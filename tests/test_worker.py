@@ -341,6 +341,17 @@ class TestUpdateWorkerStatus:
         assert info["current_step"] == "A"
 
     @pytest.mark.asyncio
+    async def test_updates_db_fields(self, worker, redis, db):
+        # /api/workers 读 DB，状态变更必须写回 DB
+        await worker.register()
+        await worker._update_worker_status("busy", "j1", "A")
+
+        got = db.get_worker(worker.worker_id)
+        assert got.status == "busy"
+        assert got.current_job == "j1"
+        assert got.current_step == "A"
+
+    @pytest.mark.asyncio
     async def test_clears_on_idle(self, worker, redis):
         await worker.register()
         await worker._update_worker_status("busy", "j1", "A")
@@ -350,6 +361,32 @@ class TestUpdateWorkerStatus:
         assert info["status"] == "idle"
         assert info["current_job"] == ""
         assert info["current_step"] == ""
+
+
+class TestHeartbeatLoop:
+    @pytest.mark.asyncio
+    async def test_heartbeat_refreshes_db(self, worker, redis, db, monkeypatch):
+        # 心跳循环必须刷新 DB 的 last_heartbeat，否则前端 30s 后判 offline
+        from datetime import datetime, timedelta
+
+        await worker.register()
+        # 人为把 DB 心跳改老
+        w = db.get_worker(worker.worker_id)
+        w.last_heartbeat = datetime.now() - timedelta(minutes=10)
+        db.upsert_worker(w)
+
+        # 跑一轮心跳循环后退出
+        original_sleep = asyncio.sleep
+
+        async def stop_after_first(_secs):
+            worker._shutdown = True
+            await original_sleep(0)
+
+        monkeypatch.setattr("worker.worker.asyncio.sleep", stop_after_first)
+        await worker.heartbeat_loop()
+
+        got = db.get_worker(worker.worker_id)
+        assert (datetime.now() - got.last_heartbeat).total_seconds() < 5
 
 
 class TestFetchTask:

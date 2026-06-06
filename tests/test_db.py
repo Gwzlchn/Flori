@@ -200,6 +200,30 @@ class TestWorkerCRUD:
         db.delete_worker("cpu-1")
         assert db.get_worker("cpu-1") is None
 
+    def test_update_worker_heartbeat_refreshes_timestamp(self, db):
+        from datetime import datetime, timedelta
+
+        old = datetime.now() - timedelta(minutes=10)
+        db.upsert_worker(
+            Worker(id="cpu-1", type="cpu", status="idle",
+                   first_seen=old, last_heartbeat=old)
+        )
+        db.update_worker_heartbeat("cpu-1")
+        got = db.get_worker("cpu-1")
+        # 心跳被刷新到接近现在（而非停在 10 分钟前）
+        assert (datetime.now() - got.last_heartbeat).total_seconds() < 5
+        assert got.status == "idle"
+
+    def test_update_worker_heartbeat_updates_status_and_task(self, db):
+        db.upsert_worker(Worker(id="ai-1", type="ai", status="idle"))
+        db.update_worker_heartbeat(
+            "ai-1", status="busy", current_job="j1", current_step="A"
+        )
+        got = db.get_worker("ai-1")
+        assert got.status == "busy"
+        assert got.current_job == "j1"
+        assert got.current_step == "A"
+
 
 class TestAIUsage:
     def test_record_and_summary(self, db):

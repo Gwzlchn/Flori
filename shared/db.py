@@ -359,6 +359,33 @@ class Database:
             )
             self._conn.commit()
 
+    def update_worker_heartbeat(
+        self,
+        worker_id: str,
+        status: str | None = None,
+        current_job: str | None = None,
+        current_step: str | None = None,
+    ) -> None:
+        """刷新 worker 在 DB 中的 last_heartbeat（及可选的 status / 当前任务）。
+
+        心跳与状态变更必须写回 DB，否则 /api/workers 读到的 last_heartbeat
+        永远停在注册时刻，前端会在 30s 后把所有 worker 判成 offline。"""
+        fields = {"last_heartbeat": datetime.now().isoformat()}
+        if status is not None:
+            fields["status"] = status
+        if current_job is not None:
+            fields["current_job"] = current_job or None
+        if current_step is not None:
+            fields["current_step"] = current_step or None
+        set_clause = ", ".join(f"{k}=?" for k in fields)
+        values = list(fields.values()) + [worker_id]
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE workers SET {set_clause} WHERE id=?",
+                values,
+            )
+            self._conn.commit()
+
     def delete_worker(self, worker_id: str) -> None:
         with self._lock:
             self._conn.execute("DELETE FROM workers WHERE id=?", (worker_id,))

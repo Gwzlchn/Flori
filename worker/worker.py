@@ -126,6 +126,11 @@ class Worker:
     async def heartbeat_loop(self) -> None:
         while not self._shutdown:
             await self.redis.heartbeat(self.worker_id, ttl=30)
+            # 同步刷新 DB 心跳：/api/workers 与前端 online 判定读的是 DB，
+            # 不写回 DB 则 last_heartbeat 永远停在注册时刻 → Worker 页面显示空。
+            await asyncio.to_thread(
+                self.db.update_worker_heartbeat, self.worker_id,
+            )
             await asyncio.sleep(10)
 
     # ── 主循环 ──
@@ -474,4 +479,10 @@ class Worker:
         )
         await self.redis.set_worker_field(
             self.worker_id, "current_step", step or "",
+        )
+        # 状态变更同样写回 DB（/api/workers 的数据源），并刷新心跳，
+        # 保证 busy/idle/offline 与当前任务在 Worker 页面实时可见。
+        await asyncio.to_thread(
+            self.db.update_worker_heartbeat, self.worker_id,
+            status=status, current_job=job_id or "", current_step=step or "",
         )
