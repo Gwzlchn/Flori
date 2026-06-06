@@ -17,7 +17,7 @@ services:
       - ./shared:/app/shared
       - ./api:/app/api
       - ./configs:/app/configs
-      - data:/data
+      - ${MNEMO_DATA_DIR:-./data}:/data
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DATA_DIR=/data
@@ -36,7 +36,7 @@ services:
       - ./shared:/app/shared
       - ./scheduler:/app/scheduler
       - ./configs:/app/configs
-      - data:/data
+      - ${MNEMO_DATA_DIR:-./data}:/data
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DATA_DIR=/data
@@ -55,7 +55,7 @@ services:
       - ./worker:/app/worker
       - ./steps:/app/steps
       - ./configs:/app/configs
-      - data:/data
+      - ${MNEMO_DATA_DIR:-./data}:/data
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DATA_DIR=/data
@@ -74,7 +74,7 @@ services:
       - ./worker:/app/worker
       - ./steps:/app/steps
       - ./configs:/app/configs
-      - data:/data
+      - ${MNEMO_DATA_DIR:-./data}:/data
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DATA_DIR=/data
@@ -111,4 +111,3 @@ services:
 
 volumes:
   redis-data:
-  data:
