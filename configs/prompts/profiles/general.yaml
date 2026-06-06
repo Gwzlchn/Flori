@@ -1,0 +1,9 @@
+domain: general
+role: "学习笔记编辑"
+domain_context: "通用学习视频"
+
+output_style:
+  structure: "按视频自然章节组织"
+  terminology_handling: "专业术语附简要解释"
+
+terminology: []

@@ -1,0 +1,147 @@
+video:
+  steps:
+    - name: "00_download"
+      module: steps.common.step_00_download
+      pool: io
+      depends_on: []
+      timeout_sec: 600
+      retries: 3
+
+    - name: "00b_whisper"
+      module: steps.video.step_00b_whisper
+      pool: gpu
+      depends_on: ["00_download"]
+      condition: "no_subtitle"
+      timeout_sec: 1800
+      retries: 2
+      tags: ["gpu"]
+
+    - name: "01_scene"
+      module: steps.video.step_01_scene
+      pool: scene
+      depends_on: ["00_download"]
+      timeout_sec: 600
+      retries: 2
+
+    - name: "02_frames"
+      module: steps.video.step_02_frames
+      pool: cpu
+      depends_on: ["01_scene"]
+      timeout_sec: 120
+      retries: 1
+
+    - name: "03_dedup"
+      module: steps.video.step_03_dedup
+      pool: cpu
+      depends_on: ["02_frames"]
+      timeout_sec: 120
+      retries: 1
+
+    - name: "04_ocr"
+      module: steps.video.step_04_ocr
+      pool: cpu
+      depends_on: ["03_dedup"]
+      timeout_sec: 300
+      retries: 2
+
+    - name: "05_danmaku"
+      module: steps.video.step_05_danmaku
+      pool: io
+      depends_on: ["00_download"]
+      condition: "has_danmaku"
+      timeout_sec: 30
+      retries: 1
+
+    - name: "06_punctuate"
+      module: steps.video.step_06_punctuate
+      pool: ai
+      depends_on: ["00_download"]
+      condition: "has_subtitle"
+      timeout_sec: 300
+      retries: 3
+      tags: []
+      ai:
+        primary: {provider: kimi, model: moonshot-v1-8k}
+        fallback: {provider: kimi, model: moonshot-v1-32k}
+
+    - name: "07_mechanical"
+      module: steps.video.step_07_mechanical
+      pool: io
+      depends_on: ["04_ocr", "05_danmaku", "06_punctuate"]
+      timeout_sec: 30
+      retries: 1
+
+    - name: "08_smart"
+      module: steps.video.step_08_smart
+      pool: ai
+      depends_on: ["07_mechanical"]
+      timeout_sec: 600
+      retries: 2
+      tags: ["vision"]
+      ai:
+        primary: {provider: kimi, model: moonshot-v1-32k}
+        fallback: {provider: kimi, model: moonshot-v1-128k}
+        text_fallback: {provider: kimi, model: moonshot-v1-32k}
+
+    - name: "09_review"
+      module: steps.video.step_09_review
+      pool: ai
+      depends_on: ["08_smart"]
+      timeout_sec: 120
+      retries: 2
+      tags: []
+      ai:
+        primary: {provider: kimi, model: moonshot-v1-8k}
+        fallback: {provider: kimi, model: moonshot-v1-32k}
+
+paper:
+  steps:
+    - name: "00_download"
+      module: steps.common.step_00_download
+      pool: io
+      depends_on: []
+      timeout_sec: 300
+      retries: 3
+
+    - name: "10_pdf_parse"
+      module: steps.paper.step_10_pdf_parse
+      pool: cpu
+      depends_on: ["00_download"]
+      timeout_sec: 120
+      retries: 1
+
+    - name: "11_sections"
+      module: steps.paper.step_11_sections
+      pool: cpu
+      depends_on: ["10_pdf_parse"]
+      timeout_sec: 60
+      retries: 1
+
+    - name: "12_figures"
+      module: steps.paper.step_12_figures
+      pool: cpu
+      depends_on: ["10_pdf_parse"]
+      timeout_sec: 120
+      retries: 1
+
+    - name: "14_smart_paper"
+      module: steps.paper.step_14_smart_paper
+      pool: ai
+      depends_on: ["11_sections", "12_figures"]
+      timeout_sec: 600
+      retries: 2
+      tags: []
+      ai:
+        primary: {provider: kimi, model: moonshot-v1-32k}
+        fallback: {provider: kimi, model: moonshot-v1-128k}
+
+    - name: "15_review"
+      module: steps.paper.step_15_review
+      pool: ai
+      depends_on: ["14_smart_paper"]
+      timeout_sec: 120
+      retries: 2
+      tags: []
+      ai:
+        primary: {provider: kimi, model: moonshot-v1-8k}
+        fallback: {provider: kimi, model: moonshot-v1-32k}

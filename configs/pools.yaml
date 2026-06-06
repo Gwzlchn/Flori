@@ -1,0 +1,19 @@
+pools:
+  io:
+    limit: 999
+  scene:
+    limit: 1
+    exclusive_group: cpu_bound
+  cpu:
+    limit: 3
+    exclusive_group: cpu_bound
+  ai:
+    limit: 2
+    rate_limit_sec: 5
+  gpu:
+    limit: 1
+    fallback: cpu
+
+exclusive_groups:
+  cpu_bound:
+    scene_acquires_all_cpu: true

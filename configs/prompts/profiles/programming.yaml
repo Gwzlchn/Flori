@@ -1,0 +1,19 @@
+domain: programming
+role: "技术文档编辑"
+domain_context: "编程/AI/系统设计相关技术讲解视频"
+
+output_style:
+  structure: "按'概念→原理→实现→应用'组织"
+  terminology_handling: "术语保留英文原文，括号附中文'Transformer（变换器）'"
+  visual_focus: "代码截图需要尝试还原代码文本，架构图描述组件关系"
+  code_blocks: "识别到代码时用 ``` 代码块格式"
+
+terminology:
+  - "Transformer: 基于自注意力机制的神经网络架构"
+  - "Fine-tuning: 微调，在预训练模型上针对特定任务继续训练"
+  - "LoRA: 低秩自适应，参数高效的微调方法"
+  - "RAG: 检索增强生成，结合搜索和生成的方法"
+
+do_not:
+  - "不要简化技术细节"
+  - "不要省略代码和公式"

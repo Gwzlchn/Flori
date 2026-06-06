@@ -1,0 +1,35 @@
+# 数据
+data/
+output/
+
+# 敏感
+.env
+cookies/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+docs/bak/
+LOCAL.md
+.githooks/
+shared/PLAN.md
+plans/
+.claude/
+.coverage
+
+# 个人暂存/归档(笔记、旧计划、部署速查等,不入 git)
+.local/

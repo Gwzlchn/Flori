@@ -1,0 +1,8 @@
+tag: talk
+name: "会议演讲"
+description: "技术大会/学术会议的演讲录像"
+hints:
+  - "注意区分主讲人观点和提问者的问题"
+  - "Q&A 部分单独整理"
+  - "PPT 要点和口头补充内容对照记录"
+screenshot_focus: "提取 PPT 要点，忽略会场环境"

@@ -1,0 +1,52 @@
+providers:
+  anthropic:
+    type: anthropic
+    api_key: ${ANTHROPIC_API_KEY}
+    models:
+      - claude-opus-4-6
+      - claude-sonnet-4-6
+      - claude-haiku-4-5
+    features: [vision, batch, caching]
+
+  deepseek:
+    type: openai_compatible
+    base_url: https://api.deepseek.com/v1
+    api_key: ${DEEPSEEK_API_KEY}
+    models:
+      - deepseek-v4-pro
+      - deepseek-v4-flash
+    features: []
+
+  openai:
+    type: openai
+    api_key: ${OPENAI_API_KEY:-}
+    models:
+      - gpt-4o
+      - gpt-4o-mini
+    features: [vision]
+
+  claude-cli:
+    type: cli
+    command: ["claude", "-p", "{prompt_file}", "--output-format", "text"]
+    features: [vision]
+    cost_usd: 0
+
+  kimi:
+    type: openai_compatible
+    base_url: https://api.moonshot.cn/v1
+    api_key: ${KIMI_API_KEY}
+    models:
+      - moonshot-v1-8k
+      - moonshot-v1-32k
+      - moonshot-v1-128k
+    features: []
+
+  local:
+    type: openai_compatible
+    base_url: http://ollama:11434/v1
+    api_key: ollama
+    models:
+      - "qwen3:7b"
+      - "qwen3:32b"
+    features: []
+    cost_usd: 0
