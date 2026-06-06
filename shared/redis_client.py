@@ -44,7 +44,8 @@ class RedisClient:
         self._redis: aioredis.Redis | None = None
 
     async def connect(self) -> None:
-        self._redis = aioredis.from_url(self._url, decode_responses=True)
+        # RESP2 让 decode_responses 对 hash 等 map 类型回复也生效。
+        self._redis = aioredis.from_url(self._url, decode_responses=True, protocol=2)
 
     async def close(self) -> None:
         if self._redis:

@@ -38,7 +38,7 @@ def db(tmp_path):
 async def redis():
     client = RedisClient.__new__(RedisClient)
     client._url = "redis://fake"
-    client._redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    client._redis = fakeredis.aioredis.FakeRedis(decode_responses=True, protocol=2)
     yield client
     await client.close()
 
@@ -788,8 +788,9 @@ class TestDelayedRetry:
 
         scheduler._delayed_enqueue = mock_delayed_enqueue
         await scheduler.on_step_failed("j_test_001", "A", "rate limit", "ai")
-        # _delayed_enqueue is called via create_task; yield control
+        # _delayed_enqueue 经 create_task 异步运行，等其落盘完成再断言。
         await asyncio.sleep(0)
+        await asyncio.gather(*scheduler._delayed_tasks)
 
         assert captured_delays == [30]
         assert await redis.get_step_status("j_test_001", "A") == "ready"

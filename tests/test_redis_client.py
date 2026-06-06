@@ -13,7 +13,7 @@ async def rc():
     """用 fakeredis 替代真实 Redis。"""
     client = RedisClient.__new__(RedisClient)
     client._url = "redis://fake"
-    client._redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    client._redis = fakeredis.aioredis.FakeRedis(decode_responses=True, protocol=2)
     yield client
     await client.close()
 

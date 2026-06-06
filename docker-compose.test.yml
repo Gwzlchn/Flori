@@ -14,4 +14,4 @@ services:
       - ./tests:/app/tests
       - ./configs:/app/configs
     command: >
-      sh -c "pip install --quiet 'fakeredis[lua]>=2.25,<2.28' pytest pytest-asyncio && pytest -v -p no:cacheprovider"
+      sh -c "pip install --quiet 'fakeredis[lua]>=2.28' pytest pytest-asyncio && pytest -v -p no:cacheprovider"
