@@ -46,23 +46,13 @@ sudo ./svc.sh install && sudo ./svc.sh start
 
 ## 4. Workflow 设计
 
-### ci.yml（push + PR）
+实际实现见 `.github/workflows/ci.yml`：
 
-```yaml
-jobs:
-  lint:         # ruff check
-  unit-test:    # docker compose -f docker-compose.test.yml run --rm test
-  integration:  # 仅 PR，docker compose up + run_e2e_cpu.sh
-```
+- `test`：push/PR 触发，`docker compose -f docker-compose.test.yml run --rm test`（全部单测）。
+- `build-push`：仅 main、测试通过后，用 buildx 构建多架构镜像（amd64+arm64）推 ghcr.io；
+  两个镜像 `ai-kb`（api/scheduler/worker 共用）与 `ai-kb-frontend`。
 
-### deploy.yml（merge to main）
-
-```yaml
-jobs:
-  build-push:   # docker build → push ghcr.io
-  deploy:       # ssh/本地 docker compose up -d
-  health-check: # curl /api/health
-```
+部署为手动：各机 `docker compose pull && docker compose up -d`（不做 SSH 自动部署，降低公网风险）。
 
 ## 5. docker-compose.yml 改造
 
@@ -113,9 +103,7 @@ CONFIG_DIR=/data/configs        # 配置目录
 
 ## 8. TODO
 
-- [ ] 创建 `.github/workflows/ci.yml`
-- [ ] 创建 `.github/workflows/deploy.yml`
-- [ ] docker-compose.yml 改用 `image: ghcr.io/...`
+- [x] 创建 `.github/workflows/ci.yml`（test + 多架构 build-push 到 ghcr.io）
+- [ ] docker-compose.yml 改用 `image: ghcr.io/<owner>/ai-kb:latest`（拉远程镜像部署）
 - [ ] 创建 `.env.example`
-- [ ] 配置 self-hosted runner
-- [ ] 首次手动 push 镜像验证流程
+- [ ] 首次 push 后到仓库 Packages 确认镜像、各机 `docker compose pull` 验证
