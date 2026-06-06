@@ -37,10 +37,15 @@
 ## 快速开始（单机）
 
 ```bash
-git clone <your-repo>/mnemo && cd mnemo
+git clone https://github.com/Gwzlchn/Mnemo.git && cd Mnemo
 cp .env.example .env            # 填 API_TOKEN(强随机串) + 一个 AI Provider 的 key
-docker build -t mnemo:latest -f docker/base.Dockerfile .
-docker compose up -d
+
+# 方式 A：拉取 CI 预构建镜像（推荐；私有镜像先 docker login ghcr.io）
+docker compose pull && docker compose up -d
+
+# 方式 B：本地从源码构建运行
+docker compose -f docker-compose.dev.yml up -d --build
+
 # 浏览器打开 http://<服务器IP>/ ，用 API_TOKEN 登录，投递第一个视频
 ```
 

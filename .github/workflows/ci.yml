@@ -11,10 +11,14 @@ jobs:
   # 容器内跑全部单元测试（与本地 docker compose test 同路径）。
   test:
     runs-on: ubuntu-latest
+    env:
+      USE_USTC_MIRROR: "0"     # 海外 runner 用官方源
     steps:
       - uses: actions/checkout@v4
       - name: Unit tests in container
-        run: docker compose -f docker-compose.test.yml run --rm test
+        run: |
+          docker compose -f docker-compose.test.yml build
+          docker compose -f docker-compose.test.yml run --rm test
 
   # 仅 main：测试通过后构建镜像（amd64；所有目标机均为 x86）并推送。
   build-push:
@@ -59,5 +63,7 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            USE_USTC_MIRROR=0
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -13,13 +13,13 @@ Merge to main     → + Build + Push Image → Deploy
 ## 2. 镜像发布
 
 ```
-Registry: ghcr.io/<your-github-username>/mnemo
+Registry: ghcr.io/gwzlchn/mnemo
 Tags:     latest, <git-short-sha>, v0.1.0 (release)
 ```
 
 用户一键部署：
 ```bash
-git clone https://github.com/<your-github-username>/mnemo
+git clone https://github.com/gwzlchn/mnemo
 cp .env.example .env   # 填 API key
 docker compose up -d   # 拉公开镜像，不需要本地 build
 ```
@@ -40,7 +40,7 @@ mkdir -p ~/actions-runner && cd ~/actions-runner
 curl -o actions-runner-linux-x64.tar.gz -L \
   https://github.com/actions/runner/releases/latest/download/actions-runner-linux-x64-2.321.0.tar.gz
 tar xzf ./actions-runner-linux-x64.tar.gz
-./config.sh --url https://github.com/<your-github-username>/mnemo --token <TOKEN>
+./config.sh --url https://github.com/gwzlchn/mnemo --token <TOKEN>
 sudo ./svc.sh install && sudo ./svc.sh start
 ```
 
@@ -60,7 +60,7 @@ sudo ./svc.sh install && sudo ./svc.sh start
 # 生产用：拉远程镜像
 services:
   api:
-    image: ghcr.io/<your-github-username>/mnemo:latest
+    image: ghcr.io/gwzlchn/mnemo:latest
     # ...
 ```
 
@@ -104,6 +104,6 @@ CONFIG_DIR=/data/configs        # 配置目录
 ## 8. TODO
 
 - [x] 创建 `.github/workflows/ci.yml`（test + 多架构 build-push 到 ghcr.io）
-- [ ] docker-compose.yml 改用 `image: ghcr.io/<owner>/mnemo:latest`（拉远程镜像部署）
-- [ ] 创建 `.env.example`
+- [x] docker-compose.yml 改用 `image: ghcr.io/gwzlchn/mnemo:latest`（拉远程镜像部署）
+- [x] 创建 `.env.example`
 - [ ] 首次 push 后到仓库 Packages 确认镜像、各机 `docker compose pull` 验证
