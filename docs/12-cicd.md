@@ -13,13 +13,13 @@ Merge to main     → + Build + Push Image → Deploy
 ## 2. 镜像发布
 
 ```
-Registry: ghcr.io/<your-github-username>/ai-knowledge-base
+Registry: ghcr.io/<your-github-username>/mnemo
 Tags:     latest, <git-short-sha>, v0.1.0 (release)
 ```
 
 用户一键部署：
 ```bash
-git clone https://github.com/<your-github-username>/ai-knowledge-base
+git clone https://github.com/<your-github-username>/mnemo
 cp .env.example .env   # 填 API key
 docker compose up -d   # 拉公开镜像，不需要本地 build
 ```
@@ -40,7 +40,7 @@ mkdir -p ~/actions-runner && cd ~/actions-runner
 curl -o actions-runner-linux-x64.tar.gz -L \
   https://github.com/actions/runner/releases/latest/download/actions-runner-linux-x64-2.321.0.tar.gz
 tar xzf ./actions-runner-linux-x64.tar.gz
-./config.sh --url https://github.com/<your-github-username>/ai-knowledge-base --token <TOKEN>
+./config.sh --url https://github.com/<your-github-username>/mnemo --token <TOKEN>
 sudo ./svc.sh install && sudo ./svc.sh start
 ```
 
@@ -50,7 +50,7 @@ sudo ./svc.sh install && sudo ./svc.sh start
 
 - `test`：push/PR 触发，`docker compose -f docker-compose.test.yml run --rm test`（全部单测）。
 - `build-push`：仅 main、测试通过后，用 buildx 构建多架构镜像（amd64+arm64）推 ghcr.io；
-  两个镜像 `ai-kb`（api/scheduler/worker 共用）与 `ai-kb-frontend`。
+  两个镜像 `mnemo`（api/scheduler/worker 共用）与 `mnemo-frontend`。
 
 部署为手动：各机 `docker compose pull && docker compose up -d`（不做 SSH 自动部署，降低公网风险）。
 
@@ -60,7 +60,7 @@ sudo ./svc.sh install && sudo ./svc.sh start
 # 生产用：拉远程镜像
 services:
   api:
-    image: ghcr.io/<your-github-username>/ai-knowledge-base:latest
+    image: ghcr.io/<your-github-username>/mnemo:latest
     # ...
 ```
 
@@ -104,6 +104,6 @@ CONFIG_DIR=/data/configs        # 配置目录
 ## 8. TODO
 
 - [x] 创建 `.github/workflows/ci.yml`（test + 多架构 build-push 到 ghcr.io）
-- [ ] docker-compose.yml 改用 `image: ghcr.io/<owner>/ai-kb:latest`（拉远程镜像部署）
+- [ ] docker-compose.yml 改用 `image: ghcr.io/<owner>/mnemo:latest`（拉远程镜像部署）
 - [ ] 创建 `.env.example`
 - [ ] 首次 push 后到仓库 Packages 确认镜像、各机 `docker compose pull` 验证

@@ -71,7 +71,7 @@ ROADMAP.md                  → 里程碑和进度
 ## 项目目录结构
 
 ```
-ai-knowledge-base/
+mnemo/
 ├── CLAUDE.md                    # 本文件（AI 协作者指南）
 ├── ROADMAP.md                   # 里程碑和进度
 ├── README.md                    # 项目说明

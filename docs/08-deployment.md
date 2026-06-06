@@ -13,7 +13,7 @@
 ## 2. 单机部署
 
 > 以下为说明性示例；**以仓库根目录的 `docker-compose.yml` 为准**（生产用预构建镜像
-> `image: ai-kb:latest`，开发态才 `build:` + 挂载源码，见 `docker-compose.dev.yml`）。
+> `image: mnemo:latest`，开发态才 `build:` + 挂载源码，见 `docker-compose.dev.yml`）。
 
 ### docker-compose.yml
 

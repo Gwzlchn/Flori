@@ -7,7 +7,7 @@ services:
     command: redis-server --appendonly yes
 
   api:
-    image: ai-kb:latest
+    image: mnemo:latest
     restart: unless-stopped
     command: python -m api.main
     ports:
@@ -27,7 +27,7 @@ services:
       - redis
 
   scheduler:
-    image: ai-kb:latest
+    image: mnemo:latest
     restart: unless-stopped
     command: python -m scheduler.main
     volumes:
@@ -43,7 +43,7 @@ services:
       - redis
 
   worker-download:
-    image: ai-kb:latest
+    image: mnemo:latest
     restart: unless-stopped
     command: python -m worker.main --type download
     volumes:
@@ -59,7 +59,7 @@ services:
       - redis
 
   worker-cpu:
-    image: ai-kb:latest
+    image: mnemo:latest
     restart: unless-stopped
     command: python -m worker.main --type cpu
     volumes:
@@ -78,7 +78,7 @@ services:
       - redis
 
   worker-ai:
-    image: ai-kb:latest
+    image: mnemo:latest
     restart: unless-stopped
     command: python -m worker.main --type ai
     volumes:
