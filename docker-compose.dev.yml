@@ -1,8 +1,7 @@
 services:
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    restart: unless-stopped
     volumes:
       - redis-data:/data
 
@@ -11,6 +10,7 @@ services:
       context: .
       dockerfile: docker/base.Dockerfile
     command: python -m api.main
+    restart: unless-stopped
     ports:
       - "8000:8000"
     volumes:
@@ -22,6 +22,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - DATA_DIR=/data
       - CONFIG_DIR=/app/configs
+      - API_TOKEN=${API_TOKEN:-}
     depends_on:
       - redis
 
@@ -30,6 +31,7 @@ services:
       context: .
       dockerfile: docker/base.Dockerfile
     command: python -m scheduler.main
+    restart: unless-stopped
     volumes:
       - ./shared:/app/shared
       - ./scheduler:/app/scheduler
@@ -47,6 +49,7 @@ services:
       context: .
       dockerfile: docker/base.Dockerfile
     command: python -m worker.main --type cpu
+    restart: unless-stopped
     volumes:
       - ./shared:/app/shared
       - ./worker:/app/worker
@@ -65,6 +68,7 @@ services:
       context: .
       dockerfile: docker/base.Dockerfile
     command: python -m worker.main --type ai
+    restart: unless-stopped
     volumes:
       - ./shared:/app/shared
       - ./worker:/app/worker
@@ -86,6 +90,7 @@ services:
       context: ./frontend
       target: build
     command: npx vite --host 0.0.0.0
+    restart: unless-stopped
     ports:
       - "5173:5173"
     volumes:
@@ -94,6 +99,15 @@ services:
       - ./frontend/public:/app/public
     depends_on:
       - api
+
+  # 日志面板：只绑局域网，不开公网。访问 http://127.0.0.1:8888
+  dozzle:
+    image: amir20/dozzle
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "${DOZZLE_BIND_IP:-127.0.0.1}:${DOZZLE_PORT:-8888}:8080"
 
 volumes:
   redis-data:

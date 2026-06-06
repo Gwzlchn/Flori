@@ -337,9 +337,25 @@ class Database:
             return None
         return self._row_to_worker(row)
 
-    def list_workers(self) -> list[Worker]:
+    def list_workers(self, stale_after_sec: int = 60) -> list[Worker]:
+        """列出所有 worker。心跳超过 stale_after_sec 秒未刷新的（僵尸）一律
+        视作 offline，避免崩掉/被回收的容器一直显示在线。"""
         rows = self._conn.execute("SELECT * FROM workers").fetchall()
-        return [self._row_to_worker(r) for r in rows]
+        workers = [self._row_to_worker(r) for r in rows]
+        now = datetime.now()
+        for w in workers:
+            hb = w.last_heartbeat
+            if hb is None or (now - hb).total_seconds() > stale_after_sec:
+                w.status = "offline"
+        return workers
+
+    def set_worker_status(self, worker_id: str, status: str) -> None:
+        """仅更新 worker 状态，不触碰 last_heartbeat（用于标记僵尸为 offline）。"""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE workers SET status=? WHERE id=?", (status, worker_id),
+            )
+            self._conn.commit()
 
     def increment_worker_stats(
         self,

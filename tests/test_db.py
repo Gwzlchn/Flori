@@ -195,6 +195,37 @@ class TestWorkerCRUD:
         db.upsert_worker(Worker(id="ai-1", type="ai"))
         assert len(db.list_workers()) == 2
 
+    def test_list_workers_stale_marked_offline(self, db):
+        from datetime import datetime, timedelta
+
+        fresh = datetime.now()
+        old = datetime.now() - timedelta(minutes=10)
+        db.upsert_worker(
+            Worker(id="cpu-fresh", type="cpu", status="idle",
+                   first_seen=fresh, last_heartbeat=fresh)
+        )
+        db.upsert_worker(
+            Worker(id="cpu-stale", type="cpu", status="busy",
+                   first_seen=old, last_heartbeat=old)
+        )
+        workers = {w.id: w for w in db.list_workers()}
+        assert workers["cpu-fresh"].status == "idle"
+        assert workers["cpu-stale"].status == "offline"  # 心跳超时 -> 视作 offline
+
+    def test_set_worker_status_does_not_touch_heartbeat(self, db):
+        from datetime import datetime, timedelta
+
+        old = datetime.now() - timedelta(minutes=10)
+        db.upsert_worker(
+            Worker(id="cpu-1", type="cpu", status="idle",
+                   first_seen=old, last_heartbeat=old)
+        )
+        db.set_worker_status("cpu-1", "offline")
+        got = db.get_worker("cpu-1")
+        assert got.status == "offline"
+        # last_heartbeat 未被刷新（仍停在 10 分钟前）
+        assert (datetime.now() - got.last_heartbeat).total_seconds() > 300
+
     def test_delete_worker(self, db):
         db.upsert_worker(Worker(id="cpu-1", type="cpu"))
         db.delete_worker("cpu-1")

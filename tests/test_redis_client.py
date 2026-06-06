@@ -297,3 +297,48 @@ class TestPubSub:
 
         assert len(received) == 1
         assert received[0]["event"] == "step_done"
+
+    @pytest.mark.asyncio
+    async def test_subscribe_survives_connection_error(self, rc, monkeypatch):
+        """连接级异常（TimeoutError）不应让 subscribe 抛出，而是重连重订阅后继续。"""
+        from redis.exceptions import TimeoutError as RedisTimeoutError
+
+        received = []
+        calls = {"pubsub": 0, "getmsg": 0}
+        real_pubsub = rc.r.pubsub
+
+        def flaky_pubsub(*a, **kw):
+            calls["pubsub"] += 1
+            ps = real_pubsub(*a, **kw)
+            real_get = ps.get_message
+
+            async def flaky_get_message(*ga, **gkw):
+                calls["getmsg"] += 1
+                # 首次 get_message 抛连接级异常，触发重连重订阅。
+                if calls["getmsg"] == 1:
+                    raise RedisTimeoutError("simulated")
+                return await real_get(*ga, **gkw)
+
+            ps.get_message = flaky_get_message  # type: ignore[assignment]
+            return ps
+
+        # reconnect 不真正换连接（fakeredis），只让 pubsub 重新创建走 real 路径。
+        async def fake_reconnect():
+            return None
+
+        monkeypatch.setattr(rc, "reconnect", fake_reconnect)
+        monkeypatch.setattr(rc.r, "pubsub", flaky_pubsub)
+
+        async def listener():
+            async for msg in rc.subscribe("ch2"):
+                received.append(msg)
+                break
+
+        task = asyncio.create_task(listener())
+        # 等首次失败 + 退避（1s）+ 重订阅。
+        await asyncio.sleep(1.4)
+        await rc.publish("ch2", {"event": "ok"})
+        await asyncio.wait_for(task, timeout=4.0)
+
+        assert calls["pubsub"] >= 2  # 至少重订阅过一次
+        assert received and received[0]["event"] == "ok"

@@ -7,6 +7,10 @@ from datetime import datetime
 from typing import AsyncIterator
 
 import redis.asyncio as aioredis
+from redis.exceptions import (
+    ConnectionError as RedisConnectionError,
+    TimeoutError as RedisTimeoutError,
+)
 
 
 # ── Lua 脚本 ──
@@ -46,6 +50,17 @@ class RedisClient:
     async def connect(self) -> None:
         # RESP2 让 decode_responses 对 hash 等 map 类型回复也生效。
         self._redis = aioredis.from_url(self._url, decode_responses=True, protocol=2)
+
+    async def reconnect(self) -> None:
+        """重建底层连接池（连接级异常后调用）。"""
+        old = self._redis
+        self._redis = None
+        if old is not None:
+            try:
+                await old.aclose()
+            except Exception:
+                pass
+        await self.connect()
 
     async def close(self) -> None:
         if self._redis:
@@ -237,12 +252,73 @@ class RedisClient:
         await self.r.publish(channel, json.dumps(data, ensure_ascii=False))
 
     async def subscribe(self, *channels: str) -> AsyncIterator[dict]:
-        pubsub = self.r.pubsub()
-        await pubsub.subscribe(*channels)
+        """订阅频道并 yield 解码后的消息。
+
+        实现要点（曾踩坑）：不用 ``pubsub.listen()`` 异步生成器——它在 redis
+        关闭空闲 pubsub 连接后会静默挂死或停止迭代（订阅消失但不报错），导致
+        调度器进程仍 Up 却收不到任何事件、任务永远 pending。改用带超时的
+        ``get_message`` 轮询：连接断开会抛 Timeout/Connection 异常，被捕获后
+        指数退避重连重订阅。绝不让异常逃逸导致上层崩溃；仅 CancelledError 透传。
+        """
+        import asyncio
+
+        backoff = 1
+        pubsub = None
+        subscribed = False
         try:
-            async for msg in pubsub.listen():
-                if msg["type"] == "message":
+            while True:
+                if pubsub is None or not subscribed:
+                    if pubsub is not None:
+                        try:
+                            await pubsub.aclose()
+                        except Exception:
+                            pass
+                    pubsub = self.r.pubsub()
+                    try:
+                        await pubsub.subscribe(*channels)
+                        subscribed = True
+                        backoff = 1
+                    except asyncio.CancelledError:
+                        raise
+                    except (RedisConnectionError, RedisTimeoutError, OSError):
+                        subscribed = False
+                        await asyncio.sleep(backoff)
+                        backoff = min(backoff * 2, 30)
+                        try:
+                            await self.reconnect()
+                        except Exception:
+                            pass
+                        continue
+
+                try:
+                    msg = await pubsub.get_message(
+                        ignore_subscribe_messages=True, timeout=1.0
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except (RedisConnectionError, RedisTimeoutError, OSError):
+                    # 连接级故障：标记需重订阅，退避后重连。
+                    subscribed = False
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 30)
+                    try:
+                        await self.reconnect()
+                    except Exception:
+                        pass
+                    continue
+
+                if msg is None:
+                    continue
+                if msg.get("type") == "message":
+                    backoff = 1
                     yield json.loads(msg["data"])
         finally:
-            await pubsub.unsubscribe(*channels)
-            await pubsub.aclose()
+            if pubsub is not None:
+                try:
+                    await pubsub.unsubscribe(*channels)
+                except Exception:
+                    pass
+                try:
+                    await pubsub.aclose()
+                except Exception:
+                    pass

@@ -6,8 +6,27 @@ class ApiError extends Error {
   }
 }
 
-const authToken = ref(localStorage.getItem('auth_token') || '')
-const needsLogin = ref(!authToken.value && !!import.meta.env.PROD)
+// 一键免输登录：支持 https://IP/#token=xxx，把 token 存入 localStorage 后清掉 hash。
+function readHashToken(): string {
+  const h = window.location.hash || ''
+  const m = h.match(/[#&]token=([^&]+)/)
+  if (m) {
+    const t = decodeURIComponent(m[1])
+    localStorage.setItem('auth_token', t)
+    // 清掉 URL 里的 token，避免泄漏 / 被书签保存。
+    history.replaceState(null, '', window.location.pathname + window.location.search)
+    return t
+  }
+  return ''
+}
+
+const authToken = ref(readHashToken() || localStorage.getItem('auth_token') || '')
+
+// 登录策略：默认走 Caddy 全站 Basic Auth（浏览器自动带凭证），
+// 应用层不再强制登录，也不主动发 Authorization（否则会覆盖浏览器的 Basic 头）。
+// 仅当用户显式设置了 app token（回退方案）时才发 Bearer。needsLogin 永远为 false，
+// 不弹应用登录框。
+const needsLogin = ref(false)
 
 export function setToken(token: string) {
   authToken.value = token
@@ -18,7 +37,8 @@ export function setToken(token: string) {
 export function clearToken() {
   authToken.value = ''
   localStorage.removeItem('auth_token')
-  needsLogin.value = true
+  // 不再弹应用登录框：未授权由浏览器的 Basic Auth 弹窗处理。
+  needsLogin.value = false
 }
 
 export function useAuth() {

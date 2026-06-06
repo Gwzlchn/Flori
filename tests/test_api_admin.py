@@ -89,3 +89,23 @@ class TestPoolsConfig:
         resp = await client.get("/api/config/pools")
         assert resp.status_code == 200
         assert "pools" in resp.json()
+
+
+class TestStylesConfig:
+    @pytest.mark.asyncio
+    async def test_get_styles_empty_when_no_dir(self, client):
+        resp = await client.get("/api/config/styles")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    @pytest.mark.asyncio
+    async def test_get_styles_reads_yaml(self, client, test_config):
+        styles_dir = test_config.prompts_dir / "styles"
+        styles_dir.mkdir(parents=True, exist_ok=True)
+        (styles_dir / "lecture.yaml").write_text("tag: lecture\nname: 课堂\n")
+        (styles_dir / "talk.yaml").write_text("name: 演讲\n")  # no tag -> falls back to stem
+        resp = await client.get("/api/config/styles")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "lecture" in body
+        assert "talk" in body

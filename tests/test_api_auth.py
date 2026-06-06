@@ -59,6 +59,7 @@ class TestBilibiliQrcode:
     @patch("httpx.AsyncClient")
     async def test_qrcode_success(self, mock_client_cls, client):
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.json.return_value = {
             "code": 0,
             "data": {"url": "https://qr.example.com", "qrcode_key": "key123"},
@@ -72,6 +73,44 @@ class TestBilibiliQrcode:
         resp = await client.post("/api/auth/bilibili/qrcode")
         assert resp.status_code == 200
         assert resp.json()["qrcode_key"] == "key123"
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_qrcode_waf_412_returns_502(self, mock_client_cls, client):
+        """B站 WAF 返回 412 + HTML（非 JSON）时应返回友好 502 而非 500。"""
+        import json as _json
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 412
+        mock_resp.json.side_effect = _json.JSONDecodeError("x", "doc", 0)
+
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock(get=AsyncMock(return_value=mock_resp)))
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_ctx
+
+        resp = await client.post("/api/auth/bilibili/qrcode")
+        assert resp.status_code == 502
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_qrcode_sends_browser_ua(self, mock_client_cls, client):
+        """请求必须携带浏览器 User-Agent，否则会被 B站 WAF 拦截。"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "code": 0, "data": {"url": "u", "qrcode_key": "k"},
+        }
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock(get=AsyncMock(return_value=mock_resp)))
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_ctx
+
+        await client.post("/api/auth/bilibili/qrcode")
+        # AsyncClient(headers=...) 被传入了浏览器 UA
+        _, kwargs = mock_client_cls.call_args
+        assert "User-Agent" in kwargs.get("headers", {})
+        assert "Mozilla" in kwargs["headers"]["User-Agent"]
 
 
 class TestYoutubeCookies:

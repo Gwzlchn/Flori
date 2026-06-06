@@ -64,6 +64,15 @@ export interface ProfileSummary {
   terminology_count: number
 }
 
+export interface ProfileDetail {
+  domain: string
+  role?: string
+  domain_context?: string
+  output_style?: Record<string, any>
+  terminology?: string[]
+  do_not?: string[]
+}
+
 export interface WsEvent {
   event: string
   step?: string

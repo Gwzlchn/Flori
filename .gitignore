@@ -6,6 +6,11 @@ output/
 .env
 cookies/
 
+# 部署胶水(含私钥/构建产物/凭证,不入 git)
+_tunnel/
+_dist/
+_dist_edge/
+
 # Python
 __pycache__/
 *.pyc

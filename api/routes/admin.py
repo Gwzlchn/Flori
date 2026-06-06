@@ -101,6 +101,24 @@ async def system_status(
     }
 
 
+@router.get("/config/styles", dependencies=[Depends(verify_token)])
+async def get_styles_config(config: AppConfig = Depends(get_config)):
+    """返回可用风格标签列表（从 prompts/styles/*.yaml 的文件名读取）。"""
+    import yaml
+
+    styles_dir = config.prompts_dir / "styles"
+    if not styles_dir.exists():
+        return []
+    result = []
+    for f in sorted(styles_dir.glob("*.yaml")):
+        try:
+            data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+        except Exception:
+            data = {}
+        result.append(data.get("tag") or f.stem)
+    return result
+
+
 @router.get("/config/pools", dependencies=[Depends(verify_token)])
 async def get_pools_config(config: AppConfig = Depends(get_config)):
     return config.pools

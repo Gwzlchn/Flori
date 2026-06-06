@@ -1170,3 +1170,46 @@ class TestEnqueueTags:
         assert "vision" in tags
         assert "cs" in tags
         assert item["require_tags"] == ["vision"]
+
+
+class TestCleanupStaleWorkers:
+    @pytest.mark.asyncio
+    async def test_dead_worker_deleted_alive_marked_offline(self, scheduler, redis, db):
+        """DB 心跳超时 + Redis 注册已过期 -> 删除；Redis 仍在 -> 标 offline。"""
+        from datetime import datetime, timedelta
+        from shared.models import Worker as WorkerModel
+
+        old = datetime.now() - timedelta(minutes=10)
+        # dead: DB 过期，Redis 无注册
+        db.upsert_worker(
+            WorkerModel(id="cpu-dead", type="cpu", status="busy",
+                        first_seen=old, last_heartbeat=old)
+        )
+        # alive-but-stale: DB 过期，但 Redis 仍有注册键
+        db.upsert_worker(
+            WorkerModel(id="cpu-alive", type="cpu", status="idle",
+                        first_seen=old, last_heartbeat=old)
+        )
+        await redis.register_worker("cpu-alive", {"type": "cpu", "pools": "cpu"}, ttl=30)
+
+        await scheduler.cleanup_stale_workers(timeout_sec=60)
+
+        assert db.get_worker("cpu-dead") is None  # 真死了 -> 删除
+        alive = db.get_worker("cpu-alive")
+        assert alive is not None
+        assert alive.status == "offline"
+
+    @pytest.mark.asyncio
+    async def test_fresh_worker_untouched(self, scheduler, redis, db):
+        from datetime import datetime
+        from shared.models import Worker as WorkerModel
+
+        now = datetime.now()
+        db.upsert_worker(
+            WorkerModel(id="cpu-fresh", type="cpu", status="idle",
+                        first_seen=now, last_heartbeat=now)
+        )
+        await scheduler.cleanup_stale_workers(timeout_sec=60)
+        got = db.get_worker("cpu-fresh")
+        assert got is not None
+        assert got.status == "idle"

@@ -83,15 +83,37 @@ class Scheduler:
     # ── 主循环 ──
 
     async def _event_loop(self) -> None:
-        async for msg in self.redis.subscribe(
-            "step_completed", "step_failed", "job_command",
-        ):
-            if self._shutdown:
-                break
+        """订阅事件并分发。连接级异常（redis 超时/断连）不再让进程崩溃，
+        而是指数退避后重连重订阅；启动恢复也会补推漏掉的步骤。"""
+        backoff = 1
+        while not self._shutdown:
             try:
-                await self._dispatch(msg)
+                async for msg in self.redis.subscribe(
+                    "step_completed", "step_failed", "job_command",
+                ):
+                    if self._shutdown:
+                        break
+                    backoff = 1  # 收到任何消息说明连接健康，重置退避
+                    try:
+                        await self._dispatch(msg)
+                    except Exception:
+                        logger.exception("event_handler_error", msg=msg)
+            except asyncio.CancelledError:
+                raise
             except Exception:
-                logger.exception("event_handler_error", msg=msg)
+                if self._shutdown:
+                    break
+                logger.exception("event_loop_reconnect", backoff=backoff)
+                # 重连前先尝试重建底层连接 + 补推可能漏掉的事件
+                try:
+                    await self.redis.reconnect()
+                    await self._recover()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("event_loop_recover_failed")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30)
 
     async def _dispatch(self, msg: dict) -> None:
         status = msg.get("status")
@@ -126,9 +148,33 @@ class Scheduler:
             try:
                 await self.orphan_scan()
                 await self.check_stuck()
+                await self.cleanup_stale_workers()
             except Exception:
                 logger.exception("periodic_error")
             await asyncio.sleep(30)
+
+    async def cleanup_stale_workers(self, timeout_sec: int = 60) -> None:
+        """清理僵尸 worker：DB 中 last_heartbeat 超时且 Redis 注册已过期（worker 真没了）
+        的记录删除；仅 DB 过期但 Redis 仍在的标 offline（容器可能刚重启换 id）。"""
+        from datetime import timedelta
+
+        workers = await asyncio.to_thread(self.db.list_workers)
+        now = datetime.now()
+        for w in workers:
+            hb = w.last_heartbeat
+            stale = hb is None or (now - hb) > timedelta(seconds=timeout_sec)
+            if not stale:
+                continue
+            alive = await self.redis.worker_exists(w.id)
+            if alive:
+                # 注意：list_workers 已把超时的 w.status 衍生成 "offline"，
+                # 故此处直接持久化（幂等），不能用 w.status 判断是否需要写。
+                await asyncio.to_thread(
+                    self.db.set_worker_status, w.id, "offline",
+                )
+            else:
+                await asyncio.to_thread(self.db.delete_worker, w.id)
+                logger.info("worker_cleaned", worker_id=w.id)
 
     async def _recover(self) -> None:
         """启动恢复：补推满足依赖的步骤，回收无主 running 步骤。"""

@@ -5,8 +5,9 @@ import { useGlobalStore } from '../stores/global'
 import BilibiliQrLogin from '../components/auth/BilibiliQrLogin.vue'
 import CookieUpload from '../components/auth/CookieUpload.vue'
 import StatusBadge from '../components/common/StatusBadge.vue'
+import ProfileEditor from '../components/settings/ProfileEditor.vue'
 import type { AuthStatus } from '../types'
-import { Shield, Globe, BookOpen } from 'lucide-vue-next'
+import { Shield, Globe, BookOpen, ChevronRight } from 'lucide-vue-next'
 
 const api = useApi()
 const globalStore = useGlobalStore()
@@ -28,6 +29,16 @@ onMounted(async () => {
 
 async function refreshAuth() {
   authStatus.value = await api.get<AuthStatus>('/api/auth/status')
+}
+
+const editingDomain = ref<string | null>(null)
+
+function openProfile(domain: string) {
+  editingDomain.value = domain
+}
+
+async function onProfileSaved() {
+  await globalStore.fetchProfiles()
 }
 </script>
 
@@ -80,15 +91,30 @@ async function refreshAuth() {
         </h3>
         <div v-if="globalStore.profiles.length === 0" class="text-sm text-gray-400">暂无 Profile</div>
         <div v-else class="space-y-2">
-          <div v-for="p in globalStore.profiles" :key="p.domain" class="flex items-center justify-between py-2 border-b border-gray-50 last:border-0">
+          <button
+            v-for="p in globalStore.profiles"
+            :key="p.domain"
+            @click="openProfile(p.domain)"
+            class="w-full flex items-center justify-between py-2 px-2 -mx-2 rounded-lg border-b border-gray-50 last:border-0 hover:bg-gray-50 transition-colors text-left"
+          >
             <div>
               <span class="text-sm font-medium">{{ p.domain }}</span>
               <span v-if="p.role" class="text-xs text-gray-500 ml-2">{{ p.role }}</span>
             </div>
-            <span class="text-xs text-gray-400">{{ p.terminology_count }} 个术语</span>
-          </div>
+            <div class="flex items-center gap-2">
+              <span class="text-xs text-gray-400">{{ p.terminology_count }} 个术语</span>
+              <ChevronRight :size="16" class="text-gray-300" />
+            </div>
+          </button>
         </div>
       </section>
     </template>
+
+    <ProfileEditor
+      v-if="editingDomain"
+      :domain="editingDomain"
+      @close="editingDomain = null"
+      @saved="onProfileSaved"
+    />
   </div>
 </template>
