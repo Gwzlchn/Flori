@@ -100,9 +100,8 @@ services:
     depends_on:
       - api
 
-  # 日志面板：只绑局域网，不开公网。访问 http://127.0.0.1:8888
-  # DOZZLE_REMOTE_AGENT 经 NAS->ECS 的 -L 隧道(${DOZZLE_REMOTE_AGENT:-})
-  # 接入 ECS 上的 dozzle agent，于同一面板查看 ECS 容器日志。
+  # 日志面板。默认仅绑本机；局域网访问设 DOZZLE_BIND_IP=<局域网IP>。
+  # 可选接入远程 dozzle agent（host:port，如经 SSH 隧道转发）设 DOZZLE_REMOTE_AGENT。
   dozzle:
     image: amir20/dozzle
     restart: unless-stopped

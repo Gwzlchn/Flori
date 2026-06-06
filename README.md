@@ -32,7 +32,7 @@
                                                             └── SQLite(元数据) + 文件(产物)
 ```
 
-同一套代码既能单机 `docker compose up` 全起，也能拆成「公网入口 + 后端 NAS + GPU 机」分布式部署（Worker 连同一个 Redis，按标签自取任务）。
+同一套代码既能单机 `docker compose up` 全起，也能拆成「公网入口 + 后端服务器 + GPU 机」分布式部署（Worker 连同一个 Redis，按标签自取任务）。
 
 ## 快速开始（单机）
 

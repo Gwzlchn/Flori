@@ -1,28 +1,33 @@
+# Mnemo 生产部署：运行 ghcr 上由 CI 构建的镜像，Watchtower 跟随 CI 自动更新（CD）。
+# 主机相关项（数据目录、Dozzle 绑定地址、远程 agent 等）放 .env，见 .env.example。
+# 默认仅起后端；单机全栈再带前端：`docker compose --profile allinone up -d`。
+# 拆分部署时前端单独在公网入口机运行（边缘反代由各自部署维护）。
 services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    command: redis-server --appendonly yes
     volumes:
       - redis-data:/data
-    command: redis-server --appendonly yes
 
   api:
     image: ghcr.io/gwzlchn/mnemo:latest
     restart: unless-stopped
     command: python -m api.main
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
     volumes:
-      - data:/data
-      - db-data:/data/db
+      - ${MNEMO_DATA_DIR:-mnemo-data}:/data
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DATA_DIR=/data
-      - CONFIG_DIR=/data/configs
+      - CONFIG_DIR=/app/configs
       - API_TOKEN=${API_TOKEN:-}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
     security_opt:
       - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     depends_on:
       - redis
 
@@ -31,30 +36,15 @@ services:
     restart: unless-stopped
     command: python -m scheduler.main
     volumes:
-      - data:/data
-      - db-data:/data/db
+      - ${MNEMO_DATA_DIR:-mnemo-data}:/data
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DATA_DIR=/data
-      - CONFIG_DIR=/data/configs
+      - CONFIG_DIR=/app/configs
     security_opt:
       - no-new-privileges:true
-    depends_on:
-      - redis
-
-  worker-download:
-    image: ghcr.io/gwzlchn/mnemo:latest
-    restart: unless-stopped
-    command: python -m worker.main --type download
-    volumes:
-      - data:/data
-    environment:
-      - REDIS_URL=redis://redis:6379/0
-      - DATA_DIR=/data
-      - CONFIG_DIR=/data/configs
-      - HTTPS_PROXY=${HTTPS_PROXY:-}
-    security_opt:
-      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     depends_on:
       - redis
 
@@ -63,17 +53,16 @@ services:
     restart: unless-stopped
     command: python -m worker.main --type cpu
     volumes:
-      - data:/data
+      - ${MNEMO_DATA_DIR:-mnemo-data}:/data
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DATA_DIR=/data
-      - CONFIG_DIR=/data/configs
+      - CONFIG_DIR=/app/configs
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
     security_opt:
       - no-new-privileges:true
-    deploy:
-      resources:
-        limits:
-          memory: 4G
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     depends_on:
       - redis
 
@@ -82,34 +71,56 @@ services:
     restart: unless-stopped
     command: python -m worker.main --type ai
     volumes:
-      - data:/data
-      - db-data:/data/db
+      - ${MNEMO_DATA_DIR:-mnemo-data}:/data
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DATA_DIR=/data
-      - CONFIG_DIR=/data/configs
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - CONFIG_DIR=/app/configs
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
       - DRY_RUN=${DRY_RUN:-0}
     security_opt:
       - no-new-privileges:true
-    deploy:
-      replicas: 2
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     depends_on:
       - redis
 
+  # 日志面板（可选）。默认仅绑本机；局域网访问设 DOZZLE_BIND_IP=<局域网IP>。
+  # 接入远程 dozzle agent（host:port，如经 SSH 隧道）设 DOZZLE_REMOTE_AGENT。
+  dozzle:
+    image: amir20/dozzle
+    restart: unless-stopped
+    environment:
+      - DOZZLE_REMOTE_AGENT=${DOZZLE_REMOTE_AGENT:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "${DOZZLE_BIND_IP:-127.0.0.1}:${DOZZLE_PORT:-8888}:8080"
+
+  # 单机全栈时启用：`docker compose --profile allinone up -d`。
   frontend:
     image: ghcr.io/gwzlchn/mnemo-frontend:latest
     restart: unless-stopped
+    profiles: ["allinone"]
     ports:
-      - "80:80"
+      - "${FRONTEND_PORT:-8080}:80"
     security_opt:
       - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     depends_on:
       - api
 
+  # CD：每 120s 查 ghcr，只更新带 watchtower.enable 标签的容器，自动 pull+重建+清理旧镜像。
+  watchtower:
+    image: containrrr/watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --label-enable --cleanup --interval 120
+
 volumes:
   redis-data:
-  data:
-  db-data:
+  mnemo-data:
