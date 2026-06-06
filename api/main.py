@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from shared.config import load_config
 from shared.db import Database
 from shared.redis_client import RedisClient
+from shared.storage import create_storage
 
 
 def create_app(
@@ -29,6 +30,7 @@ def create_app(
             app.state.db.init_schema()
             app.state.redis = RedisClient(os.environ.get("REDIS_URL", "redis://redis:6379/0"))
             await app.state.redis.connect()
+            app.state.storage = create_storage(cfg.jobs_dir)
             app.state._own_resources = True
         else:
             app.state._own_resources = False
@@ -45,6 +47,7 @@ def create_app(
         app.state.db = db
         app.state.redis = redis
         app.state.config = config
+        app.state.storage = create_storage(config.jobs_dir) if config is not None else None
 
     from api.routes import jobs, notes, workers, ws, auth, admin, profiles
     app.include_router(jobs.router)

@@ -12,6 +12,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from shared.config import AppConfig
 from shared.db import Database
 from shared.redis_client import RedisClient
+from shared.storage import StorageBackend
 
 _security = HTTPBearer(auto_error=False)
 
@@ -22,6 +23,10 @@ def get_db(request: Request) -> Database:
 
 def get_redis(request: Request) -> RedisClient:
     return request.app.state.redis
+
+
+def get_storage(request: Request) -> StorageBackend:
+    return request.app.state.storage
 
 
 def get_config(request: Request) -> AppConfig:

@@ -1,15 +1,16 @@
-"""笔记/截图/视频文件服务。"""
+"""笔记/截图/视频文件服务。经 StorageBackend 读，兼容本地盘与 MinIO。"""
 
 from __future__ import annotations
 
-import os
+import mimetypes
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from shared.config import AppConfig
-from api.deps import get_config, verify_token
+from shared.storage import StorageBackend
+from api.deps import get_config, get_storage, verify_token
 
 router = APIRouter(prefix="/api/jobs", tags=["notes"], dependencies=[Depends(verify_token)])
 
@@ -19,60 +20,53 @@ def _validate_job_id(job_id: str) -> None:
         raise HTTPException(400, "invalid job_id")
 
 
-def _job_dir(config: AppConfig, job_id: str) -> Path:
+async def _serve(
+    storage: StorageBackend, job_id: str, rel_path: str, media_type: str, missing: str,
+) -> Response:
     _validate_job_id(job_id)
-    d = config.jobs_dir / job_id
-    if not d.exists():
-        raise HTTPException(404, "job not found")
-    return d
+    data = await storage.read_file(job_id, rel_path)
+    if data is None:
+        raise HTTPException(404, missing)
+    return Response(content=data, media_type=media_type)
 
 
 @router.get("/{job_id}/notes/smart")
-async def get_smart_notes(job_id: str, config: AppConfig = Depends(get_config)):
-    path = _job_dir(config, job_id) / "output" / "notes_smart.md"
-    if not path.exists():
-        raise HTTPException(404, "smart notes not ready")
-    return Response(content=path.read_text(encoding="utf-8"), media_type="text/markdown; charset=utf-8")
+async def get_smart_notes(job_id: str, storage: StorageBackend = Depends(get_storage)):
+    return await _serve(storage, job_id, "output/notes_smart.md",
+                        "text/markdown; charset=utf-8", "smart notes not ready")
 
 
 @router.get("/{job_id}/notes/mechanical")
-async def get_mechanical_notes(job_id: str, config: AppConfig = Depends(get_config)):
-    path = _job_dir(config, job_id) / "output" / "notes_mechanical.md"
-    if not path.exists():
-        raise HTTPException(404, "mechanical notes not ready")
-    return Response(content=path.read_text(encoding="utf-8"), media_type="text/markdown; charset=utf-8")
+async def get_mechanical_notes(job_id: str, storage: StorageBackend = Depends(get_storage)):
+    return await _serve(storage, job_id, "output/notes_mechanical.md",
+                        "text/markdown; charset=utf-8", "mechanical notes not ready")
 
 
 @router.get("/{job_id}/notes/transcript")
-async def get_transcript(job_id: str, config: AppConfig = Depends(get_config)):
-    path = _job_dir(config, job_id) / "output" / "transcript.md"
-    if not path.exists():
-        raise HTTPException(404, "transcript not ready")
-    return Response(content=path.read_text(encoding="utf-8"), media_type="text/markdown; charset=utf-8")
+async def get_transcript(job_id: str, storage: StorageBackend = Depends(get_storage)):
+    return await _serve(storage, job_id, "output/transcript.md",
+                        "text/markdown; charset=utf-8", "transcript not ready")
 
 
 @router.get("/{job_id}/review")
-async def get_review(job_id: str, config: AppConfig = Depends(get_config)):
-    path = _job_dir(config, job_id) / "output" / "review.json"
-    if not path.exists():
-        raise HTTPException(404, "review not ready")
-    return Response(content=path.read_bytes(), media_type="application/json")
+async def get_review(job_id: str, storage: StorageBackend = Depends(get_storage)):
+    return await _serve(storage, job_id, "output/review.json",
+                        "application/json", "review not ready")
 
 
 @router.get("/{job_id}/assets/{filename}")
-async def get_asset(job_id: str, filename: str, config: AppConfig = Depends(get_config)):
+async def get_asset(job_id: str, filename: str, storage: StorageBackend = Depends(get_storage)):
     if ".." in filename or "/" in filename:
         raise HTTPException(400, "invalid filename")
-    path = _job_dir(config, job_id) / "assets" / filename
-    if not path.exists():
-        raise HTTPException(404, "asset not found")
-    return FileResponse(path)
+    media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    return await _serve(storage, job_id, f"assets/{filename}", media_type, "asset not found")
 
 
 @router.get("/{job_id}/source")
 async def get_source(job_id: str, request: Request, config: AppConfig = Depends(get_config)):
-    job_dir = _job_dir(config, job_id)
-    video_path = job_dir / "input" / "source.mp4"
+    # 视频回放仍走本地盘的 range 流式;分布式(MinIO)模式下的对象存储 range 流式为后续。
+    _validate_job_id(job_id)
+    video_path = config.jobs_dir / job_id / "input" / "source.mp4"
     if not video_path.exists():
         raise HTTPException(404, "source not found")
 

@@ -7,17 +7,21 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException
 
 from shared.db import Database
-from api.deps import get_db, verify_token
+from shared.redis_client import RedisClient
+from api.deps import get_db, get_redis, verify_token
 from api.schemas import WorkerResponse, WorkerUpdateRequest
 
 router = APIRouter(prefix="/api/workers", tags=["workers"], dependencies=[Depends(verify_token)])
 
 
 @router.get("")
-async def list_workers(db: Database = Depends(get_db)):
+async def list_workers(
+    db: Database = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+):
     workers = await asyncio.to_thread(db.list_workers)
-    return [
-        WorkerResponse(
+    by_id: dict[str, WorkerResponse] = {
+        w.id: WorkerResponse(
             id=w.id, type=w.type, pools=w.pools,
             hostname=w.hostname, status=w.status,
             current_job=w.current_job, current_step=w.current_step,
@@ -29,7 +33,31 @@ async def list_workers(db: Database = Depends(get_db)):
             admin_note=w.admin_note,
         )
         for w in workers
-    ]
+    }
+    # 合并 Redis 里注册的远程 worker：本地 SQLite 没有它们(状态写在 Redis)，
+    # 没这一步分布式 worker 在 /api/workers 里是隐身的。Redis key 带 TTL，
+    # 失活的远程 worker 会自动消失。
+    for wid in await redis.list_worker_ids():
+        if wid in by_id:
+            continue
+        info = await redis.get_worker_info(wid)
+        if not info:
+            continue
+        by_id[wid] = WorkerResponse(
+            id=wid,
+            type=info.get("type", ""),
+            pools=[p for p in info.get("pools", "").split(",") if p],
+            hostname=info.get("hostname"),
+            status=info.get("status", "idle"),
+            current_job=info.get("current_job") or None,
+            current_step=info.get("current_step") or None,
+            tasks_completed=0, tasks_failed=0, total_duration_sec=0.0,
+            first_seen=info.get("started_at") or info.get("last_heartbeat", ""),
+            started_at=info.get("started_at"),
+            last_heartbeat=info.get("last_heartbeat"),
+            admin_note=None,
+        )
+    return list(by_id.values())
 
 
 @router.get("/{worker_id}")

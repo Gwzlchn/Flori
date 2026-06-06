@@ -13,6 +13,7 @@ dependencies = [
     "openai>=1.50,<3",
     "httpx>=0.27,<1",
     "pydantic>=2,<3",
+    "minio>=7,<8",
 ]
 
 [project.optional-dependencies]

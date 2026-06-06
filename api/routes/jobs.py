@@ -15,8 +15,9 @@ from shared.db import Database
 from shared.models import Job, JobStatus, Step, StepStatus, generate_job_id
 from shared.redis_client import RedisClient
 from shared.source_detect import detect_source
+from shared.storage import StorageBackend
 
-from api.deps import get_config, get_db, get_redis, verify_token
+from api.deps import get_config, get_db, get_redis, get_storage, verify_token
 from api.schemas import (
     JobCreateRequest,
     JobDetailResponse,
@@ -211,24 +212,19 @@ async def get_job(job_id: str, db: Database = Depends(get_db)):
 async def get_step_log(
     job_id: str,
     step: str,
-    config: AppConfig = Depends(get_config),
+    storage: StorageBackend = Depends(get_storage),
 ):
-    """返回某步骤的运行日志(尾部截断),供前端展开排错。"""
+    """返回某步骤的运行日志(尾部截断),供前端展开排错。经存储读,兼容本地/MinIO。"""
     _validate_job_id(job_id)
     if "/" in step or ".." in step or "\x00" in step:
         raise HTTPException(400, "invalid step")
-    log_path = config.jobs_dir / job_id / "logs" / f"{step}.log"
-    if not log_path.exists():
+    data = await storage.read_file(job_id, f"logs/{step}.log")
+    if data is None:
         raise HTTPException(404, "log not found")
-
-    def _read_tail() -> str:
-        max_bytes = 256 * 1024
-        data = log_path.read_bytes()
-        if len(data) > max_bytes:
-            data = b"...(truncated, last 256KB)...\n" + data[-max_bytes:]
-        return data.decode("utf-8", errors="replace")
-
-    return PlainTextResponse(await asyncio.to_thread(_read_tail))
+    max_bytes = 256 * 1024
+    if len(data) > max_bytes:
+        data = b"...(truncated, last 256KB)...\n" + data[-max_bytes:]
+    return PlainTextResponse(data.decode("utf-8", errors="replace"))
 
 
 @router.delete("/{job_id}", status_code=204)

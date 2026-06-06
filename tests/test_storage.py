@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from shared.storage import LocalStorage, create_storage
+from shared.storage import LocalStorage, RemoteStorage, create_storage
 
 
 class TestLocalStorage:
@@ -42,6 +42,14 @@ class TestLocalStorage:
         path = await storage.pull("nonexistent", "01_scene")
         assert path == tmp_path / "nonexistent"
 
+    @pytest.mark.asyncio
+    async def test_read_file(self, storage, tmp_path):
+        out = tmp_path / "j_xxx" / "output"
+        out.mkdir(parents=True)
+        (out / "notes_smart.md").write_text("note")
+        assert await storage.read_file("j_xxx", "output/notes_smart.md") == b"note"
+        assert await storage.read_file("j_xxx", "output/missing.md") is None
+
 
 class TestCreateStorage:
     def test_default_local(self, tmp_path, monkeypatch):
@@ -49,7 +57,8 @@ class TestCreateStorage:
         s = create_storage(tmp_path)
         assert isinstance(s, LocalStorage)
 
-    def test_minio_not_implemented(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("MINIO_URL", "http://minio:9000")
-        with pytest.raises(NotImplementedError):
-            create_storage(tmp_path)
+    def test_minio_selects_remote(self, tmp_path, monkeypatch):
+        # 设了 MINIO_URL 选 RemoteStorage(延迟连接,构造不需 minio 服务)。
+        monkeypatch.setenv("MINIO_URL", "minio:9000")
+        s = create_storage(tmp_path)
+        assert isinstance(s, RemoteStorage)
