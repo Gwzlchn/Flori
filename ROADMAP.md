@@ -5,7 +5,7 @@
 ## 当前状态
 
 **阶段**：**M1 核心实现 + 集成测试** · 端到端链路（下载 + CPU + AI 步骤）验证通过
-**最近会话**：2026-06-06 · steps 层 DRY 重构 + 调度器并发硬化（skip 死锁守卫修正 + 延迟任务生命周期 + CAS/exec_id/幂等专项单测）+ db close 竞态(segfault) + flaky 修复；单元测试 422 pass（容器内实跑）
+**最近会话**：2026-06-06 · steps 层 DRY 重构 + 调度器并发硬化（skip 死锁守卫修正 + 延迟任务生命周期 + CAS/exec_id/幂等专项单测）+ db close 竞态(segfault) + flaky 修复；单元测试 423 pass（容器内实跑）
 **下一步**：CI/CD → 前端联调 → M2 知识库
 
 ## 里程碑
@@ -44,7 +44,7 @@
 - [x] Worker 管理（注册/心跳/持久记录/draining）
 - [x] FastAPI 服务（任务管理 + 文件服务 + Worker API）
 - [x] 前端：投递 + 进度 + 笔记阅读 + Worker 管理（手机版）
-- [x] 单元测试 422 pass（容器内 docker compose test 实跑）
+- [x] 单元测试 423 pass（容器内 docker compose test 实跑）
 - [x] 集成测试基础设施（docker-compose.integration.yml + E2E 脚本）
 - [x] 集成测试：下载 + CPU 步骤链 4/4 pass
   - [x] 视频上传 → 全 video pipeline CPU 链（scene 26s + frames 18s + dedup 2s + OCR 189s）

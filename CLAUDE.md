@@ -22,6 +22,8 @@ docs/08-deployment.md       → 部署（单机/分层/GPU 接入）
 docs/09-testing.md          → 测试
 docs/10-observability.md    → 可观测
 docs/11-dev-workflow.md     → 开发流程 + 并行会话
+docs/12-cicd.md             → CI/CD & 发布（GitHub Actions + 镜像）
+docs/13-dependencies.md     → 开源依赖（工具选型 / License）
 docs/adr/                   → 8 个架构决策记录
 ROADMAP.md                  → 里程碑和进度
 ```
@@ -106,7 +108,7 @@ ai-knowledge-base/
 │   ├── conftest.py
 │   └── test_*.py
 │
-├── docs/                        # 设计文档（00-12 + adr/）
+├── docs/                        # 设计文档（00-13 + adr/）
 └── LOCAL.md                     # 本地开发笔记（不入 git）
 ```
 

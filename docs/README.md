@@ -12,8 +12,8 @@ docs/
 │   ├── api.md                      # API 服务（FastAPI）
 │   ├── step-base.md                # StepBase 统一基类
 │   ├── steps-video.md              # 视频分析步骤（00-09）
-│   ├── steps-paper.md              # 论文分析步骤（未来）
-│   ├── steps-article.md            # 文章分析步骤（未来）
+│   ├── steps-paper.md              # 论文分析步骤（M1 已实现）
+│   ├── steps-article.md            # 文章分析步骤（M5 未来）
 │   ├── ai-gateway.md               # AI 网关（多 Provider/路由/对比/成本追踪）
 │   ├── knowledge-store.md          # 知识存储（搜索/术语/关联）
 │   └── frontend.md                 # 前端（Vue3 页面+组件）
@@ -24,7 +24,8 @@ docs/
 ├── 09-testing.md                   # 测试：单步验证/集成/端到端
 ├── 10-observability.md             # 可观测：进度/日志/监控/告警
 ├── 11-dev-workflow.md              # 开发流程：并行开发/会话交接
-├── 12-dependencies.md              # 开源依赖：工具选型/License
+├── 12-cicd.md                      # CI/CD & 发布：GitHub Actions + 镜像
+├── 13-dependencies.md              # 开源依赖：工具选型/License
 ├── adr/                            # 架构决策记录
 │   ├── README.md
 │   ├── 0001-language-python.md

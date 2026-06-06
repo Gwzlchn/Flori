@@ -1,6 +1,6 @@
 # 12 · CI/CD & 发布
 
-> Self-hosted runner + GitHub Actions + ghcr.io 镜像发布。
+> GitHub Actions（GitHub-hosted runner）+ ghcr.io 镜像发布；self-hosted runner 可选。
 
 ## 1. Pipeline 概览
 
@@ -24,14 +24,17 @@ cp .env.example .env   # 填 API key
 docker compose up -d   # 拉公开镜像，不需要本地 build
 ```
 
-## 3. Self-hosted Runner
+## 3. Runner 选择
 
-为什么不用 GitHub-hosted：
-- 集成测试需要本地视频素材（不入 git）
-- USTC 镜像在国内 runner 更快
-- 集成测试耗时 10+ 分钟（free tier 有限）
+默认 GitHub-hosted runner：公开仓库免费无限分钟，自带 Docker + buildx，跑单测与构建镜像足够、零维护。
 
-安装：
+self-hosted runner 仅在需要本地资源时可选：
+- 集成测试需要本地视频素材（不入 git，仅存于自托管 runner 本地）
+- 国内 USTC 镜像加速
+
+安全：公开仓库不要用 self-hosted runner 处理 fork PR（不受信代码可读取 secrets、在你机器上执行）；如需自托管，仅限私仓或 push/已审核 PR 触发。
+
+self-hosted 安装（可选）：
 ```bash
 mkdir -p ~/actions-runner && cd ~/actions-runner
 curl -o actions-runner-linux-x64.tar.gz -L \
