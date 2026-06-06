@@ -41,8 +41,10 @@ video:
       module: steps.video.step_04_ocr
       pool: cpu
       depends_on: ["03_dedup"]
-      timeout_sec: 300
-      retries: 2
+      # CPU RapidOCR 逐帧扫描，每帧约 2-3.5s，一段长视频可达数百帧，需大超时。
+      timeout_sec: 1800
+      # OCR 超时是工作量过大而非瞬时抖动，重试只会重跑全程（无逐帧续跑），故少重试。
+      retries: 1
 
     - name: "05_danmaku"
       module: steps.video.step_05_danmaku
