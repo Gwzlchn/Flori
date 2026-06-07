@@ -9,14 +9,21 @@ import secrets
 import time
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from shared import runner_ops
 from shared.db import Database
 from shared.models import AIUsage, Worker, generate_worker_id
 from shared.redis_client import RedisClient
-from api.deps import get_db, get_redis, verify_registration_token, verify_worker_token
+from shared.storage import StorageBackend
+from api.deps import (
+    get_db,
+    get_redis,
+    get_storage,
+    verify_registration_token,
+    verify_worker_token,
+)
 from api.schemas import (
     RunnerClaimRequest,
     RunnerCompleteRequest,
@@ -280,4 +287,53 @@ async def record_usage(
         cached=req.cached,
     )
     await asyncio.to_thread(db.record_ai_usage, usage)
+    return {"ok": True}
+
+
+# ── 产物代理(P3c:gateway-PROXY,worker<->API<->storage,minio 永不暴露给 worker) ──
+
+
+def _validate_rel(rel: str) -> None:
+    # 防目录穿越:禁 ".."、绝对路径、空字节(与 jobs._validate_job_id 同风格)。
+    if ".." in rel or rel.startswith("/") or "\x00" in rel:
+        raise HTTPException(400, "invalid artifact path")
+
+
+@router.get("/jobs/{job_id}/artifacts")
+async def list_artifacts(
+    job_id: str,
+    worker_id: str = Depends(verify_worker_token),
+    storage: StorageBackend = Depends(get_storage),
+):
+    """产物清单:GatewayStorage.pull 据此逐个拉取。"""
+    return {"files": await storage.list_files(job_id)}
+
+
+@router.get("/jobs/{job_id}/artifacts/{rel:path}")
+async def get_artifact(
+    job_id: str,
+    rel: str,
+    worker_id: str = Depends(verify_worker_token),
+    storage: StorageBackend = Depends(get_storage),
+):
+    """取单个产物字节;不存在返回 404(GatewayStorage.read_file 据此返回 None)。"""
+    _validate_rel(rel)
+    data = await storage.read_file(job_id, rel)
+    if data is None:
+        raise HTTPException(404, "artifact not found")
+    return Response(content=data, media_type="application/octet-stream")
+
+
+@router.put("/jobs/{job_id}/artifacts/{rel:path}")
+async def put_artifact(
+    job_id: str,
+    rel: str,
+    request: Request,
+    worker_id: str = Depends(verify_worker_token),
+    storage: StorageBackend = Depends(get_storage),
+):
+    """回传单个产物:原始 body 直接写入 storage(worker push 的中转出口)。"""
+    _validate_rel(rel)
+    data = await request.body()
+    await storage.write_file(job_id, rel, data)
     return {"ok": True}

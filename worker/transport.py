@@ -242,8 +242,14 @@ class RedisTransport:
         pass
 
 
-def create_transport(redis: RedisClient, db: Database) -> WorkerTransport:
-    """按 env 切换:GATEWAY_URL 有值→GatewayTransport(出站 HTTPS),否则 RedisTransport(直连)。"""
+def create_transport(
+    redis: RedisClient | None, db: Database | None,
+) -> WorkerTransport:
+    """按 env 切换:GATEWAY_URL 有值→GatewayTransport(出站 HTTPS),否则 RedisTransport(直连)。
+
+    GATEWAY_URL 模式下 redis/db 可为 None(纯网关零隧道):此时内层为 None,
+    认领/产物/生命周期全走 gateway,worker 不连 redis/minio。
+    """
     base_url = os.environ.get("GATEWAY_URL")
     if base_url:
         from worker.gateway_transport import GatewayTransport
@@ -252,6 +258,6 @@ def create_transport(redis: RedisClient, db: Database) -> WorkerTransport:
             base_url,
             registration_token=os.environ.get("WORKER_REGISTRATION_TOKEN", ""),
             id_file=os.environ.get("WORKER_ID_FILE", "/data/.worker_id"),
-            inner=RedisTransport(redis, db),
+            inner=RedisTransport(redis, db) if redis is not None else None,
         )
     return RedisTransport(redis, db)

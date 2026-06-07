@@ -366,6 +366,22 @@ def make_gateway(redis, db, tmp_path, *, registration_token="mnw-tok"):
     return gw, id_file
 
 
+def make_pure_gateway(tmp_path, *, registration_token="mnw-tok"):
+    """纯网关模式:inner=None(无 redis/db),只出站 HTTPS。"""
+    id_file = tmp_path / ".worker_id"
+    gw = GatewayTransport(
+        "https://mnemo.example",
+        registration_token=registration_token,
+        id_file=str(id_file),
+        inner=None,
+    )
+    client = MagicMock()
+    client.post = AsyncMock()
+    client.aclose = AsyncMock()
+    gw._client = client
+    return gw, id_file
+
+
 class TestGatewayRegister:
     @pytest.mark.asyncio
     async def test_sends_token_stores_worker_token_and_persists_id(
@@ -612,3 +628,83 @@ class TestGatewayCoarseHTTP:
         url, kwargs = gw._client.post.call_args
         assert url[0] == "/api/runner/jobs/j1/steps/_/progress"
         assert kwargs["json"] == {"payload": {"event": "step_log", "line": "x"}}
+
+
+class TestGatewayPureMode:
+    """P3c:inner=None(纯网关零隧道)——无影子写/无内层退回/委派返回安全默认值。"""
+
+    @pytest.mark.asyncio
+    async def test_register_returns_server_id_no_shadow_write(self, redis, tmp_path):
+        gw, id_file = make_pure_gateway(tmp_path)
+        gw._client.post.return_value = make_response(
+            json_data={"worker_id": "w_srv", "worker_token": "wt-secret"},
+        )
+
+        returned = await gw.register("w_local", **REGISTER_ARGS)
+
+        assert returned == "w_srv"
+        assert gw._worker_token == "wt-secret"
+        assert id_file.read_text().strip() == "w_srv"
+        # 无内层 → redis 不应有这行(无影子写)
+        assert await redis.get_worker_info("w_srv") is None
+
+    @pytest.mark.asyncio
+    async def test_worker_token_property_exposes_token(self, tmp_path):
+        gw, _ = make_pure_gateway(tmp_path)
+        gw._client.post.return_value = make_response(
+            json_data={"worker_id": "w_srv", "worker_token": "wt-xyz"},
+        )
+        await gw.register("w_local", **REGISTER_ARGS)
+        # GatewayStorage 经此属性拿 per-worker token
+        assert gw.worker_token == "wt-xyz"
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_no_inner_fallback_no_crash_on_httpx_error(self, tmp_path):
+        import httpx
+
+        gw, _ = make_pure_gateway(tmp_path)
+        gw._client.post.side_effect = httpx.ConnectError("down")
+        # 无内层可退回:只 log,不抛
+        await gw.heartbeat("w1")
+
+    @pytest.mark.asyncio
+    async def test_get_worker_status_returns_none(self, tmp_path):
+        gw, _ = make_pure_gateway(tmp_path)
+        assert await gw.get_worker_status("w1") is None
+
+    @pytest.mark.asyncio
+    async def test_offline_posts_then_no_inner_delegate(self, tmp_path):
+        gw, _ = make_pure_gateway(tmp_path)
+        gw._client.post.return_value = make_response()
+        # offline 仍打 gateway;无内层委派,不崩
+        await gw.update_status("w1", "offline")
+        gw._client.post.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_defensive_delegators_safe_defaults(self, tmp_path):
+        gw, _ = make_pure_gateway(tmp_path)
+        assert await gw.get_job_pipeline("j1") is None
+        assert await gw.get_job_info("j1") == {}
+        assert await gw.is_pool_frozen("cpu") is False
+        assert await gw.dequeue_step_raw("cpu") is None
+        # 无返回值的委派也不应抛
+        await gw.release_slot("cpu")
+        await gw.set_step_worker("j1", "A", "w1")
+
+    @pytest.mark.asyncio
+    async def test_close_without_inner(self, tmp_path):
+        gw, _ = make_pure_gateway(tmp_path)
+        await gw.close()
+
+
+class TestGatewayShadowWriteWithInner:
+    """对照:inner 存在时影子写仍发生(混合模式不退化)。"""
+
+    @pytest.mark.asyncio
+    async def test_register_shadow_writes_redis(self, redis, db, tmp_path):
+        gw, _ = make_gateway(redis, db, tmp_path)
+        gw._client.post.return_value = make_response(
+            json_data={"worker_id": "w_srv", "worker_token": "wt"},
+        )
+        await gw.register("w_local", **REGISTER_ARGS)
+        assert await redis.get_worker_info("w_srv") is not None

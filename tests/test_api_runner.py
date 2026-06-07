@@ -470,3 +470,66 @@ class TestUsage:
         assert resp.status_code == 200
         summary = db.get_usage_summary(job_id="j1")
         assert summary["total_input_tokens"] == 10
+
+
+# ── 产物代理端点(P3c):worker token 鉴权,经 API 读写 storage ──
+
+
+class TestArtifacts:
+    @pytest.mark.asyncio
+    async def test_all_require_worker_token(self, jobs_client):
+        assert (await jobs_client.get("/api/runner/jobs/j1/artifacts")).status_code == 401
+        assert (
+            await jobs_client.get("/api/runner/jobs/j1/artifacts/job.json")
+        ).status_code == 401
+        assert (
+            await jobs_client.put("/api/runner/jobs/j1/artifacts/job.json", content=b"x")
+        ).status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_put_then_list_and_get(self, jobs_client, test_config):
+        _, token = await _register_real(jobs_client)
+        h = {"Authorization": f"Bearer {token}"}
+
+        put = await jobs_client.put(
+            "/api/runner/jobs/j1/artifacts/output/notes.md", content=b"hello", headers=h,
+        )
+        assert put.status_code == 200 and put.json() == {"ok": True}
+        # 落到 API 端 LocalStorage(jobs_dir)
+        assert (test_config.jobs_dir / "j1" / "output" / "notes.md").read_bytes() == b"hello"
+
+        listed = await jobs_client.get("/api/runner/jobs/j1/artifacts", headers=h)
+        assert listed.status_code == 200
+        assert listed.json()["files"] == ["output/notes.md"]
+
+        got = await jobs_client.get(
+            "/api/runner/jobs/j1/artifacts/output/notes.md", headers=h,
+        )
+        assert got.status_code == 200
+        assert got.content == b"hello"
+        assert got.headers["content-type"] == "application/octet-stream"
+
+    @pytest.mark.asyncio
+    async def test_get_missing_returns_404(self, jobs_client):
+        _, token = await _register_real(jobs_client)
+        resp = await jobs_client.get(
+            "/api/runner/jobs/j1/artifacts/nope.md",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_path_traversal_rejected(self, jobs_client):
+        _, token = await _register_real(jobs_client)
+        h = {"Authorization": f"Bearer {token}"}
+        # rel:path 含 ".." → 400(get 与 put 同守卫);用 %2e%2e 避免客户端折叠掉 ".."
+        assert (
+            await jobs_client.get(
+                "/api/runner/jobs/j1/artifacts/%2e%2e/secret", headers=h,
+            )
+        ).status_code == 400
+        assert (
+            await jobs_client.put(
+                "/api/runner/jobs/j1/artifacts/%2e%2e/secret", content=b"x", headers=h,
+            )
+        ).status_code == 400

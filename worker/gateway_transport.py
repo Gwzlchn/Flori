@@ -1,13 +1,15 @@
 """GatewayTransport:把 register/heartbeat/update_status 换成出站 HTTPS,其余委派内层。
 
-P1 影子模式:worker 仍直连 redis/db(内层 RedisTransport),认领/产物保持直连;
-只有注册/心跳/下线额外打到 gateway,验证出站接入链路。gateway 不可达时退回内层,不崩。
+P1 影子模式(inner=RedisTransport):worker 仍直连 redis/db,认领额外打 gateway。
+P3c 纯网关模式(inner=None):无 redis/db,只出站 HTTPS;认领/产物全走 gateway,
+无内层可退回——不可达时只 log,不崩。内层委派方法在 inner 为空时返回安全默认值。
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import httpx
 import structlog
@@ -18,7 +20,7 @@ logger = structlog.get_logger(component="gateway_transport")
 
 
 class GatewayTransport:
-    """包裹内层 RedisTransport:生命周期方法走 gateway,其余原样委派。"""
+    """包裹可选内层 RedisTransport:生命周期方法走 gateway,其余委派或返回默认值。"""
 
     def __init__(
         self,
@@ -26,7 +28,7 @@ class GatewayTransport:
         *,
         registration_token: str,
         id_file: str,
-        inner: RedisTransport,
+        inner: Optional[RedisTransport] = None,
     ):
         self._base_url = base_url.rstrip("/")
         self._registration_token = registration_token
@@ -44,6 +46,11 @@ class GatewayTransport:
         if self._client is None:
             self._client = httpx.AsyncClient(base_url=self._base_url, timeout=35)
         return self._client
+
+    @property
+    def worker_token(self) -> str:
+        # 供 GatewayStorage 经 token_getter 读取 register 拿到的 per-worker token。
+        return self._worker_token
 
     def _load_cached_id(self) -> str | None:
         try:
@@ -82,10 +89,11 @@ class GatewayTransport:
         self._worker_token = data.get("worker_token", "")
         returned_id = data.get("worker_id") or effective_id
         self._save_id(returned_id)
-        # 影子写:让 redis/db 也有这行,认领仍走直连。
-        await self._inner.register(
-            returned_id, worker_type, pools, tags, reject_tags, hostname, now,
-        )
+        # 影子写:有内层(混合模式)才让 redis/db 也有这行;纯网关无内层,跳过。
+        if self._inner is not None:
+            await self._inner.register(
+                returned_id, worker_type, pools, tags, reject_tags, hostname, now,
+            )
         return returned_id
 
     async def heartbeat(self, worker_id):
@@ -103,8 +111,9 @@ class GatewayTransport:
                 logger.warning("worker_token_revoked", worker_id=worker_id)
         except httpx.HTTPError:
             logger.warning("gateway_heartbeat_failed", worker_id=worker_id)
-        # 影子模式:无论 gateway 结果如何,内层心跳维持 redis/db 新鲜。
-        await self._inner.heartbeat(worker_id)
+        # 有内层才退回维持 redis/db 新鲜;纯网关无内层,gateway 已是唯一通路。
+        if self._inner is not None:
+            await self._inner.heartbeat(worker_id)
 
     async def update_status(self, worker_id, status,
                             current_job="", current_step=""):
@@ -122,9 +131,10 @@ class GatewayTransport:
                 resp.raise_for_status()
             except httpx.HTTPError:
                 logger.warning("gateway_offline_failed", worker_id=worker_id)
-        await self._inner.update_status(
-            worker_id, status, current_job, current_step,
-        )
+        if self._inner is not None:
+            await self._inner.update_status(
+                worker_id, status, current_job, current_step,
+            )
 
     # ── 粗粒度认领/上报(P3b:走 gateway HTTP,不再委派内层,避免经 redis 双重认领) ──
 
@@ -215,61 +225,85 @@ class GatewayTransport:
             except httpx.HTTPError:
                 logger.warning("gateway_progress_failed", job_id=job_id)
 
-    # ── 其余方法:原样委派内层 ──
+    # ── 其余方法:有内层(混合模式)则委派,无内层(纯网关)返回安全默认值 ──
+    # P3b 后 gateway 模式 worker 不再调这些细粒度方法(claim 已在服务端 enrich),
+    # 此处仅作防御:纯网关无内层时绝不抛 AttributeError。
 
     async def get_worker_status(self, worker_id):
+        if self._inner is None:
+            return None
         return await self._inner.get_worker_status(worker_id)
 
     async def is_pool_frozen(self, pool):
+        if self._inner is None:
+            return False
         return await self._inner.is_pool_frozen(pool)
 
     async def try_acquire_slot(self, pool, limit):
+        if self._inner is None:
+            return True
         return await self._inner.try_acquire_slot(pool, limit)
 
     async def release_slot(self, pool):
-        await self._inner.release_slot(pool)
+        if self._inner is not None:
+            await self._inner.release_slot(pool)
 
     async def freeze_pool(self, pool):
-        await self._inner.freeze_pool(pool)
+        if self._inner is not None:
+            await self._inner.freeze_pool(pool)
 
     async def unfreeze_pool(self, pool):
-        await self._inner.unfreeze_pool(pool)
+        if self._inner is not None:
+            await self._inner.unfreeze_pool(pool)
 
     async def dequeue_step_raw(self, pool):
+        if self._inner is None:
+            return None
         return await self._inner.dequeue_step_raw(pool)
 
     async def return_step(self, pool, raw_json, score):
-        await self._inner.return_step(pool, raw_json, score)
+        if self._inner is not None:
+            await self._inner.return_step(pool, raw_json, score)
 
     async def cas_step_status(self, job_id, step, expected, new):
+        if self._inner is None:
+            return True
         return await self._inner.cas_step_status(job_id, step, expected, new)
 
     async def set_step_worker(self, job_id, step, worker_id):
-        await self._inner.set_step_worker(job_id, step, worker_id)
+        if self._inner is not None:
+            await self._inner.set_step_worker(job_id, step, worker_id)
 
     async def update_step_result(self, job_id, step, *, status, worker_id,
                                  started_at, finished_at, duration_sec,
                                  error=None):
-        await self._inner.update_step_result(
-            job_id, step, status=status, worker_id=worker_id,
-            started_at=started_at, finished_at=finished_at,
-            duration_sec=duration_sec, error=error,
-        )
+        if self._inner is not None:
+            await self._inner.update_step_result(
+                job_id, step, status=status, worker_id=worker_id,
+                started_at=started_at, finished_at=finished_at,
+                duration_sec=duration_sec, error=error,
+            )
 
     async def increment_worker_stats(self, worker_id, *, completed=0,
                                      failed=0, duration=0.0):
-        await self._inner.increment_worker_stats(
-            worker_id, completed=completed, failed=failed, duration=duration,
-        )
+        if self._inner is not None:
+            await self._inner.increment_worker_stats(
+                worker_id, completed=completed, failed=failed, duration=duration,
+            )
 
     async def get_job_pipeline(self, job_id):
+        if self._inner is None:
+            return None
         return await self._inner.get_job_pipeline(job_id)
 
     async def get_job_info(self, job_id):
+        if self._inner is None:
+            return {}
         return await self._inner.get_job_info(job_id)
 
     async def close(self):
         if self._client is not None:
             await self._client.aclose()
             self._client = None
-        await self._inner.close()
+        if self._inner is not None:
+            await self._inner.close()
