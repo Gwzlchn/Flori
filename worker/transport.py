@@ -11,6 +11,7 @@ transport 内部,worker.py 不再出现 asyncio.to_thread(self.db.xxx),双写顺
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime
 from typing import Protocol
 
@@ -24,7 +25,7 @@ class WorkerTransport(Protocol):
     async def register(
         self, worker_id: str, worker_type: str, pools: list[str],
         tags: set[str], reject_tags: set[str], hostname: str, now: datetime,
-    ) -> None: ...
+    ) -> str: ...
 
     async def heartbeat(self, worker_id: str) -> None: ...
 
@@ -98,6 +99,7 @@ class RedisTransport:
             status="idle", started_at=now, first_seen=now, last_heartbeat=now,
         )
         await asyncio.to_thread(self._db.upsert_worker, worker_model)
+        return worker_id
 
     async def heartbeat(self, worker_id):
         await self._redis.heartbeat(worker_id, ttl=30)
@@ -190,5 +192,15 @@ class RedisTransport:
 
 
 def create_transport(redis: RedisClient, db: Database) -> WorkerTransport:
-    """P0-A 只有 RedisTransport。P1 起按 env 切换(GATEWAY_URL 有值→GatewayTransport)。"""
+    """按 env 切换:GATEWAY_URL 有值→GatewayTransport(出站 HTTPS),否则 RedisTransport(直连)。"""
+    base_url = os.environ.get("GATEWAY_URL")
+    if base_url:
+        from worker.gateway_transport import GatewayTransport
+
+        return GatewayTransport(
+            base_url,
+            registration_token=os.environ.get("WORKER_REGISTRATION_TOKEN", ""),
+            id_file=os.environ.get("WORKER_ID_FILE", "/data/.worker_id"),
+            inner=RedisTransport(redis, db),
+        )
     return RedisTransport(redis, db)

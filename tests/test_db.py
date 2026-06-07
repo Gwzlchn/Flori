@@ -367,6 +367,70 @@ class TestWorkerAwareUTC:
         assert workers["cpu-old"].status == "stale"
 
 
+class TestWorkerToken:
+    """per-worker token：仅存 sha256 hash，round-trip + 吊销使心跳/认领失效。"""
+
+    def test_upsert_and_get_by_hash(self, db):
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        db.upsert_worker_token(
+            token_hash="h1",
+            worker_id="cpu-aaaa",
+            pools=["cpu", "io"],
+            tags=["vision"],
+            created_at=now,
+        )
+        row = db.get_worker_token_by_hash("h1")
+        assert row is not None
+        assert row["worker_id"] == "cpu-aaaa"
+        assert row["pools"] == ["cpu", "io"]
+        assert row["tags"] == ["vision"]
+        assert row["revoked"] is False
+        assert row["created_at"].tzinfo is not None
+
+    def test_get_missing_returns_none(self, db):
+        assert db.get_worker_token_by_hash("nope") is None
+
+    def test_revoke_flips_flag(self, db):
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        db.upsert_worker_token(
+            token_hash="h2", worker_id="cpu-bbbb",
+            pools=["cpu"], tags=[], created_at=now,
+        )
+        db.revoke_worker_token("cpu-bbbb")
+        row = db.get_worker_token_by_hash("h2")
+        assert row["revoked"] is True
+
+    def test_revoke_only_targets_owner(self, db):
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        db.upsert_worker_token(
+            token_hash="ha", worker_id="cpu-x", pools=[], tags=[], created_at=now,
+        )
+        db.upsert_worker_token(
+            token_hash="hb", worker_id="cpu-y", pools=[], tags=[], created_at=now,
+        )
+        db.revoke_worker_token("cpu-x")
+        assert db.get_worker_token_by_hash("ha")["revoked"] is True
+        assert db.get_worker_token_by_hash("hb")["revoked"] is False
+
+    def test_list_worker_tokens(self, db):
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        db.upsert_worker_token(
+            token_hash="h3", worker_id="cpu-cccc",
+            pools=["cpu"], tags=[], created_at=now,
+        )
+        rows = db.list_worker_tokens()
+        assert len(rows) == 1
+        assert rows[0]["worker_id"] == "cpu-cccc"
+
+
 class TestAIUsage:
     def test_record_and_summary(self, db):
         u = AIUsage(

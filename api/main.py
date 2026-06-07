@@ -49,7 +49,7 @@ def create_app(
         app.state.config = config
         app.state.storage = create_storage(config.jobs_dir) if config is not None else None
 
-    from api.routes import jobs, notes, workers, ws, auth, admin, profiles
+    from api.routes import jobs, notes, workers, ws, auth, admin, profiles, runner
     app.include_router(jobs.router)
     app.include_router(notes.router)
     app.include_router(workers.router)
@@ -57,6 +57,7 @@ def create_app(
     app.include_router(auth.router)
     app.include_router(admin.router)
     app.include_router(profiles.router)
+    app.include_router(runner.router)
 
     return app
 

@@ -249,5 +249,7 @@ async def delete_worker(
 
     if w is not None:
         await asyncio.to_thread(db.delete_worker, worker_id)
+    # 删 worker 连带吊销其 per-worker token：被删的 worker 心跳/认领立即 401，杜绝复活。
+    await asyncio.to_thread(db.revoke_worker_token, worker_id)
     # 远程 worker 只在 Redis 里活着，必须连 Redis key 一起清，否则会复活。
     await redis.delete_worker(worker_id)

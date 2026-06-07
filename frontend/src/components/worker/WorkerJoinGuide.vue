@@ -52,13 +52,14 @@ async function mint() {
 
 const command = computed(() => {
   if (activeTab.value === 'gateway') {
-    // 出站接入：worker 只连 gateway，不直连 redis/minio。GatewayTransport 为 P1，先占位。
+    // 出站接入：注册/心跳走 gateway；认领/产物 P1 仍直连 minio。WORKER_ID_FILE 持久化身份,重启复用同一 id。
     const aiLine = needsAiKey.value
       ? '  -e ANTHROPIC_API_KEY=<KEY> -e DEEPSEEK_API_KEY=<KEY> \\\n'
       : ''
     return `docker run -d --restart unless-stopped \\
   -e GATEWAY_URL=https://<MNEMO_HOST> \\
-  -e WORKER_TOKEN=${tokenLine.value} \\
+  -e WORKER_REGISTRATION_TOKEN=${tokenLine.value} \\
+  -e WORKER_ID_FILE=/data/.worker_id \\
   -e DATA_DIR=/data -e CONFIG_DIR=/app/configs -e WORK_DIR=/tmp/mnemo-work \\
   -e MINIO_URL=<HOST>:9000 -e MINIO_ACCESS_KEY=<KEY> -e MINIO_SECRET_KEY=<SECRET> -e MINIO_BUCKET=mnemo \\
 ${aiLine}  -v mnemo-data:/data \\
@@ -171,7 +172,7 @@ async function copy(text: string, which: 'token' | 'cmd') {
     </div>
 
     <p v-if="activeTab === 'gateway'" class="text-xs text-amber-600">
-      出站接入模式 (worker 只连 gateway，不暴露 redis/minio)，GatewayTransport 为 P1 规划，命令仅供预览。
+      出站接入模式：注册 / 心跳已走 gateway (worker 不暴露入站端口)；认领与产物 P1 仍直连 minio。
     </p>
 
     <div class="bg-gray-900 text-green-400 rounded-lg p-3 text-xs font-mono whitespace-pre-wrap break-all">{{ command }}</div>

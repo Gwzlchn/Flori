@@ -99,7 +99,8 @@ class Worker:
     # ── 注册 + 心跳 ──
 
     async def register(self) -> None:
-        await self.transport.register(
+        # gateway 注册可能返回缓存身份(重启复用同一 id);runner 已用旧 id 创建但子进程忽略 worker_id,无碍。
+        self.worker_id = await self.transport.register(
             worker_id=self.worker_id, worker_type=self.worker_type,
             pools=self.pools, tags=self.tags, reject_tags=self.reject_tags,
             hostname=socket.gethostname(), now=datetime.now(timezone.utc),

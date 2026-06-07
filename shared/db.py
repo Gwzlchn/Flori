@@ -103,6 +103,18 @@ CREATE TABLE IF NOT EXISTS collections (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS worker_tokens (
+    token_hash TEXT PRIMARY KEY,
+    worker_id  TEXT NOT NULL,
+    pools      TEXT NOT NULL DEFAULT '[]',
+    tags       TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    last_used  TEXT,
+    revoked    INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_worker_tokens_worker ON worker_tokens(worker_id);
 """
 
 
@@ -457,6 +469,76 @@ class Database:
             (worker_id, limit),
         ).fetchall()
         return [self._row_to_step(r) for r in rows]
+
+    # ── Worker Token ──
+
+    def upsert_worker_token(
+        self,
+        token_hash: str,
+        worker_id: str,
+        pools: list[str],
+        tags: list[str],
+        created_at: datetime,
+        revoked: bool = False,
+    ) -> None:
+        """登记一枚 per-worker token（仅存 sha256 hash），pools/tags 限定其授权范围。"""
+        with self._lock:
+            self._conn.execute(
+                """INSERT OR REPLACE INTO worker_tokens
+                   (token_hash, worker_id, pools, tags, created_at, revoked)
+                   VALUES (?,?,?,?,?,?)""",
+                (
+                    token_hash,
+                    worker_id,
+                    json.dumps(list(pools)),
+                    json.dumps(list(tags)),
+                    created_at.isoformat(),
+                    1 if revoked else 0,
+                ),
+            )
+            self._conn.commit()
+
+    def get_worker_token_by_hash(self, token_hash: str) -> dict | None:
+        """按 token hash 查 token 行，未命中返回 None；revoked 折算成 bool。"""
+        row = self._conn.execute(
+            "SELECT * FROM worker_tokens WHERE token_hash=?", (token_hash,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "token_hash": row["token_hash"],
+            "worker_id": row["worker_id"],
+            "pools": json.loads(row["pools"]),
+            "tags": json.loads(row["tags"]),
+            "created_at": _parse_dt(row["created_at"]),
+            "last_used": _parse_dt(row["last_used"]),
+            "revoked": bool(row["revoked"]),
+        }
+
+    def revoke_worker_token(self, worker_id: str) -> None:
+        """吊销某 worker 名下全部 token（删 worker 时连带，使其心跳/认领立即 401）。"""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE worker_tokens SET revoked=1 WHERE worker_id=?", (worker_id,)
+            )
+            self._conn.commit()
+
+    def list_worker_tokens(self) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM worker_tokens ORDER BY created_at DESC"
+        ).fetchall()
+        return [
+            {
+                "token_hash": r["token_hash"],
+                "worker_id": r["worker_id"],
+                "pools": json.loads(r["pools"]),
+                "tags": json.loads(r["tags"]),
+                "created_at": _parse_dt(r["created_at"]),
+                "last_used": _parse_dt(r["last_used"]),
+                "revoked": bool(r["revoked"]),
+            }
+            for r in rows
+        ]
 
     # ── AI Usage ──
 
