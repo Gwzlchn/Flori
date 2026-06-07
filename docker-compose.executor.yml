@@ -10,9 +10,13 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - STEP_RUNTIME=docker
+      # 把 pipelines 里的逻辑名 mnemo/step-X 解析到实仓 ghcr.io/<owner>/mnemo-step-X。
+      - MNEMO_STEP_REGISTRY=${MNEMO_STEP_REGISTRY:-ghcr.io/gwzlchn}
 
   worker-ai:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - STEP_RUNTIME=docker
+      # 把 pipelines 里的逻辑名 mnemo/step-X 解析到实仓 ghcr.io/<owner>/mnemo-step-X。
+      - MNEMO_STEP_REGISTRY=${MNEMO_STEP_REGISTRY:-ghcr.io/gwzlchn}

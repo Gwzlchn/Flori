@@ -429,6 +429,26 @@ class TestHostPath:
         assert runner._host_path(Path("/tmp/mnemo-work/j_abc")) == "/tmp/mnemo-work/j_abc"
 
 
+class TestResolveImage:
+    def test_logical_name_to_registry(self, fake_docker):
+        fake_docker["client"] = _FakeClient(None)
+        runner = DockerStepRunner("w1", registry="ghcr.io/gwzlchn")
+        assert runner._resolve_image("mnemo/step-base") == "ghcr.io/gwzlchn/mnemo-step-base"
+        assert runner._resolve_image("mnemo/step-heavy") == "ghcr.io/gwzlchn/mnemo-step-heavy"
+
+    def test_no_registry_keeps_logical_name(self, fake_docker):
+        # 未设 registry:本机自建 mnemo/step-base 直接命中,不改写。
+        fake_docker["client"] = _FakeClient(None)
+        runner = DockerStepRunner("w1", registry=None)
+        assert runner._resolve_image("mnemo/step-base") == "mnemo/step-base"
+
+    def test_full_image_name_untouched(self, fake_docker):
+        # 已是带 host 的全名(非 mnemo/ 前缀)原样使用。
+        fake_docker["client"] = _FakeClient(None)
+        runner = DockerStepRunner("w1", registry="ghcr.io/gwzlchn")
+        assert runner._resolve_image("docker.io/library/python:3.11") == "docker.io/library/python:3.11"
+
+
 # ── use_gpu 布尔门控(worker.execute 内联表达式的四种组合) ──
 
 

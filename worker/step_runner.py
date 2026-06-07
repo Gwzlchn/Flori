@@ -185,18 +185,28 @@ class DockerStepRunner:
     """每步一容器：work_dir bind-mount 到 /job，GPU 经 DeviceRequest，container.wait
     + kill 复刻超时，labels 防泄漏。阶段0 不默认启用，仅须语法/导入安全。"""
 
-    def __init__(self, worker_id: str, host_work_root: str | None = None):
+    def __init__(self, worker_id: str, host_work_root: str | None = None,
+                 registry: str | None = None):
         import docker  # 延迟导入：subprocess 模式不强依赖 docker SDK。
 
         self._client = docker.from_env()
         self._worker_id = worker_id
         # DooD：bind-mount 必须用宿主路径，非 worker 容器内路径。None 时退化为原路径。
         self._host_work_root = host_work_root
+        # 镜像仓库前缀:把 pipelines 里的逻辑名 mnemo/step-X 解析成实仓名。
+        self._registry = (registry or "").rstrip("/")
 
     def _host_path(self, work_dir: Path) -> str:
         if not self._host_work_root:
             return str(work_dir)
         return str(Path(self._host_work_root) / work_dir.name)
+
+    def _resolve_image(self, image: str) -> str:
+        # 逻辑名 mnemo/step-X → {registry}/mnemo-step-X(ghcr 扁平命名);
+        # 未设 registry 或已是带 host 的全名则原样用(本机自建镜像直接命中)。
+        if self._registry and image.startswith("mnemo/"):
+            return f"{self._registry}/{image.replace('/', '-')}"
+        return image
 
     def _build_environment(self, ctx: StepContext) -> dict:
         """白名单注入:始终给 STEP_EXEC_ID + HTTPS_PROXY(若有);
@@ -250,7 +260,7 @@ class DockerStepRunner:
 
         def _create_start():
             return self._client.containers.run(
-                image=ctx.image,
+                image=self._resolve_image(ctx.image),
                 command=command,
                 working_dir="/job",
                 volumes={host_dir: {"bind": "/job", "mode": "rw"}},
@@ -406,5 +416,6 @@ def create_step_runner(worker_id: str) -> StepRunner:
         return DockerStepRunner(
             worker_id,
             host_work_root=os.environ.get("HOST_WORK_DIR"),
+            registry=os.environ.get("MNEMO_STEP_REGISTRY"),
         )
     return SubprocessStepRunner()
