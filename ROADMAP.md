@@ -6,7 +6,7 @@
 
 **阶段**：**M1 + Worker 层 GitLab-runner 化（M-W）+ M2 知识库 全部完成** · 远程 worker 单出站 HTTPS 接入；笔记可集合/全文搜索/术语积累
 **最近会话**：2026-06-07 · ① M-W Worker 重构（aware-UTC + 管理页 + StepRunner + worker-gateway/token + GitLab-CI 配置 + DockerStepRunner/每步镜像 + 认领/上报/产物搬 gateway 真零隧道 + 安全加固）② B站扫码登录（DB 单一真相 + 随 job 下发 + yutto 注入）③ docker 执行器镜像名解析 + PYTHONPATH 修复（真机 e2e 抓到)④ M2 知识库（集合 + FTS5 trigram 全文搜索 + glossary 术语积累）；CI Actions 升 Node 24;NAS+ECS 全量部署新镜像验证（4 worker 在线、无头 e2e 通过）；单元测试 423 → **740 pass**（全程 CI 绿）
-**下一步**：M2.5 AI-native（RAG + 知识对话）/ 或固化 NAS→ECS 推镜像脚本（ECS 拉 ghcr 太慢)
+**下一步**：M5 GPU 加速（whisper 已就绪待 GPU 机验 + PaddleOCR-GPU 实现）/ M2.5 AI-native（RAG + 知识对话，先证伪 FTS5 不够再上向量，见 .local/IDEAS.txt）
 
 ## 里程碑
 
@@ -133,14 +133,14 @@
 - [ ] 场景检测 GPU 解码
 - [x] GitLab Runner 化接入（见 M-W：gateway + token + 每步镜像；GPU worker 单出站接入就绪）
 
-### M6 · 文章分析 + 多源扩展
+### M6 · 文章分析 + 多源扩展 ✅（2026-06-07 完成）
 
 目标：网页文章/公众号/播客也能入库。
 
-- [ ] 网页抓取适配器
-- [ ] 正文提取（readability）
-- [ ] 文章笔记模板
-- [ ] 播客 / 音频支持
+- [x] 网页抓取适配器（source_detect http_article + step_00_download 抓 HTML）
+- [x] 正文提取（trafilatura，中文友好，纯 Python）
+- [x] 文章笔记模板（article pipeline：parse→sections→smart→review）
+- [x] 播客 / 音频支持（单集音频 URL + 上传；audio pipeline：whisper→分段→smart_podcast→review；RSS 订阅追更留 M4/Agent）
 
 ### M7 · 多租户 + 商业化
 
