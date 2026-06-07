@@ -116,7 +116,10 @@ class Worker:
     async def main_loop(self) -> None:
         last_task_time = time.time()
         while not self._shutdown:
-            task = await self.fetch_task()
+            task = await self.transport.request_step(
+                self.worker_id, self.pools, self._pool_limits(),
+                self.tags, self.reject_tags,
+            )
             if task:
                 last_task_time = time.time()
                 await self.execute(task)
@@ -126,90 +129,46 @@ class Worker:
                     break
                 await asyncio.sleep(1)
 
-    # ── 任务获取 ──
-
-    async def fetch_task(self) -> dict | None:
-        if await self.transport.get_worker_status(self.worker_id) == "draining":
-            return None
-
-        for pool in self.pools:
-            if await self.transport.is_pool_frozen(pool):
-                continue
-
-            pool_cfg = self.config.pools.get("pools", {}).get(pool, {})
-            limit = pool_cfg.get("limit", 999)
-            if not await self.transport.try_acquire_slot(pool, limit):
-                continue
-
-            result = await self.pop_matching_task(pool)
-            if result:
-                task, _raw_json, _score = result
-                task["pool"] = pool
-                if pool == "scene":
-                    await self.transport.freeze_pool("cpu")
-                return task
-
-            await self.transport.release_slot(pool)
-
-        return None
-
-    async def pop_matching_task(
-        self, pool: str, max_tries: int = 5,
-    ) -> tuple[dict, str, float] | None:
-        for _ in range(max_tries):
-            result = await self.transport.dequeue_step_raw(pool)
-            if result is None:
-                return None
-
-            raw_json, task, score = result
-            require_tags = set(task.get("require_tags", []))
-            all_tags = set(task.get("tags", []))
-
-            if require_tags.issubset(self.tags) and not all_tags.intersection(self.reject_tags):
-                return task, raw_json, score
-
-            await self.transport.return_step(pool, raw_json, score)
-
-        return None
+    def _pool_limits(self) -> dict[str, int]:
+        # 每池槽位上限(从 config 算好传给 transport,transport 不持有 config)。
+        return {
+            pool: cfg.get("limit", 999)
+            for pool, cfg in self.config.pools.get("pools", {}).items()
+        }
 
     # ── 任务执行 ──
 
-    async def execute(self, task: dict) -> None:
-        job_id = task["job_id"]
-        step = task["step"]
-        pool = task["pool"]
-        exec_id = f"{self.worker_id}:{int(time.time() * 1000)}"
-
-        acquired = await self.transport.cas_step_status(job_id, step, "ready", "running")
-        if not acquired:
-            await self.transport.release_slot(pool)
-            if pool == "scene":
-                await self.transport.unfreeze_pool("cpu")
-            return
-
-        await self.transport.set_step_worker(job_id, step, self.worker_id)
-        await self.transport.update_status(self.worker_id, "busy", job_id, step)
-        await self.transport.publish_step_event("step_started", {
-            "job_id": job_id, "step": step, "status": "running",
-            "worker": self.worker_id, "exec_id": exec_id,
-        })
-        await self.transport.publish_step_event(f"events:{job_id}", {
-            "event": "step_start", "step": step, "worker": self.worker_id,
-        })
+    async def execute(self, claim: dict) -> None:
+        job_id = claim["job_id"]
+        step = claim["step"]
+        pool = claim["pool"]
+        exec_id = claim["exec_id"]
 
         start = time.time()
         work_dir = None
         try:
             work_dir = await self.storage.pull(job_id, step)
 
-            pipeline = await self.transport.get_job_pipeline(job_id)
-            job_info = await self.transport.get_job_info(job_id)
-            domain = job_info.get("domain", "general")
-            style_tags_raw = job_info.get("style_tags", "[]")
-            try:
-                style_tags = json.loads(style_tags_raw) if isinstance(style_tags_raw, str) else style_tags_raw
-            except (json.JSONDecodeError, TypeError):
+            # pipeline/domain/style_tags:gateway 模式服务端已塞进 claim,直连模式在此回读。
+            # 读失败会被本 try 接住转 report_failed,不冲垮主循环(保留旧的故障隔离)。
+            pipeline = claim.get("pipeline") or await self.transport.get_job_pipeline(job_id)
+            if "domain" in claim:
+                domain = claim["domain"]
+                style_tags = claim.get("style_tags") or []
+            else:
+                job_info = await self.transport.get_job_info(job_id)
+                domain = job_info.get("domain", "general")
+                style_tags_raw = job_info.get("style_tags", "[]")
+                try:
+                    style_tags = (
+                        json.loads(style_tags_raw)
+                        if isinstance(style_tags_raw, str) else style_tags_raw
+                    )
+                except (json.JSONDecodeError, TypeError):
+                    style_tags = []
+            if not isinstance(style_tags, list):
                 style_tags = []
+
             step_cfg = build_step_config(
                 self.config, pipeline, step, domain,
                 style_tags=style_tags if isinstance(style_tags, list) else [],
@@ -250,24 +209,7 @@ class Worker:
 
             if returncode == 0:
                 await self._collect_usage(job_id, step, work_dir)
-                await self.transport.publish_step_event("step_completed", {
-                    "job_id": job_id, "step": step, "status": "done",
-                    "duration": round(duration, 1),
-                    "worker": self.worker_id, "exec_id": exec_id,
-                })
-                await self.transport.publish_step_event(f"events:{job_id}", {
-                    "event": "step_done", "step": step,
-                    "duration_sec": round(duration, 1),
-                })
-                await self.transport.update_step_result(
-                    job_id, step, status="done", worker_id=self.worker_id,
-                    started_at=datetime.fromtimestamp(start, timezone.utc),
-                    finished_at=datetime.now(timezone.utc),
-                    duration_sec=round(duration, 1),
-                )
-                await self.transport.increment_worker_stats(
-                    self.worker_id, completed=1, duration=round(duration, 1),
-                )
+                await self.transport.report_done(claim, duration, start)
                 logger.info(
                     "step_done", worker_id=self.worker_id,
                     job_id=job_id, step=step, duration=round(duration, 1),
@@ -275,23 +217,9 @@ class Worker:
             else:
                 error_msg = stderr[-500:] if stderr else "unknown error"
                 error_type = self._parse_error_type(work_dir, step)
-                await self.transport.publish_step_event("step_failed", {
-                    "job_id": job_id, "step": step, "status": "failed",
-                    "error": error_msg, "error_type": error_type,
-                    "worker": self.worker_id, "exec_id": exec_id,
-                })
-                await self.transport.publish_step_event(f"events:{job_id}", {
-                    "event": "step_failed", "step": step,
-                    "error": error_msg[:200],
-                })
-                await self.transport.update_step_result(
-                    job_id, step, status="failed", error=error_msg,
-                    worker_id=self.worker_id,
-                    started_at=datetime.fromtimestamp(start, timezone.utc),
-                    finished_at=datetime.now(timezone.utc),
-                    duration_sec=round(duration, 1),
+                await self.transport.report_failed(
+                    claim, error_msg, error_type, duration, start, count_stats=True,
                 )
-                await self.transport.increment_worker_stats(self.worker_id, failed=1)
                 logger.warning(
                     "step_failed", worker_id=self.worker_id,
                     job_id=job_id, step=step, error=error_msg[:200],
@@ -299,21 +227,8 @@ class Worker:
 
         except asyncio.TimeoutError:
             duration = time.time() - start
-            await self.transport.publish_step_event("step_failed", {
-                "job_id": job_id, "step": step, "status": "failed",
-                "error": "timeout", "error_type": "timeout",
-                "worker": self.worker_id,
-            })
-            await self.transport.publish_step_event(f"events:{job_id}", {
-                "event": "step_failed", "step": step,
-                "error": "timeout",
-            })
-            await self.transport.update_step_result(
-                job_id, step, status="failed", error="timeout",
-                worker_id=self.worker_id,
-                started_at=datetime.fromtimestamp(start, timezone.utc),
-                finished_at=datetime.now(timezone.utc),
-                duration_sec=round(duration, 1),
+            await self.transport.report_failed(
+                claim, "timeout", "timeout", duration, start, count_stats=False,
             )
             logger.warning(
                 "step_timeout", worker_id=self.worker_id,
@@ -323,17 +238,8 @@ class Worker:
         except Exception as e:
             duration = time.time() - start
             error_msg = str(e)[:500]
-            await self.transport.publish_step_event("step_failed", {
-                "job_id": job_id, "step": step, "status": "failed",
-                "error": error_msg, "error_type": "processing",
-                "worker": self.worker_id,
-            })
-            await self.transport.update_step_result(
-                job_id, step, status="failed", error=error_msg,
-                worker_id=self.worker_id,
-                started_at=datetime.fromtimestamp(start, timezone.utc),
-                finished_at=datetime.now(timezone.utc),
-                duration_sec=round(duration, 1),
+            await self.transport.report_failed(
+                claim, error_msg, "processing", duration, start, count_stats=False,
             )
             logger.exception(
                 "step_unexpected_error", worker_id=self.worker_id,
@@ -343,10 +249,7 @@ class Worker:
         finally:
             if work_dir:
                 await self.storage.cleanup(job_id, step, work_dir)
-            await self.transport.release_slot(pool)
-            if pool == "scene":
-                await self.transport.unfreeze_pool("cpu")
-            await self.transport.update_status(self.worker_id, "idle")
+            await self.transport.release(claim)
 
     # ── 运行中日志推送 ──
 

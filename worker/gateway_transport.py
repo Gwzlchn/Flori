@@ -126,6 +126,25 @@ class GatewayTransport:
             worker_id, status, current_job, current_step,
         )
 
+    # ── 粗粒度认领/上报(P3a 影子模式:原样委派内层,认领仍走直连) ──
+
+    async def request_step(self, worker_id, pools, pool_limits, tags, reject_tags):
+        return await self._inner.request_step(
+            worker_id, pools, pool_limits, tags, reject_tags,
+        )
+
+    async def report_done(self, claim, duration, started_at):
+        await self._inner.report_done(claim, duration, started_at)
+
+    async def report_failed(self, claim, error, error_type, duration,
+                            started_at, count_stats):
+        await self._inner.report_failed(
+            claim, error, error_type, duration, started_at, count_stats,
+        )
+
+    async def release(self, claim):
+        await self._inner.release(claim)
+
     # ── 其余方法:原样委派内层 ──
 
     async def get_worker_status(self, worker_id):

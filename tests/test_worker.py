@@ -92,11 +92,28 @@ def make_job(pipeline="test", job_id="j_test_001"):
     return Job(id=job_id, content_type="video", pipeline=pipeline, domain="general")
 
 
+def make_claim(job_id="j_test_001", step="A", pool="cpu", pipeline="test",
+               domain="general", style_tags=None, exec_id="w_test:1"):
+    """构造一个 execute 入参 claim(等价 request_step 的返回)。"""
+    return {
+        "job_id": job_id, "step": step, "pool": pool, "exec_id": exec_id,
+        "pipeline": pipeline, "domain": domain, "style_tags": style_tags or [],
+    }
+
+
 async def setup_task_in_queue(redis, pool="cpu", job_id="j_test_001", step="A", tags=None, priority=0):
     """Helper: enqueue a task and set it as ready."""
     await redis.enqueue_step(pool, job_id, step, tags or [], priority)
     await redis.set_step_status(job_id, step, "ready")
     await redis.init_job(job_id, "test", {"domain": "general", "style_tags": "[]"})
+
+
+async def request_step(worker):
+    """Helper: 通过 transport 走完整认领(等价旧 worker.fetch_task)。"""
+    return await worker.transport.request_step(
+        worker.worker_id, worker.pools, worker._pool_limits(),
+        worker.tags, worker.reject_tags,
+    )
 
 
 # ── Tests ──
@@ -121,23 +138,30 @@ class TestRegister:
 
 
 class TestTagMatching:
+    """标签匹配现由 request_step 编排(原 pop_matching_task);worker 仅设 pools=[cpu] 隔离。"""
+
+    @pytest.fixture(autouse=True)
+    def _cpu_only(self, worker):
+        worker.pools = ["cpu"]
+
     @pytest.mark.asyncio
     async def test_accept_matching_require_tags(self, worker, redis):
         """require_tags ⊆ worker.tags → accept"""
         await redis.enqueue_step("cpu", "j1", "A", ["vision"], priority=0,
                                  require_tags=["vision"])
-        result = await worker.pop_matching_task("cpu")
-        assert result is not None
-        task, _raw, _score = result
-        assert task["job_id"] == "j1"
+        await redis.set_step_status("j1", "A", "ready")
+        await redis.init_job("j1", "test", {"domain": "general", "style_tags": "[]"})
+        claim = await request_step(worker)
+        assert claim is not None
+        assert claim["job_id"] == "j1"
 
     @pytest.mark.asyncio
     async def test_reject_tags_block(self, worker, redis):
         """tags ∩ reject_tags ≠ ∅ → put back (even if require_tags match)"""
         await redis.enqueue_step("cpu", "j1", "A", ["vision", "private"], priority=0,
                                  require_tags=["vision"])
-        result = await worker.pop_matching_task("cpu")
-        assert result is None
+        claim = await request_step(worker)
+        assert claim is None
         queue = await redis.get_queue_info("cpu")
         assert queue["length"] == 1  # put back
 
@@ -146,8 +170,8 @@ class TestTagMatching:
         """require_tags ⊄ worker.tags → put back"""
         await redis.enqueue_step("cpu", "j1", "A", ["heavy"], priority=0,
                                  require_tags=["heavy"])
-        result = await worker.pop_matching_task("cpu")
-        assert result is None
+        claim = await request_step(worker)
+        assert claim is None
         queue = await redis.get_queue_info("cpu")
         assert queue["length"] == 1
 
@@ -155,8 +179,10 @@ class TestTagMatching:
     async def test_empty_require_tags_always_match(self, worker, redis):
         """step with no require_tags matches any worker"""
         await redis.enqueue_step("cpu", "j1", "A", [], priority=0)
-        result = await worker.pop_matching_task("cpu")
-        assert result is not None
+        await redis.set_step_status("j1", "A", "ready")
+        await redis.init_job("j1", "test", {"domain": "general", "style_tags": "[]"})
+        claim = await request_step(worker)
+        assert claim is not None
 
     @pytest.mark.asyncio
     async def test_domain_tags_dont_block_when_not_in_require(self, worker, redis):
@@ -167,8 +193,10 @@ class TestTagMatching:
                                  tags=["vision", "nlp", "lecture"],
                                  priority=0,
                                  require_tags=["vision"])
-        result = await worker.pop_matching_task("cpu")
-        assert result is not None
+        await redis.set_step_status("j1", "A", "ready")
+        await redis.init_job("j1", "test", {"domain": "general", "style_tags": "[]"})
+        claim = await request_step(worker)
+        assert claim is not None
 
     @pytest.mark.asyncio
     async def test_domain_tags_still_enable_reject(self, worker, redis):
@@ -178,8 +206,8 @@ class TestTagMatching:
                                  tags=["private", "case-study"],
                                  priority=0,
                                  require_tags=[])
-        result = await worker.pop_matching_task("cpu")
-        assert result is None
+        claim = await request_step(worker)
+        assert claim is None
         queue = await redis.get_queue_info("cpu")
         assert queue["length"] == 1
 
@@ -197,14 +225,14 @@ class TestCAS:
 
     @pytest.mark.asyncio
     async def test_slot_release_on_cas_fail(self, worker, redis):
-        """When CAS fails, resource slot should be released."""
+        """When CAS fails (step already running), request_step releases the acquired slot."""
+        worker.pools = ["cpu"]
         await setup_task_in_queue(redis)
-        await redis.try_acquire_slot("cpu", limit=3)
-
+        # 队列里有任务但状态已是 running → CAS ready->running 失败。
         await redis.set_step_status("j_test_001", "A", "running")
 
-        task = {"job_id": "j_test_001", "step": "A", "pool": "cpu"}
-        await worker.execute(task)
+        claim = await request_step(worker)
+        assert claim is None
 
         count = await redis.get_pool_count("cpu")
         assert count == 0
@@ -217,8 +245,8 @@ class TestDraining:
         await redis.set_worker_field(worker.worker_id, "status", "draining")
         await setup_task_in_queue(redis)
 
-        task = await worker.fetch_task()
-        assert task is None
+        claim = await request_step(worker)
+        assert claim is None
 
 
 class TestSceneFreeze:
@@ -230,37 +258,42 @@ class TestSceneFreeze:
         await redis.init_job("j1", "test", {"domain": "general", "style_tags": "[]"})
         worker.pools = ["scene", "cpu"]
 
-        task = await worker.fetch_task()
-        assert task is not None
-        assert task["pool"] == "scene"
+        claim = await request_step(worker)
+        assert claim is not None
+        assert claim["pool"] == "scene"
         assert await redis.is_pool_frozen("cpu") is True
 
     @pytest.mark.asyncio
-    async def test_scene_unfreezes_on_release(self, worker, redis):
-        """After scene task completes, cpu pool unfreezes."""
-        await redis.enqueue_step("scene", "j1", "A", [], priority=0)
-        await redis.set_step_status("j1", "A", "running")
-        await redis.init_job("j1", "test", {"domain": "general", "style_tags": "[]"})
-
+    async def test_scene_unfreezes_on_release(self, worker, redis, tmp_jobs_dir):
+        """After scene task completes, execute.release unfreezes cpu pool."""
         await redis.freeze_pool("cpu")
         await redis.try_acquire_slot("scene", limit=1)
+        (tmp_jobs_dir / "j1").mkdir(exist_ok=True)
 
-        task = {"job_id": "j1", "step": "A", "pool": "scene"}
-        await worker.execute(task)
+        async def mock_run_step(ctx, on_progress, on_tick):
+            return 0, ""
+
+        worker.runner.run_step = mock_run_step
+        # pipeline "test" 的 step "A" 用 cpu 池;claim 里 pool=scene 触发 release 解冻 cpu。
+        claim = make_claim(job_id="j1", step="A", pool="scene")
+        await worker.execute(claim)
 
         assert await redis.is_pool_frozen("cpu") is False
 
 
 class TestSlotRelease:
     @pytest.mark.asyncio
-    async def test_slot_released_after_task(self, worker, redis):
+    async def test_slot_released_after_task(self, worker, redis, tmp_jobs_dir):
         """Slot count returns to 0 after execute (regardless of success)."""
         await setup_task_in_queue(redis)
         await redis.try_acquire_slot("cpu", limit=3)
+        (tmp_jobs_dir / "j_test_001").mkdir(exist_ok=True)
 
-        await redis.set_step_status("j_test_001", "A", "running")
-        task = {"job_id": "j_test_001", "step": "A", "pool": "cpu"}
-        await worker.execute(task)
+        async def mock_run_step(ctx, on_progress, on_tick):
+            return 0, ""
+
+        worker.runner.run_step = mock_run_step
+        await worker.execute(make_claim())
 
         count = await redis.get_pool_count("cpu")
         assert count == 0
@@ -275,8 +308,8 @@ class TestPoolFrozen:
         await redis.freeze_pool("io")
         await setup_task_in_queue(redis)
 
-        task = await worker.fetch_task()
-        assert task is None
+        claim = await request_step(worker)
+        assert claim is None
 
 
 class TestIdleTimeout:
@@ -287,10 +320,10 @@ class TestIdleTimeout:
 
         start = time.time()
 
-        async def empty_fetch():
+        async def empty_request(*args, **kwargs):
             return None
 
-        worker.fetch_task = empty_fetch
+        worker.transport.request_step = empty_request
         await worker.main_loop()
         elapsed = time.time() - start
         assert elapsed >= 1.0
@@ -398,15 +431,15 @@ class TestFetchTask:
         await worker.register()
         await setup_task_in_queue(redis, pool="cpu")
 
-        task = await worker.fetch_task()
-        assert task is not None
-        assert task["pool"] == "cpu"
+        claim = await request_step(worker)
+        assert claim is not None
+        assert claim["pool"] == "cpu"
 
     @pytest.mark.asyncio
     async def test_returns_none_when_empty(self, worker, redis):
         await worker.register()
-        task = await worker.fetch_task()
-        assert task is None
+        claim = await request_step(worker)
+        assert claim is None
 
 
 class TestParseErrorType:
@@ -435,11 +468,10 @@ class TestExecuteFullFlow:
 
     @pytest.mark.asyncio
     async def test_success_publishes_and_updates_db(self, worker, redis, db, tmp_jobs_dir):
+        await worker.register()  # 让 transport._worker_id 与 worker.worker_id 一致
         job = make_job()
         db.create_job(job)
         db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.READY, pool="cpu"))
-        await redis.init_job("j_test_001", "test", {"domain": "general", "style_tags": "[]"})
-        await redis.set_step_status("j_test_001", "A", "ready")
         await redis.try_acquire_slot("cpu", limit=3)
 
         job_dir = tmp_jobs_dir / "j_test_001"
@@ -456,16 +488,16 @@ class TestExecuteFullFlow:
             return 0, ""
 
         worker.runner.run_step = mock_run_step
-        task = {"job_id": "j_test_001", "step": "A", "pool": "cpu"}
 
         listener = asyncio.create_task(capture_completed())
         await asyncio.sleep(0.05)
-        await worker.execute(task)
+        await worker.execute(make_claim())
         await asyncio.wait_for(listener, timeout=2.0)
 
         assert len(completed_events) == 1
         assert completed_events[0]["status"] == "done"
         assert completed_events[0]["job_id"] == "j_test_001"
+        assert completed_events[0]["exec_id"] == "w_test:1"
 
         db_step = db.get_steps("j_test_001")[0]
         assert db_step.status == StepStatus.DONE
@@ -474,12 +506,49 @@ class TestExecuteFullFlow:
         assert await redis.get_pool_count("cpu") == 0
 
     @pytest.mark.asyncio
+    async def test_minimal_claim_resolves_pipeline_via_transport(self, worker, redis, db, tmp_jobs_dir):
+        # 最小 claim(无 pipeline/domain/style_tags)→ execute 在 try 内经 transport 回读后跑完。
+        await worker.register()
+        db.create_job(make_job())
+        db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.READY, pool="cpu"))
+        await redis.init_job("j_test_001", "test", {"domain": "lecture", "style_tags": "[]"})
+        await redis.try_acquire_slot("cpu", limit=3)
+        (tmp_jobs_dir / "j_test_001").mkdir(exist_ok=True)
+
+        async def mock_run_step(ctx, on_progress, on_tick):
+            return 0, ""
+        worker.runner.run_step = mock_run_step
+
+        await worker.execute({"job_id": "j_test_001", "step": "A",
+                              "pool": "cpu", "exec_id": "w_test:1"})
+
+        assert db.get_steps("j_test_001")[0].status == StepStatus.DONE
+
+    @pytest.mark.asyncio
+    async def test_job_read_failure_fails_step_not_crash(self, worker, redis, db, tmp_jobs_dir):
+        # get_job_pipeline 抛错 → 被 execute 接住转 report_failed:步骤判失败、槽位释放、worker 不崩。
+        await worker.register()
+        db.create_job(make_job())
+        db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.RUNNING, pool="cpu"))
+        await redis.try_acquire_slot("cpu", limit=3)
+        (tmp_jobs_dir / "j_test_001").mkdir(exist_ok=True)
+
+        async def boom(job_id):
+            raise RuntimeError("redis down")
+        worker.transport.get_job_pipeline = boom
+
+        await worker.execute({"job_id": "j_test_001", "step": "A",
+                              "pool": "cpu", "exec_id": "w_test:1"})
+
+        assert db.get_steps("j_test_001")[0].status == StepStatus.FAILED
+        assert await redis.get_pool_count("cpu") == 0
+
+    @pytest.mark.asyncio
     async def test_failure_publishes_events_and_updates_db(self, worker, redis, db, tmp_jobs_dir):
+        await worker.register()
         job = make_job()
         db.create_job(job)
         db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.READY, pool="cpu"))
-        await redis.init_job("j_test_001", "test", {"domain": "general", "style_tags": "[]"})
-        await redis.set_step_status("j_test_001", "A", "ready")
         await redis.try_acquire_slot("cpu", limit=3)
 
         job_dir = tmp_jobs_dir / "j_test_001"
@@ -503,17 +572,18 @@ class TestExecuteFullFlow:
             return 1, "segfault"
 
         worker.runner.run_step = mock_run_step
-        task = {"job_id": "j_test_001", "step": "A", "pool": "cpu"}
 
         listener1 = asyncio.create_task(capture_failed())
         listener2 = asyncio.create_task(capture_ws())
         await asyncio.sleep(0.05)
-        await worker.execute(task)
+        await worker.execute(make_claim())
         await asyncio.wait_for(listener1, timeout=2.0)
         await asyncio.wait_for(listener2, timeout=2.0)
 
         assert len(failed_events) == 1
         assert failed_events[0]["status"] == "failed"
+        # rc!=0 分支带 exec_id(保留旧 payload 差异)
+        assert failed_events[0]["exec_id"] == "w_test:1"
 
         assert len(ws_events) == 1
         assert ws_events[0]["event"] == "step_failed"
@@ -522,17 +592,19 @@ class TestExecuteFullFlow:
         assert db_step.status == StepStatus.FAILED
 
         assert await redis.get_pool_count("cpu") == 0
+        # rc!=0 计入 failed 统计(count_stats=True)
+        db_worker = db.get_worker(worker.worker_id)
+        assert db_worker.tasks_failed == 1
 
 
 class TestSubprocessTimeout:
     @pytest.mark.asyncio
     async def test_timeout_publishes_failure(self, worker, redis, db, tmp_jobs_dir):
         """When run_step times out, execute should publish step_failed with timeout error."""
+        await worker.register()
         job = make_job()
         db.create_job(job)
         db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.READY, pool="cpu"))
-        await redis.init_job("j_test_001", "test", {"domain": "general", "style_tags": "[]"})
-        await redis.set_step_status("j_test_001", "A", "ready")
         await redis.try_acquire_slot("cpu", limit=3)
 
         job_dir = tmp_jobs_dir / "j_test_001"
@@ -542,7 +614,6 @@ class TestSubprocessTimeout:
             raise asyncio.TimeoutError()
 
         worker.runner.run_step = mock_run_step_timeout
-        task = {"job_id": "j_test_001", "step": "A", "pool": "cpu"}
 
         failed_events = []
 
@@ -553,13 +624,18 @@ class TestSubprocessTimeout:
 
         listener = asyncio.create_task(capture_failed())
         await asyncio.sleep(0.05)
-        await worker.execute(task)
+        await worker.execute(make_claim())
         await asyncio.wait_for(listener, timeout=2.0)
 
         assert len(failed_events) == 1
         assert "timeout" in failed_events[0].get("error", "").lower() or failed_events[0].get("error_type") == "timeout"
+        # timeout 分支不带 exec_id(保留旧 payload 差异)
+        assert "exec_id" not in failed_events[0]
         # Slot should be released
         assert await redis.get_pool_count("cpu") == 0
+        # timeout 分支不计 failed 统计(count_stats=False)
+        db_worker = db.get_worker(worker.worker_id)
+        assert db_worker.tasks_failed == 0
 
 
 class TestPoolExhaustion:
@@ -572,45 +648,29 @@ class TestPoolExhaustion:
             await redis.try_acquire_slot("cpu", limit=3)
 
         await setup_task_in_queue(redis, pool="cpu")
-        # The worker's fetch_task should skip cpu pool because it's full
+        # request_step should skip cpu pool because it's full
         # But it tries other pools too. We need to also exhaust scene and io.
         await redis.freeze_pool("scene")
         await redis.freeze_pool("io")
 
-        task = await worker.fetch_task()
-        assert task is None
-
-
-class TestMaxTriesExhaustion:
-    @pytest.mark.asyncio
-    async def test_max_tries_returns_none(self, worker, redis):
-        """When queue has many non-matching tasks, pop_matching_task gives up after max_tries."""
-        for i in range(6):
-            await redis.enqueue_step("cpu", f"j_{i}", "A", ["exotic_tag"], priority=0,
-                                     require_tags=["exotic_tag"])
-
-        result = await worker.pop_matching_task("cpu")
-        assert result is None
-        queue = await redis.get_queue_info("cpu")
-        assert queue["length"] == 6
+        claim = await request_step(worker)
+        assert claim is None
 
 
 class TestStoragePullFailure:
     @pytest.mark.asyncio
     async def test_pull_failure_releases_slot_and_publishes_failed(self, worker, redis, db, tmp_jobs_dir):
         """When storage.pull raises, slot released + step_failed published + DB updated."""
+        await worker.register()
         job = make_job()
         db.create_job(job)
         db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.READY, pool="cpu"))
-        await redis.init_job("j_test_001", "test", {"domain": "general", "style_tags": "[]"})
-        await redis.set_step_status("j_test_001", "A", "ready")
         await redis.try_acquire_slot("cpu", limit=3)
 
         async def failing_pull(job_id, step):
             raise IOError("disk full")
 
         worker.storage.pull = failing_pull
-        task = {"job_id": "j_test_001", "step": "A", "pool": "cpu"}
 
         failed_events = []
 
@@ -621,14 +681,19 @@ class TestStoragePullFailure:
 
         listener = asyncio.create_task(capture_failed())
         await asyncio.sleep(0.05)
-        await worker.execute(task)
+        await worker.execute(make_claim())
         await asyncio.wait_for(listener, timeout=2.0)
 
         assert await redis.get_pool_count("cpu") == 0
         assert len(failed_events) == 1
         assert "disk full" in failed_events[0]["error"]
+        # 通用异常分支不带 exec_id(保留旧 payload 差异)
+        assert "exec_id" not in failed_events[0]
         db_step = db.get_steps("j_test_001")[0]
         assert db_step.status == StepStatus.FAILED
+        # 通用异常分支不计 failed 统计(count_stats=False)
+        db_worker = db.get_worker(worker.worker_id)
+        assert db_worker.tasks_failed == 0
 
 
 class TestShutdown:
