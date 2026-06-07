@@ -5,8 +5,12 @@ from __future__ import annotations
 import enum
 import secrets
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class JobStatus(str, enum.Enum):
@@ -41,8 +45,8 @@ class Job:
     current_step: str | None = None  # 派生字段（不存 DB），API 返回时动态填充
     progress_pct: int = 0
     meta: dict = field(default_factory=dict)
-    created_at: datetime = field(default_factory=datetime.now)
-    updated_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=_utcnow)
+    updated_at: datetime = field(default_factory=_utcnow)
     error: str | None = None
 
 
@@ -78,7 +82,7 @@ class Worker:
     tasks_completed: int = 0
     tasks_failed: int = 0
     total_duration_sec: float = 0.0
-    first_seen: datetime = field(default_factory=datetime.now)
+    first_seen: datetime = field(default_factory=_utcnow)
     started_at: datetime | None = None
     last_heartbeat: datetime | None = None
     admin_note: str | None = None
@@ -92,8 +96,8 @@ class Collection:
     description: str = ""
     tags: list[str] = field(default_factory=list)
     job_count: int = 0
-    created_at: datetime = field(default_factory=datetime.now)
-    updated_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=_utcnow)
+    updated_at: datetime = field(default_factory=_utcnow)
 
 
 @dataclass
@@ -108,7 +112,7 @@ class AIUsage:
     cost_usd: float = 0.0
     duration_sec: float = 0.0
     cached: bool = False
-    created_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=_utcnow)
 
 
 @dataclass

@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { useApi } from '../composables/useApi'
-import type { Worker } from '../types'
+import type { Worker, WorkerJob } from '../types'
 
 export const useWorkerStore = defineStore('workers', () => {
   const api = useApi()
@@ -32,10 +32,27 @@ export const useWorkerStore = defineStore('workers', () => {
     await fetchAll()
   }
 
-  async function remove(workerId: string) {
-    await api.del(`/api/workers/${workerId}`)
+  async function updateTags(workerId: string, tags: string[]) {
+    await api.put(`/api/workers/${workerId}`, { tags })
     await fetchAll()
   }
 
-  return { workers, loading, fetchAll, drain, undrain, updateNote, remove }
+  async function remove(workerId: string, force = false) {
+    await api.del(`/api/workers/${workerId}${force ? '?force=true' : ''}`)
+    await fetchAll()
+  }
+
+  async function mintToken(): Promise<string> {
+    const res = await api.post<{ token: string }>('/api/workers/registration-token', {})
+    return res.token
+  }
+
+  async function fetchJobs(workerId: string): Promise<WorkerJob[]> {
+    return await api.get<WorkerJob[]>(`/api/workers/${workerId}/jobs`)
+  }
+
+  return {
+    workers, loading, fetchAll, drain, undrain,
+    updateNote, updateTags, remove, mintToken, fetchJobs,
+  }
 })

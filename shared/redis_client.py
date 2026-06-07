@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import AsyncIterator
 
 import redis.asyncio as aioredis
@@ -215,7 +215,7 @@ class RedisClient:
 
     async def heartbeat(self, worker_id: str, ttl: int = 30) -> None:
         key = f"worker:{worker_id}"
-        await self.r.hset(key, "last_heartbeat", datetime.now().isoformat())
+        await self.r.hset(key, "last_heartbeat", datetime.now(timezone.utc).isoformat())
         await self.r.expire(key, ttl)
 
     async def set_worker_field(self, worker_id: str, field: str, value: str) -> None:
@@ -234,6 +234,32 @@ class RedisClient:
             worker_id = key.split(":", 1)[1]
             keys.append(worker_id)
         return keys
+
+    async def incr_worker_stat(
+        self, worker_id: str, field: str, amount: int | float
+    ) -> None:
+        """累计 worker 统计到 Redis hash。整数走 HINCRBY，浮点走 HINCRBYFLOAT，
+        避免整数字段被写成 '1.0' 让消费侧 int() 解析失败。"""
+        key = f"worker:{worker_id}"
+        if isinstance(amount, int):
+            await self.r.hincrby(key, field, amount)
+        else:
+            await self.r.hincrbyfloat(key, field, amount)
+
+    async def delete_worker(self, worker_id: str) -> None:
+        """删掉 Redis 里的 worker 记录(liveness)。活着的远程 worker 仅删 SQLite
+        会在下次扫描又冒出来，必须连 Redis key 一起清。"""
+        await self.r.delete(f"worker:{worker_id}")
+
+    # ── 接入 token（homelab 可复用 + 可重置）──
+
+    _REGISTRATION_TOKEN_KEY = "worker:registration_token"
+
+    async def get_registration_token(self) -> str | None:
+        return await self.r.get(self._REGISTRATION_TOKEN_KEY)
+
+    async def set_registration_token(self, token: str) -> None:
+        await self.r.set(self._REGISTRATION_TOKEN_KEY, token)
 
     # ── 活跃 Job 集合 ──
 

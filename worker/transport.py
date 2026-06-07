@@ -162,6 +162,13 @@ class RedisTransport:
             self._db.increment_worker_stats, worker_id,
             completed=completed, failed=failed, duration=duration,
         )
+        # 也累计进 Redis hash：远程(仅 Redis)worker 的统计才不会在 /api/workers 显示 0。
+        if completed:
+            await self._redis.incr_worker_stat(worker_id, "tasks_completed", completed)
+        if failed:
+            await self._redis.incr_worker_stat(worker_id, "tasks_failed", failed)
+        if duration:
+            await self._redis.incr_worker_stat(worker_id, "total_duration_sec", duration)
 
     async def record_ai_usage(self, usage):
         await asyncio.to_thread(self._db.record_ai_usage, usage)

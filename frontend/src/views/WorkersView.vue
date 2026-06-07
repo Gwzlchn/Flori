@@ -11,16 +11,16 @@ const workerStore = useWorkerStore()
 onMounted(() => workerStore.fetchAll())
 
 const sortedWorkers = computed(() => {
-  const order: Record<string, number> = { busy: 0, idle: 1, draining: 2, offline: 3 }
-  return [...workerStore.workers].sort((a, b) => (order[a.status] ?? 4) - (order[b.status] ?? 4))
+  const order: Record<string, number> = {
+    'online-busy': 0, 'online-idle': 1, draining: 2, offline: 3, stale: 4,
+  }
+  return [...workerStore.workers].sort((a, b) => (order[a.status] ?? 5) - (order[b.status] ?? 5))
 })
 
-const onlineCount = computed(() => workerStore.workers.filter(w => {
-  if (!w.last_heartbeat) return false
-  return Date.now() - new Date(w.last_heartbeat).getTime() < 30000
-}).length)
+// 在线数一律以后端 status 为准(online-* 即在线);不再用时间戳自算(时区会算错→在线判离线)。
+const onlineCount = computed(() => workerStore.workers.filter(w => w.status.startsWith('online')).length)
 
-const busyCount = computed(() => workerStore.workers.filter(w => w.status === 'busy').length)
+const busyCount = computed(() => workerStore.workers.filter(w => w.status === 'online-busy').length)
 
 const todayCompleted = computed(() =>
   workerStore.workers.reduce((sum, w) => sum + w.tasks_completed, 0)

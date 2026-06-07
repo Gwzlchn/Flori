@@ -5,10 +5,16 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import AIUsage, Collection, Job, JobStatus, Step, StepStatus, Worker
+from .status import (
+    DEFAULT_ONLINE_WINDOW_SEC,
+    DEFAULT_STALE_WINDOW_SEC,
+    STALE,
+    compute_worker_status,
+)
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -111,13 +117,18 @@ _STEP_UPDATABLE = {
 
 
 def _now_iso() -> str:
-    return datetime.now().isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _parse_dt(s: str | None) -> datetime | None:
+    """解析 ISO 时间串为 aware-UTC。旧库里存的 naive 串补上 UTC tzinfo，
+    避免与 aware 的 now() 相减时崩 'can't subtract offset-naive and offset-aware'。"""
     if s is None:
         return None
-    return datetime.fromisoformat(s)
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 class Database:
@@ -329,25 +340,56 @@ class Database:
             )
             self._conn.commit()
 
-    def get_worker(self, worker_id: str) -> Worker | None:
+    def get_worker(
+        self,
+        worker_id: str,
+        online_window_sec: int = DEFAULT_ONLINE_WINDOW_SEC,
+        stale_window_sec: int = DEFAULT_STALE_WINDOW_SEC,
+    ) -> Worker | None:
         row = self._conn.execute(
             "SELECT * FROM workers WHERE id=?", (worker_id,)
         ).fetchone()
         if row is None:
             return None
-        return self._row_to_worker(row)
+        w = self._row_to_worker(row)
+        self._apply_status(w, online_window_sec, stale_window_sec)
+        return w
 
-    def list_workers(self, stale_after_sec: int = 60) -> list[Worker]:
-        """列出所有 worker。心跳超过 stale_after_sec 秒未刷新的（僵尸）一律
-        视作 offline，避免崩掉/被回收的容器一直显示在线。"""
+    def list_workers(
+        self,
+        online_window_sec: int = DEFAULT_ONLINE_WINDOW_SEC,
+        stale_window_sec: int = DEFAULT_STALE_WINDOW_SEC,
+    ) -> list[Worker]:
+        """列出所有 worker，状态由后端按心跳新鲜度统一算出（online-idle/busy、
+        offline、stale，draining 为管理员叠加）。越过 stale 窗口的持久化为信号，
+        供 GC 回收僵尸 worker。"""
         rows = self._conn.execute("SELECT * FROM workers").fetchall()
         workers = [self._row_to_worker(r) for r in rows]
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         for w in workers:
-            hb = w.last_heartbeat
-            if hb is None or (now - hb).total_seconds() > stale_after_sec:
-                w.status = "offline"
+            self._apply_status(w, online_window_sec, stale_window_sec, now=now)
         return workers
+
+    def _apply_status(
+        self,
+        w: Worker,
+        online_window_sec: int,
+        stale_window_sec: int,
+        now: datetime | None = None,
+    ) -> None:
+        """把 worker 的存量字段折算成对外公共状态，并对 stale 持久化（不动心跳）。
+        存量 status 列只作管理员叠加位(draining)的来源。"""
+        public = compute_worker_status(
+            last_heartbeat=w.last_heartbeat,
+            current_job=w.current_job,
+            admin_status=w.status,
+            now=now,
+            online_window_sec=online_window_sec,
+            stale_window_sec=stale_window_sec,
+        )
+        if public == STALE and w.status != STALE:
+            self.set_worker_status(w.id, STALE)
+        w.status = public
 
     def set_worker_status(self, worker_id: str, status: str) -> None:
         """仅更新 worker 状态，不触碰 last_heartbeat（用于标记僵尸为 offline）。"""
@@ -386,7 +428,7 @@ class Database:
 
         心跳与状态变更必须写回 DB，否则 /api/workers 读到的 last_heartbeat
         永远停在注册时刻，前端会在 30s 后把所有 worker 判成 offline。"""
-        fields = {"last_heartbeat": datetime.now().isoformat()}
+        fields = {"last_heartbeat": datetime.now(timezone.utc).isoformat()}
         if status is not None:
             fields["status"] = status
         if current_job is not None:
@@ -406,6 +448,15 @@ class Database:
         with self._lock:
             self._conn.execute("DELETE FROM workers WHERE id=?", (worker_id,))
             self._conn.commit()
+
+    def list_worker_jobs(self, worker_id: str, limit: int = 50) -> list[Step]:
+        """该 worker 跑过的步骤历史（按最近开始时间倒序），对应 runner 的 job 历史。"""
+        rows = self._conn.execute(
+            "SELECT * FROM job_steps WHERE worker_id=? "
+            "ORDER BY started_at DESC LIMIT ?",
+            (worker_id, limit),
+        ).fetchall()
+        return [self._row_to_step(r) for r in rows]
 
     # ── AI Usage ──
 

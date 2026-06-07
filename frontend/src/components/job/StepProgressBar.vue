@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch, onUnmounted } from 'vue'
 import type { StepInfo } from '../../types'
 import { useApi } from '../../composables/useApi'
-import { Check, X, Minus, Loader, ChevronDown, ChevronRight } from 'lucide-vue-next'
+import { Check, X, Minus, Loader, ChevronDown, ChevronRight, Download } from 'lucide-vue-next'
 
 const props = defineProps<{ steps: StepInfo[]; jobId: string }>()
 const api = useApi()
@@ -44,9 +44,56 @@ const logs = ref<Record<string, string>>({})
 const logLoading = ref<Record<string, boolean>>({})
 const logError = ref<Record<string, string>>({})
 
+// 运行中步骤展开后轮询日志,做准实时 tail;done/failed 停轮询并最后拉一次冻结。
+const logTimers: Record<string, ReturnType<typeof setInterval>> = {}
+
 function canExpand(step: StepInfo): boolean {
   return step.status !== 'waiting' && step.status !== 'ready'
 }
+
+function logUrl(step: string, raw = false): string {
+  return `/api/jobs/${props.jobId}/steps/${step}/log${raw ? '?raw=1' : ''}`
+}
+
+async function fetchLog(step: string): Promise<void> {
+  try {
+    logs.value[step] = await api.getText(logUrl(step))
+    logError.value[step] = ''
+  } catch (e: any) {
+    if (logs.value[step] === undefined) {
+      logError.value[step] = e?.status === 404 ? '该步骤暂无日志' : (e?.message || '日志加载失败')
+    }
+  }
+}
+
+function stopLogPolling(step: string): void {
+  if (logTimers[step]) {
+    clearInterval(logTimers[step])
+    delete logTimers[step]
+  }
+}
+
+function stepByName(name: string): StepInfo | undefined {
+  return props.steps.find(s => s.name === name)
+}
+
+// 步骤跑完后停止轮询并最后拉一次,把日志冻结在终态。
+watch(
+  () => props.steps.map(s => `${s.name}:${s.status}`).join(','),
+  () => {
+    for (const name of Object.keys(logTimers)) {
+      const s = stepByName(name)
+      if (!s || s.status !== 'running') {
+        stopLogPolling(name)
+        if (expanded.value[name]) fetchLog(name)
+      }
+    }
+  },
+)
+
+onUnmounted(() => {
+  for (const name of Object.keys(logTimers)) stopLogPolling(name)
+})
 
 function stepPct(step: StepInfo): number | null {
   if (step.status === 'running' && step.meta?.pct != null) return step.meta.pct
@@ -63,16 +110,19 @@ async function toggle(step: StepInfo) {
   if (!canExpand(step)) return
   const n = step.name
   expanded.value[n] = !expanded.value[n]
-  if (expanded.value[n] && logs.value[n] === undefined && !logLoading.value[n]) {
+  if (!expanded.value[n]) {
+    stopLogPolling(n)
+    return
+  }
+  if (logs.value[n] === undefined && !logLoading.value[n]) {
     logLoading.value[n] = true
     logError.value[n] = ''
-    try {
-      logs.value[n] = await api.getText(`/api/jobs/${props.jobId}/steps/${n}/log`)
-    } catch (e: any) {
-      logError.value[n] = e?.status === 404 ? '该步骤暂无日志' : (e?.message || '日志加载失败')
-    } finally {
-      logLoading.value[n] = false
-    }
+    await fetchLog(n)
+    logLoading.value[n] = false
+  }
+  // 运行中步骤展开后每 2.5s 拉一次,准实时 tail。
+  if (step.status === 'running' && !logTimers[n]) {
+    logTimers[n] = setInterval(() => fetchLog(n), 2500)
   }
 }
 </script>
@@ -129,7 +179,21 @@ async function toggle(step: StepInfo) {
         <div v-if="expanded[step.name]" class="mt-2">
           <div v-if="logLoading[step.name]" class="text-xs text-gray-400">加载日志...</div>
           <div v-else-if="logError[step.name]" class="text-xs text-gray-400">{{ logError[step.name] }}</div>
-          <pre v-else class="text-xs bg-gray-900 text-gray-100 rounded-lg p-3 max-h-80 overflow-auto whitespace-pre-wrap break-all">{{ logs[step.name] }}</pre>
+          <template v-else>
+            <div class="flex items-center justify-between mb-1">
+              <span v-if="step.status === 'running'" class="text-xs text-blue-500">实时刷新中...</span>
+              <span v-else></span>
+              <a
+                :href="logUrl(step.name, true)"
+                target="_blank"
+                rel="noopener"
+                class="text-xs text-gray-500 hover:text-gray-700 inline-flex items-center gap-1"
+              >
+                <Download :size="12" /> 下载 raw
+              </a>
+            </div>
+            <pre class="text-xs bg-gray-900 text-gray-100 rounded-lg p-3 max-h-80 overflow-auto whitespace-pre-wrap break-all">{{ logs[step.name] }}</pre>
+          </template>
         </div>
       </div>
     </div>

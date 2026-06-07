@@ -1201,10 +1201,10 @@ class TestCleanupStaleWorkers:
 
     @pytest.mark.asyncio
     async def test_fresh_worker_untouched(self, scheduler, redis, db):
-        from datetime import datetime
+        from datetime import datetime, timezone
         from shared.models import Worker as WorkerModel
 
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         db.upsert_worker(
             WorkerModel(id="cpu-fresh", type="cpu", status="idle",
                         first_seen=now, last_heartbeat=now)
@@ -1212,4 +1212,22 @@ class TestCleanupStaleWorkers:
         await scheduler.cleanup_stale_workers(timeout_sec=60)
         got = db.get_worker("cpu-fresh")
         assert got is not None
-        assert got.status == "idle"
+        # 刚心跳的 worker 不应被回收；公共状态衍生为 online-idle
+        assert got.status == "online-idle"
+
+    @pytest.mark.asyncio
+    async def test_aware_now_minus_legacy_naive_heartbeat_no_crash(
+        self, scheduler, redis, db
+    ):
+        """UTC 迁移核心回归：cleanup 用 aware now 减去旧库 naive 心跳不能崩
+        ('can't subtract offset-naive and offset-aware')，且仍正确判旧 worker stale。"""
+        # 直接写一个 naive 心跳的旧行（绕过模型默认值，模拟历史数据）
+        db._conn.execute(
+            "INSERT INTO workers (id, type, status, first_seen, last_heartbeat) "
+            "VALUES (?,?,?,?,?)",
+            ("cpu-legacy", "cpu", "busy", "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
+        )
+        db._conn.commit()
+        # Redis 无注册键 -> 视为真死 -> 删除
+        await scheduler.cleanup_stale_workers(timeout_sec=60)
+        assert db.get_worker("cpu-legacy") is None

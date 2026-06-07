@@ -6,7 +6,7 @@ import asyncio
 import json
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
@@ -163,7 +163,7 @@ class Scheduler:
         from datetime import timedelta
 
         workers = await asyncio.to_thread(self.db.list_workers)
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         for w in workers:
             hb = w.last_heartbeat
             stale = hb is None or (now - hb) > timedelta(seconds=timeout_sec)
@@ -171,8 +171,8 @@ class Scheduler:
                 continue
             alive = await self.redis.worker_exists(w.id)
             if alive:
-                # 注意：list_workers 已把超时的 w.status 衍生成 "offline"，
-                # 故此处直接持久化（幂等），不能用 w.status 判断是否需要写。
+                # list_workers 已按心跳新鲜度衍生公共状态，故此处直接持久化（幂等），
+                # 不能用 w.status 判断是否需要写。
                 await asyncio.to_thread(
                     self.db.set_worker_status, w.id, "offline",
                 )
@@ -245,7 +245,7 @@ class Scheduler:
             return
         await asyncio.to_thread(
             self.db.update_step, job_id, step,
-            status="running", worker_id=worker, started_at=datetime.now(),
+            status="running", worker_id=worker, started_at=datetime.now(timezone.utc),
         )
 
     async def on_step_done(
@@ -264,7 +264,7 @@ class Scheduler:
             self.db.update_step, job_id, step,
             status="done",
             worker_id=worker,
-            finished_at=datetime.now(),
+            finished_at=datetime.now(timezone.utc),
             duration_sec=duration,
         )
 
@@ -332,7 +332,7 @@ class Scheduler:
             await asyncio.to_thread(
                 self.db.update_step, job_id, step,
                 status="failed", error=error[:500],
-                finished_at=datetime.now(),
+                finished_at=datetime.now(timezone.utc),
                 retries=current_retries,
             )
             await self.mark_job_failed(job_id, f"{step}: {error[:200]}")

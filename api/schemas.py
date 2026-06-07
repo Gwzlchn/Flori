@@ -53,7 +53,11 @@ class WorkerResponse(BaseModel):
     id: str
     type: str
     pools: list[str]
+    tags: list[str] = Field(default_factory=list)
+    reject_tags: list[str] = Field(default_factory=list)
     hostname: str | None = None
+    gpu_name: str | None = None
+    gpu_memory_mb: int | None = None
     status: str
     current_job: str | None = None
     current_step: str | None = None
@@ -69,6 +73,8 @@ class WorkerResponse(BaseModel):
 class WorkerUpdateRequest(BaseModel):
     status: str | None = None
     admin_note: str | None = None
+    tags: list[str] | None = None
+    reject_tags: list[str] | None = None
 
 
 class ProfileUpdateRequest(BaseModel):

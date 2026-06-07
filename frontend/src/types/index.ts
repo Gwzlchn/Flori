@@ -27,12 +27,23 @@ export interface JobListResponse {
   items: JobSummary[]
 }
 
+export type WorkerStatus =
+  | 'online-idle'
+  | 'online-busy'
+  | 'offline'
+  | 'draining'
+  | 'stale'
+
 export interface Worker {
   id: string
   type: string
   pools: string[]
+  tags: string[]
+  reject_tags: string[]
   hostname: string | null
-  status: string
+  gpu_name: string | null
+  gpu_memory_mb: number | null
+  status: WorkerStatus
   current_job: string | null
   current_step: string | null
   tasks_completed: number
@@ -42,6 +53,16 @@ export interface Worker {
   started_at: string | null
   last_heartbeat: string | null
   admin_note: string | null
+}
+
+export interface WorkerJob {
+  job_id: string
+  step: string
+  status: string
+  started_at: string | null
+  finished_at: string | null
+  duration_sec: number | null
+  error: string | null
 }
 
 export interface SystemStatus {

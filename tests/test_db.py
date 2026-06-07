@@ -177,9 +177,12 @@ class TestWorkerCRUD:
         w.status = "busy"
         w.tasks_completed = 5
         db.upsert_worker(w)
-        got = db.get_worker("ai-aabbccdd")
-        assert got.status == "busy"
-        assert got.tasks_completed == 5
+        # get_worker 衍生公共状态；要验证存量 status 列直接读底层。
+        row = db._conn.execute(
+            "SELECT status FROM workers WHERE id=?", ("ai-aabbccdd",)
+        ).fetchone()
+        assert row["status"] == "busy"
+        assert db.get_worker("ai-aabbccdd").tasks_completed == 5
 
     def test_increment_stats(self, db):
         db.upsert_worker(Worker(id="ai-aabbccdd", type="ai"))
@@ -195,27 +198,72 @@ class TestWorkerCRUD:
         db.upsert_worker(Worker(id="ai-1", type="ai"))
         assert len(db.list_workers()) == 2
 
-    def test_list_workers_stale_marked_offline(self, db):
-        from datetime import datetime, timedelta
+    def test_list_workers_derives_public_status(self, db):
+        from datetime import datetime, timedelta, timezone
 
-        fresh = datetime.now()
-        old = datetime.now() - timedelta(minutes=10)
+        fresh = datetime.now(timezone.utc)
+        offline_age = datetime.now(timezone.utc) - timedelta(minutes=2)   # >30s,<15min
+        stale_age = datetime.now(timezone.utc) - timedelta(minutes=30)    # >15min
         db.upsert_worker(
-            Worker(id="cpu-fresh", type="cpu", status="idle",
+            Worker(id="cpu-idle", type="cpu", status="idle",
                    first_seen=fresh, last_heartbeat=fresh)
         )
         db.upsert_worker(
+            Worker(id="cpu-busy", type="cpu", status="busy", current_job="j1",
+                   first_seen=fresh, last_heartbeat=fresh)
+        )
+        db.upsert_worker(
+            Worker(id="cpu-off", type="cpu", status="idle",
+                   first_seen=offline_age, last_heartbeat=offline_age)
+        )
+        db.upsert_worker(
             Worker(id="cpu-stale", type="cpu", status="busy",
+                   first_seen=stale_age, last_heartbeat=stale_age)
+        )
+        workers = {w.id: w for w in db.list_workers()}
+        assert workers["cpu-idle"].status == "online-idle"
+        assert workers["cpu-busy"].status == "online-busy"
+        assert workers["cpu-off"].status == "offline"
+        assert workers["cpu-stale"].status == "stale"
+
+    def test_list_workers_persists_stale(self, db):
+        """越过 stale 窗口的 worker，公共状态 stale 要落库供 GC 识别。"""
+        from datetime import datetime, timedelta, timezone
+
+        old = datetime.now(timezone.utc) - timedelta(minutes=30)
+        db.upsert_worker(
+            Worker(id="cpu-zombie", type="cpu", status="busy",
+                   first_seen=old, last_heartbeat=old)
+        )
+        db.list_workers()
+        # 直接读底层列，绕过 list_workers 的衍生，确认已持久化为 stale。
+        row = db._conn.execute(
+            "SELECT status FROM workers WHERE id=?", ("cpu-zombie",)
+        ).fetchone()
+        assert row["status"] == "stale"
+
+    def test_list_workers_draining_overlay(self, db):
+        """draining 是管理员叠加位：仍在线显示 draining，离线后回落到失联归类。"""
+        from datetime import datetime, timedelta, timezone
+
+        fresh = datetime.now(timezone.utc)
+        old = datetime.now(timezone.utc) - timedelta(minutes=30)
+        db.upsert_worker(
+            Worker(id="cpu-drain-on", type="cpu", status="draining",
+                   first_seen=fresh, last_heartbeat=fresh)
+        )
+        db.upsert_worker(
+            Worker(id="cpu-drain-dead", type="cpu", status="draining",
                    first_seen=old, last_heartbeat=old)
         )
         workers = {w.id: w for w in db.list_workers()}
-        assert workers["cpu-fresh"].status == "idle"
-        assert workers["cpu-stale"].status == "offline"  # 心跳超时 -> 视作 offline
+        assert workers["cpu-drain-on"].status == "draining"
+        assert workers["cpu-drain-dead"].status == "stale"
 
     def test_set_worker_status_does_not_touch_heartbeat(self, db):
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
 
-        old = datetime.now() - timedelta(minutes=10)
+        old = datetime.now(timezone.utc) - timedelta(minutes=10)
         db.upsert_worker(
             Worker(id="cpu-1", type="cpu", status="idle",
                    first_seen=old, last_heartbeat=old)
@@ -224,7 +272,7 @@ class TestWorkerCRUD:
         got = db.get_worker("cpu-1")
         assert got.status == "offline"
         # last_heartbeat 未被刷新（仍停在 10 分钟前）
-        assert (datetime.now() - got.last_heartbeat).total_seconds() > 300
+        assert (datetime.now(timezone.utc) - got.last_heartbeat).total_seconds() > 300
 
     def test_delete_worker(self, db):
         db.upsert_worker(Worker(id="cpu-1", type="cpu"))
@@ -232,9 +280,9 @@ class TestWorkerCRUD:
         assert db.get_worker("cpu-1") is None
 
     def test_update_worker_heartbeat_refreshes_timestamp(self, db):
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
 
-        old = datetime.now() - timedelta(minutes=10)
+        old = datetime.now(timezone.utc) - timedelta(minutes=10)
         db.upsert_worker(
             Worker(id="cpu-1", type="cpu", status="idle",
                    first_seen=old, last_heartbeat=old)
@@ -242,8 +290,9 @@ class TestWorkerCRUD:
         db.update_worker_heartbeat("cpu-1")
         got = db.get_worker("cpu-1")
         # 心跳被刷新到接近现在（而非停在 10 分钟前）
-        assert (datetime.now() - got.last_heartbeat).total_seconds() < 5
-        assert got.status == "idle"
+        assert (datetime.now(timezone.utc) - got.last_heartbeat).total_seconds() < 5
+        # 公共状态由心跳新鲜度衍生：刚心跳 + 无任务 -> online-idle
+        assert got.status == "online-idle"
 
     def test_update_worker_heartbeat_updates_status_and_task(self, db):
         db.upsert_worker(Worker(id="ai-1", type="ai", status="idle"))
@@ -251,9 +300,71 @@ class TestWorkerCRUD:
             "ai-1", status="busy", current_job="j1", current_step="A"
         )
         got = db.get_worker("ai-1")
-        assert got.status == "busy"
+        # 刚心跳 + 有在跑任务 -> online-busy
+        assert got.status == "online-busy"
         assert got.current_job == "j1"
         assert got.current_step == "A"
+
+
+class TestWorkerAwareUTC:
+    """UTC 全量迁移：读出的时间戳必须是 aware-UTC，且与 aware now 相减不崩。"""
+
+    def test_default_first_seen_is_aware_utc(self, db):
+        from datetime import timezone
+
+        db.upsert_worker(Worker(id="cpu-1", type="cpu"))
+        got = db.get_worker("cpu-1")
+        assert got.first_seen.tzinfo is not None
+        assert got.first_seen.utcoffset().total_seconds() == 0
+
+    def test_heartbeat_roundtrip_is_aware(self, db):
+        from datetime import datetime, timezone
+
+        db.upsert_worker(Worker(id="cpu-1", type="cpu"))
+        db.update_worker_heartbeat("cpu-1")
+        got = db.get_worker("cpu-1")
+        assert got.last_heartbeat.tzinfo is not None
+        # 与 aware now 相减不抛 "can't subtract naive and aware"
+        delta = datetime.now(timezone.utc) - got.last_heartbeat
+        assert delta.total_seconds() < 5
+
+    def test_legacy_naive_row_parsed_as_utc(self, db):
+        """旧库里存的 naive 时间串(无 tzinfo)被补成 UTC，兼容历史数据。"""
+        from datetime import datetime, timezone
+
+        # 模拟旧数据：直接写一个 naive ISO 串进 DB（绕过模型默认值）
+        naive = datetime(2026, 1, 1, 0, 0, 0)
+        db._conn.execute(
+            "INSERT INTO workers (id, type, status, first_seen, last_heartbeat) "
+            "VALUES (?,?,?,?,?)",
+            ("cpu-legacy", "cpu", "idle", naive.isoformat(), naive.isoformat()),
+        )
+        db._conn.commit()
+        got = db.get_worker("cpu-legacy")
+        assert got.first_seen.tzinfo is not None
+        assert got.last_heartbeat.tzinfo is not None
+        # 不崩 + 时刻不被时区平移（naive 当作 UTC，绝对值不变）
+        assert got.first_seen == datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def test_list_workers_stale_with_legacy_naive_heartbeat(self, db):
+        """list_workers 对 naive 旧行做 stale 判定不崩，且正确判失联。"""
+        from datetime import datetime, timezone
+
+        # 新鲜（aware）
+        db.upsert_worker(
+            Worker(id="cpu-fresh", type="cpu", status="idle",
+                   last_heartbeat=datetime.now(timezone.utc))
+        )
+        # 旧 naive 行：很久以前
+        db._conn.execute(
+            "INSERT INTO workers (id, type, status, first_seen, last_heartbeat) "
+            "VALUES (?,?,?,?,?)",
+            ("cpu-old", "cpu", "busy", "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
+        )
+        db._conn.commit()
+        workers = {w.id: w for w in db.list_workers()}
+        assert workers["cpu-fresh"].status == "online-idle"
+        assert workers["cpu-old"].status == "stale"
 
 
 class TestAIUsage:

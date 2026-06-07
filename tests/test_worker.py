@@ -99,6 +99,22 @@ async def setup_task_in_queue(redis, pool="cpu", job_id="j_test_001", step="A", 
     await redis.init_job(job_id, "test", {"domain": "general", "style_tags": "[]"})
 
 
+def _minimal_step_cfg(config, step="A", timeout_sec=10):
+    """构造 _run_step 需要的最小 step_cfg(只有 timeout 被 _run_step 读)。"""
+    return {
+        "step": {"name": step, "pool": "cpu", "timeout_sec": timeout_sec, "retries": 1},
+        "ai": {},
+        "domain": {"name": "general"},
+        "style_tags": [],
+        "paths": {
+            "data_dir": str(config.data_dir),
+            "prompts_dir": str(config.prompts_dir),
+            "config_dir": str(config.config_dir),
+        },
+        "providers": {},
+    }
+
+
 # ── Tests ──
 
 
@@ -116,7 +132,8 @@ class TestRegister:
         db_worker = db.get_worker(worker.worker_id)
         assert db_worker is not None
         assert db_worker.type == "cpu"
-        assert db_worker.status == "idle"
+        # 刚注册即心跳，公共状态衍生为 online-idle（存量列仍是 idle）
+        assert db_worker.status == "online-idle"
 
 
 class TestTagMatching:
@@ -348,7 +365,8 @@ class TestUpdateWorkerStatus:
         await worker.transport.update_status(worker.worker_id, "busy", "j1", "A")
 
         got = db.get_worker(worker.worker_id)
-        assert got.status == "busy"
+        # 心跳新鲜 + 有在跑任务 -> 公共状态衍生为 online-busy
+        assert got.status == "online-busy"
         assert got.current_job == "j1"
         assert got.current_step == "A"
 
@@ -368,12 +386,12 @@ class TestHeartbeatLoop:
     @pytest.mark.asyncio
     async def test_heartbeat_refreshes_db(self, worker, redis, db, monkeypatch):
         # 心跳循环必须刷新 DB 的 last_heartbeat，否则前端 30s 后判 offline
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
 
         await worker.register()
         # 人为把 DB 心跳改老
         w = db.get_worker(worker.worker_id)
-        w.last_heartbeat = datetime.now() - timedelta(minutes=10)
+        w.last_heartbeat = datetime.now(timezone.utc) - timedelta(minutes=10)
         db.upsert_worker(w)
 
         # 跑一轮心跳循环后退出
@@ -387,7 +405,7 @@ class TestHeartbeatLoop:
         await worker.heartbeat_loop()
 
         got = db.get_worker(worker.worker_id)
-        assert (datetime.now() - got.last_heartbeat).total_seconds() < 5
+        assert (datetime.now(timezone.utc) - got.last_heartbeat).total_seconds() < 5
 
 
 class TestFetchTask:
@@ -708,3 +726,160 @@ class TestRunStep:
         assert log_path.exists()
         log_content = log_path.read_text()
         assert "step_output_ok" in log_content
+
+    @pytest.mark.asyncio
+    async def test_run_step_streams_stdout_and_stderr_merged(
+        self, worker, tmp_jobs_dir, config,
+    ):
+        """日志边跑边落盘:stdout/stderr 合一文件,stderr 带前缀;返回 stderr 尾部。"""
+        job_dir = tmp_jobs_dir / "j_stream"
+        job_dir.mkdir(exist_ok=True)
+
+        step_cfg = _minimal_step_cfg(config)
+        mod_dir = tmp_jobs_dir / "_fake_steps2"
+        mod_dir.mkdir(exist_ok=True)
+        (mod_dir / "__init__.py").write_text("")
+        (mod_dir / "mixed.py").write_text(
+            "import sys\n"
+            "print('out_line_1')\n"
+            "print('err_line_1', file=sys.stderr)\n"
+            "sys.stdout.flush(); sys.stderr.flush()\n"
+            "sys.exit(0)\n"
+        )
+
+        orig_env = os.environ.copy()
+        os.environ["PYTHONPATH"] = str(tmp_jobs_dir) + os.pathsep + os.environ.get("PYTHONPATH", "")
+        try:
+            returncode, stderr_tail = await worker._run_step(
+                job_id="j_stream", step="A", work_dir=job_dir,
+                exec_id="x", step_cfg=step_cfg, module="_fake_steps2.mixed",
+            )
+        finally:
+            os.environ.clear()
+            os.environ.update(orig_env)
+
+        assert returncode == 0
+        log = (job_dir / "logs" / "A.log").read_text()
+        assert "out_line_1" in log
+        assert "[stderr] err_line_1" in log
+        # 返回的 stderr 尾部不带前缀,供 error_msg 使用
+        assert "err_line_1" in stderr_tail
+        assert "[stderr]" not in stderr_tail
+
+    @pytest.mark.asyncio
+    async def test_run_step_log_visible_before_completion(
+        self, worker, tmp_jobs_dir, config,
+    ):
+        """长步骤运行中,日志文件应在进程结束前就有内容(流式落盘的核心保证)。"""
+        job_dir = tmp_jobs_dir / "j_live"
+        job_dir.mkdir(exist_ok=True)
+
+        step_cfg = _minimal_step_cfg(config)
+        mod_dir = tmp_jobs_dir / "_fake_steps3"
+        mod_dir.mkdir(exist_ok=True)
+        (mod_dir / "__init__.py").write_text("")
+        (mod_dir / "slow.py").write_text(
+            "import sys, time\n"
+            "print('early_marker', flush=True)\n"
+            "time.sleep(1.5)\n"
+            "print('late_marker', flush=True)\n"
+            "sys.exit(0)\n"
+        )
+
+        orig_env = os.environ.copy()
+        os.environ["PYTHONPATH"] = str(tmp_jobs_dir) + os.pathsep + os.environ.get("PYTHONPATH", "")
+
+        log_path = job_dir / "logs" / "A.log"
+        early_seen = asyncio.Event()
+
+        async def watch_for_early():
+            for _ in range(60):
+                if log_path.is_file() and "early_marker" in log_path.read_text():
+                    early_seen.set()
+                    return
+                await asyncio.sleep(0.1)
+
+        watcher = asyncio.create_task(watch_for_early())
+        try:
+            returncode, _ = await worker._run_step(
+                job_id="j_live", step="A", work_dir=job_dir,
+                exec_id="x", step_cfg=step_cfg, module="_fake_steps3.slow",
+            )
+        finally:
+            os.environ.clear()
+            os.environ.update(orig_env)
+            watcher.cancel()
+
+        assert returncode == 0
+        # early_marker 必须在 late_marker 出现前就已落盘
+        assert early_seen.is_set(), "log was not visible mid-run (not streaming)"
+        full = log_path.read_text()
+        assert "early_marker" in full and "late_marker" in full
+
+    @pytest.mark.asyncio
+    async def test_run_step_failure_returns_stderr_tail(
+        self, worker, tmp_jobs_dir, config,
+    ):
+        """失败步骤:returncode 非 0,stderr 尾部返回供 error_msg,日志含 stderr。"""
+        job_dir = tmp_jobs_dir / "j_fail"
+        job_dir.mkdir(exist_ok=True)
+
+        step_cfg = _minimal_step_cfg(config)
+        mod_dir = tmp_jobs_dir / "_fake_steps4"
+        mod_dir.mkdir(exist_ok=True)
+        (mod_dir / "__init__.py").write_text("")
+        (mod_dir / "boom.py").write_text(
+            "import sys\n"
+            "print('boom_reason', file=sys.stderr, flush=True)\n"
+            "sys.exit(3)\n"
+        )
+
+        orig_env = os.environ.copy()
+        os.environ["PYTHONPATH"] = str(tmp_jobs_dir) + os.pathsep + os.environ.get("PYTHONPATH", "")
+        try:
+            returncode, stderr_tail = await worker._run_step(
+                job_id="j_fail", step="A", work_dir=job_dir,
+                exec_id="x", step_cfg=step_cfg, module="_fake_steps4.boom",
+            )
+        finally:
+            os.environ.clear()
+            os.environ.update(orig_env)
+
+        assert returncode == 3
+        assert "boom_reason" in stderr_tail
+        assert "[stderr] boom_reason" in (job_dir / "logs" / "A.log").read_text()
+
+    @pytest.mark.asyncio
+    async def test_run_step_timeout_marks_log_and_raises(
+        self, worker, tmp_jobs_dir, config,
+    ):
+        """超时:抛 TimeoutError,日志含 TIMEOUT 标记(超时行为不变 + 日志可见)。"""
+        job_dir = tmp_jobs_dir / "j_to"
+        job_dir.mkdir(exist_ok=True)
+
+        step_cfg = _minimal_step_cfg(config)
+        step_cfg["step"]["timeout_sec"] = 1
+        mod_dir = tmp_jobs_dir / "_fake_steps5"
+        mod_dir.mkdir(exist_ok=True)
+        (mod_dir / "__init__.py").write_text("")
+        (mod_dir / "hang.py").write_text(
+            "import time\n"
+            "print('before_hang', flush=True)\n"
+            "time.sleep(30)\n"
+        )
+
+        orig_env = os.environ.copy()
+        os.environ["PYTHONPATH"] = str(tmp_jobs_dir) + os.pathsep + os.environ.get("PYTHONPATH", "")
+        try:
+            with pytest.raises(asyncio.TimeoutError):
+                await worker._run_step(
+                    job_id="j_to", step="A", work_dir=job_dir,
+                    exec_id="x", step_cfg=step_cfg, module="_fake_steps5.hang",
+                )
+        finally:
+            os.environ.clear()
+            os.environ.update(orig_env)
+
+        log = (job_dir / "logs" / "A.log").read_text()
+        assert "before_hang" in log
+        assert "TIMEOUT" in log

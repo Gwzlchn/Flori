@@ -44,7 +44,7 @@ async def health(request: Request, db: Database = Depends(get_db), redis: RedisC
         checks["disk_free_gb"] = -1
 
     workers = await asyncio.to_thread(db.list_workers)
-    checks["workers_online"] = sum(1 for w in workers if w.status in ("idle", "busy"))
+    checks["workers_online"] = sum(1 for w in workers if w.status.startswith("online"))
 
     status = "healthy" if checks["redis"] == "ok" and checks["db"] == "ok" else "unhealthy"
     return {"status": status, "checks": checks}
@@ -62,9 +62,9 @@ async def system_status(
         wtype = w.type
         if wtype not in worker_summary:
             worker_summary[wtype] = {"online": 0, "busy": 0}
-        if w.status in ("idle", "busy"):
+        if w.status.startswith("online") or w.status == "draining":
             worker_summary[wtype]["online"] += 1
-        if w.status == "busy":
+        if w.status == "online-busy":
             worker_summary[wtype]["busy"] += 1
 
     pools_cfg = config.pools.get("pools", {})

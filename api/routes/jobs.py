@@ -53,8 +53,8 @@ def _pipeline_for(content_type: str) -> str:
 
 
 def _now_iso() -> str:
-    from datetime import datetime
-    return datetime.now().isoformat()
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
 
 
 @router.post("", status_code=201)
@@ -211,18 +211,21 @@ async def get_job(job_id: str, db: Database = Depends(get_db)):
 async def get_step_log(
     job_id: str,
     step: str,
+    raw: int = 0,
     storage: StorageBackend = Depends(get_storage),
 ):
-    """返回某步骤的运行日志(尾部截断),供前端展开排错。经存储读,兼容本地/MinIO。"""
+    """返回某步骤的运行日志,供前端展开排错。经存储读,兼容本地/MinIO。
+    默认尾部截断 256KB;raw=1 返回完整日志(供下载)。"""
     _validate_job_id(job_id)
     if "/" in step or ".." in step or "\x00" in step:
         raise HTTPException(400, "invalid step")
     data = await storage.read_file(job_id, f"logs/{step}.log")
     if data is None:
         raise HTTPException(404, "log not found")
-    max_bytes = 256 * 1024
-    if len(data) > max_bytes:
-        data = b"...(truncated, last 256KB)...\n" + data[-max_bytes:]
+    if not raw:
+        max_bytes = 256 * 1024
+        if len(data) > max_bytes:
+            data = b"...(truncated, last 256KB)...\n" + data[-max_bytes:]
     return PlainTextResponse(data.decode("utf-8", errors="replace"))
 
 

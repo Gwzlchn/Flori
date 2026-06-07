@@ -158,6 +158,45 @@ class TestPathTraversal:
         assert resp.status_code == 404
 
 
+class TestGetStepLog:
+    @pytest.mark.asyncio
+    async def test_log_not_found(self, client):
+        resp = await client.get("/api/jobs/j_nope/steps/A/log")
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_log_truncated_by_default(self, client, test_config):
+        job_id = "j_log_trunc"
+        log_dir = test_config.jobs_dir / job_id / "logs"
+        log_dir.mkdir(parents=True)
+        big = ("x" * 1000 + "\n") * 400  # ~400KB > 256KB
+        (log_dir / "A.log").write_text(big)
+
+        resp = await client.get(f"/api/jobs/{job_id}/steps/A/log")
+        assert resp.status_code == 200
+        text = resp.text
+        assert "truncated" in text
+        assert len(text.encode("utf-8")) < len(big.encode("utf-8"))
+
+    @pytest.mark.asyncio
+    async def test_log_raw_not_truncated(self, client, test_config):
+        job_id = "j_log_raw"
+        log_dir = test_config.jobs_dir / job_id / "logs"
+        log_dir.mkdir(parents=True)
+        big = ("x" * 1000 + "\n") * 400  # ~400KB > 256KB
+        (log_dir / "A.log").write_text(big)
+
+        resp = await client.get(f"/api/jobs/{job_id}/steps/A/log?raw=1")
+        assert resp.status_code == 200
+        assert "truncated" not in resp.text
+        assert resp.text == big
+
+    @pytest.mark.asyncio
+    async def test_log_step_path_traversal_rejected(self, client):
+        resp = await client.get("/api/jobs/j1/steps/..%2F..%2Fsecret/log")
+        assert resp.status_code in (400, 404, 422)
+
+
 class TestRetryRerunResubmit:
     @pytest.mark.asyncio
     async def test_retry_non_failed(self, client):

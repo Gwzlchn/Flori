@@ -17,3 +17,9 @@ pools:
 exclusive_groups:
   cpu_bound:
     scene_acquires_all_cpu: true
+
+# Worker 在线判定窗口（后端权威，全栈共用一套阈值）。
+worker_status:
+  heartbeat_interval_sec: 10   # worker 端心跳节拍
+  online_window_sec: 30        # 3x 心跳，容忍丢两拍仍判在线
+  stale_window_sec: 900        # 15min 仍无心跳判 stale，供 GC 回收僵尸

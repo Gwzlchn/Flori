@@ -12,7 +12,7 @@ import os
 import shutil
 import socket
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
@@ -100,7 +100,7 @@ class Worker:
         await self.transport.register(
             worker_id=self.worker_id, worker_type=self.worker_type,
             pools=self.pools, tags=self.tags, reject_tags=self.reject_tags,
-            hostname=socket.gethostname(), now=datetime.now(),
+            hostname=socket.gethostname(), now=datetime.now(timezone.utc),
         )
 
     async def heartbeat_loop(self) -> None:
@@ -240,8 +240,8 @@ class Worker:
                 })
                 await self.transport.update_step_result(
                     job_id, step, status="done", worker_id=self.worker_id,
-                    started_at=datetime.fromtimestamp(start),
-                    finished_at=datetime.now(),
+                    started_at=datetime.fromtimestamp(start, timezone.utc),
+                    finished_at=datetime.now(timezone.utc),
                     duration_sec=round(duration, 1),
                 )
                 await self.transport.increment_worker_stats(
@@ -266,8 +266,8 @@ class Worker:
                 await self.transport.update_step_result(
                     job_id, step, status="failed", error=error_msg,
                     worker_id=self.worker_id,
-                    started_at=datetime.fromtimestamp(start),
-                    finished_at=datetime.now(),
+                    started_at=datetime.fromtimestamp(start, timezone.utc),
+                    finished_at=datetime.now(timezone.utc),
                     duration_sec=round(duration, 1),
                 )
                 await self.transport.increment_worker_stats(self.worker_id, failed=1)
@@ -290,8 +290,8 @@ class Worker:
             await self.transport.update_step_result(
                 job_id, step, status="failed", error="timeout",
                 worker_id=self.worker_id,
-                started_at=datetime.fromtimestamp(start),
-                finished_at=datetime.now(),
+                started_at=datetime.fromtimestamp(start, timezone.utc),
+                finished_at=datetime.now(timezone.utc),
                 duration_sec=round(duration, 1),
             )
             logger.warning(
@@ -310,8 +310,8 @@ class Worker:
             await self.transport.update_step_result(
                 job_id, step, status="failed", error=error_msg,
                 worker_id=self.worker_id,
-                started_at=datetime.fromtimestamp(start),
-                finished_at=datetime.now(),
+                started_at=datetime.fromtimestamp(start, timezone.utc),
+                finished_at=datetime.now(timezone.utc),
                 duration_sec=round(duration, 1),
             )
             logger.exception(
@@ -353,46 +353,59 @@ class Worker:
             env=env,
         )
 
+        # 运行中即可见:边读管道边追加到 logs/{step}.log(stdout/stderr 合一,带前缀)。
+        log_dir = work_dir / "logs"
+        log_dir.mkdir(exist_ok=True)
+        log_path = log_dir / f"{step}.log"
+        log_file = log_path.open("w", encoding="utf-8")
+        stderr_tail: list[str] = []
+
+        async def _drain(stream: asyncio.StreamReader, prefix: str) -> None:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                text = line.decode(errors="replace")
+                log_file.write(prefix + text if prefix else text)
+                log_file.flush()
+                if prefix:
+                    stderr_tail.append(text)
+                    if len(stderr_tail) > 50:
+                        del stderr_tail[0]
+
         monitor_task = asyncio.create_task(
             self._progress_monitor(job_id, step, work_dir, proc)
         )
+        drain_task = asyncio.gather(
+            _drain(proc.stdout, ""),
+            _drain(proc.stderr, "[stderr] "),
+        )
 
-        stdout = b""
-        stderr = b""
         timed_out = False
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout,
-            )
+            await asyncio.wait_for(asyncio.shield(drain_task), timeout=timeout)
+            await proc.wait()
         except asyncio.TimeoutError:
             timed_out = True
             proc.kill()
             await proc.wait()
+            await drain_task
         finally:
             monitor_task.cancel()
             try:
                 await monitor_task
             except asyncio.CancelledError:
                 pass
+            if timed_out:
+                log_file.write(f"\n--- TIMEOUT after {timeout}s ---\n")
+            log_file.flush()
+            log_file.close()
             config_path.unlink(missing_ok=True)
-
-        # 始终写步骤日志(成功/失败/超时),调用方随后推回存储,便于远程排错。
-        log_dir = work_dir / "logs"
-        log_dir.mkdir(exist_ok=True)
-        log_content = ""
-        if stdout:
-            log_content += stdout.decode(errors="replace")
-        if stderr:
-            log_content += "\n--- STDERR ---\n" + stderr.decode(errors="replace")
-        if timed_out:
-            log_content += f"\n--- TIMEOUT after {timeout}s ---\n"
-        if log_content:
-            (log_dir / f"{step}.log").write_text(log_content)
 
         if timed_out:
             raise asyncio.TimeoutError()
 
-        return proc.returncode, stderr.decode(errors="replace") if stderr else ""
+        return proc.returncode, "".join(stderr_tail)
 
     async def _progress_monitor(
         self,
@@ -401,12 +414,16 @@ class Worker:
         work_dir: Path,
         proc: asyncio.subprocess.Process,
     ) -> None:
-        """每 10s 写 worker_heartbeat_at + 转发步骤进度事件。
-        不覆盖步骤自己写的 updated_at，否则 check_stuck 失效。"""
+        """每 10s 写 worker_heartbeat_at、续约 busy 状态、把运行中日志推回存储 +
+        转发步骤进度事件。不覆盖步骤自己写的 updated_at，否则 check_stuck 失效。"""
         progress_file = work_dir / f".{step}.progress"
 
         while proc.returncode is None:
             await asyncio.sleep(10)
+
+            # 续约:让 DB/Redis 里的 "当前 task" 秒级新鲜,scheduler 据此回收僵尸 worker。
+            await self.transport.update_status(self.worker_id, "busy", job_id, step)
+            await self._push_step_log(job_id, step, work_dir)
 
             progress_data: dict = {}
             if progress_file.exists():
@@ -427,6 +444,27 @@ class Worker:
                     "pct": progress_data.get("pct", 0),
                     "message": progress_data.get("message", ""),
                 })
+
+    async def _push_step_log(self, job_id: str, step: str, work_dir: Path) -> None:
+        """把运行中日志推回存储,供前端准实时拉取。超阈值只推尾部,失败不致命。"""
+        log_path = work_dir / "logs" / f"{step}.log"
+        if not log_path.is_file():
+            return
+        try:
+            tail_bytes = 256 * 1024
+            size = log_path.stat().st_size
+            if size > tail_bytes:
+                with log_path.open("rb") as f:
+                    f.seek(size - tail_bytes)
+                    data = b"...(truncated)...\n" + f.read()
+            else:
+                data = log_path.read_bytes()
+            await self.storage.write_file(job_id, f"logs/{step}.log", data)
+        except Exception:
+            logger.warning(
+                "step_log_push_failed", worker_id=self.worker_id,
+                job_id=job_id, step=step,
+            )
 
     # ── 工具方法 ──
 
