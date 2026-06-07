@@ -21,6 +21,7 @@ from shared.ai_gateway import collect_usage_from_file
 from shared.config import AppConfig, build_step_config
 from shared.models import generate_worker_id
 from shared.storage import StorageBackend
+from worker.step_runner import StepContext, create_step_runner
 from worker.transport import WorkerTransport
 
 logger = structlog.get_logger(component="worker")
@@ -69,6 +70,7 @@ class Worker:
         self.reject_tags = reject_tags
         self.idle_timeout = int(os.environ.get("IDLE_TIMEOUT", "0"))
         self._shutdown = False
+        self.runner = create_step_runner(self.worker_id)
 
     # ── 生命周期 ──
 
@@ -217,11 +219,29 @@ class Worker:
             if raw is None:
                 raise ValueError(f"step '{step}' not found in pipeline '{pipeline}'")
             module = raw["module"]
+            image = raw.get("image", "mnemo/step-base")
+            use_gpu = ("gpu" in self.tags) and (
+                pool == "gpu" or "gpu" in set(raw.get("tags", []))
+            )
+            ctx = StepContext(
+                job_id=job_id, step=step, work_dir=work_dir, exec_id=exec_id,
+                step_cfg=step_cfg, module=module, image=image,
+                timeout_sec=step_cfg["step"]["timeout_sec"],
+                pool=pool, use_gpu=use_gpu,
+            )
+
+            async def on_progress(event: str, payload: dict) -> None:
+                await self.transport.publish_step_event(
+                    f"events:{job_id}", {"event": event, **payload},
+                )
+
+            async def on_tick() -> None:
+                # 续约:让 DB/Redis 里的 "当前 task" 秒级新鲜 + 推送运行中日志。
+                await self.transport.update_status(self.worker_id, "busy", job_id, step)
+                await self._push_step_log(job_id, step, work_dir)
 
             try:
-                returncode, stderr = await self._run_step(
-                    job_id, step, work_dir, exec_id, step_cfg, module,
-                )
+                returncode, stderr = await self.runner.run_step(ctx, on_progress, on_tick)
             finally:
                 # 不论成功/失败/超时,都把本步产物(含日志)推回存储,失败也能在前端看日志排错。
                 await self._push_safe(job_id, step, work_dir)
@@ -327,123 +347,7 @@ class Worker:
                 await self.transport.unfreeze_pool("cpu")
             await self.transport.update_status(self.worker_id, "idle")
 
-    # ── 子进程执行 ──
-
-    async def _run_step(
-        self,
-        job_id: str,
-        step: str,
-        work_dir: Path,
-        exec_id: str,
-        step_cfg: dict,
-        module: str,
-    ) -> tuple[int, str]:
-        config_path = work_dir / f".{step}.config.json"
-        config_path.write_text(json.dumps(step_cfg, ensure_ascii=False, indent=2))
-
-        timeout = step_cfg["step"]["timeout_sec"]
-        env = {**os.environ, "STEP_EXEC_ID": exec_id}
-
-        proc = await asyncio.create_subprocess_exec(
-            "python3", "-m", module,
-            "--job-dir", str(work_dir),
-            "--step-config", str(config_path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-
-        # 运行中即可见:边读管道边追加到 logs/{step}.log(stdout/stderr 合一,带前缀)。
-        log_dir = work_dir / "logs"
-        log_dir.mkdir(exist_ok=True)
-        log_path = log_dir / f"{step}.log"
-        log_file = log_path.open("w", encoding="utf-8")
-        stderr_tail: list[str] = []
-
-        async def _drain(stream: asyncio.StreamReader, prefix: str) -> None:
-            while True:
-                line = await stream.readline()
-                if not line:
-                    break
-                text = line.decode(errors="replace")
-                log_file.write(prefix + text if prefix else text)
-                log_file.flush()
-                if prefix:
-                    stderr_tail.append(text)
-                    if len(stderr_tail) > 50:
-                        del stderr_tail[0]
-
-        monitor_task = asyncio.create_task(
-            self._progress_monitor(job_id, step, work_dir, proc)
-        )
-        drain_task = asyncio.gather(
-            _drain(proc.stdout, ""),
-            _drain(proc.stderr, "[stderr] "),
-        )
-
-        timed_out = False
-        try:
-            await asyncio.wait_for(asyncio.shield(drain_task), timeout=timeout)
-            await proc.wait()
-        except asyncio.TimeoutError:
-            timed_out = True
-            proc.kill()
-            await proc.wait()
-            await drain_task
-        finally:
-            monitor_task.cancel()
-            try:
-                await monitor_task
-            except asyncio.CancelledError:
-                pass
-            if timed_out:
-                log_file.write(f"\n--- TIMEOUT after {timeout}s ---\n")
-            log_file.flush()
-            log_file.close()
-            config_path.unlink(missing_ok=True)
-
-        if timed_out:
-            raise asyncio.TimeoutError()
-
-        return proc.returncode, "".join(stderr_tail)
-
-    async def _progress_monitor(
-        self,
-        job_id: str,
-        step: str,
-        work_dir: Path,
-        proc: asyncio.subprocess.Process,
-    ) -> None:
-        """每 10s 写 worker_heartbeat_at、续约 busy 状态、把运行中日志推回存储 +
-        转发步骤进度事件。不覆盖步骤自己写的 updated_at，否则 check_stuck 失效。"""
-        progress_file = work_dir / f".{step}.progress"
-
-        while proc.returncode is None:
-            await asyncio.sleep(10)
-
-            # 续约:让 DB/Redis 里的 "当前 task" 秒级新鲜,scheduler 据此回收僵尸 worker。
-            await self.transport.update_status(self.worker_id, "busy", job_id, step)
-            await self._push_step_log(job_id, step, work_dir)
-
-            progress_data: dict = {}
-            if progress_file.exists():
-                try:
-                    progress_data = json.loads(progress_file.read_text())
-                except (json.JSONDecodeError, OSError):
-                    pass
-
-            progress_data["worker_heartbeat_at"] = time.time()
-            progress_file.write_text(json.dumps(progress_data))
-
-            if "current" in progress_data and "total" in progress_data:
-                await self.transport.publish_step_event(f"events:{job_id}", {
-                    "event": "step_progress",
-                    "step": step,
-                    "current": progress_data["current"],
-                    "total": progress_data["total"],
-                    "pct": progress_data.get("pct", 0),
-                    "message": progress_data.get("message", ""),
-                })
+    # ── 运行中日志推送 ──
 
     async def _push_step_log(self, job_id: str, step: str, work_dir: Path) -> None:
         """把运行中日志推回存储,供前端准实时拉取。超阈值只推尾部,失败不致命。"""

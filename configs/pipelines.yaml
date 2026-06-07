@@ -2,6 +2,7 @@ video:
   steps:
     - name: "00_download"
       module: steps.common.step_00_download
+      image: mnemo/step-base
       pool: io
       depends_on: []
       timeout_sec: 600
@@ -9,6 +10,7 @@ video:
 
     - name: "00b_whisper"
       module: steps.video.step_00b_whisper
+      image: mnemo/step-gpu
       pool: gpu
       depends_on: ["00_download"]
       condition: "no_subtitle"
@@ -18,6 +20,7 @@ video:
 
     - name: "01_scene"
       module: steps.video.step_01_scene
+      image: mnemo/step-media
       pool: scene
       depends_on: ["00_download"]
       timeout_sec: 600
@@ -25,6 +28,7 @@ video:
 
     - name: "02_frames"
       module: steps.video.step_02_frames
+      image: mnemo/step-media
       pool: cpu
       depends_on: ["01_scene"]
       timeout_sec: 120
@@ -32,6 +36,7 @@ video:
 
     - name: "03_dedup"
       module: steps.video.step_03_dedup
+      image: mnemo/step-media
       pool: cpu
       depends_on: ["02_frames"]
       timeout_sec: 120
@@ -39,6 +44,7 @@ video:
 
     - name: "04_ocr"
       module: steps.video.step_04_ocr
+      image: mnemo/step-ocr
       pool: cpu
       depends_on: ["03_dedup"]
       # CPU RapidOCR 逐帧扫描，每帧约 2-3.5s，一段长视频可达数百帧，需大超时。
@@ -48,6 +54,7 @@ video:
 
     - name: "05_danmaku"
       module: steps.video.step_05_danmaku
+      image: mnemo/step-base
       pool: io
       depends_on: ["00_download"]
       condition: "has_danmaku"
@@ -56,6 +63,7 @@ video:
 
     - name: "06_punctuate"
       module: steps.video.step_06_punctuate
+      image: mnemo/step-base
       pool: ai
       depends_on: ["00_download"]
       condition: "has_subtitle"
@@ -68,6 +76,7 @@ video:
 
     - name: "07_mechanical"
       module: steps.video.step_07_mechanical
+      image: mnemo/step-base
       pool: io
       depends_on: ["04_ocr", "05_danmaku", "06_punctuate"]
       timeout_sec: 30
@@ -75,6 +84,7 @@ video:
 
     - name: "08_smart"
       module: steps.video.step_08_smart
+      image: mnemo/step-base
       pool: ai
       depends_on: ["07_mechanical"]
       timeout_sec: 600
@@ -87,6 +97,7 @@ video:
 
     - name: "09_review"
       module: steps.video.step_09_review
+      image: mnemo/step-base
       pool: ai
       depends_on: ["08_smart"]
       timeout_sec: 120
@@ -100,6 +111,7 @@ paper:
   steps:
     - name: "00_download"
       module: steps.common.step_00_download
+      image: mnemo/step-base
       pool: io
       depends_on: []
       timeout_sec: 300
@@ -107,6 +119,7 @@ paper:
 
     - name: "10_pdf_parse"
       module: steps.paper.step_10_pdf_parse
+      image: mnemo/step-pdf
       pool: cpu
       depends_on: ["00_download"]
       timeout_sec: 120
@@ -114,6 +127,7 @@ paper:
 
     - name: "11_sections"
       module: steps.paper.step_11_sections
+      image: mnemo/step-base
       pool: cpu
       depends_on: ["10_pdf_parse"]
       timeout_sec: 60
@@ -121,6 +135,7 @@ paper:
 
     - name: "12_figures"
       module: steps.paper.step_12_figures
+      image: mnemo/step-pdf
       pool: cpu
       depends_on: ["10_pdf_parse"]
       timeout_sec: 120
@@ -128,6 +143,7 @@ paper:
 
     - name: "14_smart_paper"
       module: steps.paper.step_14_smart_paper
+      image: mnemo/step-base
       pool: ai
       depends_on: ["11_sections", "12_figures"]
       timeout_sec: 600
@@ -139,6 +155,7 @@ paper:
 
     - name: "15_review"
       module: steps.paper.step_15_review
+      image: mnemo/step-base
       pool: ai
       depends_on: ["14_smart_paper"]
       timeout_sec: 120
