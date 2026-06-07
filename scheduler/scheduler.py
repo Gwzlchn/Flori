@@ -360,8 +360,8 @@ class Scheduler:
             if not all(statuses.get(d) in ("done", "skipped") for d in deps):
                 continue
 
-            condition = cfg.get("condition")
-            if condition and not await self.check_condition(job_id, condition):
+            conditional = self._step_is_conditional(cfg)
+            if conditional and not await self._eval_step_condition(job_id, cfg):
                 if status == "waiting":
                     await self.redis.set_step_status(job_id, name, "skipped")
                     await asyncio.to_thread(
@@ -374,7 +374,7 @@ class Scheduler:
                 continue
 
             if status == "skipped":
-                if not condition:
+                if not conditional:
                     continue
                 ok = await self.redis.cas_step_status(job_id, name, "skipped", "ready")
                 if not ok:
@@ -477,6 +477,48 @@ class Scheduler:
             return True
 
         return await asyncio.to_thread(_check)
+
+    def _step_is_conditional(self, cfg: dict) -> bool:
+        """step 是否带跳过条件：旧 condition 字符串或声明式 rules 均算。"""
+        return bool(cfg.get("condition") or cfg.get("rules"))
+
+    async def _eval_step_condition(self, job_id: str, cfg: dict) -> bool:
+        """求值 step 是否应运行：优先旧 condition（行为不变），否则用声明式 rules。"""
+        condition = cfg.get("condition")
+        if condition:
+            return await self.check_condition(job_id, condition)
+        rules = cfg.get("rules")
+        if rules:
+            return await self._eval_rules(job_id, rules)
+        return True
+
+    async def _eval_rules(self, job_id: str, rules: list) -> bool:
+        """声明式 rules 求值器：自上而下首条命中生效，命中 when=skip 则跳过，
+        当前支持 exists(相对 job_dir 的 glob)，无命中默认运行。"""
+        job_dir = self.jobs_dir / job_id
+
+        def _when(rule: dict) -> str:
+            when = rule.get("when", "on")
+            if when is True:
+                return "on"
+            if when is False:
+                return "skip"
+            return str(when)
+
+        def _eval() -> bool:
+            for rule in rules:
+                if not isinstance(rule, dict):
+                    continue
+                glob = rule.get("exists")
+                if glob is not None:
+                    hit = bool(list(job_dir.glob(glob))) if job_dir.exists() else False
+                    if not hit:
+                        continue
+                # exists 命中、或无 exists 的兜底规则：本条生效。
+                return _when(rule) != "skip"
+            return True
+
+        return await asyncio.to_thread(_eval)
 
     async def mark_skipped(self, job_id: str, step: str) -> None:
         await self.redis.set_step_status(job_id, step, "skipped")

@@ -10,7 +10,10 @@ from shared.config import (
     build_step_config,
     load_config,
     load_domain_profile,
+    load_pipelines,
     load_yaml,
+    normalize_pipeline,
+    normalize_pipelines,
     resolve_env_vars,
 )
 
@@ -138,3 +141,63 @@ class TestBuildStepConfig:
         cfg = load_config(config_dir=configs_dir, data_dir=tmp_data_dir)
         with pytest.raises(StopIteration):
             build_step_config(cfg, "video", "nonexistent_step")
+
+
+class TestNormalizePipelineLegacy:
+    """旧 list 格式经归一化保持原状（仅补 image/depends_on 默认值），契约不变。"""
+
+    def test_legacy_list_passthrough(self):
+        raw = {"steps": [{"name": "A", "module": "m.a", "pool": "cpu",
+                          "depends_on": [], "timeout_sec": 60, "retries": 1}]}
+        out = normalize_pipeline(raw)
+        steps = out["steps"]
+        assert isinstance(steps, list)
+        s = steps[0]
+        assert s["name"] == "A"
+        assert s["module"] == "m.a"
+        assert s["pool"] == "cpu"
+        assert s["timeout_sec"] == 60
+        assert s["retries"] == 1
+        # 旧格式无 image 时归一化补 worker 默认镜像。
+        assert s["image"] == "mnemo/step-base"
+
+    def test_legacy_image_preserved(self):
+        raw = {"steps": [{"name": "A", "module": "m.a", "pool": "gpu",
+                          "image": "mnemo/step-gpu", "depends_on": []}]}
+        s = normalize_pipeline(raw)["steps"][0]
+        assert s["image"] == "mnemo/step-gpu"
+
+
+class TestLoadPipelinesShape:
+    """加载后 pipelines[name]['steps'] 仍是 list[dict]，worker/scheduler 契约不变。"""
+
+    def test_steps_is_list_of_dicts(self, configs_dir):
+        p = load_pipelines(configs_dir / "pipelines.yaml")
+        assert isinstance(p["video"]["steps"], list)
+        assert isinstance(p["paper"]["steps"], list)
+        for s in p["video"]["steps"]:
+            assert isinstance(s, dict)
+            for key in ("name", "module", "image", "pool", "depends_on"):
+                assert key in s
+
+    def test_every_step_has_image(self, configs_dir):
+        p = load_pipelines(configs_dir / "pipelines.yaml")
+        for pl in ("video", "paper"):
+            for s in p[pl]["steps"]:
+                assert s["image"], f"{pl}/{s['name']} 缺少 image"
+
+    def test_legacy_conditions_preserved(self, configs_dir):
+        p = load_pipelines(configs_dir / "pipelines.yaml")
+        by_name = {s["name"]: s for s in p["video"]["steps"]}
+        assert by_name["00b_whisper"]["condition"] == "no_subtitle"
+        assert by_name["05_danmaku"]["condition"] == "has_danmaku"
+        assert by_name["06_punctuate"]["condition"] == "has_subtitle"
+
+    def test_ocr_timeout_single_source(self, configs_dir):
+        """04_ocr 的超时来自 variables 单一事实源，归一化后为整型 1800。"""
+        p = load_pipelines(configs_dir / "pipelines.yaml")
+        ocr = next(s for s in p["video"]["steps"] if s["name"] == "04_ocr")
+        assert ocr["timeout_sec"] == 1800
+        assert isinstance(ocr["timeout_sec"], int)
+        assert ocr["retries"] == 1
+

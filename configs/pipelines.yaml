@@ -1,166 +1,191 @@
-video:
-  steps:
-    - name: "00_download"
-      module: steps.common.step_00_download
-      image: mnemo/step-base
-      pool: io
-      depends_on: []
-      timeout_sec: 600
-      retries: 3
+# GitLab-CI 风格流水线：变量/模板(extends)/needs/rules 在加载时归一化为内部 step 结构。
+# 顺序由 needs 决定；prod↔integration 的差异退化为 integration 文件里一份 variables 覆盖。
 
-    - name: "00b_whisper"
-      module: steps.video.step_00b_whisper
+# 全局默认：所有 job 自动继承、可逐字段覆盖。
+default:
+  image: mnemo/step-base
+  timeout: 600
+  retry: 0
+
+# 隐藏模板（'.' 前缀，不直接运行）：同类步只写差异，extends 按键深合并。
+.cpu-step:
+  pool: cpu
+  timeout: 120
+  retry: 1
+
+.ai-step:
+  pool: ai
+  timeout: 600
+  retry: 2
+
+.review:
+  pool: ai
+  timeout: 120
+  retry: 2
+
+video:
+  variables:
+    # OCR 单一事实源：CPU 逐帧扫描需大超时；超时是工作量过大而非瞬时抖动，故少重试。
+    OCR_TIMEOUT: 1800
+    OCR_RETRIES: 1
+    AI_SMART_PRIMARY_PROVIDER: anthropic
+    AI_SMART_PRIMARY_MODEL: claude-sonnet-4-6
+    AI_SMART_FALLBACK_PROVIDER: openai
+    AI_SMART_FALLBACK_MODEL: gpt-4o
+    AI_SMART_TEXT_PROVIDER: deepseek
+    AI_SMART_TEXT_MODEL: deepseek-v4-pro
+    AI_REVIEW_PRIMARY_PROVIDER: anthropic
+    AI_REVIEW_PRIMARY_MODEL: claude-haiku-4-5
+    AI_REVIEW_FALLBACK_PROVIDER: deepseek
+    AI_REVIEW_FALLBACK_MODEL: deepseek-v4-flash
+    AI_PUNCT_PRIMARY_PROVIDER: deepseek
+    AI_PUNCT_PRIMARY_MODEL: deepseek-v4-flash
+    AI_PUNCT_FALLBACK_PROVIDER: local
+    AI_PUNCT_FALLBACK_MODEL: "qwen3:7b"
+  jobs:
+    "00_download":
+      run: steps.common.step_00_download
+      pool: io
+      retry: 3
+
+    "00b_whisper":
+      run: steps.video.step_00b_whisper
       image: mnemo/step-gpu
       pool: gpu
-      depends_on: ["00_download"]
-      condition: "no_subtitle"
-      timeout_sec: 1800
-      retries: 2
+      needs: ["00_download"]
+      timeout: 1800
+      retry: 2
       tags: ["gpu"]
+      rules:
+        - exists: "input/*.srt"
+          when: skip
 
-    - name: "01_scene"
-      module: steps.video.step_01_scene
+    "01_scene":
+      run: steps.video.step_01_scene
       image: mnemo/step-media
       pool: scene
-      depends_on: ["00_download"]
-      timeout_sec: 600
-      retries: 2
+      needs: ["00_download"]
+      retry: 2
 
-    - name: "02_frames"
-      module: steps.video.step_02_frames
+    "02_frames":
+      extends: .cpu-step
+      run: steps.video.step_02_frames
       image: mnemo/step-media
-      pool: cpu
-      depends_on: ["01_scene"]
-      timeout_sec: 120
-      retries: 1
+      needs: ["01_scene"]
 
-    - name: "03_dedup"
-      module: steps.video.step_03_dedup
+    "03_dedup":
+      extends: .cpu-step
+      run: steps.video.step_03_dedup
       image: mnemo/step-media
-      pool: cpu
-      depends_on: ["02_frames"]
-      timeout_sec: 120
-      retries: 1
+      needs: ["02_frames"]
 
-    - name: "04_ocr"
-      module: steps.video.step_04_ocr
+    "04_ocr":
+      extends: .cpu-step
+      run: steps.video.step_04_ocr
       image: mnemo/step-ocr
-      pool: cpu
-      depends_on: ["03_dedup"]
-      # CPU RapidOCR 逐帧扫描，每帧约 2-3.5s，一段长视频可达数百帧，需大超时。
-      timeout_sec: 1800
-      # OCR 超时是工作量过大而非瞬时抖动，重试只会重跑全程（无逐帧续跑），故少重试。
-      retries: 1
+      needs: ["03_dedup"]
+      timeout: $OCR_TIMEOUT
+      retry: $OCR_RETRIES
 
-    - name: "05_danmaku"
-      module: steps.video.step_05_danmaku
-      image: mnemo/step-base
+    "05_danmaku":
+      run: steps.video.step_05_danmaku
       pool: io
-      depends_on: ["00_download"]
-      condition: "has_danmaku"
-      timeout_sec: 30
-      retries: 1
+      needs: ["00_download"]
+      timeout: 30
+      retry: 1
+      rules:
+        - exists: "input/*.ass"
+          when: on
 
-    - name: "06_punctuate"
-      module: steps.video.step_06_punctuate
-      image: mnemo/step-base
-      pool: ai
-      depends_on: ["00_download"]
-      condition: "has_subtitle"
-      timeout_sec: 300
-      retries: 3
+    "06_punctuate":
+      extends: .ai-step
+      run: steps.video.step_06_punctuate
+      needs: ["00_download"]
+      timeout: 300
+      retry: 3
       tags: []
+      rules:
+        - exists: "input/*.srt"
+          when: on
       ai:
-        primary: {provider: deepseek, model: deepseek-v4-flash}
-        fallback: {provider: local, model: "qwen3:7b"}
+        primary: {provider: $AI_PUNCT_PRIMARY_PROVIDER, model: $AI_PUNCT_PRIMARY_MODEL}
+        fallback: {provider: $AI_PUNCT_FALLBACK_PROVIDER, model: $AI_PUNCT_FALLBACK_MODEL}
 
-    - name: "07_mechanical"
-      module: steps.video.step_07_mechanical
-      image: mnemo/step-base
+    "07_mechanical":
+      run: steps.video.step_07_mechanical
       pool: io
-      depends_on: ["04_ocr", "05_danmaku", "06_punctuate"]
-      timeout_sec: 30
-      retries: 1
+      needs: ["04_ocr", "05_danmaku", "06_punctuate"]
+      timeout: 30
+      retry: 1
 
-    - name: "08_smart"
-      module: steps.video.step_08_smart
-      image: mnemo/step-base
-      pool: ai
-      depends_on: ["07_mechanical"]
-      timeout_sec: 600
-      retries: 2
+    "08_smart":
+      extends: .ai-step
+      run: steps.video.step_08_smart
+      needs: ["07_mechanical"]
       tags: ["vision"]
       ai:
-        primary: {provider: anthropic, model: claude-sonnet-4-6}
-        fallback: {provider: openai, model: gpt-4o}
-        text_fallback: {provider: deepseek, model: deepseek-v4-pro}
+        primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
+        fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
+        text_fallback: {provider: $AI_SMART_TEXT_PROVIDER, model: $AI_SMART_TEXT_MODEL}
 
-    - name: "09_review"
-      module: steps.video.step_09_review
-      image: mnemo/step-base
-      pool: ai
-      depends_on: ["08_smart"]
-      timeout_sec: 120
-      retries: 2
+    "09_review":
+      extends: .review
+      run: steps.video.step_09_review
+      needs: ["08_smart"]
       tags: []
       ai:
-        primary: {provider: anthropic, model: claude-haiku-4-5}
-        fallback: {provider: deepseek, model: deepseek-v4-flash}
+        primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
+        fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
 
 paper:
-  steps:
-    - name: "00_download"
-      module: steps.common.step_00_download
-      image: mnemo/step-base
+  variables:
+    AI_SMART_PRIMARY_PROVIDER: anthropic
+    AI_SMART_PRIMARY_MODEL: claude-sonnet-4-6
+    AI_SMART_FALLBACK_PROVIDER: deepseek
+    AI_SMART_FALLBACK_MODEL: deepseek-v4-pro
+    AI_REVIEW_PRIMARY_PROVIDER: anthropic
+    AI_REVIEW_PRIMARY_MODEL: claude-haiku-4-5
+    AI_REVIEW_FALLBACK_PROVIDER: deepseek
+    AI_REVIEW_FALLBACK_MODEL: deepseek-v4-flash
+  jobs:
+    "00_download":
+      run: steps.common.step_00_download
       pool: io
-      depends_on: []
-      timeout_sec: 300
-      retries: 3
+      timeout: 300
+      retry: 3
 
-    - name: "10_pdf_parse"
-      module: steps.paper.step_10_pdf_parse
+    "10_pdf_parse":
+      extends: .cpu-step
+      run: steps.paper.step_10_pdf_parse
       image: mnemo/step-pdf
-      pool: cpu
-      depends_on: ["00_download"]
-      timeout_sec: 120
-      retries: 1
+      needs: ["00_download"]
 
-    - name: "11_sections"
-      module: steps.paper.step_11_sections
-      image: mnemo/step-base
-      pool: cpu
-      depends_on: ["10_pdf_parse"]
-      timeout_sec: 60
-      retries: 1
+    "11_sections":
+      extends: .cpu-step
+      run: steps.paper.step_11_sections
+      needs: ["10_pdf_parse"]
+      timeout: 60
 
-    - name: "12_figures"
-      module: steps.paper.step_12_figures
+    "12_figures":
+      extends: .cpu-step
+      run: steps.paper.step_12_figures
       image: mnemo/step-pdf
-      pool: cpu
-      depends_on: ["10_pdf_parse"]
-      timeout_sec: 120
-      retries: 1
+      needs: ["10_pdf_parse"]
 
-    - name: "14_smart_paper"
-      module: steps.paper.step_14_smart_paper
-      image: mnemo/step-base
-      pool: ai
-      depends_on: ["11_sections", "12_figures"]
-      timeout_sec: 600
-      retries: 2
+    "14_smart_paper":
+      extends: .ai-step
+      run: steps.paper.step_14_smart_paper
+      needs: ["11_sections", "12_figures"]
       tags: []
       ai:
-        primary: {provider: anthropic, model: claude-sonnet-4-6}
-        fallback: {provider: deepseek, model: deepseek-v4-pro}
+        primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
+        fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
 
-    - name: "15_review"
-      module: steps.paper.step_15_review
-      image: mnemo/step-base
-      pool: ai
-      depends_on: ["14_smart_paper"]
-      timeout_sec: 120
-      retries: 2
+    "15_review":
+      extends: .review
+      run: steps.paper.step_15_review
+      needs: ["14_smart_paper"]
       tags: []
       ai:
-        primary: {provider: anthropic, model: claude-haiku-4-5}
-        fallback: {provider: deepseek, model: deepseek-v4-flash}
+        primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
+        fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}

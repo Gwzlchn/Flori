@@ -74,9 +74,9 @@ def parallel_pipelines():
 
 @pytest.fixture
 def video_pipelines(configs_dir):
-    """使用真实 pipelines.yaml"""
-    from shared.config import load_yaml
-    return load_yaml(configs_dir / "pipelines.yaml")
+    """使用真实 pipelines.yaml（归一化为内部 step 结构）"""
+    from shared.config import load_pipelines
+    return load_pipelines(configs_dir / "pipelines.yaml")
 
 
 @pytest.fixture
@@ -443,6 +443,116 @@ class TestWhisperPunctuateRecheck:
         await sched.on_step_done("j_test_001", "00b_whisper")
 
         assert await redis.get_step_status("j_test_001", "06_punctuate") == "ready"
+
+
+class TestNewFormatConsumption:
+    """调度器消费归一化后的新格式（needs→DAG、rules→skip/run）：行为与旧格式等价。"""
+
+    def _normalized(self, raw_new):
+        from shared.config import normalize_pipelines
+        return normalize_pipelines(raw_new)
+
+    @pytest.mark.asyncio
+    async def test_needs_produce_dag_order(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir
+    ):
+        # needs 声明的依赖边归一化为 depends_on，调度器据此推进 DAG。
+        raw_new = {
+            "default": {"image": "mnemo/step-base"},
+            "nf": {
+                "jobs": {
+                    "A": {"run": "m.a", "pool": "cpu"},
+                    "B": {"run": "m.b", "pool": "cpu", "needs": ["A"]},
+                    "C": {"run": "m.c", "pool": "cpu", "needs": ["B"]},
+                }
+            },
+        }
+        config = make_config(tmp_path, tmp_jobs_dir, self._normalized(raw_new), configs_dir)
+        sched = _stub_workers_present(Scheduler(redis, db, config))
+
+        job = make_job(pipeline="nf")
+        db.create_job(job)
+        await sched.submit_job(job)
+
+        assert await redis.get_step_status("j_test_001", "A") == "ready"
+        assert await redis.get_step_status("j_test_001", "B") == "waiting"
+
+        await redis.set_step_status("j_test_001", "A", "running")
+        await sched.on_step_done("j_test_001", "A")
+        assert await redis.get_step_status("j_test_001", "B") == "ready"
+        assert await redis.get_step_status("j_test_001", "C") == "waiting"
+
+    @pytest.mark.asyncio
+    async def test_rules_exists_skip_and_run(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir
+    ):
+        # rules: exists+when=skip → 有 srt 则跳过 whisper；exists+when=on → 有 srt 才跑 punctuate。
+        raw_new = {
+            "default": {"image": "mnemo/step-base"},
+            "nf": {
+                "jobs": {
+                    "download": {"run": "m.dl", "pool": "io"},
+                    "whisper": {
+                        "run": "m.ws", "pool": "gpu", "needs": ["download"],
+                        "rules": [{"exists": "input/*.srt", "when": "skip"}],
+                    },
+                    "punctuate": {
+                        "run": "m.pu", "pool": "ai", "needs": ["download"],
+                        "rules": [{"exists": "input/*.srt", "when": "on"}],
+                    },
+                }
+            },
+        }
+        config = make_config(tmp_path, tmp_jobs_dir, self._normalized(raw_new), configs_dir)
+        sched = _stub_workers_present(Scheduler(redis, db, config))
+
+        job = make_job(pipeline="nf")
+        db.create_job(job)
+        await sched.submit_job(job)
+
+        job_dir = tmp_jobs_dir / "j_test_001"
+        (job_dir / "input").mkdir(parents=True)
+        (job_dir / "input" / "subs.srt").write_text("srt")
+
+        await redis.set_step_status("j_test_001", "download", "running")
+        await sched.on_step_done("j_test_001", "download")
+
+        # 已有 srt：whisper(when=skip) 跳过，punctuate(when=on) 运行。
+        assert await redis.get_step_status("j_test_001", "whisper") == "skipped"
+        assert await redis.get_step_status("j_test_001", "punctuate") == "ready"
+
+    @pytest.mark.asyncio
+    async def test_rules_exists_run_when_no_match(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir
+    ):
+        # 无 srt：whisper(when=skip,未命中→默认运行) 运行，punctuate(when=on,未命中→默认运行?) 见下。
+        raw_new = {
+            "default": {"image": "mnemo/step-base"},
+            "nf": {
+                "jobs": {
+                    "download": {"run": "m.dl", "pool": "io"},
+                    "whisper": {
+                        "run": "m.ws", "pool": "gpu", "needs": ["download"],
+                        "rules": [{"exists": "input/*.srt", "when": "skip"}],
+                    },
+                }
+            },
+        }
+        config = make_config(tmp_path, tmp_jobs_dir, self._normalized(raw_new), configs_dir)
+        sched = _stub_workers_present(Scheduler(redis, db, config))
+
+        job = make_job(pipeline="nf")
+        db.create_job(job)
+        await sched.submit_job(job)
+
+        job_dir = tmp_jobs_dir / "j_test_001"
+        (job_dir / "input").mkdir(parents=True)  # 无 srt
+
+        await redis.set_step_status("j_test_001", "download", "running")
+        await sched.on_step_done("j_test_001", "download")
+
+        # 无 srt：whisper 的 skip 规则未命中 → 默认运行。
+        assert await redis.get_step_status("j_test_001", "whisper") == "ready"
 
 
 class TestRetry:
