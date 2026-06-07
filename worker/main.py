@@ -47,7 +47,7 @@ async def main() -> None:
 
     # 三种模式:
     #  1) GATEWAY_URL 未设(本地/单机):redis+db 直连,RedisTransport,本地/远端存储。
-    #  2) GATEWAY_URL 设 + REDIS_URL 设(混合/影子):redis+db 作内层兜底,产物走 gateway。
+    #  2) GATEWAY_URL 设 + REDIS_URL 设(混合):redis+db 作内层兜底,产物走 gateway。
     #  3) GATEWAY_URL 设 + REDIS_URL 未设(真零隧道):跳过 redis+db,只出站 HTTPS。
     redis: RedisClient | None = None
     db: Database | None = None

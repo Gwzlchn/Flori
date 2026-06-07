@@ -1,7 +1,7 @@
 """Worker：从资源池队列自取任务，执行步骤脚本，上报结果。
 
 worker 只依赖 WorkerTransport(协调/状态后端)与 StorageBackend(产物),不直连
-redis/db。P0-A 注入 RedisTransport(零行为变化);P1 起可换 GatewayTransport。
+redis/db。注入 RedisTransport(单机直连)或 GatewayTransport(出站 HTTPS)。
 """
 
 from __future__ import annotations

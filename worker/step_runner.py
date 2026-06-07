@@ -1,6 +1,6 @@
 """StepRunner：把步骤执行底座抽成可换实现，对齐 StorageBackend 的分流模式。
 
-SubprocessStepRunner 是默认实现（零行为变化）；DockerStepRunner 为每步一容器的草案，
+SubprocessStepRunner 是默认实现；DockerStepRunner 为每步一容器,
 由 STEP_RUNTIME=docker 启用。runner 只读写 work_dir，不连 Redis/DB/对象存储——
 控制面交互（状态续约、日志推送、事件发布）全经 worker 注入的回调。
 """
@@ -183,7 +183,7 @@ class SubprocessStepRunner:
 
 class DockerStepRunner:
     """每步一容器：work_dir bind-mount 到 /job，GPU 经 DeviceRequest，container.wait
-    + kill 复刻超时，labels 防泄漏。阶段0 不默认启用，仅须语法/导入安全。"""
+    + kill 复刻超时，labels 防泄漏。由 STEP_RUNTIME=docker 启用。"""
 
     def __init__(self, worker_id: str, host_work_root: str | None = None,
                  registry: str | None = None):

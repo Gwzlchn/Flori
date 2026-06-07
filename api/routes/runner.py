@@ -163,7 +163,7 @@ async def offline(
     return {"ok": True}
 
 
-# ── 认领 / 上报(P3b:服务端执行编排,gateway 模式 worker 无需直连 redis) ──
+# ── 认领 / 上报:服务端执行编排,gateway 模式 worker 无需直连 redis ──
 
 
 async def _enrich_claim(redis: RedisClient, claim: dict) -> dict:
@@ -302,7 +302,7 @@ async def record_usage(
     return {"ok": True}
 
 
-# ── 产物代理(P3c:gateway-PROXY,worker<->API<->storage,minio 永不暴露给 worker) ──
+# ── 产物代理:worker<->API<->storage,minio 永不暴露给 worker ──
 
 
 def _validate_rel(rel: str) -> None:

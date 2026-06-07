@@ -1,7 +1,7 @@
 """GatewayTransport:把 register/heartbeat/update_status 换成出站 HTTPS,其余委派内层。
 
-P1 影子模式(inner=RedisTransport):worker 仍直连 redis/db,认领额外打 gateway。
-P3c 纯网关模式(inner=None):无 redis/db,只出站 HTTPS;认领/产物全走 gateway,
+有内层(RedisTransport)时:worker 仍直连 redis/db,认领走内层,注册/心跳额外打 gateway。
+无内层(inner=None)时:不连 redis/db,只出站 HTTPS;认领/产物全走 gateway,
 无内层可退回——不可达时只 log,不崩。内层委派方法在 inner 为空时返回安全默认值。
 """
 
@@ -89,7 +89,7 @@ class GatewayTransport:
         self._worker_token = data.get("worker_token", "")
         returned_id = data.get("worker_id") or effective_id
         self._save_id(returned_id)
-        # 影子写:有内层(混合模式)才让 redis/db 也有这行;纯网关无内层,跳过。
+        # 有内层时镜像写一份到 redis/db(认领仍走内层);无内层则跳过。
         if self._inner is not None:
             await self._inner.register(
                 returned_id, worker_type, pools, tags, reject_tags, hostname, now,
@@ -136,7 +136,7 @@ class GatewayTransport:
                 worker_id, status, current_job, current_step,
             )
 
-    # ── 粗粒度认领/上报(P3b:走 gateway HTTP,不再委派内层,避免经 redis 双重认领) ──
+    # ── 粗粒度认领/上报:走 gateway HTTP,不委派内层,避免经 redis 双重认领 ──
 
     def _auth(self) -> dict:
         return {"Authorization": f"Bearer {self._worker_token}"}
@@ -211,7 +211,7 @@ class GatewayTransport:
         resp.raise_for_status()
 
     async def publish_step_event(self, channel, data):
-        # P3b 后 worker 只通过 on_progress 发 events:{job} 进度;映射到 progress 端点。
+        # worker 只通过 on_progress 发 events:{job} 进度;映射到 progress 端点。
         # 非 events 频道(step_started/completed/failed)现由服务端发,worker 不再走这里。
         if channel.startswith("events:"):
             job_id = channel.split(":", 1)[1]
@@ -226,7 +226,7 @@ class GatewayTransport:
                 logger.warning("gateway_progress_failed", job_id=job_id)
 
     # ── 其余方法:有内层(混合模式)则委派,无内层(纯网关)返回安全默认值 ──
-    # P3b 后 gateway 模式 worker 不再调这些细粒度方法(claim 已在服务端 enrich),
+    # gateway 模式 worker 不调这些细粒度方法(claim 已在服务端 enrich),
     # 此处仅作防御:纯网关无内层时绝不抛 AttributeError。
 
     async def get_worker_status(self, worker_id):

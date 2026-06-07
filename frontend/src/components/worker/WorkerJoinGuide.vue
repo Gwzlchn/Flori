@@ -9,7 +9,7 @@ const showToast = inject<(msg: string, type: 'success' | 'error' | 'info') => vo
 const IMAGE = 'ghcr.io/gwzlchn/mnemo:latest'
 const types = ['cpu', 'gpu', 'ai', 'download']
 const tabs = [
-  { id: 'gateway', label: '分布式 (P1)' },
+  { id: 'gateway', label: '分布式' },
   { id: 'docker', label: 'docker run' },
   { id: 'compose', label: 'compose' },
 ] as const
@@ -36,15 +36,15 @@ const rejectArg = computed(() => {
   return tags.length ? ` --reject-tags ${tags.join(' ')}` : ''
 })
 const runCmd = computed(() => `python -m worker.main --type ${workerType.value}${tagsArg.value}${rejectArg.value}`)
-const tokenLine = computed(() => token.value || 'mnw-<铸取后填入>')
+const tokenLine = computed(() => token.value || 'mnw-<生成后填入>')
 
 async function mint() {
   minting.value = true
   try {
     token.value = await workerStore.mintToken()
-    showToast?.('已铸取接入 token (仅此一次完整展示)', 'success')
+    showToast?.('已生成接入 token (仅此一次完整展示)', 'success')
   } catch {
-    showToast?.('铸取失败', 'error')
+    showToast?.('生成失败', 'error')
   } finally {
     minting.value = false
   }
@@ -148,7 +148,7 @@ async function copy(text: string, which: 'token' | 'cmd') {
         class="flex items-center gap-1 px-3 py-1.5 bg-indigo-600 text-white text-xs rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50"
       >
         <component :is="token ? RotateCw : KeyRound" :size="14" />
-        {{ token ? '重铸 token' : '铸取接入 token' }}
+        {{ token ? '重新生成 token' : '生成接入 token' }}
       </button>
       <div v-if="token" class="flex-1 flex items-center gap-2 min-w-0">
         <code class="flex-1 px-2 py-1 bg-gray-100 rounded text-xs font-mono truncate">{{ token }}</code>
@@ -156,7 +156,7 @@ async function copy(text: string, which: 'token' | 'cmd') {
           <component :is="copiedToken ? Check : Copy" :size="14" />
         </button>
       </div>
-      <span v-else class="text-xs text-gray-400">铸取后仅此一次完整展示，妥善保存</span>
+      <span v-else class="text-xs text-gray-400">生成后仅此一次完整展示，妥善保存</span>
     </div>
 
     <!-- Tabs -->

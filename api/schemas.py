@@ -158,7 +158,7 @@ class SearchResponse(BaseModel):
     items: list[SearchResultItem]
 
 
-# ── Worker-gateway 认领/上报(P3b) ──
+# ── Worker-gateway 认领/上报 ──
 
 
 class RunnerClaimRequest(BaseModel):

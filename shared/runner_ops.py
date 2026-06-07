@@ -134,7 +134,7 @@ async def claim_step(
                 "event": "step_start", "step": step, "worker": worker_id,
             })
         except Exception:
-            # pop-then-crash 缺口:dequeue 成功但 CAS/publish 抛错时,把 raw 放回队列(尽力而为),
+            # dequeue 成功但随后 CAS/publish 抛错时,把 raw 放回队列(尽力而为),
             # 否则这条任务被永久吞掉。释放槽/解冻 cpu 让占用不泄漏。
             try:
                 await redis.return_step(pool, raw_json, score)

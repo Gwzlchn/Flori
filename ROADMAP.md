@@ -63,12 +63,12 @@
 目标：worker 高内聚低耦合、易拓展；远程 worker（公司 GPU 机）零隧道、单出站 HTTPS 接入。
 全程可灰度、可独立回退；每刀经对抗式等价核对 + 全量回归，保留 DAG/资源池/scene↔cpu 互斥/exec_id 去重/WS 进度等不变量。
 
-- [x] 全后端 aware-UTC + Worker 管理页 GitLab 化（状态后端权威）+ 运行中日志可见
-- [x] P0-A/P0-B：`WorkerTransport` + `StepRunner` 执行器抽象（零行为变化）
-- [x] P1：worker-gateway 注册/心跳 + per-worker 可吊销 token + `GatewayTransport`（影子）
-- [x] P2：pipelines 改 GitLab-CI 风格（variables/extends/rules/needs，加载期归一，0 漂移）+ `DockerStepRunner` + 每步镜像（base/heavy/gpu）+ executor opt-in
-- [x] P3：认领/上报搬服务端（`/api/runner/jobs/*` + 共享 `runner_ops`）+ 产物经网关代理 + 纯网关模式（真零隧道，worker 不连 redis/minio）
-- [x] P4：密钥按需注入（修配置明文 key 泄露）+ token 按 pools 授权 + 重试按失败类型（BUILD vs SYSTEM）
+- [x] 全后端 aware-UTC + Worker 管理页（状态后端权威）+ 运行中日志可见
+- [x] `WorkerTransport` + `StepRunner` 执行器抽象
+- [x] worker-gateway 注册/心跳 + per-worker 可吊销 token + `GatewayTransport`
+- [x] pipelines 改 GitLab-CI 风格（variables/extends/rules/needs）+ `DockerStepRunner` + 每步镜像（base/heavy/gpu）
+- [x] 认领/上报搬服务端（`/api/runner/jobs/*` + 共享 `runner_ops`）+ 产物经网关代理 + 纯网关模式（worker 不连 redis/minio）
+- [x] 安全加固：密钥按需注入 + token 按 pools 授权 + 重试按失败类型
 
 ### M2 · 知识库 ✅（2026-06-07 完成主体）
 

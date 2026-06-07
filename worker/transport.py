@@ -1,7 +1,7 @@
 """WorkerTransport：worker 与协调/状态后端之间的唯一接口。
 
-P0-A：RedisTransport 包现有 redis_client + db(直连,零行为变化)。
-P1+:GatewayTransport 实现同一 Protocol,全部换成出站 HTTPS,worker.py 不动。
+RedisTransport 直连 redis_client + db;逐方法转调。
+GatewayTransport 实现同一 Protocol,全部换成出站 HTTPS,worker.py 不动。
 worker.py 只依赖此 Protocol,不再 import redis_client / Database。
 
 把 register/heartbeat/update_status/update_step_result 的 "Redis+DB 双写" 封在
@@ -37,7 +37,7 @@ class WorkerTransport(Protocol):
 
     async def get_worker_status(self, worker_id: str) -> str | None: ...
 
-    # ── 粗粒度认领/上报(P3a)：编排封装在 transport 内,worker.execute 不再直接调细粒度方法 ──
+    # ── 粗粒度认领/上报:编排封装在 transport 内,worker.execute 不直接调细粒度方法 ──
     # pool_limits:每池槽位上限(由 worker 从 config 算好传入,transport 保持不持有 config)。
     async def request_step(
         self, worker_id: str, pools: list[str], pool_limits: dict[str, int],
@@ -90,7 +90,7 @@ class WorkerTransport(Protocol):
 
 
 class RedisTransport:
-    """P0-A:直连 redis_client + db,逐方法转调,零行为变化。"""
+    """直连 redis_client + db,逐方法转调。"""
 
     def __init__(self, redis: RedisClient, db: Database):
         self._redis = redis
@@ -139,7 +139,7 @@ class RedisTransport:
         info = await self._redis.get_worker_info(worker_id)
         return info.get("status") if info else None
 
-    # ── 粗粒度认领/上报(P3b:薄包装 shared.runner_ops,与 gateway 端点共用同一编排) ──
+    # ── 粗粒度认领/上报:薄包装 shared.runner_ops,与 gateway 端点共用同一编排 ──
 
     async def _pop_matching(self, pool, tags, reject_tags, max_tries=5):
         # 保留旧入口(测试/外部可能引用),实现转调 runner_ops.pop_matching。
@@ -238,7 +238,7 @@ class RedisTransport:
         await self._redis.publish(channel, data)
 
     async def close(self):
-        # P0-A:redis/db 的关闭仍由 main.py 负责,此处 no-op。
+        # redis/db 的关闭由 main.py 负责,此处 no-op。
         pass
 
 
