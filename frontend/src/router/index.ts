@@ -29,6 +29,26 @@ const router = createRouter({
       component: () => import('../views/NotesView.vue'),
     },
     {
+      path: '/collections',
+      name: 'collections',
+      component: () => import('../views/CollectionsView.vue'),
+    },
+    {
+      path: '/collections/:id',
+      name: 'collection-detail',
+      component: () => import('../views/CollectionDetailView.vue'),
+    },
+    {
+      path: '/search',
+      name: 'search',
+      component: () => import('../views/SearchView.vue'),
+    },
+    {
+      path: '/glossary',
+      name: 'glossary',
+      component: () => import('../views/GlossaryView.vue'),
+    },
+    {
       path: '/workers',
       name: 'workers',
       component: () => import('../views/WorkersView.vue'),

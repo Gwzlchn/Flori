@@ -94,6 +94,70 @@ class HealthResponse(BaseModel):
     checks: dict
 
 
+# ── 集合 (M2) ──
+
+
+class CollectionCreateRequest(BaseModel):
+    name: str
+    domain: str
+    description: str | None = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class CollectionUpdateRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    tags: list[str] | None = None
+
+
+class CollectionResponse(BaseModel):
+    id: str
+    name: str
+    domain: str
+    description: str = ""
+    tags: list[str] = Field(default_factory=list)
+    job_count: int = 0
+    created_at: str
+
+
+# ── 术语表 (M2) ──
+
+
+class GlossaryTermRequest(BaseModel):
+    term: str
+    definition: str | None = None
+    related: list[str] | None = None
+
+
+class GlossaryTermResponse(BaseModel):
+    domain: str
+    term: str
+    definition: str = ""
+    sources: list[str] = Field(default_factory=list)
+    related: list[str] = Field(default_factory=list)
+    status: str = "accepted"
+    source_type: str = "manual"
+    created_at: str
+
+
+# ── 搜索 (M2) ──
+
+
+class SearchResultItem(BaseModel):
+    job_id: str
+    title: str | None = None
+    note_type: str
+    snippet: str
+    content_type: str = ""
+    domain: str = ""
+    collection_id: str | None = None
+
+
+class SearchResponse(BaseModel):
+    total: int
+    items: list[SearchResultItem]
+
+
 # ── Worker-gateway 认领/上报(P3b) ──
 
 

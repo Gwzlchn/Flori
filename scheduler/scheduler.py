@@ -16,18 +16,56 @@ from shared.db import Database
 from shared.errors import RETRY_POLICY, get_retry_delay
 from shared.models import Job, JobStatus, Step, StepStatus
 from shared.redis_client import RedisClient
+from shared.storage import StorageBackend
 
 logger = structlog.get_logger(component="scheduler")
 
 # 延迟重试任务的 name 前缀，跟踪/按 job 取消时复用，避免格式漂移。
 _DELAYED_PREFIX = "delayed_enqueue:"
 
+# 笔记产出步 -> note_type：smart 笔记走 notes_smart.md，机械笔记走 notes_mechanical.md。
+_NOTE_STEPS = {
+    "08_smart": "smart",
+    "14_smart_paper": "smart",
+    "07_mechanical": "mechanical",
+}
+_NOTE_FILES = {
+    "smart": "output/notes_smart.md",
+    "mechanical": "output/notes_mechanical.md",
+}
+# 评审步：完成后读 review.json，把 missing_concepts 采集为候选术语。
+_REVIEW_STEPS = {"09_review", "15_review"}
+
+
+def _markdown_to_text(md: str) -> str:
+    """Markdown 去标记取纯文本（轻量、零依赖，够 FTS 索引用）：剥代码围栏、
+    图片/链接、标题/列表/强调标记，折叠空白。"""
+    import re
+
+    md = re.sub(r"```.*?```", " ", md, flags=re.DOTALL)        # 代码围栏
+    md = re.sub(r"`([^`]*)`", r"\1", md)                         # 行内代码
+    md = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", md)               # 图片
+    md = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", md)            # 链接取文字
+    md = re.sub(r"^\s{0,3}#{1,6}\s*", "", md, flags=re.MULTILINE)  # 标题井号
+    md = re.sub(r"^\s{0,3}[-*+]\s+", "", md, flags=re.MULTILINE)   # 无序列表标记
+    md = re.sub(r"[*_~>]+", " ", md)                             # 强调/引用标记
+    return " ".join(md.split())
+
 
 class Scheduler:
-    def __init__(self, redis: RedisClient, db: Database, config: AppConfig):
+    def __init__(
+        self,
+        redis: RedisClient,
+        db: Database,
+        config: AppConfig,
+        storage: StorageBackend | None = None,
+    ):
         self.redis = redis
         self.db = db
         self.config = config
+        # storage 在 NAS 侧（调度器有 DB）读笔记/评审产物做索引与术语采集；
+        # worker 可能远程无 DB，故索引必须落在这里。未注入则跳过（向后兼容）。
+        self.storage = storage
         self.jobs_dir = config.jobs_dir
         self._shutdown = False
         self._pubsub_task: asyncio.Task | None = None
@@ -274,8 +312,71 @@ class Scheduler:
             "duration_sec": duration, "progress_pct": progress,
         })
 
+        # 笔记产出步 -> 建全文索引；评审步 -> 采集候选术语。失败只 log 不致命。
+        await self._index_on_step_done(job_id, step)
+
         logger.info("step_done", job_id=job_id, step=step, duration=duration)
         await self._check_downstream(job_id)
+
+    async def _index_on_step_done(self, job_id: str, step: str) -> None:
+        """步骤完成后的知识库副作用：笔记产出步建 FTS 索引、评审步采集术语。
+        全程容错——无 storage / 读不到产物 / 解析异常都只记日志，绝不影响 DAG 推进。"""
+        if self.storage is None:
+            return
+        try:
+            if step in _NOTE_STEPS:
+                await self._index_job_notes(job_id, _NOTE_STEPS[step])
+            elif step in _REVIEW_STEPS:
+                await self._collect_glossary(job_id)
+        except Exception:
+            logger.warning("index_step_done_failed", job_id=job_id, step=step)
+
+    async def _index_job_notes(self, job_id: str, note_type: str) -> None:
+        """读该 job 的笔记 Markdown，去标记取纯文本，连同 job 元信息写入 FTS 索引。"""
+        rel = _NOTE_FILES.get(note_type)
+        if not rel:
+            return
+        data = await self.storage.read_file(job_id, rel)
+        if not data:
+            return
+        md = data.decode("utf-8", errors="replace")
+        body = _markdown_to_text(md)
+        if not body:
+            return
+        job = await asyncio.to_thread(self.db.get_job, job_id)
+        title = (job.title if job else None) or job_id
+        domain = job.domain if job else ""
+        content_type = job.content_type if job else ""
+        collection_id = (job.collection_id if job else "") or ""
+        await asyncio.to_thread(
+            self.db.index_job_notes,
+            job_id, note_type, title, body,
+            content_type, domain, collection_id,
+        )
+        logger.info("notes_indexed", job_id=job_id, note_type=note_type)
+
+    async def _collect_glossary(self, job_id: str) -> None:
+        """读评审产物 review.json，把 missing_concepts 逐个采集为候选术语。"""
+        data = await self.storage.read_file(job_id, "output/review.json")
+        if not data:
+            return
+        try:
+            review = json.loads(data.decode("utf-8", errors="replace"))
+        except (json.JSONDecodeError, ValueError):
+            return
+        concepts = review.get("missing_concepts") or []
+        if not isinstance(concepts, list) or not concepts:
+            return
+        job = await asyncio.to_thread(self.db.get_job, job_id)
+        domain = (job.domain if job else "") or "general"
+        for c in concepts:
+            term = c.get("term") if isinstance(c, dict) else c
+            if not term or not isinstance(term, str):
+                continue
+            await asyncio.to_thread(
+                self.db.add_glossary_suggestion, domain, term, job_id, "review",
+            )
+        logger.info("glossary_collected", job_id=job_id, count=len(concepts))
 
     async def on_step_failed(
         self,

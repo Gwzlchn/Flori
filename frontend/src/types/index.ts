@@ -114,6 +114,45 @@ export interface ProfileDetail {
   do_not?: string[]
 }
 
+// 集合：与后端 CollectionResponse 严格对齐。
+export interface Collection {
+  id: string
+  name: string
+  domain: string
+  description: string
+  tags: string[]
+  job_count: number
+  created_at: string
+}
+
+// 术语：与后端 GlossaryTermResponse 严格对齐。
+export interface GlossaryTerm {
+  domain: string
+  term: string
+  definition: string
+  sources: string[]
+  related: string[]
+  status: string
+  source_type: string
+  created_at: string
+}
+
+// 搜索结果项：与后端 SearchResultItem 严格对齐。
+export interface SearchResultItem {
+  job_id: string
+  title: string | null
+  note_type: string
+  snippet: string
+  content_type: string
+  domain: string
+  collection_id: string | null
+}
+
+export interface SearchResponse {
+  total: number
+  items: SearchResultItem[]
+}
+
 export interface WsEvent {
   event: string
   step?: string

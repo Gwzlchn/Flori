@@ -12,6 +12,7 @@ import structlog
 from shared.config import load_config
 from shared.db import Database
 from shared.redis_client import RedisClient
+from shared.storage import create_storage
 
 from .scheduler import Scheduler
 
@@ -34,7 +35,10 @@ async def main() -> None:
     db.init_schema()
     logger.info("db_ready", path=str(config.db_path))
 
-    scheduler = Scheduler(redis, db, config)
+    # storage 供 on_step_done 读笔记/评审产物（本地或 MinIO，由 env 决定）。
+    storage = create_storage(config.jobs_dir)
+
+    scheduler = Scheduler(redis, db, config, storage=storage)
 
     loop = asyncio.get_running_loop()
     shutdown_task: asyncio.Task | None = None

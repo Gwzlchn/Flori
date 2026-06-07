@@ -479,6 +479,206 @@ class TestCollection:
         assert len(db.list_collections()) == 2
 
 
+class TestCollectionM2:
+    """M2：集合 update / delete=解绑 / domain 过滤 / job_count 维护。"""
+
+    def test_update_collection(self, db):
+        db.create_collection(Collection(id="c1", name="旧名", domain="ml", tags=["a"]))
+        db.update_collection("c1", name="新名", description="desc", tags=["x", "y"])
+        got = db.get_collection("c1")
+        assert got.name == "新名"
+        assert got.description == "desc"
+        assert got.tags == ["x", "y"]
+
+    def test_update_collection_partial(self, db):
+        db.create_collection(Collection(id="c1", name="名", domain="ml", description="d0"))
+        db.update_collection("c1", name="名2")
+        got = db.get_collection("c1")
+        assert got.name == "名2"
+        # description 未传 -> 不动
+        assert got.description == "d0"
+
+    def test_list_collections_domain_filter(self, db):
+        db.create_collection(Collection(id="c1", name="c1", domain="ml"))
+        db.create_collection(Collection(id="c2", name="c2", domain="deep-learning"))
+        out = db.list_collections(domain="ml")
+        assert [c.id for c in out] == ["c1"]
+
+    def test_delete_collection_unbinds_jobs(self, db):
+        db.create_collection(Collection(id="c1", name="c1", domain="ml"))
+        job = Job(id="j_m2_1", content_type="video", pipeline="video", collection_id="c1")
+        db.create_job(job)
+        db.delete_collection("c1")
+        # 集合没了，但 job 保留、collection_id 置空（解绑）。
+        assert db.get_collection("c1") is None
+        got = db.get_job("j_m2_1")
+        assert got is not None
+        assert got.collection_id is None
+
+    def test_increment_collection_count(self, db):
+        db.create_collection(Collection(id="c1", name="c1", domain="ml"))
+        db.increment_collection_count("c1", 1)
+        db.increment_collection_count("c1", 1)
+        assert db.get_collection("c1").job_count == 2
+        db.increment_collection_count("c1", -1)
+        assert db.get_collection("c1").job_count == 1
+
+    def test_increment_collection_count_floor_zero(self, db):
+        db.create_collection(Collection(id="c1", name="c1", domain="ml"))
+        db.increment_collection_count("c1", -5)
+        assert db.get_collection("c1").job_count == 0
+
+    def test_increment_collection_count_empty_id_noop(self, db):
+        # collection_id 为空串 -> no-op，不抛。
+        db.increment_collection_count("", 1)
+
+
+class TestGlossary:
+    """M2：术语表 upsert / suggestion / accept / list / delete。"""
+
+    def test_upsert_and_get(self, db):
+        db.upsert_glossary_term("ml", "梯度下降", definition="一种优化算法", related=["反向传播"])
+        got = db.get_glossary_term("ml", "梯度下降")
+        assert got is not None
+        assert got["definition"] == "一种优化算法"
+        assert got["related"] == ["反向传播"]
+        assert got["status"] == "accepted"
+        assert got["source_type"] == "manual"
+
+    def test_get_missing_returns_none(self, db):
+        assert db.get_glossary_term("ml", "不存在") is None
+
+    def test_upsert_overwrites_definition_keeps_sources(self, db):
+        db.add_glossary_suggestion("ml", "Transformer", "j1", "review")
+        db.upsert_glossary_term("ml", "Transformer", definition="自注意力模型")
+        got = db.get_glossary_term("ml", "Transformer")
+        assert got["definition"] == "自注意力模型"
+        # upsert 保留已有 sources，不清空采集来源。
+        assert "j1" in got["sources"]
+
+    def test_add_suggestion_creates_suggested(self, db):
+        db.add_glossary_suggestion("ml", "注意力机制", "j1", "review")
+        got = db.get_glossary_term("ml", "注意力机制")
+        assert got["status"] == "suggested"
+        assert got["sources"] == ["j1"]
+
+    def test_add_suggestion_merges_sources(self, db):
+        db.add_glossary_suggestion("ml", "注意力机制", "j1")
+        db.add_glossary_suggestion("ml", "注意力机制", "j2")
+        db.add_glossary_suggestion("ml", "注意力机制", "j1")  # 重复来源不重复加
+        got = db.get_glossary_term("ml", "注意力机制")
+        assert got["sources"] == ["j1", "j2"]
+
+    def test_add_suggestion_does_not_downgrade_accepted(self, db):
+        db.upsert_glossary_term("ml", "梯度下降", definition="d")  # accepted
+        db.add_glossary_suggestion("ml", "梯度下降", "j9")
+        got = db.get_glossary_term("ml", "梯度下降")
+        # 仍 accepted，只并入来源。
+        assert got["status"] == "accepted"
+        assert "j9" in got["sources"]
+
+    def test_accept_term(self, db):
+        db.add_glossary_suggestion("ml", "候选词", "j1")
+        db.accept_glossary_term("ml", "候选词")
+        assert db.get_glossary_term("ml", "候选词")["status"] == "accepted"
+
+    def test_list_filters(self, db):
+        db.upsert_glossary_term("ml", "A")
+        db.add_glossary_suggestion("ml", "B", "j1")
+        db.upsert_glossary_term("dl", "C")
+        assert {t["term"] for t in db.list_glossary(domain="ml")} == {"A", "B"}
+        assert {t["term"] for t in db.list_glossary(status="suggested")} == {"B"}
+        assert {t["term"] for t in db.list_glossary(domain="ml", status="accepted")} == {"A"}
+
+    def test_list_sorted_by_term(self, db):
+        db.upsert_glossary_term("ml", "z")
+        db.upsert_glossary_term("ml", "a")
+        assert [t["term"] for t in db.list_glossary(domain="ml")] == ["a", "z"]
+
+    def test_delete_term(self, db):
+        db.upsert_glossary_term("ml", "X")
+        db.delete_glossary_term("ml", "X")
+        assert db.get_glossary_term("ml", "X") is None
+
+
+class TestNotesFTS:
+    """M2：笔记全文索引 + 中文子串检索（trigram）。"""
+
+    def test_index_and_search_chinese_substring(self, db):
+        db.index_job_notes(
+            "j1", "smart", "深度学习入门",
+            "本文介绍神经网络与反向传播算法的基本原理。",
+            content_type="video", domain="ml", collection_id="c1",
+        )
+        total, items = db.search_notes("反向传播")
+        assert total == 1
+        assert items[0]["job_id"] == "j1"
+        assert items[0]["note_type"] == "smart"
+        assert items[0]["title"] == "深度学习入门"
+        assert items[0]["collection_id"] == "c1"
+        assert "反向传播" in items[0]["snippet"]
+
+    def test_index_is_idempotent_per_job_note_type(self, db):
+        # trigram tokenizer 至少需 3 字才命中，故关键词用 3+ 字。
+        db.index_job_notes("j1", "smart", "t1", "第一版讲解卷积神经网络。")
+        db.index_job_notes("j1", "smart", "t2", "第二版讲解循环神经网络。")
+        total, items = db.search_notes("神经网络")
+        # 同 job + note_type 只保留最新一行。
+        assert total == 1
+        assert items[0]["title"] == "t2"
+
+    def test_index_separate_note_types_coexist(self, db):
+        db.index_job_notes("j1", "smart", "智能笔记", "智能版讲解模型。")
+        db.index_job_notes("j1", "mechanical", "机械笔记", "机械版讲解模型。")
+        total, _ = db.search_notes("讲解模型")
+        assert total == 2
+
+    def test_search_filter_collection(self, db):
+        db.index_job_notes("j1", "smart", "a", "讲注意力机制。", collection_id="c1")
+        db.index_job_notes("j2", "smart", "b", "讲注意力机制。", collection_id="c2")
+        total, items = db.search_notes("注意力", collection_id="c1")
+        assert total == 1
+        assert items[0]["job_id"] == "j1"
+
+    def test_search_filter_domain_and_content_type(self, db):
+        db.index_job_notes("j1", "smart", "a", "讲优化器。", domain="ml", content_type="video")
+        db.index_job_notes("j2", "smart", "b", "讲优化器。", domain="dl", content_type="paper")
+        total, items = db.search_notes("优化器", domain="dl")
+        assert total == 1 and items[0]["job_id"] == "j2"
+        total2, items2 = db.search_notes("优化器", content_type="paper")
+        assert total2 == 1 and items2[0]["job_id"] == "j2"
+
+    def test_delete_job_index(self, db):
+        db.index_job_notes("j1", "smart", "a", "讲卷积神经网络。")
+        db.delete_job_index("j1")
+        total, _ = db.search_notes("卷积")
+        assert total == 0
+
+    def test_search_no_match(self, db):
+        db.index_job_notes("j1", "smart", "a", "讲卷积。")
+        total, items = db.search_notes("量子计算")
+        assert total == 0
+        assert items == []
+
+    def test_search_empty_query_returns_empty(self, db):
+        db.index_job_notes("j1", "smart", "a", "讲卷积。")
+        assert db.search_notes("") == (0, [])
+        assert db.search_notes("   ") == (0, [])
+
+    def test_search_quote_injection_safe(self, db):
+        # 含双引号的查询不应破坏 MATCH 语法（转义后当普通短语处理）。
+        db.index_job_notes("j1", "smart", "a", '他说 "你好世界" 然后离开。')
+        total, _ = db.search_notes('"你好世界"')
+        assert total == 1
+
+    def test_search_pagination(self, db):
+        for i in range(5):
+            db.index_job_notes(f"j{i}", "smart", f"t{i}", "共同关键词出现在每篇。")
+        total, page = db.search_notes("共同关键词", limit=2, offset=0)
+        assert total == 5
+        assert len(page) == 2
+
+
 class TestAppCredentials:
     def test_set_and_get(self, db):
         db.set_credential("bili_cookies", '{"sessdata": "abc"}')

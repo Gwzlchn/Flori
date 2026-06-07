@@ -121,6 +121,33 @@ CREATE TABLE IF NOT EXISTS app_credentials (
     value TEXT,
     updated_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS glossary (
+    domain TEXT NOT NULL,
+    term TEXT NOT NULL,
+    definition TEXT DEFAULT '',
+    sources TEXT DEFAULT '[]',
+    related TEXT DEFAULT '[]',
+    status TEXT DEFAULT 'accepted',
+    source_type TEXT DEFAULT 'manual',
+    created_at TEXT,
+    updated_at TEXT,
+    PRIMARY KEY (domain, term)
+);
+
+CREATE INDEX IF NOT EXISTS idx_glossary_domain_status ON glossary(domain, status);
+
+-- trigram tokenizer：对中文做子串匹配，零外部依赖。
+CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts5 USING fts5(
+    job_id UNINDEXED,
+    content_type UNINDEXED,
+    note_type UNINDEXED,
+    collection_id UNINDEXED,
+    domain UNINDEXED,
+    title,
+    body,
+    tokenize='trigram'
+);
 """
 
 
@@ -136,6 +163,16 @@ _STEP_UPDATABLE = {
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _fts_match_query(q: str) -> str:
+    """把用户查询串包成 fts5 安全的双引号短语，防 MATCH 语法注入。
+    内部双引号转义为两个双引号；空白折叠；空查询返回空串（调用方按无结果处理）。"""
+    cleaned = " ".join((q or "").split())
+    if not cleaned:
+        return ""
+    escaped = cleaned.replace('"', '""')
+    return f'"{escaped}"'
 
 
 def _parse_dt(s: str | None) -> datetime | None:
@@ -671,8 +708,13 @@ class Database:
             updated_at=_parse_dt(row["updated_at"]),
         )
 
-    def list_collections(self) -> list[Collection]:
-        rows = self._conn.execute("SELECT * FROM collections").fetchall()
+    def list_collections(self, domain: str | None = None) -> list[Collection]:
+        if domain:
+            rows = self._conn.execute(
+                "SELECT * FROM collections WHERE domain=?", (domain,)
+            ).fetchall()
+        else:
+            rows = self._conn.execute("SELECT * FROM collections").fetchall()
         return [
             Collection(
                 id=r["id"],
@@ -687,7 +729,278 @@ class Database:
             for r in rows
         ]
 
+    def update_collection(
+        self,
+        collection_id: str,
+        name: str | None = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
+    ) -> None:
+        """更新集合的可变字段（name/description/tags），None 表示不动。"""
+        fields: dict = {}
+        if name is not None:
+            fields["name"] = name
+        if description is not None:
+            fields["description"] = description
+        if tags is not None:
+            fields["tags"] = json.dumps(tags, ensure_ascii=False)
+        if not fields:
+            return
+        fields["updated_at"] = _now_iso()
+        set_clause = ", ".join(f"{k}=?" for k in fields)
+        values = list(fields.values()) + [collection_id]
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE collections SET {set_clause} WHERE id=?", values
+            )
+            self._conn.commit()
+
+    def delete_collection(self, collection_id: str) -> None:
+        """删集合=解绑：把名下 job 的 collection_id 置 NULL（保留 job），再删集合行。"""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE jobs SET collection_id=NULL WHERE collection_id=?",
+                (collection_id,),
+            )
+            self._conn.execute(
+                "DELETE FROM collections WHERE id=?", (collection_id,)
+            )
+            self._conn.commit()
+
+    def increment_collection_count(self, collection_id: str, delta: int) -> None:
+        """维护集合的 job_count：建/删 job 时增减；负值不下穿 0。"""
+        if not collection_id:
+            return
+        with self._lock:
+            self._conn.execute(
+                "UPDATE collections SET job_count = MAX(0, job_count + ?) WHERE id=?",
+                (delta, collection_id),
+            )
+            self._conn.commit()
+
+    # ── Glossary ──
+
+    def upsert_glossary_term(
+        self,
+        domain: str,
+        term: str,
+        definition: str = "",
+        related: list[str] | None = None,
+        status: str = "accepted",
+        source_type: str = "manual",
+    ) -> None:
+        """写入/覆盖一条术语（手动维护入口）：按 (domain, term) 幂等 upsert，
+        保留已有 sources，覆盖 definition/related/status/source_type。"""
+        now = _now_iso()
+        related_json = json.dumps(related or [], ensure_ascii=False)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT sources, created_at FROM glossary WHERE domain=? AND term=?",
+                (domain, term),
+            ).fetchone()
+            if row is None:
+                self._conn.execute(
+                    """INSERT INTO glossary
+                       (domain, term, definition, sources, related, status,
+                        source_type, created_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (domain, term, definition, "[]", related_json,
+                     status, source_type, now, now),
+                )
+            else:
+                self._conn.execute(
+                    """UPDATE glossary SET definition=?, related=?, status=?,
+                       source_type=?, updated_at=? WHERE domain=? AND term=?""",
+                    (definition, related_json, status, source_type, now,
+                     domain, term),
+                )
+            self._conn.commit()
+
+    def add_glossary_suggestion(
+        self,
+        domain: str,
+        term: str,
+        source_job: str,
+        source_type: str = "review",
+    ) -> None:
+        """评审采集到的候选术语：不存在则插 status='suggested' 并记 source_job；
+        已存在则仅把 source_job 并入 sources，绝不降级已 accepted 的条目。"""
+        now = _now_iso()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT sources FROM glossary WHERE domain=? AND term=?",
+                (domain, term),
+            ).fetchone()
+            if row is None:
+                self._conn.execute(
+                    """INSERT INTO glossary
+                       (domain, term, definition, sources, related, status,
+                        source_type, created_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (domain, term, "", json.dumps([source_job]), "[]",
+                     "suggested", source_type, now, now),
+                )
+            else:
+                sources = json.loads(row["sources"])
+                if source_job not in sources:
+                    sources.append(source_job)
+                    self._conn.execute(
+                        "UPDATE glossary SET sources=?, updated_at=? "
+                        "WHERE domain=? AND term=?",
+                        (json.dumps(sources), now, domain, term),
+                    )
+            self._conn.commit()
+
+    def get_glossary_term(self, domain: str, term: str) -> dict | None:
+        """读单条术语，未命中返回 None。"""
+        row = self._conn.execute(
+            "SELECT * FROM glossary WHERE domain=? AND term=?", (domain, term)
+        ).fetchone()
+        return self._row_to_glossary(row) if row is not None else None
+
+    def list_glossary(
+        self, domain: str | None = None, status: str | None = None
+    ) -> list[dict]:
+        """列术语，可按 domain / status 过滤，按 term 升序。"""
+        where_parts: list[str] = []
+        params: list = []
+        if domain:
+            where_parts.append("domain=?")
+            params.append(domain)
+        if status:
+            where_parts.append("status=?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM glossary {where} ORDER BY term", params
+        ).fetchall()
+        return [self._row_to_glossary(r) for r in rows]
+
+    def accept_glossary_term(self, domain: str, term: str) -> None:
+        """采纳候选术语：status -> 'accepted'。"""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE glossary SET status='accepted', updated_at=? "
+                "WHERE domain=? AND term=?",
+                (_now_iso(), domain, term),
+            )
+            self._conn.commit()
+
+    def delete_glossary_term(self, domain: str, term: str) -> None:
+        """删一条术语。"""
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM glossary WHERE domain=? AND term=?", (domain, term)
+            )
+            self._conn.commit()
+
+    # ── Notes 全文索引 (FTS5) ──
+
+    def index_job_notes(
+        self,
+        job_id: str,
+        note_type: str,
+        title: str,
+        body: str,
+        content_type: str = "",
+        domain: str = "",
+        collection_id: str = "",
+    ) -> None:
+        """把某 job 某类笔记写入 FTS 索引：先删该 (job_id, note_type) 行再插，幂等。"""
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM notes_fts5 WHERE job_id=? AND note_type=?",
+                (job_id, note_type),
+            )
+            self._conn.execute(
+                """INSERT INTO notes_fts5
+                   (job_id, content_type, note_type, collection_id, domain,
+                    title, body)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (job_id, content_type, note_type, collection_id or "",
+                 domain or "", title or "", body or ""),
+            )
+            self._conn.commit()
+
+    def delete_job_index(self, job_id: str) -> None:
+        """删某 job 的全部笔记索引行（删 job 时连带）。"""
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM notes_fts5 WHERE job_id=?", (job_id,)
+            )
+            self._conn.commit()
+
+    def search_notes(
+        self,
+        q: str,
+        collection_id: str | None = None,
+        domain: str | None = None,
+        content_type: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[int, list[dict]]:
+        """全文检索笔记。q 走 fts5 MATCH（trigram，中文子串友好），做基本转义防注入；
+        可按 collection_id / domain / content_type 收窄。返回 (total, items)，
+        items 含 job_id/note_type/title/snippet/content_type/domain/collection_id。
+        注意：trigram 至少需 3 个字符才能命中，更短的查询会无结果。"""
+        match = _fts_match_query(q)
+        if not match:
+            return 0, []
+
+        where_parts = ["notes_fts5 MATCH ?"]
+        params: list = [match]
+        if collection_id:
+            where_parts.append("collection_id=?")
+            params.append(collection_id)
+        if domain:
+            where_parts.append("domain=?")
+            params.append(domain)
+        if content_type:
+            where_parts.append("content_type=?")
+            params.append(content_type)
+        where = " AND ".join(where_parts)
+
+        total = self._conn.execute(
+            f"SELECT COUNT(*) FROM notes_fts5 WHERE {where}", params
+        ).fetchone()[0]
+
+        # snippet(表, 列号 6=body, 高亮包裹, 省略号, 单片最多 12 token)。
+        rows = self._conn.execute(
+            f"""SELECT job_id, note_type, title, content_type, domain,
+                   collection_id,
+                   snippet(notes_fts5, 6, '<mark>', '</mark>', '…', 12) AS snippet
+                FROM notes_fts5 WHERE {where}
+                ORDER BY rank LIMIT ? OFFSET ?""",
+            params + [limit, offset],
+        ).fetchall()
+        items = [
+            {
+                "job_id": r["job_id"],
+                "note_type": r["note_type"],
+                "title": r["title"],
+                "snippet": r["snippet"],
+                "content_type": r["content_type"],
+                "domain": r["domain"],
+                "collection_id": r["collection_id"] or None,
+            }
+            for r in rows
+        ]
+        return total, items
+
     # ── Private ──
+
+    def _row_to_glossary(self, row: sqlite3.Row) -> dict:
+        return {
+            "domain": row["domain"],
+            "term": row["term"],
+            "definition": row["definition"],
+            "sources": json.loads(row["sources"]),
+            "related": json.loads(row["related"]),
+            "status": row["status"],
+            "source_type": row["source_type"],
+            "created_at": _parse_dt(row["created_at"]),
+            "updated_at": _parse_dt(row["updated_at"]),
+        }
 
     def _row_to_job(self, row: sqlite3.Row) -> Job:
         return Job(

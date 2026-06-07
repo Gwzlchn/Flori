@@ -110,6 +110,11 @@ async def create_job(
         collection_id=req.collection_id,
     )
     await asyncio.to_thread(db.create_job, job)
+    # 维护集合 job_count：绑定到集合的 job 计入。
+    if req.collection_id:
+        await asyncio.to_thread(
+            db.increment_collection_count, req.collection_id, 1,
+        )
 
     await redis.publish("job_command", {
         "action": "new_job",
@@ -258,6 +263,12 @@ async def delete_job(
     if not job:
         raise HTTPException(404, "job not found")
     await asyncio.to_thread(db.delete_job, job_id)
+    # 删 job 连带清掉它的全文索引，并把所属集合的 job_count 减 1。
+    await asyncio.to_thread(db.delete_job_index, job_id)
+    if job.collection_id:
+        await asyncio.to_thread(
+            db.increment_collection_count, job.collection_id, -1,
+        )
     job_dir = config.jobs_dir / job_id
     if job_dir.exists():
         await asyncio.to_thread(shutil.rmtree, job_dir)
