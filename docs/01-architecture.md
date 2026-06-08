@@ -4,7 +4,7 @@
 
 ## 1. 一句话
 
-主机跑全部核心服务，Cloudflare Tunnel 做公网入口，中转服务器（可选）给 GPU 传话。
+主机跑全部核心服务，Cloudflare Tunnel 做用户公网入口，远程 worker 经单条出站 HTTPS 接入 API 网关（不开入站端口、不连中心 Redis/MinIO）。
 
 ## 2. 组件分层
 
@@ -30,7 +30,7 @@ graph TD
         dl["Download Worker<br/>获取原始内容"]
         cpu["CPU Worker<br/>视频:帧/OCR<br/>论文:PDF解析"]
         ai["AI Worker<br/>摘要/笔记/评审"]
-        gpu["GPU Worker ⚡<br/>Whisper/OCR<br/>（可选，通过中转服务器）"]
+        gpu["GPU Worker ⚡<br/>Whisper/OCR<br/>（可选，经 API 网关出站接入）"]
     end
 
     subgraph storage["存储层 Storage"]
@@ -81,9 +81,9 @@ graph TD
 
 **开发和测试全部在此模式完成**。所有 Worker 用 `LocalStorage`（直接读写 /data/jobs/），无 MinIO。
 
-### 架构二：分层部署（核心 + 中转 + Worker 集群）
+### 架构二：分层部署（核心 + 远程 Worker，经 API 网关接入）
 
-有独立 GPU 机器或多台 Worker 机器时，拆为三层。每层一个 docker-compose：
+有独立 GPU 机器或多台 Worker 机器时，远程 worker 经 API 上的 `/api/runner/*` 网关单条出站 HTTPS 接入核心，不连中心 Redis/MinIO（见 [ADR-0009](adr/0009-worker-gateway-outbound-https.md)）：
 
 ```mermaid
 graph TD
@@ -95,65 +95,58 @@ graph TD
 
     subgraph host2["主机（核心）"]
         h_cf["cloudflared"]
-        h_api["API + 调度器"]
+        h_api["API（含 /api/runner 网关）+ 调度器"]
+        h_redis["Redis（仅核心内部）"]
         h_ai["Worker-ai ×2"]
         h_dl["Worker-download ×1"]
         h_cpu["Worker-cpu ×1（兜底）"]
         h_data["/data/jobs/（持久）"]
     end
 
-    subgraph relay["中转服务器（公网）"]
-        r_redis["Redis (TLS)"]
-        r_minio["MinIO (HTTPS)"]
-        r_note["无持久数据 · 可随时重建"]
-    end
-
-    subgraph gpu["GPU 机器"]
+    subgraph gpu["GPU 机器（远程 worker）"]
         g_worker["Worker-gpu ×1"]
         g_task["Whisper / 场景 / OCR"]
-        g_poll["轮询中转 Redis"]
-        g_file["从 MinIO 下载/上传"]
-        g_idle["空闲自动退出"]
+        g_reg["注册换 per-worker token"]
+        g_claim["长轮询认领（jobs/request）"]
+        g_file["经网关代理读写产物"]
     end
 
-    host2 -->|"文件中转"| relay
-    relay -->|"出站轮询"| gpu
+    gpu -->|"单条出站 HTTPS<br/>注册 / 认领 / 上报 / 产物"| host2
 
     style host2 fill:#dbeafe,stroke:#2563eb
-    style relay fill:#fef9c3,stroke:#ca8a04
     style gpu fill:#dcfce7,stroke:#16a34a
 ```
 
-远程 Worker 用 `RemoteStorage`（MinIO pull/push），核心服务器用 `LocalStorage`。**应用代码完全不变**——只改环境变量（`MINIO_URL`）。
+远程 worker 用 `GatewayStorage`（产物经 `/api/runner/jobs/{id}/artifacts` 代理读写），核心 worker 用 `LocalStorage`。worker 仅需出站 HTTPS 到 API，中心 Redis/MinIO 不对 worker 暴露。
 
-**三条独立通信线路**：
+**两条独立通信线路**：
 
-| 线路 | 路径 | 用途 | 中转被攻破影响 |
-|------|------|------|---------------|
-| 用户访问 | 用户 → Cloudflare → 核心 | Web UI + API | **无影响** |
-| Worker 中转 | 核心 ↔ 中转 ↔ Worker | 任务分发 + 文件中转 | Worker 断开，核心 CPU 兜底 |
-| 核心本地 | 容器间 localhost | 内部通信 | **无影响** |
+| 线路 | 路径 | 用途 | worker 被攻破影响 |
+|------|------|------|------------------|
+| 用户访问 | 用户 → Cloudflare → 核心 | Web UI + API | 与 worker 接入正交 |
+| Worker 接入 | 远程 worker → HTTPS → API `/api/runner/*` | 注册 + 认领 + 上报 + 产物代理 | per-worker token 可吊销；产物经网关，中心 Redis/MinIO 不暴露 |
 
-> 如果核心和 Worker 都有公网 IP，不需要中转——Worker 直连核心 Redis。
+### 从 All-in-One 到分层：worker 端只改环境变量
 
-### 从 All-in-One 到分层：零代码改动
+worker 进程按环境变量自适应三种模式（见 `worker/main.py`）：
 
-| 改什么 | All-in-One | 分层 |
-|--------|-----------|------|
-| Worker 代码 | 不变 | 不变 |
-| StorageBackend | LocalStorage | RemoteStorage（加 `MINIO_URL` 环境变量） |
-| Redis 连接 | `redis://localhost` | `rediss://:pass@中转IP:6380` |
-| docker-compose | 一个文件 | 每台机器一个文件 |
+| 模式 | 环境变量 | Redis/DB | 存储 | 认领 |
+|------|---------|----------|------|------|
+| 本地 / 单机 | 不设 `GATEWAY_URL` | 直连 | LocalStorage | RedisTransport |
+| 混合 | `GATEWAY_URL` + `REDIS_URL` 都设 | 作内层兜底 | GatewayStorage | 走网关，redis 镜像 |
+| 纯网关（真零隧道） | 仅设 `GATEWAY_URL` | 不连 | GatewayStorage | 全走网关 |
+
+纯网关模式下 worker 持接入 token 调 `POST /api/runner/register` 换 per-worker token，再长轮询 `POST /api/runner/jobs/request` 认领、`/complete`·`/fail` 上报、经 `artifacts` 端点拉取输入/回传产物，全程单条出站 HTTPS。
 
 **多机额外测试项**（单机测完后仅需验证）：
 
 | 测试项 | 内容 |
 |--------|------|
-| MinIO 文件传输 | 大文件（1GB+视频）上传下载完整性 |
-| Redis TLS 连接 | Worker 通过公网连接 Redis |
-| 网络延迟下的心跳 | Worker 心跳在高延迟下不误判为离线 |
+| 网关认领回路 | 远程 worker 注册→认领→上报闭环 |
+| 产物代理 | 大文件（1GB+视频）经网关 pull/push 完整性 |
+| 网络延迟下的心跳 | worker 心跳在高延迟下不误判为离线 |
 
-这些是基础设施测试，不涉及应用逻辑。10 分钟跑通即可。
+这些是基础设施测试，不涉及应用逻辑。
 
 ## 4. 数据流
 
@@ -217,13 +210,19 @@ graph LR
     smart_p --> review_p["15_review"]
 ```
 
-**文章 (article)** — M5 实现：
+**文章 (article)** — M6 实现：
 ```mermaid
 graph LR
-    dl_a["00_download"] --> extract["20_extract"] --> smart_a["21_smart_article"] --> review_a["22_review"]
+    dl_a["00_download"] --> parse_a["16_parse_article"] --> sections_a["17_article_sections"] --> smart_a["18_smart_article"] --> review_a["19_review"]
 ```
 
-每种类型共享 `00_download`（下载/获取原始内容）和 `*_smart` / `*_review`（AI 笔记 + 评审）的模式，中间的处理步骤按内容类型各异。
+**音频 / 播客 (audio)** — M6 实现：
+```mermaid
+graph LR
+    dl_au["00_download"] --> whisper_au["00b_whisper"] --> transcript["20_transcript_parse"] --> smart_au["21_smart_podcast"] --> review_au["22_review"]
+```
+
+每种类型共享 `00_download`（下载/获取原始内容）和 `*_smart` / `*_review`（AI 笔记 + 评审）的模式，中间的处理步骤按内容类型各异。audio 复用 video 的 `00b_whisper` 做转写（落在 gpu 池，含 cpu fallback）。
 
 ### 视频步骤 DAG 详解
 
@@ -235,10 +234,10 @@ graph LR
 
 | 池名 | 并发上限 | 说明 | 示例步骤 |
 |------|---------|------|---------|
-| io | 不限 | 轻量 IO | 00_download, 05_danmaku, 07_mechanical, 20_extract |
+| io | 不限 | 轻量 IO | 00_download, 05_danmaku, 07_mechanical |
 | scene | 1 | CPU 全占，与 cpu 池互斥 | 01_scene |
-| cpu | 3 | 中等 CPU | 02_frames, 03_dedup, 04_ocr, 10_pdf_parse |
-| ai | 2 | LLM 并发（按 Provider 各自限速） | 06_punctuate, 08_smart, 09_review, 14_smart_paper |
+| cpu | 3 | 中等 CPU | 02_frames, 03_dedup, 04_ocr, 10_pdf_parse, 16_parse_article, 17_article_sections, 20_transcript_parse |
+| ai | 2 | LLM 并发（按 Provider 各自限速） | 06_punctuate, 08_smart, 09_review, 14_smart_paper, 18_smart_article, 21_smart_podcast |
 | gpu | 1 | GPU 独占 | 00b_whisper |
 
 **互斥规则**：scene 运行时冻结 cpu 池（场景检测吃满全部核心）。
@@ -267,14 +266,16 @@ graph LR
 
 **禁止的依赖**：
 - 展示层 → 存储层（前端不能直读文件/DB）
-- 执行层 → 服务层（Worker 不调 API，通过 Redis 事件通信）
+- 执行层 → 服务层（核心内 worker 通过 Redis 事件通信，不调内部 API）
 - Worker 之间直接通信（通过文件和 Redis 解耦）
+
+> 例外：远程 worker 经 `/api/runner/*` 网关接入（注册/认领/上报/产物代理），这是 worker 与核心间唯一受控的出站通路，不破坏“worker 间不直连、不读中心 Redis/MinIO”。
 
 ## 7. 关键不变量
 
 **数据与部署**：
-1. **主机是唯一持久节点**：所有数据在主机。中转服务器/GPU 丢了不丢数据（MinIO 只做临时中转）。
-2. **零公网端口**：主机和 GPU 都不开入站端口（Cloudflare Tunnel 出站建立）。
+1. **主机是唯一持久节点**：所有数据在主机。远程 worker 机器丢了不丢数据（产物经网关回传主机持久化）。
+2. **零公网端口**：主机用户入口走 Cloudflare Tunnel 出站；远程 worker 只出站 HTTPS 到 API 网关，自身不开入站端口。
 3. **容器隔离**：宿主机不装任何依赖，全部在 Docker 内运行。
 
 **步骤与执行**：  
@@ -301,8 +302,8 @@ graph LR
 | 存储 | 本地文件系统 (M4+ MinIO 中转) | [ADR-0003](adr/0003-storage-local-first.md) |
 | LLM | 多 Provider AI 网关 | [ADR-0004](adr/0004-llm-multi-provider.md) |
 | 前端 | Vue 3 + Vite + Tailwind | [ADR-0005](adr/0005-frontend-vue3.md) |
-| 网关 | Cloudflare Tunnel | [ADR-0006](adr/0006-gateway-cloudflare-tunnel.md) |
-| 远程 Worker | Redis 轮询 + MinIO 文件中转 | [ADR-0007](adr/0007-remote-worker-polling.md) |
+| 用户入口 | Cloudflare Tunnel | [ADR-0006](adr/0006-gateway-cloudflare-tunnel.md) |
+| 远程 Worker 接入 | 出站 HTTPS 网关（`/api/runner/*`） | [ADR-0009](adr/0009-worker-gateway-outbound-https.md)（取代 [ADR-0007](adr/0007-remote-worker-polling.md)） |
 | 搜索 | SQLite FTS5 | [ADR-0008](adr/0008-search-sqlite-fts5.md) |
 
 ## 9. M1 → M4 演进路径
@@ -312,8 +313,8 @@ graph LR
 | **M1** | All-in-One | 调度器 + Worker + StorageBackend + AI Gateway + Profile + 风格标签 + 视频 pipeline + 论文 pipeline + API + Worker 管理 + 前端 + Tunnel | 单步验证 + 并发安全 + DRY_RUN |
 | **M2** | All-in-One | 集合管理 + FTS5 搜索 + Profile 动态积累 | 搜索质量 |
 | **M3** | All-in-One | 视频回放 + 标注 + PDF 导出 | 前端交互 |
-| **M4** | 分层部署 | 中转 Redis/MinIO + RemoteStorage + GPU Worker | 网络连通 + 文件传输 |
+| **M4** | 分层部署 | `/api/runner/*` 网关 + GatewayStorage + 远程 GPU Worker | 网关认领回路 + 产物代理 |
 
-**开发路径**：M1-M3 全在 All-in-One 模式下开发和测试。M4 只加分层部署能力，应用代码不变——只验证 MinIO 传输和 Redis TLS 连接。
+**开发路径**：M1-M3 全在 All-in-One 模式下开发和测试。M4 只加分层部署能力，应用代码不变——worker 端仅靠环境变量切到网关模式，验证认领回路与产物代理。
 
 **M1 测试重点**：LLM 调用花真钱。必须在 `DRY_RUN=1` 下验证乐观锁、exec_id 去重、事件幂等后，再接真 Provider。详见 [09-testing.md §5](09-testing.md)。

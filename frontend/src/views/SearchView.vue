@@ -32,6 +32,20 @@ const contentTypeLabels: Record<string, string> = {
   audio: '播客',
 }
 
+// snippet 安全渲染：后端 fts5 高亮用 <mark>，正文可能混入原始 HTML。
+// 先转义全部 HTML，再仅还原 <mark> 高亮标记，杜绝任何可执行标签。
+function safeSnippet(raw: string): string {
+  if (!raw) return ''
+  const escaped = raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+  return escaped
+    .replace(/&lt;mark&gt;/g, '<mark>')
+    .replace(/&lt;\/mark&gt;/g, '</mark>')
+}
+
 function buildQuery(): string {
   const p = new URLSearchParams()
   p.set('q', q.value.trim())
@@ -132,8 +146,8 @@ function openNote(item: SearchResultItem) {
             {{ typeLabels[item.note_type] || item.note_type }}
           </span>
         </div>
-        <!-- snippet 由后端 fts5 渲染，已含 <mark> 高亮且为纯文本，v-html 安全。 -->
-        <p class="text-sm text-gray-600 search-snippet" v-html="item.snippet"></p>
+        <!-- snippet 经 safeSnippet 转义，仅保留 <mark> 高亮，杜绝注入。 -->
+        <p class="text-sm text-gray-600 search-snippet" v-html="safeSnippet(item.snippet)"></p>
         <div class="flex items-center gap-2 mt-2 text-xs text-gray-400">
           <span v-if="item.content_type">{{ contentTypeLabels[item.content_type] || item.content_type }}</span>
           <span v-if="item.domain && item.domain !== 'general'">{{ item.domain }}</span>

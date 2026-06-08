@@ -307,8 +307,8 @@ class AIGateway:
         request: LLMRequest,
         job_id: str | None = None,
     ) -> list[LLMResponse]:
-        """多 Provider 并行对比（M1 预留接口）。"""
-        raise NotImplementedError("compare mode is post-M1")
+        """多 Provider 并行对比（预留接口，尚未实现）。"""
+        raise NotImplementedError("compare mode not implemented")
 
     def _get_step_ai_config(self, step_name: str) -> dict:
         steps = self._pipelines_config.get("steps", [])

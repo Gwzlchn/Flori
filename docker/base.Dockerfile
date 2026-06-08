@@ -17,7 +17,7 @@ RUN if [ "$USE_USTC_MIRROR" = "1" ]; then \
 WORKDIR /app
 
 COPY pyproject.toml .
-RUN pip install --no-cache-dir ".[steps,api]" && \
+RUN pip install --no-cache-dir ".[steps,api,worker]" && \
     pip install --no-cache-dir websockets httpx
 
 # 不写 .pyc/__pycache__：配合 test/dev compose 的 bind-mount，避免容器内 pytest

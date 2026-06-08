@@ -111,6 +111,9 @@ class DownloadStep(StepBase):
         """抓 HTML 原文写 input/source.html;同时用 trafilatura 抽正文/标题供后续解析。"""
         import trafilatura
 
+        from shared.net import assert_public_url
+
+        assert_public_url(url)  # 抓取前挡内网/回环目标(SSRF)
         input_dir = self.job_dir / "input"
         input_dir.mkdir(parents=True, exist_ok=True)
 
@@ -137,11 +140,14 @@ class DownloadStep(StepBase):
         """单集音频 URL → 下载写 input/source.mp3。无 RSS,只取单文件。
         同时落一份 input/source.mp4(复用现有 whisper 步,其入参约定为 source.mp4;
         ffmpeg 按内容嗅探解码,扩展名不影响转写)。"""
+        from shared.net import assert_public_url
+
+        assert_public_url(url)  # 下载前挡内网/回环目标(SSRF)
         input_dir = self.job_dir / "input"
         input_dir.mkdir(parents=True, exist_ok=True)
 
         dest = input_dir / "source.mp3"
-        cmd = ["curl", "-fSL", "-o", str(dest), url]
+        cmd = ["curl", "-fSL", "-o", str(dest), "--", url]
         self.run_subprocess(cmd, timeout=self.config["step"]["timeout_sec"])
 
     def _link_audio_for_whisper(self, input_dir: Path) -> None:

@@ -33,8 +33,20 @@ class LocalStorage:
     def __init__(self, jobs_dir: Path):
         self.jobs_dir = jobs_dir
 
+    def _safe_path(self, job_id: str, rel_path: str = "") -> Path:
+        # 兜底防穿越:job_id 不得逃出 jobs_dir、rel 不得逃出其 job 目录,
+        # 挡持 token 者经 job_id/rel 里的 ".." 读写中心数据。
+        root = self.jobs_dir.resolve()
+        job_root = (root / job_id).resolve()
+        if job_root != root and root not in job_root.parents:
+            raise ValueError("path escapes jobs_dir")
+        path = (job_root / rel_path).resolve()
+        if path != job_root and job_root not in path.parents:
+            raise ValueError("path escapes job dir")
+        return path
+
     async def pull(self, job_id: str, step: str) -> Path:
-        return self.jobs_dir / job_id
+        return self._safe_path(job_id)
 
     async def push(self, job_id: str, step: str, work_dir: Path) -> None:
         pass
@@ -43,13 +55,13 @@ class LocalStorage:
         pass
 
     async def read_file(self, job_id: str, rel_path: str) -> bytes | None:
-        path = self.jobs_dir / job_id / rel_path
+        path = self._safe_path(job_id, rel_path)
         if not path.is_file():
             return None
         return await asyncio.to_thread(path.read_bytes)
 
     async def write_file(self, job_id: str, rel_path: str, data: bytes) -> None:
-        path = self.jobs_dir / job_id / rel_path
+        path = self._safe_path(job_id, rel_path)
 
         def _write() -> None:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -61,7 +73,7 @@ class LocalStorage:
         return await asyncio.to_thread(self._list_files_sync, job_id)
 
     def _list_files_sync(self, job_id: str) -> list[str]:
-        root = self.jobs_dir / job_id
+        root = self._safe_path(job_id)
         if not root.is_dir():
             return []
         # 只收文件,相对 job 目录,统一用 "/" 分隔(跨平台/与对象键对齐)。

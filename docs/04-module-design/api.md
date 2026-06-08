@@ -96,14 +96,15 @@ async def ws_job(ws: WebSocket, job_id: str, redis: Redis):
 
 ## 6. 平台扫码登录
 
-B站支持扫码登录获取 cookies（用于 1080P 下载）。流程：
+B站支持扫码登录获取 cookies（用于 1080P 下载）。流程（路由见 `api/routes/bili.py`）：
 
-1. `POST /api/auth/bilibili/qrcode` → 调用 B站公开扫码 API → 返回二维码 URL + key
-2. 前端渲染二维码，用户用 B站 App 扫码
-3. `GET /api/auth/bilibili/poll?key={key}` → 轮询扫码状态
-4. 扫码成功 → 保存 cookies 到 `/data/cookies/bilibili.txt`
+1. `POST /api/bili/login/start` → 调 passport 生成二维码 → 返回 `qrcode_key` + 渲染好的 PNG data URI（`qr_png`）
+2. 前端直接把 `qr_png` 当 `img src` 渲染，用户用 B站 App 扫码
+3. `GET /api/bili/login/poll?qrcode_key={key}` → 轮询扫码状态（`waiting`/`scanned`/`confirmed`/`expired`）
+4. `confirmed` 时从 Set-Cookie 取 SESSDATA/bili_jct/DedeUserID 入库（`app_credentials` 表，非文件）
+5. `GET /api/bili/status` 查登录态、`POST /api/bili/logout` 清除 cookie
 
-具体 API endpoint 参考 B站开放文档或 yutto/bilibili-api 等开源项目的实现。
+下载步用凭证时优先读库内 SESSDATA（创建 job 时写入 job.json 下发），本地文件 `/data/cookies/bilibili.txt` 仅作回退。
 
 ## 7. 限流
 

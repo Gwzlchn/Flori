@@ -271,6 +271,66 @@ class TestSkipNoWorker:
         assert await redis.get_step_status("j_test_001", "A") == "ready"
 
 
+class TestNoWorkerFailFast:
+    """check_no_worker:无 running 且所有 ready 步的 pool 无 worker、超宽限期 → fail-fast,
+    避免未部署 gpu worker 时 audio 永久挂起。用真实 _pool_has_workers。"""
+
+    @pytest.mark.asyncio
+    async def test_stuck_job_fails_after_grace(self, redis, db, config):
+        s = Scheduler(redis, db, config)
+        s._NO_WORKER_GRACE_SEC = 0  # 立即判定,免等宽限
+        job = make_job()
+        db.create_job(job)
+        await s.submit_job(job)  # A=ready(cpu 无 worker), B/C=waiting
+        await s.check_no_worker()
+        assert "j_test_001" not in await redis.get_active_jobs()
+        assert (await asyncio.to_thread(db.get_job, "j_test_001")).status == JobStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_within_grace_not_failed(self, redis, db, config):
+        s = Scheduler(redis, db, config)  # 默认宽限 90s
+        job = make_job()
+        db.create_job(job)
+        await s.submit_job(job)
+        await s.check_no_worker()  # 首次只记时,不该失败
+        assert "j_test_001" in await redis.get_active_jobs()
+
+    @pytest.mark.asyncio
+    async def test_not_failed_when_pool_has_worker(self, redis, db, config):
+        s = Scheduler(redis, db, config)
+        s._NO_WORKER_GRACE_SEC = 0
+        await redis.register_worker(
+            "w1", {"type": "cpu", "pools": "cpu,io", "status": "idle"}
+        )
+        job = make_job()
+        db.create_job(job)
+        await s.submit_job(job)
+        await s.check_no_worker()  # cpu 有 worker → 可推进,不失败
+        assert "j_test_001" in await redis.get_active_jobs()
+
+    @pytest.mark.asyncio
+    async def test_running_step_not_failed(self, redis, db, config):
+        s = Scheduler(redis, db, config)
+        s._NO_WORKER_GRACE_SEC = 0
+        job = make_job()
+        db.create_job(job)
+        await s.submit_job(job)
+        await redis.set_step_status("j_test_001", "A", "running")
+        await s.check_no_worker()  # 有 running 步 → 在推进,不失败
+        assert "j_test_001" in await redis.get_active_jobs()
+
+
+class TestMarkdownToText:
+    """_markdown_to_text 在入 FTS 索引前剥 HTML 标签,断高亮 snippet XSS 之源。"""
+
+    def test_strips_html_tags(self):
+        from scheduler.scheduler import _markdown_to_text
+        out = _markdown_to_text("天 <img src=x onerror=alert(1)> 气 <script>bad</script>")
+        assert "<" not in out and ">" not in out
+        assert "onerror" not in out
+        assert "天" in out and "气" in out
+
+
 class TestDAGProgression:
     @pytest.mark.asyncio
     async def test_linear_chain(self, scheduler, redis, db):

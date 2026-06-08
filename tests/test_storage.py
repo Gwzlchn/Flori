@@ -76,6 +76,26 @@ class TestLocalStorage:
     async def test_list_files_missing_job(self, storage):
         assert await storage.list_files("nope") == []
 
+    @pytest.mark.asyncio
+    async def test_traversal_via_job_id_blocked(self, storage, tmp_path):
+        # job_id 含 ".." 逃出 jobs_dir → 拒绝(兜底防穿越,挡持 token 者读写中心数据)
+        outside = tmp_path.parent / "outside.txt"
+        outside.write_text("untouchable")
+        with pytest.raises(ValueError):
+            await storage.read_file("..", "outside.txt")
+        with pytest.raises(ValueError):
+            await storage.write_file("..", "outside.txt", b"pwned")
+        with pytest.raises(ValueError):
+            await storage.list_files("../")
+        assert outside.read_text() == "untouchable"  # 未被覆盖
+
+    @pytest.mark.asyncio
+    async def test_traversal_via_rel_blocked(self, storage):
+        with pytest.raises(ValueError):
+            await storage.read_file("j_ok", "../../etc/passwd")
+        with pytest.raises(ValueError):
+            await storage.write_file("j_ok", "../escape.txt", b"x")
+
 
 class TestRemoteListFiles:
     @pytest.mark.asyncio

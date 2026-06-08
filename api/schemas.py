@@ -94,7 +94,7 @@ class HealthResponse(BaseModel):
     checks: dict
 
 
-# ── 集合 (M2) ──
+# ── 集合 ──
 
 
 class CollectionCreateRequest(BaseModel):
@@ -120,7 +120,7 @@ class CollectionResponse(BaseModel):
     created_at: str
 
 
-# ── 术语表 (M2) ──
+# ── 术语表 ──
 
 
 class GlossaryTermRequest(BaseModel):
@@ -140,7 +140,7 @@ class GlossaryTermResponse(BaseModel):
     created_at: str
 
 
-# ── 搜索 (M2) ──
+# ── 搜索 ──
 
 
 class SearchResultItem(BaseModel):

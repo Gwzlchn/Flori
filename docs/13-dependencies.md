@@ -99,4 +99,9 @@
 | **GPL-3.0** | 分发需开源 | yutto, pysrt, marker |
 | MIT/Apache/BSD | 无限制 | 其他大部分工具 |
 
-本项目计划以 MIT 开源。AGPL/GPL 工具作为独立进程（Docker 容器）调用，不链接到本项目代码中，符合 GPL 兼容性要求。
+本项目计划以 MIT 开源。AGPL/GPL 工具的集成方式因运行模式而异，需分两种情况看待：
+
+- **docker 模式（`STEP_RUNTIME=docker`）**：每个步骤在独立容器内作为独立进程运行，本项目代码与 AGPL/GPL 组件不在同一进程、不发生链接。这种"独立进程调用"的形态通常被视为未构成衍生作品，但是否满足对应 License 的全部义务仍需自行确认。
+- **默认 subprocess 模式（`STEP_RUNTIME=subprocess`，worker 的默认值）**：步骤以 `python3 -m <module>` 子进程运行，步骤代码与库**同进程加载**——例如 `steps/paper/step_10_pdf_parse.py` 直接 `import fitz`（PyMuPDF，AGPL-3.0）。此时步骤代码与 AGPL 组件构成同进程链接，通常被视为衍生作品，分发/对外提供服务时可能触发 AGPL 的源码提供义务，需自行确认合规边界。
+
+因此在默认模式下，"独立进程、不链接"的论断不成立。若要规避 AGPL/GPL 传染，可选项包括：仅以 docker 模式运行涉及这些组件的步骤、将相关步骤替换为更宽松许可的实现（如 PyMuPDF → pdfplumber），或就具体分发场景咨询法律意见。本节为工程性说明，不构成法律结论。

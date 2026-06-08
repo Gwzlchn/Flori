@@ -23,26 +23,20 @@ function readHashToken(): string {
 const authToken = ref(readHashToken() || localStorage.getItem('auth_token') || '')
 
 // 登录策略：默认走 Caddy 全站 Basic Auth（浏览器自动带凭证），
-// 应用层不再强制登录，也不主动发 Authorization（否则会覆盖浏览器的 Basic 头）。
-// 仅当用户显式设置了 app token（回退方案）时才发 Bearer。needsLogin 永远为 false，
-// 不弹应用登录框。
-const needsLogin = ref(false)
-
+// 应用层不主动发 Authorization（否则会覆盖浏览器的 Basic 头）。
+// 仅当用户显式设置了 app token（回退方案）时才发 Bearer。
 export function setToken(token: string) {
   authToken.value = token
   localStorage.setItem('auth_token', token)
-  needsLogin.value = false
 }
 
 export function clearToken() {
   authToken.value = ''
   localStorage.removeItem('auth_token')
-  // 不再弹应用登录框：未授权由浏览器的 Basic Auth 弹窗处理。
-  needsLogin.value = false
 }
 
 export function useAuth() {
-  return { authToken, needsLogin, setToken, clearToken }
+  return { authToken, setToken, clearToken }
 }
 
 export function useApi() {

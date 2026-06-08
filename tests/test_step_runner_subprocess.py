@@ -252,7 +252,7 @@ class TestSubprocessProgress:
         assert written["current"] == 3
 
 
-# ── env 按需下放（P4 secrets-on-demand）──
+# ── env 按需下放（密钥按需注入）──
 
 
 # stub：把自身可见的 os.environ 落到 work_dir/env_dump.json，供断言子进程实际继承了什么。

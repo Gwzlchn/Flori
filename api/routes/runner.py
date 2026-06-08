@@ -305,6 +305,12 @@ async def record_usage(
 # ── 产物代理:worker<->API<->storage,minio 永不暴露给 worker ──
 
 
+def _validate_job_id(job_id: str) -> None:
+    # job_id 是路径段,禁 ".."、分隔符、空字节,挡持 token 者经 job_id 穿越读写中心数据。
+    if ".." in job_id or "/" in job_id or "\x00" in job_id:
+        raise HTTPException(400, "invalid job_id")
+
+
 def _validate_rel(rel: str) -> None:
     # 防目录穿越:禁 ".."、绝对路径、空字节(与 jobs._validate_job_id 同风格)。
     if ".." in rel or rel.startswith("/") or "\x00" in rel:
@@ -318,6 +324,7 @@ async def list_artifacts(
     storage: StorageBackend = Depends(get_storage),
 ):
     """产物清单:GatewayStorage.pull 据此逐个拉取。"""
+    _validate_job_id(job_id)
     return {"files": await storage.list_files(job_id)}
 
 
@@ -329,6 +336,7 @@ async def get_artifact(
     storage: StorageBackend = Depends(get_storage),
 ):
     """取单个产物字节;不存在返回 404(GatewayStorage.read_file 据此返回 None)。"""
+    _validate_job_id(job_id)
     _validate_rel(rel)
     data = await storage.read_file(job_id, rel)
     if data is None:
@@ -345,6 +353,7 @@ async def put_artifact(
     storage: StorageBackend = Depends(get_storage),
 ):
     """回传单个产物:原始 body 直接写入 storage(worker push 的中转出口)。"""
+    _validate_job_id(job_id)
     _validate_rel(rel)
     data = await request.body()
     await storage.write_file(job_id, rel, data)

@@ -606,3 +606,22 @@ class TestArtifacts:
                 "/api/runner/jobs/j1/artifacts/%2e%2e/secret", content=b"x", headers=h,
             )
         ).status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_job_id_traversal_rejected(self, jobs_client):
+        _, token = await _register_real(jobs_client)
+        h = {"Authorization": f"Bearer {token}"}
+        # job_id 段含 ".." → 400(list/get/put 三端点同守卫),挡经 job_id 读写中心数据
+        assert (
+            await jobs_client.get("/api/runner/jobs/%2e%2e/artifacts", headers=h)
+        ).status_code == 400
+        assert (
+            await jobs_client.get(
+                "/api/runner/jobs/%2e%2e/artifacts/db%2Fanalyzer.db", headers=h,
+            )
+        ).status_code == 400
+        assert (
+            await jobs_client.put(
+                "/api/runner/jobs/%2e%2e/artifacts/x", content=b"x", headers=h,
+            )
+        ).status_code == 400

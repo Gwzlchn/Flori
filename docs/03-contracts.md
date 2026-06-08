@@ -26,18 +26,29 @@ curl -X POST http://localhost:8000/api/jobs \
   -H "Content-Type: application/json" \
   -d '{"url": "https://mp.weixin.qq.com/s/xxx", "content_type": "article"}'
 
-# 文件上传（自动识别类型：mp4→video, pdf→paper）
+# 音频 / 播客 URL
 curl -X POST http://localhost:8000/api/jobs \
-  -F "file=@video.mp4" \
-  -F "domain=deep-learning"
-
-# 批量模式（创作者全部视频）
-curl -X POST http://localhost:8000/api/jobs/batch \
   -H "Content-Type: application/json" \
-  -d '{"bilibili_mid": "12345678", "content_type": "video", "domain": "deep-learning"}'
+  -d '{"url": "https://example.com/episode.mp3", "content_type": "audio"}'
 ```
 
-`content_type` 可显式指定，也可由 API 根据 URL/文件自动推断。
+JSON 创建不接受文件；文件上传走独立的 `POST /api/jobs/upload`（见下）。
+
+`content_type` 可显式指定，也可由 API 根据 URL 自动推断（arxiv→paper、网页→article、播客→audio，其余按 video）。
+
+#### POST /api/jobs/upload — 文件上传创建
+
+`multipart/form-data`：`file`（必填）+ `domain`（默认 `general`）+ `style_tags`（JSON 字符串，默认 `[]`）。
+按扩展名识别类型：`.pdf`→paper，`.mp4/.mkv/.webm/.flv`→video，`.mp3/.m4a/.wav/.aac`→audio，`.html/.htm/.txt`→article，其余按 video。上限 2GB。
+
+```bash
+curl -X POST http://localhost:8000/api/jobs/upload \
+  -F "file=@video.mp4" \
+  -F "domain=deep-learning" \
+  -F 'style_tags=["case-study"]'
+```
+
+Response `201`（同 `POST /api/jobs`）。
 
 Response `201`:
 ```json
@@ -195,6 +206,32 @@ GET /api/jobs/{id}/source               → video/mp4 (支持 Range/206)
 
 ### 1.4 Worker 管理
 
+`GET /api/workers` 返回的 `status` 是后端按心跳新鲜度+是否在跑+管理员叠加位读时派生的公共态（`online-idle` / `online-busy` / `offline` / `stale` / `draining`，见 §3.4）；下文示例中的 `idle`/`busy` 是历史字段示意，实际响应为派生态。
+
+#### POST /api/workers/registration-token — 铸接入 token
+
+铸/重置一次性接入 token（可复用、可重置，重铸即作废旧的）。远程 worker 注册时持此 token 经 `POST /api/runner/register` 换取 per-worker token（gateway 接入流程见 §1.7）。
+
+Response `200`:
+```json
+{"token": "mnw-xxxxxxxx"}
+```
+
+#### GET /api/workers/{id}/jobs — Worker 任务历史
+
+该 worker 执行过的步骤记录。`?limit=` 默认 50，范围 1–200。
+
+Response `200`:
+```json
+[
+  {
+    "job_id": "j_xxx", "step": "08_smart", "status": "done",
+    "started_at": "2026-05-17T12:00:00Z", "finished_at": "2026-05-17T12:00:45Z",
+    "duration_sec": 45.2, "error": null
+  }
+]
+```
+
 #### GET /api/workers — Worker 列表
 
 ```json
@@ -266,31 +303,43 @@ curl -X PUT http://localhost:8000/api/workers/ai-a1b2c3d4 \
 
 ### 1.5 平台认证
 
+B站扫码登录走 `/api/bili/*`（cookie 入库 DB）；YouTube cookies 与平台 cookie 文件状态走 `/api/auth/*`：
+
 ```
-GET  /api/auth/status                  → 各平台 cookies 状态
-POST /api/auth/bilibili/qrcode         → 生成扫码二维码
-GET  /api/auth/bilibili/poll?key={key} → 轮询扫码结果
-POST /api/auth/youtube/cookies          → 上传 YouTube cookies.txt
+POST /api/bili/login/start             → 生成扫码二维码（passport QR）
+GET  /api/bili/login/poll?qrcode_key=  → 轮询扫码结果
+GET  /api/bili/status                  → 当前 B站登录态
+POST /api/bili/logout                  → 清除已入库 B站 cookie
+GET  /api/auth/status                  → bilibili.txt / youtube.txt 文件状态
+POST /api/auth/youtube/cookies         → 上传 YouTube cookies.txt
 ```
 
-#### POST /api/auth/bilibili/qrcode
+#### POST /api/bili/login/start
 
-Response `200`:
+Response `200`（`qr_png` 是可直接当 `img src` 的 PNG data URI）：
 ```json
 {
-  "qrcode_url": "https://...",
-  "qrcode_key": "abc123..."
+  "qrcode_key": "abc123...",
+  "qr_png": "data:image/png;base64,...",
+  "url": "https://..."
 }
 ```
 
-#### GET /api/auth/bilibili/poll
+#### GET /api/bili/login/poll
+
+`state` ∈ `waiting` / `scanned` / `expired` / `confirmed`；`confirmed` 时服务端从 Set-Cookie 取 SESSDATA 等入库：
+```json
+{"state": "waiting",   "logged_in": false, "uname": null}
+{"state": "scanned",   "logged_in": false, "uname": null}
+{"state": "confirmed", "logged_in": true,  "uname": "用户昵称"}
+{"state": "expired",   "logged_in": false, "uname": null}
+```
+
+#### GET /api/bili/status
 
 Response `200`:
 ```json
-{"status": "waiting", "message": "等待扫码..."}
-{"status": "scanned", "message": "已扫码，请在 App 确认"}
-{"status": "success", "message": "1080P 已解锁"}
-{"status": "expired", "message": "二维码已过期，请刷新"}
+{"logged_in": true, "uname": "用户昵称"}
 ```
 
 ### 1.6 配置管理
@@ -298,6 +347,30 @@ Response `200`:
 ```
 GET  /api/config/pools                 → 当前资源池配置
 PUT  /api/config/pools                 → 热更新资源池配置
+```
+
+### 1.7 Worker 网关（`/api/runner/*`）
+
+远程 worker 经单条出站 HTTPS 接入这组端点：注册换 token、长轮询认领步骤、上报结果、经网关代理读写产物（worker 不直连 Redis/MinIO，见 [ADR-0009](adr/0009-worker-gateway-outbound-https.md)）。`register` 用接入 token（`POST /api/workers/registration-token` 铸发）门禁，其余端点用注册时签发的 per-worker token（`Authorization: Bearer`）。
+
+```
+POST   /api/runner/register                                → 换发 per-worker token
+POST   /api/runner/heartbeat                               → 刷新存活，回发 draining 控制位
+POST   /api/runner/offline                                 → 主动下线
+POST   /api/runner/jobs/request                            → 长轮询认领一步（认到即返回 enrich 后的 claim）
+POST   /api/runner/jobs/{id}/steps/{step}/complete         → 上报完成
+POST   /api/runner/jobs/{id}/steps/{step}/fail             → 上报失败
+POST   /api/runner/jobs/{id}/steps/{step}/release          → 释放认领（不计成败）
+POST   /api/runner/jobs/{id}/steps/{step}/progress         → 上报运行中进度（转发到 events:{id}）
+POST   /api/runner/usage                                   → 记录一次 AI 用量（exec_id 去重）
+GET    /api/runner/jobs/{id}/artifacts                     → 产物清单（GatewayStorage.pull 据此）
+GET    /api/runner/jobs/{id}/artifacts/{rel}              → 取单个产物字节
+PUT    /api/runner/jobs/{id}/artifacts/{rel}              → 回传单个产物字节
+```
+
+`POST /api/runner/register` Response `200`:
+```json
+{"worker_id": "ai-a1b2c3d4", "worker_token": "mnwt-...", "heartbeat_sec": 10}
 ```
 
 ## 2. WebSocket
@@ -352,7 +425,7 @@ Value:  "1" 表示冻结（scene 运行时冻结 cpu 池）
 Key:    job:{job_id}
 Type:   HASH
 Fields:
-  pipeline:       "video" | "paper" | "article"
+  pipeline:       "video" | "paper" | "article" | "audio"
   status:         "pending" | "downloading" | "processing" | "done" | "failed"
   domain:         "deep-learning" | "ml" | ...
   style_tags:     '["case-study"]'                 ← JSON array
@@ -388,7 +461,7 @@ Fields:
   tags:           "vision,claude-cli"              ← 能力标签
   reject_tags:    "private,confidential"              ← 排斥标签（可选）
   hostname:       "gpu-server" | ""
-  status:         "idle" | "busy" | "draining"
+  status:         "idle" | "busy" | "draining" | "offline"   ← 存量字段，非对外公共态
   current_job:    "j_xxx" | ""
   current_step:   "01_scene" | ""
   gpu_name:       "RTX 4090" | ""
@@ -398,6 +471,18 @@ TTL:    30 秒（心跳续期）
 
 Redis 为实时状态；持久记录（统计/历史/备注）存 SQLite workers 表。
 ```
+
+**公共状态是读时派生，不直接存。** SQLite/Redis 里 `status` 存的是存量态（`idle` / `busy` / `stale` / `draining` / `offline`，worker 自报或管理员置位）；`GET /api/workers` 不信任该字段，而是按 `shared/status.py` 的 `compute_worker_status()` 用 `last_heartbeat` 新鲜度 + `current_job` + 管理员 `draining` 叠加位现算出对外公共态：
+
+| 公共态 | 含义 |
+|--------|------|
+| `online-busy` | 心跳新鲜且有在跑任务 |
+| `online-idle` | 心跳新鲜且空闲 |
+| `draining` | 管理员置 draining 且仍在线（完成当前任务后不再接新任务） |
+| `offline` | 心跳超 `online_window`（默认 30s）但未到 `stale_window` |
+| `stale` | 心跳缺失或超 `stale_window`（默认 900s），GC 信号 |
+
+判定优先级：`draining`（仅在线生效）→ `offline` → `stale` → `online-busy` → `online-idle`。窗口阈值取自 `configs/pools.yaml` 的 `worker_status` 段，缺省回退内置默认。容器跑 UTC，故由后端统一派生，前端只渲染、不再用本地时区自算。
 
 ### 3.5 事件发布
 
@@ -419,157 +504,131 @@ Payload: (WebSocket 事件格式，同上 §2)
 
 ### 4.1 pipelines.yaml — 步骤链定义
 
-按 content_type 定义不同的步骤 DAG。调度器根据 Job 的 `pipeline` 字段加载对应步骤链。
+GitLab-CI 风格：顶层 `default` 全局默认 + `.` 前缀隐藏模板（不直接运行）+ 每个 content_type 一段 `variables`/`jobs`。加载时把 `default`、`extends` 模板、job 字段按键深合并归一化为内部 step 结构，步骤顺序由 `needs` 推导出 DAG。调度器据 Job 的 `pipeline` 字段加载对应段。
+
+**顶层结构**：
 
 ```yaml
-# ── 视频 pipeline (M1) ──
-video:
-  steps:
-    - name: "00_download"
-      pool: io
-      depends_on: []
-      timeout_sec: 600
-      retries: 3
+# 全局默认：所有 job 自动继承、可逐字段覆盖。
+default:
+  image: mnemo/step-base
+  timeout: 600
+  retry: 0
 
-    - name: "00b_whisper"
-      pool: gpu
-      depends_on: ["00_download"]
-      condition: "no_subtitle"
-      timeout_sec: 1800
-      retries: 2
-      tags: ["gpu"]                    # 需要 GPU
+# 隐藏模板（'.' 前缀，不直接运行）：同类步只写差异，extends 按键深合并。
+.cpu-step:
+  pool: cpu
+  timeout: 120
+  retry: 1
 
-    - name: "01_scene"
-      pool: scene
-      depends_on: ["00_download"]
-      timeout_sec: 600
-      retries: 2
+.ai-step:
+  pool: ai
+  timeout: 600
+  retry: 2
 
-    - name: "02_frames"
-      pool: cpu
-      depends_on: ["01_scene"]
-      timeout_sec: 120
-      retries: 1
-
-    - name: "03_dedup"
-      pool: cpu
-      depends_on: ["02_frames"]
-      timeout_sec: 120
-      retries: 1
-
-    - name: "04_ocr"
-      pool: cpu
-      depends_on: ["03_dedup"]
-      timeout_sec: 300
-      retries: 2
-
-    - name: "05_danmaku"
-      pool: io
-      depends_on: ["00_download"]
-      condition: "has_danmaku"
-      timeout_sec: 30
-      retries: 1
-
-    - name: "06_punctuate"
-      pool: ai
-      depends_on: ["00_download"]
-      condition: "has_subtitle"        # 检查 srt 是否存在（含 whisper 生成的）
-      timeout_sec: 300                 # 调度器在 00b_whisper 完成后重新检查此条件
-      retries: 3
-      tags: []                         # 任何 AI Worker 都能做
-
-    - name: "07_mechanical"
-      pool: io
-      depends_on: ["04_ocr", "05_danmaku", "06_punctuate"]
-      timeout_sec: 30
-      retries: 1
-
-    - name: "08_smart"
-      pool: ai
-      depends_on: ["07_mechanical"]
-      timeout_sec: 600
-      retries: 2
-      tags: ["vision"]                 # 需要有视觉能力的 AI Worker
-
-    - name: "09_review"
-      pool: ai
-      depends_on: ["08_smart"]
-      timeout_sec: 120
-      retries: 2
-      tags: []                         # 任何 AI Worker
-
-# ── 论文 pipeline (M1) ──
-paper:
-  steps:
-    - name: "00_download"
-      pool: io
-      depends_on: []
-      timeout_sec: 300
-      retries: 3
-
-    - name: "10_pdf_parse"
-      pool: cpu
-      depends_on: ["00_download"]
-      timeout_sec: 120
-      retries: 1
-
-    - name: "11_sections"
-      pool: cpu
-      depends_on: ["10_pdf_parse"]
-      timeout_sec: 60
-      retries: 1
-
-    - name: "12_figures"
-      pool: cpu
-      depends_on: ["10_pdf_parse"]
-      timeout_sec: 120
-      retries: 1
-
-    - name: "14_smart_paper"
-      pool: ai
-      depends_on: ["11_sections", "12_figures"]
-      timeout_sec: 600
-      retries: 2
-      tags: []
-
-    - name: "15_review"
-      pool: ai
-      depends_on: ["14_smart_paper"]
-      timeout_sec: 120
-      retries: 2
-      tags: []
-
-# ── 文章 pipeline (M5) ──
-article:
-  steps:
-    - name: "00_download"
-      pool: io
-      depends_on: []
-      timeout_sec: 120
-      retries: 3
-
-    - name: "20_extract"
-      pool: io
-      depends_on: ["00_download"]
-      timeout_sec: 60
-      retries: 1
-
-    - name: "21_smart_article"
-      pool: ai
-      depends_on: ["20_extract"]
-      timeout_sec: 600
-      retries: 2
-      tags: []
-
-    - name: "22_review"
-      pool: ai
-      depends_on: ["21_smart_article"]
-      timeout_sec: 120
-      retries: 2
-      tags: []
+.review:
+  pool: ai
+  timeout: 120
+  retry: 2
 ```
 
-新增内容类型只需在此文件添加一个 pipeline，无需改调度器/Worker 代码。
+**job 字段**：
+
+| 字段 | 说明 |
+|------|------|
+| `run` | 步骤模块（`steps.video.step_01_scene` 等），由 worker 执行 |
+| `extends` | 继承的隐藏模板名（`.cpu-step` / `.ai-step` / `.review`） |
+| `needs` | 上游 job 列表，决定 DAG 顺序；无 `needs` 即可与同级并行 |
+| `pool` | 资源池（io / scene / cpu / ai / gpu） |
+| `image` | 步骤镜像（`mnemo/step-base` / `mnemo/step-heavy` / `mnemo/step-gpu`） |
+| `timeout` | 超时秒数，支持 `$VAR` 引用本段 `variables` |
+| `retry` | 重试次数，支持 `$VAR` |
+| `tags` | 需求标签，匹配 worker 能力标签（如 `gpu` / `vision`） |
+| `rules` | 条件门：`exists` 命中后 `when: on`（启用）或 `when: skip`（跳过） |
+| `ai` | AI provider 路由：`primary` / `fallback` / `text_fallback`，各取 `{provider, model}` |
+
+**每段 `variables`** 是该 content_type 的单一事实源（AI provider/model、OCR 超时等），job 用 `$VAR` 引用。
+
+**视频 pipeline 示例**（截取，完整见 `configs/pipelines.yaml`）：
+
+```yaml
+video:
+  variables:
+    OCR_TIMEOUT: 1800
+    OCR_RETRIES: 1
+    AI_SMART_PRIMARY_PROVIDER: anthropic
+    AI_SMART_PRIMARY_MODEL: claude-sonnet-4-6
+    AI_SMART_FALLBACK_PROVIDER: openai
+    AI_SMART_FALLBACK_MODEL: gpt-4o
+    AI_SMART_TEXT_PROVIDER: deepseek
+    AI_SMART_TEXT_MODEL: deepseek-v4-pro
+    # ...（review / punct 的 provider 变量略）
+  jobs:
+    "00_download":
+      run: steps.common.step_00_download
+      pool: io
+      retry: 3
+
+    "00b_whisper":
+      run: steps.video.step_00b_whisper
+      image: mnemo/step-gpu
+      pool: gpu
+      needs: ["00_download"]
+      timeout: 1800
+      retry: 2
+      tags: ["gpu"]
+      rules:
+        - exists: "input/*.srt"
+          when: skip                   # 已有字幕则跳过 whisper
+
+    "04_ocr":
+      extends: .cpu-step
+      run: steps.video.step_04_ocr
+      image: mnemo/step-heavy
+      needs: ["03_dedup"]
+      timeout: $OCR_TIMEOUT
+      retry: $OCR_RETRIES
+
+    "06_punctuate":
+      extends: .ai-step
+      run: steps.video.step_06_punctuate
+      needs: ["00_download"]
+      timeout: 300
+      retry: 3
+      rules:
+        - exists: "input/*.srt"
+          when: on                     # 有字幕（含 whisper 产出）才标点
+      ai:
+        primary: {provider: $AI_PUNCT_PRIMARY_PROVIDER, model: $AI_PUNCT_PRIMARY_MODEL}
+        fallback: {provider: $AI_PUNCT_FALLBACK_PROVIDER, model: $AI_PUNCT_FALLBACK_MODEL}
+
+    "08_smart":
+      extends: .ai-step
+      run: steps.video.step_08_smart
+      needs: ["07_mechanical"]
+      tags: ["vision"]
+      ai:
+        primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
+        fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
+        text_fallback: {provider: $AI_SMART_TEXT_PROVIDER, model: $AI_SMART_TEXT_MODEL}
+
+    "09_review":
+      extends: .review
+      run: steps.video.step_09_review
+      needs: ["08_smart"]
+      ai:
+        primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
+        fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
+```
+
+**各 content_type 的 job 链**（`needs` 推导）：
+
+- **video**：`00_download` → `01_scene` → `02_frames` → `03_dedup` → `04_ocr`；`05_danmaku`/`06_punctuate`/`00b_whisper` 由 `00_download` 旁路触发；`07_mechanical` 汇合 `04_ocr`+`05_danmaku`+`06_punctuate` → `08_smart` → `09_review`。
+- **paper**：`00_download` → `10_pdf_parse` → (`11_sections`, `12_figures`) → `14_smart_paper` → `15_review`。
+- **article**：`00_download` → `16_parse_article` → `17_article_sections` → `18_smart_article` → `19_review`。
+- **audio**：`00_download` → `00b_whisper` → `20_transcript_parse` → `21_smart_podcast` → `22_review`。
+
+新增内容类型只需在此文件添加一段 `variables`/`jobs`，无需改调度器/Worker 代码。
 
 ### 4.2 pools.yaml — 资源池配置
 
@@ -610,33 +669,40 @@ exclusive_groups:
 
 ### 4.4 candidates.json — 候选帧
 
+`filename` 是 `assets/` 下的文件名（步骤已自带 `scene_{index}_{ts}s.jpg` 编码），`scene_index` 标出来源场景：
+
 ```json
 [
-  {"path": "assets/scene_0000_1.5s.jpg", "timestamp": 1.5, "source": "scene"},
-  {"path": "assets/sample_0005_45.0s.jpg", "timestamp": 45.0, "source": "sample"}
+  {"index": 0, "scene_index": 0, "timestamp_sec": 1.5, "filename": "scene_0000_1.5s.jpg"},
+  {"index": 1, "scene_index": 3, "timestamp_sec": 45.0, "filename": "scene_0001_45.0s.jpg"}
 ]
 ```
 
 ### 4.5 dedup.json — 去重结果
 
-在 candidates 基础上追加字段：
+在 candidates 基础上追加 `keep` / `phash`（缺图或读图异常时追加 `reason`）：
 
 ```json
 [
-  {"path": "assets/scene_0000_1.5s.jpg", "timestamp": 1.5, "source": "scene", "keep": true, "phash": "d4c0d4e0f0f8fcfe"},
-  {"path": "assets/scene_0001_15.2s.jpg", "timestamp": 15.2, "source": "scene", "keep": false, "phash": "d4c0d4e0f0f8fcff"}
+  {"index": 0, "scene_index": 0, "timestamp_sec": 1.5, "filename": "scene_0000_1.5s.jpg", "keep": true, "phash": "d4c0d4e0f0f8fcfe"},
+  {"index": 1, "scene_index": 0, "timestamp_sec": 15.2, "filename": "scene_0001_15.2s.jpg", "keep": false, "phash": "d4c0d4e0f0f8fcff"}
 ]
 ```
 
 ### 4.6 ocr.json — OCR 结果
 
+仅对 `keep=true` 的帧做 OCR。`text` 是各识别行用换行拼接的纯文本，`boxes` 是逐行的框/置信度明细：
+
 ```json
 [
   {
-    "path": "assets/scene_0000_1.5s.jpg",
-    "timestamp": 1.5,
-    "texts": ["0.32", "loss", "epoch"],
-    "full_text": "0.32 loss epoch"
+    "index": 0,
+    "filename": "scene_0000_1.5s.jpg",
+    "timestamp_sec": 1.5,
+    "text": "0.32\nloss\nepoch",
+    "boxes": [
+      {"text": "0.32", "confidence": 0.987, "box": [[10, 8], [60, 8], [60, 28], [10, 28]]}
+    ]
   }
 ]
 ```
@@ -677,7 +743,7 @@ exclusive_groups:
 |-------------|---------|------|
 | 400 | `invalid_url` | URL 格式不合法 |
 | 400 | `invalid_domain` | 未知领域 |
-| 400 | `file_too_large` | 上传文件超过 2GB |
+| 413 | `file_too_large` | 上传文件超过 2GB |
 | 401 | `unauthorized` | Bearer Token 无效 |
 | 404 | `job_not_found` | Job ID 不存在 |
 | 404 | `file_not_found` | 请求的产物文件不存在 |
@@ -719,4 +785,4 @@ RETRY_POLICY = {
 }
 ```
 
-注意：此处的重试次数和 `pipelines.yaml` 中每步定义的 `retries` 取**较小值**。pipelines.yaml 是步骤级上限，RETRY_POLICY 是错误类型级上限。
+注意：此处的重试次数和 `pipelines.yaml` 中每个 job 定义的 `retry` 取**较小值**。pipelines.yaml 是步骤级上限，RETRY_POLICY 是错误类型级上限。

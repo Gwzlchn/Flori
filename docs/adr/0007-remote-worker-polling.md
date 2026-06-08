@@ -1,6 +1,6 @@
 # ADR-0007: 远程 Worker 通过轮询 Redis 接入
 
-## 背景
+> **Status: Superseded** — 被 [ADR-0009](0009-worker-gateway-outbound-https.md) 取代。本方案要求远程 worker 直连公网 Redis (TLS) 并经 MinIO 中转文件，等于把两个有状态中心组件暴露到公网。现行方案改为 worker 经 API 的 `/api/runner/*` 单条出站 HTTPS 接入（注册/认领/上报/产物代理），Redis/MinIO 不再对 worker 暴露。下文保留作历史记录。
 
 Worker 可能运行在无法被外部连入的内网机器上（如内网 GPU 服务器、有 Claude 订阅的桌面机）。这些机器只能出站访问外网。需要一种统一机制让任意远程 Worker 接入系统。
 

@@ -145,7 +145,7 @@ class TestBuildStepConfig:
 
 
 class TestSanitizeProviders:
-    """P4：providers 配置下放给步骤前必须剥离明文密钥，密钥改由 env 按需读取。"""
+    """providers 配置下放给步骤前必须剥离明文密钥，密钥改由 env 按需读取。"""
 
     def test_strips_api_key_keeps_selection(self):
         raw = {"providers": {

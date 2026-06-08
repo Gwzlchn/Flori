@@ -43,6 +43,7 @@ def _markdown_to_text(md: str) -> str:
     import re
 
     md = re.sub(r"```.*?```", " ", md, flags=re.DOTALL)        # 代码围栏
+    md = re.sub(r"<[^>]+>", " ", md)                             # HTML 标签(防搜索高亮 XSS)
     md = re.sub(r"`([^`]*)`", r"\1", md)                         # 行内代码
     md = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", md)               # 图片
     md = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", md)            # 链接取文字
@@ -73,6 +74,8 @@ class Scheduler:
         # 跟踪所有 _delayed_enqueue fire-and-forget 任务，供 shutdown / rerun /
         # job 失败时取消，避免泄漏或旧重试与新状态串台。
         self._delayed_tasks: set[asyncio.Task] = set()
+        # job_id -> 首次被判定"无 worker 可推进"的时刻，超宽限期才 fail-fast(容忍 worker 重启)。
+        self._no_worker_since: dict[str, float] = {}
 
     # ── 生命周期 ──
 
@@ -190,6 +193,7 @@ class Scheduler:
             try:
                 await self.orphan_scan()
                 await self.check_stuck()
+                await self.check_no_worker()
                 await self.cleanup_stale_workers()
             except Exception:
                 logger.exception("periodic_error")
@@ -729,6 +733,53 @@ class Scheduler:
                         "error": f"progress stale ({age:.0f}s, worker process may be stuck)",
                         "error_type": "timeout",
                     })
+
+    _NO_WORKER_GRACE_SEC = 90
+
+    async def check_no_worker(self) -> None:
+        """无法推进的 job 持续超宽限期则 fail-fast,避免永久卡住。
+
+        判定:无 running 步,且所有 ready 步所在 pool 都无在线 worker——
+        典型是未部署 gpu worker 时 audio 的 00b_whisper 卡在 queue:gpu。
+        给出明确错误而非静默挂起;宽限期容忍 worker 短暂重启。
+        """
+        active_jobs = await self.redis.get_active_jobs()
+        for job_id in active_jobs:
+            statuses = await self.redis.get_all_step_statuses(job_id)
+            if not statuses or any(v == "running" for v in statuses.values()):
+                self._no_worker_since.pop(job_id, None)
+                continue
+            ready = [s for s, v in statuses.items() if v == "ready"]
+            if not ready:
+                self._no_worker_since.pop(job_id, None)
+                continue
+
+            pipeline = await self.redis.get_job_pipeline(job_id)
+            steps_cfg = self._get_pipeline_steps(pipeline) if pipeline else {}
+            stuck: list[tuple[str, str]] = []
+            progressable = False
+            for step in ready:
+                pool = steps_cfg.get(step, {}).get("pool", "")
+                if await self._pool_has_workers(pool):
+                    progressable = True
+                    break
+                stuck.append((step, pool))
+            if progressable or not stuck:
+                self._no_worker_since.pop(job_id, None)
+                continue
+
+            first = self._no_worker_since.setdefault(job_id, time.time())
+            if time.time() - first < self._NO_WORKER_GRACE_SEC:
+                continue
+            self._no_worker_since.pop(job_id, None)
+            pairs = ", ".join(f"{s}(pool '{p}')" for s, p in stuck)
+            logger.warning("job_no_worker", job_id=job_id, stuck=pairs)
+            await self.mark_job_failed(job_id, f"无可用 worker 执行步骤: {pairs}")
+
+        # 清理已离开 active 集合的计时,避免泄漏。
+        active_set = set(active_jobs)
+        for jid in [j for j in self._no_worker_since if j not in active_set]:
+            self._no_worker_since.pop(jid, None)
 
     # ── 重跑 / 重提交 ──
 
