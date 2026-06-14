@@ -27,7 +27,8 @@ providers:
 
   claude-cli:
     type: cli
-    command: ["claude", "-p", "{prompt_file}", "--output-format", "text"]
+    # prompt 经 stdin 喂入;有帧图时 provider 动态追加 --allowedTools Read --add-dir。
+    command: ["claude", "-p", "--output-format", "text"]
     features: [vision]
     cost_usd: 0
 

@@ -401,3 +401,54 @@ class TestClaudeCLIProvider:
         with patch("shared.ai_gateway.asyncio.wait_for", side_effect=fast_timeout):
             with pytest.raises(AIProviderError, match="timeout"):
                 await provider.complete(req)
+
+
+class TestClaudeCLIVision:
+    """claude-cli provider:prompt 走 stdin;有帧图则追加路径 + --allowedTools Read --add-dir。"""
+
+    @pytest.mark.asyncio
+    async def test_vision_appends_paths_and_read_tool(self, tmp_path, monkeypatch):
+        img = tmp_path / "f1.jpg"; img.write_bytes(b"x")
+        cap = {}
+        class FakeProc:
+            returncode = 0
+            async def communicate(self, data=None):
+                cap["stdin"] = data; return (b"NOTE", b"")
+        async def fake_exec(*cmd, **kw):
+            cap["cmd"] = list(cmd); return FakeProc()
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+        p = ClaudeCLIProvider(["claude", "-p", "--output-format", "text"])
+        resp = await p.complete(LLMRequest(messages=[{"role": "user", "content": "hi"}], images=[img]))
+        assert resp.content == "NOTE" and resp.provider == "claude-cli" and resp.cost_usd == 0.0
+        assert str(img.resolve()).encode() in cap["stdin"]      # 图路径进 prompt(stdin)
+        assert "--allowedTools" in cap["cmd"] and "Read" in cap["cmd"]
+        assert "--add-dir" in cap["cmd"] and str(tmp_path.resolve()) in cap["cmd"]
+
+    @pytest.mark.asyncio
+    async def test_text_only_strips_prompt_file_and_no_read(self, monkeypatch):
+        cap = {}
+        class FakeProc:
+            returncode = 0
+            async def communicate(self, data=None):
+                cap["stdin"] = data; return (b"OK", b"")
+        async def fake_exec(*cmd, **kw):
+            cap["cmd"] = list(cmd); return FakeProc()
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+        # 旧模板残留 {prompt_file} 必须被剥掉
+        p = ClaudeCLIProvider(["claude", "-p", "{prompt_file}", "--output-format", "text"])
+        resp = await p.complete(LLMRequest(messages=[{"role": "user", "content": "hello"}]))
+        assert resp.content == "OK"
+        assert "{prompt_file}" not in cap["cmd"]
+        assert "--allowedTools" not in cap["cmd"]       # 无图不放开工具
+        assert b"hello" in cap["stdin"]
+
+    @pytest.mark.asyncio
+    async def test_nonzero_raises(self, monkeypatch):
+        class FakeProc:
+            returncode = 1
+            async def communicate(self, data=None): return (b"", b"boom")
+        async def fake_exec(*cmd, **kw): return FakeProc()
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+        p = ClaudeCLIProvider(["claude", "-p"])
+        with pytest.raises(AIProviderError):
+            await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}]))

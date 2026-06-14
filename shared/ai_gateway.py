@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import subprocess
-import tempfile
 import time
 from datetime import datetime
 from functools import partial
@@ -208,43 +206,53 @@ class ClaudeCLIProvider:
         for msg in request.messages:
             prompt_content += f"[{msg['role'].title()}]\n{msg['content']}\n\n"
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-            f.write(prompt_content)
-            prompt_file = f.name
+        # 视觉:把帧图绝对路径写进 prompt,放开 Read 工具让 claude 逐张查看(订阅路径不支持 base64)。
+        # 帧目录用 --add-dir 加入可访问范围,容器/无头干净环境也能读到。
+        extra_dirs: set[str] = set()
+        if request.images:
+            prompt_content += "\n截图(用 Read 工具逐张查看):\n"
+            for p in request.images:
+                ap = str(Path(p).resolve())
+                prompt_content += ap + "\n"
+                extra_dirs.add(str(Path(ap).parent))
 
+        # 命令模板里的 {prompt_file} 占位已弃用——prompt 改走 stdin(无 ARG_MAX 限制、不依赖文件读)。
+        cmd = [part for part in self._command_template if "{prompt_file}" not in part]
+        if request.images:
+            cmd += ["--allowedTools", "Read"]
+            for d in sorted(extra_dirs):
+                cmd += ["--add-dir", d]
+
+        env = {**os.environ, **self._env}
+        timeout = min(600 + 25 * len(request.images or []), 1800)  # 图越多给越久
+        start = time.time()
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
         try:
-            cmd = [
-                part.replace("{prompt_file}", prompt_file)
-                for part in self._command_template
-            ]
-            env = {**os.environ, **self._env}
-            start = time.time()
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(prompt_content.encode()), timeout=timeout
             )
-            try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                raise AIProviderError("CLI timeout after 600s")
-            duration = time.time() - start
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise AIProviderError(f"CLI timeout after {timeout}s")
+        duration = time.time() - start
 
-            if proc.returncode != 0:
-                raise AIProviderError(f"CLI failed: {stderr.decode()[:500]}")
+        if proc.returncode != 0:
+            raise AIProviderError(f"CLI failed: {stderr.decode()[:500]}")
 
-            return LLMResponse(
-                content=stdout.decode().strip(),
-                model="subscription",
-                provider="claude-cli",
-                cost_usd=0.0,
-                duration_sec=round(duration, 2),
-            )
-        finally:
-            Path(prompt_file).unlink(missing_ok=True)
+        return LLMResponse(
+            content=stdout.decode().strip(),
+            model="subscription",
+            provider="claude-cli",
+            cost_usd=0.0,
+            duration_sec=round(duration, 2),
+        )
 
 
 # ── Gateway ──
