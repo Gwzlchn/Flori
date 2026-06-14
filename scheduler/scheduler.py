@@ -45,7 +45,7 @@ def _markdown_to_text(md: str) -> str:
     md = re.sub(r"```.*?```", " ", md, flags=re.DOTALL)        # 代码围栏
     md = re.sub(r"<[^>]+>", " ", md)                             # HTML 标签(防搜索高亮 XSS)
     md = re.sub(r"`([^`]*)`", r"\1", md)                         # 行内代码
-    md = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", md)               # 图片
+    md = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", md)            # 图片:保留 alt 描述进 FTS
     md = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", md)            # 链接取文字
     md = re.sub(r"^\s{0,3}#{1,6}\s*", "", md, flags=re.MULTILINE)  # 标题井号
     md = re.sub(r"^\s{0,3}[-*+]\s+", "", md, flags=re.MULTILINE)   # 无序列表标记

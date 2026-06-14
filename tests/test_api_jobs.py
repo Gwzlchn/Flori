@@ -129,6 +129,15 @@ class TestCreateJob:
         assert resp.status_code == 201
 
     @pytest.mark.asyncio
+    async def test_create_unknown_collection_rejected(self, client):
+        # collection_id 不存在 → 400(防孤儿绑定 + job_count 漂移)
+        resp = await client.post("/api/jobs", json={
+            "url": "BV1xx411c7mD",
+            "collection_id": "c_does_not_exist",
+        })
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
     async def test_create_article_job(self, client):
         resp = await client.post("/api/jobs", json={
             "url": "https://example.com/post/intro",

@@ -265,6 +265,6 @@ class TestNormalizedContractStable:
     def test_ai_block_provider_model_dict(self, configs_dir):
         p = load_pipelines(configs_dir / "pipelines.yaml")
         smart = next(s for s in p["video"]["steps"] if s["name"] == "08_smart")
-        assert smart["ai"]["primary"]["provider"] == "anthropic"
-        assert smart["ai"]["primary"]["model"] == "claude-sonnet-4-6"
+        assert smart["ai"]["primary"]["provider"] == "claude-cli"  # 无 key,走订阅
+        assert smart["ai"]["primary"]["model"] == "subscription"
         assert "text_fallback" in smart["ai"]

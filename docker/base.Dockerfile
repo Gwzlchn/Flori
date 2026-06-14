@@ -7,8 +7,12 @@ RUN if [ "$USE_USTC_MIRROR" = "1" ]; then \
         sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list.d/debian.sources; \
     fi \
     && apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg curl \
+    && apt-get install -y --no-install-recommends ffmpeg curl nodejs npm \
     && rm -rf /var/lib/apt/lists/*
+
+# Claude Code CLI:claude-cli provider(订阅出笔记、看帧图)需要 `claude` 在 PATH。
+RUN npm install -g @anthropic-ai/claude-code \
+    && rm -rf /root/.npm
 
 RUN if [ "$USE_USTC_MIRROR" = "1" ]; then \
         pip config set global.index-url https://mirrors.ustc.edu.cn/pypi/web/simple; \
@@ -17,7 +21,7 @@ RUN if [ "$USE_USTC_MIRROR" = "1" ]; then \
 WORKDIR /app
 
 COPY pyproject.toml .
-RUN pip install --no-cache-dir ".[steps,api,worker]" && \
+RUN pip install --no-cache-dir ".[steps,api,worker,gpu]" && \
     pip install --no-cache-dir websockets httpx
 
 # 不写 .pyc/__pycache__：配合 test/dev compose 的 bind-mount，避免容器内 pytest

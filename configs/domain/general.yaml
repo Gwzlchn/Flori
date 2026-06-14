@@ -18,12 +18,18 @@
 #   window_width: 2
 #   min_content_val: 15.0
 
-# 关键帧去重（steps/video/step_03_dedup.py）。默认值如下：
-# dedup:
-#   phash_hash_size: 8
-#   phash_threshold: 6
-#   ssim_threshold: 0.92
-#   ssim_resize: [320, 180]
+# 场景检测：老原型实测基线(window=4/min_content=18,比内置默认少碎场景)。
+scene:
+  window_width: 4
+  min_content_val: 18.0
 
-# OCR（steps/video/step_04_ocr.py）。
-# ocr: {}
+# 关键帧去重：老原型基线 phash_hash_size=16(比默认 8 判别力更强)。
+dedup:
+  phash_hash_size: 16
+  phash_threshold: 6
+  ssim_threshold: 0.92
+  ssim_resize: [320, 180]
+
+# OCR：按置信度过滤,挡台标/花字噪声直灌 AI(老原型基线 0.6)。
+ocr:
+  confidence_threshold: 0.6

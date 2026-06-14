@@ -129,7 +129,7 @@ class TestBuildStepConfig:
         step_cfg = build_step_config(cfg, "video", "08_smart")
 
         assert "primary" in step_cfg["ai"]
-        assert step_cfg["ai"]["primary"]["provider"] == "anthropic"
+        assert step_cfg["ai"]["primary"]["provider"] == "claude-cli"  # 无 key,走订阅
         assert "text_fallback" in step_cfg["ai"]
 
     def test_no_ai_config(self, configs_dir, tmp_data_dir):

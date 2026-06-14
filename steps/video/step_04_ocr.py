@@ -26,6 +26,8 @@ class OcrStep(StepBase):
         keep_frames = [d for d in dedup if d.get("keep", False)]
 
         ocr_engine = self._create_ocr_engine()
+        # 置信度过滤:挡台标/花字等低置信噪声直灌下游 AI(老原型基线 0.6)。
+        threshold = float(self.config.get("domain", {}).get("ocr", {}).get("confidence_threshold", 0.0))
         results = []
         nonempty = 0
 
@@ -43,7 +45,7 @@ class OcrStep(StepBase):
                 })
                 continue
 
-            text, boxes = self._ocr_image(ocr_engine, img_path)
+            text, boxes = self._ocr_image(ocr_engine, img_path, threshold)
             if text.strip():
                 nonempty += 1
             results.append({
@@ -68,7 +70,7 @@ class OcrStep(StepBase):
         else:
             raise NotImplementedError(f"OCR backend {backend} not yet supported")
 
-    def _ocr_image(self, engine, img_path: Path) -> tuple[str, list[dict]]:
+    def _ocr_image(self, engine, img_path: Path, threshold: float = 0.0) -> tuple[str, list[dict]]:
         try:
             result, _ = engine(str(img_path))
             if not result:
@@ -78,6 +80,8 @@ class OcrStep(StepBase):
             boxes = []
             for item in result:
                 box, text, confidence = item
+                if confidence < threshold:
+                    continue
                 texts.append(text)
                 boxes.append({
                     "text": text,

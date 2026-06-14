@@ -94,6 +94,11 @@ async def create_job(
     pipeline = _pipeline_for(content_type)
     source = detect_source(req.url) if req.url else "upload"
 
+    # 校验 collection_id 存在,避免孤儿绑定 + job_count 漂移(increment 对不存在行静默 no-op)。
+    if req.collection_id:
+        if not await asyncio.to_thread(db.get_collection, req.collection_id):
+            raise HTTPException(400, "collection_id not found")
+
     job_id = generate_job_id()
     job_doc = {
         "id": job_id,

@@ -28,34 +28,38 @@ video:
     # OCR 单一事实源：CPU 逐帧扫描需大超时；超时是工作量过大而非瞬时抖动，故少重试。
     OCR_TIMEOUT: 1800
     OCR_RETRIES: 1
-    AI_SMART_PRIMARY_PROVIDER: anthropic
-    AI_SMART_PRIMARY_MODEL: claude-sonnet-4-6
-    AI_SMART_FALLBACK_PROVIDER: openai
-    AI_SMART_FALLBACK_MODEL: gpt-4o
-    AI_SMART_TEXT_PROVIDER: deepseek
-    AI_SMART_TEXT_MODEL: deepseek-v4-pro
-    AI_REVIEW_PRIMARY_PROVIDER: anthropic
-    AI_REVIEW_PRIMARY_MODEL: claude-haiku-4-5
-    AI_REVIEW_FALLBACK_PROVIDER: deepseek
-    AI_REVIEW_FALLBACK_MODEL: deepseek-v4-flash
-    AI_PUNCT_PRIMARY_PROVIDER: deepseek
-    AI_PUNCT_PRIMARY_MODEL: deepseek-v4-flash
-    AI_PUNCT_FALLBACK_PROVIDER: local
-    AI_PUNCT_FALLBACK_MODEL: "qwen3:7b"
+    # 无 API key → 全部走 claude-cli 订阅(免费、能看帧图);primary/fallback 同指订阅,
+    # 避免 08_smart 失败时静默降级到"丢图的文本 provider"。要恢复 API,改回 anthropic/deepseek 即可。
+    AI_SMART_PRIMARY_PROVIDER: claude-cli
+    AI_SMART_PRIMARY_MODEL: subscription
+    AI_SMART_FALLBACK_PROVIDER: claude-cli
+    AI_SMART_FALLBACK_MODEL: subscription
+    AI_SMART_TEXT_PROVIDER: claude-cli
+    AI_SMART_TEXT_MODEL: subscription
+    AI_REVIEW_PRIMARY_PROVIDER: claude-cli
+    AI_REVIEW_PRIMARY_MODEL: subscription
+    AI_REVIEW_FALLBACK_PROVIDER: claude-cli
+    AI_REVIEW_FALLBACK_MODEL: subscription
+    AI_PUNCT_PRIMARY_PROVIDER: claude-cli
+    AI_PUNCT_PRIMARY_MODEL: subscription
+    AI_PUNCT_FALLBACK_PROVIDER: claude-cli
+    AI_PUNCT_FALLBACK_MODEL: subscription
   jobs:
     "00_download":
       run: steps.common.step_00_download
       pool: io
       retry: 3
 
+    # 无字幕时转写。pool=cpu(base 镜像已含 faster-whisper,无 GPU 用 int8 CPU 回退),
+    # 不再钉 gpu tag——否则无 gpu worker 时整 job fail-fast。有 GPU 的 worker 仍会更快。
     "00b_whisper":
       run: steps.video.step_00b_whisper
       image: mnemo/step-gpu
-      pool: gpu
+      pool: cpu
       needs: ["00_download"]
       timeout: 1800
       retry: 2
-      tags: ["gpu"]
+      tags: []
       rules:
         - exists: "input/*.srt"
           when: skip
