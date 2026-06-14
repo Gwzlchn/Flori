@@ -423,6 +423,7 @@ class TestClaudeCLIVision:
         assert str(img.resolve()).encode() in cap["stdin"]      # 图路径进 prompt(stdin)
         assert "--allowedTools" in cap["cmd"] and "Read" in cap["cmd"]
         assert "--add-dir" in cap["cmd"] and str(tmp_path.resolve()) in cap["cmd"]
+        assert "--max-turns" in cap["cmd"]                       # 限轮数,防多图上下文膨胀拖垮
 
     @pytest.mark.asyncio
     async def test_text_only_strips_prompt_file_and_no_read(self, monkeypatch):

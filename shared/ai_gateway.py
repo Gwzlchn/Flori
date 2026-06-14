@@ -220,6 +220,9 @@ class ClaudeCLIProvider:
         cmd = [part for part in self._command_template if "{prompt_file}" not in part]
         if request.images:
             cmd += ["--allowedTools", "Read"]
+            # 限轮数:每张图一个 Read 轮,多图时上下文超线性膨胀会拖垮(实测 20 张丢图无界跑 >18min)。
+            # 留几轮给思考+生成。配合 step 侧限图数,把视觉笔记控制在分钟级。
+            cmd += ["--max-turns", str(len(request.images) + 5)]
             for d in sorted(extra_dirs):
                 cmd += ["--add-dir", d]
 

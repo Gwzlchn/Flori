@@ -43,13 +43,15 @@ class SmartStep(StepBase):
 
         prompt = self._build_user_prompt(mechanical)
 
+        # 限 10 张:多图时 claude Read-per-轮的上下文超线性膨胀会拖垮(实测 20 张 >18min,10 张 ~1min)。
+        # 10 张代表帧足够覆盖视觉要点。
         if images:
-            result = self.call_ai(prompt, images=images[:20])
+            result = self.call_ai(prompt, images=images[:10])
         else:
             result = self.call_ai(prompt)
 
         self.write_output("output/notes_smart.md", result)
-        return {"chars": len(result), "images_sent": min(len(images), 20)}
+        return {"chars": len(result), "images_sent": min(len(images), 10)}
 
     def _build_user_prompt(self, mechanical: str) -> str:
         profile = self._load_profile()
@@ -83,6 +85,10 @@ class SmartStep(StepBase):
                 if hint.get("screenshot_focus"):
                     parts.append(f"- 截图重点：{hint['screenshot_focus']}\n")
 
+        parts.append(
+            "\n如附有截图路径(见下方),请用 Read 工具逐张查看,并在笔记关键处用 "
+            "![中文描述](文件名) 内嵌最有信息量的几张(描述要写出图里 OCR 给不出的视觉信息)。\n"
+        )
         parts.append(f"\n---\n\n{mechanical}")
         return "".join(parts)
 
