@@ -370,3 +370,19 @@ class TestCliMainEndToEnd:
         assert data["title"] == "测试文章"
         assert data["total_sections"] >= 2  # 引言 / 方法
         assert (tmp_path / ".17_article_sections.done").exists()  # 幂等标记
+
+
+class TestExtractJson:
+    """call_ai_json 从 claude-cli 输出抽 JSON:剥 ```json 围栏 / 取首尾花括号。"""
+
+    def test_fenced(self):
+        from shared.step_base import StepBase
+        assert json.loads(StepBase._extract_json('```json\n{"a": 1}\n```')) == {"a": 1}
+
+    def test_prose_wrapped(self):
+        from shared.step_base import StepBase
+        assert json.loads(StepBase._extract_json('好的,结果如下:\n{"a": 1, "b": 2}\n以上。')) == {"a": 1, "b": 2}
+
+    def test_plain(self):
+        from shared.step_base import StepBase
+        assert json.loads(StepBase._extract_json('{"a": 1}')) == {"a": 1}

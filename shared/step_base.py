@@ -223,8 +223,8 @@ class StepBase:
         raw = self.call_ai(prompt, images=images, **kwargs)
         parse_failed = False
         try:
-            result = json.loads(raw)
-        except json.JSONDecodeError:
+            result = json.loads(self._extract_json(raw))
+        except (json.JSONDecodeError, ValueError):
             self.log.warn("ai_json_parse_failed", raw=raw[:200])
             result = {**fallback, "raw_response": raw[:500], "parse_failed": True}
             parse_failed = True
@@ -232,6 +232,21 @@ class StepBase:
             scores = [result.get(k, 3) for k in score_keys]
             result["overall"] = round(sum(scores) / max(len(scores), 1), 1)
         return result, parse_failed
+
+    @staticmethod
+    def _extract_json(raw: str) -> str:
+        """从 AI 输出里抽出 JSON:claude-cli 常包 ```json 围栏或带前后说明文字。
+        先剥代码围栏,再退化为取首个 { 到末个 } 的子串。"""
+        s = (raw or "").strip()
+        if s.startswith("```"):
+            import re
+            s = re.sub(r"^```[a-zA-Z]*\n?", "", s)
+            s = re.sub(r"\n?```\s*$", "", s).strip()
+        if not s.startswith("{"):
+            i, j = s.find("{"), s.rfind("}")
+            if i != -1 and j > i:
+                s = s[i:j + 1]
+        return s
 
     # ── 外部命令 ──
 
