@@ -59,6 +59,8 @@ async function submit() {
     submitting.value = false
   }
 }
+
+onMounted(load)  // 进入集合详情页即加载集合信息 + 名下 job 列表
 </script>
 
 <template>
