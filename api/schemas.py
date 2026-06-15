@@ -22,6 +22,7 @@ class JobResponse(BaseModel):
     progress_pct: int = 0
     source: str | None = None
     domain: str = "general"
+    collection_id: str | None = None
 
 
 class JobDetailResponse(JobResponse):

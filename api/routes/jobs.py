@@ -205,12 +205,14 @@ async def upload_job(
 @router.get("")
 async def list_jobs(
     status: str | None = None,
+    collection_id: str | None = None,
     limit: int = 20,
     offset: int = 0,
     db: Database = Depends(get_db),
 ):
     total, jobs = await asyncio.to_thread(
-        db.list_jobs, status=status, limit=limit, offset=offset,
+        db.list_jobs, status=status, collection_id=collection_id,
+        limit=limit, offset=offset,
     )
     return JobListResponse(
         total=total,
@@ -219,6 +221,7 @@ async def list_jobs(
                 job_id=j.id, content_type=j.content_type, status=j.status.value,
                 created_at=j.created_at.isoformat(), title=j.title,
                 progress_pct=j.progress_pct, source=j.source, domain=j.domain,
+                collection_id=j.collection_id,
             )
             for j in jobs
         ],
@@ -237,6 +240,7 @@ async def get_job(job_id: str, db: Database = Depends(get_db)):
         job_id=job.id, content_type=job.content_type, status=job.status.value,
         created_at=job.created_at.isoformat(), title=job.title,
         progress_pct=job.progress_pct, source=job.source, domain=job.domain,
+        collection_id=job.collection_id,
         meta=job.meta,
         steps=[
             StepResponse(

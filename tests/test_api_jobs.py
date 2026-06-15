@@ -296,3 +296,19 @@ class TestRetryRerunResubmit:
         job_id = create_resp.json()["job_id"]
         resp = await client.post(f"/api/jobs/{job_id}/resubmit")
         assert resp.status_code == 200
+
+
+class TestListByCollection:
+    @pytest.mark.asyncio
+    async def test_list_filters_by_collection(self, client, app):
+        from shared.models import Collection, Job
+        db = app.state.db
+        db.create_collection(Collection(id="c_x", name="X", domain="general"))
+        db.create_job(Job(id="j_in", content_type="video", pipeline="video", collection_id="c_x"))
+        db.create_job(Job(id="j_out", content_type="video", pipeline="video"))
+        resp = await client.get("/api/jobs?collection_id=c_x")
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        ids = {i["job_id"] for i in items}
+        assert "j_in" in ids and "j_out" not in ids
+        assert items[0]["collection_id"] == "c_x"  # 响应含 collection_id
