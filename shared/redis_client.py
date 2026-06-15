@@ -240,6 +240,10 @@ class RedisClient:
         keys = []
         async for key in self.r.scan_iter(match="worker:*"):
             worker_id = key.split(":", 1)[1]
+            # 防御:历史上接入 token 曾占 worker:registration_token(string,非 hash),
+            # 会让后续 hgetall 报 WRONGTYPE 把 /api/workers 打成 500。跳过非 worker 键。
+            if worker_id == "registration_token":
+                continue
             keys.append(worker_id)
         return keys
 
@@ -261,7 +265,9 @@ class RedisClient:
 
     # ── 接入 token（homelab 可复用 + 可重置）──
 
-    _REGISTRATION_TOKEN_KEY = "worker:registration_token"
+    # 不放 worker: 命名空间:否则 list_worker_ids 的 worker:* 扫描会把它当成 worker,
+    # 对这个 string 键做 hgetall 触发 WRONGTYPE → /api/workers 500。
+    _REGISTRATION_TOKEN_KEY = "runner:registration_token"
 
     async def get_registration_token(self) -> str | None:
         return await self.r.get(self._REGISTRATION_TOKEN_KEY)

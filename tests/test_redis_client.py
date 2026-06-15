@@ -250,6 +250,25 @@ class TestWorker:
         ids = await rc.list_worker_ids()
         assert set(ids) == {"cpu-1", "ai-1"}
 
+    @pytest.mark.asyncio
+    async def test_registration_token_not_listed_as_worker(self, rc):
+        # 接入 token 不该污染 worker 列表(否则 hgetall 一个 string 键会 WRONGTYPE → /api/workers 500)。
+        await rc.register_worker("cpu-1", {"type": "cpu"})
+        await rc.set_registration_token("mnw-secret", ttl_sec=3600)
+        ids = await rc.list_worker_ids()
+        assert set(ids) == {"cpu-1"}
+        assert await rc.get_registration_token() == "mnw-secret"
+
+    @pytest.mark.asyncio
+    async def test_legacy_worker_registration_token_key_skipped(self, rc):
+        # 兼容历史:旧版把 token 写在 worker:registration_token(string)。扫描须跳过,不得 WRONGTYPE。
+        await rc.register_worker("cpu-1", {"type": "cpu"})
+        await rc._redis.set("worker:registration_token", "mnw-legacy")
+        ids = await rc.list_worker_ids()
+        assert set(ids) == {"cpu-1"}
+        for wid in ids:
+            assert await rc.get_worker_info(wid) is not None
+
 
 class TestActiveJobs:
     @pytest.mark.asyncio
