@@ -210,8 +210,102 @@ class TestGatewayStorage:
         assert str(work_dir) not in gw._snapshots
 
 
-class TestCreateStorage:
-    def test_default_local(self, tmp_path, monkeypatch):
+class TestGatewayStorageReuse:
+    """STORAGE_WORKDIR_REUSE + STORAGE_NO_PUSH_GLOBS:大源文件留本机、不走慢链路。"""
+
+    def _gw(self, tmp_path):
+        gw = GatewayStorage(
+            "https://gw.example", token_getter=lambda: "wt", work_dir=tmp_path / "work",
+        )
+        client = MagicMock()
+        client.get = AsyncMock()
+        client.put = AsyncMock()
+        gw._client_obj = client
+        return gw, client
+
+    def _resp(self, status_code=200, content=b"", json_data=None):
+        r = MagicMock()
+        r.status_code = status_code
+        r.content = content
+        r.json.return_value = json_data if json_data is not None else {}
+        r.raise_for_status = MagicMock()
+        return r
+
+    @pytest.mark.asyncio
+    async def test_no_push_skips_matching_glob(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("STORAGE_NO_PUSH_GLOBS", "input/source.mp4,input/source.mp3")
+        gw, client = self._gw(tmp_path)
+        client.put.return_value = self._resp()
+        work_dir = tmp_path / "work" / "j1"
+        (work_dir / "input").mkdir(parents=True)
+        (work_dir / "out").mkdir(parents=True)
+        (work_dir / "input" / "source.mp4").write_bytes(b"BIGVIDEO")
+        (work_dir / "out" / "frame.jpg").write_bytes(b"IMG")
+        gw._snapshots[str(work_dir)] = {}  # 都视为新增
+
+        await gw.push("j1", "02", work_dir)
+
+        put_urls = [c.args[0] for c in client.put.call_args_list]
+        # 帧图回传,source.mp4 被挡(留本机)
+        assert "/api/runner/jobs/j1/artifacts/out/frame.jpg" in put_urls
+        assert "/api/runner/jobs/j1/artifacts/input/source.mp4" not in put_urls
+
+    @pytest.mark.asyncio
+    async def test_reuse_pull_skips_locally_present(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("STORAGE_WORKDIR_REUSE", "1")
+        gw, client = self._gw(tmp_path)
+        # 上一步留下的 source.mp4 已在本机
+        work_dir = tmp_path / "work" / "j1"
+        (work_dir / "input").mkdir(parents=True)
+        (work_dir / "input" / "source.mp4").write_bytes(b"LOCAL")
+
+        def _get(url, headers=None):
+            if url.endswith("/artifacts"):
+                return self._resp(json_data={"files": ["input/source.mp4", "job.json"]})
+            if url.endswith("job.json"):
+                return self._resp(content=b"J")
+            raise AssertionError(f"unexpected GET {url}")  # 不该重拉 source.mp4
+
+        client.get.side_effect = _get
+
+        out = await gw.pull("j1", "02")
+        got = [c.args[0] for c in client.get.call_args_list]
+        assert "/api/runner/jobs/j1/artifacts/input/source.mp4" not in got
+        assert (out / "input" / "source.mp4").read_bytes() == b"LOCAL"  # 本机原样保留
+        # 快照覆盖全部本机文件(含留下的 mp4),push 才不会误传
+        assert set(gw._snapshots[str(out)]) == {"input/source.mp4", "job.json"}
+
+    @pytest.mark.asyncio
+    async def test_reuse_cleanup_keeps_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("STORAGE_WORKDIR_REUSE", "1")
+        gw, _ = self._gw(tmp_path)
+        work_dir = tmp_path / "work" / "j1"
+        work_dir.mkdir(parents=True)
+        (work_dir / "f").write_text("x")
+        gw._snapshots[str(work_dir)] = {"f": (1, 1.0)}
+
+        await gw.cleanup("j1", "02", work_dir)
+        assert work_dir.exists()  # 复用:目录留住给下一步
+        assert str(work_dir) not in gw._snapshots  # 快照仍清掉
+
+    @pytest.mark.asyncio
+    async def test_reuse_gc_removes_stale_sibling(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("STORAGE_WORKDIR_REUSE", "1")
+        monkeypatch.setenv("STORAGE_WORKDIR_GC_TTL_SEC", "100")
+        gw, client = self._gw(tmp_path)
+        work_root = tmp_path / "work"
+        stale = work_root / "old_job"
+        stale.mkdir(parents=True)
+        (stale / "input").mkdir()
+        (stale / "input" / "source.mp4").write_bytes(b"OLD")
+        os.utime(stale, (0, 0))  # 远早于 TTL
+
+        client.get.side_effect = lambda url, headers=None: self._resp(json_data={"files": []})
+
+        await gw.pull("j2", "00")
+        assert not stale.exists()  # 过期兄弟目录被回收
+        assert (work_root / "j2").exists()  # 当前 job 目录保留
+
         monkeypatch.delenv("MINIO_URL", raising=False)
         s = create_storage(tmp_path)
         assert isinstance(s, LocalStorage)

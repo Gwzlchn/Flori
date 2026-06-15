@@ -44,7 +44,11 @@ class GatewayTransport:
     @property
     def _http(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(base_url=self._base_url, timeout=35)
+            from shared.net import gateway_tls_verify
+
+            self._client = httpx.AsyncClient(
+                base_url=self._base_url, timeout=35, verify=gateway_tls_verify(),
+            )
         return self._client
 
     @property

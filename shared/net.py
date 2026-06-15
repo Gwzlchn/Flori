@@ -7,10 +7,24 @@
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
 from urllib.parse import urlparse
 
 from shared.errors import InputInvalidError
+
+
+def gateway_tls_verify() -> bool | str:
+    """远端 worker 连网关(出站 HTTPS)时 httpx 的 verify 取值:
+      · GATEWAY_CA_BUNDLE=<path> → 用该 CA(自签 ECS 首选:导出 Caddy internal CA 后指它);
+      · GATEWAY_TLS_INSECURE=1   → 跳过校验(未导 CA 时的兜底,链路仍由 Bearer token 鉴权);
+      · 都不设 → True(默认严格校验,既有行为不变)。"""
+    ca = os.environ.get("GATEWAY_CA_BUNDLE", "").strip()
+    if ca:
+        return ca
+    if os.environ.get("GATEWAY_TLS_INSECURE", "") not in ("", "0", "false"):
+        return False
+    return True
 
 
 def assert_public_url(url: str) -> None:

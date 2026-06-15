@@ -9,8 +9,10 @@ RemoteStorage：对象存储(MinIO/S3)，让任意机器都能当 worker——
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Callable, Protocol
 
@@ -213,6 +215,15 @@ class GatewayStorage:
     pull 拉清单+逐个产物到本机临时 work_dir(并记快照),push 只回传相对快照
     新增/改动的文件(语义与 RemoteStorage 一致),read/write/list 直接打 API 端点。
     每个对象整体载入内存(与现有 read_file/write_file 一致);流式传输是后续优化。
+
+    远端 worker 经慢链路(出站 HTTPS)连中心存储时,两个可选项把大源文件挡在链路外:
+      · STORAGE_WORKDIR_REUSE=1:job 目录跨步骤复用(按 job_id 命名),pull 跳过本机
+        已存在的文件、cleanup 不再逐步 rmtree(改由 pull 时按 TTL GC 兄弟目录)。
+        于是 00_download 下载的 source.mp4 留在本机,后续 01/02/00b 步直接读本地,不重拉。
+      · STORAGE_NO_PUSH_GLOBS=input/source.mp4,...:匹配的文件不回传中心存储,只留本机。
+        大源文件(视频/音频)因此永不上行慢链路;帧图/字幕/OCR 等小产物照常回传供 AI 步消费。
+    二者默认关闭(空),不改变既有部署语义;远端重算 worker 才在 docker run 里开。
+    NOTE:开了 NO_PUSH,依赖该文件的步骤必须落在持有它的同一 worker(中心存储无副本)。
     """
 
     def __init__(
@@ -227,35 +238,71 @@ class GatewayStorage:
         # pull 时记录每个 work_dir 的文件快照(relpath -> (size, mtime))，供 push 算增量。
         self._snapshots: dict[str, dict[str, tuple[int, float]]] = {}
         self._client_obj = None
+        # 跨步骤复用 job 目录(留住大源文件,免重拉);关时沿用逐步 rmtree 旧语义。
+        self._reuse = os.environ.get("STORAGE_WORKDIR_REUSE", "") not in ("", "0", "false")
+        # 复用模式下,pull 时回收超过 TTL 未活动的兄弟 job 目录(默认 2h),给磁盘兜底。
+        self._gc_ttl = int(os.environ.get("STORAGE_WORKDIR_GC_TTL_SEC", "7200"))
+        # 不回传中心存储的文件 glob(相对 work_dir,fnmatch);默认空=全推(旧语义)。
+        self._no_push = [
+            g.strip() for g in os.environ.get("STORAGE_NO_PUSH_GLOBS", "").split(",") if g.strip()
+        ]
 
     def _client(self):
         # 延迟建 httpx.AsyncClient:构造不连接(便于选型/单测),首次用到才建。
         if self._client_obj is None:
             import httpx
 
-            self._client_obj = httpx.AsyncClient(base_url=self._base_url, timeout=60)
+            from shared.net import gateway_tls_verify
+
+            self._client_obj = httpx.AsyncClient(
+                base_url=self._base_url, timeout=60, verify=gateway_tls_verify(),
+            )
         return self._client_obj
 
     def _auth(self) -> dict:
         return {"Authorization": f"Bearer {self._token_getter()}"}
 
     async def pull(self, job_id: str, step: str) -> Path:
+        if self._reuse:
+            await asyncio.to_thread(self._gc_stale, job_id)
         work_dir = self._work_root / job_id
         work_dir.mkdir(parents=True, exist_ok=True)
         rels = await self.list_files(job_id)
-        snapshot: dict[str, tuple[int, float]] = {}
         for rel in rels:
+            dest = work_dir / rel
+            # 复用模式:本机已有同名文件就不重拉(留住的 source.mp4 不再走慢链路下行)。
+            if self._reuse and dest.is_file():
+                continue
             resp = await self._client().get(
                 f"/api/runner/jobs/{job_id}/artifacts/{rel}", headers=self._auth(),
             )
             resp.raise_for_status()
-            dest = work_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             await asyncio.to_thread(dest.write_bytes, resp.content)
-            st = dest.stat()
-            snapshot[rel] = (st.st_size, st.st_mtime)
+        # 快照覆盖 work_dir 全部本机文件(含复用留下的),push 才能据此跳过未改动的文件。
+        snapshot: dict[str, tuple[int, float]] = {}
+        for path in work_dir.rglob("*"):
+            if path.is_file():
+                st = path.stat()
+                snapshot[path.relative_to(work_dir).as_posix()] = (st.st_size, st.st_mtime)
         self._snapshots[str(work_dir)] = snapshot
+        if self._reuse:
+            await asyncio.to_thread(os.utime, work_dir, None)  # 标记活动时间,供 GC 判活
         return work_dir
+
+    def _gc_stale(self, current_job_id: str) -> None:
+        """复用模式回收:删超过 TTL 未活动的兄弟 job 目录,给磁盘兜底。失败不致命。"""
+        if not self._work_root.exists():
+            return
+        cutoff = time.time() - self._gc_ttl
+        for child in self._work_root.iterdir():
+            if child.name == current_job_id or not child.is_dir():
+                continue
+            try:
+                if child.stat().st_mtime < cutoff:
+                    shutil.rmtree(child, ignore_errors=True)
+            except OSError:
+                continue
 
     async def push(self, job_id: str, step: str, work_dir: Path) -> None:
         snapshot = self._snapshots.get(str(work_dir), {})
@@ -263,6 +310,8 @@ class GatewayStorage:
             if not path.is_file():
                 continue
             rel = path.relative_to(work_dir).as_posix()
+            if self._is_no_push(rel):
+                continue  # 大源文件等:不回传,只留本机(配 NO_PUSH glob)
             st = path.stat()
             prev = snapshot.get(rel)
             if prev is not None and prev == (st.st_size, st.st_mtime):
@@ -274,8 +323,14 @@ class GatewayStorage:
             )
             resp.raise_for_status()
 
+    def _is_no_push(self, rel: str) -> bool:
+        return any(fnmatch.fnmatch(rel, pat) for pat in self._no_push)
+
     async def cleanup(self, job_id: str, step: str, work_dir: Path) -> None:
         self._snapshots.pop(str(work_dir), None)
+        # 复用模式留住 job 目录(同 job 后续步直接读本地),由 pull 时 TTL GC 回收。
+        if self._reuse:
+            return
         await asyncio.to_thread(shutil.rmtree, work_dir, ignore_errors=True)
 
     async def read_file(self, job_id: str, rel_path: str) -> bytes | None:
