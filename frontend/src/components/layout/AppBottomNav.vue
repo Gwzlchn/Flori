@@ -51,6 +51,9 @@ function goMore(path: string) {
 </script>
 
 <template>
+  <!-- 单根 + 自带 md:hidden:多根组件时父传的 md:hidden class 不会落到根上,
+       会导致桌面端底部导航不隐藏、fixed 盖住内容底部("尾部被挡")。 -->
+  <div class="md:hidden">
   <nav class="fixed bottom-0 left-0 right-0 z-40 bg-white border-t border-gray-200 flex justify-around py-1.5 safe-area-pb">
     <a
       v-for="(tab, idx) in tabs"
@@ -101,6 +104,7 @@ function goMore(path: string) {
       </div>
     </div>
   </transition>
+  </div>
 </template>
 
 <style scoped>

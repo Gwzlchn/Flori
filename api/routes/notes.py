@@ -22,12 +22,17 @@ def _validate_job_id(job_id: str) -> None:
 
 async def _serve(
     storage: StorageBackend, job_id: str, rel_path: str, media_type: str, missing: str,
+    cache: bool = False,
 ) -> Response:
     _validate_job_id(job_id)
     data = await storage.read_file(job_id, rel_path)
     if data is None:
         raise HTTPException(404, missing)
-    return Response(content=data, media_type=media_type)
+    headers = {}
+    if cache:
+        # 帧图等产物不可变(文件名含时间戳),长缓存让翻页/重访秒开,省 1Mbps 公网带宽。
+        headers["Cache-Control"] = "public, max-age=604800, immutable"
+    return Response(content=data, media_type=media_type, headers=headers)
 
 
 @router.get("/{job_id}/notes/smart")
@@ -59,7 +64,8 @@ async def get_asset(job_id: str, filename: str, storage: StorageBackend = Depend
     if ".." in filename or "/" in filename:
         raise HTTPException(400, "invalid filename")
     media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-    return await _serve(storage, job_id, f"assets/{filename}", media_type, "asset not found")
+    return await _serve(storage, job_id, f"assets/{filename}", media_type, "asset not found",
+                        cache=True)
 
 
 @router.get("/{job_id}/source")
