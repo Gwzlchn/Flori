@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import json
+import os
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -793,7 +794,10 @@ class Scheduler:
                         "error_type": "timeout",
                     })
 
-    _NO_WORKER_GRACE_SEC = 90
+    # 默认 90s 宽限即 fail-fast(无可用 worker 的 job)。可经 env 调大,用于
+    # "只跑部分 worker"的运维窗口(如夜间仅 ECS download worker,其余步骤明天再跑),
+    # 避免下载完的 job 因缺 scene/cpu/ai worker 被误判失败。
+    _NO_WORKER_GRACE_SEC = int(os.environ.get("NO_WORKER_GRACE_SEC", "90"))
 
     async def check_no_worker(self) -> None:
         """无法推进的 job 持续超宽限期则 fail-fast,避免永久卡住。
