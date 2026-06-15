@@ -461,6 +461,31 @@ class TestConditions:
         result = await scheduler.check_condition("j_any", "some_new_condition")
         assert result is True
 
+    @pytest.mark.asyncio
+    async def test_condition_uses_storage_not_local_disk(self, redis, db, config):
+        """分布式部署:产物在对象存储、调度器本地盘为空。条件须查 storage,否则
+        has_subtitle/has_danmaku 永远 False → 05/06 被误跳、whisper 误跑(本次修复的 bug)。"""
+        from unittest.mock import AsyncMock
+        storage = AsyncMock()
+        storage.list_files.return_value = ["input/subtitle.srt", "input/danmaku.ass", "input/source.mp4"]
+        s = _stub_workers_present(Scheduler(redis, db, config, storage=storage))
+        # 本地 jobs_dir 完全没有该 job 的文件,仅靠 storage 判断
+        assert await s.check_condition("j_remote", "has_subtitle") is True
+        assert await s.check_condition("j_remote", "has_danmaku") is True
+        assert await s.check_condition("j_remote", "no_subtitle") is False
+        # 声明式 rules 同源
+        assert await s._eval_rules("j_remote", [{"exists": "input/*.srt", "when": "skip"}]) is False
+        assert await s._eval_rules("j_remote", [{"exists": "input/*.ass", "when": True}]) is True
+
+    @pytest.mark.asyncio
+    async def test_condition_storage_empty_means_absent(self, redis, db, config):
+        from unittest.mock import AsyncMock
+        storage = AsyncMock()
+        storage.list_files.return_value = []
+        s = _stub_workers_present(Scheduler(redis, db, config, storage=storage))
+        assert await s.check_condition("j_empty", "has_subtitle") is False
+        assert await s.check_condition("j_empty", "no_subtitle") is True
+
 
 class TestWhisperPunctuateRecheck:
     @pytest.mark.asyncio

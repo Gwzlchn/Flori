@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import json
 import time
 from collections import deque
@@ -593,20 +594,35 @@ class Scheduler:
 
         logger.info("step_enqueued", job_id=job_id, step=step_name, pool=pool, priority=priority)
 
-    async def check_condition(self, job_id: str, condition: str) -> bool:
+    async def _list_job_files(self, job_id: str) -> list[str]:
+        """列出 job 现有产物的相对路径。分布式部署产物在对象存储(MinIO)、不在调度器本地盘,
+        故优先走 storage;无 storage(单机/测试)回退本地 jobs_dir。条件/规则据此判存在。"""
+        if self.storage is not None:
+            try:
+                return await self.storage.list_files(job_id)
+            except Exception:
+                logger.warning("list_job_files_failed", job_id=job_id)
+                return []
         job_dir = self.jobs_dir / job_id
-        input_dir = job_dir / "input"
 
-        def _check() -> bool:
-            if condition == "no_subtitle":
-                return not list(input_dir.glob("*.srt")) if input_dir.exists() else True
-            if condition == "has_subtitle":
-                return bool(list(input_dir.glob("*.srt"))) if input_dir.exists() else False
-            if condition == "has_danmaku":
-                return bool(list(input_dir.glob("*.ass"))) if input_dir.exists() else False
-            return True
+        def _local() -> list[str]:
+            if not job_dir.exists():
+                return []
+            return [p.relative_to(job_dir).as_posix() for p in job_dir.rglob("*") if p.is_file()]
 
-        return await asyncio.to_thread(_check)
+        return await asyncio.to_thread(_local)
+
+    async def check_condition(self, job_id: str, condition: str) -> bool:
+        files = await self._list_job_files(job_id)
+        has_srt = any(fnmatch.fnmatch(f, "input/*.srt") for f in files)
+        has_ass = any(fnmatch.fnmatch(f, "input/*.ass") for f in files)
+        if condition == "no_subtitle":
+            return not has_srt
+        if condition == "has_subtitle":
+            return has_srt
+        if condition == "has_danmaku":
+            return has_ass
+        return True
 
     def _step_is_conditional(self, cfg: dict) -> bool:
         """step 是否带跳过条件：旧 condition 字符串或声明式 rules 均算。"""
@@ -624,8 +640,9 @@ class Scheduler:
 
     async def _eval_rules(self, job_id: str, rules: list) -> bool:
         """声明式 rules 求值器：自上而下首条命中生效，命中 when=skip 则跳过，
-        当前支持 exists(相对 job_dir 的 glob)，无命中默认运行。"""
-        job_dir = self.jobs_dir / job_id
+        当前支持 exists(相对 job 根的 glob)，无命中默认运行。
+        存在性查 storage(产物在 MinIO,不在调度器本地盘)。"""
+        files = await self._list_job_files(job_id)
 
         def _when(rule: dict) -> str:
             when = rule.get("when", "on")
@@ -635,20 +652,17 @@ class Scheduler:
                 return "skip"
             return str(when)
 
-        def _eval() -> bool:
-            for rule in rules:
-                if not isinstance(rule, dict):
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            glob = rule.get("exists")
+            if glob is not None:
+                hit = any(fnmatch.fnmatch(f, glob) for f in files)
+                if not hit:
                     continue
-                glob = rule.get("exists")
-                if glob is not None:
-                    hit = bool(list(job_dir.glob(glob))) if job_dir.exists() else False
-                    if not hit:
-                        continue
-                # exists 命中、或无 exists 的兜底规则：本条生效。
-                return _when(rule) != "skip"
-            return True
-
-        return await asyncio.to_thread(_eval)
+            # exists 命中、或无 exists 的兜底规则：本条生效。
+            return _when(rule) != "skip"
+        return True
 
     async def mark_skipped(self, job_id: str, step: str) -> None:
         await self.redis.set_step_status(job_id, step, "skipped")
