@@ -18,6 +18,15 @@ const workerType = ref('cpu')
 const tagsInput = ref('')
 const rejectInput = ref('')
 const activeTab = ref<(typeof tabs)[number]['id']>('docker')
+// 远端算力机:慢链路 + 自签网关。大源文件(mp4/mp3)不回传、job 目录跨步骤复用(留住本机
+// mp4 免重拉)、跳过自签证书校验、whisper 走 HF 镜像。仅 gateway 接入有意义。
+const remoteHeavy = ref(false)
+
+// 网关地址默认取当前访问源(就是网关本身);非 http 场景回退占位。
+const gatewayUrl = computed(() => {
+  const o = typeof window !== 'undefined' ? window.location?.origin : ''
+  return o && o.startsWith('http') ? o : 'https://<MNEMO_HOST>'
+})
 
 const token = ref('')
 const minting = ref(false)
@@ -56,12 +65,21 @@ const command = computed(() => {
     const aiLine = needsAiKey.value
       ? '  -e ANTHROPIC_API_KEY=<KEY> -e DEEPSEEK_API_KEY=<KEY> \\\n'
       : ''
+    // 远端算力机:大源文件留本机不上行慢链路 + 自签网关跳过校验 + HF 镜像。
+    const heavyLines = remoteHeavy.value
+      ? '  -e GATEWAY_TLS_INSECURE=1 \\\n'
+        + '  -e STORAGE_WORKDIR_REUSE=1 \\\n'
+        + '  -e STORAGE_NO_PUSH_GLOBS=input/source.mp4,input/source.mp3 \\\n'
+        + '  -e HF_ENDPOINT=https://hf-mirror.com \\\n'
+      : ''
+    // 远端复用模式 WORK_DIR 落持久卷(留得下并发若干 job 的 mp4);否则用 /tmp。
+    const workDir = remoteHeavy.value ? '/data/mnemo-work' : '/tmp/mnemo-work'
     return `docker run -d --restart unless-stopped \\
-  -e GATEWAY_URL=https://<MNEMO_HOST> \\
+  -e GATEWAY_URL=${gatewayUrl.value} \\
   -e WORKER_REGISTRATION_TOKEN=${tokenLine.value} \\
   -e WORKER_ID_FILE=/data/.worker_id \\
-  -e DATA_DIR=/data -e CONFIG_DIR=/app/configs -e WORK_DIR=/tmp/mnemo-work \\
-${aiLine}  -v mnemo-data:/data \\
+  -e DATA_DIR=/data -e CONFIG_DIR=/app/configs -e WORK_DIR=${workDir} \\
+${heavyLines}${aiLine}  -v mnemo-data:/data \\
   ${IMAGE} \\
   ${runCmd.value}`
   }
@@ -170,9 +188,16 @@ async function copy(text: string, which: 'token' | 'cmd') {
       >{{ t.label }}</button>
     </div>
 
-    <p v-if="activeTab === 'gateway'" class="text-xs text-amber-600">
-      真零隧道:只需出站 HTTPS 到网关,不连 redis/minio。
-    </p>
+    <div v-if="activeTab === 'gateway'" class="space-y-2">
+      <p class="text-xs text-amber-600">
+        真零隧道:只需出站 HTTPS 到网关({{ gatewayUrl }}),不连 redis/minio。
+      </p>
+      <label class="flex items-start gap-2 text-xs text-gray-600 cursor-pointer">
+        <input type="checkbox" v-model="remoteHeavy" class="mt-0.5" />
+        <span>远端算力机(慢链路 / 自签网关):大源文件不回传、job 目录跨步骤复用、跳过证书校验、HF 镜像。
+          WORK_DIR 落持久卷,需留得下并发若干 job 的视频。</span>
+      </label>
+    </div>
 
     <div class="bg-gray-900 text-green-400 rounded-lg p-3 text-xs font-mono whitespace-pre-wrap break-all">{{ command }}</div>
 
