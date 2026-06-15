@@ -357,8 +357,9 @@ class TestClaudeCLIProvider:
     @pytest.mark.asyncio
     async def test_call_success(self):
         """Successful CLI call returns stdout as content."""
+        # sh -c 包裹:provider 追加的 --allowedTools/--max-turns 落到 $0/$1 被忽略,不污染输出。
         provider = ClaudeCLIProvider(
-            command_template=["echo", "CLI output"]
+            command_template=["sh", "-c", "echo CLI output"]
         )
         req = LLMRequest(
             messages=[{"role": "user", "content": "hello"}],
@@ -386,7 +387,7 @@ class TestClaudeCLIProvider:
     async def test_cli_timeout_raises(self):
         """Timeout should kill process and raise AIProviderError."""
         provider = ClaudeCLIProvider(
-            command_template=["sleep", "999"]
+            command_template=["sh", "-c", "sleep 999"]
         )
         import asyncio
         original_wait_for = asyncio.wait_for
@@ -440,7 +441,8 @@ class TestClaudeCLIVision:
         resp = await p.complete(LLMRequest(messages=[{"role": "user", "content": "hello"}]))
         assert resp.content == "OK"
         assert "{prompt_file}" not in cap["cmd"]
-        assert "--allowedTools" not in cap["cmd"]       # 无图不放开工具
+        assert "Read" not in cap["cmd"]                 # 无图不放开 Read
+        assert "--max-turns" in cap["cmd"]              # 纯文本限 1 轮,逼单次生成(防 agentic 拖慢)
         assert b"hello" in cap["stdin"]
 
     @pytest.mark.asyncio

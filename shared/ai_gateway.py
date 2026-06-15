@@ -225,6 +225,10 @@ class ClaudeCLIProvider:
             cmd += ["--max-turns", str(len(request.images) + 5)]
             for d in sorted(extra_dirs):
                 cmd += ["--add-dir", d]
+        else:
+            # 纯文本调用(评审/标点):不放任何工具 + 限 1 轮,逼单次生成。
+            # 否则 claude -p 默认带全套工具会多轮 agentic"思考",一个打分跑成 >15min。
+            cmd += ["--allowedTools", "", "--max-turns", "1"]
 
         env = {**os.environ, **self._env}
         timeout = min(600 + 25 * len(request.images or []), 1800)  # 图越多给越久
