@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, inject } from 'vue'
+import { ref, computed, onMounted, watch, inject } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import MarkdownViewer from '../components/notes/MarkdownViewer.vue'
@@ -99,12 +99,21 @@ function pollForVersion(provider: string) {
   }, 15000)
 }
 
-onMounted(async () => {
+async function reload() {
   try {
     const detail = await api.get<{ title: string }>(`/api/jobs/${jobId.value}`)
     title.value = detail.title || jobId.value
   } catch { title.value = jobId.value }
   await Promise.all([loadContent(), loadVersions(), loadProviders()])
+}
+
+onMounted(reload)
+
+// 智能笔记 ↔ 机械稿、以及不同 jobId 共用同一个 NotesView 实例,切换时组件不重挂、
+// onMounted 不再触发 → 内容不会变。监听路由变化重新取(切 variant 时清掉 provider 选择)。
+watch(() => [route.params.jobId, route.name], () => {
+  activeProvider.value = null
+  reload()
 })
 
 function onHeadings(h: { id: string; text: string; level: number }[]) {
