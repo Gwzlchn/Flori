@@ -173,7 +173,7 @@ watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pick
             <div v-if="stepPct(s) != null" class="mt-1 w-full bg-gray-200 rounded-full h-1">
               <div class="bg-blue-500 h-full rounded-full transition-all" :style="{ width: `${stepPct(s)}%` }" />
             </div>
-            <div v-else-if="s.duration_sec" class="text-[11px] text-gray-400 mt-0.5">耗时 {{ fmtDur(s.duration_sec) }}</div>
+            <div v-else-if="s.duration_sec && ['done', 'failed'].includes(s.status)" class="text-[11px] text-gray-400 mt-0.5">耗时 {{ fmtDur(s.duration_sec) }}</div>
           </div>
         </button>
       </div>
@@ -187,11 +187,13 @@ watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pick
             <span class="text-xs text-gray-400 font-mono">{{ selStep.name }}</span>
           </div>
 
-          <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 mt-2">
+          <!-- 时间仅对真正跑过的步骤显示;等待/就绪(可能被重跑重置)不展示旧时间 -->
+          <div v-if="['done', 'failed', 'running'].includes(selStep.status)" class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 mt-2">
             <span><Clock :size="12" class="inline -mt-0.5" /> 开始 {{ fmtDateTime(selStep.started_at) }}</span>
-            <span>结束 {{ fmtDateTime(selStep.finished_at) }}</span>
-            <span>耗时 {{ fmtDur(selStep.duration_sec) }}</span>
+            <span>结束 {{ selStep.status === 'running' ? '进行中' : fmtDateTime(selStep.finished_at) }}</span>
+            <span>耗时 {{ selStep.status === 'running' ? '进行中' : fmtDur(selStep.duration_sec) }}</span>
           </div>
+          <div v-else-if="['waiting', 'ready'].includes(selStep.status)" class="text-xs text-gray-400 mt-2">尚未运行</div>
 
           <div v-if="stepPct(selStep) != null" class="mt-2 w-full bg-gray-200 rounded-full h-1.5">
             <div class="bg-blue-500 h-full rounded-full" :style="{ width: `${stepPct(selStep)}%` }" />

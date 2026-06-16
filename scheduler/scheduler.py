@@ -877,7 +877,9 @@ class Scheduler:
             await self.redis.set_step_status(job_id, step, "waiting")
             await asyncio.to_thread(
                 self.db.update_step, job_id, step,
+                # 清掉上一轮的起止/耗时,否则重置成 waiting 的步骤会显示旧时间(诡异)。
                 status="waiting", error=None,
+                started_at=None, finished_at=None, duration_sec=None,
             )
 
         await asyncio.to_thread(
