@@ -63,6 +63,14 @@ const rendered = computed(() => {
     return `<h${level} id="${id}">`
   })
 
+  // OCR 仅在显示时折叠：把 `> OCR：…` 渲染出的引用块包成默认收起的 <details>，
+  // 原文仍保留在笔记里，只是阅读时不喧宾夺主。
+  html = html.replace(
+    /<blockquote>\s*<p>OCR：([\s\S]*?)<\/p>\s*<\/blockquote>/g,
+    (_m: string, body: string) =>
+      `<details class="ocr-fold"><summary>OCR</summary><div class="ocr-body">${body}</div></details>`,
+  )
+
   return html
 })
 
@@ -84,4 +92,9 @@ watch(rendered, (html) => {
 <style>
 .prose img { max-width: 100%; border-radius: 0.5rem; }
 .prose .timestamp-mark { text-decoration: none; }
+.prose details.ocr-fold { margin: 0.2rem 0 0.7rem; }
+.prose details.ocr-fold > summary { cursor: pointer; font-size: 0.72rem; color: #9ca3af; user-select: none; }
+.prose details.ocr-fold > summary::before { content: "🔎 "; }
+.prose details.ocr-fold .ocr-body { font-size: 0.78rem; color: #6b7280; background: #f9fafb; border-radius: 0.375rem; padding: 0.35rem 0.6rem; margin-top: 0.25rem; }
+.prose details.ocr-fold .ocr-body p { margin: 0; }
 </style>

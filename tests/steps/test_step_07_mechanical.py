@@ -39,7 +39,7 @@ class TestMechanicalStep:
 
         assert result["frames"] == 3
         md = (job_dir / "output" / "notes_mechanical.md").read_text()
-        assert "## 第 1 章" in md
+        assert "## [00:00]" in md            # 图文时间线:按时间节分段
         assert "scene_0000_5.0s.jpg" in md
 
     def test_with_optional_inputs(self, tmp_path):
@@ -55,8 +55,8 @@ class TestMechanicalStep:
         result = step.execute()
 
         md = (job_dir / "output" / "notes_mechanical.md").read_text()
-        assert "这个推导讲得真清楚" in md
-        assert "[00:05]" in md
+        assert "这个推导讲得真清楚" in md      # 弹幕并入对应时间节
+        assert "你好" in md                    # 口播文本进入正文
 
     def test_without_optional_inputs(self, tmp_path):
         job_dir = self._setup_job(tmp_path)
@@ -65,14 +65,25 @@ class TestMechanicalStep:
         result = step.execute()
         assert result["frames"] == 3
 
-    def test_chapter_splitting(self, tmp_path):
+    def test_beat_splitting(self, tmp_path):
         job_dir = self._setup_job(tmp_path)
         config = make_step_config(tmp_path, step_name="07_mechanical", pool="io")
         step = MechanicalStep("07_mechanical", job_dir, config)
         step.execute()
 
         md = (job_dir / "output" / "notes_mechanical.md").read_text()
-        assert "## 第 2 章" in md
+        # 帧分布在 5s / 65s / 200s → 至少跨 3 个时间节标题
+        assert "## [00:00]" in md and "## [03:00]" in md
+
+    def test_clean_ocr_filters_noise(self):
+        from steps.video.step_07_mechanical import _clean_ocr
+
+        raw = ("过去案例解读，与现在并无关系，不构成任何推荐 PAKEN财经说 bilibili "
+               "夏氏家族持股42.09% 132.401.983.63 USDT")
+        out = _clean_ocr(raw)
+        assert "夏氏家族持股42.09%" in out          # 有意义的画面文字保留
+        assert "PAKEN" not in out and "bilibili" not in out
+        assert "过去案例解读" not in out and "132.401.983.63" not in out
 
     def test_validate_inputs(self, tmp_path):
         job_dir = tmp_path / "job"

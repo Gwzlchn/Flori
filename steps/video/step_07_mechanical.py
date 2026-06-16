@@ -3,13 +3,48 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from shared.step_base import StepBase, file_hash
 from steps.utils.srt_parser import load_srt, pick_native_srt
 
 
-CHAPTER_INTERVAL_SEC = 180
+# 画面常驻水印 / 行情面板刻度等噪声:OCR 每帧反复抓到,对笔记无意义,生成时过滤掉。
+_OCR_WATERMARKS = (
+    "过去案例解读，与现在并无关系，不构成任何推荐",
+    "过去案例解读", "与现在并无关系", "不构成任何推荐",
+)
+
+
+def _is_ocr_noise_token(tok: str) -> bool:
+    tok = tok.strip("-=_.,;:!?()[]{}<>|/\\'\"~`*+，。、：；！？（）【】《》")
+    if not tok:                                                  # 纯标点残渣
+        return True
+    low = tok.lower()
+    if "paken" in low or tok.startswith("派克财经"):
+        return True
+    if "b" in low and re.fullmatch(r"[bil1]{5,}", low):         # bilibili 及 OCR 变体(biibili/bilbili/Lilibli…)
+        return True
+    if low.startswith("ma(") or any(k in low for k in ("usdt", "macd", "diff", "change")):
+        return True
+    if re.fullmatch(r"[a-z]\d[\d.,]+", low):                     # OHLC 形如 O22.983 / H23.016
+        return True
+    if not any("一" <= c <= "鿿" for c in tok):                  # 无中文 → 可能是行情刻度
+        if re.fullmatch(r"\d[\d.,:]{4,}", tok):                  # 纯数字串 132.401.983.63
+            return True
+        if re.fullmatch(r"\d[\d.,]*[KkMm]", tok):                # 2.699K
+            return True
+    return False
+
+
+def _clean_ocr(text: str) -> str:
+    """剔除明显噪声(水印/平台名/行情刻度),保留有意义的画面文字。"""
+    if not text:
+        return ""
+    for w in _OCR_WATERMARKS:
+        text = text.replace(w, " ")
+    return " ".join(t for t in text.split() if not _is_ocr_noise_token(t))
 
 
 class MechanicalStep(StepBase):
@@ -22,7 +57,10 @@ class MechanicalStep(StepBase):
         return missing
 
     # 渲染版本:渲染逻辑变了但输入文件没变时,bump 这个值让幂等失效、强制重渲染。
-    RENDER_VERSION = "v2-sections"
+    RENDER_VERSION = "v4-timeline-clean"
+
+    # 时间节粒度:口播按节成段,该节的截图/OCR 并置在同一节内,三者按时间往下读。
+    BEAT_SEC = 30
 
     def input_hashes(self) -> dict[str, str]:
         hashes = {
@@ -106,60 +144,58 @@ class MechanicalStep(StepBase):
         return f"{m:02d}:{s:02d}"
 
     def _render_markdown(self, events) -> str:
-        """口播全文为主体(与字幕一字不差、连续不打断),画面/OCR、弹幕作为独立附录在后。
-        此前每章口播被大段 OCR 截断,看起来像「掐头去尾」;现按内容分区,口播完整连读。"""
-        if not events:
-            return "# 机械版笔记\n\n（无内容）\n"
-
+        """图文时间线:按 ~BEAT_SEC 一节,把该节的口播(字幕整行拼接成段、句子完整不截断)
+        与该节的截图+OCR 并置在一起,顺时间往下读。截图再稀释:连续/节内重复 OCR 去重,
+        有 OCR 的优先、每节最多 2 张,全节无 OCR 则留 1 张代表帧。"""
         transcript = [e for e in events if e["type"] == "transcript" and e["text"].strip()]
         frames = [e for e in events if e["type"] == "frame"]
         danmaku = [e for e in events if e["type"] == "danmaku" and e["text"].strip()]
+        if not transcript and not frames:
+            return "# 机械版笔记\n\n（无内容）\n"
+
+        from collections import defaultdict
+        tb: dict[int, list] = defaultdict(list)   # 口播
+        fb: dict[int, list] = defaultdict(list)   # 截图
+        db: dict[int, list] = defaultdict(list)   # 弹幕
+        for e in transcript:
+            tb[int(e["time"] // self.BEAT_SEC)].append(e)
+        for e in frames:
+            fb[int(e["time"] // self.BEAT_SEC)].append(e)
+        for e in danmaku:
+            db[int(e["time"] // self.BEAT_SEC)].append(e)
+
         parts = ["# 机械版笔记\n"]
-
-        # ── 主体:口播全文(与字幕完全一致)。按 CHAPTER_INTERVAL 加时间小标题便于导航,
-        #     段内每 ~30s 空行分段;全程不插画面,保证口播连续可读。 ──
-        parts.append("\n## 口播全文\n")
-        if transcript:
-            last_head = -CHAPTER_INTERVAL_SEC
-            buf: list[str] = []
-            pstart = transcript[0]["time"]
-
-            def _flush() -> None:
-                if buf:
-                    parts.append("\n" + "".join(buf) + "\n")
-                    buf.clear()
-
-            for e in transcript:
-                if e["time"] - last_head >= CHAPTER_INTERVAL_SEC:
-                    _flush()
-                    parts.append(f"\n### [{self._ts(e['time'])}]\n")
-                    last_head = e["time"]; pstart = e["time"]
-                if buf and e["time"] - pstart >= 30:
-                    _flush(); pstart = e["time"]
-                buf.append(e["text"].strip())
-            _flush()
-        else:
+        if not transcript:
             parts.append("\n> ⚠️ 未取得字幕/口播稿(非中文视频需先经 06 翻译)。\n")
 
-        # ── 附录:画面 / OCR(辅助)。连续重复 OCR 去重,多行 OCR 压成一行,不污染正文。 ──
-        if frames:
-            parts.append("\n## 画面 / OCR（辅助）\n")
-            last_head = -CHAPTER_INTERVAL_SEC
-            last_ocr = None
-            for fr in frames:
-                if fr["time"] - last_head >= CHAPTER_INTERVAL_SEC:
-                    parts.append(f"\n### [{self._ts(fr['time'])}]\n")
-                    last_head = fr["time"]
-                parts.append(f"\n![{fr['filename']}](assets/{fr['filename']})\n")
-                ocr = " ".join((fr.get("ocr_text") or "").split())
-                if ocr and ocr != last_ocr:
-                    parts.append(f"\n> {ocr}\n")
-                    last_ocr = ocr
+        last_ocr: str | None = None
+        for beat in sorted(set(tb) | set(fb)):
+            parts.append(f"\n## [{self._ts(beat * self.BEAT_SEC)}]\n")
 
-        # ── 附录:弹幕(辅助) ──
-        if danmaku:
-            parts.append("\n## 弹幕（辅助）\n\n")
-            parts.append(" / ".join(d["text"] for d in danmaku[:80]) + "\n")
+            text = "".join(e["text"].strip() for e in tb.get(beat, []))
+            if text:
+                parts.append(f"\n{text}\n")
+
+            # 再稀释:节内/与上一张连续重复的 OCR 跳过;有 OCR 的优先,最多 2 张;
+            # 全节无 OCR 仍留 1 张代表帧,保证有画面。
+            kept: list[tuple[dict, str]] = []
+            seen: set[str] = set()
+            for fr in fb.get(beat, []):
+                ocr = _clean_ocr(fr.get("ocr_text") or "")
+                if ocr and (ocr == last_ocr or ocr in seen):
+                    continue
+                kept.append((fr, ocr))
+                if ocr:
+                    seen.add(ocr)
+                    last_ocr = ocr
+            with_text = [k for k in kept if k[1]]
+            for fr, ocr in (with_text[:2] if with_text else kept[:1]):
+                parts.append(f"\n![{self._ts(fr['time'])}](assets/{fr['filename']})\n")
+                if ocr:
+                    parts.append(f"\n> OCR：{ocr}\n")
+
+            if db.get(beat):
+                parts.append(f"\n> 弹幕：{' / '.join(d['text'] for d in db[beat][:20])}\n")
 
         return "".join(parts)
 

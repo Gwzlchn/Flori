@@ -108,7 +108,7 @@ video:
       extends: .ai-step
       run: steps.video.step_06_punctuate
       needs: ["00_download"]
-      timeout: 300
+      timeout: 1800
       retry: 3
       tags: []
       rules:
