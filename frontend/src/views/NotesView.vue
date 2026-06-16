@@ -11,8 +11,8 @@ const router = useRouter()
 const api = useApi()
 const showToast = inject<(m: string, t?: string) => void>('showToast', () => {})
 
-const jobId = computed(() => route.params.jobId as string)
-const isMechanical = computed(() => route.name === 'notes-mechanical')
+const jobId = computed(() => route.params.id as string)
+const isMechanical = computed(() => route.params.type === 'mechanical')
 
 const content = ref('')
 const headings = ref<{ id: string; text: string; level: number }[]>([])
@@ -109,9 +109,9 @@ async function reload() {
 
 onMounted(reload)
 
-// 智能笔记 ↔ 机械稿、以及不同 jobId 共用同一个 NotesView 实例,切换时组件不重挂、
+// 智能笔记 ↔ 机械稿、以及不同 job 共用同一个 NotesView 实例,切换时组件不重挂、
 // onMounted 不再触发 → 内容不会变。监听路由变化重新取(切 variant 时清掉 provider 选择)。
-watch(() => [route.params.jobId, route.name], () => {
+watch(() => [route.params.id, route.params.type], () => {
   activeProvider.value = null
   reload()
 })
@@ -132,7 +132,7 @@ const showChapters = ref(false)
       <h2 class="text-lg font-bold truncate flex-1">{{ title }}</h2>
       <div class="flex items-center gap-1">
         <router-link
-          :to="`/notes/${jobId}`"
+          :to="`/jobs/${jobId}/notes/smart`"
           class="px-2 py-1 text-xs rounded-md transition-colors"
           :class="!isMechanical ? 'bg-blue-100 text-blue-700 font-medium' : 'text-gray-500 hover:bg-gray-100'"
         >
@@ -140,7 +140,7 @@ const showChapters = ref(false)
           智能版
         </router-link>
         <router-link
-          :to="`/notes/${jobId}/mechanical`"
+          :to="`/jobs/${jobId}/notes/mechanical`"
           class="px-2 py-1 text-xs rounded-md transition-colors"
           :class="isMechanical ? 'bg-blue-100 text-blue-700 font-medium' : 'text-gray-500 hover:bg-gray-100'"
         >

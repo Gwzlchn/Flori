@@ -135,11 +135,11 @@ async function confirmDelete() {
       <div class="flex flex-wrap gap-2">
         <!-- Done: view outputs -->
         <template v-if="jobStatus === 'done'">
-          <router-link :to="`/notes/${jobId}`" class="flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors">
+          <router-link :to="`/jobs/${jobId}/notes/smart`" class="flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors">
             <BookOpen :size="14" />
             查看笔记
           </router-link>
-          <router-link v-if="job.content_type === 'video'" :to="`/notes/${jobId}/mechanical`" class="flex items-center gap-1.5 px-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50 transition-colors">
+          <router-link v-if="job.content_type === 'video'" :to="`/jobs/${jobId}/notes/mechanical`" class="flex items-center gap-1.5 px-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50 transition-colors">
             <FileText :size="14" />
             机械版
           </router-link>

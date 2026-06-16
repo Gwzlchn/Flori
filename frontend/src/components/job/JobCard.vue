@@ -30,7 +30,7 @@ const timeAgo = computed(() => {
 
 function go() {
   if (props.job.status === 'done') {
-    router.push(`/notes/${props.job.job_id}`)
+    router.push(`/jobs/${props.job.job_id}/notes/smart`)
   } else {
     router.push(`/jobs/${props.job.job_id}`)
   }

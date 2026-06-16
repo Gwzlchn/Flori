@@ -82,8 +82,8 @@ watch([q, domain, contentType], () => {
 function openNote(item: SearchResultItem) {
   // 机械笔记跳机械页，其余跳智能笔记页。
   const path = item.note_type === 'mechanical'
-    ? `/notes/${item.job_id}/mechanical`
-    : `/notes/${item.job_id}`
+    ? `/jobs/${item.job_id}/notes/mechanical`
+    : `/jobs/${item.job_id}/notes/smart`
   router.push(path)
 }
 </script>

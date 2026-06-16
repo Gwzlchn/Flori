@@ -19,14 +19,13 @@ const router = createRouter({
       component: () => import('../views/JobDetailView.vue'),
     },
     {
-      path: '/notes/:jobId',
+      path: '/jobs/:id/notes/:type',
       name: 'notes',
       component: () => import('../views/NotesView.vue'),
     },
     {
-      path: '/notes/:jobId/mechanical',
-      name: 'notes-mechanical',
-      component: () => import('../views/NotesView.vue'),
+      path: '/jobs/:id/notes',
+      redirect: (to) => `/jobs/${to.params.id}/notes/smart`,
     },
     {
       path: '/collections',
