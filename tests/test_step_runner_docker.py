@@ -120,7 +120,7 @@ def _ctx(
         work_dir=work_dir,
         exec_id="e1",
         step_cfg={"step": {"name": "A", "timeout_sec": timeout_sec}},
-        module="steps.video.step_01_scene",
+        module="steps.video.step_03_scene",
         image=image,
         timeout_sec=timeout_sec,
         pool=pool,
@@ -154,7 +154,7 @@ class TestDockerSuccess:
         assert rc == 0
         kw = runner._client.containers.run_kwargs
         assert kw["command"] == [
-            "python3", "-m", "steps.video.step_01_scene",
+            "python3", "-m", "steps.video.step_03_scene",
             "--job-dir", "/job",
             "--step-config", "/job/.A.config.json",
         ]

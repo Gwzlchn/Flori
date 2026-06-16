@@ -5,9 +5,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from steps.common.step_00_download import DownloadStep
-from steps.video.step_02_frames import FramesStep
-from steps.video.step_03_dedup import DedupStep
+from steps.common.step_01_download import DownloadStep
+from steps.video.step_04_frames import FramesStep
+from steps.video.step_05_dedup import DedupStep
 
 
 def _cfg(tmp):
@@ -35,14 +35,14 @@ def _img(seed):
 
 class TestFramePick:
     def test_static_scene_picks_early_frame(self, tmp_path):
-        step = FramesStep("02_frames", tmp_path, _cfg(tmp_path))
+        step = FramesStep("04_frames", tmp_path, _cfg(tmp_path))
         same = _img(1)
         cap = _FakeCap({0: same, 70: same.copy(), 5: _img(99)})
         _, target = step._pick_representative(cap, 0, 100, 0.7, 0.85)
         assert target == 5   # 静止(SSIM 高)→ 取 start+5,避开过渡态
 
     def test_dynamic_scene_picks_mid_frame(self, tmp_path):
-        step = FramesStep("02_frames", tmp_path, _cfg(tmp_path))
+        step = FramesStep("04_frames", tmp_path, _cfg(tmp_path))
         cap = _FakeCap({0: _img(1), 70: _img(2)})
         _, target = step._pick_representative(cap, 0, 100, 0.7, 0.85)
         assert target == 70  # 画面在变(SSIM 低)→ 取 ratio 位置帧
@@ -60,19 +60,19 @@ class TestPhashBand:
 class TestVerifyDownload:
     def test_missing_raises(self, tmp_path):
         from shared.errors import InputInvalidError
-        step = DownloadStep("00_download", tmp_path, _cfg(tmp_path))
+        step = DownloadStep("01_download", tmp_path, _cfg(tmp_path))
         with pytest.raises(InputInvalidError):
             step._verify_download(tmp_path / "nope.mp4")
 
     def test_too_small_raises(self, tmp_path):
         from shared.errors import InputInvalidError
-        step = DownloadStep("00_download", tmp_path, _cfg(tmp_path))
+        step = DownloadStep("01_download", tmp_path, _cfg(tmp_path))
         f = tmp_path / "source.mp4"; f.write_bytes(b"x" * 100)
         with pytest.raises(InputInvalidError):
             step._verify_download(f)
 
     def test_valid_passes(self, tmp_path, monkeypatch):
-        step = DownloadStep("00_download", tmp_path, _cfg(tmp_path))
+        step = DownloadStep("01_download", tmp_path, _cfg(tmp_path))
         f = tmp_path / "source.mp4"; f.write_bytes(b"x" * 2_000_000)
         monkeypatch.setattr(step, "_get_video_duration", lambda p: 123.0)
         step._verify_download(f)  # 不抛

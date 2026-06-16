@@ -1,12 +1,12 @@
-"""tests for steps/audio/ (20_transcript_parse / 21_smart_podcast / 22_review)"""
+"""tests for steps/audio/ (03_transcript_parse / 04_smart_podcast / 05_review)"""
 
 import json
 
 import pytest
 
-from steps.audio.step_20_transcript_parse import TranscriptParseStep
-from steps.audio.step_21_smart_podcast import SmartPodcastStep
-from steps.audio.step_22_review import PodcastReviewStep
+from steps.audio.step_03_transcript_parse import TranscriptParseStep
+from steps.audio.step_04_smart_podcast import SmartPodcastStep
+from steps.audio.step_05_review import PodcastReviewStep
 from tests.steps.conftest import make_step_config
 
 # 跨越 60s 窗口的样例 SRT，预期聚合为 2 段
@@ -40,15 +40,15 @@ def _mk_job(tmp_path):
 class TestTranscriptParseStep:
     def test_validate_missing(self, tmp_path):
         job_dir = _mk_job(tmp_path)
-        config = make_step_config(tmp_path, step_name="20_transcript_parse")
-        step = TranscriptParseStep("20_transcript_parse", job_dir, config)
+        config = make_step_config(tmp_path, step_name="03_transcript_parse")
+        step = TranscriptParseStep("03_transcript_parse", job_dir, config)
         assert step.validate_inputs() == ["input/subtitle.srt"]
 
     def test_execute_aggregates(self, tmp_path):
         job_dir = _mk_job(tmp_path)
         (job_dir / "input" / "subtitle.srt").write_text(SRT)
-        config = make_step_config(tmp_path, step_name="20_transcript_parse")
-        step = TranscriptParseStep("20_transcript_parse", job_dir, config)
+        config = make_step_config(tmp_path, step_name="03_transcript_parse")
+        step = TranscriptParseStep("03_transcript_parse", job_dir, config)
         result = step.execute()
 
         # 4 条字幕跨越 ~120s，按 60s 窗口应聚合为 2 段
@@ -72,8 +72,8 @@ class TestTranscriptParseStep:
     def test_empty_srt(self, tmp_path):
         job_dir = _mk_job(tmp_path)
         (job_dir / "input" / "subtitle.srt").write_text("")
-        config = make_step_config(tmp_path, step_name="20_transcript_parse")
-        step = TranscriptParseStep("20_transcript_parse", job_dir, config)
+        config = make_step_config(tmp_path, step_name="03_transcript_parse")
+        step = TranscriptParseStep("03_transcript_parse", job_dir, config)
         result = step.execute()
         assert result["segments"] == 0
         assert result["duration_sec"] == 0.0
@@ -81,11 +81,11 @@ class TestTranscriptParseStep:
     def test_idempotent(self, tmp_path):
         job_dir = _mk_job(tmp_path)
         (job_dir / "input" / "subtitle.srt").write_text(SRT)
-        config = make_step_config(tmp_path, step_name="20_transcript_parse")
-        step = TranscriptParseStep("20_transcript_parse", job_dir, config)
+        config = make_step_config(tmp_path, step_name="03_transcript_parse")
+        step = TranscriptParseStep("03_transcript_parse", job_dir, config)
         step.execute()
         step.mark_done()
-        step2 = TranscriptParseStep("20_transcript_parse", job_dir, config)
+        step2 = TranscriptParseStep("03_transcript_parse", job_dir, config)
         assert step2.should_run() is False
 
 
@@ -104,23 +104,23 @@ class TestSmartPodcastStep:
 
     def test_validate_missing(self, tmp_path):
         job_dir = _mk_job(tmp_path)
-        config = make_step_config(tmp_path, step_name="21_smart_podcast")
-        step = SmartPodcastStep("21_smart_podcast", job_dir, config)
+        config = make_step_config(tmp_path, step_name="04_smart_podcast")
+        step = SmartPodcastStep("04_smart_podcast", job_dir, config)
         assert step.validate_inputs() == ["intermediate/transcript.json"]
 
     def test_execute_dry_run(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DRY_RUN", "1")
         job_dir = self._setup(tmp_path)
-        config = make_step_config(tmp_path, step_name="21_smart_podcast", pool="ai")
-        step = SmartPodcastStep("21_smart_podcast", job_dir, config)
+        config = make_step_config(tmp_path, step_name="04_smart_podcast", pool="ai")
+        step = SmartPodcastStep("04_smart_podcast", job_dir, config)
         result = step.execute()
         assert result["chars"] > 0
         assert (job_dir / "output" / "notes_smart.md").exists()
 
     def test_build_prompt(self, tmp_path):
         job_dir = self._setup(tmp_path)
-        config = make_step_config(tmp_path, step_name="21_smart_podcast")
-        step = SmartPodcastStep("21_smart_podcast", job_dir, config)
+        config = make_step_config(tmp_path, step_name="04_smart_podcast")
+        step = SmartPodcastStep("04_smart_podcast", job_dir, config)
         transcript = step.load_json("intermediate/transcript.json")
         prompt = step._build_prompt(transcript)
         assert "注意力机制" in prompt
@@ -130,10 +130,10 @@ class TestSmartPodcastStep:
         job_dir = self._setup(tmp_path)
         prompts_dir = tmp_path / "prompts"
         prompts_dir.mkdir(exist_ok=True)
-        (prompts_dir / "21_smart_podcast.md").write_text("system prompt")
-        config = make_step_config(tmp_path, step_name="21_smart_podcast", pool="ai")
+        (prompts_dir / "04_smart_podcast.md").write_text("system prompt")
+        config = make_step_config(tmp_path, step_name="04_smart_podcast", pool="ai")
         config["paths"]["prompts_dir"] = str(prompts_dir)
-        step = SmartPodcastStep("21_smart_podcast", job_dir, config)
+        step = SmartPodcastStep("04_smart_podcast", job_dir, config)
         hashes = step.input_hashes()
         assert "transcript" in hashes
         assert "prompt" in hashes
@@ -154,15 +154,15 @@ class TestPodcastReviewStep:
 
     def test_validate_inputs(self, tmp_path):
         job_dir = _mk_job(tmp_path)
-        config = make_step_config(tmp_path, step_name="22_review")
-        step = PodcastReviewStep("22_review", job_dir, config)
+        config = make_step_config(tmp_path, step_name="05_review")
+        step = PodcastReviewStep("05_review", job_dir, config)
         assert len(step.validate_inputs()) == 2
 
     def test_execute_dry_run(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DRY_RUN", "1")
         job_dir = self._setup(tmp_path)
-        config = make_step_config(tmp_path, step_name="22_review", pool="ai")
-        step = PodcastReviewStep("22_review", job_dir, config)
+        config = make_step_config(tmp_path, step_name="05_review", pool="ai")
+        step = PodcastReviewStep("05_review", job_dir, config)
         result = step.execute()
         assert (job_dir / "output" / "review.json").exists()
         review = json.loads((job_dir / "output" / "review.json").read_text())

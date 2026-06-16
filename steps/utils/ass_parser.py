@@ -27,7 +27,6 @@ _DIALOGUE_RE = re.compile(
     re.IGNORECASE,
 )
 
-_EFFECT_TAGS = re.compile(r"\\(?:move|pos|fad|org|clip|an\d)\b")
 _ASS_TAGS = re.compile(r"\{[^}]*\}")
 
 
@@ -36,7 +35,9 @@ def _ts_to_sec(h: str, m: str, s: str, cs: str) -> float:
 
 
 def parse_ass(text: str) -> list[DanmakuEntry]:
-    """解析 ASS 弹幕，过滤特效标签，按时间排序。"""
+    """解析 ASS 弹幕:剥掉 {\\...} 覆盖标签后保留弹幕文字,按时间排序。
+    注意:B 站滚动弹幕(biliass)几乎都带 {\\move(...)} 定位标签,绝不能据此丢弃,
+    否则会把绝大多数真实弹幕过滤掉(早期 bug)。仅剥标签、保留文本即可。"""
     entries: list[DanmakuEntry] = []
 
     for line in text.splitlines():
@@ -45,10 +46,6 @@ def parse_ass(text: str) -> list[DanmakuEntry]:
             continue
 
         raw_text = m.group(9)
-
-        if _EFFECT_TAGS.search(raw_text):
-            continue
-
         clean = _ASS_TAGS.sub("", raw_text).replace("\\N", " ").strip()
         if not clean:
             continue

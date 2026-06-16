@@ -254,6 +254,7 @@ async def get_job(
     job_id: str,
     db: Database = Depends(get_db),
     config: AppConfig = Depends(get_config),
+    storage: StorageBackend = Depends(get_storage),
 ):
     _validate_job_id(job_id)
     job = await asyncio.to_thread(db.get_job, job_id)
@@ -266,10 +267,19 @@ async def get_job(
         s["name"]: s.get("label")
         for s in config.pipelines.get(job.pipeline, {}).get("steps", [])
     }
+    # 源发布时间(「上传于」)由 01_download 写入 metadata.json;读不到则 None。
+    published_at = None
+    try:
+        raw = await storage.read_file(job_id, "input/metadata.json")
+        if raw:
+            published_at = json.loads(raw.decode("utf-8")).get("published_at")
+    except Exception:
+        pass
     return JobDetailResponse(
         job_id=job.id, content_type=job.content_type, status=job.status.value,
         created_at=job.created_at.isoformat(),
         updated_at=job.updated_at.isoformat() if job.updated_at else None,
+        published_at=published_at,
         title=job.title, url=job.url,
         progress_pct=job.progress_pct, source=job.source, domain=job.domain,
         collection_id=job.collection_id,
@@ -386,16 +396,16 @@ async def rerun_smart(
         raise HTTPException(404, "job not found")
     if not _provider_available(req.provider, config.providers):
         raise HTTPException(400, f"provider '{req.provider}' 不可用(未配置 API key)")
-    # 把 provider 覆盖写进 job.json(08/09 步会读),worker rerun 时 pull 到新 job.json。
+    # 把 provider 覆盖写进 job.json(智能/评审步会读),worker rerun 时 pull 到新 job.json。
     raw = await storage.read_file(job_id, "job.json")
     doc = json.loads(raw) if raw else {}
     doc.setdefault("ai_overrides", {})
-    doc["ai_overrides"]["08_smart"] = req.provider
-    doc["ai_overrides"]["09_review"] = req.provider
+    doc["ai_overrides"]["10_smart"] = req.provider
+    doc["ai_overrides"]["11_review"] = req.provider
     await storage.write_file(job_id, "job.json",
                              json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8"))
     await redis.publish("job_command", {
-        "action": "rerun", "job_id": job_id, "from_step": "08_smart",
+        "action": "rerun", "job_id": job_id, "from_step": "10_smart",
     })
     return {"job_id": job_id, "status": "processing", "provider": req.provider}
 

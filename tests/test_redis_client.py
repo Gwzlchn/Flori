@@ -21,9 +21,9 @@ async def rc():
 class TestQueue:
     @pytest.mark.asyncio
     async def test_enqueue_dequeue_priority(self, rc):
-        await rc.enqueue_step("cpu", "j_a", "04_ocr", ["cpu"], priority=-5)
-        await rc.enqueue_step("cpu", "j_b", "04_ocr", ["cpu"], priority=-2)
-        await rc.enqueue_step("cpu", "j_c", "04_ocr", ["cpu"], priority=-8)
+        await rc.enqueue_step("cpu", "j_a", "06_ocr", ["cpu"], priority=-5)
+        await rc.enqueue_step("cpu", "j_b", "06_ocr", ["cpu"], priority=-2)
+        await rc.enqueue_step("cpu", "j_c", "06_ocr", ["cpu"], priority=-8)
 
         item1, score1 = await rc.dequeue_step("cpu")
         assert item1["job_id"] == "j_c"
@@ -38,7 +38,7 @@ class TestQueue:
 
     @pytest.mark.asyncio
     async def test_return_step_preserves_score(self, rc):
-        await rc.enqueue_step("ai", "j_x", "08_smart", ["vision"], priority=-3)
+        await rc.enqueue_step("ai", "j_x", "10_smart", ["vision"], priority=-3)
         raw_json, task, score = await rc.dequeue_step_raw("ai")
         await rc.return_step("ai", raw_json, score)
 
@@ -49,7 +49,7 @@ class TestQueue:
     @pytest.mark.asyncio
     async def test_enqueue_with_require_tags(self, rc):
         """require_tags should be stored separately from tags."""
-        await rc.enqueue_step("ai", "j_x", "08_smart",
+        await rc.enqueue_step("ai", "j_x", "10_smart",
                               tags=["vision", "nlp", "case-study"],
                               priority=0,
                               require_tags=["vision"])
@@ -66,21 +66,21 @@ class TestQueue:
 
     @pytest.mark.asyncio
     async def test_queue_info(self, rc):
-        await rc.enqueue_step("io", "j_1", "00_download", [], priority=0)
-        await rc.enqueue_step("io", "j_2", "00_download", [], priority=0)
+        await rc.enqueue_step("io", "j_1", "01_download", [], priority=0)
+        await rc.enqueue_step("io", "j_2", "01_download", [], priority=0)
         info = await rc.get_queue_info("io")
         assert info["length"] == 2
 
 
     @pytest.mark.asyncio
     async def test_dequeue_step_raw_returns_triple(self, rc):
-        await rc.enqueue_step("cpu", "j_a", "01_scene", ["gpu"], priority=-3)
+        await rc.enqueue_step("cpu", "j_a", "03_scene", ["gpu"], priority=-3)
         result = await rc.dequeue_step_raw("cpu")
         assert result is not None
         raw_json, task, score = result
         assert isinstance(raw_json, str)
         assert task["job_id"] == "j_a"
-        assert task["step"] == "01_scene"
+        assert task["step"] == "03_scene"
         assert score == -3
 
     @pytest.mark.asyncio
@@ -89,7 +89,7 @@ class TestQueue:
 
     @pytest.mark.asyncio
     async def test_dequeue_step_raw_return_roundtrip(self, rc):
-        await rc.enqueue_step("ai", "j_x", "08_smart", ["vision"], priority=-5)
+        await rc.enqueue_step("ai", "j_x", "10_smart", ["vision"], priority=-5)
         raw_json, task, score = await rc.dequeue_step_raw("ai")
         await rc.return_step("ai", raw_json, score)
         item, score2 = await rc.dequeue_step("ai")
@@ -173,43 +173,43 @@ class TestJobState:
 
     @pytest.mark.asyncio
     async def test_step_status(self, rc):
-        await rc.set_step_status("j_x", "01_scene", "waiting")
-        assert await rc.get_step_status("j_x", "01_scene") == "waiting"
+        await rc.set_step_status("j_x", "03_scene", "waiting")
+        assert await rc.get_step_status("j_x", "03_scene") == "waiting"
 
-        await rc.set_step_status("j_x", "01_scene", "running")
+        await rc.set_step_status("j_x", "03_scene", "running")
         statuses = await rc.get_all_step_statuses("j_x")
-        assert statuses["01_scene"] == "running"
+        assert statuses["03_scene"] == "running"
 
     @pytest.mark.asyncio
     async def test_cas_success(self, rc):
-        await rc.set_step_status("j_x", "01_scene", "ready")
-        assert await rc.cas_step_status("j_x", "01_scene", "ready", "running") is True
-        assert await rc.get_step_status("j_x", "01_scene") == "running"
+        await rc.set_step_status("j_x", "03_scene", "ready")
+        assert await rc.cas_step_status("j_x", "03_scene", "ready", "running") is True
+        assert await rc.get_step_status("j_x", "03_scene") == "running"
 
     @pytest.mark.asyncio
     async def test_cas_failure(self, rc):
-        await rc.set_step_status("j_x", "01_scene", "done")
-        assert await rc.cas_step_status("j_x", "01_scene", "ready", "running") is False
-        assert await rc.get_step_status("j_x", "01_scene") == "done"
+        await rc.set_step_status("j_x", "03_scene", "done")
+        assert await rc.cas_step_status("j_x", "03_scene", "ready", "running") is False
+        assert await rc.get_step_status("j_x", "03_scene") == "done"
 
     @pytest.mark.asyncio
     async def test_step_worker(self, rc):
-        await rc.set_step_worker("j_x", "01_scene", "cpu-abc")
-        assert await rc.get_step_worker("j_x", "01_scene") == "cpu-abc"
+        await rc.set_step_worker("j_x", "03_scene", "cpu-abc")
+        assert await rc.get_step_worker("j_x", "03_scene") == "cpu-abc"
 
     @pytest.mark.asyncio
     async def test_retries(self, rc):
-        assert await rc.get_step_retries("j_x", "08_smart") == 0
-        assert await rc.incr_step_retries("j_x", "08_smart") == 1
-        assert await rc.incr_step_retries("j_x", "08_smart") == 2
-        assert await rc.get_step_retries("j_x", "08_smart") == 2
+        assert await rc.get_step_retries("j_x", "10_smart") == 0
+        assert await rc.incr_step_retries("j_x", "10_smart") == 1
+        assert await rc.incr_step_retries("j_x", "10_smart") == 2
+        assert await rc.get_step_retries("j_x", "10_smart") == 2
 
     @pytest.mark.asyncio
     async def test_cleanup(self, rc):
         await rc.init_job("j_x", "video", {})
-        await rc.set_step_status("j_x", "01_scene", "done")
-        await rc.set_step_worker("j_x", "01_scene", "cpu-1")
-        await rc.incr_step_retries("j_x", "01_scene")
+        await rc.set_step_status("j_x", "03_scene", "done")
+        await rc.set_step_worker("j_x", "03_scene", "cpu-1")
+        await rc.incr_step_retries("j_x", "03_scene")
 
         await rc.cleanup_job("j_x")
         assert await rc.get_job_pipeline("j_x") is None
@@ -311,7 +311,7 @@ class TestPubSub:
 
         task = asyncio.create_task(listener())
         await asyncio.sleep(0.05)
-        await rc.publish("test_channel", {"event": "step_done", "step": "01_scene"})
+        await rc.publish("test_channel", {"event": "step_done", "step": "03_scene"})
         await asyncio.wait_for(task, timeout=2.0)
 
         assert len(received) == 1

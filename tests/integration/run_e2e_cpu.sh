@@ -80,9 +80,9 @@ RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload" \
 JOB1=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
 log "  Job: $JOB1"
 
-# 等 CPU 步骤完成（00_download → 01_scene → 02_frames → 03_dedup → 04_ocr → 07_mechanical）
-# 05_danmaku 和 06_punctuate 可能 skip（取决于有无字幕/弹幕）
-CPU_STEPS="00_download,01_scene,02_frames,03_dedup,04_ocr,07_mechanical"
+# 等 CPU 步骤完成（01_download → 03_scene → 04_frames → 05_dedup → 06_ocr → 09_mechanical）
+# 07_danmaku 和 08_punctuate 可能 skip（取决于有无字幕/弹幕）
+CPU_STEPS="01_download,03_scene,04_frames,05_dedup,06_ocr,09_mechanical"
 if wait_steps_done "$JOB1" "$CPU_STEPS" 900; then
   report_steps "$JOB1"
   # 验证产物
@@ -133,7 +133,7 @@ JOB3=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['j
 CT=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['content_type'])")
 log "  Job: $JOB3 (content_type=$CT)"
 
-PAPER_CPU_STEPS="00_download,10_pdf_parse,11_sections,12_figures"
+PAPER_CPU_STEPS="01_download,02_pdf_parse,03_sections,04_figures"
 if wait_steps_done "$JOB3" "$PAPER_CPU_STEPS" 300; then
   report_steps "$JOB3"
   # 验证 sections.json 存在

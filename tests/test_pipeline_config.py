@@ -77,7 +77,7 @@ class TestExtends:
             normalize_pipelines(raw)
 
 
-# ── variables：覆盖（04_ocr 单一事实源，无 prod/integration 漂移）──
+# ── variables：覆盖（06_ocr 单一事实源，无 prod/integration 漂移）──
 
 
 class TestVariables:
@@ -114,25 +114,25 @@ class TestVariables:
         assert s["ai"]["primary"]["provider"] == "kimi"
 
     def test_ocr_timeout_single_source_no_drift(self, configs_dir):
-        """04_ocr 的 timeout/retry 只在 variables 定义一次；prod 与一份 integration 覆盖
+        """06_ocr 的 timeout/retry 只在 variables 定义一次；prod 与一份 integration 覆盖
         共享同一结构，超时不再各写一份（消灭 prod 1800/1 vs integration 300/2 漂移）。"""
         prod = load_pipelines(configs_dir / "pipelines.yaml")
-        ocr = next(s for s in prod["video"]["steps"] if s["name"] == "04_ocr")
+        ocr = next(s for s in prod["video"]["steps"] if s["name"] == "06_ocr")
         assert ocr["timeout_sec"] == 1800
         assert ocr["retries"] == 1
 
         # integration 退化为一份 variables 覆盖（仅换 provider），结构复用 prod；
-        # 不再各写一份 04_ocr → 两侧 timeout/retry 必然一致，漂移不可能再发生。
+        # 不再各写一份 06_ocr → 两侧 timeout/retry 必然一致，漂移不可能再发生。
         raw = {
             "default": {"image": "mnemo/step-base", "timeout": 600, "retry": 0},
             ".cpu-step": {"pool": "cpu", "timeout": 120, "retry": 1},
             "video": {
                 "variables": {"OCR_TIMEOUT": 1800, "OCR_RETRIES": 1, "PROV": "anthropic"},
                 "jobs": {
-                    "04_ocr": {"extends": ".cpu-step", "run": "steps.video.step_04_ocr",
-                               "image": "mnemo/step-heavy", "needs": ["03_dedup"],
+                    "06_ocr": {"extends": ".cpu-step", "run": "steps.video.step_06_ocr",
+                               "image": "mnemo/step-heavy", "needs": ["05_dedup"],
                                "timeout": "$OCR_TIMEOUT", "retry": "$OCR_RETRIES"},
-                    "08_smart": {"run": "m.s", "pool": "ai",
+                    "10_smart": {"run": "m.s", "pool": "ai",
                                  "ai": {"primary": {"provider": "$PROV"}}},
                 },
             },
@@ -146,13 +146,13 @@ class TestVariables:
         }
         int_norm = normalize_pipelines(raw_int)
 
-        prod_ocr = next(s for s in prod_norm["video"]["steps"] if s["name"] == "04_ocr")
-        int_ocr = next(s for s in int_norm["video"]["steps"] if s["name"] == "04_ocr")
+        prod_ocr = next(s for s in prod_norm["video"]["steps"] if s["name"] == "06_ocr")
+        int_ocr = next(s for s in int_norm["video"]["steps"] if s["name"] == "06_ocr")
         assert prod_ocr["timeout_sec"] == int_ocr["timeout_sec"] == 1800
         assert prod_ocr["retries"] == int_ocr["retries"] == 1
         # provider 是两侧唯一差异。
-        prod_smart = next(s for s in prod_norm["video"]["steps"] if s["name"] == "08_smart")
-        int_smart = next(s for s in int_norm["video"]["steps"] if s["name"] == "08_smart")
+        prod_smart = next(s for s in prod_norm["video"]["steps"] if s["name"] == "10_smart")
+        int_smart = next(s for s in int_norm["video"]["steps"] if s["name"] == "10_smart")
         assert prod_smart["ai"]["primary"]["provider"] == "anthropic"
         assert int_smart["ai"]["primary"]["provider"] == "kimi"
 
@@ -264,7 +264,7 @@ class TestNormalizedContractStable:
 
     def test_ai_block_provider_model_dict(self, configs_dir):
         p = load_pipelines(configs_dir / "pipelines.yaml")
-        smart = next(s for s in p["video"]["steps"] if s["name"] == "08_smart")
+        smart = next(s for s in p["video"]["steps"] if s["name"] == "10_smart")
         assert smart["ai"]["primary"]["provider"] == "claude-cli"  # 无 key,走订阅
         assert smart["ai"]["primary"]["model"] == "subscription"
         assert "text_fallback" in smart["ai"]

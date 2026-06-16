@@ -27,6 +27,9 @@ class StorageBackend(Protocol):
     async def write_file(self, job_id: str, rel_path: str, data: bytes) -> None: ...
     # 列出某 job 的全部产物相对路径(供 gateway 产物清单端点 / GatewayStorage.pull 用)。
     async def list_files(self, job_id: str) -> list[str]: ...
+    # 供 api range 流式播放视频/音频:取文件大小 + 读指定字节区间。找不到返回 None。
+    async def file_size(self, job_id: str, rel_path: str) -> int | None: ...
+    async def read_range(self, job_id: str, rel_path: str, start: int, length: int) -> bytes | None: ...
 
 
 class LocalStorage:
@@ -61,6 +64,22 @@ class LocalStorage:
         if not path.is_file():
             return None
         return await asyncio.to_thread(path.read_bytes)
+
+    async def file_size(self, job_id: str, rel_path: str) -> int | None:
+        path = self._safe_path(job_id, rel_path)
+        return path.stat().st_size if path.is_file() else None
+
+    async def read_range(self, job_id: str, rel_path: str, start: int, length: int) -> bytes | None:
+        path = self._safe_path(job_id, rel_path)
+        if not path.is_file():
+            return None
+
+        def _read() -> bytes:
+            with open(path, "rb") as f:
+                f.seek(start)
+                return f.read(length)
+
+        return await asyncio.to_thread(_read)
 
     async def write_file(self, job_id: str, rel_path: str, data: bytes) -> None:
         path = self._safe_path(job_id, rel_path)
@@ -196,6 +215,32 @@ class RemoteStorage:
                 resp.close()
                 resp.release_conn()
 
+    async def file_size(self, job_id: str, rel_path: str) -> int | None:
+        def _stat() -> int | None:
+            from minio.error import S3Error
+            try:
+                return self._client().stat_object(self._bucket, f"{job_id}/{rel_path}").size
+            except S3Error:
+                return None
+        return await asyncio.to_thread(_stat)
+
+    async def read_range(self, job_id: str, rel_path: str, start: int, length: int) -> bytes | None:
+        def _read() -> bytes | None:
+            from minio.error import S3Error
+            resp = None
+            try:
+                resp = self._client().get_object(
+                    self._bucket, f"{job_id}/{rel_path}", offset=start, length=length,
+                )
+                return resp.read()
+            except S3Error:
+                return None
+            finally:
+                if resp is not None:
+                    resp.close()
+                    resp.release_conn()
+        return await asyncio.to_thread(_read)
+
     async def list_files(self, job_id: str) -> list[str]:
         return await asyncio.to_thread(self._list_files_sync, job_id)
 
@@ -219,7 +264,7 @@ class GatewayStorage:
     远端 worker 经慢链路(出站 HTTPS)连中心存储时,两个可选项把大源文件挡在链路外:
       · STORAGE_WORKDIR_REUSE=1:job 目录跨步骤复用(按 job_id 命名),pull 跳过本机
         已存在的文件、cleanup 不再逐步 rmtree(改由 pull 时按 TTL GC 兄弟目录)。
-        于是 00_download 下载的 source.mp4 留在本机,后续 01/02/00b 步直接读本地,不重拉。
+        于是 01_download 下载的 source.mp4 留在本机,后续 03/04/02 步直接读本地,不重拉。
       · STORAGE_NO_PUSH_GLOBS=input/source.mp4,...:匹配的文件不回传中心存储,只留本机。
         大源文件(视频/音频)因此永不上行慢链路;帧图/字幕/OCR 等小产物照常回传供 AI 步消费。
     二者默认关闭(空),不改变既有部署语义;远端重算 worker 才在 docker run 里开。
@@ -355,6 +400,15 @@ class GatewayStorage:
         )
         resp.raise_for_status()
         return resp.json().get("files", [])
+
+    # gateway 仅供远端 worker 拉产物,不用于给前端流式播放;range 用整文件回退即可。
+    async def file_size(self, job_id: str, rel_path: str) -> int | None:
+        data = await self.read_file(job_id, rel_path)
+        return len(data) if data is not None else None
+
+    async def read_range(self, job_id: str, rel_path: str, start: int, length: int) -> bytes | None:
+        data = await self.read_file(job_id, rel_path)
+        return data[start:start + length] if data is not None else None
 
     async def close(self) -> None:
         if self._client_obj is not None:

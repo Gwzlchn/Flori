@@ -1,18 +1,18 @@
-"""tests for steps/video/step_04_ocr.py — 置信度过滤。"""
+"""tests for steps/video/step_06_ocr.py — 置信度过滤。"""
 
 from __future__ import annotations
 
-from steps.video.step_04_ocr import OcrStep
+from steps.video.step_06_ocr import OcrStep
 
 
 def _step(tmp_path):
     cfg = {
-        "step": {"name": "04_ocr", "pool": "cpu", "timeout_sec": 60, "retries": 0},
+        "step": {"name": "06_ocr", "pool": "cpu", "timeout_sec": 60, "retries": 0},
         "domain": {"ocr": {"confidence_threshold": 0.6}},
         "paths": {"data_dir": str(tmp_path)},
         "ai": {}, "providers": {},
     }
-    return OcrStep("04_ocr", tmp_path, cfg)
+    return OcrStep("06_ocr", tmp_path, cfg)
 
 
 def test_confidence_filter_drops_low(tmp_path):

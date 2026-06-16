@@ -35,15 +35,17 @@ class TestParseAss:
         times = [e.time_sec for e in entries]
         assert times == sorted(times)
 
-    def test_filters_move(self):
+    def test_keeps_move(self):
+        # B 站滚动弹幕都带 {\\move(...)},必须保留(剥标签后保留文字)。
         entries = parse_ass(SAMPLE_ASS)
         texts = [e.text for e in entries]
-        assert "Moving text" not in texts
+        assert "Moving text" in texts
 
-    def test_filters_pos(self):
+    def test_keeps_pos(self):
+        # 顶/底固定弹幕带 {\\pos(...)},同样保留。
         entries = parse_ass(SAMPLE_ASS)
         texts = [e.text for e in entries]
-        assert "Positioned" not in texts
+        assert "Positioned" in texts
 
     def test_strips_formatting_tags(self):
         entries = parse_ass(SAMPLE_ASS)

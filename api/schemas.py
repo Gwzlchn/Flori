@@ -19,6 +19,7 @@ class JobResponse(BaseModel):
     status: str
     created_at: str
     updated_at: str | None = None
+    published_at: str | None = None   # 源内容在 B 站等平台的发布时间(「上传于」)
     title: str | None = None
     url: str | None = None
     progress_pct: int = 0

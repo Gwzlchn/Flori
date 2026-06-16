@@ -7,10 +7,10 @@ import json
 
 import pytest
 
-from steps.article.step_16_parse_article import ParseArticleStep
-from steps.article.step_17_article_sections import ArticleSectionsStep
-from steps.article.step_18_smart_article import SmartArticleStep
-from steps.article.step_19_review import ArticleReviewStep
+from steps.article.step_02_parse_article import ParseArticleStep
+from steps.article.step_03_article_sections import ArticleSectionsStep
+from steps.article.step_04_smart_article import SmartArticleStep
+from steps.article.step_05_review import ArticleReviewStep
 from tests.steps.conftest import make_step_config
 
 
@@ -46,8 +46,8 @@ def _mk_job(tmp_path):
 class TestParseArticleStep:
     def test_validate_inputs_missing(self, tmp_path):
         job_dir = _mk_job(tmp_path)
-        config = make_step_config(tmp_path, step_name="16_parse_article", pool="cpu")
-        step = ParseArticleStep("16_parse_article", job_dir, config)
+        config = make_step_config(tmp_path, step_name="02_parse_article", pool="cpu")
+        step = ParseArticleStep("02_parse_article", job_dir, config)
         assert step.validate_inputs() == ["input/source.html"]
 
     def test_execute_extracts_body(self, tmp_path):
@@ -63,8 +63,8 @@ class TestParseArticleStep:
             }, ensure_ascii=False),
             encoding="utf-8",
         )
-        config = make_step_config(tmp_path, step_name="16_parse_article", pool="cpu")
-        step = ParseArticleStep("16_parse_article", job_dir, config)
+        config = make_step_config(tmp_path, step_name="02_parse_article", pool="cpu")
+        step = ParseArticleStep("02_parse_article", job_dir, config)
         result = step.execute()
 
         parsed = json.loads((job_dir / "intermediate" / "parsed.json").read_text())
@@ -78,8 +78,8 @@ class TestParseArticleStep:
     def test_meta_optional(self, tmp_path):
         job_dir = _mk_job(tmp_path)
         (job_dir / "input" / "source.html").write_text(SAMPLE_HTML, encoding="utf-8")
-        config = make_step_config(tmp_path, step_name="16_parse_article", pool="cpu")
-        step = ParseArticleStep("16_parse_article", job_dir, config)
+        config = make_step_config(tmp_path, step_name="02_parse_article", pool="cpu")
+        step = ParseArticleStep("02_parse_article", job_dir, config)
         # 无 article_meta.json 时不应报错，仍能从 HTML 抽到标题
         result = step.execute()
         parsed = json.loads((job_dir / "intermediate" / "parsed.json").read_text())
@@ -90,8 +90,8 @@ class TestParseArticleStep:
 class TestArticleSectionsStep:
     def test_validate_inputs(self, tmp_path):
         job_dir = _mk_job(tmp_path)
-        config = make_step_config(tmp_path, step_name="17_article_sections", pool="cpu")
-        step = ArticleSectionsStep("17_article_sections", job_dir, config)
+        config = make_step_config(tmp_path, step_name="03_article_sections", pool="cpu")
+        step = ArticleSectionsStep("03_article_sections", job_dir, config)
         assert step.validate_inputs() == ["intermediate/parsed.json"]
 
     def test_split_markdown_headings(self, tmp_path):
@@ -108,8 +108,8 @@ class TestArticleSectionsStep:
             "text": text,
         }
         (job_dir / "intermediate" / "parsed.json").write_text(json.dumps(parsed))
-        config = make_step_config(tmp_path, step_name="17_article_sections", pool="cpu")
-        step = ArticleSectionsStep("17_article_sections", job_dir, config)
+        config = make_step_config(tmp_path, step_name="03_article_sections", pool="cpu")
+        step = ArticleSectionsStep("03_article_sections", job_dir, config)
         result = step.execute()
 
         sections = json.loads((job_dir / "intermediate" / "sections.json").read_text())
@@ -131,8 +131,8 @@ class TestArticleSectionsStep:
             "text": text,
         }
         (job_dir / "intermediate" / "parsed.json").write_text(json.dumps(parsed))
-        config = make_step_config(tmp_path, step_name="17_article_sections", pool="cpu")
-        step = ArticleSectionsStep("17_article_sections", job_dir, config)
+        config = make_step_config(tmp_path, step_name="03_article_sections", pool="cpu")
+        step = ArticleSectionsStep("03_article_sections", job_dir, config)
         step.execute()
         sections = json.loads((job_dir / "intermediate" / "sections.json").read_text())
         assert len(sections["sections"]) >= 1
@@ -156,14 +156,14 @@ class TestSmartArticleStep:
 
     def test_validate_inputs(self, tmp_path):
         job_dir = _mk_job(tmp_path)
-        config = make_step_config(tmp_path, step_name="18_smart_article", pool="ai")
-        step = SmartArticleStep("18_smart_article", job_dir, config)
+        config = make_step_config(tmp_path, step_name="04_smart_article", pool="ai")
+        step = SmartArticleStep("04_smart_article", job_dir, config)
         assert step.validate_inputs() == ["intermediate/sections.json"]
 
     def test_build_prompt(self, tmp_path):
         job_dir = self._setup(tmp_path)
-        config = make_step_config(tmp_path, step_name="18_smart_article", pool="ai")
-        step = SmartArticleStep("18_smart_article", job_dir, config)
+        config = make_step_config(tmp_path, step_name="04_smart_article", pool="ai")
+        step = SmartArticleStep("04_smart_article", job_dir, config)
         sections = step.load_json("intermediate/sections.json")
         prompt = step._build_prompt(sections)
         assert "示例文章" in prompt
@@ -172,8 +172,8 @@ class TestSmartArticleStep:
     def test_execute_dry_run(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DRY_RUN", "1")
         job_dir = self._setup(tmp_path)
-        config = make_step_config(tmp_path, step_name="18_smart_article", pool="ai")
-        step = SmartArticleStep("18_smart_article", job_dir, config)
+        config = make_step_config(tmp_path, step_name="04_smart_article", pool="ai")
+        step = SmartArticleStep("04_smart_article", job_dir, config)
         result = step.execute()
         assert result["chars"] > 0
         assert (job_dir / "output" / "notes_smart.md").exists()
@@ -194,15 +194,15 @@ class TestArticleReviewStep:
 
     def test_validate_inputs(self, tmp_path):
         job_dir = _mk_job(tmp_path)
-        config = make_step_config(tmp_path, step_name="19_review", pool="ai")
-        step = ArticleReviewStep("19_review", job_dir, config)
+        config = make_step_config(tmp_path, step_name="05_review", pool="ai")
+        step = ArticleReviewStep("05_review", job_dir, config)
         assert len(step.validate_inputs()) == 2
 
     def test_execute_dry_run(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DRY_RUN", "1")
         job_dir = self._setup(tmp_path)
-        config = make_step_config(tmp_path, step_name="19_review", pool="ai")
-        step = ArticleReviewStep("19_review", job_dir, config)
+        config = make_step_config(tmp_path, step_name="05_review", pool="ai")
+        step = ArticleReviewStep("05_review", job_dir, config)
         result = step.execute()
         assert (job_dir / "output" / "review.json").exists()
         review = json.loads((job_dir / "output" / "review.json").read_text())

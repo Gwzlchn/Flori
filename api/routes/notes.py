@@ -2,42 +2,29 @@
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import mimetypes
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import Response
 
 from shared.config import AppConfig
+from shared.db import Database
 from shared.storage import StorageBackend
-from api.deps import get_config, get_storage, verify_token
+from api.deps import get_config, get_db, get_storage, verify_token
 
 router = APIRouter(prefix="/api/jobs", tags=["notes"], dependencies=[Depends(verify_token)])
-
-# 产物 → 步骤分组(按出现顺序归第一个命中的步;未命中归「其他」)。
-_STEP_GROUPS = [
-    ("00_download", "下载 / 原始", ["input/metadata.json", "input/article_meta.json",
-                                    "input/*.srt", "input/*.ass", "input/source.html", "input/source.pdf"]),
-    ("01_scene", "场景检测", ["intermediate/scenes.json"]),
-    ("02_frames", "代表帧", ["intermediate/frames.json", "assets/*"]),
-    ("03_dedup", "去重", ["intermediate/dedup.json"]),
-    ("04_ocr", "OCR", ["intermediate/ocr.json"]),
-    ("05_danmaku", "弹幕", ["intermediate/danmaku.json"]),
-    ("06_punctuate", "口播标点", ["output/transcript.md"]),
-    ("07_mechanical", "机械版笔记", ["output/notes_mechanical.md"]),
-    ("08_smart", "智能版笔记", ["output/notes_smart.md", "output/versions/smart__*"]),
-    ("09_review", "评审", ["output/review.json", "output/versions/review__*"]),
-    ("logs", "日志", ["logs/*"]),
-]
-# 不列出:大源文件 / yutto 中间件 / 内部点文件 / job.json(含 SESSDATA,绝不暴露)。
-_ARTIFACT_HIDE = ["input/source.mp4", "input/source.mp3", "input/*.m4s", "input/*_cover.*"]
-
 
 def _artifact_kind(path: str) -> str:
     ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
     if ext in ("jpg", "jpeg", "png", "gif", "webp"):
         return "image"
+    if ext in ("mp4", "webm", "mkv", "mov"):
+        return "video"
+    if ext in ("mp3", "m4a", "wav", "aac"):
+        return "audio"
     if ext == "json":
         return "json"
     if ext in ("md", "srt", "txt", "html", "ass", "log"):
@@ -46,12 +33,10 @@ def _artifact_kind(path: str) -> str:
 
 
 def _artifact_hidden(f: str) -> bool:
+    # 仅出于安全/整洁强制隐藏:内部点文件 + job.json(含 SESSDATA)。
+    # 展示哪些产物由 pipelines.yaml 各步的 outputs 决定(单一事实源),不在此写死。
     base = f.rsplit("/", 1)[-1]
-    if base.startswith("."):  # .done / .{step}.config.json / .progress / .error.json
-        return True
-    if f == "job.json":  # 含 SESSDATA
-        return True
-    return any(fnmatch.fnmatch(f, p) for p in _ARTIFACT_HIDE)
+    return base.startswith(".") or f == "job.json"
 
 
 def _validate_job_id(job_id: str) -> None:
@@ -142,25 +127,31 @@ async def get_asset(job_id: str, filename: str, storage: StorageBackend = Depend
 
 
 @router.get("/{job_id}/artifacts")
-async def list_artifacts(job_id: str, storage: StorageBackend = Depends(get_storage)):
-    """列某 job 全部产物,按步骤分组(供前端分步查看)。隐藏大源文件/内部文件/job.json。"""
+async def list_artifacts(
+    job_id: str,
+    storage: StorageBackend = Depends(get_storage),
+    db: Database = Depends(get_db),
+    config: AppConfig = Depends(get_config),
+):
+    """列某 job 产物,按步骤分组。分组与文件清单来自 pipelines.yaml 各步的 outputs(单一事实源);
+    job.json / 内部点文件由 _artifact_hidden 强制隐藏。"""
     _validate_job_id(job_id)
+    job = await asyncio.to_thread(db.get_job, job_id)
+    if not job:
+        raise HTTPException(404, "job not found")
     files = [f for f in await storage.list_files(job_id) if not _artifact_hidden(f)]
     assigned: set[str] = set()
     groups = []
-    for step, label, pats in _STEP_GROUPS:
+    for s in config.pipelines.get(job.pipeline, {}).get("steps", []):
+        pats = s.get("outputs") or []
         matched = sorted(
             f for f in files
             if f not in assigned and any(fnmatch.fnmatch(f, p) for p in pats)
         )
         assigned.update(matched)
         if matched:
-            groups.append({"step": step, "label": label,
+            groups.append({"step": s["name"], "label": s.get("label") or s["name"],
                            "files": [{"path": f, "kind": _artifact_kind(f)} for f in matched]})
-    other = sorted(f for f in files if f not in assigned)
-    if other:
-        groups.append({"step": "其他", "label": "其他",
-                       "files": [{"path": f, "kind": _artifact_kind(f)} for f in other]})
     return {"groups": groups}
 
 
@@ -187,49 +178,50 @@ async def get_artifact(job_id: str, path: str, storage: StorageBackend = Depends
                         cache=_artifact_kind(path) == "image")
 
 
-@router.get("/{job_id}/source")
-async def get_source(job_id: str, request: Request, config: AppConfig = Depends(get_config)):
-    # 视频回放仍走本地盘的 range 流式;分布式(MinIO)模式下的对象存储 range 流式为后续。
+_MEDIA_CHUNK = 2 * 1024 * 1024   # 单次最多回 2MB:浏览器按 range 续拉,内存不被整片视频撑爆。
+
+
+@router.get("/{job_id}/media")
+async def get_media(job_id: str, path: str, request: Request,
+                    storage: StorageBackend = Depends(get_storage)):
+    """视频/音频 range 流式(经 StorageBackend,兼容本地/MinIO)。<video>/<audio> 用它播放。
+    每次最多回 _MEDIA_CHUNK,开放区间(bytes=N-)也只回一段,避免把整片视频读进内存。"""
     _validate_job_id(job_id)
-    video_path = config.jobs_dir / job_id / "input" / "source.mp4"
-    if not video_path.exists():
-        raise HTTPException(404, "source not found")
+    if ".." in path or path.startswith("/") or "\x00" in path:
+        raise HTTPException(400, "invalid path")
+    if _artifact_hidden(path):
+        raise HTTPException(404, "media not found")
+    size = await storage.file_size(job_id, path)
+    if size is None:
+        raise HTTPException(404, "media not found")
+    ct = mimetypes.guess_type(path)[0] or "application/octet-stream"
 
-    file_size = video_path.stat().st_size
     range_header = request.headers.get("range")
-
     if not range_header:
-        return FileResponse(video_path, media_type="video/mp4", headers={"Accept-Ranges": "bytes"})
+        # 无 range:只回首段 + Accept-Ranges,引导浏览器改用 range(不整片加载)。
+        data = await storage.read_range(job_id, path, 0, min(_MEDIA_CHUNK, size))
+        status = 206 if size > _MEDIA_CHUNK else 200
+        headers = {"Accept-Ranges": "bytes", "Content-Length": str(len(data or b""))}
+        if status == 206:
+            headers["Content-Range"] = f"bytes 0-{len(data) - 1}/{size}"
+        return Response(content=data or b"", status_code=status, media_type=ct, headers=headers)
 
     try:
-        range_str = range_header.replace("bytes=", "")
-        parts = range_str.split("-")
+        parts = range_header.replace("bytes=", "").split("-")
         start = int(parts[0]) if parts[0] else 0
-        end = int(parts[1]) if len(parts) > 1 and parts[1] else file_size - 1
-        end = min(end, file_size - 1)
-        if start < 0 or start > end or start >= file_size:
-            raise ValueError("invalid range")
+        end = int(parts[1]) if len(parts) > 1 and parts[1] else size - 1
+        end = min(end, size - 1, start + _MEDIA_CHUNK - 1)   # 封顶单段大小
+        if start < 0 or start > end or start >= size:
+            raise ValueError
         length = end - start + 1
     except (ValueError, IndexError):
         raise HTTPException(416, "invalid Range header")
 
-    def _stream():
-        with open(video_path, "rb") as f:
-            f.seek(start)
-            remaining = length
-            while remaining > 0:
-                chunk = f.read(min(8192, remaining))
-                if not chunk:
-                    break
-                remaining -= len(chunk)
-                yield chunk
-
-    return StreamingResponse(
-        _stream(),
-        status_code=206,
-        media_type="video/mp4",
+    data = await storage.read_range(job_id, path, start, length)
+    return Response(
+        content=data or b"", status_code=206, media_type=ct,
         headers={
-            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Content-Range": f"bytes {start}-{end}/{size}",
             "Accept-Ranges": "bytes",
             "Content-Length": str(length),
         },

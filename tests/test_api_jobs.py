@@ -290,10 +290,10 @@ class TestRetryRerunResubmit:
         job_id = create_resp.json()["job_id"]
         resp = await client.post(
             f"/api/jobs/{job_id}/rerun",
-            json={"from_step": "08_smart"},
+            json={"from_step": "10_smart"},
         )
         assert resp.status_code == 200
-        assert resp.json()["from_step"] == "08_smart"
+        assert resp.json()["from_step"] == "10_smart"
 
     @pytest.mark.asyncio
     async def test_resubmit(self, client, mock_redis):
@@ -347,5 +347,5 @@ class TestProviderVersions:
         assert resp.status_code == 200 and resp.json()["provider"] == "claude-cli"
         import json as _j
         doc = _j.loads((await storage.read_file(jid, "job.json")).decode())
-        assert doc["ai_overrides"]["08_smart"] == "claude-cli"
-        assert doc["ai_overrides"]["09_review"] == "claude-cli"
+        assert doc["ai_overrides"]["10_smart"] == "claude-cli"
+        assert doc["ai_overrides"]["11_review"] == "claude-cli"

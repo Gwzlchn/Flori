@@ -34,6 +34,7 @@ export interface StepInfo {
 export interface JobDetail extends JobSummary {
   url: string | null
   updated_at: string | null
+  published_at: string | null   // 源内容发布时间(「上传于」)
   meta: Record<string, any>
   steps: StepInfo[]
 }

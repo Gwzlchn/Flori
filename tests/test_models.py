@@ -109,7 +109,7 @@ class TestJobDefaults:
 
 class TestStepDefaults:
     def test_minimal(self):
-        step = Step(job_id="j_xxx", name="01_scene")
+        step = Step(job_id="j_xxx", name="03_scene")
         assert step.status == StepStatus.WAITING
         assert step.pool == ""
         assert step.retries == 0
@@ -151,7 +151,7 @@ class TestAIUsage:
             provider="anthropic",
             model="claude-sonnet-4-6",
             job_id="j_xxx",
-            step="08_smart",
+            step="10_smart",
             input_tokens=1000,
             output_tokens=500,
             cost_usd=0.0105,

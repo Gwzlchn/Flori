@@ -83,9 +83,9 @@ for entry in "${JOBS[@]}"; do
   pipeline="${entry##*:}"
   log "  等待 $jid ($pipeline)..."
 
-  TARGET_STEPS="07_mechanical"
+  TARGET_STEPS="09_mechanical"
   if [ "$pipeline" = "paper" ]; then
-    TARGET_STEPS="12_figures"
+    TARGET_STEPS="04_figures"
   fi
 
   # 轮询直到目标步骤完成
@@ -115,7 +115,7 @@ print(steps.get(target, 'waiting'))
 done
 
 if [ "$ALL_OK" = true ]; then
-  # 验证资源池——scene 池 limit=1 说明不可能 3 个 01_scene 同时跑，只能串行
+  # 验证资源池——scene 池 limit=1 说明不可能 3 个 03_scene 同时跑，只能串行
   # 这里只验证 3 个都完成了
   pass "TC-5: 并发 3 任务 CPU 步骤全部完成"
 else
@@ -157,7 +157,7 @@ if wait_job "$JOB_FAIL" "failed" 120; then
   RERUN_CODE=$(curl --noproxy '*' -s -o /dev/null -w "%{http_code}" \
     -X POST "$API/api/jobs/$JOB_FAIL/rerun" \
     -H "Content-Type: application/json" \
-    -d '{"from_step": "00_download"}')
+    -d '{"from_step": "01_download"}')
   if [ "$RERUN_CODE" = "200" ]; then
     log "  rerun API 返回 200 ✓"
   else

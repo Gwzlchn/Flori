@@ -88,7 +88,7 @@ class TestAIGateway:
         pipelines_config = {
             "steps": [
                 {
-                    "name": "08_smart",
+                    "name": "10_smart",
                     "ai": {
                         "primary": {"provider": "mock_primary", "model": "claude-sonnet-4-6"},
                         "fallback": {"provider": "mock_fallback", "model": "gpt-4o"},
@@ -107,7 +107,7 @@ class TestAIGateway:
         monkeypatch.setenv("DRY_RUN", "1")
         gw = AIGateway(*gateway_config)
         req = LLMRequest(messages=[{"role": "user", "content": "test"}])
-        resp = await gw.call("08_smart", req)
+        resp = await gw.call("10_smart", req)
         assert "[DRY_RUN]" in resp.content
 
     @pytest.mark.asyncio
@@ -121,7 +121,7 @@ class TestAIGateway:
             return mock_resp
 
         gw._providers["mock_primary"] = type("P", (), {"complete": mock_complete})()
-        resp = await gw.call("08_smart", LLMRequest(messages=[{"role": "user", "content": "test"}]))
+        resp = await gw.call("10_smart", LLMRequest(messages=[{"role": "user", "content": "test"}]))
         assert resp.content == "ok"
 
     @pytest.mark.asyncio
@@ -139,7 +139,7 @@ class TestAIGateway:
 
         gw._providers["mock_primary"] = type("P", (), {"complete": fail_complete})()
         gw._providers["mock_fallback"] = type("P", (), {"complete": ok_complete})()
-        resp = await gw.call("08_smart", LLMRequest(messages=[{"role": "user", "content": "test"}]))
+        resp = await gw.call("10_smart", LLMRequest(messages=[{"role": "user", "content": "test"}]))
         assert resp.content == "fallback_ok"
 
     @pytest.mark.asyncio
@@ -164,7 +164,7 @@ class TestAIGateway:
             messages=[{"role": "user", "content": "test"}],
             images=[Path("/fake/img.jpg")],
         )
-        resp = await gw.call("08_smart", req)
+        resp = await gw.call("10_smart", req)
         assert resp.content == "text_ok"
         assert captured_request["images"] == []
 
@@ -182,7 +182,7 @@ class TestAIGateway:
 
         with pytest.raises(AllProvidersFailedError):
             await gw.call(
-                "08_smart",
+                "10_smart",
                 LLMRequest(
                     messages=[{"role": "user", "content": "test"}],
                     images=[Path("/fake/img.jpg")],
@@ -200,7 +200,7 @@ class TestAIGateway:
     async def test_compare_not_implemented(self, gateway_config):
         gw = AIGateway(*gateway_config)
         with pytest.raises(NotImplementedError):
-            await gw.compare("08_smart", LLMRequest(messages=[]))
+            await gw.compare("10_smart", LLMRequest(messages=[]))
 
 
 class TestUsageFile:
@@ -209,7 +209,7 @@ class TestUsageFile:
             exec_id="ai-abc:1716000:0",
             provider="anthropic",
             model="claude-sonnet-4-6",
-            step="08_smart",
+            step="10_smart",
             input_tokens=100,
             cost_usd=0.01,
         )
@@ -217,14 +217,14 @@ class TestUsageFile:
             exec_id="ai-abc:1716000:1",
             provider="deepseek",
             model="deepseek-v4-pro",
-            step="08_smart",
+            step="10_smart",
             input_tokens=200,
             cost_usd=0.005,
         )
         record_usage_to_file(u1, tmp_path)
         record_usage_to_file(u2, tmp_path)
 
-        collected = collect_usage_from_file(tmp_path, "08_smart")
+        collected = collect_usage_from_file(tmp_path, "10_smart")
         assert len(collected) == 2
         assert collected[0].exec_id == "ai-abc:1716000:0"
         assert collected[1].provider == "deepseek"

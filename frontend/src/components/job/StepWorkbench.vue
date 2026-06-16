@@ -2,8 +2,9 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
 import MarkdownViewer from '../notes/MarkdownViewer.vue'
+import { fmtDateTime } from '../../utils/datetime'
 import type { StepInfo } from '../../types'
-import { Check, X, Minus, Loader, Clock, ChevronRight, FileText, Image as ImageIcon, Braces } from 'lucide-vue-next'
+import { Check, X, Minus, Loader, Clock, ChevronRight, FileText, Braces } from 'lucide-vue-next'
 
 const props = defineProps<{ jobId: string; steps: StepInfo[] }>()
 const api = useApi()
@@ -50,14 +51,11 @@ const selStep = computed(() => props.steps.find(s => s.name === sel.value) || nu
 const selFiles = computed(() => filesByStep.value[sel.value] || [])
 
 const artUrl = (p: string) => `/api/jobs/${props.jobId}/artifact?path=${encodeURIComponent(p)}`
+// 视频/音频走 range 流式端点(不整片加载),<video>/<audio> 才能正常播放/拖动。
+const mediaUrl = (p: string) => `/api/jobs/${props.jobId}/media?path=${encodeURIComponent(p)}`
 const fname = (p: string) => p.split('/').pop()
 const stepLabel = (s: StepInfo) => s.label || s.name
 
-function fmtTime(iso: string | null | undefined): string {
-  if (!iso) return '—'
-  return new Date(iso).toLocaleString('zh-CN',
-    { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
-}
 function fmtDur(sec: number | null): string {
   if (sec == null) return '—'
   return sec < 60 ? `${sec.toFixed(1)}s` : `${Math.floor(sec / 60)}m${Math.floor(sec % 60)}s`
@@ -75,6 +73,22 @@ function metaRows(s: StepInfo): { k: string; v: string }[] {
   }
   return rows
 }
+
+// 产物按类别铺开:图片(缩略图网格) / 字幕 / 文档 / 数据。类型由扩展名/kind 预先判定。
+const CAT_ORDER = ['视频', '音频', '图片', '字幕', '文档', '数据']
+function catOf(f: AFile): string {
+  if (f.kind === 'video') return '视频'
+  if (f.kind === 'audio') return '音频'
+  if (f.kind === 'image') return '图片'
+  if (f.path.endsWith('.srt') || f.path.endsWith('.ass')) return '字幕'
+  if (f.kind === 'json') return '数据'
+  return '文档'
+}
+const cats = computed(() => {
+  const m: Record<string, AFile[]> = {}
+  for (const f of selFiles.value) (m[catOf(f)] ||= []).push(f)
+  return CAT_ORDER.filter(c => m[c]?.length).map(c => ({ cat: c, files: m[c] }))
+})
 
 async function loadGroups() {
   try {
@@ -102,7 +116,8 @@ function selectStep(name: string) {
 
 async function viewFile(f: AFile) {
   selFile.value = f; fileErr.value = ''
-  if (f.kind === 'image') { fileContent.value = ''; return }
+  // 二进制(图片/视频/音频)直接用 <img>/<video>/<audio> 播放,不当文本拉取。
+  if (f.kind === 'image' || f.kind === 'video' || f.kind === 'audio') { fileContent.value = ''; return }
   fileLoading.value = true
   try {
     const t = await api.getText(artUrl(f.path))
@@ -132,8 +147,8 @@ watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pick
   <div class="bg-white border border-gray-200 rounded-xl p-4">
     <h3 class="text-sm font-semibold text-gray-700 mb-3">步骤与产物</h3>
     <div class="grid md:grid-cols-[300px_1fr] gap-4">
-      <!-- 左:步骤时间线 -->
-      <div class="space-y-0 md:border-r md:border-gray-100 md:pr-2 max-h-[72vh] overflow-auto">
+      <!-- 左:步骤时间线(全部步骤直接铺开,不加内部滚动条) -->
+      <div class="space-y-0 md:border-r md:border-gray-100 md:pr-2">
         <button
           v-for="(s, idx) in steps" :key="s.name" @click="selectStep(s.name)"
           class="w-full text-left rounded-lg px-2 py-2 flex gap-2.5 transition-colors"
@@ -173,8 +188,8 @@ watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pick
           </div>
 
           <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 mt-2">
-            <span><Clock :size="12" class="inline -mt-0.5" /> 开始 {{ fmtTime(selStep.started_at) }}</span>
-            <span>结束 {{ fmtTime(selStep.finished_at) }}</span>
+            <span><Clock :size="12" class="inline -mt-0.5" /> 开始 {{ fmtDateTime(selStep.started_at) }}</span>
+            <span>结束 {{ fmtDateTime(selStep.finished_at) }}</span>
             <span>耗时 {{ fmtDur(selStep.duration_sec) }}</span>
           </div>
 
@@ -182,7 +197,13 @@ watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pick
             <div class="bg-blue-500 h-full rounded-full" :style="{ width: `${stepPct(selStep)}%` }" />
           </div>
 
-          <p v-if="selStep.error" class="text-xs text-red-600 mt-2 break-all bg-red-50 rounded p-2">✗ {{ selStep.error }}</p>
+          <!-- 失败原因:仅失败步骤显示(done 步骤的历史 error 如 timeout 不算失败) -->
+          <p v-if="selStep.error && selStep.status === 'failed'" class="text-xs text-red-600 mt-2 break-all bg-red-50 rounded p-2">✗ {{ selStep.error }}</p>
+
+          <!-- 跳过说明 -->
+          <div v-if="selStep.status === 'skipped'" class="mt-3 text-xs text-gray-500 bg-gray-50 rounded p-2">
+            已跳过{{ selStep.meta?.reason ? '：' + selStep.meta.reason : '（不满足运行条件，例如视频自带字幕则无需语音转写）' }}
+          </div>
 
           <!-- 产出摘要(可读,替代原始 JSON) -->
           <div v-if="metaRows(selStep).length" class="mt-3 flex flex-wrap gap-2">
@@ -191,28 +212,45 @@ watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pick
             </span>
           </div>
 
-          <!-- 产物文件 -->
-          <div v-if="selFiles.length" class="mt-4">
-            <div class="text-xs text-gray-500 mb-1.5">产物（{{ selFiles.length }}）</div>
-            <div class="flex flex-wrap gap-1.5 mb-2 max-h-28 overflow-auto">
-              <button
-                v-for="f in selFiles" :key="f.path" @click="viewFile(f)"
-                class="text-xs px-2 py-1 rounded border flex items-center gap-1"
-                :class="selFile?.path === f.path ? 'bg-blue-100 border-blue-200 text-blue-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'"
-              >
-                <component :is="f.kind === 'image' ? ImageIcon : f.kind === 'json' ? Braces : FileText" :size="11" />
-                <span class="truncate max-w-[12rem]">{{ fname(f.path) }}</span>
-              </button>
+          <!-- 产物:按类别全部铺开,无内部滚动条 -->
+          <div v-if="selFiles.length" class="mt-4 space-y-3">
+            <div class="text-xs text-gray-500">产物（{{ selFiles.length }}）</div>
+            <div v-for="grp in cats" :key="grp.cat">
+              <div class="text-xs font-medium text-gray-600 mb-1.5">{{ grp.cat }} <span class="text-gray-400 font-normal">({{ grp.files.length }})</span></div>
+              <!-- 图片:全部缩略图网格 -->
+              <div v-if="grp.cat === '图片'" class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-1.5">
+                <button
+                  v-for="f in grp.files" :key="f.path" @click="viewFile(f)"
+                  class="block rounded overflow-hidden border"
+                  :class="selFile?.path === f.path ? 'ring-2 ring-blue-400 border-blue-300' : 'border-gray-200 hover:border-gray-300'"
+                >
+                  <img :src="artUrl(f.path)" loading="lazy" class="w-full h-16 object-cover" />
+                </button>
+              </div>
+              <!-- 字幕/文档/数据:文件名全部列出 -->
+              <div v-else class="flex flex-wrap gap-1.5">
+                <button
+                  v-for="f in grp.files" :key="f.path" @click="viewFile(f)"
+                  class="text-xs px-2 py-1 rounded border flex items-center gap-1"
+                  :class="selFile?.path === f.path ? 'bg-blue-100 border-blue-200 text-blue-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'"
+                >
+                  <component :is="grp.cat === '数据' ? Braces : FileText" :size="11" />
+                  <span>{{ fname(f.path) }}</span>
+                </button>
+              </div>
             </div>
+            <!-- 选中文件预览 -->
             <div v-if="selFile" class="border border-gray-100 rounded-lg p-3 bg-gray-50/40">
-              <img v-if="selFile.kind === 'image'" :src="artUrl(selFile.path)" loading="lazy" class="max-w-full rounded border border-gray-200" />
+              <img v-if="selFile.kind === 'image'" :src="artUrl(selFile.path)" class="max-w-full rounded border border-gray-200" />
+              <video v-else-if="selFile.kind === 'video'" :src="mediaUrl(selFile.path)" controls preload="metadata" class="max-w-full rounded border border-gray-200" />
+              <audio v-else-if="selFile.kind === 'audio'" :src="mediaUrl(selFile.path)" controls class="w-full" />
               <div v-else-if="fileLoading" class="text-xs text-gray-400">加载中…</div>
               <div v-else-if="fileErr" class="text-xs text-red-600">{{ fileErr }}</div>
               <MarkdownViewer v-else-if="selFile.path.endsWith('.md')" :content="fileContent" :job-id="jobId" />
-              <pre v-else class="text-xs whitespace-pre-wrap break-all max-h-[55vh] overflow-auto">{{ fileContent }}</pre>
+              <pre v-else class="text-xs whitespace-pre-wrap break-all">{{ fileContent }}</pre>
             </div>
           </div>
-          <div v-else-if="selStep.status === 'done' || selStep.status === 'skipped'" class="mt-3 text-xs text-gray-400">（此步无可展示的产物文件）</div>
+          <div v-else-if="selStep.status === 'done'" class="mt-3 text-xs text-gray-400">（此步无可展示的产物文件）</div>
 
           <!-- 原始日志(默认折叠,排错用) -->
           <div v-if="selStep.status !== 'waiting' && selStep.status !== 'ready'" class="mt-4">
@@ -222,6 +260,7 @@ watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pick
             <div v-if="logOpen" class="mt-1.5">
               <div v-if="logLoading" class="text-xs text-gray-400">加载中…</div>
               <div v-else-if="logErr" class="text-xs text-gray-400">{{ logErr }}</div>
+              <div v-else-if="!logText.trim()" class="text-xs text-gray-400">（该步骤无日志输出，见上方「产出摘要」）</div>
               <pre v-else class="text-xs bg-gray-900 text-gray-100 rounded-lg p-3 max-h-72 overflow-auto whitespace-pre-wrap break-all">{{ logText }}</pre>
             </div>
           </div>

@@ -101,7 +101,7 @@ class TestJobCRUD:
 
     def test_delete_cascades_steps(self, db, sample_job):
         db.create_job(sample_job)
-        db.upsert_step(Step(job_id=sample_job.id, name="01_scene", pool="scene"))
+        db.upsert_step(Step(job_id=sample_job.id, name="03_scene", pool="scene"))
         db.delete_job(sample_job.id)
         assert db.get_steps(sample_job.id) == []
 
@@ -111,7 +111,7 @@ class TestStepCRUD:
         db.create_job(sample_job)
         step = Step(
             job_id=sample_job.id,
-            name="01_scene",
+            name="03_scene",
             status=StepStatus.RUNNING,
             pool="scene",
             meta={"scenes": 76},
@@ -119,16 +119,16 @@ class TestStepCRUD:
         db.upsert_step(step)
         steps = db.get_steps(sample_job.id)
         assert len(steps) == 1
-        assert steps[0].name == "01_scene"
+        assert steps[0].name == "03_scene"
         assert steps[0].status == StepStatus.RUNNING
         assert steps[0].meta == {"scenes": 76}
 
     def test_upsert_replaces(self, db, sample_job):
         db.create_job(sample_job)
-        db.upsert_step(Step(job_id=sample_job.id, name="01_scene", pool="scene"))
+        db.upsert_step(Step(job_id=sample_job.id, name="03_scene", pool="scene"))
         db.upsert_step(Step(
             job_id=sample_job.id,
-            name="01_scene",
+            name="03_scene",
             status=StepStatus.DONE,
             pool="scene",
             duration_sec=120.5,
@@ -140,18 +140,18 @@ class TestStepCRUD:
 
     def test_update_step(self, db, sample_job):
         db.create_job(sample_job)
-        db.upsert_step(Step(job_id=sample_job.id, name="01_scene", pool="scene"))
-        db.update_step(sample_job.id, "01_scene", status="done", duration_sec=99.0)
+        db.upsert_step(Step(job_id=sample_job.id, name="03_scene", pool="scene"))
+        db.update_step(sample_job.id, "03_scene", status="done", duration_sec=99.0)
         steps = db.get_steps(sample_job.id)
         assert steps[0].status == StepStatus.DONE
         assert steps[0].duration_sec == 99.0
 
     def test_get_steps_sorted(self, db, sample_job):
         db.create_job(sample_job)
-        for name in ["03_dedup", "01_scene", "02_frames"]:
+        for name in ["05_dedup", "03_scene", "04_frames"]:
             db.upsert_step(Step(job_id=sample_job.id, name=name, pool="cpu"))
         steps = db.get_steps(sample_job.id)
-        assert [s.name for s in steps] == ["01_scene", "02_frames", "03_dedup"]
+        assert [s.name for s in steps] == ["03_scene", "04_frames", "05_dedup"]
 
 
 class TestWorkerCRUD:
@@ -438,7 +438,7 @@ class TestAIUsage:
             provider="anthropic",
             model="claude-sonnet-4-6",
             job_id="j_xxx",
-            step="08_smart",
+            step="10_smart",
             input_tokens=1000,
             output_tokens=500,
             cost_usd=0.0105,
@@ -710,9 +710,9 @@ class TestUpdateValidation:
 
     def test_update_step_invalid_column(self, db, sample_job):
         db.create_job(sample_job)
-        db.upsert_step(Step(job_id=sample_job.id, name="01_scene", pool="scene"))
+        db.upsert_step(Step(job_id=sample_job.id, name="03_scene", pool="scene"))
         with pytest.raises(ValueError, match="Invalid step columns"):
-            db.update_step(sample_job.id, "01_scene", hacked_field="bad")
+            db.update_step(sample_job.id, "03_scene", hacked_field="bad")
 
     def test_update_job_style_tags_roundtrip(self, db, sample_job):
         db.create_job(sample_job)

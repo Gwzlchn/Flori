@@ -27,16 +27,16 @@ _DELAYED_PREFIX = "delayed_enqueue:"
 
 # 笔记产出步 -> note_type：smart 笔记走 notes_smart.md，机械笔记走 notes_mechanical.md。
 _NOTE_STEPS = {
-    "08_smart": "smart",
-    "14_smart_paper": "smart",
-    "07_mechanical": "mechanical",
+    "10_smart": "smart",
+    "05_smart_paper": "smart",
+    "09_mechanical": "mechanical",
 }
 _NOTE_FILES = {
     "smart": "output/notes_smart.md",
     "mechanical": "output/notes_mechanical.md",
 }
 # 评审步：完成后读 review.json，把 missing_concepts 采集为候选术语。
-_REVIEW_STEPS = {"09_review", "15_review"}
+_REVIEW_STEPS = {"11_review", "06_review"}
 
 
 def _markdown_to_text(md: str) -> str:
@@ -803,7 +803,7 @@ class Scheduler:
         """无法推进的 job 持续超宽限期则 fail-fast,避免永久卡住。
 
         判定:无 running 步,且所有 ready 步所在 pool 都无在线 worker——
-        典型是未部署 gpu worker 时 audio 的 00b_whisper 卡在 queue:gpu。
+        典型是未部署 gpu worker 时 audio 的 02_whisper 卡在 queue:gpu。
         给出明确错误而非静默挂起;宽限期容忍 worker 短暂重启。
         """
         active_jobs = await self.redis.get_active_jobs()

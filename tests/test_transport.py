@@ -469,13 +469,13 @@ class TestGatewayHeartbeat:
         monkeypatch.setattr(gw._inner, "update_status", AsyncMock())
 
         # 心跳须带 worker_id + update_status 记下的当前状态(不能漏 body 导致 422)。
-        await gw.update_status("w1", "busy", "job1", "01_scene")
+        await gw.update_status("w1", "busy", "job1", "03_scene")
         await gw.heartbeat("w1")
 
         _, kwargs = gw._client.post.call_args
         assert kwargs["json"] == {
             "worker_id": "w1", "status": "busy",
-            "current_job": "job1", "current_step": "01_scene",
+            "current_job": "job1", "current_step": "03_scene",
         }
 
 

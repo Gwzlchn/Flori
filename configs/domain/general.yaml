@@ -5,13 +5,13 @@
 #       terminology），由 smart 步骤（08/14）从 prompts_dir 直接加载。
 #   - configs/domain/{domain}.yaml（本文件）  →  CPU 步骤的按领域参数微调，由
 #       shared/config.py:build_step_config 读取并合并进 config["domain"]，供
-#       step_01_scene / step_03_dedup / step_04_ocr 读取。
+#       step_03_scene / step_05_dedup / step_06_ocr 读取。
 #
 # 此前 configs/domain/ 目录不存在，导致 load_domain_profile 永远返回 {}，
 # 这些步骤恒走代码内默认值。补齐目录 + 本模板让该扩展点可发现、可配置。
 # 留空（全部注释）即沿用各步骤的内置默认值，行为不变。
 
-# 场景检测（steps/video/step_01_scene.py）。默认值如下，按需取消注释覆盖：
+# 场景检测（steps/video/step_03_scene.py）。默认值如下，按需取消注释覆盖：
 # scene:
 #   adaptive_threshold: 3.0
 #   min_scene_len_sec: 2.0
@@ -23,12 +23,12 @@ scene:
   window_width: 4
   min_content_val: 18.0
 
-# 代表帧选取(step_02_frames):画面在变取 ratio 位置帧、静止取靠前帧。
+# 代表帧选取(step_04_frames):画面在变取 ratio 位置帧、静止取靠前帧。
 frame_pick:
   dynamic_pick_ratio: 0.7
   dynamic_scene_ssim: 0.85
 
-# 超长场景保底采样(step_02_frames):场景超 max_gap_sec 则每 forced_interval_sec 补一帧。
+# 超长场景保底采样(step_04_frames):场景超 max_gap_sec 则每 forced_interval_sec 补一帧。
 sampling:
   max_gap_sec: 60
   forced_interval_sec: 15

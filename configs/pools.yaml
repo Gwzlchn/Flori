@@ -15,7 +15,7 @@ pools:
   gpu:
     limit: 1
     # gpu 池仅由 --type gpu 且具 whisper 能力的 worker 服务;无此 worker 时
-    # 含 gpu 步(audio 的 00b_whisper)的 job 会被 scheduler fail-fast 而非永久挂起。
+    # 含 gpu 步(audio 的 02_whisper)的 job 会被 scheduler fail-fast 而非永久挂起。
 
 # Worker 在线判定窗口（后端权威，全栈共用一套阈值）。
 worker_status:

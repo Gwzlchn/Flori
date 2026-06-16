@@ -1,8 +1,11 @@
 # GitLab-CI 风格流水线：变量/模板(extends)/needs/rules 在加载时归一化为内部 step 结构。
 # 顺序由 needs 决定；prod↔integration 的差异退化为 integration 文件里一份 variables 覆盖。
 #
-# label：步骤的中文显示名（前端各处展示）。英文键名(00_download 等)只在日志/技术视图出现。
-# 新增 pipeline 的步骤也应带 label，保证终端用户处处看到中文名。
+# 约定:
+#   - 步骤键按执行顺序从 01 递增(每条 pipeline 各自从 01 开始)。
+#   - label:  步骤中文显示名(前端各处展示)。英文键只在日志/技术视图出现。
+#   - outputs: 本步产物的文件 glob(单一事实源)。前端「分步产物」按此分组展示;
+#              未被任何步骤匹配的文件归入「其他」。job.json 等敏感文件由代码强制隐藏。
 
 # 全局默认：所有 job 自动继承、可逐字段覆盖。
 default:
@@ -28,11 +31,8 @@ default:
 
 video:
   variables:
-    # OCR 单一事实源：CPU 逐帧扫描需大超时；超时是工作量过大而非瞬时抖动，故少重试。
     OCR_TIMEOUT: 1800
     OCR_RETRIES: 1
-    # 无 API key → 全部走 claude-cli 订阅(免费、能看帧图);primary/fallback 同指订阅,
-    # 避免 08_smart 失败时静默降级到"丢图的文本 provider"。要恢复 API,改回 anthropic/deepseek 即可。
     AI_SMART_PRIMARY_PROVIDER: claude-cli
     AI_SMART_PRIMARY_MODEL: subscription
     AI_SMART_FALLBACK_PROVIDER: claude-cli
@@ -48,77 +48,84 @@ video:
     AI_PUNCT_FALLBACK_PROVIDER: claude-cli
     AI_PUNCT_FALLBACK_MODEL: subscription
   jobs:
-    "00_download":
+    "01_download":
       label: "下载"
-      run: steps.common.step_00_download
+      run: steps.common.step_01_download
       pool: io
       retry: 3
       timeout: 2400   # 长视频(30min+)1080p 下载 + 推 MinIO 可能超默认 600s
+      outputs: ["input/source.mp4", "input/source.mp3", "input/source.m4a",
+                "input/metadata.json", "input/*.srt", "input/*.ass",
+                "input/source.pdf", "input/source.html"]
 
-    # 无字幕时转写。pool=cpu(base 镜像已含 faster-whisper,无 GPU 用 int8 CPU 回退),
-    # 不再钉 gpu tag——否则无 gpu worker 时整 job fail-fast。有 GPU 的 worker 仍会更快。
-    "00b_whisper":
+    "02_whisper":
       label: "语音转写"
-      run: steps.video.step_00b_whisper
+      run: steps.video.step_02_whisper
       image: mnemo/step-gpu
       pool: cpu
-      needs: ["00_download"]
+      needs: ["01_download"]
       timeout: 1800
       retry: 2
       tags: []
       rules:
         - exists: "input/*.srt"
           when: skip
+      outputs: ["input/whisper.srt", "intermediate/whisper.json"]
 
-    "01_scene":
+    "03_scene":
       label: "场景检测"
-      run: steps.video.step_01_scene
+      run: steps.video.step_03_scene
       image: mnemo/step-heavy
       pool: scene
-      needs: ["00_download"]
+      needs: ["01_download"]
       retry: 2
+      outputs: ["intermediate/scenes.json"]
 
-    "02_frames":
+    "04_frames":
       label: "关键帧"
       extends: .cpu-step
-      run: steps.video.step_02_frames
+      run: steps.video.step_04_frames
       image: mnemo/step-heavy
-      needs: ["01_scene"]
+      needs: ["03_scene"]
       timeout: 1800   # cv2 逐场景 SSIM 代表帧:长视频(数百场景)耗时,远超 .cpu-step 的 120s
+      outputs: ["intermediate/frames.json", "assets/*"]
 
-    "03_dedup":
+    "05_dedup":
       label: "画面去重"
       extends: .cpu-step
-      run: steps.video.step_03_dedup
+      run: steps.video.step_05_dedup
       image: mnemo/step-heavy
-      needs: ["02_frames"]
+      needs: ["04_frames"]
       timeout: 900    # 数百帧 pHash + 灰区 SSIM 复核
+      outputs: ["intermediate/dedup.json"]
 
-    "04_ocr":
+    "06_ocr":
       label: "画面文字(OCR)"
       extends: .cpu-step
-      run: steps.video.step_04_ocr
+      run: steps.video.step_06_ocr
       image: mnemo/step-heavy
-      needs: ["03_dedup"]
+      needs: ["05_dedup"]
       timeout: $OCR_TIMEOUT
       retry: $OCR_RETRIES
+      outputs: ["intermediate/ocr.json"]
 
-    "05_danmaku":
+    "07_danmaku":
       label: "弹幕"
-      run: steps.video.step_05_danmaku
+      run: steps.video.step_07_danmaku
       pool: io
-      needs: ["00_download"]
+      needs: ["01_download"]
       timeout: 30
       retry: 1
       rules:
         - exists: "input/*.ass"
           when: on
+      outputs: ["intermediate/danmaku.json"]
 
-    "06_punctuate":
+    "08_punctuate":
       label: "口播稿"
       extends: .ai-step
-      run: steps.video.step_06_punctuate
-      needs: ["00_download"]
+      run: steps.video.step_08_punctuate
+      needs: ["01_download"]
       timeout: 1800
       retry: 3
       tags: []
@@ -128,39 +135,43 @@ video:
       ai:
         primary: {provider: $AI_PUNCT_PRIMARY_PROVIDER, model: $AI_PUNCT_PRIMARY_MODEL}
         fallback: {provider: $AI_PUNCT_FALLBACK_PROVIDER, model: $AI_PUNCT_FALLBACK_MODEL}
+      outputs: ["output/transcript.md"]
 
-    "07_mechanical":
+    "09_mechanical":
       label: "机械版笔记"
-      run: steps.video.step_07_mechanical
+      run: steps.video.step_09_mechanical
       pool: io
-      # 不硬依赖 06(标点是 AI 步):07 口播优先用 06 标点稿,没有则直接读原始中文字幕,
-      # 于是机械版不依赖 claude 也能先出;06 跑完后重跑 07 即可换成标点版。
-      needs: ["04_ocr", "05_danmaku"]
+      # 不硬依赖 08(标点是 AI 步):机械版口播优先用 08 标点稿,没有则直接读原始中文字幕,
+      # 于是不依赖 claude 也能先出;08 跑完后重跑本步即可换成标点版。
+      needs: ["06_ocr", "07_danmaku"]
       timeout: 30
       retry: 1
+      outputs: ["output/notes_mechanical.md"]
 
-    "08_smart":
+    "10_smart":
       label: "智能版笔记"
       extends: .ai-step
-      run: steps.video.step_08_smart
-      needs: ["07_mechanical"]
+      run: steps.video.step_10_smart
+      needs: ["09_mechanical"]
       tags: ["vision"]
       timeout: 1800   # claude-cli 逐张 Read 帧图(最多 20+ 张),与 provider 超时上限对齐
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
         text_fallback: {provider: $AI_SMART_TEXT_PROVIDER, model: $AI_SMART_TEXT_MODEL}
+      outputs: ["output/notes_smart.md"]
 
-    "09_review":
+    "11_review":
       label: "评审"
       extends: .review
-      run: steps.video.step_09_review
-      needs: ["08_smart"]
+      run: steps.video.step_11_review
+      needs: ["10_smart"]
       tags: []
       timeout: 1800   # claude-cli 对大 prompt(笔记+机械稿)生成评审较慢,给足时间
       ai:
         primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
+      outputs: ["output/review.json"]
 
 paper:
   variables:
@@ -173,53 +184,59 @@ paper:
     AI_REVIEW_FALLBACK_PROVIDER: deepseek
     AI_REVIEW_FALLBACK_MODEL: deepseek-v4-flash
   jobs:
-    "00_download":
+    "01_download":
       label: "下载"
-      run: steps.common.step_00_download
+      run: steps.common.step_01_download
       pool: io
       timeout: 300
       retry: 3
+      outputs: ["input/source.pdf", "input/metadata.json"]
 
-    "10_pdf_parse":
+    "02_pdf_parse":
       label: "PDF 解析"
       extends: .cpu-step
-      run: steps.paper.step_10_pdf_parse
+      run: steps.paper.step_02_pdf_parse
       image: mnemo/step-heavy
-      needs: ["00_download"]
+      needs: ["01_download"]
+      outputs: ["intermediate/pdf_text.json", "intermediate/pages.json"]
 
-    "11_sections":
+    "03_sections":
       label: "章节切分"
       extends: .cpu-step
-      run: steps.paper.step_11_sections
-      needs: ["10_pdf_parse"]
+      run: steps.paper.step_03_sections
+      needs: ["02_pdf_parse"]
       timeout: 60
+      outputs: ["intermediate/sections.json"]
 
-    "12_figures":
+    "04_figures":
       label: "图表提取"
       extends: .cpu-step
-      run: steps.paper.step_12_figures
+      run: steps.paper.step_04_figures
       image: mnemo/step-heavy
-      needs: ["10_pdf_parse"]
+      needs: ["02_pdf_parse"]
+      outputs: ["intermediate/figures.json", "assets/*"]
 
-    "14_smart_paper":
+    "05_smart_paper":
       label: "智能版笔记"
       extends: .ai-step
-      run: steps.paper.step_14_smart_paper
-      needs: ["11_sections", "12_figures"]
+      run: steps.paper.step_05_smart_paper
+      needs: ["03_sections", "04_figures"]
       tags: []
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
+      outputs: ["output/notes_smart.md"]
 
-    "15_review":
+    "06_review":
       label: "评审"
       extends: .review
-      run: steps.paper.step_15_review
-      needs: ["14_smart_paper"]
+      run: steps.paper.step_06_review
+      needs: ["05_smart_paper"]
       tags: []
       ai:
         primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
+      outputs: ["output/review.json"]
 
 article:
   variables:
@@ -232,46 +249,51 @@ article:
     AI_REVIEW_FALLBACK_PROVIDER: deepseek
     AI_REVIEW_FALLBACK_MODEL: deepseek-v4-flash
   jobs:
-    "00_download":
+    "01_download":
       label: "下载"
-      run: steps.common.step_00_download
+      run: steps.common.step_01_download
       pool: io
       timeout: 120
       retry: 3
+      outputs: ["input/source.html", "input/metadata.json", "input/article_meta.json"]
 
-    "16_parse_article":
+    "02_parse_article":
       label: "正文解析"
       extends: .cpu-step
-      run: steps.article.step_16_parse_article
-      needs: ["00_download"]
+      run: steps.article.step_02_parse_article
+      needs: ["01_download"]
       timeout: 60
+      outputs: ["intermediate/article.json"]
 
-    "17_article_sections":
+    "03_article_sections":
       label: "章节切分"
       extends: .cpu-step
-      run: steps.article.step_17_article_sections
-      needs: ["16_parse_article"]
+      run: steps.article.step_03_article_sections
+      needs: ["02_parse_article"]
       timeout: 60
+      outputs: ["intermediate/sections.json"]
 
-    "18_smart_article":
+    "04_smart_article":
       label: "智能版笔记"
       extends: .ai-step
-      run: steps.article.step_18_smart_article
-      needs: ["17_article_sections"]
+      run: steps.article.step_04_smart_article
+      needs: ["03_article_sections"]
       tags: []
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
+      outputs: ["output/notes_smart.md"]
 
-    "19_review":
+    "05_review":
       label: "评审"
       extends: .review
-      run: steps.article.step_19_review
-      needs: ["18_smart_article"]
+      run: steps.article.step_05_review
+      needs: ["04_smart_article"]
       tags: []
       ai:
         primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
+      outputs: ["output/review.json"]
 
 audio:
   variables:
@@ -284,47 +306,52 @@ audio:
     AI_REVIEW_FALLBACK_PROVIDER: deepseek
     AI_REVIEW_FALLBACK_MODEL: deepseek-v4-flash
   jobs:
-    "00_download":
+    "01_download":
       label: "下载"
-      run: steps.common.step_00_download
+      run: steps.common.step_01_download
       pool: io
       timeout: 120
       retry: 3
+      outputs: ["input/source.mp3", "input/source.m4a", "input/source.mp4", "input/metadata.json"]
 
     # 转写复用 video 的 whisper 步;落在 whisper-capable worker(gpu 池含 cpu fallback)。
-    "00b_whisper":
+    "02_whisper":
       label: "语音转写"
-      run: steps.video.step_00b_whisper
+      run: steps.video.step_02_whisper
       image: mnemo/step-gpu
       pool: gpu
-      needs: ["00_download"]
+      needs: ["01_download"]
       timeout: 1800
       retry: 2
       tags: ["gpu"]
+      outputs: ["input/whisper.srt", "intermediate/whisper.json"]
 
-    "20_transcript_parse":
+    "03_transcript_parse":
       label: "转写解析"
       extends: .cpu-step
-      run: steps.audio.step_20_transcript_parse
-      needs: ["00b_whisper"]
+      run: steps.audio.step_03_transcript_parse
+      needs: ["02_whisper"]
       timeout: 60
+      outputs: ["intermediate/transcript.json"]
 
-    "21_smart_podcast":
+    "04_smart_podcast":
       label: "智能版笔记"
       extends: .ai-step
-      run: steps.audio.step_21_smart_podcast
-      needs: ["20_transcript_parse"]
+      run: steps.audio.step_04_smart_podcast
+      needs: ["03_transcript_parse"]
       tags: []
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
+      outputs: ["output/notes_smart.md"]
 
-    "22_review":
+    "05_review":
       label: "评审"
       extends: .review
-      run: steps.audio.step_22_review
-      needs: ["21_smart_podcast"]
+      run: steps.audio.step_05_review
+      needs: ["04_smart_podcast"]
       tags: []
       ai:
         primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
+      outputs: ["output/review.json"]

@@ -114,9 +114,9 @@ class TestLoadDomainProfile:
 class TestBuildStepConfig:
     def test_basic_structure(self, configs_dir, tmp_data_dir):
         cfg = load_config(config_dir=configs_dir, data_dir=tmp_data_dir)
-        step_cfg = build_step_config(cfg, "video", "04_ocr", domain="deep-learning")
+        step_cfg = build_step_config(cfg, "video", "06_ocr", domain="deep-learning")
 
-        assert step_cfg["step"]["name"] == "04_ocr"
+        assert step_cfg["step"]["name"] == "06_ocr"
         assert step_cfg["step"]["pool"] == "cpu"
         # 超时/重试是可调运维参数，只校验类型与合理范围，不绑定具体数值。
         assert isinstance(step_cfg["step"]["timeout_sec"], int) and step_cfg["step"]["timeout_sec"] > 0
@@ -126,7 +126,7 @@ class TestBuildStepConfig:
 
     def test_ai_config_included(self, configs_dir, tmp_data_dir):
         cfg = load_config(config_dir=configs_dir, data_dir=tmp_data_dir)
-        step_cfg = build_step_config(cfg, "video", "08_smart")
+        step_cfg = build_step_config(cfg, "video", "10_smart")
 
         assert "primary" in step_cfg["ai"]
         assert step_cfg["ai"]["primary"]["provider"] == "claude-cli"  # 无 key,走订阅
@@ -134,7 +134,7 @@ class TestBuildStepConfig:
 
     def test_no_ai_config(self, configs_dir, tmp_data_dir):
         cfg = load_config(config_dir=configs_dir, data_dir=tmp_data_dir)
-        step_cfg = build_step_config(cfg, "video", "01_scene")
+        step_cfg = build_step_config(cfg, "video", "03_scene")
 
         assert step_cfg["ai"] == {}
 
@@ -180,7 +180,7 @@ class TestBuildStepConfigNoSecrets:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-LEAK-canary")
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deep-canary")
         cfg = load_config(config_dir=configs_dir, data_dir=tmp_data_dir)
-        step_cfg = build_step_config(cfg, "video", "08_smart")
+        step_cfg = build_step_config(cfg, "video", "10_smart")
 
         # 整个 step_cfg 序列化后不得出现任何明文密钥（落盘 + 代理给 gateway 的就是它）。
         import json as _json
@@ -238,14 +238,14 @@ class TestLoadPipelinesShape:
     def test_legacy_conditions_preserved(self, configs_dir):
         p = load_pipelines(configs_dir / "pipelines.yaml")
         by_name = {s["name"]: s for s in p["video"]["steps"]}
-        assert by_name["00b_whisper"]["condition"] == "no_subtitle"
-        assert by_name["05_danmaku"]["condition"] == "has_danmaku"
-        assert by_name["06_punctuate"]["condition"] == "has_subtitle"
+        assert by_name["02_whisper"]["condition"] == "no_subtitle"
+        assert by_name["07_danmaku"]["condition"] == "has_danmaku"
+        assert by_name["08_punctuate"]["condition"] == "has_subtitle"
 
     def test_ocr_timeout_single_source(self, configs_dir):
-        """04_ocr 的超时来自 variables 单一事实源，归一化后为整型 1800。"""
+        """06_ocr 的超时来自 variables 单一事实源，归一化后为整型 1800。"""
         p = load_pipelines(configs_dir / "pipelines.yaml")
-        ocr = next(s for s in p["video"]["steps"] if s["name"] == "04_ocr")
+        ocr = next(s for s in p["video"]["steps"] if s["name"] == "06_ocr")
         assert ocr["timeout_sec"] == 1800
         assert isinstance(ocr["timeout_sec"], int)
         assert ocr["retries"] == 1

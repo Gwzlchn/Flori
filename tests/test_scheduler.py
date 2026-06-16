@@ -492,17 +492,17 @@ class TestWhisperPunctuateRecheck:
     async def test_skipped_revives_when_condition_met(
         self, redis, db, tmp_path, tmp_jobs_dir, configs_dir
     ):
-        """00b_whisper generates srt → skipped 06_punctuate revives to ready."""
+        """02_whisper generates srt → skipped 08_punctuate revives to ready."""
         pipelines = {
             "video_mini": {
                 "steps": [
-                    {"name": "00_download", "pool": "io", "depends_on": []},
-                    {"name": "00b_whisper", "pool": "gpu", "depends_on": ["00_download"],
+                    {"name": "01_download", "pool": "io", "depends_on": []},
+                    {"name": "02_whisper", "pool": "gpu", "depends_on": ["01_download"],
                      "condition": "no_subtitle", "tags": ["gpu"]},
-                    {"name": "06_punctuate", "pool": "ai", "depends_on": ["00_download"],
+                    {"name": "08_punctuate", "pool": "ai", "depends_on": ["01_download"],
                      "condition": "has_subtitle"},
-                    {"name": "07_mechanical", "pool": "io",
-                     "depends_on": ["06_punctuate"]},
+                    {"name": "09_mechanical", "pool": "io",
+                     "depends_on": ["08_punctuate"]},
                 ]
             }
         }
@@ -516,18 +516,18 @@ class TestWhisperPunctuateRecheck:
         job_dir = tmp_jobs_dir / "j_test_001"
         (job_dir / "input").mkdir(parents=True)
 
-        await redis.set_step_status("j_test_001", "00_download", "running")
-        await sched.on_step_done("j_test_001", "00_download")
+        await redis.set_step_status("j_test_001", "01_download", "running")
+        await sched.on_step_done("j_test_001", "01_download")
 
-        assert await redis.get_step_status("j_test_001", "00b_whisper") == "ready"
-        assert await redis.get_step_status("j_test_001", "06_punctuate") == "skipped"
+        assert await redis.get_step_status("j_test_001", "02_whisper") == "ready"
+        assert await redis.get_step_status("j_test_001", "08_punctuate") == "skipped"
 
         (job_dir / "input" / "generated.srt").write_text("whisper output")
 
-        await redis.set_step_status("j_test_001", "00b_whisper", "running")
-        await sched.on_step_done("j_test_001", "00b_whisper")
+        await redis.set_step_status("j_test_001", "02_whisper", "running")
+        await sched.on_step_done("j_test_001", "02_whisper")
 
-        assert await redis.get_step_status("j_test_001", "06_punctuate") == "ready"
+        assert await redis.get_step_status("j_test_001", "08_punctuate") == "ready"
 
 
 class TestNewFormatConsumption:
@@ -1213,8 +1213,8 @@ class TestConcurrentCAS:
 
     @pytest.mark.asyncio
     async def test_record_ai_usage_exec_id_dedup(self, db):
-        u1 = AIUsage(exec_id="e1", provider="kimi", model="k2", job_id="j", step="08_smart")
-        u2 = AIUsage(exec_id="e1", provider="kimi", model="k2", job_id="j", step="08_smart")
+        u1 = AIUsage(exec_id="e1", provider="kimi", model="k2", job_id="j", step="10_smart")
+        u2 = AIUsage(exec_id="e1", provider="kimi", model="k2", job_id="j", step="10_smart")
         results = await asyncio.gather(
             asyncio.to_thread(db.record_ai_usage, u1),
             asyncio.to_thread(db.record_ai_usage, u2),

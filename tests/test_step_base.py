@@ -327,12 +327,12 @@ class TestCallAI:
 
 class TestCliMainEndToEnd:
     """L12:经 cli_main 真跑一个 step 模块,覆盖 runner 命令 + config schema + StepBase 粘合缝。
-    用纯 Python 的 17_article_sections(base 镜像即可跑),不依赖外部命令/AI。"""
+    用纯 Python 的 03_article_sections(base 镜像即可跑),不依赖外部命令/AI。"""
 
     def test_cli_main_runs_real_step(self, tmp_path):
         for d in ["input", "intermediate", "output", "assets", "logs"]:
             (tmp_path / d).mkdir()
-        # 17_article_sections 的输入:intermediate/parsed.json
+        # 03_article_sections 的输入:intermediate/parsed.json
         parsed = {
             "title": "测试文章",
             "authors": ["甲"],
@@ -347,7 +347,7 @@ class TestCliMainEndToEnd:
         prompts = tmp_path / "prompts"
         prompts.mkdir(exist_ok=True)
         cfg = {
-            "step": {"name": "17_article_sections", "pool": "cpu", "timeout_sec": 60, "retries": 0},
+            "step": {"name": "03_article_sections", "pool": "cpu", "timeout_sec": 60, "retries": 0},
             "ai": {}, "domain": {"name": "general"}, "style_tags": [],
             "paths": {"data_dir": str(tmp_path), "prompts_dir": str(prompts),
                       "config_dir": str(tmp_path)},
@@ -356,10 +356,10 @@ class TestCliMainEndToEnd:
         cfg_file = tmp_path / "step.config.json"
         cfg_file.write_text(json.dumps(cfg), encoding="utf-8")
 
-        # 经真实入口 python -m steps.article.step_17_article_sections 跑(cli_main)
+        # 经真实入口 python -m steps.article.step_03_article_sections 跑(cli_main)
         import sys
         result = subprocess.run(
-            [sys.executable, "-m", "steps.article.step_17_article_sections",
+            [sys.executable, "-m", "steps.article.step_03_article_sections",
              "--job-dir", str(tmp_path), "--step-config", str(cfg_file)],
             capture_output=True, text=True, timeout=60,
         )
@@ -369,7 +369,7 @@ class TestCliMainEndToEnd:
         data = json.loads(out.read_text(encoding="utf-8"))
         assert data["title"] == "测试文章"
         assert data["total_sections"] >= 2  # 引言 / 方法
-        assert (tmp_path / ".17_article_sections.done").exists()  # 幂等标记
+        assert (tmp_path / ".03_article_sections.done").exists()  # 幂等标记
 
 
 class TestExtractJson:

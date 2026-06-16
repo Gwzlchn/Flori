@@ -8,6 +8,7 @@ import StatusBadge from '../components/common/StatusBadge.vue'
 import ConfirmDialog from '../components/common/ConfirmDialog.vue'
 import type { JobDetail } from '../types'
 import { CONTENT_TYPE_LABELS } from '../types'
+import { fmtDateTime } from '../utils/datetime'
 import { ArrowLeft, RotateCcw, Play, Trash2, BookOpen, FileText, Video, Newspaper, Headphones, ExternalLink } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -20,6 +21,25 @@ const { steps, jobStatus, connected, setInitialSteps } = useJobWs(jobId)
 
 // BV 号:job id 形如 jobs_bili_BV1Kth…,无则不显示(非 B 站来源)。
 const bv = computed(() => jobId.value.match(/_(BV[0-9A-Za-z]+)/)?.[1] ?? null)
+
+// 生成时间:开始=所有步骤最早 started_at,结束=最晚 finished_at(有步骤在跑则「进行中」),
+// 总耗时=结束-开始;未完成显示 --。
+function fmtDur(sec: number | null): string {
+  if (sec == null) return '--'
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = Math.floor(sec % 60)
+  return h ? `${h}h${m}m` : m ? `${m}m${s}s` : `${s}s`
+}
+const anyRunning = computed(() => steps.value.some(s => s.status === 'running'))
+const genStart = computed(() => {
+  const t = steps.value.map(s => s.started_at).filter(Boolean).map(x => +new Date(x as string))
+  return t.length ? Math.min(...t) : null
+})
+const genEnd = computed(() => {
+  if (anyRunning.value) return null
+  const t = steps.value.map(s => s.finished_at).filter(Boolean).map(x => +new Date(x as string))
+  return t.length ? Math.max(...t) : null
+})
+const genDurSec = computed(() => (genStart.value && genEnd.value ? (genEnd.value - genStart.value) / 1000 : null))
 
 const job = ref<JobDetail | null>(null)
 const loading = ref(true)
@@ -87,9 +107,9 @@ async function confirmDelete() {
 
 <template>
   <div class="space-y-4">
-    <button @click="router.back()" class="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700">
+    <button @click="router.push('/jobs')" class="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700">
       <ArrowLeft :size="16" />
-      返回
+      返回任务列表
     </button>
 
     <div v-if="loading" class="text-sm text-gray-400 py-8 text-center">加载中...</div>
@@ -126,8 +146,12 @@ async function confirmDelete() {
               >
                 原始链接 <ExternalLink :size="12" />
               </a>
-              <span>创建 {{ new Date(job.created_at).toLocaleString('zh-CN') }}</span>
-              <span v-if="job.updated_at">更新 {{ new Date(job.updated_at).toLocaleString('zh-CN') }}</span>
+              <span>上传于 {{ fmtDateTime(job.published_at) }}</span>
+              <span>
+                生成 {{ fmtDateTime(genStart) }} →
+                {{ anyRunning ? '进行中' : (genEnd ? fmtDateTime(genEnd) : '--') }}
+                · 耗时 {{ genEnd ? fmtDur(genDurSec) : '--' }}
+              </span>
             </div>
           </div>
         </div>

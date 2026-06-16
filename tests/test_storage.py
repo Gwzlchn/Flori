@@ -20,7 +20,7 @@ class TestLocalStorage:
 
     @pytest.mark.asyncio
     async def test_pull_returns_path(self, storage, tmp_path):
-        path = await storage.pull("j_xxx", "01_scene")
+        path = await storage.pull("j_xxx", "03_scene")
         assert path == tmp_path / "j_xxx"
 
     @pytest.mark.asyncio
@@ -28,7 +28,7 @@ class TestLocalStorage:
         job_dir = tmp_path / "j_xxx"
         job_dir.mkdir(parents=True)
         (job_dir / "test.txt").write_text("hello")
-        await storage.push("j_xxx", "01_scene", job_dir)
+        await storage.push("j_xxx", "03_scene", job_dir)
         # LocalStorage.push is a no-op — files should remain unchanged
         assert (job_dir / "test.txt").read_text() == "hello"
 
@@ -37,7 +37,7 @@ class TestLocalStorage:
         job_dir = tmp_path / "j_xxx"
         job_dir.mkdir(parents=True)
         (job_dir / "test.txt").write_text("data")
-        await storage.cleanup("j_xxx", "01_scene", job_dir)
+        await storage.cleanup("j_xxx", "03_scene", job_dir)
         # LocalStorage.cleanup is a no-op — directory should still exist
         assert job_dir.exists()
         assert (job_dir / "test.txt").read_text() == "data"
@@ -45,7 +45,7 @@ class TestLocalStorage:
 
     @pytest.mark.asyncio
     async def test_pull_missing_dir(self, storage, tmp_path):
-        path = await storage.pull("nonexistent", "01_scene")
+        path = await storage.pull("nonexistent", "03_scene")
         assert path == tmp_path / "nonexistent"
 
     @pytest.mark.asyncio
