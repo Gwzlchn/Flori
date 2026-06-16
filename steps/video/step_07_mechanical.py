@@ -121,11 +121,19 @@ class MechanicalStep(StepBase):
             m, s = divmod(int(ch["ts"]), 60)
             parts.append(f"\n## 第 {idx} 章 [{m:02d}:{s:02d}]\n")
 
-            # 主体:口播(与字幕一致)
-            spoken = [e["text"].strip() for e in ch["events"]
-                      if e["type"] == "transcript" and e["text"].strip()]
-            if spoken:
-                parts.append("\n" + "".join(spoken) + "\n")
+            # 主体:口播(与字幕一致)。按 ~30s 切成自然段,避免一整段长文不可读
+            # (markdown breaks=false,单换行会被吞,故用空行分段)。
+            sp = [e for e in ch["events"] if e["type"] == "transcript" and e["text"].strip()]
+            if sp:
+                paras, buf = [], []
+                pstart = sp[0]["time"]
+                for e in sp:
+                    if buf and e["time"] - pstart >= 30:
+                        paras.append("".join(buf)); buf = []; pstart = e["time"]
+                    buf.append(e["text"].strip())
+                if buf:
+                    paras.append("".join(buf))
+                parts.append("\n" + "\n\n".join(paras) + "\n")
 
             # 辅助:该时段画面 + OCR(连续重复的 OCR 只显示一次)
             frames = [e for e in ch["events"] if e["type"] == "frame"]
