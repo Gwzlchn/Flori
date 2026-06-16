@@ -241,15 +241,16 @@ watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pick
                 </button>
               </div>
             </div>
-            <!-- 选中文件预览 -->
-            <div v-if="selFile" class="border border-gray-100 rounded-lg p-3 bg-gray-50/40">
+            <!-- 选中文件预览:容器留 min-height、加载态用浮层覆盖(不塌缩内容),避免点产物时页面抖动 -->
+            <div v-if="selFile" class="relative border border-gray-100 rounded-lg p-3 bg-gray-50/40 min-h-[16rem]">
               <img v-if="selFile.kind === 'image'" :src="artUrl(selFile.path)" class="max-w-full rounded border border-gray-200" />
               <video v-else-if="selFile.kind === 'video'" :src="mediaUrl(selFile.path)" controls preload="metadata" class="max-w-full rounded border border-gray-200" />
               <audio v-else-if="selFile.kind === 'audio'" :src="mediaUrl(selFile.path)" controls class="w-full" />
-              <div v-else-if="fileLoading" class="text-xs text-gray-400">加载中…</div>
               <div v-else-if="fileErr" class="text-xs text-red-600">{{ fileErr }}</div>
               <MarkdownViewer v-else-if="selFile.path.endsWith('.md')" :content="fileContent" :job-id="jobId" />
               <pre v-else class="text-xs whitespace-pre-wrap break-all">{{ fileContent }}</pre>
+              <!-- 文本加载:浮层覆盖,旧内容保持原高度不塌缩 -->
+              <div v-if="fileLoading" class="absolute inset-0 flex items-center justify-center bg-gray-50/70 text-xs text-gray-400 rounded-lg">加载中…</div>
             </div>
           </div>
           <div v-else-if="selStep.status === 'done'" class="mt-3 text-xs text-gray-400">（此步无可展示的产物文件）</div>
