@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from shared.step_base import StepBase, file_hash
-from steps.utils.srt_parser import format_timestamp, load_srt
+from steps.utils.srt_parser import format_timestamp, load_srt, pick_chinese_srt
 
 
 CHUNK_SIZE = 30000
@@ -14,17 +14,7 @@ CHUNK_SIZE = 30000
 
 class PunctuateStep(StepBase):
     def _pick_subtitle(self) -> Path | None:
-        """口播 = 中文字幕。一个视频常含多语言 srt(英/西/日…),只取中文那一份,
-        否则会把多语言混进口播稿。优先中文标记,其次 subtitle.srt,再不行取第一个。"""
-        srts = sorted((self.job_dir / "input").glob("*.srt"))
-        if not srts:
-            return None
-        zh = [f for f in srts if any(k in f.name.lower() for k in
-              ("中文", "简体", "zh", "chs", "chinese", "cn"))]
-        if zh:
-            return zh[0]
-        primary = [f for f in srts if f.name == "subtitle.srt"]
-        return primary[0] if primary else srts[0]
+        return pick_chinese_srt(self.job_dir / "input")
 
     def validate_inputs(self) -> list[str]:
         if self._pick_subtitle() is None:

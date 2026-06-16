@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from shared.step_base import StepBase, file_hash
+from steps.utils.srt_parser import load_srt, pick_chinese_srt
 
 
 CHAPTER_INTERVAL_SEC = 180
@@ -31,6 +32,10 @@ class MechanicalStep(StepBase):
         transcript_path = self.job_dir / "output" / "transcript.md"
         if transcript_path.exists():
             hashes["transcript"] = file_hash(transcript_path)
+        else:
+            sub = pick_chinese_srt(self.job_dir / "input")
+            if sub:
+                hashes["subtitle"] = file_hash(sub)
         return hashes
 
     def execute(self) -> dict | None:
@@ -40,8 +45,15 @@ class MechanicalStep(StepBase):
         danmaku_path = self.job_dir / "intermediate" / "danmaku.json"
         danmaku = json.loads(danmaku_path.read_text()) if danmaku_path.exists() else []
 
+        # 口播:优先 06 punctuate 的标点稿;没有则直接读原始中文字幕(无需 claude,先出可看的机械版)。
         transcript_path = self.job_dir / "output" / "transcript.md"
-        transcript_lines = self._parse_transcript(transcript_path) if transcript_path.exists() else []
+        if transcript_path.exists():
+            transcript_lines = self._parse_transcript(transcript_path)
+        else:
+            sub = pick_chinese_srt(self.job_dir / "input")
+            transcript_lines = (
+                [{"time_sec": e.start_sec, "text": e.text} for e in load_srt(sub)] if sub else []
+            )
 
         kept_frames = [d for d in dedup if d.get("keep", False)]
         ocr_map = {o["index"]: o for o in ocr}

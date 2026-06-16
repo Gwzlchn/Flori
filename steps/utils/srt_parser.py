@@ -64,3 +64,18 @@ def format_timestamp(seconds: float) -> str:
     m = int(seconds) // 60
     s = int(seconds) % 60
     return f"[{m:02d}:{s:02d}]"
+
+
+def pick_chinese_srt(input_dir: Path) -> Path | None:
+    """口播 = 音频对应的中文字幕。一个视频常含多语言 srt(英/西/日…),
+    只取中文那一份,否则会把多语言混进口播。优先中文标记 → subtitle.srt → 第一个。
+    (非中文音频的翻译走后续翻译步骤,不在此处理。)"""
+    srts = sorted(input_dir.glob("*.srt"))
+    if not srts:
+        return None
+    zh = [f for f in srts if any(k in f.name.lower() for k in
+          ("中文", "简体", "zh", "chs", "chinese", "cn"))]
+    if zh:
+        return zh[0]
+    primary = [f for f in srts if f.name == "subtitle.srt"]
+    return primary[0] if primary else srts[0]
