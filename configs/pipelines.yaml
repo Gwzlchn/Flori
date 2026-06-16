@@ -121,7 +121,9 @@ video:
     "07_mechanical":
       run: steps.video.step_07_mechanical
       pool: io
-      needs: ["04_ocr", "05_danmaku", "06_punctuate"]
+      # 不硬依赖 06(标点是 AI 步):07 口播优先用 06 标点稿,没有则直接读原始中文字幕,
+      # 于是机械版不依赖 claude 也能先出;06 跑完后重跑 07 即可换成标点版。
+      needs: ["04_ocr", "05_danmaku"]
       timeout: 30
       retry: 1
 
