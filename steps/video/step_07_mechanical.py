@@ -83,35 +83,52 @@ class MechanicalStep(StepBase):
         return events
 
     def _render_markdown(self, events) -> str:
+        """口播为主、画面/OCR 为辅:每章先出口播正文(与字幕一致),再附该时段的画面+OCR。"""
         if not events:
             return "# 机械版笔记\n\n（无内容）\n"
 
-        parts = []
-        chapter_idx = 1
-        last_chapter_time = -CHAPTER_INTERVAL_SEC
+        has_transcript = any(e["type"] == "transcript" for e in events)
+        parts = ["# 机械版笔记\n"]
+        if not has_transcript:
+            parts.append("\n> ⚠️ 本视频未取得字幕/口播稿，以下仅为画面 OCR。\n")
 
-        for event in events:
-            ts = event["time"]
-            if ts - last_chapter_time >= CHAPTER_INTERVAL_SEC:
-                m = int(ts) // 60
-                s = int(ts) % 60
-                parts.append(f"\n## 第 {chapter_idx} 章 [{m:02d}:{s:02d}]\n")
-                chapter_idx += 1
-                last_chapter_time = ts
+        # 按时间分章
+        chapters: list[dict] = []
+        last = -CHAPTER_INTERVAL_SEC
+        cur: dict | None = None
+        for e in events:
+            if cur is None or e["time"] - last >= CHAPTER_INTERVAL_SEC:
+                cur = {"ts": e["time"], "events": []}
+                chapters.append(cur)
+                last = e["time"]
+            cur["events"].append(e)
 
-            if event["type"] == "frame":
-                parts.append(f"\n![{event['filename']}](assets/{event['filename']})\n")
-                ocr_text = event.get("ocr_text", "").strip()
-                if ocr_text:
-                    parts.append(f"\n> OCR: {ocr_text}\n")
+        for idx, ch in enumerate(chapters, 1):
+            m, s = divmod(int(ch["ts"]), 60)
+            parts.append(f"\n## 第 {idx} 章 [{m:02d}:{s:02d}]\n")
 
-            elif event["type"] == "danmaku":
-                parts.append(f"- 💬 {event['text']}\n")
+            # 主体:口播(与字幕一致)
+            spoken = [e["text"].strip() for e in ch["events"]
+                      if e["type"] == "transcript" and e["text"].strip()]
+            if spoken:
+                parts.append("\n" + "".join(spoken) + "\n")
 
-            elif event["type"] == "transcript":
-                m = int(ts) // 60
-                s = int(ts) % 60
-                parts.append(f"[{m:02d}:{s:02d}] {event['text']}\n")
+            # 辅助:该时段画面 + OCR(连续重复的 OCR 只显示一次)
+            frames = [e for e in ch["events"] if e["type"] == "frame"]
+            if frames:
+                parts.append("\n**画面 / OCR（辅助）**\n")
+                last_ocr = None
+                for fr in frames:
+                    parts.append(f"\n![{fr['filename']}](assets/{fr['filename']})\n")
+                    ocr = (fr.get("ocr_text") or "").strip()
+                    if ocr and ocr != last_ocr:
+                        parts.append(f"\n> {ocr}\n")
+                        last_ocr = ocr
+
+            # 辅助:弹幕
+            dm = [e["text"] for e in ch["events"] if e["type"] == "danmaku"]
+            if dm:
+                parts.append("\n💬 弹幕：" + " / ".join(dm[:20]) + "\n")
 
         return "".join(parts)
 

@@ -13,23 +13,31 @@ CHUNK_SIZE = 30000
 
 
 class PunctuateStep(StepBase):
+    def _pick_subtitle(self) -> Path | None:
+        """口播 = 中文字幕。一个视频常含多语言 srt(英/西/日…),只取中文那一份,
+        否则会把多语言混进口播稿。优先中文标记,其次 subtitle.srt,再不行取第一个。"""
+        srts = sorted((self.job_dir / "input").glob("*.srt"))
+        if not srts:
+            return None
+        zh = [f for f in srts if any(k in f.name.lower() for k in
+              ("中文", "简体", "zh", "chs", "chinese", "cn"))]
+        if zh:
+            return zh[0]
+        primary = [f for f in srts if f.name == "subtitle.srt"]
+        return primary[0] if primary else srts[0]
+
     def validate_inputs(self) -> list[str]:
-        if not list((self.job_dir / "input").glob("*.srt")):
+        if self._pick_subtitle() is None:
             return ["input/*.srt"]
         return []
 
     def input_hashes(self) -> dict[str, str]:
-        srt_files = sorted((self.job_dir / "input").glob("*.srt"))
-        hashes = {}
-        for f in srt_files:
-            hashes[f.name] = file_hash(f)
-        return hashes
+        sub = self._pick_subtitle()
+        return {sub.name: file_hash(sub)} if sub else {}
 
     def execute(self) -> dict | None:
-        srt_files = sorted((self.job_dir / "input").glob("*.srt"))
-        all_entries = []
-        for srt_file in srt_files:
-            all_entries.extend(load_srt(srt_file))
+        sub = self._pick_subtitle()
+        all_entries = load_srt(sub) if sub else []
 
         lines = [
             f"{format_timestamp(e.start_sec)} {e.text}"
