@@ -66,16 +66,27 @@ def format_timestamp(seconds: float) -> str:
     return f"[{m:02d}:{s:02d}]"
 
 
-def pick_chinese_srt(input_dir: Path) -> Path | None:
-    """口播 = 音频对应的中文字幕。一个视频常含多语言 srt(英/西/日…),
-    只取中文那一份,否则会把多语言混进口播。优先中文标记 → subtitle.srt → 第一个。
-    (非中文音频的翻译走后续翻译步骤,不在此处理。)"""
+def _looks_chinese(path: Path) -> bool:
+    """按内容判定字幕是否中文(CJK 占比超过拉丁字母),比看文件名可靠。"""
+    try:
+        text = path.read_text(encoding="utf-8")[:4000]
+    except OSError:
+        return False
+    cjk = sum(1 for ch in text if "一" <= ch <= "鿿")
+    latin = sum(1 for ch in text if "a" <= ch.lower() <= "z")
+    return cjk > 0 and cjk >= latin
+
+
+def pick_native_srt(input_dir: Path) -> tuple[Path | None, bool]:
+    """选与音频对应的原生字幕,返回 (路径, 是否中文)。
+    一个视频常含多语言 srt(英/西/日…)。优先内容判定为中文的(原生中文视频的口播);
+    无中文字幕则取原生非中文(英文等)——交由 06 翻译成中文。"""
     srts = sorted(input_dir.glob("*.srt"))
     if not srts:
-        return None
-    zh = [f for f in srts if any(k in f.name.lower() for k in
-          ("中文", "简体", "zh", "chs", "chinese", "cn"))]
+        return (None, True)
+    zh = [f for f in srts if _looks_chinese(f)]
     if zh:
-        return zh[0]
-    primary = [f for f in srts if f.name == "subtitle.srt"]
-    return primary[0] if primary else srts[0]
+        marked = [f for f in zh if any(k in f.name.lower() for k in
+                  ("中文", "简体", "zh", "chs", "cn"))]
+        return (marked[0] if marked else zh[0], True)
+    return (srts[0], False)

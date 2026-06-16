@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from shared.step_base import StepBase, file_hash
-from steps.utils.srt_parser import load_srt, pick_chinese_srt
+from steps.utils.srt_parser import load_srt, pick_native_srt
 
 
 CHAPTER_INTERVAL_SEC = 180
@@ -33,8 +33,8 @@ class MechanicalStep(StepBase):
         if transcript_path.exists():
             hashes["transcript"] = file_hash(transcript_path)
         else:
-            sub = pick_chinese_srt(self.job_dir / "input")
-            if sub:
+            sub, is_zh = pick_native_srt(self.job_dir / "input")
+            if sub and is_zh:  # 仅中文原生字幕可无 claude 直用;非中文等 06 翻译
                 hashes["subtitle"] = file_hash(sub)
         return hashes
 
@@ -45,14 +45,16 @@ class MechanicalStep(StepBase):
         danmaku_path = self.job_dir / "intermediate" / "danmaku.json"
         danmaku = json.loads(danmaku_path.read_text()) if danmaku_path.exists() else []
 
-        # 口播:优先 06 punctuate 的标点稿;没有则直接读原始中文字幕(无需 claude,先出可看的机械版)。
+        # 口播:优先 06 的中文稿(中文加标点/非中文已翻译);没有则直接读原始中文字幕(无需 claude
+        # 先出可看的机械版)。非中文视频无中文稿时口播留空,等 06 翻译,不把外文塞进中文机械版。
         transcript_path = self.job_dir / "output" / "transcript.md"
         if transcript_path.exists():
             transcript_lines = self._parse_transcript(transcript_path)
         else:
-            sub = pick_chinese_srt(self.job_dir / "input")
+            sub, is_zh = pick_native_srt(self.job_dir / "input")
             transcript_lines = (
-                [{"time_sec": e.start_sec, "text": e.text} for e in load_srt(sub)] if sub else []
+                [{"time_sec": e.start_sec, "text": e.text} for e in load_srt(sub)]
+                if sub and is_zh else []
             )
 
         kept_frames = [d for d in dedup if d.get("keep", False)]
