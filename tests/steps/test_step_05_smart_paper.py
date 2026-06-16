@@ -48,7 +48,7 @@ class TestSmartPaperStep:
         step = SmartPaperStep("05_smart_paper", job_dir, config)
         result = step.execute()
         assert result["chars"] > 0
-        assert (job_dir / "output" / "notes_smart.md").exists()
+        assert list((job_dir / "output" / "versions").glob("notes_smart_*.md"))
 
     def test_build_prompt(self, tmp_path):
         job_dir = self._setup_job(tmp_path)

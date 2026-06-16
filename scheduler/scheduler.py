@@ -25,14 +25,13 @@ logger = structlog.get_logger(component="scheduler")
 # 延迟重试任务的 name 前缀，跟踪/按 job 取消时复用，避免格式漂移。
 _DELAYED_PREFIX = "delayed_enqueue:"
 
-# 笔记产出步 -> note_type：smart 笔记走 notes_smart.md，机械笔记走 notes_mechanical.md。
+# 笔记产出步 -> note_type。smart 已版本化(取最新版本文件),mechanical 走固定路径。
 _NOTE_STEPS = {
     "10_smart": "smart",
     "05_smart_paper": "smart",
     "09_mechanical": "mechanical",
 }
 _NOTE_FILES = {
-    "smart": "output/notes_smart.md",
     "mechanical": "output/notes_mechanical.md",
 }
 # 评审步：完成后读 review.json，把 missing_concepts 采集为候选术语。
@@ -355,6 +354,9 @@ class Scheduler:
     async def _index_job_notes(self, job_id: str, note_type: str) -> None:
         """读该 job 的笔记 Markdown，去标记取纯文本，连同 job 元信息写入 FTS 索引。"""
         rel = _NOTE_FILES.get(note_type)
+        if note_type == "smart":   # 智能笔记已版本化,取最新版本文件
+            from shared.notes_versions import latest_smart
+            rel = latest_smart(await self.storage.list_files(job_id))
         if not rel:
             return
         data = await self.storage.read_file(job_id, rel)

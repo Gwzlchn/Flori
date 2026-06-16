@@ -10,20 +10,22 @@ from shared.step_base import StepBase, file_hash
 class PodcastReviewStep(StepBase):
     def validate_inputs(self) -> list[str]:
         missing = []
-        if not (self.job_dir / "output" / "notes_smart.md").exists():
-            missing.append("output/notes_smart.md")
+        if self.latest_smart_note() is None:
+            missing.append("output/versions/notes_smart_*.md")
         if not (self.job_dir / "intermediate" / "transcript.json").exists():
             missing.append("intermediate/transcript.json")
         return missing
 
     def input_hashes(self) -> dict[str, str]:
         return {
-            "smart": file_hash(self.job_dir / "output" / "notes_smart.md"),
+            "smart": file_hash(self.latest_smart_note()) if self.latest_smart_note() else "",
             "transcript": file_hash(self.job_dir / "intermediate" / "transcript.json"),
         }
 
     def execute(self) -> dict | None:
-        smart = (self.job_dir / "output" / "notes_smart.md").read_text(encoding="utf-8")
+        smart_path = self.latest_smart_note()
+        smart = smart_path.read_text(encoding="utf-8") if smart_path else ""
+        note_file = str(smart_path.relative_to(self.job_dir)) if smart_path else None
         transcript = self.load_json("intermediate/transcript.json")
         full_text = transcript.get("full_text", "")
 
@@ -59,8 +61,8 @@ class PodcastReviewStep(StepBase):
             ],
         )
 
-        self.write_output("output/review.json", review)
-        return {"overall": review.get("overall", 0), "parse_failed": parse_failed}
+        self.write_review(review, note_file)
+        return {"overall": review.get("overall", 0), "parse_failed": parse_failed, "note_file": note_file}
 
 
 if __name__ == "__main__":

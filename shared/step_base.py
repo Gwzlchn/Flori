@@ -36,8 +36,9 @@ class StepBase:
         self.log = self._setup_logger()
         self._gateway: AIGateway | None = None
         self._call_index = 0
-        # 最近一次 AI 调用实际命中的 provider(供版本化笔记按 provider 标记)。
+        # 最近一次 AI 调用实际命中的 provider / model(供版本化笔记标记)。
         self.last_ai_provider: str | None = None
+        self.last_ai_model: str | None = None
 
     # ── 统一入口 ──
 
@@ -128,6 +129,47 @@ class StepBase:
             tmp.write_bytes(data)
         tmp.rename(target)
 
+    def ai_provider_model(self) -> tuple[str, str]:
+        """最近一次 AI 调用的 (provider, model)。claude-cli 订阅默认 Opus 4.8——config 里是
+        占位 "subscription",此处换成真实模型名,供笔记/评审统一标注。"""
+        prov = self.last_ai_provider or "unknown"
+        model = self.last_ai_model or "unknown"
+        if prov == "claude-cli" and model in ("subscription", "unknown", ""):
+            model = "claude-opus-4-8"
+        return prov, model
+
+    def write_smart_note(self, content: str) -> str:
+        """智能笔记按版本落盘:output/versions/notes_smart_{provider}_{model}_{时间}.md,
+        开头加一行说明(生成时间 / 方式 / 模型)。不再写规范 notes_smart.md——前端取最新版本。
+        返回相对路径,供评审步在 review.json 里标明评的是哪一版。"""
+        prov, model = self.ai_provider_model()
+        # 字段内只允许字母数字与 . - (把 _ 也归一为 -),保证文件名按 "_" 切分无歧义。
+        safe = lambda s: __import__("re").sub(r"[^0-9A-Za-z.-]+", "-", s).strip("-") or "x"
+        now = datetime.now()
+        rel = f"output/versions/notes_smart_{safe(prov)}_{safe(model)}_{now.strftime('%Y%m%d-%H%M%S')}.md"
+        header = f"> 生成于 {now.strftime('%Y/%m/%d %H:%M:%S')} · 方式 {prov} · 模型 {model}\n\n"
+        self.write_output(rel, header + content)
+        return rel
+
+    def write_review(self, review: dict, note_file: str | None) -> None:
+        """评审结果落盘:补记 生成时间 / 方式 / 模型 + 评的是哪一版智能笔记(note_file)。"""
+        prov, model = self.ai_provider_model()
+        review["note_file"] = note_file
+        review["provider"] = prov
+        review["model"] = model
+        review["generated_at"] = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+        self.write_output("output/review.json", review)
+
+    def latest_smart_note(self) -> Path | None:
+        """工作目录里最新的智能笔记版本文件(供评审步读取并标注评的是哪一版)。"""
+        from shared.notes_versions import latest_smart
+        vdir = self.job_dir / "output" / "versions"
+        if not vdir.is_dir():
+            return None
+        rels = [f"output/versions/{p.name}" for p in vdir.glob("notes_smart_*.md")]
+        latest = latest_smart(rels)
+        return (self.job_dir / latest) if latest else None
+
     def load_json(self, filename: str) -> dict | list:
         return json.loads((self.job_dir / filename).read_text(encoding="utf-8"))
 
@@ -209,6 +251,7 @@ class StepBase:
             self._gateway.call(self.step_name, request, job_id=self.job_dir.name)
         )
         self.last_ai_provider = response.provider
+        self.last_ai_model = response.model
 
         self.log.info(
             "ai_call",

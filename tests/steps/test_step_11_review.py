@@ -16,7 +16,9 @@ class TestReviewStep:
         for d in ["output", "logs"]:
             (job_dir / d).mkdir()
         (job_dir / "output" / "notes_mechanical.md").write_text("## 机械版\n\n内容\n")
-        (job_dir / "output" / "notes_smart.md").write_text("## 智能版\n\n重组后内容\n")
+        # 智能笔记已版本化:评审读 output/versions/notes_smart_*.md 的最新一版。
+        (job_dir / "output" / "versions").mkdir()
+        (job_dir / "output" / "versions" / "notes_smart_claude-cli_claude-opus-4-8_20260101-000000.md").write_text("## 智能版\n\n重组后内容\n")
         return job_dir
 
     def test_validate_inputs(self, tmp_path):
@@ -26,7 +28,7 @@ class TestReviewStep:
         config = make_step_config(tmp_path, step_name="11_review")
         step = ReviewStep("11_review", job_dir, config)
         missing = step.validate_inputs()
-        assert "output/notes_smart.md" in missing
+        assert "output/versions/notes_smart_*.md" in missing
 
     def test_execute_dry_run(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DRY_RUN", "1")

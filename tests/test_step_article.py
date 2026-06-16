@@ -176,7 +176,7 @@ class TestSmartArticleStep:
         step = SmartArticleStep("04_smart_article", job_dir, config)
         result = step.execute()
         assert result["chars"] > 0
-        assert (job_dir / "output" / "notes_smart.md").exists()
+        assert list((job_dir / "output" / "versions").glob("notes_smart_*.md"))
 
 
 class TestArticleReviewStep:
@@ -189,7 +189,8 @@ class TestArticleReviewStep:
             ],
         }
         (job_dir / "intermediate" / "sections.json").write_text(json.dumps(sections))
-        (job_dir / "output" / "notes_smart.md").write_text("## 文章笔记\n\n内容\n")
+        (job_dir / "output" / "versions").mkdir(exist_ok=True)
+        (job_dir / "output" / "versions" / "notes_smart_anthropic_claude-sonnet-4-6_20260101-000000.md").write_text("## 文章笔记\n\n内容\n")
         return job_dir
 
     def test_validate_inputs(self, tmp_path):

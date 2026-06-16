@@ -33,7 +33,7 @@ class TestSmartStep:
         step = SmartStep("10_smart", job_dir, config)
         result = step.execute()
         assert result["chars"] > 0
-        assert (job_dir / "output" / "notes_smart.md").exists()
+        assert list((job_dir / "output" / "versions").glob("notes_smart_*.md"))
 
     def test_input_hashes_includes_styles(self, tmp_path):
         job_dir = self._setup_job(tmp_path)

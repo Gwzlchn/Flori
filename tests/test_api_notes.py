@@ -49,10 +49,13 @@ def _create_job_files(jobs_dir, job_id):
     (job_dir / "output").mkdir()
     (job_dir / "assets").mkdir()
     (job_dir / "input").mkdir()
-    (job_dir / "output" / "notes_smart.md").write_text("# Smart Notes\n")
+    # 智能笔记已版本化:/notes/smart 默认取最新版本(output/versions/notes_smart_*.md)。
+    (job_dir / "output" / "versions").mkdir()
+    smart_ver = "output/versions/notes_smart_claude-cli_claude-opus-4-8_20260101-000000.md"
+    (job_dir / smart_ver).write_text("# Smart Notes\n")
     (job_dir / "output" / "notes_mechanical.md").write_text("# Mechanical\n")
     (job_dir / "output" / "transcript.md").write_text("[00:00] Hello\n")
-    (job_dir / "output" / "review.json").write_text('{"overall": 4.0}')
+    (job_dir / "output" / "review.json").write_text(f'{{"overall": 4.0, "note_file": "{smart_ver}"}}')
     (job_dir / "assets" / "scene_0001.jpg").write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
     return job_dir
 

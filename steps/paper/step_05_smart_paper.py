@@ -46,8 +46,9 @@ class SmartPaperStep(StepBase):
         prompt = self._build_prompt(sections, figures)
         result = self.call_ai(prompt)
 
-        self.write_output("output/notes_smart.md", result)
-        return {"chars": len(result)}
+        rel = self.write_smart_note(result)   # 版本化落盘(含生成时间/方式/模型),不再写 notes_smart.md
+        return {"chars": len(result), "provider": self.last_ai_provider,
+                "model": self.last_ai_model, "note_file": rel}
 
     def _build_prompt(self, sections: dict, figures: list) -> str:
         profile = self._load_profile()

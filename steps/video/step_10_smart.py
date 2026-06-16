@@ -52,11 +52,9 @@ class SmartStep(StepBase):
         else:
             result = self.call_ai(prompt)
 
-        self.write_output("output/notes_smart.md", result)
-        # 版本化:按实际命中的 provider 另存一份,供前端多版本切换("claude 版/kimi 版")。
-        provider = self.last_ai_provider or "unknown"
-        self.write_output(f"output/versions/smart__{provider}.md", result)
-        return {"chars": len(result), "images_sent": min(len(images), 10), "provider": provider}
+        rel = self.write_smart_note(result)   # 版本化落盘(含生成时间/方式/模型),不再写 notes_smart.md
+        return {"chars": len(result), "images_sent": min(len(images), 10),
+                "provider": self.last_ai_provider, "model": self.last_ai_model, "note_file": rel}
 
     def _build_user_prompt(self, mechanical: str) -> str:
         profile = self._load_profile()

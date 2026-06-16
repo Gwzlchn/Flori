@@ -115,7 +115,7 @@ class TestSmartPodcastStep:
         step = SmartPodcastStep("04_smart_podcast", job_dir, config)
         result = step.execute()
         assert result["chars"] > 0
-        assert (job_dir / "output" / "notes_smart.md").exists()
+        assert list((job_dir / "output" / "versions").glob("notes_smart_*.md"))
 
     def test_build_prompt(self, tmp_path):
         job_dir = self._setup(tmp_path)
@@ -149,7 +149,8 @@ class TestPodcastReviewStep:
             "duration_sec": 120.0,
         }
         (job_dir / "intermediate" / "transcript.json").write_text(json.dumps(transcript))
-        (job_dir / "output" / "notes_smart.md").write_text("## 播客笔记\n\n内容\n")
+        (job_dir / "output" / "versions").mkdir(exist_ok=True)
+        (job_dir / "output" / "versions" / "notes_smart_anthropic_claude-sonnet-4-6_20260101-000000.md").write_text("## 播客笔记\n\n内容\n")
         return job_dir
 
     def test_validate_inputs(self, tmp_path):

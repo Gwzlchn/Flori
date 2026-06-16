@@ -159,7 +159,7 @@ video:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
         text_fallback: {provider: $AI_SMART_TEXT_PROVIDER, model: $AI_SMART_TEXT_MODEL}
-      outputs: ["output/notes_smart.md"]
+      outputs: ["output/versions/notes_smart_*"]
 
     "11_review":
       label: "评审"
@@ -171,7 +171,7 @@ video:
       ai:
         primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
-      outputs: ["output/review.json"]
+      outputs: []   # review.json 不进产物浏览器(归内部);评审在笔记页渲染成可读面板
 
 paper:
   variables:
@@ -225,7 +225,7 @@ paper:
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
-      outputs: ["output/notes_smart.md"]
+      outputs: ["output/versions/notes_smart_*"]
 
     "06_review":
       label: "评审"
@@ -236,7 +236,7 @@ paper:
       ai:
         primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
-      outputs: ["output/review.json"]
+      outputs: []   # review.json 不进产物浏览器(归内部);评审在笔记页渲染成可读面板
 
 article:
   variables:
@@ -282,7 +282,7 @@ article:
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
-      outputs: ["output/notes_smart.md"]
+      outputs: ["output/versions/notes_smart_*"]
 
     "05_review":
       label: "评审"
@@ -293,7 +293,7 @@ article:
       ai:
         primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
-      outputs: ["output/review.json"]
+      outputs: []   # review.json 不进产物浏览器(归内部);评审在笔记页渲染成可读面板
 
 audio:
   variables:
@@ -343,7 +343,7 @@ audio:
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
-      outputs: ["output/notes_smart.md"]
+      outputs: ["output/versions/notes_smart_*"]
 
     "05_review":
       label: "评审"
@@ -354,4 +354,4 @@ audio:
       ai:
         primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
-      outputs: ["output/review.json"]
+      outputs: []   # review.json 不进产物浏览器(归内部);评审在笔记页渲染成可读面板

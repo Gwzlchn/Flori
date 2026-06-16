@@ -12,6 +12,7 @@ from fastapi.responses import Response
 
 from shared.config import AppConfig
 from shared.db import Database
+from shared.notes_versions import latest_smart, parse_smart_version
 from shared.storage import StorageBackend
 from api.deps import get_config, get_db, get_storage, verify_token
 
@@ -59,42 +60,44 @@ async def _serve(
     return Response(content=data, media_type=media_type, headers=headers)
 
 
-def _safe_provider(p: str) -> str:
-    # provider 仅用于拼版本文件名,限字母数字与 -_,挡路径穿越。
-    import re
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", p or ""):
-        raise HTTPException(400, "invalid provider")
-    return p
-
-
 @router.get("/{job_id}/notes/smart")
-async def get_smart_notes(job_id: str, provider: str | None = None,
+async def get_smart_notes(job_id: str, file: str | None = None,
                           storage: StorageBackend = Depends(get_storage)):
-    # provider 指定时取该版本,否则取默认(最近一次)。
-    rel = f"output/versions/smart__{_safe_provider(provider)}.md" if provider else "output/notes_smart.md"
+    """默认取最新版本智能笔记;file= 指定某版本(output/versions/notes_smart_*.md)。"""
+    _validate_job_id(job_id)
+    if file:
+        if ".." in file or not file.startswith("output/versions/notes_smart_") or not file.endswith(".md"):
+            raise HTTPException(400, "invalid version file")
+        rel = file
+    else:
+        rel = latest_smart(await storage.list_files(job_id))
+        if not rel:
+            raise HTTPException(404, "smart notes not ready")
     return await _serve(storage, job_id, rel,
                         "text/markdown; charset=utf-8", "smart notes not ready")
 
 
 @router.get("/{job_id}/note-versions")
 async def list_note_versions(job_id: str, storage: StorageBackend = Depends(get_storage)):
-    """列出该 job 的智能笔记各 provider 版本 + 各自评分,供前端版本切换。"""
+    """列出智能笔记各版本(provider/model/生成时间)。review.json 记录评的是哪一版 + 总分。"""
     _validate_job_id(job_id)
     import json as _json
     files = await storage.list_files(job_id)
+    reviewed_file, overall = None, None
+    rdata = await storage.read_file(job_id, "output/review.json")
+    if rdata:
+        try:
+            rj = _json.loads(rdata)
+            reviewed_file, overall = rj.get("note_file"), rj.get("overall")
+        except (ValueError, _json.JSONDecodeError):
+            pass
     versions = []
     for f in files:
-        if f.startswith("output/versions/smart__") and f.endswith(".md"):
-            prov = f[len("output/versions/smart__"):-len(".md")]
-            score = None
-            rdata = await storage.read_file(job_id, f"output/versions/review__{prov}.json")
-            if rdata:
-                try:
-                    score = _json.loads(rdata).get("overall")
-                except (ValueError, _json.JSONDecodeError):
-                    pass
-            versions.append({"provider": prov, "overall": score})
-    versions.sort(key=lambda v: v["provider"])
+        v = parse_smart_version(f)
+        if v:
+            v["overall"] = overall if reviewed_file == f else None
+            versions.append(v)
+    versions.sort(key=lambda v: v["version"], reverse=True)   # 最新在前
     return {"versions": versions}
 
 
@@ -111,10 +114,9 @@ async def get_transcript(job_id: str, storage: StorageBackend = Depends(get_stor
 
 
 @router.get("/{job_id}/review")
-async def get_review(job_id: str, provider: str | None = None,
-                     storage: StorageBackend = Depends(get_storage)):
-    rel = f"output/versions/review__{_safe_provider(provider)}.json" if provider else "output/review.json"
-    return await _serve(storage, job_id, rel, "application/json", "review not ready")
+async def get_review(job_id: str, storage: StorageBackend = Depends(get_storage)):
+    # 单一规范评审:review.json(内含 note_file 标明评的是哪一版智能笔记)。
+    return await _serve(storage, job_id, "output/review.json", "application/json", "review not ready")
 
 
 @router.get("/{job_id}/assets/{filename}")

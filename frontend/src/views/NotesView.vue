@@ -20,14 +20,35 @@ const loading = ref(true)
 const error = ref('')
 const title = ref('')
 
-// 版本(按 provider)+ 重跑
-type Version = { provider: string; overall: number | null }
+// 版本(按 provider/model/生成时间)+ 重跑
+type Version = { provider: string; model: string; version: string; file: string; overall: number | null }
 const versions = ref<Version[]>([])
-const activeProvider = ref<string | null>(null)   // null = 默认(最近一次)
+const activeFile = ref<string | null>(null)   // null = 默认(最新版本)
 type Provider = { name: string; type: string; available: boolean; label: string }
 const providers = ref<Provider[]>([])
 const showRerun = ref(false)
 const rerunning = ref(false)
+
+// 质量评审(智能版):总分 + 各维度 + 缺失概念 + 改进 + 生成元信息,渲染成可读面板。
+const review = ref<Record<string, any> | null>(null)
+const DIM_LABELS: Record<string, string> = {
+  completeness: '完整性', accuracy: '准确性', structure: '结构', terminology: '术语',
+  visual_integration: '配图', readability: '可读性', formula_integrity: '公式',
+  figure_references: '图表引用',
+}
+const _DIM_SKIP = new Set(['overall'])
+const reviewDims = computed(() => {
+  const r = review.value || {}
+  return Object.entries(r)
+    .filter(([k, v]) => typeof v === 'number' && !_DIM_SKIP.has(k))
+    .map(([k, v]) => ({ label: DIM_LABELS[k] || k, score: v }))
+})
+async function loadReview() {
+  review.value = null
+  if (isMechanical.value) return
+  try { review.value = await api.get<Record<string, any>>(`/api/jobs/${jobId.value}/review`) }
+  catch { review.value = null }
+}
 
 async function loadContent() {
   loading.value = true; error.value = ''
@@ -35,8 +56,8 @@ async function loadContent() {
     const base = isMechanical.value
       ? `/api/jobs/${jobId.value}/notes/mechanical`
       : `/api/jobs/${jobId.value}/notes/smart`
-    const endpoint = (!isMechanical.value && activeProvider.value)
-      ? `${base}?provider=${encodeURIComponent(activeProvider.value)}`
+    const endpoint = (!isMechanical.value && activeFile.value)
+      ? `${base}?file=${encodeURIComponent(activeFile.value)}`
       : base
     content.value = await api.getText(endpoint)
   } catch (e: any) {
@@ -61,9 +82,14 @@ async function loadProviders() {
   } catch { providers.value = [] }
 }
 
-async function selectVersion(provider: string | null) {
-  activeProvider.value = provider
+async function selectVersion(file: string | null) {
+  activeFile.value = file
   await loadContent()
+}
+// 版本号(时间戳)转可读时间;无则原样。
+function verLabel(v: Version): string {
+  const m = v.version.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/)
+  return m ? `${m[1]}/${m[2]}/${m[3]} ${m[4]}:${m[5]}` : v.version
 }
 
 async function rerunWith(provider: Provider) {
@@ -93,7 +119,7 @@ function pollForVersion(provider: string) {
       rerunning.value = false
       if (got) {
         showToast(`${provider} 版本已生成`, 'success')
-        await selectVersion(provider)
+        await selectVersion(got.file)
       }
     }
   }, 15000)
@@ -104,7 +130,7 @@ async function reload() {
     const detail = await api.get<{ title: string }>(`/api/jobs/${jobId.value}`)
     title.value = detail.title || jobId.value
   } catch { title.value = jobId.value }
-  await Promise.all([loadContent(), loadVersions(), loadProviders()])
+  await Promise.all([loadContent(), loadVersions(), loadProviders(), loadReview()])
 }
 
 onMounted(reload)
@@ -112,7 +138,7 @@ onMounted(reload)
 // 智能笔记 ↔ 机械稿、以及不同 job 共用同一个 NotesView 实例,切换时组件不重挂、
 // onMounted 不再触发 → 内容不会变。监听路由变化重新取(切 variant 时清掉 provider 选择)。
 watch(() => [route.params.id, route.params.type], () => {
-  activeProvider.value = null
+  activeFile.value = null
   reload()
 })
 
@@ -159,12 +185,12 @@ const showChapters = ref(false)
       >默认</button>
       <button
         v-for="v in versions"
-        :key="v.provider"
-        @click="selectVersion(v.provider)"
+        :key="v.file"
+        @click="selectVersion(v.file)"
         class="px-2 py-1 text-xs rounded-md transition-colors flex items-center gap-1"
-        :class="(activeProvider ?? versions[0]?.provider) === v.provider ? 'bg-blue-100 text-blue-700 font-medium' : 'text-gray-500 hover:bg-gray-100 border border-gray-200'"
+        :class="(activeFile ?? versions[0]?.file) === v.file ? 'bg-blue-100 text-blue-700 font-medium' : 'text-gray-500 hover:bg-gray-100 border border-gray-200'"
       >
-        {{ v.provider }}
+        {{ v.provider }}/{{ v.model }} · {{ verLabel(v) }}
         <span v-if="v.overall != null" class="flex items-center gap-0.5 text-amber-600">
           <Star :size="11" />{{ v.overall }}
         </span>
@@ -194,6 +220,32 @@ const showChapters = ref(false)
             <span v-if="!p.available" class="text-[10px] text-gray-300">未配置 key</span>
           </button>
         </div>
+      </div>
+    </div>
+
+    <!-- 质量评审面板(仅智能版,有 review 时) -->
+    <div v-if="!isMechanical && review" class="mb-4 bg-white border border-gray-200 rounded-xl p-4">
+      <div class="flex items-center flex-wrap gap-x-3 gap-y-1 mb-2">
+        <span class="text-sm font-semibold text-gray-700">质量评审</span>
+        <span v-if="review.overall != null" class="flex items-center gap-0.5 text-amber-600 font-medium">
+          <Star :size="14" />{{ review.overall }}/5
+        </span>
+        <span class="text-xs text-gray-400">
+          {{ review.provider }}<template v-if="review.model">/{{ review.model }}</template>
+          <template v-if="review.generated_at"> · {{ review.generated_at }}</template>
+        </span>
+      </div>
+      <div v-if="reviewDims.length" class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600 mb-2">
+        <span v-for="d in reviewDims" :key="d.label">{{ d.label }} <span class="font-medium text-gray-800">{{ d.score }}</span></span>
+      </div>
+      <div v-if="review.missing_concepts?.length" class="text-xs text-gray-600 mb-1">
+        <span class="text-gray-400">缺失概念:</span> {{ review.missing_concepts.join(' / ') }}
+      </div>
+      <div v-if="review.top3_improvements?.length" class="text-xs text-gray-600">
+        <span class="text-gray-400">改进建议:</span>
+        <ol class="list-decimal ml-5 mt-0.5 space-y-0.5">
+          <li v-for="(t, i) in review.top3_improvements" :key="i">{{ t }}</li>
+        </ol>
       </div>
     </div>
 

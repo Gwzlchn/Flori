@@ -1,4 +1,4 @@
-"""Step 09: 质量评审。6 维度评分 + 缺失概念 + 改进建议。"""
+"""Step 11: 质量评审。6 维度评分 + 缺失概念 + 改进建议。评最新版智能笔记,review.json 标 note_file。"""
 
 from __future__ import annotations
 
@@ -11,15 +11,16 @@ from shared.step_base import StepBase, file_hash
 class ReviewStep(StepBase):
     def validate_inputs(self) -> list[str]:
         missing = []
-        if not (self.job_dir / "output" / "notes_smart.md").exists():
-            missing.append("output/notes_smart.md")
+        if self.latest_smart_note() is None:
+            missing.append("output/versions/notes_smart_*.md")
         if not (self.job_dir / "output" / "notes_mechanical.md").exists():
             missing.append("output/notes_mechanical.md")
         return missing
 
     def input_hashes(self) -> dict[str, str]:
+        smart = self.latest_smart_note()
         return {
-            "smart": file_hash(self.job_dir / "output" / "notes_smart.md"),
+            "smart": file_hash(smart) if smart else "",
             "mechanical": file_hash(self.job_dir / "output" / "notes_mechanical.md"),
             # provider 覆盖纳入指纹:换 provider 重跑时强制重评。
             "provider": self.override_provider(),
@@ -27,7 +28,9 @@ class ReviewStep(StepBase):
 
     def execute(self) -> dict | None:
         mechanical = (self.job_dir / "output" / "notes_mechanical.md").read_text(encoding="utf-8")
-        smart = (self.job_dir / "output" / "notes_smart.md").read_text(encoding="utf-8")
+        smart_path = self.latest_smart_note()
+        smart = smart_path.read_text(encoding="utf-8") if smart_path else ""
+        note_file = str(smart_path.relative_to(self.job_dir)) if smart_path else None
 
         prompt = (
             "请对比以下两份笔记，对 AI 生成的智能版笔记进行质量评审。\n\n"
@@ -61,12 +64,9 @@ class ReviewStep(StepBase):
             ],
         )
 
-        self.write_output("output/review.json", review)
-        # 版本化:按 provider 另存评分,与对应版本智能笔记配对显示。
-        provider = self.last_ai_provider or "unknown"
-        review["provider"] = provider
-        self.write_output(f"output/versions/review__{provider}.json", review)
-        return {"overall": review.get("overall", 0), "parse_failed": parse_failed, "provider": provider}
+        self.write_review(review, note_file)   # 补记 生成时间/方式/模型 + 评的是哪一版
+        return {"overall": review.get("overall", 0), "parse_failed": parse_failed,
+                "provider": review["provider"], "note_file": note_file}
 
 
 if __name__ == "__main__":

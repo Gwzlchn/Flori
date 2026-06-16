@@ -23,7 +23,8 @@ class TestPaperReviewStep:
             ],
         }
         (job_dir / "intermediate" / "sections.json").write_text(json.dumps(sections))
-        (job_dir / "output" / "notes_smart.md").write_text("## 论文笔记\n\n内容\n")
+        (job_dir / "output" / "versions").mkdir()
+        (job_dir / "output" / "versions" / "notes_smart_anthropic_claude-sonnet-4-6_20260101-000000.md").write_text("## 论文笔记\n\n内容\n")
         return job_dir
 
     def test_validate_inputs(self, tmp_path):
