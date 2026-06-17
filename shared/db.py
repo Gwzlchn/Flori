@@ -296,6 +296,8 @@ class Database:
         collection_id: str | None = None,
         limit: int = 20,
         offset: int = 0,
+        domain: str | None = None,
+        uncategorized: bool = False,
     ) -> tuple[int, list[Job]]:
         where_parts: list[str] = []
         params: list = []
@@ -305,6 +307,11 @@ class Database:
         if collection_id:
             where_parts.append("collection_id=?")
             params.append(collection_id)
+        if domain:
+            where_parts.append("domain=?")
+            params.append(domain)
+        if uncategorized:
+            where_parts.append("collection_id IS NULL")
 
         where = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
 
@@ -889,6 +896,70 @@ class Database:
                 (dt.isoformat(), _now_iso(), collection_id),
             )
             self._conn.commit()
+
+    # ── Domain（领域是派生视图：来自 jobs ∪ collections ∪ glossary 的 distinct domain）──
+
+    def list_domains(self) -> list[dict]:
+        """领域总览：每个 domain 的 集合数/内容数/概念数/订阅数/最近活跃(派生,无 domains 表)。"""
+        domains: set[str] = set()
+        for tbl in ("jobs", "collections", "glossary"):
+            for r in self._conn.execute(
+                f"SELECT DISTINCT domain FROM {tbl} WHERE domain IS NOT NULL AND domain<>''"
+            ):
+                domains.add(r[0])
+
+        def grp(sql: str) -> dict:
+            return {r[0]: r[1] for r in self._conn.execute(sql)}
+
+        coll_c = grp("SELECT domain, COUNT(*) FROM collections GROUP BY domain")
+        job_c = grp("SELECT domain, COUNT(*) FROM jobs GROUP BY domain")
+        concept_c = grp("SELECT domain, COUNT(*) FROM glossary GROUP BY domain")
+        sub_c = grp("SELECT domain, COUNT(*) FROM collections WHERE source_type IS NOT NULL GROUP BY domain")
+        last = grp("SELECT domain, MAX(updated_at) FROM jobs GROUP BY domain")
+        return [
+            {
+                "domain": d,
+                "collection_count": coll_c.get(d, 0),
+                "job_count": job_c.get(d, 0),
+                "concept_count": concept_c.get(d, 0),
+                "subscription_count": sub_c.get(d, 0),
+                "last_active_at": last.get(d),
+            }
+            for d in sorted(domains)
+        ]
+
+    def domain_top_terms(self, domain: str, limit: int = 30) -> list[dict]:
+        """领域工作台语义栏：该 domain 已接受术语，按来源数(佐证强度代理)降序。"""
+        rows = self._conn.execute(
+            "SELECT term, definition, sources, status FROM glossary WHERE domain=?",
+            (domain,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            try:
+                src = json.loads(r["sources"] or "[]")
+            except (ValueError, TypeError):
+                src = []
+            out.append({
+                "term": r["term"], "definition": r["definition"],
+                "source_count": len(src) if isinstance(src, list) else 0,
+                "status": r["status"],
+            })
+        out.sort(key=lambda t: t["source_count"], reverse=True)
+        return out[:limit]
+
+    def domain_topics(self, domain: str) -> list[dict]:
+        """领域内主题(可浏览标签) = 该 domain 所有 job 的 style_tags distinct + 计数。"""
+        from collections import Counter
+        c: Counter = Counter()
+        for r in self._conn.execute("SELECT style_tags FROM jobs WHERE domain=?", (domain,)):
+            try:
+                for t in json.loads(r["style_tags"] or "[]"):
+                    if t:
+                        c[t] += 1
+            except (ValueError, TypeError):
+                pass
+        return [{"topic": t, "count": n} for t, n in c.most_common()]
 
     def ingested_bvids(self) -> set[str]:
         """已入库的 B站 BV 号集合(从 jobs.url 提取),供订阅同步去重。"""

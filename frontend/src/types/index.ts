@@ -131,6 +131,16 @@ export interface ProfileDetail {
   do_not?: string[]
 }
 
+// 领域总览卡片（派生聚合）。与后端 GET /api/domains 对齐。
+export interface DomainOverview {
+  domain: string
+  collection_count: number
+  job_count: number
+  concept_count: number
+  subscription_count: number
+  last_active_at: string | null
+}
+
 // 集合的订阅源（自动追更）。无订阅则为 null。同步/开关端点用集合自身 id。
 export interface CollectionSubscription {
   source_type: string        // bilibili_up

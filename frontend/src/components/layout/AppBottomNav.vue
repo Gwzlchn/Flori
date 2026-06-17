@@ -1,19 +1,18 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Home, ListTodo, PlusCircle, HardDrive, MoreHorizontal, Library, Search, BookA, Settings, X } from 'lucide-vue-next'
+import { Layers, ListTodo, PlusCircle, MoreHorizontal, Library, Search, BookA, Settings, X } from 'lucide-vue-next'
 
 const route = useRoute()
 const router = useRouter()
 
 const tabs = [
-  { path: '/', label: '首页', icon: Home },
-  { path: '/jobs', label: '任务', icon: ListTodo },
+  { path: '/', label: '领域', icon: Layers },
+  { path: '/jobs', label: '全部内容', icon: ListTodo },
   { path: '/', label: '投递', icon: PlusCircle, highlight: true, action: 'submit' },
-  { path: '/workers', label: 'Worker', icon: HardDrive },
 ]
 
-// 次要页面收进“更多”抽屉，移动端也能到达集合/搜索/术语/设置。
+// 次要页面收进“更多”抽屉：集合/搜索/术语/设置（Worker 在设置内）。
 const moreItems = [
   { path: '/collections', label: '集合', icon: Library },
   { path: '/search', label: '搜索', icon: Search },

@@ -9,6 +9,21 @@ const router = createRouter({
       component: () => import('../views/HomeView.vue'),
     },
     {
+      path: '/domains/:domain',
+      name: 'domain-workspace',
+      component: () => import('../views/DomainWorkspaceView.vue'),
+    },
+    {
+      path: '/domains/:domain/terms/:term',
+      name: 'term-detail',
+      component: () => import('../views/TermDetailView.vue'),
+    },
+    {
+      path: '/domains/:domain/topics/:topic',
+      name: 'topic',
+      component: () => import('../views/TopicView.vue'),
+    },
+    {
       path: '/jobs',
       name: 'jobs',
       component: () => import('../views/JobListView.vue'),

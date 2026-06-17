@@ -7,7 +7,7 @@ import CookieUpload from '../components/auth/CookieUpload.vue'
 import StatusBadge from '../components/common/StatusBadge.vue'
 import ProfileEditor from '../components/settings/ProfileEditor.vue'
 import type { AuthStatus } from '../types'
-import { Shield, Globe, BookOpen, ChevronRight } from 'lucide-vue-next'
+import { Shield, Globe, BookOpen, ChevronRight, HardDrive } from 'lucide-vue-next'
 
 const api = useApi()
 const globalStore = useGlobalStore()
@@ -98,6 +98,21 @@ async function onProfileSaved() {
             </div>
           </button>
         </div>
+      </section>
+
+      <!-- 运维：Worker 监控归入设置(不占顶级导航) -->
+      <section class="bg-white border border-gray-200 rounded-xl p-4">
+        <h3 class="text-sm font-semibold text-gray-700 flex items-center gap-2 mb-3">
+          <HardDrive :size="16" />
+          运维
+        </h3>
+        <router-link
+          to="/workers"
+          class="w-full flex items-center justify-between py-2 px-2 -mx-2 rounded-lg hover:bg-gray-50 transition-colors"
+        >
+          <span class="text-sm font-medium">Worker 监控</span>
+          <ChevronRight :size="16" class="text-gray-300" />
+        </router-link>
       </section>
     </template>
 

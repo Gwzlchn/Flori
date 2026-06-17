@@ -227,13 +227,15 @@ async def upload_job(
 async def list_jobs(
     status: str | None = None,
     collection_id: str | None = None,
+    domain: str | None = None,
+    uncategorized: bool = False,
     limit: int = 20,
     offset: int = 0,
     db: Database = Depends(get_db),
 ):
     total, jobs = await asyncio.to_thread(
         db.list_jobs, status=status, collection_id=collection_id,
-        limit=limit, offset=offset,
+        limit=limit, offset=offset, domain=domain, uncategorized=uncategorized,
     )
     return JobListResponse(
         total=total,
@@ -294,6 +296,38 @@ async def get_job(
             for s in steps
         ],
     )
+
+
+@router.patch("/{job_id}")
+async def patch_job(
+    job_id: str,
+    body: dict,
+    db: Database = Depends(get_db),
+):
+    """归类：把 job 归入/移出集合(collection_id)。collection.domain 须等于 job.domain(不变式2)。
+    维护两侧 job_count。body: {"collection_id": "col_..." | null}。"""
+    _validate_job_id(job_id)
+    if "collection_id" not in body:
+        raise HTTPException(400, "only collection_id is patchable")
+    new_cid = body["collection_id"] or None
+    job = await asyncio.to_thread(db.get_job, job_id)
+    if not job:
+        raise HTTPException(404, "job not found")
+    old_cid = job.collection_id
+    if new_cid == old_cid:
+        return {"ok": True, "collection_id": new_cid}
+    if new_cid:
+        coll = await asyncio.to_thread(db.get_collection, new_cid)
+        if not coll:
+            raise HTTPException(400, "collection_id not found")
+        if coll.domain != job.domain:
+            raise HTTPException(400, f"领域不匹配：集合属于 {coll.domain}，内容属于 {job.domain}")
+    await asyncio.to_thread(db.update_job, job_id, collection_id=new_cid)
+    if old_cid:
+        await asyncio.to_thread(db.increment_collection_count, old_cid, -1)
+    if new_cid:
+        await asyncio.to_thread(db.increment_collection_count, new_cid, 1)
+    return {"ok": True, "collection_id": new_cid}
 
 
 @router.get("/{job_id}/steps/{step}/log")

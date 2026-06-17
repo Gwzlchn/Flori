@@ -1,21 +1,21 @@
 <script setup lang="ts">
 import { useRoute } from 'vue-router'
-import { Home, ListTodo, Library, Search, BookA, HardDrive, Settings } from 'lucide-vue-next'
+import { Layers, ListTodo, Search, Settings } from 'lucide-vue-next'
 
 const route = useRoute()
 
+// 领域中心 IA：领域为锚 + 跨域逃生口(全部内容/搜索) + 设置(含 Worker 运维)。
+// 集合/术语在领域工作台内归口，不占顶级导航。
 const navItems = [
-  { path: '/', label: '首页', icon: Home },
-  { path: '/jobs', label: '任务', icon: ListTodo },
-  { path: '/collections', label: '集合', icon: Library },
+  { path: '/', label: '领域', icon: Layers },
+  { path: '/jobs', label: '全部内容', icon: ListTodo },
   { path: '/search', label: '搜索', icon: Search },
-  { path: '/glossary', label: '术语', icon: BookA },
-  { path: '/workers', label: 'Worker', icon: HardDrive },
   { path: '/settings', label: '设置', icon: Settings },
 ]
 
 function isActive(path: string) {
-  if (path === '/') return route.path === '/'
+  // 领域(/) 在领域总览与领域工作台(/domains/*)下都高亮；集合详情也归领域。
+  if (path === '/') return route.path === '/' || route.path.startsWith('/domains') || route.path.startsWith('/collections')
   return route.path.startsWith(path)
 }
 </script>
