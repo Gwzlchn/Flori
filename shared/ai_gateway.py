@@ -230,9 +230,12 @@ class ClaudeCLIProvider:
             for d in sorted(extra_dirs):
                 cmd += ["--add-dir", d]
         else:
-            # 纯文本调用(评审/标点):限 1 轮逼单次生成。否则 claude -p 默认会多轮
-            # agentic"思考",一个打分跑成 >15min(实测 max-turns 1 = ~14-35s)。
-            cmd += ["--max-turns", "1"]
+            # 纯文本调用(评审/标点):禁用全部工具(--tools "")强制单次纯文本生成。
+            # 否则 claude -p 默认带工具,大 prompt(评审)下会尝试调工具→消耗第 1 轮→
+            # max-turns 1 截断报 "Reached max turns (1)"(线上 11_review 实测此因失败);
+            # 即便不报错也会多轮 agentic"思考",一个打分跑成 >15min。
+            # 工具禁掉后只能产出 1 个文本轮,max-turns 1 即安全(实测 ~14-35s)。
+            cmd += ["--tools", "", "--max-turns", "1"]
 
         env = {**os.environ, **self._env}
         timeout = min(600 + 25 * len(request.images or []), 1800)  # 图越多给越久
@@ -250,7 +253,12 @@ class ClaudeCLIProvider:
             )
         except asyncio.TimeoutError:
             proc.kill()
-            await proc.wait()
+            # 已 SIGKILL,有界回收即可:正常进程瞬间退出。若残留管道/僵尸卡住 wait()
+            # (孤儿孙进程持 fd 等),不能让 worker 无限挂起——best-effort 回收后照常抛超时。
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
             raise AIProviderError(f"CLI timeout after {timeout}s")
         duration = time.time() - start
 

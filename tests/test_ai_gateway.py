@@ -486,6 +486,10 @@ class TestClaudeCLIVision:
         assert "{prompt_file}" not in cap["cmd"]
         assert "Read" not in cap["cmd"]                 # 无图不放开 Read
         assert "--max-turns" in cap["cmd"]              # 纯文本限 1 轮,逼单次生成(防 agentic 拖慢)
+        # 纯文本必须 --tools "" 禁用全部工具:否则 claude -p 默认带工具,
+        # 大 prompt 下会试调工具消耗唯一一轮→"Reached max turns (1)" 硬失败(线上 11_review 实测)。
+        ti = cap["cmd"].index("--tools")
+        assert cap["cmd"][ti + 1] == ""
         assert b"hello" in cap["stdin"]
 
     @pytest.mark.asyncio

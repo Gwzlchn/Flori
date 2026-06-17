@@ -140,8 +140,11 @@ class TestBuildVsSystemMatrix:
     def test_ai_exponential_backoff_sequence(self):
         assert [get_retry_delay("ai", a) for a in (0, 1, 2)] == [30, 60, 120]
 
-    def test_ai_rate_limit_fixed_interval(self):
-        assert [get_retry_delay("ai_rate_limit", a) for a in (0, 1, 2)] == [30, 30, 30]
+    def test_ai_rate_limit_increasing_backoff(self):
+        # 限流窗口以分钟/小时计：递增长退避耐心等配额恢复，而非短间隔烧完转终态。
+        assert [get_retry_delay("ai_rate_limit", a) for a in (0, 1, 2, 3, 4)] == [
+            300, 600, 1200, 1800, 1800
+        ]
 
     def test_timeout_single_short_delay(self):
         assert get_retry_delay("timeout", 0) == 10
@@ -152,7 +155,7 @@ class TestBuildVsSystemMatrix:
     # 超过 max 后所有 SYSTEM 类都停止重试（返回 None）。
     def test_system_types_stop_at_max(self):
         assert get_retry_delay("ai", 3) is None
-        assert get_retry_delay("ai_rate_limit", 3) is None
+        assert get_retry_delay("ai_rate_limit", 5) is None
         assert get_retry_delay("timeout", 1) is None
         assert get_retry_delay("processing", 1) is None
 
