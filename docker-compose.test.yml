@@ -1,5 +1,9 @@
+# 测试栈独立项目名 mnemo → 容器 mnemo-test-run-*、镜像 mnemo-test（与其余 mnemo-* 一致）。
+name: mnemo
+
 services:
   test:
+    image: mnemo-test:latest
     build:
       context: .
       dockerfile: docker/base.Dockerfile
