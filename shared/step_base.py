@@ -164,7 +164,7 @@ class StepBase:
         重试——宁可重跑也不存废稿。"""
         import re
         s = (content or "").strip()
-        if os.environ.get("DRY_RUN"):   # 干跑产物是合成占位,不做净化/判废
+        if os.environ.get("DRY_RUN") == "1":   # 干跑产物是合成占位,不做净化/判废(与 gateway 同判定;"0"=关)
             return s
         # 1) 去开头元描述:仅当前缀命中 agentic 标记时,砍到首个 markdown 标题(正文应以标题起)。
         if any(m in s[:160] for m in cls._PREAMBLE_MARK):

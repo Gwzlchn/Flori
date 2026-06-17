@@ -432,6 +432,16 @@ class TestSanitizeSmartNote:
         with pytest.raises(ProcessingError):
             self._SB._sanitize_smart_note("# 标题\n\n太短了。")
 
+    def test_dry_run_zero_does_not_bypass(self, monkeypatch):
+        # DRY_RUN="0"(显式关闭但存在)不能旁路净化——只有 =="1" 才旁路。
+        monkeypatch.setenv("DRY_RUN", "0")
+        with pytest.raises(ProcessingError):
+            self._SB._sanitize_smart_note("# 标题\n\n太短了。")
+
+    def test_dry_run_one_bypasses(self, monkeypatch):
+        monkeypatch.setenv("DRY_RUN", "1")
+        assert self._SB._sanitize_smart_note("# 标题\n\n太短了。") == "# 标题\n\n太短了。"
+
 
 class TestScoreSalvage:
     """评审分数抽取健壮性:嵌套 scores 抬平 + JSON 非法时正则抢救 1-5 分,
