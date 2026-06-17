@@ -62,7 +62,7 @@ class TestManualCRUD:
         body = resp.json()
         assert body["term"] == "梯度下降"
         assert body["status"] == "accepted"
-        assert body["source_type"] == "manual"
+        assert body["occurrences"] == [] and body["is_topic"] is False
         assert body["definition"] == "一种优化算法"
 
     @pytest.mark.asyncio
@@ -134,16 +134,17 @@ class TestManualCRUD:
 class TestSuggestionFlow:
     @pytest.mark.asyncio
     async def test_suggestion_shows_in_suggested_list(self, client, db):
-        db.add_glossary_suggestion("ml", "Transformer", "job-1", "review")
-        db.add_glossary_suggestion("ml", "Transformer", "job-2", "review")
+        db.add_glossary_suggestion("ml", "Transformer", "job-1", "video")
+        db.add_glossary_suggestion("ml", "Transformer", "job-2", "paper")
         resp = await client.get("/api/glossary?domain=ml&status=suggested")
         assert resp.status_code == 200
         items = resp.json()
         assert len(items) == 1
         assert items[0]["term"] == "Transformer"
         assert items[0]["status"] == "suggested"
-        # sources 记录了来源 job，用于前端显示来源数。
-        assert set(items[0]["sources"]) == {"job-1", "job-2"}
+        # occurrences 记录类型化出现(job + content_type)，用于前端显示出现数/来源多样性。
+        assert {o["job_id"] for o in items[0]["occurrences"]} == {"job-1", "job-2"}
+        assert {o["content_type"] for o in items[0]["occurrences"]} == {"video", "paper"}
 
     @pytest.mark.asyncio
     async def test_accept_sets_status_and_writes_profile(

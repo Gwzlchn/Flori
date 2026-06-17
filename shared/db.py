@@ -127,14 +127,17 @@ CREATE TABLE IF NOT EXISTS app_credentials (
     updated_at TEXT
 );
 
+-- 概念图/知识层：occurrences=[{job_id,content_type,location}] 类型化出现索引(替代旧 sources)；
+-- is_topic=粗粒度浏览主题；definition_locked=钉住后不被自动综合覆盖。
 CREATE TABLE IF NOT EXISTS glossary (
     domain TEXT NOT NULL,
     term TEXT NOT NULL,
     definition TEXT DEFAULT '',
-    sources TEXT DEFAULT '[]',
+    occurrences TEXT DEFAULT '[]',
     related TEXT DEFAULT '[]',
     status TEXT DEFAULT 'accepted',
-    source_type TEXT DEFAULT 'manual',
+    is_topic INTEGER DEFAULT 0,
+    definition_locked INTEGER DEFAULT 0,
     created_at TEXT,
     updated_at TEXT,
     PRIMARY KEY (domain, term)
@@ -225,7 +228,11 @@ class Database:
             "sync_enabled": "sync_enabled INTEGER NOT NULL DEFAULT 1",
             "last_synced_at": "last_synced_at TEXT",
         },
-        "glossary": {"source_type": "source_type TEXT DEFAULT 'manual'"},
+        "glossary": {
+            "occurrences": "occurrences TEXT DEFAULT '[]'",
+            "is_topic": "is_topic INTEGER DEFAULT 0",
+            "definition_locked": "definition_locked INTEGER DEFAULT 0",
+        },
     }
 
     def _ensure_columns(self) -> None:
@@ -377,21 +384,21 @@ class Database:
                     "UPDATE collections SET job_count = MAX(0, job_count - 1) WHERE id=?",
                     (collection_id,),
                 )
-            # glossary.sources 是 JSON 数组,摘掉指向已删 job 的悬空 id(逐行解析,量小)。
+            # glossary.occurrences=[{job_id,...}]，摘掉指向已删 job 的出现(保留概念与定义,§1.10-7)。
             rows = self._conn.execute(
-                "SELECT domain, term, sources FROM glossary WHERE sources LIKE ?",
+                "SELECT domain, term, occurrences FROM glossary WHERE occurrences LIKE ?",
                 (f'%"{job_id}"%',),
             ).fetchall()
             for r in rows:
                 try:
-                    srcs = json.loads(r["sources"])
+                    occs = json.loads(r["occurrences"] or "[]")
                 except (json.JSONDecodeError, TypeError):
                     continue
-                if job_id in srcs:
-                    srcs = [s for s in srcs if s != job_id]
+                kept = [o for o in occs if o.get("job_id") != job_id]
+                if len(kept) != len(occs):
                     self._conn.execute(
-                        "UPDATE glossary SET sources=? WHERE domain=? AND term=?",
-                        (json.dumps(srcs), r["domain"], r["term"]),
+                        "UPDATE glossary SET occurrences=? WHERE domain=? AND term=?",
+                        (json.dumps(kept, ensure_ascii=False), r["domain"], r["term"]),
                     )
             self._conn.commit()
 
@@ -929,19 +936,19 @@ class Database:
         """领域工作台语义栏：该 domain 的术语(含候选 suggested，各带 status)，按来源数(佐证强度代理)降序。
         候选数另由 suggested_count 单独提示；前端可按 status 区分展示。"""
         rows = self._conn.execute(
-            "SELECT term, definition, sources, status FROM glossary WHERE domain=?",
+            "SELECT term, definition, occurrences, status, is_topic FROM glossary WHERE domain=?",
             (domain,),
         ).fetchall()
         out = []
         for r in rows:
             try:
-                src = json.loads(r["sources"] or "[]")
+                occs = json.loads(r["occurrences"] or "[]")
             except (ValueError, TypeError):
-                src = []
+                occs = []
             out.append({
                 "term": r["term"], "definition": r["definition"],
-                "source_count": len(src) if isinstance(src, list) else 0,
-                "status": r["status"],
+                "source_count": len(occs) if isinstance(occs, list) else 0,
+                "status": r["status"], "is_topic": bool(r["is_topic"]),
             })
         out.sort(key=lambda t: t["source_count"], reverse=True)
         return out[:limit]
@@ -991,32 +998,29 @@ class Database:
         definition: str = "",
         related: list[str] | None = None,
         status: str = "accepted",
-        source_type: str = "manual",
     ) -> None:
         """写入/覆盖一条术语（手动维护入口）：按 (domain, term) 幂等 upsert，
-        保留已有 sources，覆盖 definition/related/status/source_type。"""
+        保留已有 occurrences，覆盖 definition/related/status。"""
         now = _now_iso()
         related_json = json.dumps(related or [], ensure_ascii=False)
         with self._lock:
             row = self._conn.execute(
-                "SELECT sources, created_at FROM glossary WHERE domain=? AND term=?",
+                "SELECT created_at FROM glossary WHERE domain=? AND term=?",
                 (domain, term),
             ).fetchone()
             if row is None:
                 self._conn.execute(
                     """INSERT INTO glossary
-                       (domain, term, definition, sources, related, status,
-                        source_type, created_at, updated_at)
-                       VALUES (?,?,?,?,?,?,?,?,?)""",
-                    (domain, term, definition, "[]", related_json,
-                     status, source_type, now, now),
+                       (domain, term, definition, occurrences, related, status,
+                        created_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (domain, term, definition, "[]", related_json, status, now, now),
                 )
             else:
                 self._conn.execute(
                     """UPDATE glossary SET definition=?, related=?, status=?,
-                       source_type=?, updated_at=? WHERE domain=? AND term=?""",
-                    (definition, related_json, status, source_type, now,
-                     domain, term),
+                       updated_at=? WHERE domain=? AND term=?""",
+                    (definition, related_json, status, now, domain, term),
                 )
             self._conn.commit()
 
@@ -1024,34 +1028,37 @@ class Database:
         self,
         domain: str,
         term: str,
-        source_job: str,
-        source_type: str = "review",
+        job_id: str,
+        content_type: str = "",
+        location: str | None = None,
     ) -> None:
-        """评审采集到的候选术语：不存在则插 status='suggested' 并记 source_job；
-        已存在则仅把 source_job 并入 sources，绝不降级已 accepted 的条目。"""
+        """抽取/评审采集候选概念：不存在则插 status='suggested' 记一条 occurrence；
+        已存在则把该 job 的 occurrence 并入(按 job_id 去重)，绝不降级已 accepted 的条目。
+        occurrence = {job_id, content_type, location}（类型化出现索引，§1.5）。"""
         now = _now_iso()
+        occ = {"job_id": job_id, "content_type": content_type, "location": location}
         with self._lock:
             row = self._conn.execute(
-                "SELECT sources FROM glossary WHERE domain=? AND term=?",
+                "SELECT occurrences FROM glossary WHERE domain=? AND term=?",
                 (domain, term),
             ).fetchone()
             if row is None:
                 self._conn.execute(
                     """INSERT INTO glossary
-                       (domain, term, definition, sources, related, status,
-                        source_type, created_at, updated_at)
-                       VALUES (?,?,?,?,?,?,?,?,?)""",
-                    (domain, term, "", json.dumps([source_job]), "[]",
-                     "suggested", source_type, now, now),
+                       (domain, term, definition, occurrences, related, status,
+                        created_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (domain, term, "", json.dumps([occ], ensure_ascii=False), "[]",
+                     "suggested", now, now),
                 )
             else:
-                sources = json.loads(row["sources"])
-                if source_job not in sources:
-                    sources.append(source_job)
+                occs = json.loads(row["occurrences"] or "[]")
+                if not any(o.get("job_id") == job_id for o in occs):
+                    occs.append(occ)
                     self._conn.execute(
-                        "UPDATE glossary SET sources=?, updated_at=? "
+                        "UPDATE glossary SET occurrences=?, updated_at=? "
                         "WHERE domain=? AND term=?",
-                        (json.dumps(sources), now, domain, term),
+                        (json.dumps(occs, ensure_ascii=False), now, domain, term),
                     )
             self._conn.commit()
 
@@ -1198,10 +1205,11 @@ class Database:
             "domain": row["domain"],
             "term": row["term"],
             "definition": row["definition"],
-            "sources": json.loads(row["sources"]),
+            "occurrences": json.loads(row["occurrences"] or "[]"),
             "related": json.loads(row["related"]),
             "status": row["status"],
-            "source_type": row["source_type"],
+            "is_topic": bool(row["is_topic"]),
+            "definition_locked": bool(row["definition_locked"]),
             "created_at": _parse_dt(row["created_at"]),
             "updated_at": _parse_dt(row["updated_at"]),
         }

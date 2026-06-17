@@ -3,11 +3,12 @@ import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useDomainStore } from '../stores/domains'
 import EmptyState from '../components/common/EmptyState.vue'
+import type { TermOccurrence } from '../types'
 import { ArrowLeft, ChevronRight, Network, Link2, FileBox } from 'lucide-vue-next'
 
 // 术语详情 /domains/:domain/terms/:term —— 概念节点的知识页：
-// 头(概念名+domain+状态) / 定义(可空占位) / 关联概念 related(chips) / 出现处 sources(job_id 列表)。
-// 后端形状: {domain, term, definition, sources:[job_id...], related:[term...], status}
+// 头(概念名+domain+状态) / 定义(可空占位) / 关联概念 related(chips) / 出现处 occurrences(类型化)。
+// 后端形状: {domain, term, definition, occurrences:[{job_id,content_type,location}], related:[term...], status}
 const route = useRoute()
 const router = useRouter()
 const store = useDomainStore()
@@ -31,7 +32,7 @@ const statusLabel = computed(() => {
 })
 
 const related = computed<string[]>(() => (Array.isArray(data.value?.related) ? data.value.related : []))
-const sources = computed<string[]>(() => (Array.isArray(data.value?.sources) ? data.value.sources : []))
+const occurrences = computed<TermOccurrence[]>(() => (Array.isArray(data.value?.occurrences) ? data.value.occurrences : []))
 
 async function load() {
   loading.value = true
@@ -120,7 +121,7 @@ watch(() => [route.params.domain, route.params.term], load)
           <span>
             domain：<button @click="goBack" class="text-blue-600 hover:underline">{{ data.domain }}</button>
           </span>
-          <span>{{ sources.length }} 处出现</span>
+          <span>{{ occurrences.length }} 处出现</span>
           <span>{{ related.length }} 个关联</span>
         </div>
       </div>
@@ -155,22 +156,24 @@ watch(() => [route.params.domain, route.params.term], load)
         <p v-else class="text-sm text-gray-400">暂无关联概念</p>
       </section>
 
-      <!-- 出现处 sources（job_id 列表，每个链接到 /jobs/:job_id） -->
+      <!-- 出现处 occurrences（类型化：内容 + 类型 + 位置，链接到 /jobs/:job_id） -->
       <section class="bg-white border border-gray-200 rounded-xl p-4 space-y-3">
         <h2 class="text-sm font-semibold text-gray-700 flex items-center gap-1.5">
           <FileBox :size="15" class="text-gray-400" />
           出现处
-          <span class="text-xs text-gray-400 font-normal">（{{ sources.length }} 处）</span>
+          <span class="text-xs text-gray-400 font-normal">（{{ occurrences.length }} 处）</span>
         </h2>
-        <div v-if="sources.length > 0" class="space-y-2">
+        <div v-if="occurrences.length > 0" class="space-y-2">
           <button
-            v-for="jobId in sources"
-            :key="jobId"
-            @click="goJob(jobId)"
+            v-for="o in occurrences"
+            :key="o.job_id + (o.location || '')"
+            @click="goJob(o.job_id)"
             class="w-full flex items-center gap-2 text-left px-3 py-2.5 border border-gray-200 rounded-lg hover:border-blue-300 hover:bg-blue-50/40 transition-colors"
           >
             <FileBox :size="15" class="text-gray-400 flex-shrink-0" />
-            <span class="text-sm text-gray-700 font-mono break-all min-w-0 flex-1">{{ jobId }}</span>
+            <span class="text-sm text-gray-700 font-mono break-all min-w-0 flex-1">{{ o.job_id }}</span>
+            <span v-if="o.content_type" class="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 flex-shrink-0">{{ o.content_type }}</span>
+            <span v-if="o.location" class="text-xs text-gray-400 flex-shrink-0">{{ o.location }}</span>
             <ChevronRight :size="15" class="text-gray-300 flex-shrink-0" />
           </button>
         </div>

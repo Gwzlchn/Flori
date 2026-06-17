@@ -30,10 +30,11 @@ def _to_response(row: dict) -> GlossaryTermResponse:
         domain=row["domain"],
         term=row["term"],
         definition=row.get("definition") or "",
-        sources=row.get("sources") or [],
+        occurrences=row.get("occurrences") or [],
         related=row.get("related") or [],
         status=row.get("status") or "accepted",
-        source_type=row.get("source_type") or "manual",
+        is_topic=bool(row.get("is_topic")),
+        definition_locked=bool(row.get("definition_locked")),
         created_at=created.isoformat() if created is not None else "",
     )
 
@@ -64,7 +65,7 @@ async def create_term(
     definition = req.definition or ""
     await asyncio.to_thread(
         db.upsert_glossary_term, domain, term, definition,
-        req.related, "accepted", "manual",
+        req.related, "accepted",
     )
     await asyncio.to_thread(sync_term_to_profile, config, domain, term, definition)
     row = await asyncio.to_thread(db.get_glossary_term, domain, term)
@@ -88,7 +89,7 @@ async def update_term(
     req: GlossaryTermRequest,
     db: Database = Depends(get_db),
 ):
-    """改 definition / related（不动 status / sources）。"""
+    """改 definition / related（不动 status / occurrences）。"""
     _validate_seg(domain, "domain")
     row = await asyncio.to_thread(db.get_glossary_term, domain, term)
     if row is None:
@@ -97,7 +98,7 @@ async def update_term(
     related = req.related if req.related is not None else row["related"]
     await asyncio.to_thread(
         db.upsert_glossary_term, domain, term, definition,
-        related, row["status"], row["source_type"],
+        related, row["status"],
     )
     updated = await asyncio.to_thread(db.get_glossary_term, domain, term)
     return _to_response(updated)

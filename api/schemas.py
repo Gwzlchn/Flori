@@ -158,10 +158,11 @@ class GlossaryTermResponse(BaseModel):
     domain: str
     term: str
     definition: str = ""
-    sources: list[str] = Field(default_factory=list)
+    occurrences: list[dict] = Field(default_factory=list)   # [{job_id, content_type, location}]
     related: list[str] = Field(default_factory=list)
     status: str = "accepted"
-    source_type: str = "manual"
+    is_topic: bool = False
+    definition_locked: bool = False
     created_at: str
 
 

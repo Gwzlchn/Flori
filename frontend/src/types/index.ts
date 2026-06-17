@@ -162,15 +162,23 @@ export interface Collection {
   subscription: CollectionSubscription | null
 }
 
+// 术语出现处（类型化）：概念出现在哪条内容、什么类型、什么位置。
+export interface TermOccurrence {
+  job_id: string
+  content_type: string
+  location: string | null
+}
+
 // 术语：与后端 GlossaryTermResponse 严格对齐。
 export interface GlossaryTerm {
   domain: string
   term: string
   definition: string
-  sources: string[]
+  occurrences: TermOccurrence[]
   related: string[]
   status: string
-  source_type: string
+  is_topic: boolean
+  definition_locked: boolean
   created_at: string
 }
 

@@ -543,39 +543,40 @@ class TestGlossary:
         assert got["definition"] == "一种优化算法"
         assert got["related"] == ["反向传播"]
         assert got["status"] == "accepted"
-        assert got["source_type"] == "manual"
+        assert got["occurrences"] == [] and got["is_topic"] is False
 
     def test_get_missing_returns_none(self, db):
         assert db.get_glossary_term("ml", "不存在") is None
 
-    def test_upsert_overwrites_definition_keeps_sources(self, db):
-        db.add_glossary_suggestion("ml", "Transformer", "j1", "review")
+    def test_upsert_overwrites_definition_keeps_occurrences(self, db):
+        db.add_glossary_suggestion("ml", "Transformer", "j1", "video")
         db.upsert_glossary_term("ml", "Transformer", definition="自注意力模型")
         got = db.get_glossary_term("ml", "Transformer")
         assert got["definition"] == "自注意力模型"
-        # upsert 保留已有 sources，不清空采集来源。
-        assert "j1" in got["sources"]
+        # upsert 保留已有 occurrences，不清空出现索引。
+        assert any(o["job_id"] == "j1" for o in got["occurrences"])
 
     def test_add_suggestion_creates_suggested(self, db):
-        db.add_glossary_suggestion("ml", "注意力机制", "j1", "review")
+        db.add_glossary_suggestion("ml", "注意力机制", "j1", "video")
         got = db.get_glossary_term("ml", "注意力机制")
         assert got["status"] == "suggested"
-        assert got["sources"] == ["j1"]
+        assert [o["job_id"] for o in got["occurrences"]] == ["j1"]
+        assert got["occurrences"][0]["content_type"] == "video"
 
-    def test_add_suggestion_merges_sources(self, db):
+    def test_add_suggestion_merges_occurrences(self, db):
         db.add_glossary_suggestion("ml", "注意力机制", "j1")
         db.add_glossary_suggestion("ml", "注意力机制", "j2")
-        db.add_glossary_suggestion("ml", "注意力机制", "j1")  # 重复来源不重复加
+        db.add_glossary_suggestion("ml", "注意力机制", "j1")  # 同 job 不重复加
         got = db.get_glossary_term("ml", "注意力机制")
-        assert got["sources"] == ["j1", "j2"]
+        assert [o["job_id"] for o in got["occurrences"]] == ["j1", "j2"]
 
     def test_add_suggestion_does_not_downgrade_accepted(self, db):
         db.upsert_glossary_term("ml", "梯度下降", definition="d")  # accepted
         db.add_glossary_suggestion("ml", "梯度下降", "j9")
         got = db.get_glossary_term("ml", "梯度下降")
-        # 仍 accepted，只并入来源。
+        # 仍 accepted，只并入出现。
         assert got["status"] == "accepted"
-        assert "j9" in got["sources"]
+        assert any(o["job_id"] == "j9" for o in got["occurrences"])
 
     def test_accept_term(self, db):
         db.add_glossary_suggestion("ml", "候选词", "j1")
@@ -844,14 +845,15 @@ class TestAuditFixes:
         assert db.search_notes("卷积神经网络")[0] == 0  # FTS 行已删
         assert db.get_collection("c2").job_count == 0   # 计数 -1
 
-    def test_delete_job_cascade_cleans_glossary_sources(self, db):
-        # N5:删 job 摘掉 glossary.sources 里的悬空 job_id
+    def test_delete_job_cascade_cleans_glossary_occurrences(self, db):
+        # N5:删 job 摘掉 glossary.occurrences 里的悬空 job_id(保留概念与其它出现)
         db.create_job(self._job("j4"))
         db.add_glossary_suggestion("ml", "Transformer", "j4")
         db.add_glossary_suggestion("ml", "Transformer", "j_other")
         db.delete_job_cascade("j4", None)
         term = db.get_glossary_term("ml", "Transformer")
-        assert "j4" not in term["sources"] and "j_other" in term["sources"]
+        ids = [o["job_id"] for o in term["occurrences"]]
+        assert "j4" not in ids and "j_other" in ids
 
     def test_count_jobs_by_status(self, db):
         # L17:一次 GROUP BY 取各状态计数

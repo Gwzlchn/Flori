@@ -189,7 +189,7 @@ async function submitEdit() {
                 <span class="text-sm font-medium text-gray-800 break-all">{{ t.term }}</span>
                 <span class="text-xs text-gray-400">{{ t.domain }}</span>
               </div>
-              <div class="text-xs text-gray-500 mt-0.5">来源 {{ t.sources.length }} 篇笔记</div>
+              <div class="text-xs text-gray-500 mt-0.5">出现于 {{ t.occurrences.length }} 篇内容</div>
             </div>
             <button
               @click="acceptTerm(t)"

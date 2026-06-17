@@ -392,12 +392,13 @@ class Scheduler:
             return
         job = await asyncio.to_thread(self.db.get_job, job_id)
         domain = (job.domain if job else "") or "general"
+        content_type = job.content_type if job else ""
         for c in concepts:
             term = c.get("term") if isinstance(c, dict) else c
             if not term or not isinstance(term, str):
                 continue
             await asyncio.to_thread(
-                self.db.add_glossary_suggestion, domain, term, job_id, "review",
+                self.db.add_glossary_suggestion, domain, term, job_id, content_type,
             )
         logger.info("glossary_collected", job_id=job_id, count=len(concepts))
 
