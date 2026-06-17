@@ -5,10 +5,10 @@ import { useDomainStore } from '../stores/domains'
 import JobCard from '../components/job/JobCard.vue'
 import EmptyState from '../components/common/EmptyState.vue'
 import { fmtDateTime } from '../utils/datetime'
-import type { JobSummary } from '../types'
+import type { JobSummary, TopicConcept } from '../types'
 import {
   ArrowLeft, Rss, Library, Star, RefreshCw, ChevronRight,
-  Layers, BrainCircuit, AlertTriangle,
+  Layers, BrainCircuit, AlertTriangle, Bookmark,
 } from 'lucide-vue-next'
 
 // 领域工作台：左「情景层(看了什么)」= 集合 + 主题 + 最近内容；右「语义层(学会了什么)」= 概念 + 待确认。
@@ -55,6 +55,7 @@ const store = useDomainStore()
 
 const domain = computed(() => String(route.params.domain))
 const data = ref<Workspace | null>(null)
+const topicConcepts = ref<TopicConcept[]>([])
 const loading = ref(false)
 const error = ref('')
 
@@ -64,9 +65,16 @@ async function load() {
   try {
     const ws = (await store.workspace(domain.value)) as Workspace
     data.value = ws
+    // 概念主题独立取数（契约 1），失败不影响工作台主体。
+    try {
+      topicConcepts.value = await store.topicConcepts(domain.value)
+    } catch {
+      topicConcepts.value = []
+    }
   } catch (e: any) {
     error.value = String(e?.message ?? '') || '加载失败'
     data.value = null
+    topicConcepts.value = []
   } finally {
     loading.value = false
   }
@@ -260,6 +268,32 @@ function goTerm(term: string) {
                 />
               </div>
               <span class="text-xs text-gray-400 flex-shrink-0 w-8 text-right">{{ c.source_count }} 源</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 概念主题（域内 is_topic 概念，点进术语详情） -->
+        <div class="bg-white border border-gray-200 rounded-xl p-4">
+          <div class="flex items-center gap-1.5 mb-3">
+            <Bookmark :size="14" class="text-indigo-400" />
+            <h3 class="text-sm font-semibold text-gray-700">概念主题</h3>
+          </div>
+          <div v-if="topicConcepts.length === 0">
+            <EmptyState message="暂无概念主题" />
+          </div>
+          <div v-else class="space-y-1">
+            <button
+              v-for="tc in topicConcepts"
+              :key="tc.term"
+              @click="goTerm(tc.term)"
+              class="w-full flex items-center gap-3 text-left p-2 rounded-lg hover:bg-gray-50 transition-colors"
+            >
+              <Bookmark :size="14" class="text-indigo-400 fill-indigo-100 flex-shrink-0" />
+              <div class="flex-1 min-w-0">
+                <div class="text-sm font-medium truncate">{{ tc.term }}</div>
+                <div v-if="tc.definition" class="text-xs text-gray-400 truncate">{{ tc.definition }}</div>
+              </div>
+              <span class="text-xs text-gray-400 flex-shrink-0 w-12 text-right">{{ tc.occurrence_count }} 处</span>
             </button>
           </div>
         </div>

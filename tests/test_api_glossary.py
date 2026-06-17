@@ -176,6 +176,37 @@ class TestSuggestionFlow:
         assert resp.status_code == 404
 
 
+class TestTopicToggle:
+    @pytest.mark.asyncio
+    async def test_set_topic_true_reflected(self, client):
+        await client.post("/api/glossary?domain=ml", json={"term": "梯度下降"})
+        resp = await client.post(
+            "/api/glossary/ml/梯度下降/topic", json={"is_topic": True}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["is_topic"] is True
+        # GET 反映 is_topic=true。
+        got = await client.get("/api/glossary/ml/梯度下降")
+        assert got.json()["is_topic"] is True
+
+    @pytest.mark.asyncio
+    async def test_set_topic_false_clears(self, client):
+        await client.post("/api/glossary?domain=ml", json={"term": "A"})
+        await client.post("/api/glossary/ml/A/topic", json={"is_topic": True})
+        resp = await client.post(
+            "/api/glossary/ml/A/topic", json={"is_topic": False}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["is_topic"] is False
+
+    @pytest.mark.asyncio
+    async def test_set_topic_missing_term_404(self, client):
+        resp = await client.post(
+            "/api/glossary/ml/nope/topic", json={"is_topic": True}
+        )
+        assert resp.status_code == 404
+
+
 class TestFilters:
     @pytest.mark.asyncio
     async def test_filter_by_domain(self, client, db):

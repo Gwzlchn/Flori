@@ -1109,6 +1109,44 @@ class Database:
             )
             self._conn.commit()
 
+    def set_glossary_topic(self, domain: str, term: str, is_topic: bool) -> bool:
+        """置该词 is_topic（主题概念标记）。命中返回 True，无该行返回 False（供路由判 404）。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE glossary SET is_topic=?, updated_at=? WHERE domain=? AND term=?",
+                (1 if is_topic else 0, _now_iso(), domain, term),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def list_topic_concepts(self, domain: str) -> list[dict]:
+        """该 domain 中标为主题概念(is_topic=1)的列表，按出现数(occurrence)降序；
+        每项含 term/definition/occurrence_count/related/is_topic。空则 []。"""
+        rows = self._conn.execute(
+            "SELECT term, definition, occurrences, related, is_topic "
+            "FROM glossary WHERE domain=? AND is_topic=1",
+            (domain,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            try:
+                occs = json.loads(r["occurrences"] or "[]")
+            except (ValueError, TypeError):
+                occs = []
+            try:
+                related = json.loads(r["related"] or "[]")
+            except (ValueError, TypeError):
+                related = []
+            out.append({
+                "term": r["term"],
+                "definition": r["definition"] or "",
+                "occurrence_count": len(occs) if isinstance(occs, list) else 0,
+                "related": related if isinstance(related, list) else [],
+                "is_topic": True,
+            })
+        out.sort(key=lambda t: t["occurrence_count"], reverse=True)
+        return out
+
     def delete_glossary_term(self, domain: str, term: str) -> None:
         """删一条术语。"""
         with self._lock:

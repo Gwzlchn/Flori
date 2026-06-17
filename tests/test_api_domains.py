@@ -91,6 +91,35 @@ class TestDomains:
         assert r2["total"] == 1
 
     @pytest.mark.asyncio
+    async def test_topic_concepts(self, client, app):
+        db = app.state.db
+        # 两个出现的主题概念。
+        db.add_glossary_suggestion("finance", "通胀", "j1", "video")
+        db.add_glossary_suggestion("finance", "通胀", "j2", "video")
+        db.set_glossary_topic("finance", "通胀", True)
+        # 一个出现的主题概念。
+        db.add_glossary_suggestion("finance", "汇率", "j1", "video")
+        db.set_glossary_topic("finance", "汇率", True)
+        # 非主题概念（不应返回）。
+        db.add_glossary_suggestion("finance", "成交量", "j1", "video")
+
+        data = (await client.get("/api/domains/finance/topic-concepts")).json()
+        terms = [c["term"] for c in data]
+        assert terms == ["通胀", "汇率"]  # 按 occurrence_count 降序
+        assert all(c["is_topic"] is True for c in data)
+        by = {c["term"]: c for c in data}
+        assert by["通胀"]["occurrence_count"] == 2
+        assert by["汇率"]["occurrence_count"] == 1
+        assert "成交量" not in terms
+        assert isinstance(by["通胀"]["related"], list)
+
+    @pytest.mark.asyncio
+    async def test_topic_concepts_empty(self, client, app):
+        _seed(app.state.db)  # 无 is_topic=1 的词。
+        data = (await client.get("/api/domains/finance/topic-concepts")).json()
+        assert data == []
+
+    @pytest.mark.asyncio
     async def test_jobs_domain_filter_internal(self, client, app):
         # /api/jobs 不再暴露 domain/uncategorized 查询(无前端消费方，已移除)；
         # domain 过滤仅供领域工作台内部用，经 /api/domains/:d 验证(test_workspace)。

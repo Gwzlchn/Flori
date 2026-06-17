@@ -46,6 +46,42 @@ const reviewDims = computed(() => {
     .filter(([k, v]) => typeof v === 'number' && !_DIM_SKIP.has(k))
     .map(([k, v]) => ({ label: DIM_LABELS[k] || k, score: v }))
 })
+// 评审里「讲清楚的概念 + 候选定义」，规整成 [{term, definition}] 供面板一键采纳进概念库。
+const keyTerms = computed(() => {
+  const raw = review.value?.key_terms
+  if (!Array.isArray(raw)) return [] as { term: string; definition: string }[]
+  return raw
+    .map((t: any) =>
+      typeof t === 'string'
+        ? { term: t, definition: '' }
+        : { term: (t?.term ?? '').toString(), definition: (t?.definition ?? '').toString() })
+    .filter((t) => t.term.trim())
+})
+
+// 采纳候选术语：优先走 accept（术语行已存在时直接置为 accepted）；
+// 若该行不存在(404)，回退 create —— create 即 accepted，并带上候选定义。
+async function acceptKeyTerm(term: string, definition: string) {
+  if (!domain.value || terms.value.includes(term)) return
+  try {
+    try {
+      await api.post(`/api/glossary/${encodeURIComponent(domain.value)}/${encodeURIComponent(term)}/accept`)
+    } catch (e: any) {
+      if (e?.status === 404) {
+        await api.post(`/api/glossary?domain=${encodeURIComponent(domain.value)}`, {
+          term,
+          definition: definition || null,
+        })
+      } else {
+        throw e
+      }
+    }
+    terms.value.push(term)
+    showToast(`已采纳「${term}」`, 'success')
+  } catch (e: any) {
+    showToast(e?.message || '采纳失败', 'error')
+  }
+}
+
 async function loadReview() {
   review.value = null
   if (isMechanical.value) return
@@ -264,6 +300,25 @@ const showChapters = ref(false)
         <ol class="list-decimal ml-5 mt-0.5 space-y-0.5">
           <li v-for="(t, i) in review.top3_improvements" :key="i">{{ t }}</li>
         </ol>
+      </div>
+      <div v-if="keyTerms.length" class="text-xs text-gray-600 mt-2">
+        <span class="text-gray-400">已讲清的概念(可采纳):</span>
+        <ul class="mt-1 space-y-1">
+          <li v-for="kt in keyTerms" :key="kt.term" class="flex items-start gap-2">
+            <span class="flex-1 min-w-0">
+              <span class="font-medium text-gray-800">{{ kt.term }}</span>
+              <span v-if="kt.definition" class="text-gray-500"> — {{ kt.definition }}</span>
+            </span>
+            <button
+              @click="acceptKeyTerm(kt.term, kt.definition)"
+              :disabled="terms.includes(kt.term)"
+              class="flex-shrink-0 px-2 py-0.5 text-[11px] rounded-md transition-colors"
+              :class="terms.includes(kt.term)
+                ? 'bg-green-50 text-green-600 cursor-default'
+                : 'border border-gray-200 text-gray-600 hover:bg-gray-50'"
+            >{{ terms.includes(kt.term) ? '✓ 已采纳' : '采纳' }}</button>
+          </li>
+        </ul>
       </div>
     </div>
 

@@ -5,12 +5,17 @@ from __future__ import annotations
 import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 from shared.config import AppConfig
 from shared.db import Database
 from api.deps import get_config, get_db, verify_token
 from api.routes.profiles import sync_term_to_profile
 from api.schemas import GlossaryTermRequest, GlossaryTermResponse
+
+
+class TopicToggleRequest(BaseModel):
+    is_topic: bool
 
 router = APIRouter(
     prefix="/api/glossary", tags=["glossary"],
@@ -120,6 +125,22 @@ async def accept_term(
     await asyncio.to_thread(
         sync_term_to_profile, config, domain, term, row["definition"] or "",
     )
+    updated = await asyncio.to_thread(db.get_glossary_term, domain, term)
+    return _to_response(updated)
+
+
+@router.post("/{domain}/{term}/topic", response_model=GlossaryTermResponse)
+async def set_topic(
+    domain: str,
+    term: str,
+    req: TopicToggleRequest,
+    db: Database = Depends(get_db),
+):
+    """置该词是否为主题概念(is_topic)。term 不存在 -> 404。返回更新后的术语。"""
+    _validate_seg(domain, "domain")
+    ok = await asyncio.to_thread(db.set_glossary_topic, domain, term, req.is_topic)
+    if not ok:
+        raise HTTPException(404, "term not found")
     updated = await asyncio.to_thread(db.get_glossary_term, domain, term)
     return _to_response(updated)
 

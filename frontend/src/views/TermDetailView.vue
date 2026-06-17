@@ -2,9 +2,10 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useDomainStore } from '../stores/domains'
+import { useApi } from '../composables/useApi'
 import EmptyState from '../components/common/EmptyState.vue'
-import type { TermOccurrence } from '../types'
-import { ArrowLeft, ChevronRight, Network, Link2, FileBox } from 'lucide-vue-next'
+import type { TermOccurrence, GlossaryTerm } from '../types'
+import { ArrowLeft, ChevronRight, Network, Link2, FileBox, Bookmark } from 'lucide-vue-next'
 
 // 术语详情 /domains/:domain/terms/:term —— 概念节点的知识页：
 // 头(概念名+domain+状态) / 定义(可空占位) / 关联概念 related(chips) / 出现处 occurrences(类型化)。
@@ -12,6 +13,7 @@ import { ArrowLeft, ChevronRight, Network, Link2, FileBox } from 'lucide-vue-nex
 const route = useRoute()
 const router = useRouter()
 const store = useDomainStore()
+const api = useApi()
 
 const domain = computed(() => String(route.params.domain))
 const term = computed(() => String(route.params.term))
@@ -33,6 +35,26 @@ const statusLabel = computed(() => {
 
 const related = computed<string[]>(() => (Array.isArray(data.value?.related) ? data.value.related : []))
 const occurrences = computed<TermOccurrence[]>(() => (Array.isArray(data.value?.occurrences) ? data.value.occurrences : []))
+
+const isTopic = computed<boolean>(() => data.value?.is_topic === true)
+const toggling = ref(false)
+
+// 标为主题 / 取消主题：POST /api/glossary/{domain}/{term}/topic，成功后用返回的 GlossaryTermResponse 刷新本页。
+async function toggleTopic() {
+  if (!data.value || toggling.value) return
+  toggling.value = true
+  try {
+    const updated = await api.post<GlossaryTerm>(
+      `/api/glossary/${encodeURIComponent(domain.value)}/${encodeURIComponent(term.value)}/topic`,
+      { is_topic: !isTopic.value },
+    )
+    data.value = updated
+  } catch {
+    // 失败保持原状态，按钮可重试。
+  } finally {
+    toggling.value = false
+  }
+}
 
 async function load() {
   loading.value = true
@@ -107,15 +129,33 @@ watch(() => [route.params.domain, route.params.term], load)
     </div>
 
     <template v-else-if="data">
-      <!-- 概念名 + domain + 状态 -->
+      <!-- 概念名 + domain + 状态 + 主题徽章/切换 -->
       <div class="bg-white border border-gray-200 rounded-xl p-5">
         <div class="flex items-start gap-3 flex-wrap">
           <h1 class="text-2xl font-bold text-gray-800 break-all min-w-0">{{ data.term }}</h1>
+          <span
+            v-if="isTopic"
+            class="mt-1.5 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700"
+          >
+            <Bookmark :size="12" class="fill-indigo-500 text-indigo-500" />主题
+          </span>
           <span
             v-if="data.status"
             class="mt-1.5 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
             :class="data.status === 'suggested' ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'"
           >{{ statusLabel }}</span>
+          <button
+            @click="toggleTopic"
+            :disabled="toggling"
+            class="mt-1 ml-auto inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors disabled:opacity-50"
+            :class="isTopic
+              ? 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+              : 'bg-gray-100 text-gray-600 hover:bg-gray-200'"
+            :title="isTopic ? '取消主题' : '标为主题'"
+          >
+            <Bookmark :size="13" :class="isTopic ? 'fill-indigo-500 text-indigo-500' : ''" />
+            {{ isTopic ? '取消主题' : '标为主题' }}
+          </button>
         </div>
         <div class="mt-2 flex items-center gap-3 text-xs text-gray-500 flex-wrap">
           <span>

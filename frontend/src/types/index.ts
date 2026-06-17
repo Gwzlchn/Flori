@@ -169,6 +169,15 @@ export interface TermOccurrence {
   location: string | null
 }
 
+// 概念主题：域内被标为主题(is_topic=1)的概念。与后端 GET /api/domains/{domain}/topic-concepts 对齐。
+export interface TopicConcept {
+  term: string
+  definition: string
+  occurrence_count: number
+  related: string[]
+  is_topic: boolean
+}
+
 // 术语：与后端 GlossaryTermResponse 严格对齐。
 export interface GlossaryTerm {
   domain: string

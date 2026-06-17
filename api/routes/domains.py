@@ -70,6 +70,16 @@ async def domain_workspace(
     }
 
 
+@router.get("/{domain}/topic-concepts")
+async def topic_concepts(
+    domain: str,
+    db: Database = Depends(get_db),
+):
+    """域内被标为主题的概念列表（is_topic=1），按出现数降序；空则 []。"""
+    _validate(domain)
+    return await asyncio.to_thread(db.list_topic_concepts, domain)
+
+
 @router.get("/{domain}/terms/{term}")
 async def term_detail(
     domain: str, term: str,
