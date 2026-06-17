@@ -1,11 +1,30 @@
 <script setup lang="ts">
 import { computed, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import MarkdownIt from 'markdown-it'
 
-const props = defineProps<{ content: string; jobId: string }>()
+// terms/domain 用于 P4「笔记内联可点」：正文里命中的已接受术语包成链接 → 该领域术语详情。
+// 不传则不做术语链接(其它调用方无需改动)。
+const props = defineProps<{ content: string; jobId: string; terms?: string[]; domain?: string }>()
 const emit = defineEmits<{ headings: [{ id: string; text: string; level: number }[]] }>()
 
+const router = useRouter()
 const md = new MarkdownIt({ html: false, linkify: true, typographer: true })
+
+// 术语链接状态(在 rendered 计算里按当前 props 更新；ruler 闭包读取)。
+const termLink: { set: Set<string>; re: RegExp | null; linked: Set<string> } = {
+  set: new Set(), re: null, linked: new Set(),
+}
+function escAttr(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+function buildTermRegex(terms: string[]): RegExp | null {
+  const valid = [...new Set(terms.filter(t => t && t.length >= 2))].sort((a, b) => b.length - a.length)
+  termLink.set = new Set(valid)
+  if (!valid.length) return null
+  const esc = valid.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  return new RegExp('(' + esc.join('|') + ')', 'g')
+}
 
 const defaultImageRule = md.renderer.rules.image!
 md.renderer.rules.image = (tokens: any, idx: any, options: any, env: any, self: any) => {
@@ -54,8 +73,43 @@ md.core.ruler.after('inline', 'timestamp_marks', (state: any) => {
   }
 })
 
+// P4：正文命中「已接受术语」→ 包成可点链接(仅 text 节点、不在链接/代码内、每词仅首次出现)。
+md.core.ruler.after('timestamp_marks', 'term_links', (state: any) => {
+  if (!termLink.re) return
+  for (const blockToken of state.tokens) {
+    if (blockToken.type !== 'inline' || !blockToken.children) continue
+    let linkDepth = 0
+    const newChildren: any[] = []
+    for (const child of blockToken.children) {
+      if (child.type === 'link_open') { linkDepth++; newChildren.push(child); continue }
+      if (child.type === 'link_close') { linkDepth = Math.max(0, linkDepth - 1); newChildren.push(child); continue }
+      if (child.type !== 'text' || linkDepth > 0) { newChildren.push(child); continue }
+      termLink.re.lastIndex = 0
+      const parts = child.content.split(termLink.re)
+      if (parts.length === 1) { newChildren.push(child); continue }
+      for (const part of parts) {
+        if (!part) continue
+        if (termLink.set.has(part) && !termLink.linked.has(part)) {
+          termLink.linked.add(part)
+          const a = new state.Token('html_inline', '', 0)
+          a.content = `<a class="term-link" data-term="${escAttr(part)}">${escAttr(part)}</a>`
+          newChildren.push(a)
+        } else {
+          const t = new state.Token('text', '', 0)
+          t.content = part
+          newChildren.push(t)
+        }
+      }
+    }
+    blockToken.children = newChildren
+  }
+})
+
 const rendered = computed(() => {
   let headingIdx = 0
+  // 每次渲染前按当前 props 重建术语正则 + 清空"已链接"集合(每词仅首次出现)。
+  termLink.re = buildTermRegex(props.terms || [])
+  termLink.linked = new Set()
   let html = md.render(props.content, { jobId: props.jobId })
 
   html = html.replace(/<h([2-3])>/g, (_match: string, level: string) => {
@@ -83,15 +137,28 @@ watch(rendered, (html) => {
   }
   emit('headings', headings)
 }, { immediate: true })
+
+// 术语链接走 SPA 跳转(v-html 内的 <a> 不被 vue-router 接管，用事件委托)。
+function onClick(e: MouseEvent) {
+  const a = (e.target as HTMLElement)?.closest?.('.term-link') as HTMLElement | null
+  if (!a) return
+  e.preventDefault()
+  const term = a.getAttribute('data-term')
+  if (term && props.domain) {
+    router.push(`/domains/${encodeURIComponent(props.domain)}/terms/${encodeURIComponent(term)}`)
+  }
+}
 </script>
 
 <template>
-  <div class="prose prose-sm max-w-none prose-headings:scroll-mt-20" v-html="rendered" />
+  <div class="prose prose-sm max-w-none prose-headings:scroll-mt-20" v-html="rendered" @click="onClick" />
 </template>
 
 <style>
 .prose img { max-width: 100%; border-radius: 0.5rem; }
 .prose .timestamp-mark { text-decoration: none; }
+.prose .term-link { color: #2563eb; cursor: pointer; text-decoration: none; border-bottom: 1px dashed #93c5fd; }
+.prose .term-link:hover { background: #eff6ff; border-bottom-style: solid; }
 .prose details.ocr-fold { margin: 0.2rem 0 0.7rem; }
 .prose details.ocr-fold > summary { cursor: pointer; font-size: 0.72rem; color: #9ca3af; user-select: none; }
 .prose details.ocr-fold > summary::before { content: "🔎 "; }

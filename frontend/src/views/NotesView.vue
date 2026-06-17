@@ -18,6 +18,9 @@ const content = ref('')
 const headings = ref<{ id: string; text: string; level: number }[]>([])
 const loading = ref(true)
 const error = ref('')
+// P4 笔记内联：本 job 所属领域 + 该领域已接受术语，传给 MarkdownViewer 做正文术语链接。
+const domain = ref('')
+const terms = ref<string[]>([])
 const title = ref('')
 
 // 版本(按 provider/model/生成时间)+ 重跑
@@ -132,8 +135,16 @@ function pollForVersion(provider: string) {
 
 async function reload() {
   try {
-    const detail = await api.get<{ title: string }>(`/api/jobs/${jobId.value}`)
+    const detail = await api.get<{ title: string; domain?: string }>(`/api/jobs/${jobId.value}`)
     title.value = detail.title || jobId.value
+    domain.value = detail.domain || ''
+    if (domain.value) {
+      try {
+        const ts = await api.get<{ term: string }[]>(
+          `/api/glossary?domain=${encodeURIComponent(domain.value)}&status=accepted`)
+        terms.value = ts.map(t => t.term)
+      } catch { terms.value = [] }
+    }
   } catch { title.value = jobId.value }
   // 先拿版本列表(评审要按版本配对),再并行取内容 + 评审。
   await Promise.all([loadVersions(), loadProviders()])
@@ -275,7 +286,7 @@ const showChapters = ref(false)
 
     <div v-else class="flex gap-6">
       <div class="flex-1 min-w-0 bg-white border border-gray-200 rounded-xl p-4 md:p-6">
-        <MarkdownViewer :content="content" :job-id="jobId" @headings="onHeadings" />
+        <MarkdownViewer :content="content" :job-id="jobId" :terms="terms" :domain="domain" @headings="onHeadings" />
       </div>
       <aside class="hidden lg:block w-56 flex-shrink-0">
         <div class="sticky top-6">
