@@ -28,6 +28,8 @@ export const useCollectionStore = defineStore('collections', () => {
     domain: string
     description?: string
     tags?: string[]
+    source_type?: string   // 订阅集合：bilibili_up
+    source_id?: string     // 订阅集合：UP mid
   }): Promise<Collection> {
     const c = await api.post<Collection>('/api/collections', payload)
     await fetchAll()

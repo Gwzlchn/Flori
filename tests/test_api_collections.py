@@ -61,7 +61,7 @@ class TestCreateCollection:
     @pytest.mark.asyncio
     async def test_create_minimal(self, client):
         data = await _create(client)
-        assert data["id"].startswith("c_")
+        assert data["id"].startswith("col_")
         assert data["name"] == "DL"
         assert data["domain"] == "deep-learning"
         assert data["description"] == ""

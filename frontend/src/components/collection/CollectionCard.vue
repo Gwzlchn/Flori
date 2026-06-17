@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useRouter } from 'vue-router'
 import type { Collection } from '../../types'
-import { Library, Pencil, Trash2 } from 'lucide-vue-next'
+import { Library, Pencil, Trash2, Rss } from 'lucide-vue-next'
 
 const props = defineProps<{ collection: Collection }>()
 const emit = defineEmits<{ edit: [Collection]; remove: [Collection] }>()
@@ -15,13 +15,21 @@ function open() {
 <template>
   <div class="bg-white border border-gray-200 rounded-xl p-4 hover:shadow-sm transition-shadow">
     <div class="flex items-start gap-3">
-      <div class="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0 mt-0.5">
-        <Library :size="16" class="text-gray-500" />
+      <div
+        class="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5"
+        :class="collection.subscription ? 'bg-blue-50' : 'bg-gray-100'"
+      >
+        <Rss v-if="collection.subscription" :size="16" class="text-blue-500" />
+        <Library v-else :size="16" class="text-gray-500" />
       </div>
       <div class="flex-1 min-w-0 cursor-pointer" @click="open">
         <div class="flex items-center gap-2 mb-1">
           <h4 class="text-sm font-medium truncate">{{ collection.name }}</h4>
-          <span class="text-xs text-gray-400">{{ collection.job_count }} 篇</span>
+          <span
+            v-if="collection.subscription"
+            class="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 flex-shrink-0"
+          >订阅</span>
+          <span class="text-xs text-gray-400 ml-auto flex-shrink-0">{{ collection.job_count }} 篇</span>
         </div>
         <div class="flex items-center gap-2 text-xs text-gray-500 flex-wrap">
           <span v-if="collection.domain && collection.domain !== 'general'">{{ collection.domain }}</span>

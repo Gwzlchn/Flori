@@ -15,23 +15,23 @@ from shared.storage import create_storage
 
 
 async def _subscription_sync_loop(app: FastAPI) -> None:
-    """周期同步所有启用的订阅。失败只记日志,不影响 API。"""
+    """周期同步所有启用自动追更的订阅集合。失败只记日志,不影响 API。"""
     import asyncio
     import structlog
     log = structlog.get_logger(component="subscription-sync")
     hours = float(os.environ.get("SUBSCRIPTION_SYNC_HOURS", "6"))
     if hours <= 0:
         return
-    from api.routes.subscriptions import sync_subscription
+    from api.routes.collections import sync_collection
     await asyncio.sleep(120)  # 启动后等服务稳定再首扫
     while True:
         try:
-            subs = await asyncio.to_thread(app.state.db.list_subscriptions, True)
-            for sub in subs:
+            colls = await asyncio.to_thread(app.state.db.list_subscription_collections, True)
+            for coll in colls:
                 try:
-                    await sync_subscription(sub, app.state.db, app.state.redis, app.state.storage)
+                    await sync_collection(coll, app.state.db, app.state.redis, app.state.storage)
                 except Exception as e:
-                    log.warning("sync_failed", sub=sub.id, error=str(e)[:200])
+                    log.warning("sync_failed", coll=coll.id, error=str(e)[:200])
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -86,11 +86,10 @@ def create_app(
 
     from api.routes import (
         jobs, notes, workers, ws, auth, admin, profiles, runner, bili,
-        collections, search, glossary, subscriptions,
+        collections, search, glossary,
     )
     app.include_router(jobs.router)
     app.include_router(jobs.providers_router)
-    app.include_router(subscriptions.router)
     app.include_router(notes.router)
     app.include_router(workers.router)
     app.include_router(ws.router)

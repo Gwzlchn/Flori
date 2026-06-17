@@ -131,6 +131,14 @@ export interface ProfileDetail {
   do_not?: string[]
 }
 
+// 集合的订阅源（自动追更）。无订阅则为 null。同步/开关端点用集合自身 id。
+export interface CollectionSubscription {
+  source_type: string        // bilibili_up
+  source_id: string          // B站 mid
+  enabled: boolean           // 自动同步开关 = collection.sync_enabled
+  last_synced_at: string | null
+}
+
 // 集合：与后端 CollectionResponse 严格对齐。
 export interface Collection {
   id: string
@@ -140,6 +148,7 @@ export interface Collection {
   tags: string[]
   job_count: number
   created_at: string
+  subscription: CollectionSubscription | null
 }
 
 // 术语：与后端 GlossaryTermResponse 严格对齐。

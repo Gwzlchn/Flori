@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Home, ListTodo, PlusCircle, HardDrive, MoreHorizontal, Library, Search, BookA, Settings, Rss, X } from 'lucide-vue-next'
+import { Home, ListTodo, PlusCircle, HardDrive, MoreHorizontal, Library, Search, BookA, Settings, X } from 'lucide-vue-next'
 
 const route = useRoute()
 const router = useRouter()
@@ -16,7 +16,6 @@ const tabs = [
 // 次要页面收进“更多”抽屉，移动端也能到达集合/搜索/术语/设置。
 const moreItems = [
   { path: '/collections', label: '集合', icon: Library },
-  { path: '/subscriptions', label: '订阅', icon: Rss },
   { path: '/search', label: '搜索', icon: Search },
   { path: '/glossary', label: '术语', icon: BookA },
   { path: '/settings', label: '设置', icon: Settings },

@@ -113,12 +113,25 @@ class CollectionCreateRequest(BaseModel):
     domain: str
     description: str | None = None
     tags: list[str] = Field(default_factory=list)
+    # 订阅集合：给定 source_type/source_id 即创建订阅集合(自动从该来源追更)。
+    source_type: str | None = None      # 目前: bilibili_up
+    source_id: str | None = None        # B站 mid
+    sync_now: bool = True               # 建后立即首次同步
 
 
 class CollectionUpdateRequest(BaseModel):
     name: str | None = None
     description: str | None = None
     tags: list[str] | None = None
+    sync_enabled: bool | None = None    # 订阅集合：自动追更开关
+
+
+class CollectionSubscriptionInfo(BaseModel):
+    """集合的订阅源信息(订阅是集合属性)。同步/开关端点用集合自身 id。"""
+    source_type: str          # bilibili_up
+    source_id: str            # B站 mid
+    enabled: bool             # 自动同步开关 = collection.sync_enabled
+    last_synced_at: str | None = None
 
 
 class CollectionResponse(BaseModel):
@@ -129,6 +142,7 @@ class CollectionResponse(BaseModel):
     tags: list[str] = Field(default_factory=list)
     job_count: int = 0
     created_at: str
+    subscription: CollectionSubscriptionInfo | None = None
 
 
 # ── 术语表 ──

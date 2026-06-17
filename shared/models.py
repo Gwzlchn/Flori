@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import re
 import secrets
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -90,28 +91,25 @@ class Worker:
 
 @dataclass
 class Collection:
+    """集合 = job 的归属分组。订阅是集合的属性(非独立实体)：
+    source_type/source_id 非空 = 订阅集合(自动从某来源追更)；为空 = 手动集合。"""
     id: str
     name: str
     domain: str
     description: str = ""
     tags: list[str] = field(default_factory=list)
     job_count: int = 0
+    # 订阅属性（手动集合为 None/默认）
+    source_type: str | None = None      # 目前: bilibili_up
+    source_id: str | None = None        # B站 mid
+    sync_enabled: bool = True           # 自动追更开关（仅订阅集合有意义）
+    last_synced_at: datetime | None = None
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
 
-
-@dataclass
-class Subscription:
-    """内容源订阅(如 B站 UP 主):周期/手动同步,新内容自动入库到绑定的集合。"""
-    id: str
-    source_type: str          # 目前: bilibili_up
-    source_id: str            # B站 mid
-    name: str
-    domain: str = "general"
-    collection_id: str | None = None
-    enabled: bool = True
-    last_synced_at: datetime | None = None
-    created_at: datetime = field(default_factory=_utcnow)
+    @property
+    def is_subscription(self) -> bool:
+        return bool(self.source_type and self.source_id)
 
 
 @dataclass
@@ -183,5 +181,19 @@ def generate_worker_id(worker_type: str) -> str:
 
 
 def generate_id(prefix: str) -> str:
-    """通用 ID: {prefix}_{YYYYMMDD}_{6 hex}(集合/订阅等共用)。"""
+    """通用 ID: {prefix}_{YYYYMMDD}_{6 hex}(订阅等共用)。"""
     return f"{prefix}_{date.today().strftime('%Y%m%d')}_{secrets.token_hex(3)}"
+
+
+def collection_id_for_subscription(source_type: str, source_id: str) -> str:
+    """订阅集合用有含义、稳定的 ID(去重友好,一眼看出来源)。
+    B站 UP: col_bili_up_{mid};其余: col_{source_type}_{source_id}(非字母数字归一为 _)。"""
+    if source_type == "bilibili_up":
+        return f"col_bili_up_{source_id}"
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", f"{source_type}_{source_id}").strip("_")
+    return f"col_{safe}"
+
+
+def generate_collection_id() -> str:
+    """手动集合 ID: col_{8 hex}(无日期,简洁;创建时间已单独存 created_at)。"""
+    return f"col_{secrets.token_hex(4)}"

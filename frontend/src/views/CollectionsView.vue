@@ -43,6 +43,8 @@ async function onSubmit(payload: {
   domain: string
   description: string
   tags: string[]
+  source_type?: string
+  source_id?: string
 }) {
   submitError.value = ''
   submitting.value = true

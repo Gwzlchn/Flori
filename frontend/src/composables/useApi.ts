@@ -84,6 +84,7 @@ export function useApi() {
     get: <T>(path: string) => request<T>('GET', path),
     post: <T>(path: string, body?: any) => request<T>('POST', path, body),
     put: <T>(path: string, body?: any) => request<T>('PUT', path, body),
+    patch: <T>(path: string, body?: any) => request<T>('PATCH', path, body),
     del: (path: string) => request<void>('DELETE', path),
     upload: <T>(path: string, formData: FormData) => request<T>('POST', path, formData),
     getText,

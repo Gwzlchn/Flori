@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useRoute } from 'vue-router'
-import { Home, ListTodo, Library, Search, BookA, HardDrive, Settings, Rss } from 'lucide-vue-next'
+import { Home, ListTodo, Library, Search, BookA, HardDrive, Settings } from 'lucide-vue-next'
 
 const route = useRoute()
 
@@ -8,7 +8,6 @@ const navItems = [
   { path: '/', label: '首页', icon: Home },
   { path: '/jobs', label: '任务', icon: ListTodo },
   { path: '/collections', label: '集合', icon: Library },
-  { path: '/subscriptions', label: '订阅', icon: Rss },
   { path: '/search', label: '搜索', icon: Search },
   { path: '/glossary', label: '术语', icon: BookA },
   { path: '/workers', label: 'Worker', icon: HardDrive },

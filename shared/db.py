@@ -8,7 +8,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import AIUsage, Collection, Job, JobStatus, Step, StepStatus, Subscription, Worker
+from .models import AIUsage, Collection, Job, JobStatus, Step, StepStatus, Worker
 from .status import (
     DEFAULT_ONLINE_WINDOW_SEC,
     DEFAULT_STALE_WINDOW_SEC,
@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS ai_usage (
 CREATE INDEX IF NOT EXISTS idx_ai_usage_job ON ai_usage(job_id);
 CREATE INDEX IF NOT EXISTS idx_ai_usage_provider ON ai_usage(provider);
 
+-- 集合：订阅是集合的属性(source_type/source_id 非空=订阅集合)，无独立 subscriptions 表。
 CREATE TABLE IF NOT EXISTS collections (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -100,20 +101,12 @@ CREATE TABLE IF NOT EXISTS collections (
     description TEXT DEFAULT '',
     tags TEXT DEFAULT '[]',
     job_count INTEGER DEFAULT 0,
+    source_type TEXT,
+    source_id TEXT,
+    sync_enabled INTEGER NOT NULL DEFAULT 1,
+    last_synced_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS subscriptions (
-    id TEXT PRIMARY KEY,
-    source_type TEXT NOT NULL,
-    source_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    domain TEXT NOT NULL DEFAULT 'general',
-    collection_id TEXT,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    last_synced_at TEXT,
-    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS worker_tokens (
@@ -225,6 +218,12 @@ class Database:
         "workers": {
             "reject_tags": "reject_tags TEXT NOT NULL DEFAULT '[]'",
             "admin_note": "admin_note TEXT",
+        },
+        "collections": {
+            "source_type": "source_type TEXT",
+            "source_id": "source_id TEXT",
+            "sync_enabled": "sync_enabled INTEGER NOT NULL DEFAULT 1",
+            "last_synced_at": "last_synced_at TEXT",
         },
         "glossary": {"source_type": "source_type TEXT DEFAULT 'manual'"},
     }
@@ -765,13 +764,30 @@ class Database:
 
     # ── Collection ──
 
+    def _row_to_collection(self, r: sqlite3.Row) -> Collection:
+        return Collection(
+            id=r["id"],
+            name=r["name"],
+            domain=r["domain"],
+            description=r["description"],
+            tags=json.loads(r["tags"]),
+            job_count=r["job_count"],
+            source_type=r["source_type"],
+            source_id=r["source_id"],
+            sync_enabled=bool(r["sync_enabled"]),
+            last_synced_at=_parse_dt(r["last_synced_at"]),
+            created_at=_parse_dt(r["created_at"]),
+            updated_at=_parse_dt(r["updated_at"]),
+        )
+
     def create_collection(self, collection: Collection) -> None:
         with self._lock:
             self._conn.execute(
                 """INSERT INTO collections
                    (id, name, domain, description, tags, job_count,
+                    source_type, source_id, sync_enabled, last_synced_at,
                     created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     collection.id,
                     collection.name,
@@ -779,6 +795,10 @@ class Database:
                     collection.description,
                     json.dumps(collection.tags, ensure_ascii=False),
                     collection.job_count,
+                    collection.source_type,
+                    collection.source_id,
+                    1 if collection.sync_enabled else 0,
+                    collection.last_synced_at.isoformat() if collection.last_synced_at else None,
                     collection.created_at.isoformat(),
                     collection.updated_at.isoformat(),
                 ),
@@ -789,18 +809,7 @@ class Database:
         row = self._conn.execute(
             "SELECT * FROM collections WHERE id=?", (collection_id,)
         ).fetchone()
-        if row is None:
-            return None
-        return Collection(
-            id=row["id"],
-            name=row["name"],
-            domain=row["domain"],
-            description=row["description"],
-            tags=json.loads(row["tags"]),
-            job_count=row["job_count"],
-            created_at=_parse_dt(row["created_at"]),
-            updated_at=_parse_dt(row["updated_at"]),
-        )
+        return self._row_to_collection(row) if row else None
 
     def list_collections(self, domain: str | None = None) -> list[Collection]:
         if domain:
@@ -809,19 +818,22 @@ class Database:
             ).fetchall()
         else:
             rows = self._conn.execute("SELECT * FROM collections").fetchall()
-        return [
-            Collection(
-                id=r["id"],
-                name=r["name"],
-                domain=r["domain"],
-                description=r["description"],
-                tags=json.loads(r["tags"]),
-                job_count=r["job_count"],
-                created_at=_parse_dt(r["created_at"]),
-                updated_at=_parse_dt(r["updated_at"]),
-            )
-            for r in rows
-        ]
+        return [self._row_to_collection(r) for r in rows]
+
+    def find_collection_by_source(self, source_type: str, source_id: str) -> Collection | None:
+        """按来源找订阅集合(建订阅前去重；一个来源全局唯一对应一个订阅集合)。"""
+        row = self._conn.execute(
+            "SELECT * FROM collections WHERE source_type=? AND source_id=?",
+            (source_type, source_id),
+        ).fetchone()
+        return self._row_to_collection(row) if row else None
+
+    def list_subscription_collections(self, enabled_only: bool = False) -> list[Collection]:
+        """订阅集合(source_type 非空)；enabled_only 时仅自动追更开启的。周期同步用。"""
+        q = "SELECT * FROM collections WHERE source_type IS NOT NULL"
+        if enabled_only:
+            q += " AND sync_enabled=1"
+        return [self._row_to_collection(r) for r in self._conn.execute(q).fetchall()]
 
     def update_collection(
         self,
@@ -829,8 +841,9 @@ class Database:
         name: str | None = None,
         description: str | None = None,
         tags: list[str] | None = None,
+        sync_enabled: bool | None = None,
     ) -> None:
-        """更新集合的可变字段（name/description/tags），None 表示不动。"""
+        """更新集合可变字段（name/description/tags/订阅自动追更开关），None 表示不动。"""
         fields: dict = {}
         if name is not None:
             fields["name"] = name
@@ -838,6 +851,8 @@ class Database:
             fields["description"] = description
         if tags is not None:
             fields["tags"] = json.dumps(tags, ensure_ascii=False)
+        if sync_enabled is not None:
+            fields["sync_enabled"] = 1 if sync_enabled else 0
         if not fields:
             return
         fields["updated_at"] = _now_iso()
@@ -866,72 +881,13 @@ class Database:
             )
             self._conn.commit()
 
-    # ── Subscription ──
-
-    def _row_to_subscription(self, r: sqlite3.Row) -> Subscription:
-        return Subscription(
-            id=r["id"], source_type=r["source_type"], source_id=r["source_id"],
-            name=r["name"], domain=r["domain"], collection_id=r["collection_id"],
-            enabled=bool(r["enabled"]), last_synced_at=_parse_dt(r["last_synced_at"]),
-            created_at=_parse_dt(r["created_at"]),
-        )
-
-    def create_subscription(self, sub: Subscription) -> None:
+    def mark_collection_synced(self, collection_id: str, dt: datetime) -> None:
+        """订阅集合同步后记录 last_synced_at。"""
         with self._lock:
             self._conn.execute(
-                """INSERT INTO subscriptions
-                   (id, source_type, source_id, name, domain, collection_id,
-                    enabled, last_synced_at, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
-                (sub.id, sub.source_type, sub.source_id, sub.name, sub.domain,
-                 sub.collection_id, 1 if sub.enabled else 0,
-                 sub.last_synced_at.isoformat() if sub.last_synced_at else None,
-                 sub.created_at.isoformat()),
+                "UPDATE collections SET last_synced_at=?, updated_at=? WHERE id=?",
+                (dt.isoformat(), _now_iso(), collection_id),
             )
-            self._conn.commit()
-
-    def get_subscription(self, sub_id: str) -> Subscription | None:
-        row = self._conn.execute(
-            "SELECT * FROM subscriptions WHERE id=?", (sub_id,)
-        ).fetchone()
-        return self._row_to_subscription(row) if row else None
-
-    def find_subscription(self, source_type: str, source_id: str) -> Subscription | None:
-        row = self._conn.execute(
-            "SELECT * FROM subscriptions WHERE source_type=? AND source_id=?",
-            (source_type, source_id),
-        ).fetchone()
-        return self._row_to_subscription(row) if row else None
-
-    def list_subscriptions(self, enabled_only: bool = False) -> list[Subscription]:
-        q = "SELECT * FROM subscriptions"
-        if enabled_only:
-            q += " WHERE enabled=1"
-        q += " ORDER BY created_at DESC"
-        return [self._row_to_subscription(r) for r in self._conn.execute(q).fetchall()]
-
-    def update_subscription(self, sub_id: str, **fields) -> None:
-        allowed = {"name", "domain", "collection_id", "enabled", "last_synced_at"}
-        invalid = set(fields) - allowed
-        if invalid:
-            raise ValueError(f"Invalid subscription columns: {invalid}")
-        if not fields:
-            return
-        if "enabled" in fields:
-            fields["enabled"] = 1 if fields["enabled"] else 0
-        if isinstance(fields.get("last_synced_at"), datetime):
-            fields["last_synced_at"] = fields["last_synced_at"].isoformat()
-        set_clause = ", ".join(f"{k}=?" for k in fields)
-        with self._lock:
-            self._conn.execute(
-                f"UPDATE subscriptions SET {set_clause} WHERE id=?",
-                list(fields.values()) + [sub_id],
-            )
-            self._conn.commit()
-
-    def delete_subscription(self, sub_id: str) -> None:
-        with self._lock:
-            self._conn.execute("DELETE FROM subscriptions WHERE id=?", (sub_id,))
             self._conn.commit()
 
     def ingested_bvids(self) -> set[str]:
