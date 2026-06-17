@@ -22,12 +22,14 @@ default:
 .ai-step:
   pool: ai
   timeout: 600
-  retry: 2
+  # 5 次：让限流(ai_rate_limit)长退避策略 [300,600,1200,1800,1800] 跑满，耐心等配额恢复；
+  # 普通 ai 错误仍按其策略上限(3)退避，互不影响(调度取 min(policy_max, retry))。
+  retry: 5
 
 .review:
   pool: ai
   timeout: 120
-  retry: 2
+  retry: 5
 
 video:
   variables:
@@ -127,7 +129,7 @@ video:
       run: steps.video.step_08_punctuate
       needs: ["01_download"]
       timeout: 1800
-      retry: 3
+      retry: 5
       tags: []
       rules:
         - exists: "input/*.srt"

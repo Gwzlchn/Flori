@@ -11,8 +11,12 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+import structlog
+
 from .errors import AIProviderError, AIRateLimitError, AllProvidersFailedError
 from .models import AIUsage, LLMRequest, LLMResponse
+
+_log = structlog.get_logger(component="ai_gateway")
 
 
 # ── 成本表（USD per 1M tokens）──
@@ -251,7 +255,15 @@ class ClaudeCLIProvider:
         duration = time.time() - start
 
         if proc.returncode != 0:
-            raise AIProviderError(f"CLI failed: {stderr.decode()[:500]}")
+            detail = (stderr.decode() + stdout.decode())[:500]
+            # 订阅用量/限流：归为 AIRateLimitError 走长退避等配额恢复(而非快速重试转终态)。
+            low = detail.lower()
+            if any(k in low for k in (
+                "rate limit", "rate_limit", "usage limit", "429",
+                "overloaded", "quota", "too many requests", "limit reached",
+            )):
+                raise AIRateLimitError(f"CLI rate-limited: {detail}")
+            raise AIProviderError(f"CLI failed: {detail}")
 
         return LLMResponse(
             content=stdout.decode().strip(),
@@ -286,6 +298,8 @@ class AIGateway:
 
         ai_config = self._get_step_ai_config(step_name)
         has_images = bool(request.images)
+        errors: list[str] = []   # 累计各 provider 真实报错，附进异常→落 error.json，便于排错
+        rate_limited = False     # 任一 provider 限流 → 整体按 ai_rate_limit 走长退避
 
         for tier in ["primary", "fallback"]:
             if tier not in ai_config:
@@ -297,7 +311,12 @@ class AIGateway:
                 response = await provider.complete(request)
                 self._call_index += 1
                 return response
-            except (AIProviderError, AIRateLimitError):
+            except (AIProviderError, AIRateLimitError) as e:
+                rate_limited = rate_limited or isinstance(e, AIRateLimitError)
+                _log.warning("provider_failed", step=step_name, tier=tier,
+                             provider=cfg.get("provider"), model=cfg.get("model"),
+                             rate_limited=isinstance(e, AIRateLimitError), error=str(e)[:400])
+                errors.append(f"{tier}/{cfg.get('provider')}: {str(e)[:200]}")
                 continue
 
         if has_images and "text_fallback" in ai_config:
@@ -309,11 +328,16 @@ class AIGateway:
                 response = await provider.complete(request)
                 self._call_index += 1
                 return response
-            except (AIProviderError, AIRateLimitError):
-                pass
+            except (AIProviderError, AIRateLimitError) as e:
+                rate_limited = rate_limited or isinstance(e, AIRateLimitError)
+                _log.warning("provider_failed", step=step_name, tier="text_fallback",
+                             provider=cfg.get("provider"), model=cfg.get("model"),
+                             rate_limited=isinstance(e, AIRateLimitError), error=str(e)[:400])
+                errors.append(f"text_fallback/{cfg.get('provider')}: {str(e)[:200]}")
 
         raise AllProvidersFailedError(
-            f"All providers failed for step {step_name}"
+            f"All providers failed for step {step_name} :: " + " || ".join(errors),
+            error_type="ai_rate_limit" if rate_limited else "ai",
         )
 
     async def compare(

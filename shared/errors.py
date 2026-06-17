@@ -56,9 +56,14 @@ class ResourceError(StepError):
 
 
 class AllProvidersFailedError(AIProviderError):
-    """所有 AI Provider 都失败（primary + fallback + text_fallback）。"""
+    """所有 AI Provider 都失败（primary + fallback + text_fallback）。
+    error_type 随底层失败而定：任一为限流则 ai_rate_limit（走长退避等配额恢复），否则 ai。"""
 
     error_type = "ai"
+
+    def __init__(self, message: str = "", error_type: str = "ai"):
+        super().__init__(message)
+        self.error_type = error_type
 
 
 # 重试策略：按 error_type 区分 BUILD（步骤自身确定性失败，重试无意义）
@@ -73,7 +78,7 @@ class AllProvidersFailedError(AIProviderError):
 #   SYSTEM / transient（退避重试）：
 #     processing     处理中途异常，可能瞬态                 max 1
 #     ai             Provider 网络/5xx，指数退避            max 3 [30,60,120]
-#     ai_rate_limit  限流，固定间隔等配额恢复               max 3 [30,30,30]
+#     ai_rate_limit  限流，递增长退避等配额恢复             max 5 [300,600,1200,1800,1800]
 #     timeout        调用超时，瞬态                         max 1 [10]
 #
 # 关于 unknown：步骤内未捕获异常由 step_base 写入 error_type="unknown"（区别于
@@ -85,7 +90,8 @@ RETRY_POLICY: dict[str, dict] = {
     "input_invalid": {"max": 0},
     "processing": {"max": 1, "delay": [0]},
     "ai": {"max": 3, "delay": [30, 60, 120]},
-    "ai_rate_limit": {"max": 3, "delay": [30, 30, 30]},
+    # 限流：用量窗口恢复以分钟/小时计，用递增长退避耐心等待，而非 90s 内烧完重试转终态。
+    "ai_rate_limit": {"max": 5, "delay": [300, 600, 1200, 1800, 1800]},
     "timeout": {"max": 1, "delay": [10]},
     "resource": {"max": 0},
 }

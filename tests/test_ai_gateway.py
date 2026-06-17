@@ -35,6 +35,18 @@ class TestCalcCost:
         assert cost == 0.0
 
 
+class TestRetryPolicy:
+    def test_rate_limit_long_backoff(self):
+        from shared.errors import RETRY_POLICY, get_retry_delay
+        # 限流：递增长退避，等订阅配额恢复（而非 90s 内烧完转终态）。
+        assert RETRY_POLICY["ai_rate_limit"]["max"] == 5
+        assert get_retry_delay("ai_rate_limit", 0) == 300
+        assert get_retry_delay("ai_rate_limit", 4) == 1800
+        assert get_retry_delay("ai_rate_limit", 5) is None
+        # 普通 ai 错误仍是短退避 3 次。
+        assert get_retry_delay("ai", 0) == 30 and get_retry_delay("ai", 3) is None
+
+
 class TestDryRunProvider:
     @pytest.mark.asyncio
     async def test_returns_response(self):
@@ -188,6 +200,37 @@ class TestAIGateway:
                     images=[Path("/fake/img.jpg")],
                 ),
             )
+
+    @pytest.mark.asyncio
+    async def test_all_fail_rate_limited_marks_rate_limit(self, gateway_config, monkeypatch):
+        """任一 provider 限流 → AllProvidersFailedError.error_type=ai_rate_limit(走长退避)。"""
+        monkeypatch.delenv("DRY_RUN", raising=False)
+        gw = AIGateway(*gateway_config)
+
+        async def rl(self, request):
+            raise AIRateLimitError("usage limit reached")
+
+        for p in ("mock_primary", "mock_fallback", "mock_text"):
+            gw._providers[p] = type("P", (), {"complete": rl})()
+        with pytest.raises(AllProvidersFailedError) as ei:
+            await gw.call("10_smart", LLMRequest(
+                messages=[{"role": "user", "content": "t"}], images=[Path("/f.jpg")]))
+        assert ei.value.error_type == "ai_rate_limit"
+
+    @pytest.mark.asyncio
+    async def test_all_fail_generic_keeps_ai_type(self, gateway_config, monkeypatch):
+        monkeypatch.delenv("DRY_RUN", raising=False)
+        gw = AIGateway(*gateway_config)
+
+        async def fail(self, request):
+            raise AIProviderError("5xx")
+
+        for p in ("mock_primary", "mock_fallback", "mock_text"):
+            gw._providers[p] = type("P", (), {"complete": fail})()
+        with pytest.raises(AllProvidersFailedError) as ei:
+            await gw.call("10_smart", LLMRequest(
+                messages=[{"role": "user", "content": "t"}], images=[Path("/f.jpg")]))
+        assert ei.value.error_type == "ai"
 
     @pytest.mark.asyncio
     async def test_no_ai_config_raises(self, gateway_config, monkeypatch):
