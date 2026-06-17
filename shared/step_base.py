@@ -15,7 +15,7 @@ from pathlib import Path
 import structlog
 
 from .ai_gateway import AIGateway, record_usage_to_file
-from .errors import StepError
+from .errors import ProcessingError, StepError
 from .models import AIUsage, LLMRequest
 
 
@@ -138,10 +138,66 @@ class StepBase:
             model = "claude-opus-4-8"
         return prov, model
 
+    # claude-cli 视觉笔记走 --allowedTools Read 多轮,常 agentic 化:开头插"已完成/我做了什么/
+    # I've reviewed…"过程汇报、结尾追加"要不要我再…"提议,个别甚至只回一段"已保存到 xx.md"的
+    # 元汇报而正文整段丢失。系统 prompt 已明令禁止仍被无视,故在落盘前做结构化净化。
+    _PREAMBLE_MARK = (
+        "已完成", "我做了什么", "我做的", "我的处理", "处理思路", "重组思路", "笔记结构一览",
+        "结构化学习笔记", "保存在", "保存到", "已生成并保存", "思路如下",
+        "I've ", "I have ", "I now ", "Here'", "Here is", "Let me ", "I'll ",
+    )
+    _OFFER_MARK = (
+        "要不要我", "需要我", "如需", "需要的话", "如果需要", "我可以再", "我还可以",
+        "是否需要", "可以帮你", "如有需要", "Let me know", "Would you like", "If you",
+    )
+    # 抢救失败的退化标志:正文自称把笔记存进了文件(实际 --allowedTools 只放 Read,根本没写,
+    # 即正文未被输出),或首个标题就是"我做了什么"之类元小节。
+    _META_HEAD = (
+        "我做了什么", "我做的", "我的处理", "处理说明", "处理思路", "重组思路",
+        "笔记结构一览", "改动说明", "What I did", "Summary",
+    )
+
+    @classmethod
+    def _sanitize_smart_note(cls, content: str) -> str:
+        """剥离 claude agentic 口水(开头过程汇报 / 结尾后续提议),并判废退化输出。
+        正文存在时只去壳;若剥完不像笔记(过短 / 首标题是元小节)则抛 ProcessingError 触发
+        重试——宁可重跑也不存废稿。"""
+        import re
+        s = (content or "").strip()
+        if os.environ.get("DRY_RUN"):   # 干跑产物是合成占位,不做净化/判废
+            return s
+        # 1) 去开头元描述:仅当前缀命中 agentic 标记时,砍到首个 markdown 标题(正文应以标题起)。
+        if any(m in s[:160] for m in cls._PREAMBLE_MARK):
+            m = re.search(r"(?m)^#{1,6} ", s)
+            if m:
+                s = s[m.start():].strip()
+        # 2) 去结尾后续提议:从尾部逐段砍掉对话式提问/提议(限短段,避免误伤正文)。
+        paras = s.split("\n\n")
+        while paras:
+            tail = paras[-1].strip().lstrip("-*># ").strip()
+            if tail and len(tail) < 200 and any(o in tail[:24] for o in cls._OFFER_MARK):
+                paras.pop()
+                while paras and paras[-1].strip() in ("---", "***", "___"):
+                    paras.pop()
+            else:
+                break
+        s = "\n\n".join(paras).strip()
+        # 3) 退化判废:正文整段丢失,只剩"我做了什么/已保存到 xx.md"式元汇报。
+        first_head = next((ln for ln in s.splitlines() if ln.lstrip().startswith("#")), "")
+        head_is_meta = any(mk in first_head for mk in cls._META_HEAD)
+        if len(s) < 500 or head_is_meta:
+            raise ProcessingError(
+                f"智能笔记疑似 agentic 退化(len={len(s)}, 首标题={first_head[:40]!r}):"
+                "claude 可能只回了过程汇报而非笔记正文,触发重试。"
+            )
+        return s
+
     def write_smart_note(self, content: str) -> str:
         """智能笔记按版本落盘:output/versions/notes_smart_{provider}_{model}_{时间}.md,
         开头加一行说明(生成时间 / 方式 / 模型)。不再写规范 notes_smart.md——前端取最新版本。
+        落盘前净化 claude agentic 口水(_sanitize_smart_note)。
         返回相对路径,供评审步在 review.json 里标明评的是哪一版。"""
+        content = self._sanitize_smart_note(content)
         prov, model = self.ai_provider_model()
         # 字段内只允许字母数字与 . - (把 _ 也归一为 -),保证文件名按 "_" 切分无歧义。
         safe = lambda s: __import__("re").sub(r"[^0-9A-Za-z.-]+", "-", s).strip("-") or "x"

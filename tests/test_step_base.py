@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
+from shared.errors import ProcessingError
 from shared.step_base import StepBase, file_hash
 
 
@@ -386,6 +387,50 @@ class TestExtractJson:
     def test_plain(self):
         from shared.step_base import StepBase
         assert json.loads(StepBase._extract_json('{"a": 1}')) == {"a": 1}
+
+
+class TestSanitizeSmartNote:
+    """落盘前净化 claude agentic 口水:剥开头汇报/结尾提议、判废退化输出(线上视觉笔记实测)。"""
+
+    from shared.step_base import StepBase as _SB
+    BODY = "\n\n".join(f"## 第{i}章\n这是正文内容,足够长以通过长度判废。" * 3 for i in range(1, 8))
+
+    def test_strips_chinese_preamble_to_first_header(self):
+        raw = ("已完成重组。结构化学习笔记已生成并保存到 `/tmp/mnemo-work/x/学习笔记.md`。\n\n"
+               "我做的关键处理：\n- 按章节重组\n\n# 庄股操盘复盘\n\n" + self.BODY)
+        out = self._SB._sanitize_smart_note(raw)
+        assert out.startswith("# 庄股操盘复盘")
+        assert "已完成" not in out and "/tmp/" not in out and "我做的关键处理" not in out
+
+    def test_strips_english_preamble(self):
+        raw = ("I've reviewed all 10 screenshots and will now restructure.\n\n"
+               "# Deep Dive\n\n" + self.BODY)
+        out = self._SB._sanitize_smart_note(raw)
+        assert out.startswith("# Deep Dive")
+        assert "I've reviewed" not in out
+
+    def test_strips_trailing_offer(self):
+        raw = "# 标题\n\n" + self.BODY + "\n\n---\n\n需要我把笔记导出为其他格式（如纯 Markdown）吗？"
+        out = self._SB._sanitize_smart_note(raw)
+        assert "需要我把笔记导出" not in out
+        assert out.rstrip().endswith("足够长以通过长度判废。") or "第7章" in out
+
+    def test_clean_note_unchanged(self):
+        raw = "# 深度学习笔记\n\n" + self.BODY
+        out = self._SB._sanitize_smart_note(raw)
+        assert out == raw.strip()
+
+    def test_degenerate_lost_note_raises(self):
+        # BV1Msh 实况:claude 只回"已保存到 xx.md + 我做了什么"元汇报,正文整段丢失。
+        raw = ("已完成。结构化学习笔记保存在 `/tmp/mnemo-work/x/notes_structured.md`。\n\n"
+               "## 我做了什么\n1. 并行审阅了全部 86 张截图\n2. 按章节重组\n\n"
+               "## 笔记结构一览\n- 本案速览表 + 关键时间线")
+        with pytest.raises(ProcessingError):
+            self._SB._sanitize_smart_note(raw)
+
+    def test_too_short_raises(self):
+        with pytest.raises(ProcessingError):
+            self._SB._sanitize_smart_note("# 标题\n\n太短了。")
 
 
 class TestScoreSalvage:
