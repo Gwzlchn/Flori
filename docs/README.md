@@ -4,7 +4,7 @@
 docs/
 ├── 00-vision.md                    # 愿景：为什么做，不做什么
 ├── 01-architecture.md              # 系统架构全景图
-├── 02-domain-model.md              # 领域模型：集合/视频/笔记/术语/学习路径
+├── 02-domain-model.md              # 领域模型与知识模型：三层架构(domain⊃集合⊃job) + 术语沉淀(情景→语义)
 ├── 03-contracts.md                 # 接口契约：API/Redis消息/文件Schema
 ├── 04-module-design/               # 各模块详设
 │   ├── scheduler.md                # 调度器（资源池+优先级+Worker自取）
