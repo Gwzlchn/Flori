@@ -2,8 +2,10 @@
 # 主机相关项（数据目录、Dozzle 绑定地址、远程 agent 等）放 .env，见 .env.example。
 # 默认仅起后端；单机全栈再带前端：`docker compose --profile allinone up -d`。
 # 拆分部署时前端单独在公网入口机运行（边缘反代由各自部署维护）。
+# 容器统一命名 mnemo-*（单实例部署；要并行多实例请另起具名服务，见 .local 覆盖里的 worker 范式）。
 services:
   redis:
+    container_name: mnemo-redis
     image: redis:7-alpine
     restart: unless-stopped
     command: redis-server --appendonly yes
@@ -11,6 +13,7 @@ services:
       - redis-data:/data
 
   api:
+    container_name: mnemo-api
     image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/mnemo:latest
     restart: unless-stopped
     command: python -m api.main
@@ -39,6 +42,7 @@ services:
       - redis
 
   scheduler:
+    container_name: mnemo-scheduler
     image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/mnemo:latest
     restart: unless-stopped
     command: python -m scheduler.main
@@ -61,6 +65,7 @@ services:
       - redis
 
   worker-cpu:
+    container_name: mnemo-worker-cpu
     image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/mnemo:latest
     restart: unless-stopped
     command: python -m worker.main --type cpu
@@ -89,6 +94,7 @@ services:
       - redis
 
   worker-ai:
+    container_name: mnemo-worker-ai
     image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/mnemo:latest
     restart: unless-stopped
     command: python -m worker.main --type ai
@@ -122,6 +128,7 @@ services:
   # 日志面板（可选）。默认仅绑本机；局域网访问设 DOZZLE_BIND_IP=<局域网IP>。
   # 接入远程 dozzle agent（host:port，如经 SSH 隧道）设 DOZZLE_REMOTE_AGENT。
   dozzle:
+    container_name: mnemo-dozzle
     image: amir20/dozzle
     restart: unless-stopped
     environment:
@@ -133,6 +140,7 @@ services:
 
   # 单机全栈时启用：`docker compose --profile allinone up -d`。
   frontend:
+    container_name: mnemo-frontend
     image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/mnemo-frontend:latest
     restart: unless-stopped
     profiles: ["allinone"]
@@ -149,6 +157,7 @@ services:
   # 启用:docker compose --profile distributed up -d,并在 .env 设 MINIO_URL=minio:9000 + 账号。
   # 数据落 MINIO_DATA_DIR(默认命名卷;放独立磁盘填绝对路径让对象存本机)。
   minio:
+    container_name: mnemo-minio
     image: minio/minio
     restart: unless-stopped
     profiles: ["distributed"]
@@ -163,6 +172,7 @@ services:
 
   # CD：每 120s 查 ghcr，只更新带 watchtower.enable 标签的容器，自动 pull+重建+清理旧镜像。
   watchtower:
+    container_name: mnemo-watchtower
     image: containrrr/watchtower
     restart: unless-stopped
     volumes:
