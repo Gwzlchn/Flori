@@ -10,17 +10,53 @@ from __future__ import annotations
 import asyncio
 import json
 
+import yaml
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from shared.config import AppConfig
 from shared.db import Database
-from api.deps import get_db, verify_token
+from api.deps import get_config, get_db, verify_token
+from api.schemas import DomainCreateRequest
 
 router = APIRouter(prefix="/api/domains", tags=["domains"], dependencies=[Depends(verify_token)])
+
+# 知识库展示元数据持久化在 prompts/profiles/{domain}.yaml(领域无独立表,profile 即其元数据)。
+_META_KEYS = ("display_name", "icon", "color", "description", "role")
 
 
 def _validate(domain: str) -> None:
     if not domain or ".." in domain or "/" in domain or "\x00" in domain:
         raise HTTPException(400, "invalid domain")
+
+
+def _profile_meta(config: AppConfig) -> dict[str, dict]:
+    """读所有 profiles/*.yaml 的展示元数据(icon/color/display_name/description/role),按 domain。"""
+    pdir = config.prompts_dir / "profiles"
+    out: dict[str, dict] = {}
+    if pdir.exists():
+        for f in sorted(pdir.glob("*.yaml")):
+            try:
+                data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+            except (OSError, yaml.YAMLError):
+                data = {}
+            out[f.stem] = {k: data[k] for k in _META_KEYS if data.get(k) is not None}
+    return out
+
+
+async def _overview_map(db: Database, config: AppConfig) -> dict[str, dict]:
+    """领域总览 {domain: stats+meta}:DB 派生(jobs∪collections∪glossary) ∪ 仅有 profile 的领域(零计数),
+    并各自合并 profile 展示元数据。这样新建的空知识库(只有 profile)也会出现。"""
+    rows = await asyncio.to_thread(db.list_domains)
+    by = {d["domain"]: d for d in rows}
+    meta = _profile_meta(config)
+    for dom in meta:
+        by.setdefault(dom, {
+            "domain": dom, "collection_count": 0, "job_count": 0,
+            "concept_count": 0, "subscription_count": 0, "last_active_at": None,
+        })
+    for dom, d in by.items():
+        d.update(meta.get(dom, {}))
+    return by
 
 
 def _job_brief(j) -> dict:
@@ -33,18 +69,51 @@ def _job_brief(j) -> dict:
 
 
 @router.get("")
-async def list_domains(db: Database = Depends(get_db)):
-    return {"domains": await asyncio.to_thread(db.list_domains)}
+async def list_domains(
+    db: Database = Depends(get_db),
+    config: AppConfig = Depends(get_config),
+):
+    by = await _overview_map(db, config)
+    return {"domains": [by[k] for k in sorted(by)]}
+
+
+@router.post("", status_code=201)
+async def create_domain(
+    req: DomainCreateRequest,
+    db: Database = Depends(get_db),
+    config: AppConfig = Depends(get_config),
+):
+    """新建知识库:把展示元数据写进 profiles/{domain}.yaml(领域随即出现在总览,即使暂无内容)。"""
+    domain = (req.domain or "").strip()
+    _validate(domain)
+    if domain == "general":
+        raise HTTPException(400, "general 是默认领域，无需新建")
+    pdir = config.prompts_dir / "profiles"
+    pdir.mkdir(parents=True, exist_ok=True)
+    path = pdir / f"{domain}.yaml"
+    if path.exists():
+        raise HTTPException(409, "domain already exists")
+    data: dict = {"domain": domain}
+    for k in _META_KEYS:
+        v = getattr(req, k, None)
+        if v is not None:
+            data[k] = v
+    path.write_text(
+        yaml.dump(data, allow_unicode=True, default_flow_style=False), encoding="utf-8"
+    )
+    by = await _overview_map(db, config)
+    return by[domain]
 
 
 @router.get("/{domain}")
 async def domain_workspace(
     domain: str,
     db: Database = Depends(get_db),
+    config: AppConfig = Depends(get_config),
 ):
     """领域工作台：情景层(集合+最近内容) + 语义层(术语+主题)。"""
     _validate(domain)
-    overview = {d["domain"]: d for d in await asyncio.to_thread(db.list_domains)}
+    overview = await _overview_map(db, config)
     if domain not in overview:
         raise HTTPException(404, "domain not found")
     collections = await asyncio.to_thread(db.list_collections, domain)
@@ -78,6 +147,17 @@ async def topic_concepts(
     """域内被标为主题的概念列表（is_topic=1），按出现数降序；空则 []。"""
     _validate(domain)
     return await asyncio.to_thread(db.list_topic_concepts, domain)
+
+
+@router.get("/{domain}/concept-timeline")
+async def concept_timeline(
+    domain: str,
+    granularity: str = Query("month", pattern="^(day|week|month)$"),
+    db: Database = Depends(get_db),
+):
+    """概念时间线：各概念 occurrences 经 job 创建时间分桶计数(day/week/month)。空领域返回空序列。"""
+    _validate(domain)
+    return await asyncio.to_thread(db.concept_timeline, domain, granularity)
 
 
 @router.get("/{domain}/terms/{term}")

@@ -535,11 +535,11 @@ GET /api/collections/c_xxx/jobs?limit=20&offset=0
 
 ### 1.9 领域（知识中心）
 
-Base: `/api/domains`。领域是派生视图，无 `domains` 表——所有 distinct `domain`（来自 jobs ∪ collections ∪ glossary）即领域集合。所有端点对 `{domain}` 做合法性校验（含 `..` / `/` / 空字节或为空返回 `400`）。
+Base: `/api/domains`。领域是派生视图，无 `domains` 表——领域集合 = distinct `domain`（来自 jobs ∪ collections ∪ glossary）**∪ 有 `prompts/profiles/{domain}.yaml` 的领域**（即「新建知识库」创建的、暂无内容的空领域也算）。展示元数据（`display_name` / `icon` / `color` / `description` / `role`）持久化在该 profile yaml。所有端点对 `{domain}` 做合法性校验（含 `..` / `/` / 空字节或为空返回 `400`）。
 
 #### GET /api/domains — 领域总览
 
-每个领域的集合数 / 内容数 / 概念数 / 订阅数 / 最近活跃，用于卡片网格。Response `200`：
+每个领域的集合数 / 内容数 / 概念数 / 订阅数 / 最近活跃 + 展示元数据，用于卡片网格。Response `200`：
 
 ```json
 {
@@ -550,13 +550,34 @@ Base: `/api/domains`。领域是派生视图，无 `domains` 表——所有 dis
       "job_count": 42,
       "concept_count": 120,
       "subscription_count": 2,
-      "last_active_at": "2026-05-16T20:00:00+08:00"
+      "last_active_at": "2026-05-16T20:00:00+08:00",
+      "display_name": "深度学习",
+      "icon": "brain",
+      "color": "#6366f1",
+      "description": "...",
+      "role": "资深深度学习研究员"
     }
   ]
 }
 ```
 
-`last_active_at` = 该域 job 的 `MAX(updated_at)`，无 job 时为 `null`。列表按 `domain` 升序。
+`last_active_at` = 该域 job 的 `MAX(updated_at)`，无 job 时为 `null`。列表按 `domain` 升序。`display_name` / `icon` / `color` / `description` / `role` 来自 profile，未设则该键不出现（前端可回退按 `domain` 名派生）。
+
+#### POST /api/domains — 新建知识库（领域）
+
+把展示元数据写进 `prompts/profiles/{domain}.yaml`，领域随即出现在总览（即使暂无内容，工作台也可正常打开为空）。
+
+```bash
+curl -X POST http://localhost:8000/api/domains \
+  -H "Content-Type: application/json" \
+  -d '{"domain": "crypto", "display_name": "加密货币", "icon": "coins", "color": "#f59e0b", "role": "链上研究员", "description": "去中心化金融"}'
+```
+
+请求体：`domain`（必填，键/slug，用于 URL 与过滤）、`display_name` / `icon` / `color` / `role` / `description`（均可选）。Response `201`：该领域的总览条目（结构同 `GET /api/domains` 的一项，计数为 0）。
+
+错误：`400` domain 非法或为 `general`（默认领域无需新建）、`409` 该领域已存在（profile 已存在）。
+
+> 元数据后续修改走 `PUT /api/profiles/{domain}`（见 1.12，已支持 `display_name`/`icon`/`color`/`description`）。
 
 #### GET /api/domains/{domain} — 领域工作台
 
@@ -646,6 +667,29 @@ Base: `/api/domains`。领域是派生视图，无 `domains` 表——所有 dis
 ```
 
 `total` 为本次返回（受 `limit` 截断后）的 `jobs` 条数，非全量计数。
+
+#### GET /api/domains/{domain}/concept-timeline — 概念时间线
+
+各概念的出现（occurrences）经其 `job_id` → `job.created_at` 映射后，按粒度分桶计数，供工作台「时间线」视图。`granularity`：`day`（`YYYY-MM-DD`）/ `week`（`YYYY-Www`，ISO 周）/ `month`（`YYYY-MM`，默认）；非法值返回 `422`。空领域返回空序列（不 404）。
+
+```
+GET /api/domains/deep-learning/concept-timeline?granularity=month
+```
+
+Response `200`：
+
+```json
+{
+  "granularity": "month",
+  "buckets": ["2026-04", "2026-05"],
+  "totals": {"2026-04": 5, "2026-05": 12},
+  "concepts": [
+    {"term": "Transformer", "buckets": {"2026-04": 2, "2026-05": 6}, "total": 8}
+  ]
+}
+```
+
+`buckets` = 出现过的桶（升序）；`totals` = 每桶的跨概念总计；`concepts` 按 `total` 降序，每项 `buckets` 为该概念各桶计数。
 
 ### 1.10 术语库 / 概念图
 
@@ -833,10 +877,14 @@ Response `200`（数组）：
   "domain_context": "...",
   "output_style": {"tone": "严谨"},
   "terminology": ["注意力机制", "梯度下降"],
-  "do_not": ["不要逐字翻译英文术语"]
+  "do_not": ["不要逐字翻译英文术语"],
+  "display_name": "深度学习",
+  "icon": "brain",
+  "color": "#6366f1",
+  "description": "..."
 }
 ```
-Response `200`：返回更新后的完整 Profile（同 `GET`）。
+`display_name` / `icon` / `color` / `description` 为知识库展示元数据（与 `POST /api/domains` 同一份 profile yaml；改这些即改卡片显示）。Response `200`：返回更新后的完整 Profile（同 `GET`）。
 
 #### POST /api/profiles/{domain}/terms
 

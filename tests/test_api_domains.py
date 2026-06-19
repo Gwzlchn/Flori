@@ -49,6 +49,54 @@ def _seed(db):
     db.add_glossary_suggestion("finance", "国债期货", "j1", "review")
 
 
+class TestDomainCreate:
+    @pytest.mark.asyncio
+    async def test_create_then_appears_with_meta(self, client):
+        r = await client.post("/api/domains", json={
+            "domain": "crypto", "display_name": "加密货币", "icon": "coins",
+            "color": "#f59e0b", "role": "链上研究员", "description": "去中心化金融",
+        })
+        assert r.status_code == 201
+        body = r.json()
+        assert body["domain"] == "crypto" and body["icon"] == "coins" and body["job_count"] == 0
+        data = (await client.get("/api/domains")).json()["domains"]
+        by = {d["domain"]: d for d in data}
+        assert "crypto" in by                                   # 仅有 profile 的空知识库也出现
+        assert by["crypto"]["color"] == "#f59e0b" and by["crypto"]["display_name"] == "加密货币"
+
+    @pytest.mark.asyncio
+    async def test_duplicate_409(self, client):
+        await client.post("/api/domains", json={"domain": "crypto"})
+        r = await client.post("/api/domains", json={"domain": "crypto"})
+        assert r.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_general_rejected(self, client):
+        assert (await client.post("/api/domains", json={"domain": "general"})).status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_empty_kb_workspace_ok(self, client):
+        await client.post("/api/domains", json={"domain": "crypto"})
+        r = await client.get("/api/domains/crypto")
+        assert r.status_code == 200 and r.json()["stats"]["job_count"] == 0
+
+
+class TestConceptTimeline:
+    @pytest.mark.asyncio
+    async def test_timeline_buckets(self, client, app):
+        _seed(app.state.db)
+        r = await client.get("/api/domains/finance/concept-timeline?granularity=month")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["granularity"] == "month"
+        c = next(c for c in body["concepts"] if c["term"] == "国债期货")
+        assert c["total"] == 1 and sum(c["buckets"].values()) == 1
+
+    @pytest.mark.asyncio
+    async def test_timeline_bad_granularity_422(self, client):
+        assert (await client.get("/api/domains/finance/concept-timeline?granularity=year")).status_code == 422
+
+
 class TestDomains:
     @pytest.mark.asyncio
     async def test_overview(self, client, app):

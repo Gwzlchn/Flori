@@ -88,12 +88,27 @@ class WorkerUpdateRequest(BaseModel):
     reject_tags: list[str] | None = None
 
 
+class DomainCreateRequest(BaseModel):
+    """新建知识库(领域)。domain=键(slug,用于 URL/过滤);display_name/icon/color/role/description=展示元数据。"""
+    domain: str
+    display_name: str | None = None
+    icon: str | None = None
+    color: str | None = None
+    role: str | None = None
+    description: str | None = None
+
+
 class ProfileUpdateRequest(BaseModel):
     role: str | None = None
     domain_context: str | None = None
     output_style: dict | None = None
     terminology: list[str] | None = None
     do_not: list[str] | None = None
+    # 知识库展示元数据(随 #1/#2:icon/color 持久化在 profile)
+    display_name: str | None = None
+    icon: str | None = None
+    color: str | None = None
+    description: str | None = None
 
 
 class TermAddRequest(BaseModel):

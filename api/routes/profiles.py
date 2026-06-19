@@ -98,6 +98,10 @@ async def update_profile(domain: str, req: ProfileUpdateRequest, config: AppConf
         data["terminology"] = req.terminology
     if req.do_not is not None:
         data["do_not"] = req.do_not
+    for k in ("display_name", "icon", "color", "description"):
+        v = getattr(req, k)
+        if v is not None:
+            data[k] = v
 
     path.write_text(yaml.dump(data, allow_unicode=True, default_flow_style=False), encoding="utf-8")
     return data

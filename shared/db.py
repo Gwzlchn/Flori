@@ -953,6 +953,57 @@ class Database:
         out.sort(key=lambda t: t["source_count"], reverse=True)
         return out[:limit]
 
+    def concept_timeline(self, domain: str, granularity: str = "month") -> dict:
+        """概念时间线:把该 domain 各概念的 occurrences 经 job_id→job.created_at 映射,按粒度分桶计数。
+        granularity: day(YYYY-MM-DD) / week(YYYY-Www) / month(YYYY-MM)。无 glossary/job 时返回空。"""
+        from collections import defaultdict
+        job_dates = {
+            r["id"]: r["created_at"]
+            for r in self._conn.execute(
+                "SELECT id, created_at FROM jobs WHERE domain=?", (domain,)
+            )
+        }
+
+        def bucket(iso: str | None) -> str | None:
+            dt = _parse_dt(iso)
+            if dt is None:
+                return None
+            if granularity == "day":
+                return dt.strftime("%Y-%m-%d")
+            if granularity == "week":
+                y, w, _ = dt.isocalendar()
+                return f"{y}-W{w:02d}"
+            return dt.strftime("%Y-%m")
+
+        rows = self._conn.execute(
+            "SELECT term, occurrences FROM glossary WHERE domain=?", (domain,)
+        ).fetchall()
+        totals: dict = defaultdict(int)
+        concepts: list[dict] = []
+        for r in rows:
+            try:
+                occs = json.loads(r["occurrences"] or "[]")
+            except (ValueError, TypeError):
+                occs = []
+            buckets: dict = defaultdict(int)
+            for o in occs if isinstance(occs, list) else []:
+                b = bucket(job_dates.get(o.get("job_id")))
+                if b:
+                    buckets[b] += 1
+                    totals[b] += 1
+            if buckets:
+                concepts.append({
+                    "term": r["term"], "buckets": dict(buckets),
+                    "total": sum(buckets.values()),
+                })
+        concepts.sort(key=lambda c: c["total"], reverse=True)
+        return {
+            "granularity": granularity,
+            "buckets": sorted(totals),
+            "totals": dict(totals),
+            "concepts": concepts,
+        }
+
     def domain_topics(self, domain: str) -> list[dict]:
         """领域内主题(可浏览标签) = 该 domain 所有 job 的 style_tags distinct + 计数。"""
         from collections import Counter
