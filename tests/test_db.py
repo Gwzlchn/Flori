@@ -96,13 +96,13 @@ class TestJobCRUD:
 
     def test_delete_job(self, db, sample_job):
         db.create_job(sample_job)
-        db.delete_job(sample_job.id)
+        db.delete_job_cascade(sample_job.id)
         assert db.get_job(sample_job.id) is None
 
     def test_delete_cascades_steps(self, db, sample_job):
         db.create_job(sample_job)
         db.upsert_step(Step(job_id=sample_job.id, name="03_scene", pool="scene"))
-        db.delete_job(sample_job.id)
+        db.delete_job_cascade(sample_job.id)
         assert db.get_steps(sample_job.id) == []
 
 
@@ -687,12 +687,6 @@ class TestNotesFTS:
         assert total == 1 and items[0]["job_id"] == "j2"
         total2, items2 = db.search_notes("优化器", content_type="paper")
         assert total2 == 1 and items2[0]["job_id"] == "j2"
-
-    def test_delete_job_index(self, db):
-        db.index_job_notes("j1", "smart", "a", "讲卷积神经网络。")
-        db.delete_job_index("j1")
-        total, _ = db.search_notes("卷积")
-        assert total == 0
 
     def test_search_no_match(self, db):
         db.index_job_notes("j1", "smart", "a", "讲卷积。")

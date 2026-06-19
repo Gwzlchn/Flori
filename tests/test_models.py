@@ -13,7 +13,7 @@ from shared.models import (
     Step,
     StepStatus,
     Worker,
-    generate_job_id,
+    derive_job_id,
     generate_worker_id,
 )
 
@@ -47,22 +47,18 @@ class TestEnums:
         assert isinstance(StepStatus.SKIPPED, str)
 
 
-class TestJobId:
-    def test_format(self):
-        jid = generate_job_id()
-        assert re.match(r"^j_\d{8}_[0-9a-f]{6}$", jid)
+class TestDeriveJobId:
+    def test_bilibili_bv(self):
+        # B 站用 BV 号(稳定/唯一/路径安全)
+        assert derive_job_id("https://b23.tv/BV1xx411c7mD", "video", "bilibili") == "jobs_bili_BV1xx411c7mD"
 
-    def test_uniqueness(self):
-        # 后缀仅 24 bit（token_hex(3)），同一天内取 1000 个按生日悖论约 3% 概率
-        # 出现 1 次碰撞，断言绝对唯一会 flaky。真正的唯一性由 DB 主键约束兜底，
-        # 这里只验证生成器碰撞率足够低（容忍生日悖论下的极少量碰撞）。
-        ids = {generate_job_id() for _ in range(1000)}
-        assert len(ids) >= 998
+    def test_url_hash_stable(self):
+        a = derive_job_id("https://example.com/x", "article")
+        b = derive_job_id("https://example.com/x", "article")
+        assert a == b and a.startswith("jobs_article_")          # 同 url 稳定
 
-    def test_contains_date(self):
-        jid = generate_job_id()
-        date_part = jid.split("_")[1]
-        datetime.strptime(date_part, "%Y%m%d")
+    def test_no_url_random(self):
+        assert derive_job_id(None, "paper").startswith("jobs_paper_")
 
 
 class TestWorkerId:

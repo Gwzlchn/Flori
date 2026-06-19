@@ -116,11 +116,6 @@ class TermAddRequest(BaseModel):
     term: str
 
 
-class HealthResponse(BaseModel):
-    status: str
-    checks: dict
-
-
 # ── 集合 ──
 
 

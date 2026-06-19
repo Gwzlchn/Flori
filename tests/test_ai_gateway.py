@@ -239,12 +239,6 @@ class TestAIGateway:
         with pytest.raises(AllProvidersFailedError):
             await gw.call("no_ai_step", LLMRequest(messages=[{"role": "user", "content": "test"}]))
 
-    @pytest.mark.asyncio
-    async def test_compare_not_implemented(self, gateway_config):
-        gw = AIGateway(*gateway_config)
-        with pytest.raises(NotImplementedError):
-            await gw.compare("10_smart", LLMRequest(messages=[]))
-
 
 class TestUsageFile:
     def test_record_and_collect(self, tmp_path):

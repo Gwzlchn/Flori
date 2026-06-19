@@ -6,7 +6,7 @@ import enum
 import re
 import secrets
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -148,13 +148,6 @@ class LLMResponse:
     cost_usd: float = 0.0
     duration_sec: float = 0.0
     cached: bool = False
-
-
-def generate_job_id() -> str:
-    """生成 Job ID: j_{YYYYMMDD}_{6 hex chars}"""
-    d = date.today().strftime("%Y%m%d")
-    r = secrets.token_hex(3)
-    return f"j_{d}_{r}"
 
 
 _CATEGORY = {"video": "bili", "article": "article", "paper": "paper", "podcast": "podcast"}

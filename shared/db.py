@@ -400,11 +400,6 @@ class Database:
                 )
             self._conn.commit()
 
-    def delete_job(self, job_id: str) -> None:
-        with self._lock:
-            self._conn.execute("DELETE FROM jobs WHERE id=?", (job_id,))
-            self._conn.commit()
-
     def delete_job_cascade(self, job_id: str, collection_id: str | None = None) -> None:
         """原子删 job：jobs 行 + FTS 索引 + 集合计数 -1 + 摘除 glossary.sources 里的 job_id。
         全部在单事务内,避免两次 commit 之间崩溃留孤儿 FTS 行 / 计数错位。
@@ -1264,14 +1259,6 @@ class Database:
                    VALUES (?,?,?,?,?,?,?)""",
                 (job_id, content_type, note_type, collection_id or "",
                  domain or "", title or "", body or ""),
-            )
-            self._conn.commit()
-
-    def delete_job_index(self, job_id: str) -> None:
-        """删某 job 的全部笔记索引行（删 job 时连带）。"""
-        with self._lock:
-            self._conn.execute(
-                "DELETE FROM notes_fts5 WHERE job_id=?", (job_id,)
             )
             self._conn.commit()
 

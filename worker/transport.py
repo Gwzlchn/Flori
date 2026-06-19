@@ -144,14 +144,6 @@ class RedisTransport:
         info = await self._redis.get_worker_info(worker_id)
         return info.get("status") if info else None
 
-    # ── 粗粒度认领/上报:薄包装 shared.runner_ops,与 gateway 端点共用同一编排 ──
-
-    async def _pop_matching(self, pool, tags, reject_tags, max_tries=5):
-        # 保留旧入口(测试/外部可能引用),实现转调 runner_ops.pop_matching。
-        return await runner_ops.pop_matching(
-            self._redis, pool, tags, reject_tags, max_tries,
-        )
-
     async def request_step(self, worker_id, pools, pool_limits, tags, reject_tags):
         self._worker_id = worker_id
         return await runner_ops.claim_step(
