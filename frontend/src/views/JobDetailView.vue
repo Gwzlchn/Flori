@@ -9,7 +9,7 @@ import StepWorkbench from '../components/job/StepWorkbench.vue'
 import StatusBadge from '../components/common/StatusBadge.vue'
 import { fmtDateTime } from '../utils/datetime'
 import { CONTENT_TYPE_LABELS } from '../types'
-import type { JobDetail, GlossaryTerm } from '../types'
+import type { JobDetail, GlossaryTerm, JobConcept } from '../types'
 import {
   Play, FileText, Newspaper, Headphones, ExternalLink, BookOpen, Lightbulb,
   GitBranch, Info, RefreshCw, ChevronDown, Star, List, RotateCcw, Trash2,
@@ -80,8 +80,9 @@ const genEnd = computed(() => {
 })
 const genDurSec = computed(() => (genStart.value && genEnd.value ? (genEnd.value - genStart.value) / 1000 : null))
 
-// 集合名(元信息)：用 collection_id 反查可选；无端点直接展示 id。
+// 集合(元信息)：collection_name 由后端 collection_id join 出,无归属/已删为 null;以名为主、id 备查。
 const collectionId = computed(() => job.value?.collection_id ?? null)
+const collectionName = computed(() => job.value?.collection_name ?? null)
 
 async function fetchDetail() {
   loading.value = true
@@ -274,10 +275,10 @@ async function acceptKeyTerm(term: string, definition: string) {
 }
 
 // ════════════════════ 概念 tab ════════════════════
-// 后端无「本内容概念反查」端点 → 取本知识库 glossary，筛 occurrences 含本 job_id 的条目。
+// 直查 GET /api/jobs/{id}/concepts:每项是 GlossaryTerm,另含 job_occurrences(本内容里的命中位置)。
 const conceptsLoading = ref(false)
 const conceptsError = ref('')
-const jobConcepts = ref<{ term: string; status: string; is_topic: boolean; location: string | null; sourceCount: number }[]>([])
+const jobConcepts = ref<JobConcept[]>([])
 let conceptsInit = false
 
 async function ensureConcepts() {
@@ -286,36 +287,35 @@ async function ensureConcepts() {
   await loadConcepts()
 }
 async function loadConcepts() {
-  if (!domain.value) { jobConcepts.value = []; return }
   conceptsLoading.value = true
   conceptsError.value = ''
   try {
-    const all = await api.get<GlossaryTerm[]>(`/api/glossary?domain=${encodeURIComponent(domain.value)}`)
-    jobConcepts.value = all
-      .map(t => {
-        const occ = t.occurrences?.find(o => o.job_id === jobId.value)
-        if (!occ) return null
-        return {
-          term: t.term,
-          status: t.status,
-          is_topic: t.is_topic,
-          location: occ.location ?? null,
-          sourceCount: t.occurrences?.length ?? 0,
-        }
-      })
-      .filter((x): x is NonNullable<typeof x> => x !== null)
-      // 已采纳优先、佐证多优先。
-      .sort((a, b) => (Number(b.status === 'accepted') - Number(a.status === 'accepted')) || (b.sourceCount - a.sourceCount))
+    const list = await jobStore.fetchConcepts(jobId.value)
+    // 已采纳优先、全库佐证多优先。
+    jobConcepts.value = [...list].sort(
+      (a, b) =>
+        (Number(b.status === 'accepted') - Number(a.status === 'accepted')) ||
+        ((b.occurrences?.length ?? 0) - (a.occurrences?.length ?? 0)),
+    )
   } catch (e: any) {
-    conceptsError.value = e?.message || '加载失败'
+    conceptsError.value = e?.status === 404 ? '内容不存在或已删除' : (e?.message || '加载失败')
     jobConcepts.value = []
   } finally {
     conceptsLoading.value = false
   }
 }
-function goConcept(term: string) {
-  if (!domain.value) return
-  router.push(`/kb/${encodeURIComponent(domain.value)}/concepts/${encodeURIComponent(term)}`)
+// 本内容里命中的位置(逐个出现处),用 location/content_type 描述。
+function occLabel(o: { content_type: string; location: string | null }): string {
+  const t = CONTENT_TYPE_LABELS[o.content_type] || o.content_type
+  return o.location ? `${t} · ${o.location}` : t
+}
+function conceptOccText(c: JobConcept): string {
+  const occs = c.job_occurrences ?? []
+  if (!occs.length) return ''
+  return occs.map(occLabel).join(' / ')
+}
+function goConcept(c: JobConcept) {
+  router.push(`/kb/${encodeURIComponent(c.domain)}/concepts/${encodeURIComponent(c.term)}`)
 }
 
 // ════════════════════ 流水线 tab ════════════════════
@@ -540,15 +540,14 @@ watch(job, (j) => {
       <div v-show="tab === 'concepts'">
         <div class="card pad">
           <div class="card-h"><Lightbulb :size="15" />本内容涉及的概念<template v-if="jobConcepts.length"> · {{ jobConcepts.length }}</template></div>
-          <p class="lead" style="margin:-6px 0 12px">从这条内容抽取 / 出现的概念。点进去可反查它在整个知识库里——还有哪些内容也讲过它。</p>
+          <p class="lead" style="margin:-6px 0 12px">这条内容里命中的概念。点进去可反查它在整个知识库里——还有哪些内容也讲过它。</p>
 
           <div v-if="conceptsLoading" class="state"><span class="spinner" />加载概念…</div>
           <div v-else-if="conceptsError" class="state"><Lightbulb class="big" /><div class="t">{{ conceptsError }}</div>
             <button class="btn" @click="loadConcepts"><RotateCcw :size="14" />重试</button></div>
-          <div v-else-if="!domain" class="state"><Lightbulb class="big" /><div class="t">该内容未归入知识库，无法反查概念</div></div>
           <div v-else-if="jobConcepts.length === 0" class="state"><Lightbulb class="big" /><div class="t">这条内容暂未关联任何概念</div></div>
           <div v-else>
-            <div v-for="c in jobConcepts" :key="c.term" class="concept" @click="goConcept(c.term)">
+            <div v-for="c in jobConcepts" :key="c.term" class="concept" @click="goConcept(c)">
               <Bookmark v-if="c.is_topic" class="pin" />
               <span v-else style="width:14px;flex:none" />
               <div style="flex:1;min-width:0">
@@ -556,8 +555,9 @@ watch(job, (j) => {
                   {{ c.term }}
                   <span v-if="c.is_topic" class="badge b-brand" style="margin-left:4px">主题概念</span>
                 </div>
+                <div v-if="c.definition" class="d" style="white-space:normal">{{ c.definition }}</div>
                 <div class="d">
-                  <template v-if="c.location">{{ c.location }} · </template>全库 {{ c.sourceCount }} 条内容讲过
+                  <template v-if="conceptOccText(c)">本内容 {{ conceptOccText(c) }} · </template>全库 {{ c.occurrences?.length ?? 0 }} 条内容讲过
                 </div>
               </div>
               <StatusBadge :status="c.status" />
@@ -592,7 +592,13 @@ watch(job, (j) => {
             <tr><td>类型</td><td>{{ CONTENT_TYPE_LABELS[job.content_type] || job.content_type }}</td></tr>
             <tr><td>来源</td><td>{{ sourceLabel }}</td></tr>
             <tr><td>知识库</td><td>{{ job.domain || '—' }}</td></tr>
-            <tr><td>集合</td><td class="mono">{{ collectionId || '—' }}</td></tr>
+            <tr><td>集合</td><td>
+              <template v-if="collectionName">
+                {{ collectionName }}
+                <span v-if="collectionId" class="mono dim" style="font-size:11.5px;margin-left:6px">{{ collectionId }}</span>
+              </template>
+              <span v-else class="dim">未归集合</span>
+            </td></tr>
             <tr v-if="bv"><td>BV 号</td><td class="mono">{{ bv }}</td></tr>
             <tr v-if="job.url"><td>原始链接</td><td>
               <a class="ghost" :href="job.url" target="_blank" rel="noopener" style="color:var(--info)">{{ job.url }}<ExternalLink :size="13" /></a>

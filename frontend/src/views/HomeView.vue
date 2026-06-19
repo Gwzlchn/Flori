@@ -5,6 +5,7 @@ import { storeToRefs } from 'pinia'
 import { useDomainStore } from '../stores/domains'
 import { fmtDateTime } from '../utils/datetime'
 import type { DomainOverview } from '../types'
+import * as L from 'lucide-vue-next'
 import {
   BookMarked, Plus, Inbox, Folder, FileText, Lightbulb,
   Rss, X, Check,
@@ -22,7 +23,14 @@ const error = ref('')
 
 const hasDomains = computed(() => domains.value.length > 0)
 
-// ── 身份图标 + 渐变色块：按知识库名哈希出稳定的图标/配色（原型用人工指定，这里派生保证稳定） ──
+// 图标名字符串（lucide kebab-case）→ 组件解析器：profile 存的是名字，渲染时解析。
+function iconComp(name?: string) {
+  if (!name) return null
+  const p = name.split('-').map((s) => s.charAt(0).toUpperCase() + s.slice(1)).join('')
+  return (L as any)[p] || null
+}
+
+// ── 身份图标 + 渐变色块：按知识库名哈希出稳定的图标/配色（缺 profile 元数据时回退保证稳定） ──
 const ICONS = [Cpu, Atom, Dna, Code, Database, Globe, FlaskConical, BookOpen,
   Brain, Calculator, Scale, Languages, Music, Palette, Leaf, Rocket]
 const GRADIENTS = [
@@ -43,6 +51,16 @@ function iconFor(name: string) {
 }
 function gradientFor(name: string): string {
   return GRADIENTS[hash(name) % GRADIENTS.length]
+}
+// 卡片身份：优先用 profile 的 icon/color/display_name，缺失才回退哈希派生。
+function cardIcon(d: DomainOverview) {
+  return iconComp(d.icon) || iconFor(d.domain)
+}
+function cardBg(d: DomainOverview): string {
+  return d.color || gradientFor(d.domain)
+}
+function cardName(d: DomainOverview): string {
+  return d.display_name || d.domain
 }
 
 async function loadDomains() {
@@ -73,26 +91,54 @@ function activeAgo(v: string | null): string {
   return `${fmtDateTime(v)} 活跃`
 }
 
-// ── 新建知识库内联弹窗（参考原型 #home 的 m-domain）：创建端点后端待新增，提交时提示 ──
+// ── 新建知识库内联弹窗（参考原型 #home 的 m-domain）：提交真正调 domainStore.create ──
+// 可选图标（存 lucide 名字符串入 profile.icon）与配色（存 #hex 入 profile.color）。
+const ICON_NAMES = ['brain', 'cpu', 'coins', 'atom', 'dna', 'flask-conical', 'book', 'graduation-cap']
+const COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ec4899', '#64748b']
 const showCreate = ref(false)
-const draftName = ref('')
-const draftIconIdx = ref(0)
-const draftColorIdx = ref(0)
+const draftDomain = ref('')   // 英文 slug → payload.domain（URL/过滤标识，必填）
+const draftName = ref('')     // 显示名 → payload.display_name
+const draftIcon = ref(ICON_NAMES[0])
+const draftColor = ref(COLORS[0])
 const draftRole = ref('')
 const draftIntro = ref('')
+const submitting = ref(false)
 
 function openCreate() {
+  draftDomain.value = ''
   draftName.value = ''
-  draftIconIdx.value = 0
-  draftColorIdx.value = 0
+  draftIcon.value = ICON_NAMES[0]
+  draftColor.value = COLORS[0]
   draftRole.value = ''
   draftIntro.value = ''
   showCreate.value = true
 }
-function submitCreate() {
-  // 创建知识库端点后端尚未提供 → 提示「需后端新增」，不静默失败。
-  showToast('知识库创建需后端新增', 'info')
-  showCreate.value = false
+async function submitCreate() {
+  const domain = draftDomain.value.trim()
+  if (!domain) {
+    showToast('请填写标识（英文 slug）', 'error')
+    return
+  }
+  submitting.value = true
+  try {
+    await domainStore.create({
+      domain,
+      display_name: draftName.value.trim() || undefined,
+      icon: draftIcon.value || undefined,
+      color: draftColor.value || undefined,
+      role: draftRole.value.trim() || undefined,
+      description: draftIntro.value.trim() || undefined,
+    })
+    showToast('知识库已创建', 'success')
+    showCreate.value = false
+    router.push(`/kb/${encodeURIComponent(domain)}`)
+  } catch (e: any) {
+    if (e?.status === 409) showToast('该标识已存在', 'error')
+    else if (e?.status === 400) showToast('标识非法（不能为 general 或含非法字符）', 'error')
+    else showToast('创建失败', 'error')
+  } finally {
+    submitting.value = false
+  }
 }
 
 onMounted(loadDomains)
@@ -143,10 +189,10 @@ onMounted(loadDomains)
     <div v-else class="grid3">
       <a v-for="d in domains" :key="d.domain" class="dcard" @click="openDomain(d)">
         <div class="top">
-          <span class="ic" :style="{ background: gradientFor(d.domain) }">
-            <component :is="iconFor(d.domain)" :size="18" />
+          <span class="ic" :style="{ background: cardBg(d) }">
+            <component :is="cardIcon(d)" :size="18" />
           </span>
-          <h3>{{ d.domain }}</h3>
+          <h3>{{ cardName(d) }}</h3>
           <span v-if="d.subscription_count > 0" class="badge b-info"
             :title="`${d.subscription_count} 个订阅集合在自动追更`">
             <Rss :size="12" />{{ d.subscription_count }}
@@ -164,7 +210,7 @@ onMounted(loadDomains)
       </a>
     </div>
 
-    <!-- 新建知识库弹窗（端点后端待新增，提交仅提示） -->
+    <!-- 新建知识库弹窗（提交真正调 domainStore.create） -->
     <div v-if="showCreate" class="overlay show" @click.self="showCreate = false">
       <div class="modal">
         <div class="hd">
@@ -173,16 +219,21 @@ onMounted(loadDomains)
         </div>
         <div class="bd">
           <div class="field">
+            <label>标识（英文 slug）</label>
+            <input v-model="draftDomain" class="input" placeholder="如：rl、cryptography、macro-econ" />
+            <div class="note-tip">用于 URL 与归类的唯一标识，建议小写英文 / 连字符；不可为 general。</div>
+          </div>
+          <div class="field">
             <label>名称</label>
             <input v-model="draftName" class="input" placeholder="如：强化学习、密码学、宏观经济…" />
-            <div class="note-tip">知识库是知识的命名空间，互相隔离。建好后投递内容时选它即可归入。</div>
+            <div class="note-tip">展示用名称（可中文）。留空则用上面的标识显示。</div>
           </div>
           <div class="field">
             <label>图标</label>
             <div class="icon-grid">
-              <button v-for="(Ic, i) in ICONS" :key="i" class="icon-pick"
-                :class="{ on: draftIconIdx === i }" @click="draftIconIdx = i">
-                <component :is="Ic" :size="18" />
+              <button v-for="name in ICON_NAMES" :key="name" class="icon-pick"
+                :class="{ on: draftIcon === name }" @click="draftIcon = name">
+                <component :is="iconComp(name) || Lightbulb" :size="18" />
               </button>
             </div>
             <div class="note-tip">从图标库挑一个，配色见下。</div>
@@ -190,9 +241,9 @@ onMounted(loadDomains)
           <div class="field">
             <label>颜色</label>
             <div class="color-row">
-              <button v-for="(g, i) in GRADIENTS" :key="i" class="swatch"
-                :class="{ on: draftColorIdx === i }" :style="{ background: g }"
-                @click="draftColorIdx = i" />
+              <button v-for="c in COLORS" :key="c" class="swatch"
+                :class="{ on: draftColor === c }" :style="{ background: c }"
+                @click="draftColor = c" />
             </div>
           </div>
           <div class="field">
@@ -207,7 +258,9 @@ onMounted(loadDomains)
         </div>
         <div class="ft">
           <button class="btn" @click="showCreate = false">取消</button>
-          <button class="btn pri" @click="submitCreate"><Check :size="16" />创建知识库</button>
+          <button class="btn pri" :disabled="submitting" @click="submitCreate">
+            <Check :size="16" />{{ submitting ? '创建中…' : '创建知识库' }}
+          </button>
         </div>
       </div>
     </div>

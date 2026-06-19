@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { useApi } from '../composables/useApi'
-import type { JobSummary, JobDetail, JobListResponse } from '../types'
+import type { JobSummary, JobDetail, JobListResponse, JobFacets, JobConcept } from '../types'
 
 export const useJobStore = defineStore('jobs', () => {
   const api = useApi()
@@ -9,11 +9,14 @@ export const useJobStore = defineStore('jobs', () => {
   const total = ref(0)
   const loading = ref(false)
 
-  async function fetchList(params: { status?: string; limit?: number; offset?: number; append?: boolean } = {}) {
+  async function fetchList(params: { status?: string; domain?: string; source?: string; collection_id?: string; limit?: number; offset?: number; append?: boolean } = {}) {
     loading.value = true
     try {
       const qs = new URLSearchParams()
       if (params.status) qs.set('status', params.status)
+      if (params.domain) qs.set('domain', params.domain)
+      if (params.source) qs.set('source', params.source)
+      if (params.collection_id) qs.set('collection_id', params.collection_id)
       qs.set('limit', String(params.limit ?? 20))
       qs.set('offset', String(params.offset ?? 0))
       const data = await api.get<JobListResponse>(`/api/jobs?${qs}`)
@@ -56,5 +59,15 @@ export const useJobStore = defineStore('jobs', () => {
     await api.del(`/api/jobs/${jobId}`)
   }
 
-  return { list, total, loading, fetchList, fetchDetail, createJob, uploadJob, retryJob, rerunJob, deleteJob }
+  // 分面计数(后端聚合,供过滤 chip)
+  async function fetchFacets() {
+    return api.get<JobFacets>('/api/jobs/facets')
+  }
+
+  // 本内容命中的概念(反查)
+  async function fetchConcepts(jobId: string) {
+    return api.get<JobConcept[]>(`/api/jobs/${encodeURIComponent(jobId)}/concepts`)
+  }
+
+  return { list, total, loading, fetchList, fetchDetail, createJob, uploadJob, retryJob, rerunJob, deleteJob, fetchFacets, fetchConcepts }
 })

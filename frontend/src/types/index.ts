@@ -36,6 +36,7 @@ export interface JobDetail extends JobSummary {
   url: string | null
   updated_at: string | null
   published_at: string | null   // 源内容发布时间(「上传于」)
+  collection_name: string | null // 由 collection_id join 出,无归属/集合已删则 null
   meta: Record<string, any>
   steps: StepInfo[]
 }
@@ -140,6 +141,38 @@ export interface DomainOverview {
   concept_count: number
   subscription_count: number
   last_active_at: string | null
+  // 展示元数据(来自 profile,未设则缺省;前端回退按 domain 名派生)
+  display_name?: string
+  icon?: string
+  color?: string
+  description?: string
+  role?: string
+}
+
+// POST /api/domains 请求体(新建知识库)
+export interface CreateDomainPayload {
+  domain: string
+  display_name?: string
+  icon?: string
+  color?: string
+  role?: string
+  description?: string
+}
+
+// GET /api/jobs/facets —— 后端聚合的分面计数
+export interface JobFacets {
+  source: Record<string, number>
+  domain: Record<string, number>
+  status: Record<string, number>
+}
+
+// GET /api/domains/{domain}/concept-timeline
+export type TimelineGranularity = 'day' | 'week' | 'month'
+export interface ConceptTimeline {
+  granularity: TimelineGranularity
+  buckets: string[]
+  totals: Record<string, number>
+  concepts: { term: string; buckets: Record<string, number>; total: number }[]
 }
 
 // 集合的订阅源（自动追更）。无订阅则为 null。同步/开关端点用集合自身 id。
@@ -189,6 +222,11 @@ export interface GlossaryTerm {
   is_topic: boolean
   definition_locked: boolean
   created_at: string
+}
+
+// GET /api/jobs/{id}/concepts —— 本内容命中的概念(GlossaryTerm + 本 job 命中位置)
+export interface JobConcept extends GlossaryTerm {
+  job_occurrences: TermOccurrence[]
 }
 
 // 搜索结果项：与后端 SearchResultItem 严格对齐。

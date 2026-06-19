@@ -7,6 +7,7 @@ import ProfileEditor from '../components/settings/ProfileEditor.vue'
 import ConceptTimeline from '../components/ConceptTimeline.vue'
 import { fmtDateTime } from '../utils/datetime'
 import type { JobSummary } from '../types'
+import * as L from 'lucide-vue-next'
 import {
   SlidersHorizontal, RefreshCw, Folder, Lightbulb, BarChart3,
   Plus, Settings2, Rss, Inbox, ChevronRight, Sparkles, Bookmark,
@@ -24,6 +25,10 @@ interface DomainStats {
   concept_count: number
   subscription_count: number
   last_active_at: string | null
+  // 展示元数据(来自 profile,未设则缺省;前端回退按 domain 名派生)
+  display_name?: string
+  icon?: string
+  color?: string
 }
 interface WsCollection {
   id: string
@@ -65,7 +70,7 @@ const error = ref('')
 const tab = ref<'content' | 'concept' | 'timeline'>('content')
 const showProfile = ref(false)
 
-// ── 身份图标 + 渐变色块：按知识库名哈希，与总览页一致 ──
+// ── 身份图标 + 色块：优先用工作台 stats 的 icon/color/display_name，缺失才回退按名哈希（与总览页一致） ──
 const ICONS = [Cpu, Atom, Dna, Code, Database, Globe, FlaskConical, BookOpen,
   Brain, Calculator, Scale, Languages, Music, Palette, Leaf, Rocket]
 const GRADIENTS = [
@@ -81,8 +86,15 @@ function hash(s: string): number {
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0
   return Math.abs(h)
 }
-const headIcon = computed(() => ICONS[hash(domain.value) % ICONS.length])
-const headGradient = computed(() => GRADIENTS[hash(domain.value) % GRADIENTS.length])
+// 图标名字符串（lucide kebab-case）→ 组件解析器（与总览页一致）。
+function iconComp(name?: string) {
+  if (!name) return null
+  const p = name.split('-').map((s) => s.charAt(0).toUpperCase() + s.slice(1)).join('')
+  return (L as any)[p] || null
+}
+const headIcon = computed(() => iconComp(data.value?.stats?.icon) || ICONS[hash(domain.value) % ICONS.length])
+const headGradient = computed(() => data.value?.stats?.color || GRADIENTS[hash(domain.value) % GRADIENTS.length])
+const headName = computed(() => data.value?.stats?.display_name || domain.value)
 
 const stats = computed<DomainStats | null>(() => data.value?.stats ?? null)
 
@@ -163,7 +175,7 @@ function onProfileSaved() {
         <component :is="headIcon" :size="20" />
       </span>
       <div style="min-width:0">
-        <div class="h1">{{ domain }}</div>
+        <div class="h1">{{ headName }}</div>
         <div v-if="stats" class="lead">
           {{ stats.collection_count }} 集合 · {{ stats.job_count }} 内容 · {{ stats.concept_count }} 概念
           <template v-if="stats.last_active_at"> · {{ fmtDateTime(stats.last_active_at) }} 活跃</template>

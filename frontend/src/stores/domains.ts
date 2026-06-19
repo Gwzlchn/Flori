@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { useApi } from '../composables/useApi'
-import type { DomainOverview, TopicConcept } from '../types'
+import type { DomainOverview, TopicConcept, CreateDomainPayload, ConceptTimeline, TimelineGranularity } from '../types'
 
 // 领域 store：领域是派生视图（来自 jobs ∪ collections ∪ glossary 的 distinct domain）。
 export const useDomainStore = defineStore('domains', () => {
@@ -35,5 +35,17 @@ export const useDomainStore = defineStore('domains', () => {
     return api.get<TopicConcept[]>(`/api/domains/${encodeURIComponent(domain)}/topic-concepts`)
   }
 
-  return { domains, loading, fetchAll, workspace, term, topic, topicConcepts }
+  // 新建知识库：写 profile 元数据,领域随即出现在总览;建后刷新列表。
+  async function create(payload: CreateDomainPayload): Promise<DomainOverview> {
+    const created = await api.post<DomainOverview>('/api/domains', payload)
+    await fetchAll()
+    return created
+  }
+
+  // 概念时间线聚合(按粒度分桶)。
+  async function conceptTimeline(domain: string, granularity: TimelineGranularity = 'month'): Promise<ConceptTimeline> {
+    return api.get<ConceptTimeline>(`/api/domains/${encodeURIComponent(domain)}/concept-timeline?granularity=${granularity}`)
+  }
+
+  return { domains, loading, fetchAll, workspace, term, topic, topicConcepts, create, conceptTimeline }
 })

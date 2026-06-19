@@ -2,7 +2,8 @@
 import { ref, onMounted, inject } from 'vue'
 import { useApi } from '../../composables/useApi'
 import type { ProfileDetail } from '../../types'
-import { X, Plus, Trash2 } from 'lucide-vue-next'
+import * as L from 'lucide-vue-next'
+import { X, Plus, Trash2, SlidersHorizontal, Check, Lightbulb } from 'lucide-vue-next'
 
 const props = defineProps<{ domain: string }>()
 const emit = defineEmits<{ close: []; saved: [] }>()
@@ -13,8 +14,24 @@ const showToast = inject<(m: string, t?: 'success' | 'error' | 'info') => void>(
 const loading = ref(true)
 const saving = ref(false)
 const profile = ref<ProfileDetail>({ domain: props.domain, role: '', domain_context: '', terminology: [], do_not: [] })
+// 展示元数据(profile 上的可选字段,ProfileDetail 未声明 → 单独存,避免改 types)。
+const displayName = ref('')
+const icon = ref('')
+const color = ref('')
+const description = ref('')
 const newTerm = ref('')
 const newDoNot = ref('')
+
+// 图标 / 配色候选（与 HomeView 新建弹窗一致）。
+const ICON_NAMES = ['brain', 'cpu', 'coins', 'atom', 'dna', 'flask-conical', 'book', 'graduation-cap']
+const COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ec4899', '#64748b']
+
+// 图标名字符串（lucide kebab-case）→ 组件解析器。
+function iconComp(name?: string) {
+  if (!name) return null
+  const p = name.split('-').map((s) => s.charAt(0).toUpperCase() + s.slice(1)).join('')
+  return (L as any)[p] || null
+}
 
 onMounted(async () => {
   try {
@@ -27,8 +44,14 @@ onMounted(async () => {
       terminology: data.terminology ?? [],
       do_not: data.do_not ?? [],
     }
+    // 展示元数据从同一响应读取（后端返回但 ProfileDetail 未声明，转 any 取）。
+    const meta = data as any
+    displayName.value = meta.display_name ?? ''
+    icon.value = meta.icon ?? ''
+    color.value = meta.color ?? ''
+    description.value = meta.description ?? ''
   } catch (e) {
-    showToast?.('加载 Profile 失败', 'error')
+    showToast?.('加载知识库设定失败', 'error')
   } finally {
     loading.value = false
   }
@@ -60,12 +83,16 @@ async function save() {
   saving.value = true
   try {
     await api.put(`/api/profiles/${encodeURIComponent(props.domain)}`, {
+      display_name: displayName.value.trim(),
+      icon: icon.value,
+      color: color.value,
+      description: description.value.trim(),
       role: profile.value.role,
       domain_context: profile.value.domain_context,
       terminology: profile.value.terminology,
       do_not: profile.value.do_not,
     })
-    showToast?.('Profile 已保存', 'success')
+    showToast?.('知识库设定已保存', 'success')
     emit('saved')
     emit('close')
   } catch (e) {
@@ -77,82 +104,103 @@ async function save() {
 </script>
 
 <template>
-  <div class="fixed inset-0 z-50 bg-gray-900/50 flex items-center justify-center p-4" @click.self="emit('close')">
-    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
-      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100 sticky top-0 bg-white">
-        <h2 class="text-base font-bold">编辑 Profile · {{ domain }}</h2>
-        <button @click="emit('close')" class="p-1 text-gray-400 hover:text-gray-600">
-          <X :size="18" />
-        </button>
+  <div class="overlay show" @click.self="emit('close')">
+    <div class="modal wide">
+      <div class="hd">
+        <SlidersHorizontal :size="16" class="lead-ic" /><b>知识库设定 · {{ domain }}</b>
+        <button class="ghost" @click="emit('close')"><X :size="16" /></button>
       </div>
 
-      <div v-if="loading" class="px-5 py-10 text-center text-sm text-gray-400">加载中...</div>
+      <div v-if="loading" class="bd" style="color:var(--ink-500);font-size:13px;text-align:center;padding:36px 18px">
+        加载中…
+      </div>
 
-      <div v-else class="px-5 py-4 space-y-5">
+      <div v-else class="bd">
+        <!-- 展示名 -->
+        <div class="field">
+          <label>展示名（display_name）</label>
+          <input v-model="displayName" class="input" placeholder="如：机器学习（留空则用标识显示）" />
+          <div class="note-tip">影响知识库卡片与工作台头部显示的名字。</div>
+        </div>
+
+        <!-- 图标 -->
+        <div class="field">
+          <label>图标（icon）</label>
+          <div class="icon-grid">
+            <button v-for="name in ICON_NAMES" :key="name" class="icon-pick"
+              :class="{ on: icon === name }" @click="icon = name">
+              <component :is="iconComp(name) || Lightbulb" :size="18" />
+            </button>
+          </div>
+          <div class="note-tip">挑一个 lucide 图标，配色见下。</div>
+        </div>
+
+        <!-- 颜色 -->
+        <div class="field">
+          <label>颜色（color）</label>
+          <div class="color-row">
+            <button v-for="c in COLORS" :key="c" class="swatch"
+              :class="{ on: color === c }" :style="{ background: c }" @click="color = c" />
+          </div>
+        </div>
+
+        <!-- 简介 -->
+        <div class="field">
+          <label>简介（description）</label>
+          <textarea v-model="description" class="input"
+            placeholder="这个知识库你关注什么、希望笔记怎么写…" />
+        </div>
+
         <!-- role -->
-        <div>
-          <label class="block text-xs font-medium text-gray-500 mb-1">角色（role）</label>
-          <input v-model="profile.role" type="text"
-            class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-            placeholder="如：技术文档编辑" />
+        <div class="field">
+          <label>角色（role）</label>
+          <input v-model="profile.role" class="input" placeholder="如：技术文档编辑" />
         </div>
 
         <!-- domain_context -->
-        <div>
-          <label class="block text-xs font-medium text-gray-500 mb-1">领域上下文（domain_context）</label>
-          <textarea v-model="profile.domain_context" rows="2"
-            class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+        <div class="field">
+          <label>领域上下文（domain_context）</label>
+          <textarea v-model="profile.domain_context" class="input"
             placeholder="如：编程/AI/系统设计相关技术讲解" />
         </div>
 
         <!-- terminology -->
-        <div>
-          <label class="block text-xs font-medium text-gray-500 mb-2">术语表（terminology）</label>
-          <div class="space-y-1.5">
-            <div v-for="(t, i) in profile.terminology" :key="i" class="flex items-center gap-2">
-              <span class="flex-1 text-sm bg-gray-50 rounded px-2 py-1.5 break-all">{{ t }}</span>
-              <button @click="removeTerm(i)" class="p-1 text-gray-400 hover:text-red-500">
-                <Trash2 :size="15" />
-              </button>
+        <div class="field">
+          <label>术语表（terminology）</label>
+          <div v-if="(profile.terminology ?? []).length" style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px">
+            <div v-for="(t, i) in profile.terminology" :key="i"
+              style="display:flex;align-items:center;gap:8px">
+              <span class="chip" style="flex:1;justify-content:flex-start;word-break:break-all">{{ t }}</span>
+              <button class="iconbtn" @click="removeTerm(i)"><Trash2 :size="15" /></button>
             </div>
           </div>
-          <form @submit.prevent="addTerm" class="flex gap-2 mt-2">
-            <input v-model="newTerm" type="text"
-              class="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-              placeholder="术语: 解释" />
-            <button type="submit" class="px-2.5 py-1.5 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100">
-              <Plus :size="16" />
-            </button>
+          <form style="display:flex;gap:8px" @submit.prevent="addTerm">
+            <input v-model="newTerm" class="input" placeholder="术语: 解释" />
+            <button type="submit" class="btn"><Plus :size="16" /></button>
           </form>
         </div>
 
         <!-- do_not -->
-        <div>
-          <label class="block text-xs font-medium text-gray-500 mb-2">禁止事项（do_not）</label>
-          <div class="space-y-1.5">
-            <div v-for="(t, i) in profile.do_not" :key="i" class="flex items-center gap-2">
-              <span class="flex-1 text-sm bg-gray-50 rounded px-2 py-1.5 break-all">{{ t }}</span>
-              <button @click="removeDoNot(i)" class="p-1 text-gray-400 hover:text-red-500">
-                <Trash2 :size="15" />
-              </button>
+        <div class="field" style="margin-bottom:0">
+          <label>禁止事项（do_not）</label>
+          <div v-if="(profile.do_not ?? []).length" style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px">
+            <div v-for="(t, i) in profile.do_not" :key="i"
+              style="display:flex;align-items:center;gap:8px">
+              <span class="chip" style="flex:1;justify-content:flex-start;word-break:break-all">{{ t }}</span>
+              <button class="iconbtn" @click="removeDoNot(i)"><Trash2 :size="15" /></button>
             </div>
           </div>
-          <form @submit.prevent="addDoNot" class="flex gap-2 mt-2">
-            <input v-model="newDoNot" type="text"
-              class="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-              placeholder="如：不要简化技术细节" />
-            <button type="submit" class="px-2.5 py-1.5 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100">
-              <Plus :size="16" />
-            </button>
+          <form style="display:flex;gap:8px" @submit.prevent="addDoNot">
+            <input v-model="newDoNot" class="input" placeholder="如：不要简化技术细节" />
+            <button type="submit" class="btn"><Plus :size="16" /></button>
           </form>
         </div>
       </div>
 
-      <div v-if="!loading" class="px-5 py-4 border-t border-gray-100 flex justify-end gap-2 sticky bottom-0 bg-white">
-        <button @click="emit('close')" class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">取消</button>
-        <button @click="save" :disabled="saving"
-          class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">
-          {{ saving ? '保存中...' : '保存' }}
+      <div v-if="!loading" class="ft">
+        <button class="btn" @click="emit('close')">取消</button>
+        <button class="btn pri" :disabled="saving" @click="save">
+          <Check :size="16" />{{ saving ? '保存中…' : '保存' }}
         </button>
       </div>
     </div>
