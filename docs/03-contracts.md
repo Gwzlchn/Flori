@@ -131,7 +131,7 @@ curl -X POST http://localhost:8000/api/jobs/j_xxx/rerun \
 
 Response `200`:
 ```json
-{"job_id": "j_20260516_abc123", "status": "processing", "rerun_steps": ["08_smart", "09_review"]}
+{"job_id": "j_20260516_abc123", "status": "processing", "from_step": "08_smart"}
 ```
 
 典型场景：对 AI 笔记质量不满意 → rerun from 08_smart → Claude 重新生成。
@@ -148,6 +148,29 @@ Response `200`:
 #### DELETE /api/jobs/{id} — 删除任务
 
 删除任务记录和所有产物文件。Response `204`。
+
+#### POST /api/jobs/{id}/rerun-smart — 换 provider 重跑智能笔记 + 评审
+
+用指定 AI provider 重新生成智能笔记并重评（生成新版本，旧版本保留）。服务端把 provider 覆盖写进 `job.json` 的 `ai_overrides`（智能/评审步读取，worker rerun 时 pull 到新 `job.json`），再从智能步起重跑。
+
+```bash
+curl -X POST http://localhost:8000/api/jobs/j_xxx/rerun-smart \
+  -d '{"provider": "anthropic"}'
+```
+
+请求体：`{"provider": "anthropic"}`（必填，须是 `GET /api/providers` 列出且 `available=true` 的 provider）。
+
+写入 `job.json`（关键字段）：
+```json
+{"ai_overrides": {"10_smart": "anthropic", "11_review": "anthropic"}}
+```
+
+Response `200`:
+```json
+{"job_id": "j_20260516_abc123", "status": "processing", "provider": "anthropic"}
+```
+
+provider 不可用（未配 API key）返回 `400 provider '<name>' 不可用(未配置 API key)`。
 
 ### 1.2 笔记与产物
 
@@ -347,6 +370,14 @@ Response `200`:
 ```
 GET  /api/config/pools                 → 当前资源池配置
 PUT  /api/config/pools                 → 热更新资源池配置
+GET  /api/config/styles                → 可用风格标签列表
+```
+
+#### GET /api/config/styles
+
+返回可用风格标签（从 `prompts/styles/*.yaml` 读取，每文件取其 `tag` 字段，缺省回退文件名）。供前端创建任务时勾选 `style_tags`。Response `200`（字符串数组）：
+```json
+["case-study", "deep-dive", "quick-summary"]
 ```
 
 ### 1.7 Worker 网关（`/api/runner/*`）
@@ -372,6 +403,485 @@ PUT    /api/runner/jobs/{id}/artifacts/{rel}              → 回传单个产物
 ```json
 {"worker_id": "ai-a1b2c3d4", "worker_token": "mnwt-...", "heartbeat_sec": 10}
 ```
+
+### 1.8 集合管理
+
+Base: `/api/collections`。集合是内容分组；当 `source_type`+`source_id` 非空时该集合即"订阅集合"，会自动从来源（目前仅 B 站 UP 主）追更新内容。订阅没有独立实体，全部由集合的字段拼装为 `subscription` 对象返回。
+
+`CollectionResponse` 公共结构：
+
+```json
+{
+  "id": "c_xxx",
+  "name": "集合名",
+  "domain": "deep-learning",
+  "description": "",
+  "tags": ["tag1"],
+  "job_count": 12,
+  "created_at": "2026-05-16T20:00:00+08:00",
+  "subscription": null
+}
+```
+
+`subscription` 仅订阅集合非 null，结构为：
+
+```json
+{
+  "source_type": "bilibili_up",
+  "source_id": "12345678",
+  "enabled": true,
+  "last_synced_at": "2026-05-16T20:00:00+08:00"
+}
+```
+
+其中 `enabled` = 集合的 `sync_enabled`（自动追更开关），`last_synced_at` 可为 `null`（从未同步）。
+
+#### POST /api/collections — 创建集合
+
+普通集合只传 `name`/`domain`；同时给 `source_type`+`source_id` 即创建订阅集合。
+
+```bash
+# 普通集合
+curl -X POST http://localhost:8000/api/collections \
+  -H "Content-Type: application/json" \
+  -d '{"name": "我的合集", "domain": "deep-learning", "tags": ["case-study"]}'
+
+# 订阅集合（B 站 UP 主，建后立即首次同步）
+curl -X POST http://localhost:8000/api/collections \
+  -H "Content-Type: application/json" \
+  -d '{"name": "某 UP", "domain": "deep-learning", "source_type": "bilibili_up", "source_id": "12345678", "sync_now": true}'
+```
+
+请求体字段：`name`（必填）、`domain`（必填）、`description`、`tags`（默认 `[]`）、`source_type`/`source_id`（成对给出才算订阅）、`sync_now`（默认 `true`，仅订阅集合有效，建后立即首次同步）。
+
+订阅集合约束：`domain` 必须是真实领域，不能为空或 `general`；同一来源全局唯一（已订阅会被拒）。首次同步失败不阻塞集合创建（集合照常建好）。
+
+Response `201`：`CollectionResponse`。
+
+错误：`400` 订阅集合 domain 为 general / 该来源已订阅。
+
+#### GET /api/collections — 集合列表
+
+```
+GET /api/collections?domain=deep-learning
+```
+
+`domain` 可选，按领域过滤。Response `200`：`CollectionResponse` 数组（注意是裸数组，非 `{total, items}` 包裹）。
+
+#### GET /api/collections/{id} — 集合详情
+
+Response `200`：`CollectionResponse`。错误：`400` collection_id 非法（含 `..` / `/` / 空字节）、`404` 不存在。
+
+#### PUT /api/collections/{id} — 修改集合
+
+```bash
+curl -X PUT http://localhost:8000/api/collections/c_xxx \
+  -H "Content-Type: application/json" \
+  -d '{"name": "新名字", "description": "...", "tags": ["a"], "sync_enabled": false}'
+```
+
+请求体均可选（`null`=不改）：`name`、`description`、`tags`、`sync_enabled`。`sync_enabled` 仅订阅集合可改（对普通集合传该字段返回 `400`）。Response `200`：`CollectionResponse`。错误：`400` 非法 id / 非订阅集合改 `sync_enabled`、`404` 不存在。
+
+#### DELETE /api/collections/{id} — 删除集合
+
+删集合即解绑：名下 job 的 `collection_id` 置空（job 保留），再删集合行。Response `204` 无响应体。错误：`400` 非法 id、`404` 不存在。
+
+#### POST /api/collections/{id}/sync — 立即同步
+
+仅订阅集合可调，枚举来源 → 与已入库去重 → 新内容自动建 job 归入本集合，并刷新 `last_synced_at`。
+
+```bash
+curl -X POST http://localhost:8000/api/collections/c_xxx/sync
+```
+
+Response `200`：
+
+```json
+{"total": 50, "new": 3, "skipped": 47}
+```
+
+错误：`400` 非法 id / 非订阅集合、`404` 不存在、`502` 同步失败（如来源访问失败）。
+
+#### GET /api/collections/{id}/jobs — 集合内任务列表
+
+```
+GET /api/collections/c_xxx/jobs?limit=20&offset=0
+```
+
+`limit`（默认 20，1–200）、`offset`（默认 0）。Response `200`：`JobListResponse`（`{total, items}`，items 为 `JobResponse`）：
+
+```json
+{
+  "total": 12,
+  "items": [
+    {
+      "job_id": "j_xxx",
+      "content_type": "video",
+      "status": "done",
+      "created_at": "2026-05-16T20:00:00+08:00",
+      "title": "标题",
+      "progress_pct": 100,
+      "source": "bilibili",
+      "domain": "deep-learning",
+      "collection_id": "c_xxx"
+    }
+  ]
+}
+```
+
+错误：`400` 非法 id、`404` 不存在。
+
+---
+
+### 1.9 领域（知识中心）
+
+Base: `/api/domains`。领域是派生视图，无 `domains` 表——所有 distinct `domain`（来自 jobs ∪ collections ∪ glossary）即领域集合。所有端点对 `{domain}` 做合法性校验（含 `..` / `/` / 空字节或为空返回 `400`）。
+
+#### GET /api/domains — 领域总览
+
+每个领域的集合数 / 内容数 / 概念数 / 订阅数 / 最近活跃，用于卡片网格。Response `200`：
+
+```json
+{
+  "domains": [
+    {
+      "domain": "deep-learning",
+      "collection_count": 4,
+      "job_count": 42,
+      "concept_count": 120,
+      "subscription_count": 2,
+      "last_active_at": "2026-05-16T20:00:00+08:00"
+    }
+  ]
+}
+```
+
+`last_active_at` = 该域 job 的 `MAX(updated_at)`，无 job 时为 `null`。列表按 `domain` 升序。
+
+#### GET /api/domains/{domain} — 领域工作台
+
+聚合该领域的情景层（集合 + 最近内容）与语义层（概念 + 主题）。Response `200`：
+
+```json
+{
+  "domain": "deep-learning",
+  "stats": { "domain": "deep-learning", "collection_count": 4, "job_count": 42, "concept_count": 120, "subscription_count": 2, "last_active_at": "…" },
+  "collections": [
+    {"id": "c_xxx", "name": "某 UP", "job_count": 12, "is_subscription": true, "source_id": "12345678", "sync_enabled": true}
+  ],
+  "recent_jobs": [
+    {"job_id": "j_xxx", "content_type": "video", "status": "done", "created_at": "…", "title": "…", "progress_pct": 100, "source": "bilibili", "domain": "deep-learning", "collection_id": "c_xxx"}
+  ],
+  "top_concepts": [
+    {"term": "Transformer", "definition": "…", "source_count": 8, "status": "accepted", "is_topic": true}
+  ],
+  "topics": [
+    {"topic": "case-study", "count": 5}
+  ],
+  "suggested_count": 7
+}
+```
+
+- `stats`：即 `GET /api/domains` 中该域那条。
+- `collections`：精简集合卡（非完整 `CollectionResponse`），仅 `id/name/job_count/is_subscription/source_id/sync_enabled`。
+- `recent_jobs`：最近 12 条，字段同 `JobResponse` 子集（`job_id/content_type/status/created_at/title/progress_pct/source/domain/collection_id`）。
+- `top_concepts`：术语 Top 30（含 `suggested` 候选，各带 `status`），按 `source_count`（佐证来源数）降序；`is_topic` 标记是否为主题概念。
+- `topics`：该域所有 job 的 `style_tags` 去重计数，按 count 降序。
+- `suggested_count`：状态为 `suggested` 的候选术语数。
+
+错误：`404` 领域不存在。
+
+#### GET /api/domains/{domain}/topic-concepts — 主题概念列表
+
+该领域中被标为主题（`is_topic=1`）的概念，按出现数降序，空则 `[]`。Response `200`：
+
+```json
+[
+  {
+    "term": "Transformer",
+    "definition": "…",
+    "occurrence_count": 8,
+    "related": ["Attention", "Self-Attention"],
+    "is_topic": true
+  }
+]
+```
+
+#### GET /api/domains/{domain}/terms/{term} — 概念详情
+
+定义 + 出现处 + 关联概念。Response `200`（即 db 的 glossary 行，字段同 `GlossaryTermResponse`）：
+
+```json
+{
+  "domain": "deep-learning",
+  "term": "Transformer",
+  "definition": "…",
+  "occurrences": [
+    {"job_id": "j_xxx", "content_type": "video", "location": "…"}
+  ],
+  "related": ["Attention"],
+  "status": "accepted",
+  "is_topic": true,
+  "definition_locked": false,
+  "created_at": "2026-05-16T20:00:00+08:00",
+  "updated_at": "2026-05-16T20:00:00+08:00"
+}
+```
+
+`status`：`accepted` / `suggested`。错误：`404` 术语不存在。
+
+#### GET /api/domains/{domain}/topics/{topic} — 主题页
+
+该领域内 `style_tags` 含该标签的内容（跨集合 / 跨来源聚合）。`limit`（默认 50，1–200）。Response `200`：
+
+```json
+{
+  "domain": "deep-learning",
+  "topic": "case-study",
+  "jobs": [
+    {"job_id": "j_xxx", "content_type": "video", "status": "done", "created_at": "…", "title": "…", "progress_pct": 100, "source": "bilibili", "domain": "deep-learning", "collection_id": "c_xxx"}
+  ],
+  "total": 5
+}
+```
+
+`total` 为本次返回（受 `limit` 截断后）的 `jobs` 条数，非全量计数。
+
+### 1.10 术语库 / 概念图
+
+> 按 `domain` 维度维护的术语表。术语有两种来源：AI 抽取步骤自动采集（落 `status=suggested` 候选）、用户手动新增（直接 `accepted`）。`accepted` 的术语会同步进对应 domain 的 `Profile.terminology`，供后续 AI 步骤复用。`is_topic` 标记主题概念，用于概念图。主键为 `(domain, term)`。
+
+所有端点走 Basic/Token 鉴权。`domain` / `term` 路径段不得含 `..`、`/`、`\x00`，否则 `400`。
+
+**`GlossaryTermResponse` 字段**：
+
+```json
+{
+  "domain": "deep-learning",
+  "term": "注意力机制",
+  "definition": "一种让模型动态聚焦输入关键部分的机制",
+  "occurrences": [
+    {"job_id": "j_20260516_abc123", "content_type": "video", "location": "scene-12"}
+  ],
+  "related": ["Transformer", "自注意力"],
+  "status": "accepted",
+  "is_topic": true,
+  "definition_locked": false,
+  "created_at": "2026-05-16T20:00:00+08:00"
+}
+```
+
+- `status`：`suggested`（AI 采集的候选，待审）/ `accepted`（已采纳）。
+- `occurrences`：该术语出现过的来源，元素 `{job_id, content_type, location}`，由抽取步骤累积。
+- `is_topic`：是否为主题概念。`definition_locked`：定义是否已钉住（钉住后自动采集不再覆盖定义）。
+- `created_at`：ISO8601；缺失时为空串 `""`。
+
+#### GET /api/glossary — 列术语
+
+可按 `domain` / `status` 过滤（均可选），按 `term` 升序返回。
+
+```
+GET /api/glossary?domain=deep-learning&status=suggested
+```
+
+Response `200`：`GlossaryTermResponse` 数组（同上结构）。
+
+#### POST /api/glossary?domain= — 手动新增术语
+
+直接落 `status=accepted` 并同步进 `Profile.terminology`。`domain` 为 query 参数（必填），术语内容在 body。`term` 去空白后不得为空，否则 `400`。
+
+```bash
+curl -X POST "http://localhost:8000/api/glossary?domain=deep-learning" \
+  -H "Content-Type: application/json" \
+  -d '{"term": "注意力机制", "definition": "动态聚焦输入关键部分", "related": ["Transformer"]}'
+```
+
+请求体 `GlossaryTermRequest`：
+
+```json
+{"term": "注意力机制", "definition": "可省略", "related": ["可省略"]}
+```
+
+Response `201`：`GlossaryTermResponse`（`status` 恒为 `accepted`）。
+
+#### GET /api/glossary/{domain}/{term} — 术语详情
+
+含 `occurrences` 关联来源列表。未命中 `404`。Response `200`：`GlossaryTermResponse`。
+
+#### PUT /api/glossary/{domain}/{term} — 修改术语
+
+仅改 `definition` / `related`；不动 `status` / `occurrences` / `is_topic`。body 中字段为 `null`（或省略）则保留原值。未命中 `404`。
+
+```bash
+curl -X PUT "http://localhost:8000/api/glossary/deep-learning/注意力机制" \
+  -H "Content-Type: application/json" \
+  -d '{"definition": "更新后的定义", "related": ["Transformer", "自注意力"]}'
+```
+
+Response `200`：更新后的 `GlossaryTermResponse`。
+
+#### DELETE /api/glossary/{domain}/{term} — 删除术语
+
+仅删术语表记录，不动 `Profile`（避免误删手工维护的条目）。Response `204`。
+
+#### POST /api/glossary/{domain}/{term}/accept — 采纳候选
+
+候选术语 `status` → `accepted`，并把定义同步进 `Profile.terminology`，使后续 AI 步骤可用。未命中 `404`。
+
+```bash
+curl -X POST "http://localhost:8000/api/glossary/deep-learning/注意力机制/accept"
+```
+
+Response `200`：更新后的 `GlossaryTermResponse`（`status=accepted`）。
+
+#### POST /api/glossary/{domain}/{term}/topic — 标记/取消主题概念
+
+置该术语 `is_topic`。未命中 `404`。请求体：
+
+```json
+{"is_topic": true}
+```
+
+```bash
+curl -X POST "http://localhost:8000/api/glossary/deep-learning/注意力机制/topic" \
+  -H "Content-Type: application/json" \
+  -d '{"is_topic": true}'
+```
+
+Response `200`：更新后的 `GlossaryTermResponse`。
+
+### 1.11 全文检索
+
+#### GET /api/search — 笔记全文检索
+
+基于 SQLite FTS5（`trigram` tokenizer，对中文做子串匹配）。**`q` 至少 3 个字符才可能命中**，更短或空查询直接返回空结果（`total: 0`）。`q` 经服务端转义防 MATCH 注入。
+
+```bash
+curl "http://localhost:8000/api/search?q=注意力机制&domain=deep-learning&limit=20"
+```
+
+查询参数：
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `q` | `""` | 检索词；trigram 至少 3 字符 |
+| `collection_id` | — | 限定集合 |
+| `domain` | — | 限定领域 |
+| `content_type` | — | 限定内容类型（video/paper/article/audio） |
+| `limit` | 20 | 1–100 |
+| `offset` | 0 | ≥0 |
+
+Response `200`（`note_type` 区分命中的是哪类笔记，如 `smart`/`mechanical`/`transcript`；`snippet` 带 `<mark>` 高亮标签、`…` 省略号）：
+```json
+{
+  "total": 7,
+  "items": [
+    {
+      "job_id": "j_20260516_abc123",
+      "title": "示例视频标题",
+      "note_type": "smart",
+      "snippet": "…介绍了<mark>注意力机制</mark>的核心思想…",
+      "content_type": "video",
+      "domain": "deep-learning",
+      "collection_id": "c_xxx"
+    }
+  ]
+}
+```
+
+### 1.12 Profile 管理（`/api/profiles/*`）
+
+每个 domain 一个 `prompts/profiles/{domain}.yaml`，承载该领域的角色设定/输出风格/术语表（`terminology`），供生成笔记时注入 prompt。术语库采纳一条术语时会同步写入对应 Profile 的 `terminology`。
+
+```
+GET    /api/profiles                      → Profile 列表（每个 domain 概览）
+GET    /api/profiles/{domain}             → 单个 Profile 全文
+PUT    /api/profiles/{domain}             → 创建/更新 Profile（不存在则建）
+POST   /api/profiles/{domain}/terms       → 追加一条术语（去重）
+DELETE /api/profiles/{domain}/terms/{term} → 删除一条术语
+```
+
+#### GET /api/profiles
+
+Response `200`（数组）：
+```json
+[
+  {"domain": "deep-learning", "role": "资深深度学习研究员", "terminology_count": 42}
+]
+```
+
+#### GET /api/profiles/{domain}
+
+返回该 domain 的 YAML 解析结果原样。不存在返回 `404 profile '<domain>' not found`。
+```json
+{
+  "domain": "deep-learning",
+  "role": "资深深度学习研究员",
+  "domain_context": "...",
+  "output_style": {"...": "..."},
+  "terminology": ["注意力机制: 让模型聚焦关键输入的加权机制", "梯度下降"],
+  "do_not": ["不要逐字翻译英文术语"]
+}
+```
+
+#### PUT /api/profiles/{domain}
+
+请求体（全部可选，仅传入字段被更新，其余保留；Profile 不存在则新建）：
+```json
+{
+  "role": "资深深度学习研究员",
+  "domain_context": "...",
+  "output_style": {"tone": "严谨"},
+  "terminology": ["注意力机制", "梯度下降"],
+  "do_not": ["不要逐字翻译英文术语"]
+}
+```
+Response `200`：返回更新后的完整 Profile（同 `GET`）。
+
+#### POST /api/profiles/{domain}/terms
+
+请求体 `{"term": "梯度下降"}`。已存在则不重复追加。Profile 不存在返回 `404`。Response `200`：
+```json
+{"terminology": ["注意力机制", "梯度下降"]}
+```
+
+#### DELETE /api/profiles/{domain}/terms/{term}
+
+按裸字符串精确匹配从 `terminology` 移除该条。Profile 不存在返回 `404`。Response `200`：
+```json
+{"terminology": ["注意力机制"]}
+```
+
+`domain` / `term` 含 `..` `/` `\x00` 返回 `400 invalid domain name`。
+
+### 1.13 AI Provider 列表
+
+#### POST /api/jobs/{id}/rerun — 强制重跑
+
+请求体 `{"from_step": "08_smart"}`（必填）。`from_step` 须是该 pipeline 内的步骤名，会清除该步骤及所有下游的 `.done` 标记，由指纹机制决定哪些实际重跑。
+
+#### POST /api/jobs/{id}/rerun-smart — 换 provider 重跑智能笔记 + 评审
+
+用指定 AI provider 重新生成智能笔记并重评（生成新版本，旧版本保留）。服务端把 provider 覆盖写进 `job.json` 的 `ai_overrides`（智能/评审步读取，worker rerun 时 pull 到新 `job.json`），再从智能步起重跑。
+
+```bash
+curl -X POST http://localhost:8000/api/jobs/j_xxx/rerun-smart \
+  -d '{"provider": "anthropic"}'
+```
+
+请求体：`{"provider": "anthropic"}`（必填，须是 `GET /api/providers` 列出且 `available=true` 的 provider）。
+
+写入 `job.json`（关键字段）：
+```json
+{"ai_overrides": {"10_smart": "anthropic", "11_review": "anthropic"}}
+```
+
+Response `200`:
+```json
+{"job_id": "j_20260516_abc123", "status": "processing", "provider": "anthropic"}
+```
+
+provider 不可用（未配 API key）返回 `400 provider '<name>' 不可用(未配置 API key)`。
 
 ## 2. WebSocket
 
@@ -718,24 +1228,41 @@ exclusive_groups:
 
 ### 4.8 review.json — 评审结果
 
+智能笔记的质量评审（评最新版智能笔记）。6 维度评分（每项 1–5 整数）+ `overall`（缺失时按维度均值自动补，保留 1 位小数）+ 三类附加产出。评审步写两份：`output/review.json`（最新，供术语采集/默认读取）+ 按所评笔记版本 1:1 落一份版本化评审。`note_file` / `provider` / `model` / `generated_at` 由落盘时补记。
+
+- `key_terms`：这篇笔记**讲清楚**的关键概念 + 一句话候选定义 →（经术语库采纳后）沉淀进概念库。
+- `missing_concepts`：笔记**遗漏**的重要概念，知识缺口，**仅供评审面板/选题查漏，不入库**。
+- `top3_improvements`：最重要的 3 条改进建议。
+- `parse_failed`：AI 未返回有效 JSON 时落 fallback（各维度记 3、`top3_improvements` 提示重试），此字段标 `true`（写入步骤 meta，供前端提示重评）。
+
 ```json
 {
-  "overall": 5,
-  "scores": {
-    "completeness": 5,
-    "accuracy": 5,
-    "structure": 4,
-    "terminology": 5,
-    "readability": 5,
-    "screenshots": 4
-  },
+  "completeness": 5,
+  "accuracy": 5,
+  "structure": 4,
+  "terminology": 5,
+  "visual_integration": 4,
+  "readability": 5,
+  "overall": 4.7,
+  "key_terms": [
+    {"term": "多头注意力", "definition": "并行多组注意力以捕捉不同子空间的依赖关系"},
+    {"term": "位置编码", "definition": "为无序的 token 序列注入位置信息的向量"}
+  ],
   "missing_concepts": ["多头注意力的具体计算流程"],
   "top3_improvements": [
     "可以补充更多训练曲线的解读",
-    "弹幕提到的关联论文可以展开"
-  ]
+    "弹幕提到的关联论文可以展开",
+    "术语首次出现处建议加一句解释"
+  ],
+  "note_file": "output/versions/notes_smart_anthropic_claude-sonnet-4-6_20260516-200500.md",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "generated_at": "2026/05/16 20:05:30"
 }
 ```
+
+> 旧 schema 已废弃：分数不再嵌套进 `scores` 子对象（现为顶层扁平整数键），`screenshots` 维度更名为 `visual_integration`，并新增 `visual_integration` 之外的 `key_terms` 输出。
+
 
 ## 5. 错误码
 
