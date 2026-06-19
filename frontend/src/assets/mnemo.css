@@ -379,6 +379,9 @@ textarea.input{resize:vertical;min-height:64px;line-height:1.5}
 @media(max-width:1180px){
   .search input,.search .kbd{display:none}
   .search{width:auto;padding:8px}
+  /* 但点击就地展开后，仍要露出输入框与下拉（覆盖上面的退化） */
+  .search.expanded{width:480px;padding:7px 11px}
+  .search.expanded input{display:block}
 }
 .crumb.tight .seg-mid{display:none}
 .crumb.tight .seg-ell{display:inline}
@@ -565,3 +568,59 @@ mark{background:var(--brand-100);color:var(--brand-700);padding:0 2px;border-rad
 /* ---- 顶栏返回箭头（用面包屑父级） ---- */
 .crumb-back{display:grid;place-items:center;width:28px;height:28px;border-radius:var(--r-sm);color:var(--ink-500);flex:none;transition:.12s;margin-right:-4px}
 .crumb-back:hover{background:var(--line-soft);color:var(--ink-900)}
+
+/* ---- rail 折叠补充：图标居中 + tooltip 不被裁切 + 4 级树隐藏 ---- */
+.app.rail .side{overflow:visible}                 /* 让 [data-tip] 悬浮提示溢出可见 */
+.app.rail .nav{align-items:stretch}
+.app.rail .side-tools .tool{width:36px}
+.app.rail .nav .nb-group,.app.rail .nav .sub-item.new{display:none}  /* 折叠时整棵知识库子树只留顶层「知识库」图标 */
+
+/* ---- 顶栏汉堡（仅移动端显示）---- */
+.hamburger{display:none;place-items:center;width:30px;height:30px;border-radius:var(--r-sm);color:var(--ink-600);flex:none;margin-right:-4px;transition:.12s}
+.hamburger:hover{background:var(--line-soft);color:var(--ink-900)}
+.hamburger svg{width:18px;height:18px}
+
+/* ---- 移动端抽屉遮罩（桌面隐藏）---- */
+.scrim{display:none}
+
+/* ============================================================================
+   移动端响应式（<768px）：单列 + 侧栏化为左侧抽屉
+   桌面端（≥768px）布局完全不受影响。
+   ============================================================================ */
+@media(max-width:767px){
+  /* 单列：侧栏脱离网格，主区占满 */
+  .app,.app.rail{grid-template-columns:1fr}
+  /* 折叠态在移动端无意义：强制按全宽抽屉渲染（覆盖 .app.rail 的窄侧栏视觉） */
+  .app.rail .side{width:264px;padding:16px 12px;align-items:stretch;overflow:auto}
+  .app.rail .brand{justify-content:flex-start;padding:6px 8px 14px}
+  .app.rail .brand b,.app.rail .btn-submit span,.app.rail .nav a span{display:inline}
+  .app.rail .btn-submit{padding:10px}
+  .app.rail .nav a{justify-content:flex-start;padding:8px 10px}
+  .app.rail .top-row{flex-direction:row}
+  .app.rail .top-tool{width:40px}
+  .app.rail .side-tools{flex-direction:row}
+  .app.rail .side-tools .tool{width:36px}
+  .app.rail .side-tools .tool.collapse svg{transform:none}
+  .app.rail .nav .sub-list,.app.rail .nav .nb-group,.app.rail .nav .sub-item.new{display:flex}
+
+  /* 抽屉：固定在左侧，默认滑出屏幕，.open 时滑入 */
+  .side{position:fixed;top:0;left:0;z-index:50;width:264px;height:100vh;height:100dvh;
+    transform:translateX(-100%);transition:transform .22s ease;box-shadow:var(--sh-lg);overflow:auto}
+  .side.open{transform:translateX(0)}
+
+  /* 遮罩：抽屉打开时铺满，点击关闭 */
+  .scrim{display:block;position:fixed;inset:0;z-index:40;background:rgba(15,23,42,.4);
+    backdrop-filter:blur(1px);opacity:0;pointer-events:none;transition:opacity .22s ease}
+  .app.mobile-open .scrim{opacity:1;pointer-events:auto}
+
+  /* 顶栏：露出汉堡，收紧左右内边距，隐藏折叠按钮（抽屉模式下无意义） */
+  .hamburger{display:grid}
+  .topbar{padding:12px 14px;gap:10px}
+  .side-tools .tool.collapse{display:none}
+
+  /* 搜索展开宽度收敛到视口内，避免溢出 */
+  .search.expanded{width:min(480px,calc(100vw - 28px))}
+
+  /* 正文左右留白收紧 */
+  .page{padding:18px 16px 56px}
+}

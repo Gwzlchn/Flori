@@ -1,10 +1,16 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowLeft, Search } from 'lucide-vue-next'
+import { ArrowLeft, Search, Menu, Play, FileText, Newspaper, Headphones } from 'lucide-vue-next'
+import { useApi } from '../../composables/useApi'
+import type { SearchResponse, SearchResultItem } from '../../types'
+
+// 移动端汉堡：开合左侧抽屉。桌面端隐藏（CSS 媒体查询控制）。
+defineEmits<{ (e: 'toggle-mobile'): void }>()
 
 const route = useRoute()
 const router = useRouter()
+const api = useApi()
 const q = ref('')
 
 interface Seg { t: string; to?: string }
@@ -38,14 +44,99 @@ function goBack() {
   for (let i = cs.length - 2; i >= 0; i--) if (cs[i].to) { router.push(cs[i].to!); return }
   router.push('/')
 }
-function runSearch() {
-  const v = q.value.trim()
-  if (v) router.push(`/search?q=${encodeURIComponent(v)}`)
+
+// ===== 顶栏搜索：就地展开 + 下拉建议（不直接跳转） =====
+const expanded = ref(false)
+const suggestions = ref<SearchResultItem[]>([])
+const loading = ref(false)
+const wrapEl = ref<HTMLElement | null>(null)
+const inputEl = ref<HTMLInputElement | null>(null)
+
+// 笔记类型徽章：与后端 note_type 取值对齐（与 SearchView 一致）。
+const NOTE_TYPE_LABELS: Record<string, string> = {
+  smart: '智能笔记',
+  mechanical: '机械稿',
+  transcript: '逐字稿',
 }
+// 内容类型 → type-pill 配色类 + 图标（与 SearchView 一致）。
+const PILL_CLASS: Record<string, string> = {
+  video: 't-video', paper: 't-paper', article: 't-article', audio: 't-audio',
+}
+const PILL_ICON: Record<string, any> = {
+  video: Play, paper: FileText, article: Newspaper, audio: Headphones,
+}
+
+const term = computed(() => q.value.trim())
+
+function expand() {
+  expanded.value = true
+}
+
+function collapse() {
+  expanded.value = false
+}
+
+// 输入防抖：停止键入 ~250ms 后再查；q≥3 字符才打 API。
+let timer: ReturnType<typeof setTimeout> | undefined
+function onInput() {
+  if (timer) clearTimeout(timer)
+  if (term.value.length < 3) {
+    suggestions.value = []
+    loading.value = false
+    return
+  }
+  loading.value = true
+  timer = setTimeout(fetchSuggestions, 250)
+}
+
+async function fetchSuggestions() {
+  const v = term.value
+  if (v.length < 3) { suggestions.value = []; loading.value = false; return }
+  try {
+    const r = await api.get<SearchResponse>(`/api/search?q=${encodeURIComponent(v)}&limit=5`)
+    // 仅在查询词未变时回填，避免乱序竞态。
+    if (v === term.value) suggestions.value = r.items.slice(0, 5)
+  } catch {
+    if (v === term.value) suggestions.value = []
+  } finally {
+    if (v === term.value) loading.value = false
+  }
+}
+
+// 点建议 → 内容详情。
+function openItem(item: SearchResultItem) {
+  collapse()
+  router.push(`/content/${encodeURIComponent(item.job_id)}`)
+}
+
+// 回车 / 「查看全部」→ 搜索页。
+function runSearch() {
+  const v = term.value
+  if (!v) return
+  collapse()
+  router.push(`/search?q=${encodeURIComponent(v)}`)
+}
+
+function onEsc() {
+  collapse()
+  inputEl.value?.blur()
+}
+
+// 点外部收起。
+function onDocClick(e: MouseEvent) {
+  if (!expanded.value) return
+  if (wrapEl.value && !wrapEl.value.contains(e.target as Node)) collapse()
+}
+document.addEventListener('click', onDocClick)
+onBeforeUnmount(() => {
+  document.removeEventListener('click', onDocClick)
+  if (timer) clearTimeout(timer)
+})
 </script>
 
 <template>
   <div class="topbar">
+    <button class="hamburger" title="菜单" @click="$emit('toggle-mobile')"><Menu :size="18" /></button>
     <button v-if="canBack" class="crumb-back" title="返回" @click="goBack"><ArrowLeft :size="16" /></button>
     <div class="crumb">
       <template v-for="(s, i) in crumbs" :key="i">
@@ -54,13 +145,58 @@ function runSearch() {
         <b v-else :class="i === crumbs.length - 1 ? 'seg-last' : ''">{{ s.t }}</b>
       </template>
     </div>
-    <div class="search" @keydown.enter="runSearch">
+
+    <div
+      ref="wrapEl"
+      class="search"
+      :class="{ expanded }"
+      @click="expand"
+      @keydown.enter="runSearch"
+      @keydown.esc="onEsc"
+    >
       <Search :size="15" />
-      <input v-model="q" placeholder="搜索概念或内容…" />
+      <input
+        ref="inputEl"
+        v-model="q"
+        placeholder="搜索概念或内容…"
+        @focus="expand"
+        @input="onInput"
+      />
+
+      <div v-if="expanded" class="search-pop" @click.stop>
+        <div class="sp-hd">
+          <template v-if="term.length < 3">输入至少 3 个字符开始搜索</template>
+          <template v-else-if="loading">搜索中…</template>
+          <template v-else-if="suggestions.length">结果 “{{ term }}”</template>
+          <template v-else>没有匹配「{{ term }}」的内容</template>
+        </div>
+
+        <a
+          v-for="item in suggestions"
+          :key="`${item.job_id}-${item.note_type}`"
+          class="sp-row"
+          @click="openItem(item)"
+        >
+          <span class="sp-tag">{{ NOTE_TYPE_LABELS[item.note_type] || item.note_type }}</span>
+          <span class="sp-pill type-pill" :class="PILL_CLASS[item.content_type] || 't-article'">
+            <component :is="PILL_ICON[item.content_type] || Newspaper" :size="13" />
+          </span>
+          <div style="min-width:0;flex:1">
+            <div class="sp-t">{{ item.title || item.job_id }}</div>
+            <div class="sp-d">{{ item.domain && item.domain !== 'general' ? item.domain : '通用' }}</div>
+          </div>
+        </a>
+
+        <a v-if="term.length >= 3" class="sp-foot" @click="runSearch">
+          在搜索页查看全部结果 <Search :size="13" />
+        </a>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
 .crumb-sep { color: var(--ink-300); }
+/* 下拉里的小 type-pill：缩到 22px，配色沿用 .type-pill 既有类。 */
+.sp-pill { width: 22px; height: 22px; border-radius: 6px; }
 </style>
