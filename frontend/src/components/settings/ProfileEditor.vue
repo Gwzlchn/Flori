@@ -2,7 +2,7 @@
 import { ref, onMounted, inject } from 'vue'
 import { useApi } from '../../composables/useApi'
 import type { ProfileDetail } from '../../types'
-import * as L from 'lucide-vue-next'
+import { resolveIcon, ICON_NAMES } from '../../utils/kbIcons'
 import { X, Plus, Trash2, SlidersHorizontal, Check, Lightbulb } from 'lucide-vue-next'
 
 const props = defineProps<{ domain: string }>()
@@ -23,15 +23,9 @@ const newTerm = ref('')
 const newDoNot = ref('')
 
 // 图标 / 配色候选（与 HomeView 新建弹窗一致）。
-const ICON_NAMES = ['brain', 'cpu', 'coins', 'atom', 'dna', 'flask-conical', 'book', 'graduation-cap']
 const COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ec4899', '#64748b']
 
-// 图标名字符串（lucide kebab-case）→ 组件解析器。
-function iconComp(name?: string) {
-  if (!name) return null
-  const p = name.split('-').map((s) => s.charAt(0).toUpperCase() + s.slice(1)).join('')
-  return (L as any)[p] || null
-}
+// 图标名→组件解析改用 utils/kbIcons 的 resolveIcon。
 
 onMounted(async () => {
   try {
@@ -129,7 +123,7 @@ async function save() {
           <div class="icon-grid">
             <button v-for="name in ICON_NAMES" :key="name" class="icon-pick"
               :class="{ on: icon === name }" @click="icon = name">
-              <component :is="iconComp(name) || Lightbulb" :size="18" />
+              <component :is="resolveIcon(name) || Lightbulb" :size="18" />
             </button>
           </div>
           <div class="note-tip">挑一个 lucide 图标，配色见下。</div>

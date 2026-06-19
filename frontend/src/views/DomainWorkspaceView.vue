@@ -7,7 +7,7 @@ import ProfileEditor from '../components/settings/ProfileEditor.vue'
 import ConceptTimeline from '../components/ConceptTimeline.vue'
 import { fmtDateTime } from '../utils/datetime'
 import type { JobSummary } from '../types'
-import * as L from 'lucide-vue-next'
+import { resolveIcon } from '../utils/kbIcons'
 import {
   SlidersHorizontal, RefreshCw, Folder, Lightbulb, BarChart3,
   Plus, Settings2, Rss, Inbox, ChevronRight, Sparkles, Bookmark,
@@ -86,13 +86,8 @@ function hash(s: string): number {
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0
   return Math.abs(h)
 }
-// 图标名字符串（lucide kebab-case）→ 组件解析器（与总览页一致）。
-function iconComp(name?: string) {
-  if (!name) return null
-  const p = name.split('-').map((s) => s.charAt(0).toUpperCase() + s.slice(1)).join('')
-  return (L as any)[p] || null
-}
-const headIcon = computed(() => iconComp(data.value?.stats?.icon) || ICONS[hash(domain.value) % ICONS.length])
+// 图标名→组件解析改用 utils/kbIcons 的 resolveIcon（与总览页一致）。
+const headIcon = computed(() => resolveIcon(data.value?.stats?.icon) || ICONS[hash(domain.value) % ICONS.length])
 const headGradient = computed(() => data.value?.stats?.color || GRADIENTS[hash(domain.value) % GRADIENTS.length])
 const headName = computed(() => data.value?.stats?.display_name || domain.value)
 

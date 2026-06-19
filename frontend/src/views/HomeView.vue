@@ -5,7 +5,7 @@ import { storeToRefs } from 'pinia'
 import { useDomainStore } from '../stores/domains'
 import { fmtDateTime } from '../utils/datetime'
 import type { DomainOverview } from '../types'
-import * as L from 'lucide-vue-next'
+import { resolveIcon, ICON_NAMES } from '../utils/kbIcons'
 import {
   BookMarked, Plus, Inbox, Folder, FileText, Lightbulb,
   Rss, X, Check,
@@ -23,12 +23,7 @@ const error = ref('')
 
 const hasDomains = computed(() => domains.value.length > 0)
 
-// 图标名字符串（lucide kebab-case）→ 组件解析器：profile 存的是名字，渲染时解析。
-function iconComp(name?: string) {
-  if (!name) return null
-  const p = name.split('-').map((s) => s.charAt(0).toUpperCase() + s.slice(1)).join('')
-  return (L as any)[p] || null
-}
+// 图标名→组件解析改用 utils/kbIcons 的 resolveIcon（精选集，避免 import * 拖入整库）。
 
 // ── 身份图标 + 渐变色块：按知识库名哈希出稳定的图标/配色（缺 profile 元数据时回退保证稳定） ──
 const ICONS = [Cpu, Atom, Dna, Code, Database, Globe, FlaskConical, BookOpen,
@@ -54,7 +49,7 @@ function gradientFor(name: string): string {
 }
 // 卡片身份：优先用 profile 的 icon/color/display_name，缺失才回退哈希派生。
 function cardIcon(d: DomainOverview) {
-  return iconComp(d.icon) || iconFor(d.domain)
+  return resolveIcon(d.icon) || iconFor(d.domain)
 }
 function cardBg(d: DomainOverview): string {
   return d.color || gradientFor(d.domain)
@@ -93,7 +88,6 @@ function activeAgo(v: string | null): string {
 
 // ── 新建知识库内联弹窗（参考原型 #home 的 m-domain）：提交真正调 domainStore.create ──
 // 可选图标（存 lucide 名字符串入 profile.icon）与配色（存 #hex 入 profile.color）。
-const ICON_NAMES = ['brain', 'cpu', 'coins', 'atom', 'dna', 'flask-conical', 'book', 'graduation-cap']
 const COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ec4899', '#64748b']
 const showCreate = ref(false)
 const draftDomain = ref('')   // 英文 slug → payload.domain（URL/过滤标识，必填）
@@ -233,7 +227,7 @@ onMounted(loadDomains)
             <div class="icon-grid">
               <button v-for="name in ICON_NAMES" :key="name" class="icon-pick"
                 :class="{ on: draftIcon === name }" @click="draftIcon = name">
-                <component :is="iconComp(name) || Lightbulb" :size="18" />
+                <component :is="resolveIcon(name) || Lightbulb" :size="18" />
               </button>
             </div>
             <div class="note-tip">从图标库挑一个，配色见下。</div>
