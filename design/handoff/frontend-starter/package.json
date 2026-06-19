@@ -1,0 +1,23 @@
+{
+  "name": "mnemo-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Mnemo 前端起步工程（Vue 3 + Vue Router 4）。样式复用 mnemo.css 设计系统。",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "lucide-vue-next": "^0.460.0",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "vue-tsc": "^2.2.0"
+  }
+}

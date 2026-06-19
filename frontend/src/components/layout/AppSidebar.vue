@@ -1,41 +1,125 @@
 <script setup lang="ts">
-import { useRoute } from 'vue-router'
-import { Layers, ListTodo, Search, Settings } from 'lucide-vue-next'
+import { reactive, onMounted, inject } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { useDomainStore } from '../../stores/domains'
+import { useApi } from '../../composables/useApi'
+import {
+  Send, Inbox, BookMarked, Lightbulb, ChevronRight,
+  Rss, Folder, Server, Settings, PanelLeftClose, Plus,
+} from 'lucide-vue-next'
+
+defineEmits<{ (e: 'toggle-rail'): void }>()
 
 const route = useRoute()
+const router = useRouter()
+const domainStore = useDomainStore()
+const api = useApi()
+const showToast = inject<(m: string, t?: string) => void>('showToast', () => {})
 
-// 领域中心 IA：领域为锚 + 跨域逃生口(全部内容/搜索) + 设置(含 Worker 运维)。
-// 集合/术语在领域工作台内归口，不占顶级导航。
-const navItems = [
-  { path: '/', label: '领域', icon: Layers },
-  { path: '/jobs', label: '全部内容', icon: ListTodo },
-  { path: '/search', label: '搜索', icon: Search },
-  { path: '/settings', label: '设置', icon: Settings },
-]
+// 4 级树的展开态与懒加载缓存(本地维护,避免 store 单数组被多知识库覆盖)
+const expandedKb = reactive<Record<string, boolean>>({})
+const expandedCol = reactive<Record<string, boolean>>({})
+const kbCols = reactive<Record<string, any[]>>({})
+const colItems = reactive<Record<string, any[]>>({})
 
-function isActive(path: string) {
-  // 领域(/) 在领域总览与领域工作台(/domains/*)下都高亮；集合详情也归领域。
-  if (path === '/') return route.path === '/' || route.path.startsWith('/domains') || route.path.startsWith('/collections')
-  return route.path.startsWith(path)
+onMounted(() => { if (!domainStore.domains.length) domainStore.fetchAll() })
+
+async function toggleKb(d: string) {
+  expandedKb[d] = !expandedKb[d]
+  if (expandedKb[d] && !kbCols[d]) {
+    try {
+      const r: any = await api.get(`/api/collections?domain=${encodeURIComponent(d)}`)
+      kbCols[d] = r.collections ?? r ?? []
+    } catch { kbCols[d] = [] }
+  }
 }
+async function toggleCol(id: string) {
+  expandedCol[id] = !expandedCol[id]
+  if (expandedCol[id] && !colItems[id]) {
+    try {
+      const r: any = await api.get(`/api/collections/${id}/jobs?limit=20`)
+      colItems[id] = r.items ?? r ?? []
+    } catch { colItems[id] = [] }
+  }
+}
+
+// 知识库色点:按名字哈希出柔和色
+function kbColor(d: string) {
+  let h = 0
+  for (const c of d) h = (h * 31 + c.charCodeAt(0)) % 360
+  return `hsl(${h} 52% 62%)`
+}
+
+const isKbActive = (d: string) =>
+  route.path === `/kb/${d}` || route.path.startsWith(`/kb/${encodeURIComponent(d)}`)
 </script>
 
 <template>
-  <aside class="w-56 bg-white border-r border-gray-200 flex flex-col h-screen sticky top-0">
-    <div class="p-4 border-b border-gray-200">
-      <h1 class="text-lg font-bold text-gray-800">Mnemo</h1>
+  <aside class="side">
+    <div class="brand">
+      <div class="logo" @click="router.push('/')">M</div>
+      <b>Mnemo</b>
     </div>
-    <nav class="flex-1 py-2">
-      <router-link
-        v-for="item in navItems"
-        :key="item.path"
-        :to="item.path"
-        class="flex items-center gap-3 px-4 py-2.5 mx-2 rounded-lg text-sm transition-colors"
-        :class="isActive(item.path) ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-600 hover:bg-gray-50'"
-      >
-        <component :is="item.icon" :size="18" />
-        <span>{{ item.label }}</span>
-      </router-link>
+
+    <div class="top-row">
+      <button class="btn-submit" @click="router.push('/content')"><Send :size="16" /><span>投递内容</span></button>
+      <button class="top-tool" :class="{ on: route.name === 'content' }" title="所有来源" @click="router.push('/content')">
+        <Inbox :size="18" />
+      </button>
+    </div>
+
+    <nav class="nav">
+      <a :class="{ on: route.path === '/' }" @click="router.push('/')"><BookMarked :size="16" /><span>知识库</span></a>
+
+      <div class="sub-list">
+        <div class="nb-group" v-for="d in domainStore.domains" :key="d.domain">
+          <div class="sub-item" :class="{ on: isKbActive(d.domain) }">
+            <span class="kb-caret" :class="{ open: expandedKb[d.domain] }" @click.stop="toggleKb(d.domain)">
+              <ChevronRight :size="14" />
+            </span>
+            <span class="nb-dot" :style="{ background: kbColor(d.domain) }" />
+            <span class="nb-name" @click="router.push(`/kb/${encodeURIComponent(d.domain)}`)">{{ d.domain }}</span>
+          </div>
+
+          <div class="kb-sources" :class="{ open: expandedKb[d.domain] }">
+            <div class="src-group" v-for="c in (kbCols[d.domain] || [])" :key="c.id">
+              <div class="src-item">
+                <span class="src-caret" :class="{ open: expandedCol[c.id] }" @click.stop="toggleCol(c.id)">
+                  <ChevronRight :size="14" />
+                </span>
+                <component :is="c.subscription?.enabled ? Rss : Folder" :size="14" />
+                <span class="nb-name" @click="router.push(`/collections/${c.id}`)">{{ c.name }}</span>
+              </div>
+              <div class="src-content" :class="{ open: expandedCol[c.id] }">
+                <div class="content-item" v-for="j in (colItems[c.id] || [])" :key="j.job_id"
+                     @click="router.push(`/content/${j.job_id}`)">
+                  <span class="ci-dot" :style="{ background: kbColor(d.domain) }" />
+                  <span>{{ j.title || j.job_id }}</span>
+                </div>
+                <div class="content-item more" v-if="expandedCol[c.id] && !(colItems[c.id] || []).length">空</div>
+              </div>
+            </div>
+            <div class="src-item" v-if="expandedKb[d.domain] && !(kbCols[d.domain] || []).length"
+                 style="color:var(--ink-400);padding-left:24px">暂无集合</div>
+          </div>
+        </div>
+
+        <a class="sub-item new" @click="showToast('新建知识库弹窗将在 Phase 2 接入', 'info')">
+          <Plus :size="15" /><span>新建知识库</span>
+        </a>
+      </div>
+
+      <a :class="{ on: route.name === 'glossary' }" @click="router.push('/glossary')"><Lightbulb :size="16" /><span>概念库</span></a>
     </nav>
+
+    <div class="side-tools">
+      <button class="tool" :class="{ on: route.path.startsWith('/system') }" title="系统" @click="router.push('/system')"><Server :size="17" /></button>
+      <button class="tool" :class="{ on: route.name === 'settings' }" title="设置" @click="router.push('/settings')"><Settings :size="17" /></button>
+      <button class="tool collapse" title="折叠侧栏" @click="$emit('toggle-rail')"><PanelLeftClose :size="17" /></button>
+    </div>
   </aside>
 </template>
+
+<style scoped>
+.nb-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>

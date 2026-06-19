@@ -2,21 +2,21 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useDomainStore } from '../stores/domains'
-import JobCard from '../components/job/JobCard.vue'
-import EmptyState from '../components/common/EmptyState.vue'
-import Card from '../components/common/Card.vue'
-import LoadingState from '../components/common/LoadingState.vue'
-import ErrorState from '../components/common/ErrorState.vue'
-import Badge from '../components/common/Badge.vue'
+import StatusBadge from '../components/common/StatusBadge.vue'
+import ProfileEditor from '../components/settings/ProfileEditor.vue'
+import ConceptTimeline from '../components/ConceptTimeline.vue'
 import { fmtDateTime } from '../utils/datetime'
-import type { JobSummary, TopicConcept } from '../types'
+import type { JobSummary } from '../types'
 import {
-  ArrowLeft, Rss, Library, Star, RefreshCw, ChevronRight,
-  Layers, BrainCircuit, AlertTriangle, Bookmark,
+  SlidersHorizontal, RefreshCw, Folder, Lightbulb, BarChart3,
+  Plus, Settings2, Rss, Inbox, ChevronRight, Sparkles, Bookmark,
+  Star, FileText, Play, Newspaper, Headphones,
+  Cpu, Atom, Dna, Code, Database, Globe, FlaskConical, BookOpen,
+  Brain, Calculator, Scale, Languages, Music, Palette, Leaf, Rocket,
 } from 'lucide-vue-next'
 
-// 领域工作台：左「情景层(看了什么)」= 集合 + 主题 + 最近内容；右「语义层(学会了什么)」= 概念 + 待确认。
-// 数据一次性来自 useDomainStore.workspace(domain)；其余交互(投递/Profile/同步/图谱)在各归口页，本页只做总览与导航。
+// 知识库工作台：数据一次性来自 useDomainStore.workspace(domain)。三 tab：内容 / 概念 / 时间线。
+// 取自 route.params.domain；切换知识库时重新拉取。
 
 interface DomainStats {
   collection_count: number
@@ -38,6 +38,7 @@ interface WsConcept {
   definition: string
   source_count: number
   status: string
+  is_topic: boolean
 }
 interface WsTopic {
   topic: string
@@ -59,36 +60,33 @@ const store = useDomainStore()
 
 const domain = computed(() => String(route.params.domain))
 const data = ref<Workspace | null>(null)
-const topicConcepts = ref<TopicConcept[]>([])
 const loading = ref(false)
 const error = ref('')
+const tab = ref<'content' | 'concept' | 'timeline'>('content')
+const showProfile = ref(false)
 
-async function load() {
-  loading.value = true
-  error.value = ''
-  try {
-    const ws = (await store.workspace(domain.value)) as Workspace
-    data.value = ws
-    // 概念主题独立取数（契约 1），失败不影响工作台主体。
-    try {
-      topicConcepts.value = await store.topicConcepts(domain.value)
-    } catch {
-      topicConcepts.value = []
-    }
-  } catch (e: any) {
-    error.value = String(e?.message ?? '') || '加载失败'
-    data.value = null
-    topicConcepts.value = []
-  } finally {
-    loading.value = false
-  }
+// ── 身份图标 + 渐变色块：按知识库名哈希，与总览页一致 ──
+const ICONS = [Cpu, Atom, Dna, Code, Database, Globe, FlaskConical, BookOpen,
+  Brain, Calculator, Scale, Languages, Music, Palette, Leaf, Rocket]
+const GRADIENTS = [
+  'linear-gradient(135deg,#6366f1,#4338ca)',
+  'linear-gradient(135deg,#0ea5e9,#0369a1)',
+  'linear-gradient(135deg,#10b981,#047857)',
+  'linear-gradient(135deg,#f59e0b,#b45309)',
+  'linear-gradient(135deg,#ec4899,#9d174d)',
+  'linear-gradient(135deg,#64748b,#334155)',
+]
+function hash(s: string): number {
+  let h = 0
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0
+  return Math.abs(h)
 }
+const headIcon = computed(() => ICONS[hash(domain.value) % ICONS.length])
+const headGradient = computed(() => GRADIENTS[hash(domain.value) % GRADIENTS.length])
 
-onMounted(load)
-// 同一组件复用时(切换领域)重新拉取。
-watch(domain, load)
+const stats = computed<DomainStats | null>(() => data.value?.stats ?? null)
 
-// 概念按 source_count 降序，强度 ★(1~5) 由源数派生。
+// 概念按佐证强度（source_count）降序。
 const sortedConcepts = computed<WsConcept[]>(() =>
   [...(data.value?.top_concepts ?? [])].sort((a, b) => b.source_count - a.source_count),
 )
@@ -96,217 +94,262 @@ function strength(sourceCount: number): number {
   return Math.max(1, Math.min(5, sourceCount))
 }
 
-const stats = computed<DomainStats | null>(() => data.value?.stats ?? null)
+// 内容类型 → 图标（与原型一致：视频 play / 论文 file-text / 文章 newspaper / 播客 headphones）。
+const TYPE_ICON: Record<string, any> = {
+  video: Play, paper: FileText, article: Newspaper, audio: Headphones,
+}
+function typeIcon(t: string) {
+  return TYPE_ICON[t] ?? FileText
+}
 
+// 集合 + 未归集合内容分组：recent_jobs 按 collection_id 归到对应集合，其余进「未归集合」。
+const grouped = computed(() => {
+  const cols = data.value?.collections ?? []
+  const jobs = data.value?.recent_jobs ?? []
+  const byCol = new Map<string, JobSummary[]>()
+  const loose: JobSummary[] = []
+  for (const j of jobs) {
+    if (j.collection_id && cols.some((c) => c.id === j.collection_id)) {
+      const arr = byCol.get(j.collection_id) ?? []
+      arr.push(j)
+      byCol.set(j.collection_id, arr)
+    } else {
+      loose.push(j)
+    }
+  }
+  return { byCol, loose }
+})
+
+async function load() {
+  loading.value = true
+  error.value = ''
+  try {
+    data.value = (await store.workspace(domain.value)) as Workspace
+  } catch (e: any) {
+    error.value = String(e?.message ?? '') || '加载失败'
+    data.value = null
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(load)
+watch(domain, load)
+
+function goJob(id: string) {
+  router.push(`/content/${id}`)
+}
 function goCollection(id: string) {
   router.push(`/collections/${id}`)
 }
 function goTopic(topic: string) {
-  router.push(`/domains/${encodeURIComponent(domain.value)}/topics/${encodeURIComponent(topic)}`)
+  router.push(`/kb/${encodeURIComponent(domain.value)}/topics/${encodeURIComponent(topic)}`)
 }
 function goTerm(term: string) {
-  router.push(`/domains/${encodeURIComponent(domain.value)}/terms/${encodeURIComponent(term)}`)
+  router.push(`/kb/${encodeURIComponent(domain.value)}/concepts/${encodeURIComponent(term)}`)
+}
+
+function onProfileSaved() {
+  // 设定可能影响知识库聚合（角色/术语）→ 重新拉取。
+  load()
 }
 </script>
 
 <template>
-  <div class="space-y-4">
-    <!-- 头部：返回 + 领域名 + 统计 -->
-    <div class="flex items-center gap-2">
-      <button
-        @click="router.push('/')"
-        class="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
-        title="返回领域总览"
-      >
-        <ArrowLeft :size="18" />
-      </button>
-      <div class="min-w-0">
-        <h2 class="text-xl font-bold truncate">{{ domain }}</h2>
-        <div v-if="stats" class="flex items-center gap-2 text-xs text-gray-500 flex-wrap mt-0.5">
-          <span>{{ stats.collection_count }} 集合</span>
-          <span class="text-gray-300">·</span>
-          <span>{{ stats.job_count }} 内容</span>
-          <span class="text-gray-300">·</span>
-          <span>{{ stats.concept_count }} 概念</span>
-          <span v-if="stats.last_active_at" class="text-gray-300">·</span>
-          <span v-if="stats.last_active_at">{{ fmtDateTime(stats.last_active_at) }} 活跃</span>
+  <section class="page">
+    <!-- 头部：身份图标 + 名字 + 统计行 + 知识库设定 / 刷新 -->
+    <div style="display:flex;align-items:center;gap:13px;margin-bottom:6px">
+      <span class="dcard ic" :style="{ width: '42px', height: '42px', background: headGradient, padding: 0 }">
+        <component :is="headIcon" :size="20" />
+      </span>
+      <div style="min-width:0">
+        <div class="h1">{{ domain }}</div>
+        <div v-if="stats" class="lead">
+          {{ stats.collection_count }} 集合 · {{ stats.job_count }} 内容 · {{ stats.concept_count }} 概念
+          <template v-if="stats.last_active_at"> · {{ fmtDateTime(stats.last_active_at) }} 活跃</template>
         </div>
       </div>
-      <button
-        @click="load()"
-        class="ml-auto p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
-        title="刷新"
-      >
-        <RefreshCw :size="16" :class="loading ? 'animate-spin' : ''" />
+      <button class="btn sm" style="margin-left:auto" @click="showProfile = true">
+        <SlidersHorizontal :size="13" />知识库设定
+      </button>
+      <button class="btn sm" @click="load">
+        <RefreshCw :size="13" :class="{ spin: loading }" />刷新
       </button>
     </div>
 
     <!-- 加载态 -->
-    <LoadingState v-if="loading && !data" />
+    <div v-if="loading && !data" class="card pad" style="color:var(--ink-500);font-size:13px;margin-top:18px">
+      加载中…
+    </div>
 
     <!-- 错误态 -->
-    <Card v-else-if="error && !data" padding="p-8">
-      <ErrorState :message="error" @retry="load()" />
-    </Card>
-
-    <!-- 空领域态 -->
-    <div v-else-if="data && stats && stats.job_count === 0 && stats.collection_count === 0">
-      <EmptyState message="该领域还没有内容" />
+    <div v-else-if="error && !data" class="card pad"
+      style="display:flex;flex-direction:column;align-items:center;gap:12px;text-align:center;padding:36px 18px;margin-top:18px">
+      <div style="font-size:13.5px;color:var(--ink-700)">{{ error }}</div>
+      <button class="btn" @click="load">重试</button>
     </div>
 
-    <!-- 两栏：左情景层 / 右语义层 -->
-    <div v-else-if="data" class="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <!-- 左：情景层 -->
-      <div class="space-y-4">
-        <div class="flex items-center gap-1.5 text-sm font-semibold text-gray-700">
-          <Layers :size="15" class="text-gray-400" />
-          情景层 · 看了什么
-        </div>
-
-        <!-- 集合 -->
-        <Card>
-          <h3 class="text-sm font-semibold text-gray-700 mb-3">集合</h3>
-          <div v-if="data.collections.length === 0">
-            <EmptyState message="暂无集合" />
-          </div>
-          <div v-else class="space-y-2">
-            <button
-              v-for="c in data.collections"
-              :key="c.id"
-              @click="goCollection(c.id)"
-              class="w-full flex items-center gap-3 text-left p-2 rounded-lg hover:bg-gray-50 transition-colors"
-            >
-              <div
-                class="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
-                :class="c.is_subscription ? 'bg-blue-50' : 'bg-gray-100'"
-              >
-                <Rss v-if="c.is_subscription" :size="16" class="text-blue-500" />
-                <Library v-else :size="16" class="text-gray-500" />
-              </div>
-              <div class="flex-1 min-w-0">
-                <div class="flex items-center gap-2 min-w-0">
-                  <span class="text-sm font-medium truncate">{{ c.name }}</span>
-                  <Badge
-                    v-if="c.is_subscription"
-                    :variant="c.sync_enabled ? 'info' : 'default'"
-                    class="flex-shrink-0"
-                  >{{ c.sync_enabled ? '订阅' : '已暂停' }}</Badge>
-                </div>
-                <div class="text-xs text-gray-500">{{ c.job_count }} 篇</div>
-              </div>
-              <ChevronRight :size="16" class="text-gray-300 flex-shrink-0" />
-            </button>
-          </div>
-        </Card>
-
-        <!-- 主题 -->
-        <Card>
-          <h3 class="text-sm font-semibold text-gray-700 mb-3">主题</h3>
-          <div v-if="data.topics.length === 0">
-            <EmptyState message="暂无可浏览主题" />
-          </div>
-          <div v-else class="flex flex-wrap gap-2">
-            <button
-              v-for="t in data.topics"
-              :key="t.topic"
-              @click="goTopic(t.topic)"
-              class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-gray-100 text-gray-700 text-xs hover:bg-gray-200 transition-colors"
-            >
-              <span>#{{ t.topic }}</span>
-              <span class="text-gray-500">{{ t.count }}</span>
-            </button>
-          </div>
-        </Card>
-
-        <!-- 最近内容 -->
-        <div>
-          <h3 class="text-sm font-semibold text-gray-700 mb-2">最近内容</h3>
-          <div v-if="data.recent_jobs.length === 0">
-            <EmptyState message="暂无内容" />
-          </div>
-          <div v-else class="space-y-2">
-            <JobCard v-for="j in data.recent_jobs" :key="j.job_id" :job="j" />
-          </div>
-        </div>
+    <!-- 内容主体 -->
+    <template v-else-if="data">
+      <!-- tab 头 -->
+      <div class="tabs" style="margin-top:18px">
+        <button :class="{ on: tab === 'content' }" @click="tab = 'content'">
+          <Folder :size="15" />内容
+        </button>
+        <button :class="{ on: tab === 'concept' }" @click="tab = 'concept'">
+          <Lightbulb :size="15" />概念
+        </button>
+        <button :class="{ on: tab === 'timeline' }" @click="tab = 'timeline'">
+          <BarChart3 :size="15" />时间线
+        </button>
       </div>
 
-      <!-- 右：语义层 -->
-      <div class="space-y-4">
-        <div class="flex items-center gap-1.5 text-sm font-semibold text-gray-700">
-          <BrainCircuit :size="15" class="text-gray-400" />
-          语义层 · 学会了什么
+      <!-- TAB 内容 -->
+      <div v-show="tab === 'content'">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center">
+          <button class="chip" @click="router.push('/collections')">
+            <Plus :size="13" />新建集合 / 订阅
+          </button>
+          <button class="ghost" style="font-size:12px" @click="router.push('/collections')">
+            <Settings2 :size="14" />管理集合
+          </button>
+          <template v-if="data.topics.length">
+            <span class="divider-v" />
+            <span class="dim" style="font-size:12px">主题</span>
+            <span v-for="t in data.topics" :key="t.topic" class="chip" @click="goTopic(t.topic)">
+              #{{ t.topic }}<span class="n">{{ t.count }}</span>
+            </span>
+          </template>
         </div>
 
-        <!-- 概念 -->
-        <Card>
-          <div class="flex items-center justify-between mb-3">
-            <h3 class="text-sm font-semibold text-gray-700">概念</h3>
-            <span class="text-xs text-gray-500">按佐证 ★</span>
+        <!-- 空：无集合且无内容 -->
+        <div v-if="data.collections.length === 0 && data.recent_jobs.length === 0" class="card pad"
+          style="display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;padding:40px 18px">
+          <Inbox :size="40" :stroke-width="1" style="color:var(--ink-300)" />
+          <div style="font-size:13.5px;color:var(--ink-700)">这个知识库还没有内容</div>
+          <button class="btn" @click="router.push('/collections')"><Plus :size="14" />新建集合 / 订阅</button>
+        </div>
+
+        <template v-else>
+          <!-- 各集合分组 -->
+          <div v-for="c in data.collections" :key="c.id" class="col-group">
+            <div class="col-gh" @click="goCollection(c.id)">
+              <Rss v-if="c.is_subscription" :size="15" style="color:var(--brand-500)" />
+              <Folder v-else :size="15" />
+              <b>{{ c.name }}</b>
+              <span v-if="c.is_subscription" class="badge b-info">订阅</span>
+              <span v-else class="badge b-mut">手动</span>
+              <span class="dim" style="font-size:12px">{{ c.job_count }} 条</span>
+              <ChevronRight :size="14" class="dim" style="margin-left:auto" />
+            </div>
+            <div class="list">
+              <template v-if="grouped.byCol.get(c.id)?.length">
+                <div v-for="j in grouped.byCol.get(c.id)" :key="j.job_id" class="row" @click="goJob(j.job_id)">
+                  <span class="type-pill" :class="`t-${j.content_type}`">
+                    <component :is="typeIcon(j.content_type)" :size="16" />
+                  </span>
+                  <div class="body">
+                    <div class="title">{{ j.title || '未命名内容' }}</div>
+                    <div class="meta">
+                      <StatusBadge :status="j.status" />
+                      <span v-if="j.source">{{ j.source }}</span>
+                    </div>
+                  </div>
+                  <ChevronRight :size="16" class="dim" />
+                </div>
+              </template>
+              <div v-else class="dim" style="font-size:12px;padding:6px 2px">该集合暂无最近内容</div>
+            </div>
           </div>
-          <div v-if="sortedConcepts.length === 0">
-            <EmptyState message="暂无概念" />
-          </div>
-          <div v-else class="space-y-1">
-            <button
-              v-for="c in sortedConcepts"
-              :key="c.term"
-              @click="goTerm(c.term)"
-              class="w-full flex items-center gap-3 text-left p-2 rounded-lg hover:bg-gray-50 transition-colors"
-            >
-              <div class="flex-1 min-w-0">
-                <div class="text-sm font-medium truncate">{{ c.term }}</div>
-                <div v-if="c.definition" class="text-xs text-gray-500 truncate">{{ c.definition }}</div>
+
+          <!-- 未归集合 -->
+          <div v-if="grouped.loose.length" class="col-group">
+            <div class="col-gh" style="cursor:default">
+              <Inbox :size="15" /><b>未归集合</b>
+              <span class="dim" style="font-size:12px">{{ grouped.loose.length }} 条</span>
+            </div>
+            <div class="list">
+              <div v-for="j in grouped.loose" :key="j.job_id" class="row" @click="goJob(j.job_id)">
+                <span class="type-pill" :class="`t-${j.content_type}`">
+                  <component :is="typeIcon(j.content_type)" :size="16" />
+                </span>
+                <div class="body">
+                  <div class="title">{{ j.title || '未命名内容' }}</div>
+                  <div class="meta">
+                    <StatusBadge :status="j.status" />
+                    <span v-if="j.source">{{ j.source }}</span>
+                  </div>
+                </div>
+                <ChevronRight :size="16" class="dim" />
               </div>
-              <div class="flex items-center gap-0.5 flex-shrink-0" :title="`佐证强度 ${strength(c.source_count)}/5`">
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <!-- TAB 概念 -->
+      <div v-show="tab === 'concept'">
+        <div v-if="data.suggested_count > 0" class="callout warn" style="margin-bottom:14px">
+          <Sparkles :size="16" />有 {{ data.suggested_count }} 个 AI 提取的待确认概念。
+          <button class="btn sm" style="margin-left:auto" @click="router.push('/glossary')">去审阅</button>
+        </div>
+
+        <div class="card pad">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <div class="seclabel"><Lightbulb :size="14" />概念 · 按佐证强度</div>
+            <button class="ghost" style="font-size:12px" @click="router.push('/glossary')">
+              <BookOpen :size="14" />概念库
+            </button>
+          </div>
+
+          <div v-if="sortedConcepts.length === 0" class="dim"
+            style="font-size:13px;padding:18px 2px;text-align:center">
+            暂无概念
+          </div>
+          <template v-else>
+            <div v-for="c in sortedConcepts" :key="c.term" class="concept" @click="goTerm(c.term)">
+              <Bookmark v-if="c.is_topic" class="pin" :size="14" />
+              <span v-else style="width:14px" />
+              <div style="flex:1;min-width:0">
+                <div class="t">
+                  {{ c.term }}
+                  <span v-if="c.is_topic" class="badge b-brand" style="margin-left:4px">主题概念</span>
+                  <StatusBadge v-if="c.status === 'suggested'" :status="c.status" />
+                </div>
+                <div v-if="c.definition" class="d">{{ c.definition }}</div>
+              </div>
+              <div class="stars" :title="`佐证强度 ${strength(c.source_count)}/5`">
                 <Star
-                  v-for="i in 5"
-                  :key="i"
-                  :size="12"
-                  :class="i <= strength(c.source_count) ? 'text-amber-400 fill-amber-400' : 'text-gray-200'"
+                  v-for="i in 5" :key="i" :size="13"
+                  :style="i <= strength(c.source_count)
+                    ? { color: 'var(--amber)', fill: 'var(--amber)' }
+                    : { color: 'var(--ink-300)', fill: 'none' }"
                 />
               </div>
-              <span class="text-xs text-gray-500 flex-shrink-0 w-8 text-right">{{ c.source_count }} 源</span>
-            </button>
-          </div>
-        </Card>
-
-        <!-- 概念主题（域内 is_topic 概念，点进术语详情） -->
-        <Card>
-          <div class="flex items-center gap-1.5 mb-3">
-            <Bookmark :size="14" class="text-indigo-400" />
-            <h3 class="text-sm font-semibold text-gray-700">概念主题</h3>
-          </div>
-          <div v-if="topicConcepts.length === 0">
-            <EmptyState message="暂无概念主题" />
-          </div>
-          <div v-else class="space-y-1">
-            <button
-              v-for="tc in topicConcepts"
-              :key="tc.term"
-              @click="goTerm(tc.term)"
-              class="w-full flex items-center gap-3 text-left p-2 rounded-lg hover:bg-gray-50 transition-colors"
-            >
-              <Bookmark :size="14" class="text-indigo-400 fill-indigo-100 flex-shrink-0" />
-              <div class="flex-1 min-w-0">
-                <div class="text-sm font-medium truncate">{{ tc.term }}</div>
-                <div v-if="tc.definition" class="text-xs text-gray-500 truncate">{{ tc.definition }}</div>
-              </div>
-              <span class="text-xs text-gray-500 flex-shrink-0 w-12 text-right">{{ tc.occurrence_count }} 处</span>
-            </button>
-          </div>
-        </Card>
-
-        <!-- 待确认概念提示 -->
-        <div
-          v-if="data.suggested_count > 0"
-          class="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-center gap-2"
-        >
-          <AlertTriangle :size="16" class="text-amber-500 flex-shrink-0" />
-          <span class="text-sm text-amber-800">
-            有 {{ data.suggested_count }} 个待确认概念
-          </span>
+              <span class="dim" style="font-size:12px;width:36px;text-align:right">{{ c.source_count }} 源</span>
+            </div>
+          </template>
         </div>
       </div>
-    </div>
-  </div>
+
+      <!-- TAB 时间线（组件由集成方提供，仅 import + 使用） -->
+      <div v-show="tab === 'timeline'">
+        <ConceptTimeline :domain="domain" />
+      </div>
+    </template>
+
+    <!-- 知识库设定弹窗（内嵌 ProfileEditor，自带 overlay） -->
+    <ProfileEditor
+      v-if="showProfile"
+      :domain="domain"
+      @close="showProfile = false"
+      @saved="onProfileSaved"
+    />
+  </section>
 </template>
+
+<style scoped>
+/* 刷新图标旋转 */
+.spin { animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>

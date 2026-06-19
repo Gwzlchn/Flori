@@ -1,0 +1,203 @@
+<!-- ============================================================ 屏：概念详情（term） -->
+<section class="page" id="term" hidden>
+  <button class="ghost" style="margin-bottom:12px" onclick="go('domain')"><i data-lucide="arrow-left"></i>返回 机器学习</button>
+
+  <div class="card pad" style="margin-bottom:16px">
+    <div style="display:flex;align-items:flex-start;gap:14px">
+      <span class="dcard ic" style="width:44px;height:44px;background:linear-gradient(135deg,var(--brand-500),var(--brand-700));padding:0"><i data-lucide="lightbulb"></i></span>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+          <div class="h1">注意力机制</div>
+          <span class="badge b-brand"><i data-lucide="bookmark"></i>主题概念</span>
+          <span class="badge b-ok"><i data-lucide="check"></i>已采纳</span>
+        </div>
+        <div class="lead"><a class="term-link" onclick="go('domain')">机器学习</a> · 14 处出现 · 3 个关联</div>
+      </div>
+      <button class="btn sm" style="margin-left:auto"><i data-lucide="bookmark"></i>取消主题</button>
+    </div>
+  </div>
+
+  <div class="card pad" style="margin-bottom:16px">
+    <div class="card-h"><i data-lucide="file-text"></i>定义</div>
+    <p style="color:var(--ink-700)">通过 query-key-value 三组向量计算序列内元素之间相关性权重的机制：以查询向量与各键向量做点积得到注意力分数，经 softmax 归一化后对 value 加权求和，从而让模型在编码每个位置时动态聚焦于序列中最相关的部分，摆脱 RNN 的串行依赖。</p>
+  </div>
+
+  <div class="card pad" style="margin-bottom:16px">
+    <div class="card-h"><i data-lucide="link"></i>关联概念</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <span class="chip" onclick="go('term')">自注意力</span>
+      <span class="chip" onclick="go('term')">多头注意力</span>
+      <span class="chip" onclick="go('term')">位置编码</span>
+    </div>
+  </div>
+
+  <div class="card pad">
+    <div class="card-h"><i data-lucide="map-pin"></i>出现处 · 14</div>
+    <div class="occ" onclick="go('detail')">
+      <span class="type-pill t-video" style="width:28px;height:28px"><i data-lucide="play" style="width:13px;height:13px"></i></span>
+      <span class="occ-t" style="flex:1;min-width:0;font-weight:600;color:var(--ink-900);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Transformer 架构详解：从注意力机制到 GPT</span>
+      <span class="badge b-mut">视频</span>
+      <span class="dim mono" style="font-size:12px">02:34 片段</span>
+      <i data-lucide="chevron-right" class="dim"></i>
+    </div>
+    <div class="occ" onclick="go('detail')">
+      <span class="type-pill t-video" style="width:28px;height:28px"><i data-lucide="play" style="width:13px;height:13px"></i></span>
+      <span class="occ-t" style="flex:1;min-width:0;font-weight:600;color:var(--ink-900);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Transformer 架构详解：从注意力机制到 GPT</span>
+      <span class="badge b-mut">视频</span>
+      <span class="dim mono" style="font-size:12px">08:12 片段</span>
+      <i data-lucide="chevron-right" class="dim"></i>
+    </div>
+    <div class="occ" onclick="go('detail')">
+      <span class="type-pill t-paper" style="width:28px;height:28px"><i data-lucide="file-text" style="width:13px;height:13px"></i></span>
+      <span class="occ-t" style="flex:1;min-width:0;font-weight:600;color:var(--ink-900);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Attention Is All You Need</span>
+      <span class="badge b-mut">论文</span>
+      <span class="dim" style="font-size:12px">第 3 节</span>
+      <i data-lucide="chevron-right" class="dim"></i>
+    </div>
+    <div class="occ" onclick="go('detail')">
+      <span class="type-pill t-paper" style="width:28px;height:28px"><i data-lucide="file-text" style="width:13px;height:13px"></i></span>
+      <span class="occ-t" style="flex:1;min-width:0;font-weight:600;color:var(--ink-900);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Attention Is All You Need</span>
+      <span class="badge b-mut">论文</span>
+      <span class="dim" style="font-size:12px">第 3.2 节</span>
+      <i data-lucide="chevron-right" class="dim"></i>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 屏：主题页（topic） -->
+<section class="page" id="topic" hidden>
+  <button class="ghost" style="margin-bottom:14px" onclick="go('domain')"><i data-lucide="arrow-left"></i>返回 机器学习</button>
+
+  <div style="display:flex;align-items:center;gap:13px;margin-bottom:6px">
+    <div><div class="h1"><i data-lucide="hash"></i>注意力机制</div>
+      <div class="lead">主题 · <a class="term-link" onclick="go('domain')">机器学习</a> · 共 12 篇内容</div></div>
+    <button class="btn sm" style="margin-left:auto" onclick="go('term')"><i data-lucide="lightbulb"></i>查看概念</button>
+  </div>
+
+  <div class="seclabel" style="margin:22px 0 12px"><i data-lucide="layout-list"></i>关联内容 · 12</div>
+  <div class="list">
+    <div class="row" onclick="go('detail')"><span class="type-pill t-video"><i data-lucide="play"></i></span>
+      <div class="body"><div class="title">Transformer 架构详解：从注意力机制到 GPT</div>
+        <div class="meta"><span class="badge b-ok">已完成</span><span>李沐读论文</span><span class="sep">·</span><span>32:18</span><span class="sep">·</span><span>评分 4.6</span></div></div>
+      <i data-lucide="chevron-right" class="dim"></i></div>
+    <div class="row" onclick="go('detail')"><span class="type-pill t-paper"><i data-lucide="file-text"></i></span>
+      <div class="body"><div class="title">Attention Is All You Need</div>
+        <div class="meta"><span class="badge b-ok">已完成</span><span>arXiv</span><span class="sep">·</span><span class="mono dim">1706.03762</span></div></div>
+      <i data-lucide="chevron-right" class="dim"></i></div>
+    <div class="row" onclick="go('detail')"><span class="type-pill t-video"><i data-lucide="play"></i></span>
+      <div class="body"><div class="title">自注意力机制可视化讲解</div>
+        <div class="meta"><span class="badge b-ok">已完成</span><span>3Blue1Brown</span><span class="sep">·</span><span>26:10</span></div></div>
+      <i data-lucide="chevron-right" class="dim"></i></div>
+    <div class="row" onclick="go('detail')"><span class="type-pill t-article"><i data-lucide="newspaper"></i></span>
+      <div class="body"><div class="title">图解多头注意力：为什么需要多个头</div>
+        <div class="meta"><span class="badge b-ok">已完成</span><span>公众号</span><span class="sep">·</span><span>评分 4.3</span></div></div>
+      <i data-lucide="chevron-right" class="dim"></i></div>
+    <div class="row" onclick="go('detail')"><span class="type-pill t-paper"><i data-lucide="file-text"></i></span>
+      <div class="body"><div class="title">Flash Attention：IO 感知的精确注意力</div>
+        <div class="meta"><span class="badge b-run">处理中</span><span class="muted">08_智能笔记</span><span class="bar"><span style="width:60%"></span></span><span class="dim">60%</span></div></div></div>
+    <div class="row" onclick="go('detail')"><span class="type-pill t-video"><i data-lucide="play"></i></span>
+      <div class="body"><div class="title">从 Seq2Seq 到注意力：机器翻译的演进</div>
+        <div class="meta"><span class="badge b-ok">已完成</span><span>李沐读论文</span><span class="sep">·</span><span>19:44</span></div></div>
+      <i data-lucide="chevron-right" class="dim"></i></div>
+  </div>
+</section>
+
+<!-- ============================================================ 屏：概念库（glossary） -->
+<section class="page" id="glossary" hidden>
+  <div style="display:flex;align-items:flex-end;gap:12px;margin-bottom:20px">
+    <div><div class="h1"><i data-lucide="lightbulb"></i>概念库</div>
+      <div class="lead">AI 从内容中提取候选概念，采纳后沉淀为可检索的知识节点与正文术语链接。</div></div>
+  </div>
+
+  <div style="display:flex;gap:10px;align-items:center;margin-bottom:22px;flex-wrap:wrap">
+    <select class="input" style="max-width:160px"><option>全部领域</option><option>机器学习</option><option>系统设计</option></select>
+    <button class="btn pri" style="margin-left:auto" onclick="openModal('m-concept')"><i data-lucide="plus"></i>新增概念</button>
+  </div>
+
+  <div class="seclabel" style="margin-bottom:12px"><i data-lucide="sparkles"></i>待审建议 · 6</div>
+  <div class="card pad" style="margin-bottom:26px;border-color:var(--warn-bd)">
+    <div class="occ" style="cursor:default">
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px"><span style="font-weight:600;color:var(--ink-900)">位置编码</span><span class="badge b-warn"><i data-lucide="sparkles"></i>待确认</span></div>
+        <div class="d" style="font-size:12px;color:var(--ink-500);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">向输入嵌入注入序列顺序信息，常用正弦/余弦函数或可学习向量… · 出现于 7 篇</div>
+      </div>
+      <button class="btn sm" style="color:var(--ok);border-color:var(--ok-bd)"><i data-lucide="check"></i>采纳</button>
+      <button class="iconbtn"><i data-lucide="x"></i></button>
+    </div>
+    <div class="occ" style="cursor:default">
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px"><span style="font-weight:600;color:var(--ink-900)">层归一化</span><span class="badge b-warn"><i data-lucide="sparkles"></i>待确认</span></div>
+        <div class="d" style="font-size:12px;color:var(--ink-500);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">在特征维度上对每个样本做归一化以稳定训练，区别于批归一化… · 出现于 5 篇</div>
+      </div>
+      <button class="btn sm" style="color:var(--ok);border-color:var(--ok-bd)"><i data-lucide="check"></i>采纳</button>
+      <button class="iconbtn"><i data-lucide="x"></i></button>
+    </div>
+    <div class="occ" style="cursor:default">
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px"><span style="font-weight:600;color:var(--ink-900)">学习率调度</span><span class="badge b-warn"><i data-lucide="sparkles"></i>待确认</span></div>
+        <div class="d" style="font-size:12px;color:var(--ink-500);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">训练过程中按策略动态调整学习率，如 warmup 后线性衰减… · 出现于 4 篇</div>
+      </div>
+      <button class="btn sm" style="color:var(--ok);border-color:var(--ok-bd)"><i data-lucide="check"></i>采纳</button>
+      <button class="iconbtn"><i data-lucide="x"></i></button>
+    </div>
+  </div>
+
+  <div class="seclabel" style="margin-bottom:12px"><i data-lucide="check-circle-2"></i>已采纳 · 128</div>
+  <div class="card pad">
+    <div class="occ" onclick="go('term')">
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px"><span class="occ-t" style="font-weight:600;color:var(--ink-900)">注意力机制</span><span class="badge b-brand"><i data-lucide="bookmark"></i>主题概念</span></div>
+        <div class="d" style="font-size:12px;color:var(--ink-500);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">通过 query-key-value 计算序列内元素相关性权重的机制 · 关联 3</div>
+      </div>
+      <button class="iconbtn" onclick="event.stopPropagation();openModal('m-concept')"><i data-lucide="pencil"></i></button>
+      <button class="iconbtn" onclick="event.stopPropagation()"><i data-lucide="trash-2"></i></button>
+    </div>
+    <div class="occ" onclick="go('term')">
+      <div style="flex:1;min-width:0">
+        <div class="occ-t" style="font-weight:600;color:var(--ink-900)">梯度下降</div>
+        <div class="d" style="font-size:12px;color:var(--ink-500);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">沿损失函数负梯度方向迭代更新参数的优化方法 · 关联 2</div>
+      </div>
+      <button class="iconbtn" onclick="event.stopPropagation();openModal('m-concept')"><i data-lucide="pencil"></i></button>
+      <button class="iconbtn" onclick="event.stopPropagation()"><i data-lucide="trash-2"></i></button>
+    </div>
+    <div class="occ" onclick="go('term')">
+      <div style="flex:1;min-width:0">
+        <div class="occ-t" style="font-weight:600;color:var(--ink-900)">残差连接</div>
+        <div class="d" style="font-size:12px;color:var(--ink-500);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">将输入直接加到输出，缓解深层网络梯度消失 · 关联 2</div>
+      </div>
+      <button class="iconbtn" onclick="event.stopPropagation();openModal('m-concept')"><i data-lucide="pencil"></i></button>
+      <button class="iconbtn" onclick="event.stopPropagation()"><i data-lucide="trash-2"></i></button>
+    </div>
+    <div class="occ" onclick="go('term')">
+      <div style="flex:1;min-width:0">
+        <div class="occ-t" style="font-weight:600;color:var(--ink-900)">反向传播</div>
+        <div class="d" style="font-size:12px;color:var(--ink-500);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">利用链式法则从输出层向输入层逐层计算梯度的算法 · 关联 3</div>
+      </div>
+      <button class="iconbtn" onclick="event.stopPropagation();openModal('m-concept')"><i data-lucide="pencil"></i></button>
+      <button class="iconbtn" onclick="event.stopPropagation()"><i data-lucide="trash-2"></i></button>
+    </div>
+    <div class="occ" onclick="go('term')">
+      <div style="flex:1;min-width:0">
+        <div class="occ-t" style="font-weight:600;color:var(--ink-900)">卷积</div>
+        <div class="d" style="font-size:12px;color:var(--ink-500);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">用可学习的卷积核在局部感受野上提取空间特征的运算 · 关联 4</div>
+      </div>
+      <button class="iconbtn" onclick="event.stopPropagation();openModal('m-concept')"><i data-lucide="pencil"></i></button>
+      <button class="iconbtn" onclick="event.stopPropagation()"><i data-lucide="trash-2"></i></button>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 概念 新增/编辑弹窗 ===================== -->
+<div class="overlay" id="m-concept" onclick="if(event.target===this)closeModal('m-concept')">
+  <div class="modal">
+    <div class="hd"><i data-lucide="lightbulb" class="lead-ic"></i><b>新增概念</b><button class="ghost" onclick="closeModal('m-concept')"><i data-lucide="x"></i></button></div>
+    <div class="bd">
+      <div class="field"><label>领域</label><select class="input"><option>机器学习</option><option>系统设计</option></select></div>
+      <div class="field"><label>概念名</label><input class="input" placeholder="如 注意力机制" /></div>
+      <div class="field"><label>定义</label><textarea class="input" placeholder="用一两句话说明该概念的核心含义…"></textarea></div>
+      <div class="field" style="margin-bottom:0"><label>关联概念</label><input class="input" placeholder="逗号分隔，如 自注意力, 多头注意力, 位置编码" />
+        <div class="note-tip">采纳后正文中出现的该术语会自动转为<span class="term-link">蓝色虚线链接</span>。</div></div>
+    </div>
+    <div class="ft"><button class="btn" onclick="closeModal('m-concept')">取消</button><button class="btn pri" onclick="closeModal('m-concept')"><i data-lucide="plus"></i>添加</button></div>
+  </div>
+</div>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import AppLayout from './components/layout/AppLayout.vue'
+import AppShell from './components/layout/AppShell.vue'
 import Toast from './components/common/Toast.vue'
 import { useGlobalWs } from './composables/useGlobalWs'
 import { ref, provide } from 'vue'
@@ -16,8 +16,6 @@ provide('showToast', showToast)
 </script>
 
 <template>
-  <AppLayout>
-    <router-view />
-  </AppLayout>
+  <AppShell />
   <Toast v-if="toast" :message="toast.message" :type="toast.type" @close="toast = null" />
 </template>

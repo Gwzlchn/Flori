@@ -1,0 +1,1586 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Mnemo · 全站重设计原型</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="mnemo.css?v=13" />
+<script src="https://unpkg.com/lucide@latest"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+</head>
+<body>
+<div class="app">
+  <!-- ===================== 侧边栏（桌面） ===================== -->
+  <aside class="side">
+    <div class="brand"><span class="logo" onclick="go('home')"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V6l8 7 8-7v13"/></svg></span><b>Mnemo</b></div>
+    <div class="top-row">
+      <button class="btn-submit" onclick="openModal('m-submit')" data-tip="投递内容"><i data-lucide="plus"></i><span>投递内容</span></button>
+      <button class="top-tool" data-go="content" onclick="go('content')" data-tip="所有来源"><i data-lucide="inbox"></i></button>
+    </div>
+    <nav class="nav">
+      <a data-go="home" class="on" onclick="go('home')" data-tip="知识库"><i data-lucide="book-marked"></i><span>知识库</span></a>
+      <div class="sub-list">
+        <div class="nb-group">
+          <a class="sub-item" onclick="go('domain')"><span class="kb-caret open" onclick="event.stopPropagation();toggleKb(this)"><i data-lucide="chevron-right"></i></span><span class="nb-dot" style="background:#4f46e5"></span><span>机器学习</span></a>
+          <div class="kb-sources open">
+            <div class="src-group">
+              <a class="src-item" onclick="go('collection')"><span class="src-caret open" onclick="event.stopPropagation();toggleSrc(this)"><i data-lucide="chevron-right"></i></span><i data-lucide="rss"></i>李沐读论文</a>
+              <div class="src-content open">
+                <a class="content-item" onclick="go('detail')"><span class="ci-dot" style="background:var(--t-video)"></span><span>Transformer 架构详解</span></a>
+                <a class="content-item" onclick="go('detail')"><span class="ci-dot" style="background:var(--t-paper)"></span><span>Batch Normalization 精读</span></a>
+                <a class="content-item" onclick="go('detail')"><span class="ci-dot" style="background:var(--t-paper)"></span><span>Attention Is All You Need 精读</span></a>
+                <a class="content-item" onclick="go('detail')"><span class="ci-dot" style="background:var(--t-video)"></span><span>Vision Transformer 解读</span></a>
+                <a class="content-item" onclick="go('detail')"><span class="ci-dot" style="background:var(--t-video)"></span><span>GPT 系列演进梳理</span></a>
+              </div>
+            </div>
+            <div class="src-group">
+              <a class="src-item" onclick="go('collection')"><span class="src-caret" onclick="event.stopPropagation();toggleSrc(this)"><i data-lucide="chevron-right"></i></span><i data-lucide="folder"></i>3Blue1Brown</a>
+              <div class="src-content">
+                <a class="content-item" onclick="go('detail')"><span class="ci-dot" style="background:var(--t-video)"></span><span>反向传播的直觉理解</span></a>
+                <a class="content-item" onclick="go('detail')"><span class="ci-dot" style="background:var(--t-video)"></span><span>梯度下降的可视化</span></a>
+                <a class="content-item" onclick="go('detail')"><span class="ci-dot" style="background:var(--t-video)"></span><span>矩阵乘法的几何意义</span></a>
+              </div>
+            </div>
+            <div class="src-group">
+              <a class="src-item" onclick="go('domain')"><span class="src-caret" onclick="event.stopPropagation();toggleSrc(this)"><i data-lucide="chevron-right"></i></span><i data-lucide="folder"></i>手动收藏</a>
+              <div class="src-content">
+                <a class="content-item" onclick="go('detail')"><span class="ci-dot" style="background:var(--t-paper)"></span><span>ResNet 残差网络精读</span></a>
+                <a class="content-item" onclick="go('detail')"><span class="ci-dot" style="background:var(--t-audio)"></span><span>播客：大模型训练实践</span></a>
+                <a class="content-item" onclick="go('detail')"><span class="ci-dot" style="background:var(--t-article)"></span><span>提示工程入门</span></a>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="nb-group">
+          <a class="sub-item" onclick="go('domain')"><span class="kb-caret" onclick="event.stopPropagation();toggleKb(this)"><i data-lucide="chevron-right"></i></span><span class="nb-dot" style="background:#0ea5e9"></span><span>系统设计</span></a>
+          <div class="kb-sources">
+            <div class="src-group">
+              <a class="src-item" onclick="go('collection')"><span class="src-caret" onclick="event.stopPropagation();toggleSrc(this)"><i data-lucide="chevron-right"></i></span><i data-lucide="rss"></i>系统设计周刊</a>
+              <div class="src-content">
+                <a class="content-item" onclick="go('detail')"><span class="ci-dot" style="background:var(--t-article)"></span><span>一致性哈希实践</span></a>
+                <a class="content-item" onclick="go('detail')"><span class="ci-dot" style="background:var(--t-article)"></span><span>CAP 定理详解</span></a>
+                <a class="content-item" onclick="go('detail')"><span class="ci-dot" style="background:var(--t-article)"></span><span>消息队列选型对比</span></a>
+              </div>
+            </div>
+            <div class="src-group">
+              <a class="src-item" onclick="go('domain')"><span class="src-caret" onclick="event.stopPropagation();toggleSrc(this)"><i data-lucide="chevron-right"></i></span><i data-lucide="folder"></i>手动收藏</a>
+              <div class="src-content">
+                <a class="content-item" onclick="go('detail')"><span class="ci-dot" style="background:var(--t-article)"></span><span>限流算法实现</span></a>
+                <a class="content-item" onclick="go('detail')"><span class="ci-dot" style="background:var(--t-article)"></span><span>缓存穿透与雪崩</span></a>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="nb-group">
+          <a class="sub-item" onclick="go('domain')"><span class="kb-caret" onclick="event.stopPropagation();toggleKb(this)"><i data-lucide="chevron-right"></i></span><span class="nb-dot" style="background:#10b981"></span><span>生物信息学</span></a>
+          <div class="kb-sources">
+            <div class="src-group">
+              <a class="src-item" onclick="go('domain')"><span class="src-caret" onclick="event.stopPropagation();toggleSrc(this)"><i data-lucide="chevron-right"></i></span><i data-lucide="folder"></i>手动收藏</a>
+              <div class="src-content">
+                <a class="content-item" onclick="go('detail')"><span class="ci-dot" style="background:var(--t-paper)"></span><span>序列比对算法 BLAST</span></a>
+                <a class="content-item" onclick="go('detail')"><span class="ci-dot" style="background:var(--t-paper)"></span><span>基因组组装入门</span></a>
+              </div>
+            </div>
+          </div>
+        </div>
+        <a class="sub-item new" onclick="openModal('m-domain')"><i data-lucide="plus"></i><span>新建知识库</span></a>
+      </div>
+    </nav>
+    <div class="side-tools">
+      <button class="tool" data-go="system" onclick="go('system')" data-tip="系统状态"><i data-lucide="server"></i><span class="dot d-ok"></span></button>
+      <button class="tool" data-go="settings" onclick="go('settings')" data-tip="设置"><i data-lucide="settings"></i></button>
+      <button class="tool collapse" onclick="toggleRail()" data-tip="收起 / 展开"><i data-lucide="chevrons-left"></i></button>
+    </div>
+  </aside>
+
+  <div class="main">
+    <div class="topbar">
+      <button class="crumb-back" id="crumb-back" onclick="goBack()" hidden><i data-lucide="arrow-left"></i></button><div class="crumb" id="crumb"><b>知识库</b></div>
+      <div class="search" id="topsearch" onclick="expandSearch(event)"><i data-lucide="search"></i><input id="topsearch-in" placeholder="搜索内容、概念…（⌘K）" oninput="searchPop()" onfocus="expandSearch()" /><span class="kbd">⌘K</span><div class="search-pop" id="search-pop"></div></div>    </div>
+
+    <!-- ============================================================ 屏：知识库总览 -->
+    <section class="page" id="home">
+      <div style="display:flex;align-items:flex-end;gap:12px;margin-bottom:20px">
+        <div><div class="h1"><i data-lucide="book-marked"></i>我的知识库</div>
+          <div class="lead">投递的每条内容都会自动归入对应知识库，逐步沉淀成体系。</div></div>
+        <button class="btn pri" style="margin-left:auto" onclick="openModal('m-domain')"><i data-lucide="plus"></i>新建知识库</button>
+        <button class="btn" onclick="go('content')"><i data-lucide="inbox"></i>所有来源</button>
+      </div>
+      <div class="grid3" style="margin-bottom:28px">
+        <a class="dcard" onclick="go('domain')">
+          <div class="top"><span class="ic" style="background:linear-gradient(135deg,#6366f1,#4338ca)"><i data-lucide="cpu"></i></span>
+            <h3>机器学习</h3><span class="badge b-info"><i data-lucide="rss"></i>2</span></div>
+          <div class="stats"><span><i data-lucide="folder"></i>5 集合</span><span><i data-lucide="file-text"></i>43 条</span><span><i data-lucide="lightbulb"></i>128 概念</span></div>
+          <div class="foot"><span class="dot d-ok"></span>12 分钟前活跃</div></a>
+        <a class="dcard" onclick="go('domain')">
+          <div class="top"><span class="ic" style="background:linear-gradient(135deg,#0ea5e9,#0369a1)"><i data-lucide="atom"></i></span><h3>系统设计</h3></div>
+          <div class="stats"><span><i data-lucide="folder"></i>3 集合</span><span><i data-lucide="file-text"></i>21 条</span><span><i data-lucide="lightbulb"></i>67 概念</span></div>
+          <div class="foot"><span class="dot d-ok"></span>2 小时前活跃</div></a>
+        <a class="dcard" onclick="go('domain')">
+          <div class="top"><span class="ic" style="background:linear-gradient(135deg,#10b981,#047857)"><i data-lucide="dna"></i></span>
+            <h3>生物信息学</h3><span class="badge b-info"><i data-lucide="rss"></i>1</span></div>
+          <div class="stats"><span><i data-lucide="folder"></i>2 集合</span><span><i data-lucide="file-text"></i>9 条</span><span><i data-lucide="lightbulb"></i>31 概念</span></div>
+          <div class="foot"><span class="dot d-mut"></span>3 天前活跃</div></a>
+      </div>
+      <div class="seclabel" style="margin-bottom:12px"><i data-lucide="clock"></i>近期内容 · 跨知识库</div>
+      <div class="list">
+        <div class="row" onclick="go('detail')"><span class="type-pill t-video"><i data-lucide="play"></i></span>
+          <div class="body"><div class="title">Transformer 架构详解：从注意力机制到 GPT</div>
+            <div class="meta"><span class="badge b-ok">已完成</span><span>机器学习</span><span class="sep">·</span><span>Bilibili</span><span class="sep">·</span><span>评分 4.6</span></div></div>
+          <i data-lucide="chevron-right" class="dim"></i></div>
+        <div class="row" onclick="go('detail')"><span class="type-pill t-paper"><i data-lucide="file-text"></i></span>
+          <div class="body"><div class="title">Attention Is All You Need (arXiv:1706.03762)</div>
+            <div class="meta"><span class="badge b-run">处理中</span><span>机器学习</span><span class="sep">·</span><span class="muted">08_智能笔记</span><span class="bar"><span style="width:72%"></span></span><span class="dim">72%</span></div></div></div>
+        <div class="row" onclick="go('detail')"><span class="type-pill t-article"><i data-lucide="newspaper"></i></span>
+          <div class="body"><div class="title">一致性哈希在分布式缓存中的应用</div>
+            <div class="meta"><span class="badge b-ok">已完成</span><span>系统设计</span><span class="sep">·</span><span>公众号</span></div></div>
+          <i data-lucide="chevron-right" class="dim"></i></div>
+      </div>
+    </section>
+
+    <!-- ============================================================ 屏：知识库工作台 -->
+    <section class="page" id="domain" hidden>
+      <div style="display:flex;align-items:center;gap:13px;margin-bottom:6px">
+        <span class="dcard ic" style="width:42px;height:42px;background:linear-gradient(135deg,#6366f1,#4338ca);padding:0"><i data-lucide="cpu"></i></span>
+        <div><div class="h1">机器学习</div><div class="lead">5 集合 · 43 条内容 · 128 概念 · 12 分钟前活跃</div></div>
+        <button class="btn sm" style="margin-left:auto" onclick="openModal('m-profile')"><i data-lucide="sliders-horizontal"></i>知识库设定</button>
+        <button class="btn sm"><i data-lucide="refresh-cw"></i>刷新</button>
+      </div>
+      <div class="tabs" style="margin-top:18px">
+        <button class="on" onclick="subtab(this,'dw','dw-content')"><i data-lucide="folder"></i>内容</button>
+        <button onclick="subtab(this,'dw','dw-concept')"><i data-lucide="lightbulb"></i>概念</button>
+        <button onclick="subtab(this,'dw','dw-timeline')"><i data-lucide="bar-chart-3"></i>时间线</button>
+      </div>
+
+      <div data-sub="dw" id="dw-content">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center">
+          <button class="chip" onclick="openModal('m-collection')"><i data-lucide="plus"></i>新建集合 / 订阅</button>
+          <button class="ghost" style="font-size:12px" onclick="go('collections')"><i data-lucide="settings-2"></i>管理集合</button>
+          <span class="divider-v"></span>
+          <span class="dim" style="font-size:12px">主题</span>
+          <span class="chip" onclick="go('topic')">#注意力机制</span><span class="chip">#优化器</span><span class="chip">#CNN</span>
+        </div>
+
+        <div class="col-group">
+          <div class="col-gh" onclick="go('collection')"><i data-lucide="rss" style="color:var(--brand-500)"></i><b>李沐读论文</b><span class="badge b-info">订阅</span><span class="dim" style="font-size:12px">18 条</span><i data-lucide="chevron-right" class="dim" style="margin-left:auto"></i></div>
+          <div class="list">
+            <div class="row" onclick="go('detail')"><span class="type-pill t-video"><i data-lucide="play"></i></span>
+              <div class="body"><div class="title">Transformer 架构详解：从注意力机制到 GPT</div>
+                <div class="meta"><span class="badge b-ok">已完成</span><span>32:18</span><span class="sep">·</span><span>评分 4.6</span></div></div>
+              <i data-lucide="chevron-right" class="dim"></i></div>
+            <div class="row" onclick="go('detail')"><span class="type-pill t-paper"><i data-lucide="file-text"></i></span>
+              <div class="body"><div class="title">Batch Normalization 原论文精读</div>
+                <div class="meta"><span class="badge b-run">处理中</span><span class="muted">06_OCR</span><span class="bar"><span style="width:40%"></span></span><span class="dim">40%</span></div></div></div>
+          </div>
+        </div>
+
+        <div class="col-group">
+          <div class="col-gh" onclick="go('collection')"><i data-lucide="folder"></i><b>3Blue1Brown</b><span class="badge b-mut">手动</span><span class="dim" style="font-size:12px">12 条</span><i data-lucide="chevron-right" class="dim" style="margin-left:auto"></i></div>
+          <div class="list">
+            <div class="row" onclick="go('detail')"><span class="type-pill t-video"><i data-lucide="play"></i></span>
+              <div class="body"><div class="title">反向传播算法的直觉理解</div>
+                <div class="meta"><span class="badge b-ok">已完成</span><span>14:02</span></div></div>
+              <i data-lucide="chevron-right" class="dim"></i></div>
+          </div>
+        </div>
+
+        <div class="col-group">
+          <div class="col-gh"><i data-lucide="inbox"></i><b>未归集合</b><span class="dim" style="font-size:12px">13 条</span></div>
+          <div class="list">
+            <div class="row" onclick="go('detail')"><span class="type-pill t-paper"><i data-lucide="file-text"></i></span>
+              <div class="body"><div class="title">深度残差学习 ResNet 精读</div>
+                <div class="meta"><span class="badge b-ok">已完成</span><span>arXiv</span></div></div>
+              <i data-lucide="chevron-right" class="dim"></i></div>
+          </div>
+        </div>
+      </div>
+
+      <div data-sub="dw" id="dw-concept" hidden>
+        <div class="callout warn" style="margin-bottom:14px"><i data-lucide="sparkles"></i>有 6 个 AI 提取的待确认概念。<button class="btn sm" style="margin-left:auto" onclick="go('glossary')">去审阅</button></div>
+        <div class="card pad">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <div class="seclabel"><i data-lucide="lightbulb"></i>概念 · 按佐证强度</div><span class="dim" style="font-size:12px">128 个</span></div>
+          <div class="concept" onclick="go('term')"><i data-lucide="bookmark" class="pin"></i>
+            <div style="flex:1;min-width:0"><div class="t">注意力机制 <span class="badge b-brand" style="margin-left:4px">主题概念</span></div>
+              <div class="d">通过 query-key-value 计算序列内元素相关性权重的机制</div></div>
+            <div class="stars"><i data-lucide="star" class="f"></i><i data-lucide="star" class="f"></i><i data-lucide="star" class="f"></i><i data-lucide="star" class="f"></i><i data-lucide="star" class="f"></i></div>
+            <span class="dim" style="font-size:12px;width:36px;text-align:right">14 条</span></div>
+          <div class="concept" onclick="go('term')"><span style="width:14px"></span>
+            <div style="flex:1;min-width:0"><div class="t">梯度下降</div><div class="d">沿损失函数负梯度方向迭代更新参数的优化方法</div></div>
+            <div class="stars"><i data-lucide="star" class="f"></i><i data-lucide="star" class="f"></i><i data-lucide="star" class="f"></i><i data-lucide="star" class="f"></i><i data-lucide="star"></i></div>
+            <span class="dim" style="font-size:12px;width:36px;text-align:right">9 条</span></div>
+          <div class="concept" onclick="go('term')"><span style="width:14px"></span>
+            <div style="flex:1;min-width:0"><div class="t">残差连接</div><div class="d">将输入直接加到输出，缓解深层网络梯度消失</div></div>
+            <div class="stars"><i data-lucide="star" class="f"></i><i data-lucide="star" class="f"></i><i data-lucide="star" class="f"></i><i data-lucide="star"></i><i data-lucide="star"></i></div>
+            <span class="dim" style="font-size:12px;width:36px;text-align:right">5 条</span></div>
+        </div>
+      </div>
+
+      <div data-sub="dw" id="dw-timeline" hidden>
+        <div class="tl-toolbar">
+          <div class="fgroup"><span class="flabel">时间范围</span>
+            <div class="seg"><button class="on" onclick="tlRange(this,'all')">全部</button><button onclick="tlRange(this,'3y')">近 3 年</button><button onclick="tlRange(this,'1y')">近 1 年</button></div>
+            <span class="dim" style="font-size:12px;margin-left:6px">按年统计概念在内容中的出现次数</span></div>
+          <div class="fgroup" style="align-items:flex-start"><span class="flabel" style="margin-top:6px">选择概念</span>
+            <div class="tl-legend" id="tl-legend"></div></div>
+        </div>
+        <div class="card pad"><div class="tl-chart"><canvas id="tlChart"></canvas></div></div>
+        <div class="tl-note" style="margin-top:12px"><i data-lucide="info"></i><span>默认叠加全部概念——随时间推移引入的新概念越来越多（<b>Transformer</b> 2023 起爆发、<b>CNN</b> 逐年下降）。<b>点柱子</b>看某概念在该时段的具体出处；上方概念可单独 / 组合显示。粒度随范围变：全部=按年 · 近 3 年=按季度 · 近 1 年=按月。</span></div>
+        <div class="card pad" style="margin-top:12px">
+          <div class="card-h"><i data-lucide="list"></i><span id="tl-occ-title">出现明细</span></div>
+          <div class="list" id="tl-occ"><div class="dim" style="font-size:13px;padding:6px 2px">点击上方任意柱子，查看该概念在那个时段具体出现在哪些内容里 →</div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ 屏：内容详情（合并：笔记/处理过程/信息） -->
+    <section class="page wide" id="detail" hidden>
+      <div class="card pad" style="margin-bottom:16px">
+        <div style="display:flex;align-items:flex-start;gap:13px">
+          <span class="type-pill t-video" style="width:42px;height:42px"><i data-lucide="play"></i></span>
+          <div style="flex:1;min-width:0">
+            <div class="h1 sm">Transformer 架构详解：从注意力机制到 GPT</div>
+            <div class="row" style="border:none;box-shadow:none;padding:6px 0;cursor:default">
+              <div class="meta" style="margin:0"><span class="badge b-ok">已完成</span><span class="badge b-mut">视频</span>
+                <span>Bilibili</span><span class="sep">·</span><span>机器学习</span><span class="sep">·</span>
+                <span class="mono dim">BV1Kt4y1...</span><span class="sep">·</span>
+                <a class="ghost" style="font-size:12px;color:var(--info)">原始链接<i data-lucide="external-link"></i></a></div></div>
+            <div class="dim" style="font-size:12px;margin-top:2px">上传于 2025/05/30 · 生成 06/15 14:20 → 14:32 · 耗时 12m</div>
+          </div>
+        </div>
+      </div>
+      <div class="tabs">
+        <button class="on" onclick="subtab(this,'cd','cd-notes')"><i data-lucide="book-open"></i>笔记</button>
+        <button onclick="subtab(this,'cd','cd-concepts')"><i data-lucide="lightbulb"></i>概念</button>
+        <button onclick="subtab(this,'cd','cd-proc')"><i data-lucide="git-branch"></i>流水线</button>
+        <button onclick="subtab(this,'cd','cd-info')"><i data-lucide="info"></i>元信息</button>
+      </div>
+
+      <!-- TAB 笔记（默认，完成态落点）-->
+      <div data-sub="cd" id="cd-notes">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
+          <div class="seg"><button class="on">智能版</button><button>机械版</button></div>
+          <span class="dim" style="font-size:12px;margin-left:6px">版本</span>
+          <span class="chip on">claude/opus · 06/15 <i data-lucide="star" style="width:11px;height:11px;color:var(--amber)"></i>4.6</span>
+          <span class="chip">deepseek · 06/12 <i data-lucide="star" style="width:11px;height:11px;color:var(--amber)"></i>4.2</span>
+          <button class="btn sm" style="margin-left:auto"><i data-lucide="refresh-cw"></i>换 provider 重跑</button>
+        </div>
+        <div class="review" style="margin-bottom:16px">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <b style="font-size:13.5px;color:var(--ink-900)">质量评审</b>
+            <span class="badge b-warn"><i data-lucide="star"></i>4.6 / 5</span>
+            <span class="dim" style="font-size:12px">claude / claude-opus · 06/15</span></div>
+          <div class="dims">
+            <div class="dim-g"><div class="row-l">完整性<b>5</b></div><div class="track"><span style="width:100%"></span></div></div>
+            <div class="dim-g"><div class="row-l">准确性<b>5</b></div><div class="track"><span style="width:100%"></span></div></div>
+            <div class="dim-g"><div class="row-l">结构<b>4</b></div><div class="track"><span style="width:80%"></span></div></div>
+            <div class="dim-g"><div class="row-l">概念<b>5</b></div><div class="track"><span style="width:100%"></span></div></div>
+            <div class="dim-g"><div class="row-l">配图<b>4</b></div><div class="track"><span style="width:80%"></span></div></div>
+            <div class="dim-g"><div class="row-l">可读性<b>5</b></div><div class="track"><span style="width:100%"></span></div></div>
+            <div class="dim-g"><div class="row-l">公式<b>4</b></div><div class="track"><span style="width:80%"></span></div></div>
+            <div class="dim-g"><div class="row-l">图表引用<b>5</b></div><div class="track"><span style="width:100%"></span></div></div>
+          </div>
+          <div style="font-size:12.5px;color:var(--ink-600)"><span class="dim">已讲清的概念（可采纳）：</span>
+            <b style="color:var(--ink-900)">注意力机制</b><button class="btn sm" style="padding:2px 8px;margin:0 6px">采纳</button>
+            <b style="color:var(--ink-900)">位置编码</b><button class="btn sm" style="padding:2px 8px;margin-left:6px">采纳</button></div>
+        </div>
+        <div class="notes-wrap">
+          <div class="card pad prose">
+            <h2>1 · 为什么需要注意力机制</h2>
+            <p>传统 RNN 按时间步串行处理序列，难以并行，且<span class="term-link" onclick="go('term')">长程依赖</span>会随距离衰减。<span class="ts">[02:34]</span> 视频用一句话翻译示例说明了这个痛点。</p>
+            <div class="shot"><div class="img"><span><i data-lucide="image" style="width:15px;height:15px;vertical-align:-2px"></i> 关键帧截图</span></div>
+              <div class="cap"><i data-lucide="clock"></i>02:34 · 来源 /api/jobs/{id}/assets/frame_0234.jpg</div></div>
+            <details><summary>OCR：「RNN 的顺序计算瓶颈」（点击展开）</summary><p style="margin:6px 0 0">RNN sequential bottleneck — each step depends on the previous hidden state…</p></details>
+            <h2>2 · 自注意力的计算</h2>
+            <p>核心是 <span class="term-link" onclick="go('term')">query-key-value</span> 三组向量。<span class="ts">[08:12]</span> 点积得相关性权重，softmax 归一化后对 value 加权求和。</p>
+            <h3>2.1 多头注意力</h3>
+            <p>将 Q/K/V 投影到多个子空间并行计算，再拼接——让模型同时关注不同位置的不同表征。</p>
+          </div>
+          <nav class="toc">
+            <div class="seclabel"><i data-lucide="list"></i>章节</div>
+            <a class="on">1 · 为什么需要注意力机制</a><a>2 · 自注意力的计算</a>
+            <a class="sub">2.1 多头注意力</a><a>3 · 位置编码</a><a>4 · 完整架构与训练</a>
+          </nav>
+        </div>
+        <div class="note-tip">正文里 <span class="term-link">蓝色虚线词</span> = 已收录概念（点击进概念详情）；<span class="ts">[时间戳]</span> 灰色等宽（视频版可跳转）；OCR 段折叠为可展开块。</div>
+      </div>
+
+      <!-- TAB 处理过程（步骤工作台）-->
+      <div data-sub="cd" id="cd-proc" hidden>
+        <div class="grid2" style="grid-template-columns:300px 1fr;align-items:start">
+          <div class="card pad">
+            <div class="card-h"><i data-lucide="git-branch"></i>步骤时间线 · video</div>
+            <div class="timeline">
+              <div class="tl-step"><div class="tl-ic done"><i data-lucide="check"></i></div><div><div class="tl-name">下载</div><div class="tl-key">01_download</div><div class="tl-meta">完成 · 18s</div></div></div>
+              <div class="tl-step"><div class="tl-ic done"><i data-lucide="check"></i></div><div><div class="tl-name">语音转写</div><div class="tl-key">02_transcribe</div><div class="tl-meta">完成 · 2m10s</div></div></div>
+              <div class="tl-step"><div class="tl-ic skipped"><i data-lucide="minus"></i></div><div><div class="tl-name">弹幕</div><div class="tl-key">07_danmaku</div><div class="tl-meta dim">已跳过 · 无弹幕</div></div></div>
+              <div class="tl-step on"><div class="tl-ic done"><i data-lucide="check"></i></div><div><div class="tl-name">智能版笔记</div><div class="tl-key">10_smart</div><div class="tl-meta">完成 · 3m02s</div></div></div>
+              <div class="tl-step"><div class="tl-ic running"><i data-lucide="loader"></i></div><div><div class="tl-name">质量评审</div><div class="tl-key">11_review</div><div class="tl-meta">运行中 · 45%</div></div></div>
+            </div>
+          </div>
+          <div class="card pad">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+              <span class="badge b-ok">完成</span><b style="font-size:14px;color:var(--ink-900)">智能版笔记</b>
+              <span class="dim mono" style="font-size:11px">10_smart</span>
+              <button class="btn sm" style="margin-left:auto"><i data-lucide="terminal"></i>原始日志</button></div>
+            <table class="kv" style="margin-bottom:14px"><tr><td>开始</td><td>14:26:08</td></tr><tr><td>结束</td><td>14:29:10</td></tr><tr><td>耗时</td><td>3m02s</td></tr><tr><td>Provider</td><td>claude / claude-opus</td></tr><tr><td>产出</td><td>smart_notes.md · 4.2 KB · 1240 tokens</td></tr></table>
+            <div class="seclabel" style="margin-bottom:10px"><i data-lucide="folder-open"></i>产物</div>
+            <div class="media-box" style="margin-bottom:12px"><i data-lucide="play-circle" style="width:34px;height:34px"></i>
+              <div class="ctrl"><i data-lucide="play" style="width:13px;height:13px"></i><span>00:42</span><span class="bar"><span style="width:30%"></span></span><span>32:18</span></div></div>
+            <div class="art-grid">
+              <div class="art-thumb">frame_0234</div><div class="art-thumb">frame_0512</div><div class="art-thumb">frame_0808</div>
+              <div class="art-thumb"><i data-lucide="file-text"></i></div><div class="art-thumb"><i data-lucide="braces"></i></div></div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:14px">
+          <select class="input" style="max-width:200px"><option>从步骤重跑…</option><option>10_smart</option><option>11_review</option></select>
+          <button class="btn"><i data-lucide="play"></i>重跑</button>
+        </div>
+      </div>
+
+      <!-- TAB 信息 -->
+      <div data-sub="cd" id="cd-info" hidden>
+        <div class="card pad" style="max-width:560px">
+          <div class="card-h"><i data-lucide="info"></i>元信息</div>
+          <table class="kv">
+            <tr><td>标题</td><td>Transformer 架构详解：从注意力机制到 GPT</td></tr>
+            <tr><td>类型</td><td>视频</td></tr><tr><td>来源</td><td>Bilibili</td></tr>
+            <tr><td>知识库</td><td>机器学习</td></tr><tr><td>集合</td><td>李沐读论文</td></tr>
+            <tr><td>BV 号</td><td class="mono">BV1Kt4y1A7e8</td></tr>
+            <tr><td>原始链接</td><td><a class="ghost" style="color:var(--info)">bilibili.com/video/BV1Kt4y1A7e8<i data-lucide="external-link"></i></a></td></tr>
+            <tr><td>状态</td><td><span class="badge b-ok">已完成</span></td></tr>
+          </table>
+          <div style="margin-top:16px;display:flex;gap:8px">
+            <button class="btn"><i data-lucide="rotate-ccw"></i>重新提交</button>
+            <button class="btn danger" onclick="openModal('m-confirm','删除内容','确定删除此内容及所有产物？此操作不可恢复。')"><i data-lucide="trash-2"></i>删除内容</button>
+          </div>
+        </div>
+      </div>
+
+      <div data-sub="cd" id="cd-concepts" hidden>
+        <div class="card pad">
+          <div class="card-h"><i data-lucide="lightbulb"></i>本内容涉及的概念 · 7</div>
+          <p class="lead" style="margin:-4px 0 12px">从这条内容抽取 / 出现的概念。点进去可反查它在整个知识库里——还有哪些内容也讲过它。</p>
+          <div class="concept" onclick="go('term')"><i data-lucide="bookmark" class="pin"></i>
+            <div style="flex:1;min-width:0"><div class="t">注意力机制 <span class="badge b-brand" style="margin-left:4px">主题概念</span></div><div class="d">首次出现 02:34 · 全库 14 条内容讲过</div></div>
+            <span class="badge b-ok" style="flex:none">已收录</span><i data-lucide="chevron-right" class="dim" style="flex:none"></i></div>
+          <div class="concept" onclick="go('term')"><span style="width:14px"></span>
+            <div style="flex:1;min-width:0"><div class="t">Query-Key-Value</div><div class="d">05:18 · 全库 9 条</div></div>
+            <span class="badge b-ok" style="flex:none">已收录</span><i data-lucide="chevron-right" class="dim" style="flex:none"></i></div>
+          <div class="concept" onclick="go('term')"><span style="width:14px"></span>
+            <div style="flex:1;min-width:0"><div class="t">多头注意力</div><div class="d">08:12 · 全库 7 条</div></div>
+            <span class="badge b-ok" style="flex:none">已收录</span><i data-lucide="chevron-right" class="dim" style="flex:none"></i></div>
+          <div class="concept" onclick="go('term')"><span style="width:14px"></span>
+            <div style="flex:1;min-width:0"><div class="t">位置编码</div><div class="d">11:40 · 候选，待确认</div></div>
+            <span class="badge b-warn" style="flex:none">候选</span><i data-lucide="chevron-right" class="dim" style="flex:none"></i></div>
+          <div class="concept" onclick="go('term')"><span style="width:14px"></span>
+            <div style="flex:1;min-width:0"><div class="t">残差连接</div><div class="d">15:02 · 全库 5 条</div></div>
+            <span class="badge b-ok" style="flex:none">已收录</span><i data-lucide="chevron-right" class="dim" style="flex:none"></i></div>
+          <div class="concept" onclick="go('term')"><span style="width:14px"></span>
+            <div style="flex:1;min-width:0"><div class="t">层归一化</div><div class="d">16:20 · 候选，待确认</div></div>
+            <span class="badge b-warn" style="flex:none">候选</span><i data-lucide="chevron-right" class="dim" style="flex:none"></i></div>
+          <div class="concept" onclick="go('term')"><span style="width:14px"></span>
+            <div style="flex:1;min-width:0"><div class="t">前馈网络</div><div class="d">18:30 · 全库 6 条</div></div>
+            <span class="badge b-ok" style="flex:none">已收录</span><i data-lucide="chevron-right" class="dim" style="flex:none"></i></div>
+        </div>
+      </div>
+    </section>
+
+
+<!-- ============================================================ 屏：概念详情（term） -->
+<section class="page" id="term" hidden>
+
+  <div class="card pad" style="margin-bottom:16px">
+    <div style="display:flex;align-items:flex-start;gap:14px">
+      <span class="dcard ic" style="width:44px;height:44px;background:linear-gradient(135deg,var(--brand-500),var(--brand-700));padding:0"><i data-lucide="lightbulb"></i></span>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+          <div class="h1">注意力机制</div>
+          <span class="badge b-brand"><i data-lucide="bookmark"></i>主题概念</span>
+          <span class="badge b-ok"><i data-lucide="check"></i>已采纳</span>
+        </div>
+        <div class="lead"><a class="term-link" onclick="go('domain')">机器学习</a> · 14 处出现 · 3 个关联</div>
+      </div>
+      <button class="btn sm" style="margin-left:auto"><i data-lucide="bookmark"></i>取消主题</button>
+    </div>
+  </div>
+
+  <div class="card pad" style="margin-bottom:16px">
+    <div class="card-h"><i data-lucide="file-text"></i>定义</div>
+    <p style="color:var(--ink-700)">通过 query-key-value 三组向量计算序列内元素之间相关性权重的机制：以查询向量与各键向量做点积得到注意力分数，经 softmax 归一化后对 value 加权求和，从而让模型在编码每个位置时动态聚焦于序列中最相关的部分，摆脱 RNN 的串行依赖。</p>
+  </div>
+
+  <div class="card pad" style="margin-bottom:16px">
+    <div class="card-h"><i data-lucide="link"></i>关联概念</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <span class="chip" onclick="go('term')">自注意力</span>
+      <span class="chip" onclick="go('term')">多头注意力</span>
+      <span class="chip" onclick="go('term')">位置编码</span>
+    </div>
+  </div>
+
+  <div class="card pad">
+    <div class="card-h"><i data-lucide="map-pin"></i>出现处 · 14</div>
+    <div class="occ" onclick="go('detail')">
+      <span class="type-pill t-video" style="width:28px;height:28px"><i data-lucide="play" style="width:13px;height:13px"></i></span>
+      <span class="occ-t" style="flex:1;min-width:0;font-weight:600;color:var(--ink-900);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Transformer 架构详解：从注意力机制到 GPT</span>
+      <span class="badge b-mut">视频</span>
+      <span class="dim mono" style="font-size:12px">02:34 片段</span>
+      <i data-lucide="chevron-right" class="dim"></i>
+    </div>
+    <div class="occ" onclick="go('detail')">
+      <span class="type-pill t-video" style="width:28px;height:28px"><i data-lucide="play" style="width:13px;height:13px"></i></span>
+      <span class="occ-t" style="flex:1;min-width:0;font-weight:600;color:var(--ink-900);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Transformer 架构详解：从注意力机制到 GPT</span>
+      <span class="badge b-mut">视频</span>
+      <span class="dim mono" style="font-size:12px">08:12 片段</span>
+      <i data-lucide="chevron-right" class="dim"></i>
+    </div>
+    <div class="occ" onclick="go('detail')">
+      <span class="type-pill t-paper" style="width:28px;height:28px"><i data-lucide="file-text" style="width:13px;height:13px"></i></span>
+      <span class="occ-t" style="flex:1;min-width:0;font-weight:600;color:var(--ink-900);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Attention Is All You Need</span>
+      <span class="badge b-mut">论文</span>
+      <span class="dim" style="font-size:12px">第 3 节</span>
+      <i data-lucide="chevron-right" class="dim"></i>
+    </div>
+    <div class="occ" onclick="go('detail')">
+      <span class="type-pill t-paper" style="width:28px;height:28px"><i data-lucide="file-text" style="width:13px;height:13px"></i></span>
+      <span class="occ-t" style="flex:1;min-width:0;font-weight:600;color:var(--ink-900);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Attention Is All You Need</span>
+      <span class="badge b-mut">论文</span>
+      <span class="dim" style="font-size:12px">第 3.2 节</span>
+      <i data-lucide="chevron-right" class="dim"></i>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 屏：主题页（topic） -->
+<section class="page" id="topic" hidden>
+
+  <div style="display:flex;align-items:center;gap:13px;margin-bottom:6px">
+    <div><div class="h1"><i data-lucide="hash"></i>注意力机制</div>
+      <div class="lead">主题 · <a class="term-link" onclick="go('domain')">机器学习</a> · 共 12 条内容</div></div>
+    <button class="btn sm" style="margin-left:auto" onclick="go('term')"><i data-lucide="lightbulb"></i>查看概念</button>
+  </div>
+
+  <div class="seclabel" style="margin:22px 0 12px"><i data-lucide="layout-list"></i>关联内容 · 12</div>
+  <div class="list">
+    <div class="row" onclick="go('detail')"><span class="type-pill t-video"><i data-lucide="play"></i></span>
+      <div class="body"><div class="title">Transformer 架构详解：从注意力机制到 GPT</div>
+        <div class="meta"><span class="badge b-ok">已完成</span><span>李沐读论文</span><span class="sep">·</span><span>32:18</span><span class="sep">·</span><span>评分 4.6</span></div></div>
+      <i data-lucide="chevron-right" class="dim"></i></div>
+    <div class="row" onclick="go('detail')"><span class="type-pill t-paper"><i data-lucide="file-text"></i></span>
+      <div class="body"><div class="title">Attention Is All You Need</div>
+        <div class="meta"><span class="badge b-ok">已完成</span><span>arXiv</span><span class="sep">·</span><span class="mono dim">1706.03762</span></div></div>
+      <i data-lucide="chevron-right" class="dim"></i></div>
+    <div class="row" onclick="go('detail')"><span class="type-pill t-video"><i data-lucide="play"></i></span>
+      <div class="body"><div class="title">自注意力机制可视化讲解</div>
+        <div class="meta"><span class="badge b-ok">已完成</span><span>3Blue1Brown</span><span class="sep">·</span><span>26:10</span></div></div>
+      <i data-lucide="chevron-right" class="dim"></i></div>
+    <div class="row" onclick="go('detail')"><span class="type-pill t-article"><i data-lucide="newspaper"></i></span>
+      <div class="body"><div class="title">图解多头注意力：为什么需要多个头</div>
+        <div class="meta"><span class="badge b-ok">已完成</span><span>公众号</span><span class="sep">·</span><span>评分 4.3</span></div></div>
+      <i data-lucide="chevron-right" class="dim"></i></div>
+    <div class="row" onclick="go('detail')"><span class="type-pill t-paper"><i data-lucide="file-text"></i></span>
+      <div class="body"><div class="title">Flash Attention：IO 感知的精确注意力</div>
+        <div class="meta"><span class="badge b-run">处理中</span><span class="muted">08_智能笔记</span><span class="bar"><span style="width:60%"></span></span><span class="dim">60%</span></div></div></div>
+    <div class="row" onclick="go('detail')"><span class="type-pill t-video"><i data-lucide="play"></i></span>
+      <div class="body"><div class="title">从 Seq2Seq 到注意力：机器翻译的演进</div>
+        <div class="meta"><span class="badge b-ok">已完成</span><span>李沐读论文</span><span class="sep">·</span><span>19:44</span></div></div>
+      <i data-lucide="chevron-right" class="dim"></i></div>
+  </div>
+</section>
+
+<!-- ============================================================ 屏：概念库（glossary） -->
+<section class="page" id="glossary" hidden>
+  <div style="display:flex;align-items:flex-end;gap:12px;margin-bottom:20px">
+    <div><div class="h1"><i data-lucide="lightbulb"></i>概念库</div>
+      <div class="lead">AI 从内容中提取候选概念，采纳后沉淀为可检索的知识节点与正文概念链接。</div></div>
+  </div>
+
+  <div style="display:flex;gap:10px;align-items:center;margin-bottom:22px;flex-wrap:wrap">
+    <select class="input" style="max-width:160px"><option>全部知识库</option><option>机器学习</option><option>系统设计</option></select>
+    <button class="btn pri" style="margin-left:auto" onclick="openModal('m-concept')"><i data-lucide="plus"></i>新增概念</button>
+  </div>
+
+  <div class="seclabel" style="margin-bottom:12px"><i data-lucide="sparkles"></i>待审建议 · 6</div>
+  <div class="card pad" style="margin-bottom:26px;border-color:var(--warn-bd)">
+    <div class="occ" style="cursor:default">
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px"><span style="font-weight:600;color:var(--ink-900)">位置编码</span><span class="badge b-warn"><i data-lucide="sparkles"></i>待确认</span></div>
+        <div class="d" style="font-size:12px;color:var(--ink-500);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">向输入嵌入注入序列顺序信息，常用正弦/余弦函数或可学习向量… · 出现于 7 条</div>
+      </div>
+      <button class="btn sm" style="color:var(--ok);border-color:var(--ok-bd)"><i data-lucide="check"></i>采纳</button>
+      <button class="iconbtn"><i data-lucide="x"></i></button>
+    </div>
+    <div class="occ" style="cursor:default">
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px"><span style="font-weight:600;color:var(--ink-900)">层归一化</span><span class="badge b-warn"><i data-lucide="sparkles"></i>待确认</span></div>
+        <div class="d" style="font-size:12px;color:var(--ink-500);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">在特征维度上对每个样本做归一化以稳定训练，区别于批归一化… · 出现于 5 条</div>
+      </div>
+      <button class="btn sm" style="color:var(--ok);border-color:var(--ok-bd)"><i data-lucide="check"></i>采纳</button>
+      <button class="iconbtn"><i data-lucide="x"></i></button>
+    </div>
+    <div class="occ" style="cursor:default">
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px"><span style="font-weight:600;color:var(--ink-900)">学习率调度</span><span class="badge b-warn"><i data-lucide="sparkles"></i>待确认</span></div>
+        <div class="d" style="font-size:12px;color:var(--ink-500);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">训练过程中按策略动态调整学习率，如 warmup 后线性衰减… · 出现于 4 条</div>
+      </div>
+      <button class="btn sm" style="color:var(--ok);border-color:var(--ok-bd)"><i data-lucide="check"></i>采纳</button>
+      <button class="iconbtn"><i data-lucide="x"></i></button>
+    </div>
+  </div>
+
+  <div class="seclabel" style="margin-bottom:12px"><i data-lucide="check-circle-2"></i>已采纳 · 128</div>
+  <div class="card pad">
+    <div class="occ" onclick="go('term')">
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px"><span class="occ-t" style="font-weight:600;color:var(--ink-900)">注意力机制</span><span class="badge b-brand"><i data-lucide="bookmark"></i>主题概念</span></div>
+        <div class="d" style="font-size:12px;color:var(--ink-500);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">通过 query-key-value 计算序列内元素相关性权重的机制 · 关联 3</div>
+      </div>
+      <button class="iconbtn" onclick="event.stopPropagation();openModal('m-concept','编辑概念')"><i data-lucide="pencil"></i></button>
+      <button class="iconbtn" onclick="event.stopPropagation()"><i data-lucide="trash-2"></i></button>
+    </div>
+    <div class="occ" onclick="go('term')">
+      <div style="flex:1;min-width:0">
+        <div class="occ-t" style="font-weight:600;color:var(--ink-900)">梯度下降</div>
+        <div class="d" style="font-size:12px;color:var(--ink-500);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">沿损失函数负梯度方向迭代更新参数的优化方法 · 关联 2</div>
+      </div>
+      <button class="iconbtn" onclick="event.stopPropagation();openModal('m-concept','编辑概念')"><i data-lucide="pencil"></i></button>
+      <button class="iconbtn" onclick="event.stopPropagation()"><i data-lucide="trash-2"></i></button>
+    </div>
+    <div class="occ" onclick="go('term')">
+      <div style="flex:1;min-width:0">
+        <div class="occ-t" style="font-weight:600;color:var(--ink-900)">残差连接</div>
+        <div class="d" style="font-size:12px;color:var(--ink-500);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">将输入直接加到输出，缓解深层网络梯度消失 · 关联 2</div>
+      </div>
+      <button class="iconbtn" onclick="event.stopPropagation();openModal('m-concept','编辑概念')"><i data-lucide="pencil"></i></button>
+      <button class="iconbtn" onclick="event.stopPropagation()"><i data-lucide="trash-2"></i></button>
+    </div>
+    <div class="occ" onclick="go('term')">
+      <div style="flex:1;min-width:0">
+        <div class="occ-t" style="font-weight:600;color:var(--ink-900)">反向传播</div>
+        <div class="d" style="font-size:12px;color:var(--ink-500);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">利用链式法则从输出层向输入层逐层计算梯度的算法 · 关联 3</div>
+      </div>
+      <button class="iconbtn" onclick="event.stopPropagation();openModal('m-concept','编辑概念')"><i data-lucide="pencil"></i></button>
+      <button class="iconbtn" onclick="event.stopPropagation()"><i data-lucide="trash-2"></i></button>
+    </div>
+    <div class="occ" onclick="go('term')">
+      <div style="flex:1;min-width:0">
+        <div class="occ-t" style="font-weight:600;color:var(--ink-900)">卷积</div>
+        <div class="d" style="font-size:12px;color:var(--ink-500);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px">用可学习的卷积核在局部感受野上提取空间特征的运算 · 关联 4</div>
+      </div>
+      <button class="iconbtn" onclick="event.stopPropagation();openModal('m-concept','编辑概念')"><i data-lucide="pencil"></i></button>
+      <button class="iconbtn" onclick="event.stopPropagation()"><i data-lucide="trash-2"></i></button>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 概念 新增/编辑弹窗 ===================== -->
+<div class="overlay" id="m-concept" onclick="if(event.target===this)closeModal('m-concept')">
+  <div class="modal">
+    <div class="hd"><i data-lucide="lightbulb" class="lead-ic"></i><b>新增概念</b><button class="ghost" onclick="closeModal('m-concept')"><i data-lucide="x"></i></button></div>
+    <div class="bd">
+      <div class="field"><label>知识库</label><select class="input"><option>机器学习</option><option>系统设计</option></select></div>
+      <div class="field"><label>概念名</label><input class="input" placeholder="如 注意力机制" /></div>
+      <div class="field"><label>定义</label><textarea class="input" placeholder="用一两句话说明该概念的核心含义…"></textarea></div>
+      <div class="field" style="margin-bottom:0"><label>关联概念</label><input class="input" placeholder="逗号分隔，如 自注意力, 多头注意力, 位置编码" />
+        <div class="note-tip">采纳后正文中出现的该概念会自动转为<span class="term-link">蓝色虚线链接</span>。</div></div>
+    </div>
+    <div class="ft"><button class="btn" onclick="closeModal('m-concept')">取消</button><button class="btn pri" onclick="closeModal('m-concept')"><i data-lucide="plus"></i>添加</button></div>
+  </div>
+</div>
+
+<!-- ============================================================ 屏：所有来源（跨知识库内容） -->
+<section class="page" id="content" hidden>
+  <div style="display:flex;align-items:flex-end;gap:12px;margin-bottom:18px">
+    <div>
+      <div class="h1"><i data-lucide="inbox"></i>所有来源</div>
+      <div class="lead">跨知识库的所有投递，可按来源、类型、状态筛选。</div>
+    </div>
+    <button class="btn pri" style="margin-left:auto" onclick="openModal('m-submit')"><i data-lucide="plus"></i>投递内容</button>
+  </div>
+
+  <div class="filters">
+    <div class="fgroup"><span class="flabel">按状态</span>
+      <span class="chip" onclick="fToggle(this)">已完成 <span class="n">118</span></span>
+      <span class="chip" onclick="fToggle(this)">处理中 <span class="n">7</span></span>
+      <span class="chip" onclick="fToggle(this)">失败 <span class="n">3</span></span>
+      <button class="fclear" onclick="fClear(this)"><i data-lucide="x"></i>清除</button>
+    </div>
+    <div class="fgroup"><span class="flabel">按来源</span>
+      <span class="chip" onclick="fToggle(this)"><i data-lucide="play" style="color:var(--t-video)"></i>Bilibili <span class="n">58</span></span>
+      <span class="chip" onclick="fToggle(this)">YouTube <span class="n">13</span></span>
+      <span class="chip" onclick="fToggle(this)">arXiv <span class="n">34</span></span>
+      <span class="chip" onclick="fToggle(this)">公众号 <span class="n">19</span></span>
+      <span class="chip" onclick="fToggle(this)">本地 <span class="n">8</span></span>
+      <button class="fclear" onclick="fClear(this)"><i data-lucide="x"></i>清除</button>
+    </div>
+    <div class="fgroup"><span class="flabel">按知识库</span>
+      <span class="chip" onclick="fToggle(this)">机器学习 <span class="n">43</span></span>
+      <span class="chip" onclick="fToggle(this)">系统设计 <span class="n">21</span></span>
+      <span class="chip" onclick="fToggle(this)">生物信息学 <span class="n">9</span></span>
+      <button class="fclear" onclick="fClear(this)"><i data-lucide="x"></i>清除</button>
+    </div>
+    <div class="fbar"><span id="fbar-txt">未筛选 —— 显示全部 132 条内容</span><button class="ghost" onclick="fClearAll()"><i data-lucide="x"></i>清除全部</button></div>
+  </div>
+
+  <div class="list">
+    <div class="row" onclick="go('detail')"><span class="type-pill t-video"><i data-lucide="play"></i></span>
+      <div class="body"><div class="title">Transformer 架构详解：从注意力机制到 GPT</div>
+        <div class="meta"><span class="badge b-ok">已完成</span><span>机器学习</span><span class="sep">·</span><span>李沐读论文</span><span class="sep">·</span><span>评分 4.6</span><span class="sep">·</span><span class="dim">2 小时前</span></div></div>
+      <i data-lucide="chevron-right" class="dim"></i></div>
+
+    <div class="row" onclick="go('detail')"><span class="type-pill t-paper"><i data-lucide="file-text"></i></span>
+      <div class="body"><div class="title">Attention Is All You Need (arXiv:1706.03762)</div>
+        <div class="meta"><span class="badge b-run">处理中</span><span>机器学习</span><span class="sep">·</span><span class="muted">08_智能笔记</span><span class="bar"><span style="width:72%"></span></span><span class="dim">72%</span></div></div></div>
+
+    <div class="row" onclick="go('detail')"><span class="type-pill t-article"><i data-lucide="newspaper"></i></span>
+      <div class="body"><div class="title">一致性哈希在分布式缓存中的应用</div>
+        <div class="meta"><span class="badge b-ok">已完成</span><span>系统设计</span><span class="sep">·</span><span>系统设计周刊</span><span class="sep">·</span><span class="dim">昨天</span></div></div>
+      <i data-lucide="chevron-right" class="dim"></i></div>
+
+    <div class="row" style="cursor:default"><span class="type-pill t-audio"><i data-lucide="headphones"></i></span>
+      <div class="body"><div class="title">播客：大模型训练的工程实践</div>
+        <div class="meta"><span class="badge b-bad"><i data-lucide="alert-triangle"></i>失败</span><span>机器学习</span><span class="sep">·</span><span class="muted" style="color:var(--bad)">02_字幕转写超时</span><span class="sep">·</span><span class="dim">3 天前</span></div></div>
+      <button class="btn sm"><i data-lucide="rotate-ccw"></i>重试</button></div>
+
+    <div class="row" onclick="go('detail')"><span class="type-pill t-video"><i data-lucide="play"></i></span>
+      <div class="body"><div class="title">反向传播算法的直觉理解</div>
+        <div class="meta"><span class="badge b-ok">已完成</span><span>机器学习</span><span class="sep">·</span><span>3Blue1Brown</span><span class="sep">·</span><span>14:02</span><span class="sep">·</span><span class="dim">5 天前</span></div></div>
+      <i data-lucide="chevron-right" class="dim"></i></div>
+  </div>
+
+  <div class="load-hint"><span class="spinner" style="width:15px;height:15px;border-width:2px"></span>滚动到底自动加载更多…</div>
+</section>
+
+<!-- ============================================================ 屏：集合列表 -->
+<section class="page" id="collections" hidden>
+  <div style="display:flex;align-items:flex-end;gap:12px;margin-bottom:20px">
+    <div>
+      <div class="h1"><i data-lucide="folder"></i>集合</div>
+      <div class="lead">订阅 UP 主自动追更，或手动收藏归集——投递时自动继承集合的知识库与标签。</div>
+    </div>
+    <button class="btn sm" style="margin-left:auto"><i data-lucide="refresh-cw"></i>刷新</button>
+    <button class="btn pri" onclick="openModal('m-collection')"><i data-lucide="plus"></i>新建</button>
+  </div>
+
+  <div class="grid3">
+    <div class="card pad col-card" onclick="go('collection')">
+      <div class="chead">
+        <span class="cic sub"><i data-lucide="rss"></i></span>
+        <div class="cname-wrap"><div class="cname">李沐读论文</div></div>
+        <span class="badge b-info"><i data-lucide="rss"></i>订阅</span>
+      </div>
+      <div class="stats">
+        <span style="display:flex;align-items:center;gap:5px"><i data-lucide="file-text" style="width:13px;height:13px;color:var(--ink-400)"></i>18 条</span>
+        <span style="display:flex;align-items:center;gap:5px"><i data-lucide="cpu" style="width:13px;height:13px;color:var(--ink-400)"></i>机器学习</span>
+      </div>
+      <div class="taglist" style="margin-bottom:10px"><span class="tag">paper-reading</span><span class="tag">lecture</span></div>
+      <p class="cdesc">逐段精读经典论文，配套手写公式推导与直觉解释。</p>
+      <div class="cfoot" onclick="event.stopPropagation()">
+        <span class="cfoot-tag"><span class="dot d-ok"></span>2 小时前同步</span>
+        <button class="iconbtn" style="margin-left:auto" onclick="openModal('m-collection','编辑集合')"><i data-lucide="pencil"></i></button>
+        <button class="iconbtn" onclick="openModal('m-confirm','删除集合','确定删除此集合？集合内的内容会解绑保留。')"><i data-lucide="trash-2"></i></button>
+      </div>
+    </div>
+
+    <div class="card pad col-card" onclick="go('collection')">
+      <div class="chead">
+        <span class="cic sub"><i data-lucide="rss"></i></span>
+        <div class="cname-wrap"><div class="cname">系统设计周刊</div></div>
+        <span class="badge b-info"><i data-lucide="rss"></i>订阅</span>
+      </div>
+      <div class="stats">
+        <span style="display:flex;align-items:center;gap:5px"><i data-lucide="file-text" style="width:13px;height:13px;color:var(--ink-400)"></i>21 条</span>
+        <span style="display:flex;align-items:center;gap:5px"><i data-lucide="atom" style="width:13px;height:13px;color:var(--ink-400)"></i>系统设计</span>
+      </div>
+      <div class="taglist" style="margin-bottom:10px"><span class="tag">architecture</span><span class="tag">distributed</span></div>
+      <p class="cdesc">每周精选分布式系统与架构实践长文，自动入库。</p>
+      <div class="cfoot" onclick="event.stopPropagation()">
+        <span class="cfoot-tag"><span class="dot d-ok"></span>6 小时前同步</span>
+        <button class="iconbtn" style="margin-left:auto" onclick="openModal('m-collection','编辑集合')"><i data-lucide="pencil"></i></button>
+        <button class="iconbtn" onclick="openModal('m-confirm','删除集合','确定删除此集合？集合内的内容会解绑保留。')"><i data-lucide="trash-2"></i></button>
+      </div>
+    </div>
+
+    <div class="card pad col-card" onclick="go('collection')">
+      <div class="chead">
+        <span class="cic man"><i data-lucide="folder"></i></span>
+        <div class="cname-wrap"><div class="cname">3Blue1Brown</div></div><span class="badge b-mut" style="flex:none">手动</span>
+      </div>
+      <div class="stats">
+        <span style="display:flex;align-items:center;gap:5px"><i data-lucide="file-text" style="width:13px;height:13px;color:var(--ink-400)"></i>12 条</span>
+        <span style="display:flex;align-items:center;gap:5px"><i data-lucide="cpu" style="width:13px;height:13px;color:var(--ink-400)"></i>机器学习</span>
+      </div>
+      <div class="taglist" style="margin-bottom:10px"><span class="tag">animated</span><span class="tag">math-visual</span></div>
+      <p class="cdesc">手动收藏的可视化数学讲解视频，重直觉、轻公式。</p>
+      <div class="cfoot" onclick="event.stopPropagation()">
+        <span class="cfoot-tag"><span class="dot d-mut"></span>手动集合</span>
+        <button class="iconbtn" style="margin-left:auto" onclick="openModal('m-collection','编辑集合')"><i data-lucide="pencil"></i></button>
+        <button class="iconbtn" onclick="openModal('m-confirm','删除集合','确定删除此集合？集合内的内容会解绑保留。')"><i data-lucide="trash-2"></i></button>
+      </div>
+    </div>
+
+    <div class="card pad col-card" onclick="go('collection')">
+      <div class="chead">
+        <span class="cic man"><i data-lucide="folder"></i></span>
+        <div class="cname-wrap"><div class="cname">手动收藏</div></div><span class="badge b-mut" style="flex:none">手动</span>
+      </div>
+      <div class="stats">
+        <span style="display:flex;align-items:center;gap:5px"><i data-lucide="file-text" style="width:13px;height:13px;color:var(--ink-400)"></i>13 条</span>
+        <span style="display:flex;align-items:center;gap:5px"><i data-lucide="layers" style="width:13px;height:13px;color:var(--ink-400)"></i>多知识库</span>
+      </div>
+      <div class="taglist" style="margin-bottom:10px"><span class="tag">misc</span></div>
+      <p class="cdesc">临时随手收藏，未归入固定订阅源的零散内容。</p>
+      <div class="cfoot" onclick="event.stopPropagation()">
+        <span class="cfoot-tag"><span class="dot d-mut"></span>手动集合</span>
+        <button class="iconbtn" style="margin-left:auto" onclick="openModal('m-collection','编辑集合')"><i data-lucide="pencil"></i></button>
+        <button class="iconbtn" onclick="openModal('m-confirm','删除集合','确定删除此集合？集合内的内容会解绑保留。')"><i data-lucide="trash-2"></i></button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 屏：集合详情 -->
+<section class="page" id="collection" hidden>
+  <div style="display:flex;align-items:center;gap:13px;margin-bottom:6px">
+    <span class="ic" style="width:42px;height:42px;border-radius:11px;display:grid;place-items:center;flex:none;background:var(--info-bg);color:var(--info)"><i data-lucide="rss"></i></span>
+    <div><div class="h1">李沐读论文 <span class="badge b-info" style="margin-left:4px"><i data-lucide="rss"></i>订阅</span></div>
+      <div class="lead">机器学习 · 18 条内容 · 2 小时前同步</div></div>
+    <button class="btn sm" style="margin-left:auto"><i data-lucide="refresh-cw"></i>刷新</button>
+  </div>
+
+  <div class="grid2" style="margin-top:18px;align-items:start">
+    <div class="card pad">
+      <div class="card-h"><i data-lucide="info"></i>集合信息</div>
+      <table class="kv">
+        <tr><td>ID</td><td class="mono">col_limu_paper</td></tr>
+        <tr><td>知识库</td><td>机器学习</td></tr>
+        <tr><td>标签</td><td><span class="tag">paper-reading</span> <span class="tag">lecture</span></td></tr>
+        <tr><td>内容</td><td>18 条</td></tr>
+        <tr><td>描述</td><td>逐段精读经典论文，配套手写公式推导与直觉解释。</td></tr>
+      </table>
+    </div>
+
+    <div class="card pad">
+      <div class="card-h"><i data-lucide="rss"></i>订阅源</div>
+      <table class="kv" style="margin-bottom:13px">
+        <tr><td>来源</td><td>B站 UP 主</td></tr>
+        <tr><td>UP 主页</td><td><a class="ghost" style="color:var(--info)">space.bilibili.com/12345<i data-lucide="external-link"></i></a></td></tr>
+        <tr><td>已入库</td><td>18</td></tr>
+        <tr><td>上次同步</td><td>2 小时前</td></tr>
+        <tr><td>追更状态</td><td><span class="badge b-ok"><i data-lucide="check"></i>追更中</span></td></tr>
+      </table>
+      <div style="display:flex;align-items:center;gap:12px;padding-top:11px;border-top:1px solid var(--line-soft)">
+        <button class="btn sm"><i data-lucide="refresh-cw"></i>立即同步</button>
+        <span style="margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--ink-600)">自动同步<div class="switch on"></div></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card pad" style="margin-top:16px">
+    <div class="card-h"><i data-lucide="send"></i>投递到此集合</div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <input class="input" placeholder="粘贴 Bilibili 视频链接…" />
+      <button class="btn pri" style="flex:none"><i data-lucide="send"></i>投递</button>
+    </div>
+    <div class="note-tip">知识库 / 集合自动继承本集合（机器学习 · 李沐读论文）。</div>
+  </div>
+
+  <div class="seclabel" style="margin:22px 0 12px"><i data-lucide="layout-list"></i>内容 · 18</div>
+  <div class="list">
+    <div class="row" onclick="go('detail')"><span class="type-pill t-video"><i data-lucide="play"></i></span>
+      <div class="body"><div class="title">Transformer 架构详解：从注意力机制到 GPT</div>
+        <div class="meta"><span class="badge b-ok">已完成</span><span>32:18</span><span class="sep">·</span><span>评分 4.6</span><span class="sep">·</span><span class="dim">2 小时前</span></div></div>
+      <i data-lucide="chevron-right" class="dim"></i></div>
+    <div class="row" onclick="go('detail')"><span class="type-pill t-video"><i data-lucide="play"></i></span>
+      <div class="body"><div class="title">BERT 论文精读：双向预训练语言模型</div>
+        <div class="meta"><span class="badge b-ok">已完成</span><span>48:55</span><span class="sep">·</span><span>评分 4.5</span><span class="sep">·</span><span class="dim">昨天</span></div></div>
+      <i data-lucide="chevron-right" class="dim"></i></div>
+    <div class="row" onclick="go('detail')"><span class="type-pill t-video"><i data-lucide="play"></i></span>
+      <div class="body"><div class="title">ResNet：深度残差网络逐段精读</div>
+        <div class="meta"><span class="badge b-ok">已完成</span><span>53:10</span><span class="sep">·</span><span>评分 4.7</span><span class="sep">·</span><span class="dim">3 天前</span></div></div>
+      <i data-lucide="chevron-right" class="dim"></i></div>
+    <div class="row" onclick="go('detail')"><span class="type-pill t-video"><i data-lucide="play"></i></span>
+      <div class="body"><div class="title">GPT-3 论文导读：少样本学习的能力边界</div>
+        <div class="meta"><span class="badge b-ok">已完成</span><span>41:27</span><span class="sep">·</span><span>评分 4.4</span><span class="sep">·</span><span class="dim">5 天前</span></div></div>
+      <i data-lucide="chevron-right" class="dim"></i></div>
+  </div>
+</section>
+
+<!-- ===================== 集合 新建/编辑弹窗 ===================== -->
+<div class="overlay" id="m-collection" onclick="if(event.target===this)closeModal('m-collection')">
+  <div class="modal">
+    <div class="hd"><i data-lucide="folder-plus" class="lead-ic"></i><b>新建集合</b><button class="ghost" onclick="closeModal('m-collection')"><i data-lucide="x"></i></button></div>
+    <div class="bd">
+      <div class="field">
+        <label>集合类型</label>
+        <div class="seg"><button class="on">手动集合</button><button><i data-lucide="rss"></i>订阅 B站 UP 主</button></div>
+      </div>
+      <div class="field"><label>UP 主 mid</label><input class="input" placeholder="如 12345" />
+        <div class="note-tip">订阅时填写。</div></div>
+      <div class="field"><label>名称</label><input class="input" placeholder="订阅可留空，默认 UP-mid" /></div>
+      <div class="field"><label>知识库</label>
+        <select class="input"><option>选择知识库…</option><option>机器学习</option><option>系统设计</option><option>生物信息学</option></select>
+        <div class="note-tip">订阅必填，且不能是 general。</div></div>
+      <div class="field"><label>描述</label><textarea class="input" placeholder="一句话说明这个集合收录什么内容…"></textarea></div>
+      <div class="field" style="margin-bottom:0"><label>标签</label><input class="input" placeholder="逗号分隔，如 paper-reading, lecture" /></div>
+    </div>
+    <div class="ft"><button class="btn" onclick="closeModal('m-collection')">取消</button><button class="btn pri" onclick="closeModal('m-collection')"><i data-lucide="check"></i>创建</button></div>
+  </div>
+</div>
+
+<!-- ============================================================ 屏：全文搜索（跨知识库） -->
+<section class="page" id="search" hidden>
+  <div class="h1" style="margin-bottom:16px"><i data-lucide="search"></i>搜索</div>
+
+  <div class="search" style="width:100%;padding:11px 14px">
+    <i data-lucide="search" style="width:17px;height:17px"></i>
+    <input id="search-in" value="注意力机制" oninput="searchRun()" style="font-size:14px" />
+    <span class="kbd">⌘K</span>
+  </div>
+  <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">
+    <select class="input" style="max-width:140px"><option>全部类型</option><option>视频</option><option>论文</option><option>文章</option><option>播客</option></select>
+    <input class="input" placeholder="知识库过滤" style="max-width:160px" />
+  </div>
+
+  <div class="muted" id="search-count" style="font-size:12.5px;margin:18px 0 12px">共 4 条结果</div>
+
+  <div class="list" id="search-list">
+    <div class="card pad" onclick="go('detail')" style="cursor:pointer;display:flex;align-items:flex-start;gap:13px">
+      <span class="type-pill t-video" style="margin-top:1px"><i data-lucide="play"></i></span>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px">
+          <div class="row" style="border:none;box-shadow:none;padding:0;cursor:pointer;flex:1;min-width:0"><div class="title">Transformer 架构详解：从注意力机制到 GPT</div></div>
+          <span class="badge b-mut">智能笔记</span>
+        </div>
+        <p style="font-size:13px;color:var(--ink-600);margin:6px 0 0">核心是 query-key-value 三组向量，<mark>注意力机制</mark>通过点积计算序列内元素的相关性权重，softmax 归一化后对 value 加权求和…</p>
+        <div class="meta" style="margin-top:7px"><span>视频</span><span class="sep">·</span><span>机器学习</span><span class="sep">·</span><span>Bilibili</span></div>
+      </div>
+    </div>
+
+    <div class="card pad" onclick="go('detail')" style="cursor:pointer;display:flex;align-items:flex-start;gap:13px">
+      <span class="type-pill t-paper" style="margin-top:1px"><i data-lucide="file-text"></i></span>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px">
+          <div class="row" style="border:none;box-shadow:none;padding:0;cursor:pointer;flex:1;min-width:0"><div class="title">Attention Is All You Need (arXiv:1706.03762)</div></div>
+          <span class="badge b-mut">智能笔记</span>
+        </div>
+        <p style="font-size:13px;color:var(--ink-600);margin:6px 0 0">本文提出完全基于<mark>注意力机制</mark>的 Transformer，摒弃循环与卷积，在机器翻译任务上取得更优表现且更易并行…</p>
+        <div class="meta" style="margin-top:7px"><span>论文</span><span class="sep">·</span><span>机器学习</span><span class="sep">·</span><span>arXiv</span></div>
+      </div>
+    </div>
+
+    <div class="card pad" onclick="go('detail')" style="cursor:pointer;display:flex;align-items:flex-start;gap:13px">
+      <span class="type-pill t-video" style="margin-top:1px"><i data-lucide="play"></i></span>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px">
+          <div class="row" style="border:none;box-shadow:none;padding:0;cursor:pointer;flex:1;min-width:0"><div class="title">直观理解自注意力：可视化讲解</div></div>
+          <span class="badge b-mut">机械稿</span>
+        </div>
+        <p style="font-size:13px;color:var(--ink-600);margin:6px 0 0">[08:12] 我们用动画一步步拆开<mark>注意力机制</mark>，看 query 如何在所有 key 上打分、再加权聚合 value…</p>
+        <div class="meta" style="margin-top:7px"><span>视频</span><span class="sep">·</span><span>机器学习</span><span class="sep">·</span><span>3Blue1Brown</span></div>
+      </div>
+    </div>
+
+    <div class="card pad" onclick="go('detail')" style="cursor:pointer;display:flex;align-items:flex-start;gap:13px">
+      <span class="type-pill t-article" style="margin-top:1px"><i data-lucide="newspaper"></i></span>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px">
+          <div class="row" style="border:none;box-shadow:none;padding:0;cursor:pointer;flex:1;min-width:0"><div class="title">从 Seq2Seq 到 Transformer 的演进</div></div>
+          <span class="badge b-mut">智能笔记</span>
+        </div>
+        <p style="font-size:13px;color:var(--ink-600);margin:6px 0 0">早期 Seq2Seq 引入了对齐<mark>注意力机制</mark>缓解长程依赖，最终 self-attention 让模型彻底摆脱循环结构…</p>
+        <div class="meta" style="margin-top:7px"><span>文章</span><span class="sep">·</span><span>机器学习</span><span class="sep">·</span><span>公众号</span></div>
+      </div>
+    </div>
+  </div>
+  <div id="search-empty" hidden></div>
+
+  <div class="note-tip" style="margin-top:14px">输入需 ≥ 3 字才会搜索；改上方关键词即时过滤（演示），无匹配显示空状态。</div>
+</section>
+
+
+<!-- ============================================================ 屏：设置 -->
+<section class="page" id="settings" hidden>
+  <div class="h1" style="margin-bottom:20px"><i data-lucide="settings"></i>设置</div>
+
+  <div class="card pad" style="margin-bottom:18px">
+    <div class="card-h"><i data-lucide="qr-code"></i>平台认证</div>
+    <div class="list">
+      <div class="row" style="cursor:default">
+        <span class="type-pill" style="background:#fb7299;color:#fff"><i data-lucide="play"></i></span>
+        <div class="body">
+          <div class="title">Bilibili</div>
+          <div class="meta"><span class="badge b-ok"><i data-lucide="check"></i>已登录</span><span>·</span><span>李同学</span></div>
+        </div>
+        <button class="btn sm danger"><i data-lucide="log-out"></i>注销</button>
+      </div>
+      <div class="row" style="cursor:default">
+        <span class="type-pill" style="background:#fef2f2;color:#dc2626"><i data-lucide="youtube"></i></span>
+        <div class="body">
+          <div class="title">YouTube</div>
+          <div class="meta"><span class="badge b-warn">未配置</span><span>·</span><span>需提供登录 cookies 才能下载会员/限制内容</span></div>
+        </div>
+        <button class="btn sm"><i data-lucide="upload"></i>上传 cookies.txt</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card pad" style="margin-bottom:18px">
+    <div class="card-h"><i data-lucide="server"></i>运维</div>
+    <div class="row" onclick="go('system')">
+      <span class="type-pill" style="background:var(--mut-bg);color:var(--ink-600)"><i data-lucide="activity"></i></span>
+      <div class="body"><div class="title">Worker 监控</div>
+        <div class="meta"><span>查看系统与 Worker 状态</span></div></div>
+      <i data-lucide="chevron-right" class="dim"></i>
+    </div>
+  </div>
+
+  <div class="card pad">
+    <div class="card-h"><i data-lucide="info"></i>关于</div>
+    <div class="row" onclick="go('about')">
+      <span class="type-pill" style="background:var(--brand-50);color:var(--brand-600)"><i data-lucide="book-open"></i></span>
+      <div class="body"><div class="title">关于 Mnemo</div>
+        <div class="meta"><span>这个项目在做什么、如何使用</span></div></div>
+      <i data-lucide="chevron-right" class="dim"></i>
+    </div>
+  </div>
+</section>
+
+
+<!-- ============================================================ 屏：系统 / Worker 监控 -->
+<section class="page" id="system" hidden>
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:18px">
+    <div class="h1"><i data-lucide="server"></i>系统与 Worker</div>
+    <button class="btn sm" style="margin-left:auto"><i data-lucide="refresh-cw"></i>刷新</button>
+  </div>
+
+  <div class="grid3" style="margin-bottom:24px">
+    <div class="metric"><div class="v">4 / 6</div><div class="l">Worker 在线 / 共</div></div>
+    <div class="metric"><div class="v">2</div><div class="l">忙碌 · 处理中</div></div>
+    <div class="metric"><div class="v">47</div><div class="l">今日完成 · 吞吐</div></div>
+  </div>
+
+  <div class="seclabel" style="margin-bottom:12px"><i data-lucide="cpu"></i>Worker · 6</div>
+  <div class="list" style="margin-bottom:24px">
+
+    <!-- ai-a1b2 online idle -->
+    <div class="card pad wcard" onclick="go('wdetail')">
+      <span class="dot d-ok"></span>
+      <div class="wcard-main">
+        <div class="wcard-hd">
+          <b class="mono wcard-id">ai-a1b2</b>
+          <span class="badge b-ok">在线空闲</span><span class="badge b-mut">AI</span>
+        </div>
+        <div class="meta">
+          <span>office-pc</span><span class="sep">·</span><span>Claude Max</span><span class="sep">·</span>
+          <span>完成 142</span><span class="sep">·</span><span>失败 3</span><span class="sep">·</span>
+          <span>运行 7h12m</span><span class="sep">·</span><span>心跳 5s 前</span></div>
+      </div>
+      <button class="btn sm" onclick="event.stopPropagation()"><i data-lucide="loader"></i>排空</button>
+      <button class="btn sm" onclick="event.stopPropagation()"><i data-lucide="message-square"></i>备注</button>
+    </div>
+
+    <!-- ai-c3d4 online busy -->
+    <div class="card pad wcard" onclick="go('wdetail')">
+      <span class="dot d-info pulse"></span>
+      <div class="wcard-main">
+        <div class="wcard-hd">
+          <b class="mono wcard-id">ai-c3d4</b>
+          <span class="badge b-info">在线忙碌</span><span class="badge b-mut">AI</span>
+          <span class="badge b-run">当前 10_smart <span class="mono">j_xxx</span></span>
+        </div>
+        <div class="meta">
+          <span>office-pc</span><span class="sep">·</span><span>Claude Max</span><span class="sep">·</span>
+          <span>完成 89</span><span class="sep">·</span><span>失败 1</span><span class="sep">·</span>
+          <span>运行 3h05m</span><span class="sep">·</span><span>心跳 2s 前</span></div>
+      </div>
+      <button class="btn sm" onclick="event.stopPropagation()"><i data-lucide="loader"></i>排空</button>
+      <button class="btn sm" onclick="event.stopPropagation()"><i data-lucide="message-square"></i>备注</button>
+    </div>
+
+    <!-- gpu-e5f6 online idle -->
+    <div class="card pad wcard" onclick="go('wdetail')">
+      <span class="dot d-ok"></span>
+      <div class="wcard-main">
+        <div class="wcard-hd">
+          <b class="mono wcard-id">gpu-e5f6</b>
+          <span class="badge b-ok">在线空闲</span><span class="badge b-mut">GPU</span>
+        </div>
+        <div class="meta">
+          <span>gpu-server</span><span class="sep">·</span><span>RTX 4090 24GB</span><span class="sep">·</span>
+          <span>完成 88</span><span class="sep">·</span><span>失败 1</span><span class="sep">·</span>
+          <span>运行 5h40m</span><span class="sep">·</span><span>心跳 4s 前</span></div>
+      </div>
+      <button class="btn sm" onclick="event.stopPropagation()"><i data-lucide="loader"></i>排空</button>
+      <button class="btn sm" onclick="event.stopPropagation()"><i data-lucide="message-square"></i>备注</button>
+    </div>
+
+    <!-- cpu-i9j0 offline -->
+    <div class="card pad wcard off">
+      <span class="dot d-mut"></span>
+      <div class="wcard-main">
+        <div class="wcard-hd">
+          <b class="mono wcard-id">cpu-i9j0</b>
+          <span class="badge b-mut">离线</span><span class="badge b-mut">CPU</span>
+        </div>
+        <div class="meta">
+          <span>old-laptop</span><span class="sep">·</span><span>4 核 / 8GB</span><span class="sep">·</span>
+          <span>完成 23</span><span class="sep">·</span><span>失败 5</span><span class="sep">·</span>
+          <span>心跳 2h 前</span></div>
+      </div>
+      <button class="btn sm danger" onclick="event.stopPropagation()"><i data-lucide="x"></i>移除</button>
+    </div>
+  </div>
+
+  <div class="card pad">
+    <div class="card-h"><i data-lucide="plus"></i>接入新 Worker</div>
+    <div class="row2" style="margin-bottom:14px">
+      <div class="field" style="margin:0"><label>类型</label>
+        <select class="input"><option>cpu</option><option>gpu</option><option>ai</option><option>download</option></select></div>
+      <div class="field" style="margin:0"><label>标签</label>
+        <input class="input" placeholder="如 home-desktop" /></div>
+    </div>
+    <button class="btn pri" style="margin-bottom:16px"><i data-lucide="key"></i>生成接入 token</button>
+
+    <div class="seg" style="margin-bottom:12px"><button class="on">分布式</button><button>docker run</button><button>compose</button></div>
+    <div style="background:var(--ink-900);color:#cbd5e1;font-family:var(--mono);font-size:12px;padding:12px;border-radius:var(--r-sm);overflow:auto;line-height:1.7">docker run -d --name mnemo-worker \<br>&nbsp;&nbsp;-e MNEMO_SERVER=https://mnemo.local \<br>&nbsp;&nbsp;-e WORKER_TYPE=gpu --gpus all \<br>&nbsp;&nbsp;-e JOIN_TOKEN=wk_8f2a...d31c \<br>&nbsp;&nbsp;ghcr.io/gwzlchn/mnemo:latest worker</div>
+    <button class="btn sm" style="margin-top:10px"><i data-lucide="copy"></i>复制命令</button>
+  </div>
+</section>
+
+
+<!-- ============================================================ 屏：手机预览（统一底部导航） -->
+<section class="page wide" id="mobile" hidden>
+  <div class="h1"><i data-lucide="smartphone"></i>手机端（统一导航）</div>
+  <div class="lead" style="margin-bottom:22px">底部导航与桌面同一套信息架构：<b>知识库 · 内容 · 投递（凸起）· 搜索 · 设置</b>。概念与集合一律从知识库内层层进入，不再出现「桌面有、手机没有」的不一致。</div>
+
+  <div class="phone-wrap">
+
+    <!-- Phone 1：知识库 home -->
+    <div class="phone">
+      <div class="pbar"><span class="notch"></span></div>
+      <div class="ptop"><b>知识库</b><i data-lucide="search" style="color:var(--ink-500)"></i></div>
+      <div class="pbody">
+        <div class="mini-d">
+          <div class="top"><span class="ic" style="background:linear-gradient(135deg,#6366f1,#4338ca)"><i data-lucide="cpu"></i></span><h4>机器学习</h4></div>
+          <div class="st"><span>43 条</span><span>128 概念</span></div>
+        </div>
+        <div class="mini-d">
+          <div class="top"><span class="ic" style="background:linear-gradient(135deg,#0ea5e9,#0369a1)"><i data-lucide="atom"></i></span><h4>系统设计</h4></div>
+          <div class="st"><span>21 条</span><span>67 概念</span></div>
+        </div>
+        <div class="mini-d">
+          <div class="top"><span class="ic" style="background:linear-gradient(135deg,#10b981,#047857)"><i data-lucide="dna"></i></span><h4>生物信息学</h4></div>
+          <div class="st"><span>9 条</span><span>31 概念</span></div>
+        </div>
+      </div>
+      <div class="pnav">
+        <a class="on"><i data-lucide="book-marked"></i>知识库</a>
+        <a><i data-lucide="layout-list"></i>内容</a>
+        <a class="fab"><i data-lucide="plus"></i></a>
+        <a><i data-lucide="search"></i>搜索</a>
+        <a><i data-lucide="settings"></i>设置</a>
+      </div>
+    </div>
+
+    <!-- Phone 2：内容详情 · 笔记 -->
+    <div class="phone">
+      <div class="pbar"><span class="notch"></span></div>
+      <div class="ptop">
+        <span style="display:flex;align-items:center;gap:7px;min-width:0"><i data-lucide="arrow-left" style="color:var(--ink-500)"></i><b style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Transformer…</b></span>
+        <i data-lucide="more-horizontal" style="color:var(--ink-500)"></i>
+      </div>
+      <div class="pbody">
+        <div class="seg" style="margin-bottom:14px"><button class="on">智能版</button><button>机械版</button></div>
+        <h3 style="font-size:14px;color:var(--ink-900);font-weight:650;margin:0 0 8px">1 · 为什么需要注意力</h3>
+        <p style="font-size:13px;color:var(--ink-700);margin:0 0 12px">传统 RNN 串行处理序列，难以并行，且<span class="term-link">长程依赖</span>会随距离衰减。<span class="ts">[02:34]</span> 视频用翻译示例点出了这个痛点。</p>
+        <div class="shot" style="margin:0"><div class="img" style="height:96px"><span><i data-lucide="image" style="width:14px;height:14px;vertical-align:-2px"></i> 关键帧截图</span></div></div>
+      </div>
+      <div class="pnav">
+        <a class="on"><i data-lucide="book-marked"></i>知识库</a>
+        <a><i data-lucide="layout-list"></i>内容</a>
+        <a class="fab"><i data-lucide="plus"></i></a>
+        <a><i data-lucide="search"></i>搜索</a>
+        <a><i data-lucide="settings"></i>设置</a>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+
+<!-- ===================== Profile 编辑器弹窗 ===================== -->
+<div class="overlay" id="m-profile" onclick="if(event.target===this)closeModal('m-profile')">
+  <div class="modal wide">
+    <div class="hd"><i data-lucide="sliders-horizontal" class="lead-ic"></i><b>知识库设定 · 机器学习</b><button class="ghost" onclick="closeModal('m-profile')"><i data-lucide="x"></i></button></div>
+    <div class="bd">
+      <div class="field"><label>知识库名称</label>
+        <input class="input" value="机器学习" />
+        <div class="note-tip">重命名会更新该知识库下所有内容 / 集合 / 概念的归属。</div></div>
+      <div class="field"><label>图标</label>
+        <div class="icon-grid">
+          <button class="icon-pick on" onclick="pickIcon(this)"><i data-lucide="cpu"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="atom"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="dna"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="code"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="database"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="globe"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="flask-conical"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="brain"></i></button>
+        </div></div>
+      <div class="field"><label>颜色</label>
+        <div class="color-row">
+          <button class="swatch on" onclick="pickColor(this)" style="background:linear-gradient(135deg,#6366f1,#4338ca)"></button>
+          <button class="swatch" onclick="pickColor(this)" style="background:linear-gradient(135deg,#0ea5e9,#0369a1)"></button>
+          <button class="swatch" onclick="pickColor(this)" style="background:linear-gradient(135deg,#10b981,#047857)"></button>
+          <button class="swatch" onclick="pickColor(this)" style="background:linear-gradient(135deg,#f59e0b,#b45309)"></button>
+          <button class="swatch" onclick="pickColor(this)" style="background:linear-gradient(135deg,#ec4899,#9d174d)"></button>
+          <button class="swatch" onclick="pickColor(this)" style="background:linear-gradient(135deg,#64748b,#334155)"></button>
+        </div></div>
+      <div class="field"><label>角色</label>
+        <input class="input" value="深度学习研究者" /></div>
+      <div class="field"><label>知识库上下文</label>
+        <textarea class="input">熟悉线性代数与概率论，关注前沿论文，希望笔记保留数学严谨性并指出与已有方法的联系…</textarea></div>
+      <div class="field"><label>概念表</label>
+        <div class="taglist" style="margin-bottom:8px">
+          <span class="tag">注意力机制<button><i data-lucide="x"></i></button></span>
+          <span class="tag">梯度下降<button><i data-lucide="x"></i></button></span>
+          <span class="tag">反向传播<button><i data-lucide="x"></i></button></span>
+        </div>
+        <input class="input" placeholder="追加概念后回车…" /></div>
+      <div class="field" style="margin-bottom:0"><label>禁止事项（do_not）</label>
+        <div class="taglist" style="margin-bottom:8px">
+          <span class="tag">避免过度类比<button><i data-lucide="x"></i></button></span>
+          <span class="tag">不省略公式推导<button><i data-lucide="x"></i></button></span>
+        </div>
+        <input class="input" placeholder="追加禁止项后回车…" /></div>
+    </div>
+    <div class="ft"><button class="btn danger" style="margin-right:auto" onclick="closeModal('m-profile')"><i data-lucide="trash-2"></i>删除知识库</button><button class="btn" onclick="closeModal('m-profile')">取消</button><button class="btn pri" onclick="closeModal('m-profile')"><i data-lucide="check"></i>保存</button></div>
+  </div>
+</div>
+
+
+<!-- ============================================================ -->
+<!-- (1) Worker 详情页 -->
+<!-- ============================================================ -->
+<section class="page" id="wdetail" hidden>
+
+  <div style="display:flex;align-items:center;gap:11px;flex-wrap:wrap">
+    <span class="dot d-ok"></span>
+    <div class="h1"><span class="mono">ai-a1b2</span></div>
+    <span class="badge b-ok"><i data-lucide="check"></i>在线空闲</span>
+    <span class="badge b-mut"><i data-lucide="cpu"></i>AI</span>
+    <div style="margin-left:auto;display:flex;gap:8px">
+      <button class="btn sm"><i data-lucide="refresh-cw"></i>刷新</button>
+      <button class="btn sm"><i data-lucide="loader"></i>排空</button>
+    </div>
+  </div>
+
+  <div class="grid3" style="margin-top:18px">
+    <div class="metric"><div class="v">142</div><div class="l">累计完成</div></div>
+    <div class="metric"><div class="v">12</div><div class="l">今日完成</div></div>
+    <div class="metric"><div class="v">97.9%</div><div class="l">成功率</div></div>
+  </div>
+
+  <div class="card pad" style="margin-top:16px">
+    <div class="card-h"><i data-lucide="info"></i>基本信息</div>
+    <table class="kv">
+      <tr><td>主机名</td><td class="mono">office-pc</td></tr>
+      <tr><td>算力</td><td>Claude Max（订阅）</td></tr>
+      <tr><td>资源池</td><td><span class="badge b-brand"><i data-lucide="layers"></i>ai</span></td></tr>
+      <tr><td>标签</td><td><span class="tag">ai</span> <span class="tag">claude</span></td></tr>
+      <tr><td>运行时长</td><td>7h12m</td></tr>
+      <tr><td>上次心跳</td><td>5 秒前</td></tr>
+      <tr><td>首次接入</td><td>2026/06/08</td></tr>
+      <tr><td>备注</td><td>「内网机器，有 Claude 订阅」</td></tr>
+    </table>
+  </div>
+
+  <div class="seclabel" style="margin:22px 0 11px"><i data-lucide="clock"></i>任务历史 · 最近处理</div>
+  <div class="list">
+    <div class="row" onclick="go('detail')">
+      <span class="type-pill t-video"><i data-lucide="play"></i></span>
+      <div class="body">
+        <div class="title">Transformer 注意力机制图解</div>
+        <div class="meta"><span class="mono">10_smart 智能笔记</span><span class="badge b-ok"><i data-lucide="check"></i>完成</span><span>3m02s</span><span class="sep">·</span><span>8 分钟前</span></div>
+      </div>
+      <i data-lucide="chevron-right" class="dim"></i>
+    </div>
+    <div class="row" onclick="go('detail')">
+      <span class="type-pill t-paper"><i data-lucide="file-text"></i></span>
+      <div class="body">
+        <div class="title">Attention Is All You Need</div>
+        <div class="meta"><span class="mono">11_review 评审</span><span class="badge b-ok"><i data-lucide="check"></i>完成</span><span>1m47s</span><span class="sep">·</span><span>26 分钟前</span></div>
+      </div>
+      <i data-lucide="chevron-right" class="dim"></i>
+    </div>
+    <div class="row" onclick="go('detail')">
+      <span class="type-pill t-article"><i data-lucide="newspaper"></i></span>
+      <div class="body">
+        <div class="title">分布式系统的一致性与共识</div>
+        <div class="meta"><span class="mono">10_smart 智能笔记</span><span class="badge b-ok"><i data-lucide="check"></i>完成</span><span>2m31s</span><span class="sep">·</span><span>1 小时前</span></div>
+      </div>
+      <i data-lucide="chevron-right" class="dim"></i>
+    </div>
+    <div class="row" onclick="go('detail')">
+      <span class="type-pill t-audio"><i data-lucide="headphones"></i></span>
+      <div class="body">
+        <div class="title">播客 · 推荐系统的工程权衡</div>
+        <div class="meta"><span class="mono">02_transcribe 语音转写</span><span class="badge b-bad"><i data-lucide="x"></i>失败</span><span>0m54s</span><span class="sep">·</span><span>2 小时前</span></div>
+      </div>
+      <i data-lucide="chevron-right" class="dim"></i>
+    </div>
+    <div class="row" onclick="go('detail')">
+      <span class="type-pill t-video"><i data-lucide="play"></i></span>
+      <div class="body">
+        <div class="title">从零实现一个简易调度器</div>
+        <div class="meta"><span class="mono">10_smart 智能笔记</span><span class="badge b-ok"><i data-lucide="check"></i>完成</span><span>4m18s</span><span class="sep">·</span><span>3 小时前</span></div>
+      </div>
+      <i data-lucide="chevron-right" class="dim"></i>
+    </div>
+    <div class="row" onclick="go('detail')">
+      <span class="type-pill t-paper"><i data-lucide="file-text"></i></span>
+      <div class="body">
+        <div class="title">高可用系统设计模式综述</div>
+        <div class="meta"><span class="mono">11_review 评审</span><span class="badge b-ok"><i data-lucide="check"></i>完成</span><span>2m09s</span><span class="sep">·</span><span>今天 09:14</span></div>
+      </div>
+      <i data-lucide="chevron-right" class="dim"></i>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<!-- (2) 关于 Mnemo 页 -->
+<!-- ============================================================ -->
+<section class="page" id="about" hidden>
+
+  <div class="h1"><i data-lucide="book-open"></i>关于 Mnemo</div>
+  <div class="lead">把视频 / 论文 / 文章 / 播客自动转成结构化笔记，沉淀为可检索、互相关联的个人知识库。</div>
+
+  <div class="card pad" style="margin-top:18px">
+    <div class="card-h"><i data-lucide="info"></i>这是什么</div>
+    <p style="color:var(--ink-700)">Mnemo 把你投递的学习材料自动转成<b>两种笔记</b>：<b>机械版</b>逐字稿 + 关键截图，忠实还原原内容；<b>智能版</b>由 AI 重组成结构化讲解，便于阅读理解。</p>
+    <p style="color:var(--ink-700);margin-top:9px">这些笔记按知识范围归入各个 <b>知识库</b>（Notebook），并通过其中抽取的 <b>概念</b> 互相关联，逐渐织成一张属于你自己的知识网。</p>
+  </div>
+
+  <div class="card pad" style="margin-top:16px">
+    <div class="card-h"><i data-lucide="git-branch"></i>核心循环</div>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <span class="badge b-brand"><i data-lucide="send"></i>投递 URL/文件</span>
+      <i data-lucide="chevron-right" class="dim"></i>
+      <span class="badge b-info"><i data-lucide="refresh-cw"></i>自动处理</span>
+      <i data-lucide="chevron-right" class="dim"></i>
+      <span class="badge b-mut"><i data-lucide="file-text"></i>读智能笔记</span>
+      <i data-lucide="chevron-right" class="dim"></i>
+      <span class="badge b-ok"><i data-lucide="check"></i>采纳概念</span>
+      <i data-lucide="chevron-right" class="dim"></i>
+      <span class="badge b-brand"><i data-lucide="git-branch"></i>连成知识网</span>
+      <i data-lucide="chevron-right" class="dim"></i>
+      <span class="badge b-mut"><i data-lucide="search"></i>搜索回溯</span>
+    </div>
+    <div class="note-tip" style="margin-top:11px">自动处理含：下载 · 转写 · 截图 · OCR · 抽概念</div>
+  </div>
+
+  <div class="card pad" style="margin-top:16px">
+    <div class="card-h"><i data-lucide="list"></i>怎么用</div>
+    <div class="list">
+      <div class="row" style="cursor:default">
+        <span class="type-pill t-video"><span style="font-weight:700;color:var(--t-video)">1</span></span>
+        <div class="body">
+          <div class="title">投递</div>
+          <div class="meta"><span>粘贴链接或拖文件，丢进收件箱即可</span></div>
+        </div>
+      </div>
+      <div class="row" style="cursor:default">
+        <span class="type-pill t-paper"><span style="font-weight:700;color:var(--t-paper)">2</span></span>
+        <div class="body">
+          <div class="title">等待自动处理</div>
+          <div class="meta"><span>后台跑流水线，手机可关掉，处理完通知你</span></div>
+        </div>
+      </div>
+      <div class="row" style="cursor:default">
+        <span class="type-pill t-article"><span style="font-weight:700;color:var(--t-article)">3</span></span>
+        <div class="body">
+          <div class="title">阅读智能笔记</div>
+          <div class="meta"><span>点时间戳回看原片，点概念查定义</span></div>
+        </div>
+      </div>
+      <div class="row" style="cursor:default">
+        <span class="type-pill t-audio"><span style="font-weight:700;color:var(--t-audio)">4</span></span>
+        <div class="body">
+          <div class="title">采纳概念</div>
+          <div class="meta"><span>在评审里把讲清的概念「采纳」进知识库，越攒越成体系</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card pad" style="margin-top:16px">
+    <div class="card-h"><i data-lucide="layers"></i>四个层次</div>
+    <table class="kv">
+      <tr><td>知识库</td><td>按知识范围分，互相隔离 —— 你知识体系的一级容器</td></tr>
+      <tr><td>集合</td><td>知识库内对内容的分组 —— 订阅源（如某 UP 主合集）或手动收藏</td></tr>
+      <tr><td>内容</td><td>每条投递的视频 · 论文 · 文章 · 播客，归入某个集合</td></tr>
+      <tr><td>概念</td><td>从内容里抽取、你学会的知识点，自动连成网、跨内容互相引用</td></tr>
+    </table>
+  </div>
+
+  <div class="card pad" style="margin-top:16px">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--ink-500)">
+      <span class="badge b-mut"><i data-lucide="cpu"></i>技术栈</span>
+      <span>Vue 3 · FastAPI · SQLite · Docker</span>
+      <span class="sep" style="color:var(--ink-300)">·</span>
+      <span>全 Docker 自托管，数据完全自有</span>
+      <span class="sep" style="color:var(--ink-300)">·</span>
+      <span>MIT 开源</span>
+    </div>
+  </div>
+</section>
+
+  </div>
+</div>
+
+<!-- MODALS_INSERT -->
+<!-- ===================== 投递弹窗 ===================== -->
+<div class="overlay" id="m-submit" onclick="if(event.target===this)closeModal('m-submit')">
+  <div class="modal">
+    <div class="hd"><i data-lucide="plus-circle" class="lead-ic"></i><b>投递内容</b><button class="ghost" onclick="closeModal('m-submit')"><i data-lucide="x"></i></button></div>
+    <div class="bd">
+      <div class="field"><label>粘贴链接</label><input class="input" placeholder="Bilibili / YouTube / arXiv / 公众号 链接…" />
+        <div class="note-tip">自动识别来源与类型 · 已识别：<span class="badge b-info" style="margin-left:2px">视频 · Bilibili</span></div></div>
+      <div class="drop"><i data-lucide="upload-cloud" style="width:22px;height:22px;display:block;margin:0 auto 6px"></i>或拖拽本地视频 / PDF / 音频 到此（≤2GB）</div>
+      <div class="row2" style="margin-top:15px">
+        <div class="field" style="margin:0"><label>归入知识库</label><select class="input" id="sb-kb" onchange="syncCollections()"><option value="">自动判断</option><option>机器学习</option><option>系统设计</option><option>生物信息学</option></select></div>
+        <div class="field" style="margin:0"><label>集合（可选）<span class="dim" style="font-weight:400">· 随知识库联动</span></label><select class="input" id="sb-col"><option>不归集合</option></select></div>
+      </div>
+      <div class="field" style="margin:14px 0 0"><label>风格标签（可选）</label>
+        <div style="display:flex;gap:7px;flex-wrap:wrap"><span class="chip on">lecture</span><span class="chip">animated</span><span class="chip">code-tutorial</span><span class="chip">math-visual</span></div></div>
+    </div>
+    <div class="ft"><button class="btn" onclick="closeModal('m-submit')">取消</button><button class="btn pri" onclick="closeModal('m-submit')"><i data-lucide="send"></i>投递</button></div>
+  </div>
+</div>
+
+<!-- ===================== 通用确认弹窗 ===================== -->
+<div class="overlay confirm" id="m-confirm" onclick="if(event.target===this)closeModal('m-confirm')">
+  <div class="modal">
+    <div class="bd" style="display:flex;gap:14px"><span class="danger-ic"><i data-lucide="alert-triangle"></i></span>
+      <div><b style="font-size:15px;color:var(--ink-900)">删除内容</b>
+        <p style="font-size:13px;color:var(--ink-600);margin-top:5px">确定删除此内容及所有产物？此操作不可恢复。</p></div></div>
+    <div class="ft"><button class="btn" onclick="closeModal('m-confirm')">取消</button><button class="btn pri" style="background:var(--bad);border-color:var(--bad)" onclick="closeModal('m-confirm')">删除</button></div>
+  </div>
+</div>
+
+<!-- ===================== 新建知识库弹窗（知识库为一等实体） ===================== -->
+<div class="overlay" id="m-domain" onclick="if(event.target===this)closeModal('m-domain')">
+  <div class="modal">
+    <div class="hd"><i data-lucide="plus-circle" class="lead-ic"></i><b>新建知识库</b><button class="ghost" onclick="closeModal('m-domain')"><i data-lucide="x"></i></button></div>
+    <div class="bd">
+      <div class="field"><label>名称</label><input class="input" placeholder="如：强化学习、密码学、宏观经济…" />
+        <div class="note-tip">知识库是知识的命名空间，互相隔离。建好后投递内容时选它即可归入。</div></div>
+      <div class="field"><label>图标</label>
+        <div class="icon-grid">
+          <button class="icon-pick on" onclick="pickIcon(this)"><i data-lucide="cpu"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="atom"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="dna"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="code"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="database"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="globe"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="flask-conical"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="book-open"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="brain"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="calculator"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="scale"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="languages"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="music"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="palette"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="leaf"></i></button>
+          <button class="icon-pick" onclick="pickIcon(this)"><i data-lucide="rocket"></i></button>
+        </div>
+        <div class="note-tip">从图标库挑一个，配色见下。</div></div>
+      <div class="field"><label>颜色</label>
+        <div class="color-row">
+          <button class="swatch on" onclick="pickColor(this)" style="background:linear-gradient(135deg,#6366f1,#4338ca)"></button>
+          <button class="swatch" onclick="pickColor(this)" style="background:linear-gradient(135deg,#0ea5e9,#0369a1)"></button>
+          <button class="swatch" onclick="pickColor(this)" style="background:linear-gradient(135deg,#10b981,#047857)"></button>
+          <button class="swatch" onclick="pickColor(this)" style="background:linear-gradient(135deg,#f59e0b,#b45309)"></button>
+          <button class="swatch" onclick="pickColor(this)" style="background:linear-gradient(135deg,#ec4899,#9d174d)"></button>
+          <button class="swatch" onclick="pickColor(this)" style="background:linear-gradient(135deg,#64748b,#334155)"></button>
+        </div></div>
+      <div class="field"><label>角色（可选）</label><input class="input" placeholder="如：研究者 / 学习者 / 架构师" /></div>
+      <div class="field" style="margin-bottom:0"><label>简介（可选）</label><textarea class="input" placeholder="这个知识库你关注什么、希望笔记怎么写…（影响该知识库的笔记生成）"></textarea></div>
+    </div>
+    <div class="ft"><button class="btn" onclick="closeModal('m-domain')">取消</button><button class="btn pri" onclick="closeModal('m-domain')"><i data-lucide="check"></i>创建知识库</button></div>
+  </div>
+</div>
+
+<div class="switcher" id="switcher"></div>
+
+<script>
+const CRUMBS={
+  home:[['知识库']],
+  domain:[['知识库','home'],['机器学习']],
+  detail:[['知识库','home'],['机器学习','domain'],['Transformer 架构详解']],
+  term:[['知识库','home'],['机器学习','domain'],['概念','domain'],['注意力机制']],
+  topic:[['知识库','home'],['机器学习','domain'],['主题','domain'],['注意力机制']],
+  content:[['所有来源']],
+  collections:[['集合']],
+  collection:[['集合','collections'],['李沐读论文']],
+  search:[['搜索']],
+  glossary:[['知识库','home'],['机器学习','domain'],['概念库']],
+  system:[['系统']],
+  wdetail:[['系统','system'],['ai-a1b2']],
+  settings:[['设置']],
+  about:[['设置','settings'],['关于']],
+  mobile:[['手机预览']],
+};
+const NAVOF={home:'home',domain:'home',term:'home',topic:'home',glossary:'home',
+  content:'content',detail:'content',collections:'content',collection:'content',search:'content',
+  system:'system',wdetail:'system',settings:'settings',about:'settings',mobile:'home'};
+function go(id){
+  document.querySelectorAll('.main > section.page').forEach(s=>s.hidden=true);
+  {const _ts=document.getElementById('topsearch'); if(_ts)_ts.classList.remove('expanded');}
+  const el=document.getElementById(id); if(el)el.hidden=false;
+  document.querySelectorAll('[data-go]').forEach(a=>a.classList.remove('on'));
+  document.querySelectorAll('[data-go="'+(NAVOF[id]||id)+'"]').forEach(a=>a.classList.add('on'));
+  _cur=id; renderCrumb(id); fitCrumb();
+  { const cb=document.getElementById('crumb-back'); if(cb){ const pp=CRUMBS[id]; cb.hidden=!(pp&&pp.length>1&&pp[pp.length-2][1]); } }
+  document.querySelectorAll('.switcher button').forEach(b=>b.classList.toggle('on',b.dataset.s===id));
+  window.scrollTo(0,0); if(window.lucide)lucide.createIcons();
+}
+function renderCrumb(id){
+  const parts=CRUMBS[id]||[[id]]; const n=parts.length; let html='';
+  parts.forEach((p,i)=>{
+    const label=p[0], target=p[1];
+    const inner=(target&&i<n-1)?'<a class="crumb-link" onclick="go(\''+target+'\')"><b>'+label+'</b></a>':'<b>'+label+'</b>';
+    const cls=i===0?'seg-first':(i===n-1?'seg-last':'seg-mid');
+    if(i===n-1&&n>2) html+='<span class="seg-ell"> / …</span>';
+    html+='<span class="'+cls+'">'+(i===0?'':' / ')+inner+'</span>';
+  });
+  document.getElementById('crumb').innerHTML=html;
+}
+function toggleRail(){ document.querySelector('.app').classList.toggle('rail'); if(window.lucide)lucide.createIcons(); setTimeout(fitCrumb,260); }
+let _cur='home';
+function goBack(){ const pp=CRUMBS[_cur]; if(pp&&pp.length>1){ const p=pp[pp.length-2]; if(p[1]) go(p[1]); } }
+function fitCrumb(){ const c=document.getElementById('crumb'); if(!c)return; c.classList.remove('tight'); if(c.scrollWidth>c.clientWidth+1) c.classList.add('tight'); }
+function showTimeline(){ go('domain'); document.querySelectorAll('#domain .tabs button').forEach(b=>b.classList.toggle('on',/时间线/.test(b.textContent))); document.querySelectorAll('[data-sub="dw"]').forEach(p=>p.hidden=(p.id!=='dw-timeline')); if(window.Chart)initTimeline(); if(window.lucide)lucide.createIcons(); }
+function pickIcon(el){ el.parentElement.querySelectorAll('.icon-pick').forEach(b=>b.classList.remove('on')); el.classList.add('on'); }
+function pickColor(el){ el.parentElement.querySelectorAll('.swatch').forEach(b=>b.classList.remove('on')); el.classList.add('on'); }
+function subtab(btn,group,target){
+  btn.parentElement.querySelectorAll('button').forEach(b=>b.classList.remove('on'));btn.classList.add('on');
+  document.querySelectorAll('[data-sub="'+group+'"]').forEach(p=>p.hidden=(p.id!==target));
+  if(target==='dw-timeline'&&window.Chart) initTimeline();
+  if(window.lucide)lucide.createIcons();
+}
+function openModal(id,title,body){
+  const m=document.getElementById(id);
+  if(title){ const t=m.querySelector('.hd b')||m.querySelector('.bd b'); if(t)t.textContent=title; }
+  if(body){ const p=m.querySelector('.bd p'); if(p)p.textContent=body; }
+  m.classList.add('show'); if(window.lucide)lucide.createIcons();
+}
+function closeModal(id){document.getElementById(id).classList.remove('show');}
+function toggleKb(el){ const g=el.closest('.nb-group'); g.querySelector('.kb-sources').classList.toggle('open'); el.classList.toggle('open'); }
+function toggleSrc(el){ const g=el.closest('.src-group'); g.querySelector('.src-content').classList.toggle('open'); el.classList.toggle('open'); }
+function expandSearch(e){ if(e)e.stopPropagation(); const s=document.getElementById('topsearch'); if(!s)return; s.classList.add('expanded'); setTimeout(fitCrumb,180); const inp=document.getElementById('topsearch-in'); if(inp)inp.focus(); searchPop(); }
+function collapseSearch(){ const s=document.getElementById('topsearch'); if(s)s.classList.remove('expanded'); setTimeout(fitCrumb,180); }
+function fToggle(c){ c.classList.toggle('on'); fUpdate(); }
+function fClear(btn){ btn.closest('.fgroup').querySelectorAll('.chip.on').forEach(c=>c.classList.remove('on')); fUpdate(); }
+function fClearAll(){ document.querySelectorAll('#content .fgroup .chip.on').forEach(c=>c.classList.remove('on')); fUpdate(); }
+function fUpdate(){ const t=document.getElementById('fbar-txt'); if(!t)return; const sel=[...document.querySelectorAll('#content .fgroup .chip.on')].map(c=>c.textContent.replace(/\s*\d+\s*$/,'').trim()).filter(Boolean); t.innerHTML=sel.length?('已选 '+sel.map(s=>'<b style="color:var(--ink-700)">'+s+'</b>').join(' · ')+' —— 跨组取交集'):'未筛选 —— 显示全部 132 条内容'; }
+function searchRun(){ const inp=document.getElementById('search-in'); if(!inp)return; const q=(inp.value||'').trim();
+  const list=document.getElementById('search-list'), cnt=document.getElementById('search-count'), empty=document.getElementById('search-empty'); if(!list)return;
+  if(q.length<3){ list.hidden=true; cnt.hidden=true; empty.hidden=false; empty.innerHTML='<div class="state"><i data-lucide="pencil-line" class="big"></i><div class="t">请至少输入 3 个字符再搜索</div></div>'; if(window.lucide)lucide.createIcons(); return; }
+  let hit=0; [...list.querySelectorAll('.card')].forEach(c=>{ const txt=c.querySelector('.title').textContent+' '+(c.querySelector('p')?c.querySelector('p').textContent:''); const m=txt.includes(q); c.hidden=!m; if(m)hit++; });
+  if(hit===0){ list.hidden=true; cnt.hidden=true; empty.hidden=false; empty.innerHTML='<div class="state"><i data-lucide="search-x" class="big"></i><div class="t">没有匹配「'+q+'」的内容</div></div>'; if(window.lucide)lucide.createIcons(); }
+  else{ list.hidden=false; empty.hidden=true; cnt.hidden=false; cnt.textContent='共 '+hit+' 条结果'; } }
+function searchPop(){ const pop=document.getElementById('search-pop'); if(!pop)return; const q=(document.getElementById('topsearch-in').value||'').trim();
+  const items=[{t:'概念',n:'注意力机制',d:'机器学习 · 14 条内容讲过',g:'term'},{t:'内容',n:'Transformer 架构详解：从注意力到 GPT',d:'机器学习 · 视频',g:'detail'},{t:'内容',n:'Attention Is All You Need',d:'机器学习 · 论文',g:'detail'}];
+  pop.innerHTML='<div class="sp-hd">'+(q?('结果 “'+q+'”'):'快速找概念或内容（演示数据）')+'</div>'+items.map(it=>'<a class="sp-row" onclick="go(\''+it.g+'\')"><span class="sp-tag">'+it.t+'</span><div><div class="sp-t">'+it.n+'</div><div class="sp-d">'+it.d+'</div></div></a>').join('')+'<a class="sp-foot" onclick="go(\'search\')">在搜索页查看全部结果 <i data-lucide="arrow-right"></i></a>';
+  if(window.lucide)lucide.createIcons();
+}
+const COLLECTIONS_BY_KB={'机器学习':['李沐读论文','3Blue1Brown','手动收藏'],'系统设计':['系统设计周刊','手动收藏'],'生物信息学':['手动收藏']};
+function syncCollections(){
+  const kb=document.getElementById('sb-kb'), col=document.getElementById('sb-col'); if(!kb||!col) return;
+  const list=COLLECTIONS_BY_KB[kb.value]||[];
+  col.innerHTML='<option>不归集合</option>'+list.map(o=>'<option>'+o+'</option>').join('');
+  col.disabled=!kb.value;
+}
+let tlChart=null, tlMode='all', _tlbk=[], _tlLastBi=null;
+const TL_DATA=[
+  {label:'Transformer',color:'#2383e2',data:[1,3,16,34,48,60]},
+  {label:'注意力机制',color:'#9065b0',data:[3,6,14,24,33,40]},
+  {label:'CNN',color:'#448361',data:[42,40,33,25,18,12]},
+  {label:'扩散模型',color:'#d9730d',data:[0,1,4,15,28,38]},
+  {label:'残差连接',color:'#dd9b3a',data:[10,14,16,15,14,13]},
+  {label:'强化学习',color:'#d9484b',data:[12,13,15,18,22,26]},
+];
+const TL_SAMPLES={
+  'Transformer':['Transformer 架构详解：从注意力到 GPT','Vision Transformer (ViT) 论文精读','Transformer 在推荐系统的落地','GPT 系列演进梳理'],
+  '注意力机制':['Attention Is All You Need 精读','自注意力的直觉理解','交叉注意力在多模态中的应用','注意力可视化实战'],
+  'CNN':['CNN 卷积神经网络入门','ResNet 残差网络精读','从 LeNet 到 EfficientNet','卷积核到底学到了什么'],
+  '扩散模型':['Diffusion Models 数学推导','Stable Diffusion 原理拆解','DDPM 论文精读','扩散模型采样加速'],
+  '残差连接':['ResNet 残差网络精读','深层网络为何要残差','Highway 与 ResNet 对比'],
+  '强化学习':['强化学习入门：MDP 与价值迭代','PPO 算法详解','RLHF 在大模型对齐中的应用','AlphaGo 背后的 RL'],
+};
+const TL_TYPES=['t-video','t-paper','t-article','t-audio'], TL_ICONS={'t-video':'play','t-paper':'file-text','t-article':'newspaper','t-audio':'headphones'};
+function yAt(i,fy){ const d=TL_DATA[i].data, t=Math.max(2021,Math.min(2026,fy)), lo=Math.floor(t-2021), hi=Math.min(d.length-1,lo+1), f=(t-2021)-lo; return d[lo]*(1-f)+d[hi]*f; }
+function tlBuckets(){
+  if(tlMode==='all') return ['2021','2022','2023','2024','2025','2026'].map(l=>({label:l,kind:'year',y:+l,sub:0}));
+  if(tlMode==='3y'){ const a=[]; let y=2023,q=3; for(let k=0;k<12;k++){a.push({label:y+' Q'+q,kind:'quarter',y,sub:q}); q++; if(q>4){q=1;y++;}} return a; }
+  const a=[]; let y=2025,m=7; for(let k=0;k<12;k++){a.push({label:y+'-'+String(m).padStart(2,'0'),kind:'month',y,sub:m}); m++; if(m>12){m=1;y++;}} return a;
+}
+function valFor(i,b){
+  if(b.kind==='year') return Math.round(TL_DATA[i].data[b.y-2021]||0);
+  if(b.kind==='quarter') return Math.max(0,Math.round(yAt(i,b.y+(b.sub-0.5)/4)/4));
+  return Math.max(0,Math.round(yAt(i,b.y+(b.sub-0.5)/12)/12));
+}
+function tlBuild(){ _tlbk=tlBuckets(); return {labels:_tlbk.map(b=>b.label),
+  datasets:TL_DATA.map((d,i)=>({label:d.label,backgroundColor:d.color,hidden:!!d._h,stack:'s',borderRadius:3,borderWidth:0,barPercentage:.82,categoryPercentage:.82,data:_tlbk.map(b=>valFor(i,b))}))}; }
+function initTimeline(){
+  if(tlChart||!window.Chart) return;
+  document.getElementById('tl-legend').innerHTML=TL_DATA.map((d,i)=>'<span class="chip on" data-i="'+i+'" onclick="tlToggle(this)"><span class="tl-dot" style="background:'+d.color+'"></span>'+d.label+'</span>').join('');
+  tlChart=new Chart(document.getElementById('tlChart'),{type:'bar',data:tlBuild(),options:{responsive:true,maintainAspectRatio:false,
+    onClick:(e,els)=>{ if(els&&els.length) tlShowOcc(els[0].datasetIndex, els[0].index); },
+    plugins:{legend:{display:false},tooltip:{callbacks:{footer:()=>'点击查看出处'}}},
+    scales:{x:{stacked:true,grid:{display:false},ticks:{color:'#787670',autoSkip:true,maxRotation:0}},y:{stacked:true,grid:{color:'#ecebe8'},border:{display:false},ticks:{color:'#787670'}}}}});
+  resetOcc(); if(window.lucide)lucide.createIcons();
+}
+function tlToggle(c){ const i=+c.dataset.i; TL_DATA[i]._h=!TL_DATA[i]._h; c.classList.toggle('on',!TL_DATA[i]._h); tlChart.data.datasets[i].hidden=TL_DATA[i]._h; tlChart.update(); if(_tlLastBi!=null) tlShowOcc(0,_tlLastBi); }
+function tlRange(b,r){ b.parentElement.querySelectorAll('button').forEach(x=>x.classList.remove('on')); b.classList.add('on'); tlMode=r; tlChart.data=tlBuild(); tlChart.update(); resetOcc(); }
+function resetOcc(){ _tlLastBi=null; const t=document.getElementById('tl-occ-title'),o=document.getElementById('tl-occ'); if(t)t.textContent='出现明细'; if(o)o.innerHTML='<div class="dim" style="font-size:13px;padding:6px 2px">点击上方任意柱子，查看「已选概念」在那个时段具体出现在哪些内容里 →</div>'; }
+function tlShowOcc(di,bi){
+  _tlLastBi=bi; const b=_tlbk[bi];
+  const sel=TL_DATA.map((d,i)=>i).filter(i=>!TL_DATA[i]._h);
+  const total=sel.reduce((s,i)=>s+valFor(i,b),0);
+  document.getElementById('tl-occ-title').innerHTML='出现明细 · '+b.label+' · 已选 '+sel.length+' 概念，共 '+total+' 次';
+  let html='';
+  sel.forEach(i=>{ const d=TL_DATA[i], n=valFor(i,b); if(n<=0) return;
+    const pool=TL_SAMPLES[d.label]||['相关内容'];
+    const k=Math.max(1,Math.min(pool.length, b.kind==='year'?3:b.kind==='quarter'?2:1));
+    html+='<div class="occ-grp"><span class="tl-dot" style="background:'+d.color+'"></span>'+d.label+' <span class="dim" style="font-weight:400">· '+n+' 次</span></div>';
+    for(let j=0;j<k;j++){ const t=TL_TYPES[(i+j)%4], ic=TL_ICONS[t];
+      const loc=(t==='t-video'||t==='t-audio')?('片段 '+String(2+j*6).padStart(2,'0')+':'+String(14+j*9).padStart(2,'0')):('第 '+(j+2)+' 节');
+      html+='<div class="row" onclick="go(\'detail\')"><span class="type-pill '+t+'"><i data-lucide="'+ic+'"></i></span><div class="body"><div class="title">'+pool[j]+'</div><div class="meta"><span>'+b.label+'</span><span class="sep">·</span><span>出现于 '+loc+'</span></div></div><i data-lucide="chevron-right" class="dim"></i></div>';
+    }
+  });
+  if(!html) html='<div class="dim" style="font-size:13px;padding:6px 2px">该时段所选概念没有出现记录。</div>';
+  document.getElementById('tl-occ').innerHTML=html;
+  if(window.lucide)lucide.createIcons();
+}
+window.addEventListener('DOMContentLoaded',()=>{
+  const screens=[['home','知识库'],['domain','工作台'],['detail','内容详情'],['content','所有来源'],
+    ['term','概念详情'],['topic','主题'],['glossary','概念库'],['collections','集合'],['collection','集合详情'],
+    ['search','搜索'],['system','系统'],['wdetail','Worker详情'],['settings','设置'],['about','关于'],['mobile','手机']];
+  const sw=document.getElementById('switcher');
+  screens.forEach(([id,label])=>{const b=document.createElement('button');b.textContent=label;b.dataset.s=id;b.onclick=()=>go(id);sw.appendChild(b);});
+  const tlb=document.createElement('button');tlb.textContent='时间线';tlb.onclick=showTimeline;sw.appendChild(tlb);
+  syncCollections();
+  window.addEventListener('resize',fitCrumb);
+  document.addEventListener('click',e=>{ if(!e.target.closest('.search')) collapseSearch(); });
+  go('home');
+});
+</script>
+</body>
+</html>

@@ -1,143 +1,152 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, inject } from 'vue'
+import { useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
-import { useGlobalStore } from '../stores/global'
+import StatusBadge from '../components/common/StatusBadge.vue'
 import type { GlossaryTerm } from '../types'
-import { BookA, Plus, Check, Trash2, Pencil, X } from 'lucide-vue-next'
-import Card from '../components/common/Card.vue'
-import LoadingState from '../components/common/LoadingState.vue'
-import PrimaryButton from '../components/common/PrimaryButton.vue'
-import Modal from '../components/common/Modal.vue'
-import ConfirmDialog from '../components/common/ConfirmDialog.vue'
+import {
+  Lightbulb, Plus, Sparkles, CheckCircle2, Check, X, Pencil, Trash2, Bookmark,
+} from 'lucide-vue-next'
 
+// 概念库（原型 #glossary）：AI 提取候选概念，采纳后沉淀为可检索知识节点。
+const router = useRouter()
 const api = useApi()
-const globalStore = useGlobalStore()
-const showToast = inject<(m: string, t?: 'success' | 'error' | 'info') => void>('showToast')
+const showToast = inject<(m: string, t?: string) => void>('showToast', () => {})
 
 const loading = ref(true)
+const error = ref('')
 const terms = ref<GlossaryTerm[]>([])
-const selectedDomain = ref<string>('')
 
-// 域选项：合并 Profile 列表与现有术语里出现过的 domain，去重排序。
-const domains = computed(() => {
+// 筛选：知识库（domain）+ 状态（suggested/accepted）。
+const filterDomain = ref('')
+const filterStatus = ref<'' | 'suggested' | 'accepted'>('')
+
+const domainOptions = computed(() => {
   const set = new Set<string>()
-  globalStore.profiles.forEach((p) => set.add(p.domain))
-  terms.value.forEach((t) => set.add(t.domain))
+  terms.value.forEach((t) => { if (t.domain) set.add(t.domain) })
   return [...set].sort()
 })
 
-const suggested = computed(() => terms.value.filter((t) => t.status === 'suggested'))
-const accepted = computed(() => terms.value.filter((t) => t.status === 'accepted'))
+const suggested = computed(() =>
+  filterStatus.value === 'accepted' ? [] : terms.value.filter((t) => t.status === 'suggested'),
+)
+const accepted = computed(() =>
+  filterStatus.value === 'suggested' ? [] : terms.value.filter((t) => t.status === 'accepted'),
+)
+const isEmpty = computed(() => suggested.value.length === 0 && accepted.value.length === 0)
 
 async function loadTerms() {
   loading.value = true
+  error.value = ''
   try {
-    const q = selectedDomain.value ? `?domain=${encodeURIComponent(selectedDomain.value)}` : ''
+    const params: string[] = []
+    if (filterDomain.value) params.push(`domain=${encodeURIComponent(filterDomain.value)}`)
+    if (filterStatus.value) params.push(`status=${filterStatus.value}`)
+    const q = params.length ? `?${params.join('&')}` : ''
     terms.value = await api.get<GlossaryTerm[]>(`/api/glossary${q}`)
-  } catch (e) {
-    showToast?.('加载术语失败', 'error')
+  } catch (e: any) {
+    error.value = e?.message || '加载概念失败'
   } finally {
     loading.value = false
   }
 }
 
-onMounted(async () => {
-  await globalStore.fetchProfiles()
-  await loadTerms()
-})
-
-function onDomainChange() {
-  loadTerms()
+function goTerm(t: GlossaryTerm) {
+  router.push(`/kb/${encodeURIComponent(t.domain)}/concepts/${encodeURIComponent(t.term)}`)
 }
 
-// ── 采纳 / 忽略候选 ──
-
+// ── 采纳 / 删除 / 主题切换 ──
 async function acceptTerm(t: GlossaryTerm) {
   try {
     await api.post(`/api/glossary/${encodeURIComponent(t.domain)}/${encodeURIComponent(t.term)}/accept`)
-    showToast?.('已采纳，写入 Profile', 'success')
+    showToast('已采纳', 'success')
     await loadTerms()
-  } catch (e) {
-    showToast?.('采纳失败', 'error')
+  } catch (e: any) {
+    showToast(e?.message || '采纳失败', 'error')
   }
 }
 
-// 待删确认目标：非空即弹 ConfirmDialog（替代原生 confirm）。
-const removing = ref<GlossaryTerm | null>(null)
-
-async function deleteTerm(t: GlossaryTerm, ignore = false) {
+async function removeTerm(t: GlossaryTerm) {
   try {
     await api.del(`/api/glossary/${encodeURIComponent(t.domain)}/${encodeURIComponent(t.term)}`)
-    showToast?.(ignore ? '已忽略' : '已删除', 'success')
+    showToast('已删除', 'success')
     await loadTerms()
-  } catch (e) {
-    showToast?.('操作失败', 'error')
+  } catch (e: any) {
+    showToast(e?.message || '删除失败', 'error')
   }
 }
 
-async function confirmRemove() {
-  const t = removing.value
-  if (!t) return
-  removing.value = null
-  await deleteTerm(t)
+async function toggleTopic(t: GlossaryTerm) {
+  try {
+    await api.post(`/api/glossary/${encodeURIComponent(t.domain)}/${encodeURIComponent(t.term)}/topic`, {
+      is_topic: !t.is_topic,
+    })
+    showToast(t.is_topic ? '已取消主题' : '已标为主题', 'success')
+    await loadTerms()
+  } catch (e: any) {
+    showToast(e?.message || '操作失败', 'error')
+  }
 }
 
-// ── 手动新增 ──
-
+// ── 新增概念弹窗 ──
 const showAdd = ref(false)
 const addDomain = ref('')
 const addTerm = ref('')
 const addDefinition = ref('')
+const addRelated = ref('')
 const saving = ref(false)
+const addError = ref('')
 
 function openAdd() {
-  addDomain.value = selectedDomain.value || domains.value[0] || ''
+  addDomain.value = filterDomain.value || domainOptions.value[0] || ''
   addTerm.value = ''
   addDefinition.value = ''
+  addRelated.value = ''
+  addError.value = ''
   showAdd.value = true
 }
 
 async function submitAdd() {
   const domain = addDomain.value.trim()
   const term = addTerm.value.trim()
-  if (!domain || !term) {
-    showToast?.('域和术语不能为空', 'error')
-    return
-  }
+  addError.value = ''
+  if (!domain || !term) { addError.value = '知识库与概念名不能为空'; return }
+  const related = addRelated.value.split(',').map((s) => s.trim()).filter(Boolean)
   saving.value = true
   try {
     await api.post(`/api/glossary?domain=${encodeURIComponent(domain)}`, {
       term,
       definition: addDefinition.value.trim() || null,
+      related,
     })
-    showToast?.('术语已添加', 'success')
+    showToast('概念已添加', 'success')
     showAdd.value = false
-    if (selectedDomain.value && selectedDomain.value !== domain) {
-      selectedDomain.value = domain
-    }
+    if (filterDomain.value && filterDomain.value !== domain) filterDomain.value = domain
     await loadTerms()
-  } catch (e) {
-    showToast?.('添加失败', 'error')
+  } catch (e: any) {
+    addError.value = e?.message || '添加失败'
   } finally {
     saving.value = false
   }
 }
 
-// ── 编辑已采纳条目 ──
-
+// ── 编辑定义弹窗 ──
 const editing = ref<GlossaryTerm | null>(null)
 const editDefinition = ref('')
 const editRelated = ref('')
+const editError = ref('')
 
 function openEdit(t: GlossaryTerm) {
   editing.value = t
   editDefinition.value = t.definition
   editRelated.value = t.related.join(', ')
+  editError.value = ''
 }
 
 async function submitEdit() {
-  if (!editing.value) return
   const t = editing.value
+  if (!t) return
+  editError.value = ''
   const related = editRelated.value.split(',').map((s) => s.trim()).filter(Boolean)
   saving.value = true
   try {
@@ -146,194 +155,169 @@ async function submitEdit() {
       definition: editDefinition.value.trim() || null,
       related,
     })
-    showToast?.('已保存', 'success')
+    showToast('已保存', 'success')
     editing.value = null
     await loadTerms()
-  } catch (e) {
-    showToast?.('保存失败', 'error')
+  } catch (e: any) {
+    editError.value = e?.message || '保存失败'
   } finally {
     saving.value = false
   }
 }
+
+onMounted(loadTerms)
 </script>
 
 <template>
-  <div class="space-y-5">
-    <div class="flex items-center justify-between gap-3">
-      <h1 class="text-xl font-bold text-gray-800 flex items-center gap-2">
-        <BookA :size="20" />
-        术语
-      </h1>
-      <div class="flex items-center gap-2">
-        <select
-          v-model="selectedDomain"
-          @change="onDomainChange"
-          class="px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-        >
-          <option value="">全部域</option>
-          <option v-for="d in domains" :key="d" :value="d">{{ d }}</option>
-        </select>
-        <button
-          @click="openAdd"
-          class="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700"
-        >
-          <Plus :size="16" />
-          新增
-        </button>
+  <section>
+    <!-- 头部 -->
+    <div style="display:flex;align-items:flex-end;gap:12px;margin-bottom:20px">
+      <div>
+        <div class="h1"><Lightbulb :size="18" />概念库</div>
+        <div class="lead">AI 从内容中提取候选概念，采纳后沉淀为可检索的知识节点与正文概念链接。</div>
       </div>
     </div>
 
-    <LoadingState v-if="loading" />
+    <!-- 筛选 + 新增 -->
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:22px;flex-wrap:wrap">
+      <select v-model="filterDomain" class="input" style="max-width:160px" @change="loadTerms">
+        <option value="">全部知识库</option>
+        <option v-for="d in domainOptions" :key="d" :value="d">{{ d }}</option>
+      </select>
+      <select v-model="filterStatus" class="input" style="max-width:140px" @change="loadTerms">
+        <option value="">全部状态</option>
+        <option value="suggested">候选</option>
+        <option value="accepted">已采纳</option>
+      </select>
+      <button class="btn pri" style="margin-left:auto" @click="openAdd"><Plus :size="14" />新增概念</button>
+    </div>
+
+    <!-- 加载态 -->
+    <div v-if="loading" class="card pad" style="text-align:center;color:var(--ink-500)">加载中…</div>
+
+    <!-- 错误态 -->
+    <div v-else-if="error" class="card pad" style="text-align:center">
+      <p class="muted" style="margin-bottom:12px">{{ error }}</p>
+      <button class="btn" @click="loadTerms">重试</button>
+    </div>
+
+    <!-- 空态 -->
+    <div v-else-if="isEmpty" class="card pad" style="text-align:center;padding:40px 18px">
+      <Lightbulb :size="40" :stroke-width="1" style="color:var(--ink-300);margin-bottom:12px" />
+      <p class="muted" style="margin-bottom:14px">
+        {{ filterDomain || filterStatus ? '当前筛选下暂无概念' : '还没有概念，内容解析后会自动抽取候选概念' }}
+      </p>
+      <button class="btn pri" @click="openAdd"><Plus :size="14" />新增概念</button>
+    </div>
 
     <template v-else>
-      <!-- 待审建议（来自 review 采集） -->
-      <Card v-if="suggested.length > 0" padding="p-4 space-y-3">
-        <h2 class="text-sm font-semibold text-gray-700">
-          待审建议
-          <span class="text-xs text-gray-500 font-normal">（{{ suggested.length }}，来自评审）</span>
-        </h2>
-        <div class="space-y-2">
-          <div
-            v-for="t in suggested"
-            :key="`${t.domain}/${t.term}`"
-            class="flex items-center gap-3 py-2 px-3 bg-amber-50 rounded-lg"
-          >
-            <div class="flex-1 min-w-0">
-              <div class="flex items-center gap-2">
-                <span class="text-sm font-medium text-gray-800 break-all">{{ t.term }}</span>
-                <span class="text-xs text-gray-500">{{ t.domain }}</span>
+      <!-- 待审建议（候选） -->
+      <template v-if="suggested.length">
+        <div class="seclabel" style="margin-bottom:12px"><Sparkles :size="14" />待审建议 · {{ suggested.length }}</div>
+        <div class="card pad" style="margin-bottom:26px;border-color:var(--warn-bd)">
+          <div v-for="t in suggested" :key="`${t.domain}/${t.term}`" class="occ" style="cursor:default">
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="font-weight:600;color:var(--ink-900)">{{ t.term }}</span>
+                <StatusBadge :status="t.status" />
               </div>
-              <div class="text-xs text-gray-500 mt-0.5">出现于 {{ t.occurrences.length }} 篇内容</div>
+              <div class="dim" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;color:var(--ink-500)">
+                {{ t.definition || '暂无定义' }} · 出现于 {{ t.occurrences.length }} 条
+              </div>
             </div>
-            <button
-              @click="acceptTerm(t)"
-              class="flex items-center gap-1 px-2.5 py-1 bg-green-50 text-green-700 text-xs rounded-md hover:bg-green-100"
-            >
-              <Check :size="14" />
-              采纳
-            </button>
-            <button
-              @click="deleteTerm(t, true)"
-              class="flex items-center gap-1 px-2.5 py-1 text-gray-500 text-xs rounded-md hover:bg-gray-100"
-            >
-              <X :size="14" />
-              忽略
-            </button>
+            <button class="btn sm" style="color:var(--ok);border-color:var(--ok-bd)" @click="acceptTerm(t)"><Check :size="13" />采纳</button>
+            <button class="iconbtn" title="删除" @click="removeTerm(t)"><X :size="14" /></button>
           </div>
         </div>
-      </Card>
+      </template>
 
-      <!-- 已采纳（可编辑/删除） -->
-      <Card padding="p-4 space-y-3">
-        <h2 class="text-sm font-semibold text-gray-700">
-          已采纳
-          <span class="text-xs text-gray-500 font-normal">（{{ accepted.length }}）</span>
-        </h2>
-        <div v-if="accepted.length === 0" class="text-sm text-gray-500 py-4 text-center">暂无已采纳术语</div>
-        <div v-else class="space-y-1.5">
-          <div
-            v-for="t in accepted"
-            :key="`${t.domain}/${t.term}`"
-            class="flex items-start gap-3 py-2 px-3 border-b border-gray-50 last:border-0"
-          >
-            <div class="flex-1 min-w-0">
-              <div class="flex items-center gap-2">
-                <span class="text-sm font-medium text-gray-800 break-all">{{ t.term }}</span>
-                <span class="text-xs text-gray-500">{{ t.domain }}</span>
+      <!-- 已采纳 -->
+      <template v-if="accepted.length">
+        <div class="seclabel" style="margin-bottom:12px"><CheckCircle2 :size="14" />已采纳 · {{ accepted.length }}</div>
+        <div class="card pad">
+          <div v-for="t in accepted" :key="`${t.domain}/${t.term}`" class="occ" @click="goTerm(t)">
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span class="occ-t" style="font-weight:600;color:var(--ink-900)">{{ t.term }}</span>
+                <span v-if="t.is_topic" class="badge b-brand"><Bookmark :size="12" />主题概念</span>
               </div>
-              <div v-if="t.definition" class="text-xs text-gray-600 mt-0.5 break-all">{{ t.definition }}</div>
-              <div v-if="t.related.length > 0" class="text-xs text-gray-500 mt-0.5">
-                关联：{{ t.related.join('、') }}
+              <div class="dim" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;color:var(--ink-500)">
+                {{ t.definition || '暂无定义' }} · 出现 {{ t.occurrences.length }} · 关联 {{ t.related.length }}
               </div>
             </div>
-            <button @click="openEdit(t)" class="p-1 text-gray-500 hover:text-blue-600">
-              <Pencil :size="15" />
-            </button>
-            <button @click="removing = t" class="p-1 text-gray-500 hover:text-red-500">
-              <Trash2 :size="15" />
-            </button>
+            <button
+              class="iconbtn"
+              :title="t.is_topic ? '取消主题' : '标为主题'"
+              :style="t.is_topic ? 'color:var(--brand-600)' : ''"
+              @click.stop="toggleTopic(t)"
+            ><Bookmark :size="15" /></button>
+            <button class="iconbtn" title="编辑定义" @click.stop="openEdit(t)"><Pencil :size="15" /></button>
+            <button class="iconbtn" title="删除" @click.stop="removeTerm(t)"><Trash2 :size="15" /></button>
           </div>
         </div>
-      </Card>
+      </template>
     </template>
 
-    <!-- 新增弹窗 -->
-    <Modal :open="showAdd" title="新增术语" @close="showAdd = false">
-      <div class="space-y-4">
-        <div>
-          <label class="block text-xs font-medium text-gray-500 mb-1">域（domain）</label>
-          <input
-            v-model="addDomain"
-            type="text"
-            list="glossary-domains"
-            class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-            placeholder="如：ml"
-          />
-          <datalist id="glossary-domains">
-            <option v-for="d in domains" :key="d" :value="d" />
-          </datalist>
+    <!-- 新增概念弹窗 -->
+    <div v-if="showAdd" class="overlay show" @click.self="showAdd = false">
+      <div class="modal">
+        <div class="hd">
+          <Lightbulb :size="18" class="lead-ic" /><b>新增概念</b>
+          <button class="ghost" @click="showAdd = false"><X :size="14" /></button>
         </div>
-        <div>
-          <label class="block text-xs font-medium text-gray-500 mb-1">术语</label>
-          <input
-            v-model="addTerm"
-            type="text"
-            class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-            placeholder="如：梯度下降"
-          />
+        <div class="bd">
+          <div class="field">
+            <label>知识库</label>
+            <input v-model="addDomain" class="input" list="glossary-domains" placeholder="如 机器学习" />
+            <datalist id="glossary-domains">
+              <option v-for="d in domainOptions" :key="d" :value="d" />
+            </datalist>
+          </div>
+          <div class="field">
+            <label>概念名</label>
+            <input v-model="addTerm" class="input" placeholder="如 注意力机制" />
+          </div>
+          <div class="field">
+            <label>定义</label>
+            <textarea v-model="addDefinition" class="input" placeholder="用一两句话说明该概念的核心含义…"></textarea>
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>关联概念</label>
+            <input v-model="addRelated" class="input" placeholder="逗号分隔，如 自注意力, 多头注意力, 位置编码" />
+            <div class="note-tip">采纳后正文中出现的该概念会自动转为<span class="term-link">蓝色虚线链接</span>。</div>
+          </div>
+          <p v-if="addError" class="note-tip" style="color:var(--bad)">{{ addError }}</p>
         </div>
-        <div>
-          <label class="block text-xs font-medium text-gray-500 mb-1">定义（可选）</label>
-          <textarea
-            v-model="addDefinition"
-            rows="2"
-            class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-            placeholder="一句话解释"
-          />
-        </div>
-      </div>
-      <template #footer>
-        <button @click="showAdd = false" class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">取消</button>
-        <PrimaryButton :loading="saving" @click="submitAdd">{{ saving ? '保存中...' : '添加' }}</PrimaryButton>
-      </template>
-    </Modal>
-
-    <!-- 编辑弹窗 -->
-    <Modal :open="!!editing" :title="editing ? `编辑 · ${editing.term}` : '编辑'" @close="editing = null">
-      <div class="space-y-4">
-        <div>
-          <label class="block text-xs font-medium text-gray-500 mb-1">定义</label>
-          <textarea
-            v-model="editDefinition"
-            rows="2"
-            class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-          />
-        </div>
-        <div>
-          <label class="block text-xs font-medium text-gray-500 mb-1">关联术语（逗号分隔）</label>
-          <input
-            v-model="editRelated"
-            type="text"
-            class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-            placeholder="如：反向传播, 学习率"
-          />
+        <div class="ft">
+          <button class="btn" @click="showAdd = false">取消</button>
+          <button class="btn pri" :disabled="saving" @click="submitAdd"><Plus :size="14" />{{ saving ? '添加中…' : '添加' }}</button>
         </div>
       </div>
-      <template #footer>
-        <button @click="editing = null" class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">取消</button>
-        <PrimaryButton :loading="saving" @click="submitEdit">{{ saving ? '保存中...' : '保存' }}</PrimaryButton>
-      </template>
-    </Modal>
+    </div>
 
-    <!-- 删除确认 -->
-    <ConfirmDialog
-      v-if="removing"
-      title="删除术语"
-      :message="`删除术语「${removing.term}」？`"
-      confirm-text="删除"
-      :danger="true"
-      @confirm="confirmRemove"
-      @cancel="removing = null"
-    />
-  </div>
+    <!-- 编辑定义弹窗 -->
+    <div v-if="editing" class="overlay show" @click.self="editing = null">
+      <div class="modal">
+        <div class="hd">
+          <Pencil :size="18" class="lead-ic" /><b>编辑概念 · {{ editing.term }}</b>
+          <button class="ghost" @click="editing = null"><X :size="14" /></button>
+        </div>
+        <div class="bd">
+          <div class="field">
+            <label>定义</label>
+            <textarea v-model="editDefinition" class="input" placeholder="用一两句话说明该概念的核心含义…"></textarea>
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>关联概念</label>
+            <input v-model="editRelated" class="input" placeholder="逗号分隔，如 自注意力, 多头注意力" />
+          </div>
+          <p v-if="editError" class="note-tip" style="color:var(--bad)">{{ editError }}</p>
+        </div>
+        <div class="ft">
+          <button class="btn" @click="editing = null">取消</button>
+          <button class="btn pri" :disabled="saving" @click="submitEdit"><Check :size="14" />{{ saving ? '保存中…' : '保存' }}</button>
+        </div>
+      </div>
+    </div>
+  </section>
 </template>

@@ -1,129 +1,107 @@
 <script setup lang="ts">
+// 设置（原型 #settings）：平台认证（B站扫码 + YouTube cookies）+ 运维/关于入口。
+// 知识库设定 / Profile 不在此页（已移到工作台）。auth/status 给出各平台是否已配置。
 import { ref, onMounted } from 'vue'
 import { useApi } from '../composables/useApi'
-import { useGlobalStore } from '../stores/global'
 import BiliLogin from '../components/settings/BiliLogin.vue'
 import CookieUpload from '../components/auth/CookieUpload.vue'
 import StatusBadge from '../components/common/StatusBadge.vue'
-import Card from '../components/common/Card.vue'
-import LoadingState from '../components/common/LoadingState.vue'
-import EmptyState from '../components/common/EmptyState.vue'
-import ProfileEditor from '../components/settings/ProfileEditor.vue'
 import type { AuthStatus } from '../types'
-import { Shield, BookOpen, ChevronRight, HardDrive } from 'lucide-vue-next'
+import { Settings, QrCode, Server, Activity, Info, BookOpen, ChevronRight, Youtube } from 'lucide-vue-next'
 
 const api = useApi()
-const globalStore = useGlobalStore()
 
 const authStatus = ref<AuthStatus | null>(null)
 const loading = ref(true)
+const error = ref('')
 
-onMounted(async () => {
+async function loadAuth() {
+  loading.value = true
+  error.value = ''
   try {
-    const [auth] = await Promise.all([
-      api.get<AuthStatus>('/api/auth/status'),
-      globalStore.fetchProfiles(),
-    ])
-    authStatus.value = auth
+    authStatus.value = await api.get<AuthStatus>('/api/auth/status')
+  } catch (e: any) {
+    error.value = e?.message || '读取认证状态失败'
   } finally {
     loading.value = false
   }
-})
-
-async function refreshAuth() {
-  authStatus.value = await api.get<AuthStatus>('/api/auth/status')
 }
 
-const editingDomain = ref<string | null>(null)
-
-function openProfile(domain: string) {
-  editingDomain.value = domain
+// CookieUpload 上传成功后刷新 youtube 配置状态。
+function refreshAuth() {
+  api.get<AuthStatus>('/api/auth/status').then(s => { authStatus.value = s }).catch(() => {})
 }
 
-async function onProfileSaved() {
-  await globalStore.fetchProfiles()
-}
+onMounted(loadAuth)
 </script>
 
 <template>
-  <div class="space-y-6">
-    <h2 class="text-xl font-bold">设置</h2>
+  <section class="page">
+    <div class="h1" style="margin-bottom:20px"><Settings :size="18" />设置</div>
 
-    <LoadingState v-if="loading" />
+    <!-- 平台认证 -->
+    <div class="card pad" style="margin-bottom:18px">
+      <div class="card-h"><QrCode :size="15" />平台认证</div>
 
-    <template v-else>
-      <!-- Platform Auth -->
-      <Card padding="p-4 space-y-4">
-        <h3 class="text-sm font-semibold text-gray-700 flex items-center gap-2">
-          <Shield :size="16" />
-          平台认证
-        </h3>
+      <!-- 加载态 -->
+      <div v-if="loading" style="color:var(--ink-500);font-size:13px">读取认证状态…</div>
 
-        <!-- Bilibili：扫码登录走 /api/bili/* 契约，组件自管状态。 -->
-        <BiliLogin />
+      <!-- 错误态 -->
+      <div v-else-if="error"
+        style="display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;padding:16px">
+        <div style="font-size:13px;color:var(--ink-700)">{{ error }}</div>
+        <button class="btn sm" @click="loadAuth">重试</button>
+      </div>
 
-        <hr class="border-gray-100" />
+      <template v-else>
+        <!-- Bilibili：扫码登录走 /api/bili/* 契约，组件自管状态 -->
+        <div style="margin-bottom:6px">
+          <div class="seclabel" style="margin-bottom:8px"><Activity :size="14" />Bilibili</div>
+          <BiliLogin />
+        </div>
 
-        <!-- YouTube -->
-        <div class="space-y-2">
-          <div class="flex items-center gap-2">
-            <span class="text-sm font-medium">YouTube</span>
-            <StatusBadge v-if="authStatus" :status="authStatus.youtube.has_cookies ? 'done' : 'failed'" />
-            <span v-if="authStatus" class="text-xs text-gray-500">
-              {{ authStatus.youtube.has_cookies ? '已配置' : '未配置' }}
-            </span>
+        <!-- YouTube：上传 cookies.txt -->
+        <div style="border-top:1px solid var(--line-soft);margin-top:14px;padding-top:14px">
+          <div class="row" style="cursor:default">
+            <span class="type-pill" style="background:#fef2f2;color:#dc2626"><Youtube :size="17" /></span>
+            <div class="body">
+              <div class="title">YouTube</div>
+              <div class="meta">
+                <StatusBadge :status="authStatus?.youtube.has_cookies ? 'done' : 'pending'" />
+                <span class="sep">·</span>
+                <span>{{ authStatus?.youtube.has_cookies ? '已配置 cookies' : '需提供登录 cookies 才能下载会员/限制内容' }}</span>
+              </div>
+            </div>
+            <CookieUpload platform="youtube" @success="refreshAuth" />
           </div>
-          <CookieUpload platform="youtube" @success="refreshAuth" />
         </div>
-      </Card>
+      </template>
+    </div>
 
-      <!-- Profiles -->
-      <Card padding="p-4 space-y-3">
-        <h3 class="text-sm font-semibold text-gray-700 flex items-center gap-2">
-          <BookOpen :size="16" />
-          领域 Profile
-        </h3>
-        <EmptyState v-if="globalStore.profiles.length === 0" message="暂无 Profile" />
-        <div v-else class="space-y-2">
-          <button
-            v-for="p in globalStore.profiles"
-            :key="p.domain"
-            @click="openProfile(p.domain)"
-            class="w-full flex items-center justify-between py-2 px-2 -mx-2 rounded-lg border-b border-gray-50 last:border-0 hover:bg-gray-50 transition-colors text-left"
-          >
-            <div>
-              <span class="text-sm font-medium">{{ p.domain }}</span>
-              <span v-if="p.role" class="text-xs text-gray-500 ml-2">{{ p.role }}</span>
-            </div>
-            <div class="flex items-center gap-2">
-              <span class="text-xs text-gray-500">{{ p.terminology_count }} 个术语</span>
-              <ChevronRight :size="16" class="text-gray-300" />
-            </div>
-          </button>
+    <!-- 运维 -->
+    <div class="card pad" style="margin-bottom:18px">
+      <div class="card-h"><Server :size="15" />运维</div>
+      <div class="row" style="cursor:pointer" @click="$router.push('/system')">
+        <span class="type-pill" style="background:var(--mut-bg);color:var(--ink-600)"><Activity :size="17" /></span>
+        <div class="body">
+          <div class="title">系统与 Worker</div>
+          <div class="meta"><span>查看系统状态、资源池与 Worker</span></div>
         </div>
-      </Card>
+        <ChevronRight :size="16" class="dim" />
+      </div>
+    </div>
 
-      <!-- 运维：Worker 监控归入设置(不占顶级导航) -->
-      <Card padding="p-4">
-        <h3 class="text-sm font-semibold text-gray-700 flex items-center gap-2 mb-3">
-          <HardDrive :size="16" />
-          运维
-        </h3>
-        <router-link
-          to="/workers"
-          class="w-full flex items-center justify-between py-2 px-2 -mx-2 rounded-lg hover:bg-gray-50 transition-colors"
-        >
-          <span class="text-sm font-medium">Worker 监控</span>
-          <ChevronRight :size="16" class="text-gray-300" />
-        </router-link>
-      </Card>
-    </template>
-
-    <ProfileEditor
-      v-if="editingDomain"
-      :domain="editingDomain"
-      @close="editingDomain = null"
-      @saved="onProfileSaved"
-    />
-  </div>
+    <!-- 关于 -->
+    <div class="card pad">
+      <div class="card-h"><Info :size="15" />关于</div>
+      <div class="row" style="cursor:pointer" @click="$router.push('/about')">
+        <span class="type-pill" style="background:var(--brand-50);color:var(--brand-600)"><BookOpen :size="17" /></span>
+        <div class="body">
+          <div class="title">关于 Mnemo</div>
+          <div class="meta"><span>这个项目在做什么、如何使用</span></div>
+        </div>
+        <ChevronRight :size="16" class="dim" />
+      </div>
+    </div>
+  </section>
 </template>

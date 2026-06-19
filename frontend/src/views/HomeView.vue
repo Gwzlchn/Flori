@@ -1,50 +1,64 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, inject } from 'vue'
 import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useDomainStore } from '../stores/domains'
-import { useApi } from '../composables/useApi'
-import JobSubmitForm from '../components/job/JobSubmitForm.vue'
-import JobCard from '../components/job/JobCard.vue'
-import EmptyState from '../components/common/EmptyState.vue'
-import Card from '../components/common/Card.vue'
-import LoadingState from '../components/common/LoadingState.vue'
-import ErrorState from '../components/common/ErrorState.vue'
-import PrimaryButton from '../components/common/PrimaryButton.vue'
 import { fmtDateTime } from '../utils/datetime'
-import type { DomainOverview, JobSummary, JobListResponse } from '../types'
+import type { DomainOverview } from '../types'
 import {
-  Layers,
-  ListTodo,
-  ChevronRight,
-  ChevronDown,
-  Library,
-  FileText,
-  Lightbulb,
-  Rss,
-  Inbox,
+  BookMarked, Plus, Inbox, Folder, FileText, Lightbulb,
+  Rss, X, Check,
+  Cpu, Atom, Dna, Code, Database, Globe, FlaskConical, BookOpen,
+  Brain, Calculator, Scale, Languages, Music, Palette, Leaf, Rocket,
 } from 'lucide-vue-next'
 
 const router = useRouter()
-const api = useApi()
 const domainStore = useDomainStore()
 const { domains, loading } = storeToRefs(domainStore)
+const showToast = inject<(m: string, t?: 'success' | 'error' | 'info') => void>('showToast', () => {})
 
-// 领域网格加载错误态（store.fetchAll 不吞错，这里捕获展示）
+// 加载错误态（store.fetchAll 不吞错，这里捕获展示）。
 const error = ref('')
 
-// 「快速投递」收起式：默认展开，投递是高频入口（容器内含 JobSubmitForm，其根带 data-submit-form，
-// 底部导航「投递」按钮 scrollIntoView 靠它定位 —— 故始终渲染，仅折叠时高度收起）。
-const submitOpen = ref(true)
-
-// 近期内容（跨域）：可选区块，纯展示，失败不阻塞领域网格。
-const recentJobs = ref<JobSummary[]>([])
-const recentLoading = ref(true)
-
-// 领域是否有内容（无领域时走大空态引导）
 const hasDomains = computed(() => domains.value.length > 0)
 
-// 活跃时间相对展示（last_active_at 可能为 null）
+// ── 身份图标 + 渐变色块：按知识库名哈希出稳定的图标/配色（原型用人工指定，这里派生保证稳定） ──
+const ICONS = [Cpu, Atom, Dna, Code, Database, Globe, FlaskConical, BookOpen,
+  Brain, Calculator, Scale, Languages, Music, Palette, Leaf, Rocket]
+const GRADIENTS = [
+  'linear-gradient(135deg,#6366f1,#4338ca)',
+  'linear-gradient(135deg,#0ea5e9,#0369a1)',
+  'linear-gradient(135deg,#10b981,#047857)',
+  'linear-gradient(135deg,#f59e0b,#b45309)',
+  'linear-gradient(135deg,#ec4899,#9d174d)',
+  'linear-gradient(135deg,#64748b,#334155)',
+]
+function hash(s: string): number {
+  let h = 0
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0
+  return Math.abs(h)
+}
+function iconFor(name: string) {
+  return ICONS[hash(name) % ICONS.length]
+}
+function gradientFor(name: string): string {
+  return GRADIENTS[hash(name) % GRADIENTS.length]
+}
+
+async function loadDomains() {
+  error.value = ''
+  try {
+    await domainStore.fetchAll()
+  } catch (e: any) {
+    error.value = e?.message || '加载知识库失败'
+  }
+}
+
+function openDomain(d: DomainOverview) {
+  router.push(`/kb/${encodeURIComponent(d.domain)}`)
+}
+
+// 活跃时间相对展示（last_active_at 可能为 null）。
 function activeAgo(v: string | null): string {
   if (!v) return '从未活跃'
   const diff = Date.now() - new Date(v).getTime()
@@ -56,187 +70,146 @@ function activeAgo(v: string | null): string {
   if (hours < 24) return `${hours} 小时前活跃`
   const days = Math.floor(hours / 24)
   if (days < 30) return `${days} 天前活跃`
-  return `活跃于 ${fmtDateTime(v)}`
+  return `${fmtDateTime(v)} 活跃`
 }
 
-async function loadDomains() {
-  error.value = ''
-  try {
-    await domainStore.fetchAll()
-  } catch (e: any) {
-    error.value = e?.message || '加载领域失败'
-  }
+// ── 新建知识库内联弹窗（参考原型 #home 的 m-domain）：创建端点后端待新增，提交时提示 ──
+const showCreate = ref(false)
+const draftName = ref('')
+const draftIconIdx = ref(0)
+const draftColorIdx = ref(0)
+const draftRole = ref('')
+const draftIntro = ref('')
+
+function openCreate() {
+  draftName.value = ''
+  draftIconIdx.value = 0
+  draftColorIdx.value = 0
+  draftRole.value = ''
+  draftIntro.value = ''
+  showCreate.value = true
+}
+function submitCreate() {
+  // 创建知识库端点后端尚未提供 → 提示「需后端新增」，不静默失败。
+  showToast('知识库创建需后端新增', 'info')
+  showCreate.value = false
 }
 
-async function loadRecent() {
-  recentLoading.value = true
-  try {
-    const res = await api.get<JobListResponse>('/api/jobs?limit=8')
-    recentJobs.value = res.items || []
-  } catch {
-    // 近期内容为辅助区块，失败时静默降级为空。
-    recentJobs.value = []
-  } finally {
-    recentLoading.value = false
-  }
-}
-
-function openDomain(d: DomainOverview) {
-  router.push(`/domains/${encodeURIComponent(d.domain)}`)
-}
-
-// 空态「投递一条」：展开快速投递并滚动到表单（与底部导航「投递」一致用 data-submit-form 定位）。
-function scrollToSubmit() {
-  submitOpen.value = true
-  requestAnimationFrame(() => {
-    document.querySelector('[data-submit-form]')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  })
-}
-
-onMounted(() => {
-  loadDomains()
-  loadRecent()
-})
+onMounted(loadDomains)
 </script>
 
 <template>
-  <div class="space-y-6">
-    <!-- 头部：标题 + 全部内容入口 -->
-    <div class="flex items-center gap-2">
-      <h2 class="text-xl font-bold flex items-center gap-2">
-        <Layers :size="22" class="text-gray-700" />
-        我的知识领域
-      </h2>
-      <button
-        @click="router.push('/jobs')"
-        class="ml-auto flex items-center gap-1 text-sm text-gray-500 hover:text-gray-800 transition-colors"
-      >
-        <ListTodo :size="15" />
-        全部内容
-        <ChevronRight :size="15" />
+  <section class="page">
+    <!-- 页头 -->
+    <div style="display:flex;align-items:flex-end;gap:12px;margin-bottom:20px">
+      <div>
+        <div class="h1"><BookMarked :size="18" />我的知识库</div>
+        <div class="lead">投递的每条内容都会自动归入对应知识库，逐步沉淀成体系。</div>
+      </div>
+      <button class="btn pri" style="margin-left:auto" @click="openCreate">
+        <Plus :size="16" />新建知识库
+      </button>
+      <button class="btn" @click="router.push('/content')">
+        <Inbox :size="16" />所有来源
       </button>
     </div>
 
-    <!-- 快速投递（收起式）：容器内嵌 JobSubmitForm（其根带 data-submit-form） -->
-    <Card padding="overflow-hidden">
-      <button
-        @click="submitOpen = !submitOpen"
-        class="w-full flex items-center gap-2 px-4 py-3 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition-colors"
-      >
-        <span>快速投递</span>
-        <span class="text-xs font-normal text-gray-500">粘贴 URL / 上传文件，自动归入领域</span>
-        <component :is="submitOpen ? ChevronDown : ChevronRight" :size="16" class="ml-auto text-gray-500" />
+    <!-- 加载态 -->
+    <div v-if="loading && !hasDomains" class="card pad" style="color:var(--ink-500);font-size:13px">
+      加载中…
+    </div>
+
+    <!-- 错误态 -->
+    <div v-else-if="error && !hasDomains" class="card pad"
+      style="display:flex;flex-direction:column;align-items:center;gap:12px;text-align:center;padding:36px 18px">
+      <div style="font-size:13.5px;color:var(--ink-700)">{{ error }}</div>
+      <button class="btn" @click="loadDomains">重试</button>
+    </div>
+
+    <!-- 空态 -->
+    <div v-else-if="!hasDomains" class="card pad"
+      style="display:flex;flex-direction:column;align-items:center;gap:12px;text-align:center;padding:48px 18px">
+      <Inbox :size="44" :stroke-width="1" style="color:var(--ink-300)" />
+      <div style="font-size:14px;color:var(--ink-700);font-weight:600">还没有知识库</div>
+      <div class="lead" style="max-width:380px">
+        从一条视频 / 论文 / 文章开始，系统会自动把内容归入对应知识库，逐步沉淀成你的知识体系。
+      </div>
+      <button class="btn pri" style="margin-top:4px" @click="openCreate">
+        <Plus :size="16" />新建知识库
       </button>
-      <div v-show="submitOpen" class="border-t border-gray-100">
-        <!-- JobSubmitForm 根元素自带 data-submit-form，底部导航「投递」按钮以此定位 -->
-        <JobSubmitForm />
-      </div>
-    </Card>
+    </div>
 
-    <!-- 领域网格 -->
-    <section>
-      <!-- 加载骨架 -->
-      <div v-if="loading && domains.length === 0" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-        <Card
-          v-for="i in 3"
-          :key="i"
-          padding="p-4 animate-pulse space-y-3"
-        >
-          <div class="h-4 w-24 bg-gray-100 rounded" />
-          <div class="h-3 w-32 bg-gray-100 rounded" />
-          <div class="h-3 w-20 bg-gray-100 rounded" />
-        </Card>
-      </div>
+    <!-- 知识库卡片网格 -->
+    <div v-else class="grid3">
+      <a v-for="d in domains" :key="d.domain" class="dcard" @click="openDomain(d)">
+        <div class="top">
+          <span class="ic" :style="{ background: gradientFor(d.domain) }">
+            <component :is="iconFor(d.domain)" :size="18" />
+          </span>
+          <h3>{{ d.domain }}</h3>
+          <span v-if="d.subscription_count > 0" class="badge b-info"
+            :title="`${d.subscription_count} 个订阅集合在自动追更`">
+            <Rss :size="12" />{{ d.subscription_count }}
+          </span>
+        </div>
+        <div class="stats">
+          <span><Folder :size="13" />{{ d.collection_count }} 集合</span>
+          <span><FileText :size="13" />{{ d.job_count }} 内容</span>
+          <span><Lightbulb :size="13" />{{ d.concept_count }} 概念</span>
+        </div>
+        <div class="foot">
+          <span class="dot" :class="d.last_active_at ? 'd-ok' : 'd-mut'" />
+          {{ activeAgo(d.last_active_at) }}
+        </div>
+      </a>
+    </div>
 
-      <!-- 错误态 -->
-      <Card v-else-if="error" padding="p-6">
-        <ErrorState :message="error" @retry="loadDomains" />
-      </Card>
-
-      <!-- 领域为空：大空态引导 -->
-      <Card
-        v-else-if="!hasDomains"
-        padding="py-10 px-6 flex flex-col items-center text-center gap-3"
-      >
-        <Inbox :size="48" :stroke-width="1" class="text-gray-400" />
-        <p class="text-sm text-gray-500">还没有知识领域</p>
-        <p class="text-xs text-gray-500 max-w-sm">
-          从一条视频 / 论文 / 文章开始，系统会自动把内容归入对应领域，逐步沉淀成你的知识体系。
-        </p>
-        <PrimaryButton class="mt-1" @click="scrollToSubmit">
-          快速投递一条内容
-        </PrimaryButton>
-      </Card>
-
-      <!-- 领域卡片网格 -->
-      <div v-else class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-        <button
-          v-for="d in domains"
-          :key="d.domain"
-          @click="openDomain(d)"
-          class="text-left bg-white border border-gray-200 rounded-xl p-4 hover:shadow-sm hover:-translate-y-0.5 transition-all"
-        >
-          <div class="flex items-center gap-2 mb-3">
-            <div class="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0">
-              <Layers :size="16" class="text-gray-500" />
+    <!-- 新建知识库弹窗（端点后端待新增，提交仅提示） -->
+    <div v-if="showCreate" class="overlay show" @click.self="showCreate = false">
+      <div class="modal">
+        <div class="hd">
+          <Plus :size="16" class="lead-ic" /><b>新建知识库</b>
+          <button class="ghost" @click="showCreate = false"><X :size="16" /></button>
+        </div>
+        <div class="bd">
+          <div class="field">
+            <label>名称</label>
+            <input v-model="draftName" class="input" placeholder="如：强化学习、密码学、宏观经济…" />
+            <div class="note-tip">知识库是知识的命名空间，互相隔离。建好后投递内容时选它即可归入。</div>
+          </div>
+          <div class="field">
+            <label>图标</label>
+            <div class="icon-grid">
+              <button v-for="(Ic, i) in ICONS" :key="i" class="icon-pick"
+                :class="{ on: draftIconIdx === i }" @click="draftIconIdx = i">
+                <component :is="Ic" :size="18" />
+              </button>
             </div>
-            <h3 class="text-sm font-semibold truncate min-w-0">{{ d.domain }}</h3>
-            <span
-              v-if="d.subscription_count > 0"
-              class="ml-auto flex items-center gap-0.5 text-xs text-blue-600 flex-shrink-0"
-              :title="`${d.subscription_count} 个订阅集合在自动追更`"
-            >
-              <Rss :size="12" />{{ d.subscription_count }}
-            </span>
+            <div class="note-tip">从图标库挑一个，配色见下。</div>
           </div>
-
-          <div class="flex items-center gap-3 text-xs text-gray-500 mb-2 flex-wrap">
-            <span class="flex items-center gap-1">
-              <Library :size="13" class="text-gray-400" />
-              {{ d.collection_count }} 集合
-            </span>
-            <span class="flex items-center gap-1">
-              <FileText :size="13" class="text-gray-400" />
-              {{ d.job_count }} 篇
-            </span>
-            <span class="flex items-center gap-1">
-              <Lightbulb :size="13" class="text-gray-400" />
-              {{ d.concept_count }} 概念
-            </span>
+          <div class="field">
+            <label>颜色</label>
+            <div class="color-row">
+              <button v-for="(g, i) in GRADIENTS" :key="i" class="swatch"
+                :class="{ on: draftColorIdx === i }" :style="{ background: g }"
+                @click="draftColorIdx = i" />
+            </div>
           </div>
-
-          <div class="flex items-center gap-1.5 text-xs text-gray-500">
-            <span
-              class="w-1.5 h-1.5 rounded-full flex-shrink-0"
-              :class="d.last_active_at ? 'bg-green-500' : 'bg-gray-300'"
-            />
-            {{ activeAgo(d.last_active_at) }}
+          <div class="field">
+            <label>角色（可选）</label>
+            <input v-model="draftRole" class="input" placeholder="如：研究者 / 学习者 / 架构师" />
           </div>
-        </button>
+          <div class="field" style="margin-bottom:0">
+            <label>简介（可选）</label>
+            <textarea v-model="draftIntro" class="input"
+              placeholder="这个知识库你关注什么、希望笔记怎么写…（影响该知识库的笔记生成）" />
+          </div>
+        </div>
+        <div class="ft">
+          <button class="btn" @click="showCreate = false">取消</button>
+          <button class="btn pri" @click="submitCreate"><Check :size="16" />创建知识库</button>
+        </div>
       </div>
-    </section>
-
-    <!-- 近期内容（跨域，可选辅助区块） -->
-    <section v-if="hasDomains">
-      <div class="flex items-center gap-2 mb-2">
-        <h3 class="text-sm font-semibold text-gray-700">近期内容</h3>
-        <span class="text-xs text-gray-500">跨领域</span>
-        <button
-          @click="router.push('/jobs')"
-          class="ml-auto flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 transition-colors"
-        >
-          全部内容
-          <ChevronRight :size="13" />
-        </button>
-      </div>
-
-      <LoadingState v-if="recentLoading && recentJobs.length === 0" />
-      <div v-else-if="recentJobs.length === 0">
-        <EmptyState message="还没有内容，去上方投递一条" />
-      </div>
-      <div v-else class="space-y-2">
-        <JobCard v-for="job in recentJobs" :key="job.job_id" :job="job" />
-      </div>
-    </section>
-  </div>
+    </div>
+  </section>
 </template>

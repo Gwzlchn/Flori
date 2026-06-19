@@ -1,19 +1,17 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useDomainStore } from '../stores/domains'
 import { useApi } from '../composables/useApi'
-import EmptyState from '../components/common/EmptyState.vue'
-import Card from '../components/common/Card.vue'
-import LoadingState from '../components/common/LoadingState.vue'
-import Badge from '../components/common/Badge.vue'
-import PrimaryButton from '../components/common/PrimaryButton.vue'
+import { CONTENT_TYPE_LABELS } from '../types'
 import type { TermOccurrence, GlossaryTerm } from '../types'
-import { ArrowLeft, ChevronRight, Network, Link2, FileBox, Bookmark } from 'lucide-vue-next'
+import {
+  Lightbulb, Bookmark, Check, FileText, Link, MapPin, ChevronRight,
+  Play, Newspaper, Headphones,
+} from 'lucide-vue-next'
 
-// 术语详情 /domains/:domain/terms/:term —— 概念节点的知识页：
-// 头(概念名+domain+状态) / 定义(可空占位) / 关联概念 related(chips) / 出现处 occurrences(类型化)。
-// 后端形状: {domain, term, definition, occurrences:[{job_id,content_type,location}], related:[term...], status}
+// 概念详情（原型 #term）：定义 / 关联概念 / 出现处反查。
+// 后端形状: GlossaryTermResponse {domain, term, definition, occurrences:[{job_id,content_type,location}], related, status, is_topic}
 const route = useRoute()
 const router = useRouter()
 const store = useDomainStore()
@@ -22,37 +20,46 @@ const api = useApi()
 const domain = computed(() => String(route.params.domain))
 const term = computed(() => String(route.params.term))
 
-const data = ref<any>(null)
+const data = ref<GlossaryTerm | null>(null)
 const loading = ref(false)
 const notFound = ref(false)
-const errored = ref(false)
-
-// 状态徽标中文 —— 与 GlossaryView 语义对齐（accepted/suggested）。
-const STATUS_LABELS: Record<string, string> = {
-  accepted: '已采纳',
-  suggested: '待确认',
-}
-const statusLabel = computed(() => {
-  const s = data.value?.status ?? ''
-  return STATUS_LABELS[s] ?? s
-})
-
-const related = computed<string[]>(() => (Array.isArray(data.value?.related) ? data.value.related : []))
-const occurrences = computed<TermOccurrence[]>(() => (Array.isArray(data.value?.occurrences) ? data.value.occurrences : []))
-
-const isTopic = computed<boolean>(() => data.value?.is_topic === true)
+const error = ref('')
 const toggling = ref(false)
 
-// 标为主题 / 取消主题：POST /api/glossary/{domain}/{term}/topic，成功后用返回的 GlossaryTermResponse 刷新本页。
+const related = computed<string[]>(() => (Array.isArray(data.value?.related) ? data.value!.related : []))
+const occurrences = computed<TermOccurrence[]>(() => (Array.isArray(data.value?.occurrences) ? data.value!.occurrences : []))
+const isTopic = computed<boolean>(() => data.value?.is_topic === true)
+
+const typeIcon = (t: string) =>
+  t === 'video' ? Play : t === 'paper' ? FileText : t === 'audio' ? Headphones : Newspaper
+const typePillClass = (t: string) =>
+  t === 'video' ? 't-video' : t === 'paper' ? 't-paper' : t === 'audio' ? 't-audio' : 't-article'
+
+async function load() {
+  loading.value = true
+  notFound.value = false
+  error.value = ''
+  data.value = null
+  try {
+    data.value = await store.term(domain.value, term.value)
+  } catch (e: any) {
+    const msg = String(e?.message ?? '')
+    if (msg.includes('404')) notFound.value = true
+    else error.value = msg || '加载失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+// 标为主题 / 取消主题：POST /api/glossary/{domain}/{term}/topic，用返回的概念刷新本页。
 async function toggleTopic() {
   if (!data.value || toggling.value) return
   toggling.value = true
   try {
-    const updated = await api.post<GlossaryTerm>(
+    data.value = await api.post<GlossaryTerm>(
       `/api/glossary/${encodeURIComponent(domain.value)}/${encodeURIComponent(term.value)}/topic`,
       { is_topic: !isTopic.value },
     )
-    data.value = updated
   } catch {
     // 失败保持原状态，按钮可重试。
   } finally {
@@ -60,165 +67,96 @@ async function toggleTopic() {
   }
 }
 
-async function load() {
-  loading.value = true
-  notFound.value = false
-  errored.value = false
-  data.value = null
-  try {
-    data.value = await store.term(domain.value, term.value)
-  } catch (e: any) {
-    const msg = String(e?.message ?? '')
-    if (msg.includes('404')) notFound.value = true
-    else errored.value = true
-  } finally {
-    loading.value = false
-  }
-}
-
-function goBack() {
-  router.push(`/domains/${encodeURIComponent(domain.value)}`)
+function goDomain() {
+  router.push(`/kb/${encodeURIComponent(domain.value)}`)
 }
 function goRelated(name: string) {
-  router.push(`/domains/${encodeURIComponent(domain.value)}/terms/${encodeURIComponent(name)}`)
+  router.push(`/kb/${encodeURIComponent(domain.value)}/concepts/${encodeURIComponent(name)}`)
 }
 function goJob(jobId: string) {
-  router.push(`/jobs/${encodeURIComponent(jobId)}`)
+  router.push(`/content/${encodeURIComponent(jobId)}`)
 }
 
 onMounted(load)
-// 同页内（关联概念 chip）切换 term 时重新加载。
 watch(() => [route.params.domain, route.params.term], load)
 </script>
 
 <template>
-  <div class="space-y-4">
-    <!-- 头部：返回 + 面包屑（领域 ▸ 术语） -->
-    <div class="flex items-center gap-2">
-      <button
-        @click="goBack"
-        class="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
-        title="返回领域工作台"
-      >
-        <ArrowLeft :size="18" />
-      </button>
-      <div class="flex items-center gap-1 text-sm text-gray-500 min-w-0">
-        <button @click="goBack" class="hover:text-gray-700 truncate">{{ domain }}</button>
-        <ChevronRight :size="14" class="flex-shrink-0" />
-        <span>术语</span>
-      </div>
+  <section>
+    <!-- 404 -->
+    <div v-if="notFound" class="card pad" style="text-align:center;padding:40px 18px">
+      <p class="muted" style="margin-bottom:14px">概念不存在或已删除</p>
+      <button class="btn" @click="goDomain">返回知识库</button>
+    </div>
+
+    <!-- 错误态 -->
+    <div v-else-if="error && !data" class="card pad" style="text-align:center">
+      <p class="muted" style="margin-bottom:12px">{{ error }}</p>
+      <button class="btn" @click="load">重试</button>
     </div>
 
     <!-- 加载态 -->
-    <LoadingState v-if="loading" />
-
-    <!-- 404：概念不存在 / 已删除 -->
-    <div v-else-if="notFound" class="space-y-4">
-      <EmptyState message="概念不存在或已删除" />
-      <div class="text-center">
-        <PrimaryButton @click="goBack">返回领域工作台</PrimaryButton>
-      </div>
-    </div>
-
-    <!-- 其它错误：可重试 -->
-    <div v-else-if="errored" class="space-y-4">
-      <EmptyState message="加载失败" />
-      <div class="text-center">
-        <PrimaryButton @click="load">重试</PrimaryButton>
-      </div>
-    </div>
+    <div v-else-if="loading && !data" class="card pad" style="text-align:center;color:var(--ink-500)">加载中…</div>
 
     <template v-else-if="data">
-      <!-- 概念名 + domain + 状态 + 主题徽章/切换 -->
-      <Card padding="p-5">
-        <div class="flex items-start gap-3 flex-wrap">
-          <h1 class="text-2xl font-bold text-gray-800 break-all min-w-0">{{ data.term }}</h1>
+      <!-- 头部卡片 -->
+      <div class="card pad" style="margin-bottom:16px">
+        <div style="display:flex;align-items:flex-start;gap:14px">
           <span
-            v-if="isTopic"
-            class="mt-1.5 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700"
-          >
-            <Bookmark :size="12" class="fill-indigo-500 text-indigo-500" />主题
-          </span>
-          <Badge
-            v-if="data.status"
-            :variant="data.status === 'suggested' ? 'warn' : 'success'"
-            class="mt-1.5"
-          >{{ statusLabel }}</Badge>
-          <button
-            @click="toggleTopic"
-            :disabled="toggling"
-            class="mt-1 ml-auto inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors disabled:opacity-50"
-            :class="isTopic
-              ? 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
-              : 'bg-gray-100 text-gray-600 hover:bg-gray-200'"
-            :title="isTopic ? '取消主题' : '标为主题'"
-          >
-            <Bookmark :size="13" :class="isTopic ? 'fill-indigo-500 text-indigo-500' : ''" />
-            {{ isTopic ? '取消主题' : '标为主题' }}
+            class="ic"
+            style="width:44px;height:44px;border-radius:11px;display:grid;place-items:center;flex:none;color:#fff;background:linear-gradient(135deg,var(--brand-500),var(--brand-700))"
+          ><Lightbulb :size="18" /></span>
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+              <div class="h1">{{ data.term }}</div>
+              <span v-if="isTopic" class="badge b-brand"><Bookmark :size="12" />主题概念</span>
+              <span v-if="data.status" class="badge" :class="data.status === 'accepted' ? 'b-ok' : 'b-warn'">
+                <Check v-if="data.status === 'accepted'" :size="12" />{{ data.status === 'accepted' ? '已采纳' : '候选' }}
+              </span>
+            </div>
+            <div class="lead">
+              <a class="term-link" @click="goDomain">{{ data.domain }}</a>
+              · {{ occurrences.length }} 处出现 · {{ related.length }} 个关联
+            </div>
+          </div>
+          <button class="btn sm" style="margin-left:auto" :disabled="toggling" @click="toggleTopic">
+            <Bookmark :size="13" />{{ isTopic ? '取消主题' : '标为主题' }}
           </button>
         </div>
-        <div class="mt-2 flex items-center gap-3 text-xs text-gray-500 flex-wrap">
-          <span class="inline-flex items-center gap-1 min-w-0">
-            domain：<button @click="goBack" class="text-blue-600 hover:underline truncate max-w-[14rem]">{{ data.domain }}</button>
-          </span>
-          <span>{{ occurrences.length }} 处出现</span>
-          <span>{{ related.length }} 个关联</span>
-        </div>
-      </Card>
+      </div>
 
-      <!-- 定义（可空显示占位） -->
-      <Card padding="p-4 space-y-2">
-        <h2 class="text-sm font-semibold text-gray-700">定义</h2>
-        <p v-if="data.definition" class="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap break-words">
-          {{ data.definition }}
-        </p>
-        <p v-else class="text-sm text-gray-500">暂无定义</p>
-      </Card>
+      <!-- 定义 -->
+      <div class="card pad" style="margin-bottom:16px">
+        <div class="card-h"><FileText :size="15" />定义</div>
+        <p v-if="data.definition" style="color:var(--ink-700);line-height:1.6;white-space:pre-wrap">{{ data.definition }}</p>
+        <p v-else class="muted">暂无定义</p>
+      </div>
 
-      <!-- 关联概念 related（仅同域，点进同域术语详情） -->
-      <Card padding="p-4 space-y-3">
-        <h2 class="text-sm font-semibold text-gray-700 flex items-center gap-1.5">
-          <Network :size="15" class="text-gray-400" />
-          关联概念
-          <span class="text-xs text-gray-500 font-normal">（仅同域）</span>
-        </h2>
-        <div v-if="related.length > 0" class="flex flex-wrap gap-2">
-          <button
-            v-for="r in related"
-            :key="r"
-            @click="goRelated(r)"
-            class="inline-flex items-center gap-1 px-2.5 py-1 bg-gray-100 text-gray-700 text-sm rounded-full hover:bg-blue-50 hover:text-blue-700 transition-colors"
-          >
-            <Link2 :size="13" />
-            <span class="break-all">{{ r }}</span>
-          </button>
+      <!-- 关联概念 -->
+      <div class="card pad" style="margin-bottom:16px">
+        <div class="card-h"><Link :size="15" />关联概念</div>
+        <div v-if="related.length" style="display:flex;gap:8px;flex-wrap:wrap">
+          <span v-for="r in related" :key="r" class="chip" @click="goRelated(r)">{{ r }}</span>
         </div>
-        <p v-else class="text-sm text-gray-500">暂无关联概念</p>
-      </Card>
+        <p v-else class="muted">暂无关联概念</p>
+      </div>
 
-      <!-- 出现处 occurrences（类型化：内容 + 类型 + 位置，链接到 /jobs/:job_id） -->
-      <Card padding="p-4 space-y-3">
-        <h2 class="text-sm font-semibold text-gray-700 flex items-center gap-1.5">
-          <FileBox :size="15" class="text-gray-400" />
-          出现处
-          <span class="text-xs text-gray-500 font-normal">（{{ occurrences.length }} 处）</span>
-        </h2>
-        <div v-if="occurrences.length > 0" class="space-y-2">
-          <button
-            v-for="o in occurrences"
-            :key="o.job_id + (o.location || '')"
-            @click="goJob(o.job_id)"
-            class="w-full flex items-center gap-2 text-left px-3 py-2.5 border border-gray-200 rounded-lg hover:border-blue-300 hover:bg-blue-50/40 transition-colors"
-          >
-            <FileBox :size="15" class="text-gray-400 flex-shrink-0" />
-            <span class="text-sm text-gray-700 font-mono break-all min-w-0 flex-1">{{ o.job_id }}</span>
-            <Badge v-if="o.content_type" class="flex-shrink-0">{{ o.content_type }}</Badge>
-            <span v-if="o.location" class="text-xs text-gray-500 flex-shrink-0 truncate max-w-[8rem]">{{ o.location }}</span>
-            <ChevronRight :size="15" class="text-gray-300 flex-shrink-0" />
-          </button>
-        </div>
-        <EmptyState v-else message="还没有内容提到这个概念" />
-      </Card>
+      <!-- 出现处反查 -->
+      <div class="card pad">
+        <div class="card-h"><MapPin :size="15" />出现处 · {{ occurrences.length }}</div>
+        <template v-if="occurrences.length">
+          <div v-for="o in occurrences" :key="o.job_id + (o.location || '')" class="occ" @click="goJob(o.job_id)">
+            <span class="type-pill" :class="typePillClass(o.content_type)" style="width:28px;height:28px">
+              <component :is="typeIcon(o.content_type)" :size="13" />
+            </span>
+            <span class="occ-t" style="flex:1;min-width:0;font-weight:600;color:var(--ink-900);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ o.job_id }}</span>
+            <span class="badge b-mut">{{ CONTENT_TYPE_LABELS[o.content_type] || o.content_type }}</span>
+            <span v-if="o.location" class="dim" style="font-size:12px">{{ o.location }}</span>
+            <ChevronRight :size="15" class="dim" />
+          </div>
+        </template>
+        <p v-else class="muted">还没有内容提到这个概念</p>
+      </div>
     </template>
-  </div>
+  </section>
 </template>

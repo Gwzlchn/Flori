@@ -1,17 +1,17 @@
 <script setup lang="ts">
-import { onMounted, ref, watch, computed } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useDomainStore } from '../stores/domains'
-import JobCard from '../components/job/JobCard.vue'
-import EmptyState from '../components/common/EmptyState.vue'
-import Card from '../components/common/Card.vue'
-import LoadingState from '../components/common/LoadingState.vue'
-import ErrorState from '../components/common/ErrorState.vue'
+import StatusBadge from '../components/common/StatusBadge.vue'
+import { fmtDateTime } from '../utils/datetime'
+import { CONTENT_TYPE_LABELS } from '../types'
 import type { JobSummary } from '../types'
-import { ArrowLeft, Hash, RefreshCw } from 'lucide-vue-next'
+import {
+  Hash, Lightbulb, LayoutList, ChevronRight, Play, FileText, Newspaper, Headphones,
+} from 'lucide-vue-next'
 
-// 主题页：领域锚下，把某个主题(is_topic 概念)下跨集合/跨来源的内容聚到一处浏览。
-// 主题⊆概念：本页不是独立实体，路由挂在 /domains/:domain 下，返回回领域工作台。
+// 主题页（原型 #topic）：把某个主题(is_topic 概念)下跨集合/跨来源的内容聚到一处。
+// 后端形状: {domain, topic, jobs:[JobResponse], total}
 const route = useRoute()
 const router = useRouter()
 const store = useDomainStore()
@@ -22,15 +22,19 @@ const topic = computed(() => String(route.params.topic))
 const jobs = ref<JobSummary[]>([])
 const total = ref(0)
 const loading = ref(false)
-const errored = ref(false)
+const error = ref('')
 
-// 后端 job_brief 与 JobSummary 字段一致(job_id/content_type/status/created_at/title/
-// progress_pct/source/domain/collection_id)，做一次防御性归一，缺字段时给安全默认。
+const typeIcon = (t: string) =>
+  t === 'video' ? Play : t === 'paper' ? FileText : t === 'audio' ? Headphones : Newspaper
+const typePillClass = (t: string) =>
+  t === 'video' ? 't-video' : t === 'paper' ? 't-paper' : t === 'audio' ? 't-audio' : 't-article'
+
+// 防御性归一：后端 job 子集字段与 JobSummary 对齐，缺字段给安全默认。
 function normalizeJob(raw: any): JobSummary {
   return {
     job_id: String(raw?.job_id ?? ''),
     content_type: raw?.content_type ?? 'article',
-    status: String(raw?.status ?? 'unknown'),
+    status: String(raw?.status ?? 'pending'),
     created_at: String(raw?.created_at ?? ''),
     title: raw?.title ?? null,
     progress_pct: Number(raw?.progress_pct ?? 0),
@@ -42,78 +46,82 @@ function normalizeJob(raw: any): JobSummary {
 
 async function load() {
   loading.value = true
-  errored.value = false
+  error.value = ''
   try {
     const res = await store.topic(domain.value, topic.value)
     const list: any[] = Array.isArray(res?.jobs) ? res.jobs : []
     jobs.value = list.map(normalizeJob)
     total.value = typeof res?.total === 'number' ? res.total : jobs.value.length
-  } catch {
-    // 主题页对不存在主题也返回空列表(不会 404)，任何异常都按错误态可重试。
-    errored.value = true
+  } catch (e: any) {
+    error.value = e?.message || '加载主题内容失败'
   } finally {
     loading.value = false
   }
 }
 
-function back() {
-  router.push(`/domains/${encodeURIComponent(domain.value)}`)
+function goDomain() {
+  router.push(`/kb/${encodeURIComponent(domain.value)}`)
+}
+function goConcept() {
+  router.push(`/kb/${encodeURIComponent(domain.value)}/concepts/${encodeURIComponent(topic.value)}`)
+}
+function openJob(j: JobSummary) {
+  router.push(`/content/${j.job_id}`)
 }
 
 onMounted(load)
-// 主题/领域参数变化时(如直接改 URL 或站内跳转复用同一组件)重新加载。
 watch(() => [route.params.domain, route.params.topic], load)
 </script>
 
 <template>
-  <div class="space-y-4">
-    <!-- 头部：返回 + 面包屑(领域名) + 主题名 -->
-    <div class="flex items-center gap-2">
-      <button
-        @click="back"
-        class="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
-        title="返回领域工作台"
-      >
-        <ArrowLeft :size="18" />
-      </button>
-      <h2 class="text-xl font-bold flex items-center gap-2 min-w-0">
-        <Hash :size="20" class="text-blue-500 flex-shrink-0" />
-        <span class="truncate">{{ topic }}</span>
-      </h2>
-      <button
-        @click="load()"
-        class="ml-auto p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
-        title="刷新"
-      >
-        <RefreshCw :size="16" :class="loading ? 'animate-spin' : ''" />
-      </button>
-    </div>
-
-    <!-- 主题元信息：所属 domain(可点回工作台) + 内容数 -->
-    <Card>
-      <div class="flex items-center gap-2 text-xs text-gray-500 flex-wrap">
-        <span>主题</span>
-        <span class="text-gray-300">·</span>
-        <button @click="back" class="text-blue-600 hover:underline truncate max-w-[12rem]">{{ domain }}</button>
-        <span class="text-gray-300">·</span>
-        <span>{{ total }} 篇内容</span>
+  <section>
+    <!-- 头部：主题名 + 面包屑 + 查看概念 -->
+    <div style="display:flex;align-items:center;gap:13px;margin-bottom:6px">
+      <div style="min-width:0">
+        <div class="h1"><Hash :size="18" />{{ topic }}</div>
+        <div class="lead">主题 · <a class="term-link" @click="goDomain">{{ domain }}</a> · 共 {{ total }} 条内容</div>
       </div>
-    </Card>
+      <button class="btn sm" style="margin-left:auto" @click="goConcept"><Lightbulb :size="13" />查看概念</button>
+    </div>
 
     <!-- 错误态 -->
-    <Card v-if="errored" padding="p-6">
-      <ErrorState message="加载主题内容失败" @retry="load()" />
-    </Card>
+    <div v-if="error" class="card pad" style="text-align:center;margin-top:20px">
+      <p class="muted" style="margin-bottom:12px">{{ error }}</p>
+      <button class="btn" @click="load">重试</button>
+    </div>
 
     <!-- 加载态 -->
-    <LoadingState v-else-if="loading && jobs.length === 0" />
-
-    <!-- 空态：主题靠抽取自动聚合，不在此直接投递 -->
-    <EmptyState v-else-if="jobs.length === 0" message="这个主题还没有内容(内容被解析、抽到该概念时自动聚合)" />
-
-    <!-- 该主题下的内容列表 -->
-    <div v-else class="space-y-3">
-      <JobCard v-for="j in jobs" :key="j.job_id" :job="j" />
+    <div v-else-if="loading && jobs.length === 0" class="card pad" style="text-align:center;color:var(--ink-500);margin-top:20px">
+      加载中…
     </div>
-  </div>
+
+    <!-- 空态：主题靠抽取自动聚合 -->
+    <div v-else-if="jobs.length === 0" class="card pad" style="text-align:center;padding:40px 18px;margin-top:20px">
+      <Hash :size="40" :stroke-width="1" style="color:var(--ink-300);margin-bottom:12px" />
+      <p class="muted">这个主题还没有内容（内容被解析、抽到该概念时自动聚合）</p>
+    </div>
+
+    <!-- 关联内容列表 -->
+    <template v-else>
+      <div class="seclabel" style="margin:22px 0 12px"><LayoutList :size="14" />关联内容 · {{ total }}</div>
+      <div class="list">
+        <div v-for="j in jobs" :key="j.job_id" class="row" @click="openJob(j)">
+          <span class="type-pill" :class="typePillClass(j.content_type)">
+            <component :is="typeIcon(j.content_type)" :size="17" />
+          </span>
+          <div class="body">
+            <div class="title">{{ j.title || j.job_id }}</div>
+            <div class="meta">
+              <StatusBadge :status="j.status" />
+              <span>{{ CONTENT_TYPE_LABELS[j.content_type] || j.content_type }}</span>
+              <template v-if="j.source"><span class="sep">·</span><span>{{ j.source }}</span></template>
+              <span class="sep">·</span>
+              <span class="dim">{{ fmtDateTime(j.created_at) }}</span>
+            </div>
+          </div>
+          <ChevronRight :size="16" class="dim" />
+        </div>
+      </div>
+    </template>
+  </section>
 </template>

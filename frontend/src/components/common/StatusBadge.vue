@@ -1,33 +1,32 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-const props = defineProps<{ status: string }>()
+// 状态枚举 → 中文 + mnemo.css 徽章色(.badge .b-*)。全站统一,勿自造。
+// kind 可选(仅用于语义标注);status 在各域间基本唯一,扁平表即可解析。
+const props = defineProps<{ status: string; kind?: 'job' | 'step' | 'worker' | 'concept' }>()
 
-const config = computed(() => {
-  const map: Record<string, { bg: string; text: string; label: string }> = {
-    pending: { bg: 'bg-gray-100', text: 'text-gray-600', label: '等待' },
-    downloading: { bg: 'bg-blue-100', text: 'text-blue-700', label: '下载中' },
-    processing: { bg: 'bg-blue-100', text: 'text-blue-700', label: '处理中' },
-    done: { bg: 'bg-green-100', text: 'text-green-700', label: '完成' },
-    failed: { bg: 'bg-red-100', text: 'text-red-700', label: '失败' },
-    waiting: { bg: 'bg-gray-100', text: 'text-gray-600', label: '等待' },
-    running: { bg: 'bg-blue-100', text: 'text-blue-700', label: '运行中' },
-    skipped: { bg: 'bg-gray-100', text: 'text-gray-500', label: '跳过' },
-    ready: { bg: 'bg-yellow-100', text: 'text-yellow-700', label: '就绪' },
-    idle: { bg: 'bg-green-100', text: 'text-green-700', label: '空闲' },
-    busy: { bg: 'bg-yellow-100', text: 'text-yellow-700', label: '忙碌' },
-    'online-idle': { bg: 'bg-green-100', text: 'text-green-700', label: '空闲' },
-    'online-busy': { bg: 'bg-blue-100', text: 'text-blue-700', label: '忙碌' },
-    draining: { bg: 'bg-orange-100', text: 'text-orange-700', label: '排空中' },
-    offline: { bg: 'bg-gray-200', text: 'text-gray-600', label: '离线' },
-    stale: { bg: 'bg-gray-100', text: 'text-gray-500', label: '失联' },
-  }
-  return map[props.status] || { bg: 'bg-gray-100', text: 'text-gray-600', label: props.status }
-})
+const MAP: Record<string, [string, string]> = {
+  // job
+  pending: ['等待', 'b-mut'], downloading: ['下载中', 'b-info'], processing: ['处理中', 'b-run'],
+  done: ['已完成', 'b-ok'], failed: ['失败', 'b-bad'],
+  // step
+  waiting: ['等待', 'b-mut'], ready: ['就绪', 'b-mut'], running: ['运行中', 'b-run'], skipped: ['跳过', 'b-mut'],
+  // worker（idle/busy 为旧态兼容）
+  idle: ['空闲', 'b-ok'], busy: ['忙碌', 'b-info'],
+  'online-idle': ['空闲', 'b-ok'], 'online-busy': ['忙碌', 'b-info'], draining: ['排空中', 'b-warn'],
+  offline: ['离线', 'b-mut'], stale: ['失联', 'b-bad'],
+  // concept
+  suggested: ['候选', 'b-warn'], accepted: ['已采纳', 'b-ok'],
+}
+
+const cfg = computed<[string, string]>(() => MAP[props.status] ?? [props.status, 'b-mut'])
 </script>
 
 <template>
-  <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium" :class="[config.bg, config.text]">
-    {{ config.label }}
-  </span>
+  <span class="badge" :class="[cfg[1], { 'b-dashed': status === 'skipped' }]">{{ cfg[0] }}</span>
 </template>
+
+<style scoped>
+/* skipped 用虚线灰,视觉上绝不能像 failed */
+.b-dashed { border: 1px dashed var(--ink-300); background: transparent; color: var(--ink-500); }
+</style>

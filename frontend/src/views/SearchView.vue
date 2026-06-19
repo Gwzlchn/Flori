@@ -1,13 +1,13 @@
 <script setup lang="ts">
+// 搜索（原型 #search）：q≥3 字符才查；可按 内容类型 / 知识库(domain) / 集合(collection_id) 收窄。
+// 结果跳 /content/:id。snippet 含服务端 <mark> 高亮——但 sqlite snippet() 不转义正文，
+// 故这里仍做防御式转义（先整段转义、再仅还原 <mark>），杜绝任何可执行标签注入。
 import { ref, watch, computed } from 'vue'
 import { useRouter } from 'vue-router'
-import { Search } from 'lucide-vue-next'
 import { useApi } from '../composables/useApi'
-import Card from '../components/common/Card.vue'
-import Badge from '../components/common/Badge.vue'
-import LoadingState from '../components/common/LoadingState.vue'
-import EmptyState from '../components/common/EmptyState.vue'
+import { CONTENT_TYPE_LABELS } from '../types'
 import type { SearchResponse, SearchResultItem } from '../types'
+import { Search, Play, FileText, Newspaper, Headphones } from 'lucide-vue-next'
 
 const api = useApi()
 const router = useRouter()
@@ -15,29 +15,32 @@ const router = useRouter()
 const q = ref('')
 const domain = ref('')
 const contentType = ref('')
+const collectionId = ref('')
 const loading = ref(false)
+const error = ref('')
 const searched = ref(false)
 const result = ref<SearchResponse>({ total: 0, items: [] })
 
-// trigram tokenizer 至少 3 字符才命中，短于此直接提示而不打 API。
-const tooShort = computed(() => q.value.trim().length > 0 && q.value.trim().length < 3)
+// trigram 至少 3 字符才命中，短于此直接提示而不打 API。
+const term = computed(() => q.value.trim())
+const tooShort = computed(() => term.value.length > 0 && term.value.length < 3)
 
-// 笔记类型徽章：与后端 note_type 取值对齐。
-const typeLabels: Record<string, string> = {
+// 笔记类型徽章：与后端 note_type 取值对齐（smart|mechanical|transcript）。
+const NOTE_TYPE_LABELS: Record<string, string> = {
   smart: '智能笔记',
-  mechanical: '机械笔记',
-  paper: '论文笔记',
+  mechanical: '机械稿',
+  transcript: '逐字稿',
 }
 
-const contentTypeLabels: Record<string, string> = {
-  video: '视频',
-  paper: '论文',
-  article: '文章',
-  audio: '播客',
+// 内容类型 → type-pill 配色类 + 图标。
+const PILL_CLASS: Record<string, string> = {
+  video: 't-video', paper: 't-paper', article: 't-article', audio: 't-audio',
+}
+const PILL_ICON: Record<string, any> = {
+  video: Play, paper: FileText, article: Newspaper, audio: Headphones,
 }
 
-// snippet 安全渲染：后端 fts5 高亮用 <mark>，正文可能混入原始 HTML。
-// 先转义全部 HTML，再仅还原 <mark> 高亮标记，杜绝任何可执行标签。
+// snippet 安全渲染：整段先转义，再仅还原 <mark> 高亮，确保 v-html 不注入。
 function safeSnippet(raw: string): string {
   if (!raw) return ''
   const escaped = raw
@@ -52,25 +55,28 @@ function safeSnippet(raw: string): string {
 
 function buildQuery(): string {
   const p = new URLSearchParams()
-  p.set('q', q.value.trim())
-  if (domain.value) p.set('domain', domain.value)
+  p.set('q', term.value)
+  if (domain.value.trim()) p.set('domain', domain.value.trim())
   if (contentType.value) p.set('content_type', contentType.value)
+  if (collectionId.value.trim()) p.set('collection_id', collectionId.value.trim())
   return p.toString()
 }
 
 async function runSearch() {
-  const term = q.value.trim()
-  if (term.length < 3) {
+  if (term.value.length < 3) {
     result.value = { total: 0, items: [] }
-    searched.value = term.length > 0
+    searched.value = term.value.length > 0
+    error.value = ''
     return
   }
   loading.value = true
   searched.value = true
+  error.value = ''
   try {
     result.value = await api.get<SearchResponse>(`/api/search?${buildQuery()}`)
-  } catch {
+  } catch (e: any) {
     result.value = { total: 0, items: [] }
+    error.value = e?.message || '搜索失败'
   } finally {
     loading.value = false
   }
@@ -78,89 +84,106 @@ async function runSearch() {
 
 // 输入防抖：停止键入 300ms 后再查。
 let timer: ReturnType<typeof setTimeout> | undefined
-watch([q, domain, contentType], () => {
+watch([q, domain, contentType, collectionId], () => {
   if (timer) clearTimeout(timer)
   timer = setTimeout(runSearch, 300)
 })
 
-function openNote(item: SearchResultItem) {
-  // 机械笔记跳机械页，其余跳智能笔记页。
-  const path = item.note_type === 'mechanical'
-    ? `/jobs/${item.job_id}/notes/mechanical`
-    : `/jobs/${item.job_id}/notes/smart`
-  router.push(path)
+function open(item: SearchResultItem) {
+  router.push(`/content/${encodeURIComponent(item.job_id)}`)
 }
 </script>
 
 <template>
-  <div class="space-y-4">
-    <h2 class="text-xl font-bold">搜索</h2>
+  <section class="page">
+    <div class="h1" style="margin-bottom:16px"><Search :size="18" />搜索</div>
 
     <!-- 搜索框 -->
-    <div class="relative">
-      <Search :size="18" class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-      <input
-        v-model="q"
-        type="text"
-        placeholder="搜索笔记内容（至少 3 个字符）"
-        class="w-full pl-10 pr-4 py-2.5 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-300"
-      />
+    <div class="search" style="width:100%;padding:11px 14px;cursor:text">
+      <Search :size="17" />
+      <input v-model="q" placeholder="搜索笔记内容（至少 3 个字符）" style="font-size:14px" />
+      <span class="kbd">⌘K</span>
     </div>
 
-    <!-- facet 过滤 -->
-    <div class="flex flex-wrap gap-2">
-      <select
-        v-model="contentType"
-        class="px-3 py-1.5 text-sm border border-gray-200 rounded-lg bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-200"
-      >
+    <!-- 过滤 -->
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">
+      <select v-model="contentType" class="input" style="max-width:140px">
         <option value="">全部类型</option>
         <option value="video">视频</option>
         <option value="paper">论文</option>
         <option value="article">文章</option>
+        <option value="audio">播客</option>
       </select>
-      <input
-        v-model="domain"
-        type="text"
-        placeholder="领域过滤（可选）"
-        class="px-3 py-1.5 text-sm border border-gray-200 rounded-lg bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-200"
-      />
+      <input v-model="domain" class="input" placeholder="知识库过滤" style="max-width:160px" />
+      <input v-model="collectionId" class="input" placeholder="集合 ID（可选）" style="max-width:160px" />
     </div>
 
-    <!-- 状态/结果 -->
-    <p v-if="tooShort" class="text-sm text-gray-500 py-2">请至少输入 3 个字符。</p>
-    <LoadingState v-else-if="loading" text="搜索中…" />
-    <EmptyState v-else-if="searched && result.items.length === 0" message="未找到匹配的笔记。" />
-    <EmptyState v-else-if="!searched" message="输入关键词开始搜索。" />
+    <!-- 提示态：字数不足 -->
+    <div v-if="tooShort" class="note-tip" style="margin-top:18px">输入需 ≥ 3 字才会搜索。</div>
 
-    <div v-else class="space-y-2">
-      <p class="text-xs text-gray-500">共 {{ result.total }} 条结果</p>
-      <Card
-        v-for="item in result.items"
-        :key="`${item.job_id}-${item.note_type}`"
-        @click="openNote(item)"
-        class="cursor-pointer hover:shadow-sm transition-shadow"
-      >
-        <div class="flex items-center gap-2 mb-1">
-          <h4 class="text-sm font-medium truncate flex-1">{{ item.title || item.job_id }}</h4>
-          <Badge variant="info">
-            {{ typeLabels[item.note_type] || item.note_type }}
-          </Badge>
-        </div>
-        <!-- snippet 经 safeSnippet 转义，仅保留 <mark> 高亮，杜绝注入。 -->
-        <p class="text-sm text-gray-600 search-snippet" v-html="safeSnippet(item.snippet)"></p>
-        <div class="flex items-center gap-2 mt-2 text-xs text-gray-500">
-          <span v-if="item.content_type">{{ contentTypeLabels[item.content_type] || item.content_type }}</span>
-          <span v-if="item.domain && item.domain !== 'general'">{{ item.domain }}</span>
-        </div>
-      </Card>
+    <!-- 加载态 -->
+    <div v-else-if="loading" class="card pad" style="margin-top:18px;color:var(--ink-500);font-size:13px">
+      搜索中…
     </div>
-  </div>
+
+    <!-- 错误态 -->
+    <div v-else-if="error" class="card pad"
+      style="margin-top:18px;display:flex;flex-direction:column;align-items:center;gap:12px;text-align:center;padding:32px 18px">
+      <div style="font-size:13.5px;color:var(--ink-700)">{{ error }}</div>
+      <button class="btn" @click="runSearch">重试</button>
+    </div>
+
+    <!-- 空态：已搜但无结果 -->
+    <div v-else-if="searched && result.items.length === 0" class="card pad"
+      style="margin-top:18px;display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;padding:40px 18px">
+      <Search :size="40" :stroke-width="1" style="color:var(--ink-300)" />
+      <div style="font-size:14px;color:var(--ink-700);font-weight:600">没有匹配的笔记</div>
+      <div class="lead" style="max-width:360px">换个关键词，或放宽上面的类型 / 知识库 / 集合过滤。</div>
+    </div>
+
+    <!-- 初始态：还没搜 -->
+    <div v-else-if="!searched" class="note-tip" style="margin-top:18px">输入关键词开始搜索，无匹配会显示空状态。</div>
+
+    <!-- 结果列表 -->
+    <template v-else>
+      <div class="muted" style="font-size:12.5px;margin:18px 0 12px">共 {{ result.total }} 条结果</div>
+      <div class="list">
+        <div
+          v-for="item in result.items"
+          :key="`${item.job_id}-${item.note_type}`"
+          class="card pad"
+          style="cursor:pointer;display:flex;align-items:flex-start;gap:13px"
+          @click="open(item)"
+        >
+          <span class="type-pill" :class="PILL_CLASS[item.content_type] || 't-article'" style="margin-top:1px">
+            <component :is="PILL_ICON[item.content_type] || Newspaper" :size="17" />
+          </span>
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:8px">
+              <div class="title" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+                {{ item.title || item.job_id }}
+              </div>
+              <span class="badge b-mut">{{ NOTE_TYPE_LABELS[item.note_type] || item.note_type }}</span>
+            </div>
+            <!-- snippet 经 safeSnippet 转义，仅保留 <mark> 高亮，杜绝注入。 -->
+            <p class="search-snippet" style="font-size:13px;color:var(--ink-600);margin:6px 0 0" v-html="safeSnippet(item.snippet)"></p>
+            <div class="meta" style="margin-top:7px">
+              <span>{{ CONTENT_TYPE_LABELS[item.content_type] || item.content_type }}</span>
+              <template v-if="item.domain && item.domain !== 'general'">
+                <span class="sep">·</span><span>{{ item.domain }}</span>
+              </template>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
+  </section>
 </template>
 
 <style scoped>
 .search-snippet :deep(mark) {
-  background-color: #fef08a;
-  color: inherit;
+  background: var(--brand-50);
+  color: var(--brand-700);
   border-radius: 2px;
   padding: 0 1px;
 }

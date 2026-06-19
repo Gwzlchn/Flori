@@ -1,22 +1,21 @@
 <script setup lang="ts">
-import { onMounted, ref, inject } from 'vue'
+import { ref, computed, onMounted, inject } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useCollectionStore } from '../stores/collections'
-import { useJobStore } from '../stores/jobs'
 import { useApi } from '../composables/useApi'
-import JobCard from '../components/job/JobCard.vue'
-import EmptyState from '../components/common/EmptyState.vue'
-import Card from '../components/common/Card.vue'
-import Badge from '../components/common/Badge.vue'
-import LoadingState from '../components/common/LoadingState.vue'
+import StatusBadge from '../components/common/StatusBadge.vue'
 import { fmtDateTime } from '../utils/datetime'
+import { CONTENT_TYPE_LABELS } from '../types'
 import type { Collection, JobSummary } from '../types'
-import { ArrowLeft, Library, RefreshCw, Send, Rss, ExternalLink } from 'lucide-vue-next'
+import {
+  Rss, Folder, RefreshCw, Info, ExternalLink, LayoutList, ChevronRight,
+  Play, FileText, Newspaper, Headphones, Check,
+} from 'lucide-vue-next'
 
+// 集合详情（原型 #collection）：头部信息 + 订阅源（开关/同步） + 名下内容列表。
 const route = useRoute()
 const router = useRouter()
 const store = useCollectionStore()
-const jobStore = useJobStore()
 const api = useApi()
 const showToast = inject<(m: string, t?: string) => void>('showToast', () => {})
 
@@ -26,55 +25,37 @@ const jobs = ref<JobSummary[]>([])
 const total = ref(0)
 const loading = ref(false)
 const notFound = ref(false)
+const error = ref('')
 
-// 投递到此集合：domain 默认继承 collection.domain，collection_id 直接绑定。
-const url = ref('')
-const submitting = ref(false)
-const submitError = ref('')
-
-// 订阅源操作状态
 const syncing = ref(false)
 const togglingSync = ref(false)
 
-// B站 UP 主空间页（点名字/链接直达）
 const upHomeUrl = (mid: string) => `https://space.bilibili.com/${mid}`
+
+const typeIcon = (t: string) =>
+  t === 'video' ? Play : t === 'paper' ? FileText : t === 'audio' ? Headphones : Newspaper
+const typePillClass = (t: string) =>
+  t === 'video' ? 't-video' : t === 'paper' ? 't-paper' : t === 'audio' ? 't-audio' : 't-article'
 
 async function load() {
   loading.value = true
   notFound.value = false
+  error.value = ''
   try {
     collection.value = await store.get(id)
     const res = await store.fetchJobs(id)
     jobs.value = res.items
     total.value = res.total
   } catch (e: any) {
-    if (String(e?.message ?? '').includes('404')) notFound.value = true
+    const msg = String(e?.message ?? '')
+    if (msg.includes('404')) notFound.value = true
+    else error.value = msg || '加载失败'
   } finally {
     loading.value = false
   }
 }
 
-async function submit() {
-  if (!url.value.trim() || !collection.value) return
-  submitError.value = ''
-  submitting.value = true
-  try {
-    // 走 jobs store；collection_id 绑定集合，domain 继承集合。
-    await jobStore.createJob({
-      url: url.value.trim(),
-      domain: collection.value.domain,
-      collection_id: collection.value.id,
-    })
-    url.value = ''
-    await load()
-  } catch (e: any) {
-    submitError.value = e.message || '投递失败'
-  } finally {
-    submitting.value = false
-  }
-}
-
-// 立即同步：拉取 UP 全部视频，新视频自动建 job 入本集合。
+// 立即同步：拉取 UP 全部视频，新视频自动建内容入本集合。返回 {new,total}。
 async function syncNow() {
   const c = collection.value
   if (!c?.subscription || syncing.value) return
@@ -84,13 +65,13 @@ async function syncNow() {
     showToast(`同步完成：新增 ${r.new} 个（共 ${r.total}）`, 'success')
     await load()
   } catch (e: any) {
-    showToast(e.message || '同步失败', 'error')
+    showToast(e?.message || '同步失败', 'error')
   } finally {
     syncing.value = false
   }
 }
 
-// 自动同步开关：关掉后定时任务不再追更该来源（仍可手动同步）。订阅是集合属性，打集合端点。
+// 自动同步开关：订阅是集合属性，走集合端点 PUT {sync_enabled}。
 async function toggleAutoSync() {
   const c = collection.value
   if (!c?.subscription || togglingSync.value) return
@@ -99,124 +80,172 @@ async function toggleAutoSync() {
     await api.put(`/api/collections/${c.id}`, { sync_enabled: !c.subscription.enabled })
     await load()
   } catch (e: any) {
-    showToast(e.message || '操作失败', 'error')
+    showToast(e?.message || '操作失败', 'error')
   } finally {
     togglingSync.value = false
   }
 }
 
-onMounted(load)  // 进入集合详情页即加载集合信息 + 名下 job 列表
+function openJob(j: JobSummary) {
+  router.push(`/content/${j.job_id}`)
+}
+
+const headerSub = computed(() => {
+  const c = collection.value
+  if (!c) return ''
+  const parts: string[] = []
+  if (c.domain) parts.push(c.domain)
+  parts.push(`${c.job_count} 条内容`)
+  if (c.subscription?.last_synced_at) parts.push(`上次同步 ${fmtDateTime(c.subscription.last_synced_at)}`)
+  return parts.join(' · ')
+})
+
+onMounted(load)
 </script>
 
 <template>
-  <div class="space-y-4">
-    <div class="flex items-center gap-2">
-      <button @click="router.push('/collections')" class="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors">
-        <ArrowLeft :size="18" />
-      </button>
-      <h2 class="text-xl font-bold flex items-center gap-2 min-w-0">
-        <component :is="collection?.subscription ? Rss : Library" :size="22" class="flex-shrink-0" :class="collection?.subscription ? 'text-blue-500' : ''" />
-        <span class="truncate">{{ collection?.name ?? '集合详情' }}</span>
-      </h2>
-      <button @click="load()" class="ml-auto p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors">
-        <RefreshCw :size="16" :class="loading ? 'animate-spin' : ''" />
-      </button>
+  <section>
+    <!-- 404 -->
+    <div v-if="notFound" class="card pad" style="text-align:center;padding:40px 18px">
+      <p class="muted" style="margin-bottom:14px">集合不存在或已删除</p>
+      <button class="btn" @click="router.push('/collections')">返回集合列表</button>
     </div>
 
-    <div v-if="notFound">
-      <EmptyState message="集合不存在或已删除" />
+    <!-- 错误态 -->
+    <div v-else-if="error && !collection" class="card pad" style="text-align:center">
+      <p class="muted" style="margin-bottom:12px">{{ error }}</p>
+      <button class="btn" @click="load"><RefreshCw :size="14" />重试</button>
+    </div>
+
+    <!-- 加载态 -->
+    <div v-else-if="loading && !collection" class="card pad" style="text-align:center;color:var(--ink-500)">
+      加载中…
     </div>
 
     <template v-else-if="collection">
-      <!-- 集合元信息 -->
-      <Card>
-        <div class="flex items-center gap-2 text-xs text-gray-500 flex-wrap mb-1">
-          <span class="font-mono text-gray-500">{{ collection.id }}</span>
-          <span v-if="collection.domain && collection.domain !== 'general'">{{ collection.domain }}</span>
-          <Badge v-for="t in collection.tags" :key="t">{{ t }}</Badge>
-          <span>{{ collection.job_count }} 篇</span>
-        </div>
-        <p v-if="collection.description" class="text-sm text-gray-600">{{ collection.description }}</p>
-      </Card>
-
-      <!-- 订阅源（仅订阅集合）：UP 主信息 + 自动追更开关 + 立即同步 -->
-      <Card v-if="collection.subscription">
-        <div class="flex items-center gap-2 mb-3">
-          <Rss :size="16" class="text-blue-500" />
-          <h3 class="text-sm font-semibold text-gray-700">订阅源</h3>
-          <Badge :variant="collection.subscription.enabled ? 'success' : 'default'">
-            {{ collection.subscription.enabled ? '自动追更中' : '已暂停自动追更' }}
-          </Badge>
-        </div>
-        <div class="grid grid-cols-2 sm:grid-cols-4 gap-y-2 gap-x-4 text-xs">
-          <div>
-            <div class="text-gray-500 mb-0.5">来源</div>
-            <div class="text-gray-700">B站 UP 主</div>
+      <!-- 头部：图标 + 名字 + 类型徽章 + 立即同步 -->
+      <div style="display:flex;align-items:center;gap:13px;margin-bottom:6px">
+        <span
+          class="cic"
+          :class="collection.subscription ? 'sub' : 'man'"
+          style="width:42px;height:42px;border-radius:11px"
+        >
+          <Rss v-if="collection.subscription" :size="18" />
+          <Folder v-else :size="18" />
+        </span>
+        <div style="min-width:0">
+          <div class="h1">
+            {{ collection.name }}
+            <span v-if="collection.subscription" class="badge b-info" style="margin-left:4px"><Rss :size="12" />订阅</span>
+            <span v-else class="badge b-mut" style="margin-left:4px">手动</span>
           </div>
-          <div class="min-w-0">
-            <div class="text-gray-500 mb-0.5">UP 主页</div>
-            <a :href="upHomeUrl(collection.subscription.source_id)" target="_blank" rel="noopener"
-               class="text-blue-600 hover:underline inline-flex items-center gap-1 max-w-full">
-              <span class="truncate">{{ collection.subscription.source_id }}</span><ExternalLink :size="11" class="flex-shrink-0" />
-            </a>
-          </div>
-          <div>
-            <div class="text-gray-500 mb-0.5">已入库</div>
-            <div class="text-gray-700">{{ collection.job_count }} 个视频</div>
-          </div>
-          <div>
-            <div class="text-gray-500 mb-0.5">上次同步</div>
-            <div class="text-gray-700">{{ collection.subscription.last_synced_at ? fmtDateTime(collection.subscription.last_synced_at) : '从未' }}</div>
-          </div>
+          <div class="lead">{{ headerSub }}</div>
         </div>
-        <div class="flex items-center gap-3 mt-4 pt-3 border-t border-gray-100">
-          <button @click="syncNow" :disabled="syncing"
-                  class="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors">
-            <RefreshCw :size="13" :class="syncing ? 'animate-spin' : ''" />
-            {{ syncing ? '同步中…' : '立即同步' }}
-          </button>
-          <button @click="toggleAutoSync" :disabled="togglingSync"
-                  class="flex items-center gap-2 text-xs text-gray-600 hover:text-gray-800 disabled:opacity-50">
-            <span class="relative inline-flex h-4 w-7 items-center rounded-full transition-colors"
-                  :class="collection.subscription.enabled ? 'bg-blue-500' : 'bg-gray-300'">
-              <span class="inline-block h-3 w-3 transform rounded-full bg-white transition-transform"
-                    :class="collection.subscription.enabled ? 'translate-x-3.5' : 'translate-x-0.5'" />
-            </span>
-            自动同步
-          </button>
-        </div>
-      </Card>
-
-      <!-- 投递到此集合 -->
-      <Card>
-        <h3 class="text-sm font-semibold text-gray-700 mb-3">投递到此集合</h3>
-        <form @submit.prevent="submit" class="flex gap-2">
-          <input
-            v-model="url"
-            type="text"
-            placeholder="粘贴 URL (BV号 / arXiv / 链接)"
-            class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-          />
-          <button
-            type="submit"
-            :disabled="submitting || !url.trim()"
-            class="flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            <Send :size="14" />
-            <span>{{ submitting ? '投递中...' : '投递' }}</span>
-          </button>
-        </form>
-        <p v-if="submitError" class="text-sm text-red-600 mt-2">{{ submitError }}</p>
-      </Card>
-
-      <!-- 集合内 job 列表 -->
-      <LoadingState v-if="loading && jobs.length === 0" />
-      <div v-else-if="jobs.length === 0">
-        <EmptyState message="此集合暂无任务" />
+        <button
+          v-if="collection.subscription"
+          class="btn sm"
+          style="margin-left:auto"
+          :disabled="syncing"
+          @click="syncNow"
+        >
+          <RefreshCw :size="13" :class="{ spin: syncing }" />{{ syncing ? '同步中…' : '立即同步' }}
+        </button>
       </div>
-      <div v-else class="space-y-3">
-        <JobCard v-for="j in jobs" :key="j.job_id" :job="j" />
+
+      <!-- 信息卡 + 订阅源卡 -->
+      <div class="grid2" style="margin-top:18px;align-items:start">
+        <div class="card pad">
+          <div class="card-h"><Info :size="15" />集合信息</div>
+          <table class="kv">
+            <tr><td>ID</td><td class="mono">{{ collection.id }}</td></tr>
+            <tr><td>知识库</td><td>{{ collection.domain || '—' }}</td></tr>
+            <tr>
+              <td>标签</td>
+              <td>
+                <template v-if="collection.tags.length">
+                  <span v-for="t in collection.tags" :key="t" class="tag" style="margin-right:5px">{{ t }}</span>
+                </template>
+                <span v-else>—</span>
+              </td>
+            </tr>
+            <tr><td>内容</td><td>{{ collection.job_count }} 条</td></tr>
+            <tr><td>描述</td><td>{{ collection.description || '—' }}</td></tr>
+          </table>
+        </div>
+
+        <div v-if="collection.subscription" class="card pad">
+          <div class="card-h"><Rss :size="15" />订阅源</div>
+          <table class="kv" style="margin-bottom:13px">
+            <tr><td>来源</td><td>B站 UP 主</td></tr>
+            <tr>
+              <td>UP 主页</td>
+              <td>
+                <a class="ghost" style="color:var(--info)" :href="upHomeUrl(collection.subscription.source_id)" target="_blank" rel="noopener">
+                  space.bilibili.com/{{ collection.subscription.source_id }}<ExternalLink :size="13" />
+                </a>
+              </td>
+            </tr>
+            <tr><td>已入库</td><td>{{ collection.job_count }}</td></tr>
+            <tr><td>上次同步</td><td>{{ collection.subscription.last_synced_at ? fmtDateTime(collection.subscription.last_synced_at) : '从未' }}</td></tr>
+            <tr>
+              <td>追更状态</td>
+              <td>
+                <span class="badge" :class="collection.subscription.enabled ? 'b-ok' : 'b-mut'">
+                  <Check v-if="collection.subscription.enabled" :size="12" />{{ collection.subscription.enabled ? '追更中' : '已暂停' }}
+                </span>
+              </td>
+            </tr>
+          </table>
+          <div style="display:flex;align-items:center;gap:12px;padding-top:11px;border-top:1px solid var(--line-soft)">
+            <button class="btn sm" :disabled="syncing" @click="syncNow">
+              <RefreshCw :size="13" :class="{ spin: syncing }" />立即同步
+            </button>
+            <span style="margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--ink-600)">
+              自动同步
+              <div
+                class="switch"
+                :class="{ on: collection.subscription.enabled, disabled: togglingSync }"
+                role="switch"
+                @click="toggleAutoSync"
+              ></div>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 名下内容列表 -->
+      <div class="seclabel" style="margin:22px 0 12px"><LayoutList :size="14" />内容 · {{ total }}</div>
+
+      <div v-if="loading && jobs.length === 0" class="card pad" style="text-align:center;color:var(--ink-500)">
+        加载中…
+      </div>
+      <div v-else-if="jobs.length === 0" class="card pad" style="text-align:center;padding:30px 18px">
+        <p class="muted">此集合暂无内容</p>
+      </div>
+      <div v-else class="list">
+        <div v-for="j in jobs" :key="j.job_id" class="row" @click="openJob(j)">
+          <span class="type-pill" :class="typePillClass(j.content_type)">
+            <component :is="typeIcon(j.content_type)" :size="17" />
+          </span>
+          <div class="body">
+            <div class="title">{{ j.title || j.job_id }}</div>
+            <div class="meta">
+              <StatusBadge :status="j.status" />
+              <span>{{ CONTENT_TYPE_LABELS[j.content_type] || j.content_type }}</span>
+              <template v-if="j.source"><span class="sep">·</span><span>{{ j.source }}</span></template>
+              <span class="sep">·</span>
+              <span class="dim">{{ fmtDateTime(j.created_at) }}</span>
+            </div>
+          </div>
+          <ChevronRight :size="16" class="dim" />
+        </div>
       </div>
     </template>
-  </div>
+  </section>
 </template>
+
+<style scoped>
+.spin { animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.switch.disabled { opacity: .5; pointer-events: none; }
+</style>
