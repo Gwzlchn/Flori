@@ -1,0 +1,33 @@
+# 前端端到端冒烟：无头 Chromium 跑通所有路由（含动态 job/term），校验 HTTP/console/api。
+# 针对一个**已部署、在跑**的栈运行（不自起栈），默认连本机 ai-knowledge-base_default 网络上的 mnemo-fe-lan。
+#
+# 用法：
+#   docker compose -f docker-compose.e2e.yml run --rm e2e                 # 本机 LAN 前端
+#   BASE=https://你的外网域名 \
+#     E2E_BASIC_USER=u E2E_BASIC_PASS=p \
+#     docker compose -f docker-compose.e2e.yml run --rm e2e               # 外网（带 Basic Auth）
+#
+# 截图落到 ./output/e2e/（已被 .gitignore 忽略）。全部路由干净退出码 0，否则 1。
+name: mnemo
+
+services:
+  e2e:
+    build:
+      context: .
+      dockerfile: docker/e2e.Dockerfile
+      args:
+        USE_USTC_MIRROR: "${USE_USTC_MIRROR:-1}"
+    command: python /work/smoke.py
+    volumes:
+      - ./tests/e2e:/work
+      - ./output/e2e:/work/output
+    environment:
+      - BASE=${BASE:-http://mnemo-fe-lan}
+      - E2E_BASIC_USER=${E2E_BASIC_USER:-}
+      - E2E_BASIC_PASS=${E2E_BASIC_PASS:-}
+
+# 连到已部署栈所在的网络（由主 docker-compose.yml 创建）。
+networks:
+  default:
+    external: true
+    name: ai-knowledge-base_default
