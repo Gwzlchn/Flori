@@ -896,6 +896,10 @@ class TestAuditFixes:
         counts = db.count_jobs_by_status()
         assert counts.get("done") == 2 and counts.get("failed") == 1
 
+    def test_schema_version_stamped_after_init(self, db):
+        # #SchemaVersion: init_schema 后 user_version 被打戳为 1(可查询的迁移钩子)。
+        assert db.schema_version() == 1
+
     def test_ensure_columns_adds_missing(self, tmp_path):
         # K:旧库缺列时 init_schema 通过 _ensure_columns 自动补齐,不崩
         import sqlite3
@@ -914,3 +918,133 @@ class TestAuditFixes:
         cols = {r["name"] for r in d._conn.execute("PRAGMA table_info(jobs)").fetchall()}
         assert "collection_id" in cols and "source" in cols
         d.close()
+
+
+class TestConceptTimeline:
+    """#21: concept_timeline 的分桶/容错的直接 DB 级测试(此前仅 API happy-path month)。
+
+    seed 约定:job 用显式 created_at,glossary 的 occurrence 经 job_id 映射到该 created_at;
+    concept_timeline 仅取 domain 内 jobs 的 created_at(域外 job_id 不贡献计数)。"""
+
+    def _seed_job(self, db, jid, created_iso, domain="ml"):
+        from datetime import datetime
+
+        db.create_job(
+            Job(
+                id=jid,
+                content_type="video",
+                pipeline="video",
+                domain=domain,
+                created_at=datetime.fromisoformat(created_iso),
+            )
+        )
+
+    def test_month_bucketing(self, db):
+        # 两个 job 跨两个月,一个概念在两月各出现一次。
+        self._seed_job(db, "jA", "2026-01-10T08:00:00+00:00")
+        self._seed_job(db, "jB", "2026-02-15T08:00:00+00:00")
+        db.add_glossary_suggestion("ml", "梯度下降", "jA")
+        db.add_glossary_suggestion("ml", "梯度下降", "jB")
+        tl = db.concept_timeline("ml", granularity="month")
+        assert tl["granularity"] == "month"
+        assert tl["buckets"] == ["2026-01", "2026-02"]
+        assert tl["totals"] == {"2026-01": 1, "2026-02": 1}
+        assert len(tl["concepts"]) == 1
+        c = tl["concepts"][0]
+        assert c["term"] == "梯度下降"
+        assert c["buckets"] == {"2026-01": 1, "2026-02": 1}
+        assert c["total"] == 2
+
+    def test_day_bucketing(self, db):
+        # 同一天两个 job → 该日计 2;另一天 1。
+        self._seed_job(db, "jA", "2026-03-01T01:00:00+00:00")
+        self._seed_job(db, "jB", "2026-03-01T23:00:00+00:00")
+        self._seed_job(db, "jC", "2026-03-02T12:00:00+00:00")
+        for jid in ("jA", "jB", "jC"):
+            db.add_glossary_suggestion("ml", "注意力", jid)
+        tl = db.concept_timeline("ml", granularity="day")
+        assert tl["granularity"] == "day"
+        assert tl["totals"] == {"2026-03-01": 2, "2026-03-02": 1}
+        assert tl["concepts"][0]["buckets"] == {"2026-03-01": 2, "2026-03-02": 1}
+
+    def test_week_bucketing_year_boundary(self, db):
+        # ISO 周边界:2025-12-29 与 2026-01-01 同属 2026-W01;2026-01-05 属 2026-W02。
+        self._seed_job(db, "jA", "2025-12-29T10:00:00+00:00")
+        self._seed_job(db, "jB", "2026-01-01T10:00:00+00:00")
+        self._seed_job(db, "jC", "2026-01-05T10:00:00+00:00")
+        for jid in ("jA", "jB", "jC"):
+            db.add_glossary_suggestion("ml", "Transformer", jid)
+        tl = db.concept_timeline("ml", granularity="week")
+        assert tl["granularity"] == "week"
+        assert tl["totals"] == {"2026-W01": 2, "2026-W02": 1}
+        assert tl["buckets"] == ["2026-W01", "2026-W02"]
+        assert tl["concepts"][0]["buckets"] == {"2026-W01": 2, "2026-W02": 1}
+
+    def test_corrupt_occurrences_swallowed(self, db):
+        # 损坏的 occurrences JSON 被吞掉:该词不贡献计数,且整体不崩。
+        self._seed_job(db, "jA", "2026-01-10T08:00:00+00:00")
+        db.add_glossary_suggestion("ml", "好词", "jA")
+        # 直接写一条非法 occurrences JSON 的术语行。
+        db._conn.execute(
+            "INSERT INTO glossary (domain, term, occurrences, status) "
+            "VALUES (?,?,?,?)",
+            ("ml", "坏词", "{not valid json", "accepted"),
+        )
+        db._conn.commit()
+        tl = db.concept_timeline("ml", granularity="month")
+        terms = {c["term"] for c in tl["concepts"]}
+        assert "好词" in terms
+        assert "坏词" not in terms  # 损坏的不贡献,被吞
+        assert tl["totals"] == {"2026-01": 1}
+
+    def test_empty_domain_returns_empty_structure(self, db):
+        # 未知/空 domain:无 glossary/job → buckets/totals/concepts 皆空,不报错。
+        tl = db.concept_timeline("does-not-exist", granularity="month")
+        assert tl["granularity"] == "month"
+        assert tl["buckets"] == []
+        assert tl["totals"] == {}
+        assert tl["concepts"] == []
+
+    def test_occurrence_outside_domain_jobs_not_counted(self, db):
+        # occurrence 指向不在该 domain 的 job_id → 映射不到 created_at,不计数。
+        self._seed_job(db, "jIn", "2026-01-10T08:00:00+00:00", domain="ml")
+        self._seed_job(db, "jOut", "2026-01-10T08:00:00+00:00", domain="dl")
+        db.add_glossary_suggestion("ml", "跨域词", "jIn")
+        db.add_glossary_suggestion("ml", "跨域词", "jOut")  # jOut 属 dl,不在 ml jobs 里
+        tl = db.concept_timeline("ml", granularity="month")
+        # 只有 ml 内的 jIn 被计入。
+        assert tl["totals"] == {"2026-01": 1}
+        assert tl["concepts"][0]["total"] == 1
+
+
+class TestJobFacets:
+    """#21: job_facets 的直接 DB 级测试(source/domain/status 后端聚合计数)。"""
+
+    def test_facet_structure_for_seeded_dataset(self, db):
+        from datetime import datetime
+
+        db.create_job(Job(id="j1", content_type="video", pipeline="video",
+                          domain="ml", source="bilibili", status=JobStatus.DONE))
+        db.create_job(Job(id="j2", content_type="video", pipeline="video",
+                          domain="ml", source="bilibili", status=JobStatus.PENDING))
+        db.create_job(Job(id="j3", content_type="paper", pipeline="paper",
+                          domain="dl", source="arxiv", status=JobStatus.DONE))
+        facets = db.job_facets()
+        assert set(facets.keys()) == {"source", "domain", "status"}
+        assert facets["source"] == {"bilibili": 2, "arxiv": 1}
+        assert facets["domain"] == {"ml": 2, "dl": 1}
+        assert facets["status"] == {"done": 2, "pending": 1}
+
+    def test_facets_skip_null_source(self, db):
+        # source 为 None 的 job 不出现在 source facet(GROUP BY 跳过 None)。
+        db.create_job(Job(id="j1", content_type="video", pipeline="video",
+                          domain="ml", source="bilibili"))
+        db.create_job(Job(id="j2", content_type="video", pipeline="video",
+                          domain="ml"))  # source=None
+        facets = db.job_facets()
+        assert facets["source"] == {"bilibili": 1}  # None 被排除
+        assert facets["domain"] == {"ml": 2}
+
+    def test_facets_empty_db(self, db):
+        facets = db.job_facets()
+        assert facets == {"source": {}, "domain": {}, "status": {}}

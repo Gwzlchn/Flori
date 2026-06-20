@@ -16,6 +16,11 @@ from .status import (
     compute_worker_status,
 )
 
+# DB schema 版本戳。当前仅做加列(additive)迁移,无需版本驱动;此戳是为将来
+# 非加列迁移(改列/删列/数据回填)与备份兼容校验预留的钩子——可经 PRAGMA user_version 查询。
+SCHEMA_VERSION = 1
+
+
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
@@ -212,6 +217,15 @@ class Database:
             # CREATE INDEX 会在缺该列的老库上先行报错。新库此步无表可补、直接跳过。
             self._ensure_columns()
             self._conn.executescript(_SCHEMA_SQL)
+            # 版本戳钩子:user_version=0 表示全新库或尚未打戳的旧库,统一标记为 1。
+            # 当前只做加列迁移、无需版本驱动;此处仅建立版本号以便将来非加列迁移
+            # (改列/删列/回填)按 user_version 分支处理 + 做备份兼容校验。不在此放迁移逻辑。
+            if self._conn.execute("PRAGMA user_version").fetchone()[0] == 0:
+                self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def schema_version(self) -> int:
+        """当前库的 schema 版本(PRAGMA user_version)。供备份兼容/未来迁移判断。"""
+        return self._conn.execute("PRAGMA user_version").fetchone()[0]
 
     # 各表的期望列(列名 -> 建列 SQL 片段)。旧库缺列时按需 ALTER ADD,
     # 避免"代码加了新列、旧库没有 → 查询崩"。新增列只在此登记即可平滑升级。
