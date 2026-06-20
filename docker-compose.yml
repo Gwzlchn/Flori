@@ -3,12 +3,20 @@
 # 默认仅起后端；单机全栈再带前端：`docker compose --profile allinone up -d`。
 # 拆分部署时前端单独在公网入口机运行（边缘反代由各自部署维护）。
 # 容器统一命名 mnemo-*（单实例部署；要并行多实例请另起具名服务，见 .local 覆盖里的 worker 范式）。
+# 日志轮转:json-file 默认无上限,长跑会撑爆宿主磁盘。统一锚点限单文件 10m × 3 份。
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   redis:
     container_name: mnemo-redis
     image: redis:7-alpine
     restart: unless-stopped
     command: redis-server --appendonly yes
+    logging: *default-logging
     volumes:
       - redis-data:/data
 
@@ -37,6 +45,14 @@ services:
       # 未设 API_TOKEN 且此项非 1 时后端 fail-closed(503),不再静默裸奔(见 docs/07-security)。
       - API_ALLOW_NO_AUTH=${API_ALLOW_NO_AUTH:-1}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
+    logging: *default-logging
+    healthcheck:
+      # /openapi.json 始终免鉴权,能取到即进程在正常服务 HTTP(编排/watchtower 据此判活)。
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/openapi.json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     security_opt:
       - no-new-privileges:true
     labels:
@@ -49,6 +65,7 @@ services:
     image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/mnemo:latest
     restart: unless-stopped
     command: python -m scheduler.main
+    logging: *default-logging
     volumes:
       - ${MNEMO_DATA_DIR:-mnemo-data}:/data
     environment:
@@ -72,6 +89,7 @@ services:
     image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/mnemo:latest
     restart: unless-stopped
     command: python -m worker.main --type cpu
+    logging: *default-logging
     # 默认 subprocess 执行器,不挂 docker.sock(避免宿主 root 等价暴露);
     # 切 docker 执行器请叠加 docker-compose.executor.yml。
     volumes:
@@ -101,6 +119,7 @@ services:
     image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/mnemo:latest
     restart: unless-stopped
     command: python -m worker.main --type ai
+    logging: *default-logging
     # 默认 subprocess 执行器,不挂 docker.sock(避免宿主 root 等价暴露);
     # 切 docker 执行器请叠加 docker-compose.executor.yml。
     volumes:

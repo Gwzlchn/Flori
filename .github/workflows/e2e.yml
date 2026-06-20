@@ -1,0 +1,98 @@
+name: E2E (manual)
+
+# 集成回归门:手动触发(workflow_dispatch),不挂在每个 PR 上(避免给主 CI 加负载)。
+#
+# 覆盖目标(审计缺口 #7):真实 pipeline DAG ↔ worker ↔ scheduler ↔ step 的接线回归,
+# 主 CI 只跑单测,缺这道集成接线验证。
+#
+# 现状说明(重要):
+#   tests/integration/run_e2e_cpu.sh / run_e2e_ai.sh 需要**真实素材**才能跑通——
+#   01_download 步骤对 URL 源会真连 B站/arXiv,upload 源需真实上传文件,DRY_RUN 不绕过下载。
+#   因此 GitHub-hosted runner 无法在无素材/无网络/无 API key 下跑全 pipeline。
+#   本 workflow 退而求其次,做"接线健康探针":
+#     1) 用 docker-compose.integration.yml 起整套栈(DRY_RUN=1,AI 步返回合成产物);
+#     2) 探活 API(/openapi.json),确认 api ↔ redis 连通;
+#     3) 确认 scheduler / worker-cpu / worker-ai 容器拉起且不在崩溃重启;
+#     4) 跑容器内单测套件(与主 CI 同路径)兜底回归。
+#   真正"投真实视频/PDF 跑通 CPU+AI 全链路"仍是**人工/自托管**覆盖,见下方注释与 docs/12-cicd.md。
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep_stack:
+        description: "失败时保留栈以便排查(true/false)"
+        required: false
+        default: "false"
+
+jobs:
+  integration-smoke:
+    runs-on: ubuntu-latest
+    env:
+      USE_USTC_MIRROR: "0"     # 海外 runner 用官方源
+      DRY_RUN: "1"             # AI 步骤走 DryRunProvider,无需任何 API key
+      COMPOSE: "docker compose -f docker-compose.integration.yml"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build integration stack
+        run: $COMPOSE build
+
+      - name: Bring up stack (DRY_RUN)
+        run: $COMPOSE up -d redis api scheduler worker-cpu worker-ai
+
+      - name: Probe API health (/openapi.json)
+        run: |
+          # api 无专用 health 端点;/openapi.json 始终可匿名访问,作为 api↔redis 就绪信号。
+          for i in $(seq 1 30); do
+            if curl -fsS --noproxy '*' http://localhost:8000/openapi.json >/dev/null 2>&1; then
+              echo "API 就绪 (第 ${i} 次探测)"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::API 在 90s 内未就绪"
+          $COMPOSE logs api scheduler
+          exit 1
+
+      - name: Verify worker/scheduler wiring (容器存活,非崩溃重启)
+        run: |
+          sleep 5  # 给 worker 一点时间注册到 redis
+          fail=0
+          for svc in scheduler worker-cpu worker-ai; do
+            cid="$($COMPOSE ps -q "$svc")"
+            if [ -z "$cid" ]; then
+              echo "::error::服务 $svc 未创建容器"; fail=1; continue
+            fi
+            state="$(docker inspect -f '{{.State.Status}}' "$cid")"
+            restarts="$(docker inspect -f '{{.RestartCount}}' "$cid")"
+            echo "$svc: status=$state restarts=$restarts"
+            if [ "$state" != "running" ]; then
+              echo "::error::$svc 未在运行 (status=$state)"; fail=1
+            fi
+            if [ "${restarts:-0}" -gt 2 ]; then
+              echo "::error::$svc 反复重启 (restarts=$restarts),疑似接线/导入错误"; fail=1
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then
+            $COMPOSE logs scheduler worker-cpu worker-ai
+            exit 1
+          fi
+
+      - name: Unit suite (容器内,集成镜像复用)
+        run: |
+          # 在已构建的集成镜像内跑全量单测,与主 CI 的 test job 同路径,作回归兜底。
+          docker compose -f docker-compose.test.yml build
+          docker compose -f docker-compose.test.yml run --rm test
+
+      # 真实素材覆盖(人工/自托管):
+      #   在装好素材的机器上对**已部署/在跑**的栈手动执行——
+      #     TEST_VIDEO_FILE=/path/to.mp4 bash tests/integration/run_e2e_cpu.sh   # 下载+CPU 链
+      #     KIMI_API_KEY=... TEST_VIDEO_FILE=/path/to.mp4 \
+      #       bash tests/integration/run_e2e_ai.sh                               # 全链路+真实 AI 笔记
+      #   GitHub-hosted runner 不跑这两个(需真实视频/PDF/网络/API key)。
+
+      - name: Tear down
+        if: always() && github.event.inputs.keep_stack != 'true'
+        run: |
+          $COMPOSE down -v || true
+          docker compose -f docker-compose.test.yml down -v || true

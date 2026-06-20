@@ -275,20 +275,74 @@ docker compose up -d
 # Redis 数据持久化，不丢任务状态
 ```
 
-## 7. 备份
+## 7. 备份 / 恢复 / 磁盘回收
+
+生产 compose 用**命名卷**（`*_mnemo-data`、`*_redis-data`，前缀=compose 项目名，默认目录名 `ai-knowledge-base`），数据不在宿主可见目录里。下面三个脚本（`scripts/`）通过一次性容器进卷操作，**无需在宿主装任何工具**，全部 `-h/--help` 可查、默认安全。
+
+> 若把 `MNEMO_DATA_DIR` 设成了绝对路径（bind-mount，如 NAS 上 `/volume1/DATA/Mnemo`），三个脚本会自动直接操作该目录，无需改参数。
+
+### 7.1 备份 — `scripts/backup.sh`
+
+把 **SQLite 库（`/data/db/analyzer.db`）** + **Redis 状态（dump.rdb / appendonly）** 打包成带时间戳的 `tar.gz`。
 
 ```bash
-# 关键数据
-tar czf backup-$(date +%Y%m%d).tar.gz \
-  data/jobs/ \
-  data/db/ \
-  data/cookies/ \
-  data/prompts/ \
-  .env
-
-# 恢复
-tar xzf backup-20260516.tar.gz
-docker compose up -d
+scripts/backup.sh                 # 输出到 ./backups/mnemo-backup-<ts>.tar.gz
+BACKUP_DIR=/mnt/nas scripts/backup.sh    # 自定义输出目录
 ```
 
-视频文件体积大，可以只备份 `data/db/` + `data/jobs/*/output/`（笔记产物），视频丢了可以重新下载。
+- **无需停服**：只读挂载命名卷拷数据；Redis 先尽力 `redis-cli SAVE` 落盘（容器不在则告警跳过）。
+- **幂等**：每次产独立时间戳文件，不覆盖、不动源卷；可放 cron。
+- 视频等大源媒体**不在**备份内（体积大、可重下）；要它们用 `gc-jobs.sh` 反向管理或单独拷 jobs 卷。
+
+cron 建议（每天 03:00 备份，保留最近 14 份）：
+```cron
+0 3 * * * cd /opt/mnemo && BACKUP_DIR=/mnt/nas/mnemo scripts/backup.sh \
+  && ls -1t /mnt/nas/mnemo/mnemo-backup-*.tar.gz | tail -n +15 | xargs -r rm -f
+```
+
+### 7.2 恢复 — `scripts/restore.sh`
+
+从 `backup.sh` 产出的 tar.gz 把 DB + Redis 写回卷。**危险操作，会覆盖现有数据**，默认要求确认。
+
+```bash
+scripts/restore.sh ./backups/mnemo-backup-20260620-101500.tar.gz        # 交互确认(输入 YES)
+scripts/restore.sh <文件> --yes                                          # 无人值守跳过确认
+```
+
+- 恢复前先校验 tar 含 `db/` 或 `redis/` 成员，不合格直接退出、绝不动卷。
+- 默认会尝试 `docker compose stop api scheduler worker-*`（失败不致命，`--no-stop` 可关）；恢复后**由你手动** `docker compose up -d`（脚本不自动起，避免半途读写）。
+
+### 7.3 磁盘回收 — `scripts/gc-jobs.sh`
+
+**审计缺口修复**：单机 `LocalStorage.cleanup` 是 no-op，源媒体 `/data/jobs/<job_id>/input/source.*` 永久堆积、磁盘只增不减。本脚本按年龄回收，**默认只删大源媒体、保留笔记/图等产物**。
+
+```bash
+scripts/gc-jobs.sh                            # 干跑:列出 30 天前的源媒体(不删)
+scripts/gc-jobs.sh --older-than 14 --apply    # 真删 14 天前的源媒体
+scripts/gc-jobs.sh --what all --apply         # 删整个 job 目录(含笔记,谨慎)
+scripts/gc-jobs.sh --min-free-gb 50 --apply   # 仅当 /data 剩余 < 50GiB 才回收
+```
+
+- **默认 `--dry-run`**：只算、只列、不删；必须显式 `--apply` 才落地。
+- `--what source`（默认）只删 `jobs/*/input/source.*`；`--what all` 删整 job 目录。
+- **永不碰 DB 或非 job 数据**，只在 `/data/jobs/<job_id>/` 下动手。
+- 打印回收项数 + 字节数（GiB/MiB）。
+
+cron 建议（每周日 04:00 回收 30 天前源媒体、磁盘紧张才动手）：
+```cron
+0 4 * * 0 cd /opt/mnemo && scripts/gc-jobs.sh --older-than 30 --min-free-gb 30 --apply
+```
+
+### 7.4 配套建议：日志轮转 + 健康检查（compose 侧）
+
+脚本只管数据安全，**容器层面的两项加固建议在 `docker-compose.yml` 各服务上补**（由 compose 维护方添加，本节仅作推荐说明）：
+
+- **`logging:` json-file 轮转**：默认 docker json 日志不轮转，长跑会撑爆磁盘。建议每服务加
+  ```yaml
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+  ```
+- **`healthcheck:`**：给 `redis`（`redis-cli ping`）、`api`（探 `/openapi.json`）加健康检查，配合 `restart: unless-stopped` 让异常容器被及时重启、`depends_on: condition: service_healthy` 保证启动顺序。
+
+> 这两项不影响数据，纯运维健壮性；与上面三脚本互补。

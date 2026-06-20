@@ -7,9 +7,10 @@
 ```
 Push/PR to main   → Unit Test（容器内全部单测）
 Merge to main     → + Build + Push Image (ghcr.io) → Watchtower 自动拉取重建（CD）
+手动触发           → E2E 集成回归（workflow_dispatch，起整栈接线探针 + 单测兜底）
 ```
 
-测试只有容器内单测一道（`test` job），无独立的 PR 集成测试 job。
+每次 PR/push 只跑容器内单测（`test` job）。集成回归是**手动门**（`e2e.yml`，见 §4），不挂在每个 PR 上以免给主 CI 加负载。
 
 ## 2. 镜像发布
 
@@ -51,6 +52,19 @@ sudo ./svc.sh install && sudo ./svc.sh start
 - `build-push`：仅 main、测试通过后，用 buildx 构建 **amd64**（所有目标机均为 x86，不构 arm64）推 ghcr.io；
   矩阵两个镜像 `mnemo`（api/scheduler/worker 共用）与 `mnemo-frontend`。
 - `step-images.yml`：步骤执行镜像（`mnemo-step-base` / `mnemo-step-heavy` / `mnemo-step-gpu`）独立于主 CI，`workflow_dispatch` 手动触发，同样只构 amd64。
+- `e2e.yml`（**集成回归门**，`workflow_dispatch` 手动触发，不挂 PR）：补审计缺口 #7 —— 主 CI 只跑单测，缺 pipeline DAG ↔ worker ↔ scheduler ↔ step 的接线回归。
+
+  做的事（用 `docker-compose.integration.yml`，`DRY_RUN=1` 起栈）：
+  1. 起 redis/api/scheduler/worker-cpu/worker-ai；
+  2. 探活 API（`/openapi.json`，api 无专用 health 端点），确认 api↔redis 连通；
+  3. 校验 scheduler/worker 容器存活且未反复重启（catch 导入/接线错误）；
+  4. 跑容器内全量单测（与 `test` job 同路径）兜底回归。
+
+  **仍是人工/自托管的覆盖**：`tests/integration/run_e2e_cpu.sh`、`run_e2e_ai.sh` 需要**真实素材**（真实 mp4 / PDF、真连 B站/arXiv、AI 需真 API key）。`01_download` 步对 URL/upload 源不被 `DRY_RUN` 绕过，GitHub-hosted runner 无网络素材跑不通，故全链路「投真实视频/PDF 跑通 CPU+AI」只能在装好素材的机器上对**已部署栈**手动执行：
+  ```bash
+  TEST_VIDEO_FILE=/path/to.mp4 bash tests/integration/run_e2e_cpu.sh           # 下载+CPU 链
+  KIMI_API_KEY=... TEST_VIDEO_FILE=/path/to.mp4 bash tests/integration/run_e2e_ai.sh   # 全链路+真实 AI 笔记
+  ```
 
 部署为自动 CD：生产 `docker-compose.yml` 跑 Watchtower（`containrrr/watchtower`），每 120s 查 ghcr，只更新带 `com.centurylinklabs.watchtower.enable=true` 标签的容器，自动 pull + 重建 + 清理旧镜像。无 SSH 自动部署脚本。
 
@@ -108,4 +122,6 @@ CONFIG_DIR=/data/configs        # 配置目录
 - [x] docker-compose.yml 改用 `image: ghcr.io/gwzlchn/mnemo:latest`（拉远程镜像部署）
 - [x] docker-compose.yml 接入 Watchtower 自动 CD
 - [x] 创建 `.env.example`
+- [x] 创建 `.github/workflows/e2e.yml`（手动集成回归门：起栈接线探针 + 单测兜底）
 - [ ] 首次 push 后到仓库 Packages 确认镜像、Watchtower 自动更新验证
+- [ ] 真实素材全链路 E2E 自动化（需自托管 runner + 固定测试素材，当前人工执行）
