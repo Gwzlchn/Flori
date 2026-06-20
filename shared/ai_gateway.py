@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import time
@@ -22,7 +23,7 @@ _log = structlog.get_logger(component="ai_gateway")
 # ── 成本表（USD per 1M tokens）──
 
 PRICING: dict[tuple[str, str], dict[str, float]] = {
-    ("anthropic", "claude-opus-4-6"): {"input": 15.0, "output": 75.0},
+    ("anthropic", "claude-opus-4-8"): {"input": 15.0, "output": 75.0},
     ("anthropic", "claude-sonnet-4-6"): {"input": 3.0, "output": 15.0},
     ("anthropic", "claude-haiku-4-5"): {"input": 0.80, "output": 4.0},
     ("openai", "gpt-4o"): {"input": 2.5, "output": 10.0},
@@ -98,7 +99,11 @@ class AnthropicProvider:
         duration = time.time() - start
         input_tokens = response.usage.input_tokens
         output_tokens = response.usage.output_tokens
-        content = response.content[0].text if response.content else ""
+        # 合并所有 text block：多 block / 思考型响应只取 [0] 会丢正文(无 type 视为 text)。
+        content = "".join(
+            b.text for b in (response.content or [])
+            if getattr(b, "type", "text") == "text"
+        )
 
         return LLMResponse(
             content=content,
@@ -329,11 +334,11 @@ class AIGateway:
 
         if has_images and "text_fallback" in ai_config:
             cfg = ai_config["text_fallback"]
-            request.model = cfg["model"]
-            request.images = []
+            # 用副本调用,别原地改调用方的 request(去图/换模型会污染后续重试/复用)。
+            fb_request = dataclasses.replace(request, model=cfg["model"], images=[])
             try:
                 provider = self._get_provider(cfg["provider"])
-                response = await provider.complete(request)
+                response = await provider.complete(fb_request)
                 self._call_index += 1
                 return response
             except (AIProviderError, AIRateLimitError) as e:

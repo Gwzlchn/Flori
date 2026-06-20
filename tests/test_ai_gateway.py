@@ -178,7 +178,9 @@ class TestAIGateway:
         )
         resp = await gw.call("10_smart", req)
         assert resp.content == "text_ok"
+        # text_fallback 用副本去图调用,原始 request 的 images 不能被清空(防复用/重试丢图)。
         assert captured_request["images"] == []
+        assert req.images == [Path("/fake/img.jpg")]
 
     @pytest.mark.asyncio
     async def test_all_fail_raises(self, gateway_config, monkeypatch):
@@ -282,7 +284,7 @@ class TestAnthropicProvider:
         mock_usage.cache_read_input_tokens = 0
 
         mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="Hello world")]
+        mock_response.content = [MagicMock(type="text", text="Hello world")]
         mock_response.usage = mock_usage
 
         mock_client = MagicMock()
@@ -298,6 +300,36 @@ class TestAnthropicProvider:
         assert resp.provider == "anthropic"
         assert resp.input_tokens == 100
         assert resp.output_tokens == 50
+
+    @pytest.mark.asyncio
+    async def test_joins_multiple_text_blocks(self):
+        """多 text block(思考型/分段响应)要拼接,不能只取 content[0]。"""
+        provider = AnthropicProvider(api_key="sk-test")
+
+        mock_usage = MagicMock()
+        mock_usage.input_tokens = 10
+        mock_usage.output_tokens = 20
+        mock_usage.cache_read_input_tokens = 0
+
+        # 两个 text block + 一个非 text block(应被跳过)。
+        block1 = MagicMock(type="text", text="Hello ")
+        block2 = MagicMock(type="text", text="world")
+        block_other = MagicMock(type="thinking", text="(should be skipped)")
+
+        mock_response = MagicMock()
+        mock_response.content = [block1, block_other, block2]
+        mock_response.usage = mock_usage
+
+        mock_client = MagicMock()
+        mock_client.messages.create = MagicMock(return_value=mock_response)
+        provider._client = mock_client
+
+        req = LLMRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model="claude-sonnet-4-6",
+        )
+        resp = await provider.complete(req)
+        assert resp.content == "Hello world"
 
     @pytest.mark.asyncio
     async def test_rate_limit_raises(self):
