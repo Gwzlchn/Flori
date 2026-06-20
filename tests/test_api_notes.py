@@ -101,6 +101,44 @@ class TestNotes:
         assert resp.status_code == 400
 
     @pytest.mark.asyncio
+    async def test_note_versions_lists_with_overall(self, client, test_config):
+        job_dir = _create_job_files(test_config.jobs_dir, "j_test")
+        # 与该版笔记 1:1 配对的版本化评审,使 note-versions 能读到 overall
+        paired = "output/versions/review_claude-cli_claude-opus-4-8_20260101-000000.json"
+        (job_dir / paired).write_text('{"overall": 4.5}')
+        resp = await client.get("/api/jobs/j_test/note-versions")
+        assert resp.status_code == 200
+        versions = resp.json()["versions"]
+        assert len(versions) == 1
+        v = versions[0]
+        assert v["provider"] == "claude-cli" and v["version"] == "20260101-000000"
+        assert v["review_file"] == paired and v["overall"] == 4.5
+
+    @pytest.mark.asyncio
+    async def test_smart_version_select_valid(self, client, test_config):
+        _create_job_files(test_config.jobs_dir, "j_test")
+        f = "output/versions/notes_smart_claude-cli_claude-opus-4-8_20260101-000000.md"
+        resp = await client.get(f"/api/jobs/j_test/notes/smart?file={f}")
+        assert resp.status_code == 200 and "Smart Notes" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_smart_version_select_rejects_bad_file(self, client, test_config):
+        _create_job_files(test_config.jobs_dir, "j_test")
+        # 穿越
+        r1 = await client.get("/api/jobs/j_test/notes/smart?file=output/versions/../../x.md")
+        assert r1.status_code == 400
+        # 不在 notes_smart 版本前缀
+        r2 = await client.get("/api/jobs/j_test/notes/smart?file=output/notes_mechanical.md")
+        assert r2.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_review_version_select_rejects_bad_file(self, client, test_config):
+        _create_job_files(test_config.jobs_dir, "j_test")
+        # review.json 不在 versions/review_ 版本前缀 → 400
+        r = await client.get("/api/jobs/j_test/review?file=output/review.json")
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
     async def test_not_found(self, client):
         resp = await client.get("/api/jobs/nonexistent/notes/smart")
         assert resp.status_code == 404
