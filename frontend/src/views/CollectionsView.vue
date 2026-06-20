@@ -109,7 +109,7 @@ onMounted(load)
 </script>
 
 <template>
-  <section>
+  <section class="page">
     <!-- 头部 -->
     <div style="display:flex;align-items:flex-end;gap:12px;margin-bottom:20px">
       <div>

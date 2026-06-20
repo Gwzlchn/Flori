@@ -113,7 +113,7 @@ onBeforeUnmount(() => global.setCrumbs(null))
 </script>
 
 <template>
-  <section>
+  <section class="page">
     <!-- 404 -->
     <div v-if="notFound" class="card pad" style="text-align:center;padding:40px 18px">
       <p class="muted" style="margin-bottom:14px">集合不存在或已删除</p>

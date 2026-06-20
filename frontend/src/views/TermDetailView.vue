@@ -82,7 +82,7 @@ watch(() => [route.params.domain, route.params.term], load)
 </script>
 
 <template>
-  <section>
+  <section class="page">
     <!-- 404 -->
     <div v-if="notFound" class="card pad" style="text-align:center;padding:40px 18px">
       <p class="muted" style="margin-bottom:14px">概念不存在或已删除</p>

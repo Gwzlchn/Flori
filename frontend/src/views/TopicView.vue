@@ -74,7 +74,7 @@ watch(() => [route.params.domain, route.params.topic], load)
 </script>
 
 <template>
-  <section>
+  <section class="page">
     <!-- 头部：主题名 + 面包屑 + 查看概念 -->
     <div style="display:flex;align-items:center;gap:13px;margin-bottom:6px">
       <div style="min-width:0">
