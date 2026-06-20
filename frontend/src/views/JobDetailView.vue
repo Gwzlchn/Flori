@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch, inject } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, inject } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { useJobStore } from '../stores/jobs'
+import { useGlobalStore } from '../stores/global'
 import { useJobWs } from '../composables/useJobWs'
 import MarkdownViewer from '../components/notes/MarkdownViewer.vue'
 import StepWorkbench from '../components/job/StepWorkbench.vue'
@@ -23,6 +24,7 @@ const route = useRoute()
 const router = useRouter()
 const api = useApi()
 const jobStore = useJobStore()
+const global = useGlobalStore()
 const showToast = inject<(m: string, t?: 'success' | 'error' | 'info') => void>('showToast', () => {})
 
 const jobId = computed(() => String(route.params.id))
@@ -91,6 +93,12 @@ async function fetchDetail() {
     const d = await jobStore.fetchDetail(jobId.value)
     job.value = d
     jobStatus.value = d.status
+    // 面包屑用真实内容:知识库 / 领域 / 标题(替代通用「所有来源 / 内容详情」)。
+    global.setCrumbs([
+      { t: '知识库', to: '/' },
+      ...(d.domain ? [{ t: d.domain, to: `/kb/${encodeURIComponent(d.domain)}` }] : []),
+      { t: d.title || jobId.value },
+    ])
     setInitialSteps(d.steps)
     // 完成态默认落笔记，否则落流水线。
     tab.value = d.status === 'done' ? 'notes' : 'proc'
@@ -103,6 +111,7 @@ async function fetchDetail() {
 
 onMounted(fetchDetail)
 watch(jobId, fetchDetail)
+onBeforeUnmount(() => global.setCrumbs(null))   // 离开详情页清掉面包屑覆盖,避免残留到别的页
 
 // ════════════════════ 笔记 tab ════════════════════
 const domain = computed(() => job.value?.domain || '')
@@ -520,7 +529,9 @@ watch(job, (j) => {
           <div class="state"><FileText class="big" /><div class="t">{{ noteError }}</div></div>
         </div>
         <div v-else class="notes-wrap">
-          <div class="card pad prose">
+          <!-- max-w-none:解除 @tailwindcss/typography 给 .prose 的 65ch 上限,
+               否则笔记正文被卡到 ~586px、在 762px 列里右侧留大片空白(笔记大小不对)。 -->
+          <div class="card pad prose max-w-none">
             <MarkdownViewer
               :content="noteContent" :job-id="jobId" :terms="terms" :domain="domain"
               @headings="headings = $event"

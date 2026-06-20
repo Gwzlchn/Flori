@@ -3,6 +3,7 @@ import { ref, computed, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, Search, Menu, Play, FileText, Newspaper, Headphones } from 'lucide-vue-next'
 import { useApi } from '../../composables/useApi'
+import { useGlobalStore } from '../../stores/global'
 import type { SearchResponse, SearchResultItem } from '../../types'
 
 // 移动端汉堡：开合左侧抽屉。桌面端隐藏（CSS 媒体查询控制）。
@@ -11,12 +12,15 @@ defineEmits<{ (e: 'toggle-mobile'): void }>()
 const route = useRoute()
 const router = useRouter()
 const api = useApi()
+const global = useGlobalStore()
 const q = ref('')
 
 interface Seg { t: string; to?: string }
 
-// 面包屑由路由派生(Phase 1 用路由名;后续可接视图里的真实标题)
+// 面包屑:详情页加载到真实数据后可经 global.crumbOverride 覆盖(如内容标题/领域);
+// 否则按路由名派生通用文案。
 const crumbs = computed<Seg[]>(() => {
+  if (global.crumbOverride?.length) return global.crumbOverride
   const p = route.params as any
   const root: Seg = { t: '知识库', to: '/' }
   switch (route.name) {
