@@ -81,6 +81,25 @@ GET /api/health
 - `degraded`：某类型 Worker 为 0，但其他正常
 - `unhealthy`：Redis 不通 或 磁盘 <5GB
 
+`/api/health` 也被 compose 的 api healthcheck 与 watchtower 用作存活探针（探的是 `/openapi.json`，始终免鉴权）。
+
+### Prometheus 指标 — `GET /api/metrics`
+
+免鉴权（同 `/health`），返回 Prometheus 文本曝露格式，供外部 Prometheus 抓取（个人工具不内置时序库）：
+
+```
+mnemo_up 1
+mnemo_redis_up 1
+mnemo_db_up 1
+mnemo_disk_free_gb 600.0
+mnemo_workers_total 4
+mnemo_workers_online 4
+mnemo_jobs{status="done"} 60
+mnemo_jobs{status="processing"} 2
+```
+
+只暴露计数/容量，无敏感信息。阈值告警在 Prometheus/Alertmanager 侧配置（如 `mnemo_disk_free_gb < 10`）。
+
 ## 4. 卡住检测（两层）
 
 ### 第一层：Worker 消失 → 自动回收（调度器 orphan_scan）
@@ -114,12 +133,17 @@ async def check_stuck():
             if age > 60:
                 # Worker 心跳进度 10s 一次，60s 没更新 = Worker 进程异常
                 logger.warning("step_stuck", job_id=job_id, step=step, age_sec=age)
+                await asyncio.to_thread(notify, "step_stuck", ...)  # 主动告警(见下)
                 await redis.publish("step_failed", json.dumps({
                     "job_id": job_id, "step": step,
                     "status": "failed",
                     "error": f"progress stale ({age:.0f}s, worker process may be stuck)"
                 }))
 ```
+
+### 主动告警 — `ALERT_WEBHOOK_URL`
+
+`shared/notify.notify(event, message, **fields)` 是轻量告警钩子:设了 `ALERT_WEBHOOK_URL`（Slack/Discord/通用 webhook，payload 同时带 `text`/`content` 字段）就把关键事件 POST 出去，否则只 `structlog`。best-effort（超时 5s、吞所有异常），绝不反过来拖垮主流程；异步上下文用 `await asyncio.to_thread(notify, ...)`。当前接入点：调度器第二层卡死检测（`step_stuck`）。磁盘/容量类阈值告警走 Prometheus 抓 `/api/metrics`（§3）。
 
 ### 两层检测对照
 

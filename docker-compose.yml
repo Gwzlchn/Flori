@@ -22,7 +22,7 @@ services:
 
   api:
     container_name: mnemo-api
-    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/mnemo:latest
+    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/mnemo:${IMAGE_TAG:-latest}
     restart: unless-stopped
     command: python -m api.main
     ports:
@@ -62,7 +62,7 @@ services:
 
   scheduler:
     container_name: mnemo-scheduler
-    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/mnemo:latest
+    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/mnemo:${IMAGE_TAG:-latest}
     restart: unless-stopped
     command: python -m scheduler.main
     logging: *default-logging
@@ -77,6 +77,8 @@ services:
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-}
       - MINIO_BUCKET=${MINIO_BUCKET:-mnemo}
       - WORK_DIR=${WORK_DIR:-/tmp/mnemo-work}
+      # 设了就把卡死等关键事件 POST 到 webhook(Slack/Discord/通用);空=只记日志。
+      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-}
     security_opt:
       - no-new-privileges:true
     labels:
@@ -86,7 +88,7 @@ services:
 
   worker-cpu:
     container_name: mnemo-worker-cpu
-    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/mnemo:latest
+    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/mnemo:${IMAGE_TAG:-latest}
     restart: unless-stopped
     command: python -m worker.main --type cpu
     logging: *default-logging
@@ -116,7 +118,7 @@ services:
 
   worker-ai:
     container_name: mnemo-worker-ai
-    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/mnemo:latest
+    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/mnemo:${IMAGE_TAG:-latest}
     restart: unless-stopped
     command: python -m worker.main --type ai
     logging: *default-logging
@@ -163,7 +165,7 @@ services:
   # 单机全栈时启用：`docker compose --profile allinone up -d`。
   frontend:
     container_name: mnemo-frontend
-    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/mnemo-frontend:latest
+    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/mnemo-frontend:${IMAGE_TAG:-latest}
     restart: unless-stopped
     profiles: ["allinone"]
     ports:

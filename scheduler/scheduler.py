@@ -17,6 +17,7 @@ from shared.config import AppConfig, load_config
 from shared.db import Database
 from shared.errors import RETRY_POLICY, get_retry_delay
 from shared.models import Job, JobStatus, Step, StepStatus
+from shared.notify import notify
 from shared.redis_client import RedisClient
 from shared.storage import StorageBackend
 
@@ -797,6 +798,12 @@ class Scheduler:
                 if age > 60:
                     logger.warning(
                         "step_stuck", job_id=job_id, step=step, age_sec=round(age),
+                    )
+                    # 主动告警(设了 ALERT_WEBHOOK_URL 才外发;best-effort,不阻塞调度循环)。
+                    await asyncio.to_thread(
+                        notify, "step_stuck",
+                        f"job {job_id} 的 {step} 进度停滞 {age:.0f}s,worker 可能卡死,已触发重试",
+                        job_id=job_id, step=step, age_sec=round(age),
                     )
                     await self.redis.publish("step_failed", {
                         "job_id": job_id, "step": step, "status": "failed",

@@ -7,6 +7,7 @@ import shutil
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import PlainTextResponse
 
 logger = structlog.get_logger(component="admin")
 
@@ -48,6 +49,48 @@ async def health(request: Request, db: Database = Depends(get_db), redis: RedisC
 
     status = "healthy" if checks["redis"] == "ok" and checks["db"] == "ok" else "unhealthy"
     return {"status": status, "checks": checks}
+
+
+@router.get("/metrics", response_class=PlainTextResponse)
+async def metrics(request: Request, db: Database = Depends(get_db), redis: RedisClient = Depends(get_redis)):
+    """Prometheus 文本指标(免鉴权,同 /health;只暴露计数/容量,无敏感信息)。
+    个人工具不内置时序库,此端点供外部 Prometheus 抓取——补齐审计 #26『无 /metrics 端点』。"""
+    redis_up = 1
+    try:
+        await redis.ping()
+    except Exception:
+        redis_up = 0
+    db_up = 1
+    try:
+        await asyncio.to_thread(db.list_jobs, limit=1)
+    except Exception:
+        db_up = 0
+
+    config: AppConfig = request.app.state.config
+    data_path = str(config.data_dir) if hasattr(config, "data_dir") else "/data"
+    try:
+        disk_free = round(shutil.disk_usage(data_path).free / (1024**3), 2)
+    except (FileNotFoundError, OSError):
+        disk_free = -1
+
+    workers = await asyncio.to_thread(db.list_workers)
+    online = sum(1 for w in workers if w.status.startswith("online"))
+    lines = [
+        "# TYPE mnemo_up gauge", "mnemo_up 1",
+        "# TYPE mnemo_redis_up gauge", f"mnemo_redis_up {redis_up}",
+        "# TYPE mnemo_db_up gauge", f"mnemo_db_up {db_up}",
+        "# TYPE mnemo_disk_free_gb gauge", f"mnemo_disk_free_gb {disk_free}",
+        "# TYPE mnemo_workers_total gauge", f"mnemo_workers_total {len(workers)}",
+        "# TYPE mnemo_workers_online gauge", f"mnemo_workers_online {online}",
+    ]
+    try:
+        by_status = await asyncio.to_thread(db.count_jobs_by_status)
+        lines.append("# TYPE mnemo_jobs gauge")
+        for st, n in sorted(by_status.items()):
+            lines.append(f'mnemo_jobs{{status="{st}"}} {n}')
+    except Exception:
+        pass
+    return "\n".join(lines) + "\n"
 
 
 @router.get("/status", dependencies=[Depends(verify_token)])
