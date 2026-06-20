@@ -46,6 +46,7 @@ class Job:
     current_step: str | None = None  # 派生字段（不存 DB），API 返回时动态填充
     progress_pct: int = 0
     meta: dict = field(default_factory=dict)
+    published_at: datetime | None = None  # 源内容在平台的发布/更新时间(01_download 写入 metadata.json)
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
     error: str | None = None

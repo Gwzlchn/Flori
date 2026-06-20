@@ -926,7 +926,7 @@ class TestConceptTimeline:
     seed 约定:job 用显式 created_at,glossary 的 occurrence 经 job_id 映射到该 created_at;
     concept_timeline 仅取 domain 内 jobs 的 created_at(域外 job_id 不贡献计数)。"""
 
-    def _seed_job(self, db, jid, created_iso, domain="ml"):
+    def _seed_job(self, db, jid, created_iso, domain="ml", published_iso=None):
         from datetime import datetime
 
         db.create_job(
@@ -935,6 +935,7 @@ class TestConceptTimeline:
                 content_type="video",
                 pipeline="video",
                 domain=domain,
+                published_at=datetime.fromisoformat(published_iso) if published_iso else None,
                 created_at=datetime.fromisoformat(created_iso),
             )
         )
@@ -1015,6 +1016,31 @@ class TestConceptTimeline:
         # 只有 ml 内的 jIn 被计入。
         assert tl["totals"] == {"2026-01": 1}
         assert tl["concepts"][0]["total"] == 1
+
+    def test_buckets_by_published_at_not_created_at(self, db):
+        # 有 published_at 时按"源内容发布时间"分桶,而非入库时间(created_at)。
+        # 两个 job 同月入库(2026-06),但源发布跨两月(2026-01 / 2026-02)。
+        self._seed_job(db, "jA", "2026-06-20T08:00:00+00:00", published_iso="2026-01-10T08:00:00+00:00")
+        self._seed_job(db, "jB", "2026-06-20T09:00:00+00:00", published_iso="2026-02-15T08:00:00+00:00")
+        db.add_glossary_suggestion("ml", "梯度下降", "jA")
+        db.add_glossary_suggestion("ml", "梯度下降", "jB")
+        tl = db.concept_timeline("ml", granularity="month")
+        # 按发布时间 → 一月一个、二月一个;若错按入库时间会是 {"2026-06": 2}。
+        assert tl["buckets"] == ["2026-01", "2026-02"]
+        assert tl["totals"] == {"2026-01": 1, "2026-02": 1}
+        assert tl["concepts"][0]["buckets"] == {"2026-01": 1, "2026-02": 1}
+
+    def test_falls_back_to_created_at_when_published_at_null(self, db):
+        # published_at 为空的 job 回退到 created_at 分桶,不被丢弃。
+        # jPub 有发布时间(2026-01),jNull 无 → 用入库时间(2026-03)。
+        self._seed_job(db, "jPub", "2026-06-20T08:00:00+00:00", published_iso="2026-01-10T08:00:00+00:00")
+        self._seed_job(db, "jNull", "2026-03-05T08:00:00+00:00")  # published_at 留空
+        db.add_glossary_suggestion("ml", "注意力", "jPub")
+        db.add_glossary_suggestion("ml", "注意力", "jNull")
+        tl = db.concept_timeline("ml", granularity="month")
+        assert tl["totals"] == {"2026-01": 1, "2026-03": 1}
+        assert tl["concepts"][0]["buckets"] == {"2026-01": 1, "2026-03": 1}
+        assert tl["concepts"][0]["total"] == 2
 
 
 class TestJobFacets:

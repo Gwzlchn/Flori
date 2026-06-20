@@ -696,6 +696,7 @@ class Scheduler:
     # ── Job 状态 ──
 
     async def mark_job_done(self, job_id: str) -> None:
+        await self._sync_published_at(job_id)
         await asyncio.to_thread(
             self.db.update_job, job_id,
             status=JobStatus.DONE, progress_pct=100,
@@ -705,6 +706,30 @@ class Scheduler:
         })
         await self.redis.remove_active_job(job_id)
         logger.info("job_done", job_id=job_id)
+
+    async def _sync_published_at(self, job_id: str) -> None:
+        """把源内容发布时间(01_download 写入 input/metadata.json 的 published_at)同步进 DB,
+        供概念时间线按源内容发布时间(而非入库时间)分桶。best-effort——读不到/解析失败/无该字段
+        都只记日志,绝不阻塞 job 完成。
+
+        经 storage 读 metadata.json:分布式部署产物在对象存储(MinIO)、不在调度器本地盘,
+        与 _index_job_notes/_collect_glossary 同一路径。未注入 storage(老式单机)则跳过——
+        留空时概念时间线对该 job 回退到 created_at,不丢计数。"""
+        if self.storage is None:
+            return
+        try:
+            raw = await self.storage.read_file(job_id, "input/metadata.json")
+            if not raw:
+                return
+            published_at = json.loads(raw.decode("utf-8", errors="replace")).get("published_at")
+            if not published_at:
+                return
+            await asyncio.to_thread(
+                self.db.update_job, job_id, published_at=published_at,
+            )
+            logger.info("published_at_synced", job_id=job_id, published_at=published_at)
+        except Exception:
+            logger.warning("published_at_sync_failed", job_id=job_id)
 
     async def mark_job_failed(self, job_id: str, error: str) -> None:
         self._cancel_delayed_tasks(job_id)

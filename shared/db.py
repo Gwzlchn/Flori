@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     status TEXT NOT NULL DEFAULT 'pending',
     progress_pct INTEGER DEFAULT 0,
     meta TEXT DEFAULT '{}',
+    published_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     error TEXT
@@ -167,6 +168,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts5 USING fts5(
 _JOB_UPDATABLE = {
     "status", "title", "progress_pct", "error", "updated_at",
     "meta", "style_tags", "domain", "source", "collection_id",
+    "published_at",
 }
 _STEP_UPDATABLE = {
     "status", "input_hash", "worker_id", "started_at", "finished_at",
@@ -230,7 +232,11 @@ class Database:
     # 各表的期望列(列名 -> 建列 SQL 片段)。旧库缺列时按需 ALTER ADD,
     # 避免"代码加了新列、旧库没有 → 查询崩"。新增列只在此登记即可平滑升级。
     _EXPECTED_COLUMNS: dict[str, dict[str, str]] = {
-        "jobs": {"collection_id": "collection_id TEXT", "source": "source TEXT"},
+        "jobs": {
+            "collection_id": "collection_id TEXT",
+            "source": "source TEXT",
+            "published_at": "published_at TEXT",
+        },
         "job_steps": {"retries": "retries INTEGER DEFAULT 0"},
         "workers": {
             "reject_tags": "reject_tags TEXT NOT NULL DEFAULT '[]'",
@@ -281,8 +287,8 @@ class Database:
                 """INSERT INTO jobs
                    (id, content_type, pipeline, collection_id, url, title,
                     domain, source, style_tags, status, progress_pct, meta,
-                    created_at, updated_at, error)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    published_at, created_at, updated_at, error)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     job.id,
                     job.content_type,
@@ -296,6 +302,7 @@ class Database:
                     job.status.value if isinstance(job.status, JobStatus) else job.status,
                     job.progress_pct,
                     json.dumps(job.meta, ensure_ascii=False),
+                    job.published_at.isoformat() if job.published_at else None,
                     job.created_at.isoformat(),
                     job.updated_at.isoformat(),
                     job.error,
@@ -397,6 +404,8 @@ class Database:
             fields["meta"] = json.dumps(fields["meta"], ensure_ascii=False)
         if "status" in fields and isinstance(fields["status"], JobStatus):
             fields["status"] = fields["status"].value
+        if "published_at" in fields and isinstance(fields["published_at"], datetime):
+            fields["published_at"] = fields["published_at"].isoformat()
 
         set_clause = ", ".join(f"{k}=?" for k in fields)
         values = list(fields.values()) + [job_id]
@@ -996,13 +1005,17 @@ class Database:
         return out[:limit]
 
     def concept_timeline(self, domain: str, granularity: str = "month") -> dict:
-        """概念时间线:把该 domain 各概念的 occurrences 经 job_id→job.created_at 映射,按粒度分桶计数。
+        """概念时间线:把该 domain 各概念的 occurrences 经 job_id→源内容发布时间映射,按粒度分桶计数。
+        分桶时间用 COALESCE(published_at, created_at):优先源内容在平台的发布/更新时间(「这个概念
+        在世界上何时出现」),无已知发布时间的 job 回退入库时间(created_at),不丢计数。
         granularity: day(YYYY-MM-DD) / week(YYYY-Www) / month(YYYY-MM)。无 glossary/job 时返回空。"""
         from collections import defaultdict
         job_dates = {
-            r["id"]: r["created_at"]
+            r["id"]: r["bucket_at"]
             for r in self._conn.execute(
-                "SELECT id, created_at FROM jobs WHERE domain=?", (domain,)
+                "SELECT id, COALESCE(published_at, created_at) AS bucket_at "
+                "FROM jobs WHERE domain=?",
+                (domain,),
             )
         }
 
@@ -1363,6 +1376,7 @@ class Database:
             status=JobStatus(row["status"]),
             progress_pct=row["progress_pct"],
             meta=json.loads(row["meta"]),
+            published_at=_parse_dt(row["published_at"]),
             created_at=_parse_dt(row["created_at"]),
             updated_at=_parse_dt(row["updated_at"]),
             error=row["error"],

@@ -352,6 +352,7 @@ CREATE TABLE jobs (
     status TEXT NOT NULL DEFAULT 'pending',
     progress_pct INTEGER DEFAULT 0,
     meta TEXT DEFAULT '{}',
+    published_at TEXT,                     -- 源内容在平台的发布时间(B站 pubdate 等);概念时间线按它分桶
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL, error TEXT
 );
 CREATE INDEX idx_jobs_status ON jobs(status);
