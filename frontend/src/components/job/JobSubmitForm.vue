@@ -5,6 +5,10 @@ import { useJobStore } from '../../stores/jobs'
 import { useGlobalStore } from '../../stores/global'
 import { Send, Upload, X } from 'lucide-vue-next'
 
+// bare:不渲染外层卡片/标题(嵌入弹窗时用)。done:投递成功后通知外层(如关闭弹窗)。
+defineProps<{ bare?: boolean }>()
+const emit = defineEmits<{ done: [] }>()
+
 const router = useRouter()
 const jobStore = useJobStore()
 const globalStore = useGlobalStore()
@@ -60,7 +64,8 @@ async function submit() {
       })
       jobId = res.job_id
     }
-    router.push(`/jobs/${jobId}`)
+    emit('done')
+    router.push(`/content/${jobId}`)
   } catch (e: any) {
     error.value = e.message || '投递失败'
   } finally {
@@ -70,8 +75,8 @@ async function submit() {
 </script>
 
 <template>
-  <div data-submit-form class="bg-white rounded-xl border border-gray-200 p-4">
-    <h3 class="text-sm font-semibold text-gray-700 mb-3">快速投递</h3>
+  <div data-submit-form :class="bare ? '' : 'bg-white rounded-xl border border-gray-200 p-4'">
+    <h3 v-if="!bare" class="text-sm font-semibold text-gray-700 mb-3">快速投递</h3>
     <form @submit.prevent="submit" class="space-y-3">
       <div class="flex gap-2">
         <input

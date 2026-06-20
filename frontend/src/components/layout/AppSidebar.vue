@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useDomainStore } from '../../stores/domains'
+import { useGlobalStore } from '../../stores/global'
 import { useApi } from '../../composables/useApi'
 import {
   Send, Inbox, BookMarked, Lightbulb, ChevronRight,
@@ -14,6 +15,7 @@ const emit = defineEmits<{ (e: 'toggle-rail'): void; (e: 'nav'): void }>()
 const route = useRoute()
 const router = useRouter()
 const domainStore = useDomainStore()
+const global = useGlobalStore()
 const api = useApi()
 
 // 导航后通知外壳关闭移动端抽屉。桌面端 AppShell 忽略此事件。
@@ -30,24 +32,49 @@ const colItems = reactive<Record<string, any[]>>({})
 
 onMounted(() => { if (!domainStore.domains.length) domainStore.fetchAll() })
 
+async function loadCols(d: string) {
+  if (kbCols[d]) return
+  try {
+    const r: any = await api.get(`/api/collections?domain=${encodeURIComponent(d)}`)
+    kbCols[d] = r.collections ?? r ?? []
+  } catch { kbCols[d] = [] }
+}
+async function loadItems(id: string) {
+  if (colItems[id]) return
+  try {
+    const r: any = await api.get(`/api/collections/${id}/jobs?limit=20`)
+    colItems[id] = r.items ?? r ?? []
+  } catch { colItems[id] = [] }
+}
 async function toggleKb(d: string) {
   expandedKb[d] = !expandedKb[d]
-  if (expandedKb[d] && !kbCols[d]) {
-    try {
-      const r: any = await api.get(`/api/collections?domain=${encodeURIComponent(d)}`)
-      kbCols[d] = r.collections ?? r ?? []
-    } catch { kbCols[d] = [] }
-  }
+  if (expandedKb[d]) await loadCols(d)
 }
 async function toggleCol(id: string) {
   expandedCol[id] = !expandedCol[id]
-  if (expandedCol[id] && !colItems[id]) {
+  if (expandedCol[id]) await loadItems(id)
+}
+
+// #3 导航联动:进入某内容/集合/知识库时,侧栏自动展开其所在分支并高亮。
+async function expandKb(d: string) { expandedKb[d] = true; await loadCols(d) }
+async function expandCol(id: string) { expandedCol[id] = true; await loadItems(id) }
+async function syncFromRoute() {
+  const n = route.name as string
+  const p = route.params as any
+  if ((n === 'knowledge-base' || n === 'concept-detail' || n === 'topic') && p.domain) {
+    await expandKb(String(p.domain))
+  } else if (n === 'collection-detail' && p.id) {
+    try { const c: any = await api.get(`/api/collections/${p.id}`); if (c?.domain) await expandKb(c.domain) } catch { /* 忽略 */ }
+    await expandCol(String(p.id))
+  } else if (n === 'content-detail' && p.id) {
     try {
-      const r: any = await api.get(`/api/collections/${id}/jobs?limit=20`)
-      colItems[id] = r.items ?? r ?? []
-    } catch { colItems[id] = [] }
+      const j: any = await api.get(`/api/jobs/${p.id}`)
+      if (j?.domain) await expandKb(j.domain)
+      if (j?.collection_id) await expandCol(j.collection_id)
+    } catch { /* 忽略 */ }
   }
 }
+watch(() => route.fullPath, syncFromRoute, { immediate: true })
 
 // 知识库色点:按名字哈希出柔和色
 function kbColor(d: string) {
@@ -58,6 +85,34 @@ function kbColor(d: string) {
 
 const isKbActive = (d: string) =>
   route.path === `/kb/${d}` || route.path.startsWith(`/kb/${encodeURIComponent(d)}`)
+const isContentActive = (jid: string) =>
+  route.name === 'content-detail' && String(route.params.id) === String(jid)
+
+// #5dup 知识库拖拽排序:领域是派生视图、后端无顺序,故顺序存浏览器 localStorage。
+const ORDER_KEY = 'mnemo.kbOrder'
+const kbOrder = ref<string[]>(loadOrder())
+function loadOrder(): string[] {
+  try { return JSON.parse(localStorage.getItem(ORDER_KEY) || '[]') } catch { return [] }
+}
+const orderedDomains = computed(() => {
+  const rank = (d: string) => { const i = kbOrder.value.indexOf(d); return i === -1 ? 1e9 : i }
+  return [...domainStore.domains].sort((a, b) => rank(a.domain) - rank(b.domain))
+})
+const dragFrom = ref(-1)
+const dragOver = ref(-1)
+function onDragStart(i: number) { dragFrom.value = i }
+function onDragOver(i: number) { dragOver.value = i }
+function onDrop(i: number) {
+  const from = dragFrom.value
+  dragFrom.value = -1; dragOver.value = -1
+  if (from === -1 || from === i) return
+  const arr = orderedDomains.value.map(d => d.domain)
+  const [moved] = arr.splice(from, 1)
+  arr.splice(i, 0, moved)
+  kbOrder.value = arr
+  localStorage.setItem(ORDER_KEY, JSON.stringify(arr))
+}
+function onDragEnd() { dragFrom.value = -1; dragOver.value = -1 }
 </script>
 
 <template>
@@ -68,7 +123,7 @@ const isKbActive = (d: string) =>
     </div>
 
     <div class="top-row">
-      <button class="btn-submit" data-tip="投递内容" title="投递内容" @click="nav('/content')"><Send :size="16" /><span>投递内容</span></button>
+      <button class="btn-submit" data-tip="投递内容" title="投递内容" @click="global.openSubmit()"><Send :size="16" /><span>投递内容</span></button>
       <button class="top-tool" :class="{ on: route.name === 'content' }" data-tip="所有来源" title="所有来源" @click="nav('/content')">
         <Inbox :size="18" />
       </button>
@@ -78,8 +133,12 @@ const isKbActive = (d: string) =>
       <a :class="{ on: route.path === '/' }" data-tip="知识库" title="知识库" @click="nav('/')"><BookMarked :size="16" /><span>知识库</span></a>
 
       <div class="sub-list">
-        <div class="nb-group" v-for="d in domainStore.domains" :key="d.domain">
-          <div class="sub-item" :class="{ on: isKbActive(d.domain) }">
+        <div class="nb-group" v-for="(d, i) in orderedDomains" :key="d.domain">
+          <div
+            class="sub-item" :class="{ on: isKbActive(d.domain), dragover: dragOver === i }"
+            draggable="true"
+            @dragstart="onDragStart(i)" @dragover.prevent="onDragOver(i)" @drop="onDrop(i)" @dragend="onDragEnd"
+          >
             <span class="kb-caret" :class="{ open: expandedKb[d.domain] }" @click.stop="toggleKb(d.domain)">
               <ChevronRight :size="14" />
             </span>
@@ -98,6 +157,7 @@ const isKbActive = (d: string) =>
               </div>
               <div class="src-content" :class="{ open: expandedCol[c.id] }">
                 <div class="content-item" v-for="j in (colItems[c.id] || [])" :key="j.job_id"
+                     :class="{ on: isContentActive(j.job_id) }"
                      @click="nav(`/content/${j.job_id}`)">
                   <span class="ci-dot" :style="{ background: kbColor(d.domain) }" />
                   <span>{{ j.title || j.job_id }}</span>
@@ -128,4 +188,10 @@ const isKbActive = (d: string) =>
 
 <style scoped>
 .nb-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* #3 当前内容在侧栏高亮 */
+.content-item.on { color: var(--brand-700); font-weight: 600; }
+.content-item.on .ci-dot { box-shadow: 0 0 0 2px var(--brand-100); }
+/* #5dup 拖拽中的落点提示 + 抓取手势 */
+.sub-item[draggable="true"] { cursor: grab; }
+.sub-item.dragover { box-shadow: inset 0 2px 0 var(--brand-500); }
 </style>
