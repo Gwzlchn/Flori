@@ -174,7 +174,28 @@ class GlossaryTermResponse(BaseModel):
     status: str = "accepted"
     is_topic: bool = False
     definition_locked: bool = False
-    created_at: str
+    created_at: str | None = None
+    updated_at: str | None = None
+
+    @classmethod
+    def from_row(cls, row: dict) -> "GlossaryTermResponse":
+        """db._row_to_glossary 的 dict(created_at/updated_at 为 datetime|None)→ 响应模型
+        (ISO str|None)。所有返回单条术语的端点统一走它,保证字段形态一致——
+        此前 /api/glossary/{d}/{t} 与 /api/domains/{d}/terms/{t} 字段不一致(updated_at 有无、
+        created_at 缺失 '' vs null)。"""
+        def _iso(v):
+            return v.isoformat() if hasattr(v, "isoformat") else (v or None)
+        return cls(
+            domain=row["domain"], term=row["term"],
+            definition=row.get("definition") or "",
+            occurrences=row.get("occurrences") or [],
+            related=row.get("related") or [],
+            status=row.get("status") or "accepted",
+            is_topic=bool(row.get("is_topic")),
+            definition_locked=bool(row.get("definition_locked")),
+            created_at=_iso(row.get("created_at")),
+            updated_at=_iso(row.get("updated_at")),
+        )
 
 
 # ── 搜索 ──

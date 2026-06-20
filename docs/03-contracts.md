@@ -666,7 +666,7 @@ curl -X POST http://localhost:8000/api/domains \
 
 #### GET /api/domains/{domain}/terms/{term} — 概念详情
 
-定义 + 出现处 + 关联概念。Response `200`（即 db 的 glossary 行，字段同 `GlossaryTermResponse`）：
+定义 + 出现处 + 关联概念。Response `200`，字段为 `GlossaryTermResponse`（与 `/api/glossary/{d}/{t}` 完全同形，见 1.10）：
 
 ```json
 {
@@ -747,14 +747,16 @@ Response `200`：
   "status": "accepted",
   "is_topic": true,
   "definition_locked": false,
-  "created_at": "2026-05-16T20:00:00+08:00"
+  "created_at": "2026-05-16T20:00:00+08:00",
+  "updated_at": "2026-05-16T20:00:00+08:00"
 }
 ```
 
 - `status`：`suggested`（AI 采集的候选，待审）/ `accepted`（已采纳）。
 - `occurrences`：该术语出现过的来源，元素 `{job_id, content_type, location}`，由抽取步骤累积。
 - `is_topic`：是否为主题概念。`definition_locked`：定义是否已钉住（钉住后自动采集不再覆盖定义）。
-- `created_at`：ISO8601；缺失时为空串 `""`。
+- `created_at` / `updated_at`：ISO8601 字符串，缺失时为 `null`。
+- **同一形态**：所有返回单条术语的端点（`/api/glossary` 列表与详情、`/api/glossary/{d}/{t}`、`/api/domains/{d}/terms/{t}`）字段完全一致（后端统一走 `GlossaryTermResponse.from_row`）。
 
 #### GET /api/glossary — 列术语
 

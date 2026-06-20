@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from shared.config import AppConfig
 from shared.db import Database
 from api.deps import get_config, get_db, verify_token
-from api.schemas import DomainCreateRequest
+from api.schemas import DomainCreateRequest, GlossaryTermResponse
 
 router = APIRouter(prefix="/api/domains", tags=["domains"], dependencies=[Depends(verify_token)])
 
@@ -160,17 +160,17 @@ async def concept_timeline(
     return await asyncio.to_thread(db.concept_timeline, domain, granularity)
 
 
-@router.get("/{domain}/terms/{term}")
+@router.get("/{domain}/terms/{term}", response_model=GlossaryTermResponse)
 async def term_detail(
     domain: str, term: str,
     db: Database = Depends(get_db),
 ):
-    """术语详情：定义 + 关联 + 出现处(sources，T2 升级为 occurrences)。"""
+    """术语详情：定义 + 关联 + 类型化出现处。形态与 /api/glossary/{d}/{t} 完全一致(共用 from_row)。"""
     _validate(domain)
     t = await asyncio.to_thread(db.get_glossary_term, domain, term)
     if not t:
         raise HTTPException(404, "term not found")
-    return t
+    return GlossaryTermResponse.from_row(t)
 
 
 @router.get("/{domain}/topics/{topic}")

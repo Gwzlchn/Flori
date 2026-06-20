@@ -29,19 +29,8 @@ def _validate_seg(value: str, label: str) -> None:
 
 
 def _to_response(row: dict) -> GlossaryTermResponse:
-    """db 返回 dict（created_at 为 datetime|None）映射为响应模型（created_at 为 ISO str）。"""
-    created = row.get("created_at")
-    return GlossaryTermResponse(
-        domain=row["domain"],
-        term=row["term"],
-        definition=row.get("definition") or "",
-        occurrences=row.get("occurrences") or [],
-        related=row.get("related") or [],
-        status=row.get("status") or "accepted",
-        is_topic=bool(row.get("is_topic")),
-        definition_locked=bool(row.get("definition_locked")),
-        created_at=created.isoformat() if created is not None else "",
-    )
+    """统一术语序列化(含 created_at/updated_at,ISO str|None)。与 domains 端点共用同一形态。"""
+    return GlossaryTermResponse.from_row(row)
 
 
 @router.get("", response_model=list[GlossaryTermResponse])
