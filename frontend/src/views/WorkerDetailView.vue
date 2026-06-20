@@ -1,10 +1,11 @@
 <script setup lang="ts">
 // Worker 详情（原型 #wdetail）：单个 worker 完整统计 + 基本信息 + 任务历史(recent_tasks)
 // + 备注编辑 + 排空/移除。worker 主体走 GET /api/workers/{id}；历史走 store.fetchJobs(id)。
-import { ref, computed, onMounted, inject } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, inject } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { useWorkerStore } from '../stores/workers'
+import { useGlobalStore } from '../stores/global'
 import { fmtDateTime } from '../utils/datetime'
 import StatusBadge from '../components/common/StatusBadge.vue'
 import type { Worker, WorkerJob } from '../types'
@@ -17,6 +18,7 @@ const route = useRoute()
 const router = useRouter()
 const api = useApi()
 const workerStore = useWorkerStore()
+const global = useGlobalStore()
 const showToast = inject<(m: string, t?: 'success' | 'error' | 'info') => void>('showToast', () => {})
 
 const workerId = computed(() => String(route.params.id))
@@ -38,6 +40,8 @@ async function load() {
     ])
     worker.value = w
     tasks.value = jobs
+    // 面包屑显真实 worker id(替代通用「Worker 详情」)
+    global.setCrumbs([{ t: '系统', to: '/system' }, { t: w.id }])
   } catch (e: any) {
     error.value = e?.status === 404 ? 'Worker 不存在或已移除' : (e?.message || '加载失败')
   } finally {
@@ -167,6 +171,7 @@ async function saveNote() {
 }
 
 onMounted(load)
+onBeforeUnmount(() => global.setCrumbs(null))
 </script>
 
 <template>

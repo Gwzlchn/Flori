@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, inject } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, inject } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useCollectionStore } from '../stores/collections'
+import { useGlobalStore } from '../stores/global'
 import { useApi } from '../composables/useApi'
 import StatusBadge from '../components/common/StatusBadge.vue'
 import { fmtDateTime } from '../utils/datetime'
@@ -16,6 +17,7 @@ import {
 const route = useRoute()
 const router = useRouter()
 const store = useCollectionStore()
+const global = useGlobalStore()
 const api = useApi()
 const showToast = inject<(m: string, t?: string) => void>('showToast', () => {})
 
@@ -43,6 +45,12 @@ async function load() {
   error.value = ''
   try {
     collection.value = await store.get(id)
+    // 面包屑显真实集合名(替代通用「集合详情」)
+    global.setCrumbs([
+      { t: '知识库', to: '/' },
+      { t: '集合', to: '/collections' },
+      { t: collection.value?.name || id },
+    ])
     const res = await store.fetchJobs(id)
     jobs.value = res.items
     total.value = res.total
@@ -101,6 +109,7 @@ const headerSub = computed(() => {
 })
 
 onMounted(load)
+onBeforeUnmount(() => global.setCrumbs(null))
 </script>
 
 <template>
