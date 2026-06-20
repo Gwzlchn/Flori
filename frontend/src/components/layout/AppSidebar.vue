@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { reactive, onMounted, inject } from 'vue'
+import { reactive, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useDomainStore } from '../../stores/domains'
 import { useApi } from '../../composables/useApi'
@@ -15,7 +15,6 @@ const route = useRoute()
 const router = useRouter()
 const domainStore = useDomainStore()
 const api = useApi()
-const showToast = inject<(m: string, t?: string) => void>('showToast', () => {})
 
 // 导航后通知外壳关闭移动端抽屉。桌面端 AppShell 忽略此事件。
 function nav(to: string) {
@@ -111,7 +110,7 @@ const isKbActive = (d: string) =>
           </div>
         </div>
 
-        <a class="sub-item new" @click="showToast('新建知识库弹窗将在 Phase 2 接入', 'info')">
+        <a class="sub-item new" @click="nav('/?create=1')">
           <Plus :size="15" /><span>新建知识库</span>
         </a>
       </div>

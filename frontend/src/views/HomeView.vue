@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, inject } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted, watch, inject } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useDomainStore } from '../stores/domains'
 import { fmtDateTime } from '../utils/datetime'
@@ -14,6 +14,7 @@ import {
 } from 'lucide-vue-next'
 
 const router = useRouter()
+const route = useRoute()
 const domainStore = useDomainStore()
 const { domains, loading } = storeToRefs(domainStore)
 const showToast = inject<(m: string, t?: 'success' | 'error' | 'info') => void>('showToast', () => {})
@@ -135,7 +136,20 @@ async function submitCreate() {
   }
 }
 
-onMounted(loadDomains)
+// 侧栏「新建知识库」用 /?create=1 跳转触发(本视图弹窗为唯一实现处);触发后清掉 query,
+// 避免刷新/返回重复弹。onMounted 处理直达,watch 处理"已在首页时再次点击"。
+function maybeOpenFromQuery() {
+  if (route.query.create !== undefined) {
+    openCreate()
+    router.replace({ path: '/', query: {} })
+  }
+}
+watch(() => route.query.create, maybeOpenFromQuery)
+
+onMounted(() => {
+  loadDomains()
+  maybeOpenFromQuery()
+})
 </script>
 
 <template>
