@@ -162,15 +162,21 @@ class StepBase:
         "笔记结构一览", "改动说明", "What I did", "Summary",
     )
 
+    # 单轮纯文本 API provider:不会"只回过程汇报而丢正文",短笔记(短文章/短播客)也合法,
+    # 故只对它们做去壳、不做"过短/元标题"判废——判废是 claude-cli 视觉多轮 agentic 退化的专治。
+    _API_PROVIDERS = ("anthropic", "deepseek", "kimi", "openai", "ollama")
+
     @classmethod
-    def _sanitize_smart_note(cls, content: str) -> str:
+    def _sanitize_smart_note(cls, content: str, provider: str | None = None) -> str:
         """剥离 claude agentic 口水(开头过程汇报 / 结尾后续提议),并判废退化输出。
         正文存在时只去壳;若剥完不像笔记(过短 / 首标题是元小节)则抛 ProcessingError 触发
-        重试——宁可重跑也不存废稿。"""
+        重试——宁可重跑也不存废稿。判废仅对 claude-cli/未知 provider 生效(见 _API_PROVIDERS);
+        provider 缺省按严格处理(兼容直调与视频两段式 claude-cli 路径)。"""
         import re
         s = (content or "").strip()
         if os.environ.get("DRY_RUN") == "1":   # 干跑产物是合成占位,不做净化/判废(与 gateway 同判定;"0"=关)
             return s
+        strict = (provider or "") not in cls._API_PROVIDERS   # None/""/claude-cli/unknown → 严格判废
         # 1) 去开头元描述:仅当前缀命中 agentic 标记时,砍到首个 markdown 标题(正文应以标题起)。
         if any(m in s[:160] for m in cls._PREAMBLE_MARK):
             m = re.search(r"(?m)^#{1,6} ", s)
@@ -191,9 +197,10 @@ class StepBase:
                 break
         s = "\n\n".join(paras).strip()
         # 3) 退化判废:正文整段丢失,只剩"我做了什么/已保存到 xx.md"式元汇报。
+        #    仅 claude-cli/未知 provider 才判废;API provider 单轮纯输出的短笔记是正常的,不误杀。
         first_head = next((ln for ln in s.splitlines() if ln.lstrip().startswith("#")), "")
         head_is_meta = any(mk in first_head for mk in cls._META_HEAD)
-        if len(s) < 500 or head_is_meta:
+        if strict and (len(s) < 500 or head_is_meta):
             raise ProcessingError(
                 f"智能笔记疑似 agentic 退化(len={len(s)}, 首标题={first_head[:40]!r}):"
                 "claude 可能只回了过程汇报而非笔记正文,触发重试。"
@@ -205,8 +212,8 @@ class StepBase:
         开头加一行说明(生成时间 / 方式 / 模型)。不再写规范 notes_smart.md——前端取最新版本。
         落盘前净化 claude agentic 口水(_sanitize_smart_note)。
         返回相对路径,供评审步在 review.json 里标明评的是哪一版。"""
-        content = self._sanitize_smart_note(content)
         prov, model = self.ai_provider_model()
+        content = self._sanitize_smart_note(content, prov)
         # 字段内只允许字母数字与 . - (把 _ 也归一为 -),保证文件名按 "_" 切分无歧义。
         safe = lambda s: __import__("re").sub(r"[^0-9A-Za-z.-]+", "-", s).strip("-") or "x"
         now = datetime.now()
@@ -363,6 +370,8 @@ class StepBase:
         若给 score_keys 且结果缺 overall，按维度均值自动补 overall。
         返回 (result, parse_failed)。"""
         kwargs.setdefault("response_format", "json")
+        # 评分/抽取类要确定性:默认低温,幂等重跑/retry 拿到稳定分数(claude-cli 无视此项无害)。
+        kwargs.setdefault("temperature", 0)
         raw = self.call_ai(prompt, images=images, **kwargs)
         parse_failed = False
         try:
@@ -393,7 +402,8 @@ class StepBase:
     def _salvage_scores(raw: str, score_keys: list[str] | None) -> dict | None:
         """JSON 整体解析失败时的兜底:按 `"维度": 数字` 正则逐项抢救 1-5 分。
         rationale 里的同名键值是字符串("维度": "..."),数字正则不会误命中。
-        必须救回全部维度才返回(部分命中不可信),否则 None → 走 fallback。"""
+        至少命中半数维度才返回(部分命中按已命中均值补齐缺的,round),否则 None → 走 fallback。
+        放宽自"必须全维度命中":少一个维度就整体落 fallback 全 3 是 overall 恒 3.0 的残留口子。"""
         if not score_keys:
             return None
         import re
@@ -402,7 +412,13 @@ class StepBase:
             m = re.search(rf'"{re.escape(k)}"\s*:\s*([1-5])\b', raw or "")
             if m:
                 found[k] = int(m.group(1))
-        return found if len(found) == len(score_keys) else None
+        if not found or len(found) * 2 < len(score_keys):
+            return None  # 命中不足半数,不可信,落 fallback
+        if len(found) < len(score_keys):
+            avg = round(sum(found.values()) / len(found))
+            for k in score_keys:
+                found.setdefault(k, avg)   # 缺的维度按已命中均值补,避免误落全 3
+        return found
 
     @staticmethod
     def _extract_json(raw: str) -> str:

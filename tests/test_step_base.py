@@ -488,9 +488,18 @@ class TestScoreSalvage:
         raw = '{"completeness": 2, "rationale": {"completeness": "5 分太高"}}'
         assert StepBase._salvage_scores(raw, ["completeness"]) == {"completeness": 2}
 
-    def test_salvage_partial_returns_none(self):
-        # 维度没救全不可信 → None,走 fallback
+    def test_salvage_below_half_returns_none(self):
+        # 命中不足半数(2/6)不可信 → None,走 fallback
         assert StepBase._salvage_scores('{"completeness": 5, "accuracy": 4}', self.SCORE_KEYS) is None
+
+    def test_salvage_partial_above_half_fills_mean(self):
+        # 命中 >= 半数(4/6):缺的维度按已命中均值补(round),不再整体落 fallback 全 3
+        raw = '{"completeness": 5, "accuracy": 4, "structure": 4, "terminology": 5}'
+        out = StepBase._salvage_scores(raw, self.SCORE_KEYS)
+        assert out["completeness"] == 5 and out["terminology"] == 5
+        # 缺的 visual_integration/readability 按 (5+4+4+5)/4=4.5→round=4 补齐
+        assert out["visual_integration"] == 4 and out["readability"] == 4
+        assert set(out) == set(self.SCORE_KEYS)
 
     def test_salvage_no_score_keys_returns_none(self):
         assert StepBase._salvage_scores('{"x": 1}', None) is None

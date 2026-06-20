@@ -39,7 +39,8 @@ class SmartArticleStep(StepBase):
         sections = self.load_json("intermediate/sections.json")
 
         prompt = self._build_prompt(sections)
-        result = self.call_ai(prompt)
+        # 结构化中文笔记常超默认 4096 output tokens,显式抬高上限防被静默截断(claude-cli 无视无害)。
+        result = self.call_ai(prompt, max_tokens=8192)
 
         rel = self.write_smart_note(result)   # 版本化落盘(含生成时间/方式/模型),不再写 notes_smart.md
         return {"chars": len(result), "provider": self.last_ai_provider,
