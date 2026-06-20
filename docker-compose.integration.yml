@@ -21,6 +21,7 @@ services:
       - DATA_DIR=/data
       - CONFIG_DIR=/app/configs
       - DRY_RUN=${DRY_RUN:-0}
+      - API_ALLOW_NO_AUTH=1   # 集成测试栈:无 token 放行
     depends_on:
       - redis
 

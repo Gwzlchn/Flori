@@ -23,6 +23,7 @@ services:
       - DATA_DIR=/data
       - CONFIG_DIR=/app/configs
       - API_TOKEN=${API_TOKEN:-}
+      - API_ALLOW_NO_AUTH=${API_ALLOW_NO_AUTH:-1}   # 本机开发默认放行(空 token 时);公网暴露设 0
       - API_RELOAD=1   # 开发热更新(生产默认关,避免 StatReload 常驻)
     depends_on:
       - redis

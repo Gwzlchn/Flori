@@ -33,6 +33,9 @@ services:
       - MINIO_BUCKET=${MINIO_BUCKET:-mnemo}
       - WORK_DIR=${WORK_DIR:-/tmp/mnemo-work}
       - API_TOKEN=${API_TOKEN:-}
+      # 可信内网默认放行(空 API_TOKEN);公网/局域网直连暴露务必设 API_TOKEN 并把此项置 0。
+      # 未设 API_TOKEN 且此项非 1 时后端 fail-closed(503),不再静默裸奔(见 docs/07-security)。
+      - API_ALLOW_NO_AUTH=${API_ALLOW_NO_AUTH:-1}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
     security_opt:
       - no-new-privileges:true

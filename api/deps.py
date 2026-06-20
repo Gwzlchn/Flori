@@ -20,6 +20,10 @@ _security = HTTPBearer(auto_error=False)
 _api_token_warned = False  # API_TOKEN 未设的告警只发一次,不在每个请求里刷屏
 
 
+def _truthy(v: str | None) -> bool:
+    return (v or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def get_db(request: Request) -> Database:
     return request.app.state.db
 
@@ -41,12 +45,20 @@ async def verify_token(
 ) -> str:
     api_token = os.environ.get("API_TOKEN", "")
     if not api_token:
+        # fail-closed:未设 API_TOKEN 时必须显式 API_ALLOW_NO_AUTH=1 才放行(仅可信内网),
+        # 否则 503 拒绝——避免误把端口暴露到 LAN/公网时静默裸奔(原行为是默认放行)。
+        if not _truthy(os.environ.get("API_ALLOW_NO_AUTH")):
+            raise HTTPException(
+                status_code=503,
+                detail="API auth not configured: set API_TOKEN, or API_ALLOW_NO_AUTH=1 on a trusted network",
+            )
         global _api_token_warned
         if not _api_token_warned:
             _api_token_warned = True
             import structlog
             structlog.get_logger().warning(
-                "api_token_empty", msg="API_TOKEN not set, auth disabled"
+                "api_token_empty",
+                msg="API_TOKEN 未设且 API_ALLOW_NO_AUTH=1:鉴权已关闭(仅限可信内网)",
             )
         return "no-auth"
     if credentials is None or not hmac.compare_digest(

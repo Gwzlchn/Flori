@@ -79,6 +79,13 @@ SSH              key-only (禁密码)            服务器管理
 > API 默认零公网端口、仅绑本机(`API_BIND_IP`),verify_token 用常量时间比对。
 > 直接把 API 端口暴露到公网时,务必同时设强随机 `API_TOKEN` 并在边缘加限流。
 
+**fail-closed(空 token 行为)**：未设 `API_TOKEN` 时后端不再静默放行,而是要求显式
+`API_ALLOW_NO_AUTH=1` 才放行(仅限可信内网),否则受保护端点返回 `503 auth not configured`。
+- compose 默认 `API_ALLOW_NO_AUTH=${API_ALLOW_NO_AUTH:-1}`(本机/可信内网开箱即用)。
+- **公网或局域网直连暴露**:设强随机 `API_TOKEN`,并把 `API_ALLOW_NO_AUTH` 置 `0`。
+- 注意:开启 `API_TOKEN` 后,前端反代(nginx/Caddy)需把该 token 作为 `Authorization: Bearer`
+  注入到 `/api` 请求(否则前端 401)——这一步在前端/边缘配置侧完成。
+
 ## 4. 通信安全
 
 | 链路 | 协议 | 加密 | 认证 |

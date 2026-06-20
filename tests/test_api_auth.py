@@ -93,3 +93,21 @@ class TestTokenAuth:
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
                 resp = await c.get("/api/jobs", headers={"Authorization": "Bearer secret123"})
                 assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_no_token_no_optin_fails_closed(self, test_config, db):
+        """未设 API_TOKEN 且未显式 API_ALLOW_NO_AUTH=1 → 503(不再静默裸奔)。"""
+        with patch.dict(os.environ, {"API_TOKEN": "", "API_ALLOW_NO_AUTH": ""}):
+            app = create_app(db=db, redis=AsyncMock(), config=test_config)
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+                resp = await c.get("/api/jobs")
+                assert resp.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_no_token_with_optin_allows(self, test_config, db):
+        """未设 API_TOKEN 但 API_ALLOW_NO_AUTH=1(可信内网)→ 放行。"""
+        with patch.dict(os.environ, {"API_TOKEN": "", "API_ALLOW_NO_AUTH": "1"}):
+            app = create_app(db=db, redis=AsyncMock(), config=test_config)
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+                resp = await c.get("/api/jobs")
+                assert resp.status_code == 200
