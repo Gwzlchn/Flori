@@ -280,7 +280,7 @@ block-beta
   columns 1
   block:sysprompt["System Prompt"]
     columns 1
-    base["[base_template] ← prompts/10_smart.md<br/>你是一个{role}。请将以下视频素材重组为结构化学习笔记..."]
+    base["[base_template] 内联在 step_10_smart 代码（_build_user_prompt）<br/>可选覆盖: configs/prompts/10_smart.md（默认不存在）<br/>你是一个{role}。请将以下视频素材重组为结构化学习笔记..."]
     domain["[domain_profile] ← profiles/{domain}.yaml<br/>领域背景: {domain_context} | 输出风格: {output_style}<br/>术语表(含回流概念): {terminology} | 注意事项: {do_not}"]
     style["[style_hints] ← styles/{tag}.yaml × N<br/>内容形式提示: {hint_1}, {hint_2}<br/>截图解读重点: {screenshot_focus}"]
   end
@@ -341,19 +341,24 @@ DELETE /api/profiles/{domain}/terms/{term}  → 删除术语
 
 ## 7. 与幂等的关系
 
-Profile 和 Style Hints 都是 10_smart 的输入 → 任一变化 → input_hash 变化 → 重跑。
+Profile、Style、(可选)外置 system prompt 都是 10_smart 的输入 → 任一变化 → input_hash 变化 → 重跑。
+base prompt 默认内联在步骤代码里，**不**计入指纹；仅当放置 `configs/prompts/10_smart.md`（可选覆盖，
+默认不存在）时，它作为 system prompt 生效并以 `prompt` 键计入指纹。
 
 ```python
-# 10_smart 的 input_hashes()
+# 10_smart 的 input_hashes()（简化示意，键名与代码一致）
 def input_hashes(self):
-    # style_tags 排序后序列化，保证标签顺序不影响指纹
-    style_hash = hash_style_tags(self.job_style_tags)
-    return {
+    hashes = {
         "mechanical": file_hash(self.job_dir / "output/notes_mechanical.md"),
-        "prompt": file_hash(prompts_dir / "10_smart.md"),
         "profile": file_hash(prompts_dir / "profiles" / f"{self.domain}.yaml"),
-        "style_hints": style_hash,
+        # style_tags 排序后逐个文件指纹序列化，标签顺序不影响指纹（键名为 styles）
+        "styles": json.dumps({tag: file_hash(prompts_dir / "styles" / f"{tag}.yaml")
+                              for tag in sorted(self.style_tags) if ...exists}, sort_keys=True),
     }
+    # 可选外置 system prompt 覆盖文件存在时才计入（默认不存在 → 无 prompt 键）：
+    if (prompts_dir / "10_smart.md").exists():
+        hashes["prompt"] = file_hash(prompts_dir / "10_smart.md")
+    return hashes
 ```
 
 更新 Profile/Style 后 resubmit → 只有 10_smart 和 11_review 重跑。给同一个 Job 换标签也会触发重跑。（采纳 glossary 候选回流到 Profile，也会改变 profile 指纹。）

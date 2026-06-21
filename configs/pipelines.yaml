@@ -72,7 +72,7 @@ video:
       rules:
         - exists: "input/*.srt"
           when: skip
-      outputs: ["input/whisper.srt", "intermediate/whisper.json"]
+      outputs: ["input/subtitle.srt"]
 
     "03_scene":
       label: "场景检测"
@@ -200,7 +200,7 @@ paper:
       run: steps.paper.step_02_pdf_parse
       image: mnemo/step-heavy
       needs: ["01_download"]
-      outputs: ["intermediate/pdf_text.json", "intermediate/pages.json"]
+      outputs: ["intermediate/parsed.json"]
 
     "03_sections":
       label: "章节切分"
@@ -265,7 +265,7 @@ article:
       run: steps.article.step_02_parse_article
       needs: ["01_download"]
       timeout: 60
-      outputs: ["intermediate/article.json"]
+      outputs: ["intermediate/parsed.json"]
 
     "03_article_sections":
       label: "章节切分"
@@ -326,7 +326,7 @@ audio:
       timeout: 1800
       retry: 2
       tags: ["gpu"]
-      outputs: ["input/whisper.srt", "intermediate/whisper.json"]
+      outputs: ["input/subtitle.srt"]
 
     "03_transcript_parse":
       label: "转写解析"
@@ -334,7 +334,7 @@ audio:
       run: steps.audio.step_03_transcript_parse
       needs: ["02_whisper"]
       timeout: 60
-      outputs: ["intermediate/transcript.json"]
+      outputs: ["intermediate/transcript.json", "output/transcript.md", "intermediate/segments.json"]
 
     "04_smart_podcast":
       label: "智能版笔记"

@@ -995,6 +995,11 @@ Response `200`（数组）：
 
 ## 2. WebSocket
 
+鉴权：WebSocket 握手无法设置 `Authorization` 头，故 token 经 query 参数传入——
+`/api/ws/jobs/{id}?token=<API_TOKEN>` 与 `/api/ws/global?token=<API_TOKEN>`。
+校验策略与 REST 的 `verify_token` 一致（fail-closed）：设了 `API_TOKEN` 则必须匹配，
+未设则需 `API_ALLOW_NO_AUTH=1`（仅可信内网）才放行，否则握手被 `close(1008)` 拒绝。
+
 ### WS /api/ws/jobs/{id} — 单任务进度
 
 服务端推送事件：
@@ -1012,7 +1017,7 @@ Response `200`（数组）：
 
 ### WS /api/ws/global — 全局状态
 
-每 2 秒推送一次系统状态（格式同 GET /api/status）。
+每 2 秒推送一次系统状态（格式同 GET /api/status：`workers` / `pools` / `jobs`（含 pending） / `disk` 四段）。
 
 ## 3. Redis 数据结构
 
@@ -1376,23 +1381,31 @@ exclusive_groups:
 
 ## 5. 错误码
 
-| HTTP 状态码 | 错误类型 | 说明 |
-|-------------|---------|------|
-| 400 | `invalid_url` | URL 格式不合法 |
-| 400 | `invalid_domain` | 未知领域 |
-| 413 | `file_too_large` | 上传文件超过 2GB |
-| 401 | `unauthorized` | Bearer Token 无效 |
-| 404 | `job_not_found` | Job ID 不存在 |
-| 404 | `file_not_found` | 请求的产物文件不存在 |
-| 409 | `job_already_exists` | 相同 URL 的任务已存在 |
-| 429 | `rate_limit` | 投递频率超限（每分钟 10 次） |
-| 500 | `internal_error` | 服务内部错误 |
-| 503 | `no_workers` | 没有在线 Worker |
+错误体统一为 `{"error": <机器码>, "message": <说明>}`（由 `api/main.py` 注册的 exception_handler
+产出）。`error` 为 **HTTP 状态码派生的通用机器码**：
+
+| HTTP 状态码 | error（机器码） | 说明 |
+|-------------|-----------------|------|
+| 400 | `bad_request` | 请求参数非法（job_id 含非法字符 / style_tags 非 JSON / collection_id 不存在 等） |
+| 401 | `unauthorized` | Bearer Token 无效或未配置鉴权 |
+| 403 | `forbidden` | 无权限 |
+| 404 | `not_found` | 资源不存在（job / 产物文件 / 领域 等） |
+| 409 | `conflict` | 资源冲突（如领域已存在） |
+| 413 | `payload_too_large` | 上传文件超过 2GB |
+| 422 | `invalid_request` | 请求体校验失败（FastAPI 校验） |
+| 500 | `error` | 服务内部错误 |
 
 Response body:
 ```json
-{"error": "invalid_url", "message": "URL must start with http:// or https://"}
+{"error": "not_found", "message": "job not found"}
 ```
+
+> 契约与实现现状（避免再漂移）：
+> - `POST /api/jobs` 的 `url` 接受 http(s) 链接**或裸 B 站 BV 号**（`detect_source` 解析），不强制
+>   http(s) 前缀，故不返回独立的 `invalid_url`。
+> - 同 URL / 同 BV 重投**不返回 409**，而是建新任务（job_id 加随机后缀消歧），故不返回
+>   `job_already_exists`。
+> - 限流（429 `rate_limit`）与「无在线 worker」（503 `no_workers`）目前**未在 API 层实现**。
 
 ## 6. 步骤错误分类与重试策略
 

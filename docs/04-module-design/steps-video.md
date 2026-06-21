@@ -65,7 +65,7 @@ B站 1080P 需要登录 cookies（`/data/cookies/bilibili.txt`）。无 cookies 
 | 条件 | input/ 下无 .srt 文件 |
 | 超时 | 30min |
 | 输入 | input/source.mp4 |
-| 输出 | input/whisper.srt, intermediate/whisper.json |
+| 输出 | input/subtitle.srt |
 
 GPU 可用时用 faster-whisper large-v3（float16），仅 CPU 时用 base（int8）。根据显存自动选模型大小。
 

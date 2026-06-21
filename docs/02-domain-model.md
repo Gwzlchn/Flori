@@ -374,7 +374,7 @@ CREATE TABLE collections (
 );
 
 CREATE TABLE job_steps (
-    job_id TEXT NOT NULL REFERENCES jobs(id),
+    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
     step TEXT NOT NULL,                    -- 各 pipeline 内 01..N
     status TEXT NOT NULL DEFAULT 'waiting',
     pool TEXT NOT NULL, input_hash TEXT, worker_id TEXT,
