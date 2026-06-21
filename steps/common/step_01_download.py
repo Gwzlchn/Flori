@@ -95,12 +95,12 @@ class DownloadStep(StepBase):
         # 优先用本机侧载凭证文件 input/.credentials.json 里的 SESSDATA(扫码登录入库;
         # 该文件只存在于同机 LocalStorage,绝不下发远端 worker——见 shared/storage.is_credential_file);
         # 否则回退本地 cookie 文件;两者皆无则匿名下载,降级 480P。
-        sessdata = self._read_sessdata()
-        cookies = Path(os.environ.get("DATA_DIR", "/data")) / "cookies" / "bilibili.txt"
+        # 取值优先级:本机侧载 → 本地 cookie 文件。注意 yutto 的 -c 要的是 SESSDATA「值」,
+        # 不是文件路径——此前回退误把 bilibili.txt 路径当值传给 -c,致登录态失效:匿名下载、
+        # 无字幕(字幕需登录)、清晰度降 480P。
+        sessdata = self._read_sessdata() or self._read_cookie_file_sessdata()
         if sessdata:
             cmd.extend(["-c", sessdata])
-        elif cookies.exists():
-            cmd.extend(["-c", str(cookies)])
         else:
             self.log.warn("no_bilibili_cookies", msg="降级 480P")
 
@@ -125,6 +125,22 @@ class DownloadStep(StepBase):
             return _json.loads(cred.read_text(encoding="utf-8")).get("sessdata") or None
         except (OSError, ValueError):
             return None
+
+    def _read_cookie_file_sessdata(self) -> str | None:
+        """从 /data/cookies/bilibili.txt 取 SESSDATA「值」(Netscape cookie 文件或裸值均可)。
+        MinIO 部署下侧载凭证不下发远端 worker,此文件是登录态来源(无则匿名、无字幕)。"""
+        p = Path(os.environ.get("DATA_DIR", "/data")) / "cookies" / "bilibili.txt"
+        if not p.is_file():
+            return None
+        try:
+            txt = p.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return None
+        m = re.search(r"SESSDATA[\s=]+([^\s;]+)", txt)  # Netscape 行 或 cookie 串
+        if m:
+            return m.group(1)
+        s = txt.strip()
+        return s or None
 
     def _download_bili_ytdlp(self, url: str, input_dir: Path, sessdata: str | None) -> None:
         """yutto 失败时的兜底引擎。"""
