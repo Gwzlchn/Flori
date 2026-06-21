@@ -136,6 +136,8 @@ class LLMRequest:
     temperature: float = 0.7
     images: list[Path] = field(default_factory=list)
     system: str | None = None
+    # 注:目前仅 OpenAICompatibleProvider 把它转成 {"type":"json_object"};AnthropicProvider 与
+    # claude-cli 不读此项(由 step_base._extract_json/_salvage_scores 兜底解析 JSON)。
     response_format: str | None = None
 
 
@@ -151,14 +153,16 @@ class LLMResponse:
     cached: bool = False
 
 
-_CATEGORY = {"video": "bili", "article": "article", "paper": "paper", "podcast": "podcast"}
+# content_type → ID 类别前缀。真实 content_type 取值 video/paper/article/audio
+# (jobs.py 已把 podcast 归一为 audio);'audio':'audio' 与现有落库 jobs_audio_* 一致,
+# 替代此前永不命中的死键 'podcast':'podcast'。
+_CATEGORY = {"video": "bili", "article": "article", "paper": "paper", "audio": "audio"}
 
 
 def derive_job_id(url: str | None, content_type: str | None = None, source: str | None = None) -> str:
     """有意义的 Job ID: jobs_{类别}_{inner}。bilibili 用 BV 号(稳定/唯一/路径安全);
     其余用 url 短哈希;无 url(上传)用随机。撞已存在由调用方加随机后缀消歧。"""
     import hashlib
-    import re
 
     m = re.search(r"(BV[0-9A-Za-z]{8,12})", url or "")
     if m:

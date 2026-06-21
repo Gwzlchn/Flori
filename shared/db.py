@@ -251,7 +251,10 @@ class Database:
         # api/scheduler/worker 三进程各开连接写同一文件,撞 SQLITE_BUSY 时等待而非立刻报错。
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.row_factory = sqlite3.Row
-        self._lock = threading.Lock()
+        # RLock(可重入):写方法持锁 execute+commit;读方法亦持锁,序列化对【单一共享连接】的 Python 层
+        # 访问,避免读游标迭代与另一线程 commit 交错见到半提交态。WAL+busy_timeout 已缓解跨连接竞争,
+        # 此锁负责同连接的线程安全。可重入以便将来读方法内部调用其他读方法不自死锁。
+        self._lock = threading.RLock()
 
     def init_schema(self) -> None:
         with self._lock:
@@ -351,9 +354,10 @@ class Database:
             self._conn.commit()
 
     def get_job(self, job_id: str) -> Job | None:
-        row = self._conn.execute(
-            "SELECT * FROM jobs WHERE id=?", (job_id,)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
         if row is None:
             return None
         return self._row_to_job(row)
@@ -384,34 +388,37 @@ class Database:
 
         where = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
 
-        total = self._conn.execute(
-            f"SELECT COUNT(*) FROM jobs {where}", params
-        ).fetchone()[0]
+        with self._lock:
+            total = self._conn.execute(
+                f"SELECT COUNT(*) FROM jobs {where}", params
+            ).fetchone()[0]
 
-        rows = self._conn.execute(
-            f"SELECT * FROM jobs {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            params + [limit, offset],
-        ).fetchall()
+            rows = self._conn.execute(
+                f"SELECT * FROM jobs {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                params + [limit, offset],
+            ).fetchall()
 
         return total, [self._row_to_job(r) for r in rows]
 
     def count_jobs_by_status(self) -> dict[str, int]:
         """一次 GROUP BY 取各状态计数(替代多次 list_jobs(limit=0) 的 COUNT+空 SELECT)。"""
-        rows = self._conn.execute(
-            "SELECT status, COUNT(*) AS n FROM jobs GROUP BY status"
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT status, COUNT(*) AS n FROM jobs GROUP BY status"
+            ).fetchall()
         return {r["status"]: r["n"] for r in rows}
 
     def job_facets(self) -> dict[str, dict]:
         """全量 jobs 按 source / domain / status 的计数,供前端过滤 chip 显示(后端聚合,非客户端基于已加载)。"""
         def grp(col: str) -> dict:
-            return {
-                r[0]: r[1]
-                for r in self._conn.execute(
-                    f"SELECT {col}, COUNT(*) FROM jobs GROUP BY {col}"
-                )
-                if r[0] is not None
-            }
+            with self._lock:
+                return {
+                    r[0]: r[1]
+                    for r in self._conn.execute(
+                        f"SELECT {col}, COUNT(*) FROM jobs GROUP BY {col}"
+                    ).fetchall()
+                    if r[0] is not None
+                }
         return {"source": grp("source"), "domain": grp("domain"), "status": grp("status")}
 
     def glossary_for_job(self, job_id: str, domain: str | None = None) -> list[dict]:
@@ -464,7 +471,7 @@ class Database:
             self._conn.commit()
 
     def delete_job_cascade(self, job_id: str, collection_id: str | None = None) -> None:
-        """原子删 job：jobs 行 + FTS 索引 + 集合计数 -1 + 摘除 glossary.sources 里的 job_id。
+        """原子删 job：jobs 行 + FTS 索引 + 集合计数 -1 + 摘除 glossary.occurrences 里的 job_id。
         全部在单事务内,避免两次 commit 之间崩溃留孤儿 FTS 行 / 计数错位。
         job_steps 经 FK ON DELETE CASCADE 连带删除。"""
         with self._lock:
@@ -804,9 +811,10 @@ class Database:
 
         有 Fernet key 时尝试解密；遇 InvalidToken(历史明文行，或换了 key 的旧 token)
         透传原始串(legacy passthrough)。无 key 则直接返回原始串。任何情况都不因坏值崩。"""
-        row = self._conn.execute(
-            "SELECT value FROM app_credentials WHERE key=?", (key,)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM app_credentials WHERE key=?", (key,)
+            ).fetchone()
         if row is None:
             return None
         raw = row["value"]
@@ -1420,7 +1428,7 @@ class Database:
             "term": row["term"],
             "definition": row["definition"],
             "occurrences": json.loads(row["occurrences"] or "[]"),
-            "related": json.loads(row["related"]),
+            "related": json.loads(row["related"] or "[]"),
             "status": row["status"],
             "is_topic": bool(row["is_topic"]),
             "definition_locked": bool(row["definition_locked"]),

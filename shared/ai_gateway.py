@@ -37,7 +37,13 @@ PRICING: dict[tuple[str, str], dict[str, float]] = {
 
 
 def calc_cost(provider: str, model: str, input_tokens: int, output_tokens: int) -> float:
-    prices = PRICING.get((provider, model), {"input": 0, "output": 0})
+    prices = PRICING.get((provider, model))
+    if prices is None:
+        # 未命中 PRICING:成本按 0 计,但打 warning——区分「刻意免费(cli/dry-run 不走本函数)」
+        # 与「配置漂移漏命中(providers.yaml 模型名与 PRICING 键不一致,如旧 opus-4-6)」。
+        _log.warning("pricing_miss", provider=provider, model=model,
+                     msg="未命中 PRICING,成本按 0 计——核对模型名与 PRICING 键是否一致")
+        prices = {"input": 0, "output": 0}
     return (input_tokens * prices["input"] + output_tokens * prices["output"]) / 1_000_000
 
 
@@ -298,7 +304,6 @@ class AIGateway:
         self._pipelines_config = pipelines_config
         self._providers: dict[str, Any] = {}
         self._dry_run = os.environ.get("DRY_RUN") == "1"
-        self._call_index = 0
 
     async def call(
         self,
@@ -322,7 +327,6 @@ class AIGateway:
             try:
                 provider = self._get_provider(cfg["provider"])
                 response = await provider.complete(request)
-                self._call_index += 1
                 return response
             except (AIProviderError, AIRateLimitError) as e:
                 rate_limited = rate_limited or isinstance(e, AIRateLimitError)
@@ -339,7 +343,6 @@ class AIGateway:
             try:
                 provider = self._get_provider(cfg["provider"])
                 response = await provider.complete(fb_request)
-                self._call_index += 1
                 return response
             except (AIProviderError, AIRateLimitError) as e:
                 rate_limited = rate_limited or isinstance(e, AIRateLimitError)

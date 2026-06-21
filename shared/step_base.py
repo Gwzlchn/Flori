@@ -80,7 +80,7 @@ class StepBase:
         """步骤脚本统一入口：解析 --job-dir/--step-config，实例化并 run。"""
         import argparse
 
-        from shared.logging_setup import setup_logging
+        from .logging_setup import setup_logging
         setup_logging()  # 步骤子进程日志也输出结构化 JSON,与 scheduler/worker 一致
 
         parser = argparse.ArgumentParser()
@@ -169,7 +169,9 @@ class StepBase:
 
     # 单轮纯文本 API provider:不会"只回过程汇报而丢正文",短笔记(短文章/短播客)也合法,
     # 故只对它们做去壳、不做"过短/元标题"判废——判废是 claude-cli 视觉多轮 agentic 退化的专治。
-    _API_PROVIDERS = ("anthropic", "deepseek", "kimi", "openai", "ollama")
+    # 单轮 API provider 名(与 providers.yaml 的 provider 键一致)。注:本地 ollama 后端的 provider
+    # 键是 'local'(providers.yaml),'ollama' 只是其 api_key 字面值——故含 'local';'ollama' 暂留兼容。
+    _API_PROVIDERS = ("anthropic", "deepseek", "kimi", "openai", "ollama", "local")
 
     @classmethod
     def _sanitize_smart_note(cls, content: str, provider: str | None = None) -> str:
@@ -248,14 +250,14 @@ class StepBase:
         review["generated_at"] = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
         self.write_output("output/review.json", review)
         if note_file:
-            from shared.notes_versions import review_path_for_note
+            from .notes_versions import review_path_for_note
             vrel = review_path_for_note(note_file)
             if vrel:
                 self.write_output(vrel, review)
 
     def latest_smart_note(self) -> Path | None:
         """工作目录里最新的智能笔记版本文件(供评审步读取并标注评的是哪一版)。"""
-        from shared.notes_versions import latest_smart
+        from .notes_versions import latest_smart
         vdir = self.job_dir / "output" / "versions"
         if not vdir.is_dir():
             return None
@@ -466,6 +468,10 @@ class StepBase:
         return structlog.get_logger(step=self.step_name, job_dir=str(self.job_dir))
 
     def _load_system_prompt(self) -> str | None:
+        """可选的外置 system prompt 覆盖钩子:若存在 configs/prompts/{step_name}.md 则用作 system
+        prompt。各步默认把 prompt 内联在 _build_user_prompt/_build_prompt 里,该文件【默认不存在】→
+        返回 None(provider 对 system=None 有守卫,不影响生成)。input_hashes 的 prompt 键同样按
+        {step_name}.md 计指纹,故覆盖文件改动会触发重跑(二者文件名一致)。"""
         prompts_dir = self.config.get("paths", {}).get("prompts_dir")
         if not prompts_dir:
             return None
@@ -473,3 +479,33 @@ class StepBase:
         if path.exists():
             return path.read_text(encoding="utf-8")
         return None
+
+    def load_domain_profile(self) -> dict:
+        """加载 domain profile(prompts_dir/profiles/{domain}.yaml),不存在返回 {}。四个 smart 步共用。"""
+        import yaml
+        prompts_dir = Path(self.config["paths"]["prompts_dir"])
+        domain_name = self.config["domain"]["name"]
+        profile_path = prompts_dir / "profiles" / f"{domain_name}.yaml"
+        if profile_path.exists():
+            return yaml.safe_load(profile_path.read_text(encoding="utf-8")) or {}
+        return {}
+
+    def prompt_profile_style_hashes(self) -> dict[str, str]:
+        """smart 步共用的指纹块:可选外置 prompt 覆盖({step_name}.md)+ domain profile + style tags。
+        与各 smart 步此前逐字重复的 input_hashes 片段等价(键名/取值不变,保持幂等指纹一致)。"""
+        import json
+        prompts_dir = Path(self.config["paths"]["prompts_dir"])
+        domain_name = self.config["domain"]["name"]
+        hashes: dict[str, str] = {}
+        prompt_path = prompts_dir / f"{self.step_name}.md"
+        if prompt_path.exists():
+            hashes["prompt"] = file_hash(prompt_path)
+        profile_path = prompts_dir / "profiles" / f"{domain_name}.yaml"
+        if profile_path.exists():
+            hashes["profile"] = file_hash(profile_path)
+        hashes["styles"] = json.dumps({
+            tag: file_hash(prompts_dir / "styles" / f"{tag}.yaml")
+            for tag in sorted(self.config.get("style_tags", []))
+            if (prompts_dir / "styles" / f"{tag}.yaml").exists()
+        }, sort_keys=True)
+        return hashes

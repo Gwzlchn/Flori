@@ -1,7 +1,8 @@
 """B站 UP 主空间视频枚举。用 bilibili-api(内置 wbi 签名/buvid/ticket,解 -352 风控)。
 
-凭证取自 DB app_credentials.bili_cookies(扫码登录入库的 SESSDATA/bili_jct/buvid3);
-未登录也可枚举公开投稿,但带登录态更稳、清晰度更高。
+凭证取自 DB app_credentials.bili_cookies(扫码登录入库,小写键 sessdata/bili_jct/
+dedeuserid/buvid3,与 api/routes/bili.py 入库格式一致)。未登录也可枚举公开投稿,但带
+登录态更稳、清晰度更高。
 """
 
 from __future__ import annotations
@@ -17,10 +18,12 @@ def _credential(bili_cookies_raw: str | None):
         d = json.loads(bili_cookies_raw)
     except (ValueError, TypeError):
         return None
+    # 键名与 api/routes/bili.py login_poll 入库的小写一致(此前读大写 SESSDATA/DedeUserID
+    # 与入库不匹配,致 enumerate_up 退化为匿名枚举)。
     return Credential(
-        sessdata=d.get("SESSDATA"),
+        sessdata=d.get("sessdata"),
         bili_jct=d.get("bili_jct"),
-        dedeuserid=str(d.get("DedeUserID", "")) or None,
+        dedeuserid=str(d.get("dedeuserid", "")) or None,
         buvid3=d.get("buvid3"),
     )
 

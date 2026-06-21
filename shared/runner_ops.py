@@ -180,6 +180,9 @@ async def report_step_done(
         started_at=datetime.fromtimestamp(started_at, timezone.utc),
         finished_at=datetime.now(timezone.utc),
         duration_sec=round(duration, 1),
+        # 与失败侧对称:不覆盖已终态(done/skipped)的步——挡迟到的成功上报把已被 skip 的步倒回 done。
+        # (注:waiting/rerun-reset 不在终态集,本守卫不拦,属可接受残留——见审阅报告 B16。)
+        only_if_active=True,
     )
     await _increment_worker_stats(
         redis, db, worker_id, completed=1, duration=round(duration, 1),

@@ -93,6 +93,7 @@ class RedisClient:
         await self.r.zadd(f"queue:{pool}", {task: priority})
 
     async def dequeue_step(self, pool: str) -> tuple[dict, float] | None:
+        # 仅测试用:生产认领走 dequeue_step_raw(runner_ops/worker transport)。保留薄实现供单测。
         items = await self.r.zpopmin(f"queue:{pool}", count=1)
         if not items:
             return None
