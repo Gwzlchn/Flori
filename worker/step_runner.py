@@ -151,34 +151,7 @@ class SubprocessStepRunner:
         on_tick: TickCallback,
         proc_alive: Callable[[], bool],
     ) -> None:
-        """每 10s 续约 worker 状态 + 推日志(on_tick)，写 worker_heartbeat_at，
-        转发步骤进度事件。不覆盖步骤自己写的 updated_at，否则 check_stuck 失效。"""
-        progress_file = ctx.work_dir / f".{ctx.step}.progress"
-
-        while proc_alive():
-            await asyncio.sleep(10)
-
-            # 续约:让 DB/Redis 里的 "当前 task" 秒级新鲜,scheduler 据此回收僵尸 worker。
-            await on_tick()
-
-            progress_data: dict = {}
-            if progress_file.exists():
-                try:
-                    progress_data = json.loads(progress_file.read_text())
-                except (json.JSONDecodeError, OSError):
-                    pass
-
-            progress_data["worker_heartbeat_at"] = time.time()
-            progress_file.write_text(json.dumps(progress_data))
-
-            if "current" in progress_data and "total" in progress_data:
-                await on_progress("step_progress", {
-                    "step": ctx.step,
-                    "current": progress_data["current"],
-                    "total": progress_data["total"],
-                    "pct": progress_data.get("pct", 0),
-                    "message": progress_data.get("message", ""),
-                })
+        await _run_progress_monitor(ctx, on_progress, on_tick, proc_alive)
 
 
 class DockerStepRunner:
@@ -331,30 +304,7 @@ class DockerStepRunner:
         on_tick: TickCallback,
         proc_alive: Callable[[], bool],
     ) -> None:
-        progress_file = ctx.work_dir / f".{ctx.step}.progress"
-
-        while proc_alive():
-            await asyncio.sleep(10)
-            await on_tick()
-
-            progress_data: dict = {}
-            if progress_file.exists():
-                try:
-                    progress_data = json.loads(progress_file.read_text())
-                except (json.JSONDecodeError, OSError):
-                    pass
-
-            progress_data["worker_heartbeat_at"] = time.time()
-            progress_file.write_text(json.dumps(progress_data))
-
-            if "current" in progress_data and "total" in progress_data:
-                await on_progress("step_progress", {
-                    "step": ctx.step,
-                    "current": progress_data["current"],
-                    "total": progress_data["total"],
-                    "pct": progress_data.get("pct", 0),
-                    "message": progress_data.get("message", ""),
-                })
+        await _run_progress_monitor(ctx, on_progress, on_tick, proc_alive)
 
     async def _stream_logs(self, container, work_dir: Path, step: str) -> None:
         """把容器 stdout/stderr 合流 tee 到 logs/{step}.log,运行中即可见。"""
@@ -394,6 +344,42 @@ class DockerStepRunner:
                 c.remove(force=True)
             except Exception:
                 pass
+
+
+async def _run_progress_monitor(
+    ctx: StepContext,
+    on_progress: ProgressPublisher,
+    on_tick: TickCallback,
+    proc_alive: Callable[[], bool],
+) -> None:
+    """每 10s 续约 worker 状态 + 推日志(on_tick),写 worker_heartbeat_at,转发步骤进度事件。
+    不覆盖步骤自己写的 updated_at,否则 check_stuck 失效。Subprocess/Docker runner 共用(消重复副本)。"""
+    progress_file = ctx.work_dir / f".{ctx.step}.progress"
+
+    while proc_alive():
+        await asyncio.sleep(10)
+
+        # 续约:让 DB/Redis 里的 "当前 task" 秒级新鲜,scheduler 据此回收僵尸 worker。
+        await on_tick()
+
+        progress_data: dict = {}
+        if progress_file.exists():
+            try:
+                progress_data = json.loads(progress_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        progress_data["worker_heartbeat_at"] = time.time()
+        progress_file.write_text(json.dumps(progress_data))
+
+        if "current" in progress_data and "total" in progress_data:
+            await on_progress("step_progress", {
+                "step": ctx.step,
+                "current": progress_data["current"],
+                "total": progress_data["total"],
+                "pct": progress_data.get("pct", 0),
+                "message": progress_data.get("message", ""),
+            })
 
 
 def _build_subprocess_env(ctx: StepContext) -> dict:

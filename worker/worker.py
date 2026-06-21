@@ -77,6 +77,18 @@ class Worker:
 
     async def run(self) -> None:
         await self.register()
+        # runner 在 __init__ 用初始(可能随机)id 创建;register 后可能拿到稳定身份(gateway
+        # WORKER_ID_FILE 缓存 id),同步给 runner 使容器 label 与 reap 用同一稳定 id。
+        if hasattr(self.runner, "_worker_id"):
+            self.runner._worker_id = self.worker_id
+        # docker 模式:启动时清一次本 worker 残留容器(崩溃重启遗留)。稳定 id(gateway)下可命中
+        # 跨重启残留;非 gateway 模式 id 每次随机,只能清同进程内残留——属已知边界。SubprocessRunner 无此法。
+        reap = getattr(self.runner, "reap_orphans", None)
+        if reap is not None:
+            try:
+                await asyncio.to_thread(reap)
+            except Exception:
+                logger.warning("reap_orphans_failed", worker_id=self.worker_id, exc_info=True)
         logger.info(
             "worker_start", worker_id=self.worker_id,
             type=self.worker_type, pools=self.pools,
@@ -108,9 +120,18 @@ class Worker:
         )
 
     async def heartbeat_loop(self) -> None:
+        # 心跳节拍读 config(单一事实源);此前硬编码 10s、配置项无人读。
+        interval = int((self.config.pools.get("worker_status") or {}).get("heartbeat_interval_sec", 10))
         while not self._shutdown:
-            await self.transport.heartbeat(self.worker_id)
-            await asyncio.sleep(10)
+            try:
+                await self.transport.heartbeat(self.worker_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # 瞬态 redis/网络抖动不应经 gather 杀掉整个 worker(对照 scheduler._event_loop 容错):
+                # 记日志后继续,下一拍重试;丢几拍由 worker_status.online_window(30s)容忍。
+                logger.warning("heartbeat_failed", worker_id=self.worker_id, exc_info=True)
+            await asyncio.sleep(interval)
 
     # ── 主循环 ──
 

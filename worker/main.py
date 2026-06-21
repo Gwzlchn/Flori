@@ -6,7 +6,6 @@ import argparse
 import asyncio
 import os
 import signal
-import sys
 from pathlib import Path
 
 import structlog
@@ -92,6 +91,9 @@ async def main() -> None:
     try:
         await worker.run()
     finally:
+        # 先优雅关 transport(gateway 模式才有 httpx AsyncClient 要释放;直连 RedisTransport.close 为 no-op),
+        # 再关 db/redis(RedisTransport.close 不触碰 redis/db,故无双关)。
+        await transport.close()
         if db is not None:
             db.close()
         if redis is not None:

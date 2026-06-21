@@ -193,6 +193,16 @@ class Scheduler:
             await self.resubmit(msg["job_id"])
         elif command == "retry":
             await self._retry_failed(msg["job_id"])
+        elif command == "delete":
+            # 消费 delete_job 端点的 publish:删 job 的编排状态收尾——取消在途重试、移出
+            # active_jobs、清五个 Redis 编排 hash(job:{id}/steps/retries/step_worker/step_exec)。
+            # 否则删「在途(processing)」job 后这些键泄漏,幽灵 job 被 orphan_scan/check_no_worker/
+            # check_stuck 周期空扫,迟到的 on_step_done 还可能 CAS 推进已删 job。
+            job_id = msg["job_id"]
+            self._cancel_delayed_tasks(job_id)
+            await self.redis.remove_active_job(job_id)
+            await self.redis.cleanup_job(job_id)
+            logger.info("job_deleted_cleanup", job_id=job_id)
 
     async def _periodic_loop(self) -> None:
         while not self._shutdown:
@@ -205,11 +215,19 @@ class Scheduler:
                 logger.exception("periodic_error")
             await asyncio.sleep(30)
 
-    async def cleanup_stale_workers(self, timeout_sec: int = 60) -> None:
+    async def cleanup_stale_workers(self, timeout_sec: int | None = None) -> None:
         """清理僵尸 worker：DB 中 last_heartbeat 超时且 Redis 注册已过期（worker 真没了）
-        的记录删除；仅 DB 过期但 Redis 仍在的标 offline（容器可能刚重启换 id）。"""
+        的记录删除；仅 DB 过期但 Redis 仍在的标 offline（容器可能刚重启换 id）。
+
+        删除阈值默认取 config.pools['worker_status'].stale_window_sec(与 API 侧
+        compute_worker_status 的 STALE 窗口对齐,单一事实源)。此前硬编码 60s 远小于
+        stale_window(900s)——GC 会在 worker 进入 STALE 公开态之前就删 DB 行,使 STALE
+        态对本机 DB 追踪的 worker 实际不可达。对齐后 worker 在被判 STALE 之前不会被回收。"""
         from datetime import timedelta
 
+        if timeout_sec is None:
+            ws = (self.config.pools.get("worker_status") or {}) if self.config else {}
+            timeout_sec = int(ws.get("stale_window_sec", 900))
         workers = await asyncio.to_thread(self.db.list_workers)
         now = datetime.now(timezone.utc)
         for w in workers:
@@ -484,7 +502,7 @@ class Scheduler:
     # ── DAG 推进 ──
 
     async def _check_downstream(self, job_id: str) -> None:
-        """检查所有 waiting/skipped 步骤是否可推进。on_step_done 和 mark_skipped 共用。"""
+        """检查所有 waiting/skipped 步骤是否可推进。生产由 on_step_done 调用(mark_skipped 仅测试用)。"""
         pipeline = await self.redis.get_job_pipeline(job_id)
         if not pipeline:
             return
@@ -541,6 +559,11 @@ class Scheduler:
                         if pool not in pool_ok:
                             pool_ok[pool] = await self._pool_has_workers(pool)
                         if pool_ok[pool]:
+                            continue
+                        # 缺 worker 只 skip「条件步」(可选步缺能力=合理跳过);必需步不 skip,留给
+                        # check_no_worker 超宽限 fail-fast——避免末端必需步被静默 skip 后 job「不完整却
+                        # 显示完成」(对齐 pools.yaml fail-fast 注释)。
+                        if not self._step_is_conditional(steps_cfg.get(step_name, {})):
                             continue
                         # CAS 保护 ready→skipped：若该步骤刚被 worker 抢成 running，
                         # CAS 失败 → 放弃 skip，避免覆盖在途执行。
@@ -677,6 +700,7 @@ class Scheduler:
         return True
 
     async def mark_skipped(self, job_id: str, step: str) -> None:
+        # 仅测试用:生产条件跳过走 _check_downstream 内联逻辑,无生产调用方。
         await self.redis.set_step_status(job_id, step, "skipped")
         await asyncio.to_thread(self.db.update_step, job_id, step, status="skipped")
         await self.redis.publish(f"events:{job_id}", {
@@ -685,11 +709,17 @@ class Scheduler:
         await self._check_downstream(job_id)
 
     async def _pool_has_workers(self, pool: str) -> bool:
-        """检查某个 pool 是否有在线 worker。"""
+        """检查某个 pool 是否有可认领新任务的 worker。排除 draining/offline:claim_step 对
+        draining 直接拒认领,若 pool 只剩 draining,no-worker 判定/死锁打破器会误判为可推进 →
+        ready 步既无人认领又不被 fail-fast/skip,永久卡 ready。"""
         workers = await self.redis.list_worker_ids()
         for wid in workers:
             info = await self.redis.get_worker_info(wid)
-            if info and pool in info.get("pools", "").split(","):
+            if not info:
+                continue
+            if info.get("status") in ("draining", "offline"):
+                continue
+            if pool in info.get("pools", "").split(","):
                 return True
         return False
 
@@ -776,21 +806,29 @@ class Scheduler:
                         await self._reclaim_step(
                             job_id, step,
                             f"worker {worker_id} not running this step (claim lost?)",
+                            release_slot=False,  # worker 仍存活且已 move on,它自己已/将 release 本步 slot
                         )
         # 清理不再 mismatch 的计时,避免泄漏。
         for k in [k for k in self._claim_mismatch_since if k not in live_mismatch]:
             self._claim_mismatch_since.pop(k, None)
 
-    async def _reclaim_step(self, job_id: str, step: str, reason: str) -> None:
+    async def _reclaim_step(
+        self, job_id: str, step: str, reason: str, *, release_slot: bool = True,
+    ) -> None:
         logger.warning("reclaim_step", job_id=job_id, step=step, reason=reason)
 
-        pipeline_steps = await self._get_job_pipeline_steps(job_id)
-        if pipeline_steps:
-            pool = pipeline_steps.get(step, {}).get("pool")
-            if pool:
-                await self.redis.release_slot(pool)
-                if pool == "scene":
-                    await self.redis.unfreeze_pool("cpu")
+        # release_slot=False:worker 仍存活但已转去别的 step(认领响应丢失/已 move on),它自己的
+        # finally 已经/将会 release_step 释放本步的 slot + 解冻 cpu。此时调度器再 release 会双减
+        # slot 计数、并把 cpu 池误解冻(破坏 scene↔cpu 独占,B 在跑 scene 时 cpu 被错误解冻)。
+        # 仅当 worker 确已消失(无 worker / worker_exists=False)时,才由调度器代为释放(否则泄漏)。
+        if release_slot:
+            pipeline_steps = await self._get_job_pipeline_steps(job_id)
+            if pipeline_steps:
+                pool = pipeline_steps.get(step, {}).get("pool")
+                if pool:
+                    await self.redis.release_slot(pool)
+                    if pool == "scene":
+                        await self.redis.unfreeze_pool("cpu")
 
         await self.redis.publish("step_failed", {
             "job_id": job_id, "step": step, "status": "failed",
@@ -799,6 +837,10 @@ class Scheduler:
         })
 
     async def check_stuck(self) -> None:
+        # 注:本检查读 jobs_dir/.{step}.progress(由 worker 的 _progress_monitor 写入其本地
+        # ctx.work_dir)。仅单机 LocalStorage 下 work_dir==调度器 jobs_dir 时有效;Remote/Gateway
+        # 部署 work_dir 是 worker 本地 tmp、不回传调度器盘 → 对远程 job 恒 no-op(分布式卡死兜底
+        # 需把进度新鲜度纳入心跳上报据 DB 判,属待办,见审阅报告 B7)。
         active_jobs = await self.redis.get_active_jobs()
         for job_id in active_jobs:
             statuses = await self.redis.get_all_step_statuses(job_id)
