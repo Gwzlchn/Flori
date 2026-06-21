@@ -17,22 +17,10 @@ class SmartStep(StepBase):
         return []
 
     def input_hashes(self) -> dict[str, str]:
-        prompts_dir = Path(self.config["paths"]["prompts_dir"])
-        domain_name = self.config["domain"]["name"]
         hashes: dict[str, str] = {
             "mechanical": file_hash(self.job_dir / "output" / "notes_mechanical.md"),
         }
-        prompt_path = prompts_dir / "10_smart.md"
-        if prompt_path.exists():
-            hashes["prompt"] = file_hash(prompt_path)
-        profile_path = prompts_dir / "profiles" / f"{domain_name}.yaml"
-        if profile_path.exists():
-            hashes["profile"] = file_hash(profile_path)
-        hashes["styles"] = json.dumps({
-            tag: file_hash(prompts_dir / "styles" / f"{tag}.yaml")
-            for tag in sorted(self.config.get("style_tags", []))
-            if (prompts_dir / "styles" / f"{tag}.yaml").exists()
-        }, sort_keys=True)
+        hashes.update(self.prompt_profile_style_hashes())  # prompt(可选覆盖)+ profile + styles
         # provider 覆盖纳入指纹:换 provider 重跑时指纹变化,绕过幂等跳过。
         hashes["provider"] = self.override_provider()
         return hashes
@@ -119,12 +107,7 @@ class SmartStep(StepBase):
         return "".join(parts)
 
     def _load_profile(self) -> dict:
-        prompts_dir = Path(self.config["paths"]["prompts_dir"])
-        domain_name = self.config["domain"]["name"]
-        profile_path = prompts_dir / "profiles" / f"{domain_name}.yaml"
-        if profile_path.exists():
-            return yaml.safe_load(profile_path.read_text(encoding="utf-8")) or {}
-        return {}
+        return self.load_domain_profile()
 
     def _load_style_hints(self) -> list[dict]:
         prompts_dir = Path(self.config["paths"]["prompts_dir"])

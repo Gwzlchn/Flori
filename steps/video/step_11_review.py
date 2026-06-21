@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 from shared.step_base import REVIEW_REF_LIMIT, StepBase, file_hash
 
 
@@ -67,7 +64,7 @@ class ReviewStep(StepBase):
                 "overall": 3.0,
                 "key_terms": [],
                 "missing_concepts": [],
-                "top3_improvements": ["AI 返回的不是有效 JSON，请重试"],
+                "top3_improvements": ["AI 返回的不是有效 JSON"],
             },
             score_keys=[
                 "completeness", "accuracy", "structure",

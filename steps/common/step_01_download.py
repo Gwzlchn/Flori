@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -95,7 +96,7 @@ class DownloadStep(StepBase):
         # 该文件只存在于同机 LocalStorage,绝不下发远端 worker——见 shared/storage.is_credential_file);
         # 否则回退本地 cookie 文件;两者皆无则匿名下载,降级 480P。
         sessdata = self._read_sessdata()
-        cookies = Path("/data/cookies/bilibili.txt")
+        cookies = Path(os.environ.get("DATA_DIR", "/data")) / "cookies" / "bilibili.txt"
         if sessdata:
             cmd.extend(["-c", sessdata])
         elif cookies.exists():
@@ -160,8 +161,13 @@ class DownloadStep(StepBase):
             "--convert-subs", "srt",
             "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
             "--merge-output-format", "mp4",
-            "--", url,  # -- 分隔:挡以 "-" 开头的 url 被当作 yt-dlp 选项注入
         ]
+        # 上传的 YouTube cookies(/data/cookies/youtube.txt,Netscape 格式)用于受限/年龄限制
+        # 视频;缺失则匿名下载。写入方见 api/routes/auth.py:/youtube/cookies。
+        cookies = Path(os.environ.get("DATA_DIR", "/data")) / "cookies" / "youtube.txt"
+        if cookies.exists():
+            cmd += ["--cookies", str(cookies)]
+        cmd += ["--", url]  # -- 分隔:挡以 "-" 开头的 url 被当作 yt-dlp 选项注入
         self.run_subprocess(cmd, timeout=self.config["step"]["timeout_sec"])
         self._rename_to_source_mp4(input_dir)
 
@@ -234,6 +240,9 @@ class DownloadStep(StepBase):
                 return
 
     def _download_generic(self, url: str) -> None:
+        from shared.net import assert_public_url
+
+        assert_public_url(url)  # 下载前挡内网/回环目标(SSRF):generic 接任意用户 URL,此前无校验
         input_dir = self.job_dir / "input"
         input_dir.mkdir(parents=True, exist_ok=True)
 

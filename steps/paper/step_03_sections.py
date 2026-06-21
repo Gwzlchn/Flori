@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 from shared.step_base import StepBase, file_hash
 
 
@@ -41,9 +38,9 @@ class SectionsStep(StepBase):
 
         for section in flat:
             node = {
-                "level": section["level"],
-                "title": section["title"],
-                "page": section["page"],
+                "level": section.get("level", 1),
+                "title": section.get("title", ""),
+                "page": section.get("page", 1),  # 容错:畸形输入缺 page/level/title 时不 KeyError(与 article 版一致)
                 "text": section.get("text", ""),
                 "children": [],
             }

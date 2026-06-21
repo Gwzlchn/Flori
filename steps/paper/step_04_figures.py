@@ -102,9 +102,10 @@ class FiguresStep(StepBase):
         return extracted
 
     def _create_ocr_engine(self):
+        # 宽松语义:构造失败(含未实现后端/缺库)记日志返 None,图表 OCR 可缺省不阻断本步。
+        from steps.utils.ocr import create_ocr_engine
         try:
-            from rapidocr_onnxruntime import RapidOCR
-            return RapidOCR()
+            return create_ocr_engine()
         except Exception as e:
             self.log.warning("ocr_engine_init_failed", error=str(e))
             return None

@@ -61,14 +61,9 @@ class OcrStep(StepBase):
         return {"total": len(results), "nonempty": nonempty}
 
     def _create_ocr_engine(self):
-        from steps.utils.device import select_ocr_backend
-        backend = select_ocr_backend()
-
-        if backend == "rapidocr":
-            from rapidocr_onnxruntime import RapidOCR
-            return RapidOCR()
-        else:
-            raise NotImplementedError(f"OCR backend {backend} not yet supported")
+        # 严格语义:未实现后端由工厂 raise NotImplementedError,不静默降级(刻意防御)。
+        from steps.utils.ocr import create_ocr_engine
+        return create_ocr_engine()
 
     def _ocr_image(self, engine, img_path: Path, threshold: float = 0.0) -> tuple[str, list[dict]]:
         try:

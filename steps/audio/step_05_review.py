@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from shared.step_base import REVIEW_REF_LIMIT, StepBase, file_hash
 
 

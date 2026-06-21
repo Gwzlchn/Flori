@@ -20,23 +20,11 @@ class SmartPaperStep(StepBase):
         return missing
 
     def input_hashes(self) -> dict[str, str]:
-        prompts_dir = Path(self.config["paths"]["prompts_dir"])
-        domain_name = self.config["domain"]["name"]
         hashes: dict[str, str] = {
             "sections": file_hash(self.job_dir / "intermediate" / "sections.json"),
             "figures": file_hash(self.job_dir / "intermediate" / "figures.json"),
         }
-        prompt_path = prompts_dir / "05_smart_paper.md"
-        if prompt_path.exists():
-            hashes["prompt"] = file_hash(prompt_path)
-        profile_path = prompts_dir / "profiles" / f"{domain_name}.yaml"
-        if profile_path.exists():
-            hashes["profile"] = file_hash(profile_path)
-        hashes["styles"] = json.dumps({
-            tag: file_hash(prompts_dir / "styles" / f"{tag}.yaml")
-            for tag in sorted(self.config.get("style_tags", []))
-            if (prompts_dir / "styles" / f"{tag}.yaml").exists()
-        }, sort_keys=True)
+        hashes.update(self.prompt_profile_style_hashes())  # prompt(可选覆盖)+ profile + styles
         return hashes
 
     def execute(self) -> dict | None:
@@ -96,20 +84,11 @@ class SmartPaperStep(StepBase):
         return "".join(parts)
 
     def _render_section(self, section: dict, parts: list, level: int) -> None:
-        prefix = "#" * level
-        parts.append(f"\n{prefix} {section['title']}\n\n")
-        if section.get("text"):
-            parts.append(f"{section['text'][:2000]}\n")
-        for child in section.get("children", []):
-            self._render_section(child, parts, level + 1)
+        from steps.utils.sections import render_section_tree
+        render_section_tree(section, parts, level)
 
     def _load_profile(self) -> dict:
-        prompts_dir = Path(self.config["paths"]["prompts_dir"])
-        domain_name = self.config["domain"]["name"]
-        path = prompts_dir / "profiles" / f"{domain_name}.yaml"
-        if path.exists():
-            return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        return {}
+        return self.load_domain_profile()
 
 
 if __name__ == "__main__":
