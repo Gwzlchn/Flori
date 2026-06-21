@@ -87,7 +87,10 @@ jobs:
 
       - name: Unit suite (容器内,集成镜像复用)
         run: |
-          # 在已构建的集成镜像内跑全量单测,与主 CI 的 test job 同路径,作回归兜底。
+          # 在容器内跑全量单测,与主 CI 的 test job 同路径,作回归兜底。
+          # 注(H-10):test.yml 与上面 integration build 共用同一 docker/base.Dockerfile,
+          # 故此处 build 命中 buildx/层缓存(非真正二次全量构建);保留独立 build 是因 test 栈
+          # 用不同 image tag / 挂载。如需进一步省时,可改为复用集成镜像 tag。
           docker compose -f docker-compose.test.yml build
           docker compose -f docker-compose.test.yml run --rm test
 

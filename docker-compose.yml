@@ -10,6 +10,17 @@ x-logging: &default-logging
     max-size: "10m"
     max-file: "3"
 
+# api/scheduler/worker 共用的基础 env(REDIS/DATA/CONFIG/MINIO),各 service 经 <<: *common-env
+# 合并 + 追加自身专属项,避免逐 service 复制(H-4)。
+x-common-env: &common-env
+  REDIS_URL: redis://redis:6379/0
+  DATA_DIR: /data
+  CONFIG_DIR: /app/configs
+  MINIO_URL: ${MINIO_URL:-}
+  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-}
+  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}
+  MINIO_BUCKET: ${MINIO_BUCKET:-mnemo}
+
 services:
   redis:
     container_name: mnemo-redis
@@ -32,22 +43,16 @@ services:
     volumes:
       - ${MNEMO_DATA_DIR:-mnemo-data}:/data
     environment:
-      - REDIS_URL=redis://redis:6379/0
-      - DATA_DIR=/data
-      - CONFIG_DIR=/app/configs
-      - MINIO_URL=${MINIO_URL:-}
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-}
-      - MINIO_BUCKET=${MINIO_BUCKET:-mnemo}
-      - WORK_DIR=${WORK_DIR:-/tmp/mnemo-work}
-      - API_TOKEN=${API_TOKEN:-}
+      <<: *common-env
+      WORK_DIR: ${WORK_DIR:-/tmp/mnemo-work}
+      API_TOKEN: ${API_TOKEN:-}
       # 可信内网默认放行(空 API_TOKEN);公网/局域网直连暴露务必设 API_TOKEN 并把此项置 0。
       # 未设 API_TOKEN 且此项非 1 时后端 fail-closed(503),不再静默裸奔(见 docs/07-security)。
-      - API_ALLOW_NO_AUTH=${API_ALLOW_NO_AUTH:-1}
+      API_ALLOW_NO_AUTH: ${API_ALLOW_NO_AUTH:-1}
       # app_credentials(B站 SESSDATA 等) at-rest 加密的 Fernet key。
       # 空=凭证以明文落库；设一把 Fernet key 即加密(见 docs/07-security §密钥管理)。
-      - MNEMO_SECRET_KEY=${MNEMO_SECRET_KEY:-}
-      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      MNEMO_SECRET_KEY: ${MNEMO_SECRET_KEY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
     logging: *default-logging
     healthcheck:
       # /openapi.json 始终免鉴权,能取到即进程在正常服务 HTTP(编排/watchtower 据此判活)。
@@ -72,19 +77,13 @@ services:
     volumes:
       - ${MNEMO_DATA_DIR:-mnemo-data}:/data
     environment:
-      - REDIS_URL=redis://redis:6379/0
-      - DATA_DIR=/data
-      - CONFIG_DIR=/app/configs
-      - MINIO_URL=${MINIO_URL:-}
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-}
-      - MINIO_BUCKET=${MINIO_BUCKET:-mnemo}
-      - WORK_DIR=${WORK_DIR:-/tmp/mnemo-work}
+      <<: *common-env
+      WORK_DIR: ${WORK_DIR:-/tmp/mnemo-work}
       # 与 api 共用镜像/DB,故同样传入(凭证由 api 端读写,scheduler 一般用不到,无害)。
       # 空=凭证以明文落库；设一把 Fernet key 即加密(见 docs/07-security §密钥管理)。
-      - MNEMO_SECRET_KEY=${MNEMO_SECRET_KEY:-}
+      MNEMO_SECRET_KEY: ${MNEMO_SECRET_KEY:-}
       # 设了就把卡死等关键事件 POST 到 webhook(Slack/Discord/通用);空=只记日志。
-      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-}
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
     security_opt:
       - no-new-privileges:true
     labels:
@@ -104,17 +103,11 @@ services:
       - ${MNEMO_DATA_DIR:-mnemo-data}:/data
       - ${HOST_WORK_DIR:-mnemo-work}:/tmp/mnemo-work
     environment:
-      - REDIS_URL=redis://redis:6379/0
-      - DATA_DIR=/data
-      - CONFIG_DIR=/app/configs
-      - MINIO_URL=${MINIO_URL:-}
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-}
-      - MINIO_BUCKET=${MINIO_BUCKET:-mnemo}
-      - STEP_RUNTIME=${STEP_RUNTIME:-subprocess}
-      - WORK_DIR=/tmp/mnemo-work
-      - HOST_WORK_DIR=${HOST_WORK_DIR:-}
-      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      <<: *common-env
+      STEP_RUNTIME: ${STEP_RUNTIME:-subprocess}
+      WORK_DIR: /tmp/mnemo-work
+      HOST_WORK_DIR: ${HOST_WORK_DIR:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
     security_opt:
       - no-new-privileges:true
     labels:
@@ -134,20 +127,14 @@ services:
       - ${MNEMO_DATA_DIR:-mnemo-data}:/data
       - ${HOST_WORK_DIR:-mnemo-work}:/tmp/mnemo-work
     environment:
-      - REDIS_URL=redis://redis:6379/0
-      - DATA_DIR=/data
-      - CONFIG_DIR=/app/configs
-      - MINIO_URL=${MINIO_URL:-}
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-}
-      - MINIO_BUCKET=${MINIO_BUCKET:-mnemo}
-      - STEP_RUNTIME=${STEP_RUNTIME:-subprocess}
-      - WORK_DIR=/tmp/mnemo-work
-      - HOST_WORK_DIR=${HOST_WORK_DIR:-}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
-      - HTTPS_PROXY=${HTTPS_PROXY:-}
-      - DRY_RUN=${DRY_RUN:-0}
+      <<: *common-env
+      STEP_RUNTIME: ${STEP_RUNTIME:-subprocess}
+      WORK_DIR: /tmp/mnemo-work
+      HOST_WORK_DIR: ${HOST_WORK_DIR:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      DRY_RUN: ${DRY_RUN:-0}
     security_opt:
       - no-new-privileges:true
     labels:
