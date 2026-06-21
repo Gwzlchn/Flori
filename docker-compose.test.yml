@@ -17,7 +17,18 @@ services:
       - ./worker:/app/worker
       - ./tests:/app/tests
       - ./configs:/app/configs
+      # pytest/coverage 配置(markers、[tool.coverage])的单一事实源:挂进来,改了不用重建镜像
+      - ./pyproject.toml:/app/pyproject.toml
+      # schemathesis 检查配置(只跑 not_a_server_error + response_schema_conformance)
+      - ./schemathesis.toml:/app/schemathesis.toml
     # 测试依赖版本镜像 pyproject [test](单一事实源):改版本须同步 pyproject。为保 prod 基础镜像精简,
     # test 依赖不进 base.Dockerfile,此处运行时安装(版本与 pyproject [test] 逐字一致,避免漂移)。
+    # 默认套件:跑 -m 'not fuzz' 的快测 + 分支覆盖率;fuzz(schemathesis)单独手动跑:
+    #   docker compose -f docker-compose.test.yml run --rm test \
+    #     sh -c "pip install -q 'schemathesis>=4,<5' && pytest -m fuzz tests/test_openapi_fuzz.py --no-cov -q"
     command: >
-      sh -c "pip install --quiet 'fakeredis[lua]>=2.28,<4' 'pytest>=8.0,<9' 'pytest-asyncio>=0.24,<1' && pytest -v -p no:cacheprovider"
+      sh -c "pip install --quiet 'fakeredis[lua]>=2.28,<4' 'pytest>=8.0,<9'
+      'pytest-asyncio>=0.24,<1' 'pytest-cov>=5,<7' 'schemathesis>=4,<5' &&
+      pytest -v -p no:cacheprovider -m 'not fuzz'
+      --cov=shared --cov=api --cov=scheduler --cov=worker --cov=steps
+      --cov-branch --cov-report=term-missing --cov-fail-under=75"

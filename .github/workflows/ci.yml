@@ -8,17 +8,23 @@ on:
     branches: [main]
 
 jobs:
-  # 容器内跑全部单元测试（与本地 docker compose test 同路径）。
+  # 容器内跑全部单元测试 + 分支覆盖率门(与本地 docker compose test 同路径)。
   test:
     runs-on: ubuntu-latest
     env:
       USE_USTC_MIRROR: "0"     # 海外 runner 用官方源
     steps:
       - uses: actions/checkout@v6
-      - name: Unit tests in container
+      - name: Unit tests + 分支覆盖率门(--cov-fail-under=75,见 docker-compose.test.yml)
         run: |
           docker compose -f docker-compose.test.yml build
           docker compose -f docker-compose.test.yml run --rm test
+      # OpenAPI 模糊/契约(schemathesis):对每个端点喂畸形输入,断言不 5xx 崩溃。
+      # 复用上一步已 build 的镜像;fuzz 用例带 `fuzz` marker(默认套件已 -m 'not fuzz' 排除),此处单独 -m fuzz 跑。
+      - name: Schemathesis 模糊/契约(无 5xx)
+        run: |
+          docker compose -f docker-compose.test.yml run --rm test \
+            sh -c "pip install -q 'fakeredis[lua]>=2.28,<4' 'pytest>=8.0,<9' 'pytest-asyncio>=0.24,<1' 'schemathesis>=4,<5' && pytest -m fuzz tests/test_openapi_fuzz.py -p no:cacheprovider -q"
 
   # 仅 main：测试通过后构建镜像（amd64；所有目标机均为 x86）并推送。
   build-push:

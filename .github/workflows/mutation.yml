@@ -1,0 +1,50 @@
+name: Mutation (manual)
+
+# 变异测试(mutmut):给核心模块注入小改动(< → <=、+1、True→False…),逐个跑测试套件——
+# 测试仍绿 = "存活变异" = 你的断言抓不住的真实 bug。变异分数(killed / 非等价)直接量
+# "测试到底有没有意义",比覆盖率更狠。
+#
+# 慢(每个变异要跑相关测试)→ 仅手动触发(workflow_dispatch),不挂每个 PR。
+# 打哪些模块见 pyproject.toml [tool.mutmut].source_paths:
+#   shared/ai_gateway.py(计费/exec_id 去重 → 重复计费风险)、shared/db.py、
+#   scheduler/(步骤状态迁移)、worker/(乐观锁)—— 都是 docs/09-testing.md 反复强调的并发/计费安全面。
+#
+# 报告态:存活变异不让本 job 变红(初期必有存活),killed/survived/stats 打到日志供人工裁定;
+# 想收紧成硬门时,把下面 `|| true` 去掉、或对 survived 数加阈值即可。
+on:
+  workflow_dispatch:
+    inputs:
+      pattern:
+        description: "只跑匹配的子集(mutmut 通配符,如 shared.ai_gateway*);留空=全部 source_paths"
+        required: false
+        default: ""
+
+jobs:
+  mutmut:
+    runs-on: ubuntu-latest
+    env:
+      USE_USTC_MIRROR: "0"     # 海外 runner 用官方源
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build test image
+        run: docker compose -f docker-compose.test.yml build
+
+      - name: Mutation testing(核心模块,配置取 pyproject [tool.mutmut])
+        env:
+          PATTERN: ${{ github.event.inputs.pattern }}
+        run: |
+          docker compose -f docker-compose.test.yml run --rm -e PATTERN="$PATTERN" test sh -c '
+            set -f   # 关 glob,让 shared.db* 等通配符原样传给 mutmut(而非被 shell 展开成文件名)
+            pip install -q "fakeredis[lua]>=2.28,<4" "pytest>=8.0,<9" "pytest-asyncio>=0.24,<1" "mutmut>=3,<4" || exit 1
+            # source_paths 是整个应用(见 pyproject [tool.mutmut]);这里把"真正测哪几个模块"scope 到核心 4 个。
+            # 逐目标顺序跑,每跑完一个就打印它的 results/stats —— mutmut 共用一个 ./mutants/,跑下一个目标
+            # 会把上一个的结果重置为 None,故"聚合"以下面各目标段落为准,不要只看最后一次的总数。
+            if [ -n "$PATTERN" ]; then TARGETS="$PATTERN"; else TARGETS="shared.ai_gateway* shared.db* scheduler* worker*"; fi
+            for p in $TARGETS; do
+              echo "════════ mutmut run $p ════════"
+              mutmut run "$p" || true
+              echo "──── results: $p ────"; mutmut results || true
+              echo "──── CI/CD stats: $p ────"; mutmut export_cicd_stats && cat mutants/mutmut-cicd-stats.json || true
+            done
+          '

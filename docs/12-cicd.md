@@ -5,12 +5,12 @@
 ## 1. Pipeline 概览
 
 ```
-Push/PR to main   → Unit Test（容器内全部单测）
+Push/PR to main   → Unit Test + 分支覆盖率门(≥75%) + Schemathesis 模糊(无 5xx)
 Merge to main     → + Build + Push Image (ghcr.io) → Watchtower 自动拉取重建（CD）
-手动触发           → E2E 集成回归（workflow_dispatch，起整栈接线探针 + 单测兜底）
+手动触发           → E2E 集成回归 / Mutation 变异测试（workflow_dispatch）
 ```
 
-每次 PR/push 只跑容器内单测（`test` job）。集成回归是**手动门**（`e2e.yml`，见 §4），不挂在每个 PR 上以免给主 CI 加负载。
+每次 PR/push 跑容器内单测 + **分支覆盖率门** + **Schemathesis 模糊/契约**（同一 `test` job,见 §4）。集成回归(`e2e.yml`)与变异测试(`mutation.yml`)是**手动门**(`workflow_dispatch`),不挂在每个 PR 上以免给主 CI 加负载。
 
 ## 2. 镜像发布
 
@@ -46,9 +46,11 @@ sudo ./svc.sh install && sudo ./svc.sh start
 
 ## 4. Workflow 设计
 
-实际实现见 `.github/workflows/ci.yml`（主 CI）+ `.github/workflows/step-images.yml`（按步执行镜像，仅手动触发）：
+实际实现见 `.github/workflows/ci.yml`（主 CI）+ `.github/workflows/step-images.yml`（按步执行镜像，手动）+ `.github/workflows/mutation.yml`（变异测试，手动）：
 
-- `test`：push/PR 到 main 触发，`docker compose -f docker-compose.test.yml run --rm test`（全部单测）。
+- `test`：push/PR 到 main 触发，两步(复用同一 build):
+  - **单测 + 分支覆盖率门**:`docker compose -f docker-compose.test.yml run --rm test` —— 跑 `-m 'not fuzz'` 全部单测,带 `--cov-branch` 分支覆盖 + `--cov-fail-under=75`(低于 75% 直接红,防覆盖率倒退;当前基线 ~78%)。覆盖率配置(分支/markers)单一事实源在 `pyproject.toml`,经 compose 挂载进容器。
+  - **Schemathesis 模糊/契约**:`pytest -m fuzz tests/test_openapi_fuzz.py` —— in-process 从 `/openapi.json` 自动派生用例喂每个端点,断言不 5xx(`not_a_server_error` + `response_schema_conformance`,检查集见仓库根 `schemathesis.toml`)。曾借此揪出分页 `offset` 溢出 SQLite int64 的 500 并修复。
 - `build-push`：仅 main、测试通过后，用 buildx 构建 **amd64**（所有目标机均为 x86，不构 arm64）推 ghcr.io；
   矩阵两个镜像 `mnemo`（api/scheduler/worker 共用）与 `mnemo-frontend`。
 - `step-images.yml`：步骤执行镜像（`mnemo-step-base` / `mnemo-step-heavy` / `mnemo-step-gpu`）独立于主 CI，`workflow_dispatch` 手动触发，同样只构 amd64。
@@ -71,6 +73,8 @@ sudo ./svc.sh install && sudo ./svc.sh start
   TEST_VIDEO_FILE=/path/to.mp4 bash tests/integration/run_e2e_cpu.sh           # 下载+CPU 链
   KIMI_API_KEY=... TEST_VIDEO_FILE=/path/to.mp4 bash tests/integration/run_e2e_ai.sh   # 全链路+真实 AI 笔记
   ```
+
+- `mutation.yml`（**变异测试门**，`workflow_dispatch` 手动）：对 `pyproject.toml [tool.mutmut].source_paths` 的核心模块（`shared/ai_gateway.py` 计费/`exec_id` 去重、`shared/db.py`、`scheduler/` 状态机、`worker/` 乐观锁）注入变异,逐个跑测试套件。**存活变异 = 测试抓不住的真实 bug**——`ai_usage` 去重或乐观锁里若有存活变异 = 字面意义的重复计费/双跑风险。慢 → 仅手动;报告态(存活不让 job 红,killed/survived/CI-CD stats 打日志供人工裁定)。可传 `pattern`(如 `shared.ai_gateway*`)只跑子集。注:mutmut 3.x 配置键是 `source_paths`(非 v2 的 `paths_to_mutate`)。
 
 部署为自动 CD：生产 `docker-compose.yml` 跑 Watchtower（`containrrr/watchtower`），每 120s 查 ghcr，只更新带 `com.centurylinklabs.watchtower.enable=true` 标签的容器，自动 pull + 重建 + 清理旧镜像。无 SSH 自动部署脚本。
 
@@ -130,5 +134,7 @@ CONFIG_DIR=/data/configs        # 配置目录
 - [x] 创建 `.env.example`
 - [x] 创建 `.github/workflows/e2e.yml`（手动集成回归门：`integration-smoke` 接线探针 + 单测兜底 / `paper-e2e` 真实素材 paper 链跑到 done）
 - [x] 真实素材 paper pipeline E2E 自动化（自带微型 PDF fixture `tests/fixtures/sample.pdf` + `tests/integration/ci_paper_e2e.sh`，无需网络/API key，已并入 `e2e.yml` 的 `paper-e2e` job）
+- [x] `test` job 接入**分支覆盖率门**(`--cov-branch --cov-fail-under=75`)+ **Schemathesis 模糊/契约**(`-m fuzz`,`schemathesis.toml`)
+- [x] 创建 `.github/workflows/mutation.yml`(变异测试手动门;core 模块 `source_paths` 见 `pyproject.toml [tool.mutmut]`)
 - [ ] 首次 push 后到仓库 Packages 确认镜像、Watchtower 自动更新验证
 - [ ] 真实素材**视频/AI 全链路** E2E 自动化（需自托管 runner + 固定 mp4 素材 + 真实 API key，当前人工执行）

@@ -1,0 +1,11 @@
+# schemathesis 配置(pytest 集成与 st CLI 都会从 cwd 向上自动加载到仓库根)。
+# 本项目把"接口会不会 5xx 崩"当硬信号,不纠结 OpenAPI 文档化的完备性:
+#   - not_a_server_error           : 无 5xx(真崩溃)—— 最高价值的回归守门
+#   - response_schema_conformance  : 2xx 响应体符合自己声明的 schema
+# 关掉 status_code_conformance:FastAPI 不会自动把 HTTPException 的 404/400/409 写进 OpenAPI,
+#   于是它会把每个端点对随机 ID 返回的合理 404 误报成"未文档化状态码"(纯噪音)。
+#   若日后想严格对齐契约,把它打开、并给路由补 responses={404: ...} 即可。
+[checks]
+enabled = false
+not_a_server_error.enabled = true
+response_schema_conformance.enabled = true

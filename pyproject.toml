@@ -47,6 +47,12 @@ test = [
     "pytest>=8.0,<9",
     "pytest-asyncio>=0.24,<1",
     "fakeredis[lua]>=2.28,<4",
+    "pytest-cov>=5,<7",
+    "schemathesis>=4,<5",
+]
+mutation = [
+    # 变异测试(慢,仅手动 / CI workflow_dispatch 跑;量"测试到底有没有意义")
+    "mutmut>=3,<4",
 ]
 
 [build-system]
@@ -59,3 +65,22 @@ include = ["shared*", "steps*", "api*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "fuzz: OpenAPI 模糊/契约测试(schemathesis,较慢)。默认套件用 -m 'not fuzz' 跳过;手动 -m fuzz 跑。",
+]
+
+[tool.coverage.run]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+
+# 变异测试(mutmut 3.x)。目标:量"花钱/正确性关键"模块(计费去重 ai_gateway、DB、调度状态机、worker 乐观锁)
+# 的测试到底有没有意义。慢 → 仅经 .github/workflows/mutation.yml 手动触发;本地 pip install '.[test,mutation]'。
+# 注:v3 用 source_paths(非 v2 的 paths_to_mutate)。mutmut 把 source_paths 复制到 ./mutants/ 再变异+跑测试,
+#     故 mutants/ 必须是"可运行的完整副本":source_paths 放整个应用 + also_copy 补 tests/configs/pyproject;
+#     "真正测哪几个模块"靠 mutmut run 的通配符 scope(见 mutation.yml,默认只打那 4 个)。
+[tool.mutmut]
+source_paths = ["shared", "scheduler", "worker", "api", "steps"]
+also_copy = ["tests", "configs", "pyproject.toml"]
+pytest_add_cli_args_test_selection = ["tests/", "-m", "not fuzz"]
