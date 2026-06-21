@@ -1,3 +1,6 @@
+# 显式项目名,避免回退目录名(ai-knowledge-base)时 redis-data 等命名卷与生产同名 → 覆盖/串数据。
+name: mnemo-dev
+
 services:
   redis:
     image: redis:7-alpine

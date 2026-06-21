@@ -24,8 +24,9 @@ RUN if [ "$USE_USTC_MIRROR" = "1" ]; then \
 WORKDIR /app
 
 COPY pyproject.toml .
-RUN pip install --no-cache-dir ".[steps,api,worker,gpu]" && \
-    pip install --no-cache-dir websockets httpx
+# httpx 已是核心依赖(pyproject [project].dependencies)、websockets 由 [api] 的 uvicorn[standard]
+# 传递引入,故不再裸装(原 `pip install websockets httpx` 冗余且不带版本上界)。
+RUN pip install --no-cache-dir ".[steps,api,worker,gpu]"
 
 # 不写 .pyc/__pycache__：配合 test/dev compose 的 bind-mount，避免容器内 pytest
 # 把缓存写回宿主源码目录(此前"在 docker 里测试仍冒缓存"的根因)。日志不缓冲。
@@ -38,4 +39,9 @@ COPY api/ api/
 COPY scheduler/ scheduler/
 COPY worker/ worker/
 COPY configs/ configs/
+# prompts_dir 运行时解析为 /data/prompts(config.data_dir/'prompts')。此处 build 期把仓库
+# configs/prompts(profiles/styles 等)塞进镜像 /data/prompts。注意:生产 /data 是命名卷,首建空卷
+# 时被 seed,之后持久化——后续 rebuild 镜像的新 profiles/styles【不会】自动覆盖卷里旧内容。
+# 更新仓库 profiles/styles 后需手动同步 /data/prompts(或重置该卷)。profiles 经 API 可运行时编辑,
+# 故不能直接只读 bind-mount 仓库目录覆盖。
 COPY configs/prompts/ /data/prompts/

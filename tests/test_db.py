@@ -847,7 +847,7 @@ class TestDBEdgeCases:
         old = AIUsage(
             exec_id="old-usage-1",
             provider="anthropic",
-            model="claude-opus-4-6",
+            model="claude-opus-4-8",
             job_id="j1",
             step="A",
             input_tokens=100,
@@ -857,7 +857,7 @@ class TestDBEdgeCases:
         recent = AIUsage(
             exec_id="recent-usage-1",
             provider="anthropic",
-            model="claude-opus-4-6",
+            model="claude-opus-4-8",
             job_id="j2",
             step="B",
             input_tokens=200,

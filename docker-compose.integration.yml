@@ -1,3 +1,6 @@
+# 显式项目名,隔离命名空间(避免回退目录名与生产/dev 撞卷名)。
+name: mnemo-integration
+
 services:
   redis:
     image: redis:7-alpine

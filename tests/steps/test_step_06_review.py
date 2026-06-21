@@ -1,9 +1,6 @@
 """tests for steps/paper/step_06_review.py"""
 
 import json
-import os
-
-import pytest
 
 from steps.paper.step_06_review import PaperReviewStep
 from tests.steps.conftest import make_step_config

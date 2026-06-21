@@ -1,9 +1,6 @@
 """tests for steps/video/step_11_review.py"""
 
 import json
-import os
-
-import pytest
 
 from steps.video.step_11_review import ReviewStep
 from tests.steps.conftest import make_step_config

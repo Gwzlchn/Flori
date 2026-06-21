@@ -17,5 +17,7 @@ services:
       - ./worker:/app/worker
       - ./tests:/app/tests
       - ./configs:/app/configs
+    # 测试依赖版本镜像 pyproject [test](单一事实源):改版本须同步 pyproject。为保 prod 基础镜像精简,
+    # test 依赖不进 base.Dockerfile,此处运行时安装(版本与 pyproject [test] 逐字一致,避免漂移)。
     command: >
-      sh -c "pip install --quiet 'fakeredis[lua]>=2.28,<4' 'pytest>=8,<9' 'pytest-asyncio>=0.24,<1' && pytest -v -p no:cacheprovider"
+      sh -c "pip install --quiet 'fakeredis[lua]>=2.28,<4' 'pytest>=8.0,<9' 'pytest-asyncio>=0.24,<1' && pytest -v -p no:cacheprovider"

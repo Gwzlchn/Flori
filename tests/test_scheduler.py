@@ -194,8 +194,10 @@ class TestSkipNoWorker:
         assert await s._pool_has_workers("gpu") is False
 
     @pytest.mark.asyncio
-    async def test_all_ready_no_worker_gets_skipped(self, redis, db, config):
-        # 仅剩 A=ready、其余 done/skipped、且 cpu 无 worker → A 被 skip，job 收尾
+    async def test_all_ready_no_worker_required_step_not_skipped(self, redis, db, config):
+        # 仅剩 A=ready(必需步,无 condition/rules)、其余 done/skipped、cpu 无 worker:
+        # 死锁打破器【不】skip 必需步——留给 check_no_worker 超宽限 fail-fast,避免「不完整却显示完成」。
+        # (此前行为是把必需步也 skip 掉令 job 收尾,与 pools.yaml fail-fast 意图冲突,审阅报告 B3。)
         s = Scheduler(redis, db, config)
         job = make_job()
         db.create_job(job)
@@ -203,7 +205,7 @@ class TestSkipNoWorker:
         await redis.set_step_status("j_test_001", "B", "skipped")
         await redis.set_step_status("j_test_001", "C", "skipped")
         await s._check_downstream("j_test_001")
-        assert await redis.get_step_status("j_test_001", "A") == "skipped"
+        assert await redis.get_step_status("j_test_001", "A") == "ready"
 
     @pytest.mark.asyncio
     async def test_running_step_blocks_eager_skip(self, redis, db, config):
@@ -231,8 +233,10 @@ class TestSkipNoWorker:
 
     @pytest.mark.asyncio
     async def test_ready_won_by_worker_during_skip_not_skipped(self, redis, db, config):
-        # CAS 保护：判定无 worker 后该步骤被 worker 抢成 running，skip 应放弃
+        # CAS 保护：判定无 worker 后该步骤被 worker 抢成 running，skip 应放弃。
+        # B3 后死锁打破器只 skip 条件步,故把 A 视为条件步以走到 ready→skipped 的 CAS 路径。
         s = Scheduler(redis, db, config)
+        s._step_is_conditional = lambda cfg: True  # 令 A 走条件步 skip 分支(测 CAS 保护)
 
         async def _no_workers(_pool):
             return False
@@ -1494,10 +1498,12 @@ class TestCleanupStaleWorkers:
     @pytest.mark.asyncio
     async def test_dead_worker_deleted_alive_marked_offline(self, scheduler, redis, db):
         """DB 心跳超时 + Redis 注册已过期 -> 删除；Redis 仍在 -> 标 offline。"""
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
         from shared.models import Worker as WorkerModel
 
-        old = datetime.now() - timedelta(minutes=10)
+        # 用 aware UTC(与 cleanup_stale_workers 的 datetime.now(timezone.utc) 同基准);
+        # 此前用 naive datetime.now() 在非 UTC 宿主上会把心跳算成「未来」,致 stale 永假。
+        old = datetime.now(timezone.utc) - timedelta(minutes=10)
         # dead: DB 过期，Redis 无注册
         db.upsert_worker(
             WorkerModel(id="cpu-dead", type="cpu", status="busy",
@@ -1599,7 +1605,7 @@ class TestOrphanClaimMismatch:
                    "current_job": "", "current_step": ""},
         )
         calls = []
-        async def fake_reclaim(job_id, step, reason):
+        async def fake_reclaim(job_id, step, reason, **kwargs):
             calls.append((job_id, step))
         s._reclaim_step = fake_reclaim
         await s.orphan_scan()
@@ -1619,7 +1625,7 @@ class TestOrphanClaimMismatch:
                    "current_job": "j_test_001", "current_step": "A"},
         )
         calls = []
-        async def fake_reclaim(job_id, step, reason):
+        async def fake_reclaim(job_id, step, reason, **kwargs):
             calls.append((job_id, step))
         s._reclaim_step = fake_reclaim
         await s.orphan_scan()
@@ -1637,7 +1643,7 @@ class TestOrphanClaimMismatch:
             "w1", {"type": "cpu", "pools": "cpu,io", "status": "idle", "current_step": ""},
         )
         calls = []
-        async def fake_reclaim(job_id, step, reason):
+        async def fake_reclaim(job_id, step, reason, **kwargs):
             calls.append((job_id, step))
         s._reclaim_step = fake_reclaim
         await s.orphan_scan()  # 首次只记时,不回收

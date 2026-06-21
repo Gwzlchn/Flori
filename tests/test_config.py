@@ -150,7 +150,7 @@ class TestSanitizeProviders:
     def test_strips_api_key_keeps_selection(self):
         raw = {"providers": {
             "anthropic": {"type": "anthropic", "api_key": "sk-secret",
-                          "models": ["claude-opus-4-6"]},
+                          "models": ["claude-opus-4-8"]},
             "deepseek": {"type": "openai_compatible", "base_url": "https://x",
                          "api_key": "sk-deep", "models": ["deepseek-v4-pro"]},
         }}
@@ -159,7 +159,7 @@ class TestSanitizeProviders:
         assert "api_key" not in clean["providers"]["deepseek"]
         # 非密钥的 provider/model 选择保留，gateway 仍能路由。
         assert clean["providers"]["anthropic"]["type"] == "anthropic"
-        assert clean["providers"]["anthropic"]["models"] == ["claude-opus-4-6"]
+        assert clean["providers"]["anthropic"]["models"] == ["claude-opus-4-8"]
         assert clean["providers"]["deepseek"]["base_url"] == "https://x"
 
     def test_does_not_mutate_input(self):

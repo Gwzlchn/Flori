@@ -30,4 +30,6 @@ services:
 networks:
   default:
     external: true
-    name: ai-knowledge-base_default
+    # 参数化生产网络名:生产默认项目名=目录名(ai-knowledge-base);若给生产 compose 加 name: mnemo,
+    # 网络变 mnemo_default,用 PROD_NETWORK 覆盖即可,无需改本文件(与 H-5 命名治理联动)。
+    name: ${PROD_NETWORK:-ai-knowledge-base_default}
