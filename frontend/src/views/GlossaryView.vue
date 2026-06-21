@@ -67,6 +67,7 @@ async function acceptTerm(t: GlossaryTerm) {
 }
 
 async function removeTerm(t: GlossaryTerm) {
+  if (!confirm(`确定删除概念「${t.term}」？此操作不可撤销。`)) return
   try {
     await api.del(`/api/glossary/${encodeURIComponent(t.domain)}/${encodeURIComponent(t.term)}`)
     showToast('已删除', 'success')

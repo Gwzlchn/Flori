@@ -5,7 +5,7 @@ import { useDomainStore } from '../../stores/domains'
 import { useGlobalStore } from '../../stores/global'
 import { useApi } from '../../composables/useApi'
 import {
-  Send, Inbox, BookMarked, Lightbulb, ChevronRight,
+  Send, Inbox, BookMarked, Lightbulb, ChevronRight, ChevronUp, ChevronDown,
   Rss, Folder, Server, Settings, PanelLeftClose, Plus,
 } from 'lucide-vue-next'
 
@@ -113,6 +113,15 @@ function onDrop(i: number) {
   localStorage.setItem(ORDER_KEY, JSON.stringify(arr))
 }
 function onDragEnd() { dragFrom.value = -1; dragOver.value = -1 }
+// 上移/下移:触屏没有 HTML5 拖拽,用按钮换序(同样写 localStorage)。
+function moveKb(i: number, dir: number) {
+  const arr = orderedDomains.value.map(d => d.domain)
+  const j = i + dir
+  if (j < 0 || j >= arr.length) return
+  ;[arr[i], arr[j]] = [arr[j], arr[i]]
+  kbOrder.value = arr
+  localStorage.setItem(ORDER_KEY, JSON.stringify(arr))
+}
 </script>
 
 <template>
@@ -144,6 +153,10 @@ function onDragEnd() { dragFrom.value = -1; dragOver.value = -1 }
             </span>
             <span class="nb-dot" :style="{ background: kbColor(d.domain) }" />
             <span class="nb-name" @click="nav(`/kb/${encodeURIComponent(d.domain)}`)">{{ d.domain }}</span>
+            <span class="kb-move">
+              <button class="kb-mv" title="上移" :disabled="i === 0" @click.stop="moveKb(i, -1)"><ChevronUp :size="13" /></button>
+              <button class="kb-mv" title="下移" :disabled="i === orderedDomains.length - 1" @click.stop="moveKb(i, 1)"><ChevronDown :size="13" /></button>
+            </span>
           </div>
 
           <div class="kb-sources" :class="{ open: expandedKb[d.domain] }">
@@ -194,4 +207,11 @@ function onDragEnd() { dragFrom.value = -1; dragOver.value = -1 }
 /* #5dup 拖拽中的落点提示 + 抓取手势 */
 .sub-item[draggable="true"] { cursor: grab; }
 .sub-item.dragover { box-shadow: inset 0 2px 0 var(--brand-500); }
+/* #5dup 上移/下移按钮:默认淡出,hover 行时显现(触屏长按行也可见);移动端常驻 */
+.kb-move { display: inline-flex; flex: none; opacity: 0; transition: opacity .12s; }
+.sub-item:hover .kb-move { opacity: 1; }
+.kb-mv { display: inline-flex; align-items: center; padding: 1px; color: var(--ink-400); border-radius: 3px; }
+.kb-mv:hover:not(:disabled) { color: var(--ink-700); background: var(--raised); }
+.kb-mv:disabled { opacity: .35; cursor: default; }
+@media (max-width: 768px) { .kb-move { opacity: 1; } }
 </style>
