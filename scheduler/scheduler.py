@@ -375,7 +375,11 @@ class Scheduler:
         if self.storage is None:
             return
         try:
-            if step in _NOTE_STEPS:
+            if step == "01_download":
+                # 下载一完成就把标题/发布时间从 metadata.json 同步进 DB,使内容名在处理过程中
+                # 即可显示(不必等整个 job 完成);job_done 时仍兜底同步一次。
+                await self._sync_published_at(job_id)
+            elif step in _NOTE_STEPS:
                 await self._index_job_notes(job_id, _NOTE_STEPS[step])
             elif step in _REVIEW_STEPS:
                 await self._collect_glossary(job_id)
