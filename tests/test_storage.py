@@ -109,6 +109,16 @@ class TestLocalStorage:
         with pytest.raises(ValueError):
             await storage.write_file("j_ok", "../escape.txt", b"x")
 
+    @pytest.mark.asyncio
+    async def test_null_byte_in_path_blocked(self, storage):
+        # 空字节(null byte)会让 pathlib.resolve() 抛 ValueError(裸传即 500);_safe_path 在源头拦成 ValueError。
+        with pytest.raises(ValueError):
+            await storage.read_file("j_ok", "assets/x\x00.jpg")
+        with pytest.raises(ValueError):
+            await storage.read_file("j\x00", "f.txt")
+        with pytest.raises(ValueError):
+            await storage.write_file("j_ok", "a\x00b", b"x")
+
 
 class TestRemoteListFiles:
     @pytest.mark.asyncio

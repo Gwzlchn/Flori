@@ -45,6 +45,13 @@ def app(db, test_config):
 
 class TestSearch:
     @pytest.mark.asyncio
+    async def test_null_byte_query_returns_400(self, client):
+        # q 含空字节(%00)曾让 sqlite3 FTS 绑定抛 "unterminated string" → 裸 500;
+        # 现入口中间件统一拦成 400(回归:schemathesis fuzz seed=42 发现)。
+        resp = await client.get("/api/search?q=%00")
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
     async def test_chinese_substring_hit(self, client):
         # trigram 中文子串命中：3 个 job 含"反向传播"。
         resp = await client.get("/api/search", params={"q": "反向传播"})

@@ -37,6 +37,13 @@ def sample_job():
     )
 
 
+def test_fts_match_query_strips_null_byte():
+    # 含空字节的查询:剔除 \x00,不进入 sqlite3 绑定(否则 "unterminated string" → 裸 500)。
+    from shared.db import _fts_match_query
+    assert "\x00" not in _fts_match_query("ab\x00c")
+    assert _fts_match_query("\x00") == ""
+
+
 class TestSchema:
     def test_init_idempotent(self, tmp_path):
         d = Database(tmp_path / "test.db")
