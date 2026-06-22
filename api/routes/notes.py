@@ -136,6 +136,14 @@ async def get_review(job_id: str, file: str | None = None,
     return await _serve(storage, job_id, rel, "application/json", "review not ready")
 
 
+@router.get("/{job_id}/evidence")
+async def get_evidence(job_id: str, storage: StorageBackend = Depends(get_storage)):
+    """权威来源（取证产物 evidence.json）：案例类笔记 AI fetch 的判决/处罚/报道来源 + 引用证据。
+    裸透传，前端「权威来源」tab 渲染；未取证则 404。"""
+    return await _serve(storage, job_id, "output/evidence.json", "application/json",
+                        "evidence not ready")
+
+
 @router.get("/{job_id}/assets/{filename}")
 async def get_asset(job_id: str, filename: str, storage: StorageBackend = Depends(get_storage)):
     if ".." in filename or "/" in filename:

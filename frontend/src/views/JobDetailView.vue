@@ -15,7 +15,7 @@ import type { JobDetail, GlossaryTerm, JobConcept } from '../types'
 import {
   Play, FileText, ExternalLink, BookOpen, Lightbulb,
   GitBranch, Info, RefreshCw, ChevronDown, Star, List, RotateCcw, Trash2,
-  AlertTriangle, ChevronRight, Bookmark,
+  AlertTriangle, ChevronRight, Bookmark, ShieldCheck,
 } from 'lucide-vue-next'
 
 // 内容详情(原型 #detail)：头部 + 4 tab(笔记/概念/流水线/元信息)。
@@ -36,7 +36,7 @@ const loading = ref(true)
 const loadError = ref('')
 
 // ── tab ──
-type Tab = 'notes' | 'concepts' | 'proc' | 'info'
+type Tab = 'notes' | 'concepts' | 'proc' | 'info' | 'evidence'
 const tab = ref<Tab>('proc')
 const TABS: { key: Tab; label: string; icon: any }[] = [
   { key: 'notes', label: '笔记', icon: BookOpen },
@@ -93,6 +93,7 @@ async function fetchDetail() {
       { t: d.title || jobId.value },
     ])
     setInitialSteps(d.steps)
+    loadEvidence()  // 权威来源(取证产物);有则显示「权威来源」tab
     // 完成态默认落笔记，否则落流水线。
     tab.value = d.status === 'done' ? 'notes' : 'proc'
   } catch (e: any) {
@@ -198,6 +199,15 @@ async function loadReview() {
     ? `/api/jobs/${jobId.value}/review?file=${encodeURIComponent(v.review_file)}`
     : `/api/jobs/${jobId.value}/review`
   try { review.value = await api.get<Record<string, any>>(url) } catch { review.value = null }
+}
+
+// ════════════════════ 权威来源(evidence) tab ════════════════════
+// 取证产物 evidence.json：案例类笔记 AI fetch 的判决/处罚/报道来源。有则显示 tab，404 即无。
+const evidence = ref<any | null>(null)
+const hasEvidence = computed(() => !!evidence.value?.evidence?.length)
+async function loadEvidence() {
+  try { evidence.value = await api.get<any>(`/api/jobs/${jobId.value}/evidence`) }
+  catch { evidence.value = null }
 }
 
 let notesInit = false
@@ -434,6 +444,9 @@ watch(job, (j) => {
         <button v-for="t in TABS" :key="t.key" :class="{ on: tab === t.key }" @click="tab = t.key">
           <component :is="t.icon" :size="15" />{{ t.label }}
         </button>
+        <button v-if="hasEvidence" :class="{ on: tab === 'evidence' }" @click="tab = 'evidence'">
+          <ShieldCheck :size="15" />权威来源
+        </button>
       </div>
 
       <!-- ════ 笔记 ════ -->
@@ -544,6 +557,41 @@ watch(job, (j) => {
               :href="`#${h.id}`" :class="{ sub: h.level >= 3 }"
             >{{ h.text }}</a>
           </nav>
+        </div>
+      </div>
+
+      <!-- ════ 权威来源 ════ -->
+      <div v-show="tab === 'evidence'">
+        <div class="card pad">
+          <div class="card-h"><ShieldCheck :size="15" />权威来源<template v-if="evidence?.evidence?.length"> · {{ evidence.evidence.length }}</template></div>
+          <p class="lead" style="margin:-6px 0 12px">AI 取证为这条案例笔记抓取的判决/处罚/报道来源。笔记里的精确数据可点链接到原文核验。</p>
+
+          <div v-if="evidence?.case_match" style="font-size:12.5px;color:var(--ink-600);margin-bottom:12px;padding:8px 10px;background:var(--bg-soft,#f6f7f9);border-radius:8px">
+            <span style="font-weight:600" :style="{ color: evidence.case_match.confidence === 'high' ? '#15803d' : '#b45309' }">匹配 {{ evidence.case_match.confidence }}</span>
+            ·
+            {{ evidence.case_match.subject }}
+            <div v-if="evidence.case_match.note" style="margin-top:4px;color:var(--ink-500)">⚠ {{ evidence.case_match.note }}</div>
+          </div>
+
+          <div v-for="s in evidence?.evidence || []" :key="s.id" class="card pad" style="margin-bottom:10px">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
+              <span class="chip on" style="cursor:default">{{ s.id }}</span>
+              <span class="badge">{{ s.type }}</span>
+              <span style="font-size:11px;font-weight:600" :style="{ color: s.match_confidence === 'high' ? '#15803d' : '#b45309' }">{{ s.match_confidence }}</span>
+              <strong style="font-size:13.5px">{{ s.title }}</strong>
+            </div>
+            <div style="font-size:12px;color:var(--ink-500);margin-bottom:6px">
+              {{ s.publisher }}<template v-if="s.ref"> · {{ s.ref }}</template>
+              <a :href="s.url" target="_blank" rel="noopener" style="margin-left:6px;display:inline-flex;align-items:center;gap:2px">
+                <ExternalLink :size="12" />原文链接
+              </a>
+            </div>
+            <ul style="font-size:12.5px;color:var(--ink-600);margin:0;padding-left:18px">
+              <li v-for="(f, i) in s.key_facts || []" :key="i" style="margin-bottom:3px"><strong>{{ f.figure }}</strong> —— {{ f.quote }}</li>
+            </ul>
+          </div>
+
+          <div v-if="evidence?.notes" style="font-size:11.5px;color:var(--ink-500);margin-top:4px">{{ evidence.notes }}</div>
         </div>
       </div>
 

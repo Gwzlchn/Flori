@@ -13,3 +13,5 @@
 | [0007](0007-remote-worker-polling.md) | 远程 Worker 通过轮询 Redis 接入（已被 0009 取代） | 2026-05-17 |
 | [0008](0008-search-sqlite-fts5.md) | SQLite FTS5 做全文搜索 | 2026-05-16 |
 | [0009](0009-worker-gateway-outbound-https.md) | 远程 Worker 经出站 HTTPS 网关接入（取代 0007） | 2026-06-08 |
+| [0010](0010-review-feedback-loop.md) | AI 评审升级为闭环（三回路 + 修订红线 + 分期） | 2026-06-22 |
+| [0012](0012-case-evidence-authoritative-sources.md) | 案例取证/权威来源（fetch 判决书+报道·带引用·评审逐条核·改写 0010） | 2026-06-22 |

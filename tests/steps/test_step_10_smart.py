@@ -2,11 +2,16 @@
 
 import json
 import os
+import shutil
+from pathlib import Path
 
 import pytest
 
 from steps.video.step_10_smart import SmartStep
 from tests.steps.conftest import make_step_config
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REAL_PROMPTS = _REPO_ROOT / "configs" / "prompts"
 
 
 class TestSmartStep:
@@ -141,3 +146,79 @@ class TestSmartStep:
         assert "模型架构" in prompt
         assert "注意力" in prompt
         assert "不要编造实验数据" in prompt
+
+
+class TestP1PromptAssets:
+    """P1 (ADR-0010 Loop2)：新增 finance Profile + case-study「机制说明」hint，
+    并验证『改 prompt 资产 → 指纹失效 → 重生成』链路（指纹只 hash 文件字节，不解析 YAML）。"""
+
+    def _job(self, tmp_path):
+        job_dir = tmp_path / "job"
+        job_dir.mkdir()
+        for d in ("output", "intermediate", "assets"):
+            (job_dir / d).mkdir()
+        (job_dir / "output" / "notes_mechanical.md").write_text("## 案例\n\n内容\n", encoding="utf-8")
+        return job_dir
+
+    def test_finance_profile_parses_and_injects(self, tmp_path):
+        # 真实 configs/prompts/profiles/finance.yaml：能解析 + domain_context / 数字口径要求注入 prompt
+        job_dir = self._job(tmp_path)
+        config = make_step_config(tmp_path, step_name="10_smart")
+        config["domain"] = {"name": "finance"}
+        config["paths"]["prompts_dir"] = str(_REAL_PROMPTS)
+        step = SmartStep("10_smart", job_dir, config)
+
+        profile = step.load_domain_profile()
+        assert profile and profile.get("domain_context")          # 文件存在且解析
+        prompt = step._build_user_prompt("正文")
+        assert profile["domain_context"] in prompt
+        assert "口径" in prompt                                    # do_not 的「数字自洽」注入
+
+    def test_case_study_injects_mechanism_hint(self, tmp_path):
+        # 真实 case-study.yaml：「机制说明」hint 注入 prompt（治「只列名词不解释」）
+        job_dir = self._job(tmp_path)
+        config = make_step_config(tmp_path, step_name="10_smart")
+        config["style_tags"] = ["case-study"]
+        config["paths"]["prompts_dir"] = str(_REAL_PROMPTS)
+        step = SmartStep("10_smart", job_dir, config)
+
+        prompt = step._build_user_prompt("正文")
+        assert "机制说明" in prompt
+
+    def test_editing_style_busts_fingerprint(self, tmp_path):
+        # 链路核心：相同输入 → should_run False（幂等跳过）；改 prompt 资产 → should_run True（重生成）
+        job_dir = self._job(tmp_path)
+        prompts = tmp_path / "prompts"
+        (prompts / "profiles").mkdir(parents=True)
+        (prompts / "styles").mkdir(parents=True)
+        shutil.copy(_REAL_PROMPTS / "profiles" / "finance.yaml", prompts / "profiles" / "finance.yaml")
+        shutil.copy(_REAL_PROMPTS / "styles" / "case-study.yaml", prompts / "styles" / "case-study.yaml")
+        config = make_step_config(tmp_path, step_name="10_smart")
+        config["domain"] = {"name": "finance"}
+        config["style_tags"] = ["case-study"]
+        config["paths"]["prompts_dir"] = str(prompts)
+        step = SmartStep("10_smart", job_dir, config)
+
+        step.mark_done()                                          # 落 .done（当前指纹）
+        assert step.should_run() is False                         # 输入未变 → 跳过
+
+        sp = prompts / "styles" / "case-study.yaml"
+        sp.write_text(sp.read_text(encoding="utf-8") + "\n# 编辑标记\n", encoding="utf-8")
+        assert step.should_run() is True                          # 指纹失效 → 重生成
+
+    def test_adding_profile_busts_fingerprint(self, tmp_path):
+        # 从无到有新建 finance.yaml：prompt_profile_style_hashes 的 profile 键从缺失到出现 → 指纹变
+        job_dir = self._job(tmp_path)
+        prompts = tmp_path / "prompts"
+        (prompts / "profiles").mkdir(parents=True)
+        config = make_step_config(tmp_path, step_name="10_smart")
+        config["domain"] = {"name": "finance"}
+        config["paths"]["prompts_dir"] = str(prompts)
+        step = SmartStep("10_smart", job_dir, config)
+
+        assert "profile" not in step.prompt_profile_style_hashes()  # finance.yaml 尚不存在
+        step.mark_done()
+        assert step.should_run() is False
+        shutil.copy(_REAL_PROMPTS / "profiles" / "finance.yaml", prompts / "profiles" / "finance.yaml")
+        assert "profile" in step.prompt_profile_style_hashes()      # 文件出现
+        assert step.should_run() is True                            # 指纹变 → 重生成
