@@ -12,6 +12,8 @@ from redis.exceptions import (
     TimeoutError as RedisTimeoutError,
 )
 
+from shared.status import DEFAULT_ONLINE_WINDOW_SEC
+
 
 # ── Lua 脚本 ──
 
@@ -218,11 +220,15 @@ class RedisClient:
 
     # ── Worker ──
 
-    async def register_worker(self, worker_id: str, info: dict, ttl: int = 30) -> None:
+    # TTL 缺省取 online_window 兜底常量(单一事实源):worker liveness key 的过期窗口
+    # 应与对外"在线"判定窗口一致。API 端会用 config 的 online_window_sec 覆盖此默认。
+    async def register_worker(
+        self, worker_id: str, info: dict, ttl: int = DEFAULT_ONLINE_WINDOW_SEC,
+    ) -> None:
         await self.r.hset(f"worker:{worker_id}", mapping=info)
         await self.r.expire(f"worker:{worker_id}", ttl)
 
-    async def heartbeat(self, worker_id: str, ttl: int = 30) -> None:
+    async def heartbeat(self, worker_id: str, ttl: int = DEFAULT_ONLINE_WINDOW_SEC) -> None:
         key = f"worker:{worker_id}"
         await self.r.hset(key, "last_heartbeat", datetime.now(timezone.utc).isoformat())
         await self.r.expire(key, ttl)

@@ -120,7 +120,8 @@ class RedisTransport:
             "last_heartbeat": now.isoformat(),
         }
         self._worker_id = worker_id
-        await self._redis.register_worker(worker_id, info, ttl=30)
+        # 不再硬编码 ttl=30:用 redis_client 的单一事实源默认(=online_window 兜底常量)。
+        await self._redis.register_worker(worker_id, info)
         worker_model = WorkerModel(
             id=worker_id, type=worker_type, pools=pools,
             tags=tags, reject_tags=reject_tags, hostname=hostname,
@@ -130,7 +131,7 @@ class RedisTransport:
         return worker_id
 
     async def heartbeat(self, worker_id):
-        await self._redis.heartbeat(worker_id, ttl=30)
+        await self._redis.heartbeat(worker_id)
         await asyncio.to_thread(self._db.update_worker_heartbeat, worker_id)
 
     async def update_status(self, worker_id, status,
