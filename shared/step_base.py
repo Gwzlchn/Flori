@@ -33,6 +33,19 @@ def file_hash(path: Path) -> str:
     return f"sha256:{h.hexdigest()}"
 
 
+class SubprocessFailed(subprocess.CalledProcessError):
+    """CalledProcessError 子类:str() 附带 stderr 尾部,便于诊断(原类 str() 只有退出码,丢 capture 的 stderr)。
+    仍是 CalledProcessError 子类——既有 `except CalledProcessError` 的调用方不受影响(审计:子进程失败丢 stderr)。"""
+
+    def __str__(self) -> str:
+        base = super().__str__()
+        tail = self.stderr or ""
+        if isinstance(tail, (bytes, bytearray)):
+            tail = tail.decode(errors="replace")
+        tail = tail.strip()[-1500:]
+        return f"{base}\nstderr(tail):\n{tail}" if tail else base
+
+
 class StepBase:
     def __init__(self, step_name: str, job_dir: Path, config: dict):
         self.step_name = step_name
@@ -390,24 +403,25 @@ class StepBase:
 
     # ── AI 调用 ──
 
-    def override_provider(self) -> str:
-        """读 job.json 里本步的 provider 覆盖(无则空串)。供 input_hashes 纳入,
-        使"换 provider 重跑"改变指纹、绕过幂等跳过。"""
+    def _read_override(self) -> str:
+        """读 job.json 里本步的 provider 覆盖(无/读失败则空串)。
+        override_provider 与 _apply_provider_override 共用单一读盘+解析(审计 R-L6 去重)。"""
         try:
             job = json.loads((self.job_dir / "job.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return ""
         return (job.get("ai_overrides") or {}).get(self.step_name, "") or ""
 
+    def override_provider(self) -> str:
+        """本步的 provider 覆盖(无则空串)。供 input_hashes 纳入,
+        使"换 provider 重跑"改变指纹、绕过幂等跳过。"""
+        return self._read_override()
+
     def _apply_provider_override(self) -> None:
         """按 job.json 的 ai_overrides[step] 覆盖本步 provider(供"选 provider 重跑")。
         只用所选 provider(去掉 fallback),避免失败时静默回退到别的 provider,
         保证版本化笔记的 provider 标记如实。"""
-        try:
-            job = json.loads((self.job_dir / "job.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return
-        provider = (job.get("ai_overrides") or {}).get(self.step_name)
+        provider = self._read_override()
         if not provider:
             return
         pcfg = self.config.get("providers", {}).get("providers", {}).get(provider, {})
@@ -432,9 +446,7 @@ class StepBase:
         )
 
         import asyncio
-        response = asyncio.run(
-            self._gateway.call(self.step_name, request, job_id=self.job_dir.name)
-        )
+        response = asyncio.run(self._gateway.call(self.step_name, request))
         self.last_ai_provider = response.provider
         self.last_ai_model = response.model
 
@@ -548,9 +560,15 @@ class StepBase:
     def run_subprocess(
         self, cmd: list[str], timeout: int = 600, **kwargs
     ) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, check=True, **kwargs
-        )
+        try:
+            return subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, check=True, **kwargs
+            )
+        except subprocess.CalledProcessError as e:
+            # 重抛子类:str() 带上被 capture 的 stderr 尾部,否则失败原因(登录失效/清晰度不可用等)被吞。
+            raise SubprocessFailed(
+                e.returncode, e.cmd, output=e.output, stderr=e.stderr
+            ) from e
 
     # ── Private ──
 
@@ -570,8 +588,10 @@ class StepBase:
             return path.read_text(encoding="utf-8")
         return None
 
-    def load_domain_profile(self) -> dict:
-        """加载 domain profile(prompts_dir/profiles/{domain}.yaml),不存在返回 {}。四个 smart 步共用。"""
+    def load_domain_prompt_profile(self) -> dict:
+        """加载 domain prompt profile(prompts_dir/profiles/{domain}.yaml),不存在返回 {}。四个 smart 步共用。
+        注:与 shared.config.load_domain_profile(读 config_dir/domain/{domain}.yaml,build 期用)不同源,
+        故命名区分避免跨文件误认(审计 R-L29)。"""
         import yaml
         prompts_dir = Path(self.config["paths"]["prompts_dir"])
         domain_name = self.config["domain"]["name"]
@@ -579,6 +599,19 @@ class StepBase:
         if profile_path.exists():
             return yaml.safe_load(profile_path.read_text(encoding="utf-8")) or {}
         return {}
+
+    @staticmethod
+    def terminology_block(profile: dict) -> str:
+        """四 smart 步共用:把 profile.terminology 注入为"已沉淀标准概念"提示段(无 terminology 则空串)。
+        回流(§1.8 ③):命中沿用统一措辞、不重复展开,只对未列出的新概念首次解释(审计 R-M9 去四处重复)。"""
+        terms = (profile or {}).get("terminology")
+        if not terms:
+            return ""
+        joined = "; ".join(terms[:30])
+        return (
+            "\n本领域已沉淀的标准概念（命中时沿用统一措辞、无需重新展开解释；"
+            f"只对下列未涵盖的新概念做首次解释）：\n{joined}\n"
+        )
 
     def prompt_profile_style_hashes(self) -> dict[str, str]:
         """smart 步共用的指纹块:可选外置 prompt 覆盖({step_name}.md)+ domain profile + style tags。

@@ -20,6 +20,9 @@ class TestPaperReviewStep:
             ],
         }
         (job_dir / "intermediate" / "sections.json").write_text(json.dumps(sections))
+        (job_dir / "intermediate" / "figures.json").write_text(json.dumps(
+            [{"index": 1, "filename": "fig1.jpg", "caption": "Figure 1", "page": 1}]
+        ))
         (job_dir / "output" / "versions").mkdir()
         (job_dir / "output" / "versions" / "notes_smart_anthropic_claude-sonnet-4-6_20260101-000000.md").write_text("## 论文笔记\n\n内容\n")
         return job_dir
@@ -31,7 +34,8 @@ class TestPaperReviewStep:
             (job_dir / d).mkdir()
         config = make_step_config(tmp_path, step_name="06_review")
         step = PaperReviewStep("06_review", job_dir, config)
-        assert len(step.validate_inputs()) == 2
+        # 缺 smart note + sections.json + figures.json(figure_references 维度需 figures 真值)
+        assert len(step.validate_inputs()) == 3
 
     def test_execute_dry_run(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DRY_RUN", "1")
