@@ -4,17 +4,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock
 
 import pytest
 
 from shared.models import Collection, Job
-from api.main import create_app
-
-
-@pytest.fixture
-def app(db, test_config):
-    return create_app(db=db, redis=AsyncMock(), config=test_config)
 
 
 class TestSubscriptionCollectionDB:

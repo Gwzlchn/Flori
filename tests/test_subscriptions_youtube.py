@@ -204,3 +204,12 @@ async def test_dispatch_via_enumerate_source(monkeypatch):
     )
     assert title == "频道Q"
     assert [i.item_id for i in items] == ["q"]
+
+
+@pytest.mark.asyncio
+async def test_enumerate_source_unknown_type_raises():
+    # 文档化契约:未知 source_type 抛 ValueError(调用方转 4xx/记日志),此前无任何用例钉死。
+    from shared.subscriptions.base import enumerate_source
+
+    with pytest.raises(ValueError, match="unsupported source_type"):
+        await enumerate_source("no_such_source", "x", SourceContext())

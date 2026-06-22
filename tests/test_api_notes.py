@@ -6,14 +6,6 @@ import json
 
 import pytest
 
-from api.main import create_app
-from unittest.mock import AsyncMock
-
-
-@pytest.fixture
-def app(db, test_config):
-    return create_app(db=db, redis=AsyncMock(), config=test_config)
-
 
 def _create_job_files(jobs_dir, job_id):
     job_dir = jobs_dir / job_id

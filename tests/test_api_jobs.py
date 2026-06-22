@@ -184,13 +184,16 @@ class TestDeleteJob:
 class TestPathTraversal:
     @pytest.mark.asyncio
     async def test_job_id_with_dots_rejected(self, client):
-        resp = await client.get("/api/jobs/..%2F..%2Fetc%2Fpasswd")
-        assert resp.status_code in (400, 404, 422)
+        # %2e%2e 解码为 ".." 且仍在单段内,真正到达 _validate_job_id 守卫 → 严格 400(不接受 404 蒙混)。
+        # 此前 ..%2F.. 被路由折叠成"未匹配 404",守卫根本没执行,删掉守卫测试照样绿。
+        resp = await client.get("/api/jobs/%2e%2e_passwd")
+        assert resp.status_code == 400
 
     @pytest.mark.asyncio
     async def test_job_id_with_slash_rejected(self, client):
-        resp = await client.delete("/api/jobs/j_test/../secrets")
-        assert resp.status_code in (400, 404, 422)
+        # DELETE 同守卫:含 ".." 的 job_id 段必须 400。
+        resp = await client.delete("/api/jobs/%2e%2e_passwd")
+        assert resp.status_code == 400
 
 
 class TestJobFiltersAndFacets:
@@ -300,8 +303,9 @@ class TestGetStepLog:
 
     @pytest.mark.asyncio
     async def test_log_step_path_traversal_rejected(self, client):
-        resp = await client.get("/api/jobs/j1/steps/..%2F..%2Fsecret/log")
-        assert resp.status_code in (400, 404, 422)
+        # step 段含 ".." → validate_path_segment(step) 守卫 → 严格 400(此前 ..%2F.. 被折叠成 404)。
+        resp = await client.get("/api/jobs/j1/steps/%2e%2e_secret/log")
+        assert resp.status_code == 400
 
 
 class TestRetryRerunResubmit:

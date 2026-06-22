@@ -6,11 +6,10 @@ import hashlib
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
-import fakeredis.aioredis
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from shared.redis_client import RedisClient
+from tests.conftest import make_fakeredis
 from api.main import create_app
 
 REG_TOKEN = "mnw-registration-secret"
@@ -250,9 +249,7 @@ class TestTokenRevocationViaDelete:
 
 @pytest.fixture
 async def real_redis():
-    rc = RedisClient.__new__(RedisClient)
-    rc._url = "redis://fake"
-    rc._redis = fakeredis.aioredis.FakeRedis(decode_responses=True, protocol=2)
+    rc = make_fakeredis()
     await rc.set_registration_token(REG_TOKEN)  # 接入门禁放行
     yield rc
     await rc.close()
@@ -443,6 +440,26 @@ class TestJobsFail:
         assert db.get_steps("j1")[0].status == StepStatus.FAILED
         assert db.get_worker(worker_id).tasks_failed == 1
 
+    @pytest.mark.asyncio
+    async def test_count_stats_false_no_increment(self, jobs_client, db, real_redis):
+        """count_stats=False(timeout/异常分支)→ 步落 FAILED 但不累加 worker 失败计数。"""
+        from shared.models import Job, Step, StepStatus
+
+        worker_id, token = await _register_real(jobs_client)
+        db.create_job(Job(id="j1", content_type="video", pipeline="video", domain="general"))
+        db.upsert_step(Step(job_id="j1", name="A", status=StepStatus.RUNNING, pool="cpu"))
+
+        resp = await jobs_client.post(
+            "/api/runner/jobs/j1/steps/A/fail",
+            json={"pool": "cpu", "exec_id": f"{worker_id}:1", "error": "timeout",
+                  "error_type": "timeout", "duration": 2.0, "started_at": 0.0,
+                  "count_stats": False},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
+        assert db.get_steps("j1")[0].status == StepStatus.FAILED
+        assert db.get_worker(worker_id).tasks_failed == 0   # 不计入失败统计
+
 
 class TestJobsRelease:
     @pytest.mark.asyncio
@@ -515,7 +532,24 @@ class TestUsage:
         )
         assert resp.status_code == 200
         summary = db.get_usage_summary(job_id="j1")
+        # 计费接缝:输出 token 与成本必须落库(否则金额端点恒 0)。
         assert summary["total_input_tokens"] == 10
+        assert summary["total_output_tokens"] == 20
+        assert summary["total_cost_usd"] == pytest.approx(0.5)
+
+    @pytest.mark.asyncio
+    async def test_duplicate_usage_not_double_billed(self, jobs_client, db):
+        """同 exec_id 二次上报(worker 重试/双发)→ 200 ok 但不翻倍计费(端点 docstring 承诺去重)。"""
+        _, token = await _register_real(jobs_client)
+        body = {"exec_id": "dup1", "provider": "anthropic", "model": "claude",
+                "job_id": "j9", "step": "A", "input_tokens": 10,
+                "output_tokens": 20, "cost_usd": 0.5}
+        h = {"Authorization": f"Bearer {token}"}
+        assert (await jobs_client.post("/api/runner/usage", json=body, headers=h)).status_code == 200
+        assert (await jobs_client.post("/api/runner/usage", json=body, headers=h)).status_code == 200
+        summary = db.get_usage_summary(job_id="j9")
+        assert summary["calls"] == 1
+        assert summary["total_cost_usd"] == pytest.approx(0.5)
 
 
 # ── 产物代理端点:worker token 鉴权,经 API 读写 storage ──

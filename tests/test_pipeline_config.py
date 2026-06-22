@@ -8,7 +8,6 @@ import pytest
 
 from shared.config import (
     load_pipelines,
-    normalize_pipeline,
     normalize_pipelines,
 )
 

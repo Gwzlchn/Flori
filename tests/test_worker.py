@@ -10,12 +10,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-import fakeredis.aioredis
 
+from tests.conftest import make_fakeredis
 from shared.config import AppConfig
 from shared.db import Database
 from shared.models import Job, Step, StepStatus
-from shared.redis_client import RedisClient
 from shared.storage import LocalStorage
 from worker.worker import Worker, WORKER_POOLS, auto_discover_tags
 from worker.transport import RedisTransport
@@ -41,9 +40,7 @@ def db(tmp_path):
 
 @pytest.fixture
 async def redis():
-    client = RedisClient.__new__(RedisClient)
-    client._url = "redis://fake"
-    client._redis = fakeredis.aioredis.FakeRedis(decode_responses=True, protocol=2)
+    client = make_fakeredis()
     yield client
     await client.close()
 
@@ -297,6 +294,46 @@ class TestSlotRelease:
 
         count = await redis.get_pool_count("cpu")
         assert count == 0
+
+
+class TestUseGpuGating:
+    """直接驱动真实 worker.execute,捕获传给 runner 的 StepContext.use_gpu,
+    覆盖 worker.py 内联表达式 use_gpu=("gpu" in tags) and (pool=="gpu" or "gpu" in raw_tags)。
+    取代此前在 test_step_runner_docker.py 里复刻该表达式只断副本(改真实代码测试仍绿)的做法。"""
+
+    async def _captured_use_gpu(self, worker, tmp_jobs_dir, *, step="A", pool="cpu"):
+        (tmp_jobs_dir / "j_gpu").mkdir(exist_ok=True)
+        captured = {}
+
+        async def mock_run_step(ctx, on_progress, on_tick):
+            captured["use_gpu"] = ctx.use_gpu
+            return 0, ""
+
+        worker.runner.run_step = mock_run_step
+        await worker.execute(make_claim(job_id="j_gpu", step=step, pool=pool))
+        return captured["use_gpu"]
+
+    @pytest.mark.asyncio
+    async def test_gpu_tag_and_gpu_pool(self, worker, tmp_jobs_dir):
+        # worker 具 gpu 标签 + 认到 gpu 池 → 启用。
+        assert await self._captured_use_gpu(worker, tmp_jobs_dir, pool="gpu") is True
+
+    @pytest.mark.asyncio
+    async def test_gpu_tag_cpu_pool_no_raw_gpu(self, worker, tmp_jobs_dir):
+        # 具 gpu 标签但 cpu 池且步骤配置无 gpu 标签 → 不启用(挡误启)。
+        assert await self._captured_use_gpu(worker, tmp_jobs_dir, pool="cpu") is False
+
+    @pytest.mark.asyncio
+    async def test_gpu_tag_cpu_pool_step_tagged_gpu(self, worker, tmp_jobs_dir):
+        # cpu 池但步骤配置 tags 含 gpu → 启用(覆盖 raw.get("tags") 分支)。
+        worker.config.pipelines["test"]["steps"][0]["tags"] = ["gpu"]  # step "A"
+        assert await self._captured_use_gpu(worker, tmp_jobs_dir, pool="cpu") is True
+
+    @pytest.mark.asyncio
+    async def test_no_gpu_worker_tag(self, worker, tmp_jobs_dir):
+        # worker 不具 gpu 标签 → 即便 gpu 池也不启用(挡漏判/误启)。
+        worker.tags = {"vision"}
+        assert await self._captured_use_gpu(worker, tmp_jobs_dir, pool="gpu") is False
 
 
 class TestPoolFrozen:

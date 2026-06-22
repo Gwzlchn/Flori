@@ -28,3 +28,17 @@ def test_threshold_zero_keeps_all(tmp_path):
     fake_engine = lambda p: ([[[[0, 0]], "a", 0.9], [[[0, 0]], "b", 0.1]], None)
     text, boxes = step._ocr_image(fake_engine, tmp_path / "x.jpg", threshold=0.0)
     assert len(boxes) == 2
+    assert text == "a\nb"   # 不止数 box:多行按出现顺序用 \n 拼接
+
+
+def test_multi_box_joined_with_newline(tmp_path):
+    # confidence_filter_drops_low 只剩 1 个 box,验不到拼接;这里 3 个 box 全过阈值,
+    # 钉死"\n".join 的换行与顺序(防被改成空格/" "/反序而存活)。
+    step = _step(tmp_path)
+    fake_engine = lambda p: (
+        [[[[0, 0]], "第一行", 0.9], [[[0, 0]], "第二行", 0.8], [[[0, 0]], "第三行", 0.7]],
+        None,
+    )
+    text, boxes = step._ocr_image(fake_engine, tmp_path / "x.jpg", threshold=0.6)
+    assert len(boxes) == 3
+    assert text == "第一行\n第二行\n第三行"

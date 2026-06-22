@@ -42,3 +42,33 @@ class TestPaperReviewStep:
         assert (job_dir / "output" / "review.json").exists()
         review = json.loads((job_dir / "output" / "review.json").read_text())
         assert "overall" in review
+
+    def test_parse_fallback(self, tmp_path, monkeypatch):
+        # 非 DRY_RUN:AI 返回非 JSON → call_ai_json 走 fallback,overall 恒 3.0 + parse_failed。
+        # DRY_RUN smoke 只断 "overall" in review,完全绕过了解析/兜底这条核心分支。
+        monkeypatch.delenv("DRY_RUN", raising=False)
+        job_dir = self._setup_job(tmp_path)
+        config = make_step_config(tmp_path, step_name="06_review", pool="ai")
+        step = PaperReviewStep("06_review", job_dir, config)
+        monkeypatch.setattr(step, "call_ai", lambda *a, **k: "完全不是 JSON 的自然语言回复")
+        result = step.execute()
+        review = json.loads((job_dir / "output" / "review.json").read_text())
+        assert review["overall"] == 3.0
+        assert review["parse_failed"] is True
+        assert result["parse_failed"] is True
+
+    def test_aggregates_real_scores(self, tmp_path, monkeypatch):
+        # 非 DRY_RUN:AI 返回合法多维评分 → overall 为维度均值(而非 fallback 恒 3.0)。
+        # 钉死"评分聚合真跑了"——线上曾出 overall 恒 3.0 的 bug(step_base.py:451)。
+        monkeypatch.delenv("DRY_RUN", raising=False)
+        job_dir = self._setup_job(tmp_path)
+        config = make_step_config(tmp_path, step_name="06_review", pool="ai")
+        step = PaperReviewStep("06_review", job_dir, config)
+        scores = {"completeness": 5, "accuracy": 5, "structure": 5,
+                  "terminology": 4, "formula_integrity": 4, "figure_references": 4,
+                  "key_terms": [], "missing_concepts": [], "top3_improvements": []}
+        monkeypatch.setattr(step, "call_ai", lambda *a, **k: json.dumps(scores))
+        result = step.execute()
+        review = json.loads((job_dir / "output" / "review.json").read_text())
+        assert result["parse_failed"] is False
+        assert review["overall"] == 4.5      # (5+5+5+4+4+4)/6 = 4.5,非 3.0

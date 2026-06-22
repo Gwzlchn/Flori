@@ -2,17 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
-
 import pytest
 import yaml
-
-from api.main import create_app
-
-
-@pytest.fixture
-def app(db, test_config):
-    return create_app(db=db, redis=AsyncMock(), config=test_config)
 
 
 def _create_profile(prompts_dir, domain, **kwargs):
@@ -91,10 +82,11 @@ class TestProfiles:
 class TestDomainValidation:
     @pytest.mark.asyncio
     async def test_domain_path_traversal_rejected(self, client):
-        resp = await client.get("/api/profiles/..%2F..%2Fetc%2Fpasswd")
-        assert resp.status_code in (400, 404, 422)
+        # %2e%2e 解码 ".." 仍在单段内,真正到达 _validate_domain 守卫 → 严格 400(不接受 404 蒙混)。
+        resp = await client.get("/api/profiles/%2e%2e_passwd")
+        assert resp.status_code == 400
 
     @pytest.mark.asyncio
     async def test_domain_with_slash_rejected(self, client):
-        resp = await client.get("/api/profiles/test/../secrets")
-        assert resp.status_code in (400, 404, 422)
+        resp = await client.get("/api/profiles/%2e%2e_secrets")
+        assert resp.status_code == 400

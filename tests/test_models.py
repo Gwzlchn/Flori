@@ -1,7 +1,6 @@
 """tests for shared/models.py"""
 
 import re
-from datetime import datetime
 
 from shared.models import (
     AIUsage,
@@ -78,15 +77,11 @@ class TestWorkerId:
 
 class TestJobDefaults:
     def test_minimal_creation(self):
+        # 仅断承载契约的默认:PENDING 是初始态(调度据此挑活)、domain 缺省 general(驱动 prompt 选型)。
+        # 空容器/0/None/created_at 工厂等纯 dataclass 机制默认已删(变了不改变行为)。
         job = Job(id="j_20260517_abc123", content_type="video", pipeline="video")
         assert job.status == JobStatus.PENDING
         assert job.domain == "general"
-        assert job.style_tags == []
-        assert job.progress_pct == 0
-        assert job.meta == {}
-        assert job.error is None
-        assert job.current_step is None
-        assert isinstance(job.created_at, datetime)
 
     def test_full_creation(self):
         job = Job(
@@ -105,21 +100,18 @@ class TestJobDefaults:
 
 class TestStepDefaults:
     def test_minimal(self):
+        # 契约默认:WAITING 是初始态(DAG 据此推进);pool="" 是"未分配"路由哨兵。
+        # retries==0 / meta=={} 纯机制默认已删。
         step = Step(job_id="j_xxx", name="03_scene")
         assert step.status == StepStatus.WAITING
         assert step.pool == ""
-        assert step.retries == 0
-        assert step.meta == {}
 
 
 class TestWorkerDefaults:
     def test_minimal(self):
+        # 契约默认:新 Worker 初始 offline(注册后才转 idle)。空容器/0 计数纯机制默认已删。
         w = Worker(id="cpu-12345678", type="cpu")
-        assert w.pools == []
-        assert w.tags == set()
-        assert w.reject_tags == set()
         assert w.status == "offline"
-        assert w.tasks_completed == 0
 
     def test_with_tags(self):
         w = Worker(
@@ -134,9 +126,8 @@ class TestWorkerDefaults:
 
 class TestCollectionDefaults:
     def test_minimal(self):
+        # 契约默认:新 collection 初始 job_count==0(入库计数从 0 起算)。空串/空容器机制默认已删。
         c = Collection(id="my-dl", name="深度学习", domain="deep-learning")
-        assert c.description == ""
-        assert c.tags == []
         assert c.job_count == 0
 
 
@@ -158,13 +149,11 @@ class TestAIUsage:
 
 class TestLLMRequest:
     def test_defaults(self):
+        # 契约默认:max_tokens=4096 / temperature=0.7 直接随请求发给 LLM,改了会改变生成行为。
+        # model/images/system/response_format 的 None/空默认是纯机制,已删。
         req = LLMRequest(messages=[{"role": "user", "content": "hello"}])
-        assert req.model is None
         assert req.max_tokens == 4096
         assert req.temperature == 0.7
-        assert req.images == []
-        assert req.system is None
-        assert req.response_format is None
 
 
 class TestLLMResponse:

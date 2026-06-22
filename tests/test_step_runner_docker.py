@@ -452,24 +452,5 @@ class TestResolveImage:
         runner = DockerStepRunner("w1", registry="ghcr.io/gwzlchn")
         assert runner._resolve_image("docker.io/library/python:3.11") == "docker.io/library/python:3.11"
 
-
-# ── use_gpu 布尔门控(worker.execute 内联表达式的四种组合) ──
-
-
-def _use_gpu(tags: set[str], pool: str, raw_tags: list[str]) -> bool:
-    """复刻 worker.execute 里的 use_gpu 计算,单测其真值表。"""
-    return ("gpu" in tags) and (pool == "gpu" or "gpu" in set(raw_tags))
-
-
-class TestUseGpuGating:
-    def test_no_gpu_tag(self):
-        assert _use_gpu(set(), "gpu", ["gpu"]) is False
-
-    def test_gpu_tag_and_gpu_pool(self):
-        assert _use_gpu({"gpu"}, "gpu", []) is True
-
-    def test_gpu_tag_cpu_pool_no_raw_gpu(self):
-        assert _use_gpu({"gpu"}, "cpu", []) is False
-
-    def test_raw_tags_gpu_and_worker_gpu(self):
-        assert _use_gpu({"gpu"}, "cpu", ["gpu"]) is True
+# use_gpu 门控真值表已移到 tests/test_worker.py::TestUseGpuGating——
+# 在那里直接驱动真实 worker.execute 捕获 StepContext.use_gpu,而非在此复刻表达式只测副本。

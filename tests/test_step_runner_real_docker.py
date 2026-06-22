@@ -1,7 +1,11 @@
-"""L11:对真实 docker 守护进程跑容器,验证 mock 单测覆盖不到的执行器机制——
-work_dir bind-mount 到 /job、env 注入(PYTHONPATH/STEP_EXEC_ID)、离线池 network=none、
-退出码捕获。无 docker.sock 或本地无 python:3.11-slim 镜像时跳过(不联网拉取),
-故标准容器内单测套件会跳过,有 docker 的环境才真跑。"""
+"""L11:守护进程能力 smoke——验证 DockerStepRunner 所【依赖】的 docker 原语在真实守护进程上确实生效:
+work_dir bind-mount 到 /job、env 注入(PYTHONPATH/STEP_EXEC_ID)、离线池 network=none、退出码捕获。
+
+注意:本测试【刻意】直接用 client.containers.run 复刻执行器装配,而非实例化 DockerStepRunner——
+因为真正驱动 runner.run_step 需要一个完整的 flori step 镜像(含 /app 代码与模块 entrypoint),
+python:3.11-slim 跑不了 flori 模块。故这里只断"守护进程支持这些原语",runner 自身的命令/卷/env 装配
+由 tests/test_step_runner_docker.py 的 mock 单测覆盖。无 docker.sock 或本地无 python:3.11-slim 镜像
+时跳过(不联网拉取),标准容器内单测套件会跳过,有 docker 的环境才真跑。"""
 
 from __future__ import annotations
 
@@ -31,10 +35,11 @@ def _docker_or_skip():
     return client
 
 
-class TestRealDockerMechanics:
+class TestRealDockerDaemonCapabilities:
     def test_bind_mount_env_and_network_none(self, tmp_path):
         client = _docker_or_skip()
-        # 模拟执行器:把 work_dir 以宿主路径 bind 到 /job,注入 env,断网,跑一段真命令。
+        # 复刻执行器装配(非 DockerStepRunner 本体,见模块 docstring):
+        # 把 work_dir 以宿主路径 bind 到 /job,注入 env,断网,跑一段真命令。
         # 用容器把 STEP_EXEC_ID 写进 /job,再从宿主读回,验证 bind-mount 双向可见。
         (tmp_path / "in.txt").write_text("hi", encoding="utf-8")
         script = (

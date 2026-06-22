@@ -2,21 +2,53 @@
 
 import os
 from pathlib import Path
+from unittest.mock import AsyncMock
 
+import fakeredis.aioredis
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from api.main import create_app
 from shared.config import load_config
 from shared.db import Database
+from shared.redis_client import RedisClient
 
 # 测试环境视为可信本地:默认放行无 token 鉴权(verify_token fail-closed 的逃生口),
 # 否则所有命中受保护端点、未设 API_TOKEN 的用例都会 503。需测 fail-closed 的用例自行清此项。
 os.environ.setdefault("API_ALLOW_NO_AUTH", "1")
 
 
+# ── 出网熔断(autouse,全套件)──
+# 测试进程永不持有真实 AI provider 密钥:即便将来有人写了忘记 mock _client 的 provider 用例、
+# 且宿主/CI 恰好 export 了真 key,也不会真打外网/烧钱。把"靠每个用例自觉 mock"升级成结构性保证。
+# 用例自身若要测 {NAME}_API_KEY 透传,会在 body 里 monkeypatch.setenv(晚于本 autouse,正常生效)。
+@pytest.fixture(autouse=True)
+def _no_real_ai_keys(monkeypatch):
+    for _k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY",
+               "KIMI_API_KEY", "MOONSHOT_API_KEY"):
+        monkeypatch.delenv(_k, raising=False)
+
+
+def make_fakeredis() -> RedisClient:
+    """fakeredis 版 RedisClient 的单一构造来源(此前 protocol=2 等参数逐字散在 6 个测试文件)。
+    需关闭的用例自行 `await client.close()`(或用就近的 async fixture 包裹)。"""
+    client = RedisClient.__new__(RedisClient)
+    client._url = "redis://fake"
+    client._redis = fakeredis.aioredis.FakeRedis(decode_responses=True, protocol=2)
+    return client
+
+
 # ── API 测试共用 fixture(此前 13 个 test_api_*.py 各复制一份;G1 上移)──
-# 注:app 与 redis mock 仍各文件自定义(redis mock 体随路由而异,G7),conftest 的 client 依赖各文件 app;
-# db 被各非 api 测试以本地同名 fixture 覆盖(就近优先),互不影响;test_api_search 自带带 seed 的 db 覆盖。
+# 注:client 依赖 app;db 被各非 api 测试以本地同名 fixture 覆盖(就近优先),互不影响;
+# test_api_search 自带带 seed 的 db 覆盖。
+# app:多数纯 CRUD 路由不触 redis,默认给 AsyncMock 即可——此前 7 个文件(domains/notes/glossary/
+# profiles/auth/search/collection_sync)逐字复制同一份,故上移为默认 app。真正需要路由特异 redis
+# 行为(publish/ping/事件流等)的文件就近覆盖本 fixture(jobs/workers/admin/bili/collections/runner)。
+@pytest.fixture
+def app(db, test_config):
+    return create_app(db=db, redis=AsyncMock(), config=test_config)
+
+
 @pytest.fixture
 def test_config(tmp_path, configs_dir):
     cfg = load_config(config_dir=configs_dir, data_dir=tmp_path)

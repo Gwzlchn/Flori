@@ -7,12 +7,11 @@ import json
 from pathlib import Path
 
 import pytest
-import fakeredis.aioredis
 
+from tests.conftest import make_fakeredis
 from shared.config import AppConfig
 from shared.db import Database
 from shared.models import Job, JobStatus, StepStatus, AIUsage
-from shared.redis_client import RedisClient
 from scheduler.scheduler import Scheduler
 
 
@@ -36,9 +35,7 @@ def db(tmp_path):
 
 @pytest.fixture
 async def redis():
-    client = RedisClient.__new__(RedisClient)
-    client._url = "redis://fake"
-    client._redis = fakeredis.aioredis.FakeRedis(decode_responses=True, protocol=2)
+    client = make_fakeredis()
     yield client
     await client.close()
 

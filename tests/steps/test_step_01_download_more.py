@@ -413,6 +413,29 @@ class TestDownloadBilibili:
             cmd = run.call_args[0][0]
             assert "-c" not in cmd
 
+    def test_yutto_cookie_file_passes_value_not_path(self, tmp_path, monkeypatch):
+        """无侧载凭证、仅本地 cookie 文件时:yutto -c 收到的是 SESSDATA【值】而非文件路径。
+        回归钉死(step_01_download.py:134-136):曾误把 bilibili.txt 路径当值传 -c,
+        致登录态失效→匿名下载、无字幕、降 480P。test_yutto_primary_with_sessdata 只覆盖
+        .credentials.json 侧载路径,这条专测此前出过 bug 的 cookie 文件回退路径。"""
+        data_dir = tmp_path / "data"
+        cookie = data_dir / "cookies" / "bilibili.txt"
+        cookie.parent.mkdir(parents=True)
+        # Netscape cookie 行:SESSDATA 的值是 cookieval123,文件路径绝不该出现在命令里。
+        cookie.write_text(".bilibili.com\tTRUE\t/\tFALSE\t0\tSESSDATA\tcookieval123\n")
+        monkeypatch.setenv("DATA_DIR", str(data_dir))
+        job_dir = _make_job_dir(tmp_path)   # 无 .credentials.json → 回退读 cookie 文件
+        step = _make_step(job_dir, tmp_path, source="bilibili")
+        with patch.object(step, "run_subprocess") as run, \
+             patch.object(step, "_rename_downloaded_video"), \
+             patch.object(step, "_prune_subtitles_danmaku"), \
+             patch.object(step, "_verify_download"):
+            step._download_bilibili("https://www.bilibili.com/video/BV1xx411c7mD")
+            cmd = run.call_args[0][0]
+            assert "-c" in cmd
+            assert cmd[cmd.index("-c") + 1] == "cookieval123"   # 传的是值
+            assert str(cookie) not in cmd                       # 绝不是文件路径
+
     def test_yutto_fails_falls_back_to_ytdlp(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DATA_DIR", str(tmp_path / "nope"))
         job_dir = _make_job_dir(tmp_path)
@@ -421,8 +444,13 @@ class TestDownloadBilibili:
              patch.object(step, "_download_bili_ytdlp") as fallback, \
              patch.object(step, "_verify_download"):
             step._download_bilibili("https://www.bilibili.com/video/BV1xx411c7mD")
-            fallback.assert_called_once()
-            # 兜底也会走最终 ffprobe 验收(_verify_download 已 mock)
+            # 兜底须拿到归一后的 target_url + input_dir + sessdata(此处无凭证故 None),
+            # 而非只验"被调过"——防回退时丢/错传参数(签名:url, input_dir, sessdata)。
+            fallback.assert_called_once_with(
+                "https://www.bilibili.com/video/BV1xx411c7mD",
+                job_dir / "input",
+                None,
+            )
 
     def test_non_bvid_url_passes_through(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DATA_DIR", str(tmp_path / "nope"))

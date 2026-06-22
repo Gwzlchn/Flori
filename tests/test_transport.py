@@ -7,10 +7,9 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import fakeredis.aioredis
 
+from tests.conftest import make_fakeredis
 from shared.db import Database
-from shared.redis_client import RedisClient
 from worker.transport import RedisTransport
 from worker.gateway_transport import GatewayTransport
 
@@ -28,9 +27,7 @@ def db(tmp_path):
 
 @pytest.fixture
 async def redis():
-    client = RedisClient.__new__(RedisClient)
-    client._url = "redis://fake"
-    client._redis = fakeredis.aioredis.FakeRedis(decode_responses=True, protocol=2)
+    client = make_fakeredis()
     yield client
     await client.close()
 
@@ -616,6 +613,9 @@ class TestGatewayCoarseHTTP:
         assert url[0] == "/api/runner/usage"
         assert kwargs["json"]["exec_id"] == "e1"
         assert kwargs["json"]["input_tokens"] == 10
+        # 计费接缝:成本/输出 token 必须随 POST body 上报(否则服务端记 0,金额静默丢失)。
+        assert kwargs["json"]["output_tokens"] == 20
+        assert kwargs["json"]["cost_usd"] == 0.5
         assert "created_at" not in kwargs["json"]
 
     @pytest.mark.asyncio
@@ -958,6 +958,23 @@ class TestRedisTransportAIUsageAndJob:
         assert summary["calls"] == 1
         assert summary["total_input_tokens"] == 10
         assert summary["total_output_tokens"] == 20
+        assert summary["total_cost_usd"] == pytest.approx(0.5)
+
+    @pytest.mark.asyncio
+    async def test_record_ai_usage_dedup_same_exec_id(self, redis, db):
+        """同 exec_id 二次落库不翻倍计费(ai_usage.exec_id UNIQUE → 第二次 no-op)。"""
+        from shared.models import AIUsage
+
+        t = RedisTransport(redis, db)
+        usage = AIUsage(exec_id="dup1", provider="anthropic", model="claude",
+                        job_id="j2", step="A", input_tokens=10, output_tokens=20,
+                        cost_usd=0.5)
+        await t.record_ai_usage(usage)
+        await t.record_ai_usage(usage)   # 重复上报(worker 重试/双发)
+
+        summary = db.get_usage_summary(job_id="j2")
+        assert summary["calls"] == 1
+        assert summary["total_cost_usd"] == pytest.approx(0.5)
 
     @pytest.mark.asyncio
     async def test_get_job_pipeline_reads_redis(self, redis, db):

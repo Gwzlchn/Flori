@@ -2,17 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
-
 import pytest
 import yaml
-
-from api.main import create_app
-
-
-@pytest.fixture
-def app(db, test_config):
-    return create_app(db=db, redis=AsyncMock(), config=test_config)
 
 
 def _read_profile_terms(prompts_dir, domain):
@@ -207,7 +198,8 @@ class TestFilters:
 class TestDomainValidation:
     @pytest.mark.asyncio
     async def test_create_traversal_domain_rejected(self, client):
+        # domain 是 query 参数,"../etc" 直达 _validate_seg 守卫(无路由折叠)→ 严格 400。
         resp = await client.post(
             "/api/glossary?domain=../etc", json={"term": "A"}
         )
-        assert resp.status_code in (400, 404, 422)
+        assert resp.status_code == 400

@@ -117,6 +117,28 @@ class TestSmartPodcastStep:
         assert result["chars"] > 0
         assert list((job_dir / "output" / "versions").glob("notes_smart_*.md"))
 
+    def test_execute_real_path_sanitizes(self, tmp_path, monkeypatch):
+        # 非 DRY_RUN:驱动 write_smart_note 的 _sanitize_smart_note(去 agentic 壳 + 补 assets/ 前缀)。
+        # DRY_RUN smoke 只断 chars>0,这些净化逻辑全被绕过。
+        monkeypatch.delenv("DRY_RUN", raising=False)
+        job_dir = self._setup(tmp_path)
+        config = make_step_config(tmp_path, step_name="04_smart_podcast", pool="ai")
+        step = SmartPodcastStep("04_smart_podcast", job_dir, config)
+        note = (
+            "已完成播客笔记,思路如下:\n\n"                   # agentic 开头 → 应被净化砍到首个标题
+            "# 播客笔记\n\n"
+            "![配图](pic.png)\n\n"                          # 裸文件名 → 补 assets/ 前缀
+            + "## 正文\n足够长的真实正文以通过净化长度判废。\n" * 30
+        )
+        monkeypatch.setattr(step, "call_ai", lambda *a, **k: note)
+        step.execute()
+        written = next(
+            (job_dir / "output" / "versions").glob("notes_smart_*.md")
+        ).read_text(encoding="utf-8")
+        assert "已完成播客笔记" not in written            # agentic 开头被净化
+        assert "![配图](assets/pic.png)" in written        # 裸文件名补了 assets/ 前缀
+        assert "## 正文" in written
+
     def test_build_prompt(self, tmp_path):
         job_dir = self._setup(tmp_path)
         config = make_step_config(tmp_path, step_name="04_smart_podcast")
@@ -168,3 +190,31 @@ class TestPodcastReviewStep:
         assert (job_dir / "output" / "review.json").exists()
         review = json.loads((job_dir / "output" / "review.json").read_text())
         assert "overall" in review
+
+    def test_parse_fallback(self, tmp_path, monkeypatch):
+        # 非 DRY_RUN:AI 返回非 JSON → 走 fallback,overall 恒 3.0 + parse_failed。
+        monkeypatch.delenv("DRY_RUN", raising=False)
+        job_dir = self._setup(tmp_path)
+        config = make_step_config(tmp_path, step_name="05_review", pool="ai")
+        step = PodcastReviewStep("05_review", job_dir, config)
+        monkeypatch.setattr(step, "call_ai", lambda *a, **k: "不是 JSON")
+        result = step.execute()
+        review = json.loads((job_dir / "output" / "review.json").read_text())
+        assert review["overall"] == 3.0
+        assert review["parse_failed"] is True
+        assert result["parse_failed"] is True
+
+    def test_aggregates_real_scores(self, tmp_path, monkeypatch):
+        # 非 DRY_RUN:合法多维评分 → overall 为均值(而非恒 3.0),钉死评分聚合真跑了。
+        monkeypatch.delenv("DRY_RUN", raising=False)
+        job_dir = self._setup(tmp_path)
+        config = make_step_config(tmp_path, step_name="05_review", pool="ai")
+        step = PodcastReviewStep("05_review", job_dir, config)
+        scores = {"completeness": 5, "accuracy": 5, "structure": 5,
+                  "terminology": 4, "conciseness": 4, "readability": 4,
+                  "key_terms": [], "missing_concepts": [], "top3_improvements": []}
+        monkeypatch.setattr(step, "call_ai", lambda *a, **k: json.dumps(scores))
+        result = step.execute()
+        review = json.loads((job_dir / "output" / "review.json").read_text())
+        assert result["parse_failed"] is False
+        assert review["overall"] == 4.5      # (5+5+5+4+4+4)/6 = 4.5,非 3.0

@@ -2,9 +2,8 @@
 
 import json
 from datetime import datetime
-from functools import partial
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -144,7 +143,9 @@ class TestAIGateway:
         monkeypatch.delenv("DRY_RUN", raising=False)
         gw = AIGateway(*gateway_config)
 
-        mock_resp = LLMResponse(content="ok", model="m", provider="p")
+        mock_resp = LLMResponse(
+            content="ok", model="m", provider="p",
+            input_tokens=11, output_tokens=22, cost_usd=0.123)
 
         async def mock_complete(self, request):
             return mock_resp
@@ -152,6 +153,9 @@ class TestAIGateway:
         gw._providers["mock_primary"] = type("P", (), {"complete": mock_complete})()
         resp = await gw.call("10_smart", LLMRequest(messages=[{"role": "user", "content": "test"}]))
         assert resp.content == "ok"
+        # 透传层不能把 provider 算好的成本/token 清零或吞掉。
+        assert resp.cost_usd == 0.123
+        assert (resp.input_tokens, resp.output_tokens) == (11, 22)
 
     @pytest.mark.asyncio
     async def test_fallback_on_primary_failure(self, gateway_config, monkeypatch):
@@ -377,6 +381,32 @@ class TestAnthropicProvider:
         assert resp.provider == "anthropic"
         assert resp.input_tokens == 100
         assert resp.output_tokens == 50
+        # 计费接缝:complete 必须把 calc_cost 算进 cost_usd(否则金额静默丢 0 测试照绿)。
+        assert resp.cost_usd == pytest.approx(
+            calc_cost("anthropic", "claude-sonnet-4-6", 100, 50))
+        assert resp.cached is False   # cache_read_input_tokens == 0
+
+    @pytest.mark.asyncio
+    async def test_cached_flag_set_when_cache_read(self):
+        """cache_read_input_tokens>0 → cached=True(prompt 缓存命中标记,影响计费观感)。"""
+        provider = AnthropicProvider(api_key="sk-test")
+
+        mock_usage = MagicMock()
+        mock_usage.input_tokens = 100
+        mock_usage.output_tokens = 50
+        mock_usage.cache_read_input_tokens = 80
+
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(type="text", text="hi")]
+        mock_response.usage = mock_usage
+
+        mock_client = MagicMock()
+        mock_client.messages.create = MagicMock(return_value=mock_response)
+        provider._client = mock_client
+
+        resp = await provider.complete(LLMRequest(
+            messages=[{"role": "user", "content": "hello"}], model="claude-sonnet-4-6"))
+        assert resp.cached is True
 
     @pytest.mark.asyncio
     async def test_joins_multiple_text_blocks(self):
@@ -477,6 +507,9 @@ class TestOpenAICompatibleProvider:
         assert resp.provider == "deepseek"
         assert resp.input_tokens == 80
         assert resp.output_tokens == 40
+        # 计费接缝:成本按 provider_name(deepseek)而非固定串计价。
+        assert resp.cost_usd == pytest.approx(
+            calc_cost("deepseek", "deepseek-v4-pro", 80, 40))
 
     @pytest.mark.asyncio
     async def test_rate_limit_raises(self):

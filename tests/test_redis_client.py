@@ -3,17 +3,14 @@
 import asyncio
 
 import pytest
-import fakeredis.aioredis
 
-from shared.redis_client import RedisClient
+from tests.conftest import make_fakeredis
 
 
 @pytest.fixture
 async def rc():
     """用 fakeredis 替代真实 Redis。"""
-    client = RedisClient.__new__(RedisClient)
-    client._url = "redis://fake"
-    client._redis = fakeredis.aioredis.FakeRedis(decode_responses=True, protocol=2)
+    client = make_fakeredis()
     yield client
     await client.close()
 
@@ -354,8 +351,12 @@ class TestPubSub:
                 break
 
         task = asyncio.create_task(listener())
-        # 等首次失败 + 退避（1s）+ 重订阅。
-        await asyncio.sleep(1.4)
+        # 轮询等"重订阅真正发生"(pubsub 重建,calls>=2),而非赌固定 1.4s——
+        # 后者把生产退避常量(1s)硬编码进测试,慢机器上 1.4s 不够会偶发 flaky。
+        for _ in range(80):                 # 上限 4s,够 1s 退避 + 调度余量
+            if calls["pubsub"] >= 2:
+                break
+            await asyncio.sleep(0.05)
         await rc.publish("ch2", {"event": "ok"})
         await asyncio.wait_for(task, timeout=4.0)
 

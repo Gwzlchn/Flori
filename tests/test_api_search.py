@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from unittest.mock import AsyncMock
 
 from shared.db import Database
-from api.main import create_app
 
 
 @pytest.fixture
@@ -36,11 +34,6 @@ def db(test_config):
     )
     yield d
     d.close()
-
-
-@pytest.fixture
-def app(db, test_config):
-    return create_app(db=db, redis=AsyncMock(), config=test_config)
 
 
 class TestSearch:
