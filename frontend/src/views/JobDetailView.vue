@@ -359,6 +359,7 @@ async function rerunFromStep() {
 
 // ════════════════════ 删除 ════════════════════
 const showDelete = ref(false)
+const showArtifacts = ref(false)   // 产物路径默认折叠
 async function confirmDelete() {
   try {
     await jobStore.deleteJob(jobId.value)
@@ -607,13 +608,15 @@ watch(job, (j) => {
 
       <!-- ════ 元信息 ════ -->
       <div v-show="tab === 'info'">
+        <!-- ① 内容本身(源)信息 -->
         <div class="card pad" style="max-width:560px">
-          <div class="card-h"><Info :size="15" />元信息</div>
+          <div class="card-h"><Info :size="15" />内容信息</div>
           <table class="kv">
             <tr><td>标题</td><td>{{ job.title || '—' }}</td></tr>
             <tr><td>类型</td><td>{{ CONTENT_TYPE_LABELS[job.content_type] || job.content_type }}</td></tr>
             <tr><td>来源</td><td>{{ sourceLabel }}</td></tr>
-            <!-- 源媒体元信息(metadata.json/parsed.json):视频→时长+分辨率、文章→字数、通用→原始大小/字幕 -->
+            <tr><td>发布时间</td><td>{{ fmtDateTime(job.published_at) }}</td></tr>
+            <!-- 视频→时长+分辨率、文章→字数、通用→原始大小/字幕(metadata.json/parsed.json) -->
             <tr v-if="job.media?.duration_sec"><td>时长</td><td>{{ fmtDur(job.media.duration_sec) }}</td></tr>
             <tr v-if="job.media?.resolution"><td>分辨率</td><td class="mono">{{ job.media.resolution }}</td></tr>
             <tr v-if="job.media?.word_count"><td>字数</td><td>{{ job.media.word_count.toLocaleString() }} 字</td></tr>
@@ -627,6 +630,19 @@ watch(job, (j) => {
                 <span v-if="job.media.has_danmaku" class="badge b-info" style="margin-left:5px">有弹幕</span>
               </td>
             </tr>
+            <tr v-if="bv"><td>BV 号</td><td class="mono">{{ bv }}</td></tr>
+            <tr v-if="job.url"><td>原始链接</td><td>
+              <a class="ghost" :href="job.url" target="_blank" rel="noopener" style="color:var(--info)">{{ job.url }}<ExternalLink :size="13" /></a>
+            </td></tr>
+          </table>
+        </div>
+
+        <!-- ② 处理(任务)信息 -->
+        <div class="card pad" style="max-width:560px;margin-top:16px">
+          <div class="card-h"><GitBranch :size="15" />处理信息</div>
+          <table class="kv">
+            <tr><td>Job ID</td><td class="mono">{{ job.job_id }}</td></tr>
+            <tr><td>状态</td><td><StatusBadge :status="jobStatus" /></td></tr>
             <tr><td>知识库</td><td>{{ job.domain || '—' }}</td></tr>
             <tr><td>集合</td><td>
               <template v-if="collectionName">
@@ -635,21 +651,18 @@ watch(job, (j) => {
               </template>
               <span v-else class="dim">未归集合</span>
             </td></tr>
-            <tr v-if="bv"><td>BV 号</td><td class="mono">{{ bv }}</td></tr>
-            <tr v-if="job.url"><td>原始链接</td><td>
-              <a class="ghost" :href="job.url" target="_blank" rel="noopener" style="color:var(--info)">{{ job.url }}<ExternalLink :size="13" /></a>
-            </td></tr>
-            <tr><td>状态</td><td><StatusBadge :status="jobStatus" /></td></tr>
-            <tr><td>上传于</td><td>{{ fmtDateTime(job.published_at) }}</td></tr>
             <tr><td>创建于</td><td>{{ fmtDateTime(job.created_at) }}</td></tr>
             <tr v-if="job.updated_at"><td>更新于</td><td>{{ fmtDateTime(job.updated_at) }}</td></tr>
             <tr><td>生成耗时</td><td>{{ genEnd ? fmtDur(genDurSec) : (anyRunning ? '进行中' : '—') }}</td></tr>
           </table>
 
-          <!-- 产物路径 -->
+          <!-- 产物路径(绝对路径,可折叠) -->
           <div v-if="job.artifacts?.length" class="artifacts">
-            <div class="card-h" style="margin-top:18px"><Info :size="14" />产物路径 · {{ job.artifacts.length }}</div>
-            <ul class="art-list">
+            <button class="art-toggle" @click="showArtifacts = !showArtifacts">
+              <ChevronDown :size="14" class="art-caret" :class="{ open: showArtifacts }" />
+              产物路径 · {{ job.artifacts.length }}
+            </button>
+            <ul v-show="showArtifacts" class="art-list">
               <li v-for="p in job.artifacts" :key="p" class="mono">{{ p }}</li>
             </ul>
           </div>
@@ -680,6 +693,14 @@ watch(job, (j) => {
 </template>
 
 <style scoped>
+.artifacts { margin-top: 16px; border-top: 1px solid var(--line-soft); padding-top: 12px; }
+.art-toggle {
+  display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600;
+  color: var(--ink-700); background: none; cursor: pointer; padding: 0;
+}
+.art-caret { transition: transform .15s; }
+.art-caret.open { transform: rotate(0deg); }
+.art-caret:not(.open) { transform: rotate(-90deg); }
 .art-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .art-list li {
   font-size: 12px; color: var(--ink-600); padding: 3px 8px; border-radius: 5px;

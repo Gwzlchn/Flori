@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import secrets
 import shutil
 from pathlib import Path
@@ -310,11 +311,13 @@ async def get_job(
                     media["word_count"] = wc
         except Exception:
             pass
-    # 产物路径(元信息标签页"产物路径"):列可见产物文件(隐藏内部点文件/job.json)。
+    # 产物路径(元信息"产物路径"):绝对路径(job 数据根 = $DATA_DIR/jobs/<job_id>);
+    # 列可见产物文件(隐藏内部点文件/job.json)。
     artifacts: list[str] = []
     try:
+        root = f"{os.environ.get('DATA_DIR', '/data')}/jobs/{job_id}"
         artifacts = sorted(
-            f for f in await storage.list_files(job_id)
+            f"{root}/{f}" for f in await storage.list_files(job_id)
             if not (f.rsplit("/", 1)[-1].startswith(".") or f == "job.json")
         )
     except Exception:
