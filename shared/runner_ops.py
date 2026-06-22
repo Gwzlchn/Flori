@@ -11,12 +11,27 @@ RedisTransport 抽出来,做成 (redis, db, ...) 上的纯函数。RedisTranspor
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import datetime, timezone
 
 from shared.db import Database
 from shared.models import AIUsage
 from shared.redis_client import RedisClient
+
+
+def parse_style_tags(raw) -> list:
+    """解析 job_info.style_tags 原始值(JSON 字符串或已是 list);失败/非 list 兜空 list。
+    供 scheduler.enqueue_step / worker.claim / api.runner.request_job 共用,消除三处逐字重复(审计 R-L5)。"""
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
 
 
 # ── 内部小工具 ──
@@ -37,7 +52,7 @@ async def _set_status(
 
 
 async def _update_step_result(
-    redis: RedisClient, db: Database, job_id: str, step: str, *,
+    db: Database, job_id: str, step: str, *,
     status: str, worker_id: str,
     started_at: datetime, finished_at: datetime, duration_sec: float,
     error: str | None = None, only_if_active: bool = False,
@@ -210,7 +225,7 @@ async def report_step_done(
         "duration_sec": round(duration, 1),
     })
     await _update_step_result(
-        redis, db, job_id, step, status="done", worker_id=worker_id,
+        db, job_id, step, status="done", worker_id=worker_id,
         started_at=datetime.fromtimestamp(started_at, timezone.utc),
         finished_at=datetime.now(timezone.utc),
         duration_sec=round(duration, 1),
@@ -245,7 +260,7 @@ async def report_step_failed(
         "event": "step_failed", "step": step, "error": events_error,
     })
     await _update_step_result(
-        redis, db, job_id, step, status="failed", error=error, worker_id=worker_id,
+        db, job_id, step, status="failed", error=error, worker_id=worker_id,
         started_at=datetime.fromtimestamp(started_at, timezone.utc),
         finished_at=datetime.now(timezone.utc),
         duration_sec=round(duration, 1),
@@ -261,11 +276,19 @@ async def release_step(
     redis: RedisClient, db: Database, worker_id: str, claim: dict,
 ) -> None:
     pool = claim["pool"]
+    job_id, step = claim["job_id"], claim["step"]
+    # exec_id 守卫:若该步已被更新的执行接管(check_stuck 重排后 worker B 以新 exec_id 认领),
+    # 本(陈旧)worker 迟到的 release 不得释放/解冻已属于新执行的槽与冻结(审计 SCHED-N1 / I-M3)——
+    # 否则会误解冻 cpu 打破 scene↔cpu 独占。槽/冻结/资源由当前执行自己的 release 负责;本 worker 仅置 idle。
+    current_exec = await redis.get_step_exec_id(job_id, step)
+    if (current_exec is not None and claim.get("exec_id") is not None
+            and current_exec != claim["exec_id"]):
+        await _set_status(redis, db, worker_id, "idle")
+        return
     await redis.release_slot(pool)
     if pool == "scene":
         await redis.unfreeze_pool("cpu")
     # 归还本步占用的资源槽(从 redis 读,gateway release 请求不回传资源列表);清记录防重复归还。
-    job_id, step = claim["job_id"], claim["step"]
     resources = await redis.get_step_resources(job_id, step)
     if resources:
         for res in resources:

@@ -159,6 +159,26 @@ class TestDeleteStepStatus:
         await rc.delete_step_status("j_x", "A")
         assert await rc.get_step_status("j_x", "A") is None
 
+    @pytest.mark.asyncio
+    async def test_delete_step_status_clears_all_per_step_fields(self, rc):
+        # 对齐 cleanup_job:清该步在所有 per-step hash 的 field,不留惰性垃圾(审计 I-L11)。
+        jid = "j_x"
+        await rc.set_step_status(jid, "A", "done")
+        for sub in ("retries", "step_worker", "step_exec", "step_resources", "step_progress"):
+            await rc.r.hset(f"job:{jid}:{sub}", "A", "v")
+        await rc.delete_step_status(jid, "A")
+        for sub in ("steps", "retries", "step_worker", "step_exec", "step_resources", "step_progress"):
+            assert await rc.r.hget(f"job:{jid}:{sub}", "A") is None
+
+    @pytest.mark.asyncio
+    async def test_reset_step_retries(self, rc):
+        # rerun 前清重试计数(审计 I-H4):reset 后归零,重跑步骤恢复重试预算。
+        await rc.incr_step_retries("j_x", "A")
+        await rc.incr_step_retries("j_x", "A")
+        assert await rc.get_step_retries("j_x", "A") == 2
+        await rc.reset_step_retries("j_x", "A")
+        assert await rc.get_step_retries("j_x", "A") == 0
+
 
 class TestJobState:
     @pytest.mark.asyncio

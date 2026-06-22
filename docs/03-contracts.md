@@ -457,7 +457,7 @@ GET  /api/config/styles                → 可用风格标签列表
 
 ```
 POST   /api/runner/register                                → 换发 per-worker token
-POST   /api/runner/heartbeat                               → 刷新存活，回发 paused 控制位（{"paused": bool}）
+POST   /api/runner/heartbeat                               → 刷新存活（暂停态由 claim_step 据 admin_status 兜底，不经心跳回发）
 POST   /api/runner/offline                                 → 主动下线
 POST   /api/runner/jobs/request                            → 长轮询认领一步（认到即返回 enrich 后的 claim）
 POST   /api/runner/jobs/{id}/steps/{step}/complete         → 上报完成
@@ -473,7 +473,7 @@ PUT    /api/runner/jobs/{id}/artifacts/{rel}              → 回传单个产物
 
 `POST /api/runner/register` Response `200`:
 ```json
-{"worker_id": "ai-a1b2c3d4", "worker_token": "mnwt-...", "heartbeat_sec": 10}
+{"worker_id": "ai-a1b2c3d4", "worker_token": "mnwt-..."}
 ```
 
 ### 1.8 集合管理

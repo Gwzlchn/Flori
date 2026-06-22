@@ -87,7 +87,7 @@ def _score(ids: list[str], tests: list[str]) -> tuple[int, int]:
 def main() -> int:
     only = sys.argv[1] if len(sys.argv) > 1 else None
     g_k = g_s = 0
-    rows: list[str] = []
+    results: list[tuple[str, int, int]] = []   # (prefix, killed, survived)
     for prefix, tests in TARGETS.items():
         if only and only not in prefix:
             continue
@@ -100,19 +100,40 @@ def main() -> int:
             pathlib.Path("pyproject.toml").write_text(orig)  # 还原,勿污染仓库
         ids = _enumerate_mutants(prefix)
         killed, survived = _score(ids, tests)
+        results.append((prefix, killed, survived))
         total = killed + survived
         pct = 100.0 * killed / total if total else 0.0
-        rows.append(f"  {prefix:22s} killed={killed:4d} survived={survived:4d}"
-                    f"  total={total:4d}  score={pct:5.1f}%")
-        print(rows[-1], flush=True)
+        print(f"  {prefix:22s} killed={killed:4d} survived={survived:4d}"
+              f"  total={total:4d}  score={pct:5.1f}%", flush=True)
         g_k += killed
         g_s += survived
     gt = g_k + g_s
+
     print("\n════ 变异分数汇总(真实,非 mutmut 自报的 killed=0)════")
-    for r in rows:
-        print(r)
+    for prefix, k, s in results:
+        t = k + s
+        print(f"  {prefix:22s} killed={k:4d} survived={s:4d}  total={t:4d}"
+              f"  score={100.0 * k / t if t else 0:5.1f}%")
     print(f"  {'TOTAL':22s} killed={g_k:4d} survived={g_s:4d}"
           f"  total={gt:4d}  score={100.0 * g_k / gt if gt else 0:.1f}%")
+
+    # GitHub Actions job summary 友好的 markdown 块(工作流抽这段 >> $GITHUB_STEP_SUMMARY)。
+    print("\n<!--MUTATION-SUMMARY-->")
+    print("### 🧬 变异分数(killed/总数;存活=测试盲区,非阻塞)")
+    print("| 模块 | killed | survived | total | score |")
+    print("|---|---:|---:|---:|---:|")
+    for prefix, k, s in results:
+        t = k + s
+        print(f"| `{prefix}` | {k} | {s} | {t} | {100.0 * k / t if t else 0:.1f}% |")
+    print(f"| **TOTAL** | **{g_k}** | **{g_s}** | **{gt}** | **{100.0 * g_k / gt if gt else 0:.1f}%** |")
+    print("<!--/MUTATION-SUMMARY-->")
+
+    # 机器可读块:工作流抽这段、加日期后追加到 mutation-data 分支的 history.csv(趋势源数据)。
+    # 格式:module,killed,survived(分数由 mutation_report.py 算,避免重复定义)。
+    print("<!--MUTATION-CSV-->")
+    for prefix, k, s in results:
+        print(f"{prefix},{k},{s}")
+    print("<!--/MUTATION-CSV-->")
     # 存活变异 = 断言盲区,但初期必有(等价变异 / 误差信息变异)→ 不让本步变红,供人工裁定。
     return 0
 

@@ -26,7 +26,10 @@ class WhisperStep(StepBase):
         from faster_whisper import WhisperModel
         model = WhisperModel(model_size, compute_type=compute_type)
 
-        segments, info = model.transcribe(str(video_path), language="zh")
+        # 不写死语种:faster-whisper 自动检测。本步仅在无原生 srt 时跑,外文无字幕内容若强制
+        # language="zh" 会被按中文声学模型解码出乱码,且 info.language 恒为 zh 丢失真实语种(下游 08 据此判翻译)。
+        segments, info = model.transcribe(str(video_path))
+        total = info.duration or 0  # 真实音频时长作进度分母;segment.end 作已处理位置(替代旧的伪 total idx+100)
 
         srt_lines = []
         idx = 1
@@ -35,11 +38,13 @@ class WhisperStep(StepBase):
             end = self._format_srt_ts(segment.end)
             srt_lines.append(f"{idx}\n{start} --> {end}\n{segment.text.strip()}\n")
             idx += 1
-            if idx % 50 == 0:
-                self.report_progress(idx, idx + 100, f"transcribing ({idx} segments)")
+            if total and idx % 50 == 0:
+                self.report_progress(min(segment.end, total), total, f"transcribing ({idx} segments)")
 
         srt_content = "\n".join(srt_lines)
         self.write_output("input/subtitle.srt", srt_content)
+        if total:
+            self.report_progress(total, total, "done")
         return {"segments": idx - 1, "language": info.language, "model": model_size}
 
     def _format_srt_ts(self, seconds: float) -> str:

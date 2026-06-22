@@ -386,6 +386,30 @@ class TestAnthropicProvider:
             calc_cost("anthropic", "claude-sonnet-4-6", 100, 50))
         assert resp.cached is False   # cache_read_input_tokens == 0
 
+    def test_build_messages_attaches_image_to_last_user_only(self, tmp_path):
+        """_build_messages:只给最后一条 user message 附图(多轮不把同组图按 base64 重复),媒体类型大小写归一。"""
+        img = tmp_path / "f.JPG"; img.write_bytes(b"x")
+        provider = AnthropicProvider(api_key="sk-test")
+        req = LLMRequest(
+            messages=[{"role": "user", "content": "a"},
+                      {"role": "assistant", "content": "b"},
+                      {"role": "user", "content": "c"}],
+            images=[img],
+        )
+        msgs = provider._build_messages(req)
+        assert msgs[0]["content"] == "a"             # 非最后 user → 纯文本不附图
+        assert isinstance(msgs[2]["content"], list)   # 最后 user → 附图
+        img_part = next(p for p in msgs[2]["content"] if p["type"] == "image")
+        assert img_part["source"]["media_type"] == "image/jpeg"   # .JPG → jpeg(大小写归一)
+
+    def test_build_messages_rejects_unknown_image_type(self, tmp_path):
+        """不支持的后缀显式报错,避免发出非法 media_type 被 API 拒。"""
+        img = tmp_path / "f.bmp"; img.write_bytes(b"x")
+        provider = AnthropicProvider(api_key="sk-test")
+        req = LLMRequest(messages=[{"role": "user", "content": "a"}], images=[img])
+        with pytest.raises(AIProviderError):
+            provider._build_messages(req)
+
     @pytest.mark.asyncio
     async def test_cached_flag_set_when_cache_read(self):
         """cache_read_input_tokens>0 → cached=True(prompt 缓存命中标记,影响计费观感)。"""

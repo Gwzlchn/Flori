@@ -8,7 +8,6 @@ import json
 import os
 import time
 from datetime import datetime
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -91,11 +90,8 @@ class AnthropicProvider:
         if request.system:
             kwargs["system"] = request.system
 
-        loop = asyncio.get_event_loop()
         try:
-            response = await loop.run_in_executor(
-                None, partial(client.messages.create, **kwargs)
-            )
+            response = await asyncio.to_thread(client.messages.create, **kwargs)
         except Exception as e:
             err_str = str(e).lower()
             if "rate" in err_str or "429" in err_str:
@@ -122,27 +118,37 @@ class AnthropicProvider:
             cached=getattr(response.usage, "cache_read_input_tokens", 0) > 0,
         )
 
+    # Anthropic 支持的图片 media subtype(后缀大小写归一;其余后缀显式报错,避免发出非法 media_type 被 API 拒)。
+    _IMG_SUBTYPE = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp"}
+
     def _build_messages(self, request: LLMRequest) -> list[dict]:
-        messages = []
-        for msg in request.messages:
-            if request.images and msg["role"] == "user":
-                import base64
-                content_parts = [{"type": "text", "text": msg["content"]}]
-                for img_path in request.images:
-                    img_data = Path(img_path).read_bytes()
-                    suffix = Path(img_path).suffix.lstrip(".")
-                    media_type = f"image/{suffix}" if suffix != "jpg" else "image/jpeg"
-                    content_parts.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": base64.b64encode(img_data).decode(),
-                        },
-                    })
-                messages.append({"role": msg["role"], "content": content_parts})
-            else:
-                messages.append(msg)
+        messages = [dict(m) for m in request.messages]
+        if not request.images:
+            return messages
+        # 只给【最后一条】user message 附图:逐条附会在多 message(多轮对话)时把同组图按 base64 重复 N 遍。
+        last_user = next(
+            (i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"),
+            None,
+        )
+        if last_user is None:
+            return messages
+        import base64
+        msg = messages[last_user]
+        content_parts = [{"type": "text", "text": msg["content"]}]
+        for img_path in request.images:
+            suffix = Path(img_path).suffix.lstrip(".").lower()
+            subtype = self._IMG_SUBTYPE.get(suffix)
+            if subtype is None:
+                raise AIProviderError(f"unsupported image type {suffix!r}: {img_path}")
+            content_parts.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": f"image/{subtype}",
+                    "data": base64.b64encode(Path(img_path).read_bytes()).decode(),
+                },
+            })
+        messages[last_user] = {"role": msg["role"], "content": content_parts}
         return messages
 
 
@@ -179,11 +185,8 @@ class OpenAICompatibleProvider:
         if request.response_format == "json":
             kwargs["response_format"] = {"type": "json_object"}
 
-        loop = asyncio.get_event_loop()
         try:
-            response = await loop.run_in_executor(
-                None, partial(client.chat.completions.create, **kwargs)
-            )
+            response = await asyncio.to_thread(client.chat.completions.create, **kwargs)
         except Exception as e:
             err_str = str(e).lower()
             if "rate" in err_str or "429" in err_str:
@@ -225,11 +228,16 @@ class ClaudeCLIProvider:
         # 帧目录用 --add-dir 加入可访问范围,容器/无头干净环境也能读到。
         extra_dirs: set[str] = set()
         if request.images:
-            prompt_content += "\n截图(用 Read 工具逐张查看):\n"
+            # 路径可能已被 step 以 [N] 形式列进 prompt(如视频视觉 pass);只补 prompt 里尚未出现的,
+            # 避免同组绝对路径注入两遍(审计 R-M11)。--add-dir 仍按全部 images 授权,不影响 Read。
+            missing = []
             for p in request.images:
                 ap = str(Path(p).resolve())
-                prompt_content += ap + "\n"
                 extra_dirs.add(str(Path(ap).parent))
+                if ap not in prompt_content:
+                    missing.append(ap)
+            if missing:
+                prompt_content += "\n截图(用 Read 工具逐张查看):\n" + "\n".join(missing) + "\n"
 
         # 命令模板里的 {prompt_file} 占位已弃用——prompt 改走 stdin(无 ARG_MAX 限制、不依赖文件读)。
         cmd = [part for part in self._command_template if "{prompt_file}" not in part]
@@ -309,7 +317,6 @@ class AIGateway:
         self,
         step_name: str,
         request: LLMRequest,
-        job_id: str | None = None,
     ) -> LLMResponse:
         if self._dry_run:
             return await DryRunProvider().complete(request)

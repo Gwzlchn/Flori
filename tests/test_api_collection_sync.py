@@ -112,3 +112,38 @@ class TestSubscriptionCollectionAPI:
             "name": "手动", "domain": "finance",
         })).json()["id"]
         assert (await client.post(f"/api/collections/{cid}/sync")).status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_sync_isolates_failed_item(self, client, monkeypatch):
+        """故障隔离:单条建 job 失败不阻断整轮;失败项不 mark_ingested,下轮重试。"""
+        async def fake_enum(mid, cookies=None):
+            return [
+                {"bvid": "BV1good00001", "title": "好1", "duration": "1:00"},
+                {"bvid": "BV1bad000000", "title": "坏", "duration": "2:00"},
+                {"bvid": "BV1good00002", "title": "好2", "duration": "3:00"},
+            ]
+        monkeypatch.setattr("shared.bili_space.enumerate_up", fake_enum)
+        async def fake_up_name(mid, cookies=None): return None
+        monkeypatch.setattr("shared.bili_space.up_name", fake_up_name)
+
+        import api.routes.jobs as jobs_mod
+        real_create = jobs_mod.create_job_core
+        async def flaky_create(db, redis, storage, *, url, **kw):
+            if "BV1bad000000" in url:
+                raise RuntimeError("boom")
+            return await real_create(db, redis, storage, url=url, **kw)
+        monkeypatch.setattr(jobs_mod, "create_job_core", flaky_create)
+
+        cid = (await client.post("/api/collections", json={
+            "name": "x", "domain": "finance", "source_type": "bilibili_up",
+            "source_id": "777", "sync_now": False,
+        })).json()["id"]
+
+        r = await client.post(f"/api/collections/{cid}/sync")
+        assert r.status_code == 200, r.text       # 单条失败没把整轮翻成 500
+        assert r.json()["new"] == 2               # 两个好的入库,坏的跳过
+
+        # 坏项未 mark_ingested:下轮(此次放行)应作为 new 重新建 job(重试可续)。
+        monkeypatch.setattr(jobs_mod, "create_job_core", real_create)
+        r2 = await client.post(f"/api/collections/{cid}/sync")
+        assert r2.status_code == 200 and r2.json()["new"] == 1

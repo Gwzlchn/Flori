@@ -78,17 +78,27 @@ async def sync_collection(
     if coll.source_type and coll.source_type.startswith("bilibili"):
         ingested |= await asyncio.to_thread(db.ingested_bvids)
     new = [it for it in items if it.item_id not in ingested]
+    created = 0
     for it in new:
-        await create_job_core(
-            db, redis, storage,
-            url=it.url, content_type=it.content_type, domain=coll.domain,
-            collection_id=coll.id, title=it.title or None,
-        )
-        await asyncio.to_thread(db.mark_ingested, coll.id, it.item_id)
+        try:
+            await create_job_core(
+                db, redis, storage,
+                url=it.url, content_type=it.content_type, domain=coll.domain,
+                collection_id=coll.id, title=it.title or None,
+            )
+            await asyncio.to_thread(db.mark_ingested, coll.id, it.item_id)
+        except Exception as e:
+            # 故障隔离:单条建 job 失败(坏 url / I/O 抖动)不阻断整轮同步;不 mark_ingested,
+            # 下轮自动重试。否则一条坏数据会卡住其后所有条目本轮入库(违反"单任务失败不影响其他")。
+            logger.warning("collection_sync_item_failed", coll=coll.id,
+                           item_id=it.item_id, url=it.url, error=str(e)[:200])
+            continue
+        created += 1
         await asyncio.sleep(0.2)  # 轻微间隔,别瞬时灌爆队列/触发风控
     await asyncio.to_thread(db.mark_collection_synced, coll.id, datetime.now(timezone.utc))
-    logger.info("collection_synced", coll=coll.id, total=len(items), new=len(new))
-    return {"total": len(items), "new": len(new), "skipped": len(items) - len(new)}
+    logger.info("collection_synced", coll=coll.id, total=len(items),
+                new=created, failed=len(new) - created)
+    return {"total": len(items), "new": created, "skipped": len(items) - len(new)}
 
 
 def _is_placeholder_name(name: str | None, coll: Collection) -> bool:

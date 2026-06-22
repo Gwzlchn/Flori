@@ -8,6 +8,9 @@
 
 [![CI](https://github.com/Gwzlchn/Flori/actions/workflows/ci.yml/badge.svg)](https://github.com/Gwzlchn/Flori/actions/workflows/ci.yml) [![backend coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FGwzlchn%2FFlori%2Fbadges%2Fcoverage-backend.json)](https://github.com/Gwzlchn/Flori/actions/workflows/ci.yml) [![frontend coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FGwzlchn%2FFlori%2Fbadges%2Fcoverage-frontend.json)](https://github.com/Gwzlchn/Flori/actions/workflows/ci.yml)
 
+<!-- 变异分数(测试有效性,每日 cron 更新;徽章值=各核心模块当前分数,点开看趋势表)。首次 daily run 后生效。 -->
+[![ai_gateway mutation](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FGwzlchn%2FFlori%2Fmutation-data%2Fmutation-ai_gateway.json)](https://github.com/Gwzlchn/Flori/blob/mutation-data/trend.md) [![db mutation](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FGwzlchn%2FFlori%2Fmutation-data%2Fmutation-db.json)](https://github.com/Gwzlchn/Flori/blob/mutation-data/trend.md) [![scheduler mutation](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FGwzlchn%2FFlori%2Fmutation-data%2Fmutation-scheduler.json)](https://github.com/Gwzlchn/Flori/blob/mutation-data/trend.md) [![worker mutation](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FGwzlchn%2FFlori%2Fmutation-data%2Fmutation-worker.json)](https://github.com/Gwzlchn/Flori/blob/mutation-data/trend.md)
+
 投递一个视频/播客链接、一篇 PDF 或一个网页，Flori 自动下载、转写、截图、OCR，再用 AI 整理成结构化笔记，并把"讲清楚的概念"沉淀进按领域分桶的概念图，攒成你自己的知识库。
 
 > **名字来源**：Flori 取自拉丁语 *florilegium*（"采花集"）——中世纪指从群书中采撷精华、汇编成册的选集，正是"把素材摘录、沉淀为知识"的隐喻。目标不止于"存下来"，而是"学得会、记得住"（学习/复习回路见 [ROADMAP](ROADMAP.md) M4）。

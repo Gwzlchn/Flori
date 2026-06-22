@@ -19,6 +19,7 @@ from shared.errors import RETRY_POLICY, get_retry_delay
 from shared.models import Job, JobStatus, Step, StepStatus
 from shared.notify import notify
 from shared.redis_client import RedisClient
+from shared.runner_ops import parse_style_tags
 from shared.source_detect import detect_source
 from shared.storage import StorageBackend
 
@@ -526,7 +527,7 @@ class Scheduler:
     # ── DAG 推进 ──
 
     async def _check_downstream(self, job_id: str) -> None:
-        """检查所有 waiting/skipped 步骤是否可推进。生产由 on_step_done 调用(mark_skipped 仅测试用)。"""
+        """检查所有 waiting/skipped 步骤是否可推进。生产由 on_step_done 调用。"""
         pipeline = await self.redis.get_job_pipeline(job_id)
         if not pipeline:
             return
@@ -625,12 +626,8 @@ class Scheduler:
         if pool == "ai":
             job_info = await self.redis.get_job_info(job_id)
             domain = job_info.get("domain", "")
-            style_tags_raw = job_info.get("style_tags", "[]")
-            try:
-                style_tags = json.loads(style_tags_raw) if isinstance(style_tags_raw, str) else style_tags_raw
-            except (json.JSONDecodeError, TypeError):
-                style_tags = []
-            dynamic_tags = [domain] + (style_tags if isinstance(style_tags, list) else [])
+            style_tags = parse_style_tags(job_info.get("style_tags", "[]"))
+            dynamic_tags = [domain] + style_tags
             merged_tags = sorted(set(static_tags + [t for t in dynamic_tags if t]))
         else:
             merged_tags = list(static_tags)
@@ -744,15 +741,6 @@ class Scheduler:
             # exists 命中、或无 exists 的兜底规则：本条生效。
             return _when(rule) != "skip"
         return True
-
-    async def mark_skipped(self, job_id: str, step: str) -> None:
-        # 仅测试用:生产条件跳过走 _check_downstream 内联逻辑,无生产调用方。
-        await self.redis.set_step_status(job_id, step, "skipped")
-        await asyncio.to_thread(self.db.update_step, job_id, step, status="skipped")
-        await self.redis.publish(f"events:{job_id}", {
-            "event": "step_skipped", "step": step,
-        })
-        await self._check_downstream(job_id)
 
     async def _pool_has_workers(self, pool: str) -> bool:
         """检查某个 pool 是否有可认领新任务的 worker。排除 paused/offline:claim_step 对
@@ -1020,6 +1008,8 @@ class Scheduler:
             done_file = self.jobs_dir / job_id / f".{step}.done"
             await asyncio.to_thread(done_file.unlink, True)
             await self.redis.set_step_status(job_id, step, "waiting")
+            # 清重试计数,否则重跑曾耗尽重试的步骤会零重试预算、首次失败即终止(审计 I-H4)。
+            await self.redis.reset_step_retries(job_id, step)
             await asyncio.to_thread(
                 self.db.update_step, job_id, step,
                 # 清掉上一轮的起止/耗时,否则重置成 waiting 的步骤会显示旧时间(诡异)。

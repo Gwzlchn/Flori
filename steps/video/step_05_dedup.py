@@ -95,9 +95,10 @@ class DedupStep(StepBase):
             with Image.open(path_a) as ia, Image.open(path_b) as ib:
                 img_a = np.array(ia.convert("L").resize(resize))
                 img_b = np.array(ib.convert("L").resize(resize))
-            score = ssim(img_a, img_b)
+            score = ssim(img_a, img_b, data_range=255)  # 与 step_04 一致显式传,避免依赖 dtype 推断
             return score >= threshold
         except Exception as e:
+            # SSIM 复核失败降级为"非重复"(偏保留:宁可多留一帧也不误删),仅记 warning。
             self.log.warning("ssim_error", path_a=str(path_a), path_b=str(path_b), error=str(e))
             return False
 

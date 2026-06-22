@@ -22,10 +22,10 @@ SourceItem 字段:
   - content_type: video / paper / article / audio 之一(决定走哪条 pipeline)。
 
 SourceContext(ctx)给适配器提供:
-  - ctx.bili_cookies: B站 cookie JSON 串(从 db.get_credential('bili_cookies') 取),
+  - ctx.bili_cookies: B站 cookie JSON 串(由 sync_collection 从 db.get_credential('bili_cookies') 取),
                       未登录为 None。
-  - ctx.db:           可选的 Database 句柄(多数适配器用不到;需要查别的凭证/状态时用)。
-  - ctx.get_credential(key): 便捷读其它凭证(如 youtube cookies),底层走 ctx.db。
+  - ctx.db:           可选的 Database 句柄(目前内置适配器均未使用;保留给将来需直接查库的适配器)。
+                      注:YouTube cookies 由 youtube 适配器自行从 /data/cookies/youtube.txt 读,不走 ctx。
 ctx 由 sync_collection 构造并传入,适配器不要自己去 import db / 读环境。
 """
 
@@ -49,14 +49,7 @@ class SourceContext:
     """适配器运行时上下文。由 sync_collection 构造并传入,集中提供凭证/句柄,
     使适配器纯函数化(不自己 import db、不读环境/全局)。"""
     bili_cookies: Optional[str] = None   # B站 cookie JSON 串(db.get_credential('bili_cookies'))
-    db: object | None = None             # 可选 Database 句柄(需要别的凭证/状态时用)
-
-    def get_credential(self, key: str) -> str | None:
-        """便捷读应用级凭证(如 youtube_cookies)。无 db 时返回 None。"""
-        if self.db is None:
-            return None
-        getter = getattr(self.db, "get_credential", None)
-        return getter(key) if callable(getter) else None
+    db: object | None = None             # 可选 Database 句柄(目前内置适配器均未使用;保留给将来需查库的适配器)
 
 
 # 适配器类型: (source_id, ctx) -> (source_title | None, [SourceItem])

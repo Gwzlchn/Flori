@@ -224,6 +224,26 @@ class TestRunSubprocess:
         with pytest.raises(subprocess.TimeoutExpired):
             step.run_subprocess(["sleep", "10"], timeout=1)
 
+    def test_failure_keeps_stderr_in_message(self, tmp_path):
+        # 非零退出:仍是 CalledProcessError(子类),但 str() 带上 stderr,故障原因不再被吞(审计:丢 stderr)。
+        step = DummyStep(tmp_path)
+        with pytest.raises(subprocess.CalledProcessError) as ei:
+            step.run_subprocess(["sh", "-c", "echo boom-detail >&2; exit 3"])
+        assert "boom-detail" in str(ei.value)
+
+
+class TestTerminologyBlock:
+    def test_empty_when_no_terminology(self):
+        assert StepBase.terminology_block({}) == ""
+        assert StepBase.terminology_block({"terminology": []}) == ""
+        assert StepBase.terminology_block(None) == ""
+
+    def test_joins_and_caps_at_30(self):
+        block = StepBase.terminology_block({"terminology": ["A", "B", "C"]})
+        assert "本领域已沉淀的标准概念" in block and "A; B; C" in block
+        big = StepBase.terminology_block({"terminology": [str(i) for i in range(40)]})
+        assert "29" in big and "30" not in big   # 仅前 30 项(0..29)
+
 
 class TestLoadJson:
     def test_load_json(self, tmp_path):

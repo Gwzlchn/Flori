@@ -92,7 +92,6 @@ class TestRegisterAllocates:
         token = body["worker_token"]
         assert worker_id.startswith("cpu-")
         assert token.startswith("mnwt-")
-        assert body["heartbeat_sec"] == 10
 
         # worker_tokens 行写入（仅存 hash）
         token_hash = hashlib.sha256(token.encode()).hexdigest()
@@ -143,28 +142,16 @@ class TestHeartbeat:
         assert resp.status_code == 401
 
     @pytest.mark.asyncio
-    async def test_valid_token_returns_paused_flag(self, client, redis_mock):
+    async def test_valid_token_heartbeat_ok(self, client, redis_mock):
+        # 心跳只刷存活,返回 {"ok": True};暂停由 claim_step 据 admin_status 兜底(不经心跳回发,见 test_runner_ops)。
         worker_id, token = await self._register_worker(client)
-        redis_mock.get_worker_info.return_value = {"admin_status": ""}
         resp = await client.post(
             "/api/runner/heartbeat",
             json={"worker_id": worker_id, "status": "idle"},
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
-        assert resp.json() == {"paused": False}
-
-    @pytest.mark.asyncio
-    async def test_paused_when_redis_admin_status_paused(self, client, redis_mock):
-        worker_id, token = await self._register_worker(client)
-        redis_mock.get_worker_info.return_value = {"admin_status": "paused"}
-        resp = await client.post(
-            "/api/runner/heartbeat",
-            json={"worker_id": worker_id, "status": "idle"},
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        assert resp.status_code == 200
-        assert resp.json() == {"paused": True}
+        assert resp.json() == {"ok": True}
 
     @pytest.mark.asyncio
     async def test_worker_id_mismatch_403(self, client):

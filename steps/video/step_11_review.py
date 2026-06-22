@@ -49,7 +49,7 @@ class ReviewStep(StepBase):
             note_file=note_file, coverage=coverage,
         )
         return {"overall": review.get("overall", 0), "parse_failed": parse_failed,
-                "provider": review["provider"], "note_file": note_file,
+                "provider": review.get("provider"), "note_file": note_file,
                 "coverage_truncated": coverage["truncated"]}
 
 
