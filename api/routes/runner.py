@@ -13,11 +13,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from shared import runner_ops
+from shared.config import AppConfig
 from shared.db import Database
 from shared.models import AIUsage, Worker, generate_worker_id
 from shared.redis_client import RedisClient
+from shared.status import DEFAULT_ONLINE_WINDOW_SEC
 from shared.storage import StorageBackend, is_credential_file
 from api.deps import (
+    get_config,
     get_db,
     get_redis,
     get_storage,
@@ -38,10 +41,17 @@ from api.schemas import (
 router = APIRouter(prefix="/api/runner", tags=["runner"])
 
 _HEARTBEAT_SEC = 10
-_WORKER_TTL = 30
 # 长轮询:服务端持有窗口须小于 worker httpx 读超时(35s),空轮询间隔避免空转打爆 Redis。
 _CLAIM_WINDOW_SEC = 25.0
 _CLAIM_POLL_SEC = 0.5
+
+
+def _worker_ttl(config: AppConfig) -> int:
+    """Redis worker liveness key 的 TTL = 配置的 online_window_sec(单一事实源,与对外
+    在线判定同一窗口)。此前硬编码 _WORKER_TTL=30 与 pools.yaml online_window_sec=30 是两处
+    独立常量,改一处不同步;现统一由 config 驱动,缺省回落 shared.status 的兜底常量。"""
+    ws = (config.pools or {}).get("worker_status") or {}
+    return int(ws.get("online_window_sec", DEFAULT_ONLINE_WINDOW_SEC))
 
 
 class RunnerRegisterRequest(BaseModel):
@@ -77,6 +87,7 @@ async def register(
     request: Request,
     db: Database = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
+    config: AppConfig = Depends(get_config),
 ):
     """接入门禁通过后，服务端分配 worker_id、签发 per-worker token，
     并单写 Redis + DB（worker 不再双写），返回 token 仅此一次。"""
@@ -108,7 +119,7 @@ async def register(
         "started_at": now.isoformat(),
         "last_heartbeat": now.isoformat(),
     }
-    await redis.register_worker(worker_id, info, ttl=_WORKER_TTL)
+    await redis.register_worker(worker_id, info, ttl=_worker_ttl(config))
     await asyncio.to_thread(
         db.upsert_worker,
         Worker(
@@ -137,11 +148,12 @@ async def heartbeat(
     worker_id: str = Depends(verify_worker_token),
     db: Database = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
+    config: AppConfig = Depends(get_config),
 ):
     """刷新 Redis TTL + DB last_heartbeat；借返回值回发 drain 控制位。"""
     if req.worker_id != worker_id:
         raise HTTPException(status_code=403, detail="token/worker_id mismatch")
-    await redis.heartbeat(worker_id, ttl=_WORKER_TTL)
+    await redis.heartbeat(worker_id, ttl=_worker_ttl(config))
     await asyncio.to_thread(
         db.update_worker_heartbeat,
         worker_id,
@@ -187,6 +199,25 @@ async def _enrich_claim(redis: RedisClient, claim: dict) -> dict:
     return {**claim, "pipeline": pipeline, "domain": domain, "style_tags": style_tags}
 
 
+def _clamp_pool_limits(
+    config: AppConfig, allowed: list[str], client_limits: dict,
+) -> dict[str, int]:
+    """以服务端 pools.yaml 为权威夹取每池并发上限:绝不信任 worker 自报的 pool_limits
+    ——否则错误/恶意 worker 报一个超大 limit 即可突破全局每池并发(如 ai=2 被打成 ai=999)。
+    client 值只允许调低不允许调高;缺省/非法则取服务端值。"""
+    server_pools = (config.pools or {}).get("pools", {}) or {}
+    effective: dict[str, int] = {}
+    for pool in allowed:
+        server_limit = int((server_pools.get(pool) or {}).get("limit", 999))
+        raw = (client_limits or {}).get(pool, server_limit)
+        try:
+            client_limit = int(raw)
+        except (TypeError, ValueError):
+            client_limit = server_limit
+        effective[pool] = max(0, min(client_limit, server_limit))
+    return effective
+
+
 @router.post("/jobs/request")
 async def request_job(
     req: RunnerClaimRequest,
@@ -194,6 +225,7 @@ async def request_job(
     worker_id: str = Depends(verify_worker_token),
     db: Database = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
+    config: AppConfig = Depends(get_config),
 ):
     """长轮询认领一步:窗口内反复 claim_step,认到就 enrich 后返回,否则 {"claim": null}。"""
     # per-token 授权:把请求池裁剪到 token 注册时授权的池子(空授权列表=不限,兼容旧 token)。
@@ -207,10 +239,13 @@ async def request_job(
     if not allowed:
         return {"claim": None}
 
+    # 服务端权威夹取并发上限(不信任客户端自报),堵全局并发被突破。
+    effective_limits = _clamp_pool_limits(config, allowed, req.pool_limits)
+
     deadline = time.monotonic() + _CLAIM_WINDOW_SEC
     while True:
         claim = await runner_ops.claim_step(
-            redis, db, worker_id, allowed, req.pool_limits,
+            redis, db, worker_id, allowed, effective_limits,
             set(req.tags), set(req.reject_tags),
         )
         if claim is not None:
