@@ -82,7 +82,7 @@ class SmartStep(StepBase):
         return "".join(parts)
 
     def _build_user_prompt(self, mechanical: str, frame_desc: str = "") -> str:
-        profile = self._load_profile()
+        profile = self.load_domain_profile()
         style_hints = self._load_style_hints()
 
         parts = ["请将以下机械版笔记重组为结构化学习笔记。\n"]
@@ -129,9 +129,6 @@ class SmartStep(StepBase):
             )
         parts.append(f"\n---\n\n{mechanical}")
         return "".join(parts)
-
-    def _load_profile(self) -> dict:
-        return self.load_domain_profile()
 
     def _load_style_hints(self) -> list[dict]:
         prompts_dir = Path(self.config["paths"]["prompts_dir"])

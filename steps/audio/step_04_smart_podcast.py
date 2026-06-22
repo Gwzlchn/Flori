@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-
-import yaml
 
 from shared.step_base import StepBase, file_hash
 
@@ -38,7 +35,7 @@ class SmartPodcastStep(StepBase):
                 "model": self.last_ai_model, "note_file": rel}
 
     def _build_prompt(self, transcript: dict) -> str:
-        profile = self._load_profile()
+        profile = self.load_domain_profile()
 
         parts = [
             "请将以下播客/音频的口语转写重组为中文结构化学习笔记。\n",
@@ -68,10 +65,6 @@ class SmartPodcastStep(StepBase):
         parts.append(full_text[:MAX_TRANSCRIPT_CHARS])
 
         return "".join(parts)
-
-    def _load_profile(self) -> dict:
-        return self.load_domain_profile()
-
 
 if __name__ == "__main__":
     SmartPodcastStep.cli_main("04_smart_podcast")

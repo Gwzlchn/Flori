@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-
-import yaml
 
 from shared.step_base import StepBase, file_hash
 
@@ -35,7 +32,7 @@ class SmartArticleStep(StepBase):
                 "model": self.last_ai_model, "note_file": rel}
 
     def _build_prompt(self, sections: dict) -> str:
-        profile = self._load_profile()
+        profile = self.load_domain_profile()
 
         parts = [
             "请将以下文章内容整理为中文结构化学习笔记。\n",
@@ -72,10 +69,6 @@ class SmartArticleStep(StepBase):
     def _render_section(self, section: dict, parts: list, level: int) -> None:
         from steps.utils.sections import render_section_tree
         render_section_tree(section, parts, level)
-
-    def _load_profile(self) -> dict:
-        return self.load_domain_profile()
-
 
 if __name__ == "__main__":
     SmartArticleStep.cli_main("04_smart_article")
