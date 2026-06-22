@@ -105,6 +105,19 @@ def create_app(
             content={"error": "invalid_request", "message": str(exc.errors())},
         )
 
+    # 兜底:URL(路径/查询)含空字节(null byte)会让 sqlite3 绑定 / pathlib.resolve() 抛 → 裸 500;
+    # 这类输入恒为非法,入口统一拦成 400(schemathesis fuzz 发现 /assets/x%00、/search?q=%00 两例)。
+    from urllib.parse import unquote as _unquote
+
+    @app.middleware("http")
+    async def _reject_null_bytes(request: _Request, call_next):
+        if "\x00" in _unquote(request.url.path) or "\x00" in _unquote(request.url.query):
+            return _JSONResponse(
+                status_code=400,
+                content={"error": "bad_request", "message": "null byte in request URL"},
+            )
+        return await call_next(request)
+
     if db is not None:
         app.state.db = db
         app.state.redis = redis

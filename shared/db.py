@@ -233,7 +233,8 @@ def _warn_plaintext_credentials_once() -> None:
 def _fts_match_query(q: str) -> str:
     """把用户查询串包成 fts5 安全的双引号短语，防 MATCH 语法注入。
     内部双引号转义为两个双引号；空白折叠；空查询返回空串（调用方按无结果处理）。"""
-    cleaned = " ".join((q or "").split())
+    # 剔除空字节(null byte):sqlite3 绑定含 \x00 的串会抛 "unterminated string";它也非有效检索词。
+    cleaned = " ".join((q or "").replace("\x00", "").split())
     if not cleaned:
         return ""
     escaped = cleaned.replace('"', '""')
