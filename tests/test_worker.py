@@ -747,3 +747,69 @@ class TestShutdown:
         asyncio.create_task(schedule_shutdown())
         await asyncio.wait_for(worker.main_loop(), timeout=2.0)
         # If we reach here, main_loop exited due to shutdown
+
+
+class TestUploadFaultTolerance:
+    """上报通道抖动不得污染步骤结论 / 杀 worker(审计 I-H2/I-H3)。"""
+
+    @pytest.mark.asyncio
+    async def test_success_not_flipped_when_usage_collection_raises(
+        self, worker, redis, db, tmp_jobs_dir
+    ):
+        # returncode==0 的成功步骤,即使 usage 收集/上报抛错,也必须保持 DONE 而非被翻成 FAILED。
+        import worker.worker as worker_mod
+
+        await worker.register()
+        db.create_job(make_job())
+        db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.READY, pool="cpu"))
+        await redis.try_acquire_slot("cpu", limit=3)
+        (tmp_jobs_dir / "j_test_001").mkdir(exist_ok=True)
+
+        async def mock_run_step(ctx, on_progress, on_tick):
+            return 0, ""
+        worker.runner.run_step = mock_run_step
+
+        def boom(*_a, **_k):
+            raise RuntimeError("usage parse/upload exploded")
+        # _collect_usage 内部依赖,模拟 usage 收集/上报抖动。
+        with patch.object(worker_mod, "collect_usage_from_file", boom):
+            await worker.execute(make_claim())
+
+        # 成功步骤未被上报通道抖动翻盘。
+        assert db.get_steps("j_test_001")[0].status == StepStatus.DONE
+        assert await redis.get_pool_count("cpu") == 0
+
+    @pytest.mark.asyncio
+    async def test_gateway_upload_methods_best_effort_on_http_error(self, monkeypatch):
+        # gateway 上报四法遇 httpx 错误必须 best-effort(重试后只 log,不抛);否则 execute 的
+        # finally release 抛出会逃逸 main_loop 杀掉整个 worker(审计 I-H3)。
+        import httpx
+        import worker.gateway_transport as gw_mod
+        from worker.gateway_transport import GatewayTransport
+        from shared.models import AIUsage
+
+        async def _no_sleep(*_a, **_k):
+            return None
+        monkeypatch.setattr(gw_mod.asyncio, "sleep", _no_sleep)  # 别让重试退避拖慢测试
+
+        gt = GatewayTransport(
+            "https://gw.example", registration_token="t",
+            id_file="/tmp/.wid_beff_test", inner=None,
+        )
+
+        class _BoomClient:
+            async def post(self, *a, **k):
+                raise httpx.ConnectError("gateway down")
+        gt._client = _BoomClient()
+
+        claim = {"job_id": "j1", "step": "A", "pool": "cpu", "exec_id": "w:1"}
+        # 任一上报抛出即视为缺陷;以下四调用均应静默返回 None。
+        assert await gt.report_done(claim, 1.0, 0.0) is None
+        assert await gt.report_failed(
+            claim, "e", "processing", 1.0, 0.0, count_stats=False) is None
+        assert await gt.release(claim) is None
+        usage = AIUsage(
+            exec_id="w:1", provider="p", model="m", job_id="j1", step="A",
+            input_tokens=1, output_tokens=1, cost_usd=0.0, duration_sec=0.1, cached=False,
+        )
+        assert await gt.record_ai_usage(usage) is None

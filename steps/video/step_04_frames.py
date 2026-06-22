@@ -60,7 +60,7 @@ class FramesStep(StepBase):
                 frame, target = self._pick_representative(cap, sf, ef, ratio, dyn_ssim)
                 if frame is not None:
                     ts = target / fps if fps > 0 else start
-                    frame_index = self._save(cv2, assets_dir, "scene", frame_index, i, ts, frame, candidates)
+                    frame_index = self._save(assets_dir, "scene", frame_index, i, ts, frame, candidates)
 
                 # 超长场景:固定间隔保底采样,避免长讲解只有一帧。
                 if (end - start) > max_gap:
@@ -68,7 +68,7 @@ class FramesStep(StepBase):
                     while t < end - 5:
                         fr = self._seek(cap, int(t * fps))
                         if fr is not None:
-                            frame_index = self._save(cv2, assets_dir, "sample", frame_index, i, t, fr, candidates)
+                            frame_index = self._save(assets_dir, "sample", frame_index, i, t, fr, candidates)
                         t += interval
         finally:
             cap.release()
@@ -78,8 +78,9 @@ class FramesStep(StepBase):
         scene_n = sum(1 for c in candidates if c.get("source") == "scene")
         return {"total": len(candidates), "scenes": len(scenes), "sampled": len(candidates) - scene_n}
 
-    def _save(self, cv2, assets_dir: Path, source: str, idx: int, scene_i: int,
+    def _save(self, assets_dir: Path, source: str, idx: int, scene_i: int,
               ts: float, frame, candidates: list) -> int:
+        import cv2  # 与 _pick_representative/_seek 一致在方法内 import(模块已缓存,无开销),不再当参数传
         # 统一命名 frame-{NNNN}.jpg(扁平、前端按 assets/<flat> 解析)。source/时间戳不进文件名,
         # 留在清单(下方 candidates 条目)与图注;idx 是跨场景全局自增序号,即占位符 [img:N] 的 N。
         fn = f"frame-{idx:04d}.jpg"

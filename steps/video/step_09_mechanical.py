@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
@@ -85,7 +84,7 @@ class MechanicalStep(StepBase):
         ocr = self.load_json("intermediate/ocr.json")
 
         danmaku_path = self.job_dir / "intermediate" / "danmaku.json"
-        danmaku = json.loads(danmaku_path.read_text()) if danmaku_path.exists() else []
+        danmaku = self.load_json("intermediate/danmaku.json") if danmaku_path.exists() else []
 
         # 口播:优先 06 的中文稿(中文加标点/非中文已翻译);没有则直接读原始中文字幕(无需 claude
         # 先出可看的机械版)。非中文视频无中文稿时口播留空,等 06 翻译,不把外文塞进中文机械版。

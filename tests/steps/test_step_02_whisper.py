@@ -42,6 +42,7 @@ class TestWhisperStep:
 
         mock_info = MagicMock()
         mock_info.language = "zh"
+        mock_info.duration = 2.5  # 进度分母走真实时长(不再写死 language="zh",自动检测)
 
         mock_model = MagicMock()
         mock_model.transcribe.return_value = ([mock_segment], mock_info)

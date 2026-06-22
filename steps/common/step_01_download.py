@@ -358,12 +358,12 @@ class DownloadStep(StepBase):
         - 字幕:原生中文视频只留一份中文字幕(删 B 站 AI 翻译的其它语种,机械/智能版用不到);
           外文视频保留全部 srt,交 08 选原生语种并翻译。
         - 弹幕:多份 .ass(yutto 常同时落 danmaku.ass 与 <标题>.ass)只留一份 danmaku.ass。"""
-        from steps.utils.srt_parser import _looks_chinese
+        from steps.utils.srt_parser import _looks_chinese, CHINESE_SUBTITLE_KEYWORDS
 
         srts = sorted(input_dir.glob("*.srt"))
         zh = [f for f in srts if _looks_chinese(f)]
         if zh:
-            marked = [f for f in zh if any(k in f.name.lower() for k in ("中文", "zh", "chs", "cn"))]
+            marked = [f for f in zh if any(k in f.name.lower() for k in CHINESE_SUBTITLE_KEYWORDS)]
             keep = (marked or zh)[0]
             for f in srts:
                 if f != keep:
@@ -371,9 +371,11 @@ class DownloadStep(StepBase):
 
         asses = sorted(input_dir.glob("*.ass"))
         if asses:
-            keep = asses[0]
+            target = input_dir / "danmaku.ass"
+            # 已存在 danmaku.ass 则以它为准,不要把字母序首个 rename 覆盖掉它(R2 新发现)。
+            keep = target if target.exists() else asses[0]
             if keep.name != "danmaku.ass":
-                keep = keep.rename(input_dir / "danmaku.ass")
+                keep = keep.rename(target)
             for f in asses:
                 if f != keep and f.exists():
                     f.unlink()

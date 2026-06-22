@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 from shared.step_base import StepBase, file_hash
 from steps.utils.ass_parser import load_ass
 
@@ -26,9 +23,11 @@ class DanmakuStep(StepBase):
         ass_files = sorted((self.job_dir / "input").glob("*.ass"))
         all_entries = []
 
-        for ass_file in ass_files:
+        total_files = len(ass_files) or 1
+        for i, ass_file in enumerate(ass_files):
             entries = load_ass(ass_file)
             all_entries.extend(entries)
+            self.report_progress(i + 1, total_files, f"parsing danmaku ({i + 1}/{total_files})")
 
         all_entries.sort(key=lambda e: e.time_sec)
 
@@ -43,6 +42,7 @@ class DanmakuStep(StepBase):
             result.append({"time_sec": round(e.time_sec, 2), "text": e.text})
 
         self.write_output("intermediate/danmaku.json", result)
+        self.report_progress(total_files, total_files, "done")
         return {"comments": len(result)}
 
 

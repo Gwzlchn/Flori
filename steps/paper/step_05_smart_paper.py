@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 from shared.step_base import StepBase, file_hash
 
 
@@ -42,7 +40,7 @@ class SmartPaperStep(StepBase):
                 "model": self.last_ai_model, "note_file": rel}
 
     def _build_prompt(self, sections: dict, figures: list) -> str:
-        profile = self.load_domain_profile()
+        profile = self.load_domain_prompt_profile()
 
         parts = [
             "请将以下论文内容重组为中文结构化学习笔记。\n",
@@ -53,15 +51,7 @@ class SmartPaperStep(StepBase):
             "- 按逻辑结构组织，不必按原文章节顺序\n",
         ]
 
-        if profile:
-            if profile.get("terminology"):
-                terms = "; ".join(profile["terminology"][:30])
-                # 回流(§1.8 ③)：注入本域已沉淀概念的标准定义,命中用统一措辞、不重复展开,
-                # 只对未列出的新概念做首次解释——避免同概念每篇换一套说法。
-                parts.append(
-                    "\n本领域已沉淀的标准概念（命中时沿用统一措辞、无需重新展开解释；"
-                    f"只对下列未涵盖的新概念做首次解释）：\n{terms}\n"
-                )
+        parts.append(self.terminology_block(profile))  # 已沉淀标准概念注入(共用,审计 R-M9)
 
         parts.append(f"\n论文标题：{sections.get('title', '未知')}\n")
         parts.append(f"作者：{', '.join(sections.get('authors', []))}\n")

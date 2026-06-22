@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import secrets
 import time
 from datetime import datetime, timezone
@@ -40,7 +39,6 @@ from api.schemas import (
 # 注册接口自带门禁(registration token)，心跳/下线走 per-worker token，故不挂全局 verify_token。
 router = APIRouter(prefix="/api/runner", tags=["runner"])
 
-_HEARTBEAT_SEC = 10
 # 长轮询:服务端持有窗口须小于 worker httpx 读超时(35s),空轮询间隔避免空转打爆 Redis。
 _CLAIM_WINDOW_SEC = 25.0
 _CLAIM_POLL_SEC = 0.5
@@ -138,7 +136,6 @@ async def register(
     return {
         "worker_id": worker_id,
         "worker_token": worker_token,
-        "heartbeat_sec": _HEARTBEAT_SEC,
     }
 
 
@@ -150,7 +147,7 @@ async def heartbeat(
     redis: RedisClient = Depends(get_redis),
     config: AppConfig = Depends(get_config),
 ):
-    """刷新 Redis TTL + DB last_heartbeat；借返回值回发 drain 控制位。"""
+    """刷新 Redis TTL + DB last_heartbeat。"""
     if req.worker_id != worker_id:
         raise HTTPException(status_code=403, detail="token/worker_id mismatch")
     await redis.heartbeat(worker_id, ttl=_worker_ttl(config))
@@ -161,8 +158,7 @@ async def heartbeat(
         current_job=req.current_job,
         current_step=req.current_step,
     )
-    info = await redis.get_worker_info(worker_id) or {}
-    return {"draining": info.get("status") == "draining"}
+    return {"ok": True}
 
 
 @router.post("/offline")
@@ -186,16 +182,7 @@ async def _enrich_claim(redis: RedisClient, claim: dict) -> dict:
     pipeline = await redis.get_job_pipeline(job_id)
     job_info = await redis.get_job_info(job_id)
     domain = job_info.get("domain", "general")
-    style_tags_raw = job_info.get("style_tags", "[]")
-    try:
-        style_tags = (
-            json.loads(style_tags_raw)
-            if isinstance(style_tags_raw, str) else style_tags_raw
-        )
-    except (json.JSONDecodeError, TypeError):
-        style_tags = []
-    if not isinstance(style_tags, list):
-        style_tags = []
+    style_tags = runner_ops.parse_style_tags(job_info.get("style_tags", "[]"))
     return {**claim, "pipeline": pipeline, "domain": domain, "style_tags": style_tags}
 
 
@@ -235,7 +222,11 @@ async def request_job(
         allowed = [p for p in req.pools if p in set(authorized_pools)]
     else:
         allowed = list(req.pools)
-    # 越权池被裁空 → 无可认领,返回 null(非错误:worker 请求范围外的池自然认不到)。
+    # 剔除 pools.yaml 未声明的池:缺失池在 _clamp/claim 都回落哨兵 999(fail-open),视为无效
+    # 不认领,使配置缺失/漂移 fail-safe 而非 fail-open(审计:_clamp_pool_limits fail-open)。
+    _server_pools = (config.pools or {}).get("pools", {}) or {}
+    allowed = [p for p in allowed if p in _server_pools]
+    # 越权/无效池被裁空 → 无可认领,返回 null(非错误:worker 请求范围外的池自然认不到)。
     if not allowed:
         return {"claim": None}
 
@@ -264,6 +255,8 @@ async def complete_step(
     db: Database = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
 ):
+    validate_path_segment(job_id, "job_id")
+    validate_path_segment(step, "step")
     claim = {"job_id": job_id, "step": step, "pool": req.pool, "exec_id": req.exec_id}
     await runner_ops.report_step_done(
         redis, db, worker_id, claim, req.duration, req.started_at,
@@ -280,6 +273,8 @@ async def fail_step(
     db: Database = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
 ):
+    validate_path_segment(job_id, "job_id")
+    validate_path_segment(step, "step")
     claim = {"job_id": job_id, "step": step, "pool": req.pool, "exec_id": req.exec_id}
     await runner_ops.report_step_failed(
         redis, db, worker_id, claim, req.error, req.error_type,
@@ -297,6 +292,8 @@ async def release_step(
     db: Database = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
 ):
+    validate_path_segment(job_id, "job_id")
+    validate_path_segment(step, "step")
     claim = {"job_id": job_id, "step": step, "pool": req.pool, "exec_id": req.exec_id}
     await runner_ops.release_step(redis, db, worker_id, claim)
     return {"ok": True}
@@ -311,7 +308,10 @@ async def step_progress(
     redis: RedisClient = Depends(get_redis),
 ):
     """运行中进度/日志:发到 events:{job_id},供前端 WS 准实时拉取(gateway on_progress)。"""
-    await redis.publish(f"events:{job_id}", {"event": "step_progress", **req.payload})
+    validate_path_segment(job_id, "job_id")
+    validate_path_segment(step, "step")
+    # 固定字段后置:payload 若含 "event" 键不能覆盖 step_progress(审计 I-L8)。
+    await redis.publish(f"events:{job_id}", {**req.payload, "event": "step_progress"})
     return {"ok": True}
 
 
@@ -324,6 +324,8 @@ async def step_alive(
 ):
     """步进度心跳:刷新 redis 步进度时间戳(worker on_tick 每 10s 调,仅子进程存活时),
     供 scheduler.check_stuck 对远程 job(产物不落调度器盘)判进度停滞。"""
+    validate_path_segment(job_id, "job_id")
+    validate_path_segment(step, "step")
     await redis.set_step_progress_at(job_id, step)
     return {"ok": True}
 
@@ -354,13 +356,8 @@ async def record_usage(
 # ── 产物代理:worker<->API<->storage,minio 永不暴露给 worker ──
 
 
-def _validate_job_id(job_id: str) -> None:
-    # job_id 是路径段,禁 ".."、分隔符、空字节,挡持 token 者经 job_id 穿越读写中心数据。
-    validate_path_segment(job_id, "job_id")
-
-
 def _validate_rel(rel: str) -> None:
-    # 防目录穿越:禁 ".."、绝对路径、空字节(与 jobs._validate_job_id 同风格)。
+    # 防目录穿越:禁 ".."、绝对路径、空字节(与 artifact 端点的 job_id 校验同风格)。
     if ".." in rel or rel.startswith("/") or "\x00" in rel:
         raise HTTPException(400, "invalid artifact path")
 
@@ -372,7 +369,7 @@ async def list_artifacts(
     storage: StorageBackend = Depends(get_storage),
 ):
     """产物清单:GatewayStorage.pull 据此逐个拉取。敏感凭证侧载文件不下发给远端 worker。"""
-    _validate_job_id(job_id)
+    validate_path_segment(job_id, "job_id")
     files = await storage.list_files(job_id)
     return {"files": [f for f in files if not is_credential_file(f)]}
 
@@ -386,7 +383,7 @@ async def get_artifact(
 ):
     """取单个产物字节;不存在返回 404(GatewayStorage.read_file 据此返回 None)。
     敏感凭证侧载文件对远端 worker 一律 404(只供同机 LocalStorage 本地读)。"""
-    _validate_job_id(job_id)
+    validate_path_segment(job_id, "job_id")
     _validate_rel(rel)
     if is_credential_file(rel):
         raise HTTPException(404, "artifact not found")
@@ -405,7 +402,7 @@ async def put_artifact(
     storage: StorageBackend = Depends(get_storage),
 ):
     """回传单个产物:原始 body 直接写入 storage(worker push 的中转出口)。"""
-    _validate_job_id(job_id)
+    validate_path_segment(job_id, "job_id")
     _validate_rel(rel)
     if is_credential_file(rel):
         # 与 get_artifact 对称:禁止经网关回传写入凭证侧载文件(.credentials.json),

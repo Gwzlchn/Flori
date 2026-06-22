@@ -111,6 +111,13 @@ def _stub_workers_present(s):
     return s
 
 
+async def _skip_step(scheduler, redis, db, job_id, step):
+    """测试辅助:模拟某步被跳过并触发下游检查(原 scheduler.mark_skipped 仅测试用,已移除)。"""
+    await redis.set_step_status(job_id, step, "skipped")
+    db.update_step(job_id, step, status="skipped")
+    await scheduler._check_downstream(job_id)
+
+
 @pytest.fixture
 def scheduler(redis, db, config):
     return _stub_workers_present(Scheduler(redis, db, config))
@@ -404,7 +411,7 @@ class TestSkipPropagation:
         await redis.set_step_status("j_test_001", "A", "running")
         await scheduler.on_step_done("j_test_001", "A")
 
-        await scheduler.mark_skipped("j_test_001", "B")
+        await _skip_step(scheduler, redis, db, "j_test_001", "B")
 
         assert await redis.get_step_status("j_test_001", "C") == "ready"
 
@@ -416,7 +423,7 @@ class TestSkipPropagation:
 
         await redis.set_step_status("j_test_001", "A", "running")
         await scheduler.on_step_done("j_test_001", "A")
-        await scheduler.mark_skipped("j_test_001", "B")
+        await _skip_step(scheduler, redis, db, "j_test_001", "B")
 
         await redis.set_step_status("j_test_001", "C", "running")
         await scheduler.on_step_done("j_test_001", "C")
