@@ -164,13 +164,13 @@ describe('WorkersView', () => {
     expect(store.resume).not.toHaveBeenCalled()
   })
 
-  it('paused worker 显示“恢复”，点击调用 store.resume', async () => {
+  it('paused worker 显示“继续”，点击调用 store.resume', async () => {
     const w = mountView({
       workers: [makeWorker({ id: 'w-resume', status: 'paused' })],
     })
     await flushPromises()
     const store = useWorkerStore()
-    const btn = w.findAll('.wcard .btn.sm').find(b => b.text().includes('恢复'))
+    const btn = w.findAll('.wcard .btn.sm').find(b => b.text().includes('继续'))
     expect(btn).toBeTruthy()
     await btn!.trigger('click')
     await flushPromises()

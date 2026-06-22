@@ -8,7 +8,7 @@ export const STATUS_LABELS: Record<string, string> = {
   waiting: '等待', ready: '就绪', running: '运行中', skipped: '跳过',
   // worker(idle/busy 为旧态兼容)
   idle: '空闲', busy: '忙碌',
-  'online-idle': '空闲', 'online-busy': '忙碌', paused: '已暂停',
+  'online-idle': '空闲', 'online-busy': '忙碌', paused: '暂停',
   offline: '离线', stale: '失联',
   // concept
   suggested: '候选', accepted: '已采纳',

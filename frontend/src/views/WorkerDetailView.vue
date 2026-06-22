@@ -11,7 +11,7 @@ import { workerDotClass, workerComputeDesc } from '../utils/worker'
 import StatusBadge from '../components/common/StatusBadge.vue'
 import type { Worker, WorkerJob } from '../types'
 import {
-  RefreshCw, Loader, X, Cpu, Info, Layers, Clock, Check,
+  RefreshCw, Pause, X, Cpu, Info, Layers, Clock, Check,
   Play, FileText, Newspaper, Headphones, ChevronRight, MessageSquare,
 } from 'lucide-vue-next'
 
@@ -79,14 +79,14 @@ function stepIcon(step: string): any {
   return STEP_ICON[key] || FileText
 }
 
-// ── 操作：暂停 / 恢复 / 移除 / 备注 ──
+// ── 操作：暂停 / 继续 / 移除 / 备注 ──
 async function togglePause() {
   if (!worker.value) return
   busy.value = true
   try {
     if (worker.value.status === 'paused') {
       await workerStore.resume(workerId.value)
-      showToast('已恢复', 'success')
+      showToast('已继续', 'success')
     } else {
       await workerStore.pause(workerId.value)
       showToast('已暂停', 'success')
@@ -168,7 +168,7 @@ onBeforeUnmount(() => global.setCrumbs(null))
         <div style="margin-left:auto;display:flex;gap:8px">
           <button class="btn sm" @click="load"><RefreshCw :size="13" />刷新</button>
           <button v-if="isOnline || worker.status === 'paused'" class="btn sm" :disabled="busy" @click="togglePause">
-            <Loader :size="13" />{{ worker.status === 'paused' ? '恢复' : '暂停' }}
+            <Play v-if="worker.status === 'paused'" :size="13" /><Pause v-else :size="13" />{{ worker.status === 'paused' ? '继续' : '暂停' }}
           </button>
           <button class="btn sm danger" :disabled="busy" @click="removeWorker"><X :size="13" />移除</button>
         </div>

@@ -11,7 +11,7 @@ import { fmtDuration, fmtRelative } from '../utils/datetime'
 import { workerDotClass, workerComputeDesc } from '../utils/worker'
 import type { Worker } from '../types'
 import {
-  Server, RefreshCw, Cpu, Loader, MessageSquare, X, Plus,
+  Server, RefreshCw, Cpu, Pause, Play, MessageSquare, X, Plus,
   Key, Copy, Check, Layers, HardDrive, Database,
 } from 'lucide-vue-next'
 
@@ -69,14 +69,14 @@ function isOnline(w: Worker): boolean {
   return w.status.startsWith('online') || w.status === 'paused'
 }
 
-// ── 行内 暂停 / 恢复 / 移除 ──
+// ── 行内 暂停 / 继续 / 移除 ──
 const rowBusy = ref<string | null>(null)
 async function togglePause(w: Worker) {
   rowBusy.value = w.id
   try {
     if (w.status === 'paused') {
       await workerStore.resume(w.id)
-      showToast('已恢复', 'success')
+      showToast('已继续', 'success')
     } else {
       await workerStore.pause(w.id)
       showToast('已暂停', 'success')
@@ -120,7 +120,8 @@ const gatewayUrl = computed(() => {
   const o = typeof window !== 'undefined' ? window.location?.origin : ''
   return o && o.startsWith('http') ? o : 'https://<FLORI_HOST>'
 })
-const needsAiKey = computed(() => newType.value === 'ai' || newType.value === 'gpu')
+// 仅 ai 类型订 ai 池、需 AI key;gpu 订 [gpu,scene,cpu,io] 不含 ai,不需 ANTHROPIC_API_KEY。
+const needsAiKey = computed(() => newType.value === 'ai')
 const tagsArg = computed(() => {
   const t = newTags.value.split(/[\s,]+/).filter(Boolean)
   return t.length ? ` --tags ${t.join(' ')}` : ''
@@ -134,6 +135,7 @@ const command = computed(() => {
     const aiLine = needsAiKey.value ? '  -e ANTHROPIC_API_KEY=<KEY> \\\n' : ''
     return `docker run -d --restart unless-stopped${gpuFlag.value} \\
   -e GATEWAY_URL=${gatewayUrl.value} \\
+  -e GATEWAY_TLS_INSECURE=1 \\
   -e WORKER_REGISTRATION_TOKEN=${tokenLine.value} \\
   -e WORKER_ID_FILE=/data/.worker_id \\
   -e DATA_DIR=/data -e CONFIG_DIR=/app/configs -e WORK_DIR=/tmp/flori-work \\
@@ -158,7 +160,7 @@ ${aiLines}    depends_on: [ redis ]`
   const aiLine = needsAiKey.value ? '  -e ANTHROPIC_API_KEY=<KEY> \\\n' : ''
   return `docker run -d --restart unless-stopped${gpuFlag.value} \\
   -e REDIS_URL=redis://<HOST>:6379/0 \\
-  -e MINIO_URL=<HOST>:9000 -e MINIO_BUCKET=flori \\
+  -e MINIO_URL=<HOST>:9000 -e MINIO_ACCESS_KEY=<KEY> -e MINIO_SECRET_KEY=<SECRET> -e MINIO_BUCKET=flori \\
   -e DATA_DIR=/data -e CONFIG_DIR=/app/configs -e WORK_DIR=/tmp/flori-work \\
 ${aiLine}  -v flori-data:/data \\
   ${IMAGE} \\
@@ -290,10 +292,10 @@ onMounted(refreshAll)
             <span class="sep">·</span><span>心跳 {{ fmtRelative(w.last_heartbeat) }}</span>
           </div>
         </div>
-        <!-- 在线/已暂停：暂停/恢复 + 备注入口（备注跳详情编辑）；离线：移除 -->
+        <!-- 在线/已暂停：暂停/继续 + 备注入口（备注跳详情编辑）；离线：移除 -->
         <template v-if="isOnline(w)">
           <button class="btn sm" :disabled="rowBusy === w.id" @click.stop="togglePause(w)">
-            <Loader :size="13" />{{ w.status === 'paused' ? '恢复' : '暂停' }}
+            <Play v-if="w.status === 'paused'" :size="13" /><Pause v-else :size="13" />{{ w.status === 'paused' ? '继续' : '暂停' }}
           </button>
           <button class="btn sm" @click.stop="router.push(`/system/workers/${encodeURIComponent(w.id)}`)">
             <MessageSquare :size="13" />备注
