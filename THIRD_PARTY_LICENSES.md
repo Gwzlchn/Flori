@@ -6,7 +6,7 @@
 
 以下组件采用强 Copyleft 许可,集成与分发方式需单独评估:
 
-- **PyMuPDF (`fitz`)** — **AGPL-3.0**。用于 PDF 论文解析(`steps/paper/step_10_pdf_parse.py`、`step_12_figures.py` 中 `import fitz`)。装入重 CPU 步骤镜像(`docker/step-heavy.Dockerfile`)。AGPL 对"通过网络提供服务"也触发源码提供义务,商用或对外提供服务前需自行确认合规路径(或改用 MIT 的 pdfplumber 等替代)。
+- **PyMuPDF (`fitz`)** — **AGPL-3.0**。用于 PDF 论文解析(`steps/paper/step_02_pdf_parse.py`、`step_04_figures.py` 中 `import fitz`)。装入重 CPU 步骤镜像(`docker/step-heavy.Dockerfile`)。AGPL 对"通过网络提供服务"也触发源码提供义务,商用或对外提供服务前需自行确认合规路径(或改用 MIT 的 pdfplumber 等替代)。
   - https://github.com/pymupdf/PyMuPDF · License: https://www.gnu.org/licenses/agpl-3.0.html
 - **yutto** — **GPL-3.0**。B站视频下载器,作为命令行/进程被调用,随 `steps` 组及纯 Python 步骤镜像(`docker/step-base.Dockerfile`)分发。
   - https://github.com/yutto-dev/yutto · License: https://www.gnu.org/licenses/gpl-3.0.html

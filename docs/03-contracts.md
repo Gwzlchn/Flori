@@ -1324,12 +1324,12 @@ exclusive_groups:
 
 ### 4.4 candidates.json — 候选帧
 
-`filename` 是 `assets/` 下的文件名（步骤已自带 `scene_{index}_{ts}s.jpg` 编码），`scene_index` 标出来源场景：
+`filename` 是 `assets/` 下的文件名（步骤统一命名为 `frame-{NNNN}.jpg`，四位全局自增序号 = 占位符 `[img:N]` 的 N；时间戳/场景号不进文件名，只留在本清单里），`scene_index` 标出来源场景、`source` 标出取帧方式（`scene`/`sample`）：
 
 ```json
 [
-  {"index": 0, "scene_index": 0, "timestamp_sec": 1.5, "filename": "scene_0000_1.5s.jpg"},
-  {"index": 1, "scene_index": 3, "timestamp_sec": 45.0, "filename": "scene_0001_45.0s.jpg"}
+  {"index": 0, "scene_index": 0, "timestamp_sec": 1.5, "filename": "frame-0000.jpg", "source": "scene"},
+  {"index": 1, "scene_index": 3, "timestamp_sec": 45.0, "filename": "frame-0001.jpg", "source": "sample"}
 ]
 ```
 
@@ -1339,8 +1339,8 @@ exclusive_groups:
 
 ```json
 [
-  {"index": 0, "scene_index": 0, "timestamp_sec": 1.5, "filename": "scene_0000_1.5s.jpg", "keep": true, "phash": "d4c0d4e0f0f8fcfe"},
-  {"index": 1, "scene_index": 0, "timestamp_sec": 15.2, "filename": "scene_0001_15.2s.jpg", "keep": false, "phash": "d4c0d4e0f0f8fcff"}
+  {"index": 0, "scene_index": 0, "timestamp_sec": 1.5, "filename": "frame-0000.jpg", "source": "scene", "keep": true, "phash": "d4c0d4e0f0f8fcfe"},
+  {"index": 1, "scene_index": 0, "timestamp_sec": 15.2, "filename": "frame-0001.jpg", "source": "scene", "keep": false, "phash": "d4c0d4e0f0f8fcff"}
 ]
 ```
 
@@ -1352,7 +1352,7 @@ exclusive_groups:
 [
   {
     "index": 0,
-    "filename": "scene_0000_1.5s.jpg",
+    "filename": "frame-0000.jpg",
     "timestamp_sec": 1.5,
     "text": "0.32\nloss\nepoch",
     "boxes": [

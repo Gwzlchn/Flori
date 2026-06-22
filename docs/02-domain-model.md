@@ -437,7 +437,7 @@ CREATE VIRTUAL TABLE notes_fts5 USING fts5(
 │   ├── job.json                  # 任务元信息（含凭证, 不对外暴露）
 │   ├── input/                    # metadata.json + 原始内容(video:source.mp4,*.srt,danmaku.ass; paper:source.pdf; article:source.html)
 │   ├── intermediate/             # 步骤间中间产物
-│   ├── assets/                   # 截图/图表(video:scene_*.jpg; paper:figure_*.png)
+│   ├── assets/                   # 截图/图表(video:frame-{NNNN}.jpg; paper:figure-{NNNN}.png)
 │   ├── output/                   # notes_mechanical.md / transcript.md / review.json
 │   │   └── versions/             # notes_smart_{provider}_{model}_{ts}.md, review_{...}.json
 │   └── logs/{step}.log

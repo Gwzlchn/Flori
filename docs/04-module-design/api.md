@@ -32,7 +32,7 @@ api/
 
 ## 2. 认证
 
-单层 Bearer Token（个人工具，Basic Auth 在 Cloudflare Access 或 Caddy 层做）：
+单层 Bearer Token（个人工具，Basic Auth 在边缘 Caddy 层做；用户名 flori）：
 
 ```python
 API_TOKEN = os.environ["API_TOKEN"]
@@ -46,7 +46,7 @@ async def auth_middleware(request, call_next):
     return await call_next(request)
 ```
 
-前端通过 Cloudflare Access（邮箱验证或密码）进入后，在前端 JS 中注入 API Token。
+前端经边缘 Caddy 的 Basic Auth（用户名 flori）进入后，在前端 JS 中注入 API Token。
 
 ## 3. 任务创建流程
 

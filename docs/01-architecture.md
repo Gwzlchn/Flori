@@ -71,7 +71,7 @@ graph TD
         cpu_s["worker-cpu — CPU步骤 ×1"]
         ai_s["worker-ai — AI ×2"]
         data["/data/jobs/ — 视频+产物"]
-        db["/db/analyzer.db — SQLite"]
+        db["/data/db/analyzer.db — SQLite"]
     end
 
     style host fill:#f0fdf4,stroke:#16a34a

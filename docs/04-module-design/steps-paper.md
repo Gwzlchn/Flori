@@ -54,7 +54,7 @@ graph LR
     {"level": 2, "title": "Background", "page": 2, "text": "..."}
   ],
   "figures": [
-    {"id": "fig1", "page": 3, "caption": "The Transformer architecture", "path": "assets/fig1.png"}
+    {"id": "fig1", "page": 3, "caption": "The Transformer architecture", "path": "assets/figure-0001.png"}
   ],
   "formulas": [
     {"id": "eq1", "page": 4, "latex": "Attention(Q,K,V) = softmax(QK^T/\\sqrt{d_k})V"}
@@ -88,7 +88,7 @@ graph LR
 | 依赖 | 02_pdf_parse |
 | 超时 | 2min |
 | 输入 | intermediate/parsed.json + input/source.pdf |
-| 输出 | assets/fig*.png + intermediate/figures.json |
+| 输出 | assets/figure-NNNN.png + intermediate/figures.json |
 
 从 PDF 中裁切图表区域，保存为图片。对图表做 OCR 提取文字标注。
 

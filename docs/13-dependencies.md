@@ -1,4 +1,4 @@
-# 12 · 开源依赖
+# 13 · 开源依赖
 
 > 项目用到的开源工具和库。选型原则：优先成熟活跃的项目，优先中文生态好的工具。
 
@@ -46,7 +46,7 @@
 
 > **marker 和 MinerU 值得重点评估**：它们直接将 PDF 转为结构化 Markdown（含公式/图表），可能替代 02_pdf_parse + 03_sections + 04_figures 三个步骤。M1 实现论文 pipeline 前应先对比测试。
 
-## 5. 文章抓取（M5）
+## 5. 文章抓取（M6 已实现）
 
 | 工具 | License | 说明 |
 |------|---------|------|
@@ -88,7 +88,8 @@
 | [Redis](https://github.com/redis/redis) | 任务队列 + 事件 + 心跳 | BSD-3 |
 | [MinIO](https://github.com/minio/minio) | 远程 Worker 文件中转 | AGPL-3.0 |
 | [Docker](https://www.docker.com/) | 容器化部署 | Apache-2.0 |
-| [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) | 公网入口 | 商业（免费层） |
+| [Caddy](https://github.com/caddyserver/caddy) | 公网入口（自签 TLS + Basic Auth，边缘反代） | Apache-2.0 |
+| [autossh](https://www.harding.motd.ca/autossh/) | NAS→边缘 反向 SSH 隧道（保活） | BSD/GPL |
 | [Ollama](https://github.com/ollama/ollama) | 本地 LLM 运行 | MIT |
 
 ## 9. License 注意
@@ -96,6 +97,7 @@
 | License | 影响 | 涉及工具 |
 |---------|------|---------|
 | **AGPL-3.0** | 网络使用需开源 | PyMuPDF, MinerU, MinIO |
+| **Apache-2.0** | 公网入口（替代 Cloudflare Tunnel） | Caddy |
 | **GPL-3.0** | 分发需开源 | yutto, pysrt, marker |
 | MIT/Apache/BSD | 无限制 | 其他大部分工具 |
 

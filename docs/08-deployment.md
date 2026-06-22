@@ -7,8 +7,8 @@
 | 场景 | 机器 | 适用 |
 |------|------|------|
 | **单机局域网** | 任意一台机器 | 局域网内使用 |
-| **单机 + 公网** | 同上 + Cloudflare Tunnel | 手机/外网访问 |
-| **分层部署** | 主机 + 中转服务器 + GPU | 有独立 GPU 机器时 |
+| **单机 + 公网** | 同上 + 边缘机（Caddy + 反向 SSH 隧道） | 手机/外网访问 |
+| **分层部署** | 核心机/NAS + 边缘机 + （可选 GPU/远程 worker） | 有边缘机或独立 worker 时 |
 
 ## 2. 单机部署
 
@@ -162,30 +162,33 @@ docker compose up -d
 - 换目录：在 `.env` 设 `FLORI_INBOX_DIR=/srv/my-inbox`（宿主绝对路径），容器内仍是 `/data/inbox`。
 - 安全：`file://` 分支绕过 SSRF 防护（本地文件非网络），`source_id` 是受信任的运维输入；个人工具 Basic Auth 场景风险可接受。挂载为只读（`:ro`）。
 
-## 3. 加公网：Cloudflare Tunnel
+## 3. 加公网：边缘机 Caddy + 反向 SSH 隧道
 
-在主机 docker-compose.yml 中加一个 cloudflared 容器：
-
-```yaml
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    command: tunnel run
-    environment:
-      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
-    restart: unless-stopped
-```
-
-Cloudflare Dashboard 配置：
-1. 创建 Tunnel，获取 Token
-2. 配置路由：`video-notes.yourdomain.com` → `http://api:8000`
-3. 开启 Cloudflare Access（邮箱验证）
-
-前端静态文件也通过 API 服务返回（或单独配一条 Tunnel 路由到 frontend:80）。
-
-### .env 追加
+核心机/NAS 在 NAT 内、零公网端口；由一台公网边缘机（如 ECS）跑 Caddy（自签 TLS + Basic Auth）做入口，核心机用 autossh 反向 SSH 隧道把自己的 api/redis/minio 暴露到边缘回环。配方在 tracked 的 `deploy/{edge,tunnel}`（`${ENV}` 模板 + `.env.example`），详见 `deploy/README.md` 与 [ADR-0009](adr/0009-worker-gateway-outbound-https.md)。（历史上曾计划用 Cloudflare Tunnel，见已 Superseded 的 [ADR-0006](adr/0006-gateway-cloudflare-tunnel.md)。）
 
 ```bash
-CLOUDFLARE_TUNNEL_TOKEN=your-tunnel-token
+# 1) 核心机/NAS 侧起反向 SSH 隧道（把 api/redis/minio 暴露到边缘回环）
+cp deploy/edge/.env.example deploy/edge/.env   # 填 EDGE_HOST / MINIO_* / FLORI_BASIC_HASH
+# 放 SSH 私钥到 deploy/tunnel/ssh/id_ed25519（本地，不入 git）
+docker compose -f deploy/tunnel/docker-compose.tunnel.yml up -d
+
+# 2) 边缘机起 Caddy（自签 TLS + Basic Auth，用户名 flori）+ 前端
+scp deploy/edge/* 边缘:/opt/flori-edge/
+ssh 边缘 'cd /opt/flori-edge && docker compose --env-file .env up -d'
+
+# 3) 从 NAS 推镜像到边缘（边缘直连镜像仓库慢时）
+scripts/push-to-edge.sh <frontend|worker|all>
+```
+
+边缘 Caddy（`deploy/edge/Caddyfile`）：对人面入口（SPA + 非 runner 的 `/api/*`）全站 Basic Auth（用户名 `flori`，密码哈希 `FLORI_BASIC_HASH`）；`/api/runner/*` 是机机接口、自带 per-worker Bearer，放行不挂 Basic。`/api/*` 反代到反向 SSH 隧道口 `127.0.0.1:8000`，前端反代到本机 `flori-frontend` 容器。
+
+### deploy/edge/.env 关键项
+
+```bash
+EDGE_HOST=your.edge.host        # 边缘机域名/IP（也作自签证书 SNI）
+FLORI_BASIC_HASH=...            # caddy hash-password 生成的 flori 用户密码哈希
+MINIO_ACCESS_KEY=...
+MINIO_SECRET_KEY=...
 ```
 
 ## 4. 分层部署：主机 + 中转 + GPU

@@ -13,9 +13,11 @@
 
 | key | 步骤 | 可调参数 |
 |-----|------|----------|
-| `scene` | `step_01_scene` | `adaptive_threshold` / `min_scene_len_sec` / `window_width` / `min_content_val` |
-| `dedup` | `step_03_dedup` | `phash_hash_size` / `phash_threshold` / `ssim_threshold` / `ssim_resize` |
-| `ocr`   | `step_04_ocr`   | （预留） |
+| `scene` | `step_03_scene` | `adaptive_threshold` / `min_scene_len_sec` / `window_width` / `min_content_val` |
+| `frame_pick` | `step_04_frames` | `dynamic_pick_ratio` / `dynamic_scene_ssim` |
+| `sampling` | `step_04_frames` | `max_gap_sec` / `forced_interval_sec` |
+| `dedup` | `step_05_dedup` | `phash_hash_size` / `phash_threshold` / `ssim_threshold` / `ssim_resize` |
+| `ocr`   | `step_06_ocr`   | `confidence_threshold` |
 
 ## 与 configs/prompts/profiles/ 的区别
 

@@ -81,28 +81,29 @@ arXiv URL 自动下载 PDF。本地 PDF 直接上传。
 
 ```
 /data/cookies/
-├── bilibili.txt      # B站 (扫码自动更新)
-├── youtube.txt       # YouTube (手动上传)
-└── status.json       # 各平台状态
+├── bilibili.txt      # B站 (本地回退;扫码登录的凭证主存于 DB app_credentials.bili_cookies)
+└── youtube.txt       # YouTube (手动上传)
 ```
+
+状态由 `GET /api/auth/cookies/status` 实时返回（按 cookie 文件是否存在判定，无独立状态文件）：
 
 ```json
 {
-  "bilibili": {"valid": true, "updated": "2026-05-16", "quality": "1080P"},
-  "youtube":  {"valid": false}
+  "bilibili": {"has_cookies": true, "status": "ok"},
+  "youtube":  {"has_cookies": false, "status": "missing"}
 }
 ```
 
-### Cookies 过期检测
+### Cookies 缺失/失效时的降级
 
-下载步骤遇到 403/画质降级时自动检测：
+下载步缺少有效 B站凭证(DB 凭证与本地 bilibili.txt 回退皆无/失效)时不报错中断，而是降级：
 
 ```
-01_download 执行 → 下载失败 (HTTP 403) 或 画质 < 预期
-  → step meta 写入 {"cookies_expired": true, "platform": "bilibili"}
-  → 发布 WebSocket 事件: {"event": "cookies_expired", "platform": "bilibili", "message": "B站 cookies 过期，请重新扫码"}
-  → 前端弹窗提示用户扫码刷新
-  → 用户扫码 → cookies 更新 → 重跑下载步骤
+01_download 执行 → 取不到 SESSDATA（DB 凭证缺失 + 本地 cookie 文件回退也无）
+  → 记日志 no_bilibili_cookies（warn）
+  → 匿名下载：清晰度降到 480P、无字幕（字幕需登录）
 ```
+
+用户可在前端重新扫码登录(写入 DB)或上传 cookie 文件后重跑下载步取回 1080P。
 
 B站 cookies 有效期约 1-3 个月。YouTube cookies 有效期数月，较少过期。

@@ -13,7 +13,7 @@ docs/
 │   ├── step-base.md                # StepBase 统一基类
 │   ├── steps-video.md              # 视频分析步骤（00-09）
 │   ├── steps-paper.md              # 论文分析步骤（M1 已实现）
-│   ├── steps-article.md            # 文章分析步骤（M5 未来）
+│   ├── steps-article.md            # 文章分析步骤（M6 已实现）
 │   ├── ai-gateway.md               # AI 网关（多 Provider/路由/对比/成本追踪）
 │   ├── knowledge-store.md          # 知识存储（搜索/术语/关联）
 │   └── frontend.md                 # 前端（Vue3 页面+组件）
@@ -35,5 +35,6 @@ docs/
 │   ├── 0005-frontend-vue3.md
 │   ├── 0006-gateway-cloudflare-tunnel.md
 │   ├── 0007-remote-worker-polling.md
-│   └── 0008-search-sqlite-fts5.md
+│   ├── 0008-search-sqlite-fts5.md
+│   └── 0009-worker-gateway-outbound-https.md
 ```

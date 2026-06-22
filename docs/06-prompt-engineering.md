@@ -280,7 +280,7 @@ block-beta
   columns 1
   block:sysprompt["System Prompt"]
     columns 1
-    base["[base_template] 内联在 step_10_smart 代码（_build_user_prompt）<br/>可选覆盖: configs/prompts/10_smart.md（默认不存在）<br/>你是一个{role}。请将以下视频素材重组为结构化学习笔记..."]
+    base["[base_template] 内联在 step_10_smart 代码（_build_user_prompt）<br/>可选覆盖: /data/prompts/10_smart.md（默认不存在）<br/>你是一个{role}。请将以下视频素材重组为结构化学习笔记..."]
     domain["[domain_profile] ← profiles/{domain}.yaml<br/>领域背景: {domain_context} | 输出风格: {output_style}<br/>术语表(含回流概念): {terminology} | 注意事项: {do_not}"]
     style["[style_hints] ← styles/{tag}.yaml × N<br/>内容形式提示: {hint_1}, {hint_2}<br/>截图解读重点: {screenshot_focus}"]
   end
@@ -342,7 +342,7 @@ DELETE /api/profiles/{domain}/terms/{term}  → 删除术语
 ## 7. 与幂等的关系
 
 Profile、Style、(可选)外置 system prompt 都是 10_smart 的输入 → 任一变化 → input_hash 变化 → 重跑。
-base prompt 默认内联在步骤代码里，**不**计入指纹；仅当放置 `configs/prompts/10_smart.md`（可选覆盖，
+base prompt 默认内联在步骤代码里，**不**计入指纹；仅当放置 `/data/prompts/10_smart.md`（可选覆盖，
 默认不存在）时，它作为 system prompt 生效并以 `prompt` 键计入指纹。
 
 ```python

@@ -27,4 +27,4 @@ Vue 3 + Composition API + Vite + Tailwind CSS + Pinia。
 
 ## 影响
 
-前端独立 SPA，通过 API 与后端通信。静态文件可以放在 Cloudflare Tunnel 后或容器内 Nginx 托管。
+前端独立 SPA，通过 API 与后端通信。静态文件由容器内 Nginx 托管，公网经边缘 Caddy（自签 TLS + Basic Auth，反向 SSH 隧道回连核心）反代（见 [ADR-0006](0006-gateway-cloudflare-tunnel.md)）。

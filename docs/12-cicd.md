@@ -106,6 +106,7 @@ services:
 # === 必填 ===
 ANTHROPIC_API_KEY=sk-ant-...    # 或留空用 DRY_RUN
 DEEPSEEK_API_KEY=sk-...         # AI 笔记生成
+KIMI_API_KEY=                   # AI 笔记生成（Moonshot/Kimi）
 
 # === 可选 ===
 API_TOKEN=                      # API 认证 token（留空不鉴权）
@@ -113,8 +114,8 @@ HTTPS_PROXY=                    # 代理（不需要可留空）
 DRY_RUN=0                       # 1=AI 步骤不调真实 API
 
 # === 高级 ===
-DATA_DIR=/data                  # 数据目录
-CONFIG_DIR=/data/configs        # 配置目录
+FLORI_DATA_DIR=                 # 数据/产物挂载目录；留空=命名卷(prod)/./data(dev)
+MINIO_DATA_DIR=                 # MinIO 对象落盘目录；留空=命名卷
 ```
 
 ## 7. GitHub Secrets

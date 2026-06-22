@@ -1,19 +1,19 @@
 # 07 · 安全
 
-> 核心原则：主机和 GPU 零公网端口。Cloudflare 是用户入口。中转服务器（可选）只给 GPU 传话，被攻破只影响 GPU 通信。
+> 核心原则：核心机（NAS）和 GPU 零公网端口。公网入口是边缘机的 Caddy（自签 TLS + Basic Auth），核心机经 NAS→边缘 反向 SSH 隧道（autossh）回连。中转服务器（可选）只给 GPU 传话，被攻破只影响 GPU 通信。
 
 ## 1. 攻击面
 
 ```mermaid
 graph TD
     Internet["互联网"]
-    CF["Cloudflare<br/>WAF + DDoS 防护"]
-    Host["主机（零公网端口）<br/>所有敏感数据<br/>Claude 凭证<br/><i>可以在 NAT 内网，也可以有公网 IP</i>"]
+    CF["边缘机 Caddy<br/>自签 TLS + Basic Auth（用户 flori）"]
+    Host["核心机/NAS（零公网端口）<br/>所有敏感数据<br/>Claude 凭证<br/><i>在 NAT 内网，经反向 SSH 隧道回连边缘</i>"]
     Relay["中转服务器（可选）<br/>Redis (TLS) / MinIO (HTTPS)<br/>无敏感数据<br/><i>仅分层部署时需要，给 GPU 用</i>"]
     GPU["GPU 机器（可选）<br/>无敏感数据<br/><i>只出站连中转服务器</i>"]
 
-    Internet -->|"请求"| CF
-    CF -->|"Tunnel（主机出站连接）"| Host
+    Internet -->|"HTTPS 请求"| CF
+    CF -->|"反向 SSH 隧道（核心机 autossh 回连边缘）"| Host
     Host ---|"Redis TLS / MinIO HTTPS"| Relay
     GPU -->|"出站连接"| Relay
 ```
@@ -22,11 +22,11 @@ graph TD
 
 ### 主机 — 风险低
 
-唯一外部入口是 Cloudflare Tunnel（主机出站建立）。如果主机有公网 IP，也只通过 Tunnel 暴露 API 端口。
+唯一外部入口是边缘机的 Caddy（自签 TLS + Basic Auth）；核心机零公网端口，靠 NAS→边缘 反向 SSH 隧道（autossh）回连，自身不监听任何公网端口。
 
 | 威胁 | 风险 | 说明 |
 |------|------|------|
-| Cloudflare Tunnel 入口 | 低 | Cloudflare Access 认证 + API Bearer Token |
+| 边缘 Caddy 入口 | 低 | Basic Auth（用户 flori）+ 自签 TLS；/api/runner/* 走 per-worker Bearer |
 | Claude 凭证泄露 | 低 | 文件权限 600，只在主机本地 |
 
 主机敏感数据清单：
@@ -47,7 +47,7 @@ graph TD
 **中转被攻破最坏情况**：
 - ❌ 不会泄露 Claude 凭证（在主机）
 - ❌ 不会泄露平台 cookies（在主机）
-- ❌ 不会影响用户访问（走 Cloudflare，不经过中转）
+- ❌ 不会影响用户访问（走边缘 Caddy + 反向 SSH 隧道，不经过中转）
 - ⚠️ GPU Worker 断开（改 Redis 密码即可恢复）
 - ⚠️ MinIO 临时文件泄露（24h 自动清理）
 
@@ -60,22 +60,22 @@ graph TD
 ```
 层级              认证方式                    保护对象
 ────────────────────────────────────────────────────────
-Cloudflare       Access (邮箱/密码)           Web UI 入口
+边缘 Caddy        Basic Auth (用户 flori)      Web UI 入口 + /api/* 人面
 API              Bearer Token                 API 端点
 Redis            requirepass + TLS            任务队列
 MinIO            access_key + secret + HTTPS  文件存储
 SSH              key-only (禁密码)            服务器管理
 ```
 
-### Cloudflare Access
+### 边缘 Caddy Basic Auth
 
-免费方案，支持邮箱验证码登录。用户首次访问输入邮箱 → 收到验证码 → 验证通过后设 cookie。
+边缘机 Caddy 对人面入口（SPA + 非 runner 的 `/api/*`）全站 Basic Auth（用户名 `flori`，密码哈希存边缘 `.env` 的 `FLORI_BASIC_HASH`）。`/api/runner/*` 是机机接口、自带 per-worker Bearer，放行不挂 Basic（见 `deploy/edge/Caddyfile`）。
 
 ### API Bearer Token
 
-即使 Cloudflare 被绕过（几乎不可能），API 仍需 Bearer Token。Token 只存在主机本地 `.env`。
+即使边缘 Basic Auth 被绕过，应用层仍可用 API Bearer Token 兜底（`API_TOKEN`，只存核心机本地 `.env`）。注：边缘+反向 SSH 部署下 NAS 端 `API_TOKEN` 常置空、由 Caddy Basic Auth 把门；直连暴露 API 时务必设强随机 `API_TOKEN`。
 
-> 限流 / 防爆破在边缘层(Cloudflare/Caddy Basic Auth)做,应用内不内置限流——
+> 限流 / 防爆破在边缘层(边缘 Caddy Basic Auth)做,应用内不内置限流——
 > API 默认零公网端口、仅绑本机(`API_BIND_IP`),verify_token 用常量时间比对。
 > 直接把 API 端口暴露到公网时,务必同时设强随机 `API_TOKEN` 并在边缘加限流。
 
@@ -90,8 +90,8 @@ SSH              key-only (禁密码)            服务器管理
 
 | 链路 | 协议 | 加密 | 认证 |
 |------|------|------|------|
-| 用户 → Cloudflare | HTTPS | TLS 1.3 | Access |
-| Cloudflare → 主机 | Tunnel | Cloudflare 加密 | Tunnel Token |
+| 用户 → 边缘 Caddy | HTTPS | TLS（自签，internal CA） | Basic Auth |
+| 边缘 → 核心机 | 反向 SSH 隧道 | SSH | SSH key-only |
 | 主机 → 中转 Redis | Redis TLS | TLS 1.2+ | requirepass |
 | 主机 → 中转 MinIO | HTTPS | TLS 1.3 | access key |
 | GPU → 中转 Redis | Redis TLS | TLS 1.2+ | requirepass |
@@ -125,7 +125,8 @@ Worker 执行前校验 job_id + step + url，不合法直接丢弃。
 | API Bearer Token | 主机 .env | API 服务 |
 | Redis 密码 | 中转 .env + 主机 .env + GPU .env | 所有连 Redis 的组件 |
 | MinIO access key | 中转 .env + 主机 .env + GPU .env | 调度器 + GPU Worker |
-| Cloudflare Tunnel Token | 主机 .env | cloudflared |
+| 边缘 Basic Auth 哈希 `FLORI_BASIC_HASH` | 边缘 .env | 边缘 Caddy |
+| 反向 SSH 隧道私钥 | 核心机 `deploy/tunnel/ssh/id_ed25519` | autossh 隧道 |
 | Claude OAuth | 主机 ~/.claude/ | Claude Worker |
 | 平台 cookies | 主机 /data/cookies/ | Download Worker |
 | B站 SESSDATA(扫码登录) | 主机 SQLite app_credentials(Fernet 加密) + job 本机侧载文件 | 同机 Download Worker |
@@ -180,7 +181,7 @@ sessdata 触发）：
 4. 重启主机和 GPU Worker
 ```
 
-恢复时间：30 分钟。数据损失：零（全在主机）。用户访问不中断（走 Cloudflare）。
+恢复时间：30 分钟。数据损失：零（全在核心机/NAS）。用户访问不中断（走边缘 Caddy + 反向 SSH 隧道）。
 
 ### 主机磁盘故障
 
@@ -196,9 +197,10 @@ sessdata 触发）：
   - [ ] MinIO: 强密码 + HTTPS + bucket 级 policy
   - [ ] 自动安全更新
 
-主机:
-  - [ ] Cloudflare Tunnel 连接正常
-  - [ ] API Bearer Token 认证
+核心机 / 边缘:
+  - [ ] 边缘 Caddy 自签 TLS + Basic Auth（用户 flori）正常
+  - [ ] NAS→边缘 反向 SSH 隧道（autossh）连接正常
+  - [ ] 边缘 SSH key-only；隧道私钥权限 600
   - [ ] Claude 凭证权限 600
   - [ ] cookies 权限 600
   - [ ] Docker no-new-privileges

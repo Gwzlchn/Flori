@@ -54,7 +54,7 @@ service/
 │   ├── main.py
 │   └── heartbeat.py
 │
-├── worker-gpu/             # M4
+├── worker-gpu/             # M5（GPU 加速，未来）
 │   └── Dockerfile
 │
 ├── shared/                 # 会话 A (基础) + B (扩展)
@@ -97,7 +97,7 @@ docker compose -f docker-compose.dev.yml up
 # - ports 暴露到宿主机（方便调试）
 # - 挂载源码目录（代码热更新）
 # - 单副本 Worker
-# - 不启动 cloudflared
+# - 不启动公网入口（Caddy + 反向 SSH 隧道仅生产用，见 deploy/edge、deploy/tunnel）
 ```
 
 ```yaml
@@ -106,7 +106,7 @@ services:
   api:
     volumes:
       - ./api:/app        # 挂载源码
-      - ${DATA_DIR}:/data
+      - ${FLORI_DATA_DIR:-./data}:/data
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
   worker-cpu:
@@ -114,7 +114,7 @@ services:
       - ./worker:/app
       - ./steps:/app/steps
       - ./shared:/app/shared
-      - ${DATA_DIR}:/data
+      - ${FLORI_DATA_DIR:-./data}:/data
 ```
 
 ## 4. Git 工作流

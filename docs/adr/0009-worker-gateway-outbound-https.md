@@ -43,7 +43,7 @@ worker 进程按环境变量自适应三种模式（`worker/main.py`）：
 ## 与其它 ADR 的关系
 
 - 取代 ADR-0007（公网 Redis 轮询 + MinIO 中转）。
-- 与 [ADR-0006](0006-gateway-cloudflare-tunnel.md) 正交：Cloudflare Tunnel 是**用户**公网入口，本 ADR 是**远程 worker**接入通路，两者互不取代。
+- 与 [ADR-0006](0006-gateway-cloudflare-tunnel.md) 正交：0006 讨论**用户**公网入口（已废弃 Cloudflare Tunnel 方案，实际为 Caddy 自签 TLS + Basic Auth 经反向 SSH 隧道回连核心），本 ADR 是**远程 worker**接入通路，两条链路互不取代。
 
 ## 影响
 
