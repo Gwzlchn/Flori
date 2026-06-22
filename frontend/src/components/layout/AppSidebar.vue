@@ -139,7 +139,7 @@ function moveKb(i: number, dir: number) {
 <template>
   <aside class="side" :class="{ open: mobileOpen }">
     <div class="brand">
-      <div class="logo" title="Flori" @click="nav('/')">M</div>
+      <div class="logo" title="Flori" @click="nav('/')">F</div>
       <b>Flori</b>
     </div>
 
