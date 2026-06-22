@@ -609,7 +609,7 @@ watch(job, (j) => {
       <!-- ════ 元信息 ════ -->
       <div v-show="tab === 'info'">
         <!-- ① 内容本身(源)信息 -->
-        <div class="card pad" style="max-width:560px">
+        <div class="card pad">
           <div class="card-h"><Info :size="15" />内容信息</div>
           <table class="kv">
             <tr><td>标题</td><td>{{ job.title || '—' }}</td></tr>
@@ -638,7 +638,7 @@ watch(job, (j) => {
         </div>
 
         <!-- ② 处理(任务)信息 -->
-        <div class="card pad" style="max-width:560px;margin-top:16px">
+        <div class="card pad" style="margin-top:16px">
           <div class="card-h"><GitBranch :size="15" />处理信息</div>
           <table class="kv">
             <tr><td>Job ID</td><td class="mono">{{ job.job_id }}</td></tr>

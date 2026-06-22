@@ -61,8 +61,36 @@ class DownloadStep(StepBase):
             pub = self._bili_published_at(url)
             if pub:
                 metadata["published_at"] = pub   # 源视频在 B 站的发布时间(供前端「上传于」)
+        elif source == "youtube":
+            # 标题/上传日期取自 yt-dlp 写的 source.info.json(--write-info-json)。
+            t, pub = self._youtube_title_published()
+            if t and not metadata.get("title"):
+                metadata["title"] = t
+            if pub:
+                metadata["published_at"] = pub
         self.write_output("input/metadata.json", metadata)
         return {"source": source, "duration_sec": metadata.get("duration_sec")}
+
+    def _youtube_title_published(self) -> tuple[str | None, str | None]:
+        """从 source.info.json 读 YouTube 标题与上传日期(YYYYMMDD→ISO)。失败返回 (None, None)。"""
+        import json as _json
+        from datetime import datetime, timezone
+        info = self.job_dir / "input" / "source.info.json"
+        if not info.is_file():
+            return None, None
+        try:
+            d = _json.loads(info.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None, None
+        title = (d.get("title") or d.get("fulltitle") or "").strip() or None
+        pub = None
+        ud = d.get("upload_date") or d.get("release_date")  # YYYYMMDD
+        if ud and len(str(ud)) == 8:
+            try:
+                pub = datetime.strptime(str(ud), "%Y%m%d").replace(tzinfo=timezone.utc).isoformat()
+            except ValueError:
+                pass
+        return title, pub
 
     def _bili_published_at(self, url: str) -> str | None:
         """取 B 站视频发布时间(pubdate)→ ISO 字符串。尽力而为,失败返回 None,不影响下载。"""
@@ -181,6 +209,7 @@ class DownloadStep(StepBase):
         cmd = [
             "yt-dlp",
             "-o", str(input_dir / "source.%(ext)s"),
+            "--write-info-json",   # 写 source.info.json(供元信息取标题/上传日期)
             "--write-sub", "--sub-lang", "en,zh-Hans",
             "--convert-subs", "srt",
             "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]",

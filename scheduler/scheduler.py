@@ -779,15 +779,23 @@ class Scheduler:
             raw = await self.storage.read_file(job_id, "input/metadata.json")
             if not raw:
                 return
-            published_at = json.loads(raw.decode("utf-8", errors="replace")).get("published_at")
-            if not published_at:
+            md = json.loads(raw.decode("utf-8", errors="replace"))
+            fields: dict = {}
+            if md.get("published_at"):
+                fields["published_at"] = md["published_at"]
+            # 标题:01_download 从源(youtube info.json 等)写入 metadata 时回填——仅当 DB 标题为空,
+            # 不覆盖订阅/用户已填的标题。覆盖所有创建路径(手动 URL 投递此前无标题)。
+            title = (md.get("title") or "").strip()
+            if title:
+                job = await asyncio.to_thread(self.db.get_job, job_id)
+                if job and not (job.title or "").strip():
+                    fields["title"] = title
+            if not fields:
                 return
-            await asyncio.to_thread(
-                self.db.update_job, job_id, published_at=published_at,
-            )
-            logger.info("published_at_synced", job_id=job_id, published_at=published_at)
+            await asyncio.to_thread(self.db.update_job, job_id, **fields)
+            logger.info("metadata_synced", job_id=job_id, **fields)
         except Exception:
-            logger.warning("published_at_sync_failed", job_id=job_id)
+            logger.warning("metadata_sync_failed", job_id=job_id)
 
     async def mark_job_failed(self, job_id: str, error: str) -> None:
         self._cancel_delayed_tasks(job_id)
