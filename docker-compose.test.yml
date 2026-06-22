@@ -1,5 +1,5 @@
 # 测试栈独立项目名 flori → 容器 flori-test-run-*、镜像 flori-test（与其余 flori-* 一致）。
-name: flori
+name: flori-test
 
 services:
   test:

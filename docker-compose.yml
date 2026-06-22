@@ -1,4 +1,5 @@
 # Flori 生产部署：运行 ghcr 上由 CI 构建的镜像，Watchtower 跟随 CI 自动更新（CD）。
+name: flori
 # 主机相关项（数据目录、Dozzle 绑定地址、远程 agent 等）放 .env，见 .env.example。
 # 默认仅起后端；单机全栈再带前端：`docker compose --profile allinone up -d`。
 # 拆分部署时前端单独在公网入口机运行（边缘反代由各自部署维护）。
