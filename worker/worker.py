@@ -20,6 +20,7 @@ import structlog
 from shared.ai_gateway import collect_usage_from_file
 from shared.config import AppConfig, build_step_config
 from shared.models import generate_worker_id
+from shared.runner_ops import parse_style_tags
 from shared.storage import StorageBackend
 from worker.step_runner import StepContext, create_step_runner
 from worker.transport import WorkerTransport
@@ -70,7 +71,8 @@ def auto_discover_tags() -> set[str]:
         tags.update(["vision", "claude-cli"])
     if os.environ.get("DEEPSEEK_API_KEY"):
         tags.add("text-only")
-    if os.path.exists("/usr/bin/nvidia-smi"):
+    from steps.utils.device import has_nvidia_gpu
+    if has_nvidia_gpu():  # PATH 感知 + 真实探测,与 steps.utils.device 单一判据(审计 R-L28)
         tags.add("gpu")
     if os.environ.get("OLLAMA_URL"):
         tags.add("local")
@@ -173,7 +175,16 @@ class Worker:
             )
             if task:
                 last_task_time = time.time()
-                await self.execute(task)
+                try:
+                    await self.execute(task)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # 单任务异常绝不杀主循环:execute 内部已尽量 report_failed/release;此处兜底
+                    # 极端情形(如 execute 自身的上报/release 逃逸),记日志后续跑(审计 I-H3)。
+                    logger.exception(
+                        "execute_escaped_error", worker_id=self.worker_id,
+                    )
             else:
                 if self.idle_timeout and time.time() - last_task_time > self.idle_timeout:
                     logger.info("idle_timeout_exit", worker_id=self.worker_id)
@@ -209,14 +220,7 @@ class Worker:
             else:
                 job_info = await self.transport.get_job_info(job_id)
                 domain = job_info.get("domain", "general")
-                style_tags_raw = job_info.get("style_tags", "[]")
-                try:
-                    style_tags = (
-                        json.loads(style_tags_raw)
-                        if isinstance(style_tags_raw, str) else style_tags_raw
-                    )
-                except (json.JSONDecodeError, TypeError):
-                    style_tags = []
+                style_tags = parse_style_tags(job_info.get("style_tags", "[]"))
             if not isinstance(style_tags, list):
                 style_tags = []
 
@@ -351,6 +355,14 @@ class Worker:
             )
 
     async def _collect_usage(self, job_id: str, step: str, work_dir: Path) -> None:
-        usages = collect_usage_from_file(work_dir / "logs", step)
-        for usage in usages:
-            await self.transport.record_ai_usage(usage)
+        # usage 仅统计/计费侧效应:解析或上报失败只降级为"统计不准",绝不让 returncode==0 的成功
+        # 步骤经 execute 的 except 翻成 failed(审计 I-H2)。record_ai_usage 已在 gateway 侧 best-effort。
+        try:
+            usages = collect_usage_from_file(work_dir / "logs", step)
+            for usage in usages:
+                await self.transport.record_ai_usage(usage)
+        except Exception:
+            logger.warning(
+                "collect_usage_failed", worker_id=self.worker_id,
+                job_id=job_id, step=step,
+            )

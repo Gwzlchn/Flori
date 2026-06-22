@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -163,56 +164,73 @@ class GatewayTransport:
             logger.warning("gateway_request_step_failed", worker_id=worker_id)
             return None
 
+    async def _report_best_effort(self, url, json_body, *, op,
+                                  job_id="", step=""):
+        """上报通道(complete/fail/release/usage)统一 best-effort:有界重试后仍失败只 log,
+        绝不抛——上报抖动不得把 returncode==0 的成功步骤翻成 failed,也不得经 execute 的
+        finally release 逃逸杀掉整个 worker 主循环(审计 I-H2/I-H3)。对照同文件 heartbeat/
+        request_step/report_step_alive 同为 best-effort,唯独这四个上报方法此前裸 raise。"""
+        last_exc = None
+        for attempt in range(3):
+            try:
+                resp = await self._http.post(url, headers=self._auth(), json=json_body)
+                resp.raise_for_status()
+                return
+            except httpx.HTTPError as e:
+                last_exc = e
+                if attempt < 2:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+        logger.warning(
+            f"gateway_{op}_failed", job_id=job_id, step=step,
+            error=str(last_exc)[:200],
+        )
+
     async def report_done(self, claim, duration, started_at):
         job_id, step = claim["job_id"], claim["step"]
-        resp = await self._http.post(
+        await self._report_best_effort(
             f"/api/runner/jobs/{job_id}/steps/{step}/complete",
-            headers=self._auth(),
-            json={
+            {
                 "pool": claim["pool"], "exec_id": claim["exec_id"],
                 "duration": duration, "started_at": started_at,
             },
+            op="report_done", job_id=job_id, step=step,
         )
-        resp.raise_for_status()
 
     async def report_failed(self, claim, error, error_type, duration,
                             started_at, count_stats):
         job_id, step = claim["job_id"], claim["step"]
-        resp = await self._http.post(
+        await self._report_best_effort(
             f"/api/runner/jobs/{job_id}/steps/{step}/fail",
-            headers=self._auth(),
-            json={
+            {
                 "pool": claim["pool"], "exec_id": claim["exec_id"],
                 "error": error, "error_type": error_type,
                 "duration": duration, "started_at": started_at,
                 "count_stats": count_stats,
             },
+            op="report_failed", job_id=job_id, step=step,
         )
-        resp.raise_for_status()
 
     async def release(self, claim):
         job_id, step = claim["job_id"], claim["step"]
-        resp = await self._http.post(
+        await self._report_best_effort(
             f"/api/runner/jobs/{job_id}/steps/{step}/release",
-            headers=self._auth(),
-            json={"pool": claim["pool"], "exec_id": claim["exec_id"]},
+            {"pool": claim["pool"], "exec_id": claim["exec_id"]},
+            op="release", job_id=job_id, step=step,
         )
-        resp.raise_for_status()
 
     async def record_ai_usage(self, usage):
         # usage 是 AIUsage 数据类;created_at 由服务端补默认,这里只发可序列化字段。
-        resp = await self._http.post(
+        await self._report_best_effort(
             "/api/runner/usage",
-            headers=self._auth(),
-            json={
+            {
                 "exec_id": usage.exec_id, "provider": usage.provider,
                 "model": usage.model, "job_id": usage.job_id, "step": usage.step,
                 "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens,
                 "cost_usd": usage.cost_usd, "duration_sec": usage.duration_sec,
                 "cached": usage.cached,
             },
+            op="record_ai_usage", job_id=usage.job_id, step=usage.step,
         )
-        resp.raise_for_status()
 
     async def publish_step_event(self, channel, data):
         # worker 只通过 on_progress 发 events:{job} 进度;映射到 progress 端点。
