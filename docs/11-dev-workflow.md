@@ -273,12 +273,21 @@ steps/audio/step_04_smart_podcast.py      # AI 生成播客笔记
 ### 7.5 扩展 Worker
 
 **水平扩展（加副本）**：
-```bash
-# 同一台机器加 CPU Worker
-docker compose up -d --scale worker-cpu=3
 
-# 或在 .env 里配置
-WORKER_CPU_REPLICAS=3
+> ⚠️ **不要用 `docker compose up -d --scale worker-cpu=3`**。所有副本共用同一服务定义、同一
+> `WORKER_ID_FILE`(默认 `/data/.worker_id`),会注册成**同一个 worker_id** → 监控里互相覆盖、
+> 多数显示离线、心跳/状态错乱。同机多 worker 必须各起**命名服务**并设**独立 `WORKER_ID_FILE`**
+> (+ 独立 `WORK_DIR`),`worker/worker.py:_resolve_worker_id` 据此给每个 worker 稳定且唯一的身份。
+
+```yaml
+# 同机加一个 CPU worker:叠加到一个 override compose,命名服务 + 独立 id 文件
+services:
+  worker-cpu-2:
+    extends: { file: docker-compose.yml, service: worker-cpu }
+    container_name: flori-worker-cpu-2
+    environment:
+      WORKER_ID_FILE: /data/.worker_id-cpu-2
+      WORK_DIR: /tmp/flori-work-cpu-2
 ```
 
 **跨机器扩展（加 GPU）**：

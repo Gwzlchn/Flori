@@ -117,6 +117,8 @@ services:
       <<: *common-env
       STEP_RUNTIME: ${STEP_RUNTIME:-subprocess}
       WORK_DIR: /tmp/flori-work
+      # 独立 id 文件:与 worker-ai 等共享 /data 时,默认 /data/.worker_id 会被争用→注册成同一 id(全离线)。
+      WORKER_ID_FILE: /data/.worker_id-cpu
       HOST_WORK_DIR: ${HOST_WORK_DIR:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
     security_opt:
@@ -141,6 +143,8 @@ services:
       <<: *common-env
       STEP_RUNTIME: ${STEP_RUNTIME:-subprocess}
       WORK_DIR: /tmp/flori-work
+      # 独立 id 文件:与 worker-cpu 共享 /data,默认 /data/.worker_id 会撞→注册成同一 id。
+      WORKER_ID_FILE: /data/.worker_id-ai
       HOST_WORK_DIR: ${HOST_WORK_DIR:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
