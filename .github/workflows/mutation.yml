@@ -53,9 +53,10 @@ jobs:
           sed -n "/<!--MUTATION-SUMMARY-->/,/<!--\/MUTATION-SUMMARY-->/p" /tmp/mut.log \
             | grep -v "MUTATION-SUMMARY" >> "$GITHUB_STEP_SUMMARY" || true
 
-      # 只有定时全量跑才写历史(手动 dispatch 只看 summary,不污染趋势)
+      # 写历史:定时跑 或 手动【全量】跑(没填 target)——后者可立即 seed 让徽章生效。
+      # 手动只跑单模块(填了 target)不写,防部分数据污染趋势。
       - name: Persist scores + regen trend/badges (mutation-data branch)
-        if: github.event_name == 'schedule'
+        if: github.event_name == 'schedule' || github.event.inputs.target == ''
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
