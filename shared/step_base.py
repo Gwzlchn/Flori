@@ -286,6 +286,49 @@ class StepBase:
         "- top3_improvements: 最重要的 3 条改进建议\n\n"
     )
 
+    # 评审步 prompt 里逐字相同的 JSON 示例尾(key_terms/missing/top3)与维度计数中文词。
+    _REVIEW_CN_NUM = {3: "三", 4: "四", 5: "五", 6: "六", 7: "七", 8: "八"}
+    _REVIEW_JSON_TAIL = (
+        '  "key_terms": [{"term": "概念名", "definition": "一句话候选定义"}],\n'
+        '  "missing_concepts": ["遗漏的重要概念"],\n'
+        '  "top3_improvements": ["改进建议1", "改进建议2", "改进建议3"]\n'
+        "}\n\n"
+    )
+
+    def build_review_prompt(
+        self, *, intro: str, dimensions: list[tuple[str, str]], ref_block: str,
+    ) -> str:
+        """拼装评审 prompt:intro + 维度表 + 共用输出格式约束 + JSON 示例 + 参照块。
+        各评审步只传 intro / dimensions=[(维度键, 中文说明)] / ref_block(参照块);
+        '评分维度''只输出扁平 JSON''JSON 尾'这几段四步逐字一致,集中此处不再各写一份。"""
+        dim_lines = "".join(
+            f"{i}. {key}: {desc}\n" for i, (key, desc) in enumerate(dimensions, 1)
+        )
+        example_scores = ", ".join(f'"{key}": 4' for key, _ in dimensions)
+        count_word = self._REVIEW_CN_NUM.get(len(dimensions), str(len(dimensions)))
+        return (
+            f"{intro}\n\n"
+            "评分维度（每项打 1-5 的整数）：\n"
+            f"{dim_lines}\n"
+            + self._REVIEW_OUTPUT_EXTRAS +
+            f"只输出如下扁平 JSON：{count_word}个维度为顶层整数键，不要嵌套进 scores 子对象、"
+            "不要加 rationale 字段、不要代码围栏、不要任何额外说明文字。\n"
+            "{\n"
+            f"  {example_scores},\n"
+            + self._REVIEW_JSON_TAIL
+            + ref_block
+        )
+
+    def review_fallback(self, score_keys: list[str]) -> dict:
+        """评审步 AI 解析失败时的兜底:各维度 3 分 + overall 3.0 + 空 key_terms/missing + 提示。
+        从 score_keys 机械派生,替代四步各写一份逐字相同的 fallback 字面量。"""
+        fallback = {key: 3 for key in score_keys}
+        fallback.update(
+            overall=3.0, key_terms=[], missing_concepts=[],
+            top3_improvements=["AI 返回的不是有效 JSON"],
+        )
+        return fallback
+
     def prepare_smart_for_review(self) -> tuple[str, dict, str | None]:
         """读最新智能笔记并按 REVIEW_NOTE_LIMIT 截断送评,返回 (smart_clip, coverage, note_file)。"""
         smart_path = self.latest_smart_note()
