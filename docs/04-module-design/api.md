@@ -85,7 +85,7 @@ async def stream_video(job_id: str, request: Request):
                        headers={"Accept-Ranges": "bytes"})
 ```
 
-笔记中的截图路径替换：前端请求 `/api/jobs/{id}/assets/scene_0012_63.5s.jpg`，API 直接返回文件。
+笔记中的截图路径替换：前端请求 `/api/jobs/{id}/assets/frame-0012.jpg`，API 直接返回文件。
 
 ## 5. WebSocket 进度推送
 
