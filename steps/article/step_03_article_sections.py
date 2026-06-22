@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from shared.step_base import StepBase, file_hash
+from steps.utils.sections import build_section_tree
 
 
 class ArticleSectionsStep(StepBase):
@@ -28,7 +29,7 @@ class ArticleSectionsStep(StepBase):
         elif not flat and parsed.get("text"):
             flat = self._split_text(parsed["text"])
 
-        tree = self._build_tree(flat)
+        tree = build_section_tree(flat)
         result = {
             "title": parsed.get("title", ""),
             "authors": parsed.get("authors", []),
@@ -93,31 +94,6 @@ class ArticleSectionsStep(StepBase):
             return 2, line
 
         return 0, None
-
-    def _build_tree(self, flat: list[dict]) -> list[dict]:
-        tree: list[dict] = []
-        stack: list[dict] = []
-
-        for section in flat:
-            node = {
-                "level": section["level"],
-                "title": section["title"],
-                "page": section.get("page", 1),
-                "text": section.get("text", ""),
-                "children": [],
-            }
-
-            while stack and stack[-1]["level"] >= node["level"]:
-                stack.pop()
-
-            if stack:
-                stack[-1]["children"].append(node)
-            else:
-                tree.append(node)
-
-            stack.append(node)
-
-        return tree
 
 
 if __name__ == "__main__":

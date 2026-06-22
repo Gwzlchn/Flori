@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from steps.utils.sections import render_section_tree
+from steps.utils.sections import build_section_tree, render_section_tree
 
 
 class TestRenderSectionTree:
@@ -99,3 +99,24 @@ class TestRenderSectionTree:
         render_section_tree({"title": "X"}, parts, level=1)
         assert parts[0] == "PRE"
         assert "".join(parts[1:]) == "\n# X\n\n"
+
+
+class TestBuildSectionTree:
+    def test_flat_to_nested(self):
+        flat = [
+            {"level": 1, "title": "A", "page": 1, "text": "a"},
+            {"level": 2, "title": "A1", "page": 1, "text": "a1"},
+            {"level": 1, "title": "B", "page": 2, "text": "b"},
+        ]
+        tree = build_section_tree(flat)
+        assert [n["title"] for n in tree] == ["A", "B"]
+        assert [c["title"] for c in tree[0]["children"]] == ["A1"]
+        assert tree[1]["children"] == []
+
+    def test_defensive_missing_keys(self):
+        # 缺 level/title/page/text 不应 KeyError(I-L18:article 旧版直接索引会崩)。
+        tree = build_section_tree([{}])
+        assert tree == [{"level": 1, "title": "", "page": 1, "text": "", "children": []}]
+
+    def test_empty(self):
+        assert build_section_tree([]) == []

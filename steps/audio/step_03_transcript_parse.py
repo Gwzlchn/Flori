@@ -11,6 +11,23 @@ from steps.utils.srt_parser import format_timestamp, load_srt
 SEGMENT_INTERVAL_SEC = 60
 
 
+def _is_word_char(ch: str) -> bool:
+    return ch.isascii() and ch.isalnum()
+
+
+def _join_cues(texts) -> str:
+    """拼接相邻字幕文本:英文词边界处补空格(避免 "hello""world" 粘连),
+    CJK 之间直接相连(不在中文字间插空格)。"""
+    result = ""
+    for t in texts:
+        if not t:
+            continue
+        if result and _is_word_char(result[-1]) and _is_word_char(t[0]):
+            result += " "
+        result += t
+    return result
+
+
 class TranscriptParseStep(StepBase):
     def validate_inputs(self) -> list[str]:
         # 02_whisper 写 input/subtitle.srt
@@ -28,7 +45,7 @@ class TranscriptParseStep(StepBase):
 
         # 按固定时间窗口聚合为段落，提供下游 sections 雏形
         segments = self._aggregate(entries)
-        full_text = "".join(e.text for e in entries)
+        full_text = _join_cues([e.text for e in entries])
         duration_sec = round(entries[-1].end_sec, 1) if entries else 0.0
 
         transcript = {
@@ -63,7 +80,7 @@ class TranscriptParseStep(StepBase):
 
         for e in entries:
             if e.start_sec - window_start >= SEGMENT_INTERVAL_SEC and buf:
-                segments.append({"start": seg_start, "end": seg_end, "text": "".join(buf)})
+                segments.append({"start": seg_start, "end": seg_end, "text": _join_cues(buf)})
                 window_start = e.start_sec
                 seg_start = e.start_sec
                 buf = []
@@ -71,7 +88,7 @@ class TranscriptParseStep(StepBase):
             seg_end = e.end_sec
 
         if buf:
-            segments.append({"start": seg_start, "end": seg_end, "text": "".join(buf)})
+            segments.append({"start": seg_start, "end": seg_end, "text": _join_cues(buf)})
 
         return segments
 

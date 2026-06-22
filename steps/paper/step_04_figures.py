@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from pathlib import Path
 
 from shared.step_base import StepBase, file_hash
@@ -38,6 +39,12 @@ class FiguresStep(StepBase):
         results = []
         ocr_engine = self._create_ocr_engine()
 
+        # 同页可有多张内嵌位图与多条图注:按页建可消费队列,逐图注取「下一张未用」位图,
+        # 而非每条图注都命中该页第一张(否则多图注引用同一图/图文错配)。
+        page_pool: dict[int, list[dict]] = defaultdict(list)
+        for ext_img in extracted:
+            page_pool[ext_img["page"]].append(ext_img)
+
         for i, fig in enumerate(figures_info):
             self.report_progress(i, len(figures_info), "processing figures")
             fig_id = fig.get("id", f"fig{i + 1}")
@@ -46,11 +53,11 @@ class FiguresStep(StepBase):
 
             img_filename = None
             img_idx = None
-            for ext_img in extracted:
-                if ext_img["page"] == page:
-                    img_filename = ext_img["filename"]
-                    img_idx = ext_img["index"]
-                    break
+            pool = page_pool.get(page)
+            if pool:  # 同页图注多于位图时,后续图注取不到 → 保持 None(优雅降级)
+                ext_img = pool.pop(0)
+                img_filename = ext_img["filename"]
+                img_idx = ext_img["index"]
 
             entry = {
                 "id": fig_id,

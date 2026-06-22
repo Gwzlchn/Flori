@@ -11,3 +11,34 @@ def render_section_tree(section: dict, parts: list, level: int, max_chars: int =
         parts.append(f"{section['text'][:max_chars]}\n")
     for child in section.get("children", []):
         render_section_tree(child, parts, level + 1, max_chars)
+
+
+def build_section_tree(flat: list[dict]) -> list[dict]:
+    """扁平章节列表 → 树形(按 level 嵌套)。paper/article 共用,消逐字重复副本。
+
+    容错:缺 level/title/page/text 时用默认值,不因畸形输入(如手改 parsed.json
+    或上游 schema 变化)KeyError。
+    """
+    tree: list[dict] = []
+    stack: list[dict] = []
+
+    for section in flat:
+        node = {
+            "level": section.get("level", 1),
+            "title": section.get("title", ""),
+            "page": section.get("page", 1),
+            "text": section.get("text", ""),
+            "children": [],
+        }
+
+        while stack and stack[-1]["level"] >= node["level"]:
+            stack.pop()
+
+        if stack:
+            stack[-1]["children"].append(node)
+        else:
+            tree.append(node)
+
+        stack.append(node)
+
+    return tree

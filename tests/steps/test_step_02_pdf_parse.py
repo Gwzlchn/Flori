@@ -67,3 +67,85 @@ class TestPdfParseStep:
         hashes = step.input_hashes()
         assert "pdf" in hashes
         assert hashes["pdf"].startswith("sha256:")
+
+
+# ── I-L15 / I-L16: 标题跨 span 拼接 + 摘要终止符兜底(轻量 fake doc)──
+
+class _FakePage:
+    def __init__(self, page_dict, page_text):
+        self._dict = page_dict
+        self._text = page_text
+
+    def get_text(self, kind=None):
+        return self._dict if kind == "dict" else self._text
+
+
+class _FakeDoc:
+    def __init__(self, metadata, page_dict=None, page_text=""):
+        self.metadata = metadata
+        self._page = _FakePage(page_dict or {"blocks": []}, page_text)
+
+    def __len__(self):
+        return 1
+
+    def __getitem__(self, i):
+        return self._page
+
+
+def _mk_step(tmp_path):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    for d in ["input", "intermediate"]:
+        (job_dir / d).mkdir()
+    config = make_step_config(tmp_path, step_name="02_pdf_parse", pool="cpu")
+    return PdfParseStep("02_pdf_parse", job_dir, config)
+
+
+def _blocks(*lines_of_spans):
+    return {"blocks": [{"lines": [{"spans": list(spans)} for spans in lines_of_spans]}]}
+
+
+class TestExtractTitle:
+    def test_prefers_metadata_title(self, tmp_path):
+        step = _mk_step(tmp_path)
+        assert step._extract_title(_FakeDoc({"title": "Meta Title"})) == "Meta Title"
+
+    def test_joins_spans_at_max_size(self, tmp_path):
+        # 标题跨多个 span(同最大字号)应拼接,而非只取第一个(I-L15)。
+        step = _mk_step(tmp_path)
+        doc = _FakeDoc(
+            {"title": ""},
+            _blocks(
+                [{"size": 20.0, "text": "Attention Is All"}],
+                [{"size": 20.0, "text": "You Need"}],
+                [{"size": 10.0, "text": "small body text"}],
+            ),
+        )
+        assert step._extract_title(doc) == "Attention Is All You Need"
+
+    def test_overlong_falls_back_to_first_span(self, tmp_path):
+        step = _mk_step(tmp_path)
+        big = "x" * 300
+        doc = _FakeDoc(
+            {"title": ""},
+            _blocks([{"size": 18.0, "text": big}], [{"size": 18.0, "text": "y" * 50}]),
+        )
+        assert step._extract_title(doc) == big  # 拼接 >250 → 退回首个
+
+
+class TestExtractAbstract:
+    def test_terminates_at_blank_line(self, tmp_path):
+        step = _mk_step(tmp_path)
+        doc = _FakeDoc({"title": "t"}, page_text="Abstract\nThe body here.\n\nIntroduction\nmore")
+        assert step._extract_abstract(doc) == "The body here."
+
+    def test_falls_back_to_end_without_terminator(self, tmp_path):
+        # 首页无空行、无 introduction:\Z 兜底应仍抽到摘要而非返回空(I-L16)。
+        step = _mk_step(tmp_path)
+        doc = _FakeDoc({"title": "t"}, page_text="Abstract\nlone abstract with no blank line")
+        assert "lone abstract with no blank line" in step._extract_abstract(doc)
+
+    def test_caps_overlong_abstract(self, tmp_path):
+        step = _mk_step(tmp_path)
+        doc = _FakeDoc({"title": "t"}, page_text="Abstract\n" + "w" * 5000)
+        assert len(step._extract_abstract(doc)) <= 3000

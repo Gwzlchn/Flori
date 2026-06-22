@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from shared.step_base import StepBase, file_hash
+from steps.utils.sections import build_section_tree
 
 
 class SectionsStep(StepBase):
@@ -20,7 +21,7 @@ class SectionsStep(StepBase):
         parsed = self.load_json("intermediate/parsed.json")
         flat_sections = parsed.get("sections", [])
 
-        tree = self._build_tree(flat_sections)
+        tree = build_section_tree(flat_sections)
         result = {
             "title": parsed.get("title", ""),
             "authors": parsed.get("authors", []),
@@ -31,31 +32,6 @@ class SectionsStep(StepBase):
 
         self.write_output("intermediate/sections.json", result)
         return {"sections": len(tree)}
-
-    def _build_tree(self, flat: list[dict]) -> list[dict]:
-        tree: list[dict] = []
-        stack: list[dict] = []
-
-        for section in flat:
-            node = {
-                "level": section.get("level", 1),
-                "title": section.get("title", ""),
-                "page": section.get("page", 1),  # 容错:畸形输入缺 page/level/title 时不 KeyError(与 article 版一致)
-                "text": section.get("text", ""),
-                "children": [],
-            }
-
-            while stack and stack[-1]["level"] >= node["level"]:
-                stack.pop()
-
-            if stack:
-                stack[-1]["children"].append(node)
-            else:
-                tree.append(node)
-
-            stack.append(node)
-
-        return tree
 
 
 if __name__ == "__main__":

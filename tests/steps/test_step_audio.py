@@ -4,10 +4,26 @@ import json
 
 import pytest
 
-from steps.audio.step_03_transcript_parse import TranscriptParseStep
+from steps.audio.step_03_transcript_parse import TranscriptParseStep, _join_cues
 from steps.audio.step_04_smart_podcast import SmartPodcastStep
 from steps.audio.step_05_review import PodcastReviewStep
 from tests.steps.conftest import make_step_config
+
+
+class TestJoinCues:
+    """I-L17: 拼接字幕条目时英文补空格、CJK 直连(避免 ''.join 把英文词粘连)。"""
+
+    def test_english_words_spaced(self):
+        assert _join_cues(["hello", "world"]) == "hello world"
+
+    def test_cjk_not_spaced(self):
+        assert _join_cues(["大家好", "今天聊聊"]) == "大家好今天聊聊"
+
+    def test_cross_script_no_space(self):
+        assert _join_cues(["中文", "abc"]) == "中文abc"
+
+    def test_skips_empty(self):
+        assert _join_cues(["a", "", "b"]) == "a b"
 
 # 跨越 60s 窗口的样例 SRT，预期聚合为 2 段
 SRT = """\

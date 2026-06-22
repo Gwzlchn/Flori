@@ -61,18 +61,26 @@ class PdfParseStep(StepBase):
         if len(doc) > 0:
             page = doc[0]
             blocks = page.get_text("dict")["blocks"]
-            if blocks:
-                max_size = 0
-                title_text = ""
-                for block in blocks:
-                    if "lines" not in block:
-                        continue
-                    for line in block["lines"]:
-                        for span in line["spans"]:
-                            if span["size"] > max_size:
-                                max_size = span["size"]
-                                title_text = span["text"]
-                return title_text.strip()
+            spans = [
+                span
+                for block in blocks if "lines" in block
+                for line in block["lines"]
+                for span in line["spans"]
+                if span.get("text", "").strip()
+            ]
+            if spans:
+                max_size = max(s["size"] for s in spans)
+                # 收集首页最大字号那一档(容差 0.1)的所有 span 按阅读序拼接,
+                # 而非只取单个 span(避免多 span 标题被截断)。
+                parts = [
+                    s["text"].strip() for s in spans
+                    if abs(s["size"] - max_size) < 0.1
+                ]
+                title = " ".join(parts).strip()
+                # 兜底:异常长多半误并了页眉/作者块,退回首个最大字号 span。
+                if len(title) > 250:
+                    title = parts[0] if parts else ""
+                return title
         return ""
 
     def _extract_authors(self, doc) -> list[str]:
@@ -85,10 +93,22 @@ class PdfParseStep(StepBase):
         if len(doc) == 0:
             return ""
         text = doc[0].get_text()
-        m = re.search(r"(?i)abstract[:\s]*\n?(.*?)(?:\n\s*\n|introduction)", text, re.DOTALL)
-        if m:
-            return m.group(1).strip()
-        return ""
+        # 终止于「空行 / introduction / 文末(\Z)」:补 \Z 兜底,避免首页无空行又无
+        # introduction 时整段匹配失败而直接返回空。
+        m = re.search(
+            r"(?i)abstract[:\s]*\n?(.*?)(?:\n\s*\n|introduction|\Z)",
+            text, re.DOTALL,
+        )
+        if not m:
+            return ""
+        abstract = m.group(1).strip()
+        # 长度上限:无显式终止符时可能吞进正文,截断到合理范围。
+        MAX_ABSTRACT = 3000
+        if len(abstract) > MAX_ABSTRACT:
+            abstract = abstract[:MAX_ABSTRACT].rstrip()
+        if not abstract:
+            self.log.warning("abstract_empty", page0_chars=len(text))
+        return abstract
 
     def _extract_sections(self, page, page_num: int) -> list[dict]:
         blocks = page.get_text("dict")["blocks"]
