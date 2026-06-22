@@ -167,8 +167,12 @@ Worker 信息存两处：
 
 | 存储 | 用途 | 生命周期 |
 |------|------|---------|
-| Redis HASH | 实时心跳 + 当前状态 | TTL 30s，崩溃自动消失 |
+| Redis HASH | 实时心跳 + 当前状态 | TTL = `online_window_sec`（默认 30s，单一事实源，崩溃自动消失） |
 | SQLite workers 表 | 历史记录 + 统计 + 运维备注 | 持久，Worker 下线后仍保留 |
+
+> **Worker 身份延续**：`worker_id` 不再每次随机。启动时优先读 `WORKER_ID_FILE`（默认 `/data/.worker_id`）缓存的 id，无则生成 `{type}-{8hex}` 并写回——重启复用同一身份（监控不刷幽灵行、docker `reap_orphans` 能跨重启命中残留容器）。gateway 模式以服务端 `register` 返回的 id 为准。多副本 worker 须各挂独立卷或设不同 `WORKER_ID_FILE`，否则争用同一 id。
+> **Redis TTL 单一事实源**：liveness key 的 TTL 由 `configs/pools.yaml` 的 `worker_status.online_window_sec` 驱动（与对外"在线"判定同窗口），不再各处硬编码 30。
+> **并发上限服务端权威**：gateway 认领时以服务端 `pools.yaml` 夹取 worker 自报的 `pool_limits`（`min(client, server)`），worker 报超大值也无法突破全局每池并发。
 
 ```python
 async def register(self):
