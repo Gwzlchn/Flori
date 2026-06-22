@@ -19,9 +19,19 @@ from shared.errors import RETRY_POLICY, get_retry_delay
 from shared.models import Job, JobStatus, Step, StepStatus
 from shared.notify import notify
 from shared.redis_client import RedisClient
+from shared.source_detect import detect_source
 from shared.storage import StorageBackend
 
 logger = structlog.get_logger(component="scheduler")
+
+# 命中来源站点、需按来源路由网络的步骤(其余步骤本地/AI,不分代理)。
+_NET_STEPS = {"01_download", "07_danmaku"}
+# 需走出站代理的来源(本环境 YouTube 在代理后)。其余(bilibili 等)直连——代理会断 B站。
+# 可扩展:arxiv / 外网 RSS 文章如需代理在此加。
+_PROXY_SOURCES = {"youtube"}
+
+# 步骤静态优先级加权(分数 -= boost;zpopmin 越小越先)。02_whisper 防饿死(出稿硬依赖它)。
+_PRIORITY_BOOST = {"02_whisper": 100}
 
 # 延迟重试任务的 name 前缀，跟踪/按 job 取消时复用，避免格式漂移。
 _DELAYED_PREFIX = "delayed_enqueue:"
@@ -285,6 +295,8 @@ class Scheduler:
         await self.redis.init_job(job.id, job.pipeline, {
             "domain": job.domain,
             "style_tags": job.style_tags,
+            "url": job.url or "",
+            "source": job.source or "",
         })
 
         for name, cfg in pipeline_steps.items():
@@ -611,13 +623,29 @@ class Scheduler:
         else:
             merged_tags = list(static_tags)
 
+        # 来源网络路由:仅 01_download/07_danmaku 命中来源站点。按来源分 net-proxy / net-direct,
+        # 让需代理的源(YouTube)落到带代理的 worker、B站等直连源落到无代理 worker(代理会断 B站)。
+        # net-proxy 同时进 require_tags(只有声明该 tag 的 worker 能认领);net-direct 仅进 tags
+        # (无代理 worker 不 reject 它故能认领,带代理 worker reject 它故不抢)。
+        require_tags = list(static_tags)
+        if step_name in _NET_STEPS:
+            info = job_info if pool == "ai" else await self.redis.get_job_info(job_id)
+            src = (info.get("source") or "").strip() or detect_source(info.get("url", ""))
+            netclass = "net-proxy" if src in _PROXY_SOURCES else "net-direct"
+            merged_tags = sorted(set(merged_tags + [netclass]))
+            if netclass == "net-proxy":
+                require_tags = sorted(set(require_tags + [netclass]))
+
         statuses = await self.redis.get_all_step_statuses(job_id)
         done_count = sum(1 for v in statuses.values() if v in ("done", "skipped"))
-        priority = -done_count
+        # zpopmin:分数越小越先出。priority=-done_count 让晚到步骤优先,但 02_whisper 处在链路早段
+        # 会被各 job 的视觉步(04/05/06,同 cpu 池)长期抢占而饿死。给它静态加权(更小分数)抢先转写,
+        # 避免出稿步空等(出稿现已硬依赖转写)。
+        priority = -done_count - _PRIORITY_BOOST.get(step_name, 0)
 
         await self.redis.enqueue_step(
             pool, job_id, step_name, merged_tags, priority,
-            require_tags=list(static_tags),
+            require_tags=require_tags,
         )
 
         await asyncio.to_thread(

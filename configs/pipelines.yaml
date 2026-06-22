@@ -127,7 +127,10 @@ video:
       label: "口播稿"
       extends: .ai-step
       run: steps.video.step_08_punctuate
-      needs: ["01_download"]
+      # 依赖 02_whisper:无原生字幕时等 whisper 转写出 input/subtitle.srt 再出口播稿
+      # (whisper 有原生 srt 则 skip,视为满足依赖)。否则规则在 whisper 前求值→无 srt→08 被跳过→
+      # 笔记只剩 OCR。规则保留作兜底(whisper 万一没产 srt 则优雅跳过)。
+      needs: ["01_download", "02_whisper"]
       timeout: 1800
       retry: 5
       tags: []
@@ -143,9 +146,9 @@ video:
       label: "机械版笔记"
       run: steps.video.step_09_mechanical
       pool: io
-      # 不硬依赖 08(标点是 AI 步):机械版口播优先用 08 标点稿,没有则直接读原始中文字幕,
-      # 于是不依赖 claude 也能先出;08 跑完后重跑本步即可换成标点版。
-      needs: ["06_ocr", "07_danmaku"]
+      # 依赖 08:口播稿(标点版,源自原生字幕或 whisper 转写)必须先就绪再出机械版,否则无字幕视频
+      # (如 YouTube 无 CC)只会得到纯 OCR 笔记、丢失口播主体内容。08 有 retry:5 容错。
+      needs: ["06_ocr", "07_danmaku", "08_punctuate"]
       timeout: 30
       retry: 1
       outputs: ["output/notes_mechanical.md"]
