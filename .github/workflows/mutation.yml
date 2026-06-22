@@ -1,26 +1,33 @@
-name: Mutation (manual)
+name: Mutation (daily + manual)
 
 # 变异测试:给核心模块注入小改动(< → <=、+1、True→False、删行…),逐个跑相关测试——
 # 测试仍绿 = "存活变异" = 你的断言抓不住的真实 bug。变异分数(killed / 总数)直接量
 # "测试到底有没有意义",比覆盖率更狠。打哪些模块见 scripts/mutation_score.py 的 TARGETS:
-#   shared/ai_gateway.py(计费/exec_id 去重 → 重复计费风险)、shared/db.py、
-#   scheduler/(状态迁移)、worker/(乐观锁)—— docs/09-testing.md 反复强调的并发/计费安全面。
+#   shared/ai_gateway.py(计费/exec_id 去重)、shared/db.py、scheduler/(状态迁移)、worker/(乐观锁)。
 #
-# 慢(每个变异要跑相关测试)→ 仅手动触发(workflow_dispatch),不挂每个 PR。
-# 报告态:存活变异不让本 job 变红(初期必有存活/等价变异),分数打日志供人工裁定。
+# 慢(每个变异要跑相关测试)→ 不挂每 PR;改为每天 cron 跑一次做趋势监控(非阻塞):
+#   · 分数写进本次 run 的 job summary(立即可见);
+#   · 追加到 mutation-data 分支的 history.csv(时间序列源数据),并再生成 trend.md + 各模块徽章 JSON;
+#   · README 徽章读 mutation-data 分支的 mutation-<module>.json,趋势看该分支的 trend.md。
+#   · workflow_dispatch 仍可按需手动跑(可只跑某模块,不写历史只看 summary)。
 #
-# 为什么不用 `mutmut run` 自带的判生死:本仓库布局下 mutmut 3.6 的自动 runner 恒报 killed=0
-# (它跑测试时 import shared 解析到 /app/shared 原文,没从 mutants/ 副本激活变异;mutmut 3.6 的
-# run 只有 --max-children 一个选项,无 runner/cwd 配置可纠正)。底层 trampoline 机制是好的——
-# 设 MUTANT_UNDER_TEST={module}.{mutant} 后从 mutants/ 跑 pytest 能真正路由到变异体。
-# scripts/mutation_score.py 就把这条手动 recipe 做成循环,产出**真实**的 killed/survived。
+# 为什么不用 mutmut 自带判生死:本布局下其自动 runner 恒报 killed=0(import shared 解析到 /app/shared
+# 原文,没从 mutants/ 副本激活变异;mutmut 3.6 无 runner/cwd 配置)。改用 scripts/mutation_score.py:
+# 设 MUTANT_UNDER_TEST 从 mutants/ 跑相关测试,产出真实 killed/survived。
+#
+# Baseline(回归锚点):shared.ai_gateway = 88.0% (132/150)。其余首次 daily run 跑出后进 history.csv。
 on:
+  schedule:
+    - cron: "0 19 * * *"   # 北京时间每天 03:00(= 前一天 19:00 UTC);要 UTC 3点改成 "0 3 * * *"
   workflow_dispatch:
     inputs:
       target:
-        description: "只跑 key 含该子串的目标(如 ai_gateway / db / scheduler / worker);留空=全部核心模块"
+        description: "只跑 key 含该子串的目标(如 ai_gateway / db / scheduler / worker);留空=全部"
         required: false
         default: ""
+
+permissions:
+  contents: write          # 推 mutation-data 分支用内置 GITHUB_TOKEN
 
 jobs:
   mutmut:
@@ -41,4 +48,37 @@ jobs:
             pip install -q "fakeredis[lua]>=2.28,<4" "pytest>=8.0,<9" "pytest-asyncio>=0.24,<1" \
               "mutmut>=3,<4" "openai>=1.50,<3" "anthropic>=0.40,<1" || exit 1
             python3 scripts/mutation_score.py "$TARGET"
-          '
+          ' | tee /tmp/mut.log
+          # 分数表写进本次 run 的 job summary(立即可见)
+          sed -n "/<!--MUTATION-SUMMARY-->/,/<!--\/MUTATION-SUMMARY-->/p" /tmp/mut.log \
+            | grep -v "MUTATION-SUMMARY" >> "$GITHUB_STEP_SUMMARY" || true
+
+      # 只有定时全量跑才写历史(手动 dispatch 只看 summary,不污染趋势)
+      - name: Persist scores + regen trend/badges (mutation-data branch)
+        if: github.event_name == 'schedule'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          DATE=$(date -u +%Y-%m-%d)
+          URL="https://x-access-token:${TOKEN}@github.com/${REPO}.git"
+          # 取已存在的 mutation-data 分支(append 历史);没有就新建带表头
+          if git ls-remote --exit-code --heads "$URL" mutation-data >/dev/null 2>&1; then
+            git clone --depth 60 --branch mutation-data "$URL" data
+          else
+            mkdir data && (cd data && git init -q -b mutation-data && echo "date,module,killed,survived" > history.csv)
+          fi
+          # 抽 driver 的 CSV 块(module,killed,survived),加日期后追加
+          sed -n "/<!--MUTATION-CSV-->/,/<!--\/MUTATION-CSV-->/p" /tmp/mut.log \
+            | grep -vE "MUTATION-CSV" | while IFS= read -r line; do
+                [ -n "$line" ] && echo "${DATE},${line}" >> data/history.csv
+              done
+          # 从 history.csv 再生成 trend.md + 各模块 shields 徽章 JSON(纯 stdlib)
+          python3 scripts/mutation_report.py data/history.csv data
+          cd data
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "chore(mutation): scores ${DATE} [skip ci]" || { echo "无新数据,跳过"; exit 0; }
+          git push "$URL" mutation-data
