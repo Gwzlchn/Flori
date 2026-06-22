@@ -289,3 +289,21 @@ class TestRelease:
 
         assert await redis.get_pool_count("cpu") == 0
         assert await redis.is_pool_frozen("cpu") is True
+
+    @pytest.mark.asyncio
+    async def test_release_skips_when_exec_id_superseded(self, redis, db):
+        # check_stuck 重排后旧 worker 迟到的 release 不得释放/解冻已被新执行接管的槽与冻结(审计 SCHED-N1)。
+        await _register_worker(redis, db)
+        await redis.try_acquire_slot("scene", limit=1)
+        await redis.freeze_pool("cpu")
+        await redis.set_step_exec_id("j1", "A", "e_new")  # 新执行已接管该步
+
+        await runner_ops.release_step(
+            redis, db, WORKER_ID,
+            {"job_id": "j1", "step": "A", "pool": "scene", "exec_id": "e_old"},
+        )
+
+        assert await redis.get_pool_count("scene") == 1   # 槽未被误放
+        assert await redis.is_pool_frozen("cpu") is True   # cpu 未被误解冻
+        info = await redis.get_worker_info(WORKER_ID)
+        assert info["status"] == "idle"                    # 旧 worker 仍回 idle

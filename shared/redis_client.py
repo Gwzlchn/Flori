@@ -281,8 +281,15 @@ class RedisClient:
         val = await self.r.hget(f"job:{job_id}:retries", step)
         return int(val) if val else 0
 
+    async def reset_step_retries(self, job_id: str, step: str) -> None:
+        # 清单步重试计数(rerun 用):否则重跑曾耗尽重试的步骤会零重试预算(审计 I-H4)。
+        await self.r.hdel(f"job:{job_id}:retries", step)
+
     async def delete_step_status(self, job_id: str, step: str) -> None:
-        await self.r.hdel(f"job:{job_id}:steps", step)
+        # 清该步在所有 per-step hash 的 field(对齐 cleanup_job 清单),避免 resubmit 残留惰性垃圾(审计 I-L11)。
+        for sub in ("steps", "retries", "step_worker", "step_exec",
+                    "step_resources", "step_progress"):
+            await self.r.hdel(f"job:{job_id}:{sub}", step)
 
     async def cleanup_job(self, job_id: str) -> None:
         keys = [
