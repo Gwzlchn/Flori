@@ -51,6 +51,9 @@ class LocalStorage:
     def _safe_path(self, job_id: str, rel_path: str = "") -> Path:
         # 兜底防穿越:job_id 不得逃出 jobs_dir、rel 不得逃出其 job 目录,
         # 挡持 token 者经 job_id/rel 里的 ".." 读写中心数据。
+        # 空字节(null byte)会让 pathlib.resolve() / os 抛 ValueError(裸传即 500),在此与穿越一并拦成 ValueError。
+        if "\x00" in job_id or "\x00" in rel_path:
+            raise ValueError("null byte in path")
         root = self.jobs_dir.resolve()
         job_root = (root / job_id).resolve()
         if job_root != root and root not in job_root.parents:

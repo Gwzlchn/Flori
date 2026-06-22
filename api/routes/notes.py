@@ -49,7 +49,11 @@ async def _serve(
     cache: bool = False,
 ) -> Response:
     _validate_job_id(job_id)
-    data = await storage.read_file(job_id, rel_path)
+    try:
+        data = await storage.read_file(job_id, rel_path)
+    except ValueError:
+        # _safe_path 对路径穿越 / 空字节(null byte)抛 ValueError;映射为 400 而非裸 500。
+        raise HTTPException(400, "invalid path")
     if data is None:
         raise HTTPException(404, missing)
     headers = {}

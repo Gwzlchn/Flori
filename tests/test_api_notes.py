@@ -73,6 +73,14 @@ class TestNotes:
         assert resp.status_code == 400
 
     @pytest.mark.asyncio
+    async def test_asset_null_byte(self, client, test_config):
+        # 文件名含空字节(%00→\x00)曾让 pathlib.resolve() 抛 ValueError → 裸 500;
+        # 现 _safe_path 拦成 ValueError、_serve 映射为 400(回归:schemathesis fuzz 在 CI 发现)。
+        _create_job_files(test_config.jobs_dir, "j_test")
+        resp = await client.get("/api/jobs/j_test/assets/x%00")
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
     async def test_note_versions_lists_with_overall(self, client, test_config):
         job_dir = _create_job_files(test_config.jobs_dir, "j_test")
         # 与该版笔记 1:1 配对的版本化评审,使 note-versions 能读到 overall
