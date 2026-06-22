@@ -35,6 +35,33 @@ WORKER_POOLS: dict[str, list[str]] = {
 }
 
 
+def _resolve_worker_id(worker_type: str) -> str:
+    """解析 worker 稳定身份:优先读 WORKER_ID_FILE 缓存(重启复用同一 id),无缓存则生成
+    {type}-{8hex} 并写回。
+
+    为何要稳定:直连(非 gateway)模式此前每次启动随机换 id,重启即被当全新 worker——监控
+    刷一堆幽灵行、docker reap_orphans 按 label flori.worker={id} 也无法跨重启命中残留容器。
+    与 GatewayTransport 同一文件约定(默认 /data/.worker_id);gateway 模式下服务端仍可在
+    register 时返回另一 id 并覆盖该文件(以服务端为准),本函数只负责直连模式的身份延续。
+
+    ⚠ 多副本 worker(如 claude-worker / claude-worker-2)必须各自挂独立卷或设不同
+    WORKER_ID_FILE,否则会争用同一 id 文件、注册成同一个 worker。"""
+    id_file = Path(os.environ.get("WORKER_ID_FILE", "/data/.worker_id"))
+    try:
+        cached = id_file.read_text().strip()
+        if cached:
+            return cached
+    except OSError:
+        pass
+    worker_id = generate_worker_id(worker_type)
+    try:
+        id_file.parent.mkdir(parents=True, exist_ok=True)
+        id_file.write_text(worker_id)
+    except OSError:
+        logger.warning("worker_id_persist_failed", worker_id=worker_id)
+    return worker_id
+
+
 def auto_discover_tags() -> set[str]:
     tags = set()
     if os.environ.get("ANTHROPIC_API_KEY"):
@@ -65,7 +92,9 @@ class Worker:
         self.config = config
         self.storage = storage
         self.worker_type = worker_type
-        self.worker_id = generate_worker_id(worker_type)
+        # 稳定身份:重启复用缓存 id(见 _resolve_worker_id);gateway 模式 register 后可能被
+        # 服务端返回的 id 覆盖(worker.py:run 里 self.worker_id = await transport.register(...))。
+        self.worker_id = _resolve_worker_id(worker_type)
         self.pools = pools
         self.tags = tags
         self.reject_tags = reject_tags

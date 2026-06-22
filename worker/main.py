@@ -25,7 +25,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Worker process")
     parser.add_argument(
         "--type", required=True,
-        choices=["download", "cpu", "ai", "gpu"],
+        # choices 从 WORKER_POOLS 派生(单一事实源):新增/重命名 worker 类型只改 worker.py
+        # 的 WORKER_POOLS 一处,不必再同步这里的字面量列表。
+        choices=sorted(WORKER_POOLS),
         help="Worker type (determines default pools)",
     )
     parser.add_argument("--tags", nargs="*", default=None, help="Capability tags")
