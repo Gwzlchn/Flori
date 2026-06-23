@@ -852,6 +852,9 @@ class Scheduler:
     # ── 孤儿回收 + 卡住检测 ──
 
     _CLAIM_MISMATCH_GRACE_SEC = 30
+    # 判「这步是否有人在跑」用每步独立的进度心跳新鲜度(worker on_tick 每 10s 刷一步)。
+    # 取 30s(≈3 拍)留余量,避免扫描时序抖动误判正在跑的步。
+    _STEP_PROGRESS_FRESH_SEC = 30
 
     async def orphan_scan(self) -> None:
         active_jobs = await self.redis.get_active_jobs()
@@ -868,21 +871,25 @@ class Scheduler:
                 if not await self.redis.worker_exists(worker_id):
                     await self._reclaim_step(job_id, step, f"worker {worker_id} lost")
                     continue
-                # worker 存活,但其上报的 current_step 不是本步 → 认领响应丢失/已转去别的任务,
-                # 这步实际没人在跑。持续超宽限期(容忍认领后首拍心跳延迟)才回收。
-                info = await self.redis.get_worker_info(worker_id)
-                reported = (info or {}).get("current_step", "")
-                if reported != step:
-                    key = (job_id, step)
-                    live_mismatch.add(key)
-                    first = self._claim_mismatch_since.setdefault(key, time.time())
-                    if time.time() - first >= self._CLAIM_MISMATCH_GRACE_SEC:
-                        self._claim_mismatch_since.pop(key, None)
-                        await self._reclaim_step(
-                            job_id, step,
-                            f"worker {worker_id} not running this step (claim lost?)",
-                            release_slot=False,  # worker 仍存活且已 move on,它自己已/将 release 本步 slot
-                        )
+                # worker 存活,但这步没有近期进度心跳 → 认领响应丢失/未真正运行,实际没人在跑。
+                # 判活用「每步独立」的进度心跳(job:*:step_progress,worker on_tick 每 10s 刷一步),
+                # 而非 worker 的单个 current_step——后者在 concurrency>1 时只能反映 N 个并发步中的 1 个,
+                # 会把其余并发步全误判为 claim lost 反复回收(并发越高越严重,曾致失败雪崩)。
+                # 持续超宽限期(容忍认领后首拍心跳延迟)才回收。
+                progress_at = await self.redis.get_step_progress_at(job_id, step)
+                if progress_at is not None and time.time() - progress_at < self._STEP_PROGRESS_FRESH_SEC:
+                    self._claim_mismatch_since.pop((job_id, step), None)
+                    continue
+                key = (job_id, step)
+                live_mismatch.add(key)
+                first = self._claim_mismatch_since.setdefault(key, time.time())
+                if time.time() - first >= self._CLAIM_MISMATCH_GRACE_SEC:
+                    self._claim_mismatch_since.pop(key, None)
+                    await self._reclaim_step(
+                        job_id, step,
+                        f"worker {worker_id} not running this step (claim lost?)",
+                        release_slot=False,  # worker 仍存活且已 move on,它自己已/将 release 本步 slot
+                    )
         # 清理不再 mismatch 的计时,避免泄漏。
         for k in [k for k in self._claim_mismatch_since if k not in live_mismatch]:
             self._claim_mismatch_since.pop(k, None)

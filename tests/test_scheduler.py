@@ -1682,7 +1682,9 @@ class TestOrphanClaimMismatch:
         assert ("j_test_001", "A") in calls
 
     @pytest.mark.asyncio
-    async def test_no_reclaim_when_worker_runs_this_step(self, redis, db, config):
+    async def test_no_reclaim_when_step_has_fresh_progress(self, redis, db, config):
+        # 修复点:即便 worker 上报的 current_step 不是本步(并发下只反映 N 步中的 1 步),
+        # 只要本步有新鲜进度心跳 → 不回收。
         s = Scheduler(redis, db, config)
         s._CLAIM_MISMATCH_GRACE_SEC = 0
         job = make_job()
@@ -1692,14 +1694,39 @@ class TestOrphanClaimMismatch:
         await redis.set_step_worker("j_test_001", "A", "w1")
         await redis.register_worker(
             "w1", {"type": "cpu", "pools": "cpu,io", "status": "busy",
-                   "current_job": "j_test_001", "current_step": "A"},
+                   "current_job": "j_test_001", "current_step": "B"},  # 上报的是别的步
+        )
+        await redis.set_step_progress_at("j_test_001", "A")  # 本步心跳新鲜
+        calls = []
+        async def fake_reclaim(job_id, step, reason, **kwargs):
+            calls.append((job_id, step))
+        s._reclaim_step = fake_reclaim
+        await s.orphan_scan()
+        assert calls == []  # 本步心跳新鲜 → 不回收(尽管 current_step 不匹配)
+
+    @pytest.mark.asyncio
+    async def test_concurrent_steps_not_reclaimed(self, redis, db, config):
+        # 回归:worker 并发跑多步,current_step 只能反映其一;两步都有新鲜心跳 → 都不回收。
+        # (旧逻辑按单个 current_step 判活,会把其余并发步全误回收 → 失败雪崩。)
+        s = Scheduler(redis, db, config)
+        s._CLAIM_MISMATCH_GRACE_SEC = 0
+        job = make_job()
+        db.create_job(job)
+        await s.submit_job(job)
+        for st in ("A", "B"):
+            await redis.set_step_status("j_test_001", st, "running")
+            await redis.set_step_worker("j_test_001", st, "w1")
+            await redis.set_step_progress_at("j_test_001", st)
+        await redis.register_worker(
+            "w1", {"type": "cpu", "pools": "cpu,io", "status": "busy",
+                   "current_job": "j_test_001", "current_step": "A"},  # 只报 A
         )
         calls = []
         async def fake_reclaim(job_id, step, reason, **kwargs):
             calls.append((job_id, step))
         s._reclaim_step = fake_reclaim
         await s.orphan_scan()
-        assert calls == []  # current_step 匹配 → 不回收
+        assert calls == []  # A、B 都有新鲜心跳 → 都不回收(并发安全)
 
     @pytest.mark.asyncio
     async def test_within_grace_not_reclaimed(self, redis, db, config):
