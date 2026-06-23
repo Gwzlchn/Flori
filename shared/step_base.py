@@ -565,14 +565,25 @@ class StepBase:
         self, cmd: list[str], timeout: int = 600, **kwargs
     ) -> subprocess.CompletedProcess:
         try:
-            return subprocess.run(
+            r = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=timeout, check=True, **kwargs
             )
         except subprocess.CalledProcessError as e:
-            # 重抛子类:str() 带上被 capture 的 stderr 尾部,否则失败原因(登录失效/清晰度不可用等)被吞。
+            # 失败:把工具输出转发到本步 stdout/stderr(进 logs/{step}.log 供排错),再重抛带 stderr 尾部。
+            if e.stdout:
+                print(e.stdout, flush=True)
+            if e.stderr:
+                print(e.stderr, file=sys.stderr, flush=True)
             raise SubprocessFailed(
                 e.returncode, e.cmd, output=e.output, stderr=e.stderr
             ) from e
+        # 成功:把工具(yt-dlp/yutto/ffmpeg 等)输出转发到本步 stdout/stderr,使其进 logs/{step}.log。
+        # 否则 capture_output 把输出吃掉、成功步(尤其 01_download)的日志为空,无从查看下载/处理详情。
+        if r.stdout:
+            print(r.stdout, flush=True)
+        if r.stderr:
+            print(r.stderr, file=sys.stderr, flush=True)
+        return r
 
     # ── Private ──
 
