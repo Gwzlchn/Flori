@@ -33,6 +33,11 @@ _NET_STEPS = {"01_download", "07_danmaku"}
 # 需走出站代理的来源(本环境 YouTube 在代理后)。其余(bilibili 等)直连——代理会断 B站。
 _PROXY_SOURCES = {"youtube"}
 
+# B站需登录态(SESSDATA)才能下高清/字幕 → 对该源的 net_steps 步加 require_tags=['bili'](硬门控),
+# 仅自带 B站 cookie 的 worker(auto_discover_tags 探 BILI_SESSDATA/cookie 文件)能认领;可经
+# sources.yaml 的 bili_sources 覆盖。arxiv/article 等 net-direct 非 B站源不受影响。
+_BILI_SOURCES = {"bilibili"}
+
 # 步骤静态优先级加权(分数 -= boost;zpopmin 越小越先)。02_whisper 防饿死(出稿硬依赖它)。
 _PRIORITY_BOOST = {"02_whisper": 100}
 
@@ -641,6 +646,7 @@ class Scheduler:
         nr = self.config.net_routing or {}
         net_steps = set(nr.get("net_steps") or _NET_STEPS)
         proxy_sources = set(nr.get("proxy_sources") or _PROXY_SOURCES)
+        bili_sources = set(nr.get("bili_sources") or _BILI_SOURCES)
         require_tags = list(static_tags)
         if step_name in net_steps:
             info = job_info if pool == "ai" else await self.redis.get_job_info(job_id)
@@ -649,6 +655,10 @@ class Scheduler:
             merged_tags = sorted(set(merged_tags + [netclass]))
             if netclass == "net-proxy":
                 require_tags = sorted(set(require_tags + [netclass]))
+            # B站(直连)需登录态:加 bili 硬门控,仅自带 cookie 的 worker 能认领(代理会断 B站,
+            # 故 bili 独立于 netclass、不进 merged_tags 软标签)。
+            if src in bili_sources:
+                require_tags = sorted(set(require_tags + ["bili"]))
 
         statuses = await self.redis.get_all_step_statuses(job_id)
         done_count = sum(1 for v in statuses.values() if v in ("done", "skipped"))
@@ -755,6 +765,28 @@ class Scheduler:
             if info.get("admin_status") == "paused" or info.get("status") == "offline":
                 continue
             if pool in info.get("pools", "").split(","):
+                return True
+        return False
+
+    async def _pool_has_workers_for(self, pool: str, require_tags: list[str]) -> bool:
+        """同 _pool_has_workers,但额外要求在线 worker 的 tags 满足 require_tags(硬门控)。
+        require_tags 空 → 等价 _pool_has_workers。修复:check_no_worker 若只看池不看 tag,
+        『池有 worker 但无人满足 require_tags』(如 B站 require bili 却无 bili worker)会躲过
+        fail-fast、永久卡 ready(无报错)。用本函数后超 NO_WORKER_GRACE_SEC 才给明确失败。"""
+        req = {t for t in (require_tags or []) if t}
+        if not req:
+            return await self._pool_has_workers(pool)
+        workers = await self.redis.list_worker_ids()
+        for wid in workers:
+            info = await self.redis.get_worker_info(wid)
+            if not info:
+                continue
+            if info.get("admin_status") == "paused" or info.get("status") == "offline":
+                continue
+            if pool not in info.get("pools", "").split(","):
+                continue
+            wtags = {t for t in info.get("tags", "").split(",") if t}
+            if req.issubset(wtags):
                 return True
         return False
 
@@ -953,12 +985,28 @@ class Scheduler:
             steps_cfg = self._get_pipeline_steps(pipeline) if pipeline else {}
             stuck: list[tuple[str, str]] = []
             progressable = False
-            pool_ok: dict[str, bool] = {}  # 同 pool 只查一次
+            nr = self.config.net_routing or {}
+            net_steps = set(nr.get("net_steps") or _NET_STEPS)
+            proxy_sources = set(nr.get("proxy_sources") or _PROXY_SOURCES)
+            bili_sources = set(nr.get("bili_sources") or _BILI_SOURCES)
+            job_src: str | None = None  # 懒查 job 来源(仅 net_steps 需要)
+            pool_ok: dict[tuple, bool] = {}  # 按 (pool, require_tags) 缓存:同池不同门控要分别判
             for step in ready:
                 pool = steps_cfg.get(step, {}).get("pool", "")
-                if pool not in pool_ok:
-                    pool_ok[pool] = await self._pool_has_workers(pool)
-                if pool_ok[pool]:
+                # 重算该 step 的 require_tags(与 enqueue_step 同逻辑):B站→bili、YouTube→net-proxy。
+                req: list[str] = []
+                if step in net_steps:
+                    if job_src is None:
+                        jinfo = await self.redis.get_job_info(job_id)
+                        job_src = (jinfo.get("source") or "").strip() or detect_source(jinfo.get("url", ""))
+                    if job_src in proxy_sources:
+                        req.append("net-proxy")
+                    if job_src in bili_sources:
+                        req.append("bili")
+                key = (pool, frozenset(req))
+                if key not in pool_ok:
+                    pool_ok[key] = await self._pool_has_workers_for(pool, req)
+                if pool_ok[key]:
                     progressable = True
                     break
                 stuck.append((step, pool))

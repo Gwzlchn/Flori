@@ -108,6 +108,14 @@ def auto_discover_tags() -> set[str]:
         tags.add("gpu")
     if os.environ.get("OLLAMA_URL"):
         tags.add("local")
+    # 下载凭证/代理 → 自动门控标签(对应 scheduler:B站 require bili / YouTube require net-proxy):
+    # 有 B站 SESSDATA(env 或 /data/cookies/bilibili.txt)→ 'bili';有出站代理 → 'net-proxy'。
+    data_dir = os.environ.get("DATA_DIR", "/data")
+    if os.environ.get("BILI_SESSDATA", "").strip() or (Path(data_dir) / "cookies" / "bilibili.txt").is_file():
+        tags.add("bili")
+    if (os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+            or os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")):
+        tags.add("net-proxy")
     return tags
 
 

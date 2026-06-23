@@ -13,3 +13,8 @@ net_routing:
   # 新增需代理的境外源(vimeo / 外网 RSS 文章)在此加一行即可,不必改 Python。
   proxy_sources:
     - "youtube"
+  # 需登录态(SESSDATA)的来源:调度器对其 net_steps 步加 require_tags=['bili'](硬门控),
+  # 仅自带 B站 cookie 的 worker(auto_discover_tags 探 BILI_SESSDATA env / /data/cookies/bilibili.txt)
+  # 能认领;无此项回落 scheduler._BILI_SOURCES 内置默认。
+  bili_sources:
+    - "bilibili"

@@ -393,6 +393,38 @@ class TestAutoDiscoverTags:
                     assert "vision" in tags
                     assert "claude-cli" in tags
 
+    _CRED_ENV = ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OLLAMA_URL",
+                 "BILI_SESSDATA", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
+
+    def _clean_env(self, **extra):
+        env = {k: v for k, v in os.environ.items() if k not in self._CRED_ENV}
+        env.update(extra)
+        return env
+
+    def test_bili_sessdata_env_adds_bili(self):
+        with patch.dict(os.environ, self._clean_env(BILI_SESSDATA="x", DATA_DIR="/no-such"), clear=True):
+            with patch("shutil.which", return_value=None):
+                assert "bili" in auto_discover_tags()
+
+    def test_bili_cookie_file_adds_bili(self, tmp_path):
+        (tmp_path / "cookies").mkdir()
+        (tmp_path / "cookies" / "bilibili.txt").write_text("SESSDATA=x")
+        with patch.dict(os.environ, self._clean_env(DATA_DIR=str(tmp_path)), clear=True):
+            with patch("shutil.which", return_value=None):
+                assert "bili" in auto_discover_tags()
+
+    def test_https_proxy_adds_net_proxy(self):
+        with patch.dict(os.environ, self._clean_env(HTTPS_PROXY="http://p:1", DATA_DIR="/no-such"), clear=True):
+            with patch("shutil.which", return_value=None):
+                assert "net-proxy" in auto_discover_tags()
+
+    def test_no_cred_no_bili_no_net_proxy(self, tmp_path):
+        with patch.dict(os.environ, self._clean_env(DATA_DIR=str(tmp_path)), clear=True):
+            with patch("shutil.which", return_value=None):
+                tags = auto_discover_tags()
+                assert "bili" not in tags
+                assert "net-proxy" not in tags
+
 
 class TestWorkerPools:
     def test_default_pools(self):

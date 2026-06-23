@@ -327,6 +327,34 @@ class TestNoWorkerFailFast:
         await s.check_no_worker()  # 有 running 步 → 在推进,不失败
         assert "j_test_001" in await redis.get_active_jobs()
 
+    async def _bili_dl_job(self, redis, db, config, tmp_path, tmp_jobs_dir, configs_dir,
+                           jid, worker_tags):
+        pipelines = {"v": {"steps": [{"name": "01_download", "pool": "io", "depends_on": [], "tags": []}]}}
+        cfg = make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir)
+        s = Scheduler(redis, db, cfg)
+        s._NO_WORKER_GRACE_SEC = 0
+        await redis.register_worker("w_io", {"type": "io", "pools": "io",
+                                             "tags": worker_tags, "status": "idle"})
+        job = Job(id=jid, content_type="video", pipeline="v")
+        db.create_job(job)
+        await redis.init_job(jid, "v", {"source": "bilibili", "url": "https://b23.tv/x"})
+        await redis.set_step_status(jid, "01_download", "ready")
+        await redis.add_active_job(jid)
+        await s.check_no_worker()
+
+    @pytest.mark.asyncio
+    async def test_bili_download_no_bili_worker_fails(self, redis, db, config, tmp_path, tmp_jobs_dir, configs_dir):
+        """B6:B站 01_download(require bili)落 io 池但 io worker 无 bili 标签 → 超宽限 fail-fast
+        (旧逻辑只看池不看 tag 会误判可推进、永久卡 ready)。"""
+        await self._bili_dl_job(redis, db, config, tmp_path, tmp_jobs_dir, configs_dir, "j_nobili", "")
+        assert "j_nobili" not in await redis.get_active_jobs()
+
+    @pytest.mark.asyncio
+    async def test_bili_download_with_bili_worker_ok(self, redis, db, config, tmp_path, tmp_jobs_dir, configs_dir):
+        """io worker 带 bili 标签 → 满足 require,不 fail-fast。"""
+        await self._bili_dl_job(redis, db, config, tmp_path, tmp_jobs_dir, configs_dir, "j_hasbili", "bili")
+        assert "j_hasbili" in await redis.get_active_jobs()
+
 
 class TestMarkdownToText:
     """_markdown_to_text 在入 FTS 索引前剥 HTML 标签,断高亮 snippet XSS 之源。"""
@@ -1503,6 +1531,37 @@ class TestEnqueueTags:
         assert "vision" in tags
         assert "cs" in tags
         assert item["require_tags"] == ["vision"]
+
+    @pytest.mark.asyncio
+    async def test_bili_download_requires_bili(self, scheduler, redis, db, tmp_path, tmp_jobs_dir, configs_dir):
+        """B站源的 01_download → require_tags 含 'bili'(硬门控);net-direct 仍进软 tags。"""
+        pipelines = {"v": {"steps": [{"name": "01_download", "pool": "io", "depends_on": [], "tags": []}]}}
+        config = make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir)
+        sched = Scheduler(redis, db, config)
+        job = Job(id="j_bdl", content_type="video", pipeline="v")
+        db.create_job(job)
+        await redis.init_job("j_bdl", "v", {"source": "bilibili", "url": "https://b23.tv/x"})
+        await redis.set_step_status("j_bdl", "01_download", "waiting")
+        await redis.add_active_job("j_bdl")
+        await sched.enqueue_step("j_bdl", "01_download")
+        item, _ = await redis.dequeue_step("io")
+        assert "bili" in item["require_tags"]
+        assert "net-direct" in item["tags"]
+
+    @pytest.mark.asyncio
+    async def test_arxiv_download_no_bili(self, scheduler, redis, db, tmp_path, tmp_jobs_dir, configs_dir):
+        """非 B站 net-direct 源(arxiv)的 01_download 不加 bili require。"""
+        pipelines = {"p": {"steps": [{"name": "01_download", "pool": "io", "depends_on": [], "tags": []}]}}
+        config = make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir)
+        sched = Scheduler(redis, db, config)
+        job = Job(id="j_adl", content_type="paper", pipeline="p")
+        db.create_job(job)
+        await redis.init_job("j_adl", "p", {"source": "arxiv", "url": "https://arxiv.org/abs/1"})
+        await redis.set_step_status("j_adl", "01_download", "waiting")
+        await redis.add_active_job("j_adl")
+        await sched.enqueue_step("j_adl", "01_download")
+        item, _ = await redis.dequeue_step("io")
+        assert "bili" not in item["require_tags"]
 
 
 class TestCleanupStaleWorkers:
