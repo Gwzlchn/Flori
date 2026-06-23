@@ -100,18 +100,19 @@ class TestRequestStep:
         assert await redis.get_pool_count("cpu") == 1
 
     @pytest.mark.asyncio
-    async def test_scene_freezes_cpu(self, redis, db):
+    async def test_claim_does_not_freeze(self, redis, db):
         t = await _registered(redis, db)
-        await redis.enqueue_step("scene", "j1", "A", [], priority=0)
+        await redis.enqueue_step("cpu", "j1", "A", [], priority=0)
         await redis.set_step_status("j1", "A", "ready")
         await redis.init_job("j1", "test", {"domain": "general", "style_tags": "[]"})
 
-        claim = await t.request_step(WORKER_ID, ["scene"], POOL_LIMITS,
+        claim = await t.request_step(WORKER_ID, ["cpu"], POOL_LIMITS,
                                      {"vision"}, set())
 
         assert claim is not None
-        assert claim["pool"] == "scene"
-        assert await redis.is_pool_frozen("cpu") is True
+        assert claim["pool"] == "cpu"
+        # scene 并入 cpu、取消冻结:认领不再冻结其他池。
+        assert await redis.is_pool_frozen("cpu") is False
 
     @pytest.mark.asyncio
     async def test_paused_returns_none(self, redis, db):
@@ -317,16 +318,14 @@ class TestReportFailed:
 
 class TestRelease:
     @pytest.mark.asyncio
-    async def test_release_slot_and_unfreeze_scene(self, redis, db):
+    async def test_release_slot_and_idle(self, redis, db):
         t = await _registered(redis, db)
-        await redis.try_acquire_slot("scene", limit=1)
-        await redis.freeze_pool("cpu")
+        await redis.try_acquire_slot("cpu", limit=1)
 
-        await t.release({"job_id": "j1", "step": "A", "pool": "scene",
+        await t.release({"job_id": "j1", "step": "A", "pool": "cpu",
                          "exec_id": "e"})
 
-        assert await redis.get_pool_count("scene") == 0
-        assert await redis.is_pool_frozen("cpu") is False
+        assert await redis.get_pool_count("cpu") == 0
         # worker 回到 idle
         info = await redis.get_worker_info(WORKER_ID)
         assert info["status"] == "idle"

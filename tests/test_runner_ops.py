@@ -79,18 +79,19 @@ class TestClaimStep:
         assert await redis.get_step_worker("j1", "A") == WORKER_ID
 
     @pytest.mark.asyncio
-    async def test_scene_freezes_cpu(self, redis, db):
+    async def test_claim_does_not_freeze(self, redis, db):
         await _register_worker(redis, db)
-        await redis.enqueue_step("scene", "j1", "A", [], priority=0)
+        await redis.enqueue_step("cpu", "j1", "A", [], priority=0)
         await redis.set_step_status("j1", "A", "ready")
         await redis.init_job("j1", "test", {"domain": "general", "style_tags": "[]"})
 
         claim = await runner_ops.claim_step(
-            redis, db, WORKER_ID, ["scene"], POOL_LIMITS, {"vision"}, set(),
+            redis, db, WORKER_ID, ["cpu"], POOL_LIMITS, {"vision"}, set(),
         )
 
-        assert claim is not None and claim["pool"] == "scene"
-        assert await redis.is_pool_frozen("cpu") is True
+        assert claim is not None and claim["pool"] == "cpu"
+        # scene 并入 cpu、取消 scene↔cpu 冻结:认领任何池都不再自动冻结其他池。
+        assert await redis.is_pool_frozen("cpu") is False
 
     @pytest.mark.asyncio
     async def test_paused_returns_none(self, redis, db):
@@ -276,18 +277,16 @@ class TestReportFailed:
 
 class TestRelease:
     @pytest.mark.asyncio
-    async def test_release_slot_and_unfreeze_scene(self, redis, db):
+    async def test_release_slot_and_idle(self, redis, db):
         await _register_worker(redis, db)
-        await redis.try_acquire_slot("scene", limit=1)
-        await redis.freeze_pool("cpu")
+        await redis.try_acquire_slot("cpu", limit=1)
 
         await runner_ops.release_step(
             redis, db, WORKER_ID,
-            {"job_id": "j1", "step": "A", "pool": "scene", "exec_id": "e"},
+            {"job_id": "j1", "step": "A", "pool": "cpu", "exec_id": "e"},
         )
 
-        assert await redis.get_pool_count("scene") == 0
-        assert await redis.is_pool_frozen("cpu") is False
+        assert await redis.get_pool_count("cpu") == 0
         info = await redis.get_worker_info(WORKER_ID)
         assert info["status"] == "idle"
 

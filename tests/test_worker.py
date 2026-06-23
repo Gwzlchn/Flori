@@ -246,35 +246,19 @@ class TestPaused:
         assert claim is None
 
 
-class TestSceneFreeze:
+class TestNoPoolFreeze:
+    """scene 已并入 cpu 池,取消 scene↔cpu 全局冻结:认领/释放任何池都不再自动冻结其他池。"""
     @pytest.mark.asyncio
-    async def test_scene_freezes_cpu(self, worker, redis):
-        """Acquiring scene pool freezes cpu pool."""
-        await redis.enqueue_step("scene", "j1", "A", [], priority=0)
+    async def test_claiming_cpu_step_does_not_freeze(self, worker, redis):
+        await redis.enqueue_step("cpu", "j1", "A", [], priority=0)
         await redis.set_step_status("j1", "A", "ready")
         await redis.init_job("j1", "test", {"domain": "general", "style_tags": "[]"})
-        worker.pools = ["scene", "cpu"]
+        worker.pools = ["cpu"]
 
         claim = await request_step(worker)
         assert claim is not None
-        assert claim["pool"] == "scene"
-        assert await redis.is_pool_frozen("cpu") is True
-
-    @pytest.mark.asyncio
-    async def test_scene_unfreezes_on_release(self, worker, redis, tmp_jobs_dir):
-        """After scene task completes, execute.release unfreezes cpu pool."""
-        await redis.freeze_pool("cpu")
-        await redis.try_acquire_slot("scene", limit=1)
-        (tmp_jobs_dir / "j1").mkdir(exist_ok=True)
-
-        async def mock_run_step(ctx, on_progress, on_tick):
-            return 0, ""
-
-        worker.runner.run_step = mock_run_step
-        # pipeline "test" 的 step "A" 用 cpu 池;claim 里 pool=scene 触发 release 解冻 cpu。
-        claim = make_claim(job_id="j1", step="A", pool="scene")
-        await worker.execute(claim)
-
+        assert claim["pool"] == "cpu"
+        # 关键:认领 cpu 步全程零冻结(旧版认领 scene 会冻 cpu,现已移除)。
         assert await redis.is_pool_frozen("cpu") is False
 
 
@@ -416,9 +400,17 @@ class TestWorkerPools:
         for wtype, pools in WORKER_POOLS.items():
             assert isinstance(pools, list), f"{wtype} pools should be a list"
             assert len(pools) > 0, f"{wtype} should have at least one pool"
-        # GPU type should include scene and cpu pools
-        assert "scene" in WORKER_POOLS["gpu"]
-        assert "cpu" in WORKER_POOLS["gpu"]
+        # gpu 保留 cpu fallback;scene 已并入 cpu(无独立 scene 池)。
+        assert WORKER_POOLS["gpu"] == ["gpu", "cpu"]
+        assert WORKER_POOLS["cpu"] == ["cpu"]
+        assert WORKER_POOLS["io"] == ["io"]
+        assert WORKER_POOLS["ai"] == ["ai"]
+        # 下载隔离:只有 io 订 io 池;cpu/ai/gpu 都不下载。
+        assert "io" not in WORKER_POOLS["cpu"]
+        assert "io" not in WORKER_POOLS["ai"]
+        assert "io" not in WORKER_POOLS["gpu"]
+        # 无 scene 池残留。
+        assert all("scene" not in p for p in WORKER_POOLS.values())
         # All types should exist
         assert set(WORKER_POOLS.keys()) >= {"io", "cpu", "ai", "gpu"}
 

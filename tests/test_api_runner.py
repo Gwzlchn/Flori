@@ -450,19 +450,17 @@ class TestJobsFail:
 
 class TestJobsRelease:
     @pytest.mark.asyncio
-    async def test_release_unfreezes_scene_and_idles(self, jobs_client, real_redis):
+    async def test_release_slot_and_idles(self, jobs_client, real_redis):
         worker_id, token = await _register_real(jobs_client)
-        await real_redis.try_acquire_slot("scene", limit=1)
-        await real_redis.freeze_pool("cpu")
+        await real_redis.try_acquire_slot("cpu", limit=1)
 
         resp = await jobs_client.post(
             "/api/runner/jobs/j1/steps/A/release",
-            json={"pool": "scene", "exec_id": "e"},
+            json={"pool": "cpu", "exec_id": "e"},
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
-        assert await real_redis.get_pool_count("scene") == 0
-        assert await real_redis.is_pool_frozen("cpu") is False
+        assert await real_redis.get_pool_count("cpu") == 0
         assert (await real_redis.get_worker_info(worker_id))["status"] == "idle"
 
 

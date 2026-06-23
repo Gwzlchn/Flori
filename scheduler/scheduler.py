@@ -861,8 +861,7 @@ class Scheduler:
         logger.warning("reclaim_step", job_id=job_id, step=step, reason=reason)
 
         # release_slot=False:worker 仍存活但已转去别的 step(认领响应丢失/已 move on),它自己的
-        # finally 已经/将会 release_step 释放本步的 slot + 解冻 cpu。此时调度器再 release 会双减
-        # slot 计数、并把 cpu 池误解冻(破坏 scene↔cpu 独占,B 在跑 scene 时 cpu 被错误解冻)。
+        # finally 已经/将会 release_step 释放本步的 slot。此时调度器再 release 会双减 slot 计数。
         # 仅当 worker 确已消失(无 worker / worker_exists=False)时,才由调度器代为释放(否则泄漏)。
         if release_slot:
             pipeline_steps = await self._get_job_pipeline_steps(job_id)
@@ -870,8 +869,6 @@ class Scheduler:
                 pool = pipeline_steps.get(step, {}).get("pool")
                 if pool:
                     await self.redis.release_slot(pool)
-                    if pool == "scene":
-                        await self.redis.unfreeze_pool("cpu")
             # 死 worker 的步:代为归还其占用的资源槽(release_slot=False 时 worker 仍活、会自释放,
             # 不在此重复归还)。
             resources = await self.redis.get_step_resources(job_id, step)

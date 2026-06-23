@@ -152,19 +152,12 @@ async def claim_step(
             await redis.return_step(pool, raw_json, score)
             continue
 
-        # 池拓扑权威在代码:scene 独占 cpu_bound —— 认领 scene 即冻结 cpu 池,
-        # 释放时解冻(见 release_step)。pools.yaml 只配 limit,不配这层关系。
-        if pool == "scene":
-            await redis.freeze_pool("cpu")
-
         exec_id = f"{worker_id}:{int(time.time() * 1000)}"
         try:
             acquired = await redis.cas_step_status(job_id, step, "ready", "running")
             if not acquired:
-                # CAS 失败(被他人抢先):释放槽 + 解冻 cpu + 归还资源槽,继续看其他池。
+                # CAS 失败(被他人抢先):释放槽 + 归还资源槽,继续看其他池。
                 await redis.release_slot(pool)
-                if pool == "scene":
-                    await redis.unfreeze_pool("cpu")
                 for res in acquired_resources:
                     await redis.release_resource(res)
                 continue
@@ -184,15 +177,13 @@ async def claim_step(
             })
         except Exception:
             # dequeue 成功但随后 CAS/publish 抛错时,把 raw 放回队列(尽力而为),
-            # 否则这条任务被永久吞掉。释放槽/解冻 cpu/归还资源让占用不泄漏。
+            # 否则这条任务被永久吞掉。释放槽/归还资源让占用不泄漏。
             try:
                 await redis.return_step(pool, raw_json, score)
             except Exception:
                 pass
             try:
                 await redis.release_slot(pool)
-                if pool == "scene":
-                    await redis.unfreeze_pool("cpu")
             except Exception:
                 pass
             for res in acquired_resources:
@@ -278,16 +269,14 @@ async def release_step(
     pool = claim["pool"]
     job_id, step = claim["job_id"], claim["step"]
     # exec_id 守卫:若该步已被更新的执行接管(check_stuck 重排后 worker B 以新 exec_id 认领),
-    # 本(陈旧)worker 迟到的 release 不得释放/解冻已属于新执行的槽与冻结(审计 SCHED-N1 / I-M3)——
-    # 否则会误解冻 cpu 打破 scene↔cpu 独占。槽/冻结/资源由当前执行自己的 release 负责;本 worker 仅置 idle。
+    # 本(陈旧)worker 迟到的 release 不得释放已属于新执行的槽与资源(审计 SCHED-N1 / I-M3)。
+    # 槽/资源由当前执行自己的 release 负责;本 worker 仅置 idle。
     current_exec = await redis.get_step_exec_id(job_id, step)
     if (current_exec is not None and claim.get("exec_id") is not None
             and current_exec != claim["exec_id"]):
         await _set_status(redis, db, worker_id, "idle")
         return
     await redis.release_slot(pool)
-    if pool == "scene":
-        await redis.unfreeze_pool("cpu")
     # 归还本步占用的资源槽(从 redis 读,gateway release 请求不回传资源列表);清记录防重复归还。
     resources = await redis.get_step_resources(job_id, step)
     if resources:

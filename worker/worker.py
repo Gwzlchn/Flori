@@ -29,12 +29,14 @@ from worker.transport import WorkerTransport, default_worker_id_file
 logger = structlog.get_logger(component="worker")
 
 # worker 类型 → 订阅的池(拓扑权威,不在 pools.yaml;新增/重命名池在此维护)。
-# "io" 类型 = 纯下载/出网 worker(只订 io 池);类型名即其唯一订阅的池,语义诚实。
+# 下载隔离:只有 io 类型订 io 池 → 唯一下载/出网 worker;cpu/ai/gpu 都不下载。
+# scene 已并入 cpu 池(取消独立 scene 池 + scene↔cpu 全局冻结);单机抢资源由 per-worker
+# WORKER_CONCURRENCY 控制,池间不再有冻结互斥。gpu 保留 cpu fallback(空闲帮跑 cpu 步)。
 WORKER_POOLS: dict[str, list[str]] = {
     "io": ["io"],
-    "cpu": ["scene", "cpu", "io"],
-    "ai": ["ai", "io"],
-    "gpu": ["gpu", "scene", "cpu", "io"],
+    "cpu": ["cpu"],
+    "ai": ["ai"],
+    "gpu": ["gpu", "cpu"],
 }
 
 

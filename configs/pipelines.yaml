@@ -78,7 +78,7 @@ video:
       label: "场景检测"
       run: steps.video.step_03_scene
       image: flori/step-heavy
-      pool: scene
+      pool: cpu
       needs: ["01_download"]
       retry: 2
       outputs: ["intermediate/scenes.json"]
