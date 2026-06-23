@@ -93,12 +93,16 @@ CREATE TABLE IF NOT EXISTS ai_usage (
     exec_id TEXT NOT NULL UNIQUE,
     job_id TEXT,
     step TEXT,
+    worker_id TEXT,
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
     input_tokens INTEGER DEFAULT 0,
     output_tokens INTEGER DEFAULT 0,
+    cache_creation_input_tokens INTEGER DEFAULT 0,
+    cache_read_input_tokens INTEGER DEFAULT 0,
     cost_usd REAL DEFAULT 0,
     duration_sec REAL DEFAULT 0,
+    num_turns INTEGER DEFAULT 0,
     cached INTEGER DEFAULT 0,
     created_at TEXT NOT NULL
 );
@@ -297,6 +301,12 @@ class Database:
             "published_at": "published_at TEXT",
         },
         "job_steps": {"retries": "retries INTEGER DEFAULT 0"},
+        "ai_usage": {
+            "worker_id": "worker_id TEXT",
+            "cache_creation_input_tokens": "cache_creation_input_tokens INTEGER DEFAULT 0",
+            "cache_read_input_tokens": "cache_read_input_tokens INTEGER DEFAULT 0",
+            "num_turns": "num_turns INTEGER DEFAULT 0",
+        },
         "workers": {
             "reject_tags": "reject_tags TEXT NOT NULL DEFAULT '[]'",
             "admin_note": "admin_note TEXT",
@@ -893,20 +903,25 @@ class Database:
             with self._lock:
                 self._conn.execute(
                     """INSERT INTO ai_usage
-                       (exec_id, job_id, step, provider, model,
-                        input_tokens, output_tokens, cost_usd,
-                        duration_sec, cached, created_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                       (exec_id, job_id, step, worker_id, provider, model,
+                        input_tokens, output_tokens,
+                        cache_creation_input_tokens, cache_read_input_tokens,
+                        cost_usd, duration_sec, num_turns, cached, created_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         usage.exec_id,
                         usage.job_id,
                         usage.step,
+                        usage.worker_id,
                         usage.provider,
                         usage.model,
                         usage.input_tokens,
                         usage.output_tokens,
+                        usage.cache_creation_input_tokens,
+                        usage.cache_read_input_tokens,
                         usage.cost_usd,
                         usage.duration_sec,
+                        usage.num_turns,
                         1 if usage.cached else 0,
                         usage.created_at.isoformat(),
                     ),

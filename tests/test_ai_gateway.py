@@ -662,3 +662,99 @@ class TestClaudeCLIVision:
         p = ClaudeCLIProvider(["claude", "-p"])
         with pytest.raises(AIProviderError):
             await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}]))
+
+
+# ── ClaudeCLIProvider: --output-format json 用量解析(批1 详细 AI 统计)──
+
+class _FakeProc:
+    """假 subprocess:communicate 回固定 stdout,returncode=0。"""
+    def __init__(self, stdout: bytes, rc: int = 0):
+        self._stdout = stdout
+        self.returncode = rc
+
+    async def communicate(self, _input=None):
+        return self._stdout, b""
+
+    def kill(self):
+        pass
+
+    async def wait(self):
+        return self.returncode
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_parses_json_usage(monkeypatch):
+    """claude -p --output-format json → result/usage(含 cache token)/total_cost_usd/num_turns 全解析。"""
+    payload = {
+        "result": "你好,这是结构化笔记。",
+        "model": "claude-opus-4-8",
+        "total_cost_usd": 0.0123,
+        "num_turns": 3,
+        "usage": {
+            "input_tokens": 100, "output_tokens": 50,
+            "cache_creation_input_tokens": 200, "cache_read_input_tokens": 800,
+        },
+    }
+
+    async def fake_exec(*a, **k):
+        return _FakeProc(json.dumps(payload).encode())
+
+    monkeypatch.setattr("shared.ai_gateway.asyncio.create_subprocess_exec", fake_exec)
+    p = ClaudeCLIProvider(command_template=["claude", "-p"])
+    r = await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}]))
+
+    assert r.content == "你好,这是结构化笔记。"
+    assert r.provider == "claude-cli" and r.model == "claude-opus-4-8"
+    assert r.input_tokens == 100 and r.output_tokens == 50
+    assert r.cache_creation_input_tokens == 200
+    assert r.cache_read_input_tokens == 800
+    assert r.cost_usd == pytest.approx(0.0123)
+    assert r.num_turns == 3
+    assert r.cached is True   # cache_read>0
+    # 命中率可据此算:read/(input+read+creation)=800/1100
+    assert r.cache_read_input_tokens / (
+        r.input_tokens + r.cache_read_input_tokens + r.cache_creation_input_tokens
+    ) == pytest.approx(800 / 1100)
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_fallback_non_json(monkeypatch):
+    """旧 CLI / 非 json 输出 → 回退原始文本 + 零统计(向后兼容,不让步骤失败)。"""
+    async def fake_exec(*a, **k):
+        return _FakeProc(b"plain text answer, not json")
+
+    monkeypatch.setattr("shared.ai_gateway.asyncio.create_subprocess_exec", fake_exec)
+    p = ClaudeCLIProvider(command_template=["claude", "-p"])
+    r = await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}]))
+
+    assert r.content == "plain text answer, not json"
+    assert r.input_tokens == 0 and r.output_tokens == 0
+    assert r.cache_read_input_tokens == 0 and r.cost_usd == 0.0
+    assert r.num_turns == 0 and r.cached is False
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_usage_roundtrips_file(tmp_path, monkeypatch):
+    """provider→record_usage_to_file→collect_usage_from_file 全程保住 cache/num_turns/worker_id。"""
+    payload = {"result": "ok", "model": "claude-opus-4-8", "total_cost_usd": 0.01,
+               "num_turns": 2, "usage": {"input_tokens": 10, "output_tokens": 5,
+               "cache_creation_input_tokens": 7, "cache_read_input_tokens": 9}}
+
+    async def fake_exec(*a, **k):
+        return _FakeProc(json.dumps(payload).encode())
+
+    monkeypatch.setattr("shared.ai_gateway.asyncio.create_subprocess_exec", fake_exec)
+    p = ClaudeCLIProvider(command_template=["claude", "-p"])
+    r = await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}]))
+
+    u = AIUsage(exec_id="e1", provider=r.provider, model=r.model, job_id="j", step="11_smart",
+                worker_id="ai-abc", input_tokens=r.input_tokens, output_tokens=r.output_tokens,
+                cache_creation_input_tokens=r.cache_creation_input_tokens,
+                cache_read_input_tokens=r.cache_read_input_tokens, cost_usd=r.cost_usd,
+                duration_sec=r.duration_sec, num_turns=r.num_turns, cached=r.cached)
+    record_usage_to_file(u, tmp_path)
+    back = collect_usage_from_file(tmp_path, "11_smart")
+    assert len(back) == 1
+    b = back[0]
+    assert b.worker_id == "ai-abc" and b.num_turns == 2
+    assert b.cache_creation_input_tokens == 7 and b.cache_read_input_tokens == 9

@@ -230,9 +230,12 @@ class GatewayTransport:
             {
                 "exec_id": usage.exec_id, "provider": usage.provider,
                 "model": usage.model, "job_id": usage.job_id, "step": usage.step,
+                "worker_id": usage.worker_id,
                 "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens,
+                "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+                "cache_read_input_tokens": usage.cache_read_input_tokens,
                 "cost_usd": usage.cost_usd, "duration_sec": usage.duration_sec,
-                "cached": usage.cached,
+                "num_turns": usage.num_turns, "cached": usage.cached,
             },
             op="record_ai_usage", job_id=usage.job_id, step=usage.step,
         )

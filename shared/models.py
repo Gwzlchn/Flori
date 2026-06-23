@@ -126,10 +126,14 @@ class AIUsage:
     model: str
     job_id: str | None = None
     step: str | None = None
+    worker_id: str | None = None      # 哪个 worker 执行(AI 用量归因到节点)
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_creation_input_tokens: int = 0   # 写缓存 token
+    cache_read_input_tokens: int = 0       # 读缓存 token;命中率=read/(input+read+creation)
     cost_usd: float = 0.0
     duration_sec: float = 0.0
+    num_turns: int = 0                # claude -p agentic 轮数
     cached: bool = False
     created_at: datetime = field(default_factory=_utcnow)
 
@@ -158,8 +162,11 @@ class LLMResponse:
     provider: str
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
     cost_usd: float = 0.0
     duration_sec: float = 0.0
+    num_turns: int = 0
     cached: bool = False
 
 

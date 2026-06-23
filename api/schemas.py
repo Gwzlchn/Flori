@@ -268,8 +268,12 @@ class RunnerUsageRequest(BaseModel):
     model: str
     job_id: str | None = None
     step: str | None = None
+    worker_id: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
     cost_usd: float = 0.0
     duration_sec: float = 0.0
+    num_turns: int = 0
     cached: bool = False

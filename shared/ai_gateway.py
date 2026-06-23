@@ -107,15 +107,19 @@ class AnthropicProvider:
             if getattr(b, "type", "text") == "text"
         )
 
+        cc = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+        cr = getattr(response.usage, "cache_read_input_tokens", 0) or 0
         return LLMResponse(
             content=content,
             model=request.model,
             provider="anthropic",
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            cache_creation_input_tokens=cc,
+            cache_read_input_tokens=cr,
             cost_usd=calc_cost("anthropic", request.model, input_tokens, output_tokens),
             duration_sec=round(duration, 2),
-            cached=getattr(response.usage, "cache_read_input_tokens", 0) > 0,
+            cached=cr > 0,
         )
 
     # Anthropic 支持的图片 media subtype(后缀大小写归一;其余后缀显式报错,避免发出非法 media_type 被 API 拒)。
@@ -241,6 +245,9 @@ class ClaudeCLIProvider:
 
         # 命令模板里的 {prompt_file} 占位已弃用——prompt 改走 stdin(无 ARG_MAX 限制、不依赖文件读)。
         cmd = [part for part in self._command_template if "{prompt_file}" not in part]
+        # 结构化输出:拿真实 usage(in/out/cache token)+ total_cost_usd + num_turns,而非订阅路径丢统计。
+        if "--output-format" not in cmd:
+            cmd += ["--output-format", "json"]
         if request.allowed_tools:
             # 取证等联网步骤:放开指定工具(如 WebSearch + Bash),让 claude agentic 搜+抓+抽。
             # 与 images 分支互斥(取证不喂帧图);max_turns 给足(多轮:搜索→直连curl→抽取)。
@@ -298,12 +305,39 @@ class ClaudeCLIProvider:
                 raise AIRateLimitError(f"CLI rate-limited: {detail}")
             raise AIProviderError(f"CLI failed: {detail}")
 
+        raw = stdout.decode().strip()
+        # 解析 --output-format json:result(正文)+ usage(in/out/cache)+ total_cost_usd + num_turns。
+        # 解析失败(旧 CLI / 非 json 输出)回退原始文本 + 零统计(向后兼容,不让步骤失败)。
+        content, in_tok, out_tok = raw, 0, 0
+        cc = cr = turns = 0
+        cost = 0.0
+        model = "subscription"
+        try:
+            obj = json.loads(raw)
+            if isinstance(obj, dict):
+                content = obj.get("result", raw) or raw
+                u = obj.get("usage") or {}
+                in_tok = int(u.get("input_tokens", 0) or 0)
+                out_tok = int(u.get("output_tokens", 0) or 0)
+                cc = int(u.get("cache_creation_input_tokens", 0) or 0)
+                cr = int(u.get("cache_read_input_tokens", 0) or 0)
+                cost = float(obj.get("total_cost_usd", 0.0) or 0.0)
+                turns = int(obj.get("num_turns", 0) or 0)
+                model = obj.get("model") or "subscription"
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
         return LLMResponse(
-            content=stdout.decode().strip(),
-            model="subscription",
+            content=content,
+            model=model,
             provider="claude-cli",
-            cost_usd=0.0,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cache_creation_input_tokens=cc,
+            cache_read_input_tokens=cr,
+            cost_usd=round(cost, 6),
             duration_sec=round(duration, 2),
+            num_turns=turns,
+            cached=cr > 0,
         )
 
 
@@ -418,10 +452,14 @@ def record_usage_to_file(usage: AIUsage, log_dir: Path) -> None:
         "model": usage.model,
         "job_id": usage.job_id,
         "step": usage.step,
+        "worker_id": usage.worker_id,
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
+        "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+        "cache_read_input_tokens": usage.cache_read_input_tokens,
         "cost_usd": usage.cost_usd,
         "duration_sec": usage.duration_sec,
+        "num_turns": usage.num_turns,
         "cached": usage.cached,
         "created_at": usage.created_at.isoformat(),
     })
@@ -441,10 +479,14 @@ def collect_usage_from_file(log_dir: Path, step: str) -> list[AIUsage]:
             model=e["model"],
             job_id=e.get("job_id"),
             step=e.get("step"),
+            worker_id=e.get("worker_id"),
             input_tokens=e.get("input_tokens", 0),
             output_tokens=e.get("output_tokens", 0),
+            cache_creation_input_tokens=e.get("cache_creation_input_tokens", 0),
+            cache_read_input_tokens=e.get("cache_read_input_tokens", 0),
             cost_usd=e.get("cost_usd", 0.0),
             duration_sec=e.get("duration_sec", 0.0),
+            num_turns=e.get("num_turns", 0),
             cached=e.get("cached", False),
             created_at=datetime.fromisoformat(e["created_at"]),
         )

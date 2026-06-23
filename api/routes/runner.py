@@ -363,10 +363,14 @@ async def record_usage(
         model=req.model,
         job_id=req.job_id,
         step=req.step,
+        worker_id=worker_id,   # 以鉴权 token 认定的 worker 为准(权威),忽略 body 自报
         input_tokens=req.input_tokens,
         output_tokens=req.output_tokens,
+        cache_creation_input_tokens=req.cache_creation_input_tokens,
+        cache_read_input_tokens=req.cache_read_input_tokens,
         cost_usd=req.cost_usd,
         duration_sec=req.duration_sec,
+        num_turns=req.num_turns,
         cached=req.cached,
     )
     await asyncio.to_thread(db.record_ai_usage, usage)

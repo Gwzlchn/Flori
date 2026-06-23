@@ -448,6 +448,7 @@ class Worker:
         try:
             usages = collect_usage_from_file(work_dir / "logs", step)
             for usage in usages:
+                usage.worker_id = self.worker_id   # 归因到执行节点(直连路径;网关路径 api 据 token 再认定)
                 await self.transport.record_ai_usage(usage)
         except Exception:
             logger.warning(
