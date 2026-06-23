@@ -387,6 +387,28 @@ class TestAutoDiscoverTags:
                     assert "vision" not in tags
                     assert "gpu" not in tags
 
+    def test_claude_binary_present_but_not_authed(self):
+        # 镜像自带 claude 二进制但无凭证(纯 gateway worker)→ 不该标 vision/claude-cli
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OLLAMA_URL")}
+        with patch.dict(os.environ, env, clear=True):
+            with patch("shutil.which", return_value="/usr/bin/claude"):
+                with patch("worker.worker._claude_logged_in", return_value=False):
+                    tags = auto_discover_tags()
+                    assert "vision" not in tags
+                    assert "claude-cli" not in tags
+
+    def test_claude_logged_in_adds_vision_and_cli(self):
+        # claude 订阅已登录(~/.claude/.credentials.json 在)→ 标 vision + claude-cli
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OLLAMA_URL")}
+        with patch.dict(os.environ, env, clear=True):
+            with patch("shutil.which", return_value="/usr/bin/claude"):
+                with patch("worker.worker._claude_logged_in", return_value=True):
+                    tags = auto_discover_tags()
+                    assert "vision" in tags
+                    assert "claude-cli" in tags
+
 
 class TestWorkerPools:
     def test_default_pools(self):

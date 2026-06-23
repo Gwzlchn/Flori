@@ -77,12 +77,28 @@ def _resolve_worker_id(worker_type: str) -> str:
     return worker_id
 
 
+def _claude_logged_in() -> bool:
+    """claude-cli 是否【真有可用凭证】(订阅登录态)。token 落在 $HOME/.claude/.credentials.json
+    (claude-cli 用 refreshToken 自动续期就地回写)。仅判二进制在不在会误标,见 auto_discover_tags。"""
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    cred = Path(home) / ".claude" / ".credentials.json"
+    try:
+        return cred.is_file() and cred.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def auto_discover_tags() -> set[str]:
     tags = set()
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    has_anthropic_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    # claude-cli/vision 须【真能用】才标,而非"镜像里有 claude 二进制就标":否则纯 gateway worker
+    # (镜像自带 claude 但无凭证)会误标,一旦作 ai worker 就会认领 11_smart/取证/评审再因无登录失败。
+    # 判据:二进制在 且 (订阅已登录 或 有 ANTHROPIC_API_KEY)。
+    claude_ready = bool(shutil.which("claude")) and (has_anthropic_key or _claude_logged_in())
+    if has_anthropic_key or claude_ready:
         tags.add("vision")
-    if shutil.which("claude"):
-        tags.update(["vision", "claude-cli"])
+    if claude_ready:
+        tags.add("claude-cli")
     if os.environ.get("DEEPSEEK_API_KEY"):
         tags.add("text-only")
     from steps.utils.device import has_nvidia_gpu
