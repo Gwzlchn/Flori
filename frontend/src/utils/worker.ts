@@ -12,6 +12,16 @@ export function workerDotClass(status: string | null | undefined): string {
   }
 }
 
+// 组件四态 → dot 颜色(系统组件卡;复用既有点色,无新颜色)。
+export function componentDotClass(status: string | null | undefined): string {
+  switch (status) {
+    case 'up': return 'd-ok'
+    case 'degraded': return 'd-warn'
+    case 'down': return 'd-bad'
+    default: return 'd-mut'   // unknown / 缺失
+  }
+}
+
 // 算力描述:GPU 名(+显存)优先;否则 AI 给完整文案、其余类型给大写类型名(列表里仍可辨类型)。
 export function workerComputeDesc(
   w: { gpu_name?: string | null; gpu_memory_mb?: number | null; type: string },

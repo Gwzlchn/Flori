@@ -17,6 +17,15 @@ def mock_redis():
     r.get_queue_info = AsyncMock(return_value={"length": 0})
     r.get_all_pool_limit_overrides = AsyncMock(return_value={})
     r.publish = AsyncMock()
+    # 组件探测(build_full_status):scheduler 心跳缺失→unknown;redis server_info 给一份;events 空。
+    r.get_component_heartbeat = AsyncMock(return_value=None)
+    r.server_info = AsyncMock(return_value={
+        "version": "7.2.4", "ping_ms": 1.0, "used_memory_human": "1.0M",
+        "used_memory_mb": 1.0, "maxmemory_mb": 0.0, "uptime_sec": 100,
+        "connected_clients": 1,
+    })
+    r.r = MagicMock()
+    r.r.lrange = AsyncMock(return_value=[])
     return r
 
 
@@ -76,6 +85,83 @@ class TestStatus:
         assert data["pools"] and all(                      # 每个池 used/queue 归零
             p["used"] == 0 and p["queue"] == 0 for p in data["pools"].values())
         assert "available_gb" in data["disk"]
+        # 批3 新增:disk 补 total_gb/used_pct、version、throughput_1h。
+        assert "total_gb" in data["disk"] and "used_pct" in data["disk"]
+        assert "version" in data
+        assert data["throughput_1h"] == {"done": 0, "failed": 0}
+
+    @pytest.mark.asyncio
+    async def test_status_components_ordered(self, client):
+        """components 为有序数组,顺序固定 api→scheduler→redis→minio。"""
+        data = (await client.get("/api/status")).json()
+        comps = data["components"]
+        assert [c["kind"] for c in comps] == ["api", "scheduler", "redis", "minio"]
+        api = next(c for c in comps if c["kind"] == "api")
+        assert api["status"] == "up"   # API 能响应即 up
+        sched = next(c for c in comps if c["kind"] == "scheduler")
+        assert sched["status"] == "unknown"   # 无心跳 → unknown(不误报挂)
+        redis_c = next(c for c in comps if c["kind"] == "redis")
+        assert redis_c["status"] == "up" and redis_c["version"] == "7.2.4"
+        minio_c = next(c for c in comps if c["kind"] == "minio")
+        # 测试 storage=LocalStorage(create_storage 无 MINIO_URL)→ mode=local/unknown,不标红。
+        assert minio_c["status"] == "unknown" and minio_c["extra"]["mode"] == "local"
+
+    @pytest.mark.asyncio
+    async def test_status_redis_probe_timeout_never_500(self, client, mock_redis):
+        """redis server_info 抛异常 → redis 组件 unknown + detail,/api/status 不 500。"""
+        from unittest.mock import AsyncMock as _AM
+        mock_redis.server_info = _AM(side_effect=Exception("conn refused"))
+        resp = await client.get("/api/status")
+        assert resp.status_code == 200
+        redis_c = next(c for c in resp.json()["components"] if c["kind"] == "redis")
+        assert redis_c["status"] == "unknown"
+        assert redis_c["detail"] and "conn refused" in redis_c["detail"]
+
+
+class TestUsageAggregate:
+    @pytest.mark.asyncio
+    async def test_usage_empty(self, client):
+        data = (await client.get("/api/usage")).json()
+        assert data["calls"] == 0 and data["total_cost_usd"] == 0
+        assert data["cache_hit_rate_pct"] == 0.0 and data["by_model"] == []
+
+    @pytest.mark.asyncio
+    async def test_usage_aggregate_hit_rate_by_model(self, client, db):
+        from datetime import datetime, timezone
+        from shared.models import AIUsage
+        db.record_ai_usage(AIUsage(
+            exec_id="e1", job_id="j1", step="s", worker_id="w1",
+            provider="anthropic", model="claude-x",
+            input_tokens=100, output_tokens=50,
+            cache_creation_input_tokens=20, cache_read_input_tokens=80,
+            cost_usd=0.5, duration_sec=2.0, num_turns=3, cached=True,
+            created_at=datetime.now(timezone.utc),
+        ))
+        data = (await client.get("/api/usage")).json()
+        assert data["calls"] == 1
+        assert data["total_cache_read_tokens"] == 80
+        # 命中率 = 80/(100+20+80) = 40%
+        assert data["cache_hit_rate_pct"] == 40.0
+        assert len(data["by_model"]) == 1
+        assert data["by_model"][0]["model"] == "claude-x"
+
+
+class TestEvents:
+    @pytest.mark.asyncio
+    async def test_events_empty(self, client):
+        data = (await client.get("/api/events")).json()
+        assert data == {"events": []}
+
+    @pytest.mark.asyncio
+    async def test_events_reads_redis_list(self, client, mock_redis):
+        from unittest.mock import AsyncMock as _AM
+        mock_redis.r.lrange = _AM(return_value=[
+            '{"ts": 1.0, "kind": "no_worker", "job_id": "j1"}',
+            'not-json',  # 坏行跳过,不报错
+        ])
+        data = (await client.get("/api/events?limit=10")).json()
+        assert len(data["events"]) == 1
+        assert data["events"][0]["kind"] == "no_worker"
 
 
 class TestPoolsConfig:

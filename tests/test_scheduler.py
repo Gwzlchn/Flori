@@ -1798,3 +1798,60 @@ class TestOrphanClaimMismatch:
         s._reclaim_step = fake_reclaim
         await s.orphan_scan()  # 首次只记时,不回收
         assert calls == []
+
+
+class TestSchedulerHeartbeat:
+    @pytest.mark.asyncio
+    async def test_heartbeat_loop_writes_component(self, scheduler, redis):
+        # 起一拍心跳即取消:验 component:scheduler 写入 version/started_at/loop_*/pid。
+        scheduler._last_loop_lag = 1.5
+        task = asyncio.create_task(scheduler._heartbeat_loop())
+        # 轮询等首拍写入(避免赌固定 sleep)。
+        for _ in range(40):
+            hb = await redis.get_component_heartbeat("scheduler")
+            if hb:
+                break
+            await asyncio.sleep(0.02)
+        scheduler._shutdown = True
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        assert hb is not None
+        assert hb["loop_lag_sec"] == "1.5"
+        assert hb["loop_interval_sec"] == "30"
+        assert "started_at" in hb and "pid" in hb and "ts" in hb
+
+    @pytest.mark.asyncio
+    async def test_periodic_loop_measures_loop_lag(self, scheduler, monkeypatch):
+        # 用受控 monotonic 模拟两拍间隔 35s(期望 30s)→ loop_lag=5s;sleep no-op,首拍后 shutdown。
+        import scheduler.scheduler as sched_mod
+        ticks = iter([100.0, 135.0])
+
+        def fake_mono():
+            try:
+                return next(ticks)
+            except StopIteration:
+                return 135.0
+        monkeypatch.setattr(sched_mod.time, "monotonic", fake_mono)
+
+        calls = {"n": 0}
+
+        async def fake_sleep(_):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                scheduler._shutdown = True
+        monkeypatch.setattr(sched_mod.asyncio, "sleep", fake_sleep)
+
+        # orphan_scan 等设成 no-op,只测 loop_lag 计算。
+        async def noop():
+            return None
+        scheduler.orphan_scan = noop
+        scheduler.check_stuck = noop
+        scheduler.check_no_worker = noop
+        scheduler.cleanup_stale_workers = noop
+
+        await scheduler._periodic_loop()
+        # 第一拍 _last_tick=100;第二拍 now=135,lag = (135-100)-30 = 5。
+        assert scheduler._last_loop_lag == 5.0

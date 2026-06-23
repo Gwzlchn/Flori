@@ -154,6 +154,24 @@ class TestHeartbeat:
         assert resp.json() == {"ok": True}
 
     @pytest.mark.asyncio
+    async def test_heartbeat_writes_live_load(self, client, redis_mock):
+        # B 档:心跳带 load → 经网关写 redis worker hash 的 load 字段(JSON)。
+        import json as _json
+        worker_id, token = await self._register_worker(client)
+        resp = await client.post(
+            "/api/runner/heartbeat",
+            json={"worker_id": worker_id, "status": "idle",
+                  "load": {"cpu_pct": 30.0, "mem_pct": 55.0, "loadavg": 1.2}},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
+        # 找到那次写 load 字段的调用。
+        load_calls = [c for c in redis_mock.set_worker_field.call_args_list
+                      if c.args[1] == "load"]
+        assert load_calls, "load 未写入 redis worker hash"
+        assert _json.loads(load_calls[-1].args[2])["cpu_pct"] == 30.0
+
+    @pytest.mark.asyncio
     async def test_worker_id_mismatch_403(self, client):
         _, token = await self._register_worker(client)
         resp = await client.post(

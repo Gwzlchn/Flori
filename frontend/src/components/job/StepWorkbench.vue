@@ -4,8 +4,8 @@ import { useApi } from '../../composables/useApi'
 import MarkdownViewer from '../notes/MarkdownViewer.vue'
 import { fmtDateTime, fmtDuration } from '../../utils/datetime'
 import { statusLabel } from '../../utils/status'
-import type { StepInfo } from '../../types'
-import { Check, X, Minus, Loader, Clock, ChevronRight, FileText, Braces, Package } from 'lucide-vue-next'
+import type { StepInfo, StepUsage } from '../../types'
+import { Check, X, Minus, Loader, Clock, ChevronRight, FileText, Braces, Package, Coins } from 'lucide-vue-next'
 
 const props = defineProps<{ jobId: string; steps: StepInfo[] }>()
 const api = useApi()
@@ -93,6 +93,18 @@ async function loadGroups() {
   } catch { groups.value = [] }
 }
 
+// 逐次 AI 调用明细(按步聚合;一个步可能多次调用 → 取该步全部行)。
+const usage = ref<StepUsage[]>([])
+async function loadUsage() {
+  try {
+    const r = await api.get<{ usage: StepUsage[] }>(`/api/jobs/${props.jobId}/usage`)
+    usage.value = r.usage || []
+  } catch { usage.value = [] }
+}
+const selUsage = computed(() => usage.value.filter(u => u.step === sel.value))
+const fmtCost = (v: number) => `$${(v ?? 0).toFixed(4)}`
+const costSuffix = (provider: string) => (provider === 'claude-cli' ? '（等价）' : '')
+
 function pickDefault() {
   const s = props.steps
   if (!s.length) return
@@ -134,7 +146,7 @@ async function toggleLog() {
   }
 }
 
-onMounted(async () => { await loadGroups(); pickDefault() })
+onMounted(async () => { await Promise.all([loadGroups(), loadUsage()]); pickDefault() })
 // steps 可能在 detail 加载后才到;若还没选中则补选默认。
 watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pickDefault() })
 </script>
@@ -209,6 +221,28 @@ watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pick
             <span v-for="r in metaRows(selStep)" :key="r.k" class="text-xs bg-gray-50 border border-gray-100 rounded px-2 py-1 text-gray-600">
               {{ r.k }}：<span class="text-gray-800 font-medium">{{ r.v }}</span>
             </span>
+          </div>
+
+          <!-- AI 用量(本步 AI 调用:token/缓存/命中率/成本/轮数/worker;claude-cli 成本标「等价」) -->
+          <div v-if="selUsage.length" class="mt-3 pt-3 border-t border-gray-100">
+            <div class="text-xs font-semibold text-gray-700 flex items-center gap-1.5 mb-2"><Coins :size="13" class="text-gray-500" />AI 用量</div>
+            <div v-for="(u, i) in selUsage" :key="i" class="text-xs text-gray-600 bg-gray-50 border border-gray-100 rounded p-2 mb-1.5">
+              <div class="flex items-center gap-2 flex-wrap mb-1">
+                <span class="font-mono text-gray-800">{{ u.model }}</span>
+                <span class="text-gray-400">{{ u.provider }}</span>
+                <span class="ml-auto text-gray-800 font-medium">{{ fmtCost(u.cost_usd) }}<span class="text-gray-400">{{ costSuffix(u.provider) }}</span></span>
+              </div>
+              <div class="flex flex-wrap gap-x-3 gap-y-0.5 text-gray-500">
+                <span>入 {{ u.input_tokens.toLocaleString() }}</span>
+                <span>出 {{ u.output_tokens.toLocaleString() }}</span>
+                <span>读缓存 {{ u.cache_read_tokens.toLocaleString() }}</span>
+                <span>写缓存 {{ u.cache_creation_tokens.toLocaleString() }}</span>
+                <span>命中 {{ u.cache_hit_rate_pct }}%</span>
+                <span v-if="u.num_turns">轮数 {{ u.num_turns }}</span>
+                <span v-if="u.duration_sec">耗时 {{ fmtDuration(u.duration_sec, { decimalSeconds: true }) }}</span>
+                <span v-if="u.worker_id">worker <span class="font-mono">{{ u.worker_id }}</span></span>
+              </div>
+            </div>
           </div>
 
           <!-- ════ 产物(本步产出的文件)════ -->

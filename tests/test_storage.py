@@ -403,3 +403,39 @@ class TestGatewayStorageReuse(_GatewayStorageHelpers):
         monkeypatch.setenv("MINIO_URL", "minio:9000")
         s = create_storage(tmp_path)
         assert isinstance(s, RemoteStorage)
+
+
+class TestStorageHealth:
+    @pytest.mark.asyncio
+    async def test_local_health_is_local_mode(self, tmp_path):
+        h = await LocalStorage(tmp_path).health()
+        assert h["mode"] == "local" and h["status"] == "unknown"
+        assert h["bucket"] is None
+
+    @pytest.mark.asyncio
+    async def test_remote_health_bucket_exists_up(self, tmp_path):
+        rs = RemoteStorage("h:9000", "k", "s", "flori", False, tmp_root=tmp_path)
+        client = MagicMock()
+        client.bucket_exists.return_value = True
+        rs._client = lambda: client
+        h = await rs.health()
+        assert h["status"] == "up" and h["mode"] == "remote"
+        assert h["bucket"] == "flori" and h["bucket_exists"] is True
+        assert isinstance(h["probe_ms"], float)
+        client.bucket_exists.assert_called_once_with("flori")
+
+    @pytest.mark.asyncio
+    async def test_remote_health_missing_bucket_degraded(self, tmp_path):
+        rs = RemoteStorage("h:9000", "k", "s", "flori", False, tmp_root=tmp_path)
+        client = MagicMock()
+        client.bucket_exists.return_value = False
+        rs._client = lambda: client
+        h = await rs.health()
+        assert h["status"] == "degraded" and h["bucket_exists"] is False
+        assert "flori" in h["detail"]
+
+    @pytest.mark.asyncio
+    async def test_gateway_health_stub(self, tmp_path):
+        gw = GatewayStorage("https://gw", lambda: "tok", tmp_path)
+        h = await gw.health()
+        assert h["mode"] == "gateway" and h["status"] == "unknown"

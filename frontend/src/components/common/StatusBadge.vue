@@ -12,6 +12,8 @@ const COLOR: Record<string, string> = {
   waiting: 'b-mut', ready: 'b-mut', running: 'b-run', skipped: 'b-mut',
   idle: 'b-ok', busy: 'b-info',
   'online-idle': 'b-ok', 'online-busy': 'b-info', paused: 'b-warn', offline: 'b-mut', stale: 'b-bad',
+  // 系统组件四态 → 复用既有徽章色(无新颜色)
+  up: 'b-ok', degraded: 'b-warn', down: 'b-bad', unknown: 'b-mut',
   suggested: 'b-warn', accepted: 'b-ok',
 }
 

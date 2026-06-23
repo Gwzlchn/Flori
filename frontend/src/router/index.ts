@@ -19,7 +19,7 @@ const router = createRouter({
     { path: '/search', name: 'search', component: () => import('../views/SearchView.vue') },
     { path: '/glossary', name: 'glossary', component: () => import('../views/GlossaryView.vue') },
 
-    { path: '/system', name: 'system', component: () => import('../views/WorkersView.vue') },
+    { path: '/system', name: 'system', component: () => import('../views/SystemView.vue') },
     { path: '/system/workers/:id', name: 'worker-detail', component: () => import('../views/WorkerDetailView.vue') },
 
     { path: '/settings', name: 'settings', component: () => import('../views/SettingsView.vue') },

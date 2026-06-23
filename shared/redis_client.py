@@ -380,6 +380,42 @@ class RedisClient:
         会在下次扫描又冒出来，必须连 Redis key 一起清。"""
         await self.r.delete(f"worker:{worker_id}")
 
+    # ── 组件心跳(scheduler 等无 DB 行的服务,与 worker:{id} 模式一致)──
+    # 键 component:{name},TTL=900(=stale_window):超窗 key 自动消失 → API 读不到 → down
+    # (而非永久 degraded)。scheduler 每 10s 续约,容忍丢 2 拍仍 up。
+    COMPONENT_TTL = 900
+
+    async def set_component_heartbeat(self, name: str, fields: dict) -> None:
+        key = f"component:{name}"
+        payload = {**fields, "ts": datetime.now(timezone.utc).isoformat()}
+        await self.r.hset(key, mapping={k: str(v) for k, v in payload.items()})
+        await self.r.expire(key, self.COMPONENT_TTL)
+
+    async def get_component_heartbeat(self, name: str) -> dict | None:
+        data = await self.r.hgetall(f"component:{name}")
+        return data or None
+
+    async def server_info(self) -> dict:
+        """Redis 探活 + INFO 采集(供 /api/status 的 redis 组件)。ping 计时 + version/内存/连接数。
+        调用方包 asyncio.wait_for 超时;异常透传由调用方转 down。"""
+        t0 = time.perf_counter()
+        await self.r.ping()
+        ping_ms = round((time.perf_counter() - t0) * 1000, 1)
+        info = await self.r.info("server")
+        mem = await self.r.info("memory")
+        cli = await self.r.info("clients")
+        used = int(mem.get("used_memory", 0) or 0)
+        maxmem = int(mem.get("maxmemory", 0) or 0)
+        return {
+            "version": info.get("redis_version"),
+            "ping_ms": ping_ms,
+            "used_memory_human": mem.get("used_memory_human"),
+            "used_memory_mb": round(used / 1048576, 1),
+            "maxmemory_mb": round(maxmem / 1048576, 1),
+            "uptime_sec": info.get("uptime_in_seconds"),
+            "connected_clients": int(cli.get("connected_clients", 0) or 0),
+        }
+
     # ── 接入 token（homelab 可复用 + 可重置）──
 
     # 不放 worker: 命名空间:否则 list_worker_ids 的 worker:* 扫描会把它当成 worker,

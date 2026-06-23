@@ -69,6 +69,7 @@ class RunnerHeartbeatRequest(BaseModel):
     status: str = "idle"
     current_job: str = ""
     current_step: str = ""
+    load: dict = Field(default_factory=dict)   # 本机 live 负载 {cpu_pct,mem_pct,loadavg};可空
 
 
 class RunnerOfflineRequest(BaseModel):
@@ -170,6 +171,9 @@ async def heartbeat(
     if req.worker_id != worker_id:
         raise HTTPException(status_code=403, detail="token/worker_id mismatch")
     await redis.heartbeat(worker_id, ttl=_worker_ttl(config))
+    # live 负载落 redis worker hash(实时态,不进 DB);为空则不写,保留上次。
+    if req.load:
+        await redis.set_worker_field(worker_id, "load", json.dumps(req.load))
     await asyncio.to_thread(
         db.update_worker_heartbeat,
         worker_id,

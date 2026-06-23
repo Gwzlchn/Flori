@@ -22,6 +22,7 @@ from shared.redis_client import RedisClient
 from shared.runner_ops import parse_style_tags
 from shared.source_detect import detect_source
 from shared.storage import StorageBackend
+from shared.version import FLORI_VERSION
 
 logger = structlog.get_logger(component="scheduler")
 
@@ -91,6 +92,11 @@ class Scheduler:
         self._shutdown = False
         self._pubsub_task: asyncio.Task | None = None
         self._periodic_task: asyncio.Task | None = None
+        self._heartbeat_task: asyncio.Task | None = None
+        # 心跳 payload 源:启动时刻(算 uptime)+ 上一拍 periodic 循环的实测延迟(loop_lag)。
+        self._started_at_iso = datetime.now(timezone.utc).isoformat()
+        self._last_tick: float | None = None       # 上一拍 periodic 循环的 monotonic 时刻
+        self._last_loop_lag: float = 0.0            # 实测间隔 - 期望(30s)的超出量,≥5s 叠加 degraded
         # 跟踪所有 _delayed_enqueue fire-and-forget 任务，供 shutdown / rerun /
         # job 失败时取消，避免泄漏或旧重试与新状态串台。
         self._delayed_tasks: set[asyncio.Task] = set()
@@ -104,14 +110,17 @@ class Scheduler:
 
     async def run(self) -> None:
         logger.info("scheduler_start")
+        self._started_at_iso = datetime.now(timezone.utc).isoformat()
         await self._publish_resource_limits()
         await self._recover()
         self._pubsub_task = asyncio.create_task(self._event_loop())
         self._periodic_task = asyncio.create_task(self._periodic_loop())
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         try:
             await asyncio.gather(
                 self._pubsub_task,
                 self._periodic_task,
+                self._heartbeat_task,
             )
         except asyncio.CancelledError:
             logger.info("scheduler_cancelled")
@@ -128,6 +137,8 @@ class Scheduler:
             self._pubsub_task.cancel()
         if self._periodic_task and not self._periodic_task.done():
             self._periodic_task.cancel()
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
         pending = [t for t in self._delayed_tasks if not t.done()]
         for t in pending:
             t.cancel()
@@ -228,8 +239,18 @@ class Scheduler:
             await self.redis.cleanup_job(job_id)
             logger.info("job_deleted_cleanup", job_id=job_id)
 
+    _PERIODIC_INTERVAL_SEC = 30
+
     async def _periodic_loop(self) -> None:
         while not self._shutdown:
+            # 实测本拍与上一拍的间隔,超出期望(30s)的部分=loop_lag(循环被拖慢的信号);
+            # 心跳把它带给 /api/status 的 scheduler 组件(>5s 叠加 degraded)。
+            now = time.monotonic()
+            if self._last_tick is not None:
+                self._last_loop_lag = max(
+                    0.0, (now - self._last_tick) - self._PERIODIC_INTERVAL_SEC,
+                )
+            self._last_tick = now
             try:
                 await self.orphan_scan()
                 await self.check_stuck()
@@ -237,7 +258,25 @@ class Scheduler:
                 await self.cleanup_stale_workers()
             except Exception:
                 logger.exception("periodic_error")
-            await asyncio.sleep(30)
+            await asyncio.sleep(self._PERIODIC_INTERVAL_SEC)
+
+    async def _heartbeat_loop(self) -> None:
+        """每 ~10s 写 component:scheduler 心跳(<online_window/3,容忍丢 2 拍仍 up)。
+        瞬态 redis 抖动不杀 worker:记日志后续跑,下一拍重写;丢几拍由 stale 窗口容忍。"""
+        while not self._shutdown:
+            try:
+                await self.redis.set_component_heartbeat("scheduler", {
+                    "version": FLORI_VERSION,
+                    "started_at": self._started_at_iso,
+                    "loop_lag_sec": round(self._last_loop_lag, 2),
+                    "loop_interval_sec": self._PERIODIC_INTERVAL_SEC,
+                    "pid": os.getpid(),
+                })
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("heartbeat_failed", exc_info=True)
+            await asyncio.sleep(10)
 
     async def cleanup_stale_workers(self, timeout_sec: int | None = None) -> None:
         """清理僵尸 worker：DB 中 last_heartbeat 超时且 Redis 注册已过期（worker 真没了）

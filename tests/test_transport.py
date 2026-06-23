@@ -438,7 +438,7 @@ class TestGatewayHeartbeat:
 
         await gw.heartbeat("w1")
 
-        inner_hb.assert_awaited_once_with("w1")
+        inner_hb.assert_awaited_once_with("w1", load=None)
 
     @pytest.mark.asyncio
     async def test_httpx_error_falls_back_to_inner(
@@ -453,7 +453,7 @@ class TestGatewayHeartbeat:
 
         await gw.heartbeat("w1")
 
-        inner_hb.assert_awaited_once_with("w1")
+        inner_hb.assert_awaited_once_with("w1", load=None)
 
     @pytest.mark.asyncio
     async def test_posts_worker_id_and_current_status(

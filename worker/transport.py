@@ -33,7 +33,7 @@ class WorkerTransport(Protocol):
         concurrency: int = 1, spec: dict | None = None,
     ) -> str: ...
 
-    async def heartbeat(self, worker_id: str) -> None: ...
+    async def heartbeat(self, worker_id: str, load: dict | None = None) -> None: ...
 
     async def update_status(
         self, worker_id: str, status: str,
@@ -142,8 +142,12 @@ class RedisTransport:
         await asyncio.to_thread(self._db.upsert_worker, worker_model)
         return worker_id
 
-    async def heartbeat(self, worker_id):
+    async def heartbeat(self, worker_id, load=None):
         await self._redis.heartbeat(worker_id)
+        # live 负载落 redis worker hash 的 load 字段(JSON);/api/workers 读出透传到 WorkerResponse.load。
+        # 仅 redis(实时态,不进 DB);采集为空则不写,保留上次。
+        if load:
+            await self._redis.set_worker_field(worker_id, "load", json.dumps(load))
         await asyncio.to_thread(self._db.update_worker_heartbeat, worker_id)
 
     async def update_status(self, worker_id, status,

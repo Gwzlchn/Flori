@@ -259,8 +259,28 @@ GET /api/jobs/{id}/notes/transcript     → text/markdown (逐字稿)
 
 #### GET /api/status
 
+返回全量系统状态：`version` + 有序 `components`（系统健康总览页 §2）+ live 四段（`workers`/`pools`/`jobs`/`disk`）+ `throughput_1h`。逐组件探测各自 try+超时（redis 2s / minio 3s）：单项异常 → 该组件 `status="unknown"`（采集失败≠挂）或 `down`（连接拒绝/超时），其余照常返回，**绝不整体 500**。`components` 是**有序数组**（顺序固定 `api→scheduler→redis→minio`，前端按 `name` 作 key），便于追加新组件不破坏类型。`components.detail` 不暴露密钥/连接串。
+
 ```json
 {
+  "version": "a1b2c3d",
+  "//version": "FLORI_VERSION（构建期注入 git short sha）；未注入=\"dev\"。顶层 version = components[kind=api].version 的冗余",
+  "components": [
+    {"name": "api", "kind": "api", "status": "up", "version": "a1b2c3d",
+     "last_heartbeat": "2026-06-24T07:21:55+00:00", "uptime_sec": 273840, "detail": null,
+     "extra": {"rss_mb": 128.4}},
+    {"name": "scheduler", "kind": "scheduler", "status": "up", "version": "a1b2c3d",
+     "last_heartbeat": "2026-06-24T07:21:54+00:00", "uptime_sec": 18290, "detail": null,
+     "extra": {"loop_lag_sec": 0.8, "loop_interval_sec": 30, "pid": 7}},
+    {"name": "redis", "kind": "redis", "status": "up", "version": "7.2.4",
+     "last_heartbeat": "2026-06-24T07:21:55+00:00", "uptime_sec": 932011, "detail": null,
+     "extra": {"used_memory_human": "48.2M", "used_memory_mb": 48.2, "maxmemory_mb": 256.0,
+               "connected_clients": 11, "ping_ms": 1.2}},
+    {"name": "minio", "kind": "minio", "status": "up", "version": null,
+     "last_heartbeat": "2026-06-24T07:21:55+00:00", "uptime_sec": null, "detail": null,
+     "extra": {"bucket": "flori", "bucket_exists": true, "probe_ms": 18.4, "mode": "remote"}}
+  ],
+  "//components.status": "up|degraded|down|unknown（组件专用四态，非 worker 的 online-*/stale）。scheduler 据 component:scheduler 心跳新鲜度（复用 worker_status 的 30/900 窗口）+ loop_lag>5s 叠 degraded；redis 据 ping/内存；minio 据 bucket_exists；mode=local 时 minio=unknown（本地盘）",
   "workers": {
     "io":       {"online": 1, "busy": 0},
     "cpu":      {"online": 1, "busy": 1},
@@ -275,8 +295,39 @@ GET /api/jobs/{id}/notes/transcript     → text/markdown (逐字稿)
   },
   "//pools": "scene 已并入 cpu 池(无独立 scene 池);capacity = redis 运行时覆盖优先,否则 pools.yaml 默认(1024≈不限,实际并发由 per-worker WORKER_CONCURRENCY 控制)",
   "jobs": {"total": 44, "done": 12, "processing": 4, "failed": 1, "pending": 27},
-  "disk": {"used_gb": 15.2, "available_gb": 600.0}
+  "disk": {"used_gb": 15.2, "available_gb": 600.0, "total_gb": 615.2, "used_pct": 2.5},
+  "//disk": "total_gb/used_pct 新增（disk_usage 本就返回 total，零成本）",
+  "throughput_1h": {"done": 18, "failed": 2},
+  "//throughput_1h": "近 1h 进入终态的 job 计数；用 jobs.updated_at 近似终态时刻（rerun 改 updated_at 致重复计入罕见）"
 }
+```
+
+#### GET /api/usage — AI 用量聚合
+
+全量 AI 调用聚合（系统健康总览页「系统状态」展示）：累计 token/缓存/成本 + 平均缓存命中率 + 按 model 分。命中率 = `cache_read /(input + cache_read + cache_creation)`。
+
+```json
+{
+  "calls": 128, "total_input_tokens": 410233, "total_output_tokens": 88210,
+  "total_cache_creation_tokens": 51200, "total_cache_read_tokens": 302100,
+  "total_cost_usd": 1.234567, "total_num_turns": 256, "total_duration_sec": 1820.5,
+  "cache_hit_rate_pct": 39.6,
+  "by_model": [
+    {"provider": "claude-cli", "model": "claude-opus-4", "calls": 96,
+     "input_tokens": 300000, "output_tokens": 60000,
+     "cache_creation_tokens": 40000, "cache_read_tokens": 250000,
+     "cost_usd": 1.10, "cache_hit_rate_pct": 42.4}
+  ],
+  "//cost": "claude-cli 订阅成本为「等价 API 成本」（非真实账单），前端按 provider==claude-cli 标「(等价)」"
+}
+```
+
+#### GET /api/events?limit=50 — 系统事件流
+
+scheduler emit 的环形列表（Redis `events:system`，最近在上）。本批次 scheduler emit 尚未接线，通常返回空数组（向后兼容，前端空态）。
+
+```json
+{"events": [{"ts": 1719100800.0, "kind": "orphan_reclaimed", "job_id": "j_abc", "step": "transcribe", "reason": "worker w_3 lost"}]}
 ```
 
 #### GET /api/health
@@ -466,7 +517,7 @@ GET  /api/pipelines                    → 流水线只读:各 pipeline 步骤 D
 
 ```
 POST   /api/runner/register                                → 换发 per-worker token
-POST   /api/runner/heartbeat                               → 刷新存活（暂停态由 claim_step 据 admin_status 兜底，不经心跳回发）
+POST   /api/runner/heartbeat                               → 刷新存活（暂停态由 claim_step 据 admin_status 兜底，不经心跳回发）；可带 load={cpu_pct,mem_pct,loadavg}（本机 live 负载，写 redis worker hash → GET /api/workers 的 worker.load）
 POST   /api/runner/offline                                 → 主动下线
 POST   /api/runner/jobs/request                            → 长轮询认领一步（认到即返回 enrich 后的 claim）
 POST   /api/runner/jobs/{id}/steps/{step}/complete         → 上报完成
@@ -1063,7 +1114,7 @@ Response `200`（数组）：
 
 ### WS /api/ws/global — 全局状态
 
-每 2 秒推送一次系统状态（格式同 GET /api/status：`workers` / `pools` / `jobs`（含 pending） / `disk` 四段）。
+每 2 秒推送一次 **live 子集**：`workers` / `pools` / `jobs`（含 pending） / `disk`（含 `total_gb`/`used_pct`）四段。**不含** `version`/`components`/`throughput_1h`（组件探测是慢变量，每 2s 跑会给 redis/minio 加无谓负载）——全量取 HTTP 轮询 `GET /api/status`（进页 1 次 + 每 15s + 手动刷新）。契约从「推全四段」收窄为「推 live 子集」：live 子集本就是原四段，对现有 WS 消费方无破坏。前端合并策略：WS 到达只覆盖 live 四段，`components`/`version`/`throughput` 保持上次轮询值。
 
 ## 3. Redis 数据结构
 
@@ -1143,11 +1194,26 @@ Fields:
   gpu_name:       "RTX 4090" | ""
   remote_addr:    "1.2.3.4" | ""                      ← 网关 worker 连接来源 IP；本机直连为空
   spec:           JSON {version,cpu,mem_mb,platform,python}  ← worker 自报版本/机器配置(redis-only,前端详情展示)
+  load:           JSON {cpu_pct,mem_pct,loadavg}        ← worker 心跳自报本机 live 负载(redis-only;纯 /proc 采,各项可为 null)
   started_at:     ISO timestamp
   last_heartbeat: ISO timestamp
 TTL:    30 秒（心跳续期）
 
 Redis 为实时状态；持久记录（统计/历史/备注）存 SQLite workers 表。
+```
+
+#### 组件心跳 + 系统事件流（系统健康总览页）
+
+```
+Key:    component:{name}                                ← name ∈ {scheduler}（api/redis/minio 靠实时探活，不写心跳）
+Type:   HASH
+Fields: {version, started_at, loop_lag_sec, loop_interval_sec, pid, ts}  ← scheduler 每 10s 续约
+TTL:    900 秒（= stale_window）：超窗 key 自动消失 → GET /api/status 读不到 → 组件 down（非永久 degraded）
+
+Key:    events:system                                   ← 系统事件环形列表（scheduler emit；最近在上）
+Type:   LIST（LPUSH + LTRIM 0 199）
+Member: JSON {ts, kind, ...}  kind ∈ {orphan_reclaimed,step_stuck,no_worker,worker_cleaned,job_failed}
+        供 GET /api/events?limit=50（LRANGE）。本批次 emit 接线后置，端点已就绪、空表兼容。
 ```
 
 **公共状态是读时派生，不直接存。** 运行时 `status`（`idle` / `busy` / `offline`，worker 自报）与管理员暂停态 `admin_status`（`"" / "paused"`，仅 API 写）是**两个独立字段**；`GET /api/workers` 不信任运行时 `status`，而是按 `shared/status.py` 的 `compute_worker_status()` 用 `last_heartbeat` 新鲜度 + `current_job` + 管理员 `admin_status` 叠加位现算出对外公共态。拆成两字段是为了让 `claim/release/心跳` 写运行时 `status` 时**不会覆盖暂停态**（旧实现 draining 复用 `status` 字段会被覆盖）：

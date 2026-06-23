@@ -43,6 +43,8 @@ class StorageBackend(Protocol):
     # 供 api range 流式播放视频/音频:取文件大小 + 读指定字节区间。找不到返回 None。
     async def file_size(self, job_id: str, rel_path: str) -> int | None: ...
     async def read_range(self, job_id: str, rel_path: str, start: int, length: int) -> bytes | None: ...
+    # 健康探活(供 /api/status 的 minio 组件):返回 {status, mode, bucket, ...};不抛(异常由调用方包超时)。
+    async def health(self) -> dict: ...
 
 
 class LocalStorage:
@@ -123,6 +125,13 @@ class LocalStorage:
             p.relative_to(root).as_posix()
             for p in root.rglob("*") if p.is_file()
         ]
+
+    async def health(self) -> dict:
+        # 本地盘:无独立对象存储组件,前端按 mode=local 显"本地存储"灰点(unknown,非 down)。
+        return {
+            "status": "unknown", "mode": "local", "bucket": None,
+            "version": None, "detail": "本地盘", "probe_ms": None,
+        }
 
 
 class RemoteStorage:
@@ -304,6 +313,22 @@ class RemoteStorage:
                 out.append(rel)
         return out
 
+    async def health(self) -> dict:
+        # bucket_exists 是 HEAD bucket(O(1)),勿用 list_objects(全量扫)。minio SDK 同步 → to_thread。
+        # 容量统计(对象数/总字节)MinIO 无聚合 API,全量 list 才能求和 → 不在探活里做(设计 §5.4 标"未采集")。
+        return await asyncio.to_thread(self._health_sync)
+
+    def _health_sync(self) -> dict:
+        t0 = time.perf_counter()
+        exists = self._client().bucket_exists(self._bucket)
+        probe_ms = round((time.perf_counter() - t0) * 1000, 1)
+        return {
+            "status": "up" if exists else "degraded",
+            "mode": "remote", "version": None,
+            "bucket": self._bucket, "bucket_exists": exists, "probe_ms": probe_ms,
+            "detail": None if exists else f"bucket {self._bucket} 不存在",
+        }
+
 
 class GatewayStorage:
     """gateway-PROXY 产物后端:纯出站 HTTPS,产物经 API 中转(worker 永不直连 minio)。
@@ -470,6 +495,12 @@ class GatewayStorage:
     async def read_range(self, job_id: str, rel_path: str, start: int, length: int) -> bytes | None:
         data = await self.read_file(job_id, rel_path)
         return data[start:start + length] if data is not None else None
+
+    async def health(self) -> dict:
+        # worker 侧网关存储,不参与 /api/status 的 minio 探活(那查的是 API 自己的中心存储)。
+        # 仅满足 Protocol,标 unknown(gateway 中转)。
+        return {"status": "unknown", "mode": "gateway", "bucket": None,
+                "version": None, "detail": "gateway proxy", "probe_ms": None}
 
     async def close(self) -> None:
         if self._client_obj is not None:

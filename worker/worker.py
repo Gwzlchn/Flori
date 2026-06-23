@@ -24,6 +24,7 @@ from shared.config import AppConfig, build_step_config
 from shared.models import generate_worker_id
 from shared.runner_ops import parse_style_tags
 from shared.storage import StorageBackend
+from shared.sysload import collect_node_load
 from worker.step_runner import StepContext, create_step_runner
 from worker.transport import WorkerTransport, default_worker_id_file
 
@@ -32,8 +33,9 @@ logger = structlog.get_logger(component="worker")
 
 def _worker_spec() -> dict:
     """worker 自报:版本(构建时注入的 FLORI_VERSION,便于查代码漂移)+ 机器配置。"""
+    from shared.version import FLORI_VERSION
     spec: dict = {
-        "version": os.environ.get("FLORI_VERSION", "dev"),
+        "version": FLORI_VERSION,
         "cpu": os.cpu_count(),
         "platform": platform.platform(),
         "python": platform.python_version(),
@@ -220,7 +222,8 @@ class Worker:
         interval = int((self.config.pools.get("worker_status") or {}).get("heartbeat_interval_sec", 10))
         while not self._shutdown:
             try:
-                await self.transport.heartbeat(self.worker_id)
+                # 本机 live 负载(cpu%/mem%/loadavg,纯 /proc,便宜非阻塞);采集失败=各项 None,不致命。
+                await self.transport.heartbeat(self.worker_id, load=collect_node_load())
             except asyncio.CancelledError:
                 raise
             except Exception:

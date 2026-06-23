@@ -507,6 +507,25 @@ class TestHeartbeatLoop:
         got = db.get_worker(worker.worker_id)
         assert (datetime.now(timezone.utc) - got.last_heartbeat).total_seconds() < 5
 
+    @pytest.mark.asyncio
+    async def test_heartbeat_writes_live_load_to_redis(self, worker, redis):
+        # B 档:心跳带 load → 写 redis worker hash 的 load 字段(JSON);空 load 不写。
+        await worker.register()
+        await worker.transport.heartbeat(
+            worker.worker_id, load={"cpu_pct": 12.5, "mem_pct": 40.0, "loadavg": 0.7},
+        )
+        info = await redis.get_worker_info(worker.worker_id)
+        assert info is not None
+        load = json.loads(info["load"])
+        assert load["cpu_pct"] == 12.5 and load["loadavg"] == 0.7
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_no_load_leaves_field_absent(self, worker, redis):
+        await worker.register()
+        await worker.transport.heartbeat(worker.worker_id, load=None)
+        info = await redis.get_worker_info(worker.worker_id)
+        assert "load" not in info   # 不写空,保留上次(此处从未写过)
+
 
 class TestFetchTask:
     @pytest.mark.asyncio

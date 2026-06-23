@@ -56,3 +56,40 @@ def compute_worker_status(
     if current_job:
         return ONLINE_BUSY
     return ONLINE_IDLE
+
+
+# ── 组件健康(api/scheduler/redis/minio)──
+# 组件用专用四态 up/degraded/down/unknown,与 worker 的 online-*/stale 分开:worker 的 stale
+# 在前端固定映射红色"该 GC",与组件"心跳刚过期=黄"语义冲突(见设计 §2.2)。复用 worker 的
+# 30/900 窗口(单一阈值源),仅心跳型组件(scheduler)用本函数。
+COMPONENT_UP = "up"
+COMPONENT_DEGRADED = "degraded"
+COMPONENT_DOWN = "down"
+COMPONENT_UNKNOWN = "unknown"
+
+
+def compute_component_status(
+    last_heartbeat: datetime | None,
+    now: datetime | None = None,
+    online_window_sec: int = DEFAULT_ONLINE_WINDOW_SEC,
+    stale_window_sec: int = DEFAULT_STALE_WINDOW_SEC,
+) -> str:
+    """按心跳新鲜度把组件折算成四态(供 scheduler 心跳判活):
+      · 无心跳记录(从未写过/老版本)→ unknown(非永久 degraded,避免误报"挂了")。
+      · age ≤ online_window → up。
+      · online_window < age ≤ stale_window → degraded(错过几拍,缓冲带)。
+      · age > stale_window → down(TTL 过期/进程死)。
+    redis/minio 不走本函数(它们靠实时探活,而非心跳)。loop_lag 等附加降级条件由调用方叠加。
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if last_heartbeat is None:
+        return COMPONENT_UNKNOWN
+    if last_heartbeat.tzinfo is None:
+        last_heartbeat = last_heartbeat.replace(tzinfo=timezone.utc)
+    age = (now - last_heartbeat).total_seconds()
+    if age <= online_window_sec:
+        return COMPONENT_UP
+    if age <= stale_window_sec:
+        return COMPONENT_DEGRADED
+    return COMPONENT_DOWN

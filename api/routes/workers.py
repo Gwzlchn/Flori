@@ -103,6 +103,14 @@ def _spec(info: dict) -> dict:
         return {}
 
 
+def _load(info: dict) -> dict:
+    """从 Redis info 解析 worker 自报的 live 负载(cpu%/mem%/loadavg)JSON;失败返回 {}。"""
+    try:
+        return json.loads(info.get("load") or "{}") or {}
+    except (ValueError, TypeError):
+        return {}
+
+
 @router.get("")
 async def list_workers(
     db: Database = Depends(get_db),
@@ -139,6 +147,7 @@ async def list_workers(
             existing.current_job = info.get("current_job") or None
             existing.current_step = info.get("current_step") or None
             existing.spec = _spec(info)
+            existing.load = _load(info)
             continue
         by_id[wid] = WorkerResponse(
             id=wid,
@@ -152,6 +161,7 @@ async def list_workers(
             concurrency=_int(info.get("concurrency")) or 1,
             remote_addr=info.get("remote_addr") or None,
             spec=_spec(info),
+            load=_load(info),
             status=status,
             current_job=info.get("current_job") or None,
             current_step=info.get("current_step") or None,
@@ -215,6 +225,7 @@ async def get_worker(
         if info.get("remote_addr"):
             resp.remote_addr = info.get("remote_addr")
         resp.spec = _spec(info)
+        resp.load = _load(info)
     return resp
 
 

@@ -106,16 +106,19 @@ class GatewayTransport:
             )
         return returned_id
 
-    async def heartbeat(self, worker_id):
+    async def heartbeat(self, worker_id, load=None):
         try:
+            body = {
+                "worker_id": worker_id, "status": self._status,
+                "current_job": self._current_job,
+                "current_step": self._current_step,
+            }
+            if load:
+                body["load"] = load   # 本机 live 负载,经网关写 redis worker hash(B 档各节点负载)
             resp = await self._http.post(
                 "/api/runner/heartbeat",
                 headers={"Authorization": f"Bearer {self._worker_token}"},
-                json={
-                    "worker_id": worker_id, "status": self._status,
-                    "current_job": self._current_job,
-                    "current_step": self._current_step,
-                },
+                json=body,
             )
             if resp.status_code == 401:
                 logger.warning("worker_token_revoked", worker_id=worker_id)
@@ -123,7 +126,7 @@ class GatewayTransport:
             logger.warning("gateway_heartbeat_failed", worker_id=worker_id)
         # 有内层才退回维持 redis/db 新鲜;纯网关无内层,gateway 已是唯一通路。
         if self._inner is not None:
-            await self._inner.heartbeat(worker_id)
+            await self._inner.heartbeat(worker_id, load=load)
 
     async def update_status(self, worker_id, status,
                             current_job="", current_step=""):

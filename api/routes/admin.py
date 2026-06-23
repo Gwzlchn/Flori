@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from datetime import datetime, timedelta, timezone
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -14,6 +15,14 @@ logger = structlog.get_logger(component="admin")
 from shared.config import AppConfig, load_yaml
 from shared.db import Database
 from shared.redis_client import RedisClient
+from shared.status import (
+    DEFAULT_ONLINE_WINDOW_SEC,
+    DEFAULT_STALE_WINDOW_SEC,
+    compute_component_status,
+)
+from shared.storage import RemoteStorage
+from shared.sysload import read_process_rss_mb
+from shared.version import FLORI_VERSION
 from api.deps import get_config, get_db, get_redis, verify_token
 
 router = APIRouter(prefix="/api", tags=["admin"])
@@ -95,9 +104,18 @@ async def metrics(request: Request, db: Database = Depends(get_db), redis: Redis
     return "\n".join(lines) + "\n"
 
 
-async def build_system_status(db, redis, config) -> dict:
-    """聚合系统状态(workers/pools/jobs/disk)。供 GET /api/status 与 WS /api/ws/global 共用,
-    避免两处各自拼装导致漂移(WS 此前只回 jobs 计数,与契约「格式同 GET /api/status」不符)。"""
+def _windows(config) -> tuple[int, int]:
+    """组件/worker 判活窗口(单一事实源 pools.yaml::worker_status,缺省回退内置默认)。"""
+    cfg = (config.pools.get("worker_status") or {}) if config else {}
+    return (
+        int(cfg.get("online_window_sec", DEFAULT_ONLINE_WINDOW_SEC)),
+        int(cfg.get("stale_window_sec", DEFAULT_STALE_WINDOW_SEC)),
+    )
+
+
+async def build_live_status(db, redis, config) -> dict:
+    """实时片段(workers/pools/jobs/disk):便宜、无组件探测。供 WS /api/ws/global 每 2s 推 +
+    被 build_full_status 复用。disk 补 total_gb/used_pct(zero-cost,disk_usage 本就返回 total)。"""
     workers = await asyncio.to_thread(db.list_workers)
     worker_summary = {}
     for w in workers:
@@ -132,12 +150,16 @@ async def build_system_status(db, redis, config) -> dict:
 
     try:
         disk = shutil.disk_usage(str(config.data_dir))
+        total_gb = round(disk.total / (1024**3), 1)
+        used_gb = round(disk.used / (1024**3), 1)
         disk_info = {
-            "used_gb": round(disk.used / (1024**3), 1),
+            "used_gb": used_gb,
             "available_gb": round(disk.free / (1024**3), 1),
+            "total_gb": total_gb,
+            "used_pct": round(disk.used / disk.total * 100, 1) if disk.total else 0.0,
         }
     except (FileNotFoundError, OSError):
-        disk_info = {"used_gb": -1, "available_gb": -1}
+        disk_info = {"used_gb": -1, "available_gb": -1, "total_gb": -1, "used_pct": -1}
 
     return {
         "workers": worker_summary,
@@ -147,13 +169,244 @@ async def build_system_status(db, redis, config) -> dict:
     }
 
 
+# 历史别名:WS 旧 import build_system_status,保留指向 live 子集(契约收窄,对现有消费方无破坏)。
+build_system_status = build_live_status
+
+
+async def _probe_api(app, online_window: int) -> dict:
+    """API 组件:能返回响应即 up(恒 up;down 仅前端在 /api/status 请求失败时兜底)。
+    uptime 据 app.state.started_at;extra 带进程 RSS。"""
+    started_at = getattr(app.state, "started_at", None)
+    now = datetime.now(timezone.utc)
+    last_hb = now.isoformat()
+    uptime = None
+    if isinstance(started_at, datetime):
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        uptime = round((now - started_at).total_seconds())
+    rss = read_process_rss_mb()
+    extra: dict = {}
+    if rss is not None:
+        extra["rss_mb"] = rss
+    return {
+        "name": "api", "kind": "api", "status": "up", "version": FLORI_VERSION,
+        "last_heartbeat": last_hb, "uptime_sec": uptime, "detail": None, "extra": extra,
+    }
+
+
+async def _probe_scheduler(redis, online_window: int, stale_window: int) -> dict:
+    """Scheduler 组件:据 component:scheduler 心跳新鲜度算 up/degraded/down/unknown;
+    loop_lag>5s 叠加 degraded。键从不存在=unknown(老版本/从未启动)。"""
+    comp = {
+        "name": "scheduler", "kind": "scheduler", "status": "unknown", "version": None,
+        "last_heartbeat": None, "uptime_sec": None, "detail": None, "extra": {},
+    }
+    try:
+        hb = await asyncio.wait_for(redis.get_component_heartbeat("scheduler"), timeout=2)
+    except (asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
+        comp["detail"] = f"读心跳失败: {str(e)[:120]}"
+        return comp
+    if not hb:
+        comp["detail"] = "调度器从未上报心跳(未启动/老版本)"
+        return comp
+    ts = _parse_iso(hb.get("ts"))
+    now = datetime.now(timezone.utc)
+    status = compute_component_status(ts, now, online_window, stale_window)
+    loop_lag = _to_float(hb.get("loop_lag_sec"))
+    if status == "up" and loop_lag is not None and loop_lag > 5:
+        status = "degraded"
+        comp["detail"] = f"调度循环被拖慢 loop_lag={loop_lag}s"
+    started = _parse_iso(hb.get("started_at"))
+    uptime = round((now - started).total_seconds()) if started else None
+    comp.update({
+        "status": status,
+        "version": hb.get("version") or None,
+        "last_heartbeat": ts.isoformat() if ts else None,
+        "uptime_sec": uptime,
+        "extra": {
+            "loop_lag_sec": loop_lag if loop_lag is not None else 0.0,
+            "loop_interval_sec": _to_int(hb.get("loop_interval_sec"), 30),
+            "pid": _to_int(hb.get("pid"), None),
+        },
+    })
+    if status == "down" and not comp["detail"]:
+        comp["detail"] = "调度器心跳已过期(进程可能已停止)"
+    return comp
+
+
+async def _probe_redis(redis) -> dict:
+    """Redis 组件:ping 计时 + INFO。超时(2s)/异常 → unknown(采集失败 ≠ 红);ping_ms>200 或
+    内存临界 → degraded。"""
+    comp = {
+        "name": "redis", "kind": "redis", "status": "unknown", "version": None,
+        "last_heartbeat": None, "uptime_sec": None, "detail": None, "extra": {},
+    }
+    try:
+        info = await asyncio.wait_for(redis.server_info(), timeout=2)
+    except asyncio.TimeoutError:
+        comp.update(status="down", detail="redis 探活超时(2s)")
+        return comp
+    except Exception as e:  # noqa: BLE001
+        comp.update(status="unknown", detail=f"redis 探活失败: {str(e)[:120]}")
+        return comp
+    now = datetime.now(timezone.utc)
+    ping_ms = info.get("ping_ms")
+    used = info.get("used_memory_mb") or 0
+    maxmem = info.get("maxmemory_mb") or 0
+    status = "up"
+    detail = None
+    if ping_ms is not None and ping_ms > 200:
+        status, detail = "degraded", f"ping 慢 {ping_ms}ms"
+    if maxmem and used / maxmem > 0.9:
+        status, detail = "degraded", f"内存临界 {used}/{maxmem}MB"
+    comp.update({
+        "status": status,
+        "version": info.get("version"),
+        "last_heartbeat": now.isoformat(),
+        "uptime_sec": info.get("uptime_sec"),
+        "detail": detail,
+        "extra": {
+            "used_memory_human": info.get("used_memory_human"),
+            "used_memory_mb": used,
+            "maxmemory_mb": maxmem,
+            "connected_clients": info.get("connected_clients"),
+            "ping_ms": ping_ms,
+        },
+    })
+    return comp
+
+
+async def _probe_minio(storage) -> dict:
+    """MinIO 组件:RemoteStorage 才探活(本地盘 mode=local→unknown 不标红)。超时 3s/异常 → down/unknown。"""
+    comp = {
+        "name": "minio", "kind": "minio", "status": "unknown", "version": None,
+        "last_heartbeat": None, "uptime_sec": None, "detail": None, "extra": {},
+    }
+    now = datetime.now(timezone.utc)
+    if not isinstance(storage, RemoteStorage):
+        h = await storage.health() if storage is not None else {"mode": "local", "detail": "本地盘"}
+        comp.update(detail=h.get("detail"), extra={"mode": h.get("mode", "local")})
+        return comp
+    try:
+        h = await asyncio.wait_for(storage.health(), timeout=3)
+    except asyncio.TimeoutError:
+        comp.update(status="down", detail="对象存储探活超时(3s)", extra={"mode": "remote"})
+        return comp
+    except Exception as e:  # noqa: BLE001
+        comp.update(status="down", detail=f"对象存储不可达: {str(e)[:120]}", extra={"mode": "remote"})
+        return comp
+    comp.update({
+        "status": h.get("status", "unknown"),
+        "version": h.get("version"),
+        "last_heartbeat": now.isoformat(),
+        "detail": h.get("detail"),
+        "extra": {
+            "bucket": h.get("bucket"), "bucket_exists": h.get("bucket_exists"),
+            "probe_ms": h.get("probe_ms"), "mode": h.get("mode", "remote"),
+        },
+    })
+    return comp
+
+
+async def build_full_status(app) -> dict:
+    """全量(给 HTTP /api/status):live 子集 + version + 有序 components[api,scheduler,redis,minio]
+    + throughput_1h。逐组件独立 try+超时:单项异常→该组件 unknown/down + detail,绝不让整体 500。"""
+    db = app.state.db
+    redis = app.state.redis
+    config = app.state.config
+    storage = getattr(app.state, "storage", None)
+    online_window, stale_window = _windows(config)
+
+    live = await build_live_status(db, redis, config)
+
+    # 组件探测各自隔离:gather(return_exceptions)兜底,任一抛出退化为 unknown 占位(不影响其余)。
+    async def _safe(coro, name, kind):
+        try:
+            return await coro
+        except Exception as e:  # noqa: BLE001
+            logger.warning("component_probe_failed", component=name, error=str(e)[:200])
+            return {"name": name, "kind": kind, "status": "unknown", "version": None,
+                    "last_heartbeat": None, "uptime_sec": None,
+                    "detail": f"探测异常: {str(e)[:120]}", "extra": {}}
+
+    components = await asyncio.gather(
+        _safe(_probe_api(app, online_window), "api", "api"),
+        _safe(_probe_scheduler(redis, online_window, stale_window), "scheduler", "scheduler"),
+        _safe(_probe_redis(redis), "redis", "redis"),
+        _safe(_probe_minio(storage), "minio", "minio"),
+    )
+
+    # 近 1h 吞吐(便宜:GROUP BY done/failed,利用 idx_jobs_status)。失败不致命。
+    throughput = {"done": 0, "failed": 0}
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        throughput = await asyncio.to_thread(db.throughput_since, since)
+    except Exception:
+        logger.warning("throughput_failed")
+
+    return {
+        "version": FLORI_VERSION,
+        "components": list(components),
+        **live,
+        "throughput_1h": throughput,
+    }
+
+
+def _parse_iso(value):
+    """解析 ISO 时间串为 aware-UTC,naive 补 UTC;失败/空返回 None。"""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def _to_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 @router.get("/status", dependencies=[Depends(verify_token)])
-async def system_status(
-    db: Database = Depends(get_db),
-    redis: RedisClient = Depends(get_redis),
-    config: AppConfig = Depends(get_config),
-):
-    return await build_system_status(db, redis, config)
+async def system_status(request: Request):
+    """全量系统状态(version + 组件健康 + workers/pools/jobs/disk + throughput_1h)。
+    components.detail 不暴露密钥/连接串;逐组件探测失败→该组件 unknown/down,整体不 500。"""
+    return await build_full_status(request.app)
+
+
+@router.get("/usage", dependencies=[Depends(verify_token)])
+async def usage_aggregate(db: Database = Depends(get_db)):
+    """全量 AI 用量聚合:累计 token/缓存/成本 + 平均缓存命中率 + 按 model 分(供系统状态展示)。"""
+    return await asyncio.to_thread(db.get_usage_aggregate)
+
+
+@router.get("/events", dependencies=[Depends(verify_token)])
+async def list_events(limit: int = 50, redis: RedisClient = Depends(get_redis)):
+    """系统事件流(scheduler emit 的环形列表 events:system,最近在上)。
+    本批次 scheduler emit 尚未接线 → 通常为空数组(向后兼容,前端空态);读失败→空。"""
+    import json as _json
+    limit = max(1, min(limit, 200))
+    try:
+        raw = await redis.r.lrange("events:system", 0, limit - 1)
+    except Exception:
+        return {"events": []}
+    events = []
+    for item in raw or []:
+        try:
+            events.append(_json.loads(item))
+        except (ValueError, TypeError):
+            continue
+    return {"events": events}
 
 
 @router.get("/config/styles", dependencies=[Depends(verify_token)])

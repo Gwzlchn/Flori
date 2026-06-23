@@ -39,6 +39,22 @@ export interface StepInfo {
   worker_id?: string | null     // 执行本步的 worker(「由 xxx 完成」)
 }
 
+// 逐次 AI 调用明细(GET /api/jobs/{id}/usage;job 详情按步展示)。
+export interface StepUsage {
+  step: string | null
+  worker_id: string | null
+  provider: string
+  model: string
+  input_tokens: number
+  output_tokens: number
+  cache_creation_tokens: number
+  cache_read_tokens: number
+  cost_usd: number
+  duration_sec: number
+  num_turns: number
+  cache_hit_rate_pct: number
+}
+
 export interface JobMedia {
   resolution?: string           // 视频:如 "1920x1080"
   width?: number
@@ -87,6 +103,13 @@ export interface WorkerSpec {
   python?: string               // Python 版本
 }
 
+// worker 心跳自报的 live 负载(纯 /proc 采;各项可缺=未采集)。
+export interface WorkerLoad {
+  cpu_pct?: number | null       // 瞬时 CPU 占用率(%)
+  mem_pct?: number | null       // 已用内存(%)
+  loadavg?: number | null       // 1 分钟平均负载
+}
+
 export interface Worker {
   id: string
   type: string
@@ -99,6 +122,7 @@ export interface Worker {
   concurrency: number
   remote_addr: string | null
   spec?: WorkerSpec             // worker 自报:版本/机器配置
+  load?: WorkerLoad             // worker 心跳自报:live 负载(cpu%/mem%/loadavg)
   status: WorkerStatus
   current_job: string | null
   current_step: string | null
@@ -121,13 +145,84 @@ export interface WorkerJob {
   error: string | null
 }
 
-export interface SystemStatus {
-  jobs: {
-    total: number
-    done: number
-    processing: number
-    failed: number
-  }
+// ── 系统健康总览页(/system)──
+export type ComponentKind = 'api' | 'scheduler' | 'redis' | 'minio'
+export type ComponentStatus = 'up' | 'degraded' | 'down' | 'unknown'
+
+export interface SystemComponent {
+  name: string
+  kind: ComponentKind
+  status: ComponentStatus
+  version: string | null
+  last_heartbeat: string | null    // ISO8601 UTC;勿前端自算时区
+  uptime_sec: number | null
+  detail: string | null
+  extra: Record<string, any>       // 按 kind 有约定字段;前端渲染已知、忽略未知
+}
+
+export interface PoolStat    { capacity: number; used: number; queue: number }
+export interface WorkerCount { online: number; busy: number }
+export interface JobCounts   { total: number; done: number; processing: number; failed: number; pending: number }
+export interface DiskInfo    { used_gb: number; available_gb: number; total_gb: number; used_pct: number }
+export interface Throughput  { done: number; failed: number }
+
+// GET /api/status 完整形状(进页 1 次 + 每 15s 轮询拿全量)。
+export interface FullStatus {
+  version: string
+  components: SystemComponent[]
+  workers: Record<string, WorkerCount>
+  pools: Record<string, PoolStat>
+  jobs: JobCounts
+  disk: DiskInfo
+  throughput_1h?: Throughput
+}
+
+// WS /api/ws/global 每 2s 推 live 子集;本页只可靠消费这四段。
+export type SystemStatus = Pick<FullStatus, 'jobs' | 'workers' | 'pools' | 'disk'>
+
+// 系统事件流(GET /api/events)
+export interface SystemEvent {
+  ts: number
+  kind: string
+  job_id?: string
+  step?: string
+  reason?: string
+  error?: string
+  worker_id?: string
+  pool?: string
+  [k: string]: any
+}
+
+// AI 用量聚合(GET /api/usage)
+export interface UsageByModel {
+  provider: string
+  model: string
+  calls: number
+  input_tokens: number
+  output_tokens: number
+  cache_creation_tokens: number
+  cache_read_tokens: number
+  cost_usd: number
+  cache_hit_rate_pct: number
+}
+export interface UsageAggregate {
+  calls: number
+  total_input_tokens: number
+  total_output_tokens: number
+  total_cache_creation_tokens: number
+  total_cache_read_tokens: number
+  total_cost_usd: number
+  total_num_turns: number
+  total_duration_sec: number
+  cache_hit_rate_pct: number
+  by_model: UsageByModel[]
+}
+
+export const COMPONENT_KIND_LABELS: Record<ComponentKind, string> = {
+  api: 'API 服务', scheduler: '调度器', redis: 'Redis', minio: '对象存储',
+}
+export const COMPONENT_STATUS_LABELS: Record<ComponentStatus, string> = {
+  up: '在线', degraded: '降级', down: '离线', unknown: '采集失败',
 }
 
 export interface AuthStatus {

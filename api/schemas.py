@@ -76,6 +76,7 @@ class WorkerResponse(BaseModel):
     concurrency: int = 1
     remote_addr: str | None = None
     spec: dict = Field(default_factory=dict)   # 版本/机器配置(worker 自报);前端详情展示
+    load: dict = Field(default_factory=dict)   # live 负载(worker 心跳自报 cpu%/mem%/loadavg);redis-only
     status: str
     current_job: str | None = None
     current_step: str | None = None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI
 
@@ -48,6 +49,8 @@ def create_app(
     setup_logging()  # 与 scheduler/worker 一致输出结构化 JSON 日志
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # api 进程启动时刻(供 /api/status 的 api 组件算 uptime_sec)。两条资源路径都记。
+        app.state.started_at = datetime.now(timezone.utc)
         if not hasattr(app.state, "db") or app.state.db is None:
             cfg = load_config(
                 config_dir=os.environ.get("CONFIG_DIR", "/data/configs"),

@@ -363,6 +363,17 @@ async def job_concepts(
     return await asyncio.to_thread(db.glossary_for_job, job_id, job.domain)
 
 
+@router.get("/{job_id}/usage")
+async def job_usage(
+    job_id: str,
+    db: Database = Depends(get_db),
+):
+    """该 job 的逐次 AI 调用明细(按步展示 in/out/cache/命中率/cost/耗时/轮数/worker)。
+    cost 对 claude-cli 订阅是「等价 API 成本」,前端按 provider==claude-cli 标「(等价)」。"""
+    validate_path_segment(job_id, "job_id")
+    return {"usage": await asyncio.to_thread(db.list_usage_by_job, job_id)}
+
+
 @router.get("/{job_id}/steps/{step}/log")
 async def get_step_log(
     job_id: str,

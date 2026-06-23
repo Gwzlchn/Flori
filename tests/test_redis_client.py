@@ -392,3 +392,51 @@ class TestPubSub:
 
         assert calls["pubsub"] >= 2  # 至少重订阅过一次
         assert received and received[0]["event"] == "ok"
+
+
+class TestComponentHeartbeat:
+    @pytest.mark.asyncio
+    async def test_set_get_component_heartbeat(self, rc):
+        await rc.set_component_heartbeat("scheduler", {
+            "version": "abc123", "loop_lag_sec": 0.5, "pid": 7,
+        })
+        hb = await rc.get_component_heartbeat("scheduler")
+        assert hb is not None
+        assert hb["version"] == "abc123"
+        assert hb["loop_lag_sec"] == "0.5"   # 全转 str 存
+        assert "ts" in hb                      # set 注入 ts
+
+    @pytest.mark.asyncio
+    async def test_get_missing_component_returns_none(self, rc):
+        assert await rc.get_component_heartbeat("nope") is None
+
+    @pytest.mark.asyncio
+    async def test_component_heartbeat_has_ttl(self, rc):
+        await rc.set_component_heartbeat("scheduler", {"version": "x"})
+        ttl = await rc.r.ttl("component:scheduler")
+        assert 0 < ttl <= rc.COMPONENT_TTL
+
+
+class TestServerInfo:
+    @pytest.mark.asyncio
+    async def test_server_info_parses(self, rc, monkeypatch):
+        # fakeredis 不支持 INFO,mock .r.info/.ping 验解析逻辑(ping 计时 + version/内存/连接数)。
+        from unittest.mock import AsyncMock
+
+        async def fake_info(section):
+            return {
+                "server": {"redis_version": "7.2.4", "uptime_in_seconds": 1000},
+                "memory": {"used_memory": 2097152, "used_memory_human": "2.0M",
+                           "maxmemory": 0},
+                "clients": {"connected_clients": 3},
+            }[section]
+
+        monkeypatch.setattr(rc.r, "info", fake_info)
+        monkeypatch.setattr(rc.r, "ping", AsyncMock(return_value=True))
+        info = await rc.server_info()
+        assert info["version"] == "7.2.4"
+        assert info["used_memory_mb"] == 2.0
+        assert info["maxmemory_mb"] == 0.0
+        assert info["connected_clients"] == 3
+        assert info["uptime_sec"] == 1000
+        assert info["ping_ms"] >= 0

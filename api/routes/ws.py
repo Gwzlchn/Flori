@@ -207,7 +207,8 @@ async def ws_global(websocket: WebSocket):
 
 
 async def _build_global_status(app) -> dict:
-    # 复用 admin 的聚合,推送完整四段(workers/pools/jobs/disk),与契约「格式同 GET /api/status」一致
-    # (此前只回 jobs 计数、且缺 pending)。
-    from api.routes.admin import build_system_status
-    return await build_system_status(app.state.db, app.state.redis, app.state.config)
+    # 只推 live 子集(workers/pools/jobs/disk):组件探测(redis INFO / minio bucket_exists / 计时)
+    # 是慢变量(心跳 30s 级),每 2s 跑会给 redis/minio 加无谓负载 → 全量取 HTTP 轮询 GET /api/status。
+    # 契约收窄:WS 此前推全四段,live 子集本就是除组件外的全部,对现有页面无破坏(见设计 §2.5)。
+    from api.routes.admin import build_live_status
+    return await build_live_status(app.state.db, app.state.redis, app.state.config)
