@@ -1,8 +1,12 @@
-"""Step 04: 关键帧提取。每场景取 SSIM 动态代表帧 + 超长场景保底采样(cv2 帧精确)。
+"""Step 04: 关键帧提取。每场景取 SSIM 动态代表帧 + 超长场景保底采样。
 
 代表帧策略(移植自老原型 analyzer/steps/04_frames.py,经实测对 PPT/手写/K线类更稳):
 比较场景首帧与 ratio 位置帧的 SSIM——差异大(画面在变)则取 ratio 位置帧、
 差异小(基本静止)则取靠前帧(start+5),避免抓到画到一半的过渡态。
+
+解码用 PyAV(系统 libav,含 libdav1d)而非 cv2.VideoCapture——后者用 OpenCV 自带 ffmpeg
+解不了 AV1(场景/关键帧会全空)。是什么编码解什么编码,不转码。cv2 仅用于对 numpy 帧
+做 resize/SSIM/存图。
 """
 
 from __future__ import annotations
@@ -11,6 +15,44 @@ import json
 from pathlib import Path
 
 from shared.step_base import StepBase, file_hash
+
+
+class _VideoReader:
+    """PyAV 按帧号读 BGR 帧,替代 cv2.VideoCapture 以支持 AV1 等 OpenCV 解不了的编码。
+    seek 到目标时间戳所在关键帧后向前解到目标帧;缩略图用途,无需逐帧精确。"""
+
+    def __init__(self, path: str):
+        import av
+        self.container = av.open(path)
+        self.stream = self.container.streams.video[0]
+        self.stream.thread_type = "AUTO"
+        rate = self.stream.average_rate or self.stream.guessed_rate
+        self.fps = float(rate) if rate else 25.0
+        self._tb = self.stream.time_base
+
+    def read_at_frame(self, frame_no: int):
+        """返回目标帧的 BGR ndarray(format 与 cv2 一致),失败返回 None。"""
+        frame_no = max(0, int(frame_no))
+        target_pts = int((frame_no / self.fps) / self._tb) if self._tb else 0
+        try:
+            self.container.seek(target_pts, stream=self.stream, backward=True, any_frame=False)
+        except Exception:
+            return None
+        last = None
+        try:
+            for frame in self.container.decode(self.stream):
+                last = frame
+                if frame.pts is None or frame.pts >= target_pts:
+                    break
+        except Exception:
+            return last.to_ndarray(format="bgr24") if last is not None else None
+        return last.to_ndarray(format="bgr24") if last is not None else None
+
+    def close(self):
+        try:
+            self.container.close()
+        except Exception:
+            pass
 
 
 class FramesStep(StepBase):
@@ -30,8 +72,6 @@ class FramesStep(StepBase):
         }
 
     def execute(self) -> dict | None:
-        import cv2
-
         scenes = self.load_json("intermediate/scenes.json")
         video_path = self.job_dir / "input" / "source.mp4"
         assets_dir = self.job_dir / "assets"
@@ -44,8 +84,8 @@ class FramesStep(StepBase):
         max_gap = float(sp.get("max_gap_sec", 60))
         interval = float(sp.get("forced_interval_sec", 15))
 
-        cap = cv2.VideoCapture(str(video_path))
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        reader = _VideoReader(str(video_path))
+        fps = reader.fps
         candidates: list[dict] = []
         frame_index = 0
 
@@ -57,7 +97,7 @@ class FramesStep(StepBase):
                 sf = int(start * fps)
                 ef = int(end * fps) if end > start else sf + 1
 
-                frame, target = self._pick_representative(cap, sf, ef, ratio, dyn_ssim)
+                frame, target = self._pick_representative(reader, sf, ef, ratio, dyn_ssim)
                 if frame is not None:
                     ts = target / fps if fps > 0 else start
                     frame_index = self._save(assets_dir, "scene", frame_index, i, ts, frame, candidates)
@@ -66,12 +106,12 @@ class FramesStep(StepBase):
                 if (end - start) > max_gap:
                     t = start + interval
                     while t < end - 5:
-                        fr = self._seek(cap, int(t * fps))
+                        fr = reader.read_at_frame(int(t * fps))
                         if fr is not None:
                             frame_index = self._save(assets_dir, "sample", frame_index, i, t, fr, candidates)
                         t += interval
         finally:
-            cap.release()
+            reader.close()
 
         self.report_progress(len(scenes), len(scenes), "done")
         self.write_output("intermediate/candidates.json", candidates)
@@ -80,7 +120,7 @@ class FramesStep(StepBase):
 
     def _save(self, assets_dir: Path, source: str, idx: int, scene_i: int,
               ts: float, frame, candidates: list) -> int:
-        import cv2  # 与 _pick_representative/_seek 一致在方法内 import(模块已缓存,无开销),不再当参数传
+        import cv2  # 仅对 numpy 帧存图;模块已缓存,无开销
         # 统一命名 frame-{NNNN}.jpg(扁平、前端按 assets/<flat> 解析)。source/时间戳不进文件名,
         # 留在清单(下方 candidates 条目)与图注;idx 是跨场景全局自增序号,即占位符 [img:N] 的 N。
         fn = f"frame-{idx:04d}.jpg"
@@ -94,17 +134,15 @@ class FramesStep(StepBase):
             return idx + 1
         return idx
 
-    def _pick_representative(self, cap, sf: int, ef: int, ratio: float, dyn_ssim: float):
+    def _pick_representative(self, reader: _VideoReader, sf: int, ef: int, ratio: float, dyn_ssim: float):
         import cv2
         from skimage.metrics import structural_similarity as ssim
 
-        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, sf))
-        ok1, head = cap.read()
+        head = reader.read_at_frame(max(0, sf))
         mf = sf + int((ef - sf) * ratio)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, mf))
-        ok2, mid = cap.read()
-        if not ok1 or not ok2 or head is None or mid is None:
-            return (head if ok1 else None), sf
+        mid = reader.read_at_frame(max(0, mf))
+        if head is None or mid is None:
+            return head, sf
 
         h = cv2.cvtColor(cv2.resize(head, (320, 180)), cv2.COLOR_BGR2GRAY)
         m = cv2.cvtColor(cv2.resize(mid, (320, 180)), cv2.COLOR_BGR2GRAY)
@@ -112,15 +150,8 @@ class FramesStep(StepBase):
         # 画面在变(SSIM 低)取 ratio 位置帧;基本静止取靠前帧避开过渡态。
         target = mf if score < dyn_ssim else min(sf + 5, ef - 1)
         target = max(0, min(target, ef - 1))
-        cap.set(cv2.CAP_PROP_POS_FRAMES, target)
-        ok3, frame = cap.read()
-        return (frame if ok3 else head), target
-
-    def _seek(self, cap, frame_no: int):
-        import cv2
-        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frame_no))
-        ok, fr = cap.read()
-        return fr if ok else None
+        frame = reader.read_at_frame(target)
+        return (frame if frame is not None else head), target
 
 
 if __name__ == "__main__":
