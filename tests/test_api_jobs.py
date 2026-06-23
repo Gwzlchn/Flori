@@ -354,6 +354,21 @@ class TestRetryRerunResubmit:
         ch, payload = mock_redis.publish.call_args[0]
         assert ch == "job_command" and payload == {"action": "resubmit", "job_id": job_id}
 
+    @pytest.mark.asyncio
+    async def test_retry_all_failed(self, client, mock_redis, db):
+        from shared.models import JobStatus
+        ids = []
+        for u in ("BV1xx411c7mD", "BV1yy422d8nE"):
+            jid = (await client.post("/api/jobs", json={"url": u})).json()["job_id"]
+            db.update_job(jid, status=JobStatus.FAILED)
+            ids.append(jid)
+        resp = await client.post("/api/jobs/retry-failed")
+        assert resp.status_code == 200
+        assert resp.json()["retried"] >= 2
+        retried = {c[0][1]["job_id"] for c in mock_redis.publish.call_args_list
+                   if c[0][0] == "job_command" and c[0][1].get("action") == "retry"}
+        assert set(ids) <= retried
+
 
 class TestListByCollection:
     @pytest.mark.asyncio

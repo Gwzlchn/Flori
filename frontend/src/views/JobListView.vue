@@ -155,6 +155,21 @@ async function load() {
   }
 }
 
+const retryingAll = ref(false)
+async function onRetryAllFailed() {
+  if (!confirm('重试所有失败的 job?(各自从首个失败步重跑;缺凭证类如无 cookie 的 YouTube 会再次失败)')) return
+  retryingAll.value = true
+  try {
+    const { retried } = await jobStore.retryAllFailed()
+    showToast(`已发起重试 ${retried} 个失败 job`, 'success')
+    await load()
+  } catch {
+    showToast('批量重试失败', 'error')
+  } finally {
+    retryingAll.value = false
+  }
+}
+
 async function loadMore() {
   if (jobStore.loading || !hasMore.value) return
   offset.value += PAGE
@@ -214,6 +229,9 @@ const isInitialLoading = computed(() => jobStore.loading && jobStore.list.length
         <div class="h1"><Inbox :size="18" />所有来源</div>
         <div class="lead">跨知识库的所有投递，可按来源、类型、状态筛选。</div>
       </div>
+      <button class="btn" style="margin-left:auto" :disabled="retryingAll" @click="onRetryAllFailed">
+        <RotateCcw :size="14" />{{ retryingAll ? '重试中…' : '重试全部失败' }}
+      </button>
     </div>
 
     <!-- 三组筛选 -->

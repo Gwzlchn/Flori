@@ -396,6 +396,19 @@ async def delete_job(
     await redis.publish("job_command", {"action": "delete", "job_id": job_id})
 
 
+@router.post("/retry-failed")
+async def retry_all_failed(
+    db: Database = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+):
+    """批量重试所有 failed job(各自从首个失败步重跑,自动重置下游)。返回发起数。
+    注:缺凭证类失败(如无 cookie 的 YouTube 下载)修好根因前会再失败。"""
+    _, jobs = await asyncio.to_thread(db.list_jobs, status="failed", limit=100000)
+    for j in jobs:
+        await redis.publish("job_command", {"action": "retry", "job_id": j.id})
+    return {"retried": len(jobs)}
+
+
 @router.post("/{job_id}/retry")
 async def retry_job(
     job_id: str,
