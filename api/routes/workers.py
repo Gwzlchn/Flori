@@ -176,6 +176,15 @@ async def mint_registration_token(redis: RedisClient = Depends(get_redis)):
     return {"token": token, "expires_in_sec": ttl}
 
 
+@router.get("/registration-token")
+async def registration_token_status(redis: RedisClient = Depends(get_redis)):
+    """接入 token 状态(不回明文):是否已铸 + 剩余有效秒。注:env WORKER_REGISTRATION_TOKEN
+    配的长期 token 不经 redis,不在此反映。须置于 GET /{worker_id} 之前,否则被路径参数路由遮蔽。"""
+    tok = await redis.get_registration_token()
+    ttl = await redis.get_registration_token_ttl() if tok else -2
+    return {"exists": bool(tok), "expires_in_sec": (ttl if ttl and ttl > 0 else None)}
+
+
 @router.get("/{worker_id}")
 async def get_worker(
     worker_id: str,

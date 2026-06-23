@@ -238,3 +238,23 @@ async def update_pool_limits(
         else:
             raise HTTPException(400, f"pool '{pool}' limit must be a non-negative integer or null")
     return {"status": "updated"}
+
+
+@router.get("/pipelines", dependencies=[Depends(verify_token)])
+async def list_pipelines(config: AppConfig = Depends(get_config)):
+    """流水线只读视图:各 pipeline 的步骤 DAG(键+中文名+池)。模板/'.'前缀/default 不算 pipeline。"""
+    out = []
+    for name, pc in (config.pipelines or {}).items():
+        if name.startswith(".") or name == "default":
+            continue
+        steps = (pc or {}).get("steps")
+        if not isinstance(steps, list):
+            continue
+        out.append({
+            "name": name,
+            "steps": [
+                {"key": s.get("name"), "label": s.get("label"), "pool": s.get("pool")}
+                for s in steps
+            ],
+        })
+    return {"pipelines": out}

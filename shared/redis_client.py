@@ -389,6 +389,10 @@ class RedisClient:
     async def get_registration_token(self) -> str | None:
         return await self.r.get(self._REGISTRATION_TOKEN_KEY)
 
+    async def get_registration_token_ttl(self) -> int:
+        """接入 token 剩余有效秒:>0=剩余秒数,-1=永不过期,-2=不存在。"""
+        return await self.r.ttl(self._REGISTRATION_TOKEN_KEY)
+
     async def set_registration_token(self, token: str, ttl_sec: int | None = None) -> None:
         # ttl_sec 给接入 token 设过期,泄漏后自动失效;None 表示不过期(向后兼容)。
         if ttl_sec:

@@ -306,6 +306,10 @@ Response `200`:
 {"token": "flw-xxxxxxxx"}
 ```
 
+#### GET /api/workers/registration-token — 接入 token 状态
+
+不回明文,仅状态:`{"exists": bool, "expires_in_sec": int|null}`（剩余有效秒,无过期/不存在为 null）。env `WORKER_REGISTRATION_TOKEN` 配的长期 token 不经 redis,不在此反映。路由须置于 `GET /api/workers/{id}` 之前,否则被路径参数路由遮蔽。
+
 #### GET /api/workers/{id}/jobs — Worker 任务历史
 
 该 worker 执行过的步骤记录。`?limit=` 默认 50，范围 1–200。
@@ -446,6 +450,7 @@ PUT  /api/config/pools                 → 热更新资源池配置(写 pools.ya
 GET  /api/config/pool-limits           → 各池 {default(pools.yaml), override(redis 运行时覆盖,可 null)}
 PUT  /api/config/pool-limits           → 运行时覆盖各池上限(写 redis、不动 pools.yaml;body {pool:int}=设、{pool:null}=清除回落默认;即时对所有 worker 含网关生效;0=暂停该池;unknown pool/非法值 400)
 GET  /api/config/styles                → 可用风格标签列表
+GET  /api/pipelines                    → 流水线只读:各 pipeline 步骤 DAG {name, steps:[{key,label,pool}]};模板/'.'前缀/default 不计
 ```
 
 #### GET /api/config/styles
