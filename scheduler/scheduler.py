@@ -1107,14 +1107,23 @@ class Scheduler:
             await self.redis.delete_step_status(job_id, name)
             await asyncio.to_thread(self.db.delete_step, job_id, name)
 
-        # 当前 pipeline 的每个步:取已有状态(缺则 waiting),redis 与 DB 都写到同一状态(强制对齐)。
+        # 当前 pipeline 的每个步:取已有状态(缺则 waiting),redis 与 DB 都对齐到该状态。
+        # DB 侧:已有行只在状态变化时 update_step(status=)——不能 upsert_step 整行替换,
+        # 否则会抹掉已完成步的 started_at/finished_at/duration/input_hash(流水线显示无时间);
+        # 仅 DB 缺该步(分叉)时才 upsert_step 新建。
         for name, cfg in steps.items():
             status = existing.get(name) or db_status.get(name) or "waiting"
             await self.redis.set_step_status(job_id, name, status)
-            await asyncio.to_thread(
-                self.db.upsert_step,
-                Step(job_id=job_id, name=name, status=StepStatus(status), pool=cfg["pool"]),
-            )
+            if name in db_status:
+                if db_status[name] != status:
+                    await asyncio.to_thread(
+                        self.db.update_step, job_id, name, status=StepStatus(status),
+                    )
+            else:
+                await asyncio.to_thread(
+                    self.db.upsert_step,
+                    Step(job_id=job_id, name=name, status=StepStatus(status), pool=cfg["pool"]),
+                )
 
         await asyncio.to_thread(
             self.db.update_job, job_id, status=JobStatus.PROCESSING,

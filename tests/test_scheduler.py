@@ -1347,6 +1347,31 @@ class TestResubmit:
         assert redis_names == {"A", "B", "C"}          # C 补回 redis
         assert db_names == redis_names                 # 核心:两侧一致、无分叉
 
+    @pytest.mark.asyncio
+    async def test_resubmit_preserves_existing_step_metadata(self, scheduler, redis, db):
+        """resubmit 不得抹掉已存在步的时间戳/指纹(回归:对已有行用 update_step 只改 status,
+        不能 upsert_step 整行替换——否则已完成步的 started_at/duration/input_hash 被清空,
+        流水线显示该步「无时间」)。"""
+        job = make_job()
+        db.create_job(job)
+        await scheduler.submit_job(job)
+        # 把 A 标成 done 且带时间戳/时长/指纹(模拟真实跑完的步)
+        db.update_step("j_test_001", "A", status=StepStatus.DONE,
+                       started_at="2026-01-01T00:00:00+00:00",
+                       finished_at="2026-01-01T00:00:05+00:00",
+                       duration_sec=5.0, input_hash="deadbeef")
+        await redis.set_step_status("j_test_001", "A", "done")
+        scheduler.reload_config = lambda: None
+
+        await scheduler.resubmit("j_test_001")
+
+        a = next(s for s in db.get_steps("j_test_001") if s.name == "A")
+        assert a.status == StepStatus.DONE
+        assert a.started_at is not None                 # 时间戳保留(不被 upsert 抹掉)
+        assert a.finished_at is not None
+        assert a.duration_sec == 5.0
+        assert a.input_hash == "deadbeef"               # 指纹保留
+
 
 class TestRetryFailed:
     @pytest.mark.asyncio
