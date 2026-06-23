@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { useApi } from '../composables/useApi'
-import type { Worker, WorkerJob } from '../types'
+import type { Worker, WorkerJob, FullStatus, SystemEvent, UsageAggregate } from '../types'
 
 export const useWorkerStore = defineStore('workers', () => {
   const api = useApi()
@@ -59,9 +59,21 @@ export const useWorkerStore = defineStore('workers', () => {
     await api.put('/api/config/pool-limits', body)
   }
 
+  // 系统健康总览页:全量状态(version + 组件 + 四段 + throughput)、事件流、AI 用量聚合。
+  async function fetchFullStatus(): Promise<FullStatus> {
+    return await api.get<FullStatus>('/api/status')
+  }
+  async function fetchEvents(limit = 50): Promise<{ events: SystemEvent[] }> {
+    return await api.get(`/api/events?limit=${limit}`)
+  }
+  async function fetchUsage(): Promise<UsageAggregate> {
+    return await api.get<UsageAggregate>('/api/usage')
+  }
+
   return {
     workers, loading, fetchAll, pause, resume,
     updateNote, updateTags, remove, mintToken, fetchJobs,
     fetchPoolLimits, savePoolLimits,
+    fetchFullStatus, fetchEvents, fetchUsage,
   }
 })

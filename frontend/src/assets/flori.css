@@ -624,3 +624,36 @@ mark{background:var(--brand-100);color:var(--brand-700);padding:0 2px;border-rad
   /* 正文左右留白收紧 */
   .page{padding:18px 16px 56px}
 }
+
+/* ════ 系统健康总览页（/system）：健康条 / 组件卡 / 4 格栅格 / 骨架 ════ */
+/* 全部复用既有 token（--ok/--warn/--bad/--mut/--ink-*/--line-*），无新增颜色。 */
+
+/* 4 等分概览栅格（②系统概览）；断点降列复用 grid3 同档。 */
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+@media(max-width:900px){ .grid4{grid-template-columns:repeat(2,1fr)} }
+@media(max-width:767px){ .grid4{grid-template-columns:repeat(2,1fr)} }
+
+/* ①系统健康条：full-width 卡，左 4px 竖色条按聚合态变色，放大状态点。 */
+.health-bar{display:flex;align-items:center;gap:14px;border-left:4px solid var(--ok)}
+.hb-ok{border-left-color:var(--ok)}
+.hb-warn{border-left-color:var(--warn)}
+.hb-down{border-left-color:var(--bad)}
+.dot-lg{width:12px;height:12px}
+.hb-text{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+.hb-title{font-size:15px;font-weight:700;color:var(--ink-900)}
+.hb-sub{font-size:12.5px;color:var(--ink-500)}
+@media(max-width:767px){ .health-bar{align-items:flex-start} }
+
+/* ③核心组件卡：点+名+徽章 / 主标识行 / 次要指标行（与 worker 卡同构）。 */
+.comp-card{padding:13px 15px;display:flex;flex-direction:column;gap:6px}
+.comp-hd{display:flex;align-items:center;gap:8px}
+.comp-hd .name{font-size:13.5px;font-weight:600;color:var(--ink-900);flex:1}
+.comp-main{font-size:12.5px;color:var(--ink-700)}
+.comp-meta{font-size:11.5px;color:var(--ink-500)}
+.comp-card .mono{font-family:var(--mono)}
+.comp-card.is-down{border-left:3px solid var(--bad)}
+.comp-note{font-size:11.5px;color:var(--bad)}
+
+/* 首屏加载骨架条（status===null 且首响应未回）。 */
+.sk-bar{border-radius:4px;background:var(--line-soft);animation:sk 1.2s ease-in-out infinite}
+@keyframes sk{0%,100%{opacity:.45}50%{opacity:.9}}

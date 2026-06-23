@@ -1015,6 +1015,33 @@ class Database:
             ],
         }
 
+    def list_usage_by_job(self, job_id: str) -> list[dict]:
+        """该 job 的逐次 AI 调用明细(供 job 详情按步展示:in/out/cache/命中率/cost/耗时/轮数/worker)。
+        命中率 = cache_read /(input + cache_read + cache_creation)。"""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT step, worker_id, provider, model,
+                    input_tokens, output_tokens,
+                    cache_creation_input_tokens, cache_read_input_tokens,
+                    cost_usd, duration_sec, num_turns, created_at
+                FROM ai_usage WHERE job_id=? ORDER BY created_at""",
+                (job_id,),
+            ).fetchall()
+        out = []
+        for r in rows:
+            denom = r["input_tokens"] + r["cache_creation_input_tokens"] + r["cache_read_input_tokens"]
+            hit = round(r["cache_read_input_tokens"] / denom * 100, 1) if denom else 0.0
+            out.append({
+                "step": r["step"], "worker_id": r["worker_id"],
+                "provider": r["provider"], "model": r["model"],
+                "input_tokens": r["input_tokens"], "output_tokens": r["output_tokens"],
+                "cache_creation_tokens": r["cache_creation_input_tokens"],
+                "cache_read_tokens": r["cache_read_input_tokens"],
+                "cost_usd": round(r["cost_usd"], 6), "duration_sec": r["duration_sec"],
+                "num_turns": r["num_turns"], "cache_hit_rate_pct": hit,
+            })
+        return out
+
     def throughput_since(self, since_iso: str) -> dict:
         """近窗口吞吐:since_iso 之后进入终态的 job 计数(done/failed)。用 updated_at 近似终态时刻
         (rerun 改 updated_at 致重复计入罕见,设计 §7.3 已注;利用 idx_jobs_status)。"""
