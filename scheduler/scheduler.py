@@ -851,9 +851,13 @@ class Scheduler:
 
     # ── 孤儿回收 + 卡住检测 ──
 
-    _CLAIM_MISMATCH_GRACE_SEC = 30
+    # 认领后到首个进度心跳之间允许的「无心跳」窗口。尤其 gateway worker 拉大源文件(source.mp4)
+    # 的 pull 阶段:子进程未起、on_tick 未触发,progress_at 为 None。取 120s 覆盖慢链路拉取,
+    # 避免 pull 中的步被误判 claim lost 回收(曾致 03_scene 等步雪崩)。真丢认领最迟 120s 回收
+    # (罕见,可接受)。开 STORAGE_WORKDIR_REUSE 后 pull 近乎瞬时、基本不触发。env 可调。
+    _CLAIM_MISMATCH_GRACE_SEC = int(os.environ.get("CLAIM_MISMATCH_GRACE_SEC", "120"))
     # 判「这步是否有人在跑」用每步独立的进度心跳新鲜度(worker on_tick 每 10s 刷一步)。
-    # 取 30s(≈3 拍)留余量,避免扫描时序抖动误判正在跑的步。
+    # 30s(≈3 拍)留余量,避免扫描时序抖动误判正在跑的步。
     _STEP_PROGRESS_FRESH_SEC = 30
 
     async def orphan_scan(self) -> None:
