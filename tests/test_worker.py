@@ -529,21 +529,23 @@ class TestParseErrorType:
     def test_reads_error_json(self, worker, tmp_jobs_dir):
         job_dir = tmp_jobs_dir / "j1"
         job_dir.mkdir()
-        error_data = {"error_type": "ai_rate_limit", "message": "429"}
+        error_data = {"error_type": "ai_rate_limit", "message": "429 rate limited"}
         (job_dir / ".A.error.json").write_text(json.dumps(error_data))
 
-        assert worker._parse_error_type(job_dir, "A") == "ai_rate_limit"
+        etype, emsg = worker._parse_error(job_dir, "A")
+        assert etype == "ai_rate_limit"
+        assert emsg == "429 rate limited"   # message 用于 stderr 为空时的兜底
 
     def test_missing_file(self, worker, tmp_jobs_dir):
         job_dir = tmp_jobs_dir / "j2"
         job_dir.mkdir()
-        assert worker._parse_error_type(job_dir, "A") == "unknown"
+        assert worker._parse_error(job_dir, "A") == ("unknown", "")
 
     def test_corrupt_json(self, worker, tmp_jobs_dir):
         job_dir = tmp_jobs_dir / "j3"
         job_dir.mkdir()
         (job_dir / ".A.error.json").write_text("not json")
-        assert worker._parse_error_type(job_dir, "A") == "unknown"
+        assert worker._parse_error(job_dir, "A") == ("unknown", "")
 
 
 class TestExecuteFullFlow:

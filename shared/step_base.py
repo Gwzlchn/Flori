@@ -83,9 +83,13 @@ class StepBase:
             })
         except StepError as e:
             self.write_error(e.error_type, str(e))
+            # 同时打到 stderr:step_runner 会把它 tee 进 logs/{step}.log(失败也推存储)+ captured
+            # 为 stderr_tail → worker 据此记真实错误,而非只写 error.json 导致 worker 记「unknown error」。
+            print(f"[{e.error_type}] {e}", file=sys.stderr, flush=True)
             sys.exit(1)
         except Exception as e:
             self.write_error("unknown", str(e), traceback.format_exc())
+            traceback.print_exc()  # 完整栈到 stderr → logs/{step}.log,前端可见、worker 记真因
             sys.exit(1)
 
     @classmethod

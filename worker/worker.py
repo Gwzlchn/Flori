@@ -321,8 +321,10 @@ class Worker:
                     job_id=job_id, step=step, duration=round(duration, 1),
                 )
             else:
-                error_msg = stderr[-500:] if stderr else "unknown error"
-                error_type = self._parse_error_type(work_dir, step)
+                error_type, error_json_msg = self._parse_error(work_dir, step)
+                # 兜底:子进程 stderr 为空时,用 .{step}.error.json 的 message(真实异常文本),
+                # 避免前端只看到「unknown error」无从排错。
+                error_msg = (stderr[-500:] if stderr else "") or error_json_msg[:500] or "unknown error"
                 await self.transport.report_failed(
                     claim, error_msg, error_type, duration, start, count_stats=True,
                 )
@@ -382,15 +384,16 @@ class Worker:
 
     # ── 工具方法 ──
 
-    def _parse_error_type(self, work_dir: Path, step: str) -> str:
+    def _parse_error(self, work_dir: Path, step: str) -> tuple[str, str]:
+        """从 .{step}.error.json 读 (error_type, message);失败上报在子进程 stderr 为空时据此兜底。"""
         error_file = work_dir / f".{step}.error.json"
         if error_file.exists():
             try:
                 data = json.loads(error_file.read_text())
-                return data.get("error_type", "unknown")
+                return data.get("error_type", "unknown"), (data.get("message") or "")
             except (json.JSONDecodeError, OSError):
                 pass
-        return "unknown"
+        return "unknown", ""
 
     async def _push_safe(self, job_id: str, step: str, work_dir: Path) -> None:
         """把本步产物(含日志)推回存储;失败不致命(避免遮蔽真正的步骤错误)。"""
