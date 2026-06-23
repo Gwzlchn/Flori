@@ -661,7 +661,8 @@ watch(job, (j) => {
             <!-- 视频→时长+分辨率、文章→字数、通用→原始大小/字幕(metadata.json/parsed.json) -->
             <tr v-if="job.media?.duration_sec"><td>时长</td><td>{{ fmtDuration(job.media.duration_sec) }}</td></tr>
             <tr v-if="job.media?.resolution"><td>分辨率</td><td class="mono">{{ job.media.resolution }}</td></tr>
-            <tr v-if="job.media?.video_codec"><td>编码</td><td class="mono">{{ job.media.video_codec }}<span v-if="job.media.audio_codec"> / {{ job.media.audio_codec }}</span></td></tr>
+            <tr v-if="job.media?.video_codec"><td>视频编码</td><td class="mono">{{ job.media.video_codec }}</td></tr>
+            <tr v-if="job.media?.audio_codec"><td>音频编码</td><td class="mono">{{ job.media.audio_codec }}</td></tr>
             <tr v-if="job.media?.fps"><td>帧率</td><td>{{ job.media.fps }} fps</td></tr>
             <tr v-if="job.media?.bitrate_kbps ?? job.media?.video_bitrate_kbps"><td>码率</td><td>{{ fmtBitrate(job.media.bitrate_kbps ?? job.media.video_bitrate_kbps) }}</td></tr>
             <tr v-if="job.media?.word_count"><td>字数</td><td>{{ job.media.word_count.toLocaleString() }} 字</td></tr>
