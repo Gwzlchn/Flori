@@ -99,6 +99,11 @@ async def register(
     token_hash = hashlib.sha256(worker_token.encode()).hexdigest()
     now = datetime.now(timezone.utc)
 
+    # 重注册保留管理员暂停态:worker 重启不应清掉暂停(否则每次重启都要重新暂停)。
+    # 从 DB(持久,无 TTL)读已有 admin_status;新 worker 无记录则为空。
+    _existing = await asyncio.to_thread(db.get_worker, worker_id)
+    admin_status = _existing.admin_status if _existing else ""
+
     await asyncio.to_thread(
         db.upsert_worker_token,
         token_hash=token_hash,
@@ -121,7 +126,7 @@ async def register(
         "reject_tags": ",".join(sorted(req.reject_tags)),
         "hostname": req.hostname or "",
         "status": "idle",
-        "admin_status": "",
+        "admin_status": admin_status,
         "concurrency": str(req.concurrency),
         "remote_addr": remote_addr,
         "spec": json.dumps(req.spec or {}),
@@ -139,6 +144,7 @@ async def register(
             reject_tags=set(req.reject_tags),
             hostname=req.hostname,
             status="idle",
+            admin_status=admin_status,
             concurrency=req.concurrency,
             remote_addr=remote_addr or None,
             started_at=now,

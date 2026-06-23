@@ -114,6 +114,9 @@ class RedisTransport:
     async def register(self, worker_id, worker_type, pools, tags,
                        reject_tags, hostname, now, concurrency: int = 1,
                        spec: dict | None = None):
+        # 重注册保留管理员暂停态(同 api register):从 DB 读回 admin_status,重启不清暂停。
+        existing = await asyncio.to_thread(self._db.get_worker, worker_id)
+        admin_status = existing.admin_status if existing else ""
         info = {
             "type": worker_type,
             "pools": ",".join(pools),
@@ -121,7 +124,7 @@ class RedisTransport:
             "reject_tags": ",".join(sorted(reject_tags)),
             "hostname": hostname,
             "status": "idle",
-            "admin_status": "",
+            "admin_status": admin_status,
             "concurrency": str(concurrency),
             "spec": json.dumps(spec or {}),   # 版本/机器配置(redis-only,前端 worker 详情展示)
             "started_at": now.isoformat(),
@@ -133,7 +136,7 @@ class RedisTransport:
         worker_model = WorkerModel(
             id=worker_id, type=worker_type, pools=pools,
             tags=tags, reject_tags=reject_tags, hostname=hostname,
-            status="idle", concurrency=concurrency,
+            status="idle", admin_status=admin_status, concurrency=concurrency,
             started_at=now, first_seen=now, last_heartbeat=now,
         )
         await asyncio.to_thread(self._db.upsert_worker, worker_model)
