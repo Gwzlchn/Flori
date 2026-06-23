@@ -42,17 +42,16 @@ class TestFramesStep:
 
         fake_frame = np.zeros((180, 320, 3), dtype=np.uint8)
 
-        class FakeCap:
-            def get(self, prop): return 25.0
-            def set(self, prop, val): pass
-            def read(self): return (True, fake_frame)
-            def release(self): pass
+        class FakeReader:   # 对齐 PyAV _VideoReader:.fps + read_at_frame(frame_no) + close()
+            fps = 25.0
+            def read_at_frame(self, n): return fake_frame
+            def close(self): pass
 
         def fake_imwrite(path, *a, **k):
             Path(path).write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 2000)
             return True
 
-        with patch.object(cv2, "VideoCapture", return_value=FakeCap()), \
+        with patch("steps.video.step_04_frames._VideoReader", return_value=FakeReader()), \
              patch.object(cv2, "imwrite", side_effect=fake_imwrite):
             result = step.execute()
 
@@ -92,16 +91,14 @@ class TestFramesStep:
         sf, ef = 0, int(10.0 * fps)            # 0, 250
         mf = sf + int((ef - sf) * 0.7)         # 175(默认 dynamic_pick_ratio=0.7)
 
-        class DynCap:
-            def __init__(self): self._pos = 0
-            def get(self, prop): return fps
-            def set(self, prop, val): self._pos = val
-            def read(self):
-                v = 0 if self._pos < mf else 255   # head 黑 / ratio 帧白 → SSIM≈0 < 0.85
-                return (True, np.full((180, 320, 3), v, dtype=np.uint8))
-            def release(self): pass
+        class DynReader:   # read_at_frame(frame_no):head 黑 / ratio 帧白 → SSIM≈0 < 0.85
+            fps = 25.0
+            def read_at_frame(self, n):
+                v = 0 if n < mf else 255
+                return np.full((180, 320, 3), v, dtype=np.uint8)
+            def close(self): pass
 
-        with patch.object(cv2, "VideoCapture", return_value=DynCap()), \
+        with patch("steps.video.step_04_frames._VideoReader", return_value=DynReader()), \
              patch.object(cv2, "imwrite", side_effect=self._fake_imwrite):
             step.execute()
 
@@ -118,13 +115,12 @@ class TestFramesStep:
         config = make_step_config(tmp_path, step_name="04_frames", pool="cpu")
         step = FramesStep("04_frames", job_dir, config)
 
-        class StaticCap:
-            def get(self, prop): return 25.0
-            def set(self, prop, val): pass
-            def read(self): return (True, np.full((180, 320, 3), 128, dtype=np.uint8))
-            def release(self): pass
+        class StaticReader:
+            fps = 25.0
+            def read_at_frame(self, n): return np.full((180, 320, 3), 128, dtype=np.uint8)
+            def close(self): pass
 
-        with patch.object(cv2, "VideoCapture", return_value=StaticCap()), \
+        with patch("steps.video.step_04_frames._VideoReader", return_value=StaticReader()), \
              patch.object(cv2, "imwrite", side_effect=self._fake_imwrite):
             step.execute()
 
@@ -141,13 +137,12 @@ class TestFramesStep:
         config = make_step_config(tmp_path, step_name="04_frames", pool="cpu")
         step = FramesStep("04_frames", job_dir, config)
 
-        class StaticCap:
-            def get(self, prop): return 25.0
-            def set(self, prop, val): pass
-            def read(self): return (True, np.full((180, 320, 3), 128, dtype=np.uint8))
-            def release(self): pass
+        class StaticReader:
+            fps = 25.0
+            def read_at_frame(self, n): return np.full((180, 320, 3), 128, dtype=np.uint8)
+            def close(self): pass
 
-        with patch.object(cv2, "VideoCapture", return_value=StaticCap()), \
+        with patch("steps.video.step_04_frames._VideoReader", return_value=StaticReader()), \
              patch.object(cv2, "imwrite", side_effect=self._fake_imwrite):
             step.execute()
 

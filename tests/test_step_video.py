@@ -18,14 +18,11 @@ def _cfg(tmp):
 
 
 class _FakeCap:
-    """鸭子类型替身,按帧号返回预置 numpy 帧。"""
+    """鸭子类型替身,按帧号返回预置 numpy 帧(对齐 PyAV _VideoReader.read_at_frame)。"""
     def __init__(self, frames):
-        self.frames = frames; self.pos = 0
-    def set(self, prop, val):
-        self.pos = int(val)
-    def read(self):
-        f = self.frames.get(self.pos)
-        return (f is not None, f)
+        self.frames = frames
+    def read_at_frame(self, n):
+        return self.frames.get(int(n))
 
 
 def _img(seed):
