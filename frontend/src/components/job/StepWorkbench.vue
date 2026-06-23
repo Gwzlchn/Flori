@@ -41,7 +41,8 @@ const selFile = ref<AFile | null>(null)
 const fileContent = ref('')
 const fileLoading = ref(false)
 const fileErr = ref('')
-const logOpen = ref(false)
+const artOpen = ref(true)        // 产物默认展开,可折叠
+const logOpen = ref(false)       // 日志默认折叠
 const logText = ref('')
 const logLoading = ref(false)
 const logErr = ref('')
@@ -211,9 +212,13 @@ watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pick
 
           <!-- ════ 产物(本步产出的文件)════ -->
           <div v-if="['done', 'failed', 'running'].includes(selStep.status)" class="mt-4 pt-3 border-t border-gray-100">
-            <div class="text-xs font-semibold text-gray-700 mb-2 flex items-center gap-1.5">
-              <Package :size="13" class="text-gray-500" />产物 <span class="font-normal text-gray-400">（{{ selFiles.length }}）</span>
+            <div class="flex items-center gap-2 mb-2">
+              <span class="text-xs font-semibold text-gray-700 flex items-center gap-1.5"><Package :size="13" class="text-gray-500" />产物 <span class="font-normal text-gray-400">（{{ selFiles.length }}）</span></span>
+              <button @click="artOpen = !artOpen" class="text-xs text-blue-600 hover:text-blue-700 flex items-center gap-0.5">
+                <ChevronRight :size="12" :class="artOpen ? 'rotate-90' : ''" class="transition-transform" />{{ artOpen ? '收起' : '展开' }}
+              </button>
             </div>
+            <template v-if="artOpen">
             <div v-if="selFiles.length" class="space-y-3">
               <div v-for="grp in cats" :key="grp.cat">
                 <div class="text-xs font-medium text-gray-600 mb-1.5">{{ grp.cat }} <span class="text-gray-400 font-normal">({{ grp.files.length }})</span></div>
@@ -252,6 +257,7 @@ watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pick
               </div>
             </div>
             <div v-else class="text-xs text-gray-400">该步骤无产物文件</div>
+            </template>
           </div>
 
           <!-- ════ 日志(本步运行日志)════ -->
@@ -266,7 +272,7 @@ watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pick
               <div v-if="logLoading" class="text-xs text-gray-400">加载中…</div>
               <div v-else-if="logErr" class="text-xs text-gray-400">{{ logErr }}</div>
               <div v-else-if="!logText.trim()" class="text-xs text-gray-400">该步骤无日志输出</div>
-              <pre v-else class="text-xs bg-gray-900 text-gray-100 rounded-lg p-3 max-h-72 overflow-auto whitespace-pre-wrap break-all">{{ logText }}</pre>
+              <pre v-else class="text-xs bg-gray-50 text-gray-800 border border-gray-200 rounded-lg p-3 max-h-72 overflow-auto whitespace-pre-wrap break-all">{{ logText }}</pre>
             </div>
           </div>
         </template>
