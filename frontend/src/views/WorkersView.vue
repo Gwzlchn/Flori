@@ -140,13 +140,13 @@ const gpuFlag = computed(() => (newType.value === 'gpu' ? ' --gpus all' : ''))
 
 const command = computed(() => {
   if (activeTab.value === 'gateway') {
-    // 无状态:不挂 /data 卷。id 由 WORKER_NAME 确定性派生、configs 在镜像、产物经网关、凭证走 env。
+    // 无状态:不挂 /data 卷,configs/prompts 在镜像(CONFIG_DIR 默认 /app/configs),id 由 WORKER_NAME
+    // 确定性派生,产物经网关,凭证走 env。
     return `docker run -d --restart unless-stopped${gpuFlag.value} \\
   -e GATEWAY_URL=${gatewayUrl.value} \\
   -e GATEWAY_TLS_INSECURE=1 \\
   -e WORKER_REGISTRATION_TOKEN=${tokenLine.value} \\
   -e WORKER_NAME=${newType.value}-1 \\
-  -e CONFIG_DIR=/app/configs \\
 ${credLines.value}${cacheLine.value}  ${IMAGE} \\
   ${runCmd.value}`
   }
@@ -165,14 +165,13 @@ ${credLines.value}${cacheLine.value}  ${IMAGE} \\
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DATA_DIR=/data
-      - CONFIG_DIR=/app/configs
       - WORKER_NAME=${newType.value}-1
 ${credCompose}    depends_on: [ redis ]`
   }
   return `docker run -d --restart unless-stopped${gpuFlag.value} \\
   -e REDIS_URL=redis://<HOST>:6379/0 \\
   -e MINIO_URL=<HOST>:9000 -e MINIO_ACCESS_KEY=<KEY> -e MINIO_SECRET_KEY=<SECRET> -e MINIO_BUCKET=flori \\
-  -e DATA_DIR=/data -e CONFIG_DIR=/app/configs -e WORK_DIR=/tmp/flori-work \\
+  -e DATA_DIR=/data -e WORK_DIR=/tmp/flori-work \\
 ${credLines.value}${cacheLine.value}  -v flori-data:/data \\
   ${IMAGE} \\
   ${runCmd.value}`

@@ -45,7 +45,9 @@ async def main() -> None:
     args = parse_args()
 
     data_dir = os.environ.get("DATA_DIR", "/data")
-    config_dir = os.environ.get("CONFIG_DIR", "/data/configs")
+    # 默认从镜像烤入的 /app/configs 读(无状态 worker 不必显式传 CONFIG_DIR);
+    # docker/base.Dockerfile 把 configs/ 复制到 /app/configs。挂 /data 卷的部署可显式覆盖。
+    config_dir = os.environ.get("CONFIG_DIR", "/app/configs")
     config = load_config(config_dir=config_dir, data_dir=data_dir)
 
     gateway_url = os.environ.get("GATEWAY_URL")
