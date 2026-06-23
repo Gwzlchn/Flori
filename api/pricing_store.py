@@ -1,0 +1,88 @@
+"""api 侧 LiteLLM 价表缓存:启动从 MinIO 载入(快),每天拉一次最新存回 MinIO,内存持有供算价。
+
+计费在 api 侧做——纯网关 worker 不直连 MinIO/Redis,故由 api 在 record_ai_usage 时据本表填 cost。
+claude-cli 订阅路径用 CLI total_cost_usd(不经本表);未命中/空表 → 回退 worker 上报的 cost
+(其 ai_gateway.calc_cost 硬编码 PRICING 兜底)。对象落 MinIO:bucket 内 _pricing/litellm.json。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+
+import structlog
+
+from shared.pricing import cost_from_table, fetch_litellm_pricing
+
+_log = structlog.get_logger(component="pricing")
+
+_PRICING_JOB = "_pricing"        # 伪 job_id(不与真 job 冲突);经 storage.write_file 落 MinIO/_pricing/
+_PRICING_FILE = "litellm.json"
+_REFRESH_SEC = 86400             # 每天拉一次
+
+
+class PricingStore:
+    def __init__(self) -> None:
+        self._table: dict = {}
+
+    @property
+    def ready(self) -> bool:
+        return bool(self._table)
+
+    @property
+    def model_count(self) -> int:
+        return len(self._table)
+
+    def cost(self, provider: str, model: str, input_tokens: int, output_tokens: int,
+             cache_creation_tokens: int = 0, cache_read_tokens: int = 0) -> float | None:
+        """据当前 LiteLLM 表算成本;空表/未命中返回 None(调用方回退)。"""
+        if not self._table:
+            return None
+        return cost_from_table(self._table, provider, model, input_tokens, output_tokens,
+                               cache_creation_tokens, cache_read_tokens)
+
+    async def load_from_storage(self, storage) -> bool:
+        """启动快速载入(无网络):读 MinIO 缓存。成功返回 True。"""
+        try:
+            raw = await storage.read_file(_PRICING_JOB, _PRICING_FILE)
+            if raw:
+                table = json.loads(raw)
+                if isinstance(table, dict) and table:
+                    self._table = table
+                    _log.info("pricing_loaded", models=len(table), source="minio")
+                    return True
+        except Exception as e:
+            _log.warning("pricing_load_failed", error=str(e)[:200])
+        return False
+
+    async def refresh(self, storage) -> bool:
+        """拉 LiteLLM 最新 → 更新内存 + 存回 MinIO。失败保留旧表(不致 cost 归零)。"""
+        try:
+            table = await fetch_litellm_pricing()
+        except Exception as e:
+            _log.warning("pricing_fetch_failed", error=str(e)[:200])
+            return False
+        if not isinstance(table, dict) or not table:
+            return False
+        self._table = table
+        try:
+            await storage.write_file(
+                _PRICING_JOB, _PRICING_FILE,
+                json.dumps(table, ensure_ascii=False).encode("utf-8"),
+            )
+        except Exception as e:
+            _log.warning("pricing_persist_failed", error=str(e)[:200])
+        _log.info("pricing_refreshed", models=len(table))
+        return True
+
+    async def daily_loop(self, storage) -> None:
+        """启动先从 MinIO 载入(快,warm start),再拉一次最新;此后每 24h 刷新。"""
+        await self.load_from_storage(storage)
+        while True:
+            try:
+                await self.refresh(storage)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _log.exception("pricing_loop_error")
+            await asyncio.sleep(_REFRESH_SEC)

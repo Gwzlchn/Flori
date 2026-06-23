@@ -523,6 +523,41 @@ class TestUsage:
         assert summary["total_cost_usd"] == pytest.approx(0.5)
 
     @pytest.mark.asyncio
+    async def test_cost_filled_from_litellm_pricing(self, jobs_app, jobs_client, db):
+        """非 cli provider:api 侧 LiteLLM 价表命中 → 覆盖 worker 上报成本(权威,缓存感知)。"""
+        jobs_app.state.pricing._table = {
+            "claude-opus-4-8": {
+                "input_cost_per_token": 5e-06, "output_cost_per_token": 2.5e-05,
+                "cache_read_input_token_cost": 5e-07,
+            },
+        }
+        _, token = await _register_real(jobs_client)
+        resp = await jobs_client.post(
+            "/api/runner/usage",
+            json={"exec_id": "p1", "provider": "anthropic", "model": "claude-opus-4-8",
+                  "job_id": "jp", "step": "A", "input_tokens": 1_000_000, "output_tokens": 0,
+                  "cache_read_input_tokens": 1_000_000, "cost_usd": 0.0},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
+        # input 5e-6*1e6 + cache_read 5e-7*1e6 = 5 + 0.5 = 5.5,覆盖上报的 0
+        assert db.get_usage_summary(job_id="jp")["total_cost_usd"] == pytest.approx(5.5)
+
+    @pytest.mark.asyncio
+    async def test_claude_cli_cost_not_overridden(self, jobs_app, jobs_client, db):
+        """claude-cli 订阅:用 CLI total_cost_usd(等价成本),价表不覆盖。"""
+        jobs_app.state.pricing._table = {"claude-opus-4-8": {"input_cost_per_token": 5e-06}}
+        _, token = await _register_real(jobs_client)
+        await jobs_client.post(
+            "/api/runner/usage",
+            json={"exec_id": "p2", "provider": "claude-cli", "model": "claude-opus-4-8",
+                  "job_id": "jc", "step": "A", "input_tokens": 1_000_000, "output_tokens": 0,
+                  "cost_usd": 0.123},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert db.get_usage_summary(job_id="jc")["total_cost_usd"] == pytest.approx(0.123)
+
+    @pytest.mark.asyncio
     async def test_duplicate_usage_not_double_billed(self, jobs_client, db):
         """同 exec_id 二次上报(worker 重试/双发)→ 200 ok 但不翻倍计费(端点 docstring 承诺去重)。"""
         _, token = await _register_real(jobs_client)

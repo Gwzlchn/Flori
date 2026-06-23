@@ -12,6 +12,7 @@ from shared.db import Database
 from shared.logging_setup import setup_logging
 from shared.redis_client import RedisClient
 from shared.storage import create_storage
+from api.pricing_store import PricingStore
 
 
 async def _subscription_sync_loop(app: FastAPI) -> None:
@@ -64,14 +65,19 @@ def create_app(
 
         # 周期自动同步订阅(默认每 6h;SUBSCRIPTION_SYNC_HOURS=0 关闭)。
         sync_task = None
+        pricing_task = None
         if getattr(app.state, "_own_resources", False):
             import asyncio
             sync_task = asyncio.create_task(_subscription_sync_loop(app))
+            # LiteLLM 价表:启动从 MinIO 载入 + 每日拉最新(仅生产起;测试/注入态空表→runner 回退)。
+            pricing_task = asyncio.create_task(app.state.pricing.daily_loop(app.state.storage))
 
         yield
 
         if sync_task:
             sync_task.cancel()
+        if pricing_task:
+            pricing_task.cancel()
         if getattr(app.state, "_own_resources", False):
             await app.state.redis.close()
             app.state.db.close()
@@ -123,6 +129,9 @@ def create_app(
         app.state.redis = redis
         app.state.config = config
         app.state.storage = create_storage(config.jobs_dir) if config is not None else None
+
+    # LiteLLM 价表缓存(无条件置,供 runner 算价);daily_loop 仅生产在 lifespan 起,测试/注入态空表→回退。
+    app.state.pricing = PricingStore()
 
     from api.routes import (
         jobs, notes, workers, ws, auth, admin, profiles, runner, bili,

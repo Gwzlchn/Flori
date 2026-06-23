@@ -474,7 +474,7 @@ POST   /api/runner/jobs/{id}/steps/{step}/fail             → 上报失败
 POST   /api/runner/jobs/{id}/steps/{step}/release          → 释放认领（不计成败）
 POST   /api/runner/jobs/{id}/steps/{step}/progress         → 上报运行中进度（转发到 events:{id}）
 POST   /api/runner/jobs/{id}/steps/{step}/alive            → 步进度心跳（on_tick 每 10s，仅子进程存活时；供远程 job 卡死检测）
-POST   /api/runner/usage                                   → 记录一次 AI 用量（exec_id 去重）。body 含 worker_id（api 以鉴权 token 认定为准）、input/output_tokens、cache_creation/cache_read_input_tokens（命中率=read/(input+read+creation)）、cost_usd、duration_sec、num_turns、cached；claude-cli 经 `claude -p --output-format json` 取真实 usage+total_cost_usd
+POST   /api/runner/usage                                   → 记录一次 AI 用量（exec_id 去重）。body 含 worker_id（api 以鉴权 token 认定为准）、input/output_tokens、cache_creation/cache_read_input_tokens（命中率=read/(input+read+creation)）、cost_usd、duration_sec、num_turns、cached；claude-cli 经 `claude -p --output-format json` 取真实 usage+total_cost_usd。api 侧据 LiteLLM 价表（每天拉 `model_prices_and_context_window.json` 存 MinIO `_pricing/litellm.json`,缓存感知 per-token 单价）对**非 cli** provider 填权威 cost_usd（命中时覆盖上报值；空表/未命中回退上报值）；claude-cli 用其 CLI total_cost_usd（订阅=等价 API 成本,不覆盖）
 GET    /api/runner/jobs/{id}/artifacts                     → 产物清单（GatewayStorage.pull 据此）
 GET    /api/runner/jobs/{id}/artifacts/{rel}              → 取单个产物字节
 PUT    /api/runner/jobs/{id}/artifacts/{rel}              → 回传单个产物字节

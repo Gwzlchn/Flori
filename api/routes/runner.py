@@ -352,6 +352,7 @@ async def step_alive(
 
 @router.post("/usage")
 async def record_usage(
+    request: Request,
     req: RunnerUsageRequest,
     worker_id: str = Depends(verify_worker_token),
     db: Database = Depends(get_db),
@@ -373,6 +374,14 @@ async def record_usage(
         num_turns=req.num_turns,
         cached=req.cached,
     )
+    # 用 LiteLLM 价表填权威成本(claude-cli 订阅用 CLI total_cost_usd,不覆盖);空表/未命中→保留上报值。
+    if req.provider != "claude-cli":
+        pricing = getattr(request.app.state, "pricing", None)
+        if pricing is not None:
+            c = pricing.cost(req.provider, req.model, req.input_tokens, req.output_tokens,
+                             req.cache_creation_input_tokens, req.cache_read_input_tokens)
+            if c is not None:
+                usage.cost_usd = round(c, 6)
     await asyncio.to_thread(db.record_ai_usage, usage)
     return {"ok": True}
 
