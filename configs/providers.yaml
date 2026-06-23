@@ -31,7 +31,9 @@ providers:
   claude-cli:
     type: cli
     # prompt 经 stdin 喂入;有帧图时 provider 动态追加 --allowedTools Read --add-dir。
-    command: ["claude", "-p", "--output-format", "text"]
+    # 输出格式由 provider 强制 `--output-format json`(取真实 usage/cache/total_cost_usd/num_turns);
+    # 这里不写 --output-format(写了也会被 provider 剔除改 json)。
+    command: ["claude", "-p"]
     features: [vision]
     cost_usd: 0
 

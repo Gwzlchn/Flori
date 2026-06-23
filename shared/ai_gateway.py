@@ -35,7 +35,8 @@ PRICING: dict[tuple[str, str], dict[str, float]] = {
 }
 
 
-def calc_cost(provider: str, model: str, input_tokens: int, output_tokens: int) -> float:
+def calc_cost(provider: str, model: str, input_tokens: int, output_tokens: int,
+              cache_creation_tokens: int = 0, cache_read_tokens: int = 0) -> float:
     prices = PRICING.get((provider, model))
     if prices is None:
         # 未命中 PRICING:成本按 0 计,但打 warning——区分「刻意免费(cli/dry-run 不走本函数)」
@@ -43,7 +44,14 @@ def calc_cost(provider: str, model: str, input_tokens: int, output_tokens: int) 
         _log.warning("pricing_miss", provider=provider, model=model,
                      msg="未命中 PRICING,成本按 0 计——核对模型名与 PRICING 键是否一致")
         prices = {"input": 0, "output": 0}
-    return (input_tokens * prices["input"] + output_tokens * prices["output"]) / 1_000_000
+    inp = prices["input"]
+    # 缓存感知(Anthropic 口径,同 codeburn/LiteLLM):写缓存(5min)≈1.25× 输入价、读缓存≈0.1× 输入价。
+    return (
+        input_tokens * inp
+        + cache_creation_tokens * inp * 1.25
+        + cache_read_tokens * inp * 0.1
+        + output_tokens * prices["output"]
+    ) / 1_000_000
 
 
 # ── Provider 实现 ──
@@ -117,7 +125,7 @@ class AnthropicProvider:
             output_tokens=output_tokens,
             cache_creation_input_tokens=cc,
             cache_read_input_tokens=cr,
-            cost_usd=calc_cost("anthropic", request.model, input_tokens, output_tokens),
+            cost_usd=calc_cost("anthropic", request.model, input_tokens, output_tokens, cc, cr),
             duration_sec=round(duration, 2),
             cached=cr > 0,
         )
@@ -245,9 +253,13 @@ class ClaudeCLIProvider:
 
         # 命令模板里的 {prompt_file} 占位已弃用——prompt 改走 stdin(无 ARG_MAX 限制、不依赖文件读)。
         cmd = [part for part in self._command_template if "{prompt_file}" not in part]
-        # 结构化输出:拿真实 usage(in/out/cache token)+ total_cost_usd + num_turns,而非订阅路径丢统计。
-        if "--output-format" not in cmd:
-            cmd += ["--output-format", "json"]
+        # 结构化输出强制 json:拿真实 usage(in/out/cache token)+ total_cost_usd + num_turns。
+        # 模板里可能已带 `--output-format text`(providers.yaml 默认),先剔除该对再设 json,
+        # 否则 text 输出解析失败→回退零统计,批量统计形同虚设。
+        if "--output-format" in cmd:
+            _i = cmd.index("--output-format")
+            del cmd[_i:_i + 2]
+        cmd += ["--output-format", "json"]
         if request.allowed_tools:
             # 取证等联网步骤:放开指定工具(如 WebSearch + Bash),让 claude agentic 搜+抓+抽。
             # 与 images 分支互斥(取证不喂帧图);max_turns 给足(多轮:搜索→直连curl→抽取)。
@@ -326,6 +338,10 @@ class ClaudeCLIProvider:
                 model = obj.get("model") or "subscription"
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
+        # 订阅路径:claude -p 一般已回 total_cost_usd(=等价 API 成本,非真实账单,前端标「等价」)。
+        # 若缺失(回 0)而有 token,则按 PRICING 折算等价成本(缓存感知);model 未命中价表则仍为 0(已 warn)。
+        if cost == 0.0 and (in_tok or out_tok or cc or cr):
+            cost = round(calc_cost("anthropic", model, in_tok, out_tok, cc, cr), 6)
         return LLMResponse(
             content=content,
             model=model,

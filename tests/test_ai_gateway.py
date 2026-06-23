@@ -363,6 +363,7 @@ class TestAnthropicProvider:
         mock_usage.input_tokens = 100
         mock_usage.output_tokens = 50
         mock_usage.cache_read_input_tokens = 0
+        mock_usage.cache_creation_input_tokens = 0   # 真实 Usage 对象该字段是 int/None,非 MagicMock
 
         mock_response = MagicMock()
         mock_response.content = [MagicMock(type="text", text="Hello world")]
@@ -758,3 +759,34 @@ async def test_claude_cli_usage_roundtrips_file(tmp_path, monkeypatch):
     b = back[0]
     assert b.worker_id == "ai-abc" and b.num_turns == 2
     assert b.cache_creation_input_tokens == 7 and b.cache_read_input_tokens == 9
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_forces_json_output_format(monkeypatch):
+    """模板带 `--output-format text` 时,provider 必须剔除并强制 json(否则 usage 统计失效)。"""
+    seen = {}
+
+    async def fake_exec(*a, **k):
+        seen["cmd"] = list(a)
+        return _FakeProc(json.dumps({"result": "x", "usage": {}}).encode())
+
+    monkeypatch.setattr("shared.ai_gateway.asyncio.create_subprocess_exec", fake_exec)
+    p = ClaudeCLIProvider(command_template=["claude", "-p", "--output-format", "text"])
+    await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}]))
+    cmd = seen["cmd"]
+    assert "--output-format" in cmd
+    assert cmd[cmd.index("--output-format") + 1] == "json"
+    assert "text" not in cmd   # 旧 text 已被剔除
+
+
+def test_calc_cost_cache_aware():
+    """缓存感知:写缓存≈1.25× 输入价、读缓存≈0.1× 输入价。"""
+    # opus-4-8: input 15 / output 75 per 1M
+    base = calc_cost("anthropic", "claude-opus-4-8", 1_000_000, 0)
+    assert base == pytest.approx(15.0)
+    creation = calc_cost("anthropic", "claude-opus-4-8", 0, 0, cache_creation_tokens=1_000_000)
+    assert creation == pytest.approx(15.0 * 1.25)
+    read = calc_cost("anthropic", "claude-opus-4-8", 0, 0, cache_read_tokens=1_000_000)
+    assert read == pytest.approx(15.0 * 0.1)
+    # 读缓存比同量纯输入便宜 10×
+    assert read == pytest.approx(base * 0.1)
