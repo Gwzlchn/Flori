@@ -1,6 +1,7 @@
 [project]
 name = "flori"
-# 语义版本:每次改系统/worker 行为按语义递增(见 shared/version.py)。运行时版本 = 此值 + 构建短 sha。
+# 版本递增规则:任何改动 patch(第3段)+1;逢10进位(0.2.9→0.3.0,0.9.9→1.0.0);大重构 major+1。
+# 全系统单一版本,所有组件(api/scheduler/worker)统一。运行时 = 此值 + 构建短sha(见 shared/version.py)。
 version = "0.2.0"
 description = "AI-assisted personal learning knowledge base"
 requires-python = ">=3.11"
