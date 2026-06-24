@@ -54,6 +54,29 @@ def calc_cost(provider: str, model: str, input_tokens: int, output_tokens: int,
     ) / 1_000_000
 
 
+def _extract_cli_model(obj: dict) -> str:
+    """从 `claude -p --output-format json` 顶层 JSON 取真实模型名(兼容多种 CLI 输出)。
+    优先顶层 `model`(老/简单格式多半没有);否则取 `modelUsage`(新 CLI={模型名:{token...}})里
+    token 总数最大的键(主力模型);都拿不到 → "subscription"(订阅路径占位,不迁移历史数据)。"""
+    m = obj.get("model")
+    if isinstance(m, str) and m:
+        return m
+    usage = obj.get("modelUsage")
+    if isinstance(usage, dict) and usage:
+        def _tok_total(v: object) -> int:
+            if not isinstance(v, dict):
+                return 0
+            return sum(
+                int(x or 0)
+                for x in v.values()
+                if isinstance(x, (int, float)) and not isinstance(x, bool)
+            )
+        best = max(usage.items(), key=lambda kv: _tok_total(kv[1]))[0]
+        if isinstance(best, str) and best:
+            return best
+    return "subscription"
+
+
 # ── Provider 实现 ──
 
 
@@ -335,7 +358,7 @@ class ClaudeCLIProvider:
                 cr = int(u.get("cache_read_input_tokens", 0) or 0)
                 cost = float(obj.get("total_cost_usd", 0.0) or 0.0)
                 turns = int(obj.get("num_turns", 0) or 0)
-                model = obj.get("model") or "subscription"
+                model = _extract_cli_model(obj)
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
         # 订阅路径:claude -p 一般已回 total_cost_usd(=等价 API 成本,非真实账单,前端标「等价」)。

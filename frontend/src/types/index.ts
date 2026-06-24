@@ -219,6 +219,13 @@ export interface UsageAggregate {
   cache_hit_rate_pct: number
   by_model: UsageByModel[]
 }
+// LiteLLM 价表状态(GET /api/pricing)。fetched_at 为 ISO 串或 null(从未拉取)。
+export interface PricingStatus {
+  ready: boolean
+  model_count: number
+  fetched_at: string | null
+  source_url: string
+}
 
 export const COMPONENT_KIND_LABELS: Record<ComponentKind, string> = {
   api: 'API 服务', scheduler: '调度器', redis: 'Redis', minio: '对象存储',

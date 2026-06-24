@@ -212,3 +212,53 @@ class TestStylesConfig:
         body = resp.json()
         assert "lecture" in body
         assert "talk" in body
+
+
+class TestPricing:
+    @pytest.mark.asyncio
+    async def test_status_fresh_store(self, client):
+        # 空表(测试态从未拉取):ready=False、0 模型、fetched_at=None、source_url 为 LiteLLM 常量。
+        resp = await client.get("/api/pricing")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ready"] is False
+        assert body["model_count"] == 0
+        assert body["fetched_at"] is None
+        assert "litellm" in body["source_url"].lower()
+
+    @pytest.mark.asyncio
+    async def test_refresh_success_updates_status(self, client, app, monkeypatch):
+        # 手动更新成功:拉到表 → 200 + ready/model_count/fetched_at 全到位。
+        import api.pricing_store as ps
+
+        async def fake_fetch(*a, **k):
+            return {"claude-opus-4-8": {"input_cost_per_token": 5e-06}}
+
+        monkeypatch.setattr(ps, "fetch_litellm_pricing", fake_fetch)
+        resp = await client.post("/api/pricing/refresh")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ready"] is True
+        assert body["model_count"] == 1
+        assert body["fetched_at"] is not None
+        # 内存表已更新,后续 GET /api/pricing 一致。
+        assert app.state.pricing.model_count == 1
+
+    @pytest.mark.asyncio
+    async def test_refresh_failure_returns_502(self, client, monkeypatch):
+        # 上游拉取失败:不 crash,回 502 + 保留旧表(此处空表)。
+        import api.pricing_store as ps
+
+        async def boom(*a, **k):
+            raise RuntimeError("network down")
+
+        monkeypatch.setattr(ps, "fetch_litellm_pricing", boom)
+        resp = await client.post("/api/pricing/refresh")
+        assert resp.status_code == 502
+
+    @pytest.mark.asyncio
+    async def test_raw_returns_table(self, client, app):
+        app.state.pricing._table = {"gpt-4o": {"input_cost_per_token": 2.5e-06}}
+        resp = await client.get("/api/pricing/raw")
+        assert resp.status_code == 200
+        assert resp.json() == {"gpt-4o": {"input_cost_per_token": 2.5e-06}}
