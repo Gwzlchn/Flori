@@ -524,12 +524,21 @@ svg.lucide{width:16px;height:16px;flex:none}
 mark{background:var(--brand-100);color:var(--brand-700);padding:0 2px;border-radius:3px}
 
 /* ---- Worker 卡（抽类，去行内 style 重复） ---- */
-.wcard{display:flex;align-items:center;gap:13px;cursor:pointer}
+.wcard{display:flex;align-items:flex-start;gap:13px;cursor:pointer}
 .wcard.off{cursor:default;opacity:.78}
+.wcard>.dot{margin-top:5px;flex:none}
 .wcard-main{flex:1;min-width:0}
 .wcard-hd{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .wcard-id{font-size:13.5px;color:var(--ink-900)}
 .wcard .meta{margin-top:4px}
+/* worker 卡:统计行(完成/失败/并发大数字 + 负载药丸)+ 灰色副行(主机·算力·运行·心跳) */
+.wcard-stats{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-top:7px}
+.wstat{display:inline-flex;align-items:baseline;gap:4px;font-size:12px;color:var(--ink-500)}
+.wstat b{font-size:15px;font-weight:700;color:var(--ink-900)}
+.wstat b.bad{color:var(--bad)}
+.wload{align-self:center;font-size:11.5px;color:var(--ink-600);background:var(--line-soft);border-radius:999px;padding:2px 9px}
+.wcard-sub{display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:11.5px;color:var(--ink-400);margin-top:6px}
+.wcard-sub .sep{color:var(--ink-300)}
 /* ---- 集合卡（抽类，去行内 style 重复） ---- */
 .col-card{display:flex;flex-direction:column;cursor:pointer}
 .chead{display:flex;align-items:center;gap:10px;margin-bottom:12px}

@@ -673,17 +673,17 @@ function fmtCost(v: number): string { return `$${(v ?? 0).toFixed(4)}` }
               旧版本 {{ shortSha(w.spec?.version) }}
             </span>
           </div>
-          <div class="meta">
+          <div class="wcard-stats">
+            <span class="wstat"><b>{{ w.tasks_completed }}</b>完成</span>
+            <span class="wstat"><b :class="{ bad: w.tasks_failed > 0 }">{{ w.tasks_failed }}</b>失败</span>
+            <span class="wstat"><b>{{ w.concurrency }}</b>并发</span>
+            <span v-if="loadText(w)" class="wload">{{ loadText(w) }}</span>
+          </div>
+          <div class="wcard-sub">
             <span v-if="w.hostname">{{ w.hostname }}</span>
             <span v-if="w.hostname" class="sep">·</span>
-            <span>{{ computeDesc(w) }}</span><span class="sep">·</span>
-            <span>完成 {{ w.tasks_completed }}</span><span class="sep">·</span>
-            <span>失败 {{ w.tasks_failed }}</span><span class="sep">·</span>
-            <span>并发 {{ w.concurrency }}</span>
-            <template v-if="loadText(w)"><span class="sep">·</span><span>{{ loadText(w) }}</span></template>
-            <template v-if="w.total_duration_sec > 0">
-              <span class="sep">·</span><span>运行 {{ fmtDuration(w.total_duration_sec) }}</span>
-            </template>
+            <span>{{ computeDesc(w) }}</span>
+            <template v-if="w.total_duration_sec > 0"><span class="sep">·</span><span>运行 {{ fmtDuration(w.total_duration_sec) }}</span></template>
             <span class="sep">·</span><span>心跳 {{ fmtRelative(w.last_heartbeat) }}</span>
           </div>
         </div>
