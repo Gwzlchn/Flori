@@ -13,6 +13,7 @@ from shared.ai_gateway import (
     ClaudeCLIProvider,
     DryRunProvider,
     OpenAICompatibleProvider,
+    _extract_cli_model,
     calc_cost,
     collect_usage_from_file,
     record_usage_to_file,
@@ -790,3 +791,56 @@ def test_calc_cost_cache_aware():
     assert read == pytest.approx(15.0 * 0.1)
     # 读缓存比同量纯输入便宜 10×
     assert read == pytest.approx(base * 0.1)
+
+
+# ── claude-cli 真实 model 提取(批2 用量按 provider+model 分组)──
+
+class TestExtractCliModel:
+    def test_prefers_top_level_model(self):
+        # 老/简单格式:顶层 model 直接用,且优先于 modelUsage。
+        obj = {"model": "claude-opus-4-8",
+               "modelUsage": {"claude-sonnet-4-6": {"inputTokens": 999}}}
+        assert _extract_cli_model(obj) == "claude-opus-4-8"
+
+    def test_from_model_usage_picks_max_tokens(self):
+        # 新 CLI 顶层无 model,从 modelUsage 取 token 总数最大的键(主力模型)。
+        obj = {"modelUsage": {
+            "claude-haiku-4": {"inputTokens": 10, "outputTokens": 5},        # 合计 15
+            "claude-opus-4-8": {"inputTokens": 800, "outputTokens": 200,
+                                "cacheReadInputTokens": 100},                 # 合计 1100
+        }}
+        assert _extract_cli_model(obj) == "claude-opus-4-8"
+
+    def test_falls_back_to_subscription(self):
+        # 两种字段都没有 → 订阅占位。
+        assert _extract_cli_model({}) == "subscription"
+        assert _extract_cli_model({"model": "", "modelUsage": {}}) == "subscription"
+
+    def test_ignores_non_numeric_token_values(self):
+        # token 值非数字(异常 JSON)不应让求和崩溃;仍能挑出唯一可计的键。
+        obj = {"modelUsage": {
+            "model-a": {"inputTokens": "oops"},
+            "model-b": {"inputTokens": 42},
+        }}
+        assert _extract_cli_model(obj) == "model-b"
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_uses_model_usage_when_no_top_model(monkeypatch):
+    """端到端:顶层无 model、有 modelUsage → LLMResponse.model = token 最多的模型。"""
+    payload = {
+        "result": "ok",
+        "modelUsage": {
+            "claude-opus-4-8": {"inputTokens": 500, "outputTokens": 120},
+            "claude-haiku-4": {"inputTokens": 10},
+        },
+        "usage": {"input_tokens": 510, "output_tokens": 120},
+    }
+
+    async def fake_exec(*a, **k):
+        return _FakeProc(json.dumps(payload).encode())
+
+    monkeypatch.setattr("shared.ai_gateway.asyncio.create_subprocess_exec", fake_exec)
+    p = ClaudeCLIProvider(command_template=["claude", "-p"])
+    r = await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}]))
+    assert r.model == "claude-opus-4-8"
