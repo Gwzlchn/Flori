@@ -549,7 +549,9 @@ async def list_pipelines(config: AppConfig = Depends(get_config)):
         out.append({
             "name": name,
             "steps": [
-                {"key": s.get("name"), "label": s.get("label"), "pool": s.get("pool")}
+                {"key": s.get("name"), "label": s.get("label"), "pool": s.get("pool"),
+                 # 依赖(YAML needs 归一化为内部 depends_on,见 config._FIELD_ALIASES),供前端画 DAG
+                 "needs": s.get("depends_on") or []}
                 for s in steps
             ],
         })

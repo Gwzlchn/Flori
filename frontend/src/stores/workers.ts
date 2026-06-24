@@ -78,7 +78,7 @@ export const useWorkerStore = defineStore('workers', () => {
     return await api.post<PricingStatus>('/api/pricing/refresh', {})
   }
   // 四条内容流水线只读视图(= configs/pipelines.yaml 单一事实源);AboutView 动态渲染,不再硬编码。
-  async function fetchPipelines(): Promise<{ name: string; steps: { key: string; label: string | null; pool: string | null }[] }[]> {
+  async function fetchPipelines(): Promise<{ name: string; steps: { key: string; label: string | null; pool: string | null; needs: string[] }[] }[]> {
     const r = await api.get<{ pipelines?: any[] }>('/api/pipelines')
     return Array.isArray(r) ? r : (r?.pipelines ?? [])
   }

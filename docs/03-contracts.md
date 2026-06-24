@@ -541,7 +541,7 @@ PUT  /api/config/pools                 → 热更新资源池配置(写 pools.ya
 GET  /api/config/pool-limits           → 各池 {default(pools.yaml), override(redis 运行时覆盖,可 null)}
 PUT  /api/config/pool-limits           → 运行时覆盖各池上限(写 redis、不动 pools.yaml;body {pool:int}=设、{pool:null}=清除回落默认;即时对所有 worker 含网关生效;0=暂停该池;unknown pool/非法值 400)
 GET  /api/config/styles                → 可用风格标签列表
-GET  /api/pipelines                    → 流水线只读:各 pipeline 步骤 DAG {name, steps:[{key,label,pool}]};模板/'.'前缀/default 不计
+GET  /api/pipelines                    → 流水线只读:各 pipeline 步骤 DAG {name, steps:[{key,label,pool,needs:[key...]}]};needs=依赖(YAML needs→内部 depends_on),前端据此画分层 DAG;模板/'.'前缀/default 不计
 ```
 
 #### GET /api/config/styles
