@@ -9,9 +9,31 @@ from shared.storage import (
     GatewayStorage,
     LocalStorage,
     RemoteStorage,
+    _parse_minio_version,
     create_storage,
     is_credential_file,
 )
+
+
+class TestParseMinioVersion:
+    def test_from_servers_array(self):
+        # 实测 MinioAdmin.info():顶层无 version,版本在 servers[].version。
+        info = {"servers": [{"endpoint": "minio:9000", "version": "2025-09-07T16:13:09Z"}]}
+        assert _parse_minio_version(info) == "2025-09-07T16:13:09Z"
+
+    def test_release_style_version(self):
+        info = {"servers": [{"version": "RELEASE.2024-01-01T00-00-00Z"}]}
+        assert _parse_minio_version(info) == "RELEASE.2024-01-01T00-00-00Z"
+
+    def test_prefers_top_level(self):
+        info = {"version": "top-v", "servers": [{"version": "srv-v"}]}
+        assert _parse_minio_version(info) == "top-v"
+
+    def test_missing_returns_none(self):
+        assert _parse_minio_version({}) is None
+        assert _parse_minio_version({"servers": []}) is None
+        assert _parse_minio_version({"servers": [{}]}) is None
+        assert _parse_minio_version("not-a-dict") is None
 
 
 class TestIsCredentialFile:
@@ -183,6 +205,37 @@ class TestRemoteListFiles:
         rs._client = lambda: client
         await rs.delete("none")  # 幂等:无对象不调 remove_objects
         client.remove_objects.assert_not_called()
+
+
+class TestRemoteHealthVersion:
+    @pytest.mark.asyncio
+    async def test_health_includes_server_version(self, monkeypatch):
+        # health 把 MinIO 服务端版本(经 MinioAdmin.info)填进 version 字段。
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=None)
+        client = MagicMock()
+        client.bucket_exists.return_value = True
+        monkeypatch.setattr(rs, "_client", lambda: client)
+        monkeypatch.setattr(rs, "_server_version_sync", lambda: "RELEASE.2025-09-07T16-13-09Z")
+
+        h = await rs.health()
+        assert h["status"] == "up"
+        assert h["version"] == "RELEASE.2025-09-07T16-13-09Z"
+
+    @pytest.mark.asyncio
+    async def test_health_version_none_on_admin_failure(self, monkeypatch):
+        # MinioAdmin 取版本失败绝不让 health 报错/变慢:version 回 None,探活照常返回。
+        import minio
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=None)
+        client = MagicMock()
+        client.bucket_exists.return_value = True
+        monkeypatch.setattr(rs, "_client", lambda: client)
+
+        # 构造即抛(模拟连不上/凭证错):_server_version_sync 内 try/except 吞掉 → version None。
+        monkeypatch.setattr(minio, "MinioAdmin", MagicMock(side_effect=RuntimeError("admin unreachable")))
+        h = await rs.health()
+        assert h["status"] == "up"
+        assert h["version"] is None
 
 
 class _GatewayStorageHelpers:

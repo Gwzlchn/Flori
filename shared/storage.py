@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import json
 import os
 import shutil
 import time
@@ -25,6 +26,23 @@ CREDENTIAL_REL = "input/.credentials.json"
 def is_credential_file(rel: str) -> bool:
     """是否为敏感凭证侧载文件(按 basename 判,跨平台)。"""
     return rel.replace("\\", "/").rsplit("/", 1)[-1] == ".credentials.json"
+
+
+def _parse_minio_version(info: dict) -> str | None:
+    """从 MinioAdmin.info() 的 JSON 取服务端版本。
+    实测响应无顶层 version,版本在 servers[].version(形如 RELEASE.xxx 或 2025-09-07T16:13:09Z)。
+    优先顶层(兼容未来/其他实现),否则取首个带 version 的 server。取不到返回 None。"""
+    if not isinstance(info, dict):
+        return None
+    top = info.get("version")
+    if isinstance(top, str) and top:
+        return top
+    for srv in info.get("servers") or []:
+        if isinstance(srv, dict):
+            v = srv.get("version")
+            if isinstance(v, str) and v:
+                return v
+    return None
 
 
 class StorageBackend(Protocol):
@@ -374,10 +392,27 @@ class RemoteStorage:
         probe_ms = round((time.perf_counter() - t0) * 1000, 1)
         return {
             "status": "up" if exists else "degraded",
-            "mode": "remote", "version": None,
+            "mode": "remote", "version": self._server_version_sync(),
             "bucket": self._bucket, "bucket_exists": exists, "probe_ms": probe_ms,
             "detail": None if exists else f"bucket {self._bucket} 不存在",
         }
+
+    def _server_version_sync(self) -> str | None:
+        # 经 MinIO 管理 API(MinioAdmin.info)取服务端版本,与 bucket 探活同处一次 health。
+        # 失败一律回 None——绝不让 health 变慢/报错(它是 /api/status 关键路径)。
+        try:
+            from minio import MinioAdmin
+            from minio.credentials import StaticProvider
+
+            adm = MinioAdmin(
+                endpoint=self._endpoint,
+                credentials=StaticProvider(self._access_key, self._secret_key),
+                secure=self._secure,
+            )
+            info = json.loads(adm.info())
+            return _parse_minio_version(info)
+        except Exception:
+            return None
 
     async def capacity(self) -> dict | None:
         # 全量遍历 bucket 求对象数 + 总字节(MinIO 无聚合 API)。贵! 故 api 侧带缓存+后台定时
