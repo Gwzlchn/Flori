@@ -7,6 +7,7 @@ import { useGlobalStore } from '../stores/global'
 import { useJobWs } from '../composables/useJobWs'
 import MarkdownViewer from '../components/notes/MarkdownViewer.vue'
 import StepWorkbench from '../components/job/StepWorkbench.vue'
+import PipelineDag from '../components/PipelineDag.vue'
 import StatusBadge from '../components/common/StatusBadge.vue'
 import { fmtDateTime, fmtDuration } from '../utils/datetime'
 import { contentTypeIcon, contentTypePill, contentTypeLabel } from '../utils/contentType'
@@ -30,6 +31,15 @@ const showToast = inject<(m: string, t?: 'success' | 'error' | 'info') => void>(
 
 const jobId = computed(() => String(route.params.id))
 const { steps, jobStatus, connected, setInitialSteps } = useJobWs(jobId)
+
+// 每个 job 的 DAG:流水线定义(含 needs)按 content_type 匹配 /api/pipelines,叠加各步实时状态着色。
+const pipelinesDef = ref<{ name: string; steps: { key: string; label: string | null; pool: string | null; needs: string[] }[] }[]>([])
+const jobDagSteps = computed(() => pipelinesDef.value.find(p => p.name === job.value?.content_type)?.steps || [])
+const stepStatusByKey = computed<Record<string, string>>(() => {
+  const m: Record<string, string> = {}
+  for (const s of steps.value) m[s.name] = s.status
+  return m
+})
 
 const job = ref<JobDetail | null>(null)
 const loading = ref(true)
@@ -100,6 +110,8 @@ async function fetchDetail() {
     ])
     setInitialSteps(d.steps)
     loadEvidence()  // 权威来源(取证产物);有则显示「权威来源」tab
+    // 本 job DAG 的依赖(needs)定义(/api/pipelines 返回 {pipelines:[...]});失败留空不影响详情。
+    api.get<{ pipelines?: any[] }>('/api/pipelines').then(r => { pipelinesDef.value = Array.isArray(r) ? r : (r?.pipelines ?? []) }).catch(() => {})
     // 完成态默认落笔记，否则落流水线。
     tab.value = d.status === 'done' ? 'notes' : 'proc'
   } catch (e: any) {
@@ -634,6 +646,18 @@ watch(job, (j) => {
 
       <!-- ════ 流水线 ════ -->
       <div v-show="tab === 'proc'">
+        <details v-if="jobDagSteps.length" class="card pad" style="margin-bottom:14px;padding:13px 15px" open>
+          <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ink-800);display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <GitBranch :size="14" />流程依赖图（DAG）
+            <span style="font-weight:400;font-size:11px;color:var(--ink-500);display:inline-flex;gap:9px;margin-left:4px">
+              <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:7px;height:7px;border-radius:50%;background:var(--ok)"></i>完成</span>
+              <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:7px;height:7px;border-radius:50%;background:var(--run)"></i>运行中</span>
+              <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:7px;height:7px;border-radius:50%;background:var(--bad)"></i>失败</span>
+              <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:7px;height:7px;border-radius:50%;background:var(--ink-300)"></i>跳过/待运行</span>
+            </span>
+          </summary>
+          <PipelineDag :steps="jobDagSteps" :status-by-key="stepStatusByKey" style="margin-top:10px" />
+        </details>
         <StepWorkbench :job-id="jobId" :steps="steps" />
 
         <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;align-items:center">

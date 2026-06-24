@@ -4,7 +4,8 @@
 import { computed } from 'vue'
 
 interface Step { key: string; label: string | null; pool: string | null; needs: string[] }
-const props = defineProps<{ steps: Step[] }>()
+// statusByKey 给定时(每个 job 视图):点按步骤状态着色;否则(流水线定义视图)按池着色。
+const props = defineProps<{ steps: Step[]; statusByKey?: Record<string, string> }>()
 
 const byKey = computed<Record<string, Step>>(() => {
   const m: Record<string, Step> = {}
@@ -37,7 +38,11 @@ function mergeNote(s: Step): string {
   const ns = (s.needs || []).filter(n => byKey.value[n])
   return ns.length > 1 ? '合 ' + ns.map(n => byKey.value[n].label || n).join('·') : ''
 }
-function poolCls(pool: string | null): string { return 'pl-' + (pool || 'io') }
+// 点色:job 视图按状态(done/running/...),定义视图按池(io/cpu/ai/gpu)。
+function dotCls(s: Step): string {
+  if (props.statusByKey) return 'st-' + (props.statusByKey[s.key] || 'waiting')
+  return 'pl-' + (s.pool || 'io')
+}
 </script>
 
 <template>
@@ -45,7 +50,7 @@ function poolCls(pool: string | null): string { return 'pl-' + (pool || 'io') }
     <template v-for="(col, ci) in layers" :key="ci">
       <div class="dag-col">
         <div v-for="s in col" :key="s.key" class="dag-node" :title="`${s.label || s.key} · ${s.pool || ''} 池`">
-          <span class="dag-dot" :class="poolCls(s.pool)"></span>
+          <span class="dag-dot" :class="dotCls(s)"></span>
           <span class="dag-text">
             <span class="dag-label">{{ s.label || s.key }}</span>
             <span v-if="mergeNote(s)" class="dag-merge">⟵{{ mergeNote(s) }}</span>
@@ -74,5 +79,12 @@ function poolCls(pool: string | null): string { return 'pl-' + (pool || 'io') }
 .pl-cpu { background: var(--ink-500); }
 .pl-ai { background: var(--info); }
 .pl-gpu { background: var(--warn); }
+/* job 视图按步骤状态着色(复用语义色,无新增) */
+.st-done { background: var(--ok); }
+.st-running { background: var(--run); }
+.st-ready { background: var(--warn); }
+.st-failed { background: var(--bad); }
+.st-skipped { background: var(--ink-300); }
+.st-waiting { background: var(--ink-200); }
 .dag-arrow { display: flex; align-items: center; color: var(--ink-300); font-size: 13px; flex: none; }
 </style>

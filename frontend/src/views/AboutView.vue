@@ -4,7 +4,6 @@
 // 不再硬编码 → 永远与实际步骤链一致。
 import { ref, onMounted } from 'vue'
 import { useWorkerStore } from '../stores/workers'
-import PipelineDag from '../components/PipelineDag.vue'
 import {
   BookOpen, Info, GitBranch, RefreshCw, FileText, Check, Send,
   Search, Layers, Cpu, Play, Newspaper, Headphones, ChevronRight,
@@ -28,6 +27,12 @@ const CT: Record<string, { label: string; icon: any; pill: string }> = {
   audio: { label: '播客 / 音频', icon: Headphones, pill: 't-audio' },
 }
 function ct(name: string) { return CT[name] || { label: name, icon: Layers, pill: 't-video' } }
+// 步骤徽章配色（复用既有 badge 语义）：评审→绿、AI 步→蓝、其余→灰。
+function stepBadge(s: PipeStep): string {
+  if ((s.key || '').toLowerCase().includes('review') || (s.label || '').includes('评审')) return 'b-ok'
+  if (s.pool === 'ai') return 'b-info'
+  return 'b-mut'
+}
 </script>
 
 <template>
@@ -84,21 +89,15 @@ function ct(name: string) { return CT[name] || { label: name, icon: Layers, pill
     <div class="card pad" style="margin-top:16px">
       <div class="card-h"><RefreshCw :size="15" />四条内容流水线</div>
       <p class="note-tip" style="margin-top:-4px;margin-bottom:13px">每种内容走各自的步骤链；步骤间以 JSON / MD 文件通信，输入指纹未变则跳过（幂等）。</p>
-      <!-- 池图例 + 阅读提示 -->
-      <div v-if="pipelines.length" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:14px;font-size:11.5px;color:var(--ink-500)">
-        <span style="display:inline-flex;align-items:center;gap:5px"><i style="width:7px;height:7px;border-radius:50%;background:var(--ink-300)"></i>io</span>
-        <span style="display:inline-flex;align-items:center;gap:5px"><i style="width:7px;height:7px;border-radius:50%;background:var(--ink-500)"></i>cpu</span>
-        <span style="display:inline-flex;align-items:center;gap:5px"><i style="width:7px;height:7px;border-radius:50%;background:var(--info)"></i>ai</span>
-        <span style="display:inline-flex;align-items:center;gap:5px"><i style="width:7px;height:7px;border-radius:50%;background:var(--warn)"></i>gpu</span>
-        <span style="color:var(--ink-400)">· 同列=可并行 · ⟵合=扇入依赖(needs)</span>
-      </div>
-      <div style="display:flex;flex-direction:column;gap:16px">
-        <div v-for="p in pipelines" :key="p.name">
-          <div style="display:flex;align-items:center;gap:11px;margin-bottom:6px">
-            <span class="type-pill" :class="ct(p.name).pill"><component :is="ct(p.name).icon" :size="17" /></span>
+      <div class="list">
+        <div v-for="p in pipelines" :key="p.name" class="row" style="cursor:default;align-items:flex-start">
+          <span class="type-pill" :class="ct(p.name).pill"><component :is="ct(p.name).icon" :size="17" /></span>
+          <div class="body">
             <div class="title">{{ ct(p.name).label }}<span style="font-weight:400;color:var(--ink-400);margin-left:7px;font-size:12px">{{ p.steps.length }} 步</span></div>
+            <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">
+              <span v-for="s in p.steps" :key="s.key" class="badge" :class="stepBadge(s)">{{ s.label || s.key }}</span>
+            </div>
           </div>
-          <PipelineDag :steps="p.steps" />
         </div>
         <div v-if="!pipelines.length" class="note-tip" style="margin:0">流水线信息加载中…</div>
       </div>
