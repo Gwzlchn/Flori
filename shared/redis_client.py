@@ -429,6 +429,18 @@ class RedisClient:
         """接入 token 剩余有效秒:>0=剩余秒数,-1=永不过期,-2=不存在。"""
         return await self.r.ttl(self._REGISTRATION_TOKEN_KEY)
 
+    async def push_event(self, kind: str, **fields) -> None:
+        """系统事件环形列表(events:system,LPUSH+LTRIM 保留最近 200,最近在上);供 /api/events 透出。
+        None 字段剔除。best-effort:事件透出失败绝不影响调度主流程。"""
+        import json
+        import time
+        evt = {"ts": time.time(), "kind": kind, **{k: v for k, v in fields.items() if v is not None}}
+        try:
+            await self.r.lpush("events:system", json.dumps(evt, ensure_ascii=False))
+            await self.r.ltrim("events:system", 0, 199)
+        except Exception:
+            pass
+
     async def set_registration_token(self, token: str, ttl_sec: int | None = None) -> None:
         # ttl_sec 给接入 token 设过期,泄漏后自动失效;None 表示不过期(向后兼容)。
         if ttl_sec:

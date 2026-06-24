@@ -324,7 +324,7 @@ GET /api/jobs/{id}/notes/transcript     → text/markdown (逐字稿)
 
 #### GET /api/events?limit=50 — 系统事件流
 
-scheduler emit 的环形列表（Redis `events:system`，最近在上）。本批次 scheduler emit 尚未接线，通常返回空数组（向后兼容，前端空态）。
+scheduler emit 的环形列表（Redis `events:system`，最近在上，保留最近 200）。scheduler 在 孤儿回收(`orphan_reclaimed`)/卡步(`step_stuck`)/无worker(`no_worker`)/worker清理(`worker_cleaned`)/任务失败(`job_failed`) 处 `push_event`；每条 `{ts, kind, job_id?, step?, pool?, reason?, error?, worker_id?}`；无事件→空数组。
 
 ```json
 {"events": [{"ts": 1719100800.0, "kind": "orphan_reclaimed", "job_id": "j_abc", "step": "transcribe", "reason": "worker w_3 lost"}]}

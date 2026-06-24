@@ -1,4 +1,5 @@
 """tests for shared/redis_client.py — 使用 fakeredis。"""
+import json
 
 import asyncio
 
@@ -440,3 +441,24 @@ class TestServerInfo:
         assert info["connected_clients"] == 3
         assert info["uptime_sec"] == 1000
         assert info["ping_ms"] >= 0
+
+
+class TestSystemEvents:
+    @pytest.mark.asyncio
+    async def test_push_event_ring_and_fields(self, rc):
+        await rc.push_event("orphan_reclaimed", job_id="j1", step="03_scene", reason="worker lost", pool=None)
+        await rc.push_event("job_failed", job_id="j2", error="boom")
+        raw = await rc.r.lrange("events:system", 0, -1)
+        assert len(raw) == 2
+        top = json.loads(raw[0])          # 最近在上(LPUSH)
+        assert top["kind"] == "job_failed" and top["job_id"] == "j2" and top["error"] == "boom"
+        assert "ts" in top
+        second = json.loads(raw[1])
+        assert second["kind"] == "orphan_reclaimed" and second["reason"] == "worker lost"
+        assert "pool" not in second       # None 字段剔除
+
+    @pytest.mark.asyncio
+    async def test_push_event_trims_to_200(self, rc):
+        for i in range(210):
+            await rc.push_event("worker_cleaned", worker_id=f"w{i}")
+        assert await rc.r.llen("events:system") == 200

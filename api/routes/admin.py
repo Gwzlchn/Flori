@@ -392,8 +392,8 @@ async def usage_aggregate(db: Database = Depends(get_db)):
 
 @router.get("/events", dependencies=[Depends(verify_token)])
 async def list_events(limit: int = 50, redis: RedisClient = Depends(get_redis)):
-    """系统事件流(scheduler emit 的环形列表 events:system,最近在上)。
-    本批次 scheduler emit 尚未接线 → 通常为空数组(向后兼容,前端空态);读失败→空。"""
+    """系统事件流(scheduler emit 的环形列表 events:system,最近在上,保留最近 200)。
+    scheduler 在 孤儿回收/卡步/无worker/worker清理/任务失败 处 push_event;无事件→空数组;读失败→空。"""
     import json as _json
     limit = max(1, min(limit, 200))
     try:

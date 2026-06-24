@@ -307,6 +307,7 @@ class Scheduler:
                 )
             else:
                 await asyncio.to_thread(self.db.delete_worker, w.id)
+                await self.redis.push_event("worker_cleaned", worker_id=w.id)
                 logger.info("worker_cleaned", worker_id=w.id)
 
     async def _recover(self) -> None:
@@ -885,6 +886,7 @@ class Scheduler:
         await self.redis.publish(f"events:{job_id}", {
             "event": "job_failed", "error": error[:200], "progress_pct": progress,
         })
+        await self.redis.push_event("job_failed", job_id=job_id, error=error[:200])
         await self.redis.remove_active_job(job_id)
         logger.info("job_failed", job_id=job_id, error=error[:200])
 
@@ -941,6 +943,7 @@ class Scheduler:
         self, job_id: str, step: str, reason: str, *, release_slot: bool = True,
     ) -> None:
         logger.warning("reclaim_step", job_id=job_id, step=step, reason=reason)
+        await self.redis.push_event("orphan_reclaimed", job_id=job_id, step=step, reason=reason)
 
         # release_slot=False:worker 仍存活但已转去别的 step(认领响应丢失/已 move on),它自己的
         # finally 已经/将会 release_step 释放本步的 slot。此时调度器再 release 会双减 slot 计数。
@@ -996,6 +999,7 @@ class Scheduler:
                     logger.warning(
                         "step_stuck", job_id=job_id, step=step, age_sec=round(age),
                     )
+                    await self.redis.push_event("step_stuck", job_id=job_id, step=step, stalled_sec=round(age))
                     # 主动告警(设了 ALERT_WEBHOOK_URL 才外发;best-effort,不阻塞调度循环)。
                     await asyncio.to_thread(
                         notify, "step_stuck",
@@ -1067,9 +1071,12 @@ class Scheduler:
             first = self._no_worker_since.setdefault(job_id, time.time())
             if time.time() - first < self._NO_WORKER_GRACE_SEC:
                 continue
+            waited = round(time.time() - first)
             self._no_worker_since.pop(job_id, None)
             pairs = ", ".join(f"{s}(pool '{p}')" for s, p in stuck)
             logger.warning("job_no_worker", job_id=job_id, stuck=pairs)
+            await self.redis.push_event(
+                "no_worker", job_id=job_id, step=stuck[0][0], pool=stuck[0][1], waited_sec=waited)
             await self.mark_job_failed(job_id, f"无可用 worker 执行步骤: {pairs}")
 
         # 清理已离开 active 集合的计时,避免泄漏。
