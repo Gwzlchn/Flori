@@ -48,6 +48,9 @@ class StorageBackend(Protocol):
     async def read_range(self, job_id: str, rel_path: str, start: int, length: int) -> bytes | None: ...
     # 健康探活(供 /api/status 的 minio 组件):返回 {status, mode, bucket, ...};不抛(异常由调用方包超时)。
     async def health(self) -> dict: ...
+    # 容量统计(对象数 + 总字节):RemoteStorage 全量 list 求和(贵!),故 api 侧带缓存+后台刷新,
+    # 绝不同步阻塞 /api/status。不支持(本地不强求)返回 None。
+    async def capacity(self) -> dict | None: ...
 
 
 class LocalStorage:
@@ -148,6 +151,24 @@ class LocalStorage:
             "status": "unknown", "mode": "local", "bucket": None,
             "version": None, "detail": "本地盘", "probe_ms": None,
         }
+
+    async def capacity(self) -> dict | None:
+        # 本地盘容量(os.walk 求和);to_thread 防阻塞。jobs_dir 不存在 → 零。
+        return await asyncio.to_thread(self._capacity_sync)
+
+    def _capacity_sync(self) -> dict:
+        objects = 0
+        total = 0
+        root = self.jobs_dir
+        if root.is_dir():
+            for dirpath, _dirs, files in os.walk(root):
+                for name in files:
+                    try:
+                        total += os.path.getsize(os.path.join(dirpath, name))
+                        objects += 1
+                    except OSError:
+                        continue
+        return {"objects": objects, "bytes": total}
 
 
 class RemoteStorage:
@@ -358,6 +379,19 @@ class RemoteStorage:
             "detail": None if exists else f"bucket {self._bucket} 不存在",
         }
 
+    async def capacity(self) -> dict | None:
+        # 全量遍历 bucket 求对象数 + 总字节(MinIO 无聚合 API)。贵! 故 api 侧带缓存+后台定时
+        # 刷新,绝不在 /api/status 同步调。同步 minio 调用包 to_thread,不阻塞事件循环。
+        return await asyncio.to_thread(self._capacity_sync)
+
+    def _capacity_sync(self) -> dict:
+        objects = 0
+        total = 0
+        for obj in self._client().list_objects(self._bucket, recursive=True):
+            total += obj.size or 0
+            objects += 1
+        return {"objects": objects, "bytes": total}
+
 
 class GatewayStorage:
     """gateway-PROXY 产物后端:纯出站 HTTPS,产物经 API 中转(worker 永不直连 minio)。
@@ -534,6 +568,10 @@ class GatewayStorage:
         # 仅满足 Protocol,标 unknown(gateway 中转)。
         return {"status": "unknown", "mode": "gateway", "bucket": None,
                 "version": None, "detail": "gateway proxy", "probe_ms": None}
+
+    async def capacity(self) -> dict | None:
+        # worker 侧网关存储不查中心容量(那是 API 端 Remote/Local 的职责);仅满足 Protocol。
+        return None
 
     async def close(self) -> None:
         if self._client_obj is not None:

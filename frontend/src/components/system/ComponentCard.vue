@@ -4,7 +4,7 @@
 import { computed } from 'vue'
 import StatusBadge from '../common/StatusBadge.vue'
 import { componentDotClass } from '../../utils/worker'
-import { fmtDuration, fmtRelative } from '../../utils/datetime'
+import { fmtDuration, fmtRelative, fmtBytes } from '../../utils/datetime'
 import { COMPONENT_KIND_LABELS } from '../../types'
 import type { SystemComponent } from '../../types'
 
@@ -50,7 +50,11 @@ const metaText = computed(() => {
   }
   if (c.kind === 'minio') {
     if (e.mode === 'local') return ''
-    return e.probe_ms != null ? `探活 ${e.probe_ms}ms` : ''
+    const parts: string[] = []
+    if (e.objects != null) parts.push(`${e.objects} 对象`)
+    if (e.size_bytes != null) parts.push(`容量 ${fmtBytes(e.size_bytes)}`)
+    if (e.probe_ms != null) parts.push(`探活 ${e.probe_ms}ms`)
+    return parts.join(' · ')
   }
   return ''
 })

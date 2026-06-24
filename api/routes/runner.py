@@ -417,6 +417,7 @@ async def get_artifact(
     rel: str,
     worker_id: str = Depends(verify_worker_token),
     storage: StorageBackend = Depends(get_storage),
+    redis: RedisClient = Depends(get_redis),
 ):
     """取单个产物字节;不存在返回 404(GatewayStorage.read_file 据此返回 None)。
     敏感凭证侧载文件对远端 worker 一律 404(只供同机 LocalStorage 本地读)。"""
@@ -427,6 +428,9 @@ async def get_artifact(
     data = await storage.read_file(job_id, rel)
     if data is None:
         raise HTTPException(404, "artifact not found")
+    # 出库流量(NAS→worker,worker 从 ECS 拉取):按 worker 归因计字节。best-effort,
+    # incr_traffic 内已吞异常 → 绝不因计数影响产物下发。
+    await redis.incr_traffic("pull", worker_id, len(data))
     return Response(content=data, media_type="application/octet-stream")
 
 
@@ -437,6 +441,7 @@ async def put_artifact(
     request: Request,
     worker_id: str = Depends(verify_worker_token),
     storage: StorageBackend = Depends(get_storage),
+    redis: RedisClient = Depends(get_redis),
 ):
     """回传单个产物:原始 body 直接写入 storage(worker push 的中转出口)。"""
     validate_path_segment(job_id, "job_id")
@@ -447,4 +452,6 @@ async def put_artifact(
         raise HTTPException(403, "writing credential files is not allowed")
     data = await request.body()
     await storage.write_file(job_id, rel, data)
+    # 入库流量(worker→NAS,即 ECS→NAS):写盘后按收到的 body 字节计。best-effort。
+    await redis.incr_traffic("push", worker_id, len(data))
     return {"ok": True}

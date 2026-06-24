@@ -336,6 +336,16 @@ async def build_full_status(app) -> dict:
         _safe(_probe_minio(storage), "minio", "minio"),
     )
 
+    # MinIO 容量(对象数/总字节):读后台缓存,绝不在此同步扫(贵)。有缓存才填,无则不填(前端显 —)。
+    cap = getattr(getattr(app.state, "minio_cap", None), "value", None)
+    if cap:
+        for c in components:
+            if c.get("kind") == "minio":
+                c.setdefault("extra", {})
+                c["extra"]["objects"] = cap.get("objects")
+                c["extra"]["size_bytes"] = cap.get("bytes")
+                break
+
     # 近 1h 吞吐(便宜:GROUP BY done/failed,利用 idx_jobs_status)。失败不致命。
     throughput = {"done": 0, "failed": 0}
     try:
@@ -344,11 +354,22 @@ async def build_full_status(app) -> dict:
     except Exception:
         logger.warning("throughput_failed")
 
+    # 网关中转流量累计(产物代理:pull=NAS→worker 出库,push=worker→NAS 入库)。读 redis hash 总量,
+    # get_traffic 内已吞异常;再包一层防 redis 连接级抛出影响整体(降级为 0)。
+    traffic = {"pull_bytes": 0, "push_bytes": 0}
+    try:
+        pull = await redis.get_traffic("pull")
+        push = await redis.get_traffic("push")
+        traffic = {"pull_bytes": pull.get("total", 0), "push_bytes": push.get("total", 0)}
+    except Exception:
+        logger.warning("traffic_failed")
+
     return {
         "version": FLORI_VERSION,
         "components": list(components),
         **live,
         "throughput_1h": throughput,
+        "traffic": traffic,
     }
 
 

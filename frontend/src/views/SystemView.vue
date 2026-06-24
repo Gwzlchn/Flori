@@ -14,7 +14,7 @@ import { useWorkerStore } from '../stores/workers'
 import { useGlobalWs } from '../composables/useGlobalWs'
 import StatusBadge from '../components/common/StatusBadge.vue'
 import ComponentCard from '../components/system/ComponentCard.vue'
-import { fmtDuration, fmtRelative } from '../utils/datetime'
+import { fmtDuration, fmtRelative, fmtBytes } from '../utils/datetime'
 import { workerDotClass, workerComputeDesc } from '../utils/worker'
 import type { Worker, FullStatus, SystemComponent, SystemEvent, UsageAggregate } from '../types'
 import { COMPONENT_KIND_LABELS } from '../types'
@@ -123,6 +123,7 @@ const liveJobs = computed(() => systemStatus.value?.jobs ?? status.value?.jobs ?
 const livePools = computed(() => systemStatus.value?.pools ?? status.value?.pools ?? {})
 const liveDisk = computed(() => systemStatus.value?.disk ?? status.value?.disk ?? null)
 const throughput = computed(() => status.value?.throughput_1h ?? null)
+const traffic = computed(() => status.value?.traffic ?? null)
 
 // ── Worker 列表派生 ──
 const STATUS_ORDER: Record<string, number> = {
@@ -184,6 +185,16 @@ const sameVersionCount = computed(() =>
     ? sortedWorkers.value.filter(w => w.spec?.version && w.spec.version !== 'dev' && !workerDrifted(w)).length
     : 0,
 )
+
+// worker 网关中转流量短文案（拉取↓ / 回传↑ 字节;均为 0 则不显）。
+function trafficText(w: Worker): string {
+  const t = w.traffic
+  if (!t) return ''
+  const pull = t.pull ?? 0
+  const push = t.push ?? 0
+  if (pull <= 0 && push <= 0) return ''
+  return `↓${fmtBytes(pull)} ↑${fmtBytes(push)}`
+}
 
 // worker live 负载短文案（cpu%/mem%/load）。
 function loadText(w: Worker): string {
@@ -517,6 +528,13 @@ const usageByProvider = computed(() => {
         <span class="sep" style="color:var(--ink-300)">·</span>
         <span style="font-size:12.5px;color:var(--ink-500)">近 1h 完成 {{ throughput.done }} · 失败 {{ throughput.failed }}</span>
       </template>
+      <template v-if="traffic && (traffic.pull_bytes > 0 || traffic.push_bytes > 0)">
+        <span class="sep" style="color:var(--ink-300)">·</span>
+        <span class="badge b-mut">中转</span>
+        <span style="font-size:12.5px;color:var(--ink-500)" title="网关产物代理:出库=worker 拉取(NAS→worker) / 入库=回传(worker→NAS)">
+          出库 {{ fmtBytes(traffic.pull_bytes) }} · 入库 {{ fmtBytes(traffic.push_bytes) }}
+        </span>
+      </template>
     </div>
 
     <!-- AI 用量聚合 -->
@@ -721,6 +739,7 @@ const usageByProvider = computed(() => {
             <span v-if="w.hostname" class="sep">·</span>
             <span>{{ computeDesc(w) }}</span>
             <template v-if="w.total_duration_sec > 0"><span class="sep">·</span><span>运行 {{ fmtDuration(w.total_duration_sec) }}</span></template>
+            <template v-if="trafficText(w)"><span class="sep">·</span><span title="网关中转:拉取产物 / 回传产物">中转 {{ trafficText(w) }}</span></template>
             <span class="sep">·</span><span>心跳 {{ fmtRelative(w.last_heartbeat) }}</span>
           </div>
         </div>

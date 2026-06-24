@@ -77,6 +77,7 @@ class WorkerResponse(BaseModel):
     remote_addr: str | None = None
     spec: dict = Field(default_factory=dict)   # 版本/机器配置(worker 自报);前端详情展示
     load: dict = Field(default_factory=dict)   # live 负载(worker 心跳自报 cpu%/mem%/loadavg);redis-only
+    traffic: dict = Field(default_factory=dict)  # 网关中转流量字节 {pull,push};redis-only(产物代理累计)
     status: str
     current_job: str | None = None
     current_step: str | None = None

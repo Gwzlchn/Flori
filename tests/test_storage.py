@@ -439,3 +439,56 @@ class TestStorageHealth:
         gw = GatewayStorage("https://gw", lambda: "tok", tmp_path)
         h = await gw.health()
         assert h["mode"] == "gateway" and h["status"] == "unknown"
+
+
+class TestStorageCapacity:
+    @pytest.mark.asyncio
+    async def test_remote_capacity_sums_objects_and_bytes(self, tmp_path):
+        # 全量 list bucket(无前缀,recursive)求对象数 + 总字节。
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        objs = [
+            MagicMock(size=100), MagicMock(size=250), MagicMock(size=0),
+        ]
+        client = MagicMock()
+        client.list_objects.return_value = objs
+        rs._client = lambda: client
+        cap = await rs.capacity()
+        assert cap == {"objects": 3, "bytes": 350}
+        client.list_objects.assert_called_once_with("b", recursive=True)
+
+    @pytest.mark.asyncio
+    async def test_remote_capacity_handles_none_size(self, tmp_path):
+        # obj.size 为 None(某些 SDK 列举返回)按 0 计,不抛。
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        client.list_objects.return_value = [MagicMock(size=None), MagicMock(size=10)]
+        rs._client = lambda: client
+        cap = await rs.capacity()
+        assert cap == {"objects": 2, "bytes": 10}
+
+    @pytest.mark.asyncio
+    async def test_remote_capacity_empty_bucket(self, tmp_path):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        client.list_objects.return_value = []
+        rs._client = lambda: client
+        assert await rs.capacity() == {"objects": 0, "bytes": 0}
+
+    @pytest.mark.asyncio
+    async def test_local_capacity_walks_jobs_dir(self, tmp_path):
+        job = tmp_path / "j_a" / "output"
+        job.mkdir(parents=True)
+        (job / "notes.md").write_bytes(b"hello")          # 5
+        (tmp_path / "j_a" / "job.json").write_bytes(b"{}")  # 2
+        cap = await LocalStorage(tmp_path).capacity()
+        assert cap == {"objects": 2, "bytes": 7}
+
+    @pytest.mark.asyncio
+    async def test_local_capacity_missing_dir_is_zero(self, tmp_path):
+        cap = await LocalStorage(tmp_path / "nope").capacity()
+        assert cap == {"objects": 0, "bytes": 0}
+
+    @pytest.mark.asyncio
+    async def test_gateway_capacity_is_none(self, tmp_path):
+        gw = GatewayStorage("https://gw", lambda: "tok", tmp_path)
+        assert await gw.capacity() is None

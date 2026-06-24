@@ -61,3 +61,15 @@ export function fmtRelative(v: string | number | Date | null | undefined, opts: 
   }
   return tail ? `${core}${tail}` : core
 }
+
+// 字节 → 人类可读(KB/MB/GB/TB,1024 进制)。全站统一,供流量/容量展示。
+//   <1KB → "512 B" / ≥1KB → "1.5 KB" / "12.3 MB" / "1.20 GB"。负/NaN/空 → fallback。
+export function fmtBytes(n: number | null | undefined, fallback = '—'): string {
+  if (n == null || isNaN(n) || n < 0) return fallback
+  if (n < 1024) return `${Math.round(n)} B`
+  const units = ['KB', 'MB', 'GB', 'TB', 'PB']
+  let v = n / 1024
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  return `${v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2)} ${units[i]}`
+}

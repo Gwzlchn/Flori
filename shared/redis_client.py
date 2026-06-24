@@ -380,6 +380,38 @@ class RedisClient:
         会在下次扫描又冒出来，必须连 Redis key 一起清。"""
         await self.r.delete(f"worker:{worker_id}")
 
+    # ── 网关中转流量(产物代理:pull=NAS→worker 出库 / push=worker→NAS 入库)──
+    # 按方向 + worker 归因累计字节。埋点在 api/routes/runner.py 的 get/put_artifact;
+    # best-effort:计数失败绝不影响产物传输(故全程 try/except 吞异常)。
+    # 总量另存哨兵 field "_"(`traffic:{direction}:total` hash),省得每次读全 by_worker 求和。
+
+    async def incr_traffic(self, direction: str, worker_id: str, n: int) -> None:
+        """累计中转流量字节:`traffic:{direction}` 按 worker_id,`traffic:{direction}:total` 总量。
+        direction ∈ {pull,push}。失败静默(产物传输优先,统计可丢)。"""
+        try:
+            if not worker_id or n <= 0:
+                return
+            await self.r.hincrby(f"traffic:{direction}", worker_id, n)
+            await self.r.hincrby(f"traffic:{direction}:total", "_", n)
+        except Exception:
+            pass
+
+    async def get_traffic(self, direction: str) -> dict:
+        """读某方向流量:{"total": int, "by_worker": {wid: int}}。读失败回零(不抛)。"""
+        try:
+            total_raw = await self.r.hget(f"traffic:{direction}:total", "_")
+            total = int(total_raw) if total_raw else 0
+            by_worker_raw = await self.r.hgetall(f"traffic:{direction}") or {}
+            by_worker: dict[str, int] = {}
+            for wid, v in by_worker_raw.items():
+                try:
+                    by_worker[wid] = int(v)
+                except (TypeError, ValueError):
+                    continue
+            return {"total": total, "by_worker": by_worker}
+        except Exception:
+            return {"total": 0, "by_worker": {}}
+
     # ── 组件心跳(scheduler 等无 DB 行的服务,与 worker:{id} 模式一致)──
     # 键 component:{name},TTL=900(=stale_window):超窗 key 自动消失 → API 读不到 → down
     # (而非永久 degraded)。scheduler 每 10s 续约,容忍丢 2 拍仍 up。

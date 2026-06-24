@@ -24,6 +24,8 @@ def mock_redis():
         "used_memory_mb": 1.0, "maxmemory_mb": 0.0, "uptime_sec": 100,
         "connected_clients": 1,
     })
+    # 中转流量(build_full_status 读 pull/push 总量);裸 AsyncMock 的 await→AsyncMock 会 500。
+    r.get_traffic = AsyncMock(return_value={"total": 0, "by_worker": {}})
     r.r = MagicMock()
     r.r.lrange = AsyncMock(return_value=[])
     return r

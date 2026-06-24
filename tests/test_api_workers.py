@@ -17,8 +17,10 @@ def _utcnow():
 
 @pytest.fixture
 def redis_mock():
-    """默认无远程 worker；list_worker_ids 返回空表，worker_exists 不活。"""
-    rc = AsyncMock()
+    """默认无远程 worker；list_worker_ids 返回空表，worker_exists 不活。
+    get_traffic 须返回真 dict(裸 AsyncMock 的 await→AsyncMock,.get() 又得 coroutine)。"""
+    from tests.conftest import make_redis_mock
+    rc = make_redis_mock()
     rc.list_worker_ids.return_value = []
     rc.worker_exists.return_value = False
     rc.get_worker_info.return_value = None

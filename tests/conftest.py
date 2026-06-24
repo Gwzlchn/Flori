@@ -44,9 +44,18 @@ def make_fakeredis() -> RedisClient:
 # app:多数纯 CRUD 路由不触 redis,默认给 AsyncMock 即可——此前 7 个文件(domains/notes/glossary/
 # profiles/auth/search/collection_sync)逐字复制同一份,故上移为默认 app。真正需要路由特异 redis
 # 行为(publish/ping/事件流等)的文件就近覆盖本 fixture(jobs/workers/admin/bili/collections/runner)。
+def make_redis_mock() -> AsyncMock:
+    """API 测试默认 redis AsyncMock。get_traffic 须返回真 dict——裸 AsyncMock 的
+    `await get_traffic()` 回 AsyncMock,对其 .get() 又得 coroutine,污染 /api/status、
+    /api/workers 等读流量的端点。单一构造来源,各文件就近 mock 复用。"""
+    rc = AsyncMock()
+    rc.get_traffic.return_value = {"total": 0, "by_worker": {}}
+    return rc
+
+
 @pytest.fixture
 def app(db, test_config):
-    return create_app(db=db, redis=AsyncMock(), config=test_config)
+    return create_app(db=db, redis=make_redis_mock(), config=test_config)
 
 
 @pytest.fixture

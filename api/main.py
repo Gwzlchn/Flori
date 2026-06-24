@@ -14,6 +14,7 @@ from shared.logging_setup import setup_logging
 from shared.redis_client import RedisClient
 from shared.storage import create_storage
 from api.pricing_store import PricingStore
+from api.minio_capacity_store import MinioCapacityStore
 
 
 async def _subscription_sync_loop(app: FastAPI) -> None:
@@ -69,11 +70,17 @@ def create_app(
         # 周期自动同步订阅(默认每 6h;SUBSCRIPTION_SYNC_HOURS=0 关闭)。
         sync_task = None
         pricing_task = None
+        capacity_task = None
         if getattr(app.state, "_own_resources", False):
             import asyncio
             sync_task = asyncio.create_task(_subscription_sync_loop(app))
             # LiteLLM 价表:启动从 MinIO 载入 + 每日拉最新(仅生产起;测试/注入态空表→runner 回退)。
             pricing_task = asyncio.create_task(app.state.pricing.daily_loop(app.state.storage))
+            # MinIO 容量:后台每 10min 全量扫一次,内存缓存供 /api/status 读(绝不同步阻塞)。
+            if app.state.storage is not None:
+                capacity_task = asyncio.create_task(
+                    app.state.minio_cap.loop(app.state.storage)
+                )
 
         yield
 
@@ -81,6 +88,8 @@ def create_app(
             sync_task.cancel()
         if pricing_task:
             pricing_task.cancel()
+        if capacity_task:
+            capacity_task.cancel()
         if getattr(app.state, "_own_resources", False):
             await app.state.redis.close()
             app.state.db.close()
@@ -135,6 +144,8 @@ def create_app(
 
     # LiteLLM 价表缓存(无条件置,供 runner 算价);daily_loop 仅生产在 lifespan 起,测试/注入态空表→回退。
     app.state.pricing = PricingStore()
+    # MinIO 容量缓存(无条件置,build_full_status 读;loop 仅生产在 lifespan 起,测试/注入态空快照→不填)。
+    app.state.minio_cap = MinioCapacityStore()
 
     from api.routes import (
         jobs, notes, workers, ws, auth, admin, profiles, runner, bili,

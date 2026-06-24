@@ -658,6 +658,23 @@ class TestArtifacts:
         assert resp.status_code == 404
 
     @pytest.mark.asyncio
+    async def test_traffic_counted_by_direction_and_worker(self, jobs_client, real_redis):
+        """put=入库(push)、get=出库(pull):按方向 + worker 归因计字节;404 不计。"""
+        worker_id, token = await _register_real(jobs_client)
+        h = {"Authorization": f"Bearer {token}"}
+        # 入库:PUT body 5 字节
+        await jobs_client.put("/api/runner/jobs/j1/artifacts/a.md", content=b"hello", headers=h)
+        # 出库:GET 同一文件(5 字节)
+        await jobs_client.get("/api/runner/jobs/j1/artifacts/a.md", headers=h)
+        # 404 不计入出库
+        await jobs_client.get("/api/runner/jobs/j1/artifacts/missing.md", headers=h)
+
+        push = await real_redis.get_traffic("push")
+        pull = await real_redis.get_traffic("pull")
+        assert push["total"] == 5 and push["by_worker"] == {worker_id: 5}
+        assert pull["total"] == 5 and pull["by_worker"] == {worker_id: 5}
+
+    @pytest.mark.asyncio
     async def test_path_traversal_rejected(self, jobs_client):
         _, token = await _register_real(jobs_client)
         h = {"Authorization": f"Bearer {token}"}

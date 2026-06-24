@@ -123,6 +123,7 @@ export interface Worker {
   remote_addr: string | null
   spec?: WorkerSpec             // worker 自报:版本/机器配置
   load?: WorkerLoad             // worker 心跳自报:live 负载(cpu%/mem%/loadavg)
+  traffic?: { pull?: number; push?: number }  // 网关中转流量字节(产物代理累计;redis-only)
   status: WorkerStatus
   current_job: string | null
   current_step: string | null
@@ -175,6 +176,7 @@ export interface FullStatus {
   jobs: JobCounts
   disk: DiskInfo
   throughput_1h?: Throughput
+  traffic?: { pull_bytes: number; push_bytes: number }  // 网关中转流量累计(出库/入库字节)
 }
 
 // WS /api/ws/global 每 2s 推 live 子集;本页只可靠消费这四段。

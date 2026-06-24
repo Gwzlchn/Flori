@@ -462,3 +462,45 @@ class TestSystemEvents:
         for i in range(210):
             await rc.push_event("worker_cleaned", worker_id=f"w{i}")
         assert await rc.r.llen("events:system") == 200
+
+
+class TestTraffic:
+    @pytest.mark.asyncio
+    async def test_incr_and_get_by_worker_and_total(self, rc):
+        await rc.incr_traffic("pull", "ai-1", 100)
+        await rc.incr_traffic("pull", "ai-1", 50)
+        await rc.incr_traffic("pull", "cpu-2", 30)
+        t = await rc.get_traffic("pull")
+        assert t["total"] == 180
+        assert t["by_worker"] == {"ai-1": 150, "cpu-2": 30}
+
+    @pytest.mark.asyncio
+    async def test_directions_are_independent(self, rc):
+        await rc.incr_traffic("pull", "ai-1", 100)
+        await rc.incr_traffic("push", "ai-1", 7)
+        pull = await rc.get_traffic("pull")
+        push = await rc.get_traffic("push")
+        assert pull["total"] == 100 and pull["by_worker"] == {"ai-1": 100}
+        assert push["total"] == 7 and push["by_worker"] == {"ai-1": 7}
+
+    @pytest.mark.asyncio
+    async def test_get_empty_returns_zero(self, rc):
+        t = await rc.get_traffic("pull")
+        assert t == {"total": 0, "by_worker": {}}
+
+    @pytest.mark.asyncio
+    async def test_zero_or_empty_worker_skipped(self, rc):
+        # n<=0 或空 worker_id 不写(不污染 hash,且避免无谓 HINCRBY)。
+        await rc.incr_traffic("pull", "ai-1", 0)
+        await rc.incr_traffic("pull", "", 100)
+        await rc.incr_traffic("pull", "ai-1", -5)
+        t = await rc.get_traffic("pull")
+        assert t == {"total": 0, "by_worker": {}}
+
+    @pytest.mark.asyncio
+    async def test_incr_never_raises_on_backend_error(self, rc, monkeypatch):
+        # best-effort:redis 抛错也吞掉(产物传输优先于计数)。
+        async def boom(*a, **kw):
+            raise RuntimeError("redis down")
+        monkeypatch.setattr(rc.r, "hincrby", boom)
+        await rc.incr_traffic("pull", "ai-1", 100)  # 不抛即通过

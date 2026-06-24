@@ -120,6 +120,15 @@ async def list_workers(
     online_window, stale_window = _windows(config)
     workers = await asyncio.to_thread(db.list_workers, online_window, stale_window)
     by_id: dict[str, WorkerResponse] = {w.id: _to_response(w) for w in workers}
+    # 网关中转流量(产物代理 pull/push 字节,按 worker 归因);读两个 hash 一次,按 id 查填。
+    pull_by = (await redis.get_traffic("pull")).get("by_worker", {})
+    push_by = (await redis.get_traffic("push")).get("by_worker", {})
+
+    def _traffic(wid: str) -> dict:
+        return {"pull": pull_by.get(wid, 0), "push": push_by.get(wid, 0)}
+
+    for wid, resp in by_id.items():
+        resp.traffic = _traffic(wid)
     # 合并 Redis 里注册的远程 worker：本地 SQLite 没有它们(状态写在 Redis)，
     # 没这一步分布式 worker 在 /api/workers 里是隐身的。Redis key 带 TTL，
     # 失活的远程 worker 会自动消失。状态同样按 last_heartbeat 走后端权威判定，
@@ -162,6 +171,7 @@ async def list_workers(
             remote_addr=info.get("remote_addr") or None,
             spec=_spec(info),
             load=_load(info),
+            traffic=_traffic(wid),
             status=status,
             current_job=info.get("current_job") or None,
             current_step=info.get("current_step") or None,
@@ -207,6 +217,11 @@ async def get_worker(
     if not w:
         raise HTTPException(404, "worker not found")
     resp = _to_response(w)
+    # 网关中转流量(产物代理 pull/push 字节,按 worker 归因);redis-only。
+    resp.traffic = {
+        "pull": (await redis.get_traffic("pull")).get("by_worker", {}).get(worker_id, 0),
+        "push": (await redis.get_traffic("push")).get("by_worker", {}).get(worker_id, 0),
+    }
     # 同 list_workers:Redis 是实时 liveness 源(TTL,每心跳刷新),db.last_heartbeat 在 worker 空闲时
     # 可能不刷新而过期 → 用 Redis 覆盖状态/心跳/当前任务(Redis 无则保留 db 判定,即已失活)。
     info = await redis.get_worker_info(worker_id)
