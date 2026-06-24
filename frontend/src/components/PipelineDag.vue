@@ -45,6 +45,13 @@ function dotCls(s: Step): string {
   return 'pl-' + (s.pool || 'io')
 }
 const fmtCost = (v: number) => `$${(v ?? 0).toFixed(4)}`
+// hover 提示:步骤 · 池 · (AI 步)provider 开销。节点本体保持窄,详情挪到 tooltip。
+function nodeTitle(s: Step): string {
+  let t = `${s.label || s.key} · ${s.pool || 'io'} 池`
+  const u = props.usageByStep?.[s.key]
+  if (u) t += ` · ${u.provider} ${fmtCost(u.cost)}${u.equiv ? '（等价）' : ''}`
+  return t
+}
 
 // ── SVG 依赖连线:渲染后量取各节点位置,源右缘→目标左缘画贝塞尔 ──
 const container = ref<HTMLElement | null>(null)
@@ -111,18 +118,13 @@ watch(
     <div v-for="(col, ci) in layers" :key="ci" class="dag-col">
       <div
         v-for="s in col" :key="s.key" class="dag-node" :data-key="s.key"
-        :class="{ 'is-sel': s.key === selected }"
-        :title="`${s.label || s.key} · ${s.pool || ''} 池`" @click="emit('select', s.key)"
+        :class="['pe-' + (s.pool || 'io'), { 'is-sel': s.key === selected }]"
+        :title="nodeTitle(s)" @click="emit('select', s.key)"
       >
         <span class="dag-dot" :class="dotCls(s)"></span>
         <span class="dag-text">
-          <span class="dag-row1">
-            <span class="dag-label">{{ s.label || s.key }}</span>
-            <span class="dag-pool" :class="'pool-' + (s.pool || 'io')">{{ s.pool || 'io' }}</span>
-          </span>
-          <span v-if="usageByStep && usageByStep[s.key]" class="dag-cost">
-            {{ usageByStep[s.key].provider }} · {{ fmtCost(usageByStep[s.key].cost) }}<span v-if="usageByStep[s.key].equiv" class="dim">（等价）</span>
-          </span>
+          <span class="dag-label">{{ s.label || s.key }}</span>
+          <span v-if="usageByStep && usageByStep[s.key]" class="dag-cost">{{ usageByStep[s.key].equiv ? '≈' : '' }}{{ fmtCost(usageByStep[s.key].cost) }}</span>
         </span>
       </div>
     </div>
@@ -130,27 +132,27 @@ watch(
 </template>
 
 <style scoped>
-.dag { position: relative; display: flex; align-items: stretch; gap: 30px; overflow-x: auto; padding: 4px 0 8px; }
+.dag { position: relative; display: flex; align-items: stretch; gap: 18px; overflow-x: auto; padding: 4px 0 8px; }
 .dag-edges { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 0; overflow: visible; }
 .dag-edges path { fill: none; stroke: var(--ink-300); stroke-width: 1.4; }
 .dag-edges path.sel { stroke: var(--brand-400); stroke-width: 2; }
 .dag-col { position: relative; z-index: 1; display: flex; flex-direction: column; justify-content: center; gap: 10px; flex: none; }
 .dag-node {
   display: flex; align-items: center; gap: 6px; padding: 5px 9px; position: relative;
-  border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface);
+  border: 1px solid var(--line); border-left-width: 3px; border-left-color: var(--ink-200);
+  border-radius: var(--r-sm); background: var(--surface);
   white-space: nowrap; cursor: pointer; transition: border-color .12s, background .12s;
 }
 .dag-node:hover { border-color: var(--ink-300); }
 .dag-node.is-sel { border-color: var(--brand-500); background: var(--brand-50); }
+/* 池=左边框色(不占宽):io/cpu 灰、ai 蓝、gpu 琥珀 */
+.pe-io { border-left-color: var(--ink-200); }
+.pe-cpu { border-left-color: var(--ink-400); }
+.pe-ai { border-left-color: var(--info); }
+.pe-gpu { border-left-color: var(--warn); }
 .dag-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
-.dag-text { display: flex; flex-direction: column; line-height: 1.25; gap: 1px; }
-.dag-row1 { display: flex; align-items: center; gap: 6px; }
+.dag-text { display: flex; flex-direction: column; line-height: 1.2; gap: 1px; }
 .dag-label { font-size: 12px; color: var(--ink-800); }
-.dag-pool { font-size: 9px; padding: 0 4px; border-radius: 3px; text-transform: uppercase; letter-spacing: .02em; }
-.pool-ai { background: var(--info-bg); color: var(--info); }
-.pool-cpu { background: var(--ink-200); color: var(--ink-600); }
-.pool-io { background: var(--line-soft); color: var(--ink-500); }
-.pool-gpu { background: var(--warn-bg); color: var(--warn); }
 .dag-cost { font-size: 10px; color: var(--ink-500); }
 /* 定义视图(无 statusByKey)按池着点 */
 .pl-io { background: var(--ink-300); }

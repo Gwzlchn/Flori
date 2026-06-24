@@ -385,7 +385,13 @@ function goConcept(c: JobConcept) {
 }
 
 // ════════════════════ 流水线 tab ════════════════════
-const rerunStep = ref('')
+// 选中步(DAG 点选)的中文名,供「从『X』重跑」按钮。
+const selectedStepLabel = computed(() => {
+  const d = jobDagSteps.value.find(x => x.key === selectedStep.value)
+  if (d?.label) return d.label
+  const s = steps.value.find(x => x.name === selectedStep.value)
+  return s?.label || selectedStep.value
+})
 async function retryJob() {
   try {
     await jobStore.retryJob(jobId.value)
@@ -393,13 +399,13 @@ async function retryJob() {
     jobStatus.value = 'processing'
   } catch (e: any) { showToast(e?.message || '重试失败', 'error') }
 }
+// 从当前选中步(而非旧下拉)重跑。
 async function rerunFromStep() {
-  if (!rerunStep.value) return
+  if (!selectedStep.value) return
   try {
-    await jobStore.rerunJob(jobId.value, rerunStep.value)
-    showToast(`从 ${rerunStep.value} 开始重跑`, 'success')
+    await jobStore.rerunJob(jobId.value, selectedStep.value)
+    showToast(`从 ${selectedStepLabel.value} 开始重跑`, 'success')
     jobStatus.value = 'processing'
-    rerunStep.value = ''
   } catch (e: any) { showToast(e?.message || '重跑失败', 'error') }
 }
 
@@ -684,6 +690,11 @@ watch(job, (j) => {
               <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:7px;height:7px;border-radius:50%;background:var(--run)"></i>运行中</span>
               <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:7px;height:7px;border-radius:50%;background:var(--bad)"></i>失败</span>
               <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:7px;height:7px;border-radius:50%;background:var(--ink-300)"></i>跳过/待运行</span>
+              <span style="color:var(--ink-300)">|</span>
+              <span style="color:var(--ink-400)">左条</span>
+              <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:3px;height:11px;border-radius:1px;background:var(--info)"></i>AI</span>
+              <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:3px;height:11px;border-radius:1px;background:var(--ink-400)"></i>CPU</span>
+              <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:3px;height:11px;border-radius:1px;background:var(--warn)"></i>GPU</span>
             </span>
             <span v-if="totalAi.calls" style="margin-left:auto;font-weight:600;color:var(--ink-700);display:inline-flex;align-items:center;gap:5px;font-size:12px">
               <Coins :size="13" style="color:var(--ink-400)" />AI 总开销 {{ fmtCost(totalAi.cost) }}<span v-if="totalAi.equiv" style="font-weight:400;color:var(--ink-400);font-size:11px">（等价）</span>
@@ -691,18 +702,12 @@ watch(job, (j) => {
           </div>
           <PipelineDag :steps="jobDagSteps" :status-by-key="stepStatusByKey" :selected="selectedStep" :usage-by-step="usageByStep" @select="selectedStep = $event" style="margin-top:10px" />
         </div>
-        <StepWorkbench :job-id="jobId" :steps="steps" :selected-step="selectedStep" />
-
-        <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;align-items:center">
+        <!-- 步骤操作:对当前选中步(上方 DAG 点选)重跑;失败 job 可整体重试。紧贴步骤与产物,不再堆在最下面 -->
+        <div v-if="jobStatus === 'done' || jobStatus === 'failed'" style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
           <button v-if="jobStatus === 'failed'" class="btn pri" @click="retryJob"><RotateCcw :size="14" />重试</button>
-          <template v-if="jobStatus === 'done' || jobStatus === 'failed'">
-            <select v-model="rerunStep" class="input" style="max-width:220px">
-              <option value="">从步骤重跑…</option>
-              <option v-for="s in steps" :key="s.name" :value="s.name">{{ s.label || s.name }}</option>
-            </select>
-            <button class="btn" :disabled="!rerunStep" @click="rerunFromStep"><Play :size="14" />重跑</button>
-          </template>
+          <button v-if="selectedStep" class="btn" @click="rerunFromStep"><Play :size="14" />从「{{ selectedStepLabel }}」重跑</button>
         </div>
+        <StepWorkbench :job-id="jobId" :steps="steps" :selected-step="selectedStep" />
       </div>
 
       <!-- ════ 元信息 ════ -->
