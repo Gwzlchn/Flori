@@ -166,6 +166,8 @@ async def list_artifacts(
     job = await asyncio.to_thread(db.get_job, job_id)
     if not job:
         raise HTTPException(404, "job not found")
+    # 一次列举拿全部 relpath→size,据此透出每文件/每步/整 job 产物体积(无须逐文件 stat)。
+    sizes = await storage.list_file_sizes(job_id)
     files = [f for f in await storage.list_files(job_id) if not _artifact_hidden(f)]
     steps = config.pipelines.get(job.pipeline, {}).get("steps", [])
     assigned: set[str] = set()
@@ -189,12 +191,18 @@ async def list_artifacts(
                 _claim(s["name"], f)
 
     groups = []
+    total_bytes = 0
     for s in steps:
         matched = sorted(by_step.get(s["name"], []))
         if matched:
+            step_bytes = sum(sizes.get(f, 0) for f in matched)
+            total_bytes += step_bytes
             groups.append({"step": s["name"], "label": s.get("label") or s["name"],
-                           "files": [{"path": f, "kind": _artifact_kind(f)} for f in matched]})
-    return {"groups": groups}
+                           "total_bytes": step_bytes,
+                           "files": [{"path": f, "kind": _artifact_kind(f),
+                                      "size": sizes.get(f, 0)} for f in matched]})
+    # total_bytes:本 job 全部已分组产物体积合计(供前端「产物总体积」汇总)。
+    return {"groups": groups, "total_bytes": total_bytes}
 
 
 @router.get("/{job_id}/artifact")

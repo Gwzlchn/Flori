@@ -3,9 +3,10 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useApi } from '../../composables/useApi'
 import MarkdownViewer from '../notes/MarkdownViewer.vue'
 import { fmtDateTime, fmtDuration } from '../../utils/datetime'
+import { fmtBytes } from '../../utils/format'
 import { statusLabel } from '../../utils/status'
 import type { StepInfo, StepUsage } from '../../types'
-import { Check, X, Minus, Loader, Clock, ChevronRight, FileText, Braces, Package, Coins } from 'lucide-vue-next'
+import { Check, X, Minus, Loader, Clock, ChevronRight, FileText, Braces, Package, Coins, HardDrive } from 'lucide-vue-next'
 
 const props = defineProps<{ jobId: string; steps: StepInfo[] }>()
 const api = useApi()
@@ -25,11 +26,13 @@ const META_LABELS: Record<string, string> = {
   figures: '图表', duration: '时长', words: '字数', pages: '页数', provider: '模型',
 }
 const MODE_LABELS: Record<string, string> = { zh: '加标点', translate: '翻译为中文' }
-const META_SKIP = new Set(['pct', 'current', 'total', 'exec_id', 'worker'])
+// message=运行中实时进度文案(单独渲染在进度条旁,不作产出摘要 chip)。
+const META_SKIP = new Set(['pct', 'current', 'total', 'exec_id', 'worker', 'message'])
 
-interface AFile { path: string; kind: string }
-interface Group { step: string; label: string; files: AFile[] }
+interface AFile { path: string; kind: string; size?: number }
+interface Group { step: string; label: string; files: AFile[]; total_bytes?: number }
 const groups = ref<Group[]>([])
+const jobBytes = ref(0)          // 本 job 全部产物体积合计(/artifacts.total_bytes)
 const filesByStep = computed<Record<string, AFile[]>>(() => {
   const m: Record<string, AFile[]> = {}
   for (const g of groups.value) m[g.step] = g.files
@@ -88,9 +91,10 @@ const cats = computed(() => {
 
 async function loadGroups() {
   try {
-    const r = await api.get<{ groups: Group[] }>(`/api/jobs/${props.jobId}/artifacts`)
+    const r = await api.get<{ groups: Group[]; total_bytes?: number }>(`/api/jobs/${props.jobId}/artifacts`)
     groups.value = r.groups || []
-  } catch { groups.value = [] }
+    jobBytes.value = r.total_bytes || 0
+  } catch { groups.value = []; jobBytes.value = 0 }
 }
 
 // 逐次 AI 调用明细(按步聚合;一个步可能多次调用 → 取该步全部行)。
@@ -104,6 +108,32 @@ async function loadUsage() {
 const selUsage = computed(() => usage.value.filter(u => u.step === sel.value))
 const fmtCost = (v: number) => `$${(v ?? 0).toFixed(4)}`
 const costSuffix = (provider: string) => (provider === 'claude-cli' ? '（等价）' : '')
+
+// 选中步的产物体积合计(后端按步给 total_bytes;无则回退各文件 size 之和)。
+const selBytes = computed(() => {
+  const g = groups.value.find(g => g.step === sel.value)
+  if (!g) return 0
+  return g.total_bytes ?? g.files.reduce((s, f) => s + (f.size || 0), 0)
+})
+
+// 本 job 级 AI 用量小计(逐次明细前端聚合,避免再调聚合端点)。命中率=读缓存/(入+读+写)。
+const jobUsage = computed(() => {
+  const us = usage.value
+  if (!us.length) return null
+  let inp = 0, cr = 0, cc = 0, cost = 0, claudeCli = false
+  for (const u of us) {
+    inp += u.input_tokens
+    cr += u.cache_read_tokens; cc += u.cache_creation_tokens
+    cost += u.cost_usd || 0
+    if (u.provider === 'claude-cli') claudeCli = true
+  }
+  const denom = inp + cr + cc
+  return {
+    calls: us.length, cost,
+    hit: denom ? Math.round((cr / denom) * 1000) / 10 : 0,
+    claudeCli,   // 任一调用为订阅 → 成本标「(等价)」
+  }
+})
 
 function pickDefault() {
   const s = props.steps
@@ -153,7 +183,20 @@ watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pick
 
 <template>
   <div class="bg-white border border-gray-200 rounded-xl p-4">
-    <h3 class="text-sm font-semibold text-gray-700 mb-3">步骤与产物</h3>
+    <div class="flex items-center gap-2 flex-wrap mb-3">
+      <h3 class="text-sm font-semibold text-gray-700">步骤与产物</h3>
+      <!-- job 级小计:全 job 产物体积 + AI 用量(累计成本/命中率/调用次数);克制,仅一行 -->
+      <div class="ml-auto flex items-center gap-3 text-xs text-gray-500">
+        <span v-if="jobBytes" class="flex items-center gap-1" title="本内容全部产物体积">
+          <HardDrive :size="12" class="text-gray-400" />产物 <span class="font-medium text-gray-700">{{ fmtBytes(jobBytes) }}</span>
+        </span>
+        <span v-if="jobUsage" class="flex items-center gap-1" title="本内容 AI 用量累计">
+          <Coins :size="12" class="text-gray-400" />
+          <span class="font-medium text-gray-700">{{ fmtCost(jobUsage.cost) }}<span class="text-gray-400">{{ jobUsage.claudeCli ? '（等价）' : '' }}</span></span>
+          <span class="text-gray-400">· {{ jobUsage.calls }} 次 · 命中 {{ jobUsage.hit }}%</span>
+        </span>
+      </div>
+    </div>
     <div class="grid md:grid-cols-[300px_1fr] gap-4">
       <!-- 左:步骤时间线(全部步骤直接铺开,不加内部滚动条) -->
       <div class="space-y-0 md:border-r md:border-gray-100 md:pr-2">
@@ -204,8 +247,12 @@ watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pick
           </div>
           <div v-else-if="['waiting', 'ready'].includes(selStep.status)" class="text-xs text-gray-400 mt-2">尚未运行</div>
 
-          <div v-if="stepPct(selStep) != null" class="mt-2 w-full bg-gray-200 rounded-full h-1.5">
-            <div class="bg-blue-500 h-full rounded-full" :style="{ width: `${stepPct(selStep)}%` }" />
+          <div v-if="selStep.status === 'running' && (stepPct(selStep) != null || selStep.meta?.message)" class="mt-2">
+            <div v-if="stepPct(selStep) != null" class="w-full bg-gray-200 rounded-full h-1.5">
+              <div class="bg-blue-500 h-full rounded-full transition-all" :style="{ width: `${stepPct(selStep)}%` }" />
+            </div>
+            <!-- 实时进度文案(WS step_progress.message),如「扫描关键帧」-->
+            <div v-if="selStep.meta?.message" class="text-xs text-gray-500 mt-1 truncate">{{ selStep.meta.message }}</div>
           </div>
 
           <!-- 失败原因:仅失败步骤显示(done 步骤的历史 error 如 timeout 不算失败) -->
@@ -248,7 +295,7 @@ watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pick
           <!-- ════ 产物(本步产出的文件)════ -->
           <div v-if="['done', 'failed', 'running'].includes(selStep.status)" class="mt-4 pt-3 border-t border-gray-100">
             <div class="flex items-center gap-2 mb-2">
-              <span class="text-xs font-semibold text-gray-700 flex items-center gap-1.5"><Package :size="13" class="text-gray-500" />产物 <span class="font-normal text-gray-400">（{{ selFiles.length }}）</span></span>
+              <span class="text-xs font-semibold text-gray-700 flex items-center gap-1.5"><Package :size="13" class="text-gray-500" />产物 <span class="font-normal text-gray-400">（{{ selFiles.length }}<template v-if="selBytes"> · {{ fmtBytes(selBytes) }}</template>）</span></span>
               <button @click="artOpen = !artOpen" class="text-xs text-blue-600 hover:text-blue-700 flex items-center gap-0.5">
                 <ChevronRight :size="12" :class="artOpen ? 'rotate-90' : ''" class="transition-transform" />{{ artOpen ? '收起' : '展开' }}
               </button>
@@ -276,6 +323,7 @@ watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pick
                   >
                     <component :is="grp.cat === '数据' ? Braces : FileText" :size="11" />
                     <span>{{ fname(f.path) }}</span>
+                    <span v-if="f.size" class="text-gray-400">{{ fmtBytes(f.size) }}</span>
                   </button>
                 </div>
               </div>

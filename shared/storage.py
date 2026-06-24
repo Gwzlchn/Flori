@@ -40,6 +40,9 @@ class StorageBackend(Protocol):
     async def write_file(self, job_id: str, rel_path: str, data: bytes) -> None: ...
     # 列出某 job 的全部产物相对路径(供 gateway 产物清单端点 / GatewayStorage.pull 用)。
     async def list_files(self, job_id: str) -> list[str]: ...
+    # 列产物相对路径 → 字节大小(供 /artifacts 透出每步/每 job 产物体积)。一次列举拿全,
+    # 不对每文件逐个 stat(本地 rglob 自带 st_size、MinIO list_objects 自带 obj.size)。
+    async def list_file_sizes(self, job_id: str) -> dict[str, int]: ...
     # 供 api range 流式播放视频/音频:取文件大小 + 读指定字节区间。找不到返回 None。
     async def file_size(self, job_id: str, rel_path: str) -> int | None: ...
     async def read_range(self, job_id: str, rel_path: str, start: int, length: int) -> bytes | None: ...
@@ -125,6 +128,19 @@ class LocalStorage:
             p.relative_to(root).as_posix()
             for p in root.rglob("*") if p.is_file()
         ]
+
+    async def list_file_sizes(self, job_id: str) -> dict[str, int]:
+        return await asyncio.to_thread(self._list_file_sizes_sync, job_id)
+
+    def _list_file_sizes_sync(self, job_id: str) -> dict[str, int]:
+        root = self._safe_path(job_id)
+        if not root.is_dir():
+            return {}
+        # rglob 已遍历到每个文件,顺手 stat().st_size,不再二次列举。
+        return {
+            p.relative_to(root).as_posix(): p.stat().st_size
+            for p in root.rglob("*") if p.is_file()
+        }
 
     async def health(self) -> dict:
         # 本地盘:无独立对象存储组件,前端按 mode=local 显"本地存储"灰点(unknown,非 down)。
@@ -313,6 +329,19 @@ class RemoteStorage:
                 out.append(rel)
         return out
 
+    async def list_file_sizes(self, job_id: str) -> dict[str, int]:
+        return await asyncio.to_thread(self._list_file_sizes_sync, job_id)
+
+    def _list_file_sizes_sync(self, job_id: str) -> dict[str, int]:
+        prefix = f"{job_id}/"
+        out: dict[str, int] = {}
+        # list_objects 自带 obj.size,无需逐对象 stat_object。
+        for obj in self._client().list_objects(self._bucket, prefix=prefix, recursive=True):
+            rel = obj.object_name[len(prefix):]
+            if rel:
+                out[rel] = obj.size or 0
+        return out
+
     async def health(self) -> dict:
         # bucket_exists 是 HEAD bucket(O(1)),勿用 list_objects(全量扫)。minio SDK 同步 → to_thread。
         # 容量统计(对象数/总字节)MinIO 无聚合 API,全量 list 才能求和 → 不在探活里做(设计 §5.4 标"未采集")。
@@ -486,6 +515,10 @@ class GatewayStorage:
         )
         resp.raise_for_status()
         return resp.json().get("files", [])
+
+    # gateway 仅供 worker 拉/回传产物,前端 /artifacts 体积透出走 API 端 Local/Remote;此处不参与 → 返回空。
+    async def list_file_sizes(self, job_id: str) -> dict[str, int]:
+        return {}
 
     # gateway 仅供远端 worker 拉产物,不用于给前端流式播放;range 用整文件回退即可。
     async def file_size(self, job_id: str, rel_path: str) -> int | None:

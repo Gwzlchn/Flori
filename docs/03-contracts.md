@@ -264,6 +264,10 @@ GET /api/jobs/{id}/notes/transcript     → text/markdown (逐字稿)
 > 任意单个产物用 `GET .../artifact?path=<相对路径>`(非 `/output/{filename}`)。`job.json`(含凭证)
 > 与 `.` 开头的内部/凭证文件一律隐藏、不可经产物端点取。`/note-versions` 返回:
 > `{"versions": [{"provider","model","version","file","review_file","overall"}...]}`(按 version 倒序)。
+>
+> `/artifacts` 返回:`{"groups":[{"step","label","total_bytes","files":[{"path","kind","size"}...]}...],"total_bytes":<int>}`。
+> `size`/`total_bytes` 为字节(本地盘 rglob 自带 st_size、MinIO list_objects 自带 obj.size,不逐文件 stat);
+> `total_bytes`(顶层)=全部已分组产物体积合计,供前端透出每步/整 job 产物体积。
 
 ### 1.3 系统状态
 
