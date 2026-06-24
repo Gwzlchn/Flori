@@ -473,13 +473,13 @@ const usageByProvider = computed(() => {
     <!-- 1. 系统信息 -->
     <div class="seclabel" style="margin-bottom:10px"><GitCommit :size="14" />系统信息</div>
     <div class="card pad" style="margin-bottom:18px;display:flex;flex-wrap:wrap;gap:8px 22px;align-items:center">
-      <span style="font-size:13px;color:var(--ink-700)">系统版本 <b class="mono">{{ systemVersion }}</b></span>
+      <span style="font-size:13px;color:var(--ink-700)">系统版本 <b class="mono">{{ shortSha(systemVersion) }}</b></span>
       <span class="sep" style="color:var(--ink-300)">·</span>
       <span style="font-size:13px;color:var(--ink-700)">部署模式 <b>{{ deployMode }}</b></span>
       <template v-for="c in components" :key="`v-${c.name}`">
         <span class="sep" style="color:var(--ink-300)">·</span>
         <span style="font-size:12.5px;color:var(--ink-600)">{{ COMPONENT_KIND_LABELS[c.kind] }}
-          <b class="mono">{{ c.version || '—' }}</b></span>
+          <b class="mono">{{ c.version ? shortSha(c.version) : '—' }}</b></span>
       </template>
     </div>
 

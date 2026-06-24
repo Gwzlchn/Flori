@@ -23,7 +23,8 @@ const mainText = computed(() => {
     const b = extra.value.bucket
     return b ? `bucket ${b} ${extra.value.bucket_exists ? '✓' : '✗'}` : '对象存储'
   }
-  return c.version ? `版本 ${c.version}` : '版本 —'
+  // sha 版本截短 7 位(与 SystemView shortSha 一致);Redis 等语义版本(<7 位)原样。
+  return c.version ? `版本 ${c.version.slice(0, 7)}` : '版本 —'
 })
 
 // 次要指标行（uptime / 心跳·loop / 内存·ping·conn / 探活）。
