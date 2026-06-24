@@ -40,6 +40,15 @@ const stepStatusByKey = computed<Record<string, string>>(() => {
   for (const s of steps.value) m[s.name] = s.status
   return m
 })
+// DAG 与工作台共享的选中步(点 DAG 节点即选)。默认:运行中→失败→最后完成→末步;用户点选后不被刷新覆盖。
+const selectedStep = ref('')
+watch(steps, (s) => {
+  if (selectedStep.value && s.some(x => x.name === selectedStep.value)) return
+  if (!s.length) return
+  const pick = s.find(x => x.status === 'running') || s.find(x => x.status === 'failed')
+    || [...s].reverse().find(x => x.status === 'done') || s[s.length - 1]
+  selectedStep.value = pick.name
+}, { immediate: true })
 
 const job = ref<JobDetail | null>(null)
 const loading = ref(true)
@@ -646,8 +655,8 @@ watch(job, (j) => {
 
       <!-- ════ 流水线 ════ -->
       <div v-show="tab === 'proc'">
-        <details v-if="jobDagSteps.length" class="card pad" style="margin-bottom:14px;padding:13px 15px" open>
-          <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--ink-800);display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <div v-if="jobDagSteps.length" class="card pad" style="margin-bottom:14px;padding:13px 15px">
+          <div style="font-size:13px;font-weight:600;color:var(--ink-800);display:flex;align-items:center;gap:8px;flex-wrap:wrap">
             <GitBranch :size="14" />流程依赖图（DAG）
             <span style="font-weight:400;font-size:11px;color:var(--ink-500);display:inline-flex;gap:9px;margin-left:4px">
               <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:7px;height:7px;border-radius:50%;background:var(--ok)"></i>完成</span>
@@ -655,10 +664,10 @@ watch(job, (j) => {
               <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:7px;height:7px;border-radius:50%;background:var(--bad)"></i>失败</span>
               <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:7px;height:7px;border-radius:50%;background:var(--ink-300)"></i>跳过/待运行</span>
             </span>
-          </summary>
-          <PipelineDag :steps="jobDagSteps" :status-by-key="stepStatusByKey" style="margin-top:10px" />
-        </details>
-        <StepWorkbench :job-id="jobId" :steps="steps" />
+          </div>
+          <PipelineDag :steps="jobDagSteps" :status-by-key="stepStatusByKey" :selected="selectedStep" @select="selectedStep = $event" style="margin-top:10px" />
+        </div>
+        <StepWorkbench :job-id="jobId" :steps="steps" :selected-step="selectedStep" />
 
         <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;align-items:center">
           <button v-if="jobStatus === 'failed'" class="btn pri" @click="retryJob"><RotateCcw :size="14" />重试</button>

@@ -8,7 +8,8 @@ import { statusLabel } from '../../utils/status'
 import type { StepInfo, StepUsage } from '../../types'
 import { Check, X, Minus, Loader, Clock, ChevronRight, FileText, Braces, Package, Coins, HardDrive } from 'lucide-vue-next'
 
-const props = defineProps<{ jobId: string; steps: StepInfo[] }>()
+// selectedStep 由父组件(JobDetailView 的 DAG 点选)驱动;本组件不再自带步骤轨。
+const props = defineProps<{ jobId: string; steps: StepInfo[]; selectedStep?: string }>()
 const api = useApi()
 
 const statusIcon: Record<string, any> = { done: Check, failed: X, skipped: Minus, running: Loader }
@@ -39,7 +40,7 @@ const filesByStep = computed<Record<string, AFile[]>>(() => {
   return m
 })
 
-const sel = ref('')                      // 选中步骤名
+const sel = computed(() => props.selectedStep || '')   // 选中步骤名(父驱动)
 const selFile = ref<AFile | null>(null)
 const fileContent = ref('')
 const fileLoading = ref(false)
@@ -135,22 +136,13 @@ const jobUsage = computed(() => {
   }
 })
 
-function pickDefault() {
-  const s = props.steps
-  if (!s.length) return
-  const running = s.find(x => x.status === 'running')
-  const lastDone = [...s].reverse().find(x => x.status === 'done' || x.status === 'failed')
-  selectStep((running || lastDone || s[0]).name)
-}
-
-function selectStep(name: string) {
-  if (!name) return
-  sel.value = name
+// 选中步(父经 selectedStep 驱动)变化:重置文件/日志态,自动预览首个产物。
+watch(sel, (name) => {
   selFile.value = null; fileContent.value = ''; fileErr.value = ''
   logOpen.value = false; logText.value = ''; logErr.value = ''
   const f = (filesByStep.value[name] || [])[0]
   if (f) viewFile(f)
-}
+})
 
 async function viewFile(f: AFile) {
   selFile.value = f; fileErr.value = ''
@@ -176,9 +168,12 @@ async function toggleLog() {
   }
 }
 
-onMounted(async () => { await Promise.all([loadGroups(), loadUsage()]); pickDefault() })
-// steps 可能在 detail 加载后才到;若还没选中则补选默认。
-watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pickDefault() })
+onMounted(async () => {
+  await Promise.all([loadGroups(), loadUsage()])
+  // groups 到位后,若已有选中步则预览其首个产物(初次进入)。
+  const f = (filesByStep.value[sel.value] || [])[0]
+  if (f && !selFile.value) viewFile(f)
+})
 </script>
 
 <template>
@@ -197,41 +192,7 @@ watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pick
         </span>
       </div>
     </div>
-    <div class="grid md:grid-cols-[300px_1fr] gap-4">
-      <!-- 左:步骤时间线(全部步骤直接铺开,不加内部滚动条) -->
-      <div class="space-y-0 md:border-r md:border-gray-100 md:pr-2">
-        <button
-          v-for="(s, idx) in steps" :key="s.name" @click="selectStep(s.name)"
-          class="w-full text-left rounded-lg px-2 py-2 flex gap-2.5 transition-colors"
-          :class="sel === s.name ? 'bg-blue-50 ring-1 ring-blue-200' : 'hover:bg-gray-50'"
-        >
-          <div class="flex flex-col items-center">
-            <span
-              class="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0"
-              :class="statusColor[s.status] || statusColor.waiting"
-            >
-              <component :is="statusIcon[s.status]" v-if="statusIcon[s.status]" :size="13" />
-              <span v-else class="text-[10px]">{{ idx + 1 }}</span>
-            </span>
-            <div v-if="idx < steps.length - 1" class="w-0.5 flex-1 min-h-[0.5rem] my-0.5 bg-gray-200" />
-          </div>
-          <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-1.5">
-              <span class="text-sm font-medium truncate" :class="s.status === 'waiting' ? 'text-gray-400' : 'text-gray-800'">{{ stepLabel(s) }}</span>
-              <span class="text-[10px] px-1 py-0.5 rounded flex-shrink-0" :class="statusColor[s.status] || statusColor.waiting">{{ statusLabel(s.status) }}</span>
-            </div>
-            <div class="text-[11px] text-gray-400 font-mono mt-0.5">{{ s.name }}</div>
-            <div v-if="stepPct(s) != null" class="mt-1 w-full bg-gray-200 rounded-full h-1">
-              <div class="bg-blue-500 h-full rounded-full transition-all" :style="{ width: `${stepPct(s)}%` }" />
-            </div>
-            <div v-else-if="s.duration_sec && ['done', 'failed'].includes(s.status)" class="text-[11px] text-gray-400 mt-0.5">耗时 {{ fmtDuration(s.duration_sec, { decimalSeconds: true }) }}</div>
-          </div>
-        </button>
-      </div>
-
-      <!-- 右:选中步骤详情 + 产物 -->
-      <div class="min-w-0">
-        <template v-if="selStep">
+    <template v-if="selStep">
           <div class="flex items-center gap-2 flex-wrap">
             <h4 class="text-base font-semibold text-gray-800">{{ stepLabel(selStep) }}</h4>
             <span class="text-xs px-1.5 py-0.5 rounded" :class="statusColor[selStep.status] || statusColor.waiting">{{ statusLabel(selStep.status) }}</span>
@@ -355,12 +316,10 @@ watch(() => props.steps.map(s => s.name).join(','), () => { if (!sel.value) pick
               <div v-if="logLoading" class="text-xs text-gray-400">加载中…</div>
               <div v-else-if="logErr" class="text-xs text-gray-400">{{ logErr }}</div>
               <div v-else-if="!logText.trim()" class="text-xs text-gray-400">该步骤无日志输出</div>
-              <pre v-else class="text-xs bg-gray-50 text-gray-800 border border-gray-200 rounded-lg p-3 max-h-72 overflow-auto whitespace-pre-wrap break-all">{{ logText }}</pre>
+              <pre v-else class="text-xs bg-gray-50 text-gray-800 border border-gray-200 rounded-lg p-3 whitespace-pre-wrap break-all">{{ logText }}</pre>
             </div>
           </div>
-        </template>
-        <div v-else class="text-sm text-gray-400 py-12 text-center">← 选择左侧步骤查看详情与产物</div>
-      </div>
-    </div>
+    </template>
+    <div v-else class="text-sm text-gray-400 py-12 text-center">从上方流程图点选步骤，查看详情与产物</div>
   </div>
 </template>

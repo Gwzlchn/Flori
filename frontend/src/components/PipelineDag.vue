@@ -5,7 +5,9 @@ import { computed } from 'vue'
 
 interface Step { key: string; label: string | null; pool: string | null; needs: string[] }
 // statusByKey 给定时(每个 job 视图):点按步骤状态着色;否则(流水线定义视图)按池着色。
-const props = defineProps<{ steps: Step[]; statusByKey?: Record<string, string> }>()
+// selected 高亮当前选中步;点节点 emit select(=步骤选择器,替代旧左侧轨)。
+const props = defineProps<{ steps: Step[]; statusByKey?: Record<string, string>; selected?: string }>()
+const emit = defineEmits<{ (e: 'select', key: string): void }>()
 
 const byKey = computed<Record<string, Step>>(() => {
   const m: Record<string, Step> = {}
@@ -49,7 +51,8 @@ function dotCls(s: Step): string {
   <div class="dag">
     <template v-for="(col, ci) in layers" :key="ci">
       <div class="dag-col">
-        <div v-for="s in col" :key="s.key" class="dag-node" :title="`${s.label || s.key} · ${s.pool || ''} 池`">
+        <div v-for="s in col" :key="s.key" class="dag-node" :class="{ 'is-sel': s.key === selected }"
+          :title="`${s.label || s.key} · ${s.pool || ''} 池`" @click="emit('select', s.key)">
           <span class="dag-dot" :class="dotCls(s)"></span>
           <span class="dag-text">
             <span class="dag-label">{{ s.label || s.key }}</span>
@@ -68,8 +71,10 @@ function dotCls(s: Step): string {
 .dag-node {
   display: flex; align-items: center; gap: 6px; padding: 5px 9px;
   border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface);
-  white-space: nowrap;
+  white-space: nowrap; cursor: pointer; transition: border-color .12s, background .12s;
 }
+.dag-node:hover { border-color: var(--ink-300); }
+.dag-node.is-sel { border-color: var(--brand-500); background: var(--brand-50); }
 .dag-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .dag-text { display: flex; flex-direction: column; line-height: 1.25; }
 .dag-label { font-size: 12px; color: var(--ink-800); }
