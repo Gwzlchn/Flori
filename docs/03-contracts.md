@@ -179,6 +179,16 @@ GET /api/jobs/j_xxx/steps/10_smart/log?raw=1  → 完整
 {"job_id": "j_20260516_abc123", "status": "processing", "retry_from": "10_smart"}
 ```
 
+#### POST /api/jobs/retry-failed — 批量重试失败任务
+
+<!-- contract: 二期 retry-failed 加可选 collection_id 过滤(scoped 重试) -->
+重试所有 `status=failed` 的 job(各自从首个失败步重跑)。可选 query `collection_id` 只重试该集合内的失败 job(不传=全局)。Response `200`：`{"retried": <int>}`。前端入口:job 列表页工具栏「重试全部失败」(全局) + 集合详情页「重试本集合失败」(scoped)。
+
+```bash
+curl -X POST 'http://localhost:8000/api/jobs/retry-failed'                       # 全局
+curl -X POST 'http://localhost:8000/api/jobs/retry-failed?collection_id=col_xxx' # 仅该集合
+```
+
 #### POST /api/jobs/{id}/rerun — 强制重跑
 
 从指定步骤开始重跑（对已完成的 Job 重新生成）。清除该步骤及所有下游的 `.done` 标记，由指纹机制决定哪些实际需要重跑。
@@ -579,11 +589,15 @@ Base: `/api/collections`。集合是内容分组；当 `source_type`+`source_id`
   "source_type": "bilibili_up",
   "source_id": "12345678",
   "enabled": true,
-  "last_synced_at": "2026-05-16T20:00:00+08:00"
+  "last_synced_at": "2026-05-16T20:00:00+08:00",
+  "last_sync_status": "ok",
+  "last_sync_error": null
 }
 ```
 
 其中 `enabled` = 集合的 `sync_enabled`（自动追更开关），`last_synced_at` 可为 `null`（从未同步）。
+<!-- contract: 二期 订阅同步状态分级,驱动侧栏/详情状态点 -->
+`last_sync_status` ∈ `ok` / `error` / `syncing` / `null`（`null`=从未同步；`syncing`=同步进行中；`ok`=上次成功；`error`=上次失败，`last_sync_error` 含截断的错误摘要）。前端 5 态:订阅中(绿)/暂停(灰)/从未(琥珀)/出错(红)/同步中(蓝)。
 
 #### POST /api/collections — 创建集合
 
@@ -606,7 +620,7 @@ curl -X POST http://localhost:8000/api/collections \
 <!-- contract: 集合存纯名 name + 派生来源标签 source_label（不拼接入库），显示 = name + 来源徽标 -->
 
 `name` 规则：手动集合必填；订阅集合可留空（`""` 或不传），首次同步拿到**来源真实名**（UP 真实昵称/频道名/RSS feed 标题/目录 basename）后自动命名为该**纯名**（如 `PAKEN财经说`，**不拼来源标签**）。来源名拿不到时停留在占位名（source_id）。用户显式填的名不会被自动命名覆盖。
-来源标签**不入库**：由 `source_type` 派生，在响应的 `subscription.source_label`（`bilibili`/`youtube`/`rss`/`local`）返回；前端显示 = `name` + 来源徽标。`CollectionResponse.subscription` 含 `{source_type, source_id, source_label, enabled, last_synced_at}`。
+来源标签**不入库**：由 `source_type` 派生，在响应的 `subscription.source_label`（`bilibili`/`youtube`/`rss`/`local`）返回；前端显示 = `name` + 来源徽标。`CollectionResponse.subscription` 含 `{source_type, source_id, source_label, enabled, last_synced_at, last_sync_status, last_sync_error}`。
 
 <!-- contract: 订阅创建/同步行为 -->
 
@@ -627,6 +641,8 @@ GET /api/collections?domain=deep-learning
 #### GET /api/collections/{id} — 集合详情
 
 Response `200`：`CollectionResponse`。错误：`400` collection_id 非法（含 `..` / `/` / 空字节）、`404` 不存在。
+<!-- contract: 二期 详情额外带 status_counts(集合内 job 各状态计数);列表端点该字段为 null -->
+详情比列表多一个顶层 `status_counts`：本集合内 job 各状态计数,如 `{"done":1,"processing":0,"failed":2,"pending":0}`（恒含这四键、0 补齐,可能有额外状态);列表端点该字段为 `null`。供集合页显示状态分布 + 「重试本集合失败」。
 
 #### PUT /api/collections/{id} — 修改集合
 
@@ -738,6 +754,19 @@ curl -X POST http://localhost:8000/api/domains \
 请求体：`domain`（必填，键/slug，用于 URL 与过滤）、`display_name` / `icon` / `color` / `role` / `description`（均可选）。Response `201`：该领域的总览条目（结构同 `GET /api/domains` 的一项，计数为 0）。
 
 错误：`400` domain 非法或为 `general`（默认领域无需新建）、`409` 该领域已存在（profile 已存在）。
+
+#### POST /api/domains/{domain}/rename — 改英文标识(domain key)
+
+<!-- contract: 二期 issue1-b 真改 domain key,事务迁移所有引用 -->
+改领域英文 key。领域是派生键(无表),散在 `jobs`/`collections`/`glossary`(+ `notes_fts5` 冗余列)+ `profiles/{domain}.yaml`。一个事务原子迁移:先迁 profile 文件(可回滚)→ 再事务迁移 DB 引用,DB 失败回滚文件。
+
+```bash
+curl -X POST http://localhost:8000/api/domains/finance/rename \
+  -H "Content-Type: application/json" -d '{"new_domain": "investing"}'
+```
+
+请求体:`new_domain`(必填,新键/slug)。Response `200`:`{"old","new","moved":{"jobs","collections","glossary"},"domain":<新键总览条目>}`。
+错误:`400` new 非法/为空/与旧相同/old 或 new 为 `general`、`409` 目标标识已被使用(库里有行 或 profile 已存在)。
 
 > 展示元数据(重命名/图标/配色)修改走已有 `PUT /api/profiles/{domain}`（见 1.12，`ProfileUpdateRequest` 已含可选 `display_name`/`icon`/`color`/`description`,部分合并、保留 `terminology`)。侧栏「…」菜单的「重命名/改图标配色」即调它(`stores/domains.ts` updateMeta);**不另开 domains meta 端点**,避免同一份 yaml 持久化两处分叉。**不迁移 domain key**(英文标识不变;真改 key 为二期单独迁移端点)。
 

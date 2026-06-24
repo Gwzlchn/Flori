@@ -106,6 +106,11 @@ class DomainCreateRequest(BaseModel):
     description: str | None = None
 
 
+class DomainRenameRequest(BaseModel):
+    """改领域英文标识(domain key):把 URL 里的旧 domain 迁到 new_domain,事务迁移所有引用。"""
+    new_domain: str
+
+
 class ProfileUpdateRequest(BaseModel):
     role: str | None = None
     domain_context: str | None = None
@@ -154,6 +159,8 @@ class CollectionSubscriptionInfo(BaseModel):
     source_label: str = ""    # 由 source_type 派生的来源短标签(bilibili/youtube/rss/local);前端 = name + 该徽标
     enabled: bool             # 自动同步开关 = collection.sync_enabled
     last_synced_at: str | None = None
+    last_sync_status: str | None = None   # ok | error | syncing | None(从未同步)
+    last_sync_error: str | None = None    # status=error 时的错误摘要(供前端 tooltip)
 
 
 class CollectionResponse(BaseModel):
@@ -165,6 +172,8 @@ class CollectionResponse(BaseModel):
     job_count: int = 0
     created_at: str
     subscription: CollectionSubscriptionInfo | None = None
+    # 各状态 job 计数(仅集合详情端点填,列表端点为 None):{done, processing, failed, pending, ...}
+    status_counts: dict[str, int] | None = None
 
 
 # ── 术语表 ──

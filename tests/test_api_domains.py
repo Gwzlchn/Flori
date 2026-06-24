@@ -164,3 +164,56 @@ class TestDomains:
 
 # 注:知识库展示元数据(display_name/icon/color)的修改复用 PUT /api/profiles/{domain}
 # (见 test_api_profiles 的 meta 合并用例),侧栏 updateMeta 即调它;此处不再另测一份 domains meta 端点。
+
+
+class TestDomainRename:
+    """二期 issue1-b:改英文 domain key(事务迁移 jobs/collections/glossary + notes_fts5 + profile 文件)。"""
+
+    @pytest.mark.asyncio
+    async def test_rename_migrates_all(self, client, app):
+        _seed(app.state.db)
+        r = await client.post("/api/domains/finance/rename", json={"new_domain": "investing"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["new"] == "investing"
+        assert body["moved"] == {"jobs": 2, "collections": 1, "glossary": 1}
+        names = [d["domain"] for d in (await client.get("/api/domains")).json()["domains"]]
+        assert "investing" in names and "finance" not in names
+        # 内容/集合/术语都迁到了新 key(经工作台聚合验证)
+        ws = (await client.get("/api/domains/investing")).json()
+        assert ws["stats"]["job_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_rename_conflict_409(self, client, app):
+        _seed(app.state.db)  # deep-learning 已存在(j3)
+        r = await client.post("/api/domains/finance/rename", json={"new_domain": "deep-learning"})
+        assert r.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_rename_general_rejected(self, client, app):
+        _seed(app.state.db)
+        assert (await client.post("/api/domains/general/rename", json={"new_domain": "x"})).status_code == 400
+        assert (await client.post("/api/domains/finance/rename", json={"new_domain": "general"})).status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_rename_same_rejected(self, client, app):
+        _seed(app.state.db)
+        assert (await client.post("/api/domains/finance/rename", json={"new_domain": "finance"})).status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_rename_overlong_new_400(self, client, app):
+        _seed(app.state.db)
+        r = await client.post("/api/domains/finance/rename", json={"new_domain": "x" * 300})
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_rename_moves_profile_file(self, client, test_config):
+        await client.post("/api/domains", json={"domain": "crypto", "display_name": "加密"})
+        r = await client.post("/api/domains/crypto/rename", json={"new_domain": "web3"})
+        assert r.status_code == 200
+        pdir = test_config.prompts_dir / "profiles"
+        assert not (pdir / "crypto.yaml").exists()
+        assert (pdir / "web3.yaml").exists()
+        import yaml as _yaml
+        meta = _yaml.safe_load((pdir / "web3.yaml").read_text(encoding="utf-8"))
+        assert meta["domain"] == "web3" and meta["display_name"] == "加密"

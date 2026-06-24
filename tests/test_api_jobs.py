@@ -369,6 +369,25 @@ class TestRetryRerunResubmit:
                    if c[0][0] == "job_command" and c[0][1].get("action") == "retry"}
         assert set(ids) <= retried
 
+    @pytest.mark.asyncio
+    async def test_retry_all_failed_scoped_by_collection(self, client, mock_redis, db):
+        # P2 item D：retry-failed?collection_id 只重试该集合的失败 job。
+        from shared.models import Collection, Job, JobStatus
+        db.create_collection(Collection(id="c_a", name="A", domain="general"))
+        db.create_collection(Collection(id="c_b", name="B", domain="general"))
+        db.create_job(Job(id="ja_fail", content_type="video", pipeline="video",
+                          collection_id="c_a", status=JobStatus.FAILED))
+        db.create_job(Job(id="ja_done", content_type="video", pipeline="video",
+                          collection_id="c_a", status=JobStatus.DONE))
+        db.create_job(Job(id="jb_fail", content_type="video", pipeline="video",
+                          collection_id="c_b", status=JobStatus.FAILED))
+        resp = await client.post("/api/jobs/retry-failed?collection_id=c_a")
+        assert resp.status_code == 200
+        assert resp.json()["retried"] == 1   # 仅 c_a 的 1 个失败
+        retried = {c[0][1]["job_id"] for c in mock_redis.publish.call_args_list
+                   if c[0][0] == "job_command" and c[0][1].get("action") == "retry"}
+        assert retried == {"ja_fail"}        # 不含 c_b 的失败、不含 c_a 的 done
+
 
 class TestListByCollection:
     @pytest.mark.asyncio

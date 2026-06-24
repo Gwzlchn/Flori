@@ -111,6 +111,8 @@ class Collection:
     source_id: str | None = None        # 来源标识(B站 mid / 收藏夹 id / 频道URL / feed URL / 目录路径)
     sync_enabled: bool = True           # 自动追更开关（仅订阅集合有意义）
     last_synced_at: datetime | None = None
+    last_sync_status: str | None = None  # 上次同步结果: ok | error | syncing | None(从未同步)
+    last_sync_error: str | None = None   # 上次同步失败的错误摘要(status=error 时有值)
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
 

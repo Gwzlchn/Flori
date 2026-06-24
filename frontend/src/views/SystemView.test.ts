@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { ref } from 'vue'
 import { createTestingPinia } from '@pinia/testing'
+import { setActivePinia } from 'pinia'
 import { useWorkerStore } from '../stores/workers'
 
 // ── 顶层 mock：组件 <script setup> import 什么就 mock 什么 ──
@@ -56,18 +57,18 @@ function makeWorker(over: Partial<any> = {}) {
   }
 }
 
+// 共享一个 testing pinia(在 beforeEach 建并 setActivePinia)→ 测试里 useWorkerStore() 在 mount 前/后
+// 都拿到与组件同一个 store 实例。此前 pinia 建在 mountView 内且无 setActivePinia,mount 前取的 store
+// 绑到上一个测试遗留的陈旧 pinia,onMounted 的 fetch* 永不命中目标 store → 9/12 失败。
+let pinia: ReturnType<typeof createTestingPinia>
+
 function mountView(state: { workers?: any[]; loading?: boolean } = {}) {
+  const store: any = useWorkerStore()
+  store.workers = state.workers ?? []
+  store.loading = state.loading ?? false
   return mount(SystemView, {
     global: {
-      plugins: [
-        createTestingPinia({
-          createSpy: vi.fn,
-          stubActions: true,
-          initialState: {
-            workers: { workers: state.workers ?? [], loading: state.loading ?? false },
-          },
-        }),
-      ],
+      plugins: [pinia],
       stubs: { StatusBadge: true, ComponentCard: true },
     },
   })
@@ -86,6 +87,9 @@ function stubStoreData(store: any, opts: { full?: any; usage?: any; events?: any
 beforeEach(() => {
   vi.clearAllMocks()
   systemStatus.value = null
+  pinia = createTestingPinia({ createSpy: vi.fn, stubActions: true })
+  setActivePinia(pinia)
+  stubStoreData(useWorkerStore())   // 安全默认(onMounted 即 refreshAll 会用到);各测试可再 stub 覆盖
 })
 
 describe('SystemView', () => {

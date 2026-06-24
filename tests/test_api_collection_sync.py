@@ -147,3 +147,37 @@ class TestSubscriptionCollectionAPI:
         monkeypatch.setattr(jobs_mod, "create_job_core", real_create)
         r2 = await client.post(f"/api/collections/{cid}/sync")
         assert r2.status_code == 200 and r2.json()["new"] == 1
+
+    @pytest.mark.asyncio
+    async def test_sync_success_records_status_ok(self, client, monkeypatch):
+        """P2 item A:同步成功后 last_sync_status=ok、错误清空。"""
+        async def fake_enum(mid, cookies=None):
+            return [{"bvid": "BV1aaaaaaaaa", "title": "x", "duration": "1:00"}]
+        monkeypatch.setattr("shared.bili_space.enumerate_up", fake_enum)
+        async def fake_up_name(mid, cookies=None): return None
+        monkeypatch.setattr("shared.bili_space.up_name", fake_up_name)
+        cid = (await client.post("/api/collections", json={
+            "name": "x", "domain": "finance", "source_type": "bilibili_up",
+            "source_id": "5551", "sync_now": False,
+        })).json()["id"]
+        assert (await client.post(f"/api/collections/{cid}/sync")).status_code == 200
+        sub = (await client.get(f"/api/collections/{cid}")).json()["subscription"]
+        assert sub["last_sync_status"] == "ok"
+        assert sub["last_sync_error"] is None
+
+    @pytest.mark.asyncio
+    async def test_sync_failure_records_status_error(self, client, monkeypatch):
+        """P2 item A:同步异常 → 502 且 last_sync_status=error + 存错误摘要(不掩盖失败)。"""
+        async def fake_up_name(mid, cookies=None): return None
+        monkeypatch.setattr("shared.bili_space.up_name", fake_up_name)
+        async def boom_enum(mid, cookies=None):
+            raise RuntimeError("enumerate failed: net down")
+        monkeypatch.setattr("shared.bili_space.enumerate_up", boom_enum)
+        cid = (await client.post("/api/collections", json={
+            "name": "x", "domain": "finance", "source_type": "bilibili_up",
+            "source_id": "5552", "sync_now": False,   # 创建不触发枚举,故 boom 此刻不影响建集合
+        })).json()["id"]
+        assert (await client.post(f"/api/collections/{cid}/sync")).status_code == 502
+        sub = (await client.get(f"/api/collections/{cid}")).json()["subscription"]
+        assert sub["last_sync_status"] == "error"
+        assert "enumerate failed" in sub["last_sync_error"]

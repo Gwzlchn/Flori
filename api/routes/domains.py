@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from shared.config import AppConfig
 from shared.db import Database
 from api.deps import get_config, get_db, validate_path_segment, verify_token
-from api.schemas import DomainCreateRequest, GlossaryTermResponse
+from api.schemas import DomainCreateRequest, DomainRenameRequest, GlossaryTermResponse
 
 router = APIRouter(prefix="/api/domains", tags=["domains"], dependencies=[Depends(verify_token)])
 
@@ -103,6 +103,57 @@ async def create_domain(
     )
     by = await _overview_map(db, config)
     return by[domain]
+
+
+@router.post("/{domain}/rename")
+async def rename_domain_key(
+    domain: str,
+    req: DomainRenameRequest,
+    db: Database = Depends(get_db),
+    config: AppConfig = Depends(get_config),
+):
+    """改知识库英文标识(domain key,二期 issue1-b):领域是派生键(无独立表),散在 jobs/collections/glossary
+    + notes_fts5 冗余列 + profiles/{domain}.yaml。这里:先迁 profile 文件(可回滚)→ 再事务迁移 DB 引用,
+    DB 失败则回滚文件。new 须合法、不与现有领域冲突;general 不可改。"""
+    validate_path_segment(domain, "domain")
+    new = (req.new_domain or "").strip()
+    if not new:
+        raise HTTPException(400, "invalid new_domain")
+    validate_path_segment(new, "new_domain")
+    if new == domain:
+        raise HTTPException(400, "新旧标识相同")
+    if domain == "general" or new == "general":
+        raise HTTPException(400, "general 是默认领域,不可改名")
+    # 防撞:new 不能已被使用(库里有行 或 profile 文件已存在)
+    pdir = config.prompts_dir / "profiles"
+    old_path = pdir / f"{domain}.yaml"
+    new_path = pdir / f"{new}.yaml"
+    if new_path.exists() or await asyncio.to_thread(db.domain_exists, new):
+        raise HTTPException(409, f"目标标识 '{new}' 已存在")
+    # 1) 迁 profile 文件(若有):old.yaml -> new.yaml + 改内部 domain 字段(记录以便回滚)
+    moved_file = False
+    if old_path.exists():
+        data = yaml.safe_load(old_path.read_text(encoding="utf-8")) or {}
+        data["domain"] = new
+        pdir.mkdir(parents=True, exist_ok=True)
+        new_path.write_text(
+            yaml.dump(data, allow_unicode=True, default_flow_style=False), encoding="utf-8"
+        )
+        old_path.unlink()
+        moved_file = True
+    # 2) 事务迁移 DB 引用;失败则回滚文件,保证一致
+    try:
+        moved = await asyncio.to_thread(db.rename_domain, domain, new)
+    except Exception:
+        if moved_file:
+            data["domain"] = domain
+            old_path.write_text(
+                yaml.dump(data, allow_unicode=True, default_flow_style=False), encoding="utf-8"
+            )
+            new_path.unlink(missing_ok=True)
+        raise
+    by = await _overview_map(db, config)
+    return {"old": domain, "new": new, "moved": moved, "domain": by.get(new)}
 
 
 # 注:知识库展示元数据(display_name/icon/color)的修改复用已有 PUT /api/profiles/{domain}

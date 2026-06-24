@@ -17,6 +17,12 @@ vi.mock('../stores/collections', () => ({
   useCollectionStore: () => ({ get: storeGet, fetchJobs: storeFetchJobs, remove: storeRemove }),
 }))
 
+// ── jobs store mock：集合级重试走 jobStore.retryFailedInCollection ──
+const retryFailedInCollection = vi.fn()
+vi.mock('../stores/jobs', () => ({
+  useJobStore: () => ({ retryFailedInCollection }),
+}))
+
 const setCrumbs = vi.fn()
 vi.mock('../stores/global', () => ({
   useGlobalStore: () => ({ setCrumbs }),
@@ -138,7 +144,8 @@ describe('CollectionDetailView 订阅集合', () => {
     const t = w.text()
     expect(t).toContain('订阅源')
     expect(t).toContain('立即同步')
-    expect(t).toContain('追更中')        // enabled=true
+    // enabled=true + 有 last_synced_at + 无 last_sync_status → 5 态点 active(绿)
+    expect(w.find('.sub-dot.active').exists()).toBe(true)
   })
 
   it('点击立即同步:POST sync 端点并成功 toast', async () => {
@@ -192,5 +199,50 @@ describe('CollectionDetailView 交互', () => {
     await delBtn.trigger('click')
     await flushPromises()
     expect(w.find('delete-collection-dialog-stub').exists()).toBe(true)
+  })
+})
+
+describe('CollectionDetailView 状态分布与集合级重试', () => {
+  function withCounts(failed: number) {
+    return {
+      ...makeCollection(),
+      status_counts: { done: 2, processing: 1, failed, pending: 0 },
+    } as any
+  }
+
+  it('有 status_counts:信息卡渲染状态分布', async () => {
+    storeGet.mockResolvedValue(withCounts(3))
+    storeFetchJobs.mockResolvedValue({ total: 0, items: [] })
+    const w = mountView()
+    await flushPromises()
+    const t = w.text()
+    expect(t).toContain('状态分布')
+    expect(t).toContain('完成 2')
+    expect(t).toContain('失败 3')
+  })
+
+  it('有失败任务:显示重试按钮,确认后调 retryFailedInCollection 并 toast', async () => {
+    storeGet.mockResolvedValue(withCounts(3))
+    storeFetchJobs.mockResolvedValue({ total: 0, items: [] })
+    retryFailedInCollection.mockResolvedValue({ retried: 3 })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const w = mountView()
+    await flushPromises()
+
+    const btn = w.findAll('button').find((b) => b.text().includes('重试本集合失败'))!
+    expect(btn).toBeTruthy()
+    await btn.trigger('click')
+    await flushPromises()
+
+    expect(retryFailedInCollection).toHaveBeenCalledWith('col-1')
+    expect(showToast).toHaveBeenCalledWith('已重试 3 个失败任务', 'success')
+  })
+
+  it('无失败任务:不显示重试按钮', async () => {
+    storeGet.mockResolvedValue(withCounts(0))
+    storeFetchJobs.mockResolvedValue({ total: 0, items: [] })
+    const w = mountView()
+    await flushPromises()
+    expect(w.findAll('button').some((b) => b.text().includes('重试本集合失败'))).toBe(false)
   })
 })

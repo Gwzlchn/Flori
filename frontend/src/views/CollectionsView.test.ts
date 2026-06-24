@@ -79,7 +79,7 @@ describe('CollectionsView 列表渲染', () => {
     await flushPromises()
     const t = w.text()
     expect(t).toContain('bilibili')   // sourceBadge(group) 文案
-    expect(t).toContain('从未同步')   // last_synced_at=null
+    expect(t).toContain('尚未同步')   // last_synced_at=null → subState 'never'
   })
 })
 

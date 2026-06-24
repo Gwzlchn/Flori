@@ -5,7 +5,7 @@ import { storeToRefs } from 'pinia'
 import { useCollectionStore } from '../stores/collections'
 import { fmtRelative } from '../utils/datetime'
 import type { Collection } from '../types'
-import { sourceLabelOf, sourceBadge, sourceMeta } from '../constants/sources'
+import { sourceLabelOf, sourceBadge, sourceMeta, subState, subTip, SUB_STATE_META } from '../constants/sources'
 import AddSubscriptionDialog from '../components/collection/AddSubscriptionDialog.vue'
 import DeleteCollectionDialog from '../components/collection/DeleteCollectionDialog.vue'
 import {
@@ -43,6 +43,17 @@ function badgeOf(c: Collection) {
 
 // 相对同步时间走 utils/datetime.fmtRelative(中文单位 + 「同步」后缀)。
 const syncAgo = (v: string | null) => fmtRelative(v, { style: 'cn', suffix: '同步', fallback: '从未同步' })
+
+// 集合底栏状态文案/tooltip(5 态与侧栏一致):订阅中显示相对同步时间,其余显示状态文案。
+function colFoot(c: Collection): string {
+  const sub = c.subscription
+  if (!sub) return '手动集合'
+  const st = subState(sub)
+  return st === 'active' ? syncAgo(sub.last_synced_at) : (SUB_STATE_META[st]?.tip ?? '')
+}
+function colTip(c: Collection): string {
+  return c.subscription ? subTip(c.subscription) : '手动集合'
+}
 
 async function load() {
   error.value = ''
@@ -164,9 +175,10 @@ onMounted(load)
         <p v-if="c.description" class="cdesc">{{ c.description }}</p>
 
         <div class="cfoot">
-          <span class="cfoot-tag">
-            <span class="dot" :class="c.subscription ? (c.subscription.enabled ? 'd-ok' : 'd-mut') : 'd-mut'"></span>
-            {{ c.subscription ? (c.subscription.enabled ? syncAgo(c.subscription.last_synced_at) : '已暂停追更') : '手动集合' }}
+          <span class="cfoot-tag" :title="colTip(c)">
+            <span v-if="c.subscription" class="sub-dot" :class="subState(c.subscription)"></span>
+            <span v-else class="dot d-mut"></span>
+            {{ colFoot(c) }}
           </span>
         </div>
       </div>
@@ -193,4 +205,12 @@ onMounted(load)
 .card-del { flex: none; opacity: 0; color: var(--ink-400); padding: 3px; border-radius: 5px; transition: all .12s; }
 .col-card:hover .card-del { opacity: 1; }
 .card-del:hover { color: var(--bad); background: var(--bad-bg); }
+/* 订阅状态点(5 态,与侧栏 .sub-dot 配色一致) */
+.sub-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.sub-dot.active { background: #10b981; }
+.sub-dot.paused { background: var(--ink-300); }
+.sub-dot.never { background: #f59e0b; }
+.sub-dot.error { background: #ef4444; }
+.sub-dot.syncing { background: #3b82f6; animation: subpulse 1.1s ease-in-out infinite; }
+@keyframes subpulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
 </style>

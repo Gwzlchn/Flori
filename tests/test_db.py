@@ -566,6 +566,73 @@ class TestCollectionM2:
         db.increment_collection_count("", 1)
 
 
+class TestCollectionSyncStatus:
+    """P2 item A：集合同步状态字段(last_sync_status / last_sync_error)读写。"""
+
+    def test_defaults_none(self, db):
+        db.create_collection(Collection(id="c1", name="c1", domain="ml"))
+        got = db.get_collection("c1")
+        assert got.last_sync_status is None
+        assert got.last_sync_error is None
+
+    def test_set_sync_status_syncing(self, db):
+        db.create_collection(Collection(id="c1", name="c1", domain="ml"))
+        db.set_sync_status("c1", "syncing")
+        got = db.get_collection("c1")
+        assert got.last_sync_status == "syncing"
+        assert got.last_sync_error is None
+
+    def test_set_sync_status_error_stores_msg(self, db):
+        db.create_collection(Collection(id="c1", name="c1", domain="ml"))
+        db.set_sync_status("c1", "error", "boom: network down")
+        got = db.get_collection("c1")
+        assert got.last_sync_status == "error"
+        assert got.last_sync_error == "boom: network down"
+
+    def test_set_sync_status_error_truncated(self, db):
+        db.create_collection(Collection(id="c1", name="c1", domain="ml"))
+        db.set_sync_status("c1", "error", "x" * 1000)
+        assert len(db.get_collection("c1").last_sync_error) == 500
+
+    def test_non_error_status_clears_error(self, db):
+        db.create_collection(Collection(id="c1", name="c1", domain="ml"))
+        db.set_sync_status("c1", "error", "old failure")
+        db.set_sync_status("c1", "syncing")
+        assert db.get_collection("c1").last_sync_error is None
+
+    def test_mark_synced_sets_ok_and_clears_error(self, db):
+        from datetime import datetime, timezone
+        db.create_collection(Collection(id="c1", name="c1", domain="ml"))
+        db.set_sync_status("c1", "error", "previous failure")
+        db.mark_collection_synced("c1", datetime.now(timezone.utc))
+        got = db.get_collection("c1")
+        assert got.last_sync_status == "ok"
+        assert got.last_sync_error is None
+        assert got.last_synced_at is not None
+
+
+class TestCountJobsByStatusScoped:
+    """P2 item C：count_jobs_by_status(collection_id) 按集合的状态计数。"""
+
+    def test_scoped_counts(self, db):
+        db.create_collection(Collection(id="c1", name="c1", domain="ml"))
+        db.create_collection(Collection(id="c2", name="c2", domain="ml"))
+        specs = [
+            ("a1", "c1", JobStatus.DONE), ("a2", "c1", JobStatus.DONE),
+            ("a3", "c1", JobStatus.FAILED), ("a4", "c1", JobStatus.PROCESSING),
+            ("b1", "c2", JobStatus.FAILED),
+        ]
+        for jid, cid, st in specs:
+            db.create_job(Job(id=jid, content_type="video", pipeline="video",
+                              collection_id=cid, status=st))
+        counts = db.count_jobs_by_status("c1")
+        assert counts.get("done") == 2
+        assert counts.get("failed") == 1
+        assert counts.get("processing") == 1
+        # 全局(不传)仍统计所有集合
+        assert db.count_jobs_by_status().get("failed") == 2
+
+
 class TestGlossary:
     """M2：术语表 upsert / suggestion / accept / list / delete。"""
 

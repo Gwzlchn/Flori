@@ -77,6 +77,44 @@ export function sourceMeta(type: string): SourceTypeMeta | undefined {
   return BY_TYPE[type]
 }
 
+// ── 订阅同步状态(单一事实源,侧栏/列表/详情共用)──────────────────────
+// 后端 subscription 增量字段:last_sync_status(ok|error|syncing|null)+ last_sync_error(text|null)。
+// 注:这里参数用宽松可选类型,避免与 types/index.ts CollectionSubscription 耦合(后者新增字段为可选)。
+export interface SubStateInput {
+  enabled?: boolean
+  last_synced_at?: string | null
+  last_sync_status?: 'ok' | 'error' | 'syncing' | null
+  last_sync_error?: string | null
+}
+
+// 由订阅推 5 态(优先级:暂停 > 同步中 > 出错 > 从未同步 > 订阅中)。无订阅返回 ''。
+export function subState(sub: SubStateInput | null | undefined): string {
+  if (!sub) return ''
+  if (!sub.enabled) return 'paused'
+  if (sub.last_sync_status === 'syncing') return 'syncing'
+  if (sub.last_sync_status === 'error') return 'error'
+  if (!sub.last_synced_at) return 'never'
+  return 'active'
+}
+
+// 每态 → CSS class 后缀 + 默认 tooltip 文案。class 名与状态名一致,供 .sub-dot.<cls> 上色。
+export const SUB_STATE_META: Record<string, { cls: string; tip: string }> = {
+  active: { cls: 'active', tip: '订阅中' },
+  paused: { cls: 'paused', tip: '已暂停追更' },
+  never: { cls: 'never', tip: '尚未同步' },
+  error: { cls: 'error', tip: '上次同步出错' },
+  syncing: { cls: 'syncing', tip: '同步中…' },
+}
+
+// tooltip 文案:出错态追加真实错误摘要(last_sync_error)。
+export function subTip(sub: SubStateInput | null | undefined): string {
+  const st = subState(sub)
+  const meta = SUB_STATE_META[st]
+  if (!meta) return ''
+  if (st === 'error' && sub?.last_sync_error) return `${meta.tip}:${sub.last_sync_error}`
+  return meta.tip
+}
+
 // 订阅源主页/原始链接(详情页「打开来源」)。尽力而为,拿不到返回 null。
 export function sourceHomeUrl(sub: { source_type: string; source_id: string }): string | null {
   const { source_type: t, source_id: id } = sub

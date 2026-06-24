@@ -122,6 +122,8 @@ CREATE TABLE IF NOT EXISTS collections (
     source_id TEXT,
     sync_enabled INTEGER NOT NULL DEFAULT 1,
     last_synced_at TEXT,
+    last_sync_status TEXT,
+    last_sync_error TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -319,6 +321,8 @@ class Database:
             "source_id": "source_id TEXT",
             "sync_enabled": "sync_enabled INTEGER NOT NULL DEFAULT 1",
             "last_synced_at": "last_synced_at TEXT",
+            "last_sync_status": "last_sync_status TEXT",
+            "last_sync_error": "last_sync_error TEXT",
         },
         "glossary": {
             "occurrences": "occurrences TEXT DEFAULT '[]'",
@@ -432,11 +436,15 @@ class Database:
 
         return total, [self._row_to_job(r) for r in rows]
 
-    def count_jobs_by_status(self) -> dict[str, int]:
-        """一次 GROUP BY 取各状态计数(替代多次 list_jobs(limit=0) 的 COUNT+空 SELECT)。"""
+    def count_jobs_by_status(self, collection_id: str | None = None) -> dict[str, int]:
+        """一次 GROUP BY 取各状态计数(替代多次 list_jobs(limit=0) 的 COUNT+空 SELECT)。
+        传 collection_id 则只统计该集合,供集合详情页 status_counts 用。"""
+        where = "WHERE collection_id=?" if collection_id else ""
+        params = (collection_id,) if collection_id else ()
         with self._lock:
             rows = self._conn.execute(
-                "SELECT status, COUNT(*) AS n FROM jobs GROUP BY status"
+                f"SELECT status, COUNT(*) AS n FROM jobs {where} GROUP BY status",
+                params,
             ).fetchall()
         return {r["status"]: r["n"] for r in rows}
 
@@ -1069,6 +1077,8 @@ class Database:
             source_id=r["source_id"],
             sync_enabled=bool(r["sync_enabled"]),
             last_synced_at=_parse_dt(r["last_synced_at"]),
+            last_sync_status=r["last_sync_status"],
+            last_sync_error=r["last_sync_error"],
             created_at=_parse_dt(r["created_at"]),
             updated_at=_parse_dt(r["updated_at"]),
         )
@@ -1079,8 +1089,8 @@ class Database:
                 """INSERT INTO collections
                    (id, name, domain, description, tags, job_count,
                     source_type, source_id, sync_enabled, last_synced_at,
-                    created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    last_sync_status, last_sync_error, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     collection.id,
                     collection.name,
@@ -1092,6 +1102,8 @@ class Database:
                     collection.source_id,
                     1 if collection.sync_enabled else 0,
                     collection.last_synced_at.isoformat() if collection.last_synced_at else None,
+                    collection.last_sync_status,
+                    collection.last_sync_error,
                     collection.created_at.isoformat(),
                     collection.updated_at.isoformat(),
                 ),
@@ -1193,13 +1205,61 @@ class Database:
             self._conn.commit()
 
     def mark_collection_synced(self, collection_id: str, dt: datetime) -> None:
-        """订阅集合同步后记录 last_synced_at。"""
+        """订阅集合同步成功后记录 last_synced_at,并置 last_sync_status=ok、清除错误。"""
         with self._lock:
             self._conn.execute(
-                "UPDATE collections SET last_synced_at=?, updated_at=? WHERE id=?",
+                """UPDATE collections
+                   SET last_synced_at=?, last_sync_status='ok', last_sync_error=NULL,
+                       updated_at=? WHERE id=?""",
                 (dt.isoformat(), _now_iso(), collection_id),
             )
             self._conn.commit()
+
+    def set_sync_status(
+        self, collection_id: str, status: str | None, error: str | None = None
+    ) -> None:
+        """更新订阅集合的同步状态(syncing/ok/error/None)。error 仅 status=error 时存,其余清空。"""
+        err = (error or "")[:500] if status == "error" else None
+        with self._lock:
+            self._conn.execute(
+                """UPDATE collections
+                   SET last_sync_status=?, last_sync_error=?, updated_at=? WHERE id=?""",
+                (status, err, _now_iso(), collection_id),
+            )
+            self._conn.commit()
+
+    def domain_exists(self, domain: str) -> bool:
+        """领域键是否已被使用(jobs/collections/glossary 任一有行)。用于 rename 防撞。"""
+        with self._lock:
+            for tbl in ("jobs", "collections", "glossary"):
+                if self._conn.execute(
+                    f"SELECT 1 FROM {tbl} WHERE domain=? LIMIT 1", (domain,)
+                ).fetchone():
+                    return True
+        return False
+
+    def rename_domain(self, old: str, new: str) -> dict[str, int]:
+        """把领域键 old 原子改成 new(领域是派生键,散在 jobs/collections/glossary + notes_fts5 冗余列)。
+        一个事务内迁移所有引用,任一失败回滚。返回各表迁移行数。调用方须先校验 new 合法且不冲突。"""
+        with self._lock:
+            try:
+                n_jobs = self._conn.execute(
+                    "UPDATE jobs SET domain=? WHERE domain=?", (new, old)
+                ).rowcount
+                n_coll = self._conn.execute(
+                    "UPDATE collections SET domain=? WHERE domain=?", (new, old)
+                ).rowcount
+                n_gloss = self._conn.execute(
+                    "UPDATE glossary SET domain=? WHERE domain=?", (new, old)
+                ).rowcount
+                self._conn.execute(
+                    "UPDATE notes_fts5 SET domain=? WHERE domain=?", (new, old)
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        return {"jobs": n_jobs, "collections": n_coll, "glossary": n_gloss}
 
     # ── Domain（领域是派生视图：来自 jobs ∪ collections ∪ glossary 的 distinct domain）──
 

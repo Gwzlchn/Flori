@@ -58,5 +58,15 @@ export const useDomainStore = defineStore('domains', () => {
     await fetchAll()
   }
 
-  return { domains, loading, fetchAll, workspace, term, topic, topicConcepts, create, conceptTimeline, updateMeta }
+  // 改英文 domain key(二期 issue1-b):事务迁移该领域下所有 job/集合/术语 + profile 文件。
+  // 后端校验 new 合法且不与现有领域冲突(否则 409)。改后刷新列表;返回新 key 供调用方跳转。
+  async function renameKey(domain: string, newDomain: string): Promise<string> {
+    const r = await api.post<{ new: string }>(
+      `/api/domains/${encodeURIComponent(domain)}/rename`, { new_domain: newDomain },
+    )
+    await fetchAll()
+    return r.new
+  }
+
+  return { domains, loading, fetchAll, workspace, term, topic, topicConcepts, create, conceptTimeline, updateMeta, renameKey }
 })

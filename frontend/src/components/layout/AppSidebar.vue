@@ -9,7 +9,7 @@ import {
   Folder, Server, Settings, PanelLeftClose, Plus, MoreHorizontal,
 } from 'lucide-vue-next'
 import { resolveIcon } from '../../utils/kbIcons'
-import { sourceBadge, sourceLabelOf } from '../../constants/sources'
+import { sourceBadge, sourceLabelOf, subState, subTip } from '../../constants/sources'
 import AddSubscriptionDialog from '../collection/AddSubscriptionDialog.vue'
 import KbSettingsDialog from './KbSettingsDialog.vue'
 
@@ -154,16 +154,8 @@ function kbIconComp(d: any) { return resolveIcon(d.icon) || resolveIcon(smartIco
 function kbHue(d: any) { return d.color || kbColor(d.domain) }
 function kbLabel(d: any) { return d.display_name || d.domain }
 
-// #4 集合来源图标 + 订阅状态点(数据来自 c.subscription={source_label,enabled,last_synced_at})
+// #4 集合来源图标 + 订阅状态点(5 态由共享 subState/subTip 推,数据来自 c.subscription)
 function srcIcon(c: any) { return c.subscription ? sourceBadge(sourceLabelOf(c.subscription)).icon : Folder }
-function subState(c: any): string {
-  const s = c.subscription
-  if (!s) return ''
-  if (!s.enabled) return 'paused'        // 灰:暂停追更
-  if (!s.last_synced_at) return 'never'  // 琥珀:从未同步
-  return 'active'                         // 绿:订阅中
-}
-const SUB_TIP: Record<string, string> = { active: '订阅中', paused: '已暂停追更', never: '尚未同步' }
 
 // #1/#2 KB 设置弹窗(重命名/图标/配色)+ 新增集合/订阅弹窗
 const settingsFor = ref<any | null>(null)
@@ -175,6 +167,19 @@ async function saveSettings(patch: { display_name: string; icon: string; color: 
   const d = settingsFor.value
   if (!d) return
   try { await domainStore.updateMeta(d.domain, patch) } finally { settingsFor.value = null }
+}
+// 改英文 domain key(二期):确认 → 事务迁移 → 关弹窗 + 跳到新 key 的工作台。失败(如重名 409)弹错。
+async function renameSettings(newDomain: string) {
+  const d = settingsFor.value
+  if (!d) return
+  if (!confirm(`把知识库英文标识从 “${d.domain}” 改为 “${newDomain}”?\n会迁移该领域下所有内容 / 集合 / 术语,URL 也会变。`)) return
+  try {
+    const nk = await domainStore.renameKey(d.domain, newDomain)
+    settingsFor.value = null
+    router.push(`/kb/${encodeURIComponent(nk)}`)
+  } catch (e: any) {
+    alert(e?.message || '改标识失败(可能与现有领域重名)')
+  }
 }
 function openAdd(d: string) { addError.value = ''; addFor.value = d }
 async function onCreateCollection(payload: any) {
@@ -234,7 +239,7 @@ async function onCreateCollection(payload: any) {
                 </span>
                 <component :is="srcIcon(c)" :size="14" :title="c.subscription ? sourceLabelOf(c.subscription) : '手动集合'" />
                 <span class="nb-name" @click="nav(`/collections/${c.id}`)">{{ c.name }}</span>
-                <span v-if="c.subscription" class="sub-dot" :class="subState(c)" :title="SUB_TIP[subState(c)]" />
+                <span v-if="c.subscription" class="sub-dot" :class="subState(c.subscription)" :title="subTip(c.subscription)" />
               </div>
               <div class="src-content" :class="{ open: expandedCol[c.id] }">
                 <div class="content-item" v-for="j in (colItems[c.id] || [])" :key="j.job_id"
@@ -287,7 +292,7 @@ async function onCreateCollection(payload: any) {
     <KbSettingsDialog
       v-if="settingsFor" :domain="settingsFor.domain"
       :name="settingsFor.display_name || ''" :icon="settingsFor.icon || ''" :color="settingsFor.color || ''"
-      @close="settingsFor = null" @save="saveSettings"
+      @close="settingsFor = null" @save="saveSettings" @rename="renameSettings"
     />
     <AddSubscriptionDialog
       v-if="addFor" :default-domain="addFor" :saving="addSaving" :error="addError"
@@ -304,11 +309,14 @@ async function onCreateCollection(payload: any) {
 /* #3 当前内容在侧栏高亮 */
 .content-item.on { color: var(--brand-700); font-weight: 600; }
 .content-item.on .ci-dot { box-shadow: 0 0 0 2px var(--brand-100); }
-/* #4 订阅状态点:绿=订阅中 / 灰=已暂停 / 琥珀=尚未同步(无 error 字段,暂无红) */
+/* #4 订阅状态点(5 态):绿=订阅中 / 灰=已暂停 / 琥珀=尚未同步 / 红=同步出错 / 蓝脉冲=同步中 */
 .sub-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; margin-left: auto; }
 .sub-dot.active { background: #10b981; }
 .sub-dot.paused { background: var(--ink-300); }
 .sub-dot.never { background: #f59e0b; }
+.sub-dot.error { background: #ef4444; }
+.sub-dot.syncing { background: #3b82f6; animation: subpulse 1.1s ease-in-out infinite; }
+@keyframes subpulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .45; transform: scale(.78); } }
 /* #2 Notion 式:整行点击=进工作台;箭头 hover 抬起(底色+阴影)提示"点这里才展开" */
 .sub-item:hover .kb-caret { background: var(--surface); box-shadow: 0 1px 3px rgba(15, 23, 42, .18); color: var(--ink-700); }
 /* #5dup 拖拽落点提示;行可点(进工作台)故 pointer */

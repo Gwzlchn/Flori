@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, inject } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useCollectionStore } from '../stores/collections'
+import { useJobStore } from '../stores/jobs'
 import { useGlobalStore } from '../stores/global'
 import { useApi } from '../composables/useApi'
 import StatusBadge from '../components/common/StatusBadge.vue'
@@ -9,16 +10,17 @@ import DeleteCollectionDialog from '../components/collection/DeleteCollectionDia
 import { fmtDateTime } from '../utils/datetime'
 import { contentTypeIcon, contentTypePill, contentTypeLabel } from '../utils/contentType'
 import type { Collection, JobSummary } from '../types'
-import { sourceLabelOf, sourceBadge, sourceMeta, sourceHomeUrl } from '../constants/sources'
+import { sourceLabelOf, sourceBadge, sourceMeta, sourceHomeUrl, subState, SUB_STATE_META } from '../constants/sources'
 import {
   Rss, Folder, RefreshCw, Info, ExternalLink, LayoutList, ChevronRight,
-  Check, Trash2,
+  Trash2,
 } from 'lucide-vue-next'
 
 // 集合详情（原型 #collection）：头部信息 + 订阅源（开关/同步） + 名下内容列表。
 const route = useRoute()
 const router = useRouter()
 const store = useCollectionStore()
+const jobStore = useJobStore()
 const global = useGlobalStore()
 const api = useApi()
 const showToast = inject<(m: string, t?: string) => void>('showToast', () => {})
@@ -41,6 +43,17 @@ const srcBadge = computed(() => sourceBadge(sourceLabelOf(collection.value?.subs
 const srcIcon = computed(() => sourceMeta(collection.value?.subscription?.source_type || '')?.icon ?? Rss)
 const srcTypeLabel = computed(() => sourceMeta(collection.value?.subscription?.source_type || '')?.label || '订阅源')
 const srcHome = computed(() => collection.value?.subscription ? sourceHomeUrl(collection.value.subscription) : null)
+
+// 订阅状态(5 态:订阅中/暂停/从未/出错/同步中)——取自 constants/sources,与侧栏/列表统一。
+const sub = computed(() => collection.value?.subscription ?? null)
+const subSt = computed(() => (sub.value ? subState(sub.value as any) : null))
+const subMeta = computed(() => (subSt.value ? SUB_STATE_META[subSt.value] : null))
+const syncError = computed(() => ((sub.value as any)?.last_sync_error as string | null) ?? null)
+// 内容状态分布(后端集合详情返回 status_counts);用于信息卡补全 + 集合级重试可发现性。
+const counts = computed(
+  () => (collection.value as any)?.status_counts as
+    { done: number; processing: number; failed: number; pending: number } | undefined,
+)
 
 async function load() {
   loading.value = true
@@ -79,6 +92,25 @@ async function syncNow() {
     showToast(e?.message || '同步失败', 'error')
   } finally {
     syncing.value = false
+  }
+}
+
+// 重试本集合下的失败任务(scoped 批量重试,复用全局 retry-failed + collection_id 过滤)。
+const retrying = ref(false)
+async function retryFailed() {
+  const c = collection.value
+  const n = counts.value?.failed ?? 0
+  if (!c || !n || retrying.value) return
+  if (!confirm(`重试本集合 ${n} 个失败任务?(各自从首个失败步重跑)`)) return
+  retrying.value = true
+  try {
+    const { retried } = await jobStore.retryFailedInCollection(c.id)
+    showToast(`已重试 ${retried} 个失败任务`, 'success')
+    await load()
+  } catch (e: any) {
+    showToast(e?.message || '重试失败', 'error')
+  } finally {
+    retrying.value = false
   }
 }
 
@@ -203,6 +235,26 @@ onBeforeUnmount(() => global.setCrumbs(null))
               </td>
             </tr>
             <tr><td>内容</td><td>{{ collection.job_count }} 条</td></tr>
+            <tr><td>创建时间</td><td>{{ fmtDateTime(collection.created_at) }}</td></tr>
+            <tr v-if="counts">
+              <td>状态分布</td>
+              <td>
+                <div class="counts">
+                  <span>完成 {{ counts.done }}</span><span class="sep">·</span>
+                  <span>处理中 {{ counts.processing }}</span><span class="sep">·</span>
+                  <span>待处理 {{ counts.pending }}</span><span class="sep">·</span>
+                  <span :class="{ bad: counts.failed > 0 }">失败 {{ counts.failed }}</span>
+                </div>
+                <button
+                  v-if="counts.failed > 0"
+                  class="btn sm danger retry-btn"
+                  :disabled="retrying"
+                  @click="retryFailed"
+                >
+                  <RefreshCw :size="12" :class="{ spin: retrying }" />重试本集合失败 {{ counts.failed }}
+                </button>
+              </td>
+            </tr>
             <tr><td>描述</td><td>{{ collection.description || '—' }}</td></tr>
           </table>
         </div>
@@ -225,9 +277,10 @@ onBeforeUnmount(() => global.setCrumbs(null))
             <tr>
               <td>追更状态</td>
               <td>
-                <span class="badge" :class="collection.subscription.enabled ? 'b-ok' : 'b-mut'">
-                  <Check v-if="collection.subscription.enabled" :size="12" />{{ collection.subscription.enabled ? '追更中' : '已暂停' }}
+                <span class="substat">
+                  <span class="sub-dot" :class="subSt"></span>{{ subMeta?.tip }}
                 </span>
+                <div v-if="subSt === 'error' && syncError" class="sub-err">{{ syncError }}</div>
               </td>
             </tr>
           </table>
@@ -291,4 +344,18 @@ onBeforeUnmount(() => global.setCrumbs(null))
 .switch.disabled { opacity: .5; pointer-events: none; }
 .del-btn { color: var(--ink-500); }
 .del-btn:hover { color: var(--bad); border-color: var(--bad-bd); background: var(--bad-bg); }
+/* 订阅状态点(5 态) */
+.substat { display: inline-flex; align-items: center; gap: 7px; }
+.sub-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--ink-300); }
+.sub-dot.active { background: var(--ok); }
+.sub-dot.never { background: var(--warn); }
+.sub-dot.error { background: var(--bad); }
+.sub-dot.syncing { background: var(--info); animation: pulse 1.1s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+.sub-err { margin-top: 5px; font-size: 12px; color: var(--bad); word-break: break-all; }
+/* 内容状态分布 + 集合级重试 */
+.counts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.counts .sep { color: var(--ink-300); }
+.counts .bad { color: var(--bad); font-weight: 600; }
+.retry-btn { margin-top: 8px; }
 </style>

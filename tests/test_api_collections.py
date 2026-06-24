@@ -88,6 +88,65 @@ class TestGetCollection:
         assert resp.status_code == 404
 
 
+class TestSubscriptionSyncStatus:
+    """P2 item A：订阅集合响应携带 last_sync_status / last_sync_error。"""
+
+    @pytest.mark.asyncio
+    async def test_subscription_carries_sync_status(self, client, app):
+        from shared.models import Collection
+        app.state.db.create_collection(Collection(
+            id="col_bili_up_1", name="UP", domain="finance",
+            source_type="bilibili_up", source_id="123",
+            last_sync_status="error", last_sync_error="boom: net down",
+        ))
+        sub = (await client.get("/api/collections/col_bili_up_1")).json()["subscription"]
+        assert sub is not None
+        assert sub["last_sync_status"] == "error"
+        assert sub["last_sync_error"] == "boom: net down"
+
+    @pytest.mark.asyncio
+    async def test_never_synced_status_none(self, client, app):
+        from shared.models import Collection
+        app.state.db.create_collection(Collection(
+            id="col_bili_up_2", name="UP2", domain="finance",
+            source_type="bilibili_up", source_id="456",
+        ))
+        sub = (await client.get("/api/collections/col_bili_up_2")).json()["subscription"]
+        assert sub["last_sync_status"] is None
+        assert sub["last_sync_error"] is None
+
+    @pytest.mark.asyncio
+    async def test_manual_collection_no_subscription(self, client):
+        cid = (await _create(client))["id"]
+        body = (await client.get(f"/api/collections/{cid}")).json()
+        assert body["subscription"] is None
+
+
+class TestCollectionStatusCounts:
+    """P2 item C：详情端点返回 status_counts(本集合各状态计数,缺省补 0);列表端点为 None。"""
+
+    @pytest.mark.asyncio
+    async def test_detail_includes_status_counts(self, client, app):
+        from shared.models import Collection, Job, JobStatus
+        db = app.state.db
+        db.create_collection(Collection(id="c_sc", name="X", domain="general"))
+        for jid, st in [("s1", JobStatus.DONE), ("s2", JobStatus.FAILED),
+                        ("s3", JobStatus.FAILED)]:
+            db.create_job(Job(id=jid, content_type="video", pipeline="video",
+                              collection_id="c_sc", status=st))
+        sc = (await client.get("/api/collections/c_sc")).json()["status_counts"]
+        assert sc["done"] == 1
+        assert sc["failed"] == 2
+        assert sc["processing"] == 0   # 缺省补 0
+        assert sc["pending"] == 0
+
+    @pytest.mark.asyncio
+    async def test_list_endpoint_omits_status_counts(self, client):
+        await _create(client)
+        items = (await client.get("/api/collections")).json()
+        assert items[0]["status_counts"] is None   # 仅详情端点填,列表不查
+
+
 class TestUpdateCollection:
     @pytest.mark.asyncio
     async def test_update_name_only(self, client):

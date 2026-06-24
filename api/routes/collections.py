@@ -33,7 +33,9 @@ router = APIRouter(
 )
 
 
-def _to_response(c: Collection) -> CollectionResponse:
+def _to_response(
+    c: Collection, status_counts: dict[str, int] | None = None
+) -> CollectionResponse:
     sub = None
     if c.is_subscription:
         sub = CollectionSubscriptionInfo(
@@ -41,11 +43,13 @@ def _to_response(c: Collection) -> CollectionResponse:
             source_label=source_label(c.source_type),   # 派生短标签,前端组合显示(name + 徽标)
             enabled=c.sync_enabled,
             last_synced_at=c.last_synced_at.isoformat() if c.last_synced_at else None,
+            last_sync_status=c.last_sync_status,         # ok|error|syncing|None(从未同步)
+            last_sync_error=c.last_sync_error,           # status=error 时的错误摘要
         )
     return CollectionResponse(
         id=c.id, name=c.name, domain=c.domain, description=c.description,
         tags=c.tags, job_count=c.job_count, created_at=c.created_at.isoformat(),
-        subscription=sub,
+        subscription=sub, status_counts=status_counts,   # 仅详情端点填,列表端点为 None
     )
 
 
@@ -57,6 +61,19 @@ async def sync_collection(
     YouTube/RSS/本地目录…),与具体来源解耦。返回 {total, new, skipped}。仅订阅集合可调。"""
     if not coll.is_subscription:
         raise ValueError("not a subscription collection")
+    # 同步状态机:开始置 syncing(并发读可见"同步中")→ 成功由 mark_collection_synced 置 ok
+    # → 异常置 error+存摘要后向上抛(故障隔离不掩盖错误)。
+    await asyncio.to_thread(db.set_sync_status, coll.id, "syncing")
+    try:
+        return await _sync_collection_body(coll, db, redis, storage)
+    except Exception as e:
+        await asyncio.to_thread(db.set_sync_status, coll.id, "error", str(e))
+        raise
+
+
+async def _sync_collection_body(
+    coll: Collection, db: Database, redis: RedisClient, storage: StorageBackend,
+) -> dict:
     from shared.subscriptions import SourceContext, enumerate_source
     from api.routes.jobs import create_job_core
 
@@ -170,7 +187,12 @@ async def get_collection(
     c = await asyncio.to_thread(db.get_collection, collection_id)
     if not c:
         raise HTTPException(404, "collection not found")
-    return _to_response(c)
+    # 详情页带 status_counts(本集合各状态 job 计数):充实"集合信息"卡 + 驱动"重试本集合失败"
+    counts = await asyncio.to_thread(db.count_jobs_by_status, collection_id)
+    status_counts = dict(counts)
+    for k in ("done", "processing", "failed", "pending"):
+        status_counts.setdefault(k, 0)
+    return _to_response(c, status_counts)
 
 
 @router.put("/{collection_id}", response_model=CollectionResponse)

@@ -314,6 +314,8 @@ export interface CollectionSubscription {
   source_label?: string      // 后端派生来源短标签(bilibili/youtube/rss/local);前端=name+徽标
   enabled: boolean           // 自动同步开关 = collection.sync_enabled
   last_synced_at: string | null
+  last_sync_status?: 'ok' | 'error' | 'syncing' | null  // 上次同步结果(二期);驱动侧栏/详情状态点
+  last_sync_error?: string | null                       // 同步出错时的错误摘要(error 态 tooltip/红字)
 }
 
 // 集合：与后端 CollectionResponse 严格对齐。
@@ -326,6 +328,7 @@ export interface Collection {
   job_count: number
   created_at: string
   subscription: CollectionSubscription | null
+  status_counts?: Record<string, number>  // 集合详情:job 各状态计数(done/processing/failed/pending…)(二期)
 }
 
 // 术语出现处（类型化）：概念出现在哪条内容、什么类型、什么位置。
