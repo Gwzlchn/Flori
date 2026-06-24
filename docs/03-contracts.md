@@ -290,11 +290,12 @@ GET /api/jobs/{id}/notes/transcript     → text/markdown (逐字稿)
      "last_heartbeat": "2026-06-24T07:21:55+00:00", "uptime_sec": 932011, "detail": null,
      "extra": {"used_memory_human": "48.2M", "used_memory_mb": 48.2, "maxmemory_mb": 256.0,
                "connected_clients": 11, "ping_ms": 1.2}},
-    {"name": "minio", "kind": "minio", "status": "up", "version": null,
+    {"name": "minio", "kind": "minio", "status": "up", "version": "RELEASE.2025-09-07T16-13-09Z",
      "last_heartbeat": "2026-06-24T07:21:55+00:00", "uptime_sec": null, "detail": null,
      "extra": {"bucket": "flori", "bucket_exists": true, "probe_ms": 18.4, "mode": "remote",
                "objects": 1842, "size_bytes": 5368709120}}
   ],
+  "//minio.version": "MinIO 服务端版本(经 MinioAdmin.info() 取 servers[].version,与 bucket 探活同 health 一次拉);取不到(凭证/网络/旧 SDK)或本地盘 mode=local 则为 null。失败一律吞为 null,绝不让 /api/status 变慢/报错",
   "//minio.extra.objects/size_bytes": "MinIO bucket 对象数 + 总字节。MinIO 无聚合 API → 须全量 list 求和(贵),故 api 侧后台缓存(每 600s 刷,RemoteStorage.capacity 经 to_thread),build_full_status 只读缓存;无缓存(刚起/采集失败)则不带这俩字段(前端显 —)。绝不在 /api/status 同步扫",
   "//components.status": "up|degraded|down|unknown（组件专用四态，非 worker 的 online-*/stale）。scheduler 据 component:scheduler 心跳新鲜度（复用 worker_status 的 30/900 窗口）+ loop_lag>5s 叠 degraded；redis 据 ping/内存；minio 据 bucket_exists；mode=local 时 minio=unknown（本地盘）",
   "workers": {
@@ -339,6 +340,24 @@ GET /api/jobs/{id}/notes/transcript     → text/markdown (逐字稿)
   "//cost": "claude-cli 订阅成本为「等价 API 成本」（非真实账单），前端按 provider==claude-cli 标「(等价)」"
 }
 ```
+
+#### GET /api/pricing — LiteLLM 价表状态
+
+api 侧持有的 LiteLLM 价表元信息（系统状态页「AI 用量」卡展示）。`fetched_at` 为末次成功拉取（refresh）时间（ISO，或 `null`=从未拉到 / 仅启动时读了旧缓存且无 sidecar）。价表持久化在 MinIO 伪 job `_pricing/litellm.json`，更新时间另存 sidecar `_pricing/litellm.meta.json`（`{"fetched_at": ISO}`，价表本体不含时间戳，载入时回填）。
+
+```json
+{"ready": true, "model_count": 1342,
+ "fetched_at": "2026-06-24T03:00:01+00:00",
+ "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"}
+```
+
+#### POST /api/pricing/refresh — 手动更新价表
+
+立即拉一次 LiteLLM 最新价表 → 更新内存 + 存回 MinIO（本体 + sidecar 更新时间）。成功返回新的 `status()`（同 `GET /api/pricing`）；上游拉取失败 → `502`（**保留旧表，绝不 crash / 不致 cost 归零**）。
+
+#### GET /api/pricing/raw — 原始价表
+
+返回当前内存中的原始 LiteLLM 价表全量 `dict`（key=模型名，值=单价等字段），供前端新标签/弹窗查看。空表返回 `{}`。
 
 #### GET /api/events?limit=50 — 系统事件流
 

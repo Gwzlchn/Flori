@@ -23,7 +23,7 @@ from shared.status import (
 from shared.storage import RemoteStorage
 from shared.sysload import read_process_rss_mb
 from shared.version import FLORI_VERSION
-from api.deps import get_config, get_db, get_redis, verify_token
+from api.deps import get_config, get_db, get_redis, get_storage, verify_token
 
 router = APIRouter(prefix="/api", tags=["admin"])
 
@@ -409,6 +409,28 @@ async def system_status(request: Request):
 async def usage_aggregate(db: Database = Depends(get_db)):
     """全量 AI 用量聚合:累计 token/缓存/成本 + 平均缓存命中率 + 按 model 分(供系统状态展示)。"""
     return await asyncio.to_thread(db.get_usage_aggregate)
+
+
+@router.get("/pricing", dependencies=[Depends(verify_token)])
+async def pricing_status(request: Request):
+    """LiteLLM 价表状态:{ready, model_count, fetched_at(ISO|null), source_url}。"""
+    return request.app.state.pricing.status()
+
+
+@router.post("/pricing/refresh", dependencies=[Depends(verify_token)])
+async def pricing_refresh(request: Request, storage=Depends(get_storage)):
+    """手动拉一次 LiteLLM 最新价表 → 更新内存 + 存回 MinIO。成功回新 status;拉取失败 502(不 crash)。"""
+    pricing = request.app.state.pricing
+    ok = await pricing.refresh(storage)
+    if not ok:
+        raise HTTPException(502, "拉取 LiteLLM 价表失败(网络/上游异常),已保留旧表")
+    return pricing.status()
+
+
+@router.get("/pricing/raw", dependencies=[Depends(verify_token)])
+async def pricing_raw(request: Request):
+    """原始 LiteLLM 价表(全量 dict,供前端新标签/弹窗查看)。空表返回 {}。"""
+    return request.app.state.pricing.raw()
 
 
 @router.get("/events", dependencies=[Depends(verify_token)])

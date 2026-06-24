@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { useApi } from '../composables/useApi'
-import type { Worker, WorkerJob, FullStatus, SystemEvent, UsageAggregate } from '../types'
+import type { Worker, WorkerJob, FullStatus, SystemEvent, UsageAggregate, PricingStatus } from '../types'
 
 export const useWorkerStore = defineStore('workers', () => {
   const api = useApi()
@@ -70,10 +70,19 @@ export const useWorkerStore = defineStore('workers', () => {
     return await api.get<UsageAggregate>('/api/usage')
   }
 
+  // LiteLLM 价表:状态(更新时间 + 模型数)、手动更新(拉最新)。
+  async function fetchPricing(): Promise<PricingStatus> {
+    return await api.get<PricingStatus>('/api/pricing')
+  }
+  async function refreshPricing(): Promise<PricingStatus> {
+    return await api.post<PricingStatus>('/api/pricing/refresh', {})
+  }
+
   return {
     workers, loading, fetchAll, pause, resume,
     updateNote, updateTags, remove, mintToken, fetchJobs,
     fetchPoolLimits, savePoolLimits,
     fetchFullStatus, fetchEvents, fetchUsage,
+    fetchPricing, refreshPricing,
   }
 })

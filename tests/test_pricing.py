@@ -87,3 +87,74 @@ async def test_fetch_drops_sample_spec(monkeypatch):
     table = await fetch_litellm_pricing()
     assert "sample_spec" not in table
     assert "claude-opus-4-8" in table
+
+
+# ── PricingStore:更新时间戳 + sidecar 持久化(批2.2)──
+
+class _MemStorage:
+    """最小内存 storage:仅 read_file/write_file,按 (job_id, rel) 存字节(模拟 MinIO 伪 job)。"""
+    def __init__(self):
+        self._files: dict[tuple[str, str], bytes] = {}
+
+    async def read_file(self, job_id, rel_path):
+        return self._files.get((job_id, rel_path))
+
+    async def write_file(self, job_id, rel_path, data):
+        self._files[(job_id, rel_path)] = data
+
+
+@pytest.mark.asyncio
+async def test_pricing_store_status_and_refresh_sets_fetched_at(monkeypatch):
+    import api.pricing_store as ps
+
+    async def fake_fetch(*a, **k):
+        return {"claude-opus-4-8": {"input_cost_per_token": 5e-06}}
+
+    monkeypatch.setattr(ps, "fetch_litellm_pricing", fake_fetch)
+    store = ps.PricingStore()
+    st0 = store.status()
+    assert st0["ready"] is False and st0["model_count"] == 0 and st0["fetched_at"] is None
+    assert "litellm" in st0["source_url"].lower()
+
+    storage = _MemStorage()
+    assert await store.refresh(storage) is True
+    st1 = store.status()
+    assert st1["ready"] is True and st1["model_count"] == 1 and st1["fetched_at"] is not None
+    # refresh 同写 sidecar(litellm.meta.json)记更新时间。
+    assert (ps._PRICING_JOB, ps._PRICING_META) in storage._files
+
+
+@pytest.mark.asyncio
+async def test_pricing_store_load_backfills_fetched_at_from_sidecar(monkeypatch):
+    """refresh 落盘 → 新 store load_from_storage 应回填 _fetched_at(读 sidecar)。"""
+    import api.pricing_store as ps
+
+    async def fake_fetch(*a, **k):
+        return {"gpt-4o": {"input_cost_per_token": 2.5e-06}}
+
+    monkeypatch.setattr(ps, "fetch_litellm_pricing", fake_fetch)
+    storage = _MemStorage()
+    writer = ps.PricingStore()
+    await writer.refresh(storage)
+    written_ts = writer.status()["fetched_at"]
+
+    reader = ps.PricingStore()
+    assert await reader.load_from_storage(storage) is True
+    assert reader.model_count == 1
+    assert reader.status()["fetched_at"] == written_ts
+
+
+@pytest.mark.asyncio
+async def test_pricing_store_load_without_sidecar_keeps_fetched_at_none():
+    """只有价表本体、无 sidecar(老缓存)→ 表载入成功但 fetched_at 仍为 None。"""
+    import json as _json
+
+    import api.pricing_store as ps
+
+    storage = _MemStorage()
+    storage._files[(ps._PRICING_JOB, ps._PRICING_FILE)] = _json.dumps(
+        {"gpt-4o": {"input_cost_per_token": 2.5e-06}}).encode()
+    store = ps.PricingStore()
+    assert await store.load_from_storage(storage) is True
+    assert store.model_count == 1
+    assert store.status()["fetched_at"] is None

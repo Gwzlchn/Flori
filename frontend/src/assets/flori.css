@@ -662,6 +662,8 @@ mark{background:var(--brand-100);color:var(--brand-700);padding:0 2px;border-rad
 .prov-models{padding:2px 13px 10px 28px;display:flex;flex-direction:column;gap:6px}
 .prov-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px}
 .prov-row b{font-size:12.5px;color:var(--ink-900)}
+/* LiteLLM 价表行(模型数+更新时间+手动更新/原始 JSON):复用 prov 行观感,与 provider 列表拉开一点 */
+.pricing-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px;margin-top:12px;padding-top:11px;border-top:1px solid var(--line-soft)}
 
 /* ①系统健康条：full-width 卡，左 4px 竖色条按聚合态变色，放大状态点。 */
 .health-bar{display:flex;align-items:center;gap:14px;border-left:4px solid var(--ok)}
