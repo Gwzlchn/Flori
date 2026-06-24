@@ -645,7 +645,9 @@ mark{background:var(--brand-100);color:var(--brand-700);padding:0 2px;border-rad
 
 /* AI 用量:每个 provider 一个可折叠组（顶部 4 块=跨 provider 总计，默认展开） */
 .prov-group{border:1px solid var(--line-soft);border-radius:var(--r-md);overflow:hidden}
-.prov-group + .prov-group{margin-top:8px}
+.prov-flat{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:9px 13px;border:1px solid var(--line-soft);border-radius:var(--r-md);font-size:12px}
+.prov-flat b{font-size:12.5px;color:var(--ink-900)}
+.prov-group + .prov-group,.prov-flat + .prov-flat,.prov-flat + .prov-group,.prov-group + .prov-flat{margin-top:8px}
 .prov-sum{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:9px 13px;cursor:pointer;list-style:none;font-size:12px}
 .prov-sum::-webkit-details-marker{display:none}
 .prov-sum::before{content:'▸';color:var(--ink-400);font-size:10px}

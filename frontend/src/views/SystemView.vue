@@ -528,22 +528,30 @@ const usageByProvider = computed(() => {
         <div class="metric"><div class="v">{{ usage.cache_hit_rate_pct }}%</div><div class="l">平均缓存命中</div></div>
         <div class="metric"><div class="v">{{ fmtCost(usage.total_cost_usd) }}</div><div class="l">累计成本</div></div>
       </div>
-      <!-- 每个 provider 可点开看自己的统计；单 provider 时默认展开 -->
+      <!-- 每个 provider 一行;多模型可点开看分模型,单模型平铺(不冗余展开) -->
       <div>
-        <details v-for="p in usageByProvider" :key="p.provider" class="prov-group" :open="usageByProvider.length === 1">
-          <summary class="prov-sum">
+        <template v-for="p in usageByProvider" :key="p.provider">
+          <div v-if="p.models.length === 1" class="prov-flat">
             <span class="badge b-mut">{{ p.provider }}</span>
+            <b class="mono">{{ p.models[0].model }}</b>
             <span class="prov-meta">{{ p.calls }} 次 · 入 {{ p.input.toLocaleString() }} / 出 {{ p.output.toLocaleString() }} · 命中 {{ p.hit }}%</span>
             <span class="prov-cost">{{ fmtCost(p.cost) }}<span class="dim" style="font-size:11px">{{ costLabel(p.provider) }}</span></span>
-          </summary>
-          <div class="prov-models">
-            <div v-for="m in p.models" :key="m.model" class="prov-row">
-              <b class="mono">{{ m.model }}</b>
-              <span class="prov-meta">{{ m.calls }} 次 · 入 {{ m.input_tokens.toLocaleString() }} / 出 {{ m.output_tokens.toLocaleString() }} · 命中 {{ m.cache_hit_rate_pct }}%</span>
-              <span class="prov-cost">{{ fmtCost(m.cost_usd) }}</span>
-            </div>
           </div>
-        </details>
+          <details v-else class="prov-group">
+            <summary class="prov-sum">
+              <span class="badge b-mut">{{ p.provider }}</span>
+              <span class="prov-meta">{{ p.models.length }} 个模型 · {{ p.calls }} 次 · 命中 {{ p.hit }}%</span>
+              <span class="prov-cost">{{ fmtCost(p.cost) }}<span class="dim" style="font-size:11px">{{ costLabel(p.provider) }}</span></span>
+            </summary>
+            <div class="prov-models">
+              <div v-for="m in p.models" :key="m.model" class="prov-row">
+                <b class="mono">{{ m.model }}</b>
+                <span class="prov-meta">{{ m.calls }} 次 · 入 {{ m.input_tokens.toLocaleString() }} / 出 {{ m.output_tokens.toLocaleString() }} · 命中 {{ m.cache_hit_rate_pct }}%</span>
+                <span class="prov-cost">{{ fmtCost(m.cost_usd) }}</span>
+              </div>
+            </div>
+          </details>
+        </template>
       </div>
     </div>
 
