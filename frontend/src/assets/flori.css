@@ -636,12 +636,25 @@ mark{background:var(--brand-100);color:var(--brand-700);padding:0 2px;border-rad
 }
 
 /* ════ 系统健康总览页（/system）：健康条 / 组件卡 / 4 格栅格 / 骨架 ════ */
-/* 全部复用既有 token（--ok/--warn/--bad/--mut/--ink-*/--line-*），无新增颜色。 */
+/* 全部复用既有 token（--ok / --warn / --bad / --mut / --ink / --line 系列），无新增颜色。 */
 
 /* 4 等分概览栅格（②系统概览）；断点降列复用 grid3 同档。 */
 .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
 @media(max-width:900px){ .grid4{grid-template-columns:repeat(2,1fr)} }
 @media(max-width:767px){ .grid4{grid-template-columns:repeat(2,1fr)} }
+
+/* AI 用量:每个 provider 一个可折叠组（顶部 4 块=跨 provider 总计，默认展开） */
+.prov-group{border:1px solid var(--line-soft);border-radius:var(--r-md);overflow:hidden}
+.prov-group + .prov-group{margin-top:8px}
+.prov-sum{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:9px 13px;cursor:pointer;list-style:none;font-size:12px}
+.prov-sum::-webkit-details-marker{display:none}
+.prov-sum::before{content:'▸';color:var(--ink-400);font-size:10px}
+.prov-group[open] .prov-sum::before{content:'▾'}
+.prov-meta{color:var(--ink-500)}
+.prov-cost{margin-left:auto;font-size:12.5px;color:var(--ink-900)}
+.prov-models{padding:2px 13px 10px 28px;display:flex;flex-direction:column;gap:6px}
+.prov-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px}
+.prov-row b{font-size:12.5px;color:var(--ink-900)}
 
 /* ①系统健康条：full-width 卡，左 4px 竖色条按聚合态变色，放大状态点。 */
 .health-bar{display:flex;align-items:center;gap:14px;border-left:4px solid var(--ok)}

@@ -415,6 +415,26 @@ async function copy(text: string, which: 'token' | 'cmd') {
 // AI 用量：成本按 provider==claude-cli 标「(等价)」。
 function costLabel(provider: string): string { return provider === 'claude-cli' ? '（等价）' : '' }
 function fmtCost(v: number): string { return `$${(v ?? 0).toFixed(4)}` }
+
+// 按 provider 分组（每个可点开看自己的统计；跨 provider 总计在顶部 4 块）。
+const usageByProvider = computed(() => {
+  const u = usage.value
+  if (!u) return []
+  const m = new Map<string, any>()
+  for (const r of u.by_model) {
+    let g = m.get(r.provider)
+    if (!g) {
+      g = { provider: r.provider, calls: 0, input: 0, output: 0, cc: 0, cr: 0, cost: 0, models: [] as any[] }
+      m.set(r.provider, g)
+    }
+    g.calls += r.calls; g.input += r.input_tokens; g.output += r.output_tokens
+    g.cc += r.cache_creation_tokens; g.cr += r.cache_read_tokens; g.cost += r.cost_usd
+    g.models.push(r)
+  }
+  return [...m.values()]
+    .map(g => ({ ...g, hit: (g.input + g.cc + g.cr) ? Math.round((g.cr / (g.input + g.cc + g.cr)) * 1000) / 10 : 0 }))
+    .sort((a, b) => b.cost - a.cost)
+})
 </script>
 
 <template>
@@ -508,13 +528,22 @@ function fmtCost(v: number): string { return `$${(v ?? 0).toFixed(4)}` }
         <div class="metric"><div class="v">{{ usage.cache_hit_rate_pct }}%</div><div class="l">平均缓存命中</div></div>
         <div class="metric"><div class="v">{{ fmtCost(usage.total_cost_usd) }}</div><div class="l">累计成本</div></div>
       </div>
-      <div class="list">
-        <div v-for="m in usage.by_model" :key="`${m.provider}/${m.model}`" class="card pad" style="padding:9px 13px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-          <b class="mono" style="font-size:12.5px;color:var(--ink-900)">{{ m.model }}</b>
-          <span class="badge b-mut">{{ m.provider }}</span>
-          <span style="font-size:12px;color:var(--ink-600)">{{ m.calls }} 次 · 入 {{ m.input_tokens.toLocaleString() }} / 出 {{ m.output_tokens.toLocaleString() }} · 命中 {{ m.cache_hit_rate_pct }}%</span>
-          <span style="margin-left:auto;font-size:12.5px;color:var(--ink-900)">{{ fmtCost(m.cost_usd) }}<span class="dim" style="font-size:11px">{{ costLabel(m.provider) }}</span></span>
-        </div>
+      <!-- 每个 provider 可点开看自己的统计；单 provider 时默认展开 -->
+      <div>
+        <details v-for="p in usageByProvider" :key="p.provider" class="prov-group" :open="usageByProvider.length === 1">
+          <summary class="prov-sum">
+            <span class="badge b-mut">{{ p.provider }}</span>
+            <span class="prov-meta">{{ p.calls }} 次 · 入 {{ p.input.toLocaleString() }} / 出 {{ p.output.toLocaleString() }} · 命中 {{ p.hit }}%</span>
+            <span class="prov-cost">{{ fmtCost(p.cost) }}<span class="dim" style="font-size:11px">{{ costLabel(p.provider) }}</span></span>
+          </summary>
+          <div class="prov-models">
+            <div v-for="m in p.models" :key="m.model" class="prov-row">
+              <b class="mono">{{ m.model }}</b>
+              <span class="prov-meta">{{ m.calls }} 次 · 入 {{ m.input_tokens.toLocaleString() }} / 出 {{ m.output_tokens.toLocaleString() }} · 命中 {{ m.cache_hit_rate_pct }}%</span>
+              <span class="prov-cost">{{ fmtCost(m.cost_usd) }}</span>
+            </div>
+          </div>
+        </details>
       </div>
     </div>
 
