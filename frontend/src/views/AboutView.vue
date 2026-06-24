@@ -1,10 +1,38 @@
 <script setup lang="ts">
-// 关于 Flori（原型 #about）：纯静态，三层心智模型 + 真实能力概览。无数据请求。
+// 关于 Flori（原型 #about）：三层心智模型 + 真实能力概览。
+// 「四条内容流水线」从 /api/pipelines 动态拉取（= configs/pipelines.yaml 单一事实源），
+// 不再硬编码 → 永远与实际步骤链一致。
+import { ref, onMounted } from 'vue'
+import { useWorkerStore } from '../stores/workers'
 import {
   BookOpen, Info, GitBranch, RefreshCw, FileText, Check, Send,
   Search, Layers, Cpu, Play, Newspaper, Headphones, ChevronRight,
   Sparkles, Network, Tag, Server, Rss, Library, Database, Star,
 } from 'lucide-vue-next'
+
+interface PipeStep { key: string; label: string | null; pool: string | null }
+interface Pipeline { name: string; steps: PipeStep[] }
+
+const store = useWorkerStore()
+const pipelines = ref<Pipeline[]>([])
+onMounted(async () => {
+  try { pipelines.value = await store.fetchPipelines() } catch { /* 非致命：留空，显加载态 */ }
+})
+
+// 内容类型 → 展示（中文名 / 图标 / 色 pill）；未知类型回退。
+const CT: Record<string, { label: string; icon: any; pill: string }> = {
+  video: { label: '视频', icon: Play, pill: 't-video' },
+  paper: { label: '论文', icon: FileText, pill: 't-paper' },
+  article: { label: '文章', icon: Newspaper, pill: 't-article' },
+  audio: { label: '播客 / 音频', icon: Headphones, pill: 't-audio' },
+}
+function ct(name: string) { return CT[name] || { label: name, icon: Layers, pill: 't-video' } }
+// 步骤徽章配色（复用既有 badge 语义，无新增色）：评审→绿、AI 步→蓝、其余→灰。
+function stepBadge(s: PipeStep): string {
+  if ((s.key || '').toLowerCase().includes('review') || (s.label || '').includes('评审')) return 'b-ok'
+  if (s.pool === 'ai') return 'b-info'
+  return 'b-mut'
+}
 </script>
 
 <template>
@@ -62,42 +90,16 @@ import {
       <div class="card-h"><RefreshCw :size="15" />四条内容流水线</div>
       <p class="note-tip" style="margin-top:-4px;margin-bottom:13px">每种内容走各自的步骤链；步骤间以 JSON / MD 文件通信，输入指纹未变则跳过（幂等）。</p>
       <div class="list">
-        <div class="row" style="cursor:default;align-items:flex-start">
-          <span class="type-pill t-video"><Play :size="17" /></span>
+        <div v-for="p in pipelines" :key="p.name" class="row" style="cursor:default;align-items:flex-start">
+          <span class="type-pill" :class="ct(p.name).pill"><component :is="ct(p.name).icon" :size="17" /></span>
           <div class="body">
-            <div class="title">视频<span style="font-weight:400;color:var(--ink-400);margin-left:7px;font-size:12px">11 步</span></div>
+            <div class="title">{{ ct(p.name).label }}<span style="font-weight:400;color:var(--ink-400);margin-left:7px;font-size:12px">{{ p.steps.length }} 步</span></div>
             <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">
-              <span class="badge b-mut">下载</span><span class="badge b-mut">转写</span><span class="badge b-mut">场景检测</span><span class="badge b-mut">关键帧</span><span class="badge b-mut">去重</span><span class="badge b-mut">OCR</span><span class="badge b-mut">弹幕</span><span class="badge b-mut">标点</span><span class="badge b-mut">机械稿</span><span class="badge b-info">AI 智能版</span><span class="badge b-ok">质量评审</span>
+              <span v-for="s in p.steps" :key="s.key" class="badge" :class="stepBadge(s)">{{ s.label || s.key }}</span>
             </div>
           </div>
         </div>
-        <div class="row" style="cursor:default;align-items:flex-start">
-          <span class="type-pill t-paper"><FileText :size="17" /></span>
-          <div class="body">
-            <div class="title">论文<span style="font-weight:400;color:var(--ink-400);margin-left:7px;font-size:12px">5 步</span></div>
-            <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">
-              <span class="badge b-mut">PDF 解析</span><span class="badge b-mut">章节</span><span class="badge b-mut">图表</span><span class="badge b-info">AI 笔记</span><span class="badge b-ok">质量评审</span>
-            </div>
-          </div>
-        </div>
-        <div class="row" style="cursor:default;align-items:flex-start">
-          <span class="type-pill t-article"><Newspaper :size="17" /></span>
-          <div class="body">
-            <div class="title">文章<span style="font-weight:400;color:var(--ink-400);margin-left:7px;font-size:12px">5 步</span></div>
-            <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">
-              <span class="badge b-mut">正文解析</span><span class="badge b-mut">章节</span><span class="badge b-info">AI 笔记</span><span class="badge b-ok">质量评审</span>
-            </div>
-          </div>
-        </div>
-        <div class="row" style="cursor:default;align-items:flex-start">
-          <span class="type-pill t-audio"><Headphones :size="17" /></span>
-          <div class="body">
-            <div class="title">播客 / 音频<span style="font-weight:400;color:var(--ink-400);margin-left:7px;font-size:12px">5 步</span></div>
-            <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">
-              <span class="badge b-mut">转写</span><span class="badge b-mut">分段</span><span class="badge b-info">AI 笔记</span><span class="badge b-ok">质量评审</span>
-            </div>
-          </div>
-        </div>
+        <div v-if="!pipelines.length" class="note-tip" style="margin:0">流水线信息加载中…</div>
       </div>
       <div class="note-tip" style="margin-top:11px">视频智能版走<b>两段式</b>：先逐帧看图产出视觉描述，再据机械稿 + 视觉描述纯文本成稿。</div>
     </div>

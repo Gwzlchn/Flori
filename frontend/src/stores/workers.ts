@@ -77,12 +77,17 @@ export const useWorkerStore = defineStore('workers', () => {
   async function refreshPricing(): Promise<PricingStatus> {
     return await api.post<PricingStatus>('/api/pricing/refresh', {})
   }
+  // 四条内容流水线只读视图(= configs/pipelines.yaml 单一事实源);AboutView 动态渲染,不再硬编码。
+  async function fetchPipelines(): Promise<{ name: string; steps: { key: string; label: string | null; pool: string | null }[] }[]> {
+    const r = await api.get<{ pipelines?: any[] }>('/api/pipelines')
+    return Array.isArray(r) ? r : (r?.pipelines ?? [])
+  }
 
   return {
     workers, loading, fetchAll, pause, resume,
     updateNote, updateTags, remove, mintToken, fetchJobs,
     fetchPoolLimits, savePoolLimits,
     fetchFullStatus, fetchEvents, fetchUsage,
-    fetchPricing, refreshPricing,
+    fetchPricing, refreshPricing, fetchPipelines,
   }
 })
