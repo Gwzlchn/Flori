@@ -15,3 +15,5 @@
 | [0009](0009-worker-gateway-outbound-https.md) | 远程 Worker 经出站 HTTPS 网关接入（取代 0007） | 2026-06-08 |
 | [0010](0010-review-feedback-loop.md) | AI 评审升级为闭环（三回路 + 修订红线 + 分期） | 2026-06-22 |
 | [0012](0012-case-evidence-authoritative-sources.md) | 案例取证/权威来源（fetch 判决书+报道·带引用·评审逐条核·改写 0010） | 2026-06-22 |
+| [0013](0013-version-semver-build-sha.md) | 版本号 = 单一语义版本 + 构建短 sha,所有组件共用（递增:patch+1·逢10进位·大重构 major+1） | 2026-06-26 |
+| [0014](0014-observability-and-job-dag.md) | 可观测体系 + 每个 job 的流水线 DAG（纯 CSS/SVG·pipelines.yaml 单一事实源） | 2026-06-26 |
