@@ -90,6 +90,7 @@ function measure() {
       })
     }
   }
+  out.sort((a, b) => Number(a.sel) - Number(b.sel))  // 选中边最后画 → 叠在上层、突出
   edges.value = out
 }
 
@@ -135,13 +136,14 @@ watch(
 .dag { position: relative; display: flex; align-items: stretch; justify-content: space-between; gap: 14px; overflow-x: auto; padding: 4px 0 8px; }
 .dag-edges { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 0; overflow: visible; }
 .dag-edges path { fill: none; stroke: var(--ink-300); stroke-width: 1.4; }
-.dag-edges path.sel { stroke: var(--brand-400); stroke-width: 2; }
+.dag-edges path.sel { stroke: var(--brand-500); stroke-width: 2.5; }
 .dag-col { position: relative; z-index: 1; display: flex; flex-direction: column; justify-content: center; gap: 10px; flex: none; }
 .dag-node {
   display: flex; align-items: center; gap: 6px; padding: 5px 9px; position: relative;
-  border: 1px solid var(--line); border-left-width: 3px; border-left-color: var(--ink-200);
-  border-radius: var(--r-sm); background: var(--surface);
-  white-space: nowrap; cursor: pointer; transition: border-color .12s, background .12s;
+  border: 1px solid var(--line); border-left-width: 5px; border-left-color: var(--ink-200);
+  border-radius: var(--r-sm); border-top-left-radius: 0; border-bottom-left-radius: 0;
+  background: var(--surface);
+  white-space: nowrap; cursor: pointer; transition: background .12s;
 }
 .dag-node.is-sel { border-color: var(--brand-500); background: var(--brand-50); }
 /* 池=左边框色(不占宽):io/cpu 灰、ai 蓝、gpu 琥珀 */
