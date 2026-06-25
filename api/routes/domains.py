@@ -105,6 +105,11 @@ async def create_domain(
     return by[domain]
 
 
+# 进程级串行化 rename:防撞检查与文件/DB 迁移之间本无原子性,两个并发 rename 可交错通过检查后
+# 各自改文件/库(TOCTOU)。单用户工具极低频,一把进程内锁串行化即足够稳妥。
+_rename_lock = asyncio.Lock()
+
+
 @router.post("/{domain}/rename")
 async def rename_domain_key(
     domain: str,
@@ -124,34 +129,36 @@ async def rename_domain_key(
         raise HTTPException(400, "新旧标识相同")
     if domain == "general" or new == "general":
         raise HTTPException(400, "general 是默认领域,不可改名")
-    # 防撞:new 不能已被使用(库里有行 或 profile 文件已存在)
-    pdir = config.prompts_dir / "profiles"
-    old_path = pdir / f"{domain}.yaml"
-    new_path = pdir / f"{new}.yaml"
-    if new_path.exists() or await asyncio.to_thread(db.domain_exists, new):
-        raise HTTPException(409, f"目标标识 '{new}' 已存在")
-    # 1) 迁 profile 文件(若有):old.yaml -> new.yaml + 改内部 domain 字段(记录以便回滚)
-    moved_file = False
-    if old_path.exists():
-        data = yaml.safe_load(old_path.read_text(encoding="utf-8")) or {}
-        data["domain"] = new
-        pdir.mkdir(parents=True, exist_ok=True)
-        new_path.write_text(
-            yaml.dump(data, allow_unicode=True, default_flow_style=False), encoding="utf-8"
-        )
-        old_path.unlink()
-        moved_file = True
-    # 2) 事务迁移 DB 引用;失败则回滚文件,保证一致
-    try:
-        moved = await asyncio.to_thread(db.rename_domain, domain, new)
-    except Exception:
-        if moved_file:
-            data["domain"] = domain
-            old_path.write_text(
+    # 防撞 + 文件/DB 迁移全程持锁,避免并发 rename 在检查与执行之间交错(TOCTOU)。
+    async with _rename_lock:
+        # 防撞:new 不能已被使用(库里有行 或 profile 文件已存在)
+        pdir = config.prompts_dir / "profiles"
+        old_path = pdir / f"{domain}.yaml"
+        new_path = pdir / f"{new}.yaml"
+        if new_path.exists() or await asyncio.to_thread(db.domain_exists, new):
+            raise HTTPException(409, f"目标标识 '{new}' 已存在")
+        # 1) 迁 profile 文件(若有):old.yaml -> new.yaml + 改内部 domain 字段(记录以便回滚)
+        moved_file = False
+        if old_path.exists():
+            data = yaml.safe_load(old_path.read_text(encoding="utf-8")) or {}
+            data["domain"] = new
+            pdir.mkdir(parents=True, exist_ok=True)
+            new_path.write_text(
                 yaml.dump(data, allow_unicode=True, default_flow_style=False), encoding="utf-8"
             )
-            new_path.unlink(missing_ok=True)
-        raise
+            old_path.unlink()
+            moved_file = True
+        # 2) 事务迁移 DB 引用;失败则回滚文件,保证一致
+        try:
+            moved = await asyncio.to_thread(db.rename_domain, domain, new)
+        except Exception:
+            if moved_file:
+                data["domain"] = domain
+                old_path.write_text(
+                    yaml.dump(data, allow_unicode=True, default_flow_style=False), encoding="utf-8"
+                )
+                new_path.unlink(missing_ok=True)
+            raise
     by = await _overview_map(db, config)
     return {"old": domain, "new": new, "moved": moved, "domain": by.get(new)}
 

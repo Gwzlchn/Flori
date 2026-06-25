@@ -126,6 +126,8 @@ const collectionName = computed(() => job.value?.collection_name ?? null)
 async function fetchDetail() {
   loading.value = true
   loadError.value = ''
+  jobUsageRows.value = []  // 切 job 先清空:避免新 job 的 usage 请求失败/404 时残留上一个 job 的开销(跨 job 串台)
+  const fid = jobId.value
   try {
     const d = await jobStore.fetchDetail(jobId.value)
     job.value = d
@@ -140,8 +142,8 @@ async function fetchDetail() {
     loadEvidence()  // 权威来源(取证产物);有则显示「权威来源」tab
     // 本 job DAG 的依赖(needs)定义(/api/pipelines 返回 {pipelines:[...]});失败留空不影响详情。
     api.get<{ pipelines?: any[] }>('/api/pipelines').then(r => { pipelinesDef.value = Array.isArray(r) ? r : (r?.pipelines ?? []) }).catch(() => {})
-    // 逐次 AI 用量 → DAG 节点 provider/开销 + 总开销。
-    api.get<{ usage?: any[] }>(`/api/jobs/${jobId.value}/usage`).then(r => { jobUsageRows.value = r?.usage || [] }).catch(() => {})
+    // 逐次 AI 用量 → DAG 节点 provider/开销 + 总开销。带 job 切换守卫,迟到的回填不串到新 job。
+    api.get<{ usage?: any[] }>(`/api/jobs/${fid}/usage`).then(r => { if (jobId.value === fid) jobUsageRows.value = r?.usage || [] }).catch(() => {})
     // 完成态默认落笔记，否则落流水线。
     tab.value = d.status === 'done' ? 'notes' : 'proc'
   } catch (e: any) {

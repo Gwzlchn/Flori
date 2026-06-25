@@ -4,7 +4,8 @@
 import { computed } from 'vue'
 import StatusBadge from '../common/StatusBadge.vue'
 import { componentDotClass } from '../../utils/worker'
-import { fmtDuration, fmtRelative, fmtBytes } from '../../utils/datetime'
+import { fmtDuration, fmtRelative } from '../../utils/datetime'
+import { fmtBytes } from '../../utils/format'
 import { COMPONENT_KIND_LABELS } from '../../types'
 import type { SystemComponent } from '../../types'
 

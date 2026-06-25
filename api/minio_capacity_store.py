@@ -3,7 +3,7 @@
 容量统计(对象数/总字节)MinIO 无聚合 API,只能全量 list 求和——贵。绝不能让它同步阻塞
 /api/status(每 15s 轮询)。故仿 PricingStore.daily_loop:进程起一个后台循环,每 TTL 秒刷一次,
 build_full_status 只读内存快照(无则 minio extra 不填 objects/size_bytes,前端显 —)。
-仅生产(_own_resources)且 RemoteStorage 才起;LocalStorage 用 os.walk(便宜)同样支持。
+门控见 api/main.py:storage 非空即起(生产 _own_resources 下两种后端都启);RemoteStorage 全量 list bucket、LocalStorage 用 os.walk(便宜)。
 """
 
 from __future__ import annotations

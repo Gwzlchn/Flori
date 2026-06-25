@@ -423,6 +423,10 @@ async def retry_all_failed(
     """批量重试 failed job(各自从首个失败步重跑,自动重置下游)。返回发起数。
     传 collection_id 则限定该集合(集合详情页"重试本集合失败");不传=全局所有失败。
     注:缺凭证类失败(如无 cookie 的 YouTube 下载)修好根因前会再失败。"""
+    # 空串(?collection_id=)归一为 None:否则 list_jobs 的 `elif collection_id:` 对空串为假 →
+    # 集合过滤落空 → 静默退化为「全局重试所有 failed」,与「限定该集合」语义相悖且误触批量重发。
+    if collection_id is not None:
+        collection_id = collection_id.strip() or None
     if collection_id is not None:
         validate_path_segment(collection_id, "collection_id")
     _, jobs = await asyncio.to_thread(

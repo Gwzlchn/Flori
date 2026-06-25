@@ -398,8 +398,12 @@ class RemoteStorage:
         }
 
     def _server_version_sync(self) -> str | None:
-        # 经 MinIO 管理 API(MinioAdmin.info)取服务端版本,与 bucket 探活同处一次 health。
-        # 失败一律回 None——绝不让 health 变慢/报错(它是 /api/status 关键路径)。
+        # 经 MinIO 管理 API(MinioAdmin.info)取服务端版本。版本近乎静态:首次成功即缓存到实例,
+        # 后续 health 直接复用,不再每次新建 MinioAdmin/调 info()——避免管理 API RTT 反复挤占
+        # health 的 3s 探活预算(否则可能拖超时致 minio 误报 down)。失败回 None 且不缓存,下次再试。
+        cached = getattr(self, "_server_version", None)
+        if cached:
+            return cached
         try:
             from minio import MinioAdmin
             from minio.credentials import StaticProvider
@@ -410,7 +414,8 @@ class RemoteStorage:
                 secure=self._secure,
             )
             info = json.loads(adm.info())
-            return _parse_minio_version(info)
+            self._server_version = _parse_minio_version(info)
+            return self._server_version
         except Exception:
             return None
 
