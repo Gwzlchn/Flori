@@ -8,24 +8,34 @@
 https://{$EDGE_HOST}, https://localhost, https://127.0.0.1 {
 	tls internal
 
-	# /api/runner/* 是 worker↔网关的机机接口,自带 Bearer 鉴权(注册 token + 每 worker
-	# token),且 worker 只发 Authorization: Bearer——与 Basic 同头冲突,故须放行不挂 Basic。
-	@protected not path /api/runner/*
-
-	# 一道门:对人面入口(SPA + /api/* 非 runner)全站 Basic Auth。
-	# NAS 端 API_TOKEN 已置空,应用层不再要 Bearer;前端也不发 Authorization,
-	# 浏览器对所有请求自动带 Basic 凭证,不会与任何 Bearer 头冲突。
-	basic_auth @protected {
-		flori {$FLORI_BASIC_HASH}
+	# MCP(streamable-http):把知识库作为 MCP 提供给 agent。自身 Bearer token 鉴权由
+	# NAS mcp-http 强制(FLORI_MCP_TOKEN);放行 Basic(MCP client 用 Bearer,与 Basic 同头冲突)。
+	# 经反向 SSH 隧道口 127.0.0.1:8091 → NAS mcp-http:8090。
+	# 注:必须用独立 handle 块(而非给 @protected 加 not path);单个 not path 多模式只认第一个。
+	handle /mcp* {
+		reverse_proxy 127.0.0.1:8091
 	}
 
-	# /api/*(含 /api/runner/*)反代到 NAS api(反向 SSH 隧道口)。
-	handle /api/* {
+	# /api/runner/* 是 worker↔网关的机机接口,自带 Bearer 鉴权(注册 token + 每 worker token),
+	# 且 worker 只发 Authorization: Bearer——与 Basic 同头冲突,故须放行不挂 Basic。
+	handle /api/runner/* {
 		reverse_proxy 127.0.0.1:8000
 	}
 
-	# 前端:反代到本机 flori-frontend 容器(SSH 直传部署 push-frontend-to-edge.sh,不归 Watchtower;见 docker-compose.yml）。
+	# 其余人面入口(SPA + /api/* 非 runner):一道门 Basic Auth,再按路径路由。
 	handle {
-		reverse_proxy 127.0.0.1:8090
+		basic_auth {
+			flori {$FLORI_BASIC_HASH}
+		}
+
+		# /api/* 反代到 NAS api(反向 SSH 隧道口)。
+		handle /api/* {
+			reverse_proxy 127.0.0.1:8000
+		}
+
+		# 前端:反代到本机 flori-frontend 容器(SSH 直传部署 push-frontend-to-edge.sh)。
+		handle {
+			reverse_proxy 127.0.0.1:8090
+		}
 	}
 }

@@ -90,6 +90,28 @@ services:
       - ./ssh/id_ed25519:/id_rsa:ro
       - ./ssh/known_hosts:/known_hosts:ro
 
+  # NAS -> ECS 反向(-R):把 NAS 的 mcp-http:8090 暴露到 ECS 127.0.0.1:8091,供 Caddy /mcp 反代。
+  # MCP server(把知识库作为 MCP 给 agent);自身 Bearer token 鉴权,故经回环暴露给 Caddy 即可。
+  mcp-tunnel:
+    image: jnovack/autossh:latest
+    container_name: flori-tunnel-mcp
+    restart: unless-stopped
+    networks:
+      - backend
+    environment:
+      SSH_REMOTE_USER: root
+      SSH_REMOTE_HOST: ${EDGE_HOST}
+      SSH_REMOTE_PORT: "22"
+      SSH_TUNNEL_PORT: "8091"
+      SSH_TARGET_HOST: mcp-http
+      SSH_TARGET_PORT: "8090"
+      SSH_MODE: "-R"
+      SSH_SERVER_ALIVE_INTERVAL: "30"
+      SSH_SERVER_ALIVE_COUNT_MAX: "3"
+    volumes:
+      - ./ssh/id_ed25519:/id_rsa:ro
+      - ./ssh/known_hosts:/known_hosts:ro
+
 networks:
   backend:
     external: true

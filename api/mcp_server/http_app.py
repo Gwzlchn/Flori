@@ -81,8 +81,25 @@ class TokenAuthASGI:
 
 def build_http_app():
     """构造带鉴权的 streamable-http ASGI app(默认挂 /mcp)。供 uvicorn 启动。"""
+    from mcp.server.transport_security import TransportSecuritySettings
+
     from api.mcp_server.server import build_default_server
 
     mcp = build_default_server(stateless_http=True)
+
+    # DNS-rebinding 保护:其威胁模型是「浏览器被诱导直连 localhost MCP」。本服务总在
+    # 反向代理(Caddy/隧道)+ Bearer token 之后,经代理后 Host=公网域名会被默认保护判为非法 → 421。
+    # 故按部署主机放行:FLORI_MCP_ALLOWED_HOSTS=逗号分隔 → 保护开但允许这些 host;"*"/未设 → 关保护。
+    hosts_env = os.environ.get("FLORI_MCP_ALLOWED_HOSTS", "").strip()
+    if hosts_env and hosts_env != "*":
+        hosts = [h.strip() for h in hosts_env.split(",") if h.strip()]
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True, allowed_hosts=hosts, allowed_origins=hosts
+        )
+    else:
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False
+        )
+
     app = mcp.streamable_http_app()  # Starlette ASGI;path 默认 /mcp
     return TokenAuthASGI(app)

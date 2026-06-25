@@ -61,6 +61,9 @@ services:
       WORK_DIR: ${WORK_DIR:-/tmp/flori-work}        # RemoteStorage 临时根(MinIO 后端)
       FLORI_MCP_TOKEN: ${FLORI_MCP_TOKEN:-}
       FLORI_MCP_ALLOW_NO_AUTH: ${FLORI_MCP_ALLOW_NO_AUTH:-0}
+      # 经反代/隧道暴露时,Host=公网域名会被 MCP 的 DNS-rebinding 保护判为非法(421)。
+      # 设逗号分隔 allowed hosts(如 ${EDGE_HOST},localhost,127.0.0.1)放行;"*"/不设=关该保护。
+      FLORI_MCP_ALLOWED_HOSTS: ${FLORI_MCP_ALLOWED_HOSTS:-}
     ports:
       - "${MCP_BIND_IP:-127.0.0.1}:${MCP_PORT:-8090}:8090"   # 默认仅绑本机;经 Caddy/Tunnel 暴露
     volumes:
