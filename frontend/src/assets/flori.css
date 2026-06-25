@@ -51,7 +51,7 @@ i[data-lucide]{width:16px;height:16px;stroke-width:1.75;flex:none}
 .hidden{display:none!important}
 
 /* --------------------------------- APP SHELL --------------------------------- */
-.app{display:grid;grid-template-columns:240px 1fr;min-height:100vh}
+.app{display:grid;grid-template-columns:264px 1fr;min-height:100vh}
 .side{background:var(--surface);border-right:1px solid var(--line);display:flex;
   flex-direction:column;padding:16px 12px;position:sticky;top:0;height:100vh;overflow:hidden}
 /* #5 长侧栏:头部/投递行/底部工具固定,只有知识库树(.nav)内部滚动 → 设置图标永不被顶出屏外 */

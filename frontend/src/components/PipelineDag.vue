@@ -132,7 +132,7 @@ watch(
 </template>
 
 <style scoped>
-.dag { position: relative; display: flex; align-items: stretch; gap: 18px; overflow-x: auto; padding: 4px 0 8px; }
+.dag { position: relative; display: flex; align-items: stretch; justify-content: space-between; gap: 14px; overflow-x: auto; padding: 4px 0 8px; }
 .dag-edges { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 0; overflow: visible; }
 .dag-edges path { fill: none; stroke: var(--ink-300); stroke-width: 1.4; }
 .dag-edges path.sel { stroke: var(--brand-400); stroke-width: 2; }
@@ -143,7 +143,6 @@ watch(
   border-radius: var(--r-sm); background: var(--surface);
   white-space: nowrap; cursor: pointer; transition: border-color .12s, background .12s;
 }
-.dag-node:hover { border-color: var(--ink-300); }
 .dag-node.is-sel { border-color: var(--brand-500); background: var(--brand-50); }
 /* 池=左边框色(不占宽):io/cpu 灰、ai 蓝、gpu 琥珀 */
 .pe-io { border-left-color: var(--ink-200); }

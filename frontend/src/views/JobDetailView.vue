@@ -691,7 +691,6 @@ watch(job, (j) => {
               <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:7px;height:7px;border-radius:50%;background:var(--bad)"></i>失败</span>
               <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:7px;height:7px;border-radius:50%;background:var(--ink-300)"></i>跳过/待运行</span>
               <span style="color:var(--ink-300)">|</span>
-              <span style="color:var(--ink-400)">左条</span>
               <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:3px;height:11px;border-radius:1px;background:var(--info)"></i>AI</span>
               <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:3px;height:11px;border-radius:1px;background:var(--ink-400)"></i>CPU</span>
               <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:3px;height:11px;border-radius:1px;background:var(--warn)"></i>GPU</span>
