@@ -295,6 +295,12 @@ function loadText(w: Worker): string {
 }
 
 // ── ①健康条聚合（纯函数派生，§3）──
+// 近 1h 失败/掉线 → 进健康条「需关注」。事件流是历史,但近期窗口值得提醒;随 1h 窗口自动消退,不被旧失败刷屏。
+const recentJobFails = computed(() => throughput.value?.failed ?? 0)
+const recentWorkerLost = computed(() => {
+  const cut = Date.now() - 3600_000
+  return events.value.filter(e => (e.kind === 'worker_cleaned' || e.kind === 'orphan_reclaimed') && e.ts * 1000 >= cut).length
+})
 type Overall = 'ok' | 'warn' | 'down' | 'unreachable'
 const overall = computed<Overall>(() => {
   // 不可达：连续失败 ≥1 且当前无可用快照（或失败累计已多次）。保留陈旧快照仍展示其余。
@@ -306,13 +312,14 @@ const overall = computed<Overall>(() => {
   const allOffline = workerStore.workers.length > 0 && onlineCount.value === 0
   const pausedBacklog = pools.value.some(([, p]) => p.capacity === 0 && p.queue > 0)
   if (anyDown || allOffline || pausedBacklog) return 'down'
-  // 黄：组件 degraded/unknown（minio local 不算）；stale worker；版本漂移；排队无 worker。
+  // 黄：组件 degraded/unknown（minio local 不算）；stale worker；版本漂移；排队无 worker；近1h有任务失败/worker掉线。
   const anyDegraded = comps.some(c => c.status === 'degraded'
     || (c.status === 'unknown' && c.extra?.mode !== 'local'))
   const anyStale = workerStore.workers.some(w => w.status === 'stale')
   const queueNoWorker = pools.value.some(([name, p]) =>
     p.queue > 0 && (status.value?.workers?.[name]?.online ?? 0) === 0 && p.capacity !== 0)
-  if (anyDegraded || anyStale || driftCount.value > 0 || queueNoWorker) return 'warn'
+  if (anyDegraded || anyStale || driftCount.value > 0 || queueNoWorker
+    || recentJobFails.value > 0 || recentWorkerLost.value > 0) return 'warn'
   return 'ok'
 })
 const overallDot = computed(() =>
@@ -340,6 +347,8 @@ const issues = computed<string[]>(() => {
   if (workerStore.workers.length > 0 && onlineCount.value === 0) out.push('所有 worker 均已离线')
   if (driftCount.value > 0) out.push(`${driftCount.value} 个 worker 运行旧版本`)
   if (workerStore.workers.some(w => w.status === 'stale')) out.push('有 worker 失联')
+  if (recentJobFails.value > 0) out.push(`${recentJobFails.value} 个任务近 1h 失败`)
+  if (recentWorkerLost.value > 0) out.push(`近 1h ${recentWorkerLost.value} 次 worker 掉线`)
   return out
 })
 const healthSummary = computed(() => {
