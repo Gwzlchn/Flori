@@ -1678,6 +1678,34 @@ class Database:
         ]
         return total, items
 
+    def note_bodies(self, job_ids: list[str]) -> dict[str, str]:
+        """批量取笔记正文：job_id -> body（取自 notes_fts5.body，FTS5 唯一持有全文之处）。
+
+        search_notes 只回 snippet,综合问答(synthesis)需要整段正文喂给 LLM。一次 IN 查询
+        避免 N 次往返。一个 job 可能有多条(smart/mechanical/...),同 job 多行用 '\\n\\n' 串接,
+        优先保留 smart(综合笔记)在前。空列表返回空 dict;去重 + 防注入(占位符绑定)。"""
+        ids = [j for j in dict.fromkeys(job_ids) if j]  # 去重保序,剔空
+        if not ids:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        rows = self._conn.execute(
+            f"SELECT job_id, note_type, body FROM notes_fts5 "
+            f"WHERE job_id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        # 同 job 多笔记类型:smart 优先(综合版最适合问答),其余按出现顺序追加。
+        out: dict[str, list[str]] = {}
+        for r in rows:
+            body = r["body"] or ""
+            if not body:
+                continue
+            bucket = out.setdefault(r["job_id"], [])
+            if r["note_type"] == "smart":
+                bucket.insert(0, body)
+            else:
+                bucket.append(body)
+        return {jid: "\n\n".join(parts) for jid, parts in out.items() if parts}
+
     # ── Private ──
 
     def _row_to_glossary(self, row: sqlite3.Row) -> dict:

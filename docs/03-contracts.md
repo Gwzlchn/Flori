@@ -1106,6 +1106,39 @@ Response `200`（`note_type` 区分命中的是哪类笔记，如 `smart`/`mecha
 }
 ```
 
+#### POST /api/ask — 跨源综合问答（Cross-Source Synthesis Q&A）
+
+自然语言提问 → 跨语料检索相关笔记 → LLM 综合出**带引用**的答案，内联标注 `[来源N]`、并附「共识 / 分歧」段。需 `verify_token`。
+
+**检索缓解**：底层只有 FTS5 `trigram` 检索，且 `search_notes` 把整条查询当一个带引号字面短语匹配（自然语言整句几乎不可能命中）。故服务端先把问句**拆词**（去停用词/标点，CJK 连续串做 2–4 字滑窗，ascii 词保留）并叠加**术语表里出现在问句中的术语**，得到一组（≤6）派生查询，分别打 FTS 后**并集去重**（保留最佳 rank），取前 `limit` 篇，批量拉取整段正文（每段截断 ~4000 字）喂给 LLM。综合走 `claude-cli` 订阅。
+
+请求体：
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| `question` | （必填，≥1 字） | 自然语言问题 |
+| `domain` | `null` | 限定知识库（domain）；`null`=全库 |
+| `limit` | 8 | 检索并喂给 LLM 的最大笔记数（1–20） |
+
+```bash
+curl -X POST http://localhost:8000/api/ask -H 'Content-Type: application/json' \
+  -d '{"question":"反向传播和梯度下降有什么区别？","domain":"deep-learning"}'
+```
+
+Response `200`（`answer_markdown` 内 `[来源N]` 与 `sources` 数组下标 +1 对应；命中为 0 时返回固定提示文案、`sources:[]`、不调 LLM）：
+```json
+{
+  "question": "反向传播和梯度下降有什么区别？",
+  "answer_markdown": "反向传播用于计算梯度 [来源1]……\n\n## 共识 / 分歧\n各来源一致认为……",
+  "sources": [
+    {"job_id": "j_bp", "title": "反向传播详解", "domain": "deep-learning", "content_type": "video"}
+  ],
+  "retrieved_count": 1
+}
+```
+
+每次实际调用 LLM 会记一条 `ai_usage`（`step=synthesis`，`exec_id=ask-<uuid>`，成本归因同 runner：claude-cli 用订阅等价成本，其它 provider 用 LiteLLM 价表覆盖）。
+
 ### 1.12 Profile 管理（`/api/profiles/*`）
 
 每个 domain 一个 `prompts/profiles/{domain}.yaml`，承载该领域的角色设定/输出风格/术语表（`terminology`），供生成笔记时注入 prompt。术语库采纳一条术语时会同步写入对应 Profile 的 `terminology`。
