@@ -1368,6 +1368,36 @@ class Database:
             "concepts": concepts,
         }
 
+    def concept_occurrence_dates(self, domain: str) -> dict[str, list[str]]:
+        """概念趋势雷达基础数据:该 domain 各概念的每条 occurrence 经 job_id→源内容时间映射,
+        返回 {term: [iso_date, ...]}(每个 occurrence 一个时间点,可重复)。时间口径与 concept_timeline
+        一致:COALESCE(published_at, created_at)(「这个概念在世界上何时出现」,无发布时间回退入库时间)。
+        无映射到时间的 occurrence 略过(不计入)。供 radar 服务按窗口切片算飙升/新出现,纯数据无业务策略。"""
+        job_dates = {
+            r["id"]: r["bucket_at"]
+            for r in self._conn.execute(
+                "SELECT id, COALESCE(published_at, created_at) AS bucket_at "
+                "FROM jobs WHERE domain=?",
+                (domain,),
+            )
+        }
+        out: dict[str, list[str]] = {}
+        rows = self._conn.execute(
+            "SELECT term, occurrences FROM glossary WHERE domain=?", (domain,)
+        ).fetchall()
+        for r in rows:
+            try:
+                occs = json.loads(r["occurrences"] or "[]")
+            except (ValueError, TypeError):
+                occs = []
+            dates: list[str] = []
+            for o in occs if isinstance(occs, list) else []:
+                d = job_dates.get(o.get("job_id")) if isinstance(o, dict) else None
+                if d:
+                    dates.append(d)
+            out[r["term"]] = dates
+        return out
+
     def domain_topics(self, domain: str) -> list[dict]:
         """领域内主题(可浏览标签) = 该 domain 所有 job 的 style_tags distinct + 计数。"""
         from collections import Counter

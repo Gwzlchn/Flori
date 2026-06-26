@@ -7,6 +7,7 @@ const router = createRouter({
   routes: [
     { path: '/', name: 'knowledge-bases', component: () => import('../views/HomeView.vue') },
     { path: '/kb/:domain', name: 'knowledge-base', component: () => import('../views/DomainWorkspaceView.vue') },
+    { path: '/kb/:domain/radar', name: 'knowledge-radar', component: () => import('../views/RadarView.vue') },
     { path: '/kb/:domain/concepts/:term', name: 'concept-detail', component: () => import('../views/TermDetailView.vue') },
     { path: '/kb/:domain/topics/:topic', name: 'topic', component: () => import('../views/TopicView.vue') },
 

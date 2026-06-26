@@ -12,7 +12,7 @@ import { contentTypeIcon, contentTypePill } from '../utils/contentType'
 import {
   SlidersHorizontal, RefreshCw, Folder, Lightbulb, BarChart3,
   Plus, Settings2, Rss, Inbox, ChevronRight, Sparkles, Bookmark,
-  Star,
+  Star, Radar,
   Cpu, Atom, Dna, Code, Database, Globe, FlaskConical, BookOpen,
   Brain, Calculator, Scale, Languages, Music, Palette, Leaf, Rocket,
 } from 'lucide-vue-next'
@@ -163,7 +163,11 @@ function onProfileSaved() {
           <template v-if="stats.last_active_at"> · {{ fmtDateTime(stats.last_active_at) }} 活跃</template>
         </div>
       </div>
-      <button class="btn sm" style="margin-left:auto" @click="showProfile = true">
+      <button class="btn sm" style="margin-left:auto"
+        @click="router.push(`/kb/${encodeURIComponent(domain)}/radar`)">
+        <Radar :size="13" />雷达/周报
+      </button>
+      <button class="btn sm" @click="showProfile = true">
         <SlidersHorizontal :size="13" />知识库设定
       </button>
       <button class="btn sm" @click="load">

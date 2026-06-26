@@ -935,6 +935,57 @@ Response `200`：
 
 `buckets` = 出现过的桶（升序）；`totals` = 每桶的跨概念总计；`concepts` 按 `total` 降序，每项 `buckets` 为该概念各桶计数。
 
+#### GET /api/domains/{domain}/radar — 概念趋势雷达（本周知识雷达）
+
+对比「最近 `window_days` 天」与「紧邻其前的同长窗口」，算出该领域近期的概念热度变化与新增内容，供「雷达/周报」页快速加载（**不调 LLM**）。概念出现时间口径与 concept-timeline 一致：`occurrences[*].job_id` → `job` 的 `COALESCE(published_at, created_at)`。`window_days`：默认 `7`，范围 `1..90`，越界 `422`。窗口为半开区间 `recent = [now-window_days, now)`、`prior = [now-2*window_days, now-window_days)`。空领域返回各空数组（不 404）。
+
+```
+GET /api/domains/finance/radar?window_days=7
+```
+
+Response `200`：
+
+```json
+{
+  "domain": "finance",
+  "rising_concepts": [
+    {"term": "量化交易", "recent": 3, "prior": 1, "delta": 2}
+  ],
+  "new_concepts": [
+    {"term": "JEPQ", "definition": "主动型高股息 ETF", "first_seen": "2026-06-22T00:00:00+00:00"}
+  ],
+  "recent_jobs": [
+    {"job_id": "r1", "title": "量化交易入门", "published_at": "2026-06-22T00:00:00+00:00", "content_type": "video"}
+  ],
+  "top_recent_concepts": [
+    {"term": "量化交易", "recent": 3}
+  ],
+  "window": {"days": 7, "since": "2026-06-19T...", "until": "2026-06-26T..."}
+}
+```
+
+- `rising_concepts`：最近窗口出现次数 > 前窗口的概念，按 `delta` 降序。
+- `new_concepts`：最早一次出现落在最近窗口内的概念（按 `first_seen` 降序）。
+- `recent_jobs`：时间落在最近窗口内的内容（按时间降序）。
+- `top_recent_concepts`：最近窗口出现最多的概念（最多 10 个）。
+
+#### POST /api/domains/{domain}/digest — 本周摘要（按需调 LLM）
+
+先算同款雷达，再把结果 + 最近内容标题喂给 LLM（`digest` 步，走 `claude-cli` 订阅）生成一段中文周报（本周在聊什么 / 新概念 / 热点），并记一条 `AIUsage`（`step=digest`、`worker_id=api`、`job_id=null`、`exec_id=digest-{domain}-{rand}`，按价表/订阅成本归因）。与 GET radar 分离：页面先秒开雷达，用户点「生成本周摘要」再触发本端点。`window_days` 同 radar（`1..90`，越界 `422`）。
+
+```
+POST /api/domains/finance/digest?window_days=7
+```
+
+Response `200`：
+
+```json
+{
+  "markdown": "## 本周摘要\n本周聚焦量化交易……",
+  "window": {"days": 7, "since": "2026-06-19T...", "until": "2026-06-26T..."}
+}
+```
+
 ### 1.10 术语库 / 概念图
 
 > 按 `domain` 维度维护的术语表。术语有两种来源：AI 抽取步骤自动采集（落 `status=suggested` 候选）、用户手动新增（直接 `accepted`）。`accepted` 的术语会同步进对应 domain 的 `Profile.terminology`，供后续 AI 步骤复用。`is_topic` 标记主题概念，用于概念图。主键为 `(domain, term)`。

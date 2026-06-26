@@ -149,7 +149,7 @@ def create_app(
 
     from api.routes import (
         jobs, notes, workers, ws, auth, admin, profiles, runner, bili,
-        collections, search, glossary, domains, mcp,
+        collections, search, glossary, domains, mcp, radar,
     )
     app.include_router(jobs.router)
     app.include_router(jobs.providers_router)
@@ -166,6 +166,7 @@ def create_app(
     app.include_router(search.router)
     app.include_router(glossary.router)
     app.include_router(mcp.router)
+    app.include_router(radar.router)
 
     return app
 
