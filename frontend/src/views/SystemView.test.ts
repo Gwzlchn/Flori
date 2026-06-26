@@ -140,7 +140,8 @@ describe('SystemView', () => {
       ],
     })
     await flushPromises()
-    const metrics = w.findAll('.metric .v').map(n => n.text())
+    // 概览统一网格:KPI 与系统状态同为 .st-cell/.st-val(前 4 格 = KPI)。
+    const metrics = w.findAll('.statgrid .st-cell .st-val').map(n => n.text())
     expect(metrics[0]).toBe('2 / 3')   // 在线/共
     expect(metrics[1]).toBe('1')       // 忙碌
     expect(metrics[2]).toBe('3')       // 待处理(jobs.pending)
