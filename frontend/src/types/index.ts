@@ -401,6 +401,21 @@ export interface SearchResponse {
   items: SearchResultItem[]
 }
 
+// 跨源综合问答(POST /api/ask):答案 markdown + 引用来源列表。
+export interface AskSource {
+  job_id: string
+  title: string
+  domain: string
+  content_type: string
+}
+
+export interface AskResponse {
+  question: string
+  answer_markdown: string
+  sources: AskSource[]
+  retrieved_count: number
+}
+
 export interface WsEvent {
   event: string
   step?: string

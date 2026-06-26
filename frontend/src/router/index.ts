@@ -17,6 +17,7 @@ const router = createRouter({
     { path: '/collections/:id', name: 'collection-detail', component: () => import('../views/CollectionDetailView.vue') },
 
     { path: '/search', name: 'search', component: () => import('../views/SearchView.vue') },
+    { path: '/ask', name: 'ask', component: () => import('../views/AskView.vue') },
     { path: '/glossary', name: 'glossary', component: () => import('../views/GlossaryView.vue') },
 
     { path: '/system', name: 'system', component: () => import('../views/SystemView.vue') },
