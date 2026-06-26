@@ -5,7 +5,7 @@ import { useApi } from '../composables/useApi'
 import StatusBadge from '../components/common/StatusBadge.vue'
 import type { GlossaryTerm } from '../types'
 import {
-  Lightbulb, Plus, Sparkles, CheckCircle2, Check, X, Pencil, Trash2, Bookmark,
+  Lightbulb, Plus, Sparkles, CheckCircle2, Check, X, Pencil, Trash2, Bookmark, Share2,
 } from 'lucide-vue-next'
 
 // 概念库（原型 #glossary）：AI 提取候选概念，采纳后沉淀为可检索知识节点。
@@ -190,7 +190,13 @@ onMounted(loadTerms)
         <option value="suggested">候选</option>
         <option value="accepted">已采纳</option>
       </select>
-      <button class="btn pri" style="margin-left:auto" @click="openAdd"><Plus :size="14" />新增概念</button>
+      <button
+        v-if="filterDomain"
+        class="btn sm"
+        style="margin-left:auto"
+        @click="router.push(`/kb/${encodeURIComponent(filterDomain)}?tab=graph`)"
+      ><Share2 :size="14" />查看图谱</button>
+      <button class="btn pri" :style="filterDomain ? {} : { marginLeft: 'auto' }" @click="openAdd"><Plus :size="14" />新增概念</button>
     </div>
 
     <!-- 加载态 -->

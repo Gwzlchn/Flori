@@ -4,6 +4,7 @@
 - GET  /api/domains/{d}        领域工作台聚合(集合/最近内容/术语/主题)
 - GET  /api/domains/{d}/topic-concepts   领域主题概念
 - GET  /api/domains/{d}/concept-timeline 领域概念时间线
+- GET  /api/domains/{d}/concept-graph    领域概念图谱(共现网络)
 - GET  /api/domains/{d}/terms/{term}     术语详情
 - GET  /api/domains/{d}/topics/{topic}   主题页(域内带该标签的内容)
 """
@@ -20,6 +21,7 @@ from shared.config import AppConfig
 from shared.db import Database
 from api.deps import get_config, get_db, validate_path_segment, verify_token
 from api.schemas import DomainCreateRequest, DomainRenameRequest, GlossaryTermResponse
+from api.services import kb
 
 router = APIRouter(prefix="/api/domains", tags=["domains"], dependencies=[Depends(verify_token)])
 
@@ -226,6 +228,17 @@ async def concept_timeline(
     """概念时间线：各概念 occurrences 经 job 创建时间分桶计数(day/week/month)。空领域返回空序列。"""
     validate_path_segment(domain, "domain")
     return await asyncio.to_thread(db.concept_timeline, domain, granularity)
+
+
+@router.get("/{domain}/concept-graph")
+async def concept_graph(
+    domain: str,
+    db: Database = Depends(get_db),
+):
+    """概念图谱：节点=概念，边=共现(两概念引用同一 job_id)，权重=共享 job 数；叠加手动 related。
+    返回 {nodes, edges, stats}。空领域返回空节点/边与零计数。逻辑在 api.services.kb(单一来源)。"""
+    validate_path_segment(domain, "domain")
+    return await asyncio.to_thread(kb.concept_graph, db, domain)
 
 
 @router.get("/{domain}/terms/{term}", response_model=GlossaryTermResponse)

@@ -39,7 +39,7 @@ function ws(over: Partial<any> = {}) {
   }
 }
 
-const STUBS = { ProfileEditor: true, ConceptTimeline: true, StatusBadge: true }
+const STUBS = { ProfileEditor: true, ConceptTimeline: true, ConceptGraph: true, StatusBadge: true }
 
 async function mountView() {
   const w = mount(DomainWorkspaceView, { global: { stubs: STUBS } })

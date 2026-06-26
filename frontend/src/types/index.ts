@@ -327,6 +327,26 @@ export interface ConceptTimeline {
   concepts: { term: string; buckets: Record<string, number>; total: number }[]
 }
 
+// 概念图谱:节点=概念,边=共现(两概念引用同一 job)。后端 GET /api/domains/{d}/concept-graph。
+export interface ConceptGraphNode {
+  id: string
+  term: string
+  definition: string          // 短定义(首句/截断)
+  status: string              // 'suggested' | 'accepted'
+  is_topic: boolean
+  occurrence_count: number
+}
+export interface ConceptGraphEdge {
+  source: string              // term
+  target: string              // term
+  weight: number              // 共享 job 数
+}
+export interface ConceptGraph {
+  nodes: ConceptGraphNode[]
+  edges: ConceptGraphEdge[]
+  stats: { node_count: number; edge_count: number; isolated_count: number }
+}
+
 // 集合的订阅源（自动追更）。无订阅则为 null。同步/开关端点用集合自身 id。
 export interface CollectionSubscription {
   source_type: string        // bilibili_up/fav/collection · youtube_channel · rss · local_dir

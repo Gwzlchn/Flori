@@ -5,12 +5,13 @@ import { useDomainStore } from '../stores/domains'
 import StatusBadge from '../components/common/StatusBadge.vue'
 import ProfileEditor from '../components/settings/ProfileEditor.vue'
 import ConceptTimeline from '../components/ConceptTimeline.vue'
+import ConceptGraph from '../components/concept/ConceptGraph.vue'
 import { fmtDateTime } from '../utils/datetime'
 import type { JobSummary } from '../types'
 import { resolveIcon } from '../utils/kbIcons'
 import { contentTypeIcon, contentTypePill } from '../utils/contentType'
 import {
-  SlidersHorizontal, RefreshCw, Folder, Lightbulb, BarChart3,
+  SlidersHorizontal, RefreshCw, Folder, Lightbulb, BarChart3, Share2,
   Plus, Settings2, Rss, Inbox, ChevronRight, Sparkles, Bookmark,
   Star,
   Cpu, Atom, Dna, Code, Database, Globe, FlaskConical, BookOpen,
@@ -69,7 +70,7 @@ const domain = computed(() => String(route.params.domain))
 const data = ref<Workspace | null>(null)
 const loading = ref(false)
 const error = ref('')
-const tab = ref<'content' | 'concept' | 'timeline'>('content')
+const tab = ref<'content' | 'concept' | 'timeline' | 'graph'>('content')
 const showProfile = ref(false)
 
 // ── 身份图标 + 色块：优先用工作台 stats 的 icon/color/display_name，缺失才回退按名哈希（与总览页一致） ──
@@ -127,8 +128,16 @@ async function load() {
   }
 }
 
-onMounted(load)
+// 支持深链 ?tab=graph(如概念库「查看图谱」入口);仅接受已知 tab 值,否则默认内容。
+const _TABS = ['content', 'concept', 'timeline', 'graph'] as const
+function initTabFromQuery() {
+  const q = String(route.query.tab ?? '')
+  if ((_TABS as readonly string[]).includes(q)) tab.value = q as typeof tab.value
+}
+
+onMounted(() => { initTabFromQuery(); load() })
 watch(domain, load)
+watch(() => route.query.tab, initTabFromQuery)
 
 function goJob(id: string) {
   router.push(`/content/${id}`)
@@ -195,6 +204,9 @@ function onProfileSaved() {
         </button>
         <button :class="{ on: tab === 'timeline' }" @click="tab = 'timeline'">
           <BarChart3 :size="15" />时间线
+        </button>
+        <button :class="{ on: tab === 'graph' }" @click="tab = 'graph'">
+          <Share2 :size="15" />图谱
         </button>
       </div>
 
@@ -329,6 +341,11 @@ function onProfileSaved() {
       <!-- TAB 时间线（组件由集成方提供，仅 import + 使用） -->
       <div v-show="tab === 'timeline'">
         <ConceptTimeline :domain="domain" />
+      </div>
+
+      <!-- TAB 图谱（概念共现力导向网络） -->
+      <div v-show="tab === 'graph'">
+        <ConceptGraph :domain="domain" />
       </div>
     </template>
 

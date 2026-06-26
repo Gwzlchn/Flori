@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { useApi } from '../composables/useApi'
-import type { DomainOverview, TopicConcept, CreateDomainPayload, ConceptTimeline, TimelineGranularity } from '../types'
+import type { DomainOverview, TopicConcept, CreateDomainPayload, ConceptTimeline, TimelineGranularity, ConceptGraph } from '../types'
 
 // 领域 store：领域是派生视图（来自 jobs ∪ collections ∪ glossary 的 distinct domain）。
 export const useDomainStore = defineStore('domains', () => {
@@ -47,6 +47,11 @@ export const useDomainStore = defineStore('domains', () => {
     return api.get<ConceptTimeline>(`/api/domains/${encodeURIComponent(domain)}/concept-timeline?granularity=${granularity}`)
   }
 
+  // 概念图谱:节点=概念,边=共现(两概念引用同一 job),权重=共享 job 数。{nodes, edges, stats}。
+  async function conceptGraph(domain: string): Promise<ConceptGraph> {
+    return api.get<ConceptGraph>(`/api/domains/${encodeURIComponent(domain)}/concept-graph`)
+  }
+
   // 改知识库展示元数据(显示名/图标/配色),不改英文 domain key;改后刷新列表让侧栏即时更新。
   // 复用已有 PUT /api/profiles/{domain}(部分合并 display_name/icon/color,保留 terminology);
   // 不另开端点避免同一份 yaml meta 持久化两处分叉。空值经侧栏 display_name||domain / resolveIcon 回退。
@@ -68,5 +73,5 @@ export const useDomainStore = defineStore('domains', () => {
     return r.new
   }
 
-  return { domains, loading, fetchAll, workspace, term, topic, topicConcepts, create, conceptTimeline, updateMeta, renameKey }
+  return { domains, loading, fetchAll, workspace, term, topic, topicConcepts, create, conceptTimeline, conceptGraph, updateMeta, renameKey }
 })

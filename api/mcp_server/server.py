@@ -226,6 +226,23 @@ def build_server(
         log.info("mcp.concept_timeline", domain=domain, granularity=granularity)
         return res
 
+    @mcp.tool()
+    def concept_graph(domain: str) -> dict:
+        """某库概念图谱:节点=概念,边=共现(两概念引用同一 job_id),权重=共享 job 数,叠加手动 related。
+
+        - domain 必填。返回 {nodes:[{id,term,definition,status,is_topic,occurrence_count}],
+          edges:[{source,target,weight}], stats:{node_count,edge_count,isolated_count}}。
+        - 看「这个库的概念彼此如何关联/聚成哪些簇」;孤立概念(无共现)仍作节点保留。
+        """
+        sc = scope_domain()
+        if sc is not None:
+            domain = sc  # 作用域端点:锁定该库,忽略入参 domain
+        res = kb.concept_graph(db, domain)
+        _record_call("concept_graph")
+        log.info("mcp.concept_graph", domain=domain,
+                 nodes=res["stats"]["node_count"], edges=res["stats"]["edge_count"])
+        return res
+
     return mcp
 
 

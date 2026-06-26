@@ -110,6 +110,7 @@ class TestMcpServer:
         assert names == {
             "list_knowledge_bases", "search", "get_note",
             "list_collections", "get_glossary", "get_term", "concept_timeline",
+            "concept_graph",
         }
 
     @pytest.mark.asyncio
@@ -119,6 +120,21 @@ class TestMcpServer:
         result = await mcp.call_tool("search", {"query": "坐庄收割"})
         # FastMCP.call_tool 返回 (content_blocks, structured);命中的 j1 应出现在结果里
         assert result is not None and "j1" in str(result)
+
+    @pytest.mark.asyncio
+    async def test_concept_graph_tool(self, db, test_config):
+        # 两概念共现于同一 job → 一条权重 1 的边;委托 kb.concept_graph。
+        db.create_job(Job(id="jg", content_type="video", pipeline="video", domain="finance"))
+        db.add_glossary_suggestion("finance", "坐庄", "jg", "video")
+        db.add_glossary_suggestion("finance", "庄家", "jg", "video")
+        mcp = build_server(db, LocalStorage(test_config.jobs_dir))
+        # call_tool 返回 TextContent 块列表;首块 text 是工具返回 dict 的 JSON。
+        import json
+        blocks = await mcp.call_tool("concept_graph", {"domain": "finance"})
+        graph = json.loads(blocks[0].text)
+        assert graph["stats"]["node_count"] == 2
+        assert graph["stats"]["edge_count"] == 1
+        assert graph["edges"][0]["weight"] == 1
 
 
 def _structured(result):

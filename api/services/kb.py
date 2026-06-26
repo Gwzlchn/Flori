@@ -125,6 +125,107 @@ def concept_timeline(db: Database, domain: str, granularity: str = "month") -> d
     return db.concept_timeline(domain, granularity)
 
 
+def _short_definition(text: str | None, limit: int = 120) -> str:
+    """概念定义的简短形态(图谱节点/侧栏摘要):取首句,过长再按字符截断。
+
+    首句以中文/英文句末标点(。！？.!?)切分;无标点则整体按 limit 截断(超长补省略号)。
+    """
+    s = (text or "").strip()
+    if not s:
+        return ""
+    head = s
+    for i, ch in enumerate(s):
+        if ch in "。！？!?":
+            head = s[: i + 1]
+            break
+        if ch == "." and i + 1 < len(s) and s[i + 1] in " \t\n":
+            head = s[: i + 1]
+            break
+    head = head.strip()
+    if len(head) > limit:
+        head = head[:limit].rstrip() + "…"
+    return head
+
+
+def concept_graph(db: Database, domain: str) -> dict:
+    """某库「概念图谱」:节点=概念,边=共现(两概念的 occurrences 引用同一 job_id 即相连)。
+
+    单一来源:供 FastAPI 路由 / MCP 工具共用,避免共现推导逻辑两处分叉。
+
+    - 节点:{id, term, definition(短), status, is_topic, occurrence_count}。id=term(域内唯一)。
+    - 边(无向,去重):
+        * 共现边——按 job_id 倒排:同一 job 下出现的每对概念连一条,weight=两者共享的 job 数。
+        * 手动 related 叠加——把 related 里的术语名当额外边(实践中多为空)。同一对已有共现边则取权重较大者。
+      边按 (source, target) 字典序规范化方向,自连(同名)忽略,related 指向不存在的概念忽略。
+    - stats:{node_count, edge_count, isolated_count(度为 0 的节点数)}。
+    全程按 domain 作用域;孤立概念(无 occurrences/无共现)仍作为节点保留(度 0)。
+    """
+    terms = db.list_glossary(domain)
+
+    nodes: list[dict] = []
+    node_terms: set[str] = set()
+    # job_id -> 在该 job 中出现的概念名集合(共现倒排)。
+    by_job: dict[str, set[str]] = {}
+    for t in terms:
+        term = t["term"]
+        if term in node_terms:
+            continue
+        node_terms.add(term)
+        occs = t.get("occurrences") or []
+        occ_list = occs if isinstance(occs, list) else []
+        nodes.append({
+            "id": term,
+            "term": term,
+            "definition": _short_definition(t.get("definition")),
+            "status": t.get("status"),
+            "is_topic": bool(t.get("is_topic")),
+            "occurrence_count": len(occ_list),
+        })
+        for o in occ_list:
+            jid = (o or {}).get("job_id") if isinstance(o, dict) else None
+            if jid:
+                by_job.setdefault(jid, set()).add(term)
+
+    # 共现边:每个 job 下两两配对累加权重(= 共享 job 数)。键已字典序规范化方向。
+    weights: dict[tuple[str, str], int] = {}
+    for members in by_job.values():
+        ms = sorted(members)
+        for i in range(len(ms)):
+            for j in range(i + 1, len(ms)):
+                weights[(ms[i], ms[j])] = weights.get((ms[i], ms[j]), 0) + 1
+
+    # 手动 related 叠加:related 术语名当额外边(权重 1),已有共现边则保留较大权重。
+    for t in terms:
+        src = t["term"]
+        for rel in (t.get("related") or []):
+            if not isinstance(rel, str) or rel == src or rel not in node_terms:
+                continue
+            key = (src, rel) if src < rel else (rel, src)
+            weights[key] = max(weights.get(key, 0), 1)
+
+    edges = [
+        {"source": s, "target": tgt, "weight": w}
+        for (s, tgt), w in weights.items()
+    ]
+    edges.sort(key=lambda e: (-e["weight"], e["source"], e["target"]))
+
+    degree: dict[str, int] = {}
+    for e in edges:
+        degree[e["source"]] = degree.get(e["source"], 0) + 1
+        degree[e["target"]] = degree.get(e["target"], 0) + 1
+    isolated_count = sum(1 for n in nodes if degree.get(n["id"], 0) == 0)
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "stats": {
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "isolated_count": isolated_count,
+        },
+    }
+
+
 # ── 检索后端:可插拔(FtsSearch → 未来 VecSearch/HybridSearch)──
 
 

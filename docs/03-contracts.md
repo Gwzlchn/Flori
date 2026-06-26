@@ -935,6 +935,33 @@ Response `200`：
 
 `buckets` = 出现过的桶（升序）；`totals` = 每桶的跨概念总计；`concepts` 按 `total` 降序，每项 `buckets` 为该概念各桶计数。
 
+#### GET /api/domains/{domain}/concept-graph — 概念图谱（共现网络）
+
+把该领域的概念组织成力导向图，供工作台「图谱」视图。**节点 = 概念**；**边 = 共现**：两概念若其 `occurrences` 引用同一 `job_id` 即相连，`weight` = 两者共享的 `job_id` 数。手动维护的 `related`（术语名列表，实践中多为空）叠加为额外边（权重 1；与已有共现边同一对时取较大权重）。指向不存在概念的 `related` 项忽略，自连忽略。孤立概念（无共现）仍作为节点保留（度 0）。全程按 `domain` 作用域。空领域返回空 `nodes`/`edges` 与零计数（不 404）。逻辑在 `api/services/kb.py:concept_graph`（单一来源，REST 与 MCP 工具共用）。
+
+```
+GET /api/domains/finance/concept-graph
+```
+
+Response `200`：
+
+```json
+{
+  "nodes": [
+    {"id": "通胀", "term": "通胀", "definition": "物价普涨。", "status": "accepted", "is_topic": true, "occurrence_count": 3},
+    {"id": "利率", "term": "利率", "definition": "资金的价格。", "status": "accepted", "is_topic": false, "occurrence_count": 2}
+  ],
+  "edges": [
+    {"source": "通胀", "target": "利率", "weight": 2}
+  ],
+  "stats": {"node_count": 2, "edge_count": 1, "isolated_count": 0}
+}
+```
+
+- `nodes[].id` = `term`（领域内唯一）。`definition` 为短定义（首句或截断，便于节点 tooltip/侧栏）。`occurrence_count` = 该概念出现处数（节点大小 ∝ 此值）。`status` ∈ `suggested`/`accepted`，`is_topic` 标主题。
+- `edges` 无向且去重，`(source, target)` 按字典序规范化方向，按 `weight` 降序、再按术语名排序。
+- `stats.isolated_count` = 度为 0 的节点数。
+
 ### 1.10 术语库 / 概念图
 
 > 按 `domain` 维度维护的术语表。术语有两种来源：AI 抽取步骤自动采集（落 `status=suggested` 候选）、用户手动新增（直接 `accepted`）。`accepted` 的术语会同步进对应 domain 的 `Profile.terminology`，供后续 AI 步骤复用。`is_topic` 标记主题概念，用于概念图。主键为 `(domain, term)`。
@@ -1754,6 +1781,8 @@ v2(未做):写工具(submit);sqlite-vec 语义后端。
   —— 单条术语详情(定义+出处+相关);未命中 null。
 - **`concept_timeline(domain, granularity?=month)`** → `{domain, granularity, ...buckets}`
   —— 概念按源内容发布时间分桶计数;`granularity`=day|week|month。
+- **`concept_graph(domain)`** → `{nodes:[{id,term,definition,status,is_topic,occurrence_count}], edges:[{source,target,weight}], stats:{node_count,edge_count,isolated_count}}`
+  —— 概念共现网络:边=两概念引用同一 job,权重=共享 job 数,叠加手动 related;孤立概念仍作节点。等价于 REST `GET /api/domains/{domain}/concept-graph`。
 
 ### 迭代约定(新增工具)
 service 函数(单一来源)→ `@mcp.tool()` 薄包(写好面向 LLM 的 docstring)→ pytest 集成(进 CI)→ 本节同提交更新(`contract:`)→
