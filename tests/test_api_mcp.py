@@ -17,7 +17,8 @@ class TestMcpInfo:
         d = r.json()
         assert d["enabled"] is True
         assert d["http_path"] == "/mcp"
-        assert d["stdio_module"] == "api.mcp_server"
+        # 统一走 HTTP:本地端点直连 mcp-http(127.0.0.1:<MCP_PORT>/mcp),不再有 stdio_module。
+        assert d["local_url"].startswith("http://127.0.0.1:") and d["local_url"].endswith("/mcp")
         names = {t["name"] for t in d["tools"]}
         assert {"list_knowledge_bases", "search", "get_note"} <= names
         # 描述非空(取 docstring 首行)

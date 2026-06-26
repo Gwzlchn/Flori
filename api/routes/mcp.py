@@ -48,7 +48,8 @@ async def mcp_info(
     return {
         "enabled": True,
         "http_path": "/mcp",  # 公网端点 = <当前站点 origin> + 此路径(前端据 window.location 拼)
-        "stdio_module": "api.mcp_server",  # 本地 stdio:python -m <此>
+        # 本地同机直连 mcp-http(streamable-http)——与公网统一走 HTTP,不再用 stdio。port 取 MCP_PORT(默认 8090)。
+        "local_url": f"http://127.0.0.1:{os.environ.get('MCP_PORT', '8090')}/mcp",
         "token_configured": bool(os.environ.get("FLORI_MCP_TOKEN")),
         "tools": [
             {"name": t.name, "description": (t.description or "").strip().splitlines()[0]}

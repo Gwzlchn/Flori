@@ -10,7 +10,7 @@ import McpConnectCard from './McpConnectCard.vue'
 const INFO = {
   enabled: true,
   http_path: '/mcp',
-  stdio_module: 'api.mcp_server',
+  local_url: 'http://127.0.0.1:8090/mcp',
   token_configured: true,
   tools: [
     { name: 'list_knowledge_bases', description: '列出知识库' },
@@ -38,25 +38,26 @@ beforeEach(() => {
 })
 
 describe('McpConnectCard', () => {
-  it('渲染工具清单 + 默认本地 tab 命令 + token 遮掩', async () => {
+  it('渲染工具清单 + 默认本地 tab(HTTP 本地端点) + token 遮掩', async () => {
     const w = mountCard()
     await flushPromises()
     expect(w.text()).toContain('接入 MCP')
     expect(w.text()).toContain('list_knowledge_bases')
     expect(w.text()).toContain('get_note')
-    expect(w.text()).toContain('claude mcp add -s user flori') // 本地 stdio
+    expect(w.text()).toContain('--transport http') // 统一走 HTTP
+    expect(w.text()).toContain('http://127.0.0.1:8090/mcp') // 本地端点
     expect(w.text()).toContain('••••') // token 默认遮掩
     expect(w.text()).not.toContain('flori-mcp-faketoken')
   })
 
-  it('切到公网 tab 显示 HTTP 接法(transport http + curl)', async () => {
+  it('切到公网 tab 切换到公网端点(仍 HTTP + curl,不再显示本地 127.0.0.1)', async () => {
     const w = mountCard()
     await flushPromises()
     const httpTab = w.findAll('.seg button').find((b) => b.text().includes('公网'))
     await httpTab!.trigger('click')
     expect(w.text()).toContain('--transport http')
-    expect(w.text()).toContain('/mcp')
     expect(w.text()).toContain('curl')
+    expect(w.text()).not.toContain('127.0.0.1:8090')
   })
 
   it('点击「显示/复制」取回并展示 token', async () => {

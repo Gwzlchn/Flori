@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 系统页「接入 MCP」卡片:把知识库作为 MCP 提供给 agent。
-// 本地(stdio)/公网(HTTP)两种接法的命令片段 + 工具清单 + token(默认遮掩,点击显示/复制)。
+// 统一走 HTTP(streamable-http + Bearer token):本地连 127.0.0.1:8090/mcp、公网连 <origin>/mcp,仅 URL 不同。
+// 工具清单 + token(默认遮掩,点击显示/复制)。
 // 信息来自 GET /api/mcp/info(工具实时派生);token 明文经 GET /api/mcp/token 按需取。
 import { ref, computed, onMounted, inject } from 'vue'
 import { Boxes, Copy, Check, Key, Eye, EyeOff } from 'lucide-vue-next'
@@ -11,7 +12,7 @@ interface McpStats { total: number; by_tool: Record<string, number> }
 interface McpInfo {
   enabled: boolean
   http_path: string
-  stdio_module: string
+  local_url: string
   token_configured: boolean
   tools: McpTool[]
   stats?: McpStats
@@ -40,6 +41,9 @@ const endpoint = computed(() => {
   const base = origin && origin.startsWith('http') ? origin : 'https://<FLORI_HOST>'
   return base + (info.value?.http_path || '/mcp')
 })
+// 本地端点(同机直连 mcp-http);当前 tab 决定用本地还是公网 URL。
+const localEndpoint = computed(() => info.value?.local_url || 'http://127.0.0.1:8090/mcp')
+const curEndpoint = computed(() => (activeTab.value === 'local' ? localEndpoint.value : endpoint.value))
 const tokenShown = computed(() => revealed.value || '<TOKEN>')
 
 // 调用统计:总调用 + 按工具(取调用过的、按次数降序的前几条;subtle)。
@@ -50,12 +54,11 @@ const statsByTool = computed(() =>
     .sort((a, b) => b[1] - a[1]),
 )
 
-const localCmd = 'claude mcp add -s user flori -- /home/zelin/.local/bin/flori-mcp-docker.sh'
 const httpAddCmd = computed(
-  () => `claude mcp add --transport http flori ${endpoint.value} --header "Authorization: Bearer ${tokenShown.value}"`,
+  () => `claude mcp add --transport http flori ${curEndpoint.value} --header "Authorization: Bearer ${tokenShown.value}"`,
 )
 const curlCmd = computed(
-  () => `curl -k -X POST ${endpoint.value} \\
+  () => `curl -X POST ${curEndpoint.value} \\
   -H "Authorization: Bearer ${tokenShown.value}" \\
   -H "Accept: application/json, text/event-stream" \\
   -H "Content-Type: application/json" \\
@@ -103,30 +106,24 @@ async function toggleReveal() {
     <p v-if="loading" class="note-tip" style="margin:12px 0 0">加载中…</p>
     <template v-else-if="info">
       <div class="seg" style="margin:12px 0">
-        <button :class="{ on: activeTab === 'local' }" @click="activeTab = 'local'">本地(stdio)</button>
-        <button :class="{ on: activeTab === 'http' }" @click="activeTab = 'http'">公网(HTTP)</button>
+        <button :class="{ on: activeTab === 'local' }" @click="activeTab = 'local'">本地</button>
+        <button :class="{ on: activeTab === 'http' }" @click="activeTab = 'http'">公网</button>
       </div>
 
-      <template v-if="activeTab === 'local'">
-        <p class="note-tip" style="margin:0 0 8px">同机 agent(如本机 Claude Code):连本机活栈(DB+MinIO)。加完<b>重启 claude 会话</b>即可让 agent 用 flori 工具搜你的知识库。</p>
-        <pre class="mcp-snip">{{ localCmd }}</pre>
-        <button class="btn sm" style="margin-top:10px" @click="copy(localCmd, 'local')">
-          <component :is="copied === 'local' ? Check : Copy" :size="13" />{{ copied === 'local' ? '已复制' : '复制' }}
-        </button>
-      </template>
-
-      <template v-else>
-        <p class="note-tip" style="margin:0 0 8px">端点 <code class="mono">{{ endpoint }}</code>(streamable-http,需 Bearer token)。把 &lt;TOKEN&gt; 换成下方真实 token(或先点「显示/复制」自动带入)。</p>
-        <pre class="mcp-snip">{{ httpAddCmd }}</pre>
-        <button class="btn sm" style="margin-top:10px" @click="copy(httpAddCmd, 'add')">
-          <component :is="copied === 'add' ? Check : Copy" :size="13" />{{ copied === 'add' ? '已复制' : '复制' }}
-        </button>
-        <p class="note-tip" style="margin:12px 0 8px">原始 curl(initialize 握手):</p>
-        <pre class="mcp-snip">{{ curlCmd }}</pre>
-        <button class="btn sm" style="margin-top:10px" @click="copy(curlCmd, 'curl')">
-          <component :is="copied === 'curl' ? Check : Copy" :size="13" />{{ copied === 'curl' ? '已复制' : '复制' }}
-        </button>
-      </template>
+      <p class="note-tip" style="margin:0 0 8px">
+        <template v-if="activeTab === 'local'">同机 agent(如本机 Claude Code)直连本机 MCP 服务。</template>
+        <template v-else>外网 agent 经公网域名接入(Caddy 反代 + Bearer)。</template>
+        端点 <code class="mono">{{ curEndpoint }}</code>(streamable-http,需 Bearer token)。把 &lt;TOKEN&gt; 换成下方真实 token(或先点「显示/复制」自动带入)。
+      </p>
+      <pre class="mcp-snip">{{ httpAddCmd }}</pre>
+      <button class="btn sm" style="margin-top:10px" @click="copy(httpAddCmd, 'add')">
+        <component :is="copied === 'add' ? Check : Copy" :size="13" />{{ copied === 'add' ? '已复制' : '复制' }}
+      </button>
+      <p class="note-tip" style="margin:12px 0 8px">原始 curl(initialize 握手):</p>
+      <pre class="mcp-snip">{{ curlCmd }}</pre>
+      <button class="btn sm" style="margin-top:10px" @click="copy(curlCmd, 'curl')">
+        <component :is="copied === 'curl' ? Check : Copy" :size="13" />{{ copied === 'curl' ? '已复制' : '复制' }}
+      </button>
 
       <div style="margin-top:14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <Key :size="14" /><span style="font-size:13px">Bearer token</span>
