@@ -219,10 +219,27 @@ function focusTerm(term: string) {
   }
 }
 
-onMounted(load)
+// vis-network 在 tab 隐藏(v-show display:none)时初始化会得到 0×0 画布;容器从隐藏变可见后
+// autoResize 不一定触发。用 ResizeObserver:容器拿到真实尺寸时强制 setSize+redraw+fit,保证显隐切换都画。
+let ro: ResizeObserver | null = null
+function refit() {
+  const el = containerEl.value
+  if (!network || !el) return
+  const w = el.clientWidth, h = el.clientHeight
+  if (w > 0 && h > 0) {
+    try { network.setSize(`${w}px`, `${h}px`); network.redraw(); network.fit() } catch { /* noop */ }
+  }
+}
+onMounted(async () => {
+  await load()
+  if (typeof ResizeObserver !== 'undefined' && containerEl.value) {
+    ro = new ResizeObserver(() => refit())
+    ro.observe(containerEl.value)
+  }
+})
 watch(() => props.domain, load)
 watch([query, hideIsolated, statusFilter], applyFilter)
-onBeforeUnmount(() => { if (network) network.destroy() })
+onBeforeUnmount(() => { ro?.disconnect(); if (network) network.destroy() })
 
 // 图谱节点的点击/悬停发生在 canvas(vis-network),无 DOM 节点可触发 —— 暴露这些入口供
 // 测试驱动「点节点→开侧栏」,也便于父组件/集成代码以编程方式选中/聚焦概念。
