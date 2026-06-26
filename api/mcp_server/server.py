@@ -76,6 +76,47 @@ def build_server(
         log.info("mcp.get_note", job_id=job_id, has_md=bool(res.get("markdown")))
         return res
 
+    @mcp.tool()
+    def list_collections(domain: str | None = None) -> list[dict]:
+        """列出集合(内容分组/订阅来源);domain 可选限定某知识库。
+
+        返回 [{id, name, domain, job_count, 及订阅集合的 source_type/source_id/last_synced_at/last_sync_status}]。
+        """
+        res = kb.list_collections(db, domain)
+        log.info("mcp.list_collections", domain=domain, n=len(res))
+        return res
+
+    @mcp.tool()
+    def get_glossary(domain: str, status: str | None = None) -> list[dict]:
+        """列出某知识库的概念/术语表。
+
+        - domain 必填(来自 list_knowledge_bases);status 可选(如 accepted / review)。
+        - 返回 [{term, definition, status, is_topic, occurrence_count}]。要单条详情(出处/相关)用 get_term。
+        """
+        res = kb.get_glossary(db, domain, status)
+        log.info("mcp.get_glossary", domain=domain, n=len(res))
+        return res
+
+    @mcp.tool()
+    def get_term(domain: str, term: str) -> dict | None:
+        """取某库单条术语/概念详情(定义 + 出处 occurrences + 相关 related + 状态)。
+
+        - domain + term 必填(term 来自 get_glossary / search)。未命中返回 null。
+        """
+        res = kb.get_term(db, domain, term)
+        log.info("mcp.get_term", domain=domain, term=term, found=res is not None)
+        return res
+
+    @mcp.tool()
+    def concept_timeline(domain: str, granularity: str = "month") -> dict:
+        """某库概念时间线:概念按其源内容发布时间分桶计数,看「概念何时出现/演化」。
+
+        - domain 必填;granularity = day | week | month(默认 month)。
+        """
+        res = kb.concept_timeline(db, domain, granularity)
+        log.info("mcp.concept_timeline", domain=domain, granularity=granularity)
+        return res
+
     return mcp
 
 

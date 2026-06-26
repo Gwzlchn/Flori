@@ -69,6 +69,62 @@ async def get_note(db: Database, storage: StorageBackend, job_id: str) -> dict:
     }
 
 
+def list_collections(db: Database, domain: str | None = None) -> list[dict]:
+    """集合(内容分组)清单,可按 domain 过滤;归一为 agent 友好 compact dict。
+    订阅集合额外带 source_type/source_id/last_synced_at/last_sync_status。"""
+    out: list[dict] = []
+    for c in db.list_collections(domain):
+        d = {"id": c.id, "name": c.name, "domain": c.domain, "job_count": c.job_count}
+        if c.source_type and c.source_id:
+            d["source_type"] = c.source_type
+            d["source_id"] = c.source_id
+            d["last_synced_at"] = (
+                c.last_synced_at.isoformat() if c.last_synced_at else None
+            )
+            d["last_sync_status"] = c.last_sync_status
+        out.append(d)
+    return out
+
+
+def get_glossary(
+    db: Database, domain: str, status: str | None = None
+) -> list[dict]:
+    """某库概念/术语表(compact:term/definition/status/is_topic/occurrence_count)。
+    status 可选(如 accepted/review)。单条详情用 get_term。"""
+    return [
+        {
+            "term": t["term"],
+            "definition": t["definition"],
+            "status": t["status"],
+            "is_topic": t["is_topic"],
+            "occurrence_count": len(t.get("occurrences") or []),
+        }
+        for t in db.list_glossary(domain, status)
+    ]
+
+
+def get_term(db: Database, domain: str, term: str) -> dict | None:
+    """单条术语/概念详情(定义/出处 occurrences/相关 related/状态)。未命中返回 None。
+    去掉 datetime 等非 JSON 友好字段,保 agent 可直接消费。"""
+    t = db.get_glossary_term(domain, term)
+    if t is None:
+        return None
+    return {
+        "domain": t["domain"],
+        "term": t["term"],
+        "definition": t["definition"],
+        "status": t["status"],
+        "is_topic": t["is_topic"],
+        "occurrences": t.get("occurrences") or [],
+        "related": t.get("related") or [],
+    }
+
+
+def concept_timeline(db: Database, domain: str, granularity: str = "month") -> dict:
+    """某库概念时间线:概念按其源内容发布时间分桶计数。granularity=day|week|month。"""
+    return db.concept_timeline(domain, granularity)
+
+
 # ── 检索后端:可插拔(FtsSearch → 未来 VecSearch/HybridSearch)──
 
 

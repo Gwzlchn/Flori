@@ -27,6 +27,7 @@ def _seed(db):
                        "讲庄家如何坐庄收割散户的手法", domain="finance", collection_id="c1")
     db.index_job_notes("j2", "smart", "注意力机制",
                        "transformer 注意力机制详解", domain="deep-learning")
+    db.add_glossary_suggestion("finance", "坐庄", "j1", "review")
 
 
 class TestKbServices:
@@ -77,12 +78,39 @@ class TestKbServices:
             await kb.get_note(db, storage, "nope")
 
 
+class TestKbServicesV2:
+    def test_list_collections(self, db):
+        _seed(db)
+        cols = kb.list_collections(db, "finance")
+        assert cols and cols[0]["id"] == "c1"
+        assert cols[0]["source_type"] == "bilibili_up"  # 订阅集合带 source
+        assert kb.list_collections(db, "deep-learning") == []  # 该库无集合
+
+    def test_get_glossary_and_term(self, db):
+        _seed(db)
+        g = kb.get_glossary(db, "finance")
+        row = next(t for t in g if t["term"] == "坐庄")
+        assert set(row) == {"term", "definition", "status", "is_topic", "occurrence_count"}
+        assert row["occurrence_count"] >= 1
+        term = kb.get_term(db, "finance", "坐庄")
+        assert term and term["term"] == "坐庄" and "occurrences" in term
+        assert kb.get_term(db, "finance", "不存在的词") is None
+
+    def test_concept_timeline(self, db):
+        _seed(db)
+        tl = kb.concept_timeline(db, "finance", "month")
+        assert tl["granularity"] == "month"
+
+
 class TestMcpServer:
     @pytest.mark.asyncio
     async def test_tools_registered(self, db, test_config):
         mcp = build_server(db, LocalStorage(test_config.jobs_dir))
         names = {t.name for t in await mcp.list_tools()}
-        assert names == {"list_knowledge_bases", "search", "get_note"}
+        assert names == {
+            "list_knowledge_bases", "search", "get_note",
+            "list_collections", "get_glossary", "get_term", "concept_timeline",
+        }
 
     @pytest.mark.asyncio
     async def test_tool_delegates_to_service(self, db, test_config):
