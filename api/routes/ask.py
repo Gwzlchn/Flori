@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 
+import structlog
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
@@ -19,6 +20,8 @@ from shared.db import Database
 from shared.models import AIUsage
 from api.deps import get_config, get_db, verify_token
 from api.services import synthesis
+
+log = structlog.get_logger(__name__)
 
 router = APIRouter(
     prefix="/api", tags=["ask"],
@@ -116,9 +119,25 @@ async def ask(
             retrieved_count=0,
         )
 
+    sources = [
+        SourceItem(
+            job_id=p["job_id"], title=p["title"], domain=p["domain"], content_type=p["content_type"],
+        )
+        for p in passages
+    ]
+
     # gateway 可被测试经 app.state.synthesis_gateway 注入(假 gateway 返回固定 LLMResponse)。
     gateway = getattr(request.app.state, "synthesis_gateway", None) or _build_gateway(config)
-    resp = await synthesis.synthesize(gateway, req.question, passages)
+    try:
+        resp = await synthesis.synthesize(gateway, req.question, passages)
+    except Exception as e:  # LLM 不可用(未配凭证/调用失败)→ 优雅降级,不冒 5xx;仍回检索到的来源。
+        log.warning("ask_synthesis_failed", error=str(e))
+        return AskResponse(
+            question=req.question,
+            answer_markdown="⚠️ 综合服务暂不可用（LLM 未配置或调用失败），但已检索到下列相关笔记。",
+            sources=sources,
+            retrieved_count=len(passages),
+        )
 
     exec_id = f"ask-{uuid.uuid4().hex}"
     await asyncio.to_thread(_record_usage, request, db, resp, exec_id)
@@ -126,14 +145,6 @@ async def ask(
     return AskResponse(
         question=req.question,
         answer_markdown=resp.content,
-        sources=[
-            SourceItem(
-                job_id=p["job_id"],
-                title=p["title"],
-                domain=p["domain"],
-                content_type=p["content_type"],
-            )
-            for p in passages
-        ],
+        sources=sources,
         retrieved_count=len(passages),
     )

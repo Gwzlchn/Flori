@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 
+import structlog
 from fastapi import APIRouter, Depends, Query, Request
 
 from shared.ai_gateway import AIGateway
@@ -22,6 +23,8 @@ from api.deps import get_config, get_db, validate_path_segment, verify_token
 from api.services import radar as radar_service
 
 router = APIRouter(prefix="/api/domains", tags=["radar"], dependencies=[Depends(verify_token)])
+
+log = structlog.get_logger(__name__)
 
 
 @router.get("/{domain}/radar")
@@ -55,7 +58,14 @@ async def post_digest(
             "primary": {"provider": "claude-cli", "model": "subscription"},
         }}]},
     )
-    response = await radar_service.digest(gateway, radar_data, recent_titles)
+    try:
+        response = await radar_service.digest(gateway, radar_data, recent_titles)
+    except Exception as e:  # LLM 不可用→优雅降级,不冒 5xx;雷达数据走 GET 仍可看。
+        log.warning("digest_failed", domain=domain, error=str(e))
+        return {
+            "markdown": "⚠️ 周报生成暂不可用（LLM 未配置或调用失败）。雷达各板块见上方。",
+            "window": radar_data["window"],
+        }
 
     # 成本归因(镜像 runner.record_usage):exec_id 唯一去重,job_id=None(领域级,非单条内容)。
     usage = AIUsage(
