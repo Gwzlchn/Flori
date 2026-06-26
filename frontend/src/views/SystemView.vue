@@ -295,8 +295,13 @@ function loadText(w: Worker): string {
 }
 
 // ── ①健康条聚合（纯函数派生，§3）──
-// 近 1h 失败/掉线 → 进健康条「需关注」。事件流是历史,但近期窗口值得提醒;随 1h 窗口自动消退,不被旧失败刷屏。
-const recentJobFails = computed(() => throughput.value?.failed ?? 0)
+// 近 1h 失败/掉线 → 进健康条「需关注」。用【事件流口径】(与用户在事件区所见一致):
+// job_failed=步骤/任务失败事件(throughput_1h.failed 数的是 job 终态转换,与步骤失败事件不一致、会漏);
+// worker_cleaned/orphan_reclaimed=worker 掉线被清理 / 其任务被孤儿回收。随 1h 窗口自动消退,不被旧事件刷屏。
+const recentJobFails = computed(() => {
+  const cut = Date.now() - 3600_000
+  return events.value.filter(e => e.kind === 'job_failed' && e.ts * 1000 >= cut).length
+})
 const recentWorkerLost = computed(() => {
   const cut = Date.now() - 3600_000
   return events.value.filter(e => (e.kind === 'worker_cleaned' || e.kind === 'orphan_reclaimed') && e.ts * 1000 >= cut).length
