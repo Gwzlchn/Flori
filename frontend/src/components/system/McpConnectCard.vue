@@ -1,0 +1,158 @@
+<script setup lang="ts">
+// 系统页「接入 MCP」卡片:把知识库作为 MCP 提供给 agent。
+// 本地(stdio)/公网(HTTP)两种接法的命令片段 + 工具清单 + token(默认遮掩,点击显示/复制)。
+// 信息来自 GET /api/mcp/info(工具实时派生);token 明文经 GET /api/mcp/token 按需取。
+import { ref, computed, onMounted, inject } from 'vue'
+import { Boxes, Copy, Check, Key, Eye, EyeOff } from 'lucide-vue-next'
+import { useApi } from '../../composables/useApi'
+
+interface McpTool { name: string; description: string }
+interface McpInfo {
+  enabled: boolean
+  http_path: string
+  stdio_module: string
+  token_configured: boolean
+  tools: McpTool[]
+}
+
+const api = useApi()
+const showToast = inject<(m: string, t?: 'success' | 'error' | 'info') => void>('showToast', () => {})
+
+const info = ref<McpInfo | null>(null)
+const loading = ref(true)
+const activeTab = ref<'local' | 'http'>('local')
+const revealed = ref<string | null>(null) // 显示后的 token 明文(null=遮掩)
+
+onMounted(async () => {
+  try {
+    info.value = await api.get<McpInfo>('/api/mcp/info')
+  } catch {
+    /* 非致命:卡片只读,失败则不渲染内容 */
+  } finally {
+    loading.value = false
+  }
+})
+
+const endpoint = computed(() => {
+  const origin = typeof window !== 'undefined' ? window.location?.origin : ''
+  const base = origin && origin.startsWith('http') ? origin : 'https://<FLORI_HOST>'
+  return base + (info.value?.http_path || '/mcp')
+})
+const tokenShown = computed(() => revealed.value || '<TOKEN>')
+
+const localCmd = 'claude mcp add -s user flori -- /home/zelin/.local/bin/flori-mcp-docker.sh'
+const httpAddCmd = computed(
+  () => `claude mcp add --transport http flori ${endpoint.value} --header "Authorization: Bearer ${tokenShown.value}"`,
+)
+const curlCmd = computed(
+  () => `curl -k -X POST ${endpoint.value} \\
+  -H "Authorization: Bearer ${tokenShown.value}" \\
+  -H "Accept: application/json, text/event-stream" \\
+  -H "Content-Type: application/json" \\
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}'`,
+)
+
+const copied = ref('')
+async function copy(text: string, which: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    copied.value = which
+    setTimeout(() => (copied.value = ''), 1600)
+  } catch {
+    showToast('复制失败', 'error')
+  }
+}
+
+async function toggleReveal() {
+  if (revealed.value) {
+    revealed.value = null // 再点=隐藏
+    return
+  }
+  try {
+    const r = await api.get<{ token: string | null }>('/api/mcp/token')
+    if (!r.token) {
+      showToast('未配置 token', 'error')
+      return
+    }
+    revealed.value = r.token
+    await navigator.clipboard.writeText(r.token).catch(() => {})
+    showToast('token 已显示并复制(敏感,勿外传)', 'success')
+  } catch {
+    showToast('获取 token 失败', 'error')
+  }
+}
+</script>
+
+<template>
+  <details class="card pad" style="margin-bottom:18px">
+    <summary class="card-h" style="margin-bottom:0;cursor:pointer;list-style:none">
+      <Boxes :size="15" />接入 MCP
+      <span class="dim" style="font-weight:400;font-size:12px;margin-left:6px">把知识库作为 MCP 提供给 agent</span>
+    </summary>
+
+    <p v-if="loading" class="note-tip" style="margin:12px 0 0">加载中…</p>
+    <template v-else-if="info">
+      <div class="seg" style="margin:12px 0">
+        <button :class="{ on: activeTab === 'local' }" @click="activeTab = 'local'">本地(stdio)</button>
+        <button :class="{ on: activeTab === 'http' }" @click="activeTab = 'http'">公网(HTTP)</button>
+      </div>
+
+      <template v-if="activeTab === 'local'">
+        <p class="note-tip" style="margin:0 0 8px">同机 agent(如本机 Claude Code):连本机活栈(DB+MinIO)。加完<b>重启 claude 会话</b>即可让 agent 用 flori 工具搜你的知识库。</p>
+        <pre class="mcp-snip">{{ localCmd }}</pre>
+        <button class="btn sm" style="margin-top:10px" @click="copy(localCmd, 'local')">
+          <component :is="copied === 'local' ? Check : Copy" :size="13" />{{ copied === 'local' ? '已复制' : '复制' }}
+        </button>
+      </template>
+
+      <template v-else>
+        <p class="note-tip" style="margin:0 0 8px">端点 <code class="mono">{{ endpoint }}</code>(streamable-http,需 Bearer token)。把 &lt;TOKEN&gt; 换成下方真实 token(或先点「显示/复制」自动带入)。</p>
+        <pre class="mcp-snip">{{ httpAddCmd }}</pre>
+        <button class="btn sm" style="margin-top:10px" @click="copy(httpAddCmd, 'add')">
+          <component :is="copied === 'add' ? Check : Copy" :size="13" />{{ copied === 'add' ? '已复制' : '复制' }}
+        </button>
+        <p class="note-tip" style="margin:12px 0 8px">原始 curl(initialize 握手):</p>
+        <pre class="mcp-snip">{{ curlCmd }}</pre>
+        <button class="btn sm" style="margin-top:10px" @click="copy(curlCmd, 'curl')">
+          <component :is="copied === 'curl' ? Check : Copy" :size="13" />{{ copied === 'curl' ? '已复制' : '复制' }}
+        </button>
+      </template>
+
+      <div style="margin-top:14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <Key :size="14" /><span style="font-size:13px">Bearer token</span>
+        <template v-if="info.token_configured">
+          <code class="mono" style="font-size:12px">{{ revealed || '••••••••••••' }}</code>
+          <button class="btn sm" @click="toggleReveal">
+            <component :is="revealed ? EyeOff : Eye" :size="13" />{{ revealed ? '隐藏' : '显示/复制' }}
+          </button>
+          <span class="dim" style="font-size:11px">敏感,勿外传(LAN :8080 无鉴权)</span>
+        </template>
+        <span v-else class="dim" style="font-size:12px">未配置:在 NAS .env 设 FLORI_MCP_TOKEN</span>
+      </div>
+
+      <div style="margin-top:14px">
+        <div class="dim" style="font-size:12px;margin-bottom:6px">工具({{ info.tools.length }})</div>
+        <div v-for="t in info.tools" :key="t.name" style="font-size:12.5px;margin-bottom:4px;line-height:1.5">
+          <code class="mono">{{ t.name }}</code>
+          <span style="color:var(--ink-600)"> — {{ t.description }}</span>
+        </div>
+      </div>
+    </template>
+  </details>
+</template>
+
+<style scoped>
+.mcp-snip {
+  background: var(--ink-900);
+  color: #cbd5e1;
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 12px;
+  border-radius: var(--r-sm);
+  overflow: auto;
+  line-height: 1.7;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+</style>

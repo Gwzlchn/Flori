@@ -1699,6 +1699,10 @@ RETRY_POLICY = {
   · curl 冒烟:`curl -H "Authorization: Bearer $TOK" -H "Accept: application/json, text/event-stream" -H "Content-Type: application/json" -X POST https://<host>/mcp -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`
 v2(未做):写工具(submit);按库 `/mcp/{domain}` 端点;sqlite-vec 语义后端。
 
+**接入信息端点**(供系统页「接入 MCP」卡片渲染;只读,挂 /api 经 Caddy basic_auth / API_ALLOW_NO_AUTH 收口):
+- `GET /api/mcp/info` → `{enabled, http_path:"/mcp", stdio_module:"api.mcp_server", token_configured:bool, tools:[{name, description}]}`。tools 从 MCP server 实时派生(不写死);不回传 token 明文。前端公网端点 = `window.location.origin + http_path`。
+- `GET /api/mcp/token` → `{token: string|null}`。前端默认遮掩 token、点击「显示/复制」时才取(明文经此端点;LAN :8080 无鉴权,注意)。
+
 ### 工具(3,只读)
 - **`list_knowledge_bases()`** → `[{domain, collection_count, job_count, concept_count, subscription_count, last_active_at}]`
   —— agent 探索起点。

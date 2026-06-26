@@ -14,6 +14,7 @@ import { useWorkerStore } from '../stores/workers'
 import { useGlobalWs } from '../composables/useGlobalWs'
 import StatusBadge from '../components/common/StatusBadge.vue'
 import ComponentCard from '../components/system/ComponentCard.vue'
+import McpConnectCard from '../components/system/McpConnectCard.vue'
 import { fmtDuration, fmtRelative } from '../utils/datetime'
 import { fmtBytes } from '../utils/format'
 import { workerDotClass, workerComputeDesc } from '../utils/worker'
@@ -732,6 +733,9 @@ const usageByProvider = computed(() => {
         </button>
       </div>
     </details>
+
+    <!-- 接入 MCP(把知识库作为 MCP 提供给 agent)-->
+    <McpConnectCard />
 
     <!-- 6. worker 状态卡片 -->
     <div v-if="workerStore.loading && workerStore.workers.length === 0" class="card pad" style="color:var(--ink-500);font-size:13px;margin-bottom:24px">
