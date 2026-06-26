@@ -8,7 +8,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useDomainStore } from '../../stores/domains'
 import type { ConceptGraph, ConceptGraphNode } from '../../types'
-import { Share2, Search, Lightbulb, FileText, ExternalLink, X } from 'lucide-vue-next'
+import { Share2, Search, Lightbulb, FileText, ExternalLink, X, Maximize2, Minimize2 } from 'lucide-vue-next'
 // vis-network 的类型仅用于标注,运行时实例懒加载;用宽松类型避免把库塞进首屏 chunk。
 type VisNetwork = any
 
@@ -30,6 +30,7 @@ let nodesDS: any = null            // 节点 DataSet(过滤/高亮就地更新)
 const query = ref('')
 const hideIsolated = ref(false)
 const statusFilter = ref<'all' | 'accepted' | 'suggested'>('all')
+const fullscreen = ref(false)   // 全屏看图(力导向图节点多,放大才看得清)
 
 const ACCEPTED = '#2383e2'        // 已采纳=品牌蓝
 const SUGGESTED = '#cb7b1f'       // 候选=琥珀
@@ -259,6 +260,8 @@ onMounted(async () => {
 })
 watch(() => props.domain, load)
 watch([query, hideIsolated, statusFilter], applyFilter)
+// 全屏切换后容器尺寸大变 → 下一帧重新按尺寸定一次(RO 也会兜底)。
+watch(fullscreen, async () => { await nextTick(); ensureSized() })
 onBeforeUnmount(() => { ro?.disconnect(); if (network) network.destroy() })
 
 // 图谱节点的点击/悬停发生在 canvas(vis-network),无 DOM 节点可触发 —— 暴露这些入口供
@@ -267,9 +270,10 @@ defineExpose({ selectNode, focusTerm, selected })
 </script>
 
 <template>
-  <div>
+  <div :class="{ 'cg-fs': fullscreen }">
     <div class="cg-bar">
       <div class="seclabel"><Share2 :size="14" />概念关联网络</div>
+      <span class="cg-hint">滚轮缩放 · 拖拽平移 · 点节点看详情</span>
       <div class="cg-stats">
         <span class="badge b-brand">{{ stats.node_count }} 概念</span>
         <span class="badge b-mut">{{ stats.edge_count }} 关联</span>
@@ -287,6 +291,9 @@ defineExpose({ selectNode, focusTerm, selected })
       <button class="chip" :class="{ on: statusFilter === 'all' }" @click="statusFilter = 'all'">全部</button>
       <button class="chip" :class="{ on: statusFilter === 'accepted' }" @click="statusFilter = 'accepted'">已采纳</button>
       <button class="chip" :class="{ on: statusFilter === 'suggested' }" @click="statusFilter = 'suggested'">候选</button>
+      <button class="chip cg-fsbtn" :class="{ on: fullscreen }" style="margin-left:auto" @click="fullscreen = !fullscreen">
+        <Maximize2 v-if="!fullscreen" :size="13" /><Minimize2 v-else :size="13" />{{ fullscreen ? '退出全屏' : '全屏' }}
+      </button>
     </div>
 
     <div class="cg-layout">
@@ -334,13 +341,21 @@ defineExpose({ selectNode, focusTerm, selected })
 
 <style scoped>
 .cg-bar { display: flex; align-items: center; gap: 12px; }
+.cg-hint { font-size: 12px; color: var(--ink-400); }
 .cg-stats { margin-left: auto; display: flex; gap: 6px; }
 .cg-controls { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 .cg-search { display: flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 4px 10px; color: var(--ink-500); background: var(--surface); }
 .cg-input { border: none; outline: none; font-size: 13px; background: transparent; color: var(--ink-800); width: 150px; }
+.cg-fsbtn { display: inline-flex; align-items: center; gap: 4px; }
 .cg-layout { display: flex; gap: 14px; margin-top: 12px; align-items: flex-start; }
 .cg-canvas-card { flex: 1; min-width: 0; }
-.cg-canvas { height: 460px; width: 100%; }
+/* 力导向图节点多,默认就给足高度(占大半视口);全屏时铺满。 */
+.cg-canvas { height: calc(100vh - 300px); min-height: 480px; width: 100%; }
+
+/* 全屏:整块固定铺满视口,画布吃满剩余高度。 */
+.cg-fs { position: fixed; inset: 0; z-index: 1000; background: var(--surface, #fff); padding: 16px 20px; overflow: auto; }
+.cg-fs .cg-canvas { height: calc(100vh - 150px); min-height: 0; }
+.cg-fs .cg-panel { top: 16px; }
 .cg-state { color: var(--ink-500); font-size: 13px; padding: 60px 0; text-align: center; }
 .cg-dim { color: var(--ink-400); }
 .cg-panel { width: 320px; flex: none; position: sticky; top: 12px; }
