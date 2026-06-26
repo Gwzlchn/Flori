@@ -3,7 +3,7 @@ import type { SystemEvent } from '../types'
 
 const EVENT_LABELS: Record<string, string> = {
   orphan_reclaimed: '孤儿回收', step_stuck: '卡住步', no_worker: '无 worker',
-  worker_cleaned: 'worker 清理', job_failed: '任务失败',
+  worker_cleaned: 'worker 清理', job_failed: '作业失败',
 }
 const EVENT_DOT: Record<string, string> = {
   orphan_reclaimed: 'd-warn', step_stuck: 'd-warn', no_worker: 'd-bad',

@@ -99,13 +99,13 @@ describe('useWorkerStore', () => {
     expect(res).toBe('tok-123')
   })
 
-  it('fetchJobs: GET worker jobs 返回数组(不写 state)', async () => {
-    const jobs = [{ id: 'j1' }]
-    get.mockResolvedValueOnce(jobs)
+  it('fetchTasks: GET worker tasks 返回数组(不写 state)', async () => {
+    const tasks = [{ job_id: 'j1', step: 's1' }]
+    get.mockResolvedValueOnce(tasks)
     const store = useWorkerStore()
-    const res = await store.fetchJobs('w1')
-    expect(get).toHaveBeenCalledWith('/api/workers/w1/jobs')
-    expect(res).toEqual(jobs)
+    const res = await store.fetchTasks('w1')
+    expect(get).toHaveBeenCalledWith('/api/workers/w1/tasks')
+    expect(res).toEqual(tasks)
     expect(store.workers).toEqual([])
   })
 })

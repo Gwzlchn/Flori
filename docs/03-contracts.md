@@ -8,7 +8,7 @@ Base URL: `/api`
 
 ### 1.1 任务管理
 
-#### POST /api/jobs — 创建任务
+#### POST /api/jobs — 创建作业(投递内容)
 
 ```bash
 # 视频 URL（带风格标签）
@@ -60,7 +60,7 @@ Response `201`:
 }
 ```
 
-#### GET /api/jobs — 任务列表
+#### GET /api/jobs — 作业列表
 
 ```
 GET /api/jobs?status=processing&domain=deep-learning&source=bilibili&limit=20&offset=0
@@ -431,9 +431,9 @@ Response `200`:
 
 不回明文,仅状态:`{"exists": bool, "expires_in_sec": int|null}`（剩余有效秒,无过期/不存在为 null）。env `WORKER_REGISTRATION_TOKEN` 配的长期 token 不经 redis,不在此反映。路由须置于 `GET /api/workers/{id}` 之前,否则被路径参数路由遮蔽。
 
-#### GET /api/workers/{id}/jobs — Worker 任务历史
+#### GET /api/workers/{id}/tasks — Worker 任务(task)历史
 
-该 worker 执行过的步骤记录。`?limit=` 默认 50，范围 1–200。
+该 worker 执行过的 task 记录(task = 某作业 job 的某步骤 step 的一次执行;每条对应一个 step 记录)。`?limit=` 默认 50，范围 1–200。
 
 Response `200`:
 ```json
@@ -743,7 +743,7 @@ Response `200`：
 
 错误：`400` 非法 id / 非订阅集合、`404` 不存在、`502` 同步失败（如来源访问失败）。
 
-#### GET /api/collections/{id}/jobs — 集合内任务列表
+#### GET /api/collections/{id}/jobs — 集合内作业列表
 
 ```
 GET /api/collections/c_xxx/jobs?limit=20&offset=0

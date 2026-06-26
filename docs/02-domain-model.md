@@ -260,7 +260,13 @@ class Collection:
 
 > 旧的独立 `Subscription` 实体/表已废，其字段并入 Collection（见 §1.4、§2.3）。
 
-### Job（任务）
+### Job（作业流水线）
+
+> **三层命名(领域核心,2026-06-27 统一)**:
+> - **Job(作业流水线)** = 一个内容项(视频/论文/文章/播客)的整条处理流水线。id `jobs_{src}_{原生id}`,jobs 表。
+> - **Step(步骤)** = 流水线里的一步(pipelines.yaml 定义 + 该 job 的步骤状态,job_steps 表 / Step 模型 / StepStatus)。
+> - **Task(任务)** = worker 认领执行的**最小单元** = 「某 Job 的某 Step 的一次执行」(claim={job_id,step,pool,exec_id},进 `queue:{pool}` 被 worker 认领)。**不是独立持久表**——一个 Task 落地为一条 job_steps 记录的一次执行;worker 的「当前任务」由 `current_job`+`current_step` 两字段表征。
+> 关系:Job 1 ──< N Step;每个 Step 的一次执行 = 一个 Task。**没有「子 job」**——job 含 step,worker 跑的是 task。
 
 ```python
 @dataclass
@@ -303,10 +309,11 @@ class Concept:                     # 表名仍为 glossary（历史）
 
 > 术语与主题是同一实体的两端：`is_topic=True` 的（通常粗粒度）节点额外获得"主题页"。meta 标签不在此表，存于 `job.style_tags`。
 
-### Step / Worker
+### Step（步骤）/ Task（任务）/ Worker
 
 Step：`name`（各 pipeline 内 `01..N`）/status/pool/input_hash/worker_id/started_at/finished_at/duration_sec/meta/error/retries。
-Worker：两份存储（Redis 心跳 + SQLite 持久），字段见 §2.3 `workers` 表。
+Task（任务）：worker 认领执行的最小单元 = 某 Job 的某 Step 的一次执行(见上「三层命名」);非独立表,落地为 job_steps 记录的一次执行;经 `queue:{pool}` 派发、worker `claim` 认领。`GET /api/workers/{id}/tasks` 返回某 worker 的 task 历史(每条=一个 step 记录)。
+Worker：两份存储（Redis 心跳 + SQLite 持久），字段见 §2.3 `workers` 表。其 `current_job`+`current_step` 表示「该 worker 当前正在跑的 task」(current_job 存的是该 task 所属的内容作业 job_id)。
 
 ## 2.2 状态机
 

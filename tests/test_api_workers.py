@@ -297,9 +297,9 @@ class TestRegistrationToken:
         redis_mock.set_registration_token.assert_awaited_with(token, ttl_sec=86400)
 
 
-class TestWorkerJobs:
+class TestWorkerTasks:
     @pytest.mark.asyncio
-    async def test_worker_job_history(self, client, db):
+    async def test_worker_task_history(self, client, db):
         from shared.models import Job, JobStatus, Step, StepStatus
 
         _make_worker(db, id="w-hist")
@@ -312,7 +312,7 @@ class TestWorkerJobs:
             status=StepStatus.DONE, worker_id="w-hist",
             started_at=_utcnow(), finished_at=_utcnow(), duration_sec=3.2,
         ))
-        resp = await client.get("/api/workers/w-hist/jobs")
+        resp = await client.get("/api/workers/w-hist/tasks")
         assert resp.status_code == 200
         rows = resp.json()
         assert len(rows) == 1

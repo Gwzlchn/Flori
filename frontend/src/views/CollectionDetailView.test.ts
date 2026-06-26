@@ -235,7 +235,7 @@ describe('CollectionDetailView 状态分布与集合级重试', () => {
     await flushPromises()
 
     expect(retryFailedInCollection).toHaveBeenCalledWith('col-1')
-    expect(showToast).toHaveBeenCalledWith('已重试 3 个失败任务', 'success')
+    expect(showToast).toHaveBeenCalledWith('已重试 3 个失败作业', 'success')
   })
 
   it('无失败任务:不显示重试按钮', async () => {

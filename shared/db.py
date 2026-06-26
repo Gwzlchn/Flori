@@ -773,8 +773,8 @@ class Database:
             self._conn.execute("DELETE FROM workers WHERE id=?", (worker_id,))
             self._conn.commit()
 
-    def list_worker_jobs(self, worker_id: str, limit: int = 50) -> list[Step]:
-        """该 worker 跑过的步骤历史（按最近开始时间倒序），对应 runner 的 job 历史。"""
+    def list_worker_tasks(self, worker_id: str, limit: int = 50) -> list[Step]:
+        """该 worker 的 task 执行历史（task = 某作业的某步骤的一次执行,按最近开始时间倒序;每条 = 一个 step 记录）。"""
         rows = self._conn.execute(
             "SELECT * FROM job_steps WHERE worker_id=? "
             "ORDER BY started_at DESC LIMIT ?",

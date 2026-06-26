@@ -171,7 +171,8 @@ export interface Worker {
   admin_note: string | null
 }
 
-export interface WorkerJob {
+// Task = worker 认领执行的最小单元(某作业 job 的某步骤 step 的一次执行);每条对应一个 step 记录。
+export interface WorkerTask {
   job_id: string
   step: string
   status: string

@@ -228,11 +228,11 @@ function poolDot(name: string, p: { capacity: number; used: number; queue: numbe
   return 'd-ok'
 }
 function poolQueueBadge(name: string, p: { capacity: number; used: number; queue: number }): { cls: string; text: string } {
-  if (p.capacity === 0) return { cls: 'b-mut', text: `⏸ ${p.queue} 等待` }
+  if (p.capacity === 0) return { cls: 'b-mut', text: `⏸ ${p.queue} 个任务等待` }
   const onlineForType = status.value?.workers?.[name]?.online ?? 0
-  if (p.queue > 0 && onlineForType === 0) return { cls: 'b-bad', text: `⚠ ${p.queue} 等待无 worker` }
-  if (p.queue > 0) return { cls: 'b-warn', text: `▲ ${p.queue} 积压` }
-  return { cls: 'b-mut', text: `队列 ${p.queue}` }
+  if (p.queue > 0 && onlineForType === 0) return { cls: 'b-bad', text: `⚠ ${p.queue} 个任务无 worker` }
+  if (p.queue > 0) return { cls: 'b-warn', text: `▲ ${p.queue} 个任务积压` }
+  return { cls: 'b-mut', text: `队列 ${p.queue} 任务` }
 }
 
 // ── 版本漂移（前端比对，§8.6）──
@@ -352,7 +352,7 @@ const issues = computed<string[]>(() => {
   if (workerStore.workers.length > 0 && onlineCount.value === 0) out.push('所有 worker 均已离线')
   if (driftCount.value > 0) out.push(`${driftCount.value} 个 worker 运行旧版本`)
   if (workerStore.workers.some(w => w.status === 'stale')) out.push('有 worker 失联')
-  if (recentJobFails.value > 0) out.push(`${recentJobFails.value} 个任务近 1h 失败`)
+  if (recentJobFails.value > 0) out.push(`${recentJobFails.value} 个作业近 1h 失败`)
   if (recentWorkerLost.value > 0) out.push(`近 1h ${recentWorkerLost.value} 次 worker 掉线`)
   return out
 })
@@ -711,7 +711,7 @@ const usageByProvider = computed(() => {
           <span class="badge" :class="poolQueueBadge(name, p).cls">{{ poolQueueBadge(name, p).text }}</span>
         </div>
         <div class="dim-g">
-          <div class="row-l"><span>占用</span><b>{{ p.used }} / {{ p.capacity === 0 ? '暂停' : p.capacity }}</b></div>
+          <div class="row-l"><span>在跑任务</span><b>{{ p.used }} / {{ p.capacity === 0 ? '暂停' : p.capacity }}</b></div>
           <div class="track"><span :style="{ width: `${Math.min(100, p.capacity ? (p.used / p.capacity) * 100 : 0)}%` }"></span></div>
         </div>
         <div v-if="name in limitDraft" style="display:flex;align-items:center;gap:6px;margin-top:9px;flex-wrap:wrap">
@@ -828,8 +828,8 @@ const usageByProvider = computed(() => {
             <StatusBadge :status="w.status" />
             <span class="badge b-mut">{{ w.type.toUpperCase() }}</span>
             <span v-if="w.status === 'online-busy' && w.current_step" class="badge b-run">
-              当前 {{ w.current_step }}
-              <span v-if="w.current_job" class="mono">{{ w.current_job }}</span>
+              当前任务 {{ w.current_step }}
+              <span v-if="w.current_job" class="mono">@ {{ w.current_job }}</span>
             </span>
             <span v-if="workerDrifted(w)" class="badge b-warn"
               :title="`期望 ${systemVersion}，当前 ${w.spec?.version}`">

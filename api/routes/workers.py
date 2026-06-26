@@ -244,14 +244,14 @@ async def get_worker(
     return resp
 
 
-@router.get("/{worker_id}/jobs")
-async def list_worker_jobs(
+@router.get("/{worker_id}/tasks")
+async def list_worker_tasks(
     worker_id: str,
     limit: int = Query(50, ge=1, le=200),
     db: Database = Depends(get_db),
 ):
-    """该 worker 的任务历史（对应 runner 的 jobs 列表）。"""
-    steps = await asyncio.to_thread(db.list_worker_jobs, worker_id, limit)
+    """该 worker 的 task 执行历史（task = 某作业的某步骤的一次执行;每条对应一个 step 记录）。"""
+    steps = await asyncio.to_thread(db.list_worker_tasks, worker_id, limit)
     return [
         {
             "job_id": s.job_id,

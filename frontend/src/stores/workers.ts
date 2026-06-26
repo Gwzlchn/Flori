@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { useApi } from '../composables/useApi'
-import type { Worker, WorkerJob, FullStatus, SystemEvent, UsageAggregate, PricingStatus } from '../types'
+import type { Worker, WorkerTask, FullStatus, SystemEvent, UsageAggregate, PricingStatus } from '../types'
 
 export const useWorkerStore = defineStore('workers', () => {
   const api = useApi()
@@ -47,8 +47,8 @@ export const useWorkerStore = defineStore('workers', () => {
     return res.token
   }
 
-  async function fetchJobs(workerId: string): Promise<WorkerJob[]> {
-    return await api.get<WorkerJob[]>(`/api/workers/${workerId}/jobs`)
+  async function fetchTasks(workerId: string): Promise<WorkerTask[]> {
+    return await api.get<WorkerTask[]>(`/api/workers/${workerId}/tasks`)
   }
 
   // 系统池上限:default(pools.yaml)+ override(redis 运行时覆盖,可为 null)。
@@ -90,7 +90,7 @@ export const useWorkerStore = defineStore('workers', () => {
 
   return {
     workers, loading, fetchAll, pause, resume,
-    updateNote, updateTags, remove, mintToken, fetchJobs,
+    updateNote, updateTags, remove, mintToken, fetchTasks,
     fetchPoolLimits, savePoolLimits,
     fetchFullStatus, fetchEvents, fetchUsage, fetchLinkTrafficHistory,
     fetchPricing, refreshPricing, fetchPipelines,

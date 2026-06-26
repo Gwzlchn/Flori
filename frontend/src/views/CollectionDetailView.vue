@@ -95,17 +95,17 @@ async function syncNow() {
   }
 }
 
-// 重试本集合下的失败任务(scoped 批量重试,复用全局 retry-failed + collection_id 过滤)。
+// 重试本集合下的失败作业(scoped 批量重试,复用全局 retry-failed + collection_id 过滤)。
 const retrying = ref(false)
 async function retryFailed() {
   const c = collection.value
   const n = counts.value?.failed ?? 0
   if (!c || !n || retrying.value) return
-  if (!confirm(`重试本集合 ${n} 个失败任务?(各自从首个失败步重跑)`)) return
+  if (!confirm(`重试本集合 ${n} 个失败作业?(各自从首个失败步重跑)`)) return
   retrying.value = true
   try {
     const { retried } = await jobStore.retryFailedInCollection(c.id)
-    showToast(`已重试 ${retried} 个失败任务`, 'success')
+    showToast(`已重试 ${retried} 个失败作业`, 'success')
     await load()
   } catch (e: any) {
     showToast(e?.message || '重试失败', 'error')

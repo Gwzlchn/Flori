@@ -62,7 +62,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   // 默认成功路径：主体 + 历史。
   api.get.mockImplementation((url: string) => {
-    if (url.endsWith('/jobs')) return Promise.resolve(JOBS)
+    if (url.endsWith('/tasks')) return Promise.resolve(JOBS)
     return Promise.resolve(makeWorker())
   })
   api.put.mockResolvedValue(undefined)
@@ -98,7 +98,7 @@ describe('WorkerDetailView', () => {
 
   it('历史为空：显示空文案', async () => {
     api.get.mockImplementation((url: string) => {
-      if (url.endsWith('/jobs')) return Promise.resolve([])
+      if (url.endsWith('/tasks')) return Promise.resolve([])
       return Promise.resolve(makeWorker())
     })
     const w = factory()
@@ -118,7 +118,7 @@ describe('WorkerDetailView', () => {
 
   it('404 错误态：展示「Worker 不存在或已移除」', async () => {
     api.get.mockImplementation((url: string) => {
-      if (url.endsWith('/jobs')) return Promise.resolve([])
+      if (url.endsWith('/tasks')) return Promise.resolve([])
       return Promise.reject({ status: 404 })
     })
     const w = factory()
@@ -128,7 +128,7 @@ describe('WorkerDetailView', () => {
 
   it('错误态「重试」按钮重新加载', async () => {
     api.get.mockImplementationOnce(() => Promise.reject({ message: 'boom' }))
-      .mockImplementation((url: string) => (url.endsWith('/jobs') ? Promise.resolve([]) : Promise.resolve(makeWorker())))
+      .mockImplementation((url: string) => (url.endsWith('/tasks') ? Promise.resolve([]) : Promise.resolve(makeWorker())))
     const w = factory()
     await flushPromises()
     expect(w.text()).toContain('boom')
@@ -191,7 +191,7 @@ describe('WorkerDetailView', () => {
 
   it('成功率：完成与失败均为 0 时显示「—」', async () => {
     api.get.mockImplementation((url: string) => {
-      if (url.endsWith('/jobs')) return Promise.resolve([])
+      if (url.endsWith('/tasks')) return Promise.resolve([])
       return Promise.resolve(makeWorker({ tasks_completed: 0, tasks_failed: 0 }))
     })
     const w = factory()

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// Worker 详情（原型 #wdetail）：单个 worker 完整统计 + 基本信息 + 任务历史(recent_tasks)
-// + 备注编辑 + 暂停/移除。worker 主体走 GET /api/workers/{id}；历史走 store.fetchJobs(id)。
+// Worker 详情（原型 #wdetail）：单个 worker 完整统计 + 基本信息 + 任务(task)历史
+// + 备注编辑 + 暂停/移除。worker 主体走 GET /api/workers/{id}；task 历史走 store.fetchTasks(id)。
 import { ref, computed, onMounted, onBeforeUnmount, inject } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
@@ -10,7 +10,7 @@ import { fmtDateTime, fmtDuration, fmtRelative } from '../utils/datetime'
 import { fmtBytes } from '../utils/format'
 import { workerDotClass, workerComputeDesc } from '../utils/worker'
 import StatusBadge from '../components/common/StatusBadge.vue'
-import type { Worker, WorkerJob } from '../types'
+import type { Worker, WorkerTask } from '../types'
 import {
   RefreshCw, Pause, X, Cpu, Info, Layers, Clock, Check,
   Play, FileText, Newspaper, Headphones, ChevronRight, MessageSquare,
@@ -26,7 +26,7 @@ const showToast = inject<(m: string, t?: 'success' | 'error' | 'info') => void>(
 const workerId = computed(() => String(route.params.id))
 
 const worker = ref<Worker | null>(null)
-const tasks = ref<WorkerJob[]>([])
+const tasks = ref<WorkerTask[]>([])
 const loading = ref(true)
 const error = ref('')
 const busy = ref(false)
@@ -36,12 +36,12 @@ async function load() {
   error.value = ''
   try {
     // 主体 + 历史并行；历史失败不致命（仅置空）。
-    const [w, jobs] = await Promise.all([
+    const [w, taskList] = await Promise.all([
       api.get<Worker>(`/api/workers/${encodeURIComponent(workerId.value)}`),
-      workerStore.fetchJobs(workerId.value).catch(() => [] as WorkerJob[]),
+      workerStore.fetchTasks(workerId.value).catch(() => [] as WorkerTask[]),
     ])
     worker.value = w
-    tasks.value = jobs
+    tasks.value = taskList
     // 面包屑显真实 worker id(替代通用「Worker 详情」)
     global.setCrumbs([{ t: '系统', to: '/system' }, { t: w.id }])
   } catch (e: any) {
