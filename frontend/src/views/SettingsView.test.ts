@@ -12,6 +12,7 @@ const stubs = {
   BiliLogin: true,
   CookieUpload: true,
   StatusBadge: true,
+  McpConnectCard: true,  // 自带 onMounted 拉 /api/mcp/info,会抢 mock;非本测目标,stub(它有独立 test)
 }
 const $router = { push: vi.fn(), replace: vi.fn() }
 

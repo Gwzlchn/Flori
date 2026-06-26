@@ -1,11 +1,9 @@
 <script setup lang="ts">
-// 系统健康总览页（/system）。6 区（自上而下，设计 §2.5）：
-//  1 系统信息（版本 + 各组件版本 + 部署模式）
-//  2 系统状态（健康条 + 组件健康 + jobs 计数 + 磁盘 + AI 用量聚合）
-//  3 系统历史事件（事件流）
-//  4 调度信息（Scheduler 健康 + 资源池）
-//  5 worker 信息（计数 + 版本漂移汇总 + 接入新 worker 折叠）
-//  6 worker 状态卡片
+// 系统健康总览页（/system）。三带（自上而下）：
+//  带1 概览：健康条 + 概览指标 + 系统状态行(整体版本/部署/磁盘/内容/吞吐/中转) + 最近 5 事件(全部→/system/events)
+//  带2 基础设施：核心组件(api/scheduler/redis/minio) + 通联/链路拓扑
+//  带3 算力与用量：AI 用量 + 价表(上) + 资源池 + Worker 列表 + 接入新 worker 折叠(下)
+// MCP 接入卡已移至 /settings(用户集成);worker 接入留此(运维)。事件全量在 /system/events(类型/时间筛选)。
 // 双通道：WS 每 2s 推 live 子集（计数/忙闲/队列/磁盘跳动）；HTTP /api/status + /api/usage +
 // /api/events 进页 1 次 + 每 15s 轮询（组件/版本/吞吐/用量/事件，慢变量）+ 手动刷新。
 import { ref, computed, onMounted, onUnmounted, inject } from 'vue'
@@ -14,17 +12,17 @@ import { useWorkerStore } from '../stores/workers'
 import { useGlobalWs } from '../composables/useGlobalWs'
 import StatusBadge from '../components/common/StatusBadge.vue'
 import ComponentCard from '../components/system/ComponentCard.vue'
-import McpConnectCard from '../components/system/McpConnectCard.vue'
 import LinkTopologyTree from '../components/system/LinkTopologyTree.vue'
 import { fmtDuration, fmtRelative } from '../utils/datetime'
 import { fmtBytes } from '../utils/format'
+import { eventLabel, eventDot, eventSummary } from '../utils/events'
 import { workerDotClass, workerComputeDesc } from '../utils/worker'
 import type { Worker, FullStatus, SystemComponent, SystemEvent, UsageAggregate, PricingStatus, LinkTraffic } from '../types'
 import { COMPONENT_KIND_LABELS } from '../types'
 import {
   Server, RefreshCw, Cpu, Pause, Play, MessageSquare, X, Plus,
   Key, Copy, Check, Layers, HardDrive, Database, Boxes, AlertTriangle,
-  Activity, GitCommit, Coins, Braces, Network,
+  Coins, Braces, Network,
 } from 'lucide-vue-next'
 
 const router = useRouter()
@@ -132,8 +130,6 @@ async function resetPoolLimit(pool: string) {
 // ── 组件 / 版本派生 ──
 const components = computed<SystemComponent[]>(() => status.value?.components ?? [])
 const systemVersion = computed(() => status.value?.version || 'dev')
-const apiComp = computed(() => components.value.find(c => c.kind === 'api'))
-const schedComp = computed(() => components.value.find(c => c.kind === 'scheduler'))
 const minioComp = computed(() => components.value.find(c => c.kind === 'minio'))
 const deployMode = computed(() => {
   const m = minioComp.value?.extra?.mode
@@ -361,27 +357,7 @@ const healthSummary = computed(() => {
   return head + more
 })
 
-// 事件 kind → 中文 + 严重度点色。
-const EVENT_LABELS: Record<string, string> = {
-  orphan_reclaimed: '孤儿回收', step_stuck: '卡住步', no_worker: '无 worker',
-  worker_cleaned: 'worker 清理', job_failed: '任务失败',
-}
-const EVENT_DOT: Record<string, string> = {
-  orphan_reclaimed: 'd-warn', step_stuck: 'd-warn', no_worker: 'd-bad',
-  worker_cleaned: 'd-mut', job_failed: 'd-bad',
-}
-function eventLabel(k: string): string { return EVENT_LABELS[k] ?? k }
-function eventDot(k: string): string { return EVENT_DOT[k] ?? 'd-mut' }
-function eventSummary(e: SystemEvent): string {
-  const parts: string[] = []
-  if (e.job_id) parts.push(e.job_id)
-  if (e.step) parts.push(e.step)
-  if (e.pool) parts.push(`池 ${e.pool}`)
-  if (e.reason) parts.push(e.reason)
-  if (e.error) parts.push(String(e.error).slice(0, 80))
-  if (e.worker_id) parts.push(e.worker_id)
-  return parts.join(' · ')
-}
+// 事件 kind→标签/点色/摘要 已抽到 utils/events(EventsView 共用)。
 
 // 磁盘阈值色。
 const diskBarColor = computed(() => {
@@ -399,9 +375,13 @@ async function togglePause(w: Worker) {
   } catch { showToast('操作失败', 'error') } finally { rowBusy.value = null }
 }
 async function removeWorker(w: Worker) {
-  if (!confirm(`确定移除 Worker ${w.id}？`)) return
+  const online = isOnline(w)
+  // 在线 worker 强制移除(force):它若仍在跑会重新注册;离线则普通移除。
+  if (!confirm(online
+    ? `Worker ${w.id} 仍在线，强制移除？(若进程还活着会重新注册)`
+    : `确定移除 Worker ${w.id}？`)) return
   rowBusy.value = w.id
-  try { await workerStore.remove(w.id); showToast('已移除', 'success') }
+  try { await workerStore.remove(w.id, online); showToast('已移除', 'success') }
   catch { showToast('移除失败', 'error') } finally { rowBusy.value = null }
 }
 
@@ -552,7 +532,7 @@ const usageByProvider = computed(() => {
       </button>
     </div>
 
-    <!-- ① 系统健康条 -->
+    <!-- ════════ 带1 · 概览 ════════ -->
     <div class="card pad health-bar" :class="overallClass" style="margin-bottom:18px">
       <span class="dot dot-lg" :class="[overallDot, { pulse: overall === 'down' || overall === 'unreachable' }]"></span>
       <div class="hb-text">
@@ -561,21 +541,6 @@ const usageByProvider = computed(() => {
       </div>
     </div>
 
-    <!-- 1. 系统信息 -->
-    <div class="seclabel" style="margin-bottom:10px"><GitCommit :size="14" />系统信息</div>
-    <div class="card pad" style="margin-bottom:18px;display:flex;flex-wrap:wrap;gap:8px 22px;align-items:center">
-      <span style="font-size:13px;color:var(--ink-700)">系统版本 <b class="mono">{{ verSem(systemVersion) }}</b><span v-if="verBuild(systemVersion)" class="dim" style="font-size:11px"> · 构建 {{ verBuild(systemVersion) }}</span></span>
-      <span class="sep" style="color:var(--ink-300)">·</span>
-      <span style="font-size:13px;color:var(--ink-700)">部署模式 <b>{{ deployMode }}</b></span>
-      <template v-for="c in components" :key="`v-${c.name}`">
-        <span class="sep" style="color:var(--ink-300)">·</span>
-        <span style="font-size:12.5px;color:var(--ink-600)">{{ COMPONENT_KIND_LABELS[c.kind] }}
-          <b class="mono">{{ c.version ? verSem(c.version) : '—' }}</b></span>
-      </template>
-    </div>
-
-    <!-- 2. 系统状态 -->
-    <!-- ② 概览(grid4) -->
     <div class="grid4" style="margin-bottom:18px">
       <div class="metric"><div class="v">{{ onlineCount }} / {{ workerStore.workers.length }}</div><div class="l">Worker 在线 / 共</div></div>
       <div class="metric"><div class="v">{{ busyCount }}</div><div class="l">忙碌 · 处理中</div></div>
@@ -583,20 +548,11 @@ const usageByProvider = computed(() => {
       <div class="metric"><div class="v">{{ doneCount }}</div><div class="l">累计完成 · 吞吐</div></div>
     </div>
 
-    <!-- ③ 核心组件 -->
-    <div class="seclabel" style="margin-bottom:12px"><Boxes :size="14" />核心组件 · {{ components.length }}</div>
-    <div v-if="status === null && components.length === 0" class="grid2" style="margin-bottom:18px">
-      <div v-for="n in 4" :key="n" class="card pad comp-card">
-        <div class="sk-bar" style="height:14px;width:50%"></div>
-        <div class="sk-bar" style="height:11px;width:70%"></div>
-      </div>
-    </div>
-    <div v-else class="grid2" style="margin-bottom:18px">
-      <ComponentCard v-for="c in components" :key="c.name" :comp="c" />
-    </div>
-
-    <!-- jobs 计数 + 磁盘 -->
-    <div class="card pad" style="margin-bottom:14px;display:flex;align-items:center;gap:18px;flex-wrap:wrap">
+    <!-- 系统状态:整体版本(系统级,单一来源)+ 部署 + 磁盘 + 内容 + 吞吐 + 中转 -->
+    <div class="card pad" style="margin-bottom:14px;display:flex;align-items:center;gap:8px 16px;flex-wrap:wrap">
+      <span class="badge b-mut" :title="systemVersion">系统 {{ verSem(systemVersion) }}<span v-if="verBuild(systemVersion)" style="font-weight:400;opacity:.65"> · {{ verBuild(systemVersion) }}</span></span>
+      <span style="font-size:12.5px;color:var(--ink-500)">{{ deployMode }}</span>
+      <span class="sep" style="color:var(--ink-300)">·</span>
       <span class="badge b-mut"><HardDrive :size="12" />磁盘</span>
       <template v-if="liveDisk && liveDisk.total_gb >= 0">
         <span style="font-size:13px;color:var(--ink-700)">
@@ -628,7 +584,65 @@ const usageByProvider = computed(() => {
       </template>
     </div>
 
-    <!-- AI 用量聚合 -->
+    <!-- 最近事件:概览只摘 5 条,全部 → /system/events(可按类型/时间筛选)-->
+    <div class="seclabel" style="margin-bottom:10px;display:flex;align-items:center">
+      <AlertTriangle :size="14" />系统事件
+      <span style="margin-left:auto;font-weight:400;font-size:11.5px;color:var(--brand-600);cursor:pointer;text-transform:none;letter-spacing:0" @click="router.push('/system/events')">查看全部 →</span>
+    </div>
+    <div class="card pad" style="margin-bottom:24px">
+      <div v-if="events.length === 0" style="display:flex;align-items:center;gap:8px;color:var(--ink-500);font-size:13px">
+        <span class="dot d-ok"></span>系统运行平稳，近期无告警
+      </div>
+      <div v-else class="list">
+        <div v-for="(e, i) in events.slice(0, 5)" :key="i" style="display:flex;align-items:center;gap:9px;font-size:12.5px">
+          <span class="dot" :class="eventDot(e.kind)"></span>
+          <span style="color:var(--ink-500);min-width:64px">{{ fmtRelative(e.ts * 1000) }}</span>
+          <b style="color:var(--ink-900)">{{ eventLabel(e.kind) }}</b>
+          <span style="color:var(--ink-600);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ eventSummary(e) }}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ════════ 带2 · 基础设施(核心组件 + 通联) ════════ -->
+    <div class="seclabel" style="margin-bottom:12px"><Boxes :size="14" />核心组件 · {{ components.length }}</div>
+    <div v-if="status === null && components.length === 0" class="grid2" style="margin-bottom:18px">
+      <div v-for="n in 4" :key="n" class="card pad comp-card">
+        <div class="sk-bar" style="height:14px;width:50%"></div>
+        <div class="sk-bar" style="height:11px;width:70%"></div>
+      </div>
+    </div>
+    <div v-else class="grid2" style="margin-bottom:18px">
+      <ComponentCard v-for="c in components" :key="c.name" :comp="c" />
+    </div>
+
+    <!-- 通联 / 链路流量:远程 worker ↔ ECS 网关 ⇄ 隧道 ⇄ NAS -->
+    <div v-if="hasLink" class="seclabel" style="margin-bottom:12px"><Network :size="14" />通联 · 链路流量</div>
+    <div v-if="hasLink" class="card pad" style="margin-bottom:24px">
+      <LinkTopologyTree :workers="workerStore.workers" :link="link" :selected="selectedNode" @select="selectedNode = $event" />
+      <!-- 选中节点详情:累计 + 当前速率 + 近期趋势(来自 /api/link-traffic/history 按节点切片)-->
+      <div v-if="detail" class="tp-detail">
+        <div class="tp-detail-h">
+          {{ detail.title }}
+          <span class="tp-detail-cum">{{ detail.cum }}<template v-if="detail.rate"> · 速率 {{ detail.rate }}</template></span>
+          <span v-if="detail.linkDesc" class="tp-detail-tag">{{ detail.linkDesc }}</span>
+          <span v-if="detail.wid" class="tp-detail-link" @click="router.push(`/workers/${detail.wid}`)">worker 详情 →</span>
+        </div>
+        <div v-if="detail.down.length > 1" class="tp-chart">
+          <svg viewBox="0 0 100 28" preserveAspectRatio="none">
+            <polyline :points="chartPoints(detail.down, detail.peak)" class="ch-d" />
+            <polyline :points="chartPoints(detail.up, detail.peak)" class="ch-u" />
+          </svg>
+          <span class="tp-chart-leg"><i class="ch-dd"></i>{{ detail.dl }} <i class="ch-ud"></i>{{ detail.ul }}<span class="dim" style="margin-left:6px">近 {{ detail.span }}</span></span>
+        </div>
+        <div v-else class="tp-detail-empty">趋势数据累积中…(上报器每 20s 采样;需边缘在线)</div>
+        <div v-if="detail.tunnels.length" class="tp-tunnels">
+          <span class="tp-tn" v-for="t in detail.tunnels" :key="t.name" :title="t.fwd"><b>{{ t.name }}</b> ↓{{ fmtBytes(t.rx) }} ↑{{ fmtBytes(t.tx) }}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ════════ 带3 · 算力与用量(用量在上,算力在下) ════════ -->
+    <!-- AI 用量聚合 + LiteLLM 价表 -->
     <div v-if="usage && usage.calls > 0" class="card pad" style="margin-bottom:24px">
       <div class="card-h"><Coins :size="15" />AI 用量 · {{ usage.calls }} 次调用</div>
       <div class="grid4" style="margin-bottom:12px">
@@ -673,53 +687,6 @@ const usageByProvider = computed(() => {
       </div>
     </div>
 
-    <!-- 通联 / 链路流量:远程 worker ↔ ECS 网关 ⇄ 隧道 ⇄ NAS -->
-    <div v-if="hasLink" class="seclabel" style="margin-bottom:12px"><Network :size="14" />通联 · 链路流量</div>
-    <div v-if="hasLink" class="card pad" style="margin-bottom:24px">
-      <LinkTopologyTree :workers="workerStore.workers" :link="link" :selected="selectedNode" @select="selectedNode = $event" />
-      <!-- 选中节点详情:累计 + 当前速率 + 近期趋势(来自 /api/link-traffic/history 按节点切片)-->
-      <div v-if="detail" class="tp-detail">
-        <div class="tp-detail-h">
-          {{ detail.title }}
-          <span class="tp-detail-cum">{{ detail.cum }}<template v-if="detail.rate"> · 速率 {{ detail.rate }}</template></span>
-          <span v-if="detail.linkDesc" class="tp-detail-tag">{{ detail.linkDesc }}</span>
-          <span v-if="detail.wid" class="tp-detail-link" @click="router.push(`/workers/${detail.wid}`)">worker 详情 →</span>
-        </div>
-        <div v-if="detail.down.length > 1" class="tp-chart">
-          <svg viewBox="0 0 100 28" preserveAspectRatio="none">
-            <polyline :points="chartPoints(detail.down, detail.peak)" class="ch-d" />
-            <polyline :points="chartPoints(detail.up, detail.peak)" class="ch-u" />
-          </svg>
-          <span class="tp-chart-leg"><i class="ch-dd"></i>{{ detail.dl }} <i class="ch-ud"></i>{{ detail.ul }}<span class="dim" style="margin-left:6px">近 {{ detail.span }}</span></span>
-        </div>
-        <div v-else class="tp-detail-empty">趋势数据累积中…(上报器每 20s 采样;需边缘在线)</div>
-        <div v-if="detail.tunnels.length" class="tp-tunnels">
-          <span class="tp-tn" v-for="t in detail.tunnels" :key="t.name" :title="t.fwd"><b>{{ t.name }}</b> ↓{{ fmtBytes(t.rx) }} ↑{{ fmtBytes(t.tx) }}</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- 3. 系统历史事件 -->
-    <div class="seclabel" style="margin-bottom:12px"><AlertTriangle :size="14" />系统事件</div>
-    <div class="card pad" style="margin-bottom:24px">
-      <div v-if="events.length === 0" style="display:flex;align-items:center;gap:8px;color:var(--ink-500);font-size:13px">
-        <span class="dot d-ok"></span>系统运行平稳，近期无告警
-      </div>
-      <div v-else class="list">
-        <div v-for="(e, i) in events" :key="i" style="display:flex;align-items:center;gap:9px;font-size:12.5px">
-          <span class="dot" :class="eventDot(e.kind)"></span>
-          <span style="color:var(--ink-500);min-width:64px">{{ fmtRelative(e.ts * 1000) }}</span>
-          <b style="color:var(--ink-900)">{{ eventLabel(e.kind) }}</b>
-          <span style="color:var(--ink-600);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ eventSummary(e) }}</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- 4. 调度信息 -->
-    <div class="seclabel" style="margin-bottom:12px"><Activity :size="14" />调度信息</div>
-    <div v-if="schedComp" style="margin-bottom:14px">
-      <ComponentCard :comp="schedComp" />
-    </div>
     <!-- 资源池 -->
     <div class="seclabel" style="margin-bottom:12px"><Layers :size="14" />资源池 · {{ pools.length }}</div>
     <div class="grid3" style="margin-bottom:24px">
@@ -821,10 +788,8 @@ const usageByProvider = computed(() => {
       </div>
     </details>
 
-    <!-- 接入 MCP(把知识库作为 MCP 提供给 agent)-->
-    <McpConnectCard />
+    <!-- worker 状态卡片(接入 MCP 已移至 /settings)-->
 
-    <!-- 6. worker 状态卡片 -->
     <div v-if="workerStore.loading && workerStore.workers.length === 0" class="card pad" style="color:var(--ink-500);font-size:13px;margin-bottom:24px">
       加载中…
     </div>
@@ -883,7 +848,8 @@ const usageByProvider = computed(() => {
             <MessageSquare :size="13" />备注
           </button>
         </template>
-        <button v-else class="btn sm danger" :disabled="rowBusy === w.id" @click.stop="removeWorker(w)">
+        <!-- 移除在所有卡片可用(在线=强制移除);离线只显移除 -->
+        <button class="btn sm danger" :disabled="rowBusy === w.id" @click.stop="removeWorker(w)">
           <X :size="13" />移除
         </button>
       </div>

@@ -32,37 +32,28 @@ const mainText = computed(() => {
   return `版本 ${/^\d/.test(sem) ? 'v' + sem : sem}`
 })
 
-// 次要指标行（uptime / 心跳·loop / 内存·ping·conn / 探活）。
+// 次要指标行：统一以「运行 <时长>」(uptime/启动时间)起头(各组件都有,minio 本地盘除外),再接各自指标。
 const metaText = computed(() => {
   const c = props.comp
   const e = extra.value
+  if (c.kind === 'minio' && e.mode === 'local') return ''   // 本地盘无运行时长概念
+  const parts: string[] = []
+  if (c.uptime_sec != null) parts.push(`运行 ${fmtDuration(c.uptime_sec)}`)
   if (c.kind === 'api') {
-    const parts: string[] = []
-    if (c.uptime_sec != null) parts.push(`运行 ${fmtDuration(c.uptime_sec)}`)
     if (e.rss_mb != null) parts.push(`内存 ${e.rss_mb}MB`)
-    return parts.join(' · ')
-  }
-  if (c.kind === 'scheduler') {
-    const hb = c.last_heartbeat ? `心跳 ${fmtRelative(c.last_heartbeat)}` : '无心跳'
-    const lag = e.loop_lag_sec != null ? ` · loop ${e.loop_lag_sec}s` : ''
-    return hb + lag
-  }
-  if (c.kind === 'redis') {
-    const parts: string[] = []
+  } else if (c.kind === 'scheduler') {
+    parts.push(c.last_heartbeat ? `心跳 ${fmtRelative(c.last_heartbeat)}` : '无心跳')
+    if (e.loop_lag_sec != null) parts.push(`loop ${e.loop_lag_sec}s`)
+  } else if (c.kind === 'redis') {
     if (e.used_memory_human) parts.push(`内存 ${e.used_memory_human}`)
     if (e.ping_ms != null) parts.push(`ping ${e.ping_ms}ms`)
     if (e.connected_clients != null) parts.push(`${e.connected_clients} conn`)
-    return parts.join(' · ')
-  }
-  if (c.kind === 'minio') {
-    if (e.mode === 'local') return ''
-    const parts: string[] = []
+  } else if (c.kind === 'minio') {
     if (e.objects != null) parts.push(`${e.objects} 对象`)
     if (e.size_bytes != null) parts.push(`容量 ${fmtBytes(e.size_bytes)}`)
     if (e.probe_ms != null) parts.push(`探活 ${e.probe_ms}ms`)
-    return parts.join(' · ')
   }
-  return ''
+  return parts.join(' · ')
 })
 </script>
 

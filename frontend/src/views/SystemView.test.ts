@@ -105,20 +105,19 @@ describe('SystemView', () => {
     expect(t).toContain('累计完成 · 吞吐')
   })
 
-  it('拉取全量状态后渲染 6 区标题与资源池', async () => {
+  it('拉取全量状态后渲染三带区块与资源池', async () => {
     const store = useWorkerStore()
     stubStoreData(store)
     const w = mountView({ workers: [] })
     await flushPromises()
     const t = w.text()
     expect(store.fetchFullStatus).toHaveBeenCalled()
-    expect(t).toContain('系统信息')
+    // 三带重组后:系统信息/调度信息 区已并入概览/核心组件,不再单列。
     expect(t).toContain('核心组件')
     expect(t).toContain('系统事件')
-    expect(t).toContain('调度信息')
     expect(t).toContain('资源池')
     expect(t).toContain('cpu')
-    expect(t).toContain('a1b2c3d')   // 系统版本
+    expect(t).toContain('a1b2c3d')   // 系统版本(构建 sha,概览版本徽章)
   })
 
   it('空态：无 worker 显示接入提示', async () => {
@@ -191,7 +190,7 @@ describe('SystemView', () => {
     const btn = w.findAll('.wcard .btn.danger').find(b => b.text().includes('移除'))
     await btn!.trigger('click')
     await flushPromises()
-    expect(store.remove).toHaveBeenCalledWith('w-off')
+    expect(store.remove).toHaveBeenCalledWith('w-off', false)  // 离线=普通移除(force=false)
     confirmSpy.mockRestore()
   })
 

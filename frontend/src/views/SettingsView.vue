@@ -5,6 +5,7 @@ import { ref, onMounted } from 'vue'
 import { useApi } from '../composables/useApi'
 import BiliLogin from '../components/settings/BiliLogin.vue'
 import CookieUpload from '../components/auth/CookieUpload.vue'
+import McpConnectCard from '../components/system/McpConnectCard.vue'
 import StatusBadge from '../components/common/StatusBadge.vue'
 import type { AuthStatus } from '../types'
 import { Settings, QrCode, Server, Activity, Info, BookOpen, ChevronRight, Youtube } from 'lucide-vue-next'
@@ -77,6 +78,9 @@ onMounted(loadAuth)
         </div>
       </template>
     </div>
+
+    <!-- 接入 MCP(把知识库作为 MCP 提供给 agent;用户集成,非运维)-->
+    <McpConnectCard />
 
     <!-- 运维 -->
     <div class="card pad" style="margin-bottom:18px">

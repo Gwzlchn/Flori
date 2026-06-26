@@ -22,6 +22,7 @@ const router = createRouter({
     { path: '/glossary', name: 'glossary', component: () => import('../views/GlossaryView.vue') },
 
     { path: '/system', name: 'system', component: () => import('../views/SystemView.vue') },
+    { path: '/system/events', name: 'system-events', component: () => import('../views/EventsView.vue') },
     { path: '/system/workers/:id', name: 'worker-detail', component: () => import('../views/WorkerDetailView.vue') },
 
     { path: '/settings', name: 'settings', component: () => import('../views/SettingsView.vue') },
