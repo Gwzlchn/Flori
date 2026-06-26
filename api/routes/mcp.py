@@ -11,19 +11,36 @@ import os
 
 from fastapi import APIRouter, Depends
 
-from api.deps import get_db, get_storage, verify_token
+from api.deps import get_db, get_redis, get_storage, verify_token
 from shared.db import Database
+from shared.redis_client import RedisClient
 from shared.storage import StorageBackend
 
 router = APIRouter(prefix="/api/mcp", tags=["mcp"], dependencies=[Depends(verify_token)])
+
+
+async def _mcp_stats(redis: RedisClient) -> dict:
+    """MCP 工具调用计数(best-effort):redis 缺失/异常/形态不符 → 零值,不让 info 端点 5xx。"""
+    try:
+        stats = await redis.get_mcp_call_stats()
+        if (
+            isinstance(stats, dict)
+            and isinstance(stats.get("total"), int)
+            and isinstance(stats.get("by_tool"), dict)
+        ):
+            return {"total": stats["total"], "by_tool": stats["by_tool"]}
+    except Exception:
+        pass
+    return {"total": 0, "by_tool": {}}
 
 
 @router.get("/info")
 async def mcp_info(
     db: Database = Depends(get_db),
     storage: StorageBackend = Depends(get_storage),
+    redis: RedisClient = Depends(get_redis),
 ) -> dict:
-    """MCP 接入信息:工具清单(实时派生)、传输、是否已配 token。不回传 token 明文。"""
+    """MCP 接入信息:工具清单(实时派生)、传输、是否已配 token、调用统计。不回传 token 明文。"""
     from api.mcp_server.server import build_server
 
     mcp = build_server(db, storage)
@@ -37,6 +54,7 @@ async def mcp_info(
             {"name": t.name, "description": (t.description or "").strip().splitlines()[0]}
             for t in tools
         ],
+        "stats": await _mcp_stats(redis),  # {total, by_tool};redis 不可用 → 0s
     }
 
 

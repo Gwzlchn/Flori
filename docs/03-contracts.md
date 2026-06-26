@@ -1697,6 +1697,8 @@ RETRY_POLICY = {
 - **http**(`MCP_TRANSPORT=http`):streamable-http,uvicorn 监听 `MCP_PORT`(默认 8090),端点路径 **`/mcp`**;经 Caddy 暴露到公网。
   · 鉴权:**`Authorization: Bearer <FLORI_MCP_TOKEN>`**。fail-closed(对齐 API):设了 `FLORI_MCP_TOKEN`→不匹配 401;
     未设→503,除非 `FLORI_MCP_ALLOW_NO_AUTH=1`(仅可信内网放行)。compose 服务 `mcp-http`(profile `mcp`,默认绑 127.0.0.1)。
+  · <!-- contract: MCP-http 限流 429 -->**限流**:`RateLimitASGI`(最外层,鉴权之前)进程内全局时间窗计数器,
+    上限 env **`FLORI_MCP_RATE_LIMIT`**(请求/分钟,默认 120;`0`/留空=关闭)。超限 → **`429`**,体 `{"error":"rate_limited"}`,带 `Retry-After: 60`。lifespan 等非 http scope 不计数直通。
   · curl 冒烟:`curl -H "Authorization: Bearer $TOK" -H "Accept: application/json, text/event-stream" -H "Content-Type: application/json" -X POST https://<host>/mcp -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`
 
 <!-- contract: 按库作用域端点 /mcp/{domain} —— 单 server + contextvar,非一库一 server -->
@@ -1711,7 +1713,7 @@ RETRY_POLICY = {
 v2(未做):写工具(submit);sqlite-vec 语义后端。
 
 **接入信息端点**(供系统页「接入 MCP」卡片渲染;只读,挂 /api 经 Caddy basic_auth / API_ALLOW_NO_AUTH 收口):
-- `GET /api/mcp/info` → `{enabled, http_path:"/mcp", stdio_module:"api.mcp_server", token_configured:bool, tools:[{name, description}]}`。tools 从 MCP server 实时派生(不写死);不回传 token 明文。前端公网端点 = `window.location.origin + http_path`。
+- `GET /api/mcp/info` → `{enabled, http_path:"/mcp", stdio_module:"api.mcp_server", token_configured:bool, tools:[{name, description}], stats:{total:int, by_tool:{name:int}}}`。tools 从 MCP server 实时派生(不写死);不回传 token 明文。前端公网端点 = `window.location.origin + http_path`。<!-- contract: stats = MCP 工具调用计数 -->`stats` 是 MCP 工具调用计数(MCP-http 进程 best-effort 写 redis:总计 `mcp:calls:total` + 按工具 `mcp:calls:tool:{name}`;API 只读透出),redis 不可用 → `{total:0, by_tool:{}}`(不报错)。
 - `GET /api/mcp/token` → `{token: string|null}`。前端默认遮掩 token、点击「显示/复制」时才取(明文经此端点;LAN :8080 无鉴权,注意)。
 
 ### 工具(7,只读)

@@ -7,12 +7,14 @@ import { Boxes, Copy, Check, Key, Eye, EyeOff } from 'lucide-vue-next'
 import { useApi } from '../../composables/useApi'
 
 interface McpTool { name: string; description: string }
+interface McpStats { total: number; by_tool: Record<string, number> }
 interface McpInfo {
   enabled: boolean
   http_path: string
   stdio_module: string
   token_configured: boolean
   tools: McpTool[]
+  stats?: McpStats
 }
 
 const api = useApi()
@@ -39,6 +41,14 @@ const endpoint = computed(() => {
   return base + (info.value?.http_path || '/mcp')
 })
 const tokenShown = computed(() => revealed.value || '<TOKEN>')
+
+// 调用统计:总调用 + 按工具(取调用过的、按次数降序的前几条;subtle)。
+const statsTotal = computed(() => info.value?.stats?.total ?? 0)
+const statsByTool = computed(() =>
+  Object.entries(info.value?.stats?.by_tool || {})
+    .filter(([, n]) => n > 0)
+    .sort((a, b) => b[1] - a[1]),
+)
 
 const localCmd = 'claude mcp add -s user flori -- /home/zelin/.local/bin/flori-mcp-docker.sh'
 const httpAddCmd = computed(
@@ -136,6 +146,16 @@ async function toggleReveal() {
           <code class="mono">{{ t.name }}</code>
           <span style="color:var(--ink-600)"> — {{ t.description }}</span>
         </div>
+      </div>
+
+      <div class="dim" style="margin-top:12px;font-size:12px;line-height:1.6">
+        调用统计:总调用 {{ statsTotal }}
+        <span v-if="statsByTool.length">
+          ·
+          <span v-for="([name, n], i) in statsByTool" :key="name">
+            <code class="mono">{{ name }}</code> {{ n }}<span v-if="i < statsByTool.length - 1"> · </span>
+          </span>
+        </span>
       </div>
     </template>
   </details>

@@ -17,6 +17,7 @@ const INFO = {
     { name: 'search', description: '全文检索' },
     { name: 'get_note', description: '取笔记 Markdown' },
   ],
+  stats: { total: 7, by_tool: { search: 5, get_note: 2 } },
 }
 
 function mountCard() {
@@ -66,6 +67,25 @@ describe('McpConnectCard', () => {
     await flushPromises()
     expect(api.get).toHaveBeenCalledWith('/api/mcp/token')
     expect(w.text()).toContain('flori-mcp-faketoken')
+  })
+
+  it('显示调用统计(总调用 + 按工具)', async () => {
+    const w = mountCard()
+    await flushPromises()
+    expect(w.text()).toContain('调用统计')
+    expect(w.text()).toContain('总调用 7')
+    expect(w.text()).toContain('search')
+  })
+
+  it('stats 缺失时仍渲染总调用 0(不报错)', async () => {
+    api.get.mockImplementation((p: string) =>
+      p === '/api/mcp/info'
+        ? Promise.resolve({ ...INFO, stats: undefined })
+        : Promise.resolve({}),
+    )
+    const w = mountCard()
+    await flushPromises()
+    expect(w.text()).toContain('总调用 0')
   })
 
   it('未配置 token 时提示去 .env 设', async () => {

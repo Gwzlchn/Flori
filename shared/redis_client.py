@@ -412,6 +412,27 @@ class RedisClient:
         except Exception:
             return {"total": 0, "by_worker": {}}
 
+    # ── MCP 工具调用计数(可观测;由 MCP server 进程 best-effort 写入,API 只读透出)──
+    # 写在 api/mcp_server/server.py 的工具包装里:总计 mcp:calls:total + 按工具 mcp:calls:tool:{name}。
+    # 读失败回零(不抛):统计是 best-effort,绝不让 /api/mcp/info 因 redis 抖动 5xx。
+
+    async def get_mcp_call_stats(self) -> dict:
+        """读 MCP 工具调用计数:{"total": int, "by_tool": {name: int}}。读失败回零。"""
+        try:
+            total_raw = await self.r.get("mcp:calls:total")
+            total = int(total_raw) if total_raw else 0
+            by_tool: dict[str, int] = {}
+            async for key in self.r.scan_iter(match="mcp:calls:tool:*"):
+                name = key.split("mcp:calls:tool:", 1)[1]
+                val = await self.r.get(key)
+                try:
+                    by_tool[name] = int(val) if val else 0
+                except (TypeError, ValueError):
+                    continue
+            return {"total": total, "by_tool": by_tool}
+        except Exception:
+            return {"total": 0, "by_tool": {}}
+
     # ── 组件心跳(scheduler 等无 DB 行的服务,与 worker:{id} 模式一致)──
     # 键 component:{name},TTL=900(=stale_window):超窗 key 自动消失 → API 读不到 → down
     # (而非永久 degraded)。scheduler 每 10s 续约,容忍丢 2 拍仍 up。

@@ -12,7 +12,7 @@ import contextlib
 import httpx
 import pytest
 
-from api.mcp_server.http_app import DomainScopeASGI, TokenAuthASGI
+from api.mcp_server.http_app import DomainScopeASGI, RateLimitASGI, TokenAuthASGI
 
 
 async def _dummy(scope, receive, send):
@@ -82,6 +82,71 @@ def test_build_http_app_smoke(monkeypatch, tmp_path):
 
     app = build_http_app()
     assert callable(app)
+
+
+# ── 限流 RateLimitASGI(纯 ASGI 时间窗计数器,最外层)──
+
+
+class TestRateLimit:
+    @pytest.mark.asyncio
+    async def test_under_limit_passes(self, monkeypatch):
+        """上限内的请求全部放行(200)。"""
+        monkeypatch.setenv("FLORI_MCP_RATE_LIMIT", "3")
+        app = RateLimitASGI(_dummy)  # 每实例独立窗口/计数,确定性
+        for _ in range(3):
+            r = await _post(app)
+            assert r.status_code == 200
+            assert r.text == "ok"
+
+    @pytest.mark.asyncio
+    async def test_over_limit_429(self, monkeypatch):
+        """超过上限 → 429,小 JSON 体。"""
+        monkeypatch.setenv("FLORI_MCP_RATE_LIMIT", "2")
+        app = RateLimitASGI(_dummy)
+        assert (await _post(app)).status_code == 200
+        assert (await _post(app)).status_code == 200
+        r = await _post(app)
+        assert r.status_code == 429
+        assert "rate_limited" in r.text
+
+    @pytest.mark.asyncio
+    async def test_disabled_never_429(self, monkeypatch):
+        """FLORI_MCP_RATE_LIMIT=0 → 关闭,任意次数都不 429。"""
+        monkeypatch.setenv("FLORI_MCP_RATE_LIMIT", "0")
+        app = RateLimitASGI(_dummy)
+        for _ in range(50):
+            assert (await _post(app)).status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_empty_disabled_default(self, monkeypatch):
+        """空值 → 用默认上限 120(此处只验远低于默认的请求不被挡)。"""
+        monkeypatch.delenv("FLORI_MCP_RATE_LIMIT", raising=False)
+        app = RateLimitASGI(_dummy)
+        for _ in range(10):
+            assert (await _post(app)).status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_lifespan_passthrough_not_counted(self, monkeypatch):
+        """非 http scope 直通且不计数:即便上限=1,lifespan 不消耗令牌。"""
+        monkeypatch.setenv("FLORI_MCP_RATE_LIMIT", "1")
+        seen = {"lifespan": 0}
+
+        async def inner(scope, receive, send):
+            # 直通安全:lifespan 仅记次数;http 回 200 ok。
+            if scope["type"] != "http":
+                seen["lifespan"] += 1
+                return
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"text/plain")]})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        # 同实例:上限=1,先吃 5 个 lifespan(若被计数则上限早耗尽),首个 http 仍 200。
+        app = RateLimitASGI(inner)
+        for _ in range(5):
+            await app({"type": "lifespan"}, None, None)
+        assert seen["lifespan"] == 5  # 全部直通内层
+        assert (await _post(app)).status_code == 200  # lifespan 未耗令牌 → http 放行
+        assert (await _post(app)).status_code == 429  # 第二个 http 超上限=1
 
 
 # ── 按库作用域 /mcp/{domain}:DomainScopeASGI 路径改写 + contextvar 设置 ──

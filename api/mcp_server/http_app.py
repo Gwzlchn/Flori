@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import hmac
 import os
+import threading
+import time
 
 import structlog
 
@@ -26,6 +28,77 @@ _warned = False
 
 def _truthy(v: str | None) -> bool:
     return (v or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+class RateLimitASGI:
+    """纯 ASGI 限流中间件:进程内全局滑动时间窗计数器(每分钟 N 次)。
+
+    为什么不缓冲/不用 BaseHTTPMiddleware:与 TokenAuthASGI 同理,要保 streamable-http 的
+    流式 SSE 不被破坏。放在**最外层**(鉴权之前):无谓的请求在做任何鉴权/路由前就被挡掉。
+
+    - 上限来自 env `FLORI_MCP_RATE_LIMIT`(请求/分钟,默认 120);0/空 = 关闭(永不 429)。
+    - 仅对 http scope 计数;lifespan / 其它 scope 直通(放行 session manager 生命周期)。
+    - 个人工具粒度:全局单桶(不分 IP/token),固定 60s 窗口 + 计数,窗口翻转即清零。
+      threading.Lock 守计数(uvicorn 单事件循环下足够,也容忍多 worker 各自独立计数)。
+    - 超限 → 429,小 JSON 体(对齐 TokenAuthASGI._deny 形态)。
+    """
+
+    _WINDOW_SEC = 60.0
+
+    def __init__(self, app):
+        self.app = app
+        self._lock = threading.Lock()
+        self._window_start = 0.0
+        self._count = 0
+
+    def _limit(self) -> int:
+        raw = (os.environ.get("FLORI_MCP_RATE_LIMIT") or "").strip()
+        if not raw:
+            return 120  # 默认 120 请求/分钟
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            return 120
+
+    def _allow(self) -> bool:
+        """消费一个令牌;返回是否放行。limit<=0 视为关闭(恒放行)。"""
+        limit = self._limit()
+        if limit <= 0:
+            return True
+        now = time.monotonic()
+        with self._lock:
+            if now - self._window_start >= self._WINDOW_SEC:
+                self._window_start = now
+                self._count = 0
+            if self._count >= limit:
+                return False
+            self._count += 1
+            return True
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            # lifespan / websocket 等直通(不计数,不破坏 session manager 生命周期)
+            await self.app(scope, receive, send)
+            return
+        if not self._allow():
+            log.warning("mcp_rate_limited", path=scope.get("path"), limit=self._limit())
+            await self._deny(send)
+            return
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    async def _deny(send) -> None:
+        body = b'{"error":"rate_limited"}'
+        await send({
+            "type": "http.response.start",
+            "status": 429,
+            "headers": [
+                (b"content-type", b"application/json; charset=utf-8"),
+                (b"content-length", str(len(body)).encode()),
+                (b"retry-after", b"60"),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
 
 
 class TokenAuthASGI:
@@ -161,5 +234,6 @@ def build_http_app():
         )
 
     app = mcp.streamable_http_app()  # Starlette ASGI;path 默认 /mcp
-    # 鉴权在最外层(先认证再作用域);作用域中间件把 /mcp/{domain} 改写到 /mcp 并 set contextvar
-    return TokenAuthASGI(DomainScopeASGI(app))
+    # 限流在最外层(先限流再做鉴权/路由,挡掉的请求不耗鉴权);鉴权次之(先认证再作用域);
+    # 作用域中间件把 /mcp/{domain} 改写到 /mcp 并 set contextvar。
+    return RateLimitASGI(TokenAuthASGI(DomainScopeASGI(app)))

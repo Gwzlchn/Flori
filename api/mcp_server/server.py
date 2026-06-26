@@ -28,6 +28,54 @@ log = structlog.get_logger()
 # 默认 None = 全局(无作用域),工具行为不变。
 current_domain: ContextVar[str | None] = ContextVar("flori_mcp_domain", default=None)
 
+# ── 工具调用计数(best-effort 可观测)──
+# 用同步 redis 客户端(MCP 工具多为同步函数,FastMCP 在线程池跑;async 工具里此 incr 极快可忽略)。
+# REDIS_URL 未设(如 stdio 本地包装)→ 懒构造返回 None → 静默 no-op。绝不因 redis 缺失/出错破坏工具。
+MCP_CALLS_TOTAL_KEY = "mcp:calls:total"
+
+
+def _mcp_calls_tool_key(name: str) -> str:
+    return f"mcp:calls:tool:{name}"
+
+
+_stats_redis = None  # 进程级懒缓存:None=未尝试 / False=不可用(REDIS_URL 未设或构造失败)
+
+
+def _get_stats_redis():
+    """懒构造同步 redis 客户端(供工具计数);REDIS_URL 未设或不可用 → None(静默 no-op)。"""
+    global _stats_redis
+    if _stats_redis is None:
+        url = os.environ.get("REDIS_URL")
+        if not url:
+            _stats_redis = False  # http server 之外(stdio)通常无 REDIS_URL → 永不再试
+            return None
+        try:
+            import redis
+
+            # 短超时:计数永远不该拖慢工具响应。decode_responses 不影响 INCR。
+            _stats_redis = redis.from_url(
+                url, socket_connect_timeout=0.5, socket_timeout=0.5
+            )
+        except Exception as e:  # noqa: BLE001 — 构造失败即放弃计数,不影响工具
+            log.warning("mcp.stats.redis_init_failed", err=str(e))
+            _stats_redis = False
+            return None
+    return _stats_redis or None
+
+
+def _record_call(name: str) -> None:
+    """记一次工具调用到 redis(总计 + 按工具);fire-and-forget,任何异常都吞掉。"""
+    r = _get_stats_redis()
+    if r is None:
+        return
+    try:
+        pipe = r.pipeline()
+        pipe.incr(MCP_CALLS_TOTAL_KEY)
+        pipe.incr(_mcp_calls_tool_key(name))
+        pipe.execute()
+    except Exception:  # noqa: BLE001 — best-effort,绝不因计数破坏工具
+        pass
+
 
 def scope_domain() -> str | None:
     """解析当前生效的作用域 domain:请求级 contextvar 优先,其次环境(stdio 用),否则 None。
@@ -78,6 +126,7 @@ def build_server(
         sc = scope_domain()
         if sc is not None:
             res = [r for r in res if r.get("domain") == sc]
+        _record_call("list_knowledge_bases")
         log.info("mcp.list_knowledge_bases", n=len(res), scope=sc)
         return res
 
@@ -98,6 +147,7 @@ def build_server(
         except Exception as e:  # noqa: BLE001 — 工具边界,记录后回抛给 client
             log.warning("mcp.search.error", query=query, domain=domain, err=str(e))
             raise
+        _record_call("search")
         log.info("mcp.search", query=query, domain=domain, n=len(res))
         return res
 
@@ -114,6 +164,7 @@ def build_server(
         except KeyError:
             log.warning("mcp.get_note.not_found", job_id=job_id, scope=scope_domain())
             raise
+        _record_call("get_note")
         log.info("mcp.get_note", job_id=job_id, has_md=bool(res.get("markdown")),
                  scope=scope_domain())
         return res
@@ -128,6 +179,7 @@ def build_server(
         if sc is not None:
             domain = sc  # 作用域端点:锁定该库
         res = kb.list_collections(db, domain)
+        _record_call("list_collections")
         log.info("mcp.list_collections", domain=domain, n=len(res))
         return res
 
@@ -142,6 +194,7 @@ def build_server(
         if sc is not None:
             domain = sc  # 作用域端点:锁定该库,忽略入参 domain
         res = kb.get_glossary(db, domain, status)
+        _record_call("get_glossary")
         log.info("mcp.get_glossary", domain=domain, n=len(res))
         return res
 
@@ -155,6 +208,7 @@ def build_server(
         if sc is not None:
             domain = sc  # 作用域端点:锁定该库,忽略入参 domain
         res = kb.get_term(db, domain, term)
+        _record_call("get_term")
         log.info("mcp.get_term", domain=domain, term=term, found=res is not None)
         return res
 
@@ -168,6 +222,7 @@ def build_server(
         if sc is not None:
             domain = sc  # 作用域端点:锁定该库,忽略入参 domain
         res = kb.concept_timeline(db, domain, granularity)
+        _record_call("concept_timeline")
         log.info("mcp.concept_timeline", domain=domain, granularity=granularity)
         return res
 
