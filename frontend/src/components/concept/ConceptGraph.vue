@@ -139,6 +139,9 @@ async function render() {
   if (network) { network.destroy(); network = null }
   nodesDS = null
   if (!containerEl.value || !data.value || !data.value.nodes?.length) return
+  // 容器还没真实尺寸(tab 隐藏/v-show display:none)→ 暂不建图,等 ResizeObserver 在容器拿到尺寸后再 render。
+  // 否则 vis-network 会建在 0×0 容器里、autoResize 之后也救不回(画布恒 0×0)。
+  if (!containerEl.value.clientWidth || !containerEl.value.clientHeight) return
   // 懒加载图谱库(首屏不含);jsdom/无 canvas 测试环境优雅跳过——数据/侧栏/筛选逻辑仍可测。
   try {
     const vis: any = await import('vis-network/standalone')
@@ -233,7 +236,8 @@ function refit() {
 onMounted(async () => {
   await load()
   if (typeof ResizeObserver !== 'undefined' && containerEl.value) {
-    ro = new ResizeObserver(() => refit())
+    // 容器尺寸变化(tab 由隐藏变可见、首次拿到尺寸)时:还没建图就 render(此刻容器已有尺寸);已建则 refit。
+    ro = new ResizeObserver(() => { if (!network) { void render() } else { refit() } })
     ro.observe(containerEl.value)
   }
 })
