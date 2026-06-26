@@ -562,40 +562,36 @@ const usageByProvider = computed(() => {
       <div class="metric"><div class="v">{{ doneCount }}</div><div class="l">累计完成 · 吞吐</div></div>
     </div>
 
-    <!-- 系统状态:整体版本(系统级,单一来源)+ 部署 + 磁盘 + 内容 + 吞吐 + 中转 -->
-    <div class="card pad" style="margin-bottom:14px;display:flex;align-items:center;gap:8px 16px;flex-wrap:wrap">
-      <span class="badge b-mut" :title="systemVersion">系统 {{ verSem(systemVersion) }}<span v-if="verBuild(systemVersion)" style="font-weight:400;opacity:.65"> · {{ verBuild(systemVersion) }}</span></span>
-      <span style="font-size:12.5px;color:var(--ink-500)">{{ deployMode }}</span>
-      <span class="sep" style="color:var(--ink-300)">·</span>
-      <span class="badge b-mut"><HardDrive :size="12" />磁盘</span>
-      <template v-if="liveDisk && liveDisk.total_gb >= 0">
-        <span style="font-size:13px;color:var(--ink-700)">
-          {{ liveDisk.used_gb }}/{{ liveDisk.total_gb }}GB
-          <b :style="{ color: liveDisk.used_pct > 90 ? 'var(--bad)' : 'var(--ink-900)' }">{{ liveDisk.used_pct }}%</b>
-        </span>
-        <span class="dim-g" style="flex:1;min-width:120px;max-width:280px">
-          <span class="track"><span :style="{ width: `${Math.min(100, liveDisk.used_pct)}%`, background: diskBarColor }"></span></span>
-        </span>
-        <span style="font-size:12.5px;color:var(--ink-500)">剩 {{ liveDisk.available_gb }}GB</span>
-      </template>
-      <span v-else class="dim" style="font-size:13px">磁盘信息不可用</span>
-      <span class="sep" style="color:var(--ink-300)">·</span>
-      <span class="badge b-mut"><Database :size="12" />内容</span>
-      <span v-if="liveJobs" style="font-size:13px;color:var(--ink-700)">
-        共 <b>{{ liveJobs.total }}</b> · 处理中 <b>{{ liveJobs.processing }}</b> ·
-        失败 <b :style="{ color: liveJobs.failed > 0 ? 'var(--bad)' : 'var(--ink-900)' }">{{ liveJobs.failed }}</b>
-      </span>
-      <template v-if="throughput">
-        <span class="sep" style="color:var(--ink-300)">·</span>
-        <span style="font-size:12.5px;color:var(--ink-500)">近 1h 完成 {{ throughput.done }} · 失败 {{ throughput.failed }}</span>
-      </template>
-      <template v-if="traffic && (traffic.pull_bytes > 0 || traffic.push_bytes > 0)">
-        <span class="sep" style="color:var(--ink-300)">·</span>
-        <span class="badge b-mut">中转</span>
-        <span style="font-size:12.5px;color:var(--ink-500)" title="网关产物代理:出库=worker 拉取(NAS→worker) / 入库=回传(worker→NAS)">
-          出库 {{ fmtBytes(traffic.pull_bytes) }} · 入库 {{ fmtBytes(traffic.push_bytes) }}
-        </span>
-      </template>
+    <!-- 系统状态:标签化网格(版本/部署/磁盘/内容/近1h/中转),避免挤成一行 -->
+    <div class="card pad statgrid" style="margin-bottom:14px">
+      <div class="st-cell">
+        <div class="st-lbl">版本</div>
+        <div class="st-val" :title="systemVersion">系统 {{ verSem(systemVersion) }}<span v-if="verBuild(systemVersion)" class="dim"> · {{ verBuild(systemVersion) }}</span></div>
+      </div>
+      <div class="st-cell">
+        <div class="st-lbl">部署</div>
+        <div class="st-val">{{ deployMode }}</div>
+      </div>
+      <div class="st-cell st-wide">
+        <div class="st-lbl"><HardDrive :size="11" />磁盘</div>
+        <template v-if="liveDisk && liveDisk.total_gb >= 0">
+          <div class="st-val">{{ liveDisk.used_gb }}/{{ liveDisk.total_gb }}GB <b :style="{ color: liveDisk.used_pct > 90 ? 'var(--bad)' : 'var(--ink-900)' }">{{ liveDisk.used_pct }}%</b><span class="dim" style="margin-left:6px">剩 {{ liveDisk.available_gb }}GB</span></div>
+          <span class="track" style="margin-top:5px;max-width:240px"><span :style="{ width: `${Math.min(100, liveDisk.used_pct)}%`, background: diskBarColor }"></span></span>
+        </template>
+        <div v-else class="st-val dim">不可用</div>
+      </div>
+      <div class="st-cell">
+        <div class="st-lbl"><Database :size="11" />内容(作业)</div>
+        <div class="st-val" v-if="liveJobs">共 {{ liveJobs.total }} · 处理中 {{ liveJobs.processing }} · 失败 <b :style="{ color: liveJobs.failed > 0 ? 'var(--bad)' : 'var(--ink-900)' }">{{ liveJobs.failed }}</b></div>
+      </div>
+      <div class="st-cell">
+        <div class="st-lbl">近 1h</div>
+        <div class="st-val">完成 {{ throughput?.done ?? 0 }} · 失败 {{ throughput?.failed ?? 0 }}</div>
+      </div>
+      <div class="st-cell" v-if="traffic && (traffic.pull_bytes > 0 || traffic.push_bytes > 0)">
+        <div class="st-lbl" title="网关产物代理:出库=worker 拉取(NAS→worker) / 入库=回传(worker→NAS)">网关中转</div>
+        <div class="st-val">出库 {{ fmtBytes(traffic.pull_bytes) }} · 入库 {{ fmtBytes(traffic.push_bytes) }}</div>
+      </div>
     </div>
 
     <!-- 最近事件:概览只摘 5 条,全部 → /system/events(可按类型/时间筛选)-->
@@ -896,4 +892,12 @@ summary::-webkit-details-marker { display: none; }
 .tp-tunnels { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; font-size: 11.5px; color: var(--ink-500); }
 .tp-tn { font-variant-numeric: tabular-nums; }
 .tp-tn b { color: var(--ink-700); font-weight: 600; }
+
+/* 系统状态标签化网格(替代挤成一行) */
+.statgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px 22px; align-items: start; }
+.st-wide { grid-column: span 2; }
+.st-cell { min-width: 0; }
+.st-lbl { display: flex; align-items: center; gap: 4px; font-size: 10.5px; color: var(--ink-400); letter-spacing: .03em; margin-bottom: 3px; }
+.st-val { font-size: 13px; color: var(--ink-800); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 560px) { .st-wide { grid-column: span 1; } }
 </style>
