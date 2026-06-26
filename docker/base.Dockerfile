@@ -38,6 +38,7 @@ COPY steps/ steps/
 COPY api/ api/
 COPY scheduler/ scheduler/
 COPY worker/ worker/
+COPY tunnel_stats/ tunnel_stats/
 COPY configs/ configs/
 # prompts_dir 运行时解析为 /data/prompts(config.data_dir/'prompts')。此处 build 期把仓库
 # configs/prompts(profiles/styles 等)塞进镜像 /data/prompts。注意:生产 /data 是命名卷,首建空卷
