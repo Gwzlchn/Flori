@@ -69,6 +69,11 @@ export const useWorkerStore = defineStore('workers', () => {
   async function fetchUsage(): Promise<UsageAggregate> {
     return await api.get<UsageAggregate>('/api/usage')
   }
+  // 通联富时间线(按节点切片画趋势):/api/link-traffic/history → samples[](最近在前)。
+  async function fetchLinkTrafficHistory(): Promise<Array<{ ts: number; gw?: any; tun?: any; t?: any; w?: any }>> {
+    const r = await api.get<{ samples?: any[] }>('/api/link-traffic/history?limit=120')
+    return r?.samples ?? []
+  }
 
   // LiteLLM 价表:状态(更新时间 + 模型数)、手动更新(拉最新)。
   async function fetchPricing(): Promise<PricingStatus> {
@@ -87,7 +92,7 @@ export const useWorkerStore = defineStore('workers', () => {
     workers, loading, fetchAll, pause, resume,
     updateNote, updateTags, remove, mintToken, fetchJobs,
     fetchPoolLimits, savePoolLimits,
-    fetchFullStatus, fetchEvents, fetchUsage,
+    fetchFullStatus, fetchEvents, fetchUsage, fetchLinkTrafficHistory,
     fetchPricing, refreshPricing, fetchPipelines,
   }
 })

@@ -187,7 +187,7 @@ export interface LinkTraffic {
   ts: number
   gateway: { pull: number; push: number; pull_bps: number; push_bps: number }  // 远程 worker ↔ ECS 网关(产物代理)
   tunnel: { rx: number; tx: number; rx_bps: number; tx_bps: number; up: boolean; tunnels: TunnelStat[] }  // ECS ↔ NAS 隧道
-  timeline?: { ts: number; gw_pull: number; gw_push: number; tun_rx: number; tun_tx: number }[]  // 近 ~20min 样本(趋势)
+  // 注:按节点时间趋势走单独端点 /api/link-traffic/history(富时间线),不再内嵌于快照。
 }
 
 // WS /api/ws/global 每 2s 推 live 子集;本页只可靠消费这四段。

@@ -87,8 +87,9 @@ async def main() -> None:
             tunnels = _read_tunnels()
             rx = sum(t["rx"] for t in tunnels)
             tx = sum(t["tx"] for t in tunnels)
-            pull = (await redis.get_traffic("pull"))["total"]
-            push = (await redis.get_traffic("push"))["total"]
+            pull_d = await redis.get_traffic("pull")
+            push_d = await redis.get_traffic("push")
+            pull, push = pull_d["total"], push_d["total"]
             now = time.time()
 
             rx_bps = tx_bps = gw_pull_bps = gw_push_bps = 0.0
@@ -114,10 +115,18 @@ async def main() -> None:
                     "tunnels": sorted(tunnels, key=lambda t: t["name"]),
                 },
             })
-            await redis.push_traffic_sample(
-                {"ts": now, "gw_pull": pull, "gw_push": push, "tun_rx": rx, "tun_tx": tx},
-                TIMELINE_CAP,
-            )
+            # 富时间线样本:总量 + 每隧道 + 每(远程)worker 累计字节;供 /api/link-traffic/history → 按节点切片画趋势。
+            by_worker = {
+                wid: {"pull": pull_d["by_worker"].get(wid, 0), "push": push_d["by_worker"].get(wid, 0)}
+                for wid in set(pull_d["by_worker"]) | set(push_d["by_worker"])
+            }
+            await redis.push_traffic_sample({
+                "ts": round(now, 1),
+                "gw": {"pull": pull, "push": push},
+                "tun": {"rx": rx, "tx": tx},
+                "t": {t["name"]: {"rx": t["rx"], "tx": t["tx"]} for t in tunnels},
+                "w": by_worker,
+            }, TIMELINE_CAP)
         except Exception:
             # 连接级异常:重连后下一轮再试,不让上报器死循环退出。
             try:

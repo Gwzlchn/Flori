@@ -364,13 +364,13 @@ async def build_full_status(app) -> dict:
     except Exception:
         logger.warning("traffic_failed")
 
-    # 链路流量快照:ECS↔NAS 隧道 rx/tx + 每隧道 + up + 网关聚合 + 当前速率,由 tunnel_stats 上报器周期写。
-    # 附近 60 个时间线样本(~20min)供前端画趋势 sparkline。无上报器/无边缘 → None,前端「通联」区不渲染。
+    # 链路流量【快照】:ECS↔NAS 隧道 rx/tx + 每隧道 + up + 网关聚合 + 当前速率,由 tunnel_stats 上报器周期写。
+    # 只放当前快照(轻);按节点时间趋势走单独端点 /api/link-traffic/history(富时间线,前端点节点时才用)。
+    # 无上报器/无边缘 → None,前端「通联」区不渲染。
     link_traffic = None
     try:
         lt = await redis.get_link_traffic()
         if isinstance(lt, dict):  # 仅真实快照(dict)才透出;防 redis mock/异常对象流进响应
-            lt["timeline"] = await redis.get_traffic_timeline(60)
             link_traffic = lt
     except Exception:
         logger.warning("link_traffic_failed")
@@ -415,6 +415,19 @@ async def system_status(request: Request):
     """全量系统状态(version + 组件健康 + workers/pools/jobs/disk + throughput_1h)。
     components.detail 不暴露密钥/连接串;逐组件探测失败→该组件 unknown/down,整体不 500。"""
     return await build_full_status(request.app)
+
+
+@router.get("/link-traffic/history", dependencies=[Depends(verify_token)])
+async def link_traffic_history(request: Request, limit: int = 120):
+    """通联富时间线(tunnel_stats 上报器周期采的累计字节样本,最近在前):
+    每样本含 总量 gw/tun + 每隧道 t{} + 每远程 worker w{}。前端「通联」树点节点 → 切该节点序列算趋势。
+    读失败/无上报器 → 空。limit 截断(默认 120 ≈ 40min @20s)。"""
+    redis = request.app.state.redis
+    try:
+        samples = await redis.get_traffic_timeline(max(1, min(limit, 360)))
+    except Exception:
+        samples = []
+    return {"samples": samples}
 
 
 @router.get("/usage", dependencies=[Depends(verify_token)])

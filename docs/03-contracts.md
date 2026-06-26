@@ -322,12 +322,26 @@ GET /api/jobs/{id}/notes/transcript     → text/markdown (逐字稿)
     "ts": 1782500000.0,
     "gateway": {"pull": 12884901888, "push": 3221225472, "pull_bps": 1048576.0, "push_bps": 0.0},
     "tunnel": {"rx": 52934963, "tx": 29419407, "rx_bps": 4096.0, "tx_bps": 2048.0, "up": true,
-      "tunnels": [{"name": "api", "rx": 21013394, "tx": 19238566, "fwd": "127.0.0.1:8000:api:8000"}]},
-    "timeline": [{"ts": 1782499980.0, "gw_pull": 12884900000, "gw_push": 3221225472, "tun_rx": 52930000, "tun_tx": 29418000}]
+      "tunnels": [{"name": "api", "rx": 21013394, "tx": 19238566, "fwd": "127.0.0.1:8000:api:8000"}]}
   },
-  "//link_traffic": "通联/链路流量快照,由 tunnel_stats 上报器(容器 flori-tunnel-stats,pid:host 读各 autossh 隧道 eth0 /proc/net/dev)周期写 redis link:traffic + traffic:timeline,/api/status 透出。gateway=远程 worker↔ECS 网关(产物代理,同 traffic);tunnel=ECS↔NAS 反向 SSH 隧道物理字节(含 api/redis/minio/dozzle/mcp 全部),up=有隧道进程,tunnels[]=每隧道累计;*_bps=上一采样周期速率(字节/秒);timeline=近 ~60 样本(趋势)。无上报器/无边缘 → null"
+  "//link_traffic": "通联/链路流量【当前快照】,由 tunnel_stats 上报器(容器 flori-tunnel-stats,pid:host 读各 autossh 隧道 eth0 /proc/net/dev)周期写 redis link:traffic,/api/status 透出。gateway=远程 worker↔ECS 网关(产物代理,同 traffic);tunnel=ECS↔NAS 反向 SSH 隧道物理字节(含 api/redis/minio/dozzle/mcp 全部),up=有隧道进程,tunnels[]=每隧道累计;*_bps=上一采样周期速率(字节/秒)。按节点时间趋势走 GET /api/link-traffic/history。无上报器/无边缘 → null"
 }
 ```
+
+#### GET /api/link-traffic/history — 通联富时间线(按节点趋势)
+
+通联「树」点节点/链路时取该节点的时间序列画趋势。tunnel_stats 上报器周期采样累计字节(最近在前)。`?limit=`（默认 120，封顶 360）。无上报器 → `{"samples": []}`。
+
+```json
+{"samples": [
+  {"ts": 1782500000.0,
+   "gw": {"pull": 12884901888, "push": 3221225472},
+   "tun": {"rx": 52934963, "tx": 29419407},
+   "t": {"api": {"rx": 21013394, "tx": 19238566}, "minio": {"rx": 11409690, "tx": 4168538}},
+   "w": {"gpu-DXP4800": {"pull": 8000000, "push": 2000000}}}
+]}
+```
+- `gw`=网关聚合累计、`tun`=隧道总累计、`t`=每隧道累计、`w`=每远程 worker 网关累计（cumulative;前端取相邻差算速率/趋势）。
 
 #### GET /api/usage — AI 用量聚合
 

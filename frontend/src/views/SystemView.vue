@@ -15,6 +15,7 @@ import { useGlobalWs } from '../composables/useGlobalWs'
 import StatusBadge from '../components/common/StatusBadge.vue'
 import ComponentCard from '../components/system/ComponentCard.vue'
 import McpConnectCard from '../components/system/McpConnectCard.vue'
+import LinkTopologyTree from '../components/system/LinkTopologyTree.vue'
 import { fmtDuration, fmtRelative } from '../utils/datetime'
 import { fmtBytes } from '../utils/format'
 import { workerDotClass, workerComputeDesc } from '../utils/worker'
@@ -76,7 +77,7 @@ async function doRefreshPricing() {
 function openPricingRaw() { window.open('/api/pricing/raw', '_blank') }
 
 async function refreshAll() {
-  await Promise.all([loadStatus(), workerStore.fetchAll(), loadPoolLimits(), loadUsage(), loadEvents(), loadPricing()])
+  await Promise.all([loadStatus(), workerStore.fetchAll(), loadPoolLimits(), loadUsage(), loadEvents(), loadPricing(), loadHistory()])
 }
 
 // 进页 1 次 + 每 15s 轮询（组件/版本/吞吐/用量/事件）。WS 负责计数实时跳动。
@@ -148,32 +149,62 @@ const traffic = computed(() => status.value?.traffic ?? null)
 
 // ── 通联 / 链路流量 ──
 const link = computed<LinkTraffic | null>(() => status.value?.link_traffic ?? null)
-// 远程 worker = 经网关/隧道接入(有 remote_addr);带过中转流量的优先,按总量降序。
-const remoteWorkers = computed(() =>
-  workerStore.workers
-    .filter(w => w.remote_addr)
-    .map(w => ({ w, pull: w.traffic?.pull ?? 0, push: w.traffic?.push ?? 0 }))
-    .sort((a, b) => (b.pull + b.push) - (a.pull + a.push)),
-)
-// 是否有可展示的通联数据(有上报器快照,或有远程 worker)。无则不渲染「通联」区。
-const hasLink = computed(() => !!link.value || remoteWorkers.value.length > 0)
+const hasLink = computed(() => !!link.value || workerStore.workers.some(w => w.remote_addr))
 const fmtRate = (bps: number | undefined) => (bps && bps > 0 ? `${fmtBytes(bps)}/s` : '—')
-// 趋势 sparkline:取时间线某字段(最近在前→反转为时间正序),归一化为 0..1 高度点。
-function spark(field: 'tun_rx' | 'tun_tx' | 'gw_pull' | 'gw_push'): number[] {
-  const tl = link.value?.timeline
-  if (!tl || tl.length < 2) return []
-  const vals = [...tl].reverse().map(s => s[field] ?? 0)
-  // 累计量 → 相邻差(速率代理),负值(重启清零)截 0。
-  const deltas: number[] = []
-  for (let i = 1; i < vals.length; i++) deltas.push(Math.max(0, vals[i] - vals[i - 1]))
-  const max = Math.max(...deltas, 1)
-  return deltas.map(d => d / max)
+
+// 选中拓扑节点(默认 ECS=隧道,数据最丰富);富时间线供按节点切片画趋势。
+const selectedNode = ref('ecs')
+const history = ref<Array<{ ts: number; gw?: any; tun?: any; t?: any; w?: any }>>([])
+async function loadHistory() {
+  try {
+    history.value = await workerStore.fetchLinkTrafficHistory()
+  } catch {
+    history.value = []  // 无上报器/边缘离线 → 空,详情显「累积中」
+  }
 }
-// 0..1 高度数组 → SVG polyline points(x 等分 0..100,y 翻转留边)。
-function sparkPoints(hs: number[]): string {
-  if (hs.length < 2) return ''
-  const n = hs.length
-  return hs.map((h, i) => `${((i / (n - 1)) * 100).toFixed(1)},${((1 - h) * 17 + 1.5).toFixed(1)}`).join(' ')
+
+// 选中节点详情:累计 + 当前速率 + 近期速率序列(相邻样本累计差/dt)。节点语义不同:隧道=rx/tx,worker=pull/push。
+const detail = computed(() => {
+  const tl = [...history.value].reverse()  // 时间正序
+  const rate = (pick: (s: any) => { a: number; b: number }) => {
+    const d: number[] = [], u: number[] = []
+    for (let i = 1; i < tl.length; i++) {
+      const dt = (tl[i].ts - tl[i - 1].ts) || 1
+      const A = pick(tl[i]), B = pick(tl[i - 1])
+      d.push(Math.max(0, (A.a - B.a) / dt)); u.push(Math.max(0, (A.b - B.b) / dt))
+    }
+    return { d, u, peak: Math.max(...d, ...u, 1) }
+  }
+  const span = tl.length > 1 ? `${Math.max(1, Math.round((tl[tl.length - 1].ts - tl[0].ts) / 60))}min` : '—'
+  const id = selectedNode.value
+  if (id === 'ecs' || id === 'nas') {
+    const r = rate(s => ({ a: s.tun?.rx ?? 0, b: s.tun?.tx ?? 0 }))
+    return {
+      title: id === 'nas' ? 'NAS · 经隧道收发(ECS↔NAS)' : 'ECS ↔ NAS 隧道', dl: '↓ 下行', ul: '↑ 上行', span,
+      cum: `↓${fmtBytes(link.value?.tunnel.rx ?? 0)} ↑${fmtBytes(link.value?.tunnel.tx ?? 0)}`,
+      rate: `↓${fmtRate(link.value?.tunnel.rx_bps)} ↑${fmtRate(link.value?.tunnel.tx_bps)}`,
+      down: r.d, up: r.u, peak: r.peak, tunnels: link.value?.tunnel.tunnels ?? [], wid: '',
+      linkDesc: link.value ? (link.value.tunnel.up ? '隧道 通' : '隧道 断') : '',
+    }
+  }
+  if (id.startsWith('w:')) {
+    const wid = id.slice(2)
+    const w = workerStore.workers.find(x => x.id === wid)
+    const r = rate(s => ({ a: s.w?.[wid]?.pull ?? 0, b: s.w?.[wid]?.push ?? 0 }))
+    return {
+      title: `worker · ${w?.hostname || wid}`, dl: '↓ 拉取(出库)', ul: '↑ 回传(入库)', span,
+      cum: `↓${fmtBytes(w?.traffic?.pull ?? 0)} ↑${fmtBytes(w?.traffic?.push ?? 0)}`, rate: '',
+      down: r.d, up: r.u, peak: r.peak, tunnels: [], wid,
+      linkDesc: w?.remote_addr ? `远程·网关接入 ${w.remote_addr}` : '本地·直连',
+    }
+  }
+  return null
+})
+// 速率序列 → SVG polyline points(down/up 共享峰值 max 以可比;x 等分 0..100,y 翻转留边)。
+function chartPoints(arr: number[], max: number): string {
+  if (arr.length < 2) return ''
+  const n = arr.length
+  return arr.map((v, i) => `${((i / (n - 1)) * 100).toFixed(1)},${((1 - v / (max || 1)) * 25 + 1.5).toFixed(1)}`).join(' ')
 }
 
 // ── Worker 列表派生 ──
@@ -645,49 +676,26 @@ const usageByProvider = computed(() => {
     <!-- 通联 / 链路流量:远程 worker ↔ ECS 网关 ⇄ 隧道 ⇄ NAS -->
     <div v-if="hasLink" class="seclabel" style="margin-bottom:12px"><Network :size="14" />通联 · 链路流量</div>
     <div v-if="hasLink" class="card pad" style="margin-bottom:24px">
-      <div class="topo">
-        <div class="topo-node">
-          <div class="topo-node-h"><Cpu :size="13" />远程 worker · {{ remoteWorkers.length }}</div>
-          <div v-if="remoteWorkers.length" class="topo-sub">
-            <div v-for="r in remoteWorkers.slice(0, 6)" :key="r.w.id" class="topo-wl">
-              <span class="topo-wn" :title="r.w.remote_addr || ''">{{ r.w.hostname || r.w.id }}</span>
-              <span class="topo-wb">↓{{ fmtBytes(r.pull) }} ↑{{ fmtBytes(r.push) }}</span>
-            </div>
-          </div>
-          <div v-else class="topo-empty">无远程 worker</div>
+      <LinkTopologyTree :workers="workerStore.workers" :link="link" :selected="selectedNode" @select="selectedNode = $event" />
+      <!-- 选中节点详情:累计 + 当前速率 + 近期趋势(来自 /api/link-traffic/history 按节点切片)-->
+      <div v-if="detail" class="tp-detail">
+        <div class="tp-detail-h">
+          {{ detail.title }}
+          <span class="tp-detail-cum">{{ detail.cum }}<template v-if="detail.rate"> · 速率 {{ detail.rate }}</template></span>
+          <span v-if="detail.linkDesc" class="tp-detail-tag">{{ detail.linkDesc }}</span>
+          <span v-if="detail.wid" class="tp-detail-link" @click="router.push(`/workers/${detail.wid}`)">worker 详情 →</span>
         </div>
-        <div class="topo-edge">
-          <div class="topo-edge-dir">↑入 {{ fmtBytes(link?.gateway.push ?? traffic?.push_bytes ?? 0) }} <span class="topo-rate">{{ fmtRate(link?.gateway.push_bps) }}</span></div>
-          <div class="topo-arrow">⇆ 网关</div>
-          <div class="topo-edge-dir">↓出 {{ fmtBytes(link?.gateway.pull ?? traffic?.pull_bytes ?? 0) }} <span class="topo-rate">{{ fmtRate(link?.gateway.pull_bps) }}</span></div>
+        <div v-if="detail.down.length > 1" class="tp-chart">
+          <svg viewBox="0 0 100 28" preserveAspectRatio="none">
+            <polyline :points="chartPoints(detail.down, detail.peak)" class="ch-d" />
+            <polyline :points="chartPoints(detail.up, detail.peak)" class="ch-u" />
+          </svg>
+          <span class="tp-chart-leg"><i class="ch-dd"></i>{{ detail.dl }} <i class="ch-ud"></i>{{ detail.ul }}<span class="dim" style="margin-left:6px">近 {{ detail.span }}</span></span>
         </div>
-        <div class="topo-node topo-ecs">
-          <div class="topo-node-h"><Server :size="13" />ECS 边缘</div>
-          <div class="topo-sub topo-center">公网入口<br />Caddy · 网关 · 隧道</div>
+        <div v-else class="tp-detail-empty">趋势数据累积中…(上报器每 20s 采样;需边缘在线)</div>
+        <div v-if="detail.tunnels.length" class="tp-tunnels">
+          <span class="tp-tn" v-for="t in detail.tunnels" :key="t.name" :title="t.fwd"><b>{{ t.name }}</b> ↓{{ fmtBytes(t.rx) }} ↑{{ fmtBytes(t.tx) }}</span>
         </div>
-        <div class="topo-edge">
-          <div class="topo-edge-dir">↑上 {{ fmtBytes(link?.tunnel.tx ?? 0) }} <span class="topo-rate">{{ fmtRate(link?.tunnel.tx_bps) }}</span></div>
-          <div class="topo-arrow" :class="link ? (link.tunnel.up ? 'up' : 'down') : ''">⇆ 隧道{{ link ? (link.tunnel.up ? ' 通' : ' 断') : '' }}</div>
-          <div class="topo-edge-dir">↓下 {{ fmtBytes(link?.tunnel.rx ?? 0) }} <span class="topo-rate">{{ fmtRate(link?.tunnel.rx_bps) }}</span></div>
-        </div>
-        <div class="topo-node">
-          <div class="topo-node-h"><Database :size="13" />NAS</div>
-          <div class="topo-sub topo-center">api · minio<br />redis · scheduler</div>
-        </div>
-      </div>
-
-      <div v-if="link && link.tunnel.tunnels.length" class="topo-tunnels">
-        <span class="topo-tn" v-for="t in link.tunnel.tunnels" :key="t.name" :title="t.fwd"><b>{{ t.name }}</b> ↓{{ fmtBytes(t.rx) }} ↑{{ fmtBytes(t.tx) }}</span>
-      </div>
-      <div v-else-if="link" class="topo-tunnels"><span class="topo-empty">隧道无连接(ECS 不可达?)</span></div>
-
-      <div v-if="link && link.timeline && link.timeline.length > 2" class="topo-spark">
-        <span class="topo-spark-l">隧道趋势</span>
-        <svg viewBox="0 0 100 20" preserveAspectRatio="none" class="spk">
-          <polyline :points="sparkPoints(spark('tun_rx'))" class="spk-rx" />
-          <polyline :points="sparkPoints(spark('tun_tx'))" class="spk-tx" />
-        </svg>
-        <span class="topo-spark-leg"><i class="spk-d spk-rx-d"></i>下行 <i class="spk-d spk-tx-d"></i>上行</span>
       </div>
     </div>
 
@@ -888,34 +896,24 @@ const usageByProvider = computed(() => {
 @keyframes spin { to { transform: rotate(360deg); } }
 summary::-webkit-details-marker { display: none; }
 
-/* 通联 / 链路流量拓扑 */
-.topo { display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap; }
-.topo-node { flex: 1 1 150px; min-width: 130px; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 9px 11px; background: var(--surface); }
-.topo-ecs { background: var(--brand-50); border-color: var(--brand-200); }
-.topo-node-h { display: flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 600; color: var(--ink-800); margin-bottom: 6px; }
-.topo-sub { font-size: 11px; color: var(--ink-500); line-height: 1.5; }
-.topo-center { text-align: center; padding-top: 4px; }
-.topo-empty { font-size: 11px; color: var(--ink-400); }
-.topo-wl { display: flex; justify-content: space-between; gap: 8px; }
-.topo-wn { color: var(--ink-700); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 90px; }
-.topo-wb { color: var(--ink-500); flex: none; font-variant-numeric: tabular-nums; }
-.topo-edge { flex: 0 0 auto; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 2px; padding: 0 4px; min-width: 96px; }
-.topo-edge-dir { font-size: 11px; color: var(--ink-600); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.topo-rate { color: var(--ink-400); }
-.topo-arrow { font-size: 11.5px; font-weight: 600; color: var(--ink-500); padding: 1px 0; }
-.topo-arrow.up { color: var(--ok); }
-.topo-arrow.down { color: var(--bad); }
-.topo-tunnels { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line-soft); font-size: 11.5px; color: var(--ink-500); }
-.topo-tn { font-variant-numeric: tabular-nums; }
-.topo-tn b { color: var(--ink-700); font-weight: 600; }
-.topo-spark { display: flex; align-items: center; gap: 9px; margin-top: 10px; }
-.topo-spark-l { font-size: 11px; color: var(--ink-400); flex: none; }
-.spk { width: 160px; height: 22px; flex: none; }
-.spk polyline { fill: none; stroke-width: 1.4; vector-effect: non-scaling-stroke; }
-.spk-rx { stroke: var(--brand-500); }
-.spk-tx { stroke: var(--warn); }
-.topo-spark-leg { font-size: 10.5px; color: var(--ink-400); display: inline-flex; align-items: center; gap: 4px; }
-.spk-d { width: 8px; height: 2.5px; border-radius: 1px; display: inline-block; }
-.spk-rx-d { background: var(--brand-500); }
-.spk-tx-d { background: var(--warn); }
+/* 通联 / 链路流量:选中节点详情面板(树本身样式在 LinkTopologyTree.vue) */
+.tp-detail { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--line-soft); }
+.tp-detail-h { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; font-size: 13px; font-weight: 600; color: var(--ink-800); }
+.tp-detail-cum { font-weight: 400; font-size: 12px; color: var(--ink-500); font-variant-numeric: tabular-nums; }
+.tp-detail-tag, .tp-detail .tp-detail-h > .tp-detail-tag { font-weight: 400; font-size: 11px; color: var(--ink-400); }
+.tp-detail-link { font-weight: 400; font-size: 11.5px; color: var(--brand-600); cursor: pointer; margin-left: auto; }
+.tp-detail-link:hover { text-decoration: underline; }
+.tp-detail-empty { font-size: 11.5px; color: var(--ink-400); margin-top: 8px; }
+.tp-chart { display: flex; align-items: center; gap: 10px; margin-top: 9px; }
+.tp-chart svg { width: 220px; height: 30px; flex: none; }
+.tp-chart polyline { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.ch-d { stroke: var(--brand-500); }
+.ch-u { stroke: var(--warn); }
+.tp-chart-leg { font-size: 10.5px; color: var(--ink-400); display: inline-flex; align-items: center; gap: 5px; }
+.tp-chart-leg i { width: 9px; height: 2.5px; border-radius: 1px; display: inline-block; }
+.tp-chart-leg .ch-dd { background: var(--brand-500); }
+.tp-chart-leg .ch-ud { background: var(--warn); }
+.tp-tunnels { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; font-size: 11.5px; color: var(--ink-500); }
+.tp-tn { font-variant-numeric: tabular-nums; }
+.tp-tn b { color: var(--ink-700); font-weight: 600; }
 </style>
