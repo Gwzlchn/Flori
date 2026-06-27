@@ -85,9 +85,13 @@ describe('RadarView', () => {
     expect(w.text()).toContain('本周这个知识库还没有新动静')
   })
 
-  it('点击「生成本周摘要」走 POST digest 并渲染 markdown', async () => {
-    api.get.mockResolvedValue(RADAR)
-    api.post.mockResolvedValue({ markdown: '## 本周摘要\n量化交易是焦点。', window: RADAR.window })
+  it('点击「生成本周摘要」→ POST digest(202) → 轮询 result 渲染 markdown', async () => {
+    const md = '## 本周摘要\n量化交易是焦点。'
+    api.get.mockImplementation((p: string) =>
+      p.includes('/result')
+        ? Promise.resolve({ status: 'done', task_id: 'at_d', markdown: md, content: md })
+        : Promise.resolve(RADAR))
+    api.post.mockResolvedValue({ task_id: 'at_d', window: RADAR.window })
     const w = mountView()
     await flushPromises()
     const btn = w.findAll('button').find((b) => b.text().includes('生成本周摘要'))!
@@ -95,8 +99,23 @@ describe('RadarView', () => {
     await btn.trigger('click')
     await flushPromises()
     expect(api.post).toHaveBeenCalledWith('/api/domains/finance/digest?window_days=7')
+    expect(api.get).toHaveBeenCalledWith('/api/ai-tasks/at_d/result')
     expect(w.text()).toContain('本周摘要')
     expect(w.text()).toContain('量化交易是焦点')
+  })
+
+  it('摘要轮询 result 返回 error → 显示错误文案', async () => {
+    api.get.mockImplementation((p: string) =>
+      p.includes('/result')
+        ? Promise.resolve({ status: 'error', task_id: 'at_d', error: 'provider down' })
+        : Promise.resolve(RADAR))
+    api.post.mockResolvedValue({ task_id: 'at_d', window: RADAR.window })
+    const w = mountView()
+    await flushPromises()
+    const btn = w.findAll('button').find((b) => b.text().includes('生成本周摘要'))!
+    await btn.trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain('provider down')
   })
 
   it('点击概念跳转概念页;点击最近内容跳转内容详情', async () => {

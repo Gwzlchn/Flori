@@ -6,8 +6,10 @@ import MarkdownViewer from '../components/notes/MarkdownViewer.vue'
 import { fmtDateTime } from '../utils/datetime'
 import { contentTypeIcon, contentTypePill, contentTypeLabel } from '../utils/contentType'
 import {
-  Radar, ChevronRight, TrendingUp, Sparkles, Flame, LayoutList, FileText,
+  Radar, ChevronRight, TrendingUp, Sparkles, Flame, LayoutList, FileText, ScrollText,
 } from 'lucide-vue-next'
+import AiTaskAuditPanel from '../components/job/AiTaskAuditPanel.vue'
+import type { AiTaskResult } from '../types'
 
 // 本周知识雷达:GET /radar(无 LLM,秒开)渲染各板块;「生成本周摘要」按钮 → POST /digest(LLM)。
 // 形状(后端 api/services/radar.py):
@@ -39,6 +41,12 @@ const error = ref('')
 const digest = ref('')
 const digesting = ref(false)
 const digestError = ref('')
+const digestTaskId = ref<string | null>(null)
+const showDigestAudit = ref(false)
+let digestPollToken = ''
+const D_POLL_MS = 1500
+const D_TIMEOUT_MS = 90000
+const dsleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 // 窗口标题:06.20–06.26(本地短日期)。
 function shortDate(iso: string): string {
@@ -77,15 +85,43 @@ async function load() {
 async function generateDigest() {
   digesting.value = true
   digestError.value = ''
+  digest.value = ''
+  digestTaskId.value = null
+  showDigestAudit.value = false
+  digestPollToken = ''
   try {
-    const r = await api.post<{ markdown: string; window: any }>(
+    // 异步:POST 返 202 {task_id, window};投递成功则轮询 result 取 markdown(claude 在 ai-worker)。
+    const r = await api.post<{ task_id: string | null; window: any; markdown?: string }>(
       `/api/domains/${encodeURIComponent(domain.value)}/digest?window_days=7`,
     )
-    digest.value = r?.markdown || ''
+    if (r?.task_id) {
+      digestTaskId.value = r.task_id
+      digestPollToken = r.task_id
+      await pollDigest(r.task_id)
+    } else {
+      digest.value = r?.markdown || ''   // 投递失败:后端给降级 markdown
+    }
   } catch (e: any) {
     digestError.value = e?.message || '生成摘要失败'
   } finally {
     digesting.value = false
+  }
+}
+
+async function pollDigest(taskId: string) {
+  const start = Date.now()
+  while (digestPollToken === taskId) {
+    let r: AiTaskResult
+    try {
+      r = await api.get<AiTaskResult>(`/api/ai-tasks/${encodeURIComponent(taskId)}/result`)
+    } catch {
+      r = { status: 'pending', task_id: taskId }
+    }
+    if (digestPollToken !== taskId) return
+    if (r.status === 'done') { digest.value = r.markdown ?? r.content ?? ''; return }
+    if (r.status === 'error') { digestError.value = r.error || 'AI 调用失败。'; return }
+    if (Date.now() - start > D_TIMEOUT_MS) { digestError.value = 'AI 暂不可用（超时），请稍后重试。'; return }
+    await dsleep(D_POLL_MS)
   }
 }
 
@@ -187,7 +223,15 @@ watch(domain, load)
         <div v-else-if="digesting" style="text-align:center;color:var(--ink-500);padding:6px 0">生成中…（调用 AI，稍候）</div>
         <template v-else>
           <MarkdownViewer :content="digest" :job-id="''" :domain="domain" />
-          <button class="btn sm" style="margin-top:10px" @click="generateDigest">重新生成</button>
+          <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button class="btn sm" @click="generateDigest">重新生成</button>
+            <button v-if="digestTaskId" class="btn sm" @click="showDigestAudit = !showDigestAudit">
+              <ScrollText :size="13" />{{ showDigestAudit ? '收起 AI 审计' : 'AI 审计' }}
+            </button>
+          </div>
+          <div v-if="showDigestAudit && digestTaskId" style="margin-top:10px">
+            <AiTaskAuditPanel :task-id="digestTaskId" />
+          </div>
         </template>
         <p v-if="digestError" class="muted" style="color:var(--danger,#dc2626);font-size:12px;margin:10px 0 0">{{ digestError }}</p>
       </div>

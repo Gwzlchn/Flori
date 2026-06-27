@@ -513,9 +513,43 @@ export interface AskSource {
 
 export interface AskResponse {
   question: string
-  answer_markdown: string
+  // 异步:命中则投 AI task 给 ai-worker,task_id 用于轮询 result;无命中/投递失败 task_id=null。
+  task_id: string | null
+  answer_markdown: string | null  // 仅无命中/投递失败时直接给消息;有 task 时 null(答案走 result 端点)
   sources: AskSource[]
   retrieved_count: number
+}
+
+// 独立 AI task 结果(GET /api/ai-tasks/{task_id}/result):/ask、/digest 异步答案的轮询载体。
+export interface AiTaskResult {
+  status: 'pending' | 'error' | 'done'
+  task_id: string
+  content?: string
+  answer_markdown?: string  // = content(ask 读这个)
+  markdown?: string         // = content(digest 读这个)
+  provider?: string
+  model?: string
+  cost_usd?: number
+  error?: string
+}
+
+// 独立 AI task 白盒审计(GET /api/ai-tasks/{task_id}/log):每次 claude 调用一条。
+export interface AiTaskLogCall {
+  task_id: string
+  exec_id?: string
+  step?: string
+  domain?: string | null
+  provider?: string
+  model?: string
+  ok: boolean
+  error?: string | null
+  created_at?: string
+  record?: any  // {routing:{requested,tier_used,attempts}, prompt:{system,messages,...}, output, raw, usage, flori}
+}
+export interface AiTaskLogResponse {
+  task_id: string
+  count: number
+  calls: AiTaskLogCall[]
 }
 
 export interface WsEvent {
