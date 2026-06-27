@@ -395,6 +395,30 @@ class Database:
             return None
         return self._row_to_job(row)
 
+    def jobs_brief(self, job_ids: list[str]) -> dict[str, dict]:
+        """批量取作业简要(队列 / worker 历史 enrich 用):
+        {job_id: {title, content_type, domain, status, pipeline}}。pipeline 供运行中 task 解析 step→pool。
+        一次 IN 查询避免 N+1;去重保序、跳空 id;SQLite 变量上限按 500 分批。"""
+        ids = [j for j in dict.fromkeys(job_ids) if j]
+        if not ids:
+            return {}
+        out: dict[str, dict] = {}
+        with self._lock:
+            for i in range(0, len(ids), 500):
+                chunk = ids[i:i + 500]
+                ph = ",".join("?" * len(chunk))
+                rows = self._conn.execute(
+                    f"SELECT id, title, content_type, domain, status, pipeline FROM jobs WHERE id IN ({ph})",
+                    chunk,
+                ).fetchall()
+                for r in rows:
+                    out[r["id"]] = {
+                        "title": r["title"], "content_type": r["content_type"],
+                        "domain": r["domain"], "status": r["status"],
+                        "pipeline": r["pipeline"],
+                    }
+        return out
+
     def list_jobs(
         self,
         status: str | None = None,
@@ -772,6 +796,15 @@ class Database:
         with self._lock:
             self._conn.execute("DELETE FROM workers WHERE id=?", (worker_id,))
             self._conn.commit()
+
+    def list_running_steps(self) -> list[Step]:
+        """所有 status=running 的 step(= 正在执行的 task),按开始时间倒序。
+        队列页「运行中」分组的权威来源:step 行自带 pool/worker_id/started_at,无需依赖 worker 心跳派生。"""
+        rows = self._conn.execute(
+            "SELECT * FROM job_steps WHERE status=? ORDER BY started_at DESC",
+            (StepStatus.RUNNING.value,),
+        ).fetchall()
+        return [self._row_to_step(r) for r in rows]
 
     def list_worker_tasks(self, worker_id: str, limit: int = 50) -> list[Step]:
         """该 worker 的 task 执行历史（task = 某作业的某步骤的一次执行,按最近开始时间倒序;每条 = 一个 step 记录）。"""

@@ -10,10 +10,11 @@ import { fmtDateTime, fmtDuration, fmtRelative } from '../utils/datetime'
 import { fmtBytes } from '../utils/format'
 import { workerDotClass, workerComputeDesc } from '../utils/worker'
 import StatusBadge from '../components/common/StatusBadge.vue'
+import TaskRow from '../components/system/TaskRow.vue'
 import type { Worker, WorkerTask } from '../types'
 import {
   RefreshCw, Pause, X, Cpu, Info, Layers, Clock, Check,
-  Play, FileText, Newspaper, Headphones, ChevronRight, MessageSquare,
+  Play, MessageSquare,
 } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -92,13 +93,6 @@ const machineDesc = computed(() => {
   if (s.python) parts.push(`Py ${s.python}`)
   return parts.join(' · ')
 })
-
-// 任务历史 type-pill（按 step 无内容类型，统一用中性图标兜底）。
-const STEP_ICON: Record<string, any> = { download: Play, transcribe: Headphones }
-function stepIcon(step: string): any {
-  const key = step.replace(/^\d+_/, '')
-  return STEP_ICON[key] || FileText
-}
 
 // ── 操作：暂停 / 继续 / 移除 / 备注 ──
 async function togglePause() {
@@ -275,28 +269,18 @@ onBeforeUnmount(() => global.setCrumbs(null))
         暂无任务历史
       </div>
       <div v-else class="list">
-        <div
+        <TaskRow
           v-for="t in tasks"
           :key="`${t.job_id}-${t.step}-${t.finished_at}`"
-          class="row"
-          style="cursor:pointer"
-          @click="router.push(`/content/${encodeURIComponent(t.job_id)}`)"
-        >
-          <span class="type-pill" style="background:var(--mut-bg);color:var(--ink-600)">
-            <component :is="stepIcon(t.step)" :size="17" />
-          </span>
-          <div class="body">
-            <div class="title mono" style="font-size:13.5px">{{ t.job_id }}</div>
-            <div class="meta">
-              <span class="mono">{{ t.step }}</span>
-              <StatusBadge :status="t.status" />
-              <span>{{ fmtDuration(t.duration_sec) }}</span>
-              <span class="sep">·</span>
-              <span>{{ ago(t.finished_at) }}</span>
-            </div>
-          </div>
-          <ChevronRight :size="16" class="dim" />
-        </div>
+          state="completed"
+          :job-id="t.job_id"
+          :step="t.step"
+          :title="t.title"
+          :content-type="t.content_type"
+          :status="t.status"
+          :duration-sec="t.duration_sec"
+          :finished-at="t.finished_at"
+        />
       </div>
     </template>
   </section>

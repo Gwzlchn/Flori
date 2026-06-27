@@ -618,13 +618,18 @@ const usageByProvider = computed(() => {
     </div>
 
     <!-- 资源池 -->
-    <div class="seclabel" style="margin-bottom:12px"><Layers :size="14" />资源池 · {{ pools.length }}</div>
+    <div class="seclabel" style="margin-bottom:12px;display:flex;align-items:center">
+      <Layers :size="14" />资源池 · {{ pools.length }}
+      <span style="margin-left:auto;font-weight:400;font-size:11.5px;color:var(--brand-600);cursor:pointer;text-transform:none;letter-spacing:0"
+        @click="router.push('/system/queue')">查看队列 →</span>
+    </div>
     <div class="grid3" style="margin-bottom:24px">
       <div v-for="[name, p] in pools" :key="name" class="card pad" style="padding:13px 15px">
         <div style="display:flex;align-items:center;gap:7px;margin-bottom:8px">
           <span class="dot" :class="poolDot(name, p)"></span>
           <b class="mono" style="font-size:13px;color:var(--ink-900);flex:1">{{ name }}</b>
-          <span class="badge" :class="poolQueueBadge(name, p).cls">{{ poolQueueBadge(name, p).text }}</span>
+          <span class="badge" :class="poolQueueBadge(name, p).cls" style="cursor:pointer"
+            title="查看该池队列" @click="router.push(`/system/queue?pool=${encodeURIComponent(name)}`)">{{ poolQueueBadge(name, p).text }}</span>
         </div>
         <div class="dim-g">
           <div class="row-l"><span>在跑任务</span><b>{{ p.used }} / {{ p.capacity === 0 ? '暂停' : p.capacity }}</b></div>

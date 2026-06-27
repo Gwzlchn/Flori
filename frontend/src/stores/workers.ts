@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { useApi } from '../composables/useApi'
-import type { Worker, WorkerTask, FullStatus, SystemEvent, UsageAggregate, PricingStatus } from '../types'
+import type { Worker, WorkerTask, FullStatus, SystemEvent, UsageAggregate, PricingStatus, QueueStatus } from '../types'
 
 export const useWorkerStore = defineStore('workers', () => {
   const api = useApi()
@@ -51,6 +51,12 @@ export const useWorkerStore = defineStore('workers', () => {
     return await api.get<WorkerTask[]>(`/api/workers/${workerId}/tasks`)
   }
 
+  // 任务队列只读视图:各池排队中 + 运行中 task。pool 给则只看单池。
+  async function fetchQueue(pool?: string): Promise<QueueStatus> {
+    const q = pool ? `?pool=${encodeURIComponent(pool)}` : ''
+    return await api.get<QueueStatus>(`/api/queue${q}`)
+  }
+
   // 系统池上限:default(pools.yaml)+ override(redis 运行时覆盖,可为 null)。
   async function fetchPoolLimits(): Promise<Record<string, { default: number; override: number | null }>> {
     return await api.get('/api/config/pool-limits')
@@ -90,7 +96,7 @@ export const useWorkerStore = defineStore('workers', () => {
 
   return {
     workers, loading, fetchAll, pause, resume,
-    updateNote, updateTags, remove, mintToken, fetchTasks,
+    updateNote, updateTags, remove, mintToken, fetchTasks, fetchQueue,
     fetchPoolLimits, savePoolLimits,
     fetchFullStatus, fetchEvents, fetchUsage, fetchLinkTrafficHistory,
     fetchPricing, refreshPricing, fetchPipelines,

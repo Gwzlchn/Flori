@@ -23,6 +23,7 @@ const router = createRouter({
 
     { path: '/system', name: 'system', component: () => import('../views/SystemView.vue') },
     { path: '/system/events', name: 'system-events', component: () => import('../views/EventsView.vue') },
+    { path: '/system/queue', name: 'system-queue', component: () => import('../views/QueueView.vue') },
     { path: '/system/workers/:id', name: 'worker-detail', component: () => import('../views/WorkerDetailView.vue') },
 
     { path: '/settings', name: 'settings', component: () => import('../views/SettingsView.vue') },

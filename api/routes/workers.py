@@ -250,11 +250,16 @@ async def list_worker_tasks(
     limit: int = Query(50, ge=1, le=200),
     db: Database = Depends(get_db),
 ):
-    """该 worker 的 task 执行历史（task = 某作业的某步骤的一次执行;每条对应一个 step 记录）。"""
+    """该 worker 的 task 执行历史（task = 某作业的某步骤的一次执行;每条对应一个 step 记录）。
+    enrich 作业标题/类型,使卡片显作业标题而非裸 job_id(与队列页同款 task 数据)。"""
     steps = await asyncio.to_thread(db.list_worker_tasks, worker_id, limit)
+    briefs = await asyncio.to_thread(db.jobs_brief, [s.job_id for s in steps])
     return [
         {
             "job_id": s.job_id,
+            "title": (briefs.get(s.job_id) or {}).get("title"),
+            "content_type": (briefs.get(s.job_id) or {}).get("content_type"),
+            "domain": (briefs.get(s.job_id) or {}).get("domain"),
             "step": s.name,
             "status": s.status.value if hasattr(s.status, "value") else s.status,
             "started_at": _iso_utc(s.started_at),

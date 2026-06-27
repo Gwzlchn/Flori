@@ -305,6 +305,7 @@ class TestWorkerTasks:
         _make_worker(db, id="w-hist")
         db.create_job(Job(
             id="job-1", content_type="video", pipeline="video",
+            title="深入理解 Transformer", domain="ai",
             status=JobStatus.PROCESSING,
         ))
         db.upsert_step(Step(
@@ -319,3 +320,7 @@ class TestWorkerTasks:
         assert rows[0]["job_id"] == "job-1"
         assert rows[0]["step"] == "download"
         assert rows[0]["status"] == "done"
+        # enrich:作业标题/类型(前端主显标题而非裸 job_id)
+        assert rows[0]["title"] == "深入理解 Transformer"
+        assert rows[0]["content_type"] == "video"
+        assert rows[0]["domain"] == "ai"

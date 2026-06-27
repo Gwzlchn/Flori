@@ -8,6 +8,20 @@ export function fmtDateTime(v: string | number | Date | null | undefined): strin
     + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
+// 智能"点"时刻:今天只显 HH:MM,跨天显 MM-DD HH:MM。用于 task 时间("投递/开始/结束"的时刻部分),
+// 比满格 YYYY/MM/DD HH:MM:SS 紧凑、比"10h前"明确。接受 ISO 串 / 毫秒数 / Date(epoch 秒须先 ×1000)。
+export function fmtClock(v: string | number | Date | null | undefined): string {
+  if (v == null || v === '') return '—'
+  const d = new Date(v)
+  if (isNaN(d.getTime())) return '—'
+  const p = (n: number) => String(n).padStart(2, '0')
+  const now = new Date()
+  const sameDay = d.getFullYear() === now.getFullYear()
+    && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()
+  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`
+  return sameDay ? hm : `${p(d.getMonth() + 1)}-${p(d.getDate())} ${hm}`
+}
+
 // 时长(秒 → 人类可读)。全站统一,替代各处手写的 fmtDuration/fmtDur。
 //   <60s          → "12s"(decimalSeconds 时 "12.3s",用于步骤耗时)
 //   ≥60s 且 <1h   → "5m03s"

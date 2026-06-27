@@ -95,6 +95,51 @@ class TestQueue:
         assert score2 == -5
 
 
+class TestListQueue:
+    @pytest.mark.asyncio
+    async def test_list_queue_orders_by_priority_and_joins_enqueued_at(self, rc):
+        await rc.enqueue_step("cpu", "j_a", "06_ocr", ["cpu"], priority=5)
+        await rc.enqueue_step("cpu", "j_b", "06_ocr", ["cpu"], priority=-2)
+        items = await rc.list_queue("cpu")
+        # 只读窥视:不弹出,队列仍在
+        assert (await rc.get_queue_info("cpu"))["length"] == 2
+        # 按 score 升序(越小越先)
+        assert [it["job_id"] for it in items] == ["j_b", "j_a"]
+        # enqueue 顺带写入 queue:enqueued → list_queue join 出 enqueued_at(秒)
+        assert all(isinstance(it["enqueued_at"], float) for it in items)
+        assert items[0]["priority"] == -2
+        assert items[0]["step"] == "06_ocr"
+
+    @pytest.mark.asyncio
+    async def test_list_queue_empty(self, rc):
+        assert await rc.list_queue("io") == []
+
+    @pytest.mark.asyncio
+    async def test_list_queue_limit_truncates(self, rc):
+        for i in range(5):
+            await rc.enqueue_step("io", f"j_{i}", "01_download", [], priority=i)
+        items = await rc.list_queue("io", limit=3)
+        assert len(items) == 3
+        assert (await rc.get_queue_info("io"))["length"] == 5  # 总数不变,仅列出截断
+
+    @pytest.mark.asyncio
+    async def test_dequeue_clears_enqueued_at(self, rc):
+        await rc.enqueue_step("cpu", "j_a", "06_ocr", ["cpu"], priority=0)
+        field = "cpu|j_a|06_ocr"
+        assert await rc.r.hexists("queue:enqueued", field)
+        await rc.dequeue_step_raw("cpu")
+        assert not await rc.r.hexists("queue:enqueued", field)
+
+    @pytest.mark.asyncio
+    async def test_return_step_resets_enqueued_at(self, rc):
+        await rc.enqueue_step("ai", "j_x", "10_smart", ["vision"], priority=-5)
+        raw_json, _, score = await rc.dequeue_step_raw("ai")
+        await rc.return_step("ai", raw_json, score)
+        items = await rc.list_queue("ai")
+        assert len(items) == 1
+        assert isinstance(items[0]["enqueued_at"], float)
+
+
 class TestPool:
     @pytest.mark.asyncio
     async def test_acquire_and_release(self, rc):

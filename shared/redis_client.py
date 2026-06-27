@@ -98,6 +98,11 @@ class RedisClient:
             payload["resources"] = sorted(resources)
         task = json.dumps(payload, sort_keys=True)
         await self.r.zadd(f"queue:{pool}", {task: priority})
+        # 入队时间戳存独立 hash(不进 ZSET 成员,避免改成员破坏 ZADD 去重);供「已等待多久」展示。
+        try:
+            await self.r.hset("queue:enqueued", f"{pool}|{job_id}|{step}", str(time.time()))
+        except Exception:
+            pass
 
     async def dequeue_step(self, pool: str) -> tuple[dict, float] | None:
         # 仅测试用:生产认领走 dequeue_step_raw(runner_ops/worker transport)。保留薄实现供单测。
@@ -109,6 +114,12 @@ class RedisClient:
 
     async def return_step(self, pool: str, task_json: str, score: float) -> None:
         await self.r.zadd(f"queue:{pool}", {task_json: score})
+        # 退回队列 = 重新等待,重置入队时间戳。
+        try:
+            t = json.loads(task_json)
+            await self.r.hset("queue:enqueued", f"{pool}|{t.get('job_id')}|{t.get('step')}", str(time.time()))
+        except Exception:
+            pass
 
     async def dequeue_step_raw(self, pool: str) -> tuple[str, dict, float] | None:
         """弹出最高优先级任务，返回 (raw_json, parsed_dict, score)。Worker 专用。"""
@@ -116,11 +127,43 @@ class RedisClient:
         if not items:
             return None
         task_json, score = items[0]
-        return task_json, json.loads(task_json), score
+        parsed = json.loads(task_json)
+        # 出队即离开队列 → 清入队时间戳(避免 hash 堆积孤儿)。
+        try:
+            await self.r.hdel("queue:enqueued", f"{pool}|{parsed.get('job_id')}|{parsed.get('step')}")
+        except Exception:
+            pass
+        return task_json, parsed, score
 
     async def get_queue_info(self, pool: str) -> dict:
         length = await self.r.zcard(f"queue:{pool}")
         return {"length": length}
+
+    async def list_queue(self, pool: str, limit: int = 200) -> list[dict]:
+        """只读窥视队列(ZRANGE 不弹出),返回排队中的 task(按优先级序)。
+        每条:{job_id, step, priority, enqueued_at(秒,无则 None), tags, require_tags, resources}。失败回 []。"""
+        try:
+            items = await self.r.zrange(f"queue:{pool}", 0, limit - 1, withscores=True)
+            if not items:
+                return []
+            ats = await self.r.hgetall("queue:enqueued") or {}
+            out: list[dict] = []
+            for member, score in items:
+                try:
+                    t = json.loads(member)
+                except Exception:
+                    continue
+                jid, step = t.get("job_id"), t.get("step")
+                at_raw = ats.get(f"{pool}|{jid}|{step}")
+                out.append({
+                    "job_id": jid, "step": step, "priority": int(score),
+                    "enqueued_at": float(at_raw) if at_raw else None,
+                    "tags": t.get("tags", []), "require_tags": t.get("require_tags", []),
+                    "resources": t.get("resources", []),
+                })
+            return out
+        except Exception:
+            return []
 
     # ── 资源池（Lua 原子操作）──
 

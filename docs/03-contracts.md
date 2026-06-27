@@ -436,17 +436,57 @@ Response `200`:
 #### GET /api/workers/{id}/tasks — Worker 任务(task)历史
 
 该 worker 执行过的 task 记录(task = 某作业 job 的某步骤 step 的一次执行;每条对应一个 step 记录)。`?limit=` 默认 50，范围 1–200。
+enrich 作业标题/类型(批量查 jobs 表,一次 IN),前端主显作业标题而非裸 job_id;与 `GET /api/queue` 同款 task 形态(统一 TaskRow 渲染)。
 
 Response `200`:
 ```json
 [
   {
-    "job_id": "j_xxx", "step": "10_smart", "status": "done",
+    "job_id": "j_xxx", "title": "深入理解 Transformer", "content_type": "video", "domain": "ai",
+    "step": "10_smart", "status": "done",
     "started_at": "2026-05-17T12:00:00Z", "finished_at": "2026-05-17T12:00:45Z",
     "duration_sec": 45.2, "error": null
   }
 ]
 ```
+> `title`/`content_type`/`domain` 来自作业 enrich,作业已删/查不到则为 `null`(前端退 类型名 → 流水线 → job_id)。
+
+#### GET /api/queue — 任务队列(排队中 + 运行中)
+
+各资源池里【排队中】(redis `queue:{pool}` ZSET 只读窥视,ZRANGE 不弹出)+【运行中】(各 worker 当前 `current_job`/`current_step` 派生)的 task。两类都 enrich 作业标题/类型,与 worker 任务历史共用 TaskRow。`?pool=` 可选,只看单池。每池排队最多列出 200 条(`queued_count` 仍报总数,超出不静默截断)。
+
+入队时间戳存独立 redis hash `queue:enqueued`(field=`{pool}|{job_id}|{step}`→epoch 秒),**不写入 ZSET 成员**(避免改成员破坏 ZADD 去重);enqueue 时 set、dequeue 时 hdel、return 时重置。`list_queue` 读时 join 补 `enqueued_at`(旧 task 无则 `null`)。
+
+Response `200`:
+```json
+{
+  "pools": [
+    {
+      "name": "ai",
+      "queued_count": 12,
+      "queued_shown": 12,
+      "running": [
+        {
+          "state": "running", "job_id": "j_xxx", "title": "深入理解 Transformer",
+          "content_type": "video", "domain": "ai", "pipeline": "video",
+          "step": "10_smart", "pool": "ai", "started_at": "2026-05-17T12:00:00Z",
+          "worker_id": "ai-a1b2c3d4", "worker_type": "ai", "worker_hostname": "office-pc"
+        }
+      ],
+      "queued": [
+        {
+          "state": "queued", "job_id": "j_yyy", "title": "RLHF 综述",
+          "content_type": "paper", "domain": "ai", "pipeline": "paper",
+          "step": "10_smart", "pool": "ai", "priority": 100,
+          "enqueued_at": 1747483200.0, "tags": [], "require_tags": []
+        }
+      ]
+    }
+  ],
+  "limit": 200
+}
+```
+> 运行中 task 的 `pool`/`started_at` 取自 job_steps 运行中行;无法解析归属池的运行中 task 归入名为 `(未归类)` 的兜底组(`queued` 为空)。队列是动态快照,列出瞬间可能已被认领(刷新即更新)。
 
 #### GET /api/workers — Worker 列表
 

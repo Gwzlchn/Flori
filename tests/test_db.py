@@ -1249,3 +1249,24 @@ class TestJobFacets:
     def test_facets_empty_db(self, db):
         facets = db.job_facets()
         assert facets == {"source": {}, "domain": {}, "status": {}}
+
+
+class TestJobsBrief:
+    def test_batch_enrich(self, db):
+        db.create_job(Job(id="j_a", content_type="video", pipeline="video",
+                          title="深入理解 Transformer", domain="ai"))
+        db.create_job(Job(id="j_b", content_type="paper", pipeline="paper",
+                          title=None, domain="ml"))
+        out = db.jobs_brief(["j_a", "j_b", "j_missing"])
+        assert out["j_a"] == {"title": "深入理解 Transformer", "content_type": "video",
+                              "domain": "ai", "status": "pending", "pipeline": "video"}
+        assert out["j_b"]["title"] is None
+        assert out["j_b"]["content_type"] == "paper"
+        assert "j_missing" not in out   # 查不到的 id 不出现(前端按缺失回退)
+
+    def test_empty_and_dedup(self, db):
+        assert db.jobs_brief([]) == {}
+        assert db.jobs_brief([None, ""]) == {}
+        db.create_job(Job(id="j_a", content_type="video", pipeline="video", title="x"))
+        out = db.jobs_brief(["j_a", "j_a", "j_a"])   # 去重不报错
+        assert list(out.keys()) == ["j_a"]

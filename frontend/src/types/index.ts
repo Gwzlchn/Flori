@@ -178,12 +178,49 @@ export interface Worker {
 // Task = worker 认领执行的最小单元(某作业 job 的某步骤 step 的一次执行);每条对应一个 step 记录。
 export interface WorkerTask {
   job_id: string
+  title?: string | null         // enrich:作业标题(主显),空则前端退类型/流水线/job_id
+  content_type?: string | null  // enrich:来源类型(图标/类型名)
+  domain?: string | null        // enrich:所属领域
   step: string
   status: string
   started_at: string | null
   finished_at: string | null
   duration_sec: number | null
   error: string | null
+}
+
+// ── 任务队列(/system/queue)──
+// 排队中(queued)/运行中(running)的 task,与 WorkerTask(已完成)同源:统一 TaskRow 渲染。
+export interface QueueTask {
+  state: 'queued' | 'running'
+  job_id: string
+  title?: string | null
+  content_type?: string | null
+  domain?: string | null
+  pipeline?: string | null
+  step: string
+  pool?: string | null
+  priority?: number | null
+  enqueued_at?: number | null   // epoch 秒(排队时入队时刻);旧 task 可能缺
+  started_at?: string | null    // ISO(运行中开始时刻)
+  worker_id?: string
+  worker_type?: string
+  worker_hostname?: string | null
+  tags?: string[]
+  require_tags?: string[]
+}
+
+export interface QueuePool {
+  name: string
+  queued_count: number   // 队列总数(可能 > 列出条数)
+  queued_shown: number   // 实际列出条数
+  running: QueueTask[]
+  queued: QueueTask[]
+}
+
+export interface QueueStatus {
+  pools: QueuePool[]
+  limit: number
 }
 
 // ── 系统健康总览页(/system)──
