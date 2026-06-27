@@ -555,13 +555,9 @@ const usageByProvider = computed(() => {
       </div>
     </div>
 
-    <!-- 概览统一网格:KPI(worker/忙碌/待处理/完成)+ 系统状态(版本/部署/磁盘/内容/近1h/中转)
-         全用同一种「标签 + 值」cell、同一个网格对齐(原来 KPI 大数字块 + 状态行两种风格已合并)。 -->
-    <div class="card pad statgrid" style="margin-bottom:18px">
-      <div class="st-cell"><div class="st-lbl">Worker 在线 / 共</div><div class="st-val"><b>{{ onlineCount }} / {{ workerStore.workers.length }}</b></div></div>
-      <div class="st-cell"><div class="st-lbl">忙碌 · 处理中</div><div class="st-val"><b>{{ busyCount }}</b></div></div>
-      <div class="st-cell"><div class="st-lbl">待处理 · 队列</div><div class="st-val"><b>{{ pendingCount }}</b></div></div>
-      <div class="st-cell"><div class="st-lbl">累计完成 · 吞吐</div><div class="st-val"><b>{{ doneCount }}</b></div></div>
+    <!-- 概览拆两组(同一种「标签+值」cell):① 系统 ② Worker·作业。系统在前。 -->
+    <div class="seclabel" style="margin-bottom:8px"><Server :size="14" />系统</div>
+    <div class="card pad statgrid" style="margin-bottom:16px">
       <div class="st-cell">
         <div class="st-lbl">版本</div>
         <div class="st-val" :title="systemVersion">系统 {{ verSem(systemVersion) }}<span v-if="verBuild(systemVersion)" class="dim"> · {{ verBuild(systemVersion) }}</span></div>
@@ -578,6 +574,18 @@ const usageByProvider = computed(() => {
         </template>
         <div v-else class="st-val dim">不可用</div>
       </div>
+      <div class="st-cell" v-if="traffic && (traffic.pull_bytes > 0 || traffic.push_bytes > 0)">
+        <div class="st-lbl" title="网关产物代理:出库=worker 拉取(NAS→worker) / 入库=回传(worker→NAS)">网关中转</div>
+        <div class="st-val">出库 {{ fmtBytes(traffic.pull_bytes) }} · 入库 {{ fmtBytes(traffic.push_bytes) }}</div>
+      </div>
+    </div>
+
+    <div class="seclabel" style="margin-bottom:8px"><Cpu :size="14" />Worker · 作业</div>
+    <div class="card pad statgrid sg-worker" style="margin-bottom:18px">
+      <div class="st-cell"><div class="st-lbl">Worker 在线 / 共</div><div class="st-val"><b>{{ onlineCount }} / {{ workerStore.workers.length }}</b></div></div>
+      <div class="st-cell"><div class="st-lbl">忙碌 · 处理中</div><div class="st-val"><b>{{ busyCount }}</b></div></div>
+      <div class="st-cell"><div class="st-lbl">待处理 · 队列</div><div class="st-val"><b>{{ pendingCount }}</b></div></div>
+      <div class="st-cell"><div class="st-lbl">累计完成 · 吞吐</div><div class="st-val"><b>{{ doneCount }}</b></div></div>
       <div class="st-cell">
         <div class="st-lbl"><Database :size="11" />内容(作业)</div>
         <div class="st-val" v-if="liveJobs">共 {{ liveJobs.total }} · 处理中 {{ liveJobs.processing }} · 失败 <b :style="{ color: liveJobs.failed > 0 ? 'var(--bad)' : 'var(--ink-900)' }">{{ liveJobs.failed }}</b></div>
@@ -585,10 +593,6 @@ const usageByProvider = computed(() => {
       <div class="st-cell">
         <div class="st-lbl">近 1h</div>
         <div class="st-val">完成 {{ throughput?.done ?? 0 }} · 失败 {{ throughput?.failed ?? 0 }}</div>
-      </div>
-      <div class="st-cell" v-if="traffic && (traffic.pull_bytes > 0 || traffic.push_bytes > 0)">
-        <div class="st-lbl" title="网关产物代理:出库=worker 拉取(NAS→worker) / 入库=回传(worker→NAS)">网关中转</div>
-        <div class="st-val">出库 {{ fmtBytes(traffic.pull_bytes) }} · 入库 {{ fmtBytes(traffic.push_bytes) }}</div>
       </div>
     </div>
 
