@@ -73,7 +73,7 @@ resume_watchtower() {
 }
 
 do_frontend() { push_image "$IMAGE_OWNER/flori-frontend:latest"; recreate docker-compose.yml frontend; }
-do_worker()   { pause_watchtower; push_image "$IMAGE_OWNER/flori:latest"; recreate worker.yml worker-cpu worker-ai; }
+do_worker()   { pause_watchtower; push_image "$IMAGE_OWNER/flori-worker:latest"; recreate worker.yml worker-cpu worker-ai; }
 
 case "$TARGET" in
   frontend) do_frontend ;;

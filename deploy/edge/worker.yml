@@ -3,7 +3,7 @@
 # network_mode host:为了访问隧道暴露在 ECS 回环的 127.0.0.1:6379/9000。
 services:
   worker-cpu:
-    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori:latest
+    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker:latest
     container_name: flori-worker-cpu
     network_mode: host
     restart: unless-stopped
@@ -22,7 +22,7 @@ services:
       - "com.centurylinklabs.watchtower.enable=true"
 
   worker-ai:
-    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori:latest
+    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker:latest
     container_name: flori-worker-ai
     network_mode: host
     restart: unless-stopped

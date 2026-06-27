@@ -41,7 +41,7 @@ services:
   # FLORI_MCP_TOKEN 必设(公网/局域网暴露);未设且 FLORI_MCP_ALLOW_NO_AUTH≠1 时 fail-closed(503)。
   mcp-http:
     container_name: flori-mcp-http
-    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori:${IMAGE_TAG:-latest}
+    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-api:${IMAGE_TAG:-latest}   # MCP server 在 api stage([api,mcp])
     restart: unless-stopped
     # 无 profile:随栈常驻自动起(不再需要 --profile mcp);MCP 是默认能力。
     command: python -m api.mcp_server
@@ -66,7 +66,7 @@ services:
 
   api:
     container_name: flori-api
-    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori:${IMAGE_TAG:-latest}
+    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-api:${IMAGE_TAG:-latest}
     restart: unless-stopped
     command: python -m api.main
     ports:
@@ -110,7 +110,7 @@ services:
 
   scheduler:
     container_name: flori-scheduler
-    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori:${IMAGE_TAG:-latest}
+    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-scheduler:${IMAGE_TAG:-latest}
     restart: unless-stopped
     command: python -m scheduler.main
     logging: *default-logging
@@ -139,7 +139,7 @@ services:
   # 无隧道(无边缘)时上报 tunnel.up=false,无害。
   tunnel-stats:
     container_name: flori-tunnel-stats
-    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori:${IMAGE_TAG:-latest}
+    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-scheduler:${IMAGE_TAG:-latest}   # tunnel_stats 在 scheduler stage
     restart: unless-stopped
     command: python -m tunnel_stats.main
     logging: *default-logging
@@ -156,7 +156,7 @@ services:
 
   worker-cpu:
     container_name: flori-worker-cpu
-    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori:${IMAGE_TAG:-latest}
+    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker:${IMAGE_TAG:-latest}
     restart: unless-stopped
     command: python -m worker.main --type cpu
     logging: *default-logging
@@ -189,7 +189,7 @@ services:
 
   worker-ai:
     container_name: flori-worker-ai
-    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori:${IMAGE_TAG:-latest}
+    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker:${IMAGE_TAG:-latest}
     restart: unless-stopped
     command: python -m worker.main --type ai
     logging: *default-logging
