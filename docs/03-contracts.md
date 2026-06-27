@@ -1099,20 +1099,22 @@ Response `200`：
 
 #### POST /api/domains/{domain}/digest — 本周摘要（按需调 LLM）
 
-先算同款雷达，再把结果 + 最近内容标题喂给 LLM（`digest` 步，走 `claude-cli` 订阅）生成一段中文周报（本周在聊什么 / 新概念 / 热点），并记一条 `AIUsage`（`step=digest`、`worker_id=api`、`job_id=null`、`exec_id=digest-{domain}-{rand}`，按价表/订阅成本归因）。与 GET radar 分离：页面先秒开雷达，用户点「生成本周摘要」再触发本端点。`window_days` 同 radar（`1..90`，越界 `422`）。
+先算同款雷达，再用 `digest` builder 拼 prompt → **投递独立 AI task（`queue:ai`，§3.1）给 ai-worker** 异步生成中文周报（本周在聊什么 / 新概念 / 热点）；**API 进程不再调 claude**（claude 全在 ai-worker，用量 `ai_usage`/白盒审计 `ai_task_logs` 也在 worker 侧记，P1）。与 GET radar 分离：页面先秒开雷达，用户点「生成本周摘要」再触发本端点。`window_days` 同 radar（`1..90`，越界 `422`）。
 
 ```
 POST /api/domains/finance/digest?window_days=7
 ```
 
-Response `200`：
+Response `202`（投递成功；`markdown` 经 `GET /api/ai-tasks/{task_id}/result` 轮询取，digest 读 `markdown` 别名）：
 
 ```json
 {
-  "markdown": "## 本周摘要\n本周聚焦量化交易……",
+  "task_id": "at_3f9c…",
   "window": {"days": 7, "since": "2026-06-19T...", "until": "2026-06-26T..."}
 }
 ```
+
+投递失败（redis 不可用）→ 仍 `202`，`{"task_id": null, "window": {...}, "markdown": "⚠️ 周报生成暂不可用…"}`（优雅降级，不 5xx）。
 
 ### 1.10 术语库 / 概念图
 
@@ -1277,19 +1279,44 @@ curl -X POST http://localhost:8000/api/ask -H 'Content-Type: application/json' \
   -d '{"question":"反向传播和梯度下降有什么区别？","domain":"deep-learning"}'
 ```
 
-Response `200`（`answer_markdown` 内 `[来源N]` 与 `sources` 数组下标 +1 对应；命中为 0 时返回固定提示文案、`sources:[]`、不调 LLM）：
+**异步**：检索/拼 prompt 后**投递独立 AI task（`queue:ai`，§3.1）给 ai-worker**（claude 全在 ai-worker，P1），API 不在进程内调 claude。
+
+Response `202`（`sources` 提交时已算好；`answer_markdown` 经 `GET /api/ai-tasks/{task_id}/result` 轮询取，ask 读 `answer_markdown` 别名，内 `[来源N]` 与 `sources` 下标 +1 对应）：
 ```json
 {
   "question": "反向传播和梯度下降有什么区别？",
-  "answer_markdown": "反向传播用于计算梯度 [来源1]……\n\n## 共识 / 分歧\n各来源一致认为……",
+  "task_id": "at_8b2e…",
+  "answer_markdown": null,
   "sources": [
     {"job_id": "j_bp", "title": "反向传播详解", "domain": "deep-learning", "content_type": "video"}
   ],
   "retrieved_count": 1
 }
 ```
+- 命中为 0 → `task_id:null`、`answer_markdown` 为固定提示文案、`sources:[]`，**不投 task**（短路）。
+- 投递失败（redis 不可用）→ `task_id:null` + 降级文案 + 已检索 `sources`（不 5xx）。
 
-每次实际调用 LLM 会记一条 `ai_usage`（`step=synthesis`，`exec_id=ask-<uuid>`，成本归因同 runner：claude-cli 用订阅等价成本，其它 provider 用 LiteLLM 价表覆盖）。
+用量（`ai_usage`，`step=synthesis`，`job_id=null`）与白盒审计（`ai_task_logs`）由 **ai-worker** 记账（P1-2），API 不再记。
+
+#### GET /api/ai-tasks/{task_id}/result — 独立 AI task 结果（轮询）
+
+`/ask`、`/digest` 提交的 AI task 的结果。读 `airesult:{task_id}`（§3.1，worker 写，TTL≈600s）：
+
+| status | 响应 |
+|---|---|
+| `pending` | 未就绪（worker 没跑完/已过期）：`{"status":"pending","task_id":...}` |
+| `error` | 失败：`{"status":"error","task_id":...,"error":"..."}` |
+| `done` | 完成：`{"status":"done","task_id":...,"content":"...","answer_markdown":"...","markdown":"...","provider":...,"model":...,"cost_usd":...}` |
+
+`answer_markdown`/`markdown` 均 = `content`（ask 读前者、digest 读后者）。前端也可 `WS /api/ws/jobs/{task_id}` 收 `ai_task_done`（§3.5）后再取本端点。
+
+#### GET /api/ai-tasks/{task_id}/log — 独立 AI task 白盒审计
+
+镜像 DAG 的 `GET /api/jobs/{id}/ai-logs`：读 `ai_task_logs`（§3.1），返回该 task 每次 claude 调用的完整审计（路由/尝试链/渲染 prompt/输出/raw/用量），最近在前。
+
+```json
+{"task_id":"at_…","count":1,"calls":[{"task_id":"at_…","exec_id":"…","step":"synthesis","domain":"ml","provider":"claude-cli","model":"subscription","ok":true,"error":null,"created_at":"…","record":{"routing":{"attempts":[…]},"prompt":{"system":"…","messages":[…]},"output":"…","raw":{…},"usage":{…}}}]}
+```
 
 ### 1.12 Profile 管理（`/api/profiles/*`）
 

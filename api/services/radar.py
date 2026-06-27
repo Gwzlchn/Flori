@@ -1,11 +1,12 @@
-"""概念趋势雷达 + 本周摘要（单一来源:服务层纯函数 + 一处 gateway 调用）。
+"""概念趋势雷达 + 本周摘要（服务层纯函数:雷达计算 + 摘要 prompt 构建）。
 
 雷达 = 比较「最近 window_days」与「紧邻其前的同长窗口」,从该 domain 的 glossary occurrences
 (经 job_id→源内容时间映射)算出:飙升概念 / 新出现概念 / 窗口内新增内容 / 窗口内最热概念。
 时间口径与 db.concept_timeline / db.concept_occurrence_dates 一致(COALESCE(published_at,created_at))。
 
-摘要 = 把雷达结果 + 最近内容标题喂给 LLM(claude-cli 订阅步),产出一段中文短文(本周在聊什么 /
-新概念 / 热点)。雷达(GET,无 LLM,秒开)与摘要(POST,按需调 LLM)分离,见 api/routes/radar.py。
+摘要 = 把雷达结果 + 最近内容标题拼成 prompt(build_digest_prompt),由 api/routes/radar.py 作为独立 AI task
+投给 ai-worker 跑 claude(本模块只产 radar/build_digest_prompt,不调 gateway)。雷达(GET,无 LLM,秒开)
+与摘要(POST,投 AI task)分离,见 api/routes/radar.py。
 """
 
 from __future__ import annotations
@@ -13,7 +14,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from shared.db import Database
-from shared.models import LLMRequest, LLMResponse
 
 
 def _parse(iso: str | None) -> datetime | None:
@@ -152,18 +152,3 @@ def build_digest_prompt(
         "以下是本周知识雷达数据,请据此写本周摘要:\n\n" + "\n".join(lines)
     )
     return system, user
-
-
-async def digest(
-    gateway, radar_data: dict, recent_titles: list[str]
-) -> LLMResponse:
-    """调用 AI gateway 的 'digest' 步生成本周摘要,返回 LLMResponse(content 为 markdown 正文)。
-    gateway 由路由按 claude-cli 步配置构建(见 api/routes/radar.py),此处不关心 provider 细节。"""
-    system, user = build_digest_prompt(radar_data, recent_titles)
-    request = LLMRequest(
-        messages=[{"role": "user", "content": user}],
-        system=system,
-        max_tokens=2048,
-        temperature=0.7,
-    )
-    return await gateway.call("digest", request)

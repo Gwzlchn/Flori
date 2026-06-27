@@ -194,67 +194,96 @@ def fake_response():
 
 
 @pytest.fixture
-def app_with_gateway(db, test_config, fake_response):
+def ask_app(db, test_config):
+    """异步 /ask、ai-tasks 端点:用真 fakeredis(让 enqueue_ai_task/set_ai_result 真生效,便于验队列/结果)。"""
     from api.main import create_app
-    from tests.conftest import make_redis_mock
+    from tests.conftest import make_fakeredis
 
-    app = create_app(db=db, redis=make_redis_mock(), config=test_config)
-    app.state.synthesis_gateway = _FakeGateway(fake_response)
-    return app
+    return create_app(db=db, redis=make_fakeredis(), config=test_config)
 
 
 @pytest.fixture
-async def ask_client(app_with_gateway):
+async def ask_client(ask_app):
     from httpx import ASGITransport, AsyncClient
 
-    transport = ASGITransport(app=app_with_gateway)
+    transport = ASGITransport(app=ask_app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
 
 
 class TestAskEndpoint:
     @pytest.mark.asyncio
-    async def test_ask_returns_answer_and_sources(self, ask_client, app_with_gateway):
+    async def test_ask_enqueues_task_and_returns_sources(self, ask_client, ask_app):
         resp = await ask_client.post(
             "/api/ask", json={"question": "反向传播和梯度下降有什么区别?", "domain": "ml"}
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 202
         data = resp.json()
         assert data["question"].startswith("反向传播")
-        assert "[来源1]" in data["answer_markdown"]
-        assert "共识 / 分歧" in data["answer_markdown"]
+        assert data["task_id"] and data["task_id"].startswith("at_")
+        assert data["answer_markdown"] is None  # 答案走 result 端点,不在这里
         assert data["retrieved_count"] >= 1
-        job_ids = {s["job_id"] for s in data["sources"]}
-        assert "j_bp" in job_ids
+        assert "j_bp" in {s["job_id"] for s in data["sources"]}
         for s in data["sources"]:
             assert set(s) == {"job_id", "title", "domain", "content_type"}
-        # 假 gateway 确实被以 synthesis 步调用(没走真 LLM)。
-        assert app_with_gateway.state.synthesis_gateway.calls
-        assert app_with_gateway.state.synthesis_gateway.calls[0][0] == "synthesis"
+        # 真投了一个 synthesis AI task 进 queue:ai(claude 在 worker 跑,API 没调)。
+        queued = await ask_app.state.redis.list_queue("ai")
+        assert len(queued) == 1
+        assert queued[0]["kind"] == "ai" and queued[0]["task_id"] == data["task_id"]
+        assert queued[0]["step"] == "synthesis" and queued[0]["require_tags"] == ["claude-cli"]
 
     @pytest.mark.asyncio
-    async def test_ask_records_usage(self, ask_client, db):
-        await ask_client.post("/api/ask", json={"question": "反向传播", "domain": "ml"})
-        summary = db.get_usage_summary()
-        # 记了一次 synthesis 调用(input/output token 来自假 response)。
-        assert summary["calls"] >= 1
-        assert summary["total_input_tokens"] == 120
-        assert summary["total_output_tokens"] == 60
-
-    @pytest.mark.asyncio
-    async def test_ask_no_match_skips_llm(self, ask_client, app_with_gateway):
+    async def test_ask_no_match_skips_task(self, ask_client, ask_app):
         resp = await ask_client.post(
             "/api/ask", json={"question": "量子计算机超导体", "domain": "ml"}
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 202
         data = resp.json()
-        assert data["retrieved_count"] == 0
-        assert data["sources"] == []
-        assert "没有找到" in data["answer_markdown"]
-        # 无命中不应调 gateway。
-        assert app_with_gateway.state.synthesis_gateway.calls == []
+        assert data["retrieved_count"] == 0 and data["sources"] == []
+        assert data["task_id"] is None and "没有找到" in data["answer_markdown"]
+        assert await ask_app.state.redis.list_queue("ai") == []  # 无命中不投 task
 
     @pytest.mark.asyncio
     async def test_ask_empty_question_422(self, ask_client):
         resp = await ask_client.post("/api/ask", json={"question": ""})
         assert resp.status_code == 422
+
+
+class TestAITasksEndpoints:
+    """/api/ai-tasks/{task_id}/result(pending/done/error) + /log(白盒审计)(P1-3)。"""
+
+    @pytest.mark.asyncio
+    async def test_result_pending(self, ask_client):
+        data = (await ask_client.get("/api/ai-tasks/at_none/result")).json()
+        assert data["status"] == "pending" and data["task_id"] == "at_none"
+
+    @pytest.mark.asyncio
+    async def test_result_done(self, ask_client, ask_app):
+        await ask_app.state.redis.set_ai_result(
+            "at_done", {"content": "ANS", "provider": "claude-cli", "model": "subscription", "cost_usd": 0.1})
+        data = (await ask_client.get("/api/ai-tasks/at_done/result")).json()
+        assert data["status"] == "done" and data["content"] == "ANS"
+        assert data["answer_markdown"] == "ANS" and data["markdown"] == "ANS"
+        assert data["provider"] == "claude-cli"
+
+    @pytest.mark.asyncio
+    async def test_result_error(self, ask_client, ask_app):
+        await ask_app.state.redis.set_ai_result("at_err", {"error": "provider down"})
+        data = (await ask_client.get("/api/ai-tasks/at_err/result")).json()
+        assert data["status"] == "error" and "provider down" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_log_endpoint(self, ask_client, db):
+        db.record_ai_task_log({
+            "task_id": "at_log", "exec_id": "w:1", "step_name": "synthesis", "domain": "ml",
+            "provider": "claude-cli", "model": "subscription", "ok": True,
+            "record": {"output": "hi", "routing": {"attempts": [{"tier": "primary"}]}},
+            "created_at": "2026-06-27T00:00:00+00:00",
+        })
+        data = (await ask_client.get("/api/ai-tasks/at_log/log")).json()
+        assert data["count"] == 1
+        call = data["calls"][0]
+        assert call["step"] == "synthesis" and call["provider"] == "claude-cli" and call["ok"] is True
+        assert call["record"]["output"] == "hi"
+        empty = (await ask_client.get("/api/ai-tasks/at_missing/log")).json()
+        assert empty["count"] == 0 and empty["calls"] == []

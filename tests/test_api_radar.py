@@ -131,39 +131,19 @@ class TestRadarRoutes:
         assert (await client.get("/api/domains/finance/radar?window_days=999")).status_code == 422
 
     @pytest.mark.asyncio
-    async def test_post_digest_records_usage(self, client, app, monkeypatch):
+    async def test_post_digest_enqueues_task(self, client, app):
         _seed_radar(app.state.db)
-
-        canned = LLMResponse(
-            content="## 本周摘要\n本周聚焦量化交易,新概念 JEPQ 值得关注。",
-            model="subscription", provider="claude-cli",
-            input_tokens=120, output_tokens=80, cost_usd=0.0042,
-            duration_sec=1.5, num_turns=1,
-        )
-        captured = {}
-
-        class FakeGateway:
-            def __init__(self, *a, **k):
-                pass
-
-            async def call(self, step_name, request):
-                captured["step"] = step_name
-                captured["system"] = request.system
-                captured["user"] = request.messages[0]["content"]
-                return canned
-
-        # 路由内部 `AIGateway(...)` 构造 → 用 fake 替换,绝不打真 LLM。
-        monkeypatch.setattr("api.routes.radar.AIGateway", FakeGateway)
-
         r = await client.post("/api/domains/finance/digest?window_days=7")
-        assert r.status_code == 200, r.text
+        assert r.status_code == 202, r.text
         body = r.json()
-        assert body["markdown"].startswith("## 本周摘要")
+        assert body["task_id"] and body["task_id"].startswith("at_")
         assert body["window"]["days"] == 7
-        assert captured["step"] == "digest"
-        assert "量化交易" in captured["user"]  # 雷达数据进了 prompt
-
-        # AIUsage 落库:provider/step/cost 正确归因。
-        summary = app.state.db.get_usage_summary()
-        assert summary["total_cost_usd"] == pytest.approx(0.0042)
-        assert summary["calls"] == 1
+        # 投了一个 digest AI task 进 queue:ai(claude 在 ai-worker 跑,API 不调);用量/审计在 worker 侧。
+        redis = app.state.redis
+        assert redis.enqueue_ai_task.await_count == 1
+        payload = redis.enqueue_ai_task.await_args.args[0]
+        assert payload["kind"] == "ai" and payload["step"] == "digest"
+        assert payload["domain"] == "finance" and payload["require_tags"] == ["claude-cli"]
+        assert payload["task_id"] == body["task_id"]
+        # 雷达数据进了 prompt。
+        assert "量化交易" in payload["request"]["messages"][0]["content"]

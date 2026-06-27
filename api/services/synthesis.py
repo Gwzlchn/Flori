@@ -6,16 +6,15 @@
 带引号的字面短语匹配(_fts_match_query),自然语言问句几乎不可能整句命中。本模块通过
 `derive_queries` 把问句拆成有意义的小词/术语,分别检索再并集去重,缓解该字面短语限制。
 
-门面纯函数(吃 Database / gateway),便于单测:不在此持有连接/全局状态。
+门面纯函数(吃 Database),便于单测:不在此持有连接/全局状态。
+LLM 综合本身现作为独立 AI task 投给 ai-worker(见 api/routes/ask.py + shared.models.AITask),本模块只产 retrieve/build_prompt。
 """
 
 from __future__ import annotations
 
 import re
 
-from shared.ai_gateway import AIGateway
 from shared.db import Database
-from shared.models import LLMRequest, LLMResponse
 
 # 每段正文喂给 LLM 的字符预算:太长会撑爆上下文 + 涨成本,4000 中文足够承载要点。
 _BODY_CHAR_BUDGET = 4000
@@ -185,17 +184,3 @@ def build_prompt(question: str, passages: list[dict]) -> tuple[str, str]:
         "请根据上述资料综合作答,并按要求内联引用 [来源N] 且补充「共识 / 分歧」章节。"
     )
     return system, user
-
-
-async def synthesize(
-    gateway: AIGateway, question: str, passages: list[dict]
-) -> LLMResponse:
-    """调 gateway 的 `synthesis` 步综合出答案。passages 由 retrieve 产出。"""
-    system, user = build_prompt(question, passages)
-    request = LLMRequest(
-        messages=[{"role": "user", "content": user}],
-        system=system,
-        max_tokens=4096,
-        temperature=0.3,  # 综合问答求稳,低温减少臆造
-    )
-    return await gateway.call("synthesis", request)
