@@ -218,17 +218,18 @@ class PdfParseStep(StepBase):
         return sections
 
     def _extract_figure_refs(self, doc) -> list[dict]:
-        figures = []
+        # 同一图号在正文里常被多次匹配("Figure 1." inline 引用)+ 真图注一处 → 按图号去重,留 caption 最长者
+        # (真图注信息最全;inline 引用 caption 短)。渲染步据此每图渲一张,避免重复/错配。
         fig_pattern = re.compile(r"(?:Figure|Fig\.?)\s+(\d+)[.:]\s*(.*?)(?:\n|$)", re.IGNORECASE)
+        best: dict[str, dict] = {}
         for page_num in range(len(doc)):
             text = doc[page_num].get_text()
             for m in fig_pattern.finditer(text):
-                figures.append({
-                    "id": f"fig{m.group(1)}",
-                    "page": page_num + 1,
-                    "caption": m.group(2).strip(),
-                })
-        return figures
+                num, caption = m.group(1), m.group(2).strip()
+                cur = best.get(num)
+                if cur is None or len(caption) > len(cur["caption"]):
+                    best[num] = {"id": f"fig{num}", "page": page_num + 1, "caption": caption}
+        return [best[k] for k in sorted(best, key=lambda n: int(n))]
 
     def _extract_formulas(self, doc) -> list[dict]:
         formulas = []

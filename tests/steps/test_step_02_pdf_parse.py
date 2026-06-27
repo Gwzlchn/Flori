@@ -216,3 +216,16 @@ class TestExtractVenue:
     def test_no_venue_returns_empty(self, tmp_path):
         step = _mk_step(tmp_path)
         assert step._extract_venue(_doc1("Just some body text with no venue line.")) == ""
+
+
+class TestExtractFigureRefs:
+    def test_dedup_keeps_longest_caption(self, tmp_path):
+        # 同图号去重:正文 inline 引用("Figure 1. ...")caption 短,真图注最长 → 留最长。
+        step = _mk_step(tmp_path)
+        doc = _FakeDoc({"title": "t"}, page_text=(
+            "Figure 1: Architecture of the model.\n"
+            "As shown in Figure 1. it works\n"
+            "Figure 2: Results table.\n"))
+        figs = step._extract_figure_refs(doc)
+        assert [f["id"] for f in figs] == ["fig1", "fig2"]
+        assert figs[0]["caption"] == "Architecture of the model."

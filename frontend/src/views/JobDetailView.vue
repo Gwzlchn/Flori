@@ -17,6 +17,7 @@ import {
   Play, FileText, ExternalLink, BookOpen, Lightbulb,
   GitBranch, Info, RefreshCw, ChevronDown, Star, List, RotateCcw, Trash2,
   AlertTriangle, ChevronRight, Bookmark, ShieldCheck, Coins, Languages,
+  Image as ImageIcon,
 } from 'lucide-vue-next'
 
 // 内容详情(原型 #detail)：头部 + 4 tab(笔记/概念/流水线/元信息)。
@@ -81,7 +82,7 @@ const loading = ref(true)
 const loadError = ref('')
 
 // ── tab ──
-type Tab = 'notes' | 'concepts' | 'proc' | 'info' | 'evidence' | 'translated'
+type Tab = 'notes' | 'concepts' | 'proc' | 'info' | 'evidence' | 'translated' | 'figures'
 const tab = ref<Tab>('proc')
 const TABS: { key: Tab; label: string; icon: any }[] = [
   { key: 'notes', label: '笔记', icon: BookOpen },
@@ -153,6 +154,7 @@ async function fetchDetail() {
     loadEvidence()  // 权威来源(取证产物);有则显示「权威来源」tab
     loadOriginal()  // 原文 MD(article v2 output/original.md);有则显示「原文」tab
     loadTranslated()  // 译文 MD(非中文文章 output/translated.md);有则显示「译文」tab
+    loadFigures()     // 论文图表(intermediate/figures.json);有渲染图则显示「图表」tab
     // 本 job DAG 的依赖(needs)定义(/api/pipelines 返回 {pipelines:[...]});失败留空不影响详情。
     api.get<{ pipelines?: any[] }>('/api/pipelines').then(r => { pipelinesDef.value = Array.isArray(r) ? r : (r?.pipelines ?? []) }).catch(() => {})
     // 逐次 AI 用量 → DAG 节点 provider/开销 + 总开销。带 job 切换守卫,迟到的回填不串到新 job。
@@ -303,6 +305,23 @@ async function loadTranslated() {
     translatedMd.value = await api.getText(
       `/api/jobs/${jobId.value}/artifact?path=${encodeURIComponent('output/translated.md')}`)
   } catch { translatedMd.value = '' }
+}
+
+// ════════════════════ 图表(论文 intermediate/figures.json) tab ════════════════════
+// 04_figures 渲染的图(含矢量图);独立展示,不依赖智能笔记/AI worker。只列有渲染图(filename)的条目。
+interface FigureItem { id: string; page: number; caption: string; filename: string | null; ocr_text?: string }
+const figures = ref<FigureItem[]>([])
+const figuresWithImage = computed(() => figures.value.filter(f => f.filename))
+const hasFigures = computed(() => figuresWithImage.value.length > 0)
+async function loadFigures() {
+  try {
+    const raw = await api.getText(
+      `/api/jobs/${jobId.value}/artifact?path=${encodeURIComponent('intermediate/figures.json')}`)
+    figures.value = JSON.parse(raw)
+  } catch { figures.value = [] }
+}
+function figureUrl(filename: string): string {
+  return `/api/jobs/${jobId.value}/assets/${filename}`
 }
 
 let notesInit = false
@@ -577,6 +596,9 @@ watch(job, (j) => {
         <button v-if="hasTranslation" :class="{ on: tab === 'translated' }" @click="tab = 'translated'">
           <Languages :size="15" />译文
         </button>
+        <button v-if="hasFigures" :class="{ on: tab === 'figures' }" @click="tab = 'figures'">
+          <ImageIcon :size="15" />图表
+        </button>
       </div>
 
       <!-- ════ 笔记(article:智能版可隐藏、机械版=原文)════ -->
@@ -731,6 +753,15 @@ watch(job, (j) => {
       <div v-show="tab === 'translated'">
         <p class="lead" style="margin:-6px 0 12px"><Languages :size="13" /> 原文为非中文,以下是 AI 忠实全文译文(保留原结构与配图)。</p>
         <MarkdownViewer :content="translatedMd" :job-id="jobId" :domain="domain" />
+      </div>
+
+      <!-- ════ 图表(论文按图注渲染的页面区域,含矢量图)════ -->
+      <div v-show="tab === 'figures'">
+        <p class="lead" style="margin:-6px 0 12px"><ImageIcon :size="13" /> 从 PDF 按图注渲染的图表({{ figuresWithImage.length }} 张,含矢量图)。</p>
+        <figure v-for="f in figuresWithImage" :key="f.id" class="fig-card">
+          <img :src="figureUrl(f.filename!)" :alt="f.caption" loading="lazy" />
+          <figcaption><b>{{ f.id }}</b><span v-if="f.caption"> · {{ f.caption }}</span></figcaption>
+        </figure>
       </div>
 
       <!-- ════ 概念 ════ -->
@@ -910,6 +941,12 @@ watch(job, (j) => {
 </template>
 
 <style scoped>
+.fig-card { margin: 0 0 22px; }
+.fig-card img {
+  max-width: 100%; display: block; border: 1px solid var(--line-soft);
+  border-radius: 8px; background: #fff; padding: 8px;
+}
+.fig-card figcaption { margin-top: 6px; font-size: 13px; color: var(--ink-600); line-height: 1.5; }
 .artifacts { margin-top: 16px; border-top: 1px solid var(--line-soft); padding-top: 12px; }
 .art-toggle {
   display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600;

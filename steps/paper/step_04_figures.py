@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections import defaultdict
 from pathlib import Path
 
 from shared.step_base import StepBase, file_hash
@@ -37,89 +36,140 @@ class FiguresStep(StepBase):
         assets_dir = self.job_dir / "assets"
         assets_dir.mkdir(parents=True, exist_ok=True)
 
-        with fitz.open(str(pdf_path)) as doc:
-            extracted = self._extract_images_from_pdf(doc, assets_dir)
-
         figures_info = parsed.get("figures", [])
-        results = []
         ocr_engine = self._create_ocr_engine()
+        results = []
+        asset_idx = 0   # 渲染出图者的递增序号 = 占位符 img:N 的 N(05_smart 内联回填用)
 
-        # 同页可有多张内嵌位图与多条图注:按页建可消费队列,逐图注取「下一张未用」位图,
-        # 而非每条图注都命中该页第一张(否则多图注引用同一图/图文错配)。
-        page_pool: dict[int, list[dict]] = defaultdict(list)
-        for ext_img in extracted:
-            page_pool[ext_img["page"]].append(ext_img)
+        # 按图注【渲染 PDF 页面区域】:caption 上方、同列、drawings+图片矩形的并集 = 图区域,
+        # get_pixmap(clip=区域) 渲染——矢量图与栅格图通吃(get_images 只能抽栅格,会漏正文矢量图)。
+        with fitz.open(str(pdf_path)) as doc:
+            for i, fig in enumerate(figures_info):
+                self.report_progress(i, len(figures_info), "rendering figures")
+                fig_id = fig.get("id", f"fig{i + 1}")
+                page_no = fig.get("page", 1)
+                caption = fig.get("caption", "")
 
-        for i, fig in enumerate(figures_info):
-            self.report_progress(i, len(figures_info), "processing figures")
-            fig_id = fig.get("id", f"fig{i + 1}")
-            page = fig.get("page", 1)
-            caption = fig.get("caption", "")
+                filename = None
+                if 1 <= page_no <= len(doc):
+                    filename = self._render_figure_region(
+                        doc[page_no - 1], self._fig_number(fig_id), caption, assets_dir, asset_idx)
 
-            img_filename = None
-            img_idx = None
-            pool = page_pool.get(page)
-            if pool:  # 同页图注多于位图时,后续图注取不到 → 保持 None(优雅降级)
-                ext_img = pool.pop(0)
-                img_filename = ext_img["filename"]
-                img_idx = ext_img["index"]
-
-            entry = {
-                "id": fig_id,
-                "page": page,
-                "caption": caption,
-                "filename": img_filename,
-                "index": img_idx,   # 占位符 [img:N] 的 N;无内嵌位图时为 None
-                "ocr_text": "",
-            }
-
-            if img_filename:
-                img_path = assets_dir / img_filename
-                if img_path.exists():
-                    entry["ocr_text"] = self._ocr_figure(ocr_engine, img_path)
-
-            results.append(entry)
+                entry = {
+                    "id": fig_id,
+                    "page": page_no,
+                    "caption": caption,
+                    "filename": filename,
+                    "index": asset_idx if filename else None,   # img:N 的 N;渲染不出图则 None(仅文字图注)
+                    "ocr_text": "",
+                }
+                if filename:
+                    entry["ocr_text"] = self._ocr_figure(ocr_engine, assets_dir / filename)
+                    asset_idx += 1
+                results.append(entry)
 
         self.report_progress(len(figures_info), len(figures_info), "done")
         self.write_output("intermediate/figures.json", results)
         return {"figures": len(results), "with_image": sum(1 for r in results if r["filename"])}
 
-    def _extract_images_from_pdf(self, doc, assets_dir: Path) -> list[dict]:
-        import fitz  # 本方法用 fitz.Pixmap/csRGB;execute() 的 import 不及于此作用域(曾致 NameError 静默吞图)
-        extracted = []
-        img_index = 0
+    @staticmethod
+    def _fig_number(fig_id: str) -> str:
+        import re
+        m = re.search(r"\d+", fig_id or "")
+        return m.group(0) if m else ""
 
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            images = page.get_images(full=True)
+    def _render_figure_region(self, page, fig_num: str, caption: str, assets_dir: Path, idx: int, zoom: float = 2.0):
+        """渲染图注上方的图区域为 PNG。取不到 caption 位置 / 上方无图形 → None(仅文字图注,优雅降级)。"""
+        import fitz
+        try:
+            cap = self._caption_rect(page, fig_num, caption)
+            if cap is None:
+                return None
+            region = self._figure_bbox_above(page, cap)
+            if region is None:
+                return None
+            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=region)
+            if pix.width < 24 or pix.height < 24:
+                return None
+            fn = f"figure-{idx:04d}.png"
+            pix.save(str(assets_dir / fn))
+            return fn
+        except _BUG_ERRORS:
+            raise   # 代码 bug → fail-loud,不静默吞
+        except Exception as e:
+            self.log.warning("figure_render_error", fig=fig_num, error=str(e))
+            return None
 
-            for img_info in images:
-                xref = img_info[0]
-                try:
-                    pix = fitz.Pixmap(doc, xref)
-                    if pix.n < 5:
-                        filename = f"figure-{img_index:04d}.png"
-                        pix.save(str(assets_dir / filename))
-                    else:
-                        pix2 = fitz.Pixmap(fitz.csRGB, pix)
-                        filename = f"figure-{img_index:04d}.png"
-                        pix2.save(str(assets_dir / filename))
+    @staticmethod
+    def _caption_rect(page, fig_num: str, caption: str):
+        """定位图注矩形:先用「Figure N: <头部>」精确,退回「Figure N」标签。"""
+        probes = []
+        head = (caption or "").strip()[:24]
+        if head:
+            probes += [f"Figure {fig_num}: {head}", f"Figure {fig_num}. {head}"]
+        probes += [f"Figure {fig_num}:", f"Figure {fig_num}.", f"Fig. {fig_num}", f"Fig {fig_num}"]
+        for p in probes:
+            rs = page.search_for(p)
+            if rs:
+                return rs[0]
+        return None
 
-                    if (assets_dir / filename).stat().st_size > 1024:
-                        extracted.append({
-                            "page": page_num + 1,
-                            "filename": filename,
-                            "index": img_index,   # 稳定资产序号 = 占位符 [img:N] 的 N
-                        })
-                        img_index += 1
-                except _BUG_ERRORS:
-                    raise   # 代码 bug(如 fitz 未导入)→ fail-loud,不当"缺图"吞掉
-                except Exception as e:
-                    # 单张图的数据问题(损坏/不支持色彩空间等)→ 跳过该图,不阻断本步。
-                    self.log.warning("figure_extract_error", page=page_num + 1, error=str(e))
-                    continue
+    @staticmethod
+    def _figure_bbox_above(page, cap):
+        """图区域 = caption 与其上方最近正文段落之间、同列内 drawings+图片矩形的并集。"""
+        import fitz
+        pw, ph = page.rect.width, page.rect.height
+        mid = pw / 2
+        # 列:用图注【所在文本块】宽度判栏(search 探针 rect 只是文字片段,会把全宽图误判成单栏)。
+        # 块宽 < 55% 页宽 → 双栏,取所在半栏;否则(全宽图注)整页宽。
+        cap_block_w = cap.width
+        for b in page.get_text("blocks"):
+            if b[1] <= cap.y0 <= b[3] + 1 and len(b[4].strip()) > 8:
+                cap_block_w = max(cap_block_w, b[2] - b[0])
+        if cap_block_w < pw * 0.55:
+            col_l, col_r = (0.0, mid) if (cap.x0 + cap.x1) / 2 < mid else (mid, pw)
+        else:
+            col_l, col_r = 0.0, pw
 
-        return extracted
+        def in_col(x0, x1):
+            return col_l - 6 <= (x0 + x1) / 2 <= col_r + 6
+
+        # 上界:caption 上方最近的正文段落(长文本块)底——避免并入更上方的图/段落。
+        text_top = max(0.0, cap.y0 - ph * 0.75)
+        for b in page.get_text("blocks"):
+            if len(b[4].strip()) < 80:          # 跳过短块(轴标签/图例/页眉)
+                continue
+            if in_col(b[0], b[2]) and b[3] <= cap.y0 - 2:
+                text_top = max(text_top, b[3])
+
+        # ink:drawings + 图片 bbox,落在 [text_top, caption] 之间、同列、尺寸合理。
+        ink = [fitz.Rect(d["rect"]) for d in page.get_drawings()]
+        for img in page.get_images(full=True):
+            try:
+                ink.append(page.get_image_bbox(img))
+            except Exception:
+                pass
+        sel = []
+        for r in ink:
+            if r.is_empty or r.is_infinite:
+                continue
+            if not in_col(r.x0, r.x1):
+                continue
+            if r.y1 > cap.y0 - 1 or r.y0 < text_top - 2:
+                continue
+            if r.width > pw * 0.98 and r.height < 3:   # 跨页横线(rule)跳过
+                continue
+            sel.append(r)
+        if not sel:
+            return None
+        region = sel[0]
+        for r in sel[1:]:
+            region |= r
+        region = fitz.Rect(max(region.x0, col_l) - 2, region.y0 - 2,
+                           min(region.x1, col_r) + 2, min(region.y1 + 2, cap.y0 - 1))
+        if region.height < 24 or region.width < 24:
+            return None
+        return region
 
     def _create_ocr_engine(self):
         # 宽松语义:构造失败(含未实现后端/缺库)记日志返 None,图表 OCR 可缺省不阻断本步。

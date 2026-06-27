@@ -84,8 +84,13 @@ class TestFiguresStep:
         assert "parsed" in hashes
         assert "pdf" in hashes
 
-    def test_same_page_captions_map_to_distinct_images(self, tmp_path, monkeypatch):
-        """I-L14: 同页多条图注应各取不同位图(消费式),多于位图的图注降级为 None。"""
+    def test_fig_number(self):
+        assert FiguresStep._fig_number("fig3") == "3"
+        assert FiguresStep._fig_number("fig12") == "12"
+        assert FiguresStep._fig_number("fig") == ""
+
+    def test_renders_per_caption_with_index(self, tmp_path, monkeypatch):
+        # 每图注渲一张:渲出图者得递增 index(img:N 契约),渲不出者 filename/index 皆 None。
         job_dir = tmp_path / "job"
         job_dir.mkdir()
         for d in ["intermediate", "input", "assets"]:
@@ -94,11 +99,14 @@ class TestFiguresStep:
         parsed = {"figures": [
             {"id": "fig1", "page": 1, "caption": "c1"},
             {"id": "fig2", "page": 1, "caption": "c2"},
-            {"id": "fig3", "page": 1, "caption": "c3"},  # 第三条无位图可取
+            {"id": "fig3", "page": 1, "caption": "c3"},  # 渲不出图(矢量/无图)
         ], "sections": []}
         (job_dir / "intermediate" / "parsed.json").write_text(json.dumps(parsed))
 
+        mock_page = MagicMock()
         mock_doc = MagicMock()
+        mock_doc.__len__ = lambda self: 1
+        mock_doc.__getitem__ = lambda self, i: mock_page
         mock_doc.__enter__ = lambda self: self
         mock_doc.__exit__ = lambda self, *a: None
         mock_fitz = MagicMock()
@@ -107,11 +115,8 @@ class TestFiguresStep:
 
         config = make_step_config(tmp_path, step_name="04_figures", pool="cpu")
         step = FiguresStep("04_figures", job_dir, config)
-        # 同页两张位图;OCR 关闭(返回 None),不依赖真实图片文件。
-        monkeypatch.setattr(step, "_extract_images_from_pdf", lambda doc, assets: [
-            {"page": 1, "filename": "figure-0000.png", "index": 0},
-            {"page": 1, "filename": "figure-0001.png", "index": 1},
-        ])
+        rendered = iter(["figure-0000.png", "figure-0001.png", None])
+        monkeypatch.setattr(step, "_render_figure_region", lambda *a, **k: next(rendered))
         monkeypatch.setattr(step, "_create_ocr_engine", lambda: None)
         step.execute()
 
@@ -120,30 +125,23 @@ class TestFiguresStep:
         assert (figs[1]["filename"], figs[1]["index"]) == ("figure-0001.png", 1)
         assert figs[2]["filename"] is None and figs[2]["index"] is None
 
-    @staticmethod
-    def _doc_one_image():
-        page = MagicMock()
-        page.get_images.return_value = [(123,)]   # 一张图,xref=123
-        doc = MagicMock()
-        doc.__len__ = lambda self: 1
-        doc.__getitem__ = lambda self, i: page
-        return doc
-
-    def test_bug_error_reraised_not_swallowed(self, tmp_path, monkeypatch):
-        # 代码 bug(NameError 等)不被"缺图"宽松 catch 吞 → 重抛(否则像 fitz 未导入会静默抽 0 图、还查不到)。
+    def test_render_bug_error_reraised(self, tmp_path, monkeypatch):
+        # _render_figure_region 内代码 bug(NameError)→ 重抛 fail-loud,不当"缺图"吞掉。
         job_dir = tmp_path / "job"; job_dir.mkdir(); (job_dir / "assets").mkdir()
         step = FiguresStep("04_figures", job_dir, make_step_config(tmp_path, step_name="04_figures", pool="cpu"))
-        mock_fitz = MagicMock()
-        mock_fitz.Pixmap.side_effect = NameError("name 'fitz' is not defined")
-        monkeypatch.setitem(sys.modules, "fitz", mock_fitz)
+
+        def _boom(*a, **k):
+            raise NameError("bug")
+        monkeypatch.setattr(step, "_caption_rect", staticmethod(_boom))
         with pytest.raises(NameError):
-            step._extract_images_from_pdf(self._doc_one_image(), job_dir / "assets")
+            step._render_figure_region(MagicMock(), "1", "cap", job_dir / "assets", 0)
 
-    def test_data_error_swallowed(self, tmp_path, monkeypatch):
-        # 单张图的数据错(损坏等)仍优雅跳过,不阻断本步(图表可缺省)。
+    def test_render_data_error_swallowed(self, tmp_path, monkeypatch):
+        # 渲染中的数据错(损坏页等)→ 优雅返回 None,不阻断本步。
         job_dir = tmp_path / "job"; job_dir.mkdir(); (job_dir / "assets").mkdir()
         step = FiguresStep("04_figures", job_dir, make_step_config(tmp_path, step_name="04_figures", pool="cpu"))
-        mock_fitz = MagicMock()
-        mock_fitz.Pixmap.side_effect = ValueError("corrupt image")
-        monkeypatch.setitem(sys.modules, "fitz", mock_fitz)
-        assert step._extract_images_from_pdf(self._doc_one_image(), job_dir / "assets") == []
+
+        def _boom(*a, **k):
+            raise ValueError("corrupt page")
+        monkeypatch.setattr(step, "_caption_rect", staticmethod(_boom))
+        assert step._render_figure_region(MagicMock(), "1", "cap", job_dir / "assets", 0) is None

@@ -1683,6 +1683,7 @@ video:
   - `02_pdf_parse` 检测正文主语言写 `parsed.json.lang`(判据与文章共用 `steps.utils.lang`);**非中文**额外写 `intermediate/needs_translation.json`;元信息(title/authors/abstract/pages/lang/**venue**)经 JobDetail `media` 透出「元信息」tab(与文章同)。
   - **来源(`media.venue` / `media.sitename`)**:论文 `02_pdf_parse._extract_venue` 抽会议/期刊+年份(`OSDI 2023`/`arXiv`;全名→缩写映射在 `configs/venues.yaml`,配置与代码分离);文章 `02_parse_article` 取 trafilatura `sitename`(URL 域名兜底)。前端「来源」= `venue`/`sitename`,无则回退来源类型标签。
   - **arxiv 元数据**:`01_download._fetch_arxiv_meta` 查 arxiv API(`export.arxiv.org/api/query`,feedparser 解析)→ `title/authors/abstract/published_at` 写入 `input/metadata.json`(权威来源);`02_pdf_parse` 优先用其 `title/authors/abstract` 覆盖 PDF 启发(PDF 标题常误抓左边距 arXiv 戳、作者为空)。best-effort,API 失败回退 PDF 解析。
+  - `04_figures`:**按图注渲染 PDF 页面区域**为图(`get_pixmap(clip=区域)`,矢量+栅格通吃;旧 `get_images` 只能抽栅格、漏矢量正文图)。区域 = 图注上方、同列(按图注所在文本块宽判单/双栏)、`drawings`+图片矩形并集。`intermediate/figures.json` = `[{id, page, caption, filename, index, ocr_text}]`:`filename`=渲染图(`assets/figure-NNNN.png`,经 `GET /api/jobs/{id}/assets/{filename}`),渲不出图者 `filename/index` 为 `null`(仅文字图注);`index`=`05_smart` 内联占位符 `img:N` 的 N。前端「图表」tab 直接展示(不依赖智能笔记/AI worker)。
   - `04_translate_paper`(AI,`rules.exists` 门控,仅非中文论文):章节文本忠实翻译为简体中文 → `output/translated.md`(保留结构/公式/图表引用),供「译文」tab。
   - `05_smart_paper` `needs` 含 `04_translate_paper`:非中文论文笔记**基于 章节+图表+译文**(有译文则用译文正文);译文跳过(中文论文)依赖视为满足、读原文。
 - **article**：`01_download` → `02_parse_article` → `03_article_sections` → `04_smart_article`(可选,`smart_note`)/`04_translate_article`(条件) → `05_concepts`(必跑) → `06_review`(可选)。
