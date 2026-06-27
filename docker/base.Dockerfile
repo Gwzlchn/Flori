@@ -47,6 +47,23 @@ COPY configs/ configs/
 # 故不能直接只读 bind-mount 仓库目录覆盖。
 COPY configs/prompts/ /data/prompts/
 
+# 网络区域路由(net-zone)用的 CN 域名表:【构建时从 GitHub 上游(felixonmars/dnsmasq-china-list)拉取,
+# 不自维护】,解析成可注册域集烤进镜像 /app/data/cn_domains.txt(运行时 shared.net_zone 只读不拉)。
+# 源用与 apt/pip 同一个 USE_USTC_MIRROR 控制:国内构建(=1)优先 jsdelivr/ghproxy 国内可达镜像,
+# 海外 CI(=0)走 github raw;按序兜底,全失败则留空 → 运行时回退仅按 .cn TLD 判 cn(境外仍 net-global)。
+RUN mkdir -p /app/data \
+    && CN_RAW="https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/accelerated-domains.china.conf" \
+    && CN_JSD="https://cdn.jsdelivr.net/gh/felixonmars/dnsmasq-china-list@master/accelerated-domains.china.conf" \
+    && CN_GHP="https://ghproxy.net/${CN_RAW}" \
+    && if [ "$USE_USTC_MIRROR" = "1" ]; then ORDER="$CN_JSD $CN_GHP $CN_RAW"; else ORDER="$CN_RAW $CN_JSD"; fi \
+    && for u in $ORDER; do curl -fsSL --retry 2 --max-time 90 "$u" -o /tmp/cn.conf && break || true; done; \
+       sed -n 's#^server=/\([^/]*\)/.*#\1#p' /tmp/cn.conf 2>/dev/null | sort -u > /app/data/cn_domains.txt || true; \
+       echo "cn_domains baked: $(wc -l < /app/data/cn_domains.txt 2>/dev/null || echo 0) domains"
+
+# 注:net-zone 探针 URL(NET_PROBE_CN/NET_PROBE_GLOBAL)是【部署/启动配置】,不烤进镜像——
+# 由 compose 的 worker 服务 env 注入(见 docker-compose.yml);worker 代码有兜底默认。
+# NET_ZONES=cn,global 可在启动时强制跳过探测(如香港 worker 设 NET_ZONES=global)。
+
 # 构建期注入构建短 sha:运行时 shared.version 把它拼到语义版本后(0.2.0+<sha>),用于查"哪台
 # worker 跑哪份代码"(代码漂移排查)。放最后,版本变化不影响上面代码层缓存。语义版本来自已装包(pyproject)。
 ARG FLORI_BUILD_SHA=

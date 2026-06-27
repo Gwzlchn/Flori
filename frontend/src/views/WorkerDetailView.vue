@@ -26,6 +26,14 @@ const showToast = inject<(m: string, t?: 'success' | 'error' | 'info') => void>(
 const workerId = computed(() => String(route.params.id))
 
 const worker = ref<Worker | null>(null)
+// 可达区域:从自动探测出的 net-cn/net-global tag 映射成友好展示(决策E:worker 页展示)。
+const netZones = computed(() => {
+  const t = worker.value?.tags || []
+  const z: string[] = []
+  if (t.includes('net-cn')) z.push('国内 net-cn')
+  if (t.includes('net-global')) z.push('全球 net-global')
+  return z
+})
 const tasks = ref<WorkerTask[]>([])
 const loading = ref(true)
 const error = ref('')
@@ -215,6 +223,15 @@ onBeforeUnmount(() => global.setCrumbs(null))
                   </span>
                 </template>
                 <span v-else>—</span>
+              </td>
+            </tr>
+            <tr>
+              <td>可达区域</td>
+              <td>
+                <template v-if="netZones.length">
+                  <span v-for="z in netZones" :key="z" class="tag" style="margin-right:6px;background:var(--info-bg, #e6f0ff)">{{ z }}</span>
+                </template>
+                <span v-else class="dim">未探测到(无网络下载能力)</span>
               </td>
             </tr>
             <tr>

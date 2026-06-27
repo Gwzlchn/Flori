@@ -2,7 +2,7 @@
 name = "flori"
 # 版本递增规则:任何改动 patch(第3段)+1;逢10进位(0.2.9→0.3.0,0.9.9→1.0.0);大重构 major+1。
 # 全系统单一版本,所有组件(api/scheduler/worker)统一。运行时 = 此值 + 构建短sha(见 shared/version.py)。
-version = "0.6.8"
+version = "0.6.9"
 description = "AI-assisted personal learning knowledge base"
 requires-python = ">=3.11"
 # 上界封顶:挡住新 major/minor 静默引入(USTC 与官方源解析差异曾坑过 CI);

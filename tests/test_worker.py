@@ -16,7 +16,7 @@ from shared.config import AppConfig
 from shared.db import Database
 from shared.models import Job, Step, StepStatus
 from shared.storage import LocalStorage
-from worker.worker import Worker, WORKER_POOLS, auto_discover_tags, _resolve_worker_id
+from worker.worker import Worker, WORKER_POOLS, auto_discover_tags, _resolve_worker_id, _probe_net_zones
 from worker.transport import RedisTransport
 
 
@@ -351,6 +351,13 @@ class TestIdleTimeout:
 
 
 class TestAutoDiscoverTags:
+    @pytest.fixture(autouse=True)
+    def _no_real_net_probe(self):
+        # auto_discover_tags 现会做网络探测(net-zone),默认屏蔽真探测(返回空 zone),
+        # 避免单测联网/卡;net-zone 专项用例自行 patch _probe_reachable 验证逻辑。
+        with patch("worker.worker._probe_net_zones", return_value=set()):
+            yield
+
     def test_anthropic_key(self):
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}, clear=False):
             tags = auto_discover_tags()
@@ -401,29 +408,54 @@ class TestAutoDiscoverTags:
         env.update(extra)
         return env
 
-    def test_bili_sessdata_env_adds_bili(self):
+    def test_sessdata_does_not_add_routing_tag(self):
+        # SESSDATA 是 worker 本地凭证(下载步自读),【不】再自报 'bili' 路由 tag。
         with patch.dict(os.environ, self._clean_env(BILI_SESSDATA="x", DATA_DIR="/no-such"), clear=True):
             with patch("shutil.which", return_value=None):
-                assert "bili" in auto_discover_tags()
+                assert "bili" not in auto_discover_tags()
 
-    def test_bili_cookie_file_adds_bili(self, tmp_path):
-        (tmp_path / "cookies").mkdir()
-        (tmp_path / "cookies" / "bilibili.txt").write_text("SESSDATA=x")
-        with patch.dict(os.environ, self._clean_env(DATA_DIR=str(tmp_path)), clear=True):
+    def test_net_zones_merged_into_tags(self):
+        # _probe_net_zones 探出的区域并入 tags(覆盖 autouse 的空 mock)。
+        with patch.dict(os.environ, self._clean_env(DATA_DIR="/no-such"), clear=True):
             with patch("shutil.which", return_value=None):
-                assert "bili" in auto_discover_tags()
-
-    def test_https_proxy_adds_net_proxy(self):
-        with patch.dict(os.environ, self._clean_env(HTTPS_PROXY="http://p:1", DATA_DIR="/no-such"), clear=True):
-            with patch("shutil.which", return_value=None):
-                assert "net-proxy" in auto_discover_tags()
+                with patch("worker.worker._probe_net_zones", return_value={"net-cn", "net-global"}):
+                    tags = auto_discover_tags()
+                    assert "net-cn" in tags and "net-global" in tags
 
     def test_no_cred_no_bili_no_net_proxy(self, tmp_path):
+        # 无凭证 → 无 bili;net-proxy 机制已移除(改 net-zone,由探测决定,本用例 autouse 屏蔽为空)。
         with patch.dict(os.environ, self._clean_env(DATA_DIR=str(tmp_path)), clear=True):
             with patch("shutil.which", return_value=None):
                 tags = auto_discover_tags()
                 assert "bili" not in tags
                 assert "net-proxy" not in tags
+
+
+class TestNetZoneProbe:
+    """net-zone 自动探测:env 强制覆盖 / 按探针可达性判 / 不联网(_probe_reachable mock)。"""
+
+    def test_env_override_skips_probe(self):
+        # NET_ZONES 显式覆盖 → 直接用,不探测(香港 worker 设 NET_ZONES=global)。
+        with patch.dict(os.environ, {"NET_ZONES": "global"}, clear=False):
+            with patch("worker.worker._probe_reachable", side_effect=AssertionError("不该探测")):
+                assert _probe_net_zones() == {"net-global"}
+
+    def test_probe_both_reachable(self):
+        with patch.dict(os.environ, {"NET_ZONES": ""}, clear=False):
+            with patch("worker.worker._probe_reachable", return_value=True):
+                assert _probe_net_zones() == {"net-cn", "net-global"}
+
+    def test_probe_only_cn(self):
+        # 国内无代理:CN 探针通、global 不通 → 仅 net-cn。
+        with patch.dict(os.environ, {"NET_ZONES": "", "NET_PROBE_CN": "https://cn", "NET_PROBE_GLOBAL": "https://g"}, clear=False):
+            with patch("worker.worker._probe_reachable", side_effect=lambda u, **k: u == "https://cn"):
+                assert _probe_net_zones() == {"net-cn"}
+
+    def test_probe_only_global(self):
+        # 香港:global 通、CN(B站)不通 → 仅 net-global。
+        with patch.dict(os.environ, {"NET_ZONES": "", "NET_PROBE_CN": "https://cn", "NET_PROBE_GLOBAL": "https://g"}, clear=False):
+            with patch("worker.worker._probe_reachable", side_effect=lambda u, **k: u == "https://g"):
+                assert _probe_net_zones() == {"net-global"}
 
 
 class TestWorkerPools:

@@ -261,8 +261,8 @@ class AppConfig:
     pipelines: dict
     pools: dict
     providers: dict
-    # 来源网络路由(configs/sources.yaml 的 net_routing 段):net_steps / proxy_sources。
-    # 缺省空 dict → scheduler 回落到内置默认,向后兼容(无 sources.yaml 也能跑)。
+    # 网络区域路由(configs/sources.yaml 的 net_routing 段):net_steps。
+    # 区域(net-cn/net-global)由 shared.net_zone 按 URL + CN 域名表判;缺省空 dict → 回落内置默认。
     net_routing: dict = field(default_factory=dict)
     # 资源槽上限(configs/resources.yaml 的 resources 段):资源名 -> 并发上限。
     # 缺省空 dict → 不启用任何资源限流(无 resources.yaml 也能跑)。

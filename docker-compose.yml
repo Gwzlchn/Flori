@@ -21,6 +21,11 @@ x-common-env: &common-env
   MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-}
   MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}
   MINIO_BUCKET: ${MINIO_BUCKET:-flori}
+  # net-zone 探针 URL(启动配置,非镜像烤死):worker 启动自动探测可达区域(net-cn/net-global)。
+  # 部署可经 .env 覆盖;NET_ZONES=cn,global 强制跳过探测(如香港 worker 设 NET_ZONES=global)。
+  NET_PROBE_CN: ${NET_PROBE_CN:-https://api.bilibili.com/x/web-interface/nav}
+  NET_PROBE_GLOBAL: ${NET_PROBE_GLOBAL:-https://github.com}
+  NET_ZONES: ${NET_ZONES:-}
 
 services:
   redis:

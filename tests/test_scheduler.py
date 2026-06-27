@@ -343,17 +343,17 @@ class TestNoWorkerFailFast:
         await s.check_no_worker()
 
     @pytest.mark.asyncio
-    async def test_bili_download_no_bili_worker_fails(self, redis, db, config, tmp_path, tmp_jobs_dir, configs_dir):
-        """B6:B站 01_download(require bili)落 io 池但 io worker 无 bili 标签 → 超宽限 fail-fast
-        (旧逻辑只看池不看 tag 会误判可推进、永久卡 ready)。"""
-        await self._bili_dl_job(redis, db, config, tmp_path, tmp_jobs_dir, configs_dir, "j_nobili", "")
-        assert "j_nobili" not in await redis.get_active_jobs()
+    async def test_cn_download_no_zone_worker_fails(self, redis, db, config, tmp_path, tmp_jobs_dir, configs_dir):
+        """B站(net-cn)01_download 落 io 池但 io worker 不覆盖 net-cn → 超宽限 fail-fast
+        (只看池不看 tag 会误判可推进、永久卡 ready)。"""
+        await self._bili_dl_job(redis, db, config, tmp_path, tmp_jobs_dir, configs_dir, "j_nozone", "")
+        assert "j_nozone" not in await redis.get_active_jobs()
 
     @pytest.mark.asyncio
-    async def test_bili_download_with_bili_worker_ok(self, redis, db, config, tmp_path, tmp_jobs_dir, configs_dir):
-        """io worker 带 bili 标签 → 满足 require,不 fail-fast。"""
-        await self._bili_dl_job(redis, db, config, tmp_path, tmp_jobs_dir, configs_dir, "j_hasbili", "bili")
-        assert "j_hasbili" in await redis.get_active_jobs()
+    async def test_cn_download_with_zone_worker_ok(self, redis, db, config, tmp_path, tmp_jobs_dir, configs_dir):
+        """io worker 覆盖 net-cn → 满足 B站下载 require {net-cn},不 fail-fast。"""
+        await self._bili_dl_job(redis, db, config, tmp_path, tmp_jobs_dir, configs_dir, "j_haszone", "net-cn")
+        assert "j_haszone" in await redis.get_active_jobs()
 
 
 class TestMarkdownToText:
@@ -1602,8 +1602,8 @@ class TestEnqueueTags:
         assert item["require_tags"] == ["vision"]
 
     @pytest.mark.asyncio
-    async def test_bili_download_requires_bili(self, scheduler, redis, db, tmp_path, tmp_jobs_dir, configs_dir):
-        """B站源的 01_download → require_tags 含 'bili'(硬门控);net-direct 仍进软 tags。"""
+    async def test_bili_download_requires_net_cn(self, scheduler, redis, db, tmp_path, tmp_jobs_dir, configs_dir):
+        """B站源的 01_download → require_tags 含 net-cn(B站属大陆区域);不再有 bili 路由 tag。"""
         pipelines = {"v": {"steps": [{"name": "01_download", "pool": "io", "depends_on": [], "tags": []}]}}
         config = make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir)
         sched = Scheduler(redis, db, config)
@@ -1614,12 +1614,12 @@ class TestEnqueueTags:
         await redis.add_active_job("j_bdl")
         await sched.enqueue_step("j_bdl", "01_download")
         item, _ = await redis.dequeue_step("io")
-        assert "bili" in item["require_tags"]
-        assert "net-direct" in item["tags"]
+        assert "net-cn" in item["require_tags"]   # B站属大陆区域(平台源权威)
+        assert "bili" not in item["require_tags"]   # bili 路由 tag 已移除(SESSDATA 是 worker 本地的事)
 
     @pytest.mark.asyncio
     async def test_arxiv_download_no_bili(self, scheduler, redis, db, tmp_path, tmp_jobs_dir, configs_dir):
-        """非 B站 net-direct 源(arxiv)的 01_download 不加 bili require。"""
+        """境外源(arxiv)的 01_download 不加 bili,且 require net-global(arxiv.org 非 CN 域名)。"""
         pipelines = {"p": {"steps": [{"name": "01_download", "pool": "io", "depends_on": [], "tags": []}]}}
         config = make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir)
         sched = Scheduler(redis, db, config)
@@ -1631,6 +1631,7 @@ class TestEnqueueTags:
         await sched.enqueue_step("j_adl", "01_download")
         item, _ = await redis.dequeue_step("io")
         assert "bili" not in item["require_tags"]
+        assert "net-global" in item["require_tags"]   # arxiv.org 非 CN → 全球区域
 
 
 class TestCleanupStaleWorkers:

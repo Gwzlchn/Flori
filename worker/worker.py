@@ -112,6 +112,40 @@ def _claude_logged_in() -> bool:
         return False
 
 
+def _probe_reachable(url: str, timeout: float = 6.0, retries: int = 2) -> bool:
+    """试连 URL(走本机网络,含自带代理)。拿到任何 HTTP 响应(含 4xx/5xx)= 可达;
+    仅网络层失败(连不上/超时/DNS)= 不可达。用于自动判定 net-zone。"""
+    if not url:
+        return False
+    import urllib.request
+    import urllib.error
+    req = urllib.request.Request(url, headers={"User-Agent": "flori-netprobe"})
+    for _ in range(max(1, retries)):
+        try:
+            urllib.request.urlopen(req, timeout=timeout)
+            return True
+        except urllib.error.HTTPError:
+            return True   # 有 HTTP 响应(403/404 等)= 到得了
+        except Exception:
+            continue
+    return False
+
+
+def _probe_net_zones() -> set[str]:
+    """自动探测本 worker 可达的网络区域(net-cn / net-global)。
+    探针 URL 不写死——读 env(base.Dockerfile 设默认,部署可覆盖);
+    NET_ZONES 显式覆盖(如香港 worker 设 NET_ZONES=global)则跳过探测,防误判/离线。"""
+    override = os.environ.get("NET_ZONES", "").strip()
+    if override:
+        return {f"net-{z.strip()}" for z in override.split(",") if z.strip()}
+    zones: set[str] = set()
+    if _probe_reachable(os.environ.get("NET_PROBE_CN", "https://api.bilibili.com/x/web-interface/nav")):
+        zones.add("net-cn")
+    if _probe_reachable(os.environ.get("NET_PROBE_GLOBAL", "https://github.com")):
+        zones.add("net-global")
+    return zones
+
+
 def auto_discover_tags() -> set[str]:
     tags = set()
     has_anthropic_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
@@ -130,14 +164,10 @@ def auto_discover_tags() -> set[str]:
         tags.add("gpu")
     if os.environ.get("OLLAMA_URL"):
         tags.add("local")
-    # 下载凭证/代理 → 自动门控标签(对应 scheduler:B站 require bili / YouTube require net-proxy):
-    # 有 B站 SESSDATA(env 或 /data/cookies/bilibili.txt)→ 'bili';有出站代理 → 'net-proxy'。
-    data_dir = os.environ.get("DATA_DIR", "/data")
-    if os.environ.get("BILI_SESSDATA", "").strip() or (Path(data_dir) / "cookies" / "bilibili.txt").is_file():
-        tags.add("bili")
-    if (os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
-            or os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")):
-        tags.add("net-proxy")
+    # 网络可达区域:自动探测(替代旧的"有代理→net-proxy")。worker 在哪、有没有代理 → 它自己探出
+    # net-cn / net-global,scheduler 按 URL 区域匹配。代理/SESSDATA 等都是 worker 本地的事,非路由 tag
+    # (B站 SESSDATA 经 per-job 凭证文件传给 worker,下载步 step_01 自读;不再自报 'bili' tag)。
+    tags |= _probe_net_zones()
     return tags
 
 
