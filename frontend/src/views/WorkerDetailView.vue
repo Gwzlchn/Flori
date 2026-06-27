@@ -35,6 +35,8 @@ const netZones = computed(() => {
   if (t.includes('net-global')) z.push('全球 net-global')
   return z
 })
+// 「标签」行排除 net-cn/net-global —— 它们已在「可达区域」行友好展示,避免两行重复。
+const otherTags = computed(() => (worker.value?.tags || []).filter(t => t !== 'net-cn' && t !== 'net-global'))
 const tasks = ref<WorkerTask[]>([])
 const loading = ref(true)
 const error = ref('')
@@ -231,8 +233,8 @@ onBeforeUnmount(() => global.setCrumbs(null))
             <tr>
               <td>标签</td>
               <td>
-                <template v-if="worker.tags.length">
-                  <span v-for="t in worker.tags" :key="t" class="tag" style="margin-right:6px">{{ t }}</span>
+                <template v-if="otherTags.length">
+                  <span v-for="t in otherTags" :key="t" class="tag" style="margin-right:6px">{{ t }}</span>
                 </template>
                 <span v-else class="dim">无</span>
               </td>
