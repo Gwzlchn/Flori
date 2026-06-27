@@ -8,8 +8,11 @@ on:
     branches: [main]
 
 jobs:
-  # 容器内跑全部单元测试 + 分支覆盖率门(与本地 docker compose test 同路径)。
-  test:
+  # 后端单测 + 分支覆盖率门(75%)。容器内跑(与本地 docker compose test 同路径),pytest-xdist `-n auto` 多进程并行。
+  # 原单 `test` job(6m32s)= unit+cov(4m10s)+ schemathesis(2m16s,串行);此处拆成 unit ‖ fuzz 两条并行 job,
+  # 关键路径降到 ~max(unit, fuzz)。测试镜像(full stage)用 registry buildcache(flori-test:buildcache)→ 两 job
+  # 与跨 run 都不冷建依赖层(pip/apt/npm 全命中,只重算变动代码层)。
+  unit:
     runs-on: ubuntu-latest
     outputs:
       cov: ${{ steps.cov.outputs.pct }}
@@ -17,17 +20,72 @@ jobs:
       USE_USTC_MIRROR: "0"     # 海外 runner 用官方源
     steps:
       - uses: actions/checkout@v6
+      # ghcr 缓存引用必须全小写;owner 含大写 → 统一算一个小写 owner 供 cache 引用(见 build-push 同款注释)。
+      - name: Lowercase owner
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to ghcr.io
+        if: github.ref == 'refs/heads/main'   # 仅 main 需登录(写 buildcache);PR 只读缓存(私有包读不到则优雅回退 gha)
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # full stage(测试镜像)走 registry buildcache:cache-to 仅 main(unit 独占写,避免与 fuzz 并行双写冲突);
+      # PR 回退 gha。load=true 把 flori-test:latest 装进本地 docker,供下方 docker compose run 直接用(不再 build)。
+      - name: Build test image(full stage, registry buildcache)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/base.Dockerfile
+          target: full
+          tags: flori-test:latest
+          load: true
+          build-args: USE_USTC_MIRROR=0
+          cache-from: |
+            type=registry,ref=ghcr.io/${{ env.OWNER_LC }}/flori-test:buildcache
+            type=gha,scope=flori-test
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}/flori-test:buildcache,mode=max', env.OWNER_LC) || 'type=gha,scope=flori-test,mode=max' }}
       - name: Unit tests + 分支覆盖率门(--cov-fail-under=75,见 docker-compose.test.yml)
         id: cov
         run: |
-          docker compose -f docker-compose.test.yml build
           docker compose -f docker-compose.test.yml run --rm test | tee /tmp/be-cov.log
           pct=$(grep -oP 'Total coverage: \K[0-9.]+' /tmp/be-cov.log | tail -1 || true)
           pct=${pct:-unknown}
           echo "pct=$pct" >> "$GITHUB_OUTPUT"
           echo "### 🐍 后端分支覆盖率:${pct}%" >> "$GITHUB_STEP_SUMMARY"
-      # OpenAPI 模糊/契约(schemathesis):对每个端点喂畸形输入,断言不 5xx 崩溃。
-      # 复用上一步已 build 的镜像;fuzz 用例带 `fuzz` marker(默认套件已 -m 'not fuzz' 排除),此处单独 -m fuzz 跑。
+
+  # OpenAPI 模糊/契约(schemathesis):对每个端点喂畸形输入,断言不 5xx 崩溃。与 unit 并行,各自为门。
+  # fuzz 用例带 `fuzz` marker(默认套件已 -m 'not fuzz' 排除),此处单独 -m fuzz 跑。
+  fuzz:
+    runs-on: ubuntu-latest
+    env:
+      USE_USTC_MIRROR: "0"
+    steps:
+      - uses: actions/checkout@v6
+      - name: Lowercase owner
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to ghcr.io
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # 复用 unit 写的同一 buildcache(此 job 仅 cache-from,不写,避免并行双写);命中后建镜像秒级。
+      - name: Build test image(full stage, registry buildcache)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/base.Dockerfile
+          target: full
+          tags: flori-test:latest
+          load: true
+          build-args: USE_USTC_MIRROR=0
+          cache-from: |
+            type=registry,ref=ghcr.io/${{ env.OWNER_LC }}/flori-test:buildcache
+            type=gha,scope=flori-test
       - name: Schemathesis 模糊/契约(无 5xx)
         run: |
           docker compose -f docker-compose.test.yml run --rm test \
@@ -54,7 +112,7 @@ jobs:
   # 仅 main：把前后端覆盖率写成 shields endpoint JSON,force-push 到 badges 数据分支(README 徽章读它)。
   # badges 分支不触发 CI(on 只认 main/PR),零额外 secret(用内置 GITHUB_TOKEN;public 仓库 shields 直接读 raw)。
   coverage-badge:
-    needs: [test, fe-test]
+    needs: [unit, fe-test]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -62,7 +120,7 @@ jobs:
     steps:
       - name: 生成覆盖率徽章 JSON 并 force-push badges 分支
         env:
-          BE: ${{ needs.test.outputs.cov }}
+          BE: ${{ needs.unit.outputs.cov }}
           FE: ${{ needs.fe-test.outputs.cov }}
         run: |
           col() { awk -v p="$1" 'BEGIN{n=p+0; print (n>=80)?"brightgreen":(n>=60)?"yellow":"orange"}'; }
@@ -79,7 +137,7 @@ jobs:
   # 仅 main：测试通过后构建镜像（amd64；所有目标机均为 x86）并推送。
   build-push:
     # PR 也构建镜像(只是不推),把 Dockerfile/构建期问题(如前端 vue-tsc)挡在合并前;推送仅 main。
-    needs: [test, fe-test]
+    needs: [unit, fe-test]
     runs-on: ubuntu-latest
     permissions:
       contents: read
