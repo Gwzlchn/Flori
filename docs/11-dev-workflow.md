@@ -133,12 +133,13 @@ main
 
 ### 提交规范
 
+> **权威定义在 `CLAUDE.md` §提交规范**（标题格式 / type / scope / 版本号递增 / body 结构 / 署名 trailer，跨会话·多 agent 统一）。本节只留示例，规则改动请改 CLAUDE.md，勿在两处各写一份。
+
 ```
-feat(scheduler): 实现 DAG 推进逻辑
-feat(worker): Worker 自取 + 心跳
-feat(api): 任务创建和查询 API
-feat(frontend): 投递页 + 进度页
-fix(worker): 修复 scene 池未冻结 cpu 的问题
+feat(scheduler): 实现 DAG 推进逻辑;0.2.0
+fix(worker): 修复 scene 池未冻结 cpu 的问题;0.2.1
+contract(api): 任务队列接口 + 同步 docs/03-contracts.md;0.7.1
+docs: 补充扩展指南;0.7.2
 ```
 
 ## 5. 集成测试顺序

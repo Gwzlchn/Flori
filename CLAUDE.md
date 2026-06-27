@@ -56,6 +56,48 @@ ROADMAP.md                  → 里程碑和进度
 - 不做国际化（中文为主）
 - 不做用户系统（个人工具，Basic Auth）
 
+### 提交规范（跨会话 / 多 agent 统一，**权威在此处**）
+
+> 不管哪个会话 / agent 提交，都按此格式。与某个 agent 的 harness 默认（如型号后缀、session 链接）不一致时，**以本节为准**（CLAUDE.md OVERRIDE 默认行为）。
+
+**标题**：`<type>(<scope>): <中文摘要>;<版本>`（版本**必带**，见下）
+- `type` ∈ `feat / fix / refactor / chore / ops / contract / test / docs / perf / build`（与迭代记录类型对齐）。
+- `scope` = 受影响模块/领域，小写：`article / jobs / ui / mcp / net-zone / concept-graph / build`…（尽量带，可省）。
+- 摘要用**中文**、一句话说清「做了什么 + 为什么」，**不写句号**，逗号用半角 `,`（沿用既有风格）。
+- 动了**对外接口**（API / WebSocket / Redis / 文件 Schema）→ 用 `contract:` 或 `contract(scope):`，并**同提交**更新 `docs/03-contracts.md`。
+
+**版本号**：单一来源 = `pyproject.toml` 的 `[project].version`（当前值以该文件为准，勿在文档里硬编码；api/scheduler/worker 共用 `shared.version.FLORI_VERSION`，前端从后端取、`package.json` 不跟随）。三档递增：
+- **普通改动** → patch（第 3 段）+1；**逢 10 进位**：每段满 10 向前进 1、本段归 0（`0.8.9 → 0.9.0`，`0.9.9 → 1.0.0`）。
+- **大的重构** → minor（中间段）+1，patch 归 0（如 `0.8.3 → 0.9.0`）。
+- **架构级大重构** → major（第 1 段）+1，后两段归 0（如 `0.8.3 → 1.0.0`）。
+- **每个提交都 bump、标题结尾都带 `;<新版本>`**（含 docs/test/chore，无例外）。
+
+**正文 body**：解释「为什么这么改」，不是罗列 diff。建议顺序：
+1. 背景 / 动机（用户诉求或问题根因）；
+2. 关键改动点（按模块分条，带取舍）；
+3. `tests:` 验证了什么（跑了哪些、passed 数）；
+4. 动接口时一行 `contract:` 说明已同步 `docs/03-contracts.md`。
+
+**署名 trailer**：正文后**仅一行**，不要 `Claude-Session` URL、不要 `(1M context)` 等后缀：
+```
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+（提交的 agent 非 Opus 时，把型号换成对应模型名，如 `Claude Sonnet 4.6`；其余格式不变。）
+
+**示例**：
+```
+feat(article): 非中文文章自动翻译步(忠实全文译文 + 独立「译文」tab);0.8.0
+
+英文等非中文文章希望有中文翻译。新增条件 AI 步,与 04_smart 正交——这里是忠实全文翻译。
+- 02_parse_article:检测正文主语言写 parsed.json.lang;非中文额外标记 needs_translation。
+- 新步 04_translate_article:忠实翻译 original.md → translated.md(保留 MD 结构 + 图位)。
+- 前端 JobDetailView:hasTranslation → 独立「译文」tab。
+tests:TestArticleLangDetect + TestTranslateArticleStep;article 步 39 passed。
+contract: docs/03-contracts.md 更新 article 链 + lang 字段 + translated.md。
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+
 ## 系统要求
 
 | 项目 | 最低 | 推荐 |
