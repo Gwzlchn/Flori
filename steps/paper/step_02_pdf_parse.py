@@ -122,7 +122,9 @@ class PdfParseStep(StepBase):
         text = "\n".join(doc[i].get_text() for i in range(min(2, len(doc))))
         if re.search(r"arXiv:\d", text):
             return "arXiv"
-        m = re.search(r"Proceedings of (?:the\s+)?(.{4,90}?)\s*[.\n]", text, re.I)
+        # re.S:封面 venue 常跨行(如 "…Operating Systems\nDesign and Implementation."),终止于句号;
+        # 捕获后归一化空白(含换行)再匹配缩写,否则会在换行处截断、丢后半截致映射不中。
+        m = re.search(r"Proceedings of (?:the\s+)?(.{4,120}?)\.", text, re.I | re.S)
         venue = re.sub(r"\s+", " ", m.group(1).strip()) if m else ""
         low = venue.lower()
         for full, ac in self._venue_acronyms().items():
