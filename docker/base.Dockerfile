@@ -49,13 +49,15 @@ COPY configs/prompts/ /data/prompts/
 
 # 网络区域路由(net-zone)用的 CN 域名表:【构建时从 GitHub 上游(felixonmars/dnsmasq-china-list)拉取,
 # 不自维护】,解析成可注册域集烤进镜像 /app/data/cn_domains.txt(运行时 shared.net_zone 只读不拉)。
-# 源用与 apt/pip 同一个 USE_USTC_MIRROR 控制:国内构建(=1)优先 jsdelivr/ghproxy 国内可达镜像,
-# 海外 CI(=0)走 github raw;按序兜底,全失败则留空 → 运行时回退仅按 .cn TLD 判 cn(境外仍 net-global)。
+# 源用与 apt/pip 同一个 USE_USTC_MIRROR 控制:国内构建(=1)优先 gitee 官方镜像(NAS 实测 ~4s 拉完整表;
+# jsdelivr/ghproxy 在国内常超时只下到一半,作兜底),海外 CI(=0)走 github raw;
+# 按序兜底,全失败则留空 → 运行时回退仅按 .cn TLD 判 cn(境外仍 net-global)。
 RUN mkdir -p /app/data \
     && CN_RAW="https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/accelerated-domains.china.conf" \
+    && CN_GITEE="https://gitee.com/felixonmars/dnsmasq-china-list/raw/master/accelerated-domains.china.conf" \
     && CN_JSD="https://cdn.jsdelivr.net/gh/felixonmars/dnsmasq-china-list@master/accelerated-domains.china.conf" \
     && CN_GHP="https://ghproxy.net/${CN_RAW}" \
-    && if [ "$USE_USTC_MIRROR" = "1" ]; then ORDER="$CN_JSD $CN_GHP $CN_RAW"; else ORDER="$CN_RAW $CN_JSD"; fi \
+    && if [ "$USE_USTC_MIRROR" = "1" ]; then ORDER="$CN_GITEE $CN_JSD $CN_GHP $CN_RAW"; else ORDER="$CN_RAW $CN_JSD"; fi \
     && for u in $ORDER; do curl -fsSL --retry 2 --max-time 90 "$u" -o /tmp/cn.conf && break || true; done; \
        sed -n 's#^server=/\([^/]*\)/.*#\1#p' /tmp/cn.conf 2>/dev/null | sort -u > /app/data/cn_domains.txt || true; \
        echo "cn_domains baked: $(wc -l < /app/data/cn_domains.txt 2>/dev/null || echo 0) domains"
