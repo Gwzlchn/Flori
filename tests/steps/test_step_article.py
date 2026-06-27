@@ -357,6 +357,22 @@ class TestArticleImageAndAuthor:
         urls = ParseArticleStep._content_image_urls(html)
         assert urls == ["https://wpimg/chart.jpeg?imageView2/2/w/680"]
 
+    def test_content_image_substack_link_wrapped_kept(self):
+        # substack/SemiAnalysis 正文图:<a href=大图.png class=image-link><...><img w_1456> → 保留
+        # (href 指向图片本身,不是促销页);头像(<a href=页面><img w_40>)、装饰条(h_72 无宽)→ 丢。
+        chart = "https://substackcdn.com/image/fetch/$s_!c!,w_1456,c_limit,f_auto/chart.png"
+        html = (
+            '<a href="/profile/123"><img src="https://substackcdn.com/image/fetch/$s_!a!,w_40,h_40,c_fill/x.png"></a>'
+            '<img alt="SemiAnalysis" src="https://substackcdn.com/image/fetch/$s_!b!,h_72,c_limit/banner.png">'
+            '<a href="https://substackcdn.com/image/fetch/$s_!c!/chart_975x615.png" class="image-link image2">'
+            '<div class="image2-inset"><picture>'
+            '<source type="image/webp" srcset="https://substackcdn.com/image/fetch/$s_!c!,w_1456,f_webp/c.png 1456w">'
+            f'<img src="{chart}" class="sizing-normal"/>'
+            '</picture></div></a>'
+        )
+        urls = ParseArticleStep._content_image_urls(html)
+        assert urls == [chart]
+
     def test_author_from_page_json(self, tmp_path):
         # SPA 内嵌 "author":{...,"display_name":"李丹"} 兜底抽作者。
         job_dir = _mk_job(tmp_path)

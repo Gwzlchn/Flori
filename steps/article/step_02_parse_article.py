@@ -168,11 +168,29 @@ class ParseArticleStep(StepBase):
     @staticmethod
     def _content_image_urls(html: str) -> list[str]:
         """从原始 HTML 抽【正文级】图片 URL:滤掉头像/图标/logo/svg、小图(缩略图/相关文章)、
-        以及【<a> 链接包裹的图】(促销/广告 banner 几乎都是可点链接,正文图表通常不带链)。
-        小图判定:URL 的 w/{N} 或 width={N},或 <img width="{N}">,N<400 视为非正文。"""
-        # 链接包裹的 <img>(<a ...><img src=...>)→ 视为广告/促销,排除。
-        linked = set(re.findall(
-            r'<a\b[^>]*>\s*(?:<[^/a][^>]*>\s*)*<img\b[^>]*\bsrc=["\']([^"\']+)', html, re.I))
+        以及【促销 banner】(<a> 链到站外【页面】的可点图)。
+        关键:有的站(substack/SemiAnalysis)正文图恰恰是 <a class=image-link href=大图.png><img>——
+        这类 <a> 的 href 指向【图片本身】(点开看大图),应保留;只排除 href 指向【页面】的促销图。
+        尺寸:URL 的 w_1456 / w/680 / width= 识别宽,h_72 等识别高;宽<400 或(无宽且)高<200 视为非正文。"""
+        # 促销链接图:<a href=PAGE><img>,且 PAGE 不是图片(指向站外页面)→ 排除该 <img>。
+        promo_linked: set[str] = set()
+        for a_attrs, img_src in re.findall(
+            r'<a\b([^>]*)>\s*(?:<[^/a][^>]*>\s*)*<img\b[^>]*\bsrc=["\']([^"\']+)', html, re.I):
+            href_m = re.search(r'\bhref=["\']([^"\']+)', a_attrs, re.I)
+            href = (href_m.group(1) if href_m else "").lower()
+            is_img_href = bool(href) and (
+                "/image/" in href or "substackcdn" in href
+                or re.search(r'\.(png|jpe?g|gif|webp)(\?|$)', href))
+            if href and not is_img_href:
+                promo_linked.add(img_src.strip())
+
+        def _dim(url_pat: str, tag_pat: str, low: str, tag: str) -> int | None:
+            m = re.search(url_pat, low)
+            if m:
+                return int(m.group(1))
+            m = re.search(tag_pat, tag, re.I)
+            return int(m.group(1)) if m else None
+
         urls: list[str] = []
         seen: set[str] = set()
         for tag in re.findall(r'<img\b[^>]*>', html, re.I):
@@ -180,23 +198,20 @@ class ParseArticleStep(StepBase):
             if not src_m:
                 continue
             src = src_m.group(1).strip()
-            if src in linked:
-                continue   # <a> 包裹 → 广告/促销 banner
+            if src in promo_linked:
+                continue   # <a> 链到页面的促销 banner
             low = src.lower()
             if src.startswith("data:") or any(
-                k in low for k in ("avatar", "/logo", "icon", "sprite", "emoji", ".svg")
+                k in low for k in ("avatar", "/logo", "icon", "sprite", "emoji", ".svg", "/badge")
             ):
                 continue
-            w = None
-            wm = re.search(r'[/_-]w[/=](\d+)', low) or re.search(r'[?&]width=(\d+)', low)
-            if wm:
-                w = int(wm.group(1))
-            else:
-                wa = re.search(r'\bwidth=["\']?(\d+)', tag, re.I)
-                if wa:
-                    w = int(wa.group(1))
+            # 宽:w_1456(substack/cloudinary)/ w/680(七牛)/ width=;高:h_72 等。
+            w = _dim(r'[,/_-]w[,/=_](\d+)', r'\bwidth=["\']?(\d+)', low, tag)
+            h = _dim(r'[,/_-]h[,/=_](\d+)', r'\bheight=["\']?(\d+)', low, tag)
             if w is not None and w < 400:
                 continue   # 缩略图/头像/相关文章
+            if w is None and h is not None and h < 200:
+                continue   # 无宽信息但矮(站点 logo / 装饰条)
             key = src.split("?")[0]   # 同图不同尺寸参数去重
             if key not in seen:
                 seen.add(key)
