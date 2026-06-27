@@ -7,6 +7,7 @@ services:
     build:
       context: .
       dockerfile: docker/base.Dockerfile
+      target: full        # 测试要 import 全部模块(--cov=shared,api,scheduler,worker,steps)→ 全量 stage
       args:
         USE_USTC_MIRROR: "${USE_USTC_MIRROR:-1}"
     volumes:

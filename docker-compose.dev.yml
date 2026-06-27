@@ -12,6 +12,7 @@ services:
     build:
       context: .
       dockerfile: docker/base.Dockerfile
+      target: api
     command: python -m api.main
     restart: unless-stopped
     ports:
@@ -39,6 +40,7 @@ services:
     build:
       context: .
       dockerfile: docker/base.Dockerfile
+      target: scheduler
     command: python -m scheduler.main
     restart: unless-stopped
     volumes:
@@ -57,6 +59,7 @@ services:
     build:
       context: .
       dockerfile: docker/base.Dockerfile
+      target: worker
     command: python -m worker.main --type cpu
     restart: unless-stopped
     volumes:
@@ -78,6 +81,7 @@ services:
     build:
       context: .
       dockerfile: docker/base.Dockerfile
+      target: worker
     command: python -m worker.main --type ai
     restart: unless-stopped
     volumes:

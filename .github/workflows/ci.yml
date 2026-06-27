@@ -86,11 +86,21 @@ jobs:
       packages: write          # 推镜像到 ghcr.io 用内置 GITHUB_TOKEN
     strategy:
       matrix:
+        # P2 image-split:后端拆 3 个 target(scheduler/api/worker)各出一镜像,共用 base.Dockerfile;前端单独。
         include:
-          - image: flori           # api/scheduler/worker 共用
+          - image: flori-scheduler
             dockerfile: docker/base.Dockerfile
             context: .
-          - image: flori-frontend  # nginx + 构建好的 Vue 静态资源
+            target: scheduler
+          - image: flori-api
+            dockerfile: docker/base.Dockerfile
+            context: .
+            target: api
+          - image: flori-worker
+            dockerfile: docker/base.Dockerfile
+            context: .
+            target: worker
+          - image: flori-frontend  # nginx + 构建好的 Vue 静态资源(无 target → 建末 stage)
             dockerfile: frontend/Dockerfile
             context: ./frontend
     steps:
@@ -123,6 +133,7 @@ jobs:
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}   # 后端=scheduler/api/worker;前端空 → 建末 stage
           platforms: linux/amd64
           push: ${{ github.ref == 'refs/heads/main' }}   # PR 只构建验证,推送仅 main
           tags: ${{ steps.meta.outputs.tags }}
