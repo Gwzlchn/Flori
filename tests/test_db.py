@@ -1346,3 +1346,36 @@ class TestLineageP2b:
         db.promote_lineage_current("jobs_a_z")
         _, jobs = db.list_jobs(current_only=True, limit=50)
         assert {j.id for j in jobs} == {"jobs_a_z_001"}   # 回退到剩余最新
+
+
+class TestAITaskLogs:
+    """独立 AI task 白盒审计(ai_task_logs)落表/读取(P1-2)。"""
+
+    def test_record_and_get(self, db):
+        import json
+        ok = db.record_ai_task_log({
+            "task_id": "at_x", "exec_id": "w:1", "step_name": "synthesis", "domain": "dl",
+            "provider": "claude-cli", "model": "subscription", "ok": True,
+            "input_tokens": 10, "output_tokens": 5, "cost_usd": 0.12,
+            "duration_sec": 2.0, "num_turns": 1,
+            "record": {"output": "hi", "prompt": {"system": "S"},
+                       "routing": {"attempts": [{"tier": "primary"}]}},
+            "created_at": "2026-06-27T00:00:00+00:00",
+        })
+        assert ok is True
+        logs = db.get_ai_task_logs("at_x")
+        assert len(logs) == 1
+        row = logs[0]
+        assert row["provider"] == "claude-cli" and row["step_name"] == "synthesis"
+        assert row["ok"] == 1 and row["cost_usd"] == 0.12
+        assert json.loads(row["record_json"])["output"] == "hi"
+        assert db.get_ai_task_logs("missing") == []
+
+    def test_record_error_row(self, db):
+        db.record_ai_task_log({
+            "task_id": "at_e", "step_name": "digest", "ok": False, "error": "provider down",
+            "record": {"ok": False, "error": "provider down"},
+            "created_at": "2026-06-27T00:00:00+00:00",
+        })
+        row = db.get_ai_task_logs("at_e")[0]
+        assert row["ok"] == 0 and "provider down" in row["error"]

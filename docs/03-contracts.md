@@ -1435,6 +1435,8 @@ Member: {"kind":"ai","task_id":"at_xxx","step":"synthesis|digest","domain":"<dom
 - pipeline-step task 的 member **不带 `kind`**（向后兼容，缺省即 `step`）。
 - `queue:enqueued` field（§3.x 等待时长用）：step task=`{pool}|{job_id}|{step}`；**ai task=`{pool}|ai|{task_id}`**。
 - 结果回执：`airesult:{task_id}`（STRING，JSON = `LLMResponse.to_jsonable()` 或 `{"error":"..."}`，带 TTL≈600s），供 API 端 `GET …/result/{task_id}` / 同步等待取回（P1-3）。AI 用量经 `ai_usage`（`job_id=null, step=<step_name>`）记账（worker 侧，P1-2）。
+- 完成事件：worker 执行后 `publish events:{task_id}`（`ai_task_start/ai_task_done/ai_task_failed`，见 §3.5），供 `/ask`、`/digest` 经 `WS /api/ws/jobs/{task_id}`（端点对任意 id 通用）或轮询取信号。
+- **白盒审计**：ai-worker 每次执行写一条 DB 表 **`ai_task_logs`**（按 `task_id`；对齐 DAG 步的 `output/ai_logs/{step}.jsonl`）。索引列：`exec_id/step_name/domain/provider/model/ok/error/各 token/cost_usd/duration_sec/num_turns/created_at`；`record_json` 存全量审计（路由/尝试链/渲染 prompt[system+messages]/输出/raw/用量）。与 `ai_usage`（成本归因）**并存不合并**（白盒 vs 计费两套）。查看端点见 P1-3。
 
 ### 3.2 资源池计数
 
@@ -1567,6 +1569,9 @@ Payload: {"job_id": "j_xxx", "step": "03_scene", "worker": "cpu-a1b2"}
 
 Channel: events:{job_id}
 Payload: (WebSocket 事件格式，同上 §2)
+
+Channel: events:{task_id}            ← 独立 AI task(kind='ai')执行事件,供 /ask、/digest 的 ws/轮询取信号
+Payload: {"event":"ai_task_start|ai_task_done|ai_task_failed","task_id":"at_xxx","step":"synthesis|digest"[,"error":"..."]}
 ```
 
 ## 4. 文件 Schema

@@ -19,9 +19,9 @@ from pathlib import Path
 
 import structlog
 
-from shared.ai_gateway import collect_usage_from_file
+from shared.ai_gateway import AIGateway, collect_usage_from_file
 from shared.config import AppConfig, build_step_config
-from shared.models import generate_worker_id
+from shared.models import AIUsage, LLMRequest, generate_worker_id
 from shared.runner_ops import parse_style_tags
 from shared.storage import StorageBackend
 from shared.sysload import collect_node_load
@@ -302,6 +302,12 @@ class Worker:
     # ── 任务执行 ──
 
     async def execute(self, claim: dict) -> None:
+        # 独立 AI task(kind='ai')分流:不挂 job、不走 storage,单独执行(见 _execute_ai_task)。
+        # 必须在任何 job-step 处理之前,因 ai claim 没有 job_id/work_dir。
+        if claim.get("kind") == "ai":
+            await self._execute_ai_task(claim)
+            return
+
         job_id = claim["job_id"]
         step = claim["step"]
         pool = claim["pool"]
@@ -488,3 +494,117 @@ class Worker:
                 "collect_usage_failed", worker_id=self.worker_id,
                 job_id=job_id, step=step,
             )
+
+    # ── 独立 AI task(kind='ai')执行 ──
+
+    async def _execute_ai_task(self, claim: dict) -> None:
+        """执行独立 AI task:复用 AIGateway 跑 claude → 结果回 airesult:{task_id} + publish events:{task_id};
+        详细 whitebox 审计落 ai_task_logs。失败回 {"error":...},绝不崩 worker。池槽由 finally 的 release 释放
+        (release_step 的 ai 分支)。不挂 job、不走 storage —— claim 已内联 request/domain。"""
+        task_id = claim["task_id"]
+        step_name = claim.get("step", "ai")
+        exec_id = claim["exec_id"]
+        domain = claim.get("domain")
+        start = time.time()
+        ts_start = datetime.now(timezone.utc)
+        req = LLMRequest.from_jsonable(claim.get("request", {}))
+        try:
+            try:
+                gateway = AIGateway(
+                    self.config.providers,
+                    {"steps": [{"name": step_name,
+                                "ai": {"primary": {"provider": "claude-cli", "model": "subscription"}}}]},
+                )
+                resp = await gateway.call(step_name, req)
+                duration = time.time() - start
+                await self.transport.set_ai_result(task_id, resp.to_jsonable())
+                await self._record_ai_task_usage(task_id, step_name, exec_id, resp)
+                await self._write_ai_task_audit(task_id, step_name, domain, exec_id, req, resp, None, ts_start, duration)
+                await self.transport.publish_step_event(
+                    f"events:{task_id}", {"event": "ai_task_done", "task_id": task_id, "step": step_name})
+                logger.info("ai_task_done", worker_id=self.worker_id, task_id=task_id,
+                            step=step_name, provider=resp.provider, duration=round(duration, 1))
+            except Exception as e:
+                duration = time.time() - start
+                err = str(e)[:500]
+                # 失败:回执 {"error"} + 审计(含尝试链/当时 prompt)+ 完成事件;全 best-effort,绝不崩 worker。
+                for op in (
+                    lambda: self.transport.set_ai_result(task_id, {"error": err}),
+                    lambda: self._write_ai_task_audit(task_id, step_name, domain, exec_id, req, None, e, ts_start, duration),
+                    lambda: self.transport.publish_step_event(
+                        f"events:{task_id}", {"event": "ai_task_failed", "task_id": task_id, "error": err[:200]}),
+                ):
+                    try:
+                        await op()
+                    except Exception:
+                        pass
+                logger.warning("ai_task_failed", worker_id=self.worker_id, task_id=task_id, error=err[:200])
+        finally:
+            await self.transport.release(claim)
+
+    async def _record_ai_task_usage(self, task_id: str, step_name: str, exec_id: str, resp) -> None:
+        """AI task 成本归因(与白盒审计并存):record_ai_usage(job_id=null, step=step_name)。失败仅降级统计。"""
+        try:
+            await self.transport.record_ai_usage(AIUsage(
+                exec_id=exec_id, provider=resp.provider, model=resp.model,
+                job_id=None, step=step_name, worker_id=self.worker_id,
+                input_tokens=resp.input_tokens, output_tokens=resp.output_tokens,
+                cache_creation_input_tokens=resp.cache_creation_input_tokens,
+                cache_read_input_tokens=resp.cache_read_input_tokens,
+                cost_usd=resp.cost_usd, duration_sec=resp.duration_sec,
+                num_turns=resp.num_turns, cached=resp.cached,
+            ))
+        except Exception:
+            logger.warning("ai_task_usage_failed", worker_id=self.worker_id, task_id=task_id)
+
+    async def _write_ai_task_audit(self, task_id, step_name, domain, exec_id, req, resp, error, ts_start, duration) -> None:
+        """构建并落一条 AI task 白盒审计(对齐 DAG ai_logs:路由/尝试链/渲染 prompt/输出/raw/用量)→ ai_task_logs。"""
+        ok = error is None and resp is not None
+        if resp is not None:
+            attempts, tier_used, raw = resp.attempts, resp.tier_used, resp.raw
+        else:
+            attempts, tier_used, raw = (getattr(error, "attempts", []) or []), None, None
+        record = {
+            "task_id": task_id, "kind": "ai", "step": step_name, "domain": domain, "exec_id": exec_id,
+            "ok": ok, "error": (str(error)[:1000] if error else None),
+            "ts_start": ts_start.isoformat(), "ts_end": datetime.now(timezone.utc).isoformat(),
+            "flori": {
+                "image_tag": os.environ.get("FLORI_IMAGE_TAG") or os.environ.get("IMAGE_TAG"),
+                "version": os.environ.get("FLORI_VERSION"),
+                "git_commit": os.environ.get("FLORI_GIT_COMMIT"),
+            },
+            "routing": {
+                "requested": {"provider": "claude-cli", "model": "subscription"},
+                "tier_used": tier_used, "attempts": attempts,
+            },
+            "prompt": {
+                "system": req.system, "messages": req.messages,
+                "max_tokens": req.max_tokens, "temperature": req.temperature,
+                "allowed_tools": req.allowed_tools,
+            },
+            "output": (resp.content if resp is not None else None),
+            "raw": raw,
+            "usage": ({
+                "input_tokens": resp.input_tokens, "output_tokens": resp.output_tokens,
+                "cache_creation_input_tokens": resp.cache_creation_input_tokens,
+                "cache_read_input_tokens": resp.cache_read_input_tokens,
+                "cost_usd": resp.cost_usd, "duration_sec": resp.duration_sec,
+                "num_turns": resp.num_turns, "cached": resp.cached, "session_id": resp.session_id,
+            } if resp is not None else None),
+        }
+        log = {
+            "task_id": task_id, "exec_id": exec_id, "step_name": step_name, "domain": domain,
+            "provider": (resp.provider if resp is not None else "claude-cli"),
+            "model": (resp.model if resp is not None else "subscription"),
+            "ok": ok, "error": (str(error)[:1000] if error else None),
+            "input_tokens": (resp.input_tokens if resp else 0),
+            "output_tokens": (resp.output_tokens if resp else 0),
+            "cache_creation_input_tokens": (resp.cache_creation_input_tokens if resp else 0),
+            "cache_read_input_tokens": (resp.cache_read_input_tokens if resp else 0),
+            "cost_usd": (resp.cost_usd if resp else 0.0),
+            "duration_sec": (resp.duration_sec if resp else duration),
+            "num_turns": (resp.num_turns if resp else 0),
+            "record": record,
+            "created_at": ts_start.isoformat(),
+        }
+        await self.transport.record_ai_task_log(log)

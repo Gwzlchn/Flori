@@ -87,6 +87,10 @@ class WorkerTransport(Protocol):
     ) -> None: ...
     async def record_ai_usage(self, usage: AIUsage) -> None: ...
 
+    # ── 独立 AI task(kind='ai')──
+    async def set_ai_result(self, task_id: str, result: dict) -> None: ...
+    async def record_ai_task_log(self, log: dict) -> None: ...
+
     # ── Job 上下文 ──
     async def get_job_pipeline(self, job_id: str) -> str | None: ...
     async def get_job_info(self, job_id: str) -> dict: ...
@@ -242,6 +246,12 @@ class RedisTransport:
 
     async def record_ai_usage(self, usage):
         await asyncio.to_thread(self._db.record_ai_usage, usage)
+
+    async def set_ai_result(self, task_id, result):
+        await self._redis.set_ai_result(task_id, result)
+
+    async def record_ai_task_log(self, log):
+        await asyncio.to_thread(self._db.record_ai_task_log, log)
 
     # ── Job 上下文 ──
     async def get_job_pipeline(self, job_id):

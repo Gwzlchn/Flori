@@ -243,6 +243,14 @@ class GatewayTransport:
             op="record_ai_usage", job_id=usage.job_id, step=usage.step,
         )
 
+    async def set_ai_result(self, task_id, result):
+        # 独立 AI task 由 require_tags=['claude-cli'] 门控,只直连 ai-worker(RedisTransport)认领执行。
+        # 网关模式(无 redis)不应跑 ai-task;真到这里说明路由错配,显式报错而非静默丢结果。
+        raise NotImplementedError("AI task 不支持网关模式 worker(需 claude-cli 直连 worker)")
+
+    async def record_ai_task_log(self, log):
+        raise NotImplementedError("AI task 审计不支持网关模式 worker(需 claude-cli 直连 worker)")
+
     async def publish_step_event(self, channel, data):
         # worker 只通过 on_progress 发 events:{job} 进度;映射到 progress 端点。
         # 非 events 频道(step_started/completed/failed)现由服务端发,worker 不再走这里。

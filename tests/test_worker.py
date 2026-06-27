@@ -14,7 +14,7 @@ import pytest
 from tests.conftest import make_fakeredis
 from shared.config import AppConfig
 from shared.db import Database
-from shared.models import Job, Step, StepStatus
+from shared.models import AITask, Job, LLMRequest, LLMResponse, Step, StepStatus
 from shared.storage import LocalStorage
 from worker.worker import Worker, WORKER_POOLS, auto_discover_tags, _resolve_worker_id, _probe_net_zones
 from worker.transport import RedisTransport
@@ -1006,3 +1006,82 @@ class TestWorkerIdentity:
         assert default_worker_id_file() == "/data/workers/worker.id"
         monkeypatch.setenv("WORKER_NAME", "claude-1")
         assert default_worker_id_file() == "/data/workers/claude-1"
+
+
+class _FakeGateway:
+    """假 AIGateway:.call 返回预置 LLMResponse 或抛异常(测 ai-task 分流执行,不真调 claude)。"""
+
+    def __init__(self, resp=None, exc=None):
+        self._resp = resp
+        self._exc = exc
+
+    async def call(self, step_name, request):
+        if self._exc is not None:
+            raise self._exc
+        return self._resp
+
+
+class TestAITaskExecution:
+    """worker 认领并执行独立 AI task(kind='ai')+ 白盒审计 + 错误回执 + 认领路由(P1-2)。"""
+
+    def _ai_claim(self, task_id="at_1", step="synthesis", domain="dl"):
+        return {
+            "kind": "ai", "task_id": task_id, "step": step, "pool": "ai", "exec_id": "w:1",
+            "request": LLMRequest(messages=[{"role": "user", "content": "Q"}], system="S").to_jsonable(),
+            "domain": domain,
+        }
+
+    @pytest.mark.asyncio
+    async def test_execute_success(self, worker, redis, db, monkeypatch):
+        resp = LLMResponse(content="ANSWER", model="claude-opus-4-8", provider="claude-cli",
+                           cost_usd=0.12, input_tokens=100, output_tokens=50, num_turns=1,
+                           attempts=[{"tier": "primary"}], session_id="s1")
+        monkeypatch.setattr("worker.worker.AIGateway", lambda p, pl: _FakeGateway(resp=resp))
+        await worker._execute_ai_task(self._ai_claim("at_ok"))
+        # 1) 结果回执 airesult
+        got = await redis.get_ai_result("at_ok")
+        assert got["content"] == "ANSWER" and got["provider"] == "claude-cli"
+        # 2) 白盒审计落表(渲染 prompt/输出/尝试链/用量)
+        logs = db.get_ai_task_logs("at_ok")
+        assert len(logs) == 1 and logs[0]["ok"] == 1
+        assert logs[0]["provider"] == "claude-cli" and logs[0]["step_name"] == "synthesis"
+        rec = json.loads(logs[0]["record_json"])
+        assert rec["output"] == "ANSWER" and rec["prompt"]["system"] == "S"
+        assert rec["routing"]["attempts"] == [{"tier": "primary"}]
+        assert rec["usage"]["input_tokens"] == 100
+        # 3) 成本归因 ai_usage(job_id null, step=synthesis)
+        rows = db._conn.execute("SELECT job_id, step, cost_usd FROM ai_usage").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["job_id"] is None and rows[0]["step"] == "synthesis"
+        assert abs(rows[0]["cost_usd"] - 0.12) < 1e-9
+
+    @pytest.mark.asyncio
+    async def test_execute_error_sets_error_result(self, worker, redis, db, monkeypatch):
+        monkeypatch.setattr("worker.worker.AIGateway",
+                            lambda p, pl: _FakeGateway(exc=RuntimeError("provider down")))
+        await worker._execute_ai_task(self._ai_claim("at_err", step="digest"))  # 不抛(绝不崩 worker)
+        got = await redis.get_ai_result("at_err")
+        assert "error" in got and "provider down" in got["error"]
+        logs = db.get_ai_task_logs("at_err")
+        assert len(logs) == 1 and logs[0]["ok"] == 0
+        assert "provider down" in (logs[0]["error"] or "")
+
+    @pytest.mark.asyncio
+    async def test_claim_routes_ai_task_gated_by_tag(self, redis, db, config, storage):
+        # 有 claude-cli tag 的 ai-worker 能认领,且 claim 是 ai 形态(无 job_id,带 request)
+        w = Worker(transport=RedisTransport(redis, db), config=config, storage=storage,
+                   worker_type="ai", pools=["ai"], tags={"claude-cli"}, reject_tags=set())
+        await w.register()
+        await redis.enqueue_ai_task(
+            AITask(task_id="at_c", request=LLMRequest(messages=[]), step_name="synthesis").to_task_payload())
+        claim = await request_step(w)
+        assert claim is not None and claim["kind"] == "ai"
+        assert claim["task_id"] == "at_c" and claim["step"] == "synthesis"
+        assert "request" in claim and "job_id" not in claim
+        # 无 claude-cli tag 的 worker 不应认领(require_tags 门控)
+        w2 = Worker(transport=RedisTransport(redis, db), config=config, storage=storage,
+                    worker_type="cpu", pools=["ai"], tags=set(), reject_tags=set())
+        await w2.register()
+        await redis.enqueue_ai_task(
+            AITask(task_id="at_c2", request=LLMRequest(messages=[]), step_name="digest").to_task_payload())
+        assert await request_step(w2) is None

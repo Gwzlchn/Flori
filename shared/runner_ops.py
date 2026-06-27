@@ -130,6 +130,36 @@ async def claim_step(
             continue
 
         task, raw_json, score = matched
+
+        # ── 独立 AI task(kind='ai')分流 ──
+        # 没有 job_id / job:{id}:steps hash → 【绝不】喂进下方 job-step 状态机(cas_step_status/set_step_*),
+        # 也不占资源槽。已占池槽(上方 try_acquire_slot)持槽执行,done 由 release_step 的 ai 分支释放。
+        if task.get("kind") == "ai":
+            task_id = task.get("task_id")
+            step_name = task.get("step", "ai")
+            exec_id = f"{worker_id}:{int(time.time() * 1000)}"
+            try:
+                await _set_status(redis, db, worker_id, "busy", task_id, step_name)
+                await redis.publish(f"events:{task_id}", {
+                    "event": "ai_task_start", "task_id": task_id,
+                    "step": step_name, "worker": worker_id,
+                })
+            except Exception:
+                # dequeue 成功但随后写状态/publish 抛错:放回任务 + 释放槽,避免吞任务/泄漏槽。
+                try:
+                    await redis.return_step(pool, raw_json, score)
+                except Exception:
+                    pass
+                try:
+                    await redis.release_slot(pool)
+                except Exception:
+                    pass
+                raise
+            return {
+                "kind": "ai", "task_id": task_id, "step": step_name, "pool": pool,
+                "exec_id": exec_id, "request": task.get("request", {}), "domain": task.get("domain"),
+            }
+
         job_id = task["job_id"]
         step = task["step"]
 
@@ -270,6 +300,11 @@ async def release_step(
     redis: RedisClient, db: Database, worker_id: str, claim: dict,
 ) -> None:
     pool = claim["pool"]
+    # 独立 AI task:无 job:steps,跳过 exec_id 守卫 / 资源回读;仅释放池槽 + 置 idle。
+    if claim.get("kind") == "ai":
+        await redis.release_slot(pool)
+        await _set_status(redis, db, worker_id, "idle")
+        return
     job_id, step = claim["job_id"], claim["step"]
     # exec_id 守卫:若该步已被更新的执行接管(check_stuck 重排后 worker B 以新 exec_id 认领),
     # 本(陈旧)worker 迟到的 release 不得释放已属于新执行的槽与资源(审计 SCHED-N1 / I-M3)。

@@ -117,6 +117,30 @@ CREATE TABLE IF NOT EXISTS ai_usage (
 CREATE INDEX IF NOT EXISTS idx_ai_usage_job ON ai_usage(job_id);
 CREATE INDEX IF NOT EXISTS idx_ai_usage_provider ON ai_usage(provider);
 
+-- 独立 AI task 的白盒审计(DAG 步审计落 output/ai_logs/{step}.jsonl;AI task 无 job_dir → 入库)。
+-- 与 ai_usage(成本归因)并存:本表是 prompt 白盒(渲染 prompt/输出/尝试链/raw),record_json 存全量(同 DAG jsonl 一行)。
+CREATE TABLE IF NOT EXISTS ai_task_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    exec_id TEXT,
+    step_name TEXT,
+    domain TEXT,
+    provider TEXT,
+    model TEXT,
+    ok INTEGER DEFAULT 1,
+    error TEXT,
+    input_tokens INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    cache_creation_input_tokens INTEGER DEFAULT 0,
+    cache_read_input_tokens INTEGER DEFAULT 0,
+    cost_usd REAL DEFAULT 0,
+    duration_sec REAL DEFAULT 0,
+    num_turns INTEGER DEFAULT 0,
+    record_json TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ai_task_logs_task ON ai_task_logs(task_id);
+
 -- 集合：订阅是集合的属性(source_type/source_id 非空=订阅集合)，无独立 subscriptions 表。
 CREATE TABLE IF NOT EXISTS collections (
     id TEXT PRIMARY KEY,
@@ -1100,6 +1124,42 @@ class Database:
             return True
         except sqlite3.IntegrityError:
             return False
+
+    def record_ai_task_log(self, log: dict) -> bool:
+        """落一条独立 AI task 的白盒审计(对应 DAG 的 output/ai_logs/{step}.jsonl;AI task 无 job_dir 故入库)。
+        log = 索引列(task_id/exec_id/step_name/domain/provider/model/ok/error/各 token/cost/duration/num_turns)
+        + record(全量审计 dict,存进 record_json)+ created_at。best-effort,不让审计失败影响主流程。"""
+        try:
+            with self._lock:
+                self._conn.execute(
+                    """INSERT INTO ai_task_logs
+                       (task_id, exec_id, step_name, domain, provider, model, ok, error,
+                        input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+                        cost_usd, duration_sec, num_turns, record_json, created_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        log.get("task_id"), log.get("exec_id"), log.get("step_name"),
+                        log.get("domain"), log.get("provider"), log.get("model"),
+                        1 if log.get("ok", True) else 0, log.get("error"),
+                        log.get("input_tokens", 0), log.get("output_tokens", 0),
+                        log.get("cache_creation_input_tokens", 0), log.get("cache_read_input_tokens", 0),
+                        log.get("cost_usd", 0.0), log.get("duration_sec", 0.0), log.get("num_turns", 0),
+                        json.dumps(log.get("record", {}), ensure_ascii=False, default=str),
+                        log.get("created_at"),
+                    ),
+                )
+                self._conn.commit()
+            return True
+        except Exception:
+            return False
+
+    def get_ai_task_logs(self, task_id: str) -> list[dict]:
+        """读某 AI task 的白盒审计(供 P1-3 查看端点);最近在前。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM ai_task_logs WHERE task_id=? ORDER BY id DESC", (task_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def get_usage_summary(
         self, job_id: str | None = None, since: str | None = None
