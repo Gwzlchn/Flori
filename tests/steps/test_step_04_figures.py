@@ -119,3 +119,31 @@ class TestFiguresStep:
         assert (figs[0]["filename"], figs[0]["index"]) == ("figure-0000.png", 0)
         assert (figs[1]["filename"], figs[1]["index"]) == ("figure-0001.png", 1)
         assert figs[2]["filename"] is None and figs[2]["index"] is None
+
+    @staticmethod
+    def _doc_one_image():
+        page = MagicMock()
+        page.get_images.return_value = [(123,)]   # 一张图,xref=123
+        doc = MagicMock()
+        doc.__len__ = lambda self: 1
+        doc.__getitem__ = lambda self, i: page
+        return doc
+
+    def test_bug_error_reraised_not_swallowed(self, tmp_path, monkeypatch):
+        # 代码 bug(NameError 等)不被"缺图"宽松 catch 吞 → 重抛(否则像 fitz 未导入会静默抽 0 图、还查不到)。
+        job_dir = tmp_path / "job"; job_dir.mkdir(); (job_dir / "assets").mkdir()
+        step = FiguresStep("04_figures", job_dir, make_step_config(tmp_path, step_name="04_figures", pool="cpu"))
+        mock_fitz = MagicMock()
+        mock_fitz.Pixmap.side_effect = NameError("name 'fitz' is not defined")
+        monkeypatch.setitem(sys.modules, "fitz", mock_fitz)
+        with pytest.raises(NameError):
+            step._extract_images_from_pdf(self._doc_one_image(), job_dir / "assets")
+
+    def test_data_error_swallowed(self, tmp_path, monkeypatch):
+        # 单张图的数据错(损坏等)仍优雅跳过,不阻断本步(图表可缺省)。
+        job_dir = tmp_path / "job"; job_dir.mkdir(); (job_dir / "assets").mkdir()
+        step = FiguresStep("04_figures", job_dir, make_step_config(tmp_path, step_name="04_figures", pool="cpu"))
+        mock_fitz = MagicMock()
+        mock_fitz.Pixmap.side_effect = ValueError("corrupt image")
+        monkeypatch.setitem(sys.modules, "fitz", mock_fitz)
+        assert step._extract_images_from_pdf(self._doc_one_image(), job_dir / "assets") == []

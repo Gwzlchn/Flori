@@ -8,6 +8,11 @@ from pathlib import Path
 
 from shared.step_base import StepBase, file_hash
 
+# 编程错误(代码 bug)永远不该被"图表可缺省"的宽松 catch 吞成 warning 后照常 done——否则像 fitz 未导入
+# 致 NameError 这种 bug 会静默抽 0 图、还查不到。这些类型一律【重抛 fail-loud】;只放行预期的数据/环境
+# 降级(损坏图、不支持色彩空间、缺 OCR 后端 ImportError)。
+_BUG_ERRORS = (NameError, AttributeError, TypeError)
+
 
 class FiguresStep(StepBase):
     def validate_inputs(self) -> list[str]:
@@ -80,6 +85,7 @@ class FiguresStep(StepBase):
         return {"figures": len(results), "with_image": sum(1 for r in results if r["filename"])}
 
     def _extract_images_from_pdf(self, doc, assets_dir: Path) -> list[dict]:
+        import fitz  # 本方法用 fitz.Pixmap/csRGB;execute() 的 import 不及于此作用域(曾致 NameError 静默吞图)
         extracted = []
         img_index = 0
 
@@ -106,7 +112,10 @@ class FiguresStep(StepBase):
                             "index": img_index,   # 稳定资产序号 = 占位符 [img:N] 的 N
                         })
                         img_index += 1
+                except _BUG_ERRORS:
+                    raise   # 代码 bug(如 fitz 未导入)→ fail-loud,不当"缺图"吞掉
                 except Exception as e:
+                    # 单张图的数据问题(损坏/不支持色彩空间等)→ 跳过该图,不阻断本步。
                     self.log.warning("figure_extract_error", page=page_num + 1, error=str(e))
                     continue
 
@@ -117,6 +126,8 @@ class FiguresStep(StepBase):
         from steps.utils.ocr import create_ocr_engine
         try:
             return create_ocr_engine()
+        except _BUG_ERRORS:
+            raise   # 代码 bug → fail-loud(缺 OCR 后端是 ImportError,仍走下面优雅降级)
         except Exception as e:
             self.log.warning("ocr_engine_init_failed", error=str(e))
             return None
@@ -129,6 +140,8 @@ class FiguresStep(StepBase):
             if not result:
                 return ""
             return "\n".join(item[1] for item in result)
+        except _BUG_ERRORS:
+            raise   # 代码 bug → fail-loud
         except Exception as e:
             self.log.warning("ocr_figure_error", path=str(img_path), error=str(e))
             return ""
