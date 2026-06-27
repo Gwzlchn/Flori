@@ -430,9 +430,10 @@ class Scheduler:
         if self.storage is None:
             return
         try:
-            if step == "01_download":
-                # 下载一完成就把标题/发布时间从 metadata.json 同步进 DB,使内容名在处理过程中
-                # 即可显示(不必等整个 job 完成);job_done 时仍兜底同步一次。
+            if step in ("01_download", "02_pdf_parse", "02_parse_article"):
+                # 下载完即从 metadata/article_meta 同步标题/时间,使内容名在处理过程中即可显示;
+                # 论文标题只在 02_pdf_parse 写的 parsed.json(01 时还没有)→ 解析步后再同步一次
+                # (尤其 AI 步未跑、job 卡住时,不必等 job_done 也能出标题)。job_done 时仍兜底。
                 await self._sync_published_at(job_id)
             elif step in _NOTE_STEPS:
                 await self._index_job_notes(job_id, _NOTE_STEPS[step])
