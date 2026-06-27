@@ -109,7 +109,8 @@ class ParseArticleStep(StepBase):
 
     def _original_markdown(self, html: str, parsed: dict, extractor) -> tuple[str, int]:
         """trafilatura 出正文 markdown(纯文本,它会丢图);正文图由 extractor 从原始 HTML 抽,
-        下载到 assets/ 后作为「导语图」插在标题后(trafilatura 无图位,无法精确内联)。"""
+        下载到 assets/ 后【按原文位置内联】到对应段落之后(锚点 = 图在 HTML 中前面最近的段落/标题文字,
+        在 md 里定位该段插图);锚点匹配不上的图兜底插在标题后(导语图)。"""
         import trafilatura
         md = ""
         try:
@@ -125,21 +126,17 @@ class ParseArticleStep(StepBase):
         if title and not md.lstrip().startswith("# "):
             md = f"# {title}\n\n{md}"
 
-        img_md, n = self._download_content_images(extractor.content_image_urls(html))
-        if img_md:
-            # 插在第一行标题之后(导语图);无标题则置顶
-            lines = md.split("\n", 1)
-            if lines and lines[0].startswith("# "):
-                md = lines[0] + "\n\n" + img_md + ("\n" + lines[1] if len(lines) > 1 else "")
-            else:
-                md = img_md + "\n\n" + md
-        return md, n
+        downloaded = self._download_content_images(extractor.content_image_urls(html))
+        if downloaded:
+            items = [(self._image_anchor(html, url), ref) for url, ref in downloaded]
+            md = self._inline_images(md, items)
+        return md, len(downloaded)
 
-    def _download_content_images(self, urls: list[str]) -> tuple[str, int]:
-        """下载正文图到 assets/img_N.ext,返回 markdown 图片段 + 张数(失败的图跳过)。"""
+    def _download_content_images(self, urls: list[str]) -> list[tuple[str, str]]:
+        """下载正文图到 assets/img_N.ext,返回 [(原 url, markdown 引用)](按序,失败的图跳过)。"""
         import urllib.request
         assets = self.job_dir / "assets"
-        refs: list[str] = []
+        out: list[tuple[str, str]] = []
         for i, url in enumerate(urls):
             ext = (re.search(r'\.(png|jpe?g|gif|webp)', url.lower()) or [None, "jpg"])[1]
             ext = "jpg" if ext == "jpeg" else ext
@@ -151,10 +148,63 @@ class ParseArticleStep(StepBase):
                     continue
                 assets.mkdir(parents=True, exist_ok=True)
                 (assets / fname).write_bytes(data)
-                refs.append(f"![](assets/{fname})")
+                out.append((url, f"![](assets/{fname})"))
             except Exception:
                 continue
-        return "\n\n".join(refs), len(refs)
+        return out
+
+    @staticmethod
+    def _image_anchor(html: str, url: str) -> str:
+        """图 url 在 HTML 中首次出现位置之前、最近的段落/标题文字(归一化),作为它在正文里的锚点。
+        无则空串(→ 兜底插标题后)。"""
+        idx = html.find(url)
+        if idx < 0:
+            return ""
+        before = html[:idx]
+        last = ""
+        for m in re.finditer(r'<(p|h[1-6]|figcaption)\b[^>]*>(.*?)</\1>', before, re.S | re.I):
+            txt = " ".join(re.sub(r'<[^>]+>', " ", m.group(2)).split())
+            if len(txt) >= 12:           # 够长才作锚(跳过空/超短块)
+                last = txt
+        return last
+
+    @staticmethod
+    def _inline_images(md: str, items: list[tuple[str, str]]) -> str:
+        """把图按锚点插到 md 对应段落之后(图按文档序;锚点在 md 里也按序出现 → 单调推进搜索)。
+        锚点为空或在 md 找不到的图,收集后兜底插在标题(首个 # 行)之后。"""
+        lines = md.split("\n")
+        norm = [" ".join(re.sub(r'<[^>]+>', " ", ln).split()) for ln in lines]
+        after: dict[int, list[str]] = {}     # 行号 -> 该行后要插的图引用
+        leftover: list[str] = []
+        cursor = 0
+        for anchor, ref in items:
+            key = anchor[-40:].strip()
+            placed = False
+            if key:
+                for i in range(cursor, len(lines)):
+                    if key and key in norm[i]:
+                        after.setdefault(i, []).append(ref)
+                        cursor = i            # 后续图从此行起找,保序;同段连续图落同一行
+                        placed = True
+                        break
+            if not placed:
+                leftover.append(ref)
+        out: list[str] = []
+        title_idx = next((i for i, ln in enumerate(lines) if ln.startswith("# ")), -1)
+        for i, ln in enumerate(lines):
+            out.append(ln)
+            if i == title_idx and leftover:   # 锚点匹配不上的兜底插标题后
+                for ref in leftover:
+                    out.append("")
+                    out.append(ref)
+                leftover = []
+            for ref in after.get(i, []):
+                out.append("")
+                out.append(ref)
+        if leftover:                          # 无标题行 → 顶部兜底
+            head = [x for ref in leftover for x in (ref, "")]
+            out = head + out
+        return "\n".join(out)
 
     def _load_meta(self) -> dict:
         path = self.job_dir / "input" / "article_meta.json"

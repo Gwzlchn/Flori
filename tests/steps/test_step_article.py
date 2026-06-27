@@ -430,3 +430,35 @@ class TestArticleExtractors:
         assert SubstackExtractor().content_image_urls(html) == [
             "https://substackcdn.com/image/fetch/$s_!c!,w_1456/c.png"
         ]
+
+
+class TestInlineImagePositioning:
+    """正文图按原文位置内联:锚点 = 图前最近段落文字,插到 md 对应段后;锚点缺失兜底标题后。"""
+
+    def test_anchor_is_preceding_paragraph(self):
+        html = '<p>第一段足够长的引言文字内容</p><figure><img src="https://cdn/a.png"></figure>'
+        assert ParseArticleStep._image_anchor(html, "https://cdn/a.png") == "第一段足够长的引言文字内容"
+
+    def test_anchor_absent_returns_empty(self):
+        assert ParseArticleStep._image_anchor("<p>x</p>", "https://cdn/missing.png") == ""
+
+    def test_inline_after_matching_paragraph(self):
+        md = "# 标题\n\n第一段足够长的引言文字内容。\n\n第二段也是足够长的正文内容。"
+        out = ParseArticleStep._inline_images(md, [("第二段也是足够长的正文内容。", "![](assets/img_00.png)")]).split("\n")
+        j = next(k for k, l in enumerate(out) if "第二段" in l)
+        assert any("img_00" in l for l in out[j + 1:j + 3])         # 图在该段之后
+        assert not any("img_00" in l for l in out[:j])              # 不在前面
+
+    def test_inline_leftover_after_title(self):
+        md = "# 标题\n\n正文段落内容。"
+        out = ParseArticleStep._inline_images(md, [("", "![](assets/img_00.png)")]).split("\n")
+        ti = next(k for k, l in enumerate(out) if l.startswith("# "))
+        assert any("img_00" in l for l in out[ti + 1:ti + 3])       # 锚点缺失 → 兜底标题后
+
+    def test_inline_consecutive_order_preserved(self):
+        md = "# T\n\n锚段落文字内容足够长。"
+        out = ParseArticleStep._inline_images(md, [
+            ("锚段落文字内容足够长。", "![](assets/img_00.png)"),
+            ("锚段落文字内容足够长。", "![](assets/img_01.png)"),
+        ])
+        assert out.index("img_00") < out.index("img_01")
