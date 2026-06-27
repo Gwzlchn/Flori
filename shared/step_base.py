@@ -121,6 +121,19 @@ class StepBase:
     def input_hashes(self) -> dict[str, str]:
         return {}
 
+    def _def_digest(self) -> str:
+        """本步【pipeline 定义指纹】——版本来自 pipelines.yaml(经 build_step_config 进 self.config),不取代码/git。
+        纳入:step.version(使用者在 YAML 维护的版本号)+ ai(provider/model)。
+        改 YAML 的 version 或 ai 模型 → 该指纹变 → should_run 判需重跑(该步+下游;上游指纹未变仍跳过)。
+        prompt 内容定制走 {step}.md/profiles/styles(已在各步 input_hashes 经 prompt_profile_style_hashes 纳入)。"""
+        step = self.config.get("step", {}) if isinstance(self.config, dict) else {}
+        defn = {
+            "version": str(step.get("version", "1")),
+            "ai": self.config.get("ai", {}) if isinstance(self.config, dict) else {},
+        }
+        blob = json.dumps(defn, sort_keys=True, ensure_ascii=False)
+        return "sha256:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
     # ── 幂等 ──
 
     def should_run(self) -> bool:
@@ -128,12 +141,21 @@ class StepBase:
         if not done_file.exists():
             return True
         stored = json.loads(done_file.read_text())
-        return stored.get("input_hashes") != self.input_hashes()
+        if stored.get("input_hashes") != self.input_hashes():
+            return True
+        # pipeline 定义版本(def_digest):仅当旧 .done【已记录】该键才比对。
+        # 老 .done 没有此键(本特性引入前生成的)→ 不因新增字段而强制重跑,避免发版/首次引入时全量重跑(决策 e)。
+        # 新 mark_done 起记录;此后改 YAML version / ai 模型即触发该步重跑。
+        stored_def = stored.get("def_digest")
+        if stored_def is not None and stored_def != self._def_digest():
+            return True
+        return False
 
     def mark_done(self) -> None:
         data = {
             "step": self.step_name,
             "input_hashes": self.input_hashes(),
+            "def_digest": self._def_digest(),
             "finished_at": datetime.now().isoformat(),
         }
         (self.job_dir / f".{self.step_name}.done").write_text(

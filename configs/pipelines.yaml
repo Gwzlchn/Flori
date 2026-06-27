@@ -12,6 +12,9 @@ default:
   image: flori/step-base
   timeout: 600
   retry: 0
+  # 步骤定义版本(进 step def_digest 指纹):改某步行为(如改了内联 prompt/换实现)却想触发重跑时,
+  # 在该步下加/改 `version: "2"` 即可——无需改代码。换 ai 模型也会自动触发。详见 shared/step_base._def_digest。
+  version: "1"
 
 # 隐藏模板（'.' 前缀，不直接运行）：同类步只写差异，extends 按键深合并。
 .cpu-step:

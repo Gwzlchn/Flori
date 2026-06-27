@@ -332,6 +332,9 @@ def build_step_config(
             "pool": step_cfg["pool"],
             "timeout_sec": step_cfg.get("timeout_sec", 600),
             "retries": step_cfg.get("retries", 0),
+            # pipeline 定义版本(在 pipelines.yaml 维护,非代码):随 step def_digest 进步骤指纹。
+            # 使用者在 YAML 给某步加/改 `version`(或改 ai 模型)即触发该步+下游重跑,无需改代码(见 step_base._def_digest)。
+            "version": str(step_cfg.get("version", "1")),
         },
         "ai": step_cfg.get("ai", {}),
         "domain": {"name": domain, **domain_cfg},

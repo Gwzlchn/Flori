@@ -1,9 +1,14 @@
 import { describe, it, expect, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { mount, flushPromises } from '@vue/test-utils'
 
 const push = vi.fn()
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push }),
+}))
+
+const deleteJob = vi.fn(() => Promise.resolve())
+vi.mock('../../stores/jobs', () => ({
+  useJobStore: () => ({ deleteJob }),
 }))
 
 import TaskRow from './TaskRow.vue'
@@ -72,5 +77,31 @@ describe('TaskRow', () => {
     const w = mountRow({ state: 'queued', jobId: 'j_click', step: 's', title: 'T' })
     await w.find('.row').trigger('click')
     expect(push).toHaveBeenCalledWith('/content/j_click')
+  })
+
+  it('默认显示删除按钮;confirm 后调 deleteJob + emit deleted + 不跳转', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    deleteJob.mockClear(); push.mockClear()
+    const w = mountRow({ state: 'completed', jobId: 'j_del', step: 's', status: 'done' })
+    const btn = w.find('.task-del')
+    expect(btn.exists()).toBe(true)
+    await btn.trigger('click')
+    await flushPromises()
+    expect(deleteJob).toHaveBeenCalledWith('j_del')
+    expect(w.emitted('deleted')?.[0]).toEqual(['j_del'])
+    expect(push).not.toHaveBeenCalled()   // @click.stop:不触发整行跳转
+  })
+
+  it('confirm 取消则不删', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => false))
+    deleteJob.mockClear()
+    const w = mountRow({ state: 'completed', jobId: 'j', step: 's' })
+    await w.find('.task-del').trigger('click')
+    expect(deleteJob).not.toHaveBeenCalled()
+  })
+
+  it('deletable=false 不显示删除按钮', () => {
+    const w = mountRow({ state: 'queued', jobId: 'j', step: 's', deletable: false })
+    expect(w.find('.task-del').exists()).toBe(false)
   })
 })

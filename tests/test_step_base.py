@@ -84,6 +84,47 @@ class TestShouldRun:
         assert step.should_run() is True
 
 
+class TestDefDigest:
+    """pipeline 定义版本(version/ai 来自 YAML)进指纹 → 改 YAML 即重跑;旧 .done 向后兼容不强制重跑。"""
+
+    def _mk(self, job_dir, version="1", ai=None):
+        return DummyStep(job_dir, config={"step": {"version": version}, "ai": ai or {}})
+
+    def _seed_input(self, tmp_path):
+        (tmp_path / "input").mkdir(exist_ok=True)
+        (tmp_path / "input" / "data.json").write_text('{"x": 1}')
+
+    def test_def_digest_recorded_and_stable(self, tmp_path):
+        self._seed_input(tmp_path)
+        step = self._mk(tmp_path)
+        assert step._def_digest().startswith("sha256:")
+        assert self._mk(tmp_path)._def_digest() == step._def_digest()  # 同输入同 hash
+        step.mark_done()
+        content = json.loads((tmp_path / ".test_step.done").read_text())
+        assert content["def_digest"] == step._def_digest()
+
+    def test_rerun_when_version_bumped(self, tmp_path):
+        self._seed_input(tmp_path)
+        self._mk(tmp_path, version="1").mark_done()
+        assert self._mk(tmp_path, version="1").should_run() is False  # 没改 → 跳过
+        assert self._mk(tmp_path, version="2").should_run() is True   # bump version → 重跑
+
+    def test_rerun_when_ai_model_changes(self, tmp_path):
+        self._seed_input(tmp_path)
+        self._mk(tmp_path, ai={"primary": "claude-x"}).mark_done()
+        assert self._mk(tmp_path, ai={"primary": "claude-x"}).should_run() is False
+        assert self._mk(tmp_path, ai={"primary": "claude-y"}).should_run() is True  # 换模型 → 重跑
+
+    def test_legacy_done_without_def_digest_not_forced_rerun(self, tmp_path):
+        # 本特性引入前生成的 .done 没有 def_digest 键 → 不因新增字段而强制全量重跑(决策 e)。
+        self._seed_input(tmp_path)
+        step = self._mk(tmp_path)
+        (tmp_path / ".test_step.done").write_text(json.dumps({
+            "step": "test_step", "input_hashes": step.input_hashes(), "finished_at": "x",
+        }))
+        assert step.should_run() is False
+
+
 class TestMarkDone:
     def test_writes_done_file(self, tmp_path):
         (tmp_path / "input").mkdir()

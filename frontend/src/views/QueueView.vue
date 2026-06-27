@@ -102,6 +102,7 @@ onBeforeUnmount(() => {
               :title="t.title" :content-type="t.content_type" :pipeline="t.pipeline"
               :started-at="t.started_at" :worker="t.worker_hostname || t.worker_id"
               :now="now"
+              @deleted="load"
             />
           </div>
         </div>
@@ -119,6 +120,7 @@ onBeforeUnmount(() => {
               :title="t.title" :content-type="t.content_type" :pipeline="t.pipeline"
               :priority="t.priority" :enqueued-at="t.enqueued_at"
               :now="now"
+              @deleted="load"
             />
           </div>
           <div v-if="pool.queued_count > pool.queued_shown" class="trunc">

@@ -263,6 +263,7 @@ onBeforeUnmount(() => global.setCrumbs(null))
           :status="t.status"
           :duration-sec="t.duration_sec"
           :finished-at="t.finished_at"
+          @deleted="load"
         />
       </div>
     </template>
