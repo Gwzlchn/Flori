@@ -876,6 +876,13 @@ class Scheduler:
             if am_raw:
                 am = json.loads(am_raw.decode("utf-8", errors="replace"))
                 md = {**am, **{k: v for k, v in md.items() if v}}
+            # 论文/文章的 title/date 也在 02 解析写的 intermediate/parsed.json(论文标题尤其只在此)→ 末位兜底,
+            # 仍以已有非空值优先(不覆盖 metadata/article_meta 已填)。
+            if not md.get("title") or not (md.get("published_at") or md.get("date")):
+                pj_raw = await self.storage.read_file(job_id, "intermediate/parsed.json")
+                if pj_raw:
+                    pj = json.loads(pj_raw.decode("utf-8", errors="replace"))
+                    md = {**{k: pj[k] for k in ("title", "date") if pj.get(k)}, **{k: v for k, v in md.items() if v}}
             if not md:
                 return
             fields: dict = {}
