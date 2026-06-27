@@ -3,7 +3,7 @@ name = "flori"
 # 版本递增三档:普通改动 patch(第3段)+1;大的重构 minor(中段)+1;架构级大重构 major(首段)+1。
 # 逢10进位(0.8.9→0.9.0,0.9.9→1.0.0)。每提交必 bump,标题带 ;版本。详见 CLAUDE.md §提交规范。
 # 全系统单一版本,所有组件(api/scheduler/worker)统一。运行时 = 此值 + 构建短sha(见 shared/version.py)。
-version = "1.0.1"
+version = "1.0.2"
 description = "AI-assisted personal learning knowledge base"
 requires-python = ">=3.11"
 # 上界封顶:挡住新 major/minor 静默引入(USTC 与官方源解析差异曾坑过 CI);
@@ -31,6 +31,9 @@ steps = [
     "rapidocr-onnxruntime>=1.3,<2",
     "pymupdf>=1.24,<2",
     "trafilatura>=1.6,<2",
+    # 注:PyAV(`av`,steps/video 抽帧 import av)不在此显式声明——经 [gpu] 的 faster-whisper 当【预编译 wheel】
+    #     传递装上(与原单镜像一致)。显式 `av>=11` 会让 pip 解析到 av 14.x 的【源码 tarball】,需
+    #     Cython/pkg-config/libav-dev 源码构建(worker 仅 apt 装 ffmpeg 二进制,无 dev 库)→ 必挂,故不声明。
 ]
 api = [
     "fastapi>=0.115,<1",
