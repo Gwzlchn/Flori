@@ -10,8 +10,8 @@ on:
 jobs:
   # 后端单测 + 分支覆盖率门(75%)。容器内跑(与本地 docker compose test 同路径),pytest-xdist `-n auto` 多进程并行。
   # 原单 `test` job(6m32s)= unit+cov(4m10s)+ schemathesis(2m16s,串行);此处拆成 unit ‖ fuzz 两条并行 job,
-  # 关键路径降到 ~max(unit, fuzz)。测试镜像(full stage)用 registry buildcache(flori-test:buildcache)→ 两 job
-  # 与跨 run 都不冷建依赖层(pip/apt/npm 全命中,只重算变动代码层)。
+  # 关键路径降到 ~max(unit, fuzz)。测试镜像(精简 test stage,无 ffmpeg/nodejs/claude)用 registry buildcache
+  # (flori-test:buildcache)→ 跨 run 不冷建依赖层(pip 全命中,只重算变动代码层;依赖层在源码 COPY 之前=分层铁律)。
   unit:
     runs-on: ubuntu-latest
     permissions:
@@ -34,14 +34,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # full stage(测试镜像)走 registry buildcache:cache-to 仅 main(unit 独占写,避免与 fuzz 并行双写冲突);
+      # test stage(精简测试镜像)走 registry buildcache:cache-to 仅 main(unit 独占写,避免与 fuzz 并行双写冲突);
       # PR 回退 gha。load=true 把 flori-test:latest 装进本地 docker,供下方 docker compose run 直接用(不再 build)。
-      - name: Build test image(full stage, registry buildcache)
+      - name: Build test image(test stage, registry buildcache)
         uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/base.Dockerfile
-          target: full
+          target: test
           tags: flori-test:latest
           load: true
           build-args: USE_USTC_MIRROR=0
@@ -139,7 +139,8 @@ jobs:
       # 这里统一算一个小写 owner 供 images / cache 引用复用。
       - name: Lowercase owner
         run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
-      - uses: docker/setup-qemu-action@v4
+      # 注:不装 setup-qemu —— 全部 platforms: linux/amd64(原生,所有目标机 x86),无需 QEMU/binfmt 跨架构模拟。
+      #     装了反而让 4 个并行 build job 抢同一 binfmt GHA 缓存 key,刷 "Unable to reserve cache" 警告。
       - uses: docker/setup-buildx-action@v4
       - name: Log in to ghcr.io
         if: github.ref == 'refs/heads/main'   # 仅 main 需登录(PR 只构建不推)
