@@ -8,7 +8,7 @@ import CookieUpload from '../components/auth/CookieUpload.vue'
 import McpConnectCard from '../components/system/McpConnectCard.vue'
 import StatusBadge from '../components/common/StatusBadge.vue'
 import type { AuthStatus } from '../types'
-import { Settings, QrCode, Server, Activity, Info, BookOpen, ChevronRight, Youtube } from 'lucide-vue-next'
+import { Settings, QrCode, Server, Activity, Info, BookOpen, ChevronRight, Youtube, FileCode2 } from 'lucide-vue-next'
 
 const api = useApi()
 
@@ -81,6 +81,19 @@ onMounted(loadAuth)
 
     <!-- 接入 MCP(把知识库作为 MCP 提供给 agent;用户集成,非运维)-->
     <McpConnectCard />
+
+    <!-- Prompt 白盒(查看流水线 + 编辑每步 prompt 覆盖)-->
+    <div class="card pad" style="margin-bottom:18px">
+      <div class="card-h"><FileCode2 :size="15" />Prompt(白盒)</div>
+      <div class="row" style="cursor:pointer" @click="$router.push('/settings/prompts')">
+        <span class="type-pill" style="background:var(--brand-50);color:var(--brand-600)"><FileCode2 :size="17" /></span>
+        <div class="body">
+          <div class="title">流水线 &amp; Prompt</div>
+          <div class="meta"><span>查看四条流水线全部步骤,编辑每个 AI 步的 prompt 覆盖(全局/按领域)</span></div>
+        </div>
+        <ChevronRight :size="16" class="dim" />
+      </div>
+    </div>
 
     <!-- 运维 -->
     <div class="card pad" style="margin-bottom:18px">

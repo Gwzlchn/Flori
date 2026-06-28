@@ -132,6 +132,11 @@ async def create_job_core(
         "domain": domain, "style_tags": style_tags, "created_at": _now_iso(),
         "flags": flags,
     }
+    # 白盒 Phase2:job 创建时(api 有 DB)解析该 pipeline+domain 的 prompt 覆盖(domain 优先于 global),
+    # 写进 job.json 随 job 下发;worker(pure,无 DB)的 step_base 读取注入覆盖作 system prompt。
+    overrides = await asyncio.to_thread(db.resolve_prompt_overrides, pipeline, domain)
+    if overrides:
+        job_doc["prompt_overrides"] = overrides
     await storage.write_file(
         job_id, "job.json",
         json.dumps(job_doc, ensure_ascii=False, indent=2).encode("utf-8"),
@@ -227,6 +232,12 @@ async def create_job_snapshot(
         except Exception:
             doc = {}
     doc.update({"id": new_id, "created_at": _now_iso()})
+    # 白盒 Phase2:重建快照也重解析 prompt 覆盖(拾取最新编辑;父 job.json 里的旧覆盖会被替换)。
+    overrides = await asyncio.to_thread(db.resolve_prompt_overrides, parent.pipeline, parent.domain)
+    if overrides:
+        doc["prompt_overrides"] = overrides
+    else:
+        doc.pop("prompt_overrides", None)
     await storage.write_file(
         new_id, "job.json", json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8"),
     )

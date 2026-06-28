@@ -27,6 +27,7 @@ const router = createRouter({
     { path: '/system/workers/:id', name: 'worker-detail', component: () => import('../views/WorkerDetailView.vue') },
 
     { path: '/settings', name: 'settings', component: () => import('../views/SettingsView.vue') },
+    { path: '/settings/prompts', name: 'settings-prompts', component: () => import('../views/PromptsView.vue') },
     { path: '/about', name: 'about', component: () => import('../views/AboutView.vue') },
 
     // 旧路径兼容(防止过渡期遗留跳转 404,重建完成后清理)

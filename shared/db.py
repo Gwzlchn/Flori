@@ -141,6 +141,20 @@ CREATE TABLE IF NOT EXISTS ai_task_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_task_logs_task ON ai_task_logs(task_id);
 
+-- prompt 白盒化 Phase 2:按 (scope,domain,pipeline,step) 覆盖某 AI 步的 system prompt。
+-- scope='global'(domain='')或 'domain'(domain=域名);job 创建时 server 端解析(domain 优先于 global)
+-- 注入 job.json.prompt_overrides[step],worker step_base 优先用(pure worker 无 DB → 派发时带过去)。
+-- domain NOT NULL DEFAULT '' 以保证复合主键唯一(SQLite 把 PK 里的 NULL 视作互异会破唯一)。
+CREATE TABLE IF NOT EXISTS prompt_overrides (
+    scope TEXT NOT NULL DEFAULT 'global',
+    domain TEXT NOT NULL DEFAULT '',
+    pipeline TEXT NOT NULL,
+    step TEXT NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (scope, domain, pipeline, step)
+);
+
 -- 集合：订阅是集合的属性(source_type/source_id 非空=订阅集合)，无独立 subscriptions 表。
 CREATE TABLE IF NOT EXISTS collections (
     id TEXT PRIMARY KEY,
@@ -1160,6 +1174,83 @@ class Database:
                 "SELECT * FROM ai_task_logs WHERE task_id=? ORDER BY id DESC", (task_id,)
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── Prompt Overrides(白盒 Phase 2)──
+
+    @staticmethod
+    def _norm_override_key(scope: str, domain: str | None) -> tuple[str, str]:
+        """归一 (scope, domain):scope 非 'domain' 一律按 'global' 处理且 domain='';
+        'domain' scope 须有非空 domain。返回 (scope, domain) 供主键统一(避免 NULL 破唯一)。"""
+        if scope == "domain" and (domain or "").strip():
+            return "domain", domain.strip()
+        return "global", ""
+
+    def set_prompt_override(
+        self, scope: str, domain: str | None, pipeline: str, step: str, content: str
+    ) -> None:
+        """存/覆盖某步的 prompt 覆盖(按 (scope,domain,pipeline,step) 幂等 upsert)。"""
+        scope, dom = self._norm_override_key(scope, domain)
+        with self._lock:
+            self._conn.execute(
+                """INSERT OR REPLACE INTO prompt_overrides
+                   (scope, domain, pipeline, step, content, updated_at)
+                   VALUES (?,?,?,?,?,?)""",
+                (scope, dom, pipeline, step, content or "", _now_iso()),
+            )
+            self._conn.commit()
+
+    def delete_prompt_override(
+        self, scope: str, domain: str | None, pipeline: str, step: str
+    ) -> None:
+        """删某步的 prompt 覆盖(恢复默认)。无则 no-op。"""
+        scope, dom = self._norm_override_key(scope, domain)
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM prompt_overrides WHERE scope=? AND domain=? AND pipeline=? AND step=?",
+                (scope, dom, pipeline, step),
+            )
+            self._conn.commit()
+
+    def get_prompt_override(
+        self, scope: str, domain: str | None, pipeline: str, step: str
+    ) -> dict | None:
+        """读单条 prompt 覆盖,未命中返回 None。"""
+        scope, dom = self._norm_override_key(scope, domain)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM prompt_overrides WHERE scope=? AND domain=? AND pipeline=? AND step=?",
+                (scope, dom, pipeline, step),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_prompt_overrides(self) -> list[dict]:
+        """全量 prompt 覆盖(供设置页标记哪些步已有覆盖)。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM prompt_overrides ORDER BY pipeline, step, scope, domain"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def resolve_prompt_overrides(self, pipeline: str, domain: str | None) -> dict[str, str]:
+        """派发注入用:给定 job 的 pipeline + domain,返回 {step: content} 解析结果。
+        domain 覆盖优先于 global;同一步两者都有则取 domain。job 创建时(api 有 DB)调用,
+        结果写 job.json.prompt_overrides 随 job 下发,worker step_base 读取(pure worker 无 DB)。"""
+        dom = (domain or "").strip()
+        resolved: dict[str, str] = {}
+        with self._lock:
+            # 先 global 铺底,再 domain 覆盖(同步 step domain 优先)。
+            rows = self._conn.execute(
+                "SELECT scope, domain, step, content FROM prompt_overrides WHERE pipeline=? "
+                "AND (scope='global' OR (scope='domain' AND domain=?))",
+                (pipeline, dom),
+            ).fetchall()
+        for r in rows:
+            if r["scope"] == "global" and r["step"] not in resolved:
+                resolved[r["step"]] = r["content"]
+        for r in rows:
+            if r["scope"] == "domain":
+                resolved[r["step"]] = r["content"]
+        return {k: v for k, v in resolved.items() if v}
 
     def get_usage_summary(
         self, job_id: str | None = None, since: str | None = None

@@ -295,6 +295,8 @@ curl -X POST http://localhost:8000/api/jobs/j_xxx/rerun-smart \
 {"ai_overrides": {"10_smart": "anthropic", "11_review": "anthropic"}}
 ```
 
+> `job.json` 另有 `prompt_overrides`（白盒 Phase 2，见 §1.14）：`{step: system_prompt_content}`，job 创建时由 api 从 DB `prompt_overrides` 按 `(pipeline, domain)` 解析注入，worker step_base 优先用作该步 system prompt。与 `ai_overrides`（provider 覆盖）正交。
+
 Response `200`:
 ```json
 {"job_id": "j_20260516_abc123", "status": "processing", "provider": "anthropic"}
@@ -664,7 +666,7 @@ PUT  /api/config/pools                 → 热更新资源池配置(写 pools.ya
 GET  /api/config/pool-limits           → 各池 {default(pools.yaml), override(redis 运行时覆盖,可 null)}
 PUT  /api/config/pool-limits           → 运行时覆盖各池上限(写 redis、不动 pools.yaml;body {pool:int}=设、{pool:null}=清除回落默认;即时对所有 worker 含网关生效;0=暂停该池;unknown pool/非法值 400)
 GET  /api/config/styles                → 可用风格标签列表
-GET  /api/pipelines                    → 流水线只读:各 pipeline 步骤 DAG {name, steps:[{key,label,pool,needs:[key...]}]};needs=依赖(YAML needs→内部 depends_on),前端据此画分层 DAG;模板/'.'前缀/default 不计
+GET  /api/pipelines                    → 流水线只读:各 pipeline 步骤 DAG {name, steps:[{key,label,pool,needs:[key...],is_ai,has_override}]};needs=依赖(YAML needs→内部 depends_on),前端据此画分层 DAG;is_ai=pool=='ai'(可编辑 AI 节点)、has_override=该 (pipeline,step) 已有 prompt 覆盖(画 ● 角标,白盒 Phase2);模板/'.'前缀/default 不计
 ```
 
 #### GET /api/config/styles
@@ -1409,6 +1411,57 @@ Response `200`（数组）：
 - `label`：`type == "cli"` 时为 `"订阅"`，否则 `"API"`（前端展示用）。
 
 `POST /api/jobs/{id}/rerun-smart` 的 `provider` 必须是本端点列出且 `available=true` 的 provider。
+
+### 1.14 Prompt 白盒（`/api/prompts/*`，Phase 2：网页编辑每步 prompt 覆盖）
+
+让每个 AI 步的 system prompt 可见、可改。覆盖存 DB 表 `prompt_overrides`，主键 `(scope, domain, pipeline, step)`，列 `content`/`updated_at`；`scope='global'`（`domain=''`）或 `'domain'`（`domain=域名`）。**注入机制**（同 §1.1 `ai_overrides` 走 job.json 的范式）：job 创建时由 api（有 DB）调 `resolve_prompt_overrides(pipeline, domain)`（domain 覆盖优先于 global）解析出 `{step: content}`，写进 `job.json.prompt_overrides` 随 job 下发；worker（pure，无 DB）的 step_base `_load_system_prompt` 回退顺序 = **DB 注入覆盖 > 外置 `{step}.md` 钩子 > None（内联默认）**。与「默认 prompt 模板外置」（`prompts/templates/{step}.md`）正交：模板是默认 user-prompt 骨架，DB 覆盖是上层 system prompt 覆盖；编辑器把模板当「默认 prompt（只读）」展示供参考。Phase 1 的 AI 审计日志 `template.source` 据此标 `db_override`（注入命中）/`override`（`{step}.md`）/`default`。
+
+```
+GET    /api/prompts                       → 列各 pipeline 可编辑 AI 步 + 已有哪些覆盖
+GET    /api/prompts/{pipeline}/{step}     → 单步默认模板(只读) + 该 (scope,domain) 当前覆盖
+PUT    /api/prompts/{pipeline}/{step}     → 存该步 system prompt 覆盖(content 纯空白=删除恢复默认)
+DELETE /api/prompts/{pipeline}/{step}     → 删该 (scope,domain) 覆盖(恢复默认)
+```
+
+#### GET /api/prompts
+
+Response `200`：`steps` 为四条 pipeline 的全部 AI 步（`pool=='ai'`）。`overrides` 列出该步已有的覆盖（供设置页标 ●）。
+```json
+{
+  "steps": [
+    {"pipeline": "video", "step": "11_smart", "label": "智能笔记", "pool": "ai",
+     "is_ai": true, "has_template": true,
+     "overrides": [{"scope": "global", "domain": ""}, {"scope": "domain", "domain": "finance"}]}
+  ]
+}
+```
+
+#### GET /api/prompts/{pipeline}/{step}?scope=&domain=
+
+`scope` 默认 `global`；`domain` 仅 `scope=domain` 时有意义。Response `200`：
+```json
+{
+  "pipeline": "video", "step": "11_smart", "label": "智能笔记", "pool": "ai", "is_ai": true,
+  "default_template": "...(prompts/templates/11_smart.md 内容,缺则 null=内联默认)...",
+  "default_system": null,
+  "override": {"scope": "global", "domain": "", "content": "你是...", "updated_at": "..."}
+}
+```
+`override` 无覆盖时为 `null`。step 不属于该 pipeline → `404`。
+
+#### PUT /api/prompts/{pipeline}/{step}
+
+请求体 `{scope, domain?, content}`。`content` 为纯空白即视为删除该覆盖（恢复默认）。
+- `scope='domain'` 但 `domain` 空 → `400`；step 非 AI 步（`pool!='ai'`）→ `400`；step 不存在 → `404`。
+- 成功保存 `{"status": "saved", ...}`；空内容删除 `{"status": "deleted", ...}`。
+
+```json
+{"scope": "global", "content": "你是资深技术编辑,产出结构化中文笔记..."}
+```
+
+#### DELETE /api/prompts/{pipeline}/{step}?scope=&domain=
+
+删除该 `(scope,domain,pipeline,step)` 覆盖（恢复默认）。无则 no-op。Response `200 {"status":"deleted",...}`。
 
 ## 2. WebSocket
 

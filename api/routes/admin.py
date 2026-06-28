@@ -562,8 +562,16 @@ async def update_pool_limits(
 
 
 @router.get("/pipelines", dependencies=[Depends(verify_token)])
-async def list_pipelines(config: AppConfig = Depends(get_config)):
-    """流水线只读视图:各 pipeline 的步骤 DAG(键+中文名+池)。模板/'.'前缀/default 不算 pipeline。"""
+async def list_pipelines(
+    config: AppConfig = Depends(get_config), db: Database = Depends(get_db)
+):
+    """流水线只读视图:各 pipeline 的步骤 DAG(键+中文名+池 + is_ai/has_override)。
+    模板/'.'前缀/default 不算 pipeline。is_ai=pool=='ai'(白盒 Phase2 标可编辑 AI 节点);
+    has_override=该 (pipeline,step) 已有 prompt 覆盖(前端画 ● 角标)。"""
+    overridden = {
+        (o["pipeline"], o["step"])
+        for o in await asyncio.to_thread(db.list_prompt_overrides)
+    }
     out = []
     for name, pc in (config.pipelines or {}).items():
         if name.startswith(".") or name == "default":
@@ -576,7 +584,9 @@ async def list_pipelines(config: AppConfig = Depends(get_config)):
             "steps": [
                 {"key": s.get("name"), "label": s.get("label"), "pool": s.get("pool"),
                  # 依赖(YAML needs 归一化为内部 depends_on,见 config._FIELD_ALIASES),供前端画 DAG
-                 "needs": s.get("depends_on") or []}
+                 "needs": s.get("depends_on") or [],
+                 "is_ai": s.get("pool") == "ai",
+                 "has_override": (name, s.get("name")) in overridden}
                 for s in steps
             ],
         })

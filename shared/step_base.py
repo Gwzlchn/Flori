@@ -602,9 +602,13 @@ class StepBase:
         except Exception:
             pass
 
+        # template.source:DB 注入覆盖(白盒 Phase2)> 外置 {step}.md 钩子 > default。
+        # 与 _load_system_prompt 回退顺序一致,供 Phase1 AI 日志佐证"该步用了哪层 prompt"。
         template_source = "default"
         try:
-            if prompts_dir and (Path(prompts_dir) / f"{self.step_name}.md").exists():
+            if self._injected_prompt_override():
+                template_source = "db_override"
+            elif prompts_dir and (Path(prompts_dir) / f"{self.step_name}.md").exists():
                 template_source = "override"
         except Exception:
             pass
@@ -857,11 +861,26 @@ class StepBase:
     def _setup_logger(self):
         return structlog.get_logger(step=self.step_name, job_dir=str(self.job_dir))
 
+    def _injected_prompt_override(self) -> str:
+        """白盒 Phase 2:job.json 里本步被注入的 prompt 覆盖(无/读失败则空串)。
+        来源 = api job 创建时按 DB prompt_overrides(scope/domain/pipeline/step)解析后写入
+        job.json.prompt_overrides[step](pure worker 无 DB,只能靠 job 带过去)。镜像 _read_override 读盘范式。"""
+        try:
+            job = json.loads((self.job_dir / "job.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return ""
+        return (job.get("prompt_overrides") or {}).get(self.step_name, "") or ""
+
     def _load_system_prompt(self) -> str | None:
-        """可选的外置 system prompt 覆盖钩子:若存在 configs/prompts/{step_name}.md 则用作 system
-        prompt。各步默认把 prompt 内联在 _build_user_prompt/_build_prompt 里,该文件【默认不存在】→
-        返回 None(provider 对 system=None 有守卫,不影响生成)。input_hashes 的 prompt 键同样按
-        {step_name}.md 计指纹,故覆盖文件改动会触发重跑(二者文件名一致)。"""
+        """本步 system prompt,回退顺序 = DB 注入覆盖 > 外置 {step_name}.md > None(内联默认)。
+        ① 白盒 Phase 2:job.json.prompt_overrides[step](DB 覆盖派发时注入)优先,使网页编辑的
+           system 覆盖在下个 job 生效;② 兼容旧钩子 configs/prompts/{step_name}.md;③ 都无则 None
+           (各步把 prompt 内联在 _build_user_prompt/_build_prompt,provider 对 system=None 有守卫)。
+        input_hashes 的 prompt 键按 {step_name}.md 计指纹;注入覆盖在 job 创建期解析、固化进 job.json,
+        故同一 job 生命周期内稳定(幂等一致)。"""
+        injected = self._injected_prompt_override()
+        if injected:
+            return injected
         prompts_dir = self.config.get("paths", {}).get("prompts_dir")
         if not prompts_dir:
             return None

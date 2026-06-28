@@ -133,6 +133,16 @@ class TermAddRequest(BaseModel):
     term: str
 
 
+# ── Prompt 白盒(Phase 2:网页编辑每步 system prompt 覆盖)──
+
+
+class PromptOverrideRequest(BaseModel):
+    # scope='global'(忽略 domain)或 'domain'(需非空 domain);content=覆盖正文(空串会被当删除处理)
+    scope: str = "global"
+    domain: str | None = None
+    content: str = ""
+
+
 # ── 集合 ──
 
 
