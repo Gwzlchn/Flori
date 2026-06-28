@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from steps.article.step_02_parse_article import ParseArticleStep
+from steps.article.step_02_parse_article import ParseArticleStep, MIN_BODY_CHARS
 from steps.article.extractors import (
     pick_extractor, GenericExtractor, SubstackExtractor,
     generic_content_image_urls, authors_from_page_json,
@@ -19,6 +19,7 @@ from steps.article.step_04_translate_article import TranslateArticleStep
 from steps.article.step_05_concepts import ArticleConceptsStep
 from steps.article.step_05_review import ArticleReviewStep
 from shared.models import LLMResponse
+from shared.errors import InputInvalidError
 from tests.steps.conftest import make_step_config
 
 
@@ -125,6 +126,85 @@ class TestParseArticleStep:
         result = step.execute()
         parsed = json.loads((job_dir / "intermediate" / "parsed.json").read_text())
         assert parsed["title"]
+        assert result["chars"] > 0
+
+
+# 空正文护栏护栏用 HTML 样本(付费墙/JS 残桩/空壳)。
+PAYWALL_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head><title>Premium Insight</title></head>
+<body><article>
+<h1>Premium Insight</h1>
+<p>Subscribe to continue reading this members-only analysis.</p>
+</article></body>
+</html>
+"""
+
+# JS 渲染空壳:无正文,只有挂载点 + noscript 提示 → trafilatura 抽 0 字。
+EMPTY_SHELL_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head><title>Loading…</title></head>
+<body><div id="app"></div><noscript>Please enable JavaScript to view this site.</noscript></body>
+</html>
+"""
+
+
+class TestEmptyBodyGuard:
+    """空正文护栏(硬伤C):付费墙/JS 残桩/空壳页正文过短 → 02_parse 直接 InputInvalidError,
+    不让 03/04/05 在空正文上幻觉污染图谱。"""
+
+    def test_effective_len_strips_whitespace(self):
+        # 有效字符数 = 去掉所有空白后字符数(空白填充残桩不被误判为长)。
+        assert ParseArticleStep._effective_len("  a b\n c\t d  ") == 4
+        assert ParseArticleStep._effective_len("") == 0
+        assert ParseArticleStep._effective_len("   \n\t  ") == 0
+        assert ParseArticleStep._effective_len("中文 字符") == 4
+
+    def test_paywall_marker_detection(self):
+        assert ParseArticleStep._has_paywall_marker("Subscribe to continue reading.") is True
+        assert ParseArticleStep._has_paywall_marker("请先登录后阅读全文") is True
+        assert ParseArticleStep._has_paywall_marker("开通会员即可查看") is True
+        # 长正文里恰好含 subscribe 一词不影响——本函数只在正文已判过短时才被调用细化信息。
+        assert ParseArticleStep._has_paywall_marker("A normal article about gardening.") is False
+
+    def test_empty_shell_raises(self, tmp_path):
+        job_dir = _mk_job(tmp_path)
+        (job_dir / "input" / "source.html").write_text(EMPTY_SHELL_HTML, encoding="utf-8")
+        (job_dir / "input" / "article_meta.json").write_text(
+            json.dumps({"url": "https://example.com/spa"}), encoding="utf-8")
+        config = make_step_config(tmp_path, step_name="02_parse_article", pool="cpu")
+        step = ParseArticleStep("02_parse_article", job_dir, config)
+        with pytest.raises(InputInvalidError) as ei:
+            step.execute()
+        assert "正文过短" in str(ei.value)
+        # 不留半成品产物:parsed.json / original.md / needs_translation 都不应写出。
+        assert not (job_dir / "intermediate" / "parsed.json").exists()
+        assert not (job_dir / "output" / "original.md").exists()
+        assert not (job_dir / "intermediate" / "needs_translation.json").exists()
+
+    def test_paywall_stub_raises(self, tmp_path):
+        job_dir = _mk_job(tmp_path)
+        (job_dir / "input" / "source.html").write_text(PAYWALL_HTML, encoding="utf-8")
+        config = make_step_config(tmp_path, step_name="02_parse_article", pool="cpu")
+        step = ParseArticleStep("02_parse_article", job_dir, config)
+        with pytest.raises(InputInvalidError) as ei:
+            step.execute()
+        # error_type 走不重试分支(BUILD)。
+        assert ei.value.error_type == "input_invalid"
+        assert "正文过短" in str(ei.value)
+        assert "付费墙" in str(ei.value)        # 命中付费墙标记 → 错误信息细化为"疑似付费墙"
+        assert not (job_dir / "intermediate" / "parsed.json").exists()
+
+    def test_normal_article_passes_guard(self, tmp_path):
+        # 控制组:正常长文(SAMPLE_HTML)正文 >> 阈值 → 不触发护栏,正常产出。
+        job_dir = _mk_job(tmp_path)
+        (job_dir / "input" / "source.html").write_text(SAMPLE_HTML, encoding="utf-8")
+        config = make_step_config(tmp_path, step_name="02_parse_article", pool="cpu")
+        step = ParseArticleStep("02_parse_article", job_dir, config)
+        result = step.execute()       # 不抛
+        assert ParseArticleStep._effective_len(
+            json.loads((job_dir / "intermediate" / "parsed.json").read_text())["text"]
+        ) >= MIN_BODY_CHARS
         assert result["chars"] > 0
 
 

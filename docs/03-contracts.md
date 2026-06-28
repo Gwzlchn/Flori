@@ -1736,6 +1736,7 @@ video:
   - `05_smart_paper` `needs` 含 `04_translate_paper`:非中文论文笔记**基于 章节+图表+译文**(有译文则用译文正文);译文跳过(中文论文)依赖视为满足、读原文。
 - **article**：`01_download` → `02_parse_article` → `03_article_sections` → `04_smart_article`(可选,`smart_note`)/`04_translate_article`(条件) → `05_concepts`(必跑) → `06_review`(可选)。
   - `02_parse_article` 检测正文主语言写入 `parsed.json` 的 `lang`(`zh`/`non-zh`/`unknown`);**非中文**正文额外写标记 `intermediate/needs_translation.json`。
+  - **空正文护栏**:`02_parse_article` 抽出的正文【有效字符数】(去空白后)< `MIN_BODY_CHARS`(=200)→ 直接抛 `InputInvalidError`(`error_type=input_invalid`,不重试),**不写任何产物**,job 明确 `failed`。挡付费墙/JS 渲染/订阅残桩页(抽 0 或极短正文)流向 `03/04/05` 的 AI 步——否则 LLM 拿空正文幻觉编笔记/概念,污染概念库与图谱(`key_terms` 是图谱唯一概念来源)。命中常见付费墙/登录墙标记仅细化错误信息,判废只看正文长度。
   - `04_translate_article`(AI):`rules.exists: intermediate/needs_translation.json` 门控——**仅非中文文章触发**,把 `output/original.md` 忠实全文翻译为简体中文 → `output/translated.md`(保留 Markdown 结构与 `![](assets/…)` 图位),供前端「译文」tab。
   - `04_smart_article` / `05_concepts` **`needs` 含 `04_translate_article`**:非中文文章的中文产出**基于译文**(术语一致,不重复英→中)——`04_smart` 有 `translated.md` 则笔记基于译文;`05_concepts` 源优先级 **智能笔记 > 译文 > 原文章节**。译文被跳过(中文文章)时依赖视为满足,两步照常读原文。
 - **audio**：`01_download` → `02_whisper` → `03_transcript_parse` → `04_smart_podcast` → `05_review`。

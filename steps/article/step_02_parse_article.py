@@ -14,6 +14,28 @@ from steps.article.extractors import pick_extractor
 from shared.step_base import StepBase, file_hash
 
 
+# 空正文护栏(硬伤C:08-review-pipeline-audit / 09-plan P0-3)。付费墙 / JS 渲染 / 订阅残桩页
+# 常被 trafilatura 抽出空或极短正文(仅标题 + "订阅后阅读")。正文【有效字符数】低于此阈值 →
+# 判定抓取失败/付费墙,直接 InputInvalidError(不重试),不让 03/04/05 在空正文上跑 AI 幻觉、
+# 污染概念图谱(key_terms 是图谱唯一概念来源)。阈值沿用既有翻译门控的 200(本文件 needs_translation
+# 用 len(text) > 200),不另立魔数;中英通用——200 拉丁≈35 词、200 CJK≈一短段,都是"低于此基本
+# 无内容可做笔记"的地板,且对英文更宽松(需更少词)故倾向不误杀。正规文章普遍远超此值。
+MIN_BODY_CHARS = 200
+
+# 常见付费墙/登录墙标记(EN + 中文)。命中【仅用于细化错误信息】(疑似付费墙 vs 疑似抓取失败),
+# 判废仍只看正文长度——避免长文因正文含 subscribe/会员 等词被误杀(长文不会触发长度门)。
+_PAYWALL_MARKERS = (
+    "subscribe to continue", "subscribe to read", "subscribe to keep reading",
+    "already a subscriber", "already a member", "become a member",
+    "create a free account", "create an account to", "sign in to read",
+    "sign in to continue", "this content is for", "members only",
+    "for subscribers only", "subscribers only", "paywall", "metered",
+    "登录后查看", "登录后阅读", "登录以阅读", "订阅后阅读", "订阅以继续",
+    "开通会员", "成为会员", "付费内容", "仅限会员", "购买后阅读", "请先登录",
+    "继续阅读", "阅读全文需",
+)
+
+
 class ParseArticleStep(StepBase):
     def validate_inputs(self) -> list[str]:
         if not (self.job_dir / "input" / "source.html").exists():
@@ -69,6 +91,18 @@ class ParseArticleStep(StepBase):
         if not authors:
             authors = extractor.authors(html)
 
+        # 空正文护栏:正文有效字符数过短(付费墙/JS 渲染/订阅残桩)→ 直接判失败(不重试),
+        # 不写任何产物、不让 03/04/05 拿空正文喂 AI 幻觉污染概念图谱(详见文件顶部说明)。
+        eff = self._effective_len(text)
+        if eff < MIN_BODY_CHARS:
+            from shared.errors import InputInvalidError
+            hint = ("疑似付费墙/登录墙" if self._has_paywall_marker(text)
+                    else "疑似抓取失败/空正文(JS 渲染或残桩页)")
+            raise InputInvalidError(
+                f"正文过短({eff} 有效字符 < {MIN_BODY_CHARS}),{hint};"
+                f"title={title[:60]!r} url={url}"
+            )
+
         sections = []
         if text:
             sections.append({"level": 1, "title": title or "正文", "page": 1, "text": text})
@@ -103,6 +137,19 @@ class ParseArticleStep(StepBase):
         return {"chars": len(text), "title": title, "images": img_count,
                 "abstract": bool(abstract), "tags": len(tags),
                 "lang": lang, "extractor": extractor.name}
+
+    @staticmethod
+    def _effective_len(text: str) -> int:
+        """正文有效字符数 = 去掉所有空白后的字符数(中英通用:CJK/拉丁/数字均按字符计)。
+        空正文护栏的判据——避免空白填充的残桩页被 len() 误判为长。"""
+        return len("".join((text or "").split()))
+
+    @classmethod
+    def _has_paywall_marker(cls, text: str) -> bool:
+        """正文(teaser)是否命中常见付费墙/登录墙标记。仅用于细化空正文护栏的错误信息,
+        不参与判废(判废只看 _effective_len)。"""
+        low = (text or "").lower()
+        return any(m in low for m in _PAYWALL_MARKERS)
 
     @staticmethod
     def _detect_lang(text: str) -> str:
