@@ -80,6 +80,10 @@ services:
       # 即被 source_type=local_dir、source_id=/data/inbox 的订阅枚举入库。
       # api 跑 enumerate_source→scan_dir(枚举,只读即可);与 worker-cpu 挂同一容器内路径。
       - ${FLORI_INBOX_DIR:-.local/inbox}:/data/inbox:ro
+      # 默认 prompt 模板外挂(只读,同 worker):命名卷 flori-data 会 shadow 镜像烤入的 /data/prompts,
+      # 故 api 也须挂此子路径,否则 prompt 白盒 GET /api/prompts 读不到默认模板(展示为空)。
+      # 即便没挂,api 仍会回退读镜像烤入的 /app/configs/prompts/templates(双保险,见 routes/prompts.py)。
+      - ${FLORI_TEMPLATES_DIR:-./configs/prompts/templates}:/data/prompts/templates:ro
     environment:
       <<: *common-env
       WORK_DIR: ${WORK_DIR:-/tmp/flori-work}

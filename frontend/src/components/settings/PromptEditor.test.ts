@@ -100,4 +100,25 @@ describe('PromptEditor', () => {
     await flushPromises()
     expect(put).not.toHaveBeenCalled()
   })
+
+  it('renders all default template variants + system default when expanded', async () => {
+    get.mockResolvedValue({
+      default_template: 'MAIN BODY',
+      default_templates: [
+        { name: '11_smart', content: 'MAIN BODY' },
+        { name: '11_smart.vision', content: 'VISION BODY' },
+      ],
+      default_system: 'SYS DEFAULT',
+      override: null,
+    })
+    const w = await mountEditor()
+    const toggle = w.findAll('button').find((b) => b.text().includes('展开'))!
+    await toggle.trigger('click')
+    await flushPromises()
+    const txt = w.text()
+    expect(txt).toContain('MAIN BODY')
+    expect(txt).toContain('VISION BODY')
+    expect(txt).toContain('11_smart.vision') // 多模板时显示变体名
+    expect(txt).toContain('SYS DEFAULT')
+  })
 })

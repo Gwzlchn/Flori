@@ -865,21 +865,51 @@ class StepBase:
         """白盒 Phase 2:job.json 里本步被注入的 prompt 覆盖(无/读失败则空串)。
         来源 = api job 创建时按 DB prompt_overrides(scope/domain/pipeline/step)解析后写入
         job.json.prompt_overrides[step](pure worker 无 DB,只能靠 job 带过去)。镜像 _read_override 读盘范式。"""
+        job_dir = getattr(self, "job_dir", None)
+        if job_dir is None:  # 裸构造的 StepBase(仅测模板加载)无 job_dir,优雅返回空串
+            return ""
         try:
-            job = json.loads((self.job_dir / "job.json").read_text(encoding="utf-8"))
+            job = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return ""
         return (job.get("prompt_overrides") or {}).get(self.step_name, "") or ""
 
+    def _has_step_template(self) -> bool:
+        """该步是否有外置默认 user-prompt 模板(templates/{step_name}*.md,含变体)。
+        有模板(多数 AI 步)→ DB 覆盖作用于 user-prompt 模板层(_load_prompt_template,所见即所改);
+        无模板(评审等 prompt 内联步)→ 覆盖回落为 system prompt(否则其网页覆盖会失效)。"""
+        prompts_dir = (self.config.get("paths") or {}).get("prompts_dir")
+        if not prompts_dir:
+            return False
+        try:
+            return any((Path(prompts_dir) / "templates").glob(f"{self.step_name}*.md"))
+        except OSError:
+            return False
+
+    def _override_targets_template(self, name: str) -> bool:
+        """注入覆盖是否作用于该模板 name。
+        ① name==step_name:主模板,精确命中;② name 以 "step_name." 开头(变体)且该步无同名主模板
+           → 命中(如 08_punctuate 只有 .zh/.translate 变体,同一 job 只跑一个,覆盖落到被加载的那个)。
+        反例:11_smart 有主模板 11_smart.md → 变体 11_smart.vision 不吃覆盖(两 pass 同 job 都跑,
+        覆盖只改主笔记 pass,不污染视觉 pass)。"""
+        if name == self.step_name:
+            return True
+        if name.startswith(self.step_name + "."):
+            prompts_dir = (self.config.get("paths") or {}).get("prompts_dir")
+            if not prompts_dir:
+                return True  # 无 prompts_dir(空卷/测试):变体即视为覆盖目标
+            return not (Path(prompts_dir) / "templates" / f"{self.step_name}.md").exists()
+        return False
+
     def _load_system_prompt(self) -> str | None:
-        """本步 system prompt,回退顺序 = DB 注入覆盖 > 外置 {step_name}.md > None(内联默认)。
-        ① 白盒 Phase 2:job.json.prompt_overrides[step](DB 覆盖派发时注入)优先,使网页编辑的
-           system 覆盖在下个 job 生效;② 兼容旧钩子 configs/prompts/{step_name}.md;③ 都无则 None
-           (各步把 prompt 内联在 _build_user_prompt/_build_prompt,provider 对 system=None 有守卫)。
-        input_hashes 的 prompt 键按 {step_name}.md 计指纹;注入覆盖在 job 创建期解析、固化进 job.json,
+        """本步 system prompt,回退顺序 = DB 注入覆盖(仅无模板步)> 外置 {step_name}.md > None(内联默认)。
+        ① 白盒 Phase 2:覆盖对象已对齐到「该步实际起作用的那段 prompt」——有 user-prompt 模板的步,
+           DB 覆盖在 _load_prompt_template 替换该模板(所见即所改);故此处仅【无模板步】(评审等
+           prompt 内联)才把注入覆盖当 system,避免有模板步双重套用;② 兼容旧钩子 prompts/{step_name}.md;
+           ③ 都无则 None(provider 对 system=None 有守卫)。注入覆盖在 job 创建期解析、固化进 job.json,
         故同一 job 生命周期内稳定(幂等一致)。"""
         injected = self._injected_prompt_override()
-        if injected:
+        if injected and not self._has_step_template():
             return injected
         prompts_dir = self.config.get("paths", {}).get("prompts_dir")
         if not prompts_dir:
@@ -945,9 +975,14 @@ class StepBase:
         return Path(self.config["paths"]["prompts_dir"]) / "templates"
 
     def _load_prompt_template(self, name: str, default: str) -> str:
-        """读 templates/{name}.md 作可编辑的默认 prompt 骨架;不存在则用代码内 default 兜底
-        (空卷/旧部署/测试 tmp prompts_dir 下模板缺失仍能跑——沿用 _load_system_prompt 的兜底哲学)。
+        """该步默认 user-prompt 骨架,回退顺序 = DB 注入覆盖 > templates/{name}.md > 代码内 default。
+        白盒 Phase 2:网页编辑的覆盖(job.json.prompt_overrides[step])替换的就是【这段展示的默认模板】
+        ——所见即所改;只对作为该步覆盖目标的 name 生效(_override_targets_template),变体 name 见其规则。
+        缺模板文件则用 default 兜底(空卷/旧部署/测试 tmp prompts_dir 缺模板仍能跑)。
         ★调用方对动态部分用 str.replace 注入(prompt 含字面 {},不可 str.format)。"""
+        injected = self._injected_prompt_override()
+        if injected and self._override_targets_template(name):
+            return injected
         p = self._templates_dir() / f"{name}.md"
         if p.exists():
             return p.read_text(encoding="utf-8")

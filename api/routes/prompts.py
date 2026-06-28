@@ -2,9 +2,12 @@
 
 覆盖按 (scope,domain,pipeline,step) 存 DB prompt_overrides;job 创建时由 api 解析注入
 job.json.prompt_overrides(见 shared.db.resolve_prompt_overrides + api/routes/jobs.py),
-worker step_base._load_system_prompt 优先用(pure worker 无 DB,只能靠 job 带过去)。
-与 29-externalize 的默认模板(configs/prompts/templates/{step}.md)正交:模板是默认骨架,
-DB 覆盖是上层 system prompt 覆盖;编辑器把模板当「默认 prompt(只读)」展示供参考。
+worker step_base 派发时优先用(pure worker 无 DB,只能靠 job 带过去)。
+**所见即所改**:覆盖替换的就是编辑器展示的那段默认 user-prompt 模板(29-externalize:
+templates/{step}.md,含 .zh/.translate/.vision 等变体)——worker 回退序 = DB覆盖 > 模板文件 >
+内联默认(step_base._load_prompt_template)。无模板的步(评审等 prompt 内联)覆盖回落为 system
+prompt(step_base._load_system_prompt)。模板读取双保险:运行时 prompts_dir/templates 优先,
+缺失回退镜像烤入 config_dir/prompts/templates(api 容器即使没挂 templates 也能看到默认)。
 """
 
 from __future__ import annotations
@@ -47,15 +50,65 @@ def _find_step(config: AppConfig, pipeline: str, step: str) -> dict | None:
     return None
 
 
-def _default_template(config: AppConfig, step: str) -> str | None:
-    """该步外置默认 user-prompt 模板(29-externalize:templates/{step}.md);无则 None(内联默认)。"""
-    p = config.prompts_dir / "templates" / f"{step}.md"
-    if p.exists():
-        try:
-            return p.read_text(encoding="utf-8")
-        except OSError:
-            return None
+def _template_dirs(config: AppConfig) -> list:
+    """默认 prompt 模板搜索目录(双保险,按优先级):
+    ① prompts_dir/templates(/data/prompts/templates,运行时挂载,改文件即生效);
+    ② config_dir/prompts/templates(/app/configs/prompts/templates,镜像烤入,永不被 /data 命名卷 shadow)。
+    api 容器若没挂①(历史缺陷),仍能从②读到默认模板 → 白盒不再"看不到默认"。"""
+    return [config.prompts_dir / "templates", config.config_dir / "prompts" / "templates"]
+
+
+def _read_first(paths: list) -> str | None:
+    """按序返回首个存在文件的内容;都不存在/读失败则 None。"""
+    for p in paths:
+        if p.exists():
+            try:
+                return p.read_text(encoding="utf-8")
+            except OSError:
+                continue
     return None
+
+
+def _step_templates(config: AppConfig, step: str) -> list[dict]:
+    """该步全部外置默认 user-prompt 模板:{step}.md(主)+ {step}.<变体>.md(如 08_punctuate.zh、
+    11_smart.vision)。按 name 去重(prompts_dir 优先于烤入),主模板排在变体前。供白盒展示全变体。"""
+    by_name: dict[str, str] = {}
+    for d in _template_dirs(config):
+        if not d.is_dir():
+            continue
+        for p in sorted(d.glob(f"{step}*.md")):
+            name = p.stem
+            # 仅认 {step} 或 {step}.<变体>(防 11_smart 误收 11_smarter 这类前缀邻居)。
+            if name != step and not name.startswith(step + "."):
+                continue
+            if name in by_name:
+                continue
+            try:
+                by_name[name] = p.read_text(encoding="utf-8")
+            except OSError:
+                continue
+    ordered = sorted(by_name, key=lambda n: (n != step, n))  # 主模板优先,其余字典序
+    return [{"name": n, "content": by_name[n]} for n in ordered]
+
+
+def _default_template(config: AppConfig, step: str) -> str | None:
+    """该步「主」默认 user-prompt 模板内容(向后兼容字段):{step}.md;无主则取首个变体;全无则 None。"""
+    tpls = _step_templates(config, step)
+    if not tpls:
+        return None
+    for t in tpls:
+        if t["name"] == step:
+            return t["content"]
+    return tpls[0]["content"]
+
+
+def _default_system(config: AppConfig, step: str) -> str | None:
+    """该步外置 system prompt 钩子内容(prompts_dir/{step}.md,镜像烤入 config_dir/prompts/{step}.md);
+    无文件则 None(各步 system 默认内联/为 None,真正起作用的默认在 user-prompt 模板)。"""
+    return _read_first([
+        config.prompts_dir / f"{step}.md",
+        config.config_dir / "prompts" / f"{step}.md",
+    ])
 
 
 @router.get("")
@@ -73,7 +126,7 @@ async def list_prompts(
         {
             "pipeline": pipeline, "step": key, "label": label, "pool": pool,
             "is_ai": True,
-            "has_template": _default_template(config, key) is not None,
+            "has_template": bool(_step_templates(config, key)),
             "overrides": by_step.get((pipeline, key), []),
         }
         for pipeline, key, label, pool in _ai_steps(config)
@@ -90,22 +143,25 @@ async def get_prompt(
     config: AppConfig = Depends(get_config),
     db: Database = Depends(get_db),
 ):
-    """单步详情:默认模板(只读)+ 该 (scope,domain) 当前覆盖(无则 null)。"""
+    """单步详情:默认模板(只读,全变体)+ system 默认(钩子,有则非空)+ 该 (scope,domain) 当前覆盖。"""
     validate_path_segment(pipeline, "pipeline")
     validate_path_segment(step, "step")
     s = _find_step(config, pipeline, step)
     if s is None:
         raise HTTPException(404, f"step '{step}' not found in pipeline '{pipeline}'")
     ov = await asyncio.to_thread(db.get_prompt_override, scope, domain, pipeline, step)
+    templates = _step_templates(config, step)
     return {
         "pipeline": pipeline,
         "step": step,
         "label": s.get("label"),
         "pool": s.get("pool"),
         "is_ai": s.get("pool") == "ai",
-        # 默认 prompt 来源:外置 user-prompt 模板(29-externalize);system 默认无(各步内联在 user)。
+        # 默认 prompt = 外置 user-prompt 模板(覆盖即替换它,所见即所改)。default_template 为「主」模板
+        # (向后兼容);default_templates 列全变体 [{name,content}]。default_system = 外置 system 钩子(多数步 null)。
         "default_template": _default_template(config, step),
-        "default_system": None,
+        "default_templates": templates,
+        "default_system": _default_system(config, step),
         "override": ov,
     }
 
@@ -118,7 +174,8 @@ async def put_prompt(
     config: AppConfig = Depends(get_config),
     db: Database = Depends(get_db),
 ):
-    """存该步 system prompt 覆盖。content 为空(纯空白)= 删除覆盖(恢复默认)。"""
+    """存该步 prompt 覆盖(替换展示的默认 user-prompt 模板;无模板步则作 system)。
+    content 为空(纯空白)= 删除覆盖(恢复默认)。"""
     validate_path_segment(pipeline, "pipeline")
     validate_path_segment(step, "step")
     if req.domain:
