@@ -266,6 +266,30 @@ class TestPromptAPI:
         assert "05_smart_paper" in names
         assert g["default_templates"][0]["content"].strip()
 
+    async def test_get_review_steps_return_nonempty_default(self, client):
+        # 评审步白盒化:外置骨架模板(05/06/12_review)→ GET 回非空 default(含 {{ref_block}} 占位),
+        # 经镜像烤入 config_dir/prompts/templates 兜底读到(prompts_dir 未挂时)。
+        for pipeline, step in [
+            ("article", "06_review"), ("paper", "06_review"),
+            ("audio", "05_review"), ("video", "12_review"),
+        ]:
+            g = (await client.get(f"/api/prompts/{pipeline}/{step}")).json()
+            assert g["default_template"], f"{pipeline}/{step} default 为空"
+            assert "{{ref_block}}" in g["default_template"]
+            assert step in {t["name"] for t in g["default_templates"]}
+            assert g["is_ai"] is True
+
+    async def test_review_step_override_roundtrip(self, client):
+        # 评审步可存/取/删覆盖(与 smart 步同机制,验白盒可编辑闭环)。
+        r = await client.put(
+            "/api/prompts/paper/06_review", json={"scope": "global", "content": "评审覆盖"}
+        )
+        assert r.status_code == 200 and r.json()["status"] == "saved"
+        g = (await client.get("/api/prompts/paper/06_review")).json()
+        assert g["override"]["content"] == "评审覆盖"
+        await client.delete("/api/prompts/paper/06_review?scope=global")
+        assert (await client.get("/api/prompts/paper/06_review")).json()["override"] is None
+
     async def test_get_variant_step_returns_all_variants(self, client):
         # 变体步(08_punctuate 只有 .zh/.translate 变体,无主模板)也非空,且列出全变体。
         g = (await client.get("/api/prompts/video/08_punctuate")).json()

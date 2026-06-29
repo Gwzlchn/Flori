@@ -341,8 +341,7 @@ class StepBase:
         "- top3_improvements: 最重要的 3 条改进建议\n\n"
     )
 
-    # 评审步 prompt 里逐字相同的 JSON 示例尾(key_terms/missing/top3)与维度计数中文词。
-    _REVIEW_CN_NUM = {3: "三", 4: "四", 5: "五", 6: "六", 7: "七", 8: "八"}
+    # 评审步 prompt 里逐字相同的 JSON 示例尾(key_terms/missing/top3)。
     _REVIEW_JSON_TAIL = (
         '  "key_terms": [{"term": "概念名", "definition": "一句话候选定义"}],\n'
         '  "missing_concepts": ["遗漏的重要概念"],\n'
@@ -350,29 +349,51 @@ class StepBase:
         "}\n\n"
     )
 
+    @classmethod
+    def review_prompt_skeleton(cls) -> str:
+        """评审 prompt 的【可编辑结构骨架】——白盒化:外置成 templates/{review_step}.md 供网页展示+覆盖。
+        占位符 {{intro}}/{{dimensions}}/{{score_example}}/{{ref_block}} 由 build_review_prompt 在运行期
+        按本步实参 str.replace 注入。四条 pipeline 评审结构一致 → 共享同一骨架(05_review.md/06_review.md/
+        12_review.md 内容均 = 本方法输出,各 job 注入自己的维度/参照块,渲染结果各自正确;
+        test_prompt_templates 钉死文件 == 本方法防漂移)。"""
+        return (
+            "{{intro}}\n\n"
+            "评分维度（每项打 1-5 的整数）：\n"
+            "{{dimensions}}\n"
+            + cls._REVIEW_OUTPUT_EXTRAS +
+            "只输出如下扁平 JSON：所有维度为顶层整数键，不要嵌套进 scores 子对象、"
+            "不要加 rationale 字段、不要代码围栏、不要任何额外说明文字。\n"
+            "{\n"
+            "  {{score_example}},\n"
+            + cls._REVIEW_JSON_TAIL
+            + "{{ref_block}}"
+        )
+
     def build_review_prompt(
         self, *, intro: str, dimensions: list[tuple[str, str]], ref_block: str,
     ) -> str:
-        """拼装评审 prompt:intro + 维度表 + 共用输出格式约束 + JSON 示例 + 参照块。
-        各评审步只传 intro / dimensions=[(维度键, 中文说明)] / ref_block(参照块);
-        '评分维度''只输出扁平 JSON''JSON 尾'这几段四步逐字一致,集中此处不再各写一份。"""
+        """拼装评审 prompt:加载骨架(白盒 Phase2 回退序 = DB覆盖 > templates/{step}.md > 内联骨架),
+        再把 {{intro}}/{{dimensions}}/{{score_example}}/{{ref_block}} 按本步实参注入(str.replace,
+        prompt 含字面 {} 不可 format)。各评审步只传 intro / dimensions=[(维度键, 中文说明)] / ref_block。
+        ★ score_keys 解析始终从步内 dimensions 取(见各步 execute),绝不解析模板文本 —— 故覆盖文本被
+        改坏也不破坏评分 JSON 解析(决策:维度展示在 prompt 里只为让 AI 知道评什么,解析靠代码键)。"""
         dim_lines = "".join(
             f"{i}. {key}: {desc}\n" for i, (key, desc) in enumerate(dimensions, 1)
         )
         example_scores = ", ".join(f'"{key}": 4' for key, _ in dimensions)
-        count_word = self._REVIEW_CN_NUM.get(len(dimensions), str(len(dimensions)))
-        return (
-            f"{intro}\n\n"
-            "评分维度（每项打 1-5 的整数）：\n"
-            f"{dim_lines}\n"
-            + self._REVIEW_OUTPUT_EXTRAS +
-            f"只输出如下扁平 JSON：{count_word}个维度为顶层整数键，不要嵌套进 scores 子对象、"
-            "不要加 rationale 字段、不要代码围栏、不要任何额外说明文字。\n"
-            "{\n"
-            f"  {example_scores},\n"
-            + self._REVIEW_JSON_TAIL
-            + ref_block
+        template = self._load_prompt_template(self.step_name, self.review_prompt_skeleton())
+        rendered = (
+            template
+            .replace("{{intro}}", intro)
+            .replace("{{dimensions}}", dim_lines)
+            .replace("{{score_example}}", example_scores)
+            .replace("{{ref_block}}", ref_block)
         )
+        # 安全:若覆盖/模板被改得缺了 {{ref_block}} 占位,被评笔记会整段丢失 → 兜底补在末尾,
+        # 保证 AI 永远拿得到待评内容(参照块是评审的核心输入,不可丢)。
+        if "{{ref_block}}" not in template:
+            rendered = rendered.rstrip() + "\n\n" + ref_block
+        return rendered
 
     def review_fallback(self, score_keys: list[str]) -> dict:
         """评审步 AI 解析失败时的兜底:各维度 3 分 + overall 3.0 + 空 key_terms/missing + 提示。

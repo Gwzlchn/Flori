@@ -13,6 +13,11 @@ from steps.audio.step_04_smart_podcast import _DEFAULT_HEADER as smart_podcast
 from steps.video.step_08_punctuate import _PUNCTUATE_PROMPT, _TRANSLATE_PROMPT
 from steps.video.step_11_smart import _DEFAULT_VISION, _DEFAULT_USER_HEADER
 from steps.video.step_evidence import _DEFAULT as evidence
+from shared.step_base import StepBase
+
+# 评审 prompt 白盒骨架(单一来源 = StepBase.review_prompt_skeleton;build_review_prompt 运行期注入占位)。
+# 4 条 pipeline 评审结构一致 → 三个评审步名文件内容完全相同(各 job 注入自己的维度/参照块)。
+_review = StepBase.review_prompt_skeleton()
 
 TEMPLATES = {
     "04_translate_article.md": translate_article,
@@ -26,6 +31,10 @@ TEMPLATES = {
     "11_smart.vision.md": _DEFAULT_VISION,
     "11_smart.md": _DEFAULT_USER_HEADER,
     "10_evidence.md": evidence,
+    # 评审步(白盒化):audio=05_review / paper+article=06_review / video=12_review,共享同一骨架。
+    "05_review.md": _review,
+    "06_review.md": _review,
+    "12_review.md": _review,
 }
 
 if __name__ == "__main__":

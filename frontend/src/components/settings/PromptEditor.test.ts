@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 
-// PromptEditor 直接调 useApi(get 读默认+覆盖、put 存、del 恢复默认)。
+// PromptEditor 直接调 useApi(get 读默认+覆盖、put 存、del 删/恢复默认)。
 const get = vi.fn()
 const put = vi.fn()
 const del = vi.fn()
@@ -13,8 +13,10 @@ import PromptEditor from './PromptEditor.vue'
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // 默认:有覆盖 → 预填覆盖。
   get.mockResolvedValue({
     default_template: 'DEFAULT TEMPLATE BODY',
+    default_templates: [{ name: '11_smart', content: 'DEFAULT TEMPLATE BODY' }],
     override: { scope: 'global', domain: '', content: 'EXISTING OVERRIDE', updated_at: 't' },
   })
   put.mockResolvedValue({ status: 'saved' })
@@ -29,53 +31,91 @@ async function mountEditor(props = {}) {
   return w
 }
 
+const taVal = (w: any) => (w.find('textarea').element as HTMLTextAreaElement).value
+
 describe('PromptEditor', () => {
-  it('loads default template + existing override on mount', async () => {
+  it('预填:有覆盖 → textarea 填覆盖内容', async () => {
     const w = await mountEditor()
     expect(get).toHaveBeenCalledWith('/api/prompts/video/11_smart?scope=global')
-    // 覆盖正文进入 textarea
-    expect((w.find('textarea').element as HTMLTextAreaElement).value).toBe('EXISTING OVERRIDE')
-    // 标题含 pipeline + label
+    expect(taVal(w)).toBe('EXISTING OVERRIDE')
     expect(w.text()).toContain('video')
     expect(w.text()).toContain('智能笔记')
   })
 
-  it('saves override via PUT with global scope', async () => {
+  it('预填:无覆盖 → textarea 填默认模板内容,状态标"当前为默认"', async () => {
+    get.mockResolvedValue({
+      default_template: 'DEFAULT TEMPLATE BODY',
+      default_templates: [{ name: '11_smart', content: 'DEFAULT TEMPLATE BODY' }],
+      override: null,
+    })
     const w = await mountEditor()
-    await w.find('textarea').setValue('NEW SYSTEM PROMPT')
+    expect(taVal(w)).toBe('DEFAULT TEMPLATE BODY')
+    expect(w.text()).toContain('当前为默认')
+  })
+
+  it('改后保存(内容 != 默认)→ PUT 存覆盖,不调 DELETE', async () => {
+    get.mockResolvedValue({
+      default_template: 'DEFAULT TEMPLATE BODY',
+      default_templates: [{ name: '11_smart', content: 'DEFAULT TEMPLATE BODY' }],
+      override: null,
+    })
+    const w = await mountEditor()
+    await w.find('textarea').setValue('NEW PROMPT')
     const saveBtn = w.findAll('button').find((b) => b.text().includes('保存'))!
     await saveBtn.trigger('click')
     await flushPromises()
     expect(put).toHaveBeenCalledWith('/api/prompts/video/11_smart', {
       scope: 'global',
       domain: undefined,
-      content: 'NEW SYSTEM PROMPT',
+      content: 'NEW PROMPT',
     })
+    expect(del).not.toHaveBeenCalled()
     expect(w.emitted('saved')).toBeTruthy()
   })
 
-  it('restore default calls DELETE and clears content', async () => {
+  it('保存(内容 == 默认)→ DELETE 删覆盖,不调 PUT', async () => {
+    // 加载覆盖后,把内容改回默认值 → 保存应删覆盖。
     const w = await mountEditor()
+    await w.find('textarea').setValue('DEFAULT TEMPLATE BODY')
+    const saveBtn = w.findAll('button').find((b) => b.text().includes('保存'))!
+    await saveBtn.trigger('click')
+    await flushPromises()
+    expect(del).toHaveBeenCalledWith('/api/prompts/video/11_smart?scope=global')
+    expect(put).not.toHaveBeenCalled()
+    expect(w.emitted('saved')).toBeTruthy()
+  })
+
+  it('恢复默认 → textarea 重置为默认内容;随后保存调 DELETE', async () => {
+    const w = await mountEditor() // 预填 EXISTING OVERRIDE
+    expect(taVal(w)).toBe('EXISTING OVERRIDE')
     const restoreBtn = w.findAll('button').find((b) => b.text().includes('恢复默认'))!
     await restoreBtn.trigger('click')
     await flushPromises()
+    expect(taVal(w)).toBe('DEFAULT TEMPLATE BODY')
+    const saveBtn = w.findAll('button').find((b) => b.text().includes('保存'))!
+    await saveBtn.trigger('click')
+    await flushPromises()
     expect(del).toHaveBeenCalledWith('/api/prompts/video/11_smart?scope=global')
-    expect((w.find('textarea').element as HTMLTextAreaElement).value).toBe('')
-    expect(w.emitted('saved')).toBeTruthy()
+    expect(put).not.toHaveBeenCalled()
   })
 
-  it('domain scope: shows domain input and PUT includes domain', async () => {
+  it('领域作用域:显示领域输入,PUT 带 domain', async () => {
+    get.mockResolvedValue({
+      default_template: 'DEFAULT TEMPLATE BODY',
+      default_templates: [{ name: '11_smart', content: 'DEFAULT TEMPLATE BODY' }],
+      override: null,
+    })
     const w = await mountEditor()
-    // 切到领域作用域
     const domainRadio = w.findAll('input[type="radio"]').find(
       (r) => (r.element as HTMLInputElement).value === 'domain',
     )!
-    await domainRadio.setValue() // 选中 domain
+    await domainRadio.setValue()
     await flushPromises()
-    // 领域输入框出现
     const domInput = w.find('input.input')
     expect(domInput.exists()).toBe(true)
     await domInput.setValue('finance')
+    await domInput.trigger('change')
+    await flushPromises()
     await w.find('textarea').setValue('FIN PROMPT')
     const saveBtn = w.findAll('button').find((b) => b.text().includes('保存'))!
     await saveBtn.trigger('click')
@@ -87,7 +127,7 @@ describe('PromptEditor', () => {
     })
   })
 
-  it('domain scope without domain blocks save (no PUT)', async () => {
+  it('领域作用域未填领域 → 阻止保存(不调 PUT/DELETE)', async () => {
     const w = await mountEditor()
     const domainRadio = w.findAll('input[type="radio"]').find(
       (r) => (r.element as HTMLInputElement).value === 'domain',
@@ -99,9 +139,10 @@ describe('PromptEditor', () => {
     await saveBtn.trigger('click')
     await flushPromises()
     expect(put).not.toHaveBeenCalled()
+    expect(del).not.toHaveBeenCalled()
   })
 
-  it('renders all default template variants + system default when expanded', async () => {
+  it('多模板步:其余变体只读展示,不混进可编辑 textarea', async () => {
     get.mockResolvedValue({
       default_template: 'MAIN BODY',
       default_templates: [
@@ -112,13 +153,12 @@ describe('PromptEditor', () => {
       override: null,
     })
     const w = await mountEditor()
-    const toggle = w.findAll('button').find((b) => b.text().includes('展开'))!
-    await toggle.trigger('click')
-    await flushPromises()
-    const txt = w.text()
-    expect(txt).toContain('MAIN BODY')
-    expect(txt).toContain('VISION BODY')
-    expect(txt).toContain('11_smart.vision') // 多模板时显示变体名
-    expect(txt).toContain('SYS DEFAULT')
+    // 主模板进可编辑框
+    expect(taVal(w)).toBe('MAIN BODY')
+    // 变体只读展示(在文本里,但不在 textarea)
+    expect(w.text()).toContain('VISION BODY')
+    expect(w.text()).toContain('11_smart.vision')
+    expect(w.text()).toContain('SYS DEFAULT')
+    expect(taVal(w)).not.toContain('VISION BODY')
   })
 })

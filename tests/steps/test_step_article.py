@@ -361,15 +361,15 @@ class TestArticleReviewStep:
 
     def test_validate_inputs(self, tmp_path):
         job_dir = _mk_job(tmp_path)
-        config = make_step_config(tmp_path, step_name="05_review", pool="ai")
-        step = ArticleReviewStep("05_review", job_dir, config)
+        config = make_step_config(tmp_path, step_name="06_review", pool="ai")
+        step = ArticleReviewStep("06_review", job_dir, config)
         assert len(step.validate_inputs()) == 2
 
     def test_execute_dry_run(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DRY_RUN", "1")
         job_dir = self._setup(tmp_path)
-        config = make_step_config(tmp_path, step_name="05_review", pool="ai")
-        step = ArticleReviewStep("05_review", job_dir, config)
+        config = make_step_config(tmp_path, step_name="06_review", pool="ai")
+        step = ArticleReviewStep("06_review", job_dir, config)
         result = step.execute()
         assert (job_dir / "output" / "review.json").exists()
         review = json.loads((job_dir / "output" / "review.json").read_text())
@@ -380,8 +380,8 @@ class TestArticleReviewStep:
         # 非 DRY_RUN:AI 返回非 JSON → 走 fallback,overall 恒 3.0 + parse_failed。
         monkeypatch.delenv("DRY_RUN", raising=False)
         job_dir = self._setup(tmp_path)
-        config = make_step_config(tmp_path, step_name="05_review", pool="ai")
-        step = ArticleReviewStep("05_review", job_dir, config)
+        config = make_step_config(tmp_path, step_name="06_review", pool="ai")
+        step = ArticleReviewStep("06_review", job_dir, config)
         monkeypatch.setattr(step, "call_ai", lambda *a, **k: "不是 JSON")
         result = step.execute()
         review = json.loads((job_dir / "output" / "review.json").read_text())
@@ -393,8 +393,8 @@ class TestArticleReviewStep:
         # 非 DRY_RUN:合法多维评分 → overall 为均值(而非恒 3.0),钉死评分聚合真跑了。
         monkeypatch.delenv("DRY_RUN", raising=False)
         job_dir = self._setup(tmp_path)
-        config = make_step_config(tmp_path, step_name="05_review", pool="ai")
-        step = ArticleReviewStep("05_review", job_dir, config)
+        config = make_step_config(tmp_path, step_name="06_review", pool="ai")
+        step = ArticleReviewStep("06_review", job_dir, config)
         scores = {"completeness": 5, "accuracy": 5, "structure": 5,
                   "readability": 4, "insight": 4,
                   "key_terms": [], "missing_concepts": [], "top3_improvements": []}
