@@ -47,17 +47,20 @@ class TestPromptOverrideDB:
         pdb.set_prompt_override("global", None, "video", "11_smart", "G")
         pdb.set_prompt_override("domain", "finance", "video", "11_smart", "D")
         pdb.set_prompt_override("global", None, "video", "12_review", "GR")
+        # 1.1.5:resolve 返回 {step: {content, version}}(含激活版本号快照)。
         r_fin = pdb.resolve_prompt_overrides("video", "finance")
-        assert r_fin["11_smart"] == "D"      # domain 覆盖优先
-        assert r_fin["12_review"] == "GR"     # 该步无 domain 覆盖 → global 兜底
+        assert r_fin["11_smart"]["content"] == "D"   # domain 覆盖优先
+        assert r_fin["11_smart"]["version"] == 1
+        assert r_fin["12_review"]["content"] == "GR"  # 该步无 domain 覆盖 → global 兜底
         r_ml = pdb.resolve_prompt_overrides("video", "ml")
-        assert r_ml["11_smart"] == "G"        # ml 无 domain 覆盖 → global
+        assert r_ml["11_smart"]["content"] == "G"     # ml 无 domain 覆盖 → global
 
     def test_resolve_filters_empty_and_other_pipeline(self, pdb):
         pdb.set_prompt_override("global", None, "video", "11_smart", "")     # 空 = 无覆盖
         pdb.set_prompt_override("global", None, "paper", "05_smart_paper", "P")
         assert pdb.resolve_prompt_overrides("video", "general") == {}
-        assert pdb.resolve_prompt_overrides("paper", "general") == {"05_smart_paper": "P"}
+        r = pdb.resolve_prompt_overrides("paper", "general")
+        assert r["05_smart_paper"]["content"] == "P" and r["05_smart_paper"]["version"] == 1
 
     def test_delete_restores_default(self, pdb):
         pdb.set_prompt_override("global", None, "video", "11_smart", "x")
@@ -71,6 +74,65 @@ class TestPromptOverrideDB:
         assert {(r["pipeline"], r["step"]) for r in rows} == {
             ("video", "11_smart"), ("paper", "05_smart_paper")
         }
+
+
+class TestPromptOverrideVersions:
+    """版本管理(类 Grafana save):首版/覆盖当前版本/另存为新版本/查历史/删清空历史。"""
+
+    def test_first_save_is_v1(self, pdb):
+        v = pdb.set_prompt_override("global", None, "video", "11_smart", "A")
+        assert v == 1
+        assert pdb.get_prompt_override("global", None, "video", "11_smart")["version"] == 1
+        hist = pdb.list_prompt_override_versions("global", None, "video", "11_smart")
+        assert [h["version"] for h in hist] == [1]
+
+    def test_overwrite_keeps_same_version(self, pdb):
+        pdb.set_prompt_override("global", None, "video", "11_smart", "A", note="v1note")
+        v = pdb.set_prompt_override("global", None, "video", "11_smart", "A2", mode="overwrite")
+        assert v == 1                              # 版本号不变
+        ov = pdb.get_prompt_override("global", None, "video", "11_smart")
+        assert ov["content"] == "A2" and ov["version"] == 1
+        hist = pdb.list_prompt_override_versions("global", None, "video", "11_smart")
+        assert [h["version"] for h in hist] == [1]  # 仍只有 1 个版本
+        # overwrite 未给 note → 保留原 note
+        assert pdb.get_prompt_override_version("global", None, "video", "11_smart", 1)["note"] == "v1note"
+
+    def test_save_as_new_bumps_version_and_activates(self, pdb):
+        pdb.set_prompt_override("global", None, "video", "11_smart", "A")
+        v2 = pdb.set_prompt_override("global", None, "video", "11_smart", "B", mode="new", note="第二版")
+        assert v2 == 2
+        ov = pdb.get_prompt_override("global", None, "video", "11_smart")
+        assert ov["content"] == "B" and ov["version"] == 2     # 主表指向新激活版本
+        # 两版历史 content 各自独立
+        assert pdb.get_prompt_override_version("global", None, "video", "11_smart", 1)["content"] == "A"
+        assert pdb.get_prompt_override_version("global", None, "video", "11_smart", 2)["content"] == "B"
+        meta = {h["version"]: h["note"] for h in pdb.list_prompt_override_versions("global", None, "video", "11_smart")}
+        assert set(meta) == {1, 2} and meta[2] == "第二版"   # v2 note 记录
+
+    def test_overwrite_active_after_new_targets_latest(self, pdb):
+        pdb.set_prompt_override("global", None, "video", "11_smart", "A")
+        pdb.set_prompt_override("global", None, "video", "11_smart", "B", mode="new")  # 激活 v2
+        v = pdb.set_prompt_override("global", None, "video", "11_smart", "B2", mode="overwrite")
+        assert v == 2
+        assert pdb.get_prompt_override_version("global", None, "video", "11_smart", 2)["content"] == "B2"
+        assert pdb.get_prompt_override_version("global", None, "video", "11_smart", 1)["content"] == "A"  # v1 不动
+
+    def test_get_unknown_version_none(self, pdb):
+        pdb.set_prompt_override("global", None, "video", "11_smart", "A")
+        assert pdb.get_prompt_override_version("global", None, "video", "11_smart", 9) is None
+
+    def test_delete_clears_all_versions(self, pdb):
+        pdb.set_prompt_override("global", None, "video", "11_smart", "A")
+        pdb.set_prompt_override("global", None, "video", "11_smart", "B", mode="new")
+        pdb.delete_prompt_override("global", None, "video", "11_smart")
+        assert pdb.get_prompt_override("global", None, "video", "11_smart") is None
+        assert pdb.list_prompt_override_versions("global", None, "video", "11_smart") == []
+
+    def test_resolve_carries_active_version(self, pdb):
+        pdb.set_prompt_override("global", None, "video", "11_smart", "A")
+        pdb.set_prompt_override("global", None, "video", "11_smart", "B", mode="new")  # 激活 v2
+        r = pdb.resolve_prompt_overrides("video", "general")
+        assert r["11_smart"] == {"content": "B", "version": 2}
 
 
 # ── step_base 注入回退 ──
@@ -96,9 +158,20 @@ class TestSystemPromptFallback:
     回退序 = DB 注入(仅无模板步)> {step}.md 钩子 > None。这些用例不建 templates/ → 走无模板路径。"""
 
     def test_injected_override_wins(self, tmp_path):
+        # 旧格式:job.json.prompt_overrides[step] 为纯字符串(历史 job 兼容)。
         s = _mk_step(tmp_path, {"11_smart": "INJECTED"})
         assert s._injected_prompt_override() == "INJECTED"
         assert s._load_system_prompt() == "INJECTED"
+
+    def test_injected_override_new_dict_format(self, tmp_path):
+        # 1.1.5 新格式:{content, version} → 注入取出正文(版本只供 Job 详情比对)。
+        s = _mk_step(tmp_path, {"11_smart": {"content": "INJECTED", "version": 3}})
+        assert s._injected_prompt_override() == "INJECTED"
+        assert s._load_system_prompt() == "INJECTED"
+
+    def test_injected_override_dict_missing_content_safe(self, tmp_path):
+        s = _mk_step(tmp_path, {"11_smart": {"version": 2}})
+        assert s._injected_prompt_override() == ""
 
     def test_file_hook_used_when_no_injection(self, tmp_path):
         pd = tmp_path / "prompts"
@@ -322,7 +395,9 @@ class TestCreateJobInjection:
         job_id = resp.json()["job_id"]
         raw = await app.state.storage.read_file(job_id, "job.json")
         doc = json.loads(raw)
-        assert doc["prompt_overrides"]["04_smart_article"] == "ART OVERRIDE"
+        # 1.1.5:注入快照含版本号 {content, version}。
+        assert doc["prompt_overrides"]["04_smart_article"]["content"] == "ART OVERRIDE"
+        assert doc["prompt_overrides"]["04_smart_article"]["version"] == 1
 
     async def test_create_job_without_override_has_no_key(self, client, app):
         resp = await client.post(

@@ -883,9 +883,11 @@ class StepBase:
         return structlog.get_logger(step=self.step_name, job_dir=str(self.job_dir))
 
     def _injected_prompt_override(self) -> str:
-        """白盒 Phase 2:job.json 里本步被注入的 prompt 覆盖(无/读失败则空串)。
+        """白盒 Phase 2:job.json 里本步被注入的 prompt 覆盖正文(无/读失败则空串)。
         来源 = api job 创建时按 DB prompt_overrides(scope/domain/pipeline/step)解析后写入
-        job.json.prompt_overrides[step](pure worker 无 DB,只能靠 job 带过去)。镜像 _read_override 读盘范式。"""
+        job.json.prompt_overrides[step](pure worker 无 DB,只能靠 job 带过去)。镜像 _read_override 读盘范式。
+        ★兼容两种 job.json 形态:1.1.5 起每步是 {content, version}(含激活版本号快照);旧 job
+          是纯字符串。两者都取出【正文】(版本号供 Job 详情比对,worker 注入只需正文)。"""
         job_dir = getattr(self, "job_dir", None)
         if job_dir is None:  # 裸构造的 StepBase(仅测模板加载)无 job_dir,优雅返回空串
             return ""
@@ -893,7 +895,10 @@ class StepBase:
             job = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return ""
-        return (job.get("prompt_overrides") or {}).get(self.step_name, "") or ""
+        val = (job.get("prompt_overrides") or {}).get(self.step_name)
+        if isinstance(val, dict):                 # 新格式 {content, version}
+            return val.get("content", "") or ""
+        return val or ""                          # 旧格式纯字符串(历史 job.json)
 
     def _has_step_template(self) -> bool:
         """该步是否有外置默认 user-prompt 模板(templates/{step_name}*.md,含变体)。

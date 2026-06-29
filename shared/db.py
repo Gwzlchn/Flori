@@ -145,14 +145,32 @@ CREATE INDEX IF NOT EXISTS idx_ai_task_logs_task ON ai_task_logs(task_id);
 -- scope='global'(domain='')或 'domain'(domain=域名);job 创建时 server 端解析(domain 优先于 global)
 -- 注入 job.json.prompt_overrides[step],worker step_base 优先用(pure worker 无 DB → 派发时带过去)。
 -- domain NOT NULL DEFAULT '' 以保证复合主键唯一(SQLite 把 PK 里的 NULL 视作互异会破唯一)。
+-- version=当前【激活】版本号(类 Grafana save 的指针);content 仍存激活内容供注入快速读。
+-- 历史全量在 prompt_override_versions;主表始终指向其中一行(version 列)。
 CREATE TABLE IF NOT EXISTS prompt_overrides (
     scope TEXT NOT NULL DEFAULT 'global',
     domain TEXT NOT NULL DEFAULT '',
     pipeline TEXT NOT NULL,
     step TEXT NOT NULL,
     content TEXT NOT NULL DEFAULT '',
+    version INTEGER NOT NULL DEFAULT 1,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (scope, domain, pipeline, step)
+);
+
+-- prompt 覆盖的【版本历史】(类 Grafana save):每次「另存为新版本」加一行(version=max+1),
+-- 「覆盖当前版本」更新对应 version 行的 content/note。主表 prompt_overrides.version 指向激活版本。
+-- 删 override(恢复默认)= 连同此处所有版本一并删除。created_at=该版本首次创建时间。
+CREATE TABLE IF NOT EXISTS prompt_override_versions (
+    scope TEXT NOT NULL DEFAULT 'global',
+    domain TEXT NOT NULL DEFAULT '',
+    pipeline TEXT NOT NULL,
+    step TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (scope, domain, pipeline, step, version)
 );
 
 -- 集合：订阅是集合的属性(source_type/source_id 非空=订阅集合)，无独立 subscriptions 表。
@@ -337,6 +355,8 @@ class Database:
                 self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         # 回填存量 job 的 lineage_key + is_current(P2b);幂等(无 NULL lineage_key 即跳过)。
         self._backfill_lineage()
+        # 回填存量 prompt 覆盖的版本历史(给每个无历史的 override 补一条 v1);幂等。
+        self._backfill_prompt_versions()
 
     def _backfill_lineage(self) -> None:
         """一次性回填 P2b 引入前的旧 job:lineage_key(有 url 按 url 重算,否则=自身 id)+ is_current
@@ -366,6 +386,49 @@ class Database:
                      ) GROUP BY j.lineage_key
                    )"""
             )
+            self._conn.commit()
+
+    def _backfill_prompt_versions(self) -> None:
+        """一次性回填:版本管理引入前的存量 prompt_overrides 行只有 content、无历史。
+        给每个在 prompt_override_versions 里【尚无任何版本】的 override:
+        ① 把主表 version 归一到 1(ALTER 默认已是 1,这里兜底覆盖 NULL/异常);
+        ② 在历史表补一条 v1(content=主表当前内容,note='初始版本')。
+        幂等:已有历史的 override 跳过。空 content 的 override(逻辑上=无覆盖)不补历史。"""
+        with self._lock:
+            tabs = {
+                r["name"] for r in self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "prompt_overrides" not in tabs or "prompt_override_versions" not in tabs:
+                return
+            rows = self._conn.execute(
+                "SELECT scope, domain, pipeline, step, content FROM prompt_overrides"
+            ).fetchall()
+            if not rows:
+                return
+            now = _now_iso()
+            for r in rows:
+                key = (r["scope"], r["domain"], r["pipeline"], r["step"])
+                # 主表 version 兜底归一到 1(旧库 ALTER 后默认 1;防极端 NULL)。
+                self._conn.execute(
+                    "UPDATE prompt_overrides SET version=1 WHERE scope=? AND domain=? "
+                    "AND pipeline=? AND step=? AND (version IS NULL OR version<1)",
+                    key,
+                )
+                has_hist = self._conn.execute(
+                    "SELECT 1 FROM prompt_override_versions WHERE scope=? AND domain=? "
+                    "AND pipeline=? AND step=? LIMIT 1",
+                    key,
+                ).fetchone()
+                if has_hist or not (r["content"] or "").strip():
+                    continue
+                self._conn.execute(
+                    """INSERT OR IGNORE INTO prompt_override_versions
+                       (scope, domain, pipeline, step, version, content, note, created_at)
+                       VALUES (?,?,?,?,1,?,?,?)""",
+                    (*key, r["content"], "初始版本", now),
+                )
             self._conn.commit()
 
     def schema_version(self) -> int:
@@ -412,6 +475,9 @@ class Database:
             "is_topic": "is_topic INTEGER DEFAULT 0",
             "definition_locked": "definition_locked INTEGER DEFAULT 0",
         },
+        # prompt 版本管理:旧库 prompt_overrides 无 version 列 → 补上(默认激活 v1),
+        # 配合 _backfill_prompt_versions 把存量 override 内容补一条历史 v1。
+        "prompt_overrides": {"version": "version INTEGER NOT NULL DEFAULT 1"},
     }
 
     def _ensure_columns(self) -> None:
@@ -1186,27 +1252,103 @@ class Database:
         return "global", ""
 
     def set_prompt_override(
-        self, scope: str, domain: str | None, pipeline: str, step: str, content: str
-    ) -> None:
-        """存/覆盖某步的 prompt 覆盖(按 (scope,domain,pipeline,step) 幂等 upsert)。"""
+        self,
+        scope: str,
+        domain: str | None,
+        pipeline: str,
+        step: str,
+        content: str,
+        mode: str = "overwrite",
+        note: str | None = None,
+    ) -> int:
+        """存某步的 prompt 覆盖,带版本管理(类 Grafana save)。返回激活版本号。
+        - 该 (scope,domain,pipeline,step) 此前【无任何覆盖】→ 首版 v1(mode 忽略)。
+        - mode='overwrite'(默认)→ 更新【当前激活版本】历史行的 content(+note,留空则保留原 note),
+          主表 content/version 不变(version 仍指激活版本)。
+        - mode='new' → 新版本 version=max(历史)+1,历史表插一条,主表指向新版本(成为激活)。
+        content 不做空判断(空判断/删除由上层 delete_prompt_override 负责)。"""
         scope, dom = self._norm_override_key(scope, domain)
+        key = (scope, dom, pipeline, step)
+        now = _now_iso()
         with self._lock:
+            cur = self._conn.execute(
+                "SELECT version FROM prompt_overrides WHERE scope=? AND domain=? "
+                "AND pipeline=? AND step=?",
+                key,
+            ).fetchone()
+            maxv = self._conn.execute(
+                "SELECT COALESCE(MAX(version),0) FROM prompt_override_versions "
+                "WHERE scope=? AND domain=? AND pipeline=? AND step=?",
+                key,
+            ).fetchone()[0]
+            if cur is None and maxv == 0:
+                version = 1                          # 首版
+            elif mode == "new":
+                version = maxv + 1                   # 另存为新版本
+            else:                                    # overwrite 当前激活版本
+                version = cur["version"] if cur else (maxv or 1)
+            # 历史行:overwrite 保留原 created_at/note(note 给定才覆盖);new/首版用 now。
+            prev = self._conn.execute(
+                "SELECT created_at, note FROM prompt_override_versions WHERE scope=? "
+                "AND domain=? AND pipeline=? AND step=? AND version=?",
+                (*key, version),
+            ).fetchone()
+            created_at = prev["created_at"] if prev else now
+            eff_note = note if note is not None else (prev["note"] if prev else "")
+            self._conn.execute(
+                """INSERT OR REPLACE INTO prompt_override_versions
+                   (scope, domain, pipeline, step, version, content, note, created_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (*key, version, content or "", eff_note or "", created_at),
+            )
             self._conn.execute(
                 """INSERT OR REPLACE INTO prompt_overrides
-                   (scope, domain, pipeline, step, content, updated_at)
-                   VALUES (?,?,?,?,?,?)""",
-                (scope, dom, pipeline, step, content or "", _now_iso()),
+                   (scope, domain, pipeline, step, content, version, updated_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (*key, content or "", version, now),
             )
             self._conn.commit()
+        return version
+
+    def list_prompt_override_versions(
+        self, scope: str, domain: str | None, pipeline: str, step: str
+    ) -> list[dict]:
+        """该 (scope,domain,pipeline,step) 的全部历史版本元信息(不含 content),version 升序。"""
+        scope, dom = self._norm_override_key(scope, domain)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT version, note, created_at FROM prompt_override_versions "
+                "WHERE scope=? AND domain=? AND pipeline=? AND step=? ORDER BY version",
+                (scope, dom, pipeline, step),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_prompt_override_version(
+        self, scope: str, domain: str | None, pipeline: str, step: str, version: int
+    ) -> dict | None:
+        """读某历史版本(含 content),未命中返回 None。"""
+        scope, dom = self._norm_override_key(scope, domain)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM prompt_override_versions WHERE scope=? AND domain=? "
+                "AND pipeline=? AND step=? AND version=?",
+                (scope, dom, pipeline, step, version),
+            ).fetchone()
+        return dict(row) if row else None
 
     def delete_prompt_override(
         self, scope: str, domain: str | None, pipeline: str, step: str
     ) -> None:
-        """删某步的 prompt 覆盖(恢复默认)。无则 no-op。"""
+        """删某步的 prompt 覆盖(恢复默认)——连同其【全部历史版本】一并删。无则 no-op。"""
         scope, dom = self._norm_override_key(scope, domain)
         with self._lock:
             self._conn.execute(
                 "DELETE FROM prompt_overrides WHERE scope=? AND domain=? AND pipeline=? AND step=?",
+                (scope, dom, pipeline, step),
+            )
+            self._conn.execute(
+                "DELETE FROM prompt_override_versions WHERE scope=? AND domain=? "
+                "AND pipeline=? AND step=?",
                 (scope, dom, pipeline, step),
             )
             self._conn.commit()
@@ -1231,26 +1373,31 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def resolve_prompt_overrides(self, pipeline: str, domain: str | None) -> dict[str, str]:
-        """派发注入用:给定 job 的 pipeline + domain,返回 {step: content} 解析结果。
-        domain 覆盖优先于 global;同一步两者都有则取 domain。job 创建时(api 有 DB)调用,
-        结果写 job.json.prompt_overrides 随 job 下发,worker step_base 读取(pure worker 无 DB)。"""
+    def resolve_prompt_overrides(
+        self, pipeline: str, domain: str | None
+    ) -> dict[str, dict]:
+        """派发注入用:给定 job 的 pipeline + domain,返回 {step: {content, version}} 解析结果。
+        domain 覆盖优先于 global;同一步两者都有则取 domain(连同其版本号)。job 创建时(api 有 DB)
+        调用,结果写 job.json.prompt_overrides 随 job 下发(含激活版本号快照),worker step_base 读取
+        (pure worker 无 DB)。空 content 视为无覆盖被过滤。
+        注:1.1.5 起返回值由 {step: content} 改为 {step: {content, version}}——worker
+        _injected_prompt_override 已兼容 dict / 旧纯字符串两种 job.json 形态。"""
         dom = (domain or "").strip()
-        resolved: dict[str, str] = {}
+        resolved: dict[str, dict] = {}
         with self._lock:
             # 先 global 铺底,再 domain 覆盖(同步 step domain 优先)。
             rows = self._conn.execute(
-                "SELECT scope, domain, step, content FROM prompt_overrides WHERE pipeline=? "
-                "AND (scope='global' OR (scope='domain' AND domain=?))",
+                "SELECT scope, domain, step, content, version FROM prompt_overrides "
+                "WHERE pipeline=? AND (scope='global' OR (scope='domain' AND domain=?))",
                 (pipeline, dom),
             ).fetchall()
         for r in rows:
             if r["scope"] == "global" and r["step"] not in resolved:
-                resolved[r["step"]] = r["content"]
+                resolved[r["step"]] = {"content": r["content"], "version": r["version"]}
         for r in rows:
             if r["scope"] == "domain":
-                resolved[r["step"]] = r["content"]
-        return {k: v for k, v in resolved.items() if v}
+                resolved[r["step"]] = {"content": r["content"], "version": r["version"]}
+        return {k: v for k, v in resolved.items() if (v.get("content") or "").strip()}
 
     def get_usage_summary(
         self, job_id: str | None = None, since: str | None = None
