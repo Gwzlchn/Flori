@@ -1872,3 +1872,38 @@ class TestSchedulerHeartbeat:
         await scheduler._periodic_loop()
         # 第一拍 _last_tick=100;第二拍 now=135,lag = (135-100)-30 = 5。
         assert scheduler._last_loop_lag == 5.0
+
+
+class TestMarkJobFailedClearsSiblings:
+    """失败即停:某步终态失败 → mark_job_failed 清掉该 job 残留在队列的并行兄弟 task
+    (死任务——job 已 FAILED 不该再跑;不清则 worker 仍会认领、cas_step_status 因 steps hash 未清成功
+    → 跑已失败 job 的步/把它重标 done,且成指向 FAILED job 的孤儿 task)。★保留 job:{id}:steps hash
+    供重试/重跑。回归:补终态失败路径的级联收尾缺口。"""
+
+    @pytest.mark.asyncio
+    async def test_failed_clears_sibling_queue_keeps_steps(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir, parallel_pipelines
+    ):
+        cfg = make_config(tmp_path, tmp_jobs_dir, parallel_pipelines, configs_dir)
+        s = _stub_workers_present(Scheduler(redis, db, cfg))
+        job = make_job(pipeline="par", job_id="j_par_fail")
+        db.create_job(job)
+        await s.submit_job(job)                         # A 入队 cpu
+        await redis.dequeue_step_raw("cpu")             # 模拟 worker 认领 A 出队
+        await redis.set_step_status("j_par_fail", "A", "done")
+        db.update_step("j_par_fail", "A", status="done")
+        await s._check_downstream("j_par_fail")         # A 完成 → B(cpu)+C(io) 并行入队
+        assert (await redis.get_queue_info("cpu"))["length"] == 1   # B
+        assert (await redis.get_queue_info("io"))["length"] == 1    # C
+
+        await s.mark_job_failed("j_par_fail", "B 终态失败")
+
+        # ★兄弟 task(B/C)被清出队列(失败即停)
+        assert (await redis.get_queue_info("cpu"))["length"] == 0
+        assert (await redis.get_queue_info("io"))["length"] == 0
+        # ★steps hash 保留(供重试):四步状态都还在
+        statuses = await redis.get_all_step_statuses("j_par_fail")
+        assert set(statuses.keys()) == {"A", "B", "C", "D"}
+        # job 终态 FAILED + 移出 active
+        assert db.get_job("j_par_fail").status == JobStatus.FAILED
+        assert "j_par_fail" not in await redis.get_active_jobs()

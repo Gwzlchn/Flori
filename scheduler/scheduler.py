@@ -916,6 +916,11 @@ class Scheduler:
         })
         await self.redis.push_event("job_failed", job_id=job_id, error=error[:200])
         await self.redis.remove_active_job(job_id)
+        # 失败即停:清掉该 job 仍残留在 queue:{pool} 的兄弟 ready task(并行分支下,某步终态失败时其它
+        # 已入队的兄弟步是死任务——job 已 FAILED 不该再跑;不清则 worker 仍会认领、cas_step_status 因
+        # steps hash 未清而成功 → 跑已失败 job 的步、甚至 _check_downstream 把它重标 done,且成指向 FAILED
+        # job 的孤儿 task)。★保留 job:{id}:steps hash(不调 cleanup_job)→ 重试/重跑仍可用。
+        await self.redis.remove_job_tasks(job_id)
         logger.info("job_failed", job_id=job_id, error=error[:200])
 
     # ── 孤儿回收 + 卡住检测 ──
