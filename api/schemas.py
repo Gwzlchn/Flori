@@ -141,6 +141,10 @@ class PromptOverrideRequest(BaseModel):
     scope: str = "global"
     domain: str | None = None
     content: str = ""
+    # 版本管理(类 Grafana save):mode='overwrite'(默认)改当前激活版本内容;'new'=另存为新版本
+    # (version=max+1 并设为激活)。note=该版本一行备注(可空)。空 content 仍走删除(恢复默认,清全部版本)。
+    mode: str = "overwrite"
+    note: str | None = None
 
 
 # ── 集合 ──

@@ -381,6 +381,80 @@ class TestPromptAPI:
 
 
 @pytest.mark.asyncio
+class TestPromptVersionAPI:
+    """C2:单步 GET 透出 active_version + versions、新 versions/{version} 查历史、PUT mode/note 返回版本。"""
+
+    async def test_get_exposes_active_version_and_versions(self, client):
+        await client.put(
+            "/api/prompts/video/11_smart", json={"scope": "global", "content": "A", "note": "首版"}
+        )
+        await client.put(
+            "/api/prompts/video/11_smart",
+            json={"scope": "global", "content": "B", "mode": "new", "note": "第二版"},
+        )
+        g = (await client.get("/api/prompts/video/11_smart")).json()
+        assert g["active_version"] == 2
+        assert [v["version"] for v in g["versions"]] == [1, 2]
+        notes = {v["version"]: v["note"] for v in g["versions"]}
+        assert notes == {1: "首版", 2: "第二版"}
+        assert g["override"]["content"] == "B" and g["override"]["version"] == 2
+
+    async def test_get_no_override_active_version_none(self, client):
+        g = (await client.get("/api/prompts/video/11_smart")).json()
+        assert g["active_version"] is None and g["versions"] == []
+
+    async def test_put_overwrite_keeps_version(self, client):
+        r1 = await client.put(
+            "/api/prompts/video/11_smart", json={"scope": "global", "content": "A"}
+        )
+        assert r1.json()["active_version"] == 1
+        r2 = await client.put(
+            "/api/prompts/video/11_smart",
+            json={"scope": "global", "content": "A2", "mode": "overwrite"},
+        )
+        assert r2.json()["active_version"] == 1
+        g = (await client.get("/api/prompts/video/11_smart")).json()
+        assert g["active_version"] == 1 and g["override"]["content"] == "A2"
+        assert [v["version"] for v in g["versions"]] == [1]
+
+    async def test_put_new_bumps_and_activates(self, client):
+        await client.put("/api/prompts/video/11_smart", json={"scope": "global", "content": "A"})
+        r = await client.put(
+            "/api/prompts/video/11_smart",
+            json={"scope": "global", "content": "B", "mode": "new"},
+        )
+        assert r.json()["active_version"] == 2
+
+    async def test_get_version_returns_content(self, client):
+        await client.put("/api/prompts/video/11_smart", json={"scope": "global", "content": "A"})
+        await client.put(
+            "/api/prompts/video/11_smart",
+            json={"scope": "global", "content": "B", "mode": "new", "note": "n2"},
+        )
+        v1 = (await client.get("/api/prompts/video/11_smart/versions/1")).json()
+        assert v1["content"] == "A" and v1["version"] == 1
+        v2 = (await client.get("/api/prompts/video/11_smart/versions/2")).json()
+        assert v2["content"] == "B" and v2["note"] == "n2"
+
+    async def test_get_version_unknown_404(self, client):
+        await client.put("/api/prompts/video/11_smart", json={"scope": "global", "content": "A"})
+        r = await client.get("/api/prompts/video/11_smart/versions/9")
+        assert r.status_code == 404
+
+    async def test_version_history_scoped_to_domain(self, client):
+        await client.put("/api/prompts/video/11_smart", json={"scope": "global", "content": "G"})
+        await client.put(
+            "/api/prompts/video/11_smart",
+            json={"scope": "domain", "domain": "finance", "content": "D"},
+        )
+        gv = (await client.get("/api/prompts/video/11_smart/versions/1?scope=domain&domain=finance")).json()
+        assert gv["content"] == "D"
+        # global 历史与 domain 历史互不干扰
+        gg = (await client.get("/api/prompts/video/11_smart/versions/1")).json()
+        assert gg["content"] == "G"
+
+
+@pytest.mark.asyncio
 class TestCreateJobInjection:
     async def test_create_job_injects_resolved_overrides(self, client, app):
         await client.put(

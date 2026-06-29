@@ -143,13 +143,17 @@ async def get_prompt(
     config: AppConfig = Depends(get_config),
     db: Database = Depends(get_db),
 ):
-    """单步详情:默认模板(只读,全变体)+ system 默认(钩子,有则非空)+ 该 (scope,domain) 当前覆盖。"""
+    """单步详情:默认模板(只读,全变体)+ system 默认(钩子,有则非空)+ 该 (scope,domain) 当前覆盖
+    + 版本历史(active_version=当前激活版本号,versions=全部历史版本元信息;无覆盖时 None/空)。"""
     validate_path_segment(pipeline, "pipeline")
     validate_path_segment(step, "step")
     s = _find_step(config, pipeline, step)
     if s is None:
         raise HTTPException(404, f"step '{step}' not found in pipeline '{pipeline}'")
     ov = await asyncio.to_thread(db.get_prompt_override, scope, domain, pipeline, step)
+    versions = await asyncio.to_thread(
+        db.list_prompt_override_versions, scope, domain, pipeline, step
+    )
     templates = _step_templates(config, step)
     return {
         "pipeline": pipeline,
@@ -163,6 +167,35 @@ async def get_prompt(
         "default_templates": templates,
         "default_system": _default_system(config, step),
         "override": ov,
+        # 版本管理:active_version=主表指向的激活版本号(无覆盖 None);versions=该 (scope,domain) 全部
+        # 历史版本元信息 [{version,note,created_at}](version 升序,不含 content,内容经 versions/{version} 取)。
+        "active_version": (ov.get("version") if ov else None),
+        "versions": versions,
+    }
+
+
+@router.get("/{pipeline}/{step}/versions/{version}")
+async def get_prompt_version(
+    pipeline: str,
+    step: str,
+    version: int,
+    scope: str = "global",
+    domain: str | None = None,
+    db: Database = Depends(get_db),
+):
+    """查看某历史版本的完整内容(供编辑器「选历史版本」载入 textarea 后基于它改)。未命中 404。"""
+    validate_path_segment(pipeline, "pipeline")
+    validate_path_segment(step, "step")
+    if domain:
+        validate_path_segment(domain, "domain")
+    row = await asyncio.to_thread(
+        db.get_prompt_override_version, scope, domain, pipeline, step, version
+    )
+    if row is None:
+        raise HTTPException(404, f"version {version} not found for {pipeline}/{step}")
+    return {
+        "version": row["version"], "content": row["content"],
+        "note": row["note"], "created_at": row["created_at"],
     }
 
 
@@ -174,8 +207,9 @@ async def put_prompt(
     config: AppConfig = Depends(get_config),
     db: Database = Depends(get_db),
 ):
-    """存该步 prompt 覆盖(替换展示的默认 user-prompt 模板;无模板步则作 system)。
-    content 为空(纯空白)= 删除覆盖(恢复默认)。"""
+    """存该步 prompt 覆盖(替换展示的默认 user-prompt 模板;无模板步则作 system),带版本管理。
+    content 为空(纯空白)= 删除覆盖(恢复默认,清全部版本)。否则按 mode:
+    'overwrite'(默认)改当前激活版本内容;'new'=另存为新版本(version=max+1 并激活)。返回 active_version。"""
     validate_path_segment(pipeline, "pipeline")
     validate_path_segment(step, "step")
     if req.domain:
@@ -193,12 +227,14 @@ async def put_prompt(
             db.delete_prompt_override, req.scope, req.domain, pipeline, step
         )
         return {"status": "deleted", "pipeline": pipeline, "step": step}
-    await asyncio.to_thread(
-        db.set_prompt_override, req.scope, req.domain, pipeline, step, content
+    mode = req.mode if req.mode in ("overwrite", "new") else "overwrite"
+    version = await asyncio.to_thread(
+        db.set_prompt_override, req.scope, req.domain, pipeline, step, content, mode, req.note
     )
     return {
         "status": "saved", "pipeline": pipeline, "step": step,
         "scope": req.scope, "domain": (req.domain or "") if req.scope == "domain" else "",
+        "active_version": version,
     }
 
 
