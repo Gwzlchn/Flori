@@ -470,7 +470,7 @@ class TestJobsRelease:
     @pytest.mark.asyncio
     async def test_release_slot_and_idles(self, jobs_client, real_redis):
         worker_id, token = await _register_real(jobs_client)
-        await real_redis.try_acquire_slot("cpu", limit=1)
+        await real_redis.try_acquire_slot("cpu", 1, "e")   # holder = 下方 release 的 exec_id
 
         resp = await jobs_client.post(
             "/api/runner/jobs/j1/steps/A/release",

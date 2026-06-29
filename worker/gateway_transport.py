@@ -291,14 +291,14 @@ class GatewayTransport:
             return False
         return await self._inner.is_pool_frozen(pool)
 
-    async def try_acquire_slot(self, pool, limit):
+    async def try_acquire_slot(self, pool, limit, holder):
         if self._inner is None:
             return True
-        return await self._inner.try_acquire_slot(pool, limit)
+        return await self._inner.try_acquire_slot(pool, limit, holder)
 
-    async def release_slot(self, pool):
+    async def release_slot(self, pool, holder):
         if self._inner is not None:
-            await self._inner.release_slot(pool)
+            await self._inner.release_slot(pool, holder)
 
     async def freeze_pool(self, pool):
         if self._inner is not None:

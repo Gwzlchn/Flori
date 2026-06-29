@@ -320,7 +320,7 @@ class TestRelease:
     @pytest.mark.asyncio
     async def test_release_slot_and_idle(self, redis, db):
         t = await _registered(redis, db)
-        await redis.try_acquire_slot("cpu", limit=1)
+        await redis.try_acquire_slot("cpu", 1, "e")   # holder = 下方 release 的 exec_id
 
         await t.release({"job_id": "j1", "step": "A", "pool": "cpu",
                          "exec_id": "e"})
@@ -333,7 +333,7 @@ class TestRelease:
     @pytest.mark.asyncio
     async def test_release_non_scene_does_not_unfreeze(self, redis, db):
         t = await _registered(redis, db)
-        await redis.try_acquire_slot("cpu", limit=3)
+        await redis.try_acquire_slot("cpu", 3, "e")   # holder = 下方 release 的 exec_id
         await redis.freeze_pool("cpu")  # 外部冻结,非 scene 释放不应解冻
 
         await t.release({"job_id": "j1", "step": "A", "pool": "cpu",
@@ -687,7 +687,7 @@ class TestGatewayPureMode:
         assert await gw.is_pool_frozen("cpu") is False
         assert await gw.dequeue_step_raw("cpu") is None
         # 无返回值的委派也不应抛
-        await gw.release_slot("cpu")
+        await gw.release_slot("cpu", "h1")
         await gw.set_step_worker("j1", "A", "w1")
 
     @pytest.mark.asyncio
@@ -781,18 +781,18 @@ class TestRedisTransportPoolPassthrough:
     async def test_try_acquire_slot_respects_limit(self, redis, db):
         t = RedisTransport(redis, db)
 
-        assert await t.try_acquire_slot("cpu", 1) is True
-        # 槽位已满 → 第二次失败
-        assert await t.try_acquire_slot("cpu", 1) is False
+        assert await t.try_acquire_slot("cpu", 1, "h1") is True
+        # 槽位已满 → 不同 holder 第二次失败
+        assert await t.try_acquire_slot("cpu", 1, "h2") is False
         assert await redis.get_pool_count("cpu") == 1
 
     @pytest.mark.asyncio
     async def test_release_slot_decrements(self, redis, db):
         t = RedisTransport(redis, db)
-        await t.try_acquire_slot("cpu", 3)
+        await t.try_acquire_slot("cpu", 3, "h1")
         assert await redis.get_pool_count("cpu") == 1
 
-        await t.release_slot("cpu")
+        await t.release_slot("cpu", "h1")
 
         assert await redis.get_pool_count("cpu") == 0
 

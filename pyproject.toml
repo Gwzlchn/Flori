@@ -3,7 +3,7 @@ name = "flori"
 # 版本递增三档:普通改动 patch(第3段)+1;大的重构 minor(中段)+1;架构级大重构 major(首段)+1。
 # 逢10进位(0.8.9→0.9.0,0.9.9→1.0.0)。每提交必 bump,标题带 ;版本。详见 CLAUDE.md §提交规范。
 # 全系统单一版本,所有组件(api/scheduler/worker)统一。运行时 = 此值 + 构建短sha(见 shared/version.py)。
-version = "1.1.11"
+version = "1.1.12"
 description = "AI-assisted personal learning knowledge base"
 requires-python = ">=3.11"
 # 上界封顶:挡住新 major/minor 静默引入(USTC 与官方源解析差异曾坑过 CI);

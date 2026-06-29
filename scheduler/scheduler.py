@@ -101,6 +101,9 @@ class Scheduler:
         # (job_id, step) -> 首次发现"在跑步骤的 worker 上报的 current_step 不是本步"的时刻，
         # 超宽限期才回收(容忍认领后首拍心跳延迟),修 gateway 认领响应丢失导致的永久卡 running。
         self._claim_mismatch_since: dict[tuple[str, str], float] = {}
+        # 上一拍判定为"陈旧"(持有槽但不属于任何 running 步)的 holder 集合。仅连续两拍都陈旧才 SREM,
+        # 避开"刚占槽、尚未写 running 状态"的认领窗口被周期对账误清(同 _claim_mismatch_since 的宽限思路)。
+        self._slot_reconcile_suspect: set[str] = set()
 
     # ── 生命周期 ──
 
@@ -255,6 +258,7 @@ class Scheduler:
                 await self.check_stuck()
                 await self.check_no_worker()
                 await self.cleanup_stale_workers()
+                await self.reconcile_slots()
             except Exception:
                 logger.exception("periodic_error")
             await asyncio.sleep(self._PERIODIC_INTERVAL_SEC)
@@ -966,33 +970,31 @@ class Scheduler:
                     await self._reclaim_step(
                         job_id, step,
                         f"worker {worker_id} not running this step (claim lost?)",
-                        release_slot=False,  # worker 仍存活且已 move on,它自己已/将 release 本步 slot
                     )
         # 清理不再 mismatch 的计时,避免泄漏。
         for k in [k for k in self._claim_mismatch_since if k not in live_mismatch]:
             self._claim_mismatch_since.pop(k, None)
 
     async def _reclaim_step(
-        self, job_id: str, step: str, reason: str, *, release_slot: bool = True,
+        self, job_id: str, step: str, reason: str,
     ) -> None:
         logger.warning("reclaim_step", job_id=job_id, step=step, reason=reason)
         await self.redis.push_event("orphan_reclaimed", job_id=job_id, step=step, reason=reason)
 
-        # release_slot=False:worker 仍存活但已转去别的 step(认领响应丢失/已 move on),它自己的
-        # finally 已经/将会 release_step 释放本步的 slot。此时调度器再 release 会双减 slot 计数。
-        # 仅当 worker 确已消失(无 worker / worker_exists=False)时,才由调度器代为释放(否则泄漏)。
-        if release_slot:
+        # holder 集合:按本步 holder(=exec_id)SREM 释放其占的池槽/资源槽。★SREM 幂等——即便 worker 仍存活、
+        # 它自己的 release_step 也 SREM 同一 holder,双方都安全(不双减),故【不再需要 release_slot=False 特例】:
+        # reclaim 一律按 holder 释放,死 worker 的槽必被回收(根治泄漏),活 worker 重复释放也无害。
+        holder = await self.redis.get_step_exec_id(job_id, step)
+        if holder:
             pipeline_steps = await self._get_job_pipeline_steps(job_id)
             if pipeline_steps:
                 pool = pipeline_steps.get(step, {}).get("pool")
                 if pool:
-                    await self.redis.release_slot(pool)
-            # 死 worker 的步:代为归还其占用的资源槽(release_slot=False 时 worker 仍活、会自释放,
-            # 不在此重复归还)。
+                    await self.redis.release_slot(pool, holder)
             resources = await self.redis.get_step_resources(job_id, step)
             if resources:
                 for res in resources:
-                    await self.redis.release_resource(res)
+                    await self.redis.release_resource(res, holder)
                 await self.redis.clear_step_resources(job_id, step)
 
         await self.redis.publish("step_failed", {
@@ -1000,6 +1002,33 @@ class Scheduler:
             "error": f"orphan reclaimed: {reason}",
             "error_type": "processing",
         })
+
+    async def reconcile_slots(self) -> None:
+        """周期对账并发槽:持有 holder(=exec_id)但不属于任何 running 步的 = 泄漏(worker 突死没 release_step、
+        删 running job 漏放、占槽后死在写状态前等)。SCARD 是真实占用,但这些陈旧 holder 仍占名额 → 清掉收敛。
+        ★宽限:仅连续两拍(2×30s)都陈旧才 SREM,避开"刚占槽、还没写 running 状态"的认领窗口被误清。"""
+        try:
+            held = await self.redis.get_all_holders()
+            if not held:
+                self._slot_reconcile_suspect = set()
+                return
+            # live = 当前所有 running 步的 exec_id(= 合法持有者)。
+            live: set[str] = set()
+            for job_id in await self.redis.get_active_jobs():
+                statuses = await self.redis.get_all_step_statuses(job_id)
+                for step, status in statuses.items():
+                    if status == "running":
+                        ex = await self.redis.get_step_exec_id(job_id, step)
+                        if ex:
+                            live.add(ex)
+            suspects = held - live
+            confirmed = suspects & self._slot_reconcile_suspect   # 连续两拍都陈旧 → 真泄漏
+            if confirmed:
+                n = await self.redis.release_holders(confirmed)
+                logger.info("slots_reconciled", removed=n, holders=sorted(confirmed)[:10])
+            self._slot_reconcile_suspect = suspects
+        except Exception:
+            logger.exception("reconcile_slots_error")
 
     async def check_stuck(self) -> None:
         # 进度停滞检测:本地 job 读 jobs_dir/.{step}.progress(worker _progress_monitor 写其

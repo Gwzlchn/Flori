@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import time
 from datetime import datetime, timezone
 
@@ -113,6 +114,11 @@ async def claim_step(
     if (info.get("admin_status") if info else None) == "paused":
         return None
 
+    # 本次认领的唯一 holder(= exec_id),先于占槽生成:并发槽用 holder 集合记账(pool/res:*:holders),
+    # 占/放/reclaim/删除均按此 holder SADD/SREM,SREM 幂等→不双减、worker 突死的槽可被 reclaim/对账精准释放。
+    # 加短随机防同 worker 同毫秒并发认领 holder 撞(撞则两 claim 共 holder→SCARD 少计→超额)。
+    holder = f"{worker_id}:{int(time.time() * 1000)}:{secrets.token_hex(3)}"
+
     for pool in pools:
         if await redis.is_pool_frozen(pool):
             continue
@@ -121,12 +127,12 @@ async def claim_step(
         override = await redis.get_pool_limit_override(pool)
         if override is not None:
             limit = override  # 运行时覆盖即最终上限(直连+网关两路都过本函数,前端调小即时生效)
-        if not await redis.try_acquire_slot(pool, limit):
+        if not await redis.try_acquire_slot(pool, limit, holder):
             continue
 
         matched = await pop_matching(redis, pool, tags, reject_tags)
         if matched is None:
-            await redis.release_slot(pool)
+            await redis.release_slot(pool, holder)
             continue
 
         task, raw_json, score = matched
@@ -137,7 +143,7 @@ async def claim_step(
         if task.get("kind") == "ai":
             task_id = task.get("task_id")
             step_name = task.get("step", "ai")
-            exec_id = f"{worker_id}:{int(time.time() * 1000)}"
+            exec_id = holder
             try:
                 await _set_status(redis, db, worker_id, "busy", task_id, step_name)
                 await redis.publish(f"events:{task_id}", {
@@ -151,7 +157,7 @@ async def claim_step(
                 except Exception:
                     pass
                 try:
-                    await redis.release_slot(pool)
+                    await redis.release_slot(pool, holder)
                 except Exception:
                     pass
                 raise
@@ -173,26 +179,26 @@ async def claim_step(
             limit = await redis.get_resource_limit(res)
             if limit is None:
                 continue
-            if await redis.try_acquire_resource(res, limit):
+            if await redis.try_acquire_resource(res, limit, holder):
                 acquired_resources.append(res)
             else:
                 resource_blocked = True
                 break
         if resource_blocked:
             for res in acquired_resources:
-                await redis.release_resource(res)
-            await redis.release_slot(pool)
+                await redis.release_resource(res, holder)
+            await redis.release_slot(pool, holder)
             await redis.return_step(pool, raw_json, score)
             continue
 
-        exec_id = f"{worker_id}:{int(time.time() * 1000)}"
+        exec_id = holder
         try:
             acquired = await redis.cas_step_status(job_id, step, "ready", "running")
             if not acquired:
                 # CAS 失败(被他人抢先):释放槽 + 归还资源槽,继续看其他池。
-                await redis.release_slot(pool)
+                await redis.release_slot(pool, holder)
                 for res in acquired_resources:
-                    await redis.release_resource(res)
+                    await redis.release_resource(res, holder)
                 continue
 
             await redis.set_step_worker(job_id, step, worker_id)
@@ -216,12 +222,12 @@ async def claim_step(
             except Exception:
                 pass
             try:
-                await redis.release_slot(pool)
+                await redis.release_slot(pool, holder)
             except Exception:
                 pass
             for res in acquired_resources:
                 try:
-                    await redis.release_resource(res)
+                    await redis.release_resource(res, holder)
                 except Exception:
                     pass
             raise
@@ -300,25 +306,27 @@ async def release_step(
     redis: RedisClient, db: Database, worker_id: str, claim: dict,
 ) -> None:
     pool = claim["pool"]
+    holder = claim.get("exec_id")   # = 占槽时的 holder(本执行唯一);按它 SREM 释放自己的槽/资源(幂等)。
     # 独立 AI task:无 job:steps,跳过 exec_id 守卫 / 资源回读;仅释放池槽 + 置 idle。
     if claim.get("kind") == "ai":
-        await redis.release_slot(pool)
+        await redis.release_slot(pool, holder)
         await _set_status(redis, db, worker_id, "idle")
         return
     job_id, step = claim["job_id"], claim["step"]
     # exec_id 守卫:若该步已被更新的执行接管(check_stuck 重排后 worker B 以新 exec_id 认领),
-    # 本(陈旧)worker 迟到的 release 不得释放已属于新执行的槽与资源(审计 SCHED-N1 / I-M3)。
-    # 槽/资源由当前执行自己的 release 负责;本 worker 仅置 idle。
+    # 本(陈旧)worker 迟到的 release 不得动新执行的槽/资源。holder 集合下:本 worker 只 SREM 自己的
+    # holder(已被 reclaim SREM 则 no-op),不会误删新执行的 holder;仍提前 return 省去无谓回读。
     current_exec = await redis.get_step_exec_id(job_id, step)
-    if (current_exec is not None and claim.get("exec_id") is not None
-            and current_exec != claim["exec_id"]):
+    if (current_exec is not None and holder is not None
+            and current_exec != holder):
+        await redis.release_slot(pool, holder)   # 幂等:释放自己(陈旧)的 holder,防其残留泄漏
         await _set_status(redis, db, worker_id, "idle")
         return
-    await redis.release_slot(pool)
+    await redis.release_slot(pool, holder)
     # 归还本步占用的资源槽(从 redis 读,gateway release 请求不回传资源列表);清记录防重复归还。
     resources = await redis.get_step_resources(job_id, step)
     if resources:
         for res in resources:
-            await redis.release_resource(res)
+            await redis.release_resource(res, holder)
         await redis.clear_step_resources(job_id, step)
     await _set_status(redis, db, worker_id, "idle")

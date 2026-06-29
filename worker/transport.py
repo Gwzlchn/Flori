@@ -63,8 +63,8 @@ class WorkerTransport(Protocol):
     # 方法 worker 侧零调用——编排已封装在 runner_ops.claim_step/report_*/release_step 内,这里保留
     # 仅为「与 RedisTransport/gateway 同 Protocol 的防御接口」,非可用入口(避免误当 worker 可调,见 B14)。
     async def is_pool_frozen(self, pool: str) -> bool: ...
-    async def try_acquire_slot(self, pool: str, limit: int) -> bool: ...
-    async def release_slot(self, pool: str) -> None: ...
+    async def try_acquire_slot(self, pool: str, limit: int, holder: str) -> bool: ...
+    async def release_slot(self, pool: str, holder: str) -> None: ...
     async def freeze_pool(self, pool: str) -> None: ...
     async def unfreeze_pool(self, pool: str) -> None: ...
     async def dequeue_step_raw(self, pool: str) -> tuple[str, dict, float] | None: ...
@@ -195,11 +195,11 @@ class RedisTransport:
     async def is_pool_frozen(self, pool):
         return await self._redis.is_pool_frozen(pool)
 
-    async def try_acquire_slot(self, pool, limit):
-        return await self._redis.try_acquire_slot(pool, limit)
+    async def try_acquire_slot(self, pool, limit, holder):
+        return await self._redis.try_acquire_slot(pool, limit, holder)
 
-    async def release_slot(self, pool):
-        await self._redis.release_slot(pool)
+    async def release_slot(self, pool, holder):
+        await self._redis.release_slot(pool, holder)
 
     async def freeze_pool(self, pool):
         await self._redis.freeze_pool(pool)

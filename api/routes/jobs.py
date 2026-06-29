@@ -625,12 +625,25 @@ async def _delete_job_full(
     ② publish 让 scheduler 取消在途延迟重试(进程内 asyncio,只能 scheduler 端做);
     ③ 删产物(LocalStorage 删目录 / RemoteStorage 删 {job_id}/ 前缀,审计 I-H1);
     ④ 最后删 DB(jobs 行 + FTS + ai_usage + 集合计数 + glossary 出现 + 订阅 ingested_items);
-    ⑤ 审计。running job:不主动回收槽,worker 推回结果经 cas_step_status 见 steps hash 已删而 CAS 失败被丢弃。"""
+    ⑤ 审计。running job:读其 running 步的 holder(=exec_id)→ release_holders 立即归还所占池槽/资源槽(G4);
+       worker 推回结果经 cas_step_status 见 steps hash 已删而 CAS 失败被丢弃,其迟到 release_step 再 SREM 同
+       holder 也幂等无害。"""
     job_id = job.id
     item_id = (job.meta or {}).get("source_item_id")
+    # G4:删 running job 立即归还其 running 步占的槽。★须在 cleanup_job(删 steps hash)前读 exec_id。
+    stale_holders: set[str] = set()
+    try:
+        for st, status in (await redis.get_all_step_statuses(job_id)).items():
+            if status == "running":
+                ex = await redis.get_step_exec_id(job_id, st)
+                if ex:
+                    stale_holders.add(ex)
+    except Exception:
+        pass
     removed = await redis.remove_job_tasks(job_id)          # ① 队列 ZSET + queue:enqueued
     await redis.cleanup_job(job_id)                         #    7 个 job:{id}* 编排 hash
     await redis.remove_active_job(job_id)                   #    SREM active_jobs
+    await redis.release_holders(stale_holders)              #    G4:归还 running 步的池槽/资源槽(幂等)
     await redis.publish("job_command", {"action": "delete", "job_id": job_id})  # ② 取消在途重试
     await storage.delete(job_id)                            # ③ 产物
     await asyncio.to_thread(db.delete_job_cascade, job_id, job.collection_id, item_id)  # ④ DB 最后

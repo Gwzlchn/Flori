@@ -292,7 +292,7 @@ class TestRelease:
     @pytest.mark.asyncio
     async def test_release_slot_and_idle(self, redis, db):
         await _register_worker(redis, db)
-        await redis.try_acquire_slot("cpu", limit=1)
+        await redis.try_acquire_slot("cpu", 1, "e")   # holder = 下方 release 的 exec_id
 
         await runner_ops.release_step(
             redis, db, WORKER_ID,
@@ -306,7 +306,7 @@ class TestRelease:
     @pytest.mark.asyncio
     async def test_release_non_scene_does_not_unfreeze(self, redis, db):
         await _register_worker(redis, db)
-        await redis.try_acquire_slot("cpu", limit=3)
+        await redis.try_acquire_slot("cpu", 3, "e")   # holder = 下方 release 的 exec_id
         await redis.freeze_pool("cpu")
 
         await runner_ops.release_step(
@@ -321,7 +321,7 @@ class TestRelease:
     async def test_release_skips_when_exec_id_superseded(self, redis, db):
         # check_stuck 重排后旧 worker 迟到的 release 不得释放/解冻已被新执行接管的槽与冻结(审计 SCHED-N1)。
         await _register_worker(redis, db)
-        await redis.try_acquire_slot("scene", limit=1)
+        await redis.try_acquire_slot("scene", 1, "e_new")  # 槽属【存活的新执行】e_new
         await redis.freeze_pool("cpu")
         await redis.set_step_exec_id("j1", "A", "e_new")  # 新执行已接管该步
 
@@ -330,6 +330,7 @@ class TestRelease:
             {"job_id": "j1", "step": "A", "pool": "scene", "exec_id": "e_old"},
         )
 
+        # 陈旧 worker 只会 SREM 自己的 holder(e_old,本不在集合)→ 新执行 e_new 的槽未被误放。
         assert await redis.get_pool_count("scene") == 1   # 槽未被误放
         assert await redis.is_pool_frozen("cpu") is True   # cpu 未被误解冻
         info = await redis.get_worker_info(WORKER_ID)

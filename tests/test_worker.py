@@ -270,7 +270,7 @@ class TestSlotRelease:
     async def test_slot_released_after_task(self, worker, redis, tmp_jobs_dir):
         """Slot count returns to 0 after execute (regardless of success)."""
         await setup_task_in_queue(redis)
-        await redis.try_acquire_slot("cpu", limit=3)
+        await redis.try_acquire_slot("cpu", 3, "w_test:1")   # holder = claim 的 exec_id
         (tmp_jobs_dir / "j_test_001").mkdir(exist_ok=True)
 
         async def mock_run_step(ctx, on_progress, on_tick):
@@ -611,7 +611,7 @@ class TestExecuteFullFlow:
         job = make_job()
         db.create_job(job)
         db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.READY, pool="cpu"))
-        await redis.try_acquire_slot("cpu", limit=3)
+        await redis.try_acquire_slot("cpu", 3, "w_test:1")   # holder = claim 的 exec_id
 
         job_dir = tmp_jobs_dir / "j_test_001"
         job_dir.mkdir(exist_ok=True)
@@ -651,7 +651,7 @@ class TestExecuteFullFlow:
         await worker.register()
         db.create_job(make_job())
         db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.READY, pool="cpu"))
-        await redis.try_acquire_slot("cpu", limit=3)
+        await redis.try_acquire_slot("cpu", 3, "w_test:1")   # holder = claim 的 exec_id
         (tmp_jobs_dir / "j_test_001").mkdir(exist_ok=True)
 
         async def mock_run_step(ctx, on_progress, on_tick):
@@ -674,7 +674,7 @@ class TestExecuteFullFlow:
         db.create_job(make_job())
         db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.READY, pool="cpu"))
         await redis.init_job("j_test_001", "test", {"domain": "lecture", "style_tags": "[]"})
-        await redis.try_acquire_slot("cpu", limit=3)
+        await redis.try_acquire_slot("cpu", 3, "w_test:1")   # holder = claim 的 exec_id
         (tmp_jobs_dir / "j_test_001").mkdir(exist_ok=True)
 
         async def mock_run_step(ctx, on_progress, on_tick):
@@ -692,7 +692,7 @@ class TestExecuteFullFlow:
         await worker.register()
         db.create_job(make_job())
         db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.RUNNING, pool="cpu"))
-        await redis.try_acquire_slot("cpu", limit=3)
+        await redis.try_acquire_slot("cpu", 3, "w_test:1")   # holder = claim 的 exec_id
         (tmp_jobs_dir / "j_test_001").mkdir(exist_ok=True)
 
         async def boom(job_id):
@@ -711,7 +711,7 @@ class TestExecuteFullFlow:
         job = make_job()
         db.create_job(job)
         db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.READY, pool="cpu"))
-        await redis.try_acquire_slot("cpu", limit=3)
+        await redis.try_acquire_slot("cpu", 3, "w_test:1")   # holder = claim 的 exec_id
 
         job_dir = tmp_jobs_dir / "j_test_001"
         job_dir.mkdir(exist_ok=True)
@@ -767,7 +767,7 @@ class TestSubprocessTimeout:
         job = make_job()
         db.create_job(job)
         db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.READY, pool="cpu"))
-        await redis.try_acquire_slot("cpu", limit=3)
+        await redis.try_acquire_slot("cpu", 3, "w_test:1")   # holder = claim 的 exec_id
 
         job_dir = tmp_jobs_dir / "j_test_001"
         job_dir.mkdir(exist_ok=True)
@@ -805,9 +805,9 @@ class TestPoolExhaustion:
     async def test_full_pool_returns_none(self, worker, redis):
         """When pool is at capacity, fetch_task should return None for that pool."""
         await worker.register()
-        # Fill pool to capacity (limit=3 in fixture)
-        for _ in range(3):
-            await redis.try_acquire_slot("cpu", limit=3)
+        # Fill pool to capacity (limit=3 in fixture)——须用【不同】holder 才真占满(同 holder 幂等只占 1)。
+        for i in range(3):
+            await redis.try_acquire_slot("cpu", 3, f"filler{i}")
 
         await setup_task_in_queue(redis, pool="cpu")
         # request_step should skip cpu pool because it's full
@@ -827,7 +827,7 @@ class TestStoragePullFailure:
         job = make_job()
         db.create_job(job)
         db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.READY, pool="cpu"))
-        await redis.try_acquire_slot("cpu", limit=3)
+        await redis.try_acquire_slot("cpu", 3, "w_test:1")   # holder = claim 的 exec_id
 
         async def failing_pull(job_id, step):
             raise IOError("disk full")
@@ -921,7 +921,7 @@ class TestUploadFaultTolerance:
         await worker.register()
         db.create_job(make_job())
         db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.READY, pool="cpu"))
-        await redis.try_acquire_slot("cpu", limit=3)
+        await redis.try_acquire_slot("cpu", 3, "w_test:1")   # holder = claim 的 exec_id
         (tmp_jobs_dir / "j_test_001").mkdir(exist_ok=True)
 
         async def mock_run_step(ctx, on_progress, on_tick):

@@ -19,11 +19,13 @@ from shared.status import DEFAULT_ONLINE_WINDOW_SEC
 # ── Lua 脚本 ──
 
 _LUA_ACQUIRE_SLOT = """
+-- holder 集合版(替代裸计数器,根治幽灵泄漏):KEYS[1]=holders SET,KEYS[2]=frozen;ARGV[1]=limit,ARGV[2]=holder。
+-- used=SCARD;占=SADD holder(SREM 幂等放,双减不再是问题)。★已持有则幂等放行(满载时同一执行重占不被误拒)。
 local frozen = redis.call('GET', KEYS[2])
 if frozen == '1' then return 0 end
-local current = tonumber(redis.call('GET', KEYS[1]) or '0')
-if current >= tonumber(ARGV[1]) then return 0 end
-redis.call('INCR', KEYS[1])
+if redis.call('SISMEMBER', KEYS[1], ARGV[2]) == 1 then return 1 end
+if redis.call('SCARD', KEYS[1]) >= tonumber(ARGV[1]) then return 0 end
+redis.call('SADD', KEYS[1], ARGV[2])
 return 1
 """
 
@@ -36,12 +38,8 @@ return 0
 """
 
 _LUA_RELEASE_SLOT = """
-local v = tonumber(redis.call('GET', KEYS[1]) or '0')
-if v > 0 then
-    redis.call('DECR', KEYS[1])
-    return 1
-end
-return 0
+-- holder 集合版:KEYS[1]=holders SET,ARGV[1]=holder。SREM 幂等(放两次/放不存在的=安全 no-op,无双减)。
+return redis.call('SREM', KEYS[1], ARGV[1])
 """
 
 
@@ -197,19 +195,23 @@ class RedisClient:
 
     # ── 资源池（Lua 原子操作）──
 
-    async def try_acquire_slot(self, pool: str, limit: int) -> bool:
+    async def try_acquire_slot(self, pool: str, limit: int, holder: str) -> bool:
+        """占池槽:holder(=exec_id,唯一)加入 pool:{pool}:holders 集合(未 frozen 且 SCARD<limit)。
+        used=SCARD;同一 holder 重占幂等放行。配对的 release_slot(pool, holder) 用 SREM(幂等)。"""
         result = await self.r.eval(
             _LUA_ACQUIRE_SLOT,
             2,
-            f"pool:{pool}:count",
+            f"pool:{pool}:holders",
             f"pool:{pool}:frozen",
             str(limit),
+            holder,
         )
         return result == 1
 
-    async def release_slot(self, pool: str) -> bool:
+    async def release_slot(self, pool: str, holder: str) -> bool:
+        """放池槽:SREM holder(幂等——worker finally / reclaim / 删除 多方释放同一 holder 都安全,无双减)。"""
         result = await self.r.eval(
-            _LUA_RELEASE_SLOT, 1, f"pool:{pool}:count"
+            _LUA_RELEASE_SLOT, 1, f"pool:{pool}:holders", holder
         )
         return result == 1
 
@@ -223,8 +225,11 @@ class RedisClient:
         return await self.r.get(f"pool:{pool}:frozen") == "1"
 
     async def get_pool_count(self, pool: str) -> int:
-        val = await self.r.get(f"pool:{pool}:count")
-        return int(val) if val else 0
+        """已占槽数 = holders 集合基数(SCARD)。从结构上 = 当前真实持有者数,不会幽灵泄漏。"""
+        return int(await self.r.scard(f"pool:{pool}:holders"))
+
+    async def get_pool_holders(self, pool: str) -> set[str]:
+        return set(await self.r.smembers(f"pool:{pool}:holders") or [])
 
     # ── 资源槽(单账号/单出口IP 等池粒度外的细粒度并发,复用池槽 Lua)──
     # limit 由 scheduler 从 configs/resources.yaml 推到 redis hash(单一事实源),
@@ -270,21 +275,58 @@ class RedisClient:
                 continue
         return out
 
-    async def try_acquire_resource(self, resource: str, limit: int) -> bool:
-        # 复用池槽 Lua;资源无 frozen 概念,frozen 键永不置位故恒放行该检查。
+    async def try_acquire_resource(self, resource: str, limit: int, holder: str) -> bool:
+        # 复用池槽 holder-set Lua;资源无 frozen 概念,frozen 键永不置位故恒放行该检查。holder=exec_id。
         result = await self.r.eval(
             _LUA_ACQUIRE_SLOT, 2,
-            f"res:{resource}:count", f"res:{resource}:frozen", str(limit),
+            f"res:{resource}:holders", f"res:{resource}:frozen", str(limit), holder,
         )
         return result == 1
 
-    async def release_resource(self, resource: str) -> bool:
-        result = await self.r.eval(_LUA_RELEASE_SLOT, 1, f"res:{resource}:count")
+    async def release_resource(self, resource: str, holder: str) -> bool:
+        result = await self.r.eval(_LUA_RELEASE_SLOT, 1, f"res:{resource}:holders", holder)
         return result == 1
 
     async def get_resource_count(self, resource: str) -> int:
-        val = await self.r.get(f"res:{resource}:count")
-        return int(val) if val else 0
+        return int(await self.r.scard(f"res:{resource}:holders"))
+
+    async def _scan_holder_keys(self) -> list[str]:
+        """扫出所有 pool:*:holders 与 res:*:holders 集合 key(对账/定向释放共用)。"""
+        keys: list[str] = []
+        for pat in ("pool:*:holders", "res:*:holders"):
+            cursor = 0
+            while True:
+                cursor, batch = await self.r.scan(cursor, match=pat, count=200)
+                keys.extend(batch)
+                if cursor == 0:
+                    break
+        return keys
+
+    async def get_all_holders(self) -> set[str]:
+        """所有 pool:*:holders / res:*:holders 集合成员的并集(= 当前持有任意槽的 holder/exec_id 全集)。
+        供 scheduler 周期对账:与"当前 running 步的 exec_id 集"作差,找出疑似泄漏的陈旧 holder。"""
+        out: set[str] = set()
+        try:
+            for k in await self._scan_holder_keys():
+                out |= set(await self.r.smembers(k) or [])
+        except Exception:
+            pass
+        return out
+
+    async def release_holders(self, holders: set[str]) -> int:
+        """定向释放:把给定 holder(=exec_id)集合从所有 pool/res holder 集合里 SREM 掉(幂等)。
+        删 running job(G4)时按其 running 步的 exec_id 调,立即归还其占的池槽/资源槽(worker 迟到的
+        release_step 再 SREM 同 holder 也无害)。返回清掉的成员数。"""
+        if not holders:
+            return 0
+        removed = 0
+        try:
+            for k in await self._scan_holder_keys():
+                for h in holders:
+                    removed += await self.r.srem(k, h)
+        except Exception:
+            pass
+        return removed
 
     # ── Job 实时状态 ──
 

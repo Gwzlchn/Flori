@@ -1562,12 +1562,19 @@ Member: {"kind":"ai","task_id":"at_xxx","step":"synthesis|digest","domain":"<dom
 - 完成事件：worker 执行后 `publish events:{task_id}`（`ai_task_start/ai_task_done/ai_task_failed`，见 §3.5），供 `/ask`、`/digest` 经 `WS /api/ws/jobs/{task_id}`（端点对任意 id 通用）或轮询取信号。
 - **白盒审计**：ai-worker 每次执行写一条 DB 表 **`ai_task_logs`**（按 `task_id`；对齐 DAG 步的 `output/ai_logs/{step}.jsonl`）。索引列：`exec_id/step_name/domain/provider/model/ok/error/各 token/cost_usd/duration_sec/num_turns/created_at`；`record_json` 存全量审计（路由/尝试链/渲染 prompt[system+messages]/输出/raw/用量）。与 `ai_usage`（成本归因）**并存不合并**（白盒 vs 计费两套）。查看端点见 P1-3。
 
-### 3.2 资源池计数
+### 3.2 资源池计数（holder 集合，根治幽灵泄漏）
+
+并发槽不再用裸计数器，改用 **holder 集合**：holder = `exec_id`（worker 认领时生成的唯一执行 id，`{worker_id}:{ms}:{rand}`）。
+占槽 = `SADD holders exec_id`（Lua：未 frozen 且 `SCARD < limit`；同一 exec_id 重占幂等放行）；放槽 = `SREM holders exec_id`（**幂等**——worker finally / 调度器 reclaim / 删 job 多方释放同一 holder 都安全，不双减）；`used = SCARD`。worker 突死/删 running job 漏放的陈旧 holder，由调度器周期 `reconcile_slots`（连续两拍不属任何 running 步才清，避开认领窗口）SREM 收敛。
 
 ```
-Key:    pool:{pool_name}:count
-Type:   STRING (integer)
-Value:  当前已占用槽数
+Key:    pool:{pool_name}:holders        ← 旧 pool:{pool_name}:count(STRING 计数器)已废弃,新代码读/写本 SET
+Type:   SET
+Members: 当前持槽的 exec_id 集合;已占槽数 = SCARD
+
+Key:    res:{resource}:holders          ← 细粒度资源槽(单账号/单出口IP)同机制,同 Lua
+Type:   SET
+Members: 当前持该资源槽的 exec_id 集合;已占数 = SCARD
 
 Key:    pool:{pool_name}:frozen
 Type:   STRING

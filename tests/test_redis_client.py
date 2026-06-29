@@ -141,43 +141,85 @@ class TestListQueue:
 
 
 class TestPool:
+    """并发槽 = holder(=exec_id)集合:used=SCARD,占=SADD,放=SREM(幂等)。根治裸计数器幽灵泄漏。"""
+
     @pytest.mark.asyncio
     async def test_acquire_and_release(self, rc):
-        assert await rc.try_acquire_slot("cpu", limit=2) is True
+        assert await rc.try_acquire_slot("cpu", 2, "h1") is True
         assert await rc.get_pool_count("cpu") == 1
-        assert await rc.try_acquire_slot("cpu", limit=2) is True
+        assert await rc.try_acquire_slot("cpu", 2, "h2") is True
         assert await rc.get_pool_count("cpu") == 2
-        assert await rc.try_acquire_slot("cpu", limit=2) is False
+        assert await rc.try_acquire_slot("cpu", 2, "h3") is False   # 满
 
-        await rc.release_slot("cpu")
+        await rc.release_slot("cpu", "h1")
         assert await rc.get_pool_count("cpu") == 1
-        assert await rc.try_acquire_slot("cpu", limit=2) is True
+        assert await rc.try_acquire_slot("cpu", 2, "h3") is True     # 空出名额,h3 可进
 
     @pytest.mark.asyncio
     async def test_frozen_blocks_acquire(self, rc):
         await rc.freeze_pool("cpu")
         assert await rc.is_pool_frozen("cpu") is True
-        assert await rc.try_acquire_slot("cpu", limit=10) is False
+        assert await rc.try_acquire_slot("cpu", 10, "h1") is False
 
         await rc.unfreeze_pool("cpu")
         assert await rc.is_pool_frozen("cpu") is False
-        assert await rc.try_acquire_slot("cpu", limit=10) is True
+        assert await rc.try_acquire_slot("cpu", 10, "h1") is True
 
     @pytest.mark.asyncio
     async def test_acquire_over_limit(self, rc):
-        ok1 = await rc.try_acquire_slot("test_pool", limit=1)
-        ok2 = await rc.try_acquire_slot("test_pool", limit=1)
-        assert ok1 is True
-        assert ok2 is False
+        assert await rc.try_acquire_slot("test_pool", 1, "h1") is True
+        assert await rc.try_acquire_slot("test_pool", 1, "h2") is False   # 不同 holder,满
 
     @pytest.mark.asyncio
     async def test_acquire_atomicity(self, rc):
+        # 三个【不同】holder 并发抢 limit=1:仅一个进(SCARD<limit 原子判定)。
         results = await asyncio.gather(
-            rc.try_acquire_slot("scene", limit=1),
-            rc.try_acquire_slot("scene", limit=1),
-            rc.try_acquire_slot("scene", limit=1),
+            rc.try_acquire_slot("scene", 1, "h1"),
+            rc.try_acquire_slot("scene", 1, "h2"),
+            rc.try_acquire_slot("scene", 1, "h3"),
         )
         assert sum(results) == 1
+
+    @pytest.mark.asyncio
+    async def test_idempotent_release_no_double_decrement(self, rc):
+        # ★SREM 幂等:同一 holder 释放两次,不会把别人的槽也减掉(根治裸 DECR 的双减/泄漏)。
+        await rc.try_acquire_slot("cpu", 5, "h1")
+        await rc.try_acquire_slot("cpu", 5, "h2")
+        assert await rc.get_pool_count("cpu") == 2
+        assert await rc.release_slot("cpu", "h1") is True
+        assert await rc.release_slot("cpu", "h1") is False   # 再放已无此 holder = 安全 no-op
+        assert await rc.get_pool_count("cpu") == 1            # h2 仍在,未被双减误伤
+
+    @pytest.mark.asyncio
+    async def test_full_pool_same_holder_reacquire_idempotent(self, rc):
+        # 满载时同一 holder 重新占(认领重试/重入)幂等放行,不被误拒、不重复计数(SISMEMBER 分支)。
+        assert await rc.try_acquire_slot("cpu", 1, "h1") is True
+        assert await rc.get_pool_count("cpu") == 1            # 满
+        assert await rc.try_acquire_slot("cpu", 1, "h1") is True   # 同 holder 重占
+        assert await rc.get_pool_count("cpu") == 1            # 仍 1,没多占
+        assert await rc.try_acquire_slot("cpu", 1, "h2") is False  # 别人仍被挡
+
+    @pytest.mark.asyncio
+    async def test_resource_slot_by_holder(self, rc):
+        assert await rc.try_acquire_resource("acct:a", 1, "h1") is True
+        assert await rc.get_resource_count("acct:a") == 1
+        assert await rc.try_acquire_resource("acct:a", 1, "h2") is False
+        await rc.release_resource("acct:a", "h1")
+        assert await rc.get_resource_count("acct:a") == 0
+
+    @pytest.mark.asyncio
+    async def test_get_all_holders_and_release_holders(self, rc):
+        # 跨池 + 资源槽 holder 全集 + 定向释放(删 running job G4 / 对账用)。
+        await rc.try_acquire_slot("cpu", 9, "h1")
+        await rc.try_acquire_slot("io", 9, "h2")
+        await rc.try_acquire_resource("acct:x", 9, "h1")     # h1 同时占资源槽
+        assert await rc.get_all_holders() == {"h1", "h2"}
+        removed = await rc.release_holders({"h1"})
+        assert removed == 2                                   # cpu 池 + acct:x 资源槽各 SREM 一个
+        assert await rc.get_all_holders() == {"h2"}
+        assert await rc.get_pool_count("cpu") == 0
+        assert await rc.get_resource_count("acct:x") == 0
+        assert await rc.release_holders(set()) == 0           # 空集 = no-op
 
     @pytest.mark.asyncio
     async def test_pool_limit_override_roundtrip(self, rc):
@@ -190,9 +232,9 @@ class TestPool:
         assert await rc.get_all_pool_limit_overrides() == {}
 
     @pytest.mark.asyncio
-    async def test_release_at_zero_returns_false(self, rc):
-        """release_slot when count is already 0 should return False and not go negative."""
-        result = await rc.release_slot("empty_pool")
+    async def test_release_unheld_returns_false(self, rc):
+        """释放一个从未持有的 holder → SREM 返回 0(False),计数不变负。"""
+        result = await rc.release_slot("empty_pool", "nobody")
         assert result is False
         assert await rc.get_pool_count("empty_pool") == 0
 

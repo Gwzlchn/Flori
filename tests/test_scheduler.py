@@ -947,7 +947,8 @@ class TestOrphanScan:
 
         await redis.set_step_status("j_test_001", "A", "running")
         await redis.set_step_worker("j_test_001", "A", "cpu-dead")
-        await redis.try_acquire_slot("cpu", limit=3)
+        await redis.set_step_exec_id("j_test_001", "A", "exec_dead")  # holder,reclaim 据此 SREM 释放
+        await redis.try_acquire_slot("cpu", 3, "exec_dead")
         assert await redis.get_pool_count("cpu") == 1
 
         received = []
@@ -963,6 +964,64 @@ class TestOrphanScan:
 
         # Pool slot should be released
         assert await redis.get_pool_count("cpu") == 0
+
+
+class TestReconcileSlots:
+    """周期对账并发槽(holder 集合):清掉"持槽但不属任何 running 步"的陈旧 holder,宽限避认领窗口误清。"""
+
+    @pytest.mark.asyncio
+    async def test_grace_then_release_stale_keeps_live(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir
+    ):
+        pipelines = {"test": {"steps": [
+            {"name": "A", "pool": "cpu", "depends_on": [], "retries": 0},
+        ]}}
+        config = make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir)
+        sched = Scheduler(redis, db, config)
+        db.create_job(make_job())
+        await redis.add_active_job("j_test_001")
+        # 合法持有者:一个 live running 步,holder=h_live。
+        await redis.set_step_status("j_test_001", "A", "running")
+        await redis.set_step_exec_id("j_test_001", "A", "h_live")
+        await redis.try_acquire_slot("cpu", 9, "h_live")
+        # 陈旧:占了 io 槽但没有任何 running 步指向它(模拟 worker 突死/删 job 漏放泄漏)。
+        await redis.try_acquire_slot("io", 9, "h_stale")
+        assert await redis.get_pool_count("io") == 1
+
+        # 第一拍:仅把 h_stale 记为 suspect,宽限期内【不清】(避免误清刚占槽尚未写状态的认领)。
+        await sched.reconcile_slots()
+        assert await redis.get_pool_count("io") == 1
+        assert "h_stale" in sched._slot_reconcile_suspect
+        assert "h_live" not in sched._slot_reconcile_suspect   # 合法持有者从不进 suspect
+
+        # 第二拍:连续两拍都陈旧 → SREM 清掉;合法持有者 h_live 始终保留。
+        await sched.reconcile_slots()
+        assert await redis.get_pool_count("io") == 0
+        assert await redis.get_pool_count("cpu") == 1
+        assert await redis.get_all_holders() == {"h_live"}
+
+    @pytest.mark.asyncio
+    async def test_inflight_claim_not_removed_within_grace(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir
+    ):
+        # ★认领窗口保护:刚占槽、尚未写 running 状态的 holder,不能在一拍内被误清。
+        pipelines = {"test": {"steps": [
+            {"name": "A", "pool": "cpu", "depends_on": [], "retries": 0},
+        ]}}
+        config = make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir)
+        sched = Scheduler(redis, db, config)
+        await redis.try_acquire_slot("cpu", 9, "h_inflight")   # 认领中,状态还没落
+
+        await sched.reconcile_slots()                          # 第一拍:不清(仅 suspect)
+        assert await redis.get_pool_count("cpu") == 1
+
+        # 认领完成:写了 running 状态 + exec_id → 它成 live,第二拍不再 suspect、不清。
+        db.create_job(make_job())
+        await redis.add_active_job("j_test_001")
+        await redis.set_step_status("j_test_001", "A", "running")
+        await redis.set_step_exec_id("j_test_001", "A", "h_inflight")
+        await sched.reconcile_slots()
+        assert await redis.get_pool_count("cpu") == 1          # 认领完成,槽保留
 
 
 class TestCheckStuck:
