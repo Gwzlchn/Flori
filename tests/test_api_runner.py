@@ -722,3 +722,60 @@ class TestArtifacts:
                 "/api/runner/jobs/%2e%2e/artifacts/x", content=b"x", headers=h,
             )
         ).status_code == 400
+
+
+class TestWorkerTokenThrottle:
+    """无效 per-worker token 连续 401 → 达阈值返回 429+Retry-After(挡旧 worker 死刷 jobs/request);
+    有效 token 命中即清计数,不被误限流。"""
+
+    @pytest.mark.asyncio
+    async def test_repeated_invalid_token_429_with_retry_after(self, client):
+        from api import deps
+        deps._AUTH_FAIL.clear()
+        hdr = {
+            "Authorization": "Bearer flwt-bogus-not-registered",
+            "X-Worker-Id": "foreign-dl-old", "X-Worker-Host": "ecs-edge",
+            "X-Worker-Version": "1.0.0",
+        }
+        body = {"pools": ["cpu"], "pool_limits": {}, "tags": [], "reject_tags": []}
+        for _ in range(deps._AUTH_FAIL_THRESHOLD - 1):       # 阈值前:401
+            r = await client.post("/api/runner/jobs/request", json=body, headers=hdr)
+            assert r.status_code == 401
+        r = await client.post("/api/runner/jobs/request", json=body, headers=hdr)
+        assert r.status_code == 429                           # 达阈值:429
+        assert r.headers.get("Retry-After") == str(deps._AUTH_RETRY_AFTER_SEC)
+
+    @pytest.mark.asyncio
+    async def test_valid_token_clears_counter(self, client):
+        from api import deps
+        reg = (await _register(client)).json()
+        token, wid = reg["worker_token"], reg["worker_id"]
+        h = hashlib.sha256(token.encode()).hexdigest()
+        deps._AUTH_FAIL[h] = 99                                # 预置高计数(模拟历史失败)
+        r = await client.post(
+            "/api/runner/heartbeat",
+            json={"worker_id": wid, "status": "idle"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r.status_code not in (401, 429)                # 有效 token 通过鉴权
+        assert h not in deps._AUTH_FAIL                        # 计数已清
+
+
+class TestRunnerPollAccessFilter:
+    """runner 轮询端点(heartbeat/jobs/request)的 uvicorn access 记录被过滤掉(declutter dozzle),其余保留。"""
+
+    def test_filters_poll_endpoints_keeps_others(self):
+        import logging
+        from api.main import _RunnerPollAccessFilter
+        f = _RunnerPollAccessFilter()
+
+        def rec(path):
+            return logging.LogRecord(
+                "uvicorn.access", logging.INFO, "", 0,
+                '%s - "%s %s HTTP/%s" %d',
+                ("1.2.3.4", "POST", path, "1.1", 401), None,
+            )
+        assert f.filter(rec("/api/runner/jobs/request")) is False
+        assert f.filter(rec("/api/runner/heartbeat")) is False
+        assert f.filter(rec("/api/status")) is True
+        assert f.filter(rec("/api/runner/register")) is True

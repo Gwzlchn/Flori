@@ -2,11 +2,29 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
+
+
+class _RunnerPollAccessFilter(logging.Filter):
+    """丢弃 runner 高频轮询端点(heartbeat / jobs/request)的 uvicorn access 记录。
+    这些请求行高频低信号,会刷爆 api 容器日志、把真正重要的日志淹没(Dozzle 里看不到);
+    worker 连接/认证状态改由【结构化事件】呈现(worker_registered/auth_rejected/throttled → Dozzle + /system 事件页)。
+    不影响其余端点的 access,也不影响任何 structlog 业务/审计日志。"""
+
+    _NOISY = ("/api/runner/heartbeat", "/api/runner/jobs/request")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # uvicorn.access 记录 args=(client_addr, method, full_path, http_version, status);path 在 [2]。
+        args = record.args
+        path = args[2] if isinstance(args, tuple) and len(args) >= 3 else None
+        if isinstance(path, str) and any(path.startswith(p) for p in self._NOISY):
+            return False
+        return True
 
 from shared.config import load_config
 from shared.db import Database
@@ -48,6 +66,8 @@ def create_app(
     config=None,
 ) -> FastAPI:
     setup_logging()  # 与 scheduler/worker 一致输出结构化 JSON 日志
+    # runner 轮询端点(heartbeat/jobs/request)的 access 记录从 uvicorn.access 摘掉 → dozzle 主流不被刷屏。
+    logging.getLogger("uvicorn.access").addFilter(_RunnerPollAccessFilter())
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # api 进程启动时刻(供 /api/status 的 api 组件算 uptime_sec)。两条资源路径都记。
@@ -114,6 +134,7 @@ def create_app(
             status_code=exc.status_code,
             content={"error": _STATUS_ERROR_CODE.get(exc.status_code, "error"),
                      "message": exc.detail},
+            headers=exc.headers,   # 透传 HTTPException 的头(如 429 的 Retry-After);多数为 None 无影响
         )
 
     @app.exception_handler(_RequestValidationError)

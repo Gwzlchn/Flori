@@ -153,6 +153,15 @@ async def register(
             last_heartbeat=now,
         ),
     )
+    # 连接事件 → events:system → /system 事件页可见"谁连上了/重注册"(含 type/host/版本/来源)。best-effort。
+    try:
+        await redis.push_event(
+            "worker_registered", worker_id=worker_id, worker_type=req.type,
+            host=req.hostname or "", source=remote_addr,
+            version=request.headers.get("x-worker-version", ""),
+        )
+    except Exception:
+        pass
     return {
         "worker_id": worker_id,
         "worker_token": worker_token,

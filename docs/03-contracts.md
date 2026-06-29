@@ -703,6 +703,11 @@ PUT    /api/runner/jobs/{id}/artifacts/{rel}              → 回传单个产物
 {"worker_id": "ai-a1b2c3d4", "worker_token": "flwt-..."}
 ```
 
+<!-- contract: runner 鉴权自卫 + 诊断头 + 可观测(worker↔gateway 健壮性) -->
+**鉴权与自卫**：per-worker token 端点缺失/未命中/已吊销 → `401`；**同一 token 连续 401 达阈值（5）→ `429` + `Retry-After: 60`**（挡旧 worker 拿失效 token 死刷 `jobs/request`——那 worker 改不动，只能服务端自卫）；token 命中即清该 hash 计数。worker 侧拿 401 → 重注册 + 固定退避；连续失败超时（默认 6h，env `AUTH_GIVEUP_SEC`）→ 自杀退出。注册（`register`）连不上网关 → 固定间隔（默认 3s，env `REGISTER_RETRY_SEC`）WARN 重试，不再首拍崩进程。
+**诊断头（可选，不可信，仅诊断）**：worker 每个 runner 请求带 `X-Worker-Id / X-Worker-Type / X-Worker-Host / X-Worker-Version`（自报身份）；即使 401 服务端也据此记 `claimed_*`（知道是谁、什么版本在刷——`version` 是排障关键，一眼认出旧版没更新的 worker）。
+**可观测**：worker 连接/认证事件（`worker_registered / worker_auth_rejected / worker_token_throttled`）进 `events:system` → `GET /api/events`（/system 事件页）+ structlog→Dozzle；runner 高频轮询端点（`heartbeat` / `jobs/request`）的 uvicorn access 记录从主日志流摘掉（declutter Dozzle，不影响业务/审计/其余 access 日志）。
+
 ### 1.8 集合管理
 
 Base: `/api/collections`。集合是内容分组；当 `source_type`+`source_id` 非空时该集合即"订阅集合"，会自动从来源追更新内容。来源由 source-adapter 模式扩展（见 `shared/subscriptions/`）。订阅没有独立实体，全部由集合的字段拼装为 `subscription` 对象返回。
@@ -2055,7 +2060,8 @@ Response body:
 >   http(s) 前缀，故不返回独立的 `invalid_url`。
 > - 同 URL / 同 BV 重投**不返回 409**，而是建新任务（job_id 加随机后缀消歧），故不返回
 >   `job_already_exists`。
-> - 限流（429 `rate_limit`）与「无在线 worker」（503 `no_workers`）目前**未在 API 层实现**。
+> - 业务端点（如 `POST /api/jobs`）的限流 429 与「无在线 worker」503 `no_workers` 仍**未实现**；
+>   但 **runner 鉴权自卫已实现 429**（per-worker token 连续 401 达阈值 → 429 + `Retry-After`，见 §1.7）、MCP-http 限流 429 也已实现（§4）。
 
 ## 6. 步骤错误分类与重试策略
 

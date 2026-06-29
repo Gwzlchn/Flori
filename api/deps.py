@@ -8,6 +8,7 @@ import hmac
 import os
 from functools import lru_cache
 
+import structlog
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -16,8 +17,49 @@ from shared.db import Database
 from shared.redis_client import RedisClient
 from shared.storage import StorageBackend
 
+logger = structlog.get_logger(component="api_auth")
+
 _security = HTTPBearer(auto_error=False)
 _api_token_warned = False  # API_TOKEN 未设的告警只发一次,不在每个请求里刷屏
+
+# 无效 per-worker token 的连续 401 计数(内存,单 api 进程,按 token_hash):达阈值 → 429+Retry-After,
+# 挡住"旧 worker 拿失效 token 每秒死刷 jobs/request"(那 worker 改不动,只能服务端自卫)。token 命中即清零。
+_AUTH_FAIL: dict[str, int] = {}
+_AUTH_FAIL_THRESHOLD = 5
+_AUTH_RETRY_AFTER_SEC = 60
+
+
+def _claimed_identity(request: Request) -> dict:
+    """从 X-Worker-* 头取 worker 自称身份(不可信,仅诊断:即使 401 也能知道谁/什么版本在刷)。"""
+    h = request.headers
+    return {
+        "claimed_id": h.get("x-worker-id", ""),
+        "claimed_type": h.get("x-worker-type", ""),
+        "claimed_host": h.get("x-worker-host", ""),
+        "claimed_version": h.get("x-worker-version", ""),
+    }
+
+
+async def _note_worker_auth_reject(request: Request, token_hash: str) -> None:
+    """无效 per-worker token:计数;【首次 + 切到限流时】各记一条事件(structlog→Dozzle + events:system→/system事件页,
+    事件驱动非按频率刷);连续达阈值则抛 429+Retry-After 挡死刷。携带 X-Worker-* 自称身份 + token 前8。"""
+    cnt = _AUTH_FAIL.get(token_hash, 0) + 1
+    _AUTH_FAIL[token_hash] = cnt
+    if cnt == 1 or cnt == _AUTH_FAIL_THRESHOLD:
+        kind = "worker_token_throttled" if cnt >= _AUTH_FAIL_THRESHOLD else "worker_auth_rejected"
+        claimed = _claimed_identity(request)
+        logger.warning(kind, token=token_hash[:8], count=cnt, **claimed)
+        try:  # 事件推送 best-effort,绝不挡认证
+            await request.app.state.redis.push_event(
+                kind, token=token_hash[:8], count=cnt, **claimed,
+            )
+        except Exception:
+            pass
+    if cnt >= _AUTH_FAIL_THRESHOLD:
+        raise HTTPException(
+            status_code=429, detail="too many invalid-token requests",
+            headers={"Retry-After": str(_AUTH_RETRY_AFTER_SEC)},
+        )
 
 
 def _truthy(v: str | None) -> bool:
@@ -91,7 +133,9 @@ async def verify_worker_token(
     db: Database = request.app.state.db
     row = await asyncio.to_thread(db.get_worker_token_by_hash, token_hash)
     if row is None or row["revoked"]:
+        await _note_worker_auth_reject(request, token_hash)  # 计数+事件;连续达阈值抛 429,否则继续抛 401
         raise HTTPException(status_code=401, detail="invalid or revoked worker token")
+    _AUTH_FAIL.pop(token_hash, None)  # token 有效 → 清该 hash 的连续失败计数
     # 把 token 行(含 pools/tags 授权范围)挂到 request.state，供端点做认领越权裁剪，不改返回类型。
     request.state.worker_token = row
     return row["worker_id"]
