@@ -22,6 +22,12 @@ from shared.models import AIUsage, Worker as WorkerModel
 from shared.redis_client import RedisClient
 
 
+class WorkerAuthRejected(Exception):
+    """网关 runner 请求被服务端以 401 拒绝(per-worker token 失效/被吊销)。
+    worker 据此【重注册 + 指数退避】;连续失败超时(默认 6h,env AUTH_GIVEUP_SEC)则自杀退出。
+    仅 GatewayTransport(出站 HTTPS)会抛;直连 RedisTransport 无此异常。见 worker.Worker._handle_auth_failure。"""
+
+
 class WorkerTransport(Protocol):
     # per-worker token,供 GatewayStorage 经网关代理产物时鉴权;直连模式为空串。
     worker_token: str

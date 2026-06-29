@@ -1130,3 +1130,76 @@ class TestReadMediaDuration:
         (tmp_path / "input").mkdir()
         (tmp_path / "input" / "metadata.json").write_text(json.dumps({"source": "podcast"}))
         assert _read_media_duration(tmp_path) is None
+
+
+class TestWorkerAuthRecovery:
+    """worker 认证自愈:401(WorkerAuthRejected)→ 重注册 + 指数退避;连续超阈值 → 自杀(_shutdown)。
+    根因:旧 worker 拿 401 不重注册也不退避,每秒死刷 jobs/request 刷爆 api 日志。"""
+
+    @pytest.mark.asyncio
+    async def test_auth_failure_reregisters_and_backs_off(self, worker, monkeypatch):
+        calls = []
+        async def fake_register():
+            calls.append(1)
+        monkeypatch.setattr(worker, "register", fake_register)
+        assert worker._auth_failed_since is None
+        await worker._handle_auth_failure()
+        assert worker._auth_failed_since is not None      # 进入失败态
+        assert len(calls) == 1                             # 触发重注册
+        assert worker._auth_backoff == 2.0                 # 退避翻倍(1→2)
+        assert not worker._shutdown
+
+    @pytest.mark.asyncio
+    async def test_note_auth_ok_resets(self, worker, monkeypatch):
+        async def fake_register():
+            return None
+        monkeypatch.setattr(worker, "register", fake_register)
+        await worker._handle_auth_failure()
+        assert worker._auth_failed_since is not None
+        worker._note_auth_ok()                             # 一次成功请求
+        assert worker._auth_failed_since is None           # 清零自愈
+        assert worker._auth_backoff == 1.0
+
+    @pytest.mark.asyncio
+    async def test_giveup_after_timeout_sets_shutdown(self, worker, monkeypatch):
+        worker._auth_giveup_sec = 100
+        async def fake_register():
+            return None
+        monkeypatch.setattr(worker, "register", fake_register)
+        await worker._handle_auth_failure()                # 首发:置 _auth_failed_since=now
+        assert not worker._shutdown                         # 未超时
+        worker._auth_failed_since -= 200                    # 回拨首发时刻,模拟已连续失败 200s>100s
+        await worker._handle_auth_failure()
+        assert worker._shutdown                             # 自杀
+
+    @pytest.mark.asyncio
+    async def test_reauth_debounced(self, worker, monkeypatch):
+        calls = []
+        async def fake_register():
+            calls.append(1)
+        monkeypatch.setattr(worker, "register", fake_register)
+        await worker._handle_auth_failure()                # 第一次重注册
+        await worker._handle_auth_failure()                # 30s 窗口内 → 不重注册(去抖)
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_gateway_request_step_raises_authrejected_on_401(self, monkeypatch):
+        from worker.gateway_transport import GatewayTransport
+        from worker.transport import WorkerAuthRejected
+
+        class _Resp:
+            status_code = 401
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return {}
+
+        class _FakeClient:
+            async def post(self, *a, **k):
+                return _Resp()
+
+        gt = GatewayTransport("https://x", registration_token="t",
+                              id_file="/tmp/_nonexistent_worker_id")
+        gt._client = _FakeClient()                          # _http 属性 None 检查后直接返回它
+        with pytest.raises(WorkerAuthRejected):
+            await gt.request_step("w1", ["cpu"], {}, set(), set())

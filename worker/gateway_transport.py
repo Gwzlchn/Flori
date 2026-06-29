@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -15,7 +16,8 @@ from typing import Optional
 import httpx
 import structlog
 
-from worker.transport import RedisTransport
+from shared.version import FLORI_VERSION
+from worker.transport import RedisTransport, WorkerAuthRejected
 
 logger = structlog.get_logger(component="gateway_transport")
 
@@ -36,6 +38,8 @@ class GatewayTransport:
         self._id_file = Path(id_file)
         self._inner = inner
         self._worker_token = ""
+        # 每个 runner 请求带的身份头(register 后填);即使 401(token 无效)服务端也能据此记下"谁/什么版本"在刷。
+        self._identity_headers: dict[str, str] = {}
         self._client: httpx.AsyncClient | None = None
         # 心跳要带 worker_id + 当前状态;状态由 update_status 记下,避免心跳把 busy 覆成 idle。
         self._status = "idle"
@@ -98,6 +102,13 @@ class GatewayTransport:
         self._worker_token = data.get("worker_token", "")
         returned_id = data.get("worker_id") or effective_id
         self._save_id(returned_id)
+        # 身份头:随每个 runner 请求上送(诊断用,不可信)。version 是排障关键——一眼认出"旧版没更新的 worker"。
+        self._identity_headers = {
+            "X-Worker-Id": returned_id,
+            "X-Worker-Type": worker_type or "",
+            "X-Worker-Host": hostname or "",
+            "X-Worker-Version": FLORI_VERSION,
+        }
         # 有内层时镜像写一份到 redis/db(认领仍走内层);无内层则跳过。
         if self._inner is not None:
             await self._inner.register(
@@ -116,14 +127,18 @@ class GatewayTransport:
             if load:
                 body["load"] = load   # 本机 live 负载,经网关写 redis worker hash(B 档各节点负载)
             resp = await self._http.post(
-                "/api/runner/heartbeat",
-                headers={"Authorization": f"Bearer {self._worker_token}"},
-                json=body,
+                "/api/runner/heartbeat", headers=self._auth(), json=body,
             )
             if resp.status_code == 401:
-                logger.warning("worker_token_revoked", worker_id=worker_id)
-        except httpx.HTTPError:
-            logger.warning("gateway_heartbeat_failed", worker_id=worker_id)
+                # 心跳也被拒 = per-worker token 失效 → 抛给主循环走重注册/退避/自杀(不再裸吞)。
+                raise WorkerAuthRejected()
+        except httpx.HTTPError as e:
+            logger.warning(
+                "gateway_heartbeat_failed", worker_id=worker_id,
+                host=socket.gethostname(), endpoint="/api/runner/heartbeat",
+                status=getattr(getattr(e, "response", None), "status_code", None),
+                error=str(e)[:200],
+            )
         # 有内层才退回维持 redis/db 新鲜;纯网关无内层,gateway 已是唯一通路。
         if self._inner is not None:
             await self._inner.heartbeat(worker_id, load=load)
@@ -152,7 +167,8 @@ class GatewayTransport:
     # ── 粗粒度认领/上报:走 gateway HTTP,不委派内层,避免经 redis 双重认领 ──
 
     def _auth(self) -> dict:
-        return {"Authorization": f"Bearer {self._worker_token}"}
+        # per-worker token + 身份头(X-Worker-*);所有走 per-worker token 的 runner 请求统一用它。
+        return {"Authorization": f"Bearer {self._worker_token}", **self._identity_headers}
 
     async def request_step(self, worker_id, pools, pool_limits, tags, reject_tags):
         # 认领走服务端长轮询;httpx 出错只 log+返回 None(worker 空转重试),绝不退回内层
@@ -166,10 +182,18 @@ class GatewayTransport:
                     "tags": sorted(tags), "reject_tags": sorted(reject_tags),
                 },
             )
+            if resp.status_code == 401:
+                # per-worker token 失效 → 抛给主循环自愈(重注册/退避/6h自杀),不再当"无任务"空转死刷。
+                raise WorkerAuthRejected()
             resp.raise_for_status()
             return resp.json().get("claim")
-        except httpx.HTTPError:
-            logger.warning("gateway_request_step_failed", worker_id=worker_id)
+        except httpx.HTTPError as e:
+            logger.warning(
+                "gateway_request_step_failed", worker_id=worker_id,
+                host=socket.gethostname(), endpoint="/api/runner/jobs/request",
+                status=getattr(getattr(e, "response", None), "status_code", None),
+                error=str(e)[:200],
+            )
             return None
 
     async def _report_best_effort(self, url, json_body, *, op,

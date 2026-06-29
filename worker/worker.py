@@ -25,8 +25,9 @@ from shared.models import AIUsage, LLMRequest, generate_worker_id
 from shared.runner_ops import parse_style_tags
 from shared.storage import StorageBackend
 from shared.sysload import collect_node_load
+from shared.version import FLORI_VERSION
 from worker.step_runner import StepContext, create_step_runner
-from worker.transport import WorkerTransport, default_worker_id_file
+from worker.transport import WorkerTransport, WorkerAuthRejected, default_worker_id_file
 
 logger = structlog.get_logger(component="worker")
 
@@ -228,12 +229,24 @@ class Worker:
         # 全局每池槽位(pools.yaml limit)仍是系统级天花板,本数只决定单 worker 的并行上限。
         self.concurrency = max(1, concurrency)
         self._shutdown = False
+        # 认证自愈(仅 GatewayTransport 抛 WorkerAuthRejected 时用):跨 slot 协调,_auth_lock 串行化。
+        self._auth_failed_since: float | None = None   # 首次连续 401 时刻(成功一次即清零)
+        self._auth_backoff = 1.0                        # 401 退避秒数(指数,封顶 60)
+        self._last_reauth = 0.0                         # 上次重注册时刻(去抖,避免每 slot 每拍重注册)
+        self._auth_lock = asyncio.Lock()
+        self._auth_giveup_sec = int(os.environ.get("AUTH_GIVEUP_SEC", str(6 * 3600)))  # 连续 401 满此 → 自杀退出
+        self._reauth_min_interval = float(os.environ.get("REAUTH_MIN_INTERVAL_SEC", "30"))
         self.runner = create_step_runner(self.worker_id)
 
     # ── 生命周期 ──
 
     async def run(self) -> None:
         await self.register()
+        # 绑身份到 contextvars → 本进程后续【所有】日志自带 worker_id/type/host/version(排障一眼知道哪台/什么版本)。
+        structlog.contextvars.bind_contextvars(
+            worker_id=self.worker_id, worker_type=self.worker_type,
+            host=socket.gethostname(), version=FLORI_VERSION,
+        )
         # runner 在 __init__ 用初始(可能随机)id 创建;register 后可能拿到稳定身份(gateway
         # WORKER_ID_FILE 缓存 id),同步给 runner 使容器 label 与 reap 用同一稳定 id。
         if hasattr(self.runner, "_worker_id"):
@@ -286,11 +299,63 @@ class Worker:
                 await self.transport.heartbeat(self.worker_id, load=collect_node_load())
             except asyncio.CancelledError:
                 raise
+            except WorkerAuthRejected:
+                # token 失效:重注册+退避;超 6h 则 _handle_auth_failure 置 _shutdown → 退出。
+                await self._handle_auth_failure()
+                if self._shutdown:
+                    break
+                await asyncio.sleep(self._auth_backoff)
+                continue
             except Exception:
                 # 瞬态 redis/网络抖动不应经 gather 杀掉整个 worker(对照 scheduler._event_loop 容错):
                 # 记日志后继续,下一拍重试;丢几拍由 worker_status.online_window(30s)容忍。
                 logger.warning("heartbeat_failed", worker_id=self.worker_id, exc_info=True)
             await asyncio.sleep(interval)
+
+    # ── 认证自愈(401 → 重注册 + 指数退避 + 连续 6h 自杀)──
+
+    async def _handle_auth_failure(self) -> None:
+        """收到 WorkerAuthRejected(401)时调:首发记一条事件;去抖重注册;指数退避;连续满 6h 仍 401 → 自杀退出。
+        多 slot/心跳会并发触发,_auth_lock 串行化(避免同窗口重复重注册)。"""
+        async with self._auth_lock:
+            now = time.time()
+            host = socket.gethostname()
+            if self._auth_failed_since is None:
+                self._auth_failed_since = now
+                logger.warning(
+                    "worker_auth_rejected", worker_id=self.worker_id,
+                    host=host, version=FLORI_VERSION,
+                )
+            elapsed = now - self._auth_failed_since
+            if elapsed >= self._auth_giveup_sec:
+                # 连续认证失败超阈值(默认 6h):认定已被服务端注销=孤儿 → 自杀退出
+                # (置 _shutdown,各 slot/心跳循环随之收场,run() 返回,进程退出)。
+                logger.error(
+                    "worker_auth_giveup_exit", worker_id=self.worker_id,
+                    host=host, version=FLORI_VERSION, failed_sec=round(elapsed),
+                )
+                self._shutdown = True
+                return
+            # 去抖重注册(每 _reauth_min_interval 至多一次):成功则下拍 200 → _note_auth_ok 清零自愈。
+            if now - self._last_reauth >= self._reauth_min_interval:
+                self._last_reauth = now
+                try:
+                    await self.register()
+                    logger.info("worker_reauth_attempt", worker_id=self.worker_id, host=host)
+                except Exception:
+                    # 重注册也失败(注册 token 过期 503 / 网络)→ 保持失败态,继续退避,等下个窗口再试。
+                    logger.warning(
+                        "worker_reauth_failed", worker_id=self.worker_id, host=host, exc_info=True,
+                    )
+            self._auth_backoff = min(self._auth_backoff * 2, 60.0)
+
+    def _note_auth_ok(self) -> None:
+        """一次 runner 请求成功(未 401)→ 清认证失败态、退避归位(健康时为廉价 no-op)。"""
+        if self._auth_failed_since is not None:
+            logger.info("worker_reauth_ok", worker_id=self.worker_id, host=socket.gethostname())
+            self._auth_failed_since = None
+            self._auth_backoff = 1.0
+            self._last_reauth = 0.0
 
     # ── 主循环 ──
 
@@ -300,10 +365,20 @@ class Worker:
         idle_timeout 由各条独立计时,全部超时退出 → worker 退出。"""
         last_task_time = time.time()
         while not self._shutdown:
-            task = await self.transport.request_step(
-                self.worker_id, self.pools, self._pool_limits(),
-                self.tags, self.reject_tags,
-            )
+            try:
+                task = await self.transport.request_step(
+                    self.worker_id, self.pools, self._pool_limits(),
+                    self.tags, self.reject_tags,
+                )
+            except WorkerAuthRejected:
+                # token 失效:重注册+退避;超 6h → _handle_auth_failure 置 _shutdown 退出。
+                # 不再把 401 当"无任务"空转、每秒死刷(本次事故根因)。
+                await self._handle_auth_failure()
+                if self._shutdown:
+                    break
+                await asyncio.sleep(self._auth_backoff)
+                continue
+            self._note_auth_ok()
             if task:
                 last_task_time = time.time()
                 try:

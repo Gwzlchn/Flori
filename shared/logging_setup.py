@@ -9,6 +9,9 @@ import structlog
 def setup_logging() -> None:
     structlog.configure(
         processors=[
+            # 合并 contextvars(bind_contextvars 绑定的字段进每条日志):worker 启动绑 worker_id/type/host/version
+            # → 该进程后续所有日志自带身份,排障一眼知道是哪台、什么版本(见 worker.Worker.run)。
+            structlog.contextvars.merge_contextvars,
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.JSONRenderer(ensure_ascii=False),
         ],
