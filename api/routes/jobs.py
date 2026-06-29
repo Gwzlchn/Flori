@@ -461,6 +461,18 @@ async def get_job(
         )
     except Exception:
         pass
+    # 本任务 AI 步用的 prompt 覆盖版本号快照:从 job.json.prompt_overrides[step].version 读
+    # (1.1.5 起注入为 {content, version};旧 job 为纯字符串无版本 → 跳过)。供前端比对「本任务 vX vs 当前 vY」。
+    prompt_versions: dict = {}
+    try:
+        raw = await storage.read_file(job_id, "job.json")
+        if raw:
+            jd = json.loads(raw.decode("utf-8"))
+            for stp, val in (jd.get("prompt_overrides") or {}).items():
+                if isinstance(val, dict) and val.get("version") is not None:
+                    prompt_versions[stp] = val["version"]
+    except Exception:
+        pass
     return JobDetailResponse(
         job_id=job.id, content_type=job.content_type, status=job.status.value,
         created_at=job.created_at.isoformat(),
@@ -481,6 +493,7 @@ async def get_job(
             )
             for s in steps
         ],
+        prompt_versions=prompt_versions,
     )
 
 

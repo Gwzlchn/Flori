@@ -482,3 +482,32 @@ class TestCreateJobInjection:
         job_id = resp.json()["job_id"]
         doc = json.loads(await app.state.storage.read_file(job_id, "job.json"))
         assert "prompt_overrides" not in doc
+
+    async def test_job_detail_exposes_prompt_versions(self, client):
+        # C4:建覆盖 → 新建 job → 详情 prompt_versions 含该步派发时的版本快照。
+        await client.put(
+            "/api/prompts/article/04_smart_article",
+            json={"scope": "global", "content": "OV"},
+        )
+        # 再 new 一版 → 激活 v2,新 job 应快照 v2。
+        await client.put(
+            "/api/prompts/article/04_smart_article",
+            json={"scope": "global", "content": "OV2", "mode": "new"},
+        )
+        resp = await client.post(
+            "/api/jobs",
+            json={"url": "https://example.com/pv", "content_type": "article", "domain": "general"},
+        )
+        assert resp.status_code == 201
+        job_id = resp.json()["job_id"]
+        d = (await client.get(f"/api/jobs/{job_id}")).json()
+        assert d["prompt_versions"]["04_smart_article"] == 2
+
+    async def test_job_detail_prompt_versions_empty_without_override(self, client):
+        resp = await client.post(
+            "/api/jobs",
+            json={"url": "https://example.com/pv2", "content_type": "article", "domain": "general"},
+        )
+        job_id = resp.json()["job_id"]
+        d = (await client.get(f"/api/jobs/{job_id}")).json()
+        assert d["prompt_versions"] == {}

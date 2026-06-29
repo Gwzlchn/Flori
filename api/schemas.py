@@ -38,6 +38,9 @@ class JobDetailResponse(JobResponse):
     artifacts: list[str] = Field(default_factory=list)  # 可见产物文件路径(元信息标签页"产物路径")
     meta: dict = Field(default_factory=dict)
     steps: list[StepResponse] = Field(default_factory=list)
+    # 本任务各 AI 步派发时用的 prompt 覆盖版本号快照(从 job.json.prompt_overrides[step].version 读;
+    # 无覆盖的步不出现)。前端与当前激活版本(GET /api/prompts)比,不一致提示「重跑该步」(白盒版本管理 §1.14)。
+    prompt_versions: dict = Field(default_factory=dict)
 
 
 class StepResponse(BaseModel):

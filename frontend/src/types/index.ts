@@ -125,6 +125,7 @@ export interface JobDetail extends JobSummary {
   artifacts: string[]           // 可见产物文件路径
   meta: Record<string, any>
   steps: StepInfo[]
+  prompt_versions?: Record<string, number>  // 本任务各 AI 步用的 prompt 覆盖版本号快照(无覆盖步不出现)
 }
 
 export interface JobListResponse {

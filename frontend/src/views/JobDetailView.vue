@@ -159,6 +159,8 @@ async function fetchDetail() {
     api.get<{ pipelines?: any[] }>('/api/pipelines').then(r => { pipelinesDef.value = Array.isArray(r) ? r : (r?.pipelines ?? []) }).catch(() => {})
     // 逐次 AI 用量 → DAG 节点 provider/开销 + 总开销。带 job 切换守卫,迟到的回填不串到新 job。
     api.get<{ usage?: any[] }>(`/api/jobs/${fid}/usage`).then(r => { if (jobId.value === fid) jobUsageRows.value = r?.usage || [] }).catch(() => {})
+    // 本任务各 AI 步用的 prompt 版本 vs 当前激活版本(白盒版本管理);不一致给「重跑该步」。
+    loadPromptVersions().catch(() => {})
     // 完成态默认落笔记，否则落流水线。
     tab.value = d.status === 'done' ? 'notes' : 'proc'
   } catch (e: any) {
@@ -473,6 +475,52 @@ async function rerunFromStep() {
   try {
     await jobStore.rerunJob(jobId.value, selectedStep.value)
     showToast(`从 ${selectedStepLabel.value} 开始重跑`, 'success')
+    jobStatus.value = 'processing'
+  } catch (e: any) { showToast(e?.message || '重跑失败', 'error') }
+}
+
+// ── 本任务 prompt 版本(白盒版本管理 §1.14)──
+// job.json.prompt_overrides[step].version 是【本任务派发时用的版本快照】(后端透出 job.prompt_versions)。
+// 拿它与当前激活版本(GET /api/prompts/{pipeline}/{step},按本 job domain 解析:domain 优先于 global)比,
+// 不一致(stale)→ 高亮 + 「重跑该步」(复用 POST /api/jobs/{id}/rerun {from_step},清该步及下游 .done 重跑)。
+type AiPromptRow = { step: string; label: string; used: number; current: number | null; stale: boolean }
+const aiPromptRows = ref<AiPromptRow[]>([])
+
+async function loadPromptVersions() {
+  aiPromptRows.value = []
+  const pv = job.value?.prompt_versions || {}
+  const pipeline = job.value?.content_type
+  const dom = (job.value?.domain || '').trim()
+  const fid = jobId.value
+  if (!pipeline || !Object.keys(pv).length) return
+  const rows: AiPromptRow[] = []
+  for (const [step, used] of Object.entries(pv)) {
+    // 当前激活版本:先按本 job domain 查(domain 覆盖优先),无则回退 global;两者都无 = 已删覆盖(默认)。
+    let current: number | null = null
+    try {
+      if (dom) {
+        const dq = await api.get<{ active_version: number | null }>(
+          `/api/prompts/${pipeline}/${step}?scope=domain&domain=${encodeURIComponent(dom)}`)
+        if (dq.active_version != null) current = dq.active_version
+      }
+      if (current == null) {
+        const gq = await api.get<{ active_version: number | null }>(
+          `/api/prompts/${pipeline}/${step}?scope=global`)
+        current = gq.active_version ?? null
+      }
+    } catch { /* 读不到当前版本时按未知处理,不阻断 */ }
+    const label = jobDagSteps.value.find(x => x.key === step)?.label
+      || steps.value.find(x => x.name === step)?.label || step
+    rows.push({ step, label, used: used as number, current, stale: current !== (used as number) })
+  }
+  if (jobId.value === fid) aiPromptRows.value = rows
+}
+
+// 「重跑该步」:复用 job 级 rerun(from_step=该步),scheduler 清该步及下游 .done 后重跑(应用新激活 prompt)。
+async function rerunStep(step: string) {
+  try {
+    await jobStore.rerunJob(jobId.value, step)
+    showToast('已发起重跑该步(及其下游)', 'success')
     jobStatus.value = 'processing'
   } catch (e: any) { showToast(e?.message || '重跑失败', 'error') }
 }
@@ -825,6 +873,21 @@ watch(job, (j) => {
             <GitBranch :size="14" />{{ rebuilding ? '重建中…' : '重建新版本' }}
           </button>
         </div>
+        <!-- 本任务 Prompt 版本:AI 步显示派发时用的版本,与当前激活版本不一致则高亮 + 「重跑该步」 -->
+        <div v-if="aiPromptRows.length" class="card pad" style="margin-bottom:12px">
+          <div class="card-h"><FileText :size="15" />本任务 Prompt 版本</div>
+          <div v-for="r in aiPromptRows" :key="r.step" class="pver-row">
+            <span class="pver-step">{{ r.label }}</span>
+            <span class="pver-tag" :class="r.stale ? 'pv-stale' : 'pv-ok'">
+              本任务 prompt v{{ r.used }}<template v-if="r.stale"> · 当前 {{ r.current == null ? '默认(无覆盖)' : 'v' + r.current }}</template>
+            </span>
+            <span style="flex:1"></span>
+            <button v-if="r.stale" class="btn sm" @click="rerunStep(r.step)"><Play :size="13" />重跑该步</button>
+          </div>
+          <div class="dim" style="font-size:12px;margin-top:6px">
+            「本任务」= 该步派发时用的 prompt 版本快照;不一致表示之后改过 prompt,可「重跑该步」按当前版本重出(连同其下游)。
+          </div>
+        </div>
         <StepWorkbench :job-id="jobId" :steps="steps" :selected-step="selectedStep" />
       </div>
 
@@ -959,4 +1022,11 @@ watch(job, (j) => {
   font-size: 12px; color: var(--ink-600); padding: 3px 8px; border-radius: 5px;
   background: var(--raised); border: 1px solid var(--line-soft); word-break: break-all;
 }
+/* 本任务 Prompt 版本行 */
+.pver-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+.pver-row + .pver-row { border-top: 1px solid var(--line-soft); }
+.pver-step { font-size: 13px; font-weight: 600; color: var(--ink-700); }
+.pver-tag { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
+.pv-ok { color: var(--ink-500, #6b7280); background: var(--mut-bg, #f1f5f9); }
+.pv-stale { color: var(--warn-700, #b45309); background: var(--warn-bg, #fffbeb); }
 </style>
