@@ -1203,3 +1203,36 @@ class TestWorkerAuthRecovery:
         gt._client = _FakeClient()                          # _http 属性 None 检查后直接返回它
         with pytest.raises(WorkerAuthRejected):
             await gt.request_step("w1", ["cpu"], {}, set(), set())
+
+
+class TestWorkerRegisterRetry:
+    """register() 连不上网关(部署时 api 晚起的启动竞态)→ WARN + 固定间隔重试,不崩进程;
+    401/503(HTTPStatusError)不在连接重试内,照常上抛走既有路径。"""
+
+    @pytest.mark.asyncio
+    async def test_retries_on_connect_error_then_succeeds(self, worker, monkeypatch, capsys):
+        import httpx
+        calls = []
+        async def flaky_register(**kw):
+            calls.append(1)
+            if len(calls) == 1:
+                raise httpx.ConnectError("All connection attempts failed")
+            return "io-stable123"
+        monkeypatch.setattr(worker.transport, "register", flaky_register)
+        monkeypatch.setenv("REGISTER_RETRY_SEC", "0")        # 测试不等
+        await worker.register()                               # 不崩
+        assert len(calls) == 2                                # 第一次 ConnectError → 重试 → 第二次成功
+        assert worker.worker_id == "io-stable123"
+        assert "register_connect_retry" in capsys.readouterr().out   # 打了 WARN(非整屏 traceback)
+
+    @pytest.mark.asyncio
+    async def test_does_not_retry_on_http_status_error(self, worker, monkeypatch):
+        import httpx
+        req = httpx.Request("POST", "http://x/api/runner/register")
+        resp = httpx.Response(503, request=req)
+        async def rejecting_register(**kw):
+            raise httpx.HTTPStatusError("registration disabled", request=req, response=resp)
+        monkeypatch.setattr(worker.transport, "register", rejecting_register)
+        monkeypatch.setenv("REGISTER_RETRY_SEC", "0")
+        with pytest.raises(httpx.HTTPStatusError):            # 503/401 照常上抛,不被连接重试吞
+            await worker.register()

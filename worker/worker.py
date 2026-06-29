@@ -17,6 +17,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
+import redis.exceptions
 import structlog
 
 from shared.ai_gateway import AIGateway, collect_usage_from_file
@@ -283,12 +285,29 @@ class Worker:
 
     async def register(self) -> None:
         # gateway 注册可能返回缓存身份(重启复用同一 id);runner 已用旧 id 创建但子进程忽略 worker_id,无碍。
-        self.worker_id = await self.transport.register(
-            worker_id=self.worker_id, worker_type=self.worker_type,
-            pools=self.pools, tags=self.tags, reject_tags=self.reject_tags,
-            hostname=socket.gethostname(), now=datetime.now(timezone.utc),
-            concurrency=self.concurrency, spec=_worker_spec(),
-        )
+        # 连不上网关/redis(部署时 api 比 worker 晚起几百 ms,启动顺序竞态)→ 固定间隔 WARN 重试,
+        # 不再首拍 ConnectError 抛到 main 崩进程(刷整屏 traceback + 白白重启一次)。
+        # 仅兜【连接类】失败;401 / 注册 token 过期(503,是 httpx.HTTPStatusError 非 TransportError)不在此重试,
+        # 照常上抛走既有路径(_handle_auth_failure / 既有 503 处理)。
+        retry_sec = float(os.environ.get("REGISTER_RETRY_SEC", "3"))
+        while not self._shutdown:
+            try:
+                self.worker_id = await self.transport.register(
+                    worker_id=self.worker_id, worker_type=self.worker_type,
+                    pools=self.pools, tags=self.tags, reject_tags=self.reject_tags,
+                    hostname=socket.gethostname(), now=datetime.now(timezone.utc),
+                    concurrency=self.concurrency, spec=_worker_spec(),
+                )
+                return
+            except (httpx.TransportError, redis.exceptions.ConnectionError,
+                    redis.exceptions.TimeoutError) as e:
+                # 连不上:WARN 一条摘要(非整屏 traceback)+ 固定间隔重试(不指数,本身差不了几秒)。
+                logger.warning(
+                    "register_connect_retry", worker_id=self.worker_id,
+                    host=socket.gethostname(), endpoint="/api/runner/register",
+                    error=str(e)[:200], retry_sec=retry_sec,
+                )
+                await asyncio.sleep(retry_sec)
 
     async def heartbeat_loop(self) -> None:
         # 心跳节拍读 config(单一事实源);此前硬编码 10s、配置项无人读。
