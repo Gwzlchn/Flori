@@ -246,4 +246,25 @@ describe('SystemView', () => {
     expect(store.fetchAll).toHaveBeenCalled()
     expect(store.fetchFullStatus).toHaveBeenCalled()
   })
+
+  it('接入命令随勾选能力多选生成 --pools + 各能力配置并集', async () => {
+    const store = useWorkerStore()
+    stubStoreData(store)
+    const w = mountView({ workers: [] })
+    await flushPromises()
+    // 默认只勾 cpu → --pools cpu,无 GPU/代理凭证
+    expect(w.text()).toContain('--pools cpu')
+    expect(w.text()).not.toContain('--gpus all')
+    // 再勾 io + gpu + ai(cpu 仍勾)→ 命令排序稳定 + 三套配置取并集(无主次)
+    await w.find('input[type="checkbox"][value="io"]').setValue(true)
+    await w.find('input[type="checkbox"][value="gpu"]').setValue(true)
+    await w.find('input[type="checkbox"][value="ai"]').setValue(true)
+    await flushPromises()
+    const t = w.text()
+    expect(t).toContain('--pools ai cpu gpu io')   // 排序 join,不随勾选顺序抖
+    expect(t).toContain('--gpus all')               // gpu → GPU 直通
+    expect(t).toContain('MODEL_CACHE_DIR')          // gpu → whisper 缓存卷
+    expect(t).toContain('BILI_SESSDATA')            // io → B站 cookie
+    expect(t).toContain('/root/.claude')            // ai(默认 claude-sub)→ 挂宿主 ~/.claude
+  })
 })

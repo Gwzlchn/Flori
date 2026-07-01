@@ -341,7 +341,10 @@ function onEnrollToggle(e: Event) {
   localStorage.setItem(ENROLL_KEY, open ? '1' : '0')
 }
 
-const newType = ref('cpu')
+// 能力 = 订阅的资源池,可多选、无主次(旧单选 --type 已废;命令生成 --pools)。至少选一个。
+const selectedPools = ref<string[]>(['cpu'])
+// WORKER_NAME 基名:多池排序 join('-')(如 cpu-gpu),仅命名/展示用;排序=命令稳定不随勾选顺序抖。
+const nameBase = computed(() => [...selectedPools.value].sort().join('-') || 'worker')
 const newTags = ref('')
 const activeTab = ref<(typeof TABS)[number]['id']>('gateway')
 const token = ref('')
@@ -359,23 +362,26 @@ const gatewayUrl = computed(() => {
   return o && o.startsWith('http') ? o : 'https://<FLORI_HOST>'
 })
 const credLines = computed(() => {
-  if (newType.value === 'ai') {
-    if (aiCredMethod.value === 'claude-sub') return '  -v $HOME/.claude:/root/.claude \\\n'
-    if (aiCredMethod.value === 'deepseek') return '  -e DEEPSEEK_API_KEY=<KEY> \\\n'
-    return '  -e ANTHROPIC_API_KEY=<KEY> \\\n'
+  // 按勾选的能力【取并集】:勾 ai→claude/API 凭证;勾 io→B站 cookie。多池同机全都要。
+  let s = ''
+  if (selectedPools.value.includes('ai')) {
+    if (aiCredMethod.value === 'claude-sub') s += '  -v $HOME/.claude:/root/.claude \\\n'
+    else if (aiCredMethod.value === 'deepseek') s += '  -e DEEPSEEK_API_KEY=<KEY> \\\n'
+    else s += '  -e ANTHROPIC_API_KEY=<KEY> \\\n'
   }
-  if (newType.value === 'io') return '  -e BILI_SESSDATA=<B站SESSDATA,留空=匿名480P> \\\n'
-  return ''
+  if (selectedPools.value.includes('io')) s += '  -e BILI_SESSDATA=<B站SESSDATA,留空=匿名480P> \\\n'
+  return s
 })
-const cacheLine = computed(() => (newType.value === 'gpu'
+const cacheLine = computed(() => (selectedPools.value.includes('gpu')
   ? '  -v whisper-cache:/cache -e MODEL_CACHE_DIR=/cache \\\n' : ''))
 const tagsArg = computed(() => {
   const t = newTags.value.split(/[\s,]+/).filter(Boolean)
   return t.length ? ` --tags ${t.join(' ')}` : ''
 })
-const runCmd = computed(() => `python -m worker.main --type ${newType.value}${tagsArg.value}`)
+// 唯一能力表达:--pools <所勾选>(旧 --type 已删)。
+const runCmd = computed(() => `python -m worker.main --pools ${[...selectedPools.value].sort().join(' ') || '<至少勾一个能力>'}${tagsArg.value}`)
 const tokenLine = computed(() => token.value || 'flw-<生成后填入>')
-const gpuFlag = computed(() => (newType.value === 'gpu' ? ' --gpus all' : ''))
+const gpuFlag = computed(() => (selectedPools.value.includes('gpu') ? ' --gpus all' : ''))
 
 const command = computed(() => {
   if (activeTab.value === 'gateway') {
@@ -383,19 +389,17 @@ const command = computed(() => {
   -e GATEWAY_URL=${gatewayUrl.value} \\
   -e GATEWAY_TLS_INSECURE=1 \\
   -e WORKER_REGISTRATION_TOKEN=${tokenLine.value} \\
-  -e WORKER_NAME=${newType.value}-1 \\
+  -e WORKER_NAME=${nameBase.value}-1 \\
   -e WORKER_CONCURRENCY=${newConcurrency.value} \\
 ${credLines.value}${cacheLine.value}  ${IMAGE} \\
   ${runCmd.value}`
   }
   if (activeTab.value === 'compose') {
-    const credCompose = newType.value === 'ai'
-      ? '      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}\n'
-      : newType.value === 'io'
-        ? '      - BILI_SESSDATA=${BILI_SESSDATA:-}\n'
-        : ''
+    let credCompose = ''
+    if (selectedPools.value.includes('ai')) credCompose += '      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}\n'
+    if (selectedPools.value.includes('io')) credCompose += '      - BILI_SESSDATA=${BILI_SESSDATA:-}\n'
     return `# 追加到 docker-compose.yml services:
-  worker-${newType.value}-extra:
+  worker-${nameBase.value}-extra:
     image: ${IMAGE}
     restart: unless-stopped
     command: ${runCmd.value}
@@ -403,7 +407,7 @@ ${credLines.value}${cacheLine.value}  ${IMAGE} \\
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DATA_DIR=/data
-      - WORKER_NAME=${newType.value}-1
+      - WORKER_NAME=${nameBase.value}-1
       - WORKER_CONCURRENCY=${newConcurrency.value}
 ${credCompose}    depends_on: [ redis ]`
   }
@@ -675,10 +679,13 @@ const usageByProvider = computed(() => {
       <div style="margin-top:14px">
         <div class="row2" style="margin-bottom:14px">
           <div class="field" style="margin:0">
-            <label>类型</label>
-            <select v-model="newType" class="input">
-              <option v-for="t in WORKER_TYPES" :key="t" :value="t">{{ t }}</option>
-            </select>
+            <label>能力（可多选，一台机器会几种活就勾几个）</label>
+            <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;padding-top:7px">
+              <label v-for="t in WORKER_TYPES" :key="t"
+                     style="display:flex;gap:5px;align-items:center;cursor:pointer;font-weight:normal;margin:0">
+                <input type="checkbox" :value="t" v-model="selectedPools" /> {{ t }}
+              </label>
+            </div>
           </div>
           <div class="field" style="margin:0">
             <label>标签（可选，空=自动探测）</label>
@@ -689,7 +696,7 @@ const usageByProvider = computed(() => {
           <label>并发(本机同时跑几步;弱机=1,强机调大)</label>
           <input v-model.number="newConcurrency" type="number" min="1" class="input" />
         </div>
-        <div v-if="newType === 'ai'" class="field" style="margin:0 0 14px">
+        <div v-if="selectedPools.includes('ai')" class="field" style="margin:0 0 14px">
           <label>AI 凭证方式</label>
           <select v-model="aiCredMethod" class="input">
             <option v-for="m in AI_CRED_METHODS" :key="m.id" :value="m.id">{{ m.label }}</option>
