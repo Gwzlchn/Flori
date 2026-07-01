@@ -7,7 +7,8 @@ services:
     build:
       context: .
       dockerfile: docker/base.Dockerfile
-      target: test        # 精简测试 stage(全 pip extras+[test] 依赖,无 ffmpeg/nodejs/claude 二进制)→ 见 base.Dockerfile
+      target: test-worker  # 本地用【全量】测试镜像(普通 test + [steps] 媒体库):任意模块/step 测试都能跑。
+                           # CI 才拆两 job:普通 job 用 test(轻~350MB) + worker job 用 test-worker(重)。见 base.Dockerfile / ci.yml
       args:
         USE_USTC_MIRROR: "${USE_USTC_MIRROR:-1}"
     volumes:

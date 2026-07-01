@@ -3,7 +3,7 @@ name = "flori"
 # 版本递增三档:普通改动 patch(第3段)+1;大的重构 minor(中段)+1;架构级大重构 major(首段)+1。
 # 逢10进位(0.8.9→0.9.0,0.9.9→1.0.0)。每提交必 bump,标题带 ;版本。详见 CLAUDE.md §提交规范。
 # 全系统单一版本,所有组件(api/scheduler/worker)统一。运行时 = 此值 + 构建短sha(见 shared/version.py)。
-version = "1.1.23"
+version = "1.1.24"
 description = "AI-assisted personal learning knowledge base"
 requires-python = ">=3.11"
 # 上界封顶:挡住新 major/minor 静默引入(USTC 与官方源解析差异曾坑过 CI);
@@ -57,7 +57,6 @@ test = [
     "pytest>=8.0,<9",
     "pytest-asyncio>=0.24,<1",
     "pytest-xdist>=3,<4",   # 多进程并行(-n auto):用例进程内 fakeredis、无跨进程共享态 → xdist 安全,实测 122s→53s
-    "pytest-split>=0.9,<1",  # 静态均衡分片(--splits N --group M):CI 把 unit 拆 3 shard 并行,关键路径 1m21s→~27s
     "pytest-testmon>=2,<3",  # 只跑受本次改动影响的用例(scripts/test.sh --changed):迭代循环秒级
     "fakeredis[lua]>=2.28,<4",
     "pytest-cov>=5,<7",

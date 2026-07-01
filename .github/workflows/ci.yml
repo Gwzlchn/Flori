@@ -10,42 +10,35 @@ on:
     branches: [main]
     paths-ignore: ['**.md', 'docs/**', 'ROADMAP.md', '.local/**']
 
+# ★后端单测【按"普通 vs worker"拆两 job 并行】(与部署镜像同理拆):
+#   unit-normal:轻镜像 test([api,worker,mcp,test],~350MB,build/load 秒级)跑【非 step 测试】(绝大多数)。
+#   unit-worker:重镜像 test-worker(test + ffmpeg + [steps] 媒体库)跑【step/worker 测试】(tests/steps + test_step_* + test_worker)。
+#   各产【部分覆盖率】上传;coverage-gate 合并判 75%。关键路径 = max(两 job) → build-push,压 <2min。
 jobs:
-  # 后端单测【拆 3 shard 并行】(pytest-split 静态均衡分片):关键路径 1m21s(全量) → ~max(shard)≈27s。
-  # 每 shard 只跑 1/3 用例、产【部分覆盖率】.coverage.N 上传;合并判 75% 交给 coverage-gate(分片后各自判会漏)。
-  # test stage 精简镜像(无 ffmpeg/nodejs/claude)走 registry buildcache(flori-test:buildcache),3 shard 并行共享缓存。
-  unit:
-    strategy:
-      fail-fast: false
-      matrix:
-        group: [1, 2, 3]
+  unit-normal:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write          # 仅 group 1 cache-to 写 ghcr flori-test:buildcache 需 packages:write
+      packages: write
     env:
-      USE_USTC_MIRROR: "0"     # 海外 runner 用官方源
+      USE_USTC_MIRROR: "0"
     steps:
       - uses: actions/checkout@v6
-      # ghcr 缓存引用必须全小写;owner 含大写 → 统一算一个小写 owner 供 cache 引用。
       - name: Lowercase owner
         run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
-      # 抹 pyproject version→占位(0.0.0)稳定 COPY pyproject 缓存层(version 每提交变,否则下游 pip 全废冷建);
-      # 真实版本读出经 FLORI_VERSION build-arg 注入镜像 ENV(shared/version.py 用它覆盖,显示仍准)。
       - name: 稳定 pip 缓存(取真实版本 + 抹 pyproject version 为占位)
         run: |
           echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_ENV"
           sed -i 's/^version = .*/version = "0.0.0"/' pyproject.toml
       - uses: docker/setup-buildx-action@v4
       - name: Log in to ghcr.io
-        if: github.ref == 'refs/heads/main'   # 仅 main 需登录(写 buildcache);PR 只读缓存(读不到则优雅回退 gha)
+        if: github.ref == 'refs/heads/main'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # load=true 把 flori-test:latest 装进本地 docker,供下方 docker compose run 直接用(不再 build)。
-      - name: Build test image(test stage, registry buildcache)
+      - name: Build 普通 test 镜像(target test,轻)
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -59,32 +52,83 @@ jobs:
           cache-from: |
             type=registry,ref=ghcr.io/${{ env.OWNER_LC }}/flori-test:buildcache
             type=gha,scope=flori-test
-          # ★仅 group 1 写 buildcache(3 shard 并行,避免多写同一 ref 冲突/浪费);其余 shard 只读。PR 回退 gha。
-          cache-to: ${{ github.ref == 'refs/heads/main' && matrix.group == 1 && format('type=registry,ref=ghcr.io/{0}/flori-test:buildcache,mode=max', env.OWNER_LC) || (github.ref != 'refs/heads/main' && matrix.group == 1 && 'type=gha,scope=flori-test,mode=max' || '') }}
-      # shard N/3:pytest-split 静态分片 + -n auto 进程并行;--cov-report= 只写数据不出报告;
-      # COVERAGE_FILE 指向挂载卷 /covdata/.coverage.N → 上传 artifact,coverage-gate 合并判门。
-      - name: Unit tests (shard ${{ matrix.group }}/3, 部分覆盖率)
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}/flori-test:buildcache,mode=max', env.OWNER_LC) || 'type=gha,scope=flori-test,mode=max' }}
+      # 非 step 测试(--ignore 掉 tests/steps 目录 + 根 tests/test_step_*.py + test_worker.py → 归 unit-worker)。
+      - name: Unit tests(普通,非 step)+ 部分覆盖率
         run: |
           mkdir -p covdata
           docker compose -f docker-compose.test.yml run --rm \
-            -v "$GITHUB_WORKSPACE/covdata:/covdata" \
-            -e COVERAGE_FILE=/covdata/.coverage.${{ matrix.group }} \
+            -v "$GITHUB_WORKSPACE/covdata:/covdata" -e COVERAGE_FILE=/covdata/.coverage.normal \
             test \
             pytest -p no:cacheprovider -m 'not fuzz' -n auto \
-              --splits 3 --group ${{ matrix.group }} \
+              --ignore=tests/steps --ignore-glob='tests/test_step_*.py' --ignore=tests/test_worker.py \
               --cov=shared --cov=api --cov=scheduler --cov=worker --cov=steps \
               --cov-branch --cov-report=
-      - name: Upload 部分覆盖率
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: cov-${{ matrix.group }}
-          path: covdata/.coverage.${{ matrix.group }}
-          include-hidden-files: true    # .coverage.N 是隐藏文件,v4 默认排除隐藏文件
+          name: cov-normal
+          path: covdata/.coverage.normal
+          include-hidden-files: true
 
-  # 合并 3 shard 的部分覆盖率 → 判分支覆盖率门 75%(★分片后不能各自判,部分覆盖会误判)。
-  # 在 test 容器内 combine+report:数据路径 /app/* 与容器内源码一致,不用 [paths] 重映射。
+  unit-worker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      USE_USTC_MIRROR: "0"
+    steps:
+      - uses: actions/checkout@v6
+      - name: Lowercase owner
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - name: 稳定 pip 缓存(取真实版本 + 抹 pyproject version 为占位)
+        run: |
+          echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_ENV"
+          sed -i 's/^version = .*/version = "0.0.0"/' pyproject.toml
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to ghcr.io
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build worker test 镜像(target test-worker,含 [steps] 媒体库)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/base.Dockerfile
+          target: test-worker
+          tags: flori-test:latest
+          load: true
+          build-args: |
+            USE_USTC_MIRROR=0
+            FLORI_VERSION=${{ env.FLORI_VERSION }}
+          cache-from: |
+            type=registry,ref=ghcr.io/${{ env.OWNER_LC }}/flori-test-worker:buildcache
+            type=gha,scope=flori-test-worker
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}/flori-test-worker:buildcache,mode=max', env.OWNER_LC) || 'type=gha,scope=flori-test-worker,mode=max' }}
+      # step/worker 测试(tests/steps 目录 + 根 tests/test_step_*.py + test_worker.py;真需媒体库,在 test-worker 镜像跑)。
+      - name: Unit tests(step/worker)+ 部分覆盖率
+        run: |
+          mkdir -p covdata
+          docker compose -f docker-compose.test.yml run --rm \
+            -v "$GITHUB_WORKSPACE/covdata:/covdata" -e COVERAGE_FILE=/covdata/.coverage.worker \
+            test \
+            pytest -p no:cacheprovider -m 'not fuzz' -n auto \
+              tests/steps tests/test_step_*.py tests/test_worker.py \
+              --cov=shared --cov=api --cov=scheduler --cov=worker --cov=steps \
+              --cov-branch --cov-report=
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cov-worker
+          path: covdata/.coverage.worker
+          include-hidden-files: true
+
+  # 合并【普通 + worker】两份部分覆盖率 → 判分支覆盖率门 75%(拆 job 后不能各自判,部分覆盖会误判)。
+  # 在轻镜像 test 里 combine:源码 /app/* 与两 job 记录路径一致,不需 [paths] 重映射;test 镜像轻、build 快。
   coverage-gate:
-    needs: [unit]
+    needs: [unit-normal, unit-worker]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -101,8 +145,7 @@ jobs:
           echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_ENV"
           sed -i 's/^version = .*/version = "0.0.0"/' pyproject.toml
       - uses: docker/setup-buildx-action@v4
-      # gate 不写 cache(group 1 已写),只读命中(shard 刚建的层全在缓存 → 秒级)。
-      - name: Build test image(buildcache 命中复用)
+      - name: Build 普通 test 镜像(buildcache 命中,轻)
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -116,12 +159,12 @@ jobs:
           cache-from: |
             type=registry,ref=ghcr.io/${{ env.OWNER_LC }}/flori-test:buildcache
             type=gha,scope=flori-test
-      - name: Download 各 shard 部分覆盖率
+      - name: Download 两份部分覆盖率
         uses: actions/download-artifact@v4
         with:
           pattern: cov-*
           path: covdata
-          merge-multiple: true          # 三个 artifact 合到一个目录:covdata/.coverage.{1,2,3}
+          merge-multiple: true          # cov-normal + cov-worker → covdata/.coverage.{normal,worker}
       - name: Combine 覆盖率 + 判分支覆盖率门(--fail-under=75)
         id: cov
         run: |
@@ -132,7 +175,7 @@ jobs:
           pct=$(awk '/^TOTAL/{gsub("%","",$NF); print $NF}' /tmp/cov.log | tail -1)
           pct=${pct:-unknown}
           echo "pct=$pct" >> "$GITHUB_OUTPUT"
-          echo "### 🐍 后端分支覆盖率(合并 3 shard):${pct}%" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 🐍 后端分支覆盖率(合并 普通+worker):${pct}%" >> "$GITHUB_STEP_SUMMARY"
 
   # 注:OpenAPI 模糊/契约(schemathesis)已拆到独立每日 cron(.github/workflows/fuzz.yml),不拖慢 push CI。
 
@@ -205,11 +248,11 @@ jobs:
   # 测试过才构建镜像(amd64)。PR 也构建(验 Dockerfile/前端 vue-tsc),推送仅 main。
   # 路径过滤:仅重建【本次改动相关】的镜像(前端-only 跳后端 3 镜像,后端-only 跳前端)。
   build-push:
-    needs: [coverage-gate, fe-test, detect]
+    needs: [unit-normal, unit-worker, fe-test, detect]
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write          # 推镜像到 ghcr.io 用内置 GITHUB_TOKEN
+      packages: write
     strategy:
       matrix:
         include:
@@ -230,7 +273,6 @@ jobs:
             context: ./frontend
     steps:
       - uses: actions/checkout@v6
-      # 本 matrix 项是否需要构建:前端镜像看 frontend 改动,后端 3 镜像看 backend 改动。跳过则整个 job 空转极快。
       - name: 是否需要构建本镜像
         id: gate
         run: |
@@ -273,9 +315,9 @@ jobs:
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          target: ${{ matrix.target }}   # 后端=scheduler/api/worker;前端空 → 建末 stage
+          target: ${{ matrix.target }}
           platforms: linux/amd64
-          push: ${{ github.ref == 'refs/heads/main' }}   # PR 只构建验证,推送仅 main
+          push: ${{ github.ref == 'refs/heads/main' }}
           tags: ${{ steps.meta.outputs.tags }}
           build-args: |
             USE_USTC_MIRROR=0

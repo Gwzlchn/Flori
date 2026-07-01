@@ -101,21 +101,11 @@ ENV FLORI_BUILD_SHA=${FLORI_BUILD_SHA}
 ARG FLORI_VERSION=
 ENV FLORI_VERSION=${FLORI_VERSION}
 
-# ── test:精简测试镜像 —— 全 pip extras + [test] 依赖,仅给测试(docker-compose.test.yml
-#    --cov=shared,api,scheduler,worker,steps 需 import 全部模块)。
-#    【不装 apt ffmpeg/nodejs + npm claude-code、不烤 cn 表】:pytest -m 'not fuzz' 全程 mock 二进制
-#      (已审计 1570 用例;net_zone 测试自带 monkeypatch 临时表),import 重媒体库走自带 .so 的 wheel。
-#    [test] 依赖烤进镜像 → compose 跑时不再运行时 pip install(更快、版本随 pyproject 不漂移)。
+# ── test(普通):纯逻辑单测镜像 —— 仅 [api,worker,mcp,test],无 ffmpeg / 无 [steps] 媒体库(opencv/pymupdf/skimage…)。
+#    跑【非 step 测试】(scheduler/api/shared/db/redis/… 绝大多数):app+tests 无任何顶层 import 重库(全惰性 + mock),
+#    collection 与运行都不需要。与部署镜像同理拆「普通 vs worker」:普通镜像轻(~350MB,build/load 秒级)。
 FROM common AS test
-# 测试需要两类系统依赖,【但不装 nodejs + npm claude-code(~900MB 大头 + 慢)】:
-#   ① ffmpeg/ffprobe:少数 download/metadata 用例真调 ffprobe(假 mp4 读不出时长、代码能处理空结果),
-#      非全 mock → 缺二进制会 FileNotFoundError。装 ffmpeg 给 ffprobe(顺带带齐 PyAV/解码库)。
-#   ② opencv-python(cv2,经 scenedetect[opencv])import 需的 X/GL 共享库(libGL/libxcb/libSM 等)。
-#   claude/node 则【确实不装】:已审计 1570+ 用例对 claude/node 全程 mock 或走 shutil.which 的 None 分支,无真执行。
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
-    && rm -rf /var/lib/apt/lists/*
-RUN --mount=type=cache,target=/root/.cache/pip pip install ".[steps,api,worker,gpu,mcp,test]"
+RUN --mount=type=cache,target=/root/.cache/pip pip install ".[api,worker,mcp,test]"
 COPY shared/ shared/
 COPY configs/ configs/
 COPY steps/ steps/
@@ -128,3 +118,12 @@ ARG FLORI_BUILD_SHA=
 ENV FLORI_BUILD_SHA=${FLORI_BUILD_SHA}
 ARG FLORI_VERSION=
 ENV FLORI_VERSION=${FLORI_VERSION}
+
+# ── test-worker:FROM test + ffmpeg + libgl(opencv 需 X/GL 库)+ 现有 [steps] extra —— 跑【step/worker 测试】
+#    (tests/steps/ + tests/test_step_*.py + test_worker.py,真 import opencv/pymupdf/scikit-image/trafilatura/imagehash)。
+#    ★复用现有 [steps](无新概念);不含 [gpu](faster-whisper/torch,测试全 mock 不需)→ 比 worker 部署镜像更小。
+FROM test AS test-worker
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/root/.cache/pip pip install ".[steps]"
