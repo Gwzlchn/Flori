@@ -16,6 +16,11 @@ on:
 #   各产【部分覆盖率】上传;coverage-gate 合并判 75%。关键路径 = max(两 job) → build-push,压 <2min。
 jobs:
   unit-normal:
+    # 轻镜像 build/load 便宜 → 把 1234 个非 step 用例再拆 2 shard 并行(不吃重镜像重建惩罚),摊平关键路径。
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -52,22 +57,24 @@ jobs:
           cache-from: |
             type=registry,ref=ghcr.io/${{ env.OWNER_LC }}/flori-test:buildcache
             type=gha,scope=flori-test
-          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}/flori-test:buildcache,mode=max', env.OWNER_LC) || 'type=gha,scope=flori-test,mode=max' }}
-      # 非 step 测试(--ignore 掉 tests/steps 目录 + 根 tests/test_step_*.py + test_worker.py → 归 unit-worker)。
-      - name: Unit tests(普通,非 step)+ 部分覆盖率
+          # 仅 group 1 写 buildcache(2 shard 并行避免双写同 ref);其余只读。PR 回退 gha。
+          cache-to: ${{ github.ref == 'refs/heads/main' && matrix.group == 1 && format('type=registry,ref=ghcr.io/{0}/flori-test:buildcache,mode=max', env.OWNER_LC) || (github.ref != 'refs/heads/main' && matrix.group == 1 && 'type=gha,scope=flori-test,mode=max' || '') }}
+      # 非 step 测试(--ignore tests/steps + 根 tests/test_step_*.py + test_worker.py → 归 unit-worker),再 pytest-split 拆 2 shard。
+      - name: Unit tests(普通 shard ${{ matrix.group }}/2,非 step)+ 部分覆盖率
         run: |
           mkdir -p covdata
           docker compose -f docker-compose.test.yml run --rm \
-            -v "$GITHUB_WORKSPACE/covdata:/covdata" -e COVERAGE_FILE=/covdata/.coverage.normal \
+            -v "$GITHUB_WORKSPACE/covdata:/covdata" -e COVERAGE_FILE=/covdata/.coverage.normal.${{ matrix.group }} \
             test \
             pytest -p no:cacheprovider -m 'not fuzz' -n auto \
               --ignore=tests/steps --ignore-glob='tests/test_step_*.py' --ignore=tests/test_worker.py \
+              --splits 2 --group ${{ matrix.group }} \
               --cov=shared --cov=api --cov=scheduler --cov=worker --cov=steps \
               --cov-branch --cov-report=
       - uses: actions/upload-artifact@v4
         with:
-          name: cov-normal
-          path: covdata/.coverage.normal
+          name: cov-normal-${{ matrix.group }}
+          path: covdata/.coverage.normal.${{ matrix.group }}
           include-hidden-files: true
 
   unit-worker:
