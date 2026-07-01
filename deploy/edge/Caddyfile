@@ -33,7 +33,7 @@ https://{$EDGE_HOST}, https://localhost, https://127.0.0.1 {
 			reverse_proxy 127.0.0.1:8000
 		}
 
-		# 前端:反代到本机 flori-frontend 容器(SSH 直传部署 push-frontend-to-edge.sh)。
+		# 前端:反代到本机 flori-frontend 容器(ghcr 镜像,Watchtower 跟 CI 自动更新)。
 		handle {
 			reverse_proxy 127.0.0.1:8090
 		}

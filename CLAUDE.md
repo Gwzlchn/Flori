@@ -185,9 +185,8 @@ flori/
      `docker compose -f docker-compose.test.yml run --rm test pytest tests/test_<新模块>.py -p no:cacheprovider -q`（前端同理指定 vitest 文件）。
      全量回归由 **CI 承担**：push/PR 自动跑后端全套 + 覆盖率门(75%) + schemathesis + 前端 vitest（`.github/workflows/ci.yml`）。
   2. **「本地完成」判定** = 新增用例绿 + 本地 build 对应镜像 +（API 调用 或 Playwright MCP）手验通过。三者绿即算完成。
-  3. 完成即：① 按 §提交规范 commit+bump → push main（触发 CI 全量回归,异步）；② **即时部署**不等 CI：NAS recreate 对应容器（本地镜像）+ ECS `scripts/push-to-edge.sh` 直传。
-  4. **ECS 即时部署 vs Watchtower**：`scripts/push-to-edge.sh worker|all` 已**自动先暂停 edge Watchtower**（worker 容器带 `watchtower.enable=true`，否则下次 120s 轮询被旧 ghcr `:latest` 回退覆盖；frontend 已 `enable=false` 不受影响）。CI 绿 → ghcr=同代码 → `scripts/push-to-edge.sh resume-watchtower` 恢复跟随；CI 红 → 保持直传、维持暂停，按下条处置。（[[edge-frontend-deploy-watchtower-cache]] 已踩过）
-  5. **CI 后台红灯 = fix-forward（默认）**：看失败用例 → 补 `fix(scope): …;<版本>` 提交修正 → push 复跑；**不回退**已部署版本。仅当线上功能明显坏才 `scripts/rollback.sh` 回滚。
+  3. 完成即：① 按 §提交规范 commit+bump → push main（触发 CI 全量回归,异步）；② **部署**：NAS 即时 recreate 对应容器（本地 build-uptest 镜像,不等 CI）；ECS 边缘**无手动直传**——git push → CI 建 ghcr → Watchtower（120s 轮询）自动 pull+重建（单一路径,不回退,见 §部署）。
+  4. **CI 后台红灯 = fix-forward（默认）**：看失败用例 → 补 `fix(scope): …;<版本>` 提交修正 → push 复跑；**不回退**已部署版本。仅当线上功能明显坏才 `scripts/rollback.sh` 回滚。
 
 ### 本地活栈（NAS,override 叠加）
 ```
@@ -199,7 +198,7 @@ docker compose -f docker-compose.yml -f .local/docker-compose.uptest.yml --env-f
 
 ### 部署（边缘 ECS）
 - `deploy/edge`（Caddy 反代 + basic_auth + 前端）+ `deploy/tunnel`（反向 SSH 隧道,外部网络 `flori_default`）。
-- 镜像经 `scripts/push-to-edge.sh`（SSH `save|load`,**不靠 ghcr**）；登录凭证在 `.local/ops/flori-access.txt`（用户名 `flori`）。
+- 边缘前端**全自动 CD**：git push → CI 建 ghcr 公开镜像 → Watchtower（120s）自动 pull+重建（frontend `watchtower.enable=true`；nginx base 层缓存,增量拉快,**无手动直传/暂停**）。登录凭证在 `.local/ops/flori-access.txt`（用户名 `flori`）。
 
 ### GitHub / 网络（NAS 特例）
 - NAS shell 推 GitHub 须**清代理 env**：`env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY git push`（SSH 直连可用；HTTP 代理 11081 对 github/ghcr 不稳）。

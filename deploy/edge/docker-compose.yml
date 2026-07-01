@@ -15,9 +15,8 @@ services:
       - caddy-config:/config
 
   # 应用前端:只对本机回环暴露 8090,由 Caddy 反代。
-  # watchtower.enable=false:前端改走 scripts/push-frontend-to-edge.sh 的 SSH 直传部署(SSH save|load),
-  # 不归 Watchtower 管。原因:CI 构建 ghcr 落后于快速前端迭代,且 Watchtower 拉 ghcr 会反复盖掉 SSH 直传
-  # 的最新版(横跳),很难用(2026-06-24)。后端仍走 ghcr/Watchtower 自动更新。
+  # watchtower.enable=true:前端 = ghcr 公开镜像,Watchtower 跟随 CI 自动更新(nginx base 层已缓存,
+  # 每次只增量拉变化的 app 层,拉取快)。单一路径 git push→CI 建 ghcr→Watchtower 自动 pull+重建,无手动直传。
   frontend:
     image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-frontend:latest
     container_name: flori-frontend
@@ -25,9 +24,9 @@ services:
     ports:
       - "127.0.0.1:8090:80"
     labels:
-      - "com.centurylinklabs.watchtower.enable=false"
+      - "com.centurylinklabs.watchtower.enable=true"
 
-  # CD:每 120s 查 ghcr,只更新带 watchtower.enable 标签的容器(前端),自动 pull+重建+清旧镜像。
+  # CD:每 120s 查 ghcr,只更新带 watchtower.enable=true 标签的容器(此处即前端),自动 pull+重建+清旧镜像。
   # 用 ghcr 镜像:此 ECS 不通 Docker Hub(registry-1.docker.io 超时),ghcr 可达。
   watchtower:
     image: ghcr.io/containrrr/watchtower
