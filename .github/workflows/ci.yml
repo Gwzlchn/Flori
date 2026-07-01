@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2]
+        group: [1, 2, 3]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -68,7 +68,7 @@ jobs:
             test \
             pytest -p no:cacheprovider -m 'not fuzz' -n auto \
               --ignore=tests/steps --ignore-glob='tests/test_step_*.py' --ignore=tests/test_worker.py \
-              --splits 2 --group ${{ matrix.group }} \
+              --splits 3 --group ${{ matrix.group }} \
               --cov=shared --cov=api --cov=scheduler --cov=worker --cov=steps \
               --cov-branch --cov-report=
       - uses: actions/upload-artifact@v4
@@ -252,10 +252,10 @@ jobs:
           git commit -q -m "chore(badges): 覆盖率 be=${BE}% fe=${FE}% [skip ci]"
           git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" badges
 
-  # 测试过才构建镜像(amd64)。PR 也构建(验 Dockerfile/前端 vue-tsc),推送仅 main。
-  # 路径过滤:仅重建【本次改动相关】的镜像(前端-only 跳后端 3 镜像,后端-only 跳前端)。
-  build-push:
-    needs: [unit-normal, unit-worker, fe-test, detect]
+  # ★build/push 拆分①:与测试【并行】构建相关 prod 镜像(push:false,只 build + 暖 buildcache)。build 不需
+  #   测试过 → 藏进测试的 ~80s 窗口,不再串行加 ~50s。PR 也构建(验 Dockerfile/vue-tsc)。路径过滤:仅构建相关镜像。
+  build-images:
+    needs: [detect]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -316,7 +316,7 @@ jobs:
           tags: |
             type=raw,value=latest
             type=sha,format=short
-      - name: Build and push
+      - name: Build(不 push,只暖 buildcache)
         if: steps.gate.outputs.build == 'true'
         uses: docker/build-push-action@v7
         with:
@@ -324,8 +324,7 @@ jobs:
           file: ${{ matrix.dockerfile }}
           target: ${{ matrix.target }}
           platforms: linux/amd64
-          push: ${{ github.ref == 'refs/heads/main' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          push: false          # ①只 build 暖缓存,不推;推由 push-images(测过后)做
           build-args: |
             USE_USTC_MIRROR=0
             FLORI_BUILD_SHA=${{ github.sha }}
@@ -334,3 +333,73 @@ jobs:
             type=registry,ref=ghcr.io/${{ env.OWNER_LC }}/${{ matrix.image }}:buildcache
             type=gha
           cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}/{1}:buildcache,mode=max', env.OWNER_LC, matrix.image) || 'type=gha,mode=max' }}
+
+  # ★build/push 拆分②:测过(needs 两 unit + fe)+ 镜像已 build(缓存暖)→ 快速 push(cache-from 命中 → build 秒级 + push)。仅 main。
+  push-images:
+    needs: [unit-normal, unit-worker, fe-test, detect, build-images]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - { image: flori-scheduler, dockerfile: docker/base.Dockerfile, context: ., target: scheduler }
+          - { image: flori-api,       dockerfile: docker/base.Dockerfile, context: ., target: api }
+          - { image: flori-worker,    dockerfile: docker/base.Dockerfile, context: ., target: worker }
+          - { image: flori-frontend,  dockerfile: frontend/Dockerfile,    context: ./frontend }
+    steps:
+      - uses: actions/checkout@v6
+      - name: 是否需要 push 本镜像(同 detect 路径过滤)
+        id: gate
+        run: |
+          if [ "${{ matrix.image }}" = "flori-frontend" ]; then
+            want="${{ needs.detect.outputs.frontend }}"
+          else
+            want="${{ needs.detect.outputs.backend }}"
+          fi
+          echo "build=$want" >> "$GITHUB_OUTPUT"
+      - name: Lowercase owner
+        if: steps.gate.outputs.build == 'true'
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - name: 稳定 pip 缓存(取真实版本 + 抹 pyproject version 为占位)
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_ENV"
+          sed -i 's/^version = .*/version = "0.0.0"/' pyproject.toml
+      - uses: docker/setup-buildx-action@v4
+        if: steps.gate.outputs.build == 'true'
+      - name: Log in to ghcr.io
+        if: steps.gate.outputs.build == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image tags
+        id: meta
+        if: steps.gate.outputs.build == 'true'
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ env.OWNER_LC }}/${{ matrix.image }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+      - name: Push(cache-from 暖 → 秒级 build + push)
+        if: steps.gate.outputs.build == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            USE_USTC_MIRROR=0
+            FLORI_BUILD_SHA=${{ github.sha }}
+            FLORI_VERSION=${{ env.FLORI_VERSION }}
+          cache-from: |
+            type=registry,ref=ghcr.io/${{ env.OWNER_LC }}/${{ matrix.image }}:buildcache
+            type=gha
