@@ -60,7 +60,7 @@ services:
       context: .
       dockerfile: docker/base.Dockerfile
       target: worker
-    command: python -m worker.main --type cpu
+    command: python -m worker.main --pools cpu
     restart: unless-stopped
     volumes:
       - ./shared:/app/shared
@@ -82,7 +82,7 @@ services:
       context: .
       dockerfile: docker/base.Dockerfile
       target: worker
-    command: python -m worker.main --type ai
+    command: python -m worker.main --pools ai
     restart: unless-stopped
     volumes:
       - ./shared:/app/shared

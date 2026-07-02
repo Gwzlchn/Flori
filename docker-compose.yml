@@ -162,7 +162,7 @@ services:
     container_name: flori-worker-cpu
     image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker:${IMAGE_TAG:-latest}
     restart: unless-stopped
-    command: python -m worker.main --type cpu
+    command: python -m worker.main --pools cpu
     logging: *default-logging
     # 默认 subprocess 执行器,不挂 docker.sock(避免宿主 root 等价暴露);
     # 切 docker 执行器请叠加 docker-compose.executor.yml。
@@ -195,7 +195,7 @@ services:
     container_name: flori-worker-ai
     image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker:${IMAGE_TAG:-latest}
     restart: unless-stopped
-    command: python -m worker.main --type ai
+    command: python -m worker.main --pools ai
     logging: *default-logging
     # 默认 subprocess 执行器,不挂 docker.sock(避免宿主 root 等价暴露);
     # 切 docker 执行器请叠加 docker-compose.executor.yml。

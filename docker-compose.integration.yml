@@ -55,7 +55,7 @@ services:
       context: .
       dockerfile: docker/base.Dockerfile
       target: worker
-    command: python -m worker.main --type cpu
+    command: python -m worker.main --pools cpu
     volumes:
       - ./shared:/app/shared
       - ./worker:/app/worker
@@ -75,7 +75,7 @@ services:
       context: .
       dockerfile: docker/base.Dockerfile
       target: worker
-    command: python -m worker.main --type io
+    command: python -m worker.main --pools io
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -99,7 +99,7 @@ services:
       context: .
       dockerfile: docker/base.Dockerfile
       target: worker
-    command: python -m worker.main --type ai --tags vision
+    command: python -m worker.main --pools ai --tags vision
     volumes:
       - ./shared:/app/shared
       - ./worker:/app/worker
