@@ -24,7 +24,8 @@ docs/10-observability.md    → 可观测
 docs/11-dev-workflow.md     → 开发流程 + 并行会话
 docs/12-cicd.md             → CI/CD & 发布（GitHub Actions + 镜像）
 docs/13-dependencies.md     → 开源依赖（工具选型 / License）
-docs/adr/                   → 8 个架构决策记录
+docs/14-comment-and-doc-style.md → 注释与文档风格（权威版）
+docs/adr/                   → 架构决策记录
 ROADMAP.md                  → 里程碑和进度
 ```
 
@@ -36,6 +37,14 @@ ROADMAP.md                  → 里程碑和进度
 - 同步用 subprocess（步骤脚本调外部工具）
 - 配置用 YAML，数据用 JSON
 - 日志用 structlog（结构化 JSON）
+
+### 注释与文档风格（速查；权威 + 反例对照在 `docs/14-comment-and-doc-style.md`，所有会话必须遵守）
+- 注释讲 why/坑/不变量/边界，用直陈短句；不翻译代码，不复述 docs 已有内容（一行指向 `docs/xx §y` 或 `ADR-00NN`），不讲已删的旧设计（历史在 git）。
+- 禁装饰：box-drawing 分隔线（`# ── x ──`/`════`）、★ ● ✅ ① ② 等符号、【】当强调、「」『』当强调引号（「」仅可引用真实 UI 文案）。注释与 docstring 的标点一律半角 `() : , ;`。
+- 一句话最多一个补充括号，括号里不嵌因果链，超了就拆句。
+- 版本号/阶段码/审计号/commit sha/日期不进注释（进 git log 与 worklog）；注释掉的死代码直接删。
+- docstring：模块级首行一句中文点题；函数级写做什么 + 坑 + 边界返回；函数名已自明就省略，不写复述式。FastAPI 路由 docstring 进 OpenAPI，改写不删。
+- TODO 格式 `# TODO: 做什么 + 触发条件`，保持低量。
 
 ### 架构规则
 - **全程容器化**：开发、测试、部署全在 Docker 内，宿主机不装任何 Python/Node 依赖

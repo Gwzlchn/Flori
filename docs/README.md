@@ -26,6 +26,7 @@ docs/
 ├── 11-dev-workflow.md              # 开发流程：并行开发/会话交接
 ├── 12-cicd.md                      # CI/CD & 发布：GitHub Actions + 镜像
 ├── 13-dependencies.md              # 开源依赖：工具选型/License
+├── 14-comment-and-doc-style.md     # 注释与文档风格：装饰禁令/docstring/引用文档写法
 ├── adr/                            # 架构决策记录
 │   ├── README.md
 │   ├── 0001-language-python.md
