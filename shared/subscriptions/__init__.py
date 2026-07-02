@@ -2,8 +2,8 @@
 
 一个"来源"(B站 UP / YouTube 频道 / RSS / 本地目录…)由一个适配器枚举出若干
 SourceItem(待入库内容项)。同步逻辑(api/routes/collections.sync_collection)只认
-统一接口 enumerate_source(source_type, source_id, ctx)，按 source_type 分派到注册
-的适配器，与具体来源解耦。
+统一接口 enumerate_source(source_type, source_id, ctx),按 source_type 分派到注册
+的适配器,与具体来源解耦。
 
 新增适配器只需:
   1. 在 shared/subscriptions/<source>.py 写 `async def enum(source_id, ctx) -> ...`

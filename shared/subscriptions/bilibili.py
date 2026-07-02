@@ -40,7 +40,6 @@ async def enumerate_bilibili_up(
 
     复用 shared.bili_space.enumerate_up(经模块属性调用,便于测试 monkeypatch)。
     enumerate_up 返回 [{bvid,title,duration,pic,created}],逐条映射为 video 类 SourceItem。
-    source_title(UP 名)目前 enumerate_up 不返回,回退 None(由命名层用 source_id 兜底);
     source_title 取 UP 主真实昵称(bili_space.up_name → get_user_info),用于集合存纯真实名;
     拿不到回退 None(命名层用 source_id 占位)。"""
     videos = await bili_space.enumerate_up(source_id, ctx.bili_cookies)

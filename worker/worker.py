@@ -1,4 +1,4 @@
-"""Worker：从资源池队列自取任务，执行步骤脚本，上报结果。
+"""Worker: 从资源池队列自取任务,执行步骤脚本,上报结果。
 
 worker 只依赖 WorkerTransport(协调/状态后端)与 StorageBackend(产物),不直连
 redis/db。注入 RedisTransport(单机直连)或 GatewayTransport(出站 HTTPS)。
@@ -40,7 +40,7 @@ def compute_effective_timeout(
     """步超时随媒体时长伸缩(纯函数,便于测)。
 
     有 per_min 且能读到 duration → max(base, ceil(分钟)*per_min),再 clamp 到 cap(若给);
-    否则原样返回 base(行为不变)。用于长音频/视频 whisper:固定 1800s 会把无 GPU 的长集硬杀。"""
+    否则原样返回 base。用于长音频/视频 whisper:固定 1800s 会把无 GPU 的长集硬杀。"""
     import math
     if not per_min or not duration_sec or duration_sec <= 0:
         return base
@@ -65,7 +65,7 @@ def _read_media_duration(work_dir: Path) -> float | None:
 
 
 def _worker_spec() -> dict:
-    """worker 自报:版本(构建时注入的 FLORI_VERSION,便于查代码漂移)+ 机器配置。"""
+    """worker 自报版本 + 机器配置。版本取构建时注入的 FLORI_VERSION,便于查代码漂移。"""
     from shared.version import FLORI_VERSION
     spec: dict = {
         "version": FLORI_VERSION,
@@ -83,8 +83,8 @@ def _worker_spec() -> dict:
         pass
     return spec
 
-# 注:旧 WORKER_POOLS(type→默认池映射)已删——能力统一用 --pools 显式表达(worker/main.py),
-# 路由本就按 pool 走,type 纯冗余。多池强机(如 gpu+cpu)直接 `--pools gpu cpu`,无主次、无隐式 fallback。
+# 能力用 --pools 显式表达(worker/main.py),路由按 pool 走。
+# 多池强机直接 `--pools gpu cpu`,无主次、无隐式 fallback。
 
 
 def _resolve_worker_id(worker_type: str) -> str:
@@ -99,7 +99,7 @@ def _resolve_worker_id(worker_type: str) -> str:
     无法跨重启命中残留容器。gateway 模式 register 仍可返回另一 id 覆盖(以服务端为准)。
 
     无状态部署:gateway 模式(只设 GATEWAY_URL)+ WORKER_NAME 时,id 确定性派生、不依赖任何
-    本地文件,可【不挂 /data 卷】纯出站 HTTPS 跑(configs 在镜像、work_dir 在 /tmp、产物经网关)。
+    本地文件,可不挂 /data 卷纯出站 HTTPS 跑(configs 在镜像、work_dir 在 /tmp、产物经网关)。
     此时缓存文件写不了是预期的,降级为 debug 不报 warning。"""
     id_file = Path(default_worker_id_file())
     # worker_type 多池派生时形如 "cpu+gpu";id 会进 redis key / 容器 label,前缀里 '+' 换 '-' 保守。
@@ -129,7 +129,7 @@ def _resolve_worker_id(worker_type: str) -> str:
 
 
 def _claude_logged_in() -> bool:
-    """claude-cli 是否【真有可用凭证】(订阅登录态)。token 落在 $HOME/.claude/.credentials.json
+    """claude-cli 是否真有可用凭证(订阅登录态)。token 落在 $HOME/.claude/.credentials.json
     (claude-cli 用 refreshToken 自动续期就地回写)。仅判二进制在不在会误标,见 auto_discover_tags。"""
     home = os.environ.get("HOME") or os.path.expanduser("~")
     cred = Path(home) / ".claude" / ".credentials.json"
@@ -176,7 +176,7 @@ def _probe_net_zones() -> set[str]:
 def auto_discover_tags() -> set[str]:
     tags = set()
     has_anthropic_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
-    # claude-cli/vision 须【真能用】才标,而非"镜像里有 claude 二进制就标":否则纯 gateway worker
+    # claude-cli/vision 须真能用才标,而非"镜像里有 claude 二进制就标":否则纯 gateway worker
     # (镜像自带 claude 但无凭证)会误标,一旦作 ai worker 就会认领 11_smart/取证/评审再因无登录失败。
     # 判据:二进制在 且 (订阅已登录 或 有 ANTHROPIC_API_KEY)。
     claude_ready = bool(shutil.which("claude")) and (has_anthropic_key or _claude_logged_in())
@@ -187,13 +187,13 @@ def auto_discover_tags() -> set[str]:
     if os.environ.get("DEEPSEEK_API_KEY"):
         tags.add("text-only")
     from steps.utils.device import has_nvidia_gpu
-    if has_nvidia_gpu():  # PATH 感知 + 真实探测,与 steps.utils.device 单一判据(审计 R-L28)
+    if has_nvidia_gpu():  # PATH 感知 + 真实探测,与 steps.utils.device 单一判据
         tags.add("gpu")
     if os.environ.get("OLLAMA_URL"):
         tags.add("local")
-    # 网络可达区域:自动探测(替代旧的"有代理→net-proxy")。worker 在哪、有没有代理 → 它自己探出
-    # net-cn / net-global,scheduler 按 URL 区域匹配。代理/SESSDATA 等都是 worker 本地的事,非路由 tag
-    # (B站 SESSDATA 经 per-job 凭证文件传给 worker,下载步 step_01 自读;不再自报 'bili' tag)。
+    # 网络可达区域:worker 自己探出 net-cn / net-global,scheduler 按 URL 区域匹配。
+    # 代理/SESSDATA 等都是 worker 本地的事,非路由 tag。
+    # B站 SESSDATA 经 per-job 凭证文件传给 worker,下载步 step_01 自读。
     tags |= _probe_net_zones()
     return tags
 
@@ -215,7 +215,7 @@ class Worker:
         self.storage = storage
         self.worker_type = worker_type
         # 稳定身份:重启复用缓存 id(见 _resolve_worker_id);gateway 模式 register 后可能被
-        # 服务端返回的 id 覆盖(worker.py:run 里 self.worker_id = await transport.register(...))。
+        # 服务端返回的 id 覆盖,register() 里回写 self.worker_id。
         self.worker_id = _resolve_worker_id(worker_type)
         self.pools = pools
         self.tags = tags
@@ -234,11 +234,11 @@ class Worker:
         self._reauth_min_interval = float(os.environ.get("REAUTH_MIN_INTERVAL_SEC", "30"))
         self.runner = create_step_runner(self.worker_id)
 
-    # ── 生命周期 ──
+    # 生命周期
 
     async def run(self) -> None:
         await self.register()
-        # 绑身份到 contextvars → 本进程后续【所有】日志自带 worker_id/type/host/version(排障一眼知道哪台/什么版本)。
+        # 绑身份到 contextvars → 本进程后续所有日志自带 worker_id/type/host/version(排障一眼知道哪台/什么版本)。
         structlog.contextvars.bind_contextvars(
             worker_id=self.worker_id, worker_type=self.worker_type,
             host=socket.gethostname(), version=FLORI_VERSION,
@@ -275,13 +275,13 @@ class Worker:
         logger.info("worker_shutdown", worker_id=self.worker_id)
         self._shutdown = True
 
-    # ── 注册 + 心跳 ──
+    # 注册 + 心跳
 
     async def register(self) -> None:
         # gateway 注册可能返回缓存身份(重启复用同一 id);runner 已用旧 id 创建但子进程忽略 worker_id,无碍。
         # 连不上网关/redis(部署时 api 比 worker 晚起几百 ms,启动顺序竞态)→ 固定间隔 WARN 重试,
-        # 不再首拍 ConnectError 抛到 main 崩进程(刷整屏 traceback + 白白重启一次)。
-        # 仅兜【连接类】失败;401 / 注册 token 过期(503,是 httpx.HTTPStatusError 非 TransportError)不在此重试,
+        # 不让首拍 ConnectError 抛到 main 崩进程白白重启。
+        # 仅兜连接类失败;401 / 注册 token 过期(503,是 httpx.HTTPStatusError 非 TransportError)不在此重试,
         # 照常上抛走既有路径(_handle_auth_failure / 既有 503 处理)。
         retry_sec = float(os.environ.get("REGISTER_RETRY_SEC", "3"))
         while not self._shutdown:
@@ -295,7 +295,7 @@ class Worker:
                 return
             except (httpx.TransportError, redis.exceptions.ConnectionError,
                     redis.exceptions.TimeoutError) as e:
-                # 连不上:WARN 一条摘要(非整屏 traceback)+ 固定间隔重试(不指数,本身差不了几秒)。
+                # 连不上:WARN 一条摘要而非整屏 traceback,固定间隔重试。不用指数退避,本身差不了几秒。
                 logger.warning(
                     "register_connect_retry", worker_id=self.worker_id,
                     host=socket.gethostname(), endpoint="/api/runner/register",
@@ -304,7 +304,7 @@ class Worker:
                 await asyncio.sleep(retry_sec)
 
     async def heartbeat_loop(self) -> None:
-        # 心跳节拍读 config(单一事实源);此前硬编码 10s、配置项无人读。
+        # 心跳节拍读 config(单一事实源),不在此硬编码。
         interval = int((self.config.pools.get("worker_status") or {}).get("heartbeat_interval_sec", 10))
         while not self._shutdown:
             try:
@@ -325,7 +325,7 @@ class Worker:
                 logger.warning("heartbeat_failed", worker_id=self.worker_id, exc_info=True)
             await asyncio.sleep(interval)
 
-    # ── 认证自愈(401 → 重注册 + 指数退避 + 连续 6h 自杀)──
+    # 认证自愈:401 → 重注册 + 指数退避 + 连续 6h 自杀
 
     async def _handle_auth_failure(self) -> None:
         """收到 WorkerAuthRejected(401)时调:首发记一条事件;去抖重注册;指数退避;连续满 6h 仍 401 → 自杀退出。
@@ -341,8 +341,8 @@ class Worker:
                 )
             elapsed = now - self._auth_failed_since
             if elapsed >= self._auth_giveup_sec:
-                # 连续认证失败超阈值(默认 6h):认定已被服务端注销=孤儿 → 自杀退出
-                # (置 _shutdown,各 slot/心跳循环随之收场,run() 返回,进程退出)。
+                # 连续认证失败超阈值(默认 6h):认定已被服务端注销=孤儿,自杀退出。
+                # 置 _shutdown 后各 slot/心跳循环随之收场,run() 返回,进程退出。
                 logger.error(
                     "worker_auth_giveup_exit", worker_id=self.worker_id,
                     host=host, version=FLORI_VERSION, failed_sec=round(elapsed),
@@ -363,14 +363,14 @@ class Worker:
             self._auth_backoff = min(self._auth_backoff * 2, 60.0)
 
     def _note_auth_ok(self) -> None:
-        """一次 runner 请求成功(未 401)→ 清认证失败态、退避归位(健康时为廉价 no-op)。"""
+        """一次 runner 请求成功(未 401)就清认证失败态、退避归位。健康时为廉价 no-op。"""
         if self._auth_failed_since is not None:
             logger.info("worker_reauth_ok", worker_id=self.worker_id, host=socket.gethostname())
             self._auth_failed_since = None
             self._auth_backoff = 1.0
             self._last_reauth = 0.0
 
-    # ── 主循环 ──
+    # 主循环
 
     async def _claim_loop(self, slot: int = 0) -> None:
         """单条"认领→执行"循环。并发度>1 时 run() 起多条,共享 transport/storage/runner;
@@ -385,7 +385,7 @@ class Worker:
                 )
             except WorkerAuthRejected:
                 # token 失效:重注册+退避;超 6h → _handle_auth_failure 置 _shutdown 退出。
-                # 不再把 401 当"无任务"空转、每秒死刷(本次事故根因)。
+                # 401 不能当"无任务"处理,否则会每秒空转死刷。
                 await self._handle_auth_failure()
                 if self._shutdown:
                     break
@@ -400,7 +400,7 @@ class Worker:
                     raise
                 except Exception:
                     # 单任务异常绝不杀主循环:execute 内部已尽量 report_failed/release;此处兜底
-                    # 极端情形(如 execute 自身的上报/release 逃逸),记日志后续跑(审计 I-H3)。
+                    # 极端情形(如 execute 自身的上报/release 逃逸),记日志后续跑。
                     logger.exception(
                         "execute_escaped_error", worker_id=self.worker_id,
                     )
@@ -417,7 +417,7 @@ class Worker:
             for pool, cfg in self.config.pools.get("pools", {}).items()
         }
 
-    # ── 任务执行 ──
+    # 任务执行
 
     async def execute(self, claim: dict) -> None:
         # 独立 AI task(kind='ai')分流:不挂 job、不走 storage,单独执行(见 _execute_ai_task)。
@@ -437,7 +437,7 @@ class Worker:
             work_dir = await self.storage.pull(job_id, step)
 
             # pipeline/domain/style_tags:gateway 模式服务端已塞进 claim,直连模式在此回读。
-            # 读失败会被本 try 接住转 report_failed,不冲垮主循环(保留旧的故障隔离)。
+            # 读失败会被本 try 接住转 report_failed,不冲垮主循环。
             pipeline = claim.get("pipeline") or await self.transport.get_job_pipeline(job_id)
             if "domain" in claim:
                 domain = claim["domain"]
@@ -502,9 +502,9 @@ class Worker:
 
             if returncode == 0:
                 await self._collect_usage(job_id, step, work_dir)
-                # ★ 产物必须先成功推上中心存储,才报 done。否则会出现「上游标 done 但产物没上去」→
-                #   下游步拉 work_dir 时 input_missing(如 candidates.json)。push 失败 → 降级为步失败、
-                #   重试时重新生成并推送,绝不在产物缺失时标完成。
+                # 产物必须先成功推上中心存储,才报 done。否则上游标了 done 但产物没上去,
+                # 下游步拉 work_dir 时 input_missing(如 candidates.json)。push 失败降级为步失败,
+                # 重试时重新生成并推送,绝不在产物缺失时标完成。
                 try:
                     await self.storage.push(job_id, step, work_dir)
                 except Exception as push_err:
@@ -527,7 +527,7 @@ class Worker:
                 await self._push_safe(job_id, step, work_dir)
                 error_type, error_json_msg = self._parse_error(work_dir, step)
                 # 兜底:子进程 stderr 为空时,用 .{step}.error.json 的 message(真实异常文本),
-                # 避免前端只看到「unknown error」无从排错。
+                # 避免前端只看到 "unknown error" 无从排错。
                 error_msg = (stderr[-500:] if stderr else "") or error_json_msg[:500] or "unknown error"
                 await self.transport.report_failed(
                     claim, error_msg, error_type, duration, start, count_stats=True,
@@ -567,7 +567,7 @@ class Worker:
                 await self.storage.cleanup(job_id, step, work_dir)
             await self.transport.release(claim)
 
-    # ── 运行中日志推送 ──
+    # 运行中日志推送
 
     async def _push_step_log(self, job_id: str, step: str, work_dir: Path) -> None:
         """把运行中日志推回存储,供前端准实时拉取。超阈值只推尾部,失败不致命。"""
@@ -590,7 +590,7 @@ class Worker:
                 job_id=job_id, step=step,
             )
 
-    # ── 工具方法 ──
+    # 工具方法
 
     def _parse_error(self, work_dir: Path, step: str) -> tuple[str, str]:
         """从 .{step}.error.json 读 (error_type, message);失败上报在子进程 stderr 为空时据此兜底。"""
@@ -615,7 +615,7 @@ class Worker:
 
     async def _collect_usage(self, job_id: str, step: str, work_dir: Path) -> None:
         # usage 仅统计/计费侧效应:解析或上报失败只降级为"统计不准",绝不让 returncode==0 的成功
-        # 步骤经 execute 的 except 翻成 failed(审计 I-H2)。record_ai_usage 已在 gateway 侧 best-effort。
+        # 步骤经 execute 的 except 翻成 failed。record_ai_usage 已在 gateway 侧 best-effort。
         try:
             usages = collect_usage_from_file(work_dir / "logs", step)
             for usage in usages:
@@ -627,7 +627,7 @@ class Worker:
                 job_id=job_id, step=step,
             )
 
-    # ── 独立 AI task(kind='ai')执行 ──
+    # 独立 AI task(kind='ai')执行
 
     async def _execute_ai_task(self, claim: dict) -> None:
         """执行独立 AI task:复用 AIGateway 跑 claude → 结果回 airesult:{task_id} + publish events:{task_id};

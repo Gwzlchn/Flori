@@ -23,8 +23,8 @@ logger = structlog.get_logger(component="worker")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Worker process")
-    # 能力 = 订阅的资源池(可多个),这是【唯一】的能力表达。步按 pool 派活;一台机器会几种活就 --pools 几个,
-    # 无主次(如 cpu+gpu 强机:--pools cpu gpu)。旧 --type 已删除(路由本就 pool-first,type 纯冗余)。
+    # 能力用 --pools 显式表达,路由按 pool 走。一台机器会几种活就 --pools 几个,
+    # 无主次,如 cpu+gpu 强机 --pools cpu gpu。
     parser.add_argument(
         "--pools", nargs="+", required=True,
         help="本 worker 订阅的资源池(能力集合,可多个),如 --pools cpu gpu。",
@@ -58,7 +58,7 @@ async def main() -> None:
     redis: RedisClient | None = None
     db: Database | None = None
     if gateway_url is None or redis_url:
-        # 未设 GATEWAY_URL 时沿用旧默认地址;混合模式用显式 REDIS_URL。
+        # 未设 GATEWAY_URL 时用默认本机地址;混合模式用显式 REDIS_URL。
         effective_redis_url = redis_url or "redis://localhost:6379/0"
         redis = RedisClient(effective_redis_url)
         await redis.connect()
@@ -82,7 +82,7 @@ async def main() -> None:
         storage = create_storage(config.jobs_dir)
 
     pools = args.pools
-    # worker_type 仅作【显示标签】(路由一律按 pools);从 pools 集合派生:单池="cpu",多池="cpu+gpu"。
+    # worker_type 仅作显示标签,路由一律按 pools;从 pools 集合派生:单池="cpu",多池="cpu+gpu"。
     worker_type = "+".join(sorted(set(pools)))
     tags = set(args.tags) if args.tags else auto_discover_tags()
     reject_tags = set(args.reject_tags) if args.reject_tags else set()
@@ -104,8 +104,8 @@ async def main() -> None:
     try:
         await worker.run()
     finally:
-        # 先优雅关 transport(gateway 模式才有 httpx AsyncClient 要释放;直连 RedisTransport.close 为 no-op),
-        # 再关 db/redis(RedisTransport.close 不触碰 redis/db,故无双关)。
+        # 先优雅关 transport,再关 db/redis。gateway 模式才有 httpx AsyncClient 要释放;
+        # 直连 RedisTransport.close 为 no-op、不触碰 redis/db,故无双关。
         await transport.close()
         if db is not None:
             db.close()

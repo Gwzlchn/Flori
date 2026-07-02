@@ -76,7 +76,7 @@ class GatewayTransport:
             # 缓存可选:纯网关 id 由服务端返回、WORKER_NAME 下确定性;无状态部署(不挂 /data)写不了无碍。
             logger.debug("worker_id_cache_skipped", worker_id=worker_id)
 
-    # ── 生命周期 / 心跳(走 gateway) ──
+    # 生命周期 / 心跳(走 gateway)
 
     async def register(self, worker_id, worker_type, pools, tags,
                        reject_tags, hostname, now, concurrency: int = 1,
@@ -125,12 +125,12 @@ class GatewayTransport:
                 "current_step": self._current_step,
             }
             if load:
-                body["load"] = load   # 本机 live 负载,经网关写 redis worker hash(B 档各节点负载)
+                body["load"] = load   # 本机 live 负载,经网关写 redis worker hash,供各节点负载展示
             resp = await self._http.post(
                 "/api/runner/heartbeat", headers=self._auth(), json=body,
             )
             if resp.status_code == 401:
-                # 心跳也被拒 = per-worker token 失效 → 抛给主循环走重注册/退避/自杀(不再裸吞)。
+                # 心跳也被拒 = per-worker token 失效 → 抛给主循环走重注册/退避/自杀,不能裸吞。
                 raise WorkerAuthRejected()
         except httpx.HTTPError as e:
             logger.warning(
@@ -164,7 +164,7 @@ class GatewayTransport:
                 worker_id, status, current_job, current_step,
             )
 
-    # ── 粗粒度认领/上报:走 gateway HTTP,不委派内层,避免经 redis 双重认领 ──
+    # 粗粒度认领/上报:走 gateway HTTP,不委派内层,避免经 redis 双重认领。
 
     def _auth(self) -> dict:
         # per-worker token + 身份头(X-Worker-*);所有走 per-worker token 的 runner 请求统一用它。
@@ -183,7 +183,7 @@ class GatewayTransport:
                 },
             )
             if resp.status_code == 401:
-                # per-worker token 失效 → 抛给主循环自愈(重注册/退避/6h自杀),不再当"无任务"空转死刷。
+                # per-worker token 失效 → 抛给主循环自愈(重注册/退避/6h自杀),不能当"无任务"空转死刷。
                 raise WorkerAuthRejected()
             resp.raise_for_status()
             return resp.json().get("claim")
@@ -200,8 +200,8 @@ class GatewayTransport:
                                   job_id="", step=""):
         """上报通道(complete/fail/release/usage)统一 best-effort:有界重试后仍失败只 log,
         绝不抛——上报抖动不得把 returncode==0 的成功步骤翻成 failed,也不得经 execute 的
-        finally release 逃逸杀掉整个 worker 主循环(审计 I-H2/I-H3)。对照同文件 heartbeat/
-        request_step/report_step_alive 同为 best-effort,唯独这四个上报方法此前裸 raise。"""
+        finally release 逃逸杀掉整个 worker 主循环。同文件 heartbeat/request_step/
+        report_step_alive 同为 best-effort。"""
         last_exc = None
         for attempt in range(3):
             try:
@@ -277,7 +277,7 @@ class GatewayTransport:
 
     async def publish_step_event(self, channel, data):
         # worker 只通过 on_progress 发 events:{job} 进度;映射到 progress 端点。
-        # 非 events 频道(step_started/completed/failed)现由服务端发,worker 不再走这里。
+        # 非 events 频道(step_started/completed/failed)由服务端发,worker 不走这里。
         if channel.startswith("events:"):
             job_id = channel.split(":", 1)[1]
             try:
@@ -301,7 +301,7 @@ class GatewayTransport:
         except httpx.HTTPError:
             logger.warning("gateway_step_alive_failed", job_id=job_id, step=step)
 
-    # ── 其余方法:有内层(混合模式)则委派,无内层(纯网关)返回安全默认值 ──
+    # 其余方法:有内层(混合模式)则委派;无内层(纯网关)返回安全默认值。
     # gateway 模式 worker 不调这些细粒度方法(claim 已在服务端 enrich),
     # 此处仅作防御:纯网关无内层时绝不抛 AttributeError。
 

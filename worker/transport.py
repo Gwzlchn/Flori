@@ -1,11 +1,11 @@
-"""WorkerTransport：worker 与协调/状态后端之间的唯一接口。
+"""WorkerTransport: worker 与协调/状态后端之间的唯一接口。
 
 RedisTransport 直连 redis_client + db;逐方法转调。
 GatewayTransport 实现同一 Protocol,全部换成出站 HTTPS,worker.py 不动。
-worker.py 只依赖此 Protocol,不再 import redis_client / Database。
+worker.py 只依赖此 Protocol,不 import redis_client / Database。
 
 把 register/heartbeat/update_status/update_step_result 的 "Redis+DB 双写" 封在
-transport 内部,worker.py 不再出现 asyncio.to_thread(self.db.xxx),双写顺序集中一处。
+transport 内部,worker.py 不出现 asyncio.to_thread(self.db.xxx),双写顺序集中一处。
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from shared.redis_client import RedisClient
 
 class WorkerAuthRejected(Exception):
     """网关 runner 请求被服务端以 401 拒绝(per-worker token 失效/被吊销)。
-    worker 据此【重注册 + 指数退避】;连续失败超时(默认 6h,env AUTH_GIVEUP_SEC)则自杀退出。
+    worker 据此重注册 + 指数退避;连续失败超时(默认 6h,env AUTH_GIVEUP_SEC)则自杀退出。
     仅 GatewayTransport(出站 HTTPS)会抛;直连 RedisTransport 无此异常。见 worker.Worker._handle_auth_failure。"""
 
 
@@ -32,7 +32,7 @@ class WorkerTransport(Protocol):
     # per-worker token,供 GatewayStorage 经网关代理产物时鉴权;直连模式为空串。
     worker_token: str
 
-    # ── 生命周期 / 心跳 ──
+    # 生命周期 / 心跳
     async def register(
         self, worker_id: str, worker_type: str, pools: list[str],
         tags: set[str], reject_tags: set[str], hostname: str, now: datetime,
@@ -48,7 +48,7 @@ class WorkerTransport(Protocol):
 
     async def get_worker_status(self, worker_id: str) -> str | None: ...
 
-    # ── 粗粒度认领/上报:编排封装在 transport 内,worker.execute 不直接调细粒度方法 ──
+    # 粗粒度认领/上报:编排封装在 transport 内,worker.execute 不直接调细粒度方法。
     # pool_limits:每池槽位上限(由 worker 从 config 算好传入,transport 保持不持有 config)。
     async def request_step(
         self, worker_id: str, pools: list[str], pool_limits: dict[str, int],
@@ -64,10 +64,10 @@ class WorkerTransport(Protocol):
 
     async def release(self, claim: dict) -> None: ...
 
-    # ── 资源池 / 队列认领 + 步骤状态机(细粒度)──
-    # 注:worker.execute 只用上面的粗粒度方法(request_step/report_*/release 等)。下面这些细粒度
+    # 资源池 / 队列认领 + 步骤状态机(细粒度)
+    # worker.execute 只用上面的粗粒度方法(request_step/report_*/release 等)。下面这些细粒度
     # 方法 worker 侧零调用——编排已封装在 runner_ops.claim_step/report_*/release_step 内,这里保留
-    # 仅为「与 RedisTransport/gateway 同 Protocol 的防御接口」,非可用入口(避免误当 worker 可调,见 B14)。
+    # 仅为与 RedisTransport/gateway 同 Protocol 的防御接口,非可用入口,避免误当 worker 可调。
     async def is_pool_frozen(self, pool: str) -> bool: ...
     async def try_acquire_slot(self, pool: str, limit: int, holder: str) -> bool: ...
     async def release_slot(self, pool: str, holder: str) -> None: ...
@@ -76,7 +76,7 @@ class WorkerTransport(Protocol):
     async def dequeue_step_raw(self, pool: str) -> tuple[str, dict, float] | None: ...
     async def return_step(self, pool: str, raw_json: str, score: float) -> None: ...
 
-    # ── 步骤状态机 ──
+    # 步骤状态机
     async def cas_step_status(
         self, job_id: str, step: str, expected: str, new: str,
     ) -> bool: ...
@@ -93,15 +93,15 @@ class WorkerTransport(Protocol):
     ) -> None: ...
     async def record_ai_usage(self, usage: AIUsage) -> None: ...
 
-    # ── 独立 AI task(kind='ai')──
+    # 独立 AI task(kind='ai')
     async def set_ai_result(self, task_id: str, result: dict) -> None: ...
     async def record_ai_task_log(self, log: dict) -> None: ...
 
-    # ── Job 上下文 ──
+    # Job 上下文
     async def get_job_pipeline(self, job_id: str) -> str | None: ...
     async def get_job_info(self, job_id: str) -> dict: ...
 
-    # ── 事件 ──
+    # 事件
     async def publish_step_event(self, channel: str, data: dict) -> None: ...
 
     async def report_step_alive(self, job_id: str, step: str) -> None: ...
@@ -120,7 +120,7 @@ class RedisTransport:
         # 直连模式不经网关代理产物,无 per-worker token(满足 Protocol、避免误用时 AttributeError)。
         self.worker_token = ""
 
-    # ── 生命周期 / 心跳 ──
+    # 生命周期 / 心跳
     async def register(self, worker_id, worker_type, pools, tags,
                        reject_tags, hostname, now, concurrency: int = 1,
                        spec: dict | None = None):
@@ -141,7 +141,7 @@ class RedisTransport:
             "last_heartbeat": now.isoformat(),
         }
         self._worker_id = worker_id
-        # 不再硬编码 ttl=30:用 redis_client 的单一事实源默认(=online_window 兜底常量)。
+        # ttl 用 redis_client 的单一事实源默认(=online_window 兜底常量),不在此硬编码。
         await self._redis.register_worker(worker_id, info)
         worker_model = WorkerModel(
             id=worker_id, type=worker_type, pools=pools,
@@ -197,7 +197,7 @@ class RedisTransport:
             self._redis, self._db, self._worker_id, claim,
         )
 
-    # ── 资源池 / 队列(纯转调) ──
+    # 资源池 / 队列(纯转调)
     async def is_pool_frozen(self, pool):
         return await self._redis.is_pool_frozen(pool)
 
@@ -219,7 +219,7 @@ class RedisTransport:
     async def return_step(self, pool, raw_json, score):
         await self._redis.return_step(pool, raw_json, score)
 
-    # ── 步骤状态机 ──
+    # 步骤状态机
     async def cas_step_status(self, job_id, step, expected, new):
         return await self._redis.cas_step_status(job_id, step, expected, new)
 
@@ -242,7 +242,7 @@ class RedisTransport:
             self._db.increment_worker_stats, worker_id,
             completed=completed, failed=failed, duration=duration,
         )
-        # 也累计进 Redis hash：远程(仅 Redis)worker 的统计才不会在 /api/workers 显示 0。
+        # 也累计进 Redis hash:远程(仅 Redis)worker 的统计才不会在 /api/workers 显示 0。
         if completed:
             await self._redis.incr_worker_stat(worker_id, "tasks_completed", completed)
         if failed:
@@ -259,14 +259,14 @@ class RedisTransport:
     async def record_ai_task_log(self, log):
         await asyncio.to_thread(self._db.record_ai_task_log, log)
 
-    # ── Job 上下文 ──
+    # Job 上下文
     async def get_job_pipeline(self, job_id):
         return await self._redis.get_job_pipeline(job_id)
 
     async def get_job_info(self, job_id):
         return await self._redis.get_job_info(job_id)
 
-    # ── 事件 ──
+    # 事件
     async def publish_step_event(self, channel, data):
         await self._redis.publish(channel, data)
 
@@ -279,8 +279,8 @@ class RedisTransport:
 
 
 def default_worker_id_file() -> str:
-    """worker id 缓存文件默认位置(直连与 gateway 共用,单一来源):统一收进 /data/workers/ 文件夹,
-    不再散在 /data 根。WORKER_ID_FILE 显式覆盖;否则 WORKER_NAME→/data/workers/<name>,缺省→worker.id。"""
+    """worker id 缓存文件默认位置(直连与 gateway 共用,单一来源):统一收进 /data/workers/。
+    WORKER_ID_FILE 显式覆盖;否则 WORKER_NAME→/data/workers/<name>,缺省→worker.id。"""
     explicit = os.environ.get("WORKER_ID_FILE", "").strip()
     if explicit:
         return explicit

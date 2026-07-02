@@ -2,7 +2,7 @@
 
 用 yt-dlp 子进程 `--flat-playlist --dump-json` 浅枚举频道投稿(不深解析每条,快)。
 source_id 可以是频道页 URL(/@handle、/channel/UC...、/c/...)、youtu.be/频道主页,
-也可以是裸 handle(@xxx)或裸频道 id(UC...);统一规整为频道「视频」标签 URL 后枚举。
+也可以是裸 handle(@xxx)或裸频道 id(UC...);统一规整为频道 /videos 标签 URL 后枚举。
 
 下载链路已支持 youtube(yt-dlp + /data/cookies/youtube.txt,见 steps/common/step_01_download.py),
 故每个视频 item 的 url 走标准 watch 链接即可,content_type 固定 video。
@@ -23,7 +23,7 @@ _YT_DLP_TIMEOUT_SEC = 180
 
 
 def _normalize_channel_url(source_id: str) -> str:
-    """把各种频道标识规整为 yt-dlp 可枚举的「频道视频列表」URL。
+    """把各种频道标识规整为 yt-dlp 可枚举的频道视频列表 URL。
 
     支持:
       - 完整频道 URL:https://www.youtube.com/@handle、/channel/UC...、/c/name、/user/name

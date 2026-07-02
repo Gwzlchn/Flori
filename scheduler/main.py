@@ -34,7 +34,7 @@ async def main() -> None:
     db.init_schema()
     logger.info("db_ready", path=str(config.db_path))
 
-    # storage 供 on_step_done 读笔记/评审产物（本地或 MinIO，由 env 决定）。
+    # storage 供 on_step_done 读笔记/评审产物(本地或 MinIO,由 env 决定)。
     storage = create_storage(config.jobs_dir)
 
     scheduler = Scheduler(redis, db, config, storage=storage)
@@ -43,7 +43,7 @@ async def main() -> None:
     shutdown_task: asyncio.Task | None = None
 
     def _on_signal() -> None:
-        # add_signal_handler 只接受同步回调，故用 create_task 包裹 async shutdown。
+        # add_signal_handler 只接受同步回调,故用 create_task 包裹 async shutdown。
         nonlocal shutdown_task
         if shutdown_task is None:
             shutdown_task = asyncio.create_task(scheduler.shutdown())
@@ -55,7 +55,7 @@ async def main() -> None:
         await scheduler.run()
     finally:
         if shutdown_task is not None:
-            await shutdown_task  # 等 graceful shutdown（取消延迟任务）完成
+            await shutdown_task  # 等 graceful shutdown(取消延迟任务)完成
         db.close()
         await redis.close()
         logger.info("scheduler_exit")

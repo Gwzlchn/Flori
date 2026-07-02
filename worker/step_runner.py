@@ -1,8 +1,8 @@
-"""StepRunner：把步骤执行底座抽成可换实现，对齐 StorageBackend 的分流模式。
+"""StepRunner: 把步骤执行底座抽成可换实现,对齐 StorageBackend 的分流模式。
 
-SubprocessStepRunner 是默认实现；DockerStepRunner 为每步一容器,
-由 STEP_RUNTIME=docker 启用。runner 只读写 work_dir，不连 Redis/DB/对象存储——
-控制面交互（状态续约、日志推送、事件发布）全经 worker 注入的回调。
+SubprocessStepRunner 是默认实现;DockerStepRunner 为每步一容器,
+由 STEP_RUNTIME=docker 启用。runner 只读写 work_dir,不连 Redis/DB/对象存储——
+控制面交互(状态续约、日志推送、事件发布)全经 worker 注入的回调。
 """
 
 from __future__ import annotations
@@ -19,16 +19,16 @@ import structlog
 
 logger = structlog.get_logger(component="step_runner")
 
-# 进度发布回调：(event_name, payload) -> 让 runner 对控制面无知。
+# 进度发布回调:(event_name, payload) -> 让 runner 对控制面无知。
 ProgressPublisher = Callable[[str, dict], Awaitable[None]]
-# 周期回调：每 10s 一次，worker 用它续约状态 + 推送运行中日志。
+# 周期回调:每 10s 一次,worker 用它续约状态 + 推送运行中日志。
 TickCallback = Callable[[], Awaitable[None]]
 
-# 需要出网的资源池：下载与 AI 调用。其余（scene/cpu/gpu）离线，文件是接口。
+# 需要出网的资源池:下载与 AI 调用。其余(scene/cpu/gpu)离线,文件是接口。
 _NETWORKED_POOLS = frozenset({"io", "ai"})
-# AI step 才注入的密钥白名单：仅注入 env 里实际存在的那几个。
+# AI step 才注入的密钥白名单:仅注入 env 里实际存在的那几个。
 _AI_KEY_ENV = ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "OLLAMA_URL")
-# 控制面密钥：步骤只读写本地 work_dir，绝不直连 MinIO/Redis/Gateway，故全程剥离。
+# 控制面密钥:步骤只读写本地 work_dir,绝不直连 MinIO/Redis/Gateway,故全程剥离。
 _CONTROL_PLANE_SECRETS = (
     "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_URL",
     "WORKER_REGISTRATION_TOKEN", "WORKER_TOKEN", "GATEWAY_URL", "REDIS_URL",
@@ -56,14 +56,14 @@ class StepRunner(Protocol):
         on_progress: ProgressPublisher,
         on_tick: TickCallback,
     ) -> tuple[int, str]:
-        """跑一个 step，返回 (returncode, stderr_tail)。
+        """跑一个 step,返回 (returncode, stderr_tail)。
         超时写完含 TIMEOUT 标记的日志后抛 asyncio.TimeoutError。
-        只读写 ctx.work_dir，不碰 .done/.meta/.error 语义，不连 Redis/对象存储。"""
+        只读写 ctx.work_dir,不碰 .done/.meta/.error 语义,不连 Redis/对象存储。"""
         ...
 
 
 class SubprocessStepRunner:
-    """子进程执行：边读管道边落盘，每 10s 续约 + 转发进度。"""
+    """子进程执行:边读管道边落盘,每 10s 续约 + 转发进度。"""
 
     async def run_step(
         self,
@@ -77,8 +77,8 @@ class SubprocessStepRunner:
         config_path.write_text(json.dumps(ctx.step_cfg, ensure_ascii=False, indent=2))
 
         timeout = ctx.timeout_sec
-        # 按需下放：子进程需继承系统 env（PATH/HOME/LANG/LD_LIBRARY_PATH）才能 exec
-        # python/ffmpeg，故用 DENYLIST 而非白名单——仅剥离步骤永不需要的敏感密钥。
+        # 按需下放:子进程需继承系统 env(PATH/HOME/LANG/LD_LIBRARY_PATH)才能 exec
+        # python/ffmpeg,故用 DENYLIST 而非白名单——仅剥离步骤永不需要的敏感密钥。
         env = _build_subprocess_env(ctx)
 
         proc = await asyncio.create_subprocess_exec(
@@ -94,8 +94,8 @@ class SubprocessStepRunner:
         log_dir = work_dir / "logs"
         log_dir.mkdir(exist_ok=True)
         log_path = log_dir / f"{step}.log"
-        # append 而非 truncate:幂等跳过(只输出一行 skip: up-to-date)不再覆盖上次真跑的处理日志;
-        # 重跑则在已有日志后追加分隔头,保留历史(原来 'w' 会把真跑日志冲掉,出现「有产物没日志」)。
+        # append 而非 truncate:幂等跳过(只输出一行 skip: up-to-date)不覆盖上次真跑的处理日志;
+        # 重跑在已有日志后追加分隔头,保留历史,避免出现有产物没日志。
         had_content = log_path.exists() and log_path.stat().st_size > 0
         log_file = log_path.open("a", encoding="utf-8")
         if had_content:
@@ -161,16 +161,16 @@ class SubprocessStepRunner:
 
 
 class DockerStepRunner:
-    """每步一容器：work_dir bind-mount 到 /job，GPU 经 DeviceRequest，container.wait
-    + kill 复刻超时，labels 防泄漏。由 STEP_RUNTIME=docker 启用。"""
+    """每步一容器:work_dir bind-mount 到 /job,GPU 经 DeviceRequest,container.wait
+    + kill 复刻超时,labels 防泄漏。由 STEP_RUNTIME=docker 启用。"""
 
     def __init__(self, worker_id: str, host_work_root: str | None = None,
                  registry: str | None = None):
-        import docker  # 延迟导入：subprocess 模式不强依赖 docker SDK。
+        import docker  # 延迟导入:subprocess 模式不强依赖 docker SDK。
 
         self._client = docker.from_env()
         self._worker_id = worker_id
-        # DooD：bind-mount 必须用宿主路径，非 worker 容器内路径。None 时退化为原路径。
+        # DooD:bind-mount 必须用宿主路径,非 worker 容器内路径。None 时退化为原路径。
         self._host_work_root = host_work_root
         # 镜像仓库前缀:把 pipelines 里的逻辑名 flori/step-X 解析成实仓名。
         self._registry = (registry or "").rstrip("/")
@@ -359,7 +359,7 @@ async def _run_progress_monitor(
     proc_alive: Callable[[], bool],
 ) -> None:
     """每 10s 续约 worker 状态 + 推日志(on_tick),写 worker_heartbeat_at,转发步骤进度事件。
-    不覆盖步骤自己写的 updated_at,否则 check_stuck 失效。Subprocess/Docker runner 共用(消重复副本)。"""
+    不覆盖步骤自己写的 updated_at,否则 check_stuck 失效。Subprocess/Docker runner 共用。"""
     progress_file = ctx.work_dir / f".{ctx.step}.progress"
 
     while proc_alive():
@@ -389,8 +389,8 @@ async def _run_progress_monitor(
 
 
 def _build_subprocess_env(ctx: StepContext) -> dict:
-    """DENYLIST 构造子进程 env：继承全量系统 env，剥离控制面密钥；
-    非 ai 池再剥离 AI 密钥；始终补 STEP_EXEC_ID。HTTPS_PROXY 等系统变量自然保留。"""
+    """DENYLIST 构造子进程 env:继承全量系统 env,剥离控制面密钥;
+    非 ai 池再剥离 AI 密钥;始终补 STEP_EXEC_ID。HTTPS_PROXY 等系统变量自然保留。"""
     env = {**os.environ, "STEP_EXEC_ID": ctx.exec_id}
     for key in _CONTROL_PLANE_SECRETS:
         env.pop(key, None)

@@ -1,14 +1,14 @@
 """source-adapter 模式的核心接口:SourceItem / 注册表 / 分派 / 命名 helper。
 
-【适配器契约】(写给后续实现 youtube/rss/local_dir/bili_fav 的 agent)
+适配器契约(新增适配器按此实现):
 
 适配器是一个 async 函数,签名:
     async def enum(source_id: str, ctx: SourceContext) -> tuple[str | None, list[SourceItem]]
 返回 (source_title, items):
   - source_title: 来源的人类可读名(UP 主名 / 频道名 / RSS 标题 / 目录名)。
     拿不到时返回 None(集合命名会回退用 source_id)。
-  - items: 该来源当前可见的全部内容项(不做去重——去重在 sync_collection 层按
-    ingested_item_ids 做;适配器只管"枚举全集")。
+  - items: 该来源当前可见的全部内容项。适配器只管枚举全集,不做去重;
+    去重在 sync_collection 层按 ingested_item_ids 做。
 
 用 @register("<source_type>") 装饰即注册。source_type 是细粒度来源种类:
     bilibili_up / bilibili_fav / bilibili_collection / youtube_channel / rss / local_dir

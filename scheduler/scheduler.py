@@ -1,4 +1,4 @@
-"""调度器：监听步骤完成/失败事件，推进 DAG，管理 Job 生命周期。"""
+"""调度器:监听步骤完成/失败事件,推进 DAG,管理 Job 生命周期。"""
 
 from __future__ import annotations
 
@@ -27,15 +27,15 @@ from shared.version import FLORI_VERSION
 
 logger = structlog.get_logger(component="scheduler")
 
-# 命中来源站点、需按【网络可达区域 net-zone】路由的步骤(其余步骤本地/AI,不分区域)。
+# 命中来源站点、需按网络可达区域(net-zone)路由的步骤;其余步骤本地/AI,不分区域。
 # 区域判定见 shared.net_zone(按 URL + 构建时烤入的 CN 域名表);worker 启动自动探测自报覆盖区域。
-# ★网络路由 tag 只有 net-cn / net-global;B站 SESSDATA 等凭证是 worker 本地的事(下载步自读),非路由 tag。
+# 网络路由 tag 只有 net-cn / net-global;B站 SESSDATA 等凭证是 worker 本地的事(下载步自读),非路由 tag。
 _NET_STEPS = {"01_download", "07_danmaku"}
 
 # 步骤静态优先级加权(分数 -= boost;zpopmin 越小越先)。02_whisper 防饿死(出稿硬依赖它)。
 _PRIORITY_BOOST = {"02_whisper": 100}
 
-# 延迟重试任务的 name 前缀，跟踪/按 job 取消时复用，避免格式漂移。
+# 延迟重试任务的 name 前缀,跟踪/按 job 取消时复用,避免格式漂移。
 _DELAYED_PREFIX = "delayed_enqueue:"
 
 # 笔记产出步 -> note_type。smart 已版本化(取最新版本文件),mechanical 走固定路径。
@@ -47,16 +47,16 @@ _NOTE_STEPS = {
 _NOTE_FILES = {
     "mechanical": "output/notes_mechanical.md",
 }
-# 评审步：完成后读 review.json，把 key_terms(①讲清楚的概念+候选定义)采集为候选术语。
+# 评审步:完成后读 review.json,把 key_terms(讲清楚的概念 + 候选定义)采集为候选术语。
 _REVIEW_STEPS = {"12_review", "06_review", "05_review"}  # video / paper / (article|audio)
-# article v2:概念独立步(必跑),是 glossary 的主采集源(评审可选时仍能进图谱);
+# article 链的独立概念步(必跑)是 glossary 的主采集源:评审可选时仍能进图谱。
 # 与 review 双触发无害——add_glossary_suggestion 按 job_id 去重 occurrence(幂等)。
 _CONCEPT_STEPS = {"05_concepts"}
 
 
 def _markdown_to_text(md: str) -> str:
-    """Markdown 去标记取纯文本（轻量、零依赖，够 FTS 索引用）：剥代码围栏、
-    图片/链接、标题/列表/强调标记，折叠空白。"""
+    """Markdown 去标记取纯文本(轻量、零依赖,够 FTS 索引用):剥代码围栏、
+    图片/链接、标题/列表/强调标记,折叠空白。"""
     import re
 
     md = re.sub(r"```.*?```", " ", md, flags=re.DOTALL)        # 代码围栏
@@ -81,8 +81,8 @@ class Scheduler:
         self.redis = redis
         self.db = db
         self.config = config
-        # storage 在 NAS 侧（调度器有 DB）读笔记/评审产物做索引与术语采集；
-        # worker 可能远程无 DB，故索引必须落在这里。未注入则跳过（向后兼容）。
+        # storage 在 NAS 侧(调度器有 DB)读笔记/评审产物做索引与术语采集;
+        # worker 可能远程无 DB,故索引必须落在这里。未注入则跳过(向后兼容)。
         self.storage = storage
         self.jobs_dir = config.jobs_dir
         self._shutdown = False
@@ -93,19 +93,19 @@ class Scheduler:
         self._started_at_iso = datetime.now(timezone.utc).isoformat()
         self._last_tick: float | None = None       # 上一拍 periodic 循环的 monotonic 时刻
         self._last_loop_lag: float = 0.0            # 实测间隔 - 期望(30s)的超出量,≥5s 叠加 degraded
-        # 跟踪所有 _delayed_enqueue fire-and-forget 任务，供 shutdown / rerun /
-        # job 失败时取消，避免泄漏或旧重试与新状态串台。
+        # 跟踪所有 _delayed_enqueue fire-and-forget 任务,供 shutdown / rerun /
+        # job 失败时取消,避免泄漏或旧重试与新状态串台。
         self._delayed_tasks: set[asyncio.Task] = set()
-        # job_id -> 首次被判定"无 worker 可推进"的时刻，超宽限期才 fail-fast(容忍 worker 重启)。
+        # job_id -> 首次被判定"无 worker 可推进"的时刻,超宽限期才 fail-fast(容忍 worker 重启)。
         self._no_worker_since: dict[str, float] = {}
-        # (job_id, step) -> 首次发现"在跑步骤的 worker 上报的 current_step 不是本步"的时刻，
-        # 超宽限期才回收(容忍认领后首拍心跳延迟),修 gateway 认领响应丢失导致的永久卡 running。
+        # (job_id, step) -> 首次发现"在跑步骤的 worker 上报的 current_step 不是本步"的时刻,
+        # 超宽限期才回收(容忍认领后首拍心跳延迟),防 gateway 认领响应丢失导致的永久卡 running。
         self._claim_mismatch_since: dict[tuple[str, str], float] = {}
         # 上一拍判定为"陈旧"(持有槽但不属于任何 running 步)的 holder 集合。仅连续两拍都陈旧才 SREM,
         # 避开"刚占槽、尚未写 running 状态"的认领窗口被周期对账误清(同 _claim_mismatch_since 的宽限思路)。
         self._slot_reconcile_suspect: set[str] = set()
 
-    # ── 生命周期 ──
+    # 生命周期
 
     async def run(self) -> None:
         logger.info("scheduler_start")
@@ -145,7 +145,7 @@ class Scheduler:
             await asyncio.gather(*pending, return_exceptions=True)
 
     def _on_delayed_done(self, task: asyncio.Task) -> None:
-        """延迟任务完成回调：从跟踪集合移除；非取消的真异常上报。"""
+        """延迟任务完成回调:从跟踪集合移除;非取消的真异常上报。"""
         self._delayed_tasks.discard(task)
         if not task.cancelled() and task.exception() is not None:
             logger.error(
@@ -154,17 +154,17 @@ class Scheduler:
             )
 
     def _cancel_delayed_tasks(self, job_id: str) -> None:
-        """取消某 job 在途的延迟重试任务（rerun / job 失败时调用）。"""
+        """取消某 job 在途的延迟重试任务(rerun / job 失败时调用)。"""
         prefix = f"{_DELAYED_PREFIX}{job_id}:"
         for t in list(self._delayed_tasks):
             if t.get_name().startswith(prefix) and not t.done():
                 t.cancel()
 
-    # ── 主循环 ──
+    # 主循环
 
     async def _event_loop(self) -> None:
-        """订阅事件并分发。连接级异常（redis 超时/断连）不再让进程崩溃，
-        而是指数退避后重连重订阅；启动恢复也会补推漏掉的步骤。"""
+        """订阅事件并分发。连接级异常(redis 超时/断连)不崩进程:
+        指数退避后重连重订阅;启动恢复也会补推漏掉的步骤。"""
         backoff = 1
         while not self._shutdown:
             try:
@@ -173,7 +173,7 @@ class Scheduler:
                 ):
                     if self._shutdown:
                         break
-                    backoff = 1  # 收到任何消息说明连接健康，重置退避
+                    backoff = 1  # 收到任何消息说明连接健康,重置退避
                     try:
                         await self._dispatch(msg)
                     except Exception:
@@ -230,13 +230,13 @@ class Scheduler:
         elif command == "delete":
             # 消费 delete_job 端点的 publish:删 job 的编排状态收尾——取消在途重试、移出
             # active_jobs、清五个 Redis 编排 hash(job:{id}/steps/retries/step_worker/step_exec)。
-            # 否则删「在途(processing)」job 后这些键泄漏,幽灵 job 被 orphan_scan/check_no_worker/
+            # 否则删在途(processing) job 后这些键泄漏,幽灵 job 被 orphan_scan/check_no_worker/
             # check_stuck 周期空扫,迟到的 on_step_done 还可能 CAS 推进已删 job。
             job_id = msg["job_id"]
             self._cancel_delayed_tasks(job_id)
             await self.redis.remove_active_job(job_id)
             await self.redis.cleanup_job(job_id)
-            # 清队列里该 job 尚未认领的排队 task(queue:{pool}+queue:enqueued,补 G1)。
+            # 清队列里该 job 尚未认领的排队 task(queue:{pool}+queue:enqueued)。
             # API 删除路径已同步清过;此处兜底 CLI/其它经 pubsub 发起的删除。幂等。
             await self.redis.remove_job_tasks(job_id)
             logger.info("job_deleted_cleanup", job_id=job_id)
@@ -265,7 +265,7 @@ class Scheduler:
 
     async def _heartbeat_loop(self) -> None:
         """每 ~10s 写 component:scheduler 心跳(<online_window/3,容忍丢 2 拍仍 up)。
-        瞬态 redis 抖动不杀 worker:记日志后续跑,下一拍重写;丢几拍由 stale 窗口容忍。"""
+        瞬态 redis 抖动不中断循环:记日志后续跑,下一拍重写;丢几拍由 stale 窗口容忍。"""
         while not self._shutdown:
             try:
                 await self.redis.set_component_heartbeat("scheduler", {
@@ -282,13 +282,13 @@ class Scheduler:
             await asyncio.sleep(10)
 
     async def cleanup_stale_workers(self, timeout_sec: int | None = None) -> None:
-        """清理僵尸 worker：DB 中 last_heartbeat 超时且 Redis 注册已过期（worker 真没了）
-        的记录删除；仅 DB 过期但 Redis 仍在的标 offline（容器可能刚重启换 id）。
+        """清理僵尸 worker:DB 中 last_heartbeat 超时且 Redis 注册已过期(worker 真没了)
+        的记录删除;仅 DB 过期但 Redis 仍在的标 offline(容器可能刚重启换 id)。
 
-        删除阈值默认取 config.pools['worker_status'].stale_window_sec(与 API 侧
-        compute_worker_status 的 STALE 窗口对齐,单一事实源)。此前硬编码 60s 远小于
-        stale_window(900s)——GC 会在 worker 进入 STALE 公开态之前就删 DB 行,使 STALE
-        态对本机 DB 追踪的 worker 实际不可达。对齐后 worker 在被判 STALE 之前不会被回收。"""
+        删除阈值默认取 config.pools['worker_status'].stale_window_sec,与 API 侧
+        compute_worker_status 的 STALE 窗口对齐(单一事实源)。阈值若小于该窗口,
+        GC 会在 worker 进入 STALE 公开态之前就删 DB 行,使 STALE 态实际不可达;
+        对齐后 worker 在被判 STALE 之前不会被回收。"""
         from datetime import timedelta
 
         if timeout_sec is None:
@@ -303,7 +303,7 @@ class Scheduler:
                 continue
             alive = await self.redis.worker_exists(w.id)
             if alive:
-                # list_workers 已按心跳新鲜度衍生公共状态，故此处直接持久化（幂等），
+                # list_workers 已按心跳新鲜度衍生公共状态,故此处直接持久化(幂等),
                 # 不能用 w.status 判断是否需要写。
                 await asyncio.to_thread(
                     self.db.set_worker_status, w.id, "offline",
@@ -314,7 +314,7 @@ class Scheduler:
                 logger.info("worker_cleaned", worker_id=w.id)
 
     async def _recover(self) -> None:
-        """启动恢复：补推满足依赖的步骤，回收无主 running 步骤。"""
+        """启动恢复:补推满足依赖的步骤,回收无主 running 步骤。"""
         active_jobs = await self.redis.get_active_jobs()
         logger.info("recover_start", active_jobs=len(active_jobs))
 
@@ -336,10 +336,10 @@ class Scheduler:
 
         logger.info("recover_done", active_jobs=len(active_jobs))
 
-    # ── Job 提交 ──
+    # Job 提交
 
     async def submit_job(self, job: Job) -> None:
-        """API 调用：提交新任务，初始化步骤状态，入队无依赖步骤。"""
+        """API 调用:提交新任务,初始化步骤状态,入队无依赖步骤。"""
         pipeline_steps = self._get_pipeline_steps(job.pipeline)
         if not pipeline_steps:
             logger.warning("empty_pipeline", job_id=job.id, pipeline=job.pipeline)
@@ -354,7 +354,7 @@ class Scheduler:
             "style_tags": job.style_tags,
             "url": job.url or "",
             "source": job.source or "",
-            # 投递开关(如 smart_note)→ 供 rules 的 if_flag 求值(条件跳步,见 _eval_rules)。
+            # 投递开关(如 smart_note),供 rules 的 if_flag 求值,条件跳步见 _eval_rules。
             "flags": (job.meta or {}).get("flags", {}),
         })
 
@@ -370,7 +370,7 @@ class Scheduler:
 
         logger.info("job_submitted", job_id=job.id, pipeline=job.pipeline)
 
-    # ── 事件处理 ──
+    # 事件处理
 
     async def _exec_is_current(self, job_id: str, step: str, exec_id: str) -> bool:
         """事件携带的 exec_id 是否为该步当前在跑的执行实例。
@@ -422,22 +422,22 @@ class Scheduler:
             "duration_sec": duration, "progress_pct": progress,
         })
 
-        # 笔记产出步 -> 建全文索引；评审步 -> 采集候选术语。失败只 log 不致命。
+        # 笔记产出步 -> 建全文索引;评审步 -> 采集候选术语。失败只 log 不致命。
         await self._index_on_step_done(job_id, step)
 
         logger.info("step_done", job_id=job_id, step=step, duration=duration)
         await self._check_downstream(job_id)
 
     async def _index_on_step_done(self, job_id: str, step: str) -> None:
-        """步骤完成后的知识库副作用：笔记产出步建 FTS 索引、评审步采集术语。
-        全程容错——无 storage / 读不到产物 / 解析异常都只记日志，绝不影响 DAG 推进。"""
+        """步骤完成后的知识库副作用:笔记产出步建 FTS 索引、评审步采集术语。
+        全程容错——无 storage / 读不到产物 / 解析异常都只记日志,绝不影响 DAG 推进。"""
         if self.storage is None:
             return
         try:
             if step in ("01_download", "02_pdf_parse", "02_parse_article"):
                 # 下载完即从 metadata/article_meta 同步标题/时间,使内容名在处理过程中即可显示;
-                # 论文标题只在 02_pdf_parse 写的 parsed.json(01 时还没有)→ 解析步后再同步一次
-                # (尤其 AI 步未跑、job 卡住时,不必等 job_done 也能出标题)。job_done 时仍兜底。
+                # 论文标题只在 02_pdf_parse 写的 parsed.json,01 时还没有,故解析步后再同步一次。
+                # 这样 AI 步未跑、job 卡住时也不必等 job_done 就能出标题;job_done 时仍兜底。
                 await self._sync_published_at(job_id)
             elif step in _NOTE_STEPS:
                 await self._index_job_notes(job_id, _NOTE_STEPS[step])
@@ -447,7 +447,7 @@ class Scheduler:
             logger.warning("index_step_done_failed", job_id=job_id, step=step)
 
     async def _index_job_notes(self, job_id: str, note_type: str) -> None:
-        """读该 job 的笔记 Markdown，去标记取纯文本，连同 job 元信息写入 FTS 索引。"""
+        """读该 job 的笔记 Markdown,去标记取纯文本,连同 job 元信息写入 FTS 索引。"""
         rel = _NOTE_FILES.get(note_type)
         if note_type == "smart":   # 智能笔记已版本化,取最新版本文件
             from shared.notes_versions import latest_smart
@@ -474,10 +474,10 @@ class Scheduler:
         logger.info("notes_indexed", job_id=job_id, note_type=note_type)
 
     async def _collect_glossary(self, job_id: str) -> None:
-        """读评审产物 review.json，把 key_terms(①这篇讲清楚的概念 + 候选定义)采集为候选术语。
-        主喂养源是「讲清楚了什么」(§1.8)；missing_concepts(知识缺口)只留评审面板，不喂术语库。
-        采集源:优先 output/concepts.json(article v2 的独立概念步,必跑),回退 output/review.json
-        (video/paper/audio 仍由评审步出 key_terms)。"""
+        """把 key_terms(这篇讲清楚的概念 + 候选定义)采集为候选术语。
+        主喂养源是评审"讲清楚了什么"一节;missing_concepts(知识缺口)只留评审面板,不喂术语库。
+        采集源:优先 output/concepts.json(article 链的独立概念步,必跑),回退 output/review.json
+        (video/paper/audio 由评审步出 key_terms)。"""
         data = await self.storage.read_file(job_id, "output/concepts.json")
         if not data:
             data = await self.storage.read_file(job_id, "output/review.json")
@@ -535,8 +535,8 @@ class Scheduler:
         cfg = pipeline_steps.get(step, {})
         pipeline_retries = cfg.get("retries", 0)
 
-        # 缺表项（如 unknown）按 max 0 处理：未归类失败默认 BUILD，不重试。
-        # pipeline_retries 二次封顶 policy_max：用户不可放大 SYSTEM 类的上限。
+        # 缺表项(如 unknown)按 max 0 处理:未归类失败默认 BUILD,不重试。
+        # pipeline_retries 二次封顶 policy_max:用户不可放大 SYSTEM 类的上限。
         policy = RETRY_POLICY.get(error_type, {})
         policy_max = policy.get("max", 0)
         max_retries = min(policy_max, pipeline_retries)
@@ -579,10 +579,10 @@ class Scheduler:
         await asyncio.sleep(delay)
         await self.enqueue_step(job_id, step)
 
-    # ── DAG 推进 ──
+    # DAG 推进
 
     async def _check_downstream(self, job_id: str) -> None:
-        """检查所有 waiting/skipped 步骤是否可推进。生产由 on_step_done 调用。"""
+        """检查所有 waiting/skipped 步骤是否可推进。生产路径由 on_step_done 调用。"""
         pipeline = await self.redis.get_job_pipeline(job_id)
         if not pipeline:
             return
@@ -624,7 +624,7 @@ class Scheduler:
         if fresh and all(v in ("done", "skipped") for v in fresh.values()):
             await self.mark_job_done(job_id)
         elif fresh:
-            # 死锁打破器：仅当剩余未完成步骤全部为 ready（无 running、无 waiting）才介入。
+            # 死锁打破器:仅当剩余未完成步骤全部为 ready(无 running、无 waiting)才介入。
             not_done = {k: v for k, v in fresh.items() if v not in ("done", "skipped")}
             all_remaining_ready = bool(not_done) and all(
                 v == "ready" for v in not_done.values()
@@ -640,13 +640,13 @@ class Scheduler:
                             pool_ok[pool] = await self._pool_has_workers(pool)
                         if pool_ok[pool]:
                             continue
-                        # 缺 worker 只 skip「条件步」(可选步缺能力=合理跳过);必需步不 skip,留给
-                        # check_no_worker 超宽限 fail-fast——避免末端必需步被静默 skip 后 job「不完整却
-                        # 显示完成」(对齐 pools.yaml fail-fast 注释)。
+                        # 缺 worker 只 skip 条件步(可选步缺能力=合理跳过);必需步不 skip,留给
+                        # check_no_worker 超宽限 fail-fast——避免末端必需步被静默 skip 后 job
+                        # 不完整却显示完成(对齐 pools.yaml fail-fast 注释)。
                         if not self._step_is_conditional(steps_cfg.get(step_name, {})):
                             continue
-                        # CAS 保护 ready→skipped：若该步骤刚被 worker 抢成 running，
-                        # CAS 失败 → 放弃 skip，避免覆盖在途执行。
+                        # CAS 保护 ready→skipped:若该步骤刚被 worker 抢成 running,
+                        # CAS 失败 → 放弃 skip,避免覆盖在途执行。
                         if not await self.redis.cas_step_status(
                             job_id, step_name, "ready", "skipped"
                         ):
@@ -687,11 +687,9 @@ class Scheduler:
         else:
             merged_tags = list(static_tags)
 
-        # 网络区域路由(net-zone):仅 01_download/07_danmaku 命中来源站点。【任务分发时判 URL 区域】
-        # → require 对应 net-cn / net-global tag;worker 启动【自动探测】自报覆盖哪些区域,只有覆盖
-        # 该区域的 worker 才能认领(境外→香港/带代理 worker;大陆→大陆 worker)。代理 HOW 全在 worker。
-        # 区域分类用构建时烤入的 CN 域名表(见 shared.net_zone)。网络路由 tag 只有 net-cn/net-global——
-        # B站 SESSDATA 等凭证是 worker 本地的事(下载步 step_01 自己读),不再是路由 tag。
+        # 网络区域路由(net-zone):任务分发时按 URL 判区域,require 对应 net-cn / net-global tag;
+        # 只有自报覆盖该区域的 worker 才能认领(境外→香港/带代理 worker;大陆→大陆 worker)。
+        # 代理 HOW 全在 worker。区域判定与 tag 语义见文件头 _NET_STEPS 注释与 shared.net_zone。
         nr = self.config.net_routing or {}
         net_steps = set(nr.get("net_steps") or _NET_STEPS)
         require_tags = list(static_tags)
@@ -705,8 +703,8 @@ class Scheduler:
         statuses = await self.redis.get_all_step_statuses(job_id)
         done_count = sum(1 for v in statuses.values() if v in ("done", "skipped"))
         # zpopmin:分数越小越先出。priority=-done_count 让晚到步骤优先,但 02_whisper 处在链路早段
-        # 会被各 job 的视觉步(04/05/06,同 cpu 池)长期抢占而饿死。给它静态加权(更小分数)抢先转写,
-        # 避免出稿步空等(出稿现已硬依赖转写)。
+        # 会被各 job 的视觉步(04/05/06,同 cpu 池)长期抢占而饿死。给它静态加权(更小分数)抢先转写;
+        # 出稿硬依赖转写,不加权会让出稿步空等。
         priority = -done_count - _PRIORITY_BOOST.get(step_name, 0)
 
         await self.redis.enqueue_step(
@@ -755,11 +753,11 @@ class Scheduler:
         return True
 
     def _step_is_conditional(self, cfg: dict) -> bool:
-        """step 是否带跳过条件：旧 condition 字符串或声明式 rules 均算。"""
+        """step 是否带跳过条件:condition 字符串或声明式 rules 均算。"""
         return bool(cfg.get("condition") or cfg.get("rules"))
 
     async def _eval_step_condition(self, job_id: str, cfg: dict) -> bool:
-        """求值 step 是否应运行：优先旧 condition（行为不变），否则用声明式 rules。"""
+        """求值 step 是否应运行:优先 condition 字符串,否则用声明式 rules。"""
         condition = cfg.get("condition")
         if condition:
             return await self.check_condition(job_id, condition)
@@ -769,8 +767,8 @@ class Scheduler:
         return True
 
     async def _eval_rules(self, job_id: str, rules: list) -> bool:
-        """声明式 rules 求值器：自上而下首条命中生效，命中 when=skip 则跳过，
-        当前支持 exists(相对 job 根的 glob)与 if_flag(投递开关),无命中默认运行。
+        """声明式 rules 求值器:自上而下首条命中生效,命中 when=skip 则跳过,
+        支持 exists(相对 job 根的 glob)与 if_flag(投递开关),无命中默认运行。
         存在性查 storage(产物在 MinIO,不在调度器本地盘);if_flag 查 redis job info。"""
         files = await self._list_job_files(job_id)
         _flags_cache: dict | None = None
@@ -806,7 +804,7 @@ class Scheduler:
             if flag is not None:
                 if not (await _flags()).get(flag):
                     continue
-            # exists/if_flag 命中、或无条件的兜底规则：本条生效。
+            # exists/if_flag 命中、或无条件的兜底规则:本条生效。
             return _when(rule) != "skip"
         return True
 
@@ -828,9 +826,10 @@ class Scheduler:
 
     async def _pool_has_workers_for(self, pool: str, require_tags: list[str]) -> bool:
         """同 _pool_has_workers,但额外要求在线 worker 的 tags 满足 require_tags(硬门控)。
-        require_tags 空 → 等价 _pool_has_workers。修复:check_no_worker 若只看池不看 tag,
-        『池有 worker 但无人满足 require_tags』(如境外内容 require net-global 却无能到全球的 worker)会躲过
-        fail-fast、永久卡 ready(无报错)。用本函数后超 NO_WORKER_GRACE_SEC 才给明确失败。"""
+        require_tags 空 → 等价 _pool_has_workers。check_no_worker 若只看池不看 tag,
+        池有 worker 但无人满足 require_tags 时(如境外内容 require net-global 却无覆盖全球的
+        worker)会躲过 fail-fast、永久卡 ready 且无报错;用本函数后超 NO_WORKER_GRACE_SEC
+        给明确失败。"""
         req = {t for t in (require_tags or []) if t}
         if not req:
             return await self._pool_has_workers(pool)
@@ -848,7 +847,7 @@ class Scheduler:
                 return True
         return False
 
-    # ── Job 状态 ──
+    # Job 状态
 
     async def mark_job_done(self, job_id: str) -> None:
         await self._sync_published_at(job_id)
@@ -881,8 +880,8 @@ class Scheduler:
             if am_raw:
                 am = json.loads(am_raw.decode("utf-8", errors="replace"))
                 md = {**am, **{k: v for k, v in md.items() if v}}
-            # 论文/文章的 title/date 也在 02 解析写的 intermediate/parsed.json(论文标题尤其只在此)→ 末位兜底,
-            # 仍以已有非空值优先(不覆盖 metadata/article_meta 已填)。
+            # 论文/文章的 title/date 也在 02 解析写的 intermediate/parsed.json,论文标题尤其只在此,
+            # 故作末位兜底;仍以已有非空值优先,不覆盖 metadata/article_meta 已填的。
             if not md.get("title") or not (md.get("published_at") or md.get("date")):
                 pj_raw = await self.storage.read_file(job_id, "intermediate/parsed.json")
                 if pj_raw:
@@ -895,7 +894,7 @@ class Scheduler:
             if published:
                 fields["published_at"] = published
             # 标题:01_download 从源(youtube info.json / article_meta)写入时回填——仅当 DB 标题为空,
-            # 不覆盖订阅/用户已填的标题。覆盖所有创建路径(手动 URL 投递此前无标题)。
+            # 不覆盖订阅/用户已填的标题。覆盖所有创建路径,含手动 URL 投递这类无标题来源。
             title = (md.get("title") or "").strip()
             if title:
                 job = await asyncio.to_thread(self.db.get_job, job_id)
@@ -920,21 +919,21 @@ class Scheduler:
         })
         await self.redis.push_event("job_failed", job_id=job_id, error=error[:200])
         await self.redis.remove_active_job(job_id)
-        # 失败即停:清掉该 job 仍残留在 queue:{pool} 的兄弟 ready task(并行分支下,某步终态失败时其它
-        # 已入队的兄弟步是死任务——job 已 FAILED 不该再跑;不清则 worker 仍会认领、cas_step_status 因
-        # steps hash 未清而成功 → 跑已失败 job 的步、甚至 _check_downstream 把它重标 done,且成指向 FAILED
-        # job 的孤儿 task)。★保留 job:{id}:steps hash(不调 cleanup_job)→ 重试/重跑仍可用。
+        # 失败即停:清掉该 job 仍残留在 queue:{pool} 的兄弟 ready task。并行分支下某步终态失败时,
+        # 其它已入队的兄弟步是死任务,job 已 FAILED 不该再跑;不清则 worker 仍会认领,cas_step_status
+        # 因 steps hash 未清而成功,跑已失败 job 的步,甚至 _check_downstream 把它重标 done,还留下
+        # 指向 FAILED job 的孤儿 task。保留 job:{id}:steps hash(不调 cleanup_job),重试/重跑仍可用。
         await self.redis.remove_job_tasks(job_id)
         logger.info("job_failed", job_id=job_id, error=error[:200])
 
-    # ── 孤儿回收 + 卡住检测 ──
+    # 孤儿回收 + 卡住检测
 
-    # 认领后到首个进度心跳之间允许的「无心跳」窗口。尤其 gateway worker 拉大源文件(source.mp4)
+    # 认领后到首个进度心跳之间允许的无心跳窗口。尤其 gateway worker 拉大源文件(source.mp4)
     # 的 pull 阶段:子进程未起、on_tick 未触发,progress_at 为 None。取 120s 覆盖慢链路拉取,
-    # 避免 pull 中的步被误判 claim lost 回收(曾致 03_scene 等步雪崩)。真丢认领最迟 120s 回收
-    # (罕见,可接受)。开 STORAGE_WORKDIR_REUSE 后 pull 近乎瞬时、基本不触发。env 可调。
+    # 避免 pull 中的步被误判 claim lost 回收(实测误判会让 03_scene 等步雪崩)。真丢认领最迟
+    # 120s 回收(罕见,可接受)。开 STORAGE_WORKDIR_REUSE 后 pull 近乎瞬时、基本不触发。env 可调。
     _CLAIM_MISMATCH_GRACE_SEC = int(os.environ.get("CLAIM_MISMATCH_GRACE_SEC", "120"))
-    # 判「这步是否有人在跑」用每步独立的进度心跳新鲜度(worker on_tick 每 10s 刷一步)。
+    # 判"这步是否有人在跑"用每步独立的进度心跳新鲜度(worker on_tick 每 10s 刷一步)。
     # 30s(≈3 拍)留余量,避免扫描时序抖动误判正在跑的步。
     _STEP_PROGRESS_FRESH_SEC = 30
 
@@ -954,9 +953,9 @@ class Scheduler:
                     await self._reclaim_step(job_id, step, f"worker {worker_id} lost")
                     continue
                 # worker 存活,但这步没有近期进度心跳 → 认领响应丢失/未真正运行,实际没人在跑。
-                # 判活用「每步独立」的进度心跳(job:*:step_progress,worker on_tick 每 10s 刷一步),
+                # 判活用每步独立的进度心跳(job:*:step_progress,worker on_tick 每 10s 刷一步),
                 # 而非 worker 的单个 current_step——后者在 concurrency>1 时只能反映 N 个并发步中的 1 个,
-                # 会把其余并发步全误判为 claim lost 反复回收(并发越高越严重,曾致失败雪崩)。
+                # 会把其余并发步全误判为 claim lost 反复回收(并发越高越严重,实测会致失败雪崩)。
                 # 持续超宽限期(容忍认领后首拍心跳延迟)才回收。
                 progress_at = await self.redis.get_step_progress_at(job_id, step)
                 if progress_at is not None and time.time() - progress_at < self._STEP_PROGRESS_FRESH_SEC:
@@ -981,9 +980,9 @@ class Scheduler:
         logger.warning("reclaim_step", job_id=job_id, step=step, reason=reason)
         await self.redis.push_event("orphan_reclaimed", job_id=job_id, step=step, reason=reason)
 
-        # holder 集合:按本步 holder(=exec_id)SREM 释放其占的池槽/资源槽。★SREM 幂等——即便 worker 仍存活、
-        # 它自己的 release_step 也 SREM 同一 holder,双方都安全(不双减),故【不再需要 release_slot=False 特例】:
-        # reclaim 一律按 holder 释放,死 worker 的槽必被回收(根治泄漏),活 worker 重复释放也无害。
+        # holder 集合:按本步 holder(=exec_id)SREM 释放其占的池槽/资源槽。SREM 幂等——即便 worker
+        # 仍存活、它自己的 release_step 也 SREM 同一 holder,双方都安全(不双减)。故 reclaim 一律按
+        # holder 释放:死 worker 的槽必被回收,不泄漏;活 worker 重复释放也无害。
         holder = await self.redis.get_step_exec_id(job_id, step)
         if holder:
             pipeline_steps = await self._get_job_pipeline_steps(job_id)
@@ -1006,7 +1005,7 @@ class Scheduler:
     async def reconcile_slots(self) -> None:
         """周期对账并发槽:持有 holder(=exec_id)但不属于任何 running 步的 = 泄漏(worker 突死没 release_step、
         删 running job 漏放、占槽后死在写状态前等)。SCARD 是真实占用,但这些陈旧 holder 仍占名额 → 清掉收敛。
-        ★宽限:仅连续两拍(2×30s)都陈旧才 SREM,避开"刚占槽、还没写 running 状态"的认领窗口被误清。"""
+        宽限:仅连续两拍(2×30s)都陈旧才 SREM,避开"刚占槽、还没写 running 状态"的认领窗口被误清。"""
         try:
             held = await self.redis.get_all_holders()
             if not held:
@@ -1034,7 +1033,7 @@ class Scheduler:
         # 进度停滞检测:本地 job 读 jobs_dir/.{step}.progress(worker _progress_monitor 写其
         # work_dir;单机 LocalStorage 下 work_dir==jobs_dir 才可见)。远程 job(Gateway/Remote
         # 存储,work_dir 是 worker 本地 tmp、不落调度器盘)退回读 redis 步进度心跳——由 worker
-        # on_tick 每 10s(仅子进程存活时)经 set_step_progress_at 刷新(修原 B7:远程恒 no-op)。
+        # on_tick 每 10s(仅子进程存活时)经 set_step_progress_at 刷新。
         active_jobs = await self.redis.get_active_jobs()
         for job_id in active_jobs:
             statuses = await self.redis.get_all_step_statuses(job_id)
@@ -1108,7 +1107,7 @@ class Scheduler:
             pool_ok: dict[tuple, bool] = {}  # 按 (pool, require_tags) 缓存:同池不同门控要分别判
             for step in ready:
                 pool = steps_cfg.get(step, {}).get("pool", "")
-                # 重算该 step 的 require_tags(与 enqueue_step 同逻辑):net-zone(按 URL 区域)。
+                # 重算该 step 的 require_tags,与 enqueue_step 同逻辑:net-zone 按 URL 区域。
                 req: list[str] = []
                 if step in net_steps:
                     if job_src is None:
@@ -1143,10 +1142,10 @@ class Scheduler:
         for jid in [j for j in self._no_worker_since if j not in active_set]:
             self._no_worker_since.pop(jid, None)
 
-    # ── 重跑 / 重提交 ──
+    # 重跑 / 重提交
 
     async def _retry_failed(self, job_id: str) -> None:
-        """重试失败 Job：从第一个 failed 步骤开始重跑。"""
+        """重试失败 Job:从第一个 failed 步骤开始重跑。"""
         statuses = await self.redis.get_all_step_statuses(job_id)
         failed_steps = [s for s, st in statuses.items() if st == "failed"]
         if not failed_steps:
@@ -1156,8 +1155,8 @@ class Scheduler:
         logger.info("job_retry", job_id=job_id, from_step=first_failed)
 
     async def rerun(self, job_id: str, from_step: str) -> list[str]:
-        """从指定步骤开始重跑，清除该步骤及所有下游的 .done 标记。返回被重置的步骤列表。"""
-        self._cancel_delayed_tasks(job_id)  # 取消旧重试，防与新一轮状态串台
+        """从指定步骤开始重跑,清除该步骤及所有下游的 .done 标记。返回被重置的步骤列表。"""
+        self._cancel_delayed_tasks(job_id)  # 取消在途延迟重试,防与新一轮状态串台
         pipeline = await self.redis.get_job_pipeline(job_id)
         if not pipeline:
             return []
@@ -1169,7 +1168,7 @@ class Scheduler:
             done_file = self.jobs_dir / job_id / f".{step}.done"
             await asyncio.to_thread(done_file.unlink, True)
             await self.redis.set_step_status(job_id, step, "waiting")
-            # 清重试计数,否则重跑曾耗尽重试的步骤会零重试预算、首次失败即终止(审计 I-H4)。
+            # 清重试计数,否则重跑曾耗尽重试的步骤会零重试预算、首次失败即终止。
             await self.redis.reset_step_retries(job_id, step)
             await asyncio.to_thread(
                 self.db.update_step, job_id, step,
@@ -1188,12 +1187,12 @@ class Scheduler:
         return reset_steps
 
     async def resubmit(self, job_id: str) -> None:
-        """按当前 pipelines.yaml 重新初始化步骤，保留已有步骤的状态。
+        """按当前 pipelines.yaml 重新初始化步骤,保留已有步骤的状态。
 
-        以**当前 pipeline 为准**对齐 redis 与 DB 两侧:删去 pipeline 不再有的步(两侧都删)、
-        补齐新步、并把每个步在 redis/DB 写到同一状态——保证 redis 与 DB 步集一致。
-        (修旧实现的分叉 bug:删旧步只删 redis 不删 DB、且用 redis existing 当判据跳过 DB 回填,
-         renumber/改 pipeline 后会导致流水线读 DB 显示旧步、与实际执行的 redis 分叉。)"""
+        以当前 pipeline 为准对齐 redis 与 DB 两侧:删去 pipeline 不再有的步(两侧都删)、
+        补齐新步、并把每个步在 redis/DB 写到同一状态。不变量:redis 与 DB 步集一致——
+        删旧步若只删 redis 不删 DB,或用 redis existing 当判据跳过 DB 回填,renumber/改
+        pipeline 后流水线读 DB 会显示旧步、与实际执行的 redis 分叉。"""
         self.reload_config()
 
         pipeline = await self.redis.get_job_pipeline(job_id)
@@ -1207,7 +1206,7 @@ class Scheduler:
             for s in await asyncio.to_thread(self.db.get_steps, job_id)
         }
 
-        # 删去当前 pipeline 不再有的步:redis 与 DB 都删(原实现只删 redis,DB 残留旧步)。
+        # 删去当前 pipeline 不再有的步:redis 与 DB 都删,否则 DB 残留旧步。
         for name in (set(existing) | set(db_status)) - set(steps):
             await self.redis.delete_step_status(job_id, name)
             await asyncio.to_thread(self.db.delete_step, job_id, name)
@@ -1245,7 +1244,7 @@ class Scheduler:
         )
         logger.info("config_reloaded")
 
-    # ── 内部工具 ──
+    # 内部工具
 
     def _get_pipeline_steps(self, pipeline: str) -> dict[str, dict]:
         steps_list = self.config.pipelines.get(pipeline, {}).get("steps", [])

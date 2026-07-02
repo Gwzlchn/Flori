@@ -45,7 +45,7 @@ def _enc_href(enc: object) -> str:
 
 def _audio_enclosure_href(entry: object) -> str | None:
     """取 entry 第一个音频 enclosure 的真链 href(enclosures 优先,再 links rel=enclosure)。
-    无音频 enclosure → None。供 audio 条目把「页面 link」换成「音频直链」喂下载步。"""
+    无音频 enclosure → None。供 audio 条目把页面 link 换成音频直链喂下载步。"""
     get = getattr(entry, "get", None)
     if not callable(get):
         return None
@@ -107,8 +107,8 @@ async def enumerate_rss(
         if not item_id:
             continue
         content_type = _content_type_for(link, entry)
-        # audio 条目:url 用音频 enclosure 真链(而非页面 link),否则下载步 curl 到的是网页 HTML、
-        # whisper 无音源 → 挂(08 审计 §4)。enclosure 缺失时回退页面 link(下载步再 best-effort 解析)。
+        # audio 条目 url 用音频 enclosure 真链而非页面 link:否则下载步 curl 到的是网页 HTML,
+        # whisper 无音源会挂。enclosure 缺失时回退页面 link(下载步再 best-effort 解析)。
         url = link or item_id
         if content_type == "audio":
             url = _audio_enclosure_href(entry) or url

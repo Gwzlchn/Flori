@@ -4,13 +4,13 @@
 递归扫描其中支持的扩展名文件,每个文件枚举为一个 SourceItem,由 sync_collection
 建 job 入库。无网络下载——01_download 识别 file:// url 后把文件复制进 job 的 input/。
 
-source_id = 被扫描目录的【绝对路径】。source_title = 目录 basename(命名层用于
+source_id = 被扫描目录的绝对路径。source_title = 目录 basename(命名层用于
 <名>-local)。
 
 去重键 item_id = "相对路径|大小|mtime秒":
   - 相对路径稳定标识"同一个文件"(目录内移动/重命名视作新文件,符合直觉);
   - 叠加 size+mtime,使文件被原地修改/替换后 item_id 变化 → 重新入库(取最新内容)。
-    内容未变时三者皆同 → item_id 稳定 → 不重复建 job(去重在 sync_collection 层做)。
+    内容未变时三者皆同,item_id 稳定,不会重复建 job(去重在 sync_collection 层做)。
 
 扩展名 → content_type(决定 pipeline):
   .pdf                          -> paper
