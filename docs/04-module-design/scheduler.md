@@ -3,7 +3,12 @@
 > 职责：监听步骤完成事件，推进 DAG 中的下一步骤到对应资源池队列。
 > 不执行任何步骤，只做"推进"逻辑。
 
-> 现状提示：pipeline 已改为 GitLab-CI 风格（`needs` 推导 DAG、`rules` 声明式跳过、`extends`/`variables`，见 `configs/pipelines.yaml` 与 [docs/03-contracts.md §4.1](../03-contracts.md)）；步骤名为各 pipeline 内独立 `01..N`（如 video: `01_download`/`02_whisper`/.../`11_smart`→`10_smart`/`11_review`）。worker 已 GitLab-runner 化：认领/上报搬到服务端 `/api/runner/jobs/*`，远程 worker 不直连 Redis（见 [worker.md](worker.md) 与 [ADR-0009](../adr/0009-worker-gateway-outbound-https.md)）。本文余下的 `depends_on`/`condition`/Worker 直取 ZSET 等为早期设计示意，核心不变量（DAG / 资源池上限+运行时覆盖 / 下载隔离到 io 池 / B站 cookie 硬门控 / 优先级 / 孤儿回收 / 幂等）仍成立(scene↔cpu 互斥已废弃:scene 并入 cpu、单机抢资源由 per-worker 并发控制)，仅落地形态以代码为准。
+> 现状提示（正文多为早期设计示意，落地形态以代码为准）：
+> - pipeline 已改为 GitLab-CI 风格：`needs` 推导 DAG、`rules` 声明式跳过、`extends`/`variables`。见 `configs/pipelines.yaml` 与 [docs/03-contracts.md §4.1](../03-contracts.md)。正文的 `depends_on`/`condition` 对应现在的 `needs`/`rules`。
+> - 步骤名为各 pipeline 内独立 `01..N`（video 现为 `01_download`/`02_whisper`/…/`11_smart`/`12_review`）。正文示例里的旧步骤名以 `configs/pipelines.yaml` 为准。
+> - worker 已 GitLab-runner 化：认领/上报走服务端 `/api/runner/jobs/*`，远程 worker 不直连 Redis。见 [worker.md](worker.md) 与 [ADR-0009](../adr/0009-worker-gateway-outbound-https.md)。
+> - scene 池已并入 cpu：`03_scene` 只是 cpu 池里的一个步骤，scene→cpu 互斥冻结已删。单机抢资源由 per-worker 并发度（`WORKER_CONCURRENCY`）控制，见 [ADR-0011](../adr/0011-worker-runtime-orchestration.md)。
+> - 核心不变量仍成立：DAG 推进、资源池上限与运行时覆盖、下载隔离到 io 池、B站 cookie 硬门控、优先级、孤儿回收、幂等。
 
 ## 1. 职责边界
 
@@ -204,8 +209,9 @@ class PoolManager:
 
     async def release(self, pool_name: str):
         await self.redis.decr(f"pool:{pool_name}:count")
-        # scene 已并入 cpu 池,取消 scene→cpu 全局冻结(单机抢资源由 per-worker WORKER_CONCURRENCY 控制)。
 ```
+
+`frozen` 键是通用的池冻结开关：占槽 Lua 与认领循环都会检查，置位的池不再被认领；scene→cpu 的专用互斥冻结已随 scene 池并入 cpu 删除，当前没有生产路径置位该键。现行实现用 holder 集合（`pool:{pool}:holders`，`SCARD` 判上限）替代示意中的计数器，见 `shared/redis_client.py`。
 
 注意：资源池获取/释放在 **Worker** 端做（自取模式），不在调度器。调度器只负责把步骤放进队列。
 
@@ -215,7 +221,7 @@ class PoolManager:
 
 ```
 POST /api/jobs/{id}/rerun
-Body: {"from_step": "10_smart"}
+Body: {"from_step": "11_smart"}
 ```
 
 调度器收到后：
@@ -357,15 +363,15 @@ GPU 步骤（如 Whisper 转写 30 分钟视频）正常就会跑很久。不能
 
 补充：步骤的 `timeout_sec`（pipelines.yaml 定义）是 **Worker 层面的 subprocess 超时**，不是调度器层面的。Worker 正常运行时自己会超时中止并报 step_failed。orphan_scan 只处理 Worker 本身消失的情况。
 
-### GPU 步骤失败后的降级
+### GPU 加速与 CPU 回退
 
-pipelines.yaml 中 gpu 池有 `fallback: cpu`。GPU Worker 不在线时：
+池层面没有隐式降级或 fallback。`pipelines.yaml` 现把 `02_whisper` 等重步骤配在 cpu 池——刻意不配 gpu 池，否则无 GPU worker 时任务无人认领卡死；GPU 机器要参与就显式订阅 `--pools gpu cpu`。加速与回退发生在步骤内部：
 
 ```
-调度器发现 gpu 队列无消费者 → 检查 fallback → 推入 cpu 队列
-CPU Worker 取到 → 步骤内 device.py 检测无 GPU → 走 CPU 路径
-
-Whisper: GPU large-v3 (3分钟) → CPU base (30分钟，质量较低但能用)
-OCR:     PaddleOCR GPU (10秒) → RapidOCR CPU (1分钟)
-场景检测: GPU 解码 (20秒) → CPU 解码 (2分钟)
+Worker 取到步骤 → steps/utils/device.py 探测 nvidia-smi
+有 GPU → Whisper 按显存选 large-v3/medium/small (float16)
+无 GPU → Whisper base (int8)，慢但能用
+OCR 当前仅 rapidocr (CPU)，paddleocr-GPU 尚未接入
 ```
+
+某池的就绪步长期无在线 worker 时，调度器按 `NO_WORKER_GRACE_SEC` 宽限（代码默认 90s，compose 部署设 12h）后 fail-fast，给出明确错误而非静默挂起。

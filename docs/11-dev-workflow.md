@@ -33,52 +33,46 @@ M1 实现:
 ## 2. 代码目录结构
 
 ```
-service/
+flori/
 ├── docker-compose.yml
 ├── docker-compose.dev.yml
 ├── .env.example
 │
+├── docker/
+│   └── base.Dockerfile     # 多阶段，api/scheduler/worker 共用
+│
 ├── scheduler/              # 会话 A
-│   ├── Dockerfile
 │   ├── main.py
-│   ├── pools.py
-│   └── config.py
+│   └── scheduler.py
 │
 ├── api/                    # 会话 B
-│   ├── Dockerfile
 │   ├── main.py
 │   └── routes/
 │
 ├── worker/                 # 会话 A
-│   ├── Dockerfile
 │   ├── main.py
-│   └── heartbeat.py
-│
-├── worker-gpu/             # M5（GPU 加速，未来）
-│   └── Dockerfile
+│   ├── worker.py
+│   ├── transport.py        # RedisTransport（直连）
+│   └── gateway_transport.py # GatewayTransport（出站 HTTPS）
 │
 ├── shared/                 # 会话 A (基础) + B (扩展)
 │   ├── step_base.py
 │   ├── db.py
 │   ├── redis_client.py
 │   ├── storage.py
-│   └── events.py
+│   └── ai_gateway.py
 │
 ├── steps/                  # 从原型迁移（按 pipeline 分子目录）
 │   ├── common/step_01_download.py
-│   ├── video/step_02_whisper.py ... step_11_review.py
+│   ├── video/step_02_whisper.py ... step_12_review.py
 │   ├── paper/  article/  audio/
 │   └── utils/
 │
 ├── configs/
 │   ├── pools.yaml
 │   ├── pipelines.yaml
+│   ├── prompts/            # 模板/风格（templates / profiles / styles）
 │   └── domain/
-│
-├── prompts/
-│   ├── punctuate.md
-│   ├── smart_notes.md
-│   └── review.md
 │
 └── frontend/               # 会话 C
     ├── package.json
@@ -105,13 +99,15 @@ docker compose -f docker-compose.dev.yml up
 services:
   api:
     volumes:
-      - ./api:/app        # 挂载源码
+      - ./api:/app/api    # 挂载源码
+      - ./shared:/app/shared
       - ${FLORI_DATA_DIR:-./data}:/data
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      - API_RELOAD=1      # uvicorn 热更新（生产默认关）
 
   worker-cpu:
     volumes:
-      - ./worker:/app
+      - ./worker:/app/worker
       - ./steps:/app/steps
       - ./shared:/app/shared
       - ${FLORI_DATA_DIR:-./data}:/data
@@ -145,7 +141,7 @@ docs: 补充扩展指南;0.7.2
 ## 5. 集成测试顺序
 
 ```
-1. 各步骤独立通过 verify_step.py          ← 并行开发
+1. 各步骤独立通过单测 scripts/test.sh -m   ← 并行开发
 2. 调度器 + Worker + 步骤 联调             ← A 完成后
 3. API + 调度器 联调                       ← A+B 完成后
 4. 前端 + API 联调                         ← B+C 完成后
@@ -156,7 +152,7 @@ docs: 补充扩展指南;0.7.2
 
 ```
 1. 写代码
-2. 跑测试
+2. 跑测试（scripts/test.sh -m <模块>，全量回归交 CI）
 3. git commit
 4. 更新 ROADMAP.md（标记完成）
 ```
@@ -184,7 +180,7 @@ docs: 补充扩展指南;0.7.2
 
 ```bash
 # 1. 写步骤脚本
-cat > steps/video/step_12_translate.py << 'EOF'
+cat > steps/video/step_13_translate.py << 'EOF'
 from shared.step_base import StepBase
 
 class TranslateStep(StepBase):
@@ -210,8 +206,8 @@ EOF
 # video:
 #   jobs:
 #     ...
-#     "12_translate":
-#       run: steps.video.step_12_translate
+#     "13_translate":
+#       run: steps.video.step_13_translate
 #       pool: ai
 #       needs: ["08_punctuate"]
 #       tags: []
@@ -223,15 +219,16 @@ EOF
 
 ### 7.3 新增内容来源
 
-只改 `steps/common/step_01_download.py`，其他步骤不动：
+识别加在 `shared/source_detect.py`（api 与 steps 共用），下载分支加在 `steps/common/step_01_download.py`，其他步骤不动：
 
 ```python
-# steps/common/step_01_download.py 里加一个分支
+# shared/source_detect.py 里加识别分支
 def detect_source(url):
     if "douyin.com" in url:
         return "douyin"
     # ... 已有的识别逻辑
 
+# steps/common/step_01_download.py 里加下载分支
 def download_douyin(url, output_dir):
     # yt-dlp 支持抖音
     cmd = ["yt-dlp", url, "-o", str(output_dir / "source.%(ext)s")]
@@ -258,18 +255,18 @@ steps/audio/step_04_smart_podcast.py      # AI 生成播客笔记
 #     "02_whisper":              # 复用 video 的 whisper 步
 #       run: steps.video.step_02_whisper
 #       needs: ["01_download"]
-#       tags: ["gpu"]
+#       image: flori/step-gpu    # cpu 池即可跑（CPU int8），worker 有 GPU 时自动加速
 #     "04_smart_podcast":
 #       run: steps.audio.step_04_smart_podcast
 #       needs: ["03_transcript_parse"]
 #       tags: []
 
-# 3. 在 05-content-adapters 里加来源检测
-# detect_content_type():
-#   if url 是播客平台 or 文件是 mp3/wav → content_type = "podcast"
+# 3. 加来源检测（api/routes/jobs.py 的 _detect_content_type + shared/source_detect.py）
+# _detect_content_type():
+#   if url 是音频直链 or 文件是 mp3/wav → content_type = "audio"
 ```
 
-调度器/Worker/API 完全不用改——它们只看 pipelines.yaml。
+调度器/Worker 完全不用改——它们只看 pipelines.yaml。
 
 ### 7.5 扩展 Worker
 
@@ -293,21 +290,29 @@ services:
 
 **跨机器扩展（加 GPU）**：
 ```bash
-# GPU 机器上一条命令接入（连中转 Redis）
-docker run --gpus all \
-  -e REDIS_URL=rediss://:pass@relay:6380/0 \
-  worker-gpu:latest python3 worker.py --type gpu
+# 任意能出站 HTTPS 的机器一条命令接入：走 /api/runner/* 网关，不直连 Redis/MinIO
+# （见 ADR-0009；管理页「接入新 Worker」会按勾选能力自动生成完整命令）
+docker run -d --restart unless-stopped --gpus all \
+  -e GATEWAY_URL=https://<主机域名> \
+  -e WORKER_REGISTRATION_TOKEN=<flw- 接入 token> \
+  -e WORKER_NAME=gpu-1 \
+  ghcr.io/gwzlchn/flori-worker:latest \
+  python -m worker.main --pools cpu gpu
 ```
 
-**新增 Worker 类型**：
+whisper 等转写步排在 cpu 池（刻意不进 gpu 池，避免无 GPU worker 时任务没人认领），带 `--gpus all`
+的 worker 跑到时自动用 GPU 加速。
+
+接入 token 由管理页或 `POST /api/workers/registration-token` 铸造（默认 24h 过期，重铸作废旧的）；
+注册后服务端签发 per-worker token，产物经网关代理读写，删除 worker 即吊销。凭证 env、GPU 模型
+缓存、自签证书等完整选项见 [08-deployment](08-deployment.md)。
+
+**扩展 Worker 能力**：
 ```bash
-# 1. 写 Dockerfile（安装特定依赖）
-# 2. 配置消费哪些池
-WORKER_POOLS = {
-    "translation": ["ai"],           # 新类型：专门跑翻译步骤
-    "gpu-heavy": ["gpu", "scene"],   # 新类型：多 GPU 卡
-}
-# 3. docker compose up worker-translation
+# 没有类型注册表：能力 = 启动参数 --pools 集合，路由只按池匹配（type 仅为显示标签，由 pools 派生）
+python -m worker.main --pools ai         # 专门跑 AI 步骤
+python -m worker.main --pools cpu gpu    # 强机：cpu、gpu 池都消费
+# 需要额外依赖（如 whisper）时基于 worker 镜像加装 [gpu] extra，再照常 --pools 启动
 ```
 
-Worker 只需连 Redis + 知道自己消费哪些池。加减 Worker 不影响调度器——多一个消费者就多一个并行度。
+Worker 只需一条通路（本机直连 Redis，或远程经网关出站 HTTPS）+ 用 `--pools` 声明消费哪些池。加减 Worker 不影响调度器——多一个消费者就多一个并行度。

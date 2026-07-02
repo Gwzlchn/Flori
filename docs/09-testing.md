@@ -4,7 +4,7 @@
 
 > **唯一入口 `scripts/test.sh`**（跨会话/多 agent 统一,权威规约见 CLAUDE.md §测试规约）:
 > `scripts/test.sh -m <模块>`(快测) / `--changed`(只跑受改动影响) / `--all`(全量+75%门) / `--fe`(前端)。
-> 用常驻热容器免启停税、`-n auto` 并行;全量回归 + 覆盖率门交 CI(`.github/workflows/ci.yml`:unit 3 分片 → coverage-gate)。**别再各写 `docker compose run …`**。
+> 用常驻热容器免启停税、`-n auto` 并行;全量回归 + 覆盖率门交 CI(`.github/workflows/ci.yml`:unit-normal 4 分片 + unit-worker 2 分片 → coverage-gate 合并判门 75%;schemathesis 独立每日 cron `fuzz.yml`)。**别再各写 `docker compose run …`**。
 
 ## 1. 测试金字塔
 
@@ -30,18 +30,18 @@ mkdir -p /tmp/test-job/input /tmp/test-job/intermediate /tmp/test-job/assets
 cp /path/to/existing/output/scenes.json /tmp/test-job/intermediate/
 cp /path/to/existing/output/assets/*.jpg /tmp/test-job/assets/
 
-# 跑单步
+# 跑单步（这是运行服务容器手动执行步骤脚本，不是跑测试）
 docker compose run --rm worker-cpu python3 -m steps.video.step_05_dedup --job-dir /tmp/test-job
 
-# 自动验证
-python3 verify_step.py --step 05_dedup --job-dir /tmp/test-job
+# 跑该步骤的 pytest 用例（唯一入口 scripts/test.sh，`--` 透传路径）
+scripts/test.sh -- tests/steps/test_step_05_dedup.py
 ```
 
 如有原型项目的已有产物，可直接用作测试输入——复制对应步骤的输出文件到测试目录即可。
 
-### verify_step.py
+### 每步检查项
 
-每步有检查项列表：
+检查项由 `tests/steps/` 对应步骤用例覆盖：
 
 | 步骤 | 检查项 |
 |------|--------|
@@ -49,28 +49,26 @@ python3 verify_step.py --step 05_dedup --job-dir /tmp/test-job
 | 04_frames | jpg 数量 ≥ scenes 数、每张 >10KB |
 | 05_dedup | 每项有 keep/phash、保留率 25%-100% |
 | 06_ocr | 长度 == keep=true 数、nonempty >30% |
-| 10_smart | >500 字符、有 ## 标题、无拒绝话术 |
-| 11_review | 扁平 6 维整数分（completeness/accuracy/structure/terminology/visual_integration/readability）各 1-5、overall 1-5、key_terms 为 `[{term,definition}]`、parse_failed 非 true |
+| 11_smart | >500 字符、有 ## 标题、无拒绝话术 |
+| 12_review | 扁平 6 维整数分（completeness/accuracy/structure/terminology/visual_integration/readability）各 1-5、overall 1-5、key_terms 为 `[{term,definition}]`、parse_failed 非 true |
 
 ## 3. 集成测试
 
 调度器 + Worker + Redis 联调：
 
 ```bash
-# 启动基础设施
-docker compose up -d redis scheduler worker-cpu worker-ai
+# 启动集成栈（这是起服务，不是跑测试；专用 compose 免鉴权 + DRY_RUN 可选，CI 的 e2e.yml 同款）
+docker compose -f docker-compose.integration.yml up -d
 
-# 提交测试任务（用本地已有视频，跳过下载）
-curl -X POST http://localhost:8000/api/jobs \
-  -H "Authorization: Bearer $API_TOKEN" \
-  -d '{"upload": true, "domain": "deep-learning"}'
-# 预先把测试视频放到 /data/jobs/{id}/input/
+# 提交测试任务（用本地已有视频直接上传，跳过下载；文件经 storage 写入 input/）
+curl -X POST http://localhost:8000/api/jobs/upload \
+  -F "file=@/path/to/test.mp4" -F "domain=deep-learning"
 
 # 监控进度
 watch -n 2 'curl -s http://localhost:8000/api/jobs/{id} | python3 -m json.tool'
 
-# 验证产物
-python3 verify_step.py --step all --job-dir /data/jobs/{id}
+# 或一键跑现成集成脚本（自带提交 + 轮询 + 产物断言）
+bash tests/integration/run_e2e_cpu.sh
 ```
 
 ## 4. E2E 测试
@@ -241,19 +239,19 @@ async def test_concurrent_10_workers_5_tasks(redis, mock_step, mock_ai_gateway):
 
 ### AI Gateway 安全开关
 
-所有测试环境和开发环境强制使用 mock provider，防止误调真 API：
+开发和联调环境用 `DRY_RUN=1` 强制走假响应，防止误调真 API：
 
 ```python
-# AI Gateway 初始化
-if os.environ.get("TESTING") or os.environ.get("DRY_RUN"):
-    gateway.force_provider = MockProvider()  # 所有调用走 mock，零开销
+# AIGateway.call 入口（shared/ai_gateway.py）
+if self._dry_run:  # DRY_RUN=1 时置位
+    return await DryRunProvider().complete(request)  # 不发真请求，零开销
 ```
 
 ```bash
-# 跑测试时
-TESTING=1 pytest tests/test_concurrency.py -v
+# 跑并发相关用例（用例在 scheduler/worker 模块）
+scripts/test.sh -m scheduler -m worker
 
-# 开发调试时（想看完整流程但不花钱）
+# 开发调试时（想看完整流程但不花钱；这是起服务，不是跑测试）
 DRY_RUN=1 docker compose up
 ```
 

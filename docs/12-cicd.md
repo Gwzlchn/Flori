@@ -5,17 +5,18 @@
 ## 1. Pipeline 概览
 
 ```
-Push/PR to main   → Unit Test + 分支覆盖率门(≥75%) + Schemathesis 模糊(无 5xx)
-Merge to main     → + Build + Push Image (ghcr.io) → Watchtower 自动拉取重建（CD）
-手动触发           → E2E 集成回归 / Mutation 变异测试（workflow_dispatch）
+Push/PR to main   → Unit Test（普通 4 shard + worker 2 shard 并行）+ 分支覆盖率门(≥75%) + 前端 vitest
+Merge to main     → + Push Image (ghcr.io，构建已与测试并行暖好缓存) → Watchtower 自动拉取重建（CD）
+每日 cron          → Schemathesis 模糊(无 5xx，fuzz.yml) / Mutation 变异测试（mutation.yml）
+手动触发           → E2E 集成回归（workflow_dispatch）
 ```
 
-每次 PR/push 跑容器内单测 + **分支覆盖率门** + **Schemathesis 模糊/契约**（同一 `test` job,见 §4）。集成回归(`e2e.yml`)与变异测试(`mutation.yml`)是**手动门**(`workflow_dispatch`),不挂在每个 PR 上以免给主 CI 加负载。
+每次 PR/push 跑容器内单测（按普通/worker 拆两组 job 分片并行）+ **分支覆盖率门** + 前端 vitest（见 §4）；纯文档提交(`paths-ignore`)不触发。**Schemathesis 模糊/契约**已拆到独立每日 cron(`fuzz.yml`)，变异测试(`mutation.yml`)也是每日 cron + 可手动；集成回归(`e2e.yml`)是**手动门**(`workflow_dispatch`)。三者都不挂在每个 PR 上以免给主 CI 加负载。
 
 ## 2. 镜像发布
 
 ```
-Registry: ghcr.io/gwzlchn/flori, ghcr.io/gwzlchn/flori-frontend
+Registry: ghcr.io/gwzlchn/flori-{api,scheduler,worker,frontend}
 Tags:     latest, <git-short-sha>
 ```
 
@@ -46,13 +47,14 @@ sudo ./svc.sh install && sudo ./svc.sh start
 
 ## 4. Workflow 设计
 
-实际实现见 `.github/workflows/ci.yml`（主 CI）+ `.github/workflows/step-images.yml`（按步执行镜像，手动）+ `.github/workflows/mutation.yml`（变异测试，手动）：
+实际实现见 `.github/workflows/ci.yml`（主 CI）+ `fuzz.yml`（Schemathesis，每日 cron）+ `e2e.yml`（集成回归，手动）+ `step-images.yml`（按步执行镜像，手动）+ `mutation.yml`（变异测试，每日 cron + 手动）：
 
-- `test`：push/PR 到 main 触发，两步(复用同一 build):
-  - **单测 + 分支覆盖率门**:`docker compose -f docker-compose.test.yml run --rm test` —— 跑 `-m 'not fuzz'` 全部单测,带 `--cov-branch` 分支覆盖 + `--cov-fail-under=75`(低于 75% 直接红,防覆盖率倒退;当前基线 ~78%)。覆盖率配置(分支/markers)单一事实源在 `pyproject.toml`,经 compose 挂载进容器。
-  - **Schemathesis 模糊/契约**:`pytest -m fuzz tests/test_openapi_fuzz.py` —— in-process 从 `/openapi.json` 自动派生用例喂每个端点,断言不 5xx(`not_a_server_error` + `response_schema_conformance`,检查集见仓库根 `schemathesis.toml`)。曾借此揪出分页 `offset` 溢出 SQLite int64 的 500 并修复。
-- `build-push`：仅 main、测试通过后，用 buildx 构建 **amd64**（所有目标机均为 x86，不构 arm64）推 ghcr.io；
-  矩阵两个镜像 `flori`（api/scheduler/worker 共用）与 `flori-frontend`。
+- `unit-normal` / `unit-worker`：push/PR 到 main 触发；纯文档提交(`paths-ignore`)不触发。单测按普通/worker 拆两个 job 并行。普通 job 建轻量 `test` 镜像跑非 step 用例,拆 4 shard;worker job 建含 ffmpeg 与媒体库的 `test-worker` 镜像跑 step/worker 用例,拆 2 shard。分片用 pytest-split 按实测时长均衡。各 shard 产**部分覆盖率**并上传 artifact。本地跑测试统一走 `scripts/test.sh`(见 CLAUDE.md §测试规约),不手写 `docker compose run`。
+- `coverage-gate`：下载全部 shard 的部分覆盖率,在 `python:slim` 容器里 `coverage combine` 后判**分支覆盖率门** `--fail-under=75`。低于 75% 直接红,防覆盖率倒退。覆盖率配置(分支/markers)单一事实源在 `pyproject.toml`。
+- `fe-test`：容器化 vitest 跑前端单测 + 覆盖率,与后端并行,各自为门。
+- `coverage-badge`：仅 main。把前后端覆盖率写成 shields endpoint JSON,force-push 到 `badges` 数据分支,README 徽章读它。
+- `fuzz.yml`（每日 cron + 可手动）：**Schemathesis 模糊/契约**,`pytest -m fuzz tests/test_openapi_fuzz.py`。in-process 从 `/openapi.json` 自动派生用例喂每个端点,断言不 5xx(`not_a_server_error` + `response_schema_conformance`,检查集见仓库根 `schemathesis.toml`)。曾借此揪出分页 `offset` 溢出 SQLite int64 的 500 并修复。从 push CI 拆出,不再拖慢每次 push 的关键路径。
+- `build-images` / `push-images`：build 与 push 拆成两个 job。`build-images` 与测试**并行**,只构建暖 buildcache 不推送;PR 也构建,用来验 Dockerfile 与 vue-tsc。`push-images` 仅 main、测试通过后跑,命中暖缓存后秒级 build + push。均用 buildx 构 **amd64**（所有目标机均为 x86，不构 arm64）。矩阵四个镜像：`flori-api` / `flori-scheduler` / `flori-worker` 是 `docker/base.Dockerfile` 的不同 target,加 `flori-frontend`。`detect` job 按改动路径过滤,前端-only 改动不重建后端镜像,反之亦然。
 - `step-images.yml`：步骤执行镜像（`flori-step-base` / `flori-step-heavy` / `flori-step-gpu`）独立于主 CI，`workflow_dispatch` 手动触发，同样只构 amd64。
 - `e2e.yml`（**集成回归门**，`workflow_dispatch` 手动触发，不挂 PR）：补审计缺口 #7 —— 主 CI 只跑单测，缺 pipeline DAG ↔ worker ↔ scheduler ↔ step 的接线回归。含两个互不依赖、可并行的 job：
 
@@ -60,7 +62,7 @@ sudo ./svc.sh install && sudo ./svc.sh start
   1. 起 redis/api/scheduler/worker-cpu/worker-ai；
   2. 探活 API（`/openapi.json`，api 无专用 health 端点），确认 api↔redis 连通；
   3. 校验 scheduler/worker 容器存活且未反复重启（catch 导入/接线错误）；
-  4. 跑容器内全量单测（与 `test` job 同路径）兜底回归。
+  4. 跑容器内全量单测（与主 CI 同路径）兜底回归。
 
   **② `paper-e2e` —— 真实素材端到端**（`tests/integration/ci_paper_e2e.sh`，`DRY_RUN=1` 起同一栈）：
   投一个仓库自带的微型 PDF `tests/fixtures/sample.pdf`（~2KB，PyMuPDF 生成，含可抽文本 + 标题 + 多个章节标题 + 一条 `Figure 1:` 图注），走 `POST /api/jobs/upload` 进 **paper** pipeline，轮询到 `done`，断言 `notes/smart`(200) + `review`(200, 合法 JSON) + `sections.json` 非空。**无需任何外部网络 / arXiv / B站 / API key**。这是审计缺口 #7 在 GitHub-hosted runner 上的**实质**覆盖（不止探活，真跑解析链）。
@@ -74,7 +76,7 @@ sudo ./svc.sh install && sudo ./svc.sh start
   KIMI_API_KEY=... TEST_VIDEO_FILE=/path/to.mp4 bash tests/integration/run_e2e_ai.sh   # 全链路+真实 AI 笔记
   ```
 
-- `mutation.yml`（**变异测试门**，`workflow_dispatch` 手动）：对 `pyproject.toml [tool.mutmut].source_paths` 的核心模块（`shared/ai_gateway.py` 计费/`exec_id` 去重、`shared/db.py`、`scheduler/` 状态机、`worker/` 乐观锁）注入变异,逐个跑测试套件。**存活变异 = 测试抓不住的真实 bug**——`ai_usage` 去重或乐观锁里若有存活变异 = 字面意义的重复计费/双跑风险。慢 → 仅手动;报告态(存活不让 job 红,killed/survived/CI-CD stats 打日志供人工裁定)。可传 `pattern`(如 `shared.ai_gateway*`)只跑子集。注:mutmut 3.x 配置键是 `source_paths`(非 v2 的 `paths_to_mutate`)。
+- `mutation.yml`（**变异测试**，每日 cron + `workflow_dispatch` 手动）：对核心模块注入变异,逐个跑相关测试。目标清单在 `scripts/mutation_score.py` 的 `TARGETS`：`shared/ai_gateway.py` 计费与 `exec_id` 去重、`shared/db.py`、`scheduler/` 状态机、`worker/` 乐观锁。**存活变异 = 测试抓不住的真实 bug**——`ai_usage` 去重或乐观锁里若有存活变异 = 字面意义的重复计费/双跑风险。慢 → 不挂 PR;报告态非阻塞:分数写 job summary,并追加到 `mutation-data` 分支的 `history.csv`,再生成趋势与徽章 JSON 供 README 读取。手动可传 `target`(如 `ai_gateway`)只跑子集;只跑子集时不写历史。注:mutmut 3.x 配置键是 `source_paths`(非 v2 的 `paths_to_mutate`)。
 
 部署为自动 CD：生产 `docker-compose.yml` 跑 Watchtower（`containrrr/watchtower`），每 120s 查 ghcr，只更新带 `com.centurylinklabs.watchtower.enable=true` 标签的容器，自动 pull + 重建 + 清理旧镜像。无 SSH 自动部署脚本。
 
@@ -84,7 +86,7 @@ sudo ./svc.sh install && sudo ./svc.sh start
 # 生产用：拉远程镜像
 services:
   api:
-    image: ghcr.io/gwzlchn/flori:latest
+    image: ghcr.io/gwzlchn/flori-api:latest
     # ...
 ```
 
@@ -125,12 +127,12 @@ MINIO_DATA_DIR=                 # MinIO 对象落盘目录；留空=命名卷
 | `ANTHROPIC_API_KEY` | 生产环境 |
 | `DEEPSEEK_API_KEY` | 生产环境 |
 
-> 推镜像到 ghcr.io 用 Actions 内置 `GITHUB_TOKEN`（`packages: write` 权限），无需额外 secret。CI `test` job 跑容器内单测，不需 API key。
+> 推镜像到 ghcr.io 用 Actions 内置 `GITHUB_TOKEN`（`packages: write` 权限），无需额外 secret。CI 单测 job（`unit-normal` / `unit-worker`）跑容器内单测，不需 API key。
 
 ## 8. TODO
 
 - [x] 创建 `.github/workflows/ci.yml`（test + amd64 build-push 到 ghcr.io）
-- [x] docker-compose.yml 改用 `image: ghcr.io/gwzlchn/flori:latest`（拉远程镜像部署）
+- [x] docker-compose.yml 改用 `image: ghcr.io/gwzlchn/flori-*:latest`（拉远程镜像部署）
 - [x] docker-compose.yml 接入 Watchtower 自动 CD
 - [x] 创建 `.env.example`
 - [x] 创建 `.github/workflows/e2e.yml`（手动集成回归门：`integration-smoke` 接线探针 + 单测兜底 / `paper-e2e` 真实素材 paper 链跑到 done）

@@ -37,5 +37,10 @@ docs/
 │   ├── 0006-gateway-cloudflare-tunnel.md
 │   ├── 0007-remote-worker-polling.md
 │   ├── 0008-search-sqlite-fts5.md
-│   └── 0009-worker-gateway-outbound-https.md
+│   ├── 0009-worker-gateway-outbound-https.md
+│   ├── 0010-review-feedback-loop.md
+│   ├── 0011-worker-runtime-orchestration.md
+│   ├── 0012-case-evidence-authoritative-sources.md
+│   ├── 0013-version-semver-build-sha.md
+│   └── 0014-observability-and-job-dag.md
 ```
