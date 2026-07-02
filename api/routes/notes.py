@@ -1,4 +1,4 @@
-"""笔记/截图/视频文件服务。经 StorageBackend 读，兼容本地盘与 MinIO。"""
+"""笔记/截图/视频文件服务。经 StorageBackend 读,兼容本地盘与 MinIO。"""
 
 from __future__ import annotations
 
@@ -138,8 +138,8 @@ async def get_review(job_id: str, file: str | None = None,
 
 @router.get("/{job_id}/evidence")
 async def get_evidence(job_id: str, storage: StorageBackend = Depends(get_storage)):
-    """权威来源（取证产物 evidence.json）：案例类笔记 AI fetch 的判决/处罚/报道来源 + 引用证据。
-    裸透传，前端「权威来源」tab 渲染；未取证则 404。"""
+    """权威来源(取证产物 evidence.json):案例类笔记 AI fetch 的判决/处罚/报道来源 + 引用证据。
+    裸透传,前端「权威来源」tab 渲染;未取证则 404。"""
     return await _serve(storage, job_id, "output/evidence.json", "application/json",
                         "evidence not ready")
 
@@ -178,7 +178,7 @@ async def list_artifacts(
         assigned.add(f)
 
     # 第一轮:精确路径(无通配)的 outputs 优先认领,避免被别的步的宽 glob 抢走——
-    # 例如 02_whisper 的 input/subtitle.srt 不再被 01_download 的 input/*.srt 抢走(字幕错归「下载」)。
+    # 例如 02_whisper 的 input/subtitle.srt 若被 01_download 的 input/*.srt 抢走,字幕会错归「下载」。
     for s in steps:
         for p in (s.get("outputs") or []):
             if not any(c in p for c in "*?[") and p in files and p not in assigned:
@@ -201,7 +201,7 @@ async def list_artifacts(
                            "total_bytes": step_bytes,
                            "files": [{"path": f, "kind": _artifact_kind(f),
                                       "size": sizes.get(f, 0)} for f in matched]})
-    # total_bytes:本 job 全部已分组产物体积合计(供前端「产物总体积」汇总)。
+    # total_bytes:本 job 全部已分组产物体积合计,供前端汇总产物总体积。
     return {"groups": groups, "total_bytes": total_bytes}
 
 

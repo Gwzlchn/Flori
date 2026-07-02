@@ -1,8 +1,8 @@
-"""MCP 接入信息(供「系统页 · 接入 MCP」卡片渲染)。
+"""MCP 接入信息,供「接入 MCP」卡片渲染。
 
 只读:工具清单(从 MCP server 实时派生,不写死,防漂移)、是否已配 token、传输路径。
 token 明文单独经 /api/mcp/token 取(前端默认遮掩、点击才显示/复制)——避免每次 info 都带明文。
-鉴权:挂在 /api 下,经 Caddy basic_auth(公网)/ API_ALLOW_NO_AUTH(可信内网)收口。
+鉴权:挂在 /api 下,公网经 Caddy basic_auth、可信内网经 API_ALLOW_NO_AUTH 收口。
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ async def mcp_info(
     return {
         "enabled": True,
         "http_path": "/mcp",  # 公网端点 = <当前站点 origin> + 此路径(前端据 window.location 拼)
-        # 本地同机直连 mcp-http(streamable-http)——与公网统一走 HTTP,不再用 stdio。port 取 MCP_PORT(默认 8090)。
+        # 本地同机直连 mcp-http(streamable-http),与公网统一走 HTTP。port 取 MCP_PORT(默认 8090)。
         "local_url": f"http://127.0.0.1:{os.environ.get('MCP_PORT', '8090')}/mcp",
         "token_configured": bool(os.environ.get("FLORI_MCP_TOKEN")),
         "tools": [

@@ -1,10 +1,11 @@
-"""概念趋势雷达 + 本周摘要路由（均挂 verify_token）。
+"""概念趋势雷达 + 本周摘要路由(均挂 verify_token)。
 
 - GET  /api/domains/{domain}/radar    雷达数据(无 LLM,秒开,供页面加载)
 - POST /api/domains/{domain}/digest   按需生成本周摘要(异步:投递 AI task 给 ai-worker,API 不调 claude)
 
-雷达/摘要分离:页面先用 GET 快速渲染各板块,用户点「生成本周摘要」走 POST 投递 AI task → 202 + task_id,
-经 GET /api/ai-tasks/{task_id}/result 取 markdown(claude 在 ai-worker 跑,P1-2;API 不再持 claude/gateway/pricing)。
+雷达/摘要分离:页面先用 GET 快速渲染各板块;用户点「生成本周摘要」走 POST 投递 AI task,
+返回 202 + task_id,经 GET /api/ai-tasks/{task_id}/result 取 markdown。
+claude 在 ai-worker 跑,API 不持 claude/gateway/pricing。
 """
 
 from __future__ import annotations
@@ -44,13 +45,12 @@ async def post_digest(
     db: Database = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
 ):
-    """生成本周摘要(异步):先算雷达(DB)→ 拼 prompt → 投递 AI task(claude 在 ai-worker)→ 202 + task_id。
-    前端轮询 /api/ai-tasks/{task_id}/result 取 markdown(digest 读 markdown 别名)。"""
+    """生成本周摘要(异步):先在 DB 算雷达,拼 prompt 后投递 AI task 给 ai-worker,返回 202 + task_id。
+    前端轮询 /api/ai-tasks/{task_id}/result 取 markdown,digest 读 markdown 别名。"""
     validate_path_segment(domain, "domain")
     radar_data = await asyncio.to_thread(radar_service.radar, db, domain, window_days)
     recent_titles = [j["title"] for j in radar_data.get("recent_jobs", []) if j.get("title")]
 
-    # 用现有纯 builder radar_service.build_digest_prompt 拼 prompt,组 LLMRequest(max2048/温0.7)投给 ai-worker。
     system, user = radar_service.build_digest_prompt(radar_data, recent_titles)
     request_obj = LLMRequest(
         messages=[{"role": "user", "content": user}], system=system,

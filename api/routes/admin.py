@@ -65,7 +65,7 @@ async def health(request: Request, db: Database = Depends(get_db), redis: RedisC
 @router.get("/metrics", response_class=PlainTextResponse)
 async def metrics(request: Request, db: Database = Depends(get_db), redis: RedisClient = Depends(get_redis)):
     """Prometheus 文本指标(免鉴权,同 /health;只暴露计数/容量,无敏感信息)。
-    个人工具不内置时序库,此端点供外部 Prometheus 抓取——补齐审计 #26『无 /metrics 端点』。"""
+    个人工具不内置时序库,此端点供外部 Prometheus 抓取。"""
     redis_up = 1
     try:
         await redis.ping()
@@ -169,7 +169,7 @@ async def build_live_status(db, redis, config) -> dict:
     }
 
 
-# 历史别名:WS 旧 import build_system_status,保留指向 live 子集(契约收窄,对现有消费方无破坏)。
+# 兼容别名:保留公开名 build_system_status 指向 live 子集;仓库内已无引用,留着防外部消费方断链。
 build_system_status = build_live_status
 
 
@@ -235,8 +235,8 @@ async def _probe_scheduler(redis, online_window: int, stale_window: int) -> dict
 
 
 async def _probe_redis(redis) -> dict:
-    """Redis 组件:ping 计时 + INFO。超时(2s)/异常 → unknown(采集失败 ≠ 红);ping_ms>200 或
-    内存临界 → degraded。"""
+    """Redis 组件:ping 计时 + INFO。超时(2s)→ down;其他异常 → unknown(采集失败 ≠ 红);
+    ping_ms>200 或内存临界 → degraded。"""
     comp = {
         "name": "redis", "kind": "redis", "status": "unknown", "version": None,
         "last_heartbeat": None, "uptime_sec": None, "detail": None, "extra": {},
@@ -277,7 +277,7 @@ async def _probe_redis(redis) -> dict:
 
 
 async def _probe_minio(storage) -> dict:
-    """MinIO 组件:RemoteStorage 才探活(本地盘 mode=local→unknown 不标红)。超时 3s/异常 → down/unknown。"""
+    """MinIO 组件:RemoteStorage 才探活,本地盘 mode=local 保持 unknown 不标红。超时(3s)/异常 → down。"""
     comp = {
         "name": "minio", "kind": "minio", "status": "unknown", "version": None,
         "last_heartbeat": None, "uptime_sec": None, "detail": None, "extra": {},
@@ -364,7 +364,7 @@ async def build_full_status(app) -> dict:
     except Exception:
         logger.warning("traffic_failed")
 
-    # 链路流量【快照】:ECS↔NAS 隧道 rx/tx + 每隧道 + up + 网关聚合 + 当前速率,由 tunnel_stats 上报器周期写。
+    # 链路流量快照:ECS↔NAS 隧道 rx/tx + 每隧道 + up + 网关聚合 + 当前速率,由 tunnel_stats 上报器周期写。
     # 只放当前快照(轻);按节点时间趋势走单独端点 /api/link-traffic/history(富时间线,前端点节点时才用)。
     # 无上报器/无边缘 → None,前端「通联」区不渲染。
     link_traffic = None
@@ -479,7 +479,7 @@ async def list_events(limit: int = 50, redis: RedisClient = Depends(get_redis)):
 
 @router.get("/config/styles", dependencies=[Depends(verify_token)])
 async def get_styles_config(config: AppConfig = Depends(get_config)):
-    """返回可用风格标签列表（从 prompts/styles/*.yaml 的文件名读取）。"""
+    """返回可用风格标签列表(从 prompts/styles/*.yaml 的文件名读取)。"""
     import yaml
 
     styles_dir = config.prompts_dir / "styles"
@@ -566,8 +566,8 @@ async def list_pipelines(
     config: AppConfig = Depends(get_config), db: Database = Depends(get_db)
 ):
     """流水线只读视图:各 pipeline 的步骤 DAG(键+中文名+池 + is_ai/has_override)。
-    模板/'.'前缀/default 不算 pipeline。is_ai=pool=='ai'(白盒 Phase2 标可编辑 AI 节点);
-    has_override=该 (pipeline,step) 已有 prompt 覆盖(前端画 ● 角标)。"""
+    模板/'.'前缀/default 不算 pipeline。is_ai=pool=='ai',标记可编辑 prompt 的 AI 节点;
+    has_override=该 (pipeline,step) 已有 prompt 覆盖,前端据此画圆点角标。"""
     overridden = {
         (o["pipeline"], o["step"])
         for o in await asyncio.to_thread(db.list_prompt_overrides)

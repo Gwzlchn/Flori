@@ -1,4 +1,4 @@
-"""B站扫码登录路由：passport QR 流程 + cookie 入库。"""
+"""B站扫码登录路由:passport QR 流程 + cookie 入库。"""
 
 from __future__ import annotations
 
@@ -15,10 +15,10 @@ from api.deps import get_db, verify_token
 
 router = APIRouter(prefix="/api/bili", tags=["bili"], dependencies=[Depends(verify_token)])
 
-# 凭证存于 app_credentials 的固定 key，值为 JSON(sessdata/bili_jct/dedeuserid/uname)。
+# 凭证存于 app_credentials 的固定 key,值为 JSON(sessdata/bili_jct/dedeuserid/uname)。
 _CRED_KEY = "bili_cookies"
 
-# B站 WAF 对无浏览器 UA 的请求返回 412 + HTML，故所有 passport 请求必须伪装浏览器。
+# B站 WAF 对无浏览器 UA 的请求返回 412 + HTML,故所有 passport 请求必须伪装浏览器。
 _BILI_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -41,7 +41,7 @@ _CODE_TO_STATE = {
 
 
 def _render_qr_png(url: str) -> str:
-    """把登录 url 渲染为二维码 PNG 并编码成 data URI，前端可直接当 img src。"""
+    """把登录 url 渲染为二维码 PNG 并编码成 data URI,前端可直接当 img src。"""
     import qrcode
 
     img = qrcode.make(url)
@@ -52,7 +52,7 @@ def _render_qr_png(url: str) -> str:
 
 
 async def _fetch_uname(sessdata: str) -> str | None:
-    """用 SESSDATA 调 nav 接口取昵称；任何失败均降级为 None，不阻断登录。"""
+    """用 SESSDATA 调 nav 接口取昵称;任何失败均降级为 None,不阻断登录。"""
     import httpx
 
     try:
@@ -69,7 +69,7 @@ async def _fetch_uname(sessdata: str) -> str | None:
 
 
 def _load_cookies(db: Database) -> dict | None:
-    """读已入库的 B站 cookie JSON，无则 None。"""
+    """读已入库的 B站 cookie JSON,无则 None。"""
     raw = db.get_credential(_CRED_KEY)
     if not raw:
         return None
@@ -81,7 +81,7 @@ def _load_cookies(db: Database) -> dict | None:
 
 @router.post("/login/start")
 async def login_start():
-    """请求 passport 生成二维码，返回 qrcode_key + 渲染好的 PNG data URI。"""
+    """请求 passport 生成二维码,返回 qrcode_key + 渲染好的 PNG data URI。"""
     import httpx
 
     try:
@@ -105,7 +105,7 @@ async def login_start():
 
 @router.get("/login/poll")
 async def login_poll(qrcode_key: str, db: Database = Depends(get_db)):
-    """轮询扫码态；confirmed 时从 Set-Cookie 取 SESSDATA/bili_jct/DedeUserID 入库。"""
+    """轮询扫码态;confirmed 时从 Set-Cookie 取 SESSDATA/bili_jct/DedeUserID 入库。"""
     import httpx
 
     try:
@@ -123,7 +123,7 @@ async def login_poll(qrcode_key: str, db: Database = Depends(get_db)):
     if state != "confirmed":
         return {"state": state, "logged_in": False, "uname": None}
 
-    # 成功：cookie 在响应的 Set-Cookie 里，httpx resp.cookies 取三件套。
+    # 成功:cookie 在响应的 Set-Cookie 里,httpx resp.cookies 取三件套。
     cookies = resp.cookies
     sessdata = cookies.get("SESSDATA")
     bili_jct = cookies.get("bili_jct")
@@ -148,7 +148,7 @@ async def login_poll(qrcode_key: str, db: Database = Depends(get_db)):
 
 @router.get("/status")
 async def status(db: Database = Depends(get_db)):
-    """返回当前 B站登录态（依据库里是否有 cookie）。"""
+    """返回当前 B站登录态(依据库里是否有 cookie)。"""
     creds = await asyncio.to_thread(_load_cookies, db)
     if not creds or not creds.get("sessdata"):
         return {"logged_in": False, "uname": None}

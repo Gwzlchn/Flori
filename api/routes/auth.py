@@ -1,4 +1,4 @@
-"""平台认证路由：YouTube cookies + 平台 cookie 状态（B站扫码登录见 api/routes/bili.py）。"""
+"""平台认证路由:YouTube cookies + 平台 cookie 状态(B站扫码登录见 api/routes/bili.py)。"""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from api.deps import verify_token
 
 router = APIRouter(prefix="/api/auth", tags=["auth"], dependencies=[Depends(verify_token)])
 
-# 跟随 DATA_DIR(与 shared/config.data_dir 同源):改 DATA_DIR 时 cookies 目录一并跟随,
-# 不再写死 /data;test 仍可 monkeypatch 本模块属性覆盖。
+# 跟随 DATA_DIR(与 shared/config.data_dir 同源):改 DATA_DIR 时 cookies 目录一并跟随;
+# test 可 monkeypatch 本模块属性覆盖。
 COOKIES_DIR = Path(os.environ.get("DATA_DIR", "/data")) / "cookies"
 
 

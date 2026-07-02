@@ -1,10 +1,10 @@
 """知识库读服务(单一来源)。
 
 纯函数,吃 Database / StorageBackend,返回普通 dict —— 供 MCP 工具(api.mcp_server)
-和(后续可迁移的)FastAPI 路由共用,避免同一份读逻辑两处实现而漂移。
+与 FastAPI 路由共用,避免同一份读逻辑两处实现而漂移。
 
-检索后端通过 SearchBackend 协议可插拔:v1 = FtsSearch(包现有 notes_fts5);
-v2 可换 sqlite-vec 语义检索,而 MCP 工具签名不变(零返工)。
+检索后端通过 SearchBackend 协议可插拔:默认 FtsSearch 包 notes_fts5;
+换 sqlite-vec 语义检索时 MCP 工具签名不变。
 """
 
 from __future__ import annotations
@@ -148,14 +148,14 @@ def _short_definition(text: str | None, limit: int = 120) -> str:
 
 
 def concept_graph(db: Database, domain: str) -> dict:
-    """某库「概念图谱」:节点=概念,边=共现(两概念的 occurrences 引用同一 job_id 即相连)。
+    """某库概念图谱:节点=概念,边=共现(两概念的 occurrences 引用同一 job_id 即相连)。
 
     单一来源:供 FastAPI 路由 / MCP 工具共用,避免共现推导逻辑两处分叉。
 
     - 节点:{id, term, definition(短), status, is_topic, occurrence_count}。id=term(域内唯一)。
     - 边(无向,去重):
-        * 共现边——按 job_id 倒排:同一 job 下出现的每对概念连一条,weight=两者共享的 job 数。
-        * 手动 related 叠加——把 related 里的术语名当额外边(实践中多为空)。同一对已有共现边则取权重较大者。
+        - 共现边——按 job_id 倒排:同一 job 下出现的每对概念连一条,weight=两者共享的 job 数。
+        - 手动 related 叠加——把 related 里的术语名当额外边(实践中多为空)。同一对已有共现边则取权重较大者。
       边按 (source, target) 字典序规范化方向,自连(同名)忽略,related 指向不存在的概念忽略。
     - stats:{node_count, edge_count, isolated_count(度为 0 的节点数)}。
     全程按 domain 作用域;孤立概念(无 occurrences/无共现)仍作为节点保留(度 0)。
@@ -226,7 +226,7 @@ def concept_graph(db: Database, domain: str) -> dict:
     }
 
 
-# ── 检索后端:可插拔(FtsSearch → 未来 VecSearch/HybridSearch)──
+# 检索后端:可插拔
 
 
 class SearchBackend(Protocol):
@@ -238,7 +238,7 @@ class SearchBackend(Protocol):
 
 
 class FtsSearch:
-    """v1 检索后端:包现有 FTS5(db.search_notes)。"""
+    """默认检索后端:包 FTS5(db.search_notes)。"""
 
     def __init__(self, db: Database):
         self._db = db

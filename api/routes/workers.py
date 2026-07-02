@@ -28,7 +28,7 @@ router = APIRouter(prefix="/api/workers", tags=["workers"], dependencies=[Depend
 
 
 def _windows(config: AppConfig) -> tuple[int, int]:
-    """从 pools.yaml 读在线/失联窗口，缺省回退到内置默认（全栈共用一套阈值）。"""
+    """从 pools.yaml 读在线/失联窗口,缺省回退到内置默认(全栈共用一套阈值)。"""
     cfg = config.pools.get("worker_status", {}) if config else {}
     return (
         int(cfg.get("online_window_sec", DEFAULT_ONLINE_WINDOW_SEC)),
@@ -37,8 +37,8 @@ def _windows(config: AppConfig) -> tuple[int, int]:
 
 
 def _iso_utc(value: datetime | str | None) -> str | None:
-    """序列化时间戳为带 Z 后缀的 UTC ISO 串，让前端无歧义按 UTC 解析。
-    入参可能是 DB 来的 aware datetime，或 Redis 里存的原始 ISO 串(可能 naive)。"""
+    """序列化时间戳为带 Z 后缀的 UTC ISO 串,让前端无歧义按 UTC 解析。
+    入参可能是 DB 来的 aware datetime,或 Redis 里存的原始 ISO 串(可能 naive)。"""
     if value is None:
         return None
     if isinstance(value, str):
@@ -85,7 +85,7 @@ def _float(value, default: float = 0.0) -> float:
 
 
 def _parse_iso(value: str | None) -> datetime | None:
-    """解析 Redis 里存的 ISO 时间串为 aware-UTC，naive 补 UTC。"""
+    """解析 Redis 里存的 ISO 时间串为 aware-UTC,naive 补 UTC。"""
     if not value:
         return None
     try:
@@ -129,9 +129,9 @@ async def list_workers(
 
     for wid, resp in by_id.items():
         resp.traffic = _traffic(wid)
-    # 合并 Redis 里注册的远程 worker：本地 SQLite 没有它们(状态写在 Redis)，
-    # 没这一步分布式 worker 在 /api/workers 里是隐身的。Redis key 带 TTL，
-    # 失活的远程 worker 会自动消失。状态同样按 last_heartbeat 走后端权威判定，
+    # 合并 Redis 里注册的远程 worker:本地 SQLite 没有它们(状态写在 Redis),
+    # 没这一步分布式 worker 在 /api/workers 里是隐身的。Redis key 带 TTL,
+    # 失活的远程 worker 会自动消失。状态同样按 last_heartbeat 走后端权威判定,
     # 不信任 Redis 里 worker 自报的 status 字段。
     now = datetime.now(timezone.utc)
     for wid in await redis.list_worker_ids():
@@ -188,7 +188,7 @@ async def list_workers(
 
 @router.post("/registration-token")
 async def mint_registration_token(redis: RedisClient = Depends(get_redis)):
-    """铸/重置接入 token（可重置,重铸即作废旧的）。默认 24h 过期,泄漏自动失效;
+    """铸/重置接入 token,重铸即作废旧的。默认 24h 过期,泄漏自动失效;
     长期接入用 env WORKER_REGISTRATION_TOKEN。TTL 可经 REGISTRATION_TOKEN_TTL_SEC 调。"""
     token = "flw-" + secrets.token_urlsafe(18)
     ttl = int(os.environ.get("REGISTRATION_TOKEN_TTL_SEC", "86400"))
@@ -223,7 +223,7 @@ async def get_worker(
         "push": (await redis.get_traffic("push")).get("by_worker", {}).get(worker_id, 0),
     }
     # 同 list_workers:Redis 是实时 liveness 源(TTL,每心跳刷新),db.last_heartbeat 在 worker 空闲时
-    # 可能不刷新而过期 → 用 Redis 覆盖状态/心跳/当前任务(Redis 无则保留 db 判定,即已失活)。
+    # 可能不刷新而过期。故用 Redis 覆盖状态/心跳/当前任务;Redis 无该 worker 时保留 db 判定,即已失活。
     info = await redis.get_worker_info(worker_id)
     if info:
         resp.status = compute_worker_status(
@@ -250,7 +250,7 @@ async def list_worker_tasks(
     limit: int = Query(50, ge=1, le=200),
     db: Database = Depends(get_db),
 ):
-    """该 worker 的 task 执行历史（task = 某作业的某步骤的一次执行;每条对应一个 step 记录）。
+    """该 worker 的 task 执行历史(task = 某作业的某步骤的一次执行;每条对应一个 step 记录)。
     enrich 作业标题/类型,使卡片显作业标题而非裸 job_id(与队列页同款 task 数据)。"""
     steps = await asyncio.to_thread(db.list_worker_tasks, worker_id, limit)
     briefs = await asyncio.to_thread(db.jobs_brief, [s.job_id for s in steps])
@@ -299,7 +299,7 @@ async def update_worker(
     if req.reject_tags is not None:
         w.reject_tags = set(req.reject_tags)
     await asyncio.to_thread(db.upsert_worker, w)
-    # 暂停真生效：worker 认领读 Redis 的 admin_status,只写 SQLite 不顶用,必须同步进 Redis。
+    # 暂停真生效:worker 认领读 Redis 的 admin_status,只写 SQLite 不顶用,必须同步进 Redis。
     # tags 同理透传给在跑的 worker 认领逻辑。
     if admin_status is not None:
         await redis.set_worker_field(worker_id, "admin_status", admin_status)
@@ -326,8 +326,8 @@ async def delete_worker(
     if not w and not redis_alive:
         raise HTTPException(404, "worker not found")
 
-    # 仅离线/失联可删，活着的需 force；否则下次扫描又冒出来（远程 worker 尤甚）。
-    # 状态统一按心跳衍生：DB 有行用 DB 行，否则用 Redis hash 现算。
+    # 仅离线/失联可删,活着的需 force;否则下次扫描又冒出来(远程 worker 尤甚)。
+    # 状态统一按心跳衍生:DB 有行用 DB 行,否则用 Redis hash 现算。
     if w is not None:
         status = w.status
     else:
@@ -344,7 +344,7 @@ async def delete_worker(
 
     if w is not None:
         await asyncio.to_thread(db.delete_worker, worker_id)
-    # 删 worker 连带吊销其 per-worker token：被删的 worker 心跳/认领立即 401，杜绝复活。
+    # 删 worker 连带吊销其 per-worker token:被删的 worker 心跳/认领立即 401,杜绝复活。
     await asyncio.to_thread(db.revoke_worker_token, worker_id)
-    # 远程 worker 只在 Redis 里活着，必须连 Redis key 一起清，否则会复活。
+    # 远程 worker 只在 Redis 里活着,必须连 Redis key 一起清,否则会复活。
     await redis.delete_worker(worker_id)

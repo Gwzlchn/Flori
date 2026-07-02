@@ -21,8 +21,8 @@ def _profiles_dir(config: AppConfig) -> Path:
 def sync_term_to_profile(
     config: AppConfig, domain: str, term: str, definition: str = ""
 ) -> None:
-    """把一条术语写进该 domain 的 Profile.terminology（供术语采纳时复用）。
-    Profile 不存在则新建；条目格式 "术语: 定义"，按裸 term 前缀去重，幂等。"""
+    """把一条术语写进该 domain 的 Profile.terminology(供术语采纳时复用)。
+    Profile 不存在则新建;条目格式 "术语: 定义",按裸 term 前缀去重,幂等。"""
     validate_path_segment(domain, "domain")
     pdir = _profiles_dir(config)
     pdir.mkdir(parents=True, exist_ok=True)
@@ -35,7 +35,7 @@ def sync_term_to_profile(
 
     entry = f"{term}: {definition}" if definition else term
     terms = data.get("terminology", [])
-    # 同一 term（带或不带定义）只保留一条，新定义覆盖旧条目。
+    # 同一 term(带或不带定义)只保留一条,新定义覆盖旧条目。
     terms = [t for t in terms if t != term and not t.startswith(f"{term}: ")]
     terms.append(entry)
     data["terminology"] = terms

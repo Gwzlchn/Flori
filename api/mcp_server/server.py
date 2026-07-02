@@ -1,13 +1,13 @@
-"""Flori MCP server(v1)。
+"""Flori MCP server。
 
 借鉴 Notion:单 server 管整库 + 工具少而精(search/fetch 式)+ Markdown 输出省 token。
-只读工具薄包 api.services.kb(单一来源);domain 作为作用域参数(非一库一 server)。
-检索后端可插拔(默认 FtsSearch;未来换 sqlite-vec 语义,工具签名不变)。
+只读工具薄包 api.services.kb(单一来源);domain 作为作用域参数,不做一库一 server。
+检索后端可插拔,默认 FtsSearch;换 sqlite-vec 语义检索时工具签名不变。
 
-按库作用域(/mcp/{domain} 端点 / 环境变量 FLORI_MCP_DEFAULT_DOMAIN):仍是同一个 server,
-靠请求级 contextvar(current_domain)+ 环境变量给工具一个「生效 domain」(见 scope_domain)。
-设了作用域后工具自动锁定该库(search 忽略入参 domain、get_note 校验归属、其余只读工具默认/覆盖
-domain),无法越库;未设作用域(全局 /mcp)行为不变。
+按库作用域来自 /mcp/{domain} 端点或环境变量 FLORI_MCP_DEFAULT_DOMAIN,仍是同一个 server:
+生效 domain 由请求级 contextvar current_domain 与环境变量解析,见 scope_domain。
+设了作用域后工具自动锁定该库,无法越库:search 忽略入参 domain,get_note 校验归属,
+其余只读工具默认/覆盖 domain;未设作用域(全局 /mcp)行为不变。
 """
 
 from __future__ import annotations
@@ -24,13 +24,13 @@ from shared.storage import StorageBackend
 
 log = structlog.get_logger()
 
-# 当前请求的「作用域 domain」。HTTP 端点 /mcp/{domain} 经中间件 set;或读环境变量 FLORI_MCP_DEFAULT_DOMAIN。
+# 当前请求的作用域 domain。HTTP 端点 /mcp/{domain} 经中间件 set;或读环境变量 FLORI_MCP_DEFAULT_DOMAIN。
 # 默认 None = 全局(无作用域),工具行为不变。
 current_domain: ContextVar[str | None] = ContextVar("flori_mcp_domain", default=None)
 
-# ── 工具调用计数(best-effort 可观测)──
-# 用同步 redis 客户端(MCP 工具多为同步函数,FastMCP 在线程池跑;async 工具里此 incr 极快可忽略)。
-# REDIS_URL 未设(如本地/测试)→ 懒构造返回 None → 静默 no-op。绝不因 redis 缺失/出错破坏工具。
+# 工具调用计数(best-effort 可观测)
+# 用同步 redis 客户端:MCP 工具多为同步函数,FastMCP 在线程池跑;async 工具里此 incr 极快可忽略。
+# REDIS_URL 未设(如本地/测试)时懒构造返回 None,静默 no-op。绝不因 redis 缺失/出错破坏工具。
 MCP_CALLS_TOTAL_KEY = "mcp:calls:total"
 
 
@@ -42,7 +42,7 @@ _stats_redis = None  # 进程级懒缓存:None=未尝试 / False=不可用(REDIS
 
 
 def _get_stats_redis():
-    """懒构造同步 redis 客户端(供工具计数);REDIS_URL 未设或不可用 → None(静默 no-op)。"""
+    """懒构造同步 redis 客户端,供工具计数;REDIS_URL 未设或不可用返回 None,静默 no-op。"""
     global _stats_redis
     if _stats_redis is None:
         url = os.environ.get("REDIS_URL")
@@ -214,7 +214,7 @@ def build_server(
 
     @mcp.tool()
     def concept_timeline(domain: str, granularity: str = "month") -> dict:
-        """某库概念时间线:概念按其源内容发布时间分桶计数,看「概念何时出现/演化」。
+        """某库概念时间线:概念按其源内容发布时间分桶计数,看概念何时出现/演化。
 
         - domain 必填;granularity = day | week | month(默认 month)。
         """
@@ -232,7 +232,7 @@ def build_server(
 
         - domain 必填。返回 {nodes:[{id,term,definition,status,is_topic,occurrence_count}],
           edges:[{source,target,weight}], stats:{node_count,edge_count,isolated_count}}。
-        - 看「这个库的概念彼此如何关联/聚成哪些簇」;孤立概念(无共现)仍作节点保留。
+        - 看这个库的概念彼此如何关联/聚成哪些簇;孤立概念(无共现)仍作节点保留。
         """
         sc = scope_domain()
         if sc is not None:
@@ -247,7 +247,7 @@ def build_server(
 
 
 def build_default_server(*, stateless_http: bool = False) -> FastMCP:
-    """从环境(CONFIG_DIR/DATA_DIR,默认与容器一致)构造生产用 server(只读)。
+    """从环境变量 CONFIG_DIR/DATA_DIR(默认与容器一致)构造生产用只读 server。
 
     storage 用 create_storage:设了 MINIO_URL 即对象存储,否则本地 —— 与 api 服务一致,
     保证 get_note 读到的是同一份笔记产物。

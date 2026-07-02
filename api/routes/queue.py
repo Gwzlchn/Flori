@@ -1,4 +1,4 @@
-"""任务队列只读视图：列出各资源池里【排队中】+【运行中】的 task。
+"""任务队列只读视图:列出各资源池里排队中 + 运行中的 task。
 
 task = 某作业(job)的某步骤(step)的一次执行。
 - 排队 task:来自 redis `queue:{pool}` ZSET(只读窥视,不弹出)+ join `queue:enqueued` 补入队时刻。

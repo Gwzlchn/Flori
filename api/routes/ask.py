@@ -2,8 +2,8 @@
 
 提问 → 跨语料检索(api.services.synthesis.retrieve,纯 DB/CPU)→ 拼 prompt(synthesis.build_prompt)→
 组 LLMRequest → 投递独立 AI task(queue:ai)→ 返 202 {task_id, sources}。
-答案/审计经 GET /api/ai-tasks/{task_id}/{result,log}。claude 调用全在 ai-worker(P1-2);
-本路由不再持 claude / gateway / pricing(用量记账已移 worker)。
+答案/审计经 GET /api/ai-tasks/{task_id}/{result,log}。claude 调用全在 ai-worker;
+本路由不持 claude / gateway / pricing,用量记账在 worker。
 """
 
 from __future__ import annotations
@@ -73,7 +73,6 @@ async def ask(
         )
         for p in passages
     ]
-    # 用现有纯 builder synthesis.build_prompt 拼 prompt,组 LLMRequest(max4096/温0.3)投给 ai-worker。
     system, user = synthesis.build_prompt(req.question, passages)
     request_obj = LLMRequest(
         messages=[{"role": "user", "content": user}], system=system,

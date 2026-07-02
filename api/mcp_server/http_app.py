@@ -1,15 +1,16 @@
 """Flori MCP — HTTP(streamable-http)传输 + Bearer token 认证。
 
 为什么用纯 ASGI 中间件而非 starlette BaseHTTPMiddleware:后者会缓冲响应体,
-破坏 streamable-http 的流式 SSE。这里只在 http 请求上校验,**lifespan / 其它 scope 直通**
+破坏 streamable-http 的流式 SSE。这里只在 http 请求上校验,lifespan / 其它 scope 直通
 (streamable_http_app 的 lifespan 会启动 session manager,必须放行)。
 
 认证语义对齐 api/deps.verify_token 的 fail-closed:
 - 设了 FLORI_MCP_TOKEN → 必须 Bearer 精确匹配,否则 401;
 - 未设 → 503,除非 FLORI_MCP_ALLOW_NO_AUTH 为真(仅可信内网,放行并告警一次)。
 
-按库作用域 /mcp/{domain}:DomainScopeASGI(在鉴权内层)把 /mcp/{domain}[/...] 改写到 /mcp[/...]
-(同一 streamable_http_app),并经 contextvar 锁定该库,使工具无法越库;/mcp 仍是全局端点。
+按库作用域 /mcp/{domain}:DomainScopeASGI 在鉴权内层,把 /mcp/{domain}[/...] 改写到
+同一 streamable_http_app 的 /mcp[/...],并经 contextvar 锁定该库,使工具无法越库;
+/mcp 仍是全局端点。
 """
 
 from __future__ import annotations
@@ -31,12 +32,12 @@ def _truthy(v: str | None) -> bool:
 
 
 class RateLimitASGI:
-    """纯 ASGI 限流中间件:进程内全局滑动时间窗计数器(每分钟 N 次)。
+    """纯 ASGI 限流中间件:进程内全局固定时间窗计数器(每分钟 N 次)。
 
     为什么不缓冲/不用 BaseHTTPMiddleware:与 TokenAuthASGI 同理,要保 streamable-http 的
-    流式 SSE 不被破坏。放在**最外层**(鉴权之前):无谓的请求在做任何鉴权/路由前就被挡掉。
+    流式 SSE 不被破坏。放在最外层(鉴权之前):无谓的请求在做任何鉴权/路由前就被挡掉。
 
-    - 上限来自 env `FLORI_MCP_RATE_LIMIT`(请求/分钟,默认 120);0/空 = 关闭(永不 429)。
+    - 上限来自 env `FLORI_MCP_RATE_LIMIT`(请求/分钟);空或非法值取默认 120;0 = 关闭(永不 429)。
     - 仅对 http scope 计数;lifespan / 其它 scope 直通(放行 session manager 生命周期)。
     - 个人工具粒度:全局单桶(不分 IP/token),固定 60s 窗口 + 计数,窗口翻转即清零。
       threading.Lock 守计数(uvicorn 单事件循环下足够,也容忍多 worker 各自独立计数)。
@@ -54,7 +55,7 @@ class RateLimitASGI:
     def _limit(self) -> int:
         raw = (os.environ.get("FLORI_MCP_RATE_LIMIT") or "").strip()
         if not raw:
-            return 120  # 默认 120 请求/分钟
+            return 120
         try:
             return max(0, int(raw))
         except ValueError:
@@ -156,11 +157,11 @@ class TokenAuthASGI:
 
 
 class DomainScopeASGI:
-    """纯 ASGI 中间件:把 /mcp/{domain}(及其子路径)映射到单个 streamable-http app(挂 /mcp),
-    并经 contextvar 给工具一个「作用域 domain」,使该端点只能访问对应知识库。
+    """纯 ASGI 中间件:把 /mcp/{domain} 及其子路径映射到单个 streamable-http app(挂 /mcp),
+    并经 contextvar 给工具一个作用域 domain,使该端点只能访问对应知识库。
 
     - 不另起 N 个 server:同一 streamable_http_app(path=/mcp),按请求改写 scope.path + set contextvar。
-    - 路径 /mcp 或 /mcp/(无 domain 段)→ 不作用域(全局),原样直通。
+    - 路径 /mcp 或 /mcp/(无 domain 段)→ 全局无作用域,原样直通。
     - 路径 /mcp/{domain} 或 /mcp/{domain}/... → 抽出 domain,把 path 改写为 "/mcp" + 余下部分,
       在 await 内层前 current_domain.set(domain),finally reset(同一 async task,工具调用可见)。
     - 非 http scope(lifespan 等)直通 —— 放行才不破坏 session manager 生命周期。
@@ -208,7 +209,7 @@ class DomainScopeASGI:
             return None  # 不以 /mcp/ 开头(含精确 /mcp)→ 无作用域
         rest = path[len(prefix):]
         seg = rest.split("/", 1)[0]
-        return seg or None  # /mcp/ → seg 为空 → None
+        return seg or None  # /mcp/ 时 seg 为空,返回 None
 
 
 def build_http_app():
@@ -219,7 +220,7 @@ def build_http_app():
 
     mcp = build_default_server(stateless_http=True)
 
-    # DNS-rebinding 保护:其威胁模型是「浏览器被诱导直连 localhost MCP」。本服务总在
+    # DNS-rebinding 保护:其威胁模型是浏览器被诱导直连 localhost MCP。本服务总在
     # 反向代理(Caddy/隧道)+ Bearer token 之后,经代理后 Host=公网域名会被默认保护判为非法 → 421。
     # 故按部署主机放行:FLORI_MCP_ALLOWED_HOSTS=逗号分隔 → 保护开但允许这些 host;"*"/未设 → 关保护。
     hosts_env = os.environ.get("FLORI_MCP_ALLOWED_HOSTS", "").strip()
@@ -234,6 +235,6 @@ def build_http_app():
         )
 
     app = mcp.streamable_http_app()  # Starlette ASGI;path 默认 /mcp
-    # 限流在最外层(先限流再做鉴权/路由,挡掉的请求不耗鉴权);鉴权次之(先认证再作用域);
-    # 作用域中间件把 /mcp/{domain} 改写到 /mcp 并 set contextvar。
+    # 限流在最外层,挡掉的请求不耗鉴权;鉴权次之;
+    # 作用域中间件最内,把 /mcp/{domain} 改写到 /mcp 并 set contextvar。
     return RateLimitASGI(TokenAuthASGI(DomainScopeASGI(app)))

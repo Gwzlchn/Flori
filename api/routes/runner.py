@@ -1,4 +1,7 @@
-"""Worker-gateway 路由：注册 / 心跳 / 下线（GitLab-runner 式瘦客户端控制面）。"""
+"""Worker-gateway 路由:注册 / 心跳 / 认领 / 上报 / 产物代理(GitLab-runner 式瘦客户端控制面)。
+
+协议契约见 docs/03-contracts.md §1.7,出站 HTTPS 网关设计理由见 ADR-0009。
+"""
 
 from __future__ import annotations
 
@@ -37,7 +40,7 @@ from api.schemas import (
     RunnerUsageRequest,
 )
 
-# 注册接口自带门禁(registration token)，心跳/下线走 per-worker token，故不挂全局 verify_token。
+# 注册接口自带门禁(registration token),心跳/下线走 per-worker token,故不挂全局 verify_token。
 router = APIRouter(prefix="/api/runner", tags=["runner"])
 
 # 长轮询:服务端持有窗口须小于 worker httpx 读超时(35s),空轮询间隔避免空转打爆 Redis。
@@ -46,9 +49,8 @@ _CLAIM_POLL_SEC = 0.5
 
 
 def _worker_ttl(config: AppConfig) -> int:
-    """Redis worker liveness key 的 TTL = 配置的 online_window_sec(单一事实源,与对外
-    在线判定同一窗口)。此前硬编码 _WORKER_TTL=30 与 pools.yaml online_window_sec=30 是两处
-    独立常量,改一处不同步;现统一由 config 驱动,缺省回落 shared.status 的兜底常量。"""
+    """Redis worker liveness key 的 TTL 取配置的 online_window_sec,与对外在线判定
+    共用同一窗口(单一事实源,避免两处常量改一处不同步);缺省回落 shared.status 的兜底常量。"""
     ws = (config.pools or {}).get("worker_status") or {}
     return int(ws.get("online_window_sec", DEFAULT_ONLINE_WINDOW_SEC))
 
@@ -77,7 +79,7 @@ class RunnerOfflineRequest(BaseModel):
 
 
 def _bearer(request: Request) -> str:
-    """从 Authorization: Bearer 头取出 token（注册接口的接入门禁用）。"""
+    """从 Authorization: Bearer 头取出 token(注册接口的接入门禁用)。"""
     auth = request.headers.get("authorization") or request.headers.get("Authorization") or ""
     scheme, _, value = auth.partition(" ")
     return value.strip() if scheme.lower() == "bearer" else ""
@@ -91,8 +93,8 @@ async def register(
     redis: RedisClient = Depends(get_redis),
     config: AppConfig = Depends(get_config),
 ):
-    """接入门禁通过后，服务端分配 worker_id、签发 per-worker token，
-    并单写 Redis + DB（worker 不再双写），返回 token 仅此一次。"""
+    """接入门禁通过后,服务端分配 worker_id、签发 per-worker token,
+    并作为单一写者写 Redis + DB;返回 token 仅此一次。"""
     await verify_registration_token(_bearer(request), redis)
 
     worker_id = req.worker_id or generate_worker_id(req.type)
@@ -115,11 +117,11 @@ async def register(
         revoked=False,
     )
 
-    # 连接来源:网关 worker 经 Caddy→隧道→api,真实客户端 IP 在 X-Forwarded-For(Caddy 注入);
-    # 无该头(本机直连 api)则取 request.client.host。供详情页显示「worker 从哪连过来」。
+    # 连接来源:网关 worker 经 Caddy 与隧道连到 api,真实客户端 IP 在 Caddy 注入的 X-Forwarded-For;
+    # 无该头(本机直连 api)则取 request.client.host。供详情页显示 worker 连接来源。
     _xff = request.headers.get("x-forwarded-for", "")
     remote_addr = _xff.split(",")[0].strip() if _xff else (request.client.host if request.client else "")
-    # 单写者：服务端同时写 Redis liveness 与 DB 行，info 形态与 RedisTransport.register 对齐。
+    # 单写者:服务端同时写 Redis liveness 与 DB 行,info 形态与 RedisTransport.register 对齐。
     info = {
         "type": req.type,
         "pools": ",".join(req.pools),
@@ -153,7 +155,7 @@ async def register(
             last_heartbeat=now,
         ),
     )
-    # 连接事件 → events:system → /system 事件页可见"谁连上了/重注册"(含 type/host/版本/来源)。best-effort。
+    # 连接事件发到 events:system,/system 事件页可见谁连上了/重注册(含 type/host/版本/来源)。best-effort。
     try:
         await redis.push_event(
             "worker_registered", worker_id=worker_id, worker_type=req.type,
@@ -200,17 +202,17 @@ async def offline(
     worker_id: str = Depends(verify_worker_token),
     db: Database = Depends(get_db),
 ):
-    """worker 主动下线：仅置 status=offline，不触碰 last_heartbeat。"""
+    """worker 主动下线:仅置 status=offline,不触碰 last_heartbeat。"""
     await asyncio.to_thread(db.set_worker_status, worker_id, "offline")
     return {"ok": True}
 
 
-# ── 认领 / 上报:服务端执行编排,gateway 模式 worker 无需直连 redis ──
+# 认领 / 上报:服务端执行编排,gateway 模式 worker 无需直连 redis。
 
 
 async def _enrich_claim(redis: RedisClient, claim: dict) -> dict:
-    """把 pipeline/domain/style_tags 塞进 claim,让 gateway worker 无需回读 redis
-    (parse 逻辑与旧 worker.execute 逐字等价:json-or-list,失败兜空)。"""
+    """把 pipeline/domain/style_tags 塞进 claim,让 gateway worker 无需回读 redis;
+    style_tags 解析 json-or-list,失败兜空。"""
     job_id = claim["job_id"]
     pipeline = await redis.get_job_pipeline(job_id)
     job_info = await redis.get_job_info(job_id)
@@ -255,8 +257,8 @@ async def request_job(
         allowed = [p for p in req.pools if p in set(authorized_pools)]
     else:
         allowed = list(req.pools)
-    # 剔除 pools.yaml 未声明的池:缺失池在 _clamp/claim 都回落哨兵 999(fail-open),视为无效
-    # 不认领,使配置缺失/漂移 fail-safe 而非 fail-open(审计:_clamp_pool_limits fail-open)。
+    # 剔除 pools.yaml 未声明的池:缺失池在 _clamp/claim 都回落哨兵 999 属 fail-open,
+    # 故视为无效不认领,使配置缺失/漂移 fail-safe。
     _server_pools = (config.pools or {}).get("pools", {}) or {}
     allowed = [p for p in allowed if p in _server_pools]
     # 越权/无效池被裁空 → 无可认领,返回 null(非错误:worker 请求范围外的池自然认不到)。
@@ -343,7 +345,7 @@ async def step_progress(
     """运行中进度/日志:发到 events:{job_id},供前端 WS 准实时拉取(gateway on_progress)。"""
     validate_path_segment(job_id, "job_id")
     validate_path_segment(step, "step")
-    # 固定字段后置:payload 若含 "event" 键不能覆盖 step_progress(审计 I-L8)。
+    # 固定字段后置:payload 若含 "event" 键不能覆盖 step_progress。
     await redis.publish(f"events:{job_id}", {**req.payload, "event": "step_progress"})
     return {"ok": True}
 
@@ -355,8 +357,8 @@ async def step_alive(
     worker_id: str = Depends(verify_worker_token),
     redis: RedisClient = Depends(get_redis),
 ):
-    """步进度心跳:刷新 redis 步进度时间戳(worker on_tick 每 10s 调,仅子进程存活时),
-    供 scheduler.check_stuck 对远程 job(产物不落调度器盘)判进度停滞。"""
+    """步进度心跳:刷新 redis 步进度时间戳。worker on_tick 每 10s 调,仅子进程存活时;
+    供 scheduler.check_stuck 对产物不落调度器盘的远程 job 判进度停滞。"""
     validate_path_segment(job_id, "job_id")
     validate_path_segment(step, "step")
     await redis.set_step_progress_at(job_id, step)
@@ -399,7 +401,7 @@ async def record_usage(
     return {"ok": True}
 
 
-# ── 产物代理:worker<->API<->storage,minio 永不暴露给 worker ──
+# 产物代理:worker<->API<->storage,minio 永不暴露给 worker。
 
 
 def _validate_rel(rel: str) -> None:
@@ -457,7 +459,7 @@ async def put_artifact(
     _validate_rel(rel)
     if is_credential_file(rel):
         # 与 get_artifact 对称:禁止经网关回传写入凭证侧载文件(.credentials.json),
-        # 防任意已注册 worker plant 一个「同机下载步随后会读」的凭证文件。
+        # 防任意已注册 worker 植入一个同机下载步随后会读的凭证文件。
         raise HTTPException(403, "writing credential files is not allowed")
     data = await request.body()
     await storage.write_file(job_id, rel, data)

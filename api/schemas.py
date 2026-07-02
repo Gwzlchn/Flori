@@ -29,7 +29,7 @@ class JobResponse(BaseModel):
     source: str | None = None
     domain: str = "general"
     collection_id: str | None = None
-    versions: int = 1   # 同 lineage(同源内容)快照总数;>1 表示有历史版本可跳转(P2b)
+    versions: int = 1   # 同 lineage(同源内容)快照总数;>1 表示有历史版本可跳转
 
 
 class JobDetailResponse(JobResponse):
@@ -38,8 +38,8 @@ class JobDetailResponse(JobResponse):
     artifacts: list[str] = Field(default_factory=list)  # 可见产物文件路径(元信息标签页"产物路径")
     meta: dict = Field(default_factory=dict)
     steps: list[StepResponse] = Field(default_factory=list)
-    # 本任务各 AI 步派发时用的 prompt 覆盖版本号快照(从 job.json.prompt_overrides[step].version 读;
-    # 无覆盖的步不出现)。前端与当前激活版本(GET /api/prompts)比,不一致提示「重跑该步」(白盒版本管理 §1.14)。
+    # 本任务各 AI 步派发时用的 prompt 覆盖版本号快照,从 job.json.prompt_overrides[step].version 读,
+    # 无覆盖的步不出现。前端与当前激活版本(GET /api/prompts)比,不一致提示「重跑该步」,见 docs/03-contracts.md §1.14。
     prompt_versions: dict = Field(default_factory=dict)
 
 
@@ -125,7 +125,7 @@ class ProfileUpdateRequest(BaseModel):
     output_style: dict | None = None
     terminology: list[str] | None = None
     do_not: list[str] | None = None
-    # 知识库展示元数据(随 #1/#2:icon/color 持久化在 profile)
+    # 知识库展示元数据,持久化在 profile
     display_name: str | None = None
     icon: str | None = None
     color: str | None = None
@@ -136,29 +136,31 @@ class TermAddRequest(BaseModel):
     term: str
 
 
-# ── Prompt 白盒(Phase 2:网页编辑每步 system prompt 覆盖)──
+# Prompt 白盒:网页编辑每步 system prompt 覆盖
 
 
 class PromptOverrideRequest(BaseModel):
-    # scope='global'(忽略 domain)或 'domain'(需非空 domain);content=覆盖正文(空串会被当删除处理)
+    # scope 取 'global' 或 'domain':前者忽略 domain 字段,后者要求 domain 非空。
+    # content=覆盖正文,空串会被当删除处理。
     scope: str = "global"
     domain: str | None = None
     content: str = ""
-    # 版本管理(类 Grafana save):mode='overwrite'(默认)改当前激活版本内容;'new'=另存为新版本
-    # (version=max+1 并设为激活)。note=该版本一行备注(可空)。空 content 仍走删除(恢复默认,清全部版本)。
+    # 版本管理类 Grafana save。mode='overwrite' 为默认,改当前激活版本内容;
+    # mode='new' 另存为新版本(version=max+1 并设为激活)。note=该版本一行备注,可空。
+    # 空 content 仍走删除:恢复默认,清全部版本。
     mode: str = "overwrite"
     note: str | None = None
 
 
 class PromptActivateRequest(BaseModel):
-    # 激活指针操作:version=数字 → 设该历史版本为当前激活(派发用它);version=null → 停用覆盖回内置默认
-    # (非破坏,保留全部历史版本)。scope/domain 同 PromptOverrideRequest。
+    # 激活指针操作。version=数字:设该历史版本为当前激活,派发用它。
+    # version=null:停用覆盖回内置默认,非破坏,保留全部历史版本。scope/domain 同 PromptOverrideRequest。
     scope: str = "global"
     domain: str | None = None
     version: int | None = None
 
 
-# ── 集合 ──
+# 集合
 
 
 class CollectionCreateRequest(BaseModel):
@@ -167,11 +169,11 @@ class CollectionCreateRequest(BaseModel):
     domain: str
     description: str | None = None
     tags: list[str] = Field(default_factory=list)
-    # 订阅集合：给定 source_type/source_id 即创建订阅集合(自动从该来源追更)。
+    # 订阅集合:给定 source_type/source_id 即创建订阅集合(自动从该来源追更)。
     # source_type 取值: bilibili_up / bilibili_fav / bilibili_collection /
     # youtube_channel / rss / local_dir(适配器见 shared/subscriptions/)。
     source_type: str | None = None
-    source_id: str | None = None        # 来源 id：B站 mid / YouTube 频道 / RSS url / 目录路径
+    source_id: str | None = None        # 来源 id:B站 mid / YouTube 频道 / RSS url / 目录路径
     sync_now: bool = True               # 建后立即首次同步
 
 
@@ -179,12 +181,12 @@ class CollectionUpdateRequest(BaseModel):
     name: str | None = None
     description: str | None = None
     tags: list[str] | None = None
-    sync_enabled: bool | None = None    # 订阅集合：自动追更开关
+    sync_enabled: bool | None = None    # 订阅集合:自动追更开关
 
 
 class CollectionSubscriptionInfo(BaseModel):
     """集合的订阅源信息(订阅是集合属性)。同步/开关端点用集合自身 id。"""
-    source_type: str          # bilibili_up/fav/collection · youtube_channel · rss · local_dir
+    source_type: str          # bilibili_up / bilibili_fav / bilibili_collection / youtube_channel / rss / local_dir
     source_id: str            # B站 mid / 频道URL / feed URL / 目录路径 / 收藏夹id ...
     source_label: str = ""    # 由 source_type 派生的来源短标签(bilibili/youtube/rss/local);前端 = name + 该徽标
     enabled: bool             # 自动同步开关 = collection.sync_enabled
@@ -206,7 +208,7 @@ class CollectionResponse(BaseModel):
     status_counts: dict[str, int] | None = None
 
 
-# ── 术语表 ──
+# 术语表
 
 
 class GlossaryTermRequest(BaseModel):
@@ -229,10 +231,8 @@ class GlossaryTermResponse(BaseModel):
 
     @classmethod
     def from_row(cls, row: dict) -> "GlossaryTermResponse":
-        """db._row_to_glossary 的 dict(created_at/updated_at 为 datetime|None)→ 响应模型
-        (ISO str|None)。所有返回单条术语的端点统一走它,保证字段形态一致——
-        此前 /api/glossary/{d}/{t} 与 /api/domains/{d}/terms/{t} 字段不一致(updated_at 有无、
-        created_at 缺失 '' vs null)。"""
+        """把 db._row_to_glossary 的 dict 转成响应模型:created_at/updated_at 从 datetime|None
+        转 ISO str|None。所有返回单条术语的端点统一走它,保证字段形态一致。"""
         def _iso(v):
             return v.isoformat() if hasattr(v, "isoformat") else (v or None)
         return cls(
@@ -248,7 +248,7 @@ class GlossaryTermResponse(BaseModel):
         )
 
 
-# ── 搜索 ──
+# 搜索
 
 
 class SearchResultItem(BaseModel):
@@ -266,7 +266,7 @@ class SearchResponse(BaseModel):
     items: list[SearchResultItem]
 
 
-# ── Worker-gateway 认领/上报 ──
+# Worker-gateway 认领/上报
 
 
 class RunnerClaimRequest(BaseModel):

@@ -1,12 +1,12 @@
-"""概念趋势雷达 + 本周摘要（服务层纯函数:雷达计算 + 摘要 prompt 构建）。
+"""概念趋势雷达 + 本周摘要(服务层纯函数:雷达计算 + 摘要 prompt 构建)。
 
-雷达 = 比较「最近 window_days」与「紧邻其前的同长窗口」,从该 domain 的 glossary occurrences
+雷达 = 比较最近 window_days 与紧邻其前的同长窗口,从该 domain 的 glossary occurrences
 (经 job_id→源内容时间映射)算出:飙升概念 / 新出现概念 / 窗口内新增内容 / 窗口内最热概念。
 时间口径与 db.concept_timeline / db.concept_occurrence_dates 一致(COALESCE(published_at,created_at))。
 
-摘要 = 把雷达结果 + 最近内容标题拼成 prompt(build_digest_prompt),由 api/routes/radar.py 作为独立 AI task
-投给 ai-worker 跑 claude(本模块只产 radar/build_digest_prompt,不调 gateway)。雷达(GET,无 LLM,秒开)
-与摘要(POST,投 AI task)分离,见 api/routes/radar.py。
+摘要 = 把雷达结果 + 最近内容标题拼成 prompt(build_digest_prompt),由 api/routes/radar.py
+作为独立 AI task 投给 ai-worker 跑 claude。本模块只产 radar/build_digest_prompt,不调 gateway。
+雷达是 GET,无 LLM,秒开;摘要是 POST,投 AI task;两者分离,见 api/routes/radar.py。
 """
 
 from __future__ import annotations
@@ -33,11 +33,11 @@ def radar(db: Database, domain: str, window_days: int = 7) -> dict:
     """计算该 domain 的概念趋势雷达(对比最近 window_days 与紧邻其前的同长窗口)。
 
     边界约定(半开区间,避免某条恰落窗口边界被两侧重复计):
-      recent = [since, until)，until = now;since = now - window_days
-      prior  = [prior_since, since)，prior_since = now - 2*window_days
+      recent = [since, until),until = now;since = now - window_days
+      prior  = [prior_since, since),prior_since = now - 2*window_days
 
     返回 dict:
-      rising_concepts: 最近窗口出现次数 > 前窗口 的概念 [{term,recent,prior,delta}]，delta 降序
+      rising_concepts: 最近窗口出现次数 > 前窗口 的概念 [{term,recent,prior,delta}],delta 降序
       new_concepts:    首次出现(最早 occurrence 时间)落在最近窗口的概念 [{term,definition,first_seen}]
       recent_jobs:     最近窗口入库/发布的内容 [{job_id,title,published_at,content_type}]
       top_recent_concepts: 最近窗口出现次数最多的概念 [{term,recent}]

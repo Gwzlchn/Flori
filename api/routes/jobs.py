@@ -92,7 +92,7 @@ def _now_iso() -> str:
 
 
 def _bili_sessdata(db: Database) -> str | None:
-    """从凭证表取已登录 B站的 SESSDATA，未登录/解析失败返回 None。"""
+    """从凭证表取已登录 B站的 SESSDATA,未登录/解析失败返回 None。"""
     raw = db.get_credential("bili_cookies")
     if not raw:
         return None
@@ -132,8 +132,8 @@ async def create_job_core(
         "domain": domain, "style_tags": style_tags, "created_at": _now_iso(),
         "flags": flags,
     }
-    # 白盒 Phase2:job 创建时(api 有 DB)解析该 pipeline+domain 的 prompt 覆盖(domain 优先于 global),
-    # 写进 job.json 随 job 下发;worker(pure,无 DB)的 step_base 读取注入覆盖作 system prompt。
+    # prompt 白盒:job 创建时由 api 解析该 pipeline+domain 的 prompt 覆盖(domain 优先于 global),
+    # 写进 job.json 随 job 下发;worker 是 pure 进程无 DB,其 step_base 读取注入覆盖作 system prompt。
     overrides = await asyncio.to_thread(db.resolve_prompt_overrides, pipeline, domain)
     if overrides:
         job_doc["prompt_overrides"] = overrides
@@ -141,8 +141,8 @@ async def create_job_core(
         job_id, "job.json",
         json.dumps(job_doc, ensure_ascii=False, indent=2).encode("utf-8"),
     )
-    # 上传源文件经 storage 落库(本地/MinIO 一致),远端 worker 才能 pull 到 input/source.*
-    # (此前 upload_job 直写 API 容器本地盘,MinIO 部署下 worker 拉不到源文件)。
+    # 上传源文件必须经 storage 落库(本地/MinIO 一致):直写 API 容器本地盘的话,
+    # MinIO 部署下远端 worker 拉不到 input/source.*。
     if upload is not None:
         ext, data = upload
         await storage.write_file(job_id, f"input/source{ext}", data)
@@ -188,8 +188,8 @@ def _pipeline_digest(config: AppConfig | None, pipeline: str) -> str | None:
 
 
 async def is_job_expired(storage: StorageBackend, config: AppConfig, job: Job) -> dict:
-    """job 是否"过期"= 其某步 .done 存档的 def_digest 与【当前】pipeline 该步 def_digest 不同。
-    逐步读 .done(权威,覆盖含 P2c 前无 pipeline_digest 的旧 job);老 .done 缺 def_digest 键→保守判过期。
+    """job 是否"过期"= 其某步 .done 存档的 def_digest 与当前 pipeline 该步 def_digest 不同。
+    逐步读 .done(权威,兼容无 pipeline_digest 的旧 job);老 .done 缺 def_digest 键 → 保守判过期。
     返回 {expired, first_changed_step}。"""
     try:
         steps = config.pipelines[job.pipeline]["steps"]
@@ -214,8 +214,8 @@ async def create_job_snapshot(
     config: AppConfig, parent_job_id: str, actor: str = "api",
 ) -> Job:
     """从父 job fork 一个新快照(同 lineage、新时间戳 id):clone 父产物+.done 播种 → submit_job,
-    worker should_run 指纹自然只重跑分叉步及下游;旧快照保留供 A/B。不走 rerun(from_step)(它 unlink
-    本地 .done 在 MinIO 是 no-op);用 submit_job + 被播种的中心 .done。"""
+    worker should_run 指纹自然只重跑分叉步及下游;旧快照保留供 A/B。
+    不走 rerun(from_step):它 unlink 本地 .done,对 MinIO 是 no-op;改用 submit_job + 被播种的中心 .done。"""
     parent = await asyncio.to_thread(db.get_job, parent_job_id)
     if not parent:
         raise HTTPException(404, "job not found")
@@ -232,7 +232,7 @@ async def create_job_snapshot(
         except Exception:
             doc = {}
     doc.update({"id": new_id, "created_at": _now_iso()})
-    # 白盒 Phase2:重建快照也重解析 prompt 覆盖(拾取最新编辑;父 job.json 里的旧覆盖会被替换)。
+    # prompt 白盒:重建快照也重解析 prompt 覆盖,拾取最新编辑;父 job.json 里的旧覆盖会被替换。
     overrides = await asyncio.to_thread(db.resolve_prompt_overrides, parent.pipeline, parent.domain)
     if overrides:
         doc["prompt_overrides"] = overrides
@@ -248,7 +248,7 @@ async def create_job_snapshot(
         lineage_key=lineage, is_current=True, parent_job_id=parent.id,
         pipeline_digest=_pipeline_digest(config, parent.pipeline),
     )
-    await asyncio.to_thread(db.create_job, job)        # P2b create_job 自动 demote 同 lineage 旧版
+    await asyncio.to_thread(db.create_job, job)        # create_job 自动 demote 同 lineage 旧版
     if parent.collection_id:
         await asyncio.to_thread(db.increment_collection_count, parent.collection_id, 1)
     await redis.publish(
@@ -268,7 +268,7 @@ async def create_job(
     config: AppConfig = Depends(get_config),
 ):
     # 注:url 接受 http(s) 链接或裸 BV 号(detect_source 解析),故不强校验 http(s) 前缀;
-    # 契约的 invalid_url 语义改由 docs/03-contracts.md 对齐(见 C12 处置)。
+    # invalid_url 语义以 docs/03-contracts.md 为准。
     # 校验 collection_id 存在,避免孤儿绑定 + job_count 漂移。
     if req.collection_id:
         if not await asyncio.to_thread(db.get_collection, req.collection_id):
@@ -461,8 +461,8 @@ async def get_job(
         )
     except Exception:
         pass
-    # 本任务 AI 步用的 prompt 覆盖版本号快照:从 job.json.prompt_overrides[step].version 读
-    # (1.1.5 起注入为 {content, version};旧 job 为纯字符串无版本 → 跳过)。供前端比对「本任务 vX vs 当前 vY」。
+    # 本任务 AI 步用的 prompt 覆盖版本号快照:从 job.json.prompt_overrides[step].version 读,
+    # 注入形态为 {content, version};旧 job 的覆盖是纯字符串无版本,跳过。供前端比对本任务与当前版本。
     prompt_versions: dict = {}
     try:
         raw = await storage.read_file(job_id, "job.json")
@@ -539,7 +539,7 @@ async def job_usage(
     db: Database = Depends(get_db),
 ):
     """该 job 的逐次 AI 调用明细(按步展示 in/out/cache/命中率/cost/耗时/轮数/worker)。
-    cost 对 claude-cli 订阅是「等价 API 成本」,前端按 provider==claude-cli 标「(等价)」。"""
+    cost 对 claude-cli 订阅是等价 API 成本,前端按 provider==claude-cli 标「(等价)」。"""
     validate_path_segment(job_id, "job_id")
     return {"usage": await asyncio.to_thread(db.list_usage_by_job, job_id)}
 
@@ -571,7 +571,7 @@ async def job_ai_logs(
     step: str | None = None,
     storage: StorageBackend = Depends(get_storage),
 ):
-    """该 job 各 AI 步的【完整 AI 审计日志】(prompt 白盒化)。
+    """该 job 各 AI 步的完整 AI 审计日志(prompt 白盒化)。
     读 output/ai_logs/{step}.jsonl —— 每次 LLM 调用一条(含路由/尝试链/prompt 渲染/输出/用量/raw),
     按 job_id 归成一条 trace;给 step 时只返回该步。经 storage 读,兼容本地/MinIO。"""
     validate_path_segment(job_id, "job_id")
@@ -619,18 +619,18 @@ async def delete_job(
 async def _delete_job_full(
     db: Database, redis: RedisClient, storage: StorageBackend, job: Job, actor: str = "api",
 ) -> None:
-    """精准级联删一个 job —— 单 job 删除 与 集合 purge 共用,顺序保证【DB 行最后删 + 每步幂等】:
+    """精准级联删一个 job —— 单 job 删除与集合 purge 共用,顺序保证 DB 行最后删 + 每步幂等:
     任一步崩溃则 job 仍在 DB → 可原样重删补齐(不依赖周期 GC)。
-    ① 清 redis 队列残留(queue:{pool} + queue:enqueued,补 G1)+ 7 个编排 hash + active 集合;
-    ② publish 让 scheduler 取消在途延迟重试(进程内 asyncio,只能 scheduler 端做);
-    ③ 删产物(LocalStorage 删目录 / RemoteStorage 删 {job_id}/ 前缀,审计 I-H1);
-    ④ 最后删 DB(jobs 行 + FTS + ai_usage + 集合计数 + glossary 出现 + 订阅 ingested_items);
-    ⑤ 审计。running job:读其 running 步的 holder(=exec_id)→ release_holders 立即归还所占池槽/资源槽(G4);
+    1. 清 redis 队列残留(queue:{pool} + queue:enqueued)+ 7 个编排 hash + active 集合;
+    2. publish 让 scheduler 取消在途延迟重试(进程内 asyncio,只能 scheduler 端做);
+    3. 删产物(LocalStorage 删目录 / RemoteStorage 删 {job_id}/ 前缀);
+    4. 最后删 DB(jobs 行 + FTS + ai_usage + 集合计数 + glossary 出现 + 订阅 ingested_items);
+    5. 审计。running job:读其 running 步的 holder(=exec_id)→ release_holders 立即归还所占池槽/资源槽;
        worker 推回结果经 cas_step_status 见 steps hash 已删而 CAS 失败被丢弃,其迟到 release_step 再 SREM 同
        holder 也幂等无害。"""
     job_id = job.id
     item_id = (job.meta or {}).get("source_item_id")
-    # G4:删 running job 立即归还其 running 步占的槽。★须在 cleanup_job(删 steps hash)前读 exec_id。
+    # 删 running job 立即归还其 running 步占的槽。必须在 cleanup_job 删 steps hash 之前读 exec_id。
     stale_holders: set[str] = set()
     try:
         for st, status in (await redis.get_all_step_statuses(job_id)).items():
@@ -640,17 +640,17 @@ async def _delete_job_full(
                     stale_holders.add(ex)
     except Exception:
         pass
-    removed = await redis.remove_job_tasks(job_id)          # ① 队列 ZSET + queue:enqueued
+    removed = await redis.remove_job_tasks(job_id)          # 1. 队列 ZSET + queue:enqueued
     await redis.cleanup_job(job_id)                         #    7 个 job:{id}* 编排 hash
     await redis.remove_active_job(job_id)                   #    SREM active_jobs
-    await redis.release_holders(stale_holders)              #    G4:归还 running 步的池槽/资源槽(幂等)
-    await redis.publish("job_command", {"action": "delete", "job_id": job_id})  # ② 取消在途重试
-    await storage.delete(job_id)                            # ③ 产物
-    await asyncio.to_thread(db.delete_job_cascade, job_id, job.collection_id, item_id)  # ④ DB 最后
+    await redis.release_holders(stale_holders)              #    归还 running 步的池槽/资源槽(幂等)
+    await redis.publish("job_command", {"action": "delete", "job_id": job_id})  # 2. 取消在途重试
+    await storage.delete(job_id)                            # 3. 产物
+    await asyncio.to_thread(db.delete_job_cascade, job_id, job.collection_id, item_id)  # 4. DB 最后
     # 删的是 current → 把同 lineage 剩余最新一版提为 current(否则该内容在列表消失)。
     if job.is_current and job.lineage_key:
         await asyncio.to_thread(db.promote_lineage_current, job.lineage_key)
-    audit("job", job_id, "delete", actor=actor, detail={                               # ⑤
+    audit("job", job_id, "delete", actor=actor, detail={                               # 5. 审计
         "queue_tasks_removed": removed, "collection_id": job.collection_id,
         "purged_ingested": bool(item_id),
     })
@@ -665,8 +665,8 @@ async def retry_all_failed(
     """批量重试 failed job(各自从首个失败步重跑,自动重置下游)。返回发起数。
     传 collection_id 则限定该集合(集合详情页"重试本集合失败");不传=全局所有失败。
     注:缺凭证类失败(如无 cookie 的 YouTube 下载)修好根因前会再失败。"""
-    # 空串(?collection_id=)归一为 None:否则 list_jobs 的 `elif collection_id:` 对空串为假 →
-    # 集合过滤落空 → 静默退化为「全局重试所有 failed」,与「限定该集合」语义相悖且误触批量重发。
+    # 空串(?collection_id=)归一为 None:否则 list_jobs 的 `elif collection_id:` 对空串为假,
+    # 集合过滤落空,静默退化成全局重试所有 failed,与限定该集合的语义相悖且误触批量重发。
     if collection_id is not None:
         collection_id = collection_id.strip() or None
     if collection_id is not None:
@@ -720,7 +720,7 @@ async def rebuild_job(
     storage: StorageBackend = Depends(get_storage),
     config: AppConfig = Depends(get_config),
 ):
-    """重建为【新快照】(fork 父 job:播种产物+.done,只重跑分叉步及下游;旧版保留 A/B)。
+    """重建为新快照(fork 父 job:播种产物+.done,只重跑分叉步及下游;旧版保留 A/B)。
     返回新 job_id;新版自动成为该 lineage 的 current。"""
     validate_path_segment(job_id, "job_id")
     job = await create_job_snapshot(db, redis, storage, config, job_id)
@@ -735,7 +735,7 @@ async def rebuild_stale(
     storage: StorageBackend = Depends(get_storage),
     config: AppConfig = Depends(get_config),
 ):
-    """批量重建【所有过期 current job】(其某步定义指纹 def_digest 与当前 pipeline 不符)为新快照。
+    """批量重建所有过期 current job(其某步定义指纹 def_digest 与当前 pipeline 不符)为新快照。
     仿 retry-failed:逐个判过期 → create_job_snapshot。返回重建清单。"""
     _, jobs = await asyncio.to_thread(db.list_jobs, None, None, 10000, 0, None, None, False, True)
     rebuilt = []

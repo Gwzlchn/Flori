@@ -13,7 +13,7 @@ from fastapi import FastAPI
 class _RunnerPollAccessFilter(logging.Filter):
     """丢弃 runner 高频轮询端点(heartbeat / jobs/request)的 uvicorn access 记录。
     这些请求行高频低信号,会刷爆 api 容器日志、把真正重要的日志淹没(Dozzle 里看不到);
-    worker 连接/认证状态改由【结构化事件】呈现(worker_registered/auth_rejected/throttled → Dozzle + /system 事件页)。
+    worker 连接/认证状态由结构化事件呈现(worker_registered/auth_rejected/throttled → Dozzle + /system 事件页)。
     不影响其余端点的 access,也不影响任何 structlog 业务/审计日志。"""
 
     _NOISY = ("/api/runner/heartbeat", "/api/runner/jobs/request")
@@ -116,7 +116,7 @@ def create_app(
 
     app = FastAPI(title="AI Knowledge Base", lifespan=lifespan)
 
-    # 契约 §5:错误体统一 {error, message}(此前是 FastAPI 默认 {detail})。error 用状态码派生机器码。
+    # 错误体统一 {error, message},见 docs/03-contracts.md §5。error 用状态码派生机器码。
     from fastapi import Request as _Request
     from fastapi.exceptions import RequestValidationError as _RequestValidationError
     from fastapi.responses import JSONResponse as _JSONResponse
@@ -144,7 +144,7 @@ def create_app(
             content={"error": "invalid_request", "message": str(exc.errors())},
         )
 
-    # 兜底:URL(路径/查询)含空字节(null byte)会让 sqlite3 绑定 / pathlib.resolve() 抛 → 裸 500;
+    # 兜底:URL 路径或查询串含空字节(null byte)会让 sqlite3 绑定 / pathlib.resolve() 抛异常 → 裸 500;
     # 这类输入恒为非法,入口统一拦成 400(schemathesis fuzz 发现 /assets/x%00、/search?q=%00 两例)。
     from urllib.parse import unquote as _unquote
 

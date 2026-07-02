@@ -34,7 +34,7 @@ async def list_terms(
     status: str | None = None,
     db: Database = Depends(get_db),
 ):
-    """列术语，可按 domain / status（suggested 待审 / accepted 已采纳）过滤。"""
+    """列术语,可按 domain / status(suggested 待审 / accepted 已采纳)过滤。"""
     rows = await asyncio.to_thread(db.list_glossary, domain, status)
     return [_to_response(r) for r in rows]
 
@@ -46,7 +46,7 @@ async def create_term(
     db: Database = Depends(get_db),
     config: AppConfig = Depends(get_config),
 ):
-    """手动新增术语：直接落 status='accepted'，并同步进 Profile.terminology。"""
+    """手动新增术语:直接落 status='accepted',并同步进 Profile.terminology。"""
     validate_path_segment(domain, "domain")
     if not domain.strip():
         # domain 为空会写出空文件名 profile(.yaml)到不可达领域,与 domains 端点一致挡掉。
@@ -66,7 +66,7 @@ async def create_term(
 
 @router.get("/{domain}/{term}", response_model=GlossaryTermResponse)
 async def get_term(domain: str, term: str, db: Database = Depends(get_db)):
-    """术语详情（含 sources 关联的 job 列表）。"""
+    """术语详情(含 sources 关联的 job 列表)。"""
     validate_path_segment(domain, "domain")
     row = await asyncio.to_thread(db.get_glossary_term, domain, term)
     if row is None:
@@ -81,7 +81,7 @@ async def update_term(
     req: GlossaryTermRequest,
     db: Database = Depends(get_db),
 ):
-    """改 definition / related（不动 status / occurrences）。"""
+    """改 definition / related(不动 status / occurrences)。"""
     validate_path_segment(domain, "domain")
     row = await asyncio.to_thread(db.get_glossary_term, domain, term)
     if row is None:
@@ -103,7 +103,7 @@ async def accept_term(
     db: Database = Depends(get_db),
     config: AppConfig = Depends(get_config),
 ):
-    """采纳候选术语：status -> 'accepted' 并同步进 Profile.terminology，让 AI 步骤可用。"""
+    """采纳候选术语:status -> 'accepted' 并同步进 Profile.terminology,让 AI 步骤可用。"""
     validate_path_segment(domain, "domain")
     row = await asyncio.to_thread(db.get_glossary_term, domain, term)
     if row is None:
@@ -134,6 +134,6 @@ async def set_topic(
 
 @router.delete("/{domain}/{term}", status_code=204)
 async def delete_term(domain: str, term: str, db: Database = Depends(get_db)):
-    """删一条术语（不动 Profile，避免误删手工维护的条目）。"""
+    """删一条术语(不动 Profile,避免误删手工维护的条目)。"""
     validate_path_segment(domain, "domain")
     await asyncio.to_thread(db.delete_glossary_term, domain, term)

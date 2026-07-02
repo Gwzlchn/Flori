@@ -1,13 +1,13 @@
 """跨源综合问答(Cross-Source Synthesis Q&A)服务。
 
-用户提问 → 跨语料检索相关笔记 → LLM 综合出**带引用**的答案,标注共识/分歧。
+对用户提问跨语料检索相关笔记,由 LLM 综合出带引用的答案,标注共识/分歧。
 
-检索是最大风险:现有唯一检索是 FTS5 trigram,db.search_notes 把【整条查询】当一个
+检索是最大风险:唯一检索后端是 FTS5 trigram,db.search_notes 把整条查询当一个
 带引号的字面短语匹配(_fts_match_query),自然语言问句几乎不可能整句命中。本模块通过
 `derive_queries` 把问句拆成有意义的小词/术语,分别检索再并集去重,缓解该字面短语限制。
 
 门面纯函数(吃 Database),便于单测:不在此持有连接/全局状态。
-LLM 综合本身现作为独立 AI task 投给 ai-worker(见 api/routes/ask.py + shared.models.AITask),本模块只产 retrieve/build_prompt。
+LLM 综合作为独立 AI task 投给 ai-worker(见 api/routes/ask.py + shared.models.AITask),本模块只产 retrieve/build_prompt。
 """
 
 from __future__ import annotations
@@ -36,10 +36,10 @@ _STOPWORDS = {
     "do", "does", "can", "vs", "versus", "compare", "difference",
 }
 
-# 把问句切成「连续 CJK 串」或「连续 ascii 词(字母+数字)」的 token。
+# 把问句切成连续 CJK 串或连续 ascii 词(字母+数字)的 token。
 # 标点/空白天然成为分隔符;CJK 串后续再做滑窗细切以提高短词命中率。
 _TOKEN_RE = re.compile(r"[一-鿿]+|[A-Za-z0-9]+")
-# 连续 CJK 串内部再切出的子串长度(2~4 字滑窗),覆盖「神经网络/注意力机制」等复合词。
+# 连续 CJK 串内部再切出的子串长度(2~4 字滑窗),覆盖 "神经网络/注意力机制" 等复合词。
 _CJK_WINDOWS = (4, 3, 2)
 
 
@@ -64,11 +64,11 @@ def _dedup(seq: list[str]) -> list[str]:
 
 
 def derive_queries(question: str, db: Database, domain: str | None = None) -> list[str]:
-    """把自然语言问句拆成一组 FTS 友好的检索词,缓解「整句字面短语」无法命中的问题。
+    """把自然语言问句拆成一组 FTS 友好的检索词,缓解整句字面短语无法命中的问题。
 
     策略:
     1. 切出 token(连续 CJK 串 / ascii 词),丢停用词与 <2 字噪声;CJK 长串再滑窗细切。
-    2. 叠加任何「术语表里的词」且其 term 串恰出现在问句中的 —— 领域概念是最高信噪检索词。
+    2. 叠加术语表里 term 串恰出现在问句中的词 —— 领域概念是最高信噪检索词。
     3. 去重,按信息量(术语 > 长词 > 短词)排序,截断到 _MAX_QUERIES 条。
     """
     q = question or ""
@@ -92,7 +92,7 @@ def derive_queries(question: str, db: Database, domain: str | None = None) -> li
                 if len(sub) >= _MIN_TOKEN_LEN and sub not in _STOPWORDS:
                     tokens.append(sub)
 
-    # 术语优先(信噪最高),其后按长度降序(长词更具体)再原序兜底。
+    # 术语优先,信噪最高;其后按长度降序(长词更具体),再原序兜底。
     ranked_tokens = sorted(_dedup(tokens), key=lambda s: -len(s))
     candidates = _dedup([*glossary_terms, *ranked_tokens])
     return candidates[:_MAX_QUERIES]
@@ -104,8 +104,8 @@ def retrieve(
     """跨语料检索:对每个派生查询跑 FTS,并集去重(保留最佳 rank),取前 k 篇,批量拉正文。
 
     返回 [{job_id, title, domain, content_type, body}];body 截断到 _BODY_CHAR_BUDGET。
-    去重以 job_id 为粒度(同一篇内容只进一次);rank 以「首个命中它的派生查询的次序 +
-    该查询内部的命中序」近似——越靠前的查询越具体,命中即视为更相关。
+    去重以 job_id 为粒度(同一篇内容只进一次);rank 近似为首个命中它的派生查询的次序
+    加该查询内部的命中序——越靠前的查询越具体,命中即视为更相关。
     """
     queries = derive_queries(question, db, domain)
     if not queries:
@@ -154,7 +154,7 @@ def retrieve(
 
 
 def build_prompt(question: str, passages: list[dict]) -> tuple[str, str]:
-    """构造 (system, user) prompt:要求 LLM 跨段综合、内联引用 [来源N]、补「共识 / 分歧」段。"""
+    """构造 (system, user) prompt:要求 LLM 跨段综合、内联引用 [来源N]、补 "共识 / 分歧" 段。"""
     system = (
         "你是一个严谨的知识综合助手。你将收到一个问题和若干来自不同笔记的资料段落。\n"
         "请遵守以下要求:\n"

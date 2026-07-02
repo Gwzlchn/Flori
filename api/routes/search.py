@@ -23,10 +23,10 @@ async def search_notes(
     domain: str | None = None,
     content_type: str | None = None,
     limit: int = Query(20, ge=1, le=100),
-    offset: int = Query(0, ge=0, le=2_147_483_647),  # int32 max,远低于 SQLite int64 溢出点;挡住超大 offset → 500
+    offset: int = Query(0, ge=0, le=2_147_483_647),  # int32 max,远低于 SQLite int64 溢出点;挡住超大 offset 触发的 500
     db: Database = Depends(get_db),
 ) -> SearchResponse:
-    """笔记全文检索：q 经 db 层转义防注入，空查询直接返回空结果。"""
+    """笔记全文检索:q 经 db 层转义防注入,空查询直接返回空结果。"""
     total, items = await asyncio.to_thread(
         db.search_notes,
         q, collection_id=collection_id, domain=domain,

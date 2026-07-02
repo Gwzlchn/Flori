@@ -1,5 +1,5 @@
-"""集合管理路由。订阅是集合的属性(无独立订阅实体/页面)：
-source_type/source_id 非空 = 订阅集合，自动从该来源追更新内容入本集合。
+"""集合管理路由。订阅是集合的属性(无独立订阅实体/页面):
+source_type/source_id 非空 = 订阅集合,自动从该来源追更新内容入本集合。
 """
 
 from __future__ import annotations
@@ -82,8 +82,8 @@ async def _sync_collection_body(
     ctx = SourceContext(bili_cookies=cookies, db=db)
     source_title, items = await enumerate_source(coll.source_type, coll.source_id, ctx)
 
-    # 首次同步拿到 source_title 后回填集合名为 <名>-<来源>:仅当当前名为占位(空/等于
-    # source_id/已等于 id)时改,避免覆盖用户手填名。回填后用于响应与后续展示。
+    # 首次同步拿到 source_title 后回填集合名:仅当当前名为占位(空/等于
+    # source_id/等于集合 id)时改,避免覆盖用户手填名。回填后用于响应与后续展示。
     if source_title:
         desired = source_title  # 存纯真实名;来源标签在响应里派生(source_label),不拼进 name
         if _is_placeholder_name(coll.name, coll) and coll.name != desired:
@@ -136,7 +136,7 @@ async def create_collection(
 ):
     is_sub = bool(req.source_type and req.source_id)
     if is_sub:
-        # 订阅集合：domain 必须显式且非 general(否则术语沉错领域)；来源全局唯一。
+        # 订阅集合:domain 必须显式且非 general(否则术语沉错领域);来源全局唯一。
         if not req.domain or req.domain == "general":
             raise HTTPException(400, "订阅集合必须选择真实领域(不能为 general)")
         if await asyncio.to_thread(db.find_collection_by_source, req.source_type, req.source_id):
@@ -148,8 +148,8 @@ async def create_collection(
             raise HTTPException(400, "集合名不能为空")
         cid = generate_collection_id()
 
-    # 订阅集合名留空 = 要求自动命名:先以 source_id 占位(NOT NULL),首次同步拿到
-    # source_title 后由 sync_collection 回填为 <名>-<来源>(见 _is_placeholder_name)。
+    # 订阅集合名留空 = 要求自动命名:先以 source_id 占位(NOT NULL)。首次同步拿到
+    # source_title 后由 sync_collection 回填,占位判定见 _is_placeholder_name。
     name = (req.name or "").strip()
     if is_sub and not name:
         name = req.source_id
@@ -209,7 +209,7 @@ async def update_collection(
     c = await asyncio.to_thread(db.get_collection, collection_id)
     if not c:
         raise HTTPException(404, "collection not found")
-    # sync_enabled 仅订阅集合有意义；手动集合传该字段是无效写入。
+    # sync_enabled 仅订阅集合有意义;手动集合传该字段是无效写入。
     if req.sync_enabled is not None and not c.is_subscription:
         raise HTTPException(400, "非订阅集合没有自动追更开关")
     await asyncio.to_thread(
@@ -257,7 +257,7 @@ async def delete_collection(
         raise HTTPException(404, "collection not found")
     purged = 0
     if purge:
-        # 名下每个 job 先做非 DB 清理(队列残留 + 编排 hash + active + 在途重试 + 产物),
+        # 名下每个 job 先做非 DB 清理:队列残留 + 编排 hash + active + 在途重试 + 产物。
         # 再由 db.delete_collection(purge=True) 单事务批量删 DB(jobs+FTS+ai_usage+occurrences+ingested+集合)。
         _, jobs = await asyncio.to_thread(db.list_jobs, collection_id=collection_id, limit=100000)
         for j in jobs:
@@ -281,7 +281,7 @@ async def list_collection_jobs(
     offset: int = Query(0, ge=0, le=2_147_483_647),  # int32 max,远低于 SQLite int64 溢出点;挡住超大 offset → 500
     db: Database = Depends(get_db),
 ):
-    """集合名下的 job 列表（分页，复用 db.list_jobs 的 collection_id 过滤）。"""
+    """集合名下的 job 列表(分页,复用 db.list_jobs 的 collection_id 过滤)。"""
     validate_path_segment(collection_id, "collection_id")
     c = await asyncio.to_thread(db.get_collection, collection_id)
     if not c:

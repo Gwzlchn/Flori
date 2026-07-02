@@ -1,13 +1,13 @@
-"""Prompt 白盒(Phase 2):列出可编辑 AI 步 + 读/写/删每步 prompt 覆盖。
+"""Prompt 白盒:列出可编辑 AI 步 + 读/写/删每步 prompt 覆盖。
 
-覆盖按 (scope,domain,pipeline,step) 存 DB prompt_overrides;job 创建时由 api 解析注入
-job.json.prompt_overrides(见 shared.db.resolve_prompt_overrides + api/routes/jobs.py),
+覆盖按 (scope,domain,pipeline,step) 存 DB prompt_overrides。job 创建时由 api 解析注入
+job.json.prompt_overrides,见 shared.db.resolve_prompt_overrides 与 api/routes/jobs.py;
 worker step_base 派发时优先用(pure worker 无 DB,只能靠 job 带过去)。
-**所见即所改**:覆盖替换的就是编辑器展示的那段默认 user-prompt 模板(29-externalize:
-templates/{step}.md,含 .zh/.translate/.vision 等变体)——worker 回退序 = DB覆盖 > 模板文件 >
-内联默认(step_base._load_prompt_template)。无模板的步(评审等 prompt 内联)覆盖回落为 system
-prompt(step_base._load_system_prompt)。模板读取双保险:运行时 prompts_dir/templates 优先,
-缺失回退镜像烤入 config_dir/prompts/templates(api 容器即使没挂 templates 也能看到默认)。
+所见即所改:覆盖替换的就是编辑器展示的那段默认 user-prompt 模板,即 templates/{step}.md
+及 .zh/.translate/.vision 等变体。worker 回退序 = DB 覆盖 > 模板文件 > 内联默认,
+见 step_base._load_prompt_template。无模板的步(评审等 prompt 内联)覆盖回落为 system
+prompt,见 step_base._load_system_prompt。模板读取双保险:运行时 prompts_dir/templates 优先,
+缺失回退镜像烤入的 config_dir/prompts/templates,api 容器即使没挂 templates 也能看到默认。
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ router = APIRouter(prefix="/api/prompts", tags=["prompts"], dependencies=[Depend
 
 
 def _ai_steps(config: AppConfig) -> list[tuple[str, str, str | None, str | None]]:
-    """枚举四条 pipeline 的 AI 步(pool=='ai')→ [(pipeline, step_key, label, pool)]。
+    """枚举各 pipeline 的 AI 步(pool=='ai')→ [(pipeline, step_key, label, pool)]。
     模板/'.'前缀/default 不算 pipeline(与 GET /api/pipelines 同口径)。"""
     out: list[tuple[str, str, str | None, str | None]] = []
     for name, pc in (config.pipelines or {}).items():
@@ -52,9 +52,9 @@ def _find_step(config: AppConfig, pipeline: str, step: str) -> dict | None:
 
 def _template_dirs(config: AppConfig) -> list:
     """默认 prompt 模板搜索目录(双保险,按优先级):
-    ① prompts_dir/templates(/data/prompts/templates,运行时挂载,改文件即生效);
-    ② config_dir/prompts/templates(/app/configs/prompts/templates,镜像烤入,永不被 /data 命名卷 shadow)。
-    api 容器若没挂①(历史缺陷),仍能从②读到默认模板 → 白盒不再"看不到默认"。"""
+    1. prompts_dir/templates(/data/prompts/templates,运行时挂载,改文件即生效);
+    2. config_dir/prompts/templates(/app/configs/prompts/templates,镜像烤入,永不被 /data 命名卷 shadow)。
+    api 容器即使没挂运行时目录,仍能从烤入目录读到默认模板。"""
     return [config.prompts_dir / "templates", config.config_dir / "prompts" / "templates"]
 
 
@@ -70,8 +70,9 @@ def _read_first(paths: list) -> str | None:
 
 
 def _step_templates(config: AppConfig, step: str) -> list[dict]:
-    """该步全部外置默认 user-prompt 模板:{step}.md(主)+ {step}.<变体>.md(如 08_punctuate.zh、
-    11_smart.vision)。按 name 去重(prompts_dir 优先于烤入),主模板排在变体前。供白盒展示全变体。"""
+    """该步全部外置默认 user-prompt 模板:主模板 {step}.md 加变体 {step}.<变体>.md,
+    如 08_punctuate.zh、11_smart.vision。按 name 去重(prompts_dir 优先于烤入),主模板排在变体前。
+    供白盒展示全变体。"""
     by_name: dict[str, str] = {}
     for d in _template_dirs(config):
         if not d.is_dir():
@@ -92,7 +93,7 @@ def _step_templates(config: AppConfig, step: str) -> list[dict]:
 
 
 def _default_template(config: AppConfig, step: str) -> str | None:
-    """该步「主」默认 user-prompt 模板内容(向后兼容字段):{step}.md;无主则取首个变体;全无则 None。"""
+    """该步主默认 user-prompt 模板内容(向后兼容字段):{step}.md;无主则取首个变体;全无则 None。"""
     tpls = _step_templates(config, step)
     if not tpls:
         return None
@@ -115,7 +116,7 @@ def _default_system(config: AppConfig, step: str) -> str | None:
 async def list_prompts(
     config: AppConfig = Depends(get_config), db: Database = Depends(get_db)
 ):
-    """列各 pipeline 的可编辑 AI 步 + 已有哪些覆盖(供设置页画 DAG/列表 + 标 ●)。"""
+    """列各 pipeline 的可编辑 AI 步 + 已有哪些覆盖(供设置页画 DAG/列表并标圆点角标)。"""
     overrides = await asyncio.to_thread(db.list_prompt_overrides)
     by_step: dict[tuple[str, str], list[dict]] = {}
     for o in overrides:
@@ -143,8 +144,9 @@ async def get_prompt(
     config: AppConfig = Depends(get_config),
     db: Database = Depends(get_db),
 ):
-    """单步详情:默认模板(只读,全变体)+ system 默认(钩子,有则非空)+ 该 (scope,domain) 当前覆盖
-    + 版本历史(active_version=当前激活版本号,versions=全部历史版本元信息;无覆盖时 None/空)。"""
+    """单步详情:默认模板(只读,全变体)+ system 默认钩子 + 该 (scope,domain) 当前覆盖 + 版本历史。
+    system 默认有钩子文件才非空。active_version 为当前激活版本号,versions 为全部历史版本元信息;
+    无覆盖时 None/空。"""
     validate_path_segment(pipeline, "pipeline")
     validate_path_segment(step, "step")
     s = _find_step(config, pipeline, step)
@@ -161,7 +163,7 @@ async def get_prompt(
         "label": s.get("label"),
         "pool": s.get("pool"),
         "is_ai": s.get("pool") == "ai",
-        # 默认 prompt = 外置 user-prompt 模板(覆盖即替换它,所见即所改)。default_template 为「主」模板
+        # 默认 prompt = 外置 user-prompt 模板(覆盖即替换它,所见即所改)。default_template 为主模板
         # (向后兼容);default_templates 列全变体 [{name,content}]。default_system = 外置 system 钩子(多数步 null)。
         "default_template": _default_template(config, step),
         "default_templates": templates,
@@ -183,7 +185,7 @@ async def get_prompt_version(
     domain: str | None = None,
     db: Database = Depends(get_db),
 ):
-    """查看某历史版本的完整内容(供编辑器「选历史版本」载入 textarea 后基于它改)。未命中 404。"""
+    """查看某历史版本的完整内容(供编辑器选历史版本载入 textarea 后基于它改)。未命中 404。"""
     validate_path_segment(pipeline, "pipeline")
     validate_path_segment(step, "step")
     if domain:
@@ -208,7 +210,7 @@ async def put_prompt(
     db: Database = Depends(get_db),
 ):
     """存该步 prompt 覆盖(替换展示的默认 user-prompt 模板;无模板步则作 system),带版本管理。
-    content 为空(纯空白)= 删除覆盖(恢复默认,清全部版本)。否则按 mode:
+    content 为空或纯空白即删除覆盖,恢复默认并清全部版本。否则按 mode:
     'overwrite'(默认)改当前激活版本内容;'new'=另存为新版本(version=max+1 并激活)。返回 active_version。"""
     validate_path_segment(pipeline, "pipeline")
     validate_path_segment(step, "step")
@@ -246,7 +248,7 @@ async def activate_prompt(
     config: AppConfig = Depends(get_config),
     db: Database = Depends(get_db),
 ):
-    """切换该步 (scope,domain) 的【激活指针】(非破坏,历史版本始终保留)。
+    """切换该步 (scope,domain) 的激活指针(非破坏,历史版本始终保留)。
     - version=数字 → 把该历史版本设为当前激活(派发用它);该版本不存在 → 404。
     - version=null → 停用覆盖回内置默认(deactivate;主表指针清掉,历史全留,下拉仍能再激活)。
     返回新 active_version(null=已回内置默认)。"""
@@ -290,8 +292,8 @@ async def delete_prompt(
     domain: str | None = None,
     db: Database = Depends(get_db),
 ):
-    """【彻底删除】该步 (scope,domain) 覆盖,连同其全部历史版本一并清除。无则 no-op。
-    注:「恢复默认/回内置默认」请用 POST .../activate {version:null}(非破坏,保留历史);
+    """彻底删除该步 (scope,domain) 覆盖,连同其全部历史版本一并清除。无则 no-op。
+    注:恢复默认/回内置默认请用 POST .../activate {version:null}(非破坏,保留历史);
     此 DELETE 仅用于真正要丢弃所有版本的场景。"""
     validate_path_segment(pipeline, "pipeline")
     validate_path_segment(step, "step")

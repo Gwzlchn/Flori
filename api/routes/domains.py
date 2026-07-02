@@ -1,4 +1,4 @@
-"""领域路由（领域是派生视图，非实体）。
+"""领域路由(领域是派生视图,非实体)。
 - GET  /api/domains            领域总览(卡片网格)
 - POST /api/domains            新建领域
 - GET  /api/domains/{d}        领域工作台聚合(集合/最近内容/术语/主题)
@@ -45,8 +45,8 @@ def _profile_meta(config: AppConfig) -> dict[str, dict]:
 
 
 async def _overview_map(db: Database, config: AppConfig) -> dict[str, dict]:
-    """领域总览 {domain: stats+meta}:DB 派生(jobs∪collections∪glossary) ∪ 仅有 profile 的领域(零计数),
-    并各自合并 profile 展示元数据。这样新建的空知识库(只有 profile)也会出现。"""
+    """领域总览 {domain: stats+meta}。DB 从 jobs/collections/glossary 派生,再并入仅有
+    profile 的领域(零计数),各自合并 profile 展示元数据。这样新建的空知识库(只有 profile)也会出现。"""
     rows = await asyncio.to_thread(db.list_domains)
     by = {d["domain"]: d for d in rows}
     meta = _profile_meta(config)
@@ -121,8 +121,8 @@ async def rename_domain_key(
     db: Database = Depends(get_db),
     config: AppConfig = Depends(get_config),
 ):
-    """改知识库英文标识(domain key,二期 issue1-b):领域是派生键(无独立表),散在 jobs/collections/glossary
-    + notes_fts5 冗余列 + profiles/{domain}.yaml。这里:先迁 profile 文件(可回滚)→ 再事务迁移 DB 引用,
+    """改知识库英文标识(domain key)。领域是派生键,无独立表,散在 jobs/collections/glossary
+    + notes_fts5 冗余列 + profiles/{domain}.yaml。这里先迁 profile 文件(可回滚),再事务迁移 DB 引用,
     DB 失败则回滚文件。new 须合法、不与现有领域冲突;general 不可改。"""
     validate_path_segment(domain, "domain")
     new = (req.new_domain or "").strip()
@@ -141,7 +141,7 @@ async def rename_domain_key(
         new_path = pdir / f"{new}.yaml"
         if new_path.exists() or await asyncio.to_thread(db.domain_exists, new):
             raise HTTPException(409, f"目标标识 '{new}' 已存在")
-        # 1) 迁 profile 文件(若有):old.yaml -> new.yaml + 改内部 domain 字段(记录以便回滚)
+        # 1) 迁 profile 文件(若有):old.yaml -> new.yaml + 改内部 domain 字段,记录以便回滚
         moved_file = False
         if old_path.exists():
             data = yaml.safe_load(old_path.read_text(encoding="utf-8")) or {}
@@ -168,9 +168,9 @@ async def rename_domain_key(
     return {"old": domain, "new": new, "moved": moved, "domain": by.get(new)}
 
 
-# 注:知识库展示元数据(display_name/icon/color)的修改复用已有 PUT /api/profiles/{domain}
-# (api/routes/profiles.py,ProfileUpdateRequest 已含这三字段且为部分合并、保留 terminology)——
-# 不在此另开 PATCH/PUT 端点,避免同一份 yaml meta 持久化逻辑两处分叉(审计去重原则)。
+# 注:知识库展示元数据(display_name/icon/color)的修改复用 PUT /api/profiles/{domain}。
+# 其 ProfileUpdateRequest 已含这三字段且为部分合并、保留 terminology,见 api/routes/profiles.py。
+# 不在此另开 PATCH/PUT 端点,避免同一份 yaml meta 持久化逻辑两处分叉。
 
 
 @router.get("/{domain}")
@@ -179,15 +179,15 @@ async def domain_workspace(
     db: Database = Depends(get_db),
     config: AppConfig = Depends(get_config),
 ):
-    """领域工作台：情景层(集合+最近内容) + 语义层(术语+主题)。"""
+    """领域工作台:情景层(集合+最近内容) + 语义层(术语+主题)。"""
     validate_path_segment(domain, "domain")
     overview = await _overview_map(db, config)
     if domain not in overview:
         raise HTTPException(404, "domain not found")
     collections = await asyncio.to_thread(db.list_collections, domain)
-    # issue 6:每集合各取最近 5 条。原先复用「全域最近 12 条」按 collection_id 分组,集合内容不在
-    # 前 12 即被误显「该集合暂无最近内容」(如 finance 167 jobs、集合 79/45)。集合数通常个位数,
-    # N+1 小查询可接受。loose/未归类仍用下方全域 recent_jobs。
+    # 每集合各取最近 5 条。不能复用全域最近列表按 collection_id 分组:集合内容不在全域前列时
+    # 会被误显「该集合暂无最近内容」。集合数通常个位数,N+1 小查询可接受。
+    # loose/未归类用下方全域 recent_jobs。
     col_payload = []
     for c in collections:
         _, c_recent = await asyncio.to_thread(db.list_jobs, None, c.id, 5, 0, domain)
@@ -217,7 +217,7 @@ async def topic_concepts(
     domain: str,
     db: Database = Depends(get_db),
 ):
-    """域内被标为主题的概念列表（is_topic=1），按出现数降序；空则 []。"""
+    """域内被标为主题的概念列表(is_topic=1),按出现数降序;空则 []。"""
     validate_path_segment(domain, "domain")
     return await asyncio.to_thread(db.list_topic_concepts, domain)
 
@@ -228,7 +228,7 @@ async def concept_timeline(
     granularity: str = Query("month", pattern="^(day|week|month)$"),
     db: Database = Depends(get_db),
 ):
-    """概念时间线：各概念 occurrences 经 job 创建时间分桶计数(day/week/month)。空领域返回空序列。"""
+    """概念时间线:各概念 occurrences 经 job 创建时间分桶计数(day/week/month)。空领域返回空序列。"""
     validate_path_segment(domain, "domain")
     return await asyncio.to_thread(db.concept_timeline, domain, granularity)
 
@@ -238,7 +238,7 @@ async def concept_graph(
     domain: str,
     db: Database = Depends(get_db),
 ):
-    """概念图谱：节点=概念，边=共现(两概念引用同一 job_id)，权重=共享 job 数；叠加手动 related。
+    """概念图谱:节点=概念,边=共现(两概念引用同一 job_id),权重=共享 job 数;叠加手动 related。
     返回 {nodes, edges, stats}。空领域返回空节点/边与零计数。逻辑在 api.services.kb(单一来源)。"""
     validate_path_segment(domain, "domain")
     return await asyncio.to_thread(kb.concept_graph, db, domain)
@@ -249,7 +249,7 @@ async def term_detail(
     domain: str, term: str,
     db: Database = Depends(get_db),
 ):
-    """术语详情：定义 + 关联 + 类型化出现处。形态与 /api/glossary/{d}/{t} 完全一致(共用 from_row)。"""
+    """术语详情:定义 + 关联 + 类型化出现处。形态与 /api/glossary/{d}/{t} 完全一致(共用 from_row)。"""
     validate_path_segment(domain, "domain")
     t = await asyncio.to_thread(db.get_glossary_term, domain, term)
     if not t:
@@ -263,7 +263,7 @@ async def topic_page(
     limit: int = Query(50, ge=1, le=200),
     db: Database = Depends(get_db),
 ):
-    """主题页：域内带该标签(style_tags)的内容(跨集合/跨来源聚合)。"""
+    """主题页:域内带该标签(style_tags)的内容,跨集合/跨来源聚合。"""
     validate_path_segment(domain, "domain")
     _, jobs = await asyncio.to_thread(db.list_jobs, None, None, 500, 0, domain)
     matched = []
