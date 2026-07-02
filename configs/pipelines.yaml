@@ -311,7 +311,9 @@ article:
       label: "下载"
       run: steps.common.step_01_download
       pool: io
-      timeout: 120
+      # 慢站指数退避重试 5 拍(30→60→120→240→480s,见 step_01_download._download_article),
+      # 步超时须 ≥ 各拍之和 ~930s,否则退避被腰斩;死链最坏 ~930s 才判失败(接受此代价换慢站成功率)。
+      timeout: 1000
       retry: 3
       # 正文内图片本地化 → assets/(下载步抓取,供原文 MD 内嵌)。
       outputs: ["input/source.html", "input/metadata.json", "input/article_meta.json", "assets/*"]

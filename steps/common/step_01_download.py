@@ -300,6 +300,7 @@ class DownloadStep(StepBase):
     def _download_article(self, url: str) -> None:
         """抓 HTML 原文写 input/source.html;同时用 trafilatura 抽正文/标题供后续解析。"""
         import trafilatura
+        from trafilatura.settings import use_config
 
         from shared.net import assert_public_url
 
@@ -307,10 +308,20 @@ class DownloadStep(StepBase):
         input_dir = self.job_dir / "input"
         input_dir.mkdir(parents=True, exist_ok=True)
 
-        html = trafilatura.fetch_url(url)
+        # 慢站(大正文/需代理)首拍常踩 trafilatura 默认 30s 超时 → 指数退避重试:超时 30→60→120→240→480s。
+        # 步超时(pipelines.yaml article 01_download)须 ≥ 各拍之和 ~930s,否则退避被腰斩。
+        html = None
+        timeout = 30
+        for _ in range(5):
+            cfg = use_config()
+            cfg.set("DEFAULT", "DOWNLOAD_TIMEOUT", str(timeout))
+            html = trafilatura.fetch_url(url, config=cfg)
+            if html:
+                break
+            timeout *= 2
         if not html:
             from shared.errors import InputInvalidError
-            raise InputInvalidError(f"Cannot fetch article: {url}")
+            raise InputInvalidError(f"Cannot fetch article: {url} (5 次退避重试后仍失败)")
         self.write_output("input/source.html", html)
 
         # 顺手抽一份标题等元数据,正文解析仍由 02_parse_article 负责(trafilatura)。
