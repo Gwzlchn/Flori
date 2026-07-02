@@ -601,6 +601,30 @@ class StepBase:
             "git_commit": os.environ.get("FLORI_GIT_COMMIT"),
         }
 
+    def _collect_transcript(self, response, attempts) -> dict:
+        """agentic 全轨迹白盒:claude CLI 的中间轮(WebSearch/Bash/逐图 Read)只在 CLI 自写的会话
+        transcript 里(顶层 json 仅最终汇总)。把它拷为 job 产物 sidecar
+        `output/ai_logs/{step}.turns.{call_index}.jsonl`(随产物推中心存储、删 job 一起删=陪葬设计),
+        审计记录留引用。失败调用经尝试链的 transcript_path 同样回收。
+        找不到(非 CLI provider / HOME 未挂 / 会话无档)→ file=None + reason,绝不影响主流程。"""
+        src = getattr(response, "transcript_path", None) if response is not None else None
+        if not src:
+            for a in reversed(attempts or []):
+                if a.get("transcript_path"):
+                    src = a["transcript_path"]
+                    break
+        if not src:
+            return {"file": None, "reason": "no transcript (non-CLI provider or session log unavailable)"}
+        try:
+            data = Path(src).read_bytes()
+            rel = f"output/ai_logs/{self.step_name}.turns.{self._call_index}.jsonl"
+            dst = self.job_dir / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(data)
+            return {"file": rel, "turns": data.count(b"\n"), "bytes": len(data), "source": str(src)}
+        except Exception as e:
+            return {"file": None, "reason": f"copy failed: {e}"[:200]}
+
     def _build_ai_log_record(self, prompt, system, images, request, response,
                              ts_start, ts_end, error) -> dict:
         import socket
@@ -733,6 +757,9 @@ class StepBase:
                 "num_turns": getattr(response, "num_turns", None),
                 "finish_reason": getattr(response, "finish_reason", None),
             },
+            # agentic 全轨迹(sidecar 引用):{"file": "output/ai_logs/{step}.turns.{n}.jsonl", "turns", "bytes"}
+            # 或 {"file": None, "reason": …}。中间轮工具轨迹全在 sidecar,本记录仅存指针。
+            "transcript": self._collect_transcript(response, attempts),
             "output_processed": None,             # call_ai_json 解析后回填
             # 用量/成本/raw
             "usage": {

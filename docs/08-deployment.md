@@ -92,10 +92,11 @@ services:
     command: python3 worker.py --type ai
     volumes:
       - ${DATA_DIR:-./data}:/data
-      # CLI 订阅用户取消下面的注释：
-      # - ~/.claude:/home/user/.claude
-      # - ~/.local/share/claude:/home/user/.local/share/claude:ro
-      # - ~/.local/bin/claude:/usr/local/bin/claude:ro
+      # CLI 订阅用户:先 `scripts/seed-worker-home.sh <worker名>` 把凭证 seed 进该 worker 家目录
+      # (${DATA_DIR}/workers/<worker名>/,每 worker 独立副本各自续期、无并发写冲突;CLI 会话
+      # transcript 也落数据卷=纳管,agentic 全轨迹审计从这回收),再取消注释:
+      # - ${DATA_DIR:-./data}/workers/<worker名>:/home/worker
+      # (environment 需加 HOME=/home/worker;★不要直挂宿主 ~/.claude——不可控且并发续期会写坏凭证)
     environment:
       - REDIS_URL=redis://redis:6379
       - DATA_DIR=/data

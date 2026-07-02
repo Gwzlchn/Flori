@@ -196,7 +196,9 @@ GET /api/jobs/j_xxx/steps/10_smart/log?raw=1  → 完整
 
 #### GET /api/jobs/{id}/ai-logs — 完整 AI 审计日志（prompt 白盒化）
 
-返回该 job 各 AI 步的**完整 AI 调用审计**（只读）。读 `output/ai_logs/{step}.jsonl`（每个 AI 步、**每次 LLM 调用一条**；经 StorageBackend，本地/MinIO 通用），按 `job_id` 归成一条 trace。`?step={step}` 只返回该步。每条记录含:路由(provider/api/model/tier_used + 逐 tier `attempts` 尝试链)、延迟(ttft_ms/api_ms/总时长)、prompt(`rendered`=渲染后实际发出的 system+user[常量] / `template`=模板来源 / `values`=注入值)、输出、用量(in/out/cache)、成本、原始返回 `raw`、溯源(flori 版本/git_commit、input_hashes、env worker)、`ok`/`error`(失败调用也整条记)。落盘点 `shared/step_base.call_ai`(best-effort,不破坏主流程)。
+返回该 job 各 AI 步的**完整 AI 调用审计**（只读）。读 `output/ai_logs/{step}.jsonl`（每个 AI 步、**每次 LLM 调用一条**；经 StorageBackend，本地/MinIO 通用），按 `job_id` 归成一条 trace。`?step={step}` 只返回该步。每条记录含:路由(provider/api/model/tier_used + 逐 tier `attempts` 尝试链)、延迟(ttft_ms/api_ms/总时长)、prompt(`rendered`=渲染后实际发出的 system+user[常量] / `template`=模板来源 / `values`=注入值)、输出、`transcript`(agentic 全轨迹 sidecar 引用,见下)、用量(in/out/cache)、成本、原始返回 `raw`、溯源(flori 版本/git_commit、input_hashes、env worker)、`ok`/`error`(失败调用也整条记)。落盘点 `shared/step_base.call_ai`(best-effort,不破坏主流程)。
+
+> **`transcript` 字段(agentic 全轨迹白盒)**:claude-cli 的多轮 agentic 调用(取证 WebSearch/Bash、视觉逐图 Read)顶层 json 只回最终汇总,中间轮工具轨迹在 CLI 自写的会话 transcript 里。审计层按 `session_id` 回收,拷为 job 产物 sidecar `output/ai_logs/{step}.turns.{call_index}.jsonl`(随产物入 storage、随删 job 级联删),记录内留引用:`{"file": "output/ai_logs/….turns.N.jsonl", "turns": 行数, "bytes": 大小, "source": 原路径}`;不可得(非 CLI provider / HOME 未挂 / 会话无档)为 `{"file": null, "reason": …}`。失败调用经尝试链 `attempts[].transcript_path` 同样回收。
 
 ```
 GET /api/jobs/j_xxx/ai-logs                  → {job_id, steps:[{step, calls:[...]}]}
@@ -1321,11 +1323,13 @@ Response `202`（`sources` 提交时已算好；`answer_markdown` 经 `GET /api/
 
 #### GET /api/ai-tasks/{task_id}/log — 独立 AI task 白盒审计
 
-镜像 DAG 的 `GET /api/jobs/{id}/ai-logs`：读 `ai_task_logs`（§3.1），返回该 task 每次 claude 调用的完整审计（路由/尝试链/渲染 prompt/输出/raw/用量），最近在前。
+镜像 DAG 的 `GET /api/jobs/{id}/ai-logs`：读 `ai_task_logs`（§3.1），返回该 task 每次 claude 调用的完整审计（路由/尝试链/渲染 prompt/输出/raw/用量/`transcript` agentic 全轨迹），最近在前。
 
 ```json
-{"task_id":"at_…","count":1,"calls":[{"task_id":"at_…","exec_id":"…","step":"synthesis","domain":"ml","provider":"claude-cli","model":"subscription","ok":true,"error":null,"created_at":"…","record":{"routing":{"attempts":[…]},"prompt":{"system":"…","messages":[…]},"output":"…","raw":{…},"usage":{…}}}]}
+{"task_id":"at_…","count":1,"calls":[{"task_id":"at_…","exec_id":"…","step":"synthesis","domain":"ml","provider":"claude-cli","model":"subscription","ok":true,"error":null,"created_at":"…","record":{"routing":{"attempts":[…]},"prompt":{"system":"…","messages":[…]},"output":"…","raw":{…},"transcript":{"jsonl":"…","turns":12,"truncated":false,"path":"…"},"usage":{…}}}]}
 ```
+
+> `record.transcript`(agentic 全轨迹白盒):AI task 不挂 job、无 storage 产物区,CLI 会话 transcript **全文内嵌** `record_json`(`{"jsonl": 全文, "turns", "truncated", "path"}`;>5MB 截断并 `truncated:true`;不可得为 `{"jsonl": null, "reason": …}`)。
 
 ### 1.12 Profile 管理（`/api/profiles/*`）
 
@@ -1758,6 +1762,8 @@ default:
 | `ai` | AI provider 路由：`primary` / `fallback` / `text_fallback`，各取 `{provider, model}` |
 
 **每段 `variables`** 是该 content_type 的单一事实源（AI provider/model、OCR 超时等），job 用 `$VAR` 引用。
+
+> **claude-cli 的 `model` 语义（yaml 可配置，2026-07-03）**：`model: subscription` 为占位 = 用 `providers.yaml` `claude-cli.model` 的 provider 默认（如 `claude-opus-4-8[1m]`，`[1m]`=1M 上下文）；写具体模型名则该步以 `--model` 钉死。优先级:步级 model（非 subscription）> provider 默认 > CLI 自身默认（都不配时,不可复现,不建议）。步级 model 属 `ai` 配置 → 改动即变 `def_digest`,该步自动判过期可重跑。
 
 **视频 pipeline 示例**（截取，完整见 `configs/pipelines.yaml`）：
 

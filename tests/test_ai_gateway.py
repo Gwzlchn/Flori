@@ -855,3 +855,131 @@ async def test_claude_cli_uses_model_usage_when_no_top_model(monkeypatch):
     p = ClaudeCLIProvider(command_template=["claude", "-p"])
     r = await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}]))
     assert r.model == "claude-opus-4-8"
+
+
+class TestClaudeCLIModelFlag:
+    """默认模型 yaml 可配置:--model 优先级 = 步级 request.model(非 subscription 占位)> provider 默认 > 不传。"""
+
+    def _cap_provider(self, monkeypatch, cap, **kw):
+        class FakeProc:
+            returncode = 0
+            async def communicate(self, data=None):
+                return (b'{"result":"OK","session_id":null}', b"")
+        async def fake_exec(*cmd, **kwargs):
+            cap["cmd"] = list(cmd)
+            cap["env"] = kwargs.get("env") or {}
+            return FakeProc()
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+        return ClaudeCLIProvider(command_template=["claude", "-p"], **kw)
+
+    @pytest.mark.asyncio
+    async def test_provider_default_model_used_for_subscription_placeholder(self, monkeypatch):
+        cap = {}
+        p = self._cap_provider(monkeypatch, cap, model="claude-opus-4-8[1m]")
+        await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}], model="subscription"))
+        i = cap["cmd"].index("--model")
+        assert cap["cmd"][i + 1] == "claude-opus-4-8[1m]"
+
+    @pytest.mark.asyncio
+    async def test_step_level_model_overrides_provider_default(self, monkeypatch):
+        cap = {}
+        p = self._cap_provider(monkeypatch, cap, model="claude-opus-4-8[1m]")
+        await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}], model="claude-sonnet-4-6"))
+        i = cap["cmd"].index("--model")
+        assert cap["cmd"][i + 1] == "claude-sonnet-4-6"       # pipelines 步级钉死优先
+
+    @pytest.mark.asyncio
+    async def test_no_model_configured_omits_flag(self, monkeypatch):
+        cap = {}
+        p = self._cap_provider(monkeypatch, cap)              # provider 无默认
+        await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}], model="subscription"))
+        assert "--model" not in cap["cmd"]                    # 向后兼容:沿用 CLI 自身默认
+
+    @pytest.mark.asyncio
+    async def test_template_model_not_duplicated(self, monkeypatch):
+        cap = {}
+        class FakeProc:
+            returncode = 0
+            async def communicate(self, data=None):
+                return (b'{"result":"OK"}', b"")
+        async def fake_exec(*cmd, **kwargs):
+            cap["cmd"] = list(cmd); return FakeProc()
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+        p = ClaudeCLIProvider(["claude", "-p", "--model", "claude-haiku-4-5"], model="claude-opus-4-8[1m]")
+        await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}], model="subscription"))
+        assert cap["cmd"].count("--model") == 1               # 模板已带则尊重模板
+
+
+class TestClaudeCLITranscript:
+    """agentic 全轨迹白盒:按 session_id 定位 CLI 自写 transcript;成功/失败都尽力回收。"""
+
+    def _mk_transcript(self, tmp_path, sid="sess-abc"):
+        d = tmp_path / ".claude" / "projects" / "-app"
+        d.mkdir(parents=True)
+        f = d / f"{sid}.jsonl"
+        f.write_text('{"type":"user"}\n{"type":"assistant"}\n')
+        return f
+
+    def test_find_transcript_by_session_id(self, tmp_path):
+        f = self._mk_transcript(tmp_path)
+        got = ClaudeCLIProvider._find_transcript("sess-abc", {"HOME": str(tmp_path)})
+        assert got == str(f)
+
+    def test_find_transcript_missing_returns_none(self, tmp_path):
+        assert ClaudeCLIProvider._find_transcript("nope", {"HOME": str(tmp_path)}) is None
+        assert ClaudeCLIProvider._find_transcript(None, {"HOME": str(tmp_path)}) is None
+
+    def test_find_transcript_respects_claude_config_dir(self, tmp_path):
+        cfg = tmp_path / "cfg"
+        d = cfg / "projects" / "-x"
+        d.mkdir(parents=True)
+        (d / "s1.jsonl").write_text("{}\n")
+        got = ClaudeCLIProvider._find_transcript("s1", {"CLAUDE_CONFIG_DIR": str(cfg)})
+        assert got == str(d / "s1.jsonl")
+
+    @pytest.mark.asyncio
+    async def test_success_response_carries_transcript_path(self, tmp_path, monkeypatch):
+        f = self._mk_transcript(tmp_path, "sess-1")
+        class FakeProc:
+            returncode = 0
+            async def communicate(self, data=None):
+                return (b'{"result":"OK","session_id":"sess-1"}', b"")
+        async def fake_exec(*cmd, **kwargs):
+            return FakeProc()
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+        p = ClaudeCLIProvider(["claude", "-p"], env={"HOME": str(tmp_path)})
+        resp = await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}]))
+        assert resp.transcript_path == str(f)
+
+    @pytest.mark.asyncio
+    async def test_failure_attaches_transcript_to_error(self, tmp_path, monkeypatch):
+        f = self._mk_transcript(tmp_path, "sess-f")
+        class FakeProc:
+            returncode = 1
+            async def communicate(self, data=None):
+                return (b'{"is_error":true,"session_id":"sess-f"}', b"boom")
+        async def fake_exec(*cmd, **kwargs):
+            return FakeProc()
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+        p = ClaudeCLIProvider(["claude", "-p"], env={"HOME": str(tmp_path)})
+        with pytest.raises(AIProviderError) as ei:
+            await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}]))
+        assert getattr(ei.value, "transcript_path", None) == str(f)   # 失败留痕经异常带出
+
+    @pytest.mark.asyncio
+    async def test_gateway_attempt_carries_failed_transcript(self, monkeypatch, tmp_path):
+        """gateway 尝试链把失败 CLI 的 transcript_path 透传给审计层。"""
+        f = tmp_path / "t.jsonl"; f.write_text("{}\n")
+        err = AIProviderError("CLI failed: x")
+        err.transcript_path = str(f)
+        class FailProvider:
+            async def complete(self, request):
+                raise err
+        gw = AIGateway({"providers": {"claude-cli": {"type": "cli", "command": ["claude", "-p"]}}},
+                       {"steps": [{"name": "s", "ai": {"primary": {"provider": "claude-cli",
+                                                                    "model": "subscription"}}}]})
+        monkeypatch.setattr(gw, "_get_provider", lambda name: FailProvider())
+        with pytest.raises(AllProvidersFailedError) as ei:
+            import asyncio as _a
+            await gw.call("s", LLMRequest(messages=[{"role": "user", "content": "x"}]))
+        assert ei.value.attempts[0]["transcript_path"] == str(f)

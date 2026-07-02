@@ -248,7 +248,7 @@ def auto_discover_tags(self) -> set:
 |-----|------|---------|-----------|
 | `vision` | 支持图片输入 | 11_smart（视觉 pass） | 有 Claude/GPT-4o 的 Worker |
 | `gpu` | 有 GPU 硬件 | 02_whisper | GPU 机器 |
-| `claude-cli` | Claude CLI 订阅 | — | 挂载了 ~/.claude 的 Worker |
+| `claude-cli` | Claude CLI 订阅 | — | 家目录(workers/<名>/)已 seed 凭证的 Worker |
 | `cn-network` | 可访问中国网络 | 01_download (B站) | 在国内网络的 Worker |
 | `heavy` | 大内存/高配额 | 长视频处理 | 高配机器 |
 
@@ -397,18 +397,20 @@ docker run --gpus all \
 
 ## 5. AI Worker 特殊行为
 
-AI Worker 通过挂载宿主机 Claude CLI 到容器内，用 subprocess 调用：
+claude 二进制烤在 worker 镜像里(base.Dockerfile worker stage);订阅凭证放【该 worker 自己的家目录】
+`${FLORI_DATA_DIR}/workers/<worker名>/`,容器把它挂为 HOME。每 worker 独立凭证副本(各自 refreshToken
+续期,无并发写冲突);claude CLI 的会话 transcript(`$HOME/.claude/projects/…`)随之落数据卷 = 纳管,
+审计层按 session_id 回收 agentic 全轨迹(见 shared/ai_gateway.py ClaudeCLIProvider._find_transcript)。
+worker.id 稳定身份缓存也在同目录(worker/transport.py default_worker_id_file;旧平铺文件启动自迁移)。
 
 ```yaml
 # docker-compose.yml
 worker-ai:
   volumes:
-    - ~/.claude:/home/user/.claude
-    - ~/.claude.json:/home/user/.claude.json
-    - ~/.local/share/claude:/home/user/.local/share/claude:ro
-    - ~/.local/bin/claude:/usr/local/bin/claude:ro
+    # 先 scripts/seed-worker-home.sh ai(seed 凭证到家目录),再挂;★不要直挂宿主 ~/.claude
+    - ${FLORI_DATA_DIR}/workers/ai:/home/worker
   environment:
-    - HOME=/home/user
+    - HOME=/home/worker
     - HTTPS_PROXY=${HTTPS_PROXY:-}
   extra_hosts:
     - "host.docker.internal:host-gateway"

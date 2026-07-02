@@ -523,7 +523,9 @@ class Worker:
                         job_id=job_id, step=step, duration=round(duration, 1),
                     )
             else:
-                # 步本身失败:best-effort 推产物(含日志)便于前端排错,再报 failed。
+                # 步本身失败:失败也记用量(失败前已完成的 LLM 调用是真实开销,审计/计费不能缺账;
+                # exec_id UNIQUE 幂等,重试不重复计),再 best-effort 推产物(含日志)便于前端排错,报 failed。
+                await self._collect_usage(job_id, step, work_dir)
                 await self._push_safe(job_id, step, work_dir)
                 error_type, error_json_msg = self._parse_error(work_dir, step)
                 # 兜底:子进程 stderr 为空时,用 .{step}.error.json 的 message(真实异常文本),
@@ -540,6 +542,7 @@ class Worker:
         except asyncio.TimeoutError:
             duration = time.time() - start
             if work_dir:
+                await self._collect_usage(job_id, step, work_dir)  # 失败也记用量(超时前的调用是真实开销)
                 await self._push_safe(job_id, step, work_dir)  # best-effort 推日志便于排错
             await self.transport.report_failed(
                 claim, "timeout", "timeout", duration, start, count_stats=False,
@@ -552,6 +555,7 @@ class Worker:
         except Exception as e:
             duration = time.time() - start
             if work_dir:
+                await self._collect_usage(job_id, step, work_dir)  # 失败也记用量
                 await self._push_safe(job_id, step, work_dir)  # best-effort 推日志便于排错
             error_msg = str(e)[:500]
             await self.transport.report_failed(
@@ -614,8 +618,8 @@ class Worker:
             )
 
     async def _collect_usage(self, job_id: str, step: str, work_dir: Path) -> None:
-        # usage 仅统计/计费侧效应:解析或上报失败只降级为"统计不准",绝不让 returncode==0 的成功
-        # 步骤经 execute 的 except 翻成 failed。record_ai_usage 已在 gateway 侧 best-effort。
+        # usage 仅统计/计费侧效应:解析或上报失败只降级为"统计不准",绝不让步骤结论翻转。
+        # 成功与失败路径都调(失败步在挂之前完成的 LLM 调用是真实开销,必须入账;exec_id UNIQUE 幂等)。
         try:
             usages = collect_usage_from_file(work_dir / "logs", step)
             for usage in usages:
@@ -689,8 +693,31 @@ class Worker:
         except Exception:
             logger.warning("ai_task_usage_failed", worker_id=self.worker_id, task_id=task_id)
 
+    # AI task transcript 内嵌上限:record_json 是 DB 文本列,个人工具尺寸可接受;超出截断并标记。
+    _TRANSCRIPT_CAP = 5 * 1024 * 1024
+
+    def _load_ai_task_transcript(self, resp, attempts) -> dict:
+        """agentic 全轨迹白盒(AI task 版):CLI 会话 transcript 全文内嵌 record_json
+        (AI task 不挂 job、无 storage 产物区,没有 sidecar 可放)。>5MB 截断标记 truncated。
+        失败调用经尝试链 transcript_path 同样回收;找不到 → jsonl=None + reason,不失败。"""
+        path = getattr(resp, "transcript_path", None) if resp is not None else None
+        if not path:
+            for a in reversed(attempts or []):
+                if a.get("transcript_path"):
+                    path = a["transcript_path"]
+                    break
+        if not path:
+            return {"jsonl": None, "reason": "no transcript (session log unavailable)"}
+        try:
+            data = Path(path).read_text(encoding="utf-8", errors="replace")
+            truncated = len(data) > self._TRANSCRIPT_CAP
+            return {"jsonl": data[:self._TRANSCRIPT_CAP], "truncated": truncated,
+                    "turns": data.count("\n"), "path": str(path)}
+        except Exception as e:
+            return {"jsonl": None, "reason": f"read failed: {e}"[:200]}
+
     async def _write_ai_task_audit(self, task_id, step_name, domain, exec_id, req, resp, error, ts_start, duration) -> None:
-        """构建并落一条 AI task 白盒审计(对齐 DAG ai_logs:路由/尝试链/渲染 prompt/输出/raw/用量)→ ai_task_logs。"""
+        """构建并落一条 AI task 白盒审计(对齐 DAG ai_logs:路由/尝试链/渲染 prompt/输出/raw/用量/全轨迹)→ ai_task_logs。"""
         ok = error is None and resp is not None
         if resp is not None:
             attempts, tier_used, raw = resp.attempts, resp.tier_used, resp.raw
@@ -716,6 +743,8 @@ class Worker:
             },
             "output": (resp.content if resp is not None else None),
             "raw": raw,
+            # agentic 全轨迹(中间轮工具轨迹)内嵌:{"jsonl": 全文, "turns", "truncated"} 或 {"jsonl": None, "reason"}。
+            "transcript": self._load_ai_task_transcript(resp, attempts),
             "usage": ({
                 "input_tokens": resp.input_tokens, "output_tokens": resp.output_tokens,
                 "cache_creation_input_tokens": resp.cache_creation_input_tokens,

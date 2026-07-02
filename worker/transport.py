@@ -14,7 +14,10 @@ import asyncio
 import json
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Protocol
+
+import structlog
 
 from shared import runner_ops
 from shared.db import Database
@@ -278,14 +281,40 @@ class RedisTransport:
         pass
 
 
+_id_log = structlog.get_logger(component="worker_transport")
+
+
 def default_worker_id_file() -> str:
-    """worker id 缓存文件默认位置(直连与 gateway 共用,单一来源):统一收进 /data/workers/。
-    WORKER_ID_FILE 显式覆盖;否则 WORKER_NAME→/data/workers/<name>,缺省→worker.id。"""
+    """worker id 缓存文件默认位置(直连与 gateway 共用,单一来源)。
+
+    布局:`/data/workers/<name>/` 是该 worker 的【家目录】——id 缓存、claude 凭证(HOME 挂载时的
+    .claude/、.claude.json)、CLI transcript 等一切 worker 私有状态都收敛在自己目录下;id 文件为
+    `<name>/worker.id`。WORKER_ID_FILE 显式覆盖语义不变;缺省 WORKER_NAME 归入 `default/`。
+
+    旧布局(/data/workers/<name> 是【平铺 id 文件】)在此幂等迁移:读出 id → 原地换成目录 →
+    写回 worker.id。★id 内容不变 = 不触发重注册。迁移在代码里,任何宿主(NAS/边缘 ECS)自适用。"""
     explicit = os.environ.get("WORKER_ID_FILE", "").strip()
     if explicit:
         return explicit
-    name = os.environ.get("WORKER_NAME", "").strip()
-    return f"/data/workers/{name}" if name else "/data/workers/worker.id"
+    name = os.environ.get("WORKER_NAME", "").strip() or "default"
+    new = Path(f"/data/workers/{name}/worker.id")
+    # 幂等迁移旧平铺布局:有名 worker 的旧文件 = /data/workers/<name>(即新家目录同路径);
+    # 无名 worker 的旧文件 = /data/workers/worker.id。缓存可选:无 /data 挂载写不了无碍(纯网关 id 服务端确定)。
+    legacy_candidates = [Path(f"/data/workers/{name}")] + (
+        [Path("/data/workers/worker.id")] if name == "default" else []
+    )
+    for legacy in legacy_candidates:
+        try:
+            if legacy.is_file() and not new.exists():
+                wid = legacy.read_text().strip()
+                legacy.unlink()
+                new.parent.mkdir(parents=True, exist_ok=True)
+                new.write_text(wid)
+                _id_log.info("worker_id_file_migrated", src=str(legacy), dst=str(new), worker_id=wid)
+                break
+        except OSError:
+            pass
+    return str(new)
 
 
 def create_transport(

@@ -223,6 +223,9 @@ class LLMResponse:
     tier_used: str | None = None         # 实际命中的 tier(primary/fallback/text_fallback),由 gateway 写
     attempts: list[dict] = field(default_factory=list)   # 逐 tier 尝试链,由 gateway 写
     raw: dict | None = None              # provider 原始返回(尽量保真),供审计 raw
+    # claude CLI 会话 transcript 本地路径(agentic 中间轮全轨迹;provider 按 session_id 定位,
+    # 非 CLI provider / 定位失败为 None)。消费方:step_base 拷 sidecar、worker AI task 内嵌审计。
+    transcript_path: str | None = None
 
     def to_jsonable(self) -> dict:
         """JSON 安全序列化(全字段本就 json-safe);供 AI task 结果回写 airesult:{task_id}。"""

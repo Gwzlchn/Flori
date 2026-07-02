@@ -268,9 +268,30 @@ class OpenAICompatibleProvider:
 class ClaudeCLIProvider:
     """Claude CLI 订阅(subprocess 调用)。"""
 
-    def __init__(self, command_template: list[str], env: dict | None = None):
+    def __init__(self, command_template: list[str], env: dict | None = None,
+                 model: str | None = None):
         self._command_template = command_template
         self._env = env or {}
+        # provider 默认模型(providers.yaml claude-cli.model,如 claude-opus-4-8[1m])。
+        # 不配则不传 --model,沿用挂载 HOME 里 CLI 自己的默认——可用但不可复现(宿主换模型会静默跟变),建议配置钉死。
+        self._model = model
+
+    @staticmethod
+    def _find_transcript(session_id: str | None, env: dict) -> str | None:
+        """按 session_id 定位 claude CLI 自写的会话 transcript:
+        `$CLAUDE_CONFIG_DIR|$HOME/.claude/projects/<cwd编码>/<session_id>.jsonl`。
+        agentic 中间轮(WebSearch/Bash/逐图 Read)只存在于 transcript——顶层 --output-format json
+        仅回最终汇总;审计要全轨迹白盒必须回收它。session id 为 UUID,直接按文件名 glob,
+        免猜 cwd 编码规则。找不到(HOME 未挂/无档)回 None,绝不影响主流程。"""
+        if not session_id:
+            return None
+        try:
+            cfg_dir = env.get("CLAUDE_CONFIG_DIR") or str(
+                Path(env.get("HOME") or os.path.expanduser("~")) / ".claude")
+            hits = sorted(Path(cfg_dir).glob(f"projects/*/{session_id}.jsonl"))
+            return str(hits[0]) if hits else None
+        except Exception:
+            return None
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         prompt_content = ""
@@ -303,6 +324,14 @@ class ClaudeCLIProvider:
             _i = cmd.index("--output-format")
             del cmd[_i:_i + 2]
         cmd += ["--output-format", "json"]
+        # 模型可配置(yaml 单一来源,优先级:步级 > provider 默认 > CLI 默认):
+        #   pipelines.yaml 步级 model 非 "subscription" 占位 → --model <步级>(换模型改 pipelines
+        #   即变 def_digest → 该步自动过期可重跑,审计可见);否则 providers.yaml claude-cli.model;
+        #   都无 → 不传,沿用 HOME 里 CLI 默认(向后兼容)。命令模板已带 --model 时尊重模板不重复注入。
+        model_arg = (request.model if (request.model and request.model != "subscription")
+                     else self._model)
+        if model_arg and "--model" not in cmd:
+            cmd += ["--model", model_arg]
         if request.allowed_tools:
             # 取证等联网步骤:放开指定工具(如 WebSearch + Bash),让 claude agentic 搜+抓+抽。
             # 与 images 分支互斥(取证不喂帧图);max_turns 给足,多轮流程为搜索、直连 curl、抽取。
@@ -357,8 +386,18 @@ class ClaudeCLIProvider:
                 "rate limit", "rate_limit", "usage limit", "429",
                 "overloaded", "quota", "too many requests", "limit reached",
             )):
-                raise AIRateLimitError(f"CLI rate-limited: {detail}")
-            raise AIProviderError(f"CLI failed: {detail}")
+                err: Exception = AIRateLimitError(f"CLI rate-limited: {detail}")
+            else:
+                err = AIProviderError(f"CLI failed: {detail}")
+            # 失败也尽力回收 transcript(审计要失败留痕):失败输出常仍是 json(is_error),session_id 可取。
+            # 附在异常上,经 gateway 尝试链(_attempt)带给审计层。
+            try:
+                obj = json.loads(stdout.decode().strip())
+                sid = obj.get("session_id") if isinstance(obj, dict) else None
+                err.transcript_path = self._find_transcript(sid, env)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            raise err
 
         raw = stdout.decode().strip()
         # 解析 --output-format json:result(正文)+ usage(in/out/cache)+ total_cost_usd + num_turns。
@@ -410,6 +449,7 @@ class ClaudeCLIProvider:
             api_ms=api_ms,
             finish_reason=finish_reason,
             raw=raw_obj,
+            transcript_path=self._find_transcript(session_id, env),
         )
 
 
@@ -445,6 +485,9 @@ class AIGateway:
             if err is not None:
                 a["error_class"] = type(err).__name__
                 a["error"] = str(err)[:500]
+                # CLI 失败仍可能留有会话 transcript(失败留痕):经尝试链带给审计层回收。
+                if getattr(err, "transcript_path", None):
+                    a["transcript_path"] = err.transcript_path
             return a
 
         for tier in ["primary", "fallback"]:
@@ -523,6 +566,7 @@ class AIGateway:
             return ClaudeCLIProvider(
                 command_template=cfg.get("command", []),
                 env=cfg.get("env"),
+                model=cfg.get("model"),
             )
         else:
             raise AIProviderError(f"Unknown provider type: {ptype}")

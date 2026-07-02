@@ -197,3 +197,52 @@ class TestAiLogDump:
         # 破坏组装:让 _build_ai_log_record 抛错,验证被吞、主流程不受影响。
         step._build_ai_log_record = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
         assert step.call_ai("x") == "resilient"
+
+
+class TestTranscriptSidecar:
+    """agentic 全轨迹白盒(job 步):transcript 拷为 sidecar output/ai_logs/{step}.turns.{n}.jsonl,记录留引用。"""
+
+    def test_transcript_copied_as_sidecar(self, tmp_path):
+        src = tmp_path / "sess.jsonl"
+        src.write_text('{"type":"user"}\n{"type":"assistant"}\n')
+        step = _Step(tmp_path, {"ai": {}})
+        step._gateway = _FakeGW(response=_mk_response(transcript_path=str(src)))
+        step.call_ai("hello")
+        rec = _read_log(tmp_path)[0]
+        assert rec["transcript"]["file"] == "output/ai_logs/11_smart.turns.0.jsonl"
+        assert rec["transcript"]["turns"] == 2
+        sidecar = tmp_path / "output" / "ai_logs" / "11_smart.turns.0.jsonl"
+        assert sidecar.read_text() == src.read_text()          # 全轨迹原样入产物
+
+    def test_sidecar_index_follows_call_index(self, tmp_path):
+        src = tmp_path / "sess.jsonl"; src.write_text("{}\n")
+        step = _Step(tmp_path, {"ai": {}})
+        step._gateway = _FakeGW(response=_mk_response(transcript_path=str(src)))
+        step.call_ai("a"); step.call_ai("b")
+        recs = _read_log(tmp_path)
+        assert recs[0]["transcript"]["file"].endswith(".turns.0.jsonl")
+        assert recs[1]["transcript"]["file"].endswith(".turns.1.jsonl")
+        assert (tmp_path / "output" / "ai_logs" / "11_smart.turns.1.jsonl").exists()
+
+    def test_no_transcript_records_reason(self, tmp_path):
+        step = _Step(tmp_path, {"ai": {}})
+        step._gateway = _FakeGW(response=_mk_response(transcript_path=None))
+        step.call_ai("hello")
+        rec = _read_log(tmp_path)[0]
+        assert rec["transcript"]["file"] is None and "reason" in rec["transcript"]
+
+    def test_failed_call_recovers_transcript_from_attempts(self, tmp_path):
+        # 失败调用:gateway 尝试链带 transcript_path(CLI 失败留痕)→ 同样拷 sidecar
+        src = tmp_path / "fail.jsonl"; src.write_text('{"e":1}\n')
+        exc = AllProvidersFailedError(
+            "all failed", error_type="ai",
+            attempts=[{"tier": "primary", "provider": "claude-cli", "model": "subscription",
+                       "ok": False, "transcript_path": str(src)}])
+        step = _Step(tmp_path, {"ai": {}})
+        step._gateway = _FakeGW(exc=exc)
+        with pytest.raises(AllProvidersFailedError):
+            step.call_ai("hello")
+        rec = _read_log(tmp_path)[0]
+        assert rec["ok"] is False
+        assert rec["transcript"]["file"] == "output/ai_logs/11_smart.turns.0.jsonl"
+        assert (tmp_path / "output" / "ai_logs" / "11_smart.turns.0.jsonl").read_text() == '{"e":1}\n'

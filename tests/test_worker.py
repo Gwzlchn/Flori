@@ -1006,13 +1006,41 @@ class TestWorkerIdentity:
         assert _resolve_worker_id("cpu") == first
 
     def test_default_id_file_under_workers_dir(self, monkeypatch):
-        """默认 id 文件收进 /data/workers/,不散在 /data 根。"""
+        """默认 id 文件收进 worker 家目录 /data/workers/<name>/worker.id(缺省名归 default/)。"""
         from worker.transport import default_worker_id_file
         monkeypatch.delenv("WORKER_ID_FILE", raising=False)
         monkeypatch.delenv("WORKER_NAME", raising=False)
-        assert default_worker_id_file() == "/data/workers/worker.id"
+        assert default_worker_id_file() == "/data/workers/default/worker.id"
         monkeypatch.setenv("WORKER_NAME", "claude-1")
-        assert default_worker_id_file() == "/data/workers/claude-1"
+        assert default_worker_id_file() == "/data/workers/claude-1/worker.id"
+
+    def test_explicit_id_file_overrides(self, tmp_path, monkeypatch):
+        """WORKER_ID_FILE 显式覆盖语义不变(不做迁移/改写)。"""
+        from worker.transport import default_worker_id_file
+        monkeypatch.setenv("WORKER_ID_FILE", str(tmp_path / "custom.id"))
+        assert default_worker_id_file() == str(tmp_path / "custom.id")
+
+    def test_legacy_flat_id_file_migrates_to_home_dir(self, monkeypatch):
+        """旧平铺布局(/data/workers/<name> 是 id 文件)→ 启动自迁移成家目录 + worker.id。
+        ★id 内容不变 = 不触发重注册。幂等:二次调用不再动。"""
+        import shutil
+        import uuid
+        from worker.transport import default_worker_id_file
+        name = f"testmig-{uuid.uuid4().hex[:8]}"     # 唯一名,避免污染共享 /data(xdist 并行安全)
+        legacy = Path(f"/data/workers/{name}")
+        try:
+            legacy.parent.mkdir(parents=True, exist_ok=True)
+            legacy.write_text("cpu-abc12345")        # 旧平铺 id 文件
+            monkeypatch.delenv("WORKER_ID_FILE", raising=False)
+            monkeypatch.setenv("WORKER_NAME", name)
+            got = default_worker_id_file()
+            assert got == f"/data/workers/{name}/worker.id"
+            assert legacy.is_dir()                                    # 原路径升级成目录
+            assert Path(got).read_text() == "cpu-abc12345"            # id 不变
+            assert default_worker_id_file() == got                    # 幂等
+            assert Path(got).read_text() == "cpu-abc12345"
+        finally:
+            shutil.rmtree(legacy, ignore_errors=True)
 
 
 class _FakeGateway:
@@ -1240,3 +1268,94 @@ class TestWorkerRegisterRetry:
         monkeypatch.setenv("REGISTER_RETRY_SEC", "0")
         with pytest.raises(httpx.HTTPStatusError):            # 503/401 照常上抛,不被连接重试吞
             await worker.register()
+
+
+class TestCollectUsageOnFailure:
+    """失败也要记用量:rc≠0 / 超时 / 意外异常路径也 collect(失败前完成的 LLM 调用是真实开销)。"""
+
+    def _spy(self, worker):
+        calls = []
+        async def spy(job_id, step, work_dir):
+            calls.append((job_id, step))
+        worker._collect_usage = spy
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_failed_step_still_collects_usage(self, worker, redis, db, tmp_jobs_dir):
+        await worker.register()
+        db.create_job(make_job())
+        db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.READY, pool="cpu"))
+        await redis.try_acquire_slot("cpu", 3, "w_test:1")
+        (tmp_jobs_dir / "j_test_001").mkdir(exist_ok=True)
+
+        async def mock_run_step(ctx, on_progress, on_tick):
+            return 1, "boom"                      # 步失败
+        worker.runner.run_step = mock_run_step
+        calls = self._spy(worker)
+
+        await worker.execute(make_claim())
+        assert calls == [("j_test_001", "A")]     # 失败路径也 collect
+        assert db.get_steps("j_test_001")[0].status == StepStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_timeout_still_collects_usage(self, worker, redis, db, tmp_jobs_dir):
+        await worker.register()
+        db.create_job(make_job())
+        db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.READY, pool="cpu"))
+        await redis.try_acquire_slot("cpu", 3, "w_test:1")
+        (tmp_jobs_dir / "j_test_001").mkdir(exist_ok=True)
+
+        async def mock_run_step(ctx, on_progress, on_tick):
+            raise asyncio.TimeoutError()
+        worker.runner.run_step = mock_run_step
+        calls = self._spy(worker)
+
+        await worker.execute(make_claim())
+        assert calls == [("j_test_001", "A")]
+
+
+class TestAITaskTranscript:
+    """AI task 的 agentic 全轨迹内嵌 record_json(transcript 字段);找不到 → jsonl=None + reason。"""
+
+    def _ai_claim(self, task_id="at_t"):
+        return {
+            "kind": "ai", "task_id": task_id, "step": "synthesis", "pool": "ai", "exec_id": "w:1",
+            "request": LLMRequest(messages=[{"role": "user", "content": "Q"}], system="S").to_jsonable(),
+            "domain": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_transcript_embedded_in_record(self, worker, redis, db, monkeypatch, tmp_path):
+        src = tmp_path / "sess.jsonl"
+        src.write_text('{"type":"user"}\n{"type":"assistant"}\n')
+        resp = LLMResponse(content="A", model="claude-opus-4-8", provider="claude-cli",
+                           session_id="s1", transcript_path=str(src))
+        monkeypatch.setattr("worker.worker.AIGateway", lambda p, pl: _FakeGateway(resp=resp))
+        await worker._execute_ai_task(self._ai_claim("at_t1"))
+        rec = json.loads(db.get_ai_task_logs("at_t1")[0]["record_json"])
+        assert rec["transcript"]["jsonl"].startswith('{"type":"user"}')
+        assert rec["transcript"]["turns"] == 2 and rec["transcript"]["truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_transcript_missing_records_reason(self, worker, redis, db, monkeypatch):
+        resp = LLMResponse(content="A", model="m", provider="claude-cli", transcript_path=None)
+        monkeypatch.setattr("worker.worker.AIGateway", lambda p, pl: _FakeGateway(resp=resp))
+        await worker._execute_ai_task(self._ai_claim("at_t2"))
+        rec = json.loads(db.get_ai_task_logs("at_t2")[0]["record_json"])
+        assert rec["transcript"]["jsonl"] is None and "reason" in rec["transcript"]
+
+    def test_load_transcript_truncates_over_cap(self, worker, tmp_path, monkeypatch):
+        big = tmp_path / "big.jsonl"
+        big.write_text("x" * 100)
+        monkeypatch.setattr(type(worker), "_TRANSCRIPT_CAP", 10)   # 缩小上限直测截断
+        resp = LLMResponse(content="A", model="m", provider="claude-cli", transcript_path=str(big))
+        got = worker._load_ai_task_transcript(resp, [])
+        assert got["truncated"] is True and len(got["jsonl"]) == 10
+
+    def test_load_transcript_from_failed_attempts(self, worker, tmp_path):
+        # 失败调用:尝试链带 transcript_path(gateway _attempt 透传)同样回收
+        src = tmp_path / "fail.jsonl"
+        src.write_text('{"e":1}\n')
+        got = worker._load_ai_task_transcript(None, [{"tier": "primary", "ok": False,
+                                                     "transcript_path": str(src)}])
+        assert got["jsonl"] == '{"e":1}\n' and got["turns"] == 1

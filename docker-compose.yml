@@ -179,8 +179,9 @@ services:
       <<: *common-env
       STEP_RUNTIME: ${STEP_RUNTIME:-subprocess}
       WORK_DIR: /tmp/flori-work
-      # 稳定身份:WORKER_NAME 派生确定性 id({type}-sha256(name)[:8]),id 文件存 /data/workers/<name>。
-      # 同机多 worker 各给唯一 WORKER_NAME 即不撞;重装/重注册 id 不变(详见 worker/worker.py)。
+      # 稳定身份:WORKER_NAME 派生确定性 id({type}-sha256(name)[:8]),id 文件存 /data/workers/<name>/worker.id。
+      # /data/workers/<name>/ 即该 worker 的家目录(凭证/CLI transcript 等私有状态同收敛;旧平铺 id 文件启动自迁移)。
+      # 同机多 worker 各给唯一 WORKER_NAME 即不撞;重装/重注册 id 不变(详见 worker/transport.py)。
       WORKER_NAME: cpu
       HOST_WORK_DIR: ${HOST_WORK_DIR:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}

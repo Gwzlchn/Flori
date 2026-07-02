@@ -166,6 +166,8 @@ video:
       tags: []
       timeout: 1800   # claude WebSearch + 直连 curl 多轮 agentic 取证
       retry: 1        # 外网/反爬易抖,不像评审那样 5 次硬刚
+      # model 语义(claude-cli):"subscription" = 占位,用 providers.yaml claude-cli.model 默认;
+      # 写具体模型名(如 claude-sonnet-4-6)则该步 --model 钉死,且改动会变 def_digest → 步自动过期可重跑。
       ai:
         primary: {provider: claude-cli, model: subscription}
         fallback: {provider: claude-cli, model: subscription}

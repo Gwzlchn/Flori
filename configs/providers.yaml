@@ -34,6 +34,11 @@ providers:
     # 输出格式由 provider 强制 `--output-format json`(取真实 usage/cache/total_cost_usd/num_turns);
     # 这里不写 --output-format(写了也会被 provider 剔除改 json)。
     command: ["claude", "-p"]
+    # 默认模型(yaml 单一来源,钉死可复现):不配则沿用挂载 HOME 里 CLI 自己的默认模型——
+    # 宿主交互 /model 换模型会让 worker 静默跟变。优先级:pipelines.yaml 步级 model(非
+    # "subscription" 占位;换模型即变 def_digest → 该步自动过期可重跑)> 此默认 > CLI 默认。
+    # [1m] 后缀 = 1M 上下文。
+    model: claude-opus-4-8[1m]
     features: [vision]
     cost_usd: 0
 
