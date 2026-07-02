@@ -50,18 +50,18 @@ class Job:
     domain: str = "general"
     source: str | None = None
     style_tags: list[str] = field(default_factory=list)
-    current_step: str | None = None  # 派生字段（不存 DB），API 返回时动态填充
+    current_step: str | None = None  # 派生字段(不存 DB),API 返回时动态填充
     progress_pct: int = 0
     meta: dict = field(default_factory=dict)
     published_at: datetime | None = None  # 源内容在平台的发布/更新时间(01_download 写入 metadata.json)
     created_at: datetime = field(default_factory=_utcnow)
     updated_at: datetime = field(default_factory=_utcnow)
     error: str | None = None
-    # ── 快照 / lineage(P2b)──
-    # lineage_key=同源基础 id(去时间戳),同一内容的所有快照(重投/来源更新/pipeline 重建)共用;
+    # 快照 / lineage
+    # lineage_key=同源基础 id(去时间戳),同一内容的所有快照共用,快照来自重投/来源更新/pipeline 重建;
     # is_current=该 lineage 当前展示版(列表/KB 默认只显 current,历史版可跳转对比);
-    # source_digest=抓回源内容 hash、pipeline_digest=各步定义指纹聚合(供"重建过期"判断,P2c);
-    # parent_job_id=fork 自哪个快照(P2c)。
+    # source_digest=抓回源内容 hash、pipeline_digest=各步定义指纹聚合(供"重建过期"判断);
+    # parent_job_id=fork 自哪个快照。
     lineage_key: str | None = None
     is_current: bool = True
     source_digest: str | None = None
@@ -93,8 +93,8 @@ class Worker:
     tags: set[str] = field(default_factory=set)
     reject_tags: set[str] = field(default_factory=set)
     status: str = "offline"
-    # 管理员暂停叠加位（"" / "paused"），与运行时 status(idle/busy) 解耦：
-    # 暂停态只由 API 写，worker 认领/心跳永不覆盖，故 busy worker 暂停后跑完当前步不会丢暂停。
+    # 管理员暂停叠加位,取值 "" / "paused",与运行时 status(idle/busy) 解耦:
+    # 暂停态只由 API 写,worker 认领/心跳永不覆盖,故 busy worker 暂停后跑完当前步不会丢暂停。
     admin_status: str = ""
     hostname: str | None = None
     gpu_name: str | None = None
@@ -114,19 +114,19 @@ class Worker:
 
 @dataclass
 class Collection:
-    """集合 = job 的归属分组。订阅是集合的属性(非独立实体)：
-    source_type/source_id 非空 = 订阅集合(自动从某来源追更)；为空 = 手动集合。"""
+    """集合 = job 的归属分组。订阅是集合的属性(非独立实体):
+    source_type/source_id 非空 = 订阅集合(自动从某来源追更);为空 = 手动集合。"""
     id: str
     name: str
     domain: str
     description: str = ""
     tags: list[str] = field(default_factory=list)
     job_count: int = 0
-    # 订阅属性（手动集合为 None/默认）
+    # 订阅属性(手动集合为 None/默认)
     # 支持: bilibili_up/bilibili_fav/bilibili_collection/youtube_channel/rss/local_dir(见 shared/sources.py)
     source_type: str | None = None
     source_id: str | None = None        # 来源标识(B站 mid / 收藏夹 id / 频道URL / feed URL / 目录路径)
-    sync_enabled: bool = True           # 自动追更开关（仅订阅集合有意义）
+    sync_enabled: bool = True           # 自动追更开关(仅订阅集合有意义)
     last_synced_at: datetime | None = None
     last_sync_status: str | None = None  # 上次同步结果: ok | error | syncing | None(从未同步)
     last_sync_error: str | None = None   # 上次同步失败的错误摘要(status=error 时有值)
@@ -169,12 +169,12 @@ class LLMRequest:
     # claude-cli 不读此项(由 step_base._extract_json/_salvage_scores 兜底解析 JSON)。
     response_format: str | None = None
     # 取证等需联网/工具的步骤:放开指定工具(如 ["WebSearch","Bash"])。仅 claude-cli provider 读,
-    # 转为 --allowedTools <tools> --max-turns;其它 provider 忽略。None=沿用原两档(images→Read / 否则禁工具)。
+    # 转为 --allowedTools <tools> --max-turns;其它 provider 忽略。None=用默认两档(images→Read / 否则禁工具)。
     allowed_tools: list[str] | None = None
     max_turns: int | None = None
 
     def to_jsonable(self) -> dict:
-        """JSON 安全序列化(images: Path → str);供 AI task 内联投递(见 AITask)。"""
+        """JSON 安全序列化,images 的 Path 转 str;供 AI task 内联投递,见 AITask。"""
         return {
             "messages": self.messages,
             "model": self.model,
@@ -215,7 +215,7 @@ class LLMResponse:
     duration_sec: float = 0.0
     num_turns: int = 0
     cached: bool = False
-    # ── AI 审计字段(prompt 白盒化 / ai_logs)──
+    # AI 审计字段(prompt 白盒化 / ai_logs)
     session_id: str | None = None        # provider 会话 id(claude-cli 有,可溯/可续)
     api_ms: float | None = None          # 服务端 API 耗时(claude-cli duration_api_ms / SDK 测得)
     ttft_ms: float | None = None         # 首 token 延迟(provider 提供时)
@@ -236,7 +236,7 @@ class LLMResponse:
 @dataclass
 class AITask:
     """独立 AI 任务:不挂 job、不走 storage —— 内联 LLMRequest 载荷,结果内联回 airesult:{task_id}。
-    供 /api/ask、/digest 把单次 claude 调用交给 ai-worker(claude-cli tag)异步执行(P1 AI-worker-split)。
+    供 /api/ask、/digest 把单次 claude 调用交给 ai-worker(claude-cli tag)异步执行。
     入队 queue:ai(kind='ai',require_tags=['claude-cli']);无 job_id,故与 pipeline-step task 区分。"""
     task_id: str
     request: LLMRequest

@@ -1,11 +1,9 @@
-"""认领/上报编排：RedisTransport 与 gateway 服务端共用的唯一实现(避免漂移)。
+"""认领/上报编排:RedisTransport 与 gateway 服务端共用的唯一实现,避免两端漂移。
 
-把"从队列认领一步 / 上报完成 / 上报失败 / 释放"这套 redis+db 编排从
-RedisTransport 抽出来,做成 (redis, db, ...) 上的纯函数。RedisTransport 退化成
-薄包装调用本模块;gateway 的 /api/runner/jobs/* 端点也调本模块——同一份调用序列、
-同一份 payload、同一份 DB 写,两端不会各写一份导致行为分叉。
-
-调用序列/payload/DB 写与原 RedisTransport 方法体逐字等价(Verify 会对照回归)。
+"从队列认领一步 / 上报完成 / 上报失败 / 释放"这套 redis+db 编排做成
+(redis, db, ...) 上的纯函数。RedisTransport 是调用本模块的薄包装;gateway 的
+/api/runner/jobs/* 端点也调本模块——同一份调用序列、同一份 payload、同一份 DB 写,
+两端不会各写一份导致行为分叉。
 """
 
 from __future__ import annotations
@@ -23,7 +21,7 @@ from shared.redis_client import RedisClient
 
 def parse_style_tags(raw) -> list:
     """解析 job_info.style_tags 原始值(JSON 字符串或已是 list);失败/非 list 兜空 list。
-    供 scheduler.enqueue_step / worker.claim / api.runner.request_job 共用,消除三处逐字重复(审计 R-L5)。"""
+    供 scheduler.enqueue_step / worker.claim / api.runner.request_job 三处共用,避免各写一份漂移。"""
     if isinstance(raw, list):
         return raw
     if isinstance(raw, str):
@@ -35,7 +33,7 @@ def parse_style_tags(raw) -> list:
     return []
 
 
-# ── 内部小工具 ──
+# 内部小工具
 
 
 async def _set_status(
@@ -76,7 +74,7 @@ async def _increment_worker_stats(
         db.increment_worker_stats, worker_id,
         completed=completed, failed=failed, duration=duration,
     )
-    # 也累计进 Redis hash：远程(仅 Redis)worker 的统计才不会在 /api/workers 显示 0。
+    # 也累计进 Redis hash:远程(仅 Redis)worker 的统计才不会在 /api/workers 显示 0。
     if completed:
         await redis.incr_worker_stat(worker_id, "tasks_completed", completed)
     if failed:
@@ -100,7 +98,7 @@ async def pop_matching(redis: RedisClient, pool, tags, reject_tags, max_tries=5)
     return None
 
 
-# ── 粗粒度编排 ──
+# 粗粒度编排
 
 
 async def claim_step(
@@ -114,19 +112,19 @@ async def claim_step(
     if (info.get("admin_status") if info else None) == "paused":
         return None
 
-    # 本次认领的唯一 holder(= exec_id),先于占槽生成:并发槽用 holder 集合记账(pool/res:*:holders),
-    # 占/放/reclaim/删除均按此 holder SADD/SREM,SREM 幂等→不双减、worker 突死的槽可被 reclaim/对账精准释放。
-    # 加短随机防同 worker 同毫秒并发认领 holder 撞(撞则两 claim 共 holder→SCARD 少计→超额)。
+    # 本次认领的唯一 holder(= exec_id),先于占槽生成。并发槽用 holder 集合 pool/res:*:holders 记账,
+    # 占/放/reclaim/删除均按此 holder SADD/SREM;SREM 幂等不双减,worker 突死的槽可被 reclaim/对账精准释放。
+    # 加短随机,防同 worker 同毫秒并发认领时 holder 相撞:相撞则两个 claim 共用一个 holder,SCARD 少计导致超额。
     holder = f"{worker_id}:{int(time.time() * 1000)}:{secrets.token_hex(3)}"
 
     for pool in pools:
         if await redis.is_pool_frozen(pool):
             continue
-        # 限额来自 worker 传入的 pool_limits(等价旧 fetch_task 读 self.config.pools 的 limit,缺省 999)。
+        # 限额来自 worker 传入的 pool_limits,缺省 999。
         limit = pool_limits.get(pool, 999)
         override = await redis.get_pool_limit_override(pool)
         if override is not None:
-            limit = override  # 运行时覆盖即最终上限(直连+网关两路都过本函数,前端调小即时生效)
+            limit = override  # 运行时覆盖即最终上限:直连+网关两路都过本函数,前端调小即时生效
         if not await redis.try_acquire_slot(pool, limit, holder):
             continue
 
@@ -137,9 +135,9 @@ async def claim_step(
 
         task, raw_json, score = matched
 
-        # ── 独立 AI task(kind='ai')分流 ──
-        # 没有 job_id / job:{id}:steps hash → 【绝不】喂进下方 job-step 状态机(cas_step_status/set_step_*),
-        # 也不占资源槽。已占池槽(上方 try_acquire_slot)持槽执行,done 由 release_step 的 ai 分支释放。
+        # 独立 AI task(kind='ai')分流
+        # 没有 job_id / job:{id}:steps hash,绝不喂进下方 job-step 状态机(cas_step_status/set_step_*),
+        # 也不占资源槽。已占的池槽(上方 try_acquire_slot)持槽执行,done 由 release_step 的 ai 分支释放。
         if task.get("kind") == "ai":
             task_id = task.get("task_id")
             step_name = task.get("step", "ai")
@@ -169,10 +167,10 @@ async def claim_step(
         job_id = task["job_id"]
         step = task["step"]
 
-        # 资源槽(单账号/单出口IP 等细粒度并发):任务在 enqueue 时带 resources;对每个有配置上限
-        # (redis resource_limits,由 scheduler 从 configs/resources.yaml 推送)的资源占一个槽。
-        # 任一占不到 → 回滚已占资源 + 释放池槽 + 把任务放回队列,继续看下一个池(不绑定本 worker)。
-        # 未配上限的资源跳过(声明了但 resources.yaml 没配 = 不限,安全降级);无声明则整段零开销。
+        # 资源槽:单账号/单出口IP 等细粒度并发。任务在 enqueue 时带 resources;对每个有配置上限的资源
+        # 占一个槽,上限存 redis resource_limits,由 scheduler 从 configs/resources.yaml 推送。
+        # 任一占不到 → 回滚已占资源 + 释放池槽 + 把任务放回队列,继续看下一个池,不绑定本 worker。
+        # 未配上限的资源跳过:声明了但 resources.yaml 没配 = 不限,安全降级;无声明则整段零开销。
         acquired_resources: list[str] = []
         resource_blocked = False
         for res in task.get("resources", []):
@@ -260,7 +258,7 @@ async def report_step_done(
         finished_at=datetime.now(timezone.utc),
         duration_sec=round(duration, 1),
         # 与失败侧对称:不覆盖已终态(done/skipped)的步——挡迟到的成功上报把已被 skip 的步倒回 done。
-        # (注:waiting/rerun-reset 不在终态集,本守卫不拦,属可接受残留——见审阅报告 B16。)
+        # waiting/rerun-reset 不在终态集,本守卫不拦,属可接受残留。
         only_if_active=True,
     )
     await _increment_worker_stats(
@@ -275,7 +273,7 @@ async def report_step_failed(
 ) -> None:
     job_id = claim["job_id"]
     step = claim["step"]
-    # rc!=0 分支带 exec_id 且 events 用 error[:200];timeout/异常分支不带 exec_id(逐字保持旧 payload)。
+    # rc!=0 分支带 exec_id 且 events 用 error[:200];timeout/异常分支不带 exec_id——两分支 payload 刻意不同,勿顺手统一。
     topic_payload = {
         "job_id": job_id, "step": step, "status": "failed",
         "error": error, "error_type": error_type, "worker": worker_id,
@@ -297,7 +295,7 @@ async def report_step_failed(
         # 不覆盖已终态成功的步:成功上报响应丢失被改报 failed 时,DB 仍保 done。
         only_if_active=True,
     )
-    # 统计怪癖:仅 rc!=0(count_stats=True)累加 failed;timeout/异常分支不计(与旧 execute 一致)。
+    # 统计怪癖:仅 rc!=0(count_stats=True)累加 failed;timeout/异常分支刻意不计。
     if count_stats:
         await _increment_worker_stats(redis, db, worker_id, failed=1)
 
@@ -306,7 +304,7 @@ async def release_step(
     redis: RedisClient, db: Database, worker_id: str, claim: dict,
 ) -> None:
     pool = claim["pool"]
-    holder = claim.get("exec_id")   # = 占槽时的 holder(本执行唯一);按它 SREM 释放自己的槽/资源(幂等)。
+    holder = claim.get("exec_id")   # = 占槽时的 holder,本执行唯一;按它 SREM 释放自己的槽/资源,幂等。
     # 独立 AI task:无 job:steps,跳过 exec_id 守卫 / 资源回读;仅释放池槽 + 置 idle。
     if claim.get("kind") == "ai":
         await redis.release_slot(pool, holder)
@@ -314,8 +312,8 @@ async def release_step(
         return
     job_id, step = claim["job_id"], claim["step"]
     # exec_id 守卫:若该步已被更新的执行接管(check_stuck 重排后 worker B 以新 exec_id 认领),
-    # 本(陈旧)worker 迟到的 release 不得动新执行的槽/资源。holder 集合下:本 worker 只 SREM 自己的
-    # holder(已被 reclaim SREM 则 no-op),不会误删新执行的 holder;仍提前 return 省去无谓回读。
+    # 本陈旧 worker 迟到的 release 不得动新执行的槽/资源。holder 集合下本 worker 只 SREM 自己的
+    # holder,已被 reclaim SREM 则为 no-op,不会误删新执行的 holder;仍提前 return 省去无谓回读。
     current_exec = await redis.get_step_exec_id(job_id, step)
     if (current_exec is not None and holder is not None
             and current_exec != holder):

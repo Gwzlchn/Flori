@@ -1,9 +1,9 @@
-"""StorageBackend：统一文件访问接口。
+"""StorageBackend:统一文件访问接口。
 
-LocalStorage：数据在本机，pull/push 为 no-op(work_dir 即真实 job 目录)。
-RemoteStorage：对象存储(MinIO/S3)，让任意机器都能当 worker——
-  pull 把该 job 现有产物下载到本机临时 work_dir，步骤照常读写本地路径，
-  push 把本步新增/改动的文件回传对象存储(只增量上传、不删，避免并行分支互相覆盖)。
+LocalStorage:数据在本机,pull/push 为 no-op(work_dir 即真实 job 目录)。
+RemoteStorage:对象存储(MinIO/S3),让任意机器都能当 worker——
+  pull 把该 job 现有产物下载到本机临时 work_dir,步骤照常读写本地路径,
+  push 把本步新增/改动的文件回传对象存储(只增量上传、不删,避免并行分支互相覆盖)。
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ class StorageBackend(Protocol):
     # 删 job 时清掉该 job 的全部产物:LocalStorage 删 job 目录、RemoteStorage 删 {job_id}/ 前缀对象。
     # 幂等(无产物即 no-op),避免 MinIO/分布式部署删 job 后中心存储留孤儿产物。
     async def delete(self, job_id: str) -> None: ...
-    # 把 src job 的全部产物 + .done 复制到 dst job(P2c fork 重建:播种新快照,只重跑分叉步及下游)。
+    # 把 src job 的全部产物 + .done 复制到 dst job,供 fork 重建播种新快照,只重跑分叉步及下游。
     # 排除凭证侧载文件;Local=copytree、Remote=服务端 copy_object;Gateway 不支持(重建在 API/中心侧跑)。
     async def clone(self, src_job_id: str, dst_job_id: str) -> None: ...
     # 供 api 按需取单个产物(笔记/日志等);找不到返回 None。
@@ -69,13 +69,13 @@ class StorageBackend(Protocol):
     async def read_range(self, job_id: str, rel_path: str, start: int, length: int) -> bytes | None: ...
     # 健康探活(供 /api/status 的 minio 组件):返回 {status, mode, bucket, ...};不抛(异常由调用方包超时)。
     async def health(self) -> dict: ...
-    # 容量统计(对象数 + 总字节):RemoteStorage 全量 list 求和(贵!),故 api 侧带缓存+后台刷新,
+    # 容量统计(对象数 + 总字节):RemoteStorage 全量 list 求和很贵,故 api 侧带缓存+后台刷新,
     # 绝不同步阻塞 /api/status。不支持(本地不强求)返回 None。
     async def capacity(self) -> dict | None: ...
 
 
 class LocalStorage:
-    """本地部署：数据就在本机，pull/push 都是 no-op。"""
+    """本地部署:数据就在本机,pull/push 都是 no-op。"""
 
     def __init__(self, jobs_dir: Path):
         self.jobs_dir = jobs_dir
@@ -110,7 +110,7 @@ class LocalStorage:
         await asyncio.to_thread(shutil.rmtree, root, ignore_errors=True)
 
     async def clone(self, src_job_id: str, dst_job_id: str) -> None:
-        # 整目录复制(含 .done dotfile,供 fork 播种);★排除凭证侧载文件,不克隆到新 job。源不存在=no-op。
+        # 整目录复制(含 .done dotfile,供 fork 播种);排除凭证侧载文件,不克隆到新 job。源不存在=no-op。
         src = self._safe_path(src_job_id)
         dst = self._safe_path(dst_job_id)
 
@@ -181,7 +181,7 @@ class LocalStorage:
         root = self._safe_path(job_id)
         if not root.is_dir():
             return {}
-        # rglob 已遍历到每个文件,顺手 stat().st_size,不再二次列举。
+        # rglob 已遍历到每个文件,顺手 stat().st_size,无需二次列举。
         return {
             p.relative_to(root).as_posix(): p.stat().st_size
             for p in root.rglob("*") if p.is_file()
@@ -214,11 +214,11 @@ class LocalStorage:
 
 
 class RemoteStorage:
-    """对象存储后端：worker 在任意机器拉取/回传 job 产物。
+    """对象存储后端:worker 在任意机器拉取/回传 job 产物。
 
-    对象键 = ``{job_id}/{相对路径}``。pull 下载整个 job 前缀到本机临时目录，
-    push 只上传相对 pull 快照新增或改动的文件(不删除)，因此同一 job 的并行
-    步骤各自只写自己的产物，互不覆盖。
+    对象键 = ``{job_id}/{相对路径}``。pull 下载整个 job 前缀到本机临时目录,
+    push 只上传相对 pull 快照新增或改动的文件(不删除),因此同一 job 的并行
+    步骤各自只写自己的产物,互不覆盖。
     """
 
     def __init__(
@@ -236,7 +236,7 @@ class RemoteStorage:
         self._bucket = bucket
         self._secure = secure
         self._tmp_root = tmp_root
-        # pull 时记录每个 work_dir 的文件快照(relpath -> (size, mtime))，供 push 算增量。
+        # pull 时记录每个 work_dir 的文件快照(relpath -> (size, mtime)),供 push 算增量。
         self._snapshots: dict[str, dict[str, tuple[int, float]]] = {}
         self._client_obj = None
 
@@ -289,7 +289,7 @@ class RemoteStorage:
             st = path.stat()
             prev = snapshot.get(rel)
             if prev is not None and prev == (st.st_size, st.st_mtime):
-                continue  # 未改动，跳过
+                continue  # 未改动,跳过
             self._client().fput_object(self._bucket, f"{job_id}/{rel}", str(path))
 
     async def cleanup(self, job_id: str, step: str, work_dir: Path) -> None:
@@ -344,7 +344,7 @@ class RemoteStorage:
                     CopySource(self._bucket, o.object_name),
                 )
             except Exception as e:
-                # 大对象(>~5GiB)copy_object 单 PUT 超限等:记 warning 跳过(多数产物小;大源视频常 NO_PUSH 不在中心)。
+                # 大对象(>~5GiB)copy_object 单 PUT 超限等:记 warning 跳过。多数产物小;大源视频常配 NO_PUSH,不在中心。
                 import structlog
                 structlog.get_logger().warning(
                     "storage_clone_skip", src=o.object_name, dst=f"{dst_job_id}/{rel}", error=str(e),
@@ -432,7 +432,7 @@ class RemoteStorage:
 
     async def health(self) -> dict:
         # bucket_exists 是 HEAD bucket(O(1)),勿用 list_objects(全量扫)。minio SDK 同步 → to_thread。
-        # 容量统计(对象数/总字节)MinIO 无聚合 API,全量 list 才能求和 → 不在探活里做(设计 §5.4 标"未采集")。
+        # 容量统计(对象数/总字节)MinIO 无聚合 API,全量 list 才能求和 → 不在探活里做。
         return await asyncio.to_thread(self._health_sync)
 
     def _health_sync(self) -> dict:
@@ -448,8 +448,8 @@ class RemoteStorage:
 
     def _server_version_sync(self) -> str | None:
         # 经 MinIO 管理 API(MinioAdmin.info)取服务端版本。版本近乎静态:首次成功即缓存到实例,
-        # 后续 health 直接复用,不再每次新建 MinioAdmin/调 info()——避免管理 API RTT 反复挤占
-        # health 的 3s 探活预算(否则可能拖超时致 minio 误报 down)。失败回 None 且不缓存,下次再试。
+        # 后续 health 直接复用,避免每次新建 MinioAdmin/调 info() 的管理 API RTT 反复挤占
+        # health 的 3s 探活预算,拖超时致 minio 误报 down。失败回 None 且不缓存,下次再试。
         cached = getattr(self, "_server_version", None)
         if cached:
             return cached
@@ -490,10 +490,10 @@ class GatewayStorage:
     每个对象整体载入内存(与现有 read_file/write_file 一致);流式传输是后续优化。
 
     远端 worker 经慢链路(出站 HTTPS)连中心存储时,两个可选项把大源文件挡在链路外:
-      · STORAGE_WORKDIR_REUSE=1:job 目录跨步骤复用(按 job_id 命名),pull 跳过本机
-        已存在的文件、cleanup 不再逐步 rmtree(改由 pull 时按 TTL GC 兄弟目录)。
+      - STORAGE_WORKDIR_REUSE=1:job 目录跨步骤复用(按 job_id 命名),pull 跳过本机
+        已存在的文件、cleanup 不逐步 rmtree,改由 pull 时按 TTL GC 兄弟目录。
         于是 01_download 下载的 source.mp4 留在本机,后续 03/04/02 步直接读本地,不重拉。
-      · STORAGE_NO_PUSH_GLOBS=input/source.mp4,...:匹配的文件不回传中心存储,只留本机。
+      - STORAGE_NO_PUSH_GLOBS=input/source.mp4,...:匹配的文件不回传中心存储,只留本机。
         大源文件(视频/音频)因此永不上行慢链路;帧图/字幕/OCR 等小产物照常回传供 AI 步消费。
     二者默认关闭(空),不改变既有部署语义;远端重算 worker 才在 docker run 里开。
     NOTE:开了 NO_PUSH,依赖该文件的步骤必须落在持有它的同一 worker(中心存储无副本)。
@@ -508,14 +508,14 @@ class GatewayStorage:
         self._base_url = base_url.rstrip("/")
         self._token_getter = token_getter
         self._work_root = work_dir
-        # pull 时记录每个 work_dir 的文件快照(relpath -> (size, mtime))，供 push 算增量。
+        # pull 时记录每个 work_dir 的文件快照(relpath -> (size, mtime)),供 push 算增量。
         self._snapshots: dict[str, dict[str, tuple[int, float]]] = {}
         self._client_obj = None
-        # 跨步骤复用 job 目录(留住大源文件,免重拉);关时沿用逐步 rmtree 旧语义。
+        # 跨步骤复用 job 目录(留住大源文件,免重拉);关时逐步 rmtree。
         self._reuse = os.environ.get("STORAGE_WORKDIR_REUSE", "") not in ("", "0", "false")
         # 复用模式下,pull 时回收超过 TTL 未活动的兄弟 job 目录(默认 2h),给磁盘兜底。
         self._gc_ttl = int(os.environ.get("STORAGE_WORKDIR_GC_TTL_SEC", "7200"))
-        # 不回传中心存储的文件 glob(相对 work_dir,fnmatch);默认空=全推(旧语义)。
+        # 不回传中心存储的文件 glob(相对 work_dir,fnmatch);默认空=全推。
         self._no_push = [
             g.strip() for g in os.environ.get("STORAGE_NO_PUSH_GLOBS", "").split(",") if g.strip()
         ]
@@ -543,11 +543,11 @@ class GatewayStorage:
         rels = await self.list_files(job_id)
         for rel in rels:
             dest = work_dir / rel
-            # 复用模式:本机已有同名文件就不重拉(留住的 source.mp4 不再走慢链路下行)。
+            # 复用模式:本机已有同名文件就不重拉(留住的 source.mp4 不走慢链路下行)。
             if self._reuse and dest.is_file():
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
-            # 流式下载到磁盘:大产物(未配 NO_PUSH 的源文件)不再整体载入内存(审计 #23)。
+            # 流式下载到磁盘:大产物(未配 NO_PUSH 的源文件)不整体载入内存。
             async with self._client().stream(
                 "GET", f"/api/runner/jobs/{job_id}/artifacts/{rel}", headers=self._auth(),
             ) as resp:
@@ -591,7 +591,7 @@ class GatewayStorage:
             st = path.stat()
             prev = snapshot.get(rel)
             if prev is not None and prev == (st.st_size, st.st_mtime):
-                continue  # 未改动，跳过
+                continue  # 未改动,跳过
             data = await asyncio.to_thread(path.read_bytes)
             resp = await self._client().put(
                 f"/api/runner/jobs/{job_id}/artifacts/{rel}",
@@ -673,7 +673,7 @@ class GatewayStorage:
 
 
 def create_storage(jobs_dir: Path) -> StorageBackend:
-    """工厂函数。设了 MINIO_URL 用对象存储(分布式 worker)，否则本地。"""
+    """设了 MINIO_URL 用对象存储(分布式 worker),否则本地。"""
     endpoint = os.environ.get("MINIO_URL")
     if endpoint:
         return RemoteStorage(

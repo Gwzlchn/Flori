@@ -1,7 +1,4 @@
-"""URL 来源识别：bilibili / youtube / arxiv / upload / other。
-
-URL 来源识别工具,供 api 与 steps 共用。
-"""
+"""URL 来源识别:bilibili / youtube / arxiv / upload / other。供 api 与 steps 共用。"""
 
 from __future__ import annotations
 
@@ -23,13 +20,13 @@ _ARXIV_PATTERNS = [
     re.compile(r"arxiv\.org"),
 ]
 
-# 音频后缀（含点，小写）单一事实源：URL/enclosure/本地文件以此结尾视作音频。
-# rss.py、subscriptions/local_dir.py 均从此导入，避免各写一份导致集合漂移。
+# 音频后缀(含点,小写)单一事实源:URL/enclosure/本地文件以此结尾视作音频。
+# rss.py、subscriptions/local_dir.py 均从此导入,避免各写一份导致集合漂移。
 AUDIO_SUFFIXES = (".mp3", ".m4a", ".wav", ".aac", ".flac")
 
 
 def detect_source(url: str) -> str:
-    """根据 URL 或标识符判断来源平台。"""
+    """判断 URL 或裸标识符(如 BV 号)的来源平台;空值/未识别返回 "other"。"""
     if not url:
         return "other"
 
@@ -79,7 +76,7 @@ _HREF_RE = re.compile(r'href=["\']([^"\']+)["\']', re.I)
 
 
 def extract_audio_enclosure(html: str, base_url: str = "") -> str | None:
-    """从一段网页/RSS HTML 里 best-effort 解析出音频直链(供「播客页面 URL」回退取真链)。
+    """从一段网页/RSS HTML 里 best-effort 解析出音频直链,供播客页面 URL 回退取真链。
 
     顺序:og:audio meta > <audio>/<source src> > <enclosure url> > 裸 <a href="*.mp3">。
     相对链接用 base_url 解析为绝对。挑出第一个看着像音频(后缀属 AUDIO_SUFFIXES,或
@@ -132,7 +129,7 @@ def extract_bilibili_bvid(url: str) -> str | None:
     return m.group(1) if m else None
 
 
-# arXiv ID：新式 2301.00001(可带 vN 版本)或旧式 hep-th/9901001 / math.AG/0601001。
+# arXiv ID:新式 2301.00001(可带 vN 版本)或旧式 hep-th/9901001 / math.AG/0601001。
 # abs/pdf 路径段可选,裸 ID / 无 abs|pdf 的链接也能提取(保留版本号)。
 _ARXIV_ID_RE = re.compile(
     r"(?:arxiv\.org/(?:abs|pdf)/)?"
@@ -142,6 +139,6 @@ _ARXIV_ID_RE = re.compile(
 
 
 def extract_arxiv_id(url: str) -> str | None:
-    """从 arXiv URL / 裸 ID 提取论文 ID（新式 2301.00001[vN] 或旧式 hep-th/9901001[vN]）。"""
+    """从 arXiv URL / 裸 ID 提取论文 ID(新式 2301.00001[vN] 或旧式 hep-th/9901001[vN])。"""
     m = _ARXIV_ID_RE.search(url or "")
     return m.group(1) if m else None

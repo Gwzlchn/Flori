@@ -141,13 +141,13 @@ CREATE TABLE IF NOT EXISTS ai_task_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_task_logs_task ON ai_task_logs(task_id);
 
--- prompt 白盒化 Phase 2:按 (scope,domain,pipeline,step) 覆盖某 AI 步的 system prompt。
--- scope='global'(domain='')或 'domain'(domain=域名);job 创建时 server 端解析(domain 优先于 global)
--- 注入 job.json.prompt_overrides[step],worker step_base 优先用(pure worker 无 DB → 派发时带过去)。
--- domain NOT NULL DEFAULT '' 以保证复合主键唯一(SQLite 把 PK 里的 NULL 视作互异会破唯一)。
--- version=当前【激活】版本号(类 Grafana save 的指针);content 仍存激活内容供注入快速读。
+-- prompt 白盒化:按 (scope,domain,pipeline,step) 覆盖某 AI 步的 system prompt。
+-- scope='global'(domain='')或 'domain'(domain=域名);job 创建时 server 端解析,domain 优先于 global,
+-- 注入 job.json.prompt_overrides[step],worker step_base 优先用。pure worker 无 DB,派发时带过去。
+-- domain NOT NULL DEFAULT '' 以保证复合主键唯一:SQLite 把 PK 里的 NULL 视作互异会破唯一。
+-- version=当前激活版本号,类 Grafana save 的指针;content 仍存激活内容供注入快速读。
 -- 历史全量在 prompt_override_versions;主表存在时指向其中一行(version 列)。
--- 「停用覆盖回内置默认」(deactivate)= 删本表那一行(激活指针),历史表完整保留 → 主表【可缺行】而历史仍在;
+-- 停用覆盖回内置默认(deactivate)= 删本表那一行激活指针,历史表完整保留,主表可缺行而历史仍在;
 -- 缺行即 resolve 返回空(回内置默认),可经 set_active_prompt_version 重建指针重新激活某历史版本。
 CREATE TABLE IF NOT EXISTS prompt_overrides (
     scope TEXT NOT NULL DEFAULT 'global',
@@ -160,9 +160,9 @@ CREATE TABLE IF NOT EXISTS prompt_overrides (
     PRIMARY KEY (scope, domain, pipeline, step)
 );
 
--- prompt 覆盖的【版本历史】(类 Grafana save):每次「另存为新版本」加一行(version=max+1),
--- 「覆盖当前版本」更新对应 version 行的 content/note。主表 prompt_overrides.version 指向激活版本。
--- 「停用覆盖回默认」(deactivate)只删主表指针,本表【全保留】;唯有 delete_prompt_override(彻底删除)
+-- prompt 覆盖的版本历史,类 Grafana save:另存为新版本加一行(version=max+1),
+-- 覆盖当前版本更新对应 version 行的 content/note。主表 prompt_overrides.version 指向激活版本。
+-- 停用覆盖回默认(deactivate)只删主表指针,本表全保留;唯有 delete_prompt_override 彻底删除
 -- 才连同此处所有版本一并清除。created_at=该版本首次创建时间。
 CREATE TABLE IF NOT EXISTS prompt_override_versions (
     scope TEXT NOT NULL DEFAULT 'global',
@@ -176,7 +176,7 @@ CREATE TABLE IF NOT EXISTS prompt_override_versions (
     PRIMARY KEY (scope, domain, pipeline, step, version)
 );
 
--- 集合：订阅是集合的属性(source_type/source_id 非空=订阅集合)，无独立 subscriptions 表。
+-- 集合:订阅是集合的属性(source_type/source_id 非空=订阅集合),无独立 subscriptions 表。
 CREATE TABLE IF NOT EXISTS collections (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -212,9 +212,8 @@ CREATE TABLE IF NOT EXISTS app_credentials (
     updated_at TEXT
 );
 
--- 订阅去重(通用,跨来源):一个集合(订阅)已入库过哪些 item(B站=bvid、youtube=videoId、
--- rss=entry id/link、local=文件名)。source-adapter 模式下各来源统一用 item_id 去重,
--- 不再依赖从 jobs.url 抠 BV 号(旧 ingested_bvids 仅 B站可用)。
+-- 订阅去重,通用跨来源:记录一个集合已入库过哪些 item(B站=bvid、youtube=videoId、
+-- rss=entry id/link、local=文件名)。各来源统一用 item_id 去重。
 CREATE TABLE IF NOT EXISTS ingested_items (
     collection_id TEXT NOT NULL,
     item_id TEXT NOT NULL,
@@ -222,8 +221,8 @@ CREATE TABLE IF NOT EXISTS ingested_items (
     PRIMARY KEY (collection_id, item_id)
 );
 
--- 概念图/知识层：occurrences=[{job_id,content_type,location}] 类型化出现索引(替代旧 sources)；
--- is_topic=粗粒度浏览主题；definition_locked=钉住后不被自动综合覆盖。
+-- 概念图/知识层:occurrences=[{job_id,content_type,location}] 类型化出现索引;
+-- is_topic=粗粒度浏览主题;definition_locked=钉住后不被自动综合覆盖。
 CREATE TABLE IF NOT EXISTS glossary (
     domain TEXT NOT NULL,
     term TEXT NOT NULL,
@@ -240,7 +239,7 @@ CREATE TABLE IF NOT EXISTS glossary (
 
 CREATE INDEX IF NOT EXISTS idx_glossary_domain_status ON glossary(domain, status);
 
--- trigram tokenizer：对中文做子串匹配，零外部依赖。
+-- trigram tokenizer:对中文做子串匹配,零外部依赖。
 CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts5 USING fts5(
     job_id UNINDEXED,
     content_type UNINDEXED,
@@ -275,17 +274,17 @@ _log = structlog.get_logger(component="db")
 
 @lru_cache(maxsize=1)
 def _fernet():
-    """凭证 at-rest 加密的 Fernet 实例（按 FLORI_SECRET_KEY 缓存）。
+    """凭证 at-rest 加密的 Fernet 实例(按 FLORI_SECRET_KEY 缓存)。
 
-    key 取自环境变量 FLORI_SECRET_KEY（urlsafe-base64 的 32 字节 Fernet key）。
-    未设/为空 → 返回 None（凭证退回明文存储，向后兼容）。cryptography 在此惰性
-    导入，缺库或 key 非法时返回 None，使本模块在无该依赖/未配 key 时仍可正常 import
-    与运行（其它 DB 用法与测试不受影响）。"""
+    key 取自环境变量 FLORI_SECRET_KEY(urlsafe-base64 的 32 字节 Fernet key)。
+    未设/为空 → 返回 None(凭证退回明文存储,向后兼容)。cryptography 在此惰性
+    导入,缺库或 key 非法时返回 None,使本模块在无该依赖/未配 key 时仍可正常 import
+    与运行(其它 DB 用法与测试不受影响)。"""
     key = (os.environ.get("FLORI_SECRET_KEY") or "").strip()
     if not key:
         return None
     try:
-        from cryptography.fernet import Fernet  # 惰性导入：缺库也不影响模块 import
+        from cryptography.fernet import Fernet  # 惰性导入:缺库也不影响模块 import
         return Fernet(key.encode())
     except Exception as e:  # 库缺失 / key 非法 → 退回明文(不阻断启动)
         _log.warning("credential_fernet_init_failed", error=str(e)[:200])
@@ -296,7 +295,7 @@ _PLAINTEXT_CRED_WARNED = False
 
 
 def _warn_plaintext_credentials_once() -> None:
-    """无 Fernet key 时存凭证仅警告一次，提示设 FLORI_SECRET_KEY 以加密 at-rest。"""
+    """无 Fernet key 时存凭证仅警告一次,提示设 FLORI_SECRET_KEY 以加密 at-rest。"""
     global _PLAINTEXT_CRED_WARNED
     if not _PLAINTEXT_CRED_WARNED:
         _PLAINTEXT_CRED_WARNED = True
@@ -307,8 +306,8 @@ def _warn_plaintext_credentials_once() -> None:
 
 
 def _fts_match_query(q: str) -> str:
-    """把用户查询串包成 fts5 安全的双引号短语，防 MATCH 语法注入。
-    内部双引号转义为两个双引号；空白折叠；空查询返回空串（调用方按无结果处理）。"""
+    """把用户查询串包成 fts5 安全的双引号短语,防 MATCH 语法注入。
+    内部双引号转义为两个双引号;空白折叠;空查询返回空串(调用方按无结果处理)。"""
     # 剔除空字节(null byte):sqlite3 绑定含 \x00 的串会抛 "unterminated string";它也非有效检索词。
     cleaned = " ".join((q or "").replace("\x00", "").split())
     if not cleaned:
@@ -318,7 +317,7 @@ def _fts_match_query(q: str) -> str:
 
 
 def _parse_dt(s: str | None) -> datetime | None:
-    """解析 ISO 时间串为 aware-UTC。旧库里存的 naive 串补上 UTC tzinfo，
+    """解析 ISO 时间串为 aware-UTC。旧库里存的 naive 串补上 UTC tzinfo,
     避免与 aware 的 now() 相减时崩 'can't subtract offset-naive and offset-aware'。"""
     if s is None:
         return None
@@ -338,16 +337,16 @@ class Database:
         # api/scheduler/worker 三进程各开连接写同一文件,撞 SQLITE_BUSY 时等待而非立刻报错。
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.row_factory = sqlite3.Row
-        # RLock(可重入):写方法持锁 execute+commit,序列化对【单一共享连接】的写访问。
+        # RLock(可重入):写方法持锁 execute+commit,序列化对单一共享连接的写访问。
         # 读方法多数直接走单一共享连接(check_same_thread=False),依赖 C 层(GIL + SQLite
-        # 单条语句)的原子性而【不额外持锁】;少数"多条读+组装"的复合读(如 get_job/list_jobs)
+        # 单条语句)的原子性而不额外持锁;少数"多条读+组装"的复合读(如 get_job/list_jobs)
         # 持锁,序列化读游标迭代与另一线程 commit,避免见到半提交态。WAL+busy_timeout 负责
         # 跨连接竞争。可重入以便持锁方法内部再调其它持锁读不自死锁。
         self._lock = threading.RLock()
 
     def init_schema(self) -> None:
         with self._lock:
-            # 先补旧表缺列,再跑 schema：否则 schema 里 ON jobs(collection_id) 的
+            # 先补旧表缺列,再跑 schema:否则 schema 里 ON jobs(collection_id) 的
             # CREATE INDEX 会在缺该列的老库上先行报错。新库此步无表可补、直接跳过。
             self._ensure_columns()
             self._conn.executescript(_SCHEMA_SQL)
@@ -356,13 +355,13 @@ class Database:
             # (改列/删列/回填)按 user_version 分支处理 + 做备份兼容校验。不在此放迁移逻辑。
             if self._conn.execute("PRAGMA user_version").fetchone()[0] == 0:
                 self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        # 回填存量 job 的 lineage_key + is_current(P2b);幂等(无 NULL lineage_key 即跳过)。
+        # 回填存量 job 的 lineage_key + is_current;幂等(无 NULL lineage_key 即跳过)。
         self._backfill_lineage()
         # 回填存量 prompt 覆盖的版本历史(给每个无历史的 override 补一条 v1);幂等。
         self._backfill_prompt_versions()
 
     def _backfill_lineage(self) -> None:
-        """一次性回填 P2b 引入前的旧 job:lineage_key(有 url 按 url 重算,否则=自身 id)+ is_current
+        """一次性回填缺 lineage_key 的旧 job:lineage_key(有 url 按 url 重算,否则=自身 id)+ is_current
         (每个 lineage 取 created_at 最新者为 current)。幂等:无 lineage_key 为 NULL 的行即直接返回。"""
         from .ids import lineage_key as _lk
         with self._lock:
@@ -392,10 +391,10 @@ class Database:
             self._conn.commit()
 
     def _backfill_prompt_versions(self) -> None:
-        """一次性回填:版本管理引入前的存量 prompt_overrides 行只有 content、无历史。
-        给每个在 prompt_override_versions 里【尚无任何版本】的 override:
-        ① 把主表 version 归一到 1(ALTER 默认已是 1,这里兜底覆盖 NULL/异常);
-        ② 在历史表补一条 v1(content=主表当前内容,note='初始版本')。
+        """一次性回填:存量 prompt_overrides 行只有 content、无版本历史时补齐。
+        给每个在 prompt_override_versions 里尚无任何版本的 override:
+        1. 把主表 version 归一到 1(ALTER 默认已是 1,这里兜底覆盖 NULL/异常);
+        2. 在历史表补一条 v1(content=主表当前内容,note='初始版本')。
         幂等:已有历史的 override 跳过。空 content 的 override(逻辑上=无覆盖)不补历史。"""
         with self._lock:
             tabs = {
@@ -497,7 +496,7 @@ class Database:
                     self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
     def close(self) -> None:
-        # 持锁关闭，确保没有线程正在使用连接。
+        # 持锁关闭,确保没有线程正在使用连接。
         with self._lock:
             self._conn.close()
 
@@ -507,7 +506,7 @@ class Database:
     def __exit__(self, *exc):
         self.close()
 
-    # ── Job ──
+    # Job
 
     def create_job(self, job: Job) -> None:
         # lineage_key 缺省由 id 反推(去时间戳),保证同源快照归一组。
@@ -760,10 +759,10 @@ class Database:
             self._conn.commit()
 
     def _strip_occurrences_for_jobs(self, job_ids: list[str]) -> None:
-        """从 glossary.occurrences 摘除指向这些 job 的出现(保留概念与定义,§1.10-7)。
-        调用方须【已持锁且在同一事务内】;本方法只 execute,不 commit。"""
+        """从 glossary.occurrences 摘除指向这些 job 的出现(保留概念与定义)。
+        调用方须已持锁且在同一事务内;本方法只 execute,不 commit。"""
         for job_id in job_ids:
-            # glossary.occurrences=[{job_id,...}]，摘掉指向已删 job 的出现。
+            # glossary.occurrences=[{job_id,...}],摘掉指向已删 job 的出现。
             rows = self._conn.execute(
                 "SELECT domain, term, occurrences FROM glossary WHERE occurrences LIKE ?",
                 (f'%"{job_id}"%',),
@@ -787,10 +786,10 @@ class Database:
         +(订阅 job)清 ingested_items 该条。全部单事务,避免两次 commit 间崩溃留孤儿。
         job_steps 经 FK ON DELETE CASCADE 连带删除。
         item_id:订阅来源 job 的去重键(从 job.meta['source_item_id'] 取);传了才清 ingested_items
-        → 该条下轮订阅枚举可重新入库(彻底删除,设计 §7-c)。"""
+        → 该条下轮订阅枚举可重新入库(彻底删除)。"""
         with self._lock:
             self._conn.execute("DELETE FROM notes_fts5 WHERE job_id=?", (job_id,))
-            # ai_usage 无外键,不会随 jobs 行 CASCADE,须显式删,否则 token/费用行成永久悬挂孤儿(G2)。
+            # ai_usage 无外键,不会随 jobs 行 CASCADE,须显式删,否则 token/费用行成永久悬挂孤儿。
             self._conn.execute("DELETE FROM ai_usage WHERE job_id=?", (job_id,))
             self._conn.execute("DELETE FROM jobs WHERE id=?", (job_id,))
             if collection_id:
@@ -806,7 +805,7 @@ class Database:
             self._strip_occurrences_for_jobs([job_id])
             self._conn.commit()
 
-    # ── Step ──
+    # Step
 
     def upsert_step(self, step: Step) -> None:
         with self._lock:
@@ -877,7 +876,7 @@ class Database:
             )
             self._conn.commit()
 
-    # ── Worker ──
+    # Worker
 
     def upsert_worker(self, worker: Worker) -> None:
         with self._lock:
@@ -935,8 +934,8 @@ class Database:
         online_window_sec: int = DEFAULT_ONLINE_WINDOW_SEC,
         stale_window_sec: int = DEFAULT_STALE_WINDOW_SEC,
     ) -> list[Worker]:
-        """列出所有 worker，状态由后端按心跳新鲜度统一算出（online-idle/busy、
-        offline、stale，paused 为管理员叠加）。越过 stale 窗口的持久化为信号，
+        """列出所有 worker,状态由后端按心跳新鲜度统一算出(online-idle/busy、
+        offline、stale,paused 为管理员叠加)。越过 stale 窗口的持久化为信号,
         供 GC 回收僵尸 worker。"""
         rows = self._conn.execute("SELECT * FROM workers").fetchall()
         workers = [self._row_to_worker(r) for r in rows]
@@ -952,8 +951,8 @@ class Database:
         stale_window_sec: int,
         now: datetime | None = None,
     ) -> None:
-        """把 worker 的存量字段折算成对外公共状态，并对 stale 持久化（不动心跳）。
-        管理员叠加位(paused)来自独立的 admin_status 列；运行时 status 列只供 busy/idle + GC。"""
+        """把 worker 的存量字段折算成对外公共状态,并对 stale 持久化(不动心跳)。
+        管理员叠加位(paused)来自独立的 admin_status 列;运行时 status 列只供 busy/idle + GC。"""
         public = compute_worker_status(
             last_heartbeat=w.last_heartbeat,
             current_job=w.current_job,
@@ -967,7 +966,7 @@ class Database:
         w.status = public
 
     def set_worker_status(self, worker_id: str, status: str) -> None:
-        """仅更新 worker 状态，不触碰 last_heartbeat（用于标记僵尸为 offline）。"""
+        """仅更新 worker 状态,不触碰 last_heartbeat(用于标记僵尸为 offline)。"""
         with self._lock:
             self._conn.execute(
                 "UPDATE workers SET status=? WHERE id=?", (status, worker_id),
@@ -975,7 +974,7 @@ class Database:
             self._conn.commit()
 
     def set_worker_admin_status(self, worker_id: str, admin_status: str) -> None:
-        """仅更新管理员暂停叠加位("" / "paused")，不触碰运行时 status / 心跳。"""
+        """仅更新管理员暂停叠加位("" / "paused"),不触碰运行时 status / 心跳。"""
         with self._lock:
             self._conn.execute(
                 "UPDATE workers SET admin_status=? WHERE id=?",
@@ -1008,10 +1007,10 @@ class Database:
         current_job: str | None = None,
         current_step: str | None = None,
     ) -> None:
-        """刷新 worker 在 DB 中的 last_heartbeat（及可选的 status / 当前任务）。
+        """刷新 worker 在 DB 中的 last_heartbeat(及可选的 status / 当前任务)。
 
-        心跳与状态变更必须写回 DB，否则 /api/workers 读到的 last_heartbeat
-        永远停在注册时刻，前端会在 30s 后把所有 worker 判成 offline。"""
+        心跳与状态变更必须写回 DB,否则 /api/workers 读到的 last_heartbeat
+        永远停在注册时刻,前端会在 30s 后把所有 worker 判成 offline。"""
         fields = {"last_heartbeat": datetime.now(timezone.utc).isoformat()}
         if status is not None:
             fields["status"] = status
@@ -1043,7 +1042,7 @@ class Database:
         return [self._row_to_step(r) for r in rows]
 
     def list_worker_tasks(self, worker_id: str, limit: int = 50) -> list[Step]:
-        """该 worker 的 task 执行历史（task = 某作业的某步骤的一次执行,按最近开始时间倒序;每条 = 一个 step 记录）。"""
+        """该 worker 的 task 执行历史(task = 某作业的某步骤的一次执行,按最近开始时间倒序;每条 = 一个 step 记录)。"""
         rows = self._conn.execute(
             "SELECT * FROM job_steps WHERE worker_id=? "
             "ORDER BY started_at DESC LIMIT ?",
@@ -1051,7 +1050,7 @@ class Database:
         ).fetchall()
         return [self._row_to_step(r) for r in rows]
 
-    # ── Worker Token ──
+    # Worker Token
 
     def upsert_worker_token(
         self,
@@ -1062,7 +1061,7 @@ class Database:
         created_at: datetime,
         revoked: bool = False,
     ) -> None:
-        """登记一枚 per-worker token（仅存 sha256 hash），pools/tags 限定其授权范围。"""
+        """登记一枚 per-worker token(仅存 sha256 hash),pools/tags 限定其授权范围。"""
         with self._lock:
             self._conn.execute(
                 """INSERT OR REPLACE INTO worker_tokens
@@ -1080,7 +1079,7 @@ class Database:
             self._conn.commit()
 
     def get_worker_token_by_hash(self, token_hash: str) -> dict | None:
-        """按 token hash 查 token 行，未命中返回 None；revoked 折算成 bool。"""
+        """按 token hash 查 token 行,未命中返回 None;revoked 折算成 bool。"""
         row = self._conn.execute(
             "SELECT * FROM worker_tokens WHERE token_hash=?", (token_hash,)
         ).fetchone()
@@ -1097,7 +1096,7 @@ class Database:
         }
 
     def revoke_worker_token(self, worker_id: str) -> None:
-        """吊销某 worker 名下全部 token（删 worker 时连带，使其心跳/认领立即 401）。"""
+        """吊销某 worker 名下全部 token(删 worker 时连带,使其心跳/认领立即 401)。"""
         with self._lock:
             self._conn.execute(
                 "UPDATE worker_tokens SET revoked=1 WHERE worker_id=?", (worker_id,)
@@ -1121,12 +1120,12 @@ class Database:
             for r in rows
         ]
 
-    # ── App Credentials ──
+    # App Credentials
 
     def set_credential(self, key: str, value: str) -> None:
-        """存/覆盖一条应用级凭证（如 B站 cookie JSON），按 key 幂等 upsert。
+        """存/覆盖一条应用级凭证(如 B站 cookie JSON),按 key 幂等 upsert。
 
-        设了 FLORI_SECRET_KEY 时以 Fernet token 加密落库；未设则存明文(向后兼容)
+        设了 FLORI_SECRET_KEY 时以 Fernet token 加密落库;未设则存明文(向后兼容)
         并一次性告警(建议设 key 以 at-rest 加密)。"""
         f = _fernet()
         if f is not None:
@@ -1143,9 +1142,9 @@ class Database:
             self._conn.commit()
 
     def get_credential(self, key: str) -> str | None:
-        """读一条凭证值，未命中返回 None。
+        """读一条凭证值,未命中返回 None。
 
-        有 Fernet key 时尝试解密；遇 InvalidToken(历史明文行，或换了 key 的旧 token)
+        有 Fernet key 时尝试解密;遇 InvalidToken(历史明文行,或换了 key 的旧 token)
         透传原始串(legacy passthrough)。无 key 则直接返回原始串。任何情况都不因坏值崩。"""
         with self._lock:
             row = self._conn.execute(
@@ -1163,17 +1162,17 @@ class Database:
             from cryptography.fernet import InvalidToken
             return f.decrypt(raw.encode()).decode()
         except InvalidToken:
-            return raw  # 明文遗留行 / 异 key 的 token：原样透传
+            return raw  # 明文遗留行 / 异 key 的 token:原样透传
         except Exception:
             return raw  # 任何意外都不让读凭证崩
 
     def delete_credential(self, key: str) -> None:
-        """删一条凭证（如登出清除 B站 cookie）。"""
+        """删一条凭证(如登出清除 B站 cookie)。"""
         with self._lock:
             self._conn.execute("DELETE FROM app_credentials WHERE key=?", (key,))
             self._conn.commit()
 
-    # ── AI Usage ──
+    # AI Usage
 
     def record_ai_usage(self, usage: AIUsage) -> bool:
         try:
@@ -1237,14 +1236,14 @@ class Database:
             return False
 
     def get_ai_task_logs(self, task_id: str) -> list[dict]:
-        """读某 AI task 的白盒审计(供 P1-3 查看端点);最近在前。"""
+        """读某 AI task 的白盒审计(供查看端点);最近在前。"""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM ai_task_logs WHERE task_id=? ORDER BY id DESC", (task_id,)
             ).fetchall()
         return [dict(r) for r in rows]
 
-    # ── Prompt Overrides(白盒 Phase 2)──
+    # Prompt Overrides
 
     @staticmethod
     def _norm_override_key(scope: str, domain: str | None) -> tuple[str, str]:
@@ -1265,8 +1264,8 @@ class Database:
         note: str | None = None,
     ) -> int:
         """存某步的 prompt 覆盖,带版本管理(类 Grafana save)。返回激活版本号。
-        - 该 (scope,domain,pipeline,step) 此前【无任何覆盖】→ 首版 v1(mode 忽略)。
-        - mode='overwrite'(默认)→ 更新【当前激活版本】历史行的 content(+note,留空则保留原 note),
+        - 该 (scope,domain,pipeline,step) 此前无任何覆盖 → 首版 v1(mode 忽略)。
+        - mode='overwrite'(默认)→ 更新当前激活版本历史行的 content(+note,留空则保留原 note),
           主表 content/version 不变(version 仍指激活版本)。
         - mode='new' → 新版本 version=max(历史)+1,历史表插一条,主表指向新版本(成为激活)。
         content 不做空判断(空判断/删除由上层 delete_prompt_override 负责)。"""
@@ -1342,7 +1341,7 @@ class Database:
     def delete_prompt_override(
         self, scope: str, domain: str | None, pipeline: str, step: str
     ) -> None:
-        """删某步的 prompt 覆盖(恢复默认)——连同其【全部历史版本】一并删。无则 no-op。"""
+        """删某步的 prompt 覆盖(恢复默认)——连同其全部历史版本一并删。无则 no-op。"""
         scope, dom = self._norm_override_key(scope, domain)
         with self._lock:
             self._conn.execute(
@@ -1359,10 +1358,10 @@ class Database:
     def deactivate_prompt_override(
         self, scope: str, domain: str | None, pipeline: str, step: str
     ) -> None:
-        """停用某步覆盖(恢复内置默认)——【非破坏】:只删主表 prompt_overrides 那一行(激活指针),
-        prompt_override_versions【全部历史版本完整保留】(下拉里仍能看到 v1/v2…,可重新激活)。
+        """停用某步覆盖(恢复内置默认)——非破坏:只删主表 prompt_overrides 那一行(激活指针),
+        prompt_override_versions 全部历史版本完整保留(下拉里仍能看到 v1/v2…,可重新激活)。
         删指针后 resolve_prompt_overrides 返回空 → 派发回内置默认。无指针则 no-op。
-        注:version 列 NOT NULL DEFAULT 1(C1 加,不可空),故用「删激活行」而非置 NULL 表达停用。"""
+        注:version 列 NOT NULL 不可空,故用删激活行而非置 NULL 表达停用。"""
         scope, dom = self._norm_override_key(scope, domain)
         with self._lock:
             self._conn.execute(
@@ -1374,7 +1373,7 @@ class Database:
     def set_active_prompt_version(
         self, scope: str, domain: str | None, pipeline: str, step: str, version: int
     ) -> bool:
-        """把激活指针指向某【历史版本】(re-activate):主表 content/version 同步成该版本,
+        """把激活指针指向某历史版本(re-activate):主表 content/version 同步成该版本,
         下次派发即用它。该版本不存在于 prompt_override_versions → 返回 False(不动);成功 True。
         主表此前可能无行(已 deactivate 状态)——直接 INSERT OR REPLACE 重建激活指针。"""
         scope, dom = self._norm_override_key(scope, domain)
@@ -1423,8 +1422,7 @@ class Database:
         domain 覆盖优先于 global;同一步两者都有则取 domain(连同其版本号)。job 创建时(api 有 DB)
         调用,结果写 job.json.prompt_overrides 随 job 下发(含激活版本号快照),worker step_base 读取
         (pure worker 无 DB)。空 content 视为无覆盖被过滤。
-        注:1.1.5 起返回值由 {step: content} 改为 {step: {content, version}}——worker
-        _injected_prompt_override 已兼容 dict / 旧纯字符串两种 job.json 形态。"""
+        注:worker _injected_prompt_override 兼容 dict 与存量纯字符串两种 job.json 形态。"""
         dom = (domain or "").strip()
         resolved: dict[str, dict] = {}
         with self._lock:
@@ -1554,8 +1552,8 @@ class Database:
         return out
 
     def throughput_since(self, since_iso: str) -> dict:
-        """近窗口吞吐:since_iso 之后进入终态的 job 计数(done/failed)。用 updated_at 近似终态时刻
-        (rerun 改 updated_at 致重复计入罕见,设计 §7.3 已注;利用 idx_jobs_status)。"""
+        """近窗口吞吐:since_iso 之后进入终态的 job 计数(done/failed)。用 updated_at 近似终态时刻,
+        rerun 改 updated_at 会重复计入但属罕见;利用 idx_jobs_status。"""
         with self._lock:
             rows = self._conn.execute(
                 """SELECT status, COUNT(*) AS n FROM jobs
@@ -1566,7 +1564,7 @@ class Database:
         by = {r["status"]: r["n"] for r in rows}
         return {"done": by.get("done", 0), "failed": by.get("failed", 0)}
 
-    # ── Collection ──
+    # Collection
 
     def _row_to_collection(self, r: sqlite3.Row) -> Collection:
         return Collection(
@@ -1629,7 +1627,7 @@ class Database:
         return [self._row_to_collection(r) for r in rows]
 
     def find_collection_by_source(self, source_type: str, source_id: str) -> Collection | None:
-        """按来源找订阅集合(建订阅前去重；一个来源全局唯一对应一个订阅集合)。"""
+        """按来源找订阅集合(建订阅前去重;一个来源全局唯一对应一个订阅集合)。"""
         row = self._conn.execute(
             "SELECT * FROM collections WHERE source_type=? AND source_id=?",
             (source_type, source_id),
@@ -1637,7 +1635,7 @@ class Database:
         return self._row_to_collection(row) if row else None
 
     def list_subscription_collections(self, enabled_only: bool = False) -> list[Collection]:
-        """订阅集合(source_type 非空)；enabled_only 时仅自动追更开启的。周期同步用。"""
+        """订阅集合(source_type 非空);enabled_only 时仅自动追更开启的。周期同步用。"""
         q = "SELECT * FROM collections WHERE source_type IS NOT NULL"
         if enabled_only:
             q += " AND sync_enabled=1"
@@ -1651,7 +1649,7 @@ class Database:
         tags: list[str] | None = None,
         sync_enabled: bool | None = None,
     ) -> None:
-        """更新集合可变字段（name/description/tags/订阅自动追更开关），None 表示不动。"""
+        """更新集合可变字段(name/description/tags/订阅自动追更开关),None 表示不动。"""
         fields: dict = {}
         if name is not None:
             fields["name"] = name
@@ -1687,7 +1685,7 @@ class Database:
                 self._conn.execute(
                     "DELETE FROM notes_fts5 WHERE collection_id=?", (collection_id,)
                 )
-                # ai_usage 无外键,须显式删名下各 job 的用量行(与 delete_job_cascade 一致,补 G2)。
+                # ai_usage 无外键,须显式删名下各 job 的用量行(与 delete_job_cascade 一致)。
                 self._conn.execute(
                     "DELETE FROM ai_usage WHERE job_id IN "
                     "(SELECT id FROM jobs WHERE collection_id=?)",
@@ -1770,10 +1768,10 @@ class Database:
                 raise
         return {"jobs": n_jobs, "collections": n_coll, "glossary": n_gloss}
 
-    # ── Domain（领域是派生视图：来自 jobs ∪ collections ∪ glossary 的 distinct domain）──
+    # Domain(领域是派生视图:来自 jobs ∪ collections ∪ glossary 的 distinct domain)
 
     def list_domains(self) -> list[dict]:
-        """领域总览：每个 domain 的 集合数/内容数/概念数/订阅数/最近活跃(派生,无 domains 表)。"""
+        """领域总览:每个 domain 的 集合数/内容数/概念数/订阅数/最近活跃(派生,无 domains 表)。"""
         domains: set[str] = set()
         for tbl in ("jobs", "collections", "glossary"):
             for r in self._conn.execute(
@@ -1802,8 +1800,8 @@ class Database:
         ]
 
     def domain_top_terms(self, domain: str, limit: int = 30) -> list[dict]:
-        """领域工作台语义栏：该 domain 的术语(含候选 suggested，各带 status)，按来源数(佐证强度代理)降序。
-        候选数另由 suggested_count 单独提示；前端可按 status 区分展示。"""
+        """领域工作台语义栏:该 domain 的术语(含候选 suggested,各带 status),按来源数(佐证强度代理)降序。
+        候选数另由 suggested_count 单独提示;前端可按 status 区分展示。"""
         rows = self._conn.execute(
             "SELECT term, definition, occurrences, status, is_topic FROM glossary WHERE domain=?",
             (domain,),
@@ -1824,8 +1822,8 @@ class Database:
 
     def concept_timeline(self, domain: str, granularity: str = "month") -> dict:
         """概念时间线:把该 domain 各概念的 occurrences 经 job_id→源内容发布时间映射,按粒度分桶计数。
-        分桶时间用 COALESCE(published_at, created_at):优先源内容在平台的发布/更新时间(「这个概念
-        在世界上何时出现」),无已知发布时间的 job 回退入库时间(created_at),不丢计数。
+        分桶时间用 COALESCE(published_at, created_at):优先源内容在平台的发布/更新时间("这个概念
+        在世界上何时出现"),无已知发布时间的 job 回退入库时间(created_at),不丢计数。
         granularity: day(YYYY-MM-DD) / week(YYYY-Www) / month(YYYY-MM)。无 glossary/job 时返回空。"""
         from collections import defaultdict
         job_dates = {
@@ -1880,7 +1878,7 @@ class Database:
     def concept_occurrence_dates(self, domain: str) -> dict[str, list[str]]:
         """概念趋势雷达基础数据:该 domain 各概念的每条 occurrence 经 job_id→源内容时间映射,
         返回 {term: [iso_date, ...]}(每个 occurrence 一个时间点,可重复)。时间口径与 concept_timeline
-        一致:COALESCE(published_at, created_at)(「这个概念在世界上何时出现」,无发布时间回退入库时间)。
+        一致:COALESCE(published_at, created_at)("这个概念在世界上何时出现",无发布时间回退入库时间)。
         无映射到时间的 occurrence 略过(不计入)。供 radar 服务按窗口切片算飙升/新出现,纯数据无业务策略。"""
         job_dates = {
             r["id"]: r["bucket_at"]
@@ -1922,10 +1920,9 @@ class Database:
 
     def ingested_bvids(self) -> set[str]:
         """已入库的 B站 BV 号集合(从 jobs.url 提取),供订阅同步去重。
-        注:source-adapter 模式新增了通用去重表 ingested_items(见 ingested_item_ids/
-        mark_ingested),按 (collection_id, item_id) 去重。此方法保留供旧库/旧 bili
-        数据的兜底回填——同步首跑时可把它的结果并入某集合的 ingested 集合,
-        避免迁移前已入库的 B站视频被重复建 job。"""
+        通用去重走 ingested_items 表(见 ingested_item_ids/mark_ingested),按
+        (collection_id, item_id) 去重;本方法只作存量 bili 数据的兜底回填——同步首跑时
+        可把它的结果并入某集合的 ingested 集合,避免已入库的 B站视频被重复建 job。"""
         import re
         out: set[str] = set()
         for (u,) in self._conn.execute(
@@ -1956,7 +1953,7 @@ class Database:
             self._conn.commit()
 
     def increment_collection_count(self, collection_id: str, delta: int) -> None:
-        """维护集合的 job_count：建/删 job 时增减；负值不下穿 0。"""
+        """维护集合的 job_count:建/删 job 时增减;负值不下穿 0。"""
         if not collection_id:
             return
         with self._lock:
@@ -1966,7 +1963,7 @@ class Database:
             )
             self._conn.commit()
 
-    # ── Glossary ──
+    # Glossary
 
     def upsert_glossary_term(
         self,
@@ -1976,8 +1973,8 @@ class Database:
         related: list[str] | None = None,
         status: str = "accepted",
     ) -> None:
-        """写入/覆盖一条术语（手动维护入口）：按 (domain, term) 幂等 upsert，
-        保留已有 occurrences，覆盖 definition/related/status。"""
+        """写入/覆盖一条术语(手动维护入口):按 (domain, term) 幂等 upsert,
+        保留已有 occurrences,覆盖 definition/related/status。"""
         now = _now_iso()
         related_json = json.dumps(related or [], ensure_ascii=False)
         with self._lock:
@@ -2010,10 +2007,10 @@ class Database:
         location: str | None = None,
         definition: str = "",
     ) -> None:
-        """抽取(①「这篇讲清楚了什么」)采集候选概念：不存在则插 status='suggested' 记一条
-        occurrence + 候选定义；已存在则把该 job 的 occurrence 并入(按 job_id 去重)，
+        """抽取笔记"这篇讲清楚了什么"一节时采集候选概念:不存在则插 status='suggested' 记一条
+        occurrence + 候选定义;已存在则把该 job 的 occurrence 并入(按 job_id 去重),
         绝不降级已 accepted 的条目。候选定义仅在该条尚无定义且未钉住时补写——不覆盖
-        已有/已钉住定义(§1.10-11)。occurrence = {job_id, content_type, location}（§1.5）。"""
+        已有/已钉住定义。occurrence = {job_id, content_type, location}。"""
         now = _now_iso()
         occ = {"job_id": job_id, "content_type": content_type, "location": location}
         with self._lock:
@@ -2038,7 +2035,7 @@ class Database:
                     occs.append(occ)
                     changed = True
                 new_def = row["definition"]
-                # 候选定义补空:仅当本条还没定义且未钉住时填(不覆盖已有/已钉住，§1.10-11)。
+                # 候选定义补空:仅当本条还没定义且未钉住时填,不覆盖已有/已钉住。
                 if definition and not (row["definition"] or "").strip() \
                         and not row["definition_locked"]:
                     new_def = definition
@@ -2052,7 +2049,7 @@ class Database:
             self._conn.commit()
 
     def get_glossary_term(self, domain: str, term: str) -> dict | None:
-        """读单条术语，未命中返回 None。"""
+        """读单条术语,未命中返回 None。"""
         row = self._conn.execute(
             "SELECT * FROM glossary WHERE domain=? AND term=?", (domain, term)
         ).fetchone()
@@ -2061,7 +2058,7 @@ class Database:
     def list_glossary(
         self, domain: str | None = None, status: str | None = None
     ) -> list[dict]:
-        """列术语，可按 domain / status 过滤，按 term 升序。"""
+        """列术语,可按 domain / status 过滤,按 term 升序。"""
         where_parts: list[str] = []
         params: list = []
         if domain:
@@ -2077,7 +2074,7 @@ class Database:
         return [self._row_to_glossary(r) for r in rows]
 
     def accept_glossary_term(self, domain: str, term: str) -> None:
-        """采纳候选术语：status -> 'accepted'。"""
+        """采纳候选术语:status -> 'accepted'。"""
         with self._lock:
             self._conn.execute(
                 "UPDATE glossary SET status='accepted', updated_at=? "
@@ -2087,7 +2084,7 @@ class Database:
             self._conn.commit()
 
     def set_glossary_topic(self, domain: str, term: str, is_topic: bool) -> bool:
-        """置该词 is_topic（主题概念标记）。命中返回 True，无该行返回 False（供路由判 404）。"""
+        """置该词 is_topic(主题概念标记)。命中返回 True,无该行返回 False(供路由判 404)。"""
         with self._lock:
             cur = self._conn.execute(
                 "UPDATE glossary SET is_topic=?, updated_at=? WHERE domain=? AND term=?",
@@ -2097,7 +2094,7 @@ class Database:
             return cur.rowcount > 0
 
     def list_topic_concepts(self, domain: str) -> list[dict]:
-        """该 domain 中标为主题概念(is_topic=1)的列表，按出现数(occurrence)降序；
+        """该 domain 中标为主题概念(is_topic=1)的列表,按出现数(occurrence)降序;
         每项含 term/definition/occurrence_count/related/is_topic。空则 []。"""
         rows = self._conn.execute(
             "SELECT term, definition, occurrences, related, is_topic "
@@ -2125,14 +2122,13 @@ class Database:
         return out
 
     def delete_glossary_term(self, domain: str, term: str) -> None:
-        """删一条术语。"""
         with self._lock:
             self._conn.execute(
                 "DELETE FROM glossary WHERE domain=? AND term=?", (domain, term)
             )
             self._conn.commit()
 
-    # ── Notes 全文索引 (FTS5) ──
+    # Notes 全文索引 (FTS5)
 
     def index_job_notes(
         self,
@@ -2144,7 +2140,7 @@ class Database:
         domain: str = "",
         collection_id: str = "",
     ) -> None:
-        """把某 job 某类笔记写入 FTS 索引：先删该 (job_id, note_type) 行再插，幂等。"""
+        """把某 job 某类笔记写入 FTS 索引:先删该 (job_id, note_type) 行再插,幂等。"""
         with self._lock:
             self._conn.execute(
                 "DELETE FROM notes_fts5 WHERE job_id=? AND note_type=?",
@@ -2169,10 +2165,10 @@ class Database:
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[int, list[dict]]:
-        """全文检索笔记。q 走 fts5 MATCH（trigram，中文子串友好），做基本转义防注入；
-        可按 collection_id / domain / content_type 收窄。返回 (total, items)，
+        """全文检索笔记。q 走 fts5 MATCH(trigram,中文子串友好),做基本转义防注入;
+        可按 collection_id / domain / content_type 收窄。返回 (total, items),
         items 含 job_id/note_type/title/snippet/content_type/domain/collection_id。
-        注意：trigram 至少需 3 个字符才能命中，更短的查询会无结果。"""
+        注意:trigram 至少需 3 个字符才能命中,更短的查询会无结果。"""
         match = _fts_match_query(q)
         if not match:
             return 0, []
@@ -2218,7 +2214,7 @@ class Database:
         return total, items
 
     def note_bodies(self, job_ids: list[str]) -> dict[str, str]:
-        """批量取笔记正文：job_id -> body（取自 notes_fts5.body，FTS5 唯一持有全文之处）。
+        """批量取笔记正文:job_id -> body(取自 notes_fts5.body,FTS5 唯一持有全文之处)。
 
         search_notes 只回 snippet,综合问答(synthesis)需要整段正文喂给 LLM。一次 IN 查询
         避免 N 次往返。一个 job 可能有多条(smart/mechanical/...),同 job 多行用 '\\n\\n' 串接,
@@ -2245,7 +2241,7 @@ class Database:
                 bucket.append(body)
         return {jid: "\n\n".join(parts) for jid, parts in out.items() if parts}
 
-    # ── Private ──
+    # Private
 
     def _row_to_glossary(self, row: sqlite3.Row) -> dict:
         return {

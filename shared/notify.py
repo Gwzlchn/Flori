@@ -1,7 +1,7 @@
 """轻量告警钩子。设了 ALERT_WEBHOOK_URL 就把关键事件 POST 出去(Slack/Discord/通用 webhook
 都能吃 {text}/{content} JSON),否则只 structlog。best-effort:超时 5s、吞所有异常,绝不反过来
 拖垮主流程。个人工具不引 Prometheus/Alertmanager,这一层补齐"卡死/磁盘低只有 log.warning、
-无主动通知"的缺口(审计 #26);指标侧另有 GET /api/metrics。"""
+无主动通知"的缺口;指标侧另有 GET /api/metrics。"""
 
 from __future__ import annotations
 

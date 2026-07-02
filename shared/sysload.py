@@ -1,6 +1,6 @@
 """轻量节点负载采集(纯 /proc,无 psutil 依赖,便宜非阻塞)。
 
-worker 心跳带本机 cpu%/mem%/loadavg(B 档"各节点 live 负载");api 进程带自身 RSS。
+worker 心跳带本机 cpu%/mem%/loadavg(各节点 live 负载);api 进程带自身 RSS。
 全部容错:任一项读不到返回 None,绝不抛(采集失败 ≠ 服务挂)。Linux 专属;非 Linux
 (/proc 缺失)各项回 None,调用方按缺省处理。
 """

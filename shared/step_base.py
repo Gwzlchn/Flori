@@ -25,7 +25,7 @@ REVIEW_REF_LIMIT = 8000     # 机械稿/转写参照(对照用,不必全量)
 
 
 def file_hash(path: Path) -> str:
-    """计算文件 SHA-256，返回 'sha256:{hex}' 格式。"""
+    """计算文件 SHA-256,返回 'sha256:{hex}' 格式。"""
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(8192), b""):
@@ -34,7 +34,7 @@ def file_hash(path: Path) -> str:
 
 
 def def_digest_for(version: str | int | None, ai: dict | None) -> str:
-    """本步【pipeline 定义指纹】= sha256(version + ai)。单一来源:StepBase._def_digest 与
+    """本步 pipeline 定义指纹 = sha256(version + ai)。单一来源:StepBase._def_digest 与
     "重建过期"判断(api 侧 is_job_expired)都调它,防公式漂移。版本来自 pipelines.yaml(使用者维护),
     不取代码/git;prompt 内容定制走 {step}.md/profiles/styles(经 input_hashes 纳入,与此正交)。"""
     defn = {"version": str(version if version is not None else "1"), "ai": ai or {}}
@@ -51,8 +51,8 @@ def pipeline_digest_for(steps: list[dict]) -> str:
 
 
 class SubprocessFailed(subprocess.CalledProcessError):
-    """CalledProcessError 子类:str() 附带 stderr 尾部,便于诊断(原类 str() 只有退出码,丢 capture 的 stderr)。
-    仍是 CalledProcessError 子类——既有 `except CalledProcessError` 的调用方不受影响(审计:子进程失败丢 stderr)。"""
+    """str() 附带 stderr 尾部,便于诊断:基类 CalledProcessError 的 str() 只有退出码,丢 capture 的 stderr。
+    仍是 CalledProcessError 子类,既有 `except CalledProcessError` 的调用方不受影响。"""
 
     def __str__(self) -> str:
         base = super().__str__()
@@ -78,7 +78,7 @@ class StepBase:
         # 留内存副本是为 call_ai_json 解析后能回填 output_processed(amend 最后一条)。
         self._ai_log_records: list[dict] = []
 
-    # ── 统一入口 ──
+    # 统一入口
 
     def run(self) -> None:
         try:
@@ -103,8 +103,8 @@ class StepBase:
             })
         except StepError as e:
             self.write_error(e.error_type, str(e))
-            # 同时打到 stderr:step_runner 会把它 tee 进 logs/{step}.log(失败也推存储)+ captured
-            # 为 stderr_tail → worker 据此记真实错误,而非只写 error.json 导致 worker 记「unknown error」。
+            # 同时打到 stderr:step_runner 会把它 tee 进 logs/{step}.log(失败也推存储)并 capture
+            # 为 stderr_tail,worker 据此记真实错误,而非只写 error.json 导致 worker 记 "unknown error"。
             print(f"[{e.error_type}] {e}", file=sys.stderr, flush=True)
             sys.exit(1)
         except Exception as e:
@@ -114,7 +114,7 @@ class StepBase:
 
     @classmethod
     def cli_main(cls, step_name: str) -> None:
-        """步骤脚本统一入口：解析 --job-dir/--step-config，实例化并 run。"""
+        """步骤脚本统一入口:解析 --job-dir/--step-config,实例化并 run。"""
         import argparse
 
         from .logging_setup import setup_logging
@@ -127,7 +127,7 @@ class StepBase:
         config = json.loads(Path(args.step_config).read_text())
         cls(step_name, Path(args.job_dir), config).run()
 
-    # ── 子类实现 ──
+    # 子类实现
 
     def execute(self) -> dict | None:
         raise NotImplementedError
@@ -139,15 +139,15 @@ class StepBase:
         return {}
 
     def _def_digest(self) -> str:
-        """本步【pipeline 定义指纹】——版本来自 pipelines.yaml(经 build_step_config 进 self.config),不取代码/git。
+        """本步 pipeline 定义指纹——版本来自 pipelines.yaml(经 build_step_config 进 self.config),不取代码/git。
         纳入:step.version(使用者在 YAML 维护的版本号)+ ai(provider/model)。
-        改 YAML 的 version 或 ai 模型 → 该指纹变 → should_run 判需重跑(该步+下游;上游指纹未变仍跳过)。
+        改 YAML 的 version 或 ai 模型会改变该指纹,should_run 即判需重跑(该步+下游;上游指纹未变仍跳过)。
         prompt 内容定制走 {step}.md/profiles/styles(已在各步 input_hashes 经 prompt_profile_style_hashes 纳入)。"""
         step = self.config.get("step", {}) if isinstance(self.config, dict) else {}
         ai = self.config.get("ai", {}) if isinstance(self.config, dict) else {}
         return def_digest_for(step.get("version", "1"), ai)
 
-    # ── 幂等 ──
+    # 幂等:指纹机制见 docs/04-module-design/step-base.md §2
 
     def should_run(self) -> bool:
         done_file = self.job_dir / f".{self.step_name}.done"
@@ -156,9 +156,9 @@ class StepBase:
         stored = json.loads(done_file.read_text())
         if stored.get("input_hashes") != self.input_hashes():
             return True
-        # pipeline 定义版本(def_digest):仅当旧 .done【已记录】该键才比对。
-        # 老 .done 没有此键(本特性引入前生成的)→ 不因新增字段而强制重跑,避免发版/首次引入时全量重跑(决策 e)。
-        # 新 mark_done 起记录;此后改 YAML version / ai 模型即触发该步重跑。
+        # pipeline 定义版本(def_digest):仅当旧 .done 已记录该键才比对。
+        # 没有此键的老 .done 不因新增字段而强制重跑,避免发版时全量重跑。
+        # mark_done 会记录该键;此后改 YAML version / ai 模型即触发该步重跑。
         stored_def = stored.get("def_digest")
         if stored_def is not None and stored_def != self._def_digest():
             return True
@@ -175,7 +175,7 @@ class StepBase:
             json.dumps(data, ensure_ascii=False, indent=2)
         )
 
-    # ── IO 工具 ──
+    # IO 工具
 
     def write_output(self, filename: str, data) -> None:
         target = self.job_dir / filename
@@ -267,7 +267,7 @@ class StepBase:
                 f"智能笔记疑似 agentic 退化(len={len(s)}, 首标题={first_head[:40]!r}):"
                 "claude 可能只回了过程汇报而非笔记正文,触发重试。"
             )
-        # 4) 归一图片路径:smart 的 prompt 让 AI 写「文件名」,它有时给裸名(无 assets/ 前缀);
+        # 4) 归一图片路径:smart 的 prompt 让 AI 写文件名,它有时给裸名(无 assets/ 前缀);
         #    前端按 assets/ 解析本地资源,缺前缀就图裂。给缺前缀的本地图片补 assets/
         #    (放过 http(s)/绝对路径/已带 assets/ 的)。
         s = re.sub(
@@ -279,7 +279,7 @@ class StepBase:
     @staticmethod
     def _backfill_image_refs(content: str, image_map: dict) -> str:
         """把 AI 写的 ![描述](img:N) 占位符按资产清单回填成 ![描述](assets/<filename>)。
-        N=资产清单序号(index)。AI 全程不碰路径/文件名 → 不会再漏 assets/ 前缀图裂;
+        N=资产清单序号(index)。AI 全程不碰路径/文件名,不会漏 assets/ 前缀导致图裂;
         未命中的 N(AI 编的/越界/无内嵌位图)整条图片删掉,避免前端渲染出裸占位符文本。"""
         import re as _re
         def _sub(m):
@@ -289,9 +289,9 @@ class StepBase:
 
     def write_smart_note(self, content: str, image_assets: list | None = None) -> str:
         """智能笔记按版本落盘:output/versions/notes_smart_{provider}_{model}_{时间}.md,
-        开头加一行说明(生成时间 / 方式 / 模型)。不再写规范 notes_smart.md——前端取最新版本。
-        落盘前:① 按清单把 ![..](img:N) 占位符回填成真实 assets/ 路径(image_assets 给 N→filename);
-        ② 净化 agentic 口水 + 兜底补 assets/ 前缀(_sanitize_smart_note)。
+        开头加一行说明(生成时间 / 方式 / 模型)。不写规范 notes_smart.md,前端取最新版本。
+        落盘前先按清单把 ![..](img:N) 占位符回填成真实 assets/ 路径(image_assets 给 N→filename),
+        再净化 agentic 口水并兜底补 assets/ 前缀(_sanitize_smart_note)。
         返回相对路径,供评审步在 review.json 里标明评的是哪一版。"""
         prov, model = self.ai_provider_model()
         if image_assets:
@@ -332,8 +332,8 @@ class StepBase:
             if vrel:
                 self.write_output(vrel, review)
 
-    # ── 评审步共用骨架(四个 ReviewStep 的输入准备 + 调 AI + 落盘逐字相同,集中于此) ──
-    # 各评审步 prompt 里逐字相同的「另外输出」三段(各步维度/JSON 示例/参照块仍各自声明)。
+    # 评审步共用骨架:四个 ReviewStep 的输入准备 + 调 AI + 落盘逐字相同,集中于此。
+    # 各评审步 prompt 里逐字相同的"另外输出"三段(各步维度/JSON 示例/参照块仍各自声明)。
     _REVIEW_OUTPUT_EXTRAS = (
         "另外输出：\n"
         "- key_terms: 这篇笔记**讲清楚**的关键概念 + 一句话候选定义（用于沉淀进概念库）\n"
@@ -351,11 +351,11 @@ class StepBase:
 
     @classmethod
     def review_prompt_skeleton(cls) -> str:
-        """评审 prompt 的【可编辑结构骨架】——白盒化:外置成 templates/{review_step}.md 供网页展示+覆盖。
+        """评审 prompt 的可编辑结构骨架,白盒化:外置成 templates/{review_step}.md 供网页展示+覆盖。
         占位符 {{intro}}/{{dimensions}}/{{score_example}}/{{ref_block}} 由 build_review_prompt 在运行期
-        按本步实参 str.replace 注入。四条 pipeline 评审结构一致 → 共享同一骨架(05_review.md/06_review.md/
-        12_review.md 内容均 = 本方法输出,各 job 注入自己的维度/参照块,渲染结果各自正确;
-        test_prompt_templates 钉死文件 == 本方法防漂移)。"""
+        按本步实参 str.replace 注入。四条 pipeline 评审结构一致,共享同一骨架:05_review.md/06_review.md/
+        12_review.md 内容均等于本方法输出,各 job 注入自己的维度/参照块,渲染结果各自正确。
+        test_prompt_templates 钉死模板文件内容 == 本方法输出,防漂移。"""
         return (
             "{{intro}}\n\n"
             "评分维度（每项打 1-5 的整数）：\n"
@@ -372,11 +372,11 @@ class StepBase:
     def build_review_prompt(
         self, *, intro: str, dimensions: list[tuple[str, str]], ref_block: str,
     ) -> str:
-        """拼装评审 prompt:加载骨架(白盒 Phase2 回退序 = DB覆盖 > templates/{step}.md > 内联骨架),
+        """拼装评审 prompt:加载骨架(回退序 = DB 覆盖 > templates/{step}.md > 内联骨架),
         再把 {{intro}}/{{dimensions}}/{{score_example}}/{{ref_block}} 按本步实参注入(str.replace,
         prompt 含字面 {} 不可 format)。各评审步只传 intro / dimensions=[(维度键, 中文说明)] / ref_block。
-        ★ score_keys 解析始终从步内 dimensions 取(见各步 execute),绝不解析模板文本 —— 故覆盖文本被
-        改坏也不破坏评分 JSON 解析(决策:维度展示在 prompt 里只为让 AI 知道评什么,解析靠代码键)。"""
+        score_keys 解析始终从步内 dimensions 取(见各步 execute),绝不解析模板文本,故覆盖文本被
+        改坏也不破坏评分 JSON 解析。维度展示在 prompt 里只为让 AI 知道评什么,解析靠代码键。"""
         dim_lines = "".join(
             f"{i}. {key}: {desc}\n" for i, (key, desc) in enumerate(dimensions, 1)
         )
@@ -397,7 +397,7 @@ class StepBase:
 
     def review_fallback(self, score_keys: list[str]) -> dict:
         """评审步 AI 解析失败时的兜底:各维度 3 分 + overall 3.0 + 空 key_terms/missing + 提示。
-        从 score_keys 机械派生,替代四步各写一份逐字相同的 fallback 字面量。"""
+        从 score_keys 机械派生,四个评审步共用,免各写一份逐字相同的字面量。"""
         fallback = {key: 3 for key in score_keys}
         fallback.update(
             overall=3.0, key_terms=[], missing_concepts=[],
@@ -448,7 +448,7 @@ class StepBase:
             "timestamp": datetime.now().isoformat(),
         }, ensure_ascii=False, indent=2))
 
-    # ── 进度 ──
+    # 进度
 
     def report_progress(self, current: int, total: int, message: str = "") -> None:
         pct = round(100 * current / max(total, 1))
@@ -464,11 +464,11 @@ class StepBase:
         if pct % 10 == 0 or current == total:
             self.log.info("progress", current=current, total=total, pct=pct)
 
-    # ── AI 调用 ──
+    # AI 调用
 
     def _read_override(self) -> str:
         """读 job.json 里本步的 provider 覆盖(无/读失败则空串)。
-        override_provider 与 _apply_provider_override 共用单一读盘+解析(审计 R-L6 去重)。"""
+        override_provider 与 _apply_provider_override 共用这份读盘+解析,防口径漂移。"""
         try:
             job = json.loads((self.job_dir / "job.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -556,7 +556,7 @@ class StepBase:
         self._call_index += 1
         return response.content
 
-    # ── AI 审计日志(prompt 白盒化:每次 LLM 调用一条 → output/ai_logs/{step}.jsonl)──
+    # AI 审计日志(prompt 白盒化:每次 LLM 调用一条 → output/ai_logs/{step}.jsonl)
 
     def _ai_log_path(self) -> Path:
         return self.job_dir / "output" / "ai_logs" / f"{self.step_name}.jsonl"
@@ -623,8 +623,8 @@ class StepBase:
         except Exception:
             pass
 
-        # template.source:DB 注入覆盖(白盒 Phase2)> 外置 {step}.md 钩子 > default。
-        # 与 _load_system_prompt 回退顺序一致,供 Phase1 AI 日志佐证"该步用了哪层 prompt"。
+        # template.source:DB 注入覆盖 > 外置 {step}.md 钩子 > default。
+        # 与 _load_system_prompt 回退顺序一致,供 AI 日志佐证"该步用了哪层 prompt"。
         template_source = "default"
         try:
             if self._injected_prompt_override():
@@ -677,7 +677,7 @@ class StepBase:
             "session_id": getattr(response, "session_id", None),
             "ts_start": ts_start.isoformat(),
             "ts_end": ts_end.isoformat(),
-            # A 溯源/可复现
+            # 溯源/可复现
             "flori": self._flori_meta(),
             "config": {
                 "step_config_resolved": {
@@ -692,7 +692,7 @@ class StepBase:
                 "terminology_snapshot": profile.get("terminology"),
             },
             "input_hashes": in_hashes,
-            # B 调用/性能
+            # 调用/性能
             "routing": {
                 "requested_ai": cfg.get("ai"),
                 "tier_used": tier_used,
@@ -716,7 +716,7 @@ class StepBase:
                 "max_turns": request.max_turns,
                 "images_count": len(images),
             },
-            # C 输入溯源(模板⊕值=渲染)
+            # 输入溯源(模板+值=渲染)
             "prompt": {
                 "rendered": {"system": system, "user": prompt},
                 "template": {"source": template_source},
@@ -727,7 +727,7 @@ class StepBase:
                 },
                 "images": img_recs,
             },
-            # D 输出
+            # 输出
             "output": {
                 "content": getattr(response, "content", None),
                 "num_turns": getattr(response, "num_turns", None),
@@ -746,7 +746,7 @@ class StepBase:
                 "basis": "subscription-equiv" if getattr(response, "provider", None) == "claude-cli" else "priced",
             },
             "raw": getattr(response, "raw", None),
-            # F 关联(produced_artifact 此刻未知,留空)
+            # 关联(produced_artifact 此刻未知,留空)
             "links": {
                 "source": {
                     "job_url": job_meta.get("url"),
@@ -754,9 +754,9 @@ class StepBase:
                     "published_at": job_meta.get("published_at"),
                 },
             },
-            # G 评估(前瞻,留空槽)
+            # 评估(前瞻,留空槽)
             "feedback": None,
-            # H 环境
+            # 环境
             "env": {
                 "worker_id": os.environ.get("WORKER_ID") or os.environ.get("FLORI_WORKER_ID"),
                 "host": socket.gethostname(),
@@ -774,8 +774,8 @@ class StepBase:
         images: list[Path] | None = None,
         **kwargs,
     ) -> tuple[dict, bool]:
-        """调用 AI 并解析 JSON。解析失败时回退到 fallback（附 raw_response/parse_failed）。
-        若给 score_keys 且结果缺 overall，按维度均值自动补 overall。
+        """调用 AI 并解析 JSON。解析失败时回退到 fallback(附 raw_response/parse_failed)。
+        若给 score_keys 且结果缺 overall,按维度均值自动补 overall。
         返回 (result, parse_failed)。"""
         kwargs.setdefault("response_format", "json")
         # 评分/抽取类要确定性:默认低温,幂等重跑/retry 拿到稳定分数(claude-cli 无视此项无害)。
@@ -806,7 +806,7 @@ class StepBase:
         if score_keys and "overall" not in result:
             scores = [result.get(k, 3) for k in score_keys]
             result["overall"] = round(sum(scores) / max(len(scores), 1), 1)
-        # 回填审计 D 输出处理:解析成功/抢救/失败 + 抽出的结构化结果(供 review 步看产了哪些概念)。
+        # 回填审计记录的 output_processed:解析成功/抢救/失败 + 抽出的结构化结果(供 review 步看产了哪些概念)。
         self._amend_last_ai_log({"output_processed": {
             "json_parse": {"ok": not parse_failed, "salvaged": did_salvage},
             "parse_failed": parse_failed,
@@ -819,7 +819,7 @@ class StepBase:
         """JSON 整体解析失败时的兜底:按 `"维度": 数字` 正则逐项抢救 1-5 分。
         rationale 里的同名键值是字符串("维度": "..."),数字正则不会误命中。
         至少命中半数维度才返回(部分命中按已命中均值补齐缺的,round),否则 None → 走 fallback。
-        放宽自"必须全维度命中":少一个维度就整体落 fallback 全 3 是 overall 恒 3.0 的残留口子。"""
+        阈值取半数而非全命中:少一个维度就整体落 fallback 全 3,overall 又会恒 3.0。"""
         if not score_keys:
             return None
         import re
@@ -851,7 +851,7 @@ class StepBase:
                 s = s[i:j + 1]
         return s
 
-    # ── 外部命令 ──
+    # 外部命令
 
     def run_subprocess(
         self, cmd: list[str], timeout: int = 600, **kwargs
@@ -877,17 +877,17 @@ class StepBase:
             print(r.stderr, file=sys.stderr, flush=True)
         return r
 
-    # ── Private ──
+    # Private
 
     def _setup_logger(self):
         return structlog.get_logger(step=self.step_name, job_dir=str(self.job_dir))
 
     def _injected_prompt_override(self) -> str:
-        """白盒 Phase 2:job.json 里本步被注入的 prompt 覆盖正文(无/读失败则空串)。
+        """job.json 里本步被注入的 prompt 覆盖正文(无/读失败则空串)。
         来源 = api job 创建时按 DB prompt_overrides(scope/domain/pipeline/step)解析后写入
         job.json.prompt_overrides[step](pure worker 无 DB,只能靠 job 带过去)。镜像 _read_override 读盘范式。
-        ★兼容两种 job.json 形态:1.1.5 起每步是 {content, version}(含激活版本号快照);旧 job
-          是纯字符串。两者都取出【正文】(版本号供 Job 详情比对,worker 注入只需正文)。"""
+        兼容两种 job.json 形态:新形态每步是 {content, version}(含激活版本号快照),旧形态
+        是纯字符串。两者都取出正文:版本号供 Job 详情比对,worker 注入只需正文。"""
         job_dir = getattr(self, "job_dir", None)
         if job_dir is None:  # 裸构造的 StepBase(仅测模板加载)无 job_dir,优雅返回空串
             return ""
@@ -914,10 +914,11 @@ class StepBase:
 
     def _override_targets_template(self, name: str) -> bool:
         """注入覆盖是否作用于该模板 name。
-        ① name==step_name:主模板,精确命中;② name 以 "step_name." 开头(变体)且该步无同名主模板
-           → 命中(如 08_punctuate 只有 .zh/.translate 变体,同一 job 只跑一个,覆盖落到被加载的那个)。
-        反例:11_smart 有主模板 11_smart.md → 变体 11_smart.vision 不吃覆盖(两 pass 同 job 都跑,
-        覆盖只改主笔记 pass,不污染视觉 pass)。"""
+        1. name==step_name:主模板,精确命中。
+        2. name 以 "step_name." 开头(变体)且该步无同名主模板 → 命中。如 08_punctuate 只有
+           .zh/.translate 变体,同一 job 只跑一个,覆盖落到被加载的那个。
+        反例:11_smart 有主模板 11_smart.md,变体 11_smart.vision 不吃覆盖:两 pass 同 job 都跑,
+        覆盖只改主笔记 pass,不污染视觉 pass。"""
         if name == self.step_name:
             return True
         if name.startswith(self.step_name + "."):
@@ -929,11 +930,12 @@ class StepBase:
 
     def _load_system_prompt(self) -> str | None:
         """本步 system prompt,回退顺序 = DB 注入覆盖(仅无模板步)> 外置 {step_name}.md > None(内联默认)。
-        ① 白盒 Phase 2:覆盖对象已对齐到「该步实际起作用的那段 prompt」——有 user-prompt 模板的步,
-           DB 覆盖在 _load_prompt_template 替换该模板(所见即所改);故此处仅【无模板步】(评审等
-           prompt 内联)才把注入覆盖当 system,避免有模板步双重套用;② 兼容旧钩子 prompts/{step_name}.md;
-           ③ 都无则 None(provider 对 system=None 有守卫)。注入覆盖在 job 创建期解析、固化进 job.json,
-        故同一 job 生命周期内稳定(幂等一致)。"""
+        1. 覆盖对象对齐到该步实际起作用的那段 prompt:有 user-prompt 模板的步,DB 覆盖在
+           _load_prompt_template 替换该模板(所见即所改);故此处仅无模板步(评审等 prompt 内联)
+           才把注入覆盖当 system,避免有模板步双重套用。
+        2. 兼容钩子 prompts/{step_name}.md。
+        3. 都无则 None(provider 对 system=None 有守卫)。
+        注入覆盖在 job 创建期解析、固化进 job.json,故同一 job 生命周期内稳定(幂等一致)。"""
         injected = self._injected_prompt_override()
         if injected and not self._has_step_template():
             return injected
@@ -948,7 +950,7 @@ class StepBase:
     def load_domain_prompt_profile(self) -> dict:
         """加载 domain prompt profile(prompts_dir/profiles/{domain}.yaml),不存在返回 {}。四个 smart 步共用。
         注:与 shared.config.load_domain_profile(读 config_dir/domain/{domain}.yaml,build 期用)不同源,
-        故命名区分避免跨文件误认(审计 R-L29)。"""
+        故命名区分避免跨文件误认。"""
         import yaml
         prompts_dir = Path(self.config["paths"]["prompts_dir"])
         domain_name = self.config["domain"]["name"]
@@ -960,7 +962,8 @@ class StepBase:
     @staticmethod
     def terminology_block(profile: dict) -> str:
         """四 smart 步共用:把 profile.terminology 注入为"已沉淀标准概念"提示段(无 terminology 则空串)。
-        回流(§1.8 ③):命中沿用统一措辞、不重复展开,只对未列出的新概念首次解释(审计 R-M9 去四处重复)。"""
+        命中的概念沿用统一措辞、不重复展开,只对未列出的新概念首次解释。
+        回流机制见 docs/06-prompt-engineering.md §4。"""
         terms = (profile or {}).get("terminology")
         if not terms:
             return ""
@@ -973,7 +976,7 @@ class StepBase:
     def prompt_profile_style_hashes(self) -> dict[str, str]:
         """smart 步共用的指纹块:可选外置 prompt 覆盖({step_name}.md)+ 默认 prompt 模板(templates/{step_name}.md)
         + domain profile + style tags。改默认模板(外置可编辑)即变指纹 → should_run 重跑。
-        与各 smart 步此前逐字重复的 input_hashes 片段等价(profile/styles 键名取值不变,保持幂等一致)。"""
+        profile/styles 的键名与取值口径不可轻改:变了即改变既有 .done 指纹,触发全量重跑。"""
         import json
         prompts_dir = Path(self.config["paths"]["prompts_dir"])
         domain_name = self.config["domain"]["name"]
@@ -994,7 +997,7 @@ class StepBase:
         }, sort_keys=True)
         return hashes
 
-    # ── 外置默认 prompt 模板(templates/<name>.md;改文件不碰代码、自动进指纹)──
+    # 外置默认 prompt 模板(templates/<name>.md;改文件不碰代码、自动进指纹)
     def _templates_dir(self) -> Path:
         """默认 prompt 模板目录 = prompts_dir/templates(与 profiles/styles 同卷不同子路径;
         部署可把该子路径 bind-mount 到仓库 configs/prompts/templates,改模板即生效不 rebuild)。"""
@@ -1002,10 +1005,10 @@ class StepBase:
 
     def _load_prompt_template(self, name: str, default: str) -> str:
         """该步默认 user-prompt 骨架,回退顺序 = DB 注入覆盖 > templates/{name}.md > 代码内 default。
-        白盒 Phase 2:网页编辑的覆盖(job.json.prompt_overrides[step])替换的就是【这段展示的默认模板】
-        ——所见即所改;只对作为该步覆盖目标的 name 生效(_override_targets_template),变体 name 见其规则。
+        网页编辑的覆盖(job.json.prompt_overrides[step])替换的就是这段展示的默认模板,
+        所见即所改;只对作为该步覆盖目标的 name 生效(_override_targets_template),变体 name 见其规则。
         缺模板文件则用 default 兜底(空卷/旧部署/测试 tmp prompts_dir 缺模板仍能跑)。
-        ★调用方对动态部分用 str.replace 注入(prompt 含字面 {},不可 str.format)。"""
+        调用方对动态部分用 str.replace 注入:prompt 含字面 {},不可 str.format。"""
         injected = self._injected_prompt_override()
         if injected and self._override_targets_template(name):
             return injected

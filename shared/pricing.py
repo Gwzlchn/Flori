@@ -1,10 +1,10 @@
-"""LiteLLM 价表:模型计费的单一来源(取代原硬编码 PRICING,后者降为拉取失败时的兜底)。
+"""LiteLLM 价表:模型计费的单一来源;硬编码 PRICING 仅作拉取失败时的兜底。
 
 每天拉一份 LiteLLM 的 model_prices_and_context_window.json(扁平 dict,key=模型名,
 单价均为 per-token,且自带 cache_creation/cache_read 单价),存 MinIO,用最新数据算成本。
 其他供应商模型多变(kimi 2.7 / deepseek 4pro 等)无需写死,每天拉最新即可。
 
-【计费在 api 侧做】api 有网 + MinIO;纯网关 worker 不直连 MinIO/Redis。流程:worker 报原始
+计费在 api 侧做:api 有网 + MinIO;纯网关 worker 不直连 MinIO/Redis。流程:worker 报原始
 token,api record_ai_usage 据本表填 cost(claude-cli 订阅路径用 CLI total_cost_usd,不经本表)。
 未命中本表 / 拉取失败 → 调用方回退 ai_gateway.calc_cost(硬编码 PRICING)。
 """

@@ -1,4 +1,4 @@
-"""AI Gateway：Provider 适配 + 路由 + 成本追踪。"""
+"""AI Gateway: Provider 适配 + 路由 + 成本追踪。"""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from .models import AIUsage, LLMRequest, LLMResponse
 _log = structlog.get_logger(component="ai_gateway")
 
 
-# ── 成本表（USD per 1M tokens）──
+# 成本表(USD per 1M tokens)
 
 PRICING: dict[tuple[str, str], dict[str, float]] = {
     ("anthropic", "claude-opus-4-8"): {"input": 15.0, "output": 75.0},
@@ -39,13 +39,13 @@ def calc_cost(provider: str, model: str, input_tokens: int, output_tokens: int,
               cache_creation_tokens: int = 0, cache_read_tokens: int = 0) -> float:
     prices = PRICING.get((provider, model))
     if prices is None:
-        # 未命中 PRICING:成本按 0 计,但打 warning——区分「刻意免费(cli/dry-run 不走本函数)」
-        # 与「配置漂移漏命中(providers.yaml 模型名与 PRICING 键不一致,如旧 opus-4-6)」。
+        # 未命中 PRICING:成本按 0 计,但打 warning,用来区分刻意免费和配置漂移漏命中。
+        # 刻意免费指 cli/dry-run 不走本函数;配置漂移指 providers.yaml 模型名与 PRICING 键不一致。
         _log.warning("pricing_miss", provider=provider, model=model,
                      msg="未命中 PRICING,成本按 0 计——核对模型名与 PRICING 键是否一致")
         prices = {"input": 0, "output": 0}
     inp = prices["input"]
-    # 缓存感知(Anthropic 口径,同 codeburn/LiteLLM):写缓存(5min)≈1.25× 输入价、读缓存≈0.1× 输入价。
+    # 缓存感知,Anthropic 口径(同 codeburn/LiteLLM):写缓存 5min 档 ≈1.25× 输入价、读缓存 ≈0.1× 输入价。
     return (
         input_tokens * inp
         + cache_creation_tokens * inp * 1.25
@@ -55,9 +55,9 @@ def calc_cost(provider: str, model: str, input_tokens: int, output_tokens: int,
 
 
 def _extract_cli_model(obj: dict) -> str:
-    """从 `claude -p --output-format json` 顶层 JSON 取真实模型名(兼容多种 CLI 输出)。
-    优先顶层 `model`(老/简单格式多半没有);否则取 `modelUsage`(新 CLI={模型名:{token...}})里
-    token 总数最大的键(主力模型);都拿不到 → "subscription"(订阅路径占位,不迁移历史数据)。"""
+    """从 `claude -p --output-format json` 顶层 JSON 取真实模型名,兼容多种 CLI 输出。
+    优先顶层 `model`,部分输出格式没有;否则在 `modelUsage`(形如 {模型名: {token...}})里
+    取 token 总数最大的键,即主力模型。都拿不到时用 "subscription" 占位,这条路径不迁移历史数据。"""
     m = obj.get("model")
     if isinstance(m, str) and m:
         return m
@@ -77,11 +77,11 @@ def _extract_cli_model(obj: dict) -> str:
     return "subscription"
 
 
-# ── Provider 实现 ──
+# Provider 实现
 
 
 class DryRunProvider:
-    """DRY_RUN 模式：不调真实 API。"""
+    """DRY_RUN 模式:不调真实 API。"""
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         return LLMResponse(
@@ -97,7 +97,7 @@ class DryRunProvider:
 
 
 class AnthropicProvider:
-    """Anthropic API（SDK: anthropic）。"""
+    """Anthropic API(SDK: anthropic)。"""
 
     def __init__(self, api_key: str):
         self._api_key = api_key
@@ -133,7 +133,7 @@ class AnthropicProvider:
         duration = time.time() - start
         input_tokens = response.usage.input_tokens
         output_tokens = response.usage.output_tokens
-        # 合并所有 text block：多 block / 思考型响应只取 [0] 会丢正文(无 type 视为 text)。
+        # 合并所有 text block:多 block / 思考型响应只取 [0] 会丢正文(无 type 视为 text)。
         content = "".join(
             b.text for b in (response.content or [])
             if getattr(b, "type", "text") == "text"
@@ -164,14 +164,14 @@ class AnthropicProvider:
             raw=raw,
         )
 
-    # Anthropic 支持的图片 media subtype(后缀大小写归一;其余后缀显式报错,避免发出非法 media_type 被 API 拒)。
+    # Anthropic 支持的图片 media subtype,后缀大小写归一。其余后缀显式报错,避免发出非法 media_type 被 API 拒。
     _IMG_SUBTYPE = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp"}
 
     def _build_messages(self, request: LLMRequest) -> list[dict]:
         messages = [dict(m) for m in request.messages]
         if not request.images:
             return messages
-        # 只给【最后一条】user message 附图:逐条附会在多 message(多轮对话)时把同组图按 base64 重复 N 遍。
+        # 只给最后一条 user message 附图:逐条附会在多 message(多轮对话)时把同组图按 base64 重复 N 遍。
         last_user = next(
             (i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"),
             None,
@@ -199,7 +199,7 @@ class AnthropicProvider:
 
 
 class OpenAICompatibleProvider:
-    """OpenAI 兼容 API（DeepSeek / Qwen / Ollama / vLLM）。"""
+    """OpenAI 兼容 API(DeepSeek / Qwen / Ollama / vLLM)。"""
 
     def __init__(self, base_url: str, api_key: str, provider_name: str = "openai_compatible"):
         self._base_url = base_url
@@ -266,7 +266,7 @@ class OpenAICompatibleProvider:
 
 
 class ClaudeCLIProvider:
-    """Claude CLI 订阅（subprocess 调用）。"""
+    """Claude CLI 订阅(subprocess 调用)。"""
 
     def __init__(self, command_template: list[str], env: dict | None = None):
         self._command_template = command_template
@@ -284,7 +284,7 @@ class ClaudeCLIProvider:
         extra_dirs: set[str] = set()
         if request.images:
             # 路径可能已被 step 以 [N] 形式列进 prompt(如视频视觉 pass);只补 prompt 里尚未出现的,
-            # 避免同组绝对路径注入两遍(审计 R-M11)。--add-dir 仍按全部 images 授权,不影响 Read。
+            # 避免同组绝对路径注入两遍。--add-dir 仍按全部 images 授权,不影响 Read。
             missing = []
             for p in request.images:
                 ap = str(Path(p).resolve())
@@ -294,7 +294,7 @@ class ClaudeCLIProvider:
             if missing:
                 prompt_content += "\n截图(用 Read 工具逐张查看):\n" + "\n".join(missing) + "\n"
 
-        # 命令模板里的 {prompt_file} 占位已弃用——prompt 改走 stdin(无 ARG_MAX 限制、不依赖文件读)。
+        # 剔除命令模板里的 {prompt_file} 占位:prompt 走 stdin,无 ARG_MAX 限制、不依赖文件读。
         cmd = [part for part in self._command_template if "{prompt_file}" not in part]
         # 结构化输出强制 json:拿真实 usage(in/out/cache token)+ total_cost_usd + num_turns。
         # 模板里可能已带 `--output-format text`(providers.yaml 默认),先剔除该对再设 json,
@@ -305,7 +305,7 @@ class ClaudeCLIProvider:
         cmd += ["--output-format", "json"]
         if request.allowed_tools:
             # 取证等联网步骤:放开指定工具(如 WebSearch + Bash),让 claude agentic 搜+抓+抽。
-            # 与 images 分支互斥(取证不喂帧图);max_turns 给足(多轮:搜索→直连curl→抽取)。
+            # 与 images 分支互斥(取证不喂帧图);max_turns 给足,多轮流程为搜索、直连 curl、抽取。
             cmd += ["--allowedTools", *request.allowed_tools]
             cmd += ["--max-turns", str(request.max_turns or 24)]
         elif request.images:
@@ -316,9 +316,9 @@ class ClaudeCLIProvider:
             for d in sorted(extra_dirs):
                 cmd += ["--add-dir", d]
         else:
-            # 纯文本调用(评审/标点):禁用全部工具(--tools "")强制单次纯文本生成。
-            # 否则 claude -p 默认带工具,大 prompt(评审)下会尝试调工具→消耗第 1 轮→
-            # max-turns 1 截断报 "Reached max turns (1)"(线上 11_review 实测此因失败);
+            # 纯文本调用(评审/标点):用 --tools "" 禁用全部工具,强制单次纯文本生成。
+            # 否则 claude -p 默认带工具,评审这类大 prompt 会尝试调工具,消耗掉第 1 轮,
+            # 被 max-turns 1 截断报 "Reached max turns (1)",线上 11_review 实测此因失败;
             # 即便不报错也会多轮 agentic"思考",一个打分跑成 >15min。
             # 工具禁掉后只能产出 1 个文本轮,max-turns 1 即安全(实测 ~14-35s)。
             cmd += ["--tools", "", "--max-turns", "1"]
@@ -351,7 +351,7 @@ class ClaudeCLIProvider:
 
         if proc.returncode != 0:
             detail = (stderr.decode() + stdout.decode())[:500]
-            # 订阅用量/限流：归为 AIRateLimitError 走长退避等配额恢复(而非快速重试转终态)。
+            # 订阅用量/限流:归为 AIRateLimitError 走长退避等配额恢复(而非快速重试转终态)。
             low = detail.lower()
             if any(k in low for k in (
                 "rate limit", "rate_limit", "usage limit", "429",
@@ -362,7 +362,7 @@ class ClaudeCLIProvider:
 
         raw = stdout.decode().strip()
         # 解析 --output-format json:result(正文)+ usage(in/out/cache)+ total_cost_usd + num_turns。
-        # 解析失败(旧 CLI / 非 json 输出)回退原始文本 + 零统计(向后兼容,不让步骤失败)。
+        # 解析失败(旧 CLI / 非 json 输出)回退原始文本 + 零统计:向后兼容,不让步骤失败。
         content, in_tok, out_tok = raw, 0, 0
         cc = cr = turns = 0
         cost = 0.0
@@ -390,8 +390,8 @@ class ClaudeCLIProvider:
                 finish_reason = obj.get("subtype") or obj.get("stop_reason")
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
-        # 订阅路径:claude -p 一般已回 total_cost_usd(=等价 API 成本,非真实账单,前端标「等价」)。
-        # 若缺失(回 0)而有 token,则按 PRICING 折算等价成本(缓存感知);model 未命中价表则仍为 0(已 warn)。
+        # 订阅路径:claude -p 一般已回 total_cost_usd,即等价 API 成本而非真实账单,前端标「等价」。
+        # 若缺失(回 0)而有 token,则按 PRICING 折算等价成本,缓存感知;model 未命中价表则仍为 0,已 warn。
         if cost == 0.0 and (in_tok or out_tok or cc or cr):
             cost = round(calc_cost("anthropic", model, in_tok, out_tok, cc, cr), 6)
         return LLMResponse(
@@ -413,7 +413,7 @@ class ClaudeCLIProvider:
         )
 
 
-# ── Gateway ──
+# Gateway
 
 
 class AIGateway:
@@ -435,9 +435,9 @@ class AIGateway:
 
         ai_config = self._get_step_ai_config(step_name)
         has_images = bool(request.images)
-        errors: list[str] = []   # 累计各 provider 真实报错，附进异常→落 error.json，便于排错
+        errors: list[str] = []   # 累计各 provider 真实报错,附进异常→落 error.json,便于排错
         rate_limited = False     # 任一 provider 限流 → 整体按 ai_rate_limit 走长退避
-        # 逐 tier 尝试链(含成功/失败),写进返回 response.attempts(成功)或异常 .attempts(全败),供 AI 审计。
+        # 逐 tier 尝试链,含成功/失败。成功时写进返回 response.attempts,全败时写进异常 .attempts,供 AI 审计。
         attempts: list[dict] = []
 
         def _attempt(tier: str, cfg: dict, *, ok: bool, err: Exception | None = None) -> dict:
@@ -508,7 +508,7 @@ class AIGateway:
     def _create_provider(self, name: str):
         cfg = self._providers_config.get("providers", {}).get(name, {})
         ptype = cfg.get("type", "")
-        # 密钥不再随 step_cfg 落盘(已脱敏),配置缺省时按 {NAME}_API_KEY 约定从环境读。
+        # 密钥不随 step_cfg 落盘;配置缺省时按 {NAME}_API_KEY 约定从环境读。
         api_key = cfg.get("api_key") or os.environ.get(f"{name.upper()}_API_KEY", "")
 
         if ptype == "anthropic":
@@ -528,11 +528,11 @@ class AIGateway:
             raise AIProviderError(f"Unknown provider type: {ptype}")
 
 
-# ── Usage 文件读写 ──
+# Usage 文件读写
 
 
 def record_usage_to_file(usage: AIUsage, log_dir: Path) -> None:
-    """步骤进程调用：追加到 .{step}.usage.json。"""
+    """步骤进程调用:追加到 .{step}.usage.json。"""
     log_dir.mkdir(parents=True, exist_ok=True)
     path = log_dir / f".{usage.step}.usage.json"
     entries = json.loads(path.read_text()) if path.exists() else []
@@ -557,7 +557,7 @@ def record_usage_to_file(usage: AIUsage, log_dir: Path) -> None:
 
 
 def collect_usage_from_file(log_dir: Path, step: str) -> list[AIUsage]:
-    """Worker 调用：读取 usage 文件，返回 AIUsage 列表。"""
+    """Worker 调用:读取 usage 文件,返回 AIUsage 列表。"""
     path = log_dir / f".{step}.usage.json"
     if not path.exists():
         return []

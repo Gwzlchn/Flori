@@ -28,7 +28,7 @@ def extract_youtube_id(url: str | None) -> str | None:
     return m.group(1) if m else None
 
 
-# ── 内容来源 → Job ID 前缀 + 原生 ID 提取器 ──
+# 内容来源 → Job ID 前缀 + 原生 ID 提取器
 _PLATFORM: dict[str, tuple[str, "callable | None"]] = {
     "bilibili": ("bili", extract_bilibili_bvid),
     "youtube": ("yt", extract_youtube_id),
@@ -82,7 +82,7 @@ def generate_collection_id() -> str:
     return f"col_{secrets.token_hex(4)}"
 
 
-# ── 订阅源类型 → 来源徽标 + Collection ID ──
+# 订阅源类型 → 来源徽标 + Collection ID
 def _yt_slug(sid: str) -> str:
     m = (re.search(r"@([A-Za-z0-9._-]+)", sid)
          or re.search(r"(UC[A-Za-z0-9_-]{20,})", sid)

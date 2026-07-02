@@ -1,10 +1,10 @@
 """URL → 网络可达区域(net-cn / net-global)分类。
 
 任务分发(scheduler enqueue 下载步)时调用,给下载步设 require_tag,把任务路由到
-【自报覆盖该区域】的 worker(境外→香港/带代理 worker;大陆→大陆 worker)。
+自报覆盖该区域的 worker(境外→香港/带代理 worker;大陆→大陆 worker)。
 
-CN 域名表【Docker 构建时从 GitHub 上游(felixonmars/dnsmasq-china-list)拉取、烤进镜像】
-(见 docker/base.Dockerfile),运行时只读不拉(避开 NAS 对 github 的代理不稳)。
+CN 域名表在 Docker 构建时从 GitHub 上游(felixonmars/dnsmasq-china-list)拉取、烤进镜像,
+见 docker/base.Dockerfile;运行时只读不拉,避开 NAS 对 github 的代理不稳。
 表缺失/读失败 → 回退仅按 .cn/.com.cn TLD 判 cn(保底:境外仍 net-global,不误派到大陆 worker)。
 """
 

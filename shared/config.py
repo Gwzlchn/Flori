@@ -1,4 +1,4 @@
-"""配置加载：YAML + 环境变量替换 + GitLab-CI 风格流水线归一化。"""
+"""配置加载:YAML + 环境变量替换 + GitLab-CI 风格流水线归一化。"""
 
 from __future__ import annotations
 
@@ -13,13 +13,13 @@ import yaml
 
 _ENV_PATTERN = re.compile(r"\$\{(\w+)(?::-(.*?))?\}")
 
-# 流水线内变量引用：$VAR 或 ${VAR}，作用域是 pipeline 的 variables 而非 OS env。
+# 流水线内变量引用:$VAR 或 ${VAR},作用域是 pipeline 的 variables 而非 OS env。
 _PIPE_VAR_PATTERN = re.compile(r"\$\{(\w+)\}|\$(\w+)")
 
-# extends 继承链深度上限，防环/防失控（对标 GitLab 建议 ≤3 级）。
+# extends 继承链深度上限,防环/防失控(对标 GitLab 建议 ≤3 级)。
 _MAX_EXTENDS_DEPTH = 5
 
-# 新→旧字段名映射：归一化后落到 worker/scheduler 现有消费的 step dict 字段。
+# 新→旧字段名映射:归一化后落到 worker/scheduler 现有消费的 step dict 字段。
 _FIELD_ALIASES = {
     "run": "module",
     "needs": "depends_on",
@@ -27,15 +27,15 @@ _FIELD_ALIASES = {
     "retry": "retries",
 }
 
-# 顶层非 pipeline 的保留键（模板/默认/包含/变量），归一化时不当作内容类型。
+# 顶层非 pipeline 的保留键(模板/默认/包含/变量),归一化时不当作内容类型。
 _RESERVED_TOP_KEYS = {"default", "include", "variables"}
 
 
 def resolve_env_vars(text: str) -> str:
     """替换 ${VAR} 和 ${VAR:-default} 格式的环境变量引用。
-    - 有值：替换为环境变量值
-    - 无值+有默认值：替换为默认值
-    - 无值+无默认值：保留原文（运行时可能才需要）
+    - 有值:替换为环境变量值
+    - 无值+有默认值:替换为默认值
+    - 无值+无默认值:保留原文(运行时可能才需要)
     """
 
     def _replacer(match: re.Match) -> str:
@@ -52,8 +52,8 @@ def resolve_env_vars(text: str) -> str:
 
 
 def _coerce_scalar(text: str):
-    """把整段就是一个数字的字符串还原为数值，使 $VAR 注入的数值保持原类型。
-    先试 int（timeout/retry 等），再试 float（如 1.5），都不是则保留原字符串。"""
+    """把整段就是一个数字的字符串还原为数值,使 $VAR 注入的数值保持原类型。
+    先试 int(timeout/retry 等),再试 float(如 1.5),都不是则保留原字符串。"""
     try:
         return int(text)
     except ValueError:
@@ -72,7 +72,7 @@ def _resolve_pipeline_vars(value, variables: dict):
             return str(variables[name]) if name in variables else match.group(0)
 
         replaced = _PIPE_VAR_PATTERN.sub(_sub, value)
-        # 整串恰为一个变量引用时还原数值类型（timeout/retry 等需要 int）。
+        # 整串恰为一个变量引用时还原数值类型(timeout/retry 等需要 int)。
         if replaced != value and _PIPE_VAR_PATTERN.fullmatch(value):
             return _coerce_scalar(replaced)
         return replaced
@@ -91,14 +91,14 @@ def load_yaml(path: Path) -> dict:
 
 
 def _load_optional(path: Path) -> dict:
-    """加载可选 YAML，不存在返回空 dict。"""
+    """加载可选 YAML,不存在返回空 dict。"""
     if path.exists():
         return load_yaml(path)
     return {}
 
 
 def _deep_merge(base: dict, overlay: dict) -> dict:
-    """按键深合并：dict 递归合并，其余键 overlay 覆盖 base（对标 GitLab extends 语义）。"""
+    """按键深合并:dict 递归合并,其余键 overlay 覆盖 base(对标 GitLab extends 语义)。"""
     result = copy.deepcopy(base)
     for key, val in overlay.items():
         if isinstance(val, dict) and isinstance(result.get(key), dict):
@@ -109,7 +109,7 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
 
 
 def _resolve_extends(job: dict, templates: dict, _depth: int = 0) -> dict:
-    """展开 job 的 extends 链：父模板（可多级）作底，子 job 字段深合并覆盖。"""
+    """展开 job 的 extends 链:父模板(可多级)作底,子 job 字段深合并覆盖。"""
     parent_name = job.get("extends")
     if not parent_name:
         return {k: v for k, v in job.items() if k != "extends"}
@@ -122,7 +122,7 @@ def _resolve_extends(job: dict, templates: dict, _depth: int = 0) -> dict:
     return _deep_merge(parent, child)
 
 
-# rules 中 exists glob → 旧 condition 字符串的等价映射，保证 scheduler 行为不变。
+# rules 中 exists glob → 旧 condition 字符串的等价映射,保证 scheduler 行为不变。
 _RULES_EXISTS_TO_CONDITION = {
     ("input/*.srt", "skip"): "no_subtitle",
     ("input/*.srt", "on"): "has_subtitle",
@@ -131,7 +131,7 @@ _RULES_EXISTS_TO_CONDITION = {
 
 
 def _normalize_when(when) -> str:
-    """归一 when 取值：YAML 1.1 把裸 on/off 解析为布尔，统一回字符串语义。"""
+    """归一 when 取值:YAML 1.1 把裸 on/off 解析为布尔,统一回字符串语义。"""
     if when is True:
         return "on"
     if when is False:
@@ -140,8 +140,8 @@ def _normalize_when(when) -> str:
 
 
 def _rules_to_condition(rules: list) -> str | None:
-    """把已知的 exists 规则归一化回旧 condition 字符串，行为与硬编码判断等价。
-    无法识别的规则原样保留在 step 的 rules 字段，由调度器的 rules 求值器处理。"""
+    """把已知的 exists 规则归一化回旧 condition 字符串,行为与硬编码判断等价。
+    无法识别的规则原样保留在 step 的 rules 字段,由调度器的 rules 求值器处理。"""
     for rule in rules:
         if not isinstance(rule, dict):
             continue
@@ -155,7 +155,7 @@ def _rules_to_condition(rules: list) -> str | None:
 
 
 def _normalize_job(name: str, job: dict) -> dict:
-    """把单个新格式 job 归一化为旧 step dict（字段重命名 + 默认值 + 保留 image）。"""
+    """把单个新格式 job 归一化为旧 step dict(字段重命名 + 默认值 + 保留 image)。"""
     step: dict = {}
     for key, val in job.items():
         step[_FIELD_ALIASES.get(key, key)] = val
@@ -164,12 +164,12 @@ def _normalize_job(name: str, job: dict) -> dict:
     step.setdefault("depends_on", [])
     step.setdefault("image", "flori/step-base")
 
-    # retry 可为 int 或 {max, when}；归一化为旧的 retries 整数（worker/scheduler 只读次数）。
+    # retry 可为 int 或 {max, when};归一化为旧的 retries 整数(worker/scheduler 只读次数)。
     retry = step.get("retries")
     if isinstance(retry, dict):
         step["retries"] = retry.get("max", 0)
 
-    # rules → condition：已知 exists 规则映回旧字符串，行为与 check_condition 一致。
+    # rules → condition:已知 exists 规则映回旧字符串,行为与 check_condition 一致。
     rules = step.get("rules")
     if rules and "condition" not in step:
         mapped = _rules_to_condition(rules)
@@ -181,12 +181,12 @@ def _normalize_job(name: str, job: dict) -> dict:
 
 def normalize_pipeline(raw_pipeline: dict, *, default: dict | None = None,
                        templates: dict | None = None) -> dict:
-    """把单条流水线归一化为 worker/scheduler 消费的形状：{"steps": [step_dict, ...]}。
-    既接受旧格式（steps: 列表），也接受新格式（jobs: 字典 + extends/needs/rules/variables）。
-    归一化输出与旧格式逐字段等价，保证下游行为不变。"""
+    """把单条流水线归一化为 worker/scheduler 消费的形状:{"steps": [step_dict, ...]}。
+    既接受旧格式(steps: 列表),也接受新格式(jobs: 字典 + extends/needs/rules/variables)。
+    归一化输出与旧格式逐字段等价,保证下游行为不变。"""
     templates = templates or {}
 
-    # 旧格式：已是 {"steps": [...]}，仅补全 image 默认值后原样返回。
+    # 旧格式:已是 {"steps": [...]},仅补全 image 默认值后原样返回。
     if "steps" in raw_pipeline and "jobs" not in raw_pipeline:
         steps = []
         for s in raw_pipeline["steps"]:
@@ -209,7 +209,7 @@ def normalize_pipeline(raw_pipeline: dict, *, default: dict | None = None,
 
 
 def _collect_includes(raw: dict, config_dir: Path) -> dict:
-    """合并 include 的 local 文件到主结构（顶层按键深合并，后者覆盖前者）。"""
+    """合并 include 的 local 文件到主结构(顶层按键深合并,后者覆盖前者)。"""
     merged: dict = {k: v for k, v in raw.items() if k != "include"}
     for entry in raw.get("include") or []:
         local = entry.get("local") if isinstance(entry, dict) else entry
@@ -222,13 +222,13 @@ def _collect_includes(raw: dict, config_dir: Path) -> dict:
 
 
 def normalize_pipelines(raw: dict, config_dir: Path | None = None) -> dict:
-    """把整份 pipelines.yaml 归一化：处理 include / default / 模板 / 变量，
-    输出 {pipeline_name: {"steps": [...]}}，与历史 in-memory 结构逐字段等价。"""
+    """把整份 pipelines.yaml 归一化:处理 include / default / 模板 / 变量,
+    输出 {pipeline_name: {"steps": [...]}},与 worker/scheduler 消费的 in-memory 结构逐字段等价。"""
     if config_dir is not None:
         raw = _collect_includes(raw, config_dir)
 
     default = raw.get("default") or {}
-    # '.' 前缀的隐藏模板供 extends 引用，不作为内容类型流水线。
+    # '.' 前缀的隐藏模板供 extends 引用,不作为内容类型流水线。
     templates = {k: v for k, v in raw.items() if k.startswith(".")}
     global_vars = raw.get("variables") or {}
 
@@ -238,7 +238,7 @@ def normalize_pipelines(raw: dict, config_dir: Path | None = None) -> dict:
             continue
         if not isinstance(body, dict):
             continue
-        # pipeline 级变量叠加全局变量（pipeline 优先），消除 prod↔integration 双份。
+        # pipeline 级变量叠加全局变量(pipeline 优先),消除 prod 与 integration 的双份定义。
         if "jobs" in body:
             body = {**body, "variables": {**global_vars, **(body.get("variables") or {})}}
         result[name] = normalize_pipeline(body, default=default, templates=templates)
@@ -246,7 +246,7 @@ def normalize_pipelines(raw: dict, config_dir: Path | None = None) -> dict:
 
 
 def load_pipelines(path: Path) -> dict:
-    """加载并归一化 pipelines.yaml；支持新旧两种格式。"""
+    """加载并归一化 pipelines.yaml;支持新旧两种格式。"""
     raw = load_yaml(path)
     return normalize_pipelines(raw, config_dir=path.parent)
 
@@ -291,18 +291,18 @@ def load_config(
 
 
 def load_domain_profile(config_dir: Path, domain: str) -> dict:
-    """加载 domain/*.yaml，不存在返回空 dict。"""
+    """加载 domain/*.yaml,不存在返回空 dict。"""
     path = config_dir / "domain" / f"{domain}.yaml"
     return _load_optional(path)
 
 
-# providers.yaml 在加载期已把 ${API_KEY} 解析成明文，按需安全要求绝不下放给步骤。
+# providers.yaml 在加载期已把 ${API_KEY} 解析成明文,按安全要求绝不下放给步骤。
 _PROVIDER_SECRET_KEYS = ("api_key", "secret_key", "token")
 
 
 def sanitize_providers(providers: dict) -> dict:
-    """剥离 providers 配置里的明文密钥，只留 provider/model 选择给步骤进程。
-    密钥由 ai_gateway 在调用时从 env 读取，绝不经 .{step}.config.json 落盘或代理。"""
+    """剥离 providers 配置里的明文密钥,只留 provider/model 选择给步骤进程。
+    密钥由 ai_gateway 在调用时从 env 读取,绝不经 .{step}.config.json 落盘或代理。"""
     providers_map = providers.get("providers")
     if not isinstance(providers_map, dict):
         return copy.deepcopy(providers)
@@ -321,7 +321,7 @@ def build_step_config(
     domain: str = "general",
     style_tags: list[str] | None = None,
 ) -> dict:
-    """Worker 调用：合并三层配置，返回传给步骤进程的 dict。"""
+    """Worker 调用:合并三层配置,返回传给步骤进程的 dict。"""
     pipeline_steps = app_config.pipelines[pipeline]["steps"]
     step_cfg = next(s for s in pipeline_steps if s["name"] == step_name)
     domain_cfg = load_domain_profile(app_config.config_dir, domain)

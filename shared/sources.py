@@ -1,7 +1,7 @@
 """来源统一注册表(detection 在 source_detect;id 生成在 shared.ids)。
 
-历史上 id 生成与来源注册表都在本文件;现 id 生成(job/collection/worker/lineage)已收敛到
-shared.ids(唯一事实源)。本模块保留为兼容再导出层 + detect_source 入口,既有
+本模块是兼容再导出层 + detect_source 入口:id 生成(job/collection/worker/lineage)
+的唯一事实源在 shared.ids,既有
 `from shared.sources import content_job_id / subscription_collection_id / ...` 调用点不破。
 """
 

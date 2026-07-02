@@ -18,8 +18,8 @@ def _credential(bili_cookies_raw: str | None):
         d = json.loads(bili_cookies_raw)
     except (ValueError, TypeError):
         return None
-    # 键名与 api/routes/bili.py login_poll 入库的小写一致(此前读大写 SESSDATA/DedeUserID
-    # 与入库不匹配,致 enumerate_up 退化为匿名枚举)。
+    # 键名必须与 api/routes/bili.py login_poll 入库的小写一致,
+    # 否则读不到凭证,enumerate_up 会退化为匿名枚举。
     return Credential(
         sessdata=d.get("sessdata"),
         bili_jct=d.get("bili_jct"),
@@ -112,7 +112,7 @@ async def enumerate_collection(
     """列出某合集/系列(UP mid + season/series id)全部视频。
     返回 (合集名|None, [{bvid,title,...}])。
 
-    is_season=True 走「合集·」(新概念多 P, season_id);False 走视频列表(series_id)。
+    is_season=True 走合集(B站新概念多 P,season_id);False 走视频列表(series_id)。
     经 bilibili_api.channel_series.ChannelSeries:其构造在 __init__ 内拉一次 meta(取合集名),
     再 get_videos 翻页。两类接口都返回 {"archives": [{aid,bvid,title,...}], "page": {...}}。"""
     import asyncio
