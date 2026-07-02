@@ -131,6 +131,18 @@ class TestLocalStorage:
         assert await storage.list_files("nope") == []
 
     @pytest.mark.asyncio
+    async def test_delete_file_removes_single_and_is_idempotent(self, storage, tmp_path):
+        # rerun 清中心 .done 用:删单文件、不碰其他产物;不存在即 no-op。
+        job = tmp_path / "j_df"
+        job.mkdir()
+        (job / ".02_parse.done").write_text("{}")
+        (job / "job.json").write_text("{}")
+        await storage.delete_file("j_df", ".02_parse.done")
+        assert not (job / ".02_parse.done").exists()
+        assert (job / "job.json").exists()
+        await storage.delete_file("j_df", ".02_parse.done")   # 幂等
+
+    @pytest.mark.asyncio
     async def test_delete_removes_job_dir(self, storage, tmp_path):
         job = tmp_path / "j_del"
         (job / "output").mkdir(parents=True)

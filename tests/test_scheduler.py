@@ -1502,6 +1502,31 @@ class TestDispatch:
         assert await redis.get_step_status("j_test_001", "C") == "ready"
 
     @pytest.mark.asyncio
+    async def test_rerun_deletes_central_done(self, scheduler, redis, db, tmp_jobs_dir):
+        # MinIO 部署下 .done 在中心存储:rerun 只删本地是 no-op(worker pull 回旧 .done 指纹命中跳过),
+        # 必须经 storage.delete_file 同步删;删失败只告警不挡主流程。
+        from unittest.mock import AsyncMock
+
+        job = make_job(job_id="j_rr_central")
+        db.create_job(job)
+        await scheduler.submit_job(job)
+        for step in ["A", "B", "C"]:
+            await redis.set_step_status("j_rr_central", step, "running")
+            await scheduler.on_step_done("j_rr_central", step)
+
+        fake_storage = AsyncMock()
+        scheduler.storage = fake_storage
+        reset = await scheduler.rerun("j_rr_central", "B")
+        assert set(reset) == {"B", "C"}
+        deleted = {c.args for c in fake_storage.delete_file.await_args_list}
+        assert deleted == {("j_rr_central", ".B.done"), ("j_rr_central", ".C.done")}
+
+        # 删失败(网络抖动)→ 告警继续,rerun 仍完成重置
+        fake_storage.delete_file.side_effect = RuntimeError("minio down")
+        reset = await scheduler.rerun("j_rr_central", "C")
+        assert reset == ["C"]
+
+    @pytest.mark.asyncio
     async def test_dispatch_retry(self, scheduler, redis, db, tmp_jobs_dir):
         job = make_job()
         db.create_job(job)

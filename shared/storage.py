@@ -55,6 +55,10 @@ class StorageBackend(Protocol):
     # 把 src job 的全部产物 + .done 复制到 dst job,供 fork 重建播种新快照,只重跑分叉步及下游。
     # 排除凭证侧载文件;Local=copytree、Remote=服务端 copy_object;Gateway 不支持(重建在 API/中心侧跑)。
     async def clone(self, src_job_id: str, dst_job_id: str) -> None: ...
+    # 删单个产物(scheduler rerun 清中心 .done 用):幂等,文件不存在即 no-op。
+    # 只删本地 jobs_dir 的 .done 在 MinIO 部署下是 no-op → worker pull 回旧 .done 指纹命中跳过,
+    # rerun/「重跑该步」整体失效——中心存储必须同步删。Gateway 不支持(中心产物变更在 API/中心侧)。
+    async def delete_file(self, job_id: str, rel_path: str) -> None: ...
     # 供 api 按需取单个产物(笔记/日志等);找不到返回 None。
     async def read_file(self, job_id: str, rel_path: str) -> bytes | None: ...
     # 供 api 写入 job 初始文件(job.json、上传源文件等),worker 才能 pull 到。
@@ -129,6 +133,10 @@ class LocalStorage:
             shutil.copytree(src, dst, dirs_exist_ok=True, ignore=_ignore)
 
         await asyncio.to_thread(_copy)
+
+    async def delete_file(self, job_id: str, rel_path: str) -> None:
+        path = self._safe_path(job_id, rel_path)
+        await asyncio.to_thread(path.unlink, True)
 
     async def read_file(self, job_id: str, rel_path: str) -> bytes | None:
         path = self._safe_path(job_id, rel_path)
@@ -361,6 +369,15 @@ class RemoteStorage:
         self._client().put_object(
             self._bucket, f"{job_id}/{rel_path}", io.BytesIO(data), length=len(data),
         )
+
+    async def delete_file(self, job_id: str, rel_path: str) -> None:
+        def _rm() -> None:
+            from minio.error import S3Error
+            try:
+                self._client().remove_object(self._bucket, f"{job_id}/{rel_path}")
+            except S3Error:
+                pass    # 不存在即幂等 no-op
+        await asyncio.to_thread(_rm)
 
     async def read_file(self, job_id: str, rel_path: str) -> bytes | None:
         return await asyncio.to_thread(self._read_file_sync, job_id, rel_path)
@@ -619,6 +636,10 @@ class GatewayStorage:
     async def clone(self, src_job_id: str, dst_job_id: str) -> None:
         # worker 侧 gateway 不负责中心产物复制(fork 重建在 API/中心存储侧走 Local/Remote)。
         raise NotImplementedError("GatewayStorage.clone: fork rebuild runs on API/central storage (Local/Remote)")
+
+    async def delete_file(self, job_id: str, rel_path: str) -> None:
+        # 中心产物变更是 API/中心侧职责(与 clone 同例);worker 侧不需要也不允许删中心 .done。
+        raise NotImplementedError("GatewayStorage.delete_file: central artifact mutation runs on API/central storage")
 
     async def read_file(self, job_id: str, rel_path: str) -> bytes | None:
         resp = await self._client().get(

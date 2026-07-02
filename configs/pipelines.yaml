@@ -220,6 +220,7 @@ paper:
       pool: io
       timeout: 300
       retry: 3
+      version: "2"   # arxiv 元数据换标准库解析 + fail-loud,失效旧指纹(此前 feedparser 缺失静默丢标题)
       outputs: ["input/source.pdf", "input/metadata.json"]
 
     "02_pdf_parse":
@@ -324,6 +325,7 @@ article:
       run: steps.article.step_02_parse_article
       needs: ["01_download"]
       timeout: 60
+      version: "2"   # 原文 MD 管线换代(readability+markdownify),失效旧指纹
       # 补全元信息(abstract/image/tags/author),并产出图片本地引用的可读原文 Markdown;
       # 非中文正文写 needs_translation.json 标记(供 04_translate_article 的 rules:exists 门控)。
       outputs: ["intermediate/parsed.json", "output/original.md", "intermediate/needs_translation.json", "assets/*"]

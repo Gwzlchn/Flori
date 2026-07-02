@@ -1167,6 +1167,15 @@ class Scheduler:
         for step in reset_steps:
             done_file = self.jobs_dir / job_id / f".{step}.done"
             await asyncio.to_thread(done_file.unlink, True)
+            # 中心存储的 .done 必须一并删:MinIO 部署下 .done 在 bucket,只删本地是 no-op →
+            # worker pull 回旧 .done 指纹命中直接跳过,rerun/「重跑该步」整体失效。
+            # best-effort:删失败只告警不挡主流程(兜底=改步 version 失效指纹)。
+            if self.storage is not None:
+                try:
+                    await self.storage.delete_file(job_id, f".{step}.done")
+                except Exception:
+                    logger.warning("rerun_central_done_delete_failed",
+                                   job_id=job_id, step=step, exc_info=True)
             await self.redis.set_step_status(job_id, step, "waiting")
             # 清重试计数,否则重跑曾耗尽重试的步骤会零重试预算、首次失败即终止。
             await self.redis.reset_step_retries(job_id, step)
