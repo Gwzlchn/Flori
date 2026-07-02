@@ -262,30 +262,51 @@ class DownloadStep(StepBase):
 
     def _fetch_arxiv_meta(self, arxiv_id: str) -> None:
         """arxiv API 取权威元数据 → stash self._arxiv_meta(由 _extract_metadata 并入 metadata.json)。
-        best-effort:网络/解析失败只记日志,回退 PDF 启发。curl 经 worker 代理出站,feedparser 解析 Atom。"""
+        标准库 ElementTree 解析 Atom,零运行时依赖(曾用 feedparser,worker 镜像没装它,宽 except 把
+        ModuleNotFoundError 当网络错误静默吞 → 所有 arxiv 论文标题/作者丢失、UI 显示 job_id)。
+        best-effort 只兜【网络/坏响应】(curl 失败/超时/坏 XML → 回退 PDF 启发);编程错误照常上抛。"""
+        import xml.etree.ElementTree as ET
+
+        from shared.step_base import SubprocessFailed
+
+        api = f"http://export.arxiv.org/api/query?id_list={arxiv_id}"
         try:
-            import feedparser
-            api = f"http://export.arxiv.org/api/query?id_list={arxiv_id}"
             r = self.run_subprocess(["curl", "-fsSL", api], timeout=30)
-            feed = feedparser.parse(r.stdout)
-            if not feed.entries:
-                self.log.warning("arxiv_meta_empty", arxiv_id=arxiv_id)
-                return
-            e = feed.entries[0]
-            meta: dict = {}
-            if e.get("title"):
-                meta["title"] = " ".join(e.title.split())          # 去 arxiv title 里的换行
-            authors = [a.get("name", "").strip() for a in e.get("authors", []) if a.get("name")]
-            if authors:
-                meta["authors"] = authors
-            if e.get("summary"):
-                meta["abstract"] = " ".join(e.summary.split())
-            if e.get("published"):
-                meta["published_at"] = e.published[:10]             # ISO → YYYY-MM-DD
-            self._arxiv_meta = meta
-            self.log.info("arxiv_meta_fetched", arxiv_id=arxiv_id, title=meta.get("title"), authors=len(authors))
-        except Exception as ex:
-            self.log.warning("arxiv_meta_fetch_failed", arxiv_id=arxiv_id, error=str(ex))
+            meta = self._parse_arxiv_atom(r.stdout)
+        except (SubprocessFailed, subprocess.TimeoutExpired, ET.ParseError) as ex:
+            self.log.warning("arxiv_meta_fetch_failed", arxiv_id=arxiv_id, error=str(ex)[:200])
+            return
+        if not meta:
+            self.log.warning("arxiv_meta_empty", arxiv_id=arxiv_id)
+            return
+        self._arxiv_meta = meta
+        self.log.info("arxiv_meta_fetched", arxiv_id=arxiv_id,
+                      title=meta.get("title"), authors=len(meta.get("authors", [])))
+
+    @staticmethod
+    def _parse_arxiv_atom(xml_text: str) -> dict:
+        """arxiv Atom → {title, authors, abstract, published_at};无 entry 返回 {}。
+        坏 XML 抛 ParseError,由调用方按网络类失败兜底。"""
+        import xml.etree.ElementTree as ET
+        ns = {"a": "http://www.w3.org/2005/Atom"}
+        entry = ET.fromstring(xml_text).find("a:entry", ns)
+        if entry is None:
+            return {}
+        meta: dict = {}
+        title = entry.findtext("a:title", "", ns)
+        if title.strip():
+            meta["title"] = " ".join(title.split())                 # 去 arxiv title 里的换行
+        authors = [a for a in (el.findtext("a:name", "", ns).strip()
+                               for el in entry.findall("a:author", ns)) if a]
+        if authors:
+            meta["authors"] = authors
+        summary = entry.findtext("a:summary", "", ns)
+        if summary.strip():
+            meta["abstract"] = " ".join(summary.split())
+        published = entry.findtext("a:published", "", ns)
+        if published:
+            meta["published_at"] = published[:10]                   # ISO → YYYY-MM-DD
+        return meta
 
     def _download_pdf(self, url: str) -> None:
         """非 arxiv 的直链 PDF(OSDI/usenix/会议/期刊等)→ input/source.pdf,供 02_pdf_parse 消费。"""

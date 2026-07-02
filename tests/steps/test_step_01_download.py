@@ -220,16 +220,46 @@ class TestDownloadStep:
         meta = step._extract_metadata("arxiv", "paper")
         assert meta["title"].startswith("BERT") and meta["authors"] == ["Jacob Devlin", "Ming-Wei Chang"]
 
-    def test_fetch_arxiv_meta_failure_is_graceful(self, tmp_path):
-        # 网络/解析失败 → 不抛、不 stash;_extract_metadata 正常返回(回退 PDF 解析)。
+    def test_fetch_arxiv_meta_network_failure_is_graceful(self, tmp_path):
+        # 网络类失败(curl 挂)→ 不抛、不 stash;_extract_metadata 正常返回(回退 PDF 解析)。
+        from shared.step_base import SubprocessFailed
         job_dir = tmp_path / "job"; job_dir.mkdir(); (job_dir / "input").mkdir()
         step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805", content_type="paper")
-        with patch.object(step, "run_subprocess", side_effect=Exception("network down")):
+        with patch.object(step, "run_subprocess",
+                          side_effect=SubprocessFailed(22, ["curl"], output="", stderr="timeout")):
             step._fetch_arxiv_meta("1810.04805")
         assert getattr(step, "_arxiv_meta", {}) == {}
         (job_dir / "input" / "source.pdf").write_bytes(b"%PDF-1.4")
         meta = step._extract_metadata("arxiv", "paper")
         assert "title" not in meta
+
+    def test_fetch_arxiv_meta_bad_xml_is_graceful(self, tmp_path):
+        # arxiv 返回坏响应(半截 HTML 等)→ ParseError 按网络类失败兜底,不抛不 stash。
+        from types import SimpleNamespace
+        job_dir = tmp_path / "job"; job_dir.mkdir(); (job_dir / "input").mkdir()
+        step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805", content_type="paper")
+        with patch.object(step, "run_subprocess", return_value=SimpleNamespace(stdout="<html>oops")):
+            step._fetch_arxiv_meta("1810.04805")
+        assert getattr(step, "_arxiv_meta", {}) == {}
+
+    def test_fetch_arxiv_meta_empty_feed_is_graceful(self, tmp_path):
+        # 合法 Atom 但无 entry(id 不存在)→ 不 stash。
+        from types import SimpleNamespace
+        empty = '<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"></feed>'
+        job_dir = tmp_path / "job"; job_dir.mkdir(); (job_dir / "input").mkdir()
+        step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805", content_type="paper")
+        with patch.object(step, "run_subprocess", return_value=SimpleNamespace(stdout=empty)):
+            step._fetch_arxiv_meta("1810.04805")
+        assert getattr(step, "_arxiv_meta", {}) == {}
+
+    def test_fetch_arxiv_meta_programming_error_fails_loud(self, tmp_path):
+        # 编程/打包类错误(如曾经的 ModuleNotFoundError)不许静默吞——否则所有 arxiv 标题丢了都没人知道。
+        import pytest
+        job_dir = tmp_path / "job"; job_dir.mkdir(); (job_dir / "input").mkdir()
+        step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805", content_type="paper")
+        with patch.object(step, "run_subprocess", side_effect=ModuleNotFoundError("feedparser")):
+            with pytest.raises(ModuleNotFoundError):
+                step._fetch_arxiv_meta("1810.04805")
 
     def test_idempotent(self, tmp_path):
         job_dir = tmp_path / "job"

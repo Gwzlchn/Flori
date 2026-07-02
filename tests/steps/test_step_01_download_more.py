@@ -338,7 +338,8 @@ class TestDownloadArxiv:
     def test_builds_pdf_url(self, tmp_path):
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, source="arxiv", content_type="paper")
-        with patch.object(step, "run_subprocess") as run:
+        # 元数据 curl 返回空响应(ParseError → best-effort 兜底);末次调用是 PDF curl。
+        with patch.object(step, "run_subprocess", return_value=SimpleNamespace(stdout="")) as run:
             step._download_arxiv("https://arxiv.org/abs/2301.00001")
             cmd = run.call_args[0][0]
             assert cmd[0] == "curl"
@@ -636,17 +637,29 @@ class TestExecuteDispatch:
 # _download_article (trafilatura mocked via sys.modules)
 
 class TestDownloadArticle:
-    def _fake_trafilatura(self, html="<html>body</html>", meta=None):
+    def _fake_trafilatura(self, monkeypatch, html="<html>body</html>", meta=None,
+                          fetch_side_effect=None):
+        """假 trafilatura + settings 子模块(退避重试经 use_config 设超时,mock 面必须配齐:
+        对非 package 的假模块 from trafilatura.settings import 会 ModuleNotFoundError)。"""
+        import configparser
         mod = MagicMock()
-        mod.fetch_url.return_value = html
+        if fetch_side_effect is not None:
+            mod.fetch_url.side_effect = fetch_side_effect
+        else:
+            mod.fetch_url.return_value = html
         mod.extract_metadata.return_value = meta
+        settings = MagicMock()
+        settings.use_config.side_effect = lambda: configparser.ConfigParser()
+        mod.settings = settings
+        monkeypatch.setitem(sys.modules, "trafilatura", mod)
+        monkeypatch.setitem(sys.modules, "trafilatura.settings", settings)
         return mod
 
     def test_writes_html_and_meta(self, tmp_path, monkeypatch):
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, url="https://blog.example.com/p", content_type="article")
         meta = SimpleNamespace(title="T", author="A", sitename="S", date="2024-01-01")
-        monkeypatch.setitem(sys.modules, "trafilatura", self._fake_trafilatura(meta=meta))
+        self._fake_trafilatura(monkeypatch, meta=meta)
         with patch("shared.net.assert_public_url") as ap:
             step._download_article("https://blog.example.com/p")
             ap.assert_called_once_with("https://blog.example.com/p")
@@ -656,23 +669,33 @@ class TestDownloadArticle:
         assert am["title"] == "T"
         assert am["author"] == "A"
 
-    def test_fetch_returns_none_raises(self, tmp_path, monkeypatch):
+    def test_fetch_returns_none_raises_after_backoff(self, tmp_path, monkeypatch):
+        # 5 拍退避全空才判失败;每拍 use_config 设超时递增(30→480)。
         from shared.errors import InputInvalidError
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, url="https://blog.example.com/p", content_type="article")
-        monkeypatch.setitem(sys.modules, "trafilatura", self._fake_trafilatura(html=None))
+        mod = self._fake_trafilatura(monkeypatch, html=None)
         with patch("shared.net.assert_public_url"):
             with pytest.raises(InputInvalidError):
                 step._download_article("https://blog.example.com/p")
+        assert mod.fetch_url.call_count == 5
+
+    def test_fetch_transient_fail_recovers_on_retry(self, tmp_path, monkeypatch):
+        # 首拍超时返 None、次拍成功 → 不判失败(退避的意义)。
+        job_dir = _make_job_dir(tmp_path)
+        step = _make_step(job_dir, tmp_path, url="https://blog.example.com/p", content_type="article")
+        mod = self._fake_trafilatura(monkeypatch, fetch_side_effect=[None, "<html>slow</html>"])
+        with patch("shared.net.assert_public_url"):
+            step._download_article("https://blog.example.com/p")
+        assert mod.fetch_url.call_count == 2
+        assert (job_dir / "input" / "source.html").read_text() == "<html>slow</html>"
 
     def test_meta_extraction_exception_swallowed(self, tmp_path, monkeypatch):
         """extract_metadata 抛错时仍写 article_meta.json(只含 url),不冒泡。"""
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, url="https://blog.example.com/p", content_type="article")
-        mod = MagicMock()
-        mod.fetch_url.return_value = "<html>x</html>"
+        mod = self._fake_trafilatura(monkeypatch, html="<html>x</html>")
         mod.extract_metadata.side_effect = RuntimeError("parse boom")
-        monkeypatch.setitem(sys.modules, "trafilatura", mod)
         with patch("shared.net.assert_public_url"):
             step._download_article("https://blog.example.com/p")
         am = json.loads((job_dir / "input" / "article_meta.json").read_text())
@@ -682,8 +705,7 @@ class TestDownloadArticle:
         from shared.errors import InputInvalidError
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, url="http://127.0.0.1/p", content_type="article")
-        mod = self._fake_trafilatura()
-        monkeypatch.setitem(sys.modules, "trafilatura", mod)
+        mod = self._fake_trafilatura(monkeypatch)
         with patch("shared.net.assert_public_url",
                    side_effect=InputInvalidError("internal")):
             with pytest.raises(InputInvalidError):
