@@ -140,7 +140,7 @@ jobs:
           include-hidden-files: true
 
   # 合并【普通 + worker】两份部分覆盖率 → 判分支覆盖率门 75%(拆 job 后不能各自判,部分覆盖会误判)。
-  # 在轻镜像 test 里 combine:源码 /app/* 与两 job 记录路径一致,不需 [paths] 重映射;test 镜像轻、build 快。
+  # 用 python:slim 挂 checkout 到 /app 里 combine(记录的 /app/* 路径直接对齐,免 [paths]),不建 test 镜像→秒级。
   coverage-gate:
     needs: [unit-normal, unit-worker]
     runs-on: ubuntu-latest
@@ -148,48 +148,25 @@ jobs:
       contents: read
     outputs:
       cov: ${{ steps.cov.outputs.pct }}
-    env:
-      USE_USTC_MIRROR: "0"
     steps:
       - uses: actions/checkout@v6
-      - name: Lowercase owner
-        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
-      - name: 稳定 pip 缓存(抹 version 为占位)
-        run: |
-          echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_ENV"
-          sed -i 's/^version = .*/version = "0.0.0"/' pyproject.toml
-      - uses: docker/setup-buildx-action@v4
-      - name: Build 普通 test 镜像(buildcache 命中,轻)
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: docker/base.Dockerfile
-          target: test
-          tags: flori-test:latest
-          load: true
-          build-args: |
-            USE_USTC_MIRROR=0
-            FLORI_VERSION=${{ env.FLORI_VERSION }}
-          cache-from: |
-            type=registry,ref=ghcr.io/${{ env.OWNER_LC }}/flori-test:buildcache
-            type=gha,scope=flori-test
-      - name: Download 两份部分覆盖率
+      - name: Download 各 shard 部分覆盖率
         uses: actions/download-artifact@v4
         with:
           pattern: cov-*
           path: covdata
-          merge-multiple: true          # cov-normal + cov-worker → covdata/.coverage.{normal,worker}
-      - name: Combine 覆盖率 + 判分支覆盖率门(--fail-under=75)
+          merge-multiple: true          # cov-normal-{1..4} + cov-worker-{1,2} → covdata/.coverage.*
+      - name: Combine + 判分支覆盖率门(轻量 python:slim,不建 test 镜像 → 省 ~25s 串行)
         id: cov
         run: |
-          docker compose -f docker-compose.test.yml run --rm \
-            -v "$GITHUB_WORKSPACE/covdata:/covdata" test \
-            sh -c 'cp /covdata/.coverage.* /app/ && cd /app && coverage combine && coverage report --fail-under=75' \
+          # ★挂 checkout 到 /app(与两 unit job 记录的 /app/* 路径一致 → 免 [paths] 重映射);pip 装 coverage 秒级。
+          docker run --rm -v "$GITHUB_WORKSPACE:/app" -v "$GITHUB_WORKSPACE/covdata:/covdata" -w /app \
+            python:3.11-slim sh -c \
+            'pip install -q "coverage[toml]<8" && cp /covdata/.coverage.* . && coverage combine && coverage report --fail-under=75' \
             | tee /tmp/cov.log
           pct=$(awk '/^TOTAL/{gsub("%","",$NF); print $NF}' /tmp/cov.log | tail -1)
-          pct=${pct:-unknown}
-          echo "pct=$pct" >> "$GITHUB_OUTPUT"
-          echo "### 🐍 后端分支覆盖率(合并 普通+worker):${pct}%" >> "$GITHUB_STEP_SUMMARY"
+          echo "pct=${pct:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "### 🐍 后端分支覆盖率(合并 普通+worker):${pct:-unknown}%" >> "$GITHUB_STEP_SUMMARY"
 
   # 注:OpenAPI 模糊/契约(schemathesis)已拆到独立每日 cron(.github/workflows/fuzz.yml),不拖慢 push CI。
 
