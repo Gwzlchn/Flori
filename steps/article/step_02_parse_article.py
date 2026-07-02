@@ -215,35 +215,53 @@ class ParseArticleStep(StepBase):
     _IMG_REF = re.compile(r'!\[([^\]]*)\]\(\s*([^)\s]+)((?:\s+"[^"]*")?)\s*\)')
 
     def _localize_images(self, md: str, page_url: str) -> tuple[str, int]:
-        """md 里的图片引用逐个本地化:相对 src 先 urljoin(page_url) 绝对化(Hugo 等站图全相对,
+        """md 里的图片引用本地化:相对 src 先 urljoin(page_url) 绝对化(Hugo 等站图全相对,
         不解析则全部下载失败);下载成功改写为 assets/img_NN.ext,失败保留绝对 URL(前端在线
-        仍可渲染,不静默丢图)。data: URI 原样跳过;同图多次引用只下载一次。返回 (md, 本地化数)。"""
+        仍可渲染,不静默丢图)。data: URI 原样跳过;同图多次引用只下载一次。
+        并行下载(5 并发):图多的页(lilianweng 26 图)串行会顶爆步超时。返回 (md, 本地化数)。"""
+        from concurrent.futures import ThreadPoolExecutor
         from urllib.parse import urljoin
+
+        srcs: list[str] = []
+        for _alt, src, _title in self._IMG_REF.findall(md):
+            s = src.strip()
+            if s and not s.startswith("data:") and s not in srcs:
+                srcs.append(s)
+        if not srcs:
+            return md, 0
+
+        absolute = {s: (urljoin(page_url, s) if page_url else s) for s in srcs}
+        to_fetch = [s for s in srcs if absolute[s].startswith(("http://", "https://"))]
+        fetched: dict[str, bytes | None] = {}
+        if to_fetch:
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                for s, data in zip(to_fetch,
+                                   pool.map(lambda s: self._fetch_image(absolute[s]), to_fetch)):
+                    fetched[s] = data
+
         assets = self.job_dir / "assets"
-        cache: dict[str, str] = {}
+        mapping: dict[str, str] = {}
         count = 0
+        for idx, s in enumerate(srcs):
+            data = fetched.get(s)
+            if data:
+                ext_m = re.search(r'\.(png|jpe?g|gif|webp|svg)(?:[?#]|$)', absolute[s].lower())
+                ext = ext_m.group(1) if ext_m else "jpg"
+                ext = "jpg" if ext == "jpeg" else ext
+                fname = f"img_{idx:02d}.{ext}"
+                assets.mkdir(parents=True, exist_ok=True)
+                (assets / fname).write_bytes(data)
+                mapping[s] = f"assets/{fname}"
+                count += 1
+            else:
+                mapping[s] = absolute[s]
 
         def _replace(m: re.Match) -> str:
-            nonlocal count
             alt, src, title_part = m.group(1), m.group(2).strip(), m.group(3)
-            if not src or src.startswith("data:"):
+            new_ref = mapping.get(src)
+            if new_ref is None:
                 return m.group(0)
-            if src not in cache:
-                absolute = urljoin(page_url, src) if page_url else src
-                new_ref = absolute
-                if absolute.startswith(("http://", "https://")):
-                    data = self._fetch_image(absolute)
-                    if data:
-                        ext_m = re.search(r'\.(png|jpe?g|gif|webp|svg)(?:[?#]|$)', absolute.lower())
-                        ext = ext_m.group(1) if ext_m else "jpg"
-                        ext = "jpg" if ext == "jpeg" else ext
-                        fname = f"img_{len(cache):02d}.{ext}"
-                        assets.mkdir(parents=True, exist_ok=True)
-                        (assets / fname).write_bytes(data)
-                        new_ref = f"assets/{fname}"
-                        count += 1
-                cache[src] = new_ref
-            return f"![{alt}]({cache[src]}{title_part})"
+            return f"![{alt}]({new_ref}{title_part})"
 
         return self._IMG_REF.sub(_replace, md), count
 
@@ -253,7 +271,7 @@ class ParseArticleStep(StepBase):
         import urllib.request
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            return urllib.request.urlopen(req, timeout=20).read() or None
+            return urllib.request.urlopen(req, timeout=15).read() or None
         except Exception:
             return None
 
