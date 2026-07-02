@@ -20,9 +20,9 @@ import {
   Image as ImageIcon,
 } from 'lucide-vue-next'
 
-// 内容详情(原型 #detail)：头部 + 4 tab(笔记/概念/流水线/元信息)。
-// 完成态(done)默认落「笔记」，未完成默认「流水线」。
-// 吸收旧 JobDetailView(头/ws/步骤/重试重跑删除) + NotesView(版本/评审/采纳/换 provider 重跑)。
+// 内容详情(原型 #detail):头部 + 4 tab,即笔记/概念/流水线/元信息。
+// 完成态(done)默认落「笔记」,未完成默认「流水线」。
+// 另含步骤操作(重试/重跑/删除);笔记侧支持版本切换、评审、采纳、换 provider 重跑。
 const route = useRoute()
 const router = useRouter()
 const api = useApi()
@@ -41,7 +41,7 @@ const stepStatusByKey = computed<Record<string, string>>(() => {
   for (const s of steps.value) m[s.name] = s.status
   return m
 })
-// DAG 与工作台共享的选中步(点 DAG 节点即选)。默认:运行中→失败→最后完成→末步;用户点选后不被刷新覆盖。
+// DAG 与工作台共享的选中步(点 DAG 节点即选)。默认按优先级取运行中、失败、最后完成、末步;用户点选后不被刷新覆盖。
 const selectedStep = ref('')
 watch(steps, (s) => {
   if (selectedStep.value && s.some(x => x.name === selectedStep.value)) return
@@ -71,7 +71,7 @@ const totalAi = computed(() => {
 const fmtCost = (v: number) => `$${(v ?? 0).toFixed(4)}`
 
 const job = ref<JobDetail | null>(null)
-// 同源 lineage 的所有快照(P2b):时间倒序;>1 则头部出历史版本跳转下拉。
+// 同源 lineage 的所有快照:时间倒序;>1 则头部出历史版本跳转下拉。
 interface LineageVersion { job_id: string; created_at: string; is_current: boolean; title: string | null; status: string }
 const lineageVersions = ref<LineageVersion[]>([])
 function jumpVersion(e: Event) {
@@ -81,7 +81,7 @@ function jumpVersion(e: Event) {
 const loading = ref(true)
 const loadError = ref('')
 
-// ── tab ──
+// tab
 type Tab = 'notes' | 'concepts' | 'proc' | 'info' | 'evidence' | 'translated' | 'figures'
 const tab = ref<Tab>('proc')
 const TABS: { key: Tab; label: string; icon: any }[] = [
@@ -129,7 +129,7 @@ const genEnd = computed(() => {
 })
 const genDurSec = computed(() => (genStart.value && genEnd.value ? (genEnd.value - genStart.value) / 1000 : null))
 
-// 集合(元信息)：collection_name 由后端 collection_id join 出,无归属/已删为 null;以名为主、id 备查。
+// 集合(元信息):collection_name 由后端 collection_id join 出,无归属/已删为 null;以名为主、id 备查。
 const collectionId = computed(() => job.value?.collection_id ?? null)
 const collectionName = computed(() => job.value?.collection_name ?? null)
 
@@ -142,7 +142,7 @@ async function fetchDetail() {
     const d = await jobStore.fetchDetail(jobId.value)
     job.value = d
     jobStatus.value = d.status
-    // 面包屑用真实内容:知识库 / 领域 / 标题(替代通用「所有来源 / 内容详情」)。
+    // 面包屑用真实内容:知识库 / 领域 / 标题。
     global.setCrumbs([
       { t: '知识库', to: '/' },
       ...(d.domain ? [{ t: d.domain, to: `/kb/${encodeURIComponent(d.domain)}` }] : []),
@@ -152,16 +152,16 @@ async function fetchDetail() {
     // 同源 lineage 快照(重投/来源更新/pipeline 重建产生的多个 job);>1 则头部出历史版本跳转。
     api.get<{ versions: LineageVersion[] }>(`/api/jobs/${fid}/versions`).then(r => { if (jobId.value === fid) lineageVersions.value = r?.versions || [] }).catch(() => {})
     loadEvidence()  // 权威来源(取证产物);有则显示「权威来源」tab
-    loadOriginal()  // 原文 MD(article v2 output/original.md);有则显示「原文」tab
+    loadOriginal()  // 原文 MD(article 链 output/original.md);在笔记 tab 作「原文」变体展示
     loadTranslated()  // 译文 MD(非中文文章 output/translated.md);有则显示「译文」tab
     loadFigures()     // 论文图表(intermediate/figures.json);有渲染图则显示「图表」tab
-    // 本 job DAG 的依赖(needs)定义(/api/pipelines 返回 {pipelines:[...]});失败留空不影响详情。
+    // 本 job DAG 的 needs 依赖定义,来自 /api/pipelines 的 {pipelines:[...]};失败留空不影响详情。
     api.get<{ pipelines?: any[] }>('/api/pipelines').then(r => { pipelinesDef.value = Array.isArray(r) ? r : (r?.pipelines ?? []) }).catch(() => {})
     // 逐次 AI 用量 → DAG 节点 provider/开销 + 总开销。带 job 切换守卫,迟到的回填不串到新 job。
     api.get<{ usage?: any[] }>(`/api/jobs/${fid}/usage`).then(r => { if (jobId.value === fid) jobUsageRows.value = r?.usage || [] }).catch(() => {})
     // 本任务各 AI 步用的 prompt 版本 vs 当前激活版本(白盒版本管理);不一致给「重跑该步」。
     loadPromptVersions().catch(() => {})
-    // 完成态默认落笔记，否则落流水线。
+    // 完成态默认落笔记,否则落流水线。
     tab.value = d.status === 'done' ? 'notes' : 'proc'
   } catch (e: any) {
     loadError.value = e?.status === 404 ? '内容不存在或已删除' : (e?.message || '加载失败')
@@ -174,7 +174,7 @@ onMounted(fetchDetail)
 watch(jobId, () => { stopPolling(); fetchDetail() })   // 切 job 先停旧轮询
 onBeforeUnmount(() => { global.setCrumbs(null); stopPolling() })   // 离开详情页清面包屑覆盖 + 停轮询
 
-// ════════════════════ 笔记 tab ════════════════════
+// 笔记 tab
 const domain = computed(() => job.value?.domain || '')
 const isMechanical = ref(false)
 const noteContent = ref('')
@@ -279,8 +279,8 @@ async function loadReview() {
   try { review.value = await api.get<Record<string, any>>(url) } catch { review.value = null }
 }
 
-// ════════════════════ 权威来源(evidence) tab ════════════════════
-// 取证产物 evidence.json：案例类笔记 AI fetch 的判决/处罚/报道来源。有则显示 tab，404 即无。
+// 权威来源(evidence) tab
+// 取证产物 evidence.json:案例类笔记 AI fetch 的判决/处罚/报道来源。有则显示 tab,404 即无。
 const evidence = ref<any | null>(null)
 const hasEvidence = computed(() => !!evidence.value?.evidence?.length)
 async function loadEvidence() {
@@ -288,8 +288,8 @@ async function loadEvidence() {
   catch { evidence.value = null }
 }
 
-// ════════════════════ 原文(article v2 output/original.md) tab ════════════════════
-// 可读原文 Markdown(图片本地化);有则显示「原文」tab,404 即无。
+// 原文(article output/original.md)
+// 可读原文 Markdown(图片本地化);在笔记 tab 作「原文」变体展示,404 即无。
 const originalMd = ref('')
 async function loadOriginal() {
   try {
@@ -298,7 +298,7 @@ async function loadOriginal() {
   } catch { originalMd.value = '' }
 }
 
-// ════════════════════ 译文(article output/translated.md) tab ════════════════════
+// 译文(article output/translated.md) tab
 // 非中文文章的中文全文译文;有则显示「译文」tab,404 即无。
 const translatedMd = ref('')
 const hasTranslation = computed(() => !!translatedMd.value)
@@ -309,7 +309,7 @@ async function loadTranslated() {
   } catch { translatedMd.value = '' }
 }
 
-// ════════════════════ 图表(论文 intermediate/figures.json) tab ════════════════════
+// 图表(论文 intermediate/figures.json) tab
 // 04_figures 渲染的图(含矢量图);独立展示,不依赖智能笔记/AI worker。只列有渲染图(filename)的条目。
 interface FigureItem { id: string; page: number; caption: string; filename: string | null; ocr_text?: string }
 const figures = ref<FigureItem[]>([])
@@ -332,7 +332,7 @@ async function ensureNotes() {
   notesInit = true
   await loadTerms()
   await Promise.all([loadVersions(), loadProviders()])
-  // 文章无智能笔记(关笔记)→ 默认显示原文(机械版)
+  // 文章无智能笔记(关笔记)时默认显示原文,即机械版
   if (!versions.value.length && isArticle.value) isMechanical.value = true
   await Promise.all([loadNote(), loadReview()])
 }
@@ -373,7 +373,7 @@ async function confirmRerun() {
     rerunning.value = false
   }
 }
-// 轮询定时器提升到组件作用域,卸载/切 job/再次重跑时统一清理,避免泄漏与对已销毁状态的写入。
+// 轮询定时器放组件作用域:卸载/切 job/再次重跑时统一清理,避免泄漏与对已销毁状态的写入。
 let pollTimer: ReturnType<typeof setInterval> | null = null
 function stopPolling() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
@@ -410,7 +410,7 @@ async function acceptKeyTerm(term: string, definition: string) {
   }
 }
 
-// ════════════════════ 概念 tab ════════════════════
+// 概念 tab
 // 直查 GET /api/jobs/{id}/concepts:每项是 GlossaryTerm,另含 job_occurrences(本内容里的命中位置)。
 const conceptsLoading = ref(false)
 const conceptsError = ref('')
@@ -454,8 +454,8 @@ function goConcept(c: JobConcept) {
   router.push(`/kb/${encodeURIComponent(c.domain)}/concepts/${encodeURIComponent(c.term)}`)
 }
 
-// ════════════════════ 流水线 tab ════════════════════
-// 选中步(DAG 点选)的中文名,供「从『X』重跑」按钮。
+// 流水线 tab
+// 选中步(DAG 点选)的中文名,供"从「X」重跑"按钮。
 const selectedStepLabel = computed(() => {
   const d = jobDagSteps.value.find(x => x.key === selectedStep.value)
   if (d?.label) return d.label
@@ -469,7 +469,6 @@ async function retryJob() {
     jobStatus.value = 'processing'
   } catch (e: any) { showToast(e?.message || '重试失败', 'error') }
 }
-// 从当前选中步(而非旧下拉)重跑。
 async function rerunFromStep() {
   if (!selectedStep.value) return
   try {
@@ -479,10 +478,10 @@ async function rerunFromStep() {
   } catch (e: any) { showToast(e?.message || '重跑失败', 'error') }
 }
 
-// ── 本任务 prompt 版本(白盒版本管理 §1.14)──
-// job.json.prompt_overrides[step].version 是【本任务派发时用的版本快照】(后端透出 job.prompt_versions)。
-// 拿它与当前激活版本(GET /api/prompts/{pipeline}/{step},按本 job domain 解析:domain 优先于 global)比,
-// 不一致(stale)→ 高亮 + 「重跑该步」(复用 POST /api/jobs/{id}/rerun {from_step},清该步及下游 .done 重跑)。
+// 本任务 prompt 版本(白盒版本管理)
+// job.json.prompt_overrides[step].version 是本任务派发时用的版本快照,后端透出 job.prompt_versions。
+// 与当前激活版本对比:GET /api/prompts/{pipeline}/{step},按本 job domain 解析,domain 覆盖优先于 global。
+// 不一致(stale)则高亮并给「重跑该步」:复用 POST /api/jobs/{id}/rerun 传 from_step,清该步及下游 .done 重跑。
 type AiPromptRow = { step: string; label: string; used: number; current: number | null; stale: boolean }
 const aiPromptRows = ref<AiPromptRow[]>([])
 
@@ -495,7 +494,7 @@ async function loadPromptVersions() {
   if (!pipeline || !Object.keys(pv).length) return
   const rows: AiPromptRow[] = []
   for (const [step, used] of Object.entries(pv)) {
-    // 当前激活版本:先按本 job domain 查(domain 覆盖优先),无则回退 global;两者都无 = 已删覆盖(默认)。
+    // 当前激活版本:先按本 job domain 查(domain 覆盖优先),无则回退 global。两者都无表示无覆盖,走默认。
     let current: number | null = null
     try {
       if (dom) {
@@ -516,7 +515,7 @@ async function loadPromptVersions() {
   if (jobId.value === fid) aiPromptRows.value = rows
 }
 
-// 「重跑该步」:复用 job 级 rerun(from_step=该步),scheduler 清该步及下游 .done 后重跑(应用新激活 prompt)。
+// 「重跑该步」:复用 job 级 rerun(from_step=该步)。scheduler 清该步及下游 .done 后重跑,应用新激活 prompt。
 async function rerunStep(step: string) {
   try {
     await jobStore.rerunJob(jobId.value, step)
@@ -524,7 +523,7 @@ async function rerunStep(step: string) {
     jobStatus.value = 'processing'
   } catch (e: any) { showToast(e?.message || '重跑失败', 'error') }
 }
-// P2c:重建为【新版本快照】(fork 当前 job:只重跑定义已变的步骤及下游,旧版本保留对比)。
+// 重建为新版本快照:fork 当前 job,只重跑定义已变的步骤及下游,旧版本保留对比。
 const rebuilding = ref(false)
 async function rebuildJob() {
   if (rebuilding.value) return
@@ -540,7 +539,7 @@ async function rebuildJob() {
   }
 }
 
-// ════════════════════ 删除 ════════════════════
+// 删除
 const showDelete = ref(false)
 const showArtifacts = ref(false)   // 产物路径默认折叠
 async function confirmDelete() {
@@ -559,7 +558,7 @@ watch(tab, (t) => {
   if (t === 'notes') ensureNotes()
   else if (t === 'concepts') ensureConcepts()
 })
-// 详情就绪后若初始 tab 即笔记/概念，触发懒加载。
+// 详情就绪后若初始 tab 即笔记/概念,触发懒加载。
 watch(job, (j) => {
   if (!j) return
   if (tab.value === 'notes') ensureNotes()
@@ -587,7 +586,7 @@ watch(job, (j) => {
     </div>
 
     <template v-else-if="job">
-      <!-- ── 头部 ── -->
+      <!-- 头部 -->
       <div class="card pad" style="margin-bottom:16px">
         <div style="display:flex;align-items:flex-start;gap:13px">
           <span class="type-pill" :class="typeClass" style="width:42px;height:42px">
@@ -633,7 +632,7 @@ watch(job, (j) => {
         </div>
       </div>
 
-      <!-- ── tabs ── -->
+      <!-- tabs -->
       <div class="tabs">
         <button v-for="t in TABS" :key="t.key" :class="{ on: tab === t.key }" @click="tab = t.key">
           <component :is="t.icon" :size="15" />{{ t.label }}
@@ -649,7 +648,7 @@ watch(job, (j) => {
         </button>
       </div>
 
-      <!-- ════ 笔记(article:智能版可隐藏、机械版=原文)════ -->
+      <!-- 笔记(article:智能版可隐藏、机械版=原文) -->
       <div v-show="tab === 'notes'">
         <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
           <!-- 智能版:无智能笔记(如文章关笔记)时隐藏;机械版对文章即「原文」 -->
@@ -762,7 +761,7 @@ watch(job, (j) => {
         </div>
       </div>
 
-      <!-- ════ 权威来源 ════ -->
+      <!-- 权威来源 -->
       <div v-show="tab === 'evidence'">
         <div class="card pad">
           <div class="card-h"><ShieldCheck :size="15" />权威来源<template v-if="evidence?.evidence?.length"> · {{ evidence.evidence.length }}</template></div>
@@ -797,13 +796,13 @@ watch(job, (j) => {
         </div>
       </div>
 
-      <!-- ════ 译文(非中文文章的中文全文译文)════ -->
+      <!-- 译文(非中文文章的中文全文译文) -->
       <div v-show="tab === 'translated'">
         <p class="lead" style="margin:-6px 0 12px"><Languages :size="13" /> 原文为非中文,以下是 AI 忠实全文译文(保留原结构与配图)。</p>
         <MarkdownViewer :content="translatedMd" :job-id="jobId" :domain="domain" />
       </div>
 
-      <!-- ════ 图表(论文按图注渲染的页面区域,含矢量图)════ -->
+      <!-- 图表(论文按图注渲染的页面区域,含矢量图) -->
       <div v-show="tab === 'figures'">
         <p class="lead" style="margin:-6px 0 12px"><ImageIcon :size="13" /> 从 PDF 按图注渲染的图表({{ figuresWithImage.length }} 张,含矢量图)。</p>
         <figure v-for="f in figuresWithImage" :key="f.id" class="fig-card">
@@ -812,7 +811,7 @@ watch(job, (j) => {
         </figure>
       </div>
 
-      <!-- ════ 概念 ════ -->
+      <!-- 概念 -->
       <div v-show="tab === 'concepts'">
         <div class="card pad">
           <div class="card-h"><Lightbulb :size="15" />本内容涉及的概念<template v-if="jobConcepts.length"> · {{ jobConcepts.length }}</template></div>
@@ -843,7 +842,7 @@ watch(job, (j) => {
         </div>
       </div>
 
-      <!-- ════ 流水线 ════ -->
+      <!-- 流水线 -->
       <div v-show="tab === 'proc'">
         <div v-if="jobDagSteps.length" class="card pad" style="margin-bottom:14px;padding:13px 15px">
           <div style="font-size:13px;font-weight:600;color:var(--ink-800);display:flex;align-items:center;gap:8px;flex-wrap:wrap">
@@ -864,7 +863,7 @@ watch(job, (j) => {
           </div>
           <PipelineDag :steps="jobDagSteps" :status-by-key="stepStatusByKey" :selected="selectedStep" :usage-by-step="usageByStep" @select="selectedStep = $event" style="margin-top:10px" />
         </div>
-        <!-- 步骤操作:对当前选中步(上方 DAG 点选)重跑;失败 job 可整体重试。紧贴步骤与产物,不再堆在最下面 -->
+        <!-- 步骤操作:对当前选中步(上方 DAG 点选)重跑;失败 job 可整体重试。紧贴步骤与产物摆放 -->
         <div v-if="jobStatus === 'done' || jobStatus === 'failed'" style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
           <button v-if="jobStatus === 'failed'" class="btn pri" @click="retryJob"><RotateCcw :size="14" />重试</button>
           <button v-if="selectedStep" class="btn" @click="rerunFromStep"><Play :size="14" />从「{{ selectedStepLabel }}」重跑</button>
@@ -891,9 +890,9 @@ watch(job, (j) => {
         <StepWorkbench :job-id="jobId" :steps="steps" :selected-step="selectedStep" />
       </div>
 
-      <!-- ════ 元信息 ════ -->
+      <!-- 元信息 -->
       <div v-show="tab === 'info'">
-        <!-- ① 内容本身(源)信息 -->
+        <!-- 内容本身(源)信息 -->
         <div class="card pad">
           <div class="card-h"><Info :size="15" />内容信息</div>
           <table class="kv">
@@ -931,7 +930,7 @@ watch(job, (j) => {
           </table>
         </div>
 
-        <!-- ② 处理(任务)信息 -->
+        <!-- 处理(任务)信息 -->
         <div class="card pad" style="margin-top:16px">
           <div class="card-h"><GitBranch :size="15" />处理信息</div>
           <table class="kv">

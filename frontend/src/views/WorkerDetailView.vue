@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// Worker 详情（原型 #wdetail）：单个 worker 完整统计 + 基本信息 + 任务(task)历史
-// + 备注编辑 + 暂停/移除。worker 主体走 GET /api/workers/{id}；task 历史走 store.fetchTasks(id)。
+// Worker 详情页:单个 worker 完整统计 + 基本信息 + 任务(task)历史
+// + 备注编辑 + 暂停/移除。worker 主体走 GET /api/workers/{id};task 历史走 store.fetchTasks(id)。
 import { ref, computed, onMounted, onBeforeUnmount, inject } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
@@ -36,7 +36,7 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    // 主体 + 历史并行；历史失败不致命（仅置空）。
+    // 主体 + 历史并行;历史失败不致命(仅置空)。
     const [w, taskList] = await Promise.all([
       api.get<Worker>(`/api/workers/${encodeURIComponent(workerId.value)}`),
       workerStore.fetchTasks(workerId.value).catch(() => [] as WorkerTask[]),
@@ -52,7 +52,7 @@ async function load() {
   }
 }
 
-// ── 派生统计 ──
+// 派生统计
 const isOnline = computed(() => worker.value?.status.startsWith('online') ?? false)
 const completed = computed(() => worker.value?.tasks_completed ?? 0)
 const failed = computed(() => worker.value?.tasks_failed ?? 0)
@@ -68,10 +68,10 @@ const dotClass = computed(() => workerDotClass(worker.value?.status))
 // 类型徽章文案。
 const typeLabel = computed(() => (worker.value?.type || '').toUpperCase())
 
-// 时长走 utils/datetime.fmtDuration;相对时间(心跳/完成时间)用 fmtRelative(中文单位,超 1 天回退绝对时间)。
+// 时长走 utils/datetime.fmtDuration;心跳/完成时间用 fmtRelative,中文单位,超 1 天回退绝对时间。
 const ago = (v: string | null | undefined) => fmtRelative(v, { style: 'cn', absoluteAfterDay: true })
 
-// 算力描述：GPU 名优先，否则按类型;无 worker 时回退 —。
+// 算力描述:GPU 名优先,否则按类型;无 worker 时回退 —。
 const computeDesc = computed(() => (worker.value ? workerComputeDesc(worker.value) : '—'))
 
 // 机器配置(worker 自报 spec):核数 · 内存 · 平台 · Python。
@@ -86,7 +86,7 @@ const machineDesc = computed(() => {
   return parts.join(' · ')
 })
 
-// ── 操作：暂停 / 继续 / 移除 / 备注 ──
+// 操作:暂停 / 继续 / 移除 / 备注
 async function togglePause() {
   if (!worker.value) return
   busy.value = true
@@ -111,7 +111,7 @@ async function removeWorker() {
   if (!confirm(`确定移除 Worker ${workerId.value}？离线 worker 重新接入会重新出现。`)) return
   busy.value = true
   try {
-    // 在线 worker 需 force 才能移除（避免误删活跃节点）。
+    // 在线 worker 需 force 才能移除(避免误删活跃节点)。
     await workerStore.remove(workerId.value, isOnline.value)
     showToast('已移除', 'success')
     router.push('/system')

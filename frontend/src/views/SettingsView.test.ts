@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 
-// SettingsView 依赖 useApi.get('/api/auth/status')，模板里用 $router.push 跳转。
-// 子组件 BiliLogin/CookieUpload/StatusBadge 不在被测范围，stub 掉。
+// SettingsView 依赖 useApi.get('/api/auth/status'),模板里用 $router.push 跳转。
+// 子组件 BiliLogin/CookieUpload/StatusBadge 不在被测范围,stub 掉。
 const api = { get: vi.fn(), post: vi.fn(), put: vi.fn(), del: vi.fn(), upload: vi.fn(), getText: vi.fn() }
 vi.mock('../composables/useApi', () => ({ useApi: () => api }))
 

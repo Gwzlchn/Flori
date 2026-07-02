@@ -95,7 +95,7 @@ describe('ConceptGraph 选中与侧栏', () => {
     const w = await mountGraph()
     // 侧栏初始不显示。
     expect(w.find('[data-test="panel"]').exists()).toBe(false)
-    // 模拟「点节点」(图谱点击发生在 canvas,经暴露的 selectNode 驱动)。
+    // 模拟点节点:图谱点击发生在 canvas,经暴露的 selectNode 驱动。
     ;(w.vm as any).selectNode('通胀')
     await flushPromises()
     const panel = w.find('[data-test="panel"]')

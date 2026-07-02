@@ -8,8 +8,8 @@ import { contentTypeIcon, contentTypePill, contentTypeLabel } from '../utils/con
 import type { JobSummary } from '../types'
 import { Hash, Lightbulb, LayoutList, ChevronRight } from 'lucide-vue-next'
 
-// 主题页（原型 #topic）：把某个主题(is_topic 概念)下跨集合/跨来源的内容聚到一处。
-// 后端形状: {domain, topic, jobs:[JobResponse], total}
+// 主题页:把某个主题(is_topic 概念)下跨集合/跨来源的内容聚到一处。
+// 返回形状见 api/routes/domains.py topic_page,以后端为准。
 const route = useRoute()
 const router = useRouter()
 const store = useDomainStore()
@@ -22,7 +22,7 @@ const total = ref(0)
 const loading = ref(false)
 const error = ref('')
 
-// 防御性归一：后端 job 子集字段与 JobSummary 对齐，缺字段给安全默认。
+// 防御性归一:后端 job 子集字段与 JobSummary 对齐,缺字段给安全默认。
 function normalizeJob(raw: any): JobSummary {
   return {
     job_id: String(raw?.job_id ?? ''),
@@ -68,7 +68,7 @@ watch(() => [route.params.domain, route.params.topic], load)
 
 <template>
   <section class="page">
-    <!-- 头部：主题名 + 面包屑 + 查看概念 -->
+    <!-- 头部:主题名 + 面包屑 + 查看概念 -->
     <div style="display:flex;align-items:center;gap:13px;margin-bottom:6px">
       <div style="min-width:0">
         <div class="h1"><Hash :size="18" />{{ topic }}</div>
@@ -88,7 +88,7 @@ watch(() => [route.params.domain, route.params.topic], load)
       加载中…
     </div>
 
-    <!-- 空态：主题靠抽取自动聚合 -->
+    <!-- 空态:主题靠抽取自动聚合 -->
     <div v-else-if="jobs.length === 0" class="card pad" style="text-align:center;padding:40px 18px;margin-top:20px">
       <Hash :size="40" :stroke-width="1" style="color:var(--ink-300);margin-bottom:12px" />
       <p class="muted">这个主题还没有内容（内容被解析、抽到该概念时自动聚合）</p>

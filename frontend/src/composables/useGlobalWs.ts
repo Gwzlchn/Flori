@@ -16,8 +16,8 @@ const conn = createWsReconnect({
   onMessage: (data) => { systemStatus.value = JSON.parse(data) },
 })
 
-// 网络恢复 / 页面重新可见时,重置退避并重连 —— 否则连续断开达 MAX_RETRIES 后会永久放弃,
-// 只能整页刷新才恢复(见审计 I-M6)。仅在仍有页面引用(refCount>0)时触发。
+// 网络恢复 / 页面重新可见时,重置退避并重连:否则连续断开达 MAX_RETRIES 后会永久放弃,
+// 只能整页刷新才恢复。仅在仍有页面引用(refCount>0)时触发。
 function wake() {
   if (refCount > 0) conn.reconnect()
 }
@@ -44,6 +44,6 @@ export function useGlobalWs() {
     }
   })
 
-  // reconnect 暴露给 UI:断连提示可提供「重新连接」入口。
+  // reconnect 暴露给 UI:断连提示可提供重新连接入口。
   return { systemStatus, connected: conn.connected, reconnect: conn.reconnect }
 }

@@ -3,7 +3,7 @@ import { ref } from 'vue'
 import { useApi } from '../composables/useApi'
 import type { Collection, JobListResponse } from '../types'
 
-// 集合 CRUD store：列表/建/改/删（删=解绑，job 保留）。
+// 集合 CRUD store:列表/建/改/删(删=解绑,job 保留)。
 export const useCollectionStore = defineStore('collections', () => {
   const api = useApi()
   const collections = ref<Collection[]>([])
@@ -28,8 +28,8 @@ export const useCollectionStore = defineStore('collections', () => {
     domain: string
     description?: string
     tags?: string[]
-    source_type?: string   // 订阅集合：bilibili_up/fav/collection · youtube_channel · rss · local_dir
-    source_id?: string     // 订阅集合：mid / 频道URL / feed URL / 目录路径 / 收藏夹id
+    source_type?: string   // 订阅集合:bilibili_up/fav/collection, youtube_channel, rss, local_dir
+    source_id?: string     // 订阅集合:mid / 频道URL / feed URL / 目录路径 / 收藏夹id
     sync_now?: boolean
   }): Promise<Collection> {
     const c = await api.post<Collection>('/api/collections', payload)

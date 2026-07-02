@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// 知识库设置弹窗(重命名 / 图标 / 配色)。从侧栏 KB 行的「…」打开;
-// 一期只改 profile 展示元数据(display_name/icon/color),不改英文标识 domain key(真正改 key 见后续迁移工作项)。
+// 知识库设置弹窗(重命名 / 图标 / 配色),从侧栏 KB 行的 "…" 按钮打开。
+// 常规保存只改展示元数据(display_name/icon/color);「高级」区可改英文标识 domain key,由父组件确认并执行迁移。
 import { ref } from 'vue'
 import { Settings2, X, Check } from 'lucide-vue-next'
 import IconPicker from '../common/IconPicker.vue'

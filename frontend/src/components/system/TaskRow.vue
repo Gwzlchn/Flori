@@ -1,7 +1,7 @@
 <script setup lang="ts">
-// 统一 task 行：排队中 / 运行中 / 已完成 三态共用一种行样式(用户「任务池与 worker 历史同样的显示方式」)。
-// 主显作业标题(无则退 类型名 → 流水线 → job_id 兜底);job_id 退为 tooltip。整行可点 → 跳内容详情。
-// 右侧按状态呈现:排队=优先级 + 「投递…·已等…」;运行=运行徽章 + 「开始…·已运行…」;完成=状态 + 「耗时…·结束…」。
+// 统一 task 行:排队中 / 运行中 / 已完成 三态共用一种行样式,任务池与 worker 历史显示方式一致。
+// 主显作业标题,缺则按类型名、流水线、job_id 依次回退;job_id 退为 tooltip。整行可点 → 跳内容详情。
+// 右侧按状态呈现:排队=「排队中」徽章(优先级进 tooltip)+「投递…·已等…」;运行=运行徽章 +「开始…·已运行…」;完成=状态 +「耗时…·结束…」。
 import { computed, inject, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ChevronRight, Layers, Trash2 } from 'lucide-vue-next'
@@ -42,7 +42,7 @@ const jobStore = useJobStore()
 const showToast = inject<(m: string, t?: 'success' | 'error' | 'info') => void>('showToast')
 const deleting = ref(false)
 
-// 删除对应作业(级联,P1):确认 → deleteJob → emit deleted(父级 reload)。@click.stop 不触发整行跳转。
+// 删除对应作业(级联):确认后调 deleteJob,再 emit deleted 让父级 reload。@click.stop 不触发整行跳转。
 async function onDelete() {
   if (deleting.value || !props.jobId) return
   if (!confirm('删除该作业?将级联清除其队列任务、产物、用量、DB,不可恢复。')) return
@@ -60,7 +60,7 @@ async function onDelete() {
 
 const icon = computed(() => contentTypeIcon(props.contentType))
 
-// 主显标题:作业标题 → 类型名(有 content_type 才用)→ 流水线 → job_id(最后兜底)。
+// 主显标题按序回退:作业标题、类型名(有 content_type 才用)、流水线,最后兜底 job_id。
 const mainTitle = computed(() =>
   props.title?.trim()
   || (props.contentType ? contentTypeLabel(props.contentType) : '')
@@ -70,7 +70,7 @@ const mainTitle = computed(() =>
 
 const nowMs = computed(() => props.now ?? Date.now())
 
-// 右侧时间文案(§5.1:别用「10h前」,按状态给"点 + 时长")。
+// 右侧时间文案:不用 "10h前" 式相对时间,按状态给时间点 + 时长。
 const timeText = computed(() => {
   if (props.state === 'queued') {
     if (props.enqueuedAt) {

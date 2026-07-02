@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createTestingPinia } from '@pinia/testing'
 
-// TermDetailView: useDomainStore().term(domain, term) 拉详情(内部走 useApi.get)，
+// TermDetailView: useDomainStore().term(domain, term) 拉详情(内部走 useApi.get),
 // 标为主题走 useApi.post。route.params 提供 domain/term。
 const route = { params: { domain: 'ml', term: 'gradient' }, query: {} }
 const push = vi.fn()

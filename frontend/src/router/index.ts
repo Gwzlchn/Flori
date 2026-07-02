@@ -1,7 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
-// 新 IA：知识库(锚) ⊃ 集合 ⊃ 内容；概念 = 知识层。
-// 后端路由(/api/domains、/api/jobs)不变,仅前端路径与文案用新词。
+// IA:知识库(锚) ⊃ 集合 ⊃ 内容;概念 = 知识层。
+// 后端路由(/api/domains、/api/jobs)不变,仅前端路径与文案用知识库词汇。
 const router = createRouter({
   history: createWebHistory(),
   routes: [

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// Prompt 白盒(Phase 2):把四条流水线的全部步骤画成 DAG(看清流程=白盒),
-// 在 AI 步上编辑该步 prompt 覆盖。● = 该步已有覆盖。数据来自 GET /api/pipelines(已扩 is_ai/has_override)。
+// Prompt 白盒: 把四条流水线的全部步骤画成 DAG(看清流程=白盒),
+// 在 AI 步上编辑该步 prompt 覆盖。圆点角标表示该步已有覆盖。数据来自 GET /api/pipelines(含 is_ai/has_override)。
 import { ref, onMounted } from 'vue'
 import { useApi } from '../composables/useApi'
 import PipelineDag from '../components/PipelineDag.vue'
@@ -52,7 +52,7 @@ function openStep(p: Pipeline, key: string) {
 
 function onSaved() {
   editing.value = null
-  load() // 刷新 ● 标记
+  load() // 刷新已有覆盖的圆点角标
 }
 </script>
 

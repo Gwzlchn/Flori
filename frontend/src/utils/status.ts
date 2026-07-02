@@ -1,5 +1,5 @@
 // 状态枚举 → 中文文案,全站统一(StatusBadge / StepWorkbench 等共用),杜绝文案漂移。
-// 视觉配色(badge/pill 类)仍由各组件按自身样式体系决定;这里只管「文案」单一来源。
+// 视觉配色(badge/pill 类)仍由各组件按自身样式体系决定;这里只管文案的单一来源。
 export const STATUS_LABELS: Record<string, string> = {
   // job
   pending: '等待', downloading: '下载中', processing: '处理中',

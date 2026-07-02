@@ -2,15 +2,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
 
-// router：共享 push 间谍以断言跳转。
+// router: 共享 push 间谍以断言跳转。
 const push = vi.fn()
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push, replace: vi.fn() }),
   useRoute: () => ({ params: {}, query: {} }),
 }))
 
-// useApi：按 URL 路由不同返回。views 把 store action 的返回写入本地 ref，
-// 故用「真 Pinia + 假 useApi」让真 action 跑通、把数据灌进视图。
+// useApi: 按 URL 路由不同返回。views 把 store action 的返回写入本地 ref,
+// 故用真 Pinia + 假 useApi,让真 action 跑通、把数据灌进视图。
 const get = vi.fn()
 const post = vi.fn()
 const del = vi.fn()
@@ -20,7 +20,7 @@ vi.mock('../composables/useApi', () => ({
 
 import JobListView from './JobListView.vue'
 
-// 默认空响应；各用例可前置覆写。
+// 默认空响应;各用例可前置覆写。
 function setupApi(opts: {
   jobs?: { items: any[]; total: number }
   facets?: any
@@ -190,7 +190,7 @@ describe('JobListView 交互', () => {
     setupApi({ jobs: { items: [], total: 0 }, facets: { status: { done: 1 }, source: {}, domain: {} } })
     const w = await mountView()
     get.mockClear()
-    // 第一组(按状态)的第一个 chip = 已完成(done)，单值可下推到服务端。
+    // 第一组(按状态)的第一个 chip 是已完成 done,单值可下推到服务端。
     const chip = w.findAll('.fgroup')[0].findAll('.chip')[0]
     await chip.trigger('click')
     await flushPromises()

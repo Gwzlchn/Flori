@@ -5,14 +5,14 @@ import { createTestingPinia } from '@pinia/testing'
 import { setActivePinia } from 'pinia'
 import { useWorkerStore } from '../stores/workers'
 
-// ── 顶层 mock：组件 <script setup> import 什么就 mock 什么 ──
+// 顶层 mock:组件 <script setup> import 什么就 mock 什么
 const push = vi.fn()
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push, replace: vi.fn() }),
   useRoute: () => ({ params: {}, query: {} }),
 }))
 
-// 实时 ws：返回可控 systemStatus ref + connected，避免真连 WebSocket。
+// 实时 ws:返回可控 systemStatus ref + connected,避免真连 WebSocket。
 const systemStatus = ref<any>(null)
 vi.mock('../composables/useGlobalWs', () => ({
   useGlobalWs: () => ({ systemStatus, connected: ref(true), reconnect: vi.fn() }),
@@ -58,8 +58,8 @@ function makeWorker(over: Partial<any> = {}) {
 }
 
 // 共享一个 testing pinia(在 beforeEach 建并 setActivePinia)→ 测试里 useWorkerStore() 在 mount 前/后
-// 都拿到与组件同一个 store 实例。此前 pinia 建在 mountView 内且无 setActivePinia,mount 前取的 store
-// 绑到上一个测试遗留的陈旧 pinia,onMounted 的 fetch* 永不命中目标 store → 9/12 失败。
+// 都拿到与组件同一个 store 实例。若只在 mountView 内建 pinia 且不 setActivePinia,mount 前取的 store
+// 会绑到上一个测试遗留的陈旧 pinia,onMounted 的 fetch* 永不命中目标 store。
 let pinia: ReturnType<typeof createTestingPinia>
 
 function mountView(state: { workers?: any[]; loading?: boolean } = {}) {
@@ -74,7 +74,7 @@ function mountView(state: { workers?: any[]; loading?: boolean } = {}) {
   })
 }
 
-// store actions（stubActions）需返回值：fetchFullStatus/fetchUsage/fetchEvents 给默认。
+// store actions(stubActions)需返回值:fetchFullStatus/fetchUsage/fetchEvents 给默认。
 function stubStoreData(store: any, opts: { full?: any; usage?: any; events?: any[] } = {}) {
   ;(store.fetchFullStatus as any).mockResolvedValue(opts.full ?? fullStatus())
   ;(store.fetchUsage as any).mockResolvedValue(opts.usage ?? { calls: 0, by_model: [], cache_hit_rate_pct: 0,
@@ -112,7 +112,7 @@ describe('SystemView', () => {
     await flushPromises()
     const t = w.text()
     expect(store.fetchFullStatus).toHaveBeenCalled()
-    // 三带重组后:系统信息/调度信息 区已并入概览/核心组件,不再单列。
+    // 系统信息/调度信息并入概览/核心组件区,不单列。
     expect(t).toContain('核心组件')
     expect(t).toContain('系统事件')
     expect(t).toContain('资源池')
@@ -202,7 +202,7 @@ describe('SystemView', () => {
     await flushPromises()
     const t = w.text()
     expect(t).toContain('接入新 Worker')
-    expect(t).toContain('flori-worker:latest')   // 镜像拆分后 = flori-worker(旧 monolith flori:latest 已不存在)
+    expect(t).toContain('flori-worker:latest')   // 接入命令默认镜像 = flori-worker
     expect(t).toContain('GATEWAY_URL')
     const mintBtn = w.findAll('button').find(b => b.text().includes('生成接入 token'))
     await mintBtn!.trigger('click')
@@ -231,7 +231,7 @@ describe('SystemView', () => {
     expect(t).toContain('（等价）')   // claude-cli 成本标等价
   })
 
-  // (原「健康条:组件 down 进异常档」用例已删——健康条移除,组件状态由核心组件卡就地呈现,归 ComponentCard 测试。)
+  // 组件 down/降级的状态呈现由核心组件卡承担,归 ComponentCard 测试,此处不覆盖。
 
   it('点刷新触发 store.fetchAll 与 fetchFullStatus', async () => {
     const store = useWorkerStore()
@@ -255,7 +255,7 @@ describe('SystemView', () => {
     // 默认只勾 cpu → --pools cpu,无 GPU/代理凭证
     expect(w.text()).toContain('--pools cpu')
     expect(w.text()).not.toContain('--gpus all')
-    // 再勾 io + gpu + ai(cpu 仍勾)→ 命令排序稳定 + 三套配置取并集(无主次)
+    // 再勾 io + gpu + ai(cpu 仍勾):命令排序稳定 + 三套配置取并集,无主次
     await w.find('input[type="checkbox"][value="io"]').setValue(true)
     await w.find('input[type="checkbox"][value="gpu"]').setValue(true)
     await w.find('input[type="checkbox"][value="ai"]').setValue(true)

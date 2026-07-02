@@ -1,7 +1,7 @@
 <script setup lang="ts">
-// 搜索（原型 #search）：q≥3 字符才查；可按 内容类型 / 知识库(domain) / 集合(collection_id) 收窄。
-// 结果跳 /content/:id。snippet 含服务端 <mark> 高亮——但 sqlite snippet() 不转义正文，
-// 故这里仍做防御式转义（先整段转义、再仅还原 <mark>），杜绝任何可执行标签注入。
+// 搜索(原型 #search):q≥3 字符才查;可按 内容类型 / 知识库(domain) / 集合(collection_id) 收窄。
+// 结果跳 /content/:id。snippet 含服务端 <mark> 高亮——但 sqlite snippet() 不转义正文,
+// 故这里仍做防御式转义(先整段转义、再仅还原 <mark>),杜绝任何可执行标签注入。
 import { ref, watch, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
@@ -21,11 +21,11 @@ const error = ref('')
 const searched = ref(false)
 const result = ref<SearchResponse>({ total: 0, items: [] })
 
-// trigram 至少 3 字符才命中，短于此直接提示而不打 API。
+// trigram 至少 3 字符才命中,短于此直接提示而不打 API。
 const term = computed(() => q.value.trim())
 const tooShort = computed(() => term.value.length > 0 && term.value.length < 3)
 
-// 笔记类型徽章 / 内容类型图标·配色·文案:统一走 utils/contentType(与 TopBar 共用单一来源)。
+// 笔记类型徽章与内容类型的图标/配色/文案统一走 utils/contentType,与 TopBar 共用单一来源。
 
 // ⌘K / Ctrl-K 聚焦搜索框(与右侧 kbd 提示对应)。
 const searchInput = ref<HTMLInputElement | null>(null)
@@ -38,7 +38,7 @@ function onKeydown(e: KeyboardEvent) {
 onMounted(() => window.addEventListener('keydown', onKeydown))
 onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
-// snippet 安全渲染：整段先转义，再仅还原 <mark> 高亮，确保 v-html 不注入。
+// snippet 安全渲染:整段先转义,再仅还原 <mark> 高亮,确保 v-html 不注入。
 function safeSnippet(raw: string): string {
   if (!raw) return ''
   const escaped = raw
@@ -80,7 +80,7 @@ async function runSearch() {
   }
 }
 
-// 输入防抖：停止键入 300ms 后再查。
+// 输入防抖:停止键入 300ms 后再查。
 let timer: ReturnType<typeof setTimeout> | undefined
 watch([q, domain, contentType, collectionId], () => {
   if (timer) clearTimeout(timer)
@@ -116,7 +116,7 @@ function open(item: SearchResultItem) {
       <input v-model="collectionId" class="input" placeholder="集合 ID（可选）" style="max-width:160px" />
     </div>
 
-    <!-- 提示态：字数不足 -->
+    <!-- 提示态:字数不足 -->
     <div v-if="tooShort" class="note-tip" style="margin-top:18px">输入需 ≥ 3 字才会搜索。</div>
 
     <!-- 加载态 -->
@@ -131,7 +131,7 @@ function open(item: SearchResultItem) {
       <button class="btn" @click="runSearch">重试</button>
     </div>
 
-    <!-- 空态：已搜但无结果 -->
+    <!-- 空态:已搜但无结果 -->
     <div v-else-if="searched && result.items.length === 0" class="card pad"
       style="margin-top:18px;display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;padding:40px 18px">
       <Search :size="40" :stroke-width="1" style="color:var(--ink-300)" />
@@ -139,7 +139,7 @@ function open(item: SearchResultItem) {
       <div class="lead" style="max-width:360px">换个关键词，或放宽上面的类型 / 知识库 / 集合过滤。</div>
     </div>
 
-    <!-- 初始态：还没搜 -->
+    <!-- 初始态:还没搜 -->
     <div v-else-if="!searched" class="note-tip" style="margin-top:18px">输入关键词开始搜索，无匹配会显示空状态。</div>
 
     <!-- 结果列表 -->
@@ -163,7 +163,7 @@ function open(item: SearchResultItem) {
               </div>
               <span class="badge b-mut">{{ noteTypeLabel(item.note_type) }}</span>
             </div>
-            <!-- snippet 经 safeSnippet 转义，仅保留 <mark> 高亮，杜绝注入。 -->
+            <!-- snippet 经 safeSnippet 转义,仅保留 <mark> 高亮,杜绝注入。 -->
             <p class="search-snippet" style="font-size:13px;color:var(--ink-600);margin:6px 0 0" v-html="safeSnippet(item.snippet)"></p>
             <div class="meta" style="margin-top:7px">
               <span>{{ contentTypeLabel(item.content_type) }}</span>

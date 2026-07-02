@@ -9,7 +9,7 @@ import { statusLabel } from '../../utils/status'
 import type { StepInfo, StepUsage } from '../../types'
 import { Check, X, Minus, Loader, Clock, ChevronRight, FileText, Braces, Package, Coins, HardDrive } from 'lucide-vue-next'
 
-// selectedStep 由父组件(JobDetailView 的 DAG 点选)驱动;本组件不再自带步骤轨。
+// selectedStep 由父组件(JobDetailView 的 DAG 点选)驱动;本组件不自带步骤选择轨。
 const props = defineProps<{ jobId: string; steps: StepInfo[]; selectedStep?: string }>()
 const api = useApi()
 
@@ -21,7 +21,7 @@ const statusColor: Record<string, string> = {
 }
 // 状态文案统一走 utils/status.statusLabel(避免与 StatusBadge 文案漂移);配色保留本组件 Tailwind 体系。
 
-// 产出摘要:把 step.meta 渲染成友好「标签：值」。未知键回退原键,内部键跳过。
+// 产出摘要:把 step.meta 渲染成可读的标签值 chip。未知键回退原键,内部键跳过。
 const META_LABELS: Record<string, string> = {
   frames: '关键帧', events: '时间节', lines: '字幕行', chunks: '分块', mode: '模式',
   kept: '保留帧', scenes: '场景数', count: '数量', danmaku: '弹幕条', sections: '章节',
@@ -149,8 +149,8 @@ watch(sel, (name) => {
 
 async function viewFile(f: AFile) {
   selFile.value = f; fileErr.value = ''
-  // 只对文本/JSON 拉取预览;其余(图片/视频/音频/PDF 等 'other' 二进制)不当文本拉
-  // (PDF 当文本拉+渲染会卡死浏览器),由模板用 <img>/<video>/<audio> 或下载链接呈现。
+  // 只对文本/JSON 拉取预览;其余二进制(图片/视频/音频/PDF 等 'other')不当文本拉,
+  // 由模板用 <img>/<video>/<audio> 或下载链接呈现。PDF 当文本拉取并渲染会卡死浏览器。
   if (f.kind !== 'text' && f.kind !== 'json') { fileContent.value = ''; return }
   fileLoading.value = true
   try {
@@ -228,7 +228,7 @@ onMounted(async () => {
             已跳过{{ selStep.meta?.reason ? '：' + selStep.meta.reason : '（不满足运行条件，例如视频自带字幕则无需语音转写）' }}
           </div>
 
-          <!-- 产出摘要(可读,替代原始 JSON) -->
+          <!-- 产出摘要:可读 chip,不直接展示原始 JSON -->
           <div v-if="metaRows(selStep).length" class="mt-3 flex flex-wrap gap-2">
             <span v-for="r in metaRows(selStep)" :key="r.k" class="text-xs bg-gray-50 border border-gray-100 rounded px-2 py-1 text-gray-600">
               {{ r.k }}：<span class="text-gray-800 font-medium">{{ r.v }}</span>
@@ -257,7 +257,7 @@ onMounted(async () => {
             </div>
           </div>
 
-          <!-- ════ AI 日志(本步每次 LLM 调用的完整审计;只读)════ -->
+          <!-- AI 日志(本步每次 LLM 调用的完整审计;只读) -->
           <div v-if="selUsage.length" class="mt-3 pt-3 border-t border-gray-100">
             <div class="flex items-center gap-2 mb-1.5">
               <span class="text-xs font-semibold text-gray-700 flex items-center gap-1.5"><Braces :size="13" class="text-gray-500" />AI 日志</span>
@@ -269,7 +269,7 @@ onMounted(async () => {
             <AiLogPanel v-if="aiLogOpen" :job-id="jobId" :step="sel" />
           </div>
 
-          <!-- ════ 产物(本步产出的文件)════ -->
+          <!-- 产物(本步产出的文件) -->
           <div v-if="['done', 'failed', 'running'].includes(selStep.status)" class="mt-4 pt-3 border-t border-gray-100">
             <div class="flex items-center gap-2 mb-2">
               <span class="text-xs font-semibold text-gray-700 flex items-center gap-1.5"><Package :size="13" class="text-gray-500" />产物 <span class="font-normal text-gray-400">（{{ selFiles.length }}<template v-if="selBytes"> · {{ fmtBytes(selBytes) }}</template>）</span></span>
@@ -325,7 +325,7 @@ onMounted(async () => {
             </template>
           </div>
 
-          <!-- ════ 日志(本步运行日志)════ -->
+          <!-- 日志(本步运行日志) -->
           <div v-if="['done', 'failed', 'running'].includes(selStep.status)" class="mt-4 pt-3 border-t border-gray-100">
             <div class="flex items-center gap-2 mb-1.5">
               <span class="text-xs font-semibold text-gray-700 flex items-center gap-1.5"><FileText :size="13" class="text-gray-500" />日志</span>

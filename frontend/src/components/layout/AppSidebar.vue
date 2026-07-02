@@ -71,7 +71,7 @@ async function toggleCol(id: string) {
   if (expandedCol[id]) await loadItems(id)
 }
 
-// #3 导航联动:进入某内容/集合/知识库时,侧栏自动展开其所在分支并高亮。
+// 导航联动:进入某内容/集合/知识库时,侧栏自动展开其所在分支并高亮。
 async function expandKb(d: string) { expandedKb[d] = true; await loadCols(d) }
 async function expandCol(id: string) { expandedCol[id] = true; await loadItems(id) }
 async function syncFromRoute() {
@@ -104,7 +104,7 @@ const isKbActive = (d: string) =>
 const isContentActive = (jid: string) =>
   route.name === 'content-detail' && String(route.params.id) === String(jid)
 
-// #5dup 知识库拖拽排序:领域是派生视图、后端无顺序,故顺序存浏览器 localStorage。
+// 知识库拖拽排序:领域是派生视图、后端无顺序,故顺序存浏览器 localStorage。
 const ORDER_KEY = 'flori.kbOrder'
 const kbOrder = ref<string[]>(loadOrder())
 function loadOrder(): string[] {
@@ -139,7 +139,7 @@ function moveKb(i: number, dir: number) {
   localStorage.setItem(ORDER_KEY, JSON.stringify(arr))
 }
 
-// #3 知识库图标:有 d.icon 用之;未设按名关键词 smart 默认;颜色用 d.color 否则名字哈希(替代纯色点)。
+// 知识库图标:有 d.icon 用之;未设按名关键词 smart 默认;颜色用 d.color,否则名字哈希。
 const ICON_KW: [RegExp, string][] = [
   [/financ|金融|财经|invest|trad|market|stock|经济/i, 'landmark'],
   [/deep.?learn|深度学习|machine.?learn|neural|\bml\b|\bai\b|人工智能|算法/i, 'brain'],
@@ -154,10 +154,10 @@ function kbIconComp(d: any) { return resolveIcon(d.icon) || resolveIcon(smartIco
 function kbHue(d: any) { return d.color || kbColor(d.domain) }
 function kbLabel(d: any) { return d.display_name || d.domain }
 
-// #4 集合来源图标 + 订阅状态点(5 态由共享 subState/subTip 推,数据来自 c.subscription)
+// 集合来源图标 + 订阅状态点(5 态由共享 subState/subTip 推,数据来自 c.subscription)
 function srcIcon(c: any) { return c.subscription ? sourceBadge(sourceLabelOf(c.subscription)).icon : Folder }
 
-// #1/#2 KB 设置弹窗(重命名/图标/配色)+ 新增集合/订阅弹窗
+// KB 设置弹窗(重命名/图标/配色)+ 新增集合/订阅弹窗
 const settingsFor = ref<any | null>(null)
 const addFor = ref('')
 const addSaving = ref(false)
@@ -168,7 +168,7 @@ async function saveSettings(patch: { display_name: string; icon: string; color: 
   if (!d) return
   try { await domainStore.updateMeta(d.domain, patch) } finally { settingsFor.value = null }
 }
-// 改英文 domain key(二期):确认 → 事务迁移 → 关弹窗 + 跳到新 key 的工作台。失败(如重名 409)弹错。
+// 改英文 domain key:确认后走事务迁移,成功关弹窗并跳到新 key 的工作台。失败(如重名 409)弹错。
 async function renameSettings(newDomain: string) {
   const d = settingsFor.value
   if (!d) return
@@ -304,13 +304,13 @@ async function onCreateCollection(payload: any) {
 
 <style scoped>
 .nb-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* #3 KB 图标(替代纯色点):色取 d.color / 名字哈希 */
+/* KB 图标:色取 d.color / 名字哈希 */
 .kb-ic { display: inline-flex; align-items: center; justify-content: center; width: 18px; flex: none; }
 .kb-ic svg { width: 15px; height: 15px; }
-/* #3 当前内容在侧栏高亮 */
+/* 当前内容在侧栏高亮 */
 .content-item.on { color: var(--brand-700); font-weight: 600; }
 .content-item.on .ci-dot { box-shadow: 0 0 0 2px var(--brand-100); }
-/* #4 订阅状态点(5 态):绿=订阅中 / 灰=已暂停 / 琥珀=尚未同步 / 红=同步出错 / 蓝脉冲=同步中 */
+/* 订阅状态点(5 态):绿=订阅中 / 灰=已暂停 / 琥珀=尚未同步 / 红=同步出错 / 蓝脉冲=同步中 */
 .sub-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; margin-left: auto; }
 .sub-dot.active { background: #10b981; }
 .sub-dot.paused { background: var(--ink-300); }
@@ -318,12 +318,12 @@ async function onCreateCollection(payload: any) {
 .sub-dot.error { background: #ef4444; }
 .sub-dot.syncing { background: #3b82f6; animation: subpulse 1.1s ease-in-out infinite; }
 @keyframes subpulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .45; transform: scale(.78); } }
-/* #2 Notion 式:整行点击=进工作台;箭头 hover 抬起(底色+阴影)提示"点这里才展开" */
+/* Notion 式:整行点击=进工作台;箭头 hover 抬起(底色+阴影)提示"点这里才展开" */
 .sub-item:hover .kb-caret { background: var(--surface); box-shadow: 0 1px 3px rgba(15, 23, 42, .18); color: var(--ink-700); }
-/* #5dup 拖拽落点提示;行可点(进工作台)故 pointer */
+/* 拖拽落点提示;行可点(进工作台)故 pointer */
 .sub-item[draggable="true"] { cursor: pointer; }
 .sub-item.dragover { box-shadow: inset 0 2px 0 var(--brand-500); }
-/* 行尾操作(上移/下移/设置…/新增＋):默认淡出,hover 行显现;移动端常驻 */
+/* 行尾操作(上移/下移/设置/新增):默认淡出,hover 行显现;移动端常驻 */
 .kb-actions { display: inline-flex; flex: none; gap: 0; opacity: 0; transition: opacity .12s; }
 .sub-item:hover .kb-actions { opacity: 1; }
 .kb-mv { display: inline-flex; align-items: center; padding: 1px; color: var(--ink-400); border-radius: 3px; }

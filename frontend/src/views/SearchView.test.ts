@@ -42,7 +42,7 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-// 触发输入 + 跑完 300ms 防抖 + flush 微任务，统一封装。
+// 触发输入 + 跑完 300ms 防抖 + flush 微任务,统一封装。
 async function typeAndSettle(w: any, value: string) {
   await w.find('input[placeholder^="搜索"]').setValue(value)
   await vi.advanceTimersByTimeAsync(300)
@@ -86,7 +86,7 @@ describe('SearchView 搜索流程', () => {
     const w = mount(SearchView)
     const selects = w.findAll('select')
     await selects[0].setValue('paper')
-    await w.findAll('input.input')[0].setValue('  ml  ') // domain，前后空格应被 trim
+    await w.findAll('input.input')[0].setValue('  ml  ') // domain,前后空格应被 trim
     await w.findAll('input.input')[1].setValue('col-9')  // collection_id
     await typeAndSettle(w, 'transformer')
 

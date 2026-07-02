@@ -3,7 +3,7 @@ import { ref, computed } from 'vue'
 import { Trash2, X, AlertTriangle, Archive } from 'lucide-vue-next'
 import type { Collection } from '../../types'
 
-// 删除集合弹窗(原型 m-confirm 变体)。二选一:仅删集合保留内容 / 连内容一起删(需二次确认)。
+// 删除集合弹窗。二选一:仅删集合保留内容 / 连内容一起删(需二次确认)。
 const props = defineProps<{ collection: Collection; deleting?: boolean }>()
 const emit = defineEmits<{
   (e: 'close'): void

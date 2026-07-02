@@ -15,7 +15,7 @@ export const useGlobalStore = defineStore('global', () => {
     crumbOverride.value = segs
   }
 
-  // 全局投递内容弹窗:侧栏/底栏「投递内容」按钮打开(投递表单 JobSubmitForm 此前未挂载到任何页面)。
+  // 全局投递内容弹窗:侧栏/底栏「投递内容」按钮打开;投递表单 JobSubmitForm 只挂在该弹窗里。
   const submitOpen = ref(false)
   function openSubmit() { submitOpen.value = true }
   function closeSubmit() { submitOpen.value = false }

@@ -28,7 +28,7 @@ export function useJobWs(jobId: Ref<string>) {
       case 'step_progress':
         if (step) {
           step.status = 'running'
-          // message:运行中的实时进度文案(如「扫描关键帧」),供 workbench 显示;契约 §WS。
+          // message:运行中的实时进度文案,如 "扫描关键帧",供 workbench 显示;见 docs/03-contracts.md §2。
           step.meta = { ...step.meta, pct: event.pct, current: event.current, total: event.total, message: event.message }
         }
         break

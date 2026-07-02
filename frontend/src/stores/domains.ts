@@ -3,7 +3,7 @@ import { ref } from 'vue'
 import { useApi } from '../composables/useApi'
 import type { DomainOverview, TopicConcept, CreateDomainPayload, ConceptTimeline, TimelineGranularity, ConceptGraph } from '../types'
 
-// 领域 store：领域是派生视图（来自 jobs ∪ collections ∪ glossary 的 distinct domain）。
+// 领域 store:领域是派生视图,来自 jobs ∪ collections ∪ glossary 的 distinct domain。
 export const useDomainStore = defineStore('domains', () => {
   const api = useApi()
   const domains = ref<DomainOverview[]>([])
@@ -30,12 +30,12 @@ export const useDomainStore = defineStore('domains', () => {
   async function topic(domain: string, t: string): Promise<any> {
     return api.get(`/api/domains/${encodeURIComponent(domain)}/topics/${encodeURIComponent(t)}`)
   }
-  // 概念主题：域内 is_topic=1 的概念列表（空则 []）。
+  // 概念主题:域内 is_topic=1 的概念列表(空则 [])。
   async function topicConcepts(domain: string): Promise<TopicConcept[]> {
     return api.get<TopicConcept[]>(`/api/domains/${encodeURIComponent(domain)}/topic-concepts`)
   }
 
-  // 新建知识库：写 profile 元数据,领域随即出现在总览;建后刷新列表。
+  // 新建知识库:写 profile 元数据,领域随即出现在总览;建后刷新列表。
   async function create(payload: CreateDomainPayload): Promise<DomainOverview> {
     const created = await api.post<DomainOverview>('/api/domains', payload)
     await fetchAll()
@@ -63,7 +63,7 @@ export const useDomainStore = defineStore('domains', () => {
     await fetchAll()
   }
 
-  // 改英文 domain key(二期 issue1-b):事务迁移该领域下所有 job/集合/术语 + profile 文件。
+  // 改英文 domain key:事务迁移该领域下所有 job/集合/术语 + profile 文件。
   // 后端校验 new 合法且不与现有领域冲突(否则 409)。改后刷新列表;返回新 key 供调用方跳转。
   async function renameKey(domain: string, newDomain: string): Promise<string> {
     const r = await api.post<{ new: string }>(

@@ -2,21 +2,21 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createTestingPinia } from '@pinia/testing'
 
-// ── 依赖 mock（须在 import 组件前）──
-// 路由：固定 worker id = w1；记录 push 以验证「移除后跳转 / 历史行点击」。
+// 依赖 mock,须在 import 组件前。
+// 路由:固定 worker id = w1;记录 push 以验证移除后跳转和历史行点击。
 const push = vi.fn()
 vi.mock('vue-router', () => ({
   useRoute: () => ({ params: { id: 'w1' }, query: {} }),
   useRouter: () => ({ push, replace: vi.fn() }),
 }))
 
-// api：组件主体走 api.get(/api/workers/{id})；store 内部也用同一 useApi。
+// api:组件主体走 api.get(/api/workers/{id});store 内部也用同一 useApi。
 const api = { get: vi.fn(), post: vi.fn(), put: vi.fn(), del: vi.fn(), upload: vi.fn(), getText: vi.fn() }
 vi.mock('../composables/useApi', () => ({ useApi: () => api }))
 
 import WorkerDetailView from './WorkerDetailView.vue'
 
-// 完整 Worker 夹具（按 types.Worker 字段补齐）。
+// 完整 Worker 夹具(按 types.Worker 字段补齐)。
 function makeWorker(over: Record<string, unknown> = {}) {
   return {
     id: 'w1',
@@ -47,7 +47,7 @@ const JOBS = [
   { job_id: 'job-2', step: '02_transcribe', status: 'failed', started_at: null, finished_at: new Date().toISOString(), duration_sec: 90, error: 'x' },
 ]
 
-// 挂载助手：注入 showToast、createTestingPinia(stubActions:false → 真 action 走 mock api)、stub 子组件。
+// 挂载助手:注入 showToast、createTestingPinia(stubActions:false → 真 action 走 mock api)、stub 子组件。
 function factory() {
   return mount(WorkerDetailView, {
     global: {
@@ -60,7 +60,7 @@ function factory() {
 
 beforeEach(() => {
   vi.clearAllMocks()
-  // 默认成功路径：主体 + 历史。
+  // 默认成功路径:主体 + 历史。
   api.get.mockImplementation((url: string) => {
     if (url.endsWith('/tasks')) return Promise.resolve(JOBS)
     return Promise.resolve(makeWorker())

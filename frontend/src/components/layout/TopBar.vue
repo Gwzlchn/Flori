@@ -7,7 +7,7 @@ import { useGlobalStore } from '../../stores/global'
 import { contentTypeIcon, contentTypePill, noteTypeLabel } from '../../utils/contentType'
 import type { BreadcrumbSeg, SearchResponse, SearchResultItem } from '../../types'
 
-// 移动端汉堡：开合左侧抽屉。桌面端隐藏（CSS 媒体查询控制）。
+// 移动端汉堡:开合左侧抽屉。桌面端隐藏(CSS 媒体查询控制)。
 defineEmits<{ (e: 'toggle-mobile'): void }>()
 
 const route = useRoute()
@@ -48,14 +48,14 @@ function goBack() {
   router.push('/')
 }
 
-// ===== 顶栏搜索：就地展开 + 下拉建议（不直接跳转） =====
+// 顶栏搜索:就地展开 + 下拉建议(不直接跳转)
 const expanded = ref(false)
 const suggestions = ref<SearchResultItem[]>([])
 const loading = ref(false)
 const wrapEl = ref<HTMLElement | null>(null)
 const inputEl = ref<HTMLInputElement | null>(null)
 
-// 笔记类型徽章 / 内容类型图标·配色:统一走 utils/contentType(与 SearchView 共用单一来源)。
+// 笔记类型徽章与内容类型图标/配色统一走 utils/contentType,与 SearchView 共用单一来源。
 
 const term = computed(() => q.value.trim())
 
@@ -67,7 +67,7 @@ function collapse() {
   expanded.value = false
 }
 
-// 输入防抖：停止键入 ~250ms 后再查；q≥3 字符才打 API。
+// 输入防抖:停止键入 ~250ms 后再查;q≥3 字符才打 API。
 let timer: ReturnType<typeof setTimeout> | undefined
 function onInput() {
   if (timer) clearTimeout(timer)
@@ -85,7 +85,7 @@ async function fetchSuggestions() {
   if (v.length < 3) { suggestions.value = []; loading.value = false; return }
   try {
     const r = await api.get<SearchResponse>(`/api/search?q=${encodeURIComponent(v)}&limit=5`)
-    // 仅在查询词未变时回填，避免乱序竞态。
+    // 仅在查询词未变时回填,避免乱序竞态。
     if (v === term.value) suggestions.value = r.items.slice(0, 5)
   } catch {
     if (v === term.value) suggestions.value = []
@@ -100,7 +100,7 @@ function openItem(item: SearchResultItem) {
   router.push(`/content/${encodeURIComponent(item.job_id)}`)
 }
 
-// 回车 / 「查看全部」→ 搜索页。
+// 回车或点底部 "查看全部" → 搜索页。
 function runSearch() {
   const v = term.value
   if (!v) return
@@ -188,6 +188,6 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .crumb-sep { color: var(--ink-300); }
-/* 下拉里的小 type-pill：缩到 22px，配色沿用 .type-pill 既有类。 */
+/* 下拉里的小 type-pill:缩到 22px,配色沿用 .type-pill 既有类。 */
 .sp-pill { width: 22px; height: 22px; border-radius: 6px; }
 </style>

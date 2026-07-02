@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 
-// PromptEditor 直接调 useApi(get 读详情/历史版本、put 存(overwrite/new)、post 切激活指针(activate)、del 彻底删除)。
+// PromptEditor 直接调 useApi:get 读详情与历史版本,put 存 overwrite/new,post 切激活指针 activate,del 彻底删除。
 const get = vi.fn()
 const post = vi.fn()
 const put = vi.fn()
@@ -133,7 +133,7 @@ describe('PromptEditor 版本管理', () => {
       domain: undefined,
       version: null,
     })
-    expect(del).not.toHaveBeenCalled() // 不再删历史
+    expect(del).not.toHaveBeenCalled() // 只停用,不删历史
     expect(w.emitted('changed')).toBeTruthy()
   })
 
@@ -168,7 +168,7 @@ describe('PromptEditor 版本管理', () => {
 
   it('「设为当前激活」对已激活版本禁用(选中激活 v2 时不可点)', async () => {
     const w = await mountEditor()
-    // 初始选中 = 激活版本 v2 → 已是激活态 → 按钮禁用
+    // 初始选中即激活版本 v2,已是激活态,按钮禁用
     expect((w.find('[data-test="set-active"]').element as HTMLButtonElement).disabled).toBe(true)
   })
 

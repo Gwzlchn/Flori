@@ -20,14 +20,14 @@ const domainStore = useDomainStore()
 const { domains, loading } = storeToRefs(domainStore)
 const showToast = inject<(m: string, t?: 'success' | 'error' | 'info') => void>('showToast', () => {})
 
-// 加载错误态（store.fetchAll 不吞错，这里捕获展示）。
+// 加载错误态(store.fetchAll 不吞错,这里捕获展示)。
 const error = ref('')
 
 const hasDomains = computed(() => domains.value.length > 0)
 
-// 图标名→组件解析改用 utils/kbIcons 的 resolveIcon（精选集，避免 import * 拖入整库）。
+// 图标名→组件解析用 utils/kbIcons 的 resolveIcon(精选集,避免 import * 拖入整库)。
 
-// ── 身份图标 + 渐变色块：按知识库名哈希出稳定的图标/配色（缺 profile 元数据时回退保证稳定） ──
+// 身份图标 + 渐变色块: 按知识库名哈希出稳定的图标/配色,缺 profile 元数据时回退保证稳定。
 const ICONS = [Cpu, Atom, Dna, Code, Database, Globe, FlaskConical, BookOpen,
   Brain, Calculator, Scale, Languages, Music, Palette, Leaf, Rocket]
 const GRADIENTS = [
@@ -49,7 +49,7 @@ function iconFor(name: string) {
 function gradientFor(name: string): string {
   return GRADIENTS[hash(name) % GRADIENTS.length]
 }
-// 卡片身份：优先用 profile 的 icon/color/display_name，缺失才回退哈希派生。
+// 卡片身份: 优先用 profile 的 icon/color/display_name,缺失才回退哈希派生。
 function cardIcon(d: DomainOverview) {
   return resolveIcon(d.icon) || iconFor(d.domain)
 }
@@ -73,13 +73,13 @@ function openDomain(d: DomainOverview) {
   router.push(`/kb/${encodeURIComponent(d.domain)}`)
 }
 
-// 活跃时间相对展示走 utils/datetime.fmtRelative(中文单位 + 「活跃」后缀;last_active_at 可能为 null）。
+// 活跃时间相对展示走 utils/datetime.fmtRelative(中文单位 + "活跃" 后缀;last_active_at 可能为 null)。
 const activeAgo = (v: string | null) => fmtRelative(v, { style: 'cn', suffix: '活跃', fallback: '从未活跃' })
 
-// ── 新建知识库内联弹窗（参考原型 #home 的 m-domain）：提交真正调 domainStore.create ──
-// 可选图标（存 lucide 名字符串入 profile.icon）与配色（KB_COLORS,存 #hex 入 profile.color）。
+// 新建知识库内联弹窗(参考原型 #home 的 m-domain): 提交真正调 domainStore.create。
+// 图标存 lucide 名字符串入 profile.icon;配色从 KB_COLORS 选,存 #hex 入 profile.color。
 const showCreate = ref(false)
-const draftDomain = ref('')   // 英文 slug → payload.domain（URL/过滤标识，必填）
+const draftDomain = ref('')   // 英文 slug → payload.domain(URL/过滤标识,必填)
 const draftName = ref('')     // 显示名 → payload.display_name
 const draftIcon = ref(ICON_NAMES[0])
 const draftColor = ref(KB_COLORS[0])
@@ -206,7 +206,7 @@ onMounted(() => {
       </a>
     </div>
 
-    <!-- 新建知识库弹窗（提交真正调 domainStore.create） -->
+    <!-- 新建知识库弹窗(提交真正调 domainStore.create) -->
     <div v-if="showCreate" class="overlay show" @click.self="showCreate = false">
       <div class="modal">
         <div class="hd">

@@ -16,7 +16,7 @@ import {
   Trash2,
 } from 'lucide-vue-next'
 
-// 集合详情（原型 #collection）：头部信息 + 订阅源（开关/同步） + 名下内容列表。
+// 集合详情(原型 #collection):头部信息 + 订阅源开关与同步 + 名下内容列表。
 const route = useRoute()
 const router = useRouter()
 const store = useCollectionStore()
@@ -79,7 +79,7 @@ async function load() {
   }
 }
 
-// 立即同步：拉取 UP 全部视频，新视频自动建内容入本集合。返回 {new,total}。
+// 立即同步:拉取 UP 全部视频,新视频自动建内容入本集合。返回 {new,total}。
 async function syncNow() {
   const c = collection.value
   if (!c?.subscription || syncing.value) return
@@ -114,7 +114,7 @@ async function retryFailed() {
   }
 }
 
-// 自动同步开关：订阅是集合属性，走集合端点 PUT {sync_enabled}。
+// 自动同步开关:订阅是集合属性,走集合端点 PUT {sync_enabled}。
 async function toggleAutoSync() {
   const c = collection.value
   if (!c?.subscription || togglingSync.value) return
@@ -181,7 +181,7 @@ onBeforeUnmount(() => global.setCrumbs(null))
     </div>
 
     <template v-else-if="collection">
-      <!-- 头部：图标 + 名字 + 类型徽章 + 立即同步 -->
+      <!-- 头部:图标 + 名字 + 类型徽章 + 立即同步 -->
       <div style="display:flex;align-items:center;gap:13px;margin-bottom:6px">
         <span
           class="cic"

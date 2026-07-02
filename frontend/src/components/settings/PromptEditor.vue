@@ -1,14 +1,13 @@
 <script setup lang="ts">
-// Prompt 白盒 Phase 2 + 版本管理(类 Grafana save):编辑某 AI 步的 prompt 覆盖(全局 / 按领域)。
-// UX(1.1.7 加版本):
-//  · 顶部「版本」下拉 = `默认(无覆盖)` + 各历史版本 v{n}(标当前激活)。选默认 → 载入默认模板内容;
-//    选某历史版本 → 调 GET versions/{n} 把该版本全文载入 textarea(可基于它改)。
-//  · 保存有两个动作:「覆盖当前版本」(mode=overwrite,改激活版本内容,版本号不变)/
-//    「另存为新版本」(mode=new,version=max+1 并激活,可填一行 note)。首次保存恒为 v1。
-//  · 「设为当前激活」(1.1.11)= 把下拉所选设为激活指针(POST .../activate):选默认→version:null
-//    停用回内置默认(非破坏,留历史);选 vN→version:vN 把该历史版本设为激活(派发用它)。激活后原地刷新。
-//  · 「回到内置默认」(1.1.11,原「恢复默认」)= activate{version:null}(停用覆盖、保留全部历史版本),
-//    不再 DELETE 删历史。彻底删除入口不在此面板(如需可走 DELETE)。
+// Prompt 白盒编辑 + 版本管理(类 Grafana save):编辑某 AI 步的 prompt 覆盖(全局 / 按领域)。
+// - 顶部「版本」下拉 = `默认(无覆盖)` + 各历史版本 v{n},标出当前激活。选默认载入默认模板内容;
+//   选某历史版本调 GET versions/{n} 把该版本全文载入 textarea,可基于它改。
+// - 保存有两个动作:「覆盖当前版本」mode=overwrite,改激活版本内容,版本号不变;
+//   「另存为新版本」mode=new,version=max+1 并激活,可填一行 note。首次保存恒为 v1。
+// - 「设为当前激活」把下拉所选设为激活指针(POST .../activate)。选默认发 version:null,
+//   停用回内置默认,历史保留;选 vN 发 version:vN,把该历史版本设为派发所用。激活后原地刷新。
+// - 「回到内置默认」= activate{version:null},停用覆盖且保留全部历史版本,非破坏。
+//   彻底删除入口不在此面板,如需可走 DELETE。
 // 变体多模板步(08_punctuate/11_smart)预填用主模板,其余变体在下方只读列出。覆盖存 DB,下个 job 派发时注入。
 // 复用 ProfileEditor 的 modal 范式(.overlay/.modal/.field/.btn 全局类)。
 import { ref, onMounted, inject, computed } from 'vue'
@@ -48,7 +47,7 @@ interface PromptDetail {
   versions?: VersionMeta[]
 }
 
-// 主模板内容(预填默认用):后端 default_template 已取「主模板({step}.md)否则首个变体」。
+// 主模板内容(预填默认用):后端 default_template 取主模板 {step}.md,没有则取首个变体。
 const defaultContent = computed(() => defaultTemplate.value ?? '')
 
 // 主模板的 name(用于把"其余变体"从全变体列表里剔出来只读展示)。
@@ -64,9 +63,8 @@ const otherVariants = computed(() => defaultTemplates.value.filter((t) => t.name
 // 有无激活覆盖(决定「回到内置默认」是否可点 + 「覆盖当前版本」按钮文案带版本号)。
 const hasOverride = computed(() => activeVersion.value != null)
 
-// 下拉所选是否已是【当前激活态】(决定「设为当前激活」是否禁用):
-//  · 选「默认」→ 当且仅当当前无激活(activeVersion==null)即已是默认态;
-//  · 选 vN → 当且仅当 vN 已是激活版本。
+// 下拉所选是否已是当前激活态,决定「设为当前激活」是否禁用:
+// 选默认时,当且仅当当前无激活(activeVersion==null);选 vN 时,当且仅当 vN 已是激活版本。
 const selectedIsActive = computed(() =>
   selectedVersion.value === 'default'
     ? activeVersion.value == null
@@ -92,7 +90,7 @@ async function load() {
     const noDomain = scope.value === 'domain' && !domain.value.trim()
     activeVersion.value = noDomain ? null : (d.active_version ?? null)
     const ov = noDomain ? null : (d.override?.content ?? null)
-    // 预填【当前生效 prompt】:有覆盖填覆盖(激活版本),否则填默认模板内容;下拉相应选激活版本 / 默认。
+    // 预填当前生效 prompt:有覆盖填覆盖(激活版本),否则填默认模板内容;下拉相应选激活版本 / 默认。
     content.value = ov ?? defaultContent.value
     selectedVersion.value = activeVersion.value ?? 'default'
     note.value = ''
@@ -145,7 +143,7 @@ async function save(mode: 'overwrite' | 'new') {
 }
 
 // activate 指针操作的公共体:version=null 停用回内置默认、version=vN 设激活。成功后原地刷新
-// (active 标记移到所选)+ 通知父组件刷新 ● 标记(不关闭面板)。
+// (active 标记移到所选)+ 通知父组件刷新圆点角标(不关闭面板)。
 async function _activate(version: number | null, okMsg: string) {
   if (scope.value === 'domain' && !domain.value.trim()) {
     showToast('请先填写领域', 'error')
@@ -160,7 +158,7 @@ async function _activate(version: number | null, okMsg: string) {
     })
     showToast(okMsg, 'success')
     await load() // 原地刷新:active 标记移到新激活态
-    emit('changed') // 父组件刷新 ● 标记(不关闭面板)
+    emit('changed') // 父组件刷新圆点角标(不关闭面板)
   } catch (e: any) {
     showToast('操作失败:' + (e?.message || e), 'error')
   } finally {
@@ -178,7 +176,7 @@ async function setActive() {
   }
 }
 
-// 回到内置默认 = 停用覆盖(activate version:null),【保留全部历史版本】(非破坏,不再 DELETE)。无激活则禁用。
+// 回到内置默认 = 停用覆盖(activate version:null),保留全部历史版本,非破坏。无激活则禁用。
 async function restoreDefault() {
   if (!hasOverride.value) return
   await _activate(null, '已回到内置默认(保留历史版本)')

@@ -3,7 +3,7 @@ import { ref, computed } from 'vue'
 import { FolderPlus, X, Check, Folder } from 'lucide-vue-next'
 import { SOURCE_TYPES, sourceMeta } from '../../constants/sources'
 
-// 新建集合 / 订阅弹窗(原型 m-collection)。手动集合 or 多源订阅。
+// 新建集合 / 订阅弹窗。手动集合 or 多源订阅。
 // name 不让用户填:订阅集合首次同步自动取来源真实名;手动集合用「名称」字段(下方手动态才显示)。
 const emit = defineEmits<{
   (e: 'close'): void

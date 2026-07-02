@@ -3,7 +3,7 @@ import { computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import MarkdownIt from 'markdown-it'
 
-// terms/domain 用于 P4「笔记内联可点」：正文里命中的已接受术语包成链接 → 该领域术语详情。
+// terms/domain 用于笔记内联可点:正文里命中的已接受术语包成链接 → 该领域术语详情。
 // 不传则不做术语链接(其它调用方无需改动)。
 const props = defineProps<{ content: string; jobId: string; terms?: string[]; domain?: string }>()
 const emit = defineEmits<{ headings: [{ id: string; text: string; level: number }[]] }>()
@@ -11,7 +11,7 @@ const emit = defineEmits<{ headings: [{ id: string; text: string; level: number 
 const router = useRouter()
 const md = new MarkdownIt({ html: false, linkify: true, typographer: true })
 
-// 术语链接状态(在 rendered 计算里按当前 props 更新；ruler 闭包读取)。
+// 术语链接状态(在 rendered 计算里按当前 props 更新;ruler 闭包读取)。
 const termLink: { set: Set<string>; re: RegExp | null; linked: Set<string> } = {
   set: new Set(), re: null, linked: new Set(),
 }
@@ -39,7 +39,7 @@ md.renderer.rules.image = (tokens: any, idx: any, options: any, env: any, self: 
   return defaultImageRule(tokens, idx, options, env, self)
 }
 
-// 时间戳渲染为普通等宽文本：当前没有播放器/跳转能力，不做可点击外观以免误导。
+// 时间戳渲染为普通等宽文本:当前没有播放器/跳转能力,不做可点击外观以免误导。
 md.core.ruler.after('inline', 'timestamp_marks', (state: any) => {
   for (const blockToken of state.tokens) {
     if (blockToken.type !== 'inline' || !blockToken.children) continue
@@ -73,7 +73,7 @@ md.core.ruler.after('inline', 'timestamp_marks', (state: any) => {
   }
 })
 
-// P4：正文命中「已接受术语」→ 包成可点链接(仅 text 节点、不在链接/代码内、每词仅首次出现)。
+// 正文命中已接受术语 → 包成可点链接(仅 text 节点、不在链接/代码内、每词仅首次出现)。
 md.core.ruler.after('timestamp_marks', 'term_links', (state: any) => {
   if (!termLink.re) return
   for (const blockToken of state.tokens) {
@@ -112,8 +112,8 @@ const renderedDoc = computed(() => {
   termLink.linked = new Set()
   let html = md.render(props.content, { jobId: props.jobId })
 
-  // OCR 仅在显示时折叠：把 `> OCR：…` 渲染出的引用块包成默认收起的 <details>，
-  // 原文仍保留在笔记里，只是阅读时不喧宾夺主。
+  // OCR 仅在显示时折叠:把 `> OCR：…` 渲染出的引用块包成默认收起的 <details>,
+  // 原文仍保留在笔记里,只是阅读时不喧宾夺主。
   html = html.replace(
     /<blockquote>\s*<p>OCR：([\s\S]*?)<\/p>\s*<\/blockquote>/g,
     (_m: string, body: string) =>
@@ -136,7 +136,7 @@ const rendered = computed(() => renderedDoc.value.html)
 
 watch(() => renderedDoc.value.headings, (hs) => emit('headings', hs), { immediate: true })
 
-// 术语链接走 SPA 跳转(v-html 内的 <a> 不被 vue-router 接管，用事件委托)。
+// 术语链接走 SPA 跳转(v-html 内的 <a> 不被 vue-router 接管,用事件委托)。
 function onClick(e: MouseEvent) {
   const a = (e.target as HTMLElement)?.closest?.('.term-link') as HTMLElement | null
   if (!a) return

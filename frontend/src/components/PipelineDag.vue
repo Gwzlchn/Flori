@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 流水线分层拓扑 DAG:按 needs 最长路径分层 → 横向列(同列=可并行);依赖关系用 SVG 贝塞尔连线画出
-// (源步右缘 → 目标步左缘),不再用「⟵合」文字。节点标池(cpu/ai/io/gpu);AI 步附 provider + 开销。
+// (源步右缘 → 目标步左缘)。节点标池(cpu/ai/io/gpu);AI 步附 provider + 开销。
 // statusByKey(每个 job 视图)给定时点按状态着色,否则按池。纯 CSS + SVG,无图布局库;过宽横滚。
 import { computed, ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 
@@ -45,7 +45,7 @@ function dotCls(s: Step): string {
   return 'pl-' + (s.pool || 'io')
 }
 const fmtCost = (v: number) => `$${(v ?? 0).toFixed(4)}`
-// hover 提示:步骤 · 池 · (AI 步)provider 开销。节点本体保持窄,详情挪到 tooltip。
+// hover 提示依次给步骤、池、AI 步的 provider 开销。节点本体保持窄,详情挪到 tooltip。
 function nodeTitle(s: Step): string {
   let t = `${s.label || s.key} · ${s.pool || 'io'} 池`
   const u = props.usageByStep?.[s.key]
@@ -53,7 +53,7 @@ function nodeTitle(s: Step): string {
   return t
 }
 
-// ── SVG 依赖连线:渲染后量取各节点位置,源右缘→目标左缘画贝塞尔 ──
+// SVG 依赖连线:渲染后量取各节点位置,源右缘→目标左缘画贝塞尔
 const container = ref<HTMLElement | null>(null)
 const edges = ref<{ d: string; sel: boolean }[]>([])
 const svgW = ref(0)

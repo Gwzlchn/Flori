@@ -11,7 +11,7 @@ const loggedIn = ref(false)
 const uname = ref<string | null>(null)
 const statusLoading = ref(true)
 
-// 扫码态：idle 未开始 / starting 生成中 / waiting 等待扫码 / scanned 已扫待确认 / expired 已过期。
+// 扫码态:idle 未开始 / starting 生成中 / waiting 等待扫码 / scanned 已扫待确认 / expired 已过期。
 const phase = ref<'idle' | 'starting' | 'waiting' | 'scanned' | 'expired'>('idle')
 const qrPng = ref('')
 const qrcodeKey = ref('')
@@ -54,7 +54,7 @@ async function startLogin() {
 
 function startPolling() {
   stopPolling()
-  // 每 2s 轮询扫码状态，confirmed/expired 终止。
+  // 每 2s 轮询扫码状态,confirmed/expired 终止。
   pollTimer = setInterval(async () => {
     try {
       const data = await api.get<BiliLoginPoll>(
@@ -72,7 +72,7 @@ function startPolling() {
         phase.value = 'expired'
       }
     } catch {
-      // 轮询瞬时失败忽略，下个周期重试。
+      // 轮询瞬时失败忽略,下个周期重试。
     }
   }, 2000)
 }
@@ -107,7 +107,7 @@ onUnmounted(stopPolling)
       读取登录状态...
     </div>
 
-    <!-- 已登录：展示用户名 + 注销 -->
+    <!-- 已登录:展示用户名 + 注销 -->
     <div v-else-if="loggedIn" class="flex items-center justify-between gap-2">
       <div class="flex items-center gap-2 text-sm text-green-600">
         <CheckCircle :size="16" />
@@ -125,7 +125,7 @@ onUnmounted(stopPolling)
 
     <!-- 未登录 -->
     <div v-else class="space-y-3">
-      <!-- 未开始：扫码登录按钮 -->
+      <!-- 未开始:扫码登录按钮 -->
       <button
         v-if="phase === 'idle'"
         @click="startLogin"
@@ -151,7 +151,7 @@ onUnmounted(stopPolling)
         </p>
       </div>
 
-      <!-- 已过期：允许重新生成 -->
+      <!-- 已过期:允许重新生成 -->
       <div v-else-if="phase === 'expired'" class="space-y-2">
         <p class="text-sm text-orange-600">二维码已过期</p>
         <button

@@ -12,10 +12,7 @@ import AiTaskAuditPanel from '../components/job/AiTaskAuditPanel.vue'
 import type { AiTaskResult } from '../types'
 
 // 本周知识雷达:GET /radar(无 LLM,秒开)渲染各板块;「生成本周摘要」按钮 → POST /digest(LLM)。
-// 形状(后端 api/services/radar.py):
-//   { rising_concepts:[{term,recent,prior,delta}], new_concepts:[{term,definition,first_seen}],
-//     recent_jobs:[{job_id,title,published_at,content_type}], top_recent_concepts:[{term,recent}],
-//     window:{days,since,until} }
+// 返回形状见 api/services/radar.py,以后端为准。
 const route = useRoute()
 const router = useRouter()
 const api = useApi()
@@ -174,7 +171,7 @@ watch(domain, load)
 
     <!-- 主体 -->
     <template v-else-if="data">
-      <!-- ↑飙升 -->
+      <!-- 飙升概念 -->
       <div class="seclabel" style="margin:22px 0 10px"><TrendingUp :size="14" />↑ 飙升概念</div>
       <div v-if="data.rising_concepts.length" class="list">
         <div v-for="c in data.rising_concepts" :key="c.term" class="row rising-row" @click="goConcept(c.term)">
@@ -188,7 +185,7 @@ watch(domain, load)
       </div>
       <p v-else class="muted" style="font-size:13px;margin:0 0 4px">本周没有概念热度上升</p>
 
-      <!-- ✦新出现 -->
+      <!-- 新出现概念 -->
       <div class="seclabel" style="margin:22px 0 10px"><Sparkles :size="14" />✦ 新出现概念</div>
       <div v-if="data.new_concepts.length" class="list">
         <div v-for="c in data.new_concepts" :key="c.term" class="row" @click="goConcept(c.term)">
@@ -201,7 +198,7 @@ watch(domain, load)
       </div>
       <p v-else class="muted" style="font-size:13px;margin:0 0 4px">本周没有新概念</p>
 
-      <!-- 🔥热点 -->
+      <!-- 热点概念 -->
       <div class="seclabel" style="margin:22px 0 10px"><Flame :size="14" />🔥 热点概念</div>
       <div v-if="data.top_recent_concepts.length" class="chips">
         <button

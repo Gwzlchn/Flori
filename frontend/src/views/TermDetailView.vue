@@ -9,8 +9,8 @@ import {
   Lightbulb, Bookmark, Check, FileText, Link, MapPin, ChevronRight,
 } from 'lucide-vue-next'
 
-// 概念详情（原型 #term）：定义 / 关联概念 / 出现处反查。
-// 后端形状: GlossaryTermResponse {domain, term, definition, occurrences:[{job_id,content_type,location}], related, status, is_topic}
+// 概念详情页:定义 / 关联概念 / 出现处反查。
+// 返回形状见 api/schemas.py GlossaryTermResponse,以后端为准。
 const route = useRoute()
 const router = useRouter()
 const store = useDomainStore()
@@ -45,7 +45,7 @@ async function load() {
   }
 }
 
-// 标为主题 / 取消主题：POST /api/glossary/{domain}/{term}/topic，用返回的概念刷新本页。
+// 标为主题 / 取消主题:POST /api/glossary/{domain}/{term}/topic,用返回的概念刷新本页。
 async function toggleTopic() {
   if (!data.value || toggling.value) return
   toggling.value = true
@@ -55,7 +55,7 @@ async function toggleTopic() {
       { is_topic: !isTopic.value },
     )
   } catch {
-    // 失败保持原状态，按钮可重试。
+    // 失败保持原状态,按钮可重试。
   } finally {
     toggling.value = false
   }

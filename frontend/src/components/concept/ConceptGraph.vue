@@ -1,9 +1,9 @@
 <script setup lang="ts">
-// 概念图谱（工作台「图谱」tab）：力导向网络。后端 GET /api/domains/{d}/concept-graph
-// → {nodes:[{id,term,definition,status,is_topic,occurrence_count}], edges:[{source,target,weight}], stats}。
-// 节点=概念（大小∝出现数、形状/色按 status 与 is_topic），边=共现（粗细∝权重，= 共享 job 数）。
-// 点节点 → 右侧栏（定义/出现处/主题徽标 + 打开概念详情）；悬停 → 高亮邻居/相连边；可搜索/筛选/隐藏孤立。
-// vis-network 自带力学物理与 click/hover 事件，按需动态 import（首屏不拉图谱库）。
+// 概念图谱(工作台「图谱」tab):力导向网络。数据来自 GET /api/domains/{d}/concept-graph,
+// 返回形状见 api/services/kb.py 的 concept_graph,以后端为准。
+// 节点是概念:大小随出现数增大,形状/色按 status 与 is_topic 区分。边是共现:粗细随权重(共享 job 数)增大。
+// 点节点 → 右侧栏(定义/出现处/主题徽标 + 打开概念详情);悬停 → 高亮邻居/相连边;可搜索/筛选/隐藏孤立。
+// vis-network 自带力学物理与 click/hover 事件,按需动态 import(首屏不拉图谱库)。
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useDomainStore } from '../../stores/domains'
@@ -80,7 +80,7 @@ function nodeColor(n: ConceptGraphNode): string {
   return n.status === 'suggested' ? SUGGESTED : ACCEPTED
 }
 
-// 节点大小∝出现数(sqrt 压缩,避免巨头吞屏);孤立/零出现给个基础尺寸。
+// 节点大小随出现数增大(sqrt 压缩,避免巨头吞屏);孤立/零出现给个基础尺寸。
 function nodeSize(occ: number): number {
   return 10 + Math.sqrt(occ) * 6
 }
@@ -265,7 +265,7 @@ watch(fullscreen, async () => { await nextTick(); ensureSized() })
 onBeforeUnmount(() => { ro?.disconnect(); if (network) network.destroy() })
 
 // 图谱节点的点击/悬停发生在 canvas(vis-network),无 DOM 节点可触发 —— 暴露这些入口供
-// 测试驱动「点节点→开侧栏」,也便于父组件/集成代码以编程方式选中/聚焦概念。
+// 测试驱动点节点开侧栏的流程,也便于父组件/集成代码以编程方式选中/聚焦概念。
 defineExpose({ selectNode, focusTerm, selected })
 </script>
 

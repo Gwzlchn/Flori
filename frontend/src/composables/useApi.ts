@@ -6,14 +6,14 @@ class ApiError extends Error {
   }
 }
 
-// 一键免输登录：支持 https://IP/#token=xxx，把 token 存入 localStorage 后清掉 hash。
+// 一键免输登录:支持 https://IP/#token=xxx,把 token 存入 localStorage 后清掉 hash。
 function readHashToken(): string {
   const h = window.location.hash || ''
   const m = h.match(/[#&]token=([^&]+)/)
   if (m) {
     const t = decodeURIComponent(m[1])
     localStorage.setItem('auth_token', t)
-    // 清掉 URL 里的 token，避免泄漏 / 被书签保存。
+    // 清掉 URL 里的 token,避免泄漏 / 被书签保存。
     history.replaceState(null, '', window.location.pathname + window.location.search)
     return t
   }
@@ -22,9 +22,9 @@ function readHashToken(): string {
 
 const authToken = ref(readHashToken() || localStorage.getItem('auth_token') || '')
 
-// 登录策略：默认走 Caddy 全站 Basic Auth（浏览器自动带凭证），
-// 应用层不主动发 Authorization（否则会覆盖浏览器的 Basic 头）。
-// 仅当用户显式设置了 app token（回退方案）时才发 Bearer。
+// 登录策略:默认走 Caddy 全站 Basic Auth,浏览器自动带凭证。
+// 应用层不主动发 Authorization,否则会覆盖浏览器的 Basic 头。
+// 仅当用户显式设置了 app token(回退方案)时才发 Bearer。
 export function setToken(token: string) {
   authToken.value = token
   localStorage.setItem('auth_token', token)

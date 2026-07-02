@@ -18,7 +18,7 @@ describe('AddSubscriptionDialog', () => {
     expect(t).toContain('来源类型')
     expect(t).toContain('手动集合')
     expect(t).toContain('名称')
-    // 手动态没有「立即同步」复选项
+    // 手动态没有创建后立即同步的复选项
     expect(t).not.toContain('创建后立即同步一次')
   })
 
@@ -114,7 +114,7 @@ describe('AddSubscriptionDialog', () => {
     await w.findAll('.src-opt')[1].trigger('click')
     await w.find('.btn.pri').trigger('click')
     expect(w.emitted('create')).toBeFalsy()
-    // 提示包含 idLabel 或「来源」
+    // 提示包含 idLabel 或兜底文案 "来源"
     expect(w.text()).toContain('请填写')
   })
 

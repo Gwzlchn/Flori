@@ -25,7 +25,7 @@ export interface JobSummary {
   source: string | null
   domain: string
   collection_id: string | null
-  versions?: number   // 同源(lineage)快照总数;>1 表示有历史版本(P2b)
+  versions?: number   // 同源(lineage)快照总数;>1 表示有历史版本
 }
 
 export interface StepInfo {
@@ -56,7 +56,7 @@ export interface StepUsage {
   cache_hit_rate_pct: number
 }
 
-// 完整 AI 审计日志(prompt 白盒化 Phase 1):每次 LLM 调用一条。字段尽量全,UI 可只用子集。
+// 完整 AI 审计日志(prompt 白盒化):每次 LLM 调用一条。字段尽量全,UI 可只用子集。
 export interface AiLogAttempt {
   tier?: string; provider?: string; model?: string; ok?: boolean
   error_class?: string; error?: string
@@ -107,8 +107,8 @@ export interface JobMedia {
   venue?: string                // 论文来源:会议/期刊 + 年份(OSDI 2023 / arXiv)
   authors?: string[]            // 文章/论文:作者
   abstract?: string             // 文章/论文:摘要
-  tags?: string[]               // 文章:标签(v2)
-  image?: string                // 文章:封面图(v2;站点占位图已剔除)
+  tags?: string[]               // 文章:标签
+  image?: string                // 文章:封面图;站点占位图后端已剔除
   video_codec?: string          // 视频编码,如 "h264" / "av1"
   audio_codec?: string          // 音频编码,如 "aac" / "opus"
   fps?: number                  // 帧率
@@ -195,7 +195,7 @@ export interface WorkerTask {
   error: string | null
 }
 
-// ── 任务队列(/system/queue)──
+// 任务队列(/system/queue)。
 // 排队中(queued)/运行中(running)的 task,与 WorkerTask(已完成)同源:统一 TaskRow 渲染。
 export interface QueueTask {
   state: 'queued' | 'running'
@@ -229,7 +229,7 @@ export interface QueueStatus {
   limit: number
 }
 
-// ── 系统健康总览页(/system)──
+// 系统健康总览页(/system)。
 export type ComponentKind = 'api' | 'scheduler' | 'redis' | 'minio'
 export type ComponentStatus = 'up' | 'degraded' | 'down' | 'unknown'
 
@@ -270,7 +270,7 @@ export interface LinkTraffic {
   ts: number
   gateway: { pull: number; push: number; pull_bps: number; push_bps: number }  // 远程 worker ↔ ECS 网关(产物代理)
   tunnel: { rx: number; tx: number; rx_bps: number; tx_bps: number; up: boolean; tunnels: TunnelStat[] }  // ECS ↔ NAS 隧道
-  // 注:按节点时间趋势走单独端点 /api/link-traffic/history(富时间线),不再内嵌于快照。
+  // 注:按节点时间趋势走单独端点 /api/link-traffic/history(富时间线),快照不内嵌。
 }
 
 // WS /api/ws/global 每 2s 推 live 子集;本页只可靠消费这四段。
@@ -333,7 +333,7 @@ export interface AuthStatus {
   youtube: { has_cookies: boolean; status: string }
 }
 
-// B站扫码登录契约：与后端 /api/bili/* 严格对齐。
+// B站扫码登录契约:与后端 /api/bili/* 严格对齐。
 export interface BiliStatus {
   logged_in: boolean
   uname: string | null
@@ -368,7 +368,7 @@ export interface ProfileDetail {
   do_not?: string[]
 }
 
-// 领域总览卡片（派生聚合）。与后端 GET /api/domains 对齐。
+// 领域总览卡片(派生聚合)。与后端 GET /api/domains 对齐。
 export interface DomainOverview {
   domain: string
   collection_count: number
@@ -430,18 +430,18 @@ export interface ConceptGraph {
   stats: { node_count: number; edge_count: number; isolated_count: number }
 }
 
-// 集合的订阅源（自动追更）。无订阅则为 null。同步/开关端点用集合自身 id。
+// 集合的订阅源(自动追更)。无订阅则为 null。同步/开关端点用集合自身 id。
 export interface CollectionSubscription {
-  source_type: string        // bilibili_up/fav/collection · youtube_channel · rss · local_dir
+  source_type: string        // bilibili_up/fav/collection, youtube_channel, rss, local_dir
   source_id: string          // B站 mid / 频道URL / feed URL / 目录路径 / 收藏夹id ...
   source_label?: string      // 后端派生来源短标签(bilibili/youtube/rss/local);前端=name+徽标
   enabled: boolean           // 自动同步开关 = collection.sync_enabled
   last_synced_at: string | null
-  last_sync_status?: 'ok' | 'error' | 'syncing' | null  // 上次同步结果(二期);驱动侧栏/详情状态点
+  last_sync_status?: 'ok' | 'error' | 'syncing' | null  // 上次同步结果;驱动侧栏/详情状态点
   last_sync_error?: string | null                       // 同步出错时的错误摘要(error 态 tooltip/红字)
 }
 
-// 集合：与后端 CollectionResponse 严格对齐。
+// 集合:与后端 CollectionResponse 严格对齐。
 export interface Collection {
   id: string
   name: string
@@ -451,17 +451,17 @@ export interface Collection {
   job_count: number
   created_at: string
   subscription: CollectionSubscription | null
-  status_counts?: Record<string, number>  // 集合详情:job 各状态计数(done/processing/failed/pending…)(二期)
+  status_counts?: Record<string, number>  // 集合详情:job 各状态计数(done/processing/failed/pending…)
 }
 
-// 术语出现处（类型化）：概念出现在哪条内容、什么类型、什么位置。
+// 术语出现处(类型化):概念出现在哪条内容、什么类型、什么位置。
 export interface TermOccurrence {
   job_id: string
   content_type: string
   location: string | null
 }
 
-// 概念主题：域内被标为主题(is_topic=1)的概念。与后端 GET /api/domains/{domain}/topic-concepts 对齐。
+// 概念主题:域内被标为主题(is_topic=1)的概念。与后端 GET /api/domains/{domain}/topic-concepts 对齐。
 export interface TopicConcept {
   term: string
   definition: string
@@ -470,7 +470,7 @@ export interface TopicConcept {
   is_topic: boolean
 }
 
-// 术语：与后端 GlossaryTermResponse 严格对齐。
+// 术语:与后端 GlossaryTermResponse 严格对齐。
 export interface GlossaryTerm {
   domain: string
   term: string
@@ -488,7 +488,7 @@ export interface JobConcept extends GlossaryTerm {
   job_occurrences: TermOccurrence[]
 }
 
-// 搜索结果项：与后端 SearchResultItem 严格对齐。
+// 搜索结果项:与后端 SearchResultItem 严格对齐。
 export interface SearchResultItem {
   job_id: string
   title: string | null

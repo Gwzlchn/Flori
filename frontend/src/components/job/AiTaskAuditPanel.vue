@@ -4,7 +4,7 @@ import { useApi } from '../../composables/useApi'
 import type { AiTaskLogResponse, AiTaskLogCall } from '../../types'
 import { Check, X, Copy } from 'lucide-vue-next'
 
-// 只读:展示某独立 AI task(/ask、/digest)的【完整 AI 审计】(每次 claude 调用一条),
+// 只读:展示某独立 AI task(/ask、/digest)的完整 AI 审计(每次 claude 调用一条),
 // 镜像 ai_task_logs(GET /api/ai-tasks/{task_id}/log),与 DAG 步的 AiLogPanel 同风格。
 const props = defineProps<{ taskId: string }>()
 const api = useApi()

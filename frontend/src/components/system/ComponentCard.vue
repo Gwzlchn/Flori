@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// 核心组件卡（API/Scheduler/Redis/MinIO）：点 + 名 + 状态徽章 / 主标识行 / 次要指标行 + 异常说明。
-// 后端算好 status（up/degraded/down/unknown），前端只渲染（不拿本地时钟比时间戳）。
+// 核心组件卡(API/Scheduler/Redis/MinIO):点 + 名 + 状态徽章 / 主标识行 / 次要指标行 + 异常说明。
+// 后端算好 status(up/degraded/down/unknown),前端只渲染,不拿本地时钟比时间戳。
 import { computed } from 'vue'
 import StatusBadge from '../common/StatusBadge.vue'
 import { componentDotClass } from '../../utils/worker'
@@ -16,7 +16,7 @@ const dotCls = computed(() => componentDotClass(props.comp.status))
 const isDown = computed(() => props.comp.status === 'down')
 const extra = computed<Record<string, any>>(() => props.comp.extra || {})
 
-// 主标识行（版本 / bucket / —）。
+// 主标识行(版本 / bucket / —)。
 const mainText = computed(() => {
   const c = props.comp
   if (c.kind === 'minio') {
@@ -32,7 +32,7 @@ const mainText = computed(() => {
   return `版本 ${/^\d/.test(sem) ? 'v' + sem : sem}`
 })
 
-// 次要指标行：统一以「运行 <时长>」(uptime/启动时间)起头(各组件都有,minio 本地盘除外),再接各自指标。
+// 次要指标行:统一以「运行 <时长>」起头,时长取 uptime;除 minio 本地盘外各组件都有。之后接各自指标。
 const metaText = computed(() => {
   const c = props.comp
   const e = extra.value

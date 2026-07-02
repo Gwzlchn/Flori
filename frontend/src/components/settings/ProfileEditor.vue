@@ -36,7 +36,7 @@ onMounted(async () => {
       terminology: data.terminology ?? [],
       do_not: data.do_not ?? [],
     }
-    // 展示元数据从同一响应读取（后端返回但 ProfileDetail 未声明，转 any 取）。
+    // 展示元数据从同一响应读取(后端返回但 ProfileDetail 未声明,转 any 取)。
     const meta = data as any
     displayName.value = meta.display_name ?? ''
     icon.value = meta.icon ?? ''

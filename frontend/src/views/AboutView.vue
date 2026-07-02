@@ -1,7 +1,6 @@
 <script setup lang="ts">
-// 关于 Flori（原型 #about）：三层心智模型 + 真实能力概览。
-// 「四条内容流水线」从 /api/pipelines 动态拉取（= configs/pipelines.yaml 单一事实源），
-// 不再硬编码 → 永远与实际步骤链一致。
+// 关于 Flori(原型 #about):三层心智模型 + 真实能力概览。
+// 「四条内容流水线」从 /api/pipelines 动态拉取,configs/pipelines.yaml 为单一事实源,与实际步骤链保持一致。
 import { ref, onMounted } from 'vue'
 import { useWorkerStore } from '../stores/workers'
 import {
@@ -16,10 +15,10 @@ interface Pipeline { name: string; steps: PipeStep[] }
 const store = useWorkerStore()
 const pipelines = ref<Pipeline[]>([])
 onMounted(async () => {
-  try { pipelines.value = await store.fetchPipelines() } catch { /* 非致命：留空，显加载态 */ }
+  try { pipelines.value = await store.fetchPipelines() } catch { /* 非致命:留空,显加载态 */ }
 })
 
-// 内容类型 → 展示（中文名 / 图标 / 色 pill）；未知类型回退。
+// 内容类型 → 展示(中文名 / 图标 / 色 pill);未知类型回退。
 const CT: Record<string, { label: string; icon: any; pill: string }> = {
   video: { label: '视频', icon: Play, pill: 't-video' },
   paper: { label: '论文', icon: FileText, pill: 't-paper' },
@@ -27,7 +26,7 @@ const CT: Record<string, { label: string; icon: any; pill: string }> = {
   audio: { label: '播客 / 音频', icon: Headphones, pill: 't-audio' },
 }
 function ct(name: string) { return CT[name] || { label: name, icon: Layers, pill: 't-video' } }
-// 步骤徽章配色（复用既有 badge 语义）：评审→绿、AI 步→蓝、其余→灰。
+// 步骤徽章配色(复用既有 badge 语义):评审→绿、AI 步→蓝、其余→灰。
 function stepBadge(s: PipeStep): string {
   if ((s.key || '').toLowerCase().includes('review') || (s.label || '').includes('评审')) return 'b-ok'
   if (s.pool === 'ai') return 'b-info'

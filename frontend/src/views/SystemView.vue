@@ -1,11 +1,11 @@
 <script setup lang="ts">
-// 系统健康总览页（/system）。三带（自上而下）：
-//  带1 概览：健康条 + 概览指标 + 系统状态行(整体版本/部署/磁盘/内容/吞吐/中转) + 最近 5 事件(全部→/system/events)
-//  带2 基础设施：核心组件(api/scheduler/redis/minio) + 通联/链路拓扑
-//  带3 算力与用量：AI 用量 + 价表(上) + 资源池 + Worker 列表 + 接入新 worker 折叠(下)
-// MCP 接入卡已移至 /settings(用户集成);worker 接入留此(运维)。事件全量在 /system/events(类型/时间筛选)。
-// 双通道：WS 每 2s 推 live 子集（计数/忙闲/队列/磁盘跳动）；HTTP /api/status + /api/usage +
-// /api/events 进页 1 次 + 每 15s 轮询（组件/版本/吞吐/用量/事件，慢变量）+ 手动刷新。
+// 系统健康总览页(/system)。三带(自上而下):
+//  带1 概览:概览指标 + 系统状态行(整体版本/部署/磁盘/内容/吞吐/中转) + 最近 5 事件
+//  带2 基础设施:核心组件(api/scheduler/redis/minio) + 通联/链路拓扑
+//  带3 算力与用量:上半 AI 用量 + 价表,下半 资源池 + Worker 列表 + 接入新 worker 折叠
+// worker 接入在本页(运维);MCP 接入卡在 /settings(用户集成)。事件全量在 /system/events(类型/时间筛选)。
+// 双通道:WS 每 2s 推 live 子集(计数/忙闲/队列/磁盘跳动);HTTP /api/status + /api/usage +
+// /api/events 进页 1 次 + 每 15s 轮询(组件/版本/吞吐/用量/事件,慢变量)+ 手动刷新。
 import { ref, computed, onMounted, onUnmounted, inject } from 'vue'
 import { useRouter } from 'vue-router'
 import { useWorkerStore } from '../stores/workers'
@@ -29,12 +29,12 @@ const router = useRouter()
 const workerStore = useWorkerStore()
 const showToast = inject<(m: string, t?: 'success' | 'error' | 'info') => void>('showToast', () => {})
 
-// WS live 子集（每 2s）：只覆盖 jobs/workers/pools/disk 四段，组件/版本/吞吐保持上次轮询值。
+// WS live 子集(每 2s):只覆盖 jobs/workers/pools/disk 四段,组件/版本/吞吐保持上次轮询值。
 const { systemStatus, connected, reconnect } = useGlobalWs()
 
 const status = ref<FullStatus | null>(null)
-const lastOkAt = ref<number | null>(null)   // 末次成功 /api/status 时间戳（绑「刷新 N 秒前」）
-const failStreak = ref(0)                    // 连续失败计数（抖动缓冲，§8.4）
+const lastOkAt = ref<number | null>(null)   // 末次成功 /api/status 时间戳
+const failStreak = ref(0)                    // 连续失败计数(抖动缓冲)
 const usage = ref<UsageAggregate | null>(null)
 const events = ref<SystemEvent[]>([])
 const pricing = ref<PricingStatus | null>(null)   // LiteLLM 价表状态(模型数 + 更新时间)
@@ -47,7 +47,7 @@ async function loadStatus() {
     failStreak.value = 0
   } catch {
     failStreak.value++
-    // 不立即清空已有数据（保留陈旧快照）；健康条会进「不可达」档。
+    // 不立即清空已有数据,保留陈旧快照就地展示。
   }
 }
 async function loadUsage() {
@@ -78,7 +78,7 @@ async function refreshAll() {
   await Promise.all([loadStatus(), workerStore.fetchAll(), loadPoolLimits(), loadUsage(), loadEvents(), loadPricing(), loadHistory()])
 }
 
-// 进页 1 次 + 每 15s 轮询（组件/版本/吞吐/用量/事件）。WS 负责计数实时跳动。
+// 进页 1 次 + 每 15s 轮询(组件/版本/吞吐/用量/事件)。WS 负责计数实时跳动。
 let poll: number | undefined
 onMounted(() => {
   refreshAll()
@@ -88,7 +88,7 @@ onMounted(() => {
 })
 onUnmounted(() => { if (poll) window.clearInterval(poll) })
 
-// ── 池上限编辑（沿用既有交互 + 恢复默认 + 0 值确认）──
+// 池上限编辑:恢复默认 + 0 值确认
 const poolLimits = ref<Record<string, { default: number; override: number | null }>>({})
 const limitDraft = ref<Record<string, number | null>>({})
 const limitBusy = ref<string | null>(null)
@@ -127,7 +127,7 @@ async function resetPoolLimit(pool: string) {
   }
 }
 
-// ── 组件 / 版本派生 ──
+// 组件 / 版本派生
 const components = computed<SystemComponent[]>(() => status.value?.components ?? [])
 const systemVersion = computed(() => status.value?.version || 'dev')
 const minioComp = computed(() => components.value.find(c => c.kind === 'minio'))
@@ -136,14 +136,14 @@ const deployMode = computed(() => {
   return m === 'remote' ? '分布式（对象存储）' : m === 'local' ? '单机（本地盘）' : '—'
 })
 
-// ── live 四段：WS 优先，回退轮询 ──
+// live 四段:WS 优先,回退轮询
 const liveJobs = computed(() => systemStatus.value?.jobs ?? status.value?.jobs ?? null)
 const livePools = computed(() => systemStatus.value?.pools ?? status.value?.pools ?? {})
 const liveDisk = computed(() => systemStatus.value?.disk ?? status.value?.disk ?? null)
 const throughput = computed(() => status.value?.throughput_1h ?? null)
 const traffic = computed(() => status.value?.traffic ?? null)
 
-// ── 通联 / 链路流量 ──
+// 通联 / 链路流量
 const link = computed<LinkTraffic | null>(() => status.value?.link_traffic ?? null)
 const hasLink = computed(() => !!link.value || workerStore.workers.some(w => w.remote_addr))
 const fmtRate = (bps: number | undefined) => (bps && bps > 0 ? `${fmtBytes(bps)}/s` : '—')
@@ -196,14 +196,14 @@ const detail = computed(() => {
   }
   return null
 })
-// 速率序列 → SVG polyline points(down/up 共享峰值 max 以可比;x 等分 0..100,y 翻转留边)。
+// 速率序列 → SVG polyline points。down/up 共享峰值 max 以可比;x 等分 0..100,y 翻转留边。
 function chartPoints(arr: number[], max: number): string {
   if (arr.length < 2) return ''
   const n = arr.length
   return arr.map((v, i) => `${((i / (n - 1)) * 100).toFixed(1)},${((1 - v / (max || 1)) * 25 + 1.5).toFixed(1)}`).join(' ')
 }
 
-// ── Worker 列表派生 ──
+// Worker 列表派生
 const STATUS_ORDER: Record<string, number> = {
   'online-busy': 0, 'online-idle': 1, paused: 2, stale: 3, offline: 4,
 }
@@ -219,7 +219,7 @@ const dotClass = workerDotClass
 const computeDesc = workerComputeDesc
 function isOnline(w: Worker): boolean { return w.status.startsWith('online') || w.status === 'paused' }
 
-// 池派生：占用 / 积压 / 无 worker 积压 / 暂停。
+// 池派生:占用 / 积压 / 无 worker 积压 / 暂停。
 function poolDot(name: string, p: { capacity: number; used: number; queue: number }): string {
   if (p.capacity === 0) return 'd-mut'                          // 暂停
   const onlineForType = status.value?.workers?.[name]?.online ?? 0
@@ -235,7 +235,7 @@ function poolQueueBadge(name: string, p: { capacity: number; used: number; queue
   return { cls: 'b-mut', text: `队列 ${p.queue} 任务` }
 }
 
-// ── 版本漂移（前端比对，§8.6）──
+// 版本漂移(前端比对)
 // 版本显示:FLORI_VERSION = "<语义版本>+<构建短sha>"(如 0.2.0+f1d86f0)。
 // verSem→主显语义版本(v0.2.0;Redis 7.4.9→v7.4.9;dev 等原样);verBuild→构建 sha(f1d86f0)。
 function verSem(v: string | null | undefined): string {
@@ -251,7 +251,7 @@ function verBuild(v: string | null | undefined): string {
 function versionMatches(expected: string, actual: string | null | undefined): boolean {
   const e = (expected || '').trim().toLowerCase()
   const a = (actual || '').trim().toLowerCase()
-  if (!e || !a) return true   // 缺基准/缺自报 → 不算漂移（不误报）
+  if (!e || !a) return true   // 缺基准/缺自报 → 不算漂移(不误报)
   const n = Math.min(e.length, a.length, 40)
   if (n < 7) return e === a
   return e.slice(0, n) === a.slice(0, n)
@@ -273,7 +273,7 @@ const sameVersionCount = computed(() =>
     : 0,
 )
 
-// worker 网关中转流量短文案（拉取↓ / 回传↑ 字节;均为 0 则不显）。
+// worker 网关中转流量短文案:拉取/回传字节,均为 0 则不显。
 function trafficText(w: Worker): string {
   const t = w.traffic
   if (!t) return ''
@@ -283,7 +283,7 @@ function trafficText(w: Worker): string {
   return `↓${fmtBytes(pull)} ↑${fmtBytes(push)}`
 }
 
-// worker live 负载短文案（cpu%/mem%/load）。
+// worker live 负载短文案(cpu%/mem%/load)。
 function loadText(w: Worker): string {
   const l = w.load
   if (!l) return ''
@@ -294,18 +294,17 @@ function loadText(w: Worker): string {
   return parts.join(' ')
 }
 
-// 健康条已移除(用户:概览顶部「需关注」横幅冗余)——当前状态/告警就地呈现:失败/孤儿/worker清理 → 系统事件圆点;
-// 排队无 worker → 资源池卡告警;版本漂移 → Worker 区;组件 down/降级 → 核心组件卡。失败累计仍记 failStreak(供轮询)。
+// 刻意不做独立健康条,状态/告警就地呈现:失败/孤儿/worker 清理 → 系统事件圆点;
+// 排队无 worker → 资源池卡告警;版本漂移 → Worker 区;组件 down/降级 → 核心组件卡。失败累计记 failStreak(供轮询)。
 
-// 事件 kind→标签/点色/摘要 已抽到 utils/events(EventsView 共用)。
+// 事件 kind→标签/点色/摘要 已统一到 utils/events(EventsView 共用)。
 
-// 磁盘阈值色。
 const diskBarColor = computed(() => {
   const pct = liveDisk.value?.used_pct ?? 0
   return pct > 90 ? 'var(--bad)' : pct >= 75 ? 'var(--warn)' : 'var(--ok)'
 })
 
-// ── 行内 暂停 / 继续 / 移除 ──
+// 行内 暂停 / 继续 / 移除
 const rowBusy = ref<string | null>(null)
 async function togglePause(w: Worker) {
   rowBusy.value = w.id
@@ -325,8 +324,8 @@ async function removeWorker(w: Worker) {
   catch { showToast('移除失败', 'error') } finally { rowBusy.value = null }
 }
 
-// ── 接入新 Worker（mintToken + docker 命令；折叠 <details>）──
-// 镜像拆分后 worker 镜像 = flori-worker(旧 monolith flori:latest 已不存在);接入命令默认用它。
+// 接入新 Worker(mintToken + docker 命令;折叠 <details>)
+// worker 镜像 = flori-worker,接入命令默认用它。
 const IMAGE = import.meta.env.VITE_WORKER_IMAGE || 'ghcr.io/gwzlchn/flori-worker:latest'
 const WORKER_TYPES = ['cpu', 'gpu', 'ai', 'io']
 const TABS = [
@@ -341,7 +340,7 @@ function onEnrollToggle(e: Event) {
   localStorage.setItem(ENROLL_KEY, open ? '1' : '0')
 }
 
-// 能力 = 订阅的资源池,可多选、无主次(旧单选 --type 已废;命令生成 --pools)。至少选一个。
+// 能力 = 订阅的资源池,可多选、无主次,命令生成 --pools。至少选一个。
 const selectedPools = ref<string[]>(['cpu'])
 // WORKER_NAME 基名:多池排序 join('-')(如 cpu-gpu),仅命名/展示用;排序=命令稳定不随勾选顺序抖。
 const nameBase = computed(() => [...selectedPools.value].sort().join('-') || 'worker')
@@ -362,7 +361,7 @@ const gatewayUrl = computed(() => {
   return o && o.startsWith('http') ? o : 'https://<FLORI_HOST>'
 })
 const credLines = computed(() => {
-  // 按勾选的能力【取并集】:勾 ai→claude/API 凭证;勾 io→B站 cookie。多池同机全都要。
+  // 按勾选的能力取并集:勾 ai→claude/API 凭证;勾 io→B站 cookie。多池同机全都要。
   let s = ''
   if (selectedPools.value.includes('ai')) {
     if (aiCredMethod.value === 'claude-sub') s += '  -v $HOME/.claude:/root/.claude \\\n'
@@ -378,7 +377,7 @@ const tagsArg = computed(() => {
   const t = newTags.value.split(/[\s,]+/).filter(Boolean)
   return t.length ? ` --tags ${t.join(' ')}` : ''
 })
-// 唯一能力表达:--pools <所勾选>(旧 --type 已删)。
+// 唯一能力表达:--pools <所勾选>。
 const runCmd = computed(() => `python -m worker.main --pools ${[...selectedPools.value].sort().join(' ') || '<至少勾一个能力>'}${tagsArg.value}`)
 const tokenLine = computed(() => token.value || 'flw-<生成后填入>')
 const gpuFlag = computed(() => (selectedPools.value.includes('gpu') ? ' --gpus all' : ''))
@@ -439,11 +438,11 @@ async function copy(text: string, which: 'token' | 'cmd') {
   } catch { showToast('复制失败，请手动选择文本', 'error') }
 }
 
-// AI 用量：成本按 provider==claude-cli 标「(等价)」。
+// AI 用量:成本按 provider==claude-cli 标「(等价)」。
 function costLabel(provider: string): string { return provider === 'claude-cli' ? '（等价）' : '' }
 function fmtCost(v: number): string { return `$${(v ?? 0).toFixed(4)}` }
 
-// 按 provider 分组（每个可点开看自己的统计；跨 provider 总计在顶部 4 块）。
+// 按 provider 分组(每个可点开看自己的统计;跨 provider 总计在顶部 4 块)。
 const usageByProvider = computed(() => {
   const u = usage.value
   if (!u) return []
@@ -477,8 +476,8 @@ const usageByProvider = computed(() => {
       </button>
     </div>
 
-    <!-- ════════ 带1 · 概览 ════════ -->
-    <!-- 概览拆两组(同一种「标签+值」cell):① 系统 ② Worker·作业。系统在前。 -->
+    <!-- 带1 · 概览 -->
+    <!-- 概览拆两组(同一种标签+值 cell):1. 系统 2. Worker·作业。系统在前。 -->
     <div class="seclabel" style="margin-bottom:8px"><Server :size="14" />系统</div>
     <div class="card pad statgrid" style="margin-bottom:16px">
       <div class="st-cell">
@@ -538,7 +537,7 @@ const usageByProvider = computed(() => {
       </div>
     </div>
 
-    <!-- ════════ 带2 · 基础设施(核心组件 + 通联) ════════ -->
+    <!-- 带2 · 基础设施(核心组件 + 通联) -->
     <div class="seclabel" style="margin-bottom:12px"><Boxes :size="14" />核心组件 · {{ components.length }}</div>
     <div v-if="status === null && components.length === 0" class="grid2" style="margin-bottom:18px">
       <div v-for="n in 4" :key="n" class="card pad comp-card">
@@ -550,7 +549,7 @@ const usageByProvider = computed(() => {
       <ComponentCard v-for="c in components" :key="c.name" :comp="c" />
     </div>
 
-    <!-- 通联 / 链路流量:远程 worker ↔ ECS 网关 ⇄ 隧道 ⇄ NAS -->
+    <!-- 通联 / 链路流量:远程 worker、ECS 网关、隧道、NAS 间链路 -->
     <div v-if="hasLink" class="seclabel" style="margin-bottom:12px"><Network :size="14" />通联 · 链路流量</div>
     <div v-if="hasLink" class="card pad" style="margin-bottom:24px">
       <LinkTopologyTree :workers="workerStore.workers" :link="link" :selected="selectedNode" @select="selectedNode = $event" />
@@ -576,7 +575,7 @@ const usageByProvider = computed(() => {
       </div>
     </div>
 
-    <!-- ════════ 带3 · 算力与用量(用量在上,算力在下) ════════ -->
+    <!-- 带3 · 算力与用量(用量在上,算力在下) -->
     <!-- AI 用量聚合 + LiteLLM 价表 -->
     <div v-if="usage && usage.calls > 0" class="card pad" style="margin-bottom:24px">
       <div class="card-h"><Coins :size="15" />AI 用量 · {{ usage.calls }} 次调用</div>
@@ -656,7 +655,7 @@ const usageByProvider = computed(() => {
       </div>
     </div>
 
-    <!-- 5. worker 信息 -->
+    <!-- Worker 信息 -->
     <div class="seclabel" style="margin-bottom:12px">
       <Cpu :size="14" />Worker · {{ workerStore.workers.length }}
       <template v-if="driftEnabled">
@@ -673,7 +672,7 @@ const usageByProvider = computed(() => {
       <span class="badge b-mut">0 个 worker 在线 · 任务将排队等待算力</span>
     </div>
 
-    <!-- 接入新 Worker（折叠） -->
+    <!-- 接入新 Worker(折叠) -->
     <details class="card pad" style="margin-bottom:18px" :open="enrollOpen" @toggle="onEnrollToggle">
       <summary class="card-h" style="margin-bottom:0;cursor:pointer;list-style:none"><Plus :size="15" />接入新 Worker</summary>
       <div style="margin-top:14px">
@@ -731,7 +730,7 @@ const usageByProvider = computed(() => {
       </div>
     </details>
 
-    <!-- worker 状态卡片(接入 MCP 已移至 /settings)-->
+    <!-- worker 状态卡片 -->
 
     <div v-if="workerStore.loading && workerStore.workers.length === 0" class="card pad" style="color:var(--ink-500);font-size:13px;margin-bottom:24px">
       加载中…
@@ -826,7 +825,7 @@ summary::-webkit-details-marker { display: none; }
 .tp-tn { font-variant-numeric: tabular-nums; }
 .tp-tn b { color: var(--ink-700); font-weight: 600; }
 
-/* 系统状态标签化网格(替代挤成一行) */
+/* 系统状态标签化网格 */
 /* 固定列网格(两组共用同一列结构 → 系统/Worker 列对齐);长值在 cell 内换行,不挤不截断。 */
 .statgrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px 24px; align-items: start; }
 @media (max-width: 900px) { .statgrid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }

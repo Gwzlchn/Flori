@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 任务队列(/system/queue):各资源池里【运行中】+【排队中】的 task,与独立 worker 页风格接近、
+// 任务队列(/system/queue):各资源池里运行中 + 排队中的 task,与独立 worker 页风格接近、
 // 与 worker 任务历史共用 TaskRow。从 /system 资源池区「查看队列」或池卡队列徽章进入(可预选某池)。
 // 队列是动态快照:定时轮询刷新;另起 1s ticker 让 TaskRow 的「已等/已运行」时长走字。
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'

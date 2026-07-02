@@ -12,7 +12,7 @@ import {
   Folder, Plus, RefreshCw, FileText, Cpu, Trash2,
 } from 'lucide-vue-next'
 
-// 集合列表（原型 #collections）：多源订阅自动追更，或手动收藏归集。
+// 集合列表(原型 #collections):多源订阅自动追更,或手动收藏归集。
 const router = useRouter()
 const store = useCollectionStore()
 const { collections, loading } = storeToRefs(store)
@@ -41,7 +41,7 @@ function badgeOf(c: Collection) {
   return sourceBadge(sourceLabelOf(c.subscription))
 }
 
-// 相对同步时间走 utils/datetime.fmtRelative(中文单位 + 「同步」后缀)。
+// 相对同步时间走 utils/datetime.fmtRelative(中文单位 + "同步" 后缀)。
 const syncAgo = (v: string | null) => fmtRelative(v, { style: 'cn', suffix: '同步', fallback: '从未同步' })
 
 // 集合底栏状态文案/tooltip(5 态与侧栏一致):订阅中显示相对同步时间,其余显示状态文案。
@@ -68,7 +68,7 @@ function open(c: Collection) {
   router.push(`/collections/${c.id}`)
 }
 
-// ── 新建订阅 ──
+// 新建订阅
 const showCreate = ref(false)
 const saving = ref(false)
 const createError = ref('')
@@ -91,7 +91,7 @@ async function onCreate(payload: any) {
   }
 }
 
-// ── 删除 ──
+// 删除
 const delTarget = ref<Collection | null>(null)
 const deleting = ref(false)
 async function onDelete(purge: boolean) {

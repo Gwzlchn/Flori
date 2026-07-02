@@ -46,7 +46,7 @@ const localEndpoint = computed(() => info.value?.local_url || 'http://127.0.0.1:
 const curEndpoint = computed(() => (activeTab.value === 'local' ? localEndpoint.value : endpoint.value))
 const tokenShown = computed(() => revealed.value || '<TOKEN>')
 
-// 调用统计:总调用 + 按工具(取调用过的、按次数降序的前几条;subtle)。
+// 调用统计:总调用 + 按工具,只列调用过的并按次数降序。
 const statsTotal = computed(() => info.value?.stats?.total ?? 0)
 const statsByTool = computed(() =>
   Object.entries(info.value?.stats?.by_tool || {})

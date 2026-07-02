@@ -2,14 +2,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import type { Collection, JobSummary } from '../types'
 
-// ── 路由 mock：route.params.id 决定加载哪个集合;push 用于 openJob/删除后跳转 ──
+// 路由 mock:route.params.id 决定加载哪个集合;push 用于 openJob/删除后跳转
 const push = vi.fn()
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push, replace: vi.fn() }),
   useRoute: () => ({ params: { id: 'col-1' }, query: {} }),
 }))
 
-// ── store mock：直接控制 get/fetchJobs/remove 的返回,避免真实 action 调 useApi ──
+// store mock:直接控制 get/fetchJobs/remove 的返回,避免真实 action 调 useApi
 const storeGet = vi.fn()
 const storeFetchJobs = vi.fn()
 const storeRemove = vi.fn()
@@ -17,7 +17,7 @@ vi.mock('../stores/collections', () => ({
   useCollectionStore: () => ({ get: storeGet, fetchJobs: storeFetchJobs, remove: storeRemove }),
 }))
 
-// ── jobs store mock：集合级重试走 jobStore.retryFailedInCollection ──
+// jobs store mock:集合级重试走 jobStore.retryFailedInCollection
 const retryFailedInCollection = vi.fn()
 vi.mock('../stores/jobs', () => ({
   useJobStore: () => ({ retryFailedInCollection }),
@@ -28,7 +28,7 @@ vi.mock('../stores/global', () => ({
   useGlobalStore: () => ({ setCrumbs }),
 }))
 
-// ── useApi mock：syncNow/toggleAutoSync 走 api.post/api.put ──
+// useApi mock:syncNow/toggleAutoSync 走 api.post/api.put
 const api = { get: vi.fn(), post: vi.fn(), put: vi.fn(), del: vi.fn(), upload: vi.fn(), getText: vi.fn() }
 vi.mock('../composables/useApi', () => ({ useApi: () => api }))
 

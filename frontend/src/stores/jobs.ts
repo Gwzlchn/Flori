@@ -66,12 +66,12 @@ export const useJobStore = defineStore('jobs', () => {
     return api.post(`/api/jobs/${jobId}/rerun`, { from_step: fromStep })
   }
 
-  // P2c:重建为新快照(fork 父 job,只重跑分叉步及下游;旧版保留 A/B)。返回新 job_id。
+  // 重建为新快照:fork 父 job,只重跑分叉步及下游;旧快照保留供 A/B 对比。返回新 job_id。
   async function rebuildJob(jobId: string): Promise<{ job_id: string }> {
     return api.post<{ job_id: string }>(`/api/jobs/${jobId}/rebuild`)
   }
 
-  // P2c:批量重建所有"过期"(pipeline 定义已变)的 current job 为新快照。
+  // 批量重建所有"过期"(pipeline 定义已变)的 current job 为新快照。
   async function rebuildStale(): Promise<{ rebuilt: number }> {
     return api.post<{ rebuilt: number }>('/api/jobs/rebuild-stale')
   }

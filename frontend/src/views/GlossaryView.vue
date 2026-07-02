@@ -8,7 +8,7 @@ import {
   Lightbulb, Plus, Sparkles, CheckCircle2, Check, X, Pencil, Trash2, Bookmark, Share2,
 } from 'lucide-vue-next'
 
-// 概念库（原型 #glossary）：AI 提取候选概念，采纳后沉淀为可检索知识节点。
+// 概念库(原型 #glossary): AI 提取候选概念,采纳后沉淀为可检索知识节点。
 const router = useRouter()
 const api = useApi()
 const showToast = inject<(m: string, t?: string) => void>('showToast', () => {})
@@ -17,7 +17,7 @@ const loading = ref(true)
 const error = ref('')
 const terms = ref<GlossaryTerm[]>([])
 
-// 筛选：知识库（domain）+ 状态（suggested/accepted）。
+// 筛选: 知识库(domain) + 状态(suggested/accepted)。
 const filterDomain = ref('')
 const filterStatus = ref<'' | 'suggested' | 'accepted'>('')
 
@@ -55,7 +55,7 @@ function goTerm(t: GlossaryTerm) {
   router.push(`/kb/${encodeURIComponent(t.domain)}/concepts/${encodeURIComponent(t.term)}`)
 }
 
-// ── 采纳 / 删除 / 主题切换 ──
+// 采纳 / 删除 / 主题切换
 async function acceptTerm(t: GlossaryTerm) {
   try {
     await api.post(`/api/glossary/${encodeURIComponent(t.domain)}/${encodeURIComponent(t.term)}/accept`)
@@ -89,7 +89,7 @@ async function toggleTopic(t: GlossaryTerm) {
   }
 }
 
-// ── 新增概念弹窗 ──
+// 新增概念弹窗
 const showAdd = ref(false)
 const addDomain = ref('')
 const addTerm = ref('')
@@ -131,7 +131,7 @@ async function submitAdd() {
   }
 }
 
-// ── 编辑定义弹窗 ──
+// 编辑定义弹窗
 const editing = ref<GlossaryTerm | null>(null)
 const editDefinition = ref('')
 const editRelated = ref('')
@@ -218,7 +218,7 @@ onMounted(loadTerms)
     </div>
 
     <template v-else>
-      <!-- 待审建议（候选） -->
+      <!-- 待审建议(候选) -->
       <template v-if="suggested.length">
         <div class="seclabel" style="margin-bottom:12px"><Sparkles :size="14" />待审建议 · {{ suggested.length }}</div>
         <div class="card pad" style="margin-bottom:26px;border-color:var(--warn-bd)">

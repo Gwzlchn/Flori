@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// 设置（原型 #settings）：平台认证（B站扫码 + YouTube cookies）+ 运维/关于入口。
-// 知识库设定 / Profile 不在此页（已移到工作台）。auth/status 给出各平台是否已配置。
+// 设置(原型 #settings):平台认证(B站扫码 + YouTube cookies)+ 运维/关于入口。
+// 知识库设定 / Profile 在工作台,不在此页。auth/status 给出各平台是否已配置。
 import { ref, onMounted } from 'vue'
 import { useApi } from '../composables/useApi'
 import BiliLogin from '../components/settings/BiliLogin.vue'
@@ -55,13 +55,13 @@ onMounted(loadAuth)
       </div>
 
       <template v-else>
-        <!-- Bilibili：扫码登录走 /api/bili/* 契约，组件自管状态 -->
+        <!-- Bilibili:扫码登录走 /api/bili/* 契约,组件自管状态 -->
         <div style="margin-bottom:6px">
           <div class="seclabel" style="margin-bottom:8px"><Activity :size="14" />Bilibili</div>
           <BiliLogin />
         </div>
 
-        <!-- YouTube：上传 cookies.txt -->
+        <!-- YouTube:上传 cookies.txt -->
         <div style="border-top:1px solid var(--line-soft);margin-top:14px;padding-top:14px">
           <div class="row" style="cursor:default">
             <span class="type-pill" style="background:#fef2f2;color:#dc2626"><Youtube :size="17" /></span>

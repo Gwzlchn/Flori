@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 
-// ── 依赖 mock（须在 import 组件前）──
+// 依赖 mock(须在 import 组件前)。
 const push = vi.fn()
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push, replace: vi.fn() }),
@@ -13,7 +13,7 @@ vi.mock('../composables/useApi', () => ({ useApi: () => api }))
 
 import GlossaryView from './GlossaryView.vue'
 
-// GlossaryTerm 夹具（按 types.GlossaryTerm 补齐字段）。
+// GlossaryTerm 夹具(按 types.GlossaryTerm 补齐字段)。
 function makeTerm(over: Record<string, unknown> = {}) {
   return {
     domain: '机器学习',
@@ -167,7 +167,7 @@ describe('GlossaryView', () => {
     const openBtn = w.findAll('button').find((b) => b.text().includes('新增概念'))
     await openBtn!.trigger('click')
     expect(w.text()).toContain('新增概念')
-    // 不填直接提交 → 校验报错，不发请求
+    // 不填直接提交 → 校验报错,不发请求
     const submit = w.findAll('button').find((b) => b.text().includes('添加'))
     await submit!.trigger('click')
     await flushPromises()
@@ -181,7 +181,7 @@ describe('GlossaryView', () => {
     const openBtn = w.findAll('button').find((b) => b.text().includes('新增概念'))
     await openBtn!.trigger('click')
     const inputs = w.findAll('.modal input.input')
-    // 第 0 个=知识库，第 1 个=概念名
+    // 第 0 个=知识库,第 1 个=概念名
     await inputs[0].setValue('NLP')
     await inputs[1].setValue('词向量')
     const submit = w.findAll('button').find((b) => b.text().includes('添加'))

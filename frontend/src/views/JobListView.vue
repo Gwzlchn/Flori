@@ -12,7 +12,7 @@ import { Inbox, ChevronRight, X, RotateCcw, Trash2, History } from 'lucide-vue-n
 
 const showToast = inject<(m: string, t?: 'success' | 'error' | 'info') => void>('showToast', () => {})
 
-// 所有来源(原型 #content)：跨知识库的全部投递。三组筛选(状态/来源/知识库)，
+// 所有来源(原型 #content): 跨知识库的全部投递。三组筛选(状态/来源/知识库),
 // 组内多选、跨组取交集、各组可单独清除 + 清除全部。
 // 过滤策略:某组恰好选中 1 项(且映射到单个后端值)时,作为 fetchList 的服务端单值参数;
 // 该组选 0/≥2 项(或映射到多值)时,参数不传、改在返回页上对该维度做客户端过滤。
@@ -75,7 +75,7 @@ const STATUS_OPTS: { key: string; label: string; match: string[] }[] = [
   { key: 'processing', label: '处理中', match: ['downloading', 'processing', 'pending'] },
   { key: 'failed', label: '失败', match: ['failed'] },
 ]
-// 来源枚举：与后端 detect_source 返回值对齐(bilibili/youtube/arxiv/http_article/podcast/upload)。
+// 来源枚举: 与后端 detect_source 返回值对齐(bilibili/youtube/arxiv/http_article/podcast/upload)。
 const SOURCE_OPTS: { key: string; label: string; match: string[] }[] = [
   { key: 'bilibili', label: 'Bilibili', match: ['bilibili'] },
   { key: 'youtube', label: 'YouTube', match: ['youtube'] },
@@ -111,7 +111,7 @@ const sourceMatchSet = computed<Set<string>>(() => {
   return s
 })
 
-// ── 服务端单值下推:某组恰好选中 1 项且映射到单个后端值时,作为 fetchList 参数 ──
+// 服务端单值下推: 某组恰好选中 1 项且映射到单个后端值时,作为 fetchList 参数。
 // 状态档可能对应多个底层枚举(如「处理中」→3 个),那种情况退化为客户端过滤。
 const serverStatus = computed<string | undefined>(() => {
   if (fStatus.value.size !== 1) return undefined
@@ -206,7 +206,7 @@ async function onRetryAllFailed() {
   }
 }
 
-// P2c:批量重建所有"过期"(pipeline/prompt 定义已变)的内容为新版本(旧版保留可对比)。
+// 批量重建所有定义已过期(pipeline/prompt 已变)的内容为新版本,旧版保留可对比。
 const rebuilding = ref(false)
 async function onRebuildStale() {
   if (!confirm('重建所有「定义已过期」的内容?为受影响内容建新版本(只重跑变化的步骤及下游,旧版本保留对比)。')) return
@@ -239,7 +239,7 @@ async function loadMore() {
   }
 }
 
-// 失败行的快捷重试(列表内，不跳详情)。乐观置「处理中」,失败给出可见提示(不再静默)。
+// 失败行的快捷重试(列表内,不跳详情)。乐观置「处理中」,失败给出可见提示。
 async function retry(jobId: string) {
   try {
     await jobStore.retryJob(jobId)
@@ -269,7 +269,7 @@ function goDetail(id: string) {
   router.push(`/content/${id}`)
 }
 
-// 列表为空(无任何加载结果)时区分：真空 vs 仅被筛选清空。
+// 列表为空(无任何加载结果)时区分: 真空 vs 仅被筛选清空。
 const isInitialLoading = computed(() => jobStore.loading && jobStore.list.length === 0)
 </script>
 
@@ -418,7 +418,7 @@ const isInitialLoading = computed(() => jobStore.loading && jobStore.list.length
         </div>
       </div>
 
-      <!-- 翻页：滚动到底自动加载 + 手动兜底 -->
+      <!-- 翻页: 滚动到底自动加载 + 手动兜底 -->
       <div v-if="hasMore" class="load-hint">
         <template v-if="jobStore.loading"><span class="spinner" style="width:15px;height:15px;border-width:2px" />加载中…</template>
         <button v-else class="ghost" @click="loadMore">加载更多（已显示 {{ jobStore.list.length }} / {{ jobStore.total }}）</button>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// 通联拓扑【树】:数据驱动(workers 按 remote_addr 归父 + link_traffic),非硬编码盒子 → 加任何 worker/边缘自动进树。
-// 结构:NAS(中心 hub)→ [本地 worker(直连) · ECS 边缘(隧道)] → 远程 worker(网关接入)。
+// 通联拓扑树:数据驱动(workers 按 remote_addr 归父 + link_traffic),非硬编码盒子 → 加任何 worker/边缘自动进树。
+// 结构分三层:NAS 是中心 hub;第二层是直连的本地 worker 和走隧道的 ECS 边缘;第三层是经网关接入的远程 worker。
 // 分层横向 + SVG 贝塞尔连线(同 PipelineDag 范式)。节点可点击,选中 emit;详情(趋势)由父组件出面板。
 import { computed, ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import type { Worker, LinkTraffic } from '../../types'
@@ -21,7 +21,7 @@ interface Node {
 const props = defineProps<{ workers: Worker[]; link: LinkTraffic | null; selected?: string }>()
 const emit = defineEmits<{ (e: 'select', id: string): void }>()
 
-// ── 由数据构树 ──
+// 由数据构树
 const nodes = computed<Node[]>(() => {
   const out: Node[] = []
   const mk = (p: Partial<Node> & { id: string; kind: Node['kind']; label: string; layer: number; parent: string | null }): Node =>
@@ -60,7 +60,7 @@ const layers = computed<Node[][]>(() => {
 const iconFor = (k: Node['kind']) => (k === 'nas' ? Database : k === 'ecs' ? Server : Cpu)
 const tunnelUp = computed(() => props.link?.tunnel.up ?? false)
 
-// ── SVG 连线:渲染后量节点位置,父右缘→子左缘画贝塞尔;选中节点相关边高亮 ──
+// SVG 连线:渲染后量节点位置,父右缘→子左缘画贝塞尔;选中节点相关边高亮
 const container = ref<HTMLElement | null>(null)
 const edges = ref<{ d: string; sel: boolean }[]>([])
 const svgW = ref(0)

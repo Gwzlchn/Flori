@@ -2,7 +2,7 @@ import { ref } from 'vue'
 import { getAuthToken } from './useApi'
 
 // WS 连接 + 指数退避重连 + 清理的通用脚手架。global / job 两个端点共用,
-// 仅注入 url 工厂与「是否续连」判定,不合并端点本身。
+// 仅注入 url 工厂与是否续连的判定,不合并端点本身。
 export interface WsReconnectOptions {
   url: () => string | null          // 返回 WS 路径(如 /api/ws/global);null/空 → 不连接
   onMessage: (data: string) => void

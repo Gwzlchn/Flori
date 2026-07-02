@@ -18,8 +18,8 @@ import {
   Brain, Calculator, Scale, Languages, Music, Palette, Leaf, Rocket,
 } from 'lucide-vue-next'
 
-// 知识库工作台：数据一次性来自 useDomainStore.workspace(domain)。三 tab：内容 / 概念 / 时间线。
-// 取自 route.params.domain；切换知识库时重新拉取。
+// 知识库工作台:数据一次性来自 useDomainStore.workspace(domain)。四 tab:内容 / 概念 / 时间线 / 图谱。
+// 取自 route.params.domain;切换知识库时重新拉取。
 
 interface DomainStats {
   collection_count: number
@@ -39,7 +39,7 @@ interface WsCollection {
   is_subscription: boolean
   source_id: string | null
   sync_enabled: boolean
-  recent?: JobSummary[]  // issue 6:后端按集合返回的最近 N 条(替代「全域最近」分组)
+  recent?: JobSummary[]  // 后端按集合返回的最近 N 条
 }
 interface WsConcept {
   term: string
@@ -73,7 +73,7 @@ const error = ref('')
 const tab = ref<'content' | 'concept' | 'timeline' | 'graph'>('content')
 const showProfile = ref(false)
 
-// ── 身份图标 + 色块：优先用工作台 stats 的 icon/color/display_name，缺失才回退按名哈希（与总览页一致） ──
+// 身份图标 + 色块:优先用工作台 stats 的 icon/color/display_name,缺失才回退按名哈希,与总览页一致。
 const ICONS = [Cpu, Atom, Dna, Code, Database, Globe, FlaskConical, BookOpen,
   Brain, Calculator, Scale, Languages, Music, Palette, Leaf, Rocket]
 const GRADIENTS = [
@@ -89,14 +89,14 @@ function hash(s: string): number {
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0
   return Math.abs(h)
 }
-// 图标名→组件解析改用 utils/kbIcons 的 resolveIcon（与总览页一致）。
+// 图标名→组件解析用 utils/kbIcons 的 resolveIcon(与总览页一致)。
 const headIcon = computed(() => resolveIcon(data.value?.stats?.icon) || ICONS[hash(domain.value) % ICONS.length])
 const headGradient = computed(() => data.value?.stats?.color || GRADIENTS[hash(domain.value) % GRADIENTS.length])
 const headName = computed(() => data.value?.stats?.display_name || domain.value)
 
 const stats = computed<DomainStats | null>(() => data.value?.stats ?? null)
 
-// 概念按佐证强度（source_count）降序。
+// 概念按佐证强度(source_count)降序。
 const sortedConcepts = computed<WsConcept[]>(() =>
   [...(data.value?.top_concepts ?? [])].sort((a, b) => b.source_count - a.source_count),
 )
@@ -106,7 +106,7 @@ function strength(sourceCount: number): number {
 
 // 内容类型 → 图标/配色:统一走 utils/contentType(contentTypeIcon / contentTypePill)。
 
-// issue 6:每集合最近内容改用后端按集合返回的 c.recent;此处只算「未归集合」=
+// 每集合最近内容用后端按集合返回的 c.recent;此处只算「未归集合」=
 // recent_jobs 中不属任何已知集合的内容(手动投递等)。
 const grouped = computed(() => {
   const cols = data.value?.collections ?? []
@@ -153,14 +153,14 @@ function goTerm(term: string) {
 }
 
 function onProfileSaved() {
-  // 设定可能影响知识库聚合（角色/术语）→ 重新拉取。
+  // 设定可能影响知识库聚合(角色/术语)→ 重新拉取。
   load()
 }
 </script>
 
 <template>
   <section class="page">
-    <!-- 头部：身份图标 + 名字 + 统计行 + 知识库设定 / 刷新 -->
+    <!-- 头部:身份图标 + 名字 + 统计行 + 知识库设定 / 刷新 -->
     <div style="display:flex;align-items:center;gap:13px;margin-bottom:6px">
       <span class="dcard ic" :style="{ width: '42px', height: '42px', background: headGradient, padding: 0 }">
         <component :is="headIcon" :size="20" />
@@ -232,7 +232,7 @@ function onProfileSaved() {
           </template>
         </div>
 
-        <!-- 空：无集合且无内容 -->
+        <!-- 空:无集合且无内容 -->
         <div v-if="data.collections.length === 0 && data.recent_jobs.length === 0" class="card pad"
           style="display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;padding:40px 18px">
           <Inbox :size="40" :stroke-width="1" style="color:var(--ink-300)" />
@@ -342,18 +342,18 @@ function onProfileSaved() {
         </div>
       </div>
 
-      <!-- TAB 时间线（组件由集成方提供，仅 import + 使用） -->
+      <!-- TAB 时间线 -->
       <div v-show="tab === 'timeline'">
         <ConceptTimeline :domain="domain" />
       </div>
 
-      <!-- TAB 图谱（概念共现力导向网络） -->
+      <!-- TAB 图谱(概念共现力导向网络) -->
       <div v-show="tab === 'graph'">
         <ConceptGraph :domain="domain" />
       </div>
     </template>
 
-    <!-- 知识库设定弹窗（内嵌 ProfileEditor，自带 overlay） -->
+    <!-- 知识库设定弹窗(内嵌 ProfileEditor,自带 overlay) -->
     <ProfileEditor
       v-if="showProfile"
       :domain="domain"

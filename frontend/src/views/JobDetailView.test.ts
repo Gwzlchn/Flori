@@ -3,14 +3,14 @@ import { ref } from 'vue'
 import { mount, flushPromises } from '@vue/test-utils'
 import type { JobDetail, JobConcept } from '../types'
 
-// ── 路由 mock：route.params.id 决定加载哪个 job;push 用于跳转(删除/概念) ──
+// 路由 mock: route.params.id 决定加载哪个 job;push 用于跳转(删除/概念)。
 const push = vi.fn()
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push, replace: vi.fn() }),
   useRoute: () => ({ params: { id: 'job_BV1abc' }, query: {} }),
 }))
 
-// ── job store mock：直接控制各 action 返回,避免真实 action 走 useApi ──
+// job store mock: 直接控制各 action 返回,避免真实 action 走 useApi。
 const fetchDetail = vi.fn()
 const fetchConcepts = vi.fn()
 const retryJob = vi.fn()
@@ -25,11 +25,11 @@ vi.mock('../stores/global', () => ({
   useGlobalStore: () => ({ setCrumbs }),
 }))
 
-// ── useApi mock：笔记/版本/provider/评审/概念等附属请求都走它(组件直接调 api.get/getText/post) ──
+// useApi mock: 笔记/版本/provider/评审/概念等附属请求都走它(组件直接调 api.get/getText/post)。
 const api = { get: vi.fn(), post: vi.fn(), put: vi.fn(), del: vi.fn(), upload: vi.fn(), getText: vi.fn() }
 vi.mock('../composables/useApi', () => ({ useApi: () => api }))
 
-// ── useJobWs mock：返回可控响应式 refs(组件解构 steps/jobStatus/connected/setInitialSteps),不连真 WS ──
+// useJobWs mock: 返回可控响应式 refs(组件解构 steps/jobStatus/connected/setInitialSteps),不连真 WS。
 const wsSteps = ref<any[]>([])
 const wsJobStatus = ref('processing')
 const wsConnected = ref(false)

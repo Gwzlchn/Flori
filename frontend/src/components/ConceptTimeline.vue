@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// 概念时间线（工作台「时间线」tab）：后端聚合 GET /api/domains/{d}/concept-timeline?granularity=day|week|month。
-// Chart.js 堆叠柱（各概念分桶计数）；点柱下钻到该桶内各概念计数 → 概念详情页。
+// 概念时间线(工作台「时间线」tab):后端聚合 GET /api/domains/{d}/concept-timeline?granularity=day|week|month。
+// Chart.js 堆叠柱(各概念分桶计数);点柱下钻到该桶内各概念计数 → 概念详情页。
 import { ref, computed, onMounted, watch, nextTick, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { useDomainStore } from '../stores/domains'
@@ -29,7 +29,7 @@ const GRANS: { k: TimelineGranularity; t: string }[] = [
   { k: 'day', t: '按日' }, { k: 'week', t: '按周' }, { k: 'month', t: '按月' },
 ]
 
-// 取 Top 8 概念作堆叠系列（concepts 已按 total 降序）
+// 取 Top 8 概念作堆叠系列(concepts 已按 total 降序)
 const topConcepts = computed(() => (data.value?.concepts ?? []).slice(0, 8))
 const isEmpty = computed(() => !loading.value && !error.value && !(data.value?.buckets.length))
 
@@ -80,7 +80,7 @@ function render() {
   })
 }
 
-// 下钻：选中桶内各概念计数（降序），来自 concepts[].buckets[selected]。
+// 下钻:选中桶内各概念计数(降序),来自 concepts[].buckets[selected]。
 // 圆点配色按该 term 在 topConcepts(堆叠柱系列)中的下标取,与柱色一致;不在 Top8 给中性色。
 const inBucket = computed(() => {
   if (!selected.value || !data.value) return []
@@ -102,7 +102,7 @@ function openConcept(term: string) {
 
 onMounted(load)
 watch(() => props.domain, load)
-watch(gran, load) // 粒度切换 → 重新向后端请求（后端按粒度聚合）
+watch(gran, load) // 粒度切换 → 重新向后端请求(后端按粒度聚合)
 onBeforeUnmount(() => { if (chart) chart.destroy() })
 </script>
 
@@ -125,7 +125,7 @@ onBeforeUnmount(() => { if (chart) chart.destroy() })
       <div v-show="!loading && !error && !isEmpty" class="tl-canvas"><canvas ref="canvasEl"></canvas></div>
     </div>
 
-    <!-- 下钻：选中桶内各概念计数 -->
+    <!-- 下钻:选中桶内各概念计数 -->
     <div v-if="selected && inBucket.length" class="card pad" style="margin-top:14px">
       <div class="card-h">
         <span>{{ selected }} · 概念出现（{{ inBucket.length }}）</span>

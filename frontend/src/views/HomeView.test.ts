@@ -3,7 +3,7 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createTestingPinia } from '@pinia/testing'
 import type { DomainOverview } from '../types'
 
-// ── 路由 mock：openDomain / 侧栏 ?create=1 跳转 / 新建后跳转都打这套 push/replace ──
+// 路由 mock: openDomain / 侧栏 ?create=1 跳转 / 新建后跳转都打这套 push/replace。
 const push = vi.fn()
 const replace = vi.fn()
 // route.query 在各用例间可变(测 ?create=1 触发弹窗),用可写对象。
@@ -113,7 +113,7 @@ describe('HomeView', () => {
   it('弹窗内 slug 为空提交时 toast 报错且不调 store.create', async () => {
     const { w, showToast } = mountHome({ domains: [makeDomain()] })
     await w.find('button.btn.pri').trigger('click')
-    // 弹窗底部「创建知识库」按钮：最后一个 .btn.pri
+    // 弹窗底部「创建知识库」按钮: 最后一个 .btn.pri
     const buttons = w.findAll('button.btn.pri')
     await buttons[buttons.length - 1].trigger('click')
     await flushPromises()

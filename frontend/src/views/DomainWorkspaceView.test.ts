@@ -2,14 +2,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
 
-// router：固定 route.params.domain；共享 push 间谍断言跳转。
+// router:固定 route.params.domain;共享 push 间谍断言跳转。
 const push = vi.fn()
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push, replace: vi.fn() }),
   useRoute: () => ({ params: { domain: 'tech' }, query: {} }),
 }))
 
-// useApi：真 Pinia + 假 useApi，让真 store.workspace 跑通并把数据写进视图本地 ref。
+// useApi:真 Pinia + 假 useApi,让真 store.workspace 跑通并把数据写进视图本地 ref。
 const get = vi.fn()
 vi.mock('../composables/useApi', () => ({
   useApi: () => ({ get, post: vi.fn(), del: vi.fn(), put: vi.fn(), upload: vi.fn(), getText: vi.fn() }),
@@ -91,7 +91,7 @@ describe('DomainWorkspaceView tab 内容', () => {
         collections: [
           {
             id: 'c1', name: '我的集合', job_count: 1, is_subscription: false, source_id: null, sync_enabled: false,
-            // issue 6:卡片改读后端按集合返回的 recent(不再用全域 recent_jobs 分组)
+            // 卡片读后端按集合返回的 recent
             recent: [
               {
                 job_id: 'j1', content_type: 'video', status: 'done', created_at: '2026-01-01',
@@ -149,7 +149,7 @@ describe('DomainWorkspaceView 概念 tab', () => {
   it('切到概念 tab 后按佐证强度展示概念，空时显示暂无概念', async () => {
     get.mockResolvedValue(ws({ top_concepts: [] }))
     const w = await mountView()
-    // tab 顺序：内容 / 概念 / 时间线
+    // tab 顺序:内容 / 概念 / 时间线 / 图谱;[1] 是概念
     const conceptTab = w.findAll('.tabs button')[1]
     await conceptTab.trigger('click')
     await flushPromises()
@@ -187,7 +187,7 @@ describe('DomainWorkspaceView 设定与刷新', () => {
     get.mockResolvedValue(ws())
     const w = await mountView()
     get.mockClear()
-    // 头部两个 btn.sm：知识库设定 / 刷新；刷新是第二个。
+    // 头部 btn.sm 依次是雷达/周报、知识库设定、刷新;刷新取最后一个。
     const btns = w.findAll('button.btn.sm')
     await btns[btns.length - 1].trigger('click')
     await flushPromises()

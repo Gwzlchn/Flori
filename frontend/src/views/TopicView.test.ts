@@ -2,8 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createTestingPinia } from '@pinia/testing'
 
-// TopicView 通过 useDomainStore().topic(domain, topic) 拉数据，内部走 useApi.get。
-// 这里 mock useApi，让真实 store action 执行；stubActions:false 保留真实 action。
+// TopicView 通过 useDomainStore().topic(domain, topic) 拉数据,内部走 useApi.get。
+// 这里 mock useApi,让真实 store action 执行;stubActions:false 保留真实 action。
 const route = { params: { domain: 'ml', topic: 'transformer' }, query: {} }
 const push = vi.fn()
 vi.mock('vue-router', () => ({

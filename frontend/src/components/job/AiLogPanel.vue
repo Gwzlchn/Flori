@@ -5,7 +5,7 @@ import { fmtDuration } from '../../utils/datetime'
 import type { AiLogCall, AiLogsResponse } from '../../types'
 import { Check, X, Copy } from 'lucide-vue-next'
 
-// 只读:展示该 job 某 AI 步当时的【完整 AI 审计日志】(每次 LLM 调用一条)。改 prompt 去设置页。
+// 只读:展示该 job 某 AI 步当时的完整 AI 审计日志(每次 LLM 调用一条)。改 prompt 去设置页。
 const props = defineProps<{ jobId: string; step: string }>()
 const api = useApi()
 

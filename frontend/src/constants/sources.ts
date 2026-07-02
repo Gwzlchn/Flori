@@ -1,6 +1,6 @@
 // 订阅来源元数据(前端单一事实源)。与后端 source_type / source_label 对齐:
 // 后端 SOURCE_LABELS: bilibili_up/fav/collection→bilibili, youtube_channel→youtube,
-// rss→rss, local_dir→local。这里按「具体 source_type」给图标/输入提示,按 source_label 给徽标配色。
+// rss→rss, local_dir→local。这里按具体 source_type 给图标/输入提示,按 source_label 给徽标配色。
 import type { Component } from 'vue'
 import {
   Rss, Youtube, FolderInput, Folder, Star, ListVideo,
@@ -52,8 +52,8 @@ const GROUP_BADGE: Record<string, { text: string; icon: Icon; cls: string }> = {
   local: { text: 'local', icon: Folder, cls: 'b-mut' },
 }
 
-// job.source(后端 detect_source 返回值)→ 人类标签。JobList / JobDetail 共用,
-// 注意这是「内容检测来源」枚举,与上面订阅的 source_type 是两套取值。
+// job.source(后端 detect_source 返回值)→ 人类标签。JobList / JobDetail 共用。
+// 注意这是内容检测来源的枚举,与上面订阅的 source_type 是两套取值,不可混用。
 export const JOB_SOURCE_LABELS: Record<string, string> = {
   bilibili: 'Bilibili', youtube: 'YouTube', arxiv: 'arXiv', pdf: 'PDF',
   http_article: '网页文章', podcast: '播客', upload: '本地', other: '其它',
@@ -77,7 +77,7 @@ export function sourceMeta(type: string): SourceTypeMeta | undefined {
   return BY_TYPE[type]
 }
 
-// ── 订阅同步状态(单一事实源,侧栏/列表/详情共用)──────────────────────
+// 订阅同步状态(单一事实源,侧栏/列表/详情共用)。
 // 后端 subscription 增量字段:last_sync_status(ok|error|syncing|null)+ last_sync_error(text|null)。
 // 注:这里参数用宽松可选类型,避免与 types/index.ts CollectionSubscription 耦合(后者新增字段为可选)。
 export interface SubStateInput {
@@ -115,7 +115,7 @@ export function subTip(sub: SubStateInput | null | undefined): string {
   return meta.tip
 }
 
-// 订阅源主页/原始链接(详情页「打开来源」)。尽力而为,拿不到返回 null。
+// 订阅源主页/原始链接,集合详情页「来源地址」外链用。尽力而为,拿不到返回 null。
 export function sourceHomeUrl(sub: { source_type: string; source_id: string }): string | null {
   const { source_type: t, source_id: id } = sub
   if (!id) return null

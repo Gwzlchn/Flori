@@ -1,5 +1,5 @@
-// Worker 展示派生(状态→点色 / 算力描述)。此前 WorkersView 与 WorkerDetailView 各写一份且已漂移
-// (分隔符 空格 vs ·、AI 文案、CPU 兜底 type.toUpperCase() vs —);统一到此处单一来源(审计 R-M6)。
+// Worker 展示派生(状态→点色 / 算力描述),单一来源。
+// WorkersView / WorkerDetailView 统一从这里 import,不要在视图各写一份:分散实现的分隔符和兜底文案会漂移。
 
 // dot 颜色跟随 worker 状态。
 export function workerDotClass(status: string | null | undefined): string {
@@ -22,7 +22,7 @@ export function componentDotClass(status: string | null | undefined): string {
   }
 }
 
-// 算力描述:GPU 名(+显存)优先;否则 AI 给完整文案、其余类型给大写类型名(列表里仍可辨类型)。
+// 算力描述:GPU 名优先,有显存则一并带上。否则 ai 类型给完整文案,其余类型给大写类型名,列表里仍可辨类型。
 export function workerComputeDesc(
   w: { gpu_name?: string | null; gpu_memory_mb?: number | null; type: string },
 ): string {

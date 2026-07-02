@@ -174,7 +174,7 @@ function openSource(jobId: string) {
           <!-- 答案就绪 -->
           <template v-if="answerMd !== null">
             <MarkdownViewer :content="answerMd" :job-id="''" />
-            <!-- ★AI 审计入口(task_id 有才给;无命中/投递失败无 task) -->
+            <!-- AI 审计入口:task_id 有才给,无命中/投递失败无 task -->
             <div v-if="submitted.task_id" style="margin-top:12px">
               <button class="btn-audit" @click="showAudit = !showAudit">
                 <ScrollText :size="13" />{{ showAudit ? '收起 AI 审计' : '查看 AI 审计' }}
