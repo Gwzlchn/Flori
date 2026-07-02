@@ -75,3 +75,23 @@ class TestArxivHtmlToMarkdown:
         html = '<body><img src="https://ar5iv.org/x.png"></body>'
         md = arxiv_html_to_markdown(html)["markdown"]
         assert "![](https://ar5iv.org/x.png)" in md
+
+
+class TestPageChromeFiltered:
+    """页级 chrome(arxiv 官方 HTML 弹窗/页眉脚)整树跳过,不混进正文(线上踩过:Report GitHub Issue 进译文)。"""
+
+    def test_dialog_form_header_footer_skipped(self):
+        html = (
+            '<html><body>'
+            '<dialog id="modal-form"><form><header class="modal-header">'
+            '<h5>Report GitHub Issue</h5></header>Title: Describe the issue below:</form></dialog>'
+            '<header class="arxiv-html-header">chrome nav</header>'
+            '<article class="ltx_document"><h1 class="ltx_title">Real Title</h1>'
+            '<p class="ltx_p">Body text.</p></article>'
+            '<footer class="ds-site-footer">site footer</footer>'
+            '</body></html>'
+        )
+        md = arxiv_html_to_markdown(html)["markdown"]
+        assert 'Report GitHub Issue' not in md
+        assert 'chrome nav' not in md and 'site footer' not in md
+        assert 'Real Title' in md and 'Body text.' in md

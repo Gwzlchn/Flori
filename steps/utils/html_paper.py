@@ -38,7 +38,12 @@ _SKIP_CLASSES = {
     "ltx_page_header", "ltx_page_footer", "ltx_page_logo", "ltx_ERROR",
     "ltx_rdf", "ltx_pagination", "ltx_role_versionnotice",
 }
-_SKIP_TAGS = {"script", "style", "nav", "head", "button"}
+# dialog/form/header/footer/aside = 页级 chrome(arxiv 官方 HTML 的「Report GitHub Issue」弹窗、
+# 页眉脚 arxiv-html-header/footer、ds-site-footer 等)。已核 BERT 官方 HTML:ltx_document 正文区
+# 无这些标签(内容全在 div/section/h1-6/figure),整树跳过零内容损失;不滤则 chrome 文案混进
+# original.md 顶部并被翻译(线上踩过:「##### 報告 GitHub Issue」)。
+_SKIP_TAGS = {"script", "style", "nav", "head", "button",
+              "dialog", "form", "header", "footer", "aside"}
 
 
 class _PaperHTMLParser(HTMLParser):
