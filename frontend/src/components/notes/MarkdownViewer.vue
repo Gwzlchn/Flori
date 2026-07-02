@@ -154,6 +154,27 @@ function onClick(e: MouseEvent) {
 
 <style>
 .prose img { max-width: 100%; border-radius: 0.5rem; }
+/* 代码统一浅灰底黑字等宽,字号随正文:prose-sm 默认 0.857em 太小、pre 深底反白不合阅读习惯 */
+.prose pre {
+  background: #f3f4f6;
+  color: #111827;
+  font-size: 1em;
+  line-height: 1.6;
+  border: 1px solid #e5e7eb;
+}
+.prose pre code { background: transparent; color: inherit; font-size: 1em; padding: 0; }
+.prose :not(pre) > code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 1em;
+  font-weight: 500;
+  color: #111827;
+  background: #f3f4f6;
+  padding: 0.08em 0.35em;
+  border-radius: 0.25rem;
+}
+/* 去 typography 给行内 code 加的反引号伪元素(与正文引号叠加很吵) */
+.prose :not(pre) > code::before,
+.prose :not(pre) > code::after { content: none; }
 .prose .timestamp-mark { text-decoration: none; }
 .prose .term-link { color: #2563eb; cursor: pointer; text-decoration: none; border-bottom: 1px dashed #93c5fd; }
 .prose .term-link:hover { background: #eff6ff; border-bottom-style: solid; }
