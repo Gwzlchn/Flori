@@ -200,6 +200,10 @@ type Version = { provider: string; model: string; version: string; file: string;
 const versions = ref<Version[]>([])
 const activeFile = ref<string | null>(null)
 const isArticle = computed(() => job.value?.content_type === 'article')
+// 文章 + 论文都有解析版原文(article=02_parse readability MD;paper=03_sections 章节 MD),
+// 机械变体即「原文」;video/audio 的机械变体仍是转写机械版。
+const hasReadableOriginal = computed(() =>
+  isArticle.value || job.value?.content_type === 'paper')
 // 有无智能笔记:有版本即有(文章关笔记时为空 → 隐藏智能版、机械版即原文)
 const hasSmartNote = computed(() => versions.value.length > 0)
 
@@ -267,7 +271,7 @@ async function loadNote() {
   noteError.value = ''
   try {
     let text: string
-    if (isMechanical.value && isArticle.value) {
+    if (isMechanical.value && hasReadableOriginal.value) {
       // 文章「原文」= output/original.md(已由 loadOriginal 载入;兜底再拉一次)
       text = originalMd.value || await api.getText(
         `/api/jobs/${fid}/artifact?path=${encodeURIComponent('output/original.md')}`)
@@ -285,7 +289,7 @@ async function loadNote() {
   } catch (e: any) {
     if (jobId.value !== fid) return
     noteError.value = e?.status === 404
-      ? (isMechanical.value && isArticle.value ? '原文未生成' : '笔记尚未生成')
+      ? (isMechanical.value && hasReadableOriginal.value ? '原文未生成' : '笔记尚未生成')
       : (e?.message || '加载失败')
     noteContent.value = ''
   } finally {
@@ -369,7 +373,7 @@ async function ensureNotes() {
   await loadTerms()
   await Promise.all([loadVersions(), loadProviders()])
   // 文章无智能笔记(关笔记)时默认显示原文,即机械版
-  if (!versions.value.length && isArticle.value) isMechanical.value = true
+  if (!versions.value.length && hasReadableOriginal.value) isMechanical.value = true
   await Promise.all([loadNote(), loadReview()])
 }
 
@@ -693,9 +697,9 @@ watch(job, (j) => {
           <!-- 智能版:无智能笔记(如文章关笔记)时隐藏;机械版对文章即「原文」 -->
           <div class="seg" v-if="hasSmartNote">
             <button :class="{ on: !isMechanical }" @click="switchVariant(false)">智能版</button>
-            <button :class="{ on: isMechanical }" @click="switchVariant(true)">{{ isArticle ? '原文' : '机械版' }}</button>
+            <button :class="{ on: isMechanical }" @click="switchVariant(true)">{{ hasReadableOriginal ? '原文' : '机械版' }}</button>
           </div>
-          <span v-else class="dim" style="font-size:12px">{{ isArticle ? '原文' : '机械版' }}（未生成智能笔记）</span>
+          <span v-else class="dim" style="font-size:12px">{{ hasReadableOriginal ? '原文' : '机械版' }}（未生成智能笔记）</span>
 
           <template v-if="!isMechanical">
             <span class="dim" style="font-size:12px;margin-left:6px">版本</span>

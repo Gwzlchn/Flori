@@ -238,7 +238,8 @@ paper:
       run: steps.paper.step_03_sections
       needs: ["02_pdf_parse"]
       timeout: 60
-      outputs: ["intermediate/sections.json"]
+      version: "2"   # 增产 output/original.md(论文原文兜底),失效旧指纹
+      outputs: ["intermediate/sections.json", "output/original.md"]
 
     "04_figures":
       label: "图表提取"

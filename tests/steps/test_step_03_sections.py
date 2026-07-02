@@ -48,6 +48,29 @@ class TestSectionsStep:
         assert tree[1]["title"] == "Method"
         assert len(tree[1]["children"]) == 2
 
+    def test_execute_writes_original_md(self, tmp_path):
+        # 论文原文兜底:标题 H1 + 作者行 + 摘要引用块 + 章节按树深降级标题,全文都在。
+        job_dir = self._setup_job(tmp_path)
+        (job_dir / "output").mkdir()
+        config = make_step_config(tmp_path, step_name="03_sections", pool="cpu")
+        SectionsStep("03_sections", job_dir, config).execute()
+
+        md = (job_dir / "output" / "original.md").read_text(encoding="utf-8")
+        assert md.startswith("# Test Paper")
+        assert "Author A" in md
+        assert "> This is abstract." in md
+        assert "## Introduction" in md and "### Background" in md   # 树深→标题层级
+        assert "Intro text" in md and "Train text" in md            # 正文不丢
+
+    def test_original_md_empty_fields_skipped(self, tmp_path):
+        # 缺标题/作者/摘要时不产出空头噪音,仅渲染存在的部分。
+        md = SectionsStep._original_markdown({
+            "title": "", "authors": [], "abstract": "",
+            "sections": [{"level": 1, "title": "Only", "page": 1, "text": "body", "children": []}],
+        })
+        assert md.startswith("## Only")
+        assert "body" in md
+
     def test_validate_inputs(self, tmp_path):
         job_dir = tmp_path / "job"
         job_dir.mkdir()
