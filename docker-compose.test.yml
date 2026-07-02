@@ -25,6 +25,9 @@ services:
       - ./pyproject.toml:/app/pyproject.toml
       # schemathesis 检查配置(只跑 not_a_server_error + response_schema_conformance)
       - ./schemathesis.toml:/app/schemathesis.toml
+      # pytest-split 时长档:--splits 按【实测时长】均衡分片(消除慢用例扎堆某 shard,如 unit-normal shard1)。
+      # 改了用例分布后重新 `pytest --store-durations --durations-path .test_durations` 生成即可,不用重建镜像。
+      - ./.test_durations:/app/.test_durations
     # 测试依赖([test] extra,单一事实源 pyproject)已【烤进 test stage 镜像】(base.Dockerfile),故此处不再运行时
     # pip install——直接 pytest,省一笔安装、也不漂移。改 [test] 版本须重建镜像(CI buildcache 会自动跟随)。
     # 默认套件:跑 -m 'not fuzz' 的快测 + 分支覆盖率;fuzz(schemathesis,也已烤进镜像)单独手动跑:
