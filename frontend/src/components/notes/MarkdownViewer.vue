@@ -176,7 +176,8 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onEsc))
 </template>
 
 <style>
-.prose img { max-width: 100%; border-radius: 0.5rem; cursor: zoom-in; }
+/* 默认收敛尺寸:宽随列、高最多 70vh(超高竖图不占满屏,点开 lightbox 看全) */
+.prose img { max-width: 100%; max-height: 70vh; width: auto; border-radius: 0.5rem; cursor: zoom-in; }
 /* 图片 lightbox(Teleport 到 body,样式须非 scoped) */
 .lightbox {
   position: fixed; inset: 0; z-index: 1000;

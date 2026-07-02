@@ -244,6 +244,8 @@ i[data-lucide]{width:16px;height:16px;stroke-width:1.75;flex:none}
 
 /* PROSE / NOTES */
 .notes-wrap{display:grid;grid-template-columns:1fr 200px;gap:22px}
+/* grid item 默认 min-width:auto 不许收缩:超宽原图会把内容列撑到内容宽(整页横向溢出),放开 */
+.notes-wrap>*{min-width:0}
 .prose h2{font-size:18px;color:var(--ink-900);font-weight:700;margin:22px 0 10px;padding-bottom:7px;border-bottom:1px solid var(--line-soft)}
 .prose h2:first-child{margin-top:0}
 .prose h3{font-size:15px;color:var(--ink-900);font-weight:650;margin:18px 0 8px}
