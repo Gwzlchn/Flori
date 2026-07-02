@@ -319,9 +319,10 @@ class DownloadStep(StepBase):
         self.run_subprocess(cmd, timeout=120)
 
     def _download_article(self, url: str) -> None:
-        """抓 HTML 原文写 input/source.html;同时用 trafilatura 抽正文/标题供后续解析。"""
+        """抓 HTML 原文写 input/source.html;同时用 trafilatura 抽正文/标题供后续解析。
+        抓取用 urllib(尊重 HTTP(S)_PROXY env)——trafilatura.fetch_url 内部 urllib3 不读代理 env,
+        必须走代理的站(HF 等)直连必败、把退避整轮白烧;trafilatura 只负责解析不再负责下载。"""
         import trafilatura
-        from trafilatura.settings import use_config
 
         from shared.net import assert_public_url
 
@@ -329,14 +330,12 @@ class DownloadStep(StepBase):
         input_dir = self.job_dir / "input"
         input_dir.mkdir(parents=True, exist_ok=True)
 
-        # 慢站(大正文/需代理)首拍常踩 trafilatura 默认 30s 超时 → 指数退避重试:超时 30→60→120→240→480s。
+        # 慢站首拍常超时 → 指数退避重试:超时 30→60→120→240→480s。
         # 步超时(pipelines.yaml article 01_download)须 ≥ 各拍之和 ~930s,否则退避被腰斩。
         html = None
         timeout = 30
         for _ in range(5):
-            cfg = use_config()
-            cfg.set("DEFAULT", "DOWNLOAD_TIMEOUT", str(timeout))
-            html = trafilatura.fetch_url(url, config=cfg)
+            html = self._fetch_html(url, timeout)
             if html:
                 break
             timeout *= 2
@@ -357,6 +356,27 @@ class DownloadStep(StepBase):
         except Exception:
             pass
         self.write_output("input/article_meta.json", article_meta)
+
+    @staticmethod
+    def _fetch_html(url: str, timeout: int) -> str | None:
+        """urllib 抓单页(尊重代理 env),失败返 None(调用方退避重试)。
+        解码链:HTTP header charset → utf-8 → gb18030(GBK/GB2312 中文站) → utf-8 宽容兜底。"""
+        import urllib.request
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read()
+                charset = r.headers.get_content_charset()
+        except Exception:
+            return None
+        if not raw:
+            return None
+        for enc in filter(None, (charset, "utf-8", "gb18030")):
+            try:
+                return raw.decode(enc)
+            except (UnicodeDecodeError, LookupError):
+                continue
+        return raw.decode("utf-8", errors="replace")
 
     def _download_audio(self, url: str) -> None:
         """音频任务下载 → input/source.mp3,后续复制为 source.mp4 供 whisper;ffmpeg 按内容
