@@ -255,7 +255,9 @@ paper:
       label: "翻译"
       extends: .ai-step
       run: steps.paper.step_04_translate_paper
-      needs: ["03_sections"]
+      # needs 04_figures:译文按页码内嵌渲染图引用,图表必须先产出(否则竞态下译文无图)。
+      needs: ["03_sections", "04_figures"]
+      version: "2"   # 译文内嵌图表引用,失效旧指纹
       tags: []
       # 仅非中文论文触发:02_pdf_parse 写了 needs_translation.json 才跑,中文论文跳过。
       rules:

@@ -24,6 +24,9 @@ class TranslatePaperStep(StepBase):
 
     def input_hashes(self) -> dict[str, str]:
         h = {"sections": file_hash(self.job_dir / "intermediate" / "sections.json")}
+        figs = self.job_dir / "intermediate" / "figures.json"
+        if figs.exists():                      # 译文含图表引用,图变了要重译
+            h["figures"] = file_hash(figs)
         t = self.template_hash("04_translate_paper")
         if t:
             h["template"] = t
@@ -31,7 +34,10 @@ class TranslatePaperStep(StepBase):
 
     def execute(self) -> dict | None:
         sections = self.load_json("intermediate/sections.json")
-        md = self._paper_markdown(sections)
+        figures: list = []
+        if (self.job_dir / "intermediate" / "figures.json").exists():
+            figures = self.load_json("intermediate/figures.json")
+        md = self._paper_markdown(sections, figures)
 
         # 逐 chunk 翻译:每块一次 call_ai(各自有审计记录+transcript sidecar,call_index 自增),
         # 按原顺序聚合;max_tokens 抬高防单块译文截断(claude-cli 无视无害)。
@@ -48,10 +54,12 @@ class TranslatePaperStep(StepBase):
                 "provider": self.last_ai_provider, "model": self.last_ai_model}
 
     @staticmethod
-    def _paper_markdown(sections: dict) -> str:
+    def _paper_markdown(sections: dict, figures: list | None = None) -> str:
         """从 sections.json 拼出论文可读 Markdown(标题/作者/摘要/章节树)供翻译。
         ★max_chars=None 不截断:忠实全文翻译必须喂全文(默认 2000 字/节的截断是笔记类
-        prompt 的预算控制,曾让"全文翻译"实际只译了每节前 2000 字);规模由 chunk 管。"""
+        prompt 的预算控制,曾让"全文翻译"实际只译了每节前 2000 字);规模由 chunk 管。
+        渲染图(04_figures)按页码插到对应顶级章节之后——否则译文 0 图,「保留配图」名不副实;
+        prompt 要求 ![](assets/…) 引用行原样保留,图注(斜体行)随文翻译。"""
         from steps.utils.sections import render_section_tree
         parts: list[str] = []
         if sections.get("title"):
@@ -61,8 +69,23 @@ class TranslatePaperStep(StepBase):
         if sections.get("abstract"):
             parts.append(f"\n## Abstract\n{sections['abstract']}\n")
         parts.append("\n")
-        for sec in sections.get("sections", []):
+
+        figs = sorted(
+            (f for f in (figures or []) if f.get("filename")),
+            key=lambda f: (f.get("page") or 0, f.get("index") or 0),
+        )
+        top = sections.get("sections", [])
+        fi = 0
+        for i, sec in enumerate(top):
             render_section_tree(sec, parts, level=2, max_chars=None)
+            next_page = top[i + 1].get("page") if i + 1 < len(top) else None
+            while fi < len(figs) and (next_page is None or (figs[fi].get("page") or 0) < next_page):
+                f = figs[fi]
+                parts.append(f"\n![](assets/{f['filename']})\n")
+                caption = " ".join((f.get("caption") or "").split())
+                if caption:
+                    parts.append(f"*{caption}*\n")
+                fi += 1
         return "".join(parts)
 
     def _build_prompt(self, md: str) -> str:
@@ -78,6 +101,7 @@ _DEFAULT = (
     "- 完整保留 Markdown 结构(标题层级、列表、表格、引用等)与原文章节顺序;\n"
     "- 数学公式、变量名、代码、算法伪代码原样保留(LaTeX 不译);\n"
     "- 专有名词/人名/方法名/数据集名首次出现用「中文(English)」;\n"
+    "- 图片引用行(![](assets/…))必须原样保留在原位,不译、不改路径;其后的斜体图注行随文翻译;\n"
     "- 只输出翻译后的 Markdown 正文,不要任何前言、说明或结尾提议。\n\n"
     "--- 论文原文 ---\n<<BODY>>"
 )

@@ -94,3 +94,37 @@ def test_execute_large_paper_chunks(tmp_path, monkeypatch):
     for i in range(1, result["chunks"] + 1):
         assert f"译文块{i}" in out                  # 按序聚合,块块都在
     assert out.index("译文块1") < out.index(f"译文块{result['chunks']}")
+
+
+def test_paper_markdown_injects_figures_by_page(tmp_path):
+    # 渲染图按页码插到对应顶级章节后:page2 的图归 Method(page2)节;图注成斜体行;无 filename 的跳过。
+    sections = {
+        "title": "T", "authors": [], "abstract": "",
+        "sections": [
+            {"level": 1, "title": "Intro", "page": 1, "text": "a", "children": []},
+            {"level": 1, "title": "Method", "page": 2, "text": "b", "children": []},
+        ],
+    }
+    figures = [
+        {"id": "fig2", "page": 2, "caption": "Figure 2:  arch  diagram", "filename": "fig_02.png", "index": 0},
+        {"id": "fig1", "page": 1, "caption": "Figure 1: overview", "filename": "fig_01.png", "index": 0},
+        {"id": "fig0", "page": 1, "caption": "no render", "filename": None, "index": 1},
+    ]
+    md = TranslatePaperStep._paper_markdown(sections, figures)
+    i_intro, i_method = md.find("## Intro"), md.find("## Method")
+    i_f1, i_f2 = md.find("![](assets/fig_01.png)"), md.find("![](assets/fig_02.png)")
+    assert i_intro < i_f1 < i_method < i_f2          # 各归其节
+    assert "*Figure 2: arch diagram*" in md          # 图注斜体 + 空白折叠
+    assert "no render" not in md                     # 未渲染图不注入
+
+def test_paper_markdown_no_figures_unchanged(tmp_path):
+    sections = {"title": "T", "authors": [], "abstract": "",
+                "sections": [{"level": 1, "title": "S", "page": 1, "text": "x", "children": []}]}
+    assert "![](" not in TranslatePaperStep._paper_markdown(sections, [])
+    assert TranslatePaperStep._paper_markdown(sections) == TranslatePaperStep._paper_markdown(sections, [])
+
+def test_prompt_contains_figure_preserve_rule(tmp_path):
+    job_dir = _setup(tmp_path)
+    config = make_step_config(tmp_path, step_name="04_translate_paper", pool="ai")
+    step = TranslatePaperStep("04_translate_paper", job_dir, config)
+    assert "![](assets/" in step._build_prompt("body")   # 保留图片引用规则进了 prompt
