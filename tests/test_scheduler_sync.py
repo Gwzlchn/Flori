@@ -56,8 +56,8 @@ async def test_existing_title_not_overwritten():
 
 @pytest.mark.asyncio
 async def test_pdf_parse_triggers_title_sync(monkeypatch):
-    # 02_pdf_parse / 02_parse_article 完成后触发同步(论文标题此步才写入 parsed.json;
-    # 不能只等 01_download 或 job_done——AI 步未跑时 job 会卡住)。
+    # 02_pdf_parse / 02_parse_article 完成后触发同步:论文标题此步才写入 parsed.json;
+    # 不能只等 01_download 或 job_done,AI 步未跑时 job 会卡住。
     eng = _engine(_Storage({}), _DB())
     called: list = []
 

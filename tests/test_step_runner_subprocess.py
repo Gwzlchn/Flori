@@ -21,7 +21,7 @@ from worker.step_runner import (
 )
 
 
-# ── helpers ──
+# helpers
 
 
 def _ctx(work_dir: Path, module: str, step: str = "A", timeout_sec: int = 10,
@@ -65,7 +65,7 @@ def with_pythonpath(tmp_path):
     os.environ.update(orig)
 
 
-# ── 成功路径 ──
+# 成功路径
 
 
 class TestSubprocessSuccess:
@@ -150,7 +150,7 @@ class TestSubprocessSuccess:
         assert "early_marker" in full and "late_marker" in full
 
 
-# ── 失败路径 ──
+# 失败路径
 
 
 class TestSubprocessFailure:
@@ -176,7 +176,7 @@ class TestSubprocessFailure:
         assert "[stderr] boom_reason" in (work_dir / "logs" / "A.log").read_text()
 
 
-# ── 超时路径 ──
+# 超时路径
 
 
 class TestSubprocessTimeout:
@@ -200,7 +200,7 @@ class TestSubprocessTimeout:
         assert "--- TIMEOUT after 1s ---" in log
 
 
-# ── 进度转发 ──
+# 进度转发
 
 
 class TestSubprocessProgress:
@@ -252,10 +252,10 @@ class TestSubprocessProgress:
         assert written["current"] == 3
 
 
-# ── env 按需下放（密钥按需注入）──
+# env 按需下放(密钥按需注入)
 
 
-# stub：把自身可见的 os.environ 落到 work_dir/env_dump.json，供断言子进程实际继承了什么。
+# stub:把自身可见的 os.environ 落到 work_dir/env_dump.json,供断言子进程实际继承了什么。
 _ENV_DUMP_STUB = (
     "import json, os, sys\n"
     "from pathlib import Path\n"
@@ -266,7 +266,7 @@ _ENV_DUMP_STUB = (
 
 
 class TestSubprocessEnvHardening:
-    """DENYLIST：剥离控制面/AI 密钥但保留系统 env；ai 池才下放 AI 密钥。"""
+    """DENYLIST:剥离控制面/AI 密钥但保留系统 env;ai 池才下放 AI 密钥。"""
 
     @pytest.mark.asyncio
     async def test_non_ai_pool_strips_secrets_keeps_system(self, with_pythonpath, monkeypatch):
@@ -289,14 +289,14 @@ class TestSubprocessEnvHardening:
         assert rc == 0
         env = json.loads((work_dir / "env_dump.json").read_text())
 
-        # 控制面密钥 + AI 密钥（非 ai 池）必须不可见。
+        # 控制面密钥 + AI 密钥(非 ai 池)必须不可见。
         assert "ANTHROPIC_API_KEY" not in env
         assert "MINIO_SECRET_KEY" not in env
         assert "MINIO_ACCESS_KEY" not in env
         assert "REDIS_URL" not in env
         assert "GATEWAY_URL" not in env
         assert "WORKER_TOKEN" not in env
-        # 系统变量（exec python/ffmpeg 必需）必须保留。
+        # 系统变量(exec python/ffmpeg 必需)必须保留。
         assert "PATH" in env and env["PATH"]
         # 始终下放的运行期变量。
         assert env["STEP_EXEC_ID"] == "x"
@@ -320,16 +320,16 @@ class TestSubprocessEnvHardening:
         assert rc == 0
         env = json.loads((work_dir / "env_dump.json").read_text())
 
-        # ai 池：AI 密钥按需下放。
+        # ai 池:AI 密钥按需下放。
         assert env["ANTHROPIC_API_KEY"] == "sk-anthropic-secret"
         assert env["DEEPSEEK_API_KEY"] == "sk-deepseek-secret"
-        # 但控制面密钥仍不可见（步骤永不直连 MinIO）。
+        # 但控制面密钥仍不可见(步骤永不直连 MinIO)。
         assert "MINIO_SECRET_KEY" not in env
         assert env["STEP_EXEC_ID"] == "x"
         assert env["HTTPS_PROXY"] == "http://proxy:7890"
 
 
-# ── 工厂选型 ──
+# 工厂选型
 
 
 class TestFactory:

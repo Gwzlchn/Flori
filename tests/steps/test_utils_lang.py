@@ -1,4 +1,4 @@
-"""tests for steps/utils/lang.py — 正文主语言粗判(中/非中,翻译触发用)。"""
+"""steps/utils/lang.py 的测试:正文主语言粗判(中/非中,翻译触发用)。"""
 
 from steps.utils.lang import detect_lang
 

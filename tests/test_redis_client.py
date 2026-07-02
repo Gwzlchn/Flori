@@ -141,7 +141,7 @@ class TestListQueue:
 
 
 class TestPool:
-    """并发槽 = holder(=exec_id)集合:used=SCARD,占=SADD,放=SREM(幂等)。根治裸计数器幽灵泄漏。"""
+    """并发槽是 holder 集合,holder 取 exec_id:used=SCARD,占=SADD,放=SREM 幂等,避免裸计数器的幽灵泄漏。"""
 
     @pytest.mark.asyncio
     async def test_acquire_and_release(self, rc):
@@ -172,7 +172,7 @@ class TestPool:
 
     @pytest.mark.asyncio
     async def test_acquire_atomicity(self, rc):
-        # 三个【不同】holder 并发抢 limit=1:仅一个进(SCARD<limit 原子判定)。
+        # 三个不同 holder 并发抢 limit=1:仅一个进(SCARD<limit 原子判定)。
         results = await asyncio.gather(
             rc.try_acquire_slot("scene", 1, "h1"),
             rc.try_acquire_slot("scene", 1, "h2"),
@@ -182,7 +182,7 @@ class TestPool:
 
     @pytest.mark.asyncio
     async def test_idempotent_release_no_double_decrement(self, rc):
-        # ★SREM 幂等:同一 holder 释放两次,不会把别人的槽也减掉(根治裸 DECR 的双减/泄漏)。
+        # SREM 幂等:同一 holder 释放两次,不会把别人的槽也减掉,避免裸 DECR 的双减/泄漏。
         await rc.try_acquire_slot("cpu", 5, "h1")
         await rc.try_acquire_slot("cpu", 5, "h2")
         assert await rc.get_pool_count("cpu") == 2
@@ -192,7 +192,7 @@ class TestPool:
 
     @pytest.mark.asyncio
     async def test_full_pool_same_holder_reacquire_idempotent(self, rc):
-        # 满载时同一 holder 重新占(认领重试/重入)幂等放行,不被误拒、不重复计数(SISMEMBER 分支)。
+        # 满载时同一 holder 重新占(认领重试/重入)幂等放行,不被误拒、不重复计数。走 SISMEMBER 分支。
         assert await rc.try_acquire_slot("cpu", 1, "h1") is True
         assert await rc.get_pool_count("cpu") == 1            # 满
         assert await rc.try_acquire_slot("cpu", 1, "h1") is True   # 同 holder 重占
@@ -209,7 +209,7 @@ class TestPool:
 
     @pytest.mark.asyncio
     async def test_get_all_holders_and_release_holders(self, rc):
-        # 跨池 + 资源槽 holder 全集 + 定向释放(删 running job G4 / 对账用)。
+        # 跨池 + 资源槽 holder 全集 + 定向释放(删 running job / 对账用)。
         await rc.try_acquire_slot("cpu", 9, "h1")
         await rc.try_acquire_slot("io", 9, "h2")
         await rc.try_acquire_resource("acct:x", 9, "h1")     # h1 同时占资源槽
@@ -259,7 +259,7 @@ class TestDeleteStepStatus:
 
     @pytest.mark.asyncio
     async def test_delete_step_status_clears_all_per_step_fields(self, rc):
-        # 对齐 cleanup_job:清该步在所有 per-step hash 的 field,不留惰性垃圾(审计 I-L11)。
+        # 对齐 cleanup_job:清该步在所有 per-step hash 的 field,不留惰性垃圾。
         jid = "j_x"
         await rc.set_step_status(jid, "A", "done")
         for sub in ("retries", "step_worker", "step_exec", "step_resources", "step_progress"):
@@ -270,7 +270,7 @@ class TestDeleteStepStatus:
 
     @pytest.mark.asyncio
     async def test_reset_step_retries(self, rc):
-        # rerun 前清重试计数(审计 I-H4):reset 后归零,重跑步骤恢复重试预算。
+        # rerun 前清重试计数:reset 后归零,重跑步骤恢复重试预算。
         await rc.incr_step_retries("j_x", "A")
         await rc.incr_step_retries("j_x", "A")
         assert await rc.get_step_retries("j_x", "A") == 2
@@ -367,7 +367,7 @@ class TestWorker:
 
     @pytest.mark.asyncio
     async def test_registration_token_not_listed_as_worker(self, rc):
-        # 接入 token 不该污染 worker 列表(否则 hgetall 一个 string 键会 WRONGTYPE → /api/workers 500)。
+        # 接入 token 不该污染 worker 列表:否则对 string 键 hgetall 会 WRONGTYPE,/api/workers 报 500。
         await rc.register_worker("cpu-1", {"type": "cpu"})
         await rc.set_registration_token("flw-secret", ttl_sec=3600)
         ids = await rc.list_worker_ids()
@@ -376,7 +376,7 @@ class TestWorker:
 
     @pytest.mark.asyncio
     async def test_legacy_worker_registration_token_key_skipped(self, rc):
-        # 兼容历史:旧版把 token 写在 worker:registration_token(string)。扫描须跳过,不得 WRONGTYPE。
+        # 兼容旧数据:token 可能残留在 worker:registration_token(string 键)。扫描须跳过,不得 WRONGTYPE。
         await rc.register_worker("cpu-1", {"type": "cpu"})
         await rc._redis.set("worker:registration_token", "flw-legacy")
         ids = await rc.list_worker_ids()
@@ -434,7 +434,7 @@ class TestPubSub:
 
     @pytest.mark.asyncio
     async def test_subscribe_survives_connection_error(self, rc, monkeypatch):
-        """连接级异常（TimeoutError）不应让 subscribe 抛出，而是重连重订阅后继续。"""
+        """连接级异常(TimeoutError)不应让 subscribe 抛出,而是重连重订阅后继续。"""
         from redis.exceptions import TimeoutError as RedisTimeoutError
 
         received = []
@@ -448,7 +448,7 @@ class TestPubSub:
 
             async def flaky_get_message(*ga, **gkw):
                 calls["getmsg"] += 1
-                # 首次 get_message 抛连接级异常，触发重连重订阅。
+                # 首次 get_message 抛连接级异常,触发重连重订阅。
                 if calls["getmsg"] == 1:
                     raise RedisTimeoutError("simulated")
                 return await real_get(*ga, **gkw)
@@ -456,7 +456,7 @@ class TestPubSub:
             ps.get_message = flaky_get_message  # type: ignore[assignment]
             return ps
 
-        # reconnect 不真正换连接（fakeredis），只让 pubsub 重新创建走 real 路径。
+        # reconnect 不真正换连接(fakeredis),只让 pubsub 重新创建走 real 路径。
         async def fake_reconnect():
             return None
 
@@ -621,7 +621,7 @@ class TestLinkTraffic:
 
 
 class TestRemoveJobTasks:
-    """删 job 时精准清队列里其未认领的排队 task(queue:{pool} + queue:enqueued,补 G1)。"""
+    """删 job 时精准清队列里其未认领的排队 task(queue:{pool} + queue:enqueued)。"""
 
     @pytest.mark.asyncio
     async def test_removes_only_target_job_across_pools(self, rc):

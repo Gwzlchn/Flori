@@ -21,7 +21,7 @@ NOW = datetime(2026, 6, 24, 12, 0, 0, tzinfo=timezone.utc)
 
 class TestComputeComponentStatus:
     def test_no_heartbeat_is_unknown(self):
-        # 无心跳记录(从未上报/老版本)→ unknown,不误报"挂了"(non-down)。
+        # 无心跳记录(从未上报/老版本)→ unknown,不误报为挂了。
         assert compute_component_status(None, NOW) == COMPONENT_UNKNOWN
 
     def test_fresh_is_up(self):

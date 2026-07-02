@@ -1,6 +1,6 @@
-"""模块边界守门：api 层只能依赖 shared/ 契约层，不得 import steps/scheduler/worker。
+"""模块边界守门:api 层只能依赖 shared/ 契约层,不得 import steps/scheduler/worker。
 
-api 层是 HTTP 边界，steps / scheduler / worker 是独立部署单元，经 Redis + 文件 + HTTP 通信。
+api 层是 HTTP 边界,steps / scheduler / worker 是独立部署单元,经 Redis + 文件 + HTTP 通信。
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""tests for steps/video/step_06_ocr.py (mock RapidOCR)"""
+"""steps/video/step_06_ocr.py 的测试,RapidOCR 全 mock。"""
 
 import json
 from pathlib import Path

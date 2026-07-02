@@ -1,4 +1,4 @@
-"""tests for shared/subscriptions/local_dir.py(本地目录订阅适配器)。"""
+"""shared/subscriptions/local_dir.py(本地目录订阅适配器)单测。"""
 
 from __future__ import annotations
 
@@ -133,7 +133,7 @@ class TestEnumerateLocalDir:
     @pytest.mark.asyncio
     async def test_registered_under_local_dir(self):
         from shared.subscriptions.base import SOURCE_ADAPTERS, source_label
-        # 仅当集成阶段把本模块加入 eager-import 后才进注册表;此处显式 import 触发注册。
+        # 注册靠 import 副作用,不依赖别处 eager-import;此处显式 import 触发注册。
         import shared.subscriptions.local_dir  # noqa: F401
         assert SOURCE_ADAPTERS.get("local_dir") is local_dir.enumerate_local_dir
         assert source_label("local_dir") == "local"

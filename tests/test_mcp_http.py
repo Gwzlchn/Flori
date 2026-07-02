@@ -84,7 +84,7 @@ def test_build_http_app_smoke(monkeypatch, tmp_path):
     assert callable(app)
 
 
-# ── 限流 RateLimitASGI(纯 ASGI 时间窗计数器,最外层)──
+# 限流 RateLimitASGI(纯 ASGI 时间窗计数器,最外层)
 
 
 class TestRateLimit:
@@ -149,7 +149,7 @@ class TestRateLimit:
         assert (await _post(app)).status_code == 429  # 第二个 http 超上限=1
 
 
-# ── 按库作用域 /mcp/{domain}:DomainScopeASGI 路径改写 + contextvar 设置 ──
+# 按库作用域 /mcp/{domain}:DomainScopeASGI 路径改写 + contextvar 设置
 
 
 class TestDomainScopeMiddleware:
@@ -257,8 +257,8 @@ async def _run_lifespan(app):
 
 
 class TestScopedEndpointRouteAccepted:
-    """端到端:经 build_http_app() 的真实 streamable_http_app(已跑 lifespan 初始化 session
-    manager),验作用域路由被接受(非 404),且改写后 bare /mcp 仍可用。深层 MCP 协议见 test_mcp.py。"""
+    """端到端:经 build_http_app() 的真实 streamable_http_app,先跑 lifespan 初始化 session
+    manager。验作用域路由被接受(非 404),且改写后 bare /mcp 仍可用;深层 MCP 协议见 test_mcp.py。"""
 
     def _app(self, monkeypatch, tmp_path):
         monkeypatch.setenv("CONFIG_DIR", "/app/configs")

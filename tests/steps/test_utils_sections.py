@@ -1,4 +1,4 @@
-"""tests for steps/utils/sections.py — 章节树 → markdown 渲染。"""
+"""steps/utils/sections.py 的测试:章节树 → markdown 渲染。"""
 
 from __future__ import annotations
 
@@ -114,7 +114,7 @@ class TestBuildSectionTree:
         assert tree[1]["children"] == []
 
     def test_defensive_missing_keys(self):
-        # 缺 level/title/page/text 不应 KeyError(I-L18:article 旧版直接索引会崩)。
+        # 缺 level/title/page/text 不应 KeyError(直接索引会崩),应回填默认值。
         tree = build_section_tree([{}])
         assert tree == [{"level": 1, "title": "", "page": 1, "text": "", "children": []}]
 

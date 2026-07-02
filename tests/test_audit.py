@@ -1,4 +1,4 @@
-"""tests for shared/audit.py — 通用审计写入(→structlog→Dozzle)。"""
+"""tests for shared/audit.py — 通用审计写入,经 structlog 输出到 Dozzle。"""
 
 from structlog.testing import capture_logs
 

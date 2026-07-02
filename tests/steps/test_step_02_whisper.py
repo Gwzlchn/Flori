@@ -1,4 +1,4 @@
-"""tests for steps/video/step_02_whisper.py (mock faster-whisper)"""
+"""steps/video/step_02_whisper.py 的测试,faster-whisper 全 mock。"""
 
 import json
 from pathlib import Path
@@ -42,7 +42,7 @@ class TestWhisperStep:
 
         mock_info = MagicMock()
         mock_info.language = "zh"
-        mock_info.duration = 2.5  # 进度分母走真实时长(不再写死 language="zh",自动检测)
+        mock_info.duration = 2.5  # 进度分母走真实时长;language 靠自动检测,不写死
 
         mock_model = MagicMock()
         mock_model.transcribe.return_value = ([mock_segment], mock_info)

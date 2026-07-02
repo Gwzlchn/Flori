@@ -75,11 +75,11 @@ def test_template_hash_changes_on_edit(tmp_path):
     h1 = s.template_hash("foo")
     assert h1  # 非空
     f.write_text("v2", encoding="utf-8")
-    assert s.template_hash("foo") != h1  # 改模板 → 指纹变 → should_run 重跑
+    assert s.template_hash("foo") != h1  # 改模板则指纹变,should_run 重跑
     assert s.template_hash("absent") == ""  # 全缺 → 空串(不影响指纹)
 
 
-# ── 评审 prompt 白盒:build_review_prompt 骨架 + 运行期注入 ──
+# 评审 prompt 白盒:build_review_prompt 骨架 + 运行期注入
 
 
 def _mk_review_step(tmp_path, step="06_review"):

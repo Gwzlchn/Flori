@@ -17,7 +17,7 @@ import pytest
 from worker.step_runner import DockerStepRunner, StepContext
 
 
-# ── 桩:伪 docker SDK ──
+# 桩:伪 docker SDK
 
 
 class _FakeContainer:
@@ -136,7 +136,7 @@ async def _noop_tick():
     pass
 
 
-# ── 成功路径:命令/挂载/labels ──
+# 成功路径:命令/挂载/labels
 
 
 class TestDockerSuccess:
@@ -198,7 +198,7 @@ class TestDockerSuccess:
         assert runner._client.containers.run_kwargs["device_requests"] is None
 
 
-# ── 网络策略:出网池 vs 离线池 ──
+# 网络策略:出网池 vs 离线池
 
 
 class TestNetworkPolicy:
@@ -214,7 +214,7 @@ class TestNetworkPolicy:
         runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
         await runner.run_step(_ctx(work_dir, pool=pool), _noop_progress, _noop_tick)
 
-        # io(下载)/ai 走默认网络,network_mode 不设(None)
+        # io 下载/ai 走默认网络,network_mode 不设(None)
         assert runner._client.containers.run_kwargs["network_mode"] is None
 
     @pytest.mark.asyncio
@@ -232,7 +232,7 @@ class TestNetworkPolicy:
         assert runner._client.containers.run_kwargs["network_mode"] == "none"
 
 
-# ── 密钥白名单:STEP_EXEC_ID/HTTPS_PROXY 恒注入,AI key 仅 ai 池 ──
+# 密钥白名单:STEP_EXEC_ID/HTTPS_PROXY 恒注入,AI key 仅 ai 池
 
 
 class TestSecretsWhitelist:
@@ -316,7 +316,7 @@ class TestSecretsWhitelist:
         assert env["STEP_EXEC_ID"] == "e1"
 
 
-# ── 失败/超时:remove 必执行 ──
+# 失败/超时:remove 必执行
 
 
 class TestDockerCleanup:
@@ -351,7 +351,7 @@ class TestDockerCleanup:
         assert "--- TIMEOUT after 1s ---" in log
 
 
-# ── 进度监控:on_tick 先于 progress 发布,10s 周期 ──
+# 进度监控:on_tick 先于 progress 发布,10s 周期
 
 
 class TestProgressMonitor:
@@ -400,7 +400,7 @@ class TestProgressMonitor:
         assert "worker_heartbeat_at" in data
 
 
-# ── 孤儿清理 ──
+# 孤儿清理
 
 
 class TestReapOrphans:
@@ -416,7 +416,7 @@ class TestReapOrphans:
         assert runner._client.containers.list_filters == {"label": "flori.worker=w1"}
 
 
-# ── 宿主路径前缀替换 ──
+# 宿主路径前缀替换
 
 
 class TestHostPath:
@@ -426,7 +426,7 @@ class TestHostPath:
         assert runner._host_path(Path("/tmp/flori-work/j_abc")) == "/host/work/j_abc"
 
     def test_without_host_root_fails_fast(self, fake_docker, tmp_path):
-        # HOST_WORK_DIR 缺失 → fail-fast,不静默挂错误目录(L9)
+        # HOST_WORK_DIR 缺失 → fail-fast,不静默挂错误目录
         fake_docker["client"] = _FakeClient(None)
         runner = DockerStepRunner("w1", host_work_root=None)
         with pytest.raises(ValueError):
@@ -452,5 +452,5 @@ class TestResolveImage:
         runner = DockerStepRunner("w1", registry="ghcr.io/gwzlchn")
         assert runner._resolve_image("docker.io/library/python:3.11") == "docker.io/library/python:3.11"
 
-# use_gpu 门控真值表已移到 tests/test_worker.py::TestUseGpuGating——
-# 在那里直接驱动真实 worker.execute 捕获 StepContext.use_gpu,而非在此复刻表达式只测副本。
+# use_gpu 门控真值表在 tests/test_worker.py::TestUseGpuGating——
+# 那里直接驱动真实 worker.execute 捕获 StepContext.use_gpu,此处不复刻表达式只测副本。

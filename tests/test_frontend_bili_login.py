@@ -1,6 +1,6 @@
-"""B站扫码登录前端契约守卫：确保 BiliLogin.vue 与后端 /api/bili/* 严格对齐。
+"""B站扫码登录前端契约守卫:确保 BiliLogin.vue 与后端 /api/bili/* 严格对齐。
 
-无 JS 测试框架(宿主无 node 依赖)，故以源文件静态断言守住契约字段名/路径，
+无 JS 测试框架(宿主无 node 依赖),故以源文件静态断言守住契约字段名/路径,
 防止前后端漂移。可在测试容器内随 pytest 运行。
 """
 from pathlib import Path
@@ -12,7 +12,7 @@ COMP = ROOT / "frontend" / "src" / "components" / "settings" / "BiliLogin.vue"
 TYPES = ROOT / "frontend" / "src" / "types" / "index.ts"
 SETTINGS = ROOT / "frontend" / "src" / "views" / "SettingsView.vue"
 
-# 后端测试容器不挂载 frontend/，此时整体跳过，仅在前端源码可见时守契约。
+# 后端测试容器不挂载 frontend/,此时整体跳过,仅在前端源码可见时守契约。
 pytestmark = pytest.mark.skipif(
     not COMP.parent.parent.exists(), reason="frontend 源码未挂载"
 )
@@ -54,7 +54,7 @@ def test_poll_states_handled(comp_src: str, state: str):
 
 
 def test_contract_field_names(comp_src: str):
-    # 字段名严格对齐契约：start 返回 qr_png/qrcode_key/url，status 用 logged_in/uname。
+    # 字段名严格对齐契约:start 返回 qr_png/qrcode_key/url,status 用 logged_in/uname。
     for field in ("qr_png", "qrcode_key", "logged_in", "uname"):
         assert field in comp_src, f"缺少契约字段 {field}"
 

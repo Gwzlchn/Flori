@@ -12,7 +12,7 @@ def convert_job(src_dir: Path, dst_dir: Path) -> None:
     (dst_dir / "assets").mkdir(parents=True, exist_ok=True)
     (dst_dir / "output").mkdir(parents=True, exist_ok=True)
 
-    # scenes.json — 格式兼容，直接复制
+    # scenes.json — 格式兼容,直接复制
     _copy_if(src_dir / "scenes.json", dst_dir / "intermediate" / "scenes.json")
 
     # frames/ → assets/

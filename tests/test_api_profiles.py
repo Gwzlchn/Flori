@@ -1,4 +1,4 @@
-"""tests for api/routes/profiles.py"""
+"""api/routes/profiles.py 测试。"""
 
 from __future__ import annotations
 
@@ -93,10 +93,10 @@ class TestDomainValidation:
 
     @pytest.mark.asyncio
     async def test_overlong_domain_rejected_not_500(self, client):
-        # 模糊测试逼出:超长 domain 曾被当文件名 {domain}.yaml 写盘 → OSError 'File name too long' → 500。
-        # validate_path_segment 现按字节长度(>200)挡成 400,绝不 5xx(影响 PUT/POST/DELETE profiles 等)。
+        # 模糊测试逼出:超长 domain 若直接当文件名 {domain}.yaml 写盘,OSError 'File name too long' 会裸 500。
+        # validate_path_segment 按字节长度(>200)挡成 400,绝不 5xx,PUT/POST/DELETE profiles 同守卫。
         resp = await client.put("/api/profiles/" + "x" * 300, json={"role": "x"})
         assert resp.status_code == 400
-        # 多字节(每字 ≥3 字节)更易超 NAME_MAX(255),同样挡 400 而非 5xx。
+        # 多字节字符每字 ≥3 字节,更易超 NAME_MAX 255,同样挡 400 而非 5xx。
         resp2 = await client.post("/api/profiles/" + "金" * 120 + "/terms", json={"term": "x"})
         assert resp2.status_code == 400

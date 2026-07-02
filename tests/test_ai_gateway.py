@@ -1,4 +1,4 @@
-"""tests for shared/ai_gateway.py"""
+"""shared/ai_gateway.py 测试:计价、重试策略、provider 回退链、CLI 用量解析。"""
 
 import json
 from datetime import datetime
@@ -55,7 +55,7 @@ class TestCalcCost:
 class TestRetryPolicy:
     def test_rate_limit_long_backoff(self):
         from shared.errors import RETRY_POLICY, get_retry_delay
-        # 限流：递增长退避，等订阅配额恢复（而非 90s 内烧完转终态）。
+        # 限流:递增长退避,等订阅配额恢复(而非 90s 内烧完转终态)。
         assert RETRY_POLICY["ai_rate_limit"]["max"] == 5
         assert get_retry_delay("ai_rate_limit", 0) == 300
         assert get_retry_delay("ai_rate_limit", 4) == 1800
@@ -80,7 +80,7 @@ class TestDryRunProvider:
 
 
 class TestProviderKeyFromEnv:
-    """密钥脱敏后,_create_provider 按 {NAME}_API_KEY 约定从环境补齐。"""
+    """配置不落密钥时,_create_provider 按 {NAME}_API_KEY 约定从环境补齐。"""
 
     def test_anthropic_key_from_env_when_config_empty(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "env-secret")
@@ -357,7 +357,6 @@ class TestUsageFile:
 class TestAnthropicProvider:
     @pytest.mark.asyncio
     async def test_call_success(self):
-        """Normal response returns text content."""
         provider = AnthropicProvider(api_key="sk-test")
 
         mock_usage = MagicMock()
@@ -466,7 +465,6 @@ class TestAnthropicProvider:
 
     @pytest.mark.asyncio
     async def test_rate_limit_raises(self):
-        """Rate limit error should raise AIRateLimitError."""
         provider = AnthropicProvider(api_key="sk-test")
 
         mock_client = MagicMock()
@@ -484,7 +482,6 @@ class TestAnthropicProvider:
 
     @pytest.mark.asyncio
     async def test_generic_error_raises_provider_error(self):
-        """Non-rate-limit error should raise AIProviderError."""
         provider = AnthropicProvider(api_key="sk-test")
 
         mock_client = MagicMock()
@@ -504,7 +501,6 @@ class TestAnthropicProvider:
 class TestOpenAICompatibleProvider:
     @pytest.mark.asyncio
     async def test_call_success(self):
-        """Normal response returns text content."""
         provider = OpenAICompatibleProvider(
             base_url="http://fake", api_key="sk-test", provider_name="deepseek"
         )
@@ -539,7 +535,6 @@ class TestOpenAICompatibleProvider:
 
     @pytest.mark.asyncio
     async def test_rate_limit_raises(self):
-        """Rate limit error should raise AIRateLimitError."""
         provider = OpenAICompatibleProvider(
             base_url="http://fake", api_key="sk-test"
         )
@@ -561,7 +556,6 @@ class TestOpenAICompatibleProvider:
 class TestClaudeCLIProvider:
     @pytest.mark.asyncio
     async def test_call_success(self):
-        """Successful CLI call returns stdout as content."""
         # sh -c 包裹:provider 追加的 --allowedTools/--max-turns 落到 $0/$1 被忽略,不污染输出。
         provider = ClaudeCLIProvider(
             command_template=["sh", "-c", "echo CLI output"]
@@ -577,7 +571,6 @@ class TestClaudeCLIProvider:
 
     @pytest.mark.asyncio
     async def test_cli_failure_raises(self):
-        """Non-zero exit code should raise AIProviderError."""
         provider = ClaudeCLIProvider(
             command_template=["false"]
         )
@@ -591,8 +584,8 @@ class TestClaudeCLIProvider:
     @pytest.mark.asyncio
     async def test_cli_timeout_raises(self):
         """Timeout 应 kill 进程并抛 AIProviderError。
-        用 mock 子进程(communicate 永挂)触发超时路径——【不起真子进程】:真子进程的 communicate 被
-        wait_for 取消后,其 transport 会残留到本测试事件循环关闭【之后】才 GC,__del__ 关管道报
+        用 mock 子进程(communicate 永挂)触发超时路径,刻意不起真子进程:真子进程的 communicate 被
+        wait_for 取消后,其 transport 会残留到本测试事件循环关闭之后才 GC,__del__ 关管道报
         'Event loop is closed'(PytestUnraisableExceptionWarning;生产循环长驻不触发,纯测试噪声)。"""
         import asyncio
         provider = ClaudeCLIProvider(command_template=["claude", "-p"])
@@ -684,7 +677,7 @@ class TestClaudeCLIVision:
             await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}]))
 
 
-# ── ClaudeCLIProvider: --output-format json 用量解析(批1 详细 AI 统计)──
+# ClaudeCLIProvider: --output-format json 用量解析
 
 class _FakeProc:
     """假 subprocess:communicate 回固定 stdout,returncode=0。"""
@@ -811,7 +804,7 @@ def test_calc_cost_cache_aware():
     assert read == pytest.approx(base * 0.1)
 
 
-# ── claude-cli 真实 model 提取(批2 用量按 provider+model 分组)──
+# claude-cli 真实 model 提取:用量按 provider+model 分组,需要真实模型名而非占位。
 
 class TestExtractCliModel:
     def test_prefers_top_level_model(self):

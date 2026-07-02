@@ -1,4 +1,4 @@
-"""tests for steps/video/step_07_danmaku.py"""
+"""steps/video/step_07_danmaku.py 的测试。"""
 
 import json
 

@@ -130,7 +130,7 @@ class TestBuildStepConfig:
 
         assert step_cfg["step"]["name"] == "06_ocr"
         assert step_cfg["step"]["pool"] == "cpu"
-        # 超时/重试是可调运维参数，只校验类型与合理范围，不绑定具体数值。
+        # 超时/重试是可调运维参数,只校验类型与合理范围,不绑定具体数值。
         assert isinstance(step_cfg["step"]["timeout_sec"], int) and step_cfg["step"]["timeout_sec"] > 0
         assert isinstance(step_cfg["step"]["retries"], int) and step_cfg["step"]["retries"] >= 0
         assert step_cfg["domain"]["name"] == "deep-learning"
@@ -171,7 +171,7 @@ class TestBuildStepConfig:
 
 
 class TestSanitizeProviders:
-    """providers 配置下放给步骤前必须剥离明文密钥，密钥改由 env 按需读取。"""
+    """providers 配置下放给步骤前必须剥离明文密钥,密钥改由 env 按需读取。"""
 
     def test_strips_api_key_keeps_selection(self):
         raw = {"providers": {
@@ -183,7 +183,7 @@ class TestSanitizeProviders:
         clean = sanitize_providers(raw)
         assert "api_key" not in clean["providers"]["anthropic"]
         assert "api_key" not in clean["providers"]["deepseek"]
-        # 非密钥的 provider/model 选择保留，gateway 仍能路由。
+        # 非密钥的 provider/model 选择保留,gateway 仍能路由。
         assert clean["providers"]["anthropic"]["type"] == "anthropic"
         assert clean["providers"]["anthropic"]["models"] == ["claude-opus-4-8"]
         assert clean["providers"]["deepseek"]["base_url"] == "https://x"
@@ -202,13 +202,13 @@ class TestBuildStepConfigNoSecrets:
     """build_step_config 落盘/代理的 step_cfg 绝不含明文密钥。"""
 
     def test_no_resolved_api_key_in_step_cfg(self, configs_dir, tmp_data_dir, monkeypatch):
-        # 模拟运行环境里有真实密钥：加载期会把 ${ANTHROPIC_API_KEY} 解析成它。
+        # 模拟运行环境里有真实密钥:加载期会把 ${ANTHROPIC_API_KEY} 解析成它。
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-LEAK-canary")
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deep-canary")
         cfg = load_config(config_dir=configs_dir, data_dir=tmp_data_dir)
         step_cfg = build_step_config(cfg, "video", "11_smart")
 
-        # 整个 step_cfg 序列化后不得出现任何明文密钥（落盘 + 代理给 gateway 的就是它）。
+        # 整个 step_cfg 序列化后不得出现任何明文密钥(落盘 + 代理给 gateway 的就是它)。
         import json as _json
         serialized = _json.dumps(step_cfg)
         assert "sk-LEAK-canary" not in serialized
@@ -219,7 +219,7 @@ class TestBuildStepConfigNoSecrets:
 
 
 class TestNormalizePipelineLegacy:
-    """旧 list 格式经归一化保持原状（仅补 image/depends_on 默认值），契约不变。"""
+    """旧 list 格式经归一化保持原状(仅补 image/depends_on 默认值),契约不变。"""
 
     def test_legacy_list_passthrough(self):
         raw = {"steps": [{"name": "A", "module": "m.a", "pool": "cpu",
@@ -244,7 +244,7 @@ class TestNormalizePipelineLegacy:
 
 
 class TestLoadPipelinesShape:
-    """加载后 pipelines[name]['steps'] 仍是 list[dict]，worker/scheduler 契约不变。"""
+    """加载后 pipelines[name]['steps'] 仍是 list[dict],worker/scheduler 契约不变。"""
 
     def test_steps_is_list_of_dicts(self, configs_dir):
         p = load_pipelines(configs_dir / "pipelines.yaml")
@@ -269,7 +269,7 @@ class TestLoadPipelinesShape:
         assert by_name["08_punctuate"]["condition"] == "has_subtitle"
 
     def test_ocr_timeout_single_source(self, configs_dir):
-        """06_ocr 的超时来自 variables 单一事实源，归一化后为整型 1800。"""
+        """06_ocr 的超时来自 variables 单一事实源,归一化后为整型 1800。"""
         p = load_pipelines(configs_dir / "pipelines.yaml")
         ocr = next(s for s in p["video"]["steps"] if s["name"] == "06_ocr")
         assert ocr["timeout_sec"] == 1800

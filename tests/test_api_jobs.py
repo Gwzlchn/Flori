@@ -1,4 +1,4 @@
-"""tests for api/routes/jobs.py"""
+"""api/routes/jobs.py 测试。"""
 
 from __future__ import annotations
 
@@ -182,7 +182,7 @@ class TestDeleteJob:
 
     @pytest.mark.asyncio
     async def test_delete_purges_artifacts(self, client, app):
-        # 删 job 必须经 storage 清产物(本地删目录 / MinIO 删 {job_id}/ 前缀),否则对象存储留孤儿(I-H1)。
+        # 删 job 必须经 storage 清产物(本地删目录 / MinIO 删 {job_id}/ 前缀),否则对象存储留孤儿。
         create_resp = await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
         job_id = create_resp.json()["job_id"]
         storage = app.state.storage
@@ -202,15 +202,15 @@ class TestDeleteJob:
         assert db.list_usage_by_job(job_id)
         resp = await client.delete(f"/api/jobs/{job_id}")
         assert resp.status_code == 204
-        assert db.list_usage_by_job(job_id) == []            # ai_usage 级联清(G2)
-        mock_redis.remove_job_tasks.assert_awaited_with(job_id)  # 队列清理被调用(G1)
+        assert db.list_usage_by_job(job_id) == []            # ai_usage 级联清
+        mock_redis.remove_job_tasks.assert_awaited_with(job_id)  # 队列清理被调用
 
 
 class TestPathTraversal:
     @pytest.mark.asyncio
     async def test_job_id_with_dots_rejected(self, client):
         # %2e%2e 解码为 ".." 且仍在单段内,真正到达 _validate_job_id 守卫 → 严格 400(不接受 404 蒙混)。
-        # 此前 ..%2F.. 被路由折叠成"未匹配 404",守卫根本没执行,删掉守卫测试照样绿。
+        # 若用 ..%2F..,会被路由折叠成"未匹配 404",守卫根本不执行,删掉守卫测试照样绿。
         resp = await client.get("/api/jobs/%2e%2e_passwd")
         assert resp.status_code == 400
 
@@ -328,7 +328,7 @@ class TestGetStepLog:
 
     @pytest.mark.asyncio
     async def test_log_step_path_traversal_rejected(self, client):
-        # step 段含 ".." → validate_path_segment(step) 守卫 → 严格 400(此前 ..%2F.. 被折叠成 404)。
+        # step 段含 ".." 直达 validate_path_segment(step) 守卫,严格 400;若用 ..%2F.. 会被路由折叠成 404,到不了守卫。
         resp = await client.get("/api/jobs/j1/steps/%2e%2e_secret/log")
         assert resp.status_code == 400
 
@@ -384,7 +384,7 @@ class TestRetryRerunResubmit:
 
     @pytest.mark.asyncio
     async def test_retry_all_failed_scoped_by_collection(self, client, mock_redis, db):
-        # P2 item D：retry-failed?collection_id 只重试该集合的失败 job。
+        # retry-failed?collection_id 只重试该集合的失败 job。
         from shared.models import Collection, Job, JobStatus
         db.create_collection(Collection(id="c_a", name="A", domain="general"))
         db.create_collection(Collection(id="c_b", name="B", domain="general"))
@@ -451,7 +451,7 @@ class TestProviderVersions:
 
 
 class TestRebuildP2c:
-    """P2c:/rebuild 建新快照(fork:clone 产物+.done、父降级、新版 current);/rebuild-stale 只挑过期。"""
+    """/rebuild 建新快照(fork:clone 产物+.done、父降级、新版 current);/rebuild-stale 只挑过期。"""
 
     @pytest.mark.asyncio
     async def test_rebuild_creates_snapshot(self, client, app):

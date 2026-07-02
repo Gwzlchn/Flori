@@ -21,7 +21,7 @@ def _utcnow():
 
 @pytest.fixture
 def redis_mock():
-    """默认：Redis 已铸 registration token（接入门禁放行）。"""
+    """默认: Redis 已铸 registration token(接入门禁放行)。"""
     rc = AsyncMock()
     rc.get_registration_token.return_value = REG_TOKEN
     rc.get_worker_info.return_value = None
@@ -30,7 +30,7 @@ def redis_mock():
 
 @pytest.fixture(autouse=True)
 def _clear_env(monkeypatch):
-    """默认清掉 env 兜底 token，让门禁只认 Redis 铸的那枚。"""
+    """默认清掉 env 兜底 token,让门禁只认 Redis 铸的那枚。"""
     monkeypatch.delenv("WORKER_REGISTRATION_TOKEN", raising=False)
 
 
@@ -93,7 +93,7 @@ class TestRegisterAllocates:
         assert worker_id.startswith("cpu-")
         assert token.startswith("flwt-")
 
-        # worker_tokens 行写入（仅存 hash）
+        # worker_tokens 行写入(仅存 hash)
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         row = db.get_worker_token_by_hash(token_hash)
         assert row is not None
@@ -103,7 +103,7 @@ class TestRegisterAllocates:
         # workers 行写入
         assert db.get_worker(worker_id) is not None
 
-        # Redis liveness key 单写（info 形态对齐 RedisTransport）
+        # Redis liveness key 单写(info 形态对齐 RedisTransport)
         redis_mock.register_worker.assert_awaited_once()
         args, kwargs = redis_mock.register_worker.call_args
         assert args[0] == worker_id
@@ -155,7 +155,7 @@ class TestHeartbeat:
 
     @pytest.mark.asyncio
     async def test_heartbeat_writes_live_load(self, client, redis_mock):
-        # B 档:心跳带 load → 经网关写 redis worker hash 的 load 字段(JSON)。
+        # 心跳带 load → 经网关写 redis worker hash 的 load 字段(JSON)。
         import json as _json
         worker_id, token = await self._register_worker(client)
         resp = await client.post(
@@ -218,7 +218,7 @@ class TestOffline:
 
 
 class TestTokenRevocationViaDelete:
-    """删 worker → 吊销其 token → 后续心跳 401（防复活/防被删 worker 继续心跳）。"""
+    """删 worker 会吊销其 token,后续心跳 401(防复活/防被删 worker 继续心跳)。"""
 
     @pytest.mark.asyncio
     async def test_delete_worker_revokes_token(self, client, redis_mock):
@@ -235,7 +235,7 @@ class TestTokenRevocationViaDelete:
         )
         assert ok.status_code == 200
 
-        # 删 worker（刚注册 → online，需 force）
+        # 删 worker(刚注册 → online,需 force)
         redis_mock.worker_exists.return_value = True
         resp = await client.delete(f"/api/workers/{worker_id}?force=true")
         assert resp.status_code == 204
@@ -249,7 +249,7 @@ class TestTokenRevocationViaDelete:
         assert resp.status_code == 401
 
 
-# ── 认领/上报端点:用真 fakeredis,让服务端编排真正跑起来 ──
+# 认领/上报端点:用真 fakeredis,让服务端编排真正跑起来
 
 
 @pytest.fixture
@@ -325,7 +325,7 @@ class TestJobsRequest:
 
     @pytest.mark.asyncio
     async def test_in_scope_pool_claims(self, jobs_client, real_redis):
-        # token 注册池 [cpu,io]，请求 cpu(范围内) → 认到 cpu 步。
+        # token 注册池 [cpu,io],请求 cpu(范围内) → 认到 cpu 步。
         worker_id, token = await _register_real(jobs_client)
         await real_redis.enqueue_step("cpu", "j1", "A", [], priority=0)
         await real_redis.set_step_status("j1", "A", "ready")
@@ -342,7 +342,7 @@ class TestJobsRequest:
 
     @pytest.mark.asyncio
     async def test_out_of_scope_pool_not_served(self, jobs_client, real_redis):
-        # token 注册池 [cpu,io]，请求 gpu(范围外) → null，即便 gpu 步 ready 也不服务。
+        # token 注册池 [cpu,io],请求 gpu(范围外) → null,即便 gpu 步 ready 也不服务。
         worker_id, token = await _register_real(jobs_client)
         await real_redis.enqueue_step("gpu", "j1", "A", [], priority=0)
         await real_redis.set_step_status("j1", "A", "ready")
@@ -355,12 +355,12 @@ class TestJobsRequest:
         )
         assert resp.status_code == 200
         assert resp.json() == {"claim": None}
-        # 范围外认领被早退裁掉，gpu 步未被翻成 running。
+        # 范围外认领被早退裁掉,gpu 步未被翻成 running。
         assert await real_redis.get_step_status("j1", "A") == "ready"
 
     @pytest.mark.asyncio
     async def test_partial_scope_filters_to_allowed(self, jobs_client, real_redis):
-        # 请求 [cpu,gpu]，token 仅授权 [cpu,io] → 裁剪到 cpu，仍能认到 cpu 步。
+        # 请求 [cpu,gpu],token 仅授权 [cpu,io] → 裁剪到 cpu,仍能认到 cpu 步。
         worker_id, token = await _register_real(jobs_client)
         await real_redis.enqueue_step("cpu", "j1", "A", [], priority=0)
         await real_redis.set_step_status("j1", "A", "ready")
@@ -463,7 +463,7 @@ class TestJobsFail:
         )
         assert resp.status_code == 200
         assert db.get_steps("j1")[0].status == StepStatus.FAILED
-        assert db.get_worker(worker_id).tasks_failed == 0   # 不计入失败统计
+        assert db.get_worker(worker_id).tasks_failed == 0
 
 
 class TestJobsRelease:
@@ -577,7 +577,7 @@ class TestUsage:
 
     @pytest.mark.asyncio
     async def test_duplicate_usage_not_double_billed(self, jobs_client, db):
-        """同 exec_id 二次上报(worker 重试/双发)→ 200 ok 但不翻倍计费(端点 docstring 承诺去重)。"""
+        """同 exec_id 二次上报(worker 重试/双发)→ 200 ok 但不翻倍计费;端点 docstring 承诺去重。"""
         _, token = await _register_real(jobs_client)
         body = {"exec_id": "dup1", "provider": "anthropic", "model": "claude",
                 "job_id": "j9", "step": "A", "input_tokens": 10,
@@ -590,7 +590,7 @@ class TestUsage:
         assert summary["total_cost_usd"] == pytest.approx(0.5)
 
 
-# ── 产物代理端点:worker token 鉴权,经 API 读写 storage ──
+# 产物代理端点:worker token 鉴权,经 API 读写 storage
 
 
 class TestArtifacts:
@@ -659,7 +659,7 @@ class TestArtifacts:
 
     @pytest.mark.asyncio
     async def test_traffic_counted_by_direction_and_worker(self, jobs_client, real_redis):
-        """put=入库(push)、get=出库(pull):按方向 + worker 归因计字节;404 不计。"""
+        """put 计入库方向 push,get 计出库方向 pull:按方向 + worker 归因计字节;404 不计。"""
         worker_id, token = await _register_real(jobs_client)
         h = {"Authorization": f"Bearer {token}"}
         # 入库:PUT body 5 字节
@@ -692,7 +692,7 @@ class TestArtifacts:
 
     @pytest.mark.asyncio
     async def test_rel_absolute_and_null_rejected(self, jobs_client):
-        # L14:_validate_rel 不止挡 "..",绝对路径(/ 开头)与空字节也要 400
+        # _validate_rel 不止挡 "..",绝对路径(/ 开头)与空字节也要 400
         _, token = await _register_real(jobs_client)
         h = {"Authorization": f"Bearer {token}"}
         # rel 以 / 开头(绝对路径)
@@ -762,7 +762,7 @@ class TestWorkerTokenThrottle:
 
 
 class TestRunnerPollAccessFilter:
-    """runner 轮询端点(heartbeat/jobs/request)的 uvicorn access 记录被过滤掉(declutter dozzle),其余保留。"""
+    """runner 轮询端点(heartbeat/jobs/request)的 uvicorn access 记录被过滤掉,其余保留;为 dozzle 降噪。"""
 
     def test_filters_poll_endpoints_keeps_others(self):
         import logging

@@ -1,4 +1,4 @@
-"""tests for shared/storage.py"""
+"""shared/storage.py 的单测。"""
 
 import os
 from unittest.mock import AsyncMock, MagicMock
@@ -96,7 +96,7 @@ class TestLocalStorage:
         child = tmp_path / "j_child"
         assert (child / "output" / "sections.json").read_text() == "[]"
         assert (child / ".04_smart.done").exists()             # .done 被播种(供 fork 跳过未变步)
-        assert not (child / "input" / ".credentials.json").exists()  # ★凭证不克隆
+        assert not (child / "input" / ".credentials.json").exists()  # 凭证不克隆
 
     @pytest.mark.asyncio
     async def test_clone_missing_src_noop(self, storage):
@@ -173,7 +173,7 @@ class TestLocalStorage:
 
     @pytest.mark.asyncio
     async def test_null_byte_in_path_blocked(self, storage):
-        # 空字节(null byte)会让 pathlib.resolve() 抛 ValueError(裸传即 500);_safe_path 在源头拦成 ValueError。
+        # null byte 会让 pathlib.resolve() 抛 ValueError,裸传即 500;_safe_path 在源头拦成 ValueError。
         with pytest.raises(ValueError):
             await storage.read_file("j_ok", "assets/x\x00.jpg")
         with pytest.raises(ValueError):
@@ -201,7 +201,7 @@ class TestRemoteListFiles:
 
     @pytest.mark.asyncio
     async def test_delete_removes_prefix_objects(self, tmp_path):
-        # 删 job:列 {job_id}/ 前缀全部对象 → remove_objects 批量删(否则 MinIO 留孤儿,I-H1)。
+        # 删 job:列 {job_id}/ 前缀全部对象 → remove_objects 批量删,否则 MinIO 留孤儿。
         rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
         objs = [MagicMock(object_name="j1/job.json"), MagicMock(object_name="j1/out/n.md")]
         client = MagicMock()
@@ -258,8 +258,7 @@ class TestRemoteHealthVersion:
 
 
 class _GatewayStorageHelpers:
-    """GatewayStorage 测试共用 mock builder(此前在 TestGatewayStorage / ...Reuse 两类逐字复制)。
-    下划线前缀 → pytest 不收集为测试类。"""
+    """GatewayStorage 测试共用 mock builder;下划线前缀让 pytest 不收集为测试类。"""
 
     def _gw(self, tmp_path):
         gw = GatewayStorage(
@@ -387,8 +386,7 @@ class TestGatewayStorage(_GatewayStorageHelpers):
 
 
 class TestGatewayStorageReuse(_GatewayStorageHelpers):
-    """STORAGE_WORKDIR_REUSE + STORAGE_NO_PUSH_GLOBS:大源文件留本机、不走慢链路。
-    _gw/_resp/_stream_cm 复用 _GatewayStorageHelpers。"""
+    """STORAGE_WORKDIR_REUSE + STORAGE_NO_PUSH_GLOBS:大源文件留本机、不走慢链路。"""
 
     @pytest.mark.asyncio
     async def test_no_push_skips_matching_glob(self, tmp_path, monkeypatch):

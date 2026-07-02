@@ -1,4 +1,4 @@
-"""tests for api/routes/bili.py（B站扫码登录）+ create_job 的 sessdata 注入。"""
+"""api/routes/bili.py 测试:B站扫码登录 + create_job 的 sessdata 注入。"""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def app(db, mock_redis, test_config):
 
 
 def _fake_client_returning(resp):
-    """构造一个可当 async context manager 用的假 httpx.AsyncClient，get 永远返回 resp。"""
+    """构造一个可当 async context manager 用的假 httpx.AsyncClient,get 永远返回 resp。"""
     client = MagicMock()
     client.get = AsyncMock(return_value=resp)
     ctx = MagicMock()
@@ -35,7 +35,7 @@ def _fake_client_returning(resp):
 
 
 def _resp(json_data, cookies=None):
-    """假响应：暴露 .json() 与 .cookies（cookies 支持 .get(key)）。"""
+    """假响应:暴露 .json() 与 .cookies(cookies 支持 .get(key))。"""
     r = MagicMock()
     r.json = MagicMock(return_value=json_data)
     cookies_obj = MagicMock()
@@ -129,7 +129,7 @@ class TestLoginPoll:
         )
         factory, _ = _fake_client_returning(resp)
         monkeypatch.setattr(httpx, "AsyncClient", factory)
-        # nav 取昵称走独立路径，直接 mock 掉避免真连。
+        # nav 取昵称走独立路径,直接 mock 掉避免真连。
         monkeypatch.setattr(bili, "_fetch_uname", AsyncMock(return_value="张三"))
 
         r = await client.get("/api/bili/login/poll", params={"qrcode_key": "K"})
@@ -185,7 +185,7 @@ class TestCreateJobSessdataInjection:
         job_id = r.json()["job_id"]
         job_doc = json.loads((test_config.jobs_dir / job_id / "job.json").read_text())
         assert job_doc["source"] == "bilibili"
-        assert "sessdata" not in job_doc          # 不再进通用 job.json(会下发远端)
+        assert "sessdata" not in job_doc          # 通用 job.json 会下发远端,凭证不能进
         cred = test_config.jobs_dir / job_id / "input" / ".credentials.json"
         assert json.loads(cred.read_text())["sessdata"] == "INJECTED_SD"
 

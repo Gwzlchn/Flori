@@ -53,7 +53,7 @@ class TestEnums:
 
 class TestDeriveJobId:
     def test_bilibili_bv(self):
-        # B 站用 BV 号(稳定/唯一/路径安全);job_id 现带时间戳后缀,lineage_key 是去时间戳的基础 id。
+        # B 站用 BV 号(稳定/唯一/路径安全);job_id 带时间戳后缀,lineage_key 是去时间戳的基础 id。
         jid = derive_job_id("https://b23.tv/BV1xx411c7mD", "video", "bilibili")
         assert jid.startswith("jobs_bili_BV1xx411c7mD_")
         assert lineage_key("https://b23.tv/BV1xx411c7mD", "video", "bilibili") == "jobs_bili_BV1xx411c7mD"
@@ -89,8 +89,8 @@ class TestWorkerId:
 
 class TestJobDefaults:
     def test_minimal_creation(self):
-        # 仅断承载契约的默认:PENDING 是初始态(调度据此挑活)、domain 缺省 general(驱动 prompt 选型)。
-        # 空容器/0/None/created_at 工厂等纯 dataclass 机制默认已删(变了不改变行为)。
+        # 仅断承载契约的默认:PENDING 是初始态,调度据此挑活;domain 缺省 general,驱动 prompt 选型。
+        # 纯 dataclass 机制默认(空容器/0/None/created_at 工厂)不断言:变了不改变行为。
         job = Job(id="j_20260517_abc123", content_type="video", pipeline="video")
         assert job.status == JobStatus.PENDING
         assert job.domain == "general"
@@ -113,7 +113,7 @@ class TestJobDefaults:
 class TestStepDefaults:
     def test_minimal(self):
         # 契约默认:WAITING 是初始态(DAG 据此推进);pool="" 是"未分配"路由哨兵。
-        # retries==0 / meta=={} 纯机制默认已删。
+        # retries==0 / meta=={} 是纯机制默认,不断言。
         step = Step(job_id="j_xxx", name="03_scene")
         assert step.status == StepStatus.WAITING
         assert step.pool == ""
@@ -121,7 +121,7 @@ class TestStepDefaults:
 
 class TestWorkerDefaults:
     def test_minimal(self):
-        # 契约默认:新 Worker 初始 offline(注册后才转 idle)。空容器/0 计数纯机制默认已删。
+        # 契约默认:新 Worker 初始 offline(注册后才转 idle)。空容器/0 计数是纯机制默认,不断言。
         w = Worker(id="cpu-12345678", type="cpu")
         assert w.status == "offline"
 
@@ -138,7 +138,7 @@ class TestWorkerDefaults:
 
 class TestCollectionDefaults:
     def test_minimal(self):
-        # 契约默认:新 collection 初始 job_count==0(入库计数从 0 起算)。空串/空容器机制默认已删。
+        # 契约默认:新 collection 初始 job_count==0(入库计数从 0 起算)。空串/空容器是纯机制默认,不断言。
         c = Collection(id="my-dl", name="深度学习", domain="deep-learning")
         assert c.job_count == 0
 
@@ -162,7 +162,7 @@ class TestAIUsage:
 class TestLLMRequest:
     def test_defaults(self):
         # 契约默认:max_tokens=4096 / temperature=0.7 直接随请求发给 LLM,改了会改变生成行为。
-        # model/images/system/response_format 的 None/空默认是纯机制,已删。
+        # model/images/system/response_format 的 None/空默认是纯机制,不断言。
         req = LLMRequest(messages=[{"role": "user", "content": "hello"}])
         assert req.max_tokens == 4096
         assert req.temperature == 0.7

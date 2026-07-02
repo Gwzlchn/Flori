@@ -33,7 +33,7 @@ def _make_step(job_dir, tmp_path, url="https://example.com/x", source=None, cont
     return DownloadStep("01_download", job_dir, config)
 
 
-# ── input_hashes ──
+# input_hashes
 
 class TestInputHashes:
     def test_input_hashes_uses_job_json(self, tmp_path):
@@ -51,7 +51,7 @@ class TestInputHashes:
         assert step.input_hashes()["job"] != first
 
 
-# ── _read_sessdata ──
+# _read_sessdata
 
 class TestReadSessdata:
     def test_missing_credentials_returns_none(self, tmp_path):
@@ -78,7 +78,7 @@ class TestReadSessdata:
         assert step._read_sessdata() is None
 
 
-# ── _resolve_sessdata 优先级(env > 侧载 > 文件)──
+# _resolve_sessdata 优先级(env > 侧载 > 文件)
 
 class TestResolveSessdata:
     def test_env_takes_priority_over_sideload(self, tmp_path, monkeypatch):
@@ -103,7 +103,7 @@ class TestResolveSessdata:
         assert step._resolve_sessdata() is None
 
 
-# ── _read_cookie_file_sessdata ──
+# _read_cookie_file_sessdata
 
 class TestReadCookieFileSessdata:
     def test_missing_file_returns_none(self, tmp_path, monkeypatch):
@@ -142,7 +142,7 @@ class TestReadCookieFileSessdata:
         assert step._read_cookie_file_sessdata() is None
 
 
-# ── _verify_download ──
+# _verify_download
 
 class TestVerifyDownload:
     def test_missing_file_raises(self, tmp_path):
@@ -190,7 +190,7 @@ class TestVerifyDownload:
             step._verify_download(mp4)  # should not raise
 
 
-# ── _get_video_duration (ffprobe mocked) ──
+# _get_video_duration (ffprobe mocked)
 
 class TestGetVideoDuration:
     def test_ok(self, tmp_path):
@@ -231,7 +231,7 @@ class TestGetVideoDuration:
             assert step._get_video_duration(job_dir / "input" / "source.mp4") is None
 
 
-# ── _rename_to_source_mp4 ──
+# _rename_to_source_mp4
 
 class TestRenameToSourceMp4:
     def test_renames_mkv_to_source_mp4(self, tmp_path):
@@ -259,7 +259,7 @@ class TestRenameToSourceMp4:
         assert not (input_dir / "source.mp4").exists()
 
 
-# ── _rename_downloaded_video (flv branch) ──
+# _rename_downloaded_video (flv branch)
 
 class TestRenameDownloadedVideo:
     def test_flv_renamed(self, tmp_path):
@@ -271,7 +271,7 @@ class TestRenameDownloadedVideo:
         assert (input_dir / "source.mp4").exists()
 
 
-# ── _link_audio_for_whisper ──
+# _link_audio_for_whisper
 
 class TestLinkAudioForWhisper:
     def test_copies_mp3_to_mp4(self, tmp_path):
@@ -299,7 +299,7 @@ class TestLinkAudioForWhisper:
         assert not (input_dir / "source.mp4").exists()
 
 
-# ── _download_youtube ──
+# _download_youtube
 
 class TestDownloadYoutube:
     def test_anonymous_no_cookies(self, tmp_path, monkeypatch):
@@ -332,7 +332,7 @@ class TestDownloadYoutube:
             assert str(cookies) in cmd
 
 
-# ── _download_arxiv ──
+# _download_arxiv
 
 class TestDownloadArxiv:
     def test_builds_pdf_url(self, tmp_path):
@@ -354,7 +354,7 @@ class TestDownloadArxiv:
             run.assert_not_called()
 
 
-# ── _download_audio ──
+# _download_audio
 
 class TestDownloadAudio:
     def test_downloads_to_mp3(self, tmp_path):
@@ -382,7 +382,7 @@ class TestDownloadAudio:
             run.assert_not_called()
 
 
-# ── _download_generic ──
+# _download_generic
 
 class TestDownloadGeneric:
     def test_runs_ytdlp_with_separator(self, tmp_path):
@@ -410,7 +410,7 @@ class TestDownloadGeneric:
             run.assert_not_called()
 
 
-# ── _download_bilibili (主力 + 兜底) ──
+# _download_bilibili (主力 + 兜底)
 
 class TestDownloadBilibili:
     def test_yutto_primary_with_sessdata(self, tmp_path):
@@ -440,10 +440,10 @@ class TestDownloadBilibili:
             assert "-c" not in cmd
 
     def test_yutto_cookie_file_passes_value_not_path(self, tmp_path, monkeypatch):
-        """无侧载凭证、仅本地 cookie 文件时:yutto -c 收到的是 SESSDATA【值】而非文件路径。
-        回归钉死(step_01_download.py:134-136):曾误把 bilibili.txt 路径当值传 -c,
-        致登录态失效→匿名下载、无字幕、降 480P。test_yutto_primary_with_sessdata 只覆盖
-        .credentials.json 侧载路径,这条专测此前出过 bug 的 cookie 文件回退路径。"""
+        """无侧载凭证、仅本地 cookie 文件时,yutto -c 必须收到 SESSDATA 值而非文件路径。
+        把 bilibili.txt 路径当值传 -c 会使登录态失效,症状是匿名下载、无字幕、降 480P。
+        test_yutto_primary_with_sessdata 只覆盖 .credentials.json 侧载路径,
+        这条回归测试钉死 cookie 文件回退路径。"""
         data_dir = tmp_path / "data"
         cookie = data_dir / "cookies" / "bilibili.txt"
         cookie.parent.mkdir(parents=True)
@@ -470,8 +470,8 @@ class TestDownloadBilibili:
              patch.object(step, "_download_bili_ytdlp") as fallback, \
              patch.object(step, "_verify_download"):
             step._download_bilibili("https://www.bilibili.com/video/BV1xx411c7mD")
-            # 兜底须拿到归一后的 target_url + input_dir + sessdata(此处无凭证故 None),
-            # 而非只验"被调过"——防回退时丢/错传参数(签名:url, input_dir, sessdata)。
+            # 兜底须拿到归一后的 target_url + input_dir + sessdata,此处无凭证故 None。
+            # 不只验"被调过",防回退时丢参或错传参。签名为 url, input_dir, sessdata。
             fallback.assert_called_once_with(
                 "https://www.bilibili.com/video/BV1xx411c7mD",
                 job_dir / "input",
@@ -492,7 +492,7 @@ class TestDownloadBilibili:
             assert "https://b23.tv/shortcode" in cmd
 
 
-# ── _download_bili_ytdlp ──
+# _download_bili_ytdlp
 
 class TestDownloadBiliYtdlp:
     def test_with_sessdata_adds_cookie_header(self, tmp_path):
@@ -517,7 +517,7 @@ class TestDownloadBiliYtdlp:
             assert "--add-header" not in cmd
 
 
-# ── _bili_published_at (urllib mocked) ──
+# _bili_published_at (urllib mocked)
 
 class TestBiliPublishedAt:
     def test_no_bvid_returns_none(self, tmp_path):
@@ -571,7 +571,7 @@ class TestBiliPublishedAt:
             assert step._bili_published_at("https://www.bilibili.com/video/BV1xx411c7mD") is None
 
 
-# ── execute() 分派分支 ──
+# execute() 分派分支
 
 class TestExecuteDispatch:
     def test_http_article_branch(self, tmp_path):
@@ -633,7 +633,7 @@ class TestExecuteDispatch:
         assert "published_at" not in meta
 
 
-# ── _download_article (trafilatura mocked via sys.modules) ──
+# _download_article (trafilatura mocked via sys.modules)
 
 class TestDownloadArticle:
     def _fake_trafilatura(self, html="<html>body</html>", meta=None):
@@ -691,7 +691,7 @@ class TestDownloadArticle:
         mod.fetch_url.assert_not_called()
 
 
-# ── _extract_metadata (其它内容类型) ──
+# _extract_metadata (其它内容类型)
 
 class TestExtractMetadataTypes:
     def test_pdf_size(self, tmp_path):

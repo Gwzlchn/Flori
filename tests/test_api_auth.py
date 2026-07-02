@@ -1,4 +1,4 @@
-"""tests for api/routes/auth.py"""
+"""api/routes/auth.py 测试。"""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ class TestYoutubeCookies:
 
     @pytest.mark.asyncio
     async def test_upload_cookies_too_large_rejected(self, client, tmp_path, monkeypatch):
-        """超过 1 MiB 上限的 cookie 上传 → 413,且不落盘(I-L6)。"""
+        """超过 1 MiB 上限的 cookie 上传 → 413,且不落盘。"""
         monkeypatch.setattr("api.routes.auth.COOKIES_DIR", tmp_path / "cookies")
         big = b"x" * (1024 * 1024 + 10)
         resp = await client.post(
@@ -52,11 +52,10 @@ class TestYoutubeCookies:
 
 
 class TestTokenAuth:
-    """Test verify_token middleware with API_TOKEN set."""
+    """verify_token 中间件:设置 API_TOKEN 后的鉴权行为。"""
 
     @pytest.mark.asyncio
     async def test_no_token_returns_401(self, test_config, db):
-        """Request without Bearer token should get 401."""
         with patch.dict(os.environ, {"API_TOKEN": "secret123"}):
             app = create_app(db=db, redis=AsyncMock(), config=test_config)
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
@@ -81,7 +80,7 @@ class TestTokenAuth:
 
     @pytest.mark.asyncio
     async def test_no_token_no_optin_fails_closed(self, test_config, db):
-        """未设 API_TOKEN 且未显式 API_ALLOW_NO_AUTH=1 → 503(不再静默裸奔)。"""
+        """未设 API_TOKEN 且未显式 API_ALLOW_NO_AUTH=1 → 503,fail-closed 不静默裸奔。"""
         with patch.dict(os.environ, {"API_TOKEN": "", "API_ALLOW_NO_AUTH": ""}):
             app = create_app(db=db, redis=AsyncMock(), config=test_config)
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:

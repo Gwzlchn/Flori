@@ -1,4 +1,4 @@
-"""tests for steps/utils/device.py — GPU/CPU 检测 + Whisper/OCR 后端选择分支。
+"""steps/utils/device.py 的测试:GPU/CPU 检测 + Whisper/OCR 后端选择分支。
 
 全程 monkeypatch shutil.which / subprocess.run,不触真实 nvidia-smi,保证确定性。
 """

@@ -31,7 +31,7 @@ class TestDetectSource:
         assert detect_source("https://arxiv.org/pdf/2301.00001") == "arxiv"
 
     def test_direct_pdf_non_arxiv(self):
-        # 非 arxiv 直链 PDF(OSDI/usenix 等)→ pdf 源(走论文流水线,下载存 source.pdf)。
+        # 非 arxiv 直链 PDF(OSDI/usenix 等)→ pdf 源,走论文流水线,下载存 source.pdf。
         assert detect_source("https://www.usenix.org/system/files/osdi23-li-zhuohan.pdf") == "pdf"
         assert detect_source("https://example.com/papers/foo.PDF?x=1") == "pdf"
 
@@ -107,7 +107,7 @@ class TestExtractArxivId:
 
 
 class TestExtractAudioEnclosure:
-    """从播客页面/RSS HTML 解析音频真链(供「页面 URL」回退取音源)。"""
+    """从播客页面/RSS HTML 解析音频真链,供页面 URL 回退取音源。"""
 
     def test_og_audio(self):
         html = '<meta property="og:audio" content="https://cdn.x.com/ep.mp3">'

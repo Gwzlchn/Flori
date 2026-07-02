@@ -12,11 +12,9 @@ from shared.errors import ProcessingError
 from shared.step_base import StepBase, file_hash
 
 
-# ── Test 子类 ──
+# Test 子类
 
 class DummyStep(StepBase):
-    """测试用子类。"""
-
     def __init__(self, job_dir, config=None, fail=False, result=None):
         super().__init__("test_step", job_dir, config or {})
         self._fail = fail
@@ -85,7 +83,7 @@ class TestShouldRun:
 
 
 class TestDefDigestHelpers:
-    """P2c:def_digest_for / pipeline_digest_for 共享 helper(_def_digest 与"过期"判断共用,防漂移)。"""
+    """def_digest_for / pipeline_digest_for 共享 helper(_def_digest 与"过期"判断共用,防漂移)。"""
 
     def test_def_digest_for_stable_and_sensitive(self):
         from shared.step_base import def_digest_for
@@ -142,7 +140,7 @@ class TestDefDigest:
         assert self._mk(tmp_path, ai={"primary": "claude-y"}).should_run() is True  # 换模型 → 重跑
 
     def test_legacy_done_without_def_digest_not_forced_rerun(self, tmp_path):
-        # 本特性引入前生成的 .done 没有 def_digest 键 → 不因新增字段而强制全量重跑(决策 e)。
+        # 旧 .done 没有 def_digest 键 → 不因新增字段而强制全量重跑。
         self._seed_input(tmp_path)
         step = self._mk(tmp_path)
         (tmp_path / ".test_step.done").write_text(json.dumps({
@@ -292,7 +290,7 @@ class TestRunSubprocess:
             step.run_subprocess(["sleep", "10"], timeout=1)
 
     def test_failure_keeps_stderr_in_message(self, tmp_path):
-        # 非零退出:仍是 CalledProcessError(子类),但 str() 带上 stderr,故障原因不再被吞(审计:丢 stderr)。
+        # 非零退出:仍是 CalledProcessError(子类),但 str() 带上 stderr,故障原因不被吞。
         step = DummyStep(tmp_path)
         with pytest.raises(subprocess.CalledProcessError) as ei:
             step.run_subprocess(["sh", "-c", "echo boom-detail >&2; exit 3"])
@@ -414,7 +412,7 @@ class TestCallAI:
 
 
 class TestCliMainEndToEnd:
-    """L12:经 cli_main 真跑一个 step 模块,覆盖 runner 命令 + config schema + StepBase 粘合缝。
+    """经 cli_main 真跑一个 step 模块,覆盖 runner 命令 + config schema + StepBase 粘合缝。
     用纯 Python 的 03_article_sections(base 镜像即可跑),不依赖外部命令/AI。"""
 
     def test_cli_main_runs_real_step(self, tmp_path):
@@ -580,7 +578,7 @@ class TestScoreSalvage:
         assert StepBase._salvage_scores('{"completeness": 5, "accuracy": 4}', self.SCORE_KEYS) is None
 
     def test_salvage_partial_above_half_fills_mean(self):
-        # 命中 >= 半数(4/6):缺的维度按已命中均值补(round),不再整体落 fallback 全 3
+        # 命中 >= 半数(4/6):缺的维度按已命中均值 round 补齐,不整体落 fallback 全 3
         raw = '{"completeness": 5, "accuracy": 4, "structure": 4, "terminology": 5}'
         out = StepBase._salvage_scores(raw, self.SCORE_KEYS)
         assert out["completeness"] == 5 and out["terminology"] == 5

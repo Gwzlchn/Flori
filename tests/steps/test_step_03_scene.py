@@ -1,4 +1,4 @@
-"""tests for steps/video/step_03_scene.py (mock scenedetect)"""
+"""steps/video/step_03_scene.py 的测试,scenedetect 全 mock。"""
 
 import json
 from pathlib import Path
@@ -75,7 +75,7 @@ class TestSceneStep:
         assert result["scenes"] == 1
         scenes = json.loads((job_dir / "intermediate" / "scenes.json").read_text())
         assert len(scenes) == 1
-        # 钉死从 mock 边界导出的派生字段(此前只断 start_sec,end/duration 变量互换不会被发现)。
+        # 钉死从 mock 边界导出的派生字段:只断 start_sec 时,end/duration 变量互换不会被发现。
         assert scenes[0]["start_sec"] == 0.0
         assert scenes[0]["end_sec"] == 10.0
         assert scenes[0]["duration_sec"] == 10.0

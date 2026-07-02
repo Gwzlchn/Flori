@@ -1,15 +1,15 @@
-"""前端端到端冒烟：无头 Chromium 跑通全部路由，校验 HTTP/console/api。
+"""前端端到端冒烟:无头 Chromium 跑通全部路由,校验 HTTP/console/api。
 
-不进 pytest 主套件（主套件 hermetic、用 fakeredis、无浏览器无网络）——本脚本针对
-一个**已部署、在跑**的栈运行，所以文件名是 smoke.py 而非 test_*.py（避免被 pytest 收集）。
+不进 pytest 主套件(主套件 hermetic:fakeredis、无浏览器无网络);本脚本针对
+已部署、在跑的栈运行,所以文件名是 smoke.py 而非 test_*.py,避免被 pytest 收集。
 
-用法（容器内，见 docker-compose.e2e.yml）：
+用法(容器内,见 docker-compose.e2e.yml):
     docker compose -f docker-compose.e2e.yml run --rm e2e
     BASE=https://你的外网域名 E2E_BASIC_USER=u E2E_BASIC_PASS=p \
         docker compose -f docker-compose.e2e.yml run --rm e2e
 
-退出码：所有路由干净=0，有任一路由失败=1（可作 CI gate）。
-动态路由的 job/term 由 /api 实时解析，避免硬编码测试数据。
+退出码:所有路由干净=0,有任一路由失败=1(可作 CI gate)。
+动态路由的 job/term 由 /api 实时解析,避免硬编码测试数据。
 """
 
 import json
@@ -42,7 +42,7 @@ def api(path):
         return None
 
 
-# 动态路由 id 实时解析（优先取有数据的领域/有概念的领域）
+# 动态路由 id 实时解析(优先取有数据的领域/有概念的领域)
 doms = (api("/api/domains") or {}).get("domains", [])
 dom = next((d["domain"] for d in doms if d.get("job_count")),
            (doms[0]["domain"] if doms else "general"))

@@ -4,8 +4,8 @@
 not_a_server_error / status_code_conformance / response_schema_conformance 等检查,
 零手写用例就能逼出"畸形输入触发 5xx""响应不符合自己 schema"这类手写 test_api_* 漏掉的洞。
 
-in-process(from_asgi):复用 conftest 的 db/test_config + 本地 fake redis 注入 create_app,
-这样 lifespan 不会去连真 Redis/真 SQLite(见 api/main.py:create_app 的注入分支)。
+in-process 模式(from_asgi):复用 conftest 的 db/test_config + 本地 fake redis 注入 create_app,
+这样 lifespan 不会去连真 Redis/真 SQLite;注入分支见 api/main.py:create_app。
 
 本文件标了 `fuzz` marker,默认套件用 `-m 'not fuzz'` 跳过(慢、且找到的是待修 bug)。手动跑:
     docker compose -f docker-compose.test.yml run --rm test \
@@ -16,8 +16,8 @@ from __future__ import annotations
 import fakeredis.aioredis
 import pytest
 
-# 无 schemathesis(如 mutmut 只装核心测试依赖的环境)→ importorskip 让整文件优雅跳过,
-# 不在采集期抛 ImportError 拖垮别的 runner(mutmut 基线 pytest 会因此 collection error)。
+# 无 schemathesis 的环境(如 mutmut 只装核心测试依赖)用 importorskip 让整文件优雅跳过。
+# 否则采集期抛 ImportError 会拖垮别的 runner:mutmut 基线 pytest 直接 collection error。
 # schemathesis 依赖 hypothesis,装了前者必有后者,故一处 importorskip 足够。
 schemathesis = pytest.importorskip("schemathesis")
 
@@ -31,8 +31,8 @@ pytestmark = pytest.mark.fuzz
 
 @pytest.fixture
 def fake_redis():
-    """真 fakeredis 后端的 RedisClient(比 AsyncMock 高保真:读到的是真值/None,
-    不会像 AsyncMock 把协程对象塞进路由导致假 500)。与 test_api_runner 等一致。"""
+    """真 fakeredis 后端的 RedisClient,与 test_api_runner 等一致。
+    比 AsyncMock 高保真:读到的是真值/None,不会把协程对象塞进路由导致假 500。"""
     rc = RedisClient()
     rc._redis = fakeredis.aioredis.FakeRedis(decode_responses=True, protocol=2)
     return rc

@@ -1,4 +1,4 @@
-"""tests for steps/common/step_01_download.py"""
+"""steps/common/step_01_download.py 的测试。"""
 
 import json
 from pathlib import Path
@@ -68,7 +68,7 @@ class TestDownloadStep:
             assert result["source"] == "arxiv"
 
     def test_source_detection_pdf(self, tmp_path):
-        # 非 arxiv 直链 PDF(OSDI/usenix 等)→ source=pdf,走 _download_pdf(存 source.pdf)。
+        # 非 arxiv 直链 PDF(OSDI/usenix 等)→ source=pdf,走 _download_pdf 存成 source.pdf。
         job_dir = tmp_path / "job"
         job_dir.mkdir()
         for d in ["input", "intermediate", "output", "assets", "logs"]:
@@ -205,7 +205,7 @@ class TestDownloadStep:
 </feed>"""
 
     def test_fetch_arxiv_meta_and_merge(self, tmp_path):
-        # arxiv API 元数据解析(标题去换行/作者/摘要/发布日)+ 并入 _extract_metadata(权威,优先 PDF)。
+        # arxiv API 元数据解析(标题去换行/作者/摘要/发布日),并入 _extract_metadata 时 API 为权威、优先于 PDF 解析。
         from types import SimpleNamespace
         job_dir = tmp_path / "job"; job_dir.mkdir(); (job_dir / "input").mkdir()
         step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805", content_type="paper")

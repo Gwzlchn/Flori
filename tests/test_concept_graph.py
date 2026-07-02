@@ -1,4 +1,4 @@
-"""概念图谱：服务纯函数(api.services.kb.concept_graph) + REST 路由的共现推导/权重/孤立计数。
+"""概念图谱:服务纯函数(api.services.kb.concept_graph) + REST 路由的共现推导/权重/孤立计数。
 
 共现规则:两概念若其 occurrences 引用同一 job_id 即相连,权重=共享 job 数;手动 related 叠加为额外边。
 """
@@ -71,11 +71,11 @@ class TestConceptGraphService:
         g = kb.concept_graph(db, "finance")
         assert g["stats"]["node_count"] == 4
         assert g["stats"]["edge_count"] == 3   # 三两两 + 无 related
-        assert g["stats"]["isolated_count"] == 1  # 仅「孤立词」
+        assert g["stats"]["isolated_count"] == 1  # 仅 "孤立词"
 
     def test_manual_related_overlay(self, db):
         _seed(db)
-        # 手动给「孤立词」加一条 related 指向「通胀」→ 出现一条权重 1 的边,孤立计数归零。
+        # 手动给 "孤立词" 加一条 related 指向 "通胀" → 出现一条权重 1 的边,孤立计数归零。
         db.upsert_glossary_term("finance", "孤立词", definition="无人提及。",
                                 related=["通胀", "不存在的词"])
         g = kb.concept_graph(db, "finance")

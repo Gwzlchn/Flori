@@ -40,7 +40,7 @@ def _seed_radar(db):
     时间锚点:
       recent 窗口 [now-7d, now);  prior 窗口 [now-14d, now-7d)
     概念:
-      量化交易: recent=2 (d2,d5)  prior=1 (d10)            → 飙升 delta=1,且历史更早(d20)→非新
+      量化交易: recent=2 (d2,d5)  prior=1 (d10)            → 飙升 delta=1;历史有更早(d20),非新
       高频量化: recent=1 (d3)     prior=0,且最早=d3        → 飙升 delta=1 + 新出现
       JEPQ:     recent=1 (d1)     最早=d1                   → 新出现(prior=0,无更早)
       宏观经济: recent=0 prior=2 (d9,d12)                   → 既不飙升也不新出现
@@ -66,7 +66,7 @@ def _seed_radar(db):
     _glossary(db, "宏观经济", ["p9", "p12"])
 
 
-# ── 服务层纯函数 ──
+# 服务层纯函数
 
 class TestRadarService:
     def test_rising_new_recent_top(self, db):
@@ -111,7 +111,7 @@ class TestRadarService:
         assert "本周新增内容数: 4" in user
 
 
-# ── 路由 ──
+# 路由
 
 class TestRadarRoutes:
     @pytest.mark.asyncio

@@ -24,7 +24,7 @@ from shared.subscriptions.youtube import (
 )
 
 
-# ── URL 规整 ──────────────────────────────────────────────────────────────
+# URL 规整
 @pytest.mark.parametrize(
     "source_id, expected",
     [
@@ -61,7 +61,7 @@ def test_normalize_channel_url_empty():
     assert _normalize_channel_url("   ") == ""
 
 
-# ── 逐行 JSON 解析 ────────────────────────────────────────────────────────
+# 逐行 JSON 解析
 def test_parse_entries_basic():
     lines = [
         json.dumps({"id": "vid1", "title": "T1", "channel": "酷频道"}),
@@ -104,7 +104,7 @@ def test_parse_entries_empty():
     assert entries == []
 
 
-# ── 适配器主体(mock _run_yt_dlp,无子进程/网络)─────────────────────────
+# 适配器主体(mock _run_yt_dlp,无子进程/网络)
 def _fake_stdout(entries: list[dict]) -> str:
     return "\n".join(json.dumps(e) for e in entries)
 
@@ -120,7 +120,7 @@ async def test_enumerate_maps_items(monkeypatch):
             {"id": "bbb", "title": "第二集", "channel": "测试频道"},
         ])
 
-    # 经模块属性 monkeypatch,使适配器内部 _self._run_yt_dlp 命中假实现。
+    # 适配器内部经模块属性调用 _run_yt_dlp,monkeypatch 模块属性才能命中假实现。
     monkeypatch.setattr("shared.subscriptions.youtube._run_yt_dlp", fake_run)
 
     title, items = await enumerate_youtube_channel(
@@ -186,7 +186,7 @@ async def test_enumerate_no_channel_name_returns_none(monkeypatch):
     assert [i.item_id for i in items] == ["z"]
 
 
-# ── 注册 ──────────────────────────────────────────────────────────────────
+# 注册
 def test_registered_in_table():
     from shared.subscriptions.base import SOURCE_ADAPTERS
     assert SOURCE_ADAPTERS.get("youtube_channel") is enumerate_youtube_channel
@@ -209,14 +209,14 @@ async def test_dispatch_via_enumerate_source(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_enumerate_source_unknown_type_raises():
-    # 文档化契约:未知 source_type 抛 ValueError(调用方转 4xx/记日志),此前无任何用例钉死。
+    # 契约:未知 source_type 抛 ValueError,调用方转 4xx/记日志。
     from shared.subscriptions.base import enumerate_source
 
     with pytest.raises(ValueError, match="unsupported source_type"):
         await enumerate_source("no_such_source", "x", SourceContext())
 
 
-# ── _ensure_videos_tab:契约——频道页补 /videos,watch/playlist/已带 tab 透传 ──
+# _ensure_videos_tab 契约:频道页补 /videos,watch/playlist/已带 tab 透传
 @pytest.mark.parametrize("url,expected", [
     # 频道页形态 → 补 /videos
     ("https://www.youtube.com/@chan", "https://www.youtube.com/@chan/videos"),
@@ -224,7 +224,7 @@ async def test_enumerate_source_unknown_type_raises():
     # 已带 tab → 原样
     ("https://www.youtube.com/@chan/streams", "https://www.youtube.com/@chan/streams"),
     ("https://www.youtube.com/@chan/videos", "https://www.youtube.com/@chan/videos"),
-    # watch/playlist 非频道页 → 透传不动(交 yt-dlp 自处理),此前无用例钉死该分支
+    # watch/playlist 非频道页 → 透传不动,交 yt-dlp 自处理
     ("https://www.youtube.com/watch?v=abc", "https://www.youtube.com/watch?v=abc"),
     ("https://www.youtube.com/playlist?list=PL123", "https://www.youtube.com/playlist?list=PL123"),
 ])

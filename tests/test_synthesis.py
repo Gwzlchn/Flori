@@ -17,7 +17,7 @@ from shared.models import LLMResponse
 from api.services import synthesis
 
 
-# ── 共享 seed:三篇 ml 笔记 + 一篇无关,外加术语表 ──
+# 共享 seed:三篇 ml 笔记 + 一篇无关,外加术语表
 
 
 def _seed(db: Database) -> None:
@@ -46,7 +46,7 @@ def _seed(db: Database) -> None:
     db.upsert_glossary_term("ml", "梯度下降", "一阶优化算法")
 
 
-# ── note_bodies (DB 层) ──
+# note_bodies (DB 层)
 
 
 class TestNoteBodies:
@@ -66,14 +66,14 @@ class TestNoteBodies:
         assert list(bodies) == ["j_bp"]
 
 
-# ── derive_queries ──
+# derive_queries
 
 
 class TestDeriveQueries:
     def test_extracts_keywords_drops_stopwords(self, db):
         _seed(db)
         qs = synthesis.derive_queries("反向传播是如何工作的?", db, domain="ml")
-        # 停用词「是/如何/的」不应作为单独检索词;实义词应在。
+        # 停用词 "是/如何/的" 不应作为单独检索词;实义词应在。
         assert "的" not in qs and "如何" not in qs
         assert any("反向传播" in q or "传播" in q for q in qs)
 
@@ -102,13 +102,13 @@ class TestDeriveQueries:
         assert "transformer" in qs
 
 
-# ── retrieve ──
+# retrieve
 
 
 class TestRetrieve:
     def test_union_and_dedupe_across_queries(self, db):
         _seed(db)
-        # 「反向传播」命中三篇 ml;问句拆词后并集去重应覆盖多篇且每篇只一次。
+        # "反向传播" 命中三篇 ml;问句拆词后并集去重应覆盖多篇且每篇只一次。
         passages = synthesis.retrieve(db, "反向传播和梯度下降哪个更重要?", domain="ml", k=8)
         job_ids = [p["job_id"] for p in passages]
         assert len(job_ids) == len(set(job_ids))  # 去重
@@ -133,14 +133,14 @@ class TestRetrieve:
         assert synthesis.retrieve(db, "量子计算机超导体", domain="ml", k=8) == []
 
     def test_body_truncated(self, db):
-        # trigram 至少 3 字才命中,故查询词与正文锚点都用 3 字「反向传」。
+        # trigram 至少 3 字才命中,故查询词与正文锚点都用 3 字 "反向传"。
         db.index_job_notes("j_big", "smart", "长文", "反向传" + "啊" * 10000, domain="ml")
         passages = synthesis.retrieve(db, "反向传播原理", domain="ml", k=8)
         big = next(p for p in passages if p["job_id"] == "j_big")
         assert len(big["body"]) <= 4000
 
 
-# ── build_prompt ──
+# build_prompt
 
 
 class TestBuildPrompt:
@@ -156,7 +156,7 @@ class TestBuildPrompt:
         assert "问题X" in user
 
 
-# ── POST /api/ask(假 gateway,绝不调真 LLM) ──
+# POST /api/ask(假 gateway,绝不调真 LLM)
 
 
 class _FakeGateway:
@@ -250,7 +250,7 @@ class TestAskEndpoint:
 
 
 class TestAITasksEndpoints:
-    """/api/ai-tasks/{task_id}/result(pending/done/error) + /log(白盒审计)(P1-3)。"""
+    """/api/ai-tasks/{task_id}/result 的 pending/done/error 三态 + /log 白盒审计。"""
 
     @pytest.mark.asyncio
     async def test_result_pending(self, ask_client):

@@ -101,26 +101,26 @@ class TestRetryPolicy:
         assert RETRY_POLICY["resource"]["max"] == 0
 
 
-# 注:原 TestGetRetryDelay 已删——其全部断言(no-retry/首次/指数退避/超 max/未知)
-# 被下面 TestBuildVsSystemMatrix 完整覆盖且更全,留两套是重复维护面。
+# get_retry_delay 的断言(no-retry/首次/指数退避/超 max/未知)统一收在
+# TestBuildVsSystemMatrix,不另设重复用例,避免双份维护面。
 class TestBuildVsSystemMatrix:
-    """BUILD（确定性失败，不重试）vs SYSTEM（瞬态，退避重试）的完整重试矩阵。"""
+    """完整重试矩阵:BUILD 为确定性失败不重试,SYSTEM 为瞬态退避重试。"""
 
-    # BUILD 类：首次失败即不重试，get_retry_delay 一律 None。
+    # BUILD 类:首次失败即不重试,get_retry_delay 一律 None。
     def test_build_types_never_retry_at_attempt_zero(self):
         for et in ("input_missing", "input_invalid", "resource"):
             assert get_retry_delay(et, 0) is None, f"{et} 应为 BUILD 不重试"
 
     def test_unknown_is_build_default_no_retry(self):
-        # 步骤内未捕获异常写入 unknown：缺表项按 BUILD 兜底，不重试。
+        # 步骤内未捕获异常写入 unknown:缺表项按 BUILD 兜底,不重试。
         assert get_retry_delay("unknown", 0) is None
 
-    # SYSTEM 类：每次重试返回配置好的退避秒数。
+    # SYSTEM 类:每次重试返回配置好的退避秒数。
     def test_ai_exponential_backoff_sequence(self):
         assert [get_retry_delay("ai", a) for a in (0, 1, 2)] == [30, 60, 120]
 
     def test_ai_rate_limit_increasing_backoff(self):
-        # 限流窗口以分钟/小时计：递增长退避耐心等配额恢复，而非短间隔烧完转终态。
+        # 限流窗口以分钟/小时计:递增长退避耐心等配额恢复,而非短间隔烧完转终态。
         assert [get_retry_delay("ai_rate_limit", a) for a in (0, 1, 2, 3, 4)] == [
             300, 600, 1200, 1800, 1800
         ]
@@ -131,7 +131,7 @@ class TestBuildVsSystemMatrix:
     def test_processing_immediate_single_retry(self):
         assert get_retry_delay("processing", 0) == 0
 
-    # 超过 max 后所有 SYSTEM 类都停止重试（返回 None）。
+    # 超过 max 后所有 SYSTEM 类都停止重试(返回 None)。
     def test_system_types_stop_at_max(self):
         assert get_retry_delay("ai", 3) is None
         assert get_retry_delay("ai_rate_limit", 5) is None

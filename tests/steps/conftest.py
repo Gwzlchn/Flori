@@ -2,7 +2,6 @@
 
 
 def make_step_config(tmp_path, step_name="test", pool="cpu", **overrides):
-    """构建指定步骤名的 config。"""
     prompts_dir = tmp_path / "prompts"
     prompts_dir.mkdir(exist_ok=True)
     cfg = {
@@ -22,8 +21,7 @@ def make_step_config(tmp_path, step_name="test", pool="cpu", **overrides):
 
 
 def make_job_dir(tmp_path, *subdirs, name="job"):
-    """建 job 工作目录 + 指定子目录(此前各 step 测试逐文件重复 mkdir 循环;
-    各步子目录集合不同,故用变长参数而非固定集合)。"""
+    """建 job 工作目录和指定子目录。各步子目录集合不同,故用变长参数而非固定集合。"""
     job_dir = tmp_path / name
     job_dir.mkdir(exist_ok=True)
     for d in subdirs:

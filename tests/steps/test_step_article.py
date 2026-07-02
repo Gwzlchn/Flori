@@ -1,6 +1,6 @@
-"""tests for steps/article 文章 pipeline 步骤（16/17/18/19）。
+"""steps/article 文章 pipeline 各步的测试。
 
-约束：不联网、不真调 AI。16 直接喂本地 HTML；18/19 用 DRY_RUN。
+约束:不联网、不真调 AI。解析步直接喂本地 HTML;AI 步用 DRY_RUN 或注入 fake 响应。
 """
 
 import json
@@ -122,14 +122,14 @@ class TestParseArticleStep:
         (job_dir / "input" / "source.html").write_text(SAMPLE_HTML, encoding="utf-8")
         config = make_step_config(tmp_path, step_name="02_parse_article", pool="cpu")
         step = ParseArticleStep("02_parse_article", job_dir, config)
-        # 无 article_meta.json 时不应报错，仍能从 HTML 抽到标题
+        # 无 article_meta.json 时不应报错,仍能从 HTML 抽到标题
         result = step.execute()
         parsed = json.loads((job_dir / "intermediate" / "parsed.json").read_text())
         assert parsed["title"]
         assert result["chars"] > 0
 
 
-# 空正文护栏护栏用 HTML 样本(付费墙/JS 残桩/空壳)。
+# 空正文护栏用的 HTML 样本(付费墙/JS 残桩/空壳)。
 PAYWALL_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head><title>Premium Insight</title></head>
@@ -150,7 +150,7 @@ EMPTY_SHELL_HTML = """<!DOCTYPE html>
 
 
 class TestEmptyBodyGuard:
-    """空正文护栏(硬伤C):付费墙/JS 残桩/空壳页正文过短 → 02_parse 直接 InputInvalidError,
+    """空正文护栏:付费墙/JS 残桩/空壳页正文过短 → 02_parse 直接 InputInvalidError,
     不让 03/04/05 在空正文上幻觉污染图谱。"""
 
     def test_effective_len_strips_whitespace(self):
@@ -442,7 +442,7 @@ class TestConceptsStep:
         assert result["source"] == "smart_note"
 
     def test_source_prefers_translation_over_original(self, tmp_path):
-        # 无智能笔记但有译文(非中文文章) → 概念抽自译文(source=translation,术语与译文一致)。
+        # 无智能笔记但有译文(非中文文章)→ 概念抽自译文,source=translation,术语与译文一致。
         job_dir = _mk_job(tmp_path)
         _write_sections(job_dir)
         (job_dir / "output" / "translated.md").write_text(
@@ -494,8 +494,8 @@ class TestArticleImageAndAuthor:
         assert urls == ["https://wpimg/chart.jpeg?imageView2/2/w/680"]
 
     def test_content_image_substack_link_wrapped_kept(self):
-        # substack/SemiAnalysis 正文图:<a href=大图.png class=image-link><...><img w_1456> → 保留
-        # (href 指向图片本身,不是促销页);头像(<a href=页面><img w_40>)、装饰条(h_72 无宽)→ 丢。
+        # substack/SemiAnalysis 正文图形如 <a href=大图.png class=image-link>...<img w_1456>,
+        # href 指向图片本身而非促销页 → 保留;头像形如 <a href=页面><img w_40>,装饰条 h_72 无宽,均丢。
         chart = "https://substackcdn.com/image/fetch/$s_!c!,w_1456,c_limit,f_auto/chart.png"
         html = (
             '<a href="/profile/123"><img src="https://substackcdn.com/image/fetch/$s_!a!,w_40,h_40,c_fill/x.png"></a>'

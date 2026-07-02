@@ -51,7 +51,7 @@ class TestFallbackNoList:
         monkeypatch.setattr(nz, "_CN_LIST_PATH", str(tmp_path / "missing.txt"))
         nz._cn_domains.cache_clear()
         try:
-            # 表缺失 → 仅 .cn TLD 判 cn;非 .cn(含本属 CN 的 wallstreetcn)→ global(保守:不误派大陆)
+            # 表缺失 → 仅 .cn TLD 判 cn;非 .cn 一律 global,即便本属 CN 的 wallstreetcn 也是。保守:不误派大陆。
             assert nz.url_zone("https://wallstreetcn.com/x") == "net-global"
             assert nz.url_zone("https://x.cn/y") == "net-cn"
         finally:

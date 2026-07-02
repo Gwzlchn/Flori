@@ -17,7 +17,7 @@ def _utcnow():
 
 @pytest.fixture
 def redis_mock():
-    """默认无远程 worker；list_worker_ids 返回空表，worker_exists 不活。
+    """默认无远程 worker;list_worker_ids 返回空表,worker_exists 不活。
     get_traffic 须返回真 dict(裸 AsyncMock 的 await→AsyncMock,.get() 又得 coroutine)。"""
     from tests.conftest import make_redis_mock
     rc = make_redis_mock()
@@ -78,7 +78,7 @@ class TestWorkers:
         _make_worker(db)
         resp = await client.put("/api/workers/cpu-test001", json={"status": "paused"})
         assert resp.status_code == 200
-        # admin_status 列写入 paused；公共状态(在线+paused)也是 paused
+        # admin_status 列写入 paused;公共状态(在线+paused)也是 paused
         row = db._conn.execute(
             "SELECT admin_status FROM workers WHERE id=?", ("cpu-test001",)
         ).fetchone()
@@ -95,7 +95,7 @@ class TestWorkers:
 
     @pytest.mark.asyncio
     async def test_delete_online_worker_requires_force(self, client, db):
-        _make_worker(db)  # 刚心跳 -> online，不带 force 不许删
+        _make_worker(db)  # 刚心跳 -> online,不带 force 不许删
         resp = await client.delete("/api/workers/cpu-test001")
         assert resp.status_code == 409
         assert db.get_worker("cpu-test001") is not None
@@ -105,8 +105,8 @@ class TestWorkers:
 
 
 class TestTimestampSerialization:
-    """UTC 全量迁移：API 序列化的时间戳必须带 UTC 标记(Z)，让浏览器无歧义解析，
-    根治'容器跑 UTC、浏览器 UTC+8 → 刚心跳的 worker 被看成 8 小时前 → 误判离线'。"""
+    """API 序列化的时间戳必须带 UTC 标记(Z),让浏览器无歧义解析:
+    容器跑 UTC 而浏览器 UTC+8 时,缺标记会把刚心跳的 worker 看成 8 小时前,误判离线。"""
 
     @pytest.mark.asyncio
     async def test_list_timestamps_carry_utc_z(self, client, db):
@@ -144,7 +144,7 @@ class TestTimestampSerialization:
 
 
 class TestStatusSemantics:
-    """状态语义后端权威：API 返回的 status 由心跳新鲜度衍生，不信存量 status 列。"""
+    """状态语义后端权威:API 返回的 status 由心跳新鲜度衍生,不信存量 status 列。"""
 
     @pytest.mark.asyncio
     async def test_fresh_idle_is_online_idle(self, client, db):
@@ -211,7 +211,7 @@ class TestStatusSemantics:
 
 
 class TestPauseWritesRedis:
-    """暂停真生效：PUT status=paused 必须同步写 Redis admin_status(worker 认领读 Redis 判暂停)。"""
+    """暂停真生效:PUT status=paused 必须同步写 Redis admin_status(worker 认领读 Redis 判暂停)。"""
 
     @pytest.mark.asyncio
     async def test_put_status_writes_redis(self, client, db, redis_mock):
@@ -239,7 +239,7 @@ class TestPauseWritesRedis:
 
 
 class TestRemoteWorker:
-    """仅注册在 Redis 的远程 worker：状态按心跳衍生、累计统计从 hash 读(非硬编码 0)。"""
+    """仅注册在 Redis 的远程 worker:状态按心跳衍生、累计统计从 hash 读(非硬编码 0)。"""
 
     @pytest.mark.asyncio
     async def test_remote_worker_merged_with_stats(self, client, redis_mock):
@@ -273,16 +273,16 @@ class TestRemoteWorker:
         }
         items = (await client.get("/api/workers")).json()
         w = next(x for x in items if x["id"] == "gpu-remote")
-        # 不信 Redis 自报的 busy，按心跳判 offline
+        # 不信 Redis 自报的 busy,按心跳判 offline
         assert w["status"] == "offline"
 
     @pytest.mark.asyncio
     async def test_delete_remote_only_worker(self, client, db, redis_mock):
         redis_mock.worker_exists.return_value = True
         redis_mock.list_worker_ids.return_value = []
-        # DB 里没有这个 worker，但 Redis 活着 -> 需 force 删，并清 Redis key
+        # DB 里没有这个 worker,但 Redis 活着 -> 视作可删(无需 force),并清 Redis key
         resp = await client.delete("/api/workers/gpu-remote")
-        assert resp.status_code == 204  # 不在 DB 视作可删
+        assert resp.status_code == 204
         redis_mock.delete_worker.assert_awaited_with("gpu-remote")
 
 

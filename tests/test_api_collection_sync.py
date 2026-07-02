@@ -1,5 +1,4 @@
-"""订阅 = 集合属性：集合层的订阅创建 / 去重 / 同步 / 自动追更开关。
-（订阅并入 collections 后，原 test_api_subscriptions.py 的用例迁移到这里。）"""
+"""订阅 = 集合属性:集合层的订阅创建 / 去重 / 同步 / 自动追更开关。"""
 
 from __future__ import annotations
 
@@ -64,7 +63,7 @@ class TestSubscriptionCollectionAPI:
         assert data["id"] == "col_bili_up_247209804"
         assert data["subscription"]["source_id"] == "247209804"
         assert data["subscription"]["enabled"] is True
-        # 新视频已建 job 并归入本集合（跳过已入库 1 个 → 2 个新）
+        # 新视频已建 job 并归入本集合(跳过已入库 1 个 → 2 个新)
         jobs = (await client.get(f"/api/collections/{data['id']}/jobs")).json()
         assert jobs["total"] == 2
 
@@ -150,7 +149,7 @@ class TestSubscriptionCollectionAPI:
 
     @pytest.mark.asyncio
     async def test_sync_success_records_status_ok(self, client, monkeypatch):
-        """P2 item A:同步成功后 last_sync_status=ok、错误清空。"""
+        """同步成功后 last_sync_status=ok、错误清空。"""
         async def fake_enum(mid, cookies=None):
             return [{"bvid": "BV1aaaaaaaaa", "title": "x", "duration": "1:00"}]
         monkeypatch.setattr("shared.bili_space.enumerate_up", fake_enum)
@@ -167,7 +166,7 @@ class TestSubscriptionCollectionAPI:
 
     @pytest.mark.asyncio
     async def test_sync_failure_records_status_error(self, client, monkeypatch):
-        """P2 item A:同步异常 → 502 且 last_sync_status=error + 存错误摘要(不掩盖失败)。"""
+        """同步异常 → 502 且 last_sync_status=error + 存错误摘要(不掩盖失败)。"""
         async def fake_up_name(mid, cookies=None): return None
         monkeypatch.setattr("shared.bili_space.up_name", fake_up_name)
         async def boom_enum(mid, cookies=None):

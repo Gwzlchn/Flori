@@ -18,7 +18,7 @@ from shared.redis_client import RedisClient
 os.environ.setdefault("API_ALLOW_NO_AUTH", "1")
 
 
-# ── 出网熔断(autouse,全套件)──
+# 出网熔断(autouse,全套件)
 # 测试进程永不持有真实 AI provider 密钥:即便将来有人写了忘记 mock _client 的 provider 用例、
 # 且宿主/CI 恰好 export 了真 key,也不会真打外网/烧钱。把"靠每个用例自觉 mock"升级成结构性保证。
 # 用例自身若要测 {NAME}_API_KEY 透传,会在 body 里 monkeypatch.setenv(晚于本 autouse,正常生效)。
@@ -30,7 +30,7 @@ def _no_real_ai_keys(monkeypatch):
 
 
 def make_fakeredis() -> RedisClient:
-    """fakeredis 版 RedisClient 的单一构造来源(此前 protocol=2 等参数逐字散在 6 个测试文件)。
+    """fakeredis 版 RedisClient 的单一构造来源,protocol=2 等参数只在这里定义。
     需关闭的用例自行 `await client.close()`(或用就近的 async fixture 包裹)。"""
     client = RedisClient.__new__(RedisClient)
     client._url = "redis://fake"
@@ -38,11 +38,10 @@ def make_fakeredis() -> RedisClient:
     return client
 
 
-# ── API 测试共用 fixture(此前 13 个 test_api_*.py 各复制一份;G1 上移)──
-# 注:client 依赖 app;db 被各非 api 测试以本地同名 fixture 覆盖(就近优先),互不影响;
+# API 测试共用 fixture,各 test_api_*.py 直接复用。
+# client 依赖 app;db 被各非 api 测试以本地同名 fixture 覆盖(就近优先),互不影响;
 # test_api_search 自带带 seed 的 db 覆盖。
-# app:多数纯 CRUD 路由不触 redis,默认给 AsyncMock 即可——此前 7 个文件(domains/notes/glossary/
-# profiles/auth/search/collection_sync)逐字复制同一份,故上移为默认 app。真正需要路由特异 redis
+# app:多数纯 CRUD 路由不触 redis,默认给 AsyncMock 即可。真正需要路由特异 redis
 # 行为(publish/ping/事件流等)的文件就近覆盖本 fixture(jobs/workers/admin/bili/collections/runner)。
 def make_redis_mock() -> AsyncMock:
     """API 测试默认 redis AsyncMock。get_traffic 须返回真 dict——裸 AsyncMock 的
@@ -91,7 +90,7 @@ def configs_dir():
 
 @pytest.fixture
 def tmp_data_dir(tmp_path):
-    """临时 data 目录，模拟 /data/。"""
+    """临时 data 目录,模拟 /data/。"""
     (tmp_path / "db").mkdir()
     (tmp_path / "jobs").mkdir()
     (tmp_path / "prompts").mkdir()

@@ -15,7 +15,7 @@ from shared.models import Job, JobStatus, StepStatus, Step, AIUsage
 from scheduler.scheduler import Scheduler
 
 
-# ── Fixtures ──
+# Fixtures
 
 
 @pytest.fixture
@@ -71,7 +71,7 @@ def parallel_pipelines():
 
 @pytest.fixture
 def video_pipelines(configs_dir):
-    """使用真实 pipelines.yaml（归一化为内部 step 结构）"""
+    """使用真实 pipelines.yaml(归一化为内部 step 结构)"""
     from shared.config import load_pipelines
     return load_pipelines(configs_dir / "pipelines.yaml")
 
@@ -104,7 +104,7 @@ def make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir):
 
 
 def _stub_workers_present(s):
-    """让 scheduler 视所有 pool 都有 worker，跳过 skip_no_worker 死锁打破逻辑。"""
+    """让 scheduler 视所有 pool 都有 worker,跳过 skip_no_worker 死锁打破逻辑。"""
     async def _has_workers(_pool):
         return True
     s._pool_has_workers = _has_workers
@@ -112,7 +112,7 @@ def _stub_workers_present(s):
 
 
 async def _skip_step(scheduler, redis, db, job_id, step):
-    """测试辅助:模拟某步被跳过并触发下游检查(原 scheduler.mark_skipped 仅测试用,已移除)。"""
+    """测试辅助:模拟某步被跳过并触发下游检查。"""
     await redis.set_step_status(job_id, step, "skipped")
     db.update_step(job_id, step, status="skipped")
     await scheduler._check_downstream(job_id)
@@ -132,7 +132,7 @@ def make_job(pipeline="test", job_id="j_test_001"):
     )
 
 
-# ── Tests ──
+# Tests
 
 
 class TestSubmitJob:
@@ -182,10 +182,10 @@ class TestSubmitJob:
 
 
 class TestSkipNoWorker:
-    """覆盖 skip_no_worker 死锁打破器（_check_downstream 末段）。
-    只在『剩余未完成步骤全部为 ready 且其 pool 无 worker』时介入，并用
+    """覆盖 skip_no_worker 死锁打破器(_check_downstream 末段)。
+    只在剩余未完成步骤全部为 ready 且其 pool 无 worker 时介入,并用
     CAS(ready→skipped) 避免覆盖被 worker 抢成 running 的步骤。用真实
-    _pool_has_workers，不走 scheduler fixture 的桩。"""
+    _pool_has_workers,不走 scheduler fixture 的桩。"""
 
     @pytest.mark.asyncio
     async def test_pool_has_workers_reflects_registration(self, redis, db, config):
@@ -200,8 +200,7 @@ class TestSkipNoWorker:
     @pytest.mark.asyncio
     async def test_all_ready_no_worker_required_step_not_skipped(self, redis, db, config):
         # 仅剩 A=ready(必需步,无 condition/rules)、其余 done/skipped、cpu 无 worker:
-        # 死锁打破器【不】skip 必需步——留给 check_no_worker 超宽限 fail-fast,避免「不完整却显示完成」。
-        # (此前行为是把必需步也 skip 掉令 job 收尾,与 pools.yaml fail-fast 意图冲突,审阅报告 B3。)
+        # 死锁打破器不 skip 必需步——留给 check_no_worker 超宽限 fail-fast,避免不完整却显示完成。
         s = Scheduler(redis, db, config)
         job = make_job()
         db.create_job(job)
@@ -213,7 +212,7 @@ class TestSkipNoWorker:
 
     @pytest.mark.asyncio
     async def test_running_step_blocks_eager_skip(self, redis, db, config):
-        # 存在 running 在途步骤时，no-worker 的 ready 兄弟不被误 skip（守卫核心）
+        # 存在 running 在途步骤时,no-worker 的 ready 兄弟不被误 skip(守卫核心)
         s = Scheduler(redis, db, config)
         job = make_job()
         db.create_job(job)
@@ -226,7 +225,7 @@ class TestSkipNoWorker:
 
     @pytest.mark.asyncio
     async def test_waiting_step_not_skipped(self, redis, db, config):
-        # 仍有 waiting（依赖未满足）属正常等待，不是死锁，不触发 skip
+        # 仍有 waiting(依赖未满足)属正常等待,不是死锁,不触发 skip
         s = Scheduler(redis, db, config)
         job = make_job()
         db.create_job(job)
@@ -237,8 +236,8 @@ class TestSkipNoWorker:
 
     @pytest.mark.asyncio
     async def test_ready_won_by_worker_during_skip_not_skipped(self, redis, db, config):
-        # CAS 保护：判定无 worker 后该步骤被 worker 抢成 running，skip 应放弃。
-        # B3 后死锁打破器只 skip 条件步,故把 A 视为条件步以走到 ready→skipped 的 CAS 路径。
+        # CAS 保护:判定无 worker 后该步骤被 worker 抢成 running,skip 应放弃。
+        # 死锁打破器只 skip 条件步,故把 A 视为条件步以走到 ready→skipped 的 CAS 路径。
         s = Scheduler(redis, db, config)
         s._step_is_conditional = lambda cfg: True  # 令 A 走条件步 skip 分支(测 CAS 保护)
 
@@ -344,8 +343,8 @@ class TestNoWorkerFailFast:
 
     @pytest.mark.asyncio
     async def test_cn_download_no_zone_worker_fails(self, redis, db, config, tmp_path, tmp_jobs_dir, configs_dir):
-        """B站(net-cn)01_download 落 io 池但 io worker 不覆盖 net-cn → 超宽限 fail-fast
-        (只看池不看 tag 会误判可推进、永久卡 ready)。"""
+        """B站源的 01_download 落 io 池但 io worker 不覆盖 net-cn → 超宽限 fail-fast。
+        只看池不看 tag 会误判可推进、永久卡 ready。"""
         await self._bili_dl_job(redis, db, config, tmp_path, tmp_jobs_dir, configs_dir, "j_nozone", "")
         assert "j_nozone" not in await redis.get_active_jobs()
 
@@ -493,7 +492,7 @@ class TestConditions:
 
     @pytest.mark.asyncio
     async def test_unknown_condition_defaults_true(self, scheduler, tmp_jobs_dir):
-        # 文档化契约(scheduler.py:692):未知条件名 → 默认 True(放行,不静默跳过该步)。
+        # 文档化契约(见 scheduler.py check_condition):未知条件名默认 True,放行而不静默跳过该步。
         # 配置期无条件名白名单,故此默认是误拼/打错条件名时的安全兜底,值得钉死。
         (tmp_jobs_dir / "j_cond_unknown" / "input").mkdir(parents=True)
         assert await scheduler.check_condition("j_cond_unknown", "bogus_condition") is True
@@ -507,7 +506,7 @@ class TestConditions:
     @pytest.mark.asyncio
     async def test_condition_uses_storage_not_local_disk(self, redis, db, config):
         """分布式部署:产物在对象存储、调度器本地盘为空。条件须查 storage,否则
-        has_subtitle/has_danmaku 永远 False → 05/06 被误跳、whisper 误跑(本次修复的 bug)。"""
+        has_subtitle/has_danmaku 永远 False → 05/06 被误跳、whisper 误跑。"""
         from unittest.mock import AsyncMock
         storage = AsyncMock()
         storage.list_files.return_value = ["input/subtitle.srt", "input/danmaku.ass", "input/source.mp4"]
@@ -523,7 +522,7 @@ class TestConditions:
     @pytest.mark.asyncio
     async def test_rules_if_flag(self, redis, db, config):
         """if_flag:投递开关求值——flag 真→本条生效(run);假→落兜底规则(skip)。
-        article v2 的 smart_note 用此机制让智能笔记/评审可选。"""
+        article 链的 smart_note 用此机制让智能笔记/评审可选。"""
         from unittest.mock import AsyncMock
         storage = AsyncMock()
         storage.list_files.return_value = []
@@ -533,7 +532,7 @@ class TestConditions:
         assert await s._eval_rules("j_on", rules) is True
         await redis.init_job("j_off", "article", {"flags": {"smart_note": False}})
         assert await s._eval_rules("j_off", rules) is False
-        await redis.init_job("j_none", "article", {})   # 无 flags → 视为假 → skip
+        await redis.init_job("j_none", "article", {})   # 无 flags 视为假,落 skip
         assert await s._eval_rules("j_none", rules) is False
 
     @pytest.mark.asyncio
@@ -590,7 +589,7 @@ class TestWhisperPunctuateRecheck:
 
 
 class TestNewFormatConsumption:
-    """调度器消费归一化后的新格式（needs→DAG、rules→skip/run）：行为与旧格式等价。"""
+    """调度器消费归一化后的新格式(needs→DAG、rules→skip/run):行为与直写 steps 的格式等价。"""
 
     def _normalized(self, raw_new):
         from shared.config import normalize_pipelines
@@ -600,7 +599,7 @@ class TestNewFormatConsumption:
     async def test_needs_produce_dag_order(
         self, redis, db, tmp_path, tmp_jobs_dir, configs_dir
     ):
-        # needs 声明的依赖边归一化为 depends_on，调度器据此推进 DAG。
+        # needs 声明的依赖边归一化为 depends_on,调度器据此推进 DAG。
         raw_new = {
             "default": {"image": "flori/step-base"},
             "nf": {
@@ -630,7 +629,7 @@ class TestNewFormatConsumption:
     async def test_rules_exists_skip_and_run(
         self, redis, db, tmp_path, tmp_jobs_dir, configs_dir
     ):
-        # rules: exists+when=skip → 有 srt 则跳过 whisper；exists+when=on → 有 srt 才跑 punctuate。
+        # rules: exists+when=skip → 有 srt 则跳过 whisper;exists+when=on → 有 srt 才跑 punctuate。
         raw_new = {
             "default": {"image": "flori/step-base"},
             "nf": {
@@ -661,7 +660,7 @@ class TestNewFormatConsumption:
         await redis.set_step_status("j_test_001", "download", "running")
         await sched.on_step_done("j_test_001", "download")
 
-        # 已有 srt：whisper(when=skip) 跳过，punctuate(when=on) 运行。
+        # 已有 srt:whisper(when=skip) 跳过,punctuate(when=on) 运行。
         assert await redis.get_step_status("j_test_001", "whisper") == "skipped"
         assert await redis.get_step_status("j_test_001", "punctuate") == "ready"
 
@@ -669,7 +668,7 @@ class TestNewFormatConsumption:
     async def test_rules_exists_run_when_no_match(
         self, redis, db, tmp_path, tmp_jobs_dir, configs_dir
     ):
-        # 无 srt：whisper(when=skip,未命中→默认运行) 运行，punctuate(when=on,未命中→默认运行?) 见下。
+        # 无 srt:whisper(when=skip,未命中→默认运行) 运行。
         raw_new = {
             "default": {"image": "flori/step-base"},
             "nf": {
@@ -695,7 +694,7 @@ class TestNewFormatConsumption:
         await redis.set_step_status("j_test_001", "download", "running")
         await sched.on_step_done("j_test_001", "download")
 
-        # 无 srt：whisper 的 skip 规则未命中 → 默认运行。
+        # 无 srt:whisper 的 skip 规则未命中 → 默认运行。
         assert await redis.get_step_status("j_test_001", "whisper") == "ready"
 
 
@@ -738,18 +737,18 @@ class TestRetry:
 
 
 class TestRetryByFailureType:
-    """BUILD（不重试，标 failed）vs SYSTEM（退避重试至上限）的调度器矩阵。
-    pipeline_retries 与 RETRY_POLICY.max 取 min：用户配置只能收紧不能放大。"""
+    """失败类型矩阵:BUILD 不重试直接标 failed;SYSTEM 退避重试至上限。
+    pipeline_retries 与 RETRY_POLICY.max 取 min:用户配置只能收紧不能放大。"""
 
     async def _drain_delayed(self, scheduler):
-        """ai 类延迟重试经 create_task 异步入队，等其完成再断言。"""
+        """ai 类延迟重试经 create_task 异步入队,等其完成再断言。"""
         await asyncio.sleep(0)
         if scheduler._delayed_tasks:
             await asyncio.gather(*list(scheduler._delayed_tasks))
 
     @pytest.mark.asyncio
     async def test_input_invalid_not_retried(self, scheduler, redis, db):
-        # BUILD：input_invalid 确定性失败，A 直接标 failed，job 失败。
+        # BUILD:input_invalid 确定性失败,A 直接标 failed,job 失败。
         job = make_job()
         db.create_job(job)
         await scheduler.submit_job(job)
@@ -763,7 +762,7 @@ class TestRetryByFailureType:
 
     @pytest.mark.asyncio
     async def test_unknown_not_retried(self, scheduler, redis, db):
-        # 缺表项 unknown 走 BUILD 兜底：不重试。
+        # 缺表项 unknown 走 BUILD 兜底:不重试。
         job = make_job()
         db.create_job(job)
         await scheduler.submit_job(job)
@@ -776,7 +775,7 @@ class TestRetryByFailureType:
 
     @pytest.mark.asyncio
     async def test_ai_retried_with_configured_delay(self, scheduler, redis, db):
-        # SYSTEM：A(pipeline retries=2) 失败 ai → 重试，且用 policy 的 30s 延迟。
+        # SYSTEM:A(pipeline retries=2) 失败 ai → 重试,且用 policy 的 30s 延迟。
         job = make_job()
         db.create_job(job)
         await scheduler.submit_job(job)
@@ -800,8 +799,8 @@ class TestRetryByFailureType:
 
     @pytest.mark.asyncio
     async def test_ai_capped_by_pipeline_retries(self, scheduler, redis, db):
-        # pipeline_retries 封顶：B(retries=1) 把 ai 的 max 3 收紧到 1。
-        # 第一次失败 → 重试；第二次失败 → 已达上限 → 标 failed。
+        # pipeline_retries 封顶:B(retries=1) 把 ai 的 max 3 收紧到 1。
+        # 第一次失败重试;第二次失败已达上限,标 failed。
         job = make_job()
         db.create_job(job)
         await scheduler.submit_job(job)
@@ -814,14 +813,14 @@ class TestRetryByFailureType:
 
         scheduler._delayed_enqueue = mock_delayed
 
-        # 第一次 ai 失败：current_retries 0 < min(3,1)=1 → 重试。
+        # 第一次 ai 失败:current_retries 0 < min(3,1)=1 → 重试。
         await redis.set_step_status("j_test_001", "B", "running")
         await scheduler.on_step_failed("j_test_001", "B", "5xx", "ai")
         await self._drain_delayed(scheduler)
         assert await redis.get_step_status("j_test_001", "B") == "ready"
         assert await redis.get_step_retries("j_test_001", "B") == 1
 
-        # 第二次 ai 失败：current_retries 1 >= 1 → 不再重试，标 failed。
+        # 第二次 ai 失败:current_retries 1 >= 1 → 不再重试,标 failed。
         await redis.set_step_status("j_test_001", "B", "running")
         await scheduler.on_step_failed("j_test_001", "B", "5xx again", "ai")
         await self._drain_delayed(scheduler)
@@ -831,8 +830,8 @@ class TestRetryByFailureType:
 
     @pytest.mark.asyncio
     async def test_ai_capped_by_policy_max(self, scheduler, redis, db):
-        # policy_max 封顶反向：A 的 pipeline retries=2 仍受 ai 的 max=3 约束，
-        # min(3,2)=2，故 A 可重试两次（验证 policy.max 不会被 pipeline 放大）。
+        # policy_max 封顶反向:A 的 pipeline retries=2 仍受 ai 的 max=3 约束,
+        # min(3,2)=2,故 A 可重试两次(验证 policy.max 不会被 pipeline 放大)。
         job = make_job()
         db.create_job(job)
         await scheduler.submit_job(job)
@@ -852,12 +851,12 @@ class TestRetryByFailureType:
             await self._drain_delayed(scheduler)
             assert await redis.get_step_retries("j_test_001", "A") == expected_retries
 
-        # 第三次：current_retries 2 >= min(3,2)=2 → 停止重试。
+        # 第三次:current_retries 2 >= min(3,2)=2 → 停止重试。
         await redis.set_step_status("j_test_001", "A", "running")
         await scheduler.on_step_failed("j_test_001", "A", "5xx", "ai")
         await self._drain_delayed(scheduler)
         assert await redis.get_step_status("j_test_001", "A") == "failed"
-        assert delays == [30, 60]  # 两次退避，第三次不再重试
+        assert delays == [30, 60]  # 两次退避,第三次不再重试
 
 
 class TestIdempotent:
@@ -988,7 +987,7 @@ class TestReconcileSlots:
         await redis.try_acquire_slot("io", 9, "h_stale")
         assert await redis.get_pool_count("io") == 1
 
-        # 第一拍:仅把 h_stale 记为 suspect,宽限期内【不清】(避免误清刚占槽尚未写状态的认领)。
+        # 第一拍:仅把 h_stale 记为 suspect,宽限期内不清(避免误清刚占槽尚未写状态的认领)。
         await sched.reconcile_slots()
         assert await redis.get_pool_count("io") == 1
         assert "h_stale" in sched._slot_reconcile_suspect
@@ -1004,7 +1003,7 @@ class TestReconcileSlots:
     async def test_inflight_claim_not_removed_within_grace(
         self, redis, db, tmp_path, tmp_jobs_dir, configs_dir
     ):
-        # ★认领窗口保护:刚占槽、尚未写 running 状态的 holder,不能在一拍内被误清。
+        # 认领窗口保护:刚占槽、尚未写 running 状态的 holder,不能在一拍内被误清。
         pipelines = {"test": {"steps": [
             {"name": "A", "pool": "cpu", "depends_on": [], "retries": 0},
         ]}}
@@ -1224,7 +1223,7 @@ class TestDelayedRetry:
 
         scheduler._delayed_enqueue = mock_delayed_enqueue
         await scheduler.on_step_failed("j_test_001", "A", "rate limit", "ai")
-        # _delayed_enqueue 经 create_task 异步运行，等其落盘完成再断言。
+        # _delayed_enqueue 经 create_task 异步运行,等其落盘完成再断言。
         await asyncio.sleep(0)
         await asyncio.gather(*scheduler._delayed_tasks)
 
@@ -1234,10 +1233,10 @@ class TestDelayedRetry:
 
 
 class TestDelayedTaskTracking:
-    """覆盖延迟重试任务的跟踪与取消（防泄漏 / shutdown / rerun 串台）。"""
+    """覆盖延迟重试任务的跟踪与取消(防泄漏 / shutdown / rerun 串台)。"""
 
     async def _trigger_delayed(self, scheduler, redis, db, hang):
-        """触发一个 ai 延迟重试 task，并用 hang 替换 _delayed_enqueue 控制其存活。"""
+        """触发一个 ai 延迟重试 task,并用 hang 替换 _delayed_enqueue 控制其存活。"""
         job = make_job()
         db.create_job(job)
         await scheduler.submit_job(job)
@@ -1265,14 +1264,14 @@ class TestDelayedTaskTracking:
         await self._trigger_delayed(scheduler, redis, db, _sleep)
         task = next(iter(scheduler._delayed_tasks))
         await scheduler.shutdown()
-        await asyncio.sleep(0)  # 让 done_callback（discard）执行
+        await asyncio.sleep(0)  # 让 done_callback(discard)执行
         assert task.cancelled()
         assert task.done()
         assert len(scheduler._delayed_tasks) == 0
 
     @pytest.mark.asyncio
     async def test_cancel_is_clean_no_enqueue(self, scheduler, redis, db):
-        # 真实 _delayed_enqueue：delay 未到就取消 → enqueue 不发生，A 不被改回 ready
+        # 真实 _delayed_enqueue:delay 未到就取消 → enqueue 不发生,A 不被改回 ready
         job = make_job()
         db.create_job(job)
         await scheduler.submit_job(job)
@@ -1300,7 +1299,7 @@ class TestDelayedTaskTracking:
 
 
 class TestConcurrentCAS:
-    """覆盖跨进程并发的 CAS / 去重不变量（fakeredis + gather 验证返回值分支与最终态）。"""
+    """覆盖跨进程并发的 CAS / 去重不变量(fakeredis + gather 验证返回值分支与最终态)。"""
 
     @pytest.mark.asyncio
     async def test_cas_ready_to_running_only_one_wins(self, redis):
@@ -1323,7 +1322,7 @@ class TestConcurrentCAS:
             scheduler.on_step_done("j_test_001", "A"),
             scheduler.on_step_done("j_test_001", "A"),
         )
-        # 重复 done 只推进一次：CAS 仅一个成功 → B 仅入队一次
+        # 重复 done 只推进一次:CAS 仅一个成功 → B 仅入队一次
         assert await redis.get_step_status("j_test_001", "A") == "done"
         assert await redis.get_step_status("j_test_001", "B") == "ready"
         queue = await redis.get_queue_info("cpu")
@@ -1371,7 +1370,7 @@ class TestResubmit:
         assert await redis.get_step_status("j_test_001", "B") == "done"
         assert await redis.get_step_status("j_test_001", "C") == "done"
         assert await redis.get_step_status("j_test_001", "D") == "ready"
-        # DB 也要与 redis 步集一致(修分叉 bug:原实现新步 D 只进 redis、没回填 DB)
+        # DB 也要与 redis 步集一致:新步 D 不能只进 redis,须回填 DB,否则两侧分叉
         db_names = {s.name for s in db.get_steps("j_test_001")}
         assert "D" in db_names
         assert db_names == set(await redis.get_all_step_statuses("j_test_001")) == {"A", "B", "C", "D"}
@@ -1397,15 +1396,15 @@ class TestResubmit:
         await scheduler.resubmit("j_test_001")
 
         assert await redis.get_step_status("j_test_001", "C") is None
-        # C 也要从 DB 删除(原实现只删 redis、DB 残留旧步)
+        # C 也要从 DB 删除,不能只删 redis 而让 DB 残留旧步
         db_names = {s.name for s in db.get_steps("j_test_001")}
         assert "C" not in db_names
         assert db_names == set(await redis.get_all_step_statuses("j_test_001")) == {"A", "B"}
 
     @pytest.mark.asyncio
     async def test_resubmit_repairs_redis_db_divergence(self, scheduler, redis, db):
-        """直接复现并修复 redis/DB 分叉:DB 残留 pipeline 已无的旧步 + redis 丢了 pipeline 里的步,
-        resubmit 后两侧步集都==当前 pipeline(A/B/C),不再分叉(流水线读 DB 不再显示旧步/漏新步)。"""
+        """复现 redis/DB 分叉:DB 残留 pipeline 已无的旧步 + redis 丢了 pipeline 里的步,
+        resubmit 后两侧步集都==当前 pipeline(A/B/C),流水线读 DB 不显示旧步、不漏新步。"""
         job = make_job()
         db.create_job(job)
         await scheduler.submit_job(job)              # A/B/C 物化到 redis+DB
@@ -1424,9 +1423,9 @@ class TestResubmit:
 
     @pytest.mark.asyncio
     async def test_resubmit_preserves_existing_step_metadata(self, scheduler, redis, db):
-        """resubmit 不得抹掉已存在步的时间戳/指纹(回归:对已有行用 update_step 只改 status,
-        不能 upsert_step 整行替换——否则已完成步的 started_at/duration/input_hash 被清空,
-        流水线显示该步「无时间」)。"""
+        """resubmit 不得抹掉已存在步的时间戳/指纹:对已有行用 update_step 只改 status,
+        不能 upsert_step 整行替换,否则已完成步的 started_at/duration/input_hash 被清空,
+        流水线显示该步无时间。"""
         job = make_job()
         db.create_job(job)
         await scheduler.submit_job(job)
@@ -1662,7 +1661,7 @@ class TestEnqueueTags:
 
     @pytest.mark.asyncio
     async def test_bili_download_requires_net_cn(self, scheduler, redis, db, tmp_path, tmp_jobs_dir, configs_dir):
-        """B站源的 01_download → require_tags 含 net-cn(B站属大陆区域);不再有 bili 路由 tag。"""
+        """B站源的 01_download → require_tags 含 net-cn(B站属大陆区域);无 bili 路由 tag。"""
         pipelines = {"v": {"steps": [{"name": "01_download", "pool": "io", "depends_on": [], "tags": []}]}}
         config = make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir)
         sched = Scheduler(redis, db, config)
@@ -1674,11 +1673,11 @@ class TestEnqueueTags:
         await sched.enqueue_step("j_bdl", "01_download")
         item, _ = await redis.dequeue_step("io")
         assert "net-cn" in item["require_tags"]   # B站属大陆区域(平台源权威)
-        assert "bili" not in item["require_tags"]   # bili 路由 tag 已移除(SESSDATA 是 worker 本地的事)
+        assert "bili" not in item["require_tags"]   # 无 bili 路由 tag:SESSDATA 是 worker 本地的事
 
     @pytest.mark.asyncio
     async def test_arxiv_download_no_bili(self, scheduler, redis, db, tmp_path, tmp_jobs_dir, configs_dir):
-        """境外源(arxiv)的 01_download 不加 bili,且 require net-global(arxiv.org 非 CN 域名)。"""
+        """境外源 arxiv 的 01_download 不加 bili,且 require net-global(arxiv.org 非 CN 域名)。"""
         pipelines = {"p": {"steps": [{"name": "01_download", "pool": "io", "depends_on": [], "tags": []}]}}
         config = make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir)
         sched = Scheduler(redis, db, config)
@@ -1696,19 +1695,19 @@ class TestEnqueueTags:
 class TestCleanupStaleWorkers:
     @pytest.mark.asyncio
     async def test_dead_worker_deleted_alive_marked_offline(self, scheduler, redis, db):
-        """DB 心跳超时 + Redis 注册已过期 -> 删除；Redis 仍在 -> 标 offline。"""
+        """DB 心跳超时 + Redis 注册已过期 -> 删除;Redis 仍在 -> 标 offline。"""
         from datetime import datetime, timedelta, timezone
         from shared.models import Worker as WorkerModel
 
-        # 用 aware UTC(与 cleanup_stale_workers 的 datetime.now(timezone.utc) 同基准);
-        # 此前用 naive datetime.now() 在非 UTC 宿主上会把心跳算成「未来」,致 stale 永假。
+        # 用 aware UTC,与 cleanup_stale_workers 的 datetime.now(timezone.utc) 同基准;
+        # naive datetime.now() 在非 UTC 宿主上会把心跳算成未来,致 stale 永假。
         old = datetime.now(timezone.utc) - timedelta(minutes=10)
-        # dead: DB 过期，Redis 无注册
+        # dead: DB 过期,Redis 无注册
         db.upsert_worker(
             WorkerModel(id="cpu-dead", type="cpu", status="busy",
                         first_seen=old, last_heartbeat=old)
         )
-        # alive-but-stale: DB 过期，但 Redis 仍有注册键
+        # alive-but-stale: DB 过期,但 Redis 仍有注册键
         db.upsert_worker(
             WorkerModel(id="cpu-alive", type="cpu", status="idle",
                         first_seen=old, last_heartbeat=old)
@@ -1735,29 +1734,29 @@ class TestCleanupStaleWorkers:
         await scheduler.cleanup_stale_workers(timeout_sec=60)
         got = db.get_worker("cpu-fresh")
         assert got is not None
-        # 刚心跳的 worker 不应被回收；公共状态衍生为 online-idle
+        # 刚心跳的 worker 不应被回收;公共状态衍生为 online-idle
         assert got.status == "online-idle"
 
     @pytest.mark.asyncio
     async def test_aware_now_minus_legacy_naive_heartbeat_no_crash(
         self, scheduler, redis, db
     ):
-        """UTC 迁移核心回归：cleanup 用 aware now 减去旧库 naive 心跳不能崩
-        ('can't subtract offset-naive and offset-aware')，且仍正确判旧 worker stale。"""
-        # 直接写一个 naive 心跳的旧行（绕过模型默认值，模拟历史数据）
+        """兼容旧库回归:cleanup 用 aware now 减去旧库 naive 心跳不能崩
+        ('can't subtract offset-naive and offset-aware'),且仍正确判旧 worker stale。"""
+        # 直接写一个 naive 心跳的旧行(绕过模型默认值,模拟历史数据)
         db._conn.execute(
             "INSERT INTO workers (id, type, status, first_seen, last_heartbeat) "
             "VALUES (?,?,?,?,?)",
             ("cpu-legacy", "cpu", "busy", "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
         )
         db._conn.commit()
-        # Redis 无注册键 -> 视为真死 -> 删除
+        # Redis 无注册键视为真死,删除
         await scheduler.cleanup_stale_workers(timeout_sec=60)
         assert db.get_worker("cpu-legacy") is None
 
 
 class TestStaleExecGuard:
-    """H3:孤儿重排后旧执行的迟到完成/失败事件按 exec_id 丢弃,不顶替当前在跑实例。"""
+    """孤儿重排后旧执行的迟到完成/失败事件按 exec_id 丢弃,不顶替当前在跑实例。"""
 
     @pytest.mark.asyncio
     async def test_stale_exec_done_ignored(self, redis, db, config):
@@ -1776,7 +1775,7 @@ class TestStaleExecGuard:
 
     @pytest.mark.asyncio
     async def test_no_exec_record_backward_compatible(self, redis, db, config):
-        # 未写 exec_id(旧库) → 不过滤,按原 CAS 行为置 done
+        # 未写 exec_id(旧库) → 不过滤,按普通 CAS 行为置 done
         s = _stub_workers_present(Scheduler(redis, db, config))
         job = make_job()
         db.create_job(job)
@@ -1787,8 +1786,8 @@ class TestStaleExecGuard:
 
 
 class TestOrphanClaimMismatch:
-    """H4:在跑步骤的 worker 存活但其上报 current_step 不是本步(认领响应丢失),
-    超宽限期回收,修永久卡 running。"""
+    """在跑步骤的 worker 存活但其上报 current_step 不是本步(认领响应丢失),
+    超宽限期回收,避免永久卡 running。"""
 
     @pytest.mark.asyncio
     async def test_reclaim_when_worker_not_running_this_step(self, redis, db, config):
@@ -1812,7 +1811,7 @@ class TestOrphanClaimMismatch:
 
     @pytest.mark.asyncio
     async def test_no_reclaim_when_step_has_fresh_progress(self, redis, db, config):
-        # 修复点:即便 worker 上报的 current_step 不是本步(并发下只反映 N 步中的 1 步),
+        # 即便 worker 上报的 current_step 不是本步(并发下只反映 N 步中的 1 步),
         # 只要本步有新鲜进度心跳 → 不回收。
         s = Scheduler(redis, db, config)
         s._CLAIM_MISMATCH_GRACE_SEC = 0
@@ -1836,7 +1835,7 @@ class TestOrphanClaimMismatch:
     @pytest.mark.asyncio
     async def test_concurrent_steps_not_reclaimed(self, redis, db, config):
         # 回归:worker 并发跑多步,current_step 只能反映其一;两步都有新鲜心跳 → 都不回收。
-        # (旧逻辑按单个 current_step 判活,会把其余并发步全误回收 → 失败雪崩。)
+        # 若只按单个 current_step 判活,会把其余并发步全误回收,失败雪崩。
         s = Scheduler(redis, db, config)
         s._CLAIM_MISMATCH_GRACE_SEC = 0
         job = make_job()
@@ -1934,10 +1933,10 @@ class TestSchedulerHeartbeat:
 
 
 class TestMarkJobFailedClearsSiblings:
-    """失败即停:某步终态失败 → mark_job_failed 清掉该 job 残留在队列的并行兄弟 task
-    (死任务——job 已 FAILED 不该再跑;不清则 worker 仍会认领、cas_step_status 因 steps hash 未清成功
-    → 跑已失败 job 的步/把它重标 done,且成指向 FAILED job 的孤儿 task)。★保留 job:{id}:steps hash
-    供重试/重跑。回归:补终态失败路径的级联收尾缺口。"""
+    """失败即停:某步终态失败 → mark_job_failed 清掉该 job 残留在队列的并行兄弟 task。
+    这些是死任务,job 已 FAILED 不该再跑;不清则 worker 仍会认领,cas_step_status 因 steps hash
+    未清而成功,会跑已失败 job 的步甚至把它重标 done,还留下指向 FAILED job 的孤儿 task。
+    保留 job:{id}:steps hash 供重试/重跑。"""
 
     @pytest.mark.asyncio
     async def test_failed_clears_sibling_queue_keeps_steps(
@@ -1957,10 +1956,10 @@ class TestMarkJobFailedClearsSiblings:
 
         await s.mark_job_failed("j_par_fail", "B 终态失败")
 
-        # ★兄弟 task(B/C)被清出队列(失败即停)
+        # 兄弟 task B/C 被清出队列(失败即停)
         assert (await redis.get_queue_info("cpu"))["length"] == 0
         assert (await redis.get_queue_info("io"))["length"] == 0
-        # ★steps hash 保留(供重试):四步状态都还在
+        # steps hash 保留(供重试):四步状态都还在
         statuses = await redis.get_all_step_statuses("j_par_fail")
         assert set(statuses.keys()) == {"A", "B", "C", "D"}
         # job 终态 FAILED + 移出 active

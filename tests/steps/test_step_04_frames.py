@@ -1,4 +1,4 @@
-"""tests for steps/video/step_04_frames.py (cv2 代表帧;mock VideoCapture/imwrite)"""
+"""steps/video/step_04_frames.py 的测试:cv2 代表帧,mock _VideoReader/imwrite。"""
 
 import json
 from pathlib import Path
@@ -60,9 +60,9 @@ class TestFramesStep:
         assert len(candidates) >= 2
         assert all({"index", "scene_index", "timestamp_sec", "filename"} <= set(c) for c in candidates)
 
-    # ── 代表帧选取算法(_pick_representative)的三条分支:之前 FakeCap 恒返回同一全 0 帧
-    #    → SSIM 恒=1 永远走静止分支,动态/clamp/超长采样从未被驱动,断言也只数 total。
-    #    下面用按帧号返回差异化内容的 FakeCap,真正驱动并断言"选了哪一帧/时间戳"。──
+    # 代表帧选取算法(_pick_representative)的三条分支。恒返回同一帧会让 SSIM 恒为 1,
+    # 永远只走静止分支,动态/clamp/超长采样驱动不到。下面的 fake reader 按帧号返回
+    # 差异化内容,真正驱动三条分支,并断言选了哪一帧/时间戳。
 
     def _one_scene_job(self, tmp_path, start, end):
         job_dir = tmp_path / "job"

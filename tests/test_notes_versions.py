@@ -1,6 +1,6 @@
-"""tests for shared/notes_versions.py（智能笔记版本文件名解析 + 配对评审路径）。
+"""tests for shared/notes_versions.py(智能笔记版本文件名解析 + 配对评审路径)。
 
-此前该模块零直接单测;配对错位/排序倒置/解析异常都不会被发现(审计 #8)。"""
+覆盖配对错位/排序倒置/解析异常。"""
 
 from __future__ import annotations
 

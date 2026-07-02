@@ -1,4 +1,4 @@
-"""tests for api/routes/admin.py"""
+"""api/routes/admin.py 测试。"""
 
 from __future__ import annotations
 
@@ -87,7 +87,6 @@ class TestStatus:
         assert data["pools"] and all(                      # 每个池 used/queue 归零
             p["used"] == 0 and p["queue"] == 0 for p in data["pools"].values())
         assert "available_gb" in data["disk"]
-        # 批3 新增:disk 补 total_gb/used_pct、version、throughput_1h。
         assert "total_gb" in data["disk"] and "used_pct" in data["disk"]
         assert "version" in data
         assert data["throughput_1h"] == {"done": 0, "failed": 0}

@@ -1,4 +1,4 @@
-"""tests for api/routes/glossary.py"""
+"""api/routes/glossary.py 测试。"""
 
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ class TestManualCRUD:
         assert resp.status_code == 200
         assert resp.json()["definition"] == "新"
         assert resp.json()["related"] == ["B"]
-        # status 不动，仍 accepted。
+        # status 不动,仍 accepted。
         assert resp.json()["status"] == "accepted"
 
     @pytest.mark.asyncio
@@ -105,7 +105,7 @@ class TestSuggestionFlow:
         assert len(items) == 1
         assert items[0]["term"] == "Transformer"
         assert items[0]["status"] == "suggested"
-        # occurrences 记录类型化出现(job + content_type)，用于前端显示出现数/来源多样性。
+        # occurrences 记录类型化出现(job + content_type),用于前端显示出现数/来源多样性。
         assert {o["job_id"] for o in items[0]["occurrences"]} == {"job-1", "job-2"}
         assert {o["content_type"] for o in items[0]["occurrences"]} == {"video", "paper"}
 
@@ -117,7 +117,7 @@ class TestSuggestionFlow:
         resp = await client.post("/api/glossary/ml/注意力机制/accept")
         assert resp.status_code == 200
         assert resp.json()["status"] == "accepted"
-        # 采纳后该词进入 Profile.terminology，AI 步骤可用。
+        # 采纳后该词进入 Profile.terminology,AI 步骤可用。
         terms = _read_profile_terms(test_config.prompts_dir, "ml")
         assert "注意力机制" in terms
 
@@ -202,12 +202,11 @@ class TestDomainValidation:
         resp = await client.post(
             "/api/glossary?domain=../etc", json={"term": "A"}
         )
-        # 08 收紧:../etc 直达守卫,严格 400。
         assert resp.status_code == 400
 
     @pytest.mark.asyncio
     async def test_create_backslash_domain_rejected(self, client):
-        """反斜杠现在也被挡(R-M1:统一走 deps.validate_path_segment)。"""
+        """反斜杠也被挡:统一走 deps.validate_path_segment。"""
         resp = await client.post(
             "/api/glossary", params={"domain": "a\\b"}, json={"term": "A"}
         )
@@ -215,7 +214,7 @@ class TestDomainValidation:
 
     @pytest.mark.asyncio
     async def test_create_empty_domain_rejected(self, client):
-        """空 domain 不再写出空文件名 profile(I-L9)。"""
+        """空 domain 被拒,不写出空文件名的 profile。"""
         resp = await client.post(
             "/api/glossary", params={"domain": ""}, json={"term": "A"}
         )

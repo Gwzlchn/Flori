@@ -1,4 +1,4 @@
-"""tests for steps/video/step_12_review.py"""
+"""steps/video/step_12_review.py 的测试。"""
 
 import json
 

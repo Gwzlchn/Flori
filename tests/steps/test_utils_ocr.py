@@ -1,4 +1,4 @@
-"""tests for steps/utils/ocr.py — OCR 引擎工厂。
+"""steps/utils/ocr.py 的测试:OCR 引擎工厂。
 
 不触真实 RapidOCR;通过注入 fake 模块到 sys.modules + patch select_ocr_backend
 覆盖三条路径:rapidocr 正常构造 / 未实现后端 raise / 导入失败异常传播。

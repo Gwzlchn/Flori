@@ -1,8 +1,10 @@
-"""prompt 白盒 Phase 2:DB prompt_overrides + 解析注入 + API + step_base 回退顺序。
+"""prompt 白盒:DB prompt_overrides + 解析注入 + API + step_base 回退顺序。
 
-覆盖:DB 层(set/get/list/delete/resolve 的 global↔domain 优先级 + 归一)、step_base
-_load_system_prompt 回退(DB 注入 > {step}.md > None)+ template.source、API 端点
-(列/读/写/删/校验)、扩展后的 GET /api/pipelines(is_ai/has_override)、create_job 注入。
+覆盖:
+- DB 层:set/get/list/delete/resolve 的 global↔domain 优先级 + 归一。
+- step_base _load_system_prompt 回退(DB 注入 > {step}.md > None)+ template.source。
+- API 端点:列/读/写/删/校验。
+- GET /api/pipelines 的 is_ai/has_override,create_job 注入。
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from shared.db import Database
 from shared.step_base import StepBase
 
 
-# ── DB 层 ──
+# DB 层
 
 
 @pytest.fixture
@@ -47,7 +49,7 @@ class TestPromptOverrideDB:
         pdb.set_prompt_override("global", None, "video", "11_smart", "G")
         pdb.set_prompt_override("domain", "finance", "video", "11_smart", "D")
         pdb.set_prompt_override("global", None, "video", "12_review", "GR")
-        # 1.1.5:resolve 返回 {step: {content, version}}(含激活版本号快照)。
+        # resolve 返回 {step: {content, version}},含激活版本号快照。
         r_fin = pdb.resolve_prompt_overrides("video", "finance")
         assert r_fin["11_smart"]["content"] == "D"   # domain 覆盖优先
         assert r_fin["11_smart"]["version"] == 1
@@ -136,14 +138,14 @@ class TestPromptOverrideVersions:
 
 
 class TestPromptActivateDeactivateDB:
-    """非破坏的「回内置默认」(deactivate) + 「设为当前激活」(set_active):
+    """非破坏的「回到内置默认」(deactivate) + 「设为当前激活」(set_active):
     deactivate 删激活指针但保留历史;set_active 切激活;re-activate 后 resolve 返回该版本。"""
 
     def test_deactivate_clears_active_but_keeps_history(self, pdb):
         pdb.set_prompt_override("global", None, "video", "11_smart", "A")
         pdb.set_prompt_override("global", None, "video", "11_smart", "B", mode="new")  # 激活 v2
         pdb.deactivate_prompt_override("global", None, "video", "11_smart")
-        # 激活指针清掉 → 主表无行 → resolve 空(回内置默认)
+        # 激活指针清掉后主表无行,resolve 为空,回内置默认
         assert pdb.get_prompt_override("global", None, "video", "11_smart") is None
         assert pdb.resolve_prompt_overrides("video", "general") == {}
         # 但历史版本完整保留(下拉仍能看到 v1/v2,可再激活)
@@ -180,14 +182,14 @@ class TestPromptActivateDeactivateDB:
         assert pdb.resolve_prompt_overrides("video", "general") == {"11_smart": {"content": "B", "version": 2}}
 
     def test_delete_still_clears_history(self, pdb):
-        # delete_prompt_override 仍是真·删整个(含历史),与 deactivate 区分
+        # delete_prompt_override 是真删整个(含历史),与 deactivate 区分
         pdb.set_prompt_override("global", None, "video", "11_smart", "A")
         pdb.set_prompt_override("global", None, "video", "11_smart", "B", mode="new")
         pdb.delete_prompt_override("global", None, "video", "11_smart")
         assert pdb.list_prompt_override_versions("global", None, "video", "11_smart") == []
 
 
-# ── step_base 注入回退 ──
+# step_base 注入回退
 
 
 class _Step(StepBase):
@@ -206,17 +208,17 @@ def _mk_step(tmp_path, prompt_overrides=None, prompts_dir=None, step="11_smart")
 
 
 class TestSystemPromptFallback:
-    """无外置模板的步(评审等 prompt 内联):覆盖回落为 system prompt(_load_system_prompt)。
+    """无外置模板的步(评审等 prompt 内联):覆盖回落为 system prompt,即 _load_system_prompt。
     回退序 = DB 注入(仅无模板步)> {step}.md 钩子 > None。这些用例不建 templates/ → 走无模板路径。"""
 
     def test_injected_override_wins(self, tmp_path):
-        # 旧格式:job.json.prompt_overrides[step] 为纯字符串(历史 job 兼容)。
+        # 纯字符串格式:job.json.prompt_overrides[step] 为 str,兼容存量 job,不可去掉。
         s = _mk_step(tmp_path, {"11_smart": "INJECTED"})
         assert s._injected_prompt_override() == "INJECTED"
         assert s._load_system_prompt() == "INJECTED"
 
     def test_injected_override_new_dict_format(self, tmp_path):
-        # 1.1.5 新格式:{content, version} → 注入取出正文(版本只供 Job 详情比对)。
+        # 字典格式:{content, version} → 注入取出正文,版本只供 Job 详情比对。
         s = _mk_step(tmp_path, {"11_smart": {"content": "INJECTED", "version": 3}})
         assert s._injected_prompt_override() == "INJECTED"
         assert s._load_system_prompt() == "INJECTED"
@@ -253,7 +255,7 @@ class TestSystemPromptFallback:
         assert s._injected_prompt_override() == ""
 
     def test_template_step_injection_not_used_as_system(self, tmp_path):
-        # 有外置模板的步:覆盖作用于 user 模板层,不再当 system(避免双重套用)。
+        # 有外置模板的步:覆盖作用于 user 模板层,不当 system,避免双重套用。
         pd = tmp_path / "prompts"
         (pd / "templates").mkdir(parents=True)
         (pd / "templates" / "11_smart.md").write_text("TPL", encoding="utf-8")
@@ -271,7 +273,7 @@ class TestPromptTemplateOverride:
         (pd / "templates").mkdir(parents=True)
         (pd / "templates" / "11_smart.md").write_text("FROM_FILE", encoding="utf-8")
         s = _mk_step(tmp_path, {"11_smart": "FROM_OVERRIDE"}, prompts_dir=pd)
-        # ① 有覆盖 → 用覆盖(压过模板文件与内联默认)
+        # 1. 有覆盖 → 用覆盖(压过模板文件与内联默认)
         assert s._load_prompt_template("11_smart", "INLINE_DEFAULT") == "FROM_OVERRIDE"
 
     def test_fallback_file_when_no_override(self, tmp_path):
@@ -279,14 +281,14 @@ class TestPromptTemplateOverride:
         (pd / "templates").mkdir(parents=True)
         (pd / "templates" / "11_smart.md").write_text("FROM_FILE", encoding="utf-8")
         s = _mk_step(tmp_path, {}, prompts_dir=pd)
-        # ② 无覆盖、有模板文件 → 用文件
+        # 2. 无覆盖、有模板文件 → 用文件
         assert s._load_prompt_template("11_smart", "INLINE_DEFAULT") == "FROM_FILE"
 
     def test_fallback_inline_default_when_nothing(self, tmp_path):
         pd = tmp_path / "prompts"
         (pd / "templates").mkdir(parents=True)
         s = _mk_step(tmp_path, {}, prompts_dir=pd)
-        # ③ 无覆盖、无文件 → 内联默认
+        # 3. 无覆盖、无文件 → 内联默认
         assert s._load_prompt_template("11_smart", "INLINE_DEFAULT") == "INLINE_DEFAULT"
 
     def test_variant_not_overridden_when_main_template_exists(self, tmp_path):
@@ -310,7 +312,7 @@ class TestPromptTemplateOverride:
         assert s._load_prompt_template("08_punctuate.translate", "d") == "OV"
 
 
-# ── API 端点 ──
+# API 端点
 
 
 @pytest.mark.asyncio
@@ -383,8 +385,8 @@ class TestPromptAPI:
         assert g["default_template"] == "DEFAULT TEMPLATE BODY"
 
     async def test_get_default_falls_back_to_baked_configs(self, client):
-        # 白盒核心修复:prompts_dir/templates 为空(模拟 api 没挂 templates),仍从镜像烤入
-        # config_dir/prompts/templates 读到默认 → GET 不再回 null(白盒能看到默认)。
+        # prompts_dir/templates 为空(模拟 api 没挂 templates)时,仍从镜像烤入的
+        # config_dir/prompts/templates 读到默认 → GET 回非空,白盒能看到默认。
         g = (await client.get("/api/prompts/paper/05_smart_paper")).json()
         assert g["default_template"]                      # 非空
         names = {t["name"] for t in g["default_templates"]}
@@ -392,8 +394,8 @@ class TestPromptAPI:
         assert g["default_templates"][0]["content"].strip()
 
     async def test_get_review_steps_return_nonempty_default(self, client):
-        # 评审步白盒化:外置骨架模板(05/06/12_review)→ GET 回非空 default(含 {{ref_block}} 占位),
-        # 经镜像烤入 config_dir/prompts/templates 兜底读到(prompts_dir 未挂时)。
+        # 评审步外置骨架模板(05/06/12_review):GET 回非空 default,含 {{ref_block}} 占位。
+        # prompts_dir 未挂时经镜像烤入的 config_dir/prompts/templates 兜底读到。
         for pipeline, step in [
             ("article", "06_review"), ("paper", "06_review"),
             ("audio", "05_review"), ("video", "12_review"),
@@ -434,7 +436,7 @@ class TestPromptAPI:
 
 @pytest.mark.asyncio
 class TestPromptVersionAPI:
-    """C2:单步 GET 透出 active_version + versions、新 versions/{version} 查历史、PUT mode/note 返回版本。"""
+    """单步 GET 透出 active_version + versions,versions/{version} 查历史,PUT mode/note 返回版本。"""
 
     async def test_get_exposes_active_version_and_versions(self, client):
         await client.put(
@@ -561,7 +563,7 @@ class TestPromptActivateAPI:
         assert r.status_code == 400
 
     async def test_deactivate_does_not_touch_default_resolved_job(self, client):
-        # deactivate 后 resolve 空 → 该步派发回内置默认(借 create_job 注入验证不再带覆盖)
+        # deactivate 后 resolve 空 → 该步派发回内置默认(借 create_job 注入验证不带覆盖)
         await client.put(
             "/api/prompts/article/04_smart_article", json={"scope": "global", "content": "ART"},
         )
@@ -587,7 +589,7 @@ class TestCreateJobInjection:
         job_id = resp.json()["job_id"]
         raw = await app.state.storage.read_file(job_id, "job.json")
         doc = json.loads(raw)
-        # 1.1.5:注入快照含版本号 {content, version}。
+        # 注入快照含版本号 {content, version}。
         assert doc["prompt_overrides"]["04_smart_article"]["content"] == "ART OVERRIDE"
         assert doc["prompt_overrides"]["04_smart_article"]["version"] == 1
 
@@ -602,7 +604,7 @@ class TestCreateJobInjection:
         assert "prompt_overrides" not in doc
 
     async def test_job_detail_exposes_prompt_versions(self, client):
-        # C4:建覆盖 → 新建 job → 详情 prompt_versions 含该步派发时的版本快照。
+        # 建覆盖后新建 job,详情 prompt_versions 含该步派发时的版本快照。
         await client.put(
             "/api/prompts/article/04_smart_article",
             json={"scope": "global", "content": "OV"},

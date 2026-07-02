@@ -1,4 +1,4 @@
-"""tests for steps/audio/ (03_transcript_parse / 04_smart_podcast / 05_review)"""
+"""steps/audio 各步(03_transcript_parse / 04_smart_podcast / 05_review)的测试。"""
 
 import json
 
@@ -11,7 +11,7 @@ from tests.steps.conftest import make_step_config
 
 
 class TestJoinCues:
-    """I-L17: 拼接字幕条目时英文补空格、CJK 直连(避免 ''.join 把英文词粘连)。"""
+    """拼接字幕条目时英文补空格、CJK 直连,避免 ''.join 把英文词粘连。"""
 
     def test_english_words_spaced(self):
         assert _join_cues(["hello", "world"]) == "hello world"
@@ -25,7 +25,7 @@ class TestJoinCues:
     def test_skips_empty(self):
         assert _join_cues(["a", "", "b"]) == "a b"
 
-# 跨越 60s 窗口的样例 SRT，预期聚合为 2 段
+# 跨越 60s 窗口的样例 SRT,预期聚合为 2 段
 SRT = """\
 1
 00:00:01,000 --> 00:00:05,000
@@ -67,7 +67,7 @@ class TestTranscriptParseStep:
         step = TranscriptParseStep("03_transcript_parse", job_dir, config)
         result = step.execute()
 
-        # 4 条字幕跨越 ~120s，按 60s 窗口应聚合为 2 段
+        # 4 条字幕跨越 ~120s,按 60s 窗口应聚合为 2 段
         assert result["segments"] == 2
         assert result["duration_sec"] == 120.0
 
@@ -165,7 +165,7 @@ class TestSmartPodcastStep:
         assert "口语" in prompt
 
     def test_build_prompt_no_truncation(self, tmp_path):
-        # 旧版把正文截到 12000 字;现在单次路径全量喂入,正文结尾也要在 prompt 里。
+        # 单次路径全量喂入不截断,正文结尾也要出现在 prompt 里。
         from steps.audio.step_04_smart_podcast import SINGLE_PASS_CHAR_LIMIT
         job_dir = _mk_job(tmp_path)
         body = "中" * (SINGLE_PASS_CHAR_LIMIT - 100) + "末尾标记ZZ"

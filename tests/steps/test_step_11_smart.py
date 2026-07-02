@@ -1,4 +1,4 @@
-"""tests for steps/video/step_11_smart.py"""
+"""steps/video/step_11_smart.py 的测试。"""
 
 import json
 import os
@@ -41,7 +41,7 @@ class TestSmartStep:
         assert list((job_dir / "output" / "versions").glob("notes_smart_*.md"))
 
     def test_execute_two_pass_with_images(self, tmp_path):
-        # 有截图时走两段:① 带图的视觉 pass(按序号 N 出描述) ② 不带图的纯文本 pass(成稿);
+        # 有截图时走两段:先带图的视觉 pass(按序号 N 出描述),再不带图的纯文本 pass 成稿;
         # 帧从 dedup 清单(非 glob)按 index 选取,图片用 ![](img:N) 占位符,落盘回填成 assets/frame-NNNN.jpg。
         job_dir = self._setup_job(tmp_path)
         (job_dir / "assets" / "frame-0000.jpg").write_bytes(b"\xff\xd8\xff\xe0fakejpg")
@@ -63,10 +63,10 @@ class TestSmartStep:
 
         result = step.execute()
         assert len(calls) == 2
-        assert calls[0]["has_images"] is True                  # ① 视觉 pass 带图
+        assert calls[0]["has_images"] is True                  # 视觉 pass 带图
         assert "不要写任何笔记正文" in calls[0]["prompt"]        # 视觉 pass 只要描述
         assert "[0]" in calls[0]["prompt"]                     # 帧按序号 N 标注
-        assert calls[1]["has_images"] is False                 # ② 文本 pass 不带图
+        assert calls[1]["has_images"] is False                 # 文本 pass 不带图
         assert "红框圈住分时跳水" in calls[1]["prompt"]          # 视觉描述喂进文本 pass
         assert result["images_sent"] == 1
         # 落盘:占位符 img:0 已回填成真实 assets/ 路径,无裸占位符残留
@@ -149,8 +149,8 @@ class TestSmartStep:
 
 
 class TestP1PromptAssets:
-    """P1 (ADR-0010 Loop2)：新增 finance Profile + case-study「机制说明」hint，
-    并验证『改 prompt 资产 → 指纹失效 → 重生成』链路（指纹只 hash 文件字节，不解析 YAML）。"""
+    """finance Profile 与 case-study 的 "机制说明" hint 相关测试,见 ADR-0010。
+    验证改 prompt 资产后指纹失效、触发重生成的链路。指纹只 hash 文件字节,不解析 YAML。"""
 
     def _job(self, tmp_path):
         job_dir = tmp_path / "job"
@@ -161,7 +161,7 @@ class TestP1PromptAssets:
         return job_dir
 
     def test_finance_profile_parses_and_injects(self, tmp_path):
-        # 真实 configs/prompts/profiles/finance.yaml：能解析 + domain_context / 数字口径要求注入 prompt
+        # 真实 configs/prompts/profiles/finance.yaml:能解析,domain_context 与数字口径要求注入 prompt
         job_dir = self._job(tmp_path)
         config = make_step_config(tmp_path, step_name="11_smart")
         config["domain"] = {"name": "finance"}
@@ -172,10 +172,10 @@ class TestP1PromptAssets:
         assert profile and profile.get("domain_context")          # 文件存在且解析
         prompt = step._build_user_prompt("正文")
         assert profile["domain_context"] in prompt
-        assert "口径" in prompt                                    # do_not 的「数字自洽」注入
+        assert "口径" in prompt                                    # do_not 的数字自洽要求注入
 
     def test_case_study_injects_mechanism_hint(self, tmp_path):
-        # 真实 case-study.yaml：「机制说明」hint 注入 prompt（治「只列名词不解释」）
+        # 真实 case-study.yaml:"机制说明" hint 注入 prompt,治只列名词不解释的毛病
         job_dir = self._job(tmp_path)
         config = make_step_config(tmp_path, step_name="11_smart")
         config["style_tags"] = ["case-study"]
@@ -186,7 +186,7 @@ class TestP1PromptAssets:
         assert "机制说明" in prompt
 
     def test_editing_style_busts_fingerprint(self, tmp_path):
-        # 链路核心：相同输入 → should_run False（幂等跳过）；改 prompt 资产 → should_run True（重生成）
+        # 链路核心:相同输入 → should_run False 幂等跳过;改 prompt 资产 → should_run True 重生成
         job_dir = self._job(tmp_path)
         prompts = tmp_path / "prompts"
         (prompts / "profiles").mkdir(parents=True)
@@ -199,7 +199,7 @@ class TestP1PromptAssets:
         config["paths"]["prompts_dir"] = str(prompts)
         step = SmartStep("11_smart", job_dir, config)
 
-        step.mark_done()                                          # 落 .done（当前指纹）
+        step.mark_done()                                          # 落 .done(当前指纹)
         assert step.should_run() is False                         # 输入未变 → 跳过
 
         sp = prompts / "styles" / "case-study.yaml"
@@ -207,7 +207,7 @@ class TestP1PromptAssets:
         assert step.should_run() is True                          # 指纹失效 → 重生成
 
     def test_adding_profile_busts_fingerprint(self, tmp_path):
-        # 从无到有新建 finance.yaml：prompt_profile_style_hashes 的 profile 键从缺失到出现 → 指纹变
+        # 从无到有新建 finance.yaml:prompt_profile_style_hashes 的 profile 键从缺失到出现 → 指纹变
         job_dir = self._job(tmp_path)
         prompts = tmp_path / "prompts"
         (prompts / "profiles").mkdir(parents=True)

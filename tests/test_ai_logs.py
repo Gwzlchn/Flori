@@ -1,4 +1,4 @@
-"""AI 审计日志(prompt 白盒化 Phase 1)测试:
+"""AI 审计日志(prompt 白盒化)测试:
 - gateway 在成功/降级/全败时正确记录 tier_used + 逐 tier attempts;
 - step_base.call_ai 把每次 LLM 调用落 output/ai_logs/{step}.jsonl(成功 + 失败均记);
 - call_ai_json 解析后回填 output_processed。"""
@@ -13,7 +13,7 @@ from shared.models import LLMRequest, LLMResponse
 from shared.step_base import StepBase
 
 
-# ── 测试脚手架 ──
+# 测试脚手架
 
 class _Step(StepBase):
     def __init__(self, job_dir, config=None):
@@ -53,7 +53,7 @@ def _read_log(job_dir, step="11_smart"):
     return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
 
 
-# ── gateway:attempts + tier_used ──
+# gateway:attempts + tier_used
 
 class TestGatewayAttempts:
     @pytest.mark.asyncio
@@ -120,7 +120,7 @@ class TestGatewayAttempts:
         assert resp.raw == {"dry_run": True}
 
 
-# ── step_base:ai_logs 落盘 ──
+# step_base:ai_logs 落盘
 
 class TestAiLogDump:
     def test_call_ai_writes_full_record(self, tmp_path):

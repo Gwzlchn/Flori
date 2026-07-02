@@ -1,4 +1,4 @@
-"""tests for api/routes/notes.py"""
+"""api/routes/notes.py 测试。"""
 
 from __future__ import annotations
 
@@ -70,8 +70,8 @@ class TestNotes:
 
     @pytest.mark.asyncio
     async def test_asset_null_byte(self, client, test_config):
-        # 文件名含空字节(%00→\x00)曾让 pathlib.resolve() 抛 ValueError → 裸 500;
-        # 现 _safe_path 拦成 ValueError、_serve 映射为 400(回归:schemathesis fuzz 在 CI 发现)。
+        # 文件名含空字节(%00→\x00)会让 pathlib.resolve() 抛 ValueError;
+        # _safe_path 拦下、_serve 映射为 400,不得裸 500(schemathesis fuzz 发现的回归)。
         _create_job_files(test_config.jobs_dir, "j_test")
         resp = await client.get("/api/jobs/j_test/assets/x%00")
         assert resp.status_code == 400

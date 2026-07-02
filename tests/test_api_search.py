@@ -1,4 +1,4 @@
-"""tests for api/routes/search.py（FTS5 全文检索端点）。"""
+"""tests for api/routes/search.py(FTS5 全文检索端点)。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from shared.db import Database
 def db(test_config):
     d = Database(test_config.db_path)
     d.init_schema()
-    # 灌入若干中文笔记，覆盖不同 domain / content_type / collection。
+    # 灌入若干中文笔记,覆盖不同 domain / content_type / collection。
     d.index_job_notes(
         "j_ml", "smart", "深度学习入门",
         "反向传播算法是神经网络训练的核心机制，用于计算梯度。",
@@ -39,14 +39,14 @@ def db(test_config):
 class TestSearch:
     @pytest.mark.asyncio
     async def test_null_byte_query_returns_400(self, client):
-        # q 含空字节(%00)曾让 sqlite3 FTS 绑定抛 "unterminated string" → 裸 500;
-        # 现入口中间件统一拦成 400(回归:schemathesis fuzz seed=42 发现)。
+        # 空字节(%00)若透传到 sqlite3 FTS 绑定会抛 "unterminated string" 变裸 500;
+        # 入口中间件必须统一拦成 400。
         resp = await client.get("/api/search?q=%00")
         assert resp.status_code == 400
 
     @pytest.mark.asyncio
     async def test_chinese_substring_hit(self, client):
-        # trigram 中文子串命中：3 个 job 含"反向传播"。
+        # trigram 中文子串命中:3 条笔记(分属 2 个 job)含"反向传播"。
         resp = await client.get("/api/search", params={"q": "反向传播"})
         assert resp.status_code == 200
         data = resp.json()
@@ -56,7 +56,7 @@ class TestSearch:
 
     @pytest.mark.asyncio
     async def test_snippet_highlight(self, client):
-        # snippet 取自 body 列，故用 body 中出现的词（≥3 字）验证 <mark> 高亮。
+        # snippet 取自 body 列,故用 body 中出现的词(≥3 字)验证 <mark> 高亮。
         resp = await client.get("/api/search", params={"q": "炒糖色"})
         assert resp.status_code == 200
         items = resp.json()["items"]
@@ -113,7 +113,7 @@ class TestSearch:
 
     @pytest.mark.asyncio
     async def test_missing_query(self, client):
-        # q 缺省默认空串，返回空结果不报错。
+        # q 缺省默认空串,返回空结果不报错。
         resp = await client.get("/api/search")
         assert resp.status_code == 200
         assert resp.json()["total"] == 0
@@ -126,7 +126,7 @@ class TestSearch:
 
     @pytest.mark.asyncio
     async def test_match_query_injection_safe(self, client):
-        # 含 fts5 特殊语法的查询不应抛 500，只是按短语匹配（无结果）。
+        # 含 fts5 特殊语法的查询不应抛 500,只是按短语匹配(无结果)。
         resp = await client.get("/api/search", params={"q": '" OR job_id:"'})
         assert resp.status_code == 200
         assert resp.json()["total"] == 0

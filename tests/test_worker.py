@@ -1,4 +1,4 @@
-"""tests for worker — 使用 fakeredis + 临时 DB。"""
+"""worker 单测:用 fakeredis + 临时 DB。"""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from worker.worker import (
 from worker.transport import RedisTransport
 
 
-# ── Fixtures ──
+# Fixtures
 
 
 @pytest.fixture
@@ -102,21 +102,21 @@ def make_claim(job_id="j_test_001", step="A", pool="cpu", pipeline="test",
 
 
 async def setup_task_in_queue(redis, pool="cpu", job_id="j_test_001", step="A", tags=None, priority=0):
-    """Helper: enqueue a task and set it as ready."""
+    """入队 + 置 ready + init_job,凑齐可认领的最小状态。"""
     await redis.enqueue_step(pool, job_id, step, tags or [], priority)
     await redis.set_step_status(job_id, step, "ready")
     await redis.init_job(job_id, "test", {"domain": "general", "style_tags": "[]"})
 
 
 async def request_step(worker):
-    """Helper: 通过 transport 走完整认领(等价旧 worker.fetch_task)。"""
+    """按 worker 自身 pools/tags 走完整 transport 认领。"""
     return await worker.transport.request_step(
         worker.worker_id, worker.pools, worker._pool_limits(),
         worker.tags, worker.reject_tags,
     )
 
 
-# ── Tests ──
+# Tests
 
 
 class TestRegister:
@@ -133,12 +133,12 @@ class TestRegister:
         db_worker = db.get_worker(worker.worker_id)
         assert db_worker is not None
         assert db_worker.type == "cpu"
-        # 刚注册即心跳，公共状态衍生为 online-idle（存量列仍是 idle）
+        # 刚注册即心跳,公共状态衍生为 online-idle(存量列仍是 idle)
         assert db_worker.status == "online-idle"
 
 
 class TestTagMatching:
-    """标签匹配现由 request_step 编排(原 pop_matching_task);worker 仅设 pools=[cpu] 隔离。"""
+    """标签匹配由 request_step 编排;worker 仅设 pools=[cpu] 隔离。"""
 
     @pytest.fixture(autouse=True)
     def _cpu_only(self, worker):
@@ -250,7 +250,7 @@ class TestPaused:
 
 
 class TestNoPoolFreeze:
-    """scene 已并入 cpu 池,取消 scene↔cpu 全局冻结:认领/释放任何池都不再自动冻结其他池。"""
+    """认领/释放任何池都不自动冻结其他池。"""
     @pytest.mark.asyncio
     async def test_claiming_cpu_step_does_not_freeze(self, worker, redis):
         await redis.enqueue_step("cpu", "j1", "A", [], priority=0)
@@ -261,7 +261,7 @@ class TestNoPoolFreeze:
         claim = await request_step(worker)
         assert claim is not None
         assert claim["pool"] == "cpu"
-        # 关键:认领 cpu 步全程零冻结(旧版认领 scene 会冻 cpu,现已移除)。
+        # 关键:认领 cpu 步全程零冻结。
         assert await redis.is_pool_frozen("cpu") is False
 
 
@@ -286,7 +286,7 @@ class TestSlotRelease:
 class TestUseGpuGating:
     """直接驱动真实 worker.execute,捕获传给 runner 的 StepContext.use_gpu,
     覆盖 worker.py 内联表达式 use_gpu=("gpu" in tags) and (pool=="gpu" or "gpu" in raw_tags)。
-    取代此前在 test_step_runner_docker.py 里复刻该表达式只断副本(改真实代码测试仍绿)的做法。"""
+    不复刻表达式断言副本:那样改了真实代码测试仍绿。"""
 
     async def _captured_use_gpu(self, worker, tmp_jobs_dir, *, step="A", pool="cpu"):
         (tmp_jobs_dir / "j_gpu").mkdir(exist_ok=True)
@@ -356,8 +356,8 @@ class TestIdleTimeout:
 class TestAutoDiscoverTags:
     @pytest.fixture(autouse=True)
     def _no_real_net_probe(self):
-        # auto_discover_tags 现会做网络探测(net-zone),默认屏蔽真探测(返回空 zone),
-        # 避免单测联网/卡;net-zone 专项用例自行 patch _probe_reachable 验证逻辑。
+        # auto_discover_tags 内含 net-zone 网络探测;默认屏蔽真探测,返回空 zone,
+        # 避免单测联网/卡。net-zone 专项用例自行 patch _probe_reachable 验证逻辑。
         with patch("worker.worker._probe_net_zones", return_value=set()):
             yield
 
@@ -412,7 +412,7 @@ class TestAutoDiscoverTags:
         return env
 
     def test_sessdata_does_not_add_routing_tag(self):
-        # SESSDATA 是 worker 本地凭证(下载步自读),【不】再自报 'bili' 路由 tag。
+        # SESSDATA 是 worker 本地凭证(下载步自读),不自报 'bili' 路由 tag。
         with patch.dict(os.environ, self._clean_env(BILI_SESSDATA="x", DATA_DIR="/no-such"), clear=True):
             with patch("shutil.which", return_value=None):
                 assert "bili" not in auto_discover_tags()
@@ -426,7 +426,7 @@ class TestAutoDiscoverTags:
                     assert "net-cn" in tags and "net-global" in tags
 
     def test_no_cred_no_bili_no_net_proxy(self, tmp_path):
-        # 无凭证 → 无 bili;net-proxy 机制已移除(改 net-zone,由探测决定,本用例 autouse 屏蔽为空)。
+        # 无凭证 → 无 bili;路由走 net-zone 探测,不产生 net-proxy tag(本用例 autouse 屏蔽探测为空)。
         with patch.dict(os.environ, self._clean_env(DATA_DIR=str(tmp_path)), clear=True):
             with patch("shutil.which", return_value=None):
                 tags = auto_discover_tags()
@@ -462,7 +462,7 @@ class TestNetZoneProbe:
 
 
 class TestWorkerPoolsCli:
-    """能力统一用 --pools(旧 --type / WORKER_POOLS 已删):--pools 必填、worker_type 从 pools 派生、
+    """能力统一用 --pools:--pools 必填、worker_type 从 pools 派生、
     多池派生 type 的 worker_id 前缀 '+'→'-'。"""
 
     def test_pools_required_and_no_type_arg(self, monkeypatch):
@@ -473,7 +473,7 @@ class TestWorkerPoolsCli:
         monkeypatch.setattr("sys.argv", ["worker", "--pools", "cpu", "gpu"])
         args = wm.parse_args()
         assert args.pools == ["cpu", "gpu"]                   # 多池解析成列表
-        assert not hasattr(args, "type")                      # --type 已删
+        assert not hasattr(args, "type")                      # 不存在 --type 参数
 
     def test_worker_type_derived_from_pools(self):
         # main 里 worker_type = "+".join(sorted(set(pools))):单池="cpu",多池="cpu+gpu"(无主次)。
@@ -499,7 +499,7 @@ class TestUpdateWorkerStatus:
 
     @pytest.mark.asyncio
     async def test_updates_db_fields(self, worker, redis, db):
-        # /api/workers 读 DB，状态变更必须写回 DB
+        # /api/workers 读 DB,状态变更必须写回 DB
         await worker.register()
         await worker.transport.update_status(worker.worker_id, "busy", "j1", "A")
 
@@ -524,7 +524,7 @@ class TestUpdateWorkerStatus:
 class TestHeartbeatLoop:
     @pytest.mark.asyncio
     async def test_heartbeat_refreshes_db(self, worker, redis, db, monkeypatch):
-        # 心跳循环必须刷新 DB 的 last_heartbeat，否则前端 30s 后判 offline
+        # 心跳循环必须刷新 DB 的 last_heartbeat,否则前端 30s 后判 offline
         from datetime import datetime, timedelta, timezone
 
         await worker.register()
@@ -548,7 +548,7 @@ class TestHeartbeatLoop:
 
     @pytest.mark.asyncio
     async def test_heartbeat_writes_live_load_to_redis(self, worker, redis):
-        # B 档:心跳带 load → 写 redis worker hash 的 load 字段(JSON);空 load 不写。
+        # 心跳带 load → 写 redis worker hash 的 load 字段(JSON);空 load 不写。
         await worker.register()
         await worker.transport.heartbeat(
             worker.worker_id, load={"cpu_pct": 12.5, "mem_pct": 40.0, "loadavg": 0.7},
@@ -607,7 +607,7 @@ class TestParseErrorType:
 
 
 class TestExecuteFullFlow:
-    """execute 全流程测试：mock _run_step 避免真实子进程。"""
+    """execute 全流程测试:mock _run_step 避免真实子进程。"""
 
     @pytest.mark.asyncio
     async def test_success_publishes_and_updates_db(self, worker, redis, db, tmp_jobs_dir):
@@ -650,8 +650,8 @@ class TestExecuteFullFlow:
 
     @pytest.mark.asyncio
     async def test_push_failure_on_success_reports_failed_not_done(self, worker, redis, db, tmp_jobs_dir):
-        # ★ returncode==0 但产物推送失败 → 必须报 failed(绝不标 done),否则下游拉不到输入
-        #   (上游 done 但产物缺失 → input_missing)。重试时会重新生成并推送。
+        # returncode==0 但产物推送失败 → 必须报 failed(绝不标 done):否则下游拉不到输入,
+        # 上游 done 但产物缺失即 input_missing。重试时会重新生成并推送。
         await worker.register()
         db.create_job(make_job())
         db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.READY, pool="cpu"))
@@ -809,7 +809,7 @@ class TestPoolExhaustion:
     async def test_full_pool_returns_none(self, worker, redis):
         """When pool is at capacity, fetch_task should return None for that pool."""
         await worker.register()
-        # Fill pool to capacity (limit=3 in fixture)——须用【不同】holder 才真占满(同 holder 幂等只占 1)。
+        # Fill pool to capacity (limit=3 in fixture)。须用不同 holder 才真占满:同 holder 幂等只占 1。
         for i in range(3):
             await redis.try_acquire_slot("cpu", 3, f"filler{i}")
 
@@ -913,7 +913,7 @@ class TestConcurrency:
 
 
 class TestUploadFaultTolerance:
-    """上报通道抖动不得污染步骤结论 / 杀 worker(审计 I-H2/I-H3)。"""
+    """上报通道抖动不得污染步骤结论,也不得杀 worker。"""
 
     @pytest.mark.asyncio
     async def test_success_not_flipped_when_usage_collection_raises(
@@ -945,7 +945,7 @@ class TestUploadFaultTolerance:
     @pytest.mark.asyncio
     async def test_gateway_upload_methods_best_effort_on_http_error(self, monkeypatch):
         # gateway 上报四法遇 httpx 错误必须 best-effort(重试后只 log,不抛);否则 execute 的
-        # finally release 抛出会逃逸 _claim_loop 杀掉整个 worker(审计 I-H3)。
+        # finally release 抛出会逃逸 _claim_loop 杀掉整个 worker。
         import httpx
         import worker.gateway_transport as gw_mod
         from worker.gateway_transport import GatewayTransport
@@ -1006,7 +1006,7 @@ class TestWorkerIdentity:
         assert _resolve_worker_id("cpu") == first
 
     def test_default_id_file_under_workers_dir(self, monkeypatch):
-        """默认 id 文件收进 /data/workers/,不再散在 /data 根。"""
+        """默认 id 文件收进 /data/workers/,不散在 /data 根。"""
         from worker.transport import default_worker_id_file
         monkeypatch.delenv("WORKER_ID_FILE", raising=False)
         monkeypatch.delenv("WORKER_NAME", raising=False)
@@ -1029,7 +1029,7 @@ class _FakeGateway:
 
 
 class TestAITaskExecution:
-    """worker 认领并执行独立 AI task(kind='ai')+ 白盒审计 + 错误回执 + 认领路由(P1-2)。"""
+    """worker 认领并执行独立 AI task(kind='ai'),含白盒审计、错误回执、认领路由。"""
 
     def _ai_claim(self, task_id="at_1", step="synthesis", domain="dl"):
         return {
@@ -1138,7 +1138,7 @@ class TestReadMediaDuration:
 
 class TestWorkerAuthRecovery:
     """worker 认证自愈:401(WorkerAuthRejected)→ 重注册 + 指数退避;连续超阈值 → 自杀(_shutdown)。
-    根因:旧 worker 拿 401 不重注册也不退避,每秒死刷 jobs/request 刷爆 api 日志。"""
+    没有重注册与退避时,401 会让 worker 每秒死刷 jobs/request 刷爆 api 日志。"""
 
     @pytest.mark.asyncio
     async def test_auth_failure_reregisters_and_backs_off(self, worker, monkeypatch):
@@ -1225,7 +1225,7 @@ class TestWorkerRegisterRetry:
         monkeypatch.setattr(worker.transport, "register", flaky_register)
         monkeypatch.setenv("REGISTER_RETRY_SEC", "0")        # 测试不等
         await worker.register()                               # 不崩
-        assert len(calls) == 2                                # 第一次 ConnectError → 重试 → 第二次成功
+        assert len(calls) == 2                                # 第一次 ConnectError 触发重试,第二次成功
         assert worker.worker_id == "io-stable123"
         assert "register_connect_retry" in capsys.readouterr().out   # 打了 WARN(非整屏 traceback)
 

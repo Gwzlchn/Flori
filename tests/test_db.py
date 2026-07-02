@@ -199,7 +199,7 @@ class TestWorkerCRUD:
         w.status = "busy"
         w.tasks_completed = 5
         db.upsert_worker(w)
-        # get_worker 衍生公共状态；要验证存量 status 列直接读底层。
+        # get_worker 衍生公共状态;要验证存量 status 列直接读底层。
         row = db._conn.execute(
             "SELECT status FROM workers WHERE id=?", ("ai-aabbccdd",)
         ).fetchone()
@@ -249,7 +249,7 @@ class TestWorkerCRUD:
         assert workers["cpu-stale"].status == "stale"
 
     def test_list_workers_persists_stale(self, db):
-        """越过 stale 窗口的 worker，公共状态 stale 要落库供 GC 识别。"""
+        """越过 stale 窗口的 worker,公共状态 stale 要落库供 GC 识别。"""
         from datetime import datetime, timedelta, timezone
 
         old = datetime.now(timezone.utc) - timedelta(minutes=30)
@@ -258,14 +258,14 @@ class TestWorkerCRUD:
                    first_seen=old, last_heartbeat=old)
         )
         db.list_workers()
-        # 直接读底层列，绕过 list_workers 的衍生，确认已持久化为 stale。
+        # 直接读底层列,绕过 list_workers 的衍生,确认已持久化为 stale。
         row = db._conn.execute(
             "SELECT status FROM workers WHERE id=?", ("cpu-zombie",)
         ).fetchone()
         assert row["status"] == "stale"
 
     def test_list_workers_paused_overlay(self, db):
-        """paused 是管理员叠加位(独立 admin_status 列)：仍在线显示 paused，离线后回落到失联归类。"""
+        """paused 是管理员叠加位(独立 admin_status 列):仍在线显示 paused,离线后回落到失联归类。"""
         from datetime import datetime, timedelta, timezone
 
         fresh = datetime.now(timezone.utc)
@@ -293,7 +293,7 @@ class TestWorkerCRUD:
         db.set_worker_status("cpu-1", "offline")
         got = db.get_worker("cpu-1")
         assert got.status == "offline"
-        # last_heartbeat 未被刷新（仍停在 10 分钟前）
+        # last_heartbeat 未被刷新(仍停在 10 分钟前)
         assert (datetime.now(timezone.utc) - got.last_heartbeat).total_seconds() > 300
 
     def test_delete_worker(self, db):
@@ -311,9 +311,9 @@ class TestWorkerCRUD:
         )
         db.update_worker_heartbeat("cpu-1")
         got = db.get_worker("cpu-1")
-        # 心跳被刷新到接近现在（而非停在 10 分钟前）
+        # 心跳被刷新到接近现在(而非停在 10 分钟前)
         assert (datetime.now(timezone.utc) - got.last_heartbeat).total_seconds() < 5
-        # 公共状态由心跳新鲜度衍生：刚心跳 + 无任务 -> online-idle
+        # 公共状态由心跳新鲜度衍生:刚心跳 + 无任务 -> online-idle
         assert got.status == "online-idle"
 
     def test_update_worker_heartbeat_updates_status_and_task(self, db):
@@ -329,7 +329,7 @@ class TestWorkerCRUD:
 
 
 class TestWorkerAwareUTC:
-    """UTC 全量迁移：读出的时间戳必须是 aware-UTC，且与 aware now 相减不崩。"""
+    """读出的时间戳必须是 aware-UTC,且与 aware now 相减不崩。"""
 
     def test_default_first_seen_is_aware_utc(self, db):
         from datetime import timezone
@@ -351,10 +351,10 @@ class TestWorkerAwareUTC:
         assert delta.total_seconds() < 5
 
     def test_legacy_naive_row_parsed_as_utc(self, db):
-        """旧库里存的 naive 时间串(无 tzinfo)被补成 UTC，兼容历史数据。"""
+        """旧库里存的 naive 时间串(无 tzinfo)被补成 UTC,兼容历史数据。"""
         from datetime import datetime, timezone
 
-        # 模拟旧数据：直接写一个 naive ISO 串进 DB（绕过模型默认值）
+        # 模拟旧数据:直接写一个 naive ISO 串进 DB(绕过模型默认值)
         naive = datetime(2026, 1, 1, 0, 0, 0)
         db._conn.execute(
             "INSERT INTO workers (id, type, status, first_seen, last_heartbeat) "
@@ -365,19 +365,19 @@ class TestWorkerAwareUTC:
         got = db.get_worker("cpu-legacy")
         assert got.first_seen.tzinfo is not None
         assert got.last_heartbeat.tzinfo is not None
-        # 不崩 + 时刻不被时区平移（naive 当作 UTC，绝对值不变）
+        # 不崩 + 时刻不被时区平移(naive 当作 UTC,绝对值不变)
         assert got.first_seen == datetime(2026, 1, 1, tzinfo=timezone.utc)
 
     def test_list_workers_stale_with_legacy_naive_heartbeat(self, db):
-        """list_workers 对 naive 旧行做 stale 判定不崩，且正确判失联。"""
+        """list_workers 对 naive 旧行做 stale 判定不崩,且正确判失联。"""
         from datetime import datetime, timezone
 
-        # 新鲜（aware）
+        # 新鲜(aware)
         db.upsert_worker(
             Worker(id="cpu-fresh", type="cpu", status="idle",
                    last_heartbeat=datetime.now(timezone.utc))
         )
-        # 旧 naive 行：很久以前
+        # 旧 naive 行:很久以前
         db._conn.execute(
             "INSERT INTO workers (id, type, status, first_seen, last_heartbeat) "
             "VALUES (?,?,?,?,?)",
@@ -390,7 +390,7 @@ class TestWorkerAwareUTC:
 
 
 class TestWorkerToken:
-    """per-worker token：仅存 sha256 hash，round-trip + 吊销使心跳/认领失效。"""
+    """per-worker token:仅存 sha256 hash,round-trip + 吊销使心跳/认领失效。"""
 
     def test_upsert_and_get_by_hash(self, db):
         from datetime import datetime, timezone
@@ -502,7 +502,7 @@ class TestCollection:
 
 
 class TestCollectionM2:
-    """M2：集合 update / delete=解绑 / domain 过滤 / job_count 维护。"""
+    """集合 update / delete=解绑 / domain 过滤 / job_count 维护。"""
 
     def test_update_collection(self, db):
         db.create_collection(Collection(id="c1", name="旧名", domain="ml", tags=["a"]))
@@ -531,18 +531,18 @@ class TestCollectionM2:
         job = Job(id="j_m2_1", content_type="video", pipeline="video", collection_id="c1")
         db.create_job(job)
         db.delete_collection("c1")
-        # 集合没了，但 job 保留、collection_id 置空（解绑）。
+        # 集合没了,但 job 保留、collection_id 置空(解绑)。
         assert db.get_collection("c1") is None
         got = db.get_job("j_m2_1")
         assert got is not None
         assert got.collection_id is None
 
     def test_delete_collection_purge_strips_occurrences(self, db):
-        # purge=True 删名下 job 时，必须同步摘除其 glossary 出现记录，不留悬空 job_id。
+        # purge=True 删名下 job 时,必须同步摘除其 glossary 出现记录,不留悬空 job_id。
         db.create_collection(Collection(id="c1", name="c1", domain="ml"))
         db.create_job(Job(id="j_purge_1", content_type="video", pipeline="video", collection_id="c1"))
         db.add_glossary_suggestion("ml", "注意力机制", "j_purge_1", "video")
-        db.add_glossary_suggestion("ml", "注意力机制", "j_other", "video")  # 不属该集合，应保留
+        db.add_glossary_suggestion("ml", "注意力机制", "j_other", "video")  # 不属该集合,应保留
         db.delete_collection("c1", purge=True)
         assert db.get_job("j_purge_1") is None
         got = db.get_glossary_term("ml", "注意力机制")
@@ -562,12 +562,12 @@ class TestCollectionM2:
         assert db.get_collection("c1").job_count == 0
 
     def test_increment_collection_count_empty_id_noop(self, db):
-        # collection_id 为空串 -> no-op，不抛。
+        # collection_id 为空串 -> no-op,不抛。
         db.increment_collection_count("", 1)
 
 
 class TestCollectionSyncStatus:
-    """P2 item A：集合同步状态字段(last_sync_status / last_sync_error)读写。"""
+    """集合同步状态字段(last_sync_status / last_sync_error)读写。"""
 
     def test_defaults_none(self, db):
         db.create_collection(Collection(id="c1", name="c1", domain="ml"))
@@ -612,7 +612,7 @@ class TestCollectionSyncStatus:
 
 
 class TestCountJobsByStatusScoped:
-    """P2 item C：count_jobs_by_status(collection_id) 按集合的状态计数。"""
+    """count_jobs_by_status(collection_id) 按集合的状态计数。"""
 
     def test_scoped_counts(self, db):
         db.create_collection(Collection(id="c1", name="c1", domain="ml"))
@@ -634,7 +634,7 @@ class TestCountJobsByStatusScoped:
 
 
 class TestGlossary:
-    """M2：术语表 upsert / suggestion / accept / list / delete。"""
+    """术语表 upsert / suggestion / accept / list / delete。"""
 
     def test_upsert_and_get(self, db):
         db.upsert_glossary_term("ml", "梯度下降", definition="一种优化算法", related=["反向传播"])
@@ -653,7 +653,7 @@ class TestGlossary:
         db.upsert_glossary_term("ml", "Transformer", definition="自注意力模型")
         got = db.get_glossary_term("ml", "Transformer")
         assert got["definition"] == "自注意力模型"
-        # upsert 保留已有 occurrences，不清空出现索引。
+        # upsert 保留已有 occurrences,不清空出现索引。
         assert any(o["job_id"] == "j1" for o in got["occurrences"])
 
     def test_add_suggestion_creates_suggested(self, db):
@@ -674,7 +674,7 @@ class TestGlossary:
         db.upsert_glossary_term("ml", "梯度下降", definition="d")  # accepted
         db.add_glossary_suggestion("ml", "梯度下降", "j9")
         got = db.get_glossary_term("ml", "梯度下降")
-        # 仍 accepted，只并入出现。
+        # 仍 accepted,只并入出现。
         assert got["status"] == "accepted"
         assert any(o["job_id"] == "j9" for o in got["occurrences"])
 
@@ -692,7 +692,7 @@ class TestGlossary:
         db.add_glossary_suggestion("ml", "梯度消失", "j2", definition="深层网络梯度趋零")
         got = db.get_glossary_term("ml", "梯度消失")
         assert got["definition"] == "深层网络梯度趋零"
-        # 仍合并 occurrence，不降级。
+        # 仍合并 occurrence,不降级。
         assert {o["job_id"] for o in got["occurrences"]} == {"j1", "j2"}
 
     def test_add_suggestion_does_not_overwrite_nonempty_definition(self, db):
@@ -704,7 +704,7 @@ class TestGlossary:
         assert {o["job_id"] for o in got["occurrences"]} == {"j1", "j2"}
 
     def test_add_suggestion_respects_definition_locked(self, db):
-        # (d) definition_locked=1（即便原定义为空）-> 第二次不补填。
+        # (d) definition_locked=1(即便原定义为空) -> 第二次不补填。
         db.add_glossary_suggestion("ml", "钉住词", "j1")  # 无定义
         db._conn.execute(
             "UPDATE glossary SET definition_locked=1 WHERE domain=? AND term=?",
@@ -714,7 +714,7 @@ class TestGlossary:
         db.add_glossary_suggestion("ml", "钉住词", "j2", definition="不该写入")
         got = db.get_glossary_term("ml", "钉住词")
         assert got["definition"] == ""
-        # 钉住只锁定义，occurrence 仍照常并入。
+        # 钉住只锁定义,occurrence 仍照常并入。
         assert {o["job_id"] for o in got["occurrences"]} == {"j1", "j2"}
 
     def test_accept_term(self, db):
@@ -742,7 +742,7 @@ class TestGlossary:
 
 
 class TestNotesFTS:
-    """M2：笔记全文索引 + 中文子串检索（trigram）。"""
+    """笔记全文索引 + 中文子串检索(trigram)。"""
 
     def test_index_and_search_chinese_substring(self, db):
         db.index_job_notes(
@@ -759,7 +759,7 @@ class TestNotesFTS:
         assert "反向传播" in items[0]["snippet"]
 
     def test_index_is_idempotent_per_job_note_type(self, db):
-        # trigram tokenizer 至少需 3 字才命中，故关键词用 3+ 字。
+        # trigram tokenizer 至少需 3 字才命中,故关键词用 3+ 字。
         db.index_job_notes("j1", "smart", "t1", "第一版讲解卷积神经网络。")
         db.index_job_notes("j1", "smart", "t2", "第二版讲解循环神经网络。")
         total, items = db.search_notes("神经网络")
@@ -800,7 +800,7 @@ class TestNotesFTS:
         assert db.search_notes("   ") == (0, [])
 
     def test_search_quote_injection_safe(self, db):
-        # 含双引号的查询不应破坏 MATCH 语法（转义后当普通短语处理）。
+        # 含双引号的查询不应破坏 MATCH 语法(转义后当普通短语处理)。
         db.index_job_notes("j1", "smart", "a", '他说 "你好世界" 然后离开。')
         total, _ = db.search_notes('"你好世界"')
         assert total == 1
@@ -836,7 +836,7 @@ class TestAppCredentials:
         assert db.get_credential("never-existed") is None
 
     def test_plaintext_when_no_key(self, db, monkeypatch):
-        # 无 FLORI_SECRET_KEY 时保持明文行为：底层存的就是原文。
+        # 无 FLORI_SECRET_KEY 时保持明文行为:底层存的就是原文。
         monkeypatch.delenv("FLORI_SECRET_KEY", raising=False)
         import shared.db as dbmod
         dbmod._fernet.cache_clear()
@@ -849,8 +849,8 @@ class TestAppCredentials:
 
 
 class TestAppCredentialsEncryption:
-    """at-rest 加密：设了 FLORI_SECRET_KEY → Fernet 加密落库 + round-trip；
-    历史明文行透传；无 key 退回明文。容器当前未装 cryptography,故整类 importorskip。"""
+    """at-rest 加密:设了 FLORI_SECRET_KEY → Fernet 加密落库 + round-trip;
+    历史明文行透传;无 key 退回明文。容器当前未装 cryptography,故整类 importorskip。"""
 
     @pytest.fixture
     def fernet_key(self, monkeypatch):
@@ -940,7 +940,6 @@ class TestDBEdgeCases:
             db.create_job(job2)
 
     def test_get_usage_summary_with_since(self, db):
-        """get_usage_summary filters by since parameter."""
         from datetime import datetime, timedelta
 
         now = datetime.now()
@@ -999,14 +998,14 @@ class TestConcurrency:
 
 
 class TestAuditFixes:
-    """审计修复的回归保护:FTS 同步 / 原子级联删 / 终态守卫 / 列迁移 / 状态计数。"""
+    """回归保护:FTS 同步 / 原子级联删 / 终态守卫 / 列迁移 / 状态计数。"""
 
     def _job(self, jid="j_fix_1", collection_id=None, domain="ml"):
         return Job(id=jid, content_type="video", pipeline="video",
                    domain=domain, collection_id=collection_id, title="T")
 
     def test_update_step_only_if_active_guard(self, db, sample_job):
-        # M1:终态(done)步不被迟到的 failed 覆盖
+        # 终态(done)步不被迟到的 failed 覆盖
         db.create_job(sample_job)
         db.upsert_step(Step(job_id=sample_job.id, name="s1", pool="cpu"))
         db.update_step(sample_job.id, "s1", status="done")
@@ -1022,7 +1021,7 @@ class TestAuditFixes:
         assert steps["s1"].status == StepStatus.FAILED  # running→failed 正常写入
 
     def test_delete_collection_syncs_fts(self, db):
-        # L29:删集合后 FTS 行的 collection_id 同步清空
+        # 删集合后 FTS 行的 collection_id 同步清空
         db.create_collection(Collection(id="c1", name="C", domain="ml"))
         db.create_job(self._job("j1", collection_id="c1"))
         db.index_job_notes("j1", "smart", "标题", "深度学习正文内容", "video", "ml", "c1")
@@ -1033,7 +1032,7 @@ class TestAuditFixes:
         assert all_items and all_items[0]["collection_id"] is None
 
     def test_update_job_syncs_fts_metadata(self, db):
-        # L30:改 job 的 title/domain/collection_id 同步进 FTS 行
+        # 改 job 的 title/domain/collection_id 同步进 FTS 行
         db.create_job(self._job("j2", domain="ml"))
         db.index_job_notes("j2", "smart", "旧标题", "强化学习正文内容", "video", "ml", "")
         db.update_job("j2", title="新标题", domain="rl")
@@ -1043,7 +1042,7 @@ class TestAuditFixes:
         assert none == []  # 旧 domain 不再命中
 
     def test_delete_job_cascade_atomic(self, db):
-        # L31:级联删 job 同时清 FTS + 集合计数
+        # 级联删 job 同时清 FTS + 集合计数
         db.create_collection(Collection(id="c2", name="C2", domain="ml"))
         db.create_job(self._job("j3", collection_id="c2"))
         db.increment_collection_count("c2", 1)
@@ -1054,7 +1053,7 @@ class TestAuditFixes:
         assert db.get_collection("c2").job_count == 0   # 计数 -1
 
     def test_delete_job_cascade_cleans_glossary_occurrences(self, db):
-        # N5:删 job 摘掉 glossary.occurrences 里的悬空 job_id(保留概念与其它出现)
+        # 删 job 摘掉 glossary.occurrences 里的悬空 job_id(保留概念与其它出现)
         db.create_job(self._job("j4"))
         db.add_glossary_suggestion("ml", "Transformer", "j4")
         db.add_glossary_suggestion("ml", "Transformer", "j_other")
@@ -1064,7 +1063,7 @@ class TestAuditFixes:
         assert "j4" not in ids and "j_other" in ids
 
     def test_count_jobs_by_status(self, db):
-        # L17:一次 GROUP BY 取各状态计数
+        # 一次 GROUP BY 取各状态计数
         db.create_job(Job(id="ja", content_type="video", pipeline="video", status=JobStatus.DONE))
         db.create_job(Job(id="jb", content_type="video", pipeline="video", status=JobStatus.DONE))
         db.create_job(Job(id="jc", content_type="video", pipeline="video", status=JobStatus.FAILED))
@@ -1072,11 +1071,11 @@ class TestAuditFixes:
         assert counts.get("done") == 2 and counts.get("failed") == 1
 
     def test_schema_version_stamped_after_init(self, db):
-        # #SchemaVersion: init_schema 后 user_version 被打戳为 1(可查询的迁移钩子)。
+        # init_schema 后 user_version 被打戳为 1(可查询的迁移钩子)。
         assert db.schema_version() == 1
 
     def test_ensure_columns_adds_missing(self, tmp_path):
-        # K:旧库缺列时 init_schema 通过 _ensure_columns 自动补齐,不崩
+        # 旧库缺列时 init_schema 通过 _ensure_columns 自动补齐,不崩
         import sqlite3
         p = tmp_path / "legacy.db"
         con = sqlite3.connect(str(p))
@@ -1096,7 +1095,7 @@ class TestAuditFixes:
 
 
 class TestConceptTimeline:
-    """#21: concept_timeline 的分桶/容错的直接 DB 级测试(此前仅 API happy-path month)。
+    """concept_timeline 的分桶/容错的直接 DB 级测试。
 
     seed 约定:job 用显式 created_at,glossary 的 occurrence 经 job_id 映射到该 created_at;
     concept_timeline 仅取 domain 内 jobs 的 created_at(域外 job_id 不贡献计数)。"""
@@ -1219,7 +1218,7 @@ class TestConceptTimeline:
 
 
 class TestJobFacets:
-    """#21: job_facets 的直接 DB 级测试(source/domain/status 后端聚合计数)。"""
+    """job_facets 的直接 DB 级测试(source/domain/status 后端聚合计数)。"""
 
     def test_facet_structure_for_seeded_dataset(self, db):
         from datetime import datetime
@@ -1273,7 +1272,7 @@ class TestJobsBrief:
 
 
 class TestDeleteCascadeCompleteness:
-    """删 job/集合时彻底清:ai_usage(G2) + 订阅 ingested_items(G5,彻底删除)。"""
+    """删 job/集合时彻底清:ai_usage + 订阅 ingested_items。"""
 
     def test_delete_job_cascade_clears_ai_usage_and_ingested(self, db):
         db.create_job(Job(id="jc_1", content_type="article", pipeline="article",
@@ -1287,8 +1286,8 @@ class TestDeleteCascadeCompleteness:
         db.delete_job_cascade("jc_1", collection_id="col_x", item_id="item_42")
 
         assert db.get_job("jc_1") is None
-        assert db.list_usage_by_job("jc_1") == []     # ai_usage 已删(G2)
-        assert "item_42" not in db.ingested_item_ids("col_x")  # ingested_items 已删(G5)
+        assert db.list_usage_by_job("jc_1") == []     # ai_usage 已删
+        assert "item_42" not in db.ingested_item_ids("col_x")  # ingested_items 已删
 
     def test_delete_job_cascade_keeps_ingested_when_no_item_id(self, db):
         # 不传 item_id(手动 job)→ 不动 ingested_items。
@@ -1306,11 +1305,11 @@ class TestDeleteCascadeCompleteness:
                                    job_id="jp_1", cost_usd=0.2))
         db.delete_collection("col_p", purge=True)
         assert db.get_job("jp_1") is None
-        assert db.list_usage_by_job("jp_1") == []     # purge 也清 ai_usage(G2)
+        assert db.list_usage_by_job("jp_1") == []     # purge 也清 ai_usage
 
 
 class TestLineageP2b:
-    """P2b: lineage_key / is_current 归组、版本列表、删 current 后回退。"""
+    """lineage_key / is_current 归组、版本列表、删 current 后回退。"""
 
     def _mk(self, db, jid, lineage, created, ct="article", cid=None):
         from datetime import datetime, timezone
@@ -1349,7 +1348,7 @@ class TestLineageP2b:
 
 
 class TestAITaskLogs:
-    """独立 AI task 白盒审计(ai_task_logs)落表/读取(P1-2)。"""
+    """独立 AI task 白盒审计(ai_task_logs)落表/读取。"""
 
     def test_record_and_get(self, db):
         import json

@@ -1,4 +1,4 @@
-"""tests for shared/pricing.py(LiteLLM 价表)。夹具取自真实 LiteLLM JSON 结构(2026-06 拉取核对)。"""
+"""tests for shared/pricing.py(LiteLLM 价表)。夹具取自真实 LiteLLM JSON 结构,实际拉取核对过。"""
 
 import pytest
 
@@ -89,7 +89,7 @@ async def test_fetch_drops_sample_spec(monkeypatch):
     assert "claude-opus-4-8" in table
 
 
-# ── PricingStore:更新时间戳 + sidecar 持久化(批2.2)──
+# PricingStore:更新时间戳 + sidecar 持久化
 
 class _MemStorage:
     """最小内存 storage:仅 read_file/write_file,按 (job_id, rel) 存字节(模拟 MinIO 伪 job)。"""

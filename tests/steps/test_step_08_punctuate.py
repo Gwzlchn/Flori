@@ -1,4 +1,4 @@
-"""tests for steps/video/step_08_punctuate.py"""
+"""steps/video/step_08_punctuate.py 的测试。"""
 
 import json
 import os
@@ -40,8 +40,8 @@ class TestPunctuateStep:
         result = step.execute()
         assert result["lines"] == 2
         assert result["chunks"] == 1
-        # DRY_RUN 下 AI 输出是占位串([DRY_RUN] ...),真实标点内容无法在此验证(那需非-DRY_RUN
-        # 注入 fake 响应,属另一类用例)。这里在"存在"之上至少断产物非空——挡写出空文件。
+        # DRY_RUN 下 AI 输出是占位串([DRY_RUN] ...),真实标点内容无法在此验证;
+        # 那需要非 DRY_RUN 注入 fake 响应,属另一类用例。这里至少断产物非空,挡写出空文件。
         assert (job_dir / "output" / "transcript.md").read_text().strip()
 
     def test_chunking(self, tmp_path):

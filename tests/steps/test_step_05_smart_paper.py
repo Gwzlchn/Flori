@@ -1,4 +1,4 @@
-"""tests for steps/paper/step_05_smart_paper.py"""
+"""steps/paper/step_05_smart_paper.py 的测试。"""
 
 import json
 import os

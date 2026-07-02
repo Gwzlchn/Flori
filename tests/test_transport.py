@@ -1,4 +1,4 @@
-"""tests for transport — RedisTransport(fakeredis) + GatewayTransport(mock httpx)。"""
+"""worker transport 单测:RedisTransport 用 fakeredis,GatewayTransport 用 mock httpx。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from worker.transport import RedisTransport
 from worker.gateway_transport import GatewayTransport
 
 
-# ── Fixtures ──
+# Fixtures
 
 
 @pytest.fixture
@@ -47,7 +47,7 @@ REGISTER_ARGS = dict(
 )
 
 
-# ── RedisTransport ──
+# RedisTransport
 
 
 class TestRedisTransportRegister:
@@ -63,7 +63,7 @@ class TestRedisTransportRegister:
         assert db.get_worker("w_abc") is not None
 
 
-# ── RedisTransport 粗粒度认领/上报 ──
+# RedisTransport 粗粒度认领/上报
 
 
 WORKER_ID = "w_t1"
@@ -111,7 +111,7 @@ class TestRequestStep:
 
         assert claim is not None
         assert claim["pool"] == "cpu"
-        # scene 并入 cpu、取消冻结:认领不再冻结其他池。
+        # 认领不冻结其他池。
         assert await redis.is_pool_frozen("cpu") is False
 
     @pytest.mark.asyncio
@@ -179,7 +179,7 @@ class TestRequestStep:
                                      {"vision"}, set())
 
         assert claim is None
-        # CAS 失败路径:槽位释放 + scene 触发的 cpu 冻结被解除
+        # CAS 失败路径:槽位释放,不留下池冻结
         assert await redis.get_pool_count("scene") == 0
         assert await redis.is_pool_frozen("cpu") is False
 
@@ -343,7 +343,7 @@ class TestRelease:
         assert await redis.is_pool_frozen("cpu") is True
 
 
-# ── GatewayTransport ──
+# GatewayTransport
 
 
 def make_gateway(redis, db, tmp_path, *, registration_token="flw-tok"):
@@ -431,8 +431,8 @@ class TestGatewayHeartbeat:
     async def test_401_raises_worker_auth_rejected(
         self, redis, db, tmp_path, monkeypatch,
     ):
-        # 心跳被 401(per-worker token 失效)→ 抛 WorkerAuthRejected,交主循环走重注册/退避/6h自杀
-        # (worker 401 自愈,commit 65d18ab);不再 fall-through 到 inner——认证失败优先上抛,inner 不被调。
+        # 心跳被 401(per-worker token 失效)→ 抛 WorkerAuthRejected,交主循环走重注册/退避/6h自杀;
+        # 认证失败优先上抛,不 fall-through 到 inner。
         from worker.transport import WorkerAuthRejected
         gw, _ = make_gateway(redis, db, tmp_path)
         gw._client.post.return_value = make_response(status_code=401)
@@ -511,7 +511,7 @@ class TestGatewayDelegation:
 
 
 class TestGatewayCoarseHTTP:
-    """粗粒度认领/上报走 gateway HTTP,不再委派内层(避免经 redis 双重认领)。"""
+    """粗粒度认领/上报走 gateway HTTP,不委派内层,避免经 redis 双重认领。"""
 
     @pytest.mark.asyncio
     async def test_request_step_posts_and_parses_claim(self, redis, db, tmp_path):
@@ -713,7 +713,7 @@ class TestGatewayShadowWriteWithInner:
         assert await redis.get_worker_info("w_srv") is not None
 
 
-# ── RedisTransport 生命周期 / 心跳(直连转调)──
+# RedisTransport 生命周期 / 心跳(直连转调)
 
 
 class TestRedisTransportLifecycle:
@@ -767,7 +767,7 @@ class TestRedisTransportLifecycle:
         assert await t.get_worker_status("nope") is None
 
 
-# ── RedisTransport 资源池 / 队列(纯转调)──
+# RedisTransport 资源池 / 队列(纯转调)
 
 
 class TestRedisTransportPoolPassthrough:
@@ -832,7 +832,7 @@ class TestRedisTransportPoolPassthrough:
         assert (await redis.get_queue_info("cpu"))["length"] == 1
 
 
-# ── RedisTransport 步骤状态机(纯转调)──
+# RedisTransport 步骤状态机(纯转调)
 
 
 class TestRedisTransportStepMachine:
@@ -1037,7 +1037,7 @@ class TestRedisTransportEventsAndClose:
         assert await redis.is_pool_frozen("cpu") is False
 
 
-# ── create_transport 工厂(按 env 切换)──
+# create_transport 工厂(按 env 切换)
 
 
 class TestCreateTransport:

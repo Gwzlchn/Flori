@@ -1,4 +1,4 @@
-"""tests for steps/paper/step_04_figures.py (mock pymupdf)"""
+"""steps/paper/step_04_figures.py 的测试,pymupdf 全 mock。"""
 
 import json
 import sys

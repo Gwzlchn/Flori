@@ -18,7 +18,7 @@ from shared.db import Database
 from shared.models import Job, Step, StepStatus
 
 
-# ── Fixtures ──
+# Fixtures
 
 
 @pytest.fixture
@@ -56,7 +56,7 @@ async def _register_worker(redis, db, worker_id=WORKER_ID):
     ))
 
 
-# ── claim_step ──
+# claim_step
 
 
 class TestClaimStep:
@@ -90,7 +90,7 @@ class TestClaimStep:
         )
 
         assert claim is not None and claim["pool"] == "cpu"
-        # scene 并入 cpu、取消 scene↔cpu 冻结:认领任何池都不再自动冻结其他池。
+        # 认领任何池都不会自动冻结其他池。
         assert await redis.is_pool_frozen("cpu") is False
 
     @pytest.mark.asyncio
@@ -120,8 +120,7 @@ class TestClaimStep:
 
     @pytest.mark.asyncio
     async def test_pause_survives_runtime_status_write(self, redis, db):
-        """暂停态(admin_status)与运行时 status 解耦:写 status(busy/idle)不清暂停。
-        旧实现 draining 复用 status 字段 → claim/release/gateway心跳会覆盖暂停;本测试钉死分离后行为。"""
+        """暂停态 admin_status 与运行时 status 解耦:claim/release/gateway 心跳写 status(busy/idle)不得清掉暂停,本测试钉死该不变量。"""
         await _register_worker(redis, db)
         await redis.set_worker_field(WORKER_ID, "admin_status", "paused")
         # 模拟在跑 worker 释放任务(等价 release_step 的 _set_status idle)
@@ -179,7 +178,7 @@ class TestClaimStep:
         assert await redis.get_pool_count("cpu") == 0
 
 
-# ── report_step_done ──
+# report_step_done
 
 
 class TestReportDone:
@@ -210,7 +209,7 @@ class TestReportDone:
         assert db.get_worker(WORKER_ID).tasks_completed == 1
 
 
-# ── report_step_failed ──
+# report_step_failed
 
 
 class TestReportFailed:
@@ -285,7 +284,7 @@ class TestReportFailed:
         assert db.get_worker(WORKER_ID).tasks_failed == 0
 
 
-# ── release_step ──
+# release_step
 
 
 class TestRelease:
@@ -319,9 +318,9 @@ class TestRelease:
 
     @pytest.mark.asyncio
     async def test_release_skips_when_exec_id_superseded(self, redis, db):
-        # check_stuck 重排后旧 worker 迟到的 release 不得释放/解冻已被新执行接管的槽与冻结(审计 SCHED-N1)。
+        # check_stuck 重排后旧 worker 迟到的 release 不得释放/解冻已被新执行接管的槽与冻结。
         await _register_worker(redis, db)
-        await redis.try_acquire_slot("scene", 1, "e_new")  # 槽属【存活的新执行】e_new
+        await redis.try_acquire_slot("scene", 1, "e_new")  # 槽属存活的新执行 e_new
         await redis.freeze_pool("cpu")
         await redis.set_step_exec_id("j1", "A", "e_new")  # 新执行已接管该步
 

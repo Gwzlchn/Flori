@@ -1,4 +1,4 @@
-"""tests for ② 取证步（ADR-0012）：网关 allowed_tools 工具模式 + steps/video/step_evidence.py"""
+"""取证步的测试:网关 allowed_tools 工具模式 + steps/video/step_evidence.py,见 ADR-0012。"""
 
 import asyncio
 import json
@@ -9,7 +9,7 @@ from steps.video.step_evidence import EvidenceStep
 from tests.steps.conftest import make_step_config
 
 
-# ── 网关工具模式（ClaudeCLIProvider 第三档）──
+# 网关工具模式(ClaudeCLIProvider 第三档)
 
 class _FakeProc:
     returncode = 0
@@ -58,7 +58,7 @@ class TestClaudeCLIToolsMode:
         assert "--allowedTools" not in cmd
 
 
-# ── 取证步 EvidenceStep ──
+# 取证步 EvidenceStep
 
 _VALID_EV = (
     '{"case_match":{"subject":"马永威操纵","anchors":["马永威"],"confidence":"high","note":"一手"},'
@@ -77,7 +77,7 @@ class TestEvidenceStep:
         return job
 
     def test_skip_non_case(self, tmp_path):
-        # 默认 domain=general、无 case-study → 自门控 skip，不调 AI、不写 evidence.json
+        # 默认 domain=general、无 case-study → 自门控 skip,不调 AI、不写 evidence.json
         job = self._job(tmp_path)
         cfg = make_step_config(tmp_path, step_name="10_evidence", pool="ai")
         step = EvidenceStep("10_evidence", job, cfg)

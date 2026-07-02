@@ -1,4 +1,4 @@
-"""tests for steps/paper/step_04_translate_paper.py — 论文翻译(非中文→中文译文)。"""
+"""steps/paper/step_04_translate_paper.py 的测试:论文翻译(非中文→中文译文)。"""
 
 import json
 

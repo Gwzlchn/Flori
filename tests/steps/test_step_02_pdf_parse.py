@@ -1,4 +1,4 @@
-"""tests for steps/paper/step_02_pdf_parse.py (mock pymupdf)"""
+"""steps/paper/step_02_pdf_parse.py 的测试,pymupdf 全 mock。"""
 
 import json
 import sys
@@ -69,7 +69,7 @@ class TestPdfParseStep:
         assert hashes["pdf"].startswith("sha256:")
 
 
-# ── I-L15 / I-L16: 标题跨 span 拼接 + 摘要终止符兜底(轻量 fake doc)──
+# 标题跨 span 拼接 + 摘要终止符兜底(轻量 fake doc)
 
 class _FakePage:
     def __init__(self, page_dict, page_text):
@@ -129,7 +129,7 @@ class TestExtractTitle:
         assert step._load_source_meta() == {}
 
     def test_joins_spans_at_max_size(self, tmp_path):
-        # 标题跨多个 span(同最大字号)应拼接,而非只取第一个(I-L15)。
+        # 标题跨多个 span(同最大字号)应拼接,而非只取第一个。
         step = _mk_step(tmp_path)
         doc = _FakeDoc(
             {"title": ""},
@@ -158,7 +158,7 @@ class TestExtractAbstract:
         assert step._extract_abstract(doc) == "The body here."
 
     def test_falls_back_to_end_without_terminator(self, tmp_path):
-        # 首页无空行、无 introduction:\Z 兜底应仍抽到摘要而非返回空(I-L16)。
+        # 首页无空行、无 introduction:\Z 兜底应仍抽到摘要而非返回空。
         step = _mk_step(tmp_path)
         doc = _FakeDoc({"title": "t"}, page_text="Abstract\nlone abstract with no blank line")
         assert "lone abstract with no blank line" in step._extract_abstract(doc)
@@ -169,7 +169,7 @@ class TestExtractAbstract:
         assert len(step._extract_abstract(doc)) <= 3000
 
     def test_scans_later_pages_when_cover_page(self, tmp_path):
-        # 会议 PDF(USENIX/OSDI):首页是封面/版权页(无 Abstract),真正摘要在第 2 页 → 应扫到。
+        # 会议 PDF(USENIX/OSDI)首页是封面/版权页,没有 Abstract;真正摘要在第 2 页,应扫到。
         step = _mk_step(tmp_path)
 
         class _MultiDoc:

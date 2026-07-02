@@ -2,13 +2,13 @@
 
 覆盖:
   - bilibili_fav:
-    * source_id 解析(纯 media_id / favlist URL 的 fid / 兜底取数字)
-    * enumerate_fav 返回 (收藏夹名, [{bvid,title,...}]) → SourceItem 映射
-    * 无 bvid 条目跳过、source_title 透传
+    - source_id 解析(纯 media_id / favlist URL 的 fid / 兜底取数字)
+    - enumerate_fav 返回 (收藏夹名, [{bvid,title,...}]) → SourceItem 映射
+    - 无 bvid 条目跳过、source_title 透传
   - bilibili_collection:
-    * source_id 解析(紧凑式 mid:season|series:sid / collectiondetail|seriesdetail URL / lists?type= URL)
-    * enumerate_collection(mid, sid, is_season, cookies) 调用参数正确
-    * 合集名作 source_title、video 映射、无效写法报错
+    - source_id 解析(紧凑式 mid:season|series:sid / collectiondetail|seriesdetail URL / lists?type= URL)
+    - enumerate_collection(mid, sid, is_season, cookies) 调用参数正确
+    - 合集名作 source_title、video 映射、无效写法报错
   - 注册:@register 进入 SOURCE_ADAPTERS / enumerate_source 可分派
 
 mock 方式:经模块属性 monkeypatch `shared.bili_space.enumerate_fav` /
@@ -28,7 +28,7 @@ from shared.subscriptions.bilibili import (
 )
 
 
-# ── 收藏夹 source_id 解析 ──────────────────────────────────────────────────
+# 收藏夹 source_id 解析
 @pytest.mark.parametrize(
     "source_id, expected",
     [
@@ -51,7 +51,7 @@ def test_parse_fav_media_id_invalid():
         _parse_fav_media_id("no-digits-here")
 
 
-# ── 收藏夹适配器主体 ──────────────────────────────────────────────────────
+# 收藏夹适配器主体
 @pytest.mark.asyncio
 async def test_fav_enumerate_maps_items(monkeypatch):
     captured: dict = {}
@@ -93,7 +93,7 @@ async def test_fav_title_none_passthrough(monkeypatch):
     assert [i.item_id for i in items] == ["BV1ccccccccc"]
 
 
-# ── 合集 source_id 解析 ───────────────────────────────────────────────────
+# 合集 source_id 解析
 @pytest.mark.parametrize(
     "source_id, mid, sid, is_season",
     [
@@ -131,7 +131,7 @@ def test_parse_collection_invalid(bad):
         _parse_collection(bad)
 
 
-# ── 合集适配器主体 ────────────────────────────────────────────────────────
+# 合集适配器主体
 @pytest.mark.asyncio
 async def test_collection_enumerate_maps_items(monkeypatch):
     captured: dict = {}
@@ -176,7 +176,7 @@ async def test_collection_series_url_is_not_season(monkeypatch):
     assert captured["is_season"] is False
 
 
-# ── 注册 / 分派 ───────────────────────────────────────────────────────────
+# 注册 / 分派
 def test_registered_in_table():
     from shared.subscriptions.base import SOURCE_ADAPTERS, source_label
 

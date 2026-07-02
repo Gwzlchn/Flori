@@ -1,4 +1,4 @@
-"""领域 API（派生视图）：总览聚合 / 工作台 / 术语 / 主题 / 归类(PATCH job)。"""
+"""领域 API(派生视图)测试:总览聚合 / 工作台 / 术语 / 主题 / 归类(PATCH job)。"""
 
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ class TestDomains:
 
     @pytest.mark.asyncio
     async def test_workspace_per_collection_recent(self, client, app):
-        """issue 6:集合最近内容来自「按集合各取」而非「全域最近 12 条」分组——
+        """集合最近内容按集合各取,而非从全域最近 12 条里分组——
         老集合的内容即使被新内容挤出全域最近 12,其 collection.recent 仍应有(否则误显「暂无」)。"""
         db = app.state.db
         db.create_collection(Collection(id="col_old", name="老集合", domain="finance",
@@ -103,9 +103,9 @@ class TestDomains:
         ws = (await client.get("/api/domains/finance")).json()
         col = next(c for c in ws["collections"] if c["id"] == "col_old")
         # 注:job_count 是 collections 计数列,由 create_job_core 维护;raw db.create_job 不增,故此处不验它。
-        assert "old1" in [j["job_id"] for j in col["recent"]]          # 修复前此处为空(全域最近12分组)
+        assert "old1" in [j["job_id"] for j in col["recent"]]          # 老集合 recent 不受全域挤出影响
         assert len(ws["recent_jobs"]) == 12                            # 全域最近仍封顶 12
-        assert "old1" not in [j["job_id"] for j in ws["recent_jobs"]]  # old1 不在全域最近(正是 bug 触发条件)
+        assert "old1" not in [j["job_id"] for j in ws["recent_jobs"]]  # old1 确已被挤出全域最近,用例才踩到边界
 
     @pytest.mark.asyncio
     async def test_workspace_404(self, client):
@@ -135,7 +135,7 @@ class TestDomains:
         # 一个出现的主题概念。
         db.add_glossary_suggestion("finance", "汇率", "j1", "video")
         db.set_glossary_topic("finance", "汇率", True)
-        # 非主题概念（不应返回）。
+        # 非主题概念(不应返回)。
         db.add_glossary_suggestion("finance", "成交量", "j1", "video")
 
         data = (await client.get("/api/domains/finance/topic-concepts")).json()
@@ -156,18 +156,18 @@ class TestDomains:
 
     @pytest.mark.asyncio
     async def test_jobs_domain_filter_internal(self, client, app):
-        # /api/jobs 不再暴露 domain/uncategorized 查询(无前端消费方，已移除)；
-        # domain 过滤仅供领域工作台内部用，经 /api/domains/:d 验证(test_workspace)。
+        # /api/jobs 刻意不暴露 domain/uncategorized 查询(无前端消费方);
+        # domain 过滤仅供领域工作台内部用,经 /api/domains/:d 验证(test_workspace)。
         _seed(app.state.db)
         assert (await client.get("/api/jobs")).json()["total"] == 3
 
 
 # 注:知识库展示元数据(display_name/icon/color)的修改复用 PUT /api/profiles/{domain}
-# (见 test_api_profiles 的 meta 合并用例),侧栏 updateMeta 即调它;此处不再另测一份 domains meta 端点。
+# (见 test_api_profiles 的 meta 合并用例),侧栏 updateMeta 即调它;此处不另测一份 domains meta 端点。
 
 
 class TestDomainRename:
-    """二期 issue1-b:改英文 domain key(事务迁移 jobs/collections/glossary + notes_fts5 + profile 文件)。"""
+    """改英文 domain key:事务迁移 jobs/collections/glossary + notes_fts5 + profile 文件。"""
 
     @pytest.mark.asyncio
     async def test_rename_migrates_all(self, client, app):

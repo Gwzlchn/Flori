@@ -192,9 +192,9 @@ class TestMcpDomainScope:
             # 直接验作用域校验逻辑:j2 属 deep-learning,作用域=finance 时视同不存在
             with pytest.raises(KeyError):
                 await get_note_for_scope(db, storage, "j2")
-            # 而 MCP 工具层(call_tool)也应回错(FastMCP 把 KeyError 包成工具错误)
+            # MCP 工具层 call_tool 也应回错:FastMCP 把 KeyError 包成工具错误
             mcp = build_server(db, storage)
-            with pytest.raises(Exception):  # noqa: B017,PT011 — 跨 mcp 版本异常类型不一,只验「出错」
+            with pytest.raises(Exception):  # noqa: B017,PT011 — 跨 mcp 版本异常类型不一,只验会出错
                 await mcp.call_tool("get_note", {"job_id": "j2"})
         finally:
             current_domain.reset(token)
@@ -245,6 +245,3 @@ class TestMcpDomainScope:
             assert scope_domain() == "deep-learning"
         finally:
             current_domain.reset(token)
-
-
-# (stdio transport 已移除:原 test_stdio_logging_to_stderr_keeps_stdout_clean 随之删除)

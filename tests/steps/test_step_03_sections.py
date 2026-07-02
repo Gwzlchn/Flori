@@ -1,4 +1,4 @@
-"""tests for steps/paper/step_03_sections.py"""
+"""steps/paper/step_03_sections.py 的测试。"""
 
 import json
 

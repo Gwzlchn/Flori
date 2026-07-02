@@ -1,4 +1,4 @@
-"""tests for api/routes/collections.py"""
+"""api/routes/collections.py 测试。"""
 
 from __future__ import annotations
 
@@ -89,7 +89,7 @@ class TestGetCollection:
 
 
 class TestSubscriptionSyncStatus:
-    """P2 item A：订阅集合响应携带 last_sync_status / last_sync_error。"""
+    """订阅集合响应携带 last_sync_status / last_sync_error。"""
 
     @pytest.mark.asyncio
     async def test_subscription_carries_sync_status(self, client, app):
@@ -123,7 +123,7 @@ class TestSubscriptionSyncStatus:
 
 
 class TestCollectionStatusCounts:
-    """P2 item C：详情端点返回 status_counts(本集合各状态计数,缺省补 0);列表端点为 None。"""
+    """详情端点返回 status_counts(本集合各状态计数,缺省补 0);列表端点为 None。"""
 
     @pytest.mark.asyncio
     async def test_detail_includes_status_counts(self, client, app):
@@ -157,7 +157,7 @@ class TestUpdateCollection:
         assert resp.status_code == 200
         body = resp.json()
         assert body["name"] == "renamed"
-        # None 字段不动：description/tags 保留。
+        # None 字段不动:description/tags 保留。
         assert body["description"] == "keep"
         assert body["tags"] == ["x"]
 
@@ -193,7 +193,7 @@ class TestDeleteCollection:
 
     @pytest.mark.asyncio
     async def test_delete_unbinds_jobs_not_deletes(self, client, db):
-        """删集合=解绑：job 保留但 collection_id 置 NULL，job_count 不再相关。"""
+        """删集合=解绑:job 保留但 collection_id 置 NULL。"""
         cid = (await _create(client))["id"]
         job_resp = await client.post(
             "/api/jobs", json={"url": "BV1xx411c7mD", "collection_id": cid},
@@ -203,7 +203,7 @@ class TestDeleteCollection:
         del_resp = await client.delete(f"/api/collections/{cid}")
         assert del_resp.status_code == 204
 
-        # job 仍存在（未被级联删除）。
+        # job 仍存在(未被级联删除)。
         job_get = await client.get(f"/api/jobs/{job_id}")
         assert job_get.status_code == 200
         # collection_id 已解绑为 NULL。
@@ -257,7 +257,7 @@ class TestListCollectionJobs:
     @pytest.mark.asyncio
     async def test_list_jobs_pagination(self, client):
         cid = (await _create(client))["id"]
-        # 3 个不同 url = 3 个不同 lineage(同 url 会归一组只显 current,见 P2b lineage)。
+        # 3 个不同 url = 3 个不同 lineage:同 url 会归一组只显 current。
         for bv in ("BV1xx411c7mD", "BV2yy422d8nE", "BV3zz533e9oF"):
             await client.post(
                 "/api/jobs", json={"url": bv, "collection_id": cid},

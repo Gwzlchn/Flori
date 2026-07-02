@@ -1,4 +1,4 @@
-"""tests for steps/paper/step_06_review.py"""
+"""steps/paper/step_06_review.py 的测试。"""
 
 import json
 
@@ -62,8 +62,8 @@ class TestPaperReviewStep:
         assert result["parse_failed"] is True
 
     def test_aggregates_real_scores(self, tmp_path, monkeypatch):
-        # 非 DRY_RUN:AI 返回合法多维评分 → overall 为维度均值(而非 fallback 恒 3.0)。
-        # 钉死"评分聚合真跑了"——线上曾出 overall 恒 3.0 的 bug(step_base.py:451)。
+        # 非 DRY_RUN:AI 返回合法多维评分 → overall 为维度均值,而非 fallback 恒 3.0。
+        # 回归钉死评分聚合真跑了,防 overall 恒 3.0 的失效再现(聚合逻辑在 step_base.py)。
         monkeypatch.delenv("DRY_RUN", raising=False)
         job_dir = self._setup_job(tmp_path)
         config = make_step_config(tmp_path, step_name="06_review", pool="ai")

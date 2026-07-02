@@ -1,11 +1,11 @@
 """通用 RSS/Atom source-adapter(shared/subscriptions/rss.py)单测。
 
-不联网:用静态 RSS/Atom XML 字符串喂真实 feedparser(parse 既吃 URL 也吃 XML 串),
-覆盖 content_type 四种判定(article / arxiv->paper / youtube->video / audio enclosure)
-+ item_id 回退(id 优先,缺则 link)+ source_title 提取。
+不联网:用静态 RSS/Atom XML 字符串喂真实 feedparser,parse 既吃 URL 也吃 XML 串。
+覆盖 content_type 四种判定(article / arxiv->paper / youtube->video / audio enclosure),
+item_id 回退按 id 优先、缺则 link,另验 source_title 提取。
 
-feedparser 经 shared.rss_fetch.parse_feed(模块属性)间接调用,这里直接调适配器即可;
-无需 monkeypatch(parse_feed 透传给 feedparser.parse,喂 XML 串不发网络)。
+autouse fixture 把 shared.rss_fetch.parse_feed 换成直接 feedparser.parse,
+source_id 就能当 XML 串喂进适配器,不发网络。
 """
 
 from __future__ import annotations
@@ -69,13 +69,13 @@ ATOM_XML = """<?xml version="1.0" encoding="utf-8"?>
 
 
 def _feed_of(xml: str):
-    """让 rss_fetch.parse_feed 解析给定 XML(透传给 feedparser.parse,不联网)。"""
+    """parse_feed 的测试替身:直接 feedparser.parse 给定 XML,不联网。"""
     return feedparser.parse(xml)
 
 
 @pytest.fixture(autouse=True)
 def _patch_parse(monkeypatch):
-    # parse_feed 收到的是测试塞的 XML 串(经 fixture 间接);用 source_id 当 XML 直接喂。
+    # 替换后 parse_feed 收到的 source_id 即测试塞的 XML 串,直接解析。
     monkeypatch.setattr("shared.rss_fetch.parse_feed", _feed_of)
 
 
