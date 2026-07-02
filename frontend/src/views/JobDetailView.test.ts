@@ -255,15 +255,40 @@ describe('JobDetailView 笔记 tab', () => {
     expect(seg.text()).toContain('机械版')
   })
 
-  it('文章无智能笔记时隐藏智能版,机械版显示为「原文」', async () => {
+  it('文章无智能笔记也无译文时隐藏变体切换,显示「原文(未生成智能笔记)」', async () => {
     fetchDetail.mockResolvedValue(makeDetail({ status: 'done', content_type: 'article' }))
     api.get.mockResolvedValue([])         // note-versions 空 → 无智能笔记
-    api.getText.mockResolvedValue('# 原文\n正文')
+    // 只有 original.md 有内容;translated.md 无(否则译文变体合理出现,seg 不该隐藏)
+    api.getText.mockImplementation(async (url: string) =>
+      url.includes('original.md') ? '# 原文\n正文' : Promise.reject({ status: 404 }))
     const w = mountView()
     await flushPromises()
-    expect(w.find('.seg').exists()).toBe(false)   // 智能版/机械版分段隐藏
+    expect(w.find('.seg').exists()).toBe(false)   // 无第二变体 → 切换器隐藏
     expect(w.text()).toContain('原文')
     expect(w.text()).not.toContain('智能版')
+  })
+
+  it('有译文时笔记内出现「译文」变体并可切换(不再是顶层 tab)', async () => {
+    fetchDetail.mockResolvedValue(makeDetail({ status: 'done', content_type: 'article' }))
+    api.get.mockResolvedValue([])
+    api.getText.mockImplementation(async (url: string) =>
+      url.includes('translated.md') ? '# 译文内容' : '# 原文内容')
+    const w = mountView()
+    await flushPromises()
+    const tabs = w.find('.tabs')
+    expect(tabs.text()).not.toContain('译文')      // 顶层 tab 无译文
+    const seg = w.find('.seg')
+    expect(seg.exists()).toBe(true)
+    expect(seg.text()).toContain('译文')
+    const btn = seg.findAll('button').find(b => b.text() === '译文')
+    await btn!.trigger('click')
+    await flushPromises()
+    expect(w.find('markdown-viewer-stub').attributes('content')).toContain('译文内容')
+    // 切回原文,切换器仍在(不消失)
+    const back = seg.findAll('button').find(b => b.text() === '原文')
+    await back!.trigger('click')
+    await flushPromises()
+    expect(w.find('.seg').exists()).toBe(true)
   })
 })
 
