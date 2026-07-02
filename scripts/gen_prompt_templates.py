@@ -8,6 +8,7 @@ from steps.article.step_04_translate_article import _DEFAULT as translate_articl
 from steps.article.step_04_smart_article import _DEFAULT_HEADER as smart_article
 from steps.article.step_05_concepts import _DEFAULT_HEADER as concepts
 from steps.paper.step_04_translate_paper import _DEFAULT as translate_paper
+from steps.paper.step_04_translate_paper import _DEFAULT_PDF as translate_paper_pdf
 from steps.paper.step_05_smart_paper import _DEFAULT_HEADER as smart_paper
 from steps.audio.step_04_smart_podcast import _DEFAULT_HEADER as smart_podcast
 from steps.video.step_08_punctuate import _PUNCTUATE_PROMPT, _TRANSLATE_PROMPT
@@ -24,6 +25,7 @@ TEMPLATES = {
     "04_smart_article.md": smart_article,
     "05_concepts.md": concepts,
     "04_translate_paper.md": translate_paper,
+    "04_translate_paper.pdf.md": translate_paper_pdf,
     "05_smart_paper.md": smart_paper,
     "04_smart_podcast.md": smart_podcast,
     "08_punctuate.zh.md": _PUNCTUATE_PROMPT,

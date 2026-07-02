@@ -983,3 +983,46 @@ class TestClaudeCLITranscript:
             import asyncio as _a
             await gw.call("s", LLMRequest(messages=[{"role": "user", "content": "x"}]))
         assert ei.value.attempts[0]["transcript_path"] == str(f)
+
+
+class TestAddDirs:
+    """pdf-only 直喂:allowed_tools 分支对 request.add_dirs 追加 --add-dir(Read 出沙箱放行)。"""
+
+    def _cap_provider(self, monkeypatch, cap):
+        class FakeProc:
+            returncode = 0
+            async def communicate(self, data=None):
+                return (b'{"result":"OK","session_id":null}', b"")
+        async def fake_exec(*cmd, **kwargs):
+            cap["cmd"] = list(cmd)
+            return FakeProc()
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+        return ClaudeCLIProvider(command_template=["claude", "-p"])
+
+    @pytest.mark.asyncio
+    async def test_allowed_tools_with_add_dirs(self, monkeypatch):
+        cap = {}
+        p = self._cap_provider(monkeypatch, cap)
+        await p.complete(LLMRequest(
+            messages=[{"role": "user", "content": "用 Read 读 /work/input/source.pdf 第 1-2 页"}],
+            allowed_tools=["Read"], add_dirs=["/work/input"], max_turns=8,
+        ))
+        cmd = cap["cmd"]
+        assert "--allowedTools" in cmd and "Read" in cmd
+        i = cmd.index("--add-dir")
+        assert cmd[i + 1] == "/work/input"
+
+    @pytest.mark.asyncio
+    async def test_no_add_dirs_no_flag(self, monkeypatch):
+        cap = {}
+        p = self._cap_provider(monkeypatch, cap)
+        await p.complete(LLMRequest(
+            messages=[{"role": "user", "content": "x"}], allowed_tools=["WebSearch"],
+        ))
+        assert "--add-dir" not in cap["cmd"]      # 取证等不涉本地文件:行为不变
+
+    def test_llmrequest_jsonable_roundtrip_add_dirs(self):
+        req = LLMRequest(messages=[{"role": "user", "content": "x"}],
+                         allowed_tools=["Read"], add_dirs=["/a/b"])
+        back = LLMRequest.from_jsonable(req.to_jsonable())
+        assert back.add_dirs == ["/a/b"]          # AI task 内联投递不丢

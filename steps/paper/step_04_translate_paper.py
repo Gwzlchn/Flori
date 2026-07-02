@@ -41,6 +41,8 @@ class TranslatePaperStep(StepBase):
         return h
 
     def execute(self) -> dict | None:
+        if self._is_pdf_only():
+            return self._execute_pdf_direct()
         md = self._source_markdown()
 
         # 逐 chunk 翻译:每块一次 call_ai(各自有审计记录+transcript sidecar,call_index 自增),
@@ -109,6 +111,54 @@ class TranslatePaperStep(StepBase):
         tmpl = self._load_prompt_template("04_translate_paper", _DEFAULT)
         return tmpl.replace("<<BODY>>", md)
 
+    # ── pdf-only 直喂:无文本可抽(pymupdf 已废),claude Read 按页区间读 PDF 翻译 ──
+    PAGES_PER_CHUNK = 2   # 实测每 2 页一块 ≈30-45s、3 turns;块大易撞轮次/超时,块小浪费轮次开销
+
+    def _is_pdf_only(self) -> bool:
+        try:
+            parsed = self.load_json("intermediate/parsed.json") or {}
+        except Exception:
+            return False
+        return parsed.get("source_kind") == "pdf-only"
+
+    def _execute_pdf_direct(self) -> dict:
+        pdf = (self.job_dir / "input" / "source.pdf").resolve()
+        pages = int((self.load_json("intermediate/parsed.json") or {}).get("pages") or 0)
+        if pages <= 0:
+            from shared.errors import InputInvalidError
+            raise InputInvalidError("pdf-only translate needs parsed.json.pages > 0")
+        ranges = [(i, min(i + self.PAGES_PER_CHUNK - 1, pages))
+                  for i in range(1, pages + 1, self.PAGES_PER_CHUNK)]
+        tmpl = self._load_prompt_template("04_translate_paper.pdf", _DEFAULT_PDF)
+        parts: list[str] = []
+        for n, (a, b) in enumerate(ranges):
+            self.report_progress(n, len(ranges), f"translating pages {a}-{b}/{pages}")
+            prompt = (tmpl.replace("<<PDF_PATH>>", str(pdf))
+                          .replace("<<START>>", str(a)).replace("<<END>>", str(b)))
+            # Read 每页一轮 + 思考/生成余量;--add-dir 放行 PDF 所在目录(input/)。
+            parts.append(self.call_ai(prompt, max_tokens=16384,
+                                      allowed_tools=["Read"], add_dirs=[str(pdf.parent)],
+                                      max_turns=(b - a + 1) * 2 + 4).strip())
+        self.report_progress(len(ranges), len(ranges), "done")
+        result = "\n\n".join(parts)
+        self.write_output("output/translated.md", result)
+        return {"chars": len(result), "chunks": len(ranges), "mode": "pdf-direct",
+                "provider": self.last_ai_provider, "model": self.last_ai_model}
+
+
+# pdf-only 直喂的分块翻译 prompt(= 外置模板 templates/04_translate_paper.pdf.md;
+# <<PDF_PATH>>/<<START>>/<<END>> 运行期注入)。规则经 OSDI04 MapReduce 三轮人工对读验证:
+# 层级映射与「截断句照译」是多块聚合一致性的关键。
+_DEFAULT_PDF = (
+    "用 Read 工具读取 <<PDF_PATH>> 的第 <<START>> 页到第 <<END>> 页,把正文忠实翻译成中文。规则:\n"
+    "1. 标题层级固定映射:论文主标题用 #(仅出现在含主标题的页);编号章节 N 用 ##;小节 N.M 用 ###;"
+    "N.M.P 用 ####;无编号的段落小标题(如 Worker Failure)用**加粗**不用 #。"
+    "标题翻译成中文,括号保留英文原文(如「## 3 实现(Implementation)」)。\n"
+    "2. 不增删内容、不概括;代码/伪代码块用 ``` 围栏原样保留(代码不译,注释可译)。\n"
+    "3. 图表:在图/表出现位置写一行「【图 N】+图注中文翻译」/「【表 N】+…」。\n"
+    "4. 页首/页尾被截断的句子照常翻译,不补全不省略(与相邻页区间自然衔接)。\n"
+    "5. 引用标记([1]/作者年份)与专有名词原样保留;只输出译文,不要任何解释。\n"
+)
 
 # 静态默认 prompt 骨架(= 外置模板内容;<<BODY>> 注入论文原文)。
 _DEFAULT = (

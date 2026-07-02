@@ -172,6 +172,9 @@ class LLMRequest:
     # 转为 --allowedTools <tools> --max-turns;其它 provider 忽略。None=用默认两档(images→Read / 否则禁工具)。
     allowed_tools: list[str] | None = None
     max_turns: int | None = None
+    # 放行目录(claude-cli --add-dir):allowed_tools 含 Read 且要读 prompt 里引用的本地文件
+    # (如 pdf-only 直喂 input/source.pdf)时必须给,否则 Read 出沙箱失败。仅 claude-cli 读。
+    add_dirs: list[str] = field(default_factory=list)
 
     def to_jsonable(self) -> dict:
         """JSON 安全序列化,images 的 Path 转 str;供 AI task 内联投递,见 AITask。"""
@@ -184,6 +187,7 @@ class LLMRequest:
             "system": self.system,
             "response_format": self.response_format,
             "allowed_tools": self.allowed_tools,
+            "add_dirs": list(self.add_dirs or []),
             "max_turns": self.max_turns,
         }
 
@@ -199,6 +203,7 @@ class LLMRequest:
             response_format=d.get("response_format"),
             allowed_tools=d.get("allowed_tools"),
             max_turns=d.get("max_turns"),
+            add_dirs=list(d.get("add_dirs") or []),
         )
 
 

@@ -15,21 +15,20 @@ class PaperReviewStep(StepBase):
             missing.append("output/versions/notes_smart_*.md")
         if not (self.job_dir / "intermediate" / "sections.json").exists():
             missing.append("intermediate/sections.json")
-        if not (self.job_dir / "intermediate" / "figures.json").exists():
-            missing.append("intermediate/figures.json")
         return missing
 
     def input_hashes(self) -> dict[str, str]:
         return {
             "smart": file_hash(self.latest_smart_note()) if self.latest_smart_note() else "",
             "sections": file_hash(self.job_dir / "intermediate" / "sections.json"),
-            "figures": file_hash(self.job_dir / "intermediate" / "figures.json"),
         }
 
     def execute(self) -> dict | None:
         smart_clip, coverage, note_file = self.prepare_smart_for_review()
         sections = self.load_json("intermediate/sections.json")
-        figures = self.load_json("intermediate/figures.json")
+        figures: list = []
+        if (self.job_dir / "intermediate" / "figures.json").exists():   # 仅旧 pymupdf job 有
+            figures = self.load_json("intermediate/figures.json")
 
         original_titles = [
             s["title"] for s in sections.get("sections", [])

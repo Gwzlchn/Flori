@@ -230,7 +230,6 @@ paper:
       label: "解析"
       extends: .cpu-step
       run: steps.paper.step_02_pdf_parse
-      image: flori/step-heavy
       needs: ["01_download"]
       version: "2"   # 源头重做:HTML 源→干净 MD(原文/翻译/笔记吃它);无 HTML 标记 pdf-only
       # 非中文论文写 needs_translation.json 标记(供 04_translate_paper 的 rules:exists 门控)。
@@ -245,20 +244,11 @@ paper:
       version: "3"   # original.md 让位 02(arxiv-html 干净版),仅文本解析兜底时才由本步渲染
       outputs: ["intermediate/sections.json"]
 
-    "04_figures":
-      label: "图表提取"
-      extends: .cpu-step
-      run: steps.paper.step_04_figures
-      image: flori/step-heavy
-      needs: ["02_pdf_parse"]
-      outputs: ["intermediate/figures.json", "assets/*"]
-
     "04_translate_paper":
       label: "翻译"
       extends: .ai-step
       run: steps.paper.step_04_translate_paper
-      # needs 04_figures:遗留组装路径(无 original.md 的旧 job)译文按页码内嵌渲染图,图先产出。
-      needs: ["03_sections", "04_figures"]
+      needs: ["03_sections"]
       version: "3"   # 翻译源切 output/original.md(arxiv-html 干净原文),失效旧指纹
       # 大论文多 chunk 串行翻译,步墙钟须覆盖全部 chunk(~15 块 × 2-4min);600 默认必超时。
       timeout: 7200
@@ -277,8 +267,8 @@ paper:
       label: "智能版笔记"
       extends: .ai-step
       run: steps.paper.step_05_smart_paper
-      # needs 04_translate_paper:非中文论文先翻译,笔记基于译文+图表做(译文跳过=中文论文时依赖视为满足)。
-      needs: ["03_sections", "04_figures", "04_translate_paper"]
+      # needs 04_translate_paper:非中文论文先翻译,笔记基于译文做(译文跳过=中文论文时依赖视为满足)。
+      needs: ["03_sections", "04_translate_paper"]
       tags: []
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}

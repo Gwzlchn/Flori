@@ -20,8 +20,8 @@ def test_templates_match_constants():
 
 def test_all_templates_present():
     from scripts.gen_prompt_templates import TEMPLATES
-    # 11 个生成步 + 3 个评审步(05/06/12_review,共享同一骨架)= 14。
-    assert len(TEMPLATES) == 14
+    # 11 个生成步 + pdf 直喂翻译变体(04_translate_paper.pdf)+ 3 个评审步(共享骨架)= 15。
+    assert len(TEMPLATES) == 15
     assert {f.name for f in TEMPLATES_DIR.glob("*.md")} >= set(TEMPLATES)
 
 

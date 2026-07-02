@@ -39,7 +39,8 @@ class TestSmartPaperStep:
         (job_dir / "intermediate").mkdir()
         config = make_step_config(tmp_path, step_name="05_smart_paper")
         step = SmartPaperStep("05_smart_paper", job_dir, config)
-        assert len(step.validate_inputs()) == 2
+        # figures.json 已可选(04_figures 随 pymupdf 删除;图在正文/PDF 里)
+        assert step.validate_inputs() == ["intermediate/sections.json"]
 
     def test_execute_dry_run(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DRY_RUN", "1")
@@ -106,3 +107,33 @@ class TestSmartPaperStep:
         prompt = step._build_prompt(sections, figures)
         assert "Test Paper" in prompt
         assert "fig1" in prompt
+
+
+def test_pdf_only_direct_notes(tmp_path, monkeypatch):
+    # pdf-only 且无任何文本正文(无译文/原文 MD):笔记走 Read 直喂 PDF。
+    import json as _json
+    from tests.steps.conftest import make_step_config
+    from steps.paper.step_05_smart_paper import SmartPaperStep
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    for d in ["input", "intermediate", "output", "logs"]:
+        (job_dir / d).mkdir()
+    (job_dir / "input" / "source.pdf").write_bytes(b"%PDF fake")
+    (job_dir / "intermediate" / "sections.json").write_text(_json.dumps(
+        {"title": "MapReduce", "sections": []}))
+    (job_dir / "intermediate" / "parsed.json").write_text(_json.dumps(
+        {"source_kind": "pdf-only", "pages": 6}))
+    config = make_step_config(tmp_path, step_name="05_smart_paper", pool="ai")
+    step = SmartPaperStep("05_smart_paper", job_dir, config)
+
+    seen = {}
+    def fake_call(prompt, **kw):
+        seen["prompt"], seen["kw"] = prompt, kw
+        return "# 笔记"
+    monkeypatch.setattr(step, "call_ai", fake_call)
+    monkeypatch.setattr(step, "write_smart_note", lambda text, image_assets=None: "output/versions/x.md")
+    r = step.execute()
+    assert r["source"] == "pdf-direct"
+    assert seen["kw"]["allowed_tools"] == ["Read"]
+    assert str((job_dir / "input").resolve()) in seen["kw"]["add_dirs"][0]
+    assert "source.pdf" in seen["prompt"] and "MapReduce" in seen["prompt"]

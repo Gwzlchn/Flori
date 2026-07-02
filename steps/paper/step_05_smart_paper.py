@@ -7,18 +7,17 @@ from shared.step_base import StepBase, file_hash
 
 class SmartPaperStep(StepBase):
     def validate_inputs(self) -> list[str]:
-        missing = []
         if not (self.job_dir / "intermediate" / "sections.json").exists():
-            missing.append("intermediate/sections.json")
-        if not (self.job_dir / "intermediate" / "figures.json").exists():
-            missing.append("intermediate/figures.json")
-        return missing
+            return ["intermediate/sections.json"]
+        return []
 
     def input_hashes(self) -> dict[str, str]:
         hashes: dict[str, str] = {
             "sections": file_hash(self.job_dir / "intermediate" / "sections.json"),
-            "figures": file_hash(self.job_dir / "intermediate" / "figures.json"),
         }
+        figs = self.job_dir / "intermediate" / "figures.json"
+        if figs.exists():   # 仅旧 pymupdf job 有(04_figures 已删);arxiv-html 图在正文,pdf-only 图在 PDF
+            hashes["figures"] = file_hash(figs)
         translated = self.job_dir / "output" / "translated.md"
         if translated.exists():
             hashes["translated"] = file_hash(translated)   # 非中文论文随译文变化重跑
@@ -27,10 +26,19 @@ class SmartPaperStep(StepBase):
 
     def execute(self) -> dict | None:
         sections = self.load_json("intermediate/sections.json")
-        figures = self.load_json("intermediate/figures.json")
-        # 非中文论文:基于中文译文做笔记(对齐 04_translate_paper 依赖),术语与译文一致、不重复英→中。
-        translated = self.job_dir / "output" / "translated.md"
-        body = translated.read_text(encoding="utf-8") if translated.exists() else None
+        figures: list = []
+        if (self.job_dir / "intermediate" / "figures.json").exists():
+            figures = self.load_json("intermediate/figures.json")
+        # 正文来源优先级:中文译文(非中文论文,术语与译文一致)> 干净原文(arxiv-html/中文论文)。
+        body = None
+        for rel in ("output/translated.md", "output/original.md"):
+            f = self.job_dir / rel
+            if f.exists():
+                body = f.read_text(encoding="utf-8")
+                break
+        # pdf-only 且无任何文本正文(翻译被跳过/失败后手动重跑笔记):直喂 PDF,claude Read 逐页读。
+        if body is None and self._source_kind() == "pdf-only":
+            return self._execute_pdf_direct(sections, figures)
 
         # 有内嵌位图的图(filename 非空、index 有值)给 AI 用 ![中文图注](img:N) 占位符引用,落盘回填。
         image_assets = [{"n": f["index"], "filename": f["filename"]}
@@ -44,7 +52,32 @@ class SmartPaperStep(StepBase):
         rel = self.write_smart_note(result, image_assets=image_assets)  # 回填占位符 + 版本化落盘
         return {"chars": len(result), "provider": self.last_ai_provider,
                 "model": self.last_ai_model, "note_file": rel,
-                "source": "translation" if body else "original"}
+                "source": "translation" if (self.job_dir / "output" / "translated.md").exists()
+                          else "original"}
+
+    def _source_kind(self) -> str | None:
+        try:
+            return (self.load_json("intermediate/parsed.json") or {}).get("source_kind")
+        except Exception:
+            return None
+
+    def _execute_pdf_direct(self, sections: dict, figures: list) -> dict:
+        """pdf-only 直喂:无文本正文可用时,让 claude 用 Read 工具直接读 PDF 产笔记
+        (worker 镜像带 poppler,Read 按页渲染;上限 60 页防超长 agentic)。"""
+        pdf = (self.job_dir / "input" / "source.pdf").resolve()
+        pages = int((self.load_json("intermediate/parsed.json") or {}).get("pages") or 0)
+        cap = min(pages or 30, 60)
+        prompt = (self._load_prompt_template("05_smart_paper", _DEFAULT_HEADER)
+                  + self.terminology_block(self.load_domain_prompt_profile())
+                  + f"\n论文标题：{sections.get('title', '未知')}\n"
+                  + f"\n用 Read 工具阅读论文 PDF:{pdf}(共 {pages} 页,读前 {cap} 页),"
+                    "然后按上面要求产出中文结构化学习笔记(不内嵌图片占位符)。\n")
+        result = self.call_ai(prompt, max_tokens=8192,
+                              allowed_tools=["Read"], add_dirs=[str(pdf.parent)],
+                              max_turns=cap * 2 + 6)
+        rel = self.write_smart_note(result, image_assets=[])
+        return {"chars": len(result), "provider": self.last_ai_provider,
+                "model": self.last_ai_model, "note_file": rel, "source": "pdf-direct"}
 
     def _build_prompt(self, sections: dict, figures: list, body: str | None = None) -> str:
         profile = self.load_domain_prompt_profile()

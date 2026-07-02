@@ -70,8 +70,10 @@ ENV FLORI_VERSION=${FLORI_VERSION}
 #    + [steps,gpu,worker] + cn_domains bake(net-zone CN 表)+ /data/prompts seed(AI 步读 profiles)
 FROM common AS worker
 ARG USE_USTC_MIRROR=1
+# poppler-utils:claude Read 工具渲染 PDF 页面靠 pdftoppm(纯 PDF 论文直喂,无它 Read 必败);
+#               02 解析步 pdfinfo 取页数。pymupdf 已废(断词/公式丢,arxiv 走 HTML 源)。
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg nodejs npm \
+    && apt-get install -y --no-install-recommends ffmpeg nodejs npm poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 # Claude Code CLI:claude-cli provider(订阅出笔记、看帧图)需要 `claude` 在 PATH。npm 缓存走 cache mount。
 RUN --mount=type=cache,target=/root/.npm \
@@ -126,7 +128,7 @@ ENV FLORI_VERSION=${FLORI_VERSION}
 #    apt/[steps] 层恒命中 buildcache。
 FROM common AS test-worker
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
+    && apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=cache,target=/root/.cache/pip pip install ".[api,worker,mcp,test,steps]"
 COPY shared/ shared/

@@ -34,8 +34,8 @@ class TestPaperReviewStep:
             (job_dir / d).mkdir()
         config = make_step_config(tmp_path, step_name="06_review")
         step = PaperReviewStep("06_review", job_dir, config)
-        # 缺 smart note + sections.json + figures.json(figure_references 维度需 figures 真值)
-        assert len(step.validate_inputs()) == 3
+        # 缺 smart note + sections.json(figures.json 已可选:04_figures 随 pymupdf 删除)
+        assert len(step.validate_inputs()) == 2
 
     def test_execute_dry_run(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DRY_RUN", "1")

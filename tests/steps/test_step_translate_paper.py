@@ -150,3 +150,47 @@ def test_prefers_original_md_as_source(tmp_path, monkeypatch):
     assert "AlpaServe" not in seen["prompt"]      # 未走 sections 组装
     h = step.input_hashes()
     assert "original" in h and "sections" not in h  # 指纹跟主源
+
+
+def test_pdf_only_direct_translate(tmp_path, monkeypatch):
+    # pdf-only:按页区间 chunk,每块 Read 直喂(allowed_tools/add_dirs/max_turns),聚合 translated.md。
+    job_dir = _setup(tmp_path)
+    (job_dir / "input").mkdir()
+    (job_dir / "input" / "source.pdf").write_bytes(b"%PDF fake")
+    (job_dir / "intermediate" / "parsed.json").write_text(json.dumps(
+        {"source_kind": "pdf-only", "pages": 5}))
+    (job_dir / "output").mkdir(exist_ok=True)
+    config = make_step_config(tmp_path, step_name="04_translate_paper", pool="ai")
+    step = TranslatePaperStep("04_translate_paper", job_dir, config)
+
+    calls = []
+    def fake_call(prompt, **kw):
+        calls.append((prompt, kw))
+        return f"块{len(calls)}译文"
+    monkeypatch.setattr(step, "call_ai", fake_call)
+    result = step.execute()
+
+    assert result["mode"] == "pdf-direct"
+    assert len(calls) == 3                                    # 5 页 / 每块 2 页 → 1-2,3-4,5-5
+    p0, kw0 = calls[0]
+    assert "第 1 页到第 2 页" in p0 and str(job_dir / "input" / "source.pdf") in p0
+    assert kw0["allowed_tools"] == ["Read"]
+    assert kw0["add_dirs"] == [str((job_dir / "input").resolve())]
+    assert kw0["max_turns"] == 2 * 2 + 4
+    p2, kw2 = calls[2]
+    assert "第 5 页到第 5 页" in p2 and kw2["max_turns"] == 1 * 2 + 4
+    out = (job_dir / "output" / "translated.md").read_text()
+    assert out == "块1译文\n\n块2译文\n\n块3译文"
+
+
+def test_pdf_only_without_pages_fails_loud(tmp_path, monkeypatch):
+    from shared.errors import InputInvalidError
+    import pytest
+    job_dir = _setup(tmp_path)
+    (job_dir / "input").mkdir()
+    (job_dir / "intermediate" / "parsed.json").write_text(json.dumps(
+        {"source_kind": "pdf-only"}))
+    config = make_step_config(tmp_path, step_name="04_translate_paper", pool="ai")
+    step = TranslatePaperStep("04_translate_paper", job_dir, config)
+    with pytest.raises(InputInvalidError):
+        step.execute()

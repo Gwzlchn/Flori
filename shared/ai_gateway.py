@@ -337,6 +337,9 @@ class ClaudeCLIProvider:
             # 与 images 分支互斥(取证不喂帧图);max_turns 给足,多轮流程为搜索、直连 curl、抽取。
             cmd += ["--allowedTools", *request.allowed_tools]
             cmd += ["--max-turns", str(request.max_turns or 24)]
+            # Read 本地文件(pdf-only 直喂等):--add-dir 放行 prompt 引用的目录,否则 Read 出沙箱失败。
+            for d in request.add_dirs or []:
+                cmd += ["--add-dir", d]
         elif request.images:
             cmd += ["--allowedTools", "Read"]
             # 限轮数:每张图一个 Read 轮,多图时上下文超线性膨胀会拖垮(实测 20 张丢图无界跑 >18min)。
