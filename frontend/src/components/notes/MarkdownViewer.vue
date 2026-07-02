@@ -178,6 +178,9 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onEsc))
 <style>
 /* 默认收敛尺寸:宽随列、高最多 70vh(超高竖图不占满屏,点开 lightbox 看全) */
 .prose img { max-width: 100%; max-height: 70vh; width: auto; border-radius: 0.5rem; cursor: zoom-in; }
+/* 宽表在自身内横滚,不许撑破内容列(移动端 606px 表 vs 358px 列实测破页) */
+.prose table { display: block; max-width: 100%; overflow-x: auto; }
+.prose pre { overflow-x: auto; }
 /* 图片 lightbox(Teleport 到 body,样式须非 scoped) */
 .lightbox {
   position: fixed; inset: 0; z-index: 1000;

@@ -311,7 +311,7 @@ onMounted(async () => {
                 <audio v-else-if="selFile.kind === 'audio'" :src="mediaUrl(selFile.path)" controls class="w-full" />
                 <div v-else-if="fileErr" class="text-xs text-red-600">{{ fileErr }}</div>
                 <MarkdownViewer v-else-if="selFile.path.endsWith('.md')" :content="fileContent" :job-id="jobId" />
-                <pre v-else-if="selFile.kind === 'text' || selFile.kind === 'json'" class="text-xs whitespace-pre-wrap break-all">{{ fileContent }}</pre>
+                <pre v-else-if="selFile.kind === 'text' || selFile.kind === 'json'" class="text-xs whitespace-pre-wrap break-all max-h-[45vh] overflow-auto">{{ fileContent }}</pre>
                 <!-- 二进制/不可文本预览(PDF 等):给下载/新标签打开链接,不当文本渲染(防卡死)。 -->
                 <a v-else :href="artUrl(selFile.path)" target="_blank" rel="noopener"
                    class="text-xs text-blue-600 hover:text-blue-700 inline-flex items-center gap-1">
@@ -337,7 +337,7 @@ onMounted(async () => {
               <div v-if="logLoading" class="text-xs text-gray-400">加载中…</div>
               <div v-else-if="logErr" class="text-xs text-gray-400">{{ logErr }}</div>
               <div v-else-if="!logText.trim()" class="text-xs text-gray-400">该步骤无日志输出</div>
-              <pre v-else class="text-xs bg-gray-50 text-gray-800 border border-gray-200 rounded-lg p-3 whitespace-pre-wrap break-all">{{ logText }}</pre>
+              <pre v-else class="text-xs bg-gray-50 text-gray-800 border border-gray-200 rounded-lg p-3 whitespace-pre-wrap break-all max-h-[45vh] overflow-auto">{{ logText }}</pre>
             </div>
           </div>
     </template>
