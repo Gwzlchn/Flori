@@ -199,19 +199,20 @@ video:
       outputs: ["output/versions/review_*"]   # 版本化评审(与笔记版本 1:1 配对);笔记页另渲染可读面板
 
 paper:
+  # provider 统一 claude-cli/subscription:订阅 worker 可跑,避开无 key 的 anthropic/deepseek 全挂(与 article/video 对齐)。
   variables:
-    AI_SMART_PRIMARY_PROVIDER: anthropic
-    AI_SMART_PRIMARY_MODEL: claude-sonnet-4-6
-    AI_SMART_FALLBACK_PROVIDER: deepseek
-    AI_SMART_FALLBACK_MODEL: deepseek-v4-pro
-    AI_REVIEW_PRIMARY_PROVIDER: anthropic
-    AI_REVIEW_PRIMARY_MODEL: claude-haiku-4-5
-    AI_REVIEW_FALLBACK_PROVIDER: deepseek
-    AI_REVIEW_FALLBACK_MODEL: deepseek-v4-flash
-    AI_TRANSLATE_PRIMARY_PROVIDER: anthropic
-    AI_TRANSLATE_PRIMARY_MODEL: claude-sonnet-4-6
-    AI_TRANSLATE_FALLBACK_PROVIDER: deepseek
-    AI_TRANSLATE_FALLBACK_MODEL: deepseek-v4-pro
+    AI_SMART_PRIMARY_PROVIDER: claude-cli
+    AI_SMART_PRIMARY_MODEL: subscription
+    AI_SMART_FALLBACK_PROVIDER: claude-cli
+    AI_SMART_FALLBACK_MODEL: subscription
+    AI_REVIEW_PRIMARY_PROVIDER: claude-cli
+    AI_REVIEW_PRIMARY_MODEL: subscription
+    AI_REVIEW_FALLBACK_PROVIDER: claude-cli
+    AI_REVIEW_FALLBACK_MODEL: subscription
+    AI_TRANSLATE_PRIMARY_PROVIDER: claude-cli
+    AI_TRANSLATE_PRIMARY_MODEL: subscription
+    AI_TRANSLATE_FALLBACK_PROVIDER: claude-cli
+    AI_TRANSLATE_FALLBACK_MODEL: subscription
   jobs:
     "01_download":
       label: "下载"
@@ -397,15 +398,16 @@ article:
       outputs: ["output/versions/review_*"]   # 版本化评审(与笔记版本 1:1 配对);笔记页另渲染可读面板
 
 audio:
+  # provider 统一 claude-cli/subscription:订阅 worker 可跑,避开无 key 的 anthropic/deepseek 全挂(与 article/video 对齐)。
   variables:
-    AI_SMART_PRIMARY_PROVIDER: anthropic
-    AI_SMART_PRIMARY_MODEL: claude-sonnet-4-6
-    AI_SMART_FALLBACK_PROVIDER: deepseek
-    AI_SMART_FALLBACK_MODEL: deepseek-v4-pro
-    AI_REVIEW_PRIMARY_PROVIDER: anthropic
-    AI_REVIEW_PRIMARY_MODEL: claude-haiku-4-5
-    AI_REVIEW_FALLBACK_PROVIDER: deepseek
-    AI_REVIEW_FALLBACK_MODEL: deepseek-v4-flash
+    AI_SMART_PRIMARY_PROVIDER: claude-cli
+    AI_SMART_PRIMARY_MODEL: subscription
+    AI_SMART_FALLBACK_PROVIDER: claude-cli
+    AI_SMART_FALLBACK_MODEL: subscription
+    AI_REVIEW_PRIMARY_PROVIDER: claude-cli
+    AI_REVIEW_PRIMARY_MODEL: subscription
+    AI_REVIEW_FALLBACK_PROVIDER: claude-cli
+    AI_REVIEW_FALLBACK_MODEL: subscription
   jobs:
     "01_download":
       label: "下载"
