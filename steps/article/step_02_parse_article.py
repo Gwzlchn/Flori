@@ -133,7 +133,7 @@ class ParseArticleStep(StepBase):
             self.write_output("intermediate/needs_translation.json", {"lang": lang})
 
         # 可读原文 Markdown(图片下载到 assets/ 改本地引用),供前端「原文」tab。
-        md, img_count = self._original_markdown(html, parsed)
+        md, img_count = self._original_markdown(html, parsed, extractor)
         self.write_output("output/original.md", md)
 
         return {"chars": len(text), "title": title, "images": img_count,
@@ -181,9 +181,11 @@ class ParseArticleStep(StepBase):
 
     # 原文 Markdown:readability 定位正文 → markdownify 忠实转 MD → 图片按 md 引用本地化。
 
-    def _original_markdown(self, html: str, parsed: dict) -> tuple[str, int]:
+    def _original_markdown(self, html: str, parsed: dict, extractor) -> tuple[str, int]:
         """readability 抽正文(原始 HTML 无损子树,<pre>/<img> 原位保留)→ markdownify 转 MD。
-        关 _ * 转义:LaTeX($x_i$)与代码常含下划线/星号,转义会毁公式。失败走回退链。"""
+        关 _ * 转义:LaTeX($x_i$)与代码常含下划线/星号,转义会毁公式。失败走回退链。
+        图片找回:readability 会把深嵌套正文图连壳剔掉(substack 的 figure/captioned 容器),
+        用站点感知的 extractor.content_image_urls 找回缺失图,按 HTML 锚点插回原位。"""
         md = ""
         try:
             from markdownify import markdownify as mdify
@@ -199,7 +201,64 @@ class ParseArticleStep(StepBase):
         # 标题:readability/trafilatura 的 md 常不带 H1,补上
         if title and not md.lstrip().startswith("# "):
             md = f"# {title}\n\n{md}"
+        recovered = [u for u in extractor.content_image_urls(html) if u not in md]
+        if recovered:
+            items = [(self._image_anchor(html, u), f"![]({u})") for u in recovered]
+            md = self._inline_images(md, items)
         return self._localize_images(md, parsed.get("url", ""))
+
+    @staticmethod
+    def _image_anchor(html: str, url: str) -> str:
+        """图 url 在 HTML 中首次出现位置之前、最近的段落/标题文字(归一化),作为它在正文里的锚点。
+        无则返回空串,兜底插标题后。"""
+        idx = html.find(url)
+        if idx < 0:
+            return ""
+        before = html[:idx]
+        last = ""
+        for m in re.finditer(r'<(p|h[1-6]|figcaption)\b[^>]*>(.*?)</\1>', before, re.S | re.I):
+            txt = " ".join(re.sub(r'<[^>]+>', " ", m.group(2)).split())
+            if len(txt) >= 12:           # 够长才作锚(跳过空/超短块)
+                last = txt
+        return last
+
+    @staticmethod
+    def _inline_images(md: str, items: list[tuple[str, str]]) -> str:
+        """把找回的图按锚点插到 md 对应段落之后。图按文档序,锚点在 md 里也按序出现,故单调推进搜索。
+        锚点为空或在 md 找不到的图,收集后兜底插在标题(首个 # 行)之后。"""
+        lines = md.split("\n")
+        norm = [" ".join(re.sub(r'<[^>]+>', " ", ln).split()) for ln in lines]
+        after: dict[int, list[str]] = {}     # 行号 -> 该行后要插的图引用
+        leftover: list[str] = []
+        cursor = 0
+        for anchor, ref in items:
+            key = anchor[-40:].strip()
+            placed = False
+            if key:
+                for i in range(cursor, len(lines)):
+                    if key in norm[i]:
+                        after.setdefault(i, []).append(ref)
+                        cursor = i            # 后续图从此行起找,保序;同段连续图落同一行
+                        placed = True
+                        break
+            if not placed:
+                leftover.append(ref)
+        out: list[str] = []
+        title_idx = next((i for i, ln in enumerate(lines) if ln.startswith("# ")), -1)
+        for i, ln in enumerate(lines):
+            out.append(ln)
+            if i == title_idx and leftover:   # 锚点匹配不上的兜底插标题后
+                for ref in leftover:
+                    out.append("")
+                    out.append(ref)
+                leftover = []
+            for ref in after.get(i, []):
+                out.append("")
+                out.append(ref)
+        if leftover:                          # 无标题行 → 顶部兜底
+            head = [x for ref in leftover for x in (ref, "")]
+            out = head + out
+        return "\n".join(out)
 
     def _fallback_markdown(self, html: str, parsed: dict) -> str:
         """回退链:trafilatura markdown(代码块会被拍扁,聊胜于无)→ 纯正文文本。"""

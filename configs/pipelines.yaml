@@ -329,7 +329,7 @@ article:
       needs: ["01_download"]
       # 图片本地化网络受限:图多的页(26 图)并行 5 路仍需分批,60s 会超时。
       timeout: 300
-      version: "2"   # 原文 MD 管线换代(readability+markdownify),失效旧指纹
+      version: "3"   # 图片找回(extractor+锚点插回,readability 剔深嵌套正文图),失效旧指纹
       # 补全元信息(abstract/image/tags/author),并产出图片本地引用的可读原文 Markdown;
       # 非中文正文写 needs_translation.json 标记(供 04_translate_article 的 rules:exists 门控)。
       outputs: ["intermediate/parsed.json", "output/original.md", "intermediate/needs_translation.json", "assets/*"]
