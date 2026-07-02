@@ -200,10 +200,12 @@ type Version = { provider: string; model: string; version: string; file: string;
 const versions = ref<Version[]>([])
 const activeFile = ref<string | null>(null)
 const isArticle = computed(() => job.value?.content_type === 'article')
-// 文章 + 论文都有解析版原文(article=02_parse readability MD;paper=03_sections 章节 MD),
-// 机械变体即「原文」;video/audio 的机械变体仍是转写机械版。
-const hasReadableOriginal = computed(() =>
-  isArticle.value || job.value?.content_type === 'paper')
+// 文章 + 论文都有「原文」变体:article=02_parse readability MD;paper=内嵌 PDF(浏览器原生渲染,
+// PDF 文本抽取的排版损伤救不回,解析版 original.md 仅留给概念/检索/AI 步);video/audio 仍是转写机械版。
+const isPaper = computed(() => job.value?.content_type === 'paper')
+const hasReadableOriginal = computed(() => isArticle.value || isPaper.value)
+const paperPdfUrl = computed(() =>
+  `/api/jobs/${jobId.value}/artifact?path=${encodeURIComponent('input/source.pdf')}`)
 // 有无智能笔记:有版本即有(文章关笔记时为空 → 隐藏智能版、机械版即原文)
 const hasSmartNote = computed(() => versions.value.length > 0)
 
@@ -271,7 +273,11 @@ async function loadNote() {
   noteError.value = ''
   try {
     let text: string
-    if (isMechanical.value && hasReadableOriginal.value) {
+    if (isMechanical.value && isPaper.value) {
+      noteContent.value = ''   // 论文原文 = 模板内嵌 PDF,不走文本
+      return
+    }
+    if (isMechanical.value && isArticle.value) {
       // 文章「原文」= output/original.md(已由 loadOriginal 载入;兜底再拉一次)
       text = originalMd.value || await api.getText(
         `/api/jobs/${fid}/artifact?path=${encodeURIComponent('output/original.md')}`)
@@ -786,6 +792,11 @@ watch(job, (j) => {
         <div v-else-if="noteError" class="card pad">
           <div class="state"><FileText class="big" /><div class="t">{{ noteError }}</div></div>
         </div>
+        <!-- 论文「原文」= 内嵌 PDF(浏览器原生渲染;文本抽取排版损伤救不回,不走 MD) -->
+        <iframe
+          v-else-if="isMechanical && isPaper"
+          :src="paperPdfUrl" class="pdf-frame" title="论文 PDF 原文"
+        />
         <div v-else class="notes-wrap">
           <!-- max-w-none:解除 @tailwindcss/typography 给 .prose 的 65ch 上限,
                否则笔记正文被卡到 ~586px、在 762px 列里右侧留大片空白(笔记大小不对)。 -->
@@ -1047,6 +1058,11 @@ watch(job, (j) => {
 </template>
 
 <style scoped>
+/* 论文原文内嵌 PDF:占满列宽、接近整屏高,浏览器原生渲染 */
+.pdf-frame {
+  width: 100%; height: 82vh; border: 1px solid var(--line-soft);
+  border-radius: 10px; background: #f9fafb;
+}
 .fig-card { margin: 0 0 22px; }
 .fig-card img {
   max-width: 100%; display: block; border: 1px solid var(--line-soft);

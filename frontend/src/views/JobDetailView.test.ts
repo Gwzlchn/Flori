@@ -319,6 +319,19 @@ describe('JobDetailView 删除流程', () => {
   })
 })
 
+describe('JobDetailView 论文原文 = 内嵌 PDF', () => {
+  it('paper 无智能笔记时,笔记 tab 渲染 PDF iframe(不走 MD 文本)', async () => {
+    fetchDetail.mockResolvedValue(makeDetail({ content_type: 'paper', status: 'processing' }))
+    const w = mountView()
+    await flushPromises()
+    const frame = w.find('iframe.pdf-frame')
+    expect(frame.exists()).toBe(true)
+    expect(frame.attributes('src')).toContain('input%2Fsource.pdf')
+    // 笔记正文区不再渲染 MD(页面他处的 MarkdownViewer 实例如摘要不在此断言范围)
+    expect(w.find('.notes-wrap').exists()).toBe(false)
+  })
+})
+
 describe('JobDetailView 切 job 重置(跨 job 串台回归)', () => {
   it('切 job 后笔记重新加载,不残留上一个 job 的原文', async () => {
     // 复现实测事故:A(文章,已看原文)→ 切到 B,notesInit 不复位则 ensureNotes no-op,
