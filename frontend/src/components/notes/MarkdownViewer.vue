@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import MarkdownIt from 'markdown-it'
 
@@ -136,24 +136,65 @@ const rendered = computed(() => renderedDoc.value.html)
 
 watch(() => renderedDoc.value.headings, (hs) => emit('headings', hs), { immediate: true })
 
-// 术语链接走 SPA 跳转(v-html 内的 <a> 不被 vue-router 接管,用事件委托)。
+// 术语链接走 SPA 跳转(v-html 内的 <a> 不被 vue-router 接管,用事件委托);
+// 正文图片点击开 lightbox 放大(同一委托)。
 function onClick(e: MouseEvent) {
-  const a = (e.target as HTMLElement)?.closest?.('.term-link') as HTMLElement | null
-  if (!a) return
-  e.preventDefault()
-  const term = a.getAttribute('data-term')
-  if (term && props.domain) {
-    router.push(`/kb/${encodeURIComponent(props.domain)}/concepts/${encodeURIComponent(term)}`)
+  const t = e.target as HTMLElement
+  const a = t?.closest?.('.term-link') as HTMLElement | null
+  if (a) {
+    e.preventDefault()
+    const term = a.getAttribute('data-term')
+    if (term && props.domain) {
+      router.push(`/kb/${encodeURIComponent(props.domain)}/concepts/${encodeURIComponent(term)}`)
+    }
+    return
+  }
+  if (t instanceof HTMLImageElement && !t.closest('a')) {  // 链接内的图仍走链接
+    lightboxSrc.value = t.currentSrc || t.src
   }
 }
+
+// 图片 lightbox:点图放大,X/点遮罩/Esc 关闭。
+const lightboxSrc = ref('')
+function closeLightbox() { lightboxSrc.value = '' }
+function onEsc(e: KeyboardEvent) { if (e.key === 'Escape') closeLightbox() }
+watch(lightboxSrc, (v) => {
+  if (v) document.addEventListener('keydown', onEsc)
+  else document.removeEventListener('keydown', onEsc)
+})
+onBeforeUnmount(() => document.removeEventListener('keydown', onEsc))
 </script>
 
 <template>
   <div class="prose prose-sm max-w-none prose-headings:scroll-mt-20" v-html="rendered" @click="onClick" />
+  <Teleport to="body">
+    <div v-if="lightboxSrc" class="lightbox" @click.self="closeLightbox">
+      <button class="lightbox-x" aria-label="关闭" @click="closeLightbox">×</button>
+      <img :src="lightboxSrc" alt="">
+    </div>
+  </Teleport>
 </template>
 
 <style>
-.prose img { max-width: 100%; border-radius: 0.5rem; }
+.prose img { max-width: 100%; border-radius: 0.5rem; cursor: zoom-in; }
+/* 图片 lightbox(Teleport 到 body,样式须非 scoped) */
+.lightbox {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0, 0, 0, 0.82);
+  display: flex; align-items: center; justify-content: center;
+  padding: 4vh 4vw;
+}
+.lightbox img {
+  max-width: 100%; max-height: 100%;
+  border-radius: 6px; box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+}
+.lightbox-x {
+  position: absolute; top: 14px; right: 18px;
+  width: 40px; height: 40px; border-radius: 50%; border: none;
+  background: rgba(255, 255, 255, 0.14); color: #fff;
+  font-size: 26px; line-height: 1; cursor: pointer;
+}
+.lightbox-x:hover { background: rgba(255, 255, 255, 0.28); }
 /* 代码统一浅灰底黑字等宽,字号随正文:prose-sm 默认 0.857em 太小、pre 深底反白不合阅读习惯 */
 .prose pre {
   background: #f3f4f6;
