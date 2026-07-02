@@ -21,7 +21,7 @@ import {
 } from 'lucide-vue-next'
 
 // 内容详情(原型 #detail):头部 + 4 tab,即笔记/概念/流水线/元信息。
-// 完成态(done)默认落「笔记」,未完成默认「流水线」。
+// 一律默认落「笔记」(article/paper 有解析版原文,点开即可读,不等 AI 步)。
 // 另含步骤操作(重试/重跑/删除);笔记侧支持版本切换、评审、采纳、换 provider 重跑。
 const route = useRoute()
 const router = useRouter()
@@ -41,14 +41,13 @@ const stepStatusByKey = computed<Record<string, string>>(() => {
   for (const s of steps.value) m[s.name] = s.status
   return m
 })
-// DAG 与工作台共享的选中步(点 DAG 节点即选)。默认按优先级取运行中、失败、最后完成、末步;用户点选后不被刷新覆盖。
+// DAG 与工作台共享的选中步(点 DAG 节点即选)。默认恒为首步(下载);每次进流水线 tab 重置,
+// 不记忆上次点选(用户明确要求「都从下载开始」);同 tab 内点选不被 steps 刷新覆盖。
 const selectedStep = ref('')
 watch(steps, (s) => {
   if (selectedStep.value && s.some(x => x.name === selectedStep.value)) return
   if (!s.length) return
-  const pick = s.find(x => x.status === 'running') || s.find(x => x.status === 'failed')
-    || [...s].reverse().find(x => x.status === 'done') || s[s.length - 1]
-  selectedStep.value = pick.name
+  selectedStep.value = s[0].name
 }, { immediate: true })
 
 // AI 用量(逐次)→ 按步聚合 provider/开销喂 DAG 节点 + 全 job 总开销。
@@ -161,8 +160,8 @@ async function fetchDetail() {
     api.get<{ usage?: any[] }>(`/api/jobs/${fid}/usage`).then(r => { if (jobId.value === fid) jobUsageRows.value = r?.usage || [] }).catch(() => {})
     // 本任务各 AI 步用的 prompt 版本 vs 当前激活版本(白盒版本管理);不一致给「重跑该步」。
     loadPromptVersions().catch(() => {})
-    // 完成态默认落笔记,否则落流水线。
-    tab.value = d.status === 'done' ? 'notes' : 'proc'
+    // 一律默认落笔记:article/paper 的解析版原文不等 AI 步,点开即有内容可读。
+    tab.value = 'notes'
   } catch (e: any) {
     loadError.value = e?.status === 404 ? '内容不存在或已删除' : (e?.message || '加载失败')
   } finally {
@@ -181,6 +180,7 @@ function resetJobView() {
   evidence.value = null; figures.value = []
   jobConcepts.value = []; conceptsError.value = ''
   activeFile.value = null; isMechanical.value = false
+  selectedStep.value = ''
 }
 
 onMounted(fetchDetail)
@@ -600,6 +600,7 @@ async function confirmDelete() {
 watch(tab, (t) => {
   if (t === 'notes') ensureNotes()
   else if (t === 'concepts') ensureConcepts()
+  else if (t === 'proc') selectedStep.value = steps.value[0]?.name || ''  // 进流水线恒从「下载」开始
 })
 // 详情就绪后若初始 tab 即笔记/概念,触发懒加载。
 watch(job, (j) => {

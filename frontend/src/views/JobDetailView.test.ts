@@ -167,12 +167,12 @@ describe('JobDetailView tab 默认与切换', () => {
     expect(onBtn?.text()).toContain('笔记')
   })
 
-  it('未完成态默认落「流水线」tab', async () => {
+  it('未完成态也默认落「笔记」tab(原文不等 AI 步,点开即可读)', async () => {
     fetchDetail.mockResolvedValue(makeDetail({ status: 'processing' }))
     const w = mountView()
     await flushPromises()
     const onBtn = w.find('.tabs').findAll('button').find(b => b.classes().includes('on'))
-    expect(onBtn?.text()).toContain('流水线')
+    expect(onBtn?.text()).toContain('笔记')
   })
 
   it('点「元信息」tab 切换并渲染元信息表格', async () => {
