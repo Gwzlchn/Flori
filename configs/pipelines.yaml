@@ -1,22 +1,22 @@
-# GitLab-CI 风格流水线：变量/模板(extends)/needs/rules 在加载时归一化为内部 step 结构。
-# 顺序由 needs 决定；prod↔integration 的差异退化为 integration 文件里一份 variables 覆盖。
+# GitLab-CI 风格流水线:变量/模板(extends)/needs/rules 在加载时归一化为内部 step 结构。
+# 顺序由 needs 决定;prod 与 integration 的差异退化为 integration 文件里一份 variables 覆盖。
 #
 # 约定:
 #   - 步骤键按执行顺序从 01 递增(每条 pipeline 各自从 01 开始)。
 #   - label:  步骤中文显示名(前端各处展示)。英文键只在日志/技术视图出现。
-#   - outputs: 本步产物的文件 glob(单一事实源)。前端「分步产物」按此分组展示;
-#              未被任何步骤匹配的文件归入「其他」。job.json 等敏感文件由代码强制隐藏。
+#   - outputs: 本步产物的文件 glob(单一事实源)。前端「步骤与产物」面板按此分组展示,
+#              未被任何步骤匹配的文件不进分组视图。job.json 等敏感文件由代码强制隐藏。
 
-# 全局默认：所有 job 自动继承、可逐字段覆盖。
+# 全局默认:所有 job 自动继承、可逐字段覆盖。
 default:
   image: flori/step-base
   timeout: 600
   retry: 0
-  # 步骤定义版本(进 step def_digest 指纹):改某步行为(如改了内联 prompt/换实现)却想触发重跑时,
-  # 在该步下加/改 `version: "2"` 即可——无需改代码。换 ai 模型也会自动触发。详见 shared/step_base._def_digest。
+  # 步骤定义版本,进 step def_digest 指纹。改某步行为(如改了内联 prompt/换实现)却想触发重跑时,
+  # 在该步下加/改 `version: "2"` 即可,无需改代码。换 ai 模型也会自动触发。详见 shared/step_base._def_digest。
   version: "1"
 
-# 隐藏模板（'.' 前缀，不直接运行）：同类步只写差异，extends 按键深合并。
+# 隐藏模板('.' 前缀,不直接运行):同类步只写差异,extends 按键深合并。
 .cpu-step:
   pool: cpu
   timeout: 120
@@ -25,8 +25,8 @@ default:
 .ai-step:
   pool: ai
   timeout: 600
-  # 5 次：让限流(ai_rate_limit)长退避策略 [300,600,1200,1800,1800] 跑满，耐心等配额恢复；
-  # 普通 ai 错误仍按其策略上限(3)退避，互不影响(调度取 min(policy_max, retry))。
+  # 5 次:让限流(ai_rate_limit)长退避策略 [300,600,1200,1800,1800] 跑满,耐心等配额恢复;
+  # 普通 ai 错误仍按其策略上限 3 退避,互不影响:调度取 min(policy_max, retry)。
   retry: 5
 
 .review:
@@ -131,8 +131,8 @@ video:
       extends: .ai-step
       run: steps.video.step_08_punctuate
       # 依赖 02_whisper:无原生字幕时等 whisper 转写出 input/subtitle.srt 再出口播稿
-      # (whisper 有原生 srt 则 skip,视为满足依赖)。否则规则在 whisper 前求值→无 srt→08 被跳过→
-      # 笔记只剩 OCR。规则保留作兜底(whisper 万一没产 srt 则优雅跳过)。
+      # (whisper 有原生 srt 则 skip,视为满足依赖)。否则规则在 whisper 前求值,彼时无 srt,
+      # 本步被跳过,笔记只剩 OCR。规则保留作兜底(whisper 万一没产 srt 则优雅跳过)。
       needs: ["01_download", "02_whisper"]
       timeout: 1800
       retry: 5
@@ -149,7 +149,7 @@ video:
       label: "机械版笔记"
       run: steps.video.step_09_mechanical
       pool: io
-      # 依赖 08:口播稿(标点版,源自原生字幕或 whisper 转写)必须先就绪再出机械版,否则无字幕视频
+      # 依赖 08:口播稿(标点版,源自原生字幕或 whisper 转写)必须先就绪再出机械版。否则无字幕视频
       # (如 YouTube 无 CC)只会得到纯 OCR 笔记、丢失口播主体内容。08 有 retry:5 容错。
       needs: ["06_ocr", "07_danmaku", "08_punctuate"]
       timeout: 30
@@ -160,8 +160,8 @@ video:
       label: "权威来源"
       extends: .ai-step
       run: steps.video.step_evidence
-      # 案例取证(ADR-0012):仅案例类(domain=finance / style_tags 含 case-study)触发,步内自门控,
-      # 其余写空 skip(秒返回、不挡 smart)。在 smart 之前跑——11_smart 依赖它以引 [E#] 一手来源。
+      # 案例取证,理由见 ADR-0012。仅案例类(domain=finance / style_tags 含 case-study)触发,步内自门控。
+      # 其余写空 skip,秒返回不挡 smart。在 smart 之前跑——11_smart 依赖它以引 [E#] 一手来源。
       needs: ["09_mechanical"]
       tags: []
       timeout: 1800   # claude WebSearch + 直连 curl 多轮 agentic 取证
@@ -286,8 +286,8 @@ paper:
       outputs: ["output/versions/review_*"]   # 版本化评审(与笔记版本 1:1 配对);笔记页另渲染可读面板
 
 article:
-  # v2(2026-06-27):provider 统一 claude-cli/subscription(订阅 worker 可跑,对齐 09 决策、避开
-  # 无 key 的 anthropic/deepseek 全挂);智能笔记/评审随投递开关 smart_note 可选;概念步必跑。
+  # provider 统一 claude-cli/subscription:订阅 worker 可跑,避开无 key 的 anthropic/deepseek 全挂;
+  # 智能笔记/评审随投递开关 smart_note 可选;概念步必跑。
   variables:
     AI_SMART_PRIMARY_PROVIDER: claude-cli
     AI_SMART_PRIMARY_MODEL: subscription
@@ -312,7 +312,7 @@ article:
       pool: io
       timeout: 120
       retry: 3
-      # v2:正文内图片本地化 → assets/(下载步抓取,供原文 MD 内嵌)。
+      # 正文内图片本地化 → assets/(下载步抓取,供原文 MD 内嵌)。
       outputs: ["input/source.html", "input/metadata.json", "input/article_meta.json", "assets/*"]
 
     "02_parse_article":
@@ -321,7 +321,7 @@ article:
       run: steps.article.step_02_parse_article
       needs: ["01_download"]
       timeout: 60
-      # v2:补全元信息(abstract/image/tags/author)+ 产出可读原文 Markdown(图片本地引用);
+      # 补全元信息(abstract/image/tags/author),并产出图片本地引用的可读原文 Markdown;
       # 非中文正文写 needs_translation.json 标记(供 04_translate_article 的 rules:exists 门控)。
       outputs: ["intermediate/parsed.json", "output/original.md", "intermediate/needs_translation.json"]
 
@@ -340,7 +340,7 @@ article:
       # needs 04_translate:非中文文章先翻译,笔记基于中文译文做(译文跳过=中文文章时依赖视为满足,读原文)。
       needs: ["03_article_sections", "04_translate_article"]
       tags: []
-      # v2:投递开关 smart_note=on 才生成笔记;否则跳过(短文走轻链路)。
+      # 投递开关 smart_note=on 才生成笔记;否则跳过(短文走轻链路)。
       rules:
         - if_flag: smart_note
           when: on
@@ -370,7 +370,7 @@ article:
       label: "概念 + 摘要"
       extends: .ai-step
       run: steps.article.step_05_concepts
-      # 必跑(无 rules):源优先级 智能笔记 > 译文(非中文)> 原文章节;一句话摘要同出。
+      # 必跑,无 rules。源优先级:智能笔记 > 译文(非中文) > 原文章节;一句话摘要同出。
       # needs 04_smart/04_translate:保证笔记/译文(若有)先就绪;被跳过时依赖视为满足,本步照常跑。
       needs: ["04_smart_article", "04_translate_article"]
       timeout: 120
@@ -386,7 +386,7 @@ article:
       run: steps.article.step_05_review
       needs: ["05_concepts"]
       tags: []
-      # v2:评审跟随智能笔记(smart_note=on 才评审)。
+      # 评审跟随智能笔记(smart_note=on 才评审)。
       rules:
         - if_flag: smart_note
           when: on
@@ -415,19 +415,19 @@ audio:
       retry: 3
       outputs: ["input/source.mp3", "input/source.m4a", "input/source.mp4", "input/metadata.json"]
 
-    # 转写复用 video 的 whisper 步;落在 whisper-capable worker(gpu 池含 cpu fallback)。
+    # 转写复用 video 的 whisper 步。
     "02_whisper":
       label: "语音转写"
       run: steps.video.step_02_whisper
       image: flori/step-gpu
       # 对齐 video 的 whisper:cpu-pool + 无 tag → 任意 cpu worker 可跑(faster-whisper CPU int8);
-      # worker 有 GPU 时 select_whisper_model 自动用 GPU(gpu 更好,无 gpu 也行)。原 gpu-pool 致无 GPU 时卡死。
+      # worker 有 GPU 时 select_whisper_model 自动用 GPU。刻意不配 gpu 池:无 GPU worker 时任务会无人认领卡死。
       pool: cpu
       needs: ["01_download"]
       timeout: 1800
-      # 超时随音频时长伸缩:无 GPU 时 CPU base int8 跑长集 ≈ 1.3x 实时,固定 1800s 会把长集硬杀(08 审计 §4)。
+      # 超时随音频时长伸缩:无 GPU 时 CPU base int8 跑长集约 1.3x 实时,固定 1800s 会把长集硬杀。
       # worker 跑步前读 input/metadata.json 的 duration_sec,有效超时 = clamp(max(1800, ceil(分钟)*90), 21600)。
-      # 缺 metadata/duration 时退回 timeout(行为不变)。机制通用(见 shared.config.build_step_config / worker)。
+      # 缺 metadata/duration 时退回固定 timeout。机制通用,见 shared.config.build_step_config / worker。
       timeout_per_min: 90
       timeout_max_sec: 21600
       retry: 2

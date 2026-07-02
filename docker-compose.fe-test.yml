@@ -2,7 +2,7 @@
 name: flori-fe-test
 # 跑:  docker compose -f docker-compose.fe-test.yml run --rm fe-test
 # node:20-alpine 与 frontend/Dockerfile 同基;npmmirror 直连(出站代理已放行)。
-# 不设 name:,compose 用目录名作 project → 天然按 worktree 隔离,不撞别的栈。
+# 项目名固定 flori-fe-test,与其余 flori-* 栈命名一致。
 services:
   fe-test:
     image: node:20-alpine

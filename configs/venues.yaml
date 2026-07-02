@@ -1,4 +1,4 @@
-# 论文来源(venue)会议/期刊【全名 → 缩写】映射。配置与代码分离:领域知识在此,不硬编码进 step。
+# 论文来源(venue)会议/期刊全名 → 缩写映射。配置与代码分离:领域知识在此,不硬编码进 step。
 # 02_pdf_parse._extract_venue 扫 PDF 前 2 页 "Proceedings of the X" 的 X,小写子串命中下表则用缩写、
 # 否则用全名;再拼年份(如 "OSDI 2023")。新增会议/期刊在此加一行即可,不必改 Python。
 venue_acronyms:

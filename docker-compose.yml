@@ -1,9 +1,9 @@
-# Flori 生产部署：运行 ghcr 上由 CI 构建的镜像，Watchtower 跟随 CI 自动更新（CD）。
+# Flori 生产部署:运行 ghcr 上由 CI 构建的镜像,Watchtower 跟随 CI 自动更新(CD)。
 name: flori
-# 主机相关项（数据目录、Dozzle 绑定地址、远程 agent 等）放 .env，见 .env.example。
-# 默认仅起后端；单机全栈再带前端：`docker compose --profile allinone up -d`。
-# 拆分部署时前端单独在公网入口机运行（边缘反代由各自部署维护）。
-# 容器统一命名 flori-*（单实例部署；要并行多实例请另起具名服务，见 .local 覆盖里的 worker 范式）。
+# 主机相关项(数据目录、Dozzle 绑定地址、远程 agent 等)放 .env,见 .env.example。
+# 默认仅起后端;单机全栈再带前端:`docker compose --profile allinone up -d`。
+# 拆分部署时前端单独在公网入口机运行(边缘反代由各自部署维护)。
+# 容器统一命名 flori-*,单实例部署;要并行多实例请另起具名服务,见 .local 覆盖里的 worker 范式。
 # 日志轮转:json-file 默认无上限,长跑会撑爆宿主磁盘。统一锚点限单文件 10m × 3 份。
 x-logging: &default-logging
   driver: json-file
@@ -12,7 +12,7 @@ x-logging: &default-logging
     max-file: "3"
 
 # api/scheduler/worker 共用的基础 env(REDIS/DATA/CONFIG/MINIO),各 service 经 <<: *common-env
-# 合并 + 追加自身专属项,避免逐 service 复制(H-4)。
+# 合并 + 追加自身专属项,避免逐 service 复制。
 x-common-env: &common-env
   REDIS_URL: redis://redis:6379/0
   DATA_DIR: /data
@@ -43,7 +43,7 @@ services:
     container_name: flori-mcp-http
     image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-api:${IMAGE_TAG:-latest}   # MCP server 在 api stage([api,mcp])
     restart: unless-stopped
-    # 无 profile:随栈常驻自动起(不再需要 --profile mcp);MCP 是默认能力。
+    # 无 profile:随栈常驻自动起;MCP 是默认能力。
     command: python -m api.mcp_server
     environment:
       <<: *common-env
@@ -75,9 +75,9 @@ services:
       - "${API_BIND_IP:-127.0.0.1}:${API_PORT:-8000}:8000"
     volumes:
       - ${FLORI_DATA_DIR:-flori-data}:/data
-      # local_dir 订阅来源约定监听目录:把文件放进 ${FLORI_INBOX_DIR}(默认 .local/inbox,gitignored 本地区;
-      # 生产经 .env 设到数据盘如 /volume2/DATA/flori/inbox —— 运行时数据永不放仓库树)
-      # 即被 source_type=local_dir、source_id=/data/inbox 的订阅枚举入库。
+      # local_dir 订阅来源约定监听目录:把文件放进 ${FLORI_INBOX_DIR},即被 source_type=local_dir、
+      # source_id=/data/inbox 的订阅枚举入库。默认 .local/inbox(gitignored 本地区);
+      # 生产经 .env 设到数据盘如 /volume2/DATA/flori/inbox,运行时数据永不放仓库树。
       # api 跑 enumerate_source→scan_dir(枚举,只读即可);与 worker-cpu 挂同一容器内路径。
       - ${FLORI_INBOX_DIR:-.local/inbox}:/data/inbox:ro
       # 默认 prompt 模板外挂(只读,同 worker):命名卷 flori-data 会 shadow 镜像烤入的 /data/prompts,
@@ -89,12 +89,12 @@ services:
       WORK_DIR: ${WORK_DIR:-/tmp/flori-work}
       API_TOKEN: ${API_TOKEN:-}
       # 可信内网默认放行(空 API_TOKEN);公网/局域网直连暴露务必设 API_TOKEN 并把此项置 0。
-      # 未设 API_TOKEN 且此项非 1 时后端 fail-closed(503),不再静默裸奔(见 docs/07-security)。
+      # 未设 API_TOKEN 且此项非 1 时后端 fail-closed 返回 503,见 docs/07-security。
       API_ALLOW_NO_AUTH: ${API_ALLOW_NO_AUTH:-1}
-      # /api/mcp/info|token(系统页「接入 MCP」卡片)需读 token 判断已配置/供「显示·复制」。
+      # /api/mcp/info|token(系统页「接入 MCP」卡片)需读 token 判断是否已配置,并供显示与复制。
       FLORI_MCP_TOKEN: ${FLORI_MCP_TOKEN:-}
       # app_credentials(B站 SESSDATA 等) at-rest 加密的 Fernet key。
-      # 空=凭证以明文落库；设一把 Fernet key 即加密(见 docs/07-security §密钥管理)。
+      # 空=凭证以明文落库;设一把 Fernet key 即加密(见 docs/07-security §密钥管理)。
       FLORI_SECRET_KEY: ${FLORI_SECRET_KEY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
     logging: *default-logging
@@ -127,7 +127,7 @@ services:
       # 默认 12h:够覆盖"夜间只跑 io worker / 白天暂停某类 worker"的运维窗口;超时才判失败。
       NO_WORKER_GRACE_SEC: ${NO_WORKER_GRACE_SEC:-43200}
       # 与 api 共用镜像/DB,故同样传入(凭证由 api 端读写,scheduler 一般用不到,无害)。
-      # 空=凭证以明文落库；设一把 Fernet key 即加密(见 docs/07-security §密钥管理)。
+      # 空=凭证以明文落库;设一把 Fernet key 即加密(见 docs/07-security §密钥管理)。
       FLORI_SECRET_KEY: ${FLORI_SECRET_KEY:-}
       # 设了就把卡死等关键事件 POST 到 webhook(Slack/Discord/通用);空=只记日志。
       ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
@@ -221,8 +221,8 @@ services:
     depends_on:
       - redis
 
-  # 日志面板（可选）。默认仅绑本机；局域网访问设 DOZZLE_BIND_IP=<局域网IP>。
-  # 接入远程 dozzle agent（host:port，如经 SSH 隧道）设 DOZZLE_REMOTE_AGENT。
+  # 日志面板(可选)。默认仅绑本机;局域网访问设 DOZZLE_BIND_IP=<局域网IP>。
+  # 接入远程 dozzle agent(host:port,如经 SSH 隧道)设 DOZZLE_REMOTE_AGENT。
   dozzle:
     container_name: flori-dozzle
     image: amir20/dozzle
@@ -234,7 +234,7 @@ services:
     ports:
       - "${DOZZLE_BIND_IP:-127.0.0.1}:${DOZZLE_PORT:-8888}:8080"
 
-  # 单机全栈时启用：`docker compose --profile allinone up -d`。
+  # 单机全栈时启用:`docker compose --profile allinone up -d`。
   frontend:
     container_name: flori-frontend
     image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-frontend:${IMAGE_TAG:-latest}
@@ -266,7 +266,7 @@ services:
     volumes:
       - ${MINIO_DATA_DIR:-minio-data}:/data
 
-  # CD：每 120s 查 ghcr，只更新带 watchtower.enable 标签的容器，自动 pull+重建+清理旧镜像。
+  # CD:每 120s 查 ghcr,只更新带 watchtower.enable 标签的容器,自动 pull+重建+清理旧镜像。
   watchtower:
     container_name: flori-watchtower
     image: containrrr/watchtower

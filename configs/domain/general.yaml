@@ -1,24 +1,22 @@
-# 领域级 CPU 步骤调参（domain layer）。
+# 领域级 CPU 步骤调参(domain layer)。
 #
-# 注意：这与 configs/prompts/profiles/{domain}.yaml 是两套不同的配置层：
-#   - configs/prompts/profiles/{domain}.yaml  →  AI 笔记生成 profile（role/output_style/
-#       terminology），由 smart 步骤（08/14）从 prompts_dir 直接加载。
-#   - configs/domain/{domain}.yaml（本文件）  →  CPU 步骤的按领域参数微调，由
-#       shared/config.py:build_step_config 读取并合并进 config["domain"]，供
+# 注意:这与 configs/prompts/profiles/{domain}.yaml 是两套不同的配置层:
+#   - configs/prompts/profiles/{domain}.yaml → AI 笔记生成 profile(role/output_style/
+#       terminology),由 smart 步骤从 prompts_dir 直接加载。
+#   - configs/domain/{domain}.yaml(本文件) → CPU 步骤的按领域参数微调,由
+#       shared/config.py:build_step_config 读取并合并进 config["domain"],供
 #       step_03_scene / step_05_dedup / step_06_ocr 读取。
 #
-# 此前 configs/domain/ 目录不存在，导致 load_domain_profile 永远返回 {}，
-# 这些步骤恒走代码内默认值。补齐目录 + 本模板让该扩展点可发现、可配置。
-# 留空（全部注释）即沿用各步骤的内置默认值，行为不变。
+# 留空(全部注释)即沿用各步骤的内置默认值。
 
-# 场景检测（steps/video/step_03_scene.py）。默认值如下，按需取消注释覆盖：
+# 场景检测(steps/video/step_03_scene.py)。默认值如下,按需取消注释覆盖:
 # scene:
 #   adaptive_threshold: 3.0
 #   min_scene_len_sec: 2.0
 #   window_width: 2
 #   min_content_val: 15.0
 
-# 场景检测：老原型实测基线(window=4/min_content=18,比内置默认少碎场景)。
+# 场景检测:老原型实测基线(window=4/min_content=18,比内置默认少碎场景)。
 scene:
   window_width: 4
   min_content_val: 18.0
@@ -33,13 +31,13 @@ sampling:
   max_gap_sec: 60
   forced_interval_sec: 15
 
-# 关键帧去重：老原型基线 phash_hash_size=16(比默认 8 判别力更强)。
+# 关键帧去重:老原型基线 phash_hash_size=16(比默认 8 判别力更强)。
 dedup:
   phash_hash_size: 16
   phash_threshold: 6
   ssim_threshold: 0.92
   ssim_resize: [320, 180]
 
-# OCR：按置信度过滤,挡台标/花字噪声直灌 AI(老原型基线 0.6)。
+# OCR:按置信度过滤,挡台标/花字噪声直灌 AI(老原型基线 0.6)。
 ocr:
   confidence_threshold: 0.6

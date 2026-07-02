@@ -56,7 +56,7 @@ command -v docker >/dev/null 2>&1 || { echo "错误: 找不到 docker" >&2; exit
 [ -f "$ARCHIVE" ] || { echo "错误: 备份文件不存在: $ARCHIVE" >&2; exit 1; }
 ARCHIVE="$(cd "$(dirname "$ARCHIVE")" && pwd)/$(basename "$ARCHIVE")"
 
-# ── 1. 校验 tar 成员 ───────────────────────────────────
+# 1. 校验 tar 成员
 echo "==> 校验备份内容: $ARCHIVE"
 MEMBERS="$(tar -tzf "$ARCHIVE" 2>/dev/null || true)"
 [ -n "$MEMBERS" ] || { echo "错误: 无法读取 tar(损坏或非 gzip)" >&2; exit 1; }
@@ -72,7 +72,7 @@ fi
 echo "    含 db/    : $([ "$HAS_DB" -eq 1 ] && echo 是 || echo 否)"
 echo "    含 redis/ : $([ "$HAS_REDIS" -eq 1 ] && echo 是 || echo 否)"
 
-# ── 2. 确认(默认安全) ─────────────────────────────────
+# 2. 确认(默认安全)
 echo ""
 echo "!! 即将覆盖以下目标(原数据将丢失):"
 if [ -n "$FLORI_DATA_DIR" ]; then
@@ -93,7 +93,7 @@ if [ "$ASSUME_YES" -ne 1 ]; then
   [ "$ans" = "YES" ] || { echo "已取消。"; exit 0; }
 fi
 
-# ── 3. 尽力停服(避免恢复时被写) ───────────────────────
+# 3. 尽力停服(避免恢复时被写)
 if [ "$DO_STOP" -eq 1 ]; then
   echo "==> 尝试停掉 api/scheduler/worker(避免恢复中被写)"
   if docker compose stop api scheduler worker-cpu worker-ai >/dev/null 2>&1; then
@@ -104,7 +104,7 @@ if [ "$DO_STOP" -eq 1 ]; then
   fi
 fi
 
-# ── 4. 解包到暂存 ──────────────────────────────────────
+# 4. 解包到暂存
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/flori-restore.XXXXXX")"
 # shellcheck disable=SC2064
 trap "rm -rf '$STAGE'" EXIT
@@ -129,7 +129,7 @@ restore_into() {
     sh -c "mkdir -p \"/dst/$dst_sub\" && cp -a /src/. \"/dst/$dst_sub/\""
 }
 
-# ── 5. 恢复 DB ─────────────────────────────────────────
+# 5. 恢复 DB
 if [ "$HAS_DB" -eq 1 ]; then
   echo "==> 恢复 SQLite 库 (db/)"
   if [ -n "$FLORI_DATA_DIR" ]; then
@@ -139,7 +139,7 @@ if [ "$HAS_DB" -eq 1 ]; then
   fi
 fi
 
-# ── 6. 恢复 Redis ──────────────────────────────────────
+# 6. 恢复 Redis
 if [ "$HAS_REDIS" -eq 1 ]; then
   echo "==> 恢复 Redis 状态"
   restore_into redis "$REDIS_VOLUME" volume ""

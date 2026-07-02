@@ -1,10 +1,10 @@
 # 资源池配置:仅声明每池默认并发上限(limit)与 worker 在线判定窗口。
-# limit 是【默认天花板】,运行时可经 redis hash `pool_limit_overrides` 覆盖收紧
-#   (前端 PUT /api/config/pool-limits,即时对直连 + 网关两路 worker 生效;null=清除回落默认)。
+# limit 是默认天花板,运行时可经 redis hash `pool_limit_overrides` 覆盖收紧。
+# 覆盖入口是前端 PUT /api/config/pool-limits,即时对直连 + 网关两路 worker 生效;null=清除回落默认。
 # 默认放开到 1024(基本不限);实际单机并发由 per-worker WORKER_CONCURRENCY 控制。
 # 池的拓扑关系是代码权威,不在此配置:
-#   · worker 类型→订阅池映射 → worker/worker.py 的 WORKER_POOLS(scene 已并入 cpu);
-#   · 哪些池可出网           → worker/step_runner.py 的 _NETWORKED_POOLS。
+#   - worker 订阅哪些池 → 启动参数 --pools 显式声明(worker/main.py);
+#   - 哪些池可出网 → worker/step_runner.py 的 _NETWORKED_POOLS。
 pools:
   io:
     limit: 1024
@@ -15,8 +15,8 @@ pools:
   gpu:
     limit: 1024
 
-# Worker 在线判定窗口（后端权威，全栈共用一套阈值）。
+# Worker 在线判定窗口(后端权威,全栈共用一套阈值)。
 worker_status:
   heartbeat_interval_sec: 10   # worker 端心跳节拍
-  online_window_sec: 30        # 3x 心跳，容忍丢两拍仍判在线
-  stale_window_sec: 900        # 15min 仍无心跳判 stale，供 GC 回收僵尸
+  online_window_sec: 30        # 3x 心跳,容忍丢两拍仍判在线
+  stale_window_sec: 900        # 15min 仍无心跳判 stale,供 GC 回收僵尸

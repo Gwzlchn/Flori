@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # gc-jobs.sh — 单机 LocalStorage 的 job 产物垃圾回收。
 #
-# 背景(审计缺口):LocalStorage.cleanup 是 no-op,源视频/音频/PDF 等大文件
+# 背景:LocalStorage.cleanup 是 no-op,源视频/音频/PDF 等大文件
 # 永远堆在 jobs_dir(/data/jobs/<job_id>/input/source.*),磁盘只增不减。
 # 本脚本通过一次性容器进卷,按年龄回收;默认只删大源媒体,保留笔记/图等产物。
 #
@@ -68,7 +68,7 @@ esac
 
 command -v docker >/dev/null 2>&1 || { echo "错误: 找不到 docker" >&2; exit 1; }
 
-# ── 解析数据源挂载 ─────────────────────────────────────
+# 解析数据源挂载
 if [ -n "$FLORI_DATA_DIR" ]; then
   MOUNT_SRC="$FLORI_DATA_DIR"
   echo "==> 数据源: bind-mount $FLORI_DATA_DIR"
@@ -83,7 +83,7 @@ MODE="DRY-RUN(不删,加 --apply 才删)"
 [ "$APPLY" -eq 1 ] && MODE="APPLY(真删)"
 echo "==> 模式: $MODE  | 年龄: >${OLDER_THAN}天  | 范围: $WHAT  | 水位: ${MIN_FREE_GB:-无}GB"
 
-# ── 在容器内执行回收逻辑 ───────────────────────────────
+# 在容器内执行回收逻辑
 # 把参数透传进 alpine;容器内对 /data/jobs 操作(/data 由命名卷或 bind 挂载提供)。
 # 所有判断/删除/统计都在容器里完成,宿主无需有 find/du。
 docker run --rm \

@@ -1,10 +1,10 @@
-# 网络区域路由(net-zone):把"哪些步骤按网络区域路由"从代码外置到配置(配置与代码分离)。
+# 网络区域路由(net-zone):把"哪些步骤按网络区域路由"从代码外置到配置,配置与代码分离。
 # 与 scheduler.enqueue_step 配合:
-#   · net_steps 命中的步骤,【任务分发时按 URL 判区域】(shared.net_zone,用构建时烤入的 CN 域名表)
-#     → require net-cn / net-global tag(硬门控:只有【自动探测】到自报覆盖该区域的 worker 能认领);
-#   · ★网络路由 tag 只有 net-cn / net-global;代理、B站 SESSDATA 等都是 worker 本地的事(境外 worker
-#     直连 / 大陆 worker 走自带代理;SESSDATA 经 per-job 凭证传给 worker,下载步自读),不是路由 tag;
-#   · 新增需代理的境外文章【不必改配置】——非 CN 表内域名一律判 net-global,自动路由到能到全球的 worker。
+#   - net_steps 命中的步骤,任务分发时按 URL 判区域(shared.net_zone,用构建时烤入的 CN 域名表),
+#     require net-cn / net-global tag。tag 是硬门控:只有自动探测到自报覆盖该区域的 worker 能认领。
+#   - 网络路由 tag 只有 net-cn / net-global。代理、B站 SESSDATA 等都是 worker 本地的事,不是路由 tag:
+#     境外 worker 直连,大陆 worker 走自带代理;SESSDATA 经 per-job 凭证传给 worker,下载步自读。
+#   - 新增需代理的境外文章不必改配置:非 CN 表内域名一律判 net-global,自动路由到能到全球的 worker。
 # 缺此文件时 scheduler 回落到内置默认(scheduler.py 的 _NET_STEPS),向后兼容。
 net_routing:
   # 受网络区域路由影响的步骤(其余步骤本地/AI,不分区域)。

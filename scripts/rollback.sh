@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # 回滚后端镜像到指定标签,重建服务。
 # CI 每次提交都打 :latest + :<git-sha>;跟 :latest 的自动滚动出问题时,固定到一个
-# 已知良好的 sha 即可(审计 #24:此前无版本固定/回滚路径)。
-# P2 镜像拆分后:api/scheduler/worker 是三个独立镜像(flori-api / flori-scheduler / flori-worker),
+# 已知良好的 sha 即可。
+# api/scheduler/worker 是三个独立镜像(flori-api / flori-scheduler / flori-worker),
 # 本脚本按 service 映射到对应镜像、去重拉取,再以 IMAGE_TAG 重建(compose 各 service 已指向自己的镜像)。
 #
 # 用法:

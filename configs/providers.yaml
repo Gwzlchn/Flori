@@ -1,5 +1,5 @@
 # provider 池。pipelines.yaml 默认链只用 claude-cli/anthropic/deepseek;
-# kimi/openai/local 不在默认链,仅供前端「选 provider 重跑」手动挑选(按是否配 key 标灰),
+# kimi/openai/local 不在默认链,仅供前端选 provider 重跑时手动挑选(按是否配 key 标灰),
 # 经 ai_gateway 按 type 分发动态使用——非死配置,勿删。
 providers:
   anthropic:

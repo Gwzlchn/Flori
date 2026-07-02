@@ -1,13 +1,13 @@
-# 前端端到端冒烟：无头 Chromium 跑通所有路由（含动态 job/term），校验 HTTP/console/api。
-# 针对一个**已部署、在跑**的栈运行（不自起栈），默认连本机 flori_default 网络上的 flori-fe-lan。
+# 前端端到端冒烟:无头 Chromium 跑通所有路由(含动态 job/term),校验 HTTP/console/api。
+# 针对一个已部署、在跑的栈运行(不自起栈),默认连本机 flori_default 网络上的 flori-fe-lan。
 #
-# 用法：
+# 用法:
 #   docker compose -f docker-compose.e2e.yml run --rm e2e                 # 本机 LAN 前端
 #   BASE=https://你的外网域名 \
 #     E2E_BASIC_USER=u E2E_BASIC_PASS=p \
-#     docker compose -f docker-compose.e2e.yml run --rm e2e               # 外网（带 Basic Auth）
+#     docker compose -f docker-compose.e2e.yml run --rm e2e               # 外网(带 Basic Auth)
 #
-# 截图落到 ./output/e2e/（已被 .gitignore 忽略）。全部路由干净退出码 0，否则 1。
+# 截图落到 ./output/e2e/(已被 .gitignore 忽略)。全部路由干净退出码 0,否则 1。
 name: flori-e2e
 
 services:
@@ -26,10 +26,9 @@ services:
       - E2E_BASIC_USER=${E2E_BASIC_USER:-}
       - E2E_BASIC_PASS=${E2E_BASIC_PASS:-}
 
-# 连到已部署栈所在的网络（由主 docker-compose.yml 创建）。
+# 连到已部署栈所在的网络(由主 docker-compose.yml 创建)。
 networks:
   default:
     external: true
-    # 参数化生产网络名:生产默认项目名=目录名(flori);若给生产 compose 加 name: flori,
-    # 网络变 flori_default,用 PROD_NETWORK 覆盖即可,无需改本文件(与 H-5 命名治理联动)。
+    # 生产 compose 声明 name: flori,网络即 flori_default;项目名不同的部署用 PROD_NETWORK 覆盖,无需改本文件。
     name: ${PROD_NETWORK:-flori_default}

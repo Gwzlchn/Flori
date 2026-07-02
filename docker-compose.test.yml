@@ -1,4 +1,4 @@
-# 测试栈独立项目名 flori → 容器 flori-test-run-*、镜像 flori-test（与其余 flori-* 一致）。
+# 测试栈独立项目名 flori → 容器 flori-test-run-*、镜像 flori-test(与其余 flori-* 一致)。
 name: flori-test
 
 services:
@@ -7,7 +7,7 @@ services:
     build:
       context: .
       dockerfile: docker/base.Dockerfile
-      target: test-worker  # 本地用【全量】测试镜像(普通 test + [steps] 媒体库):任意模块/step 测试都能跑。
+      target: test-worker  # 本地用全量测试镜像(普通 test + [steps] 媒体库):任意模块/step 测试都能跑。
                            # CI 才拆两 job:普通 job 用 test(轻~350MB) + worker job 用 test-worker(重)。见 base.Dockerfile / ci.yml
       args:
         USE_USTC_MIRROR: "${USE_USTC_MIRROR:-1}"
@@ -25,15 +25,15 @@ services:
       - ./pyproject.toml:/app/pyproject.toml
       # schemathesis 检查配置(只跑 not_a_server_error + response_schema_conformance)
       - ./schemathesis.toml:/app/schemathesis.toml
-      # pytest-split 时长档:--splits 按【实测时长】均衡分片(消除慢用例扎堆某 shard,如 unit-normal shard1)。
+      # pytest-split 时长档:--splits 按实测时长均衡分片,消除慢用例扎堆某 shard。
       # 改了用例分布后重新 `pytest --store-durations --durations-path .test_durations` 生成即可,不用重建镜像。
       - ./.test_durations:/app/.test_durations
-    # 测试依赖([test] extra,单一事实源 pyproject)已【烤进 test stage 镜像】(base.Dockerfile),故此处不再运行时
-    # pip install——直接 pytest,省一笔安装、也不漂移。改 [test] 版本须重建镜像(CI buildcache 会自动跟随)。
+    # 测试依赖([test] extra,单一事实源 pyproject)已烤进 test stage 镜像,见 base.Dockerfile;此处不做运行时
+    # pip install,直接 pytest,省一笔安装、也不漂移。改 [test] 版本须重建镜像(CI buildcache 会自动跟随)。
     # 默认套件:跑 -m 'not fuzz' 的快测 + 分支覆盖率;fuzz(schemathesis,也已烤进镜像)单独手动跑:
     #   docker compose -f docker-compose.test.yml run --rm test \
     #     pytest -m fuzz tests/test_openapi_fuzz.py --no-cov -q
-    # -n auto:pytest-xdist 多进程并行(用例进程内 fakeredis、无跨进程共享态 → 安全;实测 122s→53s)。
+    # -n auto:pytest-xdist 多进程并行;用例进程内 fakeredis、无跨进程共享态,并行安全,实测 122s→53s。
     command: >
       pytest -p no:cacheprovider -m 'not fuzz' -n auto
       --cov=shared --cov=api --cov=scheduler --cov=worker --cov=steps

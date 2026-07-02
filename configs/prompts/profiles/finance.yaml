@@ -7,9 +7,9 @@ output_style:
   terminology_handling: "首次出现的专业术语或操纵手法附一句机制说明（怎么操作、为何如此/为何获利）"
   data_handling: "金额、价格、涨跌幅、折扣率等数字按素材给出的原始值书写，表格与正文口径保持一致"
 
-# terminology 暂留空：本域标准概念由 glossary 采纳(accept)回流积累（见 ADR-0010 Loop1）。
-# 不在此预置——profile 的 terminology 会被注入为「已沉淀、命中沿用措辞、无需重新展开解释」，
-# 预置操纵手法反而会压制上面要求的「机制说明」。
+# terminology 暂留空:本域标准概念由 glossary 采纳(accept)回流积累,见 ADR-0010 的 Loop 1。
+# 不在此预置:profile 的 terminology 会被注入为"已沉淀、命中沿用措辞、无需重新展开解释",
+# 预置操纵手法反而会压制上面要求的"机制说明"。
 terminology: []
 
 do_not:

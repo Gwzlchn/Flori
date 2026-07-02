@@ -1,7 +1,7 @@
 name: Fuzz
 
 # OpenAPI 模糊/契约(schemathesis):对每个端点喂畸形输入,断言不 5xx 崩溃。
-# 从 push CI 拆出(它本来串行 ~2m16s、拖慢每次 push 的关键路径)→ 每日定时跑一次 + 可手动触发。
+# 独立于 push CI:每日定时跑一次 + 可手动触发,不拖慢 push 的关键路径。
 # 复用 ci.yml unit job 写的 ghcr flori-test:buildcache(仅读)→ 测试镜像秒级建出。
 on:
   schedule:
@@ -45,7 +45,7 @@ jobs:
             USE_USTC_MIRROR=0
             FLORI_VERSION=${{ env.FLORI_VERSION }}
           cache-from: type=registry,ref=ghcr.io/${{ env.OWNER_LC }}/flori-test:buildcache
-      # schemathesis 已烤进 test stage([test] extra),直接 pytest -m fuzz(不再运行时 pip install)。
+      # schemathesis 已烤进 test stage([test] extra),直接 pytest -m fuzz,无需运行时 pip install。
       - name: Schemathesis 模糊/契约(无 5xx)
         run: |
           docker compose -f docker-compose.test.yml run --rm test \

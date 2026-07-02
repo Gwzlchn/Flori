@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Flori 测试【唯一入口】—— 所有 agent / 会话统一走此脚本,别再各写 `docker compose run …`。
+# Flori 测试唯一入口 —— 所有 agent / 会话统一走此脚本,别再各写 `docker compose run …`。
 # 权威规约见 CLAUDE.md §测试规约。全容器内跑(宿主不装依赖)。
 #
-# 用【常驻热测试容器】flori-test-warm(docker-compose.test.yml 已挂源码 → 改代码即时生效),
+# 用常驻热测试容器 flori-test-warm(docker-compose.test.yml 已挂源码 → 改代码即时生效),
 # 消除每次 `run --rm` 的容器启停税。首次自动建镜像 + 起热容器。
 #
 # 用法:
@@ -15,7 +15,7 @@
 #   scripts/test.sh --down                         # 停/删热容器
 #   scripts/test.sh                                # 打本帮助
 #
-# 标准 flags(烤死,勿在调用处另写):-p no:cacheprovider  -m 'not fuzz'  -n auto。
+# 标准 flags 已烤进脚本,勿在调用处另写:-p no:cacheprovider  -m 'not fuzz'  -n auto(仅 --all 加)。
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -39,7 +39,7 @@ ensure_warm() {
   fi
 }
 
-# ── 参数解析 ──
+# 参数解析
 [ $# -eq 0 ] && usage 0
 MODE="fast"; CHANGED=0; MODULES=(); RAW=()
 while [ $# -gt 0 ]; do
@@ -56,13 +56,13 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# ── 组装 pytest 参数 ──
+# 组装 pytest 参数
 ARGS=(pytest -p no:cacheprovider -m 'not fuzz')
 if [ "$CHANGED" -eq 1 ]; then
   ARGS+=(--testmon)                    # 只跑受改动影响用例(单进程;子集小,秒级)
 elif [ "$MODE" = "all" ]; then
-  # ★-n auto 只给全量:xdist 每 worker 要重导入整个 app,启动开销只有【大用例集】才摊得回;
-  #   单模块(-m,~100 用例)单进程更快(实测 -n auto 让 107 用例 pytest 3.4s→6.4s,负优化)。
+  # -n auto 只给全量:xdist 每 worker 要重导入整个 app,启动开销只有大用例集才摊得回;
+  #   单模块 -m 约 100 用例时单进程更快,实测 -n auto 让 107 用例 pytest 3.4s→6.4s,负优化。
   ARGS+=(-n auto
          --cov=shared --cov=api --cov=scheduler --cov=worker --cov=steps
          --cov-branch --cov-report=term-missing --cov-fail-under=75)

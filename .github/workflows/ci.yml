@@ -1,6 +1,6 @@
 name: CI
 
-# push/PR 跑测试；合并到 main 后构建并推送镜像到 ghcr.io。
+# push/PR 跑测试;合并到 main 后构建并推送镜像到 ghcr.io。
 # 纯文档提交(*.md / docs / ROADMAP / .local)不触发 CI —— 不跑测试、不重建镜像(paths-ignore)。
 on:
   push:
@@ -10,10 +10,10 @@ on:
     branches: [main]
     paths-ignore: ['**.md', 'docs/**', 'ROADMAP.md', '.local/**']
 
-# ★后端单测【按"普通 vs worker"拆两 job 并行】(与部署镜像同理拆):
-#   unit-normal:轻镜像 test([api,worker,mcp,test],~350MB,build/load 秒级)跑【非 step 测试】(绝大多数)。
-#   unit-worker:重镜像 test-worker(test + ffmpeg + [steps] 媒体库)跑【step/worker 测试】(tests/steps + test_step_* + test_worker)。
-#   各产【部分覆盖率】上传;coverage-gate 合并判 75%。关键路径 = max(两 job) → build-push,压 <2min。
+# 后端单测按"普通 vs worker"拆两 job 并行(与部署镜像同理拆):
+#   unit-normal:轻镜像 test([api,worker,mcp,test],~350MB,build/load 秒级)跑非 step 测试(绝大多数)。
+#   unit-worker:重镜像 test-worker(test + ffmpeg + [steps] 媒体库)跑 step/worker 测试(tests/steps + test_step_* + test_worker)。
+#   各产部分覆盖率上传;coverage-gate 合并判 75%。关键路径 = max(两 job) → build-push,压 <2min。
 jobs:
   unit-normal:
     # 轻镜像 build/load 便宜 → 把 1234 个非 step 用例拆 4 shard 并行(不吃重镜像重建惩罚),摊平关键路径。
@@ -57,9 +57,9 @@ jobs:
           cache-from: |
             type=registry,ref=ghcr.io/${{ env.OWNER_LC }}/flori-test:buildcache
             type=gha,scope=flori-test
-          # 仅 group 1 写 buildcache(2 shard 并行避免双写同 ref);其余只读。PR 回退 gha。
+          # 仅 group 1 写 buildcache,避免多 shard 并行双写同 ref;其余只读。PR 回退 gha。
           cache-to: ${{ github.ref == 'refs/heads/main' && matrix.group == 1 && format('type=registry,ref=ghcr.io/{0}/flori-test:buildcache,mode=max', env.OWNER_LC) || (github.ref != 'refs/heads/main' && matrix.group == 1 && 'type=gha,scope=flori-test,mode=max' || '') }}
-      # 非 step 测试(--ignore tests/steps + 根 tests/test_step_*.py + test_worker.py → 归 unit-worker),再 pytest-split 拆 2 shard。
+      # 非 step 测试(--ignore tests/steps + 根 tests/test_step_*.py + test_worker.py → 归 unit-worker),再 pytest-split 拆 4 shard。
       - name: Unit tests(普通 shard ${{ matrix.group }}/4,非 step)+ 部分覆盖率
         run: |
           mkdir -p covdata
@@ -119,7 +119,7 @@ jobs:
           cache-from: |
             type=registry,ref=ghcr.io/${{ env.OWNER_LC }}/flori-test-worker:buildcache
             type=gha,scope=flori-test-worker
-          # 仅 group 1 写 buildcache(2 shard 并行避免双写同 ref);其余只读。PR 回退 gha。
+          # 仅 group 1 写 buildcache,避免多 shard 并行双写同 ref;其余只读。PR 回退 gha。
           cache-to: ${{ github.ref == 'refs/heads/main' && matrix.group == 1 && format('type=registry,ref=ghcr.io/{0}/flori-test-worker:buildcache,mode=max', env.OWNER_LC) || (github.ref != 'refs/heads/main' && matrix.group == 1 && 'type=gha,scope=flori-test-worker,mode=max' || '') }}
       # step/worker 测试(tests/steps 目录 + 根 tests/test_step_*.py + test_worker.py;真需媒体库),再 pytest-split 拆 2 shard。
       - name: Unit tests(step/worker shard ${{ matrix.group }}/2)+ 部分覆盖率
@@ -139,7 +139,7 @@ jobs:
           path: covdata/.coverage.worker.${{ matrix.group }}
           include-hidden-files: true
 
-  # 合并【普通 + worker】两份部分覆盖率 → 判分支覆盖率门 75%(拆 job 后不能各自判,部分覆盖会误判)。
+  # 合并普通 + worker 各 shard 的部分覆盖率 → 判分支覆盖率门 75%(拆 job 后不能各自判,部分覆盖会误判)。
   # 用 python:slim 挂 checkout 到 /app 里 combine(记录的 /app/* 路径直接对齐,免 [paths]),不建 test 镜像→秒级。
   coverage-gate:
     needs: [unit-normal, unit-worker]
@@ -159,7 +159,7 @@ jobs:
       - name: Combine + 判分支覆盖率门(轻量 python:slim,不建 test 镜像 → 省 ~25s 串行)
         id: cov
         run: |
-          # ★挂 checkout 到 /app(与两 unit job 记录的 /app/* 路径一致 → 免 [paths] 重映射);pip 装 coverage 秒级。
+          # 挂 checkout 到 /app,与两 unit job 记录的 /app/* 路径一致,免 [paths] 重映射;pip 装 coverage 秒级。
           docker run --rm -v "$GITHUB_WORKSPACE:/app" -v "$GITHUB_WORKSPACE/covdata:/covdata" -w /app \
             python:3.11-slim sh -c \
             'pip install -q "coverage[toml]<8" && cp /covdata/.coverage.* . && coverage combine && coverage report --fail-under=75' \
@@ -168,7 +168,7 @@ jobs:
           echo "pct=${pct:-unknown}" >> "$GITHUB_OUTPUT"
           echo "### 🐍 后端分支覆盖率(合并 普通+worker):${pct:-unknown}%" >> "$GITHUB_STEP_SUMMARY"
 
-  # 注:OpenAPI 模糊/契约(schemathesis)已拆到独立每日 cron(.github/workflows/fuzz.yml),不拖慢 push CI。
+  # 注:OpenAPI 模糊/契约(schemathesis)在独立每日 cron .github/workflows/fuzz.yml 跑,不拖慢 push CI。
 
   # 前端单测 + 覆盖率(容器化 vitest;node:20-alpine)。与后端并行,各自为门。
   fe-test:
@@ -187,7 +187,7 @@ jobs:
           echo "pct=$pct" >> "$GITHUB_OUTPUT"
           echo "### 🟢 前端语句覆盖率:${pct}%" >> "$GITHUB_STEP_SUMMARY"
 
-  # 改动路径侦测:据此让 build-push 只重建【相关】镜像(前端-only 不重建后端,反之亦然)。
+  # 改动路径侦测:据此让 build-push 只重建相关镜像(前端-only 不重建后端,反之亦然)。
   detect:
     runs-on: ubuntu-latest
     outputs:
@@ -236,8 +236,8 @@ jobs:
           git commit -q -m "chore(badges): 覆盖率 be=${BE}% fe=${FE}% [skip ci]"
           git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" badges
 
-  # ★build/push 拆分①:与测试【并行】构建相关 prod 镜像(push:false,只 build + 暖 buildcache)。build 不需
-  #   测试过 → 藏进测试的 ~80s 窗口,不再串行加 ~50s。PR 也构建(验 Dockerfile/vue-tsc)。路径过滤:仅构建相关镜像。
+  # build/push 拆分之一:与测试并行构建相关 prod 镜像(push:false,只 build + 暖 buildcache)。
+  #   build 不需先过测试,藏进测试的 ~80s 窗口。PR 也构建(验 Dockerfile/vue-tsc)。路径过滤:仅构建相关镜像。
   build-images:
     needs: [detect]
     runs-on: ubuntu-latest
@@ -308,7 +308,7 @@ jobs:
           file: ${{ matrix.dockerfile }}
           target: ${{ matrix.target }}
           platforms: linux/amd64
-          push: false          # ①只 build 暖缓存,不推;推由 push-images(测过后)做
+          push: false          # 只 build 暖缓存,不推;推由 push-images 在测过后做
           build-args: |
             USE_USTC_MIRROR=0
             FLORI_BUILD_SHA=${{ github.sha }}
@@ -318,7 +318,7 @@ jobs:
             type=gha
           cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}/{1}:buildcache,mode=max', env.OWNER_LC, matrix.image) || 'type=gha,mode=max' }}
 
-  # ★build/push 拆分②:测过(needs 两 unit + fe)+ 镜像已 build(缓存暖)→ 快速 push(cache-from 命中 → build 秒级 + push)。仅 main。
+  # build/push 拆分之二:测过(needs 两 unit + fe)且镜像已 build 缓存暖,快速 push;cache-from 命中,build 秒级。仅 main。
   push-images:
     needs: [unit-normal, unit-worker, fe-test, detect, build-images]
     if: github.ref == 'refs/heads/main'

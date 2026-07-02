@@ -26,7 +26,7 @@ services:
       - CONFIG_DIR=/app/configs
       - DRY_RUN=${DRY_RUN:-0}
       - API_ALLOW_NO_AUTH=1   # 集成测试栈:无 token 放行
-      # app_credentials at-rest 加密的 Fernet key。空=明文落库；设 key 即加密。
+      # app_credentials at-rest 加密的 Fernet key。空=明文落库;设 key 即加密。
       - FLORI_SECRET_KEY=${FLORI_SECRET_KEY:-}
     depends_on:
       - redis

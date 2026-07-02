@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-# ── 默认值 ──────────────────────────────────────────────
+# 默认值
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-flori}"
 BACKUP_DIR="${BACKUP_DIR:-./backups}"
 FLORI_DATA_DIR="${FLORI_DATA_DIR:-}"
@@ -43,7 +43,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# ── 前置检查 ────────────────────────────────────────────
+# 前置检查
 command -v docker >/dev/null 2>&1 || { echo "错误: 找不到 docker" >&2; exit 1; }
 
 mkdir -p "$BACKUP_DIR"
@@ -79,7 +79,7 @@ copy_from_source() {
     sh -c "if [ -e \"/src/$subdir\" ]; then cp -a \"/src/$subdir/.\" /dst/ 2>/dev/null || cp -a \"/src/$subdir\" /dst/ 2>/dev/null || true; fi"
 }
 
-# ── 1. SQLite DB(/data/db) ─────────────────────────────
+# 1. SQLite DB(/data/db)
 echo "==> 备份 SQLite 库 (db/)"
 if [ -n "$FLORI_DATA_DIR" ]; then
   echo "    数据源: bind-mount $FLORI_DATA_DIR"
@@ -93,7 +93,7 @@ else
   fi
 fi
 
-# ── 2. Redis(先 SAVE 再拷卷) ───────────────────────────
+# 2. Redis(先 SAVE 再拷卷)
 echo "==> 备份 Redis 状态"
 if docker ps --format '{{.Names}}' | grep -qx "$REDIS_CONTAINER"; then
   echo "    触发 $REDIS_CONTAINER 落盘 (redis-cli SAVE)"
@@ -111,7 +111,7 @@ else
   copy_from_source "$REDIS_VOLUME" volume "" "redis"
 fi
 
-# ── 3. 元信息 + 打包 ───────────────────────────────────
+# 3. 元信息 + 打包
 cat > "$STAGE/MANIFEST.txt" <<EOF
 flori backup
 created_at=$TS

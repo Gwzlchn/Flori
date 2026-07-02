@@ -1,5 +1,5 @@
 """从各步内联 _DEFAULT 常量生成 configs/prompts/templates/*.md(保证模板 == 代码兜底,零漂移)。
-externalize-prompt 一次性用;之后改 prompt 直接改 templates/*.md(进指纹触发重跑),不碰代码。
+首次外置 prompt 时一次性用;之后改 prompt 直接改 templates/*.md(进指纹触发重跑),不碰代码。
 跑:容器内 `python scripts/gen_prompt_templates.py`(需 shared/steps 可导入)。"""
 from __future__ import annotations
 from pathlib import Path

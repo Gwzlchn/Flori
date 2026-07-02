@@ -5,14 +5,14 @@ name: Mutation (daily + manual)
 # "测试到底有没有意义",比覆盖率更狠。打哪些模块见 scripts/mutation_score.py 的 TARGETS:
 #   shared/ai_gateway.py(计费/exec_id 去重)、shared/db.py、scheduler/(状态迁移)、worker/(乐观锁)。
 #
-# 慢(每个变异要跑相关测试)→ 不挂每 PR;改为每天 cron 跑一次做趋势监控(非阻塞):
-#   · 分数写进本次 run 的 job summary(立即可见);
-#   · 追加到 mutation-data 分支的 history.csv(时间序列源数据),并再生成 trend.md + 各模块徽章 JSON;
-#   · README 徽章读 mutation-data 分支的 mutation-<module>.json,趋势看该分支的 trend.md。
-#   · workflow_dispatch 仍可按需手动跑(可只跑某模块,不写历史只看 summary)。
+# 慢:每个变异要跑相关测试,故不挂每 PR;每天 cron 跑一次做趋势监控(非阻塞):
+#   - 分数写进本次 run 的 job summary(立即可见);
+#   - 追加到 mutation-data 分支的 history.csv(时间序列源数据),并再生成 trend.md + 各模块徽章 JSON;
+#   - README 徽章读 mutation-data 分支的 mutation-<module>.json,趋势看该分支的 trend.md。
+#   - workflow_dispatch 仍可按需手动跑(可只跑某模块,不写历史只看 summary)。
 #
-# 为什么不用 mutmut 自带判生死:本布局下其自动 runner 恒报 killed=0(import shared 解析到 /app/shared
-# 原文,没从 mutants/ 副本激活变异;mutmut 3.6 无 runner/cwd 配置)。改用 scripts/mutation_score.py:
+# 为什么不用 mutmut 自带判生死:本布局下其自动 runner 恒报 killed=0——import shared 解析到 /app/shared
+# 原文,没从 mutants/ 副本激活变异;mutmut 3.6 无 runner/cwd 配置。改用 scripts/mutation_score.py:
 # 设 MUTANT_UNDER_TEST 从 mutants/ 跑相关测试,产出真实 killed/survived。
 #
 # Baseline(回归锚点):shared.ai_gateway = 88.0% (132/150)。其余首次 daily run 跑出后进 history.csv。
@@ -53,7 +53,7 @@ jobs:
           sed -n "/<!--MUTATION-SUMMARY-->/,/<!--\/MUTATION-SUMMARY-->/p" /tmp/mut.log \
             | grep -v "MUTATION-SUMMARY" >> "$GITHUB_STEP_SUMMARY" || true
 
-      # 写历史:定时跑 或 手动【全量】跑(没填 target)——后者可立即 seed 让徽章生效。
+      # 写历史:定时跑 或 手动全量跑(没填 target)——后者可立即 seed 让徽章生效。
       # 手动只跑单模块(填了 target)不写,防部分数据污染趋势。
       - name: Persist scores + regen trend/badges (mutation-data branch)
         if: github.event_name == 'schedule' || github.event.inputs.target == ''

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 本地构建拆分镜像并打 :uptest 标签,供 .local 活栈(IMAGE_TAG=uptest)使用 —— 不依赖 ghcr。
 #
-# P2 镜像拆分后,后端是三个 target(base.Dockerfile 的 scheduler/api/worker)+ 前端,各出一镜像:
+# 后端是三个 target(base.Dockerfile 的 scheduler/api/worker)+ 前端,各出一镜像:
 #   flori-scheduler / flori-api / flori-worker / flori-frontend。
 #
 # 为什么用 `docker compose build` 而非裸 `docker build`:
@@ -25,7 +25,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OWNER="${IMAGE_OWNER:-gwzlchn}"
 TAG="uptest"
 USTC="${USE_USTC_MIRROR:-1}"
-# 真实语义版本(注入镜像 ENV FLORI_VERSION;本地不抹 pyproject——靠 cache mount 提速,且不动用户文件)。
+# 真实语义版本,注入镜像 ENV FLORI_VERSION。本地不抹 pyproject:靠 cache mount 提速,且不动用户文件。
 VER="$(sed -n 's/^version = "\(.*\)"/\1/p' "${REPO}/pyproject.toml" | head -1)"
 
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
