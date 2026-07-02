@@ -260,6 +260,60 @@ class DownloadStep(StepBase):
         cmd = ["curl", "-fSL", "-o", str(input_dir / "source.pdf"), pdf_url]
         self.run_subprocess(cmd, timeout=120)
 
+        # HTML 源(论文源头重做):arxiv 官方/ar5iv 的 LaTeXML 渲染结构+公式无损,原文/翻译/笔记
+        # 全吃它(pymupdf 逆向 PDF 断词、公式丢,已废)。PDF 仍保留(下载入口 + 无 HTML 论文兜底)。
+        self._fetch_arxiv_html(arxiv_id)
+
+    def _fetch_arxiv_html(self, arxiv_id: str) -> None:
+        """抓 arxiv HTML 源 → input/source.html;页内图片下载到 job 根 assets/(与 article/前端
+        `/api/jobs/{id}/assets/` 约定一致),并把 HTML 里的 src 重写为 assets/<名>。
+        先官方 https://arxiv.org/html/<id>(新论文原生),404 再 ar5iv;都失败 = 无 HTML 源
+        (老 LaTeX 编译失败/纯扫描件),不写 source.html → 02 步按 pdf-only 处理。best-effort。"""
+        html = None
+        for base in (f"https://arxiv.org/html/{arxiv_id}",
+                     f"https://ar5iv.labs.arxiv.org/html/{arxiv_id}"):
+            html = self._fetch_html(base, timeout=60)
+            # ar5iv 对无 HTML 的论文回 200 落地页(含 ar5iv 提示语),官方 404 → None;
+            # 粗判:LaTeXML 产物必有 ltx_ 标记。
+            if html and "ltx_" in html:
+                self._arxiv_html_base = base
+                break
+            html = None
+        if not html:
+            self.log.info("arxiv_html_unavailable", arxiv_id=arxiv_id)
+            return
+        html = self._localize_html_images(html, self._arxiv_html_base)
+        self.write_output("input/source.html", html)
+        self.log.info("arxiv_html_fetched", arxiv_id=arxiv_id, base=self._arxiv_html_base,
+                      bytes=len(html))
+
+    def _localize_html_images(self, html: str, base_url: str) -> str:
+        """下载 HTML 内 <img src> 到 job 根 assets/,src 重写为 assets/<扁平名>。
+        单图失败保留原引用(绝对化,前端在线渲染兜底),不失败整体。"""
+        from urllib.parse import urljoin
+
+        assets = self.job_dir / "assets"
+        srcs = dict.fromkeys(re.findall(r'<img[^>]+src="([^"]+)"', html))
+        n_ok = 0
+        for src in srcs:
+            if src.startswith("data:"):
+                continue
+            absolute = urljoin(base_url + "/", src)
+            fname = re.sub(r"[^A-Za-z0-9._-]", "_", src.split("?")[0].strip("/"))[-80:]
+            try:
+                assets.mkdir(parents=True, exist_ok=True)
+                self.run_subprocess(
+                    ["curl", "-fsSL", "-o", str(assets / fname), "--", absolute], timeout=60)
+                html = html.replace(f'src="{src}"', f'src="assets/{fname}"')
+                n_ok += 1
+            except Exception as e:
+                # 失败:引用绝对化留痕(相对路径离开 arxiv 域必坏,绝对 URL 至少可在线渲染)。
+                html = html.replace(f'src="{src}"', f'src="{absolute}"')
+                self.log.warning("arxiv_html_image_failed", src=src[:120], error=str(e)[:120])
+        if n_ok:
+            self.log.info("arxiv_html_images_localized", count=n_ok, total=len(srcs))
+        return html
+
     def _fetch_arxiv_meta(self, arxiv_id: str) -> None:
         """arxiv API 取权威元数据 → stash self._arxiv_meta(由 _extract_metadata 并入 metadata.json)。
         标准库 ElementTree 解析 Atom,零运行时依赖(曾用 feedparser,worker 镜像没装它,宽 except 把

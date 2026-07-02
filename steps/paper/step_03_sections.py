@@ -31,9 +31,12 @@ class SectionsStep(StepBase):
         }
 
         self.write_output("intermediate/sections.json", result)
-        # 可读原文 Markdown(解析版):论文对齐 article 的原文兜底——AI 笔记没跑之前,
-        # 笔记 tab 也有全文可读(标题/作者/摘要/章节),而非空态。
-        self.write_output("output/original.md", self._original_markdown(result))
+        # 可读原文 Markdown(解析版)仅给【无 HTML 源的文本解析】兜底:
+        # - arxiv-html:02 已产干净 original.md(公式/图无损),不得用树渲染覆盖;
+        # - pdf-only(去 pymupdf 后):章节无正文文本,渲染只剩空标题,不写(原文=内嵌 PDF)。
+        if (parsed.get("source_kind") != "arxiv-html"
+                and any((s.get("text") or "").strip() for s in flat_sections)):
+            self.write_output("output/original.md", self._original_markdown(result))
         return {"sections": len(tree)}
 
     @staticmethod

@@ -50,14 +50,23 @@ graph TD
 
 yt-dlp 支持的其他网站，作为兜底。
 
-## 3. 论文适配器（M1 已实现）
+## 3. 论文适配器（M1 已实现;2026-07 源头重做:HTML 优先 / PDF 直喂兜底）
 
 ```
 输入: PDF 上传 或 arXiv URL
 输出: input/source.pdf + input/metadata.json
+      + input/source.html + assets/*      (仅 arxiv 且 HTML 源可得)
 ```
 
-arXiv URL 自动下载 PDF。本地 PDF 直接上传。
+- **arxiv**:PDF 照旧下载(下载入口/无 HTML 兜底);同时抓 **HTML 源**(官方 `arxiv.org/html/<id>`
+  → 404 再 `ar5iv.labs.arxiv.org/html/<id>`),页内图片下载到 job 根 `assets/` 并把引用重写为
+  `assets/<名>`。`02_pdf_parse`(步名保留,语义=论文解析)把 LaTeXML HTML 转干净 Markdown
+  (`steps/utils/html_paper.py`:标题层级 / `<math alttext>`→`$…$``$$…$$` / 图+图注 / 表 best-effort)
+  → `output/original.md` + `sections.json`,`parsed.json.source_kind="arxiv-html"`。
+  原文展示 / 翻译 / 笔记全部吃这份干净 MD——pymupdf 从 PDF 逆向文本断词、公式丢,已弃用。
+- **只有 PDF 的**(会议论文/直链 PDF/老论文 LaTeX 编译失败):`source_kind="pdf-only"`,不产
+  original.md(原文页=内嵌 PDF 浏览器原生渲染);AI 步(翻译/笔记)**直接喂 PDF**
+  (claude Read 工具按页区间读,worker 镜像带 poppler-utils 渲染)。
 
 ## 4. 文章适配器（M6 已实现）
 

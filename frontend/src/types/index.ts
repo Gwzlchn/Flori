@@ -126,6 +126,7 @@ export interface JobDetail extends JobSummary {
   meta: Record<string, any>
   steps: StepInfo[]
   prompt_versions?: Record<string, number>  // 本任务各 AI 步用的 prompt 覆盖版本号快照(无覆盖步不出现)
+  source_kind?: 'arxiv-html' | 'pdf-only' | null  // 论文源类型:arxiv-html=原文渲染 original.md;pdf-only=内嵌 PDF
 }
 
 export interface JobListResponse {

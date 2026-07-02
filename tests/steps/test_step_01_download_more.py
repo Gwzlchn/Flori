@@ -338,8 +338,9 @@ class TestDownloadArxiv:
     def test_builds_pdf_url(self, tmp_path):
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, source="arxiv", content_type="paper")
-        # 元数据 curl 返回空响应(ParseError → best-effort 兜底);末次调用是 PDF curl。
-        with patch.object(step, "run_subprocess", return_value=SimpleNamespace(stdout="")) as run:
+        # 元数据 curl 返回空响应(ParseError → best-effort 兜底);HTML 抓取 patch 掉(不碰网络)。
+        with patch.object(step, "run_subprocess", return_value=SimpleNamespace(stdout="")) as run, \
+                patch.object(step, "_fetch_html", return_value=None):
             step._download_arxiv("https://arxiv.org/abs/2301.00001")
             cmd = run.call_args[0][0]
             assert cmd[0] == "curl"
@@ -750,3 +751,37 @@ class TestExtractMetadataTypes:
             meta = step._extract_metadata("bilibili", "video")
         assert meta["duration_sec"] == 300.0
         assert meta["has_danmaku"] is True
+
+
+# _fetch_arxiv_html(HTML 源:官方 → ar5iv 回退;图片本地化)
+
+class TestFetchArxivHtml:
+    def test_fetch_and_localize(self, tmp_path):
+        job_dir = _make_job_dir(tmp_path)
+        step = _make_step(job_dir, tmp_path, source="arxiv", content_type="paper")
+        html = '<div class="ltx_page_main"><img src="x1.png"></div>'
+        with patch.object(step, "_fetch_html", return_value=html), \
+                patch.object(step, "run_subprocess", return_value=SimpleNamespace(stdout="")) as run:
+            step._fetch_arxiv_html("1810.04805")
+        saved = (job_dir / "input" / "source.html").read_text(encoding="utf-8")
+        assert 'src="assets/x1.png"' in saved            # 引用重写为本地 assets
+        curl_cmd = run.call_args[0][0]
+        assert "https://arxiv.org/html/1810.04805/x1.png" in curl_cmd  # 相对→绝对下载
+
+    def test_ar5iv_fallback_then_unavailable(self, tmp_path):
+        job_dir = _make_job_dir(tmp_path)
+        step = _make_step(job_dir, tmp_path, source="arxiv", content_type="paper")
+        # 官方与 ar5iv 都无 LaTeXML 产物(None / 落地页无 ltx_)→ 不写 source.html。
+        with patch.object(step, "_fetch_html", side_effect=[None, "<html>no latexml</html>"]):
+            step._fetch_arxiv_html("9901.00001")
+        assert not (job_dir / "input" / "source.html").exists()
+
+    def test_image_download_failure_keeps_absolute_url(self, tmp_path):
+        job_dir = _make_job_dir(tmp_path)
+        step = _make_step(job_dir, tmp_path, source="arxiv", content_type="paper")
+        html = '<div class="ltx_page_main"><img src="x1.png"></div>'
+        with patch.object(step, "_fetch_html", return_value=html), \
+                patch.object(step, "run_subprocess", side_effect=RuntimeError("curl fail")):
+            step._fetch_arxiv_html("1810.04805")
+        saved = (job_dir / "input" / "source.html").read_text(encoding="utf-8")
+        assert 'src="https://arxiv.org/html/1810.04805/x1.png"' in saved  # 失败留绝对 URL

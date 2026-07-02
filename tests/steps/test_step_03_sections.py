@@ -62,6 +62,18 @@ class TestSectionsStep:
         assert "## Introduction" in md and "### Background" in md   # 树深→标题层级
         assert "Intro text" in md and "Train text" in md            # 正文不丢
 
+    def test_arxiv_html_source_does_not_overwrite_original(self, tmp_path):
+        # arxiv-html:02 已产干净 original.md(公式/图无损),03 不得用树渲染覆盖。
+        job_dir = self._setup_job(tmp_path)
+        (job_dir / "output").mkdir()
+        parsed = json.loads((job_dir / "intermediate" / "parsed.json").read_text())
+        parsed["source_kind"] = "arxiv-html"
+        (job_dir / "intermediate" / "parsed.json").write_text(json.dumps(parsed))
+        (job_dir / "output" / "original.md").write_text("# Clean HTML MD $x$")
+        config = make_step_config(tmp_path, step_name="03_sections", pool="cpu")
+        SectionsStep("03_sections", job_dir, config).execute()
+        assert (job_dir / "output" / "original.md").read_text() == "# Clean HTML MD $x$"
+
     def test_original_md_empty_fields_skipped(self, tmp_path):
         # 缺标题/作者/摘要时不产出空头噪音,仅渲染存在的部分。
         md = SectionsStep._original_markdown({

@@ -41,6 +41,9 @@ class JobDetailResponse(JobResponse):
     # 本任务各 AI 步派发时用的 prompt 覆盖版本号快照,从 job.json.prompt_overrides[step].version 读,
     # 无覆盖的步不出现。前端与当前激活版本(GET /api/prompts)比,不一致提示「重跑该步」,见 docs/03-contracts.md §1.14。
     prompt_versions: dict = Field(default_factory=dict)
+    # 论文源类型(intermediate/parsed.json.source_kind,best-effort null):"arxiv-html"=有干净 HTML 源
+    # (原文变体直接渲染 original.md);"pdf-only"=只有 PDF(原文=内嵌 PDF,AI 步直喂)。非论文恒 null。
+    source_kind: str | None = None
 
 
 class StepResponse(BaseModel):

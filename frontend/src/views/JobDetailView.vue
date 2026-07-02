@@ -202,10 +202,12 @@ type Version = { provider: string; model: string; version: string; file: string;
 const versions = ref<Version[]>([])
 const activeFile = ref<string | null>(null)
 const isArticle = computed(() => job.value?.content_type === 'article')
-// 文章 + 论文都有「原文」变体:article=02_parse readability MD;paper=内嵌 PDF(浏览器原生渲染,
-// PDF 文本抽取的排版损伤救不回,解析版 original.md 仅留给概念/检索/AI 步);video/audio 仍是转写机械版。
+// 文章 + 论文都有「原文」变体:article=02_parse readability MD;paper 按源类型分流——
+// arxiv-html(02 由 HTML 源转的干净 MD,公式/图无损)直接渲染 original.md;
+// pdf-only / 旧 job(pymupdf 时代,解析 MD 排版损伤救不回)内嵌 PDF 浏览器原生渲染。
 const isPaper = computed(() => job.value?.content_type === 'paper')
 const hasReadableOriginal = computed(() => isArticle.value || isPaper.value)
+const paperHtmlSource = computed(() => isPaper.value && job.value?.source_kind === 'arxiv-html')
 const paperPdfUrl = computed(() =>
   `/api/jobs/${jobId.value}/artifact?path=${encodeURIComponent('input/source.pdf')}`)
 // 有无智能笔记:有版本即有(文章关笔记时为空 → 隐藏智能版、机械版即原文)
@@ -277,11 +279,11 @@ async function loadNote() {
     if (noteVariant.value === 'translated') {
       text = translatedMd.value || await api.getText(
         `/api/jobs/${fid}/artifact?path=${encodeURIComponent('output/translated.md')}`)
-    } else if (noteVariant.value === 'original' && isPaper.value) {
-      noteContent.value = ''   // 论文原文 = 模板内嵌 PDF,不走文本
+    } else if (noteVariant.value === 'original' && isPaper.value && !paperHtmlSource.value) {
+      noteContent.value = ''   // pdf-only/旧论文:原文 = 模板内嵌 PDF,不走文本
       return
-    } else if (noteVariant.value === 'original' && isArticle.value) {
-      // 文章「原文」= output/original.md(已由 loadOriginal 载入;兜底再拉一次)
+    } else if (noteVariant.value === 'original' && (isArticle.value || paperHtmlSource.value)) {
+      // 文章 / arxiv-html 论文「原文」= output/original.md(已由 loadOriginal 载入;兜底再拉一次)
       text = originalMd.value || await api.getText(
         `/api/jobs/${fid}/artifact?path=${encodeURIComponent('output/original.md')}`)
     } else {
@@ -810,7 +812,7 @@ watch(job, (j) => {
         </div>
         <!-- 论文「原文」= 内嵌 PDF(浏览器原生渲染;文本抽取排版损伤救不回,不走 MD) -->
         <iframe
-          v-else-if="noteVariant === 'original' && isPaper"
+          v-else-if="noteVariant === 'original' && isPaper && !paperHtmlSource"
           :src="paperPdfUrl" class="pdf-frame" title="论文 PDF 原文"
         />
         <div v-else class="notes-wrap">

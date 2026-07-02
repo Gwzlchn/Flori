@@ -18,26 +18,30 @@ CHUNK_CHARS = 16000
 
 class TranslatePaperStep(StepBase):
     def validate_inputs(self) -> list[str]:
+        # 首选 output/original.md(arxiv-html 干净原文 / 文本解析兜底);备选 sections.json(遗留组装)。
+        if (self.job_dir / "output" / "original.md").exists():
+            return []
         if not (self.job_dir / "intermediate" / "sections.json").exists():
-            return ["intermediate/sections.json"]
+            return ["output/original.md|intermediate/sections.json"]
         return []
 
     def input_hashes(self) -> dict[str, str]:
-        h = {"sections": file_hash(self.job_dir / "intermediate" / "sections.json")}
-        figs = self.job_dir / "intermediate" / "figures.json"
-        if figs.exists():                      # 译文含图表引用,图变了要重译
-            h["figures"] = file_hash(figs)
+        h: dict[str, str] = {}
+        orig = self.job_dir / "output" / "original.md"
+        if orig.exists():                      # 主源:干净原文(含图/公式),变了要重译
+            h["original"] = file_hash(orig)
+        else:
+            h["sections"] = file_hash(self.job_dir / "intermediate" / "sections.json")
+            figs = self.job_dir / "intermediate" / "figures.json"
+            if figs.exists():                  # 遗留组装路径:译文含图表引用,图变了要重译
+                h["figures"] = file_hash(figs)
         t = self.template_hash("04_translate_paper")
         if t:
             h["template"] = t
         return h
 
     def execute(self) -> dict | None:
-        sections = self.load_json("intermediate/sections.json")
-        figures: list = []
-        if (self.job_dir / "intermediate" / "figures.json").exists():
-            figures = self.load_json("intermediate/figures.json")
-        md = self._paper_markdown(sections, figures)
+        md = self._source_markdown()
 
         # 逐 chunk 翻译:每块一次 call_ai(各自有审计记录+transcript sidecar,call_index 自增),
         # 按原顺序聚合;max_tokens 抬高防单块译文截断(claude-cli 无视无害)。
@@ -52,6 +56,18 @@ class TranslatePaperStep(StepBase):
         self.write_output("output/translated.md", result)
         return {"chars": len(result), "chunks": len(chunks),
                 "provider": self.last_ai_provider, "model": self.last_ai_model}
+
+    def _source_markdown(self) -> str:
+        """翻译源文:首选 output/original.md(arxiv-html 由 02 产出,公式/图无损,图引用已在原位);
+        缺失(老 pymupdf job 未重跑 02)回退 sections+figures 组装。"""
+        orig = self.job_dir / "output" / "original.md"
+        if orig.exists():
+            return orig.read_text(encoding="utf-8")
+        sections = self.load_json("intermediate/sections.json")
+        figures: list = []
+        if (self.job_dir / "intermediate" / "figures.json").exists():
+            figures = self.load_json("intermediate/figures.json")
+        return self._paper_markdown(sections, figures)
 
     @staticmethod
     def _paper_markdown(sections: dict, figures: list | None = None) -> str:

@@ -18,7 +18,7 @@ class TestPdfParseStep:
         (job_dir / "input").mkdir()
         config = make_step_config(tmp_path, step_name="02_pdf_parse")
         step = PdfParseStep("02_pdf_parse", job_dir, config)
-        assert step.validate_inputs() == ["input/source.pdf"]
+        assert step.validate_inputs() == ["input/source.html|input/source.pdf"]
 
     def test_execute_mock(self, tmp_path, monkeypatch):
         job_dir = tmp_path / "job"
@@ -26,6 +26,8 @@ class TestPdfParseStep:
         for d in ["input", "intermediate"]:
             (job_dir / d).mkdir()
         (job_dir / "input" / "source.pdf").write_bytes(b"%PDF-1.4 fake")
+        (job_dir / "input" / "metadata.json").write_text(
+            json.dumps({"authors": ["Author A", "Author B"]}))
 
         mock_page = MagicMock()
         mock_page.get_text.side_effect = lambda fmt=None: (
@@ -55,7 +57,8 @@ class TestPdfParseStep:
         parsed = json.loads((job_dir / "intermediate" / "parsed.json").read_text())
         assert parsed["title"] == "Test Paper"
         assert parsed["pages"] == 1
-        assert len(parsed["authors"]) == 2
+        assert parsed["source_kind"] == "pdf-only"        # 无 HTML 源 → pdf-only
+        assert len(parsed["authors"]) == 2                # 来自 metadata.json(权威源)
 
     def test_input_hashes(self, tmp_path):
         job_dir = tmp_path / "job"
@@ -217,15 +220,3 @@ class TestExtractVenue:
         step = _mk_step(tmp_path)
         assert step._extract_venue(_doc1("Just some body text with no venue line.")) == ""
 
-
-class TestExtractFigureRefs:
-    def test_dedup_keeps_longest_caption(self, tmp_path):
-        # 同图号去重:正文 inline 引用("Figure 1. ...")caption 短,真图注最长 → 留最长。
-        step = _mk_step(tmp_path)
-        doc = _FakeDoc({"title": "t"}, page_text=(
-            "Figure 1: Architecture of the model.\n"
-            "As shown in Figure 1. it works\n"
-            "Figure 2: Results table.\n"))
-        figs = step._extract_figure_refs(doc)
-        assert [f["id"] for f in figs] == ["fig1", "fig2"]
-        assert figs[0]["caption"] == "Architecture of the model."

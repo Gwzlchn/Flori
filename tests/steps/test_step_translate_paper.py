@@ -27,7 +27,7 @@ def test_validate_inputs_missing(tmp_path):
     (job_dir / "intermediate").mkdir()
     config = make_step_config(tmp_path, step_name="04_translate_paper", pool="ai")
     step = TranslatePaperStep("04_translate_paper", job_dir, config)
-    assert step.validate_inputs() == ["intermediate/sections.json"]
+    assert step.validate_inputs() == ["output/original.md|intermediate/sections.json"]
 
 
 def test_paper_markdown_includes_title_and_sections(tmp_path):
@@ -128,3 +128,25 @@ def test_prompt_contains_figure_preserve_rule(tmp_path):
     config = make_step_config(tmp_path, step_name="04_translate_paper", pool="ai")
     step = TranslatePaperStep("04_translate_paper", job_dir, config)
     assert "![](assets/" in step._build_prompt("body")   # 保留图片引用规则进了 prompt
+
+
+def test_prefers_original_md_as_source(tmp_path, monkeypatch):
+    # arxiv-html:output/original.md(干净原文,图/公式已在原位)优先于 sections 组装。
+    job_dir = _setup(tmp_path)
+    (job_dir / "output").mkdir(exist_ok=True)
+    (job_dir / "output" / "original.md").write_text(
+        "# T\n\n$E=mc^2$\n\n![](assets/x1.png)", encoding="utf-8")
+    config = make_step_config(tmp_path, step_name="04_translate_paper", pool="ai")
+    step = TranslatePaperStep("04_translate_paper", job_dir, config)
+
+    seen = {}
+    def fake_call(prompt, **kw):
+        seen["prompt"] = prompt
+        return "译文"
+    monkeypatch.setattr(step, "call_ai", fake_call)
+    step.execute()
+    assert "$E=mc^2$" in seen["prompt"]           # 干净原文直通
+    assert "![](assets/x1.png)" in seen["prompt"]
+    assert "AlpaServe" not in seen["prompt"]      # 未走 sections 组装
+    h = step.input_hashes()
+    assert "original" in h and "sections" not in h  # 指纹跟主源

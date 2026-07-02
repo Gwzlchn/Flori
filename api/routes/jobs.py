@@ -420,11 +420,13 @@ async def get_job(
     except Exception:
         pass
     # 文章/论文:从 02 解析(parsed.json)透元信息进「元信息」tab。article 字数/标签/封面;paper 页数。
+    source_kind = None
     if job.content_type in ("article", "paper"):
         try:
             raw = await storage.read_file(job_id, "intermediate/parsed.json")
             if raw:
                 p = json.loads(raw.decode("utf-8"))
+                source_kind = p.get("source_kind")   # paper 源类型(arxiv-html/pdf-only;旧 job null)
                 # 通用(article + paper):作者 / 摘要 / 正文语言。
                 if p.get("authors"):
                     media["authors"] = p["authors"]
@@ -482,7 +484,7 @@ async def get_job(
         title=job.title, url=job.url,
         progress_pct=job.progress_pct, source=job.source, domain=job.domain,
         collection_id=job.collection_id, collection_name=collection_name,
-        meta=job.meta,
+        meta=job.meta, source_kind=source_kind,
         steps=[
             StepResponse(
                 name=s.name, label=labels.get(s.name), status=s.status.value,

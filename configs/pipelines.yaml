@@ -220,19 +220,21 @@ paper:
       label: "下载"
       run: steps.common.step_01_download
       pool: io
-      timeout: 300
+      timeout: 600   # PDF + HTML 源 + 页内图片(arxiv 慢时单 PDF 可近 120s)
       retry: 3
-      version: "2"   # arxiv 元数据换标准库解析 + fail-loud,失效旧指纹(此前 feedparser 缺失静默丢标题)
-      outputs: ["input/source.pdf", "input/metadata.json"]
+      version: "3"   # arxiv 加抓 HTML 源(官方→ar5iv)+ 页内图下载到 assets/,失效旧指纹
+      outputs: ["input/source.pdf", "input/source.html", "input/metadata.json", "assets/*"]
 
     "02_pdf_parse":
-      label: "PDF 解析"
+      # 步名保留 "02_pdf_parse"(历史 job 步身份/重跑兼容),语义已是「论文解析(HTML 优先)」。
+      label: "解析"
       extends: .cpu-step
       run: steps.paper.step_02_pdf_parse
       image: flori/step-heavy
       needs: ["01_download"]
+      version: "2"   # 源头重做:HTML 源→干净 MD(原文/翻译/笔记吃它);无 HTML 标记 pdf-only
       # 非中文论文写 needs_translation.json 标记(供 04_translate_paper 的 rules:exists 门控)。
-      outputs: ["intermediate/parsed.json", "intermediate/needs_translation.json"]
+      outputs: ["intermediate/parsed.json", "intermediate/needs_translation.json", "output/original.md"]
 
     "03_sections":
       label: "章节切分"
@@ -240,8 +242,8 @@ paper:
       run: steps.paper.step_03_sections
       needs: ["02_pdf_parse"]
       timeout: 60
-      version: "2"   # 增产 output/original.md(论文原文兜底),失效旧指纹
-      outputs: ["intermediate/sections.json", "output/original.md"]
+      version: "3"   # original.md 让位 02(arxiv-html 干净版),仅文本解析兜底时才由本步渲染
+      outputs: ["intermediate/sections.json"]
 
     "04_figures":
       label: "图表提取"
@@ -255,9 +257,11 @@ paper:
       label: "翻译"
       extends: .ai-step
       run: steps.paper.step_04_translate_paper
-      # needs 04_figures:译文按页码内嵌渲染图引用,图表必须先产出(否则竞态下译文无图)。
+      # needs 04_figures:遗留组装路径(无 original.md 的旧 job)译文按页码内嵌渲染图,图先产出。
       needs: ["03_sections", "04_figures"]
-      version: "2"   # 译文内嵌图表引用,失效旧指纹
+      version: "3"   # 翻译源切 output/original.md(arxiv-html 干净原文),失效旧指纹
+      # 大论文多 chunk 串行翻译,步墙钟须覆盖全部 chunk(~15 块 × 2-4min);600 默认必超时。
+      timeout: 7200
       tags: []
       # 仅非中文论文触发:02_pdf_parse 写了 needs_translation.json 才跑,中文论文跳过。
       rules:
