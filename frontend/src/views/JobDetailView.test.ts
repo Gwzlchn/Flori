@@ -1,13 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { ref } from 'vue'
+import { ref, reactive } from 'vue'
 import { mount, flushPromises } from '@vue/test-utils'
 import type { JobDetail, JobConcept } from '../types'
 
 // 路由 mock: route.params.id 决定加载哪个 job;push 用于跳转(删除/概念)。
+// params 用 reactive:测「切 job」时改 routeParams.id,组件的 jobId 才会响应式变化。
 const push = vi.fn()
+const routeParams = reactive({ id: 'job_BV1abc' })
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push, replace: vi.fn() }),
-  useRoute: () => ({ params: { id: 'job_BV1abc' }, query: {} }),
+  useRoute: () => ({ params: routeParams, query: {} }),
 }))
 
 // job store mock: 直接控制各 action 返回,避免真实 action 走 useApi。
@@ -81,6 +83,7 @@ function mountView() {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  routeParams.id = 'job_BV1abc'
   // 复位 ws refs
   wsSteps.value = []
   wsJobStatus.value = 'processing'
@@ -313,5 +316,28 @@ describe('JobDetailView 删除流程', () => {
     await flushPromises()
     expect(deleteJob).not.toHaveBeenCalled()
     expect(w.find('.modal').exists()).toBe(false)
+  })
+})
+
+describe('JobDetailView 切 job 重置(跨 job 串台回归)', () => {
+  it('切 job 后笔记重新加载,不残留上一个 job 的原文', async () => {
+    // 复现实测事故:A(文章,已看原文)→ 切到 B,notesInit 不复位则 ensureNotes no-op,
+    // B 标题下挂着 A 的原文。断言切换后 MarkdownViewer 拿到 B 的内容。
+    fetchDetail.mockImplementation(async (id: string) =>
+      makeDetail({ job_id: id, content_type: 'article', status: 'done', title: `title-${id}` }))
+    api.getText.mockImplementation(async (url: string) =>
+      url.includes('job_A') ? 'A 的原文内容' : 'B 的原文内容')
+
+    routeParams.id = 'job_A'
+    const w = mountView()
+    await flushPromises()
+    // done 态默认落笔记 tab;文章无智能笔记 → 显示原文(机械变体)
+    expect(w.find('markdown-viewer-stub').attributes('content')).toContain('A 的原文内容')
+
+    routeParams.id = 'job_B'
+    await flushPromises()
+    const content = w.find('markdown-viewer-stub').attributes('content')
+    expect(content).toContain('B 的原文内容')
+    expect(content).not.toContain('A 的原文内容')
   })
 })

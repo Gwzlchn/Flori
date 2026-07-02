@@ -170,8 +170,21 @@ async function fetchDetail() {
   }
 }
 
+// 切 job 必须重置的每-job 视图态。notesInit 不复位会让 ensureNotes 对新 job 直接 no-op,
+// 上一个 job 的 noteContent 挂在新 job 标题下(跨 job 串台,实测踩过:Prompt 页显示 Hallucination 原文);
+// 其余清空防切页瞬间闪现旧 job 内容。
+function resetJobView() {
+  notesInit = false; conceptsInit = false
+  noteContent.value = ''; noteError.value = ''
+  versions.value = []; review.value = null
+  originalMd.value = ''; translatedMd.value = ''
+  evidence.value = null; figures.value = []
+  jobConcepts.value = []; conceptsError.value = ''
+  activeFile.value = null; isMechanical.value = false
+}
+
 onMounted(fetchDetail)
-watch(jobId, () => { stopPolling(); fetchDetail() })   // 切 job 先停旧轮询
+watch(jobId, () => { stopPolling(); resetJobView(); fetchDetail() })   // 切 job 先停旧轮询 + 清旧视图态
 onBeforeUnmount(() => { global.setCrumbs(null); stopPolling() })   // 离开详情页清面包屑覆盖 + 停轮询
 
 // 笔记 tab
@@ -219,20 +232,26 @@ const keyTerms = computed(() => {
     .filter((t) => t.term.trim())
 })
 
+// ★以下 loader 均带 job 切换守卫:捕获发起时的 fid,响应回填前校验仍是当前 job——
+// 否则从 A 页切到 B 页时,A 的迟到响应会覆盖 B 的内容(与 fetchDetail 里 usage/lineage 同范式)。
 async function loadTerms() {
+  const fid = jobId.value
   if (!domain.value) { terms.value = []; return }
   try {
     const ts = await api.get<GlossaryTerm[]>(`/api/glossary?domain=${encodeURIComponent(domain.value)}&status=accepted`)
+    if (jobId.value !== fid) return
     terms.value = ts.map(t => t.term)
-  } catch { terms.value = [] }
+  } catch { if (jobId.value === fid) terms.value = [] }
 }
 
 async function loadVersions() {
+  const fid = jobId.value
   if (isMechanical.value) { versions.value = []; return }
   try {
-    const r = await api.get<{ versions: Version[] }>(`/api/jobs/${jobId.value}/note-versions`)
+    const r = await api.get<{ versions: Version[] }>(`/api/jobs/${fid}/note-versions`)
+    if (jobId.value !== fid) return
     versions.value = r.versions || []
-  } catch { versions.value = [] }
+  } catch { if (jobId.value === fid) versions.value = [] }
 }
 
 async function loadProviders() {
@@ -243,23 +262,28 @@ async function loadProviders() {
 }
 
 async function loadNote() {
+  const fid = jobId.value
   noteLoading.value = true
   noteError.value = ''
   try {
+    let text: string
     if (isMechanical.value && isArticle.value) {
       // 文章「原文」= output/original.md(已由 loadOriginal 载入;兜底再拉一次)
-      noteContent.value = originalMd.value || await api.getText(
-        `/api/jobs/${jobId.value}/artifact?path=${encodeURIComponent('output/original.md')}`)
+      text = originalMd.value || await api.getText(
+        `/api/jobs/${fid}/artifact?path=${encodeURIComponent('output/original.md')}`)
     } else {
       const base = isMechanical.value
-        ? `/api/jobs/${jobId.value}/notes/mechanical`
-        : `/api/jobs/${jobId.value}/notes/smart`
+        ? `/api/jobs/${fid}/notes/mechanical`
+        : `/api/jobs/${fid}/notes/smart`
       const url = (!isMechanical.value && activeFile.value)
         ? `${base}?file=${encodeURIComponent(activeFile.value)}`
         : base
-      noteContent.value = await api.getText(url)
+      text = await api.getText(url)
     }
+    if (jobId.value !== fid) return
+    noteContent.value = text
   } catch (e: any) {
+    if (jobId.value !== fid) return
     noteError.value = e?.status === 404
       ? (isMechanical.value && isArticle.value ? '原文未生成' : '笔记尚未生成')
       : (e?.message || '加载失败')
@@ -270,13 +294,17 @@ async function loadNote() {
 }
 
 async function loadReview() {
+  const fid = jobId.value
   review.value = null
   if (isMechanical.value) return
   const v = versions.value.find(x => x.file === activeFile.value) || versions.value[0]
   const url = v?.review_file
-    ? `/api/jobs/${jobId.value}/review?file=${encodeURIComponent(v.review_file)}`
-    : `/api/jobs/${jobId.value}/review`
-  try { review.value = await api.get<Record<string, any>>(url) } catch { review.value = null }
+    ? `/api/jobs/${fid}/review?file=${encodeURIComponent(v.review_file)}`
+    : `/api/jobs/${fid}/review`
+  try {
+    const r = await api.get<Record<string, any>>(url)
+    if (jobId.value === fid) review.value = r
+  } catch { if (jobId.value === fid) review.value = null }
 }
 
 // 权威来源(evidence) tab
@@ -284,18 +312,23 @@ async function loadReview() {
 const evidence = ref<any | null>(null)
 const hasEvidence = computed(() => !!evidence.value?.evidence?.length)
 async function loadEvidence() {
-  try { evidence.value = await api.get<any>(`/api/jobs/${jobId.value}/evidence`) }
-  catch { evidence.value = null }
+  const fid = jobId.value
+  try {
+    const r = await api.get<any>(`/api/jobs/${fid}/evidence`)
+    if (jobId.value === fid) evidence.value = r
+  } catch { if (jobId.value === fid) evidence.value = null }
 }
 
 // 原文(article output/original.md)
 // 可读原文 Markdown(图片本地化);在笔记 tab 作「原文」变体展示,404 即无。
 const originalMd = ref('')
 async function loadOriginal() {
+  const fid = jobId.value
   try {
-    originalMd.value = await api.getText(
-      `/api/jobs/${jobId.value}/artifact?path=${encodeURIComponent('output/original.md')}`)
-  } catch { originalMd.value = '' }
+    const text = await api.getText(
+      `/api/jobs/${fid}/artifact?path=${encodeURIComponent('output/original.md')}`)
+    if (jobId.value === fid) originalMd.value = text
+  } catch { if (jobId.value === fid) originalMd.value = '' }
 }
 
 // 译文(article output/translated.md) tab
@@ -303,10 +336,12 @@ async function loadOriginal() {
 const translatedMd = ref('')
 const hasTranslation = computed(() => !!translatedMd.value)
 async function loadTranslated() {
+  const fid = jobId.value
   try {
-    translatedMd.value = await api.getText(
-      `/api/jobs/${jobId.value}/artifact?path=${encodeURIComponent('output/translated.md')}`)
-  } catch { translatedMd.value = '' }
+    const text = await api.getText(
+      `/api/jobs/${fid}/artifact?path=${encodeURIComponent('output/translated.md')}`)
+    if (jobId.value === fid) translatedMd.value = text
+  } catch { if (jobId.value === fid) translatedMd.value = '' }
 }
 
 // 图表(论文 intermediate/figures.json) tab
@@ -316,11 +351,12 @@ const figures = ref<FigureItem[]>([])
 const figuresWithImage = computed(() => figures.value.filter(f => f.filename))
 const hasFigures = computed(() => figuresWithImage.value.length > 0)
 async function loadFigures() {
+  const fid = jobId.value
   try {
     const raw = await api.getText(
-      `/api/jobs/${jobId.value}/artifact?path=${encodeURIComponent('intermediate/figures.json')}`)
-    figures.value = JSON.parse(raw)
-  } catch { figures.value = [] }
+      `/api/jobs/${fid}/artifact?path=${encodeURIComponent('intermediate/figures.json')}`)
+    if (jobId.value === fid) figures.value = JSON.parse(raw)
+  } catch { if (jobId.value === fid) figures.value = [] }
 }
 function figureUrl(filename: string): string {
   return `/api/jobs/${jobId.value}/assets/${filename}`
@@ -423,10 +459,12 @@ async function ensureConcepts() {
   await loadConcepts()
 }
 async function loadConcepts() {
+  const fid = jobId.value
   conceptsLoading.value = true
   conceptsError.value = ''
   try {
-    const list = await jobStore.fetchConcepts(jobId.value)
+    const list = await jobStore.fetchConcepts(fid)
+    if (jobId.value !== fid) return
     // 已采纳优先、全库佐证多优先。
     jobConcepts.value = [...list].sort(
       (a, b) =>
@@ -434,6 +472,7 @@ async function loadConcepts() {
         ((b.occurrences?.length ?? 0) - (a.occurrences?.length ?? 0)),
     )
   } catch (e: any) {
+    if (jobId.value !== fid) return
     conceptsError.value = e?.status === 404 ? '内容不存在或已删除' : (e?.message || '加载失败')
     jobConcepts.value = []
   } finally {
