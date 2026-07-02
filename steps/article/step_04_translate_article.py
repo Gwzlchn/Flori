@@ -1,7 +1,7 @@
-"""Step 04: 文章翻译。AI 把【非中文】正文忠实翻译为简体中文,保留 Markdown 结构与图片引用。
+"""Step 04: 文章翻译。AI 把非中文正文忠实翻译为简体中文,保留 Markdown 结构与图片引用。
 
 仅非中文文章触发:02_parse 检测到非中文写 intermediate/needs_translation.json,本步经 rules:exists 门控。
-与 04_smart(意译重组为笔记)不同——这里是【忠实全文翻译】,产出 output/translated.md 供前端「译文」tab。
+与 04_smart(意译重组为笔记)不同——这里是忠实全文翻译,产出 output/translated.md 供前端「译文」tab。
 译原文 markdown(已含内联图)→ 译文天然保留图位。
 """
 

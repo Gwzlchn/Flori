@@ -1,7 +1,7 @@
 """文章内容提取器(extractor)基类 + 通用实现。
 
-个人知识库粘贴【任意 URL】,站点无限长尾 → 必须有强通用兜底(trafilatura 出正文/元数据)。
-站点差异最大的是【正文图片】(trafilatura 丢图,要从原始 HTML 重抽,各站图片标记不同),其次是作者。
+个人知识库粘贴任意 URL,站点无限长尾 → 必须有强通用兜底(trafilatura 出正文/元数据)。
+站点差异最大的是正文图片(trafilatura 丢图,要从原始 HTML 重抽,各站图片标记不同),其次是作者。
 故 extractor 只覆盖这两处差异;正文 markdown / 元数据仍由 step 的 trafilatura 通用逻辑产出。
 
 注册表见 __init__.py:按 matches(url, html) 选站点 extractor,否则 GenericExtractor 兜底。
@@ -52,11 +52,11 @@ def authors_from_page_json(html: str) -> list[str]:
 
 
 def generic_content_image_urls(html: str) -> list[str]:
-    """通用【正文级】图片 URL 提取:滤掉头像/图标/logo/svg、小图(缩略图/相关文章)、
-    以及【促销 banner】(<a> 链到站外【页面】的可点图)。
-    关键:有的站正文图恰恰是 <a href=大图.png><img>(点开看大图)——href 指向【图片本身】应保留,
-    只排除 href 指向【页面】的促销图。尺寸:w_1456 / w/680 / width= 识别宽,h_72 等识别高;
-    宽<400 或(无宽且)高<200 视为非正文。"""
+    """通用正文级图片 URL 提取。滤掉头像/图标/logo/svg、小图(缩略图/相关文章),
+    以及促销 banner,即 <a> 链到站外页面的可点图。
+    关键:有的站正文图恰恰是 <a href=大图.png><img>(点开看大图),href 指向图片本身的应保留,
+    只排除 href 指向页面的促销图。尺寸判据:w_1456 / w/680 / width= 识别宽,h_72 等识别高;
+    宽<400,或无宽且高<200,视为非正文。"""
     promo_linked: set[str] = set()
     for a_attrs, img_src in re.findall(
         r'<a\b([^>]*)>\s*(?:<[^/a][^>]*>\s*)*<img\b[^>]*\bsrc=["\']([^"\']+)', html, re.I):
@@ -104,7 +104,7 @@ def generic_content_image_urls(html: str) -> list[str]:
 
 class ArticleExtractor:
     """站点提取器基类。子类覆盖 matches() + 需要定制的 content_image_urls() / authors()。
-    默认实现 = 通用启发,故"没覆盖的方法自动走通用",新 extractor 只写差异。"""
+    默认实现 = 通用启发,没覆盖的方法自动走通用,新 extractor 只写差异。"""
 
     name = "base"
 

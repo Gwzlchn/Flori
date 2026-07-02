@@ -1,4 +1,4 @@
-"""Step 02: Whisper 语音转写。GPU 可用时 faster-whisper large-v3，CPU 用 base。"""
+"""Step 02: Whisper 语音转写。GPU 可用时 faster-whisper large-v3,CPU 用 base。"""
 
 from __future__ import annotations
 
@@ -26,8 +26,8 @@ class WhisperStep(StepBase):
         import os
 
         from faster_whisper import WhisperModel
-        # 模型缓存目录显式可配(无状态部署唯一该挂的卷):设 MODEL_CACHE_DIR 即把权重缓存到该目录
-        #(可挂 warm 卷 / 跨重启复用);不设则用库默认 HF 缓存。
+        # 模型缓存目录显式可配:设 MODEL_CACHE_DIR 即把权重缓存到该目录,不设则用库默认 HF 缓存。
+        # 这是无状态部署唯一该挂的卷,可挂 warm 卷跨重启复用。
         model = WhisperModel(
             model_size, compute_type=compute_type,
             download_root=os.environ.get("MODEL_CACHE_DIR") or None,
@@ -36,7 +36,7 @@ class WhisperStep(StepBase):
         # 不写死语种:faster-whisper 自动检测。本步仅在无原生 srt 时跑,外文无字幕内容若强制
         # language="zh" 会被按中文声学模型解码出乱码,且 info.language 恒为 zh 丢失真实语种(下游 08 据此判翻译)。
         segments, info = model.transcribe(str(video_path))
-        total = info.duration or 0  # 真实音频时长作进度分母;segment.end 作已处理位置(替代旧的伪 total idx+100)
+        total = info.duration or 0  # 真实音频时长作进度分母,segment.end 作已处理位置
 
         srt_lines = []
         idx = 1

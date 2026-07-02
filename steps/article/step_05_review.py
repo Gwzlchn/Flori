@@ -54,5 +54,5 @@ class ArticleReviewStep(StepBase):
 
 if __name__ == "__main__":
     # 步名须 = pipelines.yaml article 评审步名(06_review),令 worker self.step_name = yaml = API key,
-    # 评审模板/DB 覆盖才能按统一 key 命中(audio=05_review/paper=06_review/video=12_review 已对齐)。
+    # 评审模板/DB 覆盖才能按统一 key 命中。各链评审步名: audio=05_review/paper=06_review/video=12_review。
     ArticleReviewStep.cli_main("06_review")

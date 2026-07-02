@@ -33,7 +33,7 @@ class PunctuateStep(StepBase):
         sub, is_zh = self._pick()
         if not sub:
             return {}
-        # 语言纳入指纹:同字幕在「加标点」与「翻译」两种模式下产物不同,须各自重算。
+        # 语言纳入指纹:同字幕在加标点与翻译两种模式下产物不同,须各自重算。
         h = {sub.name: file_hash(sub), "mode": "zh" if is_zh else "translate"}
         t = self.template_hash("08_punctuate.zh", "08_punctuate.translate")
         if t:

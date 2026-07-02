@@ -1,4 +1,4 @@
-"""Step 11: 质量评审。6 维度评分 + 缺失概念 + 改进建议。评最新版智能笔记,review.json 标 note_file。"""
+"""Step 12: 质量评审。6 维度评分 + 缺失概念 + 改进建议。评最新版智能笔记,review.json 标 note_file。"""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ class ReviewStep(StepBase):
         }
 
     def _evidence_for_review(self) -> tuple[str, str]:
-        """有取证产物则:① 把权威来源附进 ref_block 供核对;② intro 加一句 [E#] 忠实性核对指令。"""
+        """有取证产物则:1. 把权威来源附进 ref_block 供核对;2. intro 加一句 [E#] 忠实性核对指令。"""
         import json
         p = self.job_dir / "output" / "evidence.json"
         if not p.exists():

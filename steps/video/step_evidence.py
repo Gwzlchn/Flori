@@ -1,11 +1,12 @@
-"""Step 12: 案例取证 / 权威来源（ADR-0012）。
+"""Step 10: 案例取证 / 权威来源,理由见 ADR-0012。
 
-仅案例类（domain=finance 或 style_tags 含 case-study）触发：从机械稿 OCR 抽锚点
-（文号/案号/当事人/股票），让 claude **域名限定搜**权威源（证监会处罚决定书 优先 csrc.gov.cn
-一手、法院案优先裁判文书网/法院官网/上市公司公告）+ **直连 curl**（中国政府/法院站走境外代理
-会失败，必须 env -u …PROXY 直连）抓正文 + 抽取，按**文号 case-match**，写 output/evidence.json。
+仅案例类(domain=finance 或 style_tags 含 case-study)触发。从机械稿 OCR 抽锚点:
+文号/案号/当事人/股票。让 claude 域名限定搜权威源:证监会处罚决定书优先 csrc.gov.cn
+一手,法院案优先裁判文书网/法院官网/上市公司公告。再用直连 curl 抓正文 + 抽取:
+中国政府/法院站走境外代理会失败,必须 env -u …PROXY 直连。按文号 case-match,
+写 output/evidence.json。
 
-红线：一手优先；抓不到如实标 source_tier/confidence，绝不用二手新闻冒充一手。
+红线:一手优先;抓不到如实标 source_tier/confidence,绝不用二手新闻冒充一手。
 """
 
 from __future__ import annotations
@@ -16,11 +17,11 @@ from datetime import datetime
 
 from shared.step_base import StepBase, file_hash
 
-# 触发：案例类内容才取证（其余 pipeline/心法类自门控 skip，不污染）。
+# 触发:案例类内容才取证(其余 pipeline/心法类自门控 skip,不污染)。
 _CASE_DOMAINS = {"finance"}
 _CASE_STYLE = "case-study"
-_MECH_CLIP = 8000  # 喂给取证 prompt 的机械稿节选上限（锚点+案情段足够）
-# OCR 文号/案号锚点：〔2018〕88号 / [2018]88号 / (2025)沪刑终60号 等。
+_MECH_CLIP = 8000  # 喂给取证 prompt 的机械稿节选上限(锚点+案情段足够)
+# OCR 文号/案号锚点:〔2018〕88号 / [2018]88号 / (2025)沪刑终60号 等。
 _REF_RE = re.compile(r"[〔\[（(]\s*20\d{2}\s*[〕\]）)][^，。\s]{0,8}?\d{1,4}\s*号")
 
 
@@ -32,7 +33,7 @@ class EvidenceStep(StepBase):
 
     def validate_inputs(self) -> list[str]:
         if not self._is_case():
-            return []  # 非案例类不取证：不要求输入，execute 自门控 skip
+            return []  # 非案例类不取证:不要求输入,execute 自门控 skip
         if not (self.job_dir / "output" / "notes_mechanical.md").exists():
             return ["output/notes_mechanical.md"]
         return []
@@ -41,7 +42,7 @@ class EvidenceStep(StepBase):
         if not self._is_case():
             return {"skip": "non-case"}
         mech = self.job_dir / "output" / "notes_mechanical.md"
-        # 指纹=机械稿(锚点来源)+provider+模板；锚点不变不重抓（省外网/省钱）。
+        # 指纹=机械稿(锚点来源)+provider+模板;锚点不变不重抓,省外网/省钱。
         h = {
             "mechanical": file_hash(mech) if mech.exists() else "",
             "provider": self.override_provider(),
@@ -77,7 +78,7 @@ class EvidenceStep(StepBase):
     def _build_prompt(self, refs: list[str], mech_clip: str) -> str:
         ref_hint = ("视频 OCR 里的处罚文号/案号：" + "、".join(refs)) if refs else "OCR 未显式给出文号/案号"
         # 模板外置 templates/10_evidence.md(含 JSON schema 字面量;改文件不碰代码,进指纹);缺失回退 _DEFAULT。
-        # ★用 replace 注入(prompt 含字面 {},不可 str.format)。
+        # 用 replace 注入:prompt 含字面 {},不能用 str.format。
         tmpl = self._load_prompt_template("10_evidence", _DEFAULT)
         return tmpl.replace("<<REF_HINT>>", ref_hint).replace("<<MECH_CLIP>>", mech_clip)
 
@@ -101,7 +102,7 @@ class EvidenceStep(StepBase):
         return obj
 
 
-# 静态默认 prompt(= 外置模板 templates/10_evidence.md 内容;<<REF_HINT>>/<<MECH_CLIP>> 由 replace 注入)。
+# 静态默认 prompt,内容与外置模板 templates/10_evidence.md 一致;<<REF_HINT>>/<<MECH_CLIP>> 由 replace 注入。
 _DEFAULT = (
     "你是案例取证助手。为下面这条视频笔记取**一手权威来源**（证监会处罚决定书 / 法院裁定 / "
     "上市公司公告），不要用泛泛新闻分析冒充。\n\n"

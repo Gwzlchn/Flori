@@ -1,4 +1,4 @@
-"""章节树 → markdown 渲染,供 paper/article smart 步的 prompt 构造共用(消逐字重复副本)。"""
+"""章节树 → markdown 渲染,供 paper/article smart 步的 prompt 构造共用。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ def render_section_tree(section: dict, parts: list, level: int, max_chars: int =
 
 
 def build_section_tree(flat: list[dict]) -> list[dict]:
-    """扁平章节列表 → 树形(按 level 嵌套)。paper/article 共用,消逐字重复副本。
+    """扁平章节列表 → 树形(按 level 嵌套)。paper/article 共用,勿各自另写。
 
     容错:缺 level/title/page/text 时用默认值,不因畸形输入(如手改 parsed.json
     或上游 schema 变化)KeyError。

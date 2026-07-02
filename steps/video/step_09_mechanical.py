@@ -75,7 +75,7 @@ class MechanicalStep(StepBase):
             hashes["transcript"] = file_hash(transcript_path)
         else:
             sub, is_zh = pick_native_srt(self.job_dir / "input")
-            if sub and is_zh:  # 仅中文原生字幕可无 claude 直用;非中文等 06 翻译
+            if sub and is_zh:  # 仅中文原生字幕可无 claude 直用;非中文等 08 翻译
                 hashes["subtitle"] = file_hash(sub)
         return hashes
 
@@ -86,8 +86,8 @@ class MechanicalStep(StepBase):
         danmaku_path = self.job_dir / "intermediate" / "danmaku.json"
         danmaku = self.load_json("intermediate/danmaku.json") if danmaku_path.exists() else []
 
-        # 口播:优先 06 的中文稿(中文加标点/非中文已翻译);没有则直接读原始中文字幕(无需 claude
-        # 先出可看的机械版)。非中文视频无中文稿时口播留空,等 06 翻译,不把外文塞进中文机械版。
+        # 口播:优先 08 的中文稿(中文加标点/非中文已翻译)。没有则直接读原始中文字幕,无需 claude
+        # 就先出可看的机械版。非中文视频无中文稿时口播留空,等 08 翻译,不把外文塞进中文机械版。
         transcript_path = self.job_dir / "output" / "transcript.md"
         if transcript_path.exists():
             transcript_lines = self._parse_transcript(transcript_path)

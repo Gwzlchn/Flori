@@ -1,7 +1,7 @@
 """Step 04: 播客智能笔记。AI 把口语转写重组为中文结构化笔记。
 
-长集不再硬截断:转写超过单次阈值时走 map-reduce(分段提炼要点 → 合并成完整笔记),
-覆盖全集不丢正文(08 审计 §4:旧 12k 截断会让 90min 集只总结前 ~12min)。
+转写超过单次阈值时走 map-reduce(分段提炼要点 → 合并成完整笔记),覆盖全集不丢正文;
+硬截断会让 90min 长集只总结开头十几分钟。
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from __future__ import annotations
 from shared.step_base import StepBase, file_hash
 
 # 单次喂 AI 的转写正文上限:不超过它就一次成稿(短集保持原质量);超过则分段 map-reduce。
-# 现代模型上下文足够,阈值取得比旧 12k 大,常见集仍走单次,只有真·长集才分段。
+# 现代模型上下文足够,阈值取宽,常见集仍走单次,只有超长集才分段。
 SINGLE_PASS_CHAR_LIMIT = 24000
 # map 阶段每段的字符预算(按 segment 边界切,尽量不破句)。
 MAP_CHUNK_CHARS = 16000
@@ -33,7 +33,7 @@ class SmartPodcastStep(StepBase):
         full_text = self._full_text(transcript)
 
         if len(full_text) <= SINGLE_PASS_CHAR_LIMIT:
-            # 短集:一次成稿(不再截断,full_text 全量喂入)。
+            # 短集:一次成稿,full_text 全量喂入不截断。
             result = self.call_ai(self._build_prompt(transcript), max_tokens=8192)
             mode, chunks_n = "single", 1
         else:
@@ -46,20 +46,20 @@ class SmartPodcastStep(StepBase):
                 "provider": self.last_ai_provider, "model": self.last_ai_model,
                 "note_file": rel}
 
-    # ── 单次成稿 ──
+    # 单次成稿
 
     def _build_prompt(self, transcript: dict) -> str:
         profile = self.load_domain_prompt_profile()
 
         # 静态指令头外置 templates/04_smart_podcast.md(经 prompt_profile_style_hashes 进指纹);缺失回退 _DEFAULT_HEADER。
         parts = [self._load_prompt_template("04_smart_podcast", _DEFAULT_HEADER)]
-        parts.append(self.terminology_block(profile))  # 已沉淀标准概念注入(共用,审计 R-M9)
+        parts.append(self.terminology_block(profile))  # 注入已沉淀的标准概念,各 smart 步共用
         parts.append(self._duration_line(transcript))
         parts.append("\n--- 转写正文 ---\n")
         parts.append(self._full_text(transcript))      # 全量,不截断
         return "".join(parts)
 
-    # ── 长集 map-reduce ──
+    # 长集 map-reduce
 
     def _map_reduce(self, transcript: dict) -> tuple[str, int]:
         profile = self.load_domain_prompt_profile()
@@ -96,7 +96,7 @@ class SmartPodcastStep(StepBase):
             parts.append(f"\n--- 第 {i + 1}/{len(summaries)} 部分要点 ---\n{s}\n")
         return "".join(parts)
 
-    # ── 工具 ──
+    # 工具
 
     @staticmethod
     def _full_text(transcript: dict) -> str:

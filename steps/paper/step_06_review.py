@@ -1,5 +1,5 @@
-"""Step 06: 论文质量评审。与各 review 步共用 StepBase 评审骨架(build_review_prompt/run_dimension_review),
-额外检查公式完整性 + 图表引用(把 figures.json 作 figure_references 维度的客观对照)。"""
+"""Step 06: 论文质量评审。与各 review 步共用 StepBase 评审骨架(build_review_prompt/run_dimension_review)。
+额外检查公式完整性 + 图表引用,把 figures.json 作 figure_references 维度的客观对照。"""
 
 from __future__ import annotations
 

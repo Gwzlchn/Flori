@@ -1,8 +1,8 @@
-"""Step 04: 论文翻译。AI 把【非中文】论文忠实翻译为简体中文 → output/translated.md
+"""Step 04: 论文翻译。AI 把非中文论文忠实翻译为简体中文 → output/translated.md
 (供前端「译文」tab + 05_smart_paper 基于译文做笔记)。
 
 仅非中文论文触发:02_pdf_parse 检测到非中文写 intermediate/needs_translation.json,本步经 rules:exists 门控。
-与 05_smart_paper(重组为中文笔记)不同——这里是【忠实全文翻译】,保留章节结构、公式(LaTeX)、图表引用。
+05_smart_paper 是重组为中文笔记;本步是忠实全文翻译,保留章节结构、公式(LaTeX)、图表引用。
 """
 
 from __future__ import annotations

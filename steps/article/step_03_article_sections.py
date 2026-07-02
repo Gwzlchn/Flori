@@ -22,7 +22,7 @@ class ArticleSectionsStep(StepBase):
     def execute(self) -> dict | None:
         parsed = self.load_json("intermediate/parsed.json")
 
-        # 文章无原生标题层级，从正文切分扁平章节
+        # 文章无原生标题层级,从正文切分扁平章节
         flat = parsed.get("sections", [])
         if flat and len(flat) == 1 and flat[0].get("text"):
             flat = self._split_text(flat[0]["text"])
@@ -73,13 +73,13 @@ class ArticleSectionsStep(StepBase):
 
         flush()
 
-        # 无任何切分时，整篇作为单一章节兜底
+        # 无任何切分时,整篇作为单一章节兜底
         if not sections and text.strip():
             sections.append({"level": 1, "title": "正文", "page": 1, "text": text.strip()})
         return sections
 
     def _as_heading(self, line: str) -> tuple[int, str | None]:
-        """识别标题行：Markdown # / 编号标题 / 短独立行。返回 (level, title|None)。"""
+        """识别标题行: Markdown # / 编号标题 / 短独立行。返回 (level, title|None)。"""
         m = re.match(r"^(#{1,6})\s+(.+)$", line)
         if m:
             return min(len(m.group(1)), 3), m.group(2).strip()
@@ -89,7 +89,7 @@ class ArticleSectionsStep(StepBase):
             level = 2 if re.match(r"^\d+\.\d+", line) else 1
             return level, line
 
-        # 短独立行（无句末标点、长度有限）视为二级标题
+        # 短独立行(无句末标点、长度有限)视为二级标题
         if len(line) <= 40 and not re.search(r"[。！？.!?；;，,：:]$", line):
             return 2, line
 

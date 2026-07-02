@@ -1,4 +1,4 @@
-"""Step 05: 概念提取 + 一句话摘要(article v2,★必跑)。
+"""Step 05: 概念提取 + 一句话摘要(必跑)。
 
 有智能笔记则从笔记抽,否则从原文/章节抽;产出 output/concepts.json
 ({summary, key_terms:[{term,definition}]})供 scheduler._collect_glossary 采集进图谱。
@@ -38,7 +38,7 @@ class ArticleConceptsStep(StepBase):
         out = {
             "summary": (result.get("summary") or "").strip(),
             "key_terms": key_terms,
-            "source": source,            # 'smart_note' | 'original'(概念抽自哪)
+            "source": source,            # 'smart_note' | 'translation' | 'original'(概念抽自哪)
             "parse_failed": parse_failed,
         }
         self.write_output("output/concepts.json", out)
@@ -48,7 +48,7 @@ class ArticleConceptsStep(StepBase):
 
     def _source_text(self) -> tuple[str, str]:
         """概念抽取的源文本优先级:智能笔记 > 译文(非中文文章)> 原文章节。
-        非中文文章基于【中文译文】抽概念/摘要,与译文术语一致(对齐 04_translate 依赖)。"""
+        非中文文章基于中文译文抽概念/摘要,与译文术语一致(对齐 04_translate 依赖)。"""
         note = self.latest_smart_note()
         if note:
             return note.read_text(encoding="utf-8"), "smart_note"

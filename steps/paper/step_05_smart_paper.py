@@ -28,7 +28,7 @@ class SmartPaperStep(StepBase):
     def execute(self) -> dict | None:
         sections = self.load_json("intermediate/sections.json")
         figures = self.load_json("intermediate/figures.json")
-        # 非中文论文:基于【中文译文】做笔记(对齐 04_translate_paper 依赖),术语与译文一致、不重复英→中。
+        # 非中文论文:基于中文译文做笔记(对齐 04_translate_paper 依赖),术语与译文一致、不重复英→中。
         translated = self.job_dir / "output" / "translated.md"
         body = translated.read_text(encoding="utf-8") if translated.exists() else None
 
@@ -52,7 +52,7 @@ class SmartPaperStep(StepBase):
         # 静态指令头外置 templates/05_smart_paper.md(经 prompt_profile_style_hashes 进指纹);缺失回退 _DEFAULT_HEADER。
         parts = [self._load_prompt_template("05_smart_paper", _DEFAULT_HEADER)]
 
-        parts.append(self.terminology_block(profile))  # 已沉淀标准概念注入(共用,审计 R-M9)
+        parts.append(self.terminology_block(profile))  # 注入已沉淀的标准概念,各 smart 步共用
 
         parts.append(f"\n论文标题：{sections.get('title', '未知')}\n")
         parts.append(f"作者：{', '.join(sections.get('authors', []))}\n")

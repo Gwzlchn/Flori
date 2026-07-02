@@ -23,7 +23,7 @@ class SmartArticleStep(StepBase):
 
     def execute(self) -> dict | None:
         sections = self.load_json("intermediate/sections.json")
-        # 非中文文章:基于【中文译文】做笔记(对齐 04_translate 依赖),术语与译文一致、避免重复英→中。
+        # 非中文文章:基于中文译文做笔记(对齐 04_translate 依赖),术语与译文一致,避免重复英译中。
         translated = self.job_dir / "output" / "translated.md"
         body = translated.read_text(encoding="utf-8") if translated.exists() else None
 
@@ -31,7 +31,7 @@ class SmartArticleStep(StepBase):
         # 结构化中文笔记常超默认 4096 output tokens,显式抬高上限防被静默截断(claude-cli 无视无害)。
         result = self.call_ai(prompt, max_tokens=8192)
 
-        rel = self.write_smart_note(result)   # 版本化落盘(含生成时间/方式/模型),不再写 notes_smart.md
+        rel = self.write_smart_note(result)   # 版本化落盘,含生成时间/方式/模型
         return {"chars": len(result), "provider": self.last_ai_provider,
                 "model": self.last_ai_model, "note_file": rel,
                 "source": "translation" if body else "original"}
@@ -42,7 +42,7 @@ class SmartArticleStep(StepBase):
         # 静态指令头外置 templates/04_smart_article.md(改文件不碰代码,经 prompt_profile_style_hashes 进指纹);缺失回退 _DEFAULT_HEADER。
         parts = [self._load_prompt_template("04_smart_article", _DEFAULT_HEADER)]
 
-        parts.append(self.terminology_block(profile))  # 已沉淀标准概念注入(共用,审计 R-M9)
+        parts.append(self.terminology_block(profile))  # 已沉淀标准概念注入(共用)
 
         parts.append(f"\n文章标题：{sections.get('title', '未知')}\n")
         authors = sections.get("authors", [])

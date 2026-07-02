@@ -41,8 +41,8 @@ class PdfParseStep(StepBase):
             formulas = self._extract_formulas(doc)
             num_pages = len(doc)
 
-        # arxiv 等:01_download 写的 input/metadata.json 含权威元数据(来自 arxiv API)→ 优先于 PDF 启发
-        # (PDF 标题常抓成左边距 arXiv 戳、作者多为空)。仅在 metadata 有该字段时覆盖。
+        # arxiv 等来源:01_download 写的 input/metadata.json 含 arxiv API 权威元数据,优先于 PDF 启发。
+        # PDF 标题常抓成左边距 arXiv 戳、作者多为空。仅在 metadata 有该字段时覆盖。
         src_meta = self._load_source_meta()
         if src_meta.get("title"):
             title = src_meta["title"].strip()
@@ -86,7 +86,7 @@ class PdfParseStep(StepBase):
 
     def _extract_title(self, doc) -> str:
         meta = doc.metadata
-        # PDF 内置 title 若是 arXiv 戳(arXiv:xxxx …)则不可信,跳过走字号启发(arxiv 真标题通常靠 API,见 _load_source_meta)。
+        # PDF 内置 title 若是 arXiv 戳(arXiv:xxxx 开头)则不可信,跳过走字号启发。arxiv 真标题通常靠 API,见 _load_source_meta。
         if meta.get("title") and not meta["title"].strip().lower().startswith("arxiv:"):
             return meta["title"]
         if len(doc) > 0:
@@ -101,8 +101,8 @@ class PdfParseStep(StepBase):
             ]
             if spans:
                 max_size = max(s["size"] for s in spans)
-                # 收集首页最大字号那一档(容差 0.1)的所有 span 按阅读序拼接,
-                # 而非只取单个 span(避免多 span 标题被截断)。
+                # 收集首页最大字号那一档(容差 0.1)的所有 span 按阅读序拼接。
+                # 只取单个 span 会截断多 span 标题。
                 parts = [
                     s["text"].strip() for s in spans
                     if abs(s["size"] - max_size) < 0.1
@@ -157,7 +157,7 @@ class PdfParseStep(StepBase):
 
     def _extract_abstract(self, doc) -> str:
         # 扫前几页找 Abstract:会议 PDF(USENIX/OSDI 等)首页常是封面/版权页,真正摘要在第 2-3 页;
-        # arxiv 等无封面则首页即命中。终止于「空行 / introduction / 文末(\Z)」。
+        # arxiv 等无封面则首页即命中。终止于空行、introduction 或文末(\Z)。
         MAX_ABSTRACT = 3000
         for i in range(min(3, len(doc))):
             text = doc[i].get_text()
@@ -218,8 +218,8 @@ class PdfParseStep(StepBase):
         return sections
 
     def _extract_figure_refs(self, doc) -> list[dict]:
-        # 同一图号在正文里常被多次匹配("Figure 1." inline 引用)+ 真图注一处 → 按图号去重,留 caption 最长者
-        # (真图注信息最全;inline 引用 caption 短)。渲染步据此每图渲一张,避免重复/错配。
+        # 同一图号在正文里常被多次匹配:"Figure 1." 这类 inline 引用多处 + 真图注一处。按图号去重,
+        # 留 caption 最长者,真图注信息最全、inline 引用 caption 短。渲染步据此每图渲一张,避免重复/错配。
         fig_pattern = re.compile(r"(?:Figure|Fig\.?)\s+(\d+)[.:]\s*(.*?)(?:\n|$)", re.IGNORECASE)
         best: dict[str, dict] = {}
         for page_num in range(len(doc)):

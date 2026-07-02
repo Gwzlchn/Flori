@@ -1,4 +1,4 @@
-"""Step 07: 弹幕提取。ASS 解析 → 过滤特效 → 按时间排序。"""
+"""Step 07: 弹幕提取。解析 ASS,过滤特效,按时间排序。"""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ class DanmakuStep(StepBase):
 
         all_entries.sort(key=lambda e: e.time_sec)
 
-        # 去重:yutto 常同时落 danmaku.ass 与 <标题>.ass(内容相同),按(时间,文本)去重避免翻倍。
+        # 去重:yutto 常同时落 danmaku.ass 与 <标题>.ass 且内容相同,按 (时间,文本) 去重避免翻倍。
         seen: set[tuple[float, str]] = set()
         result = []
         for e in all_entries:

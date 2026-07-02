@@ -1,8 +1,4 @@
-"""OCR 引擎工厂:集中 RapidOCR 构造 + 后端选择,供 video 06_ocr 与 paper 04_figures 共用。
-
-此前两步各自 new RapidOCR、且失败语义相反(06_ocr 经 select_ocr_backend、未实现后端 raise;
-04_figures 直接 import、失败返 None)。统一为本工厂构造,错误处理由调用方决定(上抛或 catch→None)。
-"""
+"""OCR 引擎工厂:集中 RapidOCR 构造 + 后端选择,供 video 06_ocr 与 paper 04_figures 共用。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Step 03: 章节结构。扁平章节 → 树形结构 + 关键段落。"""
+"""Step 03: 章节结构。扁平章节 → 树形结构。"""
 
 from __future__ import annotations
 

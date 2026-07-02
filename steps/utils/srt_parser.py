@@ -27,7 +27,7 @@ def _ts_to_sec(h: str, m: str, s: str, ms: str) -> float:
 
 
 def parse_srt(text: str) -> list[SrtEntry]:
-    """解析 SRT 格式字幕，返回结构化列表。跳过格式错误的条目。"""
+    """解析 SRT 字幕,跳过格式错误的条目。"""
     entries: list[SrtEntry] = []
     blocks = re.split(r"\n\s*\n", text.strip())
 
@@ -55,7 +55,6 @@ def parse_srt(text: str) -> list[SrtEntry]:
 
 
 def load_srt(path: Path) -> list[SrtEntry]:
-    """从文件加载 SRT。"""
     return parse_srt(path.read_text(encoding="utf-8"))
 
 
@@ -78,7 +77,7 @@ def _looks_chinese(path: Path) -> bool:
 
 
 # 中文字幕文件名标记关键词。pick_native_srt 与 step_01_download._prune_subtitles_danmaku 共用,
-# 避免两处各写一份导致漂移(此前 step_01 缺 "简体")(审计 R-M10)。
+# 避免两处各写一份导致漂移。
 CHINESE_SUBTITLE_KEYWORDS = ("中文", "简体", "zh", "chs", "cn")
 
 
@@ -93,6 +92,6 @@ def pick_native_srt(input_dir: Path) -> tuple[Path | None, bool]:
     if zh:
         marked = [f for f in zh if any(k in f.name.lower() for k in CHINESE_SUBTITLE_KEYWORDS)]
         return (marked[0] if marked else zh[0], True)
-    # 无中文字幕:取原生非中文(英文等),交 06 翻译。多份外文时此处按字母序取首个,可能非口播主语种
-    # (更稳需按语种码/metadata 排序,低优先);单份外文(常态)不受影响。
+    # 无中文字幕:取原生非中文(英文等),交 06 翻译。多份外文时此处按字母序取首个,可能非口播主语种;
+    # 更稳需按语种码/metadata 排序,低优先。单份外文的常态场景不受影响。
     return (srts[0], False)

@@ -1,11 +1,11 @@
 """Step 04: 关键帧提取。每场景取 SSIM 动态代表帧 + 超长场景保底采样。
 
-代表帧策略(移植自老原型 analyzer/steps/04_frames.py,经实测对 PPT/手写/K线类更稳):
-比较场景首帧与 ratio 位置帧的 SSIM——差异大(画面在变)则取 ratio 位置帧、
-差异小(基本静止)则取靠前帧(start+5),避免抓到画到一半的过渡态。
+代表帧策略,经实测对 PPT/手写/K线类更稳:比较场景首帧与 ratio 位置帧的 SSIM,
+差异大说明画面在变,取 ratio 位置帧;差异小说明基本静止,取靠前帧 start+5,
+避免抓到画到一半的过渡态。
 
-解码用 PyAV(系统 libav,含 libdav1d)而非 cv2.VideoCapture——后者用 OpenCV 自带 ffmpeg
-解不了 AV1(场景/关键帧会全空)。是什么编码解什么编码,不转码。cv2 仅用于对 numpy 帧
+解码用 PyAV(系统 libav,含 libdav1d)而非 cv2.VideoCapture:后者用 OpenCV 自带 ffmpeg,
+解不了 AV1,场景/关键帧会全空。是什么编码解什么编码,不转码。cv2 仅用于对 numpy 帧
 做 resize/SSIM/存图。
 """
 

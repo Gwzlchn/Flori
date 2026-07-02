@@ -1,4 +1,4 @@
-"""Step 01: 下载。视频+论文复用。来源识别 → yutto/yt-dlp/arXiv/upload。"""
+"""Step 01: 下载。各内容类型(视频/论文/文章/音频)共用,按来源分派 yutto/yt-dlp/arXiv/curl/本地复制。"""
 
 from __future__ import annotations
 
@@ -29,9 +29,9 @@ class DownloadStep(StepBase):
         source = job.get("source") or detect_source(url)
         content_type = job.get("content_type", "video")
 
-        # 本地目录订阅(local_dir 适配器)枚举出的 file:// url:不走网络下载,
-        # 把宿主本地文件复制进 job 的 input/(被监听目录已挂进容器),再走正常校验。
-        # 注:create_job_core 用 detect_source 给本地 url 的 source 记 "other",故这里
+        # 本地目录订阅(local_dir 适配器)枚举出的 file:// url 不走网络下载:
+        # 把宿主本地文件复制进 job 的 input/,被监听目录已挂进容器,再走正常校验。
+        # create_job_core 用 detect_source 给本地 url 的 source 记 "other",故这里
         # 直接按 url 前缀判定,优先于 source 分派。
         if url.startswith("file://"):
             self.log.info("local_file_mode", content_type=content_type)
@@ -41,7 +41,7 @@ class DownloadStep(StepBase):
             self.log.info("upload_mode", content_type=content_type)
         elif content_type == "audio" and source not in ("bilibili", "youtube"):
             # 显式音频任务:无论 URL 是音频直链(podcast 源)还是播客页面,都走音频下载——
-            # 否则页面 URL 被 detect_source 判成 http_article 走文章分支,whisper 无音源 → 挂(08 审计 §4)。
+            # 否则页面 URL 被 detect_source 判成 http_article 走文章分支,whisper 无音源会挂。
             # bilibili/youtube 留给各自带凭证/字幕的下载器(那类应作 video,不在此拦)。
             self._download_audio(url)
         elif source == "bilibili":
@@ -132,22 +132,21 @@ class DownloadStep(StepBase):
             "yutto", target_url,
             "-d", str(input_dir),
             "-tp", "{title}",
-            "-q", "80",   # 1080P 上限:平衡主视觉清晰度与 NAS↔ECS 隧道/MinIO 带宽
+            "-q", "80",   # 1080P 上限:平衡主视觉清晰度与 NAS 到 ECS 的隧道/MinIO 带宽
         ]
 
-        # 优先用本机侧载凭证文件 input/.credentials.json 里的 SESSDATA(扫码登录入库;
-        # 该文件只存在于同机 LocalStorage,绝不下发远端 worker——见 shared/storage.is_credential_file);
-        # 否则回退本地 cookie 文件;两者皆无则匿名下载,降级 480P。
-        # 取值优先级:本机侧载 → 本地 cookie 文件。注意 yutto 的 -c 要的是 SESSDATA「值」,
-        # 不是文件路径——此前回退误把 bilibili.txt 路径当值传给 -c,致登录态失效:匿名下载、
-        # 无字幕(字幕需登录)、清晰度降 480P。
+        # SESSDATA 取值优先级见 _resolve_sessdata。侧载凭证由扫码登录入库,只存在于同机
+        # LocalStorage,绝不下发远端 worker,见 shared/storage.is_credential_file。
+        # 皆取不到则匿名下载,降级 480P。
+        # yutto 的 -c 要的是 SESSDATA 值,不是文件路径;传路径会静默失去登录态:
+        # 匿名下载、无字幕(字幕需登录)、清晰度降 480P。
         sessdata = self._resolve_sessdata()
         if sessdata:
             cmd.extend(["-c", sessdata])
         else:
             self.log.warn("no_bilibili_cookies", msg="降级 480P")
 
-        # yutto 主力,失败转 yt-dlp 兜底(移植老原型双引擎),最后 ffprobe 验收挡坏下载。
+        # yutto 主力,失败转 yt-dlp 兜底,最后 ffprobe 验收挡坏下载。
         try:
             self.run_subprocess(cmd, timeout=self.config["step"]["timeout_sec"])
             self._rename_downloaded_video(input_dir)
@@ -158,8 +157,9 @@ class DownloadStep(StepBase):
         self._verify_download(input_dir / "source.mp4")
 
     def _resolve_sessdata(self) -> str | None:
-        """B站 SESSDATA 取值优先级:环境变量 BILI_SESSDATA(无状态 worker 推荐:凭证随 env 注入、
-        不落本地文件)→ 本机侧载 input/.credentials.json → 本地 cookie 文件 /data/cookies/bilibili.txt。"""
+        """B站 SESSDATA 取值优先级:env BILI_SESSDATA、本机侧载 input/.credentials.json、
+        本地 cookie 文件 /data/cookies/bilibili.txt。env 方式适合无状态 worker:
+        凭证随 env 注入,不落本地文件。"""
         return (
             os.environ.get("BILI_SESSDATA", "").strip()
             or self._read_sessdata()
@@ -179,7 +179,7 @@ class DownloadStep(StepBase):
             return None
 
     def _read_cookie_file_sessdata(self) -> str | None:
-        """从 /data/cookies/bilibili.txt 取 SESSDATA「值」(Netscape cookie 文件或裸值均可)。
+        """从 /data/cookies/bilibili.txt 取 SESSDATA 值(Netscape cookie 文件或裸值均可)。
         MinIO 部署下侧载凭证不下发远端 worker,此文件是登录态来源(无则匿名、无字幕)。"""
         p = Path(os.environ.get("DATA_DIR", "/data")) / "cookies" / "bilibili.txt"
         if not p.is_file():
@@ -253,7 +253,7 @@ class DownloadStep(StepBase):
             from shared.errors import InputInvalidError
             raise InputInvalidError(f"Cannot extract arXiv ID from: {url}")
 
-        # 先抓 arxiv API 元数据(标题/作者/摘要/发布日):PDF 解析抓不准(标题常成左边距 arXiv 戳、作者空)。
+        # 先抓 arxiv API 元数据(标题/作者/摘要/发布日):PDF 解析抓不准,标题常成左边距 arXiv 戳、作者空。
         self._fetch_arxiv_meta(arxiv_id)
 
         pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
@@ -327,10 +327,10 @@ class DownloadStep(StepBase):
         self.write_output("input/article_meta.json", article_meta)
 
     def _download_audio(self, url: str) -> None:
-        """音频任务下载 → input/source.mp3(后续复制为 source.mp4 供 whisper;ffmpeg 按内容
-        嗅探解码,扩展名不影响转写)。支持音频直链(mp3/m4a/wav/aac/flac)与播客「页面 URL」
-        (best-effort 从页面解析音频真链)。下载后 ffprobe 校验:挡 404/HTML 存成 mp3 拖到
-        whisper 才报晦涩 ffmpeg 错(08 审计 §4)。"""
+        """音频任务下载 → input/source.mp3,后续复制为 source.mp4 供 whisper;ffmpeg 按内容
+        嗅探解码,扩展名不影响转写。支持音频直链(mp3/m4a/wav/aac/flac)与播客页面 URL,
+        后者 best-effort 从页面解析音频真链。下载后 ffprobe 校验:挡住 404/HTML 存成 mp3
+        拖到 whisper 才报晦涩 ffmpeg 错。"""
         from shared.errors import InputInvalidError
         from shared.net import assert_public_url
         from shared.source_detect import detect_source, extract_audio_enclosure
@@ -387,7 +387,7 @@ class DownloadStep(StepBase):
 
     def _verify_audio(self, path: Path) -> bool:
         """音频下载验收:文件存在 + >2KB + ffprobe 读得出时长(>0.5s)。
-        HTML 错误页/404 体没有可解码时长 → ffprobe 失败 → False。"""
+        HTML 错误页/404 体没有可解码时长,ffprobe 失败即返回 False。"""
         if not path.exists() or path.stat().st_size < 2048:
             return False
         dur = self._get_video_duration(path)  # ffprobe format=duration,音频同样适用
@@ -440,7 +440,7 @@ class DownloadStep(StepBase):
     def _download_generic(self, url: str) -> None:
         from shared.net import assert_public_url
 
-        assert_public_url(url)  # 下载前挡内网/回环目标(SSRF):generic 接任意用户 URL,此前无校验
+        assert_public_url(url)  # 下载前挡内网/回环目标(SSRF):generic 接任意用户 URL
         input_dir = self.job_dir / "input"
         input_dir.mkdir(parents=True, exist_ok=True)
 
@@ -455,7 +455,7 @@ class DownloadStep(StepBase):
         self._rename_to_source_mp4(input_dir)
 
     def _rename_downloaded_video(self, input_dir: Path) -> None:
-        """yutto 下载的视频文件名不固定，重命名为 source.mp4。"""
+        """yutto 下载的视频文件名不固定,重命名为 source.mp4。"""
         search_dirs = [input_dir, self.job_dir]
         for d in search_dirs:
             for f in d.glob("*.mp4"):
@@ -485,7 +485,7 @@ class DownloadStep(StepBase):
         asses = sorted(input_dir.glob("*.ass"))
         if asses:
             target = input_dir / "danmaku.ass"
-            # 已存在 danmaku.ass 则以它为准,不要把字母序首个 rename 覆盖掉它(R2 新发现)。
+            # 已存在 danmaku.ass 则以它为准,不要把字母序首个 rename 覆盖掉它。
             keep = target if target.exists() else asses[0]
             if keep.name != "danmaku.ass":
                 keep = keep.rename(target)
@@ -584,7 +584,7 @@ class DownloadStep(StepBase):
 
         metadata["has_subtitle"] = any(input_dir.glob("*.srt"))
         metadata["has_danmaku"] = any(input_dir.glob("*.ass"))
-        # arxiv API 元数据(title/authors/abstract/published_at)并入,作权威来源(优先于 PDF 启发)。
+        # 并入 arxiv API 元数据(title/authors/abstract/published_at),作权威来源,优先于 PDF 启发。
         metadata.update(getattr(self, "_arxiv_meta", {}) or {})
         return metadata
 

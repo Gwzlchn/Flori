@@ -7,7 +7,7 @@ from pathlib import Path
 from shared.step_base import StepBase, file_hash
 from steps.utils.srt_parser import format_timestamp, load_srt
 
-# 段落聚合时间间隔（秒）
+# 段落聚合时间间隔(秒)
 SEGMENT_INTERVAL_SEC = 60
 
 
@@ -16,8 +16,8 @@ def _is_word_char(ch: str) -> bool:
 
 
 def _join_cues(texts) -> str:
-    """拼接相邻字幕文本:英文词边界处补空格(避免 "hello""world" 粘连),
-    CJK 之间直接相连(不在中文字间插空格)。"""
+    """拼接相邻字幕文本:英文词边界处补空格,避免 "hello""world" 粘连;
+    CJK 之间直接相连,不在中文字间插空格。"""
     result = ""
     for t in texts:
         if not t:
@@ -43,7 +43,7 @@ class TranscriptParseStep(StepBase):
     def execute(self) -> dict | None:
         entries = load_srt(self.job_dir / "input" / "subtitle.srt")
 
-        # 按固定时间窗口聚合为段落，提供下游 sections 雏形
+        # 按固定时间窗口聚合为段落,提供下游 sections 雏形
         segments = self._aggregate(entries)
         full_text = _join_cues([e.text for e in entries])
         duration_sec = round(entries[-1].end_sec, 1) if entries else 0.0

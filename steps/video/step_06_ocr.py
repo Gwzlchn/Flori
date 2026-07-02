@@ -26,7 +26,7 @@ class OcrStep(StepBase):
         keep_frames = [d for d in dedup if d.get("keep", False)]
 
         ocr_engine = self._create_ocr_engine()
-        # 置信度过滤:挡台标/花字等低置信噪声直灌下游 AI(老原型基线 0.6)。
+        # 置信度过滤:挡台标/花字等低置信噪声直灌下游 AI,经验基线 0.6。
         threshold = float(self.config.get("domain", {}).get("ocr", {}).get("confidence_threshold", 0.0))
         results = []
         nonempty = 0

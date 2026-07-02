@@ -8,7 +8,7 @@ from pathlib import Path
 from shared.step_base import StepBase, file_hash
 
 # 编程错误(代码 bug)永远不该被"图表可缺省"的宽松 catch 吞成 warning 后照常 done——否则像 fitz 未导入
-# 致 NameError 这种 bug 会静默抽 0 图、还查不到。这些类型一律【重抛 fail-loud】;只放行预期的数据/环境
+# 致 NameError 这种 bug 会静默抽 0 图、还查不到。这些类型一律重抛 fail-loud;只放行预期的数据/环境
 # 降级(损坏图、不支持色彩空间、缺 OCR 后端 ImportError)。
 _BUG_ERRORS = (NameError, AttributeError, TypeError)
 
@@ -41,7 +41,7 @@ class FiguresStep(StepBase):
         results = []
         asset_idx = 0   # 渲染出图者的递增序号 = 占位符 img:N 的 N(05_smart 内联回填用)
 
-        # 按图注【渲染 PDF 页面区域】:caption 上方、同列、drawings+图片矩形的并集 = 图区域,
+        # 按图注渲染 PDF 页面区域:caption 上方、同列、drawings+图片矩形的并集 = 图区域,
         # get_pixmap(clip=区域) 渲染——矢量图与栅格图通吃(get_images 只能抽栅格,会漏正文矢量图)。
         with fitz.open(str(pdf_path)) as doc:
             for i, fig in enumerate(figures_info):
@@ -102,7 +102,7 @@ class FiguresStep(StepBase):
 
     @staticmethod
     def _caption_rect(page, fig_num: str, caption: str):
-        """定位图注矩形:先用「Figure N: <头部>」精确,退回「Figure N」标签。"""
+        """定位图注矩形:先用 "Figure N: <头部>" 精确匹配,退回 "Figure N" 标签。"""
         probes = []
         head = (caption or "").strip()[:24]
         if head:
@@ -120,7 +120,7 @@ class FiguresStep(StepBase):
         import fitz
         pw, ph = page.rect.width, page.rect.height
         mid = pw / 2
-        # 列:用图注【所在文本块】宽度判栏(search 探针 rect 只是文字片段,会把全宽图误判成单栏)。
+        # 列:用图注所在文本块宽度判栏(search 探针 rect 只是文字片段,会把全宽图误判成单栏)。
         # 块宽 < 55% 页宽 → 双栏,取所在半栏;否则(全宽图注)整页宽。
         cap_block_w = cap.width
         for b in page.get_text("blocks"):

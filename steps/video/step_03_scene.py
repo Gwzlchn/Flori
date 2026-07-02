@@ -30,8 +30,8 @@ class SceneStep(StepBase):
         window_width = scene_cfg.get("window_width", 2)
         min_content_val = scene_cfg.get("min_content_val", 15.0)
 
-        # backend='pyav':用 PyAV(系统 libav,含 libdav1d)解码,而非 OpenCV 自带 ffmpeg
-        # ——后者解不了 AV1(报 "Failed to get pixel format")→ 场景检测 0 结果。是什么编码解什么,不转码。
+        # backend='pyav':用 PyAV(系统 libav,含 libdav1d)解码,而非 OpenCV 自带 ffmpeg。
+        # 后者解不了 AV1,报 "Failed to get pixel format",场景检测 0 结果。是什么编码解什么,不转码。
         video = open_video(str(video_path), backend="pyav")
         fps = video.frame_rate
         min_scene_len_frames = int(min_scene_len_sec * fps)

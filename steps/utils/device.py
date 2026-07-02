@@ -1,4 +1,4 @@
-"""GPU/CPU 检测，决定 OCR/Whisper 使用路径。"""
+"""GPU/CPU 检测,决定 OCR/Whisper 使用路径。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import subprocess
 
 
 def has_nvidia_gpu() -> bool:
-    """检测是否有可用的 NVIDIA GPU。"""
     if not shutil.which("nvidia-smi"):
         return False
     try:
@@ -22,7 +21,7 @@ def has_nvidia_gpu() -> bool:
 
 
 def gpu_memory_mb() -> int:
-    """返回第一块 GPU 的显存 MB，无 GPU 返回 0。"""
+    """返回第一块 GPU 的显存 MB,无 GPU 返回 0。"""
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
@@ -37,7 +36,7 @@ def gpu_memory_mb() -> int:
 
 
 def select_whisper_model() -> tuple[str, str]:
-    """选择 Whisper 模型和计算类型。返回 (model_size, compute_type)。"""
+    """按显存分档选 Whisper 模型,返回 (model_size, compute_type);无 GPU 回退 base+int8。"""
     if not has_nvidia_gpu():
         return ("base", "int8")
     mem = gpu_memory_mb()
@@ -50,9 +49,9 @@ def select_whisper_model() -> tuple[str, str]:
 
 
 def select_ocr_backend() -> str:
-    """选择 OCR 后端。当前仅实现 rapidocr(CPU/ONNX);paddleocr-GPU 属 M5 尚未接入,
-    故即便 GPU 机误设 USE_PADDLE_OCR=1 也回退 rapidocr + 告警,绝不返回会让 OCR 步崩溃的后端
-    (step_06_ocr 对未实现后端 raise NotImplementedError,此处在源头挡掉)。"""
+    """选择 OCR 后端。当前仅实现 rapidocr(CPU/ONNX);paddleocr-GPU 尚未接入,
+    故即便 GPU 机误设 USE_PADDLE_OCR=1 也回退 rapidocr 并告警,绝不返回会让 OCR 步崩溃的后端。
+    step_06_ocr 对未实现后端 raise NotImplementedError,此处在源头挡掉。"""
     if has_nvidia_gpu() and os.environ.get("USE_PADDLE_OCR") == "1":
         import structlog
         structlog.get_logger().warning(

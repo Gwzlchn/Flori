@@ -1,5 +1,5 @@
-"""Step 02: 文章解析。trafilatura 抽正文 + 元数据;v2 补全元信息(abstract/image/tags/author)
-+ 产出可读原文 Markdown(output/original.md,正文图片下载到 assets/ 本地引用)。
+"""Step 02: 文章解析。trafilatura 抽正文 + 元数据,补全元信息(abstract/image/tags/author),
+并产出可读原文 Markdown(output/original.md,正文图片下载到 assets/ 本地引用)。
 
 站点差异(正文图片标记、作者位置)外置到 extractors/ 注册表:本 step 只做通用编排
 (trafilatura 出正文/元数据 + 下载图片 + 拼 markdown),站点定制由 pick_extractor 选中的 extractor 提供。
@@ -14,16 +14,16 @@ from steps.article.extractors import pick_extractor
 from shared.step_base import StepBase, file_hash
 
 
-# 空正文护栏(硬伤C:08-review-pipeline-audit / 09-plan P0-3)。付费墙 / JS 渲染 / 订阅残桩页
-# 常被 trafilatura 抽出空或极短正文(仅标题 + "订阅后阅读")。正文【有效字符数】低于此阈值 →
-# 判定抓取失败/付费墙,直接 InputInvalidError(不重试),不让 03/04/05 在空正文上跑 AI 幻觉、
-# 污染概念图谱(key_terms 是图谱唯一概念来源)。阈值沿用既有翻译门控的 200(本文件 needs_translation
-# 用 len(text) > 200),不另立魔数;中英通用——200 拉丁≈35 词、200 CJK≈一短段,都是"低于此基本
-# 无内容可做笔记"的地板,且对英文更宽松(需更少词)故倾向不误杀。正规文章普遍远超此值。
+# 空正文护栏。付费墙 / JS 渲染 / 订阅残桩页常被 trafilatura 抽出空或极短正文(仅标题 + "订阅后阅读")。
+# 正文有效字符数低于此阈值判定为抓取失败/付费墙,直接 InputInvalidError(不重试)。
+# 不让 03/04/05 在空正文上跑 AI 幻觉、污染概念图谱:key_terms 是图谱唯一概念来源。
+# 阈值与本文件翻译门控共用 200(needs_translation 用 len(text) > 200),不另立魔数。
+# 中英通用:200 拉丁约 35 词、200 CJK 约一短段,都是低于此基本无内容可做笔记的地板;
+# 对英文更宽松(需更少词),倾向不误杀。正规文章普遍远超此值。
 MIN_BODY_CHARS = 200
 
-# 常见付费墙/登录墙标记(EN + 中文)。命中【仅用于细化错误信息】(疑似付费墙 vs 疑似抓取失败),
-# 判废仍只看正文长度——避免长文因正文含 subscribe/会员 等词被误杀(长文不会触发长度门)。
+# 常见付费墙/登录墙标记(EN + 中文)。命中仅用于细化错误信息:疑似付费墙 vs 疑似抓取失败。
+# 判废仍只看正文长度,避免长文因正文含 subscribe/会员 等词被误杀(长文不会触发长度门)。
 _PAYWALL_MARKERS = (
     "subscribe to continue", "subscribe to read", "subscribe to keep reading",
     "already a subscriber", "already a member", "become a member",
@@ -64,13 +64,13 @@ class ParseArticleStep(StepBase):
             title = (data.get("title") or "").strip()
             text = (data.get("text") or "").strip()
             date = (data.get("date") or "").strip()
-            abstract = (data.get("description") or data.get("excerpt") or "").strip()  # v2
-            image = (data.get("image") or "").strip()                                  # v2
+            abstract = (data.get("description") or data.get("excerpt") or "").strip()
+            image = (data.get("image") or "").strip()
             sitename_src = (data.get("sitename") or data.get("hostname") or "").strip()  # 来源:网站名
             # 站点通用占位图(如 wscn 的 _static/share.png、logo、default)不是文章实际配图,丢弃。
             if image and re.search(r'(share|/_static/|/static/|logo|default|placeholder)', image.lower()):
                 image = ""
-            tags = self._split_tags(data.get("tags") or data.get("categories"))        # v2
+            tags = self._split_tags(data.get("tags") or data.get("categories"))
             authors_src = data.get("author") or ""
             if authors_src:
                 authors = [a.strip() for a in str(authors_src).split(";") if a.strip()]
@@ -91,8 +91,8 @@ class ParseArticleStep(StepBase):
         if not authors:
             authors = extractor.authors(html)
 
-        # 空正文护栏:正文有效字符数过短(付费墙/JS 渲染/订阅残桩)→ 直接判失败(不重试),
-        # 不写任何产物、不让 03/04/05 拿空正文喂 AI 幻觉污染概念图谱(详见文件顶部说明)。
+        # 空正文护栏:正文有效字符数过短(付费墙/JS 渲染/订阅残桩)直接判失败,不重试、
+        # 不写任何产物,不让 03/04/05 拿空正文喂 AI 幻觉污染概念图谱。详见文件顶部说明。
         eff = self._effective_len(text)
         if eff < MIN_BODY_CHARS:
             from shared.errors import InputInvalidError
@@ -112,14 +112,14 @@ class ParseArticleStep(StepBase):
         parsed = {
             "title": title,
             "authors": authors,
-            "abstract": abstract,                      # v2:补全
-            "image": image,                            # v2:封面/配图
-            "tags": tags,                              # v2:标签/分类
+            "abstract": abstract,
+            "image": image,                            # 封面/配图
+            "tags": tags,                              # 标签/分类
             "url": url,
             # 来源网站名:trafilatura sitename > 下载元数据 > URL 域名(去 www)。供「来源」展示。
             "sitename": sitename_src or meta.get("sitename", "") or self._domain(url),
             "date": date,
-            "lang": lang,                              # v2:正文主语言(zh / non-zh)
+            "lang": lang,                              # 正文主语言(zh / non-zh)
             "word_count": len(text),
             "sections": sections,
             "text": text,
@@ -130,7 +130,7 @@ class ParseArticleStep(StepBase):
         if lang != "zh" and len(text) > 200:
             self.write_output("intermediate/needs_translation.json", {"lang": lang})
 
-        # v2:可读原文 Markdown(图片下载到 assets/ 改本地引用),供前端「原文」tab。
+        # 可读原文 Markdown(图片下载到 assets/ 改本地引用),供前端「原文」tab。
         md, img_count = self._original_markdown(html, parsed, extractor)
         self.write_output("output/original.md", md)
 
@@ -159,7 +159,7 @@ class ParseArticleStep(StepBase):
 
     @staticmethod
     def _domain(url: str) -> str:
-        """URL 域名(去 www),作「来源」兜底(无 sitename 时)。"""
+        """URL 域名(去 www):无 sitename 时作「来源」兜底。"""
         from urllib.parse import urlparse
         try:
             host = (urlparse(url or "").hostname or "").lower()
@@ -167,7 +167,7 @@ class ParseArticleStep(StepBase):
             host = ""
         return host[4:] if host.startswith("www.") else host
 
-    # ── helpers ──
+    # helpers
 
     @staticmethod
     def _split_tags(raw) -> list[str]:
@@ -177,12 +177,12 @@ class ParseArticleStep(StepBase):
             return [str(t).strip() for t in raw if str(t).strip()]
         return [t.strip() for t in re.split(r"[;,，、]", str(raw)) if t.strip()]
 
-    # ── 原文 Markdown + 正文图片(trafilatura 会丢图,故图片由 extractor 从原始 HTML 抽)──
+    # 原文 Markdown + 正文图片:trafilatura 会丢图,图片由 extractor 从原始 HTML 抽
 
     def _original_markdown(self, html: str, parsed: dict, extractor) -> tuple[str, int]:
         """trafilatura 出正文 markdown(纯文本,它会丢图);正文图由 extractor 从原始 HTML 抽,
-        下载到 assets/ 后【按原文位置内联】到对应段落之后(锚点 = 图在 HTML 中前面最近的段落/标题文字,
-        在 md 里定位该段插图);锚点匹配不上的图兜底插在标题后(导语图)。"""
+        下载到 assets/ 后按原文位置内联到对应段落之后。锚点 = 图在 HTML 中前面最近的段落/标题文字,
+        用于在 md 里定位该段插图;锚点匹配不上的图兜底插在标题后(导语图)。"""
         import trafilatura
         md = ""
         try:
@@ -228,7 +228,7 @@ class ParseArticleStep(StepBase):
     @staticmethod
     def _image_anchor(html: str, url: str) -> str:
         """图 url 在 HTML 中首次出现位置之前、最近的段落/标题文字(归一化),作为它在正文里的锚点。
-        无则空串(→ 兜底插标题后)。"""
+        无则返回空串,兜底插标题后。"""
         idx = html.find(url)
         if idx < 0:
             return ""
@@ -242,7 +242,7 @@ class ParseArticleStep(StepBase):
 
     @staticmethod
     def _inline_images(md: str, items: list[tuple[str, str]]) -> str:
-        """把图按锚点插到 md 对应段落之后(图按文档序;锚点在 md 里也按序出现 → 单调推进搜索)。
+        """把图按锚点插到 md 对应段落之后。图按文档序,锚点在 md 里也按序出现,故单调推进搜索。
         锚点为空或在 md 找不到的图,收集后兜底插在标题(首个 # 行)之后。"""
         lines = md.split("\n")
         norm = [" ".join(re.sub(r'<[^>]+>', " ", ln).split()) for ln in lines]

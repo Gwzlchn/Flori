@@ -53,8 +53,7 @@ class DedupStep(StepBase):
                 results.append({**cand, "keep": False, "phash": "", "reason": "error"})
                 continue
 
-            # 三段式带宽(移植老原型 05_dedup.py):明显不同直接跳过;足够近直接判重;
-            # 灰区才上 SSIM 复核——省算力且更准。
+            # 三段式带宽:明显不同直接跳过;足够近直接判重;灰区才上 SSIM 复核。省算力且更准。
             duplicate = False
             for prev_hash, prev_idx in seen_hashes:
                 band = self._phash_band(ph - prev_hash, phash_threshold)
@@ -79,7 +78,7 @@ class DedupStep(StepBase):
 
     @staticmethod
     def _phash_band(dist: int, threshold: int) -> str:
-        """pHash 距离分三段:>阈值+4 'different'(跳过)、≤阈值 'duplicate'、其间 'gray'(需 SSIM)。"""
+        """pHash 距离分三段:>阈值+4 为 'different' 直接跳过;≤阈值为 'duplicate';其间为 'gray',需 SSIM 复核。"""
         if dist > threshold + 4:
             return "different"
         if dist <= threshold:
@@ -98,7 +97,7 @@ class DedupStep(StepBase):
             score = ssim(img_a, img_b, data_range=255)  # 与 step_04 一致显式传,避免依赖 dtype 推断
             return score >= threshold
         except Exception as e:
-            # SSIM 复核失败降级为"非重复"(偏保留:宁可多留一帧也不误删),仅记 warning。
+            # SSIM 复核失败降级为"非重复",仅记 warning。偏保留:宁可多留一帧也不误删。
             self.log.warning("ssim_error", path_a=str(path_a), path_b=str(path_b), error=str(e))
             return False
 

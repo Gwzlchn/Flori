@@ -1,7 +1,7 @@
 """Substack 平台提取器。
 
-semianalysis.com 等自定义域名 + *.substack.com 都跑在 substack 平台上 → 按【页面特征】匹配
-(substackcdn / Image2ToDOM),不按域名,一个 extractor 通吃整个平台(写一次,白嫖全平台)。
+semianalysis.com 等自定义域名 + *.substack.com 都跑在 substack 平台上,故按页面特征匹配
+(substackcdn / Image2ToDOM),不按域名,一个 extractor 通吃整个平台。
 注:substack 没有 <meta generator="Substack">,别靠它判;substackcdn 出现频次最高最可靠。
 
 正文图在 substack 里可靠地包在 <figure> 内 → 直接按 figure 抽,比通用启发更稳:
@@ -16,8 +16,8 @@ from .base import ArticleExtractor, generic_content_image_urls
 
 
 def substack_figure_images(html: str) -> list[str]:
-    """抽 substack 正文图:每个 <figure> 内首个 <img src>(去 data:/svg),按 URL 去重
-    (substack SSR + 水合会重复出现同图)。"""
+    """抽 substack 正文图:每个 <figure> 内首个 <img src>,去 data:/svg。
+    按 URL 去重:substack SSR + 水合会重复出现同图。"""
     urls: list[str] = []
     seen: set[str] = set()
     for fig in re.findall(r'<figure\b[^>]*>(.*?)</figure>', html, re.S | re.I):
