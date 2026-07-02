@@ -326,7 +326,7 @@ article:
       timeout: 60
       # 补全元信息(abstract/image/tags/author),并产出图片本地引用的可读原文 Markdown;
       # 非中文正文写 needs_translation.json 标记(供 04_translate_article 的 rules:exists 门控)。
-      outputs: ["intermediate/parsed.json", "output/original.md", "intermediate/needs_translation.json"]
+      outputs: ["intermediate/parsed.json", "output/original.md", "intermediate/needs_translation.json", "assets/*"]
 
     "03_article_sections":
       label: "章节切分"

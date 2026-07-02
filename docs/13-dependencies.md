@@ -50,9 +50,10 @@
 
 | 工具 | License | 说明 |
 |------|---------|------|
-| [trafilatura](https://github.com/adbar/trafilatura) | Apache-2.0 | 网页正文提取，Python |
-| [readability](https://github.com/mozilla/readability) | Apache-2.0 | Mozilla 出品（JS） |
-| [newspaper3k](https://github.com/codelucas/newspaper) | MIT | 新闻文章提取，含图片 |
+| [trafilatura](https://github.com/adbar/trafilatura) | Apache-2.0 | 网页正文提取（parsed.json 正文/元数据）；其树丢 `<pre>` 换行，不用于原文 MD 主路径 |
+| [readability-lxml](https://github.com/buriy/python-readability) | Apache-2.0 | 原文 MD 主路径：定位正文，返回原始 HTML 无损子树（保代码块/图原位） |
+| [markdownify](https://github.com/matthewwithanm/python-markdownify) | MIT | 原文 HTML→Markdown 忠实转换（围栏代码/表格；关 `_`/`*` 转义保数学） |
+| [newspaper3k](https://github.com/codelucas/newspaper) | MIT | 新闻文章提取，含图片（备选，未用） |
 
 ## 6. 后端
 

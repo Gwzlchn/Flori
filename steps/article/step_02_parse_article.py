@@ -1,8 +1,10 @@
 """Step 02: 文章解析。trafilatura 抽正文 + 元数据,补全元信息(abstract/image/tags/author),
 并产出可读原文 Markdown(output/original.md,正文图片下载到 assets/ 本地引用)。
 
-站点差异(正文图片标记、作者位置)外置到 extractors/ 注册表:本 step 只做通用编排
-(trafilatura 出正文/元数据 + 下载图片 + 拼 markdown),站点定制由 pick_extractor 选中的 extractor 提供。
+原文 MD 走 readability(定位正文,返回原始 HTML 无损子树)+ markdownify(忠实转 MD):
+trafilatura 的树会丢 <pre> 换行(代码块被拍扁救不回),只用于 parsed.json 正文/元数据与回退链。
+图片按 md 引用驱动本地化:相对 src 先 urljoin 文章 URL(Hugo 等站点图全相对),失败保绝对 URL。
+站点差异(作者位置等)仍外置 extractors/ 注册表,由 pick_extractor 选中的 extractor 提供。
 """
 
 from __future__ import annotations
@@ -131,7 +133,7 @@ class ParseArticleStep(StepBase):
             self.write_output("intermediate/needs_translation.json", {"lang": lang})
 
         # 可读原文 Markdown(图片下载到 assets/ 改本地引用),供前端「原文」tab。
-        md, img_count = self._original_markdown(html, parsed, extractor)
+        md, img_count = self._original_markdown(html, parsed)
         self.write_output("output/original.md", md)
 
         return {"chars": len(text), "title": title, "images": img_count,
@@ -177,106 +179,83 @@ class ParseArticleStep(StepBase):
             return [str(t).strip() for t in raw if str(t).strip()]
         return [t.strip() for t in re.split(r"[;,，、]", str(raw)) if t.strip()]
 
-    # 原文 Markdown + 正文图片:trafilatura 会丢图,图片由 extractor 从原始 HTML 抽
+    # 原文 Markdown:readability 定位正文 → markdownify 忠实转 MD → 图片按 md 引用本地化。
 
-    def _original_markdown(self, html: str, parsed: dict, extractor) -> tuple[str, int]:
-        """trafilatura 出正文 markdown(纯文本,它会丢图);正文图由 extractor 从原始 HTML 抽,
-        下载到 assets/ 后按原文位置内联到对应段落之后。锚点 = 图在 HTML 中前面最近的段落/标题文字,
-        用于在 md 里定位该段插图;锚点匹配不上的图兜底插在标题后(导语图)。"""
-        import trafilatura
+    def _original_markdown(self, html: str, parsed: dict) -> tuple[str, int]:
+        """readability 抽正文(原始 HTML 无损子树,<pre>/<img> 原位保留)→ markdownify 转 MD。
+        关 _ * 转义:LaTeX($x_i$)与代码常含下划线/星号,转义会毁公式。失败走回退链。"""
         md = ""
+        try:
+            from markdownify import markdownify as mdify
+            from readability import Document
+            content_html = Document(html).summary(html_partial=True)
+            md = mdify(content_html, heading_style="ATX",
+                       escape_underscores=False, escape_asterisks=False).strip()
+        except Exception:
+            self.log.warning("original_md_readability_failed", exc_info=True)
+        if not md:
+            md = self._fallback_markdown(html, parsed)
+        title = parsed.get("title", "")
+        # 标题:readability/trafilatura 的 md 常不带 H1,补上
+        if title and not md.lstrip().startswith("# "):
+            md = f"# {title}\n\n{md}"
+        return self._localize_images(md, parsed.get("url", ""))
+
+    def _fallback_markdown(self, html: str, parsed: dict) -> str:
+        """回退链:trafilatura markdown(代码块会被拍扁,聊胜于无)→ 纯正文文本。"""
+        import trafilatura
         try:
             md = trafilatura.extract(
                 html, output_format="markdown", include_comments=False, include_tables=True,
             ) or ""
         except Exception:
             md = ""
-        if not md:
-            md = parsed.get("text", "")
-        title = parsed.get("title", "")
-        # 标题:trafilatura md 常不带 H1,补上
-        if title and not md.lstrip().startswith("# "):
-            md = f"# {title}\n\n{md}"
+        return md or parsed.get("text", "")
 
-        downloaded = self._download_content_images(extractor.content_image_urls(html))
-        if downloaded:
-            items = [(self._image_anchor(html, url), ref) for url, ref in downloaded]
-            md = self._inline_images(md, items)
-        return md, len(downloaded)
+    _IMG_REF = re.compile(r'!\[([^\]]*)\]\(\s*([^)\s]+)((?:\s+"[^"]*")?)\s*\)')
 
-    def _download_content_images(self, urls: list[str]) -> list[tuple[str, str]]:
-        """下载正文图到 assets/img_N.ext,返回 [(原 url, markdown 引用)](按序,失败的图跳过)。"""
-        import urllib.request
+    def _localize_images(self, md: str, page_url: str) -> tuple[str, int]:
+        """md 里的图片引用逐个本地化:相对 src 先 urljoin(page_url) 绝对化(Hugo 等站图全相对,
+        不解析则全部下载失败);下载成功改写为 assets/img_NN.ext,失败保留绝对 URL(前端在线
+        仍可渲染,不静默丢图)。data: URI 原样跳过;同图多次引用只下载一次。返回 (md, 本地化数)。"""
+        from urllib.parse import urljoin
         assets = self.job_dir / "assets"
-        out: list[tuple[str, str]] = []
-        for i, url in enumerate(urls):
-            ext = (re.search(r'\.(png|jpe?g|gif|webp)', url.lower()) or [None, "jpg"])[1]
-            ext = "jpg" if ext == "jpeg" else ext
-            fname = f"img_{i:02d}.{ext}"
-            try:
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                data = urllib.request.urlopen(req, timeout=20).read()
-                if not data:
-                    continue
-                assets.mkdir(parents=True, exist_ok=True)
-                (assets / fname).write_bytes(data)
-                out.append((url, f"![](assets/{fname})"))
-            except Exception:
-                continue
-        return out
+        cache: dict[str, str] = {}
+        count = 0
+
+        def _replace(m: re.Match) -> str:
+            nonlocal count
+            alt, src, title_part = m.group(1), m.group(2).strip(), m.group(3)
+            if not src or src.startswith("data:"):
+                return m.group(0)
+            if src not in cache:
+                absolute = urljoin(page_url, src) if page_url else src
+                new_ref = absolute
+                if absolute.startswith(("http://", "https://")):
+                    data = self._fetch_image(absolute)
+                    if data:
+                        ext_m = re.search(r'\.(png|jpe?g|gif|webp|svg)(?:[?#]|$)', absolute.lower())
+                        ext = ext_m.group(1) if ext_m else "jpg"
+                        ext = "jpg" if ext == "jpeg" else ext
+                        fname = f"img_{len(cache):02d}.{ext}"
+                        assets.mkdir(parents=True, exist_ok=True)
+                        (assets / fname).write_bytes(data)
+                        new_ref = f"assets/{fname}"
+                        count += 1
+                cache[src] = new_ref
+            return f"![{alt}]({cache[src]}{title_part})"
+
+        return self._IMG_REF.sub(_replace, md), count
 
     @staticmethod
-    def _image_anchor(html: str, url: str) -> str:
-        """图 url 在 HTML 中首次出现位置之前、最近的段落/标题文字(归一化),作为它在正文里的锚点。
-        无则返回空串,兜底插标题后。"""
-        idx = html.find(url)
-        if idx < 0:
-            return ""
-        before = html[:idx]
-        last = ""
-        for m in re.finditer(r'<(p|h[1-6]|figcaption)\b[^>]*>(.*?)</\1>', before, re.S | re.I):
-            txt = " ".join(re.sub(r'<[^>]+>', " ", m.group(2)).split())
-            if len(txt) >= 12:           # 够长才作锚(跳过空/超短块)
-                last = txt
-        return last
-
-    @staticmethod
-    def _inline_images(md: str, items: list[tuple[str, str]]) -> str:
-        """把图按锚点插到 md 对应段落之后。图按文档序,锚点在 md 里也按序出现,故单调推进搜索。
-        锚点为空或在 md 找不到的图,收集后兜底插在标题(首个 # 行)之后。"""
-        lines = md.split("\n")
-        norm = [" ".join(re.sub(r'<[^>]+>', " ", ln).split()) for ln in lines]
-        after: dict[int, list[str]] = {}     # 行号 -> 该行后要插的图引用
-        leftover: list[str] = []
-        cursor = 0
-        for anchor, ref in items:
-            key = anchor[-40:].strip()
-            placed = False
-            if key:
-                for i in range(cursor, len(lines)):
-                    if key and key in norm[i]:
-                        after.setdefault(i, []).append(ref)
-                        cursor = i            # 后续图从此行起找,保序;同段连续图落同一行
-                        placed = True
-                        break
-            if not placed:
-                leftover.append(ref)
-        out: list[str] = []
-        title_idx = next((i for i, ln in enumerate(lines) if ln.startswith("# ")), -1)
-        for i, ln in enumerate(lines):
-            out.append(ln)
-            if i == title_idx and leftover:   # 锚点匹配不上的兜底插标题后
-                for ref in leftover:
-                    out.append("")
-                    out.append(ref)
-                leftover = []
-            for ref in after.get(i, []):
-                out.append("")
-                out.append(ref)
-        if leftover:                          # 无标题行 → 顶部兜底
-            head = [x for ref in leftover for x in (ref, "")]
-            out = head + out
-        return "\n".join(out)
+    def _fetch_image(url: str) -> bytes | None:
+        """下载单图,失败返 None(调用方保留绝对 URL 引用)。"""
+        import urllib.request
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            return urllib.request.urlopen(req, timeout=20).read() or None
+        except Exception:
+            return None
 
     def _load_meta(self) -> dict:
         path = self.job_dir / "input" / "article_meta.json"

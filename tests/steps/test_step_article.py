@@ -563,36 +563,76 @@ class TestArticleExtractors:
         ]
 
 
-class TestInlineImagePositioning:
-    """正文图按原文位置内联:锚点 = 图前最近段落文字,插到 md 对应段后;锚点缺失兜底标题后。"""
+class TestOriginalMarkdownPipeline:
+    """原文 MD 管线(readability+markdownify):<pre> 代码块保多行围栏、数学/下划线不转义、
+    图片引用原位 + 相对 src urljoin 本地化、下载失败保绝对 URL 不丢图。"""
 
-    def test_anchor_is_preceding_paragraph(self):
-        html = '<p>第一段足够长的引言文字内容</p><figure><img src="https://cdn/a.png"></figure>'
-        assert ParseArticleStep._image_anchor(html, "https://cdn/a.png") == "第一段足够长的引言文字内容"
+    CODE_HTML = (
+        '<html><head><title>Code Post</title></head><body><article>'
+        '<h1>Code Post</h1>'
+        '<p>Long intro paragraph about io_uring internals, long enough for readability '
+        'to keep the article body as the main content region of this page.</p>'
+        '<pre>struct io_uring_params {\n\t__u32 sq_entries;\n\t__u32 cq_entries;\n};</pre>'
+        '<p>Math like $P_\\text{Correct}(q_a)$ and snake_case_name must survive as-is.</p>'
+        '<p><img src="figs/diagram.png" alt="diagram"></p>'
+        '<p>Closing paragraph with enough words to keep extraction stable across '
+        'readability versions and content heuristics.</p>'
+        '</article></body></html>'
+    )
+    PARSED = {"title": "Code Post", "url": "https://example.com/post/"}
 
-    def test_anchor_absent_returns_empty(self):
-        assert ParseArticleStep._image_anchor("<p>x</p>", "https://cdn/missing.png") == ""
+    def _step(self, tmp_path):
+        job_dir = _mk_job(tmp_path)
+        config = make_step_config(tmp_path, step_name="02_parse_article", pool="cpu")
+        return ParseArticleStep("02_parse_article", job_dir, config), job_dir
 
-    def test_inline_after_matching_paragraph(self):
-        md = "# 标题\n\n第一段足够长的引言文字内容。\n\n第二段也是足够长的正文内容。"
-        out = ParseArticleStep._inline_images(md, [("第二段也是足够长的正文内容。", "![](assets/img_00.png)")]).split("\n")
-        j = next(k for k, l in enumerate(out) if "第二段" in l)
-        assert any("img_00" in l for l in out[j + 1:j + 3])         # 图在该段之后
-        assert not any("img_00" in l for l in out[:j])              # 不在前面
+    def test_pre_survives_as_multiline_fenced_code(self, tmp_path, monkeypatch):
+        step, _ = self._step(tmp_path)
+        monkeypatch.setattr(ParseArticleStep, "_fetch_image", staticmethod(lambda url: None))
+        md, _ = step._original_markdown(self.CODE_HTML, self.PARSED)
+        assert "```" in md
+        block = md[md.find("struct io_uring_params"):md.find("};")]
+        assert "__u32 sq_entries;" in block and "\n" in block     # 多行原样,没被拍扁
 
-    def test_inline_leftover_after_title(self):
-        md = "# 标题\n\n正文段落内容。"
-        out = ParseArticleStep._inline_images(md, [("", "![](assets/img_00.png)")]).split("\n")
-        ti = next(k for k, l in enumerate(out) if l.startswith("# "))
-        assert any("img_00" in l for l in out[ti + 1:ti + 3])       # 锚点缺失 → 兜底标题后
+    def test_math_and_underscores_not_escaped(self, tmp_path, monkeypatch):
+        step, _ = self._step(tmp_path)
+        monkeypatch.setattr(ParseArticleStep, "_fetch_image", staticmethod(lambda url: None))
+        md, _ = step._original_markdown(self.CODE_HTML, self.PARSED)
+        assert "$P_\\text{Correct}(q_a)$" in md
+        assert "snake_case_name" in md and "snake\\_case" not in md
 
-    def test_inline_consecutive_order_preserved(self):
-        md = "# T\n\n锚段落文字内容足够长。"
-        out = ParseArticleStep._inline_images(md, [
-            ("锚段落文字内容足够长。", "![](assets/img_00.png)"),
-            ("锚段落文字内容足够长。", "![](assets/img_01.png)"),
-        ])
-        assert out.index("img_00") < out.index("img_01")
+    def test_relative_img_urljoined_and_localized(self, tmp_path, monkeypatch):
+        step, job_dir = self._step(tmp_path)
+        fetched: list[str] = []
+        monkeypatch.setattr(ParseArticleStep, "_fetch_image",
+                            staticmethod(lambda url: fetched.append(url) or b"PNGDATA"))
+        md, n = step._original_markdown(self.CODE_HTML, self.PARSED)
+        assert fetched == ["https://example.com/post/figs/diagram.png"]   # 相对 src 已 urljoin
+        assert n == 1 and "![diagram](assets/img_00.png)" in md
+        assert (job_dir / "assets" / "img_00.png").read_bytes() == b"PNGDATA"
+
+    def test_download_failure_keeps_absolute_url(self, tmp_path, monkeypatch):
+        step, job_dir = self._step(tmp_path)
+        monkeypatch.setattr(ParseArticleStep, "_fetch_image", staticmethod(lambda url: None))
+        md, n = step._original_markdown(self.CODE_HTML, self.PARSED)
+        assert n == 0
+        assert "![diagram](https://example.com/post/figs/diagram.png)" in md   # 保绝对 URL 不丢图
+        assert not (job_dir / "assets" / "img_00.png").exists()
+
+    def test_data_uri_skipped(self, tmp_path):
+        step, _ = self._step(tmp_path)
+        md, n = step._localize_images("![](data:image/png;base64,AAAA)", "https://x.com/p")
+        assert n == 0 and md == "![](data:image/png;base64,AAAA)"
+
+    def test_same_image_downloaded_once(self, tmp_path, monkeypatch):
+        step, _ = self._step(tmp_path)
+        calls: list[str] = []
+        monkeypatch.setattr(ParseArticleStep, "_fetch_image",
+                            staticmethod(lambda url: calls.append(url) or b"X"))
+        md, n = step._localize_images(
+            "![](pic.png) 中间文字 ![again](pic.png)", "https://a.com/b/")
+        assert len(calls) == 1 and n == 1
+        assert md.count("assets/img_00.png") == 2
 
 
 class TestArticleLangDetect:
