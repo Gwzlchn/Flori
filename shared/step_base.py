@@ -77,6 +77,9 @@ class StepBase:
         # AI 审计日志(prompt 白盒化):本步每次 LLM 调用一条,内存累积后落 output/ai_logs/{step}.jsonl。
         # 留内存副本是为 call_ai_json 解析后能回填 output_processed(amend 最后一条)。
         self._ai_log_records: list[dict] = []
+        # workdir 复用(STORAGE_WORKDIR_REUSE)下重试是新进程:装载已有 jsonl 续写,call_index 续增。
+        # 否则首次 _flush_ai_logs 整文件重写会吞掉上一次(被外杀)执行留下的 pending 记录。
+        self._load_existing_ai_logs()
 
     # 统一入口
 
@@ -511,12 +514,15 @@ class StepBase:
 
         import asyncio
         ts_start = datetime.now()
+        # 发起前先落 pending(输入侧留痕):步被外杀(超时 SIGKILL)时本次调用不再零审计。
+        pend_pos = self._write_ai_log_pending(prompt, system, images, request, ts_start)
         try:
             response = asyncio.run(self._gateway.call(self.step_name, request))
         except Exception as e:
             # 失败也整条记审计(含尝试链 + 当时 prompt),诊断"喂了啥/哪个 provider 挂了"。
             self._write_ai_log_safe(prompt, system, images, request, None,
-                                    ts_start, datetime.now(), error=e)
+                                    ts_start, datetime.now(), error=e,
+                                    replace_pos=pend_pos)
             self._call_index += 1
             raise
         ts_end = datetime.now()
@@ -552,7 +558,7 @@ class StepBase:
             log_dir,
         )
         self._write_ai_log_safe(prompt, system, images, request, response,
-                                ts_start, ts_end, error=None)
+                                ts_start, ts_end, error=None, replace_pos=pend_pos)
         self._call_index += 1
         return response.content
 
@@ -560,6 +566,25 @@ class StepBase:
 
     def _ai_log_path(self) -> Path:
         return self.job_dir / "output" / "ai_logs" / f"{self.step_name}.jsonl"
+
+    def _load_existing_ai_logs(self) -> None:
+        """装载 workdir 里已有的本步审计 jsonl(重试/复用续写):历史记录保留、call_index 从最大值续增。
+        best-effort:损坏的历史审计不该挡步执行(此时从 0 开始,首次 flush 会重写整文件)。"""
+        try:
+            path = self._ai_log_path()
+            if not path.exists():
+                return
+            records = []
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+            self._ai_log_records = records
+            self._call_index = max(
+                (int(r.get("call_index", -1)) for r in records), default=-1,
+            ) + 1
+        except Exception:
+            self.log.warn("ai_log_load_existing_failed", step=self.step_name)
 
     def _flush_ai_logs(self) -> None:
         path = self._ai_log_path()
@@ -572,13 +597,39 @@ class StepBase:
         )
         tmp.replace(path)
 
+    def _write_ai_log_pending(self, prompt, system, images, request, ts_start) -> int | None:
+        """call 发起【前】先落一条 phase=pending 记录(输入侧全量:渲染后 prompt/system、模板来源、
+        input_hashes、call_meta)并即刻 flush 落盘:步被外杀(超时 SIGKILL)时磁盘仍留本次调用的输入
+        与 ts_start,可与 worker 家目录 transcript 按时间窗对上。返回记录位置供完成后原位替换;
+        best-effort,失败返 None(final 走 append,不影响主流程)。"""
+        try:
+            rec = self._build_ai_log_record(prompt, system, images, request,
+                                            None, ts_start, ts_start, None)
+            rec["phase"] = "pending"
+            rec["ok"] = None        # 未知结局(区别于 final 的 True/False)
+            rec["error"] = None
+            self._ai_log_records.append(rec)
+            self._flush_ai_logs()
+            return len(self._ai_log_records) - 1
+        except Exception:
+            self.log.warn("ai_log_pending_write_failed", step=self.step_name)
+            return None
+
     def _write_ai_log_safe(self, prompt, system, images, request, response,
-                           ts_start, ts_end, error=None) -> None:
-        """落一条 AI 审计记录(best-effort,绝不影响主流程)。"""
+                           ts_start, ts_end, error=None, replace_pos=None) -> None:
+        """落一条 AI 审计记录(best-effort,绝不影响主流程)。replace_pos 指向本次调用的 pending
+        记录 → 原位替换为 final(同 call_index 才换,防错位);否则 append。"""
         try:
             rec = self._build_ai_log_record(prompt, system, images, request,
                                             response, ts_start, ts_end, error)
-            self._ai_log_records.append(rec)
+            rec["phase"] = "final"
+            if (replace_pos is not None
+                    and 0 <= replace_pos < len(self._ai_log_records)
+                    and self._ai_log_records[replace_pos].get("phase") == "pending"
+                    and self._ai_log_records[replace_pos].get("call_index") == rec["call_index"]):
+                self._ai_log_records[replace_pos] = rec
+            else:
+                self._ai_log_records.append(rec)
             self._flush_ai_logs()
         except Exception:
             self.log.warn("ai_log_write_failed", step=self.step_name)

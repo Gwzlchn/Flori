@@ -8,6 +8,12 @@
 from __future__ import annotations
 
 from shared.step_base import StepBase, file_hash
+from steps.utils.chunking import split_markdown_chunks
+
+# 单 chunk 字符预算:大论文(GPT-3 75页)整篇单调用必撞步/CLI 双 600s 超时(线上实证)。
+# 16000 字英文原文的中文译文 ≈ 万级 tokens,稳在 max_tokens=16384 与单调用几分钟内;
+# 小论文 fits 时仍是单块=行为不变。段落边界切,不破坏 Markdown 结构。
+CHUNK_CHARS = 16000
 
 
 class TranslatePaperStep(StepBase):
@@ -27,17 +33,25 @@ class TranslatePaperStep(StepBase):
         sections = self.load_json("intermediate/sections.json")
         md = self._paper_markdown(sections)
 
-        prompt = self._build_prompt(md)
-        # 全文译文常超默认 4096 output tokens,抬高上限防截断(claude-cli 无视无害)。
-        result = self.call_ai(prompt, max_tokens=16384)
+        # 逐 chunk 翻译:每块一次 call_ai(各自有审计记录+transcript sidecar,call_index 自增),
+        # 按原顺序聚合;max_tokens 抬高防单块译文截断(claude-cli 无视无害)。
+        chunks = split_markdown_chunks(md, CHUNK_CHARS)
+        parts: list[str] = []
+        for i, chunk in enumerate(chunks):
+            self.report_progress(i, len(chunks), f"translating chunk {i + 1}/{len(chunks)}")
+            parts.append(self.call_ai(self._build_prompt(chunk), max_tokens=16384).strip())
+        self.report_progress(len(chunks), len(chunks), "done")
+        result = "\n\n".join(parts)
 
         self.write_output("output/translated.md", result)
-        return {"chars": len(result), "provider": self.last_ai_provider,
-                "model": self.last_ai_model}
+        return {"chars": len(result), "chunks": len(chunks),
+                "provider": self.last_ai_provider, "model": self.last_ai_model}
 
     @staticmethod
     def _paper_markdown(sections: dict) -> str:
-        """从 sections.json 拼出论文可读 Markdown(标题/作者/摘要/章节树)供翻译。"""
+        """从 sections.json 拼出论文可读 Markdown(标题/作者/摘要/章节树)供翻译。
+        ★max_chars=None 不截断:忠实全文翻译必须喂全文(默认 2000 字/节的截断是笔记类
+        prompt 的预算控制,曾让"全文翻译"实际只译了每节前 2000 字);规模由 chunk 管。"""
         from steps.utils.sections import render_section_tree
         parts: list[str] = []
         if sections.get("title"):
@@ -48,7 +62,7 @@ class TranslatePaperStep(StepBase):
             parts.append(f"\n## Abstract\n{sections['abstract']}\n")
         parts.append("\n")
         for sec in sections.get("sections", []):
-            render_section_tree(sec, parts, level=2)
+            render_section_tree(sec, parts, level=2, max_chars=None)
         return "".join(parts)
 
     def _build_prompt(self, md: str) -> str:

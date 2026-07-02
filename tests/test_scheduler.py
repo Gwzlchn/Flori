@@ -1990,3 +1990,47 @@ class TestMarkJobFailedClearsSiblings:
         # job 终态 FAILED + 移出 active
         assert db.get_job("j_par_fail").status == JobStatus.FAILED
         assert "j_par_fail" not in await redis.get_active_jobs()
+
+
+class TestTimeoutRetry:
+    """超时重试:RETRY_POLICY['timeout']={'max':1} 封顶(非无限循环——线上 GPT-3 翻译步曾因
+    DB retries 列不同步被误读);重试时 DB retries 列同步,第二次超时终态失败。"""
+
+    async def _drain_delayed(self, scheduler):
+        await asyncio.sleep(0)
+        if scheduler._delayed_tasks:
+            await asyncio.gather(*list(scheduler._delayed_tasks))
+
+    @pytest.mark.asyncio
+    async def test_timeout_retries_once_then_fails(self, scheduler, redis, db):
+        job = make_job()
+        db.create_job(job)
+        await scheduler.submit_job(job)
+        await redis.dequeue_step("cpu")
+
+        delays = []
+
+        async def mock_delayed(delay, job_id, step):
+            delays.append(delay)
+            await scheduler.enqueue_step(job_id, step)
+
+        scheduler._delayed_enqueue = mock_delayed
+
+        # 第一次超时:policy max=1、pipeline A retries=2 → min=1,重试(延迟 10s)。
+        await redis.set_step_status("j_test_001", "A", "running")
+        await scheduler.on_step_failed("j_test_001", "A", "timeout", "timeout")
+        await self._drain_delayed(scheduler)
+        assert delays == [10]
+        assert await redis.get_step_status("j_test_001", "A") == "ready"
+        assert await redis.get_step_retries("j_test_001", "A") == 1
+        # ★DB retries 列同步(否则 UI/排查看到 0,误判"超时不计数无限循环")
+        step_row = next(s for s in db.get_steps("j_test_001") if s.name == "A")
+        assert step_row.retries == 1
+
+        # 第二次超时:current 1 >= 1 → 终态失败,job 失败(不无限循环)。
+        await redis.set_step_status("j_test_001", "A", "running")
+        await scheduler.on_step_failed("j_test_001", "A", "timeout", "timeout")
+        await self._drain_delayed(scheduler)
+        assert await redis.get_step_status("j_test_001", "A") == "failed"
+        assert delays == [10]
+        assert db.get_job("j_test_001").status == JobStatus.FAILED

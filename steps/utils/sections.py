@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 
-def render_section_tree(section: dict, parts: list, level: int, max_chars: int = 2000) -> None:
-    """把章节树渲染成 markdown 片段:标题按 level 加 #,正文截断 max_chars,递归子节点。"""
+def render_section_tree(section: dict, parts: list, level: int, max_chars: int | None = 2000) -> None:
+    """把章节树渲染成 markdown 片段:标题按 level 加 #,正文截断 max_chars,递归子节点。
+    max_chars=None 不截断——忠实全文场景(如 04_translate_paper)必须传 None,否则每节被
+    默认砍到 2000 字,"全文翻译"名不副实(默认截断只给笔记/概念类 prompt 控预算用)。"""
     prefix = "#" * level
     parts.append(f"\n{prefix} {section['title']}\n\n")
     if section.get("text"):
-        parts.append(f"{section['text'][:max_chars]}\n")
+        text = section["text"] if max_chars is None else section["text"][:max_chars]
+        parts.append(f"{text}\n")
     for child in section.get("children", []):
         render_section_tree(child, parts, level + 1, max_chars)
 

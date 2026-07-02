@@ -246,3 +246,57 @@ class TestTranscriptSidecar:
         assert rec["ok"] is False
         assert rec["transcript"]["file"] == "output/ai_logs/11_smart.turns.0.jsonl"
         assert (tmp_path / "output" / "ai_logs" / "11_smart.turns.0.jsonl").read_text() == '{"e":1}\n'
+
+
+# step_base:pending 留痕(外杀可审计)
+
+class TestPendingPhase:
+    def test_pending_flushed_before_call_then_replaced_by_final(self, tmp_path):
+        # call 发起前磁盘已有 phase=pending(输入全量);完成后原位替换为 final,不留重复。
+        seen: dict = {}
+
+        class _PeekGW:
+            async def call(self, step_name, request):
+                recs = _read_log(tmp_path)
+                seen["at_call"] = [(r.get("phase"), r.get("ok"), r["prompt"]["rendered"]["user"])
+                                   for r in recs]
+                return _mk_response()
+
+        step = _Step(tmp_path, {"ai": {}})
+        step._gateway = _PeekGW()
+        step.call_ai("audited input")
+
+        assert seen["at_call"] == [("pending", None, "audited input")]   # 调用中:盘上已留输入
+        recs = _read_log(tmp_path)
+        assert len(recs) == 1                                            # 原位替换,无重复
+        assert recs[0]["phase"] == "final" and recs[0]["ok"] is True
+
+    def test_exception_replaces_pending_no_duplicate(self, tmp_path):
+        step = _Step(tmp_path, {"ai": {}})
+        step._gateway = _FakeGW(exc=AllProvidersFailedError("down", attempts=[]))
+        with pytest.raises(AllProvidersFailedError):
+            step.call_ai("doomed")
+        recs = _read_log(tmp_path)
+        assert len(recs) == 1
+        assert recs[0]["phase"] == "final" and recs[0]["ok"] is False
+
+    def test_killed_leaves_pending_and_retry_appends(self, tmp_path):
+        # 模拟外杀:pending 落盘后进程死(无 final)。重试=新进程装载已有 jsonl:
+        # 旧 pending 保留、call_index 续增,新调用 final 追加而非覆盖。
+        step1 = _Step(tmp_path, {"ai": {}})
+        from datetime import datetime
+        from shared.models import LLMRequest as _Req
+        req = _Req(messages=[{"role": "user", "content": "killed call"}])
+        pos = step1._write_ai_log_pending("killed call", None, [], req, datetime.now())
+        assert pos == 0
+        assert _read_log(tmp_path)[0]["phase"] == "pending"              # 外杀现场
+
+        step2 = _Step(tmp_path, {"ai": {}})                              # 重试(新进程)
+        assert step2._call_index == 1                                    # 续增,不撞旧记录
+        step2._gateway = _FakeGW(response=_mk_response())
+        step2.call_ai("retry call")
+
+        recs = _read_log(tmp_path)
+        assert len(recs) == 2                                            # 旧 pending 未被吞
+        assert recs[0]["phase"] == "pending" and recs[0]["prompt"]["rendered"]["user"] == "killed call"
+        assert recs[1]["phase"] == "final" and recs[1]["call_index"] == 1

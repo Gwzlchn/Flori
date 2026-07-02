@@ -8,6 +8,11 @@
 from __future__ import annotations
 
 from shared.step_base import StepBase, file_hash
+from steps.utils.chunking import split_markdown_chunks
+
+# 单 chunk 字符预算(与 04_translate_paper 同理):超长文整篇单调用会撞步/CLI 双 600s 超时;
+# 段落边界切不破坏 Markdown/图位,小文 fits 时单块=行为不变。
+CHUNK_CHARS = 16000
 
 
 class TranslateArticleStep(StepBase):
@@ -26,13 +31,19 @@ class TranslateArticleStep(StepBase):
     def execute(self) -> dict | None:
         md = (self.job_dir / "output" / "original.md").read_text(encoding="utf-8")
 
-        prompt = self._build_prompt(md)
-        # 全文译文常超默认 4096 output tokens,抬高上限防截断(claude-cli 无视无害)。
-        result = self.call_ai(prompt, max_tokens=16384)
+        # 逐 chunk 翻译(每块一次 call_ai=各自审计+transcript sidecar),按原顺序聚合;
+        # max_tokens 抬高防单块译文截断(claude-cli 无视无害)。
+        chunks = split_markdown_chunks(md, CHUNK_CHARS)
+        parts: list[str] = []
+        for i, chunk in enumerate(chunks):
+            self.report_progress(i, len(chunks), f"translating chunk {i + 1}/{len(chunks)}")
+            parts.append(self.call_ai(self._build_prompt(chunk), max_tokens=16384).strip())
+        self.report_progress(len(chunks), len(chunks), "done")
+        result = "\n\n".join(parts)
 
         self.write_output("output/translated.md", result)
-        return {"chars": len(result), "provider": self.last_ai_provider,
-                "model": self.last_ai_model}
+        return {"chars": len(result), "chunks": len(chunks),
+                "provider": self.last_ai_provider, "model": self.last_ai_model}
 
     def _build_prompt(self, md: str) -> str:
         # 默认模板外置 configs/prompts/templates/04_translate_article.md(改文件不碰代码);缺失回退 _DEFAULT。

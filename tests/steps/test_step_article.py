@@ -741,3 +741,20 @@ class TestTranslateArticleStep:
         out = (job_dir / "output" / "translated.md").read_text(encoding="utf-8")
         assert "你好世界" in out
         assert "![](assets/img_00.png)" in out          # 图片引用原样保留
+
+
+class TestTranslateArticleChunking:
+    def test_large_article_chunks_and_aggregates(self, tmp_path, monkeypatch):
+        # 超长文按段落切多 chunk(单调用会撞 600s 双超时,线上 GPT-3 论文实证);逐块调用按序聚合。
+        job_dir = _mk_job(tmp_path)
+        big = "\n\n".join(f"Paragraph {i}. " + ("word " * 400) for i in range(20))
+        (job_dir / "output" / "original.md").write_text(big, encoding="utf-8")
+        config = make_step_config(tmp_path, step_name="04_translate_article", pool="ai")
+        step = TranslateArticleStep("04_translate_article", job_dir, config)
+        calls = []
+        monkeypatch.setattr(step, "call_ai",
+                            lambda prompt, **k: calls.append(prompt) or f"块{len(calls)}")
+        result = step.execute()
+        assert result["chunks"] > 1 and len(calls) == result["chunks"]
+        out = (job_dir / "output" / "translated.md").read_text(encoding="utf-8")
+        assert out.index("块1") < out.index(f"块{result['chunks']}")

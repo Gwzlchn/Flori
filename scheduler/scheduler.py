@@ -545,6 +545,11 @@ class Scheduler:
 
         if current_retries < max_retries:
             await self.redis.incr_step_retries(job_id, step)
+            # 同步 DB retries 列:重试计数权威在 redis(job:{id}:retries),但 DB 只在终态才写,
+            # 重试中 UI/排查看到 retries=0 会误判"超时不计数、无限循环"(线上 GPT-3 翻译步实证误读)。
+            await asyncio.to_thread(
+                self.db.update_step, job_id, step, retries=current_retries + 1,
+            )
             delay = get_retry_delay(error_type, current_retries) or 0
             logger.info(
                 "step_retry", job_id=job_id, step=step,
