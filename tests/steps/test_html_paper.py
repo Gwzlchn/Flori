@@ -116,3 +116,14 @@ class TestPageChromeFiltered:
         )
         md = arxiv_html_to_markdown(html)["markdown"]
         assert 'chrome text' not in md and 'Body text.' in md
+
+    def test_site_announcement_banner_skipped(self):
+        # arxiv 官方站点横幅(ds-announcement)不在 header/footer 内,按 class 滤(线上混进译文顶部)。
+        html = (
+            '<html><body>'
+            '<div class="ds-announcement"><img src="assets/smiley.svg">'
+            '<span class="ds-announcement-text">arXiv is now an independent nonprofit!</span></div>'
+            '<article class="ltx_document"><p class="ltx_p">Body text.</p></article></body></html>'
+        )
+        md = arxiv_html_to_markdown(html)["markdown"]
+        assert 'nonprofit' not in md and 'smiley' not in md and 'Body text.' in md

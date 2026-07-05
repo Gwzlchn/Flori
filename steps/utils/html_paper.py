@@ -37,6 +37,9 @@ _TITLE_LEVEL = {
 _SKIP_CLASSES = {
     "ltx_page_header", "ltx_page_footer", "ltx_page_logo", "ltx_ERROR",
     "ltx_rdf", "ltx_pagination", "ltx_role_versionnotice",
+    # arxiv 官方 HTML 站点横幅(如「arXiv is now an independent nonprofit!」+ 吉祥物图标):
+    # <div class="ds-announcement"> 不在 header/footer 里,单独滤(线上混进译文顶部)。
+    "ds-announcement",
 }
 # dialog/form/header/footer/aside = 页级 chrome(arxiv 官方 HTML 的「Report GitHub Issue」弹窗、
 # 页眉脚 arxiv-html-header/footer、ds-site-footer 等)。已核 BERT 官方 HTML:ltx_document 正文区

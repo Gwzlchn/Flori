@@ -272,11 +272,12 @@ class DownloadStep(StepBase):
         html = None
         for base in (f"https://arxiv.org/html/{arxiv_id}",
                      f"https://ar5iv.labs.arxiv.org/html/{arxiv_id}"):
-            html = self._fetch_html(base, timeout=60)
+            html, final_url = self._fetch_html(base, timeout=60)
             # ar5iv 对无 HTML 的论文回 200 落地页(含 ar5iv 提示语),官方 404 → None;
             # 粗判:LaTeXML 产物必有 ltx_ 标记。
             if html and "ltx_" in html:
-                self._arxiv_html_base = base
+                # 图 base 用重定向后的最终 URL(官方 html/<id> 302 到 …/<id>v<N>,相对 src 相对它)。
+                self._arxiv_html_base = final_url or base
                 break
             html = None
         if not html:
@@ -389,7 +390,7 @@ class DownloadStep(StepBase):
         html = None
         timeout = 30
         for _ in range(5):
-            html = self._fetch_html(url, timeout)
+            html, _final = self._fetch_html(url, timeout)
             if html:
                 break
             timeout *= 2
@@ -412,8 +413,10 @@ class DownloadStep(StepBase):
         self.write_output("input/article_meta.json", article_meta)
 
     @staticmethod
-    def _fetch_html(url: str, timeout: int) -> str | None:
-        """urllib 抓单页(尊重代理 env),失败返 None(调用方退避重试)。
+    def _fetch_html(url: str, timeout: int) -> tuple[str | None, str | None]:
+        """urllib 抓单页(尊重代理 env),返回 (html, 最终URL);失败返 (None, None)。
+        ★最终 URL = 跟随重定向后的(arxiv.org/html/<id> → 302 → …/<id>v2):页内图的相对
+        src 必须以它为 base 拼绝对地址,用请求前 URL 会拼出双段 404(线上:译文图全外链裸奔)。
         解码链:HTTP header charset → utf-8 → gb18030(GBK/GB2312 中文站) → utf-8 宽容兜底。"""
         import urllib.request
         try:
@@ -421,16 +424,17 @@ class DownloadStep(StepBase):
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 raw = r.read()
                 charset = r.headers.get_content_charset()
+                final_url = r.geturl()
         except Exception:
-            return None
+            return None, None
         if not raw:
-            return None
+            return None, None
         for enc in filter(None, (charset, "utf-8", "gb18030")):
             try:
-                return raw.decode(enc)
+                return raw.decode(enc), final_url
             except (UnicodeDecodeError, LookupError):
                 continue
-        return raw.decode("utf-8", errors="replace")
+        return raw.decode("utf-8", errors="replace"), final_url
 
     def _download_audio(self, url: str) -> None:
         """音频任务下载 → input/source.mp3,后续复制为 source.mp4 供 whisper;ffmpeg 按内容
