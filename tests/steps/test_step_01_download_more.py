@@ -761,14 +761,14 @@ class TestFetchArxivHtml:
     def test_fetch_and_localize(self, tmp_path):
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, source="arxiv", content_type="paper")
-        html = '<div class="ltx_page_main"><img src="x1.png"></div>'
-        with patch.object(step, "_fetch_html", return_value=(html, "https://arxiv.org/html/x1v2")), \
+        html = '<div class="ltx_page_main"><img src="x1v2/x1.png"></div>'
+        with patch.object(step, "_fetch_html", return_value=(html, "https://arxiv.org/html/x1")), \
                 patch.object(step, "run_subprocess", return_value=SimpleNamespace(stdout="")) as run:
             step._fetch_arxiv_html("1810.04805")
         saved = (job_dir / "input" / "source.html").read_text(encoding="utf-8")
-        assert 'src="assets/x1.png"' in saved            # 引用重写为本地 assets
+        assert 'src="assets/x1v2_x1.png"' in saved        # 引用重写为本地 assets(扁平名含相对目录段)
         curl_cmd = run.call_args[0][0]
-        assert "https://arxiv.org/html/x1v2/x1.png" in curl_cmd  # 相对→绝对:base=重定向后最终 URL(v2)
+        assert "https://arxiv.org/html/x1v2/x1.png" in curl_cmd  # RFC3986:base 末段丢弃(浏览器语义,无手拼斜杠)
 
     def test_ar5iv_fallback_then_unavailable(self, tmp_path):
         job_dir = _make_job_dir(tmp_path)
@@ -781,9 +781,9 @@ class TestFetchArxivHtml:
     def test_image_download_failure_keeps_absolute_url(self, tmp_path):
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, source="arxiv", content_type="paper")
-        html = '<div class="ltx_page_main"><img src="x1.png"></div>'
-        with patch.object(step, "_fetch_html", return_value=(html, "https://arxiv.org/html/x1v2")), \
+        html = '<div class="ltx_page_main"><img src="x1v2/x1.png"></div>'
+        with patch.object(step, "_fetch_html", return_value=(html, "https://arxiv.org/html/x1")), \
                 patch.object(step, "run_subprocess", side_effect=RuntimeError("curl fail")):
             step._fetch_arxiv_html("1810.04805")
         saved = (job_dir / "input" / "source.html").read_text(encoding="utf-8")
-        assert 'src="https://arxiv.org/html/x1v2/x1.png"' in saved  # 失败留绝对 URL(按最终 URL 拼)
+        assert 'src="https://arxiv.org/html/x1v2/x1.png"' in saved  # 失败留绝对 URL(RFC3986 语义拼)

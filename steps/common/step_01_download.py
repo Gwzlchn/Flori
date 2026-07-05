@@ -299,7 +299,10 @@ class DownloadStep(StepBase):
         for src in srcs:
             if src.startswith("data:"):
                 continue
-            absolute = urljoin(base_url + "/", src)
+            # ★不加尾斜杠:页面 URL(…/html/1810.04805,无重定向)按 RFC 3986 相对解析时末段
+            # 被丢弃,恰是浏览器语义——img src 本就带版本目录(1810.04805v2/x1.png)。手拼 "/" 会把
+            # 末段当目录,拼出 …/1810.04805/1810.04805v2/x1.png 双段 404(线上:图全下载失败留外链)。
+            absolute = urljoin(base_url, src)
             fname = re.sub(r"[^A-Za-z0-9._-]", "_", src.split("?")[0].strip("/"))[-80:]
             try:
                 assets.mkdir(parents=True, exist_ok=True)
