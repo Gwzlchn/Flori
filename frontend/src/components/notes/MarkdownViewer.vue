@@ -2,6 +2,10 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import MarkdownIt from 'markdown-it'
+// KaTeX 数学渲染:论文原文/译文含 $…$/$$…$$(LaTeX,arxiv HTML alttext 与 PDF 直喂译文都产)。
+// html:false 不影响插件——katex 经 token 渲染器输出,非原始 HTML 透传。
+import katexPlugin from '@vscode/markdown-it-katex'
+import 'katex/dist/katex.min.css'
 
 // terms/domain 用于笔记内联可点:正文里命中的已接受术语包成链接 → 该领域术语详情。
 // 不传则不做术语链接(其它调用方无需改动)。
@@ -10,6 +14,7 @@ const emit = defineEmits<{ headings: [{ id: string; text: string; level: number 
 
 const router = useRouter()
 const md = new MarkdownIt({ html: false, linkify: true, typographer: true })
+md.use(katexPlugin, { throwOnError: false })   // 非法 LaTeX 红字降级,不炸整页渲染
 
 // 术语链接状态(在 rendered 计算里按当前 props 更新;ruler 闭包读取)。
 const termLink: { set: Set<string>; re: RegExp | null; linked: Set<string> } = {

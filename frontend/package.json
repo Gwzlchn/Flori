@@ -11,14 +11,16 @@
     "test:cov": "vitest run --coverage"
   },
   "dependencies": {
-    "vue": "^3.4.38",
-    "vue-router": "^4.4.3",
-    "pinia": "^2.2.2",
-    "markdown-it": "^14.1.0",
-    "lucide-vue-next": "^0.441.0",
+    "@vscode/markdown-it-katex": "^1.1.1",
     "chart.js": "^4.4.3",
+    "katex": "^0.16.11",
+    "lucide-vue-next": "^0.441.0",
+    "markdown-it": "^14.1.0",
+    "pinia": "^2.2.2",
     "vis-data": "^8.0.3",
-    "vis-network": "^10.1.0"
+    "vis-network": "^10.1.0",
+    "vue": "^3.4.38",
+    "vue-router": "^4.4.3"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.1.3",
