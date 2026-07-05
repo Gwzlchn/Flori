@@ -95,3 +95,24 @@ class TestPageChromeFiltered:
         assert 'Report GitHub Issue' not in md
         assert 'chrome nav' not in md and 'site footer' not in md
         assert 'Real Title' in md and 'Body text.' in md
+
+    def test_void_elements_inside_chrome_do_not_swallow_body(self):
+        # 裸 <input>/<br>(void,无闭合)在被滤子树内不得推高 skip_depth,否则整页正文被吞(线上踩过)。
+        html = (
+            '<html><body>'
+            '<dialog><form><input type="text"><br><input type="submit"></form></dialog>'
+            '<article class="ltx_document"><h1 class="ltx_title">Real Title</h1>'
+            '<p class="ltx_p">Body text.</p></article></body></html>'
+        )
+        md = arxiv_html_to_markdown(html)["markdown"]
+        assert 'Real Title' in md and 'Body text.' in md
+
+    def test_xhtml_selfclosing_void_inside_chrome_balanced(self):
+        # XHTML 风格 <br/> 走 startendtag(starttag+endtag 合成),两侧都免计才不会把深度减负提前逃出。
+        html = (
+            '<html><body>'
+            '<header class="arxiv-html-header"><br/>chrome text<img src="x.png"/></header>'
+            '<article class="ltx_document"><p class="ltx_p">Body text.</p></article></body></html>'
+        )
+        md = arxiv_html_to_markdown(html)["markdown"]
+        assert 'chrome text' not in md and 'Body text.' in md

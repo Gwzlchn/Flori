@@ -44,6 +44,11 @@ _SKIP_CLASSES = {
 # original.md 顶部并被翻译(线上踩过:「##### 報告 GitHub Issue」)。
 _SKIP_TAGS = {"script", "style", "nav", "head", "button",
               "dialog", "form", "header", "footer", "aside"}
+# HTML5 void 元素:无闭合标签(裸 <input>/<br> 只触发 handle_starttag)。skip 子树内的深度计数
+# 必须对它们免计,否则 skip_depth 只加不减、永久失衡 → 之后整页正文被吞
+# (线上踩过:滤 <form> 后其内 <input> 把 BERT original.md 吞成 1 字符)。
+_VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input",
+              "link", "meta", "param", "source", "track", "wbr"}
 
 
 class _PaperHTMLParser(HTMLParser):
@@ -92,7 +97,9 @@ class _PaperHTMLParser(HTMLParser):
     def handle_starttag(self, tag, attrs):
         cls = self._classes(attrs)
         if self._skip_depth or tag in _SKIP_TAGS or (cls & _SKIP_CLASSES):
-            self._skip_depth += 1
+            # void 元素无闭合标签,不计深度(否则 skip_depth 失衡吞掉整页正文,见 _VOID_TAGS)。
+            if tag not in _VOID_TAGS:
+                self._skip_depth += 1
             return
         if tag == "math":
             # MathML 子树忽略正文,取 alttext(LaTeX 原文)。display="block" 为独立公式行。
@@ -156,7 +163,10 @@ class _PaperHTMLParser(HTMLParser):
 
     def handle_endtag(self, tag):
         if self._skip_depth:
-            self._skip_depth -= 1
+            # 对称免计:XHTML 自闭合(<br/>)经 HTMLParser 默认 startendtag 也会走到这里,
+            # starttag 侧已对 void 免计,这里不对称会把深度减成负、提前"逃出"skip 子树。
+            if tag not in _VOID_TAGS:
+                self._skip_depth -= 1
             return
         if tag == "math":
             if self._math_depth:
