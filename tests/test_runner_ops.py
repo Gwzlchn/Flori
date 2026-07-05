@@ -79,6 +79,24 @@ class TestClaimStep:
         assert await redis.get_step_worker("j1", "A") == WORKER_ID
 
     @pytest.mark.asyncio
+    async def test_claim_refreshes_progress_heartbeat(self, redis, db):
+        # 认领即刷 progress_at:覆盖上次执行残留的旧心跳,否则 check_stuck 在认领→首拍窗口
+        # 按 now-旧值(小时/天级)误杀刚认领的步(线上 "progress stale 250689s")。
+        import time
+        await _register_worker(redis, db)
+        await redis.enqueue_step("cpu", "j1", "A", [], priority=0)
+        await redis.set_step_status("j1", "A", "ready")
+        await redis.init_job("j1", "test", {"domain": "lecture", "style_tags": '["formal"]'})
+        await redis.r.hset("job:j1:step_progress", "A", str(time.time() - 250_000))  # 2.9 天前的残留
+
+        await runner_ops.claim_step(
+            redis, db, WORKER_ID, ["cpu"], POOL_LIMITS, {"vision"}, {"private"},
+        )
+
+        at = await redis.get_step_progress_at("j1", "A")
+        assert at is not None and time.time() - at < 5
+
+    @pytest.mark.asyncio
     async def test_claim_does_not_freeze(self, redis, db):
         await _register_worker(redis, db)
         await redis.enqueue_step("cpu", "j1", "A", [], priority=0)

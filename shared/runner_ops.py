@@ -201,6 +201,10 @@ async def claim_step(
 
             await redis.set_step_worker(job_id, step, worker_id)
             await redis.set_step_exec_id(job_id, step, exec_id)
+            # 认领即刷进度心跳:覆盖上次执行(被杀/重跑)残留的旧 progress_at,否则 check_stuck 在
+            # "认领→worker 首拍 on_tick"窗口读到旧值,按 now-旧值(可达小时/天级)误杀刚认领的步
+            # (线上踩过:rerun 后 9 步被 "progress stale 250689s" 秒杀)。
+            await redis.set_step_progress_at(job_id, step)
             if acquired_resources:
                 # 存 redis 供 release_step / orphan 回收据此释放(gateway release 请求不回传资源)。
                 await redis.set_step_resources(job_id, step, acquired_resources)
