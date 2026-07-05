@@ -222,7 +222,7 @@ paper:
       pool: io
       timeout: 600   # PDF + HTML 源 + 页内图片(arxiv 慢时单 PDF 可近 120s)
       retry: 3
-      version: "3"   # arxiv 加抓 HTML 源(官方→ar5iv)+ 页内图下载到 assets/,失效旧指纹
+      version: "4"   # 图下载 base 改重定向后最终 URL(修双段404致图全外链)+滤公告横幅,失效旧指纹
       outputs: ["input/source.pdf", "input/source.html", "input/metadata.json", "assets/*"]
 
     "02_pdf_parse":
