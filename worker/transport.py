@@ -104,6 +104,9 @@ class WorkerTransport(Protocol):
     async def get_job_pipeline(self, job_id: str) -> str | None: ...
     async def get_job_info(self, job_id: str) -> dict: ...
 
+    # 下载凭证领取(docs/03 §1.7.1):中心分发,worker 零预置;未配置返回 None(匿名降级)。
+    async def get_credential(self, key: str) -> str | None: ...
+
     # 事件
     async def publish_step_event(self, channel: str, data: dict) -> None: ...
 
@@ -268,6 +271,16 @@ class RedisTransport:
 
     async def get_job_info(self, job_id):
         return await self._redis.get_job_info(job_id)
+
+    async def get_credential(self, key):
+        # redis 镜像优先;miss 落 DB 解析(直连模式有 db 句柄)并回灌镜像。
+        value = await self._redis.get_dispatch_credential(key)
+        if value is None:
+            from shared.credentials import resolve_from_db
+            value = await asyncio.to_thread(resolve_from_db, self._db, key)
+            if value:
+                await self._redis.set_dispatch_credential(key, value)
+        return value
 
     # 事件
     async def publish_step_event(self, channel, data):

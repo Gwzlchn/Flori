@@ -78,7 +78,7 @@ class TestReadSessdata:
         assert step._read_sessdata() is None
 
 
-# _resolve_sessdata 优先级(env > 侧载 > 文件)
+# _resolve_sessdata 优先级(env > 侧载;文件回退已废除)
 
 class TestResolveSessdata:
     def test_env_takes_priority_over_sideload(self, tmp_path, monkeypatch):
@@ -95,51 +95,11 @@ class TestResolveSessdata:
         step = _make_step(job_dir, tmp_path)
         assert step._resolve_sessdata() == "SIDELOAD"
 
-    def test_none_when_no_env_no_files(self, tmp_path, monkeypatch):
+    def test_none_when_no_env_no_sideload(self, tmp_path, monkeypatch):
         monkeypatch.delenv("BILI_SESSDATA", raising=False)
-        monkeypatch.setenv("DATA_DIR", str(tmp_path / "nodata"))
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path)
         assert step._resolve_sessdata() is None
-
-
-# _read_cookie_file_sessdata
-
-class TestReadCookieFileSessdata:
-    def test_missing_file_returns_none(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
-        job_dir = _make_job_dir(tmp_path)
-        step = _make_step(job_dir, tmp_path)
-        assert step._read_cookie_file_sessdata() is None
-
-    def test_netscape_line_extracted(self, tmp_path, monkeypatch):
-        data_dir = tmp_path / "data"
-        (data_dir / "cookies").mkdir(parents=True)
-        (data_dir / "cookies" / "bilibili.txt").write_text(
-            ".bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\tdeadbeef%2Cvalue\n"
-        )
-        monkeypatch.setenv("DATA_DIR", str(data_dir))
-        job_dir = _make_job_dir(tmp_path)
-        step = _make_step(job_dir, tmp_path)
-        assert step._read_cookie_file_sessdata() == "deadbeef%2Cvalue"
-
-    def test_bare_value_file(self, tmp_path, monkeypatch):
-        data_dir = tmp_path / "data"
-        (data_dir / "cookies").mkdir(parents=True)
-        (data_dir / "cookies" / "bilibili.txt").write_text("  rawtokenvalue  \n")
-        monkeypatch.setenv("DATA_DIR", str(data_dir))
-        job_dir = _make_job_dir(tmp_path)
-        step = _make_step(job_dir, tmp_path)
-        assert step._read_cookie_file_sessdata() == "rawtokenvalue"
-
-    def test_empty_file_returns_none(self, tmp_path, monkeypatch):
-        data_dir = tmp_path / "data"
-        (data_dir / "cookies").mkdir(parents=True)
-        (data_dir / "cookies" / "bilibili.txt").write_text("   \n")
-        monkeypatch.setenv("DATA_DIR", str(data_dir))
-        job_dir = _make_job_dir(tmp_path)
-        step = _make_step(job_dir, tmp_path)
-        assert step._read_cookie_file_sessdata() is None
 
 
 # _verify_download
@@ -306,6 +266,7 @@ class TestDownloadYoutube:
         monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, source="youtube")
+        monkeypatch.delenv("FLORI_YT_COOKIES", raising=False)
         with patch.object(step, "run_subprocess") as run, \
              patch.object(step, "_rename_to_source_mp4") as rn:
             step._download_youtube("https://youtu.be/abc")
@@ -316,20 +277,35 @@ class TestDownloadYoutube:
             assert cmd[-2] == "--"
             rn.assert_called_once()
 
-    def test_with_cookies(self, tmp_path, monkeypatch):
-        data_dir = tmp_path / "data"
-        (data_dir / "cookies").mkdir(parents=True)
-        cookies = data_dir / "cookies" / "youtube.txt"
-        cookies.write_text("# netscape cookies")
-        monkeypatch.setenv("DATA_DIR", str(data_dir))
+    def test_with_cookies_env_tempfile_cleaned(self, tmp_path, monkeypatch):
+        # 中心分发注入 env FLORI_YT_COOKIES → 写临时文件传 --cookies,用毕即删(凭证不留盘)。
+        monkeypatch.setenv("FLORI_YT_COOKIES", "# netscape cookies")
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, source="youtube")
-        with patch.object(step, "run_subprocess") as run, \
+        seen = {}
+        def _capture(cmd, timeout=0):
+            i = cmd.index("--cookies")
+            seen["path"] = cmd[i + 1]
+            seen["content"] = Path(cmd[i + 1]).read_text(encoding="utf-8")
+        with patch.object(step, "run_subprocess", side_effect=_capture), \
              patch.object(step, "_rename_to_source_mp4"):
             step._download_youtube("https://youtu.be/abc")
-            cmd = run.call_args[0][0]
-            assert "--cookies" in cmd
-            assert str(cookies) in cmd
+        assert "netscape cookies" in seen["content"]
+        assert not Path(seen["path"]).exists()   # finally 已删
+
+    def test_with_cookies_tempfile_cleaned_on_failure(self, tmp_path, monkeypatch):
+        # 下载失败同样清理临时 cookie 文件。
+        monkeypatch.setenv("FLORI_YT_COOKIES", "cookiez")
+        job_dir = _make_job_dir(tmp_path)
+        step = _make_step(job_dir, tmp_path, source="youtube")
+        seen = {}
+        def _boom(cmd, timeout=0):
+            seen["path"] = cmd[cmd.index("--cookies") + 1]
+            raise RuntimeError("network down")
+        with patch.object(step, "run_subprocess", side_effect=_boom), \
+             pytest.raises(RuntimeError):
+            step._download_youtube("https://youtu.be/abc")
+        assert not Path(seen["path"]).exists()
 
 
 # _download_arxiv
@@ -441,18 +417,11 @@ class TestDownloadBilibili:
             cmd = run.call_args[0][0]
             assert "-c" not in cmd
 
-    def test_yutto_cookie_file_passes_value_not_path(self, tmp_path, monkeypatch):
-        """无侧载凭证、仅本地 cookie 文件时,yutto -c 必须收到 SESSDATA 值而非文件路径。
-        把 bilibili.txt 路径当值传 -c 会使登录态失效,症状是匿名下载、无字幕、降 480P。
-        test_yutto_primary_with_sessdata 只覆盖 .credentials.json 侧载路径,
-        这条回归测试钉死 cookie 文件回退路径。"""
-        data_dir = tmp_path / "data"
-        cookie = data_dir / "cookies" / "bilibili.txt"
-        cookie.parent.mkdir(parents=True)
-        # Netscape cookie 行:SESSDATA 的值是 cookieval123,文件路径绝不该出现在命令里。
-        cookie.write_text(".bilibili.com\tTRUE\t/\tFALSE\t0\tSESSDATA\tcookieval123\n")
-        monkeypatch.setenv("DATA_DIR", str(data_dir))
-        job_dir = _make_job_dir(tmp_path)   # 无 .credentials.json → 回退读 cookie 文件
+    def test_yutto_env_sessdata_injected(self, tmp_path, monkeypatch):
+        """中心分发注入 env BILI_SESSDATA(worker 认领时下发)→ yutto -c 收到该值;
+        cookie 文件回退已废除(docs/03 §1.7.1)。"""
+        monkeypatch.setenv("BILI_SESSDATA", "dispatched-token")
+        job_dir = _make_job_dir(tmp_path)   # 无 .credentials.json → 只能来自 env
         step = _make_step(job_dir, tmp_path, source="bilibili")
         with patch.object(step, "run_subprocess") as run, \
              patch.object(step, "_rename_downloaded_video"), \
@@ -460,9 +429,7 @@ class TestDownloadBilibili:
              patch.object(step, "_verify_download"):
             step._download_bilibili("https://www.bilibili.com/video/BV1xx411c7mD")
             cmd = run.call_args[0][0]
-            assert "-c" in cmd
-            assert cmd[cmd.index("-c") + 1] == "cookieval123"   # 传的是值
-            assert str(cookie) not in cmd                       # 绝不是文件路径
+            assert cmd[cmd.index("-c") + 1] == "dispatched-token"
 
     def test_yutto_fails_falls_back_to_ytdlp(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DATA_DIR", str(tmp_path / "nope"))

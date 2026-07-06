@@ -4,7 +4,7 @@
 source_id 可以是频道页 URL(/@handle、/channel/UC...、/c/...)、youtu.be/频道主页,
 也可以是裸 handle(@xxx)或裸频道 id(UC...);统一规整为频道 /videos 标签 URL 后枚举。
 
-下载链路已支持 youtube(yt-dlp + /data/cookies/youtube.txt,见 steps/common/step_01_download.py),
+下载链路已支持 youtube(yt-dlp,cookies 经中心分发注入,见 steps/common/step_01_download.py),
 故每个视频 item 的 url 走标准 watch 链接即可,content_type 固定 video。
 
 去重在 sync_collection 层按 ingested_item_ids 做,本适配器只枚举全集、不自去重。
@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 from pathlib import Path
 
@@ -146,19 +145,34 @@ async def enumerate_youtube_channel(
         "--ignore-errors",   # 个别条目失败不中断整页枚举
         "--no-warnings",
     ]
-    # 上传的 YouTube cookies(/data/cookies/youtube.txt,Netscape 格式)用于枚举私有/会员/
-    # 年龄限制内容;与下载链路一致(steps/common/step_01_download.py),缺失则匿名枚举。
-    cookies = Path(os.environ.get("DATA_DIR", "/data")) / "cookies" / "youtube.txt"
-    if cookies.exists():
-        args += ["--cookies", str(cookies)]
-    args += [
-        "--",                # 分隔:挡以 "-" 开头的 source_id 被当作 yt-dlp 选项注入
-        channel_url,
-    ]
-    # 经模块属性调用 _run_yt_dlp,使测试的 monkeypatch.setattr(...) 生效。
-    import shared.subscriptions.youtube as _self
+    # YouTube cookies(上传入库 credentials 表,Netscape 文本)用于枚举私有/会员/年龄限制
+    # 内容;缺失则匿名枚举。枚举跑在 api 进程(有 db 句柄),经 ctx.db 直读;
+    # yt-dlp --cookies 只认文件:写临时文件传入,用毕即删。
+    import tempfile
+    cookies_text = ""
+    if ctx.db is not None:
+        cookies_text = (await asyncio.to_thread(
+            ctx.db.get_credential, "youtube_cookies") or "").strip()
+    cookies_file: str | None = None
+    try:
+        if cookies_text:
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=".txt", delete=False, encoding="utf-8"
+            ) as f:
+                f.write(cookies_text + "\n")
+                cookies_file = f.name
+            args += ["--cookies", cookies_file]
+        args += [
+            "--",                # 分隔:挡以 "-" 开头的 source_id 被当作 yt-dlp 选项注入
+            channel_url,
+        ]
+        # 经模块属性调用 _run_yt_dlp,使测试的 monkeypatch.setattr(...) 生效。
+        import shared.subscriptions.youtube as _self
 
-    stdout = await asyncio.to_thread(_self._run_yt_dlp, args)
+        stdout = await asyncio.to_thread(_self._run_yt_dlp, args)
+    finally:
+        if cookies_file:
+            Path(cookies_file).unlink(missing_ok=True)
     channel_title, entries = _parse_entries(stdout)
 
     items: list[SourceItem] = []

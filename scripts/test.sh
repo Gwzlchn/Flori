@@ -22,7 +22,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"                       # 让 tests/test_*.py glob 相对 worktree 展开(与容器内 /app/tests 同路径)
 COMPOSE="$REPO/docker-compose.test.yml"
 FE_COMPOSE="$REPO/docker-compose.fe-test.yml"
-WARM="flori-test-warm"
+WARM="${TEST_WARM_NAME:-flori-test-warm}"
 IMAGE="flori-test:latest"
 
 usage() { sed -n '2,20p' "$0" | sed 's/^#\{1,\} \{0,1\}//; s/^#$//'; exit "${1:-0}"; }

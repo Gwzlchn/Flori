@@ -31,8 +31,8 @@ graph TD
 
 主机敏感数据清单：
 - `~/.claude/` — Claude OAuth 凭证
-- `/data/cookies/` — 视频平台 cookies
 - `/data/jobs/` — 视频和笔记
+- SQLite `credentials` 表 — 视频平台 cookies(Fernet 加密,分发镜像在 redis `cred:*`)
 
 ### 中转服务器 — 风险中（被攻破损失低）
 
@@ -128,8 +128,7 @@ Worker 执行前校验 job_id + step + url，不合法直接丢弃。
 | 边缘 Basic Auth 哈希 `FLORI_BASIC_HASH` | 边缘 .env | 边缘 Caddy |
 | 反向 SSH 隧道私钥 | 核心机 `deploy/tunnel/ssh/id_ed25519` | autossh 隧道 |
 | Claude OAuth | 主机 ~/.claude/ | Claude Worker |
-| 平台 cookies | 主机 /data/cookies/ | Download Worker |
-| B站 SESSDATA(扫码登录) | 主机 SQLite app_credentials(Fernet 加密) + job 本机侧载文件 | 同机 Download Worker |
+| 平台 cookies(B站/YouTube) | 主机 SQLite credentials(Fernet 加密)+ redis 分发镜像 cred:* | Download Worker(认领时经 runner API/redis 领取,审计 credential_issued) |
 | FLORI_SECRET_KEY(凭证 at-rest 加密) | 主机 .env（只在宿主，不入库） | API/scheduler 进程 |
 
 **原则**：Claude 凭证和平台 cookies 只在主机，不传到中转/GPU。
@@ -167,8 +166,8 @@ sessdata 触发）：
 - **未设 `FLORI_SECRET_KEY`**：凭证仍以**明文**落库（保持旧行为不阻断），并打印一次性
   告警提示设置该 key。`cryptography` 缺失或 key 非法时同样回退明文，不阻断启动。
 
-**残留 / 待办**：纯 MinIO 直连的多机部署不分发该凭证——此类部署的远端 Download Worker 请改用本机
-`/data/cookies/bilibili.txt`（或仅在单机/网关模式使用扫码登录）。
+**残留 / 待办**:无——凭证经 runner API 中心分发(docs/03 §1.7.1),远端 Download Worker
+零预置,不再依赖本机 cookie 文件。
 
 ## 7. 应急预案
 

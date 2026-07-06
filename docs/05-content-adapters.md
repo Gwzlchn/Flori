@@ -88,13 +88,12 @@ yt-dlp 支持的其他网站，作为兜底。
 
 ## 6. Cookies 管理
 
-```
-/data/cookies/
-├── bilibili.txt      # B站 (本地回退;扫码登录的凭证主存于 DB app_credentials.bili_cookies)
-└── youtube.txt       # YouTube (手动上传)
-```
+凭证单一持久源 = DB `credentials` 表(B站扫码登录写 `bili_cookies` JSON;YouTube 经
+`POST /api/auth/youtube/cookies` 上传写 `youtube_cookies` Netscape 文本),写入时镜像
+redis `cred:{key}`,worker 认领下载步时经 transport 领取(契约见 docs/03 §1.7.1)。
+cookie 文件共享目录已废除:新增 worker 零预置,凭证过期只需在中心刷新一次。
 
-状态由 `GET /api/auth/cookies/status` 实时返回（按 cookie 文件是否存在判定，无独立状态文件）：
+状态由 `GET /api/auth/status` 实时返回(按 DB 凭证有无判定):
 
 ```json
 {
@@ -105,10 +104,10 @@ yt-dlp 支持的其他网站，作为兜底。
 
 ### Cookies 缺失/失效时的降级
 
-下载步缺少有效 B站凭证(DB 凭证与本地 bilibili.txt 回退皆无/失效)时不报错中断，而是降级：
+下载步缺少有效 B站凭证(中心未配置/已失效)时不报错中断，而是降级：
 
 ```
-01_download 执行 → 取不到 SESSDATA（DB 凭证缺失 + 本地 cookie 文件回退也无）
+01_download 执行 → 取不到 SESSDATA（env 未注入 + 无侧载凭证）
   → 记日志 no_bilibili_cookies（warn）
   → 匿名下载：清晰度降到 480P、无字幕（字幕需登录）
 ```

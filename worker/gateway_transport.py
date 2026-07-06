@@ -377,6 +377,24 @@ class GatewayTransport:
             return {}
         return await self._inner.get_job_info(job_id)
 
+    async def get_credential(self, key):
+        # 凭证一律走 gateway(不委派内层):领取集中在服务端,审计事件才有单一记录点。
+        # 401 抛 WorkerAuthRejected(与认领一致,主循环自愈);其余错误降级匿名(None),
+        # 下载凭证缺失不应导致任务失败。
+        try:
+            resp = await self._http.get(
+                f"/api/runner/credentials/{key}", headers=self._auth(),
+            )
+            if resp.status_code == 401:
+                raise WorkerAuthRejected()
+            resp.raise_for_status()
+            return resp.json().get("value")
+        except WorkerAuthRejected:
+            raise
+        except Exception as e:
+            logger.warning("credential_fetch_failed", key=key, error=str(e)[:120])
+            return None
+
     async def close(self):
         if self._client is not None:
             await self._client.aclose()

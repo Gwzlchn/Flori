@@ -12,6 +12,7 @@ import secrets
 import time
 from datetime import datetime, timezone
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
@@ -42,6 +43,8 @@ from api.schemas import (
 
 # 注册接口自带门禁(registration token),心跳/下线走 per-worker token,故不挂全局 verify_token。
 router = APIRouter(prefix="/api/runner", tags=["runner"])
+
+logger = structlog.get_logger(component="runner")
 
 # 长轮询:服务端持有窗口须小于 worker httpx 读超时(35s),空轮询间隔避免空转打爆 Redis。
 _CLAIM_WINDOW_SEC = 25.0
@@ -211,14 +214,15 @@ async def offline(
 
 
 async def _enrich_claim(redis: RedisClient, claim: dict) -> dict:
-    """把 pipeline/domain/style_tags 塞进 claim,让 gateway worker 无需回读 redis;
-    style_tags 解析 json-or-list,失败兜空。"""
+    """把 pipeline/domain/style_tags/source 塞进 claim,让 gateway worker 无需回读 redis;
+    style_tags 解析 json-or-list,失败兜空。source 供下载步凭证按需领取。"""
     job_id = claim["job_id"]
     pipeline = await redis.get_job_pipeline(job_id)
     job_info = await redis.get_job_info(job_id)
     domain = job_info.get("domain", "general")
     style_tags = runner_ops.parse_style_tags(job_info.get("style_tags", "[]"))
-    return {**claim, "pipeline": pipeline, "domain": domain, "style_tags": style_tags}
+    return {**claim, "pipeline": pipeline, "domain": domain,
+            "style_tags": style_tags, "source": job_info.get("source", "")}
 
 
 def _clamp_pool_limits(
@@ -363,6 +367,29 @@ async def step_alive(
     validate_path_segment(step, "step")
     await redis.set_step_progress_at(job_id, step)
     return {"ok": True}
+
+
+@router.get("/credentials/{key}")
+async def get_dispatch_credential(
+    key: str,
+    worker_id: str = Depends(verify_worker_token),
+    redis: RedisClient = Depends(get_redis),
+    db: Database = Depends(get_db),
+):
+    """下载凭证领取(docs/03 §1.7.1):白名单 key,redis 镜像 miss 落 DB 解析并回灌。
+    value=null 表示中心未配置该凭证(worker 匿名降级,不视为错误)。
+    每次领取记审计事件 credential_issued(谁/哪个凭证/有无值)——文件共享时代无此审计。"""
+    from shared.credentials import DISPATCH_KEYS, resolve_from_db
+
+    if key not in DISPATCH_KEYS:
+        raise HTTPException(404, f"unknown credential key: {key}")
+    value = await redis.get_dispatch_credential(key)
+    if value is None:
+        value = await asyncio.to_thread(resolve_from_db, db, key)
+        if value:
+            await redis.set_dispatch_credential(key, value)
+    logger.info("credential_issued", worker_id=worker_id, key=key, present=bool(value))
+    return {"key": key, "value": value}
 
 
 @router.post("/usage")

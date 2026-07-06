@@ -260,12 +260,12 @@ docker run -d --restart unless-stopped \
 
 **凭证一律走 env**（管理页「接入新 Worker」会按类型自动生成命令)：
 - `ai`：`-e ANTHROPIC_API_KEY=<KEY>`（及 `DEEPSEEK_API_KEY` 等)。
-- `io`(下载)：B站 `-e BILI_SESSDATA=<SESSDATA>`；YouTube 受限视频再挂只读 cookie 文件
-  `-v /宿主/youtube.txt:/data/cookies/youtube.txt:ro`(公开视频匿名即可)。
+- `io`(下载)：**零凭证预置**——B站/YouTube cookies 由中心在认领下载步时经 runner API
+  下发(docs/03 §1.7.1),在管理页扫码/上传一次即全部 worker 生效。
 - `gpu`(whisper)：`--gpus all`，并需带 `[gpu]` extra 的镜像(`FROM …/flori:latest` + `RUN pip install ".[gpu]"`)；
   可选模型 warm 缓存(免每次重下)`-v whisper-cache:/cache -e MODEL_CACHE_DIR=/cache`。
 
-一条命令接入，纯出站 HTTPS；删除 worker 即吊销其 token。除 GPU 模型缓存(可选)与 YouTube cookie
+一条命令接入，纯出站 HTTPS；删除 worker 即吊销其 token。除 GPU 模型缓存(可选)外,worker 本地无任何状态。
 (可选只读文件)外，worker 不需任何持久化卷。
 
 > 旧的「中转 Redis(TLS)+MinIO」直连模型见上方 compose，已被网关模型取代，仅在需要 worker 直连内部组件时保留。

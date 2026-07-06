@@ -417,6 +417,35 @@ class Worker:
             for pool, cfg in self.config.pools.get("pools", {}).items()
         }
 
+    async def _download_credentials_env(self, step: str, source: str) -> dict:
+        """下载步的中心分发凭证 → 子进程 env(docs/03 §1.7.1)。仅 01_download 领取;
+        按 source 只取所需(减少审计噪声),source 未知则两种都试。领取失败/未配置
+        一律降级匿名(空 dict/缺项),绝不因凭证问题挂掉下载任务。"""
+        if step != "01_download":
+            return {}
+        wanted: list[tuple[str, str]] = []
+        if source.startswith("bili"):
+            wanted = [("bili_sessdata", "BILI_SESSDATA")]
+        elif source in ("youtube", "yt"):
+            wanted = [("youtube_cookies", "FLORI_YT_COOKIES")]
+        elif source in ("arxiv", "pdf", "http_article", "upload", "local"):
+            return {}   # 非平台下载,无需凭证
+        else:
+            wanted = [("bili_sessdata", "BILI_SESSDATA"),
+                      ("youtube_cookies", "FLORI_YT_COOKIES")]
+        env: dict = {}
+        for key, env_name in wanted:
+            try:
+                value = await self.transport.get_credential(key)
+            except Exception as e:
+                # 含 WorkerAuthRejected:凭证失败只降级匿名,不挂任务;token 真失效由
+                # 下一次认领请求的 401 触发主循环自愈,无需在任务路径重复处理。
+                logger.warning("credential_env_skipped", key=key, error=str(e)[:120])
+                continue
+            if value:
+                env[env_name] = value
+        return env
+
     # 任务执行
 
     async def execute(self, claim: dict) -> None:
@@ -436,16 +465,18 @@ class Worker:
         try:
             work_dir = await self.storage.pull(job_id, step)
 
-            # pipeline/domain/style_tags:gateway 模式服务端已塞进 claim,直连模式在此回读。
+            # pipeline/domain/style_tags/source:gateway 模式服务端已塞进 claim,直连模式在此回读。
             # 读失败会被本 try 接住转 report_failed,不冲垮主循环。
             pipeline = claim.get("pipeline") or await self.transport.get_job_pipeline(job_id)
             if "domain" in claim:
                 domain = claim["domain"]
                 style_tags = claim.get("style_tags") or []
+                source = claim.get("source", "")
             else:
                 job_info = await self.transport.get_job_info(job_id)
                 domain = job_info.get("domain", "general")
                 style_tags = parse_style_tags(job_info.get("style_tags", "[]"))
+                source = job_info.get("source", "")
             if not isinstance(style_tags, list):
                 style_tags = []
 
@@ -482,6 +513,7 @@ class Worker:
                 step_cfg=step_cfg, module=module, image=image,
                 timeout_sec=effective_timeout,
                 pool=pool, use_gpu=use_gpu,
+                extra_env=await self._download_credentials_env(step, source),
             )
 
             async def on_progress(event: str, payload: dict) -> None:

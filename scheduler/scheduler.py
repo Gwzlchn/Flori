@@ -117,6 +117,12 @@ class Scheduler:
         logger.info("scheduler_start")
         self._started_at_iso = datetime.now(timezone.utc).isoformat()
         await self._publish_resource_limits()
+        # 下载凭证镜像重灌:redis 卷重建/清库后 cred:* 丢,DB 是持久源(docs/03 §1.7.1)。
+        try:
+            from shared.credentials import mirror_all_from_db
+            await mirror_all_from_db(self.redis, self.db)
+        except Exception:
+            logger.warning("credential_mirror_failed")
         await self._recover()
         self._pubsub_task = asyncio.create_task(self._event_loop())
         self._periodic_task = asyncio.create_task(self._periodic_loop())

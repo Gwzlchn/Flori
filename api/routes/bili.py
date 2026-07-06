@@ -10,8 +10,9 @@ import json
 from fastapi import APIRouter, Depends, HTTPException
 
 from shared.db import Database
+from shared.redis_client import RedisClient
 
-from api.deps import get_db, verify_token
+from api.deps import get_db, get_redis, verify_token
 
 router = APIRouter(prefix="/api/bili", tags=["bili"], dependencies=[Depends(verify_token)])
 
@@ -104,7 +105,11 @@ async def login_start():
 
 
 @router.get("/login/poll")
-async def login_poll(qrcode_key: str, db: Database = Depends(get_db)):
+async def login_poll(
+    qrcode_key: str,
+    db: Database = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+):
     """轮询扫码态;confirmed 时从 Set-Cookie 取 SESSDATA/bili_jct/DedeUserID 入库。"""
     import httpx
 
@@ -140,9 +145,11 @@ async def login_poll(qrcode_key: str, db: Database = Depends(get_db)):
         "buvid3": buvid3,
         "uname": uname,
     }
-    await asyncio.to_thread(
-        db.set_credential, _CRED_KEY, json.dumps(creds, ensure_ascii=False)
-    )
+    raw = json.dumps(creds, ensure_ascii=False)
+    await asyncio.to_thread(db.set_credential, _CRED_KEY, raw)
+    # 同步分发镜像:worker 下个下载任务即用新 SESSDATA,无需逐机刷文件。
+    from shared.credentials import mirror_credential
+    await mirror_credential(redis, _CRED_KEY, raw)
     return {"state": "confirmed", "logged_in": True, "uname": uname}
 
 
@@ -156,7 +163,12 @@ async def status(db: Database = Depends(get_db)):
 
 
 @router.post("/logout")
-async def logout(db: Database = Depends(get_db)):
-    """清除已入库的 B站 cookie。"""
+async def logout(
+    db: Database = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+):
+    """清除已入库的 B站 cookie(连同分发镜像,worker 即刻回到匿名)。"""
     await asyncio.to_thread(db.delete_credential, _CRED_KEY)
+    from shared.credentials import mirror_credential
+    await mirror_credential(redis, _CRED_KEY, None)
     return {"ok": True}

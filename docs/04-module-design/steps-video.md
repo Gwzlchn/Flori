@@ -48,7 +48,7 @@ graph LR
 
 ### Cookies
 
-B站 1080P 需要登录 cookies（`/data/cookies/bilibili.txt`）。无 cookies 降级 480P。
+B站 1080P 需要登录态(SESSDATA 由中心分发,worker 认领时注入 env,docs/03 §1.7.1)。无凭证降级 480P。
 
 ### 验证
 

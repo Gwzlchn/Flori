@@ -1081,3 +1081,61 @@ class TestCreateTransport:
         assert isinstance(t, GatewayTransport)
         assert t._inner is None
         assert t._registration_token == ""
+
+
+# get_credential(下载凭证中心分发,docs/03 §1.7.1)
+
+
+class TestRedisTransportGetCredential:
+    @pytest.mark.asyncio
+    async def test_reads_redis_mirror(self, redis, db):
+        t = RedisTransport(redis, db)
+        await redis.set_dispatch_credential("bili_sessdata", "mirrored-token")
+        assert await t.get_credential("bili_sessdata") == "mirrored-token"
+
+    @pytest.mark.asyncio
+    async def test_miss_falls_back_to_db_and_remirrors(self, redis, db):
+        import json as _json
+        db.set_credential("bili_cookies", _json.dumps({"sessdata": "from-db"}))
+        t = RedisTransport(redis, db)
+        assert await t.get_credential("bili_sessdata") == "from-db"
+        # DB 兜底后回灌镜像,下次直接命中 redis
+        assert await redis.get_dispatch_credential("bili_sessdata") == "from-db"
+
+    @pytest.mark.asyncio
+    async def test_unconfigured_returns_none(self, redis, db):
+        t = RedisTransport(redis, db)
+        assert await t.get_credential("youtube_cookies") is None
+
+
+class TestGatewayTransportGetCredential:
+    def _gw(self):
+        return GatewayTransport(
+            "https://gw", registration_token="reg", id_file="/tmp/nonexistent-id",
+        )
+
+    @pytest.mark.asyncio
+    async def test_fetches_from_gateway(self):
+        gw = self._gw()
+        gw._client = AsyncMock()
+        gw._client.get.return_value = make_response(
+            200, {"key": "bili_sessdata", "value": "gw-token"})
+        assert await gw.get_credential("bili_sessdata") == "gw-token"
+        gw._client.get.assert_awaited_once()
+        assert gw._client.get.call_args[0][0] == "/api/runner/credentials/bili_sessdata"
+
+    @pytest.mark.asyncio
+    async def test_401_raises_auth_rejected(self):
+        from worker.transport import WorkerAuthRejected
+        gw = self._gw()
+        gw._client = AsyncMock()
+        gw._client.get.return_value = make_response(401)
+        with pytest.raises(WorkerAuthRejected):
+            await gw.get_credential("bili_sessdata")
+
+    @pytest.mark.asyncio
+    async def test_network_error_degrades_to_none(self):
+        gw = self._gw()
+        gw._client = AsyncMock()
+        gw._client.get.side_effect = RuntimeError("conn reset")
+        assert await gw.get_credential("youtube_cookies") is None

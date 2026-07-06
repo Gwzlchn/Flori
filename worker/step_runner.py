@@ -11,7 +11,7 @@ import asyncio
 import json
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol
 
@@ -47,6 +47,9 @@ class StepContext:
     timeout_sec: int = 600
     pool: str = ""
     use_gpu: bool = False
+    # 步骤专属注入 env(如下载步的中心分发凭证):只进子进程环境,随进程结束消亡,
+    # 不碰 os.environ(worker 并发跑多任务,进程级 env 互斥会串台)。
+    extra_env: dict = field(default_factory=dict)
 
 
 class StepRunner(Protocol):
@@ -196,7 +199,7 @@ class DockerStepRunner:
         仅 ai 池补 env 里实际存在的 AI 密钥。非 ai 池绝不见 AI key,杜绝全量透传。
         PYTHONPATH=/app:步骤镜像代码在 /app,而容器 working_dir=/job,缺它则
         python3 -m steps.* 找不到模块(子进程模式靠 cwd=/app,docker 模式必须显式给)。"""
-        env = {"STEP_EXEC_ID": ctx.exec_id, "PYTHONPATH": "/app"}
+        env = {"STEP_EXEC_ID": ctx.exec_id, "PYTHONPATH": "/app", **ctx.extra_env}
         proxy = os.environ.get("HTTPS_PROXY")
         if proxy:
             env["HTTPS_PROXY"] = proxy
@@ -391,7 +394,7 @@ async def _run_progress_monitor(
 def _build_subprocess_env(ctx: StepContext) -> dict:
     """DENYLIST 构造子进程 env:继承全量系统 env,剥离控制面密钥;
     非 ai 池再剥离 AI 密钥;始终补 STEP_EXEC_ID。HTTPS_PROXY 等系统变量自然保留。"""
-    env = {**os.environ, "STEP_EXEC_ID": ctx.exec_id}
+    env = {**os.environ, "STEP_EXEC_ID": ctx.exec_id, **ctx.extra_env}
     for key in _CONTROL_PLANE_SECRETS:
         env.pop(key, None)
     if ctx.pool != "ai":

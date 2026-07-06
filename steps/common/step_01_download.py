@@ -135,9 +135,8 @@ class DownloadStep(StepBase):
             "-q", "80",   # 1080P 上限:平衡主视觉清晰度与 NAS 到 ECS 的隧道/MinIO 带宽
         ]
 
-        # SESSDATA 取值优先级见 _resolve_sessdata。侧载凭证由扫码登录入库,只存在于同机
-        # LocalStorage,绝不下发远端 worker,见 shared/storage.is_credential_file。
-        # 皆取不到则匿名下载,降级 480P。
+        # SESSDATA 取值优先级见 _resolve_sessdata(worker 认领时中心分发注入 env,
+        # docs/03 §1.7.1)。皆取不到则匿名下载,降级 480P。
         # yutto 的 -c 要的是 SESSDATA 值,不是文件路径;传路径会静默失去登录态:
         # 匿名下载、无字幕(字幕需登录)、清晰度降 480P。
         sessdata = self._resolve_sessdata()
@@ -157,18 +156,17 @@ class DownloadStep(StepBase):
         self._verify_download(input_dir / "source.mp4")
 
     def _resolve_sessdata(self) -> str | None:
-        """B站 SESSDATA 取值优先级:env BILI_SESSDATA、本机侧载 input/.credentials.json、
-        本地 cookie 文件 /data/cookies/bilibili.txt。env 方式适合无状态 worker:
-        凭证随 env 注入,不落本地文件。"""
+        """B站 SESSDATA 取值优先级:env BILI_SESSDATA(worker 认领时中心分发注入,
+        随子进程消亡)、本机侧载 input/.credentials.json(job 自带凭证,不上 MinIO)。
+        cookie 文件共享已废除(中心分发),worker 零预置。"""
         return (
             os.environ.get("BILI_SESSDATA", "").strip()
             or self._read_sessdata()
-            or self._read_cookie_file_sessdata()
         )
 
     def _read_sessdata(self) -> str | None:
-        """从本机侧载凭证文件读 SESSDATA(只在同机 LocalStorage 存在;远端 worker 取不到)。
-        文件缺失/损坏/无字段均返回 None,由调用方回退本地 cookie 文件。"""
+        """从本机侧载凭证文件读 SESSDATA(job 自带凭证,只在同机 LocalStorage 存在)。
+        文件缺失/损坏/无字段均返回 None(回到匿名下载)。"""
         import json as _json
         cred = self.job_dir / "input" / ".credentials.json"
         if not cred.is_file():
@@ -177,22 +175,6 @@ class DownloadStep(StepBase):
             return _json.loads(cred.read_text(encoding="utf-8")).get("sessdata") or None
         except (OSError, ValueError):
             return None
-
-    def _read_cookie_file_sessdata(self) -> str | None:
-        """从 /data/cookies/bilibili.txt 取 SESSDATA 值(Netscape cookie 文件或裸值均可)。
-        MinIO 部署下侧载凭证不下发远端 worker,此文件是登录态来源(无则匿名、无字幕)。"""
-        p = Path(os.environ.get("DATA_DIR", "/data")) / "cookies" / "bilibili.txt"
-        if not p.is_file():
-            return None
-        try:
-            txt = p.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            return None
-        m = re.search(r"SESSDATA[\s=]+([^\s;]+)", txt)  # Netscape 行 或 cookie 串
-        if m:
-            return m.group(1)
-        s = txt.strip()
-        return s or None
 
     def _download_bili_ytdlp(self, url: str, input_dir: Path, sessdata: str | None) -> None:
         """yutto 失败时的兜底引擎。"""
@@ -235,13 +217,25 @@ class DownloadStep(StepBase):
             "-S", "vcodec:h264",
             "--merge-output-format", "mp4",
         ]
-        # 上传的 YouTube cookies(/data/cookies/youtube.txt,Netscape 格式)用于受限/年龄限制
-        # 视频;缺失则匿名下载。写入方见 api/routes/auth.py:/youtube/cookies。
-        cookies = Path(os.environ.get("DATA_DIR", "/data")) / "cookies" / "youtube.txt"
-        if cookies.exists():
-            cmd += ["--cookies", str(cookies)]
-        cmd += ["--", url]  # -- 分隔:挡以 "-" 开头的 url 被当作 yt-dlp 选项注入
-        self.run_subprocess(cmd, timeout=self.config["step"]["timeout_sec"])
+        # YouTube cookies(Netscape 文本)经中心分发注入 env FLORI_YT_COOKIES(上传入库见
+        # api/routes/auth.py,分发见 docs/03 §1.7.1),用于受限/年龄限制视频;缺失则匿名下载。
+        # yt-dlp --cookies 只认文件:写临时文件传入,用毕即删,凭证不留盘。
+        import tempfile
+        cookies_text = os.environ.get("FLORI_YT_COOKIES", "").strip()
+        cookies_file: str | None = None
+        try:
+            if cookies_text:
+                with tempfile.NamedTemporaryFile(
+                    "w", suffix=".txt", delete=False, encoding="utf-8"
+                ) as f:
+                    f.write(cookies_text + "\n")
+                    cookies_file = f.name
+                cmd += ["--cookies", cookies_file]
+            cmd += ["--", url]  # -- 分隔:挡以 "-" 开头的 url 被当作 yt-dlp 选项注入
+            self.run_subprocess(cmd, timeout=self.config["step"]["timeout_sec"])
+        finally:
+            if cookies_file:
+                Path(cookies_file).unlink(missing_ok=True)
         self._rename_to_source_mp4(input_dir)
 
     def _download_arxiv(self, url: str) -> None:

@@ -779,3 +779,61 @@ class TestRunnerPollAccessFilter:
         assert f.filter(rec("/api/runner/heartbeat")) is False
         assert f.filter(rec("/api/status")) is True
         assert f.filter(rec("/api/runner/register")) is True
+
+
+class TestDispatchCredentials:
+    """GET /api/runner/credentials/{key}(docs/03 §1.7.1):白名单 + 鉴权 + redis/DB 兜底。"""
+
+    async def _register_worker(self, client):
+        resp = await _register(client)
+        body = resp.json()
+        return body["worker_id"], body["worker_token"]
+
+    @pytest.mark.asyncio
+    async def test_requires_worker_token(self, client):
+        resp = await client.get("/api/runner/credentials/bili_sessdata")
+        assert resp.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_unknown_key_404(self, client):
+        _, token = await self._register_worker(client)
+        resp = await client.get(
+            "/api/runner/credentials/aws_root_key",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_serves_redis_mirror(self, client, redis_mock):
+        _, token = await self._register_worker(client)
+        redis_mock.get_dispatch_credential.return_value = "mirrored-sess"
+        resp = await client.get(
+            "/api/runner/credentials/bili_sessdata",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"key": "bili_sessdata", "value": "mirrored-sess"}
+
+    @pytest.mark.asyncio
+    async def test_miss_falls_back_to_db_and_remirrors(self, client, redis_mock, db):
+        import json as _json
+        _, token = await self._register_worker(client)
+        redis_mock.get_dispatch_credential.return_value = None
+        db.set_credential("bili_cookies", _json.dumps({"sessdata": "db-sess"}))
+        resp = await client.get(
+            "/api/runner/credentials/bili_sessdata",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.json()["value"] == "db-sess"
+        redis_mock.set_dispatch_credential.assert_awaited_with("bili_sessdata", "db-sess")
+
+    @pytest.mark.asyncio
+    async def test_unconfigured_returns_null_value(self, client, redis_mock):
+        _, token = await self._register_worker(client)
+        redis_mock.get_dispatch_credential.return_value = None
+        resp = await client.get(
+            "/api/runner/credentials/youtube_cookies",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["value"] is None

@@ -693,6 +693,18 @@ class RedisClient:
         """接入 token 剩余有效秒:>0=剩余秒数,-1=永不过期,-2=不存在。"""
         return await self.r.ttl(self._REGISTRATION_TOKEN_KEY)
 
+    # 下载凭证镜像(cred:{dispatch_key}):DB 是持久源,此处只是分发缓存,无 TTL
+    # (更新/清除由中心写入驱动,见 shared/credentials.mirror_credential)。
+
+    async def set_dispatch_credential(self, key: str, value: str | None) -> None:
+        if value:
+            await self.r.set(f"cred:{key}", value)
+        else:
+            await self.r.delete(f"cred:{key}")
+
+    async def get_dispatch_credential(self, key: str) -> str | None:
+        return await self.r.get(f"cred:{key}")
+
     async def push_event(self, kind: str, **fields) -> None:
         """系统事件环形列表(events:system,LPUSH+LTRIM 保留最近 200,最近在上);供 /api/events 透出。
         None 字段剔除。best-effort:事件透出失败绝不影响调度主流程。"""

@@ -24,8 +24,8 @@ SourceItem 字段:
 SourceContext(ctx)给适配器提供:
   - ctx.bili_cookies: B站 cookie JSON 串(由 sync_collection 从 db.get_credential('bili_cookies') 取),
                       未登录为 None。
-  - ctx.db:           可选的 Database 句柄(目前内置适配器均未使用;保留给将来需直接查库的适配器)。
-                      注:YouTube cookies 由 youtube 适配器自行从 /data/cookies/youtube.txt 读,不走 ctx。
+  - ctx.db:           可选的 Database 句柄(youtube 适配器经它读 credentials 表的
+                      youtube_cookies 做登录态枚举;其余内置适配器未使用)。
 ctx 由 sync_collection 构造并传入,适配器不要自己去 import db / 读环境。
 """
 
