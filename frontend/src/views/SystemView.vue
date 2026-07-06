@@ -368,11 +368,13 @@ const credLines = computed(() => {
     else if (aiCredMethod.value === 'deepseek') s += '  -e DEEPSEEK_API_KEY=<KEY> \\\n'
     else s += '  -e ANTHROPIC_API_KEY=<KEY> \\\n'
   }
-  if (selectedPools.value.includes('io')) s += '  -e BILI_SESSDATA=<B站SESSDATA,留空=匿名480P> \\\n'
+  // io 无需任何凭证 env:B站/YouTube cookie 由中心在任务认领时自动下发(1.1.85 凭证分发)。
   return s
 })
-const cacheLine = computed(() => (selectedPools.value.includes('gpu')
-  ? '  -v whisper-cache:/cache -e MODEL_CACHE_DIR=/cache \\\n' : ''))
+// whisper 在 cpu 池执行(GPU 机自动加速),cpu/gpu 都需要模型缓存;HF 两 env 是国内网络
+// 实测坑(代理剥元数据头 + Xet CAS 401),海外机器带着也无害。
+const cacheLine = computed(() => (selectedPools.value.some((t) => t === 'gpu' || t === 'cpu')
+  ? '  -v whisper-cache:/cache -e MODEL_CACHE_DIR=/cache \\\n  -e HF_ENDPOINT=https://hf-mirror.com -e HF_HUB_DISABLE_XET=1 \\\n' : ''))
 const tagsArg = computed(() => {
   const t = newTags.value.split(/[\s,]+/).filter(Boolean)
   return t.length ? ` --tags ${t.join(' ')}` : ''
@@ -386,7 +388,6 @@ const command = computed(() => {
   if (activeTab.value === 'gateway') {
     return `docker run -d --restart unless-stopped${gpuFlag.value} \\
   -e GATEWAY_URL=${gatewayUrl.value} \\
-  -e GATEWAY_TLS_INSECURE=1 \\
   -e WORKER_REGISTRATION_TOKEN=${tokenLine.value} \\
   -e WORKER_NAME=${nameBase.value}-1 \\
   -e WORKER_CONCURRENCY=${newConcurrency.value} \\
@@ -396,7 +397,6 @@ ${credLines.value}${cacheLine.value}  ${IMAGE} \\
   if (activeTab.value === 'compose') {
     let credCompose = ''
     if (selectedPools.value.includes('ai')) credCompose += '      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}\n'
-    if (selectedPools.value.includes('io')) credCompose += '      - BILI_SESSDATA=${BILI_SESSDATA:-}\n'
     return `# 追加到 docker-compose.yml services:
   worker-${nameBase.value}-extra:
     image: ${IMAGE}
@@ -724,6 +724,10 @@ const usageByProvider = computed(() => {
           真零隧道：只需出站 HTTPS 到网关（{{ gatewayUrl }}），不连 redis/minio。
         </p>
         <pre style="background:var(--ink-900);color:#cbd5e1;font-family:var(--mono);font-size:12px;padding:12px;border-radius:var(--r-sm);overflow:auto;line-height:1.7;margin:0;white-space:pre-wrap;word-break:break-all">{{ command }}</pre>
+        <p class="muted" style="font-size:12px;margin:8px 0 0;line-height:1.7">
+          B站 / YouTube 凭证无需配置——中心在任务认领时自动下发(在系统设置扫码 / 上传一次即全网 worker 生效)。
+          自签证书部署时另加 <code>-e GATEWAY_TLS_INSECURE=1</code>(或 <code>GATEWAY_CA_BUNDLE=&lt;CA路径&gt;</code>)。
+        </p>
         <button class="btn sm" style="margin-top:10px" @click="copy(command, 'cmd')">
           <component :is="copiedCmd ? Check : Copy" :size="13" />{{ copiedCmd ? '已复制' : '复制命令' }}
         </button>

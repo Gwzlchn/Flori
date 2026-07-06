@@ -264,7 +264,9 @@ describe('SystemView', () => {
     expect(t).toContain('--pools ai cpu gpu io')   // 排序 join,不随勾选顺序抖
     expect(t).toContain('--gpus all')               // gpu → GPU 直通
     expect(t).toContain('MODEL_CACHE_DIR')          // gpu → whisper 缓存卷
-    expect(t).toContain('BILI_SESSDATA')            // io → B站 cookie
+    expect(t).not.toContain('BILI_SESSDATA')        // io 凭证走中心分发,不进 worker env(1.1.85)
+    expect(t).toContain('HF_ENDPOINT')              // cpu/gpu → whisper HF 国内镜像
+    expect(w.find('pre').text()).not.toContain('GATEWAY_TLS_INSECURE') // 命令默认严格校验(页面提示文案除外)
     expect(t).toContain('/root/.claude')            // ai(默认 claude-sub)→ 挂宿主 ~/.claude
   })
 })
