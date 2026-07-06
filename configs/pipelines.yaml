@@ -36,6 +36,10 @@ default:
 
 video:
   variables:
+    AI_CONCEPTS_PRIMARY_PROVIDER: claude-cli
+    AI_CONCEPTS_PRIMARY_MODEL: subscription
+    AI_CONCEPTS_FALLBACK_PROVIDER: claude-cli
+    AI_CONCEPTS_FALLBACK_MODEL: subscription
     OCR_TIMEOUT: 1800
     OCR_RETRIES: 1
     AI_SMART_PRIMARY_PROVIDER: claude-cli
@@ -196,6 +200,10 @@ video:
       needs: ["11_smart"]
       timeout: 120
       tags: []
+      ai:
+        primary: {provider: $AI_CONCEPTS_PRIMARY_PROVIDER, model: $AI_CONCEPTS_PRIMARY_MODEL}
+        fallback: {provider: $AI_CONCEPTS_FALLBACK_PROVIDER, model: $AI_CONCEPTS_FALLBACK_MODEL}
+      outputs: ["output/concepts.json"]
 
     "12_review":
       label: "评审"
@@ -213,6 +221,10 @@ video:
 paper:
   # provider 统一 claude-cli/subscription:订阅 worker 可跑,避开无 key 的 anthropic/deepseek 全挂(与 article/video 对齐)。
   variables:
+    AI_CONCEPTS_PRIMARY_PROVIDER: claude-cli
+    AI_CONCEPTS_PRIMARY_MODEL: subscription
+    AI_CONCEPTS_FALLBACK_PROVIDER: claude-cli
+    AI_CONCEPTS_FALLBACK_MODEL: subscription
     AI_SMART_PRIMARY_PROVIDER: claude-cli
     AI_SMART_PRIMARY_MODEL: subscription
     AI_SMART_FALLBACK_PROVIDER: claude-cli
@@ -295,6 +307,10 @@ paper:
       needs: ["05_smart_paper"]
       timeout: 120
       tags: []
+      ai:
+        primary: {provider: $AI_CONCEPTS_PRIMARY_PROVIDER, model: $AI_CONCEPTS_PRIMARY_MODEL}
+        fallback: {provider: $AI_CONCEPTS_FALLBACK_PROVIDER, model: $AI_CONCEPTS_FALLBACK_MODEL}
+      outputs: ["output/concepts.json"]
 
     "06_review":
       label: "评审"
@@ -427,6 +443,10 @@ article:
 audio:
   # provider 统一 claude-cli/subscription:订阅 worker 可跑,避开无 key 的 anthropic/deepseek 全挂(与 article/video 对齐)。
   variables:
+    AI_CONCEPTS_PRIMARY_PROVIDER: claude-cli
+    AI_CONCEPTS_PRIMARY_MODEL: subscription
+    AI_CONCEPTS_FALLBACK_PROVIDER: claude-cli
+    AI_CONCEPTS_FALLBACK_MODEL: subscription
     AI_SMART_PRIMARY_PROVIDER: claude-cli
     AI_SMART_PRIMARY_MODEL: subscription
     AI_SMART_FALLBACK_PROVIDER: claude-cli
@@ -491,6 +511,10 @@ audio:
       needs: ["04_smart_podcast"]
       timeout: 120
       tags: []
+      ai:
+        primary: {provider: $AI_CONCEPTS_PRIMARY_PROVIDER, model: $AI_CONCEPTS_PRIMARY_MODEL}
+        fallback: {provider: $AI_CONCEPTS_FALLBACK_PROVIDER, model: $AI_CONCEPTS_FALLBACK_MODEL}
+      outputs: ["output/concepts.json"]
 
     "05_review":
       label: "评审"
