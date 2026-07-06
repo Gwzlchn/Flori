@@ -19,6 +19,15 @@ from shared.storage import StorageBackend
 router = APIRouter(prefix="/api/mcp", tags=["mcp"], dependencies=[Depends(verify_token)])
 
 
+def _mcp_public_port() -> str:
+    """返回同机 MCP 直连 URL 应展示的宿主端口。"""
+    return (
+        os.environ.get("FLORI_MCP_PUBLIC_PORT")
+        or os.environ.get("MCP_PORT")
+        or "8090"
+    ).strip() or "8090"
+
+
 async def _mcp_stats(redis: RedisClient) -> dict:
     """MCP 工具调用计数(best-effort):redis 缺失/异常/形态不符 → 零值,不让 info 端点 5xx。"""
     try:
@@ -48,8 +57,8 @@ async def mcp_info(
     return {
         "enabled": True,
         "http_path": "/mcp",  # 公网端点 = <当前站点 origin> + 此路径(前端据 window.location 拼)
-        # 本地同机直连 mcp-http(streamable-http),与公网统一走 HTTP。port 取 MCP_PORT(默认 8090)。
-        "local_url": f"http://127.0.0.1:{os.environ.get('MCP_PORT', '8090')}/mcp",
+        # 本地同机直连 mcp-http(streamable-http),与公网统一走 HTTP。
+        "local_url": f"http://127.0.0.1:{_mcp_public_port()}/mcp",
         "token_configured": bool(os.environ.get("FLORI_MCP_TOKEN")),
         "tools": [
             {"name": t.name, "description": (t.description or "").strip().splitlines()[0]}

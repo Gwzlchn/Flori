@@ -8,6 +8,9 @@ from api.main import create_app
 from httpx import ASGITransport, AsyncClient
 from tests.conftest import make_fakeredis
 
+_LOCAL_MCP_HOST = "127.0.0.1"
+_PUBLIC_MCP_PORT = "18090"
+
 
 class TestMcpInfo:
     @pytest.mark.asyncio
@@ -23,6 +26,14 @@ class TestMcpInfo:
         assert {"list_knowledge_bases", "search", "get_note"} <= names
         # 描述非空(取 docstring 首行)
         assert all(t["description"] for t in d["tools"])
+
+    @pytest.mark.asyncio
+    async def test_info_local_url_uses_public_mcp_port(self, client, monkeypatch):
+        monkeypatch.setenv("FLORI_MCP_PUBLIC_PORT", _PUBLIC_MCP_PORT)
+        monkeypatch.setenv("MCP_PORT", "8090")
+        r = await client.get("/api/mcp/info")
+        assert r.status_code == 200
+        assert r.json()["local_url"] == f"http://{_LOCAL_MCP_HOST}:{_PUBLIC_MCP_PORT}/mcp"
 
     @pytest.mark.asyncio
     async def test_info_stats_zero_without_redis(self, client):

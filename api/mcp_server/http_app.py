@@ -19,6 +19,7 @@ import hmac
 import os
 import threading
 import time
+from urllib.parse import urlsplit
 
 import structlog
 
@@ -29,6 +30,77 @@ _warned = False
 
 def _truthy(v: str | None) -> bool:
     return (v or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _valid_port(v: str | None) -> str | None:
+    port = (v or "").strip()
+    if not port.isdigit():
+        return None
+    n = int(port)
+    if n < 1 or n > 65535:
+        return None
+    return port
+
+
+def _mcp_host_ports() -> list[str]:
+    """返回 MCP 可能出现在 Host header 中的端口,保序去重。"""
+    ports: list[str] = []
+    for raw in (
+        os.environ.get("FLORI_MCP_PUBLIC_PORT"),
+        os.environ.get("MCP_PORT"),
+        "8090",
+    ):
+        port = _valid_port(raw)
+        if port and port not in ports:
+            ports.append(port)
+    return ports
+
+
+def _normalize_allowed_host(raw: str) -> str:
+    host = raw.strip().rstrip("/")
+    if "://" not in host:
+        return host
+    parsed = urlsplit(host)
+    return parsed.netloc or parsed.path
+
+
+def _host_has_port(host: str) -> bool:
+    if host.endswith(":*"):
+        return True
+    if host.startswith("["):
+        return "]:" in host
+    if host.count(":") > 1:
+        return True
+    base, sep, port = host.rpartition(":")
+    return bool(base and sep and (port.isdigit() or port == "*"))
+
+
+def _append_unique(values: list[str], value: str) -> None:
+    if value and value not in values:
+        values.append(value)
+
+
+def _expand_allowed_hosts(raw_hosts: list[str]) -> list[str]:
+    """允许配置只写 host,启动时补齐真实 Host header 会携带的端口。"""
+    hosts: list[str] = []
+    for raw in raw_hosts:
+        host = _normalize_allowed_host(raw)
+        if not host:
+            continue
+        _append_unique(hosts, host)
+        if _host_has_port(host):
+            continue
+        for port in _mcp_host_ports():
+            _append_unique(hosts, f"{host}:{port}")
+    return hosts
+
+
+def _expand_allowed_origins(hosts: list[str]) -> list[str]:
+    origins: list[str] = []
+    for host in hosts:
+        for scheme in ("http", "https"):
+            _append_unique(origins, f"{scheme}://{host}")
+    return origins
 
 
 class RateLimitASGI:
@@ -221,13 +293,15 @@ def build_http_app():
     mcp = build_default_server(stateless_http=True)
 
     # DNS-rebinding 保护:其威胁模型是浏览器被诱导直连 localhost MCP。本服务总在
-    # 反向代理(Caddy/隧道)+ Bearer token 之后,经代理后 Host=公网域名会被默认保护判为非法 → 421。
-    # 故按部署主机放行:FLORI_MCP_ALLOWED_HOSTS=逗号分隔 → 保护开但允许这些 host;"*"/未设 → 关保护。
+    # 反向代理(Caddy/隧道)+ Bearer token 之后,经代理后 Host=公网域名会被默认保护判为非法。
+    # 故按部署主机放行:FLORI_MCP_ALLOWED_HOSTS=逗号分隔。配置可省略端口,这里按公开端口补齐。
     hosts_env = os.environ.get("FLORI_MCP_ALLOWED_HOSTS", "").strip()
     if hosts_env and hosts_env != "*":
-        hosts = [h.strip() for h in hosts_env.split(",") if h.strip()]
+        hosts = _expand_allowed_hosts([h.strip() for h in hosts_env.split(",") if h.strip()])
         mcp.settings.transport_security = TransportSecuritySettings(
-            enable_dns_rebinding_protection=True, allowed_hosts=hosts, allowed_origins=hosts
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=hosts,
+            allowed_origins=_expand_allowed_origins(hosts),
         )
     else:
         mcp.settings.transport_security = TransportSecuritySettings(

@@ -17,6 +17,7 @@ x-common-env: &common-env
   REDIS_URL: redis://redis:6379/0
   DATA_DIR: /data
   CONFIG_DIR: /app/configs
+  FLORI_MCP_PUBLIC_PORT: ${MCP_PORT:-8090}
   MINIO_URL: ${MINIO_URL:-}
   MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-}
   MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}

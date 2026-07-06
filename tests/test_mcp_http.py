@@ -14,6 +14,9 @@ import pytest
 
 from api.mcp_server.http_app import DomainScopeASGI, RateLimitASGI, TokenAuthASGI
 
+_LOCAL_MCP_HOST = "127.0.0.1"
+_PUBLIC_MCP_PORT = "18090"
+
 
 async def _dummy(scope, receive, send):
     """内层 app:走到这里即鉴权已放行。"""
@@ -260,12 +263,16 @@ class TestScopedEndpointRouteAccepted:
     """端到端:经 build_http_app() 的真实 streamable_http_app,先跑 lifespan 初始化 session
     manager。验作用域路由被接受(非 404),且改写后 bare /mcp 仍可用;深层 MCP 协议见 test_mcp.py。"""
 
-    def _app(self, monkeypatch, tmp_path):
+    def _app(self, monkeypatch, tmp_path, allowed_hosts: str | None = None):
         monkeypatch.setenv("CONFIG_DIR", "/app/configs")
         monkeypatch.setenv("DATA_DIR", str(tmp_path))
         monkeypatch.delenv("MINIO_URL", raising=False)
         monkeypatch.delenv("FLORI_MCP_TOKEN", raising=False)
         monkeypatch.setenv("FLORI_MCP_ALLOW_NO_AUTH", "1")  # 鉴权放行
+        if allowed_hosts is None:
+            monkeypatch.delenv("FLORI_MCP_ALLOWED_HOSTS", raising=False)
+        else:
+            monkeypatch.setenv("FLORI_MCP_ALLOWED_HOSTS", allowed_hosts)
         from api.mcp_server.http_app import build_http_app
 
         return build_http_app()
@@ -299,3 +306,32 @@ class TestScopedEndpointRouteAccepted:
             async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
                 r = await c.post("/mcp", json=self._INIT, headers=self._HEADERS)
         assert r.status_code not in (404, 405), r.text
+
+    @pytest.mark.asyncio
+    async def test_allowed_hosts_accept_local_url_host_with_port(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MCP_PORT", "8090")
+        monkeypatch.setenv("FLORI_MCP_PUBLIC_PORT", _PUBLIC_MCP_PORT)
+        app = self._app(monkeypatch, tmp_path, allowed_hosts="localhost,127.0.0.1")
+        headers = {
+            **self._HEADERS,
+            "Origin": f"http://{_LOCAL_MCP_HOST}:{_PUBLIC_MCP_PORT}",
+        }
+        async with _run_lifespan(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url=f"http://{_LOCAL_MCP_HOST}:{_PUBLIC_MCP_PORT}",
+            ) as c:
+                r = await c.post("/mcp", json=self._INIT, headers=headers)
+        assert r.status_code == 200, r.text
+
+    @pytest.mark.asyncio
+    async def test_allowed_hosts_reject_unknown_host_with_port(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MCP_PORT", "8090")
+        monkeypatch.setenv("FLORI_MCP_PUBLIC_PORT", _PUBLIC_MCP_PORT)
+        app = self._app(monkeypatch, tmp_path, allowed_hosts="localhost,127.0.0.1")
+        async with _run_lifespan(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url=f"http://evil.test:{_PUBLIC_MCP_PORT}") as c:
+                r = await c.post("/mcp", json=self._INIT, headers=self._HEADERS)
+        assert r.status_code == 421
