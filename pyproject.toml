@@ -3,7 +3,7 @@ name = "flori"
 # 版本递增三档:普通改动 patch(第3段)+1;大的重构 minor(中段)+1;架构级大重构 major(首段)+1。
 # 逢10进位(0.8.9→0.9.0,0.9.9→1.0.0)。每提交必 bump,标题带 ;版本。详见 CLAUDE.md §提交规范。
 # 全系统单一版本,所有组件(api/scheduler/worker)统一。运行时 = 此值 + 构建短sha(见 shared/version.py)。
-version = "1.1.73"
+version = "1.1.74"
 description = "AI-assisted personal learning knowledge base"
 requires-python = ">=3.11"
 # 上界封顶:挡住新 major/minor 静默引入(USTC 与官方源解析差异曾坑过 CI);
@@ -43,6 +43,7 @@ api = [
     "qrcode>=7.4,<9",
     "Pillow>=10.0,<13",
     "bilibili-api-python>=16.0,<18",
+    "yt-dlp>=2024.0,<2027.0",   # YouTube 订阅 sync 枚举(shared/subscriptions/youtube.py 子进程调 yt-dlp;下载在 worker)
     "feedparser>=6.0,<7",   # RSS source-adapter(shared/subscriptions/rss.py,后续实现)
 ]
 gpu = [
