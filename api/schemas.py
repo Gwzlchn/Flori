@@ -224,7 +224,9 @@ class GlossaryTermResponse(BaseModel):
     domain: str
     term: str
     definition: str = ""
-    occurrences: list[dict] = Field(default_factory=list)   # [{job_id, content_type, location}]
+    zh_name: str = ""                                        # 标准中文译名(实体双语名)
+    aliases: list[str] = Field(default_factory=list)         # 归并进本实体的变体名
+    occurrences: list[dict] = Field(default_factory=list)   # [{job_id, content_type, location, title?}]
     related: list[str] = Field(default_factory=list)
     status: str = "accepted"
     is_topic: bool = False
@@ -241,6 +243,8 @@ class GlossaryTermResponse(BaseModel):
         return cls(
             domain=row["domain"], term=row["term"],
             definition=row.get("definition") or "",
+            zh_name=row.get("zh_name") or "",
+            aliases=row.get("aliases") or [],
             occurrences=row.get("occurrences") or [],
             related=row.get("related") or [],
             status=row.get("status") or "accepted",

@@ -89,11 +89,12 @@ def list_collections(db: Database, domain: str | None = None) -> list[dict]:
 def get_glossary(
     db: Database, domain: str, status: str | None = None
 ) -> list[dict]:
-    """某库概念/术语表(compact:term/definition/status/is_topic/occurrence_count)。
+    """某库概念/术语表(compact:term/zh_name/definition/status/is_topic/occurrence_count)。
     status 可选(如 accepted/review)。单条详情用 get_term。"""
     return [
         {
             "term": t["term"],
+            "zh_name": t.get("zh_name") or "",
             "definition": t["definition"],
             "status": t["status"],
             "is_topic": t["is_topic"],
@@ -104,7 +105,7 @@ def get_glossary(
 
 
 def get_term(db: Database, domain: str, term: str) -> dict | None:
-    """单条术语/概念详情(定义/出处 occurrences/相关 related/状态)。未命中返回 None。
+    """单条术语/概念详情(定义/译名/别名/出处 occurrences/相关 related/状态)。未命中返回 None。
     去掉 datetime 等非 JSON 友好字段,保 agent 可直接消费。"""
     t = db.get_glossary_term(domain, term)
     if t is None:
@@ -112,6 +113,8 @@ def get_term(db: Database, domain: str, term: str) -> dict | None:
     return {
         "domain": t["domain"],
         "term": t["term"],
+        "zh_name": t.get("zh_name") or "",
+        "aliases": t.get("aliases") or [],
         "definition": t["definition"],
         "status": t["status"],
         "is_topic": t["is_topic"],

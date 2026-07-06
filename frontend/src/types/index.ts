@@ -456,10 +456,12 @@ export interface Collection {
 }
 
 // 术语出现处(类型化):概念出现在哪条内容、什么类型、什么位置。
+// title 仅详情端点 enrich(job 标题,缺则前端回退显示 job_id)。
 export interface TermOccurrence {
   job_id: string
   content_type: string
   location: string | null
+  title?: string | null
 }
 
 // 概念主题:域内被标为主题(is_topic=1)的概念。与后端 GET /api/domains/{domain}/topic-concepts 对齐。
@@ -476,6 +478,8 @@ export interface GlossaryTerm {
   domain: string
   term: string
   definition: string
+  zh_name: string             // 标准中文译名(实体双语名,可为空串)
+  aliases: string[]           // 归并进本实体的变体名
   occurrences: TermOccurrence[]
   related: string[]
   status: string

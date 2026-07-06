@@ -222,12 +222,14 @@ CREATE TABLE IF NOT EXISTS ingested_items (
 );
 
 -- 概念图/知识层:occurrences=[{job_id,content_type,location}] 类型化出现索引;
--- is_topic=粗粒度浏览主题;definition_locked=钉住后不被自动综合覆盖。
+-- is_topic=粗粒度浏览主题;definition_locked=钉住后不被自动综合覆盖;
+-- aliases=归并进本实体的变体名(JSON list,resolve 匹配 + merge 可逆留痕)。
 CREATE TABLE IF NOT EXISTS glossary (
     domain TEXT NOT NULL,
     term TEXT NOT NULL,
     definition TEXT DEFAULT '',
     zh_name TEXT DEFAULT '',
+    aliases TEXT DEFAULT '[]',
     occurrences TEXT DEFAULT '[]',
     related TEXT DEFAULT '[]',
     status TEXT DEFAULT 'accepted',
@@ -477,6 +479,8 @@ class Database:
             "occurrences": "occurrences TEXT DEFAULT '[]'",
             # 标准中文译名(术语一致性 L1 源;06 工单):概念步回填/backfill 脚本补/术语页可编辑。
             "zh_name": "zh_name TEXT DEFAULT ''",
+            # 概念实体化(09 工单):变体名归并留痕,resolve 用其归一键匹配。
+            "aliases": "aliases TEXT DEFAULT '[]'",
             "is_topic": "is_topic INTEGER DEFAULT 0",
             "definition_locked": "definition_locked INTEGER DEFAULT 0",
         },
@@ -2011,25 +2015,51 @@ class Database:
         definition: str = "",
         zh_name: str = "",
     ) -> None:
-        """抽取笔记"这篇讲清楚了什么"一节时采集候选概念:不存在则插 status='suggested' 记一条
-        occurrence + 候选定义;已存在则把该 job 的 occurrence 并入(按 job_id 去重),
-        绝不降级已 accepted 的条目。候选定义仅在该条尚无定义且未钉住时补写——不覆盖
-        已有/已钉住定义。occurrence = {job_id, content_type, location}。"""
+        """采集候选概念(resolve-then-merge,09 工单 P1):先按 (domain, term) 精确匹配,
+        再经 shared.concepts.resolve 用归一键撞现有实体的 term/zh_name/aliases——
+        「量化(Quantization)」「多头注意力」等变体挂到既有实体(occurrence 按 job_id 去重,
+        新变体名进 aliases),而不是各建一条。都未命中才新建(主名规则见 primary_fields:
+        英文为 term、中文进 zh_name)。定义/译名仅补空不覆盖,绝不降级已 accepted 的条目。"""
+        from shared.concepts import primary_fields, resolve
+
+        term = (term or "").strip()
+        if not term:
+            return
         now = _now_iso()
         occ = {"job_id": job_id, "content_type": content_type, "location": location}
         with self._lock:
             row = self._conn.execute(
-                "SELECT occurrences, definition, definition_locked, zh_name "
+                "SELECT term, occurrences, definition, definition_locked, zh_name, aliases "
                 "FROM glossary WHERE domain=? AND term=?",
                 (domain, term),
             ).fetchone()
             if row is None:
+                # 归一匹配:域内行的 term/zh_name/aliases 归一键 vs 本建议的候选键。
+                idx_rows = [
+                    {"term": r["term"], "zh_name": r["zh_name"],
+                     "aliases": json.loads(r["aliases"] or "[]")}
+                    for r in self._conn.execute(
+                        "SELECT term, zh_name, aliases FROM glossary "
+                        "WHERE domain=? ORDER BY term", (domain,),
+                    ).fetchall()
+                ]
+                hit = resolve(idx_rows, term, zh_name or None)
+                if hit is not None:
+                    row = self._conn.execute(
+                        "SELECT term, occurrences, definition, definition_locked, zh_name, aliases "
+                        "FROM glossary WHERE domain=? AND term=?",
+                        (domain, hit),
+                    ).fetchone()
+            if row is None:
+                p_term, p_zh, p_aliases = primary_fields(term, zh_name)
                 self._conn.execute(
                     """INSERT INTO glossary
-                       (domain, term, definition, zh_name, occurrences, related, status,
-                        created_at, updated_at)
-                       VALUES (?,?,?,?,?,?,?,?,?)""",
-                    (domain, term, definition, zh_name, json.dumps([occ], ensure_ascii=False),
+                       (domain, term, definition, zh_name, aliases, occurrences, related,
+                        status, created_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (domain, p_term, definition, p_zh,
+                     json.dumps(p_aliases, ensure_ascii=False),
+                     json.dumps([occ], ensure_ascii=False),
                      "[]", "suggested", now, now),
                 )
             else:
@@ -2049,13 +2079,85 @@ class Database:
                 if zh_name and not (row["zh_name"] or "").strip():
                     new_zh = zh_name
                     changed = True
+                # 新变体名留痕进 aliases(与 term/zh_name 重复的不记)。
+                aliases = json.loads(row["aliases"] or "[]")
+                if term != row["term"] and term != (new_zh or "") and term not in aliases:
+                    aliases.append(term)
+                    changed = True
                 if changed:
                     self._conn.execute(
-                        "UPDATE glossary SET occurrences=?, definition=?, zh_name=?, updated_at=? "
-                        "WHERE domain=? AND term=?",
-                        (json.dumps(occs, ensure_ascii=False), new_def, new_zh, now, domain, term),
+                        "UPDATE glossary SET occurrences=?, definition=?, zh_name=?, "
+                        "aliases=?, updated_at=? WHERE domain=? AND term=?",
+                        (json.dumps(occs, ensure_ascii=False), new_def, new_zh,
+                         json.dumps(aliases, ensure_ascii=False), now, domain, row["term"]),
                     )
             self._conn.commit()
+
+    _STATUS_RANK = {"accepted": 2, "suggested": 1, "rejected": 0}
+
+    def merge_glossary_terms(self, domain: str, src_term: str, dst_term: str) -> dict:
+        """把 src 实体并入 dst(09 工单 P1,存量清洗/前端"合并到已有词条"共用):
+        occurrences 并集按 job_id 去重(dst 先)、definition 取更长者、zh_name 补空、
+        src 的 term/zh_name/aliases 全部入 dst.aliases(可逆留痕)、status 取更高档
+        (accepted > suggested > rejected)、is_topic/definition_locked 取或、related 并集。
+        然后删 src 行。任一行不存在或 src==dst 抛 ValueError。返回合并后的行 dict。"""
+        if src_term == dst_term:
+            raise ValueError("src and dst are the same term")
+        with self._lock:
+            rows = {
+                r["term"]: r for r in self._conn.execute(
+                    "SELECT * FROM glossary WHERE domain=? AND term IN (?,?)",
+                    (domain, src_term, dst_term),
+                ).fetchall()
+            }
+            if src_term not in rows or dst_term not in rows:
+                missing = src_term if src_term not in rows else dst_term
+                raise ValueError(f"term not found: {missing}")
+            s, d = rows[src_term], rows[dst_term]
+
+            occs = json.loads(d["occurrences"] or "[]")
+            seen_jobs = {o.get("job_id") for o in occs}
+            for o in json.loads(s["occurrences"] or "[]"):
+                if o.get("job_id") not in seen_jobs:
+                    occs.append(o)
+                    seen_jobs.add(o.get("job_id"))
+
+            d_def, s_def = (d["definition"] or "").strip(), (s["definition"] or "").strip()
+            definition = d_def if len(d_def) >= len(s_def) else s_def
+            zh_name = (d["zh_name"] or "").strip() or (s["zh_name"] or "").strip()
+
+            aliases = json.loads(d["aliases"] or "[]")
+            for cand in (json.loads(s["aliases"] or "[]")
+                         + [s["term"], (s["zh_name"] or "").strip()]):
+                if cand and cand != dst_term and cand != zh_name and cand not in aliases:
+                    aliases.append(cand)
+
+            related = json.loads(d["related"] or "[]")
+            for r in json.loads(s["related"] or "[]"):
+                if r not in related:
+                    related.append(r)
+
+            rank = self._STATUS_RANK
+            status = max((d["status"], s["status"]), key=lambda x: rank.get(x, 1))
+
+            self._conn.execute(
+                """UPDATE glossary SET definition=?, zh_name=?, aliases=?, occurrences=?,
+                   related=?, status=?, is_topic=?, definition_locked=?, updated_at=?
+                   WHERE domain=? AND term=?""",
+                (definition, zh_name, json.dumps(aliases, ensure_ascii=False),
+                 json.dumps(occs, ensure_ascii=False),
+                 json.dumps(related, ensure_ascii=False), status,
+                 1 if (d["is_topic"] or s["is_topic"]) else 0,
+                 1 if (d["definition_locked"] or s["definition_locked"]) else 0,
+                 _now_iso(), domain, dst_term),
+            )
+            self._conn.execute(
+                "DELETE FROM glossary WHERE domain=? AND term=?", (domain, src_term)
+            )
+            self._conn.commit()
+        merged = self.get_glossary_term(domain, dst_term)
+        assert merged is not None
+        return merged
 
     def glossary_term_rows(self, domain: str) -> list[dict]:
         """术语一致性 L1 导出用:该域全部词条的 (term, zh_name, definition) 轻量行。"""
@@ -2082,9 +2184,11 @@ class Database:
         return self._row_to_glossary(row) if row is not None else None
 
     def list_glossary(
-        self, domain: str | None = None, status: str | None = None
+        self, domain: str | None = None, status: str | None = None,
+        q: str | None = None,
     ) -> list[dict]:
-        """列术语,可按 domain / status 过滤,按 term 升序。"""
+        """列术语,可按 domain / status 过滤 + q 检索(term/zh_name/aliases 子串,
+        大小写不敏感),按 term 升序。"""
         where_parts: list[str] = []
         params: list = []
         if domain:
@@ -2093,11 +2197,30 @@ class Database:
         if status:
             where_parts.append("status=?")
             params.append(status)
+        if q and q.strip():
+            # aliases 是 JSON 文本列,LIKE 子串足够(检索场景,无需精确解析)。
+            like = f"%{q.strip()}%"
+            where_parts.append("(term LIKE ? OR zh_name LIKE ? OR aliases LIKE ?)")
+            params += [like, like, like]
         where = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
         rows = self._conn.execute(
             f"SELECT * FROM glossary {where} ORDER BY term", params
         ).fetchall()
         return [self._row_to_glossary(r) for r in rows]
+
+    def get_job_titles(self, job_ids: list[str]) -> dict[str, str]:
+        """批量取 job 标题(概念详情出现处 enrich 用):{job_id: title},缺 title 的 job 不返回。"""
+        out: dict[str, str] = {}
+        ids = [j for j in dict.fromkeys(job_ids) if j]
+        for i in range(0, len(ids), 500):   # SQLite 变量数上限保护
+            chunk = ids[i:i + 500]
+            ph = ",".join("?" * len(chunk))
+            for r in self._conn.execute(
+                f"SELECT id, title FROM jobs WHERE id IN ({ph})", chunk
+            ).fetchall():
+                if r["title"]:
+                    out[r["id"]] = r["title"]
+        return out
 
     def accept_glossary_term(self, domain: str, term: str) -> None:
         """采纳候选术语:status -> 'accepted'。"""
@@ -2275,6 +2398,9 @@ class Database:
             "term": row["term"],
             "definition": row["definition"],
             "zh_name": (row["zh_name"] if "zh_name" in row.keys() else "") or "",
+            "aliases": json.loads(
+                (row["aliases"] if "aliases" in row.keys() else "") or "[]"
+            ),
             "occurrences": json.loads(row["occurrences"] or "[]"),
             "related": json.loads(row["related"] or "[]"),
             "status": row["status"],

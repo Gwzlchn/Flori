@@ -90,10 +90,12 @@ class TestKbServicesV2:
         _seed(db)
         g = kb.get_glossary(db, "finance")
         row = next(t for t in g if t["term"] == "坐庄")
-        assert set(row) == {"term", "definition", "status", "is_topic", "occurrence_count"}
+        assert set(row) == {"term", "zh_name", "definition", "status", "is_topic",
+                            "occurrence_count"}
         assert row["occurrence_count"] >= 1
         term = kb.get_term(db, "finance", "坐庄")
         assert term and term["term"] == "坐庄" and "occurrences" in term
+        assert "aliases" in term and "zh_name" in term
         assert kb.get_term(db, "finance", "不存在的词") is None
 
     def test_concept_timeline(self, db):

@@ -249,12 +249,17 @@ async def term_detail(
     domain: str, term: str,
     db: Database = Depends(get_db),
 ):
-    """术语详情:定义 + 关联 + 类型化出现处。形态与 /api/glossary/{d}/{t} 完全一致(共用 from_row)。"""
+    """术语详情:定义 + 关联 + 类型化出现处(带 job 标题)。形态与 /api/glossary/{d}/{t}
+    完全一致(共用 from_row + enrich)。"""
+    from api.routes.glossary import enrich_occurrence_titles
+
     validate_path_segment(domain, "domain")
     t = await asyncio.to_thread(db.get_glossary_term, domain, term)
     if not t:
         raise HTTPException(404, "term not found")
-    return GlossaryTermResponse.from_row(t)
+    return GlossaryTermResponse.from_row(
+        await asyncio.to_thread(enrich_occurrence_titles, db, t)
+    )
 
 
 @router.get("/{domain}/topics/{topic}")

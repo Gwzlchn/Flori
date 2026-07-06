@@ -1132,7 +1132,7 @@ Response `202`（投递成功；`markdown` 经 `GET /api/ai-tasks/{task_id}/resu
 
 ### 1.10 术语库 / 概念图
 
-> 按 `domain` 维度维护的术语表。术语有两种来源：AI 抽取步骤自动采集（落 `status=suggested` 候选）、用户手动新增（直接 `accepted`）。`accepted` 的术语会同步进对应 domain 的 `Profile.terminology`，供后续 AI 步骤复用。`is_topic` 标记主题概念，用于概念图。主键为 `(domain, term)`。
+> 按 `domain` 维度维护的术语表。**一条 = 一个概念实体**（09 工单 P1）：AI 采集经 `shared.concepts.resolve` 归一——大小写/全半角/括号注音变体、中英说法（经 `zh_name`/`aliases`）都挂到同一实体，`occurrences` 跨内容累积。术语有两种来源：AI 抽取步骤自动采集（落 `status=suggested` 候选）、用户手动新增（直接 `accepted`）。`accepted` 的术语会同步进对应 domain 的 `Profile.terminology`，供后续 AI 步骤复用。`is_topic` 标记主题概念，用于概念图。主键为 `(domain, term)`；主名规则：英文术语为 `term`、中文进 `zh_name`，纯中文概念 `term`=中文。
 
 所有端点走 Basic/Token 鉴权。`domain` / `term` 路径段不得含 `..`、`/`、`\x00`，否则 `400`。
 
@@ -1141,10 +1141,12 @@ Response `202`（投递成功；`markdown` 经 `GET /api/ai-tasks/{task_id}/resu
 ```json
 {
   "domain": "deep-learning",
-  "term": "注意力机制",
+  "term": "Attention Mechanism",
+  "zh_name": "注意力机制",
+  "aliases": ["attention mechanism", "注意力機制"],
   "definition": "一种让模型动态聚焦输入关键部分的机制",
   "occurrences": [
-    {"job_id": "j_20260516_abc123", "content_type": "video", "location": "scene-12"}
+    {"job_id": "j_20260516_abc123", "content_type": "video", "location": "scene-12", "title": "视频标题"}
   ],
   "related": ["Transformer", "自注意力"],
   "status": "accepted",
@@ -1156,20 +1158,31 @@ Response `202`（投递成功；`markdown` 经 `GET /api/ai-tasks/{task_id}/resu
 ```
 
 - `status`：`suggested`（AI 采集的候选，待审）/ `accepted`（已采纳）。
-- `occurrences`：该术语出现过的来源，元素 `{job_id, content_type, location}`，由抽取步骤累积。
+- `zh_name`：标准中文译名（实体双语名，可为空串）。`aliases`：归并进本实体的变体名（采集归一与合并留痕，检索命中）。
+- `occurrences`：该术语出现过的来源，元素 `{job_id, content_type, location}`，由抽取步骤累积（同一 job 去重）。**详情端点**额外 enrich `title`（job 标题，job 已删则为 `null`）；列表端点不带。
 - `is_topic`：是否为主题概念。`definition_locked`：定义是否已钉住（钉住后自动采集不再覆盖定义）。
 - `created_at` / `updated_at`：ISO8601 字符串，缺失时为 `null`。
 - **同一形态**：所有返回单条术语的端点（`/api/glossary` 列表与详情、`/api/glossary/{d}/{t}`、`/api/domains/{d}/terms/{t}`）字段完全一致（后端统一走 `GlossaryTermResponse.from_row`）。
 
 #### GET /api/glossary — 列术语
 
-可按 `domain` / `status` 过滤（均可选），按 `term` 升序返回。
+可按 `domain` / `status` 过滤（均可选）；`q` 检索 `term`/`zh_name`/`aliases` 子串（大小写不敏感，中英说法都能搜到同一实体）。按 `term` 升序返回。
 
 ```
-GET /api/glossary?domain=deep-learning&status=suggested
+GET /api/glossary?domain=deep-learning&status=suggested&q=注意力
 ```
 
 Response `200`：`GlossaryTermResponse` 数组（同上结构）。
+
+#### POST /api/glossary/{domain}/{term}/merge — 合并实体
+
+把 `{term}`（src）并入 body `target`（dst）实体：`occurrences` 并集按 `job_id` 去重、`definition` 取更长者、`zh_name` 补空、src 的 `term`/`zh_name`/`aliases` 全部进 dst 的 `aliases`（可逆留痕）、`status` 取更高档（`accepted` > `suggested` > `rejected`）、`is_topic`/`definition_locked` 取或、`related` 并集；然后删 src 行。存量批量清洗走 `scripts/merge_glossary_entities.py`（同一 db 方法）。
+
+```json
+{"target": "Attention Mechanism"}
+```
+
+Response `200`：合并后的 `GlossaryTermResponse`。错误：`400` src==dst 或 `target` 为空；`404` 任一行不存在。
 
 #### POST /api/glossary?domain= — 手动新增术语
 

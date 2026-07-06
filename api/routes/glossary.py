@@ -17,6 +17,11 @@ from api.schemas import GlossaryTermRequest, GlossaryTermResponse
 class TopicToggleRequest(BaseModel):
     is_topic: bool
 
+
+class MergeRequest(BaseModel):
+    target: str   # 合并目标(dst)主名;路径里的 term 是被并入方(src)
+
+
 router = APIRouter(
     prefix="/api/glossary", tags=["glossary"],
     dependencies=[Depends(verify_token)],
@@ -28,14 +33,28 @@ def _to_response(row: dict) -> GlossaryTermResponse:
     return GlossaryTermResponse.from_row(row)
 
 
+def enrich_occurrence_titles(db: Database, row: dict) -> dict:
+    """概念详情的出现处补 job 标题(title 可能缺:job 已删/未同步,前端回退显示 job_id)。
+    只在单条详情端点用,列表端点不 enrich(条数 × 出现数的标题查询没必要)。"""
+    occs = row.get("occurrences") or []
+    titles = db.get_job_titles([o.get("job_id") for o in occs if isinstance(o, dict)])
+    row["occurrences"] = [
+        {**o, "title": titles.get(o.get("job_id"))} if isinstance(o, dict) else o
+        for o in occs
+    ]
+    return row
+
+
 @router.get("", response_model=list[GlossaryTermResponse])
 async def list_terms(
     domain: str | None = None,
     status: str | None = None,
+    q: str | None = None,
     db: Database = Depends(get_db),
 ):
-    """列术语,可按 domain / status(suggested 待审 / accepted 已采纳)过滤。"""
-    rows = await asyncio.to_thread(db.list_glossary, domain, status)
+    """列术语,可按 domain / status(suggested 待审 / accepted 已采纳)过滤;
+    q 检索 term/zh_name/aliases 子串(中英说法都能搜到同一实体)。"""
+    rows = await asyncio.to_thread(db.list_glossary, domain, status, q)
     return [_to_response(r) for r in rows]
 
 
@@ -66,12 +85,34 @@ async def create_term(
 
 @router.get("/{domain}/{term}", response_model=GlossaryTermResponse)
 async def get_term(domain: str, term: str, db: Database = Depends(get_db)):
-    """术语详情(含 sources 关联的 job 列表)。"""
+    """术语详情(出现处带 job 标题)。"""
     validate_path_segment(domain, "domain")
     row = await asyncio.to_thread(db.get_glossary_term, domain, term)
     if row is None:
         raise HTTPException(404, "term not found")
-    return _to_response(row)
+    return _to_response(await asyncio.to_thread(enrich_occurrence_titles, db, row))
+
+
+@router.post("/{domain}/{term}/merge", response_model=GlossaryTermResponse)
+async def merge_term(
+    domain: str,
+    term: str,
+    req: MergeRequest,
+    db: Database = Depends(get_db),
+):
+    """把 {term}(src)并入 body.target(dst)实体:occurrence 并集、变体入 aliases、
+    定义取更长者,src 行删除(可逆信息留在 dst.aliases)。src==dst 或任一不存在 → 400/404。"""
+    validate_path_segment(domain, "domain")
+    target = (req.target or "").strip()
+    if not target:
+        raise HTTPException(400, "target required")
+    if target == term:
+        raise HTTPException(400, "cannot merge a term into itself")
+    try:
+        merged = await asyncio.to_thread(db.merge_glossary_terms, domain, term, target)
+    except ValueError as e:
+        raise HTTPException(404 if "not found" in str(e) else 400, str(e))
+    return _to_response(merged)
 
 
 @router.put("/{domain}/{term}", response_model=GlossaryTermResponse)

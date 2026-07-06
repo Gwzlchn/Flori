@@ -26,6 +26,7 @@ const error = ref('')
 const toggling = ref(false)
 
 const related = computed<string[]>(() => (Array.isArray(data.value?.related) ? data.value!.related : []))
+const aliases = computed<string[]>(() => (Array.isArray(data.value?.aliases) ? data.value!.aliases : []))
 const occurrences = computed<TermOccurrence[]>(() => (Array.isArray(data.value?.occurrences) ? data.value!.occurrences : []))
 const isTopic = computed<boolean>(() => data.value?.is_topic === true)
 
@@ -103,6 +104,7 @@ watch(() => [route.params.domain, route.params.term], load)
           <div style="flex:1;min-width:0">
             <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
               <div class="h1">{{ data.term }}</div>
+              <span v-if="data.zh_name && data.zh_name !== data.term" class="dim" style="font-size:15px">{{ data.zh_name }}</span>
               <span v-if="isTopic" class="badge b-brand"><Bookmark :size="12" />主题概念</span>
               <span v-if="data.status" class="badge" :class="data.status === 'accepted' ? 'b-ok' : 'b-warn'">
                 <Check v-if="data.status === 'accepted'" :size="12" />{{ data.status === 'accepted' ? '已采纳' : '候选' }}
@@ -111,6 +113,7 @@ watch(() => [route.params.domain, route.params.term], load)
             <div class="lead">
               <a class="term-link" @click="goDomain">{{ data.domain }}</a>
               · {{ occurrences.length }} 处出现 · {{ related.length }} 个关联
+              <template v-if="aliases.length"> · 别名：{{ aliases.join('、') }}</template>
             </div>
           </div>
           <button class="btn sm" style="margin-left:auto" :disabled="toggling" @click="toggleTopic">
@@ -143,7 +146,7 @@ watch(() => [route.params.domain, route.params.term], load)
             <span class="type-pill" :class="contentTypePill(o.content_type)" style="width:28px;height:28px">
               <component :is="contentTypeIcon(o.content_type)" :size="13" />
             </span>
-            <span class="occ-t" style="flex:1;min-width:0;font-weight:600;color:var(--ink-900);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ o.job_id }}</span>
+            <span class="occ-t" style="flex:1;min-width:0;font-weight:600;color:var(--ink-900);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ o.title || o.job_id }}</span>
             <span class="badge b-mut">{{ contentTypeLabel(o.content_type) }}</span>
             <span v-if="o.location" class="dim" style="font-size:12px">{{ o.location }}</span>
             <ChevronRight :size="15" class="dim" />

@@ -195,6 +195,57 @@ class TestFilters:
         assert [t["term"] for t in resp.json()] == ["a", "z"]
 
 
+class TestEntityP1:
+    @pytest.mark.asyncio
+    async def test_response_carries_zh_name_and_aliases(self, client, db):
+        db.add_glossary_suggestion("ml", "Kelly criterion", "j1", zh_name="凯利准则")
+        db.add_glossary_suggestion("ml", "kelly criterion", "j2")   # 变体归并
+        resp = await client.get("/api/glossary?domain=ml")
+        body = resp.json()
+        assert len(body) == 1
+        assert body[0]["zh_name"] == "凯利准则"
+        assert "kelly criterion" in body[0]["aliases"]
+
+    @pytest.mark.asyncio
+    async def test_q_search_by_zh_name(self, client, db):
+        db.add_glossary_suggestion("ml", "Kelly criterion", "j1", zh_name="凯利准则")
+        db.add_glossary_suggestion("ml", "Sharpe ratio", "j2", zh_name="夏普比率")
+        resp = await client.get("/api/glossary?domain=ml&q=凯利")
+        assert [t["term"] for t in resp.json()] == ["Kelly criterion"]
+
+    @pytest.mark.asyncio
+    async def test_merge_endpoint(self, client, db):
+        db.add_glossary_suggestion("ml", "Attention", "j1")
+        db.add_glossary_suggestion("ml", "AttnMechanism", "j2", definition="更长定义在此")
+        resp = await client.post(
+            "/api/glossary/ml/AttnMechanism/merge", json={"target": "Attention"}
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["term"] == "Attention"
+        assert "AttnMechanism" in body["aliases"]
+        assert len(body["occurrences"]) == 2
+        assert (await client.get("/api/glossary/ml/AttnMechanism")).status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_merge_missing_404_self_400(self, client, db):
+        db.add_glossary_suggestion("ml", "OnlyOne", "j1")
+        r1 = await client.post("/api/glossary/ml/OnlyOne/merge", json={"target": "nope"})
+        assert r1.status_code == 404
+        r2 = await client.post("/api/glossary/ml/OnlyOne/merge", json={"target": "OnlyOne"})
+        assert r2.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_term_detail_occurrence_titles(self, client, db):
+        from shared.models import Job
+        db.create_job(Job(id="jt1", content_type="article", pipeline="article_v2",
+                          title="一篇文章"))
+        db.add_glossary_suggestion("ml", "Momentum", "jt1", "article")
+        resp = await client.get("/api/glossary/ml/Momentum")
+        occ = resp.json()["occurrences"][0]
+        assert occ["title"] == "一篇文章"
+
+
 class TestDomainValidation:
     @pytest.mark.asyncio
     async def test_create_traversal_domain_rejected(self, client):

@@ -17,9 +17,10 @@ const loading = ref(true)
 const error = ref('')
 const terms = ref<GlossaryTerm[]>([])
 
-// 筛选: 知识库(domain) + 状态(suggested/accepted)。
+// 筛选: 知识库(domain) + 状态(suggested/accepted) + 检索 q(term/zh_name/aliases,后端匹配)。
 const filterDomain = ref('')
 const filterStatus = ref<'' | 'suggested' | 'accepted'>('')
+const filterQ = ref('')
 
 const domainOptions = computed(() => {
   const set = new Set<string>()
@@ -42,6 +43,7 @@ async function loadTerms() {
     const params: string[] = []
     if (filterDomain.value) params.push(`domain=${encodeURIComponent(filterDomain.value)}`)
     if (filterStatus.value) params.push(`status=${filterStatus.value}`)
+    if (filterQ.value.trim()) params.push(`q=${encodeURIComponent(filterQ.value.trim())}`)
     const q = params.length ? `?${params.join('&')}` : ''
     terms.value = await api.get<GlossaryTerm[]>(`/api/glossary${q}`)
   } catch (e: any) {
@@ -190,6 +192,10 @@ onMounted(loadTerms)
         <option value="suggested">候选</option>
         <option value="accepted">已采纳</option>
       </select>
+      <input
+        v-model="filterQ" class="input" style="max-width:200px"
+        placeholder="搜索概念/译名/别名…" @keyup.enter="loadTerms" @change="loadTerms"
+      />
       <button
         v-if="filterDomain"
         class="btn sm"
@@ -226,6 +232,7 @@ onMounted(loadTerms)
             <div style="flex:1;min-width:0">
               <div style="display:flex;align-items:center;gap:8px">
                 <span style="font-weight:600;color:var(--ink-900)">{{ t.term }}</span>
+                <span v-if="t.zh_name && t.zh_name !== t.term" class="dim" style="font-size:12px">{{ t.zh_name }}</span>
                 <StatusBadge :status="t.status" />
               </div>
               <div class="dim" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;color:var(--ink-500)">
@@ -246,6 +253,7 @@ onMounted(loadTerms)
             <div style="flex:1;min-width:0">
               <div style="display:flex;align-items:center;gap:8px">
                 <span class="occ-t" style="font-weight:600;color:var(--ink-900)">{{ t.term }}</span>
+                <span v-if="t.zh_name && t.zh_name !== t.term" class="dim" style="font-size:12px">{{ t.zh_name }}</span>
                 <span v-if="t.is_topic" class="badge b-brand"><Bookmark :size="12" />主题概念</span>
               </div>
               <div class="dim" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;color:var(--ink-500)">
