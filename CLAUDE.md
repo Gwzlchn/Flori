@@ -204,7 +204,7 @@ flori/
   1. 本地只跑【新增 / 直接相关】用例（不跑全量）：**`scripts/test.sh -m <新模块>`**（或 `--changed` 只跑受影响用例;前端 `scripts/test.sh --fe`）。见 §测试规约。
      全量回归由 **CI 承担**：push/PR 自动跑后端全套(3 分片) + 覆盖率门(75%) + 前端 vitest（`.github/workflows/ci.yml`);schemathesis 独立每日 cron。
   2. **「本地完成」判定** = 新增用例绿 + 本地 build 对应镜像 +（API 调用 或 Playwright MCP）手验通过。三者绿即算完成。
-  3. 完成即：① 按 §提交规范 commit+bump → push main（触发 CI 全量回归,异步）；② **部署**：NAS 即时 recreate 对应容器（本地 build-uptest 镜像,不等 CI）；ECS 边缘**无手动直传**——git push → CI 建 ghcr → Watchtower（120s 轮询）自动 pull+重建（单一路径,不回退,见 §部署）。
+  3. 完成即：① 按 §提交规范 commit+bump → push main（触发 CI 全量回归,异步）；② **部署**：NAS 即时 recreate（本地 build-uptest 镜像,不等 CI）。★**后端 commit 一律三件套全建全滚**（`scripts/build-uptest.sh scheduler api worker` + recreate 全部后端容器）——共享 shared/ 且全系统单一版本,只滚"改到的那个"必致版本漂移（scheduler/api 停旧版、/system 报 worker 版本漂移,踩过两回）；前端-only 改动才可只滚 frontend。ECS 边缘**无手动直传**——git push → CI 建 ghcr → Watchtower（120s 轮询）自动 pull+重建（单一路径,不回退,见 §部署）。
   4. **CI 后台红灯 = fix-forward（默认）**：看失败用例 → 补 `fix(scope): …;<版本>` 提交修正 → push 复跑；**不回退**已部署版本。仅当线上功能明显坏才 `scripts/rollback.sh` 回滚。
 
 ### 本地活栈（NAS,override 叠加）
