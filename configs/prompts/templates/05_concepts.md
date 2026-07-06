@@ -1,6 +1,7 @@
 请从以下内容提取【核心概念】并写一句话摘要,严格输出 JSON。
 要求:
 - key_terms:文中讲清楚的关键概念(术语),每个给一句简洁中文定义;英文专有名词原样保留、不翻译。
+- zh_name:该术语的【标准中文译名】(不是解释,是短译名,如 Kelly criterion→凯利准则);term 本身是中文或无通行译名时为 null。
 - summary:用一句话(≤60 字)概括全文要点。
-- 输出格式:{"summary": "...", "key_terms": [{"term": "...", "definition": "..."}]}
+- 输出格式:{"summary": "...", "key_terms": [{"term": "...", "definition": "...", "zh_name": "...|null"}]}
 - 只输出 JSON,不要额外解释或代码块标记。

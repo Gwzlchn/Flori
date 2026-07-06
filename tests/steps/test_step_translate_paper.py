@@ -240,3 +240,69 @@ def test_pdf_only_figure_pages_rendered(tmp_path, monkeypatch):
     assert "pdf-page-4.png" not in out and "pdf-page-9.png" not in out
     assert "【图 4】旧格式无页码" in out                      # 旧格式原样
     assert result["figure_pages"] == 1
+
+
+class TestTermConsistency:
+    """术语一致性(工单 26-07-06/04 §5 V2):chunk 注入 term_map 命中 + 回收滚动 + term_pairs 落盘。"""
+
+    def _big_job(self, tmp_path, term_map=None):
+        import json as _json
+        from steps.paper.step_04_translate_paper import CHUNK_CHARS
+        job_dir = tmp_path / "job"
+        job_dir.mkdir()
+        for d in ["intermediate", "output", "logs", "input"]:
+            (job_dir / d).mkdir()
+        # 两个大节 → 必然 2+ chunk;两节都含 martingale(共享术语)。
+        secs = [{"level": 1, "title": f"Sec{i}", "page": i + 1,
+                 "text": f"martingale property {i} " + ("word " * 4000), "children": []}
+                for i in range(2)]
+        (job_dir / "intermediate" / "sections.json").write_text(_json.dumps(
+            {"title": "T", "authors": [], "abstract": "", "sections": secs, "total_sections": 2}))
+        if term_map is not None:
+            (job_dir / "input" / "term_map.json").write_text(
+                _json.dumps(term_map, ensure_ascii=False))
+        return job_dir
+
+    def test_l1_map_injected_into_every_chunk(self, tmp_path, monkeypatch):
+        job_dir = self._big_job(tmp_path, term_map={"martingale": "鞅"})
+        config = make_step_config(tmp_path, step_name="04_translate_paper", pool="ai")
+        step = TranslatePaperStep("04_translate_paper", job_dir, config)
+        prompts = []
+        monkeypatch.setattr(step, "call_ai", lambda p, **k: prompts.append(p) or "译文")
+        result = step.execute()
+        assert result["chunks"] >= 2
+        # 命中才注入:含 martingale 的 chunk 注入同一对照;纯 filler 块无术语段(命中过滤)。
+        with_term = [p for p in prompts if "martingale" in p.split("--- 论文原文 ---")[-1]]
+        assert len(with_term) >= 2
+        for p in with_term:
+            assert "martingale → 鞅" in p and "术语对照表" in p
+
+    def test_l3_rolls_from_first_chunk_and_lands_in_pairs(self, tmp_path, monkeypatch):
+        job_dir = self._big_job(tmp_path, term_map=None)   # 无 L1:首 chunk 译文定名
+        config = make_step_config(tmp_path, step_name="04_translate_paper", pool="ai")
+        step = TranslatePaperStep("04_translate_paper", job_dir, config)
+        prompts = []
+
+        def fake_ai(p, **k):
+            prompts.append(p)
+            if len(prompts) == 1:               # 首 chunk 产出「鞅(martingale)」×2(复现验证)
+                return "首段:鞅（martingale），鞅无处不在"
+            return "后续译文"
+
+        monkeypatch.setattr(step, "call_ai", fake_ai)
+        result = step.execute()
+        assert result["new_terms"] == 1
+        assert "martingale → 鞅" in prompts[1]  # 第二 chunk 注入首 chunk 回收的对照
+        import json as _json
+        pairs = _json.loads((job_dir / "output" / "term_pairs.json").read_text())
+        assert pairs == {"martingale": "鞅"}
+
+    def test_no_map_no_terms_block(self, tmp_path, monkeypatch):
+        job_dir = self._big_job(tmp_path, term_map=None)
+        config = make_step_config(tmp_path, step_name="04_translate_paper", pool="ai")
+        step = TranslatePaperStep("04_translate_paper", job_dir, config)
+        prompts = []
+        monkeypatch.setattr(step, "call_ai", lambda p, **k: prompts.append(p) or "译文")
+        step.execute()
+        assert all("术语对照表" not in p for p in prompts)   # 空表 prompt 无痕
+        assert not (job_dir / "output" / "term_pairs.json").exists()

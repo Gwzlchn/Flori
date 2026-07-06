@@ -2034,3 +2034,84 @@ class TestTimeoutRetry:
         assert await redis.get_step_status("j_test_001", "A") == "failed"
         assert delays == [10]
         assert db.get_job("j_test_001").status == JobStatus.FAILED
+
+
+class TestTermMapExportAndCollect:
+    """术语一致性(工单 26-07-06/04):submit 导出 L1(+L2)快照;翻译步完成回流 glossary/集合表。"""
+
+
+
+    @pytest.mark.asyncio
+    async def test_submit_exports_domain_term_map(self, redis, db, config):
+        from unittest.mock import AsyncMock
+        storage = AsyncMock()
+        storage.read_file.return_value = None            # 无集合表(非 book)
+        s = _stub_workers_present(Scheduler(redis, db, config, storage=storage))
+        db.add_glossary_suggestion("general", "martingale", "j0",
+                                   definition="鞅,一种随机过程")   # P1a:定义首短名可提炼
+        db.add_glossary_suggestion("general", "no name term", "j0",
+                                   definition="一段无法提炼短名的长解释而已")
+        job = make_job()
+        db.create_job(job)
+        await s.submit_job(job)
+        writes = {c.args[1]: c.args[2] for c in storage.write_file.await_args_list}
+        assert "input/term_map.json" in writes
+        tmap = json.loads(writes["input/term_map.json"])
+        assert tmap == {"martingale": "鞅"}               # 提不出的宁缺勿滥
+
+    @pytest.mark.asyncio
+    async def test_collection_terms_merged_l2_over_l1(self, redis, db, config):
+        from unittest.mock import AsyncMock
+        storage = AsyncMock()
+        storage.read_file.return_value = json.dumps({"martingale": "马丁格尔"}).encode()  # L2 覆盖 L1
+        s = _stub_workers_present(Scheduler(redis, db, config, storage=storage))
+        db.add_glossary_suggestion("general", "martingale", "j0", definition="鞅,随机过程")
+        job = make_job()
+        job.collection_id = "col_book_x"
+        db.create_job(job)
+        await s.submit_job(job)
+        writes = {c.args[1]: c.args[2] for c in storage.write_file.await_args_list}
+        tmap = json.loads(writes["input/term_map.json"])
+        assert tmap["martingale"] == "马丁格尔"
+        storage.read_file.assert_any_await("collections/col_book_x", "terms.json")
+
+    @pytest.mark.asyncio
+    async def test_translate_done_collects_pairs_into_glossary(self, redis, db, config):
+        from unittest.mock import AsyncMock
+        storage = AsyncMock()
+        pairs = {"Kelly criterion": "凯利准则"}
+        async def read_file(job_id, rel):
+            if rel == "output/term_pairs.json":
+                return json.dumps(pairs, ensure_ascii=False).encode()
+            return None
+        storage.read_file.side_effect = read_file
+        s = _stub_workers_present(Scheduler(redis, db, config, storage=storage))
+        job = make_job()
+        db.create_job(job)
+        await s._collect_term_pairs("j_test_001")
+        row = db.get_glossary_term("general", "Kelly criterion")
+        assert row and row["zh_name"] == "凯利准则" and row["status"] == "suggested"
+
+    @pytest.mark.asyncio
+    async def test_collect_pairs_merges_collection_terms_first_wins(self, redis, db, config):
+        from unittest.mock import AsyncMock
+        storage = AsyncMock()
+        state = {"collection": json.dumps({"alpha": "阿尔法"}).encode()}
+        async def read_file(prefix, rel):
+            if rel == "output/term_pairs.json":
+                return json.dumps({"alpha": "另一译", "beta": "贝塔"}, ensure_ascii=False).encode()
+            if prefix.startswith("collections/") and rel == "terms.json":
+                return state["collection"]
+            return None
+        async def write_file(prefix, rel, data):
+            if prefix.startswith("collections/"):
+                state["collection"] = data
+        storage.read_file.side_effect = read_file
+        storage.write_file.side_effect = write_file
+        s = _stub_workers_present(Scheduler(redis, db, config, storage=storage))
+        job = make_job()
+        job.collection_id = "col_book_x"
+        db.create_job(job)
+        await s._collect_term_pairs("j_test_001")
+        merged = json.loads(state["collection"])
+        assert merged == {"alpha": "阿尔法", "beta": "贝塔"}   # 先到先得:已有不覆盖,新词并入

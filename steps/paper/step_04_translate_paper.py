@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from shared.step_base import StepBase, file_hash
+from shared.terms import extract_pairs, hit_terms, render_term_block
 from steps.utils.chunking import split_markdown_chunks
 
 # 单 chunk 字符预算:大论文(GPT-3 75页)整篇单调用必撞步/CLI 双 600s 超时(线上实证)。
@@ -48,15 +49,24 @@ class TranslatePaperStep(StepBase):
         # 逐 chunk 翻译:每块一次 call_ai(各自有审计记录+transcript sidecar,call_index 自增),
         # 按原顺序聚合;max_tokens 抬高防单块译文截断(claude-cli 无视无害)。
         chunks = split_markdown_chunks(md, CHUNK_CHARS)
+        base_map = self._load_term_map()
+        new_pairs: dict[str, str] = {}   # L3:本篇滚动新定译名(chunk 间传递,收尾落盘回流)
         parts: list[str] = []
         for i, chunk in enumerate(chunks):
             self.report_progress(i, len(chunks), f"translating chunk {i + 1}/{len(chunks)}")
-            parts.append(self.call_ai(self._build_prompt(chunk), max_tokens=16384).strip())
+            merged = {**base_map, **new_pairs}
+            block = render_term_block(hit_terms(chunk, merged))
+            part = self.call_ai(self._build_prompt(chunk, block), max_tokens=16384).strip()
+            parts.append(part)
+            for en, zh in extract_pairs(part).items():
+                if en not in merged:      # 只收新词:已注入的恒定,避免中途改名
+                    new_pairs[en] = zh
         self.report_progress(len(chunks), len(chunks), "done")
         result = "\n\n".join(parts)
 
         self.write_output("output/translated.md", result)
-        return {"chars": len(result), "chunks": len(chunks),
+        self._write_term_pairs(new_pairs)
+        return {"chars": len(result), "chunks": len(chunks), "new_terms": len(new_pairs),
                 "provider": self.last_ai_provider, "model": self.last_ai_model}
 
     def _source_markdown(self) -> str:
@@ -106,10 +116,26 @@ class TranslatePaperStep(StepBase):
                 fi += 1
         return "".join(parts)
 
-    def _build_prompt(self, md: str) -> str:
+    def _build_prompt(self, md: str, term_block: str = "") -> str:
         # 默认模板外置 templates/04_translate_paper.md(改文件不碰代码);缺失回退 _DEFAULT。
+        # <<TERMS>> = 本 chunk 命中的术语对照段(shared/terms.py;无命中为空串,prompt 无痕)。
         tmpl = self._load_prompt_template("04_translate_paper", _DEFAULT)
-        return tmpl.replace("<<BODY>>", md)
+        return tmpl.replace("<<TERMS>>", term_block).replace("<<BODY>>", md)
+
+    def _load_term_map(self) -> dict[str, str]:
+        """input/term_map.json(scheduler 导出的 L1/L2 快照);缺失/坏 JSON 返回空表(降级无害)。"""
+        try:
+            m = self.load_json("input/term_map.json")
+            return m if isinstance(m, dict) else {}
+        except Exception:
+            return {}
+
+    def _write_term_pairs(self, pairs: dict[str, str]) -> None:
+        """本篇新定译名落产物,供 scheduler 回流 glossary/集合表(空表不写,省一个对象)。"""
+        if pairs:
+            import json as _json
+            self.write_output("output/term_pairs.json",
+                              _json.dumps(pairs, ensure_ascii=False, indent=1))
 
     # ── pdf-only 直喂:无文本可抽(pymupdf 已废),claude Read 按页区间读 PDF 翻译 ──
     PAGES_PER_CHUNK = 2   # 实测每 2 页一块 ≈30-45s、3 turns;块大易撞轮次/超时,块小浪费轮次开销
@@ -130,19 +156,32 @@ class TranslatePaperStep(StepBase):
         ranges = [(i, min(i + self.PAGES_PER_CHUNK - 1, pages))
                   for i in range(1, pages + 1, self.PAGES_PER_CHUNK)]
         tmpl = self._load_prompt_template("04_translate_paper.pdf", _DEFAULT_PDF)
+        base_map = self._load_term_map()
+        new_pairs: dict[str, str] = {}
         parts: list[str] = []
         for n, (a, b) in enumerate(ranges):
             self.report_progress(n, len(ranges), f"translating pages {a}-{b}/{pages}")
-            prompt = (tmpl.replace("<<PDF_PATH>>", str(pdf))
+            # pdf 直喂看不到原文文本 → 术语命中退化为「已收对照 + 全库表」直接给
+            # (表通常远小于 40 上限;超限按注入表意义排序:L3 新词优先保留)。
+            merged = {**base_map, **new_pairs}
+            hits = (list(new_pairs.items()) + [kv for kv in base_map.items() if kv[0] not in new_pairs])[:40]
+            block = render_term_block(hits)
+            prompt = (tmpl.replace("<<TERMS>>", block)
+                          .replace("<<PDF_PATH>>", str(pdf))
                           .replace("<<START>>", str(a)).replace("<<END>>", str(b)))
             # Read 每页一轮 + 思考/生成余量;--add-dir 放行 PDF 所在目录(input/)。
-            parts.append(self.call_ai(prompt, max_tokens=16384,
-                                      allowed_tools=["Read"], add_dirs=[str(pdf.parent)],
-                                      max_turns=(b - a + 1) * 2 + 4).strip())
+            part = self.call_ai(prompt, max_tokens=16384,
+                                allowed_tools=["Read"], add_dirs=[str(pdf.parent)],
+                                max_turns=(b - a + 1) * 2 + 4).strip()
+            parts.append(part)
+            for en, zh in extract_pairs(part).items():
+                if en not in merged:
+                    new_pairs[en] = zh
         self.report_progress(len(ranges), len(ranges), "done")
         result = "\n\n".join(parts)
         result, fig_pages = self._embed_figure_pages(result, pdf, pages)
         self.write_output("output/translated.md", result)
+        self._write_term_pairs(new_pairs)
         return {"chars": len(result), "chunks": len(ranges), "mode": "pdf-direct",
                 "figure_pages": fig_pages,
                 "provider": self.last_ai_provider, "model": self.last_ai_model}
@@ -196,6 +235,7 @@ class TranslatePaperStep(StepBase):
 # <<PDF_PATH>>/<<START>>/<<END>> 运行期注入)。规则经 OSDI04 MapReduce 三轮人工对读验证:
 # 层级映射与「截断句照译」是多块聚合一致性的关键。
 _DEFAULT_PDF = (
+    "<<TERMS>>"
     "用 Read 工具读取 <<PDF_PATH>> 的第 <<START>> 页到第 <<END>> 页,把正文忠实翻译成中文。规则:\n"
     "1. 标题层级固定映射:论文主标题用 #(仅出现在含主标题的页);编号章节 N 用 ##;小节 N.M 用 ###;"
     "N.M.P 用 ####;无编号的段落小标题(如 Worker Failure)用**加粗**不用 #。"
@@ -209,6 +249,7 @@ _DEFAULT_PDF = (
 
 # 静态默认 prompt 骨架(= 外置模板内容;<<BODY>> 注入论文原文)。
 _DEFAULT = (
+    "<<TERMS>>"
     "请将以下论文【忠实翻译】为简体中文。这是翻译,不是笔记/摘要,要求:\n"
     "- 忠实原意,逐段完整翻译,不增删、不概括、不评论;\n"
     "- 完整保留 Markdown 结构(标题层级、列表、表格、引用等)与原文章节顺序;\n"

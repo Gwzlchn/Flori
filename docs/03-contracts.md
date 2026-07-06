@@ -2045,6 +2045,22 @@ net_routing:
 - `source_tier` 标来源层级；笔记引用角标 **`[E#]`** 对应 `id`：`11_smart` 据 evidence 注入来源块并以 `[E#]` 引用一手事实，`12_review` 读 evidence 核 `[E#]` 忠实性（DAG：`09_mechanical → 10_evidence → 11_smart → 12_review`）。**一手优先，抓不到如实降级，绝不用二手冒充一手。**
 - 取证失败：`parse_failed: true` + 空 `evidence`。
 
+### 4.10 术语一致性(term_map / term_pairs / collections terms)
+
+翻译专有名词一致性(分层 TermMap,工单 26-07-06/04;`shared/terms.py`):
+
+- **`input/term_map.json`**(scheduler 在 submit/rerun 时导出;worker 只读):
+  `{"<english term>": "<中文译名>", ...}` —— L1=该 domain 的 glossary 提炼
+  (`zh_name` 列 > 「中文(English)」式 term > definition 首短名;提不出不导出),
+  job 属集合且存在集合表时 L2 覆盖合并。翻译步按 chunk 命中注入 prompt(`<<TERMS>>` 段,上限 40 条)。
+- **`output/term_pairs.json`**(翻译步产出,仅有新词才写):本篇新定的「英文→译名」对照
+  (译文「中文(English)」回收,复现验证)。scheduler 于翻译步完成时回流:
+  ① glossary(status=suggested,带 `zh_name`);② job 属集合 → merge 进集合表(先到先得)。
+- **`collections/{collection_id}/terms.json`**(对象存储,book 集合级 L2):结构同 term_map。
+- glossary 表新增列 `zh_name`(标准中文译名,默认空;概念步 key_terms 的 `zh_name` 字段回填,
+  存量经 `scripts/backfill_zh_names.py` 三段式补齐)。
+- 优先级:L3(篇内首译)> L2(集合)> L1(域);已注入的译名不被后续 chunk 改写。
+
 ## 5. 错误码
 
 错误体统一为 `{"error": <机器码>, "message": <说明>}`（由 `api/main.py` 注册的 exception_handler

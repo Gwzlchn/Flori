@@ -227,6 +227,7 @@ CREATE TABLE IF NOT EXISTS glossary (
     domain TEXT NOT NULL,
     term TEXT NOT NULL,
     definition TEXT DEFAULT '',
+    zh_name TEXT DEFAULT '',
     occurrences TEXT DEFAULT '[]',
     related TEXT DEFAULT '[]',
     status TEXT DEFAULT 'accepted',
@@ -474,6 +475,8 @@ class Database:
         },
         "glossary": {
             "occurrences": "occurrences TEXT DEFAULT '[]'",
+            # 标准中文译名(术语一致性 L1 源;06 工单):概念步回填/backfill 脚本补/术语页可编辑。
+            "zh_name": "zh_name TEXT DEFAULT ''",
             "is_topic": "is_topic INTEGER DEFAULT 0",
             "definition_locked": "definition_locked INTEGER DEFAULT 0",
         },
@@ -2006,6 +2009,7 @@ class Database:
         content_type: str = "",
         location: str | None = None,
         definition: str = "",
+        zh_name: str = "",
     ) -> None:
         """抽取笔记"这篇讲清楚了什么"一节时采集候选概念:不存在则插 status='suggested' 记一条
         occurrence + 候选定义;已存在则把该 job 的 occurrence 并入(按 job_id 去重),
@@ -2015,17 +2019,17 @@ class Database:
         occ = {"job_id": job_id, "content_type": content_type, "location": location}
         with self._lock:
             row = self._conn.execute(
-                "SELECT occurrences, definition, definition_locked "
+                "SELECT occurrences, definition, definition_locked, zh_name "
                 "FROM glossary WHERE domain=? AND term=?",
                 (domain, term),
             ).fetchone()
             if row is None:
                 self._conn.execute(
                     """INSERT INTO glossary
-                       (domain, term, definition, occurrences, related, status,
+                       (domain, term, definition, zh_name, occurrences, related, status,
                         created_at, updated_at)
-                       VALUES (?,?,?,?,?,?,?,?)""",
-                    (domain, term, definition, json.dumps([occ], ensure_ascii=False),
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (domain, term, definition, zh_name, json.dumps([occ], ensure_ascii=False),
                      "[]", "suggested", now, now),
                 )
             else:
@@ -2040,13 +2044,35 @@ class Database:
                         and not row["definition_locked"]:
                     new_def = definition
                     changed = True
+                # 译名同定义策略:仅补空,不覆盖已有(人工定准/先到先得)。
+                new_zh = row["zh_name"]
+                if zh_name and not (row["zh_name"] or "").strip():
+                    new_zh = zh_name
+                    changed = True
                 if changed:
                     self._conn.execute(
-                        "UPDATE glossary SET occurrences=?, definition=?, updated_at=? "
+                        "UPDATE glossary SET occurrences=?, definition=?, zh_name=?, updated_at=? "
                         "WHERE domain=? AND term=?",
-                        (json.dumps(occs, ensure_ascii=False), new_def, now, domain, term),
+                        (json.dumps(occs, ensure_ascii=False), new_def, new_zh, now, domain, term),
                     )
             self._conn.commit()
+
+    def glossary_term_rows(self, domain: str) -> list[dict]:
+        """术语一致性 L1 导出用:该域全部词条的 (term, zh_name, definition) 轻量行。"""
+        rows = self._conn.execute(
+            "SELECT term, zh_name, definition FROM glossary WHERE domain=?", (domain,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_glossary_zh_name(self, domain: str, term: str, zh_name: str) -> bool:
+        """backfill/人工定准写译名;返回是否更新(不存在的词条返回 False)。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE glossary SET zh_name=?, updated_at=? WHERE domain=? AND term=?",
+                (zh_name, _now_iso(), domain, term),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
 
     def get_glossary_term(self, domain: str, term: str) -> dict | None:
         """读单条术语,未命中返回 None。"""
@@ -2248,6 +2274,7 @@ class Database:
             "domain": row["domain"],
             "term": row["term"],
             "definition": row["definition"],
+            "zh_name": (row["zh_name"] if "zh_name" in row.keys() else "") or "",
             "occurrences": json.loads(row["occurrences"] or "[]"),
             "related": json.loads(row["related"] or "[]"),
             "status": row["status"],

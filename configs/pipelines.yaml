@@ -249,7 +249,7 @@ paper:
       extends: .ai-step
       run: steps.paper.step_04_translate_paper
       needs: ["03_sections"]
-      version: "4"   # pdf-only 图表占位带页码 + pdftoppm 渲染含图页插真图,失效旧指纹
+      version: "5"   # 术语一致性:chunk 注入 term_map + 回收 term_pairs(工单 26-07-06/04),失效旧指纹
       # 大论文多 chunk 串行翻译,步墙钟须覆盖全部 chunk(~15 块 × 2-4min);600 默认必超时。
       timeout: 7200
       tags: []
@@ -360,6 +360,7 @@ article:
       extends: .ai-step
       run: steps.article.step_04_translate_article
       needs: ["02_parse_article"]
+      version: "2"   # 术语一致性:chunk 注入 term_map + 回收 term_pairs(工单 26-07-06/04),失效旧指纹
       tags: []
       # 仅非中文文章触发:02_parse 写了 needs_translation.json 才跑,中文文章跳过。
       rules:
@@ -375,6 +376,7 @@ article:
       label: "概念 + 摘要"
       extends: .ai-step
       run: steps.article.step_05_concepts
+      version: "2"   # key_terms 增 zh_name(标准译名,回填 glossary 供术语一致性 L1)
       # 必跑,无 rules。源优先级:智能笔记 > 译文(非中文) > 原文章节;一句话摘要同出。
       # needs 04_smart/04_translate:保证笔记/译文(若有)先就绪;被跳过时依赖视为满足,本步照常跑。
       needs: ["04_smart_article", "04_translate_article"]

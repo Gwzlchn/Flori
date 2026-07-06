@@ -20,6 +20,7 @@ from shared.models import Job, JobStatus, Step, StepStatus
 from shared.notify import notify
 from shared.redis_client import RedisClient
 from shared.runner_ops import parse_style_tags
+from shared.terms import extract_pairs, zh_name_from_glossary_row
 from shared.net_zone import required_zone
 from shared.source_detect import detect_source
 from shared.storage import StorageBackend
@@ -52,6 +53,9 @@ _REVIEW_STEPS = {"12_review", "06_review", "05_review"}  # video / paper / (arti
 # article 链的独立概念步(必跑)是 glossary 的主采集源:评审可选时仍能进图谱。
 # 与 review 双触发无害——add_glossary_suggestion 按 job_id 去重 occurrence(幂等)。
 _CONCEPT_STEPS = {"05_concepts"}
+# 翻译步:完成后读 output/term_pairs.json,把本篇新定的「英文→中文译名」回流 glossary
+# (术语一致性飞轮:下一篇同域翻译经 input/term_map.json 注入,见 shared/terms.py)。
+_TRANSLATE_STEPS = {"04_translate_paper", "04_translate_article"}
 
 
 def _markdown_to_text(md: str) -> str:
@@ -365,6 +369,8 @@ class Scheduler:
                 Step(job_id=job.id, name=name, status=StepStatus.WAITING, pool=cfg["pool"]),
             )
 
+        await self._export_term_map(job)
+
         await self.redis.add_active_job(job.id)
         await self._check_downstream(job.id)
 
@@ -443,6 +449,8 @@ class Scheduler:
                 await self._index_job_notes(job_id, _NOTE_STEPS[step])
             elif step in _REVIEW_STEPS or step in _CONCEPT_STEPS:
                 await self._collect_glossary(job_id)
+            elif step in _TRANSLATE_STEPS:
+                await self._collect_term_pairs(job_id)
         except Exception:
             logger.warning("index_step_done_failed", job_id=job_id, step=step)
 
@@ -473,6 +481,80 @@ class Scheduler:
         )
         logger.info("notes_indexed", job_id=job_id, note_type=note_type)
 
+    async def _export_term_map(self, job: Job) -> None:
+        """术语一致性 L1(+L2)导出:把该 domain 的 glossary 译名快照写 input/term_map.json,
+        供翻译步(worker 无 DB)按 chunk 命中注入。job 属集合且集合有 terms.json(L2,book)
+        则合并(L2 覆盖 L1)。best-effort:失败只 warn,不阻塞提交。"""
+        if self.storage is None:
+            return
+        try:
+            rows = await asyncio.to_thread(self.db.glossary_term_rows, job.domain or "general")
+            tmap: dict[str, str] = {}
+            for r in rows:
+                pair = zh_name_from_glossary_row(r.get("term") or "", r.get("zh_name"), r.get("definition") or "")
+                if pair:
+                    tmap[pair[0]] = pair[1]
+            if job.collection_id:
+                raw = await self.storage.read_file(f"collections/{job.collection_id}", "terms.json")
+                if raw:
+                    try:
+                        tmap.update(json.loads(raw.decode("utf-8", errors="replace")))
+                    except (json.JSONDecodeError, ValueError):
+                        logger.warning("collection_terms_invalid", collection=job.collection_id)
+            if not tmap:
+                return
+            await self.storage.write_file(
+                job.id, "input/term_map.json",
+                json.dumps(tmap, ensure_ascii=False, indent=1).encode("utf-8"),
+            )
+            logger.info("term_map_exported", job_id=job.id, terms=len(tmap))
+        except Exception:
+            logger.warning("term_map_export_failed", job_id=job.id, exc_info=True)
+
+    async def _collect_term_pairs(self, job_id: str) -> None:
+        """翻译步完成回流:output/term_pairs.json(本篇新定译名)→ glossary(suggested,带 zh_name);
+        job 属集合(book)时同步 merge 进 collections/{id}/terms.json(L2,后章注入)。"""
+        if self.storage is None:
+            return
+        data = await self.storage.read_file(job_id, "output/term_pairs.json")
+        if not data:
+            return
+        try:
+            pairs = json.loads(data.decode("utf-8", errors="replace"))
+        except (json.JSONDecodeError, ValueError):
+            return
+        if not isinstance(pairs, dict) or not pairs:
+            return
+        job = await asyncio.to_thread(self.db.get_job, job_id)
+        domain = (job.domain if job else "") or "general"
+        for en, zh in pairs.items():
+            if not isinstance(en, str) or not isinstance(zh, str) or not en or not zh:
+                continue
+            await asyncio.to_thread(
+                self.db.add_glossary_suggestion,
+                domain, en, job_id, job.content_type if job else "", None, "", zh,
+            )
+        if job and job.collection_id:
+            try:
+                prefix = f"collections/{job.collection_id}"
+                raw = await self.storage.read_file(prefix, "terms.json")
+                merged: dict = {}
+                if raw:
+                    try:
+                        merged = json.loads(raw.decode("utf-8", errors="replace")) or {}
+                    except (json.JSONDecodeError, ValueError):
+                        merged = {}
+                # 先到先得:已有译名不被后章覆盖(与注入层 L2>L1、篇内首译优先一致)。
+                for en, zh in pairs.items():
+                    merged.setdefault(en, zh)
+                await self.storage.write_file(
+                    prefix, "terms.json",
+                    json.dumps(merged, ensure_ascii=False, indent=1).encode("utf-8"),
+                )
+            except Exception:
+                logger.warning("collection_terms_merge_failed", job_id=job_id, exc_info=True)
+        logger.info("term_pairs_collected", job_id=job_id, count=len(pairs))
+
     async def _collect_glossary(self, job_id: str) -> None:
         """把 key_terms(这篇讲清楚的概念 + 候选定义)采集为候选术语。
         主喂养源是评审"讲清楚了什么"一节;missing_concepts(知识缺口)只留评审面板,不喂术语库。
@@ -497,13 +579,14 @@ class Scheduler:
         for t in key_terms:
             if isinstance(t, dict):
                 term, definition = t.get("term"), (t.get("definition") or "")
+                zh_name = t.get("zh_name") if isinstance(t.get("zh_name"), str) else ""
             else:
-                term, definition = t, ""
+                term, definition, zh_name = t, "", ""
             if not term or not isinstance(term, str):
                 continue
             await asyncio.to_thread(
                 self.db.add_glossary_suggestion,
-                domain, term, job_id, content_type, None, definition,
+                domain, term, job_id, content_type, None, definition, zh_name,
             )
             collected += 1
         logger.info("glossary_collected", job_id=job_id, count=collected)
@@ -1198,6 +1281,11 @@ class Scheduler:
                 status="waiting", error=None,
                 started_at=None, finished_at=None, duration_sec=None,
             )
+
+        # 刷新术语快照:P3 修复路径 = 人工定准 glossary.zh_name 后 rerun 04,必须让新表生效。
+        job = await asyncio.to_thread(self.db.get_job, job_id)
+        if job:
+            await self._export_term_map(job)
 
         await asyncio.to_thread(
             self.db.update_job, job_id, status=JobStatus.PROCESSING,
