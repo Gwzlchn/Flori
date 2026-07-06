@@ -1067,7 +1067,9 @@ class Scheduler:
                 if latest is None:
                     continue
                 age = time.time() - latest
-                if age > 60:
+                # 180s:worker 心跳每 10s(best-effort 走 gateway),但 api recreate/网络抖动可断 1-2 分钟,
+                # 60s 一次部署就误杀在跑的步(线上 04_translate 被 "stale 71s" 杀过);真卡死 180s 内回收仍可接受。
+                if age > 180:
                     logger.warning(
                         "step_stuck", job_id=job_id, step=step, age_sec=round(age),
                     )

@@ -257,7 +257,7 @@ class DownloadStep(StepBase):
         self._fetch_arxiv_meta(arxiv_id)
 
         pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-        cmd = ["curl", "-fSL", "-o", str(input_dir / "source.pdf"), pdf_url]
+        cmd = ["curl", "-fSL", "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "-o", str(input_dir / "source.pdf"), pdf_url]  # 浏览器 UA:NBER 等站挡 curl 默认 UA(278B 错误页),实测换 UA 即 200
         self.run_subprocess(cmd, timeout=120)
 
         # HTML 源(论文源头重做):arxiv 官方/ar5iv 的 LaTeXML 渲染结构+公式无损,原文/翻译/笔记
@@ -307,7 +307,7 @@ class DownloadStep(StepBase):
             try:
                 assets.mkdir(parents=True, exist_ok=True)
                 self.run_subprocess(
-                    ["curl", "-fsSL", "-o", str(assets / fname), "--", absolute], timeout=60)
+                    ["curl", "-fsSL", "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "-o", str(assets / fname), "--", absolute], timeout=60)
                 html = html.replace(f'src="{src}"', f'src="assets/{fname}"')
                 n_ok += 1
             except Exception as e:
@@ -373,7 +373,7 @@ class DownloadStep(StepBase):
         assert_public_url(url)   # 抓取前挡内网/回环目标(SSRF),与 _download_article 一致
         input_dir = self.job_dir / "input"
         input_dir.mkdir(parents=True, exist_ok=True)
-        cmd = ["curl", "-fSL", "-o", str(input_dir / "source.pdf"), url]
+        cmd = ["curl", "-fSL", "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "-o", str(input_dir / "source.pdf"), url]  # 同上:浏览器 UA
         self.run_subprocess(cmd, timeout=120)
 
     def _download_article(self, url: str) -> None:

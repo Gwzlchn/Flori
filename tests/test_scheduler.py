@@ -1034,7 +1034,7 @@ class TestCheckStuck:
         job_dir = tmp_jobs_dir / "j_test_001"
         job_dir.mkdir(exist_ok=True)
         import time
-        progress = {"source": "step", "updated_at": time.time() - 120, "current": 5, "total": 10}
+        progress = {"source": "step", "updated_at": time.time() - 240, "current": 5, "total": 10}  # >180s 阈值(60→180:api recreate 心跳断不误杀)
         (job_dir / ".A.progress").write_text(json.dumps(progress))
 
         received = []
