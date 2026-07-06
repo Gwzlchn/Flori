@@ -100,3 +100,22 @@ class TestZhNameFromGlossaryRow:
     ])
     def test_unresolvable_returns_none(self, term, definition):
         assert zh_name_from_glossary_row(term, None, definition) is None
+
+
+class TestConflictGrouping:
+    """P3 审查脚本核心:同 English 多译名归组(scripts/term_consistency_check.collect_conflicts)。"""
+
+    def test_conflicts_and_clean_terms(self):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        from term_consistency_check import collect_conflicts
+        by_job = {
+            "j1": {"martingale": "鞅", "alpha": "阿尔法"},
+            "j2": {"martingale": "马丁格尔", "alpha": "阿尔法"},
+            "j3": {"martingale": "鞅"},
+        }
+        c = collect_conflicts(by_job)
+        assert set(c) == {"martingale"}                      # alpha 一致,不算冲突
+        assert c["martingale"]["鞅"] == ["j1", "j3"]
+        assert c["martingale"]["马丁格尔"] == ["j2"]
