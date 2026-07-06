@@ -100,6 +100,11 @@ class GatewayTransport:
         resp.raise_for_status()
         data = resp.json()
         self._worker_token = data.get("worker_token", "")
+        # 注册响应携带中心期望配置(首拍即齐);worker 读该属性应用,晚于心跳到达也无害(rev 幂等)。
+        self.initial_config = {
+            "desired_config": data.get("desired_config"),
+            "cfg_rev": int(data.get("cfg_rev") or 0),
+        }
         returned_id = data.get("worker_id") or effective_id
         self._save_id(returned_id)
         # 身份头:随每个 runner 请求上送(诊断用,不可信)。version 是排障关键——一眼认出"旧版没更新的 worker"。
@@ -117,12 +122,14 @@ class GatewayTransport:
             )
         return returned_id
 
-    async def heartbeat(self, worker_id, load=None):
+    async def heartbeat(self, worker_id, load=None, applied_cfg_rev=0):
+        cfg_payload: dict | None = None
         try:
             body = {
                 "worker_id": worker_id, "status": self._status,
                 "current_job": self._current_job,
                 "current_step": self._current_step,
+                "applied_cfg_rev": applied_cfg_rev,
             }
             if load:
                 body["load"] = load   # 本机 live 负载,经网关写 redis worker hash,供各节点负载展示
@@ -132,6 +139,15 @@ class GatewayTransport:
             if resp.status_code == 401:
                 # 心跳也被拒 = per-worker token 失效 → 抛给主循环走重注册/退避/自杀,不能裸吞。
                 raise WorkerAuthRejected()
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                    cfg_payload = {
+                        "desired_config": data.get("desired_config"),
+                        "cfg_rev": int(data.get("cfg_rev") or 0),
+                    }
+                except ValueError:
+                    pass   # 旧网关无配置字段/响应异常:保持现配置,不算错
         except httpx.HTTPError as e:
             logger.warning(
                 "gateway_heartbeat_failed", worker_id=worker_id,
@@ -142,6 +158,7 @@ class GatewayTransport:
         # 有内层才退回维持 redis/db 新鲜;纯网关无内层,gateway 已是唯一通路。
         if self._inner is not None:
             await self._inner.heartbeat(worker_id, load=load)
+        return cfg_payload
 
     async def update_status(self, worker_id, status,
                             current_job="", current_step=""):

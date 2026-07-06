@@ -42,7 +42,12 @@ class WorkerTransport(Protocol):
         concurrency: int = 1, spec: dict | None = None,
     ) -> str: ...
 
-    async def heartbeat(self, worker_id: str, load: dict | None = None) -> None: ...
+    # 心跳返回中心期望配置 {"desired_config": dict|None, "cfg_rev": int}(热下发通道,
+    # docs/03 §1.7.2);None = 本拍未取到(网络抖动等),worker 保持现配置。
+    # applied_cfg_rev:worker 回报已生效版本,中心据此显示"待同步/已生效"。
+    async def heartbeat(
+        self, worker_id: str, load: dict | None = None, applied_cfg_rev: int = 0,
+    ) -> dict | None: ...
 
     async def update_status(
         self, worker_id: str, status: str,
@@ -156,15 +161,26 @@ class RedisTransport:
             started_at=now, first_seen=now, last_heartbeat=now,
         )
         await asyncio.to_thread(self._db.upsert_worker, worker_model)
+        # 注册即取中心期望配置(与 gateway register 响应对齐,首拍即齐);worker 读该属性应用。
+        desired, cfg_rev = await asyncio.to_thread(
+            self._db.get_worker_desired_config, worker_id)
+        self.initial_config = {"desired_config": desired, "cfg_rev": cfg_rev}
         return worker_id
 
-    async def heartbeat(self, worker_id, load=None):
+    async def heartbeat(self, worker_id, load=None, applied_cfg_rev=0):
         await self._redis.heartbeat(worker_id)
         # live 负载落 redis worker hash 的 load 字段(JSON);/api/workers 读出透传到 WorkerResponse.load。
         # 仅 redis(实时态,不进 DB);采集为空则不写,保留上次。
         if load:
             await self._redis.set_worker_field(worker_id, "load", json.dumps(load))
+        if applied_cfg_rev:
+            await self._redis.set_worker_field(
+                worker_id, "cfg_applied_rev", str(applied_cfg_rev))
         await asyncio.to_thread(self._db.update_worker_heartbeat, worker_id)
+        # 中心期望配置随心跳带回(与 gateway 心跳响应同契约)。
+        desired, cfg_rev = await asyncio.to_thread(
+            self._db.get_worker_desired_config, worker_id)
+        return {"desired_config": desired, "cfg_rev": cfg_rev}
 
     async def update_status(self, worker_id, status,
                             current_job="", current_step=""):

@@ -892,7 +892,9 @@ class TestConcurrency:
 
     @pytest.mark.asyncio
     async def test_run_starts_n_claim_loops(self, redis, db, config, storage):
-        """concurrency=N → run() 起 N 条认领循环(各带 slot 序号)。全局每池槽位仍是系统级上限。"""
+        """concurrency=N → supervisor 起 N 条认领循环(各带 slot 序号)。
+        supervisor 会对非闲退的 done 循环重生(崩溃兜底),故 run() 不再随 stub 秒退而返回,
+        需显式 shutdown 收尾。全局每池槽位仍是系统级上限。"""
         w = Worker(
             transport=RedisTransport(redis, db), config=config, storage=storage,
             worker_type="cpu", pools=["cpu", "io"], tags=set(), reject_tags=set(),
@@ -902,14 +904,51 @@ class TestConcurrency:
 
         async def fake_loop(slot=0):
             slots.append(slot)
+            while not w._shutdown:          # 常驻直到 shutdown(贴近真实循环,避免被判定重生)
+                await asyncio.sleep(0.05)
 
         async def fake_hb():
             return
 
         w._claim_loop = fake_loop
         w.heartbeat_loop = fake_hb
-        await w.run()
+        task = asyncio.create_task(w.run())
+        for _ in range(100):
+            if len(slots) >= 3:
+                break
+            await asyncio.sleep(0.05)
+        w.shutdown()
+        await asyncio.wait_for(task, timeout=10)
         assert sorted(slots) == [0, 1, 2]
+
+    @pytest.mark.asyncio
+    async def test_supervisor_scales_up_and_down(self, redis, db, config, storage):
+        """中心配置热调并发:扩=supervisor 补新 slot;缩=超编 slot 自退(_claim_loop 循环顶自检)。"""
+        w = Worker(
+            transport=RedisTransport(redis, db), config=config, storage=storage,
+            worker_type="cpu", pools=["cpu"], tags=set(), reject_tags=set(),
+            concurrency=1,
+        )
+
+        async def empty_request(*args, **kwargs):
+            await asyncio.sleep(0.02)
+            return None
+
+        w.transport.request_step = empty_request
+        sup = asyncio.create_task(w._claim_supervisor())
+        try:
+            await asyncio.sleep(0.1)
+            # 扩容 1→3:supervisor 下一拍(2s)补 slot;直接断言状态经 _apply
+            w._apply_desired_config(
+                {"desired_config": {"concurrency": 3}, "cfg_rev": 1})
+            assert w.concurrency == 3
+            # 缩容 3→1:rev 更高才应用
+            w._apply_desired_config(
+                {"desired_config": {"concurrency": 1}, "cfg_rev": 2})
+            assert w.concurrency == 1 and w._cfg_applied_rev == 2
+        finally:
+            w.shutdown()
+            await asyncio.wait_for(sup, timeout=10)
 
 
 class TestUploadFaultTolerance:
@@ -1359,3 +1398,64 @@ class TestAITaskTranscript:
         got = worker._load_ai_task_transcript(None, [{"tier": "primary", "ok": False,
                                                      "transcript_path": str(src)}])
         assert got["jsonl"] == '{"e":1}\n' and got["turns"] == 1
+
+
+class TestConfigHotApply:
+    """中心配置热应用(docs/03 §1.7.2):rev 幂等、pools/并发热更、缩容槽自退、
+    LocalTransport 心跳带回配置。"""
+
+    def test_apply_updates_fields_and_rev(self, worker):
+        worker._apply_desired_config({
+            "desired_config": {"pools": ["ai"], "concurrency": 4,
+                               "tags": ["x"], "reject_tags": []},
+            "cfg_rev": 2,
+        })
+        assert worker.pools == ["ai"] and worker.concurrency == 4
+        assert worker.tags == {"x"} and worker.reject_tags == set()
+        assert worker._cfg_applied_rev == 2
+
+    def test_apply_is_rev_idempotent(self, worker):
+        worker._apply_desired_config(
+            {"desired_config": {"concurrency": 4}, "cfg_rev": 2})
+        worker._apply_desired_config(
+            {"desired_config": {"concurrency": 9}, "cfg_rev": 2})   # 同 rev 不再应用
+        assert worker.concurrency == 4
+        worker._apply_desired_config(
+            {"desired_config": {"concurrency": 9}, "cfg_rev": 1})   # 旧 rev 忽略
+        assert worker.concurrency == 4
+        worker._apply_desired_config(None)                           # 空拍(网络抖动)忽略
+        assert worker._cfg_applied_rev == 2
+
+    def test_apply_rejects_empty_pools(self, worker):
+        before = list(worker.pools)
+        worker._apply_desired_config(
+            {"desired_config": {"pools": []}, "cfg_rev": 3})
+        assert worker.pools == before   # 空池列表不应用(worker 至少订阅一个池)
+
+    @pytest.mark.asyncio
+    async def test_claim_slot_retires_when_over_concurrency(self, worker):
+        worker.concurrency = 1
+        # slot 2 超编:循环顶自检直接退位,不认领任何任务
+        await asyncio.wait_for(worker._claim_loop(slot=2), timeout=2)
+
+    @pytest.mark.asyncio
+    async def test_local_heartbeat_returns_config_payload(self, worker, redis, db):
+        await worker.register()
+        db.set_worker_desired_config(worker.worker_id, {"concurrency": 3})
+        payload = await worker.transport.heartbeat(
+            worker.worker_id, applied_cfg_rev=1)
+        assert payload == {"desired_config": {"concurrency": 3}, "cfg_rev": 1}
+        info = await redis.get_worker_info(worker.worker_id)
+        assert info.get("cfg_applied_rev") == "1"
+
+    @pytest.mark.asyncio
+    async def test_register_applies_initial_config(self, worker, db):
+        """最小三参数裸启:注册响应(LocalTransport 属性侧带)即吃到中心配置。"""
+        # 预置:同 id 的中心配置已存在(页面此前下发过)
+        wid = worker.worker_id
+        from shared.models import Worker as _W
+        db.upsert_worker(_W(id=wid, type="cpu", pools=["cpu"]))
+        db.set_worker_desired_config(wid, {"concurrency": 5, "pools": ["cpu", "gpu"]})
+        await worker.register()
+        assert worker.concurrency == 5 and worker.pools == ["cpu", "gpu"]
+        assert worker._cfg_applied_rev == 1

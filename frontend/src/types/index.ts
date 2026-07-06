@@ -157,6 +157,10 @@ export interface WorkerLoad {
 }
 
 export interface Worker {
+  // 中心配置(desired=期望;cfg_rev/applied_cfg_rev 比对显示"待同步/已生效")
+  desired_config?: { pools?: string[]; concurrency?: number; tags?: string[]; reject_tags?: string[] } | null
+  cfg_rev?: number
+  applied_cfg_rev?: number
   id: string
   type: string
   pools: string[]

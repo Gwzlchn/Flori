@@ -75,6 +75,7 @@ class RunnerHeartbeatRequest(BaseModel):
     current_job: str = ""
     current_step: str = ""
     load: dict = Field(default_factory=dict)   # 本机 live 负载 {cpu_pct,mem_pct,loadavg};可空
+    applied_cfg_rev: int = 0                   # worker 已生效的配置版本(回报,前端显示同步态)
 
 
 class RunnerOfflineRequest(BaseModel):
@@ -167,9 +168,13 @@ async def register(
         )
     except Exception:
         pass
+    # 中心期望配置随注册响应下发(首拍即齐);重注册 worker 已有配置时立即拿到。
+    desired, cfg_rev = await asyncio.to_thread(db.get_worker_desired_config, worker_id)
     return {
         "worker_id": worker_id,
         "worker_token": worker_token,
+        "desired_config": desired,
+        "cfg_rev": cfg_rev,
     }
 
 
@@ -195,8 +200,13 @@ async def heartbeat(
         current_job=req.current_job,
         current_step=req.current_step,
     )
-    # 心跳只刷存活;暂停态由服务端 claim_step 据 admin_status 兜底(不经心跳回发控制位)。
-    return {"ok": True}
+    # worker 回报已生效配置版本 → redis hash(前端显示"待同步/已生效")。
+    if req.applied_cfg_rev:
+        await redis.set_worker_field(worker_id, "cfg_applied_rev", str(req.applied_cfg_rev))
+    # 心跳回发中心期望配置(热下发通道):worker 比对 cfg_rev 决定是否应用。
+    # 暂停态仍由服务端 claim_step 据 admin_status 兜底(不经心跳回发控制位)。
+    desired, cfg_rev = await asyncio.to_thread(db.get_worker_desired_config, worker_id)
+    return {"ok": True, "desired_config": desired, "cfg_rev": cfg_rev}
 
 
 @router.post("/offline")

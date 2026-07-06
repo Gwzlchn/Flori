@@ -86,6 +86,9 @@ class WorkerResponse(BaseModel):
     concurrency: int = 1
     remote_addr: str | None = None
     spec: dict = Field(default_factory=dict)   # 版本/机器配置(worker 自报);前端详情展示
+    desired_config: dict | None = None          # 中心期望配置(None=未配置,尊重自报)
+    cfg_rev: int = 0                            # 期望配置版本(单调)
+    applied_cfg_rev: int = 0                    # worker 已生效版本(心跳回报;=cfg_rev 即已同步)
     load: dict = Field(default_factory=dict)   # live 负载(worker 心跳自报 cpu%/mem%/loadavg);redis-only
     traffic: dict = Field(default_factory=dict)  # 网关中转流量字节 {pull,push};redis-only(产物代理累计)
     status: str
@@ -98,6 +101,14 @@ class WorkerResponse(BaseModel):
     started_at: str | None = None
     last_heartbeat: str | None = None
     admin_note: str | None = None
+
+
+class WorkerConfigRequest(BaseModel):
+    """中心下发 worker 运行配置(全部可选,只存显式指定键;worker 心跳热应用,docs/03 §1.7.2)。"""
+    pools: list[str] | None = None
+    concurrency: int | None = Field(default=None, ge=1, le=64)
+    tags: list[str] | None = None
+    reject_tags: list[str] | None = None
 
 
 class WorkerUpdateRequest(BaseModel):

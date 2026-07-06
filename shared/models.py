@@ -110,6 +110,10 @@ class Worker:
     started_at: datetime | None = None
     last_heartbeat: datetime | None = None
     admin_note: str | None = None
+    # 中心期望配置(pools/concurrency/tags/reject_tags;None=尊重 worker 自报)+ 单调版本号。
+    # worker 心跳拉取热应用,cfg_rev 由 set_worker_desired_config 递增,见 docs/03 §1.7.2。
+    desired_config: dict | None = None
+    cfg_rev: int = 0
 
 
 @dataclass

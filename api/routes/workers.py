@@ -22,7 +22,7 @@ from shared.status import (
     compute_worker_status,
 )
 from api.deps import get_config, get_db, get_redis, verify_token
-from api.schemas import WorkerResponse, WorkerUpdateRequest
+from api.schemas import WorkerConfigRequest, WorkerResponse, WorkerUpdateRequest
 
 router = APIRouter(prefix="/api/workers", tags=["workers"], dependencies=[Depends(verify_token)])
 
@@ -67,6 +67,8 @@ def _to_response(w) -> WorkerResponse:
         started_at=_iso_utc(w.started_at),
         last_heartbeat=_iso_utc(w.last_heartbeat),
         admin_note=w.admin_note,
+        desired_config=w.desired_config,
+        cfg_rev=w.cfg_rev,
     )
 
 
@@ -157,6 +159,7 @@ async def list_workers(
             existing.current_step = info.get("current_step") or None
             existing.spec = _spec(info)
             existing.load = _load(info)
+            existing.applied_cfg_rev = _int(info.get("cfg_applied_rev"))
             continue
         by_id[wid] = WorkerResponse(
             id=wid,
@@ -241,6 +244,7 @@ async def get_worker(
             resp.remote_addr = info.get("remote_addr")
         resp.spec = _spec(info)
         resp.load = _load(info)
+        resp.applied_cfg_rev = _int(info.get("cfg_applied_rev"))
     return resp
 
 
@@ -269,6 +273,42 @@ async def list_worker_tasks(
         }
         for s in steps
     ]
+
+
+@router.put("/{worker_id}/config")
+async def set_worker_config(
+    worker_id: str,
+    req: WorkerConfigRequest,
+    db: Database = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+):
+    """中心下发 worker 运行配置(pools/并发/标签),worker 下一心跳(≤10s)热应用,
+    不重启容器。只存显式指定的键;cfg_rev 单调递增,worker 按 rev 幂等应用。"""
+    cfg: dict = {}
+    if req.pools is not None:
+        pools = [str(x).strip() for x in req.pools if str(x).strip()]
+        if not pools:
+            raise HTTPException(400, "pools 不能为空(worker 至少订阅一个池)")
+        cfg["pools"] = pools
+    if req.concurrency is not None:
+        cfg["concurrency"] = req.concurrency
+    if req.tags is not None:
+        cfg["tags"] = [str(x).strip() for x in req.tags if str(x).strip()]
+    if req.reject_tags is not None:
+        cfg["reject_tags"] = [str(x).strip() for x in req.reject_tags if str(x).strip()]
+    if not cfg:
+        raise HTTPException(400, "至少提供一个配置项")
+    rev = await asyncio.to_thread(db.set_worker_desired_config, worker_id, cfg)
+    if rev < 0:
+        raise HTTPException(404, "worker not found")
+    try:
+        await redis.push_event(
+            "worker_config_updated", worker_id=worker_id, cfg_rev=rev,
+            **{k: v for k, v in cfg.items()},
+        )
+    except Exception:
+        pass
+    return {"cfg_rev": rev, "desired_config": cfg}
 
 
 @router.put("/{worker_id}")

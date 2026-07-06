@@ -12,7 +12,9 @@ services:
     volumes:
       - ./frontend:/app
       - fe_node_modules:/app/node_modules   # node_modules 放卷里,不污染工作区、re-run 更快
-    command: sh -c "npm install --no-audit --no-fund && npx vitest run --coverage"
+    # vue-tsc 前置:vitest 不做类型检查,watched/WorkerInfo 两次类型事故都拖到镜像 build 才炸
+    # (2026-07-06/07);在此前置与 frontend/Dockerfile 的 npm run build 同款 tsc,本地/CI 同吃。
+    command: sh -c "npm install --no-audit --no-fund && npx vue-tsc --noEmit && npx vitest run --coverage"
 
 volumes:
   fe_node_modules:

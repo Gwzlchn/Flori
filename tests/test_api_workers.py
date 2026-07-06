@@ -324,3 +324,49 @@ class TestWorkerTasks:
         assert rows[0]["title"] == "深入理解 Transformer"
         assert rows[0]["content_type"] == "video"
         assert rows[0]["domain"] == "ai"
+
+
+class TestWorkerConfig:
+    """中心运行配置(docs/03 §1.7.2):PUT /config 写 desired_config+cfg_rev,列表带三字段。"""
+
+    def test_put_config_bumps_rev_and_persists(self, app, db):
+        from fastapi.testclient import TestClient
+        _make_worker(db, id="cpu-cfg01")
+        c = TestClient(app)
+        r = c.put("/api/workers/cpu-cfg01/config",
+                  json={"pools": ["cpu", "io"], "concurrency": 8, "tags": ["vision"]})
+        assert r.status_code == 200
+        assert r.json()["cfg_rev"] == 1
+        cfg, rev = db.get_worker_desired_config("cpu-cfg01")
+        assert rev == 1 and cfg["concurrency"] == 8 and cfg["pools"] == ["cpu", "io"]
+        # 再写 rev 单调 +1
+        r2 = c.put("/api/workers/cpu-cfg01/config", json={"concurrency": 2})
+        assert r2.json()["cfg_rev"] == 2
+        cfg2, _ = db.get_worker_desired_config("cpu-cfg01")
+        assert cfg2 == {"concurrency": 2}   # 只存显式指定键
+
+    def test_put_config_validates(self, app, db):
+        from fastapi.testclient import TestClient
+        _make_worker(db, id="cpu-cfg02")
+        c = TestClient(app)
+        assert c.put("/api/workers/cpu-cfg02/config", json={"pools": []}).status_code == 400
+        assert c.put("/api/workers/cpu-cfg02/config", json={}).status_code == 400
+        assert c.put("/api/workers/nonexist/config", json={"concurrency": 1}).status_code == 404
+
+    def test_list_carries_config_fields(self, app, db):
+        from fastapi.testclient import TestClient
+        _make_worker(db, id="cpu-cfg03")
+        db.set_worker_desired_config("cpu-cfg03", {"concurrency": 4})
+        c = TestClient(app)
+        rows = c.get("/api/workers").json()
+        w = next(x for x in rows if x["id"] == "cpu-cfg03")
+        assert w["cfg_rev"] == 1 and w["desired_config"] == {"concurrency": 4}
+        assert w["applied_cfg_rev"] == 0   # 未有心跳回报
+
+    def test_reregister_preserves_desired_config(self, db):
+        """upsert_worker(重注册路径)绝不冲掉中心配置:ON CONFLICT UPDATE 而非 REPLACE。"""
+        _make_worker(db, id="cpu-cfg04")
+        db.set_worker_desired_config("cpu-cfg04", {"pools": ["gpu"]})
+        _make_worker(db, id="cpu-cfg04")   # 模拟 worker 重启重注册
+        cfg, rev = db.get_worker_desired_config("cpu-cfg04")
+        assert rev == 1 and cfg == {"pools": ["gpu"]}

@@ -37,6 +37,15 @@ export const useWorkerStore = defineStore('workers', () => {
     await fetchAll()
   }
 
+  // 中心下发运行配置(池/并发/标签):写 desired_config + cfg_rev+1,worker 下一心跳热应用。
+  async function setConfig(
+    workerId: string,
+    cfg: { pools?: string[]; concurrency?: number; tags?: string[]; reject_tags?: string[] },
+  ) {
+    await api.put(`/api/workers/${workerId}/config`, cfg)
+    await fetchAll()
+  }
+
   async function remove(workerId: string, force = false) {
     await api.del(`/api/workers/${workerId}${force ? '?force=true' : ''}`)
     await fetchAll()
@@ -96,7 +105,7 @@ export const useWorkerStore = defineStore('workers', () => {
 
   return {
     workers, loading, fetchAll, pause, resume,
-    updateNote, updateTags, remove, mintToken, fetchTasks, fetchQueue,
+    updateNote, updateTags, setConfig, remove, mintToken, fetchTasks, fetchQueue,
     fetchPoolLimits, savePoolLimits,
     fetchFullStatus, fetchEvents, fetchUsage, fetchLinkTrafficHistory,
     fetchPricing, refreshPricing, fetchPipelines,

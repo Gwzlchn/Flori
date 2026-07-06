@@ -81,18 +81,6 @@ def _worker_spec() -> dict:
                     break
     except OSError:
         pass
-    # 重建参数:worker 自报启动配置,前端 worker 卡片据此拼"一键重建命令"(与接入向导同套
-    # 拼装,image/格式由前端统一;registration token 不上报,由前端从生成态补占位)。
-    rb: dict = {}
-    for env in ("GATEWAY_URL", "WORKER_NAME", "WORKER_CONCURRENCY",
-                "HF_ENDPOINT", "HF_HUB_DISABLE_XET", "MODEL_CACHE_DIR",
-                "HTTPS_PROXY", "NO_PROXY"):
-        v = os.environ.get(env, "").strip()
-        if v:
-            rb[env] = v
-    if os.environ.get("NVIDIA_VISIBLE_DEVICES"):
-        rb["gpus"] = True
-    spec["rebuild"] = rb
     return spec
 
 # 能力用 --pools 显式表达(worker/main.py),路由按 pool 走。
@@ -244,6 +232,8 @@ class Worker:
         self._auth_lock = asyncio.Lock()
         self._auth_giveup_sec = int(os.environ.get("AUTH_GIVEUP_SEC", str(6 * 3600)))  # 连续 401 满此 → 自杀退出
         self._reauth_min_interval = float(os.environ.get("REAUTH_MIN_INTERVAL_SEC", "30"))
+        # 中心配置热应用:已生效的 cfg_rev(注册/心跳带回期望配置,rev 更高才应用,幂等)。
+        self._cfg_applied_rev = 0
         self.runner = create_step_runner(self.worker_id)
 
     # 生命周期
@@ -275,7 +265,7 @@ class Worker:
         try:
             await asyncio.gather(
                 self.heartbeat_loop(),
-                *[self._claim_loop(i) for i in range(self.concurrency)],
+                self._claim_supervisor(),
             )
         except asyncio.CancelledError:
             pass
@@ -304,6 +294,10 @@ class Worker:
                     hostname=socket.gethostname(), now=datetime.now(timezone.utc),
                     concurrency=self.concurrency, spec=_worker_spec(),
                 )
+                # 注册响应携带的中心期望配置(transport 属性侧带,免改 ABC 返回签名):
+                # 首拍即齐——claim supervisor 起跑前生效,最小三参数裸启也能吃到中心并发/池。
+                self._apply_desired_config(
+                    getattr(self.transport, "initial_config", None))
                 return
             except (httpx.TransportError, redis.exceptions.ConnectionError,
                     redis.exceptions.TimeoutError) as e:
@@ -321,7 +315,11 @@ class Worker:
         while not self._shutdown:
             try:
                 # 本机 live 负载(cpu%/mem%/loadavg,纯 /proc,便宜非阻塞);采集失败=各项 None,不致命。
-                await self.transport.heartbeat(self.worker_id, load=collect_node_load())
+                cfg_payload = await self.transport.heartbeat(
+                    self.worker_id, load=collect_node_load(),
+                    applied_cfg_rev=self._cfg_applied_rev,
+                )
+                self._apply_desired_config(cfg_payload)
             except asyncio.CancelledError:
                 raise
             except WorkerAuthRejected:
@@ -336,6 +334,68 @@ class Worker:
                 # 记日志后继续,下一拍重试;丢几拍由 worker_status.online_window(30s)容忍。
                 logger.warning("heartbeat_failed", worker_id=self.worker_id, exc_info=True)
             await asyncio.sleep(interval)
+
+    def _apply_desired_config(self, payload: dict | None) -> None:
+        """中心期望配置热应用(注册响应/每拍心跳带回)。rev 不高于已生效值即跳过(幂等);
+        pools/tags 下轮认领生效(_claim_loop 每轮读 self.*);并发由 supervisor 对齐
+        (扩=即刻补新 slot,缩=超编 slot 跑完当前任务自然退出,绝不打断在跑步骤)。"""
+        if not payload:
+            return
+        rev = int(payload.get("cfg_rev") or 0)
+        cfg = payload.get("desired_config")
+        if not cfg or rev <= self._cfg_applied_rev:
+            return
+        changed: dict = {}
+        pools = cfg.get("pools")
+        if isinstance(pools, list) and pools and pools != self.pools:
+            self.pools = [str(x) for x in pools]
+            changed["pools"] = self.pools
+        conc = cfg.get("concurrency")
+        if isinstance(conc, int) and conc >= 1 and conc != self.concurrency:
+            self.concurrency = conc
+            changed["concurrency"] = conc
+        if "tags" in cfg and isinstance(cfg["tags"], list):
+            new_tags = {str(x) for x in cfg["tags"]}
+            if new_tags != self.tags:
+                self.tags = new_tags
+                changed["tags"] = sorted(new_tags)
+        if "reject_tags" in cfg and isinstance(cfg["reject_tags"], list):
+            new_rt = {str(x) for x in cfg["reject_tags"]}
+            if new_rt != self.reject_tags:
+                self.reject_tags = new_rt
+                changed["reject_tags"] = sorted(new_rt)
+        self._cfg_applied_rev = rev
+        logger.info(
+            "worker_config_applied", worker_id=self.worker_id,
+            cfg_rev=rev, **changed,
+        )
+
+    async def _claim_supervisor(self) -> None:
+        """维持认领并行度 = self.concurrency(中心配置可热调):每 2s 对齐一次 slot 任务集。
+        扩容补新 slot;缩容不打断——超编 slot 在 _claim_loop 循环顶自检退出(跑完当前任务)。
+        idle_timeout 语义保持:所有在编 slot 都闲退且无存活任务 → worker 整体退出(与旧
+        gather 行为一致);未配 idle_timeout 时 done 视为意外损耗,原 slot 重生(崩溃兜底)。"""
+        tasks: dict[int, asyncio.Task] = {}
+        idle_exited: set[int] = set()
+        try:
+            while not self._shutdown:
+                want = max(1, self.concurrency)
+                for slot, t in list(tasks.items()):
+                    if t.done():
+                        del tasks[slot]
+                        if self.idle_timeout and slot < want:
+                            idle_exited.add(slot)
+                idle_exited = {x for x in idle_exited if x < want}
+                if self.idle_timeout and len(idle_exited) >= want and not tasks:
+                    self.shutdown()
+                    break
+                for slot in range(want):
+                    if slot not in tasks and slot not in idle_exited:
+                        tasks[slot] = asyncio.create_task(self._claim_loop(slot))
+                await asyncio.sleep(2)
+        finally:
+            if tasks:
+                await asyncio.gather(*tasks.values(), return_exceptions=True)
 
     # 认证自愈:401 → 重注册 + 指数退避 + 连续 6h 自杀
 
@@ -390,6 +450,13 @@ class Worker:
         idle_timeout 由各条独立计时,全部超时退出 → worker 退出。"""
         last_task_time = time.time()
         while not self._shutdown:
+            if slot >= max(1, self.concurrency):
+                # 中心配置缩并发:超编 slot 跑完当前任务后在此退位,绝不打断在跑步骤。
+                logger.info(
+                    "claim_slot_retired", worker_id=self.worker_id, slot=slot,
+                    concurrency=self.concurrency,
+                )
+                break
             try:
                 task = await self.transport.request_step(
                     self.worker_id, self.pools, self._pool_limits(),

@@ -90,6 +90,8 @@ CREATE TABLE IF NOT EXISTS workers (
     tasks_completed INTEGER DEFAULT 0,
     tasks_failed INTEGER DEFAULT 0,
     total_duration_sec REAL DEFAULT 0,
+    desired_config TEXT,
+    cfg_rev INTEGER NOT NULL DEFAULT 0,
     first_seen TEXT NOT NULL,
     started_at TEXT,
     last_heartbeat TEXT,
@@ -468,6 +470,8 @@ class Database:
             "admin_status": "admin_status TEXT NOT NULL DEFAULT ''",
             "concurrency": "concurrency INTEGER NOT NULL DEFAULT 1",
             "remote_addr": "remote_addr TEXT",
+            "desired_config": "desired_config TEXT",
+            "cfg_rev": "cfg_rev INTEGER NOT NULL DEFAULT 0",
         },
         "collections": {
             "source_type": "source_type TEXT",
@@ -891,15 +895,29 @@ class Database:
     # Worker
 
     def upsert_worker(self, worker: Worker) -> None:
+        # ON CONFLICT DO UPDATE 而非 INSERT OR REPLACE:REPLACE 是整行删重建,会把不在
+        # 列清单里的中心配置列(desired_config/cfg_rev)清零——worker 每次重注册都会走到
+        # 这里,页面下发的配置绝不能被重启冲掉。
         with self._lock:
             self._conn.execute(
-                """INSERT OR REPLACE INTO workers
+                """INSERT INTO workers
                    (id, type, pools, tags, reject_tags, hostname, gpu_name,
                     gpu_memory_mb, concurrency, remote_addr, status, admin_status,
                     current_job, current_step,
                     tasks_completed, tasks_failed, total_duration_sec,
                     first_seen, started_at, last_heartbeat, admin_note)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     type=excluded.type, pools=excluded.pools, tags=excluded.tags,
+                     reject_tags=excluded.reject_tags, hostname=excluded.hostname,
+                     gpu_name=excluded.gpu_name, gpu_memory_mb=excluded.gpu_memory_mb,
+                     concurrency=excluded.concurrency, remote_addr=excluded.remote_addr,
+                     status=excluded.status, admin_status=excluded.admin_status,
+                     current_job=excluded.current_job, current_step=excluded.current_step,
+                     tasks_completed=excluded.tasks_completed, tasks_failed=excluded.tasks_failed,
+                     total_duration_sec=excluded.total_duration_sec,
+                     first_seen=excluded.first_seen, started_at=excluded.started_at,
+                     last_heartbeat=excluded.last_heartbeat, admin_note=excluded.admin_note""",
                 (
                     worker.id,
                     worker.type,
@@ -1011,6 +1029,35 @@ class Database:
                 (completed, failed, duration, worker_id),
             )
             self._conn.commit()
+
+    def set_worker_desired_config(self, worker_id: str, config: dict) -> int:
+        """写中心期望配置并 cfg_rev+1(单调);返回新 rev,worker 不存在返回 -1。
+        config 只存显式指定的键(pools/concurrency/tags/reject_tags),worker 端按键应用。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT cfg_rev FROM workers WHERE id=?", (worker_id,)
+            ).fetchone()
+            if cur is None:
+                return -1
+            rev = (cur["cfg_rev"] or 0) + 1
+            self._conn.execute(
+                "UPDATE workers SET desired_config=?, cfg_rev=? WHERE id=?",
+                (json.dumps(config), rev, worker_id),
+            )
+            self._conn.commit()
+            return rev
+
+    def get_worker_desired_config(self, worker_id: str) -> tuple[dict | None, int]:
+        """读中心期望配置;(None, 0) = 未配置/worker 不存在(worker 端视为尊重自报)。"""
+        row = self._conn.execute(
+            "SELECT desired_config, cfg_rev FROM workers WHERE id=?", (worker_id,)
+        ).fetchone()
+        if row is None or not row["desired_config"]:
+            return None, (row["cfg_rev"] or 0) if row else 0
+        try:
+            return json.loads(row["desired_config"]), row["cfg_rev"] or 0
+        except (ValueError, TypeError):
+            return None, row["cfg_rev"] or 0
 
     def update_worker_heartbeat(
         self,
@@ -2563,4 +2610,9 @@ class Database:
             started_at=_parse_dt(row["started_at"]),
             last_heartbeat=_parse_dt(row["last_heartbeat"]),
             admin_note=row["admin_note"],
+            desired_config=(
+                json.loads(row["desired_config"])
+                if "desired_config" in row.keys() and row["desired_config"] else None
+            ),
+            cfg_rev=(row["cfg_rev"] or 0) if "cfg_rev" in row.keys() else 0,
         )

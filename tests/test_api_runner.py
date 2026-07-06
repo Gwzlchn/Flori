@@ -151,7 +151,8 @@ class TestHeartbeat:
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
-        assert resp.json() == {"ok": True}
+        # 心跳响应即配置热下发通道(docs/03 §1.7.2):未配置时 desired_config=None/rev=0。
+        assert resp.json() == {"ok": True, "desired_config": None, "cfg_rev": 0}
 
     @pytest.mark.asyncio
     async def test_heartbeat_writes_live_load(self, client, redis_mock):
@@ -837,3 +838,39 @@ class TestDispatchCredentials:
         )
         assert resp.status_code == 200
         assert resp.json()["value"] is None
+
+
+class TestConfigDispatch:
+    """运行配置热下发(docs/03 §1.7.2):注册/心跳响应带 desired_config+cfg_rev;
+    心跳回报 applied_cfg_rev 落 redis hash。"""
+
+    @pytest.mark.asyncio
+    async def test_register_response_carries_config(self, client, db):
+        from shared.models import Worker as _W
+        db.upsert_worker(_W(id="cpu-pre001", type="cpu", pools=["cpu"]))
+        db.set_worker_desired_config("cpu-pre001", {"concurrency": 6})
+        resp = await _register(client, worker_id="cpu-pre001")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["desired_config"] == {"concurrency": 6} and body["cfg_rev"] == 1
+
+    @pytest.mark.asyncio
+    async def test_register_without_config_returns_null(self, client):
+        resp = await _register(client)
+        body = resp.json()
+        assert body["desired_config"] is None and body["cfg_rev"] == 0
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_reports_applied_and_returns_config(self, client, db, redis_mock):
+        resp = await _register(client, worker_id="cpu-hb001")
+        token = resp.json()["worker_token"]
+        db.set_worker_desired_config("cpu-hb001", {"pools": ["cpu", "io"]})
+        r = await client.post(
+            "/api/runner/heartbeat",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"worker_id": "cpu-hb001", "applied_cfg_rev": 3},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["desired_config"] == {"pools": ["cpu", "io"]} and body["cfg_rev"] == 1
+        redis_mock.set_worker_field.assert_any_call("cpu-hb001", "cfg_applied_rev", "3")

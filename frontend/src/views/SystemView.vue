@@ -22,7 +22,7 @@ import { COMPONENT_KIND_LABELS } from '../types'
 import {
   Server, RefreshCw, Cpu, Pause, Play, MessageSquare, X, Plus,
   Key, Copy, Check, Layers, HardDrive, Database, Boxes, AlertTriangle,
-  Coins, Braces, Network,
+  Coins, Braces, Network, Settings,
 } from 'lucide-vue-next'
 
 const router = useRouter()
@@ -348,7 +348,6 @@ const newTags = ref('')
 const activeTab = ref<(typeof TABS)[number]['id']>('gateway')
 const token = ref('')
 const minting = ref(false)
-const newConcurrency = ref(1)
 const AI_CRED_METHODS = [
   { id: 'claude-sub', label: 'Claude 订阅(共享 ~/.claude)' },
   { id: 'anthropic', label: 'Anthropic API Key' },
@@ -356,33 +355,37 @@ const AI_CRED_METHODS = [
 ] as const
 const aiCredMethod = ref<(typeof AI_CRED_METHODS)[number]['id']>('claude-sub')
 
-// worker 自报 rebuild spec → 一键复制等效重建命令(与接入向导同一套 image/格式;
-// registration token 不随 spec 存储,占位由用户粘贴或重新生成)。
-function rebuildCmd(w: Worker): string {
-  const rb = (w.spec as any)?.rebuild
-  if (!rb) return ''
-  const envs: string[] = []
-  envs.push(`  -e GATEWAY_URL=${rb.GATEWAY_URL || gatewayUrl.value} \\`)
-  envs.push('  -e WORKER_REGISTRATION_TOKEN=<flw-token,可在上方重新生成> \\')
-  if (rb.WORKER_NAME) envs.push(`  -e WORKER_NAME=${rb.WORKER_NAME} \\`)
-  envs.push(`  -e WORKER_CONCURRENCY=${rb.WORKER_CONCURRENCY || w.concurrency || 1} \\`)
-  for (const k of ['HF_ENDPOINT', 'HF_HUB_DISABLE_XET', 'MODEL_CACHE_DIR', 'HTTPS_PROXY', 'NO_PROXY'])
-    if (rb[k]) envs.push(`  -e ${k}=${rb[k]} \\`)
-  if (rb.MODEL_CACHE_DIR) envs.push('  -v whisper-cache:/cache \\')
-  const name = rb.WORKER_NAME || w.id
-  return `docker rm -f ${name}; docker run -d --restart unless-stopped --pull always${rb.gpus ? ' --gpus all' : ''} \\
-  --name ${name} \\
-${envs.join('\n')}
-  ${IMAGE} \\
-  python -m worker.main --pools ${(w.pools || []).join(' ')}`
+// worker 运行配置中心管理:卡片「配置」编辑池/并发/标签 → PUT /config → 下一心跳热生效
+// (cfg_rev/applied_cfg_rev 比对显示同步态)。重建命令已无必要:参数零漂移,Watchtower 原参重建即最新。
+const cfgEditing = ref('')          // 正在编辑配置的 worker id('' = 无)
+const cfgPools = ref<string[]>([])
+const cfgConcurrency = ref(1)
+const cfgTags = ref('')
+const cfgSaving = ref(false)
+function openCfg(w: Worker) {
+  cfgEditing.value = w.id
+  const d = w.desired_config || {}
+  cfgPools.value = [...(d.pools || w.pools || [])]
+  cfgConcurrency.value = d.concurrency ?? w.concurrency ?? 1
+  cfgTags.value = (d.tags || w.tags || []).join(' ')
 }
-const copiedRebuild = ref('')
-async function copyRebuild(w: Worker) {
-  const c = rebuildCmd(w)
-  if (!c) return
-  await navigator.clipboard.writeText(c)
-  copiedRebuild.value = w.id
-  setTimeout(() => { if (copiedRebuild.value === w.id) copiedRebuild.value = '' }, 2000)
+async function saveCfg(w: Worker) {
+  if (!cfgPools.value.length) return
+  cfgSaving.value = true
+  try {
+    await workerStore.setConfig(w.id, {
+      pools: cfgPools.value,
+      concurrency: cfgConcurrency.value,
+      tags: cfgTags.value.split(/[\s,]+/).filter(Boolean),
+    })
+    cfgEditing.value = ''
+  } finally {
+    cfgSaving.value = false
+  }
+}
+function cfgSyncState(w: Worker): string {
+  if (!w.cfg_rev) return ''
+  return (w.applied_cfg_rev ?? 0) >= w.cfg_rev ? 'synced' : 'pending'
 }
 
 const gatewayUrl = computed(() => {
@@ -419,7 +422,6 @@ const command = computed(() => {
   -e GATEWAY_URL=${gatewayUrl.value} \\
   -e WORKER_REGISTRATION_TOKEN=${tokenLine.value} \\
   -e WORKER_NAME=${nameBase.value}-1 \\
-  -e WORKER_CONCURRENCY=${newConcurrency.value} \\
 ${credLines.value}${cacheLine.value}  ${IMAGE} \\
   ${runCmd.value}`
   }
@@ -436,13 +438,12 @@ ${credLines.value}${cacheLine.value}  ${IMAGE} \\
       - REDIS_URL=redis://redis:6379/0
       - DATA_DIR=/data
       - WORKER_NAME=${nameBase.value}-1
-      - WORKER_CONCURRENCY=${newConcurrency.value}
 ${credCompose}    depends_on: [ redis ]`
   }
   return `docker run -d --restart unless-stopped${gpuFlag.value} \\
   -e REDIS_URL=redis://<HOST>:6379/0 \\
   -e MINIO_URL=<HOST>:9000 -e MINIO_ACCESS_KEY=<KEY> -e MINIO_SECRET_KEY=<SECRET> -e MINIO_BUCKET=flori \\
-  -e DATA_DIR=/data -e WORK_DIR=/tmp/flori-work -e WORKER_CONCURRENCY=${newConcurrency.value} \\
+  -e DATA_DIR=/data -e WORK_DIR=/tmp/flori-work \\
 ${credLines.value}${cacheLine.value}  -v flori-data:/data \\
   ${IMAGE} \\
   ${runCmd.value}`
@@ -720,10 +721,6 @@ const usageByProvider = computed(() => {
             <input v-model="newTags" class="input" placeholder="如 home-desktop vision" />
           </div>
         </div>
-        <div class="field" style="margin:0 0 14px;max-width:240px">
-          <label>并发(本机同时跑几步;弱机=1,强机调大)</label>
-          <input v-model.number="newConcurrency" type="number" min="1" class="input" />
-        </div>
         <div v-if="selectedPools.includes('ai')" class="field" style="margin:0 0 14px">
           <label>AI 凭证方式</label>
           <select v-model="aiCredMethod" class="input">
@@ -755,6 +752,7 @@ const usageByProvider = computed(() => {
         <pre style="background:var(--ink-900);color:#cbd5e1;font-family:var(--mono);font-size:12px;padding:12px;border-radius:var(--r-sm);overflow:auto;line-height:1.7;margin:0;white-space:pre-wrap;word-break:break-all">{{ command }}</pre>
         <p class="muted" style="font-size:12px;margin:8px 0 0;line-height:1.7">
           B站 / YouTube 凭证无需配置——中心在任务认领时自动下发(在系统设置扫码 / 上传一次即全网 worker 生效)。
+          并发 / 池 / 标签注册后在 worker 卡片「配置」在线调整,下一心跳热生效;镜像更新交给 Watchtower——启动参数从此零漂移。
           自签证书部署时另加 <code>-e GATEWAY_TLS_INSECURE=1</code>(或 <code>GATEWAY_CA_BUNDLE=&lt;CA路径&gt;</code>)。
         </p>
         <button class="btn sm" style="margin-top:10px" @click="copy(command, 'cmd')">
@@ -796,6 +794,10 @@ const usageByProvider = computed(() => {
               :title="`期望 ${systemVersion}，当前 ${w.spec?.version}`">
               旧版本 {{ verSem(w.spec?.version) }}<span v-if="verBuild(w.spec?.version)">·{{ verBuild(w.spec?.version) }}</span>
             </span>
+            <span v-if="cfgSyncState(w) === 'pending'" class="badge b-warn"
+              title="配置已下发,等待 worker 心跳应用(≤10s)">配置待同步</span>
+            <span v-else-if="cfgSyncState(w) === 'synced'" class="badge b-mut"
+              :title="`中心配置已生效(rev ${w.cfg_rev})`">配置已生效</span>
           </div>
           <div class="wcard-stats">
             <span class="wstat"><b>{{ w.tasks_completed }}</b>完成</span>
@@ -822,21 +824,48 @@ const usageByProvider = computed(() => {
           <button class="btn sm" @click.stop="router.push(`/system/workers/${encodeURIComponent(w.id)}`)">
             <MessageSquare :size="13" />备注
           </button>
-          <button v-if="(w.spec as any)?.rebuild" class="btn sm" title="复制等效 docker 重建命令(镜像 :latest + --pull always)"
-            @click.stop="copyRebuild(w)">
-            <component :is="copiedRebuild === w.id ? Check : Copy" :size="13" />{{ copiedRebuild === w.id ? '已复制' : '重建命令' }}
+          <button class="btn sm" title="中心下发运行配置(池/并发/标签),下一心跳热生效,无需重启容器"
+            @click.stop="cfgEditing === w.id ? (cfgEditing = '') : openCfg(w)">
+            <Settings :size="13" />配置
           </button>
         </template>
         <!-- 移除在所有卡片可用(在线=强制移除);离线只显移除 -->
         <button class="btn sm danger" :disabled="rowBusy === w.id" @click.stop="removeWorker(w)">
           <X :size="13" />移除
         </button>
+        <!-- 中心配置编辑:保存 → PUT /config → 下一心跳热生效(徽标显示同步态) -->
+        <div v-if="cfgEditing === w.id" class="cfg-panel" @click.stop>
+          <div class="field" style="margin:0">
+            <label>能力池</label>
+            <div style="display:flex;gap:14px;flex-wrap:wrap;padding-top:5px">
+              <label v-for="t in WORKER_TYPES" :key="t"
+                     style="display:flex;gap:5px;align-items:center;cursor:pointer;font-weight:normal;margin:0">
+                <input type="checkbox" :value="t" v-model="cfgPools" /> {{ t }}
+              </label>
+            </div>
+          </div>
+          <div class="field" style="margin:0;max-width:130px">
+            <label>并发</label>
+            <input v-model.number="cfgConcurrency" type="number" min="1" max="64" class="input" />
+          </div>
+          <div class="field" style="margin:0;flex:1;min-width:160px">
+            <label>标签(空格分隔)</label>
+            <input v-model="cfgTags" class="input" placeholder="如 vision net-cn" />
+          </div>
+          <button class="btn sm primary" :disabled="cfgSaving || !cfgPools.length" @click="saveCfg(w)">
+            {{ cfgSaving ? '下发中…' : '保存并下发' }}
+          </button>
+        </div>
       </div>
     </div>
   </section>
 </template>
 
 <style scoped>
+.cfg-panel {
+  flex-basis: 100%; display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap;
+  margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line);
+}
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 summary::-webkit-details-marker { display: none; }
