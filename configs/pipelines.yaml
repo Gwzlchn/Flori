@@ -231,7 +231,7 @@ paper:
       extends: .cpu-step
       run: steps.paper.step_02_pdf_parse
       needs: ["01_download"]
-      version: "2"   # 源头重做:HTML 源→干净 MD(原文/翻译/笔记吃它);无 HTML 标记 pdf-only
+      version: "3"   # pdf-only 垃圾标题(内嵌 metadata)启发式改从首页文本提取,失效旧指纹
       # 非中文论文写 needs_translation.json 标记(供 04_translate_paper 的 rules:exists 门控)。
       outputs: ["intermediate/parsed.json", "intermediate/needs_translation.json", "output/original.md"]
 
@@ -249,7 +249,7 @@ paper:
       extends: .ai-step
       run: steps.paper.step_04_translate_paper
       needs: ["03_sections"]
-      version: "3"   # 翻译源切 output/original.md(arxiv-html 干净原文),失效旧指纹
+      version: "4"   # pdf-only 图表占位带页码 + pdftoppm 渲染含图页插真图,失效旧指纹
       # 大论文多 chunk 串行翻译,步墙钟须覆盖全部 chunk(~15 块 × 2-4min);600 默认必超时。
       timeout: 7200
       tags: []

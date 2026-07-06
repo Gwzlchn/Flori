@@ -899,11 +899,17 @@ class Scheduler:
             if published:
                 fields["published_at"] = published
             # 标题:01_download 从源(youtube info.json / article_meta)写入时回填——仅当 DB 标题为空,
-            # 不覆盖订阅/用户已填的标题。覆盖所有创建路径,含手动 URL 投递这类无标题来源。
+            # 不覆盖订阅/用户已填的标题。例外:已入库标题是垃圾(pdf-only 的 PDF 内嵌 metadata,
+            # 如 "10things"/"paper.dvi"/"NBER WORKING PAPER SERIES")且候选明显更像真标题
+            # (非垃圾+含空格+更长)→ 允许覆盖,与 02 步提取共用 shared.titles 同一套判定。
             title = (md.get("title") or "").strip()
             if title:
+                from shared.titles import is_suspicious_title
                 job = await asyncio.to_thread(self.db.get_job, job_id)
-                if job and not (job.title or "").strip():
+                cur = (job.title or "").strip() if job else ""
+                better = (is_suspicious_title(cur) and not is_suspicious_title(title)
+                          and " " in title and len(title) > len(cur))
+                if job and (not cur or better):
                     fields["title"] = title
             if not fields:
                 return

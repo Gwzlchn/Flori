@@ -1,6 +1,7 @@
 """steps/paper/step_04_translate_paper.py 的测试:论文翻译(非中文→中文译文)。"""
 
 import json
+from types import SimpleNamespace
 
 from steps.paper.step_04_translate_paper import TranslatePaperStep
 from tests.steps.conftest import make_step_config
@@ -194,3 +195,48 @@ def test_pdf_only_without_pages_fails_loud(tmp_path, monkeypatch):
     step = TranslatePaperStep("04_translate_paper", job_dir, config)
     with pytest.raises(InputInvalidError):
         step.execute()
+
+
+def test_pdf_only_figure_pages_rendered(tmp_path, monkeypatch):
+    # 带页码的图表占位 → pdftoppm 渲染该页(去重)存 assets/pdf-page-<p>.png,占位行下插图;
+    # 渲染失败页留占位不插图;旧格式【图 N】(无 |页码)不触发。
+    job_dir = _setup(tmp_path)
+    (job_dir / "input").mkdir()
+    (job_dir / "input" / "source.pdf").write_bytes(b"%PDF fake")
+    (job_dir / "intermediate" / "parsed.json").write_text(json.dumps(
+        {"source_kind": "pdf-only", "pages": 4}))
+    (job_dir / "output").mkdir(exist_ok=True)
+    config = make_step_config(tmp_path, step_name="04_translate_paper", pool="ai")
+    step = TranslatePaperStep("04_translate_paper", job_dir, config)
+
+    translated = ("正文…\n【图 1|第 2 页】执行概览\n更多\n"
+                  "【表 2|第 2 页】配置对比\n【图 3|第 9 页】越界忽略\n"
+                  "【图 4】旧格式无页码\n【图 5|第 4 页】失败页")
+    _n = {"i": 0}
+    def _fake_ai(*a, **k):
+        _n["i"] += 1
+        return translated if _n["i"] == 1 else "尾块正文"
+    monkeypatch.setattr(step, "call_ai", _fake_ai)
+
+    rendered_pages = []
+    def fake_subprocess(cmd, timeout=0):
+        # pdftoppm -f p -l p … <td>/page → 第 4 页模拟失败,其余落一个 png
+        page = int(cmd[2])
+        rendered_pages.append(page)
+        if page == 4:
+            raise RuntimeError("render boom")
+        from pathlib import Path as _P
+        _P(cmd[-1] + f"-{page}.png").write_bytes(b"\x89PNG fake")
+        return SimpleNamespace(stdout="")
+    monkeypatch.setattr(step, "run_subprocess", fake_subprocess)
+
+    result = step.execute()
+    # 页 2 只渲染一次;页 9 越界不渲染;页 4 尝试但失败
+    assert rendered_pages == [2, 4]
+    assert (job_dir / "assets" / "pdf-page-2.png").exists()
+    assert not (job_dir / "assets" / "pdf-page-4.png").exists()
+    out = (job_dir / "output" / "translated.md").read_text()
+    assert out.count("![](assets/pdf-page-2.png)") == 2      # 图1/表2 两个占位行下各插一次
+    assert "pdf-page-4.png" not in out and "pdf-page-9.png" not in out
+    assert "【图 4】旧格式无页码" in out                      # 旧格式原样
+    assert result["figure_pages"] == 1

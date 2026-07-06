@@ -87,6 +87,14 @@ class PdfParseStep(StepBase):
         authors = meta.get("authors") or []
         abstract = (meta.get("abstract") or "").strip()
 
+        # pdf-only 的标题唯一来源是 PDF 内嵌 metadata,常为垃圾(编译文件名 "10things"/"paper.dvi"、
+        # 系列名页眉)→ 垃圾时从 pdftotext 首页启发式提真标题(shared.titles,与 scheduler 覆盖判定同套)。
+        from shared.titles import is_suspicious_title, title_from_first_page
+        if is_suspicious_title(title):
+            extracted = self._first_page_title(pdf_path)
+            if extracted:
+                title = extracted
+
         # 语言不可判(不抽正文):按用户约定默认需要翻译(中文会议论文极少;翻译步对中文输入无害)。
         sections = [
             {"level": 1, "title": f"Pages {i}-{min(i + self.PAGES_PER_SECTION - 1, num_pages)}",
@@ -107,6 +115,16 @@ class PdfParseStep(StepBase):
         self.write_output("intermediate/parsed.json", parsed)
         self.write_output("intermediate/needs_translation.json", {"lang": "unknown"})
         return {"source_kind": "pdf-only", "pages": num_pages, "lang": "unknown"}
+
+    def _first_page_title(self, pdf_path) -> str | None:
+        """pdftotext 第 1 页 → shared.titles 启发式提标题;任何失败返 None(保留 metadata 原值)。"""
+        from shared.titles import title_from_first_page
+        try:
+            r = self.run_subprocess(
+                ["pdftotext", "-f", "1", "-l", "1", str(pdf_path), "-"], timeout=60)
+            return title_from_first_page(r.stdout or "")
+        except Exception:
+            return None
 
     def _pdf_page_count(self, pdf_path) -> int:
         """poppler `pdfinfo` 取页数;失败(损坏 PDF/缺 poppler)fail-loud——页数是直喂分块的地基。"""

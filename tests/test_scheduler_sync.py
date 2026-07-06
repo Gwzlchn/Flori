@@ -80,3 +80,21 @@ async def test_metadata_title_preferred_over_parsed():
     db = _DB(title="")
     await _engine(storage, db)._sync_published_at("jobs_paper_x")
     assert db.updates.get("title") == "来自下载的标题"
+
+
+@pytest.mark.asyncio
+async def test_suspicious_title_overridden_by_better_candidate():
+    # 已入库垃圾标题("10things",pdf-only 内嵌 metadata)→ 允许被更像真标题的候选覆盖。
+    storage = _Storage({"intermediate/parsed.json":
+                        {"title": "Ten Simple Rules for Reproducible Computational Research"}})
+    db = _DB(title="10things")
+    await _engine(storage, db)._sync_published_at("j1")
+    assert db.updates.get("title") == "Ten Simple Rules for Reproducible Computational Research"
+
+
+@pytest.mark.asyncio
+async def test_normal_title_still_not_overwritten():
+    storage = _Storage({"intermediate/parsed.json": {"title": "Some Other Candidate Title"}})
+    db = _DB(title="A Perfectly Good Existing Title")
+    await _engine(storage, db)._sync_published_at("j1")
+    assert "title" not in db.updates

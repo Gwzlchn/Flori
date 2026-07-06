@@ -141,9 +141,55 @@ class TranslatePaperStep(StepBase):
                                       max_turns=(b - a + 1) * 2 + 4).strip())
         self.report_progress(len(ranges), len(ranges), "done")
         result = "\n\n".join(parts)
+        result, fig_pages = self._embed_figure_pages(result, pdf, pages)
         self.write_output("output/translated.md", result)
         return {"chars": len(result), "chunks": len(ranges), "mode": "pdf-direct",
+                "figure_pages": fig_pages,
                 "provider": self.last_ai_provider, "model": self.last_ai_model}
+
+    # 占位行:【图 N|第 p 页】/【表 N|第 p 页】(prompt 规则 3;旧译文无 |页码 → 不匹配自然跳过)。
+    _FIG_PAGE_RE = __import__("re").compile(r"【[图表]\s*[\d.]+[^】|]*\|\s*第\s*(\d+)\s*页】")
+
+    def _embed_figure_pages(self, text: str, pdf, total_pages: int) -> tuple[str, int]:
+        """图表真图兜底:PDF 矢量图无法通用抽取(pdfimages 只认位图,Raft 全 stencil 实证)→
+        渲染占位所在整页(pdftoppm)为 assets/pdf-page-<p>.png,插在占位行下一行。
+        单页渲染失败只 warn 留占位;整体 best-effort 不失败翻译步。"""
+        import shutil
+        import tempfile
+
+        pages = sorted({int(m.group(1)) for m in self._FIG_PAGE_RE.finditer(text)
+                        if 1 <= int(m.group(1)) <= total_pages})
+        if not pages:
+            return text, 0
+        assets = self.job_dir / "assets"
+        assets.mkdir(parents=True, exist_ok=True)
+        rendered: set[int] = set()
+        for p in pages:
+            target = assets / f"pdf-page-{p}.png"
+            try:
+                if not target.exists():
+                    with tempfile.TemporaryDirectory() as td:
+                        # -r 110 够看清图又不撑爆体积;单页输出名 pdftoppm 自带页号 padding → glob 取回。
+                        self.run_subprocess(
+                            ["pdftoppm", "-f", str(p), "-l", str(p), "-r", "110",
+                             "-png", str(pdf), f"{td}/page"], timeout=120)
+                        outs = sorted(__import__("pathlib").Path(td).glob("page*.png"))
+                        if not outs:
+                            raise RuntimeError("pdftoppm produced no png")
+                        shutil.copyfile(outs[0], target)
+                rendered.add(p)
+            except Exception as e:
+                self.log.warning("figure_page_render_failed", page=p, error=str(e)[:120])
+        if not rendered:
+            return text, 0
+        out_lines: list[str] = []
+        for line in text.splitlines():
+            out_lines.append(line)
+            m = self._FIG_PAGE_RE.search(line)
+            if m and int(m.group(1)) in rendered:
+                out_lines.append("")
+                out_lines.append(f"![](assets/pdf-page-{int(m.group(1))}.png)")
+        return "\n".join(out_lines), len(rendered)
 
 
 # pdf-only 直喂的分块翻译 prompt(= 外置模板 templates/04_translate_paper.pdf.md;
@@ -155,7 +201,8 @@ _DEFAULT_PDF = (
     "N.M.P 用 ####;无编号的段落小标题(如 Worker Failure)用**加粗**不用 #。"
     "标题翻译成中文,括号保留英文原文(如「## 3 实现(Implementation)」)。\n"
     "2. 不增删内容、不概括;代码/伪代码块用 ``` 围栏原样保留(代码不译,注释可译)。\n"
-    "3. 图表:在图/表出现位置写一行「【图 N】+图注中文翻译」/「【表 N】+…」。\n"
+    "3. 图表:在图/表出现位置写一行「【图 N|第 p 页】+图注中文翻译」/「【表 N|第 p 页】+…」"
+    "(p=该图/表所在的 PDF 页码,即你正在读的页)。\n"
     "4. 页首/页尾被截断的句子照常翻译,不补全不省略(与相邻页区间自然衔接)。\n"
     "5. 引用标记([1]/作者年份)与专有名词原样保留;只输出译文,不要任何解释。\n"
 )
