@@ -349,7 +349,9 @@ class TestGatewayStorage(_GatewayStorageHelpers):
 
         put_urls = [c.args[0] for c in client.put.call_args_list]
         assert put_urls == ["/api/runner/jobs/j1/artifacts/out/n.md"]
-        assert client.put.call_args.kwargs["content"] == b"NOTE"
+        content = client.put.call_args.kwargs["content"]
+        # 大文件流式上传:content 是 async 生成器,消费后应还原完整字节
+        assert b"".join([c async for c in content]) == b"NOTE"
 
     @pytest.mark.asyncio
     async def test_read_file_404_returns_none(self, tmp_path):

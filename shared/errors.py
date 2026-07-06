@@ -96,6 +96,8 @@ RETRY_POLICY: dict[str, dict] = {
     # 限流:用量窗口恢复以分钟/小时计,用递增长退避耐心等待,而非 90s 内烧完重试转终态。
     "ai_rate_limit": {"max": 5, "delay": [300, 600, 1200, 1800, 1800]},
     "timeout": {"max": 1, "delay": [10]},
+    # 产物上传失败多为网络抖动/慢链路(远程 worker 经公网网关推大文件),值得多试几次。
+    "storage": {"max": 3, "delay": [15, 60, 180]},
     "resource": {"max": 0},
 }
 

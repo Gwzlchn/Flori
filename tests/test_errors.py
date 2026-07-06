@@ -86,7 +86,8 @@ class TestRetryPolicy:
                 ResourceError,
             ]
         }
-        assert all_types == set(RETRY_POLICY.keys())
+        # storage(产物上传失败)由 worker 直接以字符串类型上报,无对应异常类。
+        assert all_types | {"storage"} == set(RETRY_POLICY.keys())
 
     def test_delay_length_ge_max(self):
         for error_type, policy in RETRY_POLICY.items():

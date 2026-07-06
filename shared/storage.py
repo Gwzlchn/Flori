@@ -609,10 +609,20 @@ class GatewayStorage:
             prev = snapshot.get(rel)
             if prev is not None and prev == (st.st_size, st.st_mtime):
                 continue  # 未改动,跳过
-            data = await asyncio.to_thread(path.read_bytes)
+            # 流式分块上传 + 独立长超时:视频等大产物几百 MB,经公网网关(如边缘反代)
+            # 60s 全局超时必挂(实测新裸金属 worker 首批下载 push 超时,httpx 异常 str 还为空);
+            # 整文件 read_bytes 也会顶满内存。read 超时按块计,900s 兜住慢链路整体传输。
+            import httpx
+
+            async def _chunks(fp=path):
+                with open(fp, "rb") as f:
+                    while chunk := f.read(1 << 20):
+                        yield chunk
+
             resp = await self._client().put(
                 f"/api/runner/jobs/{job_id}/artifacts/{rel}",
-                headers=self._auth(), content=data,
+                headers=self._auth(), content=_chunks(),
+                timeout=httpx.Timeout(900, connect=15),
             )
             resp.raise_for_status()
 

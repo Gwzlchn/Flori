@@ -541,7 +541,8 @@ class Worker:
                     await self.storage.push(job_id, step, work_dir)
                 except Exception as push_err:
                     await self.transport.report_failed(
-                        claim, f"artifact push failed: {push_err}"[:500],
+                        claim,
+                        f"artifact push failed: {type(push_err).__name__}: {push_err}"[:500],
                         "storage", duration, start, count_stats=False,
                     )
                     logger.warning(
