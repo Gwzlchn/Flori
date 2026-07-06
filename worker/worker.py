@@ -81,6 +81,18 @@ def _worker_spec() -> dict:
                     break
     except OSError:
         pass
+    # 重建参数:worker 自报启动配置,前端 worker 卡片据此拼"一键重建命令"(与接入向导同套
+    # 拼装,image/格式由前端统一;registration token 不上报,由前端从生成态补占位)。
+    rb: dict = {}
+    for env in ("GATEWAY_URL", "WORKER_NAME", "WORKER_CONCURRENCY",
+                "HF_ENDPOINT", "HF_HUB_DISABLE_XET", "MODEL_CACHE_DIR",
+                "HTTPS_PROXY", "NO_PROXY"):
+        v = os.environ.get(env, "").strip()
+        if v:
+            rb[env] = v
+    if os.environ.get("NVIDIA_VISIBLE_DEVICES"):
+        rb["gpus"] = True
+    spec["rebuild"] = rb
     return spec
 
 # 能力用 --pools 显式表达(worker/main.py),路由按 pool 走。

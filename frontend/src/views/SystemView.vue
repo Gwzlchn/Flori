@@ -356,6 +356,35 @@ const AI_CRED_METHODS = [
 ] as const
 const aiCredMethod = ref<(typeof AI_CRED_METHODS)[number]['id']>('claude-sub')
 
+// worker 自报 rebuild spec → 一键复制等效重建命令(与接入向导同一套 image/格式;
+// registration token 不随 spec 存储,占位由用户粘贴或重新生成)。
+function rebuildCmd(w: WorkerInfo): string {
+  const rb = (w.spec as any)?.rebuild
+  if (!rb) return ''
+  const envs: string[] = []
+  envs.push(`  -e GATEWAY_URL=${rb.GATEWAY_URL || gatewayUrl.value} \\`)
+  envs.push('  -e WORKER_REGISTRATION_TOKEN=<flw-token,可在上方重新生成> \\')
+  if (rb.WORKER_NAME) envs.push(`  -e WORKER_NAME=${rb.WORKER_NAME} \\`)
+  envs.push(`  -e WORKER_CONCURRENCY=${rb.WORKER_CONCURRENCY || w.concurrency || 1} \\`)
+  for (const k of ['HF_ENDPOINT', 'HF_HUB_DISABLE_XET', 'MODEL_CACHE_DIR', 'HTTPS_PROXY', 'NO_PROXY'])
+    if (rb[k]) envs.push(`  -e ${k}=${rb[k]} \\`)
+  if (rb.MODEL_CACHE_DIR) envs.push('  -v whisper-cache:/cache \\')
+  const name = rb.WORKER_NAME || w.id
+  return `docker rm -f ${name}; docker run -d --restart unless-stopped --pull always${rb.gpus ? ' --gpus all' : ''} \\
+  --name ${name} \\
+${envs.join('\n')}
+  ${IMAGE} \\
+  python -m worker.main --pools ${(w.pools || []).join(' ')}`
+}
+const copiedRebuild = ref('')
+async function copyRebuild(w: WorkerInfo) {
+  const c = rebuildCmd(w)
+  if (!c) return
+  await navigator.clipboard.writeText(c)
+  copiedRebuild.value = w.id
+  setTimeout(() => { if (copiedRebuild.value === w.id) copiedRebuild.value = '' }, 2000)
+}
+
 const gatewayUrl = computed(() => {
   const o = typeof window !== 'undefined' ? window.location?.origin : ''
   return o && o.startsWith('http') ? o : 'https://<FLORI_HOST>'
@@ -792,6 +821,10 @@ const usageByProvider = computed(() => {
           </button>
           <button class="btn sm" @click.stop="router.push(`/system/workers/${encodeURIComponent(w.id)}`)">
             <MessageSquare :size="13" />备注
+          </button>
+          <button v-if="(w.spec as any)?.rebuild" class="btn sm" title="复制等效 docker 重建命令(镜像 :latest + --pull always)"
+            @click.stop="copyRebuild(w)">
+            <component :is="copiedRebuild === w.id ? Check : Copy" :size="13" />{{ copiedRebuild === w.id ? '已复制' : '重建命令' }}
           </button>
         </template>
         <!-- 移除在所有卡片可用(在线=强制移除);离线只显移除 -->
