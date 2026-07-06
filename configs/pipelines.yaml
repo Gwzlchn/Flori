@@ -187,12 +187,22 @@ video:
         text_fallback: {provider: $AI_SMART_TEXT_PROVIDER, model: $AI_SMART_TEXT_MODEL}
       outputs: ["output/versions/notes_smart_*"]
 
+    "12_concepts":
+      label: "概念 + 摘要"
+      extends: .ai-step
+      run: steps.article.step_05_concepts
+      version: "3"
+      # 复用 article 概念步:视频以最新版智能笔记为源(必有,11_smart 必跑)。
+      needs: ["11_smart"]
+      timeout: 120
+      tags: []
+
     "12_review":
       label: "评审"
       extends: .review
       run: steps.video.step_12_review
       # 评最新版智能笔记;并读 evidence.json 核 [E#] 忠实性(经传递性排在取证之后)。
-      needs: ["11_smart"]
+      needs: ["12_concepts"]
       tags: []
       timeout: 1800   # claude-cli 对大 prompt(笔记+机械稿)生成评审较慢,给足时间
       ai:
@@ -275,11 +285,22 @@ paper:
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
       outputs: ["output/versions/notes_smart_*"]
 
+    "05_concepts":
+      label: "概念 + 摘要"
+      extends: .ai-step
+      run: steps.article.step_05_concepts
+      version: "3"
+      # 复用 article 概念步(源优先级:智能笔记 > 译文 > 章节,paper 三源俱全)。
+      # 此前 paper 概念只搭 06_review key_terms 便车(无 zh_name/related),图谱边稀疏的根因。
+      needs: ["05_smart_paper"]
+      timeout: 120
+      tags: []
+
     "06_review":
       label: "评审"
       extends: .review
       run: steps.paper.step_06_review
-      needs: ["05_smart_paper"]
+      needs: ["05_concepts"]
       tags: []
       ai:
         primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
@@ -461,11 +482,21 @@ audio:
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
       outputs: ["output/versions/notes_smart_*"]
 
+    "05_concepts":
+      label: "概念 + 摘要"
+      extends: .ai-step
+      run: steps.article.step_05_concepts
+      version: "3"
+      # 复用 article 概念步:播客以智能笔记为源。
+      needs: ["04_smart_podcast"]
+      timeout: 120
+      tags: []
+
     "05_review":
       label: "评审"
       extends: .review
       run: steps.audio.step_05_review
-      needs: ["04_smart_podcast"]
+      needs: ["05_concepts"]
       tags: []
       ai:
         primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}

@@ -52,7 +52,7 @@ _NOTE_FILES = {
 _REVIEW_STEPS = {"12_review", "06_review", "05_review"}  # video / paper / (article|audio)
 # article 链的独立概念步(必跑)是 glossary 的主采集源:评审可选时仍能进图谱。
 # 与 review 双触发无害——add_glossary_suggestion 按 job_id 去重 occurrence(幂等)。
-_CONCEPT_STEPS = {"05_concepts"}
+_CONCEPT_STEPS = {"05_concepts", "12_concepts"}
 # 翻译步:完成后读 output/term_pairs.json,把本篇新定的「英文→中文译名」回流 glossary
 # (术语一致性飞轮:下一篇同域翻译经 input/term_map.json 注入,见 shared/terms.py)。
 _TRANSLATE_STEPS = {"04_translate_paper", "04_translate_article"}
