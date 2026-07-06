@@ -208,8 +208,14 @@ const isArticle = computed(() => job.value?.content_type === 'article')
 const isPaper = computed(() => job.value?.content_type === 'paper')
 const hasReadableOriginal = computed(() => isArticle.value || isPaper.value)
 const paperHtmlSource = computed(() => isPaper.value && job.value?.source_kind === 'arxiv-html')
+const pdfJumpPage = ref(0)   // 译文图占位点击跳原文 PDF 的目标页(0=无;iframe #page= 原生支持)
 const paperPdfUrl = computed(() =>
-  `/api/jobs/${jobId.value}/artifact?path=${encodeURIComponent('input/source.pdf')}`)
+  `/api/jobs/${jobId.value}/artifact?path=${encodeURIComponent('input/source.pdf')}`
+  + (pdfJumpPage.value > 0 ? `#page=${pdfJumpPage.value}` : ''))
+function onPdfPageJump(p: number) {
+  pdfJumpPage.value = p
+  noteVariant.value = 'original'
+}
 // 有无智能笔记:有版本即有(文章关笔记时为空 → 隐藏智能版、机械版即原文)
 const hasSmartNote = computed(() => versions.value.length > 0)
 
@@ -822,7 +828,7 @@ watch(job, (j) => {
           <div class="card pad prose max-w-none">
             <MarkdownViewer
               :content="noteContent" :job-id="jobId" :terms="terms" :domain="domain"
-              @headings="headings = $event"
+              @headings="headings = $event" @pdf-page="onPdfPageJump"
             />
           </div>
           <nav v-if="headings.length" class="toc">

@@ -10,7 +10,11 @@ import 'katex/dist/katex.min.css'
 // terms/domain 用于笔记内联可点:正文里命中的已接受术语包成链接 → 该领域术语详情。
 // 不传则不做术语链接(其它调用方无需改动)。
 const props = defineProps<{ content: string; jobId: string; terms?: string[]; domain?: string }>()
-const emit = defineEmits<{ headings: [{ id: string; text: string; level: number }[]] }>()
+const emit = defineEmits<{
+  headings: [{ id: string; text: string; level: number }[]]
+  // pdf-only 译文的图占位链接(#pdf-page=N):父组件切「原文」tab 并让 PDF iframe 跳该页(原生渲染保真)
+  pdfPage: [number]
+}>()
 
 const router = useRouter()
 const md = new MarkdownIt({ html: false, linkify: true, typographer: true })
@@ -145,6 +149,13 @@ watch(() => renderedDoc.value.headings, (hs) => emit('headings', hs), { immediat
 // 正文图片点击开 lightbox 放大(同一委托)。
 function onClick(e: MouseEvent) {
   const t = e.target as HTMLElement
+  const pdfA = t?.closest?.('a[href^="#pdf-page="]') as HTMLAnchorElement | null
+  if (pdfA) {
+    e.preventDefault()
+    const n = parseInt(pdfA.getAttribute('href')!.slice('#pdf-page='.length), 10)
+    if (n > 0) emit('pdfPage', n)
+    return
+  }
   const a = t?.closest?.('.term-link') as HTMLElement | null
   if (a) {
     e.preventDefault()

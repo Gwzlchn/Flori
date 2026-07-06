@@ -249,7 +249,7 @@ paper:
       extends: .ai-step
       run: steps.paper.step_04_translate_paper
       needs: ["03_sections"]
-      version: "5"   # 术语一致性:chunk 注入 term_map + 回收 term_pairs(工单 26-07-06/04),失效旧指纹
+      version: "6"   # 术语一致性:chunk 注入 term_map + 回收 term_pairs(工单 26-07-06/04),失效旧指纹
       # 大论文多 chunk 串行翻译,步墙钟须覆盖全部 chunk(~15 块 × 2-4min);600 默认必超时。
       timeout: 7200
       tags: []
