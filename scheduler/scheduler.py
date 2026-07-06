@@ -16,7 +16,7 @@ import structlog
 from shared.config import AppConfig, load_config
 from shared.db import Database
 from shared.errors import RETRY_POLICY, get_retry_delay
-from shared.models import Job, JobStatus, Step, StepStatus
+from shared.models import AITask, Job, JobStatus, LLMRequest, Step, StepStatus
 from shared.notify import notify
 from shared.redis_client import RedisClient
 from shared.runner_ops import parse_style_tags
@@ -100,6 +100,8 @@ class Scheduler:
         # 跟踪所有 _delayed_enqueue fire-and-forget 任务,供 shutdown / rerun /
         # job 失败时取消,避免泄漏或旧重试与新状态串台。
         self._delayed_tasks: set[asyncio.Task] = set()
+        # 自动周报结果收割任务(fire-and-forget,done 自摘,防 GC 早收)。
+        self._digest_harvest_tasks: set[asyncio.Task] = set()
         # job_id -> 首次被判定"无 worker 可推进"的时刻,超宽限期才 fail-fast(容忍 worker 重启)。
         self._no_worker_since: dict[str, float] = {}
         # (job_id, step) -> 首次发现"在跑步骤的 worker 上报的 current_step 不是本步"的时刻,
@@ -263,6 +265,7 @@ class Scheduler:
                 await self.check_no_worker()
                 await self.cleanup_stale_workers()
                 await self.reconcile_slots()
+                await self.check_radar_digest()
             except Exception:
                 logger.exception("periodic_error")
             await asyncio.sleep(self._PERIODIC_INTERVAL_SEC)
@@ -316,6 +319,81 @@ class Scheduler:
                 await asyncio.to_thread(self.db.delete_worker, w.id)
                 await self.redis.push_event("worker_cleaned", worker_id=w.id)
                 logger.info("worker_cleaned", worker_id=w.id)
+
+    async def check_radar_digest(self, today=None) -> int:
+        """每周自动周报(09 工单 P3):当天(UTC)是配置星期(env RADAR_DIGEST_CRON_DOW,
+        0=周一,默认 0)则给每个 domain 投 digest AI task。periodic 每 30s 进来,幂等靠
+        redis SET NX 当日锁(锁先置——雷达无动静的库当日也不再重算);本周没新内容/概念
+        变化的库不出空周报。结果经 airesult:{task_id} 取,最新指针落 radar:digest:latest。
+        today 参数仅测试注入。返回本拍投递数。"""
+        try:
+            dow = int(os.environ.get("RADAR_DIGEST_CRON_DOW", "0"))
+        except ValueError:
+            dow = 0
+        d = today or datetime.now(timezone.utc).date()
+        if d.weekday() != dow % 7:
+            return 0
+        # api.services.radar 是纯函数服务层(只依赖 shared.db),调度器可安全复用;
+        # 惰性导入避免 scheduler 启动期背上 api 包。
+        from api.services import radar as radar_service
+        import uuid
+
+        queued = 0
+        for dom in await asyncio.to_thread(self.db.list_domains):
+            domain = dom.get("domain")
+            if not domain:
+                continue
+            if not await self.redis.try_mark_auto_digest(domain, d.isoformat()):
+                continue
+            data = await asyncio.to_thread(radar_service.radar, self.db, domain, 7)
+            if not (data["recent_jobs"] or data["rising_concepts"] or data["new_concepts"]):
+                continue
+            titles = [j["title"] for j in data["recent_jobs"] if j.get("title")]
+            system, user = radar_service.build_digest_prompt(data, titles)
+            task_id = f"at_{uuid.uuid4().hex}"
+            payload = AITask(
+                task_id=task_id,
+                request=LLMRequest(
+                    messages=[{"role": "user", "content": user}], system=system,
+                    max_tokens=2048, temperature=0.7,
+                ),
+                step_name="digest", domain=domain,
+            ).to_task_payload()
+            await self.redis.enqueue_ai_task(payload)
+            queued_at = datetime.now(timezone.utc).isoformat()
+            await self.redis.set_latest_auto_digest(domain, {
+                "task_id": task_id, "queued_at": queued_at,
+            })
+            await self.redis.push_event("radar_digest_queued", domain=domain, task_id=task_id)
+            t = asyncio.create_task(self._harvest_digest_result(domain, task_id, queued_at))
+            self._digest_harvest_tasks.add(t)
+            t.add_done_callback(self._digest_harvest_tasks.discard)
+            queued += 1
+            logger.info("radar_digest_queued", domain=domain, task_id=task_id)
+        return queued
+
+    async def _harvest_digest_result(
+        self, domain: str, task_id: str, queued_at: str,
+        timeout_sec: int = 900, poll_sec: float = 10,
+    ) -> None:
+        """把自动周报结果从 airesult:{task_id}(TTL≈600s)搬进 radar:digest:latest(长存)。
+        没人守屏轮询,ai-worker 完成后由这里收割;超时/失败落 error 供前端提示。"""
+        deadline = time.monotonic() + timeout_sec
+        info = {"task_id": task_id, "queued_at": queued_at}
+        while time.monotonic() < deadline:
+            res = await self.redis.get_ai_result(task_id)
+            if res is not None:
+                info["generated_at"] = datetime.now(timezone.utc).isoformat()
+                if isinstance(res, dict) and res.get("error"):
+                    info["error"] = str(res["error"])[:300]
+                else:
+                    info["markdown"] = (res or {}).get("content", "")
+                await self.redis.set_latest_auto_digest(domain, info)
+                await self.redis.push_event("radar_digest_ready", domain=domain, task_id=task_id)
+                return
+            await asyncio.sleep(poll_sec)
+        info["error"] = "digest result timeout"
+        await self.redis.set_latest_auto_digest(domain, info)
 
     async def _recover(self) -> None:
         """启动恢复:补推满足依赖的步骤,回收无主 running 步骤。"""
@@ -498,8 +576,14 @@ class Scheduler:
             tmap: dict[str, str] = {}
             for r in rows:
                 pair = zh_name_from_glossary_row(r.get("term") or "", r.get("zh_name"), r.get("definition") or "")
-                if pair:
-                    tmap[pair[0]] = pair[1]
+                if not pair:
+                    continue
+                tmap[pair[0]] = pair[1]
+                # 实体的英文别名(P1 归并变体)映射到同一译名,别名命中同样注入。
+                for alias in (r.get("aliases") or []):
+                    ap = zh_name_from_glossary_row(alias, pair[1], "")
+                    if ap:
+                        tmap.setdefault(ap[0], ap[1])
             if job.collection_id:
                 raw = await self.storage.read_file(f"collections/{job.collection_id}", "terms.json")
                 if raw:

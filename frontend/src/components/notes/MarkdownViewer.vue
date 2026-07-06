@@ -8,8 +8,15 @@ import katexPlugin from '@vscode/markdown-it-katex'
 import 'katex/dist/katex.min.css'
 
 // terms/domain 用于笔记内联可点:正文里命中的已接受术语包成链接 → 该领域术语详情。
-// 不传则不做术语链接(其它调用方无需改动)。
-const props = defineProps<{ content: string; jobId: string; terms?: string[]; domain?: string }>()
+// 不传则不做术语链接(其它调用方无需改动)。元素可为裸串(旧用法)或实体对象——
+// 后者的 zh_name/aliases 一并命中(中文正文里中文说法也高亮),链接统一指向主名。
+type TermRef = { term: string; zh_name?: string; aliases?: string[] }
+const props = defineProps<{
+  content: string
+  jobId: string
+  terms?: Array<string | TermRef>
+  domain?: string
+}>()
 const emit = defineEmits<{
   headings: [{ id: string; text: string; level: number }[]]
   // pdf-only 译文的图占位链接(#pdf-page=N):父组件切「原文」tab 并让 PDF iframe 跳该页(原生渲染保真)
@@ -21,18 +28,31 @@ const md = new MarkdownIt({ html: false, linkify: true, typographer: true })
 md.use(katexPlugin, { throwOnError: false })   // 非法 LaTeX 红字降级,不炸整页渲染
 
 // 术语链接状态(在 rendered 计算里按当前 props 更新;ruler 闭包读取)。
-const termLink: { set: Set<string>; re: RegExp | null; linked: Set<string> } = {
-  set: new Set(), re: null, linked: new Set(),
+// map: 小写变体名 → 实体主名;linked 按主名去重(同一概念的任一变体只链首次出现)。
+const termLink: { map: Map<string, string>; re: RegExp | null; linked: Set<string> } = {
+  map: new Map(), re: null, linked: new Set(),
 }
 function escAttr(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
-function buildTermRegex(terms: string[]): RegExp | null {
-  const valid = [...new Set(terms.filter(t => t && t.length >= 2))].sort((a, b) => b.length - a.length)
-  termLink.set = new Set(valid)
-  if (!valid.length) return null
-  const esc = valid.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-  return new RegExp('(' + esc.join('|') + ')', 'g')
+function buildTermRegex(terms: Array<string | TermRef>): RegExp | null {
+  const map = new Map<string, string>()
+  for (const t of terms) {
+    const canonical = typeof t === 'string' ? t : t.term
+    if (!canonical) continue
+    const variants = typeof t === 'string' ? [t] : [t.term, t.zh_name || '', ...(t.aliases || [])]
+    for (const v of variants) {
+      if (v && v.length >= 2 && !map.has(v.toLowerCase())) map.set(v.toLowerCase(), canonical)
+    }
+  }
+  termLink.map = map
+  if (!map.size) return null
+  const names = [...map.keys()].sort((a, b) => b.length - a.length)   // 长词优先,防短词截断长词
+  const esc = names
+    .map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    // 纯 ASCII 变体加词边界:大小写不敏感后 "AI" 会命中 "SAID" 内部;中文无词边界概念,原样。
+    .map(n => (/^[\x20-\x7e]+$/.test(n) ? `(?<![A-Za-z0-9])${n}(?![A-Za-z0-9])` : n))
+  return new RegExp('(' + esc.join('|') + ')', 'gi')
 }
 
 const defaultImageRule = md.renderer.rules.image!
@@ -98,10 +118,12 @@ md.core.ruler.after('timestamp_marks', 'term_links', (state: any) => {
       if (parts.length === 1) { newChildren.push(child); continue }
       for (const part of parts) {
         if (!part) continue
-        if (termLink.set.has(part) && !termLink.linked.has(part)) {
-          termLink.linked.add(part)
+        const canonical = termLink.map.get(part.toLowerCase())
+        if (canonical && !termLink.linked.has(canonical)) {
+          termLink.linked.add(canonical)
           const a = new state.Token('html_inline', '', 0)
-          a.content = `<a class="term-link" data-term="${escAttr(part)}">${escAttr(part)}</a>`
+          // data-term 用主名:变体命中也跳实体详情页。
+          a.content = `<a class="term-link" data-term="${escAttr(canonical)}">${escAttr(part)}</a>`
           newChildren.push(a)
         } else {
           const t = new state.Token('text', '', 0)

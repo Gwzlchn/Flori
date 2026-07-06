@@ -99,12 +99,55 @@ describe('GlossaryView', () => {
     api.get.mockResolvedValue([makeTerm({ term: '候选词', status: 'suggested' })])
     const w = factory()
     await flushPromises()
-    const acceptBtn = w.findAll('button').find((b) => b.text().includes('采纳'))
+    // 精确匹配行内「采纳」:区分于区头的「全部采纳」批量按钮。
+    const acceptBtn = w.findAll('button').find((b) => b.text() === '采纳')
     expect(acceptBtn).toBeTruthy()
     await acceptBtn!.trigger('click')
     await flushPromises()
     expect(api.post).toHaveBeenCalledWith(
       '/api/glossary/' + encodeURIComponent('机器学习') + '/' + encodeURIComponent('候选词') + '/accept',
+    )
+  })
+
+  it('全部采纳：POST /api/glossary/batch(action=accept,全量候选)', async () => {
+    api.get.mockResolvedValue([makeTerm({ term: '候选词', status: 'suggested' })])
+    api.post.mockResolvedValue({ updated: 1, skipped: 0 })
+    const w = factory()
+    await flushPromises()
+    const batchBtn = w.findAll('button').find((b) => b.text().includes('全部采纳'))
+    expect(batchBtn).toBeTruthy()
+    await batchBtn!.trigger('click')
+    await flushPromises()
+    expect(api.post).toHaveBeenCalledWith('/api/glossary/batch', {
+      action: 'accept',
+      items: [{ domain: '机器学习', term: '候选词' }],
+    })
+  })
+
+  it('驳回候选：POST reject', async () => {
+    api.get.mockResolvedValue([makeTerm({ term: '垃圾词', status: 'suggested' })])
+    const w = factory()
+    await flushPromises()
+    const rejectBtn = w.findAll('button').find((b) => (b.attributes('title') || '').includes('驳回'))
+    expect(rejectBtn).toBeTruthy()
+    await rejectBtn!.trigger('click')
+    await flushPromises()
+    expect(api.post).toHaveBeenCalledWith(
+      '/api/glossary/' + encodeURIComponent('机器学习') + '/' + encodeURIComponent('垃圾词') + '/reject',
+    )
+  })
+
+  it('关注概念：POST watch(watched 取反)', async () => {
+    api.get.mockResolvedValue([makeTerm({ term: '好词', status: 'accepted', watched: false })])
+    const w = factory()
+    await flushPromises()
+    const watchBtn = w.findAll('button').find((b) => (b.attributes('title') || '').includes('关注'))
+    expect(watchBtn).toBeTruthy()
+    await watchBtn!.trigger('click')
+    await flushPromises()
+    expect(api.post).toHaveBeenCalledWith(
+      '/api/glossary/' + encodeURIComponent('机器学习') + '/' + encodeURIComponent('好词') + '/watch',
+      { watched: true },
     )
   })
 

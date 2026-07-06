@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useApi } from '../composables/useApi'
 import { useDomainStore } from '../stores/domains'
 import StatusBadge from '../components/common/StatusBadge.vue'
 import ProfileEditor from '../components/settings/ProfileEditor.vue'
@@ -126,6 +127,22 @@ async function load() {
   } finally {
     loading.value = false
   }
+  void loadWatchedHint()
+}
+
+// 关注概念提示条(P3):近 7 天窗口内有新出现的 watched 概念 → 顶部提示,点击去雷达页。
+// best-effort:雷达失败不影响工作台主体。
+const api = useApi()
+const watchedActive = ref<{ term: string; recent: number }[]>([])
+async function loadWatchedHint() {
+  try {
+    const r = await api.get<{ watched_concepts?: { term: string; recent: number }[] }>(
+      `/api/domains/${encodeURIComponent(domain.value)}/radar?window_days=7`,
+    )
+    watchedActive.value = (r?.watched_concepts ?? []).filter((c) => c.recent > 0)
+  } catch {
+    watchedActive.value = []
+  }
 }
 
 // 支持深链 ?tab=graph(如概念库「查看图谱」入口);仅接受已知 tab 值,否则默认内容。
@@ -182,6 +199,22 @@ function onProfileSaved() {
       <button class="btn sm" @click="load">
         <RefreshCw :size="13" :class="{ spin: loading }" />刷新
       </button>
+    </div>
+
+    <!-- 关注概念动静提示条(点击去雷达页) -->
+    <div
+      v-if="watchedActive.length"
+      class="card pad"
+      data-test="watched-hint"
+      style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer;border-color:var(--warn-bd,#e8c78a)"
+      @click="router.push(`/kb/${encodeURIComponent(domain)}/radar`)"
+    >
+      <Star :size="15" style="color:var(--warn,#cb7b1f);flex:none" />
+      <span style="font-size:13px;color:var(--ink-700);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+        你关注的 {{ watchedActive.length }} 个概念本周有新动静：
+        {{ watchedActive.slice(0, 5).map((c) => `${c.term} +${c.recent}`).join('、') }}
+      </span>
+      <ChevronRight :size="15" class="dim" style="margin-left:auto;flex:none" />
     </div>
 
     <!-- 加载态 -->

@@ -131,6 +131,32 @@ class RedisClient:
         raw = await self.r.get(f"airesult:{task_id}")
         return json.loads(raw) if raw else None
 
+    # 自动周报(09 工单 P3)
+
+    async def try_mark_auto_digest(self, domain: str, day: str, ttl_sec: int = 3 * 86400) -> bool:
+        """自动周报当日锁(radar:digest:auto:{domain}:{day},SET NX):True=首次(可投),
+        False=当日已处理。periodic 循环 30s 一拍,靠这把锁幂等。"""
+        return bool(await self.r.set(
+            f"radar:digest:auto:{domain}:{day}", "1", nx=True, ex=ttl_sec,
+        ))
+
+    async def set_latest_auto_digest(self, domain: str, info: dict) -> None:
+        """最新自动周报(radar:digest:latest:{domain},无 TTL,下次覆盖):
+        {task_id, queued_at, [markdown, generated_at, error]}。airesult 的 TTL 只有约 600s,
+        自动周报没人守屏,调度器收割结果后搬到这里长存。"""
+        await self.r.set(
+            f"radar:digest:latest:{domain}", json.dumps(info, ensure_ascii=False),
+        )
+
+    async def get_latest_auto_digest(self, domain: str) -> dict | None:
+        raw = await self.r.get(f"radar:digest:latest:{domain}")
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+
     async def dequeue_step(self, pool: str) -> tuple[dict, float] | None:
         # 仅测试用:生产认领走 dequeue_step_raw(runner_ops/worker transport)。保留薄实现供单测。
         items = await self.r.zpopmin(f"queue:{pool}", count=1)

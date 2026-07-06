@@ -22,6 +22,15 @@ class MergeRequest(BaseModel):
     target: str   # 合并目标(dst)主名;路径里的 term 是被并入方(src)
 
 
+class WatchRequest(BaseModel):
+    watched: bool
+
+
+class BatchRequest(BaseModel):
+    action: str                       # 'accept' | 'reject'
+    items: list[dict]                 # [{domain, term}]
+
+
 router = APIRouter(
     prefix="/api/glossary", tags=["glossary"],
     dependencies=[Depends(verify_token)],
@@ -155,6 +164,69 @@ async def accept_term(
     )
     updated = await asyncio.to_thread(db.get_glossary_term, domain, term)
     return _to_response(updated)
+
+
+@router.post("/{domain}/{term}/reject", response_model=GlossaryTermResponse)
+async def reject_term(domain: str, term: str, db: Database = Depends(get_db)):
+    """驳回概念(P3):status -> 'rejected'。行保留,采集链 resolve 命中即跳过——同名/变体
+    不再被重复建议;列表/图谱/雷达/term_map 默认排除。term 不存在 -> 404。"""
+    validate_path_segment(domain, "domain")
+    ok = await asyncio.to_thread(db.reject_glossary_term, domain, term)
+    if not ok:
+        raise HTTPException(404, "term not found")
+    updated = await asyncio.to_thread(db.get_glossary_term, domain, term)
+    return _to_response(updated)
+
+
+@router.post("/{domain}/{term}/watch", response_model=GlossaryTermResponse)
+async def watch_term(
+    domain: str,
+    term: str,
+    req: WatchRequest,
+    db: Database = Depends(get_db),
+):
+    """关注/取关概念(P3,单用户):watched 概念在雷达页「我关注的概念」区置顶展示近窗动静。
+    term 不存在 -> 404。"""
+    validate_path_segment(domain, "domain")
+    ok = await asyncio.to_thread(db.set_glossary_watched, domain, term, req.watched)
+    if not ok:
+        raise HTTPException(404, "term not found")
+    updated = await asyncio.to_thread(db.get_glossary_term, domain, term)
+    return _to_response(updated)
+
+
+@router.post("/batch")
+async def batch_terms(
+    req: BatchRequest,
+    db: Database = Depends(get_db),
+    config: AppConfig = Depends(get_config),
+):
+    """批量采纳/驳回(P3,待审列表「全部采纳」/多选):action ∈ accept|reject,
+    items=[{domain, term}]。accept 同步进 Profile.terminology(与单条 accept 一致);
+    不存在的条目计入 skipped,不整批失败。返回 {updated, skipped}。"""
+    if req.action not in ("accept", "reject"):
+        raise HTTPException(400, "action must be 'accept' or 'reject'")
+    updated = skipped = 0
+    for it in req.items:
+        domain = (it.get("domain") or "").strip()
+        term = (it.get("term") or "").strip()
+        if not domain or not term:
+            skipped += 1
+            continue
+        validate_path_segment(domain, "domain")
+        row = await asyncio.to_thread(db.get_glossary_term, domain, term)
+        if row is None:
+            skipped += 1
+            continue
+        if req.action == "accept":
+            await asyncio.to_thread(db.accept_glossary_term, domain, term)
+            await asyncio.to_thread(
+                sync_term_to_profile, config, domain, term, row["definition"] or "",
+            )
+        else:
+            await asyncio.to_thread(db.reject_glossary_term, domain, term)
+        updated += 1
+    return {"updated": updated, "skipped": skipped}
 
 
 @router.post("/{domain}/{term}/topic", response_model=GlossaryTermResponse)

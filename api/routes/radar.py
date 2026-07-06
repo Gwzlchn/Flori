@@ -70,3 +70,19 @@ async def post_digest(
         }
 
     return {"task_id": task_id, "window": radar_data["window"]}
+
+
+@router.get("/{domain}/digest/latest")
+async def get_latest_digest(
+    domain: str,
+    redis: RedisClient = Depends(get_redis),
+):
+    """最新一期自动周报(scheduler 每周定时投递并收割结果,见 §自动周报):
+    {task_id, queued_at, markdown?, generated_at?, error?};从未生成过返回 {task_id: null}。"""
+    validate_path_segment(domain, "domain")
+    try:
+        info = await redis.get_latest_auto_digest(domain)
+    except Exception as e:   # redis 不可用 → 优雅降级,不冒 5xx
+        log.warning("digest_latest_failed", domain=domain, error=str(e))
+        info = None
+    return info or {"task_id": None}

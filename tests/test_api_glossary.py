@@ -98,8 +98,8 @@ class TestManualCRUD:
 class TestSuggestionFlow:
     @pytest.mark.asyncio
     async def test_suggestion_shows_in_suggested_list(self, client, db):
+        # 单 job 出现 → 留候选;第二个不同 job 触发自动晋升(P3),另测。
         db.add_glossary_suggestion("ml", "Transformer", "job-1", "video")
-        db.add_glossary_suggestion("ml", "Transformer", "job-2", "paper")
         resp = await client.get("/api/glossary?domain=ml&status=suggested")
         assert resp.status_code == 200
         items = resp.json()
@@ -107,7 +107,14 @@ class TestSuggestionFlow:
         assert items[0]["term"] == "Transformer"
         assert items[0]["status"] == "suggested"
         # occurrences 记录类型化出现(job + content_type),用于前端显示出现数/来源多样性。
-        assert {o["job_id"] for o in items[0]["occurrences"]} == {"job-1", "job-2"}
+        assert {o["job_id"] for o in items[0]["occurrences"]} == {"job-1"}
+
+    @pytest.mark.asyncio
+    async def test_second_job_auto_promotes(self, client, db):
+        db.add_glossary_suggestion("ml", "Transformer", "job-1", "video")
+        db.add_glossary_suggestion("ml", "Transformer", "job-2", "paper")
+        items = (await client.get("/api/glossary?domain=ml&status=accepted")).json()
+        assert len(items) == 1 and items[0]["term"] == "Transformer"
         assert {o["content_type"] for o in items[0]["occurrences"]} == {"video", "paper"}
 
     @pytest.mark.asyncio

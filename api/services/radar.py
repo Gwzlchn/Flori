@@ -41,7 +41,9 @@ def radar(db: Database, domain: str, window_days: int = 7) -> dict:
       new_concepts:    首次出现(最早 occurrence 时间)落在最近窗口的概念 [{term,definition,first_seen}]
       recent_jobs:     最近窗口入库/发布的内容 [{job_id,title,published_at,content_type}]
       top_recent_concepts: 最近窗口出现次数最多的概念 [{term,recent}]
+      watched_concepts: 关注(watched=1)的概念 [{term,zh_name,recent,total}],近窗有新出现的置顶
       window: {days, since, until}(ISO)
+    统计口径:rejected(已驳回)概念不参与(concept_occurrence_dates/list_glossary 已排除)。
     """
     days = max(1, int(window_days))
     now = datetime.now(timezone.utc)
@@ -54,10 +56,12 @@ def radar(db: Database, domain: str, window_days: int = 7) -> dict:
     rising: list[dict] = []
     new_concepts: list[dict] = []
     top_recent: list[dict] = []
+    watched: list[dict] = []
 
-    # 概念定义(new_concepts 需要),按 term 建索引,避免 N 次单查。
-    defs = {g["term"]: (g.get("definition") or "") for g in db.list_glossary(domain)}
+    # 概念行索引(定义/watched/zh_name),避免 N 次单查。
+    rows = {g["term"]: g for g in db.list_glossary(domain)}
 
+    recent_counts: dict[str, int] = {}
     for term, raw_dates in occ_dates.items():
         dts = [d for d in (_parse(x) for x in raw_dates) if d is not None]
         if not dts:
@@ -65,6 +69,7 @@ def radar(db: Database, domain: str, window_days: int = 7) -> dict:
         recent_n = sum(1 for d in dts if since <= d < now)
         prior_n = sum(1 for d in dts if prior_since <= d < since)
         first_seen = min(dts)
+        recent_counts[term] = recent_n
 
         if recent_n > prior_n:
             rising.append({
@@ -75,15 +80,28 @@ def radar(db: Database, domain: str, window_days: int = 7) -> dict:
         if since <= first_seen < now:
             new_concepts.append({
                 "term": term,
-                "definition": defs.get(term, ""),
+                "definition": (rows.get(term) or {}).get("definition") or "",
                 "first_seen": first_seen.isoformat(),
             })
         if recent_n > 0:
             top_recent.append({"term": term, "recent": recent_n})
 
+    # 我关注的概念:watch 全量列出(近窗有动静的排前),不足以出现次数为门槛——
+    # 关注本身就是"有动静要告诉我"的订阅。
+    for term, g in rows.items():
+        if not g.get("watched"):
+            continue
+        watched.append({
+            "term": term,
+            "zh_name": g.get("zh_name") or "",
+            "recent": recent_counts.get(term, 0),
+            "total": len(g.get("occurrences") or []),
+        })
+
     rising.sort(key=lambda x: (x["delta"], x["recent"], x["term"]), reverse=True)
     new_concepts.sort(key=lambda x: x["first_seen"], reverse=True)
     top_recent.sort(key=lambda x: (x["recent"], x["term"]), reverse=True)
+    watched.sort(key=lambda x: (-x["recent"], -x["total"], x["term"]))
 
     # 最近窗口的内容(按时间口径 COALESCE(published_at,created_at) 落在窗口内)。
     # 拉一批近期 job 再按时间过滤:单领域一周入库量有限,limit 500 足够覆盖,无需新建专用 SQL。
@@ -108,6 +126,7 @@ def radar(db: Database, domain: str, window_days: int = 7) -> dict:
         "new_concepts": new_concepts,
         "recent_jobs": recent_jobs,
         "top_recent_concepts": top_recent[:10],
+        "watched_concepts": watched,
         "window": {
             "days": days,
             "since": since.isoformat(),

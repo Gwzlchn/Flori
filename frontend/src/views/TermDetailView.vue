@@ -6,7 +6,7 @@ import { useApi } from '../composables/useApi'
 import { contentTypeIcon, contentTypePill, contentTypeLabel } from '../utils/contentType'
 import type { TermOccurrence, GlossaryTerm } from '../types'
 import {
-  Lightbulb, Bookmark, Check, FileText, Link, MapPin, ChevronRight,
+  Lightbulb, Bookmark, Check, FileText, Link, MapPin, ChevronRight, Star,
 } from 'lucide-vue-next'
 
 // 概念详情页:定义 / 关联概念 / 出现处反查。
@@ -65,6 +65,23 @@ async function toggleTopic() {
   }
 }
 
+// 关注/取关:watched 概念在雷达页「我关注的概念」区跟踪近窗动静。
+const watching = ref(false)
+async function toggleWatch() {
+  if (!data.value || watching.value) return
+  watching.value = true
+  try {
+    data.value = await api.post<GlossaryTerm>(
+      `/api/glossary/${encodeURIComponent(domain.value)}/${encodeURIComponent(term.value)}/watch`,
+      { watched: !data.value.watched },
+    )
+  } catch {
+    // 失败保持原状态,按钮可重试。
+  } finally {
+    watching.value = false
+  }
+}
+
 function goDomain() {
   router.push(`/kb/${encodeURIComponent(domain.value)}`)
 }
@@ -119,9 +136,18 @@ watch(() => [route.params.domain, route.params.term], load)
               <template v-if="aliases.length"> · 别名：{{ aliases.join('、') }}</template>
             </div>
           </div>
-          <button class="btn sm" style="margin-left:auto" :disabled="toggling" @click="toggleTopic">
-            <Bookmark :size="13" />{{ isTopic ? '取消主题' : '标为主题' }}
-          </button>
+          <span style="margin-left:auto;display:flex;gap:8px;flex:none">
+            <button
+              class="btn sm" :disabled="watching"
+              :style="data.watched ? 'color:var(--warn,#cb7b1f);border-color:var(--warn-bd,#e8c78a)' : ''"
+              @click="toggleWatch"
+            >
+              <Star :size="13" :fill="data.watched ? 'currentColor' : 'none'" />{{ data.watched ? '已关注' : '关注' }}
+            </button>
+            <button class="btn sm" :disabled="toggling" @click="toggleTopic">
+              <Bookmark :size="13" />{{ isTopic ? '取消主题' : '标为主题' }}
+            </button>
+          </span>
         </div>
       </div>
 

@@ -196,7 +196,10 @@ const noteContent = ref('')
 const noteLoading = ref(false)
 const noteError = ref('')
 const headings = ref<{ id: string; text: string; level: number }[]>([])
-const terms = ref<string[]>([])    // 已采纳术语(供正文术语链接 + 采纳去重)
+// 已采纳术语实体(供正文术语链接 + 采纳去重):zh_name/aliases 一并传给 MarkdownViewer,
+// 中文说法/变体也高亮到同一实体。
+const terms = ref<{ term: string; zh_name?: string; aliases?: string[] }[]>([])
+const acceptedTermNames = computed(() => new Set(terms.value.map((t) => t.term)))
 
 type Version = { provider: string; model: string; version: string; file: string; review_file: string | null; overall: number | null }
 const versions = ref<Version[]>([])
@@ -256,7 +259,7 @@ async function loadTerms() {
   try {
     const ts = await api.get<GlossaryTerm[]>(`/api/glossary?domain=${encodeURIComponent(domain.value)}&status=accepted`)
     if (jobId.value !== fid) return
-    terms.value = ts.map(t => t.term)
+    terms.value = ts.map(t => ({ term: t.term, zh_name: t.zh_name, aliases: t.aliases }))
   } catch { if (jobId.value === fid) terms.value = [] }
 }
 
@@ -466,7 +469,7 @@ function pollForVersion(provider: string) {
 }
 
 async function acceptKeyTerm(term: string, definition: string) {
-  if (!domain.value || terms.value.includes(term)) return
+  if (!domain.value || acceptedTermNames.value.has(term)) return
   try {
     try {
       await api.post(`/api/glossary/${encodeURIComponent(domain.value)}/${encodeURIComponent(term)}/accept`)
@@ -475,7 +478,7 @@ async function acceptKeyTerm(term: string, definition: string) {
         await api.post(`/api/glossary?domain=${encodeURIComponent(domain.value)}`, { term, definition: definition || null })
       } else { throw e }
     }
-    terms.value.push(term)
+    terms.value.push({ term })
     showToast(`已采纳「${term}」`, 'success')
   } catch (e: any) {
     showToast(e?.message || '采纳失败', 'error')
@@ -803,10 +806,10 @@ watch(job, (j) => {
               <b style="color:var(--ink-900)">{{ kt.term }}</b>
               <button
                 class="btn sm" style="padding:2px 8px;margin-left:6px"
-                :disabled="terms.includes(kt.term)"
-                :style="terms.includes(kt.term) ? 'color:var(--ok);border-color:var(--ok-bd)' : ''"
+                :disabled="acceptedTermNames.has(kt.term)"
+                :style="acceptedTermNames.has(kt.term) ? 'color:var(--ok);border-color:var(--ok-bd)' : ''"
                 @click="acceptKeyTerm(kt.term, kt.definition)"
-              >{{ terms.includes(kt.term) ? '✓ 已采纳' : '采纳' }}</button>
+              >{{ acceptedTermNames.has(kt.term) ? '✓ 已采纳' : '采纳' }}</button>
             </span>
           </div>
         </div>

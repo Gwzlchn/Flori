@@ -6,7 +6,7 @@ import MarkdownViewer from '../components/notes/MarkdownViewer.vue'
 import { fmtDateTime } from '../utils/datetime'
 import { contentTypeIcon, contentTypePill, contentTypeLabel } from '../utils/contentType'
 import {
-  Radar, ChevronRight, TrendingUp, Sparkles, Flame, LayoutList, FileText, ScrollText,
+  Radar, ChevronRight, TrendingUp, Sparkles, Flame, LayoutList, FileText, ScrollText, Star,
 } from 'lucide-vue-next'
 import AiTaskAuditPanel from '../components/job/AiTaskAuditPanel.vue'
 import type { AiTaskResult } from '../types'
@@ -23,11 +23,13 @@ interface Rising { term: string; recent: number; prior: number; delta: number }
 interface NewConcept { term: string; definition: string; first_seen: string }
 interface RecentJob { job_id: string; title: string | null; published_at: string; content_type: string }
 interface TopConcept { term: string; recent: number }
+interface WatchedConcept { term: string; zh_name: string; recent: number; total: number }
 interface RadarData {
   rising_concepts: Rising[]
   new_concepts: NewConcept[]
   recent_jobs: RecentJob[]
   top_recent_concepts: TopConcept[]
+  watched_concepts?: WatchedConcept[]
   window: { days: number; since: string; until: string }
 }
 
@@ -65,6 +67,8 @@ const isEmpty = computed(() =>
   && data.value.new_concepts.length === 0,
 )
 
+const watchedConcepts = computed<WatchedConcept[]>(() => data.value?.watched_concepts ?? [])
+
 async function load() {
   loading.value = true
   error.value = ''
@@ -76,6 +80,23 @@ async function load() {
     error.value = e?.message || '加载知识雷达失败'
   } finally {
     loading.value = false
+  }
+  void loadLatestAutoDigest()
+}
+
+// 自动周报(scheduler 每周投递,结果长存 redis):有历史周报就直接展示,免手动点生成。
+interface LatestDigest { task_id: string | null; queued_at?: string; markdown?: string; generated_at?: string; error?: string }
+const autoDigest = ref<LatestDigest | null>(null)
+async function loadLatestAutoDigest() {
+  try {
+    const r = await api.get<LatestDigest>(
+      `/api/domains/${encodeURIComponent(domain.value)}/digest/latest`,
+    )
+    autoDigest.value = r?.task_id ? r : null
+    // 用户尚未手动生成过 → 把最近一期自动周报直接铺进摘要卡。
+    if (!digest.value && autoDigest.value?.markdown) digest.value = autoDigest.value.markdown
+  } catch {
+    autoDigest.value = null
   }
 }
 
@@ -171,6 +192,24 @@ watch(domain, load)
 
     <!-- 主体 -->
     <template v-else-if="data">
+      <!-- 我关注的概念(watch):近窗有动静的排前 -->
+      <template v-if="watchedConcepts.length">
+        <div class="seclabel" style="margin:22px 0 10px"><Star :size="14" />我关注的概念 · {{ watchedConcepts.length }}</div>
+        <div class="list">
+          <div v-for="c in watchedConcepts" :key="c.term" class="row" @click="goConcept(c.term)">
+            <div class="body">
+              <div class="title">
+                {{ c.term }}<span v-if="c.zh_name && c.zh_name !== c.term" class="dim" style="font-weight:400;font-size:12px;margin-left:6px">{{ c.zh_name }}</span>
+              </div>
+              <div class="meta"><span class="dim">累计出现 {{ c.total }} 处</span></div>
+            </div>
+            <span v-if="c.recent > 0" class="delta-pill">本周 +{{ c.recent }}</span>
+            <span v-else class="dim" style="font-size:12px">本周无动静</span>
+            <ChevronRight :size="16" class="dim" />
+          </div>
+        </div>
+      </template>
+
       <!-- 飙升概念 -->
       <div class="seclabel" style="margin:22px 0 10px"><TrendingUp :size="14" />↑ 飙升概念</div>
       <div v-if="data.rising_concepts.length" class="list">
@@ -220,6 +259,9 @@ watch(domain, load)
         <div v-else-if="digesting" style="text-align:center;color:var(--ink-500);padding:6px 0">生成中…（调用 AI，稍候）</div>
         <template v-else>
           <MarkdownViewer :content="digest" :job-id="''" :domain="domain" />
+          <p v-if="autoDigest?.markdown && digest === autoDigest.markdown" class="muted" style="font-size:12px;margin:8px 0 0">
+            自动周报 · {{ fmtDateTime(autoDigest.generated_at || autoDigest.queued_at || '') }}
+          </p>
           <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
             <button class="btn sm" @click="generateDigest">重新生成</button>
             <button v-if="digestTaskId" class="btn sm" @click="showDigestAudit = !showDigestAudit">

@@ -5,7 +5,8 @@ import { useApi } from '../composables/useApi'
 import StatusBadge from '../components/common/StatusBadge.vue'
 import type { GlossaryTerm } from '../types'
 import {
-  Lightbulb, Plus, Sparkles, CheckCircle2, Check, X, Pencil, Trash2, Bookmark, Share2,
+  Lightbulb, Plus, Sparkles, CheckCircle2, Check, CheckCheck, X, Pencil, Trash2,
+  Bookmark, Share2, Star, Ban,
 } from 'lucide-vue-next'
 
 // 概念库(原型 #glossary): AI 提取候选概念,采纳后沉淀为可检索知识节点。
@@ -17,9 +18,10 @@ const loading = ref(true)
 const error = ref('')
 const terms = ref<GlossaryTerm[]>([])
 
-// 筛选: 知识库(domain) + 状态(suggested/accepted) + 检索 q(term/zh_name/aliases,后端匹配)。
+// 筛选: 知识库(domain) + 状态(suggested/accepted/rejected) + 检索 q(term/zh_name/aliases,后端匹配)。
+// 后端默认排除 rejected,「已驳回」须显式选中才可见。
 const filterDomain = ref('')
-const filterStatus = ref<'' | 'suggested' | 'accepted'>('')
+const filterStatus = ref<'' | 'suggested' | 'accepted' | 'rejected'>('')
 const filterQ = ref('')
 
 const domainOptions = computed(() => {
@@ -28,13 +30,12 @@ const domainOptions = computed(() => {
   return [...set].sort()
 })
 
-const suggested = computed(() =>
-  filterStatus.value === 'accepted' ? [] : terms.value.filter((t) => t.status === 'suggested'),
+const suggested = computed(() => terms.value.filter((t) => t.status === 'suggested'))
+const accepted = computed(() => terms.value.filter((t) => t.status === 'accepted'))
+const rejected = computed(() => terms.value.filter((t) => t.status === 'rejected'))
+const isEmpty = computed(
+  () => suggested.value.length === 0 && accepted.value.length === 0 && rejected.value.length === 0,
 )
-const accepted = computed(() =>
-  filterStatus.value === 'suggested' ? [] : terms.value.filter((t) => t.status === 'accepted'),
-)
-const isEmpty = computed(() => suggested.value.length === 0 && accepted.value.length === 0)
 
 async function loadTerms() {
   loading.value = true
@@ -57,7 +58,7 @@ function goTerm(t: GlossaryTerm) {
   router.push(`/kb/${encodeURIComponent(t.domain)}/concepts/${encodeURIComponent(t.term)}`)
 }
 
-// 采纳 / 删除 / 主题切换
+// 采纳 / 驳回 / 批量 / 关注 / 删除 / 主题切换
 async function acceptTerm(t: GlossaryTerm) {
   try {
     await api.post(`/api/glossary/${encodeURIComponent(t.domain)}/${encodeURIComponent(t.term)}/accept`)
@@ -65,6 +66,59 @@ async function acceptTerm(t: GlossaryTerm) {
     await loadTerms()
   } catch (e: any) {
     showToast(e?.message || '采纳失败', 'error')
+  }
+}
+
+async function rejectTerm(t: GlossaryTerm) {
+  try {
+    await api.post(`/api/glossary/${encodeURIComponent(t.domain)}/${encodeURIComponent(t.term)}/reject`)
+    showToast('已驳回(不再重复建议)', 'success')
+    await loadTerms()
+  } catch (e: any) {
+    showToast(e?.message || '驳回失败', 'error')
+  }
+}
+
+// 待审多选:key = `${domain}/${term}`。
+const selectedKeys = ref<Set<string>>(new Set())
+function keyOf(t: GlossaryTerm) { return `${t.domain}/${t.term}` }
+function toggleSelect(t: GlossaryTerm) {
+  const s = new Set(selectedKeys.value)
+  const k = keyOf(t)
+  if (s.has(k)) s.delete(k)
+  else s.add(k)
+  selectedKeys.value = s
+}
+const selectedItems = computed(() => suggested.value.filter((t) => selectedKeys.value.has(keyOf(t))))
+
+const batching = ref(false)
+async function batchAction(action: 'accept' | 'reject', items: GlossaryTerm[]) {
+  if (!items.length || batching.value) return
+  batching.value = true
+  try {
+    const r = await api.post<{ updated: number }>('/api/glossary/batch', {
+      action,
+      items: items.map((t) => ({ domain: t.domain, term: t.term })),
+    })
+    showToast(`${action === 'accept' ? '已采纳' : '已驳回'} ${r.updated} 条`, 'success')
+    selectedKeys.value = new Set()
+    await loadTerms()
+  } catch (e: any) {
+    showToast(e?.message || '批量操作失败', 'error')
+  } finally {
+    batching.value = false
+  }
+}
+
+async function toggleWatch(t: GlossaryTerm) {
+  try {
+    await api.post(`/api/glossary/${encodeURIComponent(t.domain)}/${encodeURIComponent(t.term)}/watch`, {
+      watched: !t.watched,
+    })
+    showToast(t.watched ? '已取消关注' : '已关注(雷达页可见动静)', 'success')
+    await loadTerms()
+  } catch (e: any) {
+    showToast(e?.message || '操作失败', 'error')
   }
 }
 
@@ -192,6 +246,7 @@ onMounted(loadTerms)
         <option value="">全部状态</option>
         <option value="suggested">候选</option>
         <option value="accepted">已采纳</option>
+        <option value="rejected">已驳回</option>
       </select>
       <input
         v-model="filterQ" class="input" style="max-width:200px"
@@ -225,11 +280,31 @@ onMounted(loadTerms)
     </div>
 
     <template v-else>
-      <!-- 待审建议(候选) -->
+      <!-- 待审建议(候选):支持多选/全部采纳/驳回(status=rejected,不再重复建议) -->
       <template v-if="suggested.length">
-        <div class="seclabel" style="margin-bottom:12px"><Sparkles :size="14" />待审建议 · {{ suggested.length }}</div>
+        <div class="seclabel" style="margin-bottom:12px;display:flex;align-items:center;gap:8px">
+          <Sparkles :size="14" />待审建议 · {{ suggested.length }}
+          <span style="margin-left:auto;display:flex;gap:8px">
+            <template v-if="selectedItems.length">
+              <button class="btn sm" style="color:var(--ok);border-color:var(--ok-bd)" :disabled="batching" @click="batchAction('accept', selectedItems)">
+                <Check :size="13" />采纳选中 {{ selectedItems.length }}
+              </button>
+              <button class="btn sm" :disabled="batching" @click="batchAction('reject', selectedItems)">
+                <Ban :size="13" />驳回选中
+              </button>
+            </template>
+            <button v-else class="btn sm" style="color:var(--ok);border-color:var(--ok-bd)" :disabled="batching" @click="batchAction('accept', suggested)">
+              <CheckCheck :size="13" />全部采纳
+            </button>
+          </span>
+        </div>
         <div class="card pad" style="margin-bottom:26px;border-color:var(--warn-bd)">
           <div v-for="t in suggested" :key="`${t.domain}/${t.term}`" class="occ" style="cursor:default">
+            <input
+              type="checkbox" style="flex:none"
+              :checked="selectedKeys.has(`${t.domain}/${t.term}`)"
+              @change="toggleSelect(t)"
+            />
             <div style="flex:1;min-width:0">
               <div style="display:flex;align-items:center;gap:8px">
                 <span style="font-weight:600;color:var(--ink-900)">{{ t.term }}</span>
@@ -241,6 +316,7 @@ onMounted(loadTerms)
               </div>
             </div>
             <button class="btn sm" style="color:var(--ok);border-color:var(--ok-bd)" @click="acceptTerm(t)"><Check :size="13" />采纳</button>
+            <button class="iconbtn" title="驳回(不再重复建议)" @click="rejectTerm(t)"><Ban :size="14" /></button>
             <button class="iconbtn" title="删除" @click="removeTerm(t)"><X :size="14" /></button>
           </div>
         </div>
@@ -263,12 +339,38 @@ onMounted(loadTerms)
             </div>
             <button
               class="iconbtn"
+              :title="t.watched ? '取消关注' : '关注(雷达页跟踪动静)'"
+              :style="t.watched ? 'color:var(--warn,#cb7b1f)' : ''"
+              @click.stop="toggleWatch(t)"
+            ><Star :size="15" :fill="t.watched ? 'currentColor' : 'none'" /></button>
+            <button
+              class="iconbtn"
               :title="t.is_topic ? '取消主题' : '标为主题'"
               :style="t.is_topic ? 'color:var(--brand-600)' : ''"
               @click.stop="toggleTopic(t)"
             ><Bookmark :size="15" /></button>
             <button class="iconbtn" title="编辑定义" @click.stop="openEdit(t)"><Pencil :size="15" /></button>
             <button class="iconbtn" title="删除" @click.stop="removeTerm(t)"><Trash2 :size="15" /></button>
+          </div>
+        </div>
+      </template>
+
+      <!-- 已驳回(仅显式筛选可见) -->
+      <template v-if="rejected.length">
+        <div class="seclabel" style="margin-bottom:12px"><Ban :size="14" />已驳回 · {{ rejected.length }}</div>
+        <div class="card pad">
+          <div v-for="t in rejected" :key="`${t.domain}/${t.term}`" class="occ" style="cursor:default">
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="font-weight:600;color:var(--ink-500)">{{ t.term }}</span>
+                <span v-if="t.zh_name && t.zh_name !== t.term" class="dim" style="font-size:12px">{{ t.zh_name }}</span>
+              </div>
+              <div class="dim" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;color:var(--ink-500)">
+                {{ t.definition || '暂无定义' }} · 不再被自动建议
+              </div>
+            </div>
+            <button class="btn sm" style="color:var(--ok);border-color:var(--ok-bd)" @click="acceptTerm(t)"><Check :size="13" />恢复采纳</button>
+            <button class="iconbtn" title="彻底删除" @click="removeTerm(t)"><Trash2 :size="14" /></button>
           </div>
         </div>
       </template>

@@ -20,3 +20,42 @@ describe('MarkdownViewer math', () => {
     expect(w.html().length).toBeGreaterThan(0)
   })
 })
+
+// 术语链接(09 工单 P3):大小写不敏感 + zh_name/aliases 双语命中,统一链到实体主名。
+describe('MarkdownViewer term links', () => {
+  const ENTITY = { term: 'Kelly Criterion', zh_name: '凯利准则', aliases: ['kelly formula'] }
+
+  function mountTerms(content: string, terms: any[] = [ENTITY]) {
+    return mount(MarkdownViewer, { props: { content, jobId: '', terms, domain: 'ml' } })
+  }
+
+  it('大小写不敏感命中,data-term 指向主名', () => {
+    const w = mountTerms('这篇讲 kelly criterion 的应用。')
+    const a = w.find('a.term-link')
+    expect(a.exists()).toBe(true)
+    expect(a.attributes('data-term')).toBe('Kelly Criterion')
+    expect(a.text()).toBe('kelly criterion')   // 展示保留原文写法
+  })
+
+  it('zh_name 中文说法同样命中同一实体', () => {
+    const w = mountTerms('本文推导了凯利准则的最优下注比例。')
+    const a = w.find('a.term-link')
+    expect(a.exists()).toBe(true)
+    expect(a.attributes('data-term')).toBe('Kelly Criterion')
+  })
+
+  it('同一实体的多个变体只链首次出现', () => {
+    const w = mountTerms('先讲 Kelly Criterion,再讲凯利准则,最后讲 kelly formula。')
+    expect(w.findAll('a.term-link').length).toBe(1)
+  })
+
+  it('纯 ASCII 术语按词边界匹配,不命中单词内部', () => {
+    const w = mountTerms('shai said something', [{ term: 'AI', zh_name: '', aliases: [] }])
+    expect(w.find('a.term-link').exists()).toBe(false)
+  })
+
+  it('裸字符串 terms(旧用法)仍可用', () => {
+    const w = mountTerms('注意力机制 很重要。', ['注意力机制'])
+    expect(w.find('a.term-link').attributes('data-term')).toBe('注意力机制')
+  })
+})

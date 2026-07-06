@@ -234,6 +234,7 @@ CREATE TABLE IF NOT EXISTS glossary (
     occurrences TEXT DEFAULT '[]',
     related TEXT DEFAULT '[]',
     status TEXT DEFAULT 'accepted',
+    watched INTEGER DEFAULT 0,
     is_topic INTEGER DEFAULT 0,
     definition_locked INTEGER DEFAULT 0,
     created_at TEXT,
@@ -482,6 +483,8 @@ class Database:
             "zh_name": "zh_name TEXT DEFAULT ''",
             # 概念实体化(09 工单):变体名归并留痕,resolve 用其归一键匹配。
             "aliases": "aliases TEXT DEFAULT '[]'",
+            # 概念订阅(09 工单 P3):单用户 watch 标记,雷达「我关注的概念」区数据源。
+            "watched": "watched INTEGER DEFAULT 0",
             "is_topic": "is_topic INTEGER DEFAULT 0",
             "definition_locked": "definition_locked INTEGER DEFAULT 0",
         },
@@ -718,8 +721,9 @@ class Database:
         return {"source": grp("source"), "domain": grp("domain"), "status": grp("status")}
 
     def glossary_for_job(self, job_id: str, domain: str | None = None) -> list[dict]:
-        """反查:occurrences 含该 job_id 的概念(LIKE 粗筛 + 精确过滤防子串误命中),供内容详情·概念 tab。"""
-        sql = "SELECT * FROM glossary WHERE occurrences LIKE ?"
+        """反查:occurrences 含该 job_id 的概念(LIKE 粗筛 + 精确过滤防子串误命中),
+        供内容详情·概念 tab。rejected(已驳回)不返回。"""
+        sql = "SELECT * FROM glossary WHERE status != 'rejected' AND occurrences LIKE ?"
         params: list = [f'%"{job_id}"%']
         if domain:
             sql += " AND domain=?"
@@ -1808,10 +1812,11 @@ class Database:
         ]
 
     def domain_top_terms(self, domain: str, limit: int = 30) -> list[dict]:
-        """领域工作台语义栏:该 domain 的术语(含候选 suggested,各带 status),按来源数(佐证强度代理)降序。
-        候选数另由 suggested_count 单独提示;前端可按 status 区分展示。"""
+        """领域工作台语义栏:该 domain 的术语(含候选 suggested,各带 status;rejected 除外),
+        按来源数(佐证强度代理)降序。候选数另由 suggested_count 单独提示;前端可按 status 区分展示。"""
         rows = self._conn.execute(
-            "SELECT term, definition, occurrences, status, is_topic FROM glossary WHERE domain=?",
+            "SELECT term, definition, occurrences, status, is_topic FROM glossary "
+            "WHERE domain=? AND status != 'rejected'",
             (domain,),
         ).fetchall()
         out = []
@@ -1855,7 +1860,8 @@ class Database:
             return dt.strftime("%Y-%m")
 
         rows = self._conn.execute(
-            "SELECT term, occurrences FROM glossary WHERE domain=?", (domain,)
+            "SELECT term, occurrences FROM glossary "
+            "WHERE domain=? AND status != 'rejected'", (domain,)
         ).fetchall()
         totals: dict = defaultdict(int)
         concepts: list[dict] = []
@@ -1898,7 +1904,8 @@ class Database:
         }
         out: dict[str, list[str]] = {}
         rows = self._conn.execute(
-            "SELECT term, occurrences FROM glossary WHERE domain=?", (domain,)
+            "SELECT term, occurrences FROM glossary "
+            "WHERE domain=? AND status != 'rejected'", (domain,)
         ).fetchall()
         for r in rows:
             try:
@@ -2021,7 +2028,9 @@ class Database:
         再经 shared.concepts.resolve 用归一键撞现有实体的 term/zh_name/aliases——
         「量化(Quantization)」「多头注意力」等变体挂到既有实体(occurrence 按 job_id 去重,
         新变体名进 aliases),而不是各建一条。都未命中才新建(主名规则见 primary_fields:
-        英文为 term、中文进 zh_name)。定义/译名仅补空不覆盖,绝不降级已 accepted 的条目。"""
+        英文为 term、中文进 zh_name)。定义/译名仅补空不覆盖,绝不降级已 accepted 的条目。
+        生命周期(P3):命中 rejected 实体 → 整条跳过(驳回后不再重复建议);suggested 实体
+        的 occurrence 覆盖 ≥2 个不同 job → 自动晋升 accepted。"""
         from shared.concepts import primary_fields, resolve
 
         term = (term or "").strip()
@@ -2029,10 +2038,10 @@ class Database:
             return
         now = _now_iso()
         occ = {"job_id": job_id, "content_type": content_type, "location": location}
+        cols = "term, occurrences, definition, definition_locked, zh_name, aliases, status"
         with self._lock:
             row = self._conn.execute(
-                "SELECT term, occurrences, definition, definition_locked, zh_name, aliases "
-                "FROM glossary WHERE domain=? AND term=?",
+                f"SELECT {cols} FROM glossary WHERE domain=? AND term=?",
                 (domain, term),
             ).fetchone()
             if row is None:
@@ -2048,10 +2057,11 @@ class Database:
                 hit = resolve(idx_rows, term, zh_name or None)
                 if hit is not None:
                     row = self._conn.execute(
-                        "SELECT term, occurrences, definition, definition_locked, zh_name, aliases "
-                        "FROM glossary WHERE domain=? AND term=?",
+                        f"SELECT {cols} FROM glossary WHERE domain=? AND term=?",
                         (domain, hit),
                     ).fetchone()
+            if row is not None and row["status"] == "rejected":
+                return   # 已驳回的实体不再收 occurrence,也不改状态
             if row is None:
                 p_term, p_zh, p_aliases = primary_fields(term, zh_name)
                 self._conn.execute(
@@ -2086,12 +2096,20 @@ class Database:
                 if term != row["term"] and term != (new_zh or "") and term not in aliases:
                     aliases.append(term)
                     changed = True
+                # 自动晋升:suggested 且 occurrence 覆盖 ≥2 个不同 job → accepted
+                # (跨内容复现 = 真概念的强信号;正文 term-link 高亮即时生效)。
+                new_status = row["status"]
+                if row["status"] == "suggested" \
+                        and len({o.get("job_id") for o in occs if o.get("job_id")}) >= 2:
+                    new_status = "accepted"
+                    changed = True
                 if changed:
                     self._conn.execute(
                         "UPDATE glossary SET occurrences=?, definition=?, zh_name=?, "
-                        "aliases=?, updated_at=? WHERE domain=? AND term=?",
+                        "aliases=?, status=?, updated_at=? WHERE domain=? AND term=?",
                         (json.dumps(occs, ensure_ascii=False), new_def, new_zh,
-                         json.dumps(aliases, ensure_ascii=False), now, domain, row["term"]),
+                         json.dumps(aliases, ensure_ascii=False), new_status,
+                         now, domain, row["term"]),
                     )
             self._conn.commit()
 
@@ -2193,11 +2211,21 @@ class Database:
             return added
 
     def glossary_term_rows(self, domain: str) -> list[dict]:
-        """术语一致性 L1 导出用:该域全部词条的 (term, zh_name, definition) 轻量行。"""
+        """术语一致性 L1 导出用:该域词条的 (term, zh_name, definition, aliases) 轻量行。
+        rejected 不导出(驳回件不该再注入翻译);aliases 供导出层把英文别名也映射到同一译名。"""
         rows = self._conn.execute(
-            "SELECT term, zh_name, definition FROM glossary WHERE domain=?", (domain,)
+            "SELECT term, zh_name, definition, aliases FROM glossary "
+            "WHERE domain=? AND status != 'rejected'", (domain,)
         ).fetchall()
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["aliases"] = json.loads(d.get("aliases") or "[]")
+            except (ValueError, TypeError):
+                d["aliases"] = []
+            out.append(d)
+        return out
 
     def set_glossary_zh_name(self, domain: str, term: str, zh_name: str) -> bool:
         """backfill/人工定准写译名;返回是否更新(不存在的词条返回 False)。"""
@@ -2221,7 +2249,8 @@ class Database:
         q: str | None = None,
     ) -> list[dict]:
         """列术语,可按 domain / status 过滤 + q 检索(term/zh_name/aliases 子串,
-        大小写不敏感),按 term 升序。"""
+        大小写不敏感),按 term 升序。status 未指定时默认排除 rejected(P3:驳回件
+        只在显式 status='rejected' 时可见)。"""
         where_parts: list[str] = []
         params: list = []
         if domain:
@@ -2230,6 +2259,8 @@ class Database:
         if status:
             where_parts.append("status=?")
             params.append(status)
+        else:
+            where_parts.append("status != 'rejected'")
         if q and q.strip():
             # aliases 是 JSON 文本列,LIKE 子串足够(检索场景,无需精确解析)。
             like = f"%{q.strip()}%"
@@ -2265,6 +2296,29 @@ class Database:
             )
             self._conn.commit()
 
+    def reject_glossary_term(self, domain: str, term: str) -> bool:
+        """驳回概念:status -> 'rejected'(P3)。行保留——采集链 resolve 命中 rejected 直接
+        跳过,同名/变体不会再被重复建议;各消费面(列表/图谱/雷达/term_map)默认排除。
+        命中返回 True,无该行返回 False(供路由判 404)。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE glossary SET status='rejected', updated_at=? "
+                "WHERE domain=? AND term=?",
+                (_now_iso(), domain, term),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def set_glossary_watched(self, domain: str, term: str, watched: bool) -> bool:
+        """置概念 watch 标记(P3,单用户)。命中返回 True,无该行返回 False(供路由判 404)。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE glossary SET watched=?, updated_at=? WHERE domain=? AND term=?",
+                (1 if watched else 0, _now_iso(), domain, term),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
     def set_glossary_topic(self, domain: str, term: str, is_topic: bool) -> bool:
         """置该词 is_topic(主题概念标记)。命中返回 True,无该行返回 False(供路由判 404)。"""
         with self._lock:
@@ -2276,11 +2330,11 @@ class Database:
             return cur.rowcount > 0
 
     def list_topic_concepts(self, domain: str) -> list[dict]:
-        """该 domain 中标为主题概念(is_topic=1)的列表,按出现数(occurrence)降序;
+        """该 domain 中标为主题概念(is_topic=1,rejected 除外)的列表,按出现数降序;
         每项含 term/definition/occurrence_count/related/is_topic。空则 []。"""
         rows = self._conn.execute(
             "SELECT term, definition, occurrences, related, is_topic "
-            "FROM glossary WHERE domain=? AND is_topic=1",
+            "FROM glossary WHERE domain=? AND is_topic=1 AND status != 'rejected'",
             (domain,),
         ).fetchall()
         out = []
@@ -2438,6 +2492,7 @@ class Database:
             # 规范形态 [{term, rel}];存量字符串元素在读出时归一(rel='related')。
             "related": _norm_related(json.loads(row["related"] or "[]")),
             "status": row["status"],
+            "watched": bool(row["watched"] if "watched" in row.keys() else 0),
             "is_topic": bool(row["is_topic"]),
             "definition_locked": bool(row["definition_locked"]),
             "created_at": _parse_dt(row["created_at"]),

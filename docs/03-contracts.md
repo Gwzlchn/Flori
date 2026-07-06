@@ -1111,6 +1111,9 @@ Response `200`：
   "top_recent_concepts": [
     {"term": "量化交易", "recent": 3}
   ],
+  "watched_concepts": [
+    {"term": "Kelly criterion", "zh_name": "凯利准则", "recent": 1, "total": 4}
+  ],
   "window": {"days": 7, "since": "2026-06-19T...", "until": "2026-06-26T..."}
 }
 ```
@@ -1119,6 +1122,8 @@ Response `200`：
 - `new_concepts`：最早一次出现落在最近窗口内的概念（按 `first_seen` 降序）。
 - `recent_jobs`：时间落在最近窗口内的内容（按时间降序）。
 - `top_recent_concepts`：最近窗口出现最多的概念（最多 10 个）。
+- `watched_concepts`：关注（`watched=1`）的概念全量列出，近窗有新出现（`recent`）的排前；驱动雷达页「我关注的概念」区与工作台提示条。
+- 统计口径：`rejected` 概念不参与任何板块。
 
 #### POST /api/domains/{domain}/digest — 本周摘要（按需调 LLM）
 
@@ -1138,6 +1143,16 @@ Response `202`（投递成功；`markdown` 经 `GET /api/ai-tasks/{task_id}/resu
 ```
 
 投递失败（redis 不可用）→ 仍 `202`，`{"task_id": null, "window": {...}, "markdown": "⚠️ 周报生成暂不可用…"}`（优雅降级，不 5xx）。
+
+#### GET /api/domains/{domain}/digest/latest — 最新自动周报
+
+**每周自动周报（09 工单 P3）**：scheduler periodic 循环每天检查，当天（UTC）是配置星期（env `RADAR_DIGEST_CRON_DOW`，`0`=周一，默认 `0`）则给每个近 7 天有动静（新内容/飙升/新概念任一非空）的 domain 投一条 digest AI task；当日防重复靠 redis `radar:digest:auto:{domain}:{day}` SET NX 锁（TTL 3 天）。`airesult` 只有 ~600s TTL 而自动周报没人守屏，scheduler 收割结果搬进 `radar:digest:latest:{domain}`（无 TTL），并 `push_event`（`radar_digest_queued` / `radar_digest_ready`）进事件页。本端点读该键：
+
+```json
+{"task_id": "at_…", "queued_at": "2026-07-06T00:00:30+00:00", "markdown": "# 本周…", "generated_at": "2026-07-06T00:02:10+00:00"}
+```
+
+从未生成过 → `{"task_id": null}`；生成失败/超时 → 带 `error` 字段（无 `markdown`）。前端雷达页加载时读它，把最近一期自动周报直接铺进「本周摘要」卡。
 
 ### 1.10 术语库 / 概念图
 
@@ -1166,8 +1181,9 @@ Response `202`（投递成功；`markdown` 经 `GET /api/ai-tasks/{task_id}/resu
 }
 ```
 
-- `status`：`suggested`（AI 采集的候选，待审）/ `accepted`（已采纳）。
-- `zh_name`：标准中文译名（实体双语名，可为空串）。`aliases`：归并进本实体的变体名（采集归一与合并留痕，检索命中）。
+- `status`：`suggested`（AI 采集的候选，待审）/ `accepted`（已采纳）/ `rejected`（已驳回）。**生命周期（09 工单 P3）**：采集时 `suggested` 实体的 `occurrences` 覆盖 ≥2 个不同 job → **自动晋升 `accepted`**（跨内容复现 = 真概念的强信号）；`rejected` 行保留，采集链 resolve 命中即整条跳过（同名/变体不再被重复建议），且**各消费面默认排除**（`GET /api/glossary` 未指定 status 时、正文 term-link、图谱、雷达、`term_map` 翻译注入、topic/timeline/top-terms/jobs-concepts）——只在显式 `status=rejected` 时可见。**status 语义定死**：正文 term-link 高亮 = `accepted`；翻译 `term_map` 注入 = 全量非 rejected（译名一致性收益大于误注入风险）；雷达/图谱默认 = 非 rejected（图谱前端默认再收窄到 accepted+高频，开关放宽）。
+- `watched`：概念订阅标记（bool，单用户）。watched 概念在雷达返回 `watched_concepts` 区（近窗有新出现的置顶），工作台顶部出提示条。
+- `zh_name`：标准中文译名（实体双语名，可为空串）。`aliases`：归并进本实体的变体名（采集归一与合并留痕，检索命中）。正文 term-link 对 `term`/`zh_name`/`aliases` **大小写不敏感**命中（纯 ASCII 变体按词边界），统一链到实体主名。
 - `related`：类型化关系边 `[{term, rel}]`，`rel` ∈ `prerequisite`/`is_a`/`part_of`/`related`（09 工单 P2）。写入端（PUT/POST body）元素可为字符串（视为 `rel="related"`）或对象，落库/读出统一归一为对象（存量字符串读出时同样归一）。来源：`05_concepts` v3 抽取（两端经 resolve 归一，目标未入库不建边）+ 手动维护 + `scripts/backfill_concept_edges.py` 存量补边。
 - `occurrences`：该术语出现过的来源，元素 `{job_id, content_type, location}`，由抽取步骤累积（同一 job 去重）。**详情端点**额外 enrich `title`（job 标题，job 已删则为 `null`）；列表端点不带。
 - `is_topic`：是否为主题概念。`definition_locked`：定义是否已钉住（钉住后自动采集不再覆盖定义）。
@@ -1193,6 +1209,24 @@ Response `200`：`GlossaryTermResponse` 数组（同上结构）。
 ```
 
 Response `200`：合并后的 `GlossaryTermResponse`。错误：`400` src==dst 或 `target` 为空；`404` 任一行不存在。
+
+#### POST /api/glossary/{domain}/{term}/reject — 驳回概念
+
+`status` → `rejected`。行保留（不再被自动建议 + 各消费面默认排除，语义见上）。误驳可用 `accept` 恢复。`404` 不存在。Response `200`：更新后的 `GlossaryTermResponse`。
+
+#### POST /api/glossary/{domain}/{term}/watch — 关注/取关概念
+
+请求体 `{"watched": true|false}`。`404` 不存在。Response `200`：更新后的 `GlossaryTermResponse`。
+
+#### POST /api/glossary/batch — 批量采纳/驳回
+
+待审列表「全部采纳」/多选操作。请求体：
+
+```json
+{"action": "accept", "items": [{"domain": "deep-learning", "term": "注意力机制"}]}
+```
+
+`action` ∈ `accept`/`reject`（否则 `400`）。`accept` 逐条同步进 `Profile.terminology`（与单条 accept 一致）；不存在/字段缺失的条目计入 `skipped`，不整批失败。Response `200`：`{"updated": n, "skipped": m}`。
 
 #### POST /api/glossary?domain= — 手动新增术语
 
@@ -1594,6 +1628,7 @@ Member: {"kind":"ai","task_id":"at_xxx","step":"synthesis|digest","domain":"<dom
 - pipeline-step task 的 member **不带 `kind`**（向后兼容，缺省即 `step`）。
 - `queue:enqueued` field（§3.x 等待时长用）：step task=`{pool}|{job_id}|{step}`；**ai task=`{pool}|ai|{task_id}`**。
 - 结果回执：`airesult:{task_id}`（STRING，JSON = `LLMResponse.to_jsonable()` 或 `{"error":"..."}`，带 TTL≈600s），供 API 端 `GET …/result/{task_id}` / 同步等待取回（P1-3）。AI 用量经 `ai_usage`（`job_id=null, step=<step_name>`）记账（worker 侧，P1-2）。
+- 自动周报（09 工单 P3）：`radar:digest:auto:{domain}:{YYYY-MM-DD}`（STRING SET NX，TTL 3 天，当日投递防重锁）；`radar:digest:latest:{domain}`（STRING JSON，无 TTL，最新一期 `{task_id, queued_at, [markdown, generated_at, error]}`——scheduler 收割 `airesult` 后搬入长存，`GET /api/domains/{d}/digest/latest` 读它）。
 - 完成事件：worker 执行后 `publish events:{task_id}`（`ai_task_start/ai_task_done/ai_task_failed`，见 §3.5），供 `/ask`、`/digest` 经 `WS /api/ws/jobs/{task_id}`（端点对任意 id 通用）或轮询取信号。
 - **白盒审计**：ai-worker 每次执行写一条 DB 表 **`ai_task_logs`**（按 `task_id`；对齐 DAG 步的 `output/ai_logs/{step}.jsonl`）。索引列：`exec_id/step_name/domain/provider/model/ok/error/各 token/cost_usd/duration_sec/num_turns/created_at`；`record_json` 存全量审计（路由/尝试链/渲染 prompt[system+messages]/输出/raw/用量）。与 `ai_usage`（成本归因）**并存不合并**（白盒 vs 计费两套）。查看端点见 P1-3。
 

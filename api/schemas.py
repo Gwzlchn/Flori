@@ -230,6 +230,7 @@ class GlossaryTermResponse(BaseModel):
     occurrences: list[dict] = Field(default_factory=list)   # [{job_id, content_type, location, title?}]
     related: list[dict] = Field(default_factory=list)        # [{term, rel}] 类型化关系边
     status: str = "accepted"
+    watched: bool = False                                     # 概念订阅标记(单用户)
     is_topic: bool = False
     definition_locked: bool = False
     created_at: str | None = None
@@ -249,6 +250,7 @@ class GlossaryTermResponse(BaseModel):
             occurrences=row.get("occurrences") or [],
             related=row.get("related") or [],
             status=row.get("status") or "accepted",
+            watched=bool(row.get("watched")),
             is_topic=bool(row.get("is_topic")),
             definition_locked=bool(row.get("definition_locked")),
             created_at=_iso(row.get("created_at")),
