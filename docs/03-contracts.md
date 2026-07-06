@@ -2061,6 +2061,10 @@ net_routing:
   存量经 `scripts/backfill_zh_names.py` 三段式补齐)。
 - 优先级:L3(篇内首译)> L2(集合)> L1(域);已注入的译名不被后续 chunk 改写。
 
+**book_toc 订阅契约**:`source_type=book_toc`,`source_id=书目录 URL`(jupyter-book/sphinx 结构);
+章 job=article 链 + `smart_note=true`;sync 建章 **defer**(不 publish new_job),由 scheduler 在
+前章终态时按 created_at 序 submit(严格串行,失败章放行不卡书);`BOOK_MAX_CHAPTERS` env 控章数(默认 5)。
+
 ## 5. 错误码
 
 错误体统一为 `{"error": <机器码>, "message": <说明>}`（由 `api/main.py` 注册的 exception_handler

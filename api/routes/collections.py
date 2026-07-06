@@ -97,6 +97,9 @@ async def _sync_collection_body(
         ingested |= await asyncio.to_thread(db.ingested_bvids)
     new = [it for it in items if it.item_id not in ingested]
     created = 0
+    # book(章序):全部章 defer 建好(不触发调度),由 scheduler 在前章终态时按序 submit;
+    # 章 job 强制 smart_note=True(article 链默认 off,书章要笔记)。
+    is_book = coll.source_type == "book_toc"
     for it in new:
         try:
             await create_job_core(
@@ -104,6 +107,8 @@ async def _sync_collection_body(
                 url=it.url, content_type=it.content_type, domain=coll.domain,
                 collection_id=coll.id, title=it.title or None,
                 item_id=it.item_id, actor="subscription",
+                smart_note=True if is_book else None,
+                defer_submit=is_book,
             )
             await asyncio.to_thread(db.mark_ingested, coll.id, it.item_id)
         except Exception as e:
@@ -114,6 +119,16 @@ async def _sync_collection_body(
             continue
         created += 1
         await asyncio.sleep(0.2)  # 轻微间隔,别瞬时灌爆队列/触发风控
+    if is_book and created:
+        # 兜底起链:无章在跑(首次 sync / 全部终态后新增章)→ 投最早待投章;有章在跑返回 None 不动。
+        from shared.book_chain import next_chapter_job
+        nxt = await next_chapter_job(db, redis, coll.id)
+        if nxt:
+            job = await asyncio.to_thread(db.get_job, nxt)
+            await redis.publish("job_command", {
+                "action": "new_job", "job_id": nxt, "pipeline": job.pipeline if job else "article",
+            })
+            logger.info("book_chain_kickoff", coll=coll.id, job_id=nxt)
     await asyncio.to_thread(db.mark_collection_synced, coll.id, datetime.now(timezone.utc))
     logger.info("collection_synced", coll=coll.id, total=len(items),
                 new=created, failed=len(new) - created)

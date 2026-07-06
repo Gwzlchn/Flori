@@ -2115,3 +2115,41 @@ class TestTermMapExportAndCollect:
         await s._collect_term_pairs("j_test_001")
         merged = json.loads(state["collection"])
         assert merged == {"alpha": "阿尔法", "beta": "贝塔"}   # 先到先得:已有不覆盖,新词并入
+
+
+class TestBookChainAdvance:
+    """book 章序(P2):章 job 终态 → scheduler 自动 submit 下一待投章;失败也放行。"""
+
+    @pytest.mark.asyncio
+    async def test_done_advances_next_chapter(self, redis, db, config):
+        from unittest.mock import AsyncMock
+        from datetime import datetime, timezone
+        from shared.models import Collection
+        db.create_collection(Collection(id="col_book_b", name="书", domain="general",
+                                        source_type="book_toc", source_id="https://b.example/"))
+        for i, jid in enumerate(["j_ch1", "j_ch2"]):
+            db.create_job(Job(id=jid, content_type="article", pipeline="test",
+                              domain="general", collection_id="col_book_b",
+                              created_at=datetime(2026, 7, 6, i, tzinfo=timezone.utc)))
+        storage = AsyncMock(); storage.read_file.return_value = None
+        s = _stub_workers_present(Scheduler(redis, db, config, storage=storage))
+        # ch1 跑完到终态:
+        await redis.init_job("j_ch1", "test", {})
+        await redis.set_step_status("j_ch1", "A", "done")
+        db.update_job("j_ch1", status="done")
+        await s._advance_book_chain("j_ch1")
+        # ch2 被 submit(steps hash 初始化)
+        assert await redis.get_all_step_statuses("j_ch2") != {}
+        assert db.get_job("j_ch2") is not None
+
+    @pytest.mark.asyncio
+    async def test_non_book_collection_untouched(self, redis, db, config):
+        from unittest.mock import AsyncMock
+        from shared.models import Collection
+        db.create_collection(Collection(id="col_up_x", name="up", domain="general",
+                                        source_type="bilibili_up", source_id="1"))
+        job = make_job(); job.collection_id = "col_up_x"
+        db.create_job(job)
+        storage = AsyncMock(); storage.read_file.return_value = None
+        s = _stub_workers_present(Scheduler(redis, db, config, storage=storage))
+        await s._advance_book_chain("j_test_001")   # 不炸、无副作用即可

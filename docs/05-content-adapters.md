@@ -116,3 +116,17 @@ yt-dlp 支持的其他网站，作为兜底。
 用户可在前端重新扫码登录(写入 DB)或上传 cookie 文件后重跑下载步取回 1080P。
 
 B站 cookies 有效期约 1-3 个月。YouTube cookies 有效期数月，较少过期。
+
+
+## 在线书(book_toc)
+
+book = **collection(source_type=`book_toc`,source_id=书目录 URL)+ 每章一个 article job**。
+首个实现认 jupyter-book / sphinx 目录结构(QuantEcon 系列):`<a class="reference internal">` 文档序即章序;
+根路径 meta-refresh(如 QuantEcon `/`→`intro.html`)自动跟随。章数上限 env `BOOK_MAX_CHAPTERS`(默认 5)。
+
+- 章 job 走 article 链(HTML 单页→MD→翻译→笔记→概念),强制 `smart_note=true`。
+- **章序串行**:sync 全量建章但 defer(不触发调度),scheduler 在前章终态(done/failed——失败不卡书,
+  失败章单独 rerun)按 `created_at` 序 submit 下一章(`shared/book_chain.py`)。
+- **书级术语一致性(L2)**:章翻译回流 merge 进 `collections/{id}/terms.json`(先到先得),
+  后章 term_map 合并注入 → 前章定名约束后章(docs/03 §4.10)。
+- 前端集合详情对 book 按章序(建章顺序)展示。

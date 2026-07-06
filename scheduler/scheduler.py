@@ -947,7 +947,30 @@ class Scheduler:
             "event": "job_done", "progress_pct": 100,
         })
         await self.redis.remove_active_job(job_id)
+        await self._advance_book_chain(job_id)
         logger.info("job_done", job_id=job_id)
+
+    async def _advance_book_chain(self, job_id: str) -> None:
+        """book 章序:本 job 属 book_toc 集合且到终态 → 按 created_at 序 submit 下一待投章。
+        best-effort:任何异常只 warn(书链卡住可由重新 sync 兜底 kick)。"""
+        try:
+            job = await asyncio.to_thread(self.db.get_job, job_id)
+            if not job or not job.collection_id:
+                return
+            coll = await asyncio.to_thread(self.db.get_collection, job.collection_id)
+            if not coll or getattr(coll, "source_type", None) != "book_toc":
+                return
+            from shared.book_chain import next_chapter_job
+            nxt = await next_chapter_job(self.db, self.redis, job.collection_id)
+            if not nxt:
+                return
+            nxt_job = await asyncio.to_thread(self.db.get_job, nxt)
+            if nxt_job:
+                await self.submit_job(nxt_job)
+                logger.info("book_chain_advanced", coll=job.collection_id,
+                            prev=job_id, next=nxt)
+        except Exception:
+            logger.warning("book_chain_advance_failed", job_id=job_id, exc_info=True)
 
     async def _sync_published_at(self, job_id: str) -> None:
         """把源内容发布时间(01_download 写入 input/metadata.json 的 published_at)同步进 DB,
@@ -1018,6 +1041,8 @@ class Scheduler:
         # 因 steps hash 未清而成功,跑已失败 job 的步,甚至 _check_downstream 把它重标 done,还留下
         # 指向 FAILED job 的孤儿 task。保留 job:{id}:steps hash(不调 cleanup_job),重试/重跑仍可用。
         await self.redis.remove_job_tasks(job_id)
+        # book:失败章不卡整书,照样放行下一章(失败章单独 rerun;L2 术语表已含累积对照)。
+        await self._advance_book_chain(job_id)
         logger.info("job_failed", job_id=job_id, error=error[:200])
 
     # 孤儿回收 + 卡住检测

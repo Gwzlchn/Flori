@@ -30,3 +30,4 @@ from . import bilibili  # noqa: E402,F401
 from . import youtube  # noqa: E402,F401
 from . import rss  # noqa: E402,F401  (rss 内 feedparser 惰性 import,缺依赖不影响本行)
 from . import local_dir  # noqa: E402,F401
+from . import book  # noqa: E402,F401  (book_toc:在线书目录→章节,jupyter-book/sphinx)

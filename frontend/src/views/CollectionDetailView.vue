@@ -68,7 +68,9 @@ async function load() {
       { t: collection.value?.name || id },
     ])
     const res = await store.fetchJobs(id)
-    jobs.value = res.items
+    // book(在线书):API 按 created_at 倒序,书要按章序读 → 反转为建章顺序(sync 按 toc 序建 job)。
+    jobs.value = collection.value?.subscription?.source_type === 'book_toc'
+      ? [...res.items].reverse() : res.items
     total.value = res.total
   } catch (e: any) {
     const msg = String(e?.message ?? '')

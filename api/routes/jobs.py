@@ -111,6 +111,7 @@ async def create_job_core(
     smart_note: bool | None = None,
     item_id: str | None = None, actor: str = "api",
     config: AppConfig | None = None,
+    defer_submit: bool = False,
 ) -> Job:
     """建 job 的核心流程(create_job 路由 + upload + 订阅同步共用)。返回 Job。
     upload=(ext, data):上传路径,把源文件经 storage 写入 input/source{ext}(兼容本地/MinIO)。"""
@@ -170,9 +171,12 @@ async def create_job_core(
     await asyncio.to_thread(db.create_job, job)
     if collection_id:
         await asyncio.to_thread(db.increment_collection_count, collection_id, 1)
-    await redis.publish("job_command", {
-        "action": "new_job", "job_id": job_id, "pipeline": pipeline,
-    })
+    if not defer_submit:
+        await redis.publish("job_command", {
+            "action": "new_job", "job_id": job_id, "pipeline": pipeline,
+        })
+    # defer_submit(book 章序):job 落库但不触发调度,由 scheduler 的 book 投递器在
+    # 前章终态时按 created_at 顺序 submit(shared/book_chain.next_chapter_job)。
     audit("job", job_id, "create", actor=actor,
           detail={"content_type": ctype, "source": source, "collection_id": collection_id})
     return job

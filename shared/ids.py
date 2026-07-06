@@ -109,6 +109,7 @@ _SUBSCRIPTION: dict[str, tuple[str, str, "callable"]] = {
     "youtube_channel": ("youtube", "yt", _yt_slug),
     "rss": ("rss", "rss", _hash),
     "local_dir": ("local", "local", _dir_slug),
+    "book_toc": ("book", "book", _hash),   # 在线书(source_id=目录 URL → 短哈希)
 }
 
 
