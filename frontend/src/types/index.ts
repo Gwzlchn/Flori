@@ -411,10 +411,19 @@ export interface ConceptTimeline {
   concepts: { term: string; buckets: Record<string, number>; total: number }[]
 }
 
-// 概念图谱:节点=概念,边=共现(两概念引用同一 job)。后端 GET /api/domains/{d}/concept-graph。
+// 概念间类型化关系边(P2):prerequisite 有方向,其余无向;'cooccur' 仅图谱边用。
+export type ConceptRel = 'prerequisite' | 'is_a' | 'part_of' | 'related'
+export interface RelatedEdge {
+  term: string
+  rel: ConceptRel
+}
+
+// 概念图谱:节点=概念,边=related 真边(kind=rel)+ 共现降噪边(kind='cooccur',
+// 仅共享 job 数≥min_cooccur)。后端 GET /api/domains/{d}/concept-graph。
 export interface ConceptGraphNode {
   id: string
   term: string
+  zh_name: string
   definition: string          // 短定义(首句/截断)
   status: string              // 'suggested' | 'accepted'
   is_topic: boolean
@@ -423,12 +432,13 @@ export interface ConceptGraphNode {
 export interface ConceptGraphEdge {
   source: string              // term
   target: string              // term
-  weight: number              // 共享 job 数
+  weight: number              // 共享 job 数(真边无共现时为 1)
+  kind: ConceptRel | 'cooccur'
 }
 export interface ConceptGraph {
   nodes: ConceptGraphNode[]
   edges: ConceptGraphEdge[]
-  stats: { node_count: number; edge_count: number; isolated_count: number }
+  stats: { node_count: number; edge_count: number; typed_edge_count: number; isolated_count: number }
 }
 
 // 集合的订阅源(自动追更)。无订阅则为 null。同步/开关端点用集合自身 id。
@@ -469,7 +479,7 @@ export interface TopicConcept {
   term: string
   definition: string
   occurrence_count: number
-  related: string[]
+  related: RelatedEdge[]
   is_topic: boolean
 }
 
@@ -481,7 +491,7 @@ export interface GlossaryTerm {
   zh_name: string             // 标准中文译名(实体双语名,可为空串)
   aliases: string[]           // 归并进本实体的变体名
   occurrences: TermOccurrence[]
-  related: string[]
+  related: RelatedEdge[]      // 类型化关系边(后端读出时把存量字符串归一为 rel='related')
   status: string
   is_topic: boolean
   definition_locked: boolean

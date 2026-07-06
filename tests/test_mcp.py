@@ -125,10 +125,12 @@ class TestMcpServer:
 
     @pytest.mark.asyncio
     async def test_concept_graph_tool(self, db, test_config):
-        # 两概念共现于同一 job → 一条权重 1 的边;委托 kb.concept_graph。
-        db.create_job(Job(id="jg", content_type="video", pipeline="video", domain="finance"))
-        db.add_glossary_suggestion("finance", "坐庄", "jg", "video")
-        db.add_glossary_suggestion("finance", "庄家", "jg", "video")
+        # 两概念共现于两个 job → 一条权重 2 的共现边(默认降噪 min_cooccur=2,
+        # 单 job 共现不出边);委托 kb.concept_graph。
+        for jid in ("jg", "jg2"):
+            db.create_job(Job(id=jid, content_type="video", pipeline="video", domain="finance"))
+            db.add_glossary_suggestion("finance", "坐庄", jid, "video")
+            db.add_glossary_suggestion("finance", "庄家", jid, "video")
         mcp = build_server(db, LocalStorage(test_config.jobs_dir))
         # call_tool 返回 TextContent 块列表;首块 text 是工具返回 dict 的 JSON。
         import json
@@ -136,7 +138,8 @@ class TestMcpServer:
         graph = json.loads(blocks[0].text)
         assert graph["stats"]["node_count"] == 2
         assert graph["stats"]["edge_count"] == 1
-        assert graph["edges"][0]["weight"] == 1
+        assert graph["edges"][0]["weight"] == 2
+        assert graph["edges"][0]["kind"] == "cooccur"
 
 
 def _structured(result):

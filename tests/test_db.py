@@ -641,7 +641,8 @@ class TestGlossary:
         got = db.get_glossary_term("ml", "梯度下降")
         assert got is not None
         assert got["definition"] == "一种优化算法"
-        assert got["related"] == ["反向传播"]
+        # related 归一为类型化边:字符串入参 → rel='related'。
+        assert got["related"] == [{"term": "反向传播", "rel": "related"}]
         assert got["status"] == "accepted"
         assert got["occurrences"] == [] and got["is_topic"] is False
 

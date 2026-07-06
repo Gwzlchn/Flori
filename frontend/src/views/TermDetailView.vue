@@ -25,7 +25,10 @@ const notFound = ref(false)
 const error = ref('')
 const toggling = ref(false)
 
-const related = computed<string[]>(() => (Array.isArray(data.value?.related) ? data.value!.related : []))
+import type { RelatedEdge } from '../types'
+const related = computed<RelatedEdge[]>(() => (Array.isArray(data.value?.related) ? data.value!.related : []))
+// 边类型中文标签(related 不标,免噪声)。
+const relLabel: Record<string, string> = { prerequisite: '先修', is_a: '是一种', part_of: '组成' }
 const aliases = computed<string[]>(() => (Array.isArray(data.value?.aliases) ? data.value!.aliases : []))
 const occurrences = computed<TermOccurrence[]>(() => (Array.isArray(data.value?.occurrences) ? data.value!.occurrences : []))
 const isTopic = computed<boolean>(() => data.value?.is_topic === true)
@@ -133,7 +136,9 @@ watch(() => [route.params.domain, route.params.term], load)
       <div class="card pad" style="margin-bottom:16px">
         <div class="card-h"><Link :size="15" />关联概念</div>
         <div v-if="related.length" style="display:flex;gap:8px;flex-wrap:wrap">
-          <span v-for="r in related" :key="r" class="chip" @click="goRelated(r)">{{ r }}</span>
+          <span v-for="r in related" :key="r.term" class="chip" @click="goRelated(r.term)">
+            {{ r.term }}<span v-if="relLabel[r.rel]" class="dim" style="font-size:11px;margin-left:4px">{{ relLabel[r.rel] }}</span>
+          </span>
         </div>
         <p v-else class="muted">暂无关联概念</p>
       </div>

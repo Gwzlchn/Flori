@@ -20,8 +20,13 @@ function makeTerm(over: Record<string, any> = {}) {
   return {
     domain: 'ml',
     term: 'gradient',
+    zh_name: '梯度',
+    aliases: [],
     definition: '梯度是函数的偏导数向量',
-    related: ['backprop', 'loss'],
+    related: [
+      { term: 'backprop', rel: 'related' },
+      { term: 'loss', rel: 'prerequisite' },
+    ],
     occurrences: [
       { job_id: 'jobA', content_type: 'paper', location: 'p.3' },
       { job_id: 'jobB', content_type: 'video', location: '' },

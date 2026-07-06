@@ -39,11 +39,13 @@ class _ConceptsStorageStub:
 
 
 class _DBStub:
-    """记录 add_glossary_suggestion 调用;get_job 返回固定 domain/content_type。"""
+    """记录 add_glossary_suggestion / add_glossary_relations 调用;get_job 返回固定
+    domain/content_type;list_glossary 返回已采集的最小行(供 relations 段 resolve)。"""
 
     def __init__(self, domain: str = "ml", content_type: str = "video"):
         self._job = SimpleNamespace(domain=domain, content_type=content_type)
         self.calls: list[dict] = []
+        self.relations: list[dict] = []
 
     def get_job(self, job_id: str):
         return self._job
@@ -54,8 +56,18 @@ class _DBStub:
         self.calls.append({
             "domain": domain, "term": term, "job_id": job_id,
             "content_type": content_type, "location": location,
-            "definition": definition,
+            "definition": definition, "zh_name": zh_name,
         })
+
+    def list_glossary(self, domain=None, status=None, q=None):
+        return [
+            {"term": c["term"], "zh_name": c["zh_name"] or "", "aliases": []}
+            for c in self.calls
+        ]
+
+    def add_glossary_relations(self, domain, term, relations):
+        self.relations.append({"domain": domain, "term": term, "relations": relations})
+        return len(relations)
 
 
 def _make_engine(storage, db):
@@ -123,6 +135,38 @@ async def test_no_key_terms_collects_nothing():
     await engine._collect_glossary("j_g_001")
 
     assert db.calls == []
+
+
+@pytest.mark.asyncio
+async def test_related_edges_resolved_and_written():
+    # related 两端经 resolve 归一后写边;目标未入库(幻觉词)不建边;自指跳过。
+    concepts = {
+        "key_terms": [
+            {"term": "Transformer", "definition": "d1",
+             "related": [{"term": "注意力机制", "rel": "part_of"},
+                         {"term": "没入库的词", "rel": "related"},
+                         {"term": "Transformer", "rel": "related"}]},
+            {"term": "注意力机制", "definition": "d2"},
+        ],
+    }
+    db = _DBStub(domain="dl", content_type="article")
+    engine = _make_engine(_ConceptsStorageStub(concepts), db)
+
+    await engine._collect_glossary("j_r_001")
+
+    assert len(db.relations) == 1
+    r = db.relations[0]
+    assert r["domain"] == "dl" and r["term"] == "Transformer"
+    assert r["relations"] == [{"term": "注意力机制", "rel": "part_of"}]
+
+
+@pytest.mark.asyncio
+async def test_no_related_no_relations_call():
+    concepts = {"key_terms": [{"term": "X", "definition": "d"}]}
+    db = _DBStub()
+    engine = _make_engine(_ConceptsStorageStub(concepts), db)
+    await engine._collect_glossary("j_r_002")
+    assert db.relations == []
 
 
 @pytest.mark.asyncio

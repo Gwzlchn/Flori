@@ -582,20 +582,56 @@ class Scheduler:
         domain = (job.domain if job else "") or "general"
         content_type = job.content_type if job else ""
         collected = 0
+        with_related: list[tuple[str, str, list]] = []   # (term, zh_name, related)
         for t in key_terms:
             if isinstance(t, dict):
                 term, definition = t.get("term"), (t.get("definition") or "")
                 zh_name = t.get("zh_name") if isinstance(t.get("zh_name"), str) else ""
+                related = t.get("related") if isinstance(t.get("related"), list) else []
             else:
-                term, definition, zh_name = t, "", ""
+                term, definition, zh_name, related = t, "", "", []
             if not term or not isinstance(term, str):
                 continue
             await asyncio.to_thread(
                 self.db.add_glossary_suggestion,
                 domain, term, job_id, content_type, None, definition, zh_name,
             )
+            if related:
+                with_related.append((term, zh_name or "", related))
             collected += 1
-        logger.info("glossary_collected", job_id=job_id, count=collected)
+        edges = 0
+        if with_related:
+            edges = await asyncio.to_thread(
+                self._write_concept_relations, domain, with_related,
+            )
+        logger.info("glossary_collected", job_id=job_id, count=collected, edges=edges)
+
+    def _write_concept_relations(
+        self, domain: str, items: list[tuple[str, str, list]]
+    ) -> int:
+        """key_terms 的 related 写为实体间关系边(P2):两端都经 resolve 归一到主名,
+        目标未入库(抽取幻觉/低频词)不建边——待其被采集后下次出现自动连上。同步调用,
+        由 _collect_glossary 包 to_thread。"""
+        from shared.concepts import norm_related, resolve
+
+        rows = [
+            {"term": r["term"], "zh_name": r.get("zh_name") or "",
+             "aliases": r.get("aliases") or []}
+            for r in self.db.list_glossary(domain)
+        ]
+        added = 0
+        for term, zh_name, related in items:
+            src = resolve(rows, term, zh_name or None)
+            if src is None:
+                continue
+            rels = []
+            for r in norm_related(related):
+                tgt = resolve(rows, r["term"])
+                if tgt is not None and tgt != src:
+                    rels.append({"term": tgt, "rel": r["rel"]})
+            if rels:
+                added += self.db.add_glossary_relations(domain, src, rels)
+        return added
 
     async def on_step_failed(
         self,

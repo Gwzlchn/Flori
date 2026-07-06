@@ -1,6 +1,7 @@
-"""概念图谱:服务纯函数(api.services.kb.concept_graph) + REST 路由的共现推导/权重/孤立计数。
+"""概念图谱:服务纯函数(api.services.kb.concept_graph) + REST 路由。
 
-共现规则:两概念若其 occurrences 引用同一 job_id 即相连,权重=共享 job 数;手动 related 叠加为额外边。
+边模型(09 工单 P2):related 真边(kind=rel)+ 共现边(kind='cooccur',权重=共享 job 数,
+仅保留 ≥min_cooccur,默认 2——单篇全连噪声剪掉);同一对真边优先,不重复出共现边。
 """
 
 from __future__ import annotations
@@ -39,19 +40,32 @@ def _edge(edges, a, b):
     return None
 
 
+def _kind(edges, a, b):
+    for e in edges:
+        if {e["source"], e["target"]} == {a, b}:
+            return e["kind"]
+    return None
+
+
 class TestConceptGraphService:
-    def test_cooccurrence_edges_and_weights(self, db):
+    def test_cooccurrence_noise_cut_default(self, db):
         _seed(db)
         g = kb.concept_graph(db, "finance")
-        # 节点:通胀/利率/国债期货/孤立词 = 4,且不含其它领域的概念。
         terms = {n["term"] for n in g["nodes"]}
         assert terms == {"通胀", "利率", "国债期货", "孤立词"}
         assert "梯度" not in terms
-        # 共现边:通胀-利率(共享 j1,j2)=2;通胀-国债期货(j1)=1;利率-国债期货(j1)=1。
+        # 默认 min_cooccur=2:通胀-利率(共享 j1,j2)保留;单 job 共现对(j1 全连)剪掉。
         assert _edge(g["edges"], "通胀", "利率") == 2
+        assert _kind(g["edges"], "通胀", "利率") == "cooccur"
+        assert _edge(g["edges"], "通胀", "国债期货") is None
+        assert _edge(g["edges"], "利率", "国债期货") is None
+
+    def test_min_cooccur_1_keeps_single_shared_job(self, db):
+        _seed(db)
+        g = kb.concept_graph(db, "finance", min_cooccur=1)
         assert _edge(g["edges"], "通胀", "国债期货") == 1
         assert _edge(g["edges"], "利率", "国债期货") == 1
-        assert _edge(g["edges"], "孤立词", "通胀") is None
+        assert g["stats"]["edge_count"] == 3
 
     def test_node_fields_and_occurrence_count(self, db):
         _seed(db)
@@ -62,7 +76,7 @@ class TestConceptGraphService:
         assert by["孤立词"]["occurrence_count"] == 0
         assert by["孤立词"]["definition"] == "无人提及。"  # 短定义取首句
         for n in g["nodes"]:
-            assert set(n) == {"id", "term", "definition", "status",
+            assert set(n) == {"id", "term", "zh_name", "definition", "status",
                               "is_topic", "occurrence_count"}
             assert n["id"] == n["term"]
 
@@ -70,32 +84,45 @@ class TestConceptGraphService:
         _seed(db)
         g = kb.concept_graph(db, "finance")
         assert g["stats"]["node_count"] == 4
-        assert g["stats"]["edge_count"] == 3   # 三两两 + 无 related
-        assert g["stats"]["isolated_count"] == 1  # 仅 "孤立词"
+        assert g["stats"]["edge_count"] == 1        # 降噪后仅 通胀-利率
+        assert g["stats"]["typed_edge_count"] == 0
+        assert g["stats"]["isolated_count"] == 2    # 孤立词 + 国债期货(弱边被剪成孤立)
 
-    def test_manual_related_overlay(self, db):
+    def test_typed_related_edge(self, db):
         _seed(db)
-        # 手动给 "孤立词" 加一条 related 指向 "通胀" → 出现一条权重 1 的边,孤立计数归零。
+        # 真边不受共现降噪影响:孤立词 --related→ 通胀 出边(weight 1,无共现)。
         db.upsert_glossary_term("finance", "孤立词", definition="无人提及。",
                                 related=["通胀", "不存在的词"])
         g = kb.concept_graph(db, "finance")
         assert _edge(g["edges"], "孤立词", "通胀") == 1
-        assert g["stats"]["isolated_count"] == 0
-        assert g["stats"]["edge_count"] == 4
+        assert _kind(g["edges"], "孤立词", "通胀") == "related"
+        assert g["stats"]["typed_edge_count"] == 1
         # 指向不存在概念的 related 被忽略,不会凭空造节点。
         assert "不存在的词" not in {n["term"] for n in g["nodes"]}
 
-    def test_related_does_not_downgrade_cooccurrence_weight(self, db):
+    def test_typed_edge_with_rel_and_direction(self, db):
         _seed(db)
-        # related 叠加同一对已有共现边时取较大权重(不把 2 压成 1)。
-        db.upsert_glossary_term("finance", "通胀", related=["利率"])
+        db.add_glossary_relations("finance", "利率",
+                                  [{"term": "通胀", "rel": "prerequisite"}])
         g = kb.concept_graph(db, "finance")
-        assert _edge(g["edges"], "通胀", "利率") == 2
+        e = next(e for e in g["edges"] if {e["source"], e["target"]} == {"利率", "通胀"})
+        # 真边替换同对共现边:kind=rel、方向保留(source=利率)、weight 借共现数(2)。
+        assert e["kind"] == "prerequisite"
+        assert e["source"] == "利率" and e["target"] == "通胀"
+        assert e["weight"] == 2
+        assert g["stats"]["edge_count"] == 1   # 不再重复出该对的 cooccur 边
+
+    def test_rejected_excluded(self, db):
+        _seed(db)
+        db.upsert_glossary_term("finance", "国债期货", status="rejected")
+        g = kb.concept_graph(db, "finance")
+        assert "国债期货" not in {n["term"] for n in g["nodes"]}
 
     def test_empty_domain(self, db):
         g = kb.concept_graph(db, "nonexistent")
         assert g["nodes"] == [] and g["edges"] == []
-        assert g["stats"] == {"node_count": 0, "edge_count": 0, "isolated_count": 0}
+        assert g["stats"] == {"node_count": 0, "edge_count": 0,
+                              "typed_edge_count": 0, "isolated_count": 0}
 
 
 class TestConceptGraphRoute:
@@ -107,7 +134,16 @@ class TestConceptGraphRoute:
         body = r.json()
         assert body["stats"]["node_count"] == 4
         assert _edge(body["edges"], "通胀", "利率") == 2
-        assert body["stats"]["isolated_count"] == 1
+        assert body["stats"]["isolated_count"] == 2   # 默认降噪剪掉弱边
+
+    @pytest.mark.asyncio
+    async def test_route_min_cooccur_param(self, client, app):
+        _seed(app.state.db)
+        r = await client.get("/api/domains/finance/concept-graph?min_cooccur=1")
+        assert _edge(r.json()["edges"], "通胀", "国债期货") == 1
+        assert (await client.get(
+            "/api/domains/finance/concept-graph?min_cooccur=0"
+        )).status_code == 422
 
     @pytest.mark.asyncio
     async def test_route_empty_domain(self, client):

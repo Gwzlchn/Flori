@@ -174,3 +174,41 @@ class TestGetJobTitles:
         db.create_job(Job(id="jt1", content_type="article", pipeline="article_v2",
                           title="标题一"))
         assert db.get_job_titles(["jt1", "missing"]) == {"jt1": "标题一"}
+
+
+class TestNormRelated:
+    def test_strings_and_dicts(self):
+        from shared.concepts import norm_related
+        assert norm_related(["A", {"term": "B", "rel": "is_a"}, {"term": "A"}, 42]) == [
+            {"term": "A", "rel": "related"},
+            {"term": "B", "rel": "is_a"},
+        ]
+
+    def test_unknown_rel_degraded(self):
+        from shared.concepts import norm_related
+        assert norm_related([{"term": "X", "rel": "weird"}]) == [
+            {"term": "X", "rel": "related"}
+        ]
+
+
+class TestAddGlossaryRelations:
+    def test_add_and_dedup(self, db):
+        db.add_glossary_suggestion("ml", "Transformer", "j1")
+        n = db.add_glossary_relations("ml", "Transformer",
+                                      [{"term": "Attention", "rel": "part_of"}])
+        assert n == 1
+        # 同目标再写不覆盖已有 rel(先到先得);自指跳过。
+        n2 = db.add_glossary_relations("ml", "Transformer",
+                                       [{"term": "Attention", "rel": "related"},
+                                        {"term": "Transformer", "rel": "related"}])
+        assert n2 == 0
+        t = db.get_glossary_term("ml", "Transformer")
+        assert t["related"] == [{"term": "Attention", "rel": "part_of"}]
+
+    def test_missing_row_returns_zero(self, db):
+        assert db.add_glossary_relations("ml", "nope", [{"term": "A", "rel": "related"}]) == 0
+
+    def test_legacy_string_related_normalized_on_read(self, db):
+        db.upsert_glossary_term("ml", "老词", related=["旧关联"])
+        t = db.get_glossary_term("ml", "老词")
+        assert t["related"] == [{"term": "旧关联", "rel": "related"}]

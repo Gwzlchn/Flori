@@ -112,6 +112,29 @@ def resolve(rows: list[dict], term: str, zh_name: str | None = None) -> str | No
     return None
 
 
+# 概念关系边类型(P2):prerequisite 有方向(src 需先懂 tgt),其余无向。
+REL_TYPES = ("prerequisite", "is_a", "part_of", "related")
+
+
+def norm_related(items) -> list[dict]:
+    """related 列的规范形态 [{term, rel}]:字符串(手动/存量)视为 rel='related',
+    未知 rel 降级 'related',按 term 去重(先到先得)。非法元素丢弃。"""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for it in items or []:
+        if isinstance(it, str):
+            t, rel = it.strip(), "related"
+        elif isinstance(it, dict):
+            t = (it.get("term") or "").strip()
+            rel = it.get("rel") if it.get("rel") in REL_TYPES else "related"
+        else:
+            continue
+        if t and t not in seen:
+            seen.add(t)
+            out.append({"term": t, "rel": rel})
+    return out
+
+
 def primary_fields(term: str, zh_name: str = "") -> tuple[str, str, list[str]]:
     """新建实体的主名规则 → (主名 term, zh_name, aliases)。
 

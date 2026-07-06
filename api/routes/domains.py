@@ -236,12 +236,14 @@ async def concept_timeline(
 @router.get("/{domain}/concept-graph")
 async def concept_graph(
     domain: str,
+    min_cooccur: int = Query(2, ge=1, le=10),
     db: Database = Depends(get_db),
 ):
-    """概念图谱:节点=概念,边=共现(两概念引用同一 job_id),权重=共享 job 数;叠加手动 related。
-    返回 {nodes, edges, stats}。空领域返回空节点/边与零计数。逻辑在 api.services.kb(单一来源)。"""
+    """概念图谱:节点=概念,边=类型化 related 真边 + 共现边(仅保留共享 job 数≥min_cooccur,
+    剪单篇全连噪声)。返回 {nodes, edges, stats}。空领域返回空节点/边与零计数。
+    逻辑在 api.services.kb(单一来源)。"""
     validate_path_segment(domain, "domain")
-    return await asyncio.to_thread(kb.concept_graph, db, domain)
+    return await asyncio.to_thread(kb.concept_graph, db, domain, min_cooccur)
 
 
 @router.get("/{domain}/terms/{term}", response_model=GlossaryTermResponse)

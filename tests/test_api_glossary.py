@@ -75,7 +75,8 @@ class TestManualCRUD:
         )
         assert resp.status_code == 200
         assert resp.json()["definition"] == "新"
-        assert resp.json()["related"] == ["B"]
+        # related 归一为类型化边:字符串入参 → rel='related'。
+        assert resp.json()["related"] == [{"term": "B", "rel": "related"}]
         # status 不动,仍 accepted。
         assert resp.json()["status"] == "accepted"
 

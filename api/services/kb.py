@@ -150,20 +150,23 @@ def _short_definition(text: str | None, limit: int = 120) -> str:
     return head
 
 
-def concept_graph(db: Database, domain: str) -> dict:
-    """某库概念图谱:节点=概念,边=共现(两概念的 occurrences 引用同一 job_id 即相连)。
+def concept_graph(db: Database, domain: str, min_cooccur: int = 2) -> dict:
+    """某库概念图谱:节点=概念,边=类型化 related 真边 + 共现边(降噪后)。
 
-    单一来源:供 FastAPI 路由 / MCP 工具共用,避免共现推导逻辑两处分叉。
+    单一来源:供 FastAPI 路由 / MCP 工具共用,避免推导逻辑两处分叉。
 
-    - 节点:{id, term, definition(短), status, is_topic, occurrence_count}。id=term(域内唯一)。
-    - 边(无向,去重):
-        - 共现边——按 job_id 倒排:同一 job 下出现的每对概念连一条,weight=两者共享的 job 数。
-        - 手动 related 叠加——把 related 里的术语名当额外边(实践中多为空)。同一对已有共现边则取权重较大者。
-      边按 (source, target) 字典序规范化方向,自连(同名)忽略,related 指向不存在的概念忽略。
-    - stats:{node_count, edge_count, isolated_count(度为 0 的节点数)}。
-    全程按 domain 作用域;孤立概念(无 occurrences/无共现)仍作为节点保留(度 0)。
+    - 节点:{id, term, zh_name, definition(短), status, is_topic, occurrence_count}。
+      id=term(域内唯一);rejected 概念不进图。
+    - 边 {source, target, weight, kind}:
+        - related 真边——kind=rel(prerequisite/is_a/part_of/related),方向 source→target
+          (prerequisite 有语义方向,前端画箭头);weight 取该对共现数(无共现为 1)。
+        - 共现边——按 job_id 倒排两两配对,weight=共享 job 数;仅保留 weight≥min_cooccur
+          (单篇 N 概念全连的噪声剪掉),已有 related 真边的对不再重复出共现边。
+      自连忽略,related 指向不存在概念忽略(未入库不建边,待采集后自动连上)。
+    - stats:{node_count, edge_count, typed_edge_count, isolated_count(度 0 节点数)}。
+    全程按 domain 作用域;孤立概念仍作为节点保留(度 0)。
     """
-    terms = db.list_glossary(domain)
+    terms = [t for t in db.list_glossary(domain) if t.get("status") != "rejected"]
 
     nodes: list[dict] = []
     node_terms: set[str] = set()
@@ -179,6 +182,7 @@ def concept_graph(db: Database, domain: str) -> dict:
         nodes.append({
             "id": term,
             "term": term,
+            "zh_name": t.get("zh_name") or "",
             "definition": _short_definition(t.get("definition")),
             "status": t.get("status"),
             "is_topic": bool(t.get("is_topic")),
@@ -189,7 +193,7 @@ def concept_graph(db: Database, domain: str) -> dict:
             if jid:
                 by_job.setdefault(jid, set()).add(term)
 
-    # 共现边:每个 job 下两两配对累加权重(= 共享 job 数)。键已字典序规范化方向。
+    # 共现权重:每个 job 下两两配对累加(= 共享 job 数)。键按字典序规范化方向。
     weights: dict[tuple[str, str], int] = {}
     for members in by_job.values():
         ms = sorted(members)
@@ -197,19 +201,30 @@ def concept_graph(db: Database, domain: str) -> dict:
             for j in range(i + 1, len(ms)):
                 weights[(ms[i], ms[j])] = weights.get((ms[i], ms[j]), 0) + 1
 
-    # 手动 related 叠加:related 术语名当额外边(权重 1),已有共现边则保留较大权重。
+    # related 真边:保留语义方向(source→target),weight 借该对共现数壮胆(无共现=1)。
+    edges: list[dict] = []
+    typed_pairs: set[tuple[str, str]] = set()
     for t in terms:
         src = t["term"]
         for rel in (t.get("related") or []):
-            if not isinstance(rel, str) or rel == src or rel not in node_terms:
+            tgt = rel.get("term") if isinstance(rel, dict) else None
+            if not tgt or tgt == src or tgt not in node_terms:
                 continue
-            key = (src, rel) if src < rel else (rel, src)
-            weights[key] = max(weights.get(key, 0), 1)
+            key = (src, tgt) if src < tgt else (tgt, src)
+            if key in typed_pairs:
+                continue
+            typed_pairs.add(key)
+            edges.append({
+                "source": src, "target": tgt,
+                "weight": max(weights.get(key, 0), 1),
+                "kind": rel.get("rel") or "related",
+            })
+    typed_edge_count = len(edges)
 
-    edges = [
-        {"source": s, "target": tgt, "weight": w}
-        for (s, tgt), w in weights.items()
-    ]
+    # 共现边(降噪):weight≥min_cooccur 且该对没有真边。
+    for (s, tgt), w in weights.items():
+        if w >= min_cooccur and (s, tgt) not in typed_pairs:
+            edges.append({"source": s, "target": tgt, "weight": w, "kind": "cooccur"})
     edges.sort(key=lambda e: (-e["weight"], e["source"], e["target"]))
 
     degree: dict[str, int] = {}
@@ -224,6 +239,7 @@ def concept_graph(db: Database, domain: str) -> dict:
         "stats": {
             "node_count": len(nodes),
             "edge_count": len(edges),
+            "typed_edge_count": typed_edge_count,
             "isolated_count": isolated_count,
         },
     }

@@ -142,7 +142,8 @@ const editError = ref('')
 function openEdit(t: GlossaryTerm) {
   editing.value = t
   editDefinition.value = t.definition
-  editRelated.value = t.related.join(', ')
+  // related 已是类型化边 [{term, rel}];编辑框用逗号分隔的 term,保存走字符串(后端归一 rel='related')。
+  editRelated.value = t.related.map((r) => r.term).join(', ')
   editError.value = ''
 }
 

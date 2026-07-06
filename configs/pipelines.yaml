@@ -376,7 +376,7 @@ article:
       label: "概念 + 摘要"
       extends: .ai-step
       run: steps.article.step_05_concepts
-      version: "2"   # key_terms 增 zh_name(标准译名,回填 glossary 供术语一致性 L1)
+      version: "3"   # key_terms 增 related 关系边(rel: prerequisite/is_a/part_of/related,只引本文概念)
       # 必跑,无 rules。源优先级:智能笔记 > 译文(非中文) > 原文章节;一句话摘要同出。
       # needs 04_smart/04_translate:保证笔记/译文(若有)先就绪;被跳过时依赖视为满足,本步照常跑。
       needs: ["04_smart_article", "04_translate_article"]

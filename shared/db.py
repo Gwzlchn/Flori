@@ -12,6 +12,7 @@ from pathlib import Path
 
 import structlog
 
+from .concepts import norm_related as _norm_related
 from .models import AIUsage, Collection, Job, JobStatus, Step, StepStatus, Worker
 from .ids import lineage_key_of as _lineage_key_of
 from .status import (
@@ -1977,13 +1978,14 @@ class Database:
         domain: str,
         term: str,
         definition: str = "",
-        related: list[str] | None = None,
+        related: list | None = None,
         status: str = "accepted",
     ) -> None:
         """写入/覆盖一条术语(手动维护入口):按 (domain, term) 幂等 upsert,
-        保留已有 occurrences,覆盖 definition/related/status。"""
+        保留已有 occurrences,覆盖 definition/related/status。
+        related 元素可为字符串或 {term, rel},落库前归一为 [{term, rel}]。"""
         now = _now_iso()
-        related_json = json.dumps(related or [], ensure_ascii=False)
+        related_json = json.dumps(_norm_related(related), ensure_ascii=False)
         with self._lock:
             row = self._conn.execute(
                 "SELECT created_at FROM glossary WHERE domain=? AND term=?",
@@ -2132,10 +2134,12 @@ class Database:
                 if cand and cand != dst_term and cand != zh_name and cand not in aliases:
                     aliases.append(cand)
 
-            related = json.loads(d["related"] or "[]")
-            for r in json.loads(s["related"] or "[]"):
-                if r not in related:
+            related = _norm_related(json.loads(d["related"] or "[]"))
+            rel_terms = {r["term"] for r in related}
+            for r in _norm_related(json.loads(s["related"] or "[]")):
+                if r["term"] not in rel_terms:
                     related.append(r)
+                    rel_terms.add(r["term"])
 
             rank = self._STATUS_RANK
             status = max((d["status"], s["status"]), key=lambda x: rank.get(x, 1))
@@ -2158,6 +2162,35 @@ class Database:
         merged = self.get_glossary_term(domain, dst_term)
         assert merged is not None
         return merged
+
+    def add_glossary_relations(self, domain: str, term: str, relations: list[dict]) -> int:
+        """给该概念并入关系边(P2,采集链/补边脚本共用):按目标 term 去重(先到先得,
+        不覆盖已有 rel),自指跳过。行不存在返回 0(调用方应先 resolve 到主名)。返回新增边数。"""
+        rels = [r for r in _norm_related(relations) if r["term"] != term]
+        if not rels:
+            return 0
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT related FROM glossary WHERE domain=? AND term=?",
+                (domain, term),
+            ).fetchone()
+            if row is None:
+                return 0
+            related = _norm_related(json.loads(row["related"] or "[]"))
+            have = {r["term"] for r in related}
+            added = 0
+            for r in rels:
+                if r["term"] not in have:
+                    related.append(r)
+                    have.add(r["term"])
+                    added += 1
+            if added:
+                self._conn.execute(
+                    "UPDATE glossary SET related=?, updated_at=? WHERE domain=? AND term=?",
+                    (json.dumps(related, ensure_ascii=False), _now_iso(), domain, term),
+                )
+                self._conn.commit()
+            return added
 
     def glossary_term_rows(self, domain: str) -> list[dict]:
         """术语一致性 L1 导出用:该域全部词条的 (term, zh_name, definition) 轻量行。"""
@@ -2257,14 +2290,14 @@ class Database:
             except (ValueError, TypeError):
                 occs = []
             try:
-                related = json.loads(r["related"] or "[]")
+                related = _norm_related(json.loads(r["related"] or "[]"))
             except (ValueError, TypeError):
                 related = []
             out.append({
                 "term": r["term"],
                 "definition": r["definition"] or "",
                 "occurrence_count": len(occs) if isinstance(occs, list) else 0,
-                "related": related if isinstance(related, list) else [],
+                "related": related,
                 "is_topic": True,
             })
         out.sort(key=lambda t: t["occurrence_count"], reverse=True)
@@ -2402,7 +2435,8 @@ class Database:
                 (row["aliases"] if "aliases" in row.keys() else "") or "[]"
             ),
             "occurrences": json.loads(row["occurrences"] or "[]"),
-            "related": json.loads(row["related"] or "[]"),
+            # 规范形态 [{term, rel}];存量字符串元素在读出时归一(rel='related')。
+            "related": _norm_related(json.loads(row["related"] or "[]")),
             "status": row["status"],
             "is_topic": bool(row["is_topic"]),
             "definition_locked": bool(row["definition_locked"]),

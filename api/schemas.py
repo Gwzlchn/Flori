@@ -217,7 +217,8 @@ class CollectionResponse(BaseModel):
 class GlossaryTermRequest(BaseModel):
     term: str
     definition: str | None = None
-    related: list[str] | None = None
+    # 元素可为字符串(视为 rel='related')或 {term, rel};落库前经 norm_related 归一。
+    related: list[str | dict] | None = None
 
 
 class GlossaryTermResponse(BaseModel):
@@ -227,7 +228,7 @@ class GlossaryTermResponse(BaseModel):
     zh_name: str = ""                                        # 标准中文译名(实体双语名)
     aliases: list[str] = Field(default_factory=list)         # 归并进本实体的变体名
     occurrences: list[dict] = Field(default_factory=list)   # [{job_id, content_type, location, title?}]
-    related: list[str] = Field(default_factory=list)
+    related: list[dict] = Field(default_factory=list)        # [{term, rel}] 类型化关系边
     status: str = "accepted"
     is_topic: bool = False
     definition_locked: bool = False

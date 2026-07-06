@@ -26,20 +26,33 @@ let network: VisNetwork | null = null
 let DataSet: any = null            // vis-data DataSet 构造器(懒加载)
 let nodesDS: any = null            // 节点 DataSet(过滤/高亮就地更新)
 
-// 过滤控件
+// 过滤控件。默认只画 accepted + 高频(出现≥2)节点(工单 09 P2 降噪),低频/候选靠开关。
 const query = ref('')
 const hideIsolated = ref(false)
-const statusFilter = ref<'all' | 'accepted' | 'suggested'>('all')
+const statusFilter = ref<'all' | 'accepted' | 'suggested'>('accepted')
+const showLowFreq = ref(false)
 const fullscreen = ref(false)   // 全屏看图(力导向图节点多,放大才看得清)
 
 const ACCEPTED = '#2383e2'        // 已采纳=品牌蓝
 const SUGGESTED = '#cb7b1f'       // 候选=琥珀
 const TOPIC_RING = '#9065b0'      // 主题高亮描边
+// 边配色按 kind:共现灰,类型化真边着色(prerequisite 另带箭头)。
+const EDGE_COLORS: Record<string, string> = {
+  cooccur: '#d6d5d0',
+  related: '#8fb4dd',
+  prerequisite: '#9065b0',
+  is_a: '#4fa36e',
+  part_of: '#c78f3d',
+}
+const EDGE_LABELS: Record<string, string> = {
+  cooccur: '共现', related: '相关', prerequisite: '先修', is_a: '是一种', part_of: '组成',
+}
 
 const isEmpty = computed(
   () => !loading.value && !error.value && !(data.value?.nodes?.length),
 )
-const stats = computed(() => data.value?.stats ?? { node_count: 0, edge_count: 0, isolated_count: 0 })
+const stats = computed(() => data.value?.stats
+  ?? { node_count: 0, edge_count: 0, typed_edge_count: 0, isolated_count: 0 })
 
 // 邻接表:供搜索定位 + 悬停高亮 + 侧栏「相连概念」。
 const adjacency = computed(() => {
@@ -53,15 +66,16 @@ const adjacency = computed(() => {
   return adj
 })
 
-// 当前过滤后应显示的节点 id 集合(搜索/隐藏孤立/状态筛选)。
+// 当前过滤后应显示的节点 id 集合(搜索/隐藏孤立/状态筛选/低频过滤)。
 const visibleNodeIds = computed(() => {
   const q = query.value.trim().toLowerCase()
   const adj = adjacency.value
   const ids = new Set<string>()
   for (const n of data.value?.nodes ?? []) {
     if (statusFilter.value !== 'all' && n.status !== statusFilter.value) continue
+    if (!showLowFreq.value && n.occurrence_count < 2) continue
     if (hideIsolated.value && (adj.get(n.id)?.size ?? 0) === 0) continue
-    if (q && !n.term.toLowerCase().includes(q)) continue
+    if (q && !n.term.toLowerCase().includes(q) && !(n.zh_name || '').toLowerCase().includes(q)) continue
     ids.add(n.id)
   }
   return ids
@@ -108,16 +122,21 @@ function toVisNodes() {
 
 function toVisEdges() {
   const vis = visibleNodeIds.value
-  return (data.value?.edges ?? []).map((e, i) => ({
-    id: i,
-    from: e.source,
-    to: e.target,
-    value: e.weight,
-    width: 1 + e.weight,
-    title: `共现 ${e.weight} 次`,
-    color: { color: '#d6d5d0', highlight: TOPIC_RING, opacity: 0.7 },
-    hidden: !(vis.has(e.source) && vis.has(e.target)),
-  }))
+  return (data.value?.edges ?? []).map((e, i) => {
+    const kind = e.kind ?? 'cooccur'
+    return {
+      id: i,
+      from: e.source,
+      to: e.target,
+      value: e.weight,
+      width: 1 + e.weight,
+      title: `${EDGE_LABELS[kind] ?? kind} · 共现 ${e.weight} 次`,
+      color: { color: EDGE_COLORS[kind] ?? EDGE_COLORS.cooccur, highlight: TOPIC_RING, opacity: 0.7 },
+      // prerequisite 有语义方向(source 先修于 target),画箭头;其余无向。
+      arrows: kind === 'prerequisite' ? { to: { enabled: true, scaleFactor: 0.6 } } : undefined,
+      hidden: !(vis.has(e.source) && vis.has(e.target)),
+    }
+  })
 }
 
 async function load() {
@@ -259,7 +278,7 @@ onMounted(async () => {
   }
 })
 watch(() => props.domain, load)
-watch([query, hideIsolated, statusFilter], applyFilter)
+watch([query, hideIsolated, statusFilter, showLowFreq], applyFilter)
 // 全屏切换后容器尺寸大变 → 下一帧重新按尺寸定一次(RO 也会兜底)。
 watch(fullscreen, async () => { await nextTick(); ensureSized() })
 onBeforeUnmount(() => { ro?.disconnect(); if (network) network.destroy() })
@@ -277,6 +296,7 @@ defineExpose({ selectNode, focusTerm, selected })
       <div class="cg-stats">
         <span class="badge b-brand">{{ stats.node_count }} 概念</span>
         <span class="badge b-mut">{{ stats.edge_count }} 关联</span>
+        <span v-if="stats.typed_edge_count" class="badge b-ok">{{ stats.typed_edge_count }} 真边</span>
         <span v-if="stats.isolated_count" class="badge b-warn">{{ stats.isolated_count }} 孤立</span>
       </div>
     </div>
@@ -288,6 +308,7 @@ defineExpose({ selectNode, focusTerm, selected })
         <input v-model="query" class="cg-input" placeholder="搜索概念…" @keyup.enter="focusTerm(query.trim())" />
       </label>
       <button class="chip" :class="{ on: hideIsolated }" @click="hideIsolated = !hideIsolated">只看有关联</button>
+      <button class="chip" :class="{ on: showLowFreq }" @click="showLowFreq = !showLowFreq">含低频</button>
       <button class="chip" :class="{ on: statusFilter === 'all' }" @click="statusFilter = 'all'">全部</button>
       <button class="chip" :class="{ on: statusFilter === 'accepted' }" @click="statusFilter = 'accepted'">已采纳</button>
       <button class="chip" :class="{ on: statusFilter === 'suggested' }" @click="statusFilter = 'suggested'">候选</button>
