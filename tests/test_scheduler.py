@@ -1203,6 +1203,30 @@ class TestRecover:
 
         assert await redis.get_step_status("j_test_001", "B") == "ready"
 
+    @pytest.mark.asyncio
+    async def test_requeues_ready_orphan(self, scheduler, redis, db):
+        """ready-but-not-queued 孤儿(置 ready→入队窗口重启/队列消息丢)→ recover 补投队列。"""
+        job = make_job()
+        db.create_job(job)
+        await scheduler.submit_job(job)
+        # 模拟孤儿:A 已 ready 且在队 → 抽干队列(消息丢失),状态仍 ready
+        await redis.dequeue_step("cpu")
+        assert (await redis.get_queue_info("cpu"))["length"] == 0
+        assert await redis.get_step_status("j_test_001", "A") == "ready"
+
+        await scheduler._recover()
+
+        assert (await redis.get_queue_info("cpu"))["length"] == 1  # 补投回队
+
+    @pytest.mark.asyncio
+    async def test_requeue_ready_idempotent(self, scheduler, redis, db):
+        """已在队的 ready 步,recover 重复补投不产生重复任务(ZADD 同成员幂等)。"""
+        job = make_job()
+        db.create_job(job)
+        await scheduler.submit_job(job)   # A ready 且在队
+        await scheduler._recover()
+        assert (await redis.get_queue_info("cpu"))["length"] == 1  # 仍 1,无重复
+
 
 class TestDelayedRetry:
     @pytest.mark.asyncio

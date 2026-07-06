@@ -49,7 +49,7 @@ class _DBStub:
         return self._job
 
     def add_glossary_suggestion(
-        self, domain, term, job_id, content_type="", location=None, definition=""
+        self, domain, term, job_id, content_type="", location=None, definition="", zh_name=""
     ):
         self.calls.append({
             "domain": domain, "term": term, "job_id": job_id,

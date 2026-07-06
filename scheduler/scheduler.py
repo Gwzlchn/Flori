@@ -335,6 +335,12 @@ class Scheduler:
                         await self._reclaim_step(
                             job_id, step, f"recover: worker {worker_id or 'none'} lost"
                         )
+                elif status == "ready":
+                    # ready-but-not-queued 孤儿补投:调度器/redis 在"置 ready→入队"窗口重启,或队列
+                    # 消息丢失时,步永远停在 ready 无人认领(线上:部署窗口把 03_scene 卡死)。
+                    # enqueue 的 ZADD 同成员幂等(task json 相同 → 去重),已在队的重复补投无害。
+                    await self.enqueue_step(job_id, step)
+                    logger.info("recover_requeue_ready", job_id=job_id, step=step)
 
             await self._check_downstream(job_id)
 
