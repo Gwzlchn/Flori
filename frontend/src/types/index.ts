@@ -494,6 +494,7 @@ export interface GlossaryTerm {
   related: RelatedEdge[]      // 类型化关系边(后端读出时把存量字符串归一为 rel='related')
   status: string
   is_topic: boolean
+  watched: boolean            // 概念订阅:关注后雷达/工作台优先呈现新动向
   definition_locked: boolean
   created_at: string
 }
