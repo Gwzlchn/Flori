@@ -358,7 +358,7 @@ const aiCredMethod = ref<(typeof AI_CRED_METHODS)[number]['id']>('claude-sub')
 
 // worker 自报 rebuild spec → 一键复制等效重建命令(与接入向导同一套 image/格式;
 // registration token 不随 spec 存储,占位由用户粘贴或重新生成)。
-function rebuildCmd(w: WorkerInfo): string {
+function rebuildCmd(w: Worker): string {
   const rb = (w.spec as any)?.rebuild
   if (!rb) return ''
   const envs: string[] = []
@@ -377,7 +377,7 @@ ${envs.join('\n')}
   python -m worker.main --pools ${(w.pools || []).join(' ')}`
 }
 const copiedRebuild = ref('')
-async function copyRebuild(w: WorkerInfo) {
+async function copyRebuild(w: Worker) {
   const c = rebuildCmd(w)
   if (!c) return
   await navigator.clipboard.writeText(c)
