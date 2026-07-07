@@ -19,10 +19,11 @@ docker compose up -d        # 根 docker-compose.yml;数据走 .env 的 FLORI_DA
 
 ## 边缘 + 隧道(分布式)
 ```bash
-cp deploy/edge/.env.example deploy/edge/.env     # 填 EDGE_HOST / MINIO_* / FLORI_BASIC_HASH
+cp deploy/edge/.env.example deploy/edge/.env     # 填 EDGE_HOST / EDGE_DOMAIN / MINIO_* / FLORI_BASIC_HASH
 # 放 SSH 私钥到 deploy/tunnel/ssh/id_ed25519(本地,不入 git)
 docker compose -f deploy/tunnel/docker-compose.tunnel.yml up -d           # NAS 侧起隧道
 scp deploy/edge/* 边缘:/opt/flori-edge/ && ssh 边缘 'cd /opt/flori-edge && docker compose --env-file .env up -d'
+# 若启用 EDGE_DOMAIN,先把证书放到边缘 /opt/flori-edge/certs/<domain>.fullchain.pem 与 <domain>.key。
 # 前端镜像:git push → CI 建 ghcr 公开镜像 → 边缘 Watchtower(10s)自动 pull+重建,无手动推送。
 # 根生产 compose 的 Watchtower 仍是 120s;edge 为了前端快速跟随 CI 单独设为 10s。
 ```

@@ -9,8 +9,13 @@ services:
     restart: unless-stopped
     depends_on:
       - frontend
+    environment:
+      EDGE_HOST: ${EDGE_HOST:?EDGE_HOST is required}
+      EDGE_DOMAIN: ${EDGE_DOMAIN:-flori.wiki}
+      FLORI_BASIC_HASH: ${FLORI_BASIC_HASH:?FLORI_BASIC_HASH is required}
     volumes:
       - /opt/flori-edge/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /opt/flori-edge/certs:/etc/caddy/certs:ro
       - caddy-data:/data
       - caddy-config:/config
 

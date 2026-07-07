@@ -169,7 +169,7 @@ docker compose up -d
 
 ```bash
 # 1) 核心机/NAS 侧起反向 SSH 隧道（把 api/redis/minio 暴露到边缘回环）
-cp deploy/edge/.env.example deploy/edge/.env   # 填 EDGE_HOST / MINIO_* / FLORI_BASIC_HASH
+cp deploy/edge/.env.example deploy/edge/.env   # 填 EDGE_HOST / EDGE_DOMAIN / MINIO_* / FLORI_BASIC_HASH
 # 放 SSH 私钥到 deploy/tunnel/ssh/id_ed25519（本地，不入 git）
 docker compose -f deploy/tunnel/docker-compose.tunnel.yml up -d
 
@@ -181,12 +181,13 @@ ssh 边缘 'cd /opt/flori-edge && docker compose --env-file .env up -d'
 #    根生产 compose 的 Watchtower 仍是 120s;edge 为了前端快速跟随 CI 单独设为 10s。
 ```
 
-边缘 Caddy（`deploy/edge/Caddyfile`）：对人面入口（SPA + 非 runner 的 `/api/*`）全站 Basic Auth（用户名 `flori`，密码哈希 `FLORI_BASIC_HASH`）；`/api/runner/*` 是机机接口、自带 per-worker Bearer，放行不挂 Basic。`/api/*` 反代到反向 SSH 隧道口，前端反代到边缘本机 frontend 回环端口 8090。
+边缘 Caddy（`deploy/edge/Caddyfile`）：`EDGE_DOMAIN` 站点使用 `/opt/flori-edge/certs/<domain>.fullchain.pem` 与 `<domain>.key` 的可信证书；`EDGE_HOST`、`localhost`、`127.0.0.1` 站点使用 internal 证书作为 IP/本机入口。对人面入口（SPA + 非 runner 的 `/api/*`）全站 Basic Auth（用户名 `flori`，密码哈希 `FLORI_BASIC_HASH`）；`/api/runner/*` 是机机接口、自带 per-worker Bearer，放行不挂 Basic。`/mcp` 放行 Basic,由 NAS mcp-http 强制 Bearer。`/api/*` 和 `/mcp` 反代到反向 SSH 隧道口，前端反代到边缘本机 frontend 回环端口 8090。
 
 ### deploy/edge/.env 关键项
 
 ```bash
-EDGE_HOST=your.edge.host        # 边缘机域名/IP（也作自签证书 SNI）
+EDGE_HOST=your.edge.ip          # 边缘机公网 IP（也作无 SNI 默认站点）
+EDGE_DOMAIN=flori.wiki         # 可信证书域名；证书文件需在 /opt/flori-edge/certs/
 FLORI_BASIC_HASH=...            # caddy hash-password 生成的 flori 用户密码哈希
 MINIO_ACCESS_KEY=...
 MINIO_SECRET_KEY=...
