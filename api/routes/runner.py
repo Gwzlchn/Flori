@@ -233,6 +233,8 @@ async def offline(
 async def _enrich_claim(redis: RedisClient, claim: dict) -> dict:
     """把 pipeline/domain/style_tags/source 塞进 claim,让 gateway worker 无需回读 redis;
     style_tags 解析 json-or-list,失败兜空。source 供下载步凭证按需领取。"""
+    if claim.get("kind") == "ai":
+        return claim
     job_id = claim["job_id"]
     pipeline = await redis.get_job_pipeline(job_id)
     job_info = await redis.get_job_info(job_id)

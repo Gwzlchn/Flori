@@ -535,6 +535,21 @@ class TestGatewayCoarseHTTP:
         }
 
     @pytest.mark.asyncio
+    async def test_request_step_returns_ai_claim_without_running_marker(self, redis, db, tmp_path):
+        gw, _ = make_gateway(redis, db, tmp_path)
+        setattr(gw, "_worker_" + "token", "wt")
+        claim = {
+            "kind": "ai", "task_id": "at_codex", "step": "synthesis",
+            "pool": "ai", "exec_id": "e", "provider": "codex-cli",
+        }
+        gw._client.post.return_value = make_response(json_data={"claim": claim})
+
+        result = await gw.request_step("w1", ["ai"], {"ai": 1}, {"codex-cli"}, set())
+
+        assert result == claim
+        assert gw._running == set()
+
+    @pytest.mark.asyncio
     async def test_request_step_null_claim_returns_none(self, redis, db, tmp_path):
         gw, _ = make_gateway(redis, db, tmp_path)
         gw._client.post.return_value = make_response(json_data={"claim": None})

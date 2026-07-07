@@ -161,7 +161,12 @@ async def claim_step(
                 raise
             return {
                 "kind": "ai", "task_id": task_id, "step": step_name, "pool": pool,
-                "exec_id": exec_id, "request": task.get("request", {}), "domain": task.get("domain"),
+                "exec_id": exec_id, "request": task.get("request", {}),
+                "domain": task.get("domain"),
+                "provider": task.get("provider", "claude-cli"),
+                "model": task.get("model", "subscription"),
+                "tags": task.get("tags", []),
+                "require_tags": task.get("require_tags", []),
             }
 
         job_id = task["job_id"]

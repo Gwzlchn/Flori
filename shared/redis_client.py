@@ -113,7 +113,7 @@ class RedisClient:
 
     async def enqueue_ai_task(self, payload: dict, priority: int = 0) -> None:
         """投递独立 AI task(kind='ai')到 queue:ai。payload 由 AITask.to_task_payload() 生成
-        (内联 LLMRequest + require_tags=['claude-cli']);供 /api/ask、/digest 把 claude 调用交给 ai-worker。
+        (内联 LLMRequest + require_tags=[provider]);供 /api/ask、/digest 把订阅 CLI 调用交给 ai-worker。
         与普通 task 同框、能进 /system 队列窥视;由 ai-worker 认领执行,结果回 airesult:{task_id}。"""
         task = json.dumps(payload, sort_keys=True)
         await self.r.zadd("queue:ai", {task: priority})

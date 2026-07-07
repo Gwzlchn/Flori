@@ -1217,6 +1217,7 @@ class TestAITaskExecution:
                    provider="codex-cli").to_task_payload())
         claim = await request_step(w)
         assert claim is not None and claim["provider"] == "codex-cli"
+        assert claim["model"] == "subscription"
         assert claim["require_tags"] == ["codex-cli"]
 
 

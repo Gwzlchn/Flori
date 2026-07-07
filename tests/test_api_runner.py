@@ -280,6 +280,13 @@ async def _register_real(client):
     return body["worker_id"], body["worker_token"]
 
 
+async def _register_ai(client):
+    payload = {"type": "ai", "pools": ["ai"], "tags": ["codex-cli"], "reject_tags": []}
+    resp = await client.post("/api/runner/register", json=payload, headers=_reg_headers())
+    body = resp.json()
+    return body["worker_id"], body["worker_token"]
+
+
 class TestJobsRequest:
     @pytest.mark.asyncio
     async def test_requires_worker_token(self, jobs_client):
@@ -309,6 +316,31 @@ class TestJobsRequest:
         assert claim["domain"] == "lecture"
         assert claim["style_tags"] == ["formal"]
         assert await real_redis.get_step_status("j1", "A") == "running"
+
+    @pytest.mark.asyncio
+    async def test_returns_ai_claim_without_job_enrich(self, jobs_client, real_redis):
+        from shared.models import AITask, LLMRequest
+
+        worker_id, token = await _register_ai(jobs_client)
+        await real_redis.enqueue_ai_task(
+            AITask(task_id="at_codex", request=LLMRequest(messages=[]),
+                   provider="codex-cli").to_task_payload()
+        )
+
+        resp = await jobs_client.post(
+            "/api/runner/jobs/request",
+            json={"pools": ["ai"], "pool_limits": {"ai": 1},
+                  "tags": ["codex-cli"], "reject_tags": []},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert resp.status_code == 200
+        claim = resp.json()["claim"]
+        assert claim["kind"] == "ai" and claim["task_id"] == "at_codex"
+        assert claim["provider"] == "codex-cli" and claim["model"] == "subscription"
+        assert claim["require_tags"] == ["codex-cli"]
+        assert claim["exec_id"].startswith(f"{worker_id}:")
+        assert "job_id" not in claim
 
     @pytest.mark.asyncio
     async def test_returns_null_when_empty(self, jobs_client, monkeypatch):

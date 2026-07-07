@@ -208,7 +208,7 @@ class GatewayTransport:
                 raise WorkerAuthRejected()
             resp.raise_for_status()
             claim = resp.json().get("claim")
-            if claim:
+            if claim and claim.get("kind") != "ai":
                 # 在跑步集合:心跳捎带上报(见 heartbeat body running),给每个并发步刷进度心跳。
                 # 独立 alive 通道在部分外网链路上不达(实测 8 并发 worker alive 0 送达,
                 # 步骤 150s 后被 orphan_scan 全量误回收);心跳是实测可靠通道,借道最稳。
