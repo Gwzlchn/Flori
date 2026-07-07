@@ -182,6 +182,20 @@ describe('SystemView', () => {
     expect(store.pause).toHaveBeenCalledWith('w-pause')
   })
 
+  it('worker 卡片不再提供配置入口', async () => {
+    const store = useWorkerStore()
+    stubStoreData(store)
+    const w = mountView({
+      workers: [makeWorker({ id: 'w-cfg', status: 'online-idle', cfg_rev: 2, applied_cfg_rev: 2 })],
+    })
+    await flushPromises()
+    const card = w.find('.wcard')
+    expect(card.exists()).toBe(true)
+    expect(card.text()).toContain('备注')
+    expect(card.text()).not.toContain('配置')
+    expect(card.find('.cfg-panel').exists()).toBe(false)
+  })
+
   it('离线 worker 确认后调用 store.remove', async () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     const store = useWorkerStore()

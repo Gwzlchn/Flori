@@ -14,7 +14,7 @@ import TaskRow from '../components/system/TaskRow.vue'
 import type { Worker, WorkerTask } from '../types'
 import {
   RefreshCw, Pause, X, Cpu, Info, Layers, Clock, Check,
-  Play, MessageSquare,
+  Play, MessageSquare, Settings,
 } from 'lucide-vue-next'
 
 const route = useRoute()
@@ -31,6 +31,24 @@ const tasks = ref<WorkerTask[]>([])
 const loading = ref(true)
 const error = ref('')
 const busy = ref(false)
+const cfgConcurrency = ref(1)
+const cfgSaving = ref(false)
+
+function desiredConcurrency(w: Worker): number {
+  return w.desired_config?.concurrency ?? w.concurrency ?? 1
+}
+
+function applyWorkerSnapshot(w: Worker) {
+  worker.value = w
+  cfgConcurrency.value = desiredConcurrency(w)
+  // 面包屑显真实 worker id(替代通用「Worker 详情」)
+  global.setCrumbs([{ t: '系统', to: '/system' }, { t: w.id }])
+}
+
+async function reloadWorkerDetail() {
+  const w = await api.get<Worker>(`/api/workers/${encodeURIComponent(workerId.value)}`)
+  applyWorkerSnapshot(w)
+}
 
 async function load() {
   loading.value = true
@@ -41,10 +59,8 @@ async function load() {
       api.get<Worker>(`/api/workers/${encodeURIComponent(workerId.value)}`),
       workerStore.fetchTasks(workerId.value).catch(() => [] as WorkerTask[]),
     ])
-    worker.value = w
+    applyWorkerSnapshot(w)
     tasks.value = taskList
-    // 面包屑显真实 worker id(替代通用「Worker 详情」)
-    global.setCrumbs([{ t: '系统', to: '/system' }, { t: w.id }])
   } catch (e: any) {
     error.value = e?.status === 404 ? 'Worker 不存在或已移除' : (e?.message || '加载失败')
   } finally {
@@ -73,6 +89,13 @@ const ago = (v: string | null | undefined) => fmtRelative(v, { style: 'cn', abso
 
 // 算力描述:GPU 名优先,否则按类型;无 worker 时回退 —。
 const computeDesc = computed(() => (worker.value ? workerComputeDesc(worker.value) : '—'))
+
+const desiredCfgConcurrency = computed(() => (worker.value ? desiredConcurrency(worker.value) : cfgConcurrency.value))
+const cfgSyncState = computed(() => {
+  const w = worker.value
+  if (!w?.cfg_rev) return ''
+  return (w.applied_cfg_rev ?? 0) >= w.cfg_rev ? 'synced' : 'pending'
+})
 
 // 机器配置(worker 自报 spec):核数 · 内存 · 平台 · Python。
 const machineDesc = computed(() => {
@@ -139,6 +162,25 @@ async function saveNote() {
     showToast('保存失败', 'error')
   } finally {
     busy.value = false
+  }
+}
+
+async function saveConfig() {
+  if (!worker.value) return
+  const concurrency = Math.trunc(Number(cfgConcurrency.value))
+  if (!Number.isFinite(concurrency) || concurrency < 1) {
+    showToast('并发必须大于 0', 'error')
+    return
+  }
+  cfgSaving.value = true
+  try {
+    await workerStore.setConfig(workerId.value, { concurrency })
+    await reloadWorkerDetail()
+    showToast('配置已保存', 'success')
+  } catch {
+    showToast('配置保存失败', 'error')
+  } finally {
+    cfgSaving.value = false
   }
 }
 
@@ -243,6 +285,28 @@ onBeforeUnmount(() => global.setCrumbs(null))
             </tr>
           </tbody>
         </table>
+      </div>
+
+      <!-- 配置 -->
+      <div class="card pad" style="margin-top:16px">
+        <div class="card-h"><Settings :size="15" />配置</div>
+        <div style="display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap">
+          <div class="field" style="margin:0;max-width:150px">
+            <label>并发</label>
+            <input v-model.number="cfgConcurrency" type="number" min="1" max="64" class="input" />
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px">
+            <span class="badge b-mut">当前 {{ worker.concurrency }}</span>
+            <span class="badge b-brand">期望 {{ desiredCfgConcurrency }}</span>
+            <span v-if="cfgSyncState === 'pending'" class="badge b-warn"
+              title="等待 worker 心跳应用">待同步</span>
+            <span v-else-if="cfgSyncState === 'synced'" class="badge b-mut"
+              :title="`rev ${worker.cfg_rev}`">已生效</span>
+          </div>
+          <button class="btn sm pri" style="margin-left:auto" :disabled="cfgSaving" @click="saveConfig">
+            <Check :size="13" />{{ cfgSaving ? '保存中…' : '保存配置' }}
+          </button>
+        </div>
       </div>
 
       <!-- 任务历史 -->

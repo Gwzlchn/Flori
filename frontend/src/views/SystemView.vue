@@ -22,7 +22,7 @@ import { COMPONENT_KIND_LABELS } from '../types'
 import {
   Server, RefreshCw, Cpu, Pause, Play, MessageSquare, X, Plus,
   Key, Copy, Check, Layers, HardDrive, Database, Boxes, AlertTriangle,
-  Coins, Braces, Network, Settings,
+  Coins, Braces, Network,
 } from 'lucide-vue-next'
 
 const router = useRouter()
@@ -354,31 +354,6 @@ const AI_CRED_METHODS = [
   { id: 'deepseek', label: 'DeepSeek API Key' },
 ] as const
 const aiCredMethod = ref<(typeof AI_CRED_METHODS)[number]['id']>('claude-sub')
-
-// worker 运营参数中心管理:卡片「配置」只编辑并发 → PUT /config → 下一心跳热生效。
-// 能力(池/标签)刻意不可改:池是机器固有能力(启动参数表达)、net-zone 标签是探针判定——
-// 页面改一台够不着 B 站的机器的池不能让它下载成功,语义即错(用户 review 定论)。
-const cfgEditing = ref('')          // 正在编辑配置的 worker id('' = 无)
-const cfgConcurrency = ref(1)
-const cfgSaving = ref(false)
-function openCfg(w: Worker) {
-  cfgEditing.value = w.id
-  const d = w.desired_config || {}
-  cfgConcurrency.value = d.concurrency ?? w.concurrency ?? 1
-}
-async function saveCfg(w: Worker) {
-  cfgSaving.value = true
-  try {
-    await workerStore.setConfig(w.id, { concurrency: cfgConcurrency.value })
-    cfgEditing.value = ''
-  } finally {
-    cfgSaving.value = false
-  }
-}
-function cfgSyncState(w: Worker): string {
-  if (!w.cfg_rev) return ''
-  return (w.applied_cfg_rev ?? 0) >= w.cfg_rev ? 'synced' : 'pending'
-}
 
 const gatewayUrl = computed(() => {
   const o = typeof window !== 'undefined' ? window.location?.origin : ''
@@ -744,7 +719,7 @@ const usageByProvider = computed(() => {
         <pre style="background:var(--ink-900);color:#cbd5e1;font-family:var(--mono);font-size:12px;padding:12px;border-radius:var(--r-sm);overflow:auto;line-height:1.7;margin:0;white-space:pre-wrap;word-break:break-all">{{ command }}</pre>
         <p class="muted" style="font-size:12px;margin:8px 0 0;line-height:1.7">
           B站 / YouTube 凭证无需配置——中心在任务认领时自动下发(在系统设置扫码 / 上传一次即全网 worker 生效)。
-          并发可在 worker 卡片「配置」在线调整(下一心跳热生效);能力池/net 标签由启动参数与探针决定。镜像更新交给 Watchtower。
+          并发在 worker 详情页调整(下一心跳热生效);能力池/net 标签由启动参数与探针决定。镜像更新交给 Watchtower。
           自签证书部署时另加 <code>-e GATEWAY_TLS_INSECURE=1</code>(或 <code>GATEWAY_CA_BUNDLE=&lt;CA路径&gt;</code>)。
         </p>
         <button class="btn sm" style="margin-top:10px" @click="copy(command, 'cmd')">
@@ -786,10 +761,6 @@ const usageByProvider = computed(() => {
               :title="`期望 ${systemVersion}，当前 ${w.spec?.version}`">
               旧版本 {{ verSem(w.spec?.version) }}<span v-if="verBuild(w.spec?.version)">·{{ verBuild(w.spec?.version) }}</span>
             </span>
-            <span v-if="cfgSyncState(w) === 'pending'" class="badge b-warn"
-              title="配置已下发,等待 worker 心跳应用(≤10s)">配置待同步</span>
-            <span v-else-if="cfgSyncState(w) === 'synced'" class="badge b-mut"
-              :title="`中心配置已生效(rev ${w.cfg_rev})`">配置已生效</span>
           </div>
           <div class="wcard-stats">
             <span class="wstat"><b>{{ w.tasks_completed }}</b>完成</span>
@@ -816,38 +787,17 @@ const usageByProvider = computed(() => {
           <button class="btn sm" @click.stop="router.push(`/system/workers/${encodeURIComponent(w.id)}`)">
             <MessageSquare :size="13" />备注
           </button>
-          <button class="btn sm" title="中心下发运营参数(并发),下一心跳热生效,无需重启容器"
-            @click.stop="cfgEditing === w.id ? (cfgEditing = '') : openCfg(w)">
-            <Settings :size="13" />配置
-          </button>
         </template>
         <!-- 移除在所有卡片可用(在线=强制移除);离线只显移除 -->
         <button class="btn sm danger" :disabled="rowBusy === w.id" @click.stop="removeWorker(w)">
           <X :size="13" />移除
         </button>
-        <!-- 中心配置编辑:保存 → PUT /config → 下一心跳热生效(徽标显示同步态) -->
-        <div v-if="cfgEditing === w.id" class="cfg-panel" @click.stop>
-          <div class="field" style="margin:0;max-width:130px">
-            <label>并发</label>
-            <input v-model.number="cfgConcurrency" type="number" min="1" max="64" class="input" />
-          </div>
-          <span class="muted" style="font-size:12px;align-self:center">
-            能力(池 / net 标签)由启动参数与探针决定,不在此修改。
-          </span>
-          <button class="btn sm primary" :disabled="cfgSaving" @click="saveCfg(w)">
-            {{ cfgSaving ? '下发中…' : '保存并下发' }}
-          </button>
-        </div>
       </div>
     </div>
   </section>
 </template>
 
 <style scoped>
-.cfg-panel {
-  flex-basis: 100%; display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap;
-  margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line);
-}
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 summary::-webkit-details-marker { display: none; }
