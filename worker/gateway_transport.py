@@ -38,6 +38,8 @@ class GatewayTransport:
         self._id_file = Path(id_file)
         self._inner = inner
         self._worker_token = ""
+        # 本 worker 当前在跑的 (job_id, step) 集合:心跳捎带上报刷各步进度心跳(并发>1 必需)
+        self._running: set[tuple[str, str]] = set()
         # 每个 runner 请求带的身份头(register 后填);即使 401(token 无效)服务端也能据此记下"谁/什么版本"在刷。
         self._identity_headers: dict[str, str] = {}
         self._client: httpx.AsyncClient | None = None
@@ -133,6 +135,8 @@ class GatewayTransport:
             }
             if load:
                 body["load"] = load   # 本机 live 负载,经网关写 redis worker hash,供各节点负载展示
+            if self._running:
+                body["running"] = [{"job_id": j, "step": st} for j, st in sorted(self._running)]
             resp = await self._http.post(
                 "/api/runner/heartbeat", headers=self._auth(), json=body,
             )
@@ -203,7 +207,13 @@ class GatewayTransport:
                 # per-worker token 失效 → 抛给主循环自愈(重注册/退避/6h自杀),不能当"无任务"空转死刷。
                 raise WorkerAuthRejected()
             resp.raise_for_status()
-            return resp.json().get("claim")
+            claim = resp.json().get("claim")
+            if claim:
+                # 在跑步集合:心跳捎带上报(见 heartbeat body running),给每个并发步刷进度心跳。
+                # 独立 alive 通道在部分外网链路上不达(实测 8 并发 worker alive 0 送达 → 步骤
+                # 150s 后被 orphan_scan 全量误回收);心跳是实测可靠通道,借道最稳。
+                self._running.add((claim["job_id"], claim["step"]))
+            return claim
         except httpx.HTTPError as e:
             logger.warning(
                 "gateway_request_step_failed", worker_id=worker_id,
@@ -236,6 +246,7 @@ class GatewayTransport:
 
     async def report_done(self, claim, duration, started_at):
         job_id, step = claim["job_id"], claim["step"]
+        self._running.discard((job_id, step))
         await self._report_best_effort(
             f"/api/runner/jobs/{job_id}/steps/{step}/complete",
             {
@@ -248,6 +259,7 @@ class GatewayTransport:
     async def report_failed(self, claim, error, error_type, duration,
                             started_at, count_stats):
         job_id, step = claim["job_id"], claim["step"]
+        self._running.discard((job_id, step))
         await self._report_best_effort(
             f"/api/runner/jobs/{job_id}/steps/{step}/fail",
             {
@@ -260,6 +272,7 @@ class GatewayTransport:
         )
 
     async def release(self, claim):
+        self._running.discard((claim["job_id"], claim["step"]))
         job_id, step = claim["job_id"], claim["step"]
         await self._report_best_effort(
             f"/api/runner/jobs/{job_id}/steps/{step}/release",

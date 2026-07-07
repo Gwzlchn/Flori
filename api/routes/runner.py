@@ -76,6 +76,9 @@ class RunnerHeartbeatRequest(BaseModel):
     current_step: str = ""
     load: dict = Field(default_factory=dict)   # 本机 live 负载 {cpu_pct,mem_pct,loadavg};可空
     applied_cfg_rev: int = 0                   # worker 已生效的配置版本(回报,前端显示同步态)
+    # 在跑步集合 [{job_id,step}]:心跳捎带,为每个并发步刷进度心跳。独立 alive 通道
+    # 在部分外网链路不达(实测),心跳借道使 orphan_scan 判活不再依赖单点。
+    running: list = Field(default_factory=list)
 
 
 class RunnerOfflineRequest(BaseModel):
@@ -190,6 +193,10 @@ async def heartbeat(
     if req.worker_id != worker_id:
         raise HTTPException(status_code=403, detail="token/worker_id mismatch")
     await redis.heartbeat(worker_id, ttl=_worker_ttl(config))
+    for item in (req.running or [])[:64]:
+        j, st = item.get("job_id", ""), item.get("step", "")
+        if j and st:
+            await redis.set_step_progress_at(j, st)
     # live 负载落 redis worker hash(实时态,不进 DB);为空则不写,保留上次。
     if req.load:
         await redis.set_worker_field(worker_id, "load", json.dumps(req.load))

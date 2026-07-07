@@ -874,3 +874,18 @@ class TestConfigDispatch:
         body = r.json()
         assert body["desired_config"] == {"pools": ["cpu", "io"]} and body["cfg_rev"] == 1
         redis_mock.set_worker_field.assert_any_call("cpu-hb001", "cfg_applied_rev", "3")
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_running_refreshes_step_progress(jobs_client, real_redis):
+    """心跳捎带 running 集合 → 每个并发步的进度心跳被刷新(alive 单点不达的根治通道)。"""
+    worker_id, token = await _register_real(jobs_client)
+    r = await jobs_client.post("/api/runner/heartbeat",
+                               headers={"Authorization": f"Bearer {token}"}, json={
+        "worker_id": worker_id, "status": "busy",
+        "running": [{"job_id": "j1", "step": "01_download"},
+                    {"job_id": "j2", "step": "03_scene"}],
+    })
+    assert r.status_code == 200
+    assert await real_redis.get_step_progress_at("j1", "01_download") is not None
+    assert await real_redis.get_step_progress_at("j2", "03_scene") is not None
