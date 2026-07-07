@@ -171,7 +171,7 @@ class TestRequestStep:
     async def test_cas_lost_releases_slot_and_continues(self, redis, db):
         t = await _registered(redis, db)
         await redis.enqueue_step("scene", "j1", "A", [], priority=0)
-        # 状态已是 running → CAS ready->running 失败。
+        # 状态已是 running,CAS ready->running 失败.
         await redis.set_step_status("j1", "A", "running")
         await redis.init_job("j1", "test", {"domain": "general", "style_tags": "[]"})
 
@@ -311,7 +311,7 @@ class TestReportFailed:
         db_step = db.get_steps("j1")[0]
         assert db_step.status == StepStatus.FAILED
 
-        # count_stats=False → 不累加 failed
+        # count_stats=False 时不累加 failed.
         db_worker = db.get_worker(WORKER_ID)
         assert db_worker.tasks_failed == 0
 
@@ -431,7 +431,7 @@ class TestGatewayHeartbeat:
     async def test_401_raises_worker_auth_rejected(
         self, redis, db, tmp_path, monkeypatch,
     ):
-        # 心跳被 401(per-worker token 失效)→ 抛 WorkerAuthRejected,交主循环走重注册/退避/6h自杀;
+        # 心跳被 401(per-worker token 失效)时抛 WorkerAuthRejected,交主循环走重注册/退避/6h自杀;
         # 认证失败优先上抛,不 fall-through 到 inner。
         from worker.transport import WorkerAuthRejected
         gw, _ = make_gateway(redis, db, tmp_path)
@@ -635,7 +635,7 @@ class TestGatewayCoarseHTTP:
 
 
 class TestGatewayPureMode:
-    """inner=None(纯网关零隧道)——无影子写/无内层退回/委派返回安全默认值。"""
+    """inner=None(纯网关零隧道):无影子写,无内层退回,委派返回安全默认值."""
 
     @pytest.mark.asyncio
     async def test_register_returns_server_id_no_shadow_write(self, redis, tmp_path):
@@ -649,7 +649,7 @@ class TestGatewayPureMode:
         assert returned == "w_srv"
         assert gw._worker_token == "wt-secret"
         assert id_file.read_text().strip() == "w_srv"
-        # 无内层 → redis 不应有这行(无影子写)
+        # 无内层时 redis 不应有这行(无影子写).
         assert await redis.get_worker_info("w_srv") is None
 
     @pytest.mark.asyncio
@@ -787,7 +787,7 @@ class TestRedisTransportPoolPassthrough:
         t = RedisTransport(redis, db)
 
         assert await t.try_acquire_slot("cpu", 1, "h1") is True
-        # 槽位已满 → 不同 holder 第二次失败
+        # 槽位已满时,不同 holder 第二次失败.
         assert await t.try_acquire_slot("cpu", 1, "h2") is False
         assert await redis.get_pool_count("cpu") == 1
 
@@ -842,10 +842,10 @@ class TestRedisTransportStepMachine:
         t = RedisTransport(redis, db)
         await redis.set_step_status("j1", "A", "ready")
 
-        # 期望匹配 → 推进成功
+        # 期望匹配时推进成功.
         assert await t.cas_step_status("j1", "A", "ready", "running") is True
         assert await redis.get_step_status("j1", "A") == "running"
-        # 期望不匹配(仍是 ready 的旧期望)→ 失败,状态不变
+        # 期望不匹配(仍是 ready 的旧期望)时失败,状态不变.
         assert await t.cas_step_status("j1", "A", "ready", "done") is False
         assert await redis.get_step_status("j1", "A") == "running"
 
@@ -893,7 +893,7 @@ class TestRedisTransportStepMachine:
 
         started = datetime.now(timezone.utc)
         finished = datetime.now(timezone.utc)
-        # error=None(默认)→ 不传 error kwarg,旧 error 列保持不变
+        # error=None(默认)时不传 error kwarg,旧 error 列保持不变.
         await t.update_step_result(
             "j1", "A", status="done", worker_id="w_x",
             started_at=started, finished_at=finished, duration_sec=1.0,
@@ -914,7 +914,7 @@ class TestRedisTransportIncrementStats:
         assert db.get_worker(WORKER_ID).tasks_completed == 2
         info = await redis.get_worker_info(WORKER_ID)
         assert info["tasks_completed"] == "2"
-        # failed/duration 为 0 → 不写这两个 Redis 字段
+        # failed/duration 为 0 时不写这两个 Redis 字段.
         assert "tasks_failed" not in info
         assert "total_duration_sec" not in info
 
@@ -930,7 +930,7 @@ class TestRedisTransportIncrementStats:
         info = await redis.get_worker_info(WORKER_ID)
         assert info["tasks_failed"] == "1"
         assert float(info["total_duration_sec"]) == 4.5
-        # completed=0 → 不写 tasks_completed
+        # completed=0 时不写 tasks_completed.
         assert "tasks_completed" not in info
 
     @pytest.mark.asyncio
@@ -966,7 +966,7 @@ class TestRedisTransportAIUsageAndJob:
 
     @pytest.mark.asyncio
     async def test_record_ai_usage_dedup_same_exec_id(self, redis, db):
-        """同 exec_id 二次落库不翻倍计费(ai_usage.exec_id UNIQUE → 第二次 no-op)。"""
+        """同 exec_id 二次落库不翻倍计费(ai_usage.exec_id UNIQUE,第二次 no-op)."""
         from shared.models import AIUsage
 
         t = RedisTransport(redis, db)
@@ -1065,7 +1065,7 @@ class TestCreateTransport:
         t = create_transport(redis, db)
 
         assert isinstance(t, GatewayTransport)
-        # redis 非 None → 内层 RedisTransport 注入(混合模式影子写)
+        # redis 非 None 时内层 RedisTransport 注入(混合模式影子写).
         assert isinstance(t._inner, RedisTransport)
         assert t._registration_token == "tok-1"
 
@@ -1076,7 +1076,7 @@ class TestCreateTransport:
         monkeypatch.delenv("WORKER_REGISTRATION_TOKEN", raising=False)
         monkeypatch.setenv("WORKER_ID_FILE", "/tmp/.flori_worker_id_test")
 
-        # 纯网关零隧道:redis/db 均 None → inner=None
+        # 纯网关零隧道:redis/db 均 None 时 inner=None.
         t = create_transport(None, None)
 
         assert isinstance(t, GatewayTransport)

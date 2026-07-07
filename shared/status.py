@@ -75,10 +75,10 @@ def compute_component_status(
     stale_window_sec: int = DEFAULT_STALE_WINDOW_SEC,
 ) -> str:
     """按心跳新鲜度把组件折算成四态(供 scheduler 心跳判活):
-      - 无心跳记录(从未写过/老版本)→ unknown(非永久 degraded,避免误报"挂了")。
-      - age ≤ online_window → up。
-      - online_window < age ≤ stale_window → degraded(错过几拍,缓冲带)。
-      - age > stale_window → down(TTL 过期/进程死)。
+      - 无心跳记录(从未写过/老版本):unknown(非永久 degraded,避免误报"挂了").
+      - age <= online_window:up.
+      - online_window < age <= stale_window:degraded(错过几拍,缓冲带).
+      - age > stale_window:down(TTL 过期/进程死).
     redis/minio 不走本函数(它们靠实时探活,而非心跳)。loop_lag 等附加降级条件由调用方叠加。
     """
     if now is None:

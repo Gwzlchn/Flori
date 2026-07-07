@@ -80,8 +80,8 @@ class RedisClient:
     @staticmethod
     def _enqueued_field(pool: str, parsed: dict) -> str:
         """queue:enqueued 的 field key(kind 感知):
-        pipeline-step task → {pool}|{job_id}|{step};
-        AI task(kind='ai')→ {pool}|ai|{task_id}(无 job_id,用 task_id)。"""
+        pipeline-step task 用 {pool}|{job_id}|{step};
+        AI task(kind='ai')用 {pool}|ai|{task_id}(无 job_id,用 task_id)."""
         if parsed.get("kind") == "ai":
             return f"{pool}|ai|{parsed.get('task_id')}"
         return f"{pool}|{parsed.get('job_id')}|{parsed.get('step')}"
@@ -127,7 +127,7 @@ class RedisClient:
         await self.r.set(f"airesult:{task_id}", json.dumps(result, ensure_ascii=False), ex=ttl)
 
     async def get_ai_result(self, task_id: str) -> dict | None:
-        """取 AI task 结果;未就绪/已过期 → None。"""
+        """取 AI task 结果;未就绪/已过期时返回 None."""
         raw = await self.r.get(f"airesult:{task_id}")
         return json.loads(raw) if raw else None
 
@@ -181,7 +181,7 @@ class RedisClient:
             return None
         task_json, score = items[0]
         parsed = json.loads(task_json)
-        # 出队即离开队列 → 清入队时间戳(避免 hash 堆积孤儿)。
+        # 出队即离开队列,清入队时间戳避免 hash 堆积孤儿.
         try:
             await self.r.hdel("queue:enqueued", self._enqueued_field(pool, parsed))
         except Exception:
@@ -553,7 +553,7 @@ class RedisClient:
         会在下次扫描又冒出来,必须连 Redis key 一起清。"""
         await self.r.delete(f"worker:{worker_id}")
 
-    # 网关中转流量(产物代理:pull=NAS→worker 出库 / push=worker→NAS 入库)
+    # 网关中转流量(产物代理:pull 为 NAS 到 worker 出库,push 为 worker 到 NAS 入库)
     # 按方向 + worker 归因累计字节。埋点在 api/routes/runner.py 的 get/put_artifact;
     # best-effort:计数失败绝不影响产物传输(故全程 try/except 吞异常)。
     # 总量另存哨兵 field "_"(`traffic:{direction}:total` hash),省得每次读全 by_worker 求和。
@@ -606,7 +606,7 @@ class RedisClient:
         except Exception:
             return {"total": 0, "by_tool": {}}
 
-    # 链路流量(ECS↔NAS 隧道 + 网关聚合 + 速率快照),由 tunnel_stats 上报器周期写,/api/status 读
+    # 链路流量(ECS-NAS 隧道 + 网关聚合 + 速率快照),由 tunnel_stats 上报器周期写,/api/status 读
     async def set_link_traffic(self, payload: dict) -> None:
         """写链路流量快照(隧道 rx/tx + 每隧道 + up + 网关聚合 + 当前速率)。失败静默。"""
         try:
@@ -683,7 +683,7 @@ class RedisClient:
     # 接入 token(homelab 可复用 + 可重置)
 
     # 不放 worker: 命名空间:否则 list_worker_ids 的 worker:* 扫描会把它当成 worker,
-    # 对这个 string 键做 hgetall 触发 WRONGTYPE → /api/workers 500。
+    # 对这个 string 键做 hgetall 会触发 WRONGTYPE 并导致 /api/workers 500.
     _REGISTRATION_TOKEN_KEY = "runner:registration_token"
 
     async def get_registration_token(self) -> str | None:
@@ -741,7 +741,7 @@ class RedisClient:
     async def subscribe(self, *channels: str) -> AsyncIterator[dict]:
         """订阅频道并 yield 解码后的消息。
 
-        实现要点(曾踩坑):不用 ``pubsub.listen()`` 异步生成器——它在 redis
+        实现要点(曾踩坑):不用 ``pubsub.listen()`` 异步生成器.它在 redis
         关闭空闲 pubsub 连接后会静默挂死或停止迭代(订阅消失但不报错),导致
         调度器进程仍 Up 却收不到任何事件、任务永远 pending。改用带超时的
         ``get_message`` 轮询:连接断开会抛 Timeout/Connection 异常,被捕获后

@@ -146,7 +146,7 @@ class TestTagMatching:
 
     @pytest.mark.asyncio
     async def test_accept_matching_require_tags(self, worker, redis):
-        """require_tags ⊆ worker.tags → accept"""
+        """require_tags 是 worker.tags 子集时 accept."""
         await redis.enqueue_step("cpu", "j1", "A", ["vision"], priority=0,
                                  require_tags=["vision"])
         await redis.set_step_status("j1", "A", "ready")
@@ -157,7 +157,7 @@ class TestTagMatching:
 
     @pytest.mark.asyncio
     async def test_reject_tags_block(self, worker, redis):
-        """tags ∩ reject_tags ≠ ∅ → put back (even if require_tags match)"""
+        """tags 与 reject_tags 相交时 put back,即使 require_tags 匹配."""
         await redis.enqueue_step("cpu", "j1", "A", ["vision", "private"], priority=0,
                                  require_tags=["vision"])
         claim = await request_step(worker)
@@ -167,7 +167,7 @@ class TestTagMatching:
 
     @pytest.mark.asyncio
     async def test_insufficient_require_tags(self, worker, redis):
-        """require_tags ⊄ worker.tags → put back"""
+        """require_tags 不是 worker.tags 子集时 put back."""
         await redis.enqueue_step("cpu", "j1", "A", ["heavy"], priority=0,
                                  require_tags=["heavy"])
         claim = await request_step(worker)
@@ -228,7 +228,7 @@ class TestCAS:
         """When CAS fails (step already running), request_step releases the acquired slot."""
         worker.pools = ["cpu"]
         await setup_task_in_queue(redis)
-        # 队列里有任务但状态已是 running → CAS ready->running 失败。
+        # 队列里有任务但状态已是 running,CAS ready->running 失败.
         await redis.set_step_status("j_test_001", "A", "running")
 
         claim = await request_step(worker)
@@ -302,23 +302,23 @@ class TestUseGpuGating:
 
     @pytest.mark.asyncio
     async def test_gpu_tag_and_gpu_pool(self, worker, tmp_jobs_dir):
-        # worker 具 gpu 标签 + 认到 gpu 池 → 启用。
+        # worker 具 gpu 标签 + 认到 gpu 池时启用.
         assert await self._captured_use_gpu(worker, tmp_jobs_dir, pool="gpu") is True
 
     @pytest.mark.asyncio
     async def test_gpu_tag_cpu_pool_no_raw_gpu(self, worker, tmp_jobs_dir):
-        # 具 gpu 标签但 cpu 池且步骤配置无 gpu 标签 → 不启用(挡误启)。
+        # 具 gpu 标签但 cpu 池且步骤配置无 gpu 标签时不启用(挡误启).
         assert await self._captured_use_gpu(worker, tmp_jobs_dir, pool="cpu") is False
 
     @pytest.mark.asyncio
     async def test_gpu_tag_cpu_pool_step_tagged_gpu(self, worker, tmp_jobs_dir):
-        # cpu 池但步骤配置 tags 含 gpu → 启用(覆盖 raw.get("tags") 分支)。
+        # cpu 池但步骤配置 tags 含 gpu 时启用(覆盖 raw.get("tags") 分支).
         worker.config.pipelines["test"]["steps"][0]["tags"] = ["gpu"]  # step "A"
         assert await self._captured_use_gpu(worker, tmp_jobs_dir, pool="cpu") is True
 
     @pytest.mark.asyncio
     async def test_no_gpu_worker_tag(self, worker, tmp_jobs_dir):
-        # worker 不具 gpu 标签 → 即便 gpu 池也不启用(挡漏判/误启)。
+        # worker 不具 gpu 标签时,即便 gpu 池也不启用(挡漏判/误启).
         worker.tags = {"vision"}
         assert await self._captured_use_gpu(worker, tmp_jobs_dir, pool="gpu") is False
 
@@ -382,7 +382,7 @@ class TestAutoDiscoverTags:
                     assert "gpu" not in tags
 
     def test_claude_binary_present_but_not_authed(self):
-        # 镜像自带 claude 二进制但无凭证(纯 gateway worker)→ 不该标 vision/claude-cli
+        # 镜像自带 claude 二进制但无凭证(纯 gateway worker)时不该标 vision/claude-cli.
         env = {k: v for k, v in os.environ.items()
                if k not in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OLLAMA_URL")}
         with patch.dict(os.environ, env, clear=True):
@@ -393,7 +393,7 @@ class TestAutoDiscoverTags:
                     assert "claude-cli" not in tags
 
     def test_claude_logged_in_adds_vision_and_cli(self):
-        # claude 订阅已登录(~/.claude/.credentials.json 在)→ 标 vision + claude-cli
+        # claude 订阅已登录(~/.claude/.credentials.json 在)时标 vision + claude-cli.
         env = {k: v for k, v in os.environ.items()
                if k not in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OLLAMA_URL")}
         with patch.dict(os.environ, env, clear=True):
@@ -426,7 +426,7 @@ class TestAutoDiscoverTags:
                     assert "net-cn" in tags and "net-global" in tags
 
     def test_no_cred_no_bili_no_net_proxy(self, tmp_path):
-        # 无凭证 → 无 bili;路由走 net-zone 探测,不产生 net-proxy tag(本用例 autouse 屏蔽探测为空)。
+        # 无凭证时无 bili;路由走 net-zone 探测,不产生 net-proxy tag(本用例 autouse 屏蔽探测为空).
         with patch.dict(os.environ, self._clean_env(DATA_DIR=str(tmp_path)), clear=True):
             with patch("shutil.which", return_value=None):
                 tags = auto_discover_tags()
@@ -438,7 +438,7 @@ class TestNetZoneProbe:
     """net-zone 自动探测:env 强制覆盖 / 按探针可达性判 / 不联网(_probe_reachable mock)。"""
 
     def test_env_override_skips_probe(self):
-        # NET_ZONES 显式覆盖 → 直接用,不探测(香港 worker 设 NET_ZONES=global)。
+        # NET_ZONES 显式覆盖时直接用,不探测(香港 worker 设 NET_ZONES=global).
         with patch.dict(os.environ, {"NET_ZONES": "global"}, clear=False):
             with patch("worker.worker._probe_reachable", side_effect=AssertionError("不该探测")):
                 assert _probe_net_zones() == {"net-global"}
@@ -449,13 +449,13 @@ class TestNetZoneProbe:
                 assert _probe_net_zones() == {"net-cn", "net-global"}
 
     def test_probe_only_cn(self):
-        # 国内无代理:CN 探针通、global 不通 → 仅 net-cn。
+        # 国内无代理:CN 探针通,global 不通时仅 net-cn.
         with patch.dict(os.environ, {"NET_ZONES": "", "NET_PROBE_CN": "https://cn", "NET_PROBE_GLOBAL": "https://g"}, clear=False):
             with patch("worker.worker._probe_reachable", side_effect=lambda u, **k: u == "https://cn"):
                 assert _probe_net_zones() == {"net-cn"}
 
     def test_probe_only_global(self):
-        # 香港:global 通、CN(B站)不通 → 仅 net-global。
+        # 香港:global 通,CN(B站)不通时仅 net-global.
         with patch.dict(os.environ, {"NET_ZONES": "", "NET_PROBE_CN": "https://cn", "NET_PROBE_GLOBAL": "https://g"}, clear=False):
             with patch("worker.worker._probe_reachable", side_effect=lambda u, **k: u == "https://g"):
                 assert _probe_net_zones() == {"net-global"}
@@ -463,11 +463,11 @@ class TestNetZoneProbe:
 
 class TestWorkerPoolsCli:
     """能力统一用 --pools:--pools 必填、worker_type 从 pools 派生、
-    多池派生 type 的 worker_id 前缀 '+'→'-'。"""
+    多池派生 type 的 worker_id 前缀 '+' 转为 '-'."""
 
     def test_pools_required_and_no_type_arg(self, monkeypatch):
         import worker.main as wm
-        monkeypatch.setattr("sys.argv", ["worker"])           # 不给 --pools → 必填报错
+        monkeypatch.setattr("sys.argv", ["worker"])           # 不给 --pools 时必填报错
         with pytest.raises(SystemExit):
             wm.parse_args()
         monkeypatch.setattr("sys.argv", ["worker", "--pools", "cpu", "gpu"])
@@ -483,7 +483,7 @@ class TestWorkerPoolsCli:
     def test_resolve_worker_id_sanitizes_multi_pool_type(self, monkeypatch):
         monkeypatch.setenv("WORKER_NAME", "gpu-rig")
         wid = _resolve_worker_id("cpu+gpu")
-        assert wid.startswith("cpu-gpu-") and "+" not in wid  # id 前缀 '+' → '-'
+        assert wid.startswith("cpu-gpu-") and "+" not in wid  # id 前缀 '+' 转为 '-'
 
 
 class TestUpdateWorkerStatus:
@@ -548,7 +548,7 @@ class TestHeartbeatLoop:
 
     @pytest.mark.asyncio
     async def test_heartbeat_writes_live_load_to_redis(self, worker, redis):
-        # 心跳带 load → 写 redis worker hash 的 load 字段(JSON);空 load 不写。
+        # 心跳带 load 时写 redis worker hash 的 load 字段(JSON);空 load 不写.
         await worker.register()
         await worker.transport.heartbeat(
             worker.worker_id, load={"cpu_pct": 12.5, "mem_pct": 40.0, "loadavg": 0.7},
@@ -650,7 +650,7 @@ class TestExecuteFullFlow:
 
     @pytest.mark.asyncio
     async def test_push_failure_on_success_reports_failed_not_done(self, worker, redis, db, tmp_jobs_dir):
-        # returncode==0 但产物推送失败 → 必须报 failed(绝不标 done):否则下游拉不到输入,
+        # returncode==0 但产物推送失败时必须报 failed(绝不标 done):否则下游拉不到输入,
         # 上游 done 但产物缺失即 input_missing。重试时会重新生成并推送。
         await worker.register()
         db.create_job(make_job())
@@ -673,7 +673,7 @@ class TestExecuteFullFlow:
 
     @pytest.mark.asyncio
     async def test_minimal_claim_resolves_pipeline_via_transport(self, worker, redis, db, tmp_jobs_dir):
-        # 最小 claim(无 pipeline/domain/style_tags)→ execute 在 try 内经 transport 回读后跑完。
+        # 最小 claim(无 pipeline/domain/style_tags)会在 execute 的 try 内经 transport 回读后跑完.
         await worker.register()
         db.create_job(make_job())
         db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.READY, pool="cpu"))
@@ -692,7 +692,7 @@ class TestExecuteFullFlow:
 
     @pytest.mark.asyncio
     async def test_job_read_failure_fails_step_not_crash(self, worker, redis, db, tmp_jobs_dir):
-        # get_job_pipeline 抛错 → 被 execute 接住转 report_failed:步骤判失败、槽位释放、worker 不崩。
+        # get_job_pipeline 抛错会被 execute 接住转 report_failed:步骤判失败,槽位释放,worker 不崩.
         await worker.register()
         db.create_job(make_job())
         db.upsert_step(Step(job_id="j_test_001", name="A", status=StepStatus.RUNNING, pool="cpu"))
@@ -892,7 +892,7 @@ class TestConcurrency:
 
     @pytest.mark.asyncio
     async def test_run_starts_n_claim_loops(self, redis, db, config, storage):
-        """concurrency=N → supervisor 起 N 条认领循环(各带 slot 序号)。
+        """concurrency=N 时 supervisor 起 N 条认领循环(各带 slot 序号).
         supervisor 会对非闲退的 done 循环重生(崩溃兜底),故 run() 不再随 stub 秒退而返回,
         需显式 shutdown 收尾。全局每池槽位仍是系统级上限。"""
         w = Worker(
@@ -938,11 +938,11 @@ class TestConcurrency:
         sup = asyncio.create_task(w._claim_supervisor())
         try:
             await asyncio.sleep(0.1)
-            # 扩容 1→3:supervisor 下一拍(2s)补 slot;直接断言状态经 _apply
+            # 扩容 1 到 3:supervisor 下一拍(2s)补 slot;直接断言状态经 _apply
             w._apply_desired_config(
                 {"desired_config": {"concurrency": 3}, "cfg_rev": 1})
             assert w.concurrency == 3
-            # 缩容 3→1:rev 更高才应用
+            # 缩容 3 到 1:rev 更高才应用
             w._apply_desired_config(
                 {"desired_config": {"concurrency": 1}, "cfg_rev": 2})
             assert w.concurrency == 1 and w._cfg_applied_rev == 2
@@ -1019,7 +1019,7 @@ class TestUploadFaultTolerance:
 
 class TestWorkerIdentity:
     def test_worker_name_deterministic(self, tmp_path, monkeypatch):
-        """设了 WORKER_NAME → id = {type}-sha256(name)[:8],确定性:重复解析/删缓存都同一 id。"""
+        """设了 WORKER_NAME 时 id = {type}-sha256(name)[:8],确定性:重复解析/删缓存都同一 id."""
         import hashlib
         monkeypatch.setenv("WORKER_NAME", "nas-cpu")
         monkeypatch.setenv("WORKER_ID_FILE", str(tmp_path / "id"))
@@ -1037,7 +1037,7 @@ class TestWorkerIdentity:
         assert a != b and a.startswith("ai-") and b.startswith("ai-")
 
     def test_no_name_falls_back_to_cached(self, tmp_path, monkeypatch):
-        """没 WORKER_NAME → 随机 {type}-{8hex} 缓存,二次解析复用同一 id。"""
+        """没 WORKER_NAME 时随机 {type}-{8hex} 缓存,二次解析复用同一 id."""
         monkeypatch.delenv("WORKER_NAME", raising=False)
         monkeypatch.setenv("WORKER_ID_FILE", str(tmp_path / "id"))
         first = _resolve_worker_id("cpu")
@@ -1060,7 +1060,7 @@ class TestWorkerIdentity:
         assert default_worker_id_file() == str(tmp_path / "custom.id")
 
     def test_legacy_flat_id_file_migrates_to_home_dir(self, monkeypatch):
-        """旧平铺布局(/data/workers/<name> 是 id 文件)→ 启动自迁移成家目录 + worker.id。
+        """旧平铺布局(/data/workers/<name> 是 id 文件)启动自迁移成家目录 + worker.id.
         id 内容不变,不触发重注册。幂等:二次调用不再动。"""
         import shutil
         import uuid
@@ -1172,19 +1172,19 @@ class TestComputeEffectiveTimeout:
         assert compute_effective_timeout(1800, 90, 0) == 1800
 
     def test_short_audio_uses_base_floor(self):
-        # 10 分钟 * 90 = 900 < 1800 下限 → 1800。
+        # 10 分钟 * 90 = 900 < 1800 下限,返回 1800.
         assert compute_effective_timeout(1800, 90, 600) == 1800
 
     def test_long_audio_scales(self):
-        # 90 分钟 * 90 = 8100 > 1800 → 8100。
+        # 90 分钟 * 90 = 8100 > 1800,返回 8100.
         assert compute_effective_timeout(1800, 90, 90 * 60) == 8100
 
     def test_rounds_up_partial_minute(self):
-        # 89.5 分钟 → ceil=90 → 8100。
+        # 89.5 分钟按 ceil=90 计算,返回 8100.
         assert compute_effective_timeout(1800, 90, 89.5 * 60) == 8100
 
     def test_cap_clamps(self):
-        # 10h * 90 = 54000,但 cap=21600 → 21600。
+        # 10h * 90 = 54000,但 cap=21600,返回 21600.
         assert compute_effective_timeout(1800, 90, 10 * 3600, 21600) == 21600
 
 
@@ -1204,7 +1204,7 @@ class TestReadMediaDuration:
 
 
 class TestWorkerAuthRecovery:
-    """worker 认证自愈:401(WorkerAuthRejected)→ 重注册 + 指数退避;连续超阈值 → 自杀(_shutdown)。
+    """worker 认证自愈:401(WorkerAuthRejected)触发重注册 + 指数退避;连续超阈值后自杀(_shutdown).
     没有重注册与退避时,401 会让 worker 每秒死刷 jobs/request 刷爆 api 日志。"""
 
     @pytest.mark.asyncio
@@ -1217,7 +1217,7 @@ class TestWorkerAuthRecovery:
         await worker._handle_auth_failure()
         assert worker._auth_failed_since is not None      # 进入失败态
         assert len(calls) == 1                             # 触发重注册
-        assert worker._auth_backoff == 2.0                 # 退避翻倍(1→2)
+        assert worker._auth_backoff == 2.0                 # 退避翻倍(1 到 2)
         assert not worker._shutdown
 
     @pytest.mark.asyncio
@@ -1250,7 +1250,7 @@ class TestWorkerAuthRecovery:
             calls.append(1)
         monkeypatch.setattr(worker, "register", fake_register)
         await worker._handle_auth_failure()                # 第一次重注册
-        await worker._handle_auth_failure()                # 30s 窗口内 → 不重注册(去抖)
+        await worker._handle_auth_failure()                # 30s 窗口内不重注册(去抖)
         assert len(calls) == 1
 
     @pytest.mark.asyncio
@@ -1354,7 +1354,7 @@ class TestCollectUsageOnFailure:
 
 
 class TestAITaskTranscript:
-    """AI task 的 agentic 全轨迹内嵌 record_json(transcript 字段);找不到 → jsonl=None + reason。"""
+    """AI task 的 agentic 全轨迹内嵌 record_json(transcript 字段);找不到时返回 jsonl=None + reason."""
 
     def _ai_claim(self, task_id="at_t"):
         return {

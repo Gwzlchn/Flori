@@ -2,7 +2,7 @@
 
 "从队列认领一步 / 上报完成 / 上报失败 / 释放"这套 redis+db 编排做成
 (redis, db, ...) 上的纯函数。RedisTransport 是调用本模块的薄包装;gateway 的
-/api/runner/jobs/* 端点也调本模块——同一份调用序列、同一份 payload、同一份 DB 写,
+/api/runner/jobs/* 端点也调本模块.同一份调用序列,同一份 payload,同一份 DB 写,
 两端不会各写一份导致行为分叉。
 """
 
@@ -107,7 +107,7 @@ async def claim_step(
 ) -> dict | None:
     """从池队列认领一步,返回最小 claim {job_id, step, pool, exec_id} 或 None。"""
     # 暂停(paused)的 worker 不再认领新任务。读独立的 admin_status 叠加位,
-    # 与运行时 status(idle/busy) 解耦——claim/release 写 status 不会覆盖暂停态。
+    # 与运行时 status(idle/busy) 解耦.claim/release 写 status 不会覆盖暂停态.
     info = await redis.get_worker_info(worker_id)
     if (info.get("admin_status") if info else None) == "paused":
         return None
@@ -169,7 +169,7 @@ async def claim_step(
 
         # 资源槽:单账号/单出口IP 等细粒度并发。任务在 enqueue 时带 resources;对每个有配置上限的资源
         # 占一个槽,上限存 redis resource_limits,由 scheduler 从 configs/resources.yaml 推送。
-        # 任一占不到 → 回滚已占资源 + 释放池槽 + 把任务放回队列,继续看下一个池,不绑定本 worker。
+        # 任一占不到时回滚已占资源,释放池槽并把任务放回队列,继续看下一个池,不绑定本 worker.
         # 未配上限的资源跳过:声明了但 resources.yaml 没配 = 不限,安全降级;无声明则整段零开销。
         acquired_resources: list[str] = []
         resource_blocked = False
@@ -202,7 +202,7 @@ async def claim_step(
             await redis.set_step_worker(job_id, step, worker_id)
             await redis.set_step_exec_id(job_id, step, exec_id)
             # 认领即刷进度心跳:覆盖上次执行(被杀/重跑)残留的旧 progress_at,否则 check_stuck 在
-            # "认领→worker 首拍 on_tick"窗口读到旧值,按 now-旧值(可达小时/天级)误杀刚认领的步
+            # "认领到 worker 首拍 on_tick"窗口读到旧值,按 now-旧值(可达小时/天级)误杀刚认领的步
             # (线上踩过:rerun 后 9 步被 "progress stale 250689s" 秒杀)。
             await redis.set_step_progress_at(job_id, step)
             if acquired_resources:
@@ -261,7 +261,7 @@ async def report_step_done(
         started_at=datetime.fromtimestamp(started_at, timezone.utc),
         finished_at=datetime.now(timezone.utc),
         duration_sec=round(duration, 1),
-        # 与失败侧对称:不覆盖已终态(done/skipped)的步——挡迟到的成功上报把已被 skip 的步倒回 done。
+        # 与失败侧对称:不覆盖已终态(done/skipped)的步.挡迟到的成功上报把已被 skip 的步倒回 done.
         # waiting/rerun-reset 不在终态集,本守卫不拦,属可接受残留。
         only_if_active=True,
     )
@@ -277,7 +277,7 @@ async def report_step_failed(
 ) -> None:
     job_id = claim["job_id"]
     step = claim["step"]
-    # rc!=0 分支带 exec_id 且 events 用 error[:200];timeout/异常分支不带 exec_id——两分支 payload 刻意不同,勿顺手统一。
+    # rc!=0 分支带 exec_id 且 events 用 error[:200];timeout/异常分支不带 exec_id.两分支 payload 刻意不同,勿顺手统一.
     topic_payload = {
         "job_id": job_id, "step": step, "status": "failed",
         "error": error, "error_type": error_type, "worker": worker_id,

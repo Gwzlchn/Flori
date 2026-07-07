@@ -1,7 +1,7 @@
-"""守护进程能力 smoke——验证 DockerStepRunner 所依赖的 docker 原语在真实守护进程上确实生效:
+"""守护进程能力 smoke:验证 DockerStepRunner 所依赖的 docker 原语在真实守护进程上确实生效:
 work_dir bind-mount 到 /job、env 注入(PYTHONPATH/STEP_EXEC_ID)、离线池 network=none、退出码捕获。
 
-注意:本测试刻意直接用 client.containers.run 复刻执行器装配,而非实例化 DockerStepRunner——
+注意:本测试刻意直接用 client.containers.run 复刻执行器装配,而非实例化 DockerStepRunner.
 因为真正驱动 runner.run_step 需要一个完整的 flori step 镜像(含 /app 代码与模块 entrypoint),
 python:3.11-slim 跑不了 flori 模块。故这里只断"守护进程支持这些原语",runner 自身的命令/卷/env 装配
 由 tests/test_step_runner_docker.py 的 mock 单测覆盖。无 docker.sock 或本地无 python:3.11-slim 镜像

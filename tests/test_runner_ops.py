@@ -1,4 +1,4 @@
-"""tests for shared/runner_ops.py — 认领/上报编排(fakeredis + db)。
+"""tests for shared/runner_ops.py:认领/上报编排(fakeredis + db).
 
 这套测试针对抽出来的纯函数,与 test_transport.py 的 RedisTransport 用例互为镜像;
 两者都过,才能保证薄包装与服务端端点共用同一份编排、行为不分叉。
@@ -80,7 +80,7 @@ class TestClaimStep:
 
     @pytest.mark.asyncio
     async def test_claim_refreshes_progress_heartbeat(self, redis, db):
-        # 认领即刷 progress_at:覆盖上次执行残留的旧心跳,否则 check_stuck 在认领→首拍窗口
+        # 认领即刷 progress_at:覆盖上次执行残留的旧心跳,否则 check_stuck 在认领到首拍窗口
         # 按 now-旧值(小时/天级)误杀刚认领的步(线上 "progress stale 250689s")。
         import time
         await _register_worker(redis, db)
@@ -122,7 +122,7 @@ class TestClaimStep:
         c1 = await runner_ops.claim_step(redis, db, WORKER_ID, ["cpu"], POOL_LIMITS, set(), set())
         assert c1 is not None
         c2 = await runner_ops.claim_step(redis, db, WORKER_ID, ["cpu"], POOL_LIMITS, set(), set())
-        assert c2 is None  # 覆盖上限=1 → 第二个领不到(即便 POOL_LIMITS cpu=3)
+        assert c2 is None  # 覆盖上限=1 时第二个领不到(即便 POOL_LIMITS cpu=3)
 
     @pytest.mark.asyncio
     async def test_paused_returns_none(self, redis, db):
@@ -185,7 +185,7 @@ class TestClaimStep:
         await redis.enqueue_step("cpu", "j1", "A", [], priority=0)
         await redis.set_step_status("j1", "A", "ready")
 
-        # dequeue 成功后 CAS 抛错 → raw 必须回队列,槽位释放,异常透传。
+        # dequeue 成功后 CAS 抛错时 raw 必须回队列,槽位释放,异常透传.
         with patch.object(redis, "cas_step_status", side_effect=RuntimeError("boom")):
             with pytest.raises(RuntimeError):
                 await runner_ops.claim_step(
@@ -347,7 +347,7 @@ class TestRelease:
             {"job_id": "j1", "step": "A", "pool": "scene", "exec_id": "e_old"},
         )
 
-        # 陈旧 worker 只会 SREM 自己的 holder(e_old,本不在集合)→ 新执行 e_new 的槽未被误放。
+        # 陈旧 worker 只会 SREM 自己的 holder(e_old,本不在集合),新执行 e_new 的槽未被误放.
         assert await redis.get_pool_count("scene") == 1   # 槽未被误放
         assert await redis.is_pool_frozen("cpu") is True   # cpu 未被误解冻
         info = await redis.get_worker_info(WORKER_ID)

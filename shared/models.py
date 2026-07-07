@@ -173,7 +173,7 @@ class LLMRequest:
     # claude-cli 不读此项(由 step_base._extract_json/_salvage_scores 兜底解析 JSON)。
     response_format: str | None = None
     # 取证等需联网/工具的步骤:放开指定工具(如 ["WebSearch","Bash"])。仅 claude-cli provider 读,
-    # 转为 --allowedTools <tools> --max-turns;其它 provider 忽略。None=用默认两档(images→Read / 否则禁工具)。
+    # 转为 --allowedTools <tools> --max-turns;其它 provider 忽略.None=用默认两档(images 用 Read,否则禁工具).
     allowed_tools: list[str] | None = None
     max_turns: int | None = None
     # 放行目录(claude-cli --add-dir):allowed_tools 含 Read 且要读 prompt 里引用的本地文件
@@ -247,7 +247,7 @@ class LLMResponse:
 
 @dataclass
 class AITask:
-    """独立 AI 任务:不挂 job、不走 storage —— 内联 LLMRequest 载荷,结果内联回 airesult:{task_id}。
+    """独立 AI 任务:不挂 job,不走 storage,内联 LLMRequest 载荷,结果内联回 airesult:{task_id}.
     供 /api/ask、/digest 把单次 claude 调用交给 ai-worker(claude-cli tag)异步执行。
     入队 queue:ai(kind='ai',require_tags=['claude-cli']);无 job_id,故与 pipeline-step task 区分。"""
     task_id: str
