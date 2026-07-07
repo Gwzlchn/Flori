@@ -170,7 +170,7 @@ jobs:
 
   # 注:OpenAPI 模糊/契约(schemathesis)在独立每日 cron .github/workflows/fuzz.yml 跑,不拖慢 push CI。
 
-  # 前端单测 + 覆盖率(容器化 vitest;node:20-alpine)。与后端并行,各自为门。
+  # 前端单测 + 覆盖率(容器化 vitest;node:22-alpine)。与后端并行,各自为门。
   fe-test:
     runs-on: ubuntu-latest
     outputs:

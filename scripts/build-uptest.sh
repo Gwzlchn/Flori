@@ -5,28 +5,58 @@
 #   flori-scheduler / flori-api / flori-worker / flori-frontend。
 #
 # 为什么用 `docker compose build` 而非裸 `docker build`:
-#   base.Dockerfile 用 BuildKit `--mount=type=cache`(治 pip/npm 重装)。NAS 未装 buildx CLI 插件,
+#   base.Dockerfile 用 BuildKit `--mount=type=cache`(治 pip 重装)。NAS 未装 buildx CLI 插件,
 #   裸 `docker build` 走 legacy builder 不识别 cache mount 会挂;`docker compose` 内置 buildkit 即支持。
 #
 # 冷构建复用 CI 已建层(registry buildcache):每个 service 的 build.cache_from 指向
 #   ghcr.io/<owner>/flori-<stage>:buildcache(CI build-push 的 cache-to 已常驻产出)。换机/清缓存后
-#   首建即从 ghcr 拉依赖层(pip/apt/npm)而非重算;命中需先 `docker login ghcr.io`(包私有),
+#   首建即从 ghcr 拉依赖层(pip/apt/CLI binary)而非重算;命中需先 `docker login ghcr.io`(包私有),
 #   读不到则 BuildKit 优雅跳过(import 失败非致命),退化为本地层缓存。本地热重建仍秒级(本地层 + cache mount)。
 #
 # 用法:
 #   scripts/build-uptest.sh                 # 建全部 4 个
 #   scripts/build-uptest.sh worker frontend # 只建指定(service 名:scheduler/api/worker/frontend)
 # 环境:
-#   IMAGE_OWNER      ghcr 归属(默认 gwzlchn);TAG 固定 uptest(活栈约定)
+#   IMAGE_OWNER      ghcr 归属(默认从 remote.origin.url 推断);TAG 固定 uptest(活栈约定)
 #   USE_USTC_MIRROR  1=用 USTC 源(默认),CI/海外置 0
+#   FLORI_BUILD_PROXY_HOST  把宿主 loopback 代理透给 build 容器时使用的宿主网关(默认 docker0 IP)
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-OWNER="${IMAGE_OWNER:-gwzlchn}"
 TAG="uptest"
 USTC="${USE_USTC_MIRROR:-1}"
+OWNER="${IMAGE_OWNER:-}"
+if [ -z "$OWNER" ]; then
+  ORIGIN_URL="$(git -C "$REPO" config --get remote.origin.url || true)"
+  OWNER="$(printf '%s\n' "$ORIGIN_URL" | sed -nE 's#.*[:/]([^/:]+)/[^/]+(\.git)?$#\1#p' | head -1)"
+fi
+if [ -z "$OWNER" ]; then
+  echo "IMAGE_OWNER 未设置,且无法从 remote.origin.url 推断 ghcr 归属" >&2
+  exit 1
+fi
+OWNER="${OWNER,,}"
 # 真实语义版本,注入镜像 ENV FLORI_VERSION。本地不抹 pyproject:靠 cache mount 提速,且不动用户文件。
 VER="$(sed -n 's/^version = "\(.*\)"/\1/p' "${REPO}/pyproject.toml" | head -1)"
+PROXY_HOST="${FLORI_BUILD_PROXY_HOST:-}"
+if [ -z "$PROXY_HOST" ]; then
+  PROXY_HOST="$(ip -4 addr show docker0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1 || true)"
+fi
+normalize_proxy() {
+  local value="$1"
+  if [ -n "$PROXY_HOST" ]; then
+    value="${value//:\/\/127.0.0.1:/:\/\/${PROXY_HOST}:}"
+    value="${value//:\/\/localhost:/:\/\/${PROXY_HOST}:}"
+  fi
+  printf '%s' "$value"
+}
+build_args=()
+for proxy_var in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; do
+  proxy_value="${!proxy_var:-}"
+  if [ -n "$proxy_value" ]; then
+    proxy_value="$(normalize_proxy "$proxy_value")"
+    build_args+=(--build-arg "${proxy_var}=${proxy_value}")
+  fi
+done
 
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 cat > "$work/build.yml" <<YAML
@@ -64,7 +94,7 @@ services:
 YAML
 
 echo ">> 构建拆分镜像 → :${TAG}(${*:-scheduler api worker frontend})"
-docker compose -f "$work/build.yml" build "$@"
+docker compose -f "$work/build.yml" build "${build_args[@]}" "$@"
 
 echo ">> 完成,本地镜像:"
 docker images --format '  {{.Repository}}:{{.Tag}}\t{{.Size}}' \

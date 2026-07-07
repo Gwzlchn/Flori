@@ -1,11 +1,11 @@
 # 前端单测 + 覆盖率(容器化,宿主机不装 node 依赖)。
 name: flori-fe-test
 # 跑:  docker compose -f docker-compose.fe-test.yml run --rm fe-test
-# node:20-alpine 与 frontend/Dockerfile 同基;npmmirror 直连(出站代理已放行)。
+# node:22-alpine 与 frontend/Dockerfile 同基;npmmirror 直连(出站代理已放行)。
 # 项目名固定 flori-fe-test,与其余 flori-* 栈命名一致。
 services:
   fe-test:
-    image: node:20-alpine
+    image: node:22-alpine
     working_dir: /app
     environment:
       - npm_config_registry=https://registry.npmmirror.com

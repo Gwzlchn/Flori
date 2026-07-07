@@ -3,7 +3,7 @@ import { defineConfig } from 'vitest/config'
 import vue from '@vitejs/plugin-vue'
 
 // 前端单测配置(独立于 vite.config.ts,不带 dev server proxy)。
-// 容器内跑:见 docker-compose.fe-test.yml(node:20-alpine,宿主不装依赖)。
+// 容器内跑:见 docker-compose.fe-test.yml(node:22-alpine,宿主不装依赖)。
 export default defineConfig({
   plugins: [vue()],
   test: {

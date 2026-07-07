@@ -1,14 +1,14 @@
 # 多 stage 镜像拆分:各后端服务只装自己需要的依赖/系统包,镜像各自精简。
 #   common  : python + curl + pip 镜像源 + core 依赖(不含源码)——所有 stage 共享底座
-#   scheduler: 仅 core(scheduler/ + tunnel_stats/)—— 无 ffmpeg/nodejs/claude/重 extras,最小
-#   api     : +[api,mcp](api/ + mcp_server)—— api 不调 claude,无 ffmpeg/nodejs/claude
-#   worker  : +ffmpeg+nodejs+claude-code + [steps,gpu,worker] —— 唯一跑 claude、唯一重镜像
-#   test    : 全 pip extras + [test] 依赖,无 ffmpeg/nodejs/claude 二进制、无 cn bake —— 仅给测试。
+#   scheduler: 仅 core(scheduler/ + tunnel_stats/)—— 无 ffmpeg/claude/重 extras,最小
+#   api     : +[api,mcp](api/ + mcp_server)—— api 不调 claude,无 ffmpeg/claude
+#   worker  : +ffmpeg+claude-code binary + [steps,gpu,worker] —— 唯一跑 claude、唯一重镜像
+#   test    : 全 pip extras + [test] 依赖,无 ffmpeg/claude 二进制、无 cn bake —— 仅给测试。
 #             pytest 全程 mock subprocess;opencv/whisper/PyAV 是自带 .so 的 wheel,import 不需系统 ffmpeg。
-#             用例对 ffmpeg/claude/node 天然安全,故省去 apt ffmpeg + npm claude-code,镜像更快更小。
+#             用例对 ffmpeg/claude 天然安全,故省去 apt ffmpeg + claude-code binary,镜像更快更小。
 #
-# 分层铁律(buildcache 命中关键):每个 stage 的源码 COPY 一律放在所有 apt/npm/pip 之后。
-#   改源码只重算末尾 COPY 层,apt/npm/pip 依赖层恒命中 registry buildcache,CI 不必每次 push 冷建依赖。
+# 分层铁律(buildcache 命中关键):每个 stage 的源码 COPY 一律放在所有 apt/pip/CLI binary 之后。
+#   改源码只重算末尾 COPY 层,apt/pip/CLI binary 依赖层恒命中 registry buildcache,CI 不必每次 push 冷建依赖。
 #   源码 COPY(含 shared/)也不能放进 common:那会让子 stage 的 FROM 基底随源码变,依赖层全废重建。
 #
 # 版本解耦(buildcache 命中关键之二):每次提交 bump pyproject [project].version 会让 `COPY pyproject.toml` 层
@@ -66,19 +66,43 @@ ENV FLORI_BUILD_SHA=${FLORI_BUILD_SHA}
 ARG FLORI_VERSION=
 ENV FLORI_VERSION=${FLORI_VERSION}
 
-# worker:重镜像 —— ffmpeg(steps 调 ffmpeg/ffprobe + PyAV 解码)+ nodejs/claude-code(claude-cli)
+# worker:重镜像 —— ffmpeg(steps 调 ffmpeg/ffprobe + PyAV 解码)+ claude-code native binary(claude-cli)
 #    + [steps,gpu,worker] + cn_domains bake(net-zone CN 表)+ /data/prompts seed(AI 步读 profiles)
 FROM common AS worker
 ARG USE_USTC_MIRROR=1
+ARG TARGETARCH
+ARG CLAUDE_CODE_VERSION=v2.1.202
 # poppler-utils:claude Read 工具渲染 PDF 页面靠 pdftoppm(纯 PDF 论文直喂,无它 Read 必败);
 #               02 解析步 pdfinfo 取页数。pymupdf 已废(断词/公式丢,arxiv 走 HTML 源)。
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg nodejs npm poppler-utils \
+    && apt-get install -y --no-install-recommends ffmpeg poppler-utils \
     && rm -rf /var/lib/apt/lists/*
-# Claude Code CLI:claude-cli provider(订阅出笔记、看帧图)需要 `claude` 在 PATH。npm 缓存走 cache mount。
-RUN --mount=type=cache,target=/root/.npm \
-    if [ "$USE_USTC_MIRROR" = "1" ]; then npm config set registry https://registry.npmmirror.com; fi \
-    && npm install -g @anthropic-ai/claude-code
+# Claude Code CLI:claude-cli provider 需要 `claude` 在 PATH。旧包管理器安装已废弃,这里消费 GitHub release
+# native binary,并用同 release 的 SHASUMS256.txt 校验,避免 registry/Node 版本漂移。
+RUN set -eux; \
+    case "${TARGETARCH:-amd64}" in \
+        amd64) claude_asset="claude-linux-x64.tar.gz" ;; \
+        arm64) claude_asset="claude-linux-arm64.tar.gz" ;; \
+        *) echo "unsupported TARGETARCH=${TARGETARCH:-}" >&2; exit 1 ;; \
+    esac; \
+    base="https://github.com/anthropics/claude-code/releases/download/${CLAUDE_CODE_VERSION}"; \
+    download() { \
+        url="$1"; out="$2"; \
+        for attempt in 1 2 3 4 5; do \
+            curl -fL --retry 2 --retry-all-errors --retry-delay 5 --connect-timeout 30 \
+                --speed-limit 1024 --speed-time 300 -C - "$url" -o "$out" && return 0; \
+            sleep "$((attempt * 5))"; \
+        done; \
+        return 1; \
+    }; \
+    download "${base}/${claude_asset}" "/tmp/${claude_asset}"; \
+    download "${base}/SHASUMS256.txt" /tmp/SHASUMS256.txt; \
+    cd /tmp; \
+    grep "  ${claude_asset}$" SHASUMS256.txt | sha256sum -c -; \
+    tar -xzf "/tmp/${claude_asset}" -C /usr/local/bin claude; \
+    chmod 0755 /usr/local/bin/claude; \
+    rm -f "/tmp/${claude_asset}" /tmp/SHASUMS256.txt; \
+    claude --version
 RUN --mount=type=cache,target=/root/.cache/pip pip install ".[steps,gpu,worker]"
 # net-zone CN 域名表:构建时从 GitHub 上游(felixonmars/dnsmasq-china-list)拉取,不自维护 → /app/data/cn_domains.txt
 # (运行时 shared.net_zone 只读不拉)。只用 curl、不依赖应用源码 → 放在 COPY 源码之前(改源码不重新联网拉)。
@@ -102,6 +126,7 @@ ARG FLORI_BUILD_SHA=
 ENV FLORI_BUILD_SHA=${FLORI_BUILD_SHA}
 ARG FLORI_VERSION=
 ENV FLORI_VERSION=${FLORI_VERSION}
+ENV DISABLE_UPDATES=1
 
 # test(普通):纯逻辑单测镜像 —— 仅 [api,worker,mcp,test],无 ffmpeg / 无 [steps] 媒体库(opencv/pymupdf/skimage 等)。
 #    跑非 step 测试,即 scheduler/api/shared/db/redis 等绝大多数:app+tests 无任何顶层 import 重库(全惰性 + mock),
