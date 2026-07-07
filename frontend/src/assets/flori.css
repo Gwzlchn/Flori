@@ -124,6 +124,12 @@ i[data-lucide]{width:16px;height:16px;stroke-width:1.75;flex:none}
 .iconbtn{padding:7px;border-radius:var(--r-sm);color:var(--ink-500);transition:.12s}
 .iconbtn:hover{background:var(--line-soft);color:var(--ink-900)}
 
+/* 首页操作区单独换行;共享页头还用于更密的工具页。 */
+.home-header{display:flex;align-items:flex-end;gap:12px;margin-bottom:20px}
+.home-header-copy{min-width:0;flex:1}
+.home-header-actions{margin-left:auto;display:flex;align-items:center;gap:8px;flex:none}
+.home-header-actions .btn{white-space:nowrap;flex:none}
+
 /* BADGES */
 .badge{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;
   padding:2px 8px;border-radius:999px;line-height:1.5}
@@ -634,6 +640,11 @@ mark{background:var(--brand-100);color:var(--brand-700);padding:0 2px;border-rad
 
   /* 正文左右留白收紧 */
   .page{padding:18px 16px 56px}
+
+  /* 首页标题和 action 分行,避免按钮在窄屏被压成竖排。 */
+  .home-header{align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:18px}
+  .home-header-copy{flex:1 1 100%}
+  .home-header-actions{width:100%;margin-left:0;justify-content:flex-start;flex-wrap:wrap}
 }
 
 /* 系统健康总览页(/system):健康条 / 组件卡 / 4 格栅格 / 骨架 */

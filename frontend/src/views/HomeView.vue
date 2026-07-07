@@ -143,17 +143,19 @@ onMounted(() => {
 <template>
   <section class="page">
     <!-- 页头 -->
-    <div style="display:flex;align-items:flex-end;gap:12px;margin-bottom:20px">
-      <div>
+    <div class="home-header">
+      <div class="home-header-copy">
         <div class="h1"><BookMarked :size="18" />我的知识库</div>
         <div class="lead">投递的每条内容都会自动归入对应知识库，逐步沉淀成体系。</div>
       </div>
-      <button class="btn pri" style="margin-left:auto" @click="openCreate">
-        <Plus :size="16" />新建知识库
-      </button>
-      <button class="btn" @click="router.push('/content')">
-        <Inbox :size="16" />所有来源
-      </button>
+      <div class="home-header-actions">
+        <button class="btn pri" @click="openCreate">
+          <Plus :size="16" />新建知识库
+        </button>
+        <button class="btn" @click="router.push('/content')">
+          <Inbox :size="16" />所有来源
+        </button>
+      </div>
     </div>
 
     <!-- 加载态 -->
