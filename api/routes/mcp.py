@@ -1,8 +1,8 @@
-"""MCP 接入信息,供「接入 MCP」卡片渲染。
+"""MCP 接入信息,供「接入 MCP」卡片渲染.
 
 只读:工具清单(从 MCP server 实时派生,不写死,防漂移)、是否已配 token、传输路径。
-token 明文单独经 /api/mcp/token 取(前端默认遮掩、点击才显示/复制)——避免每次 info 都带明文。
-鉴权:挂在 /api 下,公网经 Caddy basic_auth、可信内网经 API_ALLOW_NO_AUTH 收口。
+token 明文单独经 /api/mcp/token 取. 前端默认遮掩,点击才显示或复制,避免 info 每次都带明文.
+鉴权:挂在 /api 下,公网经 Caddy basic_auth、可信内网经 API_ALLOW_NO_AUTH 收口.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ def _mcp_public_port() -> str:
 
 
 async def _mcp_stats(redis: RedisClient) -> dict:
-    """MCP 工具调用计数(best-effort):redis 缺失/异常/形态不符 → 零值,不让 info 端点 5xx。"""
+    """MCP 工具调用计数. Redis 缺失、异常或形态不符时返回零值,不让 info 端点 5xx."""
     try:
         stats = await redis.get_mcp_call_stats()
         if (
@@ -56,7 +56,7 @@ async def mcp_info(
     tools = await mcp.list_tools()
     return {
         "enabled": True,
-        "http_path": "/mcp",  # 公网端点 = <当前站点 origin> + 此路径(前端据 window.location 拼)
+        "http_path": "/mcp",  # 公网端点由前端用当前站点 origin 加此路径拼出.
         # 本地同机直连 mcp-http(streamable-http),与公网统一走 HTTP。
         "local_url": f"http://127.0.0.1:{_mcp_public_port()}/mcp",
         "token_configured": bool(os.environ.get("FLORI_MCP_TOKEN")),
@@ -64,7 +64,7 @@ async def mcp_info(
             {"name": t.name, "description": (t.description or "").strip().splitlines()[0]}
             for t in tools
         ],
-        "stats": await _mcp_stats(redis),  # {total, by_tool};redis 不可用 → 0s
+        "stats": await _mcp_stats(redis),  # Redis 不可用时返回 {total: 0, by_tool: {}}.
     }
 
 

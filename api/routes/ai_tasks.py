@@ -1,9 +1,9 @@
-"""独立 AI task 的结果 / 白盒审计查看路由。
+"""独立 AI task 的结果 / 白盒审计查看路由.
 
-/ask、/digest 提交 AI task(queue:ai)后,前端经这里取结果(轮询)与审计:
-- GET /api/ai-tasks/{task_id}/result  → pending / error / done(done 带 content)
-- GET /api/ai-tasks/{task_id}/log     → 白盒审计(ai_task_logs:路由/尝试链/渲染 prompt/输出/raw/用量)
-前端也可 WS /api/ws/jobs/{task_id} 拿 ai_task_done 信号(worker 完成时 publish),收到再来取 result。
+/ask、/digest 提交 AI task(queue:ai)后,前端在这里轮询结果并查看审计.
+GET /api/ai-tasks/{task_id}/result 返回 pending,error 或 done,done 带 content.
+GET /api/ai-tasks/{task_id}/log 返回 ai_task_logs 中的路由,尝试链,渲染 prompt,输出,raw 与用量.
+前端也可通过 WS /api/ws/jobs/{task_id} 等 ai_task_done 信号,收到后再取 result.
 """
 
 from __future__ import annotations
@@ -25,9 +25,9 @@ router = APIRouter(prefix="/api/ai-tasks", tags=["ai-tasks"], dependencies=[Depe
 
 @router.get("/{task_id}/result")
 async def ai_task_result(task_id: str, redis: RedisClient = Depends(get_redis)):
-    """取独立 AI task 结果。结果存 airesult:{task_id}(worker 写,带 TTL≈600s):
-    None=未就绪→pending;{"error":...}=失败→error;否则=LLMResponse→done(带 content)。
-    ask 读 answer_markdown、digest 读 markdown,两个别名都给 content,前端各取所需。"""
+    """取独立 AI task 结果. 结果存 airesult:{task_id}(worker 写,TTL 约 600s):
+    None 表示 pending;{"error":...} 表示 error;否则按 LLMResponse 返回 done.
+    ask 读 answer_markdown,digest 读 markdown,两个别名都给 content,前端各取所需."""
     validate_path_segment(task_id, "task_id")
     res = await redis.get_ai_result(task_id)
     if res is None:
@@ -45,7 +45,7 @@ async def ai_task_result(task_id: str, redis: RedisClient = Depends(get_redis)):
 @router.get("/{task_id}/log")
 async def ai_task_log(task_id: str, db: Database = Depends(get_db)):
     """独立 AI task 的完整白盒审计(prompt 白盒化,镜像 DAG 的 /jobs/{id}/ai-logs)。
-    读 ai_task_logs(worker 每次执行写一条:路由/尝试链/渲染 prompt/输出/raw/用量),最近在前。"""
+    读 ai_task_logs. worker 每次执行写一条,内容包含路由,尝试链,渲染 prompt,输出,raw 与用量."""
     validate_path_segment(task_id, "task_id")
     rows = await asyncio.to_thread(db.get_ai_task_logs, task_id)
     calls = []

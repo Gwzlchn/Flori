@@ -1,9 +1,8 @@
-"""跨源综合问答路由 POST /api/ask(异步:提交 AI task 给 ai-worker,API 不在进程内调 claude)。
+"""跨源综合问答路由 POST /api/ask.
 
-提问 → 跨语料检索(api.services.synthesis.retrieve,纯 DB/CPU)→ 拼 prompt(synthesis.build_prompt)→
-组 LLMRequest → 投递独立 AI task(queue:ai)→ 返 202 {task_id, sources}。
-答案/审计经 GET /api/ai-tasks/{task_id}/{result,log}。claude 调用全在 ai-worker;
-本路由不持 claude / gateway / pricing,用量记账在 worker。
+本路由只负责检索、拼 prompt 并投递 AI task 给 ai-worker。claude 调用、gateway、
+pricing 与用量记账都在 worker 侧完成。答案与审计经 /api/ai-tasks/{task_id}/{result,log}
+读取.
 """
 
 from __future__ import annotations
@@ -44,8 +43,8 @@ class SourceItem(BaseModel):
 
 class AskResponse(BaseModel):
     question: str
-    task_id: str | None = None          # 提交的 AI task(轮询 /api/ai-tasks/{task_id}/result);无命中/投递失败时 None
-    answer_markdown: str | None = None  # 仅无命中/投递失败时直接给消息;有 task 时为 None(答案走 result 端点取)
+    task_id: str | None = None          # 无命中或投递失败时为 None.
+    answer_markdown: str | None = None  # 有 task 时为 None,答案走 result 端点取.
     sources: list[SourceItem] = Field(default_factory=list)
     retrieved_count: int = 0
 
@@ -56,7 +55,7 @@ async def ask(
     db: Database = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
 ) -> AskResponse:
-    """提问 → 检索(DB)→ 投递 AI task(claude 在 ai-worker 跑)→ 202 + task_id。无命中直接返回空答案不投 task。"""
+    """先检索 DB,有命中才投递 AI task. 无命中直接返回空答案,不投 task."""
     passages = await asyncio.to_thread(
         synthesis.retrieve, db, req.question, req.domain, req.limit
     )
@@ -84,7 +83,7 @@ async def ask(
     ).to_task_payload()
     try:
         await redis.enqueue_ai_task(payload)
-    except Exception as e:  # 投递失败(redis 不可用)→ 优雅降级,不冒 5xx;仍回检索到的来源。
+    except Exception as e:  # 投递失败时优雅降级,不冒 5xx;仍返回检索到的来源.
         log.warning("ask_enqueue_failed", error=str(e))
         return AskResponse(
             question=req.question, task_id=None,

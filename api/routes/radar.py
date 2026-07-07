@@ -1,11 +1,9 @@
-"""概念趋势雷达 + 本周摘要路由(均挂 verify_token)。
+"""概念趋势雷达 + 本周摘要路由(均挂 verify_token).
 
-- GET  /api/domains/{domain}/radar    雷达数据(无 LLM,秒开,供页面加载)
-- POST /api/domains/{domain}/digest   按需生成本周摘要(异步:投递 AI task 给 ai-worker,API 不调 claude)
-
-雷达/摘要分离:页面先用 GET 快速渲染各板块;用户点「生成本周摘要」走 POST 投递 AI task,
-返回 202 + task_id,经 GET /api/ai-tasks/{task_id}/result 取 markdown。
-claude 在 ai-worker 跑,API 不持 claude/gateway/pricing。
+GET /api/domains/{domain}/radar 只做 DB 计算,不调 LLM。POST /api/domains/{domain}/digest
+投递 AI task 给 ai-worker,API 不在进程内调 claude。雷达与摘要分离:页面先用 GET
+快速渲染各板块;用户生成摘要时再走 POST,返回 202 和 task_id。前端经
+/api/ai-tasks/{task_id}/result 取 markdown.
 """
 
 from __future__ import annotations
@@ -62,7 +60,7 @@ async def post_digest(
     ).to_task_payload()
     try:
         await redis.enqueue_ai_task(payload)
-    except Exception as e:  # 投递失败(redis 不可用)→ 优雅降级,不冒 5xx;雷达数据走 GET 仍可看。
+    except Exception as e:  # 投递失败时优雅降级,不冒 5xx;雷达数据走 GET 仍可看.
         log.warning("digest_enqueue_failed", domain=domain, error=str(e))
         return {
             "task_id": None, "window": radar_data["window"],
@@ -82,7 +80,7 @@ async def get_latest_digest(
     validate_path_segment(domain, "domain")
     try:
         info = await redis.get_latest_auto_digest(domain)
-    except Exception as e:   # redis 不可用 → 优雅降级,不冒 5xx
+    except Exception as e:   # Redis 不可用时优雅降级,不冒 5xx.
         log.warning("digest_latest_failed", domain=domain, error=str(e))
         info = None
     return info or {"task_id": None}

@@ -1,8 +1,9 @@
-"""api 侧 LiteLLM 价表缓存:启动从 MinIO 载入(快),每天拉一次最新存回 MinIO,内存持有供算价。
+"""api 侧 LiteLLM 价表缓存.
 
-计费在 api 侧做——纯网关 worker 不直连 MinIO/Redis,故由 api 在 record_ai_usage 时据本表填 cost。
-claude-cli 订阅路径用 CLI total_cost_usd(不经本表);未命中/空表 → 回退 worker 上报的 cost
-(其 ai_gateway.calc_cost 硬编码 PRICING 兜底)。对象落 MinIO:bucket 内 _pricing/litellm.json。
+启动时优先从 MinIO 载入缓存,之后每天刷新一次并写回 MinIO。计费在 api 侧完成:
+纯网关 worker 不直连 MinIO/Redis,record_ai_usage 依据本表补 cost。claude-cli
+订阅路径使用 CLI total_cost_usd,未命中或空表时回退 worker 上报值。对象落 MinIO
+bucket 内 _pricing/litellm.json.
 """
 
 from __future__ import annotations
@@ -17,16 +18,16 @@ from shared.pricing import LITELLM_PRICING_URL, cost_from_table, fetch_litellm_p
 
 _log = structlog.get_logger(component="pricing")
 
-_PRICING_JOB = "_pricing"        # 伪 job_id(不与真 job 冲突);经 storage.write_file 落 MinIO/_pricing/
+_PRICING_JOB = "_pricing"        # 伪 job_id,经 storage.write_file 落 MinIO/_pricing/.
 _PRICING_FILE = "litellm.json"
-_PRICING_META = "litellm.meta.json"   # sidecar:{"fetched_at": ISO} —— 价表本体不带时间戳,单独存
+_PRICING_META = "litellm.meta.json"   # sidecar: {"fetched_at": ISO};价表本体不带时间戳.
 _REFRESH_SEC = 86400             # 每天拉一次
 
 
 class PricingStore:
     def __init__(self) -> None:
         self._table: dict = {}
-        self._fetched_at: datetime | None = None   # 末次 refresh 成功(拉到新表)的时间
+        self._fetched_at: datetime | None = None   # 末次 refresh 成功取得新表的时间.
 
     @property
     def ready(self) -> bool:
@@ -77,7 +78,7 @@ class PricingStore:
         return False
 
     async def _load_meta_fetched_at(self, storage) -> datetime | None:
-        """读 sidecar litellm.meta.json 的 fetched_at(ISO)→ aware datetime;读不到/解析失败回 None。"""
+        """读 sidecar litellm.meta.json 的 fetched_at(ISO). 读不到或解析失败返回 None."""
         try:
             raw = await storage.read_file(_PRICING_JOB, _PRICING_META)
             if raw:
@@ -90,7 +91,7 @@ class PricingStore:
         return None
 
     async def refresh(self, storage) -> bool:
-        """拉 LiteLLM 最新 → 更新内存 + 存回 MinIO(本体 + sidecar 更新时间)。失败保留旧表(不致 cost 归零)。"""
+        """拉 LiteLLM 最新并写回 MinIO. 失败保留旧表,避免 cost 归零."""
         try:
             table = await fetch_litellm_pricing()
         except Exception as e:
@@ -106,7 +107,7 @@ class PricingStore:
                 _PRICING_JOB, _PRICING_FILE,
                 json.dumps(table, ensure_ascii=False).encode("utf-8"),
             )
-            # sidecar 同写更新时间(价表本体不含时间戳,载入时回填 _fetched_at)。
+            # sidecar 同写更新时间,载入时据此回填 _fetched_at.
             await storage.write_file(
                 _PRICING_JOB, _PRICING_META,
                 json.dumps({"fetched_at": now.isoformat()}).encode("utf-8"),
