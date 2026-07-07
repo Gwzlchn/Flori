@@ -1,4 +1,4 @@
-"""MCP 接入信息端点(供系统页「接入 MCP」卡片)。"""
+"""MCP 接入信息端点(供设置页「接入 MCP」卡片)。"""
 
 from __future__ import annotations
 

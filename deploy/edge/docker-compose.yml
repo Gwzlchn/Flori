@@ -4,7 +4,7 @@ services:
   caddy:
     image: caddy:2-alpine
     container_name: flori-caddy
-    # host 网络:绑 443 且能访问宿主 127.0.0.1:8000(隧道口)/127.0.0.1:8080(前端容器)
+    # host 网络:绑 443 且能访问宿主隧道口和前端容器回环端口(见 Caddyfile / ports)。
     network_mode: host
     restart: unless-stopped
     depends_on:
@@ -26,7 +26,7 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
 
-  # CD:每 120s 查 ghcr,只更新带 watchtower.enable=true 标签的容器(此处即前端),自动 pull+重建+清旧镜像。
+  # CD:edge 每 10s 查 ghcr,只更新带 watchtower.enable=true 标签的容器(此处即前端),自动 pull+重建+清旧镜像。
   # 用 ghcr 镜像:此 ECS 不通 Docker Hub(registry-1.docker.io 超时),ghcr 可达。
   watchtower:
     image: ghcr.io/containrrr/watchtower

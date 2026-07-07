@@ -23,5 +23,6 @@ cp deploy/edge/.env.example deploy/edge/.env     # 填 EDGE_HOST / MINIO_* / FLO
 # 放 SSH 私钥到 deploy/tunnel/ssh/id_ed25519(本地,不入 git)
 docker compose -f deploy/tunnel/docker-compose.tunnel.yml up -d           # NAS 侧起隧道
 scp deploy/edge/* 边缘:/opt/flori-edge/ && ssh 边缘 'cd /opt/flori-edge && docker compose --env-file .env up -d'
-# 前端镜像:git push → CI 建 ghcr 公开镜像 → 边缘 Watchtower(120s)自动 pull+重建,无手动推送。
+# 前端镜像:git push → CI 建 ghcr 公开镜像 → 边缘 Watchtower(10s)自动 pull+重建,无手动推送。
+# 根生产 compose 的 Watchtower 仍是 120s;edge 为了前端快速跟随 CI 单独设为 10s。
 ```

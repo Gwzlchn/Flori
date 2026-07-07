@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// 系统页「接入 MCP」卡片:把知识库作为 MCP 提供给 agent。
-// 统一走 HTTP(streamable-http + Bearer token):本地连 127.0.0.1:8090/mcp、公网连 <origin>/mcp,仅 URL 不同。
+// 设置页「接入 MCP」卡片:把知识库作为 MCP 提供给 agent。
+// 统一走 HTTP(streamable-http + Bearer token):本地端点来自 /api/mcp/info,公网连 <origin>/mcp。
 // 工具清单 + token(默认遮掩,点击显示/复制)。
 // 信息来自 GET /api/mcp/info(工具实时派生);token 明文经 GET /api/mcp/token 按需取。
 import { ref, computed, onMounted, inject } from 'vue'

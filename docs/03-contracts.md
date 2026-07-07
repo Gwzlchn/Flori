@@ -2249,7 +2249,7 @@ RETRY_POLICY = {
   · curl:`... -X POST https://<host>/mcp/<domain> -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`
 v2(未做):写工具(submit);sqlite-vec 语义后端。
 
-**接入信息端点**(供系统页「接入 MCP」卡片渲染;只读,挂 /api 经 Caddy basic_auth / API_ALLOW_NO_AUTH 收口):
+**接入信息端点**(供设置页「接入 MCP」卡片渲染;只读,挂 /api 经 Caddy basic_auth / API_ALLOW_NO_AUTH 收口):
 - `GET /api/mcp/info` → `{enabled, http_path:"/mcp", local_url:"http://127.0.0.1:<FLORI_MCP_PUBLIC_PORT>/mcp", token_configured:bool, tools:[{name, description}], stats:{total:int, by_tool:{name:int}}}`。`FLORI_MCP_PUBLIC_PORT` 未设时回退 `MCP_PORT` / 8090。tools 从 MCP server 实时派生(不写死);不回传 token 明文。**接入统一走 HTTP(streamable-http + Bearer),不再用 stdio**:前端本地端点 = `local_url`(同机直连 mcp-http)、公网端点 = `window.location.origin + http_path`,仅 URL 不同。<!-- contract: stats = MCP 工具调用计数 -->`stats` 是 MCP 工具调用计数(MCP-http 进程 best-effort 写 redis:总计 `mcp:calls:total` + 按工具 `mcp:calls:tool:{name}`;API 只读透出),redis 不可用 → `{total:0, by_tool:{}}`(不报错)。
 - `GET /api/mcp/token` → `{token: string|null}`。前端默认遮掩 token、点击「显示/复制」时才取(明文经此端点;LAN :8080 无鉴权,注意)。
 

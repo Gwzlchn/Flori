@@ -177,10 +177,11 @@ docker compose -f deploy/tunnel/docker-compose.tunnel.yml up -d
 scp deploy/edge/* 边缘:/opt/flori-edge/
 ssh 边缘 'cd /opt/flori-edge && docker compose --env-file .env up -d'
 
-# 3) 前端镜像走全自动 CD：git push → CI 建 ghcr 公开镜像 → 边缘 Watchtower(120s)自动 pull+重建（无手动推送）
+# 3) 前端镜像走全自动 CD：git push → CI 建 ghcr 公开镜像 → 边缘 Watchtower(10s)自动 pull+重建（无手动推送）
+#    根生产 compose 的 Watchtower 仍是 120s;edge 为了前端快速跟随 CI 单独设为 10s。
 ```
 
-边缘 Caddy（`deploy/edge/Caddyfile`）：对人面入口（SPA + 非 runner 的 `/api/*`）全站 Basic Auth（用户名 `flori`，密码哈希 `FLORI_BASIC_HASH`）；`/api/runner/*` 是机机接口、自带 per-worker Bearer，放行不挂 Basic。`/api/*` 反代到反向 SSH 隧道口 `127.0.0.1:8000`，前端反代到本机 `flori-frontend` 容器。
+边缘 Caddy（`deploy/edge/Caddyfile`）：对人面入口（SPA + 非 runner 的 `/api/*`）全站 Basic Auth（用户名 `flori`，密码哈希 `FLORI_BASIC_HASH`）；`/api/runner/*` 是机机接口、自带 per-worker Bearer，放行不挂 Basic。`/api/*` 反代到反向 SSH 隧道口，前端反代到边缘本机 frontend 回环端口 8090。
 
 ### deploy/edge/.env 关键项
 
