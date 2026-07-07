@@ -1,4 +1,4 @@
-"""shared/terms.py:术语命中/注入/回收/提炼 纯函数(工单 2026-07-06/04 §5 V1)。"""
+"""shared/terms.py 术语命中、注入、回收和提炼纯函数测试。"""
 
 from __future__ import annotations
 
@@ -103,7 +103,7 @@ class TestZhNameFromGlossaryRow:
 
 
 class TestConflictGrouping:
-    """P3 审查脚本核心:同 English 多译名归组(scripts/term_consistency_check.collect_conflicts)。"""
+    """术语一致性审查脚本的核心归组逻辑。"""
 
     def test_conflicts_and_clean_terms(self):
         import sys

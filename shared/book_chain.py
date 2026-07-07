@@ -1,4 +1,4 @@
-"""book 章序投递(工单 26-07-06/04 P2):找同书下一待投章。
+"""book 章序投递:找同书下一待投章。
 
 book collection 的章 job 由 sync 全量建好但 defer(不触发调度);顺序执行:
 前章 job 到终态(done/failed——失败也放行下一章,失败章单独 rerun,不卡整书)

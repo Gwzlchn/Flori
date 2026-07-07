@@ -232,7 +232,7 @@ def test_pdf_only_figure_placeholders_become_jump_links(tmp_path, monkeypatch):
 
 
 class TestTermConsistency:
-    """术语一致性(工单 26-07-06/04 §5 V2):chunk 注入 term_map 命中 + 回收滚动 + term_pairs 落盘。"""
+    """chunk 注入 term_map 命中、回收滚动和 term_pairs 落盘测试。"""
 
     def _big_job(self, tmp_path, term_map=None):
         import json as _json

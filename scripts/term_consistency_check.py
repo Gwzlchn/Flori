@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""术语一致性只读审查(工单 26-07-06/04 P3):找「同一 English 术语多种中文译名」冲突。
+"""术语一致性只读审查:找「同一 English 术语多种中文译名」冲突。
 
 用法(api 容器内跑,env 有 MINIO_*;--domain 需 DB):
   docker exec flori-api python /app/scripts/term_consistency_check.py --job <job_id>

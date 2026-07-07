@@ -91,7 +91,7 @@ def main() -> int:
     for prefix, tests in TARGETS.items():
         if only and only not in prefix:
             continue
-        print(f"──── 生成 + 计分: {prefix}  (tests: {' '.join(tests)}) ────", flush=True)
+        print(f"mutation scoring: {prefix}  (tests: {' '.join(tests)})", flush=True)
         orig = _set_generation_selection()
         try:
             subprocess.run(["mutmut", "run", prefix + "*"],
@@ -109,7 +109,7 @@ def main() -> int:
         g_s += survived
     gt = g_k + g_s
 
-    print("\n════ 变异分数汇总(真实,非 mutmut 自报的 killed=0)════")
+    print("\n变异分数汇总(真实,非 mutmut 自报的 killed=0)")
     for prefix, k, s in results:
         t = k + s
         print(f"  {prefix:22s} killed={k:4d} survived={s:4d}  total={t:4d}"

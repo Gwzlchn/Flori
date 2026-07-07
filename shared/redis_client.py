@@ -131,7 +131,7 @@ class RedisClient:
         raw = await self.r.get(f"airesult:{task_id}")
         return json.loads(raw) if raw else None
 
-    # 自动周报(09 工单 P3)
+    # 自动周报投递锁。
 
     async def try_mark_auto_digest(self, domain: str, day: str, ttl_sec: int = 3 * 86400) -> bool:
         """自动周报当日锁(radar:digest:auto:{domain}:{day},SET NX):True=首次(可投),

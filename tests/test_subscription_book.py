@@ -1,4 +1,4 @@
-"""book_toc 适配器 + 章序投递(工单 26-07-06/04 P2)。"""
+"""book_toc 适配器和章序投递测试。"""
 
 from __future__ import annotations
 

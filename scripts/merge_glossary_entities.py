@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""存量 glossary 实体清洗:归一键重复 + 中英分裂合并,LLM 辅助语义合并(工单 26-07-06/09 P1)。
+"""存量 glossary 实体清洗:归一键重复、中英分裂合并和 LLM 语义建议。
 
 架构约束与 backfill_zh_names 同套路:DB 在 api 容器,claude CLI 只在 worker 容器,
 /data 根目录 root-only → 文件交接走 worker 家目录(/data/workers/<name>/,uid1000 可写):
 
-  ① 确定性合并(api 容器,有 DB;先 dry-run 看计划,--apply 才落库):
+  1. 确定性合并(api 容器,有 DB;先 dry-run 看计划,--apply 才落库):
      docker exec flori-api python /app/scripts/merge_glossary_entities.py scan
      docker exec flori-api python /app/scripts/merge_glossary_entities.py scan --apply
      检测 = 同域内两行共享任一归一键(norm_key 撞 term/zh_name/aliases,即字面重复 +
      中英互指分裂);组内 dst 选择:accepted > 定义更长 > 英文主名 > 先建。合并语义见
      db.merge_glossary_terms(occurrence 并集 / 变体入 aliases,可逆留痕)。幂等:重跑无新组。
-  ② LLM 语义建议(claude worker 容器;只产建议 JSON 留档,绝不直接动库):
+  2. LLM 语义建议(claude worker 容器;只产建议 JSON 留档,绝不直接动库):
      docker exec flori-claude-worker python /app/scripts/merge_glossary_entities.py suggest \\
          --todo /data/workers/claude-2/merge/todo.json --out-dir /data/workers/claude-2/merge/
      (todo.json 先在 api 容器 `scan --export-todo <path>` 产出。)按域分批(30 条/批)喂
      claude 找语义等价组 + junk(France/法国 类非概念)。每批留档 batch-NNN.json,汇总
      suggestions.json。校验:建议引用的 term 必须都在该批输入内,越界条目丢弃。
-  ③ 人审后应用(api 容器;默认 dry-run 打印计划,--yes 才执行):
+  3. 人审后应用(api 容器;默认 dry-run 打印计划,--yes 才执行):
      docker exec flori-api python /app/scripts/merge_glossary_entities.py apply-llm \\
          --suggestions /data/workers/claude-2/merge/suggestions.json [--yes]
      merges 逐组执行 merge_glossary_terms;junk 删行(误删可从建议留档追溯)。幂等:

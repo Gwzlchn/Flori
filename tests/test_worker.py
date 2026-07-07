@@ -1061,7 +1061,7 @@ class TestWorkerIdentity:
 
     def test_legacy_flat_id_file_migrates_to_home_dir(self, monkeypatch):
         """旧平铺布局(/data/workers/<name> 是 id 文件)→ 启动自迁移成家目录 + worker.id。
-        ★id 内容不变 = 不触发重注册。幂等:二次调用不再动。"""
+        id 内容不变,不触发重注册。幂等:二次调用不再动。"""
         import shutil
         import uuid
         from worker.transport import default_worker_id_file

@@ -1,6 +1,6 @@
 """概念图谱:服务纯函数(api.services.kb.concept_graph) + REST 路由。
 
-边模型(09 工单 P2):related 真边(kind=rel)+ 共现边(kind='cooccur',权重=共享 job 数,
+边模型:related 真边(kind=rel)+ 共现边(kind='cooccur',权重=共享 job 数,
 仅保留 ≥min_cooccur,默认 2——单篇全连噪声剪掉);同一对真边优先,不重复出共现边。
 """
 

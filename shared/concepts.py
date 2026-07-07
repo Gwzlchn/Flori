@@ -1,4 +1,4 @@
-"""概念实体归一:norm_key 身份键 + resolve 变体归并(工单 2026-07-06/09 P1)。
+"""概念实体归一:norm_key 身份键 + resolve 变体归并。
 
 glossary 主键是 (domain, term) 字面精确匹配,同一概念的变体(大小写/全半角/括号注音/
 中英说法)各建一条,概念↔内容串不起来。本模块提供纯函数(零 DB 依赖,db 层与脚本共用):
@@ -112,7 +112,7 @@ def resolve(rows: list[dict], term: str, zh_name: str | None = None) -> str | No
     return None
 
 
-# 概念关系边类型(P2):prerequisite 有方向(src 需先懂 tgt),其余无向。
+# 概念关系边类型:prerequisite 有方向(src 需先懂 tgt),其余无向。
 REL_TYPES = ("prerequisite", "is_a", "part_of", "related")
 
 

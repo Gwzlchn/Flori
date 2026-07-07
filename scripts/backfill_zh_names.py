@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""存量 glossary 批量补标准中文译名(zh_name)—— 三段式运维脚本(工单 26-07-06/04 决策③)。
+"""存量 glossary 批量补标准中文译名(zh_name)的三段式运维脚本。
 
 架构约束:DB 在 api 容器(/data/db),claude CLI 只在 worker 容器 → 拆三个子命令经文件交接:
 
-  ① 导出(api 容器,有 DB):
+  1. 导出(api 容器,有 DB):
      docker exec flori-api python /app/scripts/backfill_zh_names.py export --out /data/backfill/todo.json
      读 zh_name 为空的词条 → JSON 清单 [{domain,term,definition}](已有 zh_name 的跳过=幂等)。
-  ② 补译(claude worker 容器,有 CLI;/data 卷共享):
+  2. 补译(claude worker 容器,有 CLI;/data 卷共享):
      docker exec flori-claude-worker python /app/scripts/backfill_zh_names.py translate \\
          --todo /data/backfill/todo.json --out-dir /data/backfill/
      分批(默认 50 条/批)喂 claude:每条产【标准中文译名】(不是解释;term 本身是中文→原样;
      不确定→null)。每批原始输出留档 out-dir/batch-NNN.json(可审),汇总 out-dir/zh_names.json。
-  ③ 写回(api 容器):
+  3. 写回(api 容器):
      docker exec flori-api python /app/scripts/backfill_zh_names.py apply --map /data/backfill/zh_names.json
      仅更新 zh_name 仍为空的行(幂等,重跑安全);null/空值跳过。
 
-校验铁律:② 每批输出必须是严格 JSON 且 key 集合 == 该批输入 term 集合,否则整批弃用重试一次,
+校验铁律:每批输出必须是严格 JSON 且 key 集合 == 该批输入 term 集合,否则整批弃用重试一次,
 再失败记 failed 留档继续下一批(单批失败不阻断)。
 """
 

@@ -98,7 +98,7 @@ class TestManualCRUD:
 class TestSuggestionFlow:
     @pytest.mark.asyncio
     async def test_suggestion_shows_in_suggested_list(self, client, db):
-        # 单 job 出现 → 留候选;第二个不同 job 触发自动晋升(P3),另测。
+        # 单 job 出现只留候选;第二个不同 job 触发自动晋升,另测。
         db.add_glossary_suggestion("ml", "Transformer", "job-1", "video")
         resp = await client.get("/api/glossary?domain=ml&status=suggested")
         assert resp.status_code == 200

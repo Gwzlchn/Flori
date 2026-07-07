@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""存量概念关系边补建(LLM 批量,工单 26-07-06/09 P2)——三段式运维脚本。
+"""存量概念关系边补建的三段式运维脚本。
 
 存量 800 条 related 全空(采集链 05_concepts v3 起才抽 related)。对核心概念
 (occurrence≥2 或 accepted;低频长尾不补,噪声)按域分批喂 LLM 产关系边建议,
 人审后写回。架构约束同 backfill_zh_names:DB 在 api 容器,claude 在 worker 容器,
 文件交接走 worker 家目录(/data 根 root-only):
 
-  ① 导出(api 容器):
+  1. 导出(api 容器):
      docker exec flori-api python /app/scripts/backfill_concept_edges.py export \\
          --out /data/workers/claude-2/edges/todo.json
-  ② LLM 建议(claude worker 容器;只产 JSON 留档,不动库):
+  2. LLM 建议(claude worker 容器;只产 JSON 留档,不动库):
      docker exec flori-claude-worker python /app/scripts/backfill_concept_edges.py suggest \\
          --todo /data/workers/claude-2/edges/todo.json --out-dir /data/workers/claude-2/edges/
      每域分批(30 条/批,term+定义在手),产 [{src,dst,rel,reason}];两端必须都在该批
      输入内(防幻觉),rel 限 prerequisite/is_a/part_of/related。批留档 batch-NNN.json,
      汇总 edges.json。
-  ③ 人审后写回(api 容器;默认 dry-run,--yes 执行):
+  3. 人审后写回(api 容器;默认 dry-run,--yes 执行):
      docker exec flori-api python /app/scripts/backfill_concept_edges.py apply \\
          --edges /data/workers/claude-2/edges/edges.json [--yes]
      db.add_glossary_relations 按目标去重(先到先得)→ 幂等,重跑安全。

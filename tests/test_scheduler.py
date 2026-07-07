@@ -2047,7 +2047,7 @@ class TestTimeoutRetry:
         assert delays == [10]
         assert await redis.get_step_status("j_test_001", "A") == "ready"
         assert await redis.get_step_retries("j_test_001", "A") == 1
-        # ★DB retries 列同步(否则 UI/排查看到 0,误判"超时不计数无限循环")
+        # DB retries 列必须同步,否则 UI/排查会误判为超时未计数。
         step_row = next(s for s in db.get_steps("j_test_001") if s.name == "A")
         assert step_row.retries == 1
 
@@ -2061,7 +2061,7 @@ class TestTimeoutRetry:
 
 
 class TestTermMapExportAndCollect:
-    """术语一致性(工单 26-07-06/04):submit 导出 L1(+L2)快照;翻译步完成回流 glossary/集合表。"""
+    """submit 导出 term_map 快照,翻译步完成后回流 glossary/集合表。"""
 
 
 
@@ -2072,7 +2072,7 @@ class TestTermMapExportAndCollect:
         storage.read_file.return_value = None            # 无集合表(非 book)
         s = _stub_workers_present(Scheduler(redis, db, config, storage=storage))
         db.add_glossary_suggestion("general", "martingale", "j0",
-                                   definition="鞅,一种随机过程")   # P1a:定义首短名可提炼
+                                   definition="鞅,一种随机过程")   # 定义首短名可提炼
         db.add_glossary_suggestion("general", "no name term", "j0",
                                    definition="一段无法提炼短名的长解释而已")
         job = make_job()
@@ -2142,7 +2142,7 @@ class TestTermMapExportAndCollect:
 
 
 class TestBookChainAdvance:
-    """book 章序(P2):章 job 终态 → scheduler 自动 submit 下一待投章;失败也放行。"""
+    """章 job 终态后 scheduler 自动 submit 下一待投章,失败也放行。"""
 
     @pytest.mark.asyncio
     async def test_done_advances_next_chapter(self, redis, db, config):

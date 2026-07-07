@@ -1,4 +1,4 @@
-"""shared/concepts.py 实体归一 + db resolve-then-merge / merge_glossary_terms 测试(09 工单 P1)。"""
+"""shared/concepts.py 实体归一和 resolve-then-merge 测试。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ class TestNormKey:
         assert norm_key("Multi-Head  Attention") == norm_key("multi-head attention")
 
     def test_fullwidth_paren_annotation(self):
-        # 工单验收样例:全半角括号/带不带空格的注音变体归同键。
+        # 全半角括号和空格差异不影响注音变体归一。
         k = norm_key("量化")
         assert norm_key("量化 (Quantization)") == k
         assert norm_key("量化（Quantization）") == k

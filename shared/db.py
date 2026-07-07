@@ -483,11 +483,11 @@ class Database:
         },
         "glossary": {
             "occurrences": "occurrences TEXT DEFAULT '[]'",
-            # 标准中文译名(术语一致性 L1 源;06 工单):概念步回填/backfill 脚本补/术语页可编辑。
+            # 标准中文译名:概念步回填,backfill 脚本补,术语页可编辑。
             "zh_name": "zh_name TEXT DEFAULT ''",
-            # 概念实体化(09 工单):变体名归并留痕,resolve 用其归一键匹配。
+            # 概念实体化:变体名归并留痕,resolve 用其归一键匹配。
             "aliases": "aliases TEXT DEFAULT '[]'",
-            # 概念订阅(09 工单 P3):单用户 watch 标记,雷达「我关注的概念」区数据源。
+            # 概念订阅:单用户 watch 标记,雷达「我关注的概念」区数据源。
             "watched": "watched INTEGER DEFAULT 0",
             "is_topic": "is_topic INTEGER DEFAULT 0",
             "definition_locked": "definition_locked INTEGER DEFAULT 0",
@@ -2071,12 +2071,12 @@ class Database:
         definition: str = "",
         zh_name: str = "",
     ) -> None:
-        """采集候选概念(resolve-then-merge,09 工单 P1):先按 (domain, term) 精确匹配,
+        """采集候选概念(resolve-then-merge):先按 (domain, term) 精确匹配,
         再经 shared.concepts.resolve 用归一键撞现有实体的 term/zh_name/aliases——
         「量化(Quantization)」「多头注意力」等变体挂到既有实体(occurrence 按 job_id 去重,
         新变体名进 aliases),而不是各建一条。都未命中才新建(主名规则见 primary_fields:
         英文为 term、中文进 zh_name)。定义/译名仅补空不覆盖,绝不降级已 accepted 的条目。
-        生命周期(P3):命中 rejected 实体 → 整条跳过(驳回后不再重复建议);suggested 实体
+        生命周期:命中 rejected 实体 → 整条跳过(驳回后不再重复建议);suggested 实体
         的 occurrence 覆盖 ≥2 个不同 job → 自动晋升 accepted。"""
         from shared.concepts import primary_fields, resolve
 
@@ -2163,7 +2163,7 @@ class Database:
     _STATUS_RANK = {"accepted": 2, "suggested": 1, "rejected": 0}
 
     def merge_glossary_terms(self, domain: str, src_term: str, dst_term: str) -> dict:
-        """把 src 实体并入 dst(09 工单 P1,存量清洗/前端"合并到已有词条"共用):
+        """把 src 实体并入 dst,供存量清洗与前端"合并到已有词条"共用:
         occurrences 并集按 job_id 去重(dst 先)、definition 取更长者、zh_name 补空、
         src 的 term/zh_name/aliases 全部入 dst.aliases(可逆留痕)、status 取更高档
         (accepted > suggested > rejected)、is_topic/definition_locked 取或、related 并集。
@@ -2229,7 +2229,7 @@ class Database:
         return merged
 
     def add_glossary_relations(self, domain: str, term: str, relations: list[dict]) -> int:
-        """给该概念并入关系边(P2,采集链/补边脚本共用):按目标 term 去重(先到先得,
+        """给该概念并入关系边,供采集链与补边脚本共用:按目标 term 去重(先到先得,
         不覆盖已有 rel),自指跳过。行不存在返回 0(调用方应先 resolve 到主名)。返回新增边数。"""
         rels = [r for r in _norm_related(relations) if r["term"] != term]
         if not rels:
@@ -2296,7 +2296,7 @@ class Database:
         q: str | None = None,
     ) -> list[dict]:
         """列术语,可按 domain / status 过滤 + q 检索(term/zh_name/aliases 子串,
-        大小写不敏感),按 term 升序。status 未指定时默认排除 rejected(P3:驳回件
+        大小写不敏感),按 term 升序。status 未指定时默认排除 rejected。驳回件
         只在显式 status='rejected' 时可见)。"""
         where_parts: list[str] = []
         params: list = []
@@ -2344,7 +2344,7 @@ class Database:
             self._conn.commit()
 
     def reject_glossary_term(self, domain: str, term: str) -> bool:
-        """驳回概念:status -> 'rejected'(P3)。行保留——采集链 resolve 命中 rejected 直接
+        """驳回概念:status -> 'rejected'。行保留——采集链 resolve 命中 rejected 直接
         跳过,同名/变体不会再被重复建议;各消费面(列表/图谱/雷达/term_map)默认排除。
         命中返回 True,无该行返回 False(供路由判 404)。"""
         with self._lock:
@@ -2357,7 +2357,7 @@ class Database:
             return cur.rowcount > 0
 
     def set_glossary_watched(self, domain: str, term: str, watched: bool) -> bool:
-        """置概念 watch 标记(P3,单用户)。命中返回 True,无该行返回 False(供路由判 404)。"""
+        """置概念 watch 标记。命中返回 True,无该行返回 False(供路由判 404)。"""
         with self._lock:
             cur = self._conn.execute(
                 "UPDATE glossary SET watched=?, updated_at=? WHERE domain=? AND term=?",

@@ -1,4 +1,4 @@
-"""book_toc source-adapter:在线书目录页 → 章节列表(工单 26-07-06/04 P2 + book 架构讨论)。
+"""book_toc source-adapter:在线书目录页 → 章节列表。
 
 book = collection(source_type=book_toc,source_id=目录 URL)+ 每章一个 article job。
 首个实现认 jupyter-book / sphinx 结构(QuantEcon 系列即此):目录页 nav 里的
