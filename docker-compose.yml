@@ -92,9 +92,9 @@ services:
       # 可信内网默认放行(空 API_TOKEN);公网/局域网直连暴露务必设 API_TOKEN 并把此项置 0。
       # 未设 API_TOKEN 且此项非 1 时后端 fail-closed 返回 503,见 docs/07-security。
       API_ALLOW_NO_AUTH: ${API_ALLOW_NO_AUTH:-1}
-      # /api/mcp/info|token(系统页「接入 MCP」卡片)需读 token 判断是否已配置,并供显示与复制。
+      # /api/mcp/info|token(设置页「接入 MCP」卡片)需读 token 判断是否已配置,并供显示与复制。
       FLORI_MCP_TOKEN: ${FLORI_MCP_TOKEN:-}
-      # app_credentials(B站 SESSDATA 等) at-rest 加密的 Fernet key。
+      # app_credentials(B站登录凭证等) at-rest 加密的 Fernet key。
       # 空=凭证以明文落库;设一把 Fernet key 即加密(见 docs/07-security §密钥管理)。
       FLORI_SECRET_KEY: ${FLORI_SECRET_KEY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
