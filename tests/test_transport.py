@@ -468,7 +468,7 @@ class TestGatewayHeartbeat:
         monkeypatch.setattr(gw._inner, "heartbeat", AsyncMock())
         monkeypatch.setattr(gw._inner, "update_status", AsyncMock())
 
-        # 心跳须带 worker_id + update_status 记下的当前状态(不能漏 body 导致 422)。
+        # 心跳须带当前状态与已应用配置版本,否则 runner API 无法判定漂移。
         await gw.update_status("w1", "busy", "job1", "03_scene")
         await gw.heartbeat("w1")
 
@@ -476,6 +476,7 @@ class TestGatewayHeartbeat:
         assert kwargs["json"] == {
             "worker_id": "w1", "status": "busy",
             "current_job": "job1", "current_step": "03_scene",
+            "applied_cfg_rev": 0,
         }
 
 
