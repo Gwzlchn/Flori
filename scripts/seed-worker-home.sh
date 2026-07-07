@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # 往 worker 家目录 seed claude 订阅凭证(每 worker 独立副本,各自续期,无并发写冲突)。
 #
-# 目录布局(与 worker/transport.py default_worker_id_file 一致):
-#   ${FLORI_DATA_DIR}/workers/<worker名>/     ← 该 worker 的家目录(容器内挂为 HOME)
-#     ├── worker.id                            ← 稳定身份缓存(worker 自管,含旧平铺文件自迁移)
-#     ├── .claude/.credentials.json            ← 本脚本 seed(chmod 600);CLI transcript 也落
-#     │                                          .claude/projects/…(纳管,全轨迹审计从这读)
-#     └── .claude.json                         ← 本脚本 seed(CLI settings 副本)
+# 目录布局与 worker/transport.py default_worker_id_file 保持一致。
+# - ${FLORI_DATA_DIR}/workers/<worker名>/:该 worker 的家目录,容器内挂为 HOME。
+# - worker.id:稳定身份缓存,由 worker 自管,旧平铺文件会自迁移。
+# - .claude/.credentials.json:本脚本 seed,权限 600。
+# - .claude/projects/:CLI transcript 目录,用于全轨迹审计。
+# - .claude.json:CLI settings 副本,有源文件才 seed。
 #   未来其它工具的 worker 种子同样进各自 worker home,不按工具建顶层目录。
 #
 # 用法:
@@ -29,10 +29,10 @@ FORCE="${FORCE:-0}"
 
 for name in "$@"; do
   home="$FLORI_DATA_DIR/workers/$name"
-  # 旧平铺布局(该路径是 worker.id 文件)→ 先迁移成目录(与 worker 启动自迁移同款,seed 先到也不丢 id)
+  # 旧平铺布局(该路径是 worker.id 文件):先迁移成目录,seed 先到也不丢 id。
   if [ -f "$home" ]; then
     wid=$(cat "$home"); rm -f "$home"; mkdir -p "$home"; printf '%s' "$wid" > "$home/worker.id"
-    echo ">> $name: 旧平铺 id 文件已迁移 → $home/worker.id(id 不变)"
+    echo ">> $name: 旧平铺 id 文件已迁移到 $home/worker.id(id 不变)"
   fi
   mkdir -p "$home/.claude"
   chmod 700 "$home" "$home/.claude"
@@ -41,12 +41,12 @@ for name in "$@"; do
   else
     cp "$SRC/.credentials.json" "$home/.claude/.credentials.json"
     chmod 600 "$home/.claude/.credentials.json"
-    echo ">> $name: 凭证已 seed → $home/.claude/.credentials.json"
+    echo ">> $name: 凭证已 seed 到 $home/.claude/.credentials.json"
   fi
   # CLI settings($HOME/.claude.json):有源才拷,幂等
   if [ -f "$HOME/.claude.json" ] && { [ ! -f "$home/.claude.json" ] || [ "$FORCE" = "1" ]; }; then
     cp "$HOME/.claude.json" "$home/.claude.json"
-    echo ">> $name: settings 已 seed → $home/.claude.json"
+    echo ">> $name: settings 已 seed 到 $home/.claude.json"
   fi
 done
 echo ">> 完成。compose 里给该 worker 挂 \${FLORI_DATA_DIR}/workers/<名>:/home/worker + env HOME=/home/worker 即可。"
