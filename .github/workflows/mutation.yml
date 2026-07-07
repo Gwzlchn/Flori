@@ -1,6 +1,6 @@
 name: Mutation (daily + manual)
 
-# 变异测试:给核心模块注入小改动(< → <=、+1、True→False、删行…),逐个跑相关测试——
+# 变异测试:给核心模块注入小改动(< 改成 <=、+1、True 改成 False、删行等),逐个跑相关测试。
 # 测试仍绿 = "存活变异" = 你的断言抓不住的真实 bug。变异分数(killed / 总数)直接量
 # "测试到底有没有意义",比覆盖率更狠。打哪些模块见 scripts/mutation_score.py 的 TARGETS:
 #   shared/ai_gateway.py(计费/exec_id 去重)、shared/db.py、scheduler/(状态迁移)、worker/(乐观锁)。
@@ -11,7 +11,7 @@ name: Mutation (daily + manual)
 #   - README 徽章读 mutation-data 分支的 mutation-<module>.json,趋势看该分支的 trend.md。
 #   - workflow_dispatch 仍可按需手动跑(可只跑某模块,不写历史只看 summary)。
 #
-# 为什么不用 mutmut 自带判生死:本布局下其自动 runner 恒报 killed=0——import shared 解析到 /app/shared
+# 为什么不用 mutmut 自带判生死:本布局下其自动 runner 恒报 killed=0,import shared 解析到 /app/shared
 # 原文,没从 mutants/ 副本激活变异;mutmut 3.6 无 runner/cwd 配置。改用 scripts/mutation_score.py:
 # 设 MUTANT_UNDER_TEST 从 mutants/ 跑相关测试,产出真实 killed/survived。
 #
@@ -53,7 +53,7 @@ jobs:
           sed -n "/<!--MUTATION-SUMMARY-->/,/<!--\/MUTATION-SUMMARY-->/p" /tmp/mut.log \
             | grep -v "MUTATION-SUMMARY" >> "$GITHUB_STEP_SUMMARY" || true
 
-      # 写历史:定时跑 或 手动全量跑(没填 target)——后者可立即 seed 让徽章生效。
+      # 写历史:定时跑 或 手动全量跑(没填 target),后者可立即 seed 让徽章生效。
       # 手动只跑单模块(填了 target)不写,防部分数据污染趋势。
       - name: Persist scores + regen trend/badges (mutation-data branch)
         if: github.event_name == 'schedule' || github.event.inputs.target == ''

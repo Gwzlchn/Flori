@@ -1,7 +1,7 @@
 name: CI
 
 # push/PR 跑测试;合并到 main 后构建并推送镜像到 ghcr.io。
-# 纯文档提交(*.md / docs / ROADMAP / .local)不触发 CI —— 不跑测试、不重建镜像(paths-ignore)。
+# 纯文档提交(*.md / docs / ROADMAP / .local)不触发 CI:不跑测试、不重建镜像(paths-ignore)。
 on:
   push:
     branches: [main]
@@ -13,10 +13,10 @@ on:
 # 后端单测按"普通 vs worker"拆两 job 并行(与部署镜像同理拆):
 #   unit-normal:轻镜像 test([api,worker,mcp,test],~350MB,build/load 秒级)跑非 step 测试(绝大多数)。
 #   unit-worker:重镜像 test-worker(test + ffmpeg + [steps] 媒体库)跑 step/worker 测试(tests/steps + test_step_* + test_worker)。
-#   各产部分覆盖率上传;coverage-gate 合并判 75%。关键路径 = max(两 job) → build-push,压 <2min。
+#   各产部分覆盖率上传;coverage-gate 合并判 75%。关键路径 = max(两 job) 后进入 build-push,压 <2min。
 jobs:
   unit-normal:
-    # 轻镜像 build/load 便宜 → 把 1234 个非 step 用例拆 4 shard 并行(不吃重镜像重建惩罚),摊平关键路径。
+    # 轻镜像 build/load 便宜,把 1234 个非 step 用例拆 4 shard 并行(不吃重镜像重建惩罚),摊平关键路径。
     strategy:
       fail-fast: false
       matrix:
@@ -59,7 +59,7 @@ jobs:
             type=gha,scope=flori-test
           # 仅 group 1 写 buildcache,避免多 shard 并行双写同 ref;其余只读。PR 回退 gha。
           cache-to: ${{ github.ref == 'refs/heads/main' && matrix.group == 1 && format('type=registry,ref=ghcr.io/{0}/flori-test:buildcache,mode=max', env.OWNER_LC) || (github.ref != 'refs/heads/main' && matrix.group == 1 && 'type=gha,scope=flori-test,mode=max' || '') }}
-      # 非 step 测试(--ignore tests/steps + 根 tests/test_step_*.py + test_worker.py → 归 unit-worker),再 pytest-split 拆 4 shard。
+      # 非 step 测试(--ignore tests/steps + 根 tests/test_step_*.py + test_worker.py 归 unit-worker),再 pytest-split 拆 4 shard。
       - name: Unit tests(普通 shard ${{ matrix.group }}/4,非 step)+ 部分覆盖率
         run: |
           mkdir -p covdata
@@ -139,8 +139,8 @@ jobs:
           path: covdata/.coverage.worker.${{ matrix.group }}
           include-hidden-files: true
 
-  # 合并普通 + worker 各 shard 的部分覆盖率 → 判分支覆盖率门 75%(拆 job 后不能各自判,部分覆盖会误判)。
-  # 用 python:slim 挂 checkout 到 /app 里 combine(记录的 /app/* 路径直接对齐,免 [paths]),不建 test 镜像→秒级。
+  # 合并普通 + worker 各 shard 的部分覆盖率,判分支覆盖率门 75%(拆 job 后不能各自判,部分覆盖会误判)。
+  # 用 python:slim 挂 checkout 到 /app 里 combine(记录的 /app/* 路径直接对齐,免 [paths]),不建 test 镜像也能秒级完成。
   coverage-gate:
     needs: [unit-normal, unit-worker]
     runs-on: ubuntu-latest
@@ -155,8 +155,8 @@ jobs:
         with:
           pattern: cov-*
           path: covdata
-          merge-multiple: true          # cov-normal-{1..4} + cov-worker-{1,2} → covdata/.coverage.*
-      - name: Combine + 判分支覆盖率门(轻量 python:slim,不建 test 镜像 → 省 ~25s 串行)
+          merge-multiple: true          # cov-normal-{1..4} + cov-worker-{1,2} 写入 covdata/.coverage.*
+      - name: Combine + 判分支覆盖率门(轻量 python:slim,不建 test 镜像,省约 25s 串行)
         id: cov
         run: |
           # 挂 checkout 到 /app,与两 unit job 记录的 /app/* 路径一致,免 [paths] 重映射;pip 装 coverage 秒级。
@@ -166,7 +166,7 @@ jobs:
             | tee /tmp/cov.log
           pct=$(awk '/^TOTAL/{gsub("%","",$NF); print $NF}' /tmp/cov.log | tail -1)
           echo "pct=${pct:-unknown}" >> "$GITHUB_OUTPUT"
-          echo "### 🐍 后端分支覆盖率(合并 普通+worker):${pct:-unknown}%" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 后端分支覆盖率(合并 普通+worker):${pct:-unknown}%" >> "$GITHUB_STEP_SUMMARY"
 
   # 注:OpenAPI 模糊/契约(schemathesis)在独立每日 cron .github/workflows/fuzz.yml 跑,不拖慢 push CI。
 
@@ -185,7 +185,7 @@ jobs:
           pct=$(grep -oP 'Statements\s*:\s*\K[0-9.]+' /tmp/fe-cov.log | tail -1 || true)
           pct=${pct:-unknown}
           echo "pct=$pct" >> "$GITHUB_OUTPUT"
-          echo "### 🟢 前端语句覆盖率:${pct}%" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 前端语句覆盖率:${pct}%" >> "$GITHUB_STEP_SUMMARY"
 
   # 改动路径侦测:据此让 build-push 只重建相关镜像(前端-only 不重建后端,反之亦然)。
   detect:
@@ -259,7 +259,7 @@ jobs:
             dockerfile: docker/base.Dockerfile
             context: .
             target: worker
-          - image: flori-frontend  # nginx + 构建好的 Vue 静态资源(无 target → 建末 stage)
+          - image: flori-frontend  # nginx + 构建好的 Vue 静态资源(无 target 时建末 stage)
             dockerfile: frontend/Dockerfile
             context: ./frontend
     steps:
@@ -273,7 +273,7 @@ jobs:
             want="${{ needs.detect.outputs.backend }}"
           fi
           echo "build=$want" >> "$GITHUB_OUTPUT"
-          [ "$want" = "true" ] && echo "→ 构建 ${{ matrix.image }}" || echo "→ 跳过 ${{ matrix.image }}(无相关改动)"
+          [ "$want" = "true" ] && echo "构建 ${{ matrix.image }}" || echo "跳过 ${{ matrix.image }}(无相关改动)"
       - name: Lowercase owner
         if: steps.gate.outputs.build == 'true'
         run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
@@ -370,7 +370,7 @@ jobs:
           tags: |
             type=raw,value=latest
             type=sha,format=short
-      - name: Push(cache-from 暖 → 秒级 build + push)
+      - name: Push(cache-from 已暖,秒级 build + push)
         if: steps.gate.outputs.build == 'true'
         uses: docker/build-push-action@v7
         with:

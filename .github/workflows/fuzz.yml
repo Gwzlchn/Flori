@@ -2,7 +2,7 @@ name: Fuzz
 
 # OpenAPI 模糊/契约(schemathesis):对每个端点喂畸形输入,断言不 5xx 崩溃。
 # 独立于 push CI:每日定时跑一次 + 可手动触发,不拖慢 push 的关键路径。
-# 复用 ci.yml unit job 写的 ghcr flori-test:buildcache(仅读)→ 测试镜像秒级建出。
+# 复用 ci.yml unit job 写的 ghcr flori-test:buildcache(仅读),测试镜像秒级建出。
 on:
   schedule:
     - cron: "0 18 * * *"   # 每日 UTC 18:00 = 北京 02:00(错开 mutation 的 03:00)
@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Lowercase owner
         run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
-      # 抹 pyproject version→占位稳定 pip 缓存层(同 ci.yml unit);真实版本经 FLORI_VERSION build-arg 注入。
+      # 抹 pyproject version 为占位值,稳定 pip 缓存层(同 ci.yml unit);真实版本经 FLORI_VERSION build-arg 注入。
       - name: 稳定 pip 缓存(取真实版本 + 抹 pyproject version 为占位)
         run: |
           echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_ENV"
