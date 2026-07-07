@@ -10,8 +10,8 @@ FAIL=0
 RESULTS=()
 
 log()  { echo "[$(date +%H:%M:%S)] $*"; }
-pass() { PASS=$((PASS+1)); RESULTS+=("✓ $1"); log "PASS: $1"; }
-fail() { FAIL=$((FAIL+1)); RESULTS+=("✗ $1: $2"); log "FAIL: $1 — $2"; }
+pass() { PASS=$((PASS+1)); RESULTS+=("PASS $1"); log "PASS: $1"; }
+fail() { FAIL=$((FAIL+1)); RESULTS+=("FAIL $1: $2"); log "FAIL: $1 - $2"; }
 
 wait_job_done() {
   local job_id=$1 timeout=${2:-600} elapsed=0
@@ -40,8 +40,8 @@ print(f'  Status: {d[\"status\"]}  Progress: {d[\"progress_pct\"]}%')
 for s in d['steps']:
     dur = f'{s[\"duration_sec\"]}s' if s.get('duration_sec') else ''
     err = (s.get('error','') or '')[:60]
-    icon = {'done':'✓','skipped':'⏭','failed':'✗','waiting':'⏳','ready':'🔄','running':'▶'}.get(s['status'],'?')
-    print(f'  {icon} {s[\"name\"]:20s} {s[\"status\"]:10s} {dur:>8s}  {err}')
+    label = {'done':'OK','skipped':'SKIP','failed':'FAIL','waiting':'WAIT','ready':'READY','running':'RUN'}.get(s['status'],'?')
+    print(f'  {label:5s} {s[\"name\"]:20s} {s[\"status\"]:10s} {dur:>8s}  {err}')
 "
 }
 
@@ -63,7 +63,7 @@ verify_notes() {
     return 1
   fi
 
-  echo "  notes_smart: ${notes_len} 字符, ${has_headings} 个标题 ✓"
+  echo "  notes_smart: ${notes_len} 字符, ${has_headings} 个标题 OK"
 
   # 验证 review
   local review
@@ -75,14 +75,14 @@ verify_notes() {
   return 0
 }
 
-# ═══════════════════════════════════════════
-log "═══ E2E 集成测试：真实 AI 笔记生成 ═══"
+# 测试开始
+log "=== E2E 集成测试:真实 AI 笔记生成 ==="
 log ""
 
 VIDEO_FILE="${TEST_VIDEO_FILE:?请设置 TEST_VIDEO_FILE 环境变量}"
 
-# ─── TC-AI-1: 视频上传 → 全 pipeline（含 AI 笔记）───
-log "TC-AI-1: 视频上传 → 全 pipeline + AI 笔记 (domain=deep-learning)"
+# TC-AI-1:视频上传到全 pipeline(含 AI 笔记)
+log "TC-AI-1: 视频上传到全 pipeline + AI 笔记 (domain=deep-learning)"
 log "  文件: $(du -m "$VIDEO_FILE" | cut -f1)MB"
 RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload" \
   -F "file=@$VIDEO_FILE" \
@@ -105,8 +105,8 @@ fi
 
 log ""
 
-# ─── TC-AI-2: PDF 上传 → paper pipeline + AI 笔记 ───
-log "TC-AI-2: PDF 上传 → paper pipeline + AI 笔记 (domain=ml)"
+# TC-AI-2:PDF 上传到 paper pipeline + AI 笔记
+log "TC-AI-2: PDF 上传到 paper pipeline + AI 笔记 (domain=ml)"
 RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload" \
   -F "file=@/tmp/test_paper.pdf" \
   -F "domain=ml")
@@ -127,15 +127,15 @@ fi
 
 log ""
 
-# ─── 报告 ───
-log "═══════════════════════════════════════"
+# 报告
+log "======================================="
 log "AI 集成测试报告  $(date +%Y-%m-%d\ %H:%M)"
-log "═══════════════════════════════════════"
+log "======================================="
 for r in "${RESULTS[@]}"; do
   log "  $r"
 done
-log "───────────────────────────────────────"
+log "---------------------------------------"
 log "通过: $PASS  失败: $FAIL  总计: $((PASS+FAIL))"
-log "═══════════════════════════════════════"
+log "======================================="
 
 exit $FAIL
