@@ -2,7 +2,7 @@
 
 覆盖:
 - derive_queries:关键词 + 术语表抽取(缓解整句字面短语无法命中 FTS)。
-- retrieve:多派生查询并集去重、按 best-rank 截断、note_bodies 批量拉正文。
+- retrieve:优先 chunk 证据检索,旧库无 chunk 时回退 notes_fts5。
 - POST /api/ask:注入假 gateway(返回固定 LLMResponse,绝不调真 LLM),验 sources + markdown。
 
 所有 FTS 经 db.index_job_notes 灌入(与 tests/test_api_search 同法)。
@@ -119,7 +119,8 @@ class TestRetrieve:
         passages = synthesis.retrieve(db, "反向传播", domain="ml", k=8)
         bp = next(p for p in passages if p["job_id"] == "j_bp")
         assert "链式法则" in bp["body"]
-        assert set(bp) == {"job_id", "title", "domain", "content_type", "body"}
+        assert set(bp) == {"job_id", "title", "domain", "content_type", "body", "evidence"}
+        assert bp["evidence"]["chunk_id"] == "j_bp:smart:0"
 
     def test_domain_scope(self, db):
         _seed(db)
@@ -131,6 +132,15 @@ class TestRetrieve:
     def test_no_match_returns_empty(self, db):
         _seed(db)
         assert synthesis.retrieve(db, "量子计算机超导体", domain="ml", k=8) == []
+
+    def test_legacy_notes_fallback_when_chunks_absent(self, db):
+        _seed(db)
+        db._conn.execute("DELETE FROM note_chunks")
+        db._conn.execute("DELETE FROM note_chunks_fts5")
+        db._conn.commit()
+        passages = synthesis.retrieve(db, "反向传播", domain="ml", k=8)
+        assert "j_bp" in {p["job_id"] for p in passages}
+        assert all(p["evidence"] is None for p in passages)
 
     def test_body_truncated(self, db):
         # trigram 至少 3 字才命中,故查询词与正文锚点都用 3 字 "反向传"。
@@ -225,7 +235,8 @@ class TestAskEndpoint:
         assert data["retrieved_count"] >= 1
         assert "j_bp" in {s["job_id"] for s in data["sources"]}
         for s in data["sources"]:
-            assert set(s) == {"job_id", "title", "domain", "content_type"}
+            assert {"job_id", "title", "domain", "content_type", "evidence"} <= set(s)
+        assert any(s["evidence"] and s["evidence"]["chunk_id"] for s in data["sources"])
         # 真投了一个 synthesis AI task 进 queue:ai(claude 在 worker 跑,API 没调)。
         queued = await ask_app.state.redis.list_queue("ai")
         assert len(queued) == 1

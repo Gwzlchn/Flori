@@ -257,6 +257,41 @@ CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts5 USING fts5(
     body,
     tokenize='trigram'
 );
+
+CREATE TABLE IF NOT EXISTS note_chunks (
+    chunk_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    note_type TEXT NOT NULL,
+    content_type TEXT NOT NULL DEFAULT '',
+    collection_id TEXT NOT NULL DEFAULT '',
+    domain TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    section TEXT NOT NULL DEFAULT '',
+    chunk_index INTEGER NOT NULL,
+    char_start INTEGER NOT NULL DEFAULT 0,
+    char_end INTEGER NOT NULL DEFAULT 0,
+    body TEXT NOT NULL DEFAULT '',
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(job_id, note_type, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS idx_note_chunks_job ON note_chunks(job_id);
+CREATE INDEX IF NOT EXISTS idx_note_chunks_domain ON note_chunks(domain);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS note_chunks_fts5 USING fts5(
+    chunk_id UNINDEXED,
+    job_id UNINDEXED,
+    note_type UNINDEXED,
+    content_type UNINDEXED,
+    collection_id UNINDEXED,
+    domain UNINDEXED,
+    title,
+    section,
+    body,
+    evidence_json UNINDEXED,
+    tokenize='trigram'
+);
 """
 
 
@@ -321,6 +356,85 @@ def _fts_match_query(q: str) -> str:
         return ""
     escaped = cleaned.replace('"', '""')
     return f'"{escaped}"'
+
+
+def _chunk_note_body(
+    body: str, *, max_chars: int = 1400, overlap: int = 120
+) -> list[dict]:
+    """把笔记正文切成问答证据块。按段落聚合,超长段落滑窗切分;返回 char offset 便于回看。"""
+    text = body or ""
+    if not text.strip():
+        return []
+
+    paragraphs: list[tuple[int, int, str]] = []
+    pos = 0
+    for raw in text.splitlines(keepends=True):
+        stripped = raw.strip()
+        if stripped:
+            start = text.find(raw, pos)
+            if start < 0:
+                start = pos
+            end = start + len(raw)
+            paragraphs.append((start, end, raw.rstrip("\n")))
+            pos = end
+        else:
+            pos += len(raw)
+
+    if not paragraphs:
+        return []
+
+    chunks: list[dict] = []
+    cur_parts: list[str] = []
+    cur_start = paragraphs[0][0]
+    cur_end = paragraphs[0][0]
+    section = ""
+    cur_section = ""
+
+    def emit() -> None:
+        nonlocal cur_parts, cur_start, cur_end, cur_section
+        body_text = "\n".join(p for p in cur_parts if p).strip()
+        if body_text:
+            chunks.append({
+                "body": body_text,
+                "section": cur_section,
+                "char_start": cur_start,
+                "char_end": cur_end,
+            })
+        cur_parts = []
+
+    for start, end, para in paragraphs:
+        if para.lstrip().startswith("#"):
+            section = para.lstrip("#").strip() or section
+        if len(para) > max_chars:
+            emit()
+            step = max(1, max_chars - overlap)
+            for off in range(0, len(para), step):
+                part = para[off : off + max_chars].strip()
+                if not part:
+                    continue
+                chunks.append({
+                    "body": part,
+                    "section": section,
+                    "char_start": start + off,
+                    "char_end": min(start + off + len(part), end),
+                })
+            cur_start = end
+            cur_end = end
+            cur_section = section
+            continue
+        projected = sum(len(p) for p in cur_parts) + len(cur_parts) + len(para)
+        if cur_parts and projected > max_chars:
+            emit()
+            cur_start = start
+            cur_section = section
+        elif not cur_parts:
+            cur_start = start
+            cur_section = section
+        cur_parts.append(para)
+        cur_end = end
+
+    emit()
+    return chunks
 
 
 def _parse_dt(s: str | None) -> datetime | None:
@@ -772,6 +886,14 @@ class Database:
                     f"UPDATE notes_fts5 SET {fts_clause} WHERE job_id=?",
                     [("" if v is None else v) for v in fts_sync.values()] + [job_id],
                 )
+                self._conn.execute(
+                    f"UPDATE note_chunks SET {fts_clause} WHERE job_id=?",
+                    [("" if v is None else v) for v in fts_sync.values()] + [job_id],
+                )
+                self._conn.execute(
+                    f"UPDATE note_chunks_fts5 SET {fts_clause} WHERE job_id=?",
+                    [("" if v is None else v) for v in fts_sync.values()] + [job_id],
+                )
             self._conn.commit()
 
     def _strip_occurrences_for_jobs(self, job_ids: list[str]) -> None:
@@ -805,6 +927,8 @@ class Database:
         → 该条下轮订阅枚举可重新入库(彻底删除)。"""
         with self._lock:
             self._conn.execute("DELETE FROM notes_fts5 WHERE job_id=?", (job_id,))
+            self._conn.execute("DELETE FROM note_chunks WHERE job_id=?", (job_id,))
+            self._conn.execute("DELETE FROM note_chunks_fts5 WHERE job_id=?", (job_id,))
             # ai_usage 无外键,不会随 jobs 行 CASCADE,须显式删,否则 token/费用行成永久悬挂孤儿。
             self._conn.execute("DELETE FROM ai_usage WHERE job_id=?", (job_id,))
             self._conn.execute("DELETE FROM jobs WHERE id=?", (job_id,))
@@ -1744,6 +1868,12 @@ class Database:
                 self._conn.execute(
                     "DELETE FROM notes_fts5 WHERE collection_id=?", (collection_id,)
                 )
+                self._conn.execute(
+                    "DELETE FROM note_chunks WHERE collection_id=?", (collection_id,)
+                )
+                self._conn.execute(
+                    "DELETE FROM note_chunks_fts5 WHERE collection_id=?", (collection_id,)
+                )
                 # ai_usage 无外键,须显式删名下各 job 的用量行(与 delete_job_cascade 一致)。
                 self._conn.execute(
                     "DELETE FROM ai_usage WHERE job_id IN "
@@ -1760,6 +1890,14 @@ class Database:
                 )
                 self._conn.execute(
                     "UPDATE notes_fts5 SET collection_id='' WHERE collection_id=?",
+                    (collection_id,),
+                )
+                self._conn.execute(
+                    "UPDATE note_chunks SET collection_id='' WHERE collection_id=?",
+                    (collection_id,),
+                )
+                self._conn.execute(
+                    "UPDATE note_chunks_fts5 SET collection_id='' WHERE collection_id=?",
                     (collection_id,),
                 )
             self._conn.execute(
@@ -1820,6 +1958,12 @@ class Database:
                 ).rowcount
                 self._conn.execute(
                     "UPDATE notes_fts5 SET domain=? WHERE domain=?", (new, old)
+                )
+                self._conn.execute(
+                    "UPDATE note_chunks SET domain=? WHERE domain=?", (new, old)
+                )
+                self._conn.execute(
+                    "UPDATE note_chunks_fts5 SET domain=? WHERE domain=?", (new, old)
                 )
                 self._conn.commit()
             except Exception:
@@ -2437,7 +2581,76 @@ class Database:
                 (job_id, content_type, note_type, collection_id or "",
                  domain or "", title or "", body or ""),
             )
+            self._replace_note_chunks_locked(
+                job_id=job_id,
+                note_type=note_type,
+                title=title,
+                body=body,
+                content_type=content_type,
+                domain=domain,
+                collection_id=collection_id,
+            )
             self._conn.commit()
+
+    def _replace_note_chunks_locked(
+        self,
+        *,
+        job_id: str,
+        note_type: str,
+        title: str,
+        body: str,
+        content_type: str = "",
+        domain: str = "",
+        collection_id: str = "",
+    ) -> None:
+        """重建某 job/note_type 的证据块索引。调用方须已持锁,并负责 commit。"""
+        self._conn.execute(
+            "DELETE FROM note_chunks WHERE job_id=? AND note_type=?", (job_id, note_type)
+        )
+        self._conn.execute(
+            "DELETE FROM note_chunks_fts5 WHERE job_id=? AND note_type=?",
+            (job_id, note_type),
+        )
+        now = _now_iso()
+        for idx, chunk in enumerate(_chunk_note_body(body)):
+            chunk_id = f"{job_id}:{note_type}:{idx}"
+            evidence = {
+                "chunk_id": chunk_id,
+                "note_type": note_type,
+                "section": chunk["section"],
+                "chunk_index": idx,
+                "char_start": chunk["char_start"],
+                "char_end": chunk["char_end"],
+                "timestamp_sec": None,
+                "page": None,
+                "frame_path": None,
+                "image_path": None,
+            }
+            evidence_json = json.dumps(evidence, ensure_ascii=False)
+            values = (
+                chunk_id, job_id, note_type, content_type or "", collection_id or "",
+                domain or "", title or "", chunk["section"], idx,
+                chunk["char_start"], chunk["char_end"], chunk["body"], evidence_json,
+                now, now,
+            )
+            self._conn.execute(
+                """INSERT INTO note_chunks
+                   (chunk_id, job_id, note_type, content_type, collection_id, domain,
+                    title, section, chunk_index, char_start, char_end, body,
+                    evidence_json, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                values,
+            )
+            self._conn.execute(
+                """INSERT INTO note_chunks_fts5
+                   (chunk_id, job_id, note_type, content_type, collection_id, domain,
+                    title, section, body, evidence_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    chunk_id, job_id, note_type, content_type or "", collection_id or "",
+                    domain or "", title or "", chunk["section"], chunk["body"], evidence_json,
+                ),
+            )
 
     def search_notes(
         self,
@@ -2494,6 +2707,68 @@ class Database:
             }
             for r in rows
         ]
+        return total, items
+
+    def search_note_chunks(
+        self,
+        q: str,
+        collection_id: str | None = None,
+        domain: str | None = None,
+        content_type: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[int, list[dict]]:
+        """全文检索问答证据块。返回 chunk 级 body/snippet/evidence,供 Ask 优先使用。
+
+        旧库可能还没有任何 chunk 行;调用方应在无命中时回退 search_notes。
+        """
+        match = _fts_match_query(q)
+        if not match:
+            return 0, []
+
+        where_parts = ["note_chunks_fts5 MATCH ?"]
+        params: list = [match]
+        if collection_id:
+            where_parts.append("collection_id=?")
+            params.append(collection_id)
+        if domain:
+            where_parts.append("domain=?")
+            params.append(domain)
+        if content_type:
+            where_parts.append("content_type=?")
+            params.append(content_type)
+        where = " AND ".join(where_parts)
+
+        total = self._conn.execute(
+            f"SELECT COUNT(*) FROM note_chunks_fts5 WHERE {where}", params
+        ).fetchone()[0]
+        rows = self._conn.execute(
+            f"""SELECT chunk_id, job_id, note_type, title, content_type, domain,
+                   collection_id, section, body, evidence_json,
+                   snippet(note_chunks_fts5, 8, '<mark>', '</mark>', '…', 12) AS snippet
+                FROM note_chunks_fts5 WHERE {where}
+                ORDER BY rank LIMIT ? OFFSET ?""",
+            params + [limit, offset],
+        ).fetchall()
+        items = []
+        for r in rows:
+            try:
+                evidence = json.loads(r["evidence_json"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                evidence = {}
+            items.append({
+                "chunk_id": r["chunk_id"],
+                "job_id": r["job_id"],
+                "note_type": r["note_type"],
+                "title": r["title"],
+                "snippet": r["snippet"],
+                "body": r["body"],
+                "content_type": r["content_type"],
+                "domain": r["domain"],
+                "collection_id": r["collection_id"] or None,
+                "section": r["section"] or "",
+                "evidence": evidence,
+            })
         return total, items
 
     def note_bodies(self, job_ids: list[str]) -> dict[str, str]:

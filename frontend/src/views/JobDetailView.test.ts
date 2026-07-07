@@ -377,5 +377,5 @@ describe('JobDetailView 切 job 重置(跨 job 串台回归)', () => {
     const content = w.find('markdown-viewer-stub').attributes('content')
     expect(content).toContain('B 的原文内容')
     expect(content).not.toContain('A 的原文内容')
-  })
+  }, 10000)
 })

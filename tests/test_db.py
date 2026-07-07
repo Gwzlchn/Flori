@@ -813,6 +813,36 @@ class TestNotesFTS:
         assert total == 5
         assert len(page) == 2
 
+    def test_index_also_generates_searchable_chunks(self, db):
+        db.index_job_notes(
+            "j1", "smart", "深度学习入门",
+            "# 背景\n本文介绍反向传播算法的链式法则。\n\n# 细节\n梯度下降依赖这些梯度。",
+            content_type="video", domain="ml", collection_id="c1",
+        )
+        total, items = db.search_note_chunks("链式法则", domain="ml")
+        assert total == 1
+        assert items[0]["job_id"] == "j1"
+        assert items[0]["chunk_id"] == "j1:smart:0"
+        assert items[0]["evidence"]["chunk_id"] == "j1:smart:0"
+        assert items[0]["evidence"]["note_type"] == "smart"
+        assert "链式法则" in items[0]["body"]
+
+    def test_chunk_index_is_replaced_with_note(self, db):
+        db.index_job_notes("j1", "smart", "t1", "第一版讲解卷积神经网络。")
+        db.index_job_notes("j1", "smart", "t2", "第二版讲解循环神经网络。")
+        total_old, _ = db.search_note_chunks("卷积神经网络")
+        total_new, items = db.search_note_chunks("循环神经网络")
+        assert total_old == 0
+        assert total_new == 1
+        assert items[0]["title"] == "t2"
+
+    def test_delete_job_cascade_removes_chunks(self, db):
+        db.create_job(Job(id="j_chunk_del", content_type="video", pipeline="video"))
+        db.index_job_notes("j_chunk_del", "smart", "t", "讲解反向传播算法。")
+        assert db.search_note_chunks("反向传播")[0] == 1
+        db.delete_job_cascade("j_chunk_del")
+        assert db.search_note_chunks("反向传播")[0] == 0
+
 
 class TestAppCredentials:
     def test_set_and_get(self, db):

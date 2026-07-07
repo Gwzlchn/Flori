@@ -2,9 +2,9 @@
 
 对用户提问跨语料检索相关笔记,由 LLM 综合出带引用的答案,标注共识/分歧。
 
-检索是最大风险:唯一检索后端是 FTS5 trigram,db.search_notes 把整条查询当一个
-带引号的字面短语匹配(_fts_match_query),自然语言问句几乎不可能整句命中。本模块通过
-`derive_queries` 把问句拆成有意义的小词/术语,分别检索再并集去重,缓解该字面短语限制。
+检索是最大风险:旧后端只有 job 级 FTS5 trigram;新后端优先查 note_chunks_fts5,
+返回可追溯 evidence。旧库无 chunk 或 chunk 不足时补旧 job 级检索,避免历史内容失效。
+本模块通过 `derive_queries` 把问句拆成有意义的小词/术语,分别检索再并集去重。
 
 门面纯函数(吃 Database),便于单测:不在此持有连接/全局状态。
 LLM 综合作为独立 AI task 投给 ai-worker(见 api/routes/ask.py + shared.models.AITask),本模块只产 retrieve/build_prompt。
@@ -16,7 +16,7 @@ import re
 
 from shared.db import Database
 
-# 每段正文喂给 LLM 的字符预算:太长会撑爆上下文 + 涨成本,4000 中文足够承载要点。
+# 旧文档级回退每段正文喂给 LLM 的字符预算:太长会撑爆上下文 + 涨成本。
 _BODY_CHAR_BUDGET = 4000
 # derive_queries 产出的查询条数上限:每条都要打一次 FTS,过多无谓放大检索成本。
 _MAX_QUERIES = 6
@@ -101,18 +101,64 @@ def derive_queries(question: str, db: Database, domain: str | None = None) -> li
 def retrieve(
     db: Database, question: str, domain: str | None = None, k: int = 8
 ) -> list[dict]:
-    """跨语料检索:对每个派生查询跑 FTS,并集去重(保留最佳 rank),取前 k 篇,批量拉正文。
+    """跨语料检索:优先 chunk 级 FTS,不足时补旧 job 级 FTS。
 
-    返回 [{job_id, title, domain, content_type, body}];body 截断到 _BODY_CHAR_BUDGET。
-    去重以 job_id 为粒度(同一篇内容只进一次);rank 近似为首个命中它的派生查询的次序
-    加该查询内部的命中序——越靠前的查询越具体,命中即视为更相关。
+    返回 [{job_id,title,domain,content_type,body,evidence?}]。chunk 命中以 chunk_id 去重;
+    旧回退以 job_id 去重,并跳过已有 chunk 的 job。rank 近似为派生查询顺序 + 命中序。
     """
     queries = derive_queries(question, db, domain)
     if not queries:
         # 派生不出任何词(纯停用词/纯标点):退化为整句直检,聊胜于无。
         queries = [question] if (question or "").strip() else []
 
-    # job_id -> 首次命中的全局序(越小越相关),同时记录命中元信息(title/domain/content_type)。
+    passages: list[dict] = []
+    seen_chunks: set[str] = set()
+    seen_jobs: set[str] = set()
+    order = 0
+    for qi in queries:
+        try:
+            _total, items = db.search_note_chunks(qi, domain=domain, limit=k)
+        except Exception:
+            continue
+        for it in items:
+            chunk_id = it.get("chunk_id") or f"{it.get('job_id')}:{order}"
+            if chunk_id in seen_chunks:
+                order += 1
+                continue
+            seen_chunks.add(chunk_id)
+            seen_jobs.add(it["job_id"])
+            ev = dict(it.get("evidence") or {})
+            ev.setdefault("chunk_id", chunk_id)
+            ev.setdefault("section", it.get("section") or "")
+            ev["snippet"] = it.get("snippet") or ""
+            passages.append({
+                "job_id": it["job_id"],
+                "title": it.get("title") or "(无标题)",
+                "domain": it.get("domain") or "",
+                "content_type": it.get("content_type") or "",
+                "body": (it.get("body") or "")[:_BODY_CHAR_BUDGET],
+                "evidence": ev,
+            })
+            order += 1
+            if len(passages) >= k:
+                return passages[:k]
+
+    if len(passages) >= k:
+        return passages[:k]
+
+    legacy = _retrieve_legacy_notes(db, queries, domain, k, seen_jobs)
+    passages.extend(legacy)
+    return passages[:k]
+
+
+def _retrieve_legacy_notes(
+    db: Database,
+    queries: list[str],
+    domain: str | None,
+    k: int,
+    exclude_jobs: set[str],
+) -> list[dict]:
+    """旧 notes_fts5 回退:补历史 job 或尚未 chunk 化的内容。"""
     best_rank: dict[str, int] = {}
     meta: dict[str, dict] = {}
     order = 0
@@ -123,6 +169,9 @@ def retrieve(
             continue
         for it in items:
             jid = it["job_id"]
+            if jid in exclude_jobs:
+                order += 1
+                continue
             if jid not in best_rank:
                 best_rank[jid] = order
                 meta[jid] = {
@@ -132,25 +181,18 @@ def retrieve(
                     "content_type": it.get("content_type") or "",
                 }
             order += 1
-
     if not best_rank:
         return []
 
     top_ids = sorted(best_rank, key=lambda j: best_rank[j])[:k]
     bodies = db.note_bodies(top_ids)
-
-    passages: list[dict] = []
+    out: list[dict] = []
     for jid in top_ids:
         body = (bodies.get(jid) or "").strip()
         if not body:
             continue  # 无正文(仅 snippet 索引缺失)→ 喂给 LLM 无意义,跳过
-        passages.append(
-            {
-                **meta[jid],
-                "body": body[:_BODY_CHAR_BUDGET],
-            }
-        )
-    return passages
+        out.append({**meta[jid], "body": body[:_BODY_CHAR_BUDGET], "evidence": None})
+    return out
 
 
 def build_prompt(question: str, passages: list[dict]) -> tuple[str, str]:
@@ -173,6 +215,13 @@ def build_prompt(question: str, passages: list[dict]) -> tuple[str, str]:
             tags.append(f"领域={p['domain']}")
         if p.get("content_type"):
             tags.append(f"类型={p['content_type']}")
+        ev = p.get("evidence") or {}
+        if ev.get("section"):
+            tags.append(f"段落={ev['section']}")
+        if ev.get("timestamp_sec") is not None:
+            tags.append(f"时间={ev['timestamp_sec']}秒")
+        if ev.get("page") is not None:
+            tags.append(f"页码={ev['page']}")
         if tags:
             head += f"({', '.join(tags)})"
         blocks.append(f"{head}\n{p.get('body', '')}")

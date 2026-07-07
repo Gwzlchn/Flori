@@ -106,6 +106,16 @@ function onKeydown(e: KeyboardEvent) {
 function openSource(jobId: string) {
   router.push(`/content/${encodeURIComponent(jobId)}`)
 }
+
+function evidenceLabel(s: AskResponse['sources'][number]) {
+  const ev = s.evidence
+  if (!ev) return ''
+  if (ev.section) return ev.section
+  if (ev.timestamp_sec !== null && ev.timestamp_sec !== undefined) return `${Math.round(ev.timestamp_sec)}s`
+  if (ev.page !== null && ev.page !== undefined) return `p.${ev.page}`
+  if (ev.chunk_index !== null && ev.chunk_index !== undefined) return `片段 ${ev.chunk_index + 1}`
+  return ''
+}
 </script>
 
 <template>
@@ -169,7 +179,7 @@ function openSource(jobId: string) {
         <!-- 答案正文 -->
         <div class="card pad" style="margin-top:18px">
           <div class="muted" style="font-size:12.5px;margin-bottom:10px;display:flex;align-items:center;gap:6px">
-            <Sparkles :size="14" />综合自 {{ submitted.retrieved_count }} 篇笔记
+            <Sparkles :size="14" />综合自 {{ submitted.retrieved_count }} 条来源
           </div>
           <!-- 答案就绪 -->
           <template v-if="answerMd !== null">
@@ -198,15 +208,18 @@ function openSource(jobId: string) {
           <div class="source-chips">
             <button
               v-for="(s, i) in submitted.sources"
-              :key="s.job_id"
+              :key="`${s.job_id}-${s.evidence?.chunk_id || i}`"
               class="source-chip"
               :title="s.title"
               @click="openSource(s.job_id)"
             >
-              <span class="chip-idx">来源{{ i + 1 }}</span>
-              <component :is="contentTypeIcon(s.content_type)" :size="14" />
-              <span class="chip-title">{{ s.title }}</span>
-              <span v-if="s.domain && s.domain !== 'general'" class="chip-dom">{{ s.domain }}</span>
+              <span class="chip-head">
+                <span class="chip-idx">来源{{ i + 1 }}</span>
+                <component :is="contentTypeIcon(s.content_type)" :size="14" />
+                <span class="chip-title">{{ s.title }}</span>
+                <span v-if="s.domain && s.domain !== 'general'" class="chip-dom">{{ s.domain }}</span>
+              </span>
+              <span v-if="evidenceLabel(s)" class="chip-evidence">{{ evidenceLabel(s) }}</span>
             </button>
           </div>
         </div>
@@ -223,16 +236,21 @@ function openSource(jobId: string) {
 <style scoped>
 .source-chips { display:flex; flex-wrap:wrap; gap:8px; }
 .source-chip {
-  display:inline-flex; align-items:center; gap:7px;
-  max-width:320px; padding:6px 11px;
+  display:inline-flex; flex-direction:column; align-items:flex-start; gap:3px;
+  max-width:340px; min-width:0; padding:6px 11px;
   background:var(--surface); border:1px solid var(--line);
   border-radius:999px; cursor:pointer; font-size:12.5px; color:var(--ink-700);
   transition:border-color .12s, background .12s;
 }
 .source-chip:hover { border-color:var(--brand-300); background:var(--brand-50); }
+.chip-head { display:flex; align-items:center; gap:7px; min-width:0; width:100%; }
 .chip-idx { font-weight:600; color:var(--brand-700); font-size:11.5px; flex:none; }
 .chip-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .chip-dom { color:var(--ink-400); font-size:11px; flex:none; }
+.chip-evidence {
+  max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  color:var(--ink-500); font-size:11.5px; padding-left:46px;
+}
 .btn-audit {
   display:inline-flex; align-items:center; gap:6px;
   padding:5px 10px; font-size:12px; color:var(--ink-600);

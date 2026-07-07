@@ -25,7 +25,10 @@ function askResp(over: Record<string, any> = {}) {
     task_id: 'at_1',
     answer_markdown: null,
     sources: [
-      { job_id: 'j_bp', title: '反向传播详解', domain: 'ml', content_type: 'video' },
+      {
+        job_id: 'j_bp', title: '反向传播详解', domain: 'ml', content_type: 'video',
+        evidence: { chunk_id: 'j_bp:smart:0', chunk_index: 0, section: null, snippet: '反向传播' },
+      },
       { job_id: 'j_grad', title: '梯度下降综述', domain: 'ml', content_type: 'paper' },
     ],
     retrieved_count: 2,
@@ -86,8 +89,9 @@ describe('AskView 提问流程(异步)', () => {
     expect(t).toContain('反向传播用于计算梯度')   // 答案来自 result(MarkdownViewer 渲染)
     expect(t).toContain('来源1')
     expect(t).toContain('共识 / 分歧')
-    expect(t).toContain('综合自 2 篇笔记')
+    expect(t).toContain('综合自 2 条来源')
     expect(t).toContain('反向传播详解')           // 来源 chips(随 202 即得)
+    expect(t).toContain('片段 1')
     expect(t).toContain('梯度下降综述')
   })
 

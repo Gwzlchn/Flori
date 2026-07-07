@@ -530,6 +530,19 @@ export interface AskSource {
   title: string
   domain: string
   content_type: string
+  evidence?: {
+    chunk_id?: string | null
+    note_type?: string | null
+    section?: string | null
+    snippet?: string | null
+    chunk_index?: number | null
+    char_start?: number | null
+    char_end?: number | null
+    timestamp_sec?: number | null
+    page?: number | null
+    frame_path?: string | null
+    image_path?: string | null
+  } | null
 }
 
 export interface AskResponse {
