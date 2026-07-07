@@ -1,7 +1,7 @@
 """StepRunner: 把步骤执行底座抽成可换实现,对齐 StorageBackend 的分流模式。
 
 SubprocessStepRunner 是默认实现;DockerStepRunner 为每步一容器,
-由 STEP_RUNTIME=docker 启用。runner 只读写 work_dir,不连 Redis/DB/对象存储——
+由 STEP_RUNTIME=docker 启用。runner 只读写 work_dir,不连 Redis/DB/对象存储;
 控制面交互(状态续约、日志推送、事件发布)全经 worker 注入的回调。
 """
 
@@ -81,7 +81,7 @@ class SubprocessStepRunner:
 
         timeout = ctx.timeout_sec
         # 按需下放:子进程需继承系统 env(PATH/HOME/LANG/LD_LIBRARY_PATH)才能 exec
-        # python/ffmpeg,故用 DENYLIST 而非白名单——仅剥离步骤永不需要的敏感密钥。
+        # python/ffmpeg,故用 DENYLIST 而非白名单,仅剥离步骤永不需要的敏感密钥。
         env = _build_subprocess_env(ctx)
 
         proc = await asyncio.create_subprocess_exec(
@@ -180,7 +180,7 @@ class DockerStepRunner:
 
     def _host_path(self, work_dir: Path) -> str:
         # DooD bind-mount 必须用宿主路径。HOST_WORK_DIR 缺失时若退化为容器内路径,
-        # 会把错误目录挂进 /job(读不到上一步产物)且无报错 → 直接 fail-fast。
+        # 会把错误目录挂进 /job(读不到上一步产物)且无报错,因此直接 fail-fast。
         if not self._host_work_root:
             raise ValueError(
                 "DockerStepRunner requires HOST_WORK_DIR (DooD 需宿主侧 work 目录路径)"
@@ -188,7 +188,7 @@ class DockerStepRunner:
         return str(Path(self._host_work_root) / work_dir.name)
 
     def _resolve_image(self, image: str) -> str:
-        # 逻辑名 flori/step-X → {registry}/flori-step-X(ghcr 扁平命名);
+        # 逻辑名 flori/step-X 解析为 {registry}/flori-step-X(ghcr 扁平命名);
         # 未设 registry 或已是带 host 的全名则原样用(本机自建镜像直接命中)。
         if self._registry and image.startswith("flori/"):
             return f"{self._registry}/{image.replace('/', '-')}"

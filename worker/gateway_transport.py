@@ -2,7 +2,7 @@
 
 有内层(RedisTransport)时:worker 仍直连 redis/db,认领走内层,注册/心跳额外打 gateway。
 无内层(inner=None)时:不连 redis/db,只出站 HTTPS;认领/产物全走 gateway,
-无内层可退回——不可达时只 log,不崩。内层委派方法在 inner 为空时返回安全默认值。
+无内层可退回:不可达时只 log,不崩。内层委派方法在 inner 为空时返回安全默认值。
 """
 
 from __future__ import annotations
@@ -109,7 +109,7 @@ class GatewayTransport:
         }
         returned_id = data.get("worker_id") or effective_id
         self._save_id(returned_id)
-        # 身份头:随每个 runner 请求上送(诊断用,不可信)。version 是排障关键——一眼认出"旧版没更新的 worker"。
+        # 身份头:随每个 runner 请求上送(诊断用,不可信)。version 是排障关键,用于识别未更新的 worker。
         self._identity_headers = {
             "X-Worker-Id": returned_id,
             "X-Worker-Type": worker_type or "",
@@ -141,7 +141,7 @@ class GatewayTransport:
                 "/api/runner/heartbeat", headers=self._auth(), json=body,
             )
             if resp.status_code == 401:
-                # 心跳也被拒 = per-worker token 失效 → 抛给主循环走重注册/退避/自杀,不能裸吞。
+                # 心跳也被拒 = per-worker token 失效,抛给主循环走重注册/退避/自杀,不能裸吞。
                 raise WorkerAuthRejected()
             if resp.status_code == 200:
                 try:
@@ -193,7 +193,7 @@ class GatewayTransport:
 
     async def request_step(self, worker_id, pools, pool_limits, tags, reject_tags):
         # 认领走服务端长轮询;httpx 出错只 log+返回 None(worker 空转重试),绝不退回内层
-        # ——退回内层会经 redis 再认领一次,造成双重认领。
+        # 退回内层会经 redis 再认领一次,造成双重认领。
         try:
             resp = await self._http.post(
                 "/api/runner/jobs/request",
@@ -204,14 +204,14 @@ class GatewayTransport:
                 },
             )
             if resp.status_code == 401:
-                # per-worker token 失效 → 抛给主循环自愈(重注册/退避/6h自杀),不能当"无任务"空转死刷。
+                # per-worker token 失效时抛给主循环自愈(重注册/退避/6h自杀),不能当"无任务"空转死刷。
                 raise WorkerAuthRejected()
             resp.raise_for_status()
             claim = resp.json().get("claim")
             if claim:
                 # 在跑步集合:心跳捎带上报(见 heartbeat body running),给每个并发步刷进度心跳。
-                # 独立 alive 通道在部分外网链路上不达(实测 8 并发 worker alive 0 送达 → 步骤
-                # 150s 后被 orphan_scan 全量误回收);心跳是实测可靠通道,借道最稳。
+                # 独立 alive 通道在部分外网链路上不达(实测 8 并发 worker alive 0 送达,
+                # 步骤 150s 后被 orphan_scan 全量误回收);心跳是实测可靠通道,借道最稳。
                 self._running.add((claim["job_id"], claim["step"]))
             return claim
         except httpx.HTTPError as e:
@@ -226,7 +226,7 @@ class GatewayTransport:
     async def _report_best_effort(self, url, json_body, *, op,
                                   job_id="", step=""):
         """上报通道(complete/fail/release/usage)统一 best-effort:有界重试后仍失败只 log,
-        绝不抛——上报抖动不得把 returncode==0 的成功步骤翻成 failed,也不得经 execute 的
+        绝不抛:上报抖动不得把 returncode==0 的成功步骤翻成 failed,也不得经 execute 的
         finally release 逃逸杀掉整个 worker 主循环。同文件 heartbeat/request_step/
         report_step_alive 同为 best-effort。"""
         last_exc = None

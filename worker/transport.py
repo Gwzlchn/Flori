@@ -74,7 +74,7 @@ class WorkerTransport(Protocol):
 
     # 资源池 / 队列认领 + 步骤状态机(细粒度)
     # worker.execute 只用上面的粗粒度方法(request_step/report_*/release 等)。下面这些细粒度
-    # 方法 worker 侧零调用——编排已封装在 runner_ops.claim_step/report_*/release_step 内,这里保留
+    # 方法 worker 侧零调用:编排已封装在 runner_ops.claim_step/report_*/release_step 内,这里保留
     # 仅为与 RedisTransport/gateway 同 Protocol 的防御接口,非可用入口,避免误当 worker 可调。
     async def is_pool_frozen(self, pool: str) -> bool: ...
     async def try_acquire_slot(self, pool: str, limit: int, holder: str) -> bool: ...
@@ -316,12 +316,12 @@ _id_log = structlog.get_logger(component="worker_transport")
 def default_worker_id_file() -> str:
     """worker id 缓存文件默认位置(直连与 gateway 共用,单一来源)。
 
-    布局:`/data/workers/<name>/` 是该 worker 的【家目录】——id 缓存、claude 凭证(HOME 挂载时的
-    .claude/、.claude.json)、CLI transcript 等一切 worker 私有状态都收敛在自己目录下;id 文件为
+    布局:`/data/workers/<name>/` 是该 worker 的家目录:id 缓存、Claude 凭证与配置、
+    CLI transcript 等一切 worker 私有状态都收敛在自己目录下;id 文件为
     `<name>/worker.id`。WORKER_ID_FILE 显式覆盖语义不变;缺省 WORKER_NAME 归入 `default/`。
 
-    旧布局(/data/workers/<name> 是【平铺 id 文件】)在此幂等迁移:读出 id → 原地换成目录 →
-    写回 worker.id。★id 内容不变 = 不触发重注册。迁移在代码里,任何宿主(NAS/边缘 ECS)自适用。"""
+    旧布局(/data/workers/<name> 是平铺 id 文件)在此幂等迁移:读出 id,原地换成目录,
+    写回 worker.id。id 内容不变,不触发重注册。迁移在代码里,任何宿主(NAS/边缘 ECS)自适用。"""
     explicit = os.environ.get("WORKER_ID_FILE", "").strip()
     if explicit:
         return explicit
@@ -349,7 +349,7 @@ def default_worker_id_file() -> str:
 def create_transport(
     redis: RedisClient | None, db: Database | None,
 ) -> WorkerTransport:
-    """按 env 切换:GATEWAY_URL 有值→GatewayTransport(出站 HTTPS),否则 RedisTransport(直连)。
+    """按 env 切换:GATEWAY_URL 有值时使用 GatewayTransport(出站 HTTPS),否则 RedisTransport(直连)。
 
     GATEWAY_URL 模式下 redis/db 可为 None(纯网关零隧道):此时内层为 None,
     认领/产物/生命周期全走 gateway,worker 不连 redis/minio。
