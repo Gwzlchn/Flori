@@ -39,7 +39,7 @@ class SourceItem(BaseModel):
     title: str
     domain: str
     content_type: str
-    evidence: dict | None = None
+    evidence: dict
 
 
 class AskResponse(BaseModel):
@@ -70,7 +70,7 @@ async def ask(
     sources = [
         SourceItem(
             job_id=p["job_id"], title=p["title"], domain=p["domain"],
-            content_type=p["content_type"], evidence=p.get("evidence"),
+            content_type=p["content_type"], evidence=p["evidence"],
         )
         for p in passages
     ]

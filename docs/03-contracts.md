@@ -1359,7 +1359,7 @@ Response `200`（`note_type` 区分命中的是哪类笔记，如 `smart`/`mecha
 
 自然语言提问 → 跨语料检索相关笔记 → LLM 综合出**带引用**的答案，内联标注 `[来源N]`、并附「共识 / 分歧」段。需 `verify_token`。
 
-**检索缓解**：服务端先把问句**拆词**（去停用词/标点，CJK 连续串做 2–4 字滑窗，ascii 词保留）并叠加**术语表里出现在问句中的术语**，得到一组（≤6）派生查询。检索优先查 `note_chunks_fts5` 证据块（由 `index_job_notes` 从笔记正文切分生成），按 chunk 去重并返回 `sources[].evidence`；旧库或未 chunk 化内容无命中时,补查旧 `notes_fts5` 文档级索引,保证历史笔记仍可问。综合走 `claude-cli` 订阅。
+**检索缓解**：服务端先把问句**拆词**（去停用词/标点，CJK 连续串做 2–4 字滑窗，ascii 词保留）并叠加**术语表里出现在问句中的术语**，得到一组（≤6）派生查询。检索只查 `note_chunks_fts5` 证据块（由 `index_job_notes` 从笔记正文切分生成），按 chunk 去重并返回 `sources[].evidence`；无 chunk 命中即无来源。综合走 `claude-cli` 订阅。
 
 请求体：
 
@@ -1406,7 +1406,7 @@ Response `202`（`sources` 提交时已算好；`answer_markdown` 经 `GET /api/
   "retrieved_count": 1
 }
 ```
-- `sources[].evidence` 为可选；旧文档级回退命中时可为 `null`。第一阶段只保证 chunk 文本位置和 `snippet`；视频时间戳、论文页码、截图路径等字段预留,后续由多模态 evidence 回填。
+- `sources[].evidence` 必填。第一阶段只保证 chunk 文本位置和 `snippet`；视频时间戳、论文页码、截图路径等字段预留,后续由多模态 evidence 回填。
 - 命中为 0 → `task_id:null`、`answer_markdown` 为固定提示文案、`sources:[]`，**不投 task**（短路）。
 - 投递失败（redis 不可用）→ `task_id:null` + 降级文案 + 已检索 `sources`（不 5xx）。
 

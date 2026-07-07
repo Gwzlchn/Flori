@@ -530,7 +530,7 @@ export interface AskSource {
   title: string
   domain: string
   content_type: string
-  evidence?: {
+  evidence: {
     chunk_id?: string | null
     note_type?: string | null
     section?: string | null
@@ -542,7 +542,7 @@ export interface AskSource {
     page?: number | null
     frame_path?: string | null
     image_path?: string | null
-  } | null
+  }
 }
 
 export interface AskResponse {

@@ -29,7 +29,10 @@ function askResp(over: Record<string, any> = {}) {
         job_id: 'j_bp', title: '反向传播详解', domain: 'ml', content_type: 'video',
         evidence: { chunk_id: 'j_bp:smart:0', chunk_index: 0, section: null, snippet: '反向传播' },
       },
-      { job_id: 'j_grad', title: '梯度下降综述', domain: 'ml', content_type: 'paper' },
+      {
+        job_id: 'j_grad', title: '梯度下降综述', domain: 'ml', content_type: 'paper',
+        evidence: { chunk_id: 'j_grad:smart:0', chunk_index: 0, section: null, snippet: '梯度下降' },
+      },
     ],
     retrieved_count: 2,
     ...over,
@@ -116,7 +119,10 @@ describe('AskView 提问流程(异步)', () => {
 
   it('点击来源 chip 跳 /content/{job_id}（encode）', async () => {
     post.mockResolvedValue(askResp({
-      sources: [{ job_id: 'a b/c', title: 'T', domain: 'ml', content_type: 'video' }],
+      sources: [{
+        job_id: 'a b/c', title: 'T', domain: 'ml', content_type: 'video',
+        evidence: { chunk_id: 'a-b-c:smart:0', chunk_index: 0, section: null, snippet: 'T' },
+      }],
     }))
     const w = await mountView()
     get.mockResolvedValue(doneResult())

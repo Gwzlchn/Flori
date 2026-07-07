@@ -2,7 +2,7 @@
 
 覆盖:
 - derive_queries:关键词 + 术语表抽取(缓解整句字面短语无法命中 FTS)。
-- retrieve:优先 chunk 证据检索,旧库无 chunk 时回退 notes_fts5。
+- retrieve:只返回 chunk 证据检索命中。
 - POST /api/ask:注入假 gateway(返回固定 LLMResponse,绝不调真 LLM),验 sources + markdown。
 
 所有 FTS 经 db.index_job_notes 灌入(与 tests/test_api_search 同法)。
@@ -44,26 +44,6 @@ def _seed(db: Database) -> None:
     # 术语表:其 term 出现在问句中时应被 derive_queries 采为高信噪检索词。
     db.upsert_glossary_term("ml", "反向传播", "误差反传算法")
     db.upsert_glossary_term("ml", "梯度下降", "一阶优化算法")
-
-
-# note_bodies (DB 层)
-
-
-class TestNoteBodies:
-    def test_bulk_fetch_bodies(self, db):
-        _seed(db)
-        bodies = db.note_bodies(["j_bp", "j_grad", "missing"])
-        assert set(bodies) == {"j_bp", "j_grad"}
-        assert "链式法则" in bodies["j_bp"]
-        assert "学习率" in bodies["j_grad"]
-
-    def test_empty_input(self, db):
-        assert db.note_bodies([]) == {}
-
-    def test_dedup_and_blank_ids(self, db):
-        _seed(db)
-        bodies = db.note_bodies(["j_bp", "j_bp", ""])
-        assert list(bodies) == ["j_bp"]
 
 
 # derive_queries
@@ -133,14 +113,12 @@ class TestRetrieve:
         _seed(db)
         assert synthesis.retrieve(db, "量子计算机超导体", domain="ml", k=8) == []
 
-    def test_legacy_notes_fallback_when_chunks_absent(self, db):
+    def test_no_chunks_returns_empty(self, db):
         _seed(db)
         db._conn.execute("DELETE FROM note_chunks")
         db._conn.execute("DELETE FROM note_chunks_fts5")
         db._conn.commit()
-        passages = synthesis.retrieve(db, "反向传播", domain="ml", k=8)
-        assert "j_bp" in {p["job_id"] for p in passages}
-        assert all(p["evidence"] is None for p in passages)
+        assert synthesis.retrieve(db, "反向传播", domain="ml", k=8) == []
 
     def test_body_truncated(self, db):
         # trigram 至少 3 字才命中,故查询词与正文锚点都用 3 字 "反向传"。
@@ -156,8 +134,14 @@ class TestRetrieve:
 class TestBuildPrompt:
     def test_prompt_has_citations_and_consensus_instruction(self):
         passages = [
-            {"job_id": "a", "title": "A", "domain": "ml", "content_type": "video", "body": "正文A"},
-            {"job_id": "b", "title": "B", "domain": "ml", "content_type": "paper", "body": "正文B"},
+            {
+                "job_id": "a", "title": "A", "domain": "ml", "content_type": "video",
+                "body": "正文A", "evidence": {"chunk_id": "a:smart:0", "section": ""},
+            },
+            {
+                "job_id": "b", "title": "B", "domain": "ml", "content_type": "paper",
+                "body": "正文B", "evidence": {"chunk_id": "b:smart:0", "section": ""},
+            },
         ]
         system, user = synthesis.build_prompt("问题X", passages)
         assert "[来源N]" in system and "共识 / 分歧" in system
@@ -236,7 +220,7 @@ class TestAskEndpoint:
         assert "j_bp" in {s["job_id"] for s in data["sources"]}
         for s in data["sources"]:
             assert {"job_id", "title", "domain", "content_type", "evidence"} <= set(s)
-        assert any(s["evidence"] and s["evidence"]["chunk_id"] for s in data["sources"])
+            assert s["evidence"]["chunk_id"]
         # 真投了一个 synthesis AI task 进 queue:ai(claude 在 worker 跑,API 没调)。
         queued = await ask_app.state.redis.list_queue("ai")
         assert len(queued) == 1

@@ -109,7 +109,6 @@ function openSource(jobId: string) {
 
 function evidenceLabel(s: AskResponse['sources'][number]) {
   const ev = s.evidence
-  if (!ev) return ''
   if (ev.section) return ev.section
   if (ev.timestamp_sec !== null && ev.timestamp_sec !== undefined) return `${Math.round(ev.timestamp_sec)}s`
   if (ev.page !== null && ev.page !== undefined) return `p.${ev.page}`
@@ -208,7 +207,7 @@ function evidenceLabel(s: AskResponse['sources'][number]) {
           <div class="source-chips">
             <button
               v-for="(s, i) in submitted.sources"
-              :key="`${s.job_id}-${s.evidence?.chunk_id || i}`"
+              :key="`${s.job_id}-${s.evidence.chunk_id || i}`"
               class="source-chip"
               :title="s.title"
               @click="openSource(s.job_id)"
