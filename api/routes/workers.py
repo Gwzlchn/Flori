@@ -283,7 +283,7 @@ async def set_worker_config(
     redis: RedisClient = Depends(get_redis),
 ):
     """中心下发 worker 运营参数(当前仅并发),worker 下一心跳(≤10s)热应用,不重启容器。
-    能力(pools/tags)刻意不收:那是机器客观属性——池由启动参数表达、net-zone 由探针判定,
+    能力(pools/tags)刻意不收:那是机器客观属性,池由启动参数表达、net-zone 由探针判定,
     人在页面改一台够不着 B 站机器的池并不能让它下载成功,语义即错(用户 review 定论)。
     cfg_rev 单调递增,worker 按 rev 幂等应用。"""
     cfg: dict = {}
@@ -314,7 +314,7 @@ async def update_worker(
     w = await asyncio.to_thread(db.get_worker, worker_id)
     if not w:
         raise HTTPException(404, "worker not found")
-    # status 入参解释为暂停/恢复指令 → 写独立的 admin_status 叠加位(不碰运行时 status)。
+    # status 入参解释为暂停/恢复指令,写独立的 admin_status 叠加位(不碰运行时 status)。
     # 这样 busy worker 暂停后跑完当前步不会被 idle 覆盖,gateway 心跳自报 idle 也不覆盖。
     admin_status: str | None = None
     if req.status is not None:

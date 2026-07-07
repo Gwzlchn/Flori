@@ -98,7 +98,7 @@ async def get_queue(
             "queued": queued,
         })
 
-    # 运行中但 pool 不在所选池范围(异常/历史 pool 名)的 task → 单列兜底组,避免静默丢失。
+    # 运行中但 pool 不在所选池范围的 task 单列兜底组,避免异常或历史 pool 名静默丢失.
     orphan = [_running_view(s) for s in running_steps if s.pool not in pool_names]
     if orphan:
         pools_out.append({

@@ -207,7 +207,7 @@ async def heartbeat(
         current_job=req.current_job,
         current_step=req.current_step,
     )
-    # worker 回报已生效配置版本 → redis hash(前端显示"待同步/已生效")。
+    # worker 回报已生效配置版本,写入 redis hash 供前端显示同步状态.
     if req.applied_cfg_rev:
         await redis.set_worker_field(worker_id, "cfg_applied_rev", str(req.applied_cfg_rev))
     # 心跳回发中心期望配置(热下发通道):worker 比对 cfg_rev 决定是否应用。
@@ -246,7 +246,7 @@ def _clamp_pool_limits(
     config: AppConfig, allowed: list[str], client_limits: dict,
 ) -> dict[str, int]:
     """以服务端 pools.yaml 为权威夹取每池并发上限:绝不信任 worker 自报的 pool_limits
-    ——否则错误/恶意 worker 报一个超大 limit 即可突破全局每池并发(如 ai=2 被打成 ai=999)。
+    否则错误或恶意 worker 可用超大 limit 突破全局每池并发.
     client 值只允许调低不允许调高;缺省/非法则取服务端值。"""
     server_pools = (config.pools or {}).get("pools", {}) or {}
     effective: dict[str, int] = {}
@@ -282,7 +282,7 @@ async def request_job(
     # 故视为无效不认领,使配置缺失/漂移 fail-safe。
     _server_pools = (config.pools or {}).get("pools", {}) or {}
     allowed = [p for p in allowed if p in _server_pools]
-    # 越权/无效池被裁空 → 无可认领,返回 null(非错误:worker 请求范围外的池自然认不到)。
+    # 越权或无效池被裁空时无可认领,返回 null;worker 请求范围外的池自然认不到.
     if not allowed:
         return {"claim": None}
 
@@ -395,7 +395,7 @@ async def get_dispatch_credential(
 ):
     """下载凭证领取(docs/03 §1.7.1):白名单 key,redis 镜像 miss 落 DB 解析并回灌。
     value=null 表示中心未配置该凭证(worker 匿名降级,不视为错误)。
-    每次领取记审计事件 credential_issued(谁/哪个凭证/有无值)——文件共享时代无此审计。"""
+    每次领取记审计事件 credential_issued,补上文件共享时代缺失的凭证审计。"""
     from shared.credentials import DISPATCH_KEYS, resolve_from_db
 
     if key not in DISPATCH_KEYS:
@@ -433,7 +433,7 @@ async def record_usage(
         num_turns=req.num_turns,
         cached=req.cached,
     )
-    # 用 LiteLLM 价表填权威成本(claude-cli 订阅用 CLI total_cost_usd,不覆盖);空表/未命中→保留上报值。
+    # 用 LiteLLM 价表填权威成本. claude-cli 订阅用 CLI total_cost_usd,空表或未命中则保留上报值.
     if req.provider != "claude-cli":
         pricing = getattr(request.app.state, "pricing", None)
         if pricing is not None:
@@ -483,8 +483,8 @@ async def get_artifact(
     data = await storage.read_file(job_id, rel)
     if data is None:
         raise HTTPException(404, "artifact not found")
-    # 出库流量(NAS→worker,worker 从 ECS 拉取):按 worker 归因计字节。best-effort,
-    # incr_traffic 内已吞异常 → 绝不因计数影响产物下发。
+    # 出库流量(NAS 到 worker,worker 从 ECS 拉取):按 worker 归因计字节. best-effort,
+    # incr_traffic 内已吞异常,绝不因计数影响产物下发.
     await redis.incr_traffic("pull", worker_id, len(data))
     return Response(content=data, media_type="application/octet-stream")
 
@@ -507,6 +507,6 @@ async def put_artifact(
         raise HTTPException(403, "writing credential files is not allowed")
     data = await request.body()
     await storage.write_file(job_id, rel, data)
-    # 入库流量(worker→NAS,即 ECS→NAS):写盘后按收到的 body 字节计。best-effort。
+    # 入库流量(worker 到 NAS,即 ECS 到 NAS):写盘后按收到的 body 字节计. best-effort.
     await redis.incr_traffic("push", worker_id, len(data))
     return {"ok": True}

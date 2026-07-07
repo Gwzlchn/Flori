@@ -25,7 +25,7 @@ router = APIRouter(prefix="/api/prompts", tags=["prompts"], dependencies=[Depend
 
 
 def _ai_steps(config: AppConfig) -> list[tuple[str, str, str | None, str | None]]:
-    """枚举各 pipeline 的 AI 步(pool=='ai')→ [(pipeline, step_key, label, pool)]。
+    """枚举各 pipeline 的 AI 步(pool=='ai'),返回 (pipeline, step_key, label, pool)。
     模板/'.'前缀/default 不算 pipeline(与 GET /api/pipelines 同口径)。"""
     out: list[tuple[str, str, str | None, str | None]] = []
     for name, pc in (config.pipelines or {}).items():
@@ -249,8 +249,8 @@ async def activate_prompt(
     db: Database = Depends(get_db),
 ):
     """切换该步 (scope,domain) 的激活指针(非破坏,历史版本始终保留)。
-    - version=数字 → 把该历史版本设为当前激活(派发用它);该版本不存在 → 404。
-    - version=null → 停用覆盖回内置默认(deactivate;主表指针清掉,历史全留,下拉仍能再激活)。
+    - version=数字:把该历史版本设为当前激活(派发用它);该版本不存在则 404。
+    - version=null:停用覆盖回内置默认(deactivate;主表指针清掉,历史全留,下拉仍能再激活)。
     返回新 active_version(null=已回内置默认)。"""
     validate_path_segment(pipeline, "pipeline")
     validate_path_segment(step, "step")

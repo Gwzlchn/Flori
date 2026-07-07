@@ -1,7 +1,7 @@
 """WebSocket 进度推送。事件契约见 docs/03-contracts.md §2。
 
 设计要点(与 shared/redis_client.py:subscribe 同款经验):
-- 纯推送 WS(服务端 → 客户端)不会在 listen/send 之外感知到客户端断开。
+- 纯推送 WS 不会在 listen/send 之外感知到客户端断开。
   ws_job 空闲时不发任何数据,因此必须用一个并发的 receive() 任务来探测
   断开,否则连接半开后会一直挂着轮询任务直到下次消息到达。
 - 绝不用 ``pubsub.listen()`` 异步生成器:redis 关闭空闲 pubsub 连接后它会抛
@@ -84,7 +84,7 @@ async def ws_job(websocket: WebSocket, job_id: str):
     backoff = 1
     try:
         while True:
-            # 客户端已断开 → 干净退出。
+            # 客户端已断开,干净退出.
             if disconnect_task.done():
                 break
 

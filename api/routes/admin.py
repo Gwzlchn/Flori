@@ -31,7 +31,7 @@ router = APIRouter(prefix="/api", tags=["admin"])
 @router.get("/health")
 async def health(request: Request, db: Database = Depends(get_db), redis: RedisClient = Depends(get_redis)):
     # 刻意免鉴权(同 /metrics):供存活探针/编排健康检查;仅暴露 up/disk/worker 计数,无敏感信息。
-    # 与 WS/REST 的 verify_token 是有意区分——若需收紧,在反代/网络层限制本路由可达性。
+    # 与 WS/REST 的 verify_token 有意区分. 若需收紧,在反代/网络层限制本路由可达性.
     checks = {}
     try:
         await redis.ping()
@@ -235,8 +235,8 @@ async def _probe_scheduler(redis, online_window: int, stale_window: int) -> dict
 
 
 async def _probe_redis(redis) -> dict:
-    """Redis 组件:ping 计时 + INFO。超时(2s)→ down;其他异常 → unknown(采集失败 ≠ 红);
-    ping_ms>200 或内存临界 → degraded。"""
+    """Redis 组件:ping 计时 + INFO. 超时(2s)为 down;其他异常为 unknown.
+    ping_ms>200 或内存临界时为 degraded。"""
     comp = {
         "name": "redis", "kind": "redis", "status": "unknown", "version": None,
         "last_heartbeat": None, "uptime_sec": None, "detail": None, "extra": {},
@@ -277,7 +277,7 @@ async def _probe_redis(redis) -> dict:
 
 
 async def _probe_minio(storage) -> dict:
-    """MinIO 组件:RemoteStorage 才探活,本地盘 mode=local 保持 unknown 不标红。超时(3s)/异常 → down。"""
+    """MinIO 组件:RemoteStorage 才探活,本地盘 mode=local 保持 unknown 不标红. 超时或异常为 down。"""
     comp = {
         "name": "minio", "kind": "minio", "status": "unknown", "version": None,
         "last_heartbeat": None, "uptime_sec": None, "detail": None, "extra": {},
@@ -310,7 +310,7 @@ async def _probe_minio(storage) -> dict:
 
 async def build_full_status(app) -> dict:
     """全量(给 HTTP /api/status):live 子集 + version + 有序 components[api,scheduler,redis,minio]
-    + throughput_1h。逐组件独立 try+超时:单项异常→该组件 unknown/down + detail,绝不让整体 500。"""
+    + throughput_1h。逐组件独立 try+超时:单项异常只影响该组件,绝不让整体 500。"""
     db = app.state.db
     redis = app.state.redis
     config = app.state.config
@@ -336,7 +336,7 @@ async def build_full_status(app) -> dict:
         _safe(_probe_minio(storage), "minio", "minio"),
     )
 
-    # MinIO 容量(对象数/总字节):读后台缓存,绝不在此同步扫(贵)。有缓存才填,无则不填(前端显 —)。
+    # MinIO 容量(对象数/总字节):读后台缓存,绝不在此同步扫. 有缓存才填,无则不填.
     cap = getattr(getattr(app.state, "minio_cap", None), "value", None)
     if cap:
         for c in components:
@@ -354,7 +354,7 @@ async def build_full_status(app) -> dict:
     except Exception:
         logger.warning("throughput_failed")
 
-    # 网关中转流量累计(产物代理:pull=NAS→worker 出库,push=worker→NAS 入库)。读 redis hash 总量,
+    # 网关中转流量累计(产物代理:pull 为 NAS 到 worker,push 为 worker 到 NAS). 读 redis hash 总量,
     # get_traffic 内已吞异常;再包一层防 redis 连接级抛出影响整体(降级为 0)。
     traffic = {"pull_bytes": 0, "push_bytes": 0}
     try:
@@ -364,9 +364,9 @@ async def build_full_status(app) -> dict:
     except Exception:
         logger.warning("traffic_failed")
 
-    # 链路流量快照:ECS↔NAS 隧道 rx/tx + 每隧道 + up + 网关聚合 + 当前速率,由 tunnel_stats 上报器周期写。
+    # 链路流量快照:ECS 与 NAS 隧道 rx/tx + 每隧道 + up + 网关聚合 + 当前速率,由 tunnel_stats 上报器周期写。
     # 只放当前快照(轻);按节点时间趋势走单独端点 /api/link-traffic/history(富时间线,前端点节点时才用)。
-    # 无上报器/无边缘 → None,前端「通联」区不渲染。
+    # 无上报器或无边缘时返回 None,前端「通联」区不渲染。
     link_traffic = None
     try:
         lt = await redis.get_link_traffic()
@@ -413,15 +413,15 @@ def _to_int(value, default):
 @router.get("/status", dependencies=[Depends(verify_token)])
 async def system_status(request: Request):
     """全量系统状态(version + 组件健康 + workers/pools/jobs/disk + throughput_1h)。
-    components.detail 不暴露密钥/连接串;逐组件探测失败→该组件 unknown/down,整体不 500。"""
+    components.detail 不暴露密钥/连接串;逐组件探测失败只影响该组件,整体不 500。"""
     return await build_full_status(request.app)
 
 
 @router.get("/link-traffic/history", dependencies=[Depends(verify_token)])
 async def link_traffic_history(request: Request, limit: int = 120):
     """通联富时间线(tunnel_stats 上报器周期采的累计字节样本,最近在前):
-    每样本含 总量 gw/tun + 每隧道 t{} + 每远程 worker w{}。前端「通联」树点节点 → 切该节点序列算趋势。
-    读失败/无上报器 → 空。limit 截断(默认 120 ≈ 40min @20s)。"""
+    每样本含 总量 gw/tun + 每隧道 t{} + 每远程 worker w{}. 前端「通联」树点节点后切该节点序列算趋势.
+    读失败或无上报器时返回空. limit 截断,默认 120 约 40min @20s。"""
     redis = request.app.state.redis
     try:
         samples = await redis.get_traffic_timeline(max(1, min(limit, 360)))
@@ -444,7 +444,7 @@ async def pricing_status(request: Request):
 
 @router.post("/pricing/refresh", dependencies=[Depends(verify_token)])
 async def pricing_refresh(request: Request, storage=Depends(get_storage)):
-    """手动拉一次 LiteLLM 最新价表 → 更新内存 + 存回 MinIO。成功回新 status;拉取失败 502(不 crash)。"""
+    """手动拉一次 LiteLLM 最新价表并存回 MinIO. 成功回新 status;拉取失败 502。"""
     pricing = request.app.state.pricing
     ok = await pricing.refresh(storage)
     if not ok:
@@ -461,7 +461,7 @@ async def pricing_raw(request: Request):
 @router.get("/events", dependencies=[Depends(verify_token)])
 async def list_events(limit: int = 50, redis: RedisClient = Depends(get_redis)):
     """系统事件流(scheduler emit 的环形列表 events:system,最近在上,保留最近 200)。
-    scheduler 在 孤儿回收/卡步/无worker/worker清理/任务失败 处 push_event;无事件→空数组;读失败→空。"""
+    scheduler 在孤儿回收、卡步、无 worker、worker 清理、任务失败处 push_event;无事件或读失败返回空数组。"""
     import json as _json
     limit = max(1, min(limit, 200))
     try:
@@ -507,7 +507,7 @@ async def update_pools_config(
     redis: RedisClient = Depends(get_redis),
 ):
     import yaml
-    # 结构校验:必须含 pools 映射,每池含整数 limit——挡畸形 PUT 损坏 pools.yaml + 在跑调度器池配置。
+    # 结构校验:必须含 pools 映射,每池含整数 limit,防畸形 PUT 损坏 pools.yaml 与在跑调度器池配置.
     if not isinstance(new_config, dict) or not isinstance(new_config.get("pools"), dict):
         raise HTTPException(400, "config must contain a 'pools' mapping")
     for name, pc in new_config["pools"].items():

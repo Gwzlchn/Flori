@@ -1,7 +1,7 @@
 """平台认证路由:YouTube cookies 上传(入库)+ 平台凭证状态(B站扫码见 api/routes/bili.py)。
 
 凭证只存 DB credentials 表并镜像 redis 分发(shared/credentials),worker 认领下载步时
-经 transport 领取——cookie 文件共享已废除(加 worker 零预置,过期只刷中心一次)。
+经 transport 领取;cookie 文件共享已废除,新增 worker 不再预置 cookie。
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ async def auth_status(db: Database = Depends(get_db)):
     }
 
 
-# 平台 → 凭证存储 key 白名单。前端 CookieUpload 用动态 platform 拼 /api/auth/{platform}/cookies,
+# 平台到凭证存储 key 白名单。前端 CookieUpload 用动态 platform 拼 /api/auth/{platform}/cookies,
 # 白名单挡任意 key 写入。目前仅 youtube(B站走扫码登录 /api/bili,非 cookie 上传)。
 _COOKIE_PLATFORMS = {"youtube": "youtube_cookies"}
 
@@ -43,7 +43,7 @@ async def upload_platform_cookies(
     db: Database = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
 ):
-    """上传指定平台的 cookie(Netscape 格式)→ 入库 + 镜像 redis 分发。platform 走白名单。"""
+    """上传指定平台的 cookie(Netscape 格式),入库并镜像到 redis。platform 走白名单。"""
     cred_key = _COOKIE_PLATFORMS.get(platform)
     if cred_key is None:
         raise HTTPException(400, f"unsupported platform: {platform}")

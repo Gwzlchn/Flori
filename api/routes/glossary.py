@@ -110,7 +110,7 @@ async def merge_term(
     db: Database = Depends(get_db),
 ):
     """把 {term}(src)并入 body.target(dst)实体:occurrence 并集、变体入 aliases、
-    定义取更长者,src 行删除(可逆信息留在 dst.aliases)。src==dst 或任一不存在 → 400/404。"""
+    定义取更长者,src 行删除。src==dst 或任一不存在时返回 400/404。"""
     validate_path_segment(domain, "domain")
     target = (req.target or "").strip()
     if not target:
@@ -168,8 +168,8 @@ async def accept_term(
 
 @router.post("/{domain}/{term}/reject", response_model=GlossaryTermResponse)
 async def reject_term(domain: str, term: str, db: Database = Depends(get_db)):
-    """驳回概念(P3):status -> 'rejected'。行保留,采集链 resolve 命中即跳过——同名/变体
-    不再被重复建议;列表/图谱/雷达/term_map 默认排除。term 不存在 -> 404。"""
+    """驳回概念:将 status 设为 rejected。行保留,采集链 resolve 命中即跳过。
+    同名/变体不再被重复建议;列表/图谱/雷达/term_map 默认排除。term 不存在则 404。"""
     validate_path_segment(domain, "domain")
     ok = await asyncio.to_thread(db.reject_glossary_term, domain, term)
     if not ok:

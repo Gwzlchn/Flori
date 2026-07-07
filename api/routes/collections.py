@@ -57,13 +57,13 @@ def _to_response(
 async def sync_collection(
     coll: Collection, db: Database, redis: RedisClient, storage: StorageBackend,
 ) -> dict:
-    """枚举订阅集合的来源 → 跟已入库去重 → 新内容自动建 job(归入本集合)。
+    """枚举订阅集合的来源,跟已入库内容去重,并为新内容自动建 job。
     经 enumerate_source 按 source_type 分派到注册的 source-adapter(B站 UP/收藏夹/
     YouTube/RSS/本地目录…),与具体来源解耦。返回 {total, new, skipped}。仅订阅集合可调。"""
     if not coll.is_subscription:
         raise ValueError("not a subscription collection")
-    # 同步状态机:开始置 syncing(并发读可见"同步中")→ 成功由 mark_collection_synced 置 ok
-    # → 异常置 error+存摘要后向上抛(故障隔离不掩盖错误)。
+    # 同步状态机:开始置 syncing;成功由 mark_collection_synced 置 ok;
+    # 异常置 error+存摘要后向上抛,故障隔离不掩盖错误.
     await asyncio.to_thread(db.set_sync_status, coll.id, "syncing")
     try:
         return await _sync_collection_body(coll, db, redis, storage)
@@ -120,7 +120,7 @@ async def _sync_collection_body(
         created += 1
         await asyncio.sleep(0.2)  # 轻微间隔,别瞬时灌爆队列/触发风控
     if is_book and created:
-        # 兜底起链:无章在跑(首次 sync / 全部终态后新增章)→ 投最早待投章;有章在跑返回 None 不动。
+        # 兜底起链:无章在跑时投最早待投章;有章在跑返回 None 不动.
         from shared.book_chain import next_chapter_job
         nxt = await next_chapter_job(db, redis, coll.id)
         if nxt:
@@ -293,7 +293,7 @@ async def delete_collection(
 async def list_collection_jobs(
     collection_id: str,
     limit: int = Query(20, ge=1, le=200),
-    offset: int = Query(0, ge=0, le=2_147_483_647),  # int32 max,远低于 SQLite int64 溢出点;挡住超大 offset → 500
+    offset: int = Query(0, ge=0, le=2_147_483_647),  # int32 max,远低于 SQLite int64 溢出点;挡住超大 offset.
     db: Database = Depends(get_db),
 ):
     """集合名下的 job 列表(分页,复用 db.list_jobs 的 collection_id 过滤)。"""
