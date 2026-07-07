@@ -755,11 +755,11 @@ async def rebuild_stale(
 
 
 def _provider_available(name: str, cfg: dict) -> bool:
-    """provider 是否可用:CLI 类型(claude 订阅)始终可用;其余看运行时环境是否有 {NAME}_API_KEY。
+    """provider 是否可用:CLI 订阅类型由 worker 侧凭证门控;其余看运行时环境是否有 {NAME}_API_KEY.
     只认环境变量,不信 config 里的 api_key(可能是未解析的 ${VAR} 占位串)。"""
     import os
     pc = (cfg.get("providers") or {}).get(name, {})
-    if pc.get("type") == "cli":
+    if pc.get("type") in {"cli", "codex_cli"}:
         return True
     return bool(os.environ.get(f"{name.upper()}_API_KEY"))
 

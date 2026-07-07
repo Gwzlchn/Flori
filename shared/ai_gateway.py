@@ -10,6 +10,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import structlog
 
@@ -456,6 +457,188 @@ class ClaudeCLIProvider:
         )
 
 
+class CodexCLIProvider:
+    """Codex CLI 订阅(subprocess 调用,`codex exec --json`)."""
+
+    def __init__(self, command_template: list[str], env: dict | None = None,
+                 model: str | None = None):
+        self._command_template = command_template
+        self._env = env or {}
+        self._model = model
+
+    @staticmethod
+    def _has_flag(cmd: list[str], *names: str) -> bool:
+        return any(part in names for part in cmd)
+
+    @staticmethod
+    def _classify_error(detail: str) -> Exception:
+        low = detail.lower()
+        if any(k in low for k in (
+            "rate limit", "rate_limit", "usage limit", "429",
+            "overloaded", "quota", "too many requests", "limit reached",
+        )):
+            return AIRateLimitError(f"Codex CLI rate-limited: {detail[:500]}")
+        return AIProviderError(f"Codex CLI failed: {detail[:500]}")
+
+    @staticmethod
+    def _parse_events(raw: str) -> tuple[dict | None, dict | None, int, list[dict], str | None]:
+        thread: dict | None = None
+        usage: dict | None = None
+        turns = 0
+        errors: list[dict] = []
+        last_message: str | None = None
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(ev, dict):
+                continue
+            etype = ev.get("type")
+            if etype == "thread.started":
+                thread = ev
+            elif etype == "turn.completed":
+                turns += 1
+                if isinstance(ev.get("usage"), dict):
+                    usage = ev["usage"]
+            elif etype in ("turn.failed", "error"):
+                errors.append({
+                    "type": etype,
+                    "message": str(ev.get("message") or ev.get("error") or "")[:500],
+                })
+            item = ev.get("item")
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                text = item.get("text")
+                if isinstance(text, str):
+                    last_message = text
+        return thread, usage, turns, errors, last_message
+
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        if request.allowed_tools:
+            raise AIProviderError(
+                "Codex CLI MVP only supports text/image requests; "
+                "Claude-style allowed_tools are not mapped"
+            )
+
+        prompt_content = ""
+        if request.system:
+            prompt_content += f"[System]\n{request.system}\n\n"
+        for msg in request.messages:
+            prompt_content += f"[{msg['role'].title()}]\n{msg['content']}\n\n"
+
+        run_root = Path(os.environ.get("FLORI_CODEX_TRACE_DIR", "/tmp/flori-work/codex-runs"))
+        run_dir = run_root / f"{int(time.time() * 1000)}-{os.getpid()}-{uuid4().hex[:8]}"
+        work_dir = run_dir / "work"
+        try:
+            work_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise AIProviderError(f"Codex trace dir create failed: {e}") from e
+        events_path = run_dir / "events.jsonl"
+        final_path = run_dir / "final.txt"
+
+        cmd = list(self._command_template)
+        if not cmd:
+            cmd = ["codex", "exec"]
+        if not self._has_flag(cmd, "-a", "--ask-for-approval"):
+            cmd += ["-a", "never"]
+        if not self._has_flag(cmd, "--ignore-user-config"):
+            cmd += ["--ignore-user-config"]
+        if not self._has_flag(cmd, "--ignore-rules"):
+            cmd += ["--ignore-rules"]
+        if not self._has_flag(cmd, "--skip-git-repo-check"):
+            cmd += ["--skip-git-repo-check"]
+        if not self._has_flag(cmd, "--sandbox", "-s"):
+            cmd += ["--sandbox", "read-only"]
+        if not self._has_flag(cmd, "--ephemeral"):
+            cmd += ["--ephemeral"]
+        if not self._has_flag(cmd, "--json"):
+            cmd += ["--json"]
+        if not self._has_flag(cmd, "-o", "--output-last-message"):
+            cmd += ["-o", str(final_path)]
+        if not self._has_flag(cmd, "--cd", "-C"):
+            cmd += ["--cd", str(work_dir)]
+        model_arg = (request.model if (request.model and request.model != "subscription")
+                     else self._model)
+        if model_arg and model_arg != "subscription" and not self._has_flag(cmd, "--model", "-m"):
+            cmd += ["--model", model_arg]
+        for img in request.images or []:
+            cmd += ["--image", str(Path(img).resolve())]
+        cmd += ["-"]
+
+        env = {**os.environ, **self._env}
+        timeout = min(600 + 25 * len(request.images or []), 1800)
+        start = time.time()
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(prompt_content.encode()), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
+            raise AIProviderError(f"Codex CLI timeout after {timeout}s")
+        duration = time.time() - start
+
+        raw = stdout.decode(errors="replace")
+        try:
+            events_path.write_text(raw, encoding="utf-8")
+        except OSError:
+            pass
+        thread, usage, turns, errors, last_message = self._parse_events(raw)
+        if proc.returncode != 0:
+            detail = (stderr.decode(errors="replace") + raw)[-1000:]
+            err = self._classify_error(detail)
+            err.transcript_path = str(events_path)  # type: ignore[attr-defined]
+            raise err
+
+        try:
+            content = final_path.read_text(encoding="utf-8")
+        except OSError:
+            content = last_message or ""
+        if not content and last_message:
+            content = last_message
+        usage = usage or {}
+        in_tok = int(usage.get("input_tokens", 0) or 0)
+        out_tok = int(usage.get("output_tokens", 0) or 0)
+        cr = int(usage.get("cached_input_tokens", 0) or 0)
+        thread_id = thread.get("thread_id") if isinstance(thread, dict) else None
+        model = model_arg or "subscription"
+        return LLMResponse(
+            content=content,
+            model=model,
+            provider="codex-cli",
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=cr,
+            cost_usd=0.0,
+            duration_sec=round(duration, 2),
+            num_turns=turns,
+            cached=cr > 0,
+            session_id=thread_id,
+            raw={
+                "source": "codex-jsonl",
+                "thread_id": thread_id,
+                "usage": usage,
+                "events_path": str(events_path),
+                "errors": errors,
+            },
+            transcript_path=str(events_path),
+        )
+
+
 # Gateway
 
 
@@ -567,6 +750,12 @@ class AIGateway:
             )
         elif ptype == "cli":
             return ClaudeCLIProvider(
+                command_template=cfg.get("command", []),
+                env=cfg.get("env"),
+                model=cfg.get("model"),
+            )
+        elif ptype == "codex_cli":
+            return CodexCLIProvider(
                 command_template=cfg.get("command", []),
                 env=cfg.get("env"),
                 model=cfg.get("model"),

@@ -42,6 +42,16 @@ providers:
     features: [vision]
     cost_usd: 0
 
+  codex-cli:
+    type: codex_cli
+    # prompt 经 stdin 喂入;provider 动态追加 --json/-o/--sandbox read-only/--image.
+    # 首版只承诺纯文本/图片,不映射 Claude 的 Read/WebSearch/Bash allowed_tools 语义.
+    command: ["codex", "exec"]
+    # subscription = 使用 Codex CLI 当前登录账号和 CLI 默认模型,不传 --model.
+    model: subscription
+    features: [vision]
+    cost_usd: 0
+
   kimi:
     type: openai_compatible
     base_url: https://api.moonshot.cn/v1

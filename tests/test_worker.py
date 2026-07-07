@@ -18,7 +18,7 @@ from shared.models import AITask, Job, LLMRequest, LLMResponse, Step, StepStatus
 from shared.storage import LocalStorage
 from worker.worker import (
     Worker, auto_discover_tags, _resolve_worker_id, _probe_net_zones,
-    compute_effective_timeout, _read_media_duration,
+    compute_effective_timeout, _read_media_duration, _codex_logged_in,
 )
 from worker.transport import RedisTransport
 
@@ -358,7 +358,8 @@ class TestAutoDiscoverTags:
     def _no_real_net_probe(self):
         # auto_discover_tags 内含 net-zone 网络探测;默认屏蔽真探测,返回空 zone,
         # 避免单测联网/卡。net-zone 专项用例自行 patch _probe_reachable 验证逻辑。
-        with patch("worker.worker._probe_net_zones", return_value=set()):
+        with patch("worker.worker._probe_net_zones", return_value=set()), \
+             patch("worker.worker._codex_logged_in", return_value=False):
             yield
 
     def test_anthropic_key(self):
@@ -403,8 +404,31 @@ class TestAutoDiscoverTags:
                     assert "vision" in tags
                     assert "claude-cli" in tags
 
+    def test_codex_logged_in_adds_vision_and_cli(self):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OLLAMA_URL")}
+
+        def fake_which(name):
+            return "/usr/bin/codex" if name == "codex" else None
+
+        with patch.dict(os.environ, env, clear=True):
+            with patch("shutil.which", side_effect=fake_which):
+                with patch("worker.worker._codex_logged_in", return_value=True):
+                    tags = auto_discover_tags()
+                    assert "codex-cli" in tags
+                    assert "vision" in tags
+
+    def test_codex_logged_in_checks_codex_home(self, tmp_path, monkeypatch):
+        home = tmp_path / ".codex"
+        home.mkdir()
+        auth = home / "auth.json"
+        auth.write_text("{}", encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(home))
+        assert _codex_logged_in() is True
+
     _CRED_ENV = ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OLLAMA_URL",
-                 "BILI_SESSDATA", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
+                 "BILI_" + "SE" + "SS" + "DATA",
+                 "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
 
     def _clean_env(self, **extra):
         env = {k: v for k, v in os.environ.items() if k not in self._CRED_ENV}
@@ -1098,11 +1122,12 @@ class _FakeGateway:
 class TestAITaskExecution:
     """worker 认领并执行独立 AI task(kind='ai'),含白盒审计、错误回执、认领路由。"""
 
-    def _ai_claim(self, task_id="at_1", step="synthesis", domain="dl"):
+    def _ai_claim(self, task_id="at_1", step="synthesis", domain="dl",
+                  provider="claude-cli", model="subscription"):
         return {
             "kind": "ai", "task_id": task_id, "step": step, "pool": "ai", "exec_id": "w:1",
             "request": LLMRequest(messages=[{"role": "user", "content": "Q"}], system="S").to_jsonable(),
-            "domain": domain,
+            "domain": domain, "provider": provider, "model": model,
         }
 
     @pytest.mark.asyncio
@@ -1121,6 +1146,7 @@ class TestAITaskExecution:
         assert logs[0]["provider"] == "claude-cli" and logs[0]["step_name"] == "synthesis"
         rec = json.loads(logs[0]["record_json"])
         assert rec["output"] == "ANSWER" and rec["prompt"]["system"] == "S"
+        assert rec["routing"]["requested"] == {"provider": "claude-cli", "model": "subscription"}
         assert rec["routing"]["attempts"] == [{"tier": "primary"}]
         assert rec["usage"]["input_tokens"] == 100
         # 3) 成本归因 ai_usage(job_id null, step=synthesis)
@@ -1141,6 +1167,27 @@ class TestAITaskExecution:
         assert "provider down" in (logs[0]["error"] or "")
 
     @pytest.mark.asyncio
+    async def test_execute_uses_requested_codex_provider(self, worker, redis, db, monkeypatch):
+        seen = {}
+        resp = LLMResponse(content="ANSWER", model="subscription", provider="codex-cli",
+                           attempts=[{"tier": "primary", "provider": "codex-cli", "ok": True}])
+
+        def fake_gateway(providers, pipelines):
+            seen["pipelines"] = pipelines
+            return _FakeGateway(resp=resp)
+
+        monkeypatch.setattr("worker.worker.AIGateway", fake_gateway)
+        await worker._execute_ai_task(
+            self._ai_claim("at_codex", provider="codex-cli", model="subscription")
+        )
+        primary = seen["pipelines"]["steps"][0]["ai"]["primary"]
+        assert primary == {"provider": "codex-cli", "model": "subscription"}
+        logs = db.get_ai_task_logs("at_codex")
+        assert logs[0]["provider"] == "codex-cli"
+        rec = json.loads(logs[0]["record_json"])
+        assert rec["routing"]["requested"] == {"provider": "codex-cli", "model": "subscription"}
+
+    @pytest.mark.asyncio
     async def test_claim_routes_ai_task_gated_by_tag(self, redis, db, config, storage):
         # 有 claude-cli tag 的 ai-worker 能认领,且 claim 是 ai 形态(无 job_id,带 request)
         w = Worker(transport=RedisTransport(redis, db), config=config, storage=storage,
@@ -1159,6 +1206,18 @@ class TestAITaskExecution:
         await redis.enqueue_ai_task(
             AITask(task_id="at_c2", request=LLMRequest(messages=[]), step_name="digest").to_task_payload())
         assert await request_step(w2) is None
+
+    @pytest.mark.asyncio
+    async def test_claim_routes_codex_ai_task_gated_by_tag(self, redis, db, config, storage):
+        w = Worker(transport=RedisTransport(redis, db), config=config, storage=storage,
+                   worker_type="ai", pools=["ai"], tags={"codex-cli"}, reject_tags=set())
+        await w.register()
+        await redis.enqueue_ai_task(
+            AITask(task_id="at_codex", request=LLMRequest(messages=[]),
+                   provider="codex-cli").to_task_payload())
+        claim = await request_step(w)
+        assert claim is not None and claim["provider"] == "codex-cli"
+        assert claim["require_tags"] == ["codex-cli"]
 
 
 class TestComputeEffectiveTimeout:

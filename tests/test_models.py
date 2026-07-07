@@ -227,13 +227,26 @@ class TestAITask:
         payload = AITask(task_id="at_1", request=req, step_name="synthesis", domain="dl").to_task_payload()
         assert payload["kind"] == TaskKind.AI.value == "ai"
         assert payload["task_id"] == "at_1" and payload["step"] == "synthesis"
+        assert payload["provider"] == "claude-cli" and payload["model"] == "subscription"
         assert payload["require_tags"] == ["claude-cli"] and payload["pool"] == "ai"
         assert "job_id" not in payload  # AI task 不挂 job
         json.dumps(payload)  # 可入队
         back = AITask.from_task_payload(payload)
         assert back.task_id == "at_1" and back.step_name == "synthesis" and back.domain == "dl"
+        assert back.provider == "claude-cli" and back.model == "subscription"
         assert back.request.messages == req.messages and back.request.system == "S"
 
     def test_defaults(self):
         task = AITask(task_id="at_2", request=LLMRequest(messages=[]))
         assert task.require_tags == ["claude-cli"] and task.step_name == "ai" and task.domain is None
+
+    def test_codex_provider_sets_codex_tag(self):
+        task = AITask(
+            task_id="at_3", request=LLMRequest(messages=[]),
+            provider="codex-cli", model="subscription",
+        )
+        payload = task.to_task_payload()
+        assert payload["provider"] == "codex-cli"
+        assert payload["require_tags"] == ["codex-cli"]
+        back = AITask.from_task_payload(payload)
+        assert back.provider == "codex-cli" and back.require_tags == ["codex-cli"]

@@ -139,6 +139,17 @@ def _claude_logged_in() -> bool:
         return False
 
 
+def _codex_logged_in() -> bool:
+    """codex-cli 是否有可用凭证.file storage 凭证在 `$CODEX_HOME/auth.json` 或 `$HOME/.codex/auth.json`."""
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    codex_home = os.environ.get("CODEX_HOME") or str(Path(home) / ".codex")
+    cred = Path(codex_home) / "auth.json"
+    try:
+        return cred.is_file() and cred.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def _probe_reachable(url: str, timeout: float = 6.0, retries: int = 2) -> bool:
     """试连 URL(走本机网络,含自带代理)。拿到任何 HTTP 响应(含 4xx/5xx)= 可达;
     仅网络层失败(连不上/超时/DNS)= 不可达。用于自动判定 net-zone。"""
@@ -184,6 +195,10 @@ def auto_discover_tags() -> set[str]:
         tags.add("vision")
     if claude_ready:
         tags.add("claude-cli")
+    codex_ready = bool(shutil.which("codex")) and _codex_logged_in()
+    if codex_ready:
+        tags.add("codex-cli")
+        tags.add("vision")
     if os.environ.get("DEEPSEEK_API_KEY"):
         tags.add("text-only")
     from steps.utils.device import has_nvidia_gpu
@@ -756,18 +771,23 @@ class Worker:
         start = time.time()
         ts_start = datetime.now(timezone.utc)
         req = LLMRequest.from_jsonable(claim.get("request", {}))
+        provider_name = claim.get("provider") or "claude-cli"
+        model_name = claim.get("model") or "subscription"
         try:
             try:
                 gateway = AIGateway(
                     self.config.providers,
                     {"steps": [{"name": step_name,
-                                "ai": {"primary": {"provider": "claude-cli", "model": "subscription"}}}]},
+                                "ai": {"primary": {"provider": provider_name, "model": model_name}}}]},
                 )
                 resp = await gateway.call(step_name, req)
                 duration = time.time() - start
                 await self.transport.set_ai_result(task_id, resp.to_jsonable())
                 await self._record_ai_task_usage(task_id, step_name, exec_id, resp)
-                await self._write_ai_task_audit(task_id, step_name, domain, exec_id, req, resp, None, ts_start, duration)
+                await self._write_ai_task_audit(
+                    task_id, step_name, domain, exec_id, req, resp, None, ts_start, duration,
+                    provider_name, model_name,
+                )
                 await self.transport.publish_step_event(
                     f"events:{task_id}", {"event": "ai_task_done", "task_id": task_id, "step": step_name})
                 logger.info("ai_task_done", worker_id=self.worker_id, task_id=task_id,
@@ -778,7 +798,10 @@ class Worker:
                 # 失败:回执 {"error"} + 审计(含尝试链/当时 prompt)+ 完成事件;全 best-effort,绝不崩 worker.
                 for op in (
                     lambda: self.transport.set_ai_result(task_id, {"error": err}),
-                    lambda: self._write_ai_task_audit(task_id, step_name, domain, exec_id, req, None, e, ts_start, duration),
+                    lambda: self._write_ai_task_audit(
+                        task_id, step_name, domain, exec_id, req, None, e, ts_start, duration,
+                        provider_name, model_name,
+                    ),
                     lambda: self.transport.publish_step_event(
                         f"events:{task_id}", {"event": "ai_task_failed", "task_id": task_id, "error": err[:200]}),
                 ):
@@ -828,7 +851,10 @@ class Worker:
         except Exception as e:
             return {"jsonl": None, "reason": f"read failed: {e}"[:200]}
 
-    async def _write_ai_task_audit(self, task_id, step_name, domain, exec_id, req, resp, error, ts_start, duration) -> None:
+    async def _write_ai_task_audit(
+        self, task_id, step_name, domain, exec_id, req, resp, error, ts_start, duration,
+        requested_provider="claude-cli", requested_model="subscription",
+    ) -> None:
         """构建并落一条 AI task 白盒审计,对齐 DAG ai_logs 的路由/尝试链/渲染 prompt/输出/raw/用量/全轨迹."""
         ok = error is None and resp is not None
         if resp is not None:
@@ -845,7 +871,7 @@ class Worker:
                 "git_commit": os.environ.get("FLORI_GIT_COMMIT"),
             },
             "routing": {
-                "requested": {"provider": "claude-cli", "model": "subscription"},
+                "requested": {"provider": requested_provider, "model": requested_model},
                 "tier_used": tier_used, "attempts": attempts,
             },
             "prompt": {
@@ -867,8 +893,8 @@ class Worker:
         }
         log = {
             "task_id": task_id, "exec_id": exec_id, "step_name": step_name, "domain": domain,
-            "provider": (resp.provider if resp is not None else "claude-cli"),
-            "model": (resp.model if resp is not None else "subscription"),
+            "provider": (resp.provider if resp is not None else requested_provider),
+            "model": (resp.model if resp is not None else requested_model),
             "ok": ok, "error": (str(error)[:1000] if error else None),
             "input_tokens": (resp.input_tokens if resp else 0),
             "output_tokens": (resp.output_tokens if resp else 0),

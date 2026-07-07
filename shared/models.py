@@ -248,14 +248,20 @@ class LLMResponse:
 @dataclass
 class AITask:
     """独立 AI 任务:不挂 job,不走 storage,内联 LLMRequest 载荷,结果内联回 airesult:{task_id}.
-    供 /api/ask、/digest 把单次 claude 调用交给 ai-worker(claude-cli tag)异步执行。
-    入队 queue:ai(kind='ai',require_tags=['claude-cli']);无 job_id,故与 pipeline-step task 区分。"""
+    供 /api/ask 和 /digest 把单次订阅 CLI 调用交给 ai-worker 异步执行.
+    入队 queue:ai(kind='ai',require_tags=[provider]);无 job_id,故与 pipeline-step task 区分."""
     task_id: str
     request: LLMRequest
     step_name: str = "ai"          # gateway 路由步名(如 synthesis/digest),也作 ai_usage.step
     domain: str | None = None      # 观测/归因(可空)
+    provider: str = "claude-cli"
+    model: str = "subscription"
     tags: list[str] = field(default_factory=list)                            # 软标签(reject 过滤用)
-    require_tags: list[str] = field(default_factory=lambda: ["claude-cli"])  # 硬门控:仅有凭证 ai-worker 认领
+    require_tags: list[str] = field(default_factory=list)  # 硬门控:仅有对应订阅凭证 ai-worker 认领
+
+    def __post_init__(self) -> None:
+        if not self.require_tags and self.provider in {"claude-cli", "codex-cli"}:
+            self.require_tags = [self.provider]
 
     def to_task_payload(self) -> dict:
         """序列化为 queue:ai 的 task JSON dict(kind='ai',无 job_id)。"""
@@ -264,6 +270,8 @@ class AITask:
             "task_id": self.task_id,
             "step": self.step_name,
             "domain": self.domain,
+            "provider": self.provider,
+            "model": self.model,
             "request": self.request.to_jsonable(),
             "tags": sorted(self.tags),
             "require_tags": sorted(self.require_tags),
@@ -277,8 +285,10 @@ class AITask:
             request=LLMRequest.from_jsonable(d.get("request", {})),
             step_name=d.get("step", "ai"),
             domain=d.get("domain"),
+            provider=d.get("provider", "claude-cli"),
+            model=d.get("model", "subscription"),
             tags=list(d.get("tags", [])),
-            require_tags=list(d.get("require_tags", ["claude-cli"])),
+            require_tags=list(d.get("require_tags", [])),
         )
 
 

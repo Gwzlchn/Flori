@@ -11,6 +11,7 @@ from shared.ai_gateway import (
     AIGateway,
     AnthropicProvider,
     ClaudeCLIProvider,
+    CodexCLIProvider,
     DryRunProvider,
     OpenAICompatibleProvider,
     _extract_cli_model,
@@ -102,6 +103,13 @@ class TestProviderKeyFromEnv:
             {"steps": []},
         )
         assert gw._create_provider("anthropic")._api_key == "cfg-key"
+
+    def test_codex_provider_created(self):
+        gw = AIGateway(
+            {"providers": {"codex-cli": {"type": "codex_cli", "command": ["codex", "exec"]}}},
+            {"steps": []},
+        )
+        assert isinstance(gw._create_provider("codex-cli"), CodexCLIProvider)
 
 
 class TestAIGateway:
@@ -1026,3 +1034,105 @@ class TestAddDirs:
                          allowed_tools=["Read"], add_dirs=["/a/b"])
         back = LLMRequest.from_jsonable(req.to_jsonable())
         assert back.add_dirs == ["/a/b"]          # AI task 内联投递不丢
+
+
+class TestCodexCLIProvider:
+    """codex-cli provider:非交互 JSONL 事件流 + final message 文件."""
+
+    @pytest.mark.asyncio
+    async def test_parses_jsonl_usage_and_final_file(self, monkeypatch, tmp_path):
+        events = "\n".join([
+            json.dumps({"type": "thread.started", "thread_id": "th_1"}),
+            json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "fallback"}}),
+            json.dumps({"type": "turn.completed", "usage": {
+                "input_tokens": 100, "cached_input_tokens": 40,
+                "output_tokens": 25, "reasoning_output_tokens": 5,
+            }}),
+        ])
+        seen = {}
+
+        class FakeProc:
+            returncode = 0
+            async def communicate(self, data=None):
+                seen["stdin"] = data
+                Path(seen["cmd"][seen["cmd"].index("-o") + 1]).write_text("FINAL", encoding="utf-8")
+                return events.encode(), b""
+
+        async def fake_exec(*cmd, **kwargs):
+            seen["cmd"] = list(cmd)
+            seen["env"] = kwargs.get("env") or {}
+            return FakeProc()
+
+        monkeypatch.setenv("FLORI_CODEX_TRACE_DIR", str(tmp_path))
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+        p = CodexCLIProvider(["codex", "exec"])
+        resp = await p.complete(LLMRequest(messages=[{"role": "user", "content": "Q"}],
+                                           system="S", model="subscription"))
+
+        assert resp.content == "FINAL"
+        assert resp.provider == "codex-cli" and resp.model == "subscription"
+        assert resp.input_tokens == 100 and resp.output_tokens == 25
+        assert resp.cache_read_input_tokens == 40 and resp.cached is True
+        assert resp.cost_usd == 0.0 and resp.session_id == "th_1"
+        assert resp.raw["source"] == "codex-jsonl"
+        assert Path(resp.transcript_path).read_text(encoding="utf-8") == events
+        cmd = seen["cmd"]
+        assert cmd[:2] == ["codex", "exec"]
+        assert "-a" in cmd and "never" in cmd
+        assert "--ignore-user-config" in cmd and "--ignore-rules" in cmd
+        assert "--skip-git-repo-check" in cmd and "--json" in cmd
+        assert "--sandbox" in cmd and cmd[cmd.index("--sandbox") + 1] == "read-only"
+        assert cmd[-1] == "-"
+        assert b"[System]\nS" in seen["stdin"] and b"[User]\nQ" in seen["stdin"]
+
+    @pytest.mark.asyncio
+    async def test_images_and_model_flags(self, monkeypatch, tmp_path):
+        img = tmp_path / "f.png"
+        img.write_bytes(b"x")
+        seen = {}
+
+        class FakeProc:
+            returncode = 0
+            async def communicate(self, data=None):
+                Path(seen["cmd"][seen["cmd"].index("-o") + 1]).write_text("OK", encoding="utf-8")
+                return b'{"type":"turn.completed","usage":{}}\n', b""
+
+        async def fake_exec(*cmd, **kwargs):
+            seen["cmd"] = list(cmd)
+            return FakeProc()
+
+        monkeypatch.setenv("FLORI_CODEX_TRACE_DIR", str(tmp_path / "runs"))
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+        p = CodexCLIProvider(["codex", "exec"], model="gpt-test")
+        await p.complete(LLMRequest(messages=[{"role": "user", "content": "Q"}],
+                                    images=[img], model="subscription"))
+        cmd = seen["cmd"]
+        assert "--image" in cmd and str(img.resolve()) in cmd
+        assert "--model" in cmd and cmd[cmd.index("--model") + 1] == "gpt-test"
+
+    @pytest.mark.asyncio
+    async def test_rejects_claude_allowed_tools(self):
+        p = CodexCLIProvider(["codex", "exec"])
+        with pytest.raises(AIProviderError, match="allowed_tools"):
+            await p.complete(LLMRequest(messages=[{"role": "user", "content": "Q"}],
+                                        allowed_tools=["Read"]))
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_error_carries_event_path(self, monkeypatch, tmp_path):
+        seen = {}
+
+        class FakeProc:
+            returncode = 1
+            async def communicate(self, data=None):
+                return b'{"type":"error","message":"rate limit"}\n', b"429 rate limit"
+
+        async def fake_exec(*cmd, **kwargs):
+            seen["cmd"] = list(cmd)
+            return FakeProc()
+
+        monkeypatch.setenv("FLORI_CODEX_TRACE_DIR", str(tmp_path))
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+        p = CodexCLIProvider(["codex", "exec"])
+        with pytest.raises(AIRateLimitError) as ei:
+            await p.complete(LLMRequest(messages=[{"role": "user", "content": "Q"}]))
+        assert Path(ei.value.transcript_path).is_file()
