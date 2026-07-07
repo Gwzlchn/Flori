@@ -282,22 +282,15 @@ async def set_worker_config(
     db: Database = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
 ):
-    """中心下发 worker 运行配置(pools/并发/标签),worker 下一心跳(≤10s)热应用,
-    不重启容器。只存显式指定的键;cfg_rev 单调递增,worker 按 rev 幂等应用。"""
+    """中心下发 worker 运营参数(当前仅并发),worker 下一心跳(≤10s)热应用,不重启容器。
+    能力(pools/tags)刻意不收:那是机器客观属性——池由启动参数表达、net-zone 由探针判定,
+    人在页面改一台够不着 B 站机器的池并不能让它下载成功,语义即错(用户 review 定论)。
+    cfg_rev 单调递增,worker 按 rev 幂等应用。"""
     cfg: dict = {}
-    if req.pools is not None:
-        pools = [str(x).strip() for x in req.pools if str(x).strip()]
-        if not pools:
-            raise HTTPException(400, "pools 不能为空(worker 至少订阅一个池)")
-        cfg["pools"] = pools
     if req.concurrency is not None:
         cfg["concurrency"] = req.concurrency
-    if req.tags is not None:
-        cfg["tags"] = [str(x).strip() for x in req.tags if str(x).strip()]
-    if req.reject_tags is not None:
-        cfg["reject_tags"] = [str(x).strip() for x in req.reject_tags if str(x).strip()]
     if not cfg:
-        raise HTTPException(400, "至少提供一个配置项")
+        raise HTTPException(400, "至少提供一个配置项(当前支持: concurrency)")
     rev = await asyncio.to_thread(db.set_worker_desired_config, worker_id, cfg)
     if rev < 0:
         raise HTTPException(404, "worker not found")

@@ -355,29 +355,21 @@ const AI_CRED_METHODS = [
 ] as const
 const aiCredMethod = ref<(typeof AI_CRED_METHODS)[number]['id']>('claude-sub')
 
-// worker 运行配置中心管理:卡片「配置」编辑池/并发/标签 → PUT /config → 下一心跳热生效
-// (cfg_rev/applied_cfg_rev 比对显示同步态)。重建命令已无必要:参数零漂移,Watchtower 原参重建即最新。
+// worker 运营参数中心管理:卡片「配置」只编辑并发 → PUT /config → 下一心跳热生效。
+// 能力(池/标签)刻意不可改:池是机器固有能力(启动参数表达)、net-zone 标签是探针判定——
+// 页面改一台够不着 B 站的机器的池不能让它下载成功,语义即错(用户 review 定论)。
 const cfgEditing = ref('')          // 正在编辑配置的 worker id('' = 无)
-const cfgPools = ref<string[]>([])
 const cfgConcurrency = ref(1)
-const cfgTags = ref('')
 const cfgSaving = ref(false)
 function openCfg(w: Worker) {
   cfgEditing.value = w.id
   const d = w.desired_config || {}
-  cfgPools.value = [...(d.pools || w.pools || [])]
   cfgConcurrency.value = d.concurrency ?? w.concurrency ?? 1
-  cfgTags.value = (d.tags || w.tags || []).join(' ')
 }
 async function saveCfg(w: Worker) {
-  if (!cfgPools.value.length) return
   cfgSaving.value = true
   try {
-    await workerStore.setConfig(w.id, {
-      pools: cfgPools.value,
-      concurrency: cfgConcurrency.value,
-      tags: cfgTags.value.split(/[\s,]+/).filter(Boolean),
-    })
+    await workerStore.setConfig(w.id, { concurrency: cfgConcurrency.value })
     cfgEditing.value = ''
   } finally {
     cfgSaving.value = false
@@ -752,7 +744,7 @@ const usageByProvider = computed(() => {
         <pre style="background:var(--ink-900);color:#cbd5e1;font-family:var(--mono);font-size:12px;padding:12px;border-radius:var(--r-sm);overflow:auto;line-height:1.7;margin:0;white-space:pre-wrap;word-break:break-all">{{ command }}</pre>
         <p class="muted" style="font-size:12px;margin:8px 0 0;line-height:1.7">
           B站 / YouTube 凭证无需配置——中心在任务认领时自动下发(在系统设置扫码 / 上传一次即全网 worker 生效)。
-          并发 / 池 / 标签注册后在 worker 卡片「配置」在线调整,下一心跳热生效;镜像更新交给 Watchtower——启动参数从此零漂移。
+          并发可在 worker 卡片「配置」在线调整(下一心跳热生效);能力池/net 标签由启动参数与探针决定。镜像更新交给 Watchtower。
           自签证书部署时另加 <code>-e GATEWAY_TLS_INSECURE=1</code>(或 <code>GATEWAY_CA_BUNDLE=&lt;CA路径&gt;</code>)。
         </p>
         <button class="btn sm" style="margin-top:10px" @click="copy(command, 'cmd')">
@@ -824,7 +816,7 @@ const usageByProvider = computed(() => {
           <button class="btn sm" @click.stop="router.push(`/system/workers/${encodeURIComponent(w.id)}`)">
             <MessageSquare :size="13" />备注
           </button>
-          <button class="btn sm" title="中心下发运行配置(池/并发/标签),下一心跳热生效,无需重启容器"
+          <button class="btn sm" title="中心下发运营参数(并发),下一心跳热生效,无需重启容器"
             @click.stop="cfgEditing === w.id ? (cfgEditing = '') : openCfg(w)">
             <Settings :size="13" />配置
           </button>
@@ -835,24 +827,14 @@ const usageByProvider = computed(() => {
         </button>
         <!-- 中心配置编辑:保存 → PUT /config → 下一心跳热生效(徽标显示同步态) -->
         <div v-if="cfgEditing === w.id" class="cfg-panel" @click.stop>
-          <div class="field" style="margin:0">
-            <label>能力池</label>
-            <div style="display:flex;gap:14px;flex-wrap:wrap;padding-top:5px">
-              <label v-for="t in WORKER_TYPES" :key="t"
-                     style="display:flex;gap:5px;align-items:center;cursor:pointer;font-weight:normal;margin:0">
-                <input type="checkbox" :value="t" v-model="cfgPools" /> {{ t }}
-              </label>
-            </div>
-          </div>
           <div class="field" style="margin:0;max-width:130px">
             <label>并发</label>
             <input v-model.number="cfgConcurrency" type="number" min="1" max="64" class="input" />
           </div>
-          <div class="field" style="margin:0;flex:1;min-width:160px">
-            <label>标签(空格分隔)</label>
-            <input v-model="cfgTags" class="input" placeholder="如 vision net-cn" />
-          </div>
-          <button class="btn sm primary" :disabled="cfgSaving || !cfgPools.length" @click="saveCfg(w)">
+          <span class="muted" style="font-size:12px;align-self:center">
+            能力(池 / net 标签)由启动参数与探针决定,不在此修改。
+          </span>
+          <button class="btn sm primary" :disabled="cfgSaving" @click="saveCfg(w)">
             {{ cfgSaving ? '下发中…' : '保存并下发' }}
           </button>
         </div>

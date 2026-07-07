@@ -333,12 +333,13 @@ class TestWorkerConfig:
         from fastapi.testclient import TestClient
         _make_worker(db, id="cpu-cfg01")
         c = TestClient(app)
+        # 能力(pools/tags)不可中心改(机器客观属性,页面改不改变现实):传了也被忽略,只存并发。
         r = c.put("/api/workers/cpu-cfg01/config",
                   json={"pools": ["cpu", "io"], "concurrency": 8, "tags": ["vision"]})
         assert r.status_code == 200
         assert r.json()["cfg_rev"] == 1
         cfg, rev = db.get_worker_desired_config("cpu-cfg01")
-        assert rev == 1 and cfg["concurrency"] == 8 and cfg["pools"] == ["cpu", "io"]
+        assert rev == 1 and cfg == {"concurrency": 8}
         # 再写 rev 单调 +1
         r2 = c.put("/api/workers/cpu-cfg01/config", json={"concurrency": 2})
         assert r2.json()["cfg_rev"] == 2
