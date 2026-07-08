@@ -24,6 +24,7 @@ from shared.terms import extract_pairs, zh_name_from_glossary_row
 from shared.net_zone import required_zone
 from shared.source_detect import detect_source
 from shared.storage import StorageBackend
+from shared.status import OFFLINE, PAUSED
 from shared.version import FLORI_VERSION
 
 logger = structlog.get_logger(component="scheduler")
@@ -319,8 +320,11 @@ class Scheduler:
                 # list_workers 已按心跳新鲜度衍生公共状态,故此处直接持久化(幂等),
                 # 不能用 w.status 判断是否需要写。
                 await asyncio.to_thread(
-                    self.db.set_worker_status, w.id, "offline",
+                    self.db.set_worker_status, w.id, OFFLINE,
                 )
+            elif w.admin_status == PAUSED:
+                await asyncio.to_thread(self.db.set_worker_status, w.id, OFFLINE)
+                logger.info("paused_worker_preserved", worker_id=w.id)
             else:
                 await asyncio.to_thread(self.db.delete_worker, w.id)
                 await self.redis.push_event("worker_cleaned", worker_id=w.id)

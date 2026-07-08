@@ -1793,6 +1793,26 @@ class TestCleanupStaleWorkers:
         assert alive.status == "offline"
 
     @pytest.mark.asyncio
+    async def test_paused_stale_worker_preserved(self, scheduler, redis, db):
+        """暂停是管理员意图,worker 停机或重建后不能被 stale GC 删掉。"""
+        from datetime import datetime, timedelta, timezone
+        from shared.models import Worker as WorkerModel
+
+        old = datetime.now(timezone.utc) - timedelta(minutes=10)
+        db.upsert_worker(
+            WorkerModel(id="cpu-paused", type="cpu", status="busy",
+                        admin_status="paused", current_job="j1", current_step="A",
+                        first_seen=old, last_heartbeat=old)
+        )
+
+        await scheduler.cleanup_stale_workers(timeout_sec=60)
+
+        got = db.get_worker("cpu-paused")
+        assert got is not None
+        assert got.admin_status == "paused"
+        assert got.status == "offline"
+
+    @pytest.mark.asyncio
     async def test_fresh_worker_untouched(self, scheduler, redis, db):
         from datetime import datetime, timezone
         from shared.models import Worker as WorkerModel
