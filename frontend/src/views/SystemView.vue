@@ -850,7 +850,7 @@ const usageByProvider = computed(() => {
             </div>
           </section>
 
-          <details class="deploy-box">
+          <details class="enroll-step-card deploy-box">
             <summary class="deploy-head">
               <div>
                 <b><span class="step-dot">3</span>复制部署文件</b>
@@ -956,9 +956,9 @@ summary::-webkit-details-marker { display: none; }
 .step-dot { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; flex: none; border-radius: 50%; background: var(--brand-50); color: var(--brand-700); font-size: 11px; font-weight: 700; }
 .enroll-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 500; color: var(--ink-500); }
 .pool-picker { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-.pool-picker label { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; border: 1px solid var(--line); border-radius: var(--r-sm); color: var(--ink-600); font-size: 12.5px; font-weight: 700; cursor: pointer; user-select: none; }
+.pool-picker label { position: relative; display: flex; align-items: center; justify-content: center; min-height: 34px; border: 1px solid var(--line); border-radius: var(--r-sm); color: var(--ink-600); font-size: 12.5px; font-weight: 700; cursor: pointer; user-select: none; }
 .pool-picker label.on { border-color: var(--brand-300); background: var(--brand-50); color: var(--brand-700); }
-.pool-picker input { width: 13px; height: 13px; margin: 0; }
+.pool-picker input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
 .inline-field { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; margin-top: 12px; }
 .inline-field > span { font-size: 12px; color: var(--ink-500); white-space: nowrap; }
 .inline-field .input { padding: 6px 9px; font-size: 12px; }
@@ -980,13 +980,14 @@ details[open] > summary .summary-chevron { transform: rotate(90deg); }
 .inline-number .input { width: 92px; }
 .inline-number span { font-size: 12px; color: var(--ink-500); }
 .step-advanced .note-tip { margin: -2px 0 12px; line-height: 1.6; }
-.deploy-box { min-width: 0; border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; }
-.deploy-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 14px; background: var(--line-soft); cursor: pointer; list-style: none; }
-details[open] > .deploy-head { border-bottom: 1px solid var(--line); }
+.deploy-box { min-width: 0; overflow: visible; }
+.deploy-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0; background: transparent; cursor: pointer; list-style: none; }
+details[open] > .deploy-head { margin-bottom: 12px; }
+.deploy-head > div:first-child { min-width: 0; }
 .deploy-head b { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink-800); }
 .deploy-head span { display: block; max-width: 680px; margin-top: 2px; font-size: 11.5px; color: var(--ink-500); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .deploy-actions { display: inline-flex; align-items: center; gap: 8px; flex: none; }
-.deploy-box pre { margin: 0; max-height: 360px; padding: 12px; overflow: auto; background: var(--ink-900); color: #cbd5e1; font-family: var(--mono); font-size: 12px; line-height: 1.65; white-space: pre; word-break: normal; }
+.deploy-box pre { margin: 0; max-height: 360px; padding: 12px; overflow: auto; border-radius: var(--r-sm); background: var(--ink-900); color: #cbd5e1; font-family: var(--mono); font-size: 12px; line-height: 1.65; white-space: pre; word-break: normal; }
 @media (max-width: 900px) {
   .advanced-grid { grid-template-columns: 1fr; max-width: none; }
   .pool-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
