@@ -170,9 +170,9 @@
 - 移除：清理已下线 Worker 的历史记录
 
 **接入引导**（`WorkerJoinGuide` 组件）：远程 worker 走网关 token 模型（见 [ADR-0009](../adr/0009-worker-gateway-outbound-https.md)）——
-1. 点「生成接入 token」铸一次性 registration token（`POST /api/workers/registration-token`，可复用、可重置）
-2. 复制 `docker run` 命令到目标机器执行，worker 持该 token 经 `POST /api/runner/register` 换取 per-worker token，之后单条出站 HTTPS 接入网关（注册/心跳/认领/上报/产物代理），**不直连 Redis/MinIO**
-3. 另提供单机直连 redis/minio 的命令变体（仅同机/内网部署有意义）
+1. 点「生成临时接入 token」铸短期 bootstrap token（`POST /api/workers/registration-token`，响应含有效期）
+2. 复制 Gateway-only compose 或 docker run 命令到目标机器执行，worker 首次持该 token 经 `POST /api/runner/register` 换取 per-worker token，并把 `worker.id` / `worker.token` 写入持久状态目录
+3. 之后 worker 重启或 Watchtower recreate 时走 `POST /api/runner/resume`，全程单条出站 HTTPS 接入网关（注册/恢复、心跳、认领、上报、产物代理），**不直连 Redis/MinIO**
 
 ## 5. WebSocket 状态管理
 

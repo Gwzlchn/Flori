@@ -3,6 +3,67 @@
 from __future__ import annotations
 
 
+class WorkerFatalError(Exception):
+    """worker 运行前置条件或长期凭证被拒,进程应结构化日志后退出。"""
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        reason: str = "worker_fatal",
+        status_code: int | None = None,
+        endpoint: str = "",
+    ):
+        self.reason = reason
+        self.status_code = status_code
+        self.endpoint = endpoint
+        super().__init__(message)
+
+
+class WorkerAuthRejected(WorkerFatalError):
+    """worker token 被服务端拒绝,不得自动回退 registration token。"""
+
+    def __init__(
+        self,
+        message: str = "worker auth rejected",
+        *,
+        status_code: int | None = None,
+        endpoint: str = "",
+    ):
+        super().__init__(
+            message,
+            reason="worker_auth_rejected",
+            status_code=status_code,
+            endpoint=endpoint,
+        )
+
+
+class WorkerConfigError(WorkerFatalError):
+    """worker 本地配置不足以安全启动。"""
+
+    def __init__(self, message: str, *, reason: str = "worker_config_error"):
+        super().__init__(message, reason=reason)
+
+
+class WorkerContractError(WorkerFatalError):
+    """worker 与 gateway runner API 契约不匹配。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        endpoint: str = "",
+        reason: str = "worker_contract_error",
+    ):
+        super().__init__(
+            message,
+            reason=reason,
+            status_code=status_code,
+            endpoint=endpoint,
+        )
+
+
 class StepError(Exception):
     """步骤执行错误基类。所有步骤错误继承此类。error_type 决定重试策略。"""
 

@@ -10,7 +10,12 @@ import pytest
 
 from tests.conftest import make_fakeredis
 from shared.db import Database
-from worker.transport import RedisTransport
+from worker.transport import (
+    RedisTransport,
+    WorkerAuthRejected,
+    WorkerConfigError,
+    WorkerContractError,
+)
 from worker.gateway_transport import GatewayTransport
 
 
@@ -385,7 +390,7 @@ class TestGatewayRegister:
     ):
         gw, id_file = make_gateway(redis, db, tmp_path)
         gw._client.post.return_value = make_response(
-            json_data={"worker_id": "w_srv", "worker_token": "wt-secret"},
+            json_data={"worker_id": "w_srv", "worker_token": "flwt-secret"},
         )
 
         returned = await gw.register("w_local", **REGISTER_ARGS)
@@ -397,27 +402,31 @@ class TestGatewayRegister:
         assert kwargs["json"]["worker_id"] == "w_local"
         assert kwargs["json"]["tags"] == ["vision"]
         # 服务端回的 worker_token 被记下,供后续心跳鉴权
-        assert gw._worker_token == "wt-secret"
+        assert gw._worker_token == "flwt-secret"
         # 服务端回的 worker_id 落盘
         assert id_file.read_text().strip() == "w_srv"
+        token_file = id_file.with_name("worker.token")
+        assert token_file.read_text().strip() == "flwt-secret"
+        assert (token_file.stat().st_mode & 0o777) == 0o600
         # 影子写:redis/db 也有这行
         assert await redis.get_worker_info("w_srv") is not None
 
     @pytest.mark.asyncio
-    async def test_reuses_cached_id_on_second_register(
+    async def test_reuses_cached_id_on_second_bootstrap_without_cached_token(
         self, redis, db, tmp_path,
     ):
         gw, id_file = make_gateway(redis, db, tmp_path)
         gw._client.post.return_value = make_response(
-            json_data={"worker_id": "w_first", "worker_token": "wt1"},
+            json_data={"worker_id": "w_first", "worker_token": "flwt-1"},
         )
         await gw.register("w_local", **REGISTER_ARGS)
         assert id_file.read_text().strip() == "w_first"
+        id_file.with_name("worker.token").unlink()
 
-        # 第二次注册:缓存 id 优先于传入的 id
+        # 没有 cached token 才重新 register,但 worker_id 仍复用 id_file。
         gw2, _ = make_gateway(redis, db, tmp_path)
         gw2._client.post.return_value = make_response(
-            json_data={"worker_token": "wt2"},
+            json_data={"worker_token": "flwt-2"},
         )
         returned = await gw2.register("w_other", **REGISTER_ARGS)
 
@@ -425,17 +434,110 @@ class TestGatewayRegister:
         assert kwargs["json"]["worker_id"] == "w_first"
         assert returned == "w_first"
 
+    @pytest.mark.asyncio
+    async def test_cached_token_resumes_without_registration_token(
+        self, redis, db, tmp_path,
+    ):
+        gw, id_file = make_gateway(redis, db, tmp_path, registration_token="")
+        id_file.write_text("w_cached")
+        id_file.with_name("worker.token").write_text("flwt-cached\n")
+        gw._client.post.return_value = make_response(
+            json_data={"desired_config": {"concurrency": 2}, "cfg_rev": 7},
+        )
+
+        returned = await gw.register("w_local", **REGISTER_ARGS)
+
+        url, kwargs = gw._client.post.call_args
+        assert url[0] == "/api/runner/resume"
+        assert kwargs["headers"]["Authorization"] == "Bearer flwt-cached"
+        assert kwargs["json"]["worker_id"] == "w_cached"
+        assert returned == "w_cached"
+        assert gw.worker_token == "flwt-cached"
+        assert gw.initial_config == {
+            "desired_config": {"concurrency": 2}, "cfg_rev": 7,
+        }
+
+    @pytest.mark.asyncio
+    async def test_resume_auth_rejected_does_not_fall_back_to_register(self, tmp_path):
+        fallback = "flw-" + "fallback"
+        gw, id_file = make_pure_gateway(tmp_path, registration_token=fallback)
+        id_file.write_text("w_cached")
+        id_file.with_name("worker.token").write_text("flwt-revoked\n")
+        gw._client.post.return_value = make_response(status_code=403)
+
+        with pytest.raises(WorkerAuthRejected):
+            await gw.register("w_local", **REGISTER_ARGS)
+
+        assert gw._client.post.call_count == 1
+        assert gw._client.post.call_args.args[0] == "/api/runner/resume"
+        assert id_file.with_name("worker.token").read_text().strip() == "flwt-revoked"
+
+    @pytest.mark.asyncio
+    async def test_first_bootstrap_without_registration_token_fails_fast(self, tmp_path):
+        gw, _ = make_pure_gateway(tmp_path, registration_token="")
+        with pytest.raises(WorkerConfigError):
+            await gw.register("w_local", **REGISTER_ARGS)
+
+    @pytest.mark.asyncio
+    async def test_register_requires_worker_token_in_response(self, tmp_path):
+        gw, _ = make_pure_gateway(tmp_path)
+        gw._client.post.return_value = make_response(
+            json_data={"worker_id": "w_srv"},
+        )
+        with pytest.raises(WorkerContractError):
+            await gw.register("w_local", **REGISTER_ARGS)
+
+    @pytest.mark.asyncio
+    async def test_worker_token_file_override(self, tmp_path, monkeypatch):
+        custom = tmp_path / "custom" / "token"
+        monkeypatch.setenv("WORKER_TOKEN_FILE", str(custom))
+        gw, _ = make_pure_gateway(tmp_path)
+        gw._client.post.return_value = make_response(
+            json_data={"worker_id": "w_srv", "worker_token": "flwt-custom"},
+        )
+
+        await gw.register("w_local", **REGISTER_ARGS)
+
+        assert custom.read_text().strip() == "flwt-custom"
+
 
 class TestGatewayHeartbeat:
     @pytest.mark.asyncio
     async def test_401_raises_worker_auth_rejected(
         self, redis, db, tmp_path, monkeypatch,
     ):
-        # 心跳被 401(per-worker token 失效)时抛 WorkerAuthRejected,交主循环走重注册/退避/6h自杀;
+        # 心跳被 401(per-worker token 失效)时抛 WorkerAuthRejected,交主循环停机。
         # 认证失败优先上抛,不 fall-through 到 inner。
-        from worker.transport import WorkerAuthRejected
         gw, _ = make_gateway(redis, db, tmp_path)
         gw._client.post.return_value = make_response(status_code=401)
+        inner_hb = AsyncMock()
+        monkeypatch.setattr(gw._inner, "heartbeat", inner_hb)
+
+        with pytest.raises(WorkerAuthRejected):
+            await gw.heartbeat("w1")
+
+        inner_hb.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_403_raises_worker_auth_rejected(
+        self, redis, db, tmp_path, monkeypatch,
+    ):
+        gw, _ = make_gateway(redis, db, tmp_path)
+        gw._client.post.return_value = make_response(status_code=403)
+        inner_hb = AsyncMock()
+        monkeypatch.setattr(gw._inner, "heartbeat", inner_hb)
+
+        with pytest.raises(WorkerAuthRejected):
+            await gw.heartbeat("w1")
+
+        inner_hb.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_429_raises_worker_auth_rejected(
+        self, redis, db, tmp_path, monkeypatch,
+    ):
+        gw, _ = make_gateway(redis, db, tmp_path)
+        gw._client.post.return_value = make_response(status_code=429)
         inner_hb = AsyncMock()
         monkeypatch.setattr(gw._inner, "heartbeat", inner_hb)
 
@@ -457,7 +559,7 @@ class TestGatewayHeartbeat:
 
         await gw.heartbeat("w1")
 
-        inner_hb.assert_awaited_once_with("w1", load=None)
+        inner_hb.assert_awaited_once_with("w1", load=None, concurrency=None)
 
     @pytest.mark.asyncio
     async def test_posts_worker_id_and_current_status(
@@ -468,15 +570,16 @@ class TestGatewayHeartbeat:
         monkeypatch.setattr(gw._inner, "heartbeat", AsyncMock())
         monkeypatch.setattr(gw._inner, "update_status", AsyncMock())
 
-        # 心跳须带当前状态与已应用配置版本,否则 runner API 无法判定漂移。
+        # 心跳须带当前状态、并发与已应用配置版本,否则 runner API 无法判定漂移。
         await gw.update_status("w1", "busy", "job1", "03_scene")
-        await gw.heartbeat("w1")
+        await gw.heartbeat("w1", concurrency=3)
 
         _, kwargs = gw._client.post.call_args
         assert kwargs["json"] == {
             "worker_id": "w1", "status": "busy",
             "current_job": "job1", "current_step": "03_scene",
             "applied_cfg_rev": 0,
+            "concurrency": 3,
         }
 
 
@@ -574,6 +677,22 @@ class TestGatewayCoarseHTTP:
         inner.assert_not_awaited()  # 绝不退回内层,否则经 redis 双重认领
 
     @pytest.mark.asyncio
+    async def test_request_step_403_raises_auth_rejected(self, redis, db, tmp_path):
+        gw, _ = make_gateway(redis, db, tmp_path)
+        gw._client.post.return_value = make_response(status_code=403)
+
+        with pytest.raises(WorkerAuthRejected):
+            await gw.request_step("w1", ["cpu"], {"cpu": 3}, set(), set())
+
+    @pytest.mark.asyncio
+    async def test_request_step_429_raises_auth_rejected(self, redis, db, tmp_path):
+        gw, _ = make_gateway(redis, db, tmp_path)
+        gw._client.post.return_value = make_response(status_code=429)
+
+        with pytest.raises(WorkerAuthRejected):
+            await gw.request_step("w1", ["cpu"], {"cpu": 3}, set(), set())
+
+    @pytest.mark.asyncio
     async def test_report_done_posts_complete(self, redis, db, tmp_path):
         gw, _ = make_gateway(redis, db, tmp_path)
         gw._worker_token = "wt"
@@ -638,6 +757,15 @@ class TestGatewayCoarseHTTP:
         assert "created_at" not in kwargs["json"]
 
     @pytest.mark.asyncio
+    async def test_report_done_auth_rejected_raises(self, redis, db, tmp_path):
+        gw, _ = make_gateway(redis, db, tmp_path)
+        gw._client.post.return_value = make_response(status_code=401)
+        claim = {"job_id": "j1", "step": "A", "pool": "cpu", "exec_id": "e"}
+
+        with pytest.raises(WorkerAuthRejected):
+            await gw.report_done(claim, 1.0, 0.0)
+
+    @pytest.mark.asyncio
     async def test_publish_step_event_maps_progress(self, redis, db, tmp_path):
         gw, _ = make_gateway(redis, db, tmp_path)
         gw._client.post.return_value = make_response()
@@ -656,13 +784,13 @@ class TestGatewayPureMode:
     async def test_register_returns_server_id_no_shadow_write(self, redis, tmp_path):
         gw, id_file = make_pure_gateway(tmp_path)
         gw._client.post.return_value = make_response(
-            json_data={"worker_id": "w_srv", "worker_token": "wt-secret"},
+            json_data={"worker_id": "w_srv", "worker_token": "flwt-secret"},
         )
 
         returned = await gw.register("w_local", **REGISTER_ARGS)
 
         assert returned == "w_srv"
-        assert gw._worker_token == "wt-secret"
+        assert gw._worker_token == "flwt-secret"
         assert id_file.read_text().strip() == "w_srv"
         # 无内层时 redis 不应有这行(无影子写).
         assert await redis.get_worker_info("w_srv") is None
@@ -671,11 +799,11 @@ class TestGatewayPureMode:
     async def test_worker_token_property_exposes_token(self, tmp_path):
         gw, _ = make_pure_gateway(tmp_path)
         gw._client.post.return_value = make_response(
-            json_data={"worker_id": "w_srv", "worker_token": "wt-xyz"},
+            json_data={"worker_id": "w_srv", "worker_token": "flwt-xyz"},
         )
         await gw.register("w_local", **REGISTER_ARGS)
         # GatewayStorage 经此属性拿 per-worker token
-        assert gw.worker_token == "wt-xyz"
+        assert gw.worker_token == "flwt-xyz"
 
     @pytest.mark.asyncio
     async def test_heartbeat_no_inner_fallback_no_crash_on_httpx_error(self, tmp_path):
@@ -723,7 +851,7 @@ class TestGatewayShadowWriteWithInner:
     async def test_register_shadow_writes_redis(self, redis, db, tmp_path):
         gw, _ = make_gateway(redis, db, tmp_path)
         gw._client.post.return_value = make_response(
-            json_data={"worker_id": "w_srv", "worker_token": "wt"},
+            json_data={"worker_id": "w_srv", "worker_token": "flwt-shadow"},
         )
         await gw.register("w_local", **REGISTER_ARGS)
         assert await redis.get_worker_info("w_srv") is not None
@@ -1142,7 +1270,6 @@ class TestGatewayTransportGetCredential:
 
     @pytest.mark.asyncio
     async def test_401_raises_auth_rejected(self):
-        from worker.transport import WorkerAuthRejected
         gw = self._gw()
         gw._client = AsyncMock()
         gw._client.get.return_value = make_response(401)

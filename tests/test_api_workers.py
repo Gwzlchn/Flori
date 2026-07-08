@@ -209,6 +209,37 @@ class TestStatusSemantics:
         assert len(online) == 2
         assert by_id["w3"]["status"] == "stale"
 
+    @pytest.mark.asyncio
+    async def test_delete_uses_redis_fresh_state_over_db_stale(self, client, db, redis_mock):
+        _make_worker(db, id="cpu-delete-live", heartbeat=_utcnow() - timedelta(minutes=5))
+        redis_mock.worker_exists.return_value = True
+        redis_mock.get_worker_info.return_value = {
+            "type": "cpu",
+            "status": "idle",
+            "last_heartbeat": _utcnow().isoformat(),
+            "admin_status": "",
+        }
+
+        resp = await client.delete("/api/workers/cpu-delete-live")
+        assert resp.status_code == 409
+        assert db.get_worker("cpu-delete-live") is not None
+
+    @pytest.mark.asyncio
+    async def test_delete_paused_worker_requires_force(self, client, db, redis_mock):
+        _make_worker(db, id="cpu-paused-delete")
+        redis_mock.worker_exists.return_value = True
+        redis_mock.get_worker_info.return_value = {
+            "type": "cpu",
+            "status": "idle",
+            "last_heartbeat": _utcnow().isoformat(),
+            "admin_status": "paused",
+        }
+
+        resp = await client.delete("/api/workers/cpu-paused-delete")
+        assert resp.status_code == 409
+        resp = await client.delete("/api/workers/cpu-paused-delete?force=true")
+        assert resp.status_code == 204
+
 
 class TestPauseWritesRedis:
     """暂停真生效:PUT status=paused 必须同步写 Redis admin_status(worker 认领读 Redis 判暂停)。"""
@@ -333,9 +364,7 @@ class TestWorkerConfig:
         from fastapi.testclient import TestClient
         _make_worker(db, id="cpu-cfg01")
         c = TestClient(app)
-        # 能力(pools/tags)不可中心改(机器客观属性,页面改不改变现实):传了也被忽略,只存并发。
-        r = c.put("/api/workers/cpu-cfg01/config",
-                  json={"pools": ["cpu", "io"], "concurrency": 8, "tags": ["vision"]})
+        r = c.put("/api/workers/cpu-cfg01/config", json={"concurrency": 8})
         assert r.status_code == 200
         assert r.json()["cfg_rev"] == 1
         cfg, rev = db.get_worker_desired_config("cpu-cfg01")
@@ -350,7 +379,12 @@ class TestWorkerConfig:
         from fastapi.testclient import TestClient
         _make_worker(db, id="cpu-cfg02")
         c = TestClient(app)
-        assert c.put("/api/workers/cpu-cfg02/config", json={"pools": []}).status_code == 400
+        assert c.put("/api/workers/cpu-cfg02/config", json={"pools": []}).status_code == 422
+        assert c.put("/api/workers/cpu-cfg02/config", json={"tags": ["vision"]}).status_code == 422
+        assert c.put(
+            "/api/workers/cpu-cfg02/config",
+            json={"reject_tags": ["foreign"]},
+        ).status_code == 422
         assert c.put("/api/workers/cpu-cfg02/config", json={}).status_code == 400
         assert c.put("/api/workers/nonexist/config", json={"concurrency": 1}).status_code == 404
 
@@ -367,7 +401,7 @@ class TestWorkerConfig:
     def test_reregister_preserves_desired_config(self, db):
         """upsert_worker(重注册路径)绝不冲掉中心配置:ON CONFLICT UPDATE 而非 REPLACE。"""
         _make_worker(db, id="cpu-cfg04")
-        db.set_worker_desired_config("cpu-cfg04", {"pools": ["gpu"]})
+        db.set_worker_desired_config("cpu-cfg04", {"concurrency": 6})
         _make_worker(db, id="cpu-cfg04")   # 模拟 worker 重启重注册
         cfg, rev = db.get_worker_desired_config("cpu-cfg04")
-        assert rev == 1 and cfg == {"pools": ["gpu"]}
+        assert rev == 1 and cfg == {"concurrency": 6}

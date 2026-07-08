@@ -91,12 +91,22 @@ describe('useWorkerStore', () => {
     expect(del).toHaveBeenCalledWith('/api/workers/w1?force=true')
   })
 
-  it('mintToken: POST registration-token 返回 token 字段', async () => {
-    post.mockResolvedValueOnce({ token: 'tok-123' })
+  it('setConfig: 只提交 concurrency 后刷新', async () => {
+    put.mockResolvedValueOnce(undefined)
+    get.mockResolvedValueOnce([])
+    const store = useWorkerStore()
+    await store.setConfig('w1', { concurrency: 3 })
+    expect(put).toHaveBeenCalledWith('/api/workers/w1/config', { concurrency: 3 })
+    expect(get).toHaveBeenCalledWith('/api/workers')
+  })
+
+  it('mintToken: POST registration-token 返回 token 和有效期', async () => {
+    const sampleToken = 'tok-' + '123'
+    post.mockResolvedValueOnce({ token: sampleToken, expires_in_sec: 3600 })
     const store = useWorkerStore()
     const res = await store.mintToken()
     expect(post).toHaveBeenCalledWith('/api/workers/registration-token', {})
-    expect(res).toBe('tok-123')
+    expect(res).toEqual({ token: sampleToken, expires_in_sec: 3600 })
   })
 
   it('fetchTasks: GET worker tasks 返回数组(不写 state)', async () => {

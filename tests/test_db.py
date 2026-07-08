@@ -440,6 +440,21 @@ class TestWorkerToken:
         assert db.get_worker_token_by_hash("ha")["revoked"] is True
         assert db.get_worker_token_by_hash("hb")["revoked"] is False
 
+    def test_upsert_token_can_revoke_existing_for_same_worker(self, db):
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        db.upsert_worker_token(
+            token_hash="old", worker_id="cpu-x", pools=["cpu"], tags=[], created_at=now,
+        )
+        db.upsert_worker_token(
+            token_hash="new", worker_id="cpu-x", pools=["cpu"], tags=[],
+            created_at=now, revoke_existing=True,
+        )
+
+        assert db.get_worker_token_by_hash("old")["revoked"] is True
+        assert db.get_worker_token_by_hash("new")["revoked"] is False
+
     def test_list_worker_tokens(self, db):
         from datetime import datetime, timezone
 

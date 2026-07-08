@@ -1189,6 +1189,7 @@ class Database:
         status: str | None = None,
         current_job: str | None = None,
         current_step: str | None = None,
+        concurrency: int | None = None,
     ) -> None:
         """刷新 worker 在 DB 中的 last_heartbeat(及可选的 status / 当前任务)。
 
@@ -1201,6 +1202,8 @@ class Database:
             fields["current_job"] = current_job or None
         if current_step is not None:
             fields["current_step"] = current_step or None
+        if concurrency is not None:
+            fields["concurrency"] = max(1, int(concurrency))
         set_clause = ", ".join(f"{k}=?" for k in fields)
         values = list(fields.values()) + [worker_id]
         with self._lock:
@@ -1243,9 +1246,18 @@ class Database:
         tags: list[str],
         created_at: datetime,
         revoked: bool = False,
+        revoke_existing: bool = False,
     ) -> None:
-        """登记一枚 per-worker token(仅存 sha256 hash),pools/tags 限定其授权范围。"""
+        """登记一枚 per-worker token(仅存 sha256 hash),pools/tags 限定其授权范围。
+
+        revoke_existing=True 用于首次 bootstrap/recreate,先吊销该 worker 旧 token,保证同一
+        worker 同时只有一枚 active token。"""
         with self._lock:
+            if revoke_existing:
+                self._conn.execute(
+                    "UPDATE worker_tokens SET revoked=1 WHERE worker_id=?",
+                    (worker_id,),
+                )
             self._conn.execute(
                 """INSERT OR REPLACE INTO worker_tokens
                    (token_hash, worker_id, pools, tags, created_at, revoked)

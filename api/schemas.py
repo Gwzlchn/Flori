@@ -104,11 +104,10 @@ class WorkerResponse(BaseModel):
 
 
 class WorkerConfigRequest(BaseModel):
-    """中心下发 worker 运行配置(全部可选,只存显式指定键;worker 心跳热应用,docs/03 §1.7.2)。"""
-    pools: list[str] | None = None
+    """中心下发 worker 运行配置(当前仅 concurrency;worker 心跳热应用,docs/03 §1.7.2)。"""
+    model_config = {"extra": "forbid"}
+
     concurrency: int | None = Field(default=None, ge=1, le=64)
-    tags: list[str] | None = None
-    reject_tags: list[str] | None = None
 
 
 class WorkerUpdateRequest(BaseModel):

@@ -113,6 +113,23 @@ def _load(info: dict) -> dict:
         return {}
 
 
+def _status_from_redis_info(
+    info: dict,
+    *,
+    online_window_sec: int,
+    stale_window_sec: int,
+    now: datetime | None = None,
+) -> str:
+    return compute_worker_status(
+        last_heartbeat=_parse_iso(info.get("last_heartbeat")),
+        current_job=info.get("current_job") or None,
+        admin_status=info.get("admin_status"),
+        now=now,
+        online_window_sec=online_window_sec,
+        stale_window_sec=stale_window_sec,
+    )
+
+
 @router.get("")
 async def list_workers(
     db: Database = Depends(get_db),
@@ -140,11 +157,8 @@ async def list_workers(
         info = await redis.get_worker_info(wid)
         if not info:
             continue
-        status = compute_worker_status(
-            last_heartbeat=_parse_iso(info.get("last_heartbeat")),
-            current_job=info.get("current_job") or None,
-            admin_status=info.get("admin_status"),
-            now=now,
+        status = _status_from_redis_info(
+            info, now=now,
             online_window_sec=online_window,
             stale_window_sec=stale_window,
         )
@@ -229,11 +243,8 @@ async def get_worker(
     # 可能不刷新而过期。故用 Redis 覆盖状态/心跳/当前任务;Redis 无该 worker 时保留 db 判定,即已失活。
     info = await redis.get_worker_info(worker_id)
     if info:
-        resp.status = compute_worker_status(
-            last_heartbeat=_parse_iso(info.get("last_heartbeat")),
-            current_job=info.get("current_job") or None,
-            admin_status=info.get("admin_status"),
-            now=datetime.now(timezone.utc),
+        resp.status = _status_from_redis_info(
+            info, now=datetime.now(timezone.utc),
             online_window_sec=online_window,
             stale_window_sec=stale_window,
         )
@@ -356,22 +367,22 @@ async def delete_worker(
     online_window, stale_window = _windows(config)
     w = await asyncio.to_thread(db.get_worker, worker_id, online_window, stale_window)
     redis_alive = await redis.worker_exists(worker_id)
+    info = await redis.get_worker_info(worker_id) if redis_alive else None
     if not w and not redis_alive:
         raise HTTPException(404, "worker not found")
 
     # 仅离线/失联可删,活着的需 force;否则下次扫描又冒出来(远程 worker 尤甚)。
-    # 状态统一按心跳衍生:DB 有行用 DB 行,否则用 Redis hash 现算。
-    if w is not None:
-        status = w.status
-    else:
-        info = await redis.get_worker_info(worker_id) or {}
-        status = compute_worker_status(
-            last_heartbeat=_parse_iso(info.get("last_heartbeat")),
-            current_job=info.get("current_job") or None,
-            admin_status=info.get("admin_status"),
+    # 状态统一按心跳衍生:Redis 是实时态,有新鲜 hash 时覆盖 DB 存量状态。
+    if info:
+        status = _status_from_redis_info(
+            info,
             online_window_sec=online_window,
             stale_window_sec=stale_window,
         )
+    elif w is not None:
+        status = w.status
+    else:
+        status = OFFLINE
     if status not in (OFFLINE, STALE) and not force:
         raise HTTPException(409, "worker is online; pass force=true to remove")
 

@@ -17,8 +17,10 @@ import time
 from pathlib import Path
 from typing import Callable, Protocol
 
+from shared.errors import WorkerAuthRejected
 
-# B站 SESSDATA 等敏感凭证的本地侧载文件:只供同机(LocalStorage)下载步本地读取,
+
+# B站登录态等敏感凭证的本地侧载文件:只供同机(LocalStorage)下载步本地读取,
 # 绝不入中心对象存储、绝不经 runner 网关下发给远端 worker(见 RemoteStorage / api/routes/runner.py)。
 CREDENTIAL_REL = "input/.credentials.json"
 
@@ -26,6 +28,12 @@ CREDENTIAL_REL = "input/.credentials.json"
 def is_credential_file(rel: str) -> bool:
     """是否为敏感凭证侧载文件(按 basename 判,跨平台)。"""
     return rel.replace("\\", "/").rsplit("/", 1)[-1] == ".credentials.json"
+
+
+def _raise_gateway_auth(resp, endpoint: str) -> None:
+    status = getattr(resp, "status_code", None)
+    if status in (401, 403, 429):
+        raise WorkerAuthRejected(status_code=status, endpoint=endpoint)
 
 
 def _parse_minio_version(info: dict) -> str | None:
@@ -568,6 +576,7 @@ class GatewayStorage:
             async with self._client().stream(
                 "GET", f"/api/runner/jobs/{job_id}/artifacts/{rel}", headers=self._auth(),
             ) as resp:
+                _raise_gateway_auth(resp, f"/api/runner/jobs/{job_id}/artifacts/{rel}")
                 resp.raise_for_status()
                 with open(dest, "wb") as f:
                     async for chunk in resp.aiter_bytes(65536):
@@ -624,6 +633,7 @@ class GatewayStorage:
                 headers=self._auth(), content=_chunks(),
                 timeout=httpx.Timeout(900, connect=15),
             )
+            _raise_gateway_auth(resp, f"/api/runner/jobs/{job_id}/artifacts/{rel}")
             resp.raise_for_status()
 
     def _is_no_push(self, rel: str) -> bool:
@@ -655,6 +665,7 @@ class GatewayStorage:
         resp = await self._client().get(
             f"/api/runner/jobs/{job_id}/artifacts/{rel_path}", headers=self._auth(),
         )
+        _raise_gateway_auth(resp, f"/api/runner/jobs/{job_id}/artifacts/{rel_path}")
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
@@ -665,12 +676,14 @@ class GatewayStorage:
             f"/api/runner/jobs/{job_id}/artifacts/{rel_path}",
             headers=self._auth(), content=data,
         )
+        _raise_gateway_auth(resp, f"/api/runner/jobs/{job_id}/artifacts/{rel_path}")
         resp.raise_for_status()
 
     async def list_files(self, job_id: str) -> list[str]:
         resp = await self._client().get(
             f"/api/runner/jobs/{job_id}/artifacts", headers=self._auth(),
         )
+        _raise_gateway_auth(resp, f"/api/runner/jobs/{job_id}/artifacts")
         resp.raise_for_status()
         return resp.json().get("files", [])
 

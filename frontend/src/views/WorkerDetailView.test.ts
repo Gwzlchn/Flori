@@ -171,6 +171,22 @@ describe('WorkerDetailView', () => {
     vi.unstubAllGlobals()
   })
 
+  it('移除操作：paused 视为在线管理态,删除带 force=true', async () => {
+    api.get.mockImplementation((url: string) => {
+      if (url === '/api/workers') return Promise.resolve([makeWorker({ status: 'paused' })])
+      if (url.endsWith('/tasks')) return Promise.resolve([])
+      return Promise.resolve(makeWorker({ status: 'paused' }))
+    })
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    const w = factory()
+    await flushPromises()
+    const removeBtn = w.findAll('button').find((b) => b.text().includes('移除'))
+    await removeBtn!.trigger('click')
+    await flushPromises()
+    expect(api.del).toHaveBeenCalledWith('/api/workers/w1?force=true')
+    vi.unstubAllGlobals()
+  })
+
   it('移除操作：confirm 取消则不发请求', async () => {
     vi.stubGlobal('confirm', vi.fn(() => false))
     const w = factory()

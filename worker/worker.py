@@ -29,7 +29,13 @@ from shared.storage import StorageBackend
 from shared.sysload import collect_node_load
 from shared.version import FLORI_VERSION
 from worker.step_runner import StepContext, create_step_runner
-from worker.transport import WorkerTransport, WorkerAuthRejected, default_worker_id_file
+from worker.transport import (
+    WorkerAuthRejected,
+    WorkerContractError,
+    WorkerFatalError,
+    WorkerTransport,
+    default_worker_id_file,
+)
 
 logger = structlog.get_logger(component="worker")
 
@@ -98,9 +104,8 @@ def _resolve_worker_id(worker_type: str) -> str:
     为何要稳定:重启若被当成全新 worker,监控会刷幽灵行,docker reap_orphans(label flori.worker={id})
     无法跨重启命中残留容器.gateway 模式 register 仍可返回另一 id 覆盖(以服务端为准).
 
-    无状态部署:gateway 模式(只设 GATEWAY_URL)+ WORKER_NAME 时,id 确定性派生,不依赖任何
-    本地文件,可不挂 /data 卷纯出站 HTTPS 跑(configs 在镜像,work_dir 在 /tmp,产物经网关).
-    此时缓存文件写不了是预期的,降级为 debug 不报 warning."""
+    Gateway 模式仍先用 WORKER_NAME 派生首启身份,但 register/resume 成功后必须能持久化
+    worker.id 和 worker.token。长期 token 是后续启动的唯一凭证,不能依赖 registration token 复活。"""
     id_file = Path(default_worker_id_file())
     # worker_type 多池派生时形如 "cpu+gpu";id 会进 redis key / 容器 label,前缀里 '+' 换 '-' 保守。
     safe_type = worker_type.replace("+", "-")
@@ -119,8 +124,8 @@ def _resolve_worker_id(worker_type: str) -> str:
         id_file.parent.mkdir(parents=True, exist_ok=True)
         id_file.write_text(worker_id)
     except OSError:
-        # WORKER_NAME 下 id 确定性,缓存文件可选.写不了是无状态部署的常态,不算错(debug);
-        # 随机 id 模式写不了才会每次重启换 id,故 warn.
+        # WORKER_NAME 下这里仍可确定性派生首启 id。GatewayTransport 注册成功后会再强制持久化
+        # id/token;随机 id 模式写不了才会每次重启换 id,故 warn.
         if name:
             logger.debug("worker_id_cache_skipped", worker_id=worker_id)
         else:
@@ -240,13 +245,9 @@ class Worker:
         # 全局每池槽位(pools.yaml limit)仍是系统级天花板,本数只决定单 worker 的并行上限.
         self.concurrency = max(1, concurrency)
         self._shutdown = False
-        # 认证自愈(仅 GatewayTransport 抛 WorkerAuthRejected 时用):跨 slot 协调,_auth_lock 串行化。
-        self._auth_failed_since: float | None = None   # 首次连续 401 时刻(成功一次即清零)
-        self._auth_backoff = 1.0                        # 401 退避秒数(指数,封顶 60)
-        self._last_reauth = 0.0                         # 上次重注册时刻(去抖,避免每 slot 每拍重注册)
+        # Gateway worker 的长期 token 被拒时不能自愈复活;跨 slot 用锁压成一条 fatal 日志。
         self._auth_lock = asyncio.Lock()
-        self._auth_giveup_sec = int(os.environ.get("AUTH_GIVEUP_SEC", str(6 * 3600)))  # 连续 401 满此后自杀退出
-        self._reauth_min_interval = float(os.environ.get("REAUTH_MIN_INTERVAL_SEC", "30"))
+        self._fatal_error: WorkerFatalError | None = None
         # 中心配置热应用:已生效的 cfg_rev(注册/心跳带回期望配置,rev 更高才应用,幂等).
         self._cfg_applied_rev = 0
         self.runner = create_step_runner(self.worker_id)
@@ -285,8 +286,14 @@ class Worker:
         except asyncio.CancelledError:
             pass
         finally:
-            await self.transport.update_status(self.worker_id, "offline")
+            try:
+                await self.transport.update_status(self.worker_id, "offline")
+            except WorkerAuthRejected as e:
+                if self._fatal_error is None:
+                    self._fatal_error = e
             logger.info("worker_exit", worker_id=self.worker_id)
+        if self._fatal_error is not None:
+            raise self._fatal_error
 
     def shutdown(self) -> None:
         logger.info("worker_shutdown", worker_id=self.worker_id)
@@ -298,8 +305,7 @@ class Worker:
         # gateway 注册可能返回缓存身份(重启复用同一 id);runner 已用旧 id 创建但子进程忽略 worker_id,无碍。
         # 连不上网关/redis(部署时 api 比 worker 晚起几百 ms,启动顺序竞态)时固定间隔 WARN 重试,
         # 不让首拍 ConnectError 抛到 main 崩进程白白重启.
-        # 仅兜连接类失败;401 / 注册 token 过期(503,是 httpx.HTTPStatusError 非 TransportError)不在此重试,
-        # 照常上抛走既有路径(_handle_auth_failure / 既有 503 处理).
+        # 网络层失败与 5xx 可退避重试;4xx/auth/contract/config 直接交入口结构化退出。
         retry_sec = float(os.environ.get("REGISTER_RETRY_SEC", "3"))
         while not self._shutdown:
             try:
@@ -314,6 +320,24 @@ class Worker:
                 self._apply_desired_config(
                     getattr(self.transport, "initial_config", None))
                 return
+            except WorkerFatalError:
+                raise
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code if e.response is not None else None
+                if status is not None and 500 <= status < 600:
+                    logger.warning(
+                        "register_http_retry", worker_id=self.worker_id,
+                        host=socket.gethostname(), endpoint=str(e.request.url),
+                        status=status, error=str(e)[:200], retry_sec=retry_sec,
+                    )
+                    await asyncio.sleep(retry_sec)
+                    continue
+                raise WorkerContractError(
+                    "worker register/resume rejected by gateway",
+                    status_code=status,
+                    endpoint=str(e.request.url),
+                    reason="worker_register_rejected",
+                ) from e
             except (httpx.TransportError, redis.exceptions.ConnectionError,
                     redis.exceptions.TimeoutError) as e:
                 # 连不上:WARN 一条摘要而非整屏 traceback,固定间隔重试.不用指数退避,本身差不了几秒.
@@ -333,17 +357,14 @@ class Worker:
                 cfg_payload = await self.transport.heartbeat(
                     self.worker_id, load=collect_node_load(),
                     applied_cfg_rev=self._cfg_applied_rev,
+                    concurrency=self.concurrency,
                 )
                 self._apply_desired_config(cfg_payload)
             except asyncio.CancelledError:
                 raise
-            except WorkerAuthRejected:
-                # token 失效:重注册+退避;超 6h 则 _handle_auth_failure 置 _shutdown 后退出.
-                await self._handle_auth_failure()
-                if self._shutdown:
-                    break
-                await asyncio.sleep(self._auth_backoff)
-                continue
+            except WorkerAuthRejected as e:
+                await self._handle_auth_failure(e)
+                break
             except Exception:
                 # 瞬态 redis/网络抖动不应经 gather 杀掉整个 worker(对照 scheduler._event_loop 容错):
                 # 记日志后继续,下一拍重试;丢几拍由 worker_status.online_window(30s)容忍。
@@ -352,8 +373,7 @@ class Worker:
 
     def _apply_desired_config(self, payload: dict | None) -> None:
         """中心期望配置热应用(注册响应/每拍心跳带回)。rev 不高于已生效值即跳过(幂等);
-        pools/tags 下轮认领生效(_claim_loop 每轮读 self.*);并发由 supervisor 对齐
-        (扩=即刻补新 slot,缩=超编 slot 跑完当前任务自然退出,绝不打断在跑步骤)。"""
+        当前只接受 concurrency。扩=即刻补新 slot,缩=超编 slot 跑完当前任务自然退出。"""
         if not payload:
             return
         rev = int(payload.get("cfg_rev") or 0)
@@ -361,24 +381,10 @@ class Worker:
         if not cfg or rev <= self._cfg_applied_rev:
             return
         changed: dict = {}
-        pools = cfg.get("pools")
-        if isinstance(pools, list) and pools and pools != self.pools:
-            self.pools = [str(x) for x in pools]
-            changed["pools"] = self.pools
         conc = cfg.get("concurrency")
         if isinstance(conc, int) and conc >= 1 and conc != self.concurrency:
             self.concurrency = conc
             changed["concurrency"] = conc
-        if "tags" in cfg and isinstance(cfg["tags"], list):
-            new_tags = {str(x) for x in cfg["tags"]}
-            if new_tags != self.tags:
-                self.tags = new_tags
-                changed["tags"] = sorted(new_tags)
-        if "reject_tags" in cfg and isinstance(cfg["reject_tags"], list):
-            new_rt = {str(x) for x in cfg["reject_tags"]}
-            if new_rt != self.reject_tags:
-                self.reject_tags = new_rt
-                changed["reject_tags"] = sorted(new_rt)
         self._cfg_applied_rev = rev
         logger.info(
             "worker_config_applied", worker_id=self.worker_id,
@@ -412,50 +418,17 @@ class Worker:
             if tasks:
                 await asyncio.gather(*tasks.values(), return_exceptions=True)
 
-    # 认证自愈:401 后重注册,指数退避,连续 6h 失败则自杀
-
-    async def _handle_auth_failure(self) -> None:
-        """收到 WorkerAuthRejected(401)时调:首发记一条事件;去抖重注册;指数退避;连续满 6h 仍 401 则自杀退出.
-        多 slot/心跳会并发触发,_auth_lock 串行化(避免同窗口重复重注册)."""
+    async def _handle_auth_failure(self, error: WorkerAuthRejected | None = None) -> None:
+        """收到 WorkerAuthRejected 时停机。长期 token 被拒后不得用 registration token 复活。"""
         async with self._auth_lock:
-            now = time.time()
-            host = socket.gethostname()
-            if self._auth_failed_since is None:
-                self._auth_failed_since = now
-                logger.warning(
-                    "worker_auth_rejected", worker_id=self.worker_id,
-                    host=host, version=FLORI_VERSION,
-                )
-            elapsed = now - self._auth_failed_since
-            if elapsed >= self._auth_giveup_sec:
-                # 连续认证失败超阈值(默认 6h):认定已被服务端注销=孤儿,自杀退出.
-                # 置 _shutdown 后各 slot/心跳循环随之收场,run() 返回,进程退出.
-                logger.error(
-                    "worker_auth_giveup_exit", worker_id=self.worker_id,
-                    host=host, version=FLORI_VERSION, failed_sec=round(elapsed),
-                )
-                self._shutdown = True
+            if self._shutdown:
                 return
-            # 去抖重注册(每 _reauth_min_interval 至多一次):成功则下拍 200,_note_auth_ok 清零自愈.
-            if now - self._last_reauth >= self._reauth_min_interval:
-                self._last_reauth = now
-                try:
-                    await self.register()
-                    logger.info("worker_reauth_attempt", worker_id=self.worker_id, host=host)
-                except Exception:
-                    # 重注册也失败(注册 token 过期 503 / 网络)时保持失败态,继续退避,等下个窗口再试.
-                    logger.warning(
-                        "worker_reauth_failed", worker_id=self.worker_id, host=host, exc_info=True,
-                    )
-            self._auth_backoff = min(self._auth_backoff * 2, 60.0)
-
-    def _note_auth_ok(self) -> None:
-        """一次 runner 请求成功(未 401)就清认证失败态,退避归位.健康时为廉价 no-op."""
-        if self._auth_failed_since is not None:
-            logger.info("worker_reauth_ok", worker_id=self.worker_id, host=socket.gethostname())
-            self._auth_failed_since = None
-            self._auth_backoff = 1.0
-            self._last_reauth = 0.0
+            self._fatal_error = error or WorkerAuthRejected()
+            logger.error(
+                "worker_auth_rejected_exit", worker_id=self.worker_id,
+                host=socket.gethostname(), version=FLORI_VERSION,
+            )
+            self._shutdown = True
 
     # 主循环
 
@@ -477,21 +450,18 @@ class Worker:
                     self.worker_id, self.pools, self._pool_limits(),
                     self.tags, self.reject_tags,
                 )
-            except WorkerAuthRejected:
-                # token 失效:重注册+退避;超 6h 后 _handle_auth_failure 置 _shutdown 退出.
-                # 401 不能当"无任务"处理,否则会每秒空转死刷.
-                await self._handle_auth_failure()
-                if self._shutdown:
-                    break
-                await asyncio.sleep(self._auth_backoff)
-                continue
-            self._note_auth_ok()
+            except WorkerAuthRejected as e:
+                await self._handle_auth_failure(e)
+                break
             if task:
                 last_task_time = time.time()
                 try:
                     await self.execute(task)
                 except asyncio.CancelledError:
                     raise
+                except WorkerAuthRejected as e:
+                    await self._handle_auth_failure(e)
+                    break
                 except Exception:
                     # 单任务异常绝不杀主循环:execute 内部已尽量 report_failed/release;此处兜底
                     # 极端情形(如 execute 自身的上报/release 逃逸),记日志后续跑.
@@ -514,7 +484,7 @@ class Worker:
     async def _download_credentials_env(self, step: str, source: str) -> dict:
         """下载步的中心分发凭证写入子进程 env(docs/03 §1.7.1).仅 01_download 领取;
         按 source 只取所需(减少审计噪声),source 未知则两种都试.领取失败/未配置
-        一律降级匿名(空 dict/缺项),绝不因凭证问题挂掉下载任务."""
+        降级匿名;worker token 被拒时停机。"""
         if step != "01_download":
             return {}
         wanted: list[tuple[str, str]] = []
@@ -531,9 +501,9 @@ class Worker:
         for key, env_name in wanted:
             try:
                 value = await self.transport.get_credential(key)
+            except WorkerAuthRejected:
+                raise
             except Exception as e:
-                # 含 WorkerAuthRejected:凭证失败只降级匿名,不挂任务;token 真失效由
-                # 下一次认领请求的 401 触发主循环自愈,无需在任务路径重复处理。
                 logger.warning("credential_env_skipped", key=key, error=str(e)[:120])
                 continue
             if value:
@@ -556,6 +526,7 @@ class Worker:
 
         start = time.time()
         work_dir = None
+        auth_failed = False
         try:
             work_dir = await self.storage.pull(job_id, step)
 
@@ -633,6 +604,8 @@ class Worker:
                 # 重试时重新生成并推送,绝不在产物缺失时标完成。
                 try:
                     await self.storage.push(job_id, step, work_dir)
+                except WorkerAuthRejected:
+                    raise
                 except Exception as push_err:
                     await self.transport.report_failed(
                         claim,
@@ -666,6 +639,10 @@ class Worker:
                     job_id=job_id, step=step, error=error_msg[:200],
                 )
 
+        except WorkerAuthRejected:
+            auth_failed = True
+            raise
+
         except asyncio.TimeoutError:
             duration = time.time() - start
             if work_dir:
@@ -696,12 +673,13 @@ class Worker:
         finally:
             if work_dir:
                 await self.storage.cleanup(job_id, step, work_dir)
-            await self.transport.release(claim)
+            if not auth_failed:
+                await self.transport.release(claim)
 
     # 运行中日志推送
 
     async def _push_step_log(self, job_id: str, step: str, work_dir: Path) -> None:
-        """把运行中日志推回存储,供前端准实时拉取。超阈值只推尾部,失败不致命。"""
+        """把运行中日志推回存储。网络失败不致命,auth 失败停机。"""
         log_path = work_dir / "logs" / f"{step}.log"
         if not log_path.is_file():
             return
@@ -715,6 +693,8 @@ class Worker:
             else:
                 data = log_path.read_bytes()
             await self.storage.write_file(job_id, f"logs/{step}.log", data)
+        except WorkerAuthRejected:
+            raise
         except Exception:
             logger.warning(
                 "step_log_push_failed", worker_id=self.worker_id,
@@ -735,9 +715,11 @@ class Worker:
         return "unknown", ""
 
     async def _push_safe(self, job_id: str, step: str, work_dir: Path) -> None:
-        """把本步产物(含日志)推回存储;失败不致命(避免遮蔽真正的步骤错误)。"""
+        """把本步产物推回存储。网络失败不遮蔽步骤错误,auth 失败停机。"""
         try:
             await self.storage.push(job_id, step, work_dir)
+        except WorkerAuthRejected:
+            raise
         except Exception:
             logger.warning(
                 "storage_push_failed", worker_id=self.worker_id,
@@ -745,13 +727,15 @@ class Worker:
             )
 
     async def _collect_usage(self, job_id: str, step: str, work_dir: Path) -> None:
-        # usage 仅统计/计费侧效应:解析或上报失败只降级为"统计不准",绝不让步骤结论翻转。
+        # usage 仅统计/计费侧效应:解析或网络失败只降级为"统计不准",绝不让步骤结论翻转。
         # 成功与失败路径都调(失败步在挂之前完成的 LLM 调用是真实开销,必须入账;exec_id UNIQUE 幂等)。
         try:
             usages = collect_usage_from_file(work_dir / "logs", step)
             for usage in usages:
                 usage.worker_id = self.worker_id   # 归因到执行节点(直连路径;网关路径 api 据 token 再认定)
                 await self.transport.record_ai_usage(usage)
+        except WorkerAuthRejected:
+            raise
         except Exception:
             logger.warning(
                 "collect_usage_failed", worker_id=self.worker_id,

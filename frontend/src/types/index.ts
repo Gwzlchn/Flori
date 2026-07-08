@@ -158,7 +158,7 @@ export interface WorkerLoad {
 
 export interface Worker {
   // 中心配置(desired=期望;cfg_rev/applied_cfg_rev 比对显示"待同步/已生效")
-  desired_config?: { pools?: string[]; concurrency?: number; tags?: string[]; reject_tags?: string[] } | null
+  desired_config?: WorkerDesiredConfig | null
   cfg_rev?: number
   applied_cfg_rev?: number
   id: string
@@ -184,6 +184,15 @@ export interface Worker {
   started_at: string | null
   last_heartbeat: string | null
   admin_note: string | null
+}
+
+export interface WorkerDesiredConfig {
+  concurrency?: number
+}
+
+export interface WorkerRegistrationToken {
+  token: string
+  expires_in_sec: number | null
 }
 
 // Task = worker 认领执行的最小单元(某作业 job 的某步骤 step 的一次执行);每条对应一个 step 记录。

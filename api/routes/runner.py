@@ -21,7 +21,13 @@ from shared.config import AppConfig
 from shared.db import Database
 from shared.models import AIUsage, Worker, generate_worker_id
 from shared.redis_client import RedisClient
-from shared.status import DEFAULT_ONLINE_WINDOW_SEC
+from shared.status import (
+    DEFAULT_ONLINE_WINDOW_SEC,
+    DEFAULT_STALE_WINDOW_SEC,
+    OFFLINE,
+    STALE,
+    compute_worker_status,
+)
 from shared.storage import StorageBackend, is_credential_file
 from api.deps import (
     get_config,
@@ -58,6 +64,29 @@ def _worker_ttl(config: AppConfig) -> int:
     return int(ws.get("online_window_sec", DEFAULT_ONLINE_WINDOW_SEC))
 
 
+def _worker_windows(config: AppConfig) -> tuple[int, int]:
+    ws = (config.pools or {}).get("worker_status") or {}
+    return (
+        int(ws.get("online_window_sec", DEFAULT_ONLINE_WINDOW_SEC)),
+        int(ws.get("stale_window_sec", DEFAULT_STALE_WINDOW_SEC)),
+    )
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def _remote_addr(request: Request) -> str:
+    _xff = request.headers.get("x-forwarded-for", "")
+    return _xff.split(",")[0].strip() if _xff else (request.client.host if request.client else "")
+
+
 class RunnerRegisterRequest(BaseModel):
     worker_id: str | None = None
     type: str
@@ -69,11 +98,23 @@ class RunnerRegisterRequest(BaseModel):
     spec: dict = Field(default_factory=dict)   # 版本/机器配置(worker 自报,redis-only)
 
 
+class RunnerResumeRequest(BaseModel):
+    worker_id: str
+    type: str
+    pools: list[str]
+    tags: list[str] = Field(default_factory=list)
+    reject_tags: list[str] = Field(default_factory=list)
+    hostname: str | None = None
+    concurrency: int = 1
+    spec: dict = Field(default_factory=dict)
+
+
 class RunnerHeartbeatRequest(BaseModel):
     worker_id: str
     status: str = "idle"
     current_job: str = ""
     current_step: str = ""
+    concurrency: int | None = Field(default=None, ge=1, le=64)
     load: dict = Field(default_factory=dict)   # 本机 live 负载 {cpu_pct,mem_pct,loadavg};可空
     applied_cfg_rev: int = 0                   # worker 已生效的配置版本(回报,前端显示同步态)
     # 在跑步集合 [{job_id,step}]:心跳捎带,为每个并发步刷进度心跳。独立 alive 通道
@@ -92,43 +133,38 @@ def _bearer(request: Request) -> str:
     return value.strip() if scheme.lower() == "bearer" else ""
 
 
-@router.post("/register")
-async def register(
-    req: RunnerRegisterRequest,
-    request: Request,
-    db: Database = Depends(get_db),
-    redis: RedisClient = Depends(get_redis),
-    config: AppConfig = Depends(get_config),
-):
-    """接入门禁通过后,服务端分配 worker_id、签发 per-worker token,
-    并作为单一写者写 Redis + DB;返回 token 仅此一次。"""
-    await verify_registration_token(_bearer(request), redis)
-
-    worker_id = req.worker_id or generate_worker_id(req.type)
-    worker_token = "flwt-" + secrets.token_urlsafe(48)
-    token_hash = hashlib.sha256(worker_token.encode()).hexdigest()
-    now = datetime.now(timezone.utc)
-
-    # 重注册保留管理员暂停态:worker 重启不应清掉暂停(否则每次重启都要重新暂停)。
-    # 从 DB(持久,无 TTL)读已有 admin_status;新 worker 无记录则为空。
-    _existing = await asyncio.to_thread(db.get_worker, worker_id)
-    admin_status = _existing.admin_status if _existing else ""
-
-    await asyncio.to_thread(
-        db.upsert_worker_token,
-        token_hash=token_hash,
-        worker_id=worker_id,
-        pools=req.pools,
-        tags=req.tags,
-        created_at=now,
-        revoked=False,
+async def _redis_worker_public_status(
+    redis: RedisClient, worker_id: str, config: AppConfig,
+) -> str | None:
+    info = await redis.get_worker_info(worker_id)
+    if not info:
+        return None
+    online_window, stale_window = _worker_windows(config)
+    return compute_worker_status(
+        last_heartbeat=_parse_iso(info.get("last_heartbeat")),
+        current_job=info.get("current_job") or None,
+        admin_status=info.get("admin_status"),
+        online_window_sec=online_window,
+        stale_window_sec=stale_window,
     )
 
-    # 连接来源:网关 worker 经 Caddy 与隧道连到 api,真实客户端 IP 在 Caddy 注入的 X-Forwarded-For;
-    # 无该头(本机直连 api)则取 request.client.host。供详情页显示 worker 连接来源。
-    _xff = request.headers.get("x-forwarded-for", "")
-    remote_addr = _xff.split(",")[0].strip() if _xff else (request.client.host if request.client else "")
-    # 单写者:服务端同时写 Redis liveness 与 DB 行,info 形态与 RedisTransport.register 对齐。
+
+async def _upsert_worker_presence(
+    *,
+    req: RunnerRegisterRequest | RunnerResumeRequest,
+    worker_id: str,
+    request: Request,
+    db: Database,
+    redis: RedisClient,
+    config: AppConfig,
+) -> tuple[dict | None, int]:
+    """注册/resume 的单写路径:刷新 Redis 实时态并 upsert DB worker 行。
+
+    DB 管理态来自旧行;desired_config/cfg_rev 不在 upsert 列清单中,由 DB helper 保留。"""
+    now = datetime.now(timezone.utc)
+    existing = await asyncio.to_thread(db.get_worker, worker_id)
+    admin_status = existing.admin_status if existing else ""
+    remote_addr = _remote_addr(request)
     info = {
         "type": req.type,
         "pools": ",".join(req.pools),
@@ -157,28 +193,100 @@ async def register(
             admin_status=admin_status,
             concurrency=req.concurrency,
             remote_addr=remote_addr or None,
+            current_job=None,
+            current_step=None,
+            tasks_completed=existing.tasks_completed if existing else 0,
+            tasks_failed=existing.tasks_failed if existing else 0,
+            total_duration_sec=existing.total_duration_sec if existing else 0.0,
+            first_seen=existing.first_seen if existing else now,
             started_at=now,
-            first_seen=now,
             last_heartbeat=now,
+            admin_note=existing.admin_note if existing else None,
         ),
+    )
+    return await asyncio.to_thread(db.get_worker_desired_config, worker_id)
+
+
+@router.post("/register")
+async def register(
+    req: RunnerRegisterRequest,
+    request: Request,
+    db: Database = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+    config: AppConfig = Depends(get_config),
+):
+    """接入门禁通过后,服务端分配 worker_id、签发 per-worker token,
+    并作为单一写者写 Redis + DB;返回 token 仅此一次。"""
+    await verify_registration_token(_bearer(request), redis)
+
+    worker_id = req.worker_id or generate_worker_id(req.type)
+    public_status = await _redis_worker_public_status(redis, worker_id, config)
+    if public_status not in (None, OFFLINE, STALE):
+        raise HTTPException(
+            status_code=409,
+            detail="duplicate worker is already online; use cached worker token to resume",
+        )
+
+    issued = "flwt-" + secrets.token_urlsafe(48)
+    token_hash = hashlib.sha256(issued.encode()).hexdigest()
+    now = datetime.now(timezone.utc)
+
+    await asyncio.to_thread(
+        db.upsert_worker_token,
+        token_hash=token_hash,
+        worker_id=worker_id,
+        pools=req.pools,
+        tags=req.tags,
+        created_at=now,
+        revoked=False,
+        revoke_existing=True,
+    )
+
+    desired, cfg_rev = await _upsert_worker_presence(
+        req=req, worker_id=worker_id, request=request, db=db, redis=redis, config=config,
     )
     # 连接事件发到 events:system,/system 事件页可见谁连上了/重注册(含 type/host/版本/来源)。best-effort。
     try:
         await redis.push_event(
             "worker_registered", worker_id=worker_id, worker_type=req.type,
-            host=req.hostname or "", source=remote_addr,
+            host=req.hostname or "", source=_remote_addr(request),
             version=request.headers.get("x-worker-version", ""),
         )
     except Exception:
         pass
-    # 中心期望配置随注册响应下发(首拍即齐);重注册 worker 已有配置时立即拿到。
-    desired, cfg_rev = await asyncio.to_thread(db.get_worker_desired_config, worker_id)
-    return {
+    response = {
         "worker_id": worker_id,
-        "worker_token": worker_token,
         "desired_config": desired,
         "cfg_rev": cfg_rev,
     }
+    response["worker_token"] = issued
+    return response
+
+
+@router.post("/resume")
+async def resume(
+    req: RunnerResumeRequest,
+    request: Request,
+    worker_id: str = Depends(verify_worker_token),
+    db: Database = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+    config: AppConfig = Depends(get_config),
+):
+    """持久 per-worker token 恢复在线态;不签发新 token。"""
+    if req.worker_id != worker_id:
+        raise HTTPException(status_code=403, detail="token/worker_id mismatch")
+    desired, cfg_rev = await _upsert_worker_presence(
+        req=req, worker_id=worker_id, request=request, db=db, redis=redis, config=config,
+    )
+    try:
+        await redis.push_event(
+            "worker_resumed", worker_id=worker_id, worker_type=req.type,
+            host=req.hostname or "", source=_remote_addr(request),
+            version=request.headers.get("x-worker-version", ""),
+        )
+    except Exception:
+        pass
+    return {"worker_id": worker_id, "desired_config": desired, "cfg_rev": cfg_rev}
 
 
 @router.post("/heartbeat")
@@ -200,12 +308,15 @@ async def heartbeat(
     # live 负载落 redis worker hash(实时态,不进 DB);为空则不写,保留上次。
     if req.load:
         await redis.set_worker_field(worker_id, "load", json.dumps(req.load))
+    if req.concurrency is not None:
+        await redis.set_worker_field(worker_id, "concurrency", str(req.concurrency))
     await asyncio.to_thread(
         db.update_worker_heartbeat,
         worker_id,
         status=req.status,
         current_job=req.current_job,
         current_step=req.current_step,
+        concurrency=req.concurrency,
     )
     # worker 回报已生效配置版本,写入 redis hash 供前端显示同步状态.
     if req.applied_cfg_rev:
@@ -223,6 +334,8 @@ async def offline(
     db: Database = Depends(get_db),
 ):
     """worker 主动下线:仅置 status=offline,不触碰 last_heartbeat。"""
+    if req.worker_id != worker_id:
+        raise HTTPException(status_code=403, detail="token/worker_id mismatch")
     await asyncio.to_thread(db.set_worker_status, worker_id, "offline")
     return {"ok": True}
 

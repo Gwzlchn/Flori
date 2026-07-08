@@ -127,6 +127,103 @@ class TestRegisterAllocates:
         assert info["tags"] == "claude-cli,vision"
         assert info["reject_tags"] == "a,b"
 
+    @pytest.mark.asyncio
+    async def test_reregister_revokes_previous_token(self, client, db):
+        first = await _register(client, worker_id="cpu-fixed01")
+        second = await _register(client, worker_id="cpu-fixed01")
+        assert first.status_code == 200
+        assert second.status_code == 200
+        old_token = first.json()["worker_token"]
+        new_token = second.json()["worker_token"]
+
+        old_hash = hashlib.sha256(old_token.encode()).hexdigest()
+        new_hash = hashlib.sha256(new_token.encode()).hexdigest()
+        assert db.get_worker_token_by_hash(old_hash)["revoked"] is True
+        assert db.get_worker_token_by_hash(new_hash)["revoked"] is False
+
+        resp = await client.post(
+            "/api/runner/heartbeat",
+            json={"worker_id": "cpu-fixed01"},
+            headers={"Authorization": f"Bearer {old_token}"},
+        )
+        assert resp.status_code == 401
+        resp = await client.post(
+            "/api/runner/heartbeat",
+            json={"worker_id": "cpu-fixed01"},
+            headers={"Authorization": f"Bearer {new_token}"},
+        )
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_duplicate_online_worker_register_409(self, client, redis_mock):
+        redis_mock.get_worker_info.return_value = {
+            "type": "cpu",
+            "last_heartbeat": _utcnow().isoformat(),
+            "current_job": "",
+            "admin_status": "",
+        }
+        resp = await _register(client, worker_id="cpu-live01")
+        assert resp.status_code == 409
+        assert "duplicate worker" in resp.json()["message"]
+
+
+class TestResume:
+    async def _register_worker(self, client):
+        resp = await _register(client)
+        body = resp.json()
+        return body["worker_id"], body["worker_token"]
+
+    @pytest.mark.asyncio
+    async def test_resume_refreshes_presence_without_new_token(self, client, db, redis_mock):
+        worker_id, token = await self._register_worker(client)
+        db.set_worker_desired_config(worker_id, {"concurrency": 4})
+        db.set_worker_admin_status(worker_id, "paused")
+
+        resp = await client.post(
+            "/api/runner/resume",
+            json={
+                "worker_id": worker_id,
+                "type": "cpu",
+                "pools": ["cpu"],
+                "tags": ["vision"],
+                "reject_tags": ["foreign"],
+                "hostname": "host-a",
+                "concurrency": 2,
+                "spec": {"version": "test"},
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body == {
+            "worker_id": worker_id,
+            "desired_config": {"concurrency": 4},
+            "cfg_rev": 1,
+        }
+        assert "worker_token" not in body
+        args, kwargs = redis_mock.register_worker.call_args
+        assert args[0] == worker_id
+        info = args[1]
+        assert info["admin_status"] == "paused"
+        assert info["pools"] == "cpu"
+        assert info["tags"] == "vision"
+        assert info["reject_tags"] == "foreign"
+        assert kwargs.get("ttl") == 30
+        row = db.get_worker(worker_id)
+        assert row.admin_status == "paused"
+        assert row.pools == ["cpu"]
+
+    @pytest.mark.asyncio
+    async def test_resume_worker_id_mismatch_403(self, client):
+        _, token = await self._register_worker(client)
+        resp = await client.post(
+            "/api/runner/resume",
+            json={"worker_id": "cpu-other", "type": "cpu", "pools": ["cpu"]},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 403
+
 
 class TestHeartbeat:
     async def _register_worker(self, client):
@@ -216,6 +313,17 @@ class TestOffline:
     async def test_offline_requires_token(self, client):
         resp = await client.post("/api/runner/offline", json={"worker_id": "cpu-x"})
         assert resp.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_offline_worker_id_mismatch_403(self, client):
+        resp = await _register(client)
+        token = resp.json()["worker_token"]
+        resp = await client.post(
+            "/api/runner/offline",
+            json={"worker_id": "cpu-other"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 403
 
 
 class TestTokenRevocationViaDelete:
@@ -758,7 +866,7 @@ class TestArtifacts:
 
 
 class TestWorkerTokenThrottle:
-    """无效 per-worker token 连续 401 → 达阈值返回 429+Retry-After(挡旧 worker 死刷 jobs/request);
+    """无效 per-worker token 连续 401 → 达阈值返回 429+Retry-After(挡失效 token 死刷 jobs/request);
     有效 token 命中即清计数,不被误限流。"""
 
     @pytest.mark.asyncio
@@ -896,16 +1004,18 @@ class TestConfigDispatch:
     async def test_heartbeat_reports_applied_and_returns_config(self, client, db, redis_mock):
         resp = await _register(client, worker_id="cpu-hb001")
         token = resp.json()["worker_token"]
-        db.set_worker_desired_config("cpu-hb001", {"pools": ["cpu", "io"]})
+        db.set_worker_desired_config("cpu-hb001", {"concurrency": 2})
         r = await client.post(
             "/api/runner/heartbeat",
             headers={"Authorization": f"Bearer {token}"},
-            json={"worker_id": "cpu-hb001", "applied_cfg_rev": 3},
+            json={"worker_id": "cpu-hb001", "applied_cfg_rev": 3, "concurrency": 5},
         )
         assert r.status_code == 200
         body = r.json()
-        assert body["desired_config"] == {"pools": ["cpu", "io"]} and body["cfg_rev"] == 1
+        assert body["desired_config"] == {"concurrency": 2} and body["cfg_rev"] == 1
         redis_mock.set_worker_field.assert_any_call("cpu-hb001", "cfg_applied_rev", "3")
+        redis_mock.set_worker_field.assert_any_call("cpu-hb001", "concurrency", "5")
+        assert db.get_worker("cpu-hb001").concurrency == 5
 
 
 @pytest.mark.asyncio

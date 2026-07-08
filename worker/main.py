@@ -12,6 +12,7 @@ import structlog
 
 from shared.config import load_config
 from shared.db import Database
+from shared.errors import WorkerFatalError
 from shared.redis_client import RedisClient
 from shared.storage import GatewayStorage, create_storage
 
@@ -70,7 +71,7 @@ async def main() -> None:
     transport = create_transport(redis, db)
 
     if gateway_url:
-        # 产物经网关中转:token_getter 绑定 transport,用 register 拿到的 per-worker token。
+        # 产物经网关中转:token_getter 绑定 transport,用 register/resume 后的 worker token。
         work_dir = Path(os.environ.get("WORK_DIR", "/tmp/flori-work"))
         storage = GatewayStorage(
             gateway_url,
@@ -116,4 +117,14 @@ async def main() -> None:
 if __name__ == "__main__":
     from shared.logging_setup import setup_logging
     setup_logging()
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except WorkerFatalError as e:
+        logger.error(
+            "worker_fatal_exit",
+            reason=e.reason,
+            status_code=e.status_code,
+            endpoint=e.endpoint,
+            error=str(e)[:200],
+        )
+        raise SystemExit(1)

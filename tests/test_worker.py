@@ -1264,57 +1264,86 @@ class TestReadMediaDuration:
 
 
 class TestWorkerAuthRecovery:
-    """worker 认证自愈:401(WorkerAuthRejected)触发重注册 + 指数退避;连续超阈值后自杀(_shutdown).
-    没有重注册与退避时,401 会让 worker 每秒死刷 jobs/request 刷爆 api 日志。"""
+    """worker token 被拒后 fail-fast,不得用 registration token 自动复活。"""
 
     @pytest.mark.asyncio
-    async def test_auth_failure_reregisters_and_backs_off(self, worker, monkeypatch):
+    async def test_auth_failure_sets_shutdown_without_reregister(self, worker, monkeypatch):
         calls = []
         async def fake_register():
             calls.append(1)
         monkeypatch.setattr(worker, "register", fake_register)
-        assert worker._auth_failed_since is None
+
         await worker._handle_auth_failure()
-        assert worker._auth_failed_since is not None      # 进入失败态
-        assert len(calls) == 1                             # 触发重注册
-        assert worker._auth_backoff == 2.0                 # 退避翻倍(1 到 2)
-        assert not worker._shutdown
+
+        assert worker._shutdown
+        assert worker._fatal_error is not None
+        assert calls == []
 
     @pytest.mark.asyncio
-    async def test_note_auth_ok_resets(self, worker, monkeypatch):
-        async def fake_register():
-            return None
-        monkeypatch.setattr(worker, "register", fake_register)
-        await worker._handle_auth_failure()
-        assert worker._auth_failed_since is not None
-        worker._note_auth_ok()                             # 一次成功请求
-        assert worker._auth_failed_since is None           # 清零自愈
-        assert worker._auth_backoff == 1.0
-
-    @pytest.mark.asyncio
-    async def test_giveup_after_timeout_sets_shutdown(self, worker, monkeypatch):
-        worker._auth_giveup_sec = 100
-        async def fake_register():
-            return None
-        monkeypatch.setattr(worker, "register", fake_register)
-        await worker._handle_auth_failure()                # 首发:置 _auth_failed_since=now
-        assert not worker._shutdown                         # 未超时
-        worker._auth_failed_since -= 200                    # 回拨首发时刻,模拟已连续失败 200s>100s
-        await worker._handle_auth_failure()
-        assert worker._shutdown                             # 自杀
-
-    @pytest.mark.asyncio
-    async def test_reauth_debounced(self, worker, monkeypatch):
+    async def test_auth_failure_handler_is_idempotent(self, worker, monkeypatch):
         calls = []
         async def fake_register():
             calls.append(1)
         monkeypatch.setattr(worker, "register", fake_register)
-        await worker._handle_auth_failure()                # 第一次重注册
-        await worker._handle_auth_failure()                # 30s 窗口内不重注册(去抖)
-        assert len(calls) == 1
+        await worker._handle_auth_failure()
+        await worker._handle_auth_failure()
+        assert worker._shutdown
+        assert calls == []
 
     @pytest.mark.asyncio
-    async def test_gateway_request_step_raises_authrejected_on_401(self, monkeypatch):
+    async def test_claim_loop_stops_on_auth_rejected(self, worker):
+        from worker.transport import WorkerAuthRejected
+
+        async def reject(*_a, **_k):
+            raise WorkerAuthRejected()
+
+        worker.transport.request_step = reject
+        await worker._claim_loop()
+        assert worker._shutdown
+
+    @pytest.mark.asyncio
+    async def test_execute_auth_rejected_stops_claim_loop(self, worker):
+        from worker.transport import WorkerAuthRejected
+
+        async def one_task(*_a, **_k):
+            return make_claim()
+
+        async def reject_execute(_claim):
+            raise WorkerAuthRejected()
+
+        worker.transport.request_step = one_task
+        worker.execute = reject_execute
+        await worker._claim_loop()
+        assert worker._shutdown
+
+    @pytest.mark.asyncio
+    async def test_execute_auth_rejected_skips_release(self, worker, tmp_jobs_dir):
+        from worker.transport import WorkerAuthRejected
+
+        (tmp_jobs_dir / "j_test_001").mkdir(exist_ok=True)
+
+        async def reject_run_step(ctx, on_progress, on_tick):
+            await on_tick()
+            return 0, ""
+
+        release_calls = []
+
+        async def release(_claim):
+            release_calls.append(1)
+
+        async def reject_alive(*_a, **_k):
+            raise WorkerAuthRejected()
+
+        worker.runner.run_step = reject_run_step
+        worker.transport.report_step_alive = reject_alive
+        worker.transport.release = release
+
+        with pytest.raises(WorkerAuthRejected):
+            await worker.execute(make_claim())
+        assert release_calls == []
+
+    @pytest.mark.asyncio
+    async def test_gateway_request_step_raises_authrejected_on_401(self):
         from worker.gateway_transport import GatewayTransport
         from worker.transport import WorkerAuthRejected
 
@@ -1338,7 +1367,7 @@ class TestWorkerAuthRecovery:
 
 class TestWorkerRegisterRetry:
     """register() 连不上网关(部署时 api 晚起的启动竞态)→ WARN + 固定间隔重试,不崩进程;
-    401/503(HTTPStatusError)不在连接重试内,照常上抛走既有路径。"""
+    5xx 退避重试,4xx/auth/contract/config fail-fast。"""
 
     @pytest.mark.asyncio
     async def test_retries_on_connect_error_then_succeeds(self, worker, monkeypatch, capsys):
@@ -1357,16 +1386,46 @@ class TestWorkerRegisterRetry:
         assert "register_connect_retry" in capsys.readouterr().out   # 打了 WARN(非整屏 traceback)
 
     @pytest.mark.asyncio
-    async def test_does_not_retry_on_http_status_error(self, worker, monkeypatch):
+    async def test_retries_on_5xx_status_then_succeeds(self, worker, monkeypatch, capsys):
         import httpx
         req = httpx.Request("POST", "http://x/api/runner/register")
         resp = httpx.Response(503, request=req)
+        calls = []
+
         async def rejecting_register(**kw):
-            raise httpx.HTTPStatusError("registration disabled", request=req, response=resp)
+            calls.append(1)
+            if len(calls) == 1:
+                raise httpx.HTTPStatusError("api restarting", request=req, response=resp)
+            return "io-stable456"
+
         monkeypatch.setattr(worker.transport, "register", rejecting_register)
         monkeypatch.setenv("REGISTER_RETRY_SEC", "0")
-        with pytest.raises(httpx.HTTPStatusError):            # 503/401 照常上抛,不被连接重试吞
+
+        await worker.register()
+
+        assert len(calls) == 2
+        assert worker.worker_id == "io-stable456"
+        assert "register_http_retry" in capsys.readouterr().out
+
+    @pytest.mark.asyncio
+    async def test_4xx_status_becomes_worker_contract_error(self, worker, monkeypatch):
+        import httpx
+        from worker.transport import WorkerContractError
+
+        req = httpx.Request("POST", "http://x/api/runner/resume")
+        resp = httpx.Response(404, request=req)
+
+        async def rejecting_register(**kw):
+            raise httpx.HTTPStatusError("missing endpoint", request=req, response=resp)
+
+        monkeypatch.setattr(worker.transport, "register", rejecting_register)
+        monkeypatch.setenv("REGISTER_RETRY_SEC", "0")
+
+        with pytest.raises(WorkerContractError) as got:
             await worker.register()
+
+        assert got.value.status_code == 404
+        assert got.value.reason == "worker_register_rejected"
 
 
 class TestCollectUsageOnFailure:
@@ -1461,17 +1520,21 @@ class TestAITaskTranscript:
 
 
 class TestConfigHotApply:
-    """中心配置热应用(docs/03 §1.7.2):rev 幂等、pools/并发热更、缩容槽自退、
-    LocalTransport 心跳带回配置。"""
+    """中心配置热应用(docs/03 §1.7.2):rev 幂等、并发热更、缩容槽自退、心跳带回配置。"""
 
-    def test_apply_updates_fields_and_rev(self, worker):
+    def test_apply_updates_concurrency_and_ignores_capability_fields(self, worker):
+        before_pools = list(worker.pools)
+        before_tags = set(worker.tags)
+        before_reject_tags = set(worker.reject_tags)
         worker._apply_desired_config({
             "desired_config": {"pools": ["ai"], "concurrency": 4,
                                "tags": ["x"], "reject_tags": []},
             "cfg_rev": 2,
         })
-        assert worker.pools == ["ai"] and worker.concurrency == 4
-        assert worker.tags == {"x"} and worker.reject_tags == set()
+        assert worker.concurrency == 4
+        assert worker.pools == before_pools
+        assert worker.tags == before_tags
+        assert worker.reject_tags == before_reject_tags
         assert worker._cfg_applied_rev == 2
 
     def test_apply_is_rev_idempotent(self, worker):
@@ -1486,11 +1549,11 @@ class TestConfigHotApply:
         worker._apply_desired_config(None)                           # 空拍(网络抖动)忽略
         assert worker._cfg_applied_rev == 2
 
-    def test_apply_rejects_empty_pools(self, worker):
+    def test_apply_ignores_pools(self, worker):
         before = list(worker.pools)
         worker._apply_desired_config(
             {"desired_config": {"pools": []}, "cfg_rev": 3})
-        assert worker.pools == before   # 空池列表不应用(worker 至少订阅一个池)
+        assert worker.pools == before
 
     @pytest.mark.asyncio
     async def test_claim_slot_retires_when_over_concurrency(self, worker):
@@ -1503,10 +1566,12 @@ class TestConfigHotApply:
         await worker.register()
         db.set_worker_desired_config(worker.worker_id, {"concurrency": 3})
         payload = await worker.transport.heartbeat(
-            worker.worker_id, applied_cfg_rev=1)
+            worker.worker_id, applied_cfg_rev=1, concurrency=4)
         assert payload == {"desired_config": {"concurrency": 3}, "cfg_rev": 1}
         info = await redis.get_worker_info(worker.worker_id)
         assert info.get("cfg_applied_rev") == "1"
+        assert info.get("concurrency") == "4"
+        assert db.get_worker(worker.worker_id).concurrency == 4
 
     @pytest.mark.asyncio
     async def test_register_applies_initial_config(self, worker, db):
@@ -1517,5 +1582,6 @@ class TestConfigHotApply:
         db.upsert_worker(_W(id=wid, type="cpu", pools=["cpu"]))
         db.set_worker_desired_config(wid, {"concurrency": 5, "pools": ["cpu", "gpu"]})
         await worker.register()
-        assert worker.concurrency == 5 and worker.pools == ["cpu", "gpu"]
+        assert worker.concurrency == 5
+        assert worker.pools != ["cpu", "gpu"]
         assert worker._cfg_applied_rev == 1

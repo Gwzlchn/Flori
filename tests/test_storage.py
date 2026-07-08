@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from shared.errors import WorkerAuthRejected
 from shared.storage import (
     GatewayStorage,
     LocalStorage,
@@ -291,9 +292,10 @@ class _GatewayStorageHelpers:
         r.raise_for_status = MagicMock()
         return r
 
-    def _stream_cm(self, content=b""):
+    def _stream_cm(self, content=b"", status_code=200):
         """模拟 httpx client.stream(...) 返回的 async context manager(resp 有 aiter_bytes)。"""
         resp = MagicMock()
+        resp.status_code = status_code
         resp.raise_for_status = MagicMock()
 
         async def _aiter(chunk_size=65536):
@@ -372,6 +374,54 @@ class TestGatewayStorage(_GatewayStorageHelpers):
         await gw.write_file("j1", "job.json", b"X")
         assert client.put.call_args.args[0] == "/api/runner/jobs/j1/artifacts/job.json"
         assert client.put.call_args.kwargs["content"] == b"X"
+
+    @pytest.mark.asyncio
+    async def test_list_files_auth_rejected_raises(self, tmp_path):
+        gw, client = self._gw(tmp_path)
+        client.get.return_value = self._resp(status_code=401)
+        with pytest.raises(WorkerAuthRejected):
+            await gw.list_files("j1")
+
+    @pytest.mark.asyncio
+    async def test_list_files_auth_throttled_raises(self, tmp_path):
+        gw, client = self._gw(tmp_path)
+        client.get.return_value = self._resp(status_code=429)
+        with pytest.raises(WorkerAuthRejected):
+            await gw.list_files("j1")
+
+    @pytest.mark.asyncio
+    async def test_read_file_auth_rejected_raises(self, tmp_path):
+        gw, client = self._gw(tmp_path)
+        client.get.return_value = self._resp(status_code=403)
+        with pytest.raises(WorkerAuthRejected):
+            await gw.read_file("j1", "job.json")
+
+    @pytest.mark.asyncio
+    async def test_write_file_auth_rejected_raises(self, tmp_path):
+        gw, client = self._gw(tmp_path)
+        client.put.return_value = self._resp(status_code=401)
+        with pytest.raises(WorkerAuthRejected):
+            await gw.write_file("j1", "job.json", b"X")
+
+    @pytest.mark.asyncio
+    async def test_pull_object_auth_rejected_raises(self, tmp_path):
+        gw, client = self._gw(tmp_path)
+        client.get.return_value = self._resp(json_data={"files": ["job.json"]})
+        client.stream.return_value = self._stream_cm(status_code=403)
+        with pytest.raises(WorkerAuthRejected):
+            await gw.pull("j1", "01")
+
+    @pytest.mark.asyncio
+    async def test_push_auth_rejected_raises(self, tmp_path):
+        gw, client = self._gw(tmp_path)
+        client.put.return_value = self._resp(status_code=403)
+        work_dir = tmp_path / "work" / "j1"
+        work_dir.mkdir(parents=True)
+        (work_dir / "job.json").write_bytes(b"J")
+        gw._snapshots[str(work_dir)] = {}
+
+        with pytest.raises(WorkerAuthRejected):
+            await gw.push("j1", "01", work_dir)
 
     @pytest.mark.asyncio
     async def test_cleanup_rmtree(self, tmp_path):

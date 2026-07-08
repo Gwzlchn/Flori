@@ -1,13 +1,13 @@
-"""GatewayTransport:把 register/heartbeat/update_status 换成出站 HTTPS,其余委派内层。
+"""GatewayTransport:worker 经 Gateway HTTPS 注册、认领、上报和代理产物。
 
-有内层(RedisTransport)时:worker 仍直连 redis/db,认领走内层,注册/心跳额外打 gateway。
-无内层(inner=None)时:不连 redis/db,只出站 HTTPS;认领/产物全走 gateway,
-无内层可退回:不可达时只 log,不崩。内层委派方法在 inner 为空时返回安全默认值。
+有内层(RedisTransport)时:生命周期可镜像写本地 redis/db,但认领和上报仍走 gateway,
+避免双重认领。无内层(inner=None)时:不连 redis/db,只出站 HTTPS。
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import socket
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +17,12 @@ import httpx
 import structlog
 
 from shared.version import FLORI_VERSION
-from worker.transport import RedisTransport, WorkerAuthRejected
+from worker.transport import (
+    RedisTransport,
+    WorkerAuthRejected,
+    WorkerConfigError,
+    WorkerContractError,
+)
 
 logger = structlog.get_logger(component="gateway_transport")
 
@@ -31,11 +36,17 @@ class GatewayTransport:
         *,
         registration_token: str,
         id_file: str,
+        token_file: str | None = None,
         inner: Optional[RedisTransport] = None,
     ):
         self._base_url = base_url.rstrip("/")
         self._registration_token = registration_token
         self._id_file = Path(id_file)
+        self._token_file = Path(
+            token_file
+            or os.environ.get("WORKER_TOKEN_FILE", "").strip()
+            or (self._id_file.parent / "worker.token")
+        )
         self._inner = inner
         self._worker_token = ""
         # 本 worker 当前在跑的 (job_id, step) 集合:心跳捎带上报刷各步进度心跳(并发>1 必需)
@@ -70,23 +81,46 @@ class GatewayTransport:
         except OSError:
             return None
 
+    def _load_cached_token(self) -> str | None:
+        try:
+            cached = self._token_file.read_text().strip()
+            return cached or None
+        except OSError:
+            return None
+
     def _save_id(self, worker_id: str) -> None:
         try:
             self._id_file.parent.mkdir(parents=True, exist_ok=True)
             self._id_file.write_text(worker_id)
+        except OSError as e:
+            raise WorkerConfigError(
+                f"failed to persist worker id to {self._id_file}",
+                reason="worker_id_persist_failed",
+            ) from e
+
+    def _save_worker_token(self, token: str) -> None:
+        try:
+            self._token_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._token_file.with_name(f".{self._token_file.name}.tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(token)
+                f.write("\n")
+            os.replace(tmp, self._token_file)
+        except OSError as e:
+            raise WorkerConfigError(
+                f"failed to persist worker token to {self._token_file}",
+                reason="worker_token_persist_failed",
+            ) from e
+        try:
+            os.chmod(self._token_file, 0o600)
         except OSError:
-            # 缓存可选:纯网关 id 由服务端返回、WORKER_NAME 下确定性;无状态部署(不挂 /data)写不了无碍。
-            logger.debug("worker_id_cache_skipped", worker_id=worker_id)
+            logger.warning("worker_token_chmod_failed", path=str(self._token_file))
 
-    # 生命周期 / 心跳(走 gateway)
-
-    async def register(self, worker_id, worker_type, pools, tags,
-                       reject_tags, hostname, now, concurrency: int = 1,
-                       spec: dict | None = None):
-        # 缓存的 id 优先,让 worker 重启后复用同一身份(注册幂等)。
-        effective_id = self._load_cached_id() or worker_id
-        body = {
-            "worker_id": effective_id,
+    def _identity_body(self, worker_id, worker_type, pools, tags,
+                       reject_tags, hostname, concurrency, spec) -> dict:
+        return {
+            "worker_id": worker_id,
             "type": worker_type,
             "pools": pools,
             "tags": sorted(tags),
@@ -95,27 +129,84 @@ class GatewayTransport:
             "concurrency": concurrency,
             "spec": spec or {},
         }
-        resp = await self._http.post(
-            "/api/runner/register", json=body,
-            headers={"Authorization": f"Bearer {self._registration_token}"},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        self._worker_token = data.get("worker_token", "")
-        # 注册响应携带中心期望配置(首拍即齐);worker 读该属性应用,晚于心跳到达也无害(rev 幂等)。
-        self.initial_config = {
-            "desired_config": data.get("desired_config"),
-            "cfg_rev": int(data.get("cfg_rev") or 0),
-        }
-        returned_id = data.get("worker_id") or effective_id
-        self._save_id(returned_id)
-        # 身份头:随每个 runner 请求上送(诊断用,不可信)。version 是排障关键,用于识别未更新的 worker。
+
+    def _set_identity_headers(self, worker_id: str, worker_type: str,
+                              hostname: str) -> None:
         self._identity_headers = {
-            "X-Worker-Id": returned_id,
+            "X-Worker-Id": worker_id,
             "X-Worker-Type": worker_type or "",
             "X-Worker-Host": hostname or "",
             "X-Worker-Version": FLORI_VERSION,
         }
+
+    def _set_initial_config(self, data: dict) -> None:
+        self.initial_config = {
+            "desired_config": data.get("desired_config"),
+            "cfg_rev": int(data.get("cfg_rev") or 0),
+        }
+
+    def _raise_auth_status(self, resp, endpoint: str) -> None:
+        status = getattr(resp, "status_code", None)
+        if status in (401, 403, 429):
+            raise WorkerAuthRejected(status_code=status, endpoint=endpoint)
+
+    def _json(self, resp, endpoint: str) -> dict:
+        try:
+            data = resp.json()
+        except ValueError as e:
+            raise WorkerContractError(
+                "gateway response is not valid json",
+                endpoint=endpoint,
+            ) from e
+        if not isinstance(data, dict):
+            raise WorkerContractError(
+                "gateway response json must be an object",
+                endpoint=endpoint,
+            )
+        return data
+
+    # 生命周期 / 心跳(走 gateway)
+
+    async def register(self, worker_id, worker_type, pools, tags,
+                       reject_tags, hostname, now, concurrency: int = 1,
+                       spec: dict | None = None):
+        # 有长期 worker token 时只能 resume。cached token 被拒绝说明被 revoke 或配置错,
+        # 不允许回退 registration token 复活。
+        effective_id = self._load_cached_id() or worker_id
+        body = self._identity_body(
+            effective_id, worker_type, pools, tags, reject_tags,
+            hostname, concurrency, spec,
+        )
+        cached_token = self._load_cached_token()
+        if cached_token:
+            return await self._resume(
+                effective_id, cached_token, body, worker_type, pools, tags,
+                reject_tags, hostname, now, concurrency,
+            )
+        if not self._registration_token:
+            raise WorkerConfigError(
+                "WORKER_REGISTRATION_TOKEN is required for first gateway bootstrap",
+                reason="missing_registration_token",
+            )
+        resp = await self._http.post(
+            "/api/runner/register", json=body,
+            headers={"Authorization": f"Bearer {self._registration_token}"},
+        )
+        self._raise_auth_status(resp, "/api/runner/register")
+        resp.raise_for_status()
+        data = self._json(resp, "/api/runner/register")
+        token = data.get("worker_token")
+        if not isinstance(token, str) or not token.startswith("flwt-"):
+            raise WorkerContractError(
+                "register response missing worker_token",
+                endpoint="/api/runner/register",
+            )
+        self._worker_token = token
+        self._set_initial_config(data)
+        returned_id = data.get("worker_id") or effective_id
+        self._save_id(returned_id)
+        self._save_worker_token(token)
+        self._set_identity_headers(returned_id, worker_type, hostname)
         # 有内层时镜像写一份到 redis/db(认领仍走内层);无内层则跳过。
         if self._inner is not None:
             await self._inner.register(
@@ -124,7 +215,30 @@ class GatewayTransport:
             )
         return returned_id
 
-    async def heartbeat(self, worker_id, load=None, applied_cfg_rev=0):
+    async def _resume(self, effective_id: str, cached_token: str, body: dict,
+                      worker_type, pools, tags, reject_tags, hostname, now,
+                      concurrency: int) -> str:
+        self._worker_token = cached_token
+        self._set_identity_headers(effective_id, worker_type, hostname)
+        resp = await self._http.post(
+            "/api/runner/resume", json=body, headers=self._auth(),
+        )
+        self._raise_auth_status(resp, "/api/runner/resume")
+        resp.raise_for_status()
+        data = self._json(resp, "/api/runner/resume")
+        self._set_initial_config(data)
+        returned_id = data.get("worker_id") or effective_id
+        self._save_id(returned_id)
+        self._set_identity_headers(returned_id, worker_type, hostname)
+        if self._inner is not None:
+            await self._inner.register(
+                returned_id, worker_type, pools, tags, reject_tags, hostname, now,
+                concurrency,
+            )
+        return returned_id
+
+    async def heartbeat(self, worker_id, load=None, applied_cfg_rev=0,
+                        concurrency: int | None = None):
         cfg_payload: dict | None = None
         try:
             body = {
@@ -133,6 +247,8 @@ class GatewayTransport:
                 "current_step": self._current_step,
                 "applied_cfg_rev": applied_cfg_rev,
             }
+            if concurrency is not None:
+                body["concurrency"] = concurrency
             if load:
                 body["load"] = load   # 本机 live 负载,经网关写 redis worker hash,供各节点负载展示
             if self._running:
@@ -140,9 +256,8 @@ class GatewayTransport:
             resp = await self._http.post(
                 "/api/runner/heartbeat", headers=self._auth(), json=body,
             )
-            if resp.status_code == 401:
-                # 心跳也被拒 = per-worker token 失效,抛给主循环走重注册/退避/自杀,不能裸吞。
-                raise WorkerAuthRejected()
+            self._raise_auth_status(resp, "/api/runner/heartbeat")
+            resp.raise_for_status()
             if resp.status_code == 200:
                 try:
                     data = resp.json()
@@ -152,6 +267,8 @@ class GatewayTransport:
                     }
                 except ValueError:
                     pass   # 旧网关无配置字段/响应异常:保持现配置,不算错
+        except WorkerAuthRejected:
+            raise
         except httpx.HTTPError as e:
             logger.warning(
                 "gateway_heartbeat_failed", worker_id=worker_id,
@@ -161,7 +278,7 @@ class GatewayTransport:
             )
         # 有内层才退回维持 redis/db 新鲜;纯网关无内层,gateway 已是唯一通路。
         if self._inner is not None:
-            await self._inner.heartbeat(worker_id, load=load)
+            await self._inner.heartbeat(worker_id, load=load, concurrency=concurrency)
         return cfg_payload
 
     async def update_status(self, worker_id, status,
@@ -174,10 +291,13 @@ class GatewayTransport:
             try:
                 resp = await self._http.post(
                     "/api/runner/offline",
-                    headers={"Authorization": f"Bearer {self._worker_token}"},
+                    headers=self._auth(),
                     json={"worker_id": worker_id},
                 )
+                self._raise_auth_status(resp, "/api/runner/offline")
                 resp.raise_for_status()
+            except WorkerAuthRejected:
+                raise
             except httpx.HTTPError:
                 logger.warning("gateway_offline_failed", worker_id=worker_id)
         if self._inner is not None:
@@ -203,9 +323,7 @@ class GatewayTransport:
                     "tags": sorted(tags), "reject_tags": sorted(reject_tags),
                 },
             )
-            if resp.status_code == 401:
-                # per-worker token 失效时抛给主循环自愈(重注册/退避/6h自杀),不能当"无任务"空转死刷。
-                raise WorkerAuthRejected()
+            self._raise_auth_status(resp, "/api/runner/jobs/request")
             resp.raise_for_status()
             claim = resp.json().get("claim")
             if claim and claim.get("kind") != "ai":
@@ -214,6 +332,8 @@ class GatewayTransport:
                 # 步骤 150s 后被 orphan_scan 全量误回收);心跳是实测可靠通道,借道最稳。
                 self._running.add((claim["job_id"], claim["step"]))
             return claim
+        except WorkerAuthRejected:
+            raise
         except httpx.HTTPError as e:
             logger.warning(
                 "gateway_request_step_failed", worker_id=worker_id,
@@ -225,16 +345,16 @@ class GatewayTransport:
 
     async def _report_best_effort(self, url, json_body, *, op,
                                   job_id="", step=""):
-        """上报通道(complete/fail/release/usage)统一 best-effort:有界重试后仍失败只 log,
-        绝不抛:上报抖动不得把 returncode==0 的成功步骤翻成 failed,也不得经 execute 的
-        finally release 逃逸杀掉整个 worker 主循环。同文件 heartbeat/request_step/
-        report_step_alive 同为 best-effort。"""
+        """上报通道对网络/5xx 有界重试;401/403 是长期凭证失效,必须上抛停机。"""
         last_exc = None
         for attempt in range(3):
             try:
                 resp = await self._http.post(url, headers=self._auth(), json=json_body)
+                self._raise_auth_status(resp, url)
                 resp.raise_for_status()
                 return
+            except WorkerAuthRejected:
+                raise
             except httpx.HTTPError as e:
                 last_exc = e
                 if attempt < 2:
@@ -316,18 +436,28 @@ class GatewayTransport:
                     headers=self._auth(),
                     json={"payload": data},
                 )
+                self._raise_auth_status(
+                    resp, f"/api/runner/jobs/{job_id}/steps/_/progress",
+                )
                 resp.raise_for_status()
+            except WorkerAuthRejected:
+                raise
             except httpx.HTTPError:
                 logger.warning("gateway_progress_failed", job_id=job_id)
 
     async def report_step_alive(self, job_id, step):
-        # 步进度心跳走 gateway(best-effort,失败只 log,绝不影响步骤执行)。
+        # 网络抖动仍 best-effort;auth 被拒说明 worker 已不可继续。
         try:
             resp = await self._http.post(
                 f"/api/runner/jobs/{job_id}/steps/{step}/alive",
                 headers=self._auth(),
             )
+            self._raise_auth_status(
+                resp, f"/api/runner/jobs/{job_id}/steps/{step}/alive",
+            )
             resp.raise_for_status()
+        except WorkerAuthRejected:
+            raise
         except httpx.HTTPError:
             logger.warning("gateway_step_alive_failed", job_id=job_id, step=step)
 
@@ -409,14 +539,12 @@ class GatewayTransport:
 
     async def get_credential(self, key):
         # 凭证一律走 gateway(不委派内层):领取集中在服务端,审计事件才有单一记录点。
-        # 401 抛 WorkerAuthRejected(与认领一致,主循环自愈);其余错误降级匿名(None),
-        # 下载凭证缺失不应导致任务失败。
+        # auth 失败停 worker;其余错误降级匿名(None),下载凭证缺失不应导致任务失败。
         try:
             resp = await self._http.get(
                 f"/api/runner/credentials/{key}", headers=self._auth(),
             )
-            if resp.status_code == 401:
-                raise WorkerAuthRejected()
+            self._raise_auth_status(resp, f"/api/runner/credentials/{key}")
             resp.raise_for_status()
             return resp.json().get("value")
         except WorkerAuthRejected:

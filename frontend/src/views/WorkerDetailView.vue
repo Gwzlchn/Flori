@@ -69,7 +69,10 @@ async function load() {
 }
 
 // 派生统计
-const isOnline = computed(() => worker.value?.status.startsWith('online') ?? false)
+const isOnline = computed(() => {
+  const status = worker.value?.status
+  return !!status && (status.startsWith('online') || status === 'paused')
+})
 const completed = computed(() => worker.value?.tasks_completed ?? 0)
 const failed = computed(() => worker.value?.tasks_failed ?? 0)
 const successRate = computed(() => {
@@ -131,12 +134,12 @@ async function togglePause() {
 
 async function removeWorker() {
   if (!worker.value) return
-  if (!confirm(`确定移除 Worker ${workerId.value}？离线 worker 重新接入会重新出现。`)) return
+  if (!confirm(`移除 Worker ${workerId.value} 并吊销 worker token？该 worker 会停止接入；需要重新接入时请重新生成临时接入 token。`)) return
   busy.value = true
   try {
-    // 在线 worker 需 force 才能移除(避免误删活跃节点)。
+    // 在线/paused 管理态需 force,删除会吊销 per-worker token 并让旧连接快速失败。
     await workerStore.remove(workerId.value, isOnline.value)
-    showToast('已移除', 'success')
+    showToast('已移除并吊销 worker token', 'success')
     router.push('/system')
   } catch {
     showToast('移除失败', 'error')
@@ -216,7 +219,7 @@ onBeforeUnmount(() => global.setCrumbs(null))
         </span>
         <div style="margin-left:auto;display:flex;gap:8px">
           <button class="btn sm" @click="load"><RefreshCw :size="13" />刷新</button>
-          <button v-if="isOnline || worker.status === 'paused'" class="btn sm" :disabled="busy" @click="togglePause">
+          <button v-if="isOnline" class="btn sm" :disabled="busy" @click="togglePause">
             <Play v-if="worker.status === 'paused'" :size="13" /><Pause v-else :size="13" />{{ worker.status === 'paused' ? '继续' : '暂停' }}
           </button>
           <button class="btn sm danger" :disabled="busy" @click="removeWorker"><X :size="13" />移除</button>

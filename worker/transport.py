@@ -21,14 +21,14 @@ import structlog
 
 from shared import runner_ops
 from shared.db import Database
+from shared.errors import (
+    WorkerAuthRejected,
+    WorkerConfigError,
+    WorkerContractError,
+    WorkerFatalError,
+)
 from shared.models import AIUsage, Worker as WorkerModel
 from shared.redis_client import RedisClient
-
-
-class WorkerAuthRejected(Exception):
-    """网关 runner 请求被服务端以 401 拒绝(per-worker token 失效/被吊销)。
-    worker 据此重注册 + 指数退避;连续失败超时(默认 6h,env AUTH_GIVEUP_SEC)则自杀退出。
-    仅 GatewayTransport(出站 HTTPS)会抛;直连 RedisTransport 无此异常。见 worker.Worker._handle_auth_failure。"""
 
 
 class WorkerTransport(Protocol):
@@ -47,6 +47,7 @@ class WorkerTransport(Protocol):
     # applied_cfg_rev:worker 回报已生效版本,中心据此显示"待同步/已生效"。
     async def heartbeat(
         self, worker_id: str, load: dict | None = None, applied_cfg_rev: int = 0,
+        concurrency: int | None = None,
     ) -> dict | None: ...
 
     async def update_status(
@@ -167,7 +168,8 @@ class RedisTransport:
         self.initial_config = {"desired_config": desired, "cfg_rev": cfg_rev}
         return worker_id
 
-    async def heartbeat(self, worker_id, load=None, applied_cfg_rev=0):
+    async def heartbeat(self, worker_id, load=None, applied_cfg_rev=0,
+                        concurrency: int | None = None):
         await self._redis.heartbeat(worker_id)
         # live 负载落 redis worker hash 的 load 字段(JSON);/api/workers 读出透传到 WorkerResponse.load。
         # 仅 redis(实时态,不进 DB);采集为空则不写,保留上次。
@@ -176,7 +178,13 @@ class RedisTransport:
         if applied_cfg_rev:
             await self._redis.set_worker_field(
                 worker_id, "cfg_applied_rev", str(applied_cfg_rev))
-        await asyncio.to_thread(self._db.update_worker_heartbeat, worker_id)
+        if concurrency is not None:
+            await self._redis.set_worker_field(worker_id, "concurrency", str(concurrency))
+        await asyncio.to_thread(
+            self._db.update_worker_heartbeat,
+            worker_id,
+            concurrency=concurrency,
+        )
         # 中心期望配置随心跳带回(与 gateway 心跳响应同契约)。
         desired, cfg_rev = await asyncio.to_thread(
             self._db.get_worker_desired_config, worker_id)

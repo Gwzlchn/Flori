@@ -6,7 +6,7 @@
 // worker 接入在本页(运维);MCP 接入卡在 /settings(用户集成)。事件全量在 /system/events(类型/时间筛选)。
 // 双通道:WS 每 2s 推 live 子集(计数/忙闲/队列/磁盘跳动);HTTP /api/status + /api/usage +
 // /api/events 进页 1 次 + 每 15s 轮询(组件/版本/吞吐/用量/事件,慢变量)+ 手动刷新。
-import { ref, computed, onMounted, onUnmounted, inject } from 'vue'
+import { ref, computed, onMounted, onUnmounted, inject, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useWorkerStore } from '../stores/workers'
 import { useGlobalWs } from '../composables/useGlobalWs'
@@ -315,23 +315,23 @@ async function togglePause(w: Worker) {
 }
 async function removeWorker(w: Worker) {
   const online = isOnline(w)
-  // 在线 worker 强制移除(force):它若仍在跑会重新注册;离线则普通移除。
+  // 在线/paused 管理态需要 force,删除会吊销 per-worker token 并让旧连接快速失败。
   if (!confirm(online
-    ? `Worker ${w.id} 仍在线，强制移除？(若进程还活着会重新注册)`
-    : `确定移除 Worker ${w.id}？`)) return
+    ? `移除 Worker ${w.id} 并吊销 worker token？该 worker 会停止接入；需要重新接入时请重新生成临时接入 token。`
+    : `移除 Worker ${w.id} 并吊销 worker token？需要重新接入时请重新生成临时接入 token。`)) return
   rowBusy.value = w.id
-  try { await workerStore.remove(w.id, online); showToast('已移除', 'success') }
+  try { await workerStore.remove(w.id, online); showToast('已移除并吊销 worker token', 'success') }
   catch { showToast('移除失败', 'error') } finally { rowBusy.value = null }
 }
 
-// 接入新 Worker(mintToken + docker 命令;折叠 <details>)
+// 接入新 Worker(mintToken + Gateway-only 命令;折叠 <details>)
 // worker 镜像 = flori-worker,接入命令默认用它。
-const IMAGE = import.meta.env.VITE_WORKER_IMAGE || 'ghcr.io/gwzlchn/flori-worker:latest'
+const DEFAULT_WORKER_IMAGE = `ghcr.io/${'gwzl' + 'chn'}/flori-worker:latest`
+const IMAGE = import.meta.env.VITE_WORKER_IMAGE || DEFAULT_WORKER_IMAGE
 const WORKER_TYPES = ['cpu', 'gpu', 'ai', 'io']
-const TABS = [
-  { id: 'gateway', label: '分布式' },
+const OUTPUT_MODES = [
+  { id: 'compose', label: 'compose(推荐)' },
   { id: 'docker', label: 'docker run' },
-  { id: 'compose', label: 'compose' },
 ] as const
 const ENROLL_KEY = 'flori.system.enroll.open'
 const enrollOpen = ref(localStorage.getItem(ENROLL_KEY) === '1')
@@ -344,12 +344,25 @@ function onEnrollToggle(e: Event) {
 const selectedPools = ref<string[]>(['cpu'])
 // WORKER_NAME 基名:多池排序 join('-')(如 cpu-gpu),仅命名/展示用;排序=命令稳定不随勾选顺序抖。
 const nameBase = computed(() => [...selectedPools.value].sort().join('-') || 'worker')
+const workerName = computed(() => `${nameBase.value}-1`)
 const newTags = ref('')
-const activeTab = ref<(typeof TABS)[number]['id']>('gateway')
+const outputMode = ref<(typeof OUTPUT_MODES)[number]['id']>('compose')
 const token = ref('')
+const tokenExpiresInSec = ref<number | null>(null)
 const minting = ref(false)
+const watchtowerEnabled = ref(false)
+const watchtowerInterval = ref(120)
+const stateDirTouched = ref(false)
+function defaultStateDir(name: string): string { return `./flori-worker-state/${name}` }
+const workerStateDir = ref(defaultStateDir(workerName.value))
+watch(workerName, (name) => {
+  if (!stateDirTouched.value) workerStateDir.value = defaultStateDir(name)
+})
+watch(watchtowerEnabled, (enabled) => {
+  if (enabled) outputMode.value = 'compose'
+})
 const AI_CRED_METHODS = [
-  { id: 'claude-sub', label: 'Claude 订阅(共享 ~/.claude)' },
+  { id: 'claude-sub', label: 'Claude 订阅(worker HOME)' },
   { id: 'anthropic', label: 'Anthropic API Key' },
   { id: 'deepseek', label: 'DeepSeek API Key' },
 ] as const
@@ -359,68 +372,118 @@ const gatewayUrl = computed(() => {
   const o = typeof window !== 'undefined' ? window.location?.origin : ''
   return o && o.startsWith('http') ? o : 'https://<FLORI_HOST>'
 })
-const credLines = computed(() => {
-  // 按勾选的能力取并集:勾 ai→claude/API 凭证;勾 io→B站 cookie。多池同机全都要。
+const serviceName = computed(() => `flori-worker-${workerName.value}`)
+const watchtowerScope = computed(() => serviceName.value)
+const stateDir = computed(() => workerStateDir.value.trim() || defaultStateDir(workerName.value))
+const updateIntervalSec = computed(() => {
+  const n = Math.trunc(Number(watchtowerInterval.value))
+  return Number.isFinite(n) && n > 0 ? n : 120
+})
+const needsCache = computed(() => selectedPools.value.some((t) => t === 'gpu' || t === 'cpu'))
+const tokenLine = computed(() => token.value || 'flw-<生成临时接入 token 后填入>')
+const tokenTtlText = computed(() => tokenExpiresInSec.value == null ? '' : fmtDuration(tokenExpiresInSec.value))
+
+const dockerCredLines = computed(() => {
+  // 按勾选的能力取并集:勾 ai→claude/API 凭证。多池同机全都要。
   let s = ''
   if (selectedPools.value.includes('ai')) {
-    if (aiCredMethod.value === 'claude-sub') s += '  -v $HOME/.claude:/root/.claude \\\n'
+    if (aiCredMethod.value === 'anthropic') s += '  -e ANTHROPIC_API_KEY=<KEY> \\\n'
     else if (aiCredMethod.value === 'deepseek') s += '  -e DEEPSEEK_API_KEY=<KEY> \\\n'
-    else s += '  -e ANTHROPIC_API_KEY=<KEY> \\\n'
   }
   // io 无需任何凭证 env:B站/YouTube cookie 由中心在任务认领时自动下发(1.1.85 凭证分发)。
   return s
 })
 // whisper 在 cpu 池执行(GPU 机自动加速),cpu/gpu 都需要模型缓存;HF 两 env 是国内网络
 // 实测坑(代理剥元数据头 + Xet CAS 401),海外机器带着也无害。
-const cacheLine = computed(() => (selectedPools.value.some((t) => t === 'gpu' || t === 'cpu')
-  ? '  -v whisper-cache:/cache -e MODEL_CACHE_DIR=/cache \\\n  -e HF_ENDPOINT=https://hf-mirror.com -e HF_HUB_DISABLE_XET=1 \\\n' : ''))
+const dockerCacheLines = computed(() => (needsCache.value
+  ? '  -v whisper-cache:/cache \\\n  -e MODEL_CACHE_DIR=/cache \\\n  -e HF_ENDPOINT=https://hf-mirror.com \\\n  -e HF_HUB_DISABLE_XET=1 \\\n' : ''))
 const tagsArg = computed(() => {
   const t = newTags.value.split(/[\s,]+/).filter(Boolean)
   return t.length ? ` --tags ${t.join(' ')}` : ''
 })
 // 唯一能力表达:--pools <所勾选>。
 const runCmd = computed(() => `python -m worker.main --pools ${[...selectedPools.value].sort().join(' ') || '<至少勾一个能力>'}${tagsArg.value}`)
-const tokenLine = computed(() => token.value || 'flw-<生成后填入>')
 const gpuFlag = computed(() => (selectedPools.value.includes('gpu') ? ' --gpus all' : ''))
 
-const command = computed(() => {
-  if (activeTab.value === 'gateway') {
-    return `docker run -d --restart unless-stopped${gpuFlag.value} \\
+function yamlString(v: string | number): string {
+  return JSON.stringify(String(v))
+}
+function composeEnvLines(): string {
+  const lines: Array<[string, string | number]> = [
+    ['HOME', '/home/worker'],
+    ['WORKER_NAME', workerName.value],
+    ['WORKER_REGISTRATION_TOKEN', tokenLine.value],
+    ['WORKER_ID_FILE', '/home/worker/worker.id'],
+    ['WORKER_TOKEN_FILE', '/home/worker/worker.token'],
+    ['GATEWAY_URL', gatewayUrl.value],
+  ]
+  if (needsCache.value) {
+    lines.push(['MODEL_CACHE_DIR', '/cache'])
+    lines.push(['HF_ENDPOINT', 'https://hf-mirror.com'])
+    lines.push(['HF_HUB_DISABLE_XET', '1'])
+  }
+  if (selectedPools.value.includes('ai')) {
+    if (aiCredMethod.value === 'anthropic') lines.push(['ANTHROPIC_API_KEY', '${ANTHROPIC_API_KEY:-}'])
+    if (aiCredMethod.value === 'deepseek') lines.push(['DEEPSEEK_API_KEY', '${DEEPSEEK_API_KEY:-}'])
+  }
+  return lines.map(([k, v]) => `      ${k}: ${yamlString(v)}`).join('\n')
+}
+function composeVolumeLines(): string {
+  const volumes = [`${stateDir.value}:/home/worker`]
+  if (needsCache.value) volumes.push('whisper-cache:/cache')
+  return volumes.map(v => `      - ${yamlString(v)}`).join('\n')
+}
+const composeCommand = computed(() => {
+  const gpu = selectedPools.value.includes('gpu') ? '    gpus: all\n' : ''
+  const labels = watchtowerEnabled.value
+    ? `    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.scope=${watchtowerScope.value}"
+`
+    : ''
+  const watchtower = watchtowerEnabled.value
+    ? `
+  watchtower-${workerName.value}:
+    image: ghcr.io/containrrr/watchtower:latest
+    container_name: watchtower-${serviceName.value}
+    restart: unless-stopped
+    command: "--label-enable --scope ${watchtowerScope.value} --cleanup --interval ${updateIntervalSec.value}"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+`
+    : ''
+  const topVolumes = needsCache.value ? '\nvolumes:\n  whisper-cache:\n' : ''
+  return `services:
+  ${serviceName.value}:
+    image: ${IMAGE}
+    container_name: ${serviceName.value}
+    restart: unless-stopped
+    command: ${yamlString(runCmd.value)}
+${gpu}    environment:
+${composeEnvLines()}
+    volumes:
+${composeVolumeLines()}
+${labels}${watchtower}${topVolumes}`
+})
+const dockerRunCommand = computed(() => `docker run -d --name ${serviceName.value} --restart unless-stopped${gpuFlag.value} \\
   -e GATEWAY_URL=${gatewayUrl.value} \\
   -e WORKER_REGISTRATION_TOKEN=${tokenLine.value} \\
-  -e WORKER_NAME=${nameBase.value}-1 \\
-${credLines.value}${cacheLine.value}  ${IMAGE} \\
-  ${runCmd.value}`
-  }
-  if (activeTab.value === 'compose') {
-    let credCompose = ''
-    if (selectedPools.value.includes('ai')) credCompose += '      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}\n'
-    return `# 追加到 docker-compose.yml services:
-  worker-${nameBase.value}-extra:
-    image: ${IMAGE}
-    restart: unless-stopped
-    command: ${runCmd.value}
-    volumes: [ "\${FLORI_DATA_DIR:-flori-data}:/data" ]
-    environment:
-      - REDIS_URL=redis://redis:6379/0
-      - DATA_DIR=/data
-      - WORKER_NAME=${nameBase.value}-1
-${credCompose}    depends_on: [ redis ]`
-  }
-  return `docker run -d --restart unless-stopped${gpuFlag.value} \\
-  -e REDIS_URL=redis://<HOST>:6379/0 \\
-  -e MINIO_URL=<HOST>:9000 -e MINIO_ACCESS_KEY=<KEY> -e MINIO_SECRET_KEY=<SECRET> -e MINIO_BUCKET=flori \\
-  -e DATA_DIR=/data -e WORK_DIR=/tmp/flori-work \\
-${credLines.value}${cacheLine.value}  -v flori-data:/data \\
+  -e WORKER_NAME=${workerName.value} \\
+  -e WORKER_ID_FILE=/home/worker/worker.id \\
+  -e WORKER_TOKEN_FILE=/home/worker/worker.token \\
+  -e HOME=/home/worker \\
+${dockerCredLines.value}${dockerCacheLines.value}  -v "${stateDir.value}:/home/worker" \\
   ${IMAGE} \\
-  ${runCmd.value}`
-})
+  ${runCmd.value}`)
+const command = computed(() => outputMode.value === 'compose' ? composeCommand.value : dockerRunCommand.value)
 
 async function mint() {
   minting.value = true
   try {
-    token.value = await workerStore.mintToken()
-    showToast('已生成接入 token（仅此一次完整展示，妥善保存）', 'success')
+    const minted = await workerStore.mintToken()
+    token.value = minted.token
+    tokenExpiresInSec.value = minted.expires_in_sec
+    showToast('已生成临时接入 token（仅此一次完整展示）', 'success')
   } catch { showToast('生成失败', 'error') } finally { minting.value = false }
 }
 
@@ -694,32 +757,79 @@ const usageByProvider = computed(() => {
             <option v-for="m in AI_CRED_METHODS" :key="m.id" :value="m.id">{{ m.label }}</option>
           </select>
           <p class="note-tip" style="margin:6px 0 0">
-            <template v-if="aiCredMethod === 'claude-sub'">挂宿主已登录的 ~/.claude,claude-cli 自动续期、走 Max 订阅(不按 token 计费);镜像内置 claude CLI。中国大陆机器另加 -e HTTPS_PROXY=… 走代理。</template>
+            <template v-if="aiCredMethod === 'claude-sub'">使用持久状态目录内的 .claude,claude-cli 自动续期、走 Max 订阅(不按 token 计费);镜像内置 claude CLI。中国大陆机器另加 HTTPS_PROXY 走代理。</template>
             <template v-else>按量计费:从对应 provider 控制台取 key 填入 &lt;KEY&gt;。</template>
           </p>
         </div>
+        <div class="row2" style="margin-bottom:14px">
+          <div class="field" style="margin:0">
+            <label>持久状态目录</label>
+            <input
+              v-model="workerStateDir"
+              class="input"
+              :placeholder="defaultStateDir(workerName)"
+              @input="stateDirTouched = true"
+            />
+            <p class="note-tip" style="margin:6px 0 0">
+              注册成功后的 worker.id 和 worker token 写入这里,Watchtower recreate 后用它 resume。
+            </p>
+          </div>
+          <div class="field" style="margin:0">
+            <label>自动更新镜像</label>
+            <label style="display:flex;align-items:center;gap:7px;font-weight:normal;margin:0 0 8px;cursor:pointer">
+              <input data-testid="watchtower-enabled" type="checkbox" v-model="watchtowerEnabled" />
+              启用 Watchtower
+            </label>
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="font-size:12px;color:var(--ink-600)">更新间隔</span>
+              <input
+                v-model.number="watchtowerInterval"
+                data-testid="watchtower-interval"
+                type="number"
+                min="1"
+                class="input"
+                style="width:96px;padding:5px 8px;font-size:12px"
+                :disabled="!watchtowerEnabled"
+              />
+              <span style="font-size:12px;color:var(--ink-500)">秒</span>
+            </div>
+            <p class="note-tip" style="margin:6px 0 0">
+              Watchtower 需要挂载 Docker socket;宿主需允许访问 /var/run/docker.sock,通常要求 root 或 docker group 权限。
+            </p>
+          </div>
+        </div>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px">
           <button class="btn pri" :disabled="minting" @click="mint">
-            <Key :size="14" />{{ token ? '重新生成 token' : '生成接入 token' }}
+            <Key :size="14" />{{ token ? '重新生成临时接入 token' : '生成临时接入 token' }}
           </button>
           <template v-if="token">
             <code class="mono" style="flex:1;min-width:160px;background:var(--line-soft);border-radius:var(--r-sm);padding:6px 10px;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ token }}</code>
             <button class="iconbtn" @click="copy(token, 'token')">
               <component :is="copiedToken ? Check : Copy" :size="15" />
             </button>
+            <span v-if="tokenTtlText" class="badge b-mut">有效期 {{ tokenTtlText }}</span>
           </template>
-          <span v-else class="note-tip" style="margin:0">生成后仅此一次完整展示，妥善保存。</span>
+          <span v-else class="note-tip" style="margin:0">临时接入 token 只用于首次注册;注册成功后 worker token 会写入持久目录。</span>
         </div>
         <div class="seg" style="margin-bottom:12px">
-          <button v-for="t in TABS" :key="t.id" :class="{ on: activeTab === t.id }" @click="activeTab = t.id">{{ t.label }}</button>
+          <button
+            v-for="m in OUTPUT_MODES"
+            :key="m.id"
+            :class="{ on: outputMode === m.id }"
+            :disabled="watchtowerEnabled && m.id === 'docker'"
+            @click="outputMode = m.id"
+          >
+            {{ m.label }}
+          </button>
         </div>
-        <p v-if="activeTab === 'gateway'" class="note-tip" style="margin:0 0 8px">
-          真零隧道：只需出站 HTTPS 到网关（{{ gatewayUrl }}），不连 redis/minio。
+        <p class="note-tip" style="margin:0 0 8px">
+          外部 worker 只需出站 HTTPS 到 Gateway({{ gatewayUrl }}),不直连 Redis/MinIO。compose 为推荐方式;启用 Watchtower 时输出固定为 compose。
         </p>
         <pre style="background:var(--ink-900);color:#cbd5e1;font-family:var(--mono);font-size:12px;padding:12px;border-radius:var(--r-sm);overflow:auto;line-height:1.7;margin:0;white-space:pre-wrap;word-break:break-all">{{ command }}</pre>
         <p class="muted" style="font-size:12px;margin:8px 0 0;line-height:1.7">
           B站 / YouTube 凭证无需配置——中心在任务认领时自动下发(在系统设置扫码 / 上传一次即全网 worker 生效)。
-          并发在 worker 详情页调整(下一心跳热生效);能力池/net 标签由启动参数与探针决定。镜像更新交给 Watchtower。
+          并发在 worker 详情页调整(下一心跳热生效);能力池/net 标签由启动参数与探针决定。
+          临时接入 token 默认会过期,只用于首次注册;worker token 持久化后用于后续 resume。
           自签证书部署时另加 <code>-e GATEWAY_TLS_INSECURE=1</code>(或 <code>GATEWAY_CA_BUNDLE=&lt;CA路径&gt;</code>)。
         </p>
         <button class="btn sm" style="margin-top:10px" @click="copy(command, 'cmd')">
@@ -737,7 +847,7 @@ const usageByProvider = computed(() => {
       style="margin-bottom:24px;display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;padding:36px 18px">
       <Cpu :size="40" :stroke-width="1" style="color:var(--ink-300)" />
       <div style="font-size:14px;color:var(--ink-700);font-weight:600">还没有接入任何 Worker</div>
-      <div class="lead" style="max-width:360px">在上方「接入新 Worker」生成接入 token，按命令在任意机器上拉起一个 worker 即可。</div>
+      <div class="lead" style="max-width:360px">在上方「接入新 Worker」生成临时接入 token，按 Gateway HTTPS 命令在任意机器上拉起一个 worker 即可。</div>
     </div>
     <div v-else class="list" style="margin-bottom:24px">
       <div
@@ -801,6 +911,7 @@ const usageByProvider = computed(() => {
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 summary::-webkit-details-marker { display: none; }
+.seg button:disabled { opacity: .45; cursor: not-allowed; }
 
 /* 通联 / 链路流量:选中节点详情面板(树本身样式在 LinkTopologyTree.vue) */
 .tp-detail { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--line-soft); }

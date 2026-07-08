@@ -1,7 +1,10 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { useApi } from '../composables/useApi'
-import type { Worker, WorkerTask, FullStatus, SystemEvent, UsageAggregate, PricingStatus, QueueStatus } from '../types'
+import type {
+  Worker, WorkerTask, FullStatus, SystemEvent, UsageAggregate, PricingStatus, QueueStatus,
+  WorkerDesiredConfig, WorkerRegistrationToken,
+} from '../types'
 
 export const useWorkerStore = defineStore('workers', () => {
   const api = useApi()
@@ -37,11 +40,8 @@ export const useWorkerStore = defineStore('workers', () => {
     await fetchAll()
   }
 
-  // 中心下发运行配置(池/并发/标签):写 desired_config + cfg_rev+1,worker 下一心跳热应用。
-  async function setConfig(
-    workerId: string,
-    cfg: { pools?: string[]; concurrency?: number; tags?: string[]; reject_tags?: string[] },
-  ) {
+  // 中心下发运行配置:当前只支持并发,worker 下一心跳热应用。
+  async function setConfig(workerId: string, cfg: WorkerDesiredConfig) {
     await api.put(`/api/workers/${workerId}/config`, cfg)
     await fetchAll()
   }
@@ -51,9 +51,9 @@ export const useWorkerStore = defineStore('workers', () => {
     await fetchAll()
   }
 
-  async function mintToken(): Promise<string> {
-    const res = await api.post<{ token: string }>('/api/workers/registration-token', {})
-    return res.token
+  async function mintToken(): Promise<WorkerRegistrationToken> {
+    const res = await api.post<WorkerRegistrationToken>('/api/workers/registration-token', {})
+    return { token: res.token, expires_in_sec: res.expires_in_sec ?? null }
   }
 
   async function fetchTasks(workerId: string): Promise<WorkerTask[]> {

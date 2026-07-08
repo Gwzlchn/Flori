@@ -78,7 +78,7 @@ sudo ./svc.sh install && sudo ./svc.sh start
 
 - `mutation.yml`（**变异测试**，每日 cron + `workflow_dispatch` 手动）：对核心模块注入变异,逐个跑相关测试。目标清单在 `scripts/mutation_score.py` 的 `TARGETS`：`shared/ai_gateway.py` 计费与 `exec_id` 去重、`shared/db.py`、`scheduler/` 状态机、`worker/` 乐观锁。**存活变异 = 测试抓不住的真实 bug**——`ai_usage` 去重或乐观锁里若有存活变异 = 字面意义的重复计费/双跑风险。慢 → 不挂 PR;报告态非阻塞:分数写 job summary,并追加到 `mutation-data` 分支的 `history.csv`,再生成趋势与徽章 JSON 供 README 读取。手动可传 `target`(如 `ai_gateway`)只跑子集;只跑子集时不写历史。注:mutmut 3.x 配置键是 `source_paths`(非 v2 的 `paths_to_mutate`)。
 
-部署为自动 CD：生产 `docker-compose.yml` 跑 Watchtower（`containrrr/watchtower`），每 120s 查 ghcr，只更新带 `com.centurylinklabs.watchtower.enable=true` 标签的容器，自动 pull + 重建 + 清理旧镜像。无 SSH 自动部署脚本。
+部署为自动 CD：生产 `docker-compose.yml` 跑 Watchtower（`ghcr.io/containrrr/watchtower`），每 120s 查 ghcr，只更新带 `com.centurylinklabs.watchtower.enable=true` 标签的容器，自动 pull + 重建 + 清理旧镜像。无 SSH 自动部署脚本。
 
 ## 5. docker-compose.yml 改造
 

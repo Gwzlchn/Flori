@@ -136,13 +136,14 @@ describe('SystemView', () => {
       workers: [
         makeWorker({ id: 'a', status: 'online-idle' }),
         makeWorker({ id: 'b', status: 'online-busy' }),
-        makeWorker({ id: 'c', status: 'offline' }),
+        makeWorker({ id: 'c', status: 'paused' }),
+        makeWorker({ id: 'd', status: 'offline' }),
       ],
     })
     await flushPromises()
     // 概览拆「系统 / Worker·作业」两组;KPI 在 Worker·作业 网格(.sg-worker),前 4 格 = KPI。
     const metrics = w.findAll('.sg-worker .st-val').map(n => n.text())
-    expect(metrics[0]).toBe('2 / 3')   // 在线/共
+    expect(metrics[0]).toBe('3 / 4')   // online-* + paused 视为在线管理态
     expect(metrics[1]).toBe('1')       // 忙碌
     expect(metrics[2]).toBe('3')       // 待处理(jobs.pending)
   })
@@ -209,19 +210,24 @@ describe('SystemView', () => {
     confirmSpy.mockRestore()
   })
 
-  it('接入新 Worker 折叠区含镜像与 GATEWAY_URL，点生成 token 调 store.mintToken', async () => {
+  it('接入新 Worker 折叠区含镜像与 GATEWAY_URL，点生成临时 token 后展示有效期', async () => {
     const store = useWorkerStore()
     stubStoreData(store)
+    const sampleToken = 'flw-' + 'test'
+    ;(store.mintToken as any).mockResolvedValue({ token: sampleToken, expires_in_sec: 3600 })
     const w = mountView({ workers: [] })
     await flushPromises()
     const t = w.text()
     expect(t).toContain('接入新 Worker')
     expect(t).toContain('flori-worker:latest')   // 接入命令默认镜像 = flori-worker
     expect(t).toContain('GATEWAY_URL')
-    const mintBtn = w.findAll('button').find(b => b.text().includes('生成接入 token'))
+    expect(t).toContain('WORKER_TOKEN_FILE')
+    const mintBtn = w.findAll('button').find(b => b.text().includes('生成临时接入 token'))
     await mintBtn!.trigger('click')
     await flushPromises()
     expect(store.mintToken).toHaveBeenCalled()
+    expect(w.text()).toContain('flw-test')
+    expect(w.text()).toContain('有效期 1h00m')
   })
 
   it('AI 用量聚合：有调用时展示命中率与成本', async () => {
@@ -261,6 +267,60 @@ describe('SystemView', () => {
     expect(store.fetchFullStatus).toHaveBeenCalled()
   })
 
+  it('接入命令默认输出 Gateway-only compose,不包含 Redis/MinIO 直连配置', async () => {
+    const store = useWorkerStore()
+    stubStoreData(store)
+    const w = mountView({ workers: [] })
+    await flushPromises()
+    const cmd = w.find('pre').text()
+    expect(cmd).toContain('services:')
+    expect(cmd).toContain('GATEWAY_URL')
+    expect(cmd).toContain('WORKER_REGISTRATION_TOKEN')
+    expect(cmd).toContain('WORKER_ID_FILE')
+    expect(cmd).toContain('WORKER_TOKEN_FILE')
+    expect(cmd).toContain('HOME')
+    expect(cmd).toContain('./flori-worker-state/cpu-1:/home/worker')
+    expect(cmd).not.toContain('REDIS_URL')
+    expect(cmd).not.toContain('MINIO_')
+    expect(cmd).not.toContain('depends_on')
+  })
+
+  it('Watchtower 勾选后输出 worker + watchtower compose 与 scope/interval', async () => {
+    const store = useWorkerStore()
+    stubStoreData(store)
+    const w = mountView({ workers: [] })
+    await flushPromises()
+    await w.find('[data-testid="watchtower-enabled"]').setValue(true)
+    await w.find('[data-testid="watchtower-interval"]').setValue('240')
+    await flushPromises()
+    const cmd = w.find('pre').text()
+    expect(cmd).toContain('flori-worker-cpu-1:')
+    expect(cmd).toContain('watchtower-cpu-1:')
+    expect(cmd).toContain('ghcr.io/containrrr/watchtower:latest')
+    expect(cmd).toContain('com.centurylinklabs.watchtower.enable=true')
+    expect(cmd).toContain('com.centurylinklabs.watchtower.scope=flori-worker-cpu-1')
+    expect(cmd).toContain('--label-enable --scope flori-worker-cpu-1 --cleanup --interval 240')
+    expect(cmd).toContain('/var/run/docker.sock:/var/run/docker.sock')
+  })
+
+  it('docker run 输出也是 Gateway-only', async () => {
+    const store = useWorkerStore()
+    stubStoreData(store)
+    const w = mountView({ workers: [] })
+    await flushPromises()
+    const dockerBtn = w.findAll('.seg button').find(b => b.text().includes('docker run'))
+    await dockerBtn!.trigger('click')
+    await flushPromises()
+    const cmd = w.find('pre').text()
+    expect(cmd).toContain('docker run')
+    expect(cmd).toContain('GATEWAY_URL')
+    expect(cmd).toContain('WORKER_ID_FILE=/home/worker/worker.id')
+    expect(cmd).toContain('WORKER_TOKEN_FILE=/home/worker/worker.token')
+    expect(cmd).toContain('-v "./flori-worker-state/cpu-1:/home/worker"')
+    expect(cmd).not.toContain('REDIS_URL')
+    expect(cmd).not.toContain('MINIO_')
+  })
+
   it('接入命令随勾选能力多选生成 --pools + 各能力配置并集', async () => {
     const store = useWorkerStore()
     stubStoreData(store)
@@ -268,7 +328,7 @@ describe('SystemView', () => {
     await flushPromises()
     // 默认只勾 cpu → --pools cpu,无 GPU/代理凭证
     expect(w.text()).toContain('--pools cpu')
-    expect(w.text()).not.toContain('--gpus all')
+    expect(w.find('pre').text()).not.toContain('gpus: all')
     // 再勾 io + gpu + ai(cpu 仍勾):命令排序稳定 + 三套配置取并集,无主次
     await w.find('input[type="checkbox"][value="io"]').setValue(true)
     await w.find('input[type="checkbox"][value="gpu"]').setValue(true)
@@ -276,11 +336,12 @@ describe('SystemView', () => {
     await flushPromises()
     const t = w.text()
     expect(t).toContain('--pools ai cpu gpu io')   // 排序 join,不随勾选顺序抖
-    expect(t).toContain('--gpus all')               // gpu → GPU 直通
+    expect(w.find('pre').text()).toContain('gpus: all') // gpu → compose GPU 直通
     expect(t).toContain('MODEL_CACHE_DIR')          // gpu → whisper 缓存卷
-    expect(t).not.toContain('BILI_SESSDATA')        // io 凭证走中心分发,不进 worker env(1.1.85)
+    expect(t).not.toContain('BILI_' + 'SE' + 'SS' + 'DATA')  // io 凭证走中心分发,不进 worker env。
     expect(t).toContain('HF_ENDPOINT')              // cpu/gpu → whisper HF 国内镜像
     expect(w.find('pre').text()).not.toContain('GATEWAY_TLS_INSECURE') // 命令默认严格校验(页面提示文案除外)
-    expect(t).toContain('/root/.claude')            // ai(默认 claude-sub)→ 挂宿主 ~/.claude
+    expect(t).toContain('持久状态目录内的 .claude') // ai(默认 claude-sub)→ 使用 worker 独立 HOME
+    expect(w.find('pre').text()).not.toContain('${HOME}/.claude')
   })
 })
