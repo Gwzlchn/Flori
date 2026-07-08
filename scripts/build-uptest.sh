@@ -13,6 +13,10 @@
 #   首建即从 ghcr 拉依赖层(pip/apt/CLI binary)而非重算;命中需先 `docker login ghcr.io`(包私有),
 #   读不到则 BuildKit 优雅跳过(import 失败非致命),退化为本地层缓存。本地热重建仍秒级(本地层 + cache mount)。
 #
+# 与 CI 一致,本地也把构建上下文里的 pyproject version 抹成 0.0.0,真实运行版本通过
+# FLORI_VERSION build-arg 注入。否则每次提交 bump 版本都会让 COPY pyproject.toml 层变化,
+# 进而拖垮 worker 的 apt/CLI/pip 依赖缓存。
+#
 # 用法:
 #   scripts/build-uptest.sh                 # 建全部 4 个
 #   scripts/build-uptest.sh worker frontend # 只建指定(service 名:scheduler/api/worker/frontend)
@@ -35,7 +39,7 @@ if [ -z "$OWNER" ]; then
   exit 1
 fi
 OWNER="${OWNER,,}"
-# 真实语义版本,注入镜像 ENV FLORI_VERSION。本地不抹 pyproject:靠 cache mount 提速,且不动用户文件。
+# 真实语义版本,注入镜像 ENV FLORI_VERSION。构建上下文用临时副本,不改宿主 pyproject。
 VER="$(sed -n 's/^version = "\(.*\)"/\1/p' "${REPO}/pyproject.toml" | head -1)"
 PROXY_HOST="${FLORI_BUILD_PROXY_HOST:-}"
 if [ -z "$PROXY_HOST" ]; then
@@ -59,11 +63,18 @@ for proxy_var in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_prox
 done
 
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+ctx="${work}/context"
+mkdir -p "$ctx"
+rsync -a --delete --exclude-from="${REPO}/.dockerignore" "${REPO}/" "$ctx/"
+sed -i 's/^version = .*/version = "0.0.0"/' "${ctx}/pyproject.toml"
+# NAS/ACL 复制到 /tmp 后可能变成 0600,非 root worker 会读不了 /app 源码。
+find "$ctx" -type d -exec chmod 755 {} +
+find "$ctx" -type f -exec chmod 644 {} +
 cat > "$work/build.yml" <<YAML
 services:
   scheduler:
     build:
-      context: ${REPO}
+      context: ${ctx}
       dockerfile: docker/base.Dockerfile
       target: scheduler
       args: { USE_USTC_MIRROR: "${USTC}", FLORI_VERSION: "${VER}" }
@@ -71,7 +82,7 @@ services:
     image: ghcr.io/${OWNER}/flori-scheduler:${TAG}
   api:
     build:
-      context: ${REPO}
+      context: ${ctx}
       dockerfile: docker/base.Dockerfile
       target: api
       args: { USE_USTC_MIRROR: "${USTC}", FLORI_VERSION: "${VER}" }
@@ -79,7 +90,7 @@ services:
     image: ghcr.io/${OWNER}/flori-api:${TAG}
   worker:
     build:
-      context: ${REPO}
+      context: ${ctx}
       dockerfile: docker/base.Dockerfile
       target: worker
       args: { USE_USTC_MIRROR: "${USTC}", FLORI_VERSION: "${VER}" }

@@ -26,8 +26,8 @@ ARG USE_USTC_MIRROR=1
 RUN if [ "$USE_USTC_MIRROR" = "1" ]; then \
         sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list.d/debian.sources; \
     fi \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 RUN if [ "$USE_USTC_MIRROR" = "1" ]; then \
         pip config set global.index-url https://mirrors.ustc.edu.cn/pypi/web/simple; \
@@ -74,8 +74,8 @@ ARG TARGETARCH
 ARG CLAUDE_CODE_VERSION=v2.1.202
 # poppler-utils:claude Read 工具渲染 PDF 页面靠 pdftoppm(纯 PDF 论文直喂,无它 Read 必败);
 #               02 解析步 pdfinfo 取页数。pymupdf 已废(断词/公式丢,arxiv 走 HTML 源)。
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg poppler-utils \
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends ffmpeg poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 # Claude Code CLI:claude-cli provider 需要 `claude` 在 PATH。旧包管理器安装已废弃,这里消费 GitHub release
 # native binary,并用同 release 的 SHASUMS256.txt 校验,避免 registry/Node 版本漂移。
@@ -152,8 +152,8 @@ ENV FLORI_VERSION=${FLORI_VERSION}
 #    (装 opencv/scikit-image 约 100s)。故 apt + 全 pip 装在前、源码 COPY 放最后,改源码只重末层 COPY,
 #    apt/[steps] 层恒命中 buildcache。
 FROM common AS test-worker
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 poppler-utils \
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=cache,target=/root/.cache/pip pip install ".[api,worker,mcp,test,steps]"
 COPY shared/ shared/
