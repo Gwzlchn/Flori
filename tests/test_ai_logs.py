@@ -37,11 +37,11 @@ class _FakeGW:
 
 def _mk_response(**kw):
     base = dict(
-        content="# note", model="subscription", provider="claude-cli",
+        content="# note", model="claude-opus-4-8[1m]", provider="claude-cli",
         input_tokens=100, output_tokens=50, cache_creation_input_tokens=5,
         cache_read_input_tokens=10, cost_usd=0.02, duration_sec=1.5, num_turns=1,
         session_id="sess-1", api_ms=900.0, tier_used="primary",
-        attempts=[{"tier": "primary", "provider": "claude-cli", "model": "subscription", "ok": True}],
+        attempts=[{"tier": "primary", "provider": "claude-cli", "model": "claude-opus-4-8[1m]", "ok": True}],
         raw={"result": "# note", "session_id": "sess-1"},
     )
     base.update(kw)
@@ -125,7 +125,7 @@ class TestGatewayAttempts:
 class TestAiLogDump:
     def test_call_ai_writes_full_record(self, tmp_path):
         step = _Step(tmp_path, {
-            "ai": {"primary": {"provider": "claude-cli", "model": "subscription"}},
+            "ai": {"primary": {"provider": "claude-cli", "model": "claude-opus-4-8[1m]"}},
             "pool": "ai", "domain": {"name": "finance"},
         })
         step._gateway = _FakeGW(response=_mk_response())
@@ -143,7 +143,7 @@ class TestAiLogDump:
         assert r["routing"]["attempts"][0]["ok"] is True
         assert r["usage"]["input_tokens"] == 100
         assert r["usage"]["cache_read_input_tokens"] == 10
-        assert r["cost"]["basis"] == "subscription-equiv"
+        assert r["cost"]["basis"] == "cli-equiv"
         assert r["session_id"] == "sess-1"
         assert r["raw"]["session_id"] == "sess-1"
         assert r["env"]["pool"] == "ai"
@@ -236,7 +236,7 @@ class TestTranscriptSidecar:
         src = tmp_path / "fail.jsonl"; src.write_text('{"e":1}\n')
         exc = AllProvidersFailedError(
             "all failed", error_type="ai",
-            attempts=[{"tier": "primary", "provider": "claude-cli", "model": "subscription",
+            attempts=[{"tier": "primary", "provider": "claude-cli", "model": "claude-opus-4-8[1m]",
                        "ok": False, "transcript_path": str(src)}])
         step = _Step(tmp_path, {"ai": {}})
         step._gateway = _FakeGW(exc=exc)

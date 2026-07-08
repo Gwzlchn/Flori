@@ -180,7 +180,7 @@ describe('AskView 空/错误态', () => {
       if (p.includes('/log')) return Promise.resolve({
         task_id: 'at_1', count: 1,
         calls: [{
-          task_id: 'at_1', provider: 'claude-cli', model: 'subscription', ok: true,
+          task_id: 'at_1', provider: 'claude-cli', model: 'claude-opus-4-8[1m]', ok: true,
           record: {
             output: '审计输出OUT',
             prompt: { system: 'SYS', messages: [{ role: 'user', content: 'USER内容' }] },

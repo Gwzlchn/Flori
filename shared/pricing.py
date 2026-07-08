@@ -5,7 +5,7 @@
 其他供应商模型多变(kimi 2.7 / deepseek 4pro 等)无需写死,每天拉最新即可。
 
 计费在 api 侧做:api 有网 + MinIO;纯网关 worker 不直连 MinIO/Redis。流程:worker 报原始
-token,api record_ai_usage 据本表填 cost(claude-cli 订阅路径用 CLI total_cost_usd,不经本表)。
+token,api record_ai_usage 据本表填 cost(claude-cli CLI 路径用 CLI total_cost_usd,不经本表)。
 未命中本表 / 拉取失败 → 调用方回退 ai_gateway.calc_cost(硬编码 PRICING)。
 """
 

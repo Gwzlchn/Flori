@@ -13,12 +13,12 @@ function callFixture(over: Record<string, any> = {}) {
   return {
     call_index: 0, ok: true, session_id: 'sess-1',
     routing: {
-      provider: 'claude-cli', model: 'subscription', tier_used: 'primary',
+      provider: 'claude-cli', model: 'claude-opus-4-8[1m]', tier_used: 'primary',
       attempts: [{ tier: 'primary', provider: 'claude-cli', ok: true }],
     },
     latency: { api_ms: 900, duration_total_sec: 1.5 },
     usage: { input_tokens: 2341, output_tokens: 1180, cache_creation_input_tokens: 5, cache_read_input_tokens: 10 },
-    cost: { cost_usd: 0.043, basis: 'subscription-equiv' },
+    cost: { cost_usd: 0.043, basis: 'cli-equiv' },
     prompt: { rendered: { system: 'SYS', user: 'USER PROMPT' }, template: { source: 'default' } },
     output: { content: '# 智能笔记', num_turns: 1, finish_reason: 'end_turn' },
     flori: { version: '0.4.9' },

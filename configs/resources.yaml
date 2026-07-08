@@ -1,6 +1,6 @@
 # 资源槽:对"单账号 / 单出口 IP"等池粒度之外的资源做并发上限(机制级,替代纯靠部署拓扑兜)。
 #
-# 用法:在 configs/pipelines.yaml 的某步加 `resources: [claude-sub-main]`,该步认领时除占池槽外
+# 用法:在 configs/pipelines.yaml 的某步加 `resources: [claude-cli-main]`,该步认领时除占池槽外
 # 还需占下列资源槽;占满则任务放回队列等待。崩溃/死 worker 的占用由 scheduler orphan 回收归还。
 #
 # 本文件留空(resources: {})或缺失 = 不启用任何资源限流。当前无步声明 resources,此功能为
@@ -8,6 +8,6 @@
 # limit 由 scheduler 启动时推到 redis(单一事实源);改动需重启 scheduler 生效。
 resources: {}
   # 示例(取消注释 + 在对应步声明 resources 即生效):
-  # claude-sub-main: 2     # 单 Claude 订阅账号并发(对应两个 claude-worker 共享同一 ~/.claude)
+  # claude-cli-main: 2     # 单 Claude CLI 账号并发(对应两个 claude-worker 共享同一 ~/.claude)
   # proxy-11081: 1         # 单出口代理并发(同池多账号共享一个代理时用)
   # deepseek-key: 4        # 单 API key 并发

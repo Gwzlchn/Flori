@@ -201,6 +201,8 @@ GET /api/jobs/j_xxx/steps/10_smart/log?raw=1  → 完整
 
 返回该 job 各 AI 步的**完整 AI 调用审计**（只读）。读 `output/ai_logs/{step}.jsonl`（每个 AI 步、**每次 LLM 调用一条**；经 StorageBackend，本地/MinIO 通用），按 `job_id` 归成一条 trace。`?step={step}` 只返回该步。每条记录含:路由(provider/api/model/tier_used + 逐 tier `attempts` 尝试链)、延迟(ttft_ms/api_ms/总时长)、prompt(`rendered`=渲染后实际发出的 system+user[常量] / `template`=模板来源 / `values`=注入值)、输出、`transcript`(agentic 全轨迹 sidecar 引用,见下)、用量(in/out/cache)、成本、原始返回 `raw`、溯源(flori 版本/git_commit、input_hashes、env worker)、`ok`/`error`(失败调用也整条记)。落盘点 `shared/step_base.call_ai`(best-effort,不破坏主流程)。
 
+> **AI worker 接入方式 / provider 审计对齐**:Claude CLI、Codex CLI、Kimi API key 都归同一种 `ai` worker,差异只在接入方式/凭证方式。审计必须保留具体 `provider`、`requested_model`、`effective_model`(可解析时)、`worker_id`、`worker_tags`、`ai_access_method` 与 `credential_kind`。`pool=ai` 只表示资源池,不能推断接入方式。CLI provider 有 transcript sidecar;API-key provider 无 CLI transcript 时写 `{"file": null, "reason": "non_cli_provider"}`,但其它 prompt/response/usage/cost 字段必须与 CLI provider 同形。
+
 > **`transcript` 字段(agentic 全轨迹白盒)**:claude-cli 的多轮 agentic 调用(取证 WebSearch/Bash、视觉逐图 Read)顶层 json 只回最终汇总,中间轮工具轨迹在 CLI 自写的会话 transcript 里;codex-cli 的非交互调用以 `codex exec --json` JSONL event stream 作为 trace。审计层按 provider 返回的 `transcript_path` 回收,拷为 job 产物 sidecar `output/ai_logs/{step}.turns.{call_index}.jsonl`(随产物入 storage、随删 job 级联删),记录内留引用:`{"file": "output/ai_logs/….turns.N.jsonl", "turns": 行数, "bytes": 大小, "source": 原路径}`;不可得(非 CLI provider / HOME 未挂 / 会话无档)为 `{"file": null, "reason": …}`。失败调用经尝试链 `attempts[].transcript_path` 同样回收。
 
 > **`phase` 字段(外杀留痕)**:每次调用【发起前】先落一条 `phase:"pending"` 记录(输入侧全量:渲染后 prompt/system、模板来源、input_hashes、ts_start;`ok:null`)并即刻 flush;调用完成后**原位替换**为 `phase:"final"` 完整记录。步被外杀(如步超时 SIGKILL)时磁盘仅存 pending 条 → 该调用的输入仍可审计,ts_start 可与 worker 家目录 transcript 按时间窗对上;失败/超时路径 worker 会 best-effort 把 `output/ai_logs/*` 推回中心存储,故 API 可见。workdir 复用重试时续写同一 jsonl(历史记录保留、`call_index` 续增),上次执行的 pending 不会被覆盖。
@@ -431,7 +433,7 @@ GET /api/jobs/{id}/notes/transcript     → text/markdown (逐字稿)
      "cache_creation_tokens": 40000, "cache_read_tokens": 250000,
      "cost_usd": 1.10, "cache_hit_rate_pct": 42.4}
   ],
-  "//cost": "claude-cli 订阅成本为「等价 API 成本」（非真实账单），前端按 provider==claude-cli 标「(等价)」"
+  "//cost": "claude-cli CLI 成本为「等价 API 成本」（非真实账单），前端按 provider==claude-cli 标「(等价)」"
 }
 ```
 
@@ -567,7 +569,7 @@ Response `200`:
       "first_seen": "2026-05-10T08:00:00+08:00",
       "started_at": "2026-05-17T09:00:00+08:00",
       "last_heartbeat": "2026-05-17T12:30:15+08:00",
-      "admin_note": "内网机器，有 Claude Max 订阅"
+      "admin_note": "内网机器，有 Claude Max 账号"
     },
     {
       "id": "gpu-e5f6g7h8",
@@ -620,7 +622,7 @@ curl -X PUT http://localhost:8000/api/workers/ai-a1b2c3d4 \
 
 # 添加运维备注
 curl -X PUT http://localhost:8000/api/workers/ai-a1b2c3d4 \
-  -d '{"admin_note": "内网机器，有 Claude Max 订阅"}'
+  -d '{"admin_note": "内网机器，有 Claude Max 账号"}'
 ```
 
 #### DELETE /api/workers/{id} — 移除 Worker 记录
@@ -701,7 +703,7 @@ POST   /api/runner/jobs/{id}/steps/{step}/fail             → 上报失败
 POST   /api/runner/jobs/{id}/steps/{step}/release          → 释放认领（不计成败）
 POST   /api/runner/jobs/{id}/steps/{step}/progress         → 上报运行中进度（转发到 events:{id}）
 POST   /api/runner/jobs/{id}/steps/{step}/alive            → 步进度心跳（on_tick 每 10s，仅子进程存活时；供远程 job 卡死检测）
-POST   /api/runner/usage                                   → 记录一次 AI 用量（exec_id 去重）。body 含 worker_id（api 以鉴权 token 认定为准）、input/output_tokens、cache_creation/cache_read_input_tokens（命中率=read/(input+read+creation)）、cost_usd、duration_sec、num_turns、cached；claude-cli 经 `claude -p --output-format json` 取真实 usage+total_cost_usd。api 侧据 LiteLLM 价表（每天拉 `model_prices_and_context_window.json` 存 MinIO `_pricing/litellm.json`,缓存感知 per-token 单价）对**非 cli** provider 填权威 cost_usd（命中时覆盖上报值；空表/未命中回退上报值）；claude-cli 用其 CLI total_cost_usd（订阅=等价 API 成本,不覆盖）
+POST   /api/runner/usage                                   → 记录一次 AI 用量（exec_id 去重）。body 含 worker_id（api 以鉴权 token 认定为准）、input/output_tokens、cache_creation/cache_read_input_tokens（命中率=read/(input+read+creation)）、cost_usd、duration_sec、num_turns、cached；claude-cli 经 `claude -p --output-format json` 取真实 usage+total_cost_usd。api 侧据 LiteLLM 价表（每天拉 `model_prices_and_context_window.json` 存 MinIO `_pricing/litellm.json`,缓存感知 per-token 单价）对**非 cli** provider 填权威 cost_usd（命中时覆盖上报值；空表/未命中回退上报值）；claude-cli 用其 CLI total_cost_usd（CLI 等价 API 成本,不覆盖）
 GET    /api/runner/jobs/{id}/artifacts                     → 产物清单（GatewayStorage.pull 据此）
 GET    /api/runner/jobs/{id}/artifacts/{rel}              → 取单个产物字节（计出库流量 traffic:pull，按 worker 归因；404 不计）
 PUT    /api/runner/jobs/{id}/artifacts/{rel}              → 回传单个产物字节（计入库流量 traffic:push，按 worker 归因）
@@ -1368,7 +1370,7 @@ Response `200`（`note_type` 区分命中的是哪类笔记，如 `smart`/`mecha
 
 自然语言提问 → 跨语料检索相关笔记 → LLM 综合出**带引用**的答案，内联标注 `[来源N]`、并附「共识 / 分歧」段。需 `verify_token`。
 
-**检索缓解**：服务端先把问句**拆词**（去停用词/标点，CJK 连续串做 2–4 字滑窗，ascii 词保留）并叠加**术语表里出现在问句中的术语**，得到一组（≤6）派生查询。检索只查 `note_chunks_fts5` 证据块（由 `index_job_notes` 从笔记正文切分生成），按 chunk 去重并返回 `sources[].evidence`；无 chunk 命中即无来源。综合走 `claude-cli` 订阅。
+**检索缓解**：服务端先把问句**拆词**（去停用词/标点，CJK 连续串做 2–4 字滑窗，ascii 词保留）并叠加**术语表里出现在问句中的术语**，得到一组（≤6）派生查询。检索只查 `note_chunks_fts5` 证据块（由 `index_job_notes` 从笔记正文切分生成），按 chunk 去重并返回 `sources[].evidence`；无 chunk 命中即无来源。综合走 `claude-cli` 接入方式。
 
 请求体：
 
@@ -1438,7 +1440,7 @@ Response `202`（`sources` 提交时已算好；`answer_markdown` 经 `GET /api/
 镜像 DAG 的 `GET /api/jobs/{id}/ai-logs`：读 `ai_task_logs`（§3.1），返回该 task 每次 claude 调用的完整审计（路由/尝试链/渲染 prompt/输出/raw/用量/`transcript` agentic 全轨迹），最近在前。
 
 ```json
-{"task_id":"at_…","count":1,"calls":[{"task_id":"at_…","exec_id":"…","step":"synthesis","domain":"ml","provider":"claude-cli","model":"subscription","ok":true,"error":null,"created_at":"…","record":{"routing":{"attempts":[…]},"prompt":{"system":"…","messages":[…]},"output":"…","raw":{…},"transcript":{"jsonl":"…","turns":12,"truncated":false,"path":"…"},"usage":{…}}}]}
+{"task_id":"at_…","count":1,"calls":[{"task_id":"at_…","exec_id":"…","step":"synthesis","domain":"ml","provider":"claude-cli","model":"claude-opus-4-8[1m]","ok":true,"error":null,"created_at":"…","record":{"routing":{"attempts":[…]},"prompt":{"system":"…","messages":[…]},"output":"…","raw":{…},"transcript":{"jsonl":"…","turns":12,"truncated":false,"path":"…"},"usage":{…}}}]}
 ```
 
 > `record.transcript`(agentic 全轨迹白盒):AI task 不挂 job、无 storage 产物区,CLI 会话 transcript **全文内嵌** `record_json`(`{"jsonl": 全文, "turns", "truncated", "path"}`;>5MB 截断并 `truncated:true`;不可得为 `{"jsonl": null, "reason": …}`)。
@@ -1522,17 +1524,20 @@ Response `200`（数组）：
 {
   "providers": [
     {"name": "anthropic", "type": "api", "available": true,  "label": "API"},
-    {"name": "claude-cli", "type": "cli", "available": true,  "label": "订阅"},
-    {"name": "codex-cli",  "type": "codex_cli", "available": true, "label": "订阅"},
+    {"name": "claude-cli", "type": "cli", "available": true,  "label": "CLI"},
+    {"name": "codex-cli",  "type": "codex_cli", "available": true, "label": "CLI"},
+    {"name": "kimi",      "type": "openai_compatible", "available": true, "label": "API"},
     {"name": "openai",    "type": "api", "available": false, "label": "API"}
   ]
 }
 ```
 
 - `name`：provider 键（`providers.yaml` 中的键）。
-- `type`：取自 provider 配置的 `type`（如 `api` / `cli`）。
+- `type`：取自 provider 配置的 `type`（如 `anthropic` / `openai` / `openai_compatible` / `cli` / `codex_cli`）。
 - `available`：是否已具备调用条件（配了 API key 等）。
-- `label`：`type == "cli"` 时为 `"订阅"`，否则 `"API"`（前端展示用）。
+- `label`：`type == "cli"` 或 `type == "codex_cli"` 时为 `"CLI"`，否则 `"API"`（前端展示用）。
+
+`available=true` 只表示 provider 配置侧可调用,不表示当前一定有在线 worker。进入 `queue:ai` 后仍按 AI 接入方式 tag 硬门控:如 `kimi` 需要在线 worker 带 `kimi-api` tag,`claude-cli` 需要 `claude-cli`,`codex-cli` 需要 `codex-cli`。
 
 `POST /api/jobs/{id}/rerun-smart` 的 `provider` 必须是本端点列出且 `available=true` 的 provider。
 
@@ -1668,24 +1673,25 @@ Score:  priority (负数，越小越优先)
 
 优先级计算：`score = -(已完成步骤数)`
 
-**独立 AI task（P1 AI-worker-split）**：`/api/ask`、`/digest` 把单次订阅 CLI 调用作为独立 task 投进 `queue:ai`，由具备对应 provider tag 的 ai-worker 执行——**不挂 job、不走 storage**，载荷与结果都内联。member 形态带 `kind:"ai"`（与 pipeline-step task 区分）：
+**独立 AI task（P1 AI-worker-split）**：`/api/ask`、`/digest` 把单次 AI 调用作为独立 task 投进 `queue:ai`，由具备对应 AI 接入方式 tag 的 ai-worker 执行——**不挂 job、不走 storage**，载荷与结果都内联。member 形态带 `kind:"ai"`（与 pipeline-step task 区分）：
 
 ```
 Key:    queue:ai
 Member: {"kind":"ai","task_id":"at_xxx","step":"synthesis|digest","domain":"<domain>|null",
-         "provider":"claude-cli|codex-cli","model":"subscription|<model>",
-         "request":<LLMRequest jsonable>,"tags":[...],"require_tags":["claude-cli|codex-cli"],"pool":"ai"}  (JSON string)
+         "provider":"claude-cli|codex-cli|kimi","model":"<explicit-model>",
+         "request":<LLMRequest jsonable>,"tags":[...],"require_tags":["claude-cli|codex-cli|kimi-api"],"pool":"ai"}  (JSON string)
 ```
 
 - `request` = `shared.models.LLMRequest.to_jsonable()`（messages/system/max_tokens/temperature/allowed_tools…；images 序列化为 str 路径，AI-RPC 路径一般不带图）。
-- `provider/model` = 本次独立 AI task 请求的 provider 与模型。缺省兼容旧载荷:`claude-cli/subscription`。
-- `require_tags:["claude-cli"]` 或 `["codex-cli"]` → 只有持对应订阅/凭证的 ai-worker 认领（无凭证 worker 不会领了再运行时失败）。
+- `provider/model` = 本次独立 AI task 请求的 provider 与模型,必须显式带出。缺失视为非法 AI task,不得补默认 provider/model。
+- `require_tags` = AI 接入方式硬门控:通过 Claude CLI 接入用 `["claude-cli"]`,通过 Codex CLI 接入用 `["codex-cli"]`,通过 Kimi API key 接入用 `["kimi-api"]`。无对应凭证/tag 的 `ai` worker 不得认领该 task。
+- `model` 必须是具体模型名。CLI provider 与 API-key provider 都不得使用模型占位符。
 - pipeline-step task 的 member **不带 `kind`**（向后兼容，缺省即 `step`）。
 - `queue:enqueued` field（§3.x 等待时长用）：step task=`{pool}|{job_id}|{step}`；**ai task=`{pool}|ai|{task_id}`**。
 - 结果回执：`airesult:{task_id}`（STRING，JSON = `LLMResponse.to_jsonable()` 或 `{"error":"..."}`，带 TTL≈600s），供 API 端 `GET …/result/{task_id}` / 同步等待取回（P1-3）。AI 用量经 `ai_usage`（`job_id=null, step=<step_name>`）记账（worker 侧，P1-2）。
 - 自动周报（09 工单 P3）：`radar:digest:auto:{domain}:{YYYY-MM-DD}`（STRING SET NX，TTL 3 天，当日投递防重锁）；`radar:digest:latest:{domain}`（STRING JSON，无 TTL，最新一期 `{task_id, queued_at, [markdown, generated_at, error]}`——scheduler 收割 `airesult` 后搬入长存，`GET /api/domains/{d}/digest/latest` 读它）。
 - 完成事件：worker 执行后 `publish events:{task_id}`（`ai_task_start/ai_task_done/ai_task_failed`，见 §3.5），供 `/ask`、`/digest` 经 `WS /api/ws/jobs/{task_id}`（端点对任意 id 通用）或轮询取信号。
-- **白盒审计**：ai-worker 每次执行写一条 DB 表 **`ai_task_logs`**（按 `task_id`；对齐 DAG 步的 `output/ai_logs/{step}.jsonl`）。索引列：`exec_id/step_name/domain/provider/model/ok/error/各 token/cost_usd/duration_sec/num_turns/created_at`；`record_json` 存全量审计（路由/尝试链/渲染 prompt[system+messages]/输出/raw/用量）。与 `ai_usage`（成本归因）**并存不合并**（白盒 vs 计费两套）。查看端点见 P1-3。
+- **白盒审计**：ai-worker 每次执行写一条 DB 表 **`ai_task_logs`**（按 `task_id`；对齐 DAG 步的 `output/ai_logs/{step}.jsonl`）。索引列：`exec_id/step_name/domain/provider/model/ok/error/各 token/cost_usd/duration_sec/num_turns/created_at`；`record_json` 存全量审计（路由/尝试链/渲染 prompt[system+messages]/输出/raw/用量/worker/ai_access_method/credential_kind/transcript）。与 `ai_usage`（成本归因）**并存不合并**（白盒 vs 计费两套）。查看端点见 P1-3。
 
 ### 3.2 资源池计数（holder 集合，根治幽灵泄漏）
 
@@ -1749,7 +1755,7 @@ Type:   HASH
 Fields:
   type:           "cpu" | "gpu" | "ai" | "io"
   pools:          "scene,cpu,io"
-  tags:           "vision,claude-cli,codex-cli"     ← 能力标签
+  tags:           "vision,claude-cli,codex-cli,kimi-api"     ← 能力标签
   reject_tags:    "private,confidential"              ← 排斥标签（可选）
   hostname:       "gpu-server" | ""
   status:         "idle" | "busy" | "offline"        ← 运行时态(busy/idle，非对外公共态)
@@ -1766,6 +1772,18 @@ TTL:    30 秒（心跳续期）
 
 Redis 为实时状态；持久记录（统计/历史/备注）存 SQLite workers 表。
 ```
+
+`pools` 与 AI 接入方式分离:`--pools ai` 只声明该 worker 可进入 AI 资源池,不代表它拥有任何 AI 凭证。AI 接入方式一律通过 `tags` 硬区分:
+
+| AI 接入方式 | 必需 tag | credential_kind | 典型 worker 命名 | 凭证位置/环境 |
+|----------|----------|-----------------|------------------|---------------|
+| `claude-cli` | `claude-cli` | `cli_auth` | `claude-1` | `$HOME/.claude/.credentials.json` 或等效 Claude CLI 登录态 |
+| `codex-cli` | `codex-cli` | `cli_auth` | `codex-1` | `$CODEX_HOME/auth.json` 或 `$HOME/.codex/auth.json` |
+| `kimi` | `kimi-api` | `api_key` | `kimi-1` | `KIMI_API_KEY` |
+
+同一 `ai` worker 进程可同时带多个接入方式 tag,但仅当该 worker **实际**具备对应凭证。调度/认领只看 `require_tags` 与 worker `tags` 的交集,不得因为 worker 在 `ai` 池就让其认领任意 provider 任务。注册和心跳事件必须记录 `worker_id/pools/tags/ai_access_methods`;删除 worker 后相应 per-worker token 吊销,旧 worker 即使仍有 AI 凭证也必须因 runner token `401/403` 退出。
+
+Web UI `/system` 的「接入新 Worker」向导只负责生成启动参数,不直接改中心 worker 记录:勾选 `ai` 后出现「AI 接入方式」选择器。选择 `Claude CLI` 生成 `--pools ai ... --tags claude-cli`;选择 `Codex CLI` 生成 `--tags codex-cli`;选择 `Kimi API key` 生成 `--tags kimi-api` 并在部署文件里要求 `KIMI_API_KEY`。该选择器不得生成 `--pools claude` / `--pools codex` / `--pools kimi`,也不得把接入方式写成 worker type。
 
 #### 组件心跳 + 系统事件流（系统健康总览页）
 
@@ -1879,7 +1897,9 @@ default:
 
 **每段 `variables`** 是该 content_type 的单一事实源（AI provider/model、OCR 超时等），job 用 `$VAR` 引用。
 
-> **CLI provider 的 `model` 语义**：`claude-cli` 中 `model: subscription` 为占位 = 用 `providers.yaml` `claude-cli.model` 的 provider 默认（如 `claude-opus-4-8[1m]`，`[1m]`=1M 上下文）；写具体模型名则该步以 `--model` 钉死。`codex-cli` 中 `model: subscription` 表示使用 Codex CLI 当前登录账号和 CLI 默认模型,不传 `--model`;写具体模型名则传给 `codex exec --model`。优先级:步级 model（非 subscription）> provider 默认 > CLI 自身默认。步级 model 属 `ai` 配置 → 改动即变 `def_digest`,该步自动判过期可重跑。
+> **AI provider / model 显式规则**：`ai.provider` 和 `ai.model` 必须在任务配置或载荷中显式出现,不得由 `pool=ai`、worker 名称或运行时默认推断 provider。pipeline 和独立 AI task 必须使用具体模型名（如 `claude-opus-4-8[1m]`、Codex CLI 可接受的模型名、`moonshot-v1-128k`）。缺 provider 或缺 model 是契约错误,不得用运行时默认值补齐。
+
+> **AI 接入方式 tag 路由**：`claude-cli` → `require_tags:["claude-cli"]`;`codex-cli` → `["codex-cli"]`;`kimi` → `["kimi-api"]`。其它 API-key provider 后续按 `<provider>-api` 扩展。`pool=ai` 只是容量队列,接入方式 tag 才表示该 worker 具备哪种 AI 凭证。
 
 **视频 pipeline 示例**（截取，完整见 `configs/pipelines.yaml`）：
 

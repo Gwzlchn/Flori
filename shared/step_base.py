@@ -16,7 +16,7 @@ import structlog
 
 from .ai_gateway import AIGateway, record_usage_to_file
 from .errors import ProcessingError, StepError
-from .models import AIUsage, LLMRequest
+from .models import AIUsage, DEFAULT_AI_MODEL, LLMRequest
 
 
 # 送评上限:绝大多数笔记可整篇覆盖;超长则在 review 里标 coverage,避免"只评前段却报整篇分"。
@@ -193,12 +193,11 @@ class StepBase:
         tmp.rename(target)
 
     def ai_provider_model(self) -> tuple[str, str]:
-        """最近一次 AI 调用的 (provider, model)。claude-cli 订阅默认 Opus 4.8——config 里是
-        占位 "subscription",此处换成真实模型名,供笔记/评审统一标注。"""
+        """最近一次 AI 调用的 (provider, model),供笔记/评审统一标注。"""
         prov = self.last_ai_provider or "unknown"
         model = self.last_ai_model or "unknown"
-        if prov == "claude-cli" and model in ("subscription", "unknown", ""):
-            model = "claude-opus-4-8"
+        if prov == "claude-cli" and model in ("unknown", ""):
+            model = DEFAULT_AI_MODEL
         return prov, model
 
     # claude-cli 视觉笔记走 --allowedTools Read 多轮,常 agentic 化:开头插"已完成/我做了什么/
@@ -492,7 +491,7 @@ class StepBase:
             return
         pcfg = self.config.get("providers", {}).get("providers", {}).get(provider, {})
         models = pcfg.get("models", [])
-        model = models[0] if models else "subscription"
+        model = models[0] if models else (pcfg.get("model") or "unknown")
         self.config["ai"] = {"primary": {"provider": provider, "model": model}}
         self._gateway = None  # 强制按新 ai 配置重建
 
@@ -821,7 +820,7 @@ class StepBase:
             },
             "cost": {
                 "cost_usd": getattr(response, "cost_usd", 0.0),
-                "basis": "subscription-equiv" if getattr(response, "provider", None) == "claude-cli" else "priced",
+                "basis": "cli-equiv" if getattr(response, "provider", None) == "claude-cli" else "priced",
             },
             "raw": getattr(response, "raw", None),
             # 关联(produced_artifact 此刻未知,留空)

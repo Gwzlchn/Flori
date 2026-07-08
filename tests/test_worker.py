@@ -394,7 +394,7 @@ class TestAutoDiscoverTags:
                     assert "claude-cli" not in tags
 
     def test_claude_logged_in_adds_vision_and_cli(self):
-        # claude 订阅已登录(~/.claude/.credentials.json 在)时标 vision + claude-cli.
+        # Claude CLI 已登录(~/.claude/.credentials.json 在)时标 vision + claude-cli.
         env = {k: v for k, v in os.environ.items()
                if k not in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OLLAMA_URL")}
         with patch.dict(os.environ, env, clear=True):
@@ -1123,7 +1123,7 @@ class TestAITaskExecution:
     """worker 认领并执行独立 AI task(kind='ai'),含白盒审计、错误回执、认领路由。"""
 
     def _ai_claim(self, task_id="at_1", step="synthesis", domain="dl",
-                  provider="claude-cli", model="subscription"):
+                  provider="claude-cli", model="claude-opus-4-8[1m]"):
         return {
             "kind": "ai", "task_id": task_id, "step": step, "pool": "ai", "exec_id": "w:1",
             "request": LLMRequest(messages=[{"role": "user", "content": "Q"}], system="S").to_jsonable(),
@@ -1146,7 +1146,7 @@ class TestAITaskExecution:
         assert logs[0]["provider"] == "claude-cli" and logs[0]["step_name"] == "synthesis"
         rec = json.loads(logs[0]["record_json"])
         assert rec["output"] == "ANSWER" and rec["prompt"]["system"] == "S"
-        assert rec["routing"]["requested"] == {"provider": "claude-cli", "model": "subscription"}
+        assert rec["routing"]["requested"] == {"provider": "claude-cli", "model": "claude-opus-4-8[1m]"}
         assert rec["routing"]["attempts"] == [{"tier": "primary"}]
         assert rec["usage"]["input_tokens"] == 100
         # 3) 成本归因 ai_usage(job_id null, step=synthesis)
@@ -1169,7 +1169,7 @@ class TestAITaskExecution:
     @pytest.mark.asyncio
     async def test_execute_uses_requested_codex_provider(self, worker, redis, db, monkeypatch):
         seen = {}
-        resp = LLMResponse(content="ANSWER", model="subscription", provider="codex-cli",
+        resp = LLMResponse(content="ANSWER", model="gpt-5-codex", provider="codex-cli",
                            attempts=[{"tier": "primary", "provider": "codex-cli", "ok": True}])
 
         def fake_gateway(providers, pipelines):
@@ -1178,14 +1178,14 @@ class TestAITaskExecution:
 
         monkeypatch.setattr("worker.worker.AIGateway", fake_gateway)
         await worker._execute_ai_task(
-            self._ai_claim("at_codex", provider="codex-cli", model="subscription")
+            self._ai_claim("at_codex", provider="codex-cli", model="gpt-5-codex")
         )
         primary = seen["pipelines"]["steps"][0]["ai"]["primary"]
-        assert primary == {"provider": "codex-cli", "model": "subscription"}
+        assert primary == {"provider": "codex-cli", "model": "gpt-5-codex"}
         logs = db.get_ai_task_logs("at_codex")
         assert logs[0]["provider"] == "codex-cli"
         rec = json.loads(logs[0]["record_json"])
-        assert rec["routing"]["requested"] == {"provider": "codex-cli", "model": "subscription"}
+        assert rec["routing"]["requested"] == {"provider": "codex-cli", "model": "gpt-5-codex"}
 
     @pytest.mark.asyncio
     async def test_claim_routes_ai_task_gated_by_tag(self, redis, db, config, storage):
@@ -1217,7 +1217,7 @@ class TestAITaskExecution:
                    provider="codex-cli").to_task_payload())
         claim = await request_step(w)
         assert claim is not None and claim["provider"] == "codex-cli"
-        assert claim["model"] == "subscription"
+        assert claim["model"] == "gpt-5-codex"
         assert claim["require_tags"] == ["codex-cli"]
 
 

@@ -141,7 +141,7 @@ class TestBuildStepConfig:
         step_cfg = build_step_config(cfg, "video", "11_smart")
 
         assert "primary" in step_cfg["ai"]
-        assert step_cfg["ai"]["primary"]["provider"] == "claude-cli"  # 无 key,走订阅
+        assert step_cfg["ai"]["primary"]["provider"] == "claude-cli"  # 默认走 Claude CLI 接入方式
         assert "text_fallback" in step_cfg["ai"]
 
     def test_no_ai_config(self, configs_dir, tmp_data_dir):
@@ -275,4 +275,3 @@ class TestLoadPipelinesShape:
         assert ocr["timeout_sec"] == 1800
         assert isinstance(ocr["timeout_sec"], int)
         assert ocr["retries"] == 1
-

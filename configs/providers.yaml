@@ -1,4 +1,4 @@
-# provider 池。pipelines.yaml 默认链只用 claude-cli/anthropic/deepseek;
+# provider 池。pipelines.yaml 默认链主用 claude-cli;
 # kimi/openai/local 不在默认链,仅供前端选 provider 重跑时手动挑选(按是否配 key 标灰),
 # 经 ai_gateway 按 type 分发动态使用——非死配置,勿删。
 providers:
@@ -34,11 +34,10 @@ providers:
     # 输出格式由 provider 强制 `--output-format json`(取真实 usage/cache/total_cost_usd/num_turns);
     # 这里不写 --output-format(写了也会被 provider 剔除改 json)。
     command: ["claude", "-p"]
-    # 默认模型(yaml 单一来源,钉死可复现):不配则沿用挂载 HOME 里 CLI 自己的默认模型——
-    # 宿主交互 /model 换模型会让 worker 静默跟变。优先级:pipelines.yaml 步级 model(非
-    # "subscription" 占位;换模型即变 def_digest → 该步自动过期可重跑)> 此默认 > CLI 默认。
+    # 默认模型(yaml 单一来源,钉死可复现):不配则沿用挂载 HOME 里 CLI 自己的默认模型。
+    # 优先级:pipelines.yaml 步级 model > 此默认 > CLI 默认。换模型会变 def_digest。
     # [1m] 后缀 = 1M 上下文。
-    model: claude-opus-4-8[1m]
+    model: "claude-opus-4-8[1m]"
     features: [vision]
     cost_usd: 0
 
@@ -47,8 +46,8 @@ providers:
     # prompt 经 stdin 喂入;provider 动态追加 --json/-o/--sandbox read-only/--image.
     # 首版只承诺纯文本/图片,不映射 Claude 的 Read/WebSearch/Bash allowed_tools 语义.
     command: ["codex", "exec"]
-    # subscription = 使用 Codex CLI 当前登录账号和 CLI 默认模型,不传 --model.
-    model: subscription
+    # Codex CLI 接入方式也必须显式指定模型,避免跟随本机 CLI 默认值漂移。
+    model: gpt-5-codex
     features: [vision]
     cost_usd: 0
 

@@ -56,7 +56,7 @@ class TestCalcCost:
 class TestRetryPolicy:
     def test_rate_limit_long_backoff(self):
         from shared.errors import RETRY_POLICY, get_retry_delay
-        # 限流:递增长退避,等订阅配额恢复(而非 90s 内烧完转终态)。
+        # 限流:递增长退避,等 CLI 额度恢复(而非 90s 内烧完转终态)。
         assert RETRY_POLICY["ai_rate_limit"]["max"] == 5
         assert get_retry_delay("ai_rate_limit", 0) == 300
         assert get_retry_delay("ai_rate_limit", 4) == 1800
@@ -570,7 +570,7 @@ class TestClaudeCLIProvider:
         )
         req = LLMRequest(
             messages=[{"role": "user", "content": "hello"}],
-            model="subscription",
+            model="claude-opus-4-8[1m]",
         )
         resp = await provider.complete(req)
         assert resp.content == "CLI output"
@@ -584,7 +584,7 @@ class TestClaudeCLIProvider:
         )
         req = LLMRequest(
             messages=[{"role": "user", "content": "hello"}],
-            model="subscription",
+            model="claude-opus-4-8[1m]",
         )
         with pytest.raises(AIProviderError):
             await provider.complete(req)
@@ -619,7 +619,7 @@ class TestClaudeCLIProvider:
 
         req = LLMRequest(
             messages=[{"role": "user", "content": "hello"}],
-            model="subscription",
+            model="claude-opus-4-8[1m]",
         )
         with patch("asyncio.create_subprocess_exec", side_effect=fake_exec), \
              patch("shared.ai_gateway.asyncio.wait_for", side_effect=fast_timeout):
@@ -830,10 +830,10 @@ class TestExtractCliModel:
         }}
         assert _extract_cli_model(obj) == "claude-opus-4-8"
 
-    def test_falls_back_to_subscription(self):
-        # 两种字段都没有 → 订阅占位。
-        assert _extract_cli_model({}) == "subscription"
-        assert _extract_cli_model({"model": "", "modelUsage": {}}) == "subscription"
+    def test_returns_empty_when_missing(self):
+        # 两种字段都没有 → 调用方用请求模型兜底。
+        assert _extract_cli_model({}) == ""
+        assert _extract_cli_model({"model": "", "modelUsage": {}}) == ""
 
     def test_ignores_non_numeric_token_values(self):
         # token 值非数字(异常 JSON)不应让求和崩溃;仍能挑出唯一可计的键。
@@ -866,7 +866,7 @@ async def test_claude_cli_uses_model_usage_when_no_top_model(monkeypatch):
 
 
 class TestClaudeCLIModelFlag:
-    """默认模型 yaml 可配置:--model 优先级 = 步级 request.model(非 subscription 占位)> provider 默认 > 不传。"""
+    """默认模型 yaml 可配置:--model 优先级 = 步级 request.model(显式模型)> provider 默认 > 不传。"""
 
     def _cap_provider(self, monkeypatch, cap, **kw):
         class FakeProc:
@@ -881,10 +881,18 @@ class TestClaudeCLIModelFlag:
         return ClaudeCLIProvider(command_template=["claude", "-p"], **kw)
 
     @pytest.mark.asyncio
-    async def test_provider_default_model_used_for_subscription_placeholder(self, monkeypatch):
+    async def test_request_model_used_when_explicit(self, monkeypatch):
         cap = {}
         p = self._cap_provider(monkeypatch, cap, model="claude-opus-4-8[1m]")
-        await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}], model="subscription"))
+        await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}], model="claude-opus-4-8[1m]"))
+        i = cap["cmd"].index("--model")
+        assert cap["cmd"][i + 1] == "claude-opus-4-8[1m]"
+
+    @pytest.mark.asyncio
+    async def test_provider_default_model_used_when_request_omits_model(self, monkeypatch):
+        cap = {}
+        p = self._cap_provider(monkeypatch, cap, model="claude-opus-4-8[1m]")
+        await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}]))
         i = cap["cmd"].index("--model")
         assert cap["cmd"][i + 1] == "claude-opus-4-8[1m]"
 
@@ -900,7 +908,7 @@ class TestClaudeCLIModelFlag:
     async def test_no_model_configured_omits_flag(self, monkeypatch):
         cap = {}
         p = self._cap_provider(monkeypatch, cap)              # provider 无默认
-        await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}], model="subscription"))
+        await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}]))
         assert "--model" not in cap["cmd"]                    # 向后兼容:沿用 CLI 自身默认
 
     @pytest.mark.asyncio
@@ -914,7 +922,7 @@ class TestClaudeCLIModelFlag:
             cap["cmd"] = list(cmd); return FakeProc()
         monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
         p = ClaudeCLIProvider(["claude", "-p", "--model", "claude-haiku-4-5"], model="claude-opus-4-8[1m]")
-        await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}], model="subscription"))
+        await p.complete(LLMRequest(messages=[{"role": "user", "content": "x"}], model="claude-opus-4-8[1m]"))
         assert cap["cmd"].count("--model") == 1               # 模板已带则尊重模板
 
 
@@ -985,7 +993,7 @@ class TestClaudeCLITranscript:
                 raise err
         gw = AIGateway({"providers": {"claude-cli": {"type": "cli", "command": ["claude", "-p"]}}},
                        {"steps": [{"name": "s", "ai": {"primary": {"provider": "claude-cli",
-                                                                    "model": "subscription"}}}]})
+                                                                    "model": "claude-opus-4-8[1m]"}}}]})
         monkeypatch.setattr(gw, "_get_provider", lambda name: FailProvider())
         with pytest.raises(AllProvidersFailedError) as ei:
             import asyncio as _a
@@ -1067,10 +1075,10 @@ class TestCodexCLIProvider:
         monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
         p = CodexCLIProvider(["codex", "exec"])
         resp = await p.complete(LLMRequest(messages=[{"role": "user", "content": "Q"}],
-                                           system="S", model="subscription"))
+                                           system="S", model="claude-opus-4-8[1m]"))
 
         assert resp.content == "FINAL"
-        assert resp.provider == "codex-cli" and resp.model == "subscription"
+        assert resp.provider == "codex-cli" and resp.model == "claude-opus-4-8[1m]"
         assert resp.input_tokens == 100 and resp.output_tokens == 25
         assert resp.cache_read_input_tokens == 40 and resp.cached is True
         assert resp.cost_usd == 0.0 and resp.session_id == "th_1"
@@ -1105,10 +1113,10 @@ class TestCodexCLIProvider:
         monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
         p = CodexCLIProvider(["codex", "exec"], model="gpt-test")
         await p.complete(LLMRequest(messages=[{"role": "user", "content": "Q"}],
-                                    images=[img], model="subscription"))
+                                    images=[img], model="claude-opus-4-8[1m]"))
         cmd = seen["cmd"]
         assert "--image" in cmd and str(img.resolve()) in cmd
-        assert "--model" in cmd and cmd[cmd.index("--model") + 1] == "gpt-test"
+        assert "--model" in cmd and cmd[cmd.index("--model") + 1] == "claude-opus-4-8[1m]"
 
     @pytest.mark.asyncio
     async def test_rejects_claude_allowed_tools(self):

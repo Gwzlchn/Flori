@@ -50,7 +50,7 @@ async def list_providers(config: AppConfig = Depends(get_config)):
             "name": name,
             "type": pc.get("type", ""),
             "available": _provider_available(name, config.providers),
-            "label": "订阅" if pc.get("type") == "cli" else "API",
+            "label": "CLI" if pc.get("type") in {"cli", "codex_cli"} else "API",
         })
     return {"providers": out}
 
@@ -545,7 +545,7 @@ async def job_usage(
     db: Database = Depends(get_db),
 ):
     """该 job 的逐次 AI 调用明细(按步展示 in/out/cache/命中率/cost/耗时/轮数/worker)。
-    cost 对 claude-cli 订阅是等价 API 成本,前端按 provider==claude-cli 标「(等价)」。"""
+    cost 对 claude-cli CLI 是等价 API 成本,前端按 provider==claude-cli 标「(等价)」。"""
     validate_path_segment(job_id, "job_id")
     return {"usage": await asyncio.to_thread(db.list_usage_by_job, job_id)}
 
@@ -755,7 +755,7 @@ async def rebuild_stale(
 
 
 def _provider_available(name: str, cfg: dict) -> bool:
-    """provider 是否可用:CLI 订阅类型由 worker 侧凭证门控;其余看运行时环境是否有 {NAME}_API_KEY.
+    """provider 是否可用:CLI 类型由 worker 侧凭证门控;其余看运行时环境是否有 {NAME}_API_KEY.
     只认环境变量,不信 config 里的 api_key(可能是未解析的 ${VAR} 占位串)。"""
     import os
     pc = (cfg.get("providers") or {}).get(name, {})

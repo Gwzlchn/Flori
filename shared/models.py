@@ -10,6 +10,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+DEFAULT_AI_PROVIDER = "claude-cli"
+DEFAULT_AI_MODEL = "claude-opus-4-8[1m]"
+DEFAULT_CODEX_MODEL = "gpt-5-codex"
+DEFAULT_KIMI_MODEL = "moonshot-v1-128k"
+DEFAULT_PROVIDER_MODELS = {
+    DEFAULT_AI_PROVIDER: DEFAULT_AI_MODEL,
+    "codex-cli": DEFAULT_CODEX_MODEL,
+    "kimi": DEFAULT_KIMI_MODEL,
+}
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -248,20 +259,30 @@ class LLMResponse:
 @dataclass
 class AITask:
     """独立 AI 任务:不挂 job,不走 storage,内联 LLMRequest 载荷,结果内联回 airesult:{task_id}.
-    供 /api/ask 和 /digest 把单次订阅 CLI 调用交给 ai-worker 异步执行.
-    入队 queue:ai(kind='ai',require_tags=[provider]);无 job_id,故与 pipeline-step task 区分."""
+    供 /api/ask 和 /digest 把单次 CLI/API 调用交给 ai-worker 异步执行.
+    入队 queue:ai(kind='ai',require_tags=[provider access tag]);无 job_id,故与 pipeline-step task 区分."""
     task_id: str
     request: LLMRequest
     step_name: str = "ai"          # gateway 路由步名(如 synthesis/digest),也作 ai_usage.step
     domain: str | None = None      # 观测/归因(可空)
-    provider: str = "claude-cli"
-    model: str = "subscription"
+    provider: str = DEFAULT_AI_PROVIDER
+    model: str = DEFAULT_AI_MODEL
     tags: list[str] = field(default_factory=list)                            # 软标签(reject 过滤用)
-    require_tags: list[str] = field(default_factory=list)  # 硬门控:仅有对应订阅凭证 ai-worker 认领
+    require_tags: list[str] = field(default_factory=list)  # 硬门控:仅有对应 AI 接入方式的 worker 认领
 
     def __post_init__(self) -> None:
-        if not self.require_tags and self.provider in {"claude-cli", "codex-cli"}:
+        default_model = DEFAULT_PROVIDER_MODELS.get(self.provider)
+        if default_model and (
+            not self.model
+            or (self.provider != DEFAULT_AI_PROVIDER and self.model == DEFAULT_AI_MODEL)
+        ):
+            self.model = default_model
+        if self.require_tags:
+            return
+        if self.provider in {"claude-cli", "codex-cli"}:
             self.require_tags = [self.provider]
+        elif self.provider == "kimi":
+            self.require_tags = ["kimi-api"]
 
     def to_task_payload(self) -> dict:
         """序列化为 queue:ai 的 task JSON dict(kind='ai',无 job_id)。"""
@@ -285,8 +306,8 @@ class AITask:
             request=LLMRequest.from_jsonable(d.get("request", {})),
             step_name=d.get("step", "ai"),
             domain=d.get("domain"),
-            provider=d.get("provider", "claude-cli"),
-            model=d.get("model", "subscription"),
+            provider=d.get("provider", DEFAULT_AI_PROVIDER),
+            model=d.get("model", DEFAULT_AI_MODEL),
             tags=list(d.get("tags", [])),
             require_tags=list(d.get("require_tags", [])),
         )

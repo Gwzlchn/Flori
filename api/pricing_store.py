@@ -2,7 +2,7 @@
 
 启动时优先从 MinIO 载入缓存,之后每天刷新一次并写回 MinIO。计费在 api 侧完成:
 纯网关 worker 不直连 MinIO/Redis,record_ai_usage 依据本表补 cost。claude-cli
-订阅路径使用 CLI total_cost_usd,未命中或空表时回退 worker 上报值。对象落 MinIO
+CLI 路径使用 CLI total_cost_usd,未命中或空表时回退 worker 上报值。对象落 MinIO
 bucket 内 _pricing/litellm.json.
 """
 

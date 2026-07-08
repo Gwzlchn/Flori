@@ -548,7 +548,7 @@ async def record_usage(
         num_turns=req.num_turns,
         cached=req.cached,
     )
-    # 用 LiteLLM 价表填权威成本. claude-cli 订阅用 CLI total_cost_usd,空表或未命中则保留上报值.
+    # 用 LiteLLM 价表填权威成本. claude-cli CLI 用 CLI total_cost_usd,空表或未命中则保留上报值.
     if req.provider != "claude-cli":
         pricing = getattr(request.app.state, "pricing", None)
         if pricing is not None:

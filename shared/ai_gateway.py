@@ -15,7 +15,7 @@ from uuid import uuid4
 import structlog
 
 from .errors import AIProviderError, AIRateLimitError, AllProvidersFailedError
-from .models import AIUsage, LLMRequest, LLMResponse
+from .models import AIUsage, DEFAULT_AI_MODEL, LLMRequest, LLMResponse
 
 _log = structlog.get_logger(component="ai_gateway")
 
@@ -58,7 +58,7 @@ def calc_cost(provider: str, model: str, input_tokens: int, output_tokens: int,
 def _extract_cli_model(obj: dict) -> str:
     """从 `claude -p --output-format json` 顶层 JSON 取真实模型名,兼容多种 CLI 输出。
     优先顶层 `model`,部分输出格式没有;否则在 `modelUsage`(形如 {模型名: {token...}})里
-    取 token 总数最大的键,即主力模型。都拿不到时用 "subscription" 占位,这条路径不迁移历史数据。"""
+    取 token 总数最大的键,即主力模型。都拿不到时返回空串,由调用方用请求模型兜底。"""
     m = obj.get("model")
     if isinstance(m, str) and m:
         return m
@@ -75,7 +75,7 @@ def _extract_cli_model(obj: dict) -> str:
         best = max(usage.items(), key=lambda kv: _tok_total(kv[1]))[0]
         if isinstance(best, str) and best:
             return best
-    return "subscription"
+    return ""
 
 
 # Provider 实现
@@ -267,7 +267,7 @@ class OpenAICompatibleProvider:
 
 
 class ClaudeCLIProvider:
-    """Claude CLI 订阅(subprocess 调用)。"""
+    """Claude CLI 接入(subprocess 调用)。"""
 
     def __init__(self, command_template: list[str], env: dict | None = None,
                  model: str | None = None):
@@ -301,7 +301,7 @@ class ClaudeCLIProvider:
         for msg in request.messages:
             prompt_content += f"[{msg['role'].title()}]\n{msg['content']}\n\n"
 
-        # 视觉:把帧图绝对路径写进 prompt,放开 Read 工具让 claude 逐张查看(订阅路径不支持 base64)。
+        # 视觉:把帧图绝对路径写进 prompt,放开 Read 工具让 claude 逐张查看(CLI 路径不支持 base64)。
         # 帧目录用 --add-dir 加入可访问范围,容器/无头干净环境也能读到。
         extra_dirs: set[str] = set()
         if request.images:
@@ -325,12 +325,8 @@ class ClaudeCLIProvider:
             _i = cmd.index("--output-format")
             del cmd[_i:_i + 2]
         cmd += ["--output-format", "json"]
-        # 模型可配置(yaml 单一来源,优先级:步级 > provider 默认 > CLI 默认):
-        #   pipelines.yaml 步级 model 非 "subscription" 占位 → --model <步级>(换模型改 pipelines
-        #   即变 def_digest → 该步自动过期可重跑,审计可见);否则 providers.yaml claude-cli.model;
-        #   都无 → 不传,沿用 HOME 里 CLI 默认(向后兼容)。命令模板已带 --model 时尊重模板不重复注入。
-        model_arg = (request.model if (request.model and request.model != "subscription")
-                     else self._model)
+        # 模型可配置(yaml 单一来源,优先级:步级 > provider 默认)。命令模板已带 --model 时尊重模板。
+        model_arg = request.model or self._model
         if model_arg and "--model" not in cmd:
             cmd += ["--model", model_arg]
         if request.allowed_tools:
@@ -384,7 +380,7 @@ class ClaudeCLIProvider:
 
         if proc.returncode != 0:
             detail = (stderr.decode() + stdout.decode())[:500]
-            # 订阅用量/限流:归为 AIRateLimitError 走长退避等配额恢复(而非快速重试转终态)。
+            # CLI 额度/限流:归为 AIRateLimitError 走长退避等配额恢复(而非快速重试转终态)。
             low = detail.lower()
             if any(k in low for k in (
                 "rate limit", "rate_limit", "usage limit", "429",
@@ -409,7 +405,7 @@ class ClaudeCLIProvider:
         content, in_tok, out_tok = raw, 0, 0
         cc = cr = turns = 0
         cost = 0.0
-        model = "subscription"
+        model = model_arg or DEFAULT_AI_MODEL
         raw_obj: dict | None = None
         session_id = None
         api_ms = None
@@ -426,14 +422,14 @@ class ClaudeCLIProvider:
                 cr = int(u.get("cache_read_input_tokens", 0) or 0)
                 cost = float(obj.get("total_cost_usd", 0.0) or 0.0)
                 turns = int(obj.get("num_turns", 0) or 0)
-                model = _extract_cli_model(obj)
+                model = _extract_cli_model(obj) or model
                 session_id = obj.get("session_id")
                 _api = obj.get("duration_api_ms") or obj.get("duration_ms")
                 api_ms = float(_api) if isinstance(_api, (int, float)) else None
                 finish_reason = obj.get("subtype") or obj.get("stop_reason")
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
-        # 订阅路径:claude -p 一般已回 total_cost_usd,即等价 API 成本而非真实账单,前端标「等价」。
+        # CLI 路径:claude -p 一般已回 total_cost_usd,即等价 API 成本而非真实账单,前端标「等价」。
         # 若缺失(回 0)而有 token,则按 PRICING 折算等价成本,缓存感知;model 未命中价表则仍为 0,已 warn。
         if cost == 0.0 and (in_tok or out_tok or cc or cr):
             cost = round(calc_cost("anthropic", model, in_tok, out_tok, cc, cr), 6)
@@ -458,7 +454,7 @@ class ClaudeCLIProvider:
 
 
 class CodexCLIProvider:
-    """Codex CLI 订阅(subprocess 调用,`codex exec --json`)."""
+    """Codex CLI 接入(subprocess 调用,`codex exec --json`)."""
 
     def __init__(self, command_template: list[str], env: dict | None = None,
                  model: str | None = None):
@@ -560,9 +556,8 @@ class CodexCLIProvider:
             cmd += ["-o", str(final_path)]
         if not self._has_flag(cmd, "--cd", "-C"):
             cmd += ["--cd", str(work_dir)]
-        model_arg = (request.model if (request.model and request.model != "subscription")
-                     else self._model)
-        if model_arg and model_arg != "subscription" and not self._has_flag(cmd, "--model", "-m"):
+        model_arg = request.model or self._model
+        if model_arg and not self._has_flag(cmd, "--model", "-m"):
             cmd += ["--model", model_arg]
         for img in request.images or []:
             cmd += ["--image", str(Path(img).resolve())]
@@ -614,7 +609,7 @@ class CodexCLIProvider:
         out_tok = int(usage.get("output_tokens", 0) or 0)
         cr = int(usage.get("cached_input_tokens", 0) or 0)
         thread_id = thread.get("thread_id") if isinstance(thread, dict) else None
-        model = model_arg or "subscription"
+        model = model_arg or "unknown"
         return LLMResponse(
             content=content,
             model=model,

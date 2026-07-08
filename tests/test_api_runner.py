@@ -445,7 +445,7 @@ class TestJobsRequest:
         assert resp.status_code == 200
         claim = resp.json()["claim"]
         assert claim["kind"] == "ai" and claim["task_id"] == "at_codex"
-        assert claim["provider"] == "codex-cli" and claim["model"] == "subscription"
+        assert claim["provider"] == "codex-cli" and claim["model"] == "gpt-5-codex"
         assert claim["require_tags"] == ["codex-cli"]
         assert claim["exec_id"].startswith(f"{worker_id}:")
         assert "job_id" not in claim
@@ -704,7 +704,7 @@ class TestUsage:
 
     @pytest.mark.asyncio
     async def test_claude_cli_cost_not_overridden(self, jobs_app, jobs_client, db):
-        """claude-cli 订阅:用 CLI total_cost_usd(等价成本),价表不覆盖。"""
+        """claude-cli CLI:用 CLI total_cost_usd(等价成本),价表不覆盖。"""
         jobs_app.state.pricing._table = {"claude-opus-4-8": {"input_cost_per_token": 5e-06}}
         _, token = await _register_real(jobs_client)
         await jobs_client.post(

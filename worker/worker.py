@@ -23,7 +23,7 @@ import structlog
 
 from shared.ai_gateway import AIGateway, collect_usage_from_file
 from shared.config import AppConfig, build_step_config
-from shared.models import AIUsage, LLMRequest, generate_worker_id
+from shared.models import AIUsage, DEFAULT_AI_MODEL, DEFAULT_AI_PROVIDER, LLMRequest, generate_worker_id
 from shared.runner_ops import parse_style_tags
 from shared.storage import StorageBackend
 from shared.sysload import collect_node_load
@@ -134,7 +134,7 @@ def _resolve_worker_id(worker_type: str) -> str:
 
 
 def _claude_logged_in() -> bool:
-    """claude-cli 是否真有可用凭证(订阅登录态)。token 落在 $HOME/.claude/.credentials.json
+    """claude-cli 是否真有可用凭证(CLI 登录态)。token 落在 $HOME/.claude/.credentials.json
     (claude-cli 用 refreshToken 自动续期就地回写)。仅判二进制在不在会误标,见 auto_discover_tags。"""
     home = os.environ.get("HOME") or os.path.expanduser("~")
     cred = Path(home) / ".claude" / ".credentials.json"
@@ -194,7 +194,7 @@ def auto_discover_tags() -> set[str]:
     has_anthropic_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
     # claude-cli/vision 须真能用才标,而非"镜像里有 claude 二进制就标":否则纯 gateway worker
     # (镜像自带 claude 但无凭证)会误标,一旦作 ai worker 就会认领 11_smart/取证/评审再因无登录失败.
-    # 判据:二进制在 且 (订阅已登录 或 有 ANTHROPIC_API_KEY).
+    # 判据:二进制在 且 (CLI 已登录 或 有 ANTHROPIC_API_KEY).
     claude_ready = bool(shutil.which("claude")) and (has_anthropic_key or _claude_logged_in())
     if has_anthropic_key or claude_ready:
         tags.add("vision")
@@ -205,6 +205,9 @@ def auto_discover_tags() -> set[str]:
         tags.add("codex-cli")
         tags.add("vision")
     if os.environ.get("DEEPSEEK_API_KEY"):
+        tags.add("text-only")
+    if os.environ.get("KIMI_API_KEY"):
+        tags.add("kimi-api")
         tags.add("text-only")
     from steps.utils.device import has_nvidia_gpu
     if has_nvidia_gpu():  # PATH 感知 + 真实探测,与 steps.utils.device 单一判据
@@ -755,8 +758,8 @@ class Worker:
         start = time.time()
         ts_start = datetime.now(timezone.utc)
         req = LLMRequest.from_jsonable(claim.get("request", {}))
-        provider_name = claim.get("provider") or "claude-cli"
-        model_name = claim.get("model") or "subscription"
+        provider_name = claim.get("provider") or DEFAULT_AI_PROVIDER
+        model_name = claim.get("model") or DEFAULT_AI_MODEL
         try:
             try:
                 gateway = AIGateway(
@@ -837,7 +840,7 @@ class Worker:
 
     async def _write_ai_task_audit(
         self, task_id, step_name, domain, exec_id, req, resp, error, ts_start, duration,
-        requested_provider="claude-cli", requested_model="subscription",
+        requested_provider=DEFAULT_AI_PROVIDER, requested_model=DEFAULT_AI_MODEL,
     ) -> None:
         """构建并落一条 AI task 白盒审计,对齐 DAG ai_logs 的路由/尝试链/渲染 prompt/输出/raw/用量/全轨迹."""
         ok = error is None and resp is not None

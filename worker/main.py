@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     # 无主次,如 cpu+gpu 强机 --pools cpu gpu。
     parser.add_argument(
         "--pools", nargs="+", required=True,
-        help="本 worker 订阅的资源池(能力集合,可多个),如 --pools cpu gpu。",
+        help="本 worker 声明的资源池(能力集合,可多个),如 --pools cpu gpu。",
     )
     parser.add_argument("--tags", nargs="*", default=None, help="Capability tags")
     parser.add_argument("--reject-tags", nargs="*", default=None, help="Reject tags")
@@ -85,7 +85,7 @@ async def main() -> None:
     pools = args.pools
     # worker_type 仅作显示标签,路由一律按 pools;从 pools 集合派生:单池="cpu",多池="cpu+gpu"。
     worker_type = "+".join(sorted(set(pools)))
-    tags = set(args.tags) if args.tags else auto_discover_tags()
+    tags = auto_discover_tags() | (set(args.tags) if args.tags else set())
     reject_tags = set(args.reject_tags) if args.reject_tags else set()
     concurrency = (
         args.concurrency if args.concurrency is not None

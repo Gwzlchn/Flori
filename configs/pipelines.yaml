@@ -37,25 +37,25 @@ default:
 video:
   variables:
     AI_CONCEPTS_PRIMARY_PROVIDER: claude-cli
-    AI_CONCEPTS_PRIMARY_MODEL: subscription
+    AI_CONCEPTS_PRIMARY_MODEL: "claude-opus-4-8[1m]"
     AI_CONCEPTS_FALLBACK_PROVIDER: claude-cli
-    AI_CONCEPTS_FALLBACK_MODEL: subscription
+    AI_CONCEPTS_FALLBACK_MODEL: "claude-opus-4-8[1m]"
     OCR_TIMEOUT: 1800
     OCR_RETRIES: 1
     AI_SMART_PRIMARY_PROVIDER: claude-cli
-    AI_SMART_PRIMARY_MODEL: subscription
+    AI_SMART_PRIMARY_MODEL: "claude-opus-4-8[1m]"
     AI_SMART_FALLBACK_PROVIDER: claude-cli
-    AI_SMART_FALLBACK_MODEL: subscription
+    AI_SMART_FALLBACK_MODEL: "claude-opus-4-8[1m]"
     AI_SMART_TEXT_PROVIDER: claude-cli
-    AI_SMART_TEXT_MODEL: subscription
+    AI_SMART_TEXT_MODEL: "claude-opus-4-8[1m]"
     AI_REVIEW_PRIMARY_PROVIDER: claude-cli
-    AI_REVIEW_PRIMARY_MODEL: subscription
+    AI_REVIEW_PRIMARY_MODEL: "claude-opus-4-8[1m]"
     AI_REVIEW_FALLBACK_PROVIDER: claude-cli
-    AI_REVIEW_FALLBACK_MODEL: subscription
+    AI_REVIEW_FALLBACK_MODEL: "claude-opus-4-8[1m]"
     AI_PUNCT_PRIMARY_PROVIDER: claude-cli
-    AI_PUNCT_PRIMARY_MODEL: subscription
+    AI_PUNCT_PRIMARY_MODEL: "claude-opus-4-8[1m]"
     AI_PUNCT_FALLBACK_PROVIDER: claude-cli
-    AI_PUNCT_FALLBACK_MODEL: subscription
+    AI_PUNCT_FALLBACK_MODEL: "claude-opus-4-8[1m]"
   jobs:
     "01_download":
       label: "下载"
@@ -170,11 +170,10 @@ video:
       tags: []
       timeout: 1800   # claude WebSearch + 直连 curl 多轮 agentic 取证
       retry: 1        # 外网/反爬易抖,不像评审那样 5 次硬刚
-      # model 语义(claude-cli):"subscription" = 占位,用 providers.yaml claude-cli.model 默认;
-      # 写具体模型名(如 claude-sonnet-4-6)则该步 --model 钉死,且改动会变 def_digest → 步自动过期可重跑。
+      # 取证固定用 Claude CLI 显式模型;换模型会变 def_digest → 步自动过期可重跑。
       ai:
-        primary: {provider: claude-cli, model: subscription}
-        fallback: {provider: claude-cli, model: subscription}
+        primary: {provider: claude-cli, model: "claude-opus-4-8[1m]"}
+        fallback: {provider: claude-cli, model: "claude-opus-4-8[1m]"}
       outputs: ["output/evidence.json", "output/evidence/*"]
 
     "11_smart":
@@ -219,24 +218,24 @@ video:
       outputs: ["output/versions/review_*"]   # 版本化评审(与笔记版本 1:1 配对);笔记页另渲染可读面板
 
 paper:
-  # provider 统一 claude-cli/subscription:订阅 worker 可跑,避开无 key 的 anthropic/deepseek 全挂(与 article/video 对齐)。
+  # provider 统一 claude-cli + 显式模型,由带 claude-cli tag 的 ai worker 认领。
   variables:
     AI_CONCEPTS_PRIMARY_PROVIDER: claude-cli
-    AI_CONCEPTS_PRIMARY_MODEL: subscription
+    AI_CONCEPTS_PRIMARY_MODEL: "claude-opus-4-8[1m]"
     AI_CONCEPTS_FALLBACK_PROVIDER: claude-cli
-    AI_CONCEPTS_FALLBACK_MODEL: subscription
+    AI_CONCEPTS_FALLBACK_MODEL: "claude-opus-4-8[1m]"
     AI_SMART_PRIMARY_PROVIDER: claude-cli
-    AI_SMART_PRIMARY_MODEL: subscription
+    AI_SMART_PRIMARY_MODEL: "claude-opus-4-8[1m]"
     AI_SMART_FALLBACK_PROVIDER: claude-cli
-    AI_SMART_FALLBACK_MODEL: subscription
+    AI_SMART_FALLBACK_MODEL: "claude-opus-4-8[1m]"
     AI_REVIEW_PRIMARY_PROVIDER: claude-cli
-    AI_REVIEW_PRIMARY_MODEL: subscription
+    AI_REVIEW_PRIMARY_MODEL: "claude-opus-4-8[1m]"
     AI_REVIEW_FALLBACK_PROVIDER: claude-cli
-    AI_REVIEW_FALLBACK_MODEL: subscription
+    AI_REVIEW_FALLBACK_MODEL: "claude-opus-4-8[1m]"
     AI_TRANSLATE_PRIMARY_PROVIDER: claude-cli
-    AI_TRANSLATE_PRIMARY_MODEL: subscription
+    AI_TRANSLATE_PRIMARY_MODEL: "claude-opus-4-8[1m]"
     AI_TRANSLATE_FALLBACK_PROVIDER: claude-cli
-    AI_TRANSLATE_FALLBACK_MODEL: subscription
+    AI_TRANSLATE_FALLBACK_MODEL: "claude-opus-4-8[1m]"
   jobs:
     "01_download":
       label: "下载"
@@ -324,25 +323,25 @@ paper:
       outputs: ["output/versions/review_*"]   # 版本化评审(与笔记版本 1:1 配对);笔记页另渲染可读面板
 
 article:
-  # provider 统一 claude-cli/subscription:订阅 worker 可跑,避开无 key 的 anthropic/deepseek 全挂;
+  # provider 统一 claude-cli + 显式模型,由带 claude-cli tag 的 ai worker 认领;
   # 智能笔记/评审随投递开关 smart_note 可选;概念步必跑。
   variables:
     AI_SMART_PRIMARY_PROVIDER: claude-cli
-    AI_SMART_PRIMARY_MODEL: subscription
+    AI_SMART_PRIMARY_MODEL: "claude-opus-4-8[1m]"
     AI_SMART_FALLBACK_PROVIDER: claude-cli
-    AI_SMART_FALLBACK_MODEL: subscription
+    AI_SMART_FALLBACK_MODEL: "claude-opus-4-8[1m]"
     AI_REVIEW_PRIMARY_PROVIDER: claude-cli
-    AI_REVIEW_PRIMARY_MODEL: subscription
+    AI_REVIEW_PRIMARY_MODEL: "claude-opus-4-8[1m]"
     AI_REVIEW_FALLBACK_PROVIDER: claude-cli
-    AI_REVIEW_FALLBACK_MODEL: subscription
+    AI_REVIEW_FALLBACK_MODEL: "claude-opus-4-8[1m]"
     AI_CONCEPTS_PRIMARY_PROVIDER: claude-cli
-    AI_CONCEPTS_PRIMARY_MODEL: subscription
+    AI_CONCEPTS_PRIMARY_MODEL: "claude-opus-4-8[1m]"
     AI_CONCEPTS_FALLBACK_PROVIDER: claude-cli
-    AI_CONCEPTS_FALLBACK_MODEL: subscription
+    AI_CONCEPTS_FALLBACK_MODEL: "claude-opus-4-8[1m]"
     AI_TRANSLATE_PRIMARY_PROVIDER: claude-cli
-    AI_TRANSLATE_PRIMARY_MODEL: subscription
+    AI_TRANSLATE_PRIMARY_MODEL: "claude-opus-4-8[1m]"
     AI_TRANSLATE_FALLBACK_PROVIDER: claude-cli
-    AI_TRANSLATE_FALLBACK_MODEL: subscription
+    AI_TRANSLATE_FALLBACK_MODEL: "claude-opus-4-8[1m]"
   jobs:
     "01_download":
       label: "下载"
@@ -441,20 +440,20 @@ article:
       outputs: ["output/versions/review_*"]   # 版本化评审(与笔记版本 1:1 配对);笔记页另渲染可读面板
 
 audio:
-  # provider 统一 claude-cli/subscription:订阅 worker 可跑,避开无 key 的 anthropic/deepseek 全挂(与 article/video 对齐)。
+  # provider 统一 claude-cli + 显式模型,由带 claude-cli tag 的 ai worker 认领。
   variables:
     AI_CONCEPTS_PRIMARY_PROVIDER: claude-cli
-    AI_CONCEPTS_PRIMARY_MODEL: subscription
+    AI_CONCEPTS_PRIMARY_MODEL: "claude-opus-4-8[1m]"
     AI_CONCEPTS_FALLBACK_PROVIDER: claude-cli
-    AI_CONCEPTS_FALLBACK_MODEL: subscription
+    AI_CONCEPTS_FALLBACK_MODEL: "claude-opus-4-8[1m]"
     AI_SMART_PRIMARY_PROVIDER: claude-cli
-    AI_SMART_PRIMARY_MODEL: subscription
+    AI_SMART_PRIMARY_MODEL: "claude-opus-4-8[1m]"
     AI_SMART_FALLBACK_PROVIDER: claude-cli
-    AI_SMART_FALLBACK_MODEL: subscription
+    AI_SMART_FALLBACK_MODEL: "claude-opus-4-8[1m]"
     AI_REVIEW_PRIMARY_PROVIDER: claude-cli
-    AI_REVIEW_PRIMARY_MODEL: subscription
+    AI_REVIEW_PRIMARY_MODEL: "claude-opus-4-8[1m]"
     AI_REVIEW_FALLBACK_PROVIDER: claude-cli
-    AI_REVIEW_FALLBACK_MODEL: subscription
+    AI_REVIEW_FALLBACK_MODEL: "claude-opus-4-8[1m]"
   jobs:
     "01_download":
       label: "下载"

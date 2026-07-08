@@ -55,7 +55,7 @@ function pretty(v: any): string { try { return JSON.stringify(v, null, 2) } catc
           <span class="text-gray-500">{{ c.routing?.model }}</span>
           <span v-if="c.routing?.tier_used" class="px-1 rounded bg-gray-200 text-gray-600">{{ c.routing.tier_used }}</span>
           <span class="ml-auto text-gray-800 font-medium">
-            {{ fmtCost(c.cost?.cost_usd) }}<span v-if="c.cost?.basis === 'subscription-equiv'" class="text-gray-400">（等价）</span>
+            {{ fmtCost(c.cost?.cost_usd) }}<span v-if="c.cost?.basis === 'cli-equiv'" class="text-gray-400">（等价）</span>
           </span>
         </div>
         <!-- 用量 + 延迟 -->

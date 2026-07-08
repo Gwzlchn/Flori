@@ -1400,7 +1400,7 @@ class TestAITaskLogs:
         import json
         ok = db.record_ai_task_log({
             "task_id": "at_x", "exec_id": "w:1", "step_name": "synthesis", "domain": "dl",
-            "provider": "claude-cli", "model": "subscription", "ok": True,
+            "provider": "claude-cli", "model": "claude-opus-4-8[1m]", "ok": True,
             "input_tokens": 10, "output_tokens": 5, "cost_usd": 0.12,
             "duration_sec": 2.0, "num_turns": 1,
             "record": {"output": "hi", "prompt": {"system": "S"},

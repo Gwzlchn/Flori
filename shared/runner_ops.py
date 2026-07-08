@@ -15,7 +15,7 @@ import time
 from datetime import datetime, timezone
 
 from shared.db import Database
-from shared.models import AIUsage
+from shared.models import AIUsage, DEFAULT_AI_MODEL, DEFAULT_AI_PROVIDER
 from shared.redis_client import RedisClient
 
 
@@ -163,8 +163,8 @@ async def claim_step(
                 "kind": "ai", "task_id": task_id, "step": step_name, "pool": pool,
                 "exec_id": exec_id, "request": task.get("request", {}),
                 "domain": task.get("domain"),
-                "provider": task.get("provider", "claude-cli"),
-                "model": task.get("model", "subscription"),
+                "provider": task.get("provider", DEFAULT_AI_PROVIDER),
+                "model": task.get("model", DEFAULT_AI_MODEL),
                 "tags": task.get("tags", []),
                 "require_tags": task.get("require_tags", []),
             }

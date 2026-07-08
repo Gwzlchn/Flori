@@ -178,7 +178,7 @@ def db(test_config):
 def fake_response():
     return LLMResponse(
         content="反向传播用于计算梯度 [来源1]。\n\n## 共识 / 分歧\n各来源一致认为它是核心。",
-        model="subscription",
+        model="claude-opus-4-8[1m]",
         provider="claude-cli",
         input_tokens=120,
         output_tokens=60,
@@ -255,7 +255,7 @@ class TestAITasksEndpoints:
     @pytest.mark.asyncio
     async def test_result_done(self, ask_client, ask_app):
         await ask_app.state.redis.set_ai_result(
-            "at_done", {"content": "ANS", "provider": "claude-cli", "model": "subscription", "cost_usd": 0.1})
+            "at_done", {"content": "ANS", "provider": "claude-cli", "model": "claude-opus-4-8[1m]", "cost_usd": 0.1})
         data = (await ask_client.get("/api/ai-tasks/at_done/result")).json()
         assert data["status"] == "done" and data["content"] == "ANS"
         assert data["answer_markdown"] == "ANS" and data["markdown"] == "ANS"
@@ -271,7 +271,7 @@ class TestAITasksEndpoints:
     async def test_log_endpoint(self, ask_client, db):
         db.record_ai_task_log({
             "task_id": "at_log", "exec_id": "w:1", "step_name": "synthesis", "domain": "ml",
-            "provider": "claude-cli", "model": "subscription", "ok": True,
+            "provider": "claude-cli", "model": "claude-opus-4-8[1m]", "ok": True,
             "record": {"output": "hi", "routing": {"attempts": [{"tier": "primary"}]}},
             "created_at": "2026-06-27T00:00:00+00:00",
         })
