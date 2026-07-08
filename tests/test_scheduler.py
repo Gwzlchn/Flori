@@ -316,6 +316,28 @@ class TestNoWorkerFailFast:
         assert "j_test_001" in await redis.get_active_jobs()
 
     @pytest.mark.asyncio
+    async def test_worker_availability_cached_across_jobs(self, redis, db, config):
+        s = Scheduler(redis, db, config)
+        calls = []
+
+        async def _has_workers(pool, require_tags):
+            calls.append((pool, tuple(require_tags)))
+            return True
+
+        s._pool_has_workers_for = _has_workers
+        for jid in ["j_test_001", "j_test_002", "j_test_003"]:
+            job = make_job(job_id=jid)
+            db.create_job(job)
+            await s.submit_job(job)
+
+        await s.check_no_worker()
+
+        assert calls == [("cpu", ())]
+        assert set(await redis.get_active_jobs()) == {
+            "j_test_001", "j_test_002", "j_test_003",
+        }
+
+    @pytest.mark.asyncio
     async def test_running_step_not_failed(self, redis, db, config):
         s = Scheduler(redis, db, config)
         s._NO_WORKER_GRACE_SEC = 0

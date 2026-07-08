@@ -1339,6 +1339,9 @@ class Scheduler:
         给出明确错误而非静默挂起;宽限期容忍 worker 短暂重启。
         """
         active_jobs = await self.redis.get_active_jobs()
+        # Worker 可用性在单轮扫描内是全局事实。active jobs 多时跨 job 复用,
+        # 避免每个 ready step 都重复扫 worker registry。
+        pool_ok: dict[tuple[str, frozenset[str]], bool] = {}
         for job_id in active_jobs:
             statuses = await self.redis.get_all_step_statuses(job_id)
             if not statuses or any(v == "running" for v in statuses.values()):
@@ -1357,7 +1360,6 @@ class Scheduler:
             net_steps = set(nr.get("net_steps") or _NET_STEPS)
             job_src: str | None = None  # 懒查 job 来源(仅 net_steps 需要)
             job_url: str = ""
-            pool_ok: dict[tuple, bool] = {}  # 按 (pool, require_tags) 缓存:同池不同门控要分别判
             for step in ready:
                 pool = steps_cfg.get(step, {}).get("pool", "")
                 # 重算该 step 的 require_tags,与 enqueue_step 同逻辑:net-zone 按 URL 区域。
