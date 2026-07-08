@@ -71,7 +71,7 @@ jobs:
               --splits 4 --group ${{ matrix.group }} \
               --cov=shared --cov=api --cov=scheduler --cov=worker --cov=steps \
               --cov-branch --cov-report=
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: cov-normal-${{ matrix.group }}
           path: covdata/.coverage.normal.${{ matrix.group }}
@@ -133,7 +133,7 @@ jobs:
               --splits 2 --group ${{ matrix.group }} \
               --cov=shared --cov=api --cov=scheduler --cov=worker --cov=steps \
               --cov-branch --cov-report=
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: cov-worker-${{ matrix.group }}
           path: covdata/.coverage.worker.${{ matrix.group }}
@@ -151,7 +151,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Download 各 shard 部分覆盖率
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           pattern: cov-*
           path: covdata
