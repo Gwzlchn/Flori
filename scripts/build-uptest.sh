@@ -41,6 +41,7 @@ fi
 OWNER="${OWNER,,}"
 # 真实语义版本,注入镜像 ENV FLORI_VERSION。构建上下文用临时副本,不改宿主 pyproject。
 VER="$(sed -n 's/^version = "\(.*\)"/\1/p' "${REPO}/pyproject.toml" | head -1)"
+SHA="$(git -C "$REPO" rev-parse --short=12 HEAD 2>/dev/null || echo local)"
 PROXY_HOST="${FLORI_BUILD_PROXY_HOST:-}"
 if [ -z "$PROXY_HOST" ]; then
   PROXY_HOST="$(ip -4 addr show docker0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1 || true)"
@@ -100,6 +101,7 @@ services:
     build:
       context: ${REPO}/frontend
       dockerfile: Dockerfile
+      args: { FLORI_VERSION: "${VER}", FLORI_BUILD_SHA: "${SHA}" }
       cache_from: [ "type=registry,ref=ghcr.io/${OWNER}/flori-frontend:buildcache" ]
     image: ghcr.io/${OWNER}/flori-frontend:${TAG}
 YAML

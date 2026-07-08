@@ -1,5 +1,9 @@
 # build:前端依赖与静态资源构建。
 FROM node:22-alpine AS build
+ARG FLORI_VERSION=dev
+ARG FLORI_BUILD_SHA=
+ENV VITE_FLORI_VERSION=${FLORI_VERSION}
+ENV VITE_FLORI_BUILD_SHA=${FLORI_BUILD_SHA}
 
 RUN npm config set registry https://registry.npmmirror.com
 

@@ -130,6 +130,9 @@ async function resetPoolLimit(pool: string) {
 // 组件 / 版本派生
 const components = computed<SystemComponent[]>(() => status.value?.components ?? [])
 const systemVersion = computed(() => status.value?.version || 'dev')
+const frontendVersion = (import.meta.env.VITE_FLORI_VERSION || 'dev').trim()
+const frontendBuildSha = (import.meta.env.VITE_FLORI_BUILD_SHA || '').trim().slice(0, 12)
+const frontendFullVersion = computed(() => frontendBuildSha ? `${frontendVersion}+${frontendBuildSha}` : frontendVersion)
 const minioComp = computed(() => components.value.find(c => c.kind === 'minio'))
 const deployMode = computed(() => {
   const m = minioComp.value?.extra?.mode
@@ -554,6 +557,10 @@ const usageByProvider = computed(() => {
         <div class="st-val" :title="systemVersion">系统 {{ verSem(systemVersion) }}<span v-if="verBuild(systemVersion)" class="dim"> · {{ verBuild(systemVersion) }}</span></div>
       </div>
       <div class="st-cell">
+        <div class="st-lbl">前端页面</div>
+        <div class="st-val" :title="frontendFullVersion">页面 {{ verSem(frontendVersion) }}<span v-if="frontendBuildSha" class="dim"> · {{ frontendBuildSha }}</span></div>
+      </div>
+      <div class="st-cell">
         <div class="st-lbl">部署</div>
         <div class="st-val">{{ deployMode }}</div>
       </div>
@@ -850,21 +857,23 @@ const usageByProvider = computed(() => {
             </div>
           </section>
 
-          <details class="enroll-step-card deploy-box">
-            <summary class="deploy-head">
-              <div>
-                <b><span class="step-dot">3</span>复制部署文件</b>
-                <span>{{ selectedPools.length ? `能力 ${[...selectedPools].sort().join(' + ')}` : '未选择能力' }} · {{ commandTitle }} · Gateway {{ gatewayUrl }}</span>
-              </div>
-              <div class="deploy-actions">
-                <button class="btn sm" @click.stop.prevent="copy(command, 'cmd')">
-                  <component :is="copiedCmd ? Check : Copy" :size="13" />{{ copiedCmd ? '已复制' : commandCopyLabel }}
-                </button>
-                <ChevronRight class="summary-chevron" :size="16" />
-              </div>
-            </summary>
-            <pre>{{ command }}</pre>
-          </details>
+          <section class="enroll-step-card deploy-box">
+            <details class="deploy-details">
+              <summary class="step-head deploy-head">
+                <div class="step-head-main">
+                  <span class="step-title"><span class="step-dot">3</span>复制部署文件</span>
+                  <span class="enroll-hint">{{ selectedPools.length ? `能力 ${[...selectedPools].sort().join(' + ')}` : '未选择能力' }} · {{ commandTitle }} · Gateway {{ gatewayUrl }}</span>
+                </div>
+                <div class="deploy-actions">
+                  <button class="btn sm" @click.stop.prevent="copy(command, 'cmd')">
+                    <component :is="copiedCmd ? Check : Copy" :size="13" />{{ copiedCmd ? '已复制' : commandCopyLabel }}
+                  </button>
+                  <ChevronRight class="summary-chevron" :size="16" />
+                </div>
+              </summary>
+              <pre>{{ command }}</pre>
+            </details>
+          </section>
         </div>
       </div>
     </details>
@@ -981,11 +990,8 @@ details[open] > summary .summary-chevron { transform: rotate(90deg); }
 .inline-number span { font-size: 12px; color: var(--ink-500); }
 .step-advanced .note-tip { margin: -2px 0 12px; line-height: 1.6; }
 .deploy-box { min-width: 0; overflow: visible; }
-.deploy-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0; background: transparent; cursor: pointer; list-style: none; }
-details[open] > .deploy-head { margin-bottom: 12px; }
+.deploy-details:not([open]) > .deploy-head { margin-bottom: 0; }
 .deploy-head > div:first-child { min-width: 0; }
-.deploy-head b { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink-800); }
-.deploy-head span { display: block; max-width: 680px; margin-top: 2px; font-size: 11.5px; color: var(--ink-500); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .deploy-actions { display: inline-flex; align-items: center; gap: 8px; flex: none; }
 .deploy-box pre { margin: 0; max-height: 360px; padding: 12px; overflow: auto; border-radius: var(--r-sm); background: var(--ink-900); color: #cbd5e1; font-family: var(--mono); font-size: 12px; line-height: 1.65; white-space: pre; word-break: normal; }
 @media (max-width: 900px) {
@@ -995,6 +1001,7 @@ details[open] > .deploy-head { margin-bottom: 12px; }
   .enroll-main-action { width: 100%; min-width: 0; }
   .deploy-box pre { max-height: 360px; white-space: pre-wrap; word-break: break-word; }
   .deploy-head { align-items: stretch; flex-direction: column; }
+  .deploy-head .step-head-main { align-items: flex-start; flex-direction: column; gap: 6px; }
   .deploy-actions { justify-content: space-between; }
   .deploy-head .btn { justify-content: center; }
 }
