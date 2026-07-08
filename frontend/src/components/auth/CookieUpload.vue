@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, inject } from 'vue'
 import { useApi } from '../../composables/useApi'
-import { Upload, CheckCircle } from 'lucide-vue-next'
+import { Upload } from 'lucide-vue-next'
 
 const props = defineProps<{ platform: string }>()
 const emit = defineEmits<{ success: [] }>()
@@ -32,9 +32,14 @@ async function onFileChange(e: Event) {
 </script>
 
 <template>
-  <label class="flex items-center gap-1.5 px-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 cursor-pointer hover:bg-gray-50 transition-colors">
+  <label class="btn sm cookie-upload" :class="{ disabled: uploading }">
     <Upload :size="14" />
-    <span>{{ uploading ? '上传中...' : '上传 cookies.txt' }}</span>
+    <span>{{ uploading ? '上传中…' : '上传 cookies.txt' }}</span>
     <input type="file" accept=".txt" class="hidden" @change="onFileChange" :disabled="uploading" />
   </label>
 </template>
+
+<style scoped>
+.cookie-upload { white-space: nowrap; }
+.cookie-upload.disabled { opacity: .6; cursor: wait; }
+</style>

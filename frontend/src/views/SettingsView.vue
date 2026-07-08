@@ -6,7 +6,6 @@ import { useApi } from '../composables/useApi'
 import BiliLogin from '../components/settings/BiliLogin.vue'
 import CookieUpload from '../components/auth/CookieUpload.vue'
 import McpConnectCard from '../components/system/McpConnectCard.vue'
-import StatusBadge from '../components/common/StatusBadge.vue'
 import type { AuthStatus } from '../types'
 import { Settings, QrCode, Server, Activity, Info, BookOpen, ChevronRight, Youtube, FileCode2 } from 'lucide-vue-next'
 
@@ -54,42 +53,36 @@ onMounted(loadAuth)
         <button class="btn sm" @click="loadAuth">重试</button>
       </div>
 
-      <template v-else>
-        <!-- Bilibili:扫码登录走 /api/bili/* 契约,组件自管状态 -->
-        <div style="margin-bottom:6px">
-          <div class="seclabel" style="margin-bottom:8px"><Activity :size="14" />Bilibili</div>
-          <BiliLogin />
-        </div>
+      <div v-else class="platform-list">
+        <BiliLogin />
 
-        <!-- YouTube:上传 cookies.txt -->
-        <div style="border-top:1px solid var(--line-soft);margin-top:14px;padding-top:14px">
-          <div class="row" style="cursor:default">
-            <span class="type-pill" style="background:#fef2f2;color:#dc2626"><Youtube :size="17" /></span>
-            <div class="body">
-              <div class="title">YouTube</div>
-              <div class="meta">
-                <StatusBadge :status="authStatus?.youtube.has_cookies ? 'done' : 'pending'" />
-                <span class="sep">·</span>
-                <span>{{ authStatus?.youtube.has_cookies ? '已配置 cookies' : '需提供登录 cookies 才能下载会员/限制内容' }}</span>
-              </div>
+        <div class="platform-row">
+          <span class="type-pill" style="background:#fef2f2;color:#dc2626"><Youtube :size="17" /></span>
+          <div class="body">
+            <div class="title">YouTube</div>
+            <div class="meta">
+              <span class="badge" :class="authStatus?.youtube.has_cookies ? 'b-ok' : 'b-warn'">
+                {{ authStatus?.youtube.has_cookies ? '已配置' : '待配置' }}
+              </span>
+              <span>{{ authStatus?.youtube.has_cookies ? 'cookies 已可用' : '需提供登录 cookies 才能下载会员/限制内容' }}</span>
             </div>
-            <CookieUpload platform="youtube" @success="refreshAuth" />
           </div>
+          <CookieUpload platform="youtube" @success="refreshAuth" />
         </div>
-      </template>
+      </div>
     </div>
 
     <!-- 接入 MCP(把知识库作为 MCP 提供给 agent;用户集成,非运维)-->
     <McpConnectCard />
 
-    <!-- Prompt 白盒(查看流水线 + 编辑每步 prompt 覆盖)-->
+    <!-- AI 工作流(查看流水线 + 编辑每步提示词覆盖)-->
     <div class="card pad" style="margin-bottom:18px">
-      <div class="card-h"><FileCode2 :size="15" />Prompt(白盒)</div>
+      <div class="card-h"><FileCode2 :size="15" />AI 工作流</div>
       <div class="row" style="cursor:pointer" @click="$router.push('/settings/prompts')">
         <span class="type-pill" style="background:var(--brand-50);color:var(--brand-600)"><FileCode2 :size="17" /></span>
         <div class="body">
-          <div class="title">流水线 &amp; Prompt</div>
-          <div class="meta"><span>查看四条流水线全部步骤,编辑每个 AI 步的 prompt 覆盖(全局/按领域)</span></div>
+          <div class="title">流水线 &amp; 提示词</div>
+          <div class="meta"><span>查看四条内容流水线,编辑每个 AI 步的提示词覆盖(全局/按领域)</span></div>
         </div>
         <ChevronRight :size="16" class="dim" />
       </div>
@@ -98,7 +91,7 @@ onMounted(loadAuth)
     <!-- 运维 -->
     <div class="card pad" style="margin-bottom:18px">
       <div class="card-h"><Server :size="15" />运维</div>
-      <div class="row" style="cursor:pointer" @click="$router.push('/system')">
+      <div class="row" style="cursor:pointer" @click="$router.push('/system?from=settings')">
         <span class="type-pill" style="background:var(--mut-bg);color:var(--ink-600)"><Activity :size="17" /></span>
         <div class="body">
           <div class="title">系统与 Worker</div>

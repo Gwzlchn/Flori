@@ -18,7 +18,7 @@ interface Node {
   push: number
   pool: string | null
 }
-const props = defineProps<{ workers: Worker[]; link: LinkTraffic | null; selected?: string }>()
+const props = defineProps<{ workers: Worker[]; link: LinkTraffic | null; selected?: string | null }>()
 const emit = defineEmits<{ (e: 'select', id: string): void }>()
 
 // 由数据构树
@@ -132,14 +132,13 @@ watch([() => props.workers, () => props.link, () => props.selected], () => nextT
 .tp { position: relative; display: flex; align-items: stretch; gap: 30px; overflow-x: auto; padding: 4px 0 6px; }
 .tp-edges { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 0; overflow: visible; }
 .tp-edges path { fill: none; stroke: var(--ink-300); stroke-width: 1.4; }
-.tp-edges path.sel { stroke: var(--brand-500); stroke-width: 2.5; }
+.tp-edges path.sel { stroke: var(--ink-500); stroke-width: 1.8; }
 .tp-col { position: relative; z-index: 1; display: flex; flex-direction: column; justify-content: center; gap: 9px; flex: none; }
 .tp-node {
   min-width: 130px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface);
   padding: 7px 10px; cursor: pointer; transition: background .12s, border-color .12s;
 }
-.tp-node.is-sel { border-color: var(--brand-500); background: var(--brand-50); }
-.tp-node.is-ecs { background: var(--brand-50); border-color: var(--brand-200); }
+.tp-node.is-sel { border-color: var(--ink-300); background: var(--raised); box-shadow: inset 3px 0 0 var(--ink-400); }
 .tp-node.is-nas { border-left: 3px solid var(--ink-500); }
 .tp-h { display: flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 600; color: var(--ink-800); }
 .tp-b { font-size: 11px; color: var(--ink-600); margin-top: 3px; font-variant-numeric: tabular-nums; }

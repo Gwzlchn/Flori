@@ -133,6 +133,7 @@ const systemVersion = computed(() => status.value?.version || 'dev')
 const frontendVersion = (import.meta.env.VITE_FLORI_VERSION || 'dev').trim()
 const frontendBuildSha = (import.meta.env.VITE_FLORI_BUILD_SHA || '').trim().slice(0, 12)
 const frontendFullVersion = computed(() => frontendBuildSha ? `${frontendVersion}+${frontendBuildSha}` : frontendVersion)
+const versionSummaryTitle = computed(() => `系统 ${systemVersion.value} / 前端 ${frontendFullVersion.value}`)
 const minioComp = computed(() => components.value.find(c => c.kind === 'minio'))
 const deployMode = computed(() => {
   const m = minioComp.value?.extra?.mode
@@ -151,8 +152,7 @@ const link = computed<LinkTraffic | null>(() => status.value?.link_traffic ?? nu
 const hasLink = computed(() => !!link.value || workerStore.workers.some(w => w.remote_addr))
 const fmtRate = (bps: number | undefined) => (bps && bps > 0 ? `${fmtBytes(bps)}/s` : '—')
 
-// 选中拓扑节点(默认 ECS=隧道,数据最丰富);富时间线供按节点切片画趋势。
-const selectedNode = ref('ecs')
+const selectedNode = ref<string | null>(null)
 const history = ref<Array<{ ts: number; gw?: any; tun?: any; t?: any; w?: any }>>([])
 async function loadHistory() {
   try {
@@ -186,7 +186,7 @@ const detail = computed(() => {
       linkDesc: link.value ? (link.value.tunnel.up ? '隧道 通' : '隧道 断') : '',
     }
   }
-  if (id.startsWith('w:')) {
+  if (id?.startsWith('w:')) {
     const wid = id.slice(2)
     const w = workerStore.workers.find(x => x.id === wid)
     const r = rate(s => ({ a: s.w?.[wid]?.pull ?? 0, b: s.w?.[wid]?.push ?? 0 }))
@@ -555,13 +555,9 @@ const usageByProvider = computed(() => {
     <!-- 概览拆两组(同一种标签+值 cell):1. 系统 2. Worker·作业。系统在前。 -->
     <div class="seclabel" style="margin-bottom:8px"><Server :size="14" />系统</div>
     <div class="card pad statgrid" style="margin-bottom:16px">
-      <div class="st-cell">
+      <div class="st-cell st-cell-version">
         <div class="st-lbl">版本</div>
-        <div class="st-val" :title="systemVersion">系统 {{ verSem(systemVersion) }}<span v-if="verBuild(systemVersion)" class="dim"> · {{ verBuild(systemVersion) }}</span></div>
-      </div>
-      <div class="st-cell">
-        <div class="st-lbl">前端页面</div>
-        <div class="st-val" :title="frontendFullVersion">页面 {{ verSem(frontendVersion) }}<span v-if="frontendBuildSha" class="dim"> · {{ frontendBuildSha }}</span></div>
+        <div class="st-val" :title="versionSummaryTitle">系统 {{ verSem(systemVersion) }} / 前端 {{ verSem(frontendVersion) }}</div>
       </div>
       <div class="st-cell">
         <div class="st-lbl">部署</div>
@@ -570,7 +566,8 @@ const usageByProvider = computed(() => {
       <div class="st-cell">
         <div class="st-lbl"><HardDrive :size="11" />磁盘</div>
         <template v-if="liveDisk && liveDisk.total_gb >= 0">
-          <div class="st-val">{{ liveDisk.used_gb }}/{{ liveDisk.total_gb }}GB <b :style="{ color: liveDisk.used_pct > 90 ? 'var(--bad)' : 'var(--ink-900)' }">{{ liveDisk.used_pct }}%</b><span class="dim" style="margin-left:6px">剩 {{ liveDisk.available_gb }}GB</span></div>
+          <div class="st-val">{{ liveDisk.used_gb }}/{{ liveDisk.total_gb }}GB <b :style="{ color: liveDisk.used_pct > 90 ? 'var(--bad)' : 'var(--ink-900)' }">{{ liveDisk.used_pct }}%</b></div>
+          <div class="st-subline">剩余 {{ liveDisk.available_gb }}GB</div>
           <span class="track" style="margin-top:5px;max-width:240px"><span :style="{ width: `${Math.min(100, liveDisk.used_pct)}%`, background: diskBarColor }"></span></span>
         </template>
         <div v-else class="st-val dim">不可用</div>
@@ -652,6 +649,7 @@ const usageByProvider = computed(() => {
           <span class="tp-tn" v-for="t in detail.tunnels" :key="t.name" :title="t.fwd"><b>{{ t.name }}</b> ↓{{ fmtBytes(t.rx) }} ↑{{ fmtBytes(t.tx) }}</span>
         </div>
       </div>
+      <div v-else class="tp-detail tp-detail-empty">选择节点查看链路流量</div>
     </div>
 
     <!-- 带3 · 算力与用量(用量在上,算力在下) -->
@@ -802,9 +800,11 @@ const usageByProvider = computed(() => {
                 </div>
                 <div class="field">
                   <label>自动更新</label>
-                  <label class="checkline">
+                  <label class="switchline">
                     <input data-testid="watchtower-enabled" type="checkbox" v-model="watchtowerEnabled" />
-                    Watchtower
+                    <span class="switch" :class="{ on: watchtowerEnabled }"></span>
+                    <span>Watchtower</span>
+                    <span class="dim">{{ watchtowerEnabled ? '自动拉取镜像' : '手动更新' }}</span>
                   </label>
                 </div>
                 <div class="field">
@@ -988,7 +988,10 @@ details[open] > summary .summary-chevron { transform: rotate(90deg); }
 .advanced-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 2px 0 12px; }
 .advanced-grid .field { margin: 0; }
 .advanced-grid .input { padding: 7px 9px; font-size: 12px; }
-.checkline { display: flex !important; align-items: center; gap: 7px; margin: 0 !important; font-weight: 500 !important; cursor: pointer; }
+.switchline { display: flex !important; align-items: center; gap: 8px; margin: 0 !important; font-size: 12px; font-weight: 600 !important; color: var(--ink-700); cursor: pointer; }
+.switchline input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.switchline .switch { transform: scale(.88); transform-origin: left center; }
+.advanced-grid .input:disabled { background: var(--line-soft); color: var(--ink-400); cursor: not-allowed; }
 .inline-number { display: flex; align-items: center; gap: 8px; }
 .inline-number .input { width: 92px; }
 .inline-number span { font-size: 12px; color: var(--ink-500); }
@@ -1047,4 +1050,7 @@ details[open] > summary .summary-chevron { transform: rotate(90deg); }
 .st-cell { min-width: 0; }
 .st-lbl { display: flex; align-items: center; gap: 4px; font-size: 10.5px; color: var(--ink-400); letter-spacing: .03em; margin-bottom: 3px; }
 .st-val { font-size: 13px; color: var(--ink-800); font-variant-numeric: tabular-nums; line-height: 1.35; word-break: break-word; }
+.st-cell-version { grid-column: span 2; }
+.st-subline { margin-top: 2px; font-size: 12px; color: var(--ink-400); font-variant-numeric: tabular-nums; }
+@media (max-width: 560px) { .st-cell-version { grid-column: span 1; } }
 </style>

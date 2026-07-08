@@ -1,11 +1,10 @@
 <script setup lang="ts">
-// Prompt 白盒: 把四条流水线的全部步骤画成 DAG(看清流程=白盒),
-// 在 AI 步上编辑该步 prompt 覆盖。圆点角标表示该步已有覆盖。数据来自 GET /api/pipelines(含 is_ai/has_override)。
+// AI 工作流:把四条流水线的全部步骤画成 DAG,在 AI 步上编辑提示词覆盖。
 import { ref, onMounted } from 'vue'
 import { useApi } from '../composables/useApi'
 import PipelineDag from '../components/PipelineDag.vue'
 import PromptEditor from '../components/settings/PromptEditor.vue'
-import { FileCode2, ChevronLeft } from 'lucide-vue-next'
+import { FileCode2 } from 'lucide-vue-next'
 
 interface PStep {
   key: string
@@ -58,12 +57,9 @@ function onSaved() {
 
 <template>
   <section class="page">
-    <div class="h1" style="margin-bottom:6px"><FileCode2 :size="18" />Prompt(白盒)</div>
-    <div class="row" style="cursor:pointer;margin-bottom:14px" @click="$router.push('/settings')">
-      <ChevronLeft :size="15" /><span style="font-size:13px;color:var(--ink-500)">返回设置</span>
-    </div>
+    <div class="h1" style="margin-bottom:6px"><FileCode2 :size="18" />AI 工作流</div>
     <p style="font-size:13px;color:var(--ink-600);margin-bottom:18px">
-      四条流水线的完整步骤(白盒)。点蓝色 AI 步编辑其 prompt 覆盖(全局或按领域);<b>●</b> = 已有覆盖。
+      四条内容流水线的完整步骤。点蓝色 AI 步编辑其提示词覆盖(全局或按领域);<b>●</b> = 已有覆盖。
       覆盖存数据库,下个任务派发时注入该步。
     </p>
 

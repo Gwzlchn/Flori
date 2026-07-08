@@ -33,9 +33,13 @@ const crumbs = computed<BreadcrumbSeg[]>(() => {
     case 'collection-detail': return [{ t: '集合', to: '/collections' }, { t: '集合详情' }]
     case 'glossary': return [root, { t: '概念库' }]
     case 'search': return [{ t: '搜索' }]
-    case 'system': return [{ t: '系统' }]
+    case 'system':
+      return route.query.from === 'settings'
+        ? [{ t: '设置', to: '/settings' }, { t: '系统' }]
+        : [{ t: '系统' }]
     case 'worker-detail': return [{ t: '系统', to: '/system' }, { t: 'Worker 详情' }]
     case 'settings': return [{ t: '设置' }]
+    case 'settings-prompts': return [{ t: '设置', to: '/settings' }, { t: 'AI 工作流' }]
     case 'about': return [{ t: '设置', to: '/settings' }, { t: '关于' }]
     default: return [{ t: '知识库', to: '/' }]
   }

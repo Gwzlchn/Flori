@@ -183,6 +183,15 @@ i[data-lucide]{width:16px;height:16px;stroke-width:1.75;flex:none}
 .row .meta .sep{color:var(--ink-300)}
 .list{display:flex;flex-direction:column;gap:9px}
 
+/* 平台认证:固定高度行,扫码/上传动作不撑开设置页。 */
+.platform-list{display:flex;flex-direction:column;gap:10px}
+.platform-row{display:flex;align-items:center;gap:13px;min-height:74px;padding:13px 15px;border:1px solid var(--line);
+  border-radius:var(--r-md);background:var(--surface);box-shadow:var(--sh-sm)}
+.platform-row .body{flex:1;min-width:0}
+.platform-row .title{font-size:14px;font-weight:600;color:var(--ink-900);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.platform-row .meta{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink-500);margin-top:3px;flex-wrap:wrap}
+.platform-row .btn{flex:none}
+
 /* progress bar */
 .bar{height:5px;border-radius:999px;background:var(--line);overflow:hidden;width:120px}
 .bar>span{display:block;height:100%;background:var(--brand-500);border-radius:999px}
@@ -413,10 +422,9 @@ textarea.input{resize:vertical;min-height:64px;line-height:1.5}
 .side-tools .tool:hover{background:var(--line-soft);color:var(--ink-900)}
 .side-tools .tool.on{background:var(--brand-50);color:var(--brand-700)}
 .side-tools .tool .dot{position:absolute;top:6px;right:6px;box-shadow:0 0 0 2px var(--surface)}
-.side-tools .tool.collapse{margin-left:auto}
+.side-tools .tool.rail-toggle{margin-left:auto}
 .app.rail .side-tools{flex-direction:column;gap:6px}
-.app.rail .side-tools .tool.collapse{margin-left:0}
-.app.rail .side-tools .tool.collapse svg{transform:rotate(180deg)}
+.app.rail .side-tools .tool.rail-toggle{margin-left:0}
 
 /* 面包屑可点(回上层) */
 .crumb-link{cursor:pointer}
@@ -617,7 +625,7 @@ mark{background:var(--brand-100);color:var(--brand-700);padding:0 2px;border-rad
   .app.rail .top-tool{width:40px}
   .app.rail .side-tools{flex-direction:row}
   .app.rail .side-tools .tool{width:36px}
-  .app.rail .side-tools .tool.collapse svg{transform:none}
+  .app.rail .side-tools .tool.rail-toggle svg{transform:none}
   .app.rail .nav .sub-list,.app.rail .nav .nb-group,.app.rail .nav .sub-item.new{display:flex}
 
   /* 抽屉:固定在左侧,默认滑出屏幕,.open 时滑入 */
@@ -633,7 +641,7 @@ mark{background:var(--brand-100);color:var(--brand-700);padding:0 2px;border-rad
   /* 顶栏:露出汉堡,收紧左右内边距,隐藏折叠按钮(抽屉模式下无意义) */
   .hamburger{display:grid}
   .topbar{padding:12px 14px;gap:10px}
-  .side-tools .tool.collapse{display:none}
+  .side-tools .tool.rail-toggle{display:none}
 
   /* 搜索展开宽度收敛到视口内,避免溢出 */
   .search.expanded{width:min(480px,calc(100vw - 28px))}

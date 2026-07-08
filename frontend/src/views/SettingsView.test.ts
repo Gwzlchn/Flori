@@ -2,16 +2,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 
 // SettingsView 依赖 useApi.get('/api/auth/status'),模板里用 $router.push 跳转。
-// 子组件 BiliLogin/CookieUpload/StatusBadge 不在被测范围,stub 掉。
+// 子组件 BiliLogin/CookieUpload/McpConnectCard 不在被测范围,stub 掉。
 const api = { get: vi.fn(), post: vi.fn(), put: vi.fn(), del: vi.fn(), upload: vi.fn(), getText: vi.fn() }
 vi.mock('../composables/useApi', () => ({ useApi: () => api }))
 
 import SettingsView from './SettingsView.vue'
 
 const stubs = {
-  BiliLogin: true,
+  BiliLogin: { template: '<div class="platform-row">Bilibili</div>' },
   CookieUpload: true,
-  StatusBadge: true,
   McpConnectCard: true,  // 自带 onMounted 拉 /api/mcp/info,会抢 mock;非本测目标,stub(它有独立 test)
 }
 const $router = { push: vi.fn(), replace: vi.fn() }
@@ -48,7 +47,8 @@ describe('SettingsView', () => {
     expect(t).toContain('平台认证')
     expect(t).toContain('Bilibili')
     expect(t).toContain('YouTube')
-    expect(t).toContain('已配置 cookies')
+    expect(t).toContain('已配置')
+    expect(t).toContain('cookies 已可用')
   })
 
   it('youtube 未配置 cookies 时显示提示文案', async () => {
@@ -93,8 +93,22 @@ describe('SettingsView', () => {
     const w = mountView()
     await flushPromises()
     const t = w.text()
+    expect(t).toContain('AI 工作流')
+    expect(t).toContain('流水线 & 提示词')
     expect(t).toContain('运维')
     expect(t).toContain('系统与 Worker')
     expect(t).toContain('关于 Flori')
+  })
+
+  it('从设置页进入系统页时带来源参数', async () => {
+    api.get.mockResolvedValue({
+      bilibili: { has_cookies: false, status: 'pending' },
+      youtube: { has_cookies: false, status: 'pending' },
+    })
+    const w = mountView()
+    await flushPromises()
+    const systemRow = w.findAll('.row').find((row) => row.text().includes('系统与 Worker'))
+    await systemRow!.trigger('click')
+    expect($router.push).toHaveBeenCalledWith('/system?from=settings')
   })
 })

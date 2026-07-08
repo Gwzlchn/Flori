@@ -6,14 +6,14 @@ import { useGlobalStore } from '../../stores/global'
 import { useApi } from '../../composables/useApi'
 import {
   Send, Inbox, BookMarked, Lightbulb, ChevronRight, ChevronUp, ChevronDown,
-  Folder, Server, Settings, PanelLeftClose, Plus, MoreHorizontal, MessageCircleQuestion,
+  Folder, Server, Settings, PanelLeftClose, PanelLeftOpen, Plus, MoreHorizontal, MessageCircleQuestion,
 } from 'lucide-vue-next'
 import { resolveIcon } from '../../utils/kbIcons'
 import { sourceBadge, sourceLabelOf, subState, subTip } from '../../constants/sources'
 import AddSubscriptionDialog from '../collection/AddSubscriptionDialog.vue'
 import KbSettingsDialog from './KbSettingsDialog.vue'
 
-defineProps<{ mobileOpen?: boolean }>()
+const props = defineProps<{ mobileOpen?: boolean; rail?: boolean }>()
 const emit = defineEmits<{ (e: 'toggle-rail'): void; (e: 'nav'): void }>()
 
 const route = useRoute()
@@ -21,6 +21,8 @@ const router = useRouter()
 const domainStore = useDomainStore()
 const global = useGlobalStore()
 const api = useApi()
+const railTip = computed(() => props.rail ? '展开侧栏' : '收起侧栏')
+const railIcon = computed(() => props.rail ? PanelLeftOpen : PanelLeftClose)
 
 // 导航后通知外壳关闭移动端抽屉。桌面端 AppShell 忽略此事件。
 function nav(to: string) {
@@ -195,7 +197,7 @@ async function onCreateCollection(payload: any) {
 </script>
 
 <template>
-  <aside class="side" :class="{ open: mobileOpen }">
+  <aside class="side" :class="{ open: props.mobileOpen }">
     <div class="brand">
       <div class="logo" title="Flori" @click="nav('/')">F</div>
       <b>Flori</b>
@@ -286,8 +288,10 @@ async function onCreateCollection(payload: any) {
 
     <div class="side-tools">
       <button class="tool" :class="{ on: route.path.startsWith('/system') }" data-tip="系统" title="系统" @click="nav('/system')"><Server :size="17" /></button>
-      <button class="tool" :class="{ on: route.name === 'settings' }" data-tip="设置" title="设置" @click="nav('/settings')"><Settings :size="17" /></button>
-      <button class="tool collapse" data-tip="折叠侧栏" title="折叠侧栏" @click="$emit('toggle-rail')"><PanelLeftClose :size="17" /></button>
+      <button class="tool" :class="{ on: route.path.startsWith('/settings') }" data-tip="设置" title="设置" @click="nav('/settings')"><Settings :size="17" /></button>
+      <button class="tool rail-toggle" :data-tip="railTip" :title="railTip" @click="$emit('toggle-rail')">
+        <component :is="railIcon" :size="17" />
+      </button>
     </div>
 
     <KbSettingsDialog
