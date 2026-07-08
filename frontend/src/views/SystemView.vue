@@ -328,7 +328,7 @@ async function removeWorker(w: Worker) {
 // worker 镜像 = flori-worker,接入命令默认用它。
 const DEFAULT_WORKER_IMAGE = `ghcr.io/${'gwzl' + 'chn'}/flori-worker:latest`
 const IMAGE = import.meta.env.VITE_WORKER_IMAGE || DEFAULT_WORKER_IMAGE
-const WORKER_TYPES = ['cpu', 'gpu', 'ai', 'io']
+const WORKER_TYPES = ['ai', 'cpu', 'gpu', 'io']
 const OUTPUT_MODES = [
   { id: 'compose', label: 'compose(推荐)' },
   { id: 'docker', label: 'docker run' },
@@ -748,35 +748,11 @@ const usageByProvider = computed(() => {
         <span class="enroll-summary-meta">{{ selectedPools.length ? `能力 ${[...selectedPools].sort().join(' + ')}` : '未选择能力' }} · {{ commandTitle }}</span>
       </summary>
       <div class="enroll-panel">
-        <div class="enroll-steps">
-          <div class="enroll-step">
-            <span class="step-dot">1</span>
-            <div>
-              <b>选择能力</b>
-              <span>{{ selectedPools.length ? [...selectedPools].sort().join(' / ') : '至少选一个' }}</span>
-            </div>
-          </div>
-          <div class="enroll-step">
-            <span class="step-dot">2</span>
-            <div>
-              <b>生成 token</b>
-              <span>{{ token ? `有效期 ${tokenTtlText || '已生成'}` : '首次注册用' }}</span>
-            </div>
-          </div>
-          <div class="enroll-step">
-            <span class="step-dot">3</span>
-            <div>
-              <b>复制部署文件</b>
-              <span>{{ serviceName }}</span>
-            </div>
-          </div>
-        </div>
-
         <div class="enroll-grid">
           <section class="enroll-box">
             <div class="enroll-box-h">
-              <span>能力</span>
-              <code class="mono">{{ runCmd }}</code>
+              <span class="step-title"><span class="step-dot">1</span>选择能力</span>
+              <span class="enroll-hint">{{ selectedPools.length ? [...selectedPools].sort().join(' / ') : '至少选一个' }}</span>
             </div>
             <div class="pool-picker">
               <label v-for="t in WORKER_TYPES" :key="t" :class="{ on: selectedPools.includes(t) }">
@@ -798,8 +774,8 @@ const usageByProvider = computed(() => {
 
           <section class="enroll-box">
             <div class="enroll-box-h">
-              <span>接入 token</span>
-              <span v-if="tokenTtlText" class="badge b-mut">有效期 {{ tokenTtlText }}</span>
+              <span class="step-title"><span class="step-dot">2</span>生成 token</span>
+              <span class="enroll-hint">{{ token ? `有效期 ${tokenTtlText || '已生成'}` : '首次注册用' }}</span>
             </div>
             <button class="btn pri enroll-main-action" :disabled="minting" @click="mint">
               <Key :size="14" />{{ token ? '重新生成 token' : '生成 token' }}
@@ -810,7 +786,6 @@ const usageByProvider = computed(() => {
                 <component :is="copiedToken ? Check : Copy" :size="15" />
               </button>
             </div>
-            <p v-else class="note-tip">注册成功后长期 token 会写入状态目录。</p>
           </section>
         </div>
 
@@ -875,8 +850,8 @@ const usageByProvider = computed(() => {
         <section class="deploy-box">
           <div class="deploy-head">
             <div>
-              <b>{{ commandTitle }}</b>
-              <span>{{ serviceName }} · Gateway {{ gatewayUrl }}</span>
+              <b><span class="step-dot">3</span>复制部署文件</b>
+              <span>{{ commandTitle }} · Gateway {{ gatewayUrl }}</span>
             </div>
             <button class="btn sm" @click="copy(command, 'cmd')">
               <component :is="copiedCmd ? Check : Copy" :size="13" />{{ copiedCmd ? '已复制' : commandCopyLabel }}
@@ -967,27 +942,24 @@ summary::-webkit-details-marker { display: none; }
 .enroll-summary > span:first-child { display: inline-flex; align-items: center; gap: 7px; }
 .enroll-summary-meta { font-size: 12px; font-weight: 500; color: var(--ink-500); white-space: nowrap; }
 .worker-enroll { scroll-margin-top: 72px; }
-.enroll-panel { margin-top: 14px; }
-.enroll-steps { display: grid; grid-template-columns: minmax(0, 158px) minmax(0, 150px) minmax(0, 224px); gap: 8px; max-width: 556px; margin-bottom: 12px; }
-.enroll-step { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: var(--r-sm); background: var(--surface-2, #fafafa); }
-.enroll-step b { display: block; font-size: 12.5px; color: var(--ink-800); line-height: 1.2; }
-.enroll-step span:last-child { display: block; min-width: 0; margin-top: 2px; font-size: 11.5px; color: var(--ink-500); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.step-dot { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; flex: none; border-radius: 50%; background: var(--brand-50); color: var(--brand-700); font-size: 11.5px; font-weight: 700; }
-.enroll-grid { display: grid; grid-template-columns: minmax(0, 392px) minmax(250px, 300px); gap: 10px; max-width: 712px; margin-bottom: 12px; }
-.enroll-box { min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface); }
-.enroll-box-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; font-size: 13px; font-weight: 700; color: var(--ink-800); }
-.enroll-box-h code { min-width: 0; max-width: 58%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 500; color: var(--ink-500); }
-.pool-picker { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-.pool-picker label { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; border: 1px solid var(--line); border-radius: var(--r-sm); color: var(--ink-600); font-size: 12.5px; font-weight: 700; cursor: pointer; user-select: none; }
+.enroll-panel { margin-top: 12px; }
+.enroll-grid { display: grid; grid-template-columns: minmax(0, 360px) minmax(220px, 260px); gap: 10px; max-width: 630px; margin-bottom: 10px; }
+.enroll-box { min-width: 0; padding: 11px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface); }
+.enroll-box-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 9px; color: var(--ink-800); }
+.step-title { display: inline-flex; align-items: center; gap: 7px; min-width: 0; font-size: 13px; font-weight: 700; }
+.step-dot { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; flex: none; border-radius: 50%; background: var(--brand-50); color: var(--brand-700); font-size: 11px; font-weight: 700; }
+.enroll-hint { min-width: 0; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 500; color: var(--ink-500); }
+.pool-picker { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
+.pool-picker label { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 30px; border: 1px solid var(--line); border-radius: var(--r-sm); color: var(--ink-600); font-size: 12.5px; font-weight: 700; cursor: pointer; user-select: none; }
 .pool-picker label.on { border-color: var(--brand-300); background: var(--brand-50); color: var(--brand-700); }
 .pool-picker input { width: 13px; height: 13px; margin: 0; }
-.inline-field { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 9px; margin-top: 11px; }
+.inline-field { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 9px; margin-top: 10px; }
 .inline-field > span { font-size: 12px; color: var(--ink-500); white-space: nowrap; }
 .inline-field .input { padding: 6px 9px; font-size: 12px; }
-.enroll-main-action { width: 100%; justify-content: center; min-height: 34px; }
+.enroll-main-action { width: 100%; justify-content: center; min-height: 32px; }
 .token-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; margin-top: 10px; }
 .token-row code { min-width: 0; padding: 7px 9px; border-radius: var(--r-sm); background: var(--line-soft); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.advanced-box { max-width: 712px; margin: 2px 0 12px; border: 1px solid var(--line-soft); border-radius: var(--r-sm); background: var(--surface); }
+.advanced-box { max-width: 630px; margin: 2px 0 10px; border: 1px solid var(--line-soft); border-radius: var(--r-sm); background: var(--surface); }
 .advanced-box > summary { cursor: pointer; padding: 10px 12px; font-size: 12.5px; font-weight: 700; color: var(--ink-700); }
 .advanced-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 0 12px 12px; }
 .advanced-grid .field { margin: 0; }
@@ -999,11 +971,11 @@ summary::-webkit-details-marker { display: none; }
 .advanced-box .note-tip { margin: -2px 12px 12px; line-height: 1.6; }
 .deploy-box { border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; }
 .deploy-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 12px; background: var(--line-soft); border-bottom: 1px solid var(--line); }
-.deploy-head b { display: block; font-size: 13px; color: var(--ink-800); }
+.deploy-head b { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink-800); }
 .deploy-head span { display: block; max-width: 680px; margin-top: 2px; font-size: 11.5px; color: var(--ink-500); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .deploy-box pre { margin: 0; max-height: 300px; padding: 12px; overflow: auto; background: var(--ink-900); color: #cbd5e1; font-family: var(--mono); font-size: 12px; line-height: 1.65; white-space: pre-wrap; word-break: break-all; }
 @media (max-width: 900px) {
-  .enroll-steps, .enroll-grid, .advanced-grid { grid-template-columns: 1fr; max-width: none; }
+  .enroll-grid, .advanced-grid { grid-template-columns: 1fr; max-width: none; }
   .pool-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .deploy-head { align-items: stretch; flex-direction: column; }
   .deploy-head .btn { justify-content: center; }
