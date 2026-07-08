@@ -358,9 +358,6 @@ const workerStateDir = ref(defaultStateDir(workerName.value))
 watch(workerName, (name) => {
   if (!stateDirTouched.value) workerStateDir.value = defaultStateDir(name)
 })
-watch(watchtowerEnabled, (enabled) => {
-  if (enabled) outputMode.value = 'compose'
-})
 const AI_CRED_METHODS = [
   { id: 'claude-sub', label: 'Claude 订阅(worker HOME)' },
   { id: 'anthropic', label: 'Anthropic API Key' },
@@ -404,6 +401,11 @@ const tagsArg = computed(() => {
 // 唯一能力表达:--pools <所勾选>。
 const runCmd = computed(() => `python -m worker.main --pools ${[...selectedPools.value].sort().join(' ') || '<至少勾一个能力>'}${tagsArg.value}`)
 const gpuFlag = computed(() => (selectedPools.value.includes('gpu') ? ' --gpus all' : ''))
+const dockerWatchtowerLabels = computed(() => (watchtowerEnabled.value
+  ? `  --label "com.centurylinklabs.watchtower.enable=true" \\
+  --label "com.centurylinklabs.watchtower.scope=${watchtowerScope.value}" \\
+`
+  : ''))
 
 function yamlString(v: string | number): string {
   return JSON.stringify(String(v))
@@ -466,7 +468,7 @@ ${composeVolumeLines()}
 ${labels}${watchtower}${topVolumes}`
 })
 const dockerRunCommand = computed(() => `docker run -d --name ${serviceName.value} --restart unless-stopped${gpuFlag.value} \\
-  -e GATEWAY_URL=${gatewayUrl.value} \\
+${dockerWatchtowerLabels.value}  -e GATEWAY_URL=${gatewayUrl.value} \\
   -e WORKER_REGISTRATION_TOKEN=${tokenLine.value} \\
   -e WORKER_NAME=${workerName.value} \\
   -e WORKER_ID_FILE=/home/worker/worker.id \\
@@ -474,7 +476,12 @@ const dockerRunCommand = computed(() => `docker run -d --name ${serviceName.valu
   -e HOME=/home/worker \\
 ${dockerCredLines.value}${dockerCacheLines.value}  -v "${stateDir.value}:/home/worker" \\
   ${IMAGE} \\
-  ${runCmd.value}`)
+  ${runCmd.value}${watchtowerEnabled.value ? `
+
+docker run -d --name watchtower-${serviceName.value} --restart unless-stopped \\
+  -v /var/run/docker.sock:/var/run/docker.sock \\
+  ghcr.io/containrrr/watchtower:latest \\
+  --label-enable --scope ${watchtowerScope.value} --cleanup --interval ${updateIntervalSec.value}` : ''}`)
 const command = computed(() => outputMode.value === 'compose' ? composeCommand.value : dockerRunCommand.value)
 const commandTitle = computed(() => outputMode.value === 'compose' ? 'docker-compose.yml' : 'docker run')
 const commandCopyLabel = computed(() => outputMode.value === 'compose' ? '复制 compose' : '复制命令')
@@ -834,7 +841,6 @@ const usageByProvider = computed(() => {
                   v-for="m in OUTPUT_MODES"
                   :key="m.id"
                   :class="{ on: outputMode === m.id }"
-                  :disabled="watchtowerEnabled && m.id === 'docker'"
                   @click="outputMode = m.id"
                 >
                   {{ m.label }}

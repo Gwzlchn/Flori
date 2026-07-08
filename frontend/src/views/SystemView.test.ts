@@ -305,6 +305,28 @@ describe('SystemView', () => {
     expect(cmd).toContain('/var/run/docker.sock:/var/run/docker.sock')
   })
 
+  it('Watchtower + docker run 输出 worker 与 watchtower 两条命令', async () => {
+    const store = useWorkerStore()
+    stubStoreData(store)
+    const w = mountView({ workers: [] })
+    await flushPromises()
+    const dockerBtn = w.findAll('.seg button').find(b => b.text().includes('docker run'))
+    await dockerBtn!.trigger('click')
+    await w.find('[data-testid="watchtower-enabled"]').setValue(true)
+    await w.find('[data-testid="watchtower-interval"]').setValue('240')
+    await flushPromises()
+    const cmd = w.find('pre').text()
+    expect(dockerBtn!.attributes('disabled')).toBeUndefined()
+    expect(cmd.match(/docker run -d --name/g) ?? []).toHaveLength(2)
+    expect(cmd).toContain('--name flori-worker-cpu-1')
+    expect(cmd).toContain('--label "com.centurylinklabs.watchtower.enable=true"')
+    expect(cmd).toContain('--label "com.centurylinklabs.watchtower.scope=flori-worker-cpu-1"')
+    expect(cmd).toContain('--name watchtower-flori-worker-cpu-1')
+    expect(cmd).toContain('ghcr.io/containrrr/watchtower:latest')
+    expect(cmd).toContain('--label-enable --scope flori-worker-cpu-1 --cleanup --interval 240')
+    expect(cmd).toContain('/var/run/docker.sock:/var/run/docker.sock')
+  })
+
   it('docker run 输出也是 Gateway-only', async () => {
     const store = useWorkerStore()
     stubStoreData(store)
