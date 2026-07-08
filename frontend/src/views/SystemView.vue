@@ -22,7 +22,7 @@ import { COMPONENT_KIND_LABELS } from '../types'
 import {
   Server, RefreshCw, Cpu, Pause, Play, MessageSquare, X, Plus,
   Key, Copy, Check, Layers, HardDrive, Database, Boxes, AlertTriangle,
-  Coins, Braces, Network,
+  Coins, Braces, Network, ChevronRight,
 } from 'lucide-vue-next'
 
 const router = useRouter()
@@ -745,52 +745,20 @@ const usageByProvider = computed(() => {
     <details class="card pad worker-enroll" style="margin-bottom:18px" :open="enrollOpen" @toggle="onEnrollToggle">
       <summary class="card-h enroll-summary" style="margin-bottom:0;cursor:pointer;list-style:none">
         <span><Plus :size="15" />接入新 Worker</span>
-        <span class="enroll-summary-meta">{{ selectedPools.length ? `能力 ${[...selectedPools].sort().join(' + ')}` : '未选择能力' }} · {{ commandTitle }}</span>
       </summary>
       <div class="enroll-panel">
-        <div class="enroll-workbench">
-          <div class="enroll-config">
-            <section class="enroll-box">
-              <div class="enroll-box-h">
-                <span class="step-title"><span class="step-dot">1</span>选择能力</span>
-                <span class="enroll-hint">{{ selectedPools.length ? [...selectedPools].sort().join(' / ') : '至少选一个' }}</span>
-              </div>
-              <div class="pool-picker">
-                <label v-for="t in WORKER_TYPES" :key="t" :class="{ on: selectedPools.includes(t) }">
-                  <input type="checkbox" :value="t" v-model="selectedPools" />
-                  <span>{{ t }}</span>
-                </label>
-              </div>
-              <div v-if="selectedPools.includes('ai')" class="inline-field">
-                <span>AI 凭证</span>
-                <select v-model="aiCredMethod" class="input">
-                  <option v-for="m in AI_CRED_METHODS" :key="m.id" :value="m.id">{{ m.label }}</option>
-                </select>
-              </div>
-              <p v-if="selectedPools.includes('ai')" class="note-tip">
-                <template v-if="aiCredMethod === 'claude-sub'">使用持久状态目录内的 .claude。</template>
-                <template v-else>部署时把 provider key 写入环境变量。</template>
-              </p>
-            </section>
-
-            <section class="enroll-box">
-              <div class="enroll-box-h">
-                <span class="step-title"><span class="step-dot">2</span>生成 token</span>
-                <span class="enroll-hint">{{ token ? `有效期 ${tokenTtlText || '已生成'}` : '首次注册用' }}</span>
-              </div>
-              <button class="btn pri enroll-main-action" :disabled="minting" @click="mint">
-                <Key :size="14" />{{ token ? '重新生成 token' : '生成 token' }}
-              </button>
-              <div v-if="token" class="token-row">
-                <code class="mono">{{ token }}</code>
-                <button class="iconbtn" @click="copy(token, 'token')">
-                  <component :is="copiedToken ? Check : Copy" :size="15" />
-                </button>
-              </div>
-            </section>
-
-            <details class="advanced-box">
-              <summary>高级选项</summary>
+        <div class="enroll-flow">
+          <section class="enroll-step-card step-capabilities">
+            <details class="step-advanced">
+              <summary class="step-head">
+                <div class="step-head-main">
+                  <span class="step-title"><span class="step-dot">1</span>选择能力</span>
+                  <span class="enroll-hint">{{ selectedPools.length ? [...selectedPools].sort().join(' / ') : '至少选一个' }}</span>
+                </div>
+                <span class="advanced-toggle">
+                  高级选项<ChevronRight class="summary-chevron" :size="14" />
+                </span>
+              </summary>
               <div class="advanced-grid">
                 <div class="field">
                   <label>Worker 名称</label>
@@ -846,24 +814,60 @@ const usageByProvider = computed(() => {
               </div>
               <p class="note-tip">Watchtower 会挂载 Docker socket。自签证书部署时可加 <code>GATEWAY_TLS_INSECURE=1</code> 或 <code>GATEWAY_CA_BUNDLE</code>。</p>
             </details>
-          </div>
+            <div class="pool-picker">
+              <label v-for="t in WORKER_TYPES" :key="t" :class="{ on: selectedPools.includes(t) }">
+                <input type="checkbox" :value="t" v-model="selectedPools" />
+                <span>{{ t }}</span>
+              </label>
+            </div>
+            <div v-if="selectedPools.includes('ai')" class="inline-field">
+              <span>AI 凭证</span>
+              <select v-model="aiCredMethod" class="input">
+                <option v-for="m in AI_CRED_METHODS" :key="m.id" :value="m.id">{{ m.label }}</option>
+              </select>
+            </div>
+            <p v-if="selectedPools.includes('ai')" class="note-tip">
+              <template v-if="aiCredMethod === 'claude-sub'">使用持久状态目录内的 .claude。</template>
+              <template v-else>部署时把 provider key 写入环境变量。</template>
+            </p>
+          </section>
 
-          <section class="deploy-box">
-            <div class="deploy-head">
-              <div>
-                <b><span class="step-dot">3</span>复制部署文件</b>
-                <span>{{ commandTitle }} · Gateway {{ gatewayUrl }}</span>
+          <section class="enroll-step-card token-step">
+            <div class="token-strip">
+              <div class="step-head-main">
+                <span class="step-title"><span class="step-dot">2</span>生成 token</span>
+                <span class="enroll-hint">{{ token ? `有效期 ${tokenTtlText || '已生成'}` : '首次注册用' }}</span>
               </div>
-              <button class="btn sm" @click="copy(command, 'cmd')">
-                <component :is="copiedCmd ? Check : Copy" :size="13" />{{ copiedCmd ? '已复制' : commandCopyLabel }}
+              <div v-if="token" class="token-row">
+                <code class="mono">{{ token }}</code>
+                <button class="iconbtn" @click="copy(token, 'token')">
+                  <component :is="copiedToken ? Check : Copy" :size="15" />
+                </button>
+              </div>
+              <button class="btn pri enroll-main-action" :class="{ compact: token }" :disabled="minting" @click="mint">
+                <Key :size="14" />{{ token ? '重生成' : '生成 token' }}
               </button>
             </div>
-            <pre>{{ command }}</pre>
           </section>
+
+          <details class="deploy-box">
+            <summary class="deploy-head">
+              <div>
+                <b><span class="step-dot">3</span>复制部署文件</b>
+                <span>{{ selectedPools.length ? `能力 ${[...selectedPools].sort().join(' + ')}` : '未选择能力' }} · {{ commandTitle }} · Gateway {{ gatewayUrl }}</span>
+              </div>
+              <div class="deploy-actions">
+                <button class="btn sm" @click.stop.prevent="copy(command, 'cmd')">
+                  <component :is="copiedCmd ? Check : Copy" :size="13" />{{ copiedCmd ? '已复制' : commandCopyLabel }}
+                </button>
+                <ChevronRight class="summary-chevron" :size="16" />
+              </div>
+            </summary>
+            <pre>{{ command }}</pre>
+          </details>
         </div>
       </div>
     </details>
-
     <!-- worker 状态卡片 -->
 
     <div v-if="workerStore.loading && workerStore.workers.length === 0" class="card pad" style="color:var(--ink-500);font-size:13px;margin-bottom:24px">
@@ -939,54 +943,67 @@ const usageByProvider = computed(() => {
 summary::-webkit-details-marker { display: none; }
 .seg button:disabled { opacity: .45; cursor: not-allowed; }
 
-/* Worker 接入向导:默认只暴露能力、token、部署文件,高级项折叠。 */
-.enroll-summary { justify-content: space-between; gap: 12px; }
+/* Worker 接入向导:纵向 1/2/3,部署文件默认折叠。 */
+.enroll-summary { justify-content: flex-start; gap: 12px; }
 .enroll-summary > span:first-child { display: inline-flex; align-items: center; gap: 7px; }
-.enroll-summary-meta { font-size: 12px; font-weight: 500; color: var(--ink-500); white-space: nowrap; }
 .worker-enroll { scroll-margin-top: 72px; }
 .enroll-panel { margin-top: 12px; }
-.enroll-workbench { display: grid; grid-template-columns: minmax(300px, 340px) minmax(0, 1fr); gap: 14px; align-items: start; }
-.enroll-config { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
-.enroll-box { min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface); }
-.enroll-box-h { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; color: var(--ink-800); }
+.enroll-flow { display: flex; flex-direction: column; gap: 10px; }
+.enroll-step-card { min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface); }
+.step-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; color: var(--ink-800); cursor: pointer; list-style: none; }
+.step-head-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .step-title { display: inline-flex; align-items: center; gap: 7px; min-width: 0; font-size: 13px; font-weight: 700; }
 .step-dot { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; flex: none; border-radius: 50%; background: var(--brand-50); color: var(--brand-700); font-size: 11px; font-weight: 700; }
-.enroll-hint { min-width: 0; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 500; color: var(--ink-500); }
-.pool-picker { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.enroll-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 500; color: var(--ink-500); }
+.pool-picker { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .pool-picker label { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; border: 1px solid var(--line); border-radius: var(--r-sm); color: var(--ink-600); font-size: 12.5px; font-weight: 700; cursor: pointer; user-select: none; }
 .pool-picker label.on { border-color: var(--brand-300); background: var(--brand-50); color: var(--brand-700); }
 .pool-picker input { width: 13px; height: 13px; margin: 0; }
 .inline-field { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; margin-top: 12px; }
 .inline-field > span { font-size: 12px; color: var(--ink-500); white-space: nowrap; }
 .inline-field .input { padding: 6px 9px; font-size: 12px; }
-.enroll-main-action { width: 100%; justify-content: center; min-height: 38px; }
-.token-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; margin-top: 10px; }
+.token-step { padding: 11px 14px; }
+.token-strip { display: grid; grid-template-columns: minmax(180px, auto) minmax(0, 1fr) auto; align-items: center; gap: 12px; }
+.enroll-main-action { justify-content: center; min-width: 180px; min-height: 36px; }
+.enroll-main-action.compact { width: 112px; min-width: 112px; }
+.token-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; min-width: 0; }
 .token-row code { min-width: 0; padding: 7px 9px; border-radius: var(--r-sm); background: var(--line-soft); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.advanced-box { margin: 0; border: 1px solid var(--line-soft); border-radius: var(--r-sm); background: var(--surface); }
-.advanced-box > summary { cursor: pointer; padding: 10px 12px; font-size: 12.5px; font-weight: 700; color: var(--ink-700); }
-.advanced-grid { display: grid; grid-template-columns: 1fr; gap: 12px; padding: 0 12px 12px; }
+.step-advanced > summary { margin-bottom: 12px; }
+.advanced-toggle { display: inline-flex; align-items: center; gap: 5px; flex: none; padding: 5px 8px; border: 1px solid var(--line-soft); border-radius: var(--r-sm); color: var(--ink-600); font-size: 12px; font-weight: 700; }
+.summary-chevron { flex: none; transition: transform .16s ease; }
+details[open] > summary .summary-chevron { transform: rotate(90deg); }
+.advanced-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 2px 0 12px; }
 .advanced-grid .field { margin: 0; }
 .advanced-grid .input { padding: 7px 9px; font-size: 12px; }
 .checkline { display: flex !important; align-items: center; gap: 7px; margin: 0 !important; font-weight: 500 !important; cursor: pointer; }
 .inline-number { display: flex; align-items: center; gap: 8px; }
 .inline-number .input { width: 92px; }
 .inline-number span { font-size: 12px; color: var(--ink-500); }
-.advanced-box .note-tip { margin: -2px 12px 12px; line-height: 1.6; }
+.step-advanced .note-tip { margin: -2px 0 12px; line-height: 1.6; }
 .deploy-box { min-width: 0; border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; }
-.deploy-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 12px; background: var(--line-soft); border-bottom: 1px solid var(--line); }
+.deploy-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 14px; background: var(--line-soft); cursor: pointer; list-style: none; }
+details[open] > .deploy-head { border-bottom: 1px solid var(--line); }
 .deploy-head b { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink-800); }
 .deploy-head span { display: block; max-width: 680px; margin-top: 2px; font-size: 11.5px; color: var(--ink-500); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.deploy-box pre { margin: 0; min-height: 360px; max-height: 520px; padding: 12px; overflow: auto; background: var(--ink-900); color: #cbd5e1; font-family: var(--mono); font-size: 12px; line-height: 1.65; white-space: pre; word-break: normal; }
+.deploy-actions { display: inline-flex; align-items: center; gap: 8px; flex: none; }
+.deploy-box pre { margin: 0; max-height: 360px; padding: 12px; overflow: auto; background: var(--ink-900); color: #cbd5e1; font-family: var(--mono); font-size: 12px; line-height: 1.65; white-space: pre; word-break: normal; }
 @media (max-width: 900px) {
-  .enroll-workbench, .advanced-grid { grid-template-columns: 1fr; max-width: none; }
+  .advanced-grid { grid-template-columns: 1fr; max-width: none; }
   .pool-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .deploy-box pre { min-height: 300px; max-height: 360px; white-space: pre-wrap; word-break: break-word; }
+  .token-strip { grid-template-columns: 1fr; }
+  .enroll-main-action { width: 100%; min-width: 0; }
+  .deploy-box pre { max-height: 360px; white-space: pre-wrap; word-break: break-word; }
   .deploy-head { align-items: stretch; flex-direction: column; }
+  .deploy-actions { justify-content: space-between; }
   .deploy-head .btn { justify-content: center; }
 }
 @media (max-width: 560px) {
   .enroll-summary { align-items: flex-start; flex-direction: column; }
-  .enroll-summary-meta { white-space: normal; }
+  .step-head { align-items: stretch; flex-direction: column; }
+  .step-head-main { align-items: flex-start; flex-direction: column; gap: 6px; }
+  .advanced-toggle { align-self: flex-end; }
+  .deploy-head span { white-space: normal; }
+  .deploy-actions { align-items: stretch; flex-direction: row; }
 }
 
 /* 通联 / 链路流量:选中节点详情面板(树本身样式在 LinkTopologyTree.vue) */
