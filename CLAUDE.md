@@ -226,6 +226,16 @@ docker compose -f docker-compose.yml -f .local/docker-compose.uptest.yml --env-f
 ### 单一来源 / 防漂移
 - 依赖只在 `pyproject.toml`（optional extras）；Dockerfile/CI 按 extras 名装,勿重抄版本。
 - 改任何对外接口 → 同提交更新 `docs/03-contracts.md`（commit 用 `contract:` 前缀）。
+
+### Worktree 租约制（并行开发必守）
+- 多 agent 并行、主工作树已有未提交改动、或需要隔离风险时,代码改动必须使用租约制 worktree。
+- Worktree 和临时目录规范不得写入个人绝对路径。用 `$REPO` 表示仓库根目录,用 `$FLORI_WORKING_DIR` 表示仓库外工作区。本机真实路径只放 `.local/` 或 shell 环境,不进入 git 文档。
+- worktree 统一放 `$FLORI_WORKING_DIR/wt/<slug>/`;临时产物放 `$FLORI_WORKING_DIR/tmp/`;`.local/` 只放工作日志、登记和归档 diff,不放活跃 worktree 本体。
+- 创建 worktree 前,必须在本次工作项头部记录 `branch`、`worktree path`、`base commit`、用途、创建时间和预计回收条件。
+- 合入 `main` 后必须立刻执行 `git worktree remove <path>` 和 `git branch -d <branch>`。本任务创建的远程分支已合入后同步删除;`badges`、`mutation-data` 等自动数据分支例外。
+- 最终回复前必须复查 `git worktree list --porcelain`、`git branch --merged main`、`git status --short --branch`。若 worktree 未清理,必须说明原因并写入 `.local/processing/待办池.txt`。
+- 脏 worktree 删除前,先把 `git status`、`git diff` 和必要的 `git log main..branch` 归档到 `$REPO/.local/processing/<YYYY-MM-DD>/worktree-archive/`。
+
 ### 迭代工作记录（每次开发/运维都要保持的习惯）
 **粒度铁律：一个 commit 一个 txt**（不论大小开发，每个提交都建一个工作项 txt，记录产出该提交的 worktree 开发行为；一个 commit 含 N 个开发步骤进 §7，一个任务的多个 commit 则各自一个 txt）。文件在 `.local/processing/<YYYY-MM-DD>/`，**边做边更新**（不只动手不记录）：
 - 命名 `NN-类型-简述.txt`（类型对齐 git：feat/fix/refactor/chore/ops/research/plan/docs/test）。
@@ -242,3 +252,43 @@ docker compose -f docker-compose.yml -f .local/docker-compose.uptest.yml --env-f
 - 原则：花了 >2 分钟、之后还要用的结论，**移到下一步前先写盘**；代码引用一律 `file:line` 便于精准重读，不整文件重扫。
 - 全程在 `.local/`（gitignored,永不入 git）；值得长存的决策升格 `docs/adr/`,接口变更进 `docs/03-contracts.md`。
 
+## 已迁移项目记忆（Claude Code / Codex 共用）
+
+以下来自历史 memory，作为跨会话稳定约定与踩坑记录。真实凭证不写入本文件。
+
+### 规则与偏好
+- 版本递增按三档执行：普通改动 patch +1（逢 10 进位），大的重构 minor +1，架构级重构 major +1。每个提交都 bump `pyproject.toml [project].version`，标题结尾都带 `;<新版本>`，全系统单一版本。
+- 提交格式以本文件「提交规范」为准，覆盖 agent harness 默认。禁止 `Claude-Session` URL、`(1M context)` 等后缀；正文只保留一行 `Co-Authored-By` trailer。
+- 后台 fork/agent 可能自走完整条（commit / push / 部署 / 验证），而且与主会话真并发。派后台任务后不要同时动同一 git、Docker、容器、版本号或部署资源。
+- 现在是单人开发，`frontend/` 与 `design/` 也归当前 agent，可改功能、设计、UI。对外接口仍以 `docs/03-contracts.md` 为契约；接口变更同提交更新契约文档。
+- 每次迭代都维护 `.local/processing/<YYYY-MM-DD>/` 工作项：先写计划，再记录实际实现、踩坑、验证、遗留和步骤时间线。当天建 `00-当日索引.txt`，跨天未完滚动到待办池。
+- 写工作日志任何时间戳前必须运行 `date '+%Y-%m-%d %H:%M'` 取真实北京时间；不要估算，也不要写未来时间。
+- 多 agent 并行时代码改动按上文 Worktree 租约制执行；工作日志始终写 `$REPO/.local/processing/...`，项目文档中的 worktree 路径不写个人绝对路径。
+- 用户偏好彻底调研和多 agent 深挖，不以省 token 为优先。调研/审计/计划/过程笔记放 gitignored `.local/`，不要随手进 `docs/` 或提交。
+- 仓库整洁优先：不要留下宿主缓存、临时目录、个人化路径、开发阶段痕迹、陈旧设计草案或研究笔记。公开前去个人化，必要时清理历史中的敏感 diff。
+- 目录与配置治理：顶层目录遵守本文件「目录布局」；配置单一来源，依赖只在 `pyproject.toml`；本地专用放 `.local/`，可分享部署配方放 `deploy/`。
+
+### 项目知识与运维坑
+- 后端 uptest 镜像已拆成多 target 镜像。构建本地 uptest 一律用 `scripts/build-uptest.sh`，不要裸跑 `docker build`；后端共享 `shared/`，后端提交按 scheduler / api / worker 三件套全建全滚。
+- CI 测试已按普通/worker 拆分，测试唯一入口仍是 `scripts/test.sh`。测 CI 墙钟不要 rerun 同一个 commit；修复用新 commit 触发。
+- 命名卷 `flori-data:/data` 会 shadow 镜像内烤入的 `/data/*`。默认配置、prompts、fallback 资源优先放 `/app` 或代码内回退，不要只依赖镜像里的 `/data`。
+- 边缘前端以 ghcr + Watchtower 为真源；不要再用 SSH 手动直传前端绕过。前端回退类问题优先检查 index/cache、运行容器镜像 digest、Watchtower 日志和 ghcr tag。
+- ECS Caddy + 反向 SSH 隧道新增路由时，必须同时考虑边缘 Caddy、NAS 后端、tunnel 容器和端口占用。API 容器重启后通常要按正确顺序重启对应 tunnel，避免旧反向端口僵尸连接。
+- Flori MCP server 的方向是把知识库作为 MCP 提供给 agent，工具围绕搜索、读取、概念图谱、问答等能力扩展。传输、契约和安全边界要与 `docs/03-contracts.md` / MCP 路由保持同步。
+- `flori.wiki` HTTPS 证书来自 DNS-01 续期流程；未备案杭州 ECS 存在 SNI 阻断现实。证书/续期脚本、Caddy 和 tunnel 改动前先查 `.local/acme/` 与部署文件。
+- 已上线的“工厂非仓库”能力包括概念图谱、跨源综合问答、概念雷达/周报。相关后端端点、MCP 工具和前端视图要保持一致；图谱深链初开要注意容器尺寸和 canvas 0x0 问题。
+- 前端视觉验收用 Dockerized Playwright MCP：`$PLAYWRIGHT_MCP_WRAPPER` 运行官方 `mcr.microsoft.com/playwright/mcp`，`--network host`，挂当前项目到 `/workspace`，输出到 `$FLORI_WORKING_DIR/tmp/playwright-mcp`。常规 UI 验证至少覆盖 3 个 CSS viewport：4K 显示器 `3840x2160`、14 寸 MacBook `1512x982`、iPhone 16 Pro Max `440x956`。
+- NAS 部署/重跑：`api`、`scheduler` 是长驻进程，代码改动需重启；步骤子进程通常自动重载。强制重跑某步要理解 `.done` 与 input hash，必要时删对应 done marker 或走专门 rerun API。
+- 下载网络路由使用 worker 自动探测的 `net-cn` / `net-global` 区域 tag。旧 `net-proxy` / `net-direct` / `bili` 路由 tag 已废弃；URL 分类在 scheduler enqueue 时决定，代理是 worker 本地问题。
+- 并发槽模型是 holder SET，不是裸计数器：`pool:{pool}:holders` / `res:{resource}:holders`，`used = SCARD`，holder 是 `exec_id`。释放用 `SREM`，幂等；查槽不要再看旧 `:count`。
+- pre-commit 密钥扫描钩子可能有已知误报，但真实 PAT、AI key、真实主机 IP、NAS 私有路径、MinIO 真密钥不能 `--no-verify` 放过。合并前源分支要自查，因为 merge/ff 不触发 pre-commit。
+- worker 重注册报 503 `registration disabled` 通常是 Redis `runner:registration_token` 过期或丢失；从本地 `.local/docker-compose.uptest.yml` 的 worker registration token 重写 Redis 后重启 worker。
+- worker 能力由 `--pools` 集合表达，`--type` / `WORKER_POOLS` 已删除。强机需要多能力就显式 `--pools gpu cpu` 等；前端接入新 worker 的命令也必须生成 `--pools`。
+
+### 凭证与本机 secret
+- MCP 凭证已迁到 `~/.bashrc`：`CONTEXT7_API_KEY` 和 `GITHUB_COPILOT_MCP_TOKEN`。`~/.codex/config.toml` 只引用环境变量；真实值不要进仓库。
+- Playwright MCP 无 secret，使用本机 Docker wrapper `$PLAYWRIGHT_MCP_WRAPPER`。
+- Claude worker 认证现在按 worker 独立 home 管理：`$FLORI_WORKER_HOME_ROOT/<name>/` 内含 `.claude/` 凭证副本。临时用某个 worker home 跑批任务前，先 `FORCE=1 scripts/seed-worker-home.sh <name>` 重 seed，并立即跑完，避免 OAuth refresh 轮换导致闲置副本失效。
+- B 站字幕下载依赖 `/data/cookies/bilibili.txt`。该文件过期会导致匿名下载、无字幕、降清晰度。刷新时从应用凭证库读取有效 `bili_cookies`，写 Netscape cookie 文件并 `chmod 600`；不要把 cookie 原文写进日志或文档。
+- worker registration token 属本地运行 secret：来源在 `.local/docker-compose.uptest.yml`，运行态在 Redis `runner:registration_token`。只记录位置和恢复流程，不记录值。
+- 访问线上/边缘的 basic auth、MinIO、隧道、部署密钥等都只放 `.local/`、`.env`、NAS 数据目录或部署机 secret；本文件只记录位置和流程。

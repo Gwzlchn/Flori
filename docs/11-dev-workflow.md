@@ -118,14 +118,29 @@ services:
 ```
 main
   │
-  ├── m1/infra        会话 A: 调度器+Worker
-  ├── m1/api          会话 B: API 服务
-  ├── m1/frontend     会话 C: 前端
-  │
-  └── merge → main    联调通过后合并
+  ├── $FLORI_WORKING_DIR/wt/<slug-a>   会话 A
+  ├── $FLORI_WORKING_DIR/wt/<slug-b>   会话 B
+  └── fast-forward / merge → main      联调通过后合入并回收
 ```
 
-每个会话在自己的分支工作，联调通过后 merge 到 main。
+并行会话或主工作树有未提交改动时,每个会话必须在租约制 worktree 中工作。`$FLORI_WORKING_DIR` 是仓库外工作区,本机真实路径只放 `.local/` 或 shell 环境,不要写入 git 文档。
+
+创建 worktree 前先登记到本次工作项:分支、worktree path、base commit、用途、创建时间、预计回收条件。推荐目录:
+
+```
+$FLORI_WORKING_DIR/
+├── tmp/            临时产物和 scratch
+└── wt/<slug>/      活跃 worktree
+```
+
+合入 `main` 后立即回收:
+
+```bash
+git worktree remove "$FLORI_WORKING_DIR/wt/<slug>"
+git branch -d <branch>
+```
+
+本任务创建的远程分支已合入后同步删除;`badges`、`mutation-data` 等自动数据分支例外。若 worktree 因未合入、脏 diff、用户要求保留或阻塞项不能清理,必须在最终回复说明原因,并写入 `.local/processing/待办池.txt`。
 
 ### 提交规范
 
@@ -154,7 +169,10 @@ docs: 补充扩展指南;0.7.2
 1. 写代码
 2. 跑测试（scripts/test.sh -m <模块>，全量回归交 CI）
 3. git commit
-4. 更新 ROADMAP.md（标记完成）
+4. 合入 main 并按需推送
+5. 删除已合入 worktree 和本地分支
+6. 更新 ROADMAP.md（标记完成）
+7. 最终回复前复查 git worktree list --porcelain、git branch --merged main、git status --short --branch
 ```
 
 ## 7. 扩展指南
