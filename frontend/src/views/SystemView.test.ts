@@ -222,7 +222,9 @@ describe('SystemView', () => {
     expect(t).toContain('flori-worker:latest')   // 接入命令默认镜像 = flori-worker
     expect(t).toContain('GATEWAY_URL')
     expect(t).toContain('WORKER_TOKEN_FILE')
-    const mintBtn = w.findAll('button').find(b => b.text().includes('生成临时接入 token'))
+    expect(t).toContain('选择能力')
+    expect(t).toContain('复制部署文件')
+    const mintBtn = w.findAll('button').find(b => b.text().includes('生成 token'))
     await mintBtn!.trigger('click')
     await flushPromises()
     expect(store.mintToken).toHaveBeenCalled()
@@ -341,7 +343,7 @@ describe('SystemView', () => {
     expect(t).not.toContain('BILI_' + 'SE' + 'SS' + 'DATA')  // io 凭证走中心分发,不进 worker env。
     expect(t).toContain('HF_ENDPOINT')              // cpu/gpu → whisper HF 国内镜像
     expect(w.find('pre').text()).not.toContain('GATEWAY_TLS_INSECURE') // 命令默认严格校验(页面提示文案除外)
-    expect(t).toContain('持久状态目录内的 .claude') // ai(默认 claude-sub)→ 使用 worker 独立 HOME
+    expect(t).toContain('使用持久状态目录内的 .claude') // ai(默认 claude-sub)→ 使用 worker 独立 HOME
     expect(w.find('pre').text()).not.toContain('${HOME}/.claude')
   })
 })
