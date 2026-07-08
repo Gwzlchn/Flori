@@ -1,43 +1,67 @@
-# Flori ECS 远程 worker:纯算力节点,经反向隧道连 NAS 的 redis/minio。
-# 状态写 Redis(api 合并显示);产物走 MinIO;本地 /data 仅临时 sqlite + 镜像内置 prompts/configs。
-# network_mode host:为了访问隧道暴露在 ECS 回环的 127.0.0.1:6379/9000。
+# Flori 远程 worker:只走 Gateway 出站 HTTPS,不暴露 Redis/MinIO 隧道。
+#
+# 首次接入:
+#   1. 在 /system 生成 flw- 接入 token;
+#   2. 复制到 WORKER_REGISTRATION_TOKEN;
+#   3. 运行 docker compose -f worker.yml up -d worker-cpu。
+#
+# 注册成功后 worker.id 与 worker.token 写入 /home/worker。后续重启、Watchtower recreate
+# 都用 worker.token resume,不再依赖 flw- token。
+
+x-worker-env: &worker-env
+  HOME: /home/worker
+  CONFIG_DIR: /app/configs
+  WORK_DIR: /tmp/flori-work
+  GATEWAY_URL: ${GATEWAY_URL:?GATEWAY_URL is required}
+  WORKER_REGISTRATION_TOKEN: ${WORKER_REGISTRATION_TOKEN:?WORKER_REGISTRATION_TOKEN is required}
+  WORKER_ID_FILE: /home/worker/worker.id
+  WORKER_TOKEN_FILE: /home/worker/worker.token
+
 services:
   worker-cpu:
-    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker:latest
+    image: ghcr.io/${IMAGE_OWNER:?IMAGE_OWNER is required}/flori-worker:${IMAGE_TAG:-latest}
     container_name: flori-worker-cpu
-    network_mode: host
     restart: unless-stopped
-    command: sh -c "mkdir -p /data/db && python -m worker.main --pools cpu"
+    command: python -m worker.main --pools cpu
     environment:
-      - REDIS_URL=redis://127.0.0.1:6379/0
-      - DATA_DIR=/data
-      - CONFIG_DIR=/app/configs
-      - MINIO_URL=127.0.0.1:9000
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-flori}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:?set in .env}
-      - MINIO_BUCKET=flori
-      - WORK_DIR=/tmp/flori-work
-      - DRY_RUN=1
+      <<: *worker-env
+      WORKER_NAME: ${WORKER_NAME_CPU:-edge-cpu}
+      MODEL_CACHE_DIR: /cache
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+      HF_HUB_DISABLE_XET: "1"
+    volumes:
+      - worker-cpu-state:/home/worker
+      - worker-cache:/cache
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
 
   worker-ai:
-    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker:latest
+    image: ghcr.io/${IMAGE_OWNER:?IMAGE_OWNER is required}/flori-worker:${IMAGE_TAG:-latest}
     container_name: flori-worker-ai
-    network_mode: host
     restart: unless-stopped
-    command: sh -c "mkdir -p /data/db && python -m worker.main --pools ai --tags vision text-only"
+    command: python -m worker.main --pools ai
     environment:
-      - REDIS_URL=redis://127.0.0.1:6379/0
-      - DATA_DIR=/data
-      - CONFIG_DIR=/app/configs
-      - MINIO_URL=127.0.0.1:9000
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-flori}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:?set in .env}
-      - MINIO_BUCKET=flori
-      - WORK_DIR=/tmp/flori-work
-      - DRY_RUN=1
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
-      - KIMI_API_KEY=${KIMI_API_KEY:-}
+      <<: *worker-env
+      WORKER_NAME: ${WORKER_NAME_AI:-edge-ai}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      KIMI_API_KEY: ${KIMI_API_KEY:-}
+    volumes:
+      - worker-ai-state:/home/worker
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
+
+  watchtower:
+    image: ghcr.io/containrrr/watchtower:latest
+    container_name: flori-worker-watchtower
+    restart: unless-stopped
+    profiles:
+      - watchtower
+    command: --label-enable --cleanup --interval ${WATCHTOWER_INTERVAL_SEC:-240}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  worker-cpu-state:
+  worker-ai-state:
+  worker-cache:
