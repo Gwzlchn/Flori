@@ -347,7 +347,12 @@ function onEnrollToggle(e: Event) {
 const selectedPools = ref<string[]>(['cpu'])
 // WORKER_NAME 基名:多池排序 join('-')(如 cpu-gpu),仅命名/展示用;排序=命令稳定不随勾选顺序抖。
 const nameBase = computed(() => [...selectedPools.value].sort().join('-') || 'worker')
-const workerName = computed(() => `${nameBase.value}-1`)
+const nameTouched = ref(false)
+const workerNameDraft = ref(`${nameBase.value}-1`)
+watch(nameBase, (base) => {
+  if (!nameTouched.value) workerNameDraft.value = `${base}-1`
+})
+const workerName = computed(() => workerNameDraft.value.trim() || `${nameBase.value}-1`)
 const newTags = ref('')
 const outputMode = ref<(typeof OUTPUT_MODES)[number]['id']>('compose')
 const token = ref('')
@@ -770,7 +775,12 @@ const usageByProvider = computed(() => {
               <div class="advanced-grid">
                 <div class="field">
                   <label>Worker 名称</label>
-                  <input :value="workerName" class="input" disabled />
+                  <input
+                    v-model="workerNameDraft"
+                    class="input"
+                    :placeholder="`${nameBase}-1`"
+                    @input="nameTouched = true"
+                  />
                 </div>
                 <div class="field">
                   <label>标签</label>
@@ -787,7 +797,7 @@ const usageByProvider = computed(() => {
                 </div>
                 <div class="field">
                   <label>部署形式</label>
-                  <div class="seg">
+                  <div class="seg advanced-seg">
                     <button
                       v-for="m in OUTPUT_MODES"
                       :key="m.id"
@@ -800,12 +810,11 @@ const usageByProvider = computed(() => {
                 </div>
                 <div class="field">
                   <label>自动更新</label>
-                  <label class="switchline">
+                  <div class="seg advanced-seg watchtower-mode">
                     <input data-testid="watchtower-enabled" type="checkbox" v-model="watchtowerEnabled" />
-                    <span class="switch" :class="{ on: watchtowerEnabled }"></span>
-                    <span>Watchtower</span>
-                    <span class="dim">{{ watchtowerEnabled ? '自动拉取镜像' : '手动更新' }}</span>
-                  </label>
+                    <button :class="{ on: watchtowerEnabled }" @click="watchtowerEnabled = true">开 Watchtower</button>
+                    <button :class="{ on: !watchtowerEnabled }" @click="watchtowerEnabled = false">关 Watchtower</button>
+                  </div>
                 </div>
                 <div class="field">
                   <label>更新间隔</label>
@@ -985,15 +994,16 @@ summary::-webkit-details-marker { display: none; }
 .advanced-toggle { display: inline-flex; align-items: center; gap: 5px; flex: none; padding: 5px 8px; border: 1px solid var(--line-soft); border-radius: var(--r-sm); color: var(--ink-600); font-size: 12px; font-weight: 700; }
 .summary-chevron { flex: none; transition: transform .16s ease; }
 details[open] > summary .summary-chevron { transform: rotate(90deg); }
-.advanced-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 2px 0 12px; }
-.advanced-grid .field { margin: 0; }
-.advanced-grid .input { padding: 7px 9px; font-size: 12px; }
-.switchline { display: flex !important; align-items: center; gap: 8px; margin: 0 !important; font-size: 12px; font-weight: 600 !important; color: var(--ink-700); cursor: pointer; }
-.switchline input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-.switchline .switch { transform: scale(.88); transform-origin: left center; }
-.advanced-grid .input:disabled { background: var(--line-soft); color: var(--ink-400); cursor: not-allowed; }
+.advanced-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 2px 0 12px; align-items: end; }
+.advanced-grid .field { display: flex; flex-direction: column; justify-content: flex-end; gap: 6px; margin: 0; }
+.advanced-grid .field > label { margin: 0 !important; min-height: 16px; }
+.advanced-grid .input { min-height: 34px; padding: 7px 9px; font-size: 12px; }
+.advanced-grid .advanced-seg { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); width: 100%; min-height: 34px; }
+.advanced-grid .advanced-seg button { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; padding: 5px 10px; white-space: nowrap; }
+.watchtower-mode { position: relative; }
+.watchtower-mode input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .inline-number { display: flex; align-items: center; gap: 8px; }
-.inline-number .input { width: 92px; }
+.inline-number .input { flex: 1; min-width: 0; width: auto; }
 .inline-number span { font-size: 12px; color: var(--ink-500); }
 .step-advanced .note-tip { margin: -2px 0 12px; line-height: 1.6; }
 .deploy-box { min-width: 0; overflow: visible; }
@@ -1050,7 +1060,5 @@ details[open] > summary .summary-chevron { transform: rotate(90deg); }
 .st-cell { min-width: 0; }
 .st-lbl { display: flex; align-items: center; gap: 4px; font-size: 10.5px; color: var(--ink-400); letter-spacing: .03em; margin-bottom: 3px; }
 .st-val { font-size: 13px; color: var(--ink-800); font-variant-numeric: tabular-nums; line-height: 1.35; word-break: break-word; }
-.st-cell-version { grid-column: span 2; }
 .st-subline { margin-top: 2px; font-size: 12px; color: var(--ink-400); font-variant-numeric: tabular-nums; }
-@media (max-width: 560px) { .st-cell-version { grid-column: span 1; } }
 </style>

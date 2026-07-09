@@ -54,10 +54,10 @@ i[data-lucide]{width:16px;height:16px;stroke-width:1.75;flex:none}
   flex-direction:column;padding:16px 12px;position:sticky;top:0;height:100vh;overflow:hidden}
 /* 长侧栏:头部/投递行/底部工具固定,只有知识库树(.nav)内部滚动 → 设置图标永不被顶出屏外 */
 .side > .brand, .side > .top-row, .side-tools{flex:none}
-.brand{display:flex;align-items:center;gap:9px;padding:6px 8px 14px}
-.brand .logo{width:28px;height:28px;border-radius:7px;
-  background:#37352f;
-  display:grid;place-items:center;color:#fff}
+.brand{display:flex;align-items:center;gap:10px;padding:6px 8px 14px}
+.brand .logo{width:54px;height:54px;border-radius:var(--r-sm);display:grid;place-items:center;transition:.12s}
+.brand .logo:hover{background:var(--line-soft)}
+.brand .logo img{width:50px;height:50px;object-fit:contain;display:block}
 .brand b{font-size:16px;color:var(--ink-900);font-weight:700;letter-spacing:-.01em}
 .btn-submit{display:flex;align-items:center;justify-content:center;gap:7px;width:100%;padding:10px;
   border-radius:var(--r-sm);font-weight:600;font-size:13.5px;background:var(--brand-600);color:#fff;
@@ -386,9 +386,15 @@ textarea.input{resize:vertical;min-height:64px;line-height:1.5}
 .app.rail{grid-template-columns:64px 1fr}
 .app.rail .side{padding:16px 8px;align-items:center}
 .app.rail .brand{justify-content:center;padding:6px 0 14px}
+.app.rail .brand .logo{width:48px;height:48px}
+.app.rail .brand .logo img{width:44px;height:44px}
 .app.rail .brand b,.app.rail .btn-submit span,.app.rail .nav a span{display:none}
-.app.rail .btn-submit{padding:10px 0}
-.app.rail .nav a{justify-content:center;padding:10px 0}
+.app.rail .btn-submit{width:40px;height:40px;padding:0;flex:none;justify-content:center}
+.app.rail .top-row{align-items:center}
+.app.rail .top-tool{width:40px;height:40px}
+.app.rail .nav a{width:40px;height:40px;justify-content:center;padding:0}
+.app.rail .btn-submit svg,.app.rail .top-tool svg{width:20px;height:20px}
+.app.rail .nav > a svg,.app.rail .side-tools .tool svg{width:18px;height:18px}
 .app.rail [data-tip]{position:relative}
 .app.rail [data-tip]:hover::after{content:attr(data-tip);position:absolute;left:calc(100% + 12px);top:50%;transform:translateY(-50%);
   background:var(--ink-900);color:#fff;font-size:12px;font-weight:500;padding:4px 9px;border-radius:6px;white-space:nowrap;z-index:60;box-shadow:var(--sh-md)}
@@ -424,6 +430,7 @@ textarea.input{resize:vertical;min-height:64px;line-height:1.5}
 .side-tools .tool .dot{position:absolute;top:6px;right:6px;box-shadow:0 0 0 2px var(--surface)}
 .side-tools .tool.rail-toggle{margin-left:auto}
 .app.rail .side-tools{flex-direction:column;gap:6px}
+.app.rail .side-tools .tool{width:40px;height:40px}
 .app.rail .side-tools .tool.rail-toggle{margin-left:0}
 
 /* 面包屑可点(回上层) */
@@ -590,7 +597,7 @@ mark{background:var(--brand-100);color:var(--brand-700);padding:0 2px;border-rad
 .top-tool:hover{background:var(--line-soft);color:var(--ink-900)}
 .top-tool.on{background:var(--brand-50);color:var(--brand-700);border-color:var(--brand-200)}
 .app.rail .top-row{flex-direction:column;gap:6px}
-.app.rail .top-tool{width:100%;height:36px}
+.app.rail .top-tool{width:40px;height:40px}
 
 /* 顶栏返回箭头(用面包屑父级) */
 .crumb-back{display:grid;place-items:center;width:28px;height:28px;border-radius:var(--r-sm);color:var(--ink-500);flex:none;transition:.12s;margin-right:-4px}
@@ -599,7 +606,7 @@ mark{background:var(--brand-100);color:var(--brand-700);padding:0 2px;border-rad
 /* rail 折叠补充:图标居中 + tooltip 不被裁切 + 4 级树隐藏 */
 .app.rail .side{overflow:visible}                 /* 让 [data-tip] 悬浮提示溢出可见 */
 .app.rail .nav{align-items:stretch}
-.app.rail .side-tools .tool{width:36px}
+.app.rail .side-tools .tool{width:40px;height:40px}
 .app.rail .nav .nb-group,.app.rail .nav .sub-item.new{display:none}  /* 折叠时整棵知识库子树只留顶层「知识库」图标 */
 
 /* 顶栏汉堡(仅移动端显示) */
@@ -619,8 +626,8 @@ mark{background:var(--brand-100);color:var(--brand-700);padding:0 2px;border-rad
   .app.rail .side{width:264px;padding:16px 12px;align-items:stretch;overflow:auto}
   .app.rail .brand{justify-content:flex-start;padding:6px 8px 14px}
   .app.rail .brand b,.app.rail .btn-submit span,.app.rail .nav a span{display:inline}
-  .app.rail .btn-submit{padding:10px}
-  .app.rail .nav a{justify-content:flex-start;padding:8px 10px}
+  .app.rail .btn-submit{width:auto;height:auto;padding:10px;flex:1;justify-content:center}
+  .app.rail .nav a{width:auto;height:auto;justify-content:flex-start;padding:8px 10px}
   .app.rail .top-row{flex-direction:row}
   .app.rail .top-tool{width:40px}
   .app.rail .side-tools{flex-direction:row}

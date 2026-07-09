@@ -6,12 +6,13 @@ import { useGlobalStore } from '../../stores/global'
 import { useApi } from '../../composables/useApi'
 import {
   Send, Inbox, BookMarked, Lightbulb, ChevronRight, ChevronUp, ChevronDown,
-  Folder, Server, Settings, PanelLeftClose, PanelLeftOpen, Plus, MoreHorizontal, MessageCircleQuestion,
+  Folder, Server, Settings, ChevronsLeft, ChevronsRight, Plus, MoreHorizontal, MessageCircleQuestion,
 } from 'lucide-vue-next'
 import { resolveIcon } from '../../utils/kbIcons'
 import { sourceBadge, sourceLabelOf, subState, subTip } from '../../constants/sources'
 import AddSubscriptionDialog from '../collection/AddSubscriptionDialog.vue'
 import KbSettingsDialog from './KbSettingsDialog.vue'
+import floriLogo from '../../assets/flori-logo.png'
 
 const props = defineProps<{ mobileOpen?: boolean; rail?: boolean }>()
 const emit = defineEmits<{ (e: 'toggle-rail'): void; (e: 'nav'): void }>()
@@ -22,7 +23,7 @@ const domainStore = useDomainStore()
 const global = useGlobalStore()
 const api = useApi()
 const railTip = computed(() => props.rail ? '展开侧栏' : '收起侧栏')
-const railIcon = computed(() => props.rail ? PanelLeftOpen : PanelLeftClose)
+const railIcon = computed(() => props.rail ? ChevronsRight : ChevronsLeft)
 
 // 导航后通知外壳关闭移动端抽屉。桌面端 AppShell 忽略此事件。
 function nav(to: string) {
@@ -199,7 +200,9 @@ async function onCreateCollection(payload: any) {
 <template>
   <aside class="side" :class="{ open: props.mobileOpen }">
     <div class="brand">
-      <div class="logo" title="Flori" @click="nav('/')">F</div>
+      <div class="logo" title="Flori" @click="nav('/')">
+        <img :src="floriLogo" alt="" />
+      </div>
       <b>Flori</b>
     </div>
 
