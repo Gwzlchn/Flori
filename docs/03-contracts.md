@@ -1445,7 +1445,106 @@ Response `202`（`sources` 提交时已算好；`answer_markdown` 经 `GET /api/
 
 > `record.transcript`(agentic 全轨迹白盒):AI task 不挂 job、无 storage 产物区,CLI 会话 transcript **全文内嵌** `record_json`(`{"jsonl": 全文, "turns", "truncated", "path"}`;>5MB 截断并 `truncated:true`;不可得为 `{"jsonl": null, "reason": …}`)。
 
-### 1.12 Profile 管理（`/api/profiles/*`）
+### 1.12 学习闭环 / Flashcards / SRS（`/api/study/*`）
+
+学习卡片是个人知识库的复习层。第一版支持手动创建卡片、到期队列、四档评分和简化 SM-2 调度；AI 自动生成卡片后续接入同一表与接口。所有端点走 Basic/Token 鉴权。
+
+**StudyCard 字段**：
+
+```json
+{
+  "card_id": "sc_...",
+  "domain": "deep-learning",
+  "job_id": "j_20260709_abc123",
+  "concept_term": "反向传播",
+  "card_type": "basic",
+  "front": "反向传播解决什么问题?",
+  "back": "高效计算梯度。",
+  "explanation": "链式法则让多层网络可训练。",
+  "evidence": [{"chunk_id": "j:smart:0", "snippet": "…"}],
+  "status": "active",
+  "source": "manual",
+  "created_at": "2026-07-09T00:00:00+00:00",
+  "updated_at": "2026-07-09T00:00:00+00:00",
+  "review": {
+    "due_at": "2026-07-09T00:00:00+00:00",
+    "interval_days": 0,
+    "ease": 2.5,
+    "repetitions": 0,
+    "lapses": 0,
+    "last_grade": null,
+    "last_reviewed_at": null,
+    "updated_at": "2026-07-09T00:00:00+00:00"
+  }
+}
+```
+
+- `card_type` ∈ `basic` / `cloze` / `qa` / `quiz_single` / `quiz_multi`。
+- `status` ∈ `suggested` / `active` / `suspended` / `rejected`。`active` 卡片参与复习队列。
+- `evidence` 为 JSON,可存 RAG chunk evidence 或手动来源片段。第一版不强制 schema。
+- `review` 为空表示未排入复习队列；`active` 新卡默认立即 due。
+- 评分 `grade` ∈ `again` / `hard` / `good` / `easy`。简化 SM-2:again 10 分钟后重来并增加 lapses;good 首次 1 天后复习;easy 首次 3 天后复习;ease 限制在 1.3–3.0。
+
+#### POST /api/study/cards — 创建卡片
+
+请求体：
+
+```json
+{
+  "domain": "deep-learning",
+  "job_id": "j_...",
+  "concept_term": "反向传播",
+  "card_type": "basic",
+  "front": "问题",
+  "back": "答案",
+  "explanation": "可省略",
+  "evidence": [{"chunk_id": "j:smart:0"}],
+  "status": "active",
+  "source": "manual"
+}
+```
+
+Response `201`: `StudyCard`。`front` / `back` 不能为空。
+
+#### GET /api/study/cards — 卡片库
+
+查询参数:
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `domain` | — | 限定知识库 |
+| `status` | — | 限定状态 |
+| `q` | — | 在 front/back/explanation/concept_term 中做 LIKE 检索 |
+| `limit` | 100 | 1–200 |
+| `offset` | 0 | 0–2147483647 |
+
+Response `200`: `{"total": n, "items": [StudyCard...]}`。
+
+#### GET /api/study/due — 到期复习队列
+
+查询参数: `domain` 可选,`limit` 默认 50、范围 1–200。仅返回 `status=active` 且 `review.due_at <= now` 的卡片,按 `due_at` 升序。
+
+Response `200`: `{"total": n, "items": [StudyCard...]}`。
+
+#### POST /api/study/reviews — 提交复习评分
+
+请求体:
+
+```json
+{"card_id": "sc_...", "grade": "good", "response_ms": 1200}
+```
+
+Response `200`: 更新后的 `StudyCard`。不存在返回 `404`。每次评分会写 `study_review_logs`,并更新 `study_reviews.due_at`、`interval_days`、`ease`、`repetitions`、`lapses`。
+
+#### POST /api/study/cards/{card_id}/status — 改卡片状态
+
+请求体: `{"status": "suspended"}`。Response `200`: 更新后的 `StudyCard`。恢复为 `active` 时若缺复习状态,立即排入 due 队列。
+
+#### DELETE /api/study/cards/{card_id} — 删除卡片
+
+删除卡片及其复习状态/日志。Response `204`;不存在 `404`。
+
+### 1.13 Profile 管理（`/api/profiles/*`）
 
 每个 domain 一个 `prompts/profiles/{domain}.yaml`，承载该领域的角色设定/输出风格/术语表（`terminology`），供生成笔记时注入 prompt。术语库采纳一条术语时会同步写入对应 Profile 的 `terminology`。
 
@@ -1514,7 +1613,7 @@ Response `200`（数组）：
 
 `domain` / `term` 含 `..` `/` `\x00` 返回 `400 invalid domain name`。
 
-### 1.13 AI Provider 列表
+### 1.14 AI Provider 列表
 
 #### GET /api/providers — 列 AI provider 及可用性
 
@@ -1541,7 +1640,7 @@ Response `200`（数组）：
 
 `POST /api/jobs/{id}/rerun-smart` 的 `provider` 必须是本端点列出且 `available=true` 的 provider。
 
-### 1.14 Prompt 白盒（`/api/prompts/*`，Phase 2：网页编辑每步 prompt 覆盖）
+### 1.15 Prompt 白盒（`/api/prompts/*`，Phase 2：网页编辑每步 prompt 覆盖）
 
 让每个 AI 步的默认 prompt **可见、可改**（白盒）。覆盖存 DB 表 `prompt_overrides`，主键 `(scope, domain, pipeline, step)`，列 `content`/`version`/`updated_at`；`scope='global'`（`domain=''`）或 `'domain'`（`domain=域名`）。**注入机制**（同 §1.1 `ai_overrides` 走 job.json 的范式）：job 创建时由 api（有 DB）调 `resolve_prompt_overrides(pipeline, domain)`（domain 覆盖优先于 global）解析出 `{step: {content, version}}`，写进 `job.json.prompt_overrides` 随 job 下发；worker（pure，无 DB）据此应用（兼容旧 job.json 的纯字符串形态，见 §1.1 `job.json`）。
 

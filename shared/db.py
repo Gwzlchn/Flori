@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import threading
+import uuid
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -292,6 +293,53 @@ CREATE VIRTUAL TABLE IF NOT EXISTS note_chunks_fts5 USING fts5(
     evidence_json UNINDEXED,
     tokenize='trigram'
 );
+
+CREATE TABLE IF NOT EXISTS study_cards (
+    card_id TEXT PRIMARY KEY,
+    domain TEXT NOT NULL DEFAULT 'general',
+    job_id TEXT,
+    concept_term TEXT,
+    card_type TEXT NOT NULL DEFAULT 'basic',
+    front TEXT NOT NULL,
+    back TEXT NOT NULL,
+    explanation TEXT NOT NULL DEFAULT '',
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'active',
+    source TEXT NOT NULL DEFAULT 'manual',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_study_cards_domain ON study_cards(domain);
+CREATE INDEX IF NOT EXISTS idx_study_cards_status ON study_cards(status);
+CREATE INDEX IF NOT EXISTS idx_study_cards_job ON study_cards(job_id);
+
+CREATE TABLE IF NOT EXISTS study_reviews (
+    card_id TEXT PRIMARY KEY REFERENCES study_cards(card_id) ON DELETE CASCADE,
+    due_at TEXT NOT NULL,
+    interval_days REAL NOT NULL DEFAULT 0,
+    ease REAL NOT NULL DEFAULT 2.5,
+    repetitions INTEGER NOT NULL DEFAULT 0,
+    lapses INTEGER NOT NULL DEFAULT 0,
+    last_grade TEXT,
+    last_reviewed_at TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_study_reviews_due ON study_reviews(due_at);
+
+CREATE TABLE IF NOT EXISTS study_review_logs (
+    id TEXT PRIMARY KEY,
+    card_id TEXT NOT NULL REFERENCES study_cards(card_id) ON DELETE CASCADE,
+    grade TEXT NOT NULL,
+    reviewed_at TEXT NOT NULL,
+    response_ms INTEGER,
+    scheduled_due_at TEXT,
+    next_due_at TEXT NOT NULL,
+    interval_days REAL NOT NULL,
+    ease REAL NOT NULL,
+    repetitions INTEGER NOT NULL,
+    lapses INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_study_review_logs_card ON study_review_logs(card_id);
 """
 
 
@@ -2780,7 +2828,271 @@ class Database:
             })
         return total, items
 
+    # Study cards / SRS
+
+    def create_study_card(
+        self,
+        *,
+        card_id: str,
+        domain: str,
+        front: str,
+        back: str,
+        explanation: str = "",
+        card_type: str = "basic",
+        job_id: str | None = None,
+        concept_term: str | None = None,
+        evidence: object | None = None,
+        status: str = "active",
+        source: str = "manual",
+        due_at: str | None = None,
+    ) -> dict:
+        """创建学习卡片。active 卡片同步初始化复习状态,使新卡立即进入 due 队列。"""
+        now = _now_iso()
+        evidence_json = json.dumps(evidence if evidence is not None else [], ensure_ascii=False)
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO study_cards
+                   (card_id, domain, job_id, concept_term, card_type, front, back,
+                    explanation, evidence_json, status, source, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    card_id, domain or "general", job_id or None, concept_term or None,
+                    card_type, front, back, explanation or "", evidence_json,
+                    status, source, now, now,
+                ),
+            )
+            if status == "active":
+                self._conn.execute(
+                    """INSERT OR IGNORE INTO study_reviews
+                       (card_id, due_at, interval_days, ease, repetitions, lapses, updated_at)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (card_id, due_at or now, 0, 2.5, 0, 0, now),
+                )
+            self._conn.commit()
+        card = self.get_study_card(card_id)
+        if card is None:
+            raise RuntimeError("study card insert failed")
+        return card
+
+    def get_study_card(self, card_id: str) -> dict | None:
+        row = self._conn.execute(
+            """SELECT c.card_id, c.domain, c.job_id, c.concept_term, c.card_type,
+                      c.front, c.back, c.explanation, c.evidence_json, c.status,
+                      c.source, c.created_at, c.updated_at,
+                      r.due_at AS review_due_at, r.interval_days, r.ease,
+                      r.repetitions, r.lapses, r.last_grade, r.last_reviewed_at,
+                      r.updated_at AS review_updated_at
+               FROM study_cards c
+               LEFT JOIN study_reviews r ON r.card_id = c.card_id
+               WHERE c.card_id=?""",
+            (card_id,),
+        ).fetchone()
+        return self._row_to_study_card(row) if row else None
+
+    def list_study_cards(
+        self,
+        *,
+        domain: str | None = None,
+        status: str | None = None,
+        q: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[int, list[dict]]:
+        where_parts = ["1=1"]
+        params: list = []
+        if domain:
+            where_parts.append("c.domain=?")
+            params.append(domain)
+        if status:
+            where_parts.append("c.status=?")
+            params.append(status)
+        if q:
+            like = f"%{q}%"
+            where_parts.append(
+                "(c.front LIKE ? OR c.back LIKE ? OR c.explanation LIKE ? OR c.concept_term LIKE ?)"
+            )
+            params.extend([like, like, like, like])
+        where = " AND ".join(where_parts)
+        total = self._conn.execute(
+            f"SELECT COUNT(*) FROM study_cards c WHERE {where}", params,
+        ).fetchone()[0]
+        rows = self._conn.execute(
+            f"""SELECT c.card_id, c.domain, c.job_id, c.concept_term, c.card_type,
+                       c.front, c.back, c.explanation, c.evidence_json, c.status,
+                       c.source, c.created_at, c.updated_at,
+                       r.due_at AS review_due_at, r.interval_days, r.ease,
+                       r.repetitions, r.lapses, r.last_grade, r.last_reviewed_at,
+                       r.updated_at AS review_updated_at
+                FROM study_cards c
+                LEFT JOIN study_reviews r ON r.card_id = c.card_id
+                WHERE {where}
+                ORDER BY c.updated_at DESC
+                LIMIT ? OFFSET ?""",
+            params + [limit, offset],
+        ).fetchall()
+        return total, [self._row_to_study_card(r) for r in rows]
+
+    def list_due_study_cards(
+        self,
+        *,
+        domain: str | None = None,
+        now_iso: str | None = None,
+        limit: int = 50,
+    ) -> tuple[int, list[dict]]:
+        now = now_iso or _now_iso()
+        where_parts = ["c.status='active'", "r.due_at<=?"]
+        params: list = [now]
+        if domain:
+            where_parts.append("c.domain=?")
+            params.append(domain)
+        where = " AND ".join(where_parts)
+        total = self._conn.execute(
+            f"""SELECT COUNT(*) FROM study_cards c
+                JOIN study_reviews r ON r.card_id = c.card_id
+                WHERE {where}""",
+            params,
+        ).fetchone()[0]
+        rows = self._conn.execute(
+            f"""SELECT c.card_id, c.domain, c.job_id, c.concept_term, c.card_type,
+                       c.front, c.back, c.explanation, c.evidence_json, c.status,
+                       c.source, c.created_at, c.updated_at,
+                       r.due_at AS review_due_at, r.interval_days, r.ease,
+                       r.repetitions, r.lapses, r.last_grade, r.last_reviewed_at,
+                       r.updated_at AS review_updated_at
+                FROM study_cards c
+                JOIN study_reviews r ON r.card_id = c.card_id
+                WHERE {where}
+                ORDER BY r.due_at ASC, c.created_at ASC
+                LIMIT ?""",
+            params + [limit],
+        ).fetchall()
+        return total, [self._row_to_study_card(r) for r in rows]
+
+    def set_study_card_status(self, card_id: str, status: str) -> dict | None:
+        now = _now_iso()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT card_id FROM study_cards WHERE card_id=?", (card_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            self._conn.execute(
+                "UPDATE study_cards SET status=?, updated_at=? WHERE card_id=?",
+                (status, now, card_id),
+            )
+            if status == "active":
+                self._conn.execute(
+                    """INSERT OR IGNORE INTO study_reviews
+                       (card_id, due_at, interval_days, ease, repetitions, lapses, updated_at)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (card_id, now, 0, 2.5, 0, 0, now),
+                )
+            self._conn.commit()
+        return self.get_study_card(card_id)
+
+    def delete_study_card(self, card_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM study_cards WHERE card_id=?", (card_id,))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def record_study_review(
+        self,
+        *,
+        card_id: str,
+        grade: str,
+        next_due_at: str,
+        interval_days: float,
+        ease: float,
+        repetitions: int,
+        lapses: int,
+        response_ms: int | None = None,
+        reviewed_at: str | None = None,
+    ) -> dict | None:
+        """写一次复习评分并更新 SRS 状态。返回更新后的卡片;卡片不存在返回 None。"""
+        now = reviewed_at or _now_iso()
+        log_id = f"srl_{uuid.uuid4().hex}"
+        with self._lock:
+            current = self._conn.execute(
+                "SELECT due_at FROM study_reviews WHERE card_id=?", (card_id,)
+            ).fetchone()
+            exists = self._conn.execute(
+                "SELECT card_id FROM study_cards WHERE card_id=?", (card_id,)
+            ).fetchone()
+            if exists is None:
+                return None
+            scheduled_due_at = current["due_at"] if current else None
+            self._conn.execute(
+                """INSERT INTO study_reviews
+                   (card_id, due_at, interval_days, ease, repetitions, lapses,
+                    last_grade, last_reviewed_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(card_id) DO UPDATE SET
+                     due_at=excluded.due_at,
+                     interval_days=excluded.interval_days,
+                     ease=excluded.ease,
+                     repetitions=excluded.repetitions,
+                     lapses=excluded.lapses,
+                     last_grade=excluded.last_grade,
+                     last_reviewed_at=excluded.last_reviewed_at,
+                     updated_at=excluded.updated_at""",
+                (
+                    card_id, next_due_at, interval_days, ease, repetitions, lapses,
+                    grade, now, now,
+                ),
+            )
+            self._conn.execute(
+                """INSERT INTO study_review_logs
+                   (id, card_id, grade, reviewed_at, response_ms, scheduled_due_at,
+                    next_due_at, interval_days, ease, repetitions, lapses)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    log_id, card_id, grade, now, response_ms, scheduled_due_at,
+                    next_due_at, interval_days, ease, repetitions, lapses,
+                ),
+            )
+            self._conn.execute(
+                "UPDATE study_cards SET status='active', updated_at=? WHERE card_id=?",
+                (now, card_id),
+            )
+            self._conn.commit()
+        return self.get_study_card(card_id)
+
     # Private
+
+    def _row_to_study_card(self, row: sqlite3.Row) -> dict:
+        try:
+            evidence = json.loads(row["evidence_json"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            evidence = []
+        review = None
+        if row["review_due_at"] is not None:
+            review = {
+                "due_at": row["review_due_at"],
+                "interval_days": row["interval_days"],
+                "ease": row["ease"],
+                "repetitions": row["repetitions"],
+                "lapses": row["lapses"],
+                "last_grade": row["last_grade"],
+                "last_reviewed_at": row["last_reviewed_at"],
+                "updated_at": row["review_updated_at"],
+            }
+        return {
+            "card_id": row["card_id"],
+            "domain": row["domain"],
+            "job_id": row["job_id"],
+            "concept_term": row["concept_term"],
+            "card_type": row["card_type"],
+            "front": row["front"],
+            "back": row["back"],
+            "explanation": row["explanation"],
+            "evidence": evidence,
+            "status": row["status"],
+            "source": row["source"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "review": review,
+        }
 
     def _row_to_glossary(self, row: sqlite3.Row) -> dict:
         return {

@@ -595,6 +595,39 @@ export interface AiTaskLogResponse {
   calls: AiTaskLogCall[]
 }
 
+export interface StudyReviewState {
+  due_at: string
+  interval_days: number
+  ease: number
+  repetitions: number
+  lapses: number
+  last_grade: string | null
+  last_reviewed_at: string | null
+  updated_at: string
+}
+
+export interface StudyCard {
+  card_id: string
+  domain: string
+  job_id: string | null
+  concept_term: string | null
+  card_type: string
+  front: string
+  back: string
+  explanation: string
+  evidence: any
+  status: string
+  source: string
+  created_at: string
+  updated_at: string
+  review: StudyReviewState | null
+}
+
+export interface StudyCardListResponse {
+  total: number
+  items: StudyCard[]
+}
+
 export interface WsEvent {
   event: string
   step?: string

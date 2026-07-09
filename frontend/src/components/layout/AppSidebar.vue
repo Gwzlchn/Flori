@@ -7,6 +7,7 @@ import { useApi } from '../../composables/useApi'
 import {
   Send, Inbox, BookMarked, Lightbulb, ChevronRight, ChevronUp, ChevronDown,
   Folder, Server, Settings, ChevronsLeft, ChevronsRight, Plus, MoreHorizontal, MessageCircleQuestion,
+  GraduationCap,
 } from 'lucide-vue-next'
 import { resolveIcon } from '../../utils/kbIcons'
 import { sourceBadge, sourceLabelOf, subState, subTip } from '../../constants/sources'
@@ -286,6 +287,7 @@ async function onCreateCollection(payload: any) {
       </div>
 
       <a :class="{ on: route.name === 'ask' }" data-tip="问知识库" title="问知识库" @click="nav('/ask')"><MessageCircleQuestion :size="16" /><span>问知识库</span></a>
+      <a :class="{ on: route.name === 'study' }" data-tip="学习" title="学习" @click="nav('/study')"><GraduationCap :size="16" /><span>学习</span></a>
       <a :class="{ on: route.name === 'glossary' }" data-tip="概念库" title="概念库" @click="nav('/glossary')"><Lightbulb :size="16" /><span>概念库</span></a>
     </nav>
 

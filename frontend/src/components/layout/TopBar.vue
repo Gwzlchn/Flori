@@ -32,6 +32,7 @@ const crumbs = computed<BreadcrumbSeg[]>(() => {
     case 'collections': return [root, { t: '集合' }]
     case 'collection-detail': return [{ t: '集合', to: '/collections' }, { t: '集合详情' }]
     case 'glossary': return [root, { t: '概念库' }]
+    case 'study': return [root, { t: '学习' }]
     case 'search': return [{ t: '搜索' }]
     case 'system':
       return route.query.from === 'settings'
