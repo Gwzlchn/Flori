@@ -1,6 +1,7 @@
 # CLAUDE.md — AI 协作者指南
 
 > 每个 Claude Code 会话开始时读这个文件。
+> 仓库跟踪 `AGENTS.md -> CLAUDE.md` 供 Codex 读取；规则只维护本文件这一份，禁止复制双真源。
 
 ## 项目
 
@@ -67,9 +68,27 @@ ROADMAP.md                  → 里程碑和进度
 
 ### 提交规范（跨会话 / 多 agent 统一，**权威在此处**）
 
-> 不管哪个会话 / agent 提交，都按此格式。与某个 agent 的 harness 默认（如型号后缀、session 链接）不一致时，**以本节为准**（CLAUDE.md OVERRIDE 默认行为）。
+> 最终进入 `main` 的正式提交按本节执行。分支 checkpoint 只用于保存可恢复进度，合入前必须整理，不按正式提交发布。与某个 agent 的 harness 默认（如型号后缀、session 链接）不一致时，**以本节为准**（CLAUDE.md OVERRIDE 默认行为）。
 
-**标题**：`<type>(<scope>): <中文摘要>;<版本>`（版本**必带**，见下）
+**交付单元与提交边界**
+- `main` 上一个正式提交对应一个可独立验收、可独立回滚、部署后完整可用的价值单元。提交边界由验收与回滚边界决定，不由 agent、文件数、代码行数或反馈轮次决定。
+- 同一功能的多 agent 实现、多轮评审和 UI 调整留在同一交付单元。只有契约、部署顺序或回滚边界确实独立时才拆分。
+- 实现与回归测试、对外接口与 `docs/03-contracts.md`、数据迁移与消费方必须在同一交付单元闭环，不得把不可 build、不可测或不可部署的中间状态留在 `main`。
+- 分支允许 `wip:` / `fixup!` checkpoint。checkpoint 不 bump 版本、不进入 `main`；integrator 合入前必须用 squash 方式把全部 checkpoint 整合为待提交 diff，通过价值门后再创建一个正式提交。紧急生产修复、独立 revert 和独立 CI 修复可形成小而完整的正式提交。
+
+**集成责任**
+- 每个交付单元指定唯一 integrator。integrator 负责整合 diff、并集验证、契约与文档同步、最终版本号、正式提交、push、部署和 worktree 回收。
+- 子 agent 默认只在已登记的租约 worktree 和文件 scope 内实现、测试并报告结果；可创建 branch checkpoint，不得自行修改最终版本号、合入 `main`、push 或部署，除非被明确指定为 integrator。
+- `pyproject.toml`、`docs/03-contracts.md`、`shared/db.py`、`shared/models.py`、`configs/pipelines.yaml`、前端 router/types、CI 和 deploy 文件属于共享热点。一个交付单元内为每个热点指定单一 owner，其他 agent 通过 integrator 协调。
+- 集成前由 integrator 汇总全部 touched paths，运行并集相关测试、build 和手验；子 agent 各自绿灯不等于交付单元已通过。
+
+**正式提交前价值门**
+- integrator 必须能明确回答：本提交交付的完整价值是什么，哪条测试/手验证明它，回滚是否能完整撤销该价值。
+- 若仍有本交付单元内的测试、契约、消费方、迁移或文档留到下一提交，或本次只是一轮反馈/保存点，则继续迭代，不创建正式提交。
+
+**标题**
+- 改变可部署产品、对外契约、运行时配置或构建产物的发布交付 commit：`<type>(<scope>): <中文摘要>;<新版本>`。
+- 仅改文档、公约、调研、测试或 CI，且不改变构建产物与运行时行为的非发布治理 commit：`<type>(<scope>): <中文摘要>`，不带版本。
 - `type` ∈ `feat / fix / refactor / chore / ops / contract / test / docs / perf / build`（与迭代记录类型对齐）。
 - `scope` = 受影响模块/领域，小写：`article / jobs / ui / mcp / net-zone / concept-graph / build`…（尽量带，可省）。
 - 摘要用**中文**、一句话说清「做了什么 + 为什么」，**不写句号**，逗号用半角 `,`（沿用既有风格）。
@@ -79,7 +98,8 @@ ROADMAP.md                  → 里程碑和进度
 - **普通改动** → patch（第 3 段）+1；**逢 10 进位**：每段满 10 向前进 1、本段归 0（`0.8.9 → 0.9.0`，`0.9.9 → 1.0.0`）。
 - **大的重构** → minor（中间段）+1，patch 归 0（如 `0.8.3 → 0.9.0`）。
 - **架构级大重构** → major（第 1 段）+1，后两段归 0（如 `0.8.3 → 1.0.0`）。
-- **每个提交都 bump、标题结尾都带 `;<新版本>`**（含 docs/test/chore，无例外）。
+- 只有最终进入 `main` 的发布交付 commit 才 bump 一次并在标题结尾带 `;<新版本>`。同一交付单元无论包含多少 agent、checkpoint 或评审轮次，只在最终提交 bump 一次。
+- branch checkpoint 与非发布治理 commit 不修改版本。发布与否按是否改变产物或运行时行为判定，不按 commit type 机械判定。
 
 **正文 body**：解释「为什么这么改」，不是罗列 diff。建议顺序：
 1. 背景 / 动机（用户诉求或问题根因）；
@@ -90,6 +110,11 @@ ROADMAP.md                  → 里程碑和进度
 **署名 trailer**：正文后**仅一行**，不要 `Claude-Session` URL、不要 `(1M context)` 等后缀：
 ```
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+
+非发布治理示例：
+```
+chore(workflow): 以交付单元收敛开发与发布治理
 ```
 （提交的 agent 非 Opus 时，把型号换成对应模型名，如 `Claude Sonnet 4.6`；其余格式不变。）
 
@@ -170,7 +195,7 @@ flori/
 - 全部在本地 Docker 开发（localhost），部署时改 `.env`
 - 一个里程碑可以开多个并行 Claude 会话（基础设施/业务/前端）
 - 步骤代码独立开发+验证，用已有产物做测试输入
-- 每完成一个模块提交 git + 更新 ROADMAP
+- 每完成一个可独立验收与回滚的交付单元，由 integrator 整合验证后创建正式提交；功能状态变化时同步更新 ROADMAP
 
 ## 目录与开发/运行规约（2026-06-22 治理后,务必遵守）
 
@@ -195,17 +220,18 @@ flori/
   - `scripts/test.sh --changed`  → 只跑受本次改动影响的用例(pytest-testmon,迭代秒级)。
   - `scripts/test.sh --all`      → 全量 + 覆盖率门 75%(对齐 CI)。
   - `scripts/test.sh --fe [参数]` → 前端 vitest;`--rebuild`(改了 pyproject `[test]` 依赖后重建镜像)、`--down`(收热容器)。
-- **本地/CI 分工**：本地只跑【新增/相关】用例(`-m` 或 `--changed`);**全量回归 + 覆盖率门(75%) + 前端 vitest 交 CI**（`.github/workflows/ci.yml`:unit **3 分片** → `coverage-gate` 合并判门 → `build-push`;纯文档提交 `paths-ignore` 跳 CI;前端-only 改动不重建后端镜像;schemathesis 独立每日 cron `fuzz.yml`）。
+- **本地/CI 分工**：本地只跑【新增/相关】用例(`-m` 或 `--changed`);**全量回归 + 覆盖率门(75%) + 前端 vitest 交 CI**（`.github/workflows/ci.yml`:普通 4 分片 + worker 2 分片 → `coverage-gate` 合并判门 → `push-images`;纯文档提交 `paths-ignore` 跳 CI;路径分类从最近完整成功 run 累计到当前 HEAD，前端-only 改动不重建后端镜像;同 ref 新 run 只取消旧测试/build，已启动的镜像发布不取消;schemathesis 独立每日 cron `fuzz.yml`）。
 
 ### 开发 / 测试 / 交付节奏（全容器内,宿主不装依赖）
 - 开发热更新：`docker compose -f docker-compose.dev.yml up -d`
 - 容器内测试：**唯一入口 `scripts/test.sh`**（见上 §测试规约;全量 `scripts/test.sh --all` 本地少用,全量回归交 CI）
 - **本地快测 + CI 异步回归 + 即时部署**（提速节奏,务必遵守）：
   1. 本地只跑【新增 / 直接相关】用例（不跑全量）：**`scripts/test.sh -m <新模块>`**（或 `--changed` 只跑受影响用例;前端 `scripts/test.sh --fe`）。见 §测试规约。
-     全量回归由 **CI 承担**：push/PR 自动跑后端全套(3 分片) + 覆盖率门(75%) + 前端 vitest（`.github/workflows/ci.yml`);schemathesis 独立每日 cron。
-  2. **「本地完成」判定** = 新增用例绿 + 本地 build 对应镜像 +（API 调用 或 Playwright MCP）手验通过。三者绿即算完成。
-  3. 完成即：① 按 §提交规范 commit+bump → push main（触发 CI 全量回归,异步）；② **部署**：NAS 即时 recreate（本地 build-uptest 镜像,不等 CI）。★**后端 commit 一律三件套全建全滚**（`scripts/build-uptest.sh scheduler api worker` + recreate 全部后端容器）——共享 shared/ 且全系统单一版本,只滚"改到的那个"必致版本漂移（scheduler/api 停旧版、/system 报 worker 版本漂移,踩过两回）；前端-only 改动才可只滚 frontend。ECS 边缘**无手动直传**——git push → CI 建 ghcr → Watchtower（120s 轮询）自动 pull+重建（单一路径,不回退,见 §部署）。
-  4. **CI 后台红灯 = fix-forward（默认）**：看失败用例 → 补 `fix(scope): …;<版本>` 提交修正 → push 复跑；**不回退**已部署版本。仅当线上功能明显坏才 `scripts/rollback.sh` 回滚。
+     全量回归由 **CI 承担**：push/PR 自动跑后端普通 4 分片 + worker 2 分片 + 覆盖率门(75%) + 前端 vitest（`.github/workflows/ci.yml`);schemathesis 独立每日 cron。
+  2. **「子任务完成」判定** = 约定 scope 实现完成 + 相关用例绿 + 改动与验证清单已报告。子 agent 完成不等于交付单元可发布。
+  3. **「交付单元完成」判定** = integrator 已整合全部 diff + 并集相关测试绿 + 本地 build 对应镜像 +（API 调用 或 Playwright MCP）手验通过 + 必要契约/文档已同步。
+  4. 交付单元完成后：① integrator 按 §提交规范创建一个正式提交（发布交付才 bump）→ push main（触发 CI 全量回归,异步）；② **部署**：NAS 即时 recreate（本地 build-uptest 镜像,不等 CI）。★**后端发布交付一律三件套全建全滚**（`scripts/build-uptest.sh scheduler api worker` + recreate 全部后端容器）——共享 shared/ 且全系统单一版本,只滚"改到的那个"必致版本漂移（scheduler/api 停旧版、/system 报 worker 版本漂移,踩过两回）；前端-only 发布交付才可只滚 frontend。ECS 边缘**无手动直传**——git push → CI 建 ghcr → Watchtower（120s 轮询）自动 pull+重建（单一路径,不回退,见 §部署）。
+  5. **CI 后台红灯**：尚未进入 `main` 的问题并回当前交付单元，整理 checkpoint 后再验证，不制造主线微型修复提交；已部署版本默认 fix-forward，以小而完整的 `fix(scope): …;<版本>` 发布交付修正，仅当线上功能明显坏才 `scripts/rollback.sh` 回滚。
 
 ### 本地活栈（NAS,override 叠加）
 ```
@@ -231,16 +257,17 @@ docker compose -f docker-compose.yml -f .local/docker-compose.uptest.yml --env-f
 - 多 agent 并行、主工作树已有未提交改动、或需要隔离风险时,代码改动必须使用租约制 worktree。
 - Worktree 和临时目录规范不得写入个人绝对路径。用 `$REPO` 表示仓库根目录,用 `$FLORI_WORKING_DIR` 表示仓库外工作区。本机真实路径只放 `.local/` 或 shell 环境,不进入 git 文档。
 - worktree 统一放 `$FLORI_WORKING_DIR/wt/<slug>/`;临时产物放 `$FLORI_WORKING_DIR/tmp/`;`.local/` 只放工作日志、登记和归档 diff,不放活跃 worktree 本体。
-- 创建 worktree 前,必须在本次工作项头部记录 `branch`、`worktree path`、`base commit`、用途、创建时间和预计回收条件。
-- 合入 `main` 后必须立刻执行 `git worktree remove <path>` 和 `git branch -d <branch>`。本任务创建的远程分支已合入后同步删除;`badges`、`mutation-data` 等自动数据分支例外。
-- 最终回复前必须复查 `git worktree list --porcelain`、`git branch --merged main`、`git status --short --branch`。若 worktree 未清理,必须说明原因并写入 `.local/processing/待办池.txt`。
+- 创建 worktree 前,必须在本次工作项头部记录验收目标、integrator、`branch`、`worktree path`、`base commit`、文件 scope、共享热点 owner、测试责任、合并方式和预计回收条件。
+- 多 agent 不得同时操作同一 git worktree、Docker build tag、容器、版本号或部署资源。子 agent 若使用 checkpoint，integrator 必须在进入 `main` 前全部 squash，原 checkpoint 不得进入主线历史。
+- 合入 `main` 后必须立刻回收 worktree 和分支。最终正式提交所在分支已 fast-forward/merge 进入 `main` 时用 `git branch -d <branch>`；checkpoint 分支因 squash 不建立祖先关系，必须先确认其 diff 已完整纳入最终 `main` SHA、worktree 无未归档改动，再用 `git branch -D <checkpoint-branch>`。本任务创建的远程分支已纳入后同步删除;`badges`、`mutation-data` 等自动数据分支例外。
+- 最终回复前必须复查 `git worktree list --porcelain`、本交付单元登记的全部分支（`git branch --list <branch>`，并辅以 `git branch --merged main` / `--no-merged main`）、`git status --short --branch`。若 worktree 或本任务分支未清理,必须说明原因并写入 `.local/processing/待办池.txt`。
 - 脏 worktree 删除前,先把 `git status`、`git diff` 和必要的 `git log main..branch` 归档到 `$REPO/.local/processing/<YYYY-MM-DD>/worktree-archive/`。
 
 ### 迭代工作记录（每次开发/运维都要保持的习惯）
-**粒度铁律：一个 commit 一个 txt**（不论大小开发，每个提交都建一个工作项 txt，记录产出该提交的 worktree 开发行为；一个 commit 含 N 个开发步骤进 §7，一个任务的多个 commit 则各自一个 txt）。文件在 `.local/processing/<YYYY-MM-DD>/`，**边做边更新**（不只动手不记录）：
+**粒度铁律：一个交付单元一个 txt**。一个工作项可覆盖多 agent、多轮评审和多个 branch checkpoint；全部步骤写入同一份时间线。checkpoint 只记在时间线，头部在集成完成后登记唯一的最终 `main` SHA。若确有独立验收/回滚边界而拆成多个正式提交，也同步拆成多个工作项。文件继续放在 `.local/processing/<YYYY-MM-DD>/`，**边做边更新且永不入 git**：
 - 命名 `NN-类型-简述.txt`（类型对齐 git：feat/fix/refactor/chore/ops/research/plan/docs/test）。
 - 头部：类型 / 状态（计划→进行中→已完成/阻塞）/ 创建·开始·结束·耗时（绝对时间 `YYYY-MM-DD HH:MM`）/ 分支·提交。
-- 正文（**详写、分节，不是一行**）：背景 → 计划（动手前写）→ 实际实现（与计划差异、踩坑）→ 涉及改动 → 验证 → 遗留 → **步骤时间线**（§7 必写：每个开发步骤都详记 `开始(date) → 结束(date) + 做了什么(详)`；一个 commit 常含 N 步，仅出提交的那步标 commit sha）。
+- 正文（**详写、分节，不是一行**）：背景 → 计划（动手前写）→ 实际实现（与计划差异、踩坑）→ 涉及改动 → 验证 → 遗留 → **步骤时间线**（§7 必写：每个开发步骤都详记 `开始(date) → 结束(date) + 做了什么(详)`；checkpoint 与最终提交均在对应步骤标 SHA）。
 - 当天建 `00-当日索引.txt`；跨天未完的滚动进 `.local/processing/待办池.txt`。
 - 标准/模板/待办池放 `.local/processing/` 根目录（长存,不随日期清理）；完整规范见 `.local/processing/迭代记录规范.txt`。
 
@@ -257,11 +284,11 @@ docker compose -f docker-compose.yml -f .local/docker-compose.uptest.yml --env-f
 以下来自历史 memory，作为跨会话稳定约定与踩坑记录。真实凭证不写入本文件。
 
 ### 规则与偏好
-- 版本递增按三档执行：普通改动 patch +1（逢 10 进位），大的重构 minor +1，架构级重构 major +1。每个提交都 bump `pyproject.toml [project].version`，标题结尾都带 `;<新版本>`，全系统单一版本。
+- 版本递增按三档执行：普通改动 patch +1（逢 10 进位），大的重构 minor +1，架构级重构 major +1。只有最终进入 `main` 的发布交付 commit 才 bump `pyproject.toml [project].version` 并在标题带 `;<新版本>`；branch checkpoint 与非发布治理 commit 不 bump。
 - 提交格式以本文件「提交规范」为准，覆盖 agent harness 默认。禁止 `Claude-Session` URL、`(1M context)` 等后缀；正文只保留一行 `Co-Authored-By` trailer。
-- 后台 fork/agent 可能自走完整条（commit / push / 部署 / 验证），而且与主会话真并发。派后台任务后不要同时动同一 git、Docker、容器、版本号或部署资源。
+- 每个交付单元只有唯一 integrator 可创建正式提交、push、部署和回收 worktree。后台 fork/agent 默认只在租约 scope 内实现、测试和报告，不得自走完整发布链。
 - 现在是单人开发，`frontend/` 与 `design/` 也归当前 agent，可改功能、设计、UI。对外接口仍以 `docs/03-contracts.md` 为契约；接口变更同提交更新契约文档。
-- 每次迭代都维护 `.local/processing/<YYYY-MM-DD>/` 工作项：先写计划，再记录实际实现、踩坑、验证、遗留和步骤时间线。当天建 `00-当日索引.txt`，跨天未完滚动到待办池。
+- 每个交付单元维护一份 `.local/processing/<YYYY-MM-DD>/` 工作项：先写计划，再记录多 agent、多轮评审中的实际实现、踩坑、checkpoint、验证、遗留和步骤时间线。当天建 `00-当日索引.txt`，跨天未完滚动到待办池。
 - 写工作日志任何时间戳前必须运行 `date '+%Y-%m-%d %H:%M'` 取真实北京时间；不要估算，也不要写未来时间。
 - 多 agent 并行时代码改动按上文 Worktree 租约制执行；工作日志始终写 `$REPO/.local/processing/...`，项目文档中的 worktree 路径不写个人绝对路径。
 - 用户偏好彻底调研和多 agent 深挖，不以省 token 为优先。调研/审计/计划/过程笔记放 gitignored `.local/`，不要随手进 `docs/` 或提交。

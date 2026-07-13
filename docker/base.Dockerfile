@@ -11,7 +11,7 @@
 #   改源码只重算末尾 COPY 层,apt/pip/CLI binary 依赖层恒命中 registry buildcache,CI 不必每次 push 冷建依赖。
 #   源码 COPY(含 shared/)也不能放进 common:那会让子 stage 的 FROM 基底随源码变,依赖层全废重建。
 #
-# 版本解耦(buildcache 命中关键之二):每次提交 bump pyproject [project].version 会让 `COPY pyproject.toml` 层
+# 版本解耦(buildcache 命中关键之二):发布交付 bump pyproject [project].version 会让 `COPY pyproject.toml` 层
 #   随之变,下游 pip 依赖层全废冷建。故 CI/build 在构建前把上下文里的 pyproject version 抹成占位 0.0.0(见
 #   ci.yml / build-uptest.sh),COPY pyproject 层跨提交稳定,pip 缓存命中。真实语义版本经 build-arg FLORI_VERSION
 #   注入(各 stage ENV FLORI_VERSION);shared/version.py 用此 env 覆盖,不读已安装包版本,故显示仍准。

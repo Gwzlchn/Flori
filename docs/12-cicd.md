@@ -54,7 +54,9 @@ sudo ./svc.sh install && sudo ./svc.sh start
 - `fe-test`：容器化 vitest 跑前端单测 + 覆盖率,与后端并行,各自为门。
 - `coverage-badge`：仅 main。把前后端覆盖率写成 shields endpoint JSON,force-push 到 `badges` 数据分支,README 徽章读它。
 - `fuzz.yml`（每日 cron + 可手动）：**Schemathesis 模糊/契约**,`pytest -m fuzz tests/test_openapi_fuzz.py`。in-process 从 `/openapi.json` 自动派生用例喂每个端点,断言不 5xx(`not_a_server_error` + `response_schema_conformance`,检查集见仓库根 `schemathesis.toml`)。曾借此揪出分页 `offset` 溢出 SQLite int64 的 500 并修复。从 push CI 拆出,不再拖慢每次 push 的关键路径。
-- `build-images` / `push-images`：build 与 push 拆成两个 job。`build-images` 与测试**并行**,只构建暖 buildcache 不推送;PR 也构建,用来验 Dockerfile 与 vue-tsc。`push-images` 仅 main、测试通过后跑,命中暖缓存后秒级 build + push。均用 buildx 构 **amd64**（所有目标机均为 x86，不构 arm64）。矩阵四个镜像：`flori-api` / `flori-scheduler` / `flori-worker` 是 `docker/base.Dockerfile` 的不同 target,加 `flori-frontend`。`detect` job 按改动路径过滤,前端-only 改动不重建后端镜像,反之亦然。
+- `build-images` / `push-images`：build 与 push 拆成两个 job。`build-images` 与测试**并行**,只构建暖 buildcache 不推送;PR 也构建,用来验 Dockerfile 与 vue-tsc。`push-images` 仅 main、覆盖率门和前端测试通过后跑,命中暖缓存后秒级 build + push。均用 buildx 构 **amd64**（所有目标机均为 x86，不构 arm64）。矩阵四个镜像：`flori-api` / `flori-scheduler` / `flori-worker` 是 `docker/base.Dockerfile` 的不同 target,加 `flori-frontend`。
+- `detect` 以最近一次完整成功的 main CI SHA 为已发布基线，累计分类到当前 HEAD。A 改后端后即使被 B 的连续 push 取消，B 也会在基线到 HEAD 的 diff 里看到 A，不会漏发后端。GitHub API、Git 祖先或历史基线异常时强制前后端全建，宁可多建不得漏发。合法纯版本/pyproject 注释和 Dockerfile 普通纯注释变化不触发运行镜像；Docker parser directive、heredoc 或任何指令变化仍保守重建。
+- 同 ref 的新 run 以 job 级 concurrency 取消旧单测、前端测试、路径检测和镜像预构建；`push-images` 按镜像名串行且 `cancel-in-progress: false`，已启动的发布不会被后续 run 半途取消。未启动的旧排队可由最新 HEAD 取代，累计基线保证中间改动不丢失。
 - `step-images.yml`：步骤执行镜像（`flori-step-base` / `flori-step-heavy` / `flori-step-gpu`）独立于主 CI，`workflow_dispatch` 手动触发，同样只构 amd64。
 - `e2e.yml`（**集成回归门**，`workflow_dispatch` 手动触发，不挂 PR）：补审计缺口 #7 —— 主 CI 只跑单测，缺 pipeline DAG ↔ worker ↔ scheduler ↔ step 的接线回归。含两个互不依赖、可并行的 job：
 
@@ -76,7 +78,7 @@ sudo ./svc.sh install && sudo ./svc.sh start
   KIMI_API_KEY=... TEST_VIDEO_FILE=/path/to.mp4 bash tests/integration/run_e2e_ai.sh   # 全链路+真实 AI 笔记
   ```
 
-- `mutation.yml`（**变异测试**，每日 cron + `workflow_dispatch` 手动）：对核心模块注入变异,逐个跑相关测试。目标清单在 `scripts/mutation_score.py` 的 `TARGETS`：`shared/ai_gateway.py` 计费与 `exec_id` 去重、`shared/db.py`、`scheduler/` 状态机、`worker/` 乐观锁。**存活变异 = 测试抓不住的真实 bug**——`ai_usage` 去重或乐观锁里若有存活变异 = 字面意义的重复计费/双跑风险。慢 → 不挂 PR;报告态非阻塞:分数写 job summary,并追加到 `mutation-data` 分支的 `history.csv`,再生成趋势与徽章 JSON 供 README 读取。手动可传 `target`(如 `ai_gateway`)只跑子集;只跑子集时不写历史。注:mutmut 3.x 配置键是 `source_paths`(非 v2 的 `paths_to_mutate`)。
+- `mutation.yml`（**变异测试**，每日 cron + `workflow_dispatch` 手动）：对核心模块注入变异,逐个跑相关测试。目标清单在 `scripts/mutation_score.py` 的 `TARGETS`：`shared/ai_gateway.py` 计费与 `exec_id` 去重、`shared/db.py`、`scheduler/` 状态机、`worker/` 乐观锁。**存活变异 = 测试抓不住的真实 bug**——`ai_usage` 去重或乐观锁里若有存活变异 = 字面意义的重复计费/双跑风险。每个目标先跑 clean baseline；只有 pytest 退出码 1 计 killed，退出码 0 计 survived，其余均计 infra-error 并让整次测量失败。含 infra-error 的运行不输出可持久化 CSV，不得用基础设施故障虚高分数。慢 → 不挂 PR;有效分数写 job summary,并追加到 `mutation-data` 分支的 `history.csv`,再生成趋势与徽章 JSON 供 README 读取。手动可传 `target`(如 `ai_gateway`)只跑子集;只跑子集时不写历史。注:mutmut 3.x 配置键是 `source_paths`(非 v2 的 `paths_to_mutate`)。
 
 部署为自动 CD：生产 `docker-compose.yml` 跑 Watchtower（`ghcr.io/containrrr/watchtower`），每 120s 查 ghcr，只更新带 `com.centurylinklabs.watchtower.enable=true` 标签的容器，自动 pull + 重建 + 清理旧镜像。无 SSH 自动部署脚本。
 

@@ -15,7 +15,8 @@ name: Mutation (daily + manual)
 # 原文,没从 mutants/ 副本激活变异;mutmut 3.6 无 runner/cwd 配置。改用 scripts/mutation_score.py:
 # 设 MUTANT_UNDER_TEST 从 mutants/ 跑相关测试,产出真实 killed/survived。
 #
-# Baseline(回归锚点):shared.ai_gateway = 88.0% (132/150)。其余首次 daily run 跑出后进 history.csv。
+# 旧口径回归锚点:shared.ai_gateway = 88.0% (132/150).引入 clean baseline 和 infra-error
+# 三态后由下一次有效全量 run 建立新锚点,不与旧历史直接比较.
 on:
   schedule:
     - cron: "0 19 * * *"   # 北京时间每天 03:00(= 前一天 19:00 UTC);要 UTC 3点改成 "0 3 * * *"
@@ -32,6 +33,7 @@ permissions:
 jobs:
   mutmut:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     env:
       USE_USTC_MIRROR: "0"     # 海外 runner 用官方源
     steps:
@@ -44,14 +46,19 @@ jobs:
         env:
           TARGET: ${{ github.event.inputs.target }}
         run: |
+          set -o pipefail
+          set +e
           docker compose -f docker-compose.test.yml run --rm -e TARGET="$TARGET" test sh -c '
             pip install -q "fakeredis[lua]>=2.28,<4" "pytest>=8.0,<9" "pytest-asyncio>=0.24,<1" \
               "mutmut>=3,<4" "openai>=1.50,<3" "anthropic>=0.40,<1" || exit 1
             python3 scripts/mutation_score.py "$TARGET"
           ' | tee /tmp/mut.log
+          score_status=${PIPESTATUS[0]}
+          set -e
           # 分数表写进本次 run 的 job summary(立即可见)
           sed -n "/<!--MUTATION-SUMMARY-->/,/<!--\/MUTATION-SUMMARY-->/p" /tmp/mut.log \
             | grep -v "MUTATION-SUMMARY" >> "$GITHUB_STEP_SUMMARY" || true
+          exit "$score_status"
 
       # 写历史:定时跑 或 手动全量跑(没填 target),后者可立即 seed 让徽章生效。
       # 手动只跑单模块(填了 target)不写,防部分数据污染趋势。

@@ -1,6 +1,7 @@
 # 11 · 开发流程
 
 > 并行 Claude 会话开发、会话交接、Git 工作流。
+> `CLAUDE.md` 是协作规则权威源，仓库跟踪的 `AGENTS.md` 仅是指向它的 Codex 入口。
 
 ## 1. 会话拆分
 
@@ -118,14 +119,14 @@ services:
 ```
 main
   │
-  ├── $FLORI_WORKING_DIR/wt/<slug-a>   会话 A
-  ├── $FLORI_WORKING_DIR/wt/<slug-b>   会话 B
-  └── fast-forward / merge → main      联调通过后合入并回收
+  ├── $FLORI_WORKING_DIR/wt/<slug-a>   agent A 租约 scope
+  ├── $FLORI_WORKING_DIR/wt/<slug-b>   agent B 租约 scope
+  └── integrator 整合 → squash 为候选 diff → 并集验证 → main 正式提交
 ```
 
 并行会话或主工作树有未提交改动时,每个会话必须在租约制 worktree 中工作。`$FLORI_WORKING_DIR` 是仓库外工作区,本机真实路径只放 `.local/` 或 shell 环境,不要写入 git 文档。
 
-创建 worktree 前先登记到本次工作项:分支、worktree path、base commit、用途、创建时间、预计回收条件。推荐目录:
+创建 worktree 前先登记到本次工作项:验收目标、integrator、分支、worktree path、base commit、文件 scope、共享热点 owner、测试责任、合并方式和预计回收条件。推荐目录:
 
 ```
 $FLORI_WORKING_DIR/
@@ -133,46 +134,55 @@ $FLORI_WORKING_DIR/
 └── wt/<slug>/      活跃 worktree
 ```
 
-合入 `main` 后立即回收:
+合入 `main` 后立即回收。最终正式提交所在分支已成为 `main` 祖先时:
 
 ```bash
 git worktree remove "$FLORI_WORKING_DIR/wt/<slug>"
-git branch -d <branch>
+git branch -d <final-branch>
 ```
 
-本任务创建的远程分支已合入后同步删除;`badges`、`mutation-data` 等自动数据分支例外。若 worktree 因未合入、脏 diff、用户要求保留或阻塞项不能清理,必须在最终回复说明原因,并写入 `.local/processing/待办池.txt`。
+checkpoint 分支经 squash 后不会成为 `main` 祖先。integrator 必须先确认 checkpoint diff 已完整纳入最终 `main` SHA、worktree 无未归档改动，再回收 worktree 并用 `git branch -D <checkpoint-branch>` 删除。本任务创建的远程分支已纳入后同步删除;`badges`、`mutation-data` 等自动数据分支例外。若 worktree 因未合入、脏 diff、用户要求保留或阻塞项不能清理,必须在最终回复说明原因,并写入 `.local/processing/待办池.txt`。
+
+每个交付单元只有一个 integrator。子 agent 默认只在自己的租约 scope 内实现、测试和报告，可创建 `wip:` / `fixup!` checkpoint，但不得自行修改最终版本、合入 `main`、push 或部署。integrator 必须用 squash 方式把全部 checkpoint 整合为待提交 diff，原 checkpoint 不得进入主线历史；对全部 touched paths 重跑并集相关测试、build 和手验并通过价值门后，才创建一个正式提交。
+
+`pyproject.toml`、`docs/03-contracts.md`、`shared/db.py`、`shared/models.py`、`configs/pipelines.yaml`、前端 router/types、CI 和 deploy 文件是共享热点。同一交付单元内每个热点只能有一个 owner，多 agent 不得同时操作同一 git worktree、Docker build tag、容器、版本号或部署资源。
 
 ### 提交规范
 
-> **权威定义在 `CLAUDE.md` §提交规范**（标题格式 / type / scope / 版本号递增 / body 结构 / 署名 trailer，跨会话·多 agent 统一）。本节只留示例，规则改动请改 CLAUDE.md，勿在两处各写一份。
+> **权威定义在 `CLAUDE.md` §提交规范**（交付单元 / integrator / checkpoint / 标题格式 / 版本判定 / body / trailer，跨会话·多 agent 统一）。本节只留示例，规则改动请改 CLAUDE.md，勿在两处各写一份。
 
 ```
 feat(scheduler): 实现 DAG 推进逻辑;0.2.0
 fix(worker): 修复 scene 池未冻结 cpu 的问题;0.2.1
 contract(api): 任务队列接口 + 同步 docs/03-contracts.md;0.7.1
-docs: 补充扩展指南;0.7.2
+chore(workflow): 以交付单元收敛开发与发布治理
 ```
 
 ## 5. 集成测试顺序
 
 ```
-1. 各步骤独立通过单测 scripts/test.sh -m   ← 并行开发
-2. 调度器 + Worker + 步骤 联调             ← A 完成后
-3. API + 调度器 联调                       ← A+B 完成后
-4. 前端 + API 联调                         ← B+C 完成后
-5. 端到端: 手机投递 → 跑完 → 看笔记        ← 全部完成后
+1. integrator 汇总全部 touched paths 与验收目标
+2. 子 agent 在各自 scope 跑相关测试并报告结果
+3. integrator 整合全部改动，把 checkpoint squash 为待提交 diff
+4. 按 touched paths 跑并集相关测试与跨模块联调
+5. 构建受影响镜像并做 API / Playwright 手验
+6. 契约、迁移、文档与消费方闭环后进入 main
 ```
 
-## 6. 每完成一个模块
+子 agent 的局部测试结果可复用为证据，但不能替代第 4-6 步。跨调度器、Worker、API 和前端的交付单元仍按依赖顺序联调，端到端验收覆盖完整用户路径。
+
+## 6. 每完成一个交付单元
 
 ```
-1. 写代码
-2. 跑测试（scripts/test.sh -m <模块>，全量回归交 CI）
-3. git commit
-4. 合入 main 并按需推送
-5. 删除已合入 worktree 和本地分支
-6. 更新 ROADMAP.md（标记完成）
-7. 最终回复前复查 git worktree list --porcelain、git branch --merged main、git status --short --branch
+1. 在工作项写清验收目标、integrator、scope、共享热点 owner 和回滚边界
+2. 子 agent 在租约 worktree 内实现、测试，可按需创建 checkpoint
+3. integrator 整合全部改动，把 checkpoint squash 为待提交 diff
+4. 跑并集相关测试、构建和手验，全量回归交 CI
+5. 同步契约、迁移、消费方、ROADMAP 和必要文档
+6. 只有发布交付 bump 一次版本；治理提交和 checkpoint 不 bump
+7. integrator 创建一个正式提交，按授权 push、部署
+8. 删除已合入 worktree 和本地分支
+9. 最终回复前复查 git worktree list --porcelain、本单元登记的全部分支(--list + --merged/--no-merged main)、git status --short --branch
 ```
 
 ## 7. 扩展指南

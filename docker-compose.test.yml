@@ -21,6 +21,8 @@ services:
       - ./configs:/app/configs
       # 变异分数驱动(scripts/mutation_score.py;mutation.yml 调用)
       - ./scripts:/app/scripts
+      # CI/workflow 结构不变量测试只读解析 workflow,不向容器写入.
+      - ./.github:/app/.github:ro
       # pytest/coverage 配置(markers、[tool.coverage])的单一事实源:挂进来,改了不用重建镜像
       - ./pyproject.toml:/app/pyproject.toml
       # schemathesis 检查配置(只跑 not_a_server_error + response_schema_conformance)

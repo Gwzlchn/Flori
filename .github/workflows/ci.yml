@@ -13,7 +13,7 @@ on:
 # 后端单测按"普通 vs worker"拆两 job 并行(与部署镜像同理拆):
 #   unit-normal:轻镜像 test([api,worker,mcp,test],~350MB,build/load 秒级)跑非 step 测试(绝大多数)。
 #   unit-worker:重镜像 test-worker(test + ffmpeg + [steps] 媒体库)跑 step/worker 测试(tests/steps + test_step_* + test_worker)。
-#   各产部分覆盖率上传;coverage-gate 合并判 75%。关键路径 = max(两 job) 后进入 build-push,压 <2min。
+#   各产部分覆盖率上传;coverage-gate 合并判 75%.关键路径 = max(两 job) 后进入 push-images,压 <2min.
 jobs:
   unit-normal:
     # 轻镜像 build/load 便宜,把 1234 个非 step 用例拆 4 shard 并行(不吃重镜像重建惩罚),摊平关键路径。
@@ -21,6 +21,9 @@ jobs:
       fail-fast: false
       matrix:
         group: [1, 2, 3, 4]
+    concurrency:
+      group: ci-${{ github.event.pull_request.number || github.ref }}-unit-normal-${{ matrix.group }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -83,6 +86,9 @@ jobs:
       fail-fast: false
       matrix:
         group: [1, 2]
+    concurrency:
+      group: ci-${{ github.event.pull_request.number || github.ref }}-unit-worker-${{ matrix.group }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -143,6 +149,9 @@ jobs:
   # 用 python:slim 挂 checkout 到 /app 里 combine(记录的 /app/* 路径直接对齐,免 [paths]),不建 test 镜像也能秒级完成。
   coverage-gate:
     needs: [unit-normal, unit-worker]
+    concurrency:
+      group: ci-${{ github.event.pull_request.number || github.ref }}-coverage-gate
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -172,6 +181,9 @@ jobs:
 
   # 前端单测 + 覆盖率(容器化 vitest;node:22-alpine)。与后端并行,各自为门。
   fe-test:
+    concurrency:
+      group: ci-${{ github.event.pull_request.number || github.ref }}-fe-test
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     outputs:
       cov: ${{ steps.cov.outputs.pct }}
@@ -187,17 +199,68 @@ jobs:
           echo "pct=$pct" >> "$GITHUB_OUTPUT"
           echo "### 前端语句覆盖率:${pct}%" >> "$GITHUB_STEP_SUMMARY"
 
-  # 改动路径侦测:据此让 build-push 只重建相关镜像(前端-only 不重建后端,反之亦然)。
+  # 改动路径侦测:据此只重建相关镜像.pyproject 仅合法版本值或注释变化不触发后端构建.
   detect:
+    concurrency:
+      group: ci-${{ github.event.pull_request.number || github.ref }}-detect
+      cancel-in-progress: true
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
     outputs:
-      backend: ${{ steps.f.outputs.backend }}
-      frontend: ${{ steps.f.outputs.frontend }}
+      backend: ${{ steps.classify.outputs.backend }}
+      frontend: ${{ steps.classify.outputs.frontend }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: 选择累计变更基线
+        id: baseline
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          force_all=false
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base=$(git merge-base "$PR_BASE_SHA" "$HEAD_SHA" || true)
+            if [ -z "$base" ]; then
+              force_all=true
+            fi
+          else
+            candidates=""
+            if candidates=$(gh api --method GET \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+              -f branch="$GITHUB_REF_NAME" -f event=push -f status=success -f per_page=50 \
+              --jq '.workflow_runs[].head_sha'); then
+              base=$(printf '%s\n' "$candidates" | python3 scripts/ci_select_change_base.py "$HEAD_SHA")
+            else
+              base=""
+            fi
+            if [ -z "$base" ]; then
+              force_all=true
+            fi
+          fi
+
+          # paths-filter 即使在 force-all 时也需要可解析基线.
+          if [ -z "${base:-}" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            base=$(git rev-list --max-parents=0 "$HEAD_SHA" | tail -1)
+          fi
+          if ! git merge-base --is-ancestor "$base" "$HEAD_SHA"; then
+            force_all=true
+            base=$(git rev-list --max-parents=0 "$HEAD_SHA" | tail -1)
+          fi
+
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+          echo "force_all=$force_all" >> "$GITHUB_OUTPUT"
       - uses: dorny/paths-filter@v4.0.2
         id: f
         with:
+          base: ${{ steps.baseline.outputs.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           filters: |
             backend:
               - 'shared/**'
@@ -207,15 +270,46 @@ jobs:
               - 'worker/**'
               - 'tunnel_stats/**'
               - 'configs/**'
+            docker:
               - 'docker/**'
-              - 'pyproject.toml'
             frontend:
               - 'frontend/**'
+            pyproject:
+              - 'pyproject.toml'
+      - name: 汇总运行时实质变化
+        id: classify
+        env:
+          BASE_SHA: ${{ steps.baseline.outputs.sha }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          backend="${{ steps.f.outputs.backend }}"
+          frontend=false
+          if [ "${{ steps.baseline.outputs.force_all }}" = "true" ]; then
+            backend=true
+            frontend=true
+          elif [ "${{ steps.f.outputs.pyproject }}" = "true" ]; then
+            pyproject_backend=$(python3 scripts/ci_pyproject_change.py "$BASE_SHA" "$HEAD_SHA")
+            [ "$pyproject_backend" = "true" ] && backend=true
+          fi
+          if [ "${{ steps.baseline.outputs.force_all }}" != "true" ] \
+            && [ "${{ steps.f.outputs.docker }}" = "true" ]; then
+            docker_backend=$(python3 scripts/ci_docker_change.py "$BASE_SHA" "$HEAD_SHA" docker)
+            [ "$docker_backend" = "true" ] && backend=true
+          fi
+          if [ "${{ steps.baseline.outputs.force_all }}" != "true" ] \
+            && [ "${{ steps.f.outputs.frontend }}" = "true" ]; then
+            frontend=$(python3 scripts/ci_docker_change.py "$BASE_SHA" "$HEAD_SHA" frontend)
+          fi
+          echo "backend=$backend" >> "$GITHUB_OUTPUT"
+          echo "frontend=$frontend" >> "$GITHUB_OUTPUT"
 
   # 仅 main:把前后端覆盖率写成 shields endpoint JSON,force-push 到 badges 数据分支。
   coverage-badge:
     needs: [coverage-gate, fe-test]
     if: github.ref == 'refs/heads/main'
+    concurrency:
+      group: ci-${{ github.ref }}-coverage-badge
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -240,6 +334,9 @@ jobs:
   #   build 不需先过测试,藏进测试的 ~80s 窗口。PR 也构建(验 Dockerfile/vue-tsc)。路径过滤:仅构建相关镜像。
   build-images:
     needs: [detect]
+    concurrency:
+      group: ci-${{ github.event.pull_request.number || github.ref }}-build-${{ matrix.image }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -318,10 +415,14 @@ jobs:
             type=gha
           cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}/{1}:buildcache,mode=max', env.OWNER_LC, matrix.image) || 'type=gha,mode=max' }}
 
-  # build/push 拆分之二:测过(needs 两 unit + fe)且镜像已 build 缓存暖,快速 push;cache-from 命中,build 秒级。仅 main。
+  # build/push 拆分之二:覆盖率门 + 前端测试通过且镜像缓存已暖后快速 push.仅 main.
   push-images:
-    needs: [unit-normal, unit-worker, fe-test, detect, build-images]
+    needs: [coverage-gate, fe-test, detect, build-images]
     if: github.ref == 'refs/heads/main'
+    # 已启动的同镜像发布不取消;新 run 发布当前 HEAD,可覆盖未启动的旧排队.
+    concurrency:
+      group: ci-${{ github.ref }}-release-${{ matrix.image }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: read

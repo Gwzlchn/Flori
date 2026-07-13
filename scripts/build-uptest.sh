@@ -9,12 +9,12 @@
 #   裸 `docker build` 走 legacy builder 不识别 cache mount 会挂;`docker compose` 内置 buildkit 即支持。
 #
 # 冷构建复用 CI 已建层(registry buildcache):每个 service 的 build.cache_from 指向
-#   ghcr.io/<owner>/flori-<stage>:buildcache(CI build-push 的 cache-to 已常驻产出)。换机/清缓存后
+#   ghcr.io/<owner>/flori-<stage>:buildcache(CI build-images 的 cache-to 已常驻产出).换机/清缓存后
 #   首建即从 ghcr 拉依赖层(pip/apt/CLI binary)而非重算;命中需先 `docker login ghcr.io`(包私有),
 #   读不到则 BuildKit 优雅跳过(import 失败非致命),退化为本地层缓存。本地热重建仍秒级(本地层 + cache mount)。
 #
 # 与 CI 一致,本地也把构建上下文里的 pyproject version 抹成 0.0.0,真实运行版本通过
-# FLORI_VERSION build-arg 注入。否则每次提交 bump 版本都会让 COPY pyproject.toml 层变化,
+# FLORI_VERSION build-arg 注入.否则每次发布交付 bump 版本都会让 COPY pyproject.toml 层变化,
 # 进而拖垮 worker 的 apt/CLI/pip 依赖缓存。
 #
 # 用法:

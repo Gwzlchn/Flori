@@ -1,142 +1,280 @@
 #!/usr/bin/env python3
-"""真实变异分数驱动(绕过 mutmut 3.6 自动 runner 的 killed=0 缺陷)。
+"""真实变异分数驱动,区分被测试杀死与基础设施失败.
 
-为什么需要它:mutmut 3.6 的 `mutmut run` 自带的"跑测试判生死"那一步在本仓库布局下恒报
-killed=0(它没把被测代码从 mutants/ 副本里激活——见 mutation.yml 注释)。但底层机制是好的:
-设 MUTANT_UNDER_TEST={module}.{mutant_func} 后从 mutants/ 跑 pytest,trampoline 会真正路由到
-该变异体(实测 assert_public_url 的逻辑变异确实被 test_net 杀掉)。本脚本就把这条"手动 recipe"
-做成可重复的循环,产出**真实**的 killed/survived。
-
-用法(在测试容器内,cwd=/app):
-  python3 scripts/mutation_score.py [目标前缀过滤]
-  - 不带参数:跑下面 TARGETS 里的全部核心模块。
-  - 带参数:只跑 key 含该子串的目标(如 `ai_gateway` 只跑计费模块)。
-
-慢是变异测试的固有属性(每个变异体都要跑一遍相关测试),故只对"计费/正确性关键"模块开,
-且每个目标只跑它相关的测试(不是全套),把时间压到可接受。
+mutmut 3.x 的自带 runner 在本仓库布局下不会从 mutants/ 激活变异代码.
+本脚本设置 MUTANT_UNDER_TEST,从 mutants/ 对每个变异体运行相关测试.
+只有 pytest 退出码 1 表示断言杀死变异体;中断,内部错误,用法错误,
+未收集用例等都属于 infra-error,整次测量失败且不持久化分数.
 """
+
 from __future__ import annotations
 
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum
 
-# 目标模块前缀 → 该模块"相关"的测试文件(变异体只用这些测试判生死)。
-# 选的都是 docs/09-testing.md 反复强调的钱/并发/状态机安全面。
-# 生成阶段的基线测试:只为让 mutmut 的(无效)自动 run 快速跑完以产出 mutants/——
-# 变异体只取决于 source_paths,与跑什么测试无关,故固定用一个最快的测试当基线。
+
 GEN_BASELINE = ["tests/test_net.py"]
+MUTANT_TIMEOUT_SECONDS = int(os.environ.get("MUTATION_TEST_TIMEOUT", "300"))
 
 TARGETS: dict[str, list[str]] = {
     "shared.ai_gateway": ["tests/test_ai_gateway.py"],
     "shared.db": ["tests/test_db.py"],
-    "scheduler": ["tests/test_scheduler.py", "tests/test_runner_ops.py",
-                  "tests/test_pipeline_config.py"],
+    "scheduler": [
+        "tests/test_scheduler.py",
+        "tests/test_runner_ops.py",
+        "tests/test_pipeline_config.py",
+    ],
     "worker": ["tests/test_worker.py", "tests/test_transport.py"],
 }
 
-_MUTANT_DEF = re.compile(r"^def (x_[A-Za-z0-9_]+__mutmut_\d+)\(", re.M)
+_MUTANT_DEF = re.compile(
+    r"^[ \t]*(?:async[ \t]+)?def[ \t]+(x[\wǁ]+__mutmut_\d+)[ \t]*\(",
+    re.M,
+)
 _SEL = re.compile(r"pytest_add_cli_args_test_selection = \[[^\]]*\]")
 
 
+class MutationOutcome(str, Enum):
+    KILLED = "killed"
+    SURVIVED = "survived"
+    INFRA_ERROR = "infra-error"
+
+
+@dataclass
+class MutationCounts:
+    killed: int = 0
+    survived: int = 0
+    infra_error: int = 0
+
+    @property
+    def valid_total(self) -> int:
+        return self.killed + self.survived
+
+    @property
+    def valid(self) -> bool:
+        return self.infra_error == 0
+
+
+@dataclass
+class TargetResult:
+    prefix: str
+    counts: MutationCounts
+    detail: str | None = None
+
+
+def classify_pytest_exit_code(returncode: int) -> MutationOutcome:
+    """保守分类 pytest 退出码,避免基础设施故障虚高变异分数."""
+    if returncode == 0:
+        return MutationOutcome.SURVIVED
+    if returncode == 1:
+        return MutationOutcome.KILLED
+    return MutationOutcome.INFRA_ERROR
+
+
 def _set_generation_selection() -> str:
-    """把 [tool.mutmut] 的测试选择临时改成最快基线,让 mutmut 的(无效)生成跑得快;
-    返回原始 pyproject 文本以便还原。生成出的变异体只取决于 source_paths,与选择无关。"""
-    p = pathlib.Path("pyproject.toml")
-    orig = p.read_text()
-    sel = ", ".join(repr(t) for t in [*GEN_BASELINE, "-m", "not fuzz"])
-    p.write_text(_SEL.sub(f"pytest_add_cli_args_test_selection = [{sel}]", orig))
-    return orig
+    """临时把 mutmut 生成阶段切到最快基线,返回原 pyproject 以便还原."""
+    path = pathlib.Path("pyproject.toml")
+    original = path.read_text()
+    selection = ", ".join(repr(item) for item in [*GEN_BASELINE, "-m", "not fuzz"])
+    updated, replacements = _SEL.subn(
+        f"pytest_add_cli_args_test_selection = [{selection}]", original
+    )
+    if replacements != 1:
+        raise RuntimeError("mutmut test selection config was not found exactly once")
+    path.write_text(updated)
+    return original
+
+
+def _generate_mutants(prefix: str) -> None:
+    """从干净 mutants/ 生成目标变异体,异常时也必须还原 pyproject."""
+    mutants_dir = pathlib.Path("mutants")
+    if mutants_dir.exists():
+        shutil.rmtree(mutants_dir)
+    original = _set_generation_selection()
+    try:
+        # mutmut 自身的存活结果不用于计分.
+        # 非零只表示生成阶段未可靠完成.
+        # 生成结果还要经过非空 mutants/ + clean baseline 二次校验.
+        result = subprocess.run(
+            ["mutmut", "run", prefix + "*"],
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"mutmut generation failed with exit code {result.returncode}")
+    finally:
+        pathlib.Path("pyproject.toml").write_text(original)
 
 
 def _enumerate_mutants(prefix: str) -> list[str]:
-    """从生成好的 mutants/ 源码里枚举全部变异体 id = {module}.{mutant_func}。
-    直接扫源码比 `mutmut results` 可靠(后者会漏列未"check"的逻辑变异)。"""
+    """从生成源码枚举 `{module}.{mutant_func}`."""
     ids: list[str] = []
-    for f in sorted(pathlib.Path("mutants").rglob("*.py")):
-        rel = f.relative_to("mutants")
-        if rel.parts[0] == "tests":
+    for path in sorted(pathlib.Path("mutants").rglob("*.py")):
+        relative = path.relative_to("mutants")
+        if relative.parts[0] == "tests":
             continue
-        module = ".".join(rel.with_suffix("").parts)
+        module = ".".join(relative.with_suffix("").parts)
         if not (module == prefix or module.startswith(prefix + ".")):
             continue
-        for m in _MUTANT_DEF.finditer(f.read_text()):
-            ids.append(f"{module}.{m.group(1)}")
+        for match in _MUTANT_DEF.finditer(path.read_text()):
+            ids.append(f"{module}.{match.group(1)}")
     return ids
 
 
-def _score(ids: list[str], tests: list[str]) -> tuple[int, int]:
-    killed = survived = 0
-    for mid in ids:
-        env = {**os.environ, "MUTANT_UNDER_TEST": mid}
-        r = subprocess.run(
-            [sys.executable, "-m", "pytest", *tests, "-q", "-x", "-p", "no:cacheprovider"],
-            cwd="mutants", env=env,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        # 退出码 0 = 全过 = 变异体存活(测试盲区);非 0 = 有测试挂 = 变异体被杀。
-        if r.returncode == 0:
-            survived += 1
-        else:
-            killed += 1
-    return killed, survived
+def _run_pytest(tests: list[str], mutant_id: str | None = None) -> int:
+    env = {**os.environ}
+    if mutant_id is not None:
+        env["MUTANT_UNDER_TEST"] = mutant_id
+    else:
+        env.pop("MUTANT_UNDER_TEST", None)
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", *tests, "-q", "-x", "-p", "no:cacheprovider"],
+        cwd="mutants",
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        timeout=MUTANT_TIMEOUT_SECONDS,
+    )
+    return result.returncode
 
 
-def main() -> int:
-    only = sys.argv[1] if len(sys.argv) > 1 else None
-    g_k = g_s = 0
-    results: list[tuple[str, int, int]] = []   # (prefix, killed, survived)
-    for prefix, tests in TARGETS.items():
-        if only and only not in prefix:
-            continue
-        print(f"mutation scoring: {prefix}  (tests: {' '.join(tests)})", flush=True)
-        orig = _set_generation_selection()
+def score_mutants(
+    mutant_ids: list[str],
+    *,
+    run_mutant: Callable[[str], int],
+) -> MutationCounts:
+    counts = MutationCounts()
+    for mutant_id in mutant_ids:
         try:
-            subprocess.run(["mutmut", "run", prefix + "*"],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        finally:
-            pathlib.Path("pyproject.toml").write_text(orig)  # 还原,勿污染仓库
-        ids = _enumerate_mutants(prefix)
-        killed, survived = _score(ids, tests)
-        results.append((prefix, killed, survived))
-        total = killed + survived
-        pct = 100.0 * killed / total if total else 0.0
-        print(f"  {prefix:22s} killed={killed:4d} survived={survived:4d}"
-              f"  total={total:4d}  score={pct:5.1f}%", flush=True)
-        g_k += killed
-        g_s += survived
-    gt = g_k + g_s
+            outcome = classify_pytest_exit_code(run_mutant(mutant_id))
+        except (OSError, subprocess.TimeoutExpired):
+            outcome = MutationOutcome.INFRA_ERROR
+        if outcome is MutationOutcome.KILLED:
+            counts.killed += 1
+        elif outcome is MutationOutcome.SURVIVED:
+            counts.survived += 1
+        else:
+            counts.infra_error += 1
+    return counts
 
-    print("\n变异分数汇总(真实,非 mutmut 自报的 killed=0)")
-    for prefix, k, s in results:
-        t = k + s
-        print(f"  {prefix:22s} killed={k:4d} survived={s:4d}  total={t:4d}"
-              f"  score={100.0 * k / t if t else 0:5.1f}%")
-    print(f"  {'TOTAL':22s} killed={g_k:4d} survived={g_s:4d}"
-          f"  total={gt:4d}  score={100.0 * g_k / gt if gt else 0:.1f}%")
 
-    # GitHub Actions job summary 友好的 markdown 块(工作流抽这段 >> $GITHUB_STEP_SUMMARY)。
+def measure_mutants(
+    mutant_ids: list[str],
+    *,
+    run_baseline: Callable[[], int],
+    run_mutant: Callable[[str], int],
+) -> tuple[MutationCounts, str | None]:
+    """先校验 clean baseline,再计算变异体三态结果."""
+    if not mutant_ids:
+        return MutationCounts(infra_error=1), "no mutants generated"
+    try:
+        baseline_returncode = run_baseline()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return MutationCounts(infra_error=1), f"baseline launch failed: {exc}"
+    if baseline_returncode != 0:
+        return (
+            MutationCounts(infra_error=1),
+            f"clean baseline failed with pytest exit code {baseline_returncode}",
+        )
+    counts = score_mutants(mutant_ids, run_mutant=run_mutant)
+    detail = None if counts.valid else f"{counts.infra_error} mutant test runs had infra errors"
+    return counts, detail
+
+
+def select_targets(only: str | None) -> dict[str, list[str]]:
+    if not only:
+        return TARGETS
+    return {prefix: tests for prefix, tests in TARGETS.items() if only in prefix}
+
+
+def _score_percent(counts: MutationCounts) -> float:
+    return 100.0 * counts.killed / counts.valid_total if counts.valid_total else 0.0
+
+
+def _print_report(results: list[TargetResult]) -> None:
+    total = MutationCounts(
+        killed=sum(result.counts.killed for result in results),
+        survived=sum(result.counts.survived for result in results),
+        infra_error=sum(result.counts.infra_error for result in results),
+    )
+
+    print("\n变异分数汇总(基础设施错误不计 killed)")
+    for result in results:
+        counts = result.counts
+        print(
+            f"  {result.prefix:22s} killed={counts.killed:4d} survived={counts.survived:4d}"
+            f" infra={counts.infra_error:3d} total={counts.valid_total:4d}"
+            f" score={_score_percent(counts):5.1f}%"
+        )
+        if result.detail:
+            print(f"    infra detail: {result.detail}")
+    print(
+        f"  {'TOTAL':22s} killed={total.killed:4d} survived={total.survived:4d}"
+        f" infra={total.infra_error:3d} total={total.valid_total:4d}"
+        f" score={_score_percent(total):.1f}%"
+    )
+
     print("\n<!--MUTATION-SUMMARY-->")
-    print("### 🧬 变异分数(killed/总数;存活=测试盲区,非阻塞)")
-    print("| 模块 | killed | survived | total | score |")
-    print("|---|---:|---:|---:|---:|")
-    for prefix, k, s in results:
-        t = k + s
-        print(f"| `{prefix}` | {k} | {s} | {t} | {100.0 * k / t if t else 0:.1f}% |")
-    print(f"| **TOTAL** | **{g_k}** | **{g_s}** | **{gt}** | **{100.0 * g_k / gt if gt else 0:.1f}%** |")
+    print("### 变异分数(killed/有效总数;基础设施错误使测量失败)")
+    print("| 模块 | killed | survived | infra-error | valid total | score |")
+    print("|---|---:|---:|---:|---:|---:|")
+    for result in results:
+        counts = result.counts
+        print(
+            f"| `{result.prefix}` | {counts.killed} | {counts.survived} |"
+            f" {counts.infra_error} | {counts.valid_total} | {_score_percent(counts):.1f}% |"
+        )
+    print(
+        f"| **TOTAL** | **{total.killed}** | **{total.survived}** |"
+        f" **{total.infra_error}** | **{total.valid_total}** | **{_score_percent(total):.1f}%** |"
+    )
     print("<!--/MUTATION-SUMMARY-->")
 
-    # 机器可读块:工作流抽这段、加日期后追加到 mutation-data 分支的 history.csv(趋势源数据)。
-    # 格式:module,killed,survived(分数由 mutation_report.py 算,避免重复定义)。
-    print("<!--MUTATION-CSV-->")
-    for prefix, k, s in results:
-        print(f"{prefix},{k},{s}")
-    print("<!--/MUTATION-CSV-->")
-    # 存活变异 = 断言盲区,但初期必有(等价变异 / 误差信息变异)→ 不让本步变红,供人工裁定。
-    return 0
+    if total.valid:
+        print("<!--MUTATION-CSV-->")
+        for result in results:
+            counts = result.counts
+            print(f"{result.prefix},{counts.killed},{counts.survived}")
+        print("<!--/MUTATION-CSV-->")
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = argv if argv is not None else sys.argv
+    if len(args) > 2:
+        print("usage: mutation_score.py [target-substring]", file=sys.stderr)
+        return 2
+    only = args[1].strip() if len(args) == 2 else None
+    selected = select_targets(only or None)
+    if not selected:
+        print(f"unknown mutation target: {only}", file=sys.stderr)
+        return 2
+
+    results: list[TargetResult] = []
+    for prefix, tests in selected.items():
+        print(f"mutation scoring: {prefix}  (tests: {' '.join(tests)})", flush=True)
+        try:
+            _generate_mutants(prefix)
+            mutant_ids = _enumerate_mutants(prefix)
+            counts, detail = measure_mutants(
+                mutant_ids,
+                run_baseline=lambda tests=tests: _run_pytest(tests),
+                run_mutant=lambda mutant_id, tests=tests: _run_pytest(tests, mutant_id),
+            )
+        except (OSError, RuntimeError) as exc:
+            counts = MutationCounts(infra_error=1)
+            detail = f"mutation setup failed: {exc}"
+        results.append(TargetResult(prefix, counts, detail))
+
+    _print_report(results)
+    return 0 if all(result.counts.valid for result in results) else 2
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
