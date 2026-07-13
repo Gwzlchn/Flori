@@ -2617,6 +2617,20 @@ class Database:
 
     # Notes 全文索引 (FTS5)
 
+    def list_unindexed_done_jobs(self, limit: int = 100) -> list[Job]:
+        """返回尚无任何全文索引的当前已完成 job,供 scheduler 幂等补账。"""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM jobs
+                   WHERE status='done' AND is_current=1
+                     AND NOT EXISTS (
+                       SELECT 1 FROM notes_fts5 WHERE notes_fts5.job_id=jobs.id
+                     )
+                   ORDER BY created_at ASC LIMIT ?""",
+                (max(1, min(int(limit), 1000)),),
+            ).fetchall()
+        return [self._row_to_job(row) for row in rows]
+
     def index_job_notes(
         self,
         job_id: str,
@@ -2626,31 +2640,47 @@ class Database:
         content_type: str = "",
         domain: str = "",
         collection_id: str = "",
+        supersede_note_types: list[str] | None = None,
     ) -> None:
-        """把某 job 某类笔记写入 FTS 索引:先删该 (job_id, note_type) 行再插,幂等。"""
+        """原子替换某 job/note_type 的全文与证据块索引,失败时保留旧版本。"""
         with self._lock:
-            self._conn.execute(
-                "DELETE FROM notes_fts5 WHERE job_id=? AND note_type=?",
-                (job_id, note_type),
-            )
-            self._conn.execute(
-                """INSERT INTO notes_fts5
-                   (job_id, content_type, note_type, collection_id, domain,
-                    title, body)
-                   VALUES (?,?,?,?,?,?,?)""",
-                (job_id, content_type, note_type, collection_id or "",
-                 domain or "", title or "", body or ""),
-            )
-            self._replace_note_chunks_locked(
-                job_id=job_id,
-                note_type=note_type,
-                title=title,
-                body=body,
-                content_type=content_type,
-                domain=domain,
-                collection_id=collection_id,
-            )
-            self._conn.commit()
+            # notes_fts5 与两张 chunk 表是一个可见版本。任一写入失败都回滚删除和
+            # 已插入行,避免后续无关 commit 固化半成品;同一输入可安全重试。
+            with self._conn:
+                for stale_type in set(supersede_note_types or []) - {note_type}:
+                    self._conn.execute(
+                        "DELETE FROM notes_fts5 WHERE job_id=? AND note_type=?",
+                        (job_id, stale_type),
+                    )
+                    self._conn.execute(
+                        "DELETE FROM note_chunks WHERE job_id=? AND note_type=?",
+                        (job_id, stale_type),
+                    )
+                    self._conn.execute(
+                        "DELETE FROM note_chunks_fts5 WHERE job_id=? AND note_type=?",
+                        (job_id, stale_type),
+                    )
+                self._conn.execute(
+                    "DELETE FROM notes_fts5 WHERE job_id=? AND note_type=?",
+                    (job_id, note_type),
+                )
+                self._conn.execute(
+                    """INSERT INTO notes_fts5
+                       (job_id, content_type, note_type, collection_id, domain,
+                        title, body)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (job_id, content_type, note_type, collection_id or "",
+                     domain or "", title or "", body or ""),
+                )
+                self._replace_note_chunks_locked(
+                    job_id=job_id,
+                    note_type=note_type,
+                    title=title,
+                    body=body,
+                    content_type=content_type,
+                    domain=domain,
+                    collection_id=collection_id,
+                )
 
     def _replace_note_chunks_locked(
         self,

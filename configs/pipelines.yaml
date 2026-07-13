@@ -63,6 +63,8 @@ video:
       pool: io
       retry: 3
       timeout: 2400   # 长视频(30min+)1080p 下载 + 推 MinIO 可能超默认 600s
+      on_complete:
+        - action: sync_metadata
       outputs: ["input/source.mp4", "input/source.mp3", "input/source.m4a",
                 "input/metadata.json", "input/*.srt", "input/*.ass",
                 "input/source.pdf", "input/source.html"]
@@ -158,6 +160,10 @@ video:
       needs: ["06_ocr", "07_danmaku", "08_punctuate"]
       timeout: 30
       retry: 1
+      on_complete:
+        - action: index_note
+          candidates:
+            - {note_type: mechanical, path: "output/notes_mechanical.md"}
       outputs: ["output/notes_mechanical.md"]
 
     "10_evidence":
@@ -202,6 +208,11 @@ video:
       ai:
         primary: {provider: $AI_CONCEPTS_PRIMARY_PROVIDER, model: $AI_CONCEPTS_PRIMARY_MODEL}
         fallback: {provider: $AI_CONCEPTS_FALLBACK_PROVIDER, model: $AI_CONCEPTS_FALLBACK_MODEL}
+      on_complete:
+        - action: index_note
+          candidates:
+            - {note_type: smart, path: "output/versions/notes_smart_*"}
+        - action: collect_glossary
       outputs: ["output/concepts.json"]
 
     "12_review":
@@ -215,6 +226,8 @@ video:
       ai:
         primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
+      on_complete:
+        - action: collect_glossary
       outputs: ["output/versions/review_*"]   # 版本化评审(与笔记版本 1:1 配对);笔记页另渲染可读面板
 
 paper:
@@ -244,6 +257,8 @@ paper:
       timeout: 600   # PDF + HTML 源 + 页内图片(arxiv 慢时单 PDF 可近 120s)
       retry: 3
       version: "5"   # 图 urljoin 去手拼尾斜杠(RFC3986 末段丢弃=浏览器语义;修双段404图全外链),失效旧指纹
+      on_complete:
+        - action: sync_metadata
       outputs: ["input/source.pdf", "input/source.html", "input/metadata.json", "assets/*"]
 
     "02_pdf_parse":
@@ -254,6 +269,8 @@ paper:
       needs: ["01_download"]
       version: "3"   # pdf-only 垃圾标题(内嵌 metadata)启发式改从首页文本提取,失效旧指纹
       # 非中文论文写 needs_translation.json 标记(供 04_translate_paper 的 rules:exists 门控)。
+      on_complete:
+        - action: sync_metadata
       outputs: ["intermediate/parsed.json", "intermediate/needs_translation.json", "output/original.md"]
 
     "03_sections":
@@ -282,6 +299,8 @@ paper:
       ai:
         primary: {provider: $AI_TRANSLATE_PRIMARY_PROVIDER, model: $AI_TRANSLATE_PRIMARY_MODEL}
         fallback: {provider: $AI_TRANSLATE_FALLBACK_PROVIDER, model: $AI_TRANSLATE_FALLBACK_MODEL}
+      on_complete:
+        - action: collect_term_pairs
       outputs: ["output/translated.md"]
 
     "05_smart_paper":
@@ -309,6 +328,11 @@ paper:
       ai:
         primary: {provider: $AI_CONCEPTS_PRIMARY_PROVIDER, model: $AI_CONCEPTS_PRIMARY_MODEL}
         fallback: {provider: $AI_CONCEPTS_FALLBACK_PROVIDER, model: $AI_CONCEPTS_FALLBACK_MODEL}
+      on_complete:
+        - action: index_note
+          candidates:
+            - {note_type: smart, path: "output/versions/notes_smart_*"}
+        - action: collect_glossary
       outputs: ["output/concepts.json"]
 
     "06_review":
@@ -320,6 +344,8 @@ paper:
       ai:
         primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
+      on_complete:
+        - action: collect_glossary
       outputs: ["output/versions/review_*"]   # 版本化评审(与笔记版本 1:1 配对);笔记页另渲染可读面板
 
 article:
@@ -351,6 +377,8 @@ article:
       # 步超时须 ≥ 各拍之和 ~930s,否则退避被腰斩;死链最坏 ~930s 才判失败(接受此代价换慢站成功率)。
       timeout: 1000
       retry: 3
+      on_complete:
+        - action: sync_metadata
       # 正文内图片本地化 → assets/(下载步抓取,供原文 MD 内嵌)。
       outputs: ["input/source.html", "input/metadata.json", "input/article_meta.json", "assets/*"]
 
@@ -364,6 +392,8 @@ article:
       version: "3"   # 图片找回(extractor+锚点插回,readability 剔深嵌套正文图),失效旧指纹
       # 补全元信息(abstract/image/tags/author),并产出图片本地引用的可读原文 Markdown;
       # 非中文正文写 needs_translation.json 标记(供 04_translate_article 的 rules:exists 门控)。
+      on_complete:
+        - action: sync_metadata
       outputs: ["intermediate/parsed.json", "output/original.md", "intermediate/needs_translation.json", "assets/*"]
 
     "03_article_sections":
@@ -406,6 +436,8 @@ article:
       ai:
         primary: {provider: $AI_TRANSLATE_PRIMARY_PROVIDER, model: $AI_TRANSLATE_PRIMARY_MODEL}
         fallback: {provider: $AI_TRANSLATE_FALLBACK_PROVIDER, model: $AI_TRANSLATE_FALLBACK_MODEL}
+      on_complete:
+        - action: collect_term_pairs
       outputs: ["output/translated.md"]
 
     "05_concepts":
@@ -421,6 +453,14 @@ article:
       ai:
         primary: {provider: $AI_CONCEPTS_PRIMARY_PROVIDER, model: $AI_CONCEPTS_PRIMARY_MODEL}
         fallback: {provider: $AI_CONCEPTS_FALLBACK_PROVIDER, model: $AI_CONCEPTS_FALLBACK_MODEL}
+      on_complete:
+        - action: index_note
+          # 轻链路没有 smart;按最终可用内容降级,仍只索引一个版本,避免 Ask 重复证据。
+          candidates:
+            - {note_type: smart, path: "output/versions/notes_smart_*"}
+            - {note_type: translated, path: "output/translated.md"}
+            - {note_type: original, path: "output/original.md"}
+        - action: collect_glossary
       outputs: ["output/concepts.json"]
 
     "06_review":
@@ -437,6 +477,8 @@ article:
       ai:
         primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
+      on_complete:
+        - action: collect_glossary
       outputs: ["output/versions/review_*"]   # 版本化评审(与笔记版本 1:1 配对);笔记页另渲染可读面板
 
 audio:
@@ -461,6 +503,8 @@ audio:
       pool: io
       timeout: 120
       retry: 3
+      on_complete:
+        - action: sync_metadata
       outputs: ["input/source.mp3", "input/source.m4a", "input/source.mp4", "input/metadata.json"]
 
     # 转写复用 video 的 whisper 步。
@@ -513,6 +557,11 @@ audio:
       ai:
         primary: {provider: $AI_CONCEPTS_PRIMARY_PROVIDER, model: $AI_CONCEPTS_PRIMARY_MODEL}
         fallback: {provider: $AI_CONCEPTS_FALLBACK_PROVIDER, model: $AI_CONCEPTS_FALLBACK_MODEL}
+      on_complete:
+        - action: index_note
+          candidates:
+            - {note_type: smart, path: "output/versions/notes_smart_*"}
+        - action: collect_glossary
       outputs: ["output/concepts.json"]
 
     "05_review":
@@ -524,4 +573,6 @@ audio:
       ai:
         primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
+      on_complete:
+        - action: collect_glossary
       outputs: ["output/versions/review_*"]   # 版本化评审(与笔记版本 1:1 配对);笔记页另渲染可读面板

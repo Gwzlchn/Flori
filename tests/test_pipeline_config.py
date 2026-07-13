@@ -249,6 +249,48 @@ class TestImagePreserved:
                 assert s["image"], s["name"]
 
 
+# 完成副作用:声明随 step 归一化保留,四类内容都必须具备索引闭环
+
+
+class TestCompletionEffects:
+    def test_on_complete_preserved(self):
+        raw = {"p": {"jobs": {"A": {
+            "run": "m.a", "pool": "cpu",
+            "on_complete": [{"action": "index_note", "candidates": [
+                {"note_type": "smart", "path": "output/versions/notes_smart_*"},
+            ]}],
+        }}}}
+        step = normalize_pipelines(raw)["p"]["steps"][0]
+        assert step["on_complete"][0]["action"] == "index_note"
+
+    def test_every_real_pipeline_declares_search_index(self, configs_dir):
+        pipelines = load_pipelines(configs_dir / "pipelines.yaml")
+        assert {"video", "paper", "article", "audio"} <= set(pipelines)
+        for name, pipeline in pipelines.items():
+            effects = [
+                effect
+                for step in pipeline["steps"]
+                for effect in step.get("on_complete", [])
+            ]
+            assert any(effect.get("action") == "index_note" for effect in effects), name
+            assert any(effect.get("action") == "sync_metadata" for effect in effects), name
+            assert {effect.get("action") for effect in effects} <= {
+                "sync_metadata", "index_note", "collect_glossary", "collect_term_pairs",
+            }
+
+    def test_article_index_has_lightweight_fallbacks(self, configs_dir):
+        steps = load_pipelines(configs_dir / "pipelines.yaml")["article"]["steps"]
+        effect = next(
+            effect
+            for step in steps
+            for effect in step.get("on_complete", [])
+            if effect.get("action") == "index_note"
+        )
+        assert [candidate["note_type"] for candidate in effect["candidates"]] == [
+            "smart", "translated", "original",
+        ]
+
+
 # 端到端:pipelines.yaml 归一化输出的契约形状稳定
 
 

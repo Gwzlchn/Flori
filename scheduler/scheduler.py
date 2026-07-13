@@ -40,25 +40,6 @@ _PRIORITY_BOOST = {"02_whisper": 100}
 # 延迟重试任务的 name 前缀,跟踪/按 job 取消时复用,避免格式漂移。
 _DELAYED_PREFIX = "delayed_enqueue:"
 
-# 笔记产出步 -> note_type。smart 已版本化(取最新版本文件),mechanical 走固定路径。
-_NOTE_STEPS = {
-    "11_smart": "smart",
-    "05_smart_paper": "smart",
-    "09_mechanical": "mechanical",
-}
-_NOTE_FILES = {
-    "mechanical": "output/notes_mechanical.md",
-}
-# 评审步:完成后读 review.json,把 key_terms(讲清楚的概念 + 候选定义)采集为候选术语。
-_REVIEW_STEPS = {"12_review", "06_review", "05_review"}  # video / paper / (article|audio)
-# article 链的独立概念步(必跑)是 glossary 的主采集源:评审可选时仍能进图谱。
-# 与 review 双触发无害:add_glossary_suggestion 按 job_id 去重 occurrence,保持幂等.
-_CONCEPT_STEPS = {"05_concepts", "12_concepts"}
-# 翻译步:完成后读 output/term_pairs.json,把本篇新定的英文到中文译名回流 glossary
-# (术语一致性飞轮:下一篇同域翻译经 input/term_map.json 注入,见 shared/terms.py)。
-_TRANSLATE_STEPS = {"04_translate_paper", "04_translate_article"}
-
-
 def _markdown_to_text(md: str) -> str:
     """Markdown 去标记取纯文本(轻量、零依赖,够 FTS 索引用):剥代码围栏、
     图片/链接、标题/列表/强调标记,折叠空白。"""
@@ -272,6 +253,7 @@ class Scheduler:
                 await self.check_no_worker()
                 await self.cleanup_stale_workers()
                 await self.reconcile_slots()
+                await self.reconcile_completion_effects()
                 await self.check_radar_digest()
             except Exception:
                 logger.exception("periodic_error")
@@ -521,47 +503,98 @@ class Scheduler:
             "duration_sec": duration, "progress_pct": progress,
         })
 
-        # 笔记产出步 -> 建全文索引;评审步 -> 采集候选术语。失败只 log 不致命。
-        await self._index_on_step_done(job_id, step)
+        # 完成副作用来自 pipeline step 的 on_complete 声明。失败不回滚已完成步骤;
+        # job 终态门与周期对账会幂等重放,直到全部副作用成功。
+        await self._run_step_completion_effects(job_id, step)
 
         logger.info("step_done", job_id=job_id, step=step, duration=duration)
         await self._check_downstream(job_id)
 
-    async def _index_on_step_done(self, job_id: str, step: str) -> None:
-        """步骤完成后的知识库副作用:笔记产出步建 FTS 索引、评审步采集术语。
-        全程容错:缺 storage,读不到产物或解析异常都只记日志,绝不影响 DAG 推进."""
-        if self.storage is None:
-            return
-        try:
-            if step in ("01_download", "02_pdf_parse", "02_parse_article"):
-                # 下载完即从 metadata/article_meta 同步标题/时间,使内容名在处理过程中即可显示;
-                # 论文标题只在 02_pdf_parse 写的 parsed.json,01 时还没有,故解析步后再同步一次。
-                # 这样 AI 步未跑、job 卡住时也不必等 job_done 就能出标题;job_done 时仍兜底。
-                await self._sync_published_at(job_id)
-            elif step in _NOTE_STEPS:
-                await self._index_job_notes(job_id, _NOTE_STEPS[step])
-            elif step in _REVIEW_STEPS or step in _CONCEPT_STEPS:
-                await self._collect_glossary(job_id)
-            elif step in _TRANSLATE_STEPS:
-                await self._collect_term_pairs(job_id)
-        except Exception:
-            logger.warning("index_step_done_failed", job_id=job_id, step=step)
+    async def _run_step_completion_effects(self, job_id: str, step: str) -> bool:
+        """执行当前步骤声明的完成副作用。返回 False 时由终态门和周期对账重试。"""
+        steps = await self._get_job_pipeline_steps(job_id)
+        if not steps:
+            return True
+        effects = steps.get(step, {}).get("on_complete") or []
+        return await self._run_completion_effects(job_id, step, effects)
 
-    async def _index_job_notes(self, job_id: str, note_type: str) -> None:
-        """读该 job 的笔记 Markdown,去标记取纯文本,连同 job 元信息写入 FTS 索引。"""
-        rel = _NOTE_FILES.get(note_type)
-        if note_type == "smart":   # 智能笔记已版本化,取最新版本文件
-            from shared.notes_versions import latest_smart
-            rel = latest_smart(await self.storage.list_files(job_id))
-        if not rel:
+    async def _run_completion_effects(
+        self, job_id: str, step: str, effects: list,
+    ) -> bool:
+        if not effects or self.storage is None:
+            return True
+        for effect in effects:
+            action = effect.get("action") if isinstance(effect, dict) else None
+            try:
+                if action == "sync_metadata":
+                    await self._sync_published_at(job_id)
+                elif action == "index_note":
+                    await self._index_first_available_note(
+                        job_id, effect.get("candidates") or [],
+                    )
+                elif action == "collect_glossary":
+                    await self._collect_glossary(job_id)
+                elif action == "collect_term_pairs":
+                    await self._collect_term_pairs(job_id)
+                else:
+                    raise ValueError(f"unknown completion action: {action!r}")
+                logger.info(
+                    "completion_effect_done", job_id=job_id, step=step, action=action,
+                )
+            except Exception:
+                logger.warning(
+                    "completion_effect_failed", job_id=job_id, step=step,
+                    action=action, exc_info=True,
+                )
+                return False
+        return True
+
+    async def _index_first_available_note(
+        self, job_id: str, candidates: list[dict],
+    ) -> None:
+        """按配置顺序索引首个存在的笔记产物,避免回退来源重复进入 Ask。"""
+        candidate_types = [note_type for note_type in (
+            str(candidate.get("note_type") or "").strip()
+            for candidate in candidates if isinstance(candidate, dict)
+        ) if note_type]
+        files: list[str] | None = None
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            note_type = str(candidate.get("note_type") or "").strip()
+            pattern = str(candidate.get("path") or "").strip()
+            if not note_type or not pattern:
+                continue
+            rel = pattern
+            if any(ch in pattern for ch in "*?["):
+                if files is None:
+                    files = await self.storage.list_files(job_id)
+                matches = [f for f in files if fnmatch.fnmatch(f, pattern)]
+                if note_type == "smart":
+                    from shared.notes_versions import latest_smart
+                    rel = latest_smart(matches) or ""
+                else:
+                    rel = max(matches, default="")
+            if not rel:
+                continue
+            data = await self.storage.read_file(job_id, rel)
+            if not data:
+                continue
+            await self._index_job_notes(
+                job_id, note_type, rel, data, candidate_types=candidate_types,
+            )
             return
-        data = await self.storage.read_file(job_id, rel)
-        if not data:
-            return
+        raise FileNotFoundError(f"no indexable note artifact for {job_id}")
+
+    async def _index_job_notes(
+        self, job_id: str, note_type: str, rel: str, data: bytes,
+        *, candidate_types: list[str] | None = None,
+    ) -> None:
+        """把指定 Markdown 产物去标记后写入全文与证据块索引。"""
         md = data.decode("utf-8", errors="replace")
         body = _markdown_to_text(md)
         if not body:
-            return
+            raise ValueError(f"empty note body: {rel}")
         job = await asyncio.to_thread(self.db.get_job, job_id)
         title = (job.title if job else None) or job_id
         domain = job.domain if job else ""
@@ -570,9 +603,25 @@ class Scheduler:
         await asyncio.to_thread(
             self.db.index_job_notes,
             job_id, note_type, title, body,
-            content_type, domain, collection_id,
+            content_type, domain, collection_id, candidate_types,
         )
-        logger.info("notes_indexed", job_id=job_id, note_type=note_type)
+        logger.info(
+            "notes_indexed", job_id=job_id, note_type=note_type, source_file=rel,
+        )
+
+    async def _reconcile_completed_effects(self, job_id: str) -> bool:
+        """幂等重放该 job 所有 done 步骤的声明副作用,闭合事件丢失与崩溃窗口。"""
+        steps = await self._get_job_pipeline_steps(job_id)
+        if not steps:
+            return True
+        statuses = await self.redis.get_all_step_statuses(job_id)
+        for step, cfg in steps.items():
+            if statuses.get(step) != "done":
+                continue
+            effects = cfg.get("on_complete") or []
+            if effects and not await self._run_completion_effects(job_id, step, effects):
+                return False
+        return True
 
     async def _export_term_map(self, job: Job) -> None:
         """术语一致性 L1(+L2)导出:把该 domain 的 glossary 译名快照写 input/term_map.json,
@@ -1072,8 +1121,12 @@ class Scheduler:
 
     # Job 状态
 
-    async def mark_job_done(self, job_id: str) -> None:
-        await self._sync_published_at(job_id)
+    async def mark_job_done(self, job_id: str) -> bool:
+        # 只有声明副作用全部成功才越过 job 终态门。失败时步骤保持 done、job 留在 active,
+        # 周期对账会继续幂等重放,不会要求 worker 重跑昂贵步骤。
+        if not await self._reconcile_completed_effects(job_id):
+            logger.warning("job_completion_effects_pending", job_id=job_id)
+            return False
         await asyncio.to_thread(
             self.db.update_job, job_id,
             status=JobStatus.DONE, progress_pct=100,
@@ -1084,6 +1137,33 @@ class Scheduler:
         await self.redis.remove_active_job(job_id)
         await self._advance_book_chain(job_id)
         logger.info("job_done", job_id=job_id)
+        return True
+
+    async def reconcile_completion_effects(self) -> None:
+        """周期收敛 active 终态门,并补齐历史已完成但无全文索引的 job。"""
+        for job_id in await self.redis.get_active_jobs():
+            statuses = await self.redis.get_all_step_statuses(job_id)
+            if statuses and all(v in ("done", "skipped") for v in statuses.values()):
+                await self.mark_job_done(job_id)
+        if self.storage is None:
+            return
+        jobs = await asyncio.to_thread(self.db.list_unindexed_done_jobs)
+        for job in jobs:
+            indexed = False
+            for step, cfg in self._get_pipeline_steps(job.pipeline).items():
+                effects = [
+                    effect for effect in (cfg.get("on_complete") or [])
+                    if isinstance(effect, dict) and effect.get("action") == "index_note"
+                ]
+                for effect in effects:
+                    indexed = (
+                        await self._run_completion_effects(job.id, step, [effect])
+                        or indexed
+                    )
+            if indexed:
+                logger.info(
+                    "search_index_reconciled", job_id=job.id, pipeline=job.pipeline,
+                )
 
     async def _advance_book_chain(self, job_id: str) -> None:
         """book 章序:本 job 属 book_toc 集合且到终态后,按 created_at 序 submit 下一待投章.

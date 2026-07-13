@@ -1333,6 +1333,8 @@ Response `200`：更新后的 `GlossaryTermResponse`。
 
 基于 SQLite FTS5（`trigram` tokenizer，对中文做子串匹配）。**`q` 至少 3 个字符才可能命中**，更短或空查询直接返回空结果（`total: 0`）。`q` 经服务端转义防 MATCH 注入。
 
+video、paper、article、audio 四类真实 pipeline 都通过 `pipelines.yaml::jobs.*.on_complete` 进入该全文索引；Ask 使用同一次原子写入生成的 `note_chunks_fts5`，MCP `search` 与本端点共用 `notes_fts5`。重复完成事件或恢复对账不会累加 FTS 行、证据块或概念 occurrence。
+
 ```bash
 curl "http://localhost:8000/api/search?q=注意力机制&domain=deep-learning&limit=20"
 ```
@@ -1993,8 +1995,11 @@ default:
 | `tags` | 需求标签，匹配 worker 能力标签（如 `gpu` / `vision`） |
 | `rules` | 条件门：`exists` 命中后 `when: on`（启用）或 `when: skip`（跳过） |
 | `ai` | AI provider 路由：`primary` / `fallback` / `text_fallback`，各取 `{provider, model}` |
+| `on_complete` | 步骤完成后的幂等副作用列表；每项为 `{action,...}`，支持 `sync_metadata`、`index_note`、`collect_glossary`、`collect_term_pairs` |
 
 **每段 `variables`** 是该 content_type 的单一事实源（AI provider/model、OCR 超时等），job 用 `$VAR` 引用。
+
+`on_complete` 是完成副作用的唯一声明源，scheduler 不维护内容类型或步骤白名单。`index_note.candidates` 按顺序选择首个存在的 `{note_type,path}`；`path` 可用 glob，article 默认按 `smart → translated → original` 回退且同一 job 只保留一个候选来源。步骤状态变成 `done` 后副作用可重复执行：全文、证据块和候选来源替换在同一 SQLite 事务中完成；job 进入 `done` 前会重放全部已完成步骤的声明，失败时保持 active 并由周期对账继续收敛。治理前已完成但尚无全文记录的当前 job 也按相同声明补账，不依赖遗留 Redis step 状态。
 
 > **AI provider / model 显式规则**：`ai.provider` 和 `ai.model` 必须在任务配置或载荷中显式出现,不得由 `pool=ai`、worker 名称或运行时默认推断 provider。pipeline 和独立 AI task 必须使用具体模型名（如 `claude-opus-4-8[1m]`、Codex CLI 可接受的模型名、`moonshot-v1-128k`）。缺 provider 或缺 model 是契约错误,不得用运行时默认值补齐。
 

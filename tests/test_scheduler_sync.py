@@ -31,9 +31,27 @@ class _DB:
         self.updates.update(fields)
 
 
+class _Redis:
+    async def get_job_pipeline(self, job_id: str):
+        return "article" if "article" in job_id else "paper"
+
+
 def _engine(storage, db):
-    return Scheduler(redis=None, db=db,
-                     config=SimpleNamespace(jobs_dir=Path("/tmp/x")), storage=storage)
+    pipelines = {
+        "paper": {"steps": [{
+            "name": "02_pdf_parse",
+            "on_complete": [{"action": "sync_metadata"}],
+        }]},
+        "article": {"steps": [{
+            "name": "02_parse_article",
+            "on_complete": [{"action": "sync_metadata"}],
+        }]},
+    }
+    return Scheduler(
+        redis=_Redis(), db=db,
+        config=SimpleNamespace(jobs_dir=Path("/tmp/x"), pipelines=pipelines),
+        storage=storage,
+    )
 
 
 @pytest.mark.asyncio
@@ -65,8 +83,8 @@ async def test_pdf_parse_triggers_title_sync(monkeypatch):
         called.append(jid)
 
     monkeypatch.setattr(eng, "_sync_published_at", _fake_sync)
-    await eng._index_on_step_done("jobs_paper_x", "02_pdf_parse")
-    await eng._index_on_step_done("jobs_article_x", "02_parse_article")
+    await eng._run_step_completion_effects("jobs_paper_x", "02_pdf_parse")
+    await eng._run_step_completion_effects("jobs_article_x", "02_parse_article")
     assert called == ["jobs_paper_x", "jobs_article_x"]
 
 

@@ -783,6 +783,32 @@ class TestNotesFTS:
         assert total == 1
         assert items[0]["title"] == "t2"
 
+    def test_index_failure_rolls_back_and_retry_replaces_atomically(self, db, monkeypatch):
+        db.index_job_notes("j1", "smart", "旧标题", "旧版讲解卷积神经网络。")
+        original = db._replace_note_chunks_locked
+
+        def fail_after_chunk_delete(**kwargs):
+            db._conn.execute(
+                "DELETE FROM note_chunks WHERE job_id=? AND note_type=?",
+                (kwargs["job_id"], kwargs["note_type"]),
+            )
+            raise RuntimeError("injected chunk failure")
+
+        monkeypatch.setattr(db, "_replace_note_chunks_locked", fail_after_chunk_delete)
+        with pytest.raises(RuntimeError, match="injected chunk failure"):
+            db.index_job_notes("j1", "smart", "新标题", "新版讲解循环神经网络。")
+
+        # 全文和 chunk 都仍是旧可见版本,没有把删除或半成品带出事务。
+        assert db.search_notes("卷积神经网络")[0] == 1
+        assert db.search_notes("循环神经网络")[0] == 0
+        assert db.search_note_chunks("卷积神经网络")[0] == 1
+
+        monkeypatch.setattr(db, "_replace_note_chunks_locked", original)
+        db.index_job_notes("j1", "smart", "新标题", "新版讲解循环神经网络。")
+        assert db.search_notes("卷积神经网络")[0] == 0
+        assert db.search_notes("循环神经网络")[0] == 1
+        assert db.search_note_chunks("循环神经网络")[0] == 1
+
     def test_index_separate_note_types_coexist(self, db):
         db.index_job_notes("j1", "smart", "智能笔记", "智能版讲解模型。")
         db.index_job_notes("j1", "mechanical", "机械笔记", "机械版讲解模型。")
