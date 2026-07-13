@@ -4,16 +4,8 @@ export interface BreadcrumbSeg {
   to?: string      // 可点跳转目标(末段通常无 to)
 }
 
-// 内容类型:与后端 pipeline 一一对应(video/paper/article/audio)。
-export type ContentType = 'video' | 'paper' | 'article' | 'audio'
-
-// 内容类型中文徽章:前端各处展示统一引用。
-export const CONTENT_TYPE_LABELS: Record<string, string> = {
-  video: '视频',
-  paper: '论文',
-  article: '文章',
-  audio: '播客',
-}
+// 内容类型是后端 registry 的开放集合;展示标签由 /api/sources 动态下发。
+export type ContentType = string
 
 export interface JobSummary {
   job_id: string
@@ -456,7 +448,7 @@ export interface ConceptGraph {
 
 // 集合的订阅源(自动追更)。无订阅则为 null。同步/开关端点用集合自身 id。
 export interface CollectionSubscription {
-  source_type: string        // bilibili_up/fav/collection, youtube_channel, rss, local_dir
+  source_type: string        // 订阅来源 enum 由 /api/sources 和 OpenAPI 动态给出
   source_id: string          // B站 mid / 频道URL / feed URL / 目录路径 / 收藏夹id ...
   source_label?: string      // 后端派生来源短标签(bilibili/youtube/rss/local);前端=name+徽标
   enabled: boolean           // 自动同步开关 = collection.sync_enabled

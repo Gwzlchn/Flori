@@ -1,4 +1,4 @@
-"""OCR 引擎工厂:集中 RapidOCR 构造 + 后端选择,供 video 06_ocr 与 paper 04_figures 共用。"""
+"""OCR 引擎工厂:集中 RapidOCR 构造与后端选择,供 video 06_ocr 使用。"""
 
 from __future__ import annotations
 

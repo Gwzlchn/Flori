@@ -24,8 +24,8 @@
 | | B. 挂 docker.sock 真停/启容器 | 彻底释放资源，但只控本地 worker、远程 GPU/网关 worker 够不着，且 docker.sock=宿主 root 等价（违反项目「API 不挂 docker.sock」约定，见 `docker-compose.yml` 注释） |
 | 并发 | A. per-worker `--concurrency N`（多条认领循环）**[采纳]** | 异构机器自报容量；全局每池上限仍是天花板 |
 | | B. 维持单 worker 串行 | 简单但表达不了异构容量（用户已否决） |
-| 多 GPU | 每机一个 `--type gpu` worker + 调 `gpu.limit` **[采纳]** | none-config；无设备亲和（用所有卡，YAGNI） |
-| 类型名 | `download`→`io`（保留 `[io]` 默认池）**[采纳]** | 类型名诚实指代池；删 download 改 cpu 默认会更易误配 |
+| 多 GPU | 每机一个声明 `--pools gpu cpu` 的 worker + 调 `gpu.limit` **[采纳]** | 无设备亲和（用所有卡，YAGNI） |
+| 能力表达 | `download`→`io`，随后收敛为显式 `--pools` 集合 **[采纳]** | 路由原语就是 pool；一台机器可声明多种能力 |
 | 宽限 | `NO_WORKER_GRACE_SEC` 默认改 12h **[采纳]** | 暂停某类 worker 后，下载好的 job 等 12h 才 fail-fast |
 
 ## 决定
@@ -42,11 +42,11 @@
    并发执行（`worker/worker.py` 的 `_claim_loop`）。**全局每池槽位（`pools.yaml` 的 `limit`）仍是系统级天花板**，
    并发度只决定单 worker 的并行上限。异构机器据此自报容量。
 
-3. **多 GPU 机器**：每台一个 `--type gpu` worker；要跨机并行就把 `configs/pools.yaml` 的 `gpu.limit` 调成卡数。
+3. **多 GPU 机器**：每台一个声明 `--pools gpu cpu` 的 worker；要跨机并行就把 `configs/pools.yaml` 的 `gpu.limit` 调成卡数。
    不做 GPU 设备亲和（用「任意空闲卡」语义；同机多卡/严格 1-job-per-卡属 YAGNI，需要时再用资源槽+`CUDA_VISIBLE_DEVICES`）。
 
-4. **`download` 类型改名 `io`**（`WORKER_POOLS["io"]=["io"]`），路由仍只认 pool+tags；
-   全量同步 compose/deploy/前端 `WORKER_TYPES`/文档/契约。
+4. **能力改为显式池集合**：历史交付先把 `download` 改名为 `io`，当前 CLI 进一步移除单一
+   `--type` 映射，统一由 `--pools io|cpu|ai|gpu ...` 声明一个或多个能力；路由只认 pool + tags。
 
 5. **无-worker 宽限默认 12h**：`scheduler` 的 `NO_WORKER_GRACE_SEC` 在 `docker-compose.yml` 默认 `43200`。
    被暂停的 worker 在 `_pool_has_workers` 算「无可用」→ 只剩它服务的池里就绪步等 12h 才 fail-fast。
@@ -69,7 +69,7 @@
 - 契约变更（同提交 `contract:`）：`docs/03-contracts.md` worker hash 增 `admin_status`、公共态 `draining`→`paused`、
   type 枚举 `download`→`io`、heartbeat 回发 `{"paused": bool}`、PUT 暂停/恢复示例。
 - DB：`workers` 表加 `admin_status` 列（经 `_EXPECTED_COLUMNS` 平滑迁移，旧库自动 ALTER ADD，默认 `''`）。
-- 部署：`docker-compose.yml` scheduler 默认 `NO_WORKER_GRACE_SEC=43200`；`.local` 活栈 uptest 对齐 43200，
-  foreign-dl/integration 的 `--type download` 改 `--type io`。多副本/多卡仍须各设独立 `WORKER_ID_FILE`（`worker.py:38-48` 告警）。
+- 部署：`docker-compose.yml` scheduler 默认 `NO_WORKER_GRACE_SEC=43200`；`.local` 活栈 uptest 对齐 43200；
+  worker 启动命令统一使用 `python -m worker.main --pools ...`。多副本仍须各设独立 `WORKER_NAME`。
 - 兼容：旧 `status="draining"` 持久值无害（不再作叠加源）；已发 per-worker token 不受影响。
 - 仍 YAGNI（留待后续）：GPU 设备亲和 / 1-job-per-物理卡、并发态下 `current_job` 仅展示代表性单值（busy/idle 有短暂抖动，非正确性问题）。

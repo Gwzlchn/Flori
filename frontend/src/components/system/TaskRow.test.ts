@@ -1,5 +1,6 @@
-import { describe, it, expect, vi } from 'vitest'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
+import { installSourceCatalog } from '../../constants/sources'
 
 const push = vi.fn()
 vi.mock('vue-router', () => ({
@@ -21,6 +22,14 @@ function mountRow(props: Record<string, any>) {
     global: { stubs: { StatusBadge: { template: '<span class="sb">{{ status }}</span>', props: ['status'] } } },
   })
 }
+
+beforeEach(() => {
+  installSourceCatalog({
+    content_types: [{ type: 'paper', label: '论文', upload_extensions: ['.pdf'] }],
+    job_sources: [],
+    subscription_sources: [],
+  })
+})
 
 describe('TaskRow', () => {
   it('主显作业标题;无标题退 类型 → 流水线 → job_id', () => {

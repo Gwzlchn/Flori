@@ -6,6 +6,34 @@
 
 Base URL: `/api`
 
+### 1.0 来源目录
+
+#### GET /api/sources — 内容与订阅来源目录
+
+需通过与其他业务 API 相同的 Bearer Token 鉴权。响应由 `configs/sources.yaml` 派生，供前端和
+集成方获取当前可投递内容类型、直接投递来源与订阅来源；检测正则、集合 ID 规则等内部字段不返回。
+
+```json
+{
+  "content_types": [
+    {"type": "video", "label": "视频", "pipeline": "video", "upload_extensions": [".mp4", ".mkv"]}
+  ],
+  "job_sources": [
+    {"type": "youtube", "label": "YouTube", "content_types": ["video"], "creatable": true},
+    {"type": "other", "label": "未支持来源", "content_types": [], "creatable": false}
+  ],
+  "subscription_sources": [
+    {"type": "book_toc", "label": "在线书目录", "group": "book", "icon": "book-open",
+     "id_label": "目录页 URL", "placeholder": "https://book.example.com/index.html",
+     "hint": "解析目录页,按目录顺序入库各章节。", "home_url_template": "{source_id}"}
+  ]
+}
+```
+
+`content_types[].type` 与 `POST /api/jobs.content_type` 的 OpenAPI enum 一致；
+`subscription_sources[].type` 与 `POST /api/collections.source_type` 的 OpenAPI enum 一致。新增来源必须
+同时满足 registry 完整性、真实 pipeline 或已加载 source adapter，不能只扩枚举而没有执行链。
+
 ### 1.1 任务管理
 
 #### POST /api/jobs — 创建作业(投递内容)
@@ -34,14 +62,23 @@ curl -X POST http://localhost:8000/api/jobs \
 
 JSON 创建不接受文件；文件上传走独立的 `POST /api/jobs/upload`（见下）。
 
-`content_type` 可显式指定，也可由 API 根据 URL 自动推断（arxiv→paper、**非 arxiv 直链 `.pdf`（OSDI/usenix 等）→paper**、播客（音频后缀）→audio、其余网页→article，无 http→video）。直链 PDF 经 `detect_source` 归为 `pdf` 源，下载步存 `input/source.pdf` 走论文流水线。
+`content_type` 可显式指定，也可由 API 根据 URL 自动推断（arxiv→paper、**非 arxiv 直链 `.pdf`
+（OSDI/usenix 等）→paper**、音频后缀→audio、其余 http(s) 网页→article、B 站 / YouTube→video）。
+直链 PDF 经 `detect_source` 归为 `pdf` 源，下载步存 `input/source.pdf` 走论文流水线。未知 scheme、
+未知裸标识、来源与显式类型错配或没有 pipeline 的类型在写文件、写 DB、入队前返回 `422`；公开 API
+不接受 `file://`。`file://` 只允许已注册的 `local_dir` 订阅在内部以 `actor=subscription` 创建
+`source=local_file` 的 job，不能借公开投递读取中心主机文件。
 
 可选字段 `smart_note`（bool，默认 `null`）：是否生成 AI 智能笔记及随附评审。`null`＝按内容类型默认（`article` 默认 `false` 走轻链路；video/paper/audio 默认 `true`）。无论开关如何，**概念提取 + 一句话摘要始终生成**（article v2 的 `05_concepts` 步，进概念库/图谱）。`smart_note=false` 时跳过 `04_smart_article`/`06_review`。该开关存入 `job.meta.flags`，由调度器在 `rules.if_flag` 求值时决定相应步骤是否运行。
 
 #### POST /api/jobs/upload — 文件上传创建
 
 `multipart/form-data`：`file`（必填）+ `domain`（默认 `general`）+ `style_tags`（JSON 字符串，默认 `[]`）。
-按扩展名识别类型：`.pdf`→paper，`.mp4/.mkv/.webm/.flv`→video，`.mp3/.m4a/.wav/.aac`→audio，`.html/.htm/.txt`→article，其余按 video。上限 2GB。
+按 `configs/sources.yaml` 的扩展名识别类型：`.pdf`→paper，
+`.mp4/.mkv/.webm/.flv/.mov`→video，`.mp3/.m4a/.wav/.aac/.flac`→audio，
+`.html/.htm/.txt/.md`→article；未知扩展名在读取文件体和创建 job 前返回 `422`。上限 2GB。
+上传进入 pipeline 前会规范化为既有输入契约：视频统一为 `input/source.mp4`，文章统一为
+`input/source.html`，论文和音频保留各自受支持的标准扩展名。
 
 ```bash
 curl -X POST http://localhost:8000/api/jobs/upload \
@@ -774,9 +811,10 @@ Base: `/api/collections`。集合是内容分组；当 `source_type`+`source_id`
 | `bilibili_collection` | B 站合集/系列 | 合集/列表 URL，或紧凑式 `mid:season:sid` / `mid:series:sid` | `bilibili` | video |
 | `youtube_channel` | YouTube 频道/用户全部投稿 | 频道 URL（`/@handle`、`/channel/UC...`、`/c/...`、`/user/...`）、裸 handle（`@xxx`）或裸频道 id（`UC...`） | `youtube` | video |
 | `rss` | 通用 RSS/Atom feed（含 RSSHub/公众号桥、博客、arxiv、播客、YouTube 频道 RSS 等） | feed URL | `rss` | 按 entry 判定：arxiv→paper、youtube→video、audio enclosure→audio，否则 article。**audio 条目的 `url` = 音频 enclosure 真链**（非页面 link），下载步据此取音源；`item_id` 仍用 guid/link 作去重键 |
-| `local_dir` | 本地目录（挂进 api+worker 容器的监听目录） | 容器内绝对路径（约定 `/data/inbox`） | `local` | 按扩展名：pdf→paper、mp4/mkv/webm/mov→video、mp3/m4a/wav/flac→audio、md/txt/html→article（其它扩展名忽略） |
+| `local_dir` | 本地目录（挂进 api+worker 容器的监听目录） | 容器内绝对路径（约定 `/data/inbox`） | `local` | 按 registry 扩展名：pdf→paper、mp4/mkv/webm/flv/mov→video、mp3/m4a/wav/aac/flac→audio、md/txt/html/htm→article（其它扩展名忽略） |
+| `book_toc` | Jupyter Book / Sphinx 等在线书目录 | 目录页 URL | `book` | article；章 job 强制 `smart_note=true`，按目录顺序串行投递 |
 
-- 同一来源种类细分到同一**来源标签**（`SOURCE_LABELS`）：三种 B 站来源都收敛到 `bilibili`。
+- 同一来源种类可通过 registry 的 `group` 收敛为同一**来源标签**：三种 B 站来源都收敛到 `bilibili`。
 - 去重键 `item_id`（记在 `ingested_items` 表，按 `(collection_id, item_id)`）随来源不同：B 站=bvid、youtube=videoId、rss=entry id（缺则 link）、local_dir=`相对路径|大小|mtime秒`（文件被原地修改后 item_id 变化→重新入库）。
 - `local_dir` 用 `file://` url 投递，01_download 复制源文件进 job（无网络下载）；故订阅创建/同步与 worker 必须在同一容器内能解析该路径（compose 把宿主 `${FLORI_INBOX_DIR}` 挂到 api+worker 的 `/data/inbox`，见 `docs/08-deployment`）。
 
@@ -841,7 +879,9 @@ curl -X POST http://localhost:8000/api/collections \
 
 Response `201`：`CollectionResponse`。
 
-错误：`400` 手动集合 name 为空 / 订阅集合 domain 为 general / 该来源已订阅。
+错误：`400` 手动集合 name 为空 / 订阅集合 domain 为 general / 该来源已订阅；`422`
+`source_type` 与 `source_id` 未成对提供、source_type 不在 registry enum，或 registry 声明的适配器
+未加载。校验均发生在写集合前。
 
 #### GET /api/collections — 集合列表
 
@@ -2352,7 +2392,7 @@ net_routing:
 | 404 | `not_found` | 资源不存在（job / 产物文件 / 领域 等） |
 | 409 | `conflict` | 资源冲突（如领域已存在） |
 | 413 | `payload_too_large` | 上传文件超过 2GB |
-| 422 | `invalid_request` | 请求体校验失败（FastAPI 校验） |
+| 422 | `invalid_request` | 请求体校验失败，或来源 / 内容类型 / 上传扩展名没有可执行适配器 |
 | 500 | `error` | 服务内部错误 |
 
 Response body:
@@ -2362,7 +2402,7 @@ Response body:
 
 > 契约与实现现状（避免再漂移）：
 > - `POST /api/jobs` 的 `url` 接受 http(s) 链接**或裸 B 站 BV 号**（`detect_source` 解析），不强制
->   http(s) 前缀，故不返回独立的 `invalid_url`。
+>   http(s) 前缀；其它未知裸标识和 scheme 以 `422 invalid_request` fail-closed。
 > - 同 URL / 同 BV 重投**不返回 409**，而是建新任务（job_id 加随机后缀消歧），故不返回
 >   `job_already_exists`。
 > - 业务端点（如 `POST /api/jobs`）的限流 429 与「无在线 worker」503 `no_workers` 仍**未实现**；

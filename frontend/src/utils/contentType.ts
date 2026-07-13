@@ -2,7 +2,7 @@
 // 各视图统一从这里 import,不要在视图里各写一份:分散实现的回退值会漂移。
 import type { Component } from 'vue'
 import { Play, FileText, Newspaper, Headphones } from 'lucide-vue-next'
-import { CONTENT_TYPE_LABELS } from '../types'
+import { CONTENT_TYPE_LABELS } from '../constants/sources'
 
 export { CONTENT_TYPE_LABELS }
 

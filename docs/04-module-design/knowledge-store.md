@@ -72,7 +72,9 @@ GET /api/search?q=...                   全文搜索（支持 content_type / dom
 
 一个学习主题 = 一个集合（可含多来源、多内容类型）。同 `domain` 的集合共享 Profile。
 
-**订阅不是独立实体**：集合的 `source_type`/`source_id` 非空即为「订阅集合」（如 B 站 UP 追更）。没有独立的 subscriptions 表/页面。`/{id}/sync` 拉取创作者最新内容并入该集合。
+**订阅不是独立实体**：集合的 `source_type`/`source_id` 非空即为订阅集合。没有独立的
+subscriptions 表/页面。`/{id}/sync` 从对应适配器枚举最新内容并入该集合；支持类型、展示元数据和
+集合 id 策略以 `configs/sources.yaml` 为准。
 
 ```
 POST /api/collections             创建集合（带 source_type/source_id 即订阅）

@@ -5,7 +5,8 @@
 
 这是对一个**已部署、在跑**的栈做的烟雾测试，和 `tests/`下的 hermetic 单测是两回事：
 单测用 fakeredis、无网络无浏览器（`docker compose -f docker-compose.test.yml`）；本套件需要真前端 + 真 API。
-因此脚本叫 `smoke.py` 而非 `test_*.py`（不被 pytest 收集），靠退出码作 CI gate。
+因此脚本叫 `smoke.py` 而非 `test_*.py`（不被 pytest 收集）。脚本被显式调用时用退出码作门禁，
+但当前不属于 `.github/workflows/ci.yml` 的每次 push / PR 必经 job。
 
 ## 跑
 

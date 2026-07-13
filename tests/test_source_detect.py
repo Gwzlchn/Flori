@@ -59,6 +59,9 @@ class TestDetectSource:
     def test_non_http_unknown_stays_other(self):
         assert detect_source("ftp://example.com/file") == "other"
 
+    def test_local_file_uses_registered_adapter_source(self):
+        assert detect_source("file:///data/inbox/chapter.md") == "local_file"
+
     def test_bare_identifier_stays_other(self):
         assert detect_source("just-some-text") == "other"
 

@@ -5,6 +5,9 @@
 ## 1. 适配器模型
 
 每种内容来源对应一个适配器。适配器负责：下载原始内容 + 生成统一的 input/ 目录结构。
+内容类型、可创建来源、上传扩展名和订阅来源的权威注册表是
+[`configs/sources.yaml`](../configs/sources.yaml)；API 的 OpenAPI enum、入队校验、本地目录扫描和
+前端来源目录均从它派生。新增来源必须同时实现真实适配器，完整性测试会拒绝 registry 与实现不一致。
 
 ```mermaid
 graph TD
@@ -46,9 +49,10 @@ graph TD
 | 字幕 | 可选上传 .srt，无则走 Whisper |
 | 大小限制 | 2GB |
 
-### 通用 URL
+### 未注册 URL
 
-yt-dlp 支持的其他网站，作为兜底。
+没有命中 registry 的 URL 或裸标识在 API 写文件、写 DB、发布队列之前返回 422。系统不再把未知来源
+静默当成视频交给 yt-dlp；要接入新站点，先登记来源及允许的内容类型，再实现下载适配器并补接线测试。
 
 ## 3. 论文适配器（M1 已实现;2026-07 源头重做:HTML 优先 / PDF 直喂兜底）
 
@@ -84,7 +88,10 @@ yt-dlp 支持的其他网站，作为兜底。
 输出: input/source.mp3 (+ input/source.mp4 复用 whisper) + input/metadata.json
 ```
 
-只取单集音频，无 RSS 订阅（RSS 追更留 M4/Agent）。下载后复用 video 的 whisper 步转写（`02_whisper` 入参约定为 `source.mp4`，故同时落一份），再走 audio pipeline：`01_download → 02_whisper → 03_transcript_parse → 04_smart_podcast → 05_review`。
+直接投递仍以单集音频 URL 或文件为单位。RSS / Atom 由订阅集合枚举条目，再把每个 enclosure 或
+落地页作为独立 job 入库。下载后复用 video 的 whisper 步转写（`02_whisper` 入参约定为
+`source.mp4`，故同时落一份），再走 audio pipeline：
+`01_download → 02_whisper → 03_transcript_parse → 04_smart_podcast → 05_review`。
 
 ## 6. Cookies 管理
 

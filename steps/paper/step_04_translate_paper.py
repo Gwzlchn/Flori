@@ -83,11 +83,12 @@ class TranslatePaperStep(StepBase):
 
     @staticmethod
     def _paper_markdown(sections: dict, figures: list | None = None) -> str:
-        """从 sections.json 拼出论文可读 Markdown(标题/作者/摘要/章节树)供翻译。
-        ★max_chars=None 不截断:忠实全文翻译必须喂全文(默认 2000 字/节的截断是笔记类
-        prompt 的预算控制,曾让"全文翻译"实际只译了每节前 2000 字);规模由 chunk 管。
-        渲染图(04_figures)按页码插到对应顶级章节之后——否则译文 0 图,「保留配图」名不副实;
-        prompt 要求 ![](assets/…) 引用行原样保留,图注(斜体行)随文翻译。"""
+        """从 sections.json 渲染论文 Markdown,供全文翻译。
+
+        max_chars=None 是全文翻译不变量,输入规模由 chunk 管理。旧 job 若仍含
+        figures.json,按页码插入渲染图;当前 arXiv 图片已在 original.md,PDF-only
+        由模型直接读取 PDF。assets 引用必须原样保留。
+        """
         from steps.utils.sections import render_section_tree
         parts: list[str] = []
         if sections.get("title"):

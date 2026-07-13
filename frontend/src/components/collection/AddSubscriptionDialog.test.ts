@@ -1,11 +1,29 @@
-import { describe, it, expect } from 'vitest'
+import { beforeEach, describe, it, expect } from 'vitest'
 import { mount, config } from '@vue/test-utils'
 import AddSubscriptionDialog from './AddSubscriptionDialog.vue'
-import { SOURCE_TYPES } from '../../constants/sources'
+import { SOURCE_TYPES, installSourceCatalog } from '../../constants/sources'
 
 // 弹窗已 <Teleport to="body">(逃出侧栏 .side 的 sticky 层叠上下文);测试里让 teleport 就地渲染,
 // 这样 w.find/.findAll 仍能查到弹窗内部节点(否则内容被传送到 body、不在 wrapper 内)。
 config.global.stubs = { ...config.global.stubs, teleport: true }
+
+beforeEach(() => {
+  installSourceCatalog({
+    content_types: [],
+    job_sources: [],
+    subscription_sources: [
+      {
+        type: 'bilibili_up', label: 'B站 UP 主', group: 'bilibili', icon: 'rss',
+        id_label: 'UP 主页 / mid', placeholder: '如 247209804', hint: '自动追更 UP 投稿。',
+      },
+      {
+        type: 'book_toc', label: '在线书目录', group: 'book', icon: 'book-open',
+        id_label: '目录页 URL', placeholder: 'https://book.example.com/index.html',
+        hint: '按目录顺序串行入库各章节。', home_url_template: '{source_id}',
+      },
+    ],
+  })
+})
 
 // AddSubscriptionDialog 是纯受控弹窗(props/emit + 本地 ref,无 store/router/请求)。
 // 这里验证渲染、来源类型切换的条件分支、提交校验与 create/close 事件的 payload。
@@ -28,6 +46,7 @@ describe('AddSubscriptionDialog', () => {
     expect(opts.length).toBe(SOURCE_TYPES.length + 1)
     const t = w.text()
     for (const s of SOURCE_TYPES) expect(t).toContain(s.label)
+    expect(t).toContain('在线书目录')
   })
 
   it('defaultDomain prop 预填知识库输入框', () => {

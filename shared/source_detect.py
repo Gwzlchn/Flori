@@ -1,61 +1,18 @@
-"""URL 来源识别:bilibili / youtube / arxiv / upload / other。供 api 与 steps 共用。"""
+"""URL 来源识别与来源页面辅助解析。"""
 
 from __future__ import annotations
 
 import re
 
+from .source_registry import JOB_SOURCE_SPECS, detect_registered_source
 
-_BILIBILI_PATTERNS = [
-    re.compile(r"bilibili\.com"),
-    re.compile(r"^BV[a-zA-Z0-9]{10}$"),
-    re.compile(r"b23\.tv"),
-]
-
-_YOUTUBE_PATTERNS = [
-    re.compile(r"youtube\.com"),
-    re.compile(r"youtu\.be"),
-]
-
-_ARXIV_PATTERNS = [
-    re.compile(r"arxiv\.org"),
-]
-
-# 音频后缀(含点,小写)单一事实源:URL/enclosure/本地文件以此结尾视作音频。
-# rss.py、subscriptions/local_dir.py 均从此导入,避免各写一份导致集合漂移。
-AUDIO_SUFFIXES = (".mp3", ".m4a", ".wav", ".aac", ".flac")
+# rss.py、subscriptions/local_dir.py 继续从这里导入,值由来源 registry 派生。
+AUDIO_SUFFIXES = tuple(JOB_SOURCE_SPECS["podcast"].get("suffixes") or [])
 
 
 def detect_source(url: str) -> str:
     """判断 URL 或裸标识符(如 BV 号)的来源平台;空值/未识别返回 "other"。"""
-    if not url:
-        return "other"
-
-    for pat in _BILIBILI_PATTERNS:
-        if pat.search(url):
-            return "bilibili"
-
-    for pat in _YOUTUBE_PATTERNS:
-        if pat.search(url):
-            return "youtube"
-
-    for pat in _ARXIV_PATTERNS:
-        if pat.search(url):
-            return "arxiv"
-
-    # 非 arxiv 的直链 PDF(OSDI/usenix/会议/期刊等)判为 'pdf' 源,走论文流水线(下载存 source.pdf).
-    # arxiv 已在上面命中,故此处只匹配其它 .pdf。
-    if url.lower().split("?")[0].endswith(".pdf"):
-        return "pdf"
-
-    # 音频后缀优先于通用文章:同为 http(s) 链接,音频走播客单集。
-    if url.lower().split("?")[0].endswith(AUDIO_SUFFIXES):
-        return "podcast"
-
-    # http(s) 且非已知视频/arxiv/音频时判为通用网页文章.
-    if re.match(r"https?://", url):
-        return "http_article"
-
-    return "other"
+    return detect_registered_source(url)
 
 
 # 页面里可能藏音频直链的几处:og:audio meta、<audio src>、<source src>、<enclosure url>、

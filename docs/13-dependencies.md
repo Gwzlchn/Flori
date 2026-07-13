@@ -38,13 +38,14 @@
 
 | 工具 | 步骤 | License | 说明 |
 |------|------|---------|------|
-| [PyMuPDF](https://github.com/pymupdf/PyMuPDF) | 02_pdf_parse（当前选用） | AGPL-3.0 | 快，文本/图片/表格 |
-| [pdfplumber](https://github.com/jsvine/pdfplumber) | 备选 | MIT | 表格解析优于 PyMuPDF |
+| [Poppler](https://poppler.freedesktop.org/) | 02_pdf_parse / AI PDF Read | GPL-2.0+ | `pdfinfo` 取页数、`pdftotext` 首页标题兜底、模型读取 PDF 时渲染页面 |
+| arXiv LaTeXML HTML | 02_pdf_parse（arxiv-html） | 上游内容 | HTML 转保结构 Markdown；无 HTML 时保留 PDF 直读 |
+| [PyMuPDF](https://github.com/pymupdf/PyMuPDF) | 当前无步骤调用 | AGPL-3.0 | `docker/step-heavy.Dockerfile` 仍安装的兼容残留；分发该镜像仍需履行许可，待独立清理 |
 | [marker](https://github.com/VikParuchuri/marker) | **待评估** | GPL-3.0 | PDF → Markdown，含公式/表格/图片 |
 | [MinerU](https://github.com/opendatalab/MinerU) | **待评估** | AGPL-3.0 | 上海 AI Lab，中文论文效果好 |
 | [Nougat](https://github.com/facebookresearch/nougat) | 待评估 | MIT | Meta，学术论文专用 |
 
-> **marker 和 MinerU 值得重点评估**：它们直接将 PDF 转为结构化 Markdown（含公式/图表），可能替代 02_pdf_parse + 03_sections + 04_figures 三个步骤。M1 实现论文 pipeline 前应先对比测试。
+> 当前不把 PDF 逆向抽正文作为主路径。只有量化评测证明 HTML 优先 + PDF 直读不满足需求时，才评估 marker/MinerU 等替代方案。
 
 ## 5. 文章抓取（M6 已实现）
 
@@ -97,7 +98,7 @@
 
 | License | 影响 | 涉及工具 |
 |---------|------|---------|
-| **AGPL-3.0** | 网络使用需开源 | PyMuPDF, MinerU, MinIO |
+| **AGPL-3.0** | 网络使用与镜像分发需关注源码提供义务 | PyMuPDF(旧 step-heavy 镜像残留), MinerU(未采用), MinIO |
 | **Apache-2.0** | 公网入口（替代 Cloudflare Tunnel） | Caddy |
 | **GPL-3.0** | 分发需开源 | yutto, pysrt, marker |
 | MIT/Apache/BSD | 无限制 | 其他大部分工具 |
@@ -105,6 +106,6 @@
 本项目计划以 MIT 开源。AGPL/GPL 工具的集成方式因运行模式而异，需分两种情况看待：
 
 - **docker 模式（`STEP_RUNTIME=docker`）**：每个步骤在独立容器内作为独立进程运行，本项目代码与 AGPL/GPL 组件不在同一进程、不发生链接。这种"独立进程调用"的形态通常被视为未构成衍生作品，但是否满足对应 License 的全部义务仍需自行确认。
-- **默认 subprocess 模式（`STEP_RUNTIME=subprocess`，worker 的默认值）**：步骤以 `python3 -m <module>` 子进程运行，步骤代码与库**同进程加载**——例如 `steps/paper/step_02_pdf_parse.py` 直接 `import fitz`（PyMuPDF，AGPL-3.0）。此时步骤代码与 AGPL 组件构成同进程链接，通常被视为衍生作品，分发/对外提供服务时可能触发 AGPL 的源码提供义务，需自行确认合规边界。
+- **默认 subprocess 模式（`STEP_RUNTIME=subprocess`，worker 的默认值）**：步骤以 `python3 -m <module>` 子进程运行。Python 库若被步骤直接 import，仍与步骤同进程；Poppler、yutto 等命令行工具则经 subprocess 边界调用。具体分发仍需逐项遵守上游 License。
 
-因此在默认模式下，"独立进程、不链接"的论断不成立。若要规避 AGPL/GPL 传染，可选项包括：仅以 docker 模式运行涉及这些组件的步骤、将相关步骤替换为更宽松许可的实现（如 PyMuPDF → pdfplumber），或就具体分发场景咨询法律意见。本节为工程性说明，不构成法律结论。
+因此不能笼统用"都在容器/子进程"推断无义务。发布镜像或对外提供服务前应按实际安装依赖和调用边界复核，并在必要时咨询法律意见。本节为工程性说明，不构成法律结论。

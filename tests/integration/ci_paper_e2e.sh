@@ -8,12 +8,11 @@
 #
 # 各步真假一览(DRY_RUN=1):
 #   01_download   真(upload 模式:文件已落 input/source.pdf,本步只抽 metadata,不下载)
-#   02_pdf_parse  真(PyMuPDF/fitz 解析文本/标题/章节/图注/公式)
-#   03_sections   真(扁平章节 → 树)
-#   04_figures    真(PyMuPDF 抽图;本 fixture 无内嵌位图,figures 由文中 "Figure 1:" 图注成条)
-#   05_smart_paper  合成(DRY_RUN → DryRunProvider,不调真实 AI)
-#   06_review       合成(同上)
-# 即:下载/解析/章节/图表是**真跑**,只有两步 AI 用合成产物替身——既不需 key,
+#   02_pdf_parse  真(pdfinfo 页数 + PDF metadata/首页标题兜底,pdf-only 不逆向抽正文)
+#   03_sections   真(页区间章节树)
+#   04_translate_paper / 05_smart_paper / 05_concepts / 06_review
+#                   合成(DRY_RUN → DryRunProvider,不调真实 AI)
+# 即:下载/解析/章节是**真跑**,AI 步用合成产物替身——既不需 key,
 # 又把 CPU 解析链 + AI 步落盘/接线全程压到。
 #
 # 真实视频 / B站·arXiv 联网 / 真实 AI 笔记链路仍是人工/自托管覆盖
@@ -180,7 +179,7 @@ fi
 
 log "════════════════════════════════════════"
 log "PASS: paper pipeline 真实素材 E2E 全程到 done"
-log "  真跑: 01_download(upload) · 02_pdf_parse · 03_sections · 04_figures"
-log "  合成: 05_smart_paper · 06_review (DRY_RUN)"
+log "  真跑: 01_download(upload) · 02_pdf_parse · 03_sections"
+log "  合成: 04_translate_paper · 05_smart_paper · 05_concepts · 06_review (DRY_RUN)"
 log "════════════════════════════════════════"
 exit 0

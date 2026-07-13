@@ -18,6 +18,13 @@ from shared.ids import lineage_key_of as _lineage_key_of
 from shared.models import Job, JobStatus, Step, StepStatus, derive_job_id
 from shared.redis_client import RedisClient
 from shared.source_detect import detect_source
+from shared.source_registry import (
+    SourceRegistryError,
+    content_type_for_filename,
+    default_content_type,
+    pipeline_for_content_type,
+    validate_job_route,
+)
 from shared.step_base import def_digest_for, pipeline_digest_for
 from shared.storage import CREDENTIAL_REL, StorageBackend
 
@@ -55,35 +62,16 @@ async def list_providers(config: AppConfig = Depends(get_config)):
     return {"providers": out}
 
 
-def _detect_content_type(url: str | None, filename: str | None = None) -> str:
+def _detect_content_type(url: str | None, filename: str | None = None) -> str | None:
     if filename:
-        name = filename.lower()
-        if name.endswith(".pdf"):
-            return "paper"
-        if name.endswith((".mp4", ".mkv", ".webm", ".flv")):
-            return "video"
-        if name.endswith((".mp3", ".m4a", ".wav", ".aac")):
-            return "audio"
-        if name.endswith((".html", ".htm", ".txt")):
-            return "article"
+        return content_type_for_filename(filename)
     if url:
-        source = detect_source(url)
-        if source in ("arxiv", "pdf"):   # arxiv 摘要页 / 直链 PDF(OSDI/usenix 等)→ 论文
-            return "paper"
-        if source == "http_article":
-            return "article"
-        if source == "podcast":
-            return "audio"
-    return "video"
+        return default_content_type(detect_source(url))
+    return None
 
 
-def _pipeline_for(content_type: str) -> str:
-    return {
-        "video": "video",
-        "paper": "paper",
-        "article": "article",
-        "audio": "audio",
-    }.get(content_type, "video")
+def _pipeline_for(content_type: str) -> str | None:
+    return pipeline_for_content_type(content_type)
 
 
 def _now_iso() -> str:
@@ -116,9 +104,16 @@ async def create_job_core(
     """建 job 的核心流程(create_job 路由 + upload + 订阅同步共用)。返回 Job。
     upload=(ext, data):上传路径,把源文件经 storage 写入 input/source{ext}(兼容本地/MinIO)。"""
     style_tags = style_tags or []
-    ctype = content_type or _detect_content_type(url)
+    source = "upload" if upload is not None else detect_source(url or "")
+    requested_type = getattr(content_type, "value", content_type)
+    ctype = requested_type or _detect_content_type(url)
+    try:
+        validate_job_route(source, ctype, allow_internal=(actor == "subscription"))
+    except SourceRegistryError as exc:
+        raise HTTPException(422, f"unsupported_source: {exc}") from exc
     pipeline = _pipeline_for(ctype)
-    source = detect_source(url) if url else "upload"
+    if not pipeline or (config is not None and pipeline not in config.pipelines):
+        raise HTTPException(422, f"source_pipeline_unavailable: {ctype}")
     # 投递开关:smart_note None=按类型默认(article 轻链路默认关,其余默认开)。
     # 存进 flags 随 job 落库 → scheduler 读 redis flags 求值 rules 的 if_flag(条件跳步)。
     resolved_smart = smart_note if smart_note is not None else (ctype != "article")
@@ -299,6 +294,8 @@ async def upload_job(
     config: AppConfig = Depends(get_config),
 ):
     content_type = _detect_content_type(None, file.filename)
+    if content_type is None:
+        raise HTTPException(422, "unsupported_upload_type")
     try:
         tags = json.loads(style_tags)
     except json.JSONDecodeError:

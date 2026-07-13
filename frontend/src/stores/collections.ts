@@ -28,8 +28,8 @@ export const useCollectionStore = defineStore('collections', () => {
     domain: string
     description?: string
     tags?: string[]
-    source_type?: string   // 订阅集合:bilibili_up/fav/collection, youtube_channel, rss, local_dir
-    source_id?: string     // 订阅集合:mid / 频道URL / feed URL / 目录路径 / 收藏夹id
+    source_type?: string   // 订阅来源 enum 由后端 registry 下发
+    source_id?: string     // 来源 id / URL / 容器内目录,具体提示由来源目录给出
     sync_now?: boolean
   }): Promise<Collection> {
     const c = await api.post<Collection>('/api/collections', payload)

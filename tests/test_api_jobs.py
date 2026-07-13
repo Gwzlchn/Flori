@@ -32,6 +32,9 @@ class TestDetectContentType:
     def test_filename_case_insensitive(self):
         assert _detect_content_type(None, "X.MP3") == "audio"
 
+    def test_unknown_file_has_no_default_pipeline(self):
+        assert _detect_content_type(None, "payload.zip") is None
+
     def test_arxiv_url_is_paper(self):
         assert _detect_content_type("https://arxiv.org/abs/2301.00001") == "paper"
 
@@ -52,8 +55,8 @@ class TestPipelineFor:
         assert _pipeline_for("article") == "article"
         assert _pipeline_for("audio") == "audio"
 
-    def test_unknown_defaults_video(self):
-        assert _pipeline_for("mystery") == "video"
+    def test_unknown_has_no_pipeline(self):
+        assert _pipeline_for("mystery") is None
 
 
 @pytest.fixture
@@ -126,6 +129,63 @@ class TestCreateJob:
         })
         assert resp.status_code == 201
         assert resp.json()["content_type"] == "audio"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("url", ["ftp://example.com/file", "not-a-supported-id"])
+    async def test_create_unknown_source_rejected_before_enqueue(self, client, mock_redis, url):
+        resp = await client.post("/api/jobs", json={"url": url})
+        assert resp.status_code == 422
+        assert "unsupported_source" in resp.json()["message"]
+        mock_redis.publish.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_explicit_source_content_type_mismatch_rejected(self, client, mock_redis):
+        resp = await client.post("/api/jobs", json={
+            "url": "https://youtu.be/dQw4w9WgXcQ", "content_type": "article",
+        })
+        assert resp.status_code == 422
+        mock_redis.publish.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unknown_content_type_is_openapi_422(self, client):
+        resp = await client.post("/api/jobs", json={
+            "url": "https://example.com/post", "content_type": "mystery",
+        })
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_source_catalog_and_openapi_enums_follow_registry(self, client):
+        catalog = (await client.get("/api/sources")).json()
+        assert {item["type"] for item in catalog["content_types"]} == {
+            "video", "paper", "article", "audio",
+        }
+        assert "book_toc" in {
+            item["type"] for item in catalog["subscription_sources"]
+        }
+        openapi = (await client.get("/openapi.json")).json()
+        schemas = openapi["components"]["schemas"]
+        assert set(schemas["ContentType"]["enum"]) == {
+            "video", "paper", "article", "audio",
+        }
+        assert "book_toc" in schemas["SubscriptionSourceType"]["enum"]
+
+    @pytest.mark.asyncio
+    async def test_unsupported_upload_extension_rejected(self, client, mock_redis):
+        resp = await client.post(
+            "/api/jobs/upload",
+            files={"file": ("payload.zip", b"not-media", "application/zip")},
+        )
+        assert resp.status_code == 422
+        mock_redis.publish.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_direct_file_url_is_not_a_publicly_creatable_source(self, client, mock_redis):
+        resp = await client.post(
+            "/api/jobs",
+            json={"url": "file:///data/private.txt", "content_type": "article"},
+        )
+        assert resp.status_code == 422
+        mock_redis.publish.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_create_publishes_article_pipeline(self, client, mock_redis):

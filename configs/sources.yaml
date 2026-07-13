@@ -1,3 +1,141 @@
+# 内容类型、直接投递来源和订阅来源的权威注册表。
+# 新增来源时先在这里声明,再实现对应下载或订阅适配器;完整性测试会阻止只有一侧的半成品进入主线。
+content_types:
+  video:
+    label: "视频"
+    pipeline: "video"
+    upload_extensions: [".mp4", ".mkv", ".webm", ".flv", ".mov"]
+  paper:
+    label: "论文"
+    pipeline: "paper"
+    upload_extensions: [".pdf"]
+  article:
+    label: "文章"
+    pipeline: "article"
+    upload_extensions: [".html", ".htm", ".txt", ".md"]
+  audio:
+    label: "播客 / 音频"
+    pipeline: "audio"
+    upload_extensions: [".mp3", ".m4a", ".wav", ".aac", ".flac"]
+
+# 按声明顺序检测,越具体的规则越靠前。other 是 fail-closed 回退,不可创建任务。
+job_sources:
+  bilibili:
+    label: "Bilibili"
+    default_content_type: "video"
+    content_types: ["video"]
+    patterns: ["bilibili\\.com", "^BV[a-zA-Z0-9]{10}$", "b23\\.tv"]
+  youtube:
+    label: "YouTube"
+    default_content_type: "video"
+    content_types: ["video"]
+    patterns: ["youtube\\.com", "youtu\\.be"]
+  arxiv:
+    label: "arXiv"
+    default_content_type: "paper"
+    content_types: ["paper"]
+    patterns: ["arxiv\\.org"]
+  pdf:
+    label: "PDF"
+    default_content_type: "paper"
+    content_types: ["paper"]
+    suffixes: [".pdf"]
+  podcast:
+    label: "播客"
+    default_content_type: "audio"
+    content_types: ["audio"]
+    suffixes: [".mp3", ".m4a", ".wav", ".aac", ".flac"]
+  local_file:
+    label: "本地文件"
+    content_types: ["video", "paper", "article", "audio"]
+    patterns: ["^file://"]
+    creatable: false
+    internal: true
+  http_article:
+    label: "网页文章"
+    default_content_type: "article"
+    # 显式 audio 用于不带音频后缀的播客落地页,下载步再解析 enclosure。
+    content_types: ["article", "audio"]
+    patterns: ["^https?://"]
+  upload:
+    label: "本地上传"
+    content_types: ["video", "paper", "article", "audio"]
+  other:
+    label: "未支持来源"
+    content_types: []
+    creatable: false
+
+subscription_sources:
+  bilibili_up:
+    label: "B站 UP 主"
+    group: "bilibili"
+    icon: "rss"
+    collection_prefix: "bili_up"
+    slug_strategy: "plain"
+    id_label: "UP 主页 / mid"
+    placeholder: "如 247209804 或 space.bilibili.com/247209804"
+    hint: "B站 UP 主空间 ID(mid)或其主页链接,自动追更该 UP 的全部投稿。"
+    home_url_template: "https://space.bilibili.com/{source_id}"
+  bilibili_fav:
+    label: "B站 收藏夹"
+    group: "bilibili"
+    icon: "star"
+    collection_prefix: "bili_fav"
+    slug_strategy: "plain"
+    id_label: "收藏夹 ID / 链接"
+    placeholder: "收藏夹 media_id 或收藏夹链接"
+    hint: "订阅某个收藏夹,追更其中新增的视频。"
+    home_url_template: "{source_id}"
+  bilibili_collection:
+    label: "B站 合集 / 系列"
+    group: "bilibili"
+    icon: "list-video"
+    collection_prefix: "bili_col"
+    slug_strategy: "plain"
+    id_label: "合集链接"
+    placeholder: "合集/系列链接,或 mid:season|series:sid"
+    hint: "订阅 UP 的某个合集或视频系列。"
+    home_url_template: "{source_id}"
+  youtube_channel:
+    label: "YouTube 频道"
+    group: "youtube"
+    icon: "youtube"
+    collection_prefix: "yt"
+    slug_strategy: "youtube"
+    id_label: "频道链接"
+    placeholder: "https://www.youtube.com/@handle 或 /channel/UC..."
+    hint: "频道主页链接(@handle、/channel/UC...、/c/...),追更频道全部上传。"
+    home_url_template: "{source_id}"
+  rss:
+    label: "RSS / Atom(含公众号)"
+    group: "rss"
+    icon: "rss"
+    collection_prefix: "rss"
+    slug_strategy: "hash"
+    id_label: "Feed 地址"
+    placeholder: "https://example.com/feed.xml"
+    hint: "通用 RSS/Atom 源。微信公众号可填写 RSSHub 等桥生成的 feed 地址;播客、博客、arXiv 同理。"
+    home_url_template: "{source_id}"
+  local_dir:
+    label: "本地目录"
+    group: "local"
+    icon: "folder-input"
+    collection_prefix: "local"
+    slug_strategy: "directory"
+    id_label: "目录路径"
+    placeholder: "/data/inbox"
+    hint: "容器内可见的目录路径(默认 /data/inbox),按扩展名自动入库。"
+  book_toc:
+    label: "在线书目录"
+    group: "book"
+    icon: "book-open"
+    collection_prefix: "book"
+    slug_strategy: "hash"
+    id_label: "目录页 URL"
+    placeholder: "https://book.example.com/index.html"
+    hint: "解析 Jupyter Book / Sphinx 等目录页,按目录顺序串行入库各章节。"
+    home_url_template: "{source_id}"
+
 # 网络区域路由(net-zone):把"哪些步骤按网络区域路由"从代码外置到配置,配置与代码分离。
 # 与 scheduler.enqueue_step 配合:
 #   - net_steps 命中的步骤,任务分发时按 URL 判区域(shared.net_zone,用构建时烤入的 CN 域名表),

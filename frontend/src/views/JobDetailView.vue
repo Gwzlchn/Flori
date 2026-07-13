@@ -370,7 +370,7 @@ async function loadTranslated() {
 }
 
 // 图表(论文 intermediate/figures.json) tab
-// 04_figures 渲染的图(含矢量图);独立展示,不依赖智能笔记/AI worker。只列有渲染图(filename)的条目。
+// 兼容旧 paper job 的 figures.json;当前链不生成该产物。只列仍有 filename 的历史渲染图。
 interface FigureItem { id: string; page: number; caption: string; filename: string | null; ocr_text?: string }
 const figures = ref<FigureItem[]>([])
 const figuresWithImage = computed(() => figures.value.filter(f => f.filename))

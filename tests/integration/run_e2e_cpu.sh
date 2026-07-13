@@ -133,7 +133,7 @@ JOB3=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['j
 CT=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['content_type'])")
 log "  Job: $JOB3 (content_type=$CT)"
 
-PAPER_CPU_STEPS="01_download,02_pdf_parse,03_sections,04_figures"
+PAPER_CPU_STEPS="01_download,02_pdf_parse,03_sections"
 if wait_steps_done "$JOB3" "$PAPER_CPU_STEPS" 300; then
   report_steps "$JOB3"
   # 验证 sections.json 存在

@@ -4,10 +4,21 @@
 
 ## 当前状态
 
-**进度**：M1 核心 MVP · Worker 层 GitLab-runner 化 · M2 知识库 · M6 文章+播客 全部完成
-**能力**：视频 / 论文 / 文章 / 播客四类入库；远程 worker 单出站 HTTPS 接入、真零隧道；笔记按集合组织、FTS5 全文搜索；领域中心式知识库 + 概念图（术语 + 主题，多源类型化 occurrence）；术语库 CRUD/采纳并回流 Profile；订阅集合（B 站 UP 追更）
-**测试**：单元测试 938 pass / 18 skip（容器内 docker compose test 实跑，CI 绿）
-**下一步**：M5 GPU 加速（whisper 仅在 CPU 上跑过，GPU 路径尚未在真机验证 + PaddleOCR-GPU）/ M2.5 AI-native（RAG + 知识对话，先证伪 FTS5 不足再上向量）
+本页同时记录里程碑的首次交付历史和当前成熟度。下方 `[x]` 表示该里程碑已有可用首版，
+不等于可靠性、真实集成和知识质量已经闭环；当前口径以下表为准：
+
+| 状态 | 能力 |
+|------|------|
+| 完整 | 来源 registry、OpenAPI 枚举、API 入队前 fail-closed 与前端来源目录同源 |
+| first-pass | 视频 / 论文 / 文章 / 音频四类摄入；FTS5 Search、跨源 Ask 与 MCP；集合订阅；概念图与评审；手工建卡 SRS；知识雷达；远程 Worker 网关 |
+| 未开始 | 原生客户端、通知 / PWA、自动分类、知识缺口与矛盾检测、证据型自动卡片 |
+
+向量检索不是预定必做项：先用检索黄金集量化 FTS5 的 Recall@k、MRR、引用精度和延迟，
+只有未达阈值才启动 embedding / rerank。当前优先补齐真实 pipeline 索引、Worker 租约、原子灾备、
+migration 与真实集成等可靠性基线。
+
+测试结果不在文档冻结数字。主分支实时结果看 README 的 CI / coverage 徽章；本地唯一入口和
+E2E 分层见 [`scripts/test.sh`](scripts/test.sh) 与 [`docs/09-testing.md`](docs/09-testing.md)。
 
 ## 里程碑
 
@@ -40,17 +51,17 @@
 - [x] 调度器 + Redis + Worker 框架 + StorageBackend
 - [x] AI 网关（多 Provider 路由 + 成本追踪 + DRY_RUN 模式）
 - [x] 领域 Profile + 风格标签
-- [x] 视频分析步骤（16 个步骤 + StepBase 改造）
-- [x] 论文分析步骤（PDF 解析 + 章节/图表提取 + AI 笔记）
+- [x] 视频分析步骤 + StepBase 改造
+- [x] 论文分析步骤（arXiv HTML 优先 / PDF 直读 + 章节 + 条件翻译 + AI 笔记 + 概念 + 评审）
 - [x] Worker 管理（注册/心跳/持久记录/暂停恢复/per-worker 并发）
 - [x] FastAPI 服务（任务管理 + 文件服务 + Worker API）
 - [x] 前端：投递 + 进度 + 笔记阅读 + Worker 管理（手机版）
-- [x] 单元测试 423 pass（容器内 docker compose test 实跑）
+- [x] 容器化单元测试基线（实时结果由 CI / coverage gate 给出）
 - [x] 集成测试基础设施（docker-compose.integration.yml + E2E 脚本）
-- [x] 集成测试：下载 + CPU 步骤链 4/4 pass
+- [x] 下载 + CPU 步骤链的首版 integration 场景
   - [x] 视频上传 → 全 video pipeline CPU 链（scene 26s + frames 18s + dedup 2s + OCR 189s）
   - [x] B站 BV 号真实下载 → CPU 链 + 弹幕解析
-  - [x] PDF 上传 → paper pipeline CPU 链（parse + sections + figures）
+  - [x] PDF 上传 → paper pipeline CPU 链（download + PDF 元数据 + sections）
   - [x] arXiv URL 真实下载 → paper pipeline CPU 链
 - [x] Bug fixes：tag 调度 + 场景检测 callback + yutto 参数 + 文件搜索范围（6 个）
 - [x] 集成测试：AI 步骤（TC-AI-1 视频 + TC-AI-2 论文，Kimi provider）
@@ -76,26 +87,24 @@
 目标：多视频成为知识库，可搜索、有记忆。
 
 - [x] 集合管理（按主题/课程/系列组织笔记）——CRUD + 删集合解绑保留 job + job_count 维护
-- [x] 订阅集合——集合带 `source_type`/`source_id` 即订阅（B 站 UP 追更）；无独立 subscription 表/实体，统一为集合字段
+- [x] 订阅集合——集合带 `source_type`/`source_id` 即订阅；支持类型以 `configs/sources.yaml` 为准，无独立 subscription 表/实体
 - [x] Profile 动态积累——glossary 表（PK `(domain,term)`，typed occurrences）+ scheduler 从 review.key_terms（讲清楚的概念 + 候选定义）采集候选 → 一键采纳 → 回流 Profile.terminology（missing_concepts 仅评审面板，不入库）
 - [x] 领域中心 + 概念图——领域为派生视图（jobs∪collections∪glossary 的 distinct domain ∪ 有 profile 的领域），profile yaml 存展示元数据；术语库 CRUD/accept/标主题（is_topic）；概念时间线/主题聚合
 - [x] SQLite FTS5 全文搜索——notes_fts5 虚表(trigram 中文子串)+ scheduler 侧索引 + /api/search facet/高亮
 - [x] 前端全站重建（Notion 设计，领域中心式 IA）：领域知识库列表 + 工作台 + 术语/主题页 + 集合视图 + 搜索 + 术语库 CRUD + Profile 编辑
 
-### M2.5 · AI-native 知识交互（核心拐点）
+### M2.5 · AI-native 知识交互（first-pass，质量门待补）
 
 目标：从"处理工具"变为"知识应用"。用户可以和自己的知识库对话、提问、发现关联。
 
-- [ ] 向量嵌入（笔记分段 → embedding → sqlite-vec / chromadb）
-- [ ] RAG 检索（语义搜索 + FTS5 混合排序）
-- [ ] 知识对话（Chat with your KB）
+- [x] FTS5 检索 + 跨源综合问答 + MCP 搜索 / 读取（first-pass，真实四类接线和引用质量门待补）
+- [ ] 条件向量阶段（仅检索黄金集证明 FTS5 未达阈值时启动 embedding / rerank，不预建 schema）
+- [x] 知识对话首版（Ask）
   - 跨文档问答：「Transformer 有哪些注意力变体？」→ 检索多篇笔记 → 综合回答
   - 带视觉证据：回答嵌入截图 + 时间戳跳转（纯文本 RAG 做不到的差异化）
   - 对比分析：「这篇论文和那个视频的观点有什么不同？」
-- [ ] 知识图谱 / 自动关联
-  - 实体提取（人名、公司、术语、概念）
-  - 跨笔记交叉引用：「此方法与 BV1z6 的思路类似」
-  - 概念网络可视化
+- [x] 领域概念图首版（术语 / 主题 / occurrence / 时间线与跨来源聚合）
+- [ ] 自动实体关系与跨笔记推理关联
 - [ ] 自动标签 + 智能分类（摄入时自动归类到已有集合）
 
 ### M3 · 原生客户端（iOS + Mac）
@@ -118,14 +127,12 @@
 
 目标：系统不只被动处理，还能主动发现、推荐、提醒。
 
-- [ ] RSS / UP 主订阅（自动监控新视频，满足条件时自动入库）
+- [x] 来源订阅首版（B站、YouTube、RSS / Atom、本地目录与在线书目录；类型以 registry 为准）
 - [ ] 知识缺口分析（「你的强化学习知识只有 2 篇，推荐补充这些」）
 - [ ] 矛盾检测（新摄入内容与已有知识矛盾时提醒）
-- [ ] 学习反馈环
-  - 笔记 → 自动生成闪卡 / Quiz
-  - 间隔重复（Spaced Repetition）
-  - 掌握程度追踪 → 影响后续内容的 AI 笔记深度
-- [ ] 周报 / 摘要（「本周入库 12 篇，核心发现：…」）
+- [x] 手工建卡 + 间隔重复 SRS 首版
+- [ ] 证据型自动卡片、批量采纳与概念掌握度闭环
+- [x] 知识雷达 / 周摘要首版（可靠性与质量门待补）
 
 ### M5 · GPU 加速
 
@@ -143,7 +150,7 @@
 - [x] 网页抓取适配器（source_detect http_article + step_01_download 抓 HTML）
 - [x] 正文提取（trafilatura，中文友好，纯 Python）
 - [x] 文章笔记模板（article pipeline：parse→sections→smart→review）
-- [x] 播客 / 音频支持（单集音频 URL + 上传；audio pipeline：whisper→分段→smart_podcast→review；RSS 订阅追更留 M4/Agent）
+- [x] 播客 / 音频支持（单集音频 URL + 上传；audio pipeline：whisper→分段→smart_podcast→review；RSS / Atom 订阅已提供首版）
 
 ### M7 · 多租户 + 商业化
 
@@ -164,6 +171,6 @@
 2. **先视频后扩展**，视频是最复杂的（音视频+截图+字幕），论文/文章简单得多
 3. **设计先行**，M0 做透设计，M1 开始才写代码
 4. **可并行**，每个 M 可拆成独立模块并行开发
-5. **M2.5 是拐点**，有了 RAG + 对话，从工具变应用
+5. **AI-native 以证据和评测驱动**，先补可靠问答与引用质量，再按黄金集决定是否增加向量层
 6. **M3 提升体验**，原生 App 让日常使用更顺手
 7. **M7 才商业化**，先把产品做好再考虑收费

@@ -5,13 +5,15 @@
 ## 1. Pipeline 概览
 
 ```
-Push/PR to main   → Unit Test（普通 4 shard + worker 2 shard 并行）+ 分支覆盖率门(≥75%) + 前端 vitest
-Merge to main     → + Push Image (ghcr.io，构建已与测试并行暖好缓存) → Watchtower 自动拉取重建（CD）
+Push/PR to main   → Unit Test（普通 4 shard + worker 2 shard）+ 前端 vitest + 分支覆盖率门(≥75%)
+Merge to main     → 上述现有门全部通过 + Push Image (ghcr.io，构建已与测试并行暖好缓存) → Watchtower 自动拉取重建（CD）
 每日 cron          → Schemathesis 模糊(无 5xx，fuzz.yml) / Mutation 变异测试（mutation.yml）
-手动触发           → E2E 集成回归（workflow_dispatch）
+手动触发           → paper pipeline E2E（e2e.yml）
 ```
 
-每次 PR/push 跑容器内单测（按普通/worker 拆两组 job 分片并行）+ **分支覆盖率门** + 前端 vitest（见 §4）；纯文档提交(`paths-ignore`)不触发。**Schemathesis 模糊/契约**已拆到独立每日 cron(`fuzz.yml`)，变异测试(`mutation.yml`)也是每日 cron + 可手动；集成回归(`e2e.yml`)是**手动门**(`workflow_dispatch`)。三者都不挂在每个 PR 上以免给主 CI 加负载。
+每次 PR / push 跑容器内分片单测、分支覆盖率门和前端 Vitest；纯文档提交(`paths-ignore`)不触发。
+Schemathesis 与 Mutation 是每日 cron；paper pipeline E2E 由 `e2e.yml` 手动触发。真 Redis、SQLite
+并发、real-docker 和条件外网场景当前尚未统一接入 required job，不能把手动验证计作每次 PR 的覆盖。
 
 ## 2. 镜像发布
 
@@ -47,18 +49,23 @@ sudo ./svc.sh install && sudo ./svc.sh start
 
 ## 4. Workflow 设计
 
-实际实现见 `.github/workflows/ci.yml`（主 CI）+ `fuzz.yml`（Schemathesis，每日 cron）+ `e2e.yml`（集成回归，手动）+ `step-images.yml`（按步执行镜像，手动）+ `mutation.yml`（变异测试，每日 cron + 手动）：
+实际实现见 `.github/workflows/ci.yml`（主 CI）+ `fuzz.yml`（Schemathesis，每日 cron）+
+`e2e.yml`（paper pipeline E2E，手动）+
+`step-images.yml`（按步执行镜像，手动）+ `mutation.yml`（变异测试，每日 cron + 手动）：
 
-- `unit-normal` / `unit-worker`：push/PR 到 main 触发；纯文档提交(`paths-ignore`)不触发。单测按普通/worker 拆两个 job 并行。普通 job 建轻量 `test` 镜像跑非 step 用例,拆 4 shard;worker job 建含 ffmpeg 与媒体库的 `test-worker` 镜像跑 step/worker 用例,拆 2 shard。分片用 pytest-split 按实测时长均衡。各 shard 产**部分覆盖率**并上传 artifact。本地跑测试统一走 `scripts/test.sh`(见 CLAUDE.md §测试规约),不手写 `docker compose run`。
+- `unit-normal` / `unit-worker`：push / PR 到 main 触发；普通 job 拆 4 shard，worker / step job 拆 2 shard，
+  当前 workflow 直接在测试容器中调用 pytest，分片用 pytest-split 按实测时长均衡。各 shard 产部分
+  覆盖率并上传 artifact；本地开发仍统一走 `scripts/test.sh`。
 - `coverage-gate`：下载全部 shard 的部分覆盖率,在 `python:slim` 容器里 `coverage combine` 后判**分支覆盖率门** `--fail-under=75`。低于 75% 直接红,防覆盖率倒退。覆盖率配置(分支/markers)单一事实源在 `pyproject.toml`。
 - `fe-test`：容器化 vitest 跑前端单测 + 覆盖率,与后端并行,各自为门。
 - `coverage-badge`：仅 main。把前后端覆盖率写成 shields endpoint JSON,force-push 到 `badges` 数据分支,README 徽章读它。
 - `fuzz.yml`（每日 cron + 可手动）：**Schemathesis 模糊/契约**,`pytest -m fuzz tests/test_openapi_fuzz.py`。in-process 从 `/openapi.json` 自动派生用例喂每个端点,断言不 5xx(`not_a_server_error` + `response_schema_conformance`,检查集见仓库根 `schemathesis.toml`)。曾借此揪出分页 `offset` 溢出 SQLite int64 的 500 并修复。从 push CI 拆出,不再拖慢每次 push 的关键路径。
-- `build-images` / `push-images`：build 与 push 拆成两个 job。`build-images` 与测试**并行**,只构建暖 buildcache 不推送;PR 也构建,用来验 Dockerfile 与 vue-tsc。`push-images` 仅 main、覆盖率门和前端测试通过后跑,命中暖缓存后秒级 build + push。均用 buildx 构 **amd64**（所有目标机均为 x86，不构 arm64）。矩阵四个镜像：`flori-api` / `flori-scheduler` / `flori-worker` 是 `docker/base.Dockerfile` 的不同 target,加 `flori-frontend`。
+- `build-images` / `push-images`：build 与 push 拆成两个 job。`build-images` 与测试**并行**,只构建暖 buildcache 不推送;PR 也构建,用来验 Dockerfile 与 vue-tsc。`push-images` 仅 main，必须等 coverage gate、前端、路径检测和预构建全绿后运行；命中暖缓存后 build + push。均用 buildx 构 **amd64**。矩阵四个镜像：`flori-api` / `flori-scheduler` / `flori-worker` / `flori-frontend`。
 - `detect` 以最近一次完整成功的 main CI SHA 为已发布基线，累计分类到当前 HEAD。A 改后端后即使被 B 的连续 push 取消，B 也会在基线到 HEAD 的 diff 里看到 A，不会漏发后端。GitHub API、Git 祖先或历史基线异常时强制前后端全建，宁可多建不得漏发。合法纯版本/pyproject 注释和 Dockerfile 普通纯注释变化不触发运行镜像；Docker parser directive、heredoc 或任何指令变化仍保守重建。
 - 同 ref 的新 run 以 job 级 concurrency 取消旧单测、前端测试、路径检测和镜像预构建；`push-images` 按镜像名串行且 `cancel-in-progress: false`，已启动的发布不会被后续 run 半途取消。未启动的旧排队可由最新 HEAD 取代，累计基线保证中间改动不丢失。
 - `step-images.yml`：步骤执行镜像（`flori-step-base` / `flori-step-heavy` / `flori-step-gpu`）独立于主 CI，`workflow_dispatch` 手动触发，同样只构 amd64。
-- `e2e.yml`（**集成回归门**，`workflow_dispatch` 手动触发，不挂 PR）：补审计缺口 #7 —— 主 CI 只跑单测，缺 pipeline DAG ↔ worker ↔ scheduler ↔ step 的接线回归。含两个互不依赖、可并行的 job：
+- `e2e.yml`（**paper pipeline E2E**，`workflow_dispatch` 手动触发，不挂 PR）：补 pipeline DAG ↔
+  scheduler ↔ worker ↔ step 的整链接线。含两个互不依赖、可并行的 job：
 
   **① `integration-smoke` —— 接线健康探针**（用 `docker-compose.integration.yml`，`DRY_RUN=1` 起栈）：
   1. 起 redis/api/scheduler/worker-cpu/worker-ai；
@@ -67,9 +74,9 @@ sudo ./svc.sh install && sudo ./svc.sh start
   4. 跑容器内全量单测（与主 CI 同路径）兜底回归。
 
   **② `paper-e2e` —— 真实素材端到端**（`tests/integration/ci_paper_e2e.sh`，`DRY_RUN=1` 起同一栈）：
-  投一个仓库自带的微型 PDF `tests/fixtures/sample.pdf`（~2KB，PyMuPDF 生成，含可抽文本 + 标题 + 多个章节标题 + 一条 `Figure 1:` 图注），走 `POST /api/jobs/upload` 进 **paper** pipeline，轮询到 `done`，断言 `notes/smart`(200) + `review`(200, 合法 JSON) + `sections.json` 非空。**无需任何外部网络 / arXiv / B站 / API key**。这是审计缺口 #7 在 GitHub-hosted runner 上的**实质**覆盖（不止探活，真跑解析链）。
-  - **真跑（REAL）**：`01_download`（upload 模式——文件已落 `input/source.pdf`，本步只抽 metadata，不联网）、`02_pdf_parse`（PyMuPDF 解析）、`03_sections`（章节树）、`04_figures`（抽图 + 图注成条）。
-  - **合成（SYNTHETIC）**：`05_smart_paper`、`06_review` 经 `DRY_RUN=1` → `DryRunProvider` 返回占位产物（不调真实 AI），但落盘 / 版本化 / 接线全程真实。
+  投一个仓库自带的微型 PDF `tests/fixtures/sample.pdf`，走 `POST /api/jobs/upload` 进 **paper** pipeline，轮询到 `done`，断言 `notes/smart`(200) + `review`(200,合法 JSON) + `sections.json` 非空。**无需任何外部网络 / arXiv / B站 / API key**。这是 GitHub-hosted runner 上的真实接线覆盖，不等同于外网与真实模型验收。
+  - **真跑(REAL)**：`01_download`(upload 模式)、`02_pdf_parse`(pdfinfo/metadata/首页标题兜底)、`03_sections`(页区间章节树)。
+  - **合成(SYNTHETIC)**：`04_translate_paper`、`05_smart_paper`、`05_concepts`、`06_review` 经 `DRY_RUN=1` 产占位结果；DAG、落盘与版本化接线仍真实。
   - 脚本用独立 compose 项目名（默认 `flori-ci-paper`）+ 退出 trap `down -v` 拆栈，本地跑也不会误碰生产栈（本地若 8000 被占，需先停占用方或换独立项目；CI runner 干净直接用 8000）。
 
   **仍是人工/自托管的覆盖**（本 workflow 不跑）：真实**视频** mp4 / 真连 B站·arXiv 联网下载 / **真实 AI** 笔记全链路。`01_download` 对 URL 源会真连 B站/arXiv（`DRY_RUN` 不绕过下载），真实 AI 步需真 API key，GitHub-hosted runner 无网络素材跑不通，只能在装好素材的机器上对**已部署栈**手动执行：

@@ -115,11 +115,10 @@ jobs:
   #
   #   真跑(REAL):
   #     01_download   upload 模式(文件已落 input/source.pdf,本步只抽 metadata,不联网下载)
-  #     02_pdf_parse  PyMuPDF/fitz 真解析文本/标题/章节/图注
+  #     02_pdf_parse  poppler 真解析 PDF 元数据并建立页区间章节
   #     03_sections   扁平章节 → 树(断言 total_sections>0)
-  #     04_figures    PyMuPDF 抽图 + 文中 "Figure 1:" 图注成条
   #   合成(SYNTHETIC,DRY_RUN=1 → DryRunProvider,无需 key):
-  #     05_smart_paper / 06_review
+  #     04_translate_paper / 05_smart_paper / 05_concepts / 06_review
   #
   # 仍属人工/自托管覆盖(本 job 不跑):真实视频 / B站与 arXiv 联网下载 / 真实 AI 笔记链路
   #   —— 见 tests/integration/run_e2e_cpu.sh、run_e2e_ai.sh 与 docs/12-cicd.md。

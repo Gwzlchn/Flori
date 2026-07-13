@@ -3,6 +3,7 @@
 // 「四条内容流水线」从 /api/pipelines 动态拉取,configs/pipelines.yaml 为单一事实源,与实际步骤链保持一致。
 import { ref, onMounted } from 'vue'
 import { useWorkerStore } from '../stores/workers'
+import { contentTypeLabel } from '../utils/contentType'
 import {
   BookOpen, Info, GitBranch, RefreshCw, FileText, Check, Send,
   Search, Layers, Cpu, Play, Newspaper, Headphones, ChevronRight,
@@ -19,13 +20,13 @@ onMounted(async () => {
 })
 
 // 内容类型 → 展示(中文名 / 图标 / 色 pill);未知类型回退。
-const CT: Record<string, { label: string; icon: any; pill: string }> = {
-  video: { label: '视频', icon: Play, pill: 't-video' },
-  paper: { label: '论文', icon: FileText, pill: 't-paper' },
-  article: { label: '文章', icon: Newspaper, pill: 't-article' },
-  audio: { label: '播客 / 音频', icon: Headphones, pill: 't-audio' },
+const CT: Record<string, { icon: any; pill: string }> = {
+  video: { icon: Play, pill: 't-video' },
+  paper: { icon: FileText, pill: 't-paper' },
+  article: { icon: Newspaper, pill: 't-article' },
+  audio: { icon: Headphones, pill: 't-audio' },
 }
-function ct(name: string) { return CT[name] || { label: name, icon: Layers, pill: 't-video' } }
+function ct(name: string) { return CT[name] || { icon: Layers, pill: 't-video' } }
 // 步骤徽章配色(复用既有 badge 语义):评审→绿、AI 步→蓝、其余→灰。
 function stepBadge(s: PipeStep): string {
   if ((s.key || '').toLowerCase().includes('review') || (s.label || '').includes('评审')) return 'b-ok'
@@ -37,21 +38,21 @@ function stepBadge(s: PipeStep): string {
 <template>
   <section class="page">
     <div class="h1"><BookOpen :size="18" />关于 Flori</div>
-    <div class="lead">自托管的 AI 学习知识库 —— 把视频 / 论文 / 文章 / 播客自动炼成带截图与时间戳的结构化笔记，沉淀为按领域分桶、可检索、互相关联的个人知识体系。</div>
+    <div class="lead">自托管的 AI 学习知识库 —— 把视频 / 论文 / 文章 / 播客自动炼成结构化笔记，沉淀为按领域分桶、可检索、互相关联的个人知识体系。</div>
     <div style="margin-top:10px;color:var(--ink-600);font-size:13px">名字来源：Flori 取自拉丁语 <i>florilegium</i>（“采花集”）——中世纪指从群书中采撷精华、汇编成册的选集，正是“把素材摘录、沉淀为知识”的隐喻。</div>
 
     <!-- 这是什么 -->
     <div class="card pad" style="margin-top:18px">
       <div class="card-h"><Info :size="15" />这是什么</div>
       <p style="color:var(--ink-700)">
-        投递一条链接 / 一篇 PDF / 一个网页，Flori 在后台自动下载、转写、截图、OCR，再用 AI 整理成笔记。每篇内容产出<b>两份笔记</b>：
+        投递一条链接或一个文件，Flori 会按内容类型选择下载、解析、转写、截图或 OCR，再用 AI 整理成笔记。不同类型的原始材料不同，但都保留可核对的来源并生成结构化智能笔记：
       </p>
       <div class="grid2" style="margin-top:11px">
         <div class="metric">
           <div style="display:flex;align-items:center;gap:7px;color:var(--ink-900);font-weight:600;font-size:13.5px">
-            <FileText :size="15" class="dim" />机械版
+            <FileText :size="15" class="dim" />原始 / 机械材料
           </div>
-          <div class="l" style="margin-top:5px">带标点的逐字稿 + 关键帧截图 + OCR + 弹幕，忠实还原原内容，可逐句核对。</div>
+          <div class="l" style="margin-top:5px">视频保留逐字稿、关键帧、OCR 与弹幕；论文、文章和音频保留各自的原文、章节或转写，可回到来源核对。</div>
         </div>
         <div class="metric">
           <div style="display:flex;align-items:center;gap:7px;color:var(--ink-900);font-weight:600;font-size:13.5px">
@@ -92,7 +93,7 @@ function stepBadge(s: PipeStep): string {
         <div v-for="p in pipelines" :key="p.name" class="row" style="cursor:default;align-items:flex-start">
           <span class="type-pill" :class="ct(p.name).pill"><component :is="ct(p.name).icon" :size="17" /></span>
           <div class="body">
-            <div class="title">{{ ct(p.name).label }}<span style="font-weight:400;color:var(--ink-400);margin-left:7px;font-size:12px">{{ p.steps.length }} 步</span></div>
+            <div class="title">{{ contentTypeLabel(p.name) }}<span style="font-weight:400;color:var(--ink-400);margin-left:7px;font-size:12px">{{ p.steps.length }} 步</span></div>
             <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">
               <span v-for="s in p.steps" :key="s.key" class="badge" :class="stepBadge(s)">{{ s.label || s.key }}</span>
             </div>
@@ -109,8 +110,8 @@ function stepBadge(s: PipeStep): string {
       <table class="kv">
         <tbody>
           <tr><td>领域知识库</td><td>按知识范围分桶、互相隔离 —— 你知识体系的一级容器，由内容与概念派生而成</td></tr>
-          <tr><td>集合</td><td>领域内对内容的分组 —— 手动收藏，或订阅源（如某 B 站 UP 主合集，订阅是集合的一种属性）</td></tr>
-          <tr><td>内容</td><td>每条投递的视频 · 论文 · 文章 · 播客，归入某个集合，产出两份笔记</td></tr>
+          <tr><td>集合</td><td>领域内对内容的分组 —— 手动收藏，或连接一个受支持的订阅源；订阅是集合的一种属性</td></tr>
+          <tr><td>内容</td><td>每条投递的视频 · 论文 · 文章 · 播客，可归入集合并产出对应原始材料与智能笔记</td></tr>
         </tbody>
       </table>
       <div class="note-tip" style="margin-top:9px">在这三层之上，<b>概念图</b>横向贯通所有内容：术语、主题与时间线跨来源互相引用。</div>
@@ -153,7 +154,7 @@ function stepBadge(s: PipeStep): string {
       </div>
       <div class="card pad">
         <div class="card-h"><Rss :size="15" />集合与订阅</div>
-        <p style="color:var(--ink-700)">手动集合策展，或订阅 B 站 UP 主自动追更 —— 订阅是集合的一种属性，无独立实体，新内容自动入库。</p>
+        <p style="color:var(--ink-700)">手动集合策展，或连接频道、RSS / Atom、本地目录与在线书等来源。来源目录由后端 registry 动态下发，订阅是集合属性。</p>
       </div>
     </div>
 
@@ -192,18 +193,24 @@ function stepBadge(s: PipeStep): string {
       </div>
     </div>
 
-    <!-- 规划中 -->
+    <!-- 能力成熟度 -->
     <div class="card pad" style="margin-top:16px">
-      <div class="card-h"><GitBranch :size="15" />规划中</div>
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--ink-500)">
-        <span class="badge b-mut">规划</span>
-        <span>RAG 语义检索 + 与知识库对话</span>
-        <span class="sep" style="color:var(--ink-300)">·</span>
-        <span>原生 iOS / Mac 客户端</span>
-        <span class="sep" style="color:var(--ink-300)">·</span>
-        <span>闪卡 / 间隔重复等学习复习回路</span>
+      <div class="card-h"><GitBranch :size="15" />能力成熟度</div>
+      <div class="list">
+        <div class="row" style="cursor:default">
+          <span class="badge b-ok">完整</span>
+          <div class="body"><div class="meta"><span>来源 registry、OpenAPI 枚举、API 入队前 fail-closed 与前端来源目录同源</span></div></div>
+        </div>
+        <div class="row" style="cursor:default">
+          <span class="badge b-info">first-pass</span>
+          <div class="body"><div class="meta"><span>四类摄入、FTS5 Search / Ask / MCP、订阅、概念图、评审、手工建卡 SRS、知识雷达与远程 Worker 网关</span></div></div>
+        </div>
+        <div class="row" style="cursor:default">
+          <span class="badge b-mut">未开始</span>
+          <div class="body"><div class="meta"><span>原生客户端、通知 / PWA、自动分类、知识缺口与矛盾检测、证据型自动卡片</span></div></div>
+        </div>
       </div>
-      <div class="note-tip" style="margin-top:9px">以上为后续里程碑，尚未构建；当前以已落地的四类摄入、概念图、订阅、FTS5 搜索与术语库为准。</div>
+      <div class="note-tip" style="margin-top:9px"><b>first-pass</b> 表示可用但真实集成、可靠性或质量门尚未闭环。向量检索仅在黄金集证明 FTS5 未达阈值时启动，不作为预定完成项。</div>
     </div>
 
     <!-- 技术栈 -->

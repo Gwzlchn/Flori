@@ -317,7 +317,7 @@ class TestDownloadStep:
         step = self._make(job_dir, tmp_path, url=f"file://{src}", content_type="paper")
         result = step.execute()
 
-        assert result["source"] == "local"
+        assert result["source"] == "local_file"
         copied = job_dir / "input" / "source.pdf"
         assert copied.exists()
         assert copied.read_bytes() == b"%PDF-1.4 fake pdf content"
@@ -367,8 +367,32 @@ class TestDownloadStep:
         with patch.object(step, "_download_generic") as mock_generic:
             result = step.execute()
             mock_generic.assert_not_called()
-        assert result["source"] == "local"
-        assert (job_dir / "input" / "source.txt").read_text() == "hello article body"
+        assert result["source"] == "local_file"
+        html = (job_dir / "input" / "source.html").read_text()
+        assert "hello article body" in html
+        assert not (job_dir / "input" / "source.txt").exists()
+
+    def test_article_markdown_is_normalized_and_escaped(self, tmp_path):
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        (input_dir / "source.md").write_text("# title\n<script>bad</script>")
+
+        DownloadStep._normalize_article_input(input_dir)
+
+        html = (input_dir / "source.html").read_text()
+        assert "# title" in html
+        assert "&lt;script&gt;bad&lt;/script&gt;" in html
+        assert not (input_dir / "source.md").exists()
+
+    def test_flac_is_linked_for_whisper(self, tmp_path):
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        (input_dir / "source.flac").write_bytes(b"flac-audio")
+        step = self._make(tmp_path, tmp_path, url=None, content_type="audio")
+
+        step._link_audio_for_whisper(input_dir)
+
+        assert (input_dir / "source.mp4").read_bytes() == b"flac-audio"
 
     def test_prune_subtitle_keeps_chinese_only(self, tmp_path):
         """原生中文视频:只留中文字幕,删 B 站 AI 翻译的其它语种。"""

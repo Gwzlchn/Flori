@@ -94,7 +94,7 @@ domain（一个知识领域）
 | 集合种类 | 成员规则 | 额外属性 |
 |---|---|---|
 | **手动集合** | 仅手动投递 URL，自行策展（**异构**：跨内容类型/来源） | 无 |
-| **订阅集合** | 手动投递（依然在）**+** 自动拉取某来源（B站 UP 主）新内容 | `source_type`/`source_id`/`sync_enabled`/`last_synced_at` |
+| **订阅集合** | 手动投递（依然在）**+** 自动拉取一个 registry 来源的新内容 | `source_type`/`source_id`/`sync_enabled`/`last_synced_at` |
 
 ```
 Collection「LLM 学习」 (domain: deep-learning)  ← 手动集合（跨类型/来源，同一 domain）
@@ -106,9 +106,9 @@ Collection「财经说(PAKEN)」(domain: finance)  ← 订阅集合 source_type=
 ```
 
 - 集合恒为**单 domain**，但可跨内容类型/来源。
-- 一个 domain 可含**多个订阅集合**（每个对应一个来源/UP）+ 多个手动集合；它们的概念**都沉进同一个 domain 概念图**（§1.7 多源巩固正发生于此）。
-- 每个来源(mid)**全局唯一**对应一个订阅集合（id `col_bili_up_{mid}`）→ 同一 UP 只能归一个 domain。
-- **约束**：新建订阅集合**必须显式选 domain**（不得默认 `general`），否则该 UP 的概念沉进错误领域库。
+- 一个 domain 可含**多个订阅集合**（每个对应一个来源）+ 多个手动集合；它们的概念**都沉进同一个 domain 概念图**（§1.7 多源巩固正发生于此）。
+- 每个 `(source_type, source_id)` **全局唯一**对应一个订阅集合；id 前缀与规范化策略由 `configs/sources.yaml` 派生。
+- **约束**：新建订阅集合**必须显式选 domain**（不得默认 `general`），否则该来源的概念会沉进错误领域库。
 
 ---
 
@@ -243,15 +243,15 @@ occurrence = { job_id, content_type(video/paper/article/audio), location }
 ```python
 @dataclass
 class Collection:
-    id: str                        # 手动 "col_{hex}"；订阅 "col_bili_up_{mid}"
+    id: str                        # 手动 "col_{hex}"；订阅 id 由 registry 的 prefix/slug 策略派生
     name: str
     domain: str                    # 单 domain → 继承该 domain 的 Profile/概念图
     description: str = ""
     tags: list[str] = field(default_factory=list)
     job_count: int = 0
     # 订阅属性（手动集合为 None；订阅集合填充）
-    source_type: str | None = None     # "bilibili_up"
-    source_id: str | None = None       # B站 mid
+    source_type: str | None = None     # 取值以 configs/sources.yaml 为准
+    source_id: str | None = None       # 来源自身 id / URL / 容器内目录
     sync_enabled: bool = True           # 自动追更开关
     last_synced_at: datetime | None = None
     created_at: datetime
@@ -367,14 +367,14 @@ CREATE INDEX idx_jobs_collection ON jobs(collection_id);
 
 -- 集合（订阅属性内联，无独立 subscriptions 表）
 CREATE TABLE collections (
-    id TEXT PRIMARY KEY,                   -- col_{hex} / col_bili_up_{mid}
+    id TEXT PRIMARY KEY,                   -- col_{hex} / registry 派生的订阅 id
     name TEXT NOT NULL,
     domain TEXT NOT NULL,
     description TEXT DEFAULT '',
     tags TEXT DEFAULT '[]',
     job_count INTEGER DEFAULT 0,
-    source_type TEXT,                      -- NULL=手动；"bilibili_up"=订阅
-    source_id TEXT,                        -- B站 mid
+    source_type TEXT,                      -- NULL=手动；非空值以来源 registry 为准
+    source_id TEXT,                        -- 来源自身 id / URL / 容器内目录
     sync_enabled INTEGER DEFAULT 1,        -- 自动追更开关
     last_synced_at TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL

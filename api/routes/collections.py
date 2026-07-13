@@ -149,8 +149,13 @@ async def create_collection(
     redis: RedisClient = Depends(get_redis),
     storage: StorageBackend = Depends(get_storage),
 ):
+    if bool(req.source_type) != bool(req.source_id):
+        raise HTTPException(422, "source_type and source_id must be provided together")
     is_sub = bool(req.source_type and req.source_id)
     if is_sub:
+        from shared.subscriptions import SOURCE_ADAPTERS
+        if req.source_type not in SOURCE_ADAPTERS:
+            raise HTTPException(422, f"unsupported_source_type: {req.source_type}")
         # 订阅集合:domain 必须显式且非 general(否则术语沉错领域);来源全局唯一。
         if not req.domain or req.domain == "general":
             raise HTTPException(400, "订阅集合必须选择真实领域(不能为 general)")

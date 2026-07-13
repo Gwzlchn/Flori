@@ -4,8 +4,10 @@ import Toast from './components/common/Toast.vue'
 import SubmitDialog from './components/job/SubmitDialog.vue'
 import { useGlobalWs } from './composables/useGlobalWs'
 import { ref, provide } from 'vue'
+import { ensureSourceCatalog } from './constants/sources'
 
 useGlobalWs()
+void ensureSourceCatalog()
 
 // id 自增并作 Toast 的 :key:同一文案连续提示也强制重建组件,确保每次都重新弹出/计时。
 const toast = ref<{ id: number; message: string; type: 'success' | 'error' | 'info' } | null>(null)

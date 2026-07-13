@@ -3,8 +3,21 @@
 > 分层验证策略。利用原型产物做测试数据，每步独立验证。
 
 > **唯一入口 `scripts/test.sh`**（跨会话/多 agent 统一,权威规约见 CLAUDE.md §测试规约）:
-> `scripts/test.sh -m <模块>`(快测) / `--changed`(只跑受改动影响) / `--all`(全量+75%门) / `--fe`(前端)。
-> 用常驻热容器免启停税、`-n auto` 并行;全量回归 + 覆盖率门交 CI(`.github/workflows/ci.yml`:unit-normal 4 分片 + unit-worker 2 分片 → coverage-gate 合并判门 75%;schemathesis 独立每日 cron `fuzz.yml`)。**别再各写 `docker compose run …`**。
+> `scripts/test.sh -m <模块>`(快测) / `--changed`(受改动影响) / `--all`(全量+75%门) / `--fe`(前端)。
+> 用常驻热容器免启停税、`-n auto` 并行；主 CI 运行 unit 分片、frontend、coverage gate 和镜像构建 / 发布，Schemathesis 独立每日 cron。**别再各写 `docker compose run …`**。
+
+## 验证层级与门禁事实
+
+| 层级 | 当前自动化与入口 | 是否主 CI 必经 |
+|------|------------------|----------------|
+| 主 CI | backend normal 4 分片 + worker 2 分片、frontend Vitest、coverage gate、按路径构建并在现有门通过后 push 镜像；拓扑以 `.github/workflows/ci.yml` 为准 | 是，非纯文档 push / PR |
+| 组件集成 | 真 Redis、SQLite 并发和 real-docker 用例分散在 pytest / 运维脚本中，当前尚无统一入口或主 CI required job | 否，发布前显式执行 |
+| pipeline E2E | `.github/workflows/e2e.yml` 的 `workflow_dispatch`；`tests/integration/ci_paper_e2e.sh` 运行真实 PDF 的 01 / 02 / 03，后续 AI 步在 DRY_RUN 下合成 | 否，需显式触发 |
+| 条件外网 / 凭证 | article、audio、RSS、YouTube、B站、arXiv 与真实 AI 场景当前按素材、网络和凭证条件手工执行，尚无统一 workflow | 否，只在条件满足的受控环境执行 |
+| 浏览器与视觉 | `docker-compose.e2e.yml` + `tests/e2e/smoke.py` 做已部署栈路由冒烟；UI 视觉验收另在 3840×2160、1512×982、440×956 三视口检查 | 否，当前为人工 / 发布验收 |
+
+“脚本存在”不等于“每个 PR 已覆盖”。文档记录某项通过时必须同时写明入口、素材、是否 DRY_RUN、
+是否联网以及运行时间，不能把 unit、integration、条件外网和人工视觉混写成一个“E2E 已完成”。
 
 ## 1. 测试金字塔
 
@@ -71,9 +84,9 @@ watch -n 2 'curl -s http://localhost:8000/api/jobs/{id} | python3 -m json.tool'
 bash tests/integration/run_e2e_cpu.sh
 ```
 
-## 4. E2E 测试
+## 4. 产品 E2E 目标
 
-手机投递 URL → 全流程跑完 → 笔记可读。
+手机投递 URL → 全流程跑完 → 笔记可读。以下是产品级验收目标，不代表主 CI 已自动覆盖：
 
 验收标准：
 - 投递到笔记可读 < 30 分钟（短视频）
@@ -81,6 +94,9 @@ bash tests/integration/run_e2e_cpu.sh
 - WebSocket 进度实时更新
 - 截图正常显示
 - 时间戳可点击
+
+当前自动接线范围和未自动化范围以上表及 `.github/workflows/e2e.yml` 为准；浏览器路由冒烟的
+具体运行方法见 `tests/e2e/README.md`。
 
 ## 5. 并发安全测试
 

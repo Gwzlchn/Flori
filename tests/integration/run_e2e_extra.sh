@@ -85,7 +85,7 @@ for entry in "${JOBS[@]}"; do
 
   TARGET_STEPS="09_mechanical"
   if [ "$pipeline" = "paper" ]; then
-    TARGET_STEPS="04_figures"
+    TARGET_STEPS="03_sections"
   fi
 
   # 轮询直到目标步骤完成

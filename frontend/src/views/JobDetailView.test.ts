@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { ref, reactive } from 'vue'
 import { mount, flushPromises } from '@vue/test-utils'
 import type { JobDetail, JobConcept } from '../types'
+import { installSourceCatalog } from '../constants/sources'
 
 // 路由 mock: route.params.id 决定加载哪个 job;push 用于跳转(删除/概念)。
 // params 用 reactive:测「切 job」时改 routeParams.id,组件的 jobId 才会响应式变化。
@@ -82,6 +83,11 @@ function mountView() {
 }
 
 beforeEach(() => {
+  installSourceCatalog({
+    content_types: [{ type: 'video', label: '视频', upload_extensions: ['.mp4'] }],
+    job_sources: [{ type: 'bilibili', label: 'Bilibili' }],
+    subscription_sources: [],
+  })
   vi.clearAllMocks()
   routeParams.id = 'job_BV1abc'
   // 复位 ws refs

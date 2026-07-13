@@ -203,10 +203,11 @@ graph LR
 graph LR
     dl_p["01_download"] --> parse["02_pdf_parse"]
     parse --> sections["03_sections"]
-    parse --> figures["04_figures"]
+    sections --> translate_p["04_translate_paper(条件)"]
     sections --> smart_p["05_smart_paper"]
-    figures --> smart_p
-    smart_p --> review_p["06_review"]
+    translate_p --> smart_p
+    smart_p --> concepts_p["05_concepts"]
+    concepts_p --> review_p["06_review"]
 ```
 
 **文章 (article)** — M6 实现：

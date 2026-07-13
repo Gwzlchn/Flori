@@ -10,8 +10,8 @@
   - items: 该来源当前可见的全部内容项。适配器只管枚举全集,不做去重;
     去重在 sync_collection 层按 ingested_item_ids 做。
 
-用 @register("<source_type>") 装饰即注册。source_type 是细粒度来源种类:
-    bilibili_up / bilibili_fav / bilibili_collection / youtube_channel / rss / local_dir
+用 @register("<source_type>") 装饰即注册。可创建类型由 configs/sources.yaml 声明,
+完整性测试要求声明集合与运行时 SOURCE_ADAPTERS 严格一致。
 
 SourceItem 字段:
   - item_id:   该来源内稳定唯一的 ID,用于去重(B站=bvid、youtube=videoId、

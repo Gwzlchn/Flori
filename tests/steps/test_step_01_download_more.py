@@ -203,6 +203,14 @@ class TestRenameToSourceMp4:
         assert (input_dir / "source.mp4").exists()
         assert not (input_dir / "source.mkv").exists()
 
+    def test_renames_mov_upload_to_source_mp4(self, tmp_path):
+        job_dir = _make_job_dir(tmp_path)
+        input_dir = job_dir / "input"
+        (input_dir / "source.mov").write_bytes(b"x")
+        step = _make_step(job_dir, tmp_path)
+        step._rename_to_source_mp4(input_dir)
+        assert (input_dir / "source.mp4").exists()
+
     def test_already_mp4_left_alone(self, tmp_path):
         job_dir = _make_job_dir(tmp_path)
         input_dir = job_dir / "input"

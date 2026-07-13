@@ -57,7 +57,7 @@ services:
 
   worker-io:
     build: ./worker
-    command: python3 worker.py --type io
+    command: python -m worker.main --pools io
     volumes:
       - ${DATA_DIR:-./data}:/data
     environment:
@@ -71,7 +71,7 @@ services:
 
   worker-cpu:
     build: ./worker
-    command: python3 worker.py --type cpu
+    command: python -m worker.main --pools cpu
     volumes:
       - ${DATA_DIR:-./data}:/data
     environment:
@@ -89,7 +89,7 @@ services:
 
   worker-ai:
     build: ./worker
-    command: python3 worker.py --type ai
+    command: python -m worker.main --pools ai
     volumes:
       - ${DATA_DIR:-./data}:/data
       # CLI 订阅用户:先 `scripts/seed-worker-home.sh <worker名>` 把凭证 seed 进该 worker 家目录
@@ -240,7 +240,10 @@ volumes:
 
 ### GPU 机器启动命令
 
-> **audio/播客流水线需要 whisper-capable worker**：`02_whisper` 步在 `gpu` 池，仅由 `--type gpu` 且装了 `[gpu]` 依赖（faster-whisper）的 worker 执行；该 worker 在无 GPU 的机器上用 CPU（int8）转写，较慢但可用。若集群无此 worker，含音频/无字幕视频的 job 会在约 90s 后 fail-fast 报「无可用 worker」而非永久挂起。默认 `docker compose up` 只起 download/cpu/ai worker，不含 whisper worker。
+> **audio / 播客流水线需要 whisper-capable worker**：当前 `02_whisper` 明确路由到 `cpu` 池，
+> worker 发布镜像已包含 `[gpu]` extra，可在无 GPU 时用 CPU int8 转写。GPU 机器要参与该步骤时应声明
+> `--pools gpu cpu`；`gpu` 表示额外能力，`cpu` 才能认领当前 Whisper 步。池与步骤的真实映射以
+> `configs/pipelines.yaml` 和 `configs/pools.yaml` 为准。
 
 现行接入走 worker-gateway 单出站 HTTPS（见 [ADR-0009](adr/0009-worker-gateway-outbound-https.md)）：
 worker 机只需能出站访问主机 API，不暴露入站端口、不直连 Redis/MinIO。
@@ -249,7 +252,7 @@ worker 机只需能出站访问主机 API，不暴露入站端口、不直连 Re
 产物经网关、凭证走 env —— **不挂 `/data` 卷**。唯一可选挂载是 GPU 的 whisper 模型 warm 缓存。
 
 ```bash
-# 任意内网机,纯出站 HTTPS,无状态(--type 换 cpu/io/ai/gpu):
+# 任意内网机,纯出站 HTTPS,无状态;按能力显式列出一个或多个 --pools:
 docker run -d --restart unless-stopped \
   -e GATEWAY_URL=https://<主机域名> \
   -e GATEWAY_TLS_INSECURE=1 \                 # 自签/裸IP 网关需要;有受信证书可删
@@ -257,14 +260,14 @@ docker run -d --restart unless-stopped \
   -e WORKER_NAME=cpu-1 \                       # 确定性 id;同机多 worker 各给唯一名,不撞
   -e CONFIG_DIR=/app/configs \
   ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori:latest \
-  python -m worker.main --type cpu
+  python -m worker.main --pools cpu
 ```
 
-**凭证一律走 env**（管理页「接入新 Worker」会按类型自动生成命令)：
+**凭证一律走 env**（管理页「接入新 Worker」会按能力池生成命令)：
 - `ai`：`-e ANTHROPIC_API_KEY=<KEY>`（及 `DEEPSEEK_API_KEY` 等)。
 - `io`(下载)：**零凭证预置**——B站/YouTube cookies 由中心在认领下载步时经 runner API
   下发(docs/03 §1.7.1),在管理页扫码/上传一次即全部 worker 生效。
-- `gpu`(whisper)：`--gpus all`，并需带 `[gpu]` extra 的镜像(`FROM …/flori:latest` + `RUN pip install ".[gpu]"`)；
+- GPU 加速 Whisper：`--gpus all` + `--pools gpu cpu`；发布的 worker 镜像已包含 `[gpu]` extra；
   可选模型 warm 缓存(免每次重下)`-v whisper-cache:/cache -e MODEL_CACHE_DIR=/cache`。
 
 一条命令接入，纯出站 HTTPS；删除 worker 即吊销其 token。除 GPU 模型缓存(可选)外,worker 本地无任何状态。

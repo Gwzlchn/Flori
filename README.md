@@ -1,6 +1,6 @@
 # Flori
 
-> 自托管的 AI 学习知识库 —— 把视频、论文、文章、播客自动炼成带截图与时间戳的结构化笔记，沉淀为按领域分桶、可检索的个人知识体系。
+> 自托管的 AI 学习知识库 —— 把视频、论文、文章、播客自动炼成结构化笔记，沉淀为按领域分桶、可检索的个人知识体系。
 >
 > *Self-hosted AI knowledge base that turns videos, papers, articles & podcasts into structured, searchable notes.*
 
@@ -11,20 +11,21 @@
 <!-- 变异分数(测试有效性,每日 cron 更新;徽章值=各核心模块当前分数,点开看趋势表)。首次 daily run 后生效。 -->
 [![ai_gateway mutation](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FGwzlchn%2FFlori%2Fmutation-data%2Fmutation-ai_gateway.json)](https://github.com/Gwzlchn/Flori/blob/mutation-data/trend.md) [![db mutation](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FGwzlchn%2FFlori%2Fmutation-data%2Fmutation-db.json)](https://github.com/Gwzlchn/Flori/blob/mutation-data/trend.md) [![scheduler mutation](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FGwzlchn%2FFlori%2Fmutation-data%2Fmutation-scheduler.json)](https://github.com/Gwzlchn/Flori/blob/mutation-data/trend.md) [![worker mutation](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FGwzlchn%2FFlori%2Fmutation-data%2Fmutation-worker.json)](https://github.com/Gwzlchn/Flori/blob/mutation-data/trend.md)
 
-投递一个视频/播客链接、一篇 PDF 或一个网页，Flori 自动下载、转写、截图、OCR，再用 AI 整理成结构化笔记，并把"讲清楚的概念"沉淀进按领域分桶的概念图，攒成你自己的知识库。
+投递一个视频 / 播客链接、一篇 PDF 或一个网页，Flori 按内容类型执行下载、解析、转写、截图或 OCR，
+再用 AI 整理成结构化笔记，并把“讲清楚的概念”沉淀进按领域分桶的概念图。
 
 > **名字来源**：Flori 取自拉丁语 *florilegium*（"采花集"）——中世纪指从群书中采撷精华、汇编成册的选集，正是"把素材摘录、沉淀为知识"的隐喻。目标不止于"存下来"，而是"学得会、记得住"（学习/复习回路见 [ROADMAP](ROADMAP.md) M4）。
 
 ## 能做什么
 
-- **多源摄入**：B 站 / YouTube / 本地视频，arXiv / 本地 PDF 论文，网页文章，单集音频/播客（URL 或上传）
+- **多源摄入**：视频 / 论文 / 文章 / 音频四类 pipeline；可创建来源、上传扩展名与订阅类型以 [`configs/sources.yaml`](configs/sources.yaml) 为准
 - **视频流水线**：下载 → 转写 → 场景检测 → 关键帧 → 去重 → OCR → 弹幕 → 口播稿 → 机械版笔记 → AI 智能版 → 质量评审
-- **论文 / 文章 / 播客流水线**：论文（PDF 解析 → 章节 → 图表 → AI 笔记 → 评审）/ 文章（正文解析 → 章节 → AI 笔记 → 评审）/ 播客（转写 → 解析 → AI 笔记 → 评审）
-- **两份笔记**：机械版（带标点逐字稿 + 关键帧截图 + OCR + 弹幕）/ 智能版（AI 按主题重组，含术语解释、要点回顾）；智能版视频走两段式（先逐帧看图产视觉描述，再据机械稿 + 视觉描述纯文本生成笔记）
-- **视觉证据**：笔记内嵌关键帧截图与时间戳，定位到原片对应片段
+- **论文 / 文章 / 播客流水线**：论文（HTML 优先 / PDF 直读 → 章节 → 条件翻译 → AI 笔记 → 概念 → 评审）/ 文章（正文解析 → 章节 → AI 笔记 → 概念 → 评审）/ 播客（转写 → 解析 → AI 笔记 → 评审）
+- **原始材料与智能笔记**：视频有机械版（逐字稿 + 关键帧 + OCR + 弹幕）和智能版；论文、文章、音频各自保留原文 / 章节 / 转写并生成智能笔记。视频智能版采用视觉描述 + 机械稿两段式生成
+- **视觉证据首版**：视频笔记可内嵌关键帧与时间戳；PDF 页码、文章锚点等多模态定位仍待统一质量门
 - **知识库（领域中心）**：知识按领域分桶成一组并行的概念图——术语页（跨来源综合定义 + 类型化出现处）、主题页（域内跨集合内容聚合）、术语库 CRUD（候选→采纳→回流 Prompt）；评审产出的概念自动喂养
 - **全文搜索**：SQLite FTS5（trigram 中文子串匹配），跨领域/集合检索所有笔记
-- **集合与订阅**：手动集合策展，或订阅 B 站 UP 主自动追更新内容（订阅是集合的一种属性，非独立实体）
+- **集合与订阅**：手动策展，或订阅 B站 UP/收藏夹/合集、YouTube 频道、RSS、容器内目录和在线书目录；订阅是集合属性
 - **多 Provider AI 网关**：Anthropic / DeepSeek / Kimi / OpenAI / 本地 Ollama / Claude CLI，带成本追踪与 `DRY_RUN` 空跑
 - **分布式 Worker**：资源池 + 标签亲和，远程 worker 经 API 网关单条出站 HTTPS 接入（不连中心 Redis/MinIO），可随时加一台 GPU 机器
 - **全 Docker、自托管、数据完全自有**
@@ -71,7 +72,15 @@ Python 3.11 · FastAPI · Redis · SQLite · Vue 3 · Docker
 
 ## 状态
 
-**M1（视频 + 论文 MVP）/ M2（知识库：领域概念图 + 集合订阅 + FTS5 搜索 + 术语库）/ M6（文章 + 播客）/ M-W（远程 worker 网关接入）均已完成**，全量 938 个单元测试在容器内通过（前端已按 Notion 设计全站重建并入 main）。后续里程碑（RAG 对话、学习/复习回路、原生客户端）见 [ROADMAP.md](ROADMAP.md)。
+这里的状态只使用三种口径：**完整**表示当前边界有自动验收且没有已知闭环缺口；**first-pass**表示功能可用，但仍缺真实集成、可靠性或质量门；**未开始**表示没有可用实现。详细证据与后续顺序见 [ROADMAP.md](ROADMAP.md)。
+
+| 状态 | 能力 |
+|------|------|
+| 完整 | 来源 registry、OpenAPI 枚举、API 入队前 fail-closed 与前端来源目录同源 |
+| first-pass | 四类摄入、FTS5 Search / Ask / MCP、集合订阅、概念图、评审、手工建卡 SRS、知识雷达、远程 Worker 网关 |
+| 未开始 | 原生客户端、通知 / PWA、自动分类、知识缺口与矛盾检测、证据型自动卡片 |
+
+测试结果不在文档冻结数字：主分支实时结果看页首 CI/coverage 徽章；本地权威入口是 `scripts/test.sh --all` 与 `scripts/test.sh --fe`，真实接线和条件外网验证见 [docs/09-testing.md](docs/09-testing.md)。
 
 ## 文档
 
@@ -83,4 +92,4 @@ Python 3.11 · FastAPI · Redis · SQLite · Vue 3 · Docker
 
 ### Third-party licenses / 运行期依赖许可
 
-Flori 自身代码以 MIT 发布，但运行期会调用若干强 copyleft 依赖：**PyMuPDF / `fitz`（AGPL-3.0，用于 `steps/paper/step_02_pdf_parse.py`）**、**yutto / pysrt / bilibili-api（GPL-3.0）** 等。这些组件作为独立库 / 子进程依赖被调用，Flori 以自托管方式运行、**不作为打包二进制对外分发**，因此 MIT 仅覆盖 Flori 自有源码；如需再分发包含这些依赖的产物，请遵守其各自的 AGPL/GPL 条款。逐工具许可与传染边界分析见 [docs/13-dependencies.md](docs/13-dependencies.md)。
+Flori 自身代码以 MIT 发布，但运行栈还包含 MinIO、Poppler、yutto 等不同许可的组件。MIT 仅覆盖 Flori 自有源码；再分发镜像或组件时必须遵守各自许可。逐工具清单与调用边界见 [docs/13-dependencies.md](docs/13-dependencies.md)。

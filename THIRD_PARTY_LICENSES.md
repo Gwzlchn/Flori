@@ -6,7 +6,9 @@
 
 以下组件采用强 Copyleft 许可,集成与分发方式需单独评估:
 
-- **PyMuPDF (`fitz`)** — **AGPL-3.0**。用于 PDF 论文解析(`steps/paper/step_02_pdf_parse.py`、`step_04_figures.py` 中 `import fitz`)。装入重 CPU 步骤镜像(`docker/step-heavy.Dockerfile`)。AGPL 对"通过网络提供服务"也触发源码提供义务,商用或对外提供服务前需自行确认合规路径(或改用 MIT 的 pdfplumber 等替代)。
+- **PyMuPDF (`fitz`)** — **AGPL-3.0**。当前 paper pipeline 已不 import 它，`04_figures` 也已删除；
+  但旧 `docker/step-heavy.Dockerfile` 仍显式安装该包，因此分发这个兼容镜像时仍必须按实际镜像内容评估
+  AGPL 义务，不能因为当前步骤未调用就从许可清单删除。
   - https://github.com/pymupdf/PyMuPDF · License: https://www.gnu.org/licenses/agpl-3.0.html
 - **yutto** — **GPL-3.0**。B站视频下载器,作为命令行/进程被调用,随 `steps` 组及纯 Python 步骤镜像(`docker/step-base.Dockerfile`)分发。
   - https://github.com/yutto-dev/yutto · License: https://www.gnu.org/licenses/gpl-3.0.html
@@ -39,7 +41,7 @@
 | imagehash | BSD-2-Clause | 感知哈希去重 | https://github.com/JohannesBuchner/imagehash |
 | scikit-image | BSD-3-Clause | SSIM 结构相似度 | https://github.com/scikit-image/scikit-image |
 | rapidocr-onnxruntime | Apache-2.0 | CPU OCR(ONNX 推理) | https://github.com/RapidAI/RapidOCR |
-| **PyMuPDF (`fitz`)** | **AGPL-3.0** | PDF 解析/图片提取(见上方重点提示) | https://github.com/pymupdf/PyMuPDF |
+| **PyMuPDF (`fitz`)** | **AGPL-3.0** | 旧 step-heavy 镜像残留依赖，当前 pipeline 不调用(见上方重点提示) | https://github.com/pymupdf/PyMuPDF |
 | trafilatura | Apache-2.0 | 网页正文提取 | https://github.com/adbar/trafilatura |
 
 ## pip 依赖 — API(`api`)
@@ -98,5 +100,3 @@
 ## 设计致谢
 
 - **执行器接口/设计**:docker 执行器(每步一容器、共享工作卷、cleanup 必执行、防泄漏 labels)的接口与设计借鉴自 **GitLab Runner**(MIT License, © GitLab Inc.)。
-</content>
-</invoke>

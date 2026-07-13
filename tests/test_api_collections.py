@@ -49,6 +49,43 @@ class TestCreateCollection:
         assert data["description"] == "notes"
         assert data["tags"] == ["cv", "nlp"]
 
+    @pytest.mark.asyncio
+    async def test_book_toc_is_creatable_and_exposed(self, client):
+        resp = await client.post("/api/collections", json={
+            "domain": "learning",
+            "source_type": "book_toc",
+            "source_id": "https://book.example.com/index.html",
+            "sync_now": False,
+        })
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["id"].startswith("col_book_")
+        assert body["subscription"]["source_type"] == "book_toc"
+        assert body["subscription"]["source_label"] == "book"
+
+    @pytest.mark.asyncio
+    async def test_partial_subscription_source_rejected(self, client):
+        resp = await client.post("/api/collections", json={
+            "name": "bad", "domain": "learning", "source_type": "rss",
+        })
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_registered_source_without_adapter_rejected_before_write(
+        self, client, app, monkeypatch,
+    ):
+        from shared.subscriptions import SOURCE_ADAPTERS
+
+        monkeypatch.delitem(SOURCE_ADAPTERS, "book_toc")
+        resp = await client.post("/api/collections", json={
+            "domain": "learning",
+            "source_type": "book_toc",
+            "source_id": "https://book.example.com/index.html",
+            "sync_now": False,
+        })
+        assert resp.status_code == 422
+        assert app.state.db.list_collections() == []
+
 
 class TestListCollections:
     @pytest.mark.asyncio

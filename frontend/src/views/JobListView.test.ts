@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
+import { installSourceCatalog } from '../constants/sources'
 
 // router: 共享 push 间谍以断言跳转。
 const push = vi.fn()
@@ -61,6 +62,11 @@ async function mountView() {
 }
 
 beforeEach(() => {
+  installSourceCatalog({
+    content_types: [{ type: 'video', label: '视频', upload_extensions: ['.mp4'] }],
+    job_sources: [{ type: 'bilibili', label: 'Bilibili' }],
+    subscription_sources: [],
+  })
   setActivePinia(createPinia())
   vi.clearAllMocks()
   push.mockReset()

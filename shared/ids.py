@@ -16,6 +16,7 @@ import secrets
 from datetime import datetime
 
 from .source_detect import detect_source, extract_arxiv_id, extract_bilibili_bvid
+from .source_registry import subscription_source_spec
 
 
 def _hash(s: str | None) -> str:
@@ -101,29 +102,26 @@ def _plain_slug(sid: str) -> str:
     return clean if (clean and len(clean) <= 24 and "://" not in (sid or "")) else _hash(sid)
 
 
-# source_type → (徽标, collection-id 标签, slug 提取器)
-_SUBSCRIPTION: dict[str, tuple[str, str, "callable"]] = {
-    "bilibili_up": ("bilibili", "bili_up", _plain_slug),
-    "bilibili_fav": ("bilibili", "bili_fav", _plain_slug),
-    "bilibili_collection": ("bilibili", "bili_col", _plain_slug),
-    "youtube_channel": ("youtube", "yt", _yt_slug),
-    "rss": ("rss", "rss", _hash),
-    "local_dir": ("local", "local", _dir_slug),
-    "book_toc": ("book", "book", _hash),   # 在线书(source_id=目录 URL → 短哈希)
+_SLUGGERS = {
+    "plain": _plain_slug,
+    "youtube": _yt_slug,
+    "hash": _hash,
+    "directory": _dir_slug,
 }
 
 
 def subscription_badge(source_type: str) -> str:
     """订阅源类型 → 来源短标签(前端徽标 + 集合显示)。未登记回退 source_type 本身。"""
-    e = _SUBSCRIPTION.get(source_type)
-    return e[0] if e else source_type
+    spec = subscription_source_spec(source_type)
+    return str(spec["group"]) if spec else source_type
 
 
 def subscription_collection_id(source_type: str, source_id: str) -> str:
     """Collection ID = col_{标签}_{slug}。统一规则,无来源特例(B站 UP 自然得 col_bili_up_{mid})。"""
-    e = _SUBSCRIPTION.get(source_type)
-    if e:
-        _, label, slug = e
-        return f"col_{label}_{slug(source_id)}"
+    spec = subscription_source_spec(source_type)
+    if spec:
+        label = str(spec["collection_prefix"])
+        slugger = _SLUGGERS[str(spec["slug_strategy"])]
+        return f"col_{label}_{slugger(source_id)}"
     label = re.sub(r"[^A-Za-z0-9]+", "_", source_type).strip("_")
     return f"col_{label}_{_plain_slug(source_id)}"

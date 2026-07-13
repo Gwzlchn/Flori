@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from enum import Enum
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from shared.source_registry import CONTENT_TYPE_NAMES, SUBSCRIPTION_SOURCE_NAMES
+
+
+ContentType = Enum(
+    "ContentType", {name: name for name in CONTENT_TYPE_NAMES}, type=str, module=__name__,
+)
+SubscriptionSourceType = Enum(
+    "SubscriptionSourceType",
+    {name: name for name in SUBSCRIPTION_SOURCE_NAMES},
+    type=str,
+    module=__name__,
+)
 
 
 class JobCreateRequest(BaseModel):
+    model_config = ConfigDict(use_enum_values=True)
+
     url: str | None = None
-    content_type: str | None = None
+    content_type: ContentType | None = None
     domain: str = "general"
     style_tags: list[str] = Field(default_factory=list)
     collection_id: str | None = None
@@ -177,16 +194,17 @@ class PromptActivateRequest(BaseModel):
 
 
 class CollectionCreateRequest(BaseModel):
-    # 手动集合 name 必填;订阅集合可留空(""),首次同步后自动命名为 <来源名>-<来源>。
+    model_config = ConfigDict(use_enum_values=True)
+
+    # 手动集合 name 必填;订阅集合可留空(""),首次同步后自动命名为来源真实名。
     name: str = ""
     domain: str
     description: str | None = None
     tags: list[str] = Field(default_factory=list)
     # 订阅集合:给定 source_type/source_id 即创建订阅集合(自动从该来源追更)。
-    # source_type 取值: bilibili_up / bilibili_fav / bilibili_collection /
-    # youtube_channel / rss / local_dir(适配器见 shared/subscriptions/)。
-    source_type: str | None = None
-    source_id: str | None = None        # 来源 id:B站 mid / YouTube 频道 / RSS url / 目录路径
+    # source_type 取值由 configs/sources.yaml 派生,OpenAPI 会给出完整 enum。
+    source_type: SubscriptionSourceType | None = None
+    source_id: str | None = None        # 来源 id / URL / 容器内目录,具体语义由 registry 元数据给出
     sync_now: bool = True               # 建后立即首次同步
 
 
@@ -199,9 +217,9 @@ class CollectionUpdateRequest(BaseModel):
 
 class CollectionSubscriptionInfo(BaseModel):
     """集合的订阅源信息(订阅是集合属性)。同步/开关端点用集合自身 id。"""
-    source_type: str          # bilibili_up / bilibili_fav / bilibili_collection / youtube_channel / rss / local_dir
-    source_id: str            # B站 mid / 频道URL / feed URL / 目录路径 / 收藏夹id ...
-    source_label: str = ""    # 由 source_type 派生的来源短标签(bilibili/youtube/rss/local);前端 = name + 该徽标
+    source_type: SubscriptionSourceType
+    source_id: str            # 来源自身 id / URL / 容器内目录
+    source_label: str = ""    # 由 registry group 派生的短标签;前端 = name + 来源徽标
     enabled: bool             # 自动同步开关 = collection.sync_enabled
     last_synced_at: str | None = None
     last_sync_status: str | None = None   # ok | error | syncing | None(从未同步)

@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { useJobStore } from '../../stores/jobs'
 import { useGlobalStore } from '../../stores/global'
 import { Send, Upload, X } from 'lucide-vue-next'
+import { ensureSourceCatalog, uploadAccept } from '../../constants/sources'
 
 // bare:不渲染外层卡片/标题(嵌入弹窗时用)。done:投递成功后通知外层(如关闭弹窗)。
 defineProps<{ bare?: boolean }>()
@@ -31,6 +32,7 @@ const domains = computed(() => {
 onMounted(() => {
   globalStore.fetchProfiles()
   globalStore.fetchStyleTags()
+  void ensureSourceCatalog()
 })
 
 function toggleTag(tag: string) {
@@ -120,7 +122,7 @@ async function submit() {
         <label class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded-lg cursor-pointer hover:bg-gray-50 transition-colors">
           <Upload :size="14" />
           <span>上传文件</span>
-          <input type="file" accept=".mp4,.mkv,.webm,.flv,.pdf,.mp3,.m4a,.wav,.aac,.html,.htm,.txt" class="hidden" @change="onFileChange" />
+          <input type="file" :accept="uploadAccept()" class="hidden" @change="onFileChange" />
         </label>
         <span v-if="file" class="flex items-center gap-1 text-sm text-gray-600">
           {{ file.name }}

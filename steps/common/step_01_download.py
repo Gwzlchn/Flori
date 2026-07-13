@@ -31,14 +31,19 @@ class DownloadStep(StepBase):
 
         # 本地目录订阅(local_dir 适配器)枚举出的 file:// url 不走网络下载:
         # 把宿主本地文件复制进 job 的 input/,被监听目录已挂进容器,再走正常校验。
-        # create_job_core 用 detect_source 给本地 url 的 source 记 "other",故这里
-        # 直接按 url 前缀判定,优先于 source 分派。
+        # create_job_core 已把本地 url 记为 local_file;这里仍按 scheme 守住旧 job 兼容。
         if url.startswith("file://"):
             self.log.info("local_file_mode", content_type=content_type)
-            source = "local"
+            source = "local_file"
             self._copy_local_file(url, content_type)
+            if content_type == "article":
+                self._normalize_article_input(self.job_dir / "input")
         elif source == "upload":
             self.log.info("upload_mode", content_type=content_type)
+            if content_type == "video":
+                self._rename_to_source_mp4(self.job_dir / "input")
+            elif content_type == "article":
+                self._normalize_article_input(self.job_dir / "input")
         elif content_type == "audio" and source not in ("bilibili", "youtube"):
             # 显式音频任务:无论 URL 是音频直链(podcast 源)还是播客页面,都走音频下载——
             # 否则页面 URL 被 detect_source 判成 http_article 走文章分支,whisper 无音源会挂。
@@ -505,7 +510,7 @@ class DownloadStep(StepBase):
         target = input_dir / "source.mp4"
         if target.exists():
             return
-        for ext in (".mp3", ".m4a", ".wav", ".aac"):
+        for ext in (".mp3", ".m4a", ".wav", ".aac", ".flac"):
             src = input_dir / f"source{ext}"
             if src.exists():
                 import shutil
@@ -543,6 +548,27 @@ class DownloadStep(StepBase):
 
         if content_type == "video":
             self._verify_download(dest)
+
+    @staticmethod
+    def _normalize_article_input(input_dir: Path) -> None:
+        """把支持的文章上传格式规范成下游唯一入口 input/source.html。"""
+        target = input_dir / "source.html"
+        if target.exists():
+            return
+        htm = input_dir / "source.htm"
+        if htm.exists():
+            htm.rename(target)
+            return
+        for ext in (".txt", ".md"):
+            source = input_dir / f"source{ext}"
+            if not source.exists():
+                continue
+            from html import escape
+
+            body = escape(source.read_text(encoding="utf-8"))
+            target.write_text(f"<html><body><pre>{body}</pre></body></html>", encoding="utf-8")
+            source.unlink()
+            return
 
     def _download_generic(self, url: str) -> None:
         from shared.net import assert_public_url
@@ -601,9 +627,9 @@ class DownloadStep(StepBase):
                     f.unlink()
 
     def _rename_to_source_mp4(self, input_dir: Path) -> None:
-        """yt-dlp 下载后重命名为 source.mp4。"""
+        """把下载或上传的视频容器规范成下游唯一入口 source.mp4。"""
         for f in input_dir.glob("source.*"):
-            if f.suffix in (".mp4", ".mkv", ".webm"):
+            if f.suffix.lower() in (".mp4", ".mkv", ".webm", ".flv", ".mov"):
                 if f.name != "source.mp4":
                     f.rename(input_dir / "source.mp4")
                 return
@@ -682,7 +708,7 @@ class DownloadStep(StepBase):
             _set_size(html_file)
 
         # 音频:对原始音频文件(非复制出的 source.mp4)取时长与大小。
-        for ext in (".mp3", ".m4a", ".wav", ".aac"):
+        for ext in (".mp3", ".m4a", ".wav", ".aac", ".flac"):
             audio_file = input_dir / f"source{ext}"
             if audio_file.exists():
                 metadata["duration_sec"] = self._get_video_duration(audio_file)
