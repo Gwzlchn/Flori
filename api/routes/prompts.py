@@ -13,11 +13,17 @@ prompt,见 step_base._load_system_prompt。模板读取双保险:运行时 promp
 from __future__ import annotations
 
 import asyncio
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Path
 
 from shared.config import AppConfig
-from shared.db import Database
+from shared.db import (
+    Database,
+    PROMPT_VERSION_EXCLUSIVE_MAX,
+    PROMPT_VERSION_MIN,
+    PromptVersionExhaustedError,
+)
 from api.deps import get_config, get_db, validate_path_segment, verify_token
 from api.schemas import PromptActivateRequest, PromptOverrideRequest
 
@@ -180,7 +186,10 @@ async def get_prompt(
 async def get_prompt_version(
     pipeline: str,
     step: str,
-    version: int,
+    version: Annotated[
+        int,
+        Path(ge=PROMPT_VERSION_MIN, lt=PROMPT_VERSION_EXCLUSIVE_MAX),
+    ],
     scope: str = "global",
     domain: str | None = None,
     db: Database = Depends(get_db),
@@ -230,9 +239,19 @@ async def put_prompt(
         )
         return {"status": "deleted", "pipeline": pipeline, "step": step}
     mode = req.mode if req.mode in ("overwrite", "new") else "overwrite"
-    version = await asyncio.to_thread(
-        db.set_prompt_override, req.scope, req.domain, pipeline, step, content, mode, req.note
-    )
+    try:
+        version = await asyncio.to_thread(
+            db.set_prompt_override,
+            req.scope,
+            req.domain,
+            pipeline,
+            step,
+            content,
+            mode,
+            req.note,
+        )
+    except PromptVersionExhaustedError as exc:
+        raise HTTPException(409, "prompt version limit reached") from exc
     return {
         "status": "saved", "pipeline": pipeline, "step": step,
         "scope": req.scope, "domain": (req.domain or "") if req.scope == "domain" else "",

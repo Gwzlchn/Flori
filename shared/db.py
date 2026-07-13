@@ -27,6 +27,24 @@ from .status import (
 # 非加列迁移(改列/删列/数据回填)与备份兼容校验预留的钩子——可经 PRAGMA user_version 查询。
 SCHEMA_VERSION = 1
 
+# SQLite INTEGER 是有符号 64 位整数.Prompt 版本从 1 开始,这组边界同时供
+# API schema 和 DB 绑定前防御使用.
+PROMPT_VERSION_MIN = 1
+PROMPT_VERSION_MAX = (1 << 63) - 1
+PROMPT_VERSION_EXCLUSIVE_MAX = 1 << 63
+
+
+class PromptVersionExhaustedError(ValueError):
+    """Prompt 历史已用完 SQLite 可表示的正整数版本."""
+
+
+def _valid_prompt_version(version: object) -> bool:
+    """DB 绑定前校验 Prompt 版本;bool 和整数子类也不作为版本."""
+    return (
+        type(version) is int
+        and PROMPT_VERSION_MIN <= version <= PROMPT_VERSION_MAX
+    )
+
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -1529,6 +1547,10 @@ class Database:
             if cur is None and maxv == 0:
                 version = 1                          # 首版
             elif mode == "new":
+                if maxv >= PROMPT_VERSION_MAX:
+                    raise PromptVersionExhaustedError(
+                        "prompt version reached SQLite INTEGER limit"
+                    )
                 version = maxv + 1                   # 另存为新版本
             else:                                    # overwrite 当前激活版本
                 version = cur["version"] if cur else (maxv or 1)
@@ -1572,6 +1594,8 @@ class Database:
         self, scope: str, domain: str | None, pipeline: str, step: str, version: int
     ) -> dict | None:
         """读某历史版本(含 content),未命中返回 None。"""
+        if not _valid_prompt_version(version):
+            return None
         scope, dom = self._norm_override_key(scope, domain)
         with self._lock:
             row = self._conn.execute(
@@ -1619,6 +1643,8 @@ class Database:
         """把激活指针指向某历史版本(re-activate):主表 content/version 同步成该版本,
         下次派发即用它。该版本不存在于 prompt_override_versions → 返回 False(不动);成功 True。
         主表此前可能无行(已 deactivate 状态)——直接 INSERT OR REPLACE 重建激活指针。"""
+        if not _valid_prompt_version(version):
+            return False
         scope, dom = self._norm_override_key(scope, domain)
         key = (scope, dom, pipeline, step)
         with self._lock:

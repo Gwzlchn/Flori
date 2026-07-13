@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from shared.db import PROMPT_VERSION_EXCLUSIVE_MAX, PROMPT_VERSION_MIN
 from shared.source_registry import CONTENT_TYPE_NAMES, SUBSCRIPTION_SOURCE_NAMES
 
 
@@ -18,6 +20,14 @@ SubscriptionSourceType = Enum(
     type=str,
     module=__name__,
 )
+
+
+PromptVersion = Annotated[
+    int,
+    # 2^63 可被 JSON number 精确表示.用排他上界避免 OpenAPI 把 2^63-1
+    # 转成浮点数后舍入为 2^63,语义仍等价于最大值 2^63-1.
+    Field(strict=True, ge=PROMPT_VERSION_MIN, lt=PROMPT_VERSION_EXCLUSIVE_MAX),
+]
 
 
 class JobCreateRequest(BaseModel):
@@ -187,7 +197,7 @@ class PromptActivateRequest(BaseModel):
     # version=null:停用覆盖回内置默认,非破坏,保留全部历史版本。scope/domain 同 PromptOverrideRequest。
     scope: str = "global"
     domain: str | None = None
-    version: int | None = None
+    version: PromptVersion | None = None
 
 
 # 集合
