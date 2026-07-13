@@ -293,22 +293,23 @@ docker compose up -d
 
 ## 7. 备份 / 恢复 / 磁盘回收
 
-生产 compose 用**命名卷**（`*_flori-data`、`*_redis-data`，前缀=compose 项目名，默认目录名 `flori`），数据不在宿主可见目录里。下面三个脚本（`scripts/`）通过一次性容器进卷操作，**无需在宿主装任何工具**，全部 `-h/--help` 可查、默认安全。
+生产 compose 可使用命名卷或 bind mount。灾备脚本优先从运行中的 api、Redis、MinIO 容器发现真实 `/data` 挂载；也可用 `FLORI_DATA_DIR` / `FLORI_DATA_VOLUME`、`REDIS_DATA_DIR` / `REDIS_VOLUME`、`MINIO_DATA_DIR` / `MINIO_VOLUME` 显式指定。脚本只调用 Docker 一次性容器，宿主无需安装 Python、SQLite 或 Redis 工具，全部 `-h/--help` 可查。
 
-> 若把 `FLORI_DATA_DIR` 设成了绝对路径（bind-mount，如 NAS 上 `/volume1/DATA/Flori`），三个脚本会自动直接操作该目录，无需改参数。
+NAS 可把 MinIO 嵌套挂在 data 根下；脚本会把该子树从 data 资产排除，再作为独立 MinIO 资产收录和切换，避免重复打包或恢复时误删挂载点。
 
 ### 7.1 备份 — `scripts/backup.sh`
 
-把 **SQLite 库（`/data/db/analyzer.db`）** + **Redis 状态（dump.rdb / appendonly）** 打包成带时间戳的 `tar.gz`。
+生成覆盖完整持久状态的灾备代：data 根（SQLite、jobs、prompts/profiles、运行持久文件）、Redis、MinIO 与运行配置。SQLite 使用 online backup；运行中的 Redis 先 `SAVE` 得到一致性 RDB，再在隔离临时卷物化生产 `appendonly yes` 可直接加载的 AOF。每代包含 manifest、逐文件 SHA-256、模式/uid/gid、schema/version、RPO 窗口和外部 `.sha256`。
 
 ```bash
-scripts/backup.sh                 # 输出到 ./backups/flori-backup-<ts>.tar.gz
-BACKUP_DIR=/mnt/nas scripts/backup.sh    # 自定义输出目录
+scripts/backup.sh                                      # 输出到 ./backups/
+scripts/backup.sh /mnt/nas/flori --result-file /mnt/nas/flori/backup-result.json
 ```
 
-- **无需停服**：只读挂载命名卷拷数据；Redis 先尽力 `redis-cli SAVE` 落盘（容器不在则告警跳过）。
-- **幂等**：每次产独立时间戳文件，不覆盖、不动源卷；可放 cron。
-- 视频等大源媒体**不在**备份内（体积大、可重下）；要它们用 `gc-jobs.sh` 反向管理或单独拷 jobs 卷。
+- 归档先写 `.partial`，资产稳定性、SQLite `integrity_check`、manifest 和全部摘要通过后才 `fsync + os.replace` 原子发布；同 generation 拒绝覆盖。
+- 备份不主动停应用；复制期间 data/MinIO 发生变化会 fail-closed，不发布混代归档。高写入期应在维护窗口重试。
+- 完整 data 根会包含大源媒体，容量规划不能沿用旧版“只备 DB”的估算。需要缩短保留期时先用 `gc-jobs.sh` 管理可重下源文件。
+- `BACKUP_RESULT_FILE` 输出机器可读状态；`FLORI_CONFIG_DIR=""` 可只跳过配置资产。真实 secret 值不得写进命令、日志或 tracked 配置。
 
 cron 建议（每天 03:00 备份，保留最近 14 份）：
 ```cron
@@ -318,17 +319,29 @@ cron 建议（每天 03:00 备份，保留最近 14 份）：
 
 ### 7.2 恢复 — `scripts/restore.sh`
 
-从 `backup.sh` 产出的 tar.gz 把 DB + Redis 写回卷。**危险操作，会覆盖现有数据**，默认要求确认。
+恢复会替换完整持久资产。脚本先只读校验外部摘要、归档成员、逐文件摘要、SQLite 完整性和 schema 兼容门；任何失败都在写目标前退出。校验通过后才停止全部目标挂载持有者，将各资产写入隐藏新代，全部预置完成后执行跨资产两阶段切换；中途失败反向回滚已切换资产。
 
 ```bash
-scripts/restore.sh ./backups/flori-backup-20260620-101500.tar.gz        # 交互确认(输入 YES)
-scripts/restore.sh <文件> --yes                                          # 无人值守跳过确认
+scripts/restore.sh <备份.tar.gz> --check                    # 只校验，不修改目标
+scripts/restore.sh <备份.tar.gz>                            # 交互确认，成功后容器保持停止
+scripts/restore.sh <备份.tar.gz> --yes --restart            # 无人值守恢复并重启本脚本停止的容器
 ```
 
-- 恢复前先校验 tar 含 `db/` 或 `redis/` 成员，不合格直接退出、绝不动卷。
-- 默认会尝试 `docker compose stop api scheduler worker-*`（失败不致命，`--no-stop` 可关）；恢复后**由你手动** `docker compose up -d`（脚本不自动起，避免半途读写）。
+- 默认停止所有实际持有 data/Redis/MinIO/config 目标的运行容器；任一停止失败即中止。`--no-stop` 只用于无运行持有者的隔离空环境，检测到 holder 仍会拒绝，不能绕过停写门。
+- `RESTORE_CONFIG_DIR` 非空时才切换归档配置；默认只校验配置资产，不覆盖镜像内 `/app/configs`。
+- `FLORI_MAX_DB_USER_VERSION=<当前可接受上限>` 启用数据库版本兼容门；归档 user_version 更高时 fail-closed。05 migration 单元负责把部署时上限与迁移链对齐。
+- result JSON 记录 generation、校验项、恢复资产、跳过资产、RTO 和待清理项。未传 `--restart` 时，验收后显式启动输出中列出的容器。
 
-### 7.3 磁盘回收 — `scripts/gc-jobs.sh`
+### 7.3 空环境灾备演练 — `scripts/dr-drill.sh`
+
+```bash
+DRILL_RESULT_DIR=/mnt/nas/flori/dr-evidence scripts/dr-drill.sh
+scripts/dr-drill.sh --result-file /mnt/nas/flori/dr-evidence/latest.json
+```
+
+演练在一次性容器临时根创建 SQLite/job/profile/Redis/MinIO/config 样本，验证原子发布、损坏归档拒绝、空环境业务读取和跨资产故障回滚，输出实测 RPO/RTO。它不挂 Docker socket，也不挂载现有生产卷。发布前的 real-docker integration 还会用隔离真实 Redis/MinIO 卷验证生产 `appendonly yes` 启动后 key 与对象可读。
+
+### 7.4 磁盘回收 — `scripts/gc-jobs.sh`
 
 **审计缺口修复**：单机 `LocalStorage.cleanup` 是 no-op，源媒体 `/data/jobs/<job_id>/input/source.*` 永久堆积、磁盘只增不减。本脚本按年龄回收，**默认只删大源媒体、保留笔记/图等产物**。
 
