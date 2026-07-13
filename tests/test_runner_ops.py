@@ -77,6 +77,53 @@ class TestClaimStep:
         assert await redis.get_step_status("j1", "A") == "running"
         assert await redis.get_pool_count("cpu") == 1
         assert await redis.get_step_worker("j1", "A") == WORKER_ID
+        assert await redis.validate_task_lease(
+            WORKER_ID, "j1", "A", claim["exec_id"],
+        )
+        assert await redis.r.ttl(redis._task_lease_key(claim["exec_id"])) > 0
+
+    @pytest.mark.asyncio
+    async def test_task_lease_rejects_wrong_quartet_and_rerun(self, redis, db):
+        await _register_worker(redis, db)
+        await redis.enqueue_step("cpu", "j1", "A", [], priority=0)
+        await redis.set_step_status("j1", "A", "ready")
+        claim = await runner_ops.claim_step(
+            redis, db, WORKER_ID, ["cpu"], POOL_LIMITS, {"vision"}, set(),
+        )
+        exec_id = claim["exec_id"]
+        assert not await redis.validate_task_lease("other", "j1", "A", exec_id)
+        assert not await redis.validate_task_lease(WORKER_ID, "j2", "A", exec_id)
+        assert not await redis.validate_task_lease(WORKER_ID, "j1", "B", exec_id)
+        assert not await redis.validate_task_lease(WORKER_ID, "j1", "A", "forged")
+
+        await redis.set_step_exec_id("j1", "A", "new-exec")
+        await redis.create_task_lease(WORKER_ID, "j1", "A", "new-exec")
+        assert not await redis.validate_task_lease(WORKER_ID, "j1", "A", exec_id)
+        assert await redis.validate_task_lease(WORKER_ID, "j1", "A", "new-exec")
+
+    @pytest.mark.asyncio
+    async def test_terminal_lease_allows_one_outcome_and_release_cleanup(self, redis, db):
+        await _register_worker(redis, db)
+        await redis.enqueue_step("cpu", "j1", "A", [], priority=0)
+        await redis.set_step_status("j1", "A", "ready")
+        claim = await runner_ops.claim_step(
+            redis, db, WORKER_ID, ["cpu"], POOL_LIMITS, {"vision"}, set(),
+        )
+        exec_id = claim["exec_id"]
+        assert await redis.begin_task_terminal(WORKER_ID, "j1", "A", exec_id, "done") == 1
+        assert await redis.begin_task_terminal(WORKER_ID, "j1", "A", exec_id, "done") == 2
+        assert await redis.begin_task_terminal(WORKER_ID, "j1", "A", exec_id, "failed") == 0
+        assert not await redis.validate_task_lease(WORKER_ID, "j1", "A", exec_id)
+        assert await redis.validate_task_lease(
+            WORKER_ID, "j1", "A", exec_id, require_active=False,
+        )
+        await runner_ops.release_step(redis, db, WORKER_ID, claim)
+        assert not await redis.validate_task_lease(
+            WORKER_ID, "j1", "A", exec_id, require_active=False,
+        )
+        assert await redis.validate_released_task_lease(
+            WORKER_ID, "j1", "A", exec_id, "cpu",
+        )
 
     @pytest.mark.asyncio
     async def test_claim_refreshes_progress_heartbeat(self, redis, db):

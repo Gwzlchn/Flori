@@ -10,24 +10,38 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import hashlib
+import hmac
 import json
 import os
 import shutil
+import tempfile
 import time
+import uuid
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import AsyncIterable, AsyncIterator, Callable, Protocol
 
 from shared.errors import WorkerAuthRejected
+from shared.runner_ops import current_task_lease
 
 
 # B站登录态等敏感凭证的本地侧载文件:只供同机(LocalStorage)下载步本地读取,
 # 绝不入中心对象存储、绝不经 runner 网关下发给远端 worker(见 RemoteStorage / api/routes/runner.py)。
 CREDENTIAL_REL = "input/.credentials.json"
+_STAGING_PREFIX = ".flori-upload/"
+
+
+class ArtifactTooLarge(ValueError):
+    pass
 
 
 def is_credential_file(rel: str) -> bool:
     """是否为敏感凭证侧载文件(按 basename 判,跨平台)。"""
     return rel.replace("\\", "/").rsplit("/", 1)[-1] == ".credentials.json"
+
+
+def _is_staging_file(rel: str) -> bool:
+    return rel.replace("\\", "/").startswith(_STAGING_PREFIX)
 
 
 def _raise_gateway_auth(resp, endpoint: str) -> None:
@@ -69,8 +83,19 @@ class StorageBackend(Protocol):
     async def delete_file(self, job_id: str, rel_path: str) -> None: ...
     # 供 api 按需取单个产物(笔记/日志等);找不到返回 None。
     async def read_file(self, job_id: str, rel_path: str) -> bytes | None: ...
+    # 大制品走分块读取;返回 None 表示不存在.调用方负责完整消费或关闭生成器.
+    async def open_stream(
+        self, job_id: str, rel_path: str, *, start: int = 0,
+        length: int | None = None, chunk_size: int = 1024 * 1024,
+    ) -> AsyncIterator[bytes] | None: ...
     # 供 api 写入 job 初始文件(job.json、上传源文件等),worker 才能 pull 到。
     async def write_file(self, job_id: str, rel_path: str, data: bytes) -> None: ...
+    # 分块写暂存文件/对象,校验完成后原子替换目标;失败不得暴露半制品.
+    async def write_stream(
+        self, job_id: str, rel_path: str, chunks: AsyncIterable[bytes], *,
+        expected_size: int | None = None, expected_sha256: str | None = None,
+        max_bytes: int | None = None,
+    ) -> dict: ...
     # 列出某 job 的全部产物相对路径(供 gateway 产物清单端点 / GatewayStorage.pull 用)。
     async def list_files(self, job_id: str) -> list[str]: ...
     # 列产物相对路径 → 字节大小(供 /artifacts 透出每步/每 job 产物体积)。一次列举拿全,
@@ -152,6 +177,32 @@ class LocalStorage:
             return None
         return await asyncio.to_thread(path.read_bytes)
 
+    async def open_stream(
+        self, job_id: str, rel_path: str, *, start: int = 0,
+        length: int | None = None, chunk_size: int = 1024 * 1024,
+    ) -> AsyncIterator[bytes] | None:
+        path = self._safe_path(job_id, rel_path)
+        if not path.is_file():
+            return None
+
+        async def _chunks() -> AsyncIterator[bytes]:
+            fp = await asyncio.to_thread(open, path, "rb")
+            remaining = length
+            try:
+                await asyncio.to_thread(fp.seek, start)
+                while remaining is None or remaining > 0:
+                    want = chunk_size if remaining is None else min(chunk_size, remaining)
+                    chunk = await asyncio.to_thread(fp.read, want)
+                    if not chunk:
+                        break
+                    if remaining is not None:
+                        remaining -= len(chunk)
+                    yield chunk
+            finally:
+                await asyncio.to_thread(fp.close)
+
+        return _chunks()
+
     async def file_size(self, job_id: str, rel_path: str) -> int | None:
         path = self._safe_path(job_id, rel_path)
         return path.stat().st_size if path.is_file() else None
@@ -177,6 +228,43 @@ class LocalStorage:
 
         await asyncio.to_thread(_write)
 
+    async def write_stream(
+        self, job_id: str, rel_path: str, chunks: AsyncIterable[bytes], *,
+        expected_size: int | None = None, expected_sha256: str | None = None,
+        max_bytes: int | None = None,
+    ) -> dict:
+        target = self._safe_path(job_id, rel_path)
+        staging = self._safe_path(job_id, f"{_STAGING_PREFIX}{uuid.uuid4().hex}")
+        await asyncio.to_thread(staging.parent.mkdir, parents=True, exist_ok=True)
+        digest = hashlib.sha256()
+        total = 0
+        fp = await asyncio.to_thread(open, staging, "wb")
+        try:
+            async for chunk in chunks:
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if max_bytes is not None and total > max_bytes:
+                    raise ArtifactTooLarge(f"artifact exceeds {max_bytes} bytes")
+                digest.update(chunk)
+                await asyncio.to_thread(fp.write, chunk)
+            await asyncio.to_thread(fp.flush)
+            await asyncio.to_thread(os.fsync, fp.fileno())
+            await asyncio.to_thread(fp.close)
+            fp = None
+            actual = digest.hexdigest()
+            if expected_size is not None and total != expected_size:
+                raise ValueError("artifact size mismatch")
+            if expected_sha256 and not hmac.compare_digest(actual, expected_sha256.lower()):
+                raise ValueError("artifact checksum mismatch")
+            await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+            await asyncio.to_thread(os.replace, staging, target)
+            return {"size": total, "sha256": actual}
+        finally:
+            if fp is not None:
+                await asyncio.to_thread(fp.close)
+            await asyncio.to_thread(staging.unlink, True)
+
     async def list_files(self, job_id: str) -> list[str]:
         return await asyncio.to_thread(self._list_files_sync, job_id)
 
@@ -187,7 +275,8 @@ class LocalStorage:
         # 只收文件,相对 job 目录,统一用 "/" 分隔(跨平台/与对象键对齐)。
         return [
             p.relative_to(root).as_posix()
-            for p in root.rglob("*") if p.is_file()
+            for p in root.rglob("*")
+            if p.is_file() and not _is_staging_file(p.relative_to(root).as_posix())
         ]
 
     async def list_file_sizes(self, job_id: str) -> dict[str, int]:
@@ -200,7 +289,8 @@ class LocalStorage:
         # rglob 已遍历到每个文件,顺手 stat().st_size,无需二次列举。
         return {
             p.relative_to(root).as_posix(): p.stat().st_size
-            for p in root.rglob("*") if p.is_file()
+            for p in root.rglob("*")
+            if p.is_file() and not _is_staging_file(p.relative_to(root).as_posix())
         }
 
     async def health(self) -> dict:
@@ -281,7 +371,7 @@ class RemoteStorage:
         prefix = f"{job_id}/"
         for obj in self._client().list_objects(self._bucket, prefix=prefix, recursive=True):
             rel = obj.object_name[len(prefix):]
-            if not rel:
+            if not rel or _is_staging_file(rel):
                 continue
             dest = work_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -352,7 +442,7 @@ class RemoteStorage:
         src_prefix = f"{src_job_id}/"
         for o in client.list_objects(self._bucket, prefix=src_prefix, recursive=True):
             rel = o.object_name[len(src_prefix):]
-            if is_credential_file(rel):
+            if is_credential_file(rel) or _is_staging_file(rel):
                 continue
             try:
                 client.copy_object(
@@ -370,6 +460,111 @@ class RemoteStorage:
         if is_credential_file(rel_path):
             return  # 敏感凭证不入中心对象存储(防下发到远端 worker);仅 LocalStorage 本机持有
         await asyncio.to_thread(self._write_file_sync, job_id, rel_path, data)
+
+    async def open_stream(
+        self, job_id: str, rel_path: str, *, start: int = 0,
+        length: int | None = None, chunk_size: int = 1024 * 1024,
+    ) -> AsyncIterator[bytes] | None:
+        from minio.error import S3Error
+
+        try:
+            await asyncio.to_thread(
+                self._client().stat_object, self._bucket, f"{job_id}/{rel_path}",
+            )
+        except S3Error:
+            return None
+
+        async def _chunks() -> AsyncIterator[bytes]:
+            resp = None
+            try:
+                kwargs = {"offset": start}
+                if length is not None:
+                    kwargs["length"] = length
+                resp = await asyncio.to_thread(
+                    self._client().get_object,
+                    self._bucket,
+                    f"{job_id}/{rel_path}",
+                    **kwargs,
+                )
+                remaining = length
+                while remaining is None or remaining > 0:
+                    want = chunk_size if remaining is None else min(chunk_size, remaining)
+                    chunk = await asyncio.to_thread(resp.read, want)
+                    if not chunk:
+                        break
+                    if remaining is not None:
+                        remaining -= len(chunk)
+                    yield chunk
+            finally:
+                if resp is not None:
+                    await asyncio.to_thread(resp.close)
+                    await asyncio.to_thread(resp.release_conn)
+
+        return _chunks()
+
+    async def write_stream(
+        self, job_id: str, rel_path: str, chunks: AsyncIterable[bytes], *,
+        expected_size: int | None = None, expected_sha256: str | None = None,
+        max_bytes: int | None = None,
+    ) -> dict:
+        tmp_root = Path(self._tmp_root or tempfile.gettempdir()) / ".flori-upload"
+        await asyncio.to_thread(tmp_root.mkdir, parents=True, exist_ok=True)
+        local_tmp = tmp_root / uuid.uuid4().hex
+        staging_key = f"{job_id}/{_STAGING_PREFIX}{uuid.uuid4().hex}"
+        digest = hashlib.sha256()
+        total = 0
+        fp = await asyncio.to_thread(open, local_tmp, "wb")
+        try:
+            async for chunk in chunks:
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if max_bytes is not None and total > max_bytes:
+                    raise ArtifactTooLarge(f"artifact exceeds {max_bytes} bytes")
+                digest.update(chunk)
+                await asyncio.to_thread(fp.write, chunk)
+            await asyncio.to_thread(fp.flush)
+            await asyncio.to_thread(os.fsync, fp.fileno())
+            await asyncio.to_thread(fp.close)
+            fp = None
+            actual = digest.hexdigest()
+            if expected_size is not None and total != expected_size:
+                raise ValueError("artifact size mismatch")
+            if expected_sha256 and not hmac.compare_digest(actual, expected_sha256.lower()):
+                raise ValueError("artifact checksum mismatch")
+
+            await asyncio.to_thread(
+                self._client().fput_object,
+                self._bucket,
+                staging_key,
+                str(local_tmp),
+            )
+
+            def _publish() -> None:
+                from minio.commonconfig import CopySource
+
+                self._client().copy_object(
+                    self._bucket,
+                    f"{job_id}/{rel_path}",
+                    CopySource(self._bucket, staging_key),
+                )
+
+            await asyncio.to_thread(_publish)
+            return {"size": total, "sha256": actual}
+        finally:
+            if fp is not None:
+                await asyncio.to_thread(fp.close)
+            await asyncio.to_thread(local_tmp.unlink, True)
+            try:
+                await asyncio.to_thread(
+                    self._client().remove_object, self._bucket, staging_key,
+                )
+            except Exception as exc:
+                import structlog
+                structlog.get_logger().warning(
+                    "storage_staging_cleanup_failed", object_key=staging_key,
+                    error=str(exc),
+                )
 
     def _write_file_sync(self, job_id: str, rel_path: str, data: bytes) -> None:
         import io
@@ -438,7 +633,7 @@ class RemoteStorage:
         out: list[str] = []
         for obj in self._client().list_objects(self._bucket, prefix=prefix, recursive=True):
             rel = obj.object_name[len(prefix):]
-            if rel:  # 跳过前缀本身/目录占位
+            if rel and not _is_staging_file(rel):  # 跳过前缀本身/目录占位
                 out.append(rel)
         return out
 
@@ -451,7 +646,7 @@ class RemoteStorage:
         # list_objects 自带 obj.size,无需逐对象 stat_object。
         for obj in self._client().list_objects(self._bucket, prefix=prefix, recursive=True):
             rel = obj.object_name[len(prefix):]
-            if rel:
+            if rel and not _is_staging_file(rel):
                 out[rel] = obj.size or 0
         return out
 
@@ -512,7 +707,7 @@ class GatewayStorage:
 
     pull 拉清单+逐个产物到本机临时 work_dir(并记快照),push 只回传相对快照
     新增/改动的文件(语义与 RemoteStorage 一致),read/write/list 直接打 API 端点。
-    每个对象整体载入内存(与现有 read_file/write_file 一致);流式传输是后续优化。
+    pull/push 与 open/write_stream 分块传输;中心端校验完成后才原子发布上传对象.
 
     远端 worker 经慢链路(出站 HTTPS)连中心存储时,两个可选项把大源文件挡在链路外:
       - STORAGE_WORKDIR_REUSE=1:job 目录跨步骤复用(按 job_id 命名),pull 跳过本机
@@ -557,8 +752,18 @@ class GatewayStorage:
             )
         return self._client_obj
 
-    def _auth(self) -> dict:
-        return {"Authorization": f"Bearer {self._token_getter()}"}
+    def _auth(self, job_id: str | None = None) -> dict:
+        headers = {"Authorization": f"Bearer {self._token_getter()}"}
+        lease = current_task_lease()
+        if lease is not None:
+            if job_id is not None and lease.job_id != job_id:
+                raise RuntimeError("gateway artifact request does not match current task lease")
+            headers.update({
+                "X-Flori-Lease-Job": lease.job_id,
+                "X-Flori-Lease-Step": lease.step,
+                "X-Flori-Lease-Exec": lease.exec_id,
+            })
+        return headers
 
     async def pull(self, job_id: str, step: str) -> Path:
         if self._reuse:
@@ -572,15 +777,23 @@ class GatewayStorage:
             if self._reuse and dest.is_file():
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
+            staging = dest.with_name(f".{dest.name}.flori-part-{uuid.uuid4().hex}")
             # 流式下载到磁盘:大产物(未配 NO_PUSH 的源文件)不整体载入内存。
-            async with self._client().stream(
-                "GET", f"/api/runner/jobs/{job_id}/artifacts/{rel}", headers=self._auth(),
-            ) as resp:
-                _raise_gateway_auth(resp, f"/api/runner/jobs/{job_id}/artifacts/{rel}")
-                resp.raise_for_status()
-                with open(dest, "wb") as f:
-                    async for chunk in resp.aiter_bytes(65536):
-                        f.write(chunk)
+            try:
+                async with self._client().stream(
+                    "GET", f"/api/runner/jobs/{job_id}/artifacts/{rel}",
+                    headers=self._auth(job_id),
+                ) as resp:
+                    _raise_gateway_auth(resp, f"/api/runner/jobs/{job_id}/artifacts/{rel}")
+                    resp.raise_for_status()
+                    with open(staging, "wb") as f:
+                        async for chunk in resp.aiter_bytes(65536):
+                            f.write(chunk)
+                        f.flush()
+                        os.fsync(f.fileno())
+                os.replace(staging, dest)
+            finally:
+                staging.unlink(missing_ok=True)
         # 快照覆盖 work_dir 全部本机文件(含复用留下的),push 才能据此跳过未改动的文件。
         snapshot: dict[str, tuple[int, float]] = {}
         for path in work_dir.rglob("*"):
@@ -628,9 +841,23 @@ class GatewayStorage:
                     while chunk := f.read(1 << 20):
                         yield chunk
 
+            def _sha256() -> str:
+                digest = hashlib.sha256()
+                with open(path, "rb") as f:
+                    while chunk := f.read(1 << 20):
+                        digest.update(chunk)
+                return digest.hexdigest()
+
+            checksum = await asyncio.to_thread(_sha256)
+            headers = self._auth(job_id)
+            headers.update({
+                "Content-Length": str(st.st_size),
+                "X-Content-SHA256": checksum,
+            })
+
             resp = await self._client().put(
                 f"/api/runner/jobs/{job_id}/artifacts/{rel}",
-                headers=self._auth(), content=_chunks(),
+                headers=headers, content=_chunks(),
                 timeout=httpx.Timeout(900, connect=15),
             )
             _raise_gateway_auth(resp, f"/api/runner/jobs/{job_id}/artifacts/{rel}")
@@ -663,7 +890,7 @@ class GatewayStorage:
 
     async def read_file(self, job_id: str, rel_path: str) -> bytes | None:
         resp = await self._client().get(
-            f"/api/runner/jobs/{job_id}/artifacts/{rel_path}", headers=self._auth(),
+            f"/api/runner/jobs/{job_id}/artifacts/{rel_path}", headers=self._auth(job_id),
         )
         _raise_gateway_auth(resp, f"/api/runner/jobs/{job_id}/artifacts/{rel_path}")
         if resp.status_code == 404:
@@ -671,17 +898,64 @@ class GatewayStorage:
         resp.raise_for_status()
         return resp.content
 
+    async def open_stream(
+        self, job_id: str, rel_path: str, *, start: int = 0,
+        length: int | None = None, chunk_size: int = 1024 * 1024,
+    ) -> AsyncIterator[bytes] | None:
+        headers = self._auth(job_id)
+        if length is not None:
+            headers["Range"] = f"bytes={start}-{start + length - 1}"
+        elif start:
+            headers["Range"] = f"bytes={start}-"
+
+        async def _chunks() -> AsyncIterator[bytes]:
+            async with self._client().stream(
+                "GET", f"/api/runner/jobs/{job_id}/artifacts/{rel_path}", headers=headers,
+            ) as resp:
+                _raise_gateway_auth(resp, f"/api/runner/jobs/{job_id}/artifacts/{rel_path}")
+                resp.raise_for_status()
+                async for chunk in resp.aiter_bytes(chunk_size):
+                    yield chunk
+
+        return _chunks()
+
     async def write_file(self, job_id: str, rel_path: str, data: bytes) -> None:
+        headers = self._auth(job_id)
+        headers.update({
+            "Content-Length": str(len(data)),
+            "X-Content-SHA256": hashlib.sha256(data).hexdigest(),
+        })
         resp = await self._client().put(
             f"/api/runner/jobs/{job_id}/artifacts/{rel_path}",
-            headers=self._auth(), content=data,
+            headers=headers, content=data,
         )
         _raise_gateway_auth(resp, f"/api/runner/jobs/{job_id}/artifacts/{rel_path}")
         resp.raise_for_status()
 
+    async def write_stream(
+        self, job_id: str, rel_path: str, chunks: AsyncIterable[bytes], *,
+        expected_size: int | None = None, expected_sha256: str | None = None,
+        max_bytes: int | None = None,
+    ) -> dict:
+        headers = self._auth(job_id)
+        if expected_size is not None:
+            headers["Content-Length"] = str(expected_size)
+        if expected_sha256:
+            headers["X-Content-SHA256"] = expected_sha256
+        resp = await self._client().put(
+            f"/api/runner/jobs/{job_id}/artifacts/{rel_path}",
+            headers=headers,
+            content=chunks,
+        )
+        _raise_gateway_auth(resp, f"/api/runner/jobs/{job_id}/artifacts/{rel_path}")
+        resp.raise_for_status()
+        data = resp.json()
+        return {"size": int(data.get("size") or expected_size or 0),
+                "sha256": data.get("sha256") or expected_sha256}
+
     async def list_files(self, job_id: str) -> list[str]:
         resp = await self._client().get(
-            f"/api/runner/jobs/{job_id}/artifacts", headers=self._auth(),
+            f"/api/runner/jobs/{job_id}/artifacts", headers=self._auth(job_id),
         )
         _raise_gateway_auth(resp, f"/api/runner/jobs/{job_id}/artifacts")
         resp.raise_for_status()

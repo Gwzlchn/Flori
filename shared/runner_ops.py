@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar, Token
+from dataclasses import dataclass
 import json
 import secrets
 import time
@@ -17,6 +19,34 @@ from datetime import datetime, timezone
 from shared.db import Database
 from shared.models import AIUsage, DEFAULT_AI_MODEL, DEFAULT_AI_PROVIDER
 from shared.redis_client import RedisClient
+
+
+@dataclass(frozen=True)
+class TaskLease:
+    """当前异步 worker 槽持有的任务租约."""
+
+    worker_id: str
+    job_id: str
+    step: str
+    exec_id: str
+
+
+_CURRENT_TASK_LEASE: ContextVar[TaskLease | None] = ContextVar(
+    "flori_current_task_lease", default=None,
+)
+
+
+def bind_task_lease(lease: TaskLease) -> Token:
+    """把 claim 四元组绑定到当前异步执行上下文."""
+    return _CURRENT_TASK_LEASE.set(lease)
+
+
+def current_task_lease() -> TaskLease | None:
+    return _CURRENT_TASK_LEASE.get()
+
+
+def clear_task_lease() -> None:
+    _CURRENT_TASK_LEASE.set(None)
 
 
 def parse_style_tags(raw) -> list:
@@ -195,6 +225,7 @@ async def claim_step(
             continue
 
         exec_id = holder
+        acquired = False
         try:
             acquired = await redis.cas_step_status(job_id, step, "ready", "running")
             if not acquired:
@@ -206,6 +237,7 @@ async def claim_step(
 
             await redis.set_step_worker(job_id, step, worker_id)
             await redis.set_step_exec_id(job_id, step, exec_id)
+            await redis.create_task_lease(worker_id, job_id, step, exec_id, pool)
             # 认领即刷进度心跳:覆盖上次执行(被杀/重跑)残留的旧 progress_at,否则 check_stuck 在
             # "认领到 worker 首拍 on_tick"窗口读到旧值,按 now-旧值(可达小时/天级)误杀刚认领的步
             # (线上踩过:rerun 后 9 步被 "progress stale 250689s" 秒杀)。
@@ -237,6 +269,16 @@ async def claim_step(
                     await redis.release_resource(res, holder)
                 except Exception:
                     pass
+            try:
+                await redis.revoke_task_lease(holder)
+            except Exception:
+                pass
+            try:
+                current_exec = await redis.get_step_exec_id(job_id, step)
+                if acquired and current_exec in (None, holder):
+                    await redis.cas_step_status(job_id, step, "running", "ready")
+            except Exception:
+                pass
             raise
 
         # pipeline/domain/style_tags 不在认领时读:直连模式留给 worker 在 execute 内解析;
@@ -327,6 +369,7 @@ async def release_step(
     if (current_exec is not None and holder is not None
             and current_exec != holder):
         await redis.release_slot(pool, holder)   # 幂等:释放自己(陈旧)的 holder,防其残留泄漏
+        await redis.revoke_task_lease(holder)
         await _set_status(redis, db, worker_id, "idle")
         return
     await redis.release_slot(pool, holder)
@@ -337,3 +380,6 @@ async def release_step(
             await redis.release_resource(res, holder)
         await redis.clear_step_resources(job_id, step)
     await _set_status(redis, db, worker_id, "idle")
+    await redis.mark_task_lease_released(
+        worker_id, job_id, step, holder, pool,
+    )

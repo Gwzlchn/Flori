@@ -1041,6 +1041,47 @@ class TestUploadFaultTolerance:
         assert await gt.record_ai_usage(usage) is None
 
 
+class TestGatewayTaskLeaseContext:
+    @pytest.mark.asyncio
+    async def test_claim_binds_headers_heartbeat_exec_and_release_clears(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from shared.runner_ops import current_task_lease
+        from worker.gateway_transport import GatewayTransport
+
+        registration_gate = "".join(["t"])
+        gt = GatewayTransport(
+            "https://gw.example", registration_token=registration_gate,
+            id_file="/tmp/.wid_lease_context_test", inner=None,
+        )
+        gt._worker_token = "-".join(["worker", "token"])
+        response = MagicMock(status_code=200)
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {
+            "claim": {"job_id": "j1", "step": "A", "pool": "cpu", "exec_id": "exec-1"},
+        }
+        client = MagicMock()
+        client.post = AsyncMock(return_value=response)
+        gt._client = client
+
+        claim = await gt.request_step("worker-1", ["cpu"], {"cpu": 1}, set(), set())
+        lease = current_task_lease()
+        assert lease is not None and lease.exec_id == "exec-1"
+        headers = gt._lease_auth()
+        assert headers["X-Flori-Lease-Job"] == "j1"
+        assert headers["X-Flori-Lease-Step"] == "A"
+        assert headers["X-Flori-Lease-Exec"] == "exec-1"
+
+        await gt.heartbeat("worker-1")
+        heartbeat_body = client.post.call_args_list[-1].kwargs["json"]
+        assert heartbeat_body["running"] == [
+            {"job_id": "j1", "step": "A", "exec_id": "exec-1"},
+        ]
+        await gt.release(claim)
+        assert current_task_lease() is None
+        assert gt._running == {}
+
+
 class TestWorkerIdentity:
     def test_worker_name_deterministic(self, tmp_path, monkeypatch):
         """设了 WORKER_NAME 时 id = {type}-sha256(name)[:8],确定性:重复解析/删缓存都同一 id."""

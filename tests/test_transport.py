@@ -10,6 +10,7 @@ import pytest
 
 from tests.conftest import make_fakeredis
 from shared.db import Database
+from shared.runner_ops import TaskLease, bind_task_lease, clear_task_lease
 from worker.transport import (
     RedisTransport,
     WorkerAuthRejected,
@@ -650,7 +651,7 @@ class TestGatewayCoarseHTTP:
         result = await gw.request_step("w1", ["ai"], {"ai": 1}, {"codex-cli"}, set())
 
         assert result == claim
-        assert gw._running == set()
+        assert gw._running == {}
 
     @pytest.mark.asyncio
     async def test_request_step_null_claim_returns_none(self, redis, db, tmp_path):
@@ -769,12 +770,16 @@ class TestGatewayCoarseHTTP:
     async def test_publish_step_event_maps_progress(self, redis, db, tmp_path):
         gw, _ = make_gateway(redis, db, tmp_path)
         gw._client.post.return_value = make_response()
-
-        await gw.publish_step_event("events:j1", {"event": "step_log", "line": "x"})
+        bind_task_lease(TaskLease("w1", "j1", "A", "exec-1"))
+        try:
+            await gw.publish_step_event("events:j1", {"event": "step_log", "line": "x"})
+        finally:
+            clear_task_lease()
 
         url, kwargs = gw._client.post.call_args
-        assert url[0] == "/api/runner/jobs/j1/steps/_/progress"
+        assert url[0] == "/api/runner/jobs/j1/steps/A/progress"
         assert kwargs["json"] == {"payload": {"event": "step_log", "line": "x"}}
+        assert kwargs["headers"]["X-Flori-Lease-Exec"] == "exec-1"
 
 
 class TestGatewayPureMode:

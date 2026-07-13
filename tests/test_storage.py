@@ -1,11 +1,13 @@
 """shared/storage.py 的单测。"""
 
 import os
+import tracemalloc
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from shared.errors import WorkerAuthRejected
+from shared.runner_ops import TaskLease, bind_task_lease, clear_task_lease
 from shared.storage import (
     GatewayStorage,
     LocalStorage,
@@ -14,6 +16,14 @@ from shared.storage import (
     create_storage,
     is_credential_file,
 )
+
+
+def _rss_bytes() -> int:
+    with open("/proc/self/status", encoding="utf-8") as status:
+        for line in status:
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) * 1024
+    raise RuntimeError("VmRSS unavailable")
 
 
 class TestParseMinioVersion:
@@ -77,6 +87,90 @@ class TestLocalStorage:
         # LocalStorage.cleanup is a no-op — directory should still exist
         assert job_dir.exists()
         assert (job_dir / "test.txt").read_text() == "data"
+
+    @pytest.mark.asyncio
+    async def test_stream_roundtrip_has_bounded_python_memory(self, storage):
+        chunk = b"x" * (1024 * 1024)
+        base_rss = _rss_bytes()
+        peak_rss = base_rss
+
+        async def source():
+            nonlocal peak_rss
+            for _ in range(32):
+                peak_rss = max(peak_rss, _rss_bytes())
+                yield chunk
+
+        tracemalloc.start()
+        tracemalloc.reset_peak()
+        result = await storage.write_stream("j1", "large.bin", source())
+        _, upload_peak = tracemalloc.get_traced_memory()
+        assert result["size"] == 32 * 1024 * 1024
+        assert upload_peak < 8 * 1024 * 1024
+        assert peak_rss - base_rss < 12 * 1024 * 1024
+
+        stream = await storage.open_stream("j1", "large.bin", chunk_size=1024 * 1024)
+        assert stream is not None
+        tracemalloc.reset_peak()
+        total = 0
+        async for part in stream:
+            total += len(part)
+            peak_rss = max(peak_rss, _rss_bytes())
+        _, download_peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        assert total == result["size"]
+        assert download_peak < 8 * 1024 * 1024
+        assert peak_rss - base_rss < 12 * 1024 * 1024
+
+    @pytest.mark.asyncio
+    async def test_concurrent_large_uploads_are_bounded(self, storage):
+        import asyncio
+
+        chunk = b"z" * (1024 * 1024)
+
+        async def upload(index: int):
+            async def source():
+                for _ in range(8):
+                    yield chunk
+
+            return await storage.write_stream(f"j{index}", "large.bin", source())
+
+        tracemalloc.start()
+        tracemalloc.reset_peak()
+        results = await asyncio.gather(*(upload(i) for i in range(4)))
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        assert [item["size"] for item in results] == [8 * 1024 * 1024] * 4
+        assert peak < 16 * 1024 * 1024
+
+    @pytest.mark.asyncio
+    async def test_stream_failure_cleans_staging_and_preserves_target(self, storage, tmp_path):
+        await storage.write_file("j1", "a.bin", b"old")
+
+        async def broken():
+            yield b"partial"
+            raise ConnectionError("client disconnected")
+
+        with pytest.raises(ConnectionError):
+            await storage.write_stream("j1", "a.bin", broken())
+        assert await storage.read_file("j1", "a.bin") == b"old"
+        assert await storage.list_files("j1") == ["a.bin"]
+        assert not list((tmp_path / "j1" / ".flori-upload").glob("*"))
+
+    @pytest.mark.asyncio
+    async def test_stream_size_and_checksum_mismatch_are_atomic(self, storage):
+        async def source():
+            yield b"new"
+
+        await storage.write_file("j1", "a.bin", b"old")
+        with pytest.raises(ValueError, match="size mismatch"):
+            await storage.write_stream("j1", "a.bin", source(), expected_size=4)
+        assert await storage.read_file("j1", "a.bin") == b"old"
+
+        with pytest.raises(ValueError, match="checksum mismatch"):
+            await storage.write_stream(
+                "j1", "a.bin", source(), expected_sha256="0" * 64,
+            )
+        assert await storage.read_file("j1", "a.bin") == b"old"
 
 
     @pytest.mark.asyncio
@@ -239,6 +333,80 @@ class TestRemoteListFiles:
         client.remove_objects.assert_not_called()
 
 
+class TestRemoteStreaming:
+    @pytest.mark.asyncio
+    async def test_write_stream_stages_then_atomically_copies(self, tmp_path):
+        import hashlib
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        rs._client = lambda: client
+
+        async def source():
+            yield b"abc"
+            yield b"def"
+
+        result = await rs.write_stream(
+            "j1", "out/a.bin", source(),
+            expected_size=6, expected_sha256=hashlib.sha256(b"abcdef").hexdigest(),
+        )
+        assert result == {"size": 6, "sha256": hashlib.sha256(b"abcdef").hexdigest()}
+        staging_key = client.fput_object.call_args.args[1]
+        assert staging_key.startswith("j1/.flori-upload/")
+        copy_source = client.copy_object.call_args.args[2]
+        assert client.copy_object.call_args.args[:2] == ("b", "j1/out/a.bin")
+        assert copy_source.object_name == staging_key
+        client.remove_object.assert_called_once_with("b", staging_key)
+        assert not list((tmp_path / ".flori-upload").glob("*"))
+
+    @pytest.mark.asyncio
+    async def test_open_stream_reads_chunks_and_closes_response(self, tmp_path):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        response = MagicMock()
+        response.read.side_effect = [b"abc", b"def", b""]
+        client = MagicMock()
+        client.get_object.return_value = response
+        rs._client = lambda: client
+
+        stream = await rs.open_stream("j1", "out/a.bin", chunk_size=3)
+        assert stream is not None
+        assert b"".join([part async for part in stream]) == b"abcdef"
+        response.close.assert_called_once()
+        response.release_conn.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_publish_failure_removes_staging_object(self, tmp_path):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        client.copy_object.side_effect = RuntimeError("copy failed")
+        rs._client = lambda: client
+
+        async def source():
+            yield b"partial"
+
+        with pytest.raises(RuntimeError, match="copy failed"):
+            await rs.write_stream("j1", "out/a.bin", source())
+        staging_key = client.fput_object.call_args.args[1]
+        client.remove_object.assert_called_once_with("b", staging_key)
+        assert not list((tmp_path / ".flori-upload").glob("*"))
+
+    @pytest.mark.asyncio
+    async def test_upload_failure_still_attempts_staging_cleanup(self, tmp_path):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        client.fput_object.side_effect = ConnectionError("upload interrupted")
+        rs._client = lambda: client
+
+        async def source():
+            yield b"partial"
+
+        with pytest.raises(ConnectionError, match="upload interrupted"):
+            await rs.write_stream("j1", "out/a.bin", source())
+        staging_key = client.fput_object.call_args.args[1]
+        client.remove_object.assert_called_once_with("b", staging_key)
+        assert not list((tmp_path / ".flori-upload").glob("*"))
+
+
 class TestRemoteHealthVersion:
     @pytest.mark.asyncio
     async def test_health_includes_server_version(self, monkeypatch):
@@ -311,6 +479,20 @@ class _GatewayStorageHelpers:
 class TestGatewayStorage(_GatewayStorageHelpers):
 
     @pytest.mark.asyncio
+    async def test_artifact_requests_carry_current_task_lease(self, tmp_path):
+        gw, client = self._gw(tmp_path)
+        client.get.return_value = self._resp(json_data={"files": []})
+        bind_task_lease(TaskLease("worker-1", "j1", "A", "exec-1"))
+        try:
+            assert await gw.list_files("j1") == []
+        finally:
+            clear_task_lease()
+        headers = client.get.call_args.kwargs["headers"]
+        assert headers["X-Flori-Lease-Job"] == "j1"
+        assert headers["X-Flori-Lease-Step"] == "A"
+        assert headers["X-Flori-Lease-Exec"] == "exec-1"
+
+    @pytest.mark.asyncio
     async def test_pull_downloads_manifest_and_objects_and_snapshots(self, tmp_path):
         gw, client = self._gw(tmp_path)
         # 清单走 .get(返回 json),逐个产物走流式 .stream 下载到磁盘
@@ -332,6 +514,33 @@ class TestGatewayStorage(_GatewayStorageHelpers):
         # 快照记下,供 push 算增量
         snap = gw._snapshots[str(work_dir)]
         assert set(snap) == {"job.json", "out/n.md"}
+
+    @pytest.mark.asyncio
+    async def test_pull_disconnect_preserves_target_and_cleans_staging(self, tmp_path):
+        gw, client = self._gw(tmp_path)
+        client.get.return_value = self._resp(json_data={"files": ["job.json"]})
+        work_dir = tmp_path / "work" / "j1"
+        work_dir.mkdir(parents=True)
+        target = work_dir / "job.json"
+        target.write_bytes(b"old")
+
+        resp = MagicMock(status_code=200)
+        resp.raise_for_status = MagicMock()
+
+        async def _broken(chunk_size=65536):
+            yield b"partial"
+            raise ConnectionError("download interrupted")
+
+        resp.aiter_bytes = _broken
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=resp)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        client.stream.return_value = cm
+
+        with pytest.raises(ConnectionError, match="download interrupted"):
+            await gw.pull("j1", "01")
+        assert target.read_bytes() == b"old"
+        assert not list(work_dir.glob(".*.flori-part-*"))
 
     @pytest.mark.asyncio
     async def test_push_uploads_only_changed(self, tmp_path):

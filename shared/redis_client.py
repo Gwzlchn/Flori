@@ -42,8 +42,70 @@ _LUA_RELEASE_SLOT = """
 return redis.call('SREM', KEYS[1], ARGV[1])
 """
 
+_LUA_VALIDATE_TASK_LEASE = """
+-- KEYS: lease hash,step worker hash,step exec hash,step status hash.
+-- ARGV: worker_id,job_id,step,exec_id,ttl,renew,require_active,expected_pool.
+if redis.call('HGET', KEYS[1], 'worker_id') ~= ARGV[1]
+    or redis.call('HGET', KEYS[1], 'job_id') ~= ARGV[2]
+    or redis.call('HGET', KEYS[1], 'step') ~= ARGV[3]
+    or redis.call('HGET', KEYS[1], 'exec_id') ~= ARGV[4] then
+    return 0
+end
+if ARGV[8] ~= '' and redis.call('HGET', KEYS[1], 'pool') ~= ARGV[8] then return 0 end
+if redis.call('HGET', KEYS[2], ARGV[3]) ~= ARGV[1]
+    or redis.call('HGET', KEYS[3], ARGV[3]) ~= ARGV[4] then
+    return 0
+end
+if ARGV[7] == '1' then
+    if redis.call('HGET', KEYS[4], ARGV[3]) ~= 'running'
+        or redis.call('HGET', KEYS[1], 'terminal') then
+        return 0
+    end
+end
+if ARGV[6] == '1' then
+    redis.call('EXPIRE', KEYS[1], tonumber(ARGV[5]))
+end
+return 1
+"""
+
+_LUA_BEGIN_TASK_TERMINAL = """
+-- 与普通守卫相同,但原子占用 terminal.1=首次,2=同结果重放,0=无效或冲突.
+if redis.call('HGET', KEYS[1], 'worker_id') ~= ARGV[1]
+    or redis.call('HGET', KEYS[1], 'job_id') ~= ARGV[2]
+    or redis.call('HGET', KEYS[1], 'step') ~= ARGV[3]
+    or redis.call('HGET', KEYS[1], 'exec_id') ~= ARGV[4]
+    or redis.call('HGET', KEYS[2], ARGV[3]) ~= ARGV[1]
+    or redis.call('HGET', KEYS[3], ARGV[3]) ~= ARGV[4] then
+    return 0
+end
+if ARGV[7] ~= '' and redis.call('HGET', KEYS[1], 'pool') ~= ARGV[7] then return 0 end
+local terminal = redis.call('HGET', KEYS[1], 'terminal')
+if terminal then
+    if terminal == ARGV[5] then return 2 end
+    return 0
+end
+if redis.call('HGET', KEYS[4], ARGV[3]) ~= 'running' then return 0 end
+redis.call('HSET', KEYS[1], 'terminal', ARGV[5])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[6]))
+return 1
+"""
+
+_LUA_RESET_TASK_TERMINAL = """
+if redis.call('HGET', KEYS[1], 'worker_id') == ARGV[1]
+    and redis.call('HGET', KEYS[1], 'job_id') == ARGV[2]
+    and redis.call('HGET', KEYS[1], 'step') == ARGV[3]
+    and redis.call('HGET', KEYS[1], 'exec_id') == ARGV[4]
+    and redis.call('HGET', KEYS[1], 'terminal') == ARGV[5] then
+    redis.call('HDEL', KEYS[1], 'terminal')
+    return 1
+end
+return 0
+"""
+
 
 class RedisClient:
+    TASK_LEASE_TTL_SEC = 180
+
     def __init__(self, url: str = "redis://localhost:6379/0"):
         self._url = url
         self._redis: aioredis.Redis | None = None
@@ -403,6 +465,122 @@ class RedisClient:
 
     async def get_step_exec_id(self, job_id: str, step: str) -> str | None:
         return await self.r.hget(f"job:{job_id}:step_exec", step)
+
+    @staticmethod
+    def _task_lease_key(exec_id: str) -> str:
+        return f"runner:lease:{exec_id}"
+
+    async def create_task_lease(
+        self, worker_id: str, job_id: str, step: str, exec_id: str,
+        pool: str = "",
+        ttl_sec: int | None = None,
+    ) -> None:
+        """创建四元组任务租约;当前 step 元数据仍是防 rerun/stale 的第二道约束."""
+        key = self._task_lease_key(exec_id)
+        fields = {
+            "worker_id": worker_id,
+            "job_id": job_id,
+            "step": step,
+            "exec_id": exec_id,
+            "pool": pool,
+        }
+        pipe = self.r.pipeline(transaction=True)
+        pipe.hset(key, mapping=fields)
+        pipe.expire(key, ttl_sec or self.TASK_LEASE_TTL_SEC)
+        await pipe.execute()
+
+    async def validate_task_lease(
+        self, worker_id: str, job_id: str, step: str, exec_id: str, *,
+        renew: bool = False, require_active: bool = True,
+        expected_pool: str = "",
+        ttl_sec: int | None = None,
+    ) -> bool:
+        result = await self.r.eval(
+            _LUA_VALIDATE_TASK_LEASE,
+            4,
+            self._task_lease_key(exec_id),
+            f"job:{job_id}:step_worker",
+            f"job:{job_id}:step_exec",
+            f"job:{job_id}:steps",
+            worker_id,
+            job_id,
+            step,
+            exec_id,
+            str(ttl_sec or self.TASK_LEASE_TTL_SEC),
+            "1" if renew else "0",
+            "1" if require_active else "0",
+            expected_pool,
+        )
+        return result == 1
+
+    async def begin_task_terminal(
+        self, worker_id: str, job_id: str, step: str, exec_id: str, outcome: str,
+        expected_pool: str = "",
+        ttl_sec: int | None = None,
+    ) -> int:
+        """原子占用终态上报;返回 1 首次,2 同结果重放,0 无效/冲突."""
+        return int(await self.r.eval(
+            _LUA_BEGIN_TASK_TERMINAL,
+            4,
+            self._task_lease_key(exec_id),
+            f"job:{job_id}:step_worker",
+            f"job:{job_id}:step_exec",
+            f"job:{job_id}:steps",
+            worker_id,
+            job_id,
+            step,
+            exec_id,
+            outcome,
+            str(ttl_sec or self.TASK_LEASE_TTL_SEC),
+            expected_pool,
+        ))
+
+    async def reset_task_terminal(
+        self, worker_id: str, job_id: str, step: str, exec_id: str, outcome: str,
+    ) -> bool:
+        return bool(await self.r.eval(
+            _LUA_RESET_TASK_TERMINAL,
+            1,
+            self._task_lease_key(exec_id),
+            worker_id,
+            job_id,
+            step,
+            exec_id,
+            outcome,
+        ))
+
+    async def revoke_task_lease(self, exec_id: str) -> None:
+        await self.r.delete(self._task_lease_key(exec_id))
+
+    async def mark_task_lease_released(
+        self, worker_id: str, job_id: str, step: str, exec_id: str, pool: str,
+        ttl_sec: int = 300,
+    ) -> None:
+        """正常 release 留短期幂等墓碑;安全回收/过期撤销不调用本方法."""
+        key = f"runner:released:{exec_id}"
+        pipe = self.r.pipeline(transaction=True)
+        pipe.hset(key, mapping={
+            "worker_id": worker_id,
+            "job_id": job_id,
+            "step": step,
+            "exec_id": exec_id,
+            "pool": pool,
+        })
+        pipe.expire(key, ttl_sec)
+        pipe.delete(self._task_lease_key(exec_id))
+        await pipe.execute()
+
+    async def validate_released_task_lease(
+        self, worker_id: str, job_id: str, step: str, exec_id: str, pool: str,
+    ) -> bool:
+        data = await self.r.hgetall(f"runner:released:{exec_id}")
+        return data == {
+            "worker_id": worker_id,
+            "job_id": job_id,
+            "step": step,
+            "exec_id": exec_id,
+            "pool": pool,
+        }
 
     async def set_step_resources(
         self, job_id: str, step: str, resources: list[str]

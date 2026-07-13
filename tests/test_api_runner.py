@@ -388,6 +388,27 @@ async def _register_real(client):
     return body["worker_id"], body["worker_token"]
 
 
+async def _activate_lease(
+    redis, worker_id: str, job_id: str = "j1", step: str = "A",
+    exec_id: str | None = None,
+) -> str:
+    exec_id = exec_id or f"{worker_id}:{job_id}:{step}:lease"
+    await redis.set_step_status(job_id, step, "running")
+    await redis.set_step_worker(job_id, step, worker_id)
+    await redis.set_step_exec_id(job_id, step, exec_id)
+    await redis.create_task_lease(worker_id, job_id, step, exec_id, "cpu")
+    return exec_id
+
+
+def _task_headers(token: str, job_id: str, step: str, exec_id: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "X-Flori-Lease-Job": job_id,
+        "X-Flori-Lease-Step": step,
+        "X-Flori-Lease-Exec": exec_id,
+    }
+
+
 async def _register_ai(client):
     payload = {"type": "ai", "pools": ["ai"], "tags": ["codex-cli"], "reject_tags": []}
     resp = await client.post("/api/runner/register", json=payload, headers=_reg_headers())
@@ -424,6 +445,9 @@ class TestJobsRequest:
         assert claim["domain"] == "lecture"
         assert claim["style_tags"] == ["formal"]
         assert await real_redis.get_step_status("j1", "A") == "running"
+        assert await real_redis.validate_task_lease(
+            worker_id, "j1", "A", claim["exec_id"],
+        )
 
     @pytest.mark.asyncio
     async def test_returns_ai_claim_without_job_enrich(self, jobs_client, real_redis):
@@ -554,10 +578,11 @@ class TestJobsComplete:
         worker_id, token = await _register_real(jobs_client)
         db.create_job(Job(id="j1", content_type="video", pipeline="video", domain="general"))
         db.upsert_step(Step(job_id="j1", name="A", status=StepStatus.RUNNING, pool="cpu"))
+        exec_id = await _activate_lease(real_redis, worker_id)
 
         resp = await jobs_client.post(
             "/api/runner/jobs/j1/steps/A/complete",
-            json={"pool": "cpu", "exec_id": f"{worker_id}:1",
+            json={"pool": "cpu", "exec_id": exec_id,
                   "duration": 12.34, "started_at": 100.0},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -574,10 +599,11 @@ class TestJobsFail:
         worker_id, token = await _register_real(jobs_client)
         db.create_job(Job(id="j1", content_type="video", pipeline="video", domain="general"))
         db.upsert_step(Step(job_id="j1", name="A", status=StepStatus.RUNNING, pool="cpu"))
+        exec_id = await _activate_lease(real_redis, worker_id)
 
         resp = await jobs_client.post(
             "/api/runner/jobs/j1/steps/A/fail",
-            json={"pool": "cpu", "exec_id": f"{worker_id}:1", "error": "boom",
+            json={"pool": "cpu", "exec_id": exec_id, "error": "boom",
                   "error_type": "segfault", "duration": 2.0, "started_at": 0.0,
                   "count_stats": True},
             headers={"Authorization": f"Bearer {token}"},
@@ -594,10 +620,11 @@ class TestJobsFail:
         worker_id, token = await _register_real(jobs_client)
         db.create_job(Job(id="j1", content_type="video", pipeline="video", domain="general"))
         db.upsert_step(Step(job_id="j1", name="A", status=StepStatus.RUNNING, pool="cpu"))
+        exec_id = await _activate_lease(real_redis, worker_id)
 
         resp = await jobs_client.post(
             "/api/runner/jobs/j1/steps/A/fail",
-            json={"pool": "cpu", "exec_id": f"{worker_id}:1", "error": "timeout",
+            json={"pool": "cpu", "exec_id": exec_id, "error": "timeout",
                   "error_type": "timeout", "duration": 2.0, "started_at": 0.0,
                   "count_stats": False},
             headers={"Authorization": f"Bearer {token}"},
@@ -612,6 +639,7 @@ class TestJobsRelease:
     async def test_release_slot_and_idles(self, jobs_client, real_redis):
         worker_id, token = await _register_real(jobs_client)
         await real_redis.try_acquire_slot("cpu", 1, "e")   # holder = 下方 release 的 exec_id
+        await _activate_lease(real_redis, worker_id, exec_id="e")
 
         resp = await jobs_client.post(
             "/api/runner/jobs/j1/steps/A/release",
@@ -621,6 +649,12 @@ class TestJobsRelease:
         assert resp.status_code == 200
         assert await real_redis.get_pool_count("cpu") == 0
         assert (await real_redis.get_worker_info(worker_id))["status"] == "idle"
+        duplicate = await jobs_client.post(
+            "/api/runner/jobs/j1/steps/A/release",
+            json={"pool": "cpu", "exec_id": "e"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert duplicate.status_code == 200 and duplicate.json()["duplicate"] is True
 
 
 class TestJobsProgress:
@@ -635,7 +669,8 @@ class TestJobsProgress:
     async def test_publishes_to_events_channel(self, jobs_client, real_redis):
         import asyncio
 
-        _, token = await _register_real(jobs_client)
+        worker_id, token = await _register_real(jobs_client)
+        exec_id = await _activate_lease(real_redis, worker_id)
         events = []
 
         async def capture():
@@ -648,11 +683,154 @@ class TestJobsProgress:
         resp = await jobs_client.post(
             "/api/runner/jobs/j1/steps/A/progress",
             json={"payload": {"line": "hello"}},
-            headers={"Authorization": f"Bearer {token}"},
+            headers=_task_headers(token, "j1", "A", exec_id),
         )
         assert resp.status_code == 200
         await asyncio.wait_for(listener, timeout=2.0)
         assert events[0] == {"event": "step_progress", "line": "hello"}
+
+
+class TestTaskScopedLease:
+    def test_lease_headers_are_declared_in_openapi(self, jobs_app):
+        operation = jobs_app.openapi()["paths"][
+            "/api/runner/jobs/{job_id}/artifacts/{rel}"
+        ]["get"]
+        headers = {
+            p["name"] for p in operation["parameters"] if p["in"] == "header"
+        }
+        assert {
+            "X-Flori-Lease-Job", "X-Flori-Lease-Step", "X-Flori-Lease-Exec",
+        }.issubset(headers)
+
+    @pytest.mark.asyncio
+    async def test_cross_worker_job_step_exec_endpoints_rejected(
+        self, jobs_client, real_redis, test_config,
+    ):
+        worker_a, token_a = await _register_real(jobs_client)
+        _, token_b = await _register_real(jobs_client)
+        exec_id = await _activate_lease(
+            real_redis, worker_a, "j1", "01_download", "exec-a",
+        )
+        good = _task_headers(token_a, "j1", "01_download", exec_id)
+        foreign = _task_headers(token_b, "j1", "01_download", exec_id)
+        forged = _task_headers(token_a, "j1", "01_download", "exec-forged")
+
+        assert (await jobs_client.post(
+            "/api/runner/jobs/j2/steps/01_download/progress",
+            json={"payload": {}}, headers=good,
+        )).status_code == 403
+        assert (await jobs_client.post(
+            "/api/runner/jobs/j1/steps/other/progress",
+            json={"payload": {}}, headers=good,
+        )).status_code == 403
+        assert (await jobs_client.post(
+            "/api/runner/jobs/j1/steps/01_download/progress",
+            json={"payload": {}}, headers=forged,
+        )).status_code == 403
+        assert (await jobs_client.post(
+            "/api/runner/jobs/j1/steps/01_download/alive", headers=foreign,
+        )).status_code == 403
+
+        terminal = {
+            "pool": "cpu", "exec_id": exec_id, "duration": 1.0, "started_at": 0.0,
+        }
+        assert (await jobs_client.post(
+            "/api/runner/jobs/j1/steps/01_download/complete",
+            json=terminal, headers={"Authorization": f"Bearer {token_b}"},
+        )).status_code == 403
+        assert (await jobs_client.post(
+            "/api/runner/jobs/j1/steps/01_download/fail",
+            json={**terminal, "error": "x", "error_type": "x"},
+            headers={"Authorization": f"Bearer {token_b}"},
+        )).status_code == 403
+        assert (await jobs_client.post(
+            "/api/runner/jobs/j1/steps/01_download/release",
+            json={"pool": "cpu", "exec_id": exec_id},
+            headers={"Authorization": f"Bearer {token_b}"},
+        )).status_code == 403
+        assert (await jobs_client.post(
+            "/api/runner/usage",
+            json={"exec_id": "call-1", "provider": "p", "model": "m",
+                  "job_id": "j1", "step": "01_download"},
+            headers=foreign,
+        )).status_code == 403
+        assert (await jobs_client.get(
+            "/api/runner/credentials/" + "bili_" + "sess" + "data", headers=foreign,
+        )).status_code == 403
+        assert (await jobs_client.get(
+            "/api/runner/jobs/j1/artifacts", headers=foreign,
+        )).status_code == 403
+        assert (await jobs_client.get(
+            "/api/runner/jobs/j1/artifacts/job.json", headers=foreign,
+        )).status_code == 403
+        assert (await jobs_client.put(
+            "/api/runner/jobs/j1/artifacts/evil.txt", content=b"evil", headers=foreign,
+        )).status_code == 403
+        assert not (test_config.jobs_dir / "j1" / "evil.txt").exists()
+
+    @pytest.mark.asyncio
+    async def test_rerun_and_expiry_invalidate_old_lease(self, jobs_client, real_redis):
+        worker_id, token = await _register_real(jobs_client)
+        old = await _activate_lease(real_redis, worker_id, exec_id="exec-old")
+        old_headers = _task_headers(token, "j1", "A", old)
+        new = await _activate_lease(real_redis, worker_id, exec_id="exec-new")
+        new_headers = _task_headers(token, "j1", "A", new)
+
+        assert (await jobs_client.get(
+            "/api/runner/jobs/j1/artifacts", headers=old_headers,
+        )).status_code == 403
+        assert (await jobs_client.get(
+            "/api/runner/jobs/j1/artifacts", headers=new_headers,
+        )).status_code == 200
+        await real_redis.r.expire(real_redis._task_lease_key(new), 0)
+        assert (await jobs_client.post(
+            "/api/runner/jobs/j1/steps/A/alive", headers=new_headers,
+        )).status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_duplicate_terminal_is_idempotent_and_conflict_rejected(
+        self, jobs_client, real_redis, db,
+    ):
+        from shared.models import Job, Step, StepStatus
+
+        worker_id, token = await _register_real(jobs_client)
+        db.create_job(Job(id="j1", content_type="video", pipeline="video", domain="general"))
+        db.upsert_step(Step(job_id="j1", name="A", status=StepStatus.RUNNING, pool="cpu"))
+        exec_id = await _activate_lease(real_redis, worker_id)
+        body = {"pool": "cpu", "exec_id": exec_id, "duration": 1.0, "started_at": 0.0}
+        auth = {"Authorization": f"Bearer {token}"}
+
+        first = await jobs_client.post(
+            "/api/runner/jobs/j1/steps/A/complete", json=body, headers=auth,
+        )
+        duplicate = await jobs_client.post(
+            "/api/runner/jobs/j1/steps/A/complete", json=body, headers=auth,
+        )
+        conflict = await jobs_client.post(
+            "/api/runner/jobs/j1/steps/A/fail",
+            json={**body, "error": "late", "error_type": "late"}, headers=auth,
+        )
+        assert first.status_code == 200
+        assert duplicate.status_code == 200 and duplicate.json()["duplicate"] is True
+        assert conflict.status_code == 403
+        assert db.get_worker(worker_id).tasks_completed == 1
+
+    @pytest.mark.asyncio
+    async def test_pool_tamper_cannot_release_or_finish(self, jobs_client, real_redis):
+        worker_id, token = await _register_real(jobs_client)
+        exec_id = await _activate_lease(real_redis, worker_id)
+        auth = {"Authorization": f"Bearer {token}"}
+        assert (await jobs_client.post(
+            "/api/runner/jobs/j1/steps/A/release",
+            json={"pool": "gpu", "exec_id": exec_id}, headers=auth,
+        )).status_code == 403
+        assert (await jobs_client.post(
+            "/api/runner/jobs/j1/steps/A/complete",
+            json={"pool": "gpu", "exec_id": exec_id,
+                  "duration": 1.0, "started_at": 0.0},
+            headers=auth,
+        )).status_code == 403
+        assert await real_redis.validate_task_lease(worker_id, "j1", "A", exec_id)
 
 
 class TestUsage:
@@ -665,14 +843,15 @@ class TestUsage:
         assert resp.status_code == 401
 
     @pytest.mark.asyncio
-    async def test_records_usage_row(self, jobs_client, db):
-        _, token = await _register_real(jobs_client)
+    async def test_records_usage_row(self, jobs_client, db, real_redis):
+        worker_id, token = await _register_real(jobs_client)
+        lease_exec = await _activate_lease(real_redis, worker_id)
         resp = await jobs_client.post(
             "/api/runner/usage",
             json={"exec_id": "e1", "provider": "anthropic", "model": "claude",
                   "job_id": "j1", "step": "A", "input_tokens": 10,
                   "output_tokens": 20, "cost_usd": 0.5},
-            headers={"Authorization": f"Bearer {token}"},
+            headers=_task_headers(token, "j1", "A", lease_exec),
         )
         assert resp.status_code == 200
         summary = db.get_usage_summary(job_id="j1")
@@ -682,7 +861,7 @@ class TestUsage:
         assert summary["total_cost_usd"] == pytest.approx(0.5)
 
     @pytest.mark.asyncio
-    async def test_cost_filled_from_litellm_pricing(self, jobs_app, jobs_client, db):
+    async def test_cost_filled_from_litellm_pricing(self, jobs_app, jobs_client, db, real_redis):
         """非 cli provider:api 侧 LiteLLM 价表命中 → 覆盖 worker 上报成本(权威,缓存感知)。"""
         jobs_app.state.pricing._table = {
             "claude-opus-4-8": {
@@ -690,40 +869,43 @@ class TestUsage:
                 "cache_read_input_token_cost": 5e-07,
             },
         }
-        _, token = await _register_real(jobs_client)
+        worker_id, token = await _register_real(jobs_client)
+        lease_exec = await _activate_lease(real_redis, worker_id, "jp", "A")
         resp = await jobs_client.post(
             "/api/runner/usage",
             json={"exec_id": "p1", "provider": "anthropic", "model": "claude-opus-4-8",
                   "job_id": "jp", "step": "A", "input_tokens": 1_000_000, "output_tokens": 0,
                   "cache_read_input_tokens": 1_000_000, "cost_usd": 0.0},
-            headers={"Authorization": f"Bearer {token}"},
+            headers=_task_headers(token, "jp", "A", lease_exec),
         )
         assert resp.status_code == 200
         # input 5e-6*1e6 + cache_read 5e-7*1e6 = 5 + 0.5 = 5.5,覆盖上报的 0
         assert db.get_usage_summary(job_id="jp")["total_cost_usd"] == pytest.approx(5.5)
 
     @pytest.mark.asyncio
-    async def test_claude_cli_cost_not_overridden(self, jobs_app, jobs_client, db):
+    async def test_claude_cli_cost_not_overridden(self, jobs_app, jobs_client, db, real_redis):
         """claude-cli CLI:用 CLI total_cost_usd(等价成本),价表不覆盖。"""
         jobs_app.state.pricing._table = {"claude-opus-4-8": {"input_cost_per_token": 5e-06}}
-        _, token = await _register_real(jobs_client)
+        worker_id, token = await _register_real(jobs_client)
+        lease_exec = await _activate_lease(real_redis, worker_id, "jc", "A")
         await jobs_client.post(
             "/api/runner/usage",
             json={"exec_id": "p2", "provider": "claude-cli", "model": "claude-opus-4-8",
                   "job_id": "jc", "step": "A", "input_tokens": 1_000_000, "output_tokens": 0,
                   "cost_usd": 0.123},
-            headers={"Authorization": f"Bearer {token}"},
+            headers=_task_headers(token, "jc", "A", lease_exec),
         )
         assert db.get_usage_summary(job_id="jc")["total_cost_usd"] == pytest.approx(0.123)
 
     @pytest.mark.asyncio
-    async def test_duplicate_usage_not_double_billed(self, jobs_client, db):
+    async def test_duplicate_usage_not_double_billed(self, jobs_client, db, real_redis):
         """同 exec_id 二次上报(worker 重试/双发)→ 200 ok 但不翻倍计费;端点 docstring 承诺去重。"""
-        _, token = await _register_real(jobs_client)
+        worker_id, token = await _register_real(jobs_client)
+        lease_exec = await _activate_lease(real_redis, worker_id, "j9", "A")
         body = {"exec_id": "dup1", "provider": "anthropic", "model": "claude",
                 "job_id": "j9", "step": "A", "input_tokens": 10,
                 "output_tokens": 20, "cost_usd": 0.5}
-        h = {"Authorization": f"Bearer {token}"}
+        h = _task_headers(token, "j9", "A", lease_exec)
         assert (await jobs_client.post("/api/runner/usage", json=body, headers=h)).status_code == 200
         assert (await jobs_client.post("/api/runner/usage", json=body, headers=h)).status_code == 200
         summary = db.get_usage_summary(job_id="j9")
@@ -746,14 +928,15 @@ class TestArtifacts:
         ).status_code == 401
 
     @pytest.mark.asyncio
-    async def test_put_then_list_and_get(self, jobs_client, test_config):
-        _, token = await _register_real(jobs_client)
-        h = {"Authorization": f"Bearer {token}"}
+    async def test_put_then_list_and_get(self, jobs_client, test_config, real_redis):
+        worker_id, token = await _register_real(jobs_client)
+        exec_id = await _activate_lease(real_redis, worker_id)
+        h = _task_headers(token, "j1", "A", exec_id)
 
         put = await jobs_client.put(
             "/api/runner/jobs/j1/artifacts/output/notes.md", content=b"hello", headers=h,
         )
-        assert put.status_code == 200 and put.json() == {"ok": True}
+        assert put.status_code == 200 and put.json()["ok"] is True
         # 落到 API 端 LocalStorage(jobs_dir)
         assert (test_config.jobs_dir / "j1" / "output" / "notes.md").read_bytes() == b"hello"
 
@@ -769,10 +952,11 @@ class TestArtifacts:
         assert got.headers["content-type"] == "application/octet-stream"
 
     @pytest.mark.asyncio
-    async def test_credential_sidecar_not_listed_or_served(self, jobs_client, test_config):
+    async def test_credential_sidecar_not_listed_or_served(self, jobs_client, test_config, real_redis):
         """敏感凭证侧载文件:远端 worker 既列不到、也取不到(404),只供同机本地读。"""
-        _, token = await _register_real(jobs_client)
-        h = {"Authorization": f"Bearer {token}"}
+        worker_id, token = await _register_real(jobs_client)
+        exec_id = await _activate_lease(real_redis, worker_id)
+        h = _task_headers(token, "j1", "A", exec_id)
         # 直接在 API 端 LocalStorage 放一个凭证文件 + 一个普通产物
         jd = test_config.jobs_dir / "j1"
         (jd / "input").mkdir(parents=True, exist_ok=True)
@@ -790,11 +974,12 @@ class TestArtifacts:
         assert got.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_get_missing_returns_404(self, jobs_client):
-        _, token = await _register_real(jobs_client)
+    async def test_get_missing_returns_404(self, jobs_client, real_redis):
+        worker_id, token = await _register_real(jobs_client)
+        exec_id = await _activate_lease(real_redis, worker_id)
         resp = await jobs_client.get(
             "/api/runner/jobs/j1/artifacts/nope.md",
-            headers={"Authorization": f"Bearer {token}"},
+            headers=_task_headers(token, "j1", "A", exec_id),
         )
         assert resp.status_code == 404
 
@@ -802,7 +987,8 @@ class TestArtifacts:
     async def test_traffic_counted_by_direction_and_worker(self, jobs_client, real_redis):
         """put 计入库方向 push,get 计出库方向 pull:按方向 + worker 归因计字节;404 不计。"""
         worker_id, token = await _register_real(jobs_client)
-        h = {"Authorization": f"Bearer {token}"}
+        exec_id = await _activate_lease(real_redis, worker_id)
+        h = _task_headers(token, "j1", "A", exec_id)
         # 入库:PUT body 5 字节
         await jobs_client.put("/api/runner/jobs/j1/artifacts/a.md", content=b"hello", headers=h)
         # 出库:GET 同一文件(5 字节)
@@ -814,6 +1000,108 @@ class TestArtifacts:
         pull = await real_redis.get_traffic("pull")
         assert push["total"] == 5 and push["by_worker"] == {worker_id: 5}
         assert pull["total"] == 5 and pull["by_worker"] == {worker_id: 5}
+
+    @pytest.mark.asyncio
+    async def test_range_download_and_checksum_metadata(self, jobs_client, real_redis):
+        import hashlib
+
+        worker_id, token = await _register_real(jobs_client)
+        exec_id = await _activate_lease(real_redis, worker_id)
+        h = _task_headers(token, "j1", "A", exec_id)
+        payload = b"0123456789"
+        h_upload = {**h, "X-Content-SHA256": hashlib.sha256(payload).hexdigest()}
+        put = await jobs_client.put(
+            "/api/runner/jobs/j1/artifacts/a.bin", content=payload, headers=h_upload,
+        )
+        assert put.status_code == 200
+        assert put.json()["size"] == len(payload)
+        assert put.json()["sha256"] == hashlib.sha256(payload).hexdigest()
+
+        got = await jobs_client.get(
+            "/api/runner/jobs/j1/artifacts/a.bin",
+            headers={**h, "Range": "bytes=2-5"},
+        )
+        assert got.status_code == 206 and got.content == b"2345"
+        assert got.headers["content-range"] == "bytes 2-5/10"
+        assert got.headers["accept-ranges"] == "bytes"
+        assert got.headers["content-length"] == "4"
+
+    @pytest.mark.asyncio
+    async def test_chunked_upload_without_content_length(self, jobs_client, real_redis):
+        worker_id, token = await _register_real(jobs_client)
+        exec_id = await _activate_lease(real_redis, worker_id)
+
+        async def chunks():
+            yield b"abc"
+            yield b"def"
+
+        put = await jobs_client.put(
+            "/api/runner/jobs/j1/artifacts/chunked.bin",
+            content=chunks(),
+            headers=_task_headers(token, "j1", "A", exec_id),
+        )
+        assert put.status_code == 200 and put.json()["size"] == 6
+        got = await jobs_client.get(
+            "/api/runner/jobs/j1/artifacts/chunked.bin",
+            headers=_task_headers(token, "j1", "A", exec_id),
+        )
+        assert got.content == b"abcdef"
+
+    @pytest.mark.asyncio
+    async def test_disconnected_upload_cleans_staging(
+        self, jobs_client, real_redis, test_config,
+    ):
+        worker_id, token = await _register_real(jobs_client)
+        exec_id = await _activate_lease(real_redis, worker_id)
+
+        async def disconnected():
+            yield b"partial"
+            raise ConnectionError("client disconnected")
+
+        with pytest.raises(ExceptionGroup):
+            await jobs_client.put(
+                "/api/runner/jobs/j1/artifacts/disconnected.bin",
+                content=disconnected(),
+                headers=_task_headers(token, "j1", "A", exec_id),
+            )
+        assert not (test_config.jobs_dir / "j1" / "disconnected.bin").exists()
+        assert not list((test_config.jobs_dir / "j1" / ".flori-upload").glob("*"))
+
+    @pytest.mark.asyncio
+    async def test_checksum_failure_preserves_previous_object(
+        self, jobs_client, real_redis, test_config,
+    ):
+        worker_id, token = await _register_real(jobs_client)
+        exec_id = await _activate_lease(real_redis, worker_id)
+        h = _task_headers(token, "j1", "A", exec_id)
+        target = test_config.jobs_dir / "j1" / "a.bin"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"old")
+
+        failed = await jobs_client.put(
+            "/api/runner/jobs/j1/artifacts/a.bin",
+            content=b"new",
+            headers={**h, "X-Content-SHA256": "0" * 64},
+        )
+        assert failed.status_code == 422
+        assert target.read_bytes() == b"old"
+        assert not list((test_config.jobs_dir / "j1").glob(".flori-upload/*"))
+
+    @pytest.mark.asyncio
+    async def test_oversize_rejected_without_visible_artifact(
+        self, jobs_client, real_redis, test_config, monkeypatch,
+    ):
+        from api.routes import runner as runner_route
+
+        monkeypatch.setattr(runner_route, "_ARTIFACT_MAX_BYTES", 4)
+        worker_id, token = await _register_real(jobs_client)
+        exec_id = await _activate_lease(real_redis, worker_id)
+        h = _task_headers(token, "j1", "A", exec_id)
+        failed = await jobs_client.put(
+            "/api/runner/jobs/j1/artifacts/large.bin", content=b"12345", headers=h,
+        )
+        assert failed.status_code == 413
+        assert not (test_config.jobs_dir / "j1" / "large.bin").exists()
 
     @pytest.mark.asyncio
     async def test_path_traversal_rejected(self, jobs_client):
@@ -922,7 +1210,18 @@ class TestRunnerPollAccessFilter:
         assert f.filter(rec("/api/runner/register")) is True
 
 
-class TestDispatchCredentials:
+class _CredentialLeaseClient:
+    @pytest.fixture(autouse=True)
+    async def _default_lease_headers(self, client, redis_mock):
+        client.headers.update({
+            "X-Flori-Lease-Job": "j1",
+            "X-Flori-Lease-Step": "01_download",
+            "X-Flori-Lease-Exec": "exec-download",
+        })
+        redis_mock.validate_task_lease.return_value = True
+
+
+class TestDispatchCredentials(_CredentialLeaseClient):
     """GET /api/runner/credentials/{key}(docs/03 §1.7.1):白名单 + 鉴权 + redis/DB 兜底。"""
 
     async def _register_worker(self, client):
@@ -1022,12 +1321,32 @@ class TestConfigDispatch:
 async def test_heartbeat_running_refreshes_step_progress(jobs_client, real_redis):
     """心跳捎带 running 集合 → 每个并发步的进度心跳被刷新(alive 单点不达的根治通道)。"""
     worker_id, token = await _register_real(jobs_client)
+    exec1 = await _activate_lease(real_redis, worker_id, "j1", "01_download")
+    exec2 = await _activate_lease(real_redis, worker_id, "j2", "03_scene")
     r = await jobs_client.post("/api/runner/heartbeat",
                                headers={"Authorization": f"Bearer {token}"}, json={
         "worker_id": worker_id, "status": "busy",
-        "running": [{"job_id": "j1", "step": "01_download"},
-                    {"job_id": "j2", "step": "03_scene"}],
+        "running": [{"job_id": "j1", "step": "01_download", "exec_id": exec1},
+                    {"job_id": "j2", "step": "03_scene", "exec_id": exec2}],
     })
     assert r.status_code == 200
     assert await real_redis.get_step_progress_at("j1", "01_download") is not None
     assert await real_redis.get_step_progress_at("j2", "03_scene") is not None
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_running_without_exec_does_not_refresh(jobs_client, real_redis):
+    """心跳必须携带完整四元组;服务端不得替 Worker 补出当前 exec_id."""
+    worker_id, token = await _register_real(jobs_client)
+    await _activate_lease(real_redis, worker_id, "j1", "01_download")
+    r = await jobs_client.post(
+        "/api/runner/heartbeat",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "worker_id": worker_id,
+            "status": "busy",
+            "running": [{"job_id": "j1", "step": "01_download"}],
+        },
+    )
+    assert r.status_code == 200
+    assert await real_redis.get_step_progress_at("j1", "01_download") is None

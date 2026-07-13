@@ -11,9 +11,11 @@ import json
 import secrets
 import time
 from datetime import datetime, timezone
+from typing import AsyncIterator
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from shared import runner_ops
@@ -28,7 +30,7 @@ from shared.status import (
     STALE,
     compute_worker_status,
 )
-from shared.storage import StorageBackend, is_credential_file
+from shared.storage import ArtifactTooLarge, StorageBackend, is_credential_file
 from api.deps import (
     get_config,
     get_db,
@@ -55,6 +57,8 @@ logger = structlog.get_logger(component="runner")
 # 长轮询:服务端持有窗口须小于 worker httpx 读超时(35s),空轮询间隔避免空转打爆 Redis。
 _CLAIM_WINDOW_SEC = 25.0
 _CLAIM_POLL_SEC = 0.5
+_ARTIFACT_CHUNK_SIZE = 1024 * 1024
+_ARTIFACT_MAX_BYTES = 10 * 1024 * 1024 * 1024
 
 
 def _worker_ttl(config: AppConfig) -> int:
@@ -87,6 +91,69 @@ def _remote_addr(request: Request) -> str:
     return _xff.split(",")[0].strip() if _xff else (request.client.host if request.client else "")
 
 
+class RunnerTaskLeaseHeaders(BaseModel):
+    job_id: str
+    step: str
+    exec_id: str
+
+
+def _task_lease_headers(
+    lease_job: str = Header(default="", alias="X-Flori-Lease-Job"),
+    lease_step: str = Header(default="", alias="X-Flori-Lease-Step"),
+    lease_exec: str = Header(default="", alias="X-Flori-Lease-Exec"),
+) -> RunnerTaskLeaseHeaders:
+    """把任务租约头显式纳入 OpenAPI,同时保留统一的 403 失败语义."""
+    return RunnerTaskLeaseHeaders(job_id=lease_job, step=lease_step, exec_id=lease_exec)
+
+
+async def _require_task_lease(
+    redis: RedisClient,
+    worker_id: str,
+    job_id: str,
+    step: str,
+    exec_id: str,
+    *,
+    renew: bool = False,
+    require_active: bool = True,
+    expected_pool: str = "",
+) -> None:
+    """统一校验 runner 四元组租约,拒绝缺失,过期和已被 rerun 替换的执行."""
+    if not job_id or not step or not exec_id:
+        raise HTTPException(status_code=403, detail="active task lease required")
+    validate_path_segment(job_id, "lease job_id")
+    validate_path_segment(step, "lease step")
+    validate_path_segment(exec_id, "lease exec_id")
+    valid = await redis.validate_task_lease(
+        worker_id, job_id, step, exec_id,
+        renew=renew, require_active=require_active, expected_pool=expected_pool,
+    )
+    if not valid:
+        logger.warning(
+            "task_lease_rejected", worker_id=worker_id, job_id=job_id,
+            step=step, exec_id=exec_id,
+        )
+        raise HTTPException(status_code=403, detail="task lease is stale or out of scope")
+
+
+async def _begin_terminal(
+    redis: RedisClient,
+    worker_id: str,
+    job_id: str,
+    step: str,
+    exec_id: str,
+    outcome: str,
+    pool: str,
+) -> bool:
+    validate_path_segment(exec_id, "exec_id")
+    validate_path_segment(pool, "pool")
+    state = await redis.begin_task_terminal(
+        worker_id, job_id, step, exec_id, outcome, expected_pool=pool,
+    )
+    if state == 0:
+        raise HTTPException(status_code=403, detail="task lease is stale or out of scope")
+    return state == 1
+
+
 class RunnerRegisterRequest(BaseModel):
     worker_id: str | None = None
     type: str
@@ -117,9 +184,9 @@ class RunnerHeartbeatRequest(BaseModel):
     concurrency: int | None = Field(default=None, ge=1, le=64)
     load: dict = Field(default_factory=dict)   # 本机 live 负载 {cpu_pct,mem_pct,loadavg};可空
     applied_cfg_rev: int = 0                   # worker 已生效的配置版本(回报,前端显示同步态)
-    # 在跑步集合 [{job_id,step}]:心跳捎带,为每个并发步刷进度心跳。独立 alive 通道
+    # 在跑步集合 [{job_id,step,exec_id}]:心跳捎带,为每个并发步刷进度心跳.独立 alive 通道
     # 在部分外网链路不达(实测),心跳借道使 orphan_scan 判活不再依赖单点。
-    running: list = Field(default_factory=list)
+    running: list[dict] = Field(default_factory=list)
 
 
 class RunnerOfflineRequest(BaseModel):
@@ -302,8 +369,14 @@ async def heartbeat(
         raise HTTPException(status_code=403, detail="token/worker_id mismatch")
     await redis.heartbeat(worker_id, ttl=_worker_ttl(config))
     for item in (req.running or [])[:64]:
-        j, st = item.get("job_id", ""), item.get("step", "")
-        if j and st:
+        if not isinstance(item, dict):
+            continue
+        j, st, ex = (
+            item.get("job_id", ""), item.get("step", ""), item.get("exec_id", ""),
+        )
+        if j and st and ex and await redis.validate_task_lease(
+            worker_id, j, st, ex, renew=True,
+        ):
             await redis.set_step_progress_at(j, st)
     # live 负载落 redis worker hash(实时态,不进 DB);为空则不写,保留上次。
     if req.load:
@@ -385,7 +458,7 @@ async def request_job(
     redis: RedisClient = Depends(get_redis),
     config: AppConfig = Depends(get_config),
 ):
-    """长轮询认领一步:窗口内反复 claim_step,认到就 enrich 后返回,否则 {"claim": null}。"""
+    """长轮询认领一步并签发短期任务租约;窗口内无任务返回 {"claim": null}."""
     # per-token 授权:把请求池裁剪到 token 注册时授权的池子(空授权列表=不限,兼容旧 token)。
     token = getattr(request.state, "worker_token", None)
     authorized_pools = (token or {}).get("pools") or []
@@ -428,10 +501,19 @@ async def complete_step(
 ):
     validate_path_segment(job_id, "job_id")
     validate_path_segment(step, "step")
-    claim = {"job_id": job_id, "step": step, "pool": req.pool, "exec_id": req.exec_id}
-    await runner_ops.report_step_done(
-        redis, db, worker_id, claim, req.duration, req.started_at,
+    first = await _begin_terminal(
+        redis, worker_id, job_id, step, req.exec_id, "done", req.pool,
     )
+    if not first:
+        return {"ok": True, "duplicate": True}
+    claim = {"job_id": job_id, "step": step, "pool": req.pool, "exec_id": req.exec_id}
+    try:
+        await runner_ops.report_step_done(
+            redis, db, worker_id, claim, req.duration, req.started_at,
+        )
+    except Exception:
+        await redis.reset_task_terminal(worker_id, job_id, step, req.exec_id, "done")
+        raise
     return {"ok": True}
 
 
@@ -446,11 +528,20 @@ async def fail_step(
 ):
     validate_path_segment(job_id, "job_id")
     validate_path_segment(step, "step")
-    claim = {"job_id": job_id, "step": step, "pool": req.pool, "exec_id": req.exec_id}
-    await runner_ops.report_step_failed(
-        redis, db, worker_id, claim, req.error, req.error_type,
-        req.duration, req.started_at, req.count_stats,
+    first = await _begin_terminal(
+        redis, worker_id, job_id, step, req.exec_id, "failed", req.pool,
     )
+    if not first:
+        return {"ok": True, "duplicate": True}
+    claim = {"job_id": job_id, "step": step, "pool": req.pool, "exec_id": req.exec_id}
+    try:
+        await runner_ops.report_step_failed(
+            redis, db, worker_id, claim, req.error, req.error_type,
+            req.duration, req.started_at, req.count_stats,
+        )
+    except Exception:
+        await redis.reset_task_terminal(worker_id, job_id, step, req.exec_id, "failed")
+        raise
     return {"ok": True}
 
 
@@ -465,6 +556,18 @@ async def release_step(
 ):
     validate_path_segment(job_id, "job_id")
     validate_path_segment(step, "step")
+    validate_path_segment(req.exec_id, "exec_id")
+    validate_path_segment(req.pool, "pool")
+    valid = await redis.validate_task_lease(
+        worker_id, job_id, step, req.exec_id,
+        require_active=False, expected_pool=req.pool,
+    )
+    if not valid:
+        if await redis.validate_released_task_lease(
+            worker_id, job_id, step, req.exec_id, req.pool,
+        ):
+            return {"ok": True, "duplicate": True}
+        raise HTTPException(status_code=403, detail="task lease is stale or out of scope")
     claim = {"job_id": job_id, "step": step, "pool": req.pool, "exec_id": req.exec_id}
     await runner_ops.release_step(redis, db, worker_id, claim)
     return {"ok": True}
@@ -475,12 +578,18 @@ async def step_progress(
     job_id: str,
     step: str,
     req: RunnerProgressRequest,
+    lease: RunnerTaskLeaseHeaders = Depends(_task_lease_headers),
     worker_id: str = Depends(verify_worker_token),
     redis: RedisClient = Depends(get_redis),
 ):
     """运行中进度/日志:发到 events:{job_id},供前端 WS 准实时拉取(gateway on_progress)。"""
     validate_path_segment(job_id, "job_id")
     validate_path_segment(step, "step")
+    if lease.job_id != job_id or lease.step != step:
+        raise HTTPException(status_code=403, detail="task lease path mismatch")
+    await _require_task_lease(
+        redis, worker_id, job_id, step, lease.exec_id, renew=True,
+    )
     # 固定字段后置:payload 若含 "event" 键不能覆盖 step_progress。
     await redis.publish(f"events:{job_id}", {**req.payload, "event": "step_progress"})
     return {"ok": True}
@@ -490,6 +599,7 @@ async def step_progress(
 async def step_alive(
     job_id: str,
     step: str,
+    lease: RunnerTaskLeaseHeaders = Depends(_task_lease_headers),
     worker_id: str = Depends(verify_worker_token),
     redis: RedisClient = Depends(get_redis),
 ):
@@ -497,6 +607,11 @@ async def step_alive(
     供 scheduler.check_stuck 对产物不落调度器盘的远程 job 判进度停滞。"""
     validate_path_segment(job_id, "job_id")
     validate_path_segment(step, "step")
+    if lease.job_id != job_id or lease.step != step:
+        raise HTTPException(status_code=403, detail="task lease path mismatch")
+    await _require_task_lease(
+        redis, worker_id, job_id, step, lease.exec_id, renew=True,
+    )
     await redis.set_step_progress_at(job_id, step)
     return {"ok": True}
 
@@ -504,14 +619,21 @@ async def step_alive(
 @router.get("/credentials/{key}")
 async def get_dispatch_credential(
     key: str,
+    lease: RunnerTaskLeaseHeaders = Depends(_task_lease_headers),
     worker_id: str = Depends(verify_worker_token),
     redis: RedisClient = Depends(get_redis),
     db: Database = Depends(get_db),
 ):
-    """下载凭证领取(docs/03 §1.7.1):白名单 key,redis 镜像 miss 落 DB 解析并回灌。
+    """下载凭证领取:仅当前 01_download 租约可访问白名单 key,缓存 miss 回源 DB.
     value=null 表示中心未配置该凭证(worker 匿名降级,不视为错误)。
     每次领取记审计事件 credential_issued,补上文件共享时代缺失的凭证审计。"""
     from shared.credentials import DISPATCH_KEYS, resolve_from_db
+
+    await _require_task_lease(
+        redis, worker_id, lease.job_id, lease.step, lease.exec_id, renew=True,
+    )
+    if lease.step != "01_download":
+        raise HTTPException(status_code=403, detail="credential access requires download lease")
 
     if key not in DISPATCH_KEYS:
         raise HTTPException(404, f"unknown credential key: {key}")
@@ -528,10 +650,18 @@ async def get_dispatch_credential(
 async def record_usage(
     request: Request,
     req: RunnerUsageRequest,
+    lease: RunnerTaskLeaseHeaders = Depends(_task_lease_headers),
     worker_id: str = Depends(verify_worker_token),
     db: Database = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
 ):
-    """记录一次 AI 调用用量(exec_id UNIQUE 去重,重复返回 ok 不报错)。"""
+    """在当前任务租约内记录 AI 调用用量(exec_id UNIQUE,重复上报幂等)."""
+    if req.job_id != lease.job_id or req.step != lease.step:
+        raise HTTPException(status_code=403, detail="usage task lease mismatch")
+    await _require_task_lease(
+        redis, worker_id, lease.job_id, lease.step, lease.exec_id,
+        renew=True,
+    )
     usage = AIUsage(
         exec_id=req.exec_id,
         provider=req.provider,
@@ -565,18 +695,55 @@ async def record_usage(
 
 def _validate_rel(rel: str) -> None:
     # 防目录穿越:禁 ".."、绝对路径、空字节(与 artifact 端点的 job_id 校验同风格)。
-    if ".." in rel or rel.startswith("/") or "\x00" in rel:
+    normalized = rel.replace("\\", "/")
+    if (".." in normalized or normalized.startswith("/") or "\x00" in normalized
+            or normalized.startswith(".flori-upload/")):
         raise HTTPException(400, "invalid artifact path")
+
+
+def _artifact_range(value: str | None, size: int) -> tuple[int, int, int]:
+    """解析单段 bytes Range,返回 start,length,HTTP status."""
+    if not value:
+        return 0, size, 200
+    if not value.startswith("bytes=") or "," in value:
+        raise HTTPException(416, "invalid range", headers={"Content-Range": f"bytes */{size}"})
+    spec = value[6:]
+    left, sep, right = spec.partition("-")
+    if not sep:
+        raise HTTPException(416, "invalid range", headers={"Content-Range": f"bytes */{size}"})
+    try:
+        if not left:
+            suffix = int(right)
+            if suffix <= 0:
+                raise ValueError
+            start = max(0, size - suffix)
+            end = size - 1
+        else:
+            start = int(left)
+            end = int(right) if right else size - 1
+    except ValueError:
+        raise HTTPException(416, "invalid range", headers={"Content-Range": f"bytes */{size}"})
+    if size <= 0 or start < 0 or start >= size or end < start:
+        raise HTTPException(416, "range not satisfiable", headers={"Content-Range": f"bytes */{size}"})
+    end = min(end, size - 1)
+    return start, end - start + 1, 206
 
 
 @router.get("/jobs/{job_id}/artifacts")
 async def list_artifacts(
     job_id: str,
+    lease: RunnerTaskLeaseHeaders = Depends(_task_lease_headers),
     worker_id: str = Depends(verify_worker_token),
     storage: StorageBackend = Depends(get_storage),
+    redis: RedisClient = Depends(get_redis),
 ):
-    """产物清单:GatewayStorage.pull 据此逐个拉取。敏感凭证侧载文件不下发给远端 worker。"""
+    """列出当前任务可拉取的产物;敏感凭证和内部暂存文件永不下发."""
     validate_path_segment(job_id, "job_id")
+    if lease.job_id != job_id:
+        raise HTTPException(status_code=403, detail="task lease path mismatch")
+    await _require_task_lease(
+        redis, worker_id, job_id, lease.step, lease.exec_id, renew=True,
+    )
     files = await storage.list_files(job_id)
     return {"files": [f for f in files if not is_credential_file(f)]}
 
@@ -585,23 +752,57 @@ async def list_artifacts(
 async def get_artifact(
     job_id: str,
     rel: str,
+    request: Request,
+    lease: RunnerTaskLeaseHeaders = Depends(_task_lease_headers),
     worker_id: str = Depends(verify_worker_token),
     storage: StorageBackend = Depends(get_storage),
     redis: RedisClient = Depends(get_redis),
 ):
-    """取单个产物字节;不存在返回 404(GatewayStorage.read_file 据此返回 None)。
-    敏感凭证侧载文件对远端 worker 一律 404(只供同机 LocalStorage 本地读)。"""
+    """按当前任务租约流式读取产物,支持单段 Range;敏感凭证一律返回 404."""
     validate_path_segment(job_id, "job_id")
     _validate_rel(rel)
     if is_credential_file(rel):
         raise HTTPException(404, "artifact not found")
-    data = await storage.read_file(job_id, rel)
-    if data is None:
+    if lease.job_id != job_id:
+        raise HTTPException(status_code=403, detail="task lease path mismatch")
+    await _require_task_lease(
+        redis, worker_id, job_id, lease.step, lease.exec_id, renew=True,
+    )
+    size = await storage.file_size(job_id, rel)
+    if size is None:
         raise HTTPException(404, "artifact not found")
-    # 出库流量(NAS 到 worker,worker 从 ECS 拉取):按 worker 归因计字节. best-effort,
-    # incr_traffic 内已吞异常,绝不因计数影响产物下发.
-    await redis.incr_traffic("pull", worker_id, len(data))
-    return Response(content=data, media_type="application/octet-stream")
+    start, length, status_code = _artifact_range(request.headers.get("range"), size)
+    stream = await storage.open_stream(
+        job_id, rel, start=start, length=length, chunk_size=_ARTIFACT_CHUNK_SIZE,
+    )
+    if stream is None:
+        raise HTTPException(404, "artifact not found")
+
+    async def _counted() -> AsyncIterator[bytes]:
+        sent = 0
+        checked_at = time.monotonic()
+        try:
+            async for chunk in stream:
+                if time.monotonic() - checked_at >= 30:
+                    await _require_task_lease(
+                        redis, worker_id, job_id, lease.step, lease.exec_id, renew=True,
+                    )
+                    checked_at = time.monotonic()
+                sent += len(chunk)
+                yield chunk
+        finally:
+            await redis.incr_traffic("pull", worker_id, sent)
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(length),
+    }
+    if status_code == 206:
+        headers["Content-Range"] = f"bytes {start}-{start + length - 1}/{size}"
+    return StreamingResponse(
+        _counted(), status_code=status_code, headers=headers,
+        media_type="application/octet-stream",
+    )
 
 
 @router.put("/jobs/{job_id}/artifacts/{rel:path}")
@@ -609,19 +810,59 @@ async def put_artifact(
     job_id: str,
     rel: str,
     request: Request,
+    lease: RunnerTaskLeaseHeaders = Depends(_task_lease_headers),
     worker_id: str = Depends(verify_worker_token),
     storage: StorageBackend = Depends(get_storage),
     redis: RedisClient = Depends(get_redis),
 ):
-    """回传单个产物:原始 body 直接写入 storage(worker push 的中转出口)。"""
+    """分块接收产物并校验大小/摘要,成功后原子发布;失败只清理暂存内容."""
     validate_path_segment(job_id, "job_id")
     _validate_rel(rel)
     if is_credential_file(rel):
         # 与 get_artifact 对称:禁止经网关回传写入凭证侧载文件(.credentials.json),
         # 防任意已注册 worker 植入一个同机下载步随后会读的凭证文件。
         raise HTTPException(403, "writing credential files is not allowed")
-    data = await request.body()
-    await storage.write_file(job_id, rel, data)
-    # 入库流量(worker 到 NAS,即 ECS 到 NAS):写盘后按收到的 body 字节计. best-effort.
-    await redis.incr_traffic("push", worker_id, len(data))
-    return {"ok": True}
+    if lease.job_id != job_id:
+        raise HTTPException(status_code=403, detail="task lease path mismatch")
+    await _require_task_lease(
+        redis, worker_id, job_id, lease.step, lease.exec_id, renew=True,
+    )
+    length_header = request.headers.get("content-length")
+    try:
+        expected_size = int(length_header) if length_header is not None else None
+    except ValueError:
+        raise HTTPException(400, "invalid content length")
+    if expected_size is not None and (expected_size < 0 or expected_size > _ARTIFACT_MAX_BYTES):
+        raise HTTPException(413, "artifact too large")
+    expected_sha256 = request.headers.get("x-content-sha256")
+    if expected_sha256 and (
+        len(expected_sha256) != 64
+        or any(c not in "0123456789abcdefABCDEF" for c in expected_sha256)
+    ):
+        raise HTTPException(400, "invalid artifact checksum")
+
+    async def _checked_upload() -> AsyncIterator[bytes]:
+        checked_at = time.monotonic()
+        async for chunk in request.stream():
+            if time.monotonic() - checked_at >= 30:
+                await _require_task_lease(
+                    redis, worker_id, job_id, lease.step, lease.exec_id, renew=True,
+                )
+                checked_at = time.monotonic()
+            yield chunk
+
+    try:
+        result = await storage.write_stream(
+            job_id,
+            rel,
+            _checked_upload(),
+            expected_size=expected_size,
+            expected_sha256=expected_sha256,
+            max_bytes=_ARTIFACT_MAX_BYTES,
+        )
+    except ArtifactTooLarge:
+        raise HTTPException(413, "artifact too large")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    await redis.incr_traffic("push", worker_id, result["size"])
+    return {"ok": True, **result}
