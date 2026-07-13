@@ -1,5 +1,12 @@
 # Flori 边缘(ECS):Caddy(自签 TLS + Basic Auth + 反代)+ 前端容器 + Watchtower。
 # 无状态:前端是 ghcr 镜像,Watchtower 跟随 CI 自动更新;不再手工 scp dist。
+x-logging: &default-logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+    compress: "true"
+
 services:
   caddy:
     image: caddy:2-alpine
@@ -7,6 +14,7 @@ services:
     # host 网络:绑 443 且能访问宿主隧道口和前端容器回环端口(见 Caddyfile / ports)。
     network_mode: host
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       - frontend
     environment:
@@ -26,6 +34,7 @@ services:
     image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-frontend:latest
     container_name: flori-frontend
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "127.0.0.1:8090:80"
     labels:
@@ -37,6 +46,7 @@ services:
     image: ghcr.io/containrrr/watchtower
     container_name: flori-watchtower
     restart: unless-stopped
+    logging: *default-logging
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     command: --label-enable --cleanup --interval 10

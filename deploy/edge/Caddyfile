@@ -14,7 +14,10 @@
 
 	# /api/runner/* 是 worker 网关机机接口,自带 Bearer 鉴权,放行 Basic。
 	handle /api/runner/* {
-		reverse_proxy localhost:8000
+		reverse_proxy localhost:8000 {
+			health_uri /api/health/live
+			health_interval 10s
+		}
 	}
 
 	# 其余人面入口(SPA + /api/* 非 runner):一道门 Basic Auth,再按路径路由。
@@ -25,7 +28,10 @@
 
 		# /api/* 反代到 NAS api(反向 SSH 隧道口)。
 		handle /api/* {
-			reverse_proxy localhost:8000
+			reverse_proxy localhost:8000 {
+				health_uri /api/health/live
+				health_interval 10s
+			}
 		}
 
 		# 前端:反代到本机 flori-frontend 容器。

@@ -67,6 +67,56 @@ COMPONENT_DEGRADED = "degraded"
 COMPONENT_DOWN = "down"
 COMPONENT_UNKNOWN = "unknown"
 
+HEALTH_OK = "ok"
+HEALTH_DEGRADED = "degraded"
+HEALTH_ERROR = "error"
+
+READINESS_READY = "ready"
+READINESS_DEGRADED = "degraded"
+READINESS_NOT_READY = "not_ready"
+
+
+def summarize_readiness(checks: dict[str, dict]) -> dict:
+    """把统一检查项折算成 readiness 总状态和结构化原因.
+
+    required 只控制 error 是否阻断接单.可选能力 error 与任何 degraded 都只让
+    总状态降级,避免 GPU 等可选池离线误伤基础流水线.
+    """
+    blockers = [
+        (name, check)
+        for name, check in checks.items()
+        if check.get("required", False) and check.get("status") == HEALTH_ERROR
+    ]
+    blocker_names = {name for name, _check in blockers}
+    non_ok = [
+        (name, check)
+        for name, check in checks.items()
+        if check.get("status") != HEALTH_OK
+    ]
+    if blockers:
+        status = READINESS_NOT_READY
+    elif non_ok:
+        status = READINESS_DEGRADED
+    else:
+        status = READINESS_READY
+
+    reasons = [
+        {
+            "code": name,
+            "severity": "blocking" if name in blocker_names else "degraded",
+            "message": check.get("detail") or name,
+            "recovery": check.get("recovery"),
+        }
+        for name, check in non_ok
+    ]
+    return {
+        "status": status,
+        "ready": not blockers,
+        "degraded": bool(non_ok) and not blockers,
+        "checks": checks,
+        "reasons": reasons,
+    }
+
 
 def compute_component_status(
     last_heartbeat: datetime | None,

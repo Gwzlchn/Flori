@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
+import sqlite3
+import tempfile
+import time
+import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 logger = structlog.get_logger(component="admin")
 
@@ -18,76 +24,411 @@ from shared.redis_client import RedisClient
 from shared.status import (
     DEFAULT_ONLINE_WINDOW_SEC,
     DEFAULT_STALE_WINDOW_SEC,
+    HEALTH_DEGRADED,
+    HEALTH_ERROR,
+    HEALTH_OK,
     compute_component_status,
+    summarize_readiness,
 )
 from shared.storage import RemoteStorage
 from shared.sysload import read_process_rss_mb
 from shared.version import FLORI_VERSION
 from api.deps import get_config, get_db, get_redis, get_storage, verify_token
+from api.routes.workers import merged_worker_responses
 
 router = APIRouter(prefix="/api", tags=["admin"])
 
 
+def _health_item(
+    status: str,
+    *,
+    required: bool,
+    detail: str | None = None,
+    recovery: str | None = None,
+    **data,
+) -> dict:
+    return {
+        "status": status,
+        "required": required,
+        "detail": detail,
+        "recovery": recovery,
+        **data,
+    }
+
+
+def _readiness_config(config: AppConfig) -> dict:
+    cfg = (config.pools or {}).get("readiness") or {}
+    pools = (config.pools or {}).get("pools") or {}
+    optional_cfg = list(cfg.get("optional_pools") or ["gpu"])
+    required = list(
+        cfg.get("required_pools")
+        or [name for name in pools if name not in optional_cfg]
+    )
+    optional = [name for name in optional_cfg if name not in required]
+
+    def _threshold(name: str, default: float) -> float:
+        try:
+            value = float(cfg.get(name, default))
+        except (TypeError, ValueError):
+            return default
+        return value if value > 0 else default
+
+    return {
+        "disk_min_free_gb": _threshold("disk_min_free_gb", 5),
+        "disk_min_free_pct": _threshold("disk_min_free_pct", 5),
+        "probe_ttl_sec": _threshold("probe_ttl_sec", 5),
+        "probe_timeout_sec": _threshold("probe_timeout_sec", 3),
+        "required_pools": required,
+        "optional_pools": optional,
+    }
+
+
+async def _singleflight_probe(
+    app,
+    key: str,
+    *,
+    ttl_sec: float,
+    timeout_sec: float,
+    probe,
+) -> dict:
+    """短 TTL 单飞探针.过期不回陈旧绿灯,失败也短暂缓存为红灯."""
+    cache = getattr(app.state, "readiness_probe_cache", None)
+    if cache is None:
+        cache = app.state.readiness_probe_cache = {}
+    inflight = getattr(app.state, "readiness_probe_inflight", None)
+    if inflight is None:
+        inflight = app.state.readiness_probe_inflight = {}
+
+    now = time.monotonic()
+    cached = cache.get(key)
+    if cached and cached[0] > now:
+        return cached[1]
+
+    task = inflight.get(key)
+    if task is None or task.done():
+        async def _run() -> dict:
+            try:
+                value = await asyncio.wait_for(probe(), timeout=timeout_sec)
+                result = {"ok": True, "value": value}
+            except asyncio.TimeoutError:
+                result = {"ok": False, "error_type": "TimeoutError"}
+            except Exception as e:  # noqa: BLE001
+                result = {"ok": False, "error_type": type(e).__name__}
+            cache[key] = (time.monotonic() + ttl_sec, result)
+            return result
+
+        task = asyncio.create_task(_run())
+        inflight[key] = task
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if task.done() and inflight.get(key) is task:
+            inflight.pop(key, None)
+
+
+def _probe_data_path(path: Path) -> None:
+    """真实创建并 fsync 一个临时文件,验证挂载不是只读或假可写."""
+    fd, name = tempfile.mkstemp(prefix=".flori-readiness-", dir=path)
+    try:
+        os.write(fd, b"ok")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+        Path(name).unlink(missing_ok=True)
+
+
+def _probe_sqlite_write(path: Path) -> dict:
+    """在独立连接执行真实 WAL 写事务并回滚,不留下表或业务数据."""
+    table = f"__flori_readiness_{uuid.uuid4().hex}"
+    connection = sqlite3.connect(
+        f"file:{path}?mode=rw",
+        uri=True,
+        timeout=1,
+        isolation_level=None,
+    )
+    try:
+        connection.execute("PRAGMA busy_timeout = 1000")
+        journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+        if journal_mode != "wal":
+            raise RuntimeError(f"unexpected journal mode: {journal_mode}")
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(f'CREATE TABLE "{table}" (value INTEGER NOT NULL)')
+        connection.execute(f'INSERT INTO "{table}" VALUES (1)')
+        connection.execute("ROLLBACK")
+        leftover = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,),
+        ).fetchone()
+        if leftover is not None:
+            raise RuntimeError("readiness probe table was not rolled back")
+        return {"journal_mode": journal_mode}
+    finally:
+        if connection.in_transaction:
+            connection.rollback()
+        connection.close()
+
+
+async def _probe_components(app, online_window: int, stale_window: int) -> list[dict]:
+    redis = app.state.redis
+    storage = getattr(app.state, "storage", None)
+    readiness_cfg = _readiness_config(app.state.config)
+
+    async def _safe(coro, name, kind):
+        try:
+            return await coro
+        except Exception as e:  # noqa: BLE001
+            logger.warning("component_probe_failed", component=name, error_type=type(e).__name__)
+            return {
+                "name": name, "kind": kind, "status": "unknown", "version": None,
+                "last_heartbeat": None, "uptime_sec": None,
+                "detail": f"探测异常: {type(e).__name__}", "extra": {},
+            }
+
+    return list(await asyncio.gather(
+        _safe(_probe_api(app, online_window), "api", "api"),
+        _safe(_probe_scheduler(redis, online_window, stale_window), "scheduler", "scheduler"),
+        _safe(_probe_redis(redis), "redis", "redis"),
+        _safe(
+            _probe_minio(
+                app,
+                storage,
+                readiness_cfg["probe_ttl_sec"],
+                readiness_cfg["probe_timeout_sec"],
+            ),
+            "minio",
+            "minio",
+        ),
+    ))
+
+
+async def build_readiness(app, components: list[dict] | None = None) -> dict:
+    """检查能否安全接收新任务,返回统一 readiness 模型.
+
+    探针只暴露状态、容量和恢复建议,不返回连接串、路径外的宿主信息或凭证.
+    """
+    db = app.state.db
+    config: AppConfig = app.state.config
+    cfg = _readiness_config(config)
+    online_window, stale_window = _windows(config)
+    if components is None:
+        components = await _probe_components(app, online_window, stale_window)
+    by_kind = {item["kind"]: item for item in components}
+    checks: dict[str, dict] = {}
+
+    redis_comp = by_kind.get("redis") or {}
+    redis_status = redis_comp.get("status")
+    checks["redis"] = _health_item(
+        (
+            HEALTH_OK if redis_status == "up"
+            else HEALTH_DEGRADED if redis_status == "degraded"
+            else HEALTH_ERROR
+        ),
+        required=True,
+        detail=redis_comp.get("detail"),
+        recovery="检查 Redis 容器、网络和 REDIS_URL 后重试",
+    )
+
+    async def _db_write_probe():
+        return await asyncio.to_thread(_probe_sqlite_write, Path(config.db_path))
+
+    db_probe = await _singleflight_probe(
+        app,
+        "sqlite-write",
+        ttl_sec=cfg["probe_ttl_sec"],
+        timeout_sec=cfg["probe_timeout_sec"],
+        probe=_db_write_probe,
+    )
+    if db_probe["ok"]:
+        checks["db"] = _health_item(
+            HEALTH_OK,
+            required=True,
+            journal_mode=db_probe["value"]["journal_mode"],
+        )
+    else:
+        logger.warning("health_db_error", error_type=db_probe["error_type"])
+        checks["db"] = _health_item(
+            HEALTH_ERROR,
+            required=True,
+            detail=f"数据库写事务不可用: {db_probe['error_type']}",
+            recovery="检查 SQLite 文件、WAL、锁和挂载权限",
+        )
+
+    data_path = Path(config.data_dir)
+    try:
+        disk = await asyncio.to_thread(shutil.disk_usage, data_path)
+        free_gb = disk.free / (1024**3)
+        free_pct = disk.free / disk.total * 100 if disk.total else 0.0
+        below = free_gb < cfg["disk_min_free_gb"] or free_pct < cfg["disk_min_free_pct"]
+        checks["disk"] = _health_item(
+            HEALTH_ERROR if below else HEALTH_OK,
+            required=True,
+            detail=(
+                f"数据盘空间不足: {free_gb:.1f}GB/{free_pct:.1f}% 可用"
+                if below else None
+            ),
+            recovery="释放日志或产物空间,再确认数据盘挂载正常",
+            free_gb=round(free_gb, 1),
+            free_pct=round(free_pct, 1),
+            min_free_gb=cfg["disk_min_free_gb"],
+            min_free_pct=cfg["disk_min_free_pct"],
+        )
+    except (FileNotFoundError, OSError) as e:
+        checks["disk"] = _health_item(
+            HEALTH_ERROR, required=True, detail=f"数据盘不可用: {type(e).__name__}",
+            recovery="恢复 DATA_DIR 挂载并确认目录存在",
+            free_gb=-1,
+            free_pct=-1,
+            min_free_gb=cfg["disk_min_free_gb"],
+            min_free_pct=cfg["disk_min_free_pct"],
+        )
+
+    try:
+        await asyncio.to_thread(_probe_data_path, data_path)
+        checks["data_writable"] = _health_item(HEALTH_OK, required=True)
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        checks["data_writable"] = _health_item(
+            HEALTH_ERROR, required=True, detail=f"数据盘不可写: {type(e).__name__}",
+            recovery="把 DATA_DIR 恢复为可写挂载并检查宿主权限",
+        )
+
+    sched = by_kind.get("scheduler") or {}
+    scheduler_status = sched.get("status")
+    checks["scheduler"] = _health_item(
+        (
+            HEALTH_OK if scheduler_status == "up"
+            else HEALTH_DEGRADED if scheduler_status == "degraded"
+            else HEALTH_ERROR
+        ),
+        required=True,
+        detail=sched.get("detail") or (
+            None if scheduler_status == "up" else f"调度器状态为 {scheduler_status or 'unknown'}"
+        ),
+        recovery="启动或重启 scheduler,并确认心跳在在线窗口内",
+    )
+
+    minio = by_kind.get("minio") or {}
+    storage_mode = (minio.get("extra") or {}).get("mode")
+    minio_status = minio.get("status")
+    storage_status = (
+        HEALTH_OK if storage_mode == "local" or minio_status == "up"
+        else HEALTH_DEGRADED if minio_status == "degraded"
+        else HEALTH_ERROR
+    )
+    checks["storage"] = _health_item(
+        storage_status,
+        required=True,
+        detail=None if storage_status == HEALTH_OK else (minio.get("detail") or "对象存储不可用"),
+        recovery="检查对象存储服务、bucket 和中心存储配置",
+        mode=storage_mode or "unknown",
+    )
+
+    workers_error: str | None = None
+    try:
+        workers = await asyncio.wait_for(
+            merged_worker_responses(db, app.state.redis, config, include_traffic=False),
+            timeout=cfg["probe_timeout_sec"],
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("health_workers_error", error_type=type(e).__name__)
+        workers = []
+        workers_error = type(e).__name__
+    online_by_pool: dict[str, int] = {}
+    paused_by_pool: dict[str, int] = {}
+    for worker in workers:
+        pools = set(worker.pools or ([worker.type] if worker.type else []))
+        if str(worker.status).startswith("online"):
+            for pool in pools:
+                online_by_pool[pool] = online_by_pool.get(pool, 0) + 1
+        elif worker.status == "paused":
+            for pool in pools:
+                paused_by_pool[pool] = paused_by_pool.get(pool, 0) + 1
+    total_online = sum(1 for worker in workers if str(worker.status).startswith("online"))
+    total_paused = sum(1 for worker in workers if worker.status == "paused")
+    checks["workers"] = _health_item(
+        HEALTH_ERROR if workers_error else HEALTH_OK,
+        required=True,
+        detail=(f"Worker 状态合并失败: {workers_error}" if workers_error else None),
+        recovery="检查 SQLite、Redis 和 Worker 心跳后重试",
+        total=len(workers),
+        online=total_online,
+        paused=total_paused,
+    )
+    for pool in cfg["required_pools"]:
+        count = online_by_pool.get(pool, 0)
+        paused = paused_by_pool.get(pool, 0)
+        if workers_error:
+            detail = f"必要资源池 {pool} 无法取得 Worker 状态"
+        elif paused:
+            detail = f"必要资源池 {pool} 的 Worker 全部暂停"
+        else:
+            detail = f"必要资源池 {pool} 没有在线 Worker"
+        checks[f"pool:{pool}"] = _health_item(
+            HEALTH_OK if count else HEALTH_ERROR,
+            required=True,
+            detail=None if count else detail,
+            recovery=f"启动至少一个声明 --pools {pool} 的 Worker",
+            online=count,
+            paused=paused,
+        )
+    for pool in cfg["optional_pools"]:
+        count = online_by_pool.get(pool, 0)
+        paused = paused_by_pool.get(pool, 0)
+        detail = (
+            f"可选资源池 {pool} 无法取得 Worker 状态" if workers_error
+            else f"可选资源池 {pool} 的 Worker 全部暂停" if paused
+            else f"可选资源池 {pool} 当前离线"
+        )
+        checks[f"pool:{pool}"] = _health_item(
+            HEALTH_OK if count else HEALTH_DEGRADED,
+            required=False,
+            detail=None if count else detail,
+            recovery=f"需要该能力时启动声明 --pools {pool} 的 Worker",
+            online=count,
+            paused=paused,
+        )
+
+    return {"version": FLORI_VERSION, **summarize_readiness(checks)}
+
+
+@router.get("/health/live")
+async def health_live():
+    """进程存活探针.依赖故障不改变 liveness,避免编排器重启健康 API 进程."""
+    return {"status": "alive", "alive": True, "version": FLORI_VERSION}
+
+
+@router.get("/health/ready")
+async def health_ready(request: Request):
+    """安全接单探针.阻断项存在时返回 503,供反代和发布门使用."""
+    state = await build_readiness(request.app)
+    return state if state["ready"] else JSONResponse(status_code=503, content=state)
+
+
 @router.get("/health")
-async def health(request: Request, db: Database = Depends(get_db), redis: RedisClient = Depends(get_redis)):
-    # 刻意免鉴权(同 /metrics):供存活探针/编排健康检查;仅暴露 up/disk/worker 计数,无敏感信息。
-    # 与 WS/REST 的 verify_token 有意区分. 若需收紧,在反代/网络层限制本路由可达性.
-    checks = {}
-    try:
-        await redis.ping()
-        checks["redis"] = "ok"
-    except Exception:
-        logger.exception("health_redis_error")
-        checks["redis"] = "error"
-
-    try:
-        await asyncio.to_thread(db.list_jobs, limit=1)
-        checks["db"] = "ok"
-    except Exception:
-        logger.exception("health_db_error")
-        checks["db"] = "error"
-
-    config: AppConfig = request.app.state.config
-    data_path = str(config.data_dir) if hasattr(config, "data_dir") else "/data"
-    try:
-        disk = shutil.disk_usage(data_path)
-        checks["disk_free_gb"] = round(disk.free / (1024**3), 1)
-    except (FileNotFoundError, OSError):
-        checks["disk_free_gb"] = -1
-
-    workers = await asyncio.to_thread(db.list_workers)
-    checks["workers_online"] = sum(1 for w in workers if w.status.startswith("online"))
-
-    status = "healthy" if checks["redis"] == "ok" and checks["db"] == "ok" else "unhealthy"
-    return {"status": status, "checks": checks}
+async def health(request: Request):
+    """兼容健康端点.返回统一 readiness 模型,但保持 HTTP 200 供旧监控读取."""
+    return await build_readiness(request.app)
 
 
 @router.get("/metrics", response_class=PlainTextResponse)
-async def metrics(request: Request, db: Database = Depends(get_db), redis: RedisClient = Depends(get_redis)):
+async def metrics(request: Request, db: Database = Depends(get_db)):
     """Prometheus 文本指标(免鉴权,同 /health;只暴露计数/容量,无敏感信息)。
     个人工具不内置时序库,此端点供外部 Prometheus 抓取。"""
-    redis_up = 1
+    readiness = await build_readiness(request.app)
+    checks = readiness["checks"]
+    redis_up = int(checks["redis"]["status"] == HEALTH_OK)
+    db_up = int(checks["db"]["status"] == HEALTH_OK)
+    disk_free = checks["disk"].get("free_gb", -1)
     try:
-        await redis.ping()
-    except Exception:
-        redis_up = 0
-    db_up = 1
-    try:
-        await asyncio.to_thread(db.list_jobs, limit=1)
-    except Exception:
-        db_up = 0
-
-    config: AppConfig = request.app.state.config
-    data_path = str(config.data_dir) if hasattr(config, "data_dir") else "/data"
-    try:
-        disk_free = round(shutil.disk_usage(data_path).free / (1024**3), 2)
-    except (FileNotFoundError, OSError):
-        disk_free = -1
-
-    workers = await asyncio.to_thread(db.list_workers)
+        workers = await merged_worker_responses(
+            db, request.app.state.redis, request.app.state.config, include_traffic=False,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("metrics_workers_error", error_type=type(e).__name__)
+        workers = []
     online = sum(1 for w in workers if w.status.startswith("online"))
     lines = [
         "# TYPE flori_up gauge", "flori_up 1",
+        "# TYPE flori_ready gauge", f"flori_ready {int(readiness['ready'])}",
+        "# TYPE flori_degraded gauge", f"flori_degraded {int(readiness['degraded'])}",
         "# TYPE flori_redis_up gauge", f"flori_redis_up {redis_up}",
         "# TYPE flori_db_up gauge", f"flori_db_up {db_up}",
         "# TYPE flori_disk_free_gb gauge", f"flori_disk_free_gb {disk_free}",
@@ -116,16 +457,18 @@ def _windows(config) -> tuple[int, int]:
 async def build_live_status(db, redis, config) -> dict:
     """实时片段(workers/pools/jobs/disk):便宜、无组件探测。供 WS /api/ws/global 每 2s 推 +
     被 build_full_status 复用。disk 补 total_gb/used_pct(zero-cost,disk_usage 本就返回 total)。"""
-    workers = await asyncio.to_thread(db.list_workers)
+    workers = await merged_worker_responses(db, redis, config, include_traffic=False)
     worker_summary = {}
     for w in workers:
-        wtype = w.type
-        if wtype not in worker_summary:
-            worker_summary[wtype] = {"online": 0, "busy": 0}
-        if w.status.startswith("online") or w.status == "paused":
-            worker_summary[wtype]["online"] += 1
-        if w.status == "online-busy":
-            worker_summary[wtype]["busy"] += 1
+        for pool in set(w.pools or ([w.type] if w.type else [])):
+            if pool not in worker_summary:
+                worker_summary[pool] = {"online": 0, "busy": 0, "paused": 0}
+            if w.status.startswith("online"):
+                worker_summary[pool]["online"] += 1
+            if w.status == "online-busy":
+                worker_summary[pool]["busy"] += 1
+            if w.status == "paused":
+                worker_summary[pool]["paused"] += 1
 
     pools_cfg = config.pools.get("pools", {})
     overrides = await redis.get_all_pool_limit_overrides()
@@ -204,7 +547,7 @@ async def _probe_scheduler(redis, online_window: int, stale_window: int) -> dict
     try:
         hb = await asyncio.wait_for(redis.get_component_heartbeat("scheduler"), timeout=2)
     except (asyncio.TimeoutError, Exception) as e:  # noqa: BLE001
-        comp["detail"] = f"读心跳失败: {str(e)[:120]}"
+        comp["detail"] = f"读心跳失败: {type(e).__name__}"
         return comp
     if not hb:
         comp["detail"] = "调度器从未上报心跳(未启动/老版本)"
@@ -247,7 +590,7 @@ async def _probe_redis(redis) -> dict:
         comp.update(status="down", detail="redis 探活超时(2s)")
         return comp
     except Exception as e:  # noqa: BLE001
-        comp.update(status="unknown", detail=f"redis 探活失败: {str(e)[:120]}")
+        comp.update(status="unknown", detail=f"redis 探活失败: {type(e).__name__}")
         return comp
     now = datetime.now(timezone.utc)
     ping_ms = info.get("ping_ms")
@@ -276,8 +619,8 @@ async def _probe_redis(redis) -> dict:
     return comp
 
 
-async def _probe_minio(storage) -> dict:
-    """MinIO 组件:RemoteStorage 才探活,本地盘 mode=local 保持 unknown 不标红. 超时或异常为 down。"""
+async def _probe_minio(app, storage, ttl_sec: float, timeout_sec: float) -> dict:
+    """MinIO 组件:远端用短 TTL 单飞 put/delete canary,本地盘不标红."""
     comp = {
         "name": "minio", "kind": "minio", "status": "unknown", "version": None,
         "last_heartbeat": None, "uptime_sec": None, "detail": None, "extra": {},
@@ -287,14 +630,23 @@ async def _probe_minio(storage) -> dict:
         h = await storage.health() if storage is not None else {"mode": "local", "detail": "本地盘"}
         comp.update(detail=h.get("detail"), extra={"mode": h.get("mode", "local")})
         return comp
-    try:
-        h = await asyncio.wait_for(storage.health(), timeout=3)
-    except asyncio.TimeoutError:
-        comp.update(status="down", detail="对象存储探活超时(3s)", extra={"mode": "remote"})
+    result = await _singleflight_probe(
+        app,
+        "minio-write-delete",
+        ttl_sec=ttl_sec,
+        timeout_sec=timeout_sec,
+        probe=lambda: storage.readiness_probe(timeout_sec=timeout_sec),
+    )
+    if not result["ok"]:
+        error_type = result["error_type"]
+        detail = (
+            f"对象存储写删探活超时({timeout_sec:g}s)"
+            if error_type == "TimeoutError"
+            else f"对象存储写删探活失败: {error_type}"
+        )
+        comp.update(status="down", detail=detail, extra={"mode": "remote"})
         return comp
-    except Exception as e:  # noqa: BLE001
-        comp.update(status="down", detail=f"对象存储不可达: {str(e)[:120]}", extra={"mode": "remote"})
-        return comp
+    h = result["value"]
     comp.update({
         "status": h.get("status", "unknown"),
         "version": h.get("version"),
@@ -314,27 +666,21 @@ async def build_full_status(app) -> dict:
     db = app.state.db
     redis = app.state.redis
     config = app.state.config
-    storage = getattr(app.state, "storage", None)
     online_window, stale_window = _windows(config)
 
-    live = await build_live_status(db, redis, config)
-
-    # 组件探测各自隔离:gather(return_exceptions)兜底,任一抛出退化为 unknown 占位(不影响其余)。
-    async def _safe(coro, name, kind):
-        try:
-            return await coro
-        except Exception as e:  # noqa: BLE001
-            logger.warning("component_probe_failed", component=name, error=str(e)[:200])
-            return {"name": name, "kind": kind, "status": "unknown", "version": None,
-                    "last_heartbeat": None, "uptime_sec": None,
-                    "detail": f"探测异常: {str(e)[:120]}", "extra": {}}
-
-    components = await asyncio.gather(
-        _safe(_probe_api(app, online_window), "api", "api"),
-        _safe(_probe_scheduler(redis, online_window, stale_window), "scheduler", "scheduler"),
-        _safe(_probe_redis(redis), "redis", "redis"),
-        _safe(_probe_minio(storage), "minio", "minio"),
-    )
+    try:
+        live = await build_live_status(db, redis, config)
+    except Exception as e:  # noqa: BLE001
+        # 状态页必须在依赖故障时仍能返回统一健康原因,不能让实时统计拖成 500.
+        logger.warning("live_status_failed", error_type=type(e).__name__)
+        live = {
+            "workers": {},
+            "pools": {},
+            "jobs": {"total": -1, "done": -1, "processing": -1, "failed": -1, "pending": -1},
+            "disk": {"used_gb": -1, "available_gb": -1, "total_gb": -1, "used_pct": -1},
+        }
+    components = await _probe_components(app, online_window, stale_window)
+    readiness = await build_readiness(app, components)
 
     # MinIO 容量(对象数/总字节):读后台缓存,绝不在此同步扫. 有缓存才填,无则不填.
     cap = getattr(getattr(app.state, "minio_cap", None), "value", None)
@@ -378,6 +724,7 @@ async def build_full_status(app) -> dict:
     return {
         "version": FLORI_VERSION,
         "components": list(components),
+        "health": readiness,
         **live,
         "throughput_1h": throughput,
         "traffic": traffic,

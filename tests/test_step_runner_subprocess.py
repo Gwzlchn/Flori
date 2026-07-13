@@ -17,6 +17,7 @@ from worker.step_runner import (
     DockerStepRunner,
     StepContext,
     SubprocessStepRunner,
+    _BoundedLogWriter,
     create_step_runner,
 )
 
@@ -148,6 +149,92 @@ class TestSubprocessSuccess:
         assert early_seen.is_set(), "log was not visible mid-run (not streaming)"
         full = log_path.read_text()
         assert "early_marker" in full and "late_marker" in full
+
+    @pytest.mark.asyncio
+    async def test_log_is_bounded_and_keeps_tail(self, with_pythonpath, monkeypatch):
+        root = with_pythonpath
+        work_dir = root / "j_bounded"
+        work_dir.mkdir()
+        monkeypatch.setenv("FLORI_STEP_LOG_MAX_BYTES", "2048")
+        module = _write_stub(
+            root, "_stub_loud", "loud",
+            "print('old-marker-' + 'x' * 4096)\n"
+            "print('tail-marker')\n",
+        )
+
+        runner = SubprocessStepRunner()
+        rc, _ = await runner.run_step(_ctx(work_dir, module), _noop_progress, _noop_tick)
+
+        log_path = work_dir / "logs" / "A.log"
+        assert rc == 0
+        assert log_path.stat().st_size <= 2048
+        text = log_path.read_text()
+        assert "older step log truncated" in text
+        assert "tail-marker" in text
+
+
+class TestBoundedLogWriter:
+    def test_large_write_is_capped_and_keeps_newest_tail(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FLORI_STEP_LOG_MAX_BYTES", "1024")
+        path = tmp_path / "step.log"
+        writer = _BoundedLogWriter(path)
+        writer.write(b"old-marker\n" + b"x" * 4096 + b"\nnewest-tail\n")
+        writer.close()
+
+        assert path.stat().st_size <= 1024
+        text = path.read_text(errors="replace")
+        assert "older step log truncated" in text
+        assert "newest-tail" in text
+        assert "old-marker" not in text
+
+    def test_thousands_of_small_writes_compact_amortized(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FLORI_STEP_LOG_MAX_BYTES", "1024")
+        path = tmp_path / "step.log"
+        writer = _BoundedLogWriter(path)
+        compact_count = 0
+        original = writer._compact
+
+        def counted_compact(incoming=b""):
+            nonlocal compact_count
+            compact_count += 1
+            original(incoming)
+
+        writer._compact = counted_compact
+        for number in range(5000):
+            writer.write(f"{number:04d}\n")
+            assert path.stat().st_size <= 1024
+        writer.close()
+
+        assert compact_count < 100
+        assert path.stat().st_size <= 1024
+        assert "4999" in path.read_text(errors="replace")
+
+    def test_oversized_chunk_never_hits_real_path_above_cap(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FLORI_STEP_LOG_MAX_BYTES", "1024")
+        path = tmp_path / "step.log"
+        writer = _BoundedLogWriter(path)
+        inner = writer._file
+        observed_sizes: list[int] = []
+
+        class ObservedFile:
+            def write(self, data):
+                result = inner.write(data)
+                inner.flush()
+                observed_sizes.append(path.stat().st_size)
+                assert observed_sizes[-1] <= 1024
+                return result
+
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+        writer._file = ObservedFile()
+        writer.write(b"x" * 8192 + b"latest-tail")
+        writer.close()
+
+        assert path.stat().st_size <= 1024
+        assert "latest-tail" in path.read_text(errors="replace")
+        # 超大块走临时低水位文件原子替换,不得先写进真实路径.
+        assert observed_sizes == []
 
 
 # 失败路径

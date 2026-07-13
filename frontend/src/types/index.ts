@@ -251,15 +251,39 @@ export interface SystemComponent {
 }
 
 export interface PoolStat    { capacity: number; used: number; queue: number }
-export interface WorkerCount { online: number; busy: number }
+export interface WorkerCount { online: number; busy: number; paused?: number }
 export interface JobCounts   { total: number; done: number; processing: number; failed: number; pending: number }
 export interface DiskInfo    { used_gb: number; available_gb: number; total_gb: number; used_pct: number }
 export interface Throughput  { done: number; failed: number }
+export type ReadinessStatus = 'ready' | 'degraded' | 'not_ready'
+export type HealthCheckStatus = 'ok' | 'degraded' | 'error'
+export interface HealthCheck {
+  status: HealthCheckStatus
+  required: boolean
+  detail: string | null
+  recovery: string | null
+  [key: string]: unknown
+}
+export interface ReadinessReason {
+  code: string
+  severity: 'blocking' | 'degraded'
+  message: string
+  recovery: string | null
+}
+export interface ReadinessState {
+  version: string
+  status: ReadinessStatus
+  ready: boolean
+  degraded: boolean
+  checks: Record<string, HealthCheck>
+  reasons: ReadinessReason[]
+}
 
 // GET /api/status 完整形状(进页 1 次 + 每 15s 轮询拿全量)。
 export interface FullStatus {
   version: string
   components: SystemComponent[]
+  health: ReadinessState
   workers: Record<string, WorkerCount>
   pools: Record<string, PoolStat>
   jobs: JobCounts

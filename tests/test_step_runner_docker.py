@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 
@@ -82,6 +84,12 @@ class _FakeDeviceRequest:
         )
 
 
+class _FakeLogConfig:
+    def __init__(self, type=None, config=None):
+        self.type = type
+        self.config = config
+
+
 class _FakeAPIError(Exception):
     pass
 
@@ -94,6 +102,7 @@ def fake_docker(monkeypatch):
     errors_mod = types.ModuleType("docker.errors")
 
     types_mod.DeviceRequest = _FakeDeviceRequest
+    types_mod.LogConfig = _FakeLogConfig
     errors_mod.APIError = _FakeAPIError
     docker_mod.types = types_mod
     docker_mod.errors = errors_mod
@@ -165,6 +174,10 @@ class TestDockerSuccess:
             "flori.job": "j1", "flori.step": "A", "flori.worker": "w1",
         }
         assert kw["environment"] == {"STEP_EXEC_ID": "e1", "PYTHONPATH": "/app"}
+        assert kw["log_config"].type == "local"
+        assert kw["log_config"].config == {
+            "max-size": "10m", "max-file": "3", "compress": "true",
+        }
         # cpu 池离线
         assert kw["network_mode"] == "none"
         # --step-config 走文件,不进 Cmd 之外的 env,杜绝 docker inspect 泄漏
@@ -349,6 +362,188 @@ class TestDockerCleanup:
         # 超时标记应追加到日志
         log = (work_dir / "logs" / "A.log").read_text()
         assert "--- TIMEOUT after 1s ---" in log
+
+    @pytest.mark.asyncio
+    async def test_timeout_drains_log_tail_before_marker_and_remove(
+        self, fake_docker, tmp_path,
+    ):
+        work_dir = tmp_path / "j1"
+        work_dir.mkdir()
+        events: list[str] = []
+
+        class _TailContainer(_FakeContainer):
+            def kill(self):
+                events.append("kill")
+                super().kill()
+
+            def logs(self, stream=False, follow=False):
+                events.append("logs-start")
+                yield b"before-timeout\n"
+                while not self.killed:
+                    import time
+                    time.sleep(0.01)
+                yield b"tail-after-kill\n"
+                events.append("logs-eof")
+
+            def remove(self, force=False):
+                events.append("remove")
+                super().remove(force=force)
+
+        container = _TailContainer(status_code=0, wait_delay=0.2)
+        fake_docker["client"] = _FakeClient(container)
+        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+
+        with pytest.raises(asyncio.TimeoutError):
+            await runner.run_step(
+                _ctx(work_dir, timeout_sec=0.05), _noop_progress, _noop_tick,
+            )
+
+        text = (work_dir / "logs" / "A.log").read_text()
+        assert "tail-after-kill\n\n--- TIMEOUT after 0.05s ---" in text
+        assert events.index("logs-eof") < events.index("remove")
+
+    @pytest.mark.asyncio
+    async def test_stuck_wait_has_bounded_cleanup(
+        self, fake_docker, tmp_path, monkeypatch,
+    ):
+        work_dir = tmp_path / "j1"
+        work_dir.mkdir()
+        release = threading.Event()
+
+        class _StuckWaitContainer(_FakeContainer):
+            def wait(self):
+                release.wait(10)
+                return {"StatusCode": 0}
+
+        container = _StuckWaitContainer()
+        fake_docker["client"] = _FakeClient(container)
+        monkeypatch.setenv("FLORI_DOCKER_CONTROL_TIMEOUT_SEC", "0.05")
+        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        started = time.monotonic()
+        try:
+            with pytest.raises(asyncio.TimeoutError):
+                await runner.run_step(
+                    _ctx(work_dir, timeout_sec=0.02), _noop_progress, _noop_tick,
+                )
+        finally:
+            release.set()
+            await asyncio.sleep(0.05)
+
+        assert time.monotonic() - started < 0.5
+        assert container.killed and container.removed
+
+    @pytest.mark.asyncio
+    async def test_kill_failure_preserves_timeout_and_still_removes(
+        self, fake_docker, tmp_path, monkeypatch,
+    ):
+        work_dir = tmp_path / "j1"
+        work_dir.mkdir()
+
+        class _KillFailsContainer(_FakeContainer):
+            def kill(self):
+                raise _FakeAPIError("daemon disconnected")
+
+        container = _KillFailsContainer(wait_delay=0.2)
+        fake_docker["client"] = _FakeClient(container)
+        monkeypatch.setenv("FLORI_DOCKER_CONTROL_TIMEOUT_SEC", "0.05")
+        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        started = time.monotonic()
+
+        with pytest.raises(asyncio.TimeoutError):
+            await runner.run_step(
+                _ctx(work_dir, timeout_sec=0.02), _noop_progress, _noop_tick,
+            )
+
+        assert time.monotonic() - started < 0.5
+        assert container.removed
+        assert "--- TIMEOUT after 0.02s ---" in (
+            work_dir / "logs" / "A.log"
+        ).read_text()
+
+    @pytest.mark.asyncio
+    async def test_stuck_log_stream_is_closed_with_bounded_join(
+        self, fake_docker, tmp_path, monkeypatch,
+    ):
+        work_dir = tmp_path / "j1"
+        work_dir.mkdir()
+
+        class _ClosingStream:
+            def __init__(self):
+                self.closed = threading.Event()
+                self.first = True
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                if self.first:
+                    self.first = False
+                    return b"visible-before-stall\n"
+                self.closed.wait(10)
+                raise StopIteration
+
+            def close(self):
+                self.closed.set()
+
+        stream = _ClosingStream()
+
+        stream_obj = stream
+        container = _FakeContainer(status_code=0)
+        container.logs = lambda stream=False, follow=False: stream_obj
+        fake_docker["client"] = _FakeClient(container)
+        monkeypatch.setenv("FLORI_DOCKER_CONTROL_TIMEOUT_SEC", "0.05")
+        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        started = time.monotonic()
+
+        returncode, tail = await runner.run_step(
+            _ctx(work_dir), _noop_progress, _noop_tick,
+        )
+
+        assert time.monotonic() - started < 0.5
+        assert returncode == 0 and "visible-before-stall" in tail
+        assert stream.closed.is_set()
+        assert container.removed
+
+    @pytest.mark.asyncio
+    async def test_unclosable_log_stream_is_released_by_force_remove(
+        self, fake_docker, tmp_path, monkeypatch,
+    ):
+        work_dir = tmp_path / "j1"
+        work_dir.mkdir()
+        released = threading.Event()
+
+        class _UnclosableStream:
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                released.wait(10)
+                raise StopIteration
+
+            def close(self):
+                pass
+
+        class _RemoveReleasesContainer(_FakeContainer):
+            def logs(self, stream=False, follow=False):
+                return _UnclosableStream()
+
+            def remove(self, force=False):
+                released.set()
+                super().remove(force=force)
+
+        container = _RemoveReleasesContainer(status_code=0)
+        fake_docker["client"] = _FakeClient(container)
+        monkeypatch.setenv("FLORI_DOCKER_CONTROL_TIMEOUT_SEC", "0.05")
+        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        started = time.monotonic()
+
+        returncode, _tail = await runner.run_step(
+            _ctx(work_dir), _noop_progress, _noop_tick,
+        )
+
+        assert returncode == 0
+        assert time.monotonic() - started < 0.5
+        assert released.is_set() and container.remove_calls == 1
 
 
 # 进度监控:on_tick 先于 progress 发布,10s 周期

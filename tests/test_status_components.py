@@ -12,7 +12,11 @@ from shared.status import (
     COMPONENT_DOWN,
     COMPONENT_UNKNOWN,
     COMPONENT_UP,
+    HEALTH_DEGRADED,
+    HEALTH_ERROR,
+    HEALTH_OK,
     compute_component_status,
+    summarize_readiness,
 )
 
 
@@ -45,6 +49,32 @@ class TestComputeComponentStatus:
         hb = NOW - timedelta(seconds=40)
         # 自定义窗口 online=60 → 40s 仍 up。
         assert compute_component_status(hb, NOW, online_window_sec=60) == COMPONENT_UP
+
+
+class TestSummarizeReadiness:
+    def test_required_error_blocks_readiness(self):
+        result = summarize_readiness({
+            "redis": {"status": HEALTH_ERROR, "required": True, "detail": "down"},
+            "pool:gpu": {"status": HEALTH_DEGRADED, "required": False, "detail": "offline"},
+        })
+        assert result["status"] == "not_ready"
+        assert result["ready"] is False
+        assert result["reasons"][0]["severity"] == "blocking"
+
+    def test_optional_error_only_degrades(self):
+        result = summarize_readiness({
+            "db": {"status": HEALTH_OK, "required": True},
+            "pool:gpu": {"status": HEALTH_ERROR, "required": False, "detail": "offline"},
+        })
+        assert result["status"] == "degraded"
+        assert result["ready"] is True
+        assert result["degraded"] is True
+
+    def test_all_ok_is_ready(self):
+        result = summarize_readiness({"db": {"status": HEALTH_OK, "required": True}})
+        assert result["status"] == "ready"
+        assert result["ready"] is True
+        assert result["reasons"] == []
 
 
 class TestSysload:

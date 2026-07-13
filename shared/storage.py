@@ -12,6 +12,7 @@ import asyncio
 import fnmatch
 import hashlib
 import hmac
+import io
 import json
 import os
 import shutil
@@ -345,6 +346,9 @@ class RemoteStorage:
         # pull 时记录每个 work_dir 的文件快照(relpath -> (size, mtime)),供 push 算增量。
         self._snapshots: dict[str, dict[str, tuple[int, float]]] = {}
         self._client_obj = None
+        self._readiness_client_obj = None
+        self._readiness_io_timeout_sec: float | None = None
+        self._readiness_http_client = None
 
     def _client(self):
         # 延迟连接:构造时不导入 minio、不连服务器(便于选型与单测),首次用到才建。
@@ -360,6 +364,39 @@ class RemoteStorage:
             self._tmp_root.mkdir(parents=True, exist_ok=True)
             self._client_obj = c
         return self._client_obj
+
+    def _readiness_client(self, timeout_sec: float):
+        """创建 SDK 层有界的专用客户端,不复用业务客户端的长 I/O 配置."""
+        # canary 包含 region + put + delete + 版本;单次 connect/read 取总预算五分之一,
+        # 使外层 asyncio 超时前底层线程通常已自行返回,避免黑洞网络累积残留线程.
+        io_timeout = max(0.1, min(0.75, timeout_sec / 5))
+        if (
+            self._readiness_client_obj is not None
+            and self._readiness_io_timeout_sec == io_timeout
+        ):
+            return self._readiness_client_obj
+
+        from minio import Minio
+        http_client = self._bounded_http_client(io_timeout)
+        self._readiness_client_obj = Minio(
+            self._endpoint,
+            access_key=self._access_key,
+            secret_key=self._secret_key,
+            secure=self._secure,
+            http_client=http_client,
+        )
+        self._readiness_io_timeout_sec = io_timeout
+        self._readiness_http_client = http_client
+        return self._readiness_client_obj
+
+    @staticmethod
+    def _bounded_http_client(timeout_sec: float):
+        from urllib3 import PoolManager, Retry, Timeout
+
+        return PoolManager(
+            timeout=Timeout(connect=timeout_sec, read=timeout_sec),
+            retries=Retry(total=0, connect=0, read=0, redirect=0, status=0),
+        )
 
     async def pull(self, job_id: str, step: str) -> Path:
         return await asyncio.to_thread(self._pull_sync, job_id)
@@ -655,6 +692,45 @@ class RemoteStorage:
         # 容量统计(对象数/总字节)MinIO 无聚合 API,全量 list 才能求和 → 不在探活里做。
         return await asyncio.to_thread(self._health_sync)
 
+    async def readiness_probe(self, timeout_sec: float = 3) -> dict:
+        """写入并删除短生命周期 canary,证明 bucket 不只是可读."""
+        return await asyncio.to_thread(self._readiness_probe_sync, timeout_sec)
+
+    def _readiness_probe_sync(self, timeout_sec: float) -> dict:
+        t0 = time.perf_counter()
+        client = self._readiness_client(timeout_sec)
+        payload = b"flori-readiness"
+        key = f".flori-readiness/{uuid.uuid4().hex}.canary"
+        uploaded = False
+        try:
+            client.put_object(
+                self._bucket,
+                key,
+                io.BytesIO(payload),
+                len(payload),
+                content_type="application/octet-stream",
+            )
+            uploaded = True
+            client.remove_object(self._bucket, key)
+            uploaded = False
+        finally:
+            # put 成功但 delete 失败时再次尽力清理,同时保留首次异常让 readiness
+            # fail-closed,避免静默堆积探针对象或把只写不可删误判为健康.
+            if uploaded:
+                try:
+                    client.remove_object(self._bucket, key)
+                except Exception:
+                    pass
+        probe_ms = round((time.perf_counter() - t0) * 1000, 1)
+        # 版本采集复用同一短 I/O 预算且失败只回 None,不把可写 bucket 误判 down.
+        # 首次成功后实例缓存版本,后续 canary 不再访问管理 API.
+        version = self._server_version_sync(timeout_sec=self._readiness_io_timeout_sec or 0.5)
+        return {
+            "status": "up", "mode": "remote", "version": version,
+            "bucket": self._bucket, "bucket_exists": True, "probe_ms": probe_ms,
+            "detail": None,
+        }
+
     def _health_sync(self) -> dict:
         t0 = time.perf_counter()
         exists = self._client().bucket_exists(self._bucket)
@@ -666,7 +742,7 @@ class RemoteStorage:
             "detail": None if exists else f"bucket {self._bucket} 不存在",
         }
 
-    def _server_version_sync(self) -> str | None:
+    def _server_version_sync(self, timeout_sec: float = 2) -> str | None:
         # 经 MinIO 管理 API(MinioAdmin.info)取服务端版本。版本近乎静态:首次成功即缓存到实例,
         # 后续 health 直接复用,避免每次新建 MinioAdmin/调 info() 的管理 API RTT 反复挤占
         # health 的 3s 探活预算,拖超时致 minio 误报 down。失败回 None 且不缓存,下次再试。
@@ -681,6 +757,7 @@ class RemoteStorage:
                 endpoint=self._endpoint,
                 credentials=StaticProvider(self._access_key, self._secret_key),
                 secure=self._secure,
+                http_client=self._bounded_http_client(timeout_sec),
             )
             info = json.loads(adm.info())
             self._server_version = _parse_minio_version(info)

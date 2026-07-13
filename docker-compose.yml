@@ -4,12 +4,13 @@ name: flori
 # 默认仅起后端;单机全栈再带前端:`docker compose --profile allinone up -d`。
 # 拆分部署时前端单独在公网入口机运行(边缘反代由各自部署维护)。
 # 容器统一命名 flori-*,单实例部署;要并行多实例请另起具名服务,见 .local 覆盖里的 worker 范式。
-# 日志轮转:json-file 默认无上限,长跑会撑爆宿主磁盘。统一锚点限单文件 10m × 3 份。
+# 日志轮转:local driver 自带压缩索引,统一限单文件 10m x 3 份,单容器最多约 30MB.
 x-logging: &default-logging
-  driver: json-file
+  driver: local
   options:
     max-size: "10m"
     max-file: "3"
+    compress: "true"
 
 # api/scheduler/worker 共用的基础 env(REDIS/DATA/CONFIG/MINIO),各 service 经 <<: *common-env
 # 合并 + 追加自身专属项,避免逐 service 复制。
@@ -27,6 +28,12 @@ x-common-env: &common-env
   NET_PROBE_CN: ${NET_PROBE_CN:-https://api.bilibili.com/x/web-interface/nav}
   NET_PROBE_GLOBAL: ${NET_PROBE_GLOBAL:-https://github.com}
   NET_ZONES: ${NET_ZONES:-}
+  FLORI_DISK_MIN_FREE_GB: ${FLORI_DISK_MIN_FREE_GB:-5}
+  FLORI_DISK_MIN_FREE_PCT: ${FLORI_DISK_MIN_FREE_PCT:-5}
+  FLORI_READINESS_PROBE_TTL_SEC: ${FLORI_READINESS_PROBE_TTL_SEC:-5}
+  FLORI_READINESS_PROBE_TIMEOUT_SEC: ${FLORI_READINESS_PROBE_TIMEOUT_SEC:-3}
+  FLORI_STEP_LOG_MAX_BYTES: ${FLORI_STEP_LOG_MAX_BYTES:-10485760}
+  FLORI_DOCKER_CONTROL_TIMEOUT_SEC: ${FLORI_DOCKER_CONTROL_TIMEOUT_SEC:-5}
 
 services:
   redis:
@@ -100,8 +107,8 @@ services:
       HTTPS_PROXY: ${HTTPS_PROXY:-}
     logging: *default-logging
     healthcheck:
-      # /openapi.json 始终免鉴权,能取到即进程在正常服务 HTTP(编排/watchtower 据此判活)。
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/openapi.json"]
+      # 编排只看 liveness.Redis/DB/Worker 故障由 readiness 报告,不触发 API 重启风暴.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health/live"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -229,6 +236,7 @@ services:
     container_name: flori-dozzle
     image: amir20/dozzle
     restart: unless-stopped
+    logging: *default-logging
     environment:
       - DOZZLE_REMOTE_AGENT=${DOZZLE_REMOTE_AGENT:-}
     volumes:
@@ -241,6 +249,7 @@ services:
     container_name: flori-frontend
     image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-frontend:${IMAGE_TAG:-latest}
     restart: unless-stopped
+    logging: *default-logging
     profiles: ["allinone"]
     ports:
       - "${FRONTEND_PORT:-8080}:80"
@@ -258,6 +267,7 @@ services:
     container_name: flori-minio
     image: minio/minio
     restart: unless-stopped
+    logging: *default-logging
     profiles: ["distributed"]
     command: server /data --console-address ":9001"
     environment:
@@ -273,6 +283,7 @@ services:
     container_name: flori-watchtower
     image: containrrr/watchtower
     restart: unless-stopped
+    logging: *default-logging
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     command: --label-enable --cleanup --interval 120

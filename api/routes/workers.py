@@ -130,18 +130,27 @@ def _status_from_redis_info(
     )
 
 
-@router.get("")
-async def list_workers(
-    db: Database = Depends(get_db),
-    redis: RedisClient = Depends(get_redis),
-    config: AppConfig = Depends(get_config),
-):
+async def merged_worker_responses(
+    db: Database,
+    redis: RedisClient,
+    config: AppConfig,
+    *,
+    include_traffic: bool = True,
+) -> list[WorkerResponse]:
+    """合并 SQLite 的累计资料与 Redis 的实时租约/心跳.
+
+    `/api/workers`、readiness 和状态页必须复用同一份判活结果,否则远程 Worker
+    只在 Redis 续约时会在管理页在线、健康门却仍按陈旧 DB 心跳误报离线.
+    """
     online_window, stale_window = _windows(config)
     workers = await asyncio.to_thread(db.list_workers, online_window, stale_window)
     by_id: dict[str, WorkerResponse] = {w.id: _to_response(w) for w in workers}
-    # 网关中转流量(产物代理 pull/push 字节,按 worker 归因);读两个 hash 一次,按 id 查填。
-    pull_by = (await redis.get_traffic("pull")).get("by_worker", {})
-    push_by = (await redis.get_traffic("push")).get("by_worker", {})
+    # readiness/live 不需要流量,跳过两个 Redis hash;管理页才读取并归因.
+    if include_traffic:
+        pull_by = (await redis.get_traffic("pull")).get("by_worker", {})
+        push_by = (await redis.get_traffic("push")).get("by_worker", {})
+    else:
+        pull_by, push_by = {}, {}
 
     def _traffic(wid: str) -> dict:
         return {"pull": pull_by.get(wid, 0), "push": push_by.get(wid, 0)}
@@ -201,6 +210,15 @@ async def list_workers(
             admin_note=None,
         )
     return list(by_id.values())
+
+
+@router.get("")
+async def list_workers(
+    db: Database = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+    config: AppConfig = Depends(get_config),
+):
+    return await merged_worker_responses(db, redis, config)
 
 
 @router.post("/registration-token")

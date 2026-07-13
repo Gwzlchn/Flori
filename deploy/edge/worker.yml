@@ -8,6 +8,13 @@
 # 注册成功后 worker.id 与 worker.token 写入 /home/worker。后续重启、Watchtower recreate
 # 都用 worker.token resume,不再依赖 flw- token。
 
+x-logging: &default-logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+    compress: "true"
+
 x-worker-env: &worker-env
   HOME: /home/worker
   CONFIG_DIR: /app/configs
@@ -16,12 +23,15 @@ x-worker-env: &worker-env
   WORKER_REGISTRATION_TOKEN: ${WORKER_REGISTRATION_TOKEN:?WORKER_REGISTRATION_TOKEN is required}
   WORKER_ID_FILE: /home/worker/worker.id
   WORKER_TOKEN_FILE: /home/worker/worker.token
+  FLORI_STEP_LOG_MAX_BYTES: ${FLORI_STEP_LOG_MAX_BYTES:-10485760}
+  FLORI_DOCKER_CONTROL_TIMEOUT_SEC: ${FLORI_DOCKER_CONTROL_TIMEOUT_SEC:-5}
 
 services:
   worker-cpu:
     image: ghcr.io/${IMAGE_OWNER:?IMAGE_OWNER is required}/flori-worker:${IMAGE_TAG:-latest}
     container_name: flori-worker-cpu
     restart: unless-stopped
+    logging: *default-logging
     command: python -m worker.main --pools cpu
     environment:
       <<: *worker-env
@@ -39,6 +49,7 @@ services:
     image: ghcr.io/${IMAGE_OWNER:?IMAGE_OWNER is required}/flori-worker:${IMAGE_TAG:-latest}
     container_name: flori-worker-ai
     restart: unless-stopped
+    logging: *default-logging
     command: python -m worker.main --pools ai
     environment:
       <<: *worker-env
@@ -55,6 +66,7 @@ services:
     image: ghcr.io/containrrr/watchtower:latest
     container_name: flori-worker-watchtower
     restart: unless-stopped
+    logging: *default-logging
     profiles:
       - watchtower
     command: --label-enable --cleanup --interval ${WATCHTOWER_INTERVAL_SEC:-240}

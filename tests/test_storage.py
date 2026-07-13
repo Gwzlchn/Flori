@@ -1,6 +1,9 @@
 """shared/storage.py 的单测。"""
 
 import os
+import socket
+import threading
+import time
 import tracemalloc
 from unittest.mock import AsyncMock, MagicMock
 
@@ -408,6 +411,110 @@ class TestRemoteStreaming:
 
 
 class TestRemoteHealthVersion:
+    @pytest.mark.asyncio
+    async def test_readiness_probe_puts_and_deletes_canary(self, tmp_path, monkeypatch):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        monkeypatch.setattr(rs, "_readiness_client", lambda _timeout: client)
+        rs._server_version = "RELEASE.test"
+
+        result = await rs.readiness_probe()
+
+        bucket, key, stream, length = client.put_object.call_args.args
+        assert bucket == "b"
+        assert key.startswith(".flori-readiness/") and key.endswith(".canary")
+        assert stream.read() == b"flori-readiness"
+        assert length == len(b"flori-readiness")
+        client.remove_object.assert_called_once_with("b", key)
+        assert result["status"] == "up"
+        assert result["version"] == "RELEASE.test"
+
+    @pytest.mark.asyncio
+    async def test_readiness_collects_version_with_same_bounded_budget(
+        self, tmp_path, monkeypatch,
+    ):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        monkeypatch.setattr(rs, "_readiness_client", lambda _timeout: client)
+        version_probe = MagicMock(return_value="RELEASE.bounded")
+        monkeypatch.setattr(rs, "_server_version_sync", version_probe)
+
+        result = await rs.readiness_probe(timeout_sec=1)
+
+        assert result["version"] == "RELEASE.bounded"
+        version_probe.assert_called_once()
+        assert 0 < version_probe.call_args.kwargs["timeout_sec"] <= 1
+
+    @pytest.mark.asyncio
+    async def test_readiness_delete_failure_fails_closed_and_retries_cleanup(
+        self, tmp_path, monkeypatch,
+    ):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        client.remove_object.side_effect = [RuntimeError("delete denied"), None]
+        monkeypatch.setattr(rs, "_readiness_client", lambda _timeout: client)
+
+        with pytest.raises(RuntimeError, match="delete denied"):
+            await rs.readiness_probe()
+        assert client.remove_object.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_readiness_blackhole_io_is_bounded_across_repeated_probes(self, tmp_path):
+        """本地黑洞 TCP 接受请求但不回 HTTP,验证 SDK read timeout 真正收回线程."""
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        listener.settimeout(0.05)
+        stop = threading.Event()
+        active = 0
+        lock = threading.Lock()
+
+        def serve_blackhole():
+            nonlocal active
+            while not stop.is_set():
+                try:
+                    connection, _address = listener.accept()
+                except (socket.timeout, OSError):
+                    continue
+                with lock:
+                    active += 1
+                connection.settimeout(0.05)
+                try:
+                    while not stop.is_set():
+                        try:
+                            if not connection.recv(65536):
+                                break
+                        except socket.timeout:
+                            continue
+                finally:
+                    connection.close()
+                    with lock:
+                        active -= 1
+
+        thread = threading.Thread(target=serve_blackhole, daemon=True)
+        thread.start()
+        endpoint = f"127.0.0.1:{listener.getsockname()[1]}"
+        storage = RemoteStorage(endpoint, "k", "s", "b", False, tmp_root=tmp_path)
+        started = time.monotonic()
+        try:
+            for _ in range(3):
+                with pytest.raises(Exception):
+                    await storage.readiness_probe(timeout_sec=0.3)
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                with lock:
+                    if active == 0:
+                        break
+                import asyncio
+                await asyncio.sleep(0.02)
+            with lock:
+                assert active == 0
+            assert time.monotonic() - started < 2
+        finally:
+            stop.set()
+            listener.close()
+            thread.join(timeout=1)
+
     @pytest.mark.asyncio
     async def test_health_includes_server_version(self, monkeypatch):
         # health 把 MinIO 服务端版本(经 MinioAdmin.info)填进 version 字段。

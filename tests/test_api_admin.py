@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import sqlite3
+from datetime import timedelta
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -26,6 +31,8 @@ def mock_redis():
     })
     # 中转流量(build_full_status 读 pull/push 总量);裸 AsyncMock 的 await→AsyncMock 会 500。
     r.get_traffic = AsyncMock(return_value={"total": 0, "by_worker": {}})
+    r.list_worker_ids = AsyncMock(return_value=[])
+    r.get_worker_info = AsyncMock(return_value={})
     r.r = MagicMock()
     r.r.lrange = AsyncMock(return_value=[])
     return r
@@ -36,23 +43,272 @@ def app(db, mock_redis, test_config):
     return create_app(db=db, redis=mock_redis, config=test_config)
 
 
+def _db_worker(*, status: str = "online-idle", pools: list[str] | None = None):
+    now = datetime.now(timezone.utc)
+    return SimpleNamespace(
+        id="db-worker", type="cpu", pools=pools or ["cpu"], tags=set(), reject_tags=set(),
+        hostname="test", gpu_name=None, gpu_memory_mb=None, concurrency=1, remote_addr=None,
+        status=status, current_job=None, current_step=None, tasks_completed=0, tasks_failed=0,
+        total_duration_sec=0.0, first_seen=now, started_at=now, last_heartbeat=now,
+        admin_note=None, desired_config=None, cfg_rev=0,
+    )
+
+
 class TestHealth:
     @pytest.mark.asyncio
-    async def test_health_ok(self, client):
+    async def test_health_reports_not_ready_without_scheduler_or_workers(self, client):
         resp = await client.get("/api/health")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["status"] == "healthy"
-        assert data["checks"]["redis"] == "ok"
-        assert data["checks"]["db"] == "ok"
+        assert data["status"] == "not_ready"
+        assert data["ready"] is False
+        assert data["checks"]["redis"]["status"] == "ok"
+        assert data["checks"]["db"]["status"] == "ok"
+        assert data["checks"]["scheduler"]["status"] == "error"
+        assert data["checks"]["pool:io"]["status"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_ready_endpoint_healthy_core_and_optional_gpu_degraded(
+        self, client, mock_redis, db, monkeypatch,
+    ):
+        mock_redis.get_component_heartbeat = AsyncMock(return_value={
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "version": "test",
+            "loop_lag_sec": "0",
+        })
+        workers = [_db_worker(pools=["io", "cpu", "ai"])]
+        monkeypatch.setattr(db, "list_workers", lambda *_args: workers)
+
+        resp = await client.get("/api/health/ready")
+        data = resp.json()
+        assert resp.status_code == 200
+        assert data["status"] == "degraded"
+        assert data["ready"] is True
+        assert data["checks"]["pool:gpu"]["required"] is False
+        assert data["checks"]["pool:gpu"]["status"] == "degraded"
+
+    @pytest.mark.asyncio
+    async def test_ready_endpoint_returns_503_for_required_pool_offline(
+        self, client, mock_redis,
+    ):
+        mock_redis.get_component_heartbeat = AsyncMock(return_value={
+            "ts": datetime.now(timezone.utc).isoformat(), "loop_lag_sec": "0",
+        })
+        resp = await client.get("/api/health/ready")
+        assert resp.status_code == 503
+        assert resp.json()["ready"] is False
+
+    @pytest.mark.asyncio
+    async def test_liveness_survives_dependency_failure(self, client, mock_redis):
+        mock_redis.server_info = AsyncMock(side_effect=Exception("down"))
+        resp = await client.get("/api/health/live")
+        assert resp.status_code == 200
+        assert resp.json()["alive"] is True
 
     @pytest.mark.asyncio
     async def test_health_redis_down(self, client, mock_redis):
-        mock_redis.ping = AsyncMock(side_effect=Exception("down"))
+        mock_redis.server_info = AsyncMock(side_effect=Exception("down"))
         resp = await client.get("/api/health")
         data = resp.json()
-        assert data["checks"]["redis"] == "error"
-        assert data["status"] == "unhealthy"
+        assert data["checks"]["redis"]["status"] == "error"
+        assert data["status"] == "not_ready"
+
+    @pytest.mark.asyncio
+    async def test_data_readonly_blocks_readiness(self, client, monkeypatch):
+        def denied(_path):
+            raise PermissionError("read-only")
+
+        monkeypatch.setattr("api.routes.admin._probe_data_path", denied)
+        data = (await client.get("/api/health")).json()
+        assert data["checks"]["data_writable"]["status"] == "error"
+        assert any(r["code"] == "data_writable" for r in data["reasons"])
+
+    @pytest.mark.asyncio
+    async def test_disk_below_threshold_blocks_readiness(self, client, monkeypatch):
+        monkeypatch.setattr(
+            "api.routes.admin.shutil.disk_usage",
+            lambda _path: SimpleNamespace(total=100 * 1024**3, used=99 * 1024**3, free=1024**3),
+        )
+        data = (await client.get("/api/health")).json()
+        assert data["checks"]["disk"]["status"] == "error"
+        assert data["checks"]["disk"]["free_gb"] == 1.0
+
+    @pytest.mark.asyncio
+    async def test_disk_threshold_boundary_is_ready_for_disk_check(self, client, monkeypatch):
+        monkeypatch.setattr(
+            "api.routes.admin.shutil.disk_usage",
+            lambda _path: SimpleNamespace(total=100 * 1024**3, used=95 * 1024**3, free=5 * 1024**3),
+        )
+        data = (await client.get("/api/health")).json()
+        assert data["checks"]["disk"]["status"] == "ok"
+
+    @pytest.mark.asyncio
+    async def test_required_workers_recover_without_restarting_api(
+        self, client, mock_redis, db, monkeypatch,
+    ):
+        mock_redis.get_component_heartbeat = AsyncMock(return_value={
+            "ts": datetime.now(timezone.utc).isoformat(), "loop_lag_sec": "0",
+        })
+        workers: list[SimpleNamespace] = []
+        monkeypatch.setattr(db, "list_workers", lambda *_args: workers)
+
+        blocked = await client.get("/api/health/ready")
+        assert blocked.status_code == 503
+
+        workers.append(_db_worker(pools=["io", "cpu", "ai"]))
+        recovered = await client.get("/api/health/ready")
+        assert recovered.status_code == 200
+        assert recovered.json()["ready"] is True
+
+    @pytest.mark.asyncio
+    async def test_redis_only_multi_pool_worker_satisfies_readiness(
+        self, client, mock_redis,
+    ):
+        now = datetime.now(timezone.utc).isoformat()
+        mock_redis.get_component_heartbeat = AsyncMock(return_value={
+            "ts": now, "version": "test", "loop_lag_sec": "0",
+        })
+        mock_redis.list_worker_ids = AsyncMock(return_value=["remote-1"])
+        mock_redis.get_worker_info = AsyncMock(return_value={
+            "type": "cpu", "pools": "io,cpu,ai", "last_heartbeat": now,
+            "started_at": now, "admin_status": "", "current_job": "",
+        })
+
+        response = await client.get("/api/health/ready")
+
+        assert response.status_code == 200
+        checks = response.json()["checks"]
+        assert checks["workers"]["online"] == 1
+        assert all(checks[f"pool:{pool}"]["online"] == 1 for pool in ("io", "cpu", "ai"))
+        live = (await client.get("/api/status")).json()
+        assert all(live["workers"][pool]["online"] == 1 for pool in ("io", "cpu", "ai"))
+
+    @pytest.mark.asyncio
+    async def test_configured_heartbeat_window_is_used_for_redis_worker(
+        self, client, mock_redis, test_config,
+    ):
+        now = datetime.now(timezone.utc)
+        test_config.pools["worker_status"]["online_window_sec"] = 60
+        mock_redis.get_component_heartbeat = AsyncMock(return_value={
+            "ts": now.isoformat(), "loop_lag_sec": "0",
+        })
+        mock_redis.list_worker_ids = AsyncMock(return_value=["remote-window"])
+        mock_redis.get_worker_info = AsyncMock(return_value={
+            "type": "cpu", "pools": "io,cpu,ai",
+            "last_heartbeat": (now - timedelta(seconds=40)).isoformat(),
+            "started_at": now.isoformat(), "admin_status": "", "current_job": "",
+        })
+
+        response = await client.get("/api/health/ready")
+
+        assert response.status_code == 200
+        assert response.json()["checks"]["workers"]["online"] == 1
+
+    @pytest.mark.asyncio
+    async def test_all_required_workers_paused_blocks_with_explicit_reason(
+        self, client, mock_redis,
+    ):
+        now = datetime.now(timezone.utc).isoformat()
+        mock_redis.get_component_heartbeat = AsyncMock(return_value={
+            "ts": now, "loop_lag_sec": "0",
+        })
+        mock_redis.list_worker_ids = AsyncMock(return_value=["paused-1"])
+        mock_redis.get_worker_info = AsyncMock(return_value={
+            "type": "cpu", "pools": "io,cpu,ai", "last_heartbeat": now,
+            "started_at": now, "admin_status": "paused", "current_job": "",
+        })
+
+        response = await client.get("/api/health/ready")
+
+        assert response.status_code == 503
+        check = response.json()["checks"]["pool:ai"]
+        assert check["online"] == 0 and check["paused"] == 1
+        assert "全部暂停" in check["detail"]
+
+    @pytest.mark.asyncio
+    async def test_degraded_scheduler_does_not_turn_readiness_into_503(
+        self, client, mock_redis,
+    ):
+        now = datetime.now(timezone.utc)
+        mock_redis.get_component_heartbeat = AsyncMock(return_value={
+            "ts": (now - timedelta(seconds=60)).isoformat(), "loop_lag_sec": "0",
+        })
+        mock_redis.list_worker_ids = AsyncMock(return_value=["remote-1"])
+        mock_redis.get_worker_info = AsyncMock(return_value={
+            "type": "cpu", "pools": "io,cpu,ai", "last_heartbeat": now.isoformat(),
+            "started_at": now.isoformat(), "admin_status": "", "current_job": "",
+        })
+
+        response = await client.get("/api/health/ready")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "degraded"
+        assert data["checks"]["scheduler"]["status"] == "degraded"
+
+
+class TestReadinessProbes:
+    def test_sqlite_probe_executes_wal_write_and_leaves_no_schema(self, db, test_config):
+        from api.routes.admin import _probe_sqlite_write
+
+        result = _probe_sqlite_write(test_config.db_path)
+
+        assert result == {"journal_mode": "wal"}
+        connection = sqlite3.connect(test_config.db_path)
+        try:
+            names = connection.execute(
+                "SELECT name FROM sqlite_master WHERE name LIKE '__flori_readiness_%'",
+            ).fetchall()
+        finally:
+            connection.close()
+        assert names == []
+
+    @pytest.mark.asyncio
+    async def test_expensive_probe_is_singleflight_and_short_cached(self, app):
+        from api.routes.admin import _singleflight_probe
+
+        calls = 0
+
+        async def probe():
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.02)
+            return {"value": calls}
+
+        results = await asyncio.gather(*[
+            _singleflight_probe(
+                app, "canary", ttl_sec=5, timeout_sec=1, probe=probe,
+            )
+            for _ in range(20)
+        ])
+        cached = await _singleflight_probe(
+            app, "canary", ttl_sec=5, timeout_sec=1, probe=probe,
+        )
+
+        assert calls == 1
+        assert all(result["ok"] for result in results)
+        assert cached["value"] == {"value": 1}
+
+    @pytest.mark.asyncio
+    async def test_probe_timeout_is_cached_fail_closed(self, app):
+        from api.routes.admin import _singleflight_probe
+
+        calls = 0
+
+        async def probe():
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(1)
+
+        first = await _singleflight_probe(
+            app, "timeout", ttl_sec=5, timeout_sec=0.01, probe=probe,
+        )
+        second = await _singleflight_probe(
+            app, "timeout", ttl_sec=5, timeout_sec=0.01, probe=probe,
+        )
+
+        assert first == second == {"ok": False, "error_type": "TimeoutError"}
+        assert calls == 1
 
 
 class TestMetrics:
@@ -63,6 +319,7 @@ class TestMetrics:
         assert resp.headers["content-type"].startswith("text/plain")
         body = resp.text
         assert "flori_up 1" in body
+        assert "flori_ready 0" in body
         assert "flori_redis_up 1" in body
         assert "flori_db_up 1" in body
         assert "flori_workers_online" in body
@@ -70,9 +327,23 @@ class TestMetrics:
 
     @pytest.mark.asyncio
     async def test_metrics_redis_down_reflected(self, client, mock_redis):
-        mock_redis.ping = AsyncMock(side_effect=Exception("down"))
+        mock_redis.server_info = AsyncMock(side_effect=Exception("down"))
         body = (await client.get("/api/metrics")).text
         assert "flori_redis_up 0" in body
+
+    @pytest.mark.asyncio
+    async def test_metrics_db_worker_query_failure_never_500(self, client, app, db, monkeypatch):
+        monkeypatch.setattr(db, "list_jobs", MagicMock(side_effect=OSError("db unavailable")))
+        monkeypatch.setattr(db, "list_workers", MagicMock(side_effect=OSError("db unavailable")))
+        monkeypatch.setattr(
+            "api.routes.admin._probe_sqlite_write",
+            MagicMock(side_effect=OSError("db unavailable")),
+        )
+        app.state.readiness_probe_cache = {}
+        resp = await client.get("/api/metrics")
+        assert resp.status_code == 200
+        assert "flori_db_up 0" in resp.text
+        assert "flori_workers_total 0" in resp.text
 
 
 class TestStatus:
@@ -89,6 +360,7 @@ class TestStatus:
         assert "available_gb" in data["disk"]
         assert "total_gb" in data["disk"] and "used_pct" in data["disk"]
         assert "version" in data
+        assert data["health"]["status"] == "not_ready"
         assert data["throughput_1h"] == {"done": 0, "failed": 0}
 
     @pytest.mark.asyncio
@@ -116,7 +388,18 @@ class TestStatus:
         assert resp.status_code == 200
         redis_c = next(c for c in resp.json()["components"] if c["kind"] == "redis")
         assert redis_c["status"] == "unknown"
-        assert redis_c["detail"] and "conn refused" in redis_c["detail"]
+        assert redis_c["detail"] == "redis 探活失败: Exception"
+
+    @pytest.mark.asyncio
+    async def test_status_live_fragment_failure_never_500(self, client, mock_redis):
+        mock_redis.get_all_pool_limit_overrides = AsyncMock(side_effect=ConnectionError("down"))
+        mock_redis.server_info = AsyncMock(side_effect=ConnectionError("down"))
+        resp = await client.get("/api/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["pools"] == {}
+        assert data["health"]["ready"] is False
+        assert data["health"]["checks"]["redis"]["status"] == "error"
 
 
 class TestUsageAggregate:

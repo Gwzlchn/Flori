@@ -35,6 +35,7 @@ function fullStatus(over: Partial<any> = {}) {
       { name: 'minio', kind: 'minio', status: 'unknown', version: null,
         last_heartbeat: null, uptime_sec: null, detail: '本地盘', extra: { mode: 'local' } },
     ],
+    health: { version: 'a1b2c3d', status: 'ready', ready: true, degraded: false, checks: {}, reasons: [] },
     workers: {},
     pools: { cpu: { capacity: 4, used: 2, queue: 1 } },
     jobs: { total: 10, done: 7, processing: 1, failed: 2, pending: 3 },
@@ -105,6 +106,61 @@ describe('SystemView', () => {
     expect(t).toContain('忙碌 · 处理中')
     expect(t).toContain('待处理 · 队列')
     expect(t).toContain('累计完成 · 吞吐')
+    expect(t).toContain('可安全接单')
+  })
+
+  it('readiness 阻断时展示原因和恢复建议', async () => {
+    const store = useWorkerStore()
+    stubStoreData(store, { full: fullStatus({
+      health: {
+        version: 'a1b2c3d', status: 'not_ready', ready: false, degraded: false, checks: {},
+        reasons: [{
+          code: 'pool:ai', severity: 'blocking',
+          message: '必要资源池 ai 没有在线 Worker', recovery: '启动 AI Worker',
+        }],
+      },
+    }) })
+    const w = mountView()
+    await flushPromises()
+    expect(w.text()).toContain('暂不可安全接单')
+    expect(w.text()).toContain('必要资源池 ai 没有在线 Worker')
+    expect(w.text()).toContain('启动 AI Worker')
+  })
+
+  it('状态刷新失败后清除旧绿灯并展示链路故障态', async () => {
+    const store = useWorkerStore()
+    stubStoreData(store)
+    const w = mountView()
+    await flushPromises()
+    expect(w.text()).toContain('可安全接单')
+
+    ;(store.fetchFullStatus as any).mockRejectedValueOnce(new Error('gateway down'))
+    const refreshBtn = w.findAll('button').find(b => b.text().includes('刷新'))
+    await refreshBtn!.trigger('click')
+    await flushPromises()
+
+    expect(w.text()).toContain('健康状态获取失败')
+    expect(w.text()).toContain('旧快照已清除')
+    expect(w.text()).not.toContain('可安全接单')
+    expect(w.find('.readiness').classes()).toContain('rd-bad')
+  })
+
+  it('readiness 原因超过四条时显示未展开数量', async () => {
+    const store = useWorkerStore()
+    const reasons = Array.from({ length: 6 }, (_, i) => ({
+      code: `reason-${i}`, severity: 'blocking', message: `原因 ${i}`, recovery: null,
+    }))
+    stubStoreData(store, { full: fullStatus({
+      health: {
+        version: 'a1b2c3d', status: 'not_ready', ready: false,
+        degraded: false, checks: {}, reasons,
+      },
+    }) })
+    const w = mountView()
+    await flushPromises()
+
+    expect(w.findAll('.rd-reason')).toHaveLength(4)
+    expect(w.text()).toContain('另有 2 条原因未展开')
   })
 
   it('拉取全量状态后渲染三带区块与资源池', async () => {

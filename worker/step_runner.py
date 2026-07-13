@@ -34,6 +34,92 @@ _CONTROL_PLANE_SECRETS = (
     "WORKER_REGISTRATION_TOKEN", "WORKER_TOKEN", "GATEWAY_URL", "REDIS_URL",
 )
 
+_DEFAULT_STEP_LOG_MAX_BYTES = 10 * 1024 * 1024
+_LOG_TRUNCATION_MARKER = b"...(older step log truncated by FLORI_STEP_LOG_MAX_BYTES)...\n"
+_LOG_LOW_WATERMARK_RATIO = 0.75
+_DOCKER_LOG_MAX_SIZE = "10m"
+_DOCKER_LOG_MAX_FILE = "3"
+_DEFAULT_DOCKER_CONTROL_TIMEOUT_SEC = 5.0
+
+
+def _step_log_max_bytes() -> int:
+    try:
+        value = int(os.environ.get("FLORI_STEP_LOG_MAX_BYTES", _DEFAULT_STEP_LOG_MAX_BYTES))
+    except ValueError:
+        value = _DEFAULT_STEP_LOG_MAX_BYTES
+    return max(1024, value)
+
+
+def _docker_control_timeout_sec() -> float:
+    try:
+        value = float(
+            os.environ.get(
+                "FLORI_DOCKER_CONTROL_TIMEOUT_SEC", _DEFAULT_DOCKER_CONTROL_TIMEOUT_SEC,
+            )
+        )
+    except ValueError:
+        value = _DEFAULT_DOCKER_CONTROL_TIMEOUT_SEC
+    return max(0.05, value)
+
+
+class _BoundedLogWriter:
+    """追加写步骤日志,超过硬上限时原子保留尾部到低水位."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.max_bytes = _step_log_max_bytes()
+        self._file = path.open("ab")
+        self._size = path.stat().st_size
+        self._low_watermark = max(
+            len(_LOG_TRUNCATION_MARKER),
+            int(self.max_bytes * _LOG_LOW_WATERMARK_RATIO),
+        )
+        if self._size > self.max_bytes:
+            self._compact()
+
+    def write(self, data: str | bytes) -> None:
+        raw = data.encode("utf-8", errors="replace") if isinstance(data, str) else data
+        if not raw:
+            return
+        # 不能先把超大 chunk 全写进真实路径再旋转:即使 write() 返回时已压回,
+        # 采集器仍可能在瞬间看到超限文件.越界前直接用旧尾+新 chunk 生成低水位文件.
+        if self._size + len(raw) > self.max_bytes:
+            self._compact(raw)
+            return
+        self._file.write(raw)
+        self._size += len(raw)
+
+    def flush(self) -> None:
+        self._file.flush()
+
+    def close(self) -> None:
+        self._file.flush()
+        self._file.close()
+
+    def _compact(self, incoming: bytes = b"") -> None:
+        self._file.flush()
+        self._file.close()
+        keep = max(0, self._low_watermark - len(_LOG_TRUNCATION_MARKER))
+        if len(incoming) >= keep:
+            tail = incoming[-keep:] if keep else b""
+        else:
+            old_keep = keep - len(incoming)
+            with self.path.open("rb") as source:
+                source.seek(max(0, self._size - old_keep))
+                tail = source.read(old_keep) + incoming
+        tmp = self.path.with_name(f".{self.path.name}.rotate.tmp")
+        try:
+            with tmp.open("wb") as target:
+                target.write(_LOG_TRUNCATION_MARKER)
+                target.write(tail)
+                target.flush()
+                os.fsync(target.fileno())
+            os.replace(tmp, self.path)
+        finally:
+            tmp.unlink(missing_ok=True)
+        self._file = self.path.open("ab")
+        self._size = self.path.stat().st_size
+
 
 @dataclass
 class StepContext:
@@ -100,7 +186,7 @@ class SubprocessStepRunner:
         # append 而非 truncate:幂等跳过(只输出一行 skip: up-to-date)不覆盖上次真跑的处理日志;
         # 重跑在已有日志后追加分隔头,保留历史,避免出现有产物没日志。
         had_content = log_path.exists() and log_path.stat().st_size > 0
-        log_file = log_path.open("a", encoding="utf-8")
+        log_file = _BoundedLogWriter(log_path)
         if had_content:
             log_file.write(f"\n===== re-run {step} =====\n")
             log_file.flush()
@@ -216,8 +302,7 @@ class DockerStepRunner:
         on_progress: ProgressPublisher,
         on_tick: TickCallback,
     ) -> tuple[int, str]:
-        import docker
-        from docker.types import DeviceRequest
+        from docker.types import DeviceRequest, LogConfig
 
         work_dir = ctx.work_dir
         step = ctx.step
@@ -256,6 +341,14 @@ class DockerStepRunner:
                 network_mode=network_mode,
                 device_requests=device_requests,
                 labels=labels,
+                log_config=LogConfig(
+                    type="local",
+                    config={
+                        "max-size": _DOCKER_LOG_MAX_SIZE,
+                        "max-file": _DOCKER_LOG_MAX_FILE,
+                        "compress": "true",
+                    },
+                ),
                 detach=True,
                 auto_remove=False,
             )
@@ -264,27 +357,64 @@ class DockerStepRunner:
         timed_out = False
         returncode = 1
         stderr_tail = ""
+        wait_task: asyncio.Task | None = None
+        log_task: asyncio.Task | None = None
+        log_stream: dict[str, object] = {}
+        cleanup_state = {"removed": False}
         try:
-            log_task = asyncio.create_task(self._stream_logs(container, work_dir, step))
+            log_task = asyncio.create_task(
+                self._stream_logs(container, work_dir, step, log_stream)
+            )
             monitor = asyncio.create_task(
                 self._progress_monitor(
                     ctx, on_progress, on_tick, lambda: _alive(container),
                 )
             )
+            wait_task = asyncio.create_task(asyncio.to_thread(container.wait))
             try:
                 result = await asyncio.wait_for(
-                    asyncio.to_thread(container.wait), timeout=ctx.timeout_sec,
+                    asyncio.shield(wait_task), timeout=ctx.timeout_sec,
                 )
                 returncode = int(result.get("StatusCode", 1))
             except asyncio.TimeoutError:
                 timed_out = True
-                await asyncio.to_thread(container.kill)
-            finally:
-                log_task.cancel()
+                await self._bounded_container_call(
+                    container.kill, ctx=ctx, action="kill",
+                )
+                # wait_for 只取消 asyncio 等待,不能终止后台 Docker SDK 线程.复用同一
+                # wait_task 有界 join;卡死时继续走日志关闭与 force-remove 兜底.
                 try:
-                    await log_task
-                except asyncio.CancelledError:
+                    await self._join_task_bounded(wait_task)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "container_wait_after_kill_failed",
+                        job_id=ctx.job_id,
+                        step=step,
+                        error_type=type(e).__name__,
+                    )
+            except BaseException:
+                try:
+                    await self._bounded_container_call(
+                        container.kill, ctx=ctx, action="kill-after-wait-error",
+                    )
+                except Exception:
                     pass
+                raise
+            finally:
+                # 容器退出后 Docker log stream 才会自然送完尾部并 EOF.必须 join 日志线程,
+                # 再写 TIMEOUT marker / 读 tail / remove,否则末尾日志会丢且取消 to_thread
+                # 只取消 await,后台线程仍会写已被移除容器.
+                try:
+                    await self._finish_log_task(
+                        log_task, log_stream, container, cleanup_state, ctx,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "container_log_stream_failed",
+                        job_id=ctx.job_id,
+                        step=step,
+                        error_type=type(e).__name__,
+                    )
                 monitor.cancel()
                 try:
                     await monitor
@@ -297,10 +427,23 @@ class DockerStepRunner:
                 stderr_tail = self._tail_log(work_dir, step, n_chars=4000)
         finally:
             config_path.unlink(missing_ok=True)
-            try:
-                await asyncio.to_thread(container.remove, force=True)
-            except docker.errors.APIError:
-                logger.warning("container_remove_failed", job_id=ctx.job_id, step=step)
+            if not cleanup_state["removed"]:
+                await self._bounded_container_call(
+                    container.remove, force=True, ctx=ctx, action="remove",
+                )
+            # force-remove 通常会释放仍卡在 Docker wait HTTP 调用的线程.再给一次
+            # 有界 join,仍不返回就取消 asyncio 包装,不能让 worker 永久挂住.
+            if wait_task is not None and not wait_task.done():
+                try:
+                    joined = await self._join_task_bounded(wait_task)
+                except Exception:
+                    joined = True
+                if not joined:
+                    wait_task.cancel()
+                    try:
+                        await wait_task
+                    except asyncio.CancelledError:
+                        pass
 
         if timed_out:
             raise asyncio.TimeoutError()
@@ -315,17 +458,116 @@ class DockerStepRunner:
     ) -> None:
         await _run_progress_monitor(ctx, on_progress, on_tick, proc_alive)
 
-    async def _stream_logs(self, container, work_dir: Path, step: str) -> None:
+    async def _bounded_container_call(
+        self,
+        func,
+        *args,
+        ctx: StepContext,
+        action: str,
+        **kwargs,
+    ) -> bool:
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(func, *args, **kwargs),
+                timeout=_docker_control_timeout_sec(),
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(
+                "container_control_timeout",
+                job_id=ctx.job_id,
+                step=ctx.step,
+                action=action,
+            )
+            return False
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "container_control_failed",
+                job_id=ctx.job_id,
+                step=ctx.step,
+                action=action,
+                error_type=type(e).__name__,
+            )
+            return False
+
+    async def _join_task_bounded(self, task: asyncio.Task) -> bool:
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task), timeout=_docker_control_timeout_sec(),
+            )
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    async def _finish_log_task(
+        self,
+        task: asyncio.Task,
+        stream_ref: dict[str, object],
+        container,
+        cleanup_state: dict[str, bool],
+        ctx: StepContext,
+    ) -> None:
+        if await self._join_task_bounded(task):
+            return
+        stream = stream_ref.get("stream")
+        close = getattr(stream, "close", None)
+        if callable(close):
+            try:
+                await self._bounded_container_call(
+                    close, ctx=ctx, action="close-log-stream",
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "container_log_close_failed",
+                    job_id=ctx.job_id,
+                    step=ctx.step,
+                    error_type=type(e).__name__,
+                )
+        if await self._join_task_bounded(task):
+            return
+        # 日志流自身 close 仍不返回时,force-remove 动态容器以释放 daemon 侧
+        # follow/wait 连接,再做最后一次 join.只有这一层仍超时才取消包装 task.
+        cleanup_state["removed"] = await self._bounded_container_call(
+            container.remove, force=True, ctx=ctx, action="remove-for-log-drain",
+        )
+        if await self._join_task_bounded(task):
+            return
+        logger.warning("container_log_join_timeout", job_id=ctx.job_id, step=ctx.step)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _stream_logs(
+        self,
+        container,
+        work_dir: Path,
+        step: str,
+        stream_ref: dict[str, object],
+    ) -> None:
         """把容器 stdout/stderr 合流 tee 到 logs/{step}.log,运行中即可见。"""
         log_dir = work_dir / "logs"
         log_dir.mkdir(exist_ok=True)
         log_path = log_dir / f"{step}.log"
 
         def _tee() -> None:
-            with log_path.open("wb") as f:
-                for chunk in container.logs(stream=True, follow=True):
-                    f.write(chunk)
-                    f.flush()
+            writer = _BoundedLogWriter(log_path)
+            stream = None
+            try:
+                stream = container.logs(stream=True, follow=True)
+                stream_ref["stream"] = stream
+                for chunk in stream:
+                    writer.write(chunk)
+                    writer.flush()
+            finally:
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
+                writer.close()
 
         await asyncio.to_thread(_tee)
 
@@ -341,8 +583,11 @@ class DockerStepRunner:
     def _append_timeout_marker(self, work_dir: Path, step: str, timeout: int) -> None:
         log_dir = work_dir / "logs"
         log_dir.mkdir(exist_ok=True)
-        with (log_dir / f"{step}.log").open("a", encoding="utf-8") as f:
-            f.write(f"\n--- TIMEOUT after {timeout}s ---\n")
+        writer = _BoundedLogWriter(log_dir / f"{step}.log")
+        try:
+            writer.write(f"\n--- TIMEOUT after {timeout}s ---\n")
+        finally:
+            writer.close()
 
     def reap_orphans(self) -> None:
         """清理本 worker 上一进程残留的步骤容器(按 label 过滤)。"""

@@ -2,11 +2,19 @@
 # 把 ECS 的 127.0.0.1:8000(仅本机回环,不公开)反代到 NAS 后端 api:8000。
 # 容器加入后端 docker 网络,用 docker DNS 解析 api(option b)。
 # ECS sshd GatewayPorts=no => 所有 -R 转发强制绑回环,天然不公开。
+x-logging: &default-logging
+  driver: local
+  options:
+    max-size: "5m"
+    max-file: "3"
+    compress: "true"
+
 services:
   autossh:
     image: jnovack/autossh:latest
     container_name: flori-tunnel
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - backend
     environment:
@@ -31,6 +39,7 @@ services:
     image: jnovack/autossh:latest
     container_name: flori-tunnel-dozzle
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - backend
     environment:
@@ -53,6 +62,7 @@ services:
     image: jnovack/autossh:latest
     container_name: flori-tunnel-redis
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - backend
     environment:
@@ -74,6 +84,7 @@ services:
     image: jnovack/autossh:latest
     container_name: flori-tunnel-minio
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - backend
     environment:
@@ -96,6 +107,7 @@ services:
     image: jnovack/autossh:latest
     container_name: flori-tunnel-mcp
     restart: unless-stopped
+    logging: *default-logging
     networks:
       - backend
     environment:

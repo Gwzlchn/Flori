@@ -20,3 +20,13 @@ worker_status:
   heartbeat_interval_sec: 10   # worker 端心跳节拍
   online_window_sec: 30        # 3x 心跳,容忍丢两拍仍判在线
   stale_window_sec: 900        # 15min 仍无心跳判 stale,供 GC 回收僵尸
+
+# 接单健康门:io/cpu/ai 是当前四类流水线的基础能力;gpu 是可选加速,离线只降级.
+# 磁盘必须同时满足绝对值和百分比阈值,避免小盘按 GB 误伤或大盘仅剩少量空间.
+readiness:
+  disk_min_free_gb: ${FLORI_DISK_MIN_FREE_GB:-5}
+  disk_min_free_pct: ${FLORI_DISK_MIN_FREE_PCT:-5}
+  probe_ttl_sec: ${FLORI_READINESS_PROBE_TTL_SEC:-5}
+  probe_timeout_sec: ${FLORI_READINESS_PROBE_TIMEOUT_SEC:-3}
+  required_pools: [io, cpu, ai]
+  optional_pools: [gpu]

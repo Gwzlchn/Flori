@@ -33,8 +33,7 @@ const showToast = inject<(m: string, t?: 'success' | 'error' | 'info') => void>(
 const { systemStatus, connected, reconnect } = useGlobalWs()
 
 const status = ref<FullStatus | null>(null)
-const lastOkAt = ref<number | null>(null)   // 末次成功 /api/status 时间戳
-const failStreak = ref(0)                    // 连续失败计数(抖动缓冲)
+const failStreak = ref(0)
 const usage = ref<UsageAggregate | null>(null)
 const events = ref<SystemEvent[]>([])
 const pricing = ref<PricingStatus | null>(null)   // LiteLLM 价表状态(模型数 + 更新时间)
@@ -43,11 +42,11 @@ const pricingBusy = ref(false)                     // 手动更新中(按钮转�
 async function loadStatus() {
   try {
     status.value = await workerStore.fetchFullStatus()
-    lastOkAt.value = Date.now()
     failStreak.value = 0
   } catch {
     failStreak.value++
-    // 不立即清空已有数据,保留陈旧快照就地展示。
+    // 请求失败后旧快照不得继续显示为绿色,否则隧道/API 中断会被误报健康.
+    status.value = null
   }
 }
 async function loadUsage() {
@@ -129,6 +128,21 @@ async function resetPoolLimit(pool: string) {
 
 // 组件 / 版本派生
 const components = computed<SystemComponent[]>(() => status.value?.components ?? [])
+const readiness = computed(() => status.value?.health ?? null)
+const statusFetchFailed = computed(() => failStreak.value > 0 && status.value === null)
+const hiddenReadinessReasonCount = computed(() => Math.max(0, (readiness.value?.reasons.length ?? 0) - 4))
+const readinessLabel = computed(() => {
+  if (statusFetchFailed.value) return '健康状态获取失败'
+  if (!readiness.value) return '健康状态采集中'
+  if (!readiness.value.ready) return '暂不可安全接单'
+  return readiness.value.degraded ? '可接单，部分能力降级' : '可安全接单'
+})
+const readinessClass = computed(() => {
+  if (statusFetchFailed.value) return 'rd-bad'
+  if (!readiness.value) return 'rd-unknown'
+  if (!readiness.value.ready) return 'rd-bad'
+  return readiness.value.degraded ? 'rd-warn' : 'rd-ok'
+})
 const systemVersion = computed(() => status.value?.version || 'dev')
 const frontendVersion = (import.meta.env.VITE_FLORI_VERSION || 'dev').trim()
 const frontendBuildSha = (import.meta.env.VITE_FLORI_BUILD_SHA || '').trim().slice(0, 12)
@@ -554,6 +568,19 @@ const usageByProvider = computed(() => {
       <button class="btn sm" :style="connected ? 'margin-left:auto' : ''" :disabled="workerStore.loading" @click="refreshAll">
         <RefreshCw :size="13" :class="workerStore.loading ? 'spin' : ''" />刷新
       </button>
+    </div>
+
+    <div class="readiness card" :class="readinessClass">
+      <div class="rd-title">{{ readinessLabel }}</div>
+      <div v-if="statusFetchFailed" class="rd-detail">无法取得最新健康状态,旧快照已清除;请检查 API、隧道和反向代理</div>
+      <div v-else-if="readiness?.reasons.length" class="rd-reasons">
+        <div v-for="reason in readiness.reasons.slice(0, 4)" :key="reason.code" class="rd-reason">
+          <b>{{ reason.message }}</b><span v-if="reason.recovery">{{ reason.recovery }}</span>
+        </div>
+        <div v-if="hiddenReadinessReasonCount" class="rd-detail">另有 {{ hiddenReadinessReasonCount }} 条原因未展开</div>
+      </div>
+      <div v-else-if="readiness" class="rd-detail">Redis、数据库、存储、调度器、数据盘与必要 Worker 均满足接单条件</div>
+      <div v-else class="rd-detail">正在等待最新健康状态</div>
     </div>
 
     <!-- 带1 · 概览 -->
@@ -1051,6 +1078,16 @@ details[open] > summary .summary-chevron { transform: rotate(90deg); }
 .tp-tunnels { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; font-size: 11.5px; color: var(--ink-500); }
 .tp-tn { font-variant-numeric: tabular-nums; }
 .tp-tn b { color: var(--ink-700); font-weight: 600; }
+
+.readiness { margin-bottom: 18px; padding: 12px 14px; border-left: 3px solid var(--ink-300); }
+.readiness.rd-ok { border-left-color: var(--ok); background: color-mix(in srgb, var(--ok) 5%, var(--surface)); }
+.readiness.rd-warn { border-left-color: var(--warn); background: color-mix(in srgb, var(--warn) 6%, var(--surface)); }
+.readiness.rd-bad { border-left-color: var(--bad); background: color-mix(in srgb, var(--bad) 5%, var(--surface)); }
+.rd-title { font-size: 13px; font-weight: 700; color: var(--ink-900); }
+.rd-detail { margin-top: 3px; font-size: 12px; color: var(--ink-500); }
+.rd-reasons { display: grid; gap: 5px; margin-top: 7px; }
+.rd-reason { display: flex; gap: 8px; align-items: baseline; font-size: 11.5px; color: var(--ink-600); }
+.rd-reason b { color: var(--ink-800); }
 
 /* 系统状态标签化网格 */
 /* 固定列网格(两组共用同一列结构 → 系统/Worker 列对齐);长值在 cell 内换行,不挤不截断。 */

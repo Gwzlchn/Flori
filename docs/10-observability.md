@@ -45,43 +45,47 @@ logger.info("step_started",
 #  "timestamp": "2026-05-16T20:00:00"}
 ```
 
-### 日志存储
+### 存储、轮转与保留
+
+API、scheduler、Worker、Redis、MinIO、Caddy、Watchtower、tunnel 和 Dozzle 都只写容器 stdout/stderr，不在 `/data/logs` 复制第二份。生产/NAS、边缘和远程 Worker 统一使用 Docker `local` logging driver，单文件 `10m`、保留 `3` 份并压缩，单容器硬预算约 30MB；tunnel 为 `5m × 3`，开发栈为 `5m × 2`。配置覆盖根 Compose、`deploy/edge`、`deploy/tunnel` 和边缘 Worker，新增常驻服务必须复用对应 `x-logging` 锚点。`DockerStepRunner` 创建的短生命周期步骤容器不经 Compose，也在 SDK `containers.run` 中显式设置相同的 `local` 驱动和轮转参数。
+
+步骤子进程/步骤容器的业务日志保留在 `/data/jobs/{id}/logs/{step}.log`。每个文件默认上限 10MiB（`FLORI_STEP_LOG_MAX_BYTES` 可覆盖）；写入前先判断是否越界，超大 chunk 不会先落到真实路径形成瞬时超限，而是把旧尾与新 chunk 直接写入低水位临时文件，再用 `os.replace` 原子切换。低水位给后续小写入留出余量，避免每个 chunk 都旋转；不会留下被删除但仍由进程持有的 inode。任务删除时其日志随任务产物一起清理。
+
+保留语义分三类：
+
+- 普通运行日志和结构化 `audit` 事件进入 Docker 压缩环形保留，供 `docker logs`/Dozzle 查询；需要跨轮转长期审计时，应接 Docker 日志采集器归档，不能靠扩大本机无界文件。
+- AI 计费事实写 SQLite `ai_usage`，不依赖容器日志保留；AI 调用取证随 job 写 `output/ai_logs/*.jsonl`，由备份/恢复策略覆盖。
+- 步骤排障日志按单步 10MiB 上限保留尾部，API 默认再只返回最后 256KiB。
+
+可用 `docker inspect -f '{{json .HostConfig.LogConfig}}' <container>` 检查运行容器是否采用预期上限；Compose 不变量测试负责阻止常驻服务漏配。
+
+## 3. 存活与接单健康
+
+健康模型分成两层，不能混用：
+
+- `GET /api/health/live`：liveness，只证明 API 进程可响应。依赖故障仍为 `200`，Compose 用它决定容器进程健康，避免 Redis 等外部故障触发 API 重启风暴。
+- `GET /api/health/ready`：readiness，证明系统能安全接收新任务。阻断项存在时返回 `503`；`GET /api/health` 返回相同响应体但兼容旧监控始终 `200`。
+
+readiness 检查 Redis、SQLite WAL 写事务回滚、数据目录真实写入、磁盘剩余 GB 与百分比、中心存储 put/delete canary、scheduler 心跳和 Worker pool。SQLite/MinIO 探针采用短 TTL singleflight；缓存过期后不回陈旧绿灯，超时或异常 fail-closed。MinIO 专用 SDK 客户端同时限制 connect/read 并关闭重试，黑洞网络不会按探针周期持续累积阻塞线程。阈值、探针 TTL/timeout 与 pool 角色的单一来源是 `configs/pools.yaml::readiness`：`io/cpu/ai` 为必要能力，任一全离线或全部暂停即 `not_ready`；`gpu` 为可选能力，离线只返回 `degraded`，不会封锁无关流水线。Worker 判活复用 `/api/workers` 的 SQLite 累计资料 + Redis 实时心跳合并结果，按每个 Worker 声明的多 pool 汇总，不再以陈旧 DB 心跳误判远端 Worker。
 
 ```
-/data/logs/
-├── scheduler.log
-├── api.log
-└── workers/
-    ├── cpu-a1b2.log
-    └── ai-c3d4.log
-
-/data/jobs/{id}/logs/       # 每步的执行日志
-├── 03_scene.log
-└── 10_smart.log
-```
-
-## 3. 健康检查
-
-```
-GET /api/health
+GET /api/health/ready
 
 {
-  "status": "healthy" | "degraded" | "unhealthy",
+  "status": "ready" | "degraded" | "not_ready",
+  "ready": true | false,
   "checks": {
-    "redis": "ok",
-    "db": "ok",
-    "disk_free_gb": 600.0,
-    "workers_online": 4,
-    "workers_by_type": {"io": 1, "cpu": 1, "ai": 2, "gpu": 0}
-  }
+    "redis": {"status": "ok", "required": true},
+    "db": {"status": "ok", "required": true, "journal_mode": "wal"},
+    "workers": {"status": "ok", "required": true, "online": 3, "paused": 0},
+    "disk": {"status": "ok", "required": true, "free_gb": 600.0},
+    "pool:gpu": {"status": "degraded", "required": false, "online": 0}
+  },
+  "reasons": [{"code": "pool:gpu", "severity": "degraded", "message": "...", "recovery": "..."}]
 }
 ```
 
-降级条件：
-- `degraded`：某类型 Worker 为 0，但其他正常
-- `unhealthy`：Redis 不通 或 磁盘 <5GB
-
-`/api/health` 也被 compose 的 api healthcheck 与 watchtower 用作存活探针（探的是 `/openapi.json`，始终免鉴权）。
+`GET /api/status` 的 `health` 字段复用同一模型，SystemView 直接渲染后端给出的阻断原因和恢复建议，不在浏览器重新推断阈值。状态请求失败时前端会清除旧健康快照并显示获取失败，不能让失联前的绿色状态继续冒充当前健康；原因超过四条时同时显示剩余数量。
 
 ### Prometheus 指标 — `GET /api/metrics`
 
@@ -89,6 +93,8 @@ GET /api/health
 
 ```
 flori_up 1
+flori_ready 1
+flori_degraded 0
 flori_redis_up 1
 flori_db_up 1
 flori_disk_free_gb 600.0
@@ -98,7 +104,7 @@ flori_jobs{status="done"} 60
 flori_jobs{status="processing"} 2
 ```
 
-只暴露计数/容量，无敏感信息。阈值告警在 Prometheus/Alertmanager 侧配置（如 `flori_disk_free_gb < 10`）。
+`flori_up` 对应 liveness；`flori_ready`/`flori_degraded` 直接来自统一 readiness 模型。只暴露计数/容量，无敏感信息。阈值告警在 Prometheus/Alertmanager 侧配置（如 `flori_ready == 0` 或 `flori_disk_free_gb < 10`）。
 
 ## 4. 卡住检测（两层）
 
