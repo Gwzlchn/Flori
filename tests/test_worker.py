@@ -367,11 +367,13 @@ class TestAutoDiscoverTags:
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}, clear=False):
             tags = auto_discover_tags()
             assert "vision" in tags
+            assert "anthropic-api" in tags
 
     def test_deepseek_key(self):
         with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "ds-test"}, clear=False):
             tags = auto_discover_tags()
             assert "text-only" in tags
+            assert "deepseek-api" in tags
 
     def test_no_keys(self):
         env = {k: v for k, v in os.environ.items()
@@ -404,6 +406,7 @@ class TestAutoDiscoverTags:
                     tags = auto_discover_tags()
                     assert "vision" in tags
                     assert "claude-cli" in tags
+                    assert "read" in tags
 
     def test_codex_logged_in_adds_vision_and_cli(self):
         env = {k: v for k, v in os.environ.items()
@@ -418,6 +421,7 @@ class TestAutoDiscoverTags:
                     tags = auto_discover_tags()
                     assert "codex-cli" in tags
                     assert "vision" in tags
+                    assert "read" not in tags
 
     def test_codex_logged_in_checks_codex_home(self, tmp_path, monkeypatch):
         home = tmp_path / ".codex"
@@ -427,7 +431,8 @@ class TestAutoDiscoverTags:
         monkeypatch.setenv("CODEX_HOME", str(home))
         assert _codex_logged_in() is True
 
-    _CRED_ENV = ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OLLAMA_URL",
+    _CRED_ENV = ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+                 "KIMI_API_KEY", "OLLAMA_URL",
                  "BILI_" + "SE" + "SS" + "DATA",
                  "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
 
@@ -441,6 +446,16 @@ class TestAutoDiscoverTags:
         with patch.dict(os.environ, self._clean_env(BILI_SESSDATA="x", DATA_DIR="/no-such"), clear=True):
             with patch("shutil.which", return_value=None):
                 assert "bili" not in auto_discover_tags()
+
+    def test_openai_key_never_advertises_claude_read_capability(self):
+        with patch.dict(
+            os.environ, self._clean_env(OPENAI_API_KEY="test", DATA_DIR="/no-such"),
+            clear=True,
+        ):
+            with patch("shutil.which", return_value=None):
+                tags = auto_discover_tags()
+                assert "openai-api" in tags
+                assert "read" not in tags
 
     def test_net_zones_merged_into_tags(self):
         # _probe_net_zones 探出的区域并入 tags(覆盖 autouse 的空 mock)。

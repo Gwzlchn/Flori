@@ -423,7 +423,7 @@ describe('SystemView', () => {
     expect(t).not.toContain('BILI_' + 'SE' + 'SS' + 'DATA')  // io 凭证走中心分发,不进 worker env。
     expect(t).toContain('HF_ENDPOINT')              // cpu/gpu → whisper HF 国内镜像
     expect(w.find('pre').text()).not.toContain('GATEWAY_TLS_INSECURE') // 命令默认严格校验(页面提示文案除外)
-    expect(t).toContain('--tags claude-cli')        // ai(默认 Claude CLI)→ 接入方式落成硬 tag
+    expect(t).toContain('--tags claude-cli read')   // Claude 的 PDF Read 能力独立落成硬 tag
     expect(t).toContain('状态目录内使用 .claude')   // CLI 凭证在 worker 独立 HOME
     expect(w.find('pre').text()).not.toContain('${HOME}/.claude')
   })
@@ -436,17 +436,19 @@ describe('SystemView', () => {
     await w.find('input[type="checkbox"][value="ai"]').setValue(true)
     await flushPromises()
     const select = w.find('[data-testid="ai-access-method"]')
-    expect(w.find('pre').text()).toContain('--tags claude-cli')
+    expect(w.find('pre').text()).toContain('--tags claude-cli read')
 
     await select.setValue('codex-cli')
     await flushPromises()
     expect(w.find('pre').text()).toContain('--tags codex-cli')
+    expect(w.find('pre').text()).not.toContain('--tags codex-cli read')
     expect(w.text()).toContain('状态目录内使用 .codex')
 
     await select.setValue('kimi-api')
     await flushPromises()
     const cmd = w.find('pre').text()
     expect(cmd).toContain('--tags kimi-api')
+    expect(cmd).not.toContain('--tags kimi-api read')
     expect(cmd).toContain('KIMI_API_KEY')
   })
 })

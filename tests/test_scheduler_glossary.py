@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,13 +19,79 @@ class _StorageStub:
     """read_file:concepts.json 缺时回 None,回退读 review.json(video/paper/audio 路径)。"""
 
     def __init__(self, payload: dict):
-        self._data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        smart_rel = "output/versions/notes_smart_openai_m_20260101-000000.md"
+        original_rel = "output/original.md"
+        prompt_rel = "output/versions/review_input_openai_m_20260101-000000.md"
+        smart = b"# smart\n"
+        original = b"# original\n"
+        prompt = b"prompt\n# smart\n# original\n"
+
+        def record(rel, data, label=None):
+            value = {
+                "artifact": rel, "sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
+                "bytes": len(data), "chars": len(data.decode()), "truncated": False,
+            }
+            if label:
+                value["label"] = label
+            return value
+
+        scores = ["completeness", "accuracy", "structure", "readability", "insight"]
+        review = {
+            "schema_version": 2, "score_keys": scores,
+            **{key: 5 for key in scores}, "overall": 5.0,
+            "key_terms": payload.get("key_terms", []),
+            "missing_concepts": payload.get("missing_concepts", []),
+            "top3_improvements": ["a", "b", "c"], "issues": [],
+            "review_reliable": True, "reliability_reasons": [],
+            "review_input": {
+                **record(prompt_rel, prompt), "sources": [
+                    record(smart_rel, smart, "smart"),
+                    record(original_rel, original, "original"),
+                ],
+            },
+            "completion": {
+                "schema_version": 2, "status": "complete",
+                "raw_finish_reason": "stop", "raw_error": False,
+                "tier_used": "primary", "attempts": [{
+                    "tier": "primary", "provider": "openai", "model": "m", "ok": True,
+                }],
+            },
+            "parse": {"mode": "strict", "schema_valid": True, "errors": []},
+            "citation_validation": {"status": "not_applicable", "checked": 0, "items": []},
+            "review_coverage": {
+                "note_chars": len(smart.decode()), "reviewed_chars": len(smart.decode()),
+                "truncated": False,
+            },
+            "note_file": smart_rel, "provider": "openai", "model": "m",
+            "generated_at": "2026/07/14 12:00:00",
+        }
+        self._data = json.dumps(review, ensure_ascii=False).encode("utf-8")
+        self._files = {smart_rel: smart, original_rel: original, prompt_rel: prompt}
 
     async def read_file(self, job_id: str, rel: str) -> bytes | None:
         if rel == "output/concepts.json":
             return None
-        assert rel == "output/review.json"
-        return self._data
+        if rel == "output/review.json":
+            return self._data
+        return self._files.get(rel)
+
+    async def file_size(self, job_id: str, rel: str) -> int | None:
+        data = await self.read_file(job_id, rel)
+        return len(data) if data is not None else None
+
+    async def open_stream(
+        self, job_id: str, rel: str, *, start=0, length=None, chunk_size=1024 * 1024,
+    ):
+        data = await self.read_file(job_id, rel)
+        if data is None:
+            return None
+
+        async def chunks():
+            end = None if length is None else start + length
+            for offset in range(start, len(data if end is None else data[:end]), chunk_size):
+                yield data[offset:offset + chunk_size]
+
+        return chunks()
 
 
 class _ConceptsStorageStub:
@@ -42,8 +109,13 @@ class _DBStub:
     """记录 add_glossary_suggestion / add_glossary_relations 调用;get_job 返回固定
     domain/content_type;list_glossary 返回已采集的最小行(供 relations 段 resolve)。"""
 
-    def __init__(self, domain: str = "ml", content_type: str = "video"):
-        self._job = SimpleNamespace(domain=domain, content_type=content_type)
+    def __init__(
+        self, domain: str = "ml", content_type: str = "article",
+        pipeline: str | None = None,
+    ):
+        self._job = SimpleNamespace(
+            domain=domain, content_type=content_type, pipeline=pipeline or content_type,
+        )
         self.calls: list[dict] = []
         self.relations: list[dict] = []
 
@@ -83,7 +155,7 @@ async def test_collects_key_terms_with_definition():
         "key_terms": [{"term": "X", "definition": "d"}],
         "missing_concepts": ["Y"],
     }
-    db = _DBStub(domain="ml", content_type="video")
+    db = _DBStub(domain="ml", content_type="article")
     engine = _make_engine(_StorageStub(review), db)
 
     await engine._collect_glossary("j_g_001")
@@ -92,7 +164,7 @@ async def test_collects_key_terms_with_definition():
     assert "X" in terms
     assert terms["X"]["definition"] == "d"
     assert terms["X"]["domain"] == "ml"
-    assert terms["X"]["content_type"] == "video"
+    assert terms["X"]["content_type"] == "article"
     assert terms["X"]["job_id"] == "j_g_001"
 
 
@@ -112,17 +184,15 @@ async def test_missing_concepts_not_fed():
 
 
 @pytest.mark.asyncio
-async def test_bare_string_key_terms_no_definition():
-    # 裸串元素:采集 term,definition 留空。
+async def test_bare_string_key_terms_in_reliable_review_is_rejected():
+    # review v2 要求 term/definition 对象;裸串不得冒充可靠结果。
     review = {"key_terms": ["裸词"]}
     db = _DBStub()
     engine = _make_engine(_StorageStub(review), db)
 
     await engine._collect_glossary("j_g_001")
 
-    assert len(db.calls) == 1
-    assert db.calls[0]["term"] == "裸词"
-    assert db.calls[0]["definition"] == ""
+    assert db.calls == []
 
 
 @pytest.mark.asyncio
@@ -133,6 +203,42 @@ async def test_no_key_terms_collects_nothing():
     engine = _make_engine(_StorageStub(review), db)
 
     await engine._collect_glossary("j_g_001")
+
+    assert db.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [
+    {"key_terms": [{"term": "旧版", "definition": "x"}]},
+    {"review_reliable": True, "key_terms": [{"term": "伪造旧版", "definition": "x"}]},
+    {"schema_version": 1, "review_reliable": True,
+     "key_terms": [{"term": "伪造 v1", "definition": "x"}]},
+    {"schema_version": 2, "review_reliable": False,
+     "key_terms": [{"term": "抢救结果", "definition": "x"}]},
+])
+async def test_legacy_or_unreliable_review_never_feeds_glossary(payload):
+    class RawStorage(_StorageStub):
+        def __init__(self, value):
+            self._data = json.dumps(value, ensure_ascii=False).encode("utf-8")
+
+        async def read_file(self, job_id: str, rel: str) -> bytes | None:
+            if rel == "output/concepts.json":
+                return None
+            if rel == "output/review.json":
+                return self._data
+            return None
+
+    db = _DBStub()
+    await _make_engine(RawStorage(payload), db)._collect_glossary("j_bad")
+    assert db.calls == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_job_pipeline_never_feeds_glossary():
+    storage = _StorageStub({"key_terms": [{"term": "X", "definition": "d"}]})
+    db = _DBStub(pipeline="unknown-pipeline")
+
+    await _make_engine(storage, db)._collect_glossary("j_unknown")
 
     assert db.calls == []
 

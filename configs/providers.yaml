@@ -38,7 +38,7 @@ providers:
     # 优先级:pipelines.yaml 步级 model > 此默认 > CLI 默认。换模型会变 def_digest。
     # [1m] 后缀 = 1M 上下文。
     model: "claude-opus-4-8[1m]"
-    features: [vision]
+    features: [vision, read]
     cost_usd: 0
 
   codex-cli:

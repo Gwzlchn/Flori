@@ -271,18 +271,16 @@ class AITask:
     require_tags: list[str] = field(default_factory=list)  # 硬门控:仅有对应 AI 接入方式的 worker 认领
 
     def __post_init__(self) -> None:
+        from .ai_routing import provider_required_tag
+
         default_model = DEFAULT_PROVIDER_MODELS.get(self.provider)
         if default_model and (
             not self.model
             or (self.provider != DEFAULT_AI_PROVIDER and self.model == DEFAULT_AI_MODEL)
         ):
             self.model = default_model
-        if self.require_tags:
-            return
-        if self.provider in {"claude-cli", "codex-cli"}:
-            self.require_tags = [self.provider]
-        elif self.provider == "kimi":
-            self.require_tags = ["kimi-api"]
+        # 调用方可以追加能力标签,但不能移除 provider 接入硬门。
+        self.require_tags = sorted(set(self.require_tags + [provider_required_tag(self.provider)]))
 
     def to_task_payload(self) -> dict:
         """序列化为 queue:ai 的 task JSON dict(kind='ai',无 job_id)。"""

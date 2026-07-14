@@ -124,6 +124,47 @@ class TestSmartStep:
         assert "styles" in hashes
         assert "lecture" in hashes["styles"]
 
+    def test_only_valid_v2_high_evidence_is_injected(self, tmp_path):
+        import hashlib
+
+        job_dir = self._setup_job(tmp_path)
+        ref = "〔2018〕88号"
+        (job_dir / "output/notes_mechanical.md").write_text(f"案例 {ref}\n")
+        artifact = job_dir / "output/evidence/evidence-01.md"
+        artifact.parent.mkdir()
+        artifact.write_text(f"处罚决定 {ref}载明罚款 123 万元。\n", encoding="utf-8")
+        body = artifact.read_bytes()
+        text = body.decode()
+        item = {
+            "id": "E1", "job_id": "job", "artifact": "output/evidence/evidence-01.md",
+            "sha256": "sha256:" + hashlib.sha256(body).hexdigest(), "bytes": len(body),
+            "chars": len(text),
+            "eligible": True, "confidence": "high", "source_tier": "一手官方",
+            "eligibility_reasons": [],
+            "matches": [{"anchor": ref, "offset": text.find(ref)}],
+            "title": "处罚决定", "final_url": "https://www.csrc.gov.cn/case",
+            "original_url": "https://www.csrc.gov.cn/case",
+        }
+        evidence_path = job_dir / "output/evidence.json"
+        manifest = {
+            "schema_version": 2, "job_id": "job", "ocr_refs": [ref], "evidence": [item],
+            "rejected": [], "total_bytes": len(body),
+            "candidate_parse_failed": False, "provider": "claude-cli",
+        }
+        evidence_path.write_text(json.dumps(manifest))
+        step = SmartStep("11_smart", job_dir, make_step_config(tmp_path, step_name="11_smart"))
+        assert "罚款 123 万元" in step._evidence_block(step._load_evidence())
+
+        evidence_path.write_text(json.dumps({
+            **manifest, "evidence": [{**item, "eligible": False, "confidence": "low"}],
+        }))
+        assert step._load_evidence() is None
+        evidence_path.write_text(json.dumps({"job_id": "job", "evidence": [item]}))
+        assert step._load_evidence() is None
+        evidence_path.write_text(json.dumps(manifest))
+        artifact.write_text("tampered", encoding="utf-8")
+        assert step._load_evidence() is None
+
     def test_build_prompt_with_profile(self, tmp_path):
         job_dir = self._setup_job(tmp_path)
         prompts_dir = tmp_path / "prompts"

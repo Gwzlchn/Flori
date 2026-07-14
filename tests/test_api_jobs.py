@@ -63,6 +63,14 @@ class TestPipelineFor:
 def mock_redis():
     r = AsyncMock()
     r.publish = AsyncMock()
+    r.list_worker_ids = AsyncMock(return_value=["w-ai"])
+    r.get_all_step_statuses = AsyncMock(return_value={})
+    r.get_worker_info = AsyncMock(return_value={
+        "pools": "ai",
+        "tags": "claude-cli,vision,read",
+        "status": "idle",
+        "admin_status": "active",
+    })
     return r
 
 
@@ -480,13 +488,30 @@ class TestListByCollection:
 
 class TestProviderVersions:
     @pytest.mark.asyncio
-    async def test_list_providers_marks_availability(self, client):
-        # claude-cli(cli 类型)应可用;anthropic 等无 key 应不可用
+    async def test_list_providers_marks_live_worker_capability(self, client):
         resp = await client.get("/api/providers")
         assert resp.status_code == 200
         provs = {p["name"]: p for p in resp.json()["providers"]}
         assert provs["claude-cli"]["available"] is True
-        assert provs["anthropic"]["available"] is False  # 测试环境无 key
+        assert provs["anthropic"]["available"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("worker", [
+        None,
+        {"pools": "ai", "tags": "claude-cli", "status": "offline"},
+        {"pools": "ai", "tags": "claude-cli", "admin_status": "paused"},
+        {"pools": "cpu", "tags": "claude-cli", "status": "idle"},
+        {"pools": "ai", "tags": "openai-api", "status": "idle"},
+    ])
+    async def test_provider_unavailable_without_matching_live_ai_worker(
+        self, client, mock_redis, worker,
+    ):
+        mock_redis.get_worker_info.return_value = worker
+        providers = {
+            item["name"]: item
+            for item in (await client.get("/api/providers")).json()["providers"]
+        }
+        assert providers["claude-cli"]["available"] is False
 
     @pytest.mark.asyncio
     async def test_rerun_smart_unavailable_provider_rejected(self, client):
@@ -494,6 +519,74 @@ class TestProviderVersions:
         jid = (await client.get("/api/jobs")).json()["items"][0]["job_id"]
         resp = await client.post(f"/api/jobs/{jid}/rerun-smart", json={"provider": "anthropic"})
         assert resp.status_code == 400  # 无 key 不可用
+
+    @pytest.mark.asyncio
+    async def test_rerun_rejects_unknown_provider_even_with_matching_api_env(
+        self, client, app, mock_redis, monkeypatch,
+    ):
+        await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        jid = (await client.get("/api/jobs")).json()["items"][0]["job_id"]
+        storage = app.state.storage
+        await storage.write_file(jid, "job.json", b'{"id":"x"}')
+        before = await storage.read_file(jid, "job.json")
+        monkeypatch.setenv("TYPO-PROVIDER_API_KEY", "must-not-make-it-configured")
+        mock_redis.publish.reset_mock()
+
+        resp = await client.post(
+            f"/api/jobs/{jid}/rerun-smart", json={"provider": "typo-provider"},
+        )
+
+        assert resp.status_code == 400
+        assert await storage.read_file(jid, "job.json") == before
+        mock_redis.publish.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw", [
+        b"",
+        b"{",
+        b"null",
+        b"[]",
+        b'"job"',
+        b'{"ai_overrides":null}',
+        b'{"ai_overrides":[]}',
+        b'{"ai_overrides":false}',
+        b'{"ai_overrides":"claude-cli"}',
+    ])
+    async def test_rerun_malformed_job_metadata_is_stable_4xx_without_side_effects(
+        self, client, app, mock_redis, raw,
+    ):
+        await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        jid = (await client.get("/api/jobs")).json()["items"][0]["job_id"]
+        storage = app.state.storage
+        await storage.write_file(jid, "job.json", raw)
+        mock_redis.publish.reset_mock()
+
+        resp = await client.post(
+            f"/api/jobs/{jid}/rerun-smart", json={"provider": "claude-cli"},
+        )
+
+        assert 400 <= resp.status_code < 500
+        assert await storage.read_file(jid, "job.json") == raw
+        mock_redis.publish.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_rerun_requires_workers_for_both_target_step_tag_profiles(
+        self, client, app, mock_redis,
+    ):
+        await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        jid = (await client.get("/api/jobs")).json()["items"][0]["job_id"]
+        await app.state.storage.write_file(jid, "job.json", b'{"id":"x"}')
+        mock_redis.get_worker_info.return_value = {
+            "pools": "ai", "tags": "claude-cli", "status": "idle",
+        }
+        mock_redis.publish.reset_mock()
+
+        resp = await client.post(
+            f"/api/jobs/{jid}/rerun-smart", json={"provider": "claude-cli"},
+        )
+
+        assert resp.status_code == 400
+        mock_redis.publish.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_rerun_smart_claude_writes_override(self, client, app, mock_redis):
@@ -508,6 +601,76 @@ class TestProviderVersions:
         doc = _j.loads((await storage.read_file(jid, "job.json")).decode())
         assert doc["ai_overrides"]["11_smart"] == "claude-cli"
         assert doc["ai_overrides"]["12_review"] == "claude-cli"
+
+    @pytest.mark.asyncio
+    async def test_paper_rerun_requires_read_capability_and_claude_provider(
+        self, client, app, db, mock_redis,
+    ):
+        jid = "j_paper_read_gate"
+        db.create_job(Job(id=jid, content_type="paper", pipeline="paper"))
+        storage = app.state.storage
+        await storage.write_file(jid, "job.json", b'{"id":"x"}')
+
+        mock_redis.get_worker_info.return_value = {
+            "pools": "ai", "tags": "claude-cli", "status": "idle",
+        }
+        response = await client.post(
+            f"/api/jobs/{jid}/rerun-smart", json={"provider": "claude-cli"},
+        )
+        assert response.status_code == 400
+
+        mock_redis.get_worker_info.return_value = {
+            "pools": "ai", "tags": "openai-api,read", "status": "idle",
+        }
+        response = await client.post(
+            f"/api/jobs/{jid}/rerun-smart", json={"provider": "openai"},
+        )
+        assert response.status_code == 400
+
+        mock_redis.get_worker_info.return_value = {
+            "pools": "ai", "tags": "claude-cli,read", "status": "idle",
+        }
+        response = await client.post(
+            f"/api/jobs/{jid}/rerun-smart", json={"provider": "claude-cli"},
+        )
+        assert response.status_code == 200
+        document = json.loads((await storage.read_file(jid, "job.json")).decode())
+        assert document["ai_overrides"] == {
+            "05_smart_paper": "claude-cli", "06_review": "claude-cli",
+        }
+
+        await storage.write_file(jid, "output/original.md", b"# text-backed paper")
+        mock_redis.get_worker_info.return_value = {
+            "pools": "ai", "tags": "openai-api", "status": "idle",
+        }
+        response = await client.post(
+            f"/api/jobs/{jid}/rerun-smart", json={"provider": "openai"},
+        )
+        assert response.status_code == 200
+        document = json.loads((await storage.read_file(jid, "job.json")).decode())
+        assert document["ai_overrides"] == {
+            "05_smart_paper": "openai", "06_review": "openai",
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("pipeline", "smart", "review"), [
+        ("video", "11_smart", "12_review"),
+        ("paper", "05_smart_paper", "06_review"),
+        ("article", "04_smart_article", "06_review"),
+        ("audio", "04_smart_podcast", "05_review"),
+    ])
+    async def test_rerun_smart_uses_pipeline_roles(
+        self, pipeline, smart, review, client, app, db, mock_redis,
+    ):
+        jid = f"j_role_{pipeline}"
+        db.create_job(Job(id=jid, content_type=pipeline, pipeline=pipeline))
+        storage = app.state.storage
+        await storage.write_file(jid, "job.json", b'{"id":"x"}')
+        resp = await client.post(f"/api/jobs/{jid}/rerun-smart", json={"provider": "claude-cli"})
+        assert resp.status_code == 200
+        assert resp.json()["from_step"] == smart and resp.json()["review_step"] == review
+        doc = json.loads((await storage.read_file(jid, "job.json")).decode())
+        assert doc["ai_overrides"] == {smart: "claude-cli", review: "claude-cli"}
 
 
 class TestRebuildP2c:

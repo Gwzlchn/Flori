@@ -236,7 +236,7 @@ POST /api/styles
 
 ### 喂养源：review 的 key_terms
 
-每处理完一个内容，scheduler 读其评审产物 `review.json`：
+每处理完一个内容，scheduler 优先读取 `concepts.json`；需要回退到 `review.json` 时，只接受 `schema_version=2` 且 `review_reliable=true` 的评审：
 
 ```
 评审产出       去向
@@ -293,9 +293,9 @@ block-beta
 
 > 已采纳并回流进 Profile.terminology 的概念，会和领域术语表一起注入；命中时沿用统一措辞、只对未涵盖的新概念做首次解释（见 §4）。`10_smart` 是两段式生成（视觉 pass 看图产描述清单 → 文本 pass 纯文本成稿），细节见 [steps-video Step 10](04-module-design/steps-video.md)。
 
-### 08_punctuate / 11_review
+### 08_punctuate / 各内容类型 review
 
-这两步不吃领域 Profile（加标点是通用能力；评审是对照打分）。注意评审除六维分外还产出 `key_terms`（喂概念库的主源）和 `missing_concepts`，详见 [steps-video Step 11](04-module-design/steps-video.md)。
+这两类步骤不吃领域 Profile（加标点是通用能力；评审是对照打分）。评审使用完整智能笔记和主来源，保存 `review_input.md` 与来源摘要；严格 JSON、1–5 整数分、完整输入、provider 明确正常结束及 citation 校验共同决定 `review_reliable`。提取抢救、截断、未知结束原因或伪 citation 只保留诊断，不显示为正常通过，也不向 glossary 喂 `key_terms`。
 
 ## 6. Profile 与 Style 管理
 

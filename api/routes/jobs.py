@@ -13,6 +13,14 @@ from fastapi.responses import PlainTextResponse
 
 from shared.audit import audit
 from shared.config import AppConfig
+from shared.ai_routing import (
+    READ_TOOL_TAG,
+    pipeline_ai_roles,
+    provider_is_configured,
+    provider_required_tags,
+    step_required_capability_tags,
+    worker_satisfies_requirements,
+)
 from shared.db import Database
 from shared.ids import lineage_key_of as _lineage_key_of
 from shared.models import Job, JobStatus, Step, StepStatus, derive_job_id
@@ -26,7 +34,7 @@ from shared.source_registry import (
     validate_job_route,
 )
 from shared.step_base import def_digest_for, pipeline_digest_for
-from shared.storage import CREDENTIAL_REL, StorageBackend
+from shared.storage import CREDENTIAL_REL, StorageBackend, read_file_bounded
 
 from api.deps import get_config, get_db, get_redis, get_storage, validate_path_segment, verify_token
 from api.schemas import (
@@ -47,8 +55,12 @@ providers_router = APIRouter(prefix="/api/providers", tags=["providers"],
 
 
 @providers_router.get("")
-async def list_providers(config: AppConfig = Depends(get_config)):
-    """列出 AI provider 及可用性(供前端"选 provider 重跑"挑选;未配 key 的标灰)。"""
+async def list_providers(
+    config: AppConfig = Depends(get_config),
+    redis: RedisClient = Depends(get_redis),
+):
+    """列出已配置且有在线匹配 worker 的 AI provider。"""
+    workers = await _provider_workers(redis)
     out = []
     for name, pc in (config.providers.get("providers") or {}).items():
         if name == "local":
@@ -56,7 +68,9 @@ async def list_providers(config: AppConfig = Depends(get_config)):
         out.append({
             "name": name,
             "type": pc.get("type", ""),
-            "available": _provider_available(name, config.providers),
+            "available": _provider_available(
+                name, config.providers, workers, [("ai", [])],
+            ),
             "label": "CLI" if pc.get("type") in {"cli", "codex_cli"} else "API",
         })
     return {"providers": out}
@@ -751,14 +765,84 @@ async def rebuild_stale(
     return {"rebuilt": len(rebuilt), "items": rebuilt}
 
 
-def _provider_available(name: str, cfg: dict) -> bool:
-    """provider 是否可用:CLI 类型由 worker 侧凭证门控;其余看运行时环境是否有 {NAME}_API_KEY.
-    只认环境变量,不信 config 里的 api_key(可能是未解析的 ${VAR} 占位串)。"""
-    import os
-    pc = (cfg.get("providers") or {}).get(name, {})
-    if pc.get("type") in {"cli", "codex_cli"}:
-        return True
-    return bool(os.environ.get(f"{name.upper()}_API_KEY"))
+async def _provider_workers(redis: RedisClient) -> list[dict]:
+    """取一次在线能力快照;mock/注册表异常都按无可用 worker 处理。"""
+    try:
+        worker_ids = await redis.list_worker_ids()
+    except Exception:
+        return []
+    if not isinstance(worker_ids, (list, tuple, set)):
+        return []
+    workers = []
+    for worker_id in worker_ids:
+        try:
+            info = await redis.get_worker_info(worker_id)
+        except Exception:
+            continue
+        if isinstance(info, dict):
+            workers.append(info)
+    return workers
+
+
+def _provider_available(
+    name: str,
+    cfg: dict,
+    workers: list[dict],
+    step_requirements: list[tuple[str, list[str]]],
+) -> bool:
+    """已配置 provider 必须对每个目标步骤都有真实在线 worker 能力。"""
+    if not provider_is_configured(name, cfg):
+        return False
+    for pool, static_tags in step_requirements:
+        try:
+            provider_tags = provider_required_tags(
+                name, cfg,
+                required_tags=[tag for tag in static_tags if tag == READ_TOOL_TAG],
+            )
+        except ValueError:
+            return False
+        if not any(
+            worker_satisfies_requirements(
+                worker, pool, set(static_tags) | set(provider_tags),
+            )
+            for worker in workers
+        ):
+            return False
+    return True
+
+
+async def _rerun_step_requirements(
+    config: AppConfig, pipeline: str, step_names: tuple[str, str],
+    storage: StorageBackend, job_id: str,
+) -> list[tuple[str, list[str]]] | None:
+    """目标步骤的 pool、静态标签和本次产物条件能力来自 pipeline 定义。"""
+    try:
+        steps = config.pipelines[pipeline]["steps"]
+    except (KeyError, TypeError):
+        return None
+    by_name = {
+        step.get("name"): step for step in steps
+        if isinstance(step, dict) and isinstance(step.get("name"), str)
+    }
+    result = []
+    for name in step_names:
+        step = by_name.get(name)
+        if not step or not isinstance(step.get("pool"), str):
+            return None
+        tags = step.get("tags") or []
+        if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+            return None
+        async def has_nonempty_artifact(rel: str) -> bool:
+            return bool(await read_file_bounded(storage, job_id, rel, 0))
+
+        try:
+            capability_tags = await step_required_capability_tags(
+                step, has_nonempty_artifact,
+            )
+        except (OSError, ValueError, TypeError):
+            return None
+        result.append((step["pool"], sorted(set(tags) | set(capability_tags))))
+    return result
 
 
 @router.post("/{job_id}/rerun-smart")
@@ -775,20 +859,41 @@ async def rerun_smart(
     job = await asyncio.to_thread(db.get_job, job_id)
     if not job:
         raise HTTPException(404, "job not found")
-    if not _provider_available(req.provider, config.providers):
-        raise HTTPException(400, f"provider '{req.provider}' 不可用(未配置 API key)")
+    try:
+        smart_step, review_step = pipeline_ai_roles(job.pipeline)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    requirements = await _rerun_step_requirements(
+        config, job.pipeline, (smart_step, review_step), storage, job_id,
+    )
+    workers = await _provider_workers(redis)
+    if requirements is None or not _provider_available(
+        req.provider, config.providers, workers, requirements,
+    ):
+        raise HTTPException(400, f"provider '{req.provider}' 无匹配在线 worker")
     # 把 provider 覆盖写进 job.json(智能/评审步会读),worker rerun 时 pull 到新 job.json。
     raw = await storage.read_file(job_id, "job.json")
-    doc = json.loads(raw) if raw else {}
-    doc.setdefault("ai_overrides", {})
-    doc["ai_overrides"]["11_smart"] = req.provider
-    doc["ai_overrides"]["12_review"] = req.provider
+    try:
+        doc = {} if raw is None else json.loads(raw)
+    except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        raise HTTPException(409, "job.json 格式非法") from exc
+    if not isinstance(doc, dict):
+        raise HTTPException(409, "job.json 顶层必须是对象")
+    overrides = doc.get("ai_overrides")
+    if overrides is None and "ai_overrides" not in doc:
+        overrides = {}
+        doc["ai_overrides"] = overrides
+    if not isinstance(overrides, dict):
+        raise HTTPException(409, "job.json ai_overrides 必须是对象")
+    doc["ai_overrides"][smart_step] = req.provider
+    doc["ai_overrides"][review_step] = req.provider
     await storage.write_file(job_id, "job.json",
                              json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8"))
     await redis.publish("job_command", {
-        "action": "rerun", "job_id": job_id, "from_step": "11_smart",
+        "action": "rerun", "job_id": job_id, "from_step": smart_step,
     })
-    return {"job_id": job_id, "status": "processing", "provider": req.provider}
+    return {"job_id": job_id, "status": "processing", "provider": req.provider,
+            "from_step": smart_step, "review_step": review_step}
 
 
 @router.post("/{job_id}/resubmit")

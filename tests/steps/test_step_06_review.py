@@ -57,8 +57,9 @@ class TestPaperReviewStep:
         monkeypatch.setattr(step, "call_ai", lambda *a, **k: "完全不是 JSON 的自然语言回复")
         result = step.execute()
         review = json.loads((job_dir / "output" / "review.json").read_text())
-        assert review["overall"] == 3.0
-        assert review["parse_failed"] is True
+        assert review["overall"] is None
+        assert review["review_reliable"] is False
+        assert review["parse"]["mode"] == "fallback"
         assert result["parse_failed"] is True
 
     def test_aggregates_real_scores(self, tmp_path, monkeypatch):
@@ -70,9 +71,11 @@ class TestPaperReviewStep:
         step = PaperReviewStep("06_review", job_dir, config)
         scores = {"completeness": 5, "accuracy": 5, "structure": 5,
                   "terminology": 4, "formula_integrity": 4, "figure_references": 4,
-                  "key_terms": [], "missing_concepts": [], "top3_improvements": []}
+                  "key_terms": [], "missing_concepts": [],
+                  "top3_improvements": ["a", "b", "c"], "issues": []}
         monkeypatch.setattr(step, "call_ai", lambda *a, **k: json.dumps(scores))
         result = step.execute()
         review = json.loads((job_dir / "output" / "review.json").read_text())
         assert result["parse_failed"] is False
         assert review["overall"] == 4.5      # (5+5+5+4+4+4)/6 = 4.5,非 3.0
+        assert review["review_reliable"] is False  # mock 未提供可证明的 finish 元数据

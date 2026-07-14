@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import json
+
 from shared.step_base import StepBase, file_hash
+from shared.storage import read_path_bounded
+
+
+MAX_PAPER_TEXT_SOURCE_BYTES = 8 * 1024 * 1024
 
 
 class SmartPaperStep(StepBase):
@@ -25,16 +31,21 @@ class SmartPaperStep(StepBase):
         return hashes
 
     def execute(self) -> dict | None:
-        sections = self.load_json("intermediate/sections.json")
+        sections = self._load_json_bounded("intermediate/sections.json")
         figures: list = []
-        if (self.job_dir / "intermediate" / "figures.json").exists():
-            figures = self.load_json("intermediate/figures.json")
+        try:
+            loaded_figures = self._load_json_bounded("intermediate/figures.json")
+        except FileNotFoundError:
+            loaded_figures = []
+        if isinstance(loaded_figures, list):
+            figures = loaded_figures
         # 正文来源优先级:中文译文(非中文论文,术语与译文一致)> 干净原文(arxiv-html/中文论文)。
         body = None
+        body_source = None
         for rel in ("output/translated.md", "output/original.md"):
-            f = self.job_dir / rel
-            if f.exists():
-                body = f.read_text(encoding="utf-8")
+            body = self._read_optional_text(rel)
+            if body is not None:
+                body_source = "translation" if rel.endswith("translated.md") else "original"
                 break
         # pdf-only 且无任何文本正文(翻译被跳过/失败后手动重跑笔记):直喂 PDF,claude Read 逐页读。
         if body is None and self._source_kind() == "pdf-only":
@@ -52,12 +63,38 @@ class SmartPaperStep(StepBase):
         rel = self.write_smart_note(result, image_assets=image_assets)  # 回填占位符 + 版本化落盘
         return {"chars": len(result), "provider": self.last_ai_provider,
                 "model": self.last_ai_model, "note_file": rel,
-                "source": "translation" if (self.job_dir / "output" / "translated.md").exists()
-                          else "original"}
+                "source": body_source or "original"}
+
+    def _read_optional_text(self, rel_path: str) -> str | None:
+        try:
+            data = read_path_bounded(
+                self.job_dir / rel_path,
+                MAX_PAPER_TEXT_SOURCE_BYTES,
+                trusted_root=self.job_dir,
+            )
+        except FileNotFoundError:
+            return None
+        if len(data) > MAX_PAPER_TEXT_SOURCE_BYTES:
+            raise ValueError(f"paper source exceeds {MAX_PAPER_TEXT_SOURCE_BYTES} bytes")
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"paper source is not UTF-8: {rel_path}") from exc
+        return text if text.strip() else None
+
+    def _load_json_bounded(self, rel_path: str):
+        text = self._read_optional_text(rel_path)
+        if text is None:
+            raise FileNotFoundError(rel_path)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"paper JSON source is invalid: {rel_path}") from exc
 
     def _source_kind(self) -> str | None:
         try:
-            return (self.load_json("intermediate/parsed.json") or {}).get("source_kind")
+            parsed = self._load_json_bounded("intermediate/parsed.json") or {}
+            return parsed.get("source_kind") if isinstance(parsed, dict) else None
         except Exception:
             return None
 
@@ -65,7 +102,8 @@ class SmartPaperStep(StepBase):
         """pdf-only 直喂:无文本正文可用时,让 claude 用 Read 工具直接读 PDF 产笔记
         (worker 镜像带 poppler,Read 按页渲染;上限 60 页防超长 agentic)。"""
         pdf = (self.job_dir / "input" / "source.pdf").resolve()
-        pages = int((self.load_json("intermediate/parsed.json") or {}).get("pages") or 0)
+        parsed = self._load_json_bounded("intermediate/parsed.json") or {}
+        pages = int(parsed.get("pages") or 0) if isinstance(parsed, dict) else 0
         cap = min(pages or 30, 60)
         prompt = (self._load_prompt_template("05_smart_paper", _DEFAULT_HEADER)
                   + self.terminology_block(self.load_domain_prompt_profile())

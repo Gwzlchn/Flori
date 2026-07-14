@@ -4,7 +4,13 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
+from shared.review_contract import (
+    paper_figures_review_text,
+    persist_review_source,
+    source_record,
+)
 from shared.step_base import StepBase, file_hash
 
 
@@ -21,25 +27,68 @@ class PaperReviewStep(StepBase):
         return {
             "smart": file_hash(self.latest_smart_note()) if self.latest_smart_note() else "",
             "sections": file_hash(self.job_dir / "intermediate" / "sections.json"),
+            "original": file_hash(self.job_dir / "output" / "original.md")
+                        if (self.job_dir / "output" / "original.md").exists() else "",
+            "translated": file_hash(self.job_dir / "output" / "translated.md")
+                          if (self.job_dir / "output" / "translated.md").exists() else "",
+            "figures": file_hash(self.job_dir / "intermediate" / "figures.json")
+                       if (self.job_dir / "intermediate" / "figures.json").exists() else "",
+            "provider": self.override_provider(),
         }
 
     def execute(self) -> dict | None:
-        smart_clip, coverage, note_file = self.prepare_smart_for_review()
-        sections = self.load_json("intermediate/sections.json")
+        smart_clip, coverage, note_file, smart_source = self.prepare_smart_for_review()
         figures: list = []
         if (self.job_dir / "intermediate" / "figures.json").exists():   # 仅旧 pymupdf job 有
-            figures = self.load_json("intermediate/figures.json")
+            figure_data, _ = source_record(
+                self.job_dir, "intermediate/figures.json", label="figures_json",
+            )
+            try:
+                figures = json.loads(figure_data)
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise ValueError("paper review figures are invalid") from exc
+            if not isinstance(figures, list):
+                raise ValueError("paper review figures are invalid")
 
-        original_titles = [
-            s["title"] for s in sections.get("sections", [])
-        ]
-        # figure_references 维度的客观对照:原文图表清单(序号 | 图注 | 是否可内嵌),否则该维度只能盲评。
-        figure_list = [
-            {"ref": f.get("index") if f.get("index") is not None else f.get("id", ""),
-             "caption": f.get("caption", ""),
-             "embeddable": bool(f.get("filename"))}
-            for f in figures
-        ]
+        source_paths = [p for p in ("output/original.md", "output/translated.md")
+                        if (self.job_dir / p).exists()]
+        if not source_paths:
+            source_paths = ["intermediate/sections.json"]
+        source_blocks = []
+        paper_sources = []
+        paper_source_texts = {}
+        for source_path in source_paths:
+            source_text, paper_source = source_record(
+                self.job_dir, source_path, label=Path(source_path).stem,
+            )
+            if source_path.endswith("sections.json"):
+                try:
+                    sections = json.loads(source_text)
+                except (json.JSONDecodeError, TypeError) as exc:
+                    raise ValueError("paper review sections are invalid") from exc
+                if not isinstance(sections, dict):
+                    raise ValueError("paper review sections are invalid")
+                source_text = "\n\n".join(
+                    f"## {s.get('title', '')}\n{s.get('text', '')}"
+                    for s in sections.get("sections", [])
+                )
+                if not source_text.strip():
+                    raise ValueError("paper review source has no section body")
+                source_text, paper_source = persist_review_source(
+                    self.job_dir, source_text, label="sections",
+                )
+            source_blocks.append(f"--- {paper_source['label']} 全文 ---\n{source_text}")
+            paper_sources.append(paper_source)
+            paper_source_texts[paper_source["label"]] = source_text
+        # figures.json 是可变当前事实。送评时投影并内容寻址,读时再与当前文件重算比对。
+        figure_text = paper_figures_review_text(figures)
+        if (self.job_dir / "intermediate" / "figures.json").exists():
+            figure_text, figure_source = persist_review_source(
+                self.job_dir, figure_text, label="figures",
+            )
+            source_blocks.append(f"--- figures 全文 ---\n{figure_text}")
+            paper_sources.append(figure_source)
+            paper_source_texts["figures"] = figure_text
 
         dimensions = [
             ("completeness", "信息完整性"),
@@ -53,8 +102,8 @@ class PaperReviewStep(StepBase):
             intro="请对以下论文笔记进行质量评审。",
             dimensions=dimensions,
             ref_block=(
-                f"原文章节：{json.dumps(original_titles, ensure_ascii=False)}\n"
-                f"原文图表(ref 序号 | 图注 | 是否可内嵌):{json.dumps(figure_list, ensure_ascii=False)}\n\n"
+                "\n\n".join(source_blocks) + "\n\n"
+                f"原文图表(ref 序号 | 图注 | 是否可内嵌):{figure_text}\n\n"
                 f"--- 笔记 ---\n{smart_clip}"
             ),
         )
@@ -62,6 +111,8 @@ class PaperReviewStep(StepBase):
         review, parse_failed = self.run_dimension_review(
             prompt, fallback=self.review_fallback(score_keys), score_keys=score_keys,
             note_file=note_file, coverage=coverage,
+            review_sources=[smart_source, *paper_sources],
+            review_source_texts={"smart": smart_clip, **paper_source_texts},
         )
         return {"overall": review.get("overall", 0), "parse_failed": parse_failed,
                 "note_file": note_file, "coverage_truncated": coverage["truncated"]}

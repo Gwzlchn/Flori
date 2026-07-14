@@ -118,6 +118,16 @@ def validate_url(url: str) -> bool:
 
 Worker 执行前校验 job_id + step + url，不合法直接丢弃。
 
+### 受控取证下载
+
+案例取证中，模型只用 WebSearch 提交候选 URL，不能调用 Bash/curl 或直接决定可信度。服务端下载器执行以下硬门：
+
+- 只允许无 userinfo 的 http(s)，每次跳转都重新规范化 URL 并解析 DNS。
+- 解析出的全部地址必须是公网地址；private、loopback、link-local、multicast、reserved 和 unspecified 任一命中即拒绝。
+- 生产请求固定连接已校验 IP，HTTPS 保留原 hostname 的 SNI 与证书校验，不使用环境代理，关闭 DNS 校验到连接之间的 rebinding 窗口。
+- 只接收允许的文本 MIME，限制跳转次数、超时、单源与总字节；空正文拒绝。
+- manifest 与当前 job、稳定 artifact 路径、hash 和 bytes 绑定。旧 schema、跨 job、重复 ID、路径逃逸、符号链接、低置信或文件篡改均不得进入 smart/review 权威上下文，也不得通过 API 暴露外链。
+
 ## 6. 密钥管理
 
 | 密钥 | 存储位置 | 谁需要 |

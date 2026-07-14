@@ -84,25 +84,39 @@ class SmartStep(StepBase):
         return "".join(parts)
 
     def _load_evidence(self) -> dict | None:
-        """取证产物 output/evidence.json(案例类才有);供笔记引 [E#]。无/坏即 None。"""
+        """只返回当前 job 中完整且未篡改的 v2 eligible 证据。"""
+        from shared.evidence_contract import MAX_EVIDENCE_BYTES, validate_manifest_loaded
+        from shared.storage import read_path_bounded
+
         p = self.job_dir / "output" / "evidence.json"
         if not p.exists():
             return None
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
+            data = read_path_bounded(
+                p, MAX_EVIDENCE_BYTES, trusted_root=self.job_dir,
+            )
+            if len(data) > MAX_EVIDENCE_BYTES:
+                return None
+            manifest = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, OSError):
             return None
+        valid, errors, texts = validate_manifest_loaded(
+            self.job_dir, self.job_dir.name, manifest,
+        )
+        if errors:
+            self.log.warning("evidence_rejected", errors=errors)
+        if not valid:
+            return None
+        return {"schema_version": 2, "evidence": list(valid.values()), "texts": texts}
 
     def _evidence_block(self, ev: dict) -> str:
         """把取证来源转成可注入 prompt 的"权威来源"块,引导笔记用 [E#] 引用一手事实。"""
         lines = ["\n权威来源（取证所得，可在笔记中用 [E#] 角标引用对应来源；"
                  "引用的精确数据必须出自下列来源，不得引用列表外的精确数字）："]
-        for s in ev.get("evidence", []):
-            facts = "；".join(f.get("figure", "") for f in (s.get("key_facts") or [])[:3])
-            lines.append(f"[{s.get('id')}] {s.get('type', '')}·{s.get('source_tier', '')} "
-                         f"{s.get('title', '')}（{s.get('ref', '')}）：{facts}")
-        if (ev.get("case_match") or {}).get("confidence") == "low":
-            lines.append("注意：本案取证置信度低/有缺口，存疑精确数据请标〔待核实〕，勿臆造。")
+        for item in ev.get("evidence", []):
+            text = ev.get("texts", {}).get(item["id"], "")
+            lines.append(f"\n[{item['id']}] {item.get('source_tier', '')} "
+                         f"{item.get('title', '')}\n{text}")
         return "\n".join(lines) + "\n"
 
     def _build_user_prompt(self, mechanical: str, frame_desc: str = "") -> str:

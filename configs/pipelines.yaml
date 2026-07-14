@@ -170,11 +170,12 @@ video:
       label: "权威来源"
       extends: .ai-step
       run: steps.video.step_evidence
+      version: "2"
       # 案例取证,理由见 ADR-0012。仅案例类(domain=finance / style_tags 含 case-study)触发,步内自门控。
       # 其余写空 skip,秒返回不挡 smart。在 smart 之前跑——11_smart 依赖它以引 [E#] 一手来源。
       needs: ["09_mechanical"]
       tags: []
-      timeout: 1800   # claude WebSearch + 直连 curl 多轮 agentic 取证
+      timeout: 1800   # Claude 只搜索候选,正文由服务端受控下载并校验
       retry: 1        # 外网/反爬易抖,不像评审那样 5 次硬刚
       # 取证固定用 Claude CLI 显式模型;换模型会变 def_digest → 步自动过期可重跑。
       ai:
@@ -186,6 +187,7 @@ video:
       label: "智能版笔记"
       extends: .ai-step
       run: steps.video.step_11_smart
+      version: "2"
       # 依赖取证:案例类笔记据 evidence.json 引 [E#] 一手来源(非案例类 10_evidence 秒 skip,不挡)。
       needs: ["09_mechanical", "10_evidence"]
       tags: ["vision"]
@@ -219,6 +221,7 @@ video:
       label: "评审"
       extends: .review
       run: steps.video.step_12_review
+      version: "2"
       # 评最新版智能笔记;并读 evidence.json 核 [E#] 忠实性(经传递性排在取证之后)。
       needs: ["12_concepts"]
       tags: []
@@ -228,7 +231,7 @@ video:
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
       on_complete:
         - action: collect_glossary
-      outputs: ["output/versions/review_*"]   # 版本化评审(与笔记版本 1:1 配对);笔记页另渲染可读面板
+      outputs: ["output/review.json", "output/review_input.md", "output/review_sources/*", "output/versions/review_*", "output/versions/review_input_*"]
 
 paper:
   # provider 统一 claude-cli + 显式模型,由带 claude-cli tag 的 ai worker 认领。
@@ -291,6 +294,9 @@ paper:
       # 大论文多 chunk 串行翻译,步墙钟须覆盖全部 chunk(~15 块 × 2-4min);600 默认必超时。
       timeout: 7200
       tags: []
+      capability_rules:
+        read:
+          unless_any_nonempty: ["output/original.md"]
       # 仅非中文论文触发:02_pdf_parse 写了 needs_translation.json 才跑,中文论文跳过。
       rules:
         - exists: "intermediate/needs_translation.json"
@@ -310,6 +316,9 @@ paper:
       # needs 04_translate_paper:非中文论文先翻译,笔记基于译文做(译文跳过=中文论文时依赖视为满足)。
       needs: ["03_sections", "04_translate_paper"]
       tags: []
+      capability_rules:
+        read:
+          unless_any_nonempty: ["output/translated.md", "output/original.md"]
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
@@ -339,6 +348,7 @@ paper:
       label: "评审"
       extends: .review
       run: steps.paper.step_06_review
+      version: "2"
       needs: ["05_concepts"]
       tags: []
       ai:
@@ -346,7 +356,7 @@ paper:
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
       on_complete:
         - action: collect_glossary
-      outputs: ["output/versions/review_*"]   # 版本化评审(与笔记版本 1:1 配对);笔记页另渲染可读面板
+      outputs: ["output/review.json", "output/review_input.md", "output/review_sources/*", "output/versions/review_*", "output/versions/review_input_*"]
 
 article:
   # provider 统一 claude-cli + 显式模型,由带 claude-cli tag 的 ai worker 认领;
@@ -467,6 +477,7 @@ article:
       label: "评审"
       extends: .review
       run: steps.article.step_05_review
+      version: "2"
       needs: ["05_concepts"]
       tags: []
       # 评审跟随智能笔记(smart_note=on 才评审)。
@@ -479,7 +490,7 @@ article:
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
       on_complete:
         - action: collect_glossary
-      outputs: ["output/versions/review_*"]   # 版本化评审(与笔记版本 1:1 配对);笔记页另渲染可读面板
+      outputs: ["output/review.json", "output/review_input.md", "output/review_sources/*", "output/versions/review_*", "output/versions/review_input_*"]
 
 audio:
   # provider 统一 claude-cli + 显式模型,由带 claude-cli tag 的 ai worker 认领。
@@ -568,6 +579,7 @@ audio:
       label: "评审"
       extends: .review
       run: steps.audio.step_05_review
+      version: "2"
       needs: ["05_concepts"]
       tags: []
       ai:
@@ -575,4 +587,4 @@ audio:
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
       on_complete:
         - action: collect_glossary
-      outputs: ["output/versions/review_*"]   # 版本化评审(与笔记版本 1:1 配对);笔记页另渲染可读面板
+      outputs: ["output/review.json", "output/review_input.md", "output/review_sources/*", "output/versions/review_*", "output/versions/review_input_*"]

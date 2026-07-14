@@ -15,7 +15,9 @@ import hmac
 import io
 import json
 import os
+import re
 import shutil
+import stat
 import tempfile
 import time
 import uuid
@@ -34,6 +36,227 @@ _STAGING_PREFIX = ".flori-upload/"
 
 class ArtifactTooLarge(ValueError):
     pass
+
+
+def read_path_bounded(
+    path: Path,
+    max_bytes: int,
+    *,
+    chunk_size: int = 256 * 1024,
+    trusted_root: Path | None = None,
+) -> bytes:
+    """从同一文件描述符最多读取 limit+1 字节,并拒绝目录逃逸与读中替换。"""
+    if type(max_bytes) is not int or max_bytes < 0:
+        raise ValueError("max_bytes must be a non-negative integer")
+    if type(chunk_size) is not int or chunk_size <= 0:
+        raise ValueError("chunk_size must be a positive integer")
+    if trusted_root is None:
+        fd = _open_path_nofollow(path)
+        reopen = lambda: _open_path_nofollow(path)
+    else:
+        fd = _open_path_beneath(path, trusted_root)
+        reopen = lambda: _open_path_beneath(path, trusted_root)
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise OSError("artifact is not a regular file")
+        data = bytearray()
+        remaining = max_bytes + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(chunk_size, remaining))
+            if not chunk:
+                break
+            data.extend(chunk)
+            remaining -= len(chunk)
+
+        after = os.fstat(fd)
+        try:
+            check_fd = reopen()
+        except OSError as exc:
+            raise OSError("artifact changed while reading") from exc
+        try:
+            current = os.fstat(check_fd)
+        finally:
+            os.close(check_fd)
+        if not stat.S_ISREG(current.st_mode):
+            raise OSError("artifact changed while reading")
+        if (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino):
+            raise OSError("artifact changed while reading")
+
+        def _snapshot(value):
+            return (
+                value.st_dev,
+                value.st_ino,
+                value.st_size,
+                value.st_mtime_ns,
+                value.st_ctime_ns,
+            )
+
+        if _snapshot(before) != _snapshot(after):
+            raise OSError("artifact changed while reading")
+        if len(data) <= max_bytes and len(data) != after.st_size:
+            raise OSError("artifact changed while reading")
+        return bytes(data)
+    finally:
+        os.close(fd)
+
+
+def _open_path_nofollow(path: Path) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    return os.open(path, flags)
+
+
+def _open_path_beneath(path: Path, trusted_root: Path) -> int:
+    """用 openat 逐段拒绝符号链接,使父目录竞态也不能逃出可信根。"""
+    root_input = Path(os.path.abspath(trusted_root))
+    candidate = Path(os.path.abspath(path))
+    try:
+        rel = candidate.relative_to(root_input)
+    except ValueError as exc:
+        raise OSError("artifact escapes trusted root") from exc
+    if not rel.parts or any(part in {"", ".", ".."} for part in rel.parts):
+        raise OSError("artifact path is invalid")
+
+    root = root_input.resolve(strict=True)
+    dir_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    current = os.open(root, dir_flags)
+    try:
+        for part in rel.parts[:-1]:
+            next_fd = os.open(part, dir_flags, dir_fd=current)
+            os.close(current)
+            current = next_fd
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        return os.open(rel.parts[-1], flags, dir_fd=current)
+    finally:
+        os.close(current)
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def write_path_atomic(path: Path, data: bytes) -> None:
+    """在目标目录完成 fsync 后原子替换,失败不暴露半写文件。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, staging_name = tempfile.mkstemp(
+        prefix=f".{path.name}.flori-part-", dir=path.parent,
+    )
+    staging = Path(staging_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(staging, path)
+        _fsync_directory(path.parent)
+    finally:
+        staging.unlink(missing_ok=True)
+
+
+def publish_content_addressed_path(path: Path, data: bytes) -> None:
+    """原子发布内容寻址文件;已存在时只接受逐字节相同内容。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, staging_name = tempfile.mkstemp(
+        prefix=f".{path.name}.flori-part-", dir=path.parent,
+    )
+    staging = Path(staging_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(staging, path, follow_symlinks=False)
+        except FileExistsError:
+            try:
+                existing = read_path_bounded(path, len(data), trusted_root=path.parent)
+            except OSError as exc:
+                raise ValueError("content-addressed artifact is unsafe") from exc
+            if existing != data:
+                raise ValueError("content-addressed artifact collision")
+        else:
+            _fsync_directory(path.parent)
+    finally:
+        staging.unlink(missing_ok=True)
+
+
+async def read_file_bounded(
+    storage: "StorageBackend",
+    job_id: str,
+    rel_path: str,
+    max_bytes: int,
+    *,
+    chunk_size: int = 256 * 1024,
+) -> bytes | None:
+    """用 size + range stream 有界读取;超限返回 limit+1 哨兵供上层降级。"""
+    if type(max_bytes) is not int or max_bytes < 0:
+        raise ValueError("max_bytes must be a non-negative integer")
+    size = await storage.file_size(job_id, rel_path)
+    if size is not None:
+        if type(size) is not int or size < 0:
+            raise ValueError("artifact size metadata is invalid")
+        if size > max_bytes:
+            return b"\0" * (max_bytes + 1)
+    stream = await storage.open_stream(
+        job_id, rel_path, length=max_bytes + 1,
+        chunk_size=min(max(chunk_size, 1), max_bytes + 1 or 1),
+    )
+    if stream is None:
+        return None
+    data = bytearray()
+    try:
+        async for chunk in stream:
+            if not isinstance(chunk, bytes):
+                raise ValueError("artifact stream yielded non-bytes")
+            remaining = max_bytes + 1 - len(data)
+            if remaining <= 0:
+                break
+            data.extend(chunk[:remaining])
+            if len(data) > max_bytes:
+                break
+        return bytes(data)
+    finally:
+        close = getattr(stream, "aclose", None)
+        if callable(close):
+            await close()
+
+
+def verification_artifact_limit(rel_path: str) -> int:
+    """返回评审/取证重验路径的单一字节上限。"""
+    from shared.evidence_contract import MAX_EVIDENCE_BYTES, MAX_MECHANICAL_EVIDENCE_BYTES
+    from shared.review_contract import MAX_REVIEW_SOURCE_BYTES
+
+    if rel_path.startswith("output/evidence/evidence-") or rel_path == "output/evidence.json":
+        return MAX_EVIDENCE_BYTES
+    if rel_path == "output/notes_mechanical.md":
+        return MAX_MECHANICAL_EVIDENCE_BYTES
+    return MAX_REVIEW_SOURCE_BYTES
+
+
+async def read_verification_artifact_bounded(
+    storage: "StorageBackend", job_id: str, rel_path: str,
+) -> bytes | None:
+    """有界读取重验输入;存储故障统一成 verifier 可降级的 OSError。"""
+    try:
+        return await read_file_bounded(
+            storage, job_id, rel_path, verification_artifact_limit(rel_path),
+        )
+    except asyncio.CancelledError:
+        raise
+    except (OSError, ValueError):
+        raise
+    except Exception as exc:
+        raise OSError("verification artifact read failed") from exc
 
 
 def is_credential_file(rel: str) -> bool:
@@ -1042,10 +1265,33 @@ class GatewayStorage:
     async def list_file_sizes(self, job_id: str) -> dict[str, int]:
         return {}
 
-    # gateway 仅供远端 worker 拉产物,不用于给前端流式播放;range 用整文件回退即可。
+    # 只取 Range 元数据,验证路径不得为求大小先下载完整产物。
     async def file_size(self, job_id: str, rel_path: str) -> int | None:
-        data = await self.read_file(job_id, rel_path)
-        return len(data) if data is not None else None
+        headers = self._auth(job_id)
+        headers["Range"] = "bytes=0-0"
+        endpoint = f"/api/runner/jobs/{job_id}/artifacts/{rel_path}"
+        async with self._client().stream("GET", endpoint, headers=headers) as resp:
+            _raise_gateway_auth(resp, endpoint)
+            if resp.status_code == 404:
+                return None
+            content_range = resp.headers.get("Content-Range", "")
+            if resp.status_code == 416:
+                match = re.fullmatch(r"bytes \*/(\d+)", content_range.strip())
+                if match and int(match.group(1)) == 0:
+                    return 0
+                resp.raise_for_status()
+            if resp.status_code == 206:
+                match = re.fullmatch(r"bytes \d+-\d+/(\d+)", content_range.strip())
+                if not match:
+                    raise ValueError("gateway artifact size metadata is invalid")
+                return int(match.group(1))
+            if resp.status_code == 200:
+                value = resp.headers.get("Content-Length", "")
+                if not re.fullmatch(r"\d+", value.strip()):
+                    raise ValueError("gateway artifact size metadata is invalid")
+                return int(value)
+            resp.raise_for_status()
+            raise ValueError("gateway artifact size metadata is invalid")
 
     async def read_range(self, job_id: str, rel_path: str, start: int, length: int) -> bytes | None:
         data = await self.read_file(job_id, rel_path)

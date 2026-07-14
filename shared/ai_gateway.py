@@ -93,6 +93,7 @@ class DryRunProvider:
             output_tokens=0,
             cost_usd=0.0,
             duration_sec=0.0,
+            finish_reason="stop",
             raw={"dry_run": True},
         )
 
@@ -623,6 +624,11 @@ class CodexCLIProvider:
             num_turns=turns,
             cached=cr > 0,
             session_id=thread_id,
+            finish_reason=(
+                "turn.failed" if errors
+                else "turn.completed" if turns > 0
+                else None
+            ),
             raw={
                 "source": "codex-jsonl",
                 "thread_id": thread_id,

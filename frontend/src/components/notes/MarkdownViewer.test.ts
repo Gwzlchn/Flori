@@ -59,3 +59,24 @@ describe('MarkdownViewer term links', () => {
     expect(w.find('a.term-link').attributes('data-term')).toBe('注意力机制')
   })
 })
+
+describe('MarkdownViewer evidence citations', () => {
+  it('only eligible ids become buttons and emit navigation', async () => {
+    const w = mount(MarkdownViewer, {
+      props: { content: '命中 123 [E1]，未知 [E2]。', jobId: 'j', evidenceIds: ['E1'] },
+    })
+    const button = w.find('button.evidence-citation')
+    expect(button.exists()).toBe(true)
+    expect(button.attributes('data-evidence-id')).toBe('E1')
+    expect(w.findAll('button.evidence-citation')).toHaveLength(1)
+    expect(w.text()).toContain('[E2]')
+    await button.trigger('click')
+    expect(w.emitted('evidenceCitation')).toEqual([['E1']])
+  })
+
+  it('legacy or ineligible ids remain plain text', () => {
+    const w = mount(MarkdownViewer, { props: { content: '来源 [E1]', jobId: 'j', evidenceIds: [] } })
+    expect(w.find('button.evidence-citation').exists()).toBe(false)
+    expect(w.text()).toContain('[E1]')
+  })
+})

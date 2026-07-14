@@ -144,6 +144,18 @@ class TestBuildStepConfig:
         assert step_cfg["ai"]["primary"]["provider"] == "claude-cli"  # 默认走 Claude CLI 接入方式
         assert "text_fallback" in step_cfg["ai"]
 
+    def test_conditional_capability_rules_reach_worker_step(self, configs_dir, tmp_data_dir):
+        cfg = load_config(config_dir=configs_dir, data_dir=tmp_data_dir)
+        step_cfg = build_step_config(cfg, "paper", "05_smart_paper")
+
+        assert step_cfg["step"]["capability_rules"] == {
+            "read": {
+                "unless_any_nonempty": [
+                    "output/translated.md", "output/original.md",
+                ],
+            },
+        }
+
     def test_no_ai_config(self, configs_dir, tmp_data_dir):
         cfg = load_config(config_dir=configs_dir, data_dir=tmp_data_dir)
         step_cfg = build_step_config(cfg, "video", "03_scene")

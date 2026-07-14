@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from shared.step_base import REVIEW_REF_LIMIT, StepBase, file_hash
+import json
+
+from shared.review_contract import persist_review_source, source_record
+from shared.step_base import StepBase, file_hash
 
 
 class PodcastReviewStep(StepBase):
@@ -18,12 +21,26 @@ class PodcastReviewStep(StepBase):
         return {
             "smart": file_hash(self.latest_smart_note()) if self.latest_smart_note() else "",
             "transcript": file_hash(self.job_dir / "intermediate" / "transcript.json"),
+            "provider": self.override_provider(),
         }
 
     def execute(self) -> dict | None:
-        smart_clip, coverage, note_file = self.prepare_smart_for_review()
-        transcript = self.load_json("intermediate/transcript.json")
+        smart_clip, coverage, note_file, smart_source = self.prepare_smart_for_review()
+        transcript_data, _ = source_record(
+            self.job_dir, "intermediate/transcript.json", label="transcript_json",
+        )
+        try:
+            transcript = json.loads(transcript_data)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise ValueError("audio review transcript is invalid") from exc
+        if not isinstance(transcript, dict):
+            raise ValueError("audio review transcript is invalid")
         full_text = transcript.get("full_text", "")
+        if not isinstance(full_text, str) or not full_text.strip():
+            raise ValueError("audio review source has no transcript body")
+        full_text, transcript_source = persist_review_source(
+            self.job_dir, full_text, label="transcript",
+        )
 
         dimensions = [
             ("completeness", "信息完整性（是否遗漏重要内容）"),
@@ -37,7 +54,7 @@ class PodcastReviewStep(StepBase):
             intro="请对以下播客笔记进行质量评审。",
             dimensions=dimensions,
             ref_block=(
-                f"--- 转写正文（节选）---\n{full_text[:REVIEW_REF_LIMIT]}\n\n"
+                f"--- 转写正文 ---\n{full_text}\n\n"
                 f"--- 笔记 ---\n{smart_clip}"
             ),
         )
@@ -45,6 +62,8 @@ class PodcastReviewStep(StepBase):
         review, parse_failed = self.run_dimension_review(
             prompt, fallback=self.review_fallback(score_keys), score_keys=score_keys,
             note_file=note_file, coverage=coverage,
+            review_sources=[smart_source, transcript_source],
+            review_source_texts={"smart": smart_clip, "transcript": full_text},
         )
         return {"overall": review.get("overall", 0), "parse_failed": parse_failed,
                 "note_file": note_file, "coverage_truncated": coverage["truncated"]}

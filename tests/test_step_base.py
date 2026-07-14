@@ -8,7 +8,9 @@ from unittest.mock import patch
 
 import pytest
 
-from shared.errors import ProcessingError
+from shared.errors import InputInvalidError, ProcessingError
+from shared.models import LLMResponse
+from shared.review_contract import MAX_REVIEW_SOURCE_BYTES
 from shared.step_base import StepBase, file_hash
 
 
@@ -53,6 +55,157 @@ class TestFileHash:
         f1.write_text("hello")
         f2.write_text("world")
         assert file_hash(f1) != file_hash(f2)
+
+
+@pytest.mark.parametrize("document", [
+    None, [], False, 0, "job",
+    {"ai_overrides": None}, {"ai_overrides": []},
+    {"ai_overrides": False}, {"ai_overrides": 0},
+    {"ai_overrides": "openai"},
+    {"ai_overrides": {"test_step": None}}, {"ai_overrides": {"test_step": []}},
+    {"ai_overrides": {"test_step": False}}, {"ai_overrides": {"test_step": 0}},
+    {"ai_overrides": {"test_step": {}}},
+    {"ai_overrides": {"test_step": "  "}},
+])
+def test_step_override_invalid_shapes_fail_closed_without_mutating_ai(tmp_path, document):
+    (tmp_path / "job.json").write_text(json.dumps(document), encoding="utf-8")
+    ai = {
+        "primary": {"provider": "claude-cli", "model": "primary"},
+        "fallback": {"provider": "openai", "model": "fallback"},
+    }
+    step = DummyStep(tmp_path, config={"ai": ai.copy(), "providers": {"providers": {}}})
+
+    with pytest.raises(InputInvalidError, match="invalid AI override"):
+        step.override_provider()
+    with pytest.raises(InputInvalidError, match="invalid AI override"):
+        step._apply_provider_override()
+
+    assert step.config["ai"] == ai
+
+
+def test_step_unknown_override_fails_before_gateway_or_config_mutation(tmp_path):
+    (tmp_path / "job.json").write_text(
+        json.dumps({"ai_overrides": {"test_step": "typo-provider"}}), encoding="utf-8",
+    )
+    ai = {"primary": {"provider": "claude-cli", "model": "primary"}}
+    step = DummyStep(tmp_path, config={
+        "ai": ai.copy(),
+        "providers": {"providers": {"claude-cli": {"type": "cli"}}},
+    })
+
+    with pytest.raises(InputInvalidError, match="unknown_provider"):
+        step._apply_provider_override()
+
+    assert step.config["ai"] == ai
+    assert step._gateway is None
+
+
+def test_step_invalid_override_run_writes_input_invalid_error(tmp_path):
+    (tmp_path / "input").mkdir()
+    (tmp_path / "input" / "data.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "job.json").write_text(
+        json.dumps({"ai_overrides": {"test_step": "typo-provider"}}), encoding="utf-8",
+    )
+    step = DummyStep(tmp_path, config={
+        "ai": {"primary": {"provider": "claude-cli", "model": "primary"}},
+        "providers": {"providers": {"claude-cli": {"type": "cli"}}},
+    })
+
+    with pytest.raises(SystemExit):
+        step.run()
+
+    error = json.loads((tmp_path / ".test_step.error.json").read_text(encoding="utf-8"))
+    assert error["error_type"] == "input_invalid"
+    assert "unknown_provider" in error["message"]
+
+
+def test_step_override_parser_normalizes_valid_provider(tmp_path):
+    (tmp_path / "job.json").write_text(
+        json.dumps({"ai_overrides": {"test_step": " openai "}}), encoding="utf-8",
+    )
+    step = DummyStep(tmp_path, config={
+        "ai": {"primary": {"provider": "claude-cli", "model": "primary"}},
+        "providers": {"providers": {"openai": {"models": ["gpt-test"]}}},
+    })
+
+    assert step.override_provider() == "openai"
+    step._apply_provider_override()
+
+    assert step.config["ai"] == {
+        "primary": {"provider": "openai", "model": "gpt-test"},
+    }
+
+
+def test_step_rechecks_read_capability_after_enqueue_artifact_race(tmp_path):
+    (tmp_path / "job.json").write_text(json.dumps({
+        "ai_overrides": {"test_step": "openai"},
+    }), encoding="utf-8")
+    step = DummyStep(tmp_path, config={
+        "step": {"capability_rules": {
+            "read": {"unless_any_nonempty": ["output/original.md"]},
+        }},
+        "ai": {"primary": {"provider": "claude-cli", "model": "primary"}},
+        "providers": {"providers": {
+            "claude-cli": {"type": "cli", "features": ["read"]},
+            "openai": {"type": "openai", "features": [], "models": ["gpt-test"]},
+        }},
+    })
+
+    with pytest.raises(InputInvalidError, match="does not support read"):
+        step._apply_provider_override()
+
+    assert step.config["ai"] == {
+        "primary": {"provider": "claude-cli", "model": "primary"},
+    }
+    assert step._gateway is None
+
+
+def test_actual_read_tool_cannot_be_bypassed_by_artifact_appearance(tmp_path):
+    (tmp_path / "output").mkdir()
+    (tmp_path / "output/original.md").write_text("appeared after mode selection")
+    (tmp_path / "job.json").write_text(json.dumps({
+        "ai_overrides": {"test_step": "openai"},
+    }), encoding="utf-8")
+    step = DummyStep(tmp_path, config={
+        "step": {"capability_rules": {
+            "read": {"unless_any_nonempty": ["output/original.md"]},
+        }},
+        "ai": {"primary": {"provider": "claude-cli", "model": "primary"}},
+        "providers": {"providers": {
+            "claude-cli": {"type": "cli", "features": ["read"]},
+            "openai": {"type": "openai", "features": [], "models": ["gpt-test"]},
+        }},
+    })
+
+    class GatewayMustNotRun:
+        async def call(self, *args, **kwargs):
+            raise AssertionError("provider call must be blocked by the Read capability gate")
+
+    step._gateway = GatewayMustNotRun()
+    with pytest.raises(InputInvalidError, match="does not support read"):
+        step.call_ai("read the PDF", allowed_tools=["Read"])
+
+
+def test_actual_non_read_request_does_not_inherit_stale_artifact_capability(tmp_path):
+    step = DummyStep(tmp_path, config={
+        "step": {"capability_rules": {
+            "read": {"unless_any_nonempty": ["output/original.md"]},
+        }},
+        "ai": {"primary": {"provider": "openai", "model": "gpt-test"}},
+        "providers": {"providers": {
+            "openai": {"type": "openai", "features": []},
+        }},
+    })
+
+    class Gateway:
+        async def call(self, _step_name, _request):
+            return LLMResponse(
+                content="captured text result", model="gpt-test", provider="openai",
+                finish_reason="stop",
+            )
+
+    step._gateway = Gateway()
+    assert step.call_ai("use the captured text") == "captured text result"
 
 
 class TestShouldRun:
@@ -409,6 +562,49 @@ class TestCallAI:
         meta = json.loads((tmp_path / ".test_ai.meta.json").read_text())
         assert meta["status"] == "done"
         assert meta["chars"] > 0
+
+
+class TestReviewInputGate:
+    @staticmethod
+    def _response():
+        return LLMResponse(
+            content="", model="m", provider="openai", finish_reason="stop",
+            tier_used="primary", attempts=[{
+                "tier": "primary", "provider": "openai", "model": "m", "ok": True,
+            }],
+        )
+
+    def test_aggregate_prompt_equal_to_limit_is_allowed(self, tmp_path):
+        step = DummyStep(tmp_path)
+        calls = []
+        step.last_ai_response = self._response()
+        step.call_ai = lambda prompt, **_kwargs: calls.append(len(prompt.encode())) or json.dumps({
+            "accuracy": 5, "key_terms": [], "missing_concepts": [],
+            "top3_improvements": ["a", "b", "c"], "issues": [],
+        })
+
+        step.run_dimension_review(
+            "x" * MAX_REVIEW_SOURCE_BYTES, {}, ["accuracy"], "",
+            {"truncated": False},
+        )
+
+        assert calls == [MAX_REVIEW_SOURCE_BYTES]
+        assert (tmp_path / "output/review_input.md").stat().st_size == MAX_REVIEW_SOURCE_BYTES
+
+    def test_aggregate_prompt_over_limit_has_zero_write_and_zero_ai(self, tmp_path):
+        step = DummyStep(tmp_path)
+        calls = []
+        step.call_ai = lambda *_args, **_kwargs: calls.append(True) or "{}"
+
+        with pytest.raises(ValueError, match="review input exceeds"):
+            step.run_dimension_review(
+                "x" * (MAX_REVIEW_SOURCE_BYTES + 1), {}, ["accuracy"],
+                "output/versions/notes_smart_x.md", {"truncated": False},
+            )
+
+        assert calls == []
+        assert not (tmp_path / "output/review_input.md").exists()
+        assert not (tmp_path / "output/versions/review_input_x.md").exists()
 
 
 class TestCliMainEndToEnd:

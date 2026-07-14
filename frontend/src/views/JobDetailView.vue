@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, watch, inject } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, inject, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { useJobStore } from '../stores/jobs'
@@ -201,7 +201,7 @@ const headings = ref<{ id: string; text: string; level: number }[]>([])
 const terms = ref<{ term: string; zh_name?: string; aliases?: string[] }[]>([])
 const acceptedTermNames = computed(() => new Set(terms.value.map((t) => t.term)))
 
-type Version = { provider: string; model: string; version: string; file: string; review_file: string | null; overall: number | null }
+type Version = { provider: string; model: string; version: string; file: string; review_file: string | null; overall: number | null; review_state?: string | null }
 const versions = ref<Version[]>([])
 const activeFile = ref<string | null>(null)
 const isArticle = computed(() => job.value?.content_type === 'article')
@@ -230,18 +230,35 @@ const pendingProvider = ref<Provider | null>(null)
 
 // 评审
 const review = ref<Record<string, any> | null>(null)
+const reviewState = computed(() => review.value?.reliability_state || 'legacy_unverified')
+const reviewReliable = computed(() => (
+  reviewState.value === 'reliable' && review.value?.review_reliable === true
+))
+const stringList = (value: unknown) => Array.isArray(value)
+  ? value.filter((item): item is string => typeof item === 'string')
+  : []
+const reviewReasons = computed(() => stringList(review.value?.reliability_reasons))
+const reviewMissingConcepts = computed(() => stringList(review.value?.missing_concepts))
+const reviewTop3 = computed(() => stringList(review.value?.top3_improvements))
+const reviewIssues = computed(() => Array.isArray(review.value?.issues)
+  ? review.value.issues.filter((item: unknown): item is Record<string, any> => (
+    !!item && typeof item === 'object' && !Array.isArray(item)
+  ))
+  : [])
 const DIM_LABELS: Record<string, string> = {
   completeness: '完整性', accuracy: '准确性', structure: '结构', terminology: '概念',
   visual_integration: '配图', readability: '可读性', formula_integrity: '公式',
-  figure_references: '图表引用',
+  figure_references: '图表引用', conciseness: '口语净化', insight: '观点提炼',
 }
 const reviewDims = computed(() => {
+  if (!reviewReliable.value) return []
   const r = review.value || {}
   return Object.entries(r)
-    .filter(([k, v]) => typeof v === 'number' && k !== 'overall')
+    .filter(([k, v]) => k in DIM_LABELS && typeof v === 'number' && v >= 1 && v <= 5)
     .map(([k, v]) => ({ label: DIM_LABELS[k] || k, score: v as number }))
 })
 const keyTerms = computed(() => {
+  if (!reviewReliable.value) return [] as { term: string; definition: string }[]
   const raw = review.value?.key_terms
   if (!Array.isArray(raw)) return [] as { term: string; definition: string }[]
   return raw
@@ -250,6 +267,19 @@ const keyTerms = computed(() => {
       : { term: String(t?.term ?? ''), definition: String(t?.definition ?? '') })
     .filter((t) => t.term.trim())
 })
+const reviewSourcePath = (label: string) => {
+  if (!reviewReliable.value) return ''
+  const raw = review.value?.review_input?.sources
+  const sources = Array.isArray(raw) ? raw : []
+  const source = sources.find((item: any) => item?.label === label)
+  return safeArtifactPath(source?.artifact)
+}
+const safeArtifactPath = (value: unknown) => {
+  if (typeof value !== 'string' || !value.startsWith('output/') || value.includes('\0')) return ''
+  return value.split('/').includes('..') ? '' : value
+}
+const artifactUrl = (path: string) =>
+  `/api/jobs/${jobId.value}/artifact?path=${encodeURIComponent(path)}`
 
 // ★以下 loader 均带 job 切换守卫:捕获发起时的 fid,响应回填前校验仍是当前 job——
 // 否则从 A 页切到 B 页时,A 的迟到响应会覆盖 B 的内容(与 fetchDetail 里 usage/lineage 同范式)。
@@ -328,19 +358,65 @@ async function loadReview() {
     : `/api/jobs/${fid}/review`
   try {
     const r = await api.get<Record<string, any>>(url)
-    if (jobId.value === fid) review.value = r
+    if (jobId.value === fid) {
+      review.value = r && typeof r === 'object' && !Array.isArray(r) ? r : null
+    }
   } catch { if (jobId.value === fid) review.value = null }
 }
 
 // 权威来源(evidence) tab
-// 取证产物 evidence.json:案例类笔记 AI fetch 的判决/处罚/报道来源。有则显示 tab,404 即无。
+// 取证产物 evidence.json:模型搜索候选,服务端受控下载与校验。有则显示 tab,404 即无。
 const evidence = ref<any | null>(null)
-const hasEvidence = computed(() => !!evidence.value?.evidence?.length)
+const evidenceItems = computed(() => Array.isArray(evidence.value?.evidence)
+  ? evidence.value.evidence.filter((item: unknown): item is Record<string, any> => (
+    !!item && typeof item === 'object' && !Array.isArray(item)
+  ))
+  : [])
+const evidenceManifestErrors = computed(() => stringList(evidence.value?.manifest_errors))
+const evidenceManifestState = computed(() => {
+  const state = evidence.value?.manifest_state
+  if (['verified', 'partial', 'invalid', 'legacy'].includes(state)) return state
+  return evidence.value?.reliability_state === 'legacy_unverified' ? 'legacy' : 'invalid'
+})
+const evidenceMatches = (item: Record<string, any>) => Array.isArray(item.matches)
+  ? item.matches.filter((match: unknown): match is Record<string, any> => (
+    !!match && typeof match === 'object' && !Array.isArray(match)
+    && typeof (match as Record<string, any>).anchor === 'string'
+  ))
+  : []
+const evidenceReasons = (item: Record<string, any>) => stringList(item.eligibility_reasons)
+const evidenceVerificationReasons = (item: Record<string, any>) => stringList(item.verification_reasons)
+const evidenceItemVerified = (item: Record<string, any>) => (
+  ['verified', 'partial'].includes(evidenceManifestState.value)
+  && item.verification_state === 'verified'
+  && item.eligible === true
+  && item.confidence === 'high'
+  && item.source_tier === '一手官方'
+)
+const safeEvidenceUrl = (item: Record<string, any>) => (
+  evidenceItemVerified(item) && item.link_safe === true && typeof item.final_url === 'string'
+  && /^https:\/\/[^\s\x00-\x1f\x7f]+$/i.test(item.final_url)
+    ? item.final_url : ''
+)
+const safeEvidenceArtifact = (item: Record<string, any>) => (
+  evidenceItemVerified(item) && item.link_safe === true ? safeArtifactPath(item.artifact) : ''
+)
+const hasEvidence = computed(() => evidenceItems.value.length > 0)
+const eligibleEvidenceIds = computed(() => evidenceItems.value
+  .filter((item: any) => safeEvidenceUrl(item) || safeEvidenceArtifact(item))
+  .map((item: any) => String(item.id)))
+async function onEvidenceCitation(id: string) {
+  tab.value = 'evidence'
+  await nextTick()
+  document.querySelector(`[data-evidence-card="${id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
 async function loadEvidence() {
   const fid = jobId.value
   try {
     const r = await api.get<any>(`/api/jobs/${fid}/evidence`)
-    if (jobId.value === fid) evidence.value = r
+    if (jobId.value === fid) {
+      evidence.value = r && typeof r === 'object' && !Array.isArray(r) ? r : null
+    }
   } catch { if (jobId.value === fid) evidence.value = null }
 }
 
@@ -745,6 +821,8 @@ watch(job, (j) => {
             >
               <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ v.provider }}/{{ v.model }} · {{ verLabel(v) }}</span>
               <template v-if="v.overall != null"><Star :size="11" style="color:var(--amber)" />{{ v.overall }}</template>
+              <span v-else-if="v.review_state === 'unreliable'" class="dim">评审不可靠</span>
+              <span v-else-if="v.review_state === 'legacy_unverified'" class="dim">旧版未验证</span>
             </span>
 
             <!-- 换 provider 重跑 -->
@@ -779,11 +857,18 @@ watch(job, (j) => {
         <div v-if="noteVariant === 'smart' && review" class="review" style="margin-bottom:16px">
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
             <b style="font-size:13.5px;color:var(--ink-900)">质量评审</b>
-            <span v-if="review.overall != null" class="badge b-warn"><Star :size="12" />{{ review.overall }} / 5</span>
+            <span v-if="reviewReliable && review.overall != null" class="badge b-warn"><Star :size="12" />{{ review.overall }} / 5</span>
+            <span v-if="reviewReliable" class="badge b-ok">可靠</span>
+            <span v-else-if="reviewState === 'unreliable'" class="badge b-warn">不可靠,仅供诊断</span>
+            <span v-else class="badge">旧版未验证</span>
             <span class="dim" style="font-size:12px">
               {{ review.provider }}<template v-if="review.model"> / {{ review.model }}</template>
               <template v-if="review.generated_at"> · {{ review.generated_at }}</template>
             </span>
+          </div>
+          <div v-if="!reviewReliable" class="lead" style="margin:8px 0;color:var(--warn,#b45309)">
+            本次评审不会用于术语采纳或知识沉淀。
+            <template v-if="reviewReasons.length">原因:{{ reviewReasons.join(' / ') }}</template>
           </div>
           <div v-if="reviewDims.length" class="dims">
             <div v-for="d in reviewDims" :key="d.label" class="dim-g">
@@ -791,14 +876,32 @@ watch(job, (j) => {
               <div class="track"><span :style="{ width: Math.max(0, Math.min(100, d.score * 20)) + '%' }" /></div>
             </div>
           </div>
-          <div v-if="review.missing_concepts?.length" style="font-size:12.5px;color:var(--ink-600);margin-bottom:6px">
-            <span class="dim">缺失概念：</span>{{ review.missing_concepts.join(' / ') }}
+          <div v-if="reviewMissingConcepts.length" style="font-size:12.5px;color:var(--ink-600);margin-bottom:6px">
+            <span class="dim">缺失概念：</span>{{ reviewMissingConcepts.join(' / ') }}
           </div>
-          <div v-if="review.top3_improvements?.length" style="font-size:12.5px;color:var(--ink-600);margin-bottom:6px">
+          <div v-if="reviewTop3.length" style="font-size:12.5px;color:var(--ink-600);margin-bottom:6px">
             <span class="dim">改进建议：</span>
             <ol style="margin:4px 0 0 18px">
-              <li v-for="(t, i) in review.top3_improvements" :key="i">{{ t }}</li>
+              <li v-for="(t, i) in reviewTop3" :key="i">{{ t }}</li>
             </ol>
+          </div>
+          <div v-if="reviewIssues.length" class="review-issues" style="margin-bottom:8px">
+            <div class="dim" style="font-size:12.5px;margin-bottom:4px">结构化问题:</div>
+            <div v-for="(issue, i) in reviewIssues" :key="i" class="card pad" style="padding:8px 10px;margin-bottom:6px;font-size:12.5px">
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                <span class="badge">{{ DIM_LABELS[issue.dimension] || issue.dimension || issue.type }}</span>
+                <b>{{ issue.claim || issue.message }}</b>
+                <span class="dim">{{ issue.severity }}</span>
+              </div>
+              <div v-if="issue.message && issue.message !== issue.claim" style="margin-top:3px">{{ issue.message }}</div>
+              <div v-if="reviewReliable && issue.evidence_status === 'supported' && issue.locator" class="dim" style="margin-top:3px">
+                证据 {{ issue.locator.source }}: “{{ issue.locator.quote }}”
+                <a v-if="reviewSourcePath(issue.locator.source)" :href="artifactUrl(reviewSourcePath(issue.locator.source))" target="_blank" rel="noopener" style="margin-left:6px">查看来源</a>
+              </div>
+              <div v-else-if="issue.evidence_status === 'insufficient'" class="dim" style="margin-top:3px">
+                证据不足: {{ issue.reason }}
+              </div>
+            </div>
           </div>
           <div v-if="keyTerms.length" style="font-size:12.5px;color:var(--ink-600)">
             <span class="dim">已讲清的概念（可采纳）：</span>
@@ -806,7 +909,7 @@ watch(job, (j) => {
               <b style="color:var(--ink-900)">{{ kt.term }}</b>
               <button
                 class="btn sm" style="padding:2px 8px;margin-left:6px"
-                :disabled="acceptedTermNames.has(kt.term)"
+                :disabled="!reviewReliable || acceptedTermNames.has(kt.term)"
                 :style="acceptedTermNames.has(kt.term) ? 'color:var(--ok);border-color:var(--ok-bd)' : ''"
                 @click="acceptKeyTerm(kt.term, kt.definition)"
               >{{ acceptedTermNames.has(kt.term) ? '✓ 已采纳' : '采纳' }}</button>
@@ -831,7 +934,9 @@ watch(job, (j) => {
           <div class="card pad prose max-w-none">
             <MarkdownViewer
               :content="noteContent" :job-id="jobId" :terms="terms" :domain="domain"
+              :evidence-ids="eligibleEvidenceIds"
               @headings="headings = $event" @pdf-page="onPdfPageJump"
+              @evidence-citation="onEvidenceCitation"
             />
           </div>
           <nav v-if="headings.length" class="toc">
@@ -847,35 +952,32 @@ watch(job, (j) => {
       <!-- 权威来源 -->
       <div v-show="tab === 'evidence'">
         <div class="card pad">
-          <div class="card-h"><ShieldCheck :size="15" />权威来源<template v-if="evidence?.evidence?.length"> · {{ evidence.evidence.length }}</template></div>
-          <p class="lead" style="margin:-6px 0 12px">AI 取证为这条案例笔记抓取的判决/处罚/报道来源。笔记里的精确数据可点链接到原文核验。</p>
+          <div class="card-h"><ShieldCheck :size="15" />权威来源<template v-if="evidenceItems.length"> · {{ evidenceItems.length }}</template></div>
+          <p class="lead" style="margin:-6px 0 12px">候选来源经服务端受控下载与完整性校验。只有合格证据可从笔记 [E#] 跳转或打开原文。</p>
+          <p v-if="evidenceManifestState === 'legacy'" class="lead" style="color:var(--warn,#b45309)">旧版证据未验证,链接已禁用。</p>
+          <p v-else-if="evidenceManifestState === 'partial'" class="lead" style="color:var(--warn,#b45309)">部分证据未通过当前校验,仅已验证条目可用。</p>
+          <p v-else-if="evidenceManifestState === 'invalid'" class="lead" style="color:var(--warn,#b45309)">证据清单校验失败,链接已禁用。</p>
+          <p v-if="evidenceManifestErrors.length" class="lead" style="color:var(--warn,#b45309)">校验原因: {{ evidenceManifestErrors.join(' / ') }}</p>
 
-          <div v-if="evidence?.case_match" style="font-size:12.5px;color:var(--ink-600);margin-bottom:12px;padding:8px 10px;background:var(--bg-soft,#f6f7f9);border-radius:8px">
-            <span style="font-weight:600" :style="{ color: evidence.case_match.confidence === 'high' ? '#15803d' : '#b45309' }">匹配 {{ evidence.case_match.confidence }}</span>
-            ·
-            {{ evidence.case_match.subject }}
-            <div v-if="evidence.case_match.note" style="margin-top:4px;color:var(--ink-500)">⚠ {{ evidence.case_match.note }}</div>
-          </div>
-
-          <div v-for="s in evidence?.evidence || []" :key="s.id" class="card pad" style="margin-bottom:10px">
+          <div v-for="s in evidenceItems" :key="s.id" class="card pad" style="margin-bottom:10px" :data-evidence-card="s.id">
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
               <span class="chip on" style="cursor:default">{{ s.id }}</span>
-              <span class="badge">{{ s.type }}</span>
-              <span style="font-size:11px;font-weight:600" :style="{ color: s.match_confidence === 'high' ? '#15803d' : '#b45309' }">{{ s.match_confidence }}</span>
+              <span class="badge">{{ s.source_tier || '来源待定' }}</span>
+              <span style="font-size:11px;font-weight:600" :style="{ color: s.confidence === 'high' ? '#15803d' : '#b45309' }">{{ s.confidence }}</span>
               <strong style="font-size:13.5px">{{ s.title }}</strong>
             </div>
             <div style="font-size:12px;color:var(--ink-500);margin-bottom:6px">
-              {{ s.publisher }}<template v-if="s.ref"> · {{ s.ref }}</template>
-              <a :href="s.url" target="_blank" rel="noopener" style="margin-left:6px;display:inline-flex;align-items:center;gap:2px">
+              {{ s.publisher }}
+              <a v-if="safeEvidenceUrl(s)" :href="safeEvidenceUrl(s)" target="_blank" rel="noopener" style="margin-left:6px;display:inline-flex;align-items:center;gap:2px">
                 <ExternalLink :size="12" />原文链接
               </a>
+              <span v-else class="dim" style="margin-left:6px">链接不可用</span>
+              <a v-if="safeEvidenceArtifact(s)" :href="artifactUrl(safeEvidenceArtifact(s))" target="_blank" rel="noopener" style="margin-left:6px">证据全文</a>
             </div>
-            <ul style="font-size:12.5px;color:var(--ink-600);margin:0;padding-left:18px">
-              <li v-for="(f, i) in s.key_facts || []" :key="i" style="margin-bottom:3px"><strong>{{ f.figure }}</strong> —— {{ f.quote }}</li>
-            </ul>
+            <div v-if="evidenceMatches(s).length" class="dim" style="font-size:12px">命中锚点: {{ evidenceMatches(s).map((m: any) => m.anchor).join(' / ') }}</div>
+            <div v-if="evidenceReasons(s).length" class="dim" style="font-size:12px">{{ evidenceReasons(s).join(' / ') }}</div>
+            <div v-if="evidenceVerificationReasons(s).length" class="dim" style="font-size:12px">校验原因: {{ evidenceVerificationReasons(s).join(' / ') }}</div>
           </div>
-
-          <div v-if="evidence?.notes" style="font-size:11.5px;color:var(--ink-500);margin-top:4px">{{ evidence.notes }}</div>
         </div>
       </div>
 

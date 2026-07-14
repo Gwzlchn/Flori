@@ -5,8 +5,25 @@ import os
 
 import pytest
 
+from shared.errors import InputInvalidError
+from shared.models import LLMResponse
 from steps.paper.step_05_smart_paper import SmartPaperStep
 from tests.steps.conftest import make_step_config
+
+
+def _read_capability_config(tmp_path):
+    config = make_step_config(tmp_path, step_name="05_smart_paper", pool="ai")
+    config["step"]["capability_rules"] = {
+        "read": {
+            "unless_any_nonempty": ["output/translated.md", "output/original.md"],
+        },
+    }
+    config["ai"] = {"primary": {"provider": "openai", "model": "gpt-test"}}
+    config["providers"] = {"providers": {
+        "claude-cli": {"type": "cli", "features": ["read"]},
+        "openai": {"type": "openai", "features": [], "models": ["gpt-test"]},
+    }}
+    return config
 
 
 class TestSmartPaperStep:
@@ -137,3 +154,71 @@ def test_pdf_only_direct_notes(tmp_path, monkeypatch):
     assert seen["kw"]["allowed_tools"] == ["Read"]
     assert str((job_dir / "input").resolve()) in seen["kw"]["add_dirs"][0]
     assert "source.pdf" in seen["prompt"] and "MapReduce" in seen["prompt"]
+
+
+def test_pdf_read_mode_rejects_openai_if_original_appears_after_body_snapshot(
+    tmp_path, monkeypatch,
+):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    for name in ("input", "intermediate", "output", "logs"):
+        (job_dir / name).mkdir()
+    (job_dir / "input/source.pdf").write_bytes(b"%PDF fake")
+    (job_dir / "intermediate/sections.json").write_text(json.dumps({
+        "title": "Race", "sections": [],
+    }))
+    (job_dir / "intermediate/parsed.json").write_text(json.dumps({
+        "source_kind": "pdf-only", "pages": 1,
+    }))
+    step = SmartPaperStep("05_smart_paper", job_dir, _read_capability_config(tmp_path))
+    original = job_dir / "output/original.md"
+    real_read = step._read_optional_text
+    calls = []
+
+    def absent_snapshot_then_appear(rel_path):
+        calls.append(rel_path)
+        text = real_read(rel_path)
+        if rel_path == "output/original.md" and text is None:
+            original.write_text("appeared after body snapshot")
+        return text
+
+    monkeypatch.setattr(step, "_read_optional_text", absent_snapshot_then_appear)
+    with pytest.raises(InputInvalidError, match="does not support read"):
+        step.execute()
+    assert calls.count("output/original.md") == 1
+
+
+def test_text_body_snapshot_survives_disappearance_without_read_tool(tmp_path, monkeypatch):
+    job_dir = TestSmartPaperStep()._setup_job(tmp_path)
+    original = job_dir / "output/original.md"
+    original.write_text("captured body")
+    step = SmartPaperStep("05_smart_paper", job_dir, _read_capability_config(tmp_path))
+    real_read = step._read_optional_text
+    calls = []
+    prompts = []
+
+    def present_snapshot_then_disappear(rel_path):
+        calls.append(rel_path)
+        text = real_read(rel_path)
+        if rel_path == "output/original.md" and text is not None:
+            original.unlink()
+        return text
+
+    class Gateway:
+        async def call(self, _step_name, request):
+            prompts.append(request.messages[0]["content"])
+            return LLMResponse(
+                content="# captured note", model="gpt-test", provider="openai",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr(step, "_read_optional_text", present_snapshot_then_disappear)
+    monkeypatch.setattr(
+        step, "write_smart_note",
+        lambda _text, image_assets=None: "output/versions/captured.md",
+    )
+    step._gateway = Gateway()
+    result = step.execute()
+    assert result["source"] == "original"
+    assert "captured body" in prompts[0]
+    assert calls.count("output/original.md") == 1

@@ -18,6 +18,9 @@ from shared.storage import (
     _parse_minio_version,
     create_storage,
     is_credential_file,
+    publish_content_addressed_path,
+    read_file_bounded,
+    read_path_bounded,
 )
 
 
@@ -60,6 +63,209 @@ class TestIsCredentialFile:
         assert not is_credential_file("job.json")
         assert not is_credential_file("output/notes.md")
         assert not is_credential_file("input/source.mp4")
+
+
+class TestReadFileBounded:
+    class ClosingStream:
+        def __init__(self, chunks):
+            self._chunks = iter(chunks)
+            self.closed = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._chunks)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+        async def aclose(self):
+            self.closed = True
+
+    @pytest.mark.asyncio
+    async def test_closes_stream_when_limit_sentinel_is_reached(self):
+        stream = self.ClosingStream([b"abcd", b"efgh"])
+
+        class Storage:
+            async def file_size(self, job_id, rel_path):
+                return None
+
+            async def open_stream(self, job_id, rel_path, **kwargs):
+                assert kwargs["length"] == 6
+                return stream
+
+        assert await read_file_bounded(Storage(), "j1", "a", 5) == b"abcdef"
+        assert stream.closed is True
+
+    @pytest.mark.asyncio
+    async def test_closes_stream_when_stream_contract_is_invalid(self):
+        stream = self.ClosingStream([b"ok", "not-bytes"])
+
+        class Storage:
+            async def file_size(self, job_id, rel_path):
+                return None
+
+            async def open_stream(self, job_id, rel_path, **kwargs):
+                return stream
+
+        with pytest.raises(ValueError, match="non-bytes"):
+            await read_file_bounded(Storage(), "j1", "a", 5)
+        assert stream.closed is True
+
+    @pytest.mark.asyncio
+    async def test_gateway_bounded_read_never_uses_full_get_for_size(self, tmp_path):
+        class Response:
+            def __init__(self, *, headers, chunks=()):
+                self.status_code = 206
+                self.headers = headers
+                self._chunks = chunks
+
+            def raise_for_status(self):
+                return None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def aiter_bytes(self, chunk_size):
+                for chunk in self._chunks:
+                    yield chunk
+
+        class Client:
+            def __init__(self):
+                self.stream_calls = 0
+                self.ranges = []
+
+            async def get(self, *args, **kwargs):
+                raise AssertionError("bounded read must not issue a full GET for file_size")
+
+            def stream(self, *args, **kwargs):
+                self.stream_calls += 1
+                self.ranges.append(kwargs["headers"]["Range"])
+                if self.stream_calls == 1:
+                    return Response(headers={"Content-Range": "bytes 0-0/8"})
+                return Response(headers={"Content-Range": "bytes 0-5/8"}, chunks=[b"abcdefgh"])
+
+        storage = GatewayStorage("https://example.invalid", lambda: "token", tmp_path)
+        client = Client()
+        storage._client_obj = client
+
+        assert await read_file_bounded(storage, "j1", "large.bin", 5) == b"\0" * 6
+        assert client.stream_calls == 1
+        assert client.ranges == ["bytes=0-0"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("status", "headers", "expected"), [
+        (206, {"Content-Range": "bytes 0-0/123"}, 123),
+        (200, {"Content-Length": "9"}, 9),
+        (404, {}, None),
+        (416, {"Content-Range": "bytes */0"}, 0),
+    ])
+    async def test_gateway_file_size_uses_metadata_without_touching_body(
+        self, tmp_path, status, headers, expected,
+    ):
+        class Response:
+            status_code = status
+
+            def __init__(self):
+                self.headers = headers
+
+            @property
+            def content(self):
+                raise AssertionError("metadata probe must not materialize the body")
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise RuntimeError(f"HTTP {self.status_code}")
+
+        class Client:
+            def stream(self, method, endpoint, *, headers):
+                assert method == "GET"
+                assert headers["Range"] == "bytes=0-0"
+                return Response()
+
+        storage = GatewayStorage("https://example.invalid", lambda: "token", tmp_path)
+        storage._client_obj = Client()
+        assert await storage.file_size("j1", "artifact.bin") == expected
+
+
+class TestReadPathBounded:
+    def test_rejects_parent_component_symlink(self, tmp_path):
+        root = tmp_path / "root"
+        real = root / "real"
+        real.mkdir(parents=True)
+        (real / "note.md").write_text("safe")
+        (root / "alias").symlink_to(real, target_is_directory=True)
+
+        with pytest.raises(OSError):
+            read_path_bounded(root / "alias/note.md", 10, trusted_root=root)
+
+    def test_rejects_parent_replacement_during_read(self, tmp_path, monkeypatch):
+        from shared import storage as storage_module
+
+        root = tmp_path / "root"
+        source_dir = root / "source"
+        source_dir.mkdir(parents=True)
+        target = source_dir / "note.md"
+        target.write_bytes(b"inside")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "note.md").write_bytes(b"outside")
+        real_read = storage_module.os.read
+        replaced = False
+
+        def replace_parent(fd, size):
+            nonlocal replaced
+            data = real_read(fd, size)
+            if not replaced:
+                replaced = True
+                source_dir.rename(root / "source-old")
+                source_dir.symlink_to(outside, target_is_directory=True)
+            return data
+
+        monkeypatch.setattr(storage_module.os, "read", replace_parent)
+        with pytest.raises(OSError, match="changed|link"):
+            read_path_bounded(target, 10, trusted_root=root)
+
+    def test_rejects_growth_during_read(self, tmp_path, monkeypatch):
+        from shared import storage as storage_module
+
+        target = tmp_path / "note.md"
+        target.write_bytes(b"inside")
+        real_read = storage_module.os.read
+        grown = False
+
+        def grow_file(fd, size):
+            nonlocal grown
+            data = real_read(fd, size)
+            if not grown:
+                grown = True
+                with target.open("ab") as handle:
+                    handle.write(b"growth")
+            return data
+
+        monkeypatch.setattr(storage_module.os, "read", grow_file)
+        with pytest.raises(OSError, match="changed"):
+            read_path_bounded(target, 20, trusted_root=tmp_path)
+
+    def test_content_addressed_publish_is_no_clobber_and_cleans_staging(self, tmp_path):
+        target = tmp_path / "sources/source.md"
+        publish_content_addressed_path(target, b"stable")
+        publish_content_addressed_path(target, b"stable")
+        with pytest.raises(ValueError, match="collision"):
+            publish_content_addressed_path(target, b"forged")
+
+        assert target.read_bytes() == b"stable"
+        assert list(target.parent.glob("*.flori-part-*")) == []
 
 
 class TestLocalStorage:

@@ -296,6 +296,170 @@ describe('JobDetailView 笔记 tab', () => {
     await flushPromises()
     expect(w.find('.seg').exists()).toBe(true)
   })
+
+  it.each([
+    ['reliable', '可靠'],
+    ['unreliable', '不可靠,仅供诊断'],
+    ['legacy_unverified', '旧版未验证'],
+  ])('评审三态 %s 明确展示', async (state, label) => {
+    api.get.mockImplementation((url: string) => {
+      if (url.includes('note-versions')) return Promise.resolve({ versions: [{
+        provider: 'p', model: 'm', version: '20260101-000000', file: 'f.md',
+        review_file: 'output/versions/review_x.json', overall: state === 'reliable' ? 4.5 : null,
+      }] })
+      if (url.includes('/review')) return Promise.resolve({
+        reliability_state: state, review_reliable: state === 'reliable',
+        overall: state === 'reliable' ? 4.5 : null, reliability_reasons: ['parse_fallback'],
+        key_terms: state === 'reliable' ? [{ term: 'FTS', definition: '全文检索' }] : [],
+        review_input: { sources: [{ label: 'E1', artifact: 'output/evidence/evidence-01.md' }] },
+        issues: [{
+          type: 'traceability', severity: 'warning', dimension: 'accuracy',
+          claim: '罚款金额需核验', message: '补充可复核定位',
+          evidence_status: 'supported', locator: { source: 'E1', quote: '罚款 123 万元' },
+        }],
+      })
+      return Promise.resolve([])
+    })
+    api.getText.mockResolvedValue('# 笔记')
+    const w = mountView()
+    await flushPromises()
+    expect(w.text()).toContain(label)
+    expect(w.text()).toContain('罚款金额需核验')
+    if (state === 'reliable') {
+      expect(w.text()).toContain('证据 E1')
+      expect(w.find('a[href*="evidence-01.md"]').text()).toContain('查看来源')
+    } else {
+      expect(w.text()).not.toContain('证据 E1')
+      expect(w.text()).not.toContain('罚款 123 万元')
+      expect(w.find('a[href*="evidence-01.md"]').exists()).toBe(false)
+      expect(w.text()).toContain('不会用于术语采纳')
+    }
+  })
+
+  it.each([
+    ['legacy_unverified', {
+      reliability_state: 'legacy_unverified', review_reliable: false,
+      overall: 4.9, score_keys: ['accuracy'], accuracy: 4.8,
+      key_terms: [{ term: 'FORGED_TERM', definition: '不应展示' }],
+      reliability_reasons: 'forged', missing_concepts: true, top3_improvements: {},
+      review_input: { sources: true },
+      issues: [{
+        dimension: 'accuracy', claim: '金额需核验', message: '定位未验证',
+        evidence_status: 'supported', locator: { source: 'E1', quote: 'FORGED_LOCATOR' },
+      }],
+    }],
+    ['unreliable', {
+      reliability_state: 'unreliable', review_reliable: false,
+      overall: 4.9, score_keys: ['accuracy'], accuracy: 4.8,
+      key_terms: [{ term: 'FORGED_TERM', definition: '不应展示' }],
+      reliability_reasons: ['artifact_tampered', { nested: true }],
+      missing_concepts: 'forged', top3_improvements: 'forged',
+      review_input: { sources: { label: 'E1', artifact: '../../secret' } },
+      issues: [null, {
+        dimension: 'accuracy', claim: '来源需核验', message: '来源未验证',
+        evidence_status: 'supported', locator: { source: 'E1', quote: 'FORGED_LOCATOR' },
+      }],
+    }],
+  ])('恶意 %s 评审集合响应 mount 不抛且不生成产物链接', async (state, response) => {
+    api.get.mockImplementation((url: string) => {
+      if (url.includes('note-versions')) return Promise.resolve({ versions: [{
+        provider: 'p', model: 'm', version: '20260101-000000', file: 'f.md',
+        review_file: 'output/versions/review_x.json', overall: null,
+      }] })
+      if (url.includes('/review')) return Promise.resolve(response)
+      return Promise.resolve([])
+    })
+    api.getText.mockResolvedValue('# 笔记')
+
+    const w = mountView()
+    await flushPromises()
+
+    expect(w.text()).toContain(state === 'unreliable' ? '不可靠,仅供诊断' : '旧版未验证')
+    expect(w.text()).toContain('未验证')
+    expect(w.text()).not.toContain('4.9 / 5')
+    expect(w.text()).not.toContain('FORGED_TERM')
+    expect(w.text()).not.toContain('FORGED_LOCATOR')
+    expect(w.text()).not.toContain('证据 E1')
+    expect(w.findAll('a').some(a => a.text().includes('查看来源'))).toBe(false)
+    expect(w.find('a[href*="secret"]').exists()).toBe(false)
+  })
+
+  it('可靠状态与布尔门不一致时不展示可信评分、术语或定位', async () => {
+    api.get.mockImplementation((url: string) => {
+      if (url.includes('note-versions')) return Promise.resolve({ versions: [{
+        provider: 'p', model: 'm', version: '20260101-000000', file: 'f.md',
+        review_file: 'output/versions/review_x.json', overall: 4.9,
+      }] })
+      if (url.includes('/review')) return Promise.resolve({
+        reliability_state: 'reliable', review_reliable: false,
+        overall: 4.9, accuracy: 4.8,
+        key_terms: [{ term: 'FORGED_TERM', definition: '不应展示' }],
+        issues: [{
+          dimension: 'accuracy', claim: '仍可诊断', evidence_status: 'supported',
+          locator: { source: 'E1', quote: 'FORGED_LOCATOR' },
+        }],
+      })
+      return Promise.resolve([])
+    })
+    api.getText.mockResolvedValue('# 笔记')
+
+    const w = mountView()
+    await flushPromises()
+
+    expect(w.text()).toContain('旧版未验证')
+    expect(w.text()).toContain('仍可诊断')
+    expect(w.text()).not.toContain('4.9 / 5')
+    expect(w.text()).not.toContain('FORGED_TERM')
+    expect(w.text()).not.toContain('FORGED_LOCATOR')
+  })
+
+  it('恶意 evidence 集合响应 mount 不抛且危险 URL/产物均不可点击', async () => {
+    api.get.mockImplementation((url: string) => {
+      if (url.includes('/evidence')) return Promise.resolve({
+        manifest_state: 'invalid', reliability_state: 'unreliable',
+        manifest_errors: 'forged',
+        evidence: [{
+          id: 'E1', title: '伪造来源', link_safe: true, verification_state: 'verified',
+          eligible: true, confidence: 'high', source_tier: '一手官方',
+          final_url: 'https://evil.example/forged', artifact: 'output/evidence/forged.md',
+          matches: 'forged', eligibility_reasons: { nested: true },
+          verification_reasons: true,
+        }],
+      })
+      if (url.includes('note-versions')) return Promise.resolve({ versions: [] })
+      return Promise.resolve([])
+    })
+
+    const w = mountView()
+    await flushPromises()
+    const evidenceTab = w.find('.tabs').findAll('button').find(b => b.text().includes('权威来源'))
+    await evidenceTab!.trigger('click')
+    await flushPromises()
+
+    expect(w.text()).toContain('证据清单校验失败')
+    expect(w.text()).toContain('链接不可用')
+    expect(w.find('a[href*="evil.example"]').exists()).toBe(false)
+    expect(w.find('a[href*="forged.md"]').exists()).toBe(false)
+  })
+
+  it('旧版或低置信证据不渲染外链', async () => {
+    api.get.mockImplementation((url: string) => {
+      if (url.includes('/evidence')) return Promise.resolve({
+        reliability_state: 'legacy_unverified',
+        evidence: [{ id: 'E1', title: '旧来源', link_safe: false, final_url: null }],
+      })
+      if (url.includes('note-versions')) return Promise.resolve({ versions: [] })
+      return Promise.resolve([])
+    })
+    const w = mountView()
+    await flushPromises()
+    const evidenceTab = w.find('.tabs').findAll('button').find(b => b.text().includes('权威来源'))
+    await evidenceTab!.trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain('旧版证据未验证')
+    expect(w.find('a[href="javascript:alert(1)"]').exists()).toBe(false)
+    expect(w.text()).toContain('链接不可用')
+  })
 })
 
 describe('JobDetailView 流水线 tab 操作', () => {

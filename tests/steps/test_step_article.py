@@ -385,8 +385,9 @@ class TestArticleReviewStep:
         monkeypatch.setattr(step, "call_ai", lambda *a, **k: "不是 JSON")
         result = step.execute()
         review = json.loads((job_dir / "output" / "review.json").read_text())
-        assert review["overall"] == 3.0
-        assert review["parse_failed"] is True
+        assert review["overall"] is None
+        assert review["review_reliable"] is False
+        assert review["parse"]["mode"] == "fallback"
         assert result["parse_failed"] is True
 
     def test_aggregates_real_scores(self, tmp_path, monkeypatch):
@@ -397,7 +398,8 @@ class TestArticleReviewStep:
         step = ArticleReviewStep("06_review", job_dir, config)
         scores = {"completeness": 5, "accuracy": 5, "structure": 5,
                   "readability": 4, "insight": 4,
-                  "key_terms": [], "missing_concepts": [], "top3_improvements": []}
+                  "key_terms": [], "missing_concepts": [],
+                  "top3_improvements": ["a", "b", "c"], "issues": []}
         monkeypatch.setattr(step, "call_ai", lambda *a, **k: json.dumps(scores))
         result = step.execute()
         review = json.loads((job_dir / "output" / "review.json").read_text())

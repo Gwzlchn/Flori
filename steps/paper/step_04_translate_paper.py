@@ -7,7 +7,10 @@
 
 from __future__ import annotations
 
+import json
+
 from shared.step_base import StepBase, file_hash
+from shared.storage import read_path_bounded
 from shared.terms import extract_pairs, hit_terms, render_term_block
 from steps.utils.chunking import split_markdown_chunks
 
@@ -15,6 +18,7 @@ from steps.utils.chunking import split_markdown_chunks
 # 16000 字英文原文的中文译文 ≈ 万级 tokens,稳在 max_tokens=16384 与单调用几分钟内;
 # 小论文 fits 时仍是单块=行为不变。段落边界切,不破坏 Markdown 结构。
 CHUNK_CHARS = 16000
+MAX_PAPER_TEXT_SOURCE_BYTES = 8 * 1024 * 1024
 
 
 class TranslatePaperStep(StepBase):
@@ -42,9 +46,10 @@ class TranslatePaperStep(StepBase):
         return h
 
     def execute(self) -> dict | None:
-        if self._is_pdf_only():
+        original = self._read_optional_text("output/original.md")
+        if original is None and self._source_kind() == "pdf-only":
             return self._execute_pdf_direct()
-        md = self._source_markdown()
+        md = original if original is not None else self._source_markdown_from_sections()
 
         # 逐 chunk 翻译:每块一次 call_ai(各自有审计记录+transcript sidecar,call_index 自增),
         # 按原顺序聚合;max_tokens 抬高防单块译文截断(claude-cli 无视无害)。
@@ -72,14 +77,45 @@ class TranslatePaperStep(StepBase):
     def _source_markdown(self) -> str:
         """翻译源文:首选 output/original.md(arxiv-html 由 02 产出,公式/图无损,图引用已在原位);
         缺失(老 pymupdf job 未重跑 02)回退 sections+figures 组装。"""
-        orig = self.job_dir / "output" / "original.md"
-        if orig.exists():
-            return orig.read_text(encoding="utf-8")
-        sections = self.load_json("intermediate/sections.json")
+        original = self._read_optional_text("output/original.md")
+        return original if original is not None else self._source_markdown_from_sections()
+
+    def _source_markdown_from_sections(self) -> str:
+        sections = self._load_json_bounded("intermediate/sections.json")
         figures: list = []
-        if (self.job_dir / "intermediate" / "figures.json").exists():
-            figures = self.load_json("intermediate/figures.json")
+        try:
+            loaded_figures = self._load_json_bounded("intermediate/figures.json")
+        except FileNotFoundError:
+            loaded_figures = []
+        if isinstance(loaded_figures, list):
+            figures = loaded_figures
         return self._paper_markdown(sections, figures)
+
+    def _read_optional_text(self, rel_path: str) -> str | None:
+        try:
+            data = read_path_bounded(
+                self.job_dir / rel_path,
+                MAX_PAPER_TEXT_SOURCE_BYTES,
+                trusted_root=self.job_dir,
+            )
+        except FileNotFoundError:
+            return None
+        if len(data) > MAX_PAPER_TEXT_SOURCE_BYTES:
+            raise ValueError(f"paper source exceeds {MAX_PAPER_TEXT_SOURCE_BYTES} bytes")
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"paper source is not UTF-8: {rel_path}") from exc
+        return text if text.strip() else None
+
+    def _load_json_bounded(self, rel_path: str):
+        text = self._read_optional_text(rel_path)
+        if text is None:
+            raise FileNotFoundError(rel_path)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"paper JSON source is invalid: {rel_path}") from exc
 
     @staticmethod
     def _paper_markdown(sections: dict, figures: list | None = None) -> str:
@@ -142,15 +178,21 @@ class TranslatePaperStep(StepBase):
     PAGES_PER_CHUNK = 2   # 实测每 2 页一块 ≈30-45s、3 turns;块大易撞轮次/超时,块小浪费轮次开销
 
     def _is_pdf_only(self) -> bool:
-        try:
-            parsed = self.load_json("intermediate/parsed.json") or {}
-        except Exception:
+        if self._read_optional_text("output/original.md") is not None:
             return False
-        return parsed.get("source_kind") == "pdf-only"
+        return self._source_kind() == "pdf-only"
+
+    def _source_kind(self) -> str | None:
+        try:
+            parsed = self._load_json_bounded("intermediate/parsed.json") or {}
+        except Exception:
+            return None
+        return parsed.get("source_kind") if isinstance(parsed, dict) else None
 
     def _execute_pdf_direct(self) -> dict:
         pdf = (self.job_dir / "input" / "source.pdf").resolve()
-        pages = int((self.load_json("intermediate/parsed.json") or {}).get("pages") or 0)
+        parsed = self._load_json_bounded("intermediate/parsed.json") or {}
+        pages = int(parsed.get("pages") or 0) if isinstance(parsed, dict) else 0
         if pages <= 0:
             from shared.errors import InputInvalidError
             raise InputInvalidError("pdf-only translate needs parsed.json.pages > 0")

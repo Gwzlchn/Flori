@@ -190,6 +190,8 @@ def _probe_net_zones() -> set[str]:
 
 
 def auto_discover_tags() -> set[str]:
+    from shared.ai_routing import provider_capability_tags, provider_required_tag
+
     tags = set()
     has_anthropic_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
     # claude-cli/vision 须真能用才标,而非"镜像里有 claude 二进制就标":否则纯 gateway worker
@@ -198,17 +200,24 @@ def auto_discover_tags() -> set[str]:
     claude_ready = bool(shutil.which("claude")) and (has_anthropic_key or _claude_logged_in())
     if has_anthropic_key or claude_ready:
         tags.add("vision")
+    if has_anthropic_key:
+        tags.add(provider_required_tag("anthropic"))
     if claude_ready:
-        tags.add("claude-cli")
+        tags.add(provider_required_tag("claude-cli"))
+        tags.update(provider_capability_tags("claude-cli"))
     codex_ready = bool(shutil.which("codex")) and _codex_logged_in()
     if codex_ready:
-        tags.add("codex-cli")
+        tags.add(provider_required_tag("codex-cli"))
         tags.add("vision")
     if os.environ.get("DEEPSEEK_API_KEY"):
+        tags.add(provider_required_tag("deepseek"))
         tags.add("text-only")
     if os.environ.get("KIMI_API_KEY"):
-        tags.add("kimi-api")
+        tags.add(provider_required_tag("kimi"))
         tags.add("text-only")
+    if os.environ.get("OPENAI_API_KEY"):
+        tags.add(provider_required_tag("openai"))
+        tags.add("vision")
     from steps.utils.device import has_nvidia_gpu
     if has_nvidia_gpu():  # PATH 感知 + 真实探测,与 steps.utils.device 单一判据
         tags.add("gpu")

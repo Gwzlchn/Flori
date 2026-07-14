@@ -3,6 +3,10 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
+from shared.errors import InputInvalidError
+from shared.models import LLMResponse
 from steps.paper.step_04_translate_paper import TranslatePaperStep
 from tests.steps.conftest import make_step_config
 
@@ -20,6 +24,19 @@ def _setup(tmp_path):
     }
     (job_dir / "intermediate" / "sections.json").write_text(json.dumps(sections))
     return job_dir
+
+
+def _read_capability_config(tmp_path, step_name):
+    config = make_step_config(tmp_path, step_name=step_name, pool="ai")
+    config["step"]["capability_rules"] = {
+        "read": {"unless_any_nonempty": ["output/original.md"]},
+    }
+    config["ai"] = {"primary": {"provider": "openai", "model": "gpt-test"}}
+    config["providers"] = {"providers": {
+        "claude-cli": {"type": "cli", "features": ["read"]},
+        "openai": {"type": "openai", "features": [], "models": ["gpt-test"]},
+    }}
+    return config
 
 
 def test_validate_inputs_missing(tmp_path):
@@ -153,6 +170,20 @@ def test_prefers_original_md_as_source(tmp_path, monkeypatch):
     assert "original" in h and "sections" not in h  # 指纹跟主源
 
 
+def test_nonempty_original_wins_over_stale_pdf_only_metadata(tmp_path):
+    job_dir = _setup(tmp_path)
+    (job_dir / "output" / "original.md").write_text("# extracted text", encoding="utf-8")
+    (job_dir / "intermediate" / "parsed.json").write_text(json.dumps({
+        "source_kind": "pdf-only", "pages": 5,
+    }))
+    step = TranslatePaperStep(
+        "04_translate_paper", job_dir,
+        make_step_config(tmp_path, step_name="04_translate_paper", pool="ai"),
+    )
+
+    assert step._is_pdf_only() is False
+
+
 def test_pdf_only_direct_translate(tmp_path, monkeypatch):
     # pdf-only:按页区间 chunk,每块 Read 直喂(allowed_tools/add_dirs/max_turns),聚合 translated.md。
     job_dir = _setup(tmp_path)
@@ -182,6 +213,71 @@ def test_pdf_only_direct_translate(tmp_path, monkeypatch):
     assert "第 5 页到第 5 页" in p2 and kw2["max_turns"] == 1 * 2 + 4
     out = (job_dir / "output" / "translated.md").read_text()
     assert out == "块1译文\n\n块2译文\n\n块3译文"
+
+
+def test_pdf_read_mode_rejects_openai_if_original_appears_after_source_snapshot(
+    tmp_path, monkeypatch,
+):
+    job_dir = _setup(tmp_path)
+    (job_dir / "input").mkdir()
+    (job_dir / "input/source.pdf").write_bytes(b"%PDF fake")
+    (job_dir / "intermediate/parsed.json").write_text(json.dumps({
+        "source_kind": "pdf-only", "pages": 1,
+    }))
+    step = TranslatePaperStep(
+        "04_translate_paper", job_dir,
+        _read_capability_config(tmp_path, "04_translate_paper"),
+    )
+    original = job_dir / "output/original.md"
+    real_read = step._read_optional_text
+    calls = []
+
+    def absent_snapshot_then_appear(rel_path):
+        calls.append(rel_path)
+        text = real_read(rel_path)
+        if rel_path == "output/original.md" and text is None:
+            original.write_text("appeared after source snapshot")
+        return text
+
+    monkeypatch.setattr(step, "_read_optional_text", absent_snapshot_then_appear)
+    with pytest.raises(InputInvalidError, match="does not support read"):
+        step.execute()
+    assert calls.count("output/original.md") == 1
+
+
+def test_text_snapshot_survives_source_disappearance_without_read_tool(tmp_path, monkeypatch):
+    job_dir = _setup(tmp_path)
+    original = job_dir / "output/original.md"
+    original.write_text("captured text source")
+    step = TranslatePaperStep(
+        "04_translate_paper", job_dir,
+        _read_capability_config(tmp_path, "04_translate_paper"),
+    )
+    real_read = step._read_optional_text
+    calls = []
+    prompts = []
+
+    def present_snapshot_then_disappear(rel_path):
+        calls.append(rel_path)
+        text = real_read(rel_path)
+        if rel_path == "output/original.md" and text is not None:
+            original.unlink()
+        return text
+
+    class Gateway:
+        async def call(self, _step_name, request):
+            prompts.append(request.messages[0]["content"])
+            return LLMResponse(
+                content="captured translation", model="gpt-test", provider="openai",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr(step, "_read_optional_text", present_snapshot_then_disappear)
+    step._gateway = Gateway()
+    result = step.execute()
+    assert result["chars"] == len("captured translation")
+    assert "captured text source" in prompts[0]
+    assert calls.count("output/original.md") == 1
 
 
 def test_pdf_only_without_pages_fails_loud(tmp_path, monkeypatch):

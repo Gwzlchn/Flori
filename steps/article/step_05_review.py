@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
+from shared.review_contract import persist_review_source, source_record
 from shared.step_base import StepBase, file_hash
 
 
@@ -20,13 +22,45 @@ class ArticleReviewStep(StepBase):
         return {
             "smart": file_hash(self.latest_smart_note()) if self.latest_smart_note() else "",
             "sections": file_hash(self.job_dir / "intermediate" / "sections.json"),
+            "original": file_hash(self.job_dir / "output" / "original.md")
+                        if (self.job_dir / "output" / "original.md").exists() else "",
+            "translated": file_hash(self.job_dir / "output" / "translated.md")
+                          if (self.job_dir / "output" / "translated.md").exists() else "",
+            "provider": self.override_provider(),
         }
 
     def execute(self) -> dict | None:
-        smart_clip, coverage, note_file = self.prepare_smart_for_review()
-        sections = self.load_json("intermediate/sections.json")
-
-        original_titles = [s["title"] for s in sections.get("sections", [])]
+        smart_clip, coverage, note_file, smart_source = self.prepare_smart_for_review()
+        source_paths = [p for p in ("output/original.md", "output/translated.md")
+                        if (self.job_dir / p).exists()]
+        if not source_paths:
+            source_paths = ["intermediate/sections.json"]
+        source_blocks = []
+        article_sources = []
+        article_source_texts = {}
+        for source_path in source_paths:
+            source_text, article_source = source_record(
+                self.job_dir, source_path, label=Path(source_path).stem,
+            )
+            if source_path.endswith("sections.json"):
+                try:
+                    sections = json.loads(source_text)
+                except (json.JSONDecodeError, TypeError) as exc:
+                    raise ValueError("article review sections are invalid") from exc
+                if not isinstance(sections, dict):
+                    raise ValueError("article review sections are invalid")
+                source_text = "\n\n".join(
+                    f"## {s.get('title', '')}\n{s.get('text', '')}"
+                    for s in sections.get("sections", [])
+                )
+                if not source_text.strip():
+                    raise ValueError("article review source has no section body")
+                source_text, article_source = persist_review_source(
+                    self.job_dir, source_text, label="sections",
+                )
+            source_blocks.append(f"--- {article_source['label']} 全文 ---\n{source_text}")
+            article_sources.append(article_source)
+            article_source_texts[article_source["label"]] = source_text
 
         dimensions = [
             ("completeness", "信息完整性"),
@@ -39,7 +73,7 @@ class ArticleReviewStep(StepBase):
             intro="请对以下文章笔记进行质量评审。",
             dimensions=dimensions,
             ref_block=(
-                f"原文章节：{json.dumps(original_titles, ensure_ascii=False)}\n\n"
+                "\n\n".join(source_blocks) + "\n\n"
                 f"--- 笔记 ---\n{smart_clip}"
             ),
         )
@@ -47,6 +81,8 @@ class ArticleReviewStep(StepBase):
         review, parse_failed = self.run_dimension_review(
             prompt, fallback=self.review_fallback(score_keys), score_keys=score_keys,
             note_file=note_file, coverage=coverage,
+            review_sources=[smart_source, *article_sources],
+            review_source_texts={"smart": smart_clip, **article_source_texts},
         )
         return {"overall": review.get("overall", 0), "parse_failed": parse_failed,
                 "note_file": note_file, "coverage_truncated": coverage["truncated"]}

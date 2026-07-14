@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from shared.step_base import REVIEW_REF_LIMIT, StepBase, file_hash
+import json
+
+from shared.evidence_contract import (
+    validate_citations_from_loaded,
+    validate_manifest_loaded,
+)
+from shared.review_contract import source_record, source_record_from_data
+from shared.step_base import StepBase, file_hash
 
 
 class ReviewStep(StepBase):
@@ -26,30 +33,65 @@ class ReviewStep(StepBase):
             "provider": self.override_provider(),
         }
 
-    def _evidence_for_review(self) -> tuple[str, str]:
-        """有取证产物则:1. 把权威来源附进 ref_block 供核对;2. intro 加一句 [E#] 忠实性核对指令。"""
-        import json
+    def _evidence_for_review(
+        self, smart: str | None = None, mechanical: str | None = None,
+    ) -> tuple[str, str, list[dict], dict[str, str], dict, dict | None]:
+        """只把通过 v2 manifest 校验的证据全文送评并返回引用核验结果。"""
+        if smart is None:
+            smart_path = self.latest_smart_note()
+            if smart_path is None:
+                smart = ""
+            else:
+                rel = str(smart_path.relative_to(self.job_dir))
+                smart, _ = source_record(self.job_dir, rel, label="smart")
         p = self.job_dir / "output" / "evidence.json"
         if not p.exists():
-            return "", ""
+            citation = validate_citations_from_loaded(smart, {}, {}, [])
+            return "", "", [], {}, citation, None
+        manifest_text, manifest_record = source_record(
+            self.job_dir, "output/evidence.json", label="evidence_manifest",
+        )
         try:
-            items = (json.loads(p.read_text(encoding="utf-8")).get("evidence")) or []
+            manifest = json.loads(manifest_text)
         except (ValueError, OSError):
-            return "", ""
-        if not items:
-            return "", ""
-        lines = ["\n\n--- 权威来源(取证) ---"]
-        for s in items:
-            facts = "；".join(f.get("figure", "") for f in (s.get("key_facts") or [])[:3])
-            lines.append(f"[{s.get('id')}] {s.get('source_tier', '')} {s.get('title', '')}"
-                         f"（{s.get('ref', '')}）：{facts}")
+            return "", "", [], {}, {
+                "status": "invalid", "checked": 0, "items": [],
+                "manifest_errors": ["manifest_parse_failed"],
+            }, manifest_record
+        if not isinstance(manifest, dict):
+            return "", "", [], {}, {
+                "status": "invalid", "checked": 0, "items": [],
+                "manifest_errors": ["legacy_or_invalid_schema"],
+            }, manifest_record
+        valid, manifest_errors, loaded_texts = validate_manifest_loaded(
+            self.job_dir, self.job_dir.name, manifest, mechanical_text=mechanical,
+        )
+        lines = ["\n\n--- 权威来源全文(受控取证) ---"]
+        sources = []
+        source_texts = {}
+        for evidence_id, item in valid.items():
+            text = loaded_texts[evidence_id]
+            _, record = source_record_from_data(
+                text.encode("utf-8"), item["artifact"], label=evidence_id,
+            )
+            sources.append(record)
+            source_texts[evidence_id] = text
+            lines.append(f"\n[{evidence_id}] {item.get('title', '')}\n{text}")
         intro_extra = ("（笔记若用 [E#] 引用了上方「权威来源」，请核对被引精确数据与该来源是否相符；"
                        "不符或列表外的臆造精确数字，在 top3_improvements 中指出。）")
-        return "\n".join(lines), intro_extra
+        citation = validate_citations_from_loaded(
+            smart, valid, loaded_texts, manifest_errors,
+        )
+        return (
+            "\n".join(lines) if valid else "", intro_extra, sources, source_texts,
+            citation, manifest_record,
+        )
 
     def execute(self) -> dict | None:
-        mechanical = (self.job_dir / "output" / "notes_mechanical.md").read_text(encoding="utf-8")
-        smart_clip, coverage, note_file = self.prepare_smart_for_review()
+        mechanical, mechanical_source = source_record(
+            self.job_dir, "output/notes_mechanical.md", label="mechanical",
+        )
+        smart_clip, coverage, note_file, smart_source = self.prepare_smart_for_review()
 
         dimensions = [
             ("completeness", "信息完整性（是否遗漏重要内容）"),
@@ -59,12 +101,15 @@ class ReviewStep(StepBase):
             ("visual_integration", "截图引用恰当性"),
             ("readability", "可读性"),
         ]
-        ev_ref, intro_extra = self._evidence_for_review()
+        (
+            ev_ref, intro_extra, evidence_sources, evidence_texts, citation,
+            evidence_manifest_record,
+        ) = self._evidence_for_review(smart_clip, mechanical)
         prompt = self.build_review_prompt(
             intro="请对比以下两份笔记，对 AI 生成的智能版笔记进行质量评审。" + intro_extra,
             dimensions=dimensions,
             ref_block=(
-                f"--- 机械版笔记 ---\n{mechanical[:REVIEW_REF_LIMIT]}\n\n"
+                f"--- 机械版笔记 ---\n{mechanical}\n\n"
                 f"--- 智能版笔记 ---\n{smart_clip}" + ev_ref
             ),
         )
@@ -72,6 +117,12 @@ class ReviewStep(StepBase):
         review, parse_failed = self.run_dimension_review(
             prompt, fallback=self.review_fallback(score_keys), score_keys=score_keys,
             note_file=note_file, coverage=coverage,
+            review_sources=[smart_source, mechanical_source, *evidence_sources],
+            review_source_texts={
+                "smart": smart_clip, "mechanical": mechanical, **evidence_texts,
+            },
+            citation_validation=citation,
+            evidence_manifest_record=evidence_manifest_record,
         )
         return {"overall": review.get("overall", 0), "parse_failed": parse_failed,
                 "provider": review.get("provider"), "note_file": note_file,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import json
 import mimetypes
 from pathlib import Path
 
@@ -13,7 +14,21 @@ from fastapi.responses import Response
 from shared.config import AppConfig
 from shared.db import Database
 from shared.notes_versions import latest_smart, parse_smart_version, review_path_for_note
-from shared.storage import StorageBackend
+from shared.evidence_contract import (
+    MAX_EVIDENCE_BYTES,
+    project_evidence,
+    validate_manifest_with_reader,
+)
+from shared.review_contract import (
+    MAX_REVIEW_SOURCE_BYTES,
+    project_review,
+    verify_persisted_review,
+)
+from shared.storage import (
+    StorageBackend,
+    read_file_bounded,
+    read_verification_artifact_bounded,
+)
 from api.deps import get_config, get_db, get_storage, validate_path_segment, verify_token
 
 router = APIRouter(prefix="/api/jobs", tags=["notes"], dependencies=[Depends(verify_token)])
@@ -63,6 +78,35 @@ async def _serve(
     return Response(content=data, media_type=media_type, headers=headers)
 
 
+async def _verified_evidence_ids(
+    storage: StorageBackend, job_id: str, manifest: dict,
+) -> tuple[set[str], list[str]]:
+    """重算 URL tier、机械稿锚点、match 与文件完整性;不信任 manifest 自报。"""
+    async def reader(rel: str) -> bytes | None:
+        return await _read_verification_artifact(storage, job_id, rel)
+
+    verified, errors = await validate_manifest_with_reader(job_id, manifest, reader)
+    return set(verified), errors
+
+
+async def _verified_review(
+    storage: StorageBackend, job_id: str, review: dict, pipeline: str | None,
+) -> dict:
+    async def reader(rel: str) -> bytes | None:
+        return await _read_verification_artifact(storage, job_id, rel)
+
+    return await verify_persisted_review(
+        review, job_id=job_id, pipeline=pipeline, read_file=reader,
+    )
+
+
+async def _read_verification_artifact(
+    storage: StorageBackend, job_id: str, rel: str,
+) -> bytes | None:
+    """评审/取证重验统一有界读;对象大小未知时也只消费 limit+1。"""
+    return await read_verification_artifact_bounded(storage, job_id, rel)
+
+
 @router.get("/{job_id}/notes/smart")
 async def get_smart_notes(job_id: str, file: str | None = None,
                           storage: StorageBackend = Depends(get_storage)):
@@ -81,11 +125,16 @@ async def get_smart_notes(job_id: str, file: str | None = None,
 
 
 @router.get("/{job_id}/note-versions")
-async def list_note_versions(job_id: str, storage: StorageBackend = Depends(get_storage)):
+async def list_note_versions(
+    job_id: str,
+    storage: StorageBackend = Depends(get_storage),
+    db: Database = Depends(get_db),
+):
     """列出智能笔记各版本(provider/model/生成时间)。review.json 记录评的是哪一版 + 总分。"""
     _validate_job_id(job_id)
-    import json as _json
     files = await storage.list_files(job_id)
+    job = await asyncio.to_thread(db.get_job, job_id)
+    pipeline = job.pipeline if job else None
     fileset = set(files)
     versions = []
     for f in files:
@@ -96,12 +145,19 @@ async def list_note_versions(job_id: str, storage: StorageBackend = Depends(get_
         rpath = review_path_for_note(f)
         v["review_file"] = rpath if rpath in fileset else None
         v["overall"] = None
+        v["review_state"] = None
         if v["review_file"]:
-            rdata = await storage.read_file(job_id, v["review_file"])
+            rdata = await read_file_bounded(
+                storage, job_id, v["review_file"], MAX_REVIEW_SOURCE_BYTES,
+            )
             if rdata:
                 try:
-                    v["overall"] = _json.loads(rdata).get("overall")
-                except (ValueError, _json.JSONDecodeError):
+                    parsed = json.loads(rdata)
+                    verified = await _verified_review(storage, job_id, parsed, pipeline)
+                    projected = project_review(verified)
+                    v["overall"] = projected.get("overall")
+                    v["review_state"] = projected.get("reliability_state")
+                except (ValueError, json.JSONDecodeError):
                     pass
         versions.append(v)
     versions.sort(key=lambda v: v["version"], reverse=True)   # 最新在前
@@ -124,7 +180,8 @@ async def get_transcript(job_id: str, storage: StorageBackend = Depends(get_stor
 
 @router.get("/{job_id}/review")
 async def get_review(job_id: str, file: str | None = None,
-                     storage: StorageBackend = Depends(get_storage)):
+                     storage: StorageBackend = Depends(get_storage),
+                     db: Database = Depends(get_db)):
     """默认取最新评审(review.json);file= 取与某版笔记配对的版本化评审。"""
     _validate_job_id(job_id)
     if file:
@@ -133,15 +190,45 @@ async def get_review(job_id: str, file: str | None = None,
         rel = file
     else:
         rel = "output/review.json"
-    return await _serve(storage, job_id, rel, "application/json", "review not ready")
+    data = await read_file_bounded(
+        storage, job_id, rel, MAX_REVIEW_SOURCE_BYTES,
+    )
+    if data is None:
+        raise HTTPException(404, "review not ready")
+    try:
+        artifact = json.loads(data)
+    except (ValueError, json.JSONDecodeError):
+        raise HTTPException(422, "review artifact is invalid")
+    if not isinstance(artifact, dict):
+        raise HTTPException(422, "review artifact is invalid")
+    job = await asyncio.to_thread(db.get_job, job_id)
+    verified = await _verified_review(
+        storage, job_id, artifact, job.pipeline if job else None,
+    )
+    projected = project_review(verified)
+    return Response(content=json.dumps(projected, ensure_ascii=False), media_type="application/json")
 
 
 @router.get("/{job_id}/evidence")
 async def get_evidence(job_id: str, storage: StorageBackend = Depends(get_storage)):
-    """权威来源(取证产物 evidence.json):案例类笔记 AI fetch 的判决/处罚/报道来源 + 引用证据。
-    裸透传,前端「权威来源」tab 渲染;未取证则 404。"""
-    return await _serve(storage, job_id, "output/evidence.json", "application/json",
-                        "evidence not ready")
+    """权威来源 API 投影:旧版/低置信/不合格来源保留诊断但不暴露可点击 URL。"""
+    _validate_job_id(job_id)
+    data = await read_file_bounded(
+        storage, job_id, "output/evidence.json", MAX_EVIDENCE_BYTES,
+    )
+    if data is None:
+        raise HTTPException(404, "evidence not ready")
+    try:
+        manifest = json.loads(data)
+    except (ValueError, json.JSONDecodeError):
+        raise HTTPException(422, "evidence artifact is invalid")
+    if not isinstance(manifest, dict):
+        raise HTTPException(422, "evidence artifact is invalid")
+    verified, validation_errors = await _verified_evidence_ids(storage, job_id, manifest)
+    projected = project_evidence(
+        manifest, verified_ids=verified, validation_errors=validation_errors,
+    )
+    return Response(content=json.dumps(projected, ensure_ascii=False), media_type="application/json")
 
 
 @router.get("/{job_id}/assets/{filename}")

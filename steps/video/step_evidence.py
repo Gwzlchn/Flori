@@ -2,9 +2,8 @@
 
 仅案例类(domain=finance 或 style_tags 含 case-study)触发。从机械稿 OCR 抽锚点:
 文号/案号/当事人/股票。让 claude 域名限定搜权威源:证监会处罚决定书优先 csrc.gov.cn
-一手,法院案优先裁判文书网/法院官网/上市公司公告。再用直连 curl 抓正文 + 抽取:
-中国政府/法院站走境外代理会失败,必须 env -u …PROXY 直连。按文号 case-match,
-写 output/evidence.json。
+一手,法院案优先裁判文书网/法院官网/上市公司公告。模型只提出候选 URL,
+正文由受控下载器禁代理抓取并逐跳校验,写 v2 manifest 与稳定证据文件。
 
 红线:一手优先;抓不到如实标 source_tier/confidence,绝不用二手新闻冒充一手。
 """
@@ -12,19 +11,19 @@
 from __future__ import annotations
 
 import json
-import re
-from datetime import datetime
-
+from shared.evidence_contract import (
+    MAX_EVIDENCE_ITEMS,
+    MAX_MECHANICAL_EVIDENCE_BYTES,
+    extract_case_refs,
+    materialize_evidence,
+)
 from shared.step_base import StepBase, file_hash
+from shared.storage import read_path_bounded
 
 # 触发:案例类内容才取证(其余 pipeline/心法类自门控 skip,不污染)。
 _CASE_DOMAINS = {"finance"}
 _CASE_STYLE = "case-study"
 _MECH_CLIP = 8000  # 喂给取证 prompt 的机械稿节选上限(锚点+案情段足够)
-# OCR 文号/案号锚点:〔2018〕88号 / [2018]88号 / (2025)沪刑终60号 等。
-_REF_RE = re.compile(r"[〔\[（(]\s*20\d{2}\s*[〕\]）)][^，。\s]{0,8}?\d{1,4}\s*号")
-
-
 class EvidenceStep(StepBase):
     def _is_case(self) -> bool:
         domain = (self.config.get("domain") or {}).get("name", "")
@@ -53,7 +52,7 @@ class EvidenceStep(StepBase):
         return h
 
     def _refs(self, mech: str) -> list[str]:
-        return sorted({m.strip() for m in _REF_RE.findall(mech)})
+        return extract_case_refs(mech)
 
     def execute(self) -> dict | None:
         if not self._is_case():
@@ -61,18 +60,31 @@ class EvidenceStep(StepBase):
                           domain=(self.config.get("domain") or {}).get("name"))
             return {"skipped": "non-case"}
 
-        mech = (self.job_dir / "output" / "notes_mechanical.md").read_text(encoding="utf-8")
-        refs = self._refs(mech)
-        raw = self.call_ai(
-            self._build_prompt(refs, mech[:_MECH_CLIP]),
-            allowed_tools=["WebSearch", "Bash"], max_turns=24,
+        mechanical_data = read_path_bounded(
+            self.job_dir / "output" / "notes_mechanical.md",
+            MAX_MECHANICAL_EVIDENCE_BYTES,
+            trusted_root=self.job_dir,
         )
-        evidence = self._parse(raw, refs)
+        if len(mechanical_data) > MAX_MECHANICAL_EVIDENCE_BYTES:
+            raise ValueError("mechanical source is too large")
+        try:
+            mech = mechanical_data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("mechanical source is not UTF-8") from exc
+        refs = self._refs(mech)
+        raw = self.call_ai(self._build_prompt(refs, mech[:_MECH_CLIP]),
+                           allowed_tools=["WebSearch"], max_turns=12)
+        candidates, parse_failed = self._parse_candidates(raw)
+        evidence = materialize_evidence(
+            self.job_dir, self.job_dir.name, candidates, anchors=refs,
+        )
+        evidence["ocr_refs"] = refs
+        evidence["candidate_parse_failed"] = parse_failed
+        evidence["provider"] = self.last_ai_provider
         self.write_output("output/evidence.json", evidence)
-        cm = evidence.get("case_match", {})
         return {"evidence_count": len(evidence.get("evidence", [])),
-                "confidence": cm.get("confidence"),
-                "parse_failed": evidence.get("parse_failed", False),
+                "eligible_count": sum(1 for x in evidence.get("evidence", []) if x.get("eligible")),
+                "parse_failed": parse_failed,
                 "refs": refs, "provider": self.last_ai_provider}
 
     def _build_prompt(self, refs: list[str], mech_clip: str) -> str:
@@ -82,24 +94,35 @@ class EvidenceStep(StepBase):
         tmpl = self._load_prompt_template("10_evidence", _DEFAULT)
         return tmpl.replace("<<REF_HINT>>", ref_hint).replace("<<MECH_CLIP>>", mech_clip)
 
-    def _parse(self, raw: str, refs: list[str]) -> dict:
+    def _parse_candidates(self, raw: str) -> tuple[list[dict], bool]:
         try:
-            obj = json.loads(self._extract_json(raw))
-            if not isinstance(obj, dict) or "evidence" not in obj:
-                raise ValueError("missing evidence key")
+            if type(raw) is not str:
+                raise ValueError("candidate response must be text")
+            obj = json.loads(raw.strip())
+            if not isinstance(obj, dict) or set(obj) != {"candidates"}:
+                raise ValueError("invalid candidate envelope")
+            candidates = obj.get("candidates")
+            if not isinstance(candidates, list):
+                raise ValueError("missing candidates")
+            if len(candidates) > MAX_EVIDENCE_ITEMS:
+                raise ValueError("too many candidates")
+            fields = {"title", "url", "publisher", "reason"}
+            clean = []
+            for item in candidates:
+                if (
+                    not isinstance(item, dict)
+                    or set(item) != fields
+                    or any(
+                        type(item.get(field)) is not str
+                        or not item.get(field, "").strip()
+                        for field in fields
+                    )
+                ):
+                    raise ValueError("invalid candidate item")
+                clean.append({field: item[field].strip() for field in fields})
+            return clean, False
         except (ValueError, json.JSONDecodeError):
-            obj = {
-                "case_match": {"subject": "", "anchors": refs, "confidence": "low",
-                               "note": "取证结果解析失败"},
-                "evidence": [],
-                "notes": "AI 返回非有效 JSON",
-                "parse_failed": True,
-                "raw_response": (raw or "")[:800],
-            }
-        obj.setdefault("schema_version", 1)
-        obj["fetched_at"] = datetime.now().strftime("%Y-%m-%d")
-        obj["ocr_refs"] = refs
-        return obj
+            return [], True
 
 
 # 静态默认 prompt,内容与外置模板 templates/10_evidence.md 一致;<<REF_HINT>>/<<MECH_CLIP>> 由 replace 注入。
@@ -112,21 +135,11 @@ _DEFAULT = (
     "2) 用 WebSearch 找一手——在查询里加 `site:csrc.gov.cn`（证监会案，省局子域亦可）或 "
     "`site:wenshu.court.gov.cn`（法院案）优先官方；法院一手常被登录墙挡，可退**上市公司公告**"
     "（《关于收到行政处罚/刑事裁定的公告》逐字转载）。可多次搜。\n"
-    "3) 用 Bash curl 抓正文——中国政府/法院/交易所站点**必须直连不走代理**（走代理会失败）：\n"
-    "   env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy "
-    "curl -sL -m 25 -A \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0\" \"<url>\"\n"
-    "   （csrc 页多为 GBK，原样取字节即可。）\n"
-    "4) 文号 case-match：抓回正文含上面 OCR 的文号/当事人→confidence=high；只对上当事人=medium；"
-    "对不上或只找到二手新闻=low。\n\n"
-    "只输出如下**扁平 JSON**（不要任何别的文字、不要代码围栏、字符串值内用「」不用半角双引号以免坏 JSON）：\n"
-    '{"case_match":{"subject":"案件一句话","anchors":["命中锚点"],"confidence":"high|medium|low",'
-    '"note":"一手命中/缺口说明"},'
-    '"evidence":[{"id":"E1","type":"行政处罚决定|刑事裁定|公司公告|报道",'
-    '"title":"标题","url":"真实URL","publisher":"发布方","ref":"文号/案号",'
-    '"source_tier":"一手官方|上市公司公告|媒体逐字转载|二手新闻",'
-    '"match_confidence":"high|medium|low","excerpt":"原文摘要(一句)",'
-    '"key_facts":[{"figure":"金额/数字/事实","quote":"原文片段"}]}],'
-    '"notes":"取证说明:抓到哪层、什么没抓到"}\n\n'
+    "3) 只提出候选 URL,不要调用 Bash/curl,不要声称已读取正文;下载、DNS/redirect 校验与可信度"
+    "由服务端完成。\n\n"
+    "只输出严格 JSON（不要代码围栏或额外文字）：\n"
+    '{"candidates":[{"title":"标题","url":"真实URL","publisher":"发布方",'
+    '"reason":"为什么可能匹配 OCR 锚点"}]}\n\n'
     "机械稿（节选）：\n<<MECH_CLIP>>"
 )
 

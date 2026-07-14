@@ -15,13 +15,15 @@ from pathlib import Path
 import structlog
 
 from .ai_gateway import AIGateway, record_usage_to_file
+from .ai_routing import (
+    InvalidAIOverrideError,
+    READ_TOOL_TAG,
+    ai_required_tags,
+    parse_ai_override,
+    step_required_capability_tags_sync,
+)
 from .errors import ProcessingError, StepError
-from .models import AIUsage, DEFAULT_AI_MODEL, LLMRequest
-
-
-# 送评上限:绝大多数笔记可整篇覆盖;超长则在 review 里标 coverage,避免"只评前段却报整篇分"。
-REVIEW_NOTE_LIMIT = 20000   # 智能笔记(被评对象)
-REVIEW_REF_LIMIT = 8000     # 机械稿/转写参照(对照用,不必全量)
+from .models import AIUsage, DEFAULT_AI_MODEL, LLMRequest, LLMResponse
 
 
 def file_hash(path: Path) -> str:
@@ -74,6 +76,8 @@ class StepBase:
         # 最近一次 AI 调用实际命中的 provider / model(供版本化笔记标记)。
         self.last_ai_provider: str | None = None
         self.last_ai_model: str | None = None
+        # 消费方只读最近一次响应元数据,正文仍由 call_ai 返回,不扩大各 step 接口。
+        self.last_ai_response: LLMResponse | None = None
         # AI 审计日志(prompt 白盒化):本步每次 LLM 调用一条,内存累积后落 output/ai_logs/{step}.jsonl。
         # 留内存副本是为 call_ai_json 解析后能回填 output_processed(amend 最后一条)。
         self._ai_log_records: list[dict] = []
@@ -85,6 +89,9 @@ class StepBase:
 
     def run(self) -> None:
         try:
+            # job.json 是任务控制输入。执行前先验证 override,使非法形状稳定归类 input_invalid,
+            # 不能等到某次 AI 调用才偶然触发或被非 AI 路径跳过。
+            self._read_override()
             missing = self.validate_inputs()
             if missing:
                 from .errors import InputMissingError
@@ -310,14 +317,13 @@ class StepBase:
 
     @staticmethod
     def clip_note_for_review(smart: str) -> tuple[str, dict]:
-        """送评智能笔记按 REVIEW_NOTE_LIMIT 截断,并返回覆盖率标注(评分只对覆盖范围负责)。
-        返回 (截断后文本, coverage)。coverage 由评审步写进 review.json。"""
+        """兼容旧调用名,评审 v2 始终返回完整笔记并记录未截断。"""
         cov = {
             "note_chars": len(smart),
-            "reviewed_chars": min(len(smart), REVIEW_NOTE_LIMIT),
-            "truncated": len(smart) > REVIEW_NOTE_LIMIT,
+            "reviewed_chars": len(smart),
+            "truncated": False,
         }
-        return smart[:REVIEW_NOTE_LIMIT], cov
+        return smart, cov
 
     def write_review(self, review: dict, note_file: str | None) -> None:
         """评审结果落盘:补记 生成时间 / 方式 / 模型 + 评的是哪一版智能笔记(note_file)。
@@ -341,13 +347,22 @@ class StepBase:
         "- key_terms: 这篇笔记**讲清楚**的关键概念 + 一句话候选定义（用于沉淀进概念库）\n"
         "- missing_concepts: 笔记**遗漏**的重要概念（知识缺口，仅供选题/查漏）\n"
         "- top3_improvements: 最重要的 3 条改进建议\n\n"
+        "- issues: 结构化问题列表。type 只能是 consistency / missing_in_source / "
+        "missing_external / traceability；severity 只能是 info / warning / error。"
+        "dimension 必须是上方评分维度之一，claim 是待核验主张。有证据时 "
+        "evidence_status=supported 且给 locator={source,quote}，source 是下方来源标签，"
+        "quote 必须逐字来自该来源；证据不足时 "
+        "evidence_status=insufficient 且给 reason。\n\n"
     )
 
     # 评审步 prompt 里逐字相同的 JSON 示例尾(key_terms/missing/top3)。
     _REVIEW_JSON_TAIL = (
         '  "key_terms": [{"term": "概念名", "definition": "一句话候选定义"}],\n'
         '  "missing_concepts": ["遗漏的重要概念"],\n'
-        '  "top3_improvements": ["改进建议1", "改进建议2", "改进建议3"]\n'
+        '  "top3_improvements": ["改进建议1", "改进建议2", "改进建议3"],\n'
+        '  "issues": [{"type":"traceability","severity":"warning",'
+        '"dimension":"accuracy","claim":"待核验主张","message":"问题",'
+        '"evidence_status":"supported","locator":{"source":"smart","quote":"原文逐字片段"}}]\n'
         "}\n\n"
     )
 
@@ -398,8 +413,7 @@ class StepBase:
         return rendered
 
     def review_fallback(self, score_keys: list[str]) -> dict:
-        """评审步 AI 解析失败时的兜底:各维度 3 分 + overall 3.0 + 空 key_terms/missing + 提示。
-        从 score_keys 机械派生,四个评审步共用,免各写一份逐字相同的字面量。"""
+        """保留旧扩展的调用兼容;评审 v2 不消费返回值,不得据此生成可靠分数。"""
         fallback = {key: 3 for key in score_keys}
         fallback.update(
             overall=3.0, key_terms=[], missing_concepts=[],
@@ -407,18 +421,102 @@ class StepBase:
         )
         return fallback
 
-    def prepare_smart_for_review(self) -> tuple[str, dict, str | None]:
-        """读最新智能笔记并按 REVIEW_NOTE_LIMIT 截断送评,返回 (smart_clip, coverage, note_file)。"""
-        smart_path = self.latest_smart_note()
-        smart = smart_path.read_text(encoding="utf-8") if smart_path else ""
-        note_file = str(smart_path.relative_to(self.job_dir)) if smart_path else None
-        smart_clip, coverage = self.clip_note_for_review(smart)
-        return smart_clip, coverage, note_file
+    def prepare_smart_for_review(self) -> tuple[str, dict, str, dict]:
+        """读取完整的最新智能笔记并返回正文、覆盖信息与稳定相对路径。"""
+        from .review_contract import source_record
 
-    def run_dimension_review(self, prompt, fallback, score_keys, note_file, coverage):
-        """评审步通用骨架:call_ai_json(评分 + 解析兜底)→ 标 review_coverage → write_review。
-        返回 (review, parse_failed)。各步只声明 prompt/fallback/score_keys(维度差异),骨架共用。"""
-        review, parse_failed = self.call_ai_json(prompt, fallback=fallback, score_keys=score_keys)
+        smart_path = self.latest_smart_note()
+        if smart_path is None:
+            raise ValueError("review source has no smart note")
+        note_file = str(smart_path.relative_to(self.job_dir))
+        smart, record = source_record(self.job_dir, note_file, label="smart")
+        smart_clip, coverage = self.clip_note_for_review(smart)
+        return smart_clip, coverage, note_file, record
+
+    def run_dimension_review(
+        self, prompt, fallback, score_keys, note_file, coverage,
+        *, review_sources: list[dict] | None = None,
+        review_source_texts: dict[str, str] | None = None,
+        citation_validation: dict | None = None,
+        evidence_manifest_record: dict | None = None,
+    ):
+        """评审 v2:完整输入留痕、结束原因归一、严格 JSON 与引用门禁。"""
+        del fallback  # v2 不再用虚构的全 3 分冒充评分。
+        from .review_contract import (
+            MAX_REVIEW_SOURCE_AGGREGATE_BYTES,
+            MAX_REVIEW_SOURCE_BYTES,
+            MAX_REVIEW_SOURCES,
+            parse_review,
+            sha256_bytes,
+        )
+
+        if type(prompt) is not str:
+            raise ValueError("review input must be a string")
+        try:
+            prompt_data = prompt.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("review input must be UTF-8") from exc
+        if len(prompt_data) > MAX_REVIEW_SOURCE_BYTES:
+            raise ValueError(
+                f"review input exceeds {MAX_REVIEW_SOURCE_BYTES} bytes",
+            )
+        validate_sources = review_sources is not None or review_source_texts is not None
+        sources = review_sources or []
+        if validate_sources and (not sources or len(sources) > MAX_REVIEW_SOURCES):
+            raise ValueError("review sources count is invalid")
+        labels: set[str] = set()
+        declared_total = 0
+        for source in sources:
+            if not isinstance(source, dict):
+                raise ValueError("review source record is invalid")
+            label = source.get("label")
+            size = source.get("bytes")
+            if type(label) is not str or not label or label in labels:
+                raise ValueError("review source label is invalid")
+            if type(size) is not int or size < 0 or size > MAX_REVIEW_SOURCE_BYTES:
+                raise ValueError("review source size is invalid")
+            labels.add(label)
+            declared_total += size
+        if declared_total > MAX_REVIEW_SOURCE_AGGREGATE_BYTES:
+            raise ValueError("review sources exceed aggregate byte limit")
+        source_texts = review_source_texts or {}
+        actual_total = 0
+        for label in labels:
+            text = source_texts.get(label)
+            if type(text) is not str:
+                raise ValueError("review source text is missing")
+            actual_total += len(text.encode("utf-8"))
+        if validate_sources and (
+            actual_total != declared_total
+            or actual_total > MAX_REVIEW_SOURCE_AGGREGATE_BYTES
+        ):
+            raise ValueError("review source bytes do not match records")
+        self.write_output("output/review_input.md", prompt)
+        prompt_rel = "output/review_input.md"
+        if note_file:
+            name = Path(note_file).name.replace("notes_smart_", "review_input_", 1)
+            prompt_rel = f"output/versions/{name}"
+            self.write_output(prompt_rel, prompt)
+        review_input = {
+            "artifact": prompt_rel,
+            "sha256": sha256_bytes(prompt_data),
+            "bytes": len(prompt_data),
+            "chars": len(prompt),
+            "truncated": bool(coverage.get("truncated")),
+            "sources": sources,
+        }
+        if evidence_manifest_record is not None:
+            review_input["evidence_manifest"] = evidence_manifest_record
+        raw = self.call_ai(prompt, response_format="json", temperature=0)
+        response = self.last_ai_response or LLMResponse(
+            content=raw, model=self.last_ai_model or "unknown",
+            provider=self.last_ai_provider or "unknown", finish_reason=None,
+        )
+        review, parse_failed = parse_review(
+            raw, score_keys, response, review_input=review_input,
+            review_source_texts=source_texts,
+            citation_validation=citation_validation,
+        )
         review["review_coverage"] = coverage
         self.write_review(review, note_file)
         return review, parse_failed
@@ -469,34 +567,78 @@ class StepBase:
     # AI 调用
 
     def _read_override(self) -> str:
-        """读 job.json 里本步的 provider 覆盖(无/读失败则空串)。
+        """读 job.json 里本步的 provider 覆盖(文件不存在则空串)。
         override_provider 与 _apply_provider_override 共用这份读盘+解析,防口径漂移。"""
         try:
             job = json.loads((self.job_dir / "job.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except FileNotFoundError:
             return ""
-        return (job.get("ai_overrides") or {}).get(self.step_name, "") or ""
+        except OSError as exc:
+            self.log.warning("ai_override_read_failed", reason="job_json_unreadable")
+            raise InvalidAIOverrideError("invalid AI override: job_json_unreadable") from exc
+        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+            self.log.warning("ai_override_read_failed", reason="job_json_invalid")
+            raise InvalidAIOverrideError("invalid AI override: job_json_invalid") from exc
+        override, shape_error = parse_ai_override(
+            job, self.step_name, self.config.get("providers", {}),
+        )
+        if shape_error:
+            self.log.warning("ai_override_invalid", reason=shape_error)
+            raise InvalidAIOverrideError(f"invalid AI override: {shape_error}")
+        return override or ""
 
     def override_provider(self) -> str:
         """本步的 provider 覆盖(无则空串)。供 input_hashes 纳入,
         使"换 provider 重跑"改变指纹、绕过幂等跳过。"""
         return self._read_override()
 
-    def _apply_provider_override(self) -> None:
+    def _apply_provider_override(
+        self, *, required_capabilities=(), actual_capabilities: bool = False,
+    ) -> None:
         """按 job.json 的 ai_overrides[step] 覆盖本步 provider(供"选 provider 重跑")。
         只用所选 provider(去掉 fallback),避免失败时静默回退到别的 provider,
         保证版本化笔记的 provider 标记如实。"""
         provider = self._read_override()
-        if not provider:
-            return
-        pcfg = self.config.get("providers", {}).get("providers", {}).get(provider, {})
-        models = pcfg.get("models", [])
-        model = models[0] if models else (pcfg.get("model") or "unknown")
-        self.config["ai"] = {"primary": {"provider": provider, "model": model}}
-        self._gateway = None  # 强制按新 ai 配置重建
+        selected_ai = self.config.get("ai")
+        if provider:
+            pcfg = self.config.get("providers", {}).get("providers", {}).get(provider, {})
+            models = pcfg.get("models", [])
+            model = models[0] if models else (pcfg.get("model") or "unknown")
+            selected_ai = {"primary": {"provider": provider, "model": model}}
+
+        try:
+            if actual_capabilities:
+                capability_tags = sorted(set(required_capabilities))
+            else:
+                capability_tags = step_required_capability_tags_sync(
+                    self.config.get("step", {}),
+                    lambda rel: (self.job_dir / rel).is_file()
+                    and (self.job_dir / rel).stat().st_size > 0,
+                )
+                capability_tags = sorted({*capability_tags, *required_capabilities})
+            ai_required_tags(
+                selected_ai, self.config.get("providers", {}),
+                required_tags=capability_tags,
+            )
+        except (OSError, ValueError, TypeError) as exc:
+            raise InvalidAIOverrideError(
+                f"invalid AI capability: {exc}",
+            ) from exc
+        if provider:
+            self.config["ai"] = selected_ai
+            self._gateway = None  # 强制按新 ai 配置重建
 
     def call_ai(self, prompt: str, images: list[Path] | None = None, **kwargs) -> str:
-        self._apply_provider_override()
+        allowed_tools = kwargs.get("allowed_tools")
+        required_capabilities = {
+            READ_TOOL_TAG
+            for tool in (allowed_tools if isinstance(allowed_tools, (list, tuple)) else [])
+            if type(tool) is str and tool.strip().lower() == "read"
+        }
+        self._apply_provider_override(
+            required_capabilities=required_capabilities,
+            actual_capabilities=True,
+        )
         if self._gateway is None:
             self._gateway = AIGateway(
                 self.config.get("providers", {}),
@@ -527,6 +669,7 @@ class StepBase:
         ts_end = datetime.now()
         self.last_ai_provider = response.provider
         self.last_ai_model = response.model
+        self.last_ai_response = response
 
         self.log.info(
             "ai_call",

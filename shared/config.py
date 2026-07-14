@@ -335,6 +335,8 @@ def build_step_config(
         # 使用者在 YAML 给某步加/改 `version`(或改 ai 模型)即触发该步+下游重跑,无需改代码(见 step_base._def_digest)。
         "version": str(step_cfg.get("version", "1")),
     }
+    if "capability_rules" in step_cfg:
+        step_node["capability_rules"] = copy.deepcopy(step_cfg["capability_rules"])
     # 超时随媒体时长伸缩(可选):仅当 pipeline 给了 timeout_per_min 才透传,worker 跑步前据
     # input/metadata.json 的 duration_sec 算有效超时(见 worker.compute_effective_timeout)。
     # 缺省时不写这俩键,行为完全不变。

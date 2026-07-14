@@ -381,9 +381,9 @@ watch(workerName, (name) => {
   if (!stateDirTouched.value) workerStateDir.value = defaultStateDir(name)
 })
 const AI_ACCESS_METHODS = [
-  { id: 'claude-cli', label: 'Claude CLI', tag: 'claude-cli' },
-  { id: 'codex-cli', label: 'Codex CLI', tag: 'codex-cli' },
-  { id: 'kimi-api', label: 'Kimi API key', tag: 'kimi-api' },
+  { id: 'claude-cli', label: 'Claude CLI', tags: ['claude-cli', 'read'] },
+  { id: 'codex-cli', label: 'Codex CLI', tags: ['codex-cli'] },
+  { id: 'kimi-api', label: 'Kimi API key', tags: ['kimi-api'] },
 ] as const
 const aiAccessMethod = ref<(typeof AI_ACCESS_METHODS)[number]['id']>('claude-cli')
 const selectedAiAccess = computed(() =>
@@ -419,7 +419,7 @@ const dockerCredLines = computed(() => {
 const dockerCacheLines = computed(() => (needsCache.value
   ? '  -v whisper-cache:/cache \\\n  -e MODEL_CACHE_DIR=/cache \\\n  -e HF_ENDPOINT=https://hf-mirror.com \\\n  -e HF_HUB_DISABLE_XET=1 \\\n' : ''))
 const tagsArg = computed(() => {
-  const auto = selectedPools.value.includes('ai') ? [selectedAiAccess.value.tag] : []
+  const auto = selectedPools.value.includes('ai') ? [...selectedAiAccess.value.tags] : []
   const manual = newTags.value.split(/[\s,]+/).filter(Boolean)
   const t = [...new Set([...auto, ...manual])].sort()
   return t.length ? ` --tags ${t.join(' ')}` : ''

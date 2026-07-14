@@ -16,11 +16,13 @@ const props = defineProps<{
   jobId: string
   terms?: Array<string | TermRef>
   domain?: string
+  evidenceIds?: string[]
 }>()
 const emit = defineEmits<{
   headings: [{ id: string; text: string; level: number }[]]
   // pdf-only 译文的图占位链接(#pdf-page=N):父组件切「原文」tab 并让 PDF iframe 跳该页(原生渲染保真)
   pdfPage: [number]
+  evidenceCitation: [string]
 }>()
 
 const router = useRouter()
@@ -136,6 +138,36 @@ md.core.ruler.after('timestamp_marks', 'term_links', (state: any) => {
   }
 })
 
+// 只有服务端判为 eligible 的 v2 证据 ID 才渲染为可点击引用;未知/旧版保持纯文本。
+md.core.ruler.after('term_links', 'evidence_citations', (state: any) => {
+  const allowed = new Set(props.evidenceIds || [])
+  if (!allowed.size) return
+  for (const blockToken of state.tokens) {
+    if (blockToken.type !== 'inline' || !blockToken.children) continue
+    let linkDepth = 0
+    const children: any[] = []
+    for (const child of blockToken.children) {
+      if (child.type === 'link_open') { linkDepth++; children.push(child); continue }
+      if (child.type === 'link_close') { linkDepth = Math.max(0, linkDepth - 1); children.push(child); continue }
+      if (child.type !== 'text' || linkDepth > 0) { children.push(child); continue }
+      const parts = child.content.split(/(\[E[1-9]\d*\])/g)
+      for (const part of parts) {
+        const id = part.match(/^\[(E[1-9]\d*)\]$/)?.[1]
+        if (id && allowed.has(id)) {
+          const token = new state.Token('html_inline', '', 0)
+          token.content = `<button class="evidence-citation" data-evidence-id="${id}">[${id}]</button>`
+          children.push(token)
+        } else if (part) {
+          const token = new state.Token('text', '', 0)
+          token.content = part
+          children.push(token)
+        }
+      }
+    }
+    blockToken.children = children
+  }
+})
+
 // 渲染 + 标题 id 注入 + TOC 提取一次完成:标题 id / 目录通过 DOM 遍历(替代易碎的 HTML 正则)。
 const renderedDoc = computed(() => {
   // 每次渲染前按当前 props 重建术语正则 + 清空"已链接"集合(每词仅首次出现)。
@@ -176,6 +208,13 @@ function onClick(e: MouseEvent) {
     e.preventDefault()
     const n = parseInt(pdfA.getAttribute('href')!.slice('#pdf-page='.length), 10)
     if (n > 0) emit('pdfPage', n)
+    return
+  }
+  const evidenceButton = t?.closest?.('.evidence-citation') as HTMLElement | null
+  if (evidenceButton) {
+    e.preventDefault()
+    const id = evidenceButton.getAttribute('data-evidence-id')
+    if (id) emit('evidenceCitation', id)
     return
   }
   const a = t?.closest?.('.term-link') as HTMLElement | null
@@ -261,6 +300,8 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onEsc))
 .prose .timestamp-mark { text-decoration: none; }
 .prose .term-link { color: #2563eb; cursor: pointer; text-decoration: none; border-bottom: 1px dashed #93c5fd; }
 .prose .term-link:hover { background: #eff6ff; border-bottom-style: solid; }
+.prose .evidence-citation { border: 0; padding: 0 2px; background: transparent; color: #2563eb; cursor: pointer; font: inherit; font-weight: 600; }
+.prose .evidence-citation:hover { background: #eff6ff; border-radius: 3px; }
 .prose details.ocr-fold { margin: 0.2rem 0 0.7rem; }
 .prose details.ocr-fold > summary { cursor: pointer; font-size: 0.72rem; color: #9ca3af; user-select: none; }
 .prose details.ocr-fold > summary::before { content: "🔎 "; }

@@ -1662,6 +1662,160 @@ class TestCalcProgress:
 
 class TestEnqueueTags:
     @pytest.mark.asyncio
+    async def test_ai_provider_tags_are_hard_requirements(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+    ):
+        pipelines = {"tagged": {"steps": [{
+            "name": "A", "pool": "ai", "depends_on": [], "tags": ["vision"],
+            "ai": {"primary": {"provider": "claude-cli"},
+                   "fallback": {"provider": "openai"}},
+        }]}}
+        config = make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir)
+        sched = Scheduler(redis, db, config)
+        job = Job(id="j_provider_tags", content_type="video", pipeline="tagged")
+        db.create_job(job)
+        await sched.submit_job(job)
+        item, _ = await redis.dequeue_step("ai")
+        assert item["require_tags"] == ["claude-cli", "openai-api", "vision"]
+
+    @pytest.mark.asyncio
+    async def test_job_override_replaces_pipeline_provider_tiers(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+    ):
+        class Storage:
+            async def read_file(self, job_id, rel):
+                assert rel == "job.json"
+                return b'{"ai_overrides":{"A":"deepseek"}}'
+
+        pipelines = {"tagged": {"steps": [{
+            "name": "A", "pool": "ai", "depends_on": [], "tags": [],
+            "ai": {"primary": {"provider": "claude-cli"},
+                   "fallback": {"provider": "openai"}},
+        }]}}
+        config = make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir)
+        config.providers = {"providers": {"deepseek": {"type": "openai"}}}
+        sched = Scheduler(redis, db, config, storage=Storage())
+        req = await sched._required_tags_for_step("j_override", "A", pipelines["tagged"]["steps"][0])
+        assert req == ["deepseek-api"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("provider", "original", "expected", "fails"), [
+        ("claude-cli", None, ["claude-cli", "read"], False),
+        ("openai", b"# extracted text", ["openai-api"], False),
+        ("openai", None, None, True),
+        ("openai", b"", None, True),
+    ])
+    async def test_paper_read_capability_uses_current_artifact_and_provider(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+        provider, original, expected, fails,
+    ):
+        class Storage:
+            async def read_file(self, job_id, rel):
+                assert rel == "job.json"
+                return json.dumps({"ai_overrides": {"A": provider}}).encode()
+
+            async def file_size(self, job_id, rel):
+                if rel != "output/original.md" or original is None:
+                    return None
+                return len(original)
+
+            async def open_stream(self, job_id, rel, **kwargs):
+                if rel != "output/original.md" or original is None:
+                    return None
+
+                async def chunks():
+                    yield original
+
+                return chunks()
+
+        pipelines = {"tagged": {"steps": [{
+            "name": "A", "pool": "ai", "depends_on": [], "tags": [],
+            "capability_rules": {
+                "read": {"unless_any_nonempty": ["output/original.md"]},
+            },
+            "ai": {"primary": {"provider": "claude-cli"}},
+        }]}}
+        config = make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir)
+        config.providers = {"providers": {
+            "claude-cli": {"type": "cli", "features": ["read"]},
+            "openai": {"type": "openai", "features": []},
+        }}
+        sched = Scheduler(redis, db, config, storage=Storage())
+
+        if fails:
+            from shared.errors import InputInvalidError
+            with pytest.raises(InputInvalidError, match="does not support read"):
+                await sched._required_tags_for_step(
+                    "j_read", "A", pipelines["tagged"]["steps"][0],
+                )
+        else:
+            assert await sched._required_tags_for_step(
+                "j_read", "A", pipelines["tagged"]["steps"][0],
+            ) == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("document", [
+        None, [], False, 0, "job",
+        {"ai_overrides": None}, {"ai_overrides": []},
+        {"ai_overrides": False}, {"ai_overrides": 0},
+        {"ai_overrides": "openai"},
+        {"ai_overrides": {"A": None}}, {"ai_overrides": {"A": []}},
+        {"ai_overrides": {"A": False}}, {"ai_overrides": {"A": 0}},
+        {"ai_overrides": {"A": {}}}, {"ai_overrides": {"A": "  "}},
+    ])
+    async def test_invalid_job_override_shapes_fail_closed_without_pipeline_fallback(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir, document,
+    ):
+        class Storage:
+            async def read_file(self, job_id, rel):
+                assert rel == "job.json"
+                return json.dumps(document).encode()
+
+        pipelines = {"tagged": {"steps": [{
+            "name": "A", "pool": "ai", "depends_on": [], "tags": [],
+            "ai": {"primary": {"provider": "claude-cli"},
+                   "fallback": {"provider": "openai"}},
+        }]}}
+        config = make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir)
+        sched = Scheduler(redis, db, config, storage=Storage())
+
+        from shared.errors import InputInvalidError
+        with pytest.raises(InputInvalidError, match="invalid AI override"):
+            await sched._required_tags_for_step(
+                "j_invalid_override", "A", pipelines["tagged"]["steps"][0],
+            )
+
+    @pytest.mark.asyncio
+    async def test_unknown_job_override_fails_closed_in_enqueue_and_no_worker_paths(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+    ):
+        class Storage:
+            async def read_file(self, job_id, rel):
+                assert rel == "job.json"
+                return b'{"ai_overrides":{"A":"typo-provider"}}'
+
+        pipelines = {"tagged": {"steps": [{
+            "name": "A", "pool": "ai", "depends_on": [], "tags": [],
+            "ai": {"primary": {"provider": "claude-cli"}},
+        }]}}
+        config = make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir)
+        config.providers = {"providers": {"claude-cli": {"type": "cli"}}}
+        sched = Scheduler(redis, db, config, storage=Storage())
+        job = Job(id="j_unknown_override", content_type="video", pipeline="tagged")
+        db.create_job(job)
+
+        await sched.submit_job(job)
+
+        assert await redis.get_step_status(job.id, "A") == "failed"
+        assert db.get_job(job.id).status == JobStatus.FAILED
+        assert await redis.dequeue_step("ai") is None
+
+        await redis.add_active_job(job.id)
+        await redis.set_step_status(job.id, "A", "ready")
+        await sched.check_no_worker()
+        assert db.get_job(job.id).status == JobStatus.FAILED
+
+    @pytest.mark.asyncio
     async def test_ai_pool_merges_domain_tags(self, scheduler, redis, db, tmp_path, tmp_jobs_dir, configs_dir):
         """AI pool steps merge static_tags + domain + style_tags into tags, require_tags = static only."""
         pipelines = {

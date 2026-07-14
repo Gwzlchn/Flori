@@ -14,16 +14,29 @@ from pathlib import Path
 import structlog
 
 from shared.config import AppConfig, load_config
+from shared.ai_routing import (
+    InvalidAIOverrideError,
+    READ_TOOL_TAG,
+    ai_required_tags,
+    parse_ai_override,
+    step_required_capability_tags,
+    worker_satisfies_requirements,
+)
 from shared.db import Database
 from shared.errors import RETRY_POLICY, get_retry_delay
 from shared.models import AITask, Job, JobStatus, LLMRequest, Step, StepStatus
 from shared.notify import notify
 from shared.redis_client import RedisClient
 from shared.runner_ops import parse_style_tags
+from shared.review_contract import verify_persisted_review
 from shared.terms import extract_pairs, zh_name_from_glossary_row
 from shared.net_zone import required_zone
 from shared.source_detect import detect_source
-from shared.storage import StorageBackend
+from shared.storage import (
+    StorageBackend,
+    read_file_bounded,
+    read_verification_artifact_bounded,
+)
 from shared.status import OFFLINE, PAUSED
 from shared.version import FLORI_VERSION
 
@@ -408,8 +421,8 @@ class Scheduler:
                     # ready-but-not-queued 孤儿补投:调度器/redis 在置 ready 后,入队前重启,或队列
                     # 消息丢失时,步永远停在 ready 无人认领(线上:部署窗口把 03_scene 卡死)。
                     # enqueue 的 ZADD 同成员幂等,task json 相同会去重,已在队的重复补投无害.
-                    await self.enqueue_step(job_id, step)
-                    logger.info("recover_requeue_ready", job_id=job_id, step=step)
+                    if await self.enqueue_step(job_id, step):
+                        logger.info("recover_requeue_ready", job_id=job_id, step=step)
 
             await self._check_downstream(job_id)
 
@@ -709,18 +722,35 @@ class Scheduler:
         采集源:优先 output/concepts.json(article 链的独立概念步,必跑),回退 output/review.json
         (video/paper/audio 由评审步出 key_terms)。"""
         data = await self.storage.read_file(job_id, "output/concepts.json")
+        from_review = False
         if not data:
-            data = await self.storage.read_file(job_id, "output/review.json")
+            data = await self._read_verification_artifact(
+                job_id, "output/review.json",
+            )
+            from_review = bool(data)
         if not data:
             return
         try:
             review = json.loads(data.decode("utf-8", errors="replace"))
         except (json.JSONDecodeError, ValueError):
             return
+        job = await asyncio.to_thread(self.db.get_job, job_id)
+        # 旧版/抢救/截断评审只供诊断,不能沉淀术语或关系边。
+        if from_review:
+            async def reader(rel: str) -> bytes | None:
+                return await self._read_verification_artifact(job_id, rel)
+
+            review = await verify_persisted_review(
+                review, job_id=job_id, pipeline=job.pipeline if job else None,
+                read_file=reader,
+            )
+            if review.get("review_reliable") is not True:
+                logger.info("glossary_review_rejected", job_id=job_id,
+                            reasons=review.get("reliability_reasons") or ["legacy_schema"])
+                return
         key_terms = review.get("key_terms") or []
         if not isinstance(key_terms, list) or not key_terms:
             return
-        job = await asyncio.to_thread(self.db.get_job, job_id)
         domain = (job.domain if job else "") or "general"
         content_type = job.content_type if job else ""
         collected = 0
@@ -747,6 +777,12 @@ class Scheduler:
                 self._write_concept_relations, domain, with_related,
             )
         logger.info("glossary_collected", job_id=job_id, count=collected, edges=edges)
+
+    async def _read_verification_artifact(
+        self, job_id: str, rel: str,
+    ) -> bytes | None:
+        """调度器评审重验与 API 使用同一有界读取机制。"""
+        return await read_verification_artifact_bounded(self.storage, job_id, rel)
 
     def _write_concept_relations(
         self, domain: str, items: list[tuple[str, str, list]]
@@ -889,7 +925,9 @@ class Scheduler:
                 ok = await self.redis.cas_step_status(job_id, name, "skipped", "ready")
                 if not ok:
                     continue
-            await self.enqueue_step(job_id, name)
+            if not await self.enqueue_step(job_id, name):
+                statuses[name] = "failed"
+                return
             statuses[name] = "ready"
 
         fresh = await self.redis.get_all_step_statuses(job_id)
@@ -938,15 +976,14 @@ class Scheduler:
                     if fresh2 and all(v in ("done", "skipped") for v in fresh2.values()):
                         await self.mark_job_done(job_id)
 
-    async def enqueue_step(self, job_id: str, step_name: str) -> None:
+    async def enqueue_step(self, job_id: str, step_name: str) -> bool:
         pipeline_steps = await self._get_job_pipeline_steps(job_id)
         if not pipeline_steps:
-            return
+            return False
         step_cfg = pipeline_steps.get(step_name)
         if not step_cfg:
-            return
+            return False
 
-        await self.redis.set_step_status(job_id, step_name, "ready")
         pool = step_cfg["pool"]
 
         static_tags = step_cfg.get("tags", [])
@@ -964,14 +1001,20 @@ class Scheduler:
         # 代理 HOW 全在 worker。区域判定与 tag 语义见文件头 _NET_STEPS 注释与 shared.net_zone。
         nr = self.config.net_routing or {}
         net_steps = set(nr.get("net_steps") or _NET_STEPS)
-        require_tags = list(static_tags)
+        info = job_info if pool == "ai" else None
+        try:
+            require_tags = await self._required_tags_for_step(
+                job_id, step_name, step_cfg, info,
+            )
+        except InvalidAIOverrideError as exc:
+            await self._fail_invalid_ai_override(job_id, step_name, str(exc))
+            return False
         if step_name in net_steps:
-            info = job_info if pool == "ai" else await self.redis.get_job_info(job_id)
-            src = (info.get("source") or "").strip() or detect_source(info.get("url", ""))
-            zone = required_zone(src, info.get("url", ""))   # net-cn / net-global
-            merged_tags = sorted(set(merged_tags + [zone]))
-            require_tags = sorted(set(require_tags + [zone]))   # 硬门控:worker 须覆盖该区域
+            zone = next((tag for tag in require_tags if tag in {"net-cn", "net-global"}), None)
+            if zone:
+                merged_tags = sorted(set(merged_tags + [zone]))
 
+        await self.redis.set_step_status(job_id, step_name, "ready")
         statuses = await self.redis.get_all_step_statuses(job_id)
         done_count = sum(1 for v in statuses.values() if v in ("done", "skipped"))
         # zpopmin:分数越小越先出。priority=-done_count 让晚到步骤优先,但 02_whisper 处在链路早段
@@ -993,6 +1036,112 @@ class Scheduler:
         })
 
         logger.info("step_enqueued", job_id=job_id, step=step_name, pool=pool, priority=priority)
+        return True
+
+    async def _fail_invalid_ai_override(
+        self, job_id: str, step_name: str, reason: str,
+    ) -> None:
+        """非法 override 在入队前终止步骤与 job,不允许回退到 pipeline provider。"""
+        error = (
+            reason if reason.startswith("invalid AI override:")
+            else f"invalid AI override: {reason}"
+        )
+        await self.redis.set_step_status(job_id, step_name, "failed")
+        await asyncio.to_thread(
+            self.db.update_step, job_id, step_name,
+            status="failed", error=error[:500],
+            finished_at=datetime.now(timezone.utc),
+        )
+        await self.mark_job_failed(job_id, f"{step_name}: {error}")
+
+    async def _required_tags_for_step(
+        self, job_id: str, step_name: str, step_cfg: dict,
+        job_info: dict | None = None,
+    ) -> list[str]:
+        """计算 enqueue 与 no-worker 共用的硬标签,含 provider override。"""
+        required = set(step_cfg.get("tags") or [])
+        if step_cfg.get("pool") == "ai":
+            async def has_nonempty_artifact(rel: str) -> bool:
+                if self.storage is not None:
+                    data = await read_file_bounded(self.storage, job_id, rel, 0)
+                    return bool(data)
+                path = self.jobs_dir / job_id / rel
+                try:
+                    return await asyncio.to_thread(
+                        lambda: path.is_file() and path.stat().st_size > 0,
+                    )
+                except OSError as exc:
+                    raise InvalidAIOverrideError(
+                        "invalid AI capability input: artifact_unreadable",
+                    ) from exc
+
+            try:
+                capability_tags = await step_required_capability_tags(
+                    step_cfg, has_nonempty_artifact,
+                )
+            except InvalidAIOverrideError:
+                raise
+            except (OSError, ValueError, TypeError) as exc:
+                raise InvalidAIOverrideError(
+                    "invalid AI capability input",
+                ) from exc
+            override = None
+            raw = None
+            if self.storage is not None:
+                try:
+                    raw = await self.storage.read_file(job_id, "job.json")
+                except (OSError, ValueError, TypeError) as exc:
+                    logger.warning("ai_override_read_failed", job_id=job_id, step=step_name)
+                    raise InvalidAIOverrideError(
+                        "invalid AI override: job_json_unreadable",
+                    ) from exc
+            else:
+                path = self.jobs_dir / job_id / "job.json"
+                try:
+                    raw = await asyncio.to_thread(path.read_bytes)
+                except FileNotFoundError:
+                    raw = None
+                except OSError as exc:
+                    raise InvalidAIOverrideError(
+                        "invalid AI override: job_json_unreadable",
+                    ) from exc
+            if raw is not None:
+                try:
+                    doc = json.loads(raw)
+                    override, shape_error = parse_ai_override(
+                        doc, step_name, self.config.providers,
+                    )
+                    if shape_error:
+                        logger.warning(
+                            "ai_override_invalid", job_id=job_id,
+                            step=step_name, reason=shape_error,
+                        )
+                        raise InvalidAIOverrideError(f"invalid AI override: {shape_error}")
+                except InvalidAIOverrideError:
+                    raise
+                except (ValueError, json.JSONDecodeError, TypeError) as exc:
+                    logger.warning("ai_override_read_failed", job_id=job_id, step=step_name)
+                    raise InvalidAIOverrideError(
+                        "invalid AI override: job_json_invalid",
+                    ) from exc
+            try:
+                required.update(ai_required_tags(
+                    step_cfg.get("ai"), self.config.providers, override=override,
+                    required_tags=sorted(
+                        set(capability_tags)
+                        | ({READ_TOOL_TAG} if READ_TOOL_TAG in required else set())
+                    ),
+                ))
+            except ValueError as exc:
+                raise InvalidAIOverrideError(
+                    f"invalid AI capability: {exc}",
+                ) from exc
+        nr = self.config.net_routing or {}
+        if step_name in set(nr.get("net_steps") or _NET_STEPS):
+            info = job_info or await self.redis.get_job_info(job_id)
+            source = (info.get("source") or "").strip() or detect_source(info.get("url", ""))
+            required.add(required_zone(source, info.get("url", "")))
+        return sorted(required)
 
     async def _list_job_files(self, job_id: str) -> list[str]:
         """列出 job 现有产物的相对路径。分布式部署产物在对象存储(MinIO)、不在调度器本地盘,
@@ -1103,19 +1252,10 @@ class Scheduler:
         worker)会躲过 fail-fast、永久卡 ready 且无报错;用本函数后超 NO_WORKER_GRACE_SEC
         给明确失败。"""
         req = {t for t in (require_tags or []) if t}
-        if not req:
-            return await self._pool_has_workers(pool)
         workers = await self.redis.list_worker_ids()
         for wid in workers:
             info = await self.redis.get_worker_info(wid)
-            if not info:
-                continue
-            if info.get("admin_status") == "paused" or info.get("status") == "offline":
-                continue
-            if pool not in info.get("pools", "").split(","):
-                continue
-            wtags = {t for t in info.get("tags", "").split(",") if t}
-            if req.issubset(wtags):
+            if worker_satisfies_requirements(info, pool, req):
                 return True
         return False
 
@@ -1440,20 +1580,16 @@ class Scheduler:
             steps_cfg = self._get_pipeline_steps(pipeline) if pipeline else {}
             stuck: list[tuple[str, str]] = []
             progressable = False
-            nr = self.config.net_routing or {}
-            net_steps = set(nr.get("net_steps") or _NET_STEPS)
-            job_src: str | None = None  # 懒查 job 来源(仅 net_steps 需要)
-            job_url: str = ""
             for step in ready:
-                pool = steps_cfg.get(step, {}).get("pool", "")
-                # 重算该 step 的 require_tags,与 enqueue_step 同逻辑:net-zone 按 URL 区域。
-                req: list[str] = []
-                if step in net_steps:
-                    if job_src is None:
-                        jinfo = await self.redis.get_job_info(job_id)
-                        job_url = jinfo.get("url", "")
-                        job_src = (jinfo.get("source") or "").strip() or detect_source(job_url)
-                    req.append(required_zone(job_src, job_url))
+                cfg = steps_cfg.get(step, {})
+                pool = cfg.get("pool", "")
+                try:
+                    req = await self._required_tags_for_step(job_id, step, cfg)
+                except InvalidAIOverrideError as exc:
+                    await self._fail_invalid_ai_override(job_id, step, str(exc))
+                    stuck = []
+                    progressable = True
+                    break
                 key = (pool, frozenset(req))
                 if key not in pool_ok:
                     pool_ok[key] = await self._pool_has_workers_for(pool, req)

@@ -3,6 +3,8 @@
 import asyncio
 import json
 
+import pytest
+
 from shared.ai_gateway import ClaudeCLIProvider
 from shared.models import LLMRequest
 from steps.video.step_evidence import EvidenceStep
@@ -60,12 +62,8 @@ class TestClaudeCLIToolsMode:
 
 # 取证步 EvidenceStep
 
-_VALID_EV = (
-    '{"case_match":{"subject":"马永威操纵","anchors":["马永威"],"confidence":"high","note":"一手"},'
-    '"evidence":[{"id":"E1","type":"行政处罚决定","title":"t","url":"http://csrc.gov.cn/x",'
-    '"publisher":"证监会","ref":"〔2018〕88号","source_tier":"一手官方","match_confidence":"high",'
-    '"excerpt":"x","key_facts":[]}],"notes":"ok"}'
-)
+_VALID_EV = ('{"candidates":[{"title":"t","url":"https://www.csrc.gov.cn/x",'
+             '"publisher":"证监会","reason":"处罚文号匹配"}]}')
 
 
 class TestEvidenceStep:
@@ -88,7 +86,7 @@ class TestEvidenceStep:
         assert not (job / "output" / "evidence.json").exists()
         assert step.input_hashes() == {"skip": "non-case"}
 
-    def test_finance_triggers_and_writes(self, tmp_path):
+    def test_finance_triggers_and_writes(self, tmp_path, monkeypatch):
         job = self._job(tmp_path)
         cfg = make_step_config(tmp_path, step_name="10_evidence", pool="ai")
         cfg["domain"] = {"name": "finance"}
@@ -100,14 +98,22 @@ class TestEvidenceStep:
             cap["prompt"] = prompt
             return _VALID_EV
         step.call_ai = fake
+        monkeypatch.setattr(
+            "steps.video.step_evidence.materialize_evidence",
+            lambda job_dir, job_id, candidates, **kwargs: {
+                "schema_version": 2, "job_id": job_id,
+                "evidence": [{"id": "E1", "source_tier": "一手官方", "eligible": True}],
+                "rejected": [],
+            },
+        )
         out = step.execute()
-        assert cap["allowed_tools"] == ["WebSearch", "Bash"]   # 走工具模式
+        assert cap["allowed_tools"] == ["WebSearch"]
         assert "〔2018〕88号" in cap["prompt"]                   # OCR 锚点喂进 prompt
-        assert out["evidence_count"] == 1 and out["confidence"] == "high"
+        assert out["evidence_count"] == 1 and out["eligible_count"] == 1
         data = json.loads((job / "output" / "evidence.json").read_text(encoding="utf-8"))
         assert data["evidence"][0]["id"] == "E1"
         assert data["evidence"][0]["source_tier"] == "一手官方"
-        assert data["schema_version"] == 1 and data["ocr_refs"] == ["〔2018〕88号"]
+        assert data["schema_version"] == 2 and data["ocr_refs"] == ["〔2018〕88号"]
 
     def test_case_study_style_triggers(self, tmp_path):
         # 非 finance 但 style_tags 含 case-study → 同样触发
@@ -115,9 +121,20 @@ class TestEvidenceStep:
         cfg = make_step_config(tmp_path, step_name="10_evidence", pool="ai")
         cfg["style_tags"] = ["case-study"]
         step = EvidenceStep("10_evidence", job, cfg)
-        step.call_ai = lambda *a, **k: '{"case_match":{"confidence":"low"},"evidence":[],"notes":""}'
+        step.call_ai = lambda *a, **k: '{"candidates":[]}'
         assert step.execute()["evidence_count"] == 0
         assert (job / "output" / "evidence.json").exists()
+
+    def test_oversized_mechanical_is_rejected_before_ai(self, tmp_path, monkeypatch):
+        job = self._job(tmp_path, mech="abcdef")
+        cfg = make_step_config(tmp_path, step_name="10_evidence", pool="ai")
+        cfg["domain"] = {"name": "finance"}
+        step = EvidenceStep("10_evidence", job, cfg)
+        monkeypatch.setattr("steps.video.step_evidence.MAX_MECHANICAL_EVIDENCE_BYTES", 5)
+        step.call_ai = lambda *_args, **_kwargs: pytest.fail("AI must not run")
+
+        with pytest.raises(ValueError, match="too large"):
+            step.execute()
 
     def test_parse_failed(self, tmp_path):
         job = self._job(tmp_path)
@@ -128,7 +145,42 @@ class TestEvidenceStep:
         out = step.execute()
         assert out["parse_failed"] is True
         data = json.loads((job / "output" / "evidence.json").read_text(encoding="utf-8"))
-        assert data["parse_failed"] is True and data["evidence"] == []
+        assert data["candidate_parse_failed"] is True and data["evidence"] == []
+        assert set(data) == {
+            "schema_version", "job_id", "evidence", "rejected", "total_bytes",
+            "ocr_refs", "candidate_parse_failed", "provider",
+        }
+
+    def test_partial_or_wrong_typed_candidate_fails_the_whole_response(self, tmp_path):
+        job = self._job(tmp_path)
+        cfg = make_step_config(tmp_path, step_name="10_evidence", pool="ai")
+        step = EvidenceStep("10_evidence", job, cfg)
+        valid = {
+            "title": "t", "url": "https://www.csrc.gov.cn/x",
+            "publisher": "证监会", "reason": "处罚文号匹配",
+        }
+        malformed = [
+            {"candidates": [valid, {"url": "https://www.csrc.gov.cn/y"}]},
+            {"candidates": [{**valid, "publisher": None}]},
+            {"candidates": [{**valid, "url": True}]},
+            {"candidates": [{**valid, "debug": "unexpected"}]},
+            {"candidates": [valid], "debug": True},
+        ]
+        for payload in malformed:
+            candidates, failed = step._parse_candidates(json.dumps(payload))
+            assert candidates == []
+            assert failed is True
+
+        candidates, failed = step._parse_candidates(json.dumps({
+            "candidates": [valid] * 13,
+        }))
+        assert candidates == []
+        assert failed is True
+
+        for raw in (None, False, 0, [], {}):
+            candidates, failed = step._parse_candidates(raw)
+            assert candidates == []
+            assert failed is True
 
     def test_refs_regex(self, tmp_path):
         job = self._job(tmp_path, mech="马永威〔2018〕88号 又见 (2025)沪刑终60号 与 [2017]5号 末尾")

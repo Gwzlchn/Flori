@@ -7,12 +7,15 @@
 - missing_concepts: 笔记**遗漏**的重要概念（知识缺口，仅供选题/查漏）
 - top3_improvements: 最重要的 3 条改进建议
 
+- issues: 结构化问题列表。type 只能是 consistency / missing_in_source / missing_external / traceability；severity 只能是 info / warning / error。dimension 必须是上方评分维度之一，claim 是待核验主张。有证据时 evidence_status=supported 且给 locator={source,quote}，source 是下方来源标签，quote 必须逐字来自该来源；证据不足时 evidence_status=insufficient 且给 reason。
+
 只输出如下扁平 JSON：所有维度为顶层整数键，不要嵌套进 scores 子对象、不要加 rationale 字段、不要代码围栏、不要任何额外说明文字。
 {
   {{score_example}},
   "key_terms": [{"term": "概念名", "definition": "一句话候选定义"}],
   "missing_concepts": ["遗漏的重要概念"],
-  "top3_improvements": ["改进建议1", "改进建议2", "改进建议3"]
+  "top3_improvements": ["改进建议1", "改进建议2", "改进建议3"],
+  "issues": [{"type":"traceability","severity":"warning","dimension":"accuracy","claim":"待核验主张","message":"问题","evidence_status":"supported","locator":{"source":"smart","quote":"原文逐字片段"}}]
 }
 
 {{ref_block}}
