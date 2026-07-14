@@ -28,6 +28,7 @@ function card(over: Record<string, any> = {}) {
     evidence: [{ snippet: '反向传播算法通过链式法则计算梯度' }],
     status: 'active',
     source: 'manual',
+    revision: 1,
     created_at: '2026-07-09T00:00:00+00:00',
     updated_at: '2026-07-09T00:00:00+00:00',
     review: {
@@ -48,6 +49,16 @@ async function mountView() {
   get.mockImplementation((path: string) => {
     if (path.startsWith('/api/study/due')) return Promise.resolve({ total: 1, items: [card()] })
     if (path.startsWith('/api/study/cards')) return Promise.resolve({ total: 1, items: [card()] })
+    if (path.startsWith('/api/study/stats')) return Promise.resolve({
+      total: 251,
+      statuses: { suggested: 0, active: 203, suspended: 48, rejected: 0 },
+      due: 203,
+      reviewed_cards: 20,
+      reviews_total: 24,
+      grades: { again: 3, hard: 4, good: 10, easy: 7 },
+      retained_reviews: 21,
+      retention_rate: 0.875,
+    })
     return Promise.resolve({})
   })
   const wrapper = mount(StudyView, {
@@ -69,6 +80,10 @@ describe('StudyView', () => {
     expect(w.text()).toContain('卡片库')
     expect(get).toHaveBeenCalledWith('/api/study/due?limit=50')
     expect(get).toHaveBeenCalledWith('/api/study/cards?limit=100')
+    expect(get).toHaveBeenCalledWith('/api/study/stats')
+    expect(w.text()).toContain('待复习 203')
+    expect(w.text()).toContain('卡片 251')
+    expect(w.text()).toContain('留存 88%')
   })
 
   it('显示答案后提交评分', async () => {
@@ -80,7 +95,12 @@ describe('StudyView', () => {
     expect(good).toBeTruthy()
     await good!.trigger('click')
     await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/study/reviews', { card_id: 'sc_1', grade: 'good' })
+    expect(post).toHaveBeenCalledWith('/api/study/reviews', {
+      request_id: expect.stringMatching(/^study-review:/),
+      card_id: 'sc_1',
+      expected_revision: 1,
+      grade: 'good',
+    })
   })
 
   it('创建新卡片后刷新列表', async () => {
@@ -100,6 +120,54 @@ describe('StudyView', () => {
       concept_term: '新概念',
       status: 'active',
     }))
-    expect(get).toHaveBeenCalledTimes(4)
+    expect(get).toHaveBeenCalledTimes(6)
+  })
+
+  it('模糊失败后重试复用 request_id', async () => {
+    post.mockRejectedValueOnce(new Error('network reset')).mockResolvedValueOnce(card({ revision: 2 }))
+    const w = await mountView()
+    await w.find('button.reveal').trigger('click')
+    const good = w.findAll('button.grade').find((b) => b.text().includes('掌握'))!
+    await good.trigger('click')
+    await flushPromises()
+    await good.trigger('click')
+    await flushPromises()
+    const reviewCalls = post.mock.calls.filter(([path]) => path === '/api/study/reviews')
+    expect(reviewCalls).toHaveLength(2)
+    expect(reviewCalls[0][1].request_id).toBe(reviewCalls[1][1].request_id)
+  })
+
+  it('只允许 suspended 恢复,suggested 只显示驳回', async () => {
+    get.mockImplementation((path: string) => {
+      if (path.startsWith('/api/study/due')) return Promise.resolve({ total: 0, items: [] })
+      if (path.startsWith('/api/study/cards')) return Promise.resolve({
+        total: 3,
+        items: [
+          card({ card_id: 'suspended', status: 'suspended', revision: 2 }),
+          card({ card_id: 'suggested', status: 'suggested', revision: 4 }),
+          card({ card_id: 'rejected', status: 'rejected', revision: 5 }),
+        ],
+      })
+      return Promise.resolve({
+        total: 3,
+        statuses: { suggested: 1, active: 0, suspended: 1, rejected: 1 },
+        due: 0,
+        reviewed_cards: 0,
+        reviews_total: 0,
+        grades: { again: 0, hard: 0, good: 0, easy: 0 },
+        retained_reviews: 0,
+        retention_rate: 0,
+      })
+    })
+    const w = mount(StudyView, { global: { provide: { showToast: vi.fn() } } })
+    await flushPromises()
+    expect(w.findAll('button[title="恢复"]')).toHaveLength(1)
+    expect(w.findAll('button[title="驳回"]')).toHaveLength(1)
+    await w.find('button[title="驳回"]').trigger('click')
+    await flushPromises()
+    expect(post).toHaveBeenCalledWith('/api/study/cards/suggested/status', {
+      status: 'rejected',
+      expected_revision: 4,
+    })
   })
 })

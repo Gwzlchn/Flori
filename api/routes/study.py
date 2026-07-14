@@ -7,11 +7,16 @@ import uuid
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt, field_validator
 
 from shared.db import Database
+from shared.study import (
+    MAX_SQLITE_INTEGER,
+    StudyConflictError,
+    StudyGrade,
+    StudyNotFoundError,
+)
 from api.deps import get_db, validate_path_segment, verify_token
-from api.services.study import StudyGrade, schedule_next_review
 
 
 CardType = Literal["basic", "cloze", "qa", "quiz_single", "quiz_multi"]
@@ -41,6 +46,7 @@ class StudyCardResponse(BaseModel):
     evidence: Any = Field(default_factory=list)
     status: str
     source: str
+    revision: int
     created_at: str
     updated_at: str
     review: StudyReviewState | None = None
@@ -56,22 +62,71 @@ class StudyCardCreate(BaseModel):
     job_id: str | None = None
     concept_term: str | None = None
     card_type: CardType = "basic"
-    front: str = Field(..., min_length=1)
-    back: str = Field(..., min_length=1)
+    front: str = Field(..., min_length=1, max_length=20_000)
+    back: str = Field(..., min_length=1, max_length=100_000)
     explanation: str = ""
-    evidence: Any = Field(default_factory=list)
-    status: CardStatus = "active"
-    source: str = "manual"
+    evidence: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+    status: Literal["active", "suspended"] = "active"
+    source: Literal["manual"] = "manual"
+
+    @field_validator("domain", "front", "back", "source")
+    @classmethod
+    def require_nonempty_after_strip(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
+    @field_validator("explanation")
+    @classmethod
+    def strip_explanation(cls, value: str) -> str:
+        return value.strip()
 
 
 class StudyCardStatusRequest(BaseModel):
     status: CardStatus
+    expected_revision: StrictInt = Field(..., ge=1, le=MAX_SQLITE_INTEGER)
 
 
 class StudyReviewRequest(BaseModel):
-    card_id: str
+    request_id: str = Field(..., min_length=1, max_length=128)
+    card_id: str = Field(..., min_length=1, max_length=256)
     grade: StudyGrade
-    response_ms: int | None = Field(None, ge=0)
+    expected_revision: StrictInt = Field(..., ge=1, le=MAX_SQLITE_INTEGER)
+    response_ms: StrictInt | None = Field(None, ge=0, le=MAX_SQLITE_INTEGER)
+
+    @field_validator("request_id", "card_id")
+    @classmethod
+    def require_nonempty_identifier(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
+
+class StudyStatusCounts(BaseModel):
+    suggested: int
+    active: int
+    suspended: int
+    rejected: int
+
+
+class StudyGradeCounts(BaseModel):
+    again: int
+    hard: int
+    good: int
+    easy: int
+
+
+class StudyStatsResponse(BaseModel):
+    total: int
+    statuses: StudyStatusCounts
+    due: int
+    reviewed_cards: int
+    reviews_total: int
+    grades: StudyGradeCounts
+    retained_reviews: int
+    retention_rate: float
 
 
 router = APIRouter(
@@ -82,21 +137,20 @@ router = APIRouter(
 
 @router.post("/cards", response_model=StudyCardResponse, status_code=201)
 async def create_card(req: StudyCardCreate, db: Database = Depends(get_db)):
-    """手动创建学习卡片。active 卡片立即进入复习队列。"""
-    domain = req.domain.strip() or "general"
+    """手动创建学习卡片.active 卡片立即进入复习队列."""
     card = await asyncio.to_thread(
         db.create_study_card,
         card_id=f"sc_{uuid.uuid4().hex}",
-        domain=domain,
+        domain=req.domain,
         job_id=req.job_id,
         concept_term=req.concept_term,
         card_type=req.card_type,
-        front=req.front.strip(),
-        back=req.back.strip(),
-        explanation=req.explanation.strip(),
+        front=req.front,
+        back=req.back,
+        explanation=req.explanation,
         evidence=req.evidence,
         status=req.status,
-        source=req.source.strip() or "manual",
+        source=req.source,
     )
     return StudyCardResponse(**card)
 
@@ -133,28 +187,53 @@ async def list_due_cards(
     return StudyCardListResponse(total=total, items=[StudyCardResponse(**it) for it in items])
 
 
+@router.get("/stats", response_model=StudyStatsResponse)
+async def get_study_stats(
+    domain: str | None = None,
+    db: Database = Depends(get_db),
+):
+    """从全量已提交学习事实返回状态,到期和复习留存统计."""
+    stats = await asyncio.to_thread(
+        db.get_study_stats,
+        domain=(domain or "").strip() or None,
+    )
+    return StudyStatsResponse(**stats)
+
+
+def _raise_study_error(exc: Exception) -> None:
+    if isinstance(exc, StudyNotFoundError):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    if isinstance(exc, StudyConflictError):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    if isinstance(exc, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "study_request_invalid", "message": str(exc)},
+        ) from exc
+    raise exc
+
+
 @router.post("/reviews", response_model=StudyCardResponse)
 async def review_card(req: StudyReviewRequest, db: Database = Depends(get_db)):
-    """提交一次复习评分,并按简化 SM-2 更新 due_at。"""
+    """幂等提交一次 active 卡片评分,在单事务内按 CAS 更新 SRS."""
     validate_path_segment(req.card_id, "card_id")
-    card = await asyncio.to_thread(db.get_study_card, req.card_id)
-    if card is None:
-        raise HTTPException(404, "card not found")
-    schedule = schedule_next_review(card, req.grade)
-    updated = await asyncio.to_thread(
-        db.record_study_review,
-        card_id=req.card_id,
-        grade=req.grade,
-        next_due_at=schedule["next_due_at"],
-        interval_days=schedule["interval_days"],
-        ease=schedule["ease"],
-        repetitions=schedule["repetitions"],
-        lapses=schedule["lapses"],
-        response_ms=req.response_ms,
-        reviewed_at=schedule["reviewed_at"],
-    )
-    if updated is None:
-        raise HTTPException(404, "card not found")
+    try:
+        updated = await asyncio.to_thread(
+            db.record_study_review,
+            request_id=req.request_id,
+            card_id=req.card_id,
+            grade=req.grade,
+            expected_revision=req.expected_revision,
+            response_ms=req.response_ms,
+        )
+    except (StudyNotFoundError, StudyConflictError, ValueError) as exc:
+        _raise_study_error(exc)
     return StudyCardResponse(**updated)
 
 
@@ -164,11 +243,17 @@ async def set_card_status(
     req: StudyCardStatusRequest,
     db: Database = Depends(get_db),
 ):
-    """暂停、恢复或驳回卡片。恢复 active 时没有复习状态则立即排入队列。"""
+    """按 revision 执行 active/suspended 互转或 suggested 驳回."""
     validate_path_segment(card_id, "card_id")
-    updated = await asyncio.to_thread(db.set_study_card_status, card_id, req.status)
-    if updated is None:
-        raise HTTPException(404, "card not found")
+    try:
+        updated = await asyncio.to_thread(
+            db.set_study_card_status,
+            card_id,
+            req.status,
+            expected_revision=req.expected_revision,
+        )
+    except (StudyNotFoundError, StudyConflictError, ValueError) as exc:
+        _raise_study_error(exc)
     return StudyCardResponse(**updated)
 
 

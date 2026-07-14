@@ -250,8 +250,11 @@ def run_migrations(
         current_version=initial,
         ledger_version=ledger_version,
     )
-    if initial == target:
+    # ledger 引入前的历史版本允许由后续迁移补齐,已进入不可变链的版本
+    # 升级前必须先证明当前 schema 合法,避免重建表意外修复被篡改的约束.
+    if initial >= ledger_version or initial == target:
         _validate_schema_invariants(connection, migrations, initial)
+    if initial == target:
         return initial
 
     # 一个 pending chain 是一个原子升级单元。逐版 validate 仍在链内执行，

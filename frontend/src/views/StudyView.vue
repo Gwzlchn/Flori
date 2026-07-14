@@ -3,7 +3,7 @@ import { computed, inject, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { fmtClock, fmtDateTime } from '../utils/datetime'
-import type { StudyCard, StudyCardListResponse } from '../types'
+import type { StudyCard, StudyCardListResponse, StudyStats } from '../types'
 import {
   BookOpenCheck, CheckCircle2, Eye, GraduationCap, Pause, Plus, RotateCcw,
   Sparkles, Trash2,
@@ -22,6 +22,22 @@ const cards = ref<StudyCard[]>([])
 const totalCards = ref(0)
 const selectedDomain = ref('')
 const revealed = ref(false)
+const stats = ref<StudyStats>({
+  total: 0,
+  statuses: { suggested: 0, active: 0, suspended: 0, rejected: 0 },
+  due: 0,
+  reviewed_cards: 0,
+  reviews_total: 0,
+  grades: { again: 0, hard: 0, good: 0, easy: 0 },
+  retained_reviews: 0,
+  retention_rate: 0,
+})
+const pendingReview = ref<{
+  card_id: string
+  revision: number
+  grade: 'again' | 'hard' | 'good' | 'easy'
+  request_id: string
+} | null>(null)
 
 const form = reactive({
   domain: 'general',
@@ -34,8 +50,8 @@ const form = reactive({
 })
 
 const current = computed(() => due.value[0] || null)
-const activeCards = computed(() => cards.value.filter((c) => c.status === 'active').length)
-const suspendedCards = computed(() => cards.value.filter((c) => c.status === 'suspended').length)
+const activeCards = computed(() => stats.value.statuses.active)
+const suspendedCards = computed(() => stats.value.statuses.suspended)
 const domainOptions = computed(() => {
   const set = new Set<string>()
   for (const c of cards.value) if (c.domain) set.add(c.domain)
@@ -59,13 +75,18 @@ async function load() {
   error.value = ''
   try {
     const domain = selectedDomain.value ? `domain=${encodeURIComponent(selectedDomain.value)}&` : ''
-    const [dueResp, cardResp] = await Promise.all([
+    const statsPath = selectedDomain.value
+      ? `/api/study/stats?domain=${encodeURIComponent(selectedDomain.value)}`
+      : '/api/study/stats'
+    const [dueResp, cardResp, statsResp] = await Promise.all([
       api.get<StudyCardListResponse>(`/api/study/due?${domain}limit=50`),
       api.get<StudyCardListResponse>(`/api/study/cards?${domain}limit=100`),
+      api.get<StudyStats>(statsPath),
     ])
     due.value = dueResp.items
     cards.value = cardResp.items
     totalCards.value = cardResp.total
+    stats.value = statsResp
     revealed.value = false
   } catch (e: any) {
     error.value = e?.message || '加载学习队列失败'
@@ -113,7 +134,29 @@ async function gradeCurrent(grade: 'again' | 'hard' | 'good' | 'easy') {
   if (!card || reviewing.value) return
   reviewing.value = true
   try {
-    await api.post('/api/study/reviews', { card_id: card.card_id, grade })
+    if (
+      !pendingReview.value
+      || pendingReview.value.card_id !== card.card_id
+      || pendingReview.value.revision !== card.revision
+      || pendingReview.value.grade !== grade
+    ) {
+      const suffix = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+      pendingReview.value = {
+        card_id: card.card_id,
+        revision: card.revision,
+        grade,
+        request_id: `study-review:${suffix}`,
+      }
+    }
+    await api.post('/api/study/reviews', {
+      request_id: pendingReview.value.request_id,
+      card_id: card.card_id,
+      expected_revision: card.revision,
+      grade,
+    })
+    pendingReview.value = null
     showToast('已记录复习', 'success')
     await load()
   } catch (e: any) {
@@ -123,10 +166,13 @@ async function gradeCurrent(grade: 'again' | 'hard' | 'good' | 'easy') {
   }
 }
 
-async function setStatus(card: StudyCard, status: 'active' | 'suspended') {
+async function setStatus(card: StudyCard, status: 'active' | 'suspended' | 'rejected') {
   try {
-    await api.post(`/api/study/cards/${encodeURIComponent(card.card_id)}/status`, { status })
-    showToast(status === 'active' ? '已恢复' : '已暂停', 'success')
+    await api.post(`/api/study/cards/${encodeURIComponent(card.card_id)}/status`, {
+      status,
+      expected_revision: card.revision,
+    })
+    showToast(status === 'active' ? '已恢复' : status === 'suspended' ? '已暂停' : '已驳回', 'success')
     await load()
   } catch (e: any) {
     showToast(e?.message || '操作失败', 'error')
@@ -157,8 +203,9 @@ onMounted(load)
       <div>
         <div class="h1"><GraduationCap :size="19" />学习</div>
         <div class="lead">
-          待复习 {{ due.length }} · 卡片 {{ totalCards }} · 活跃 {{ activeCards }}
+          待复习 {{ stats.due }} · 卡片 {{ stats.total }} · 活跃 {{ activeCards }}
           <template v-if="suspendedCards"> · 暂停 {{ suspendedCards }}</template>
+          <template v-if="stats.reviews_total"> · 留存 {{ Math.round(stats.retention_rate * 100) }}%</template>
         </div>
       </div>
       <div class="head-actions">
@@ -248,7 +295,8 @@ onMounted(load)
           <div class="row-actions">
             <button v-if="card.job_id" class="icon-btn" title="打开来源" @click="openSource(card)"><BookOpenCheck :size="15" /></button>
             <button v-if="card.status === 'active'" class="icon-btn" title="暂停" @click="setStatus(card, 'suspended')"><Pause :size="15" /></button>
-            <button v-else class="icon-btn" title="恢复" @click="setStatus(card, 'active')"><RotateCcw :size="15" /></button>
+            <button v-else-if="card.status === 'suspended'" class="icon-btn" title="恢复" @click="setStatus(card, 'active')"><RotateCcw :size="15" /></button>
+            <button v-else-if="card.status === 'suggested'" class="icon-btn danger" title="驳回" @click="setStatus(card, 'rejected')"><Trash2 :size="15" /></button>
             <button class="icon-btn danger" title="删除" @click="deleteCard(card)"><Trash2 :size="15" /></button>
           </div>
         </article>

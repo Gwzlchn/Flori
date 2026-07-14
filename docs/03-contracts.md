@@ -1535,7 +1535,7 @@ Response `202`（`sources` 提交时已算好；`answer_markdown` 经 `GET /api/
 
 ### 1.12 学习闭环 / Flashcards / SRS（`/api/study/*`）
 
-学习卡片是个人知识库的复习层。第一版支持手动创建卡片、到期队列、四档评分和简化 SM-2 调度；AI 自动生成卡片后续接入同一表与接口。所有端点走 Basic/Token 鉴权。
+学习卡片是个人知识库的复习层。当前闭环支持手动卡片、到期队列、四档评分、幂等重试、revision CAS 和全量统计。所有端点走 Basic/Token 鉴权。
 
 **StudyCard 字段**：
 
@@ -1552,6 +1552,7 @@ Response `202`（`sources` 提交时已算好；`answer_markdown` 经 `GET /api/
   "evidence": [{"chunk_id": "j:smart:0", "snippet": "…"}],
   "status": "active",
   "source": "manual",
+  "revision": 1,
   "created_at": "2026-07-09T00:00:00+00:00",
   "updated_at": "2026-07-09T00:00:00+00:00",
   "review": {
@@ -1568,10 +1569,12 @@ Response `202`（`sources` 提交时已算好；`answer_markdown` 经 `GET /api/
 ```
 
 - `card_type` ∈ `basic` / `cloze` / `qa` / `quiz_single` / `quiz_multi`。
-- `status` ∈ `suggested` / `active` / `suspended` / `rejected`。`active` 卡片参与复习队列。
-- `evidence` 为 JSON,可存 RAG chunk evidence 或手动来源片段。第一版不强制 schema。
+- `status` ∈ `suggested` / `active` / `suspended` / `rejected`。通用状态机只允许 `active ↔ suspended` 和 `suggested → rejected`；同状态重试不写库。`suggested/rejected` 不能通过通用端点恢复为 `active`。
+- `revision` 是 SQLite 64 位正整数且单调递增。评分和状态更改使用它执行 CAS。
+- `evidence` 是最多 100 个 JSON object 的数组，可存 RAG chunk evidence 或手动来源片段。自动建议卡的强证据 schema 不属于本接口。
 - `review` 为空表示未排入复习队列；`active` 新卡默认立即 due。
-- 评分 `grade` ∈ `again` / `hard` / `good` / `easy`。简化 SM-2:again 10 分钟后重来并增加 lapses;good 首次 1 天后复习;easy 首次 3 天后复习;ease 限制在 1.3–3.0。
+- 公开时间都返回 UTC ISO 8601；库内同时保存 epoch 微秒作为排序和到期判定真相。新写入拒绝无时区 datetime，所以 `Z/+08:00/-05:00` 表示同一时刻时语义相同。
+- 评分 `grade` ∈ `again` / `hard` / `good` / `easy`。简化 SM-2: `again` 精确 600 秒后重来并增加 lapses；`good` 前两次分别为 1/3 天；`easy` 前两次分别为 3/6 天。ease 限制在 1.3–3.0，interval 不超过 36500 天，datetime 溢出时截断到可表示上界。
 
 #### POST /api/study/cards — 创建卡片
 
@@ -1592,7 +1595,7 @@ Response `202`（`sources` 提交时已算好；`answer_markdown` 经 `GET /api/
 }
 ```
 
-Response `201`: `StudyCard`。`front` / `back` 不能为空。
+Response `201`: `StudyCard`。该公开端点只创建 `source=manual` 且 `status=active|suspended` 的卡片；`domain/front/back` 在 trim 后不能为空。
 
 #### GET /api/study/cards — 卡片库
 
@@ -1610,23 +1613,56 @@ Response `200`: `{"total": n, "items": [StudyCard...]}`。
 
 #### GET /api/study/due — 到期复习队列
 
-查询参数: `domain` 可选,`limit` 默认 50、范围 1–200。仅返回 `status=active` 且 `review.due_at <= now` 的卡片,按 `due_at` 升序。
+查询参数: `domain` 可选,`limit` 默认 50、范围 1–200。仅返回 `status=active` 且 `due_at_epoch_us <= now_epoch_us` 的卡片，按 epoch 升序。恰好等于 now 属于到期，未来 1 微秒不属于到期。
 
 Response `200`: `{"total": n, "items": [StudyCard...]}`。
+
+#### GET /api/study/stats — 学习全量统计
+
+查询参数: `domain` 可选。服务端用单次 CTE 直接聚合已提交的 cards/reviews/logs，不使用分页列表或物化计数器。
+
+```json
+{
+  "total": 251,
+  "statuses": {"suggested": 2, "active": 203, "suspended": 45, "rejected": 1},
+  "due": 203,
+  "reviewed_cards": 80,
+  "reviews_total": 120,
+  "grades": {"again": 20, "hard": 25, "good": 50, "easy": 25},
+  "retained_reviews": 100,
+  "retention_rate": 0.8333
+}
+```
+
+`retained_reviews = hard + good + easy`，`retention_rate = retained_reviews / reviews_total`；无 review 时比率为 `0.0`。
 
 #### POST /api/study/reviews — 提交复习评分
 
 请求体:
 
 ```json
-{"card_id": "sc_...", "grade": "good", "response_ms": 1200}
+{
+  "request_id": "study-review:018f...",
+  "card_id": "sc_...",
+  "expected_revision": 7,
+  "grade": "good",
+  "response_ms": 1200
+}
 ```
 
-Response `200`: 更新后的 `StudyCard`。不存在返回 `404`。每次评分会写 `study_review_logs`,并更新 `study_reviews.due_at`、`interval_days`、`ease`、`repetitions`、`lapses`。
+`request_id` 是 1–128 字符的全局幂等 key，客户端在超时、断网等结果不明时必须复用原 key。`expected_revision` 是 1..2^63-1 的真整数，`bool`、0、负数和 2^63 都返回 `422`；`response_ms` 可省略，有值时是 0..2^63-1 的真整数。
+
+处理顺序固定在一个 `BEGIN IMMEDIATE` 事务内: 全局 request replay → 卡片存在性 → active-only → revision CAS → 调度/review → immutable log → commit。同 key 且 canonical payload 相同时返回首次保存的完全相同 `StudyCard`，不再写库；同 key 异 payload、陈旧 revision 或非 active 卡片返回结构化 `409`。不存在返回结构化 `404`。
+
+```json
+{"error":"conflict","message":{"code":"study_revision_stale","message":"study card revision is stale"}}
+```
+
+`409 message.code` 可为 `study_request_id_conflict` / `study_revision_stale` / `study_revision_exhausted` / `study_card_not_active` / `study_status_transition_invalid`；`study_revision_exhausted` 表示卡片 revision 已到 SQLite 64 位上限，服务端拒绝继续写入而不产生部分提交。`404 message.code=study_card_not_found`。
 
 #### POST /api/study/cards/{card_id}/status — 改卡片状态
 
-请求体: `{"status": "suspended"}`。Response `200`: 更新后的 `StudyCard`。恢复为 `active` 时若缺复习状态,立即排入 due 队列。
+请求体: `{"status":"suspended","expected_revision":7}`。Response `200`: 更新后的 `StudyCard`。同目标状态的模糊重试直接返回当前卡片而不递增 revision；其它请求执行状态机和 CAS。恢复为 `active` 时若缺复习状态，立即排入 due 队列。
 
 #### DELETE /api/study/cards/{card_id} — 删除卡片
 
@@ -2429,6 +2465,7 @@ SQLite schema 由不可变 migration manifest、代码 registry 和数据库 led
 - 代码 registry 的版本、名称和 payload checksum 必须与 manifest 完全一致，而且必须在触碰数据库前完成验证。已发布条目只可追加，不可改写。
 - ledger 字段固定为 `version/name/checksum/applied_at`。达到 `ledger_version` 后，`schema_migrations` 必须精确覆盖 `1..PRAGMA user_version`，每条记录匹配 manifest，且 `applied_at` 为非空字符串。
 - 当前 schema 数字不在本文硬编码，以 tracked manifest 为单一来源。
+- SRS 迁移只追加当前 schema: `study_cards.revision`，reviews/logs 的 UTC epoch 微秒，log 的全局 request id/fingerprint/revision before+after/immutable outcome。历史 v1/v2 payload 与 checksum 不修改；当前 validator 校验全部 schema，不在合法新版 schema 上调用旧版 exact validator。
 
 ### 4.13 DR archive manifest v2
 

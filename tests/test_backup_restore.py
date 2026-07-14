@@ -55,6 +55,8 @@ def _fixture_roots(
         path.mkdir(parents=True)
     db_path = roots["data"] / "db" / "analyzer.db"
     db_path.parent.mkdir(parents=True)
+    local_manifest = json.loads(_SCHEMA_MANIFEST_PATH.read_text(encoding="utf-8"))
+    local_current = int(local_manifest["current_version"])
     if user_version == 0:
         connection = sqlite3.connect(db_path)
         connection.executescript(
@@ -67,7 +69,7 @@ def _fixture_roots(
         run_migrations(
             database._conn,
             database._migration_steps(),
-            target_version=min(user_version, 2),
+            target_version=min(user_version, local_current),
         )
         connection = database._conn
     connection.execute(
@@ -76,7 +78,7 @@ def _fixture_roots(
         "VALUES ('jobs_test', 'article', 'article', '灾备测试', 'general', "
         "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')"
     )
-    if user_version > 2:
+    if user_version > local_current:
         migration_manifest = json.loads(
             (schema_manifest_path or _SCHEMA_MANIFEST_PATH).read_text(encoding="utf-8")
         )
@@ -84,7 +86,7 @@ def _fixture_roots(
             "INSERT INTO schema_migrations VALUES (?, ?, ?, 'fixture')",
             [
                 (entry["version"], entry["name"], entry["checksum"])
-                for entry in migration_manifest["migrations"][2:user_version]
+                for entry in migration_manifest["migrations"][local_current:user_version]
             ],
         )
         connection.execute(f"PRAGMA user_version={user_version}")
@@ -148,6 +150,7 @@ def _extended_schema_manifest(root: Path, current_version: int) -> Path:
     module_names = [
         "v0001_legacy_baseline",
         "v0002_immutable_ledger",
+        "v0003_srs_consistency",
     ]
     for version in range(manifest["current_version"] + 1, current_version + 1):
         previous = module_names[-1]
@@ -1450,7 +1453,7 @@ def test_recover_set_rejects_accepted_and_uncommitted_status_mix(
     assert (_tree_state(left), _tree_state(right)) == before
 
 
-@pytest.mark.parametrize("user_version", [0, 1, 2])
+@pytest.mark.parametrize("user_version", [0, 1, 2, 3])
 def test_supported_database_versions_pass_backup_compatibility_matrix(
     tmp_path: Path, user_version: int
 ):
@@ -1522,24 +1525,24 @@ def test_dr_preserves_live_shape_legacy_glossary_through_restore_and_upgrade(
 
 
 def test_unsupported_sqlite_version_fails_compatibility_gate(tmp_path: Path):
-    future_manifest = _extended_schema_manifest(tmp_path, 3)
+    future_manifest = _extended_schema_manifest(tmp_path, 4)
     archive, _ = _create(
-        tmp_path, user_version=3, schema_manifest_path=future_manifest
+        tmp_path, user_version=4, schema_manifest_path=future_manifest
     )
 
     with pytest.raises(dr.SnapshotError, match="不在当前恢复程序范围"):
         dr.validate_archive(archive)
 
 
-def test_v3_program_accepts_v2_snapshot_when_history_prefix_matches(tmp_path: Path):
-    archive, _ = _create(tmp_path, user_version=2)
-    future_manifest = _extended_schema_manifest(tmp_path, 3)
+def test_v4_program_accepts_v3_snapshot_when_history_prefix_matches(tmp_path: Path):
+    archive, _ = _create(tmp_path, user_version=3)
+    future_manifest = _extended_schema_manifest(tmp_path, 4)
 
     manifest = dr.validate_archive(
         archive, schema_manifest_path=future_manifest
     )
 
-    assert manifest["sqlite"]["user_version"] == 2
+    assert manifest["sqlite"]["user_version"] == 3
 
 
 def test_same_user_version_with_divergent_migration_checksum_is_rejected(tmp_path: Path):

@@ -1,7 +1,7 @@
 {
   "format": "flori-sqlite-migrations",
   "minimum_supported_version": 0,
-  "current_version": 2,
+  "current_version": 3,
   "ledger_version": 2,
   "migrations": [
     {
@@ -13,6 +13,11 @@
       "version": 2,
       "name": "immutable-migration-ledger",
       "checksum": "5c44c10e97e05077ea28e3ec7530c4816daf9c42137b39a89b455e2634c8f360"
+    },
+    {
+      "version": 3,
+      "name": "srs-transaction-consistency",
+      "checksum": "075a7567ca1289e857491a854625aea0dec7e46025d1dd6d55bd08d9c7af81e3"
     }
   ]
 }

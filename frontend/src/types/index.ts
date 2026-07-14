@@ -634,6 +634,7 @@ export interface StudyCard {
   evidence: any
   status: string
   source: string
+  revision: number
   created_at: string
   updated_at: string
   review: StudyReviewState | null
@@ -642,6 +643,27 @@ export interface StudyCard {
 export interface StudyCardListResponse {
   total: number
   items: StudyCard[]
+}
+
+export interface StudyStats {
+  total: number
+  statuses: {
+    suggested: number
+    active: number
+    suspended: number
+    rejected: number
+  }
+  due: number
+  reviewed_cards: number
+  reviews_total: number
+  grades: {
+    again: number
+    hard: number
+    good: number
+    easy: number
+  }
+  retained_reviews: number
+  retention_rate: number
 }
 
 export interface WsEvent {

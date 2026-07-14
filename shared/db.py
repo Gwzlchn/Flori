@@ -38,6 +38,20 @@ from .status import (
     STALE,
     compute_worker_status,
 )
+from .study import (
+    MAX_SQLITE_INTEGER,
+    STUDY_STATUSES,
+    StudyConflictError,
+    StudyFaultInjector,
+    StudyNotFoundError,
+    canonical_utc_iso,
+    datetime_to_epoch_us,
+    require_aware_utc,
+    review_request_fingerprint,
+    schedule_next_review,
+    utc_now,
+    validate_review_request,
+)
 
 # schema 版本只从不可变迁移清单读取。
 SCHEMA_VERSION = current_schema_version()
@@ -3066,49 +3080,71 @@ class Database:
         evidence: object | None = None,
         status: str = "active",
         source: str = "manual",
-        due_at: str | None = None,
+        due_at: datetime | str | None = None,
     ) -> dict:
         """创建学习卡片。active 卡片同步初始化复习状态,使新卡立即进入 due 队列。"""
-        now = _now_iso()
+        normalized_domain = domain.strip() if isinstance(domain, str) else ""
+        normalized_front = front.strip() if isinstance(front, str) else ""
+        normalized_back = back.strip() if isinstance(back, str) else ""
+        normalized_source = source.strip() if isinstance(source, str) else ""
+        if not normalized_domain or not normalized_front or not normalized_back:
+            raise ValueError("domain/front/back 不能为空")
+        if not normalized_source:
+            raise ValueError("source 不能为空")
+        if status not in STUDY_STATUSES:
+            raise ValueError("invalid study card status")
+        now_dt = utc_now()
+        now = now_dt.isoformat()
+        initial_due = due_at or now_dt
+        due_iso = canonical_utc_iso(initial_due, "due_at")
+        due_epoch = datetime_to_epoch_us(initial_due, "due_at")
         evidence_json = json.dumps(evidence if evidence is not None else [], ensure_ascii=False)
         with self._lock:
-            self._conn.execute(
-                """INSERT INTO study_cards
-                   (card_id, domain, job_id, concept_term, card_type, front, back,
-                    explanation, evidence_json, status, source, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    card_id, domain or "general", job_id or None, concept_term or None,
-                    card_type, front, back, explanation or "", evidence_json,
-                    status, source, now, now,
-                ),
-            )
-            if status == "active":
+            try:
                 self._conn.execute(
-                    """INSERT OR IGNORE INTO study_reviews
-                       (card_id, due_at, interval_days, ease, repetitions, lapses, updated_at)
-                       VALUES (?,?,?,?,?,?,?)""",
-                    (card_id, due_at or now, 0, 2.5, 0, 0, now),
+                    """INSERT INTO study_cards
+                       (card_id, domain, job_id, concept_term, card_type, front, back,
+                        explanation, evidence_json, status, source, revision,
+                        created_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        card_id, normalized_domain, job_id or None, concept_term or None,
+                        card_type, normalized_front, normalized_back, explanation or "",
+                        evidence_json, status, normalized_source, 1, now, now,
+                    ),
                 )
-            self._conn.commit()
+                if status == "active":
+                    self._conn.execute(
+                        """INSERT INTO study_reviews
+                           (card_id, due_at, due_at_epoch_us, interval_days, ease,
+                            repetitions, lapses, updated_at)
+                           VALUES (?,?,?,?,?,?,?,?)""",
+                        (card_id, due_iso, due_epoch, 0, 2.5, 0, 0, now),
+                    )
+                self._conn.commit()
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
         card = self.get_study_card(card_id)
         if card is None:
             raise RuntimeError("study card insert failed")
         return card
 
     def get_study_card(self, card_id: str) -> dict | None:
-        row = self._conn.execute(
-            """SELECT c.card_id, c.domain, c.job_id, c.concept_term, c.card_type,
-                      c.front, c.back, c.explanation, c.evidence_json, c.status,
-                      c.source, c.created_at, c.updated_at,
-                      r.due_at AS review_due_at, r.interval_days, r.ease,
-                      r.repetitions, r.lapses, r.last_grade, r.last_reviewed_at,
-                      r.updated_at AS review_updated_at
-               FROM study_cards c
-               LEFT JOIN study_reviews r ON r.card_id = c.card_id
-               WHERE c.card_id=?""",
-            (card_id,),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT c.card_id, c.domain, c.job_id, c.concept_term, c.card_type,
+                          c.front, c.back, c.explanation, c.evidence_json, c.status,
+                          c.source, c.revision, c.created_at, c.updated_at,
+                          r.due_at AS review_due_at, r.interval_days, r.ease,
+                          r.repetitions, r.lapses, r.last_grade, r.last_reviewed_at,
+                          r.updated_at AS review_updated_at
+                   FROM study_cards c
+                   LEFT JOIN study_reviews r ON r.card_id = c.card_id
+                   WHERE c.card_id=?""",
+                (card_id,),
+            ).fetchone()
         return self._row_to_study_card(row) if row else None
 
     def list_study_cards(
@@ -3135,82 +3171,141 @@ class Database:
             )
             params.extend([like, like, like, like])
         where = " AND ".join(where_parts)
-        total = self._conn.execute(
-            f"SELECT COUNT(*) FROM study_cards c WHERE {where}", params,
-        ).fetchone()[0]
-        rows = self._conn.execute(
-            f"""SELECT c.card_id, c.domain, c.job_id, c.concept_term, c.card_type,
-                       c.front, c.back, c.explanation, c.evidence_json, c.status,
-                       c.source, c.created_at, c.updated_at,
-                       r.due_at AS review_due_at, r.interval_days, r.ease,
-                       r.repetitions, r.lapses, r.last_grade, r.last_reviewed_at,
-                       r.updated_at AS review_updated_at
-                FROM study_cards c
-                LEFT JOIN study_reviews r ON r.card_id = c.card_id
-                WHERE {where}
-                ORDER BY c.updated_at DESC
-                LIMIT ? OFFSET ?""",
-            params + [limit, offset],
-        ).fetchall()
+        with self._lock:
+            total = self._conn.execute(
+                f"SELECT COUNT(*) FROM study_cards c WHERE {where}", params,
+            ).fetchone()[0]
+            rows = self._conn.execute(
+                f"""SELECT c.card_id, c.domain, c.job_id, c.concept_term, c.card_type,
+                           c.front, c.back, c.explanation, c.evidence_json, c.status,
+                           c.source, c.revision, c.created_at, c.updated_at,
+                           r.due_at AS review_due_at, r.interval_days, r.ease,
+                           r.repetitions, r.lapses, r.last_grade, r.last_reviewed_at,
+                           r.updated_at AS review_updated_at
+                    FROM study_cards c
+                    LEFT JOIN study_reviews r ON r.card_id = c.card_id
+                    WHERE {where}
+                    ORDER BY c.updated_at DESC
+                    LIMIT ? OFFSET ?""",
+                params + [limit, offset],
+            ).fetchall()
         return total, [self._row_to_study_card(r) for r in rows]
 
     def list_due_study_cards(
         self,
         *,
         domain: str | None = None,
+        now: datetime | str | None = None,
         now_iso: str | None = None,
         limit: int = 50,
     ) -> tuple[int, list[dict]]:
-        now = now_iso or _now_iso()
-        where_parts = ["c.status='active'", "r.due_at<=?"]
-        params: list = [now]
+        if now is not None and now_iso is not None:
+            raise ValueError("now 与 now_iso 不能同时传入")
+        current = now if now is not None else now_iso if now_iso is not None else utc_now()
+        current_epoch = datetime_to_epoch_us(current, "now")
+        where_parts = ["c.status='active'", "r.due_at_epoch_us<=?"]
+        params: list = [current_epoch]
         if domain:
             where_parts.append("c.domain=?")
             params.append(domain)
         where = " AND ".join(where_parts)
-        total = self._conn.execute(
-            f"""SELECT COUNT(*) FROM study_cards c
-                JOIN study_reviews r ON r.card_id = c.card_id
-                WHERE {where}""",
-            params,
-        ).fetchone()[0]
-        rows = self._conn.execute(
-            f"""SELECT c.card_id, c.domain, c.job_id, c.concept_term, c.card_type,
-                       c.front, c.back, c.explanation, c.evidence_json, c.status,
-                       c.source, c.created_at, c.updated_at,
-                       r.due_at AS review_due_at, r.interval_days, r.ease,
-                       r.repetitions, r.lapses, r.last_grade, r.last_reviewed_at,
-                       r.updated_at AS review_updated_at
-                FROM study_cards c
-                JOIN study_reviews r ON r.card_id = c.card_id
-                WHERE {where}
-                ORDER BY r.due_at ASC, c.created_at ASC
-                LIMIT ?""",
-            params + [limit],
-        ).fetchall()
+        with self._lock:
+            total = self._conn.execute(
+                f"""SELECT COUNT(*) FROM study_cards c
+                    JOIN study_reviews r ON r.card_id = c.card_id
+                    WHERE {where}""",
+                params,
+            ).fetchone()[0]
+            rows = self._conn.execute(
+                f"""SELECT c.card_id, c.domain, c.job_id, c.concept_term, c.card_type,
+                           c.front, c.back, c.explanation, c.evidence_json, c.status,
+                           c.source, c.revision, c.created_at, c.updated_at,
+                           r.due_at AS review_due_at, r.interval_days, r.ease,
+                           r.repetitions, r.lapses, r.last_grade, r.last_reviewed_at,
+                           r.updated_at AS review_updated_at
+                    FROM study_cards c
+                    JOIN study_reviews r ON r.card_id = c.card_id
+                    WHERE {where}
+                    ORDER BY r.due_at_epoch_us ASC, c.created_at ASC
+                    LIMIT ?""",
+                params + [limit],
+            ).fetchall()
         return total, [self._row_to_study_card(r) for r in rows]
 
-    def set_study_card_status(self, card_id: str, status: str) -> dict | None:
-        now = _now_iso()
+    def set_study_card_status(
+        self,
+        card_id: str,
+        status: str,
+        *,
+        expected_revision: int,
+    ) -> dict:
+        if status not in STUDY_STATUSES:
+            raise ValueError("invalid study card status")
+        if type(expected_revision) is not int or not 1 <= expected_revision <= MAX_SQLITE_INTEGER:
+            raise ValueError("expected_revision 必须是 SQLite 64 位正整数")
+        now_dt = utc_now()
+        now = now_dt.isoformat()
+        now_epoch = datetime_to_epoch_us(now_dt)
         with self._lock:
-            row = self._conn.execute(
-                "SELECT card_id FROM study_cards WHERE card_id=?", (card_id,)
-            ).fetchone()
-            if row is None:
-                return None
-            self._conn.execute(
-                "UPDATE study_cards SET status=?, updated_at=? WHERE card_id=?",
-                (status, now, card_id),
-            )
-            if status == "active":
-                self._conn.execute(
-                    """INSERT OR IGNORE INTO study_reviews
-                       (card_id, due_at, interval_days, ease, repetitions, lapses, updated_at)
-                       VALUES (?,?,?,?,?,?,?)""",
-                    (card_id, now, 0, 2.5, 0, 0, now),
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                row = self._conn.execute(
+                    "SELECT status, revision FROM study_cards WHERE card_id=?", (card_id,)
+                ).fetchone()
+                if row is None:
+                    raise StudyNotFoundError("card not found")
+                current_status = str(row["status"])
+                if current_status == status:
+                    self._conn.commit()
+                    card = self.get_study_card(card_id)
+                    if card is None:
+                        raise StudyNotFoundError("card not found")
+                    return card
+                allowed = {
+                    ("active", "suspended"),
+                    ("suspended", "active"),
+                    ("suggested", "rejected"),
+                }
+                if (current_status, status) not in allowed:
+                    raise StudyConflictError(
+                        "study_status_transition_invalid",
+                        f"study card cannot transition from {current_status} to {status}",
+                    )
+                if int(row["revision"]) != expected_revision:
+                    raise StudyConflictError(
+                        "study_revision_stale", "study card revision is stale"
+                    )
+                if expected_revision == MAX_SQLITE_INTEGER:
+                    raise StudyConflictError(
+                        "study_revision_exhausted",
+                        "study card revision exhausted SQLite integer range",
+                    )
+                changed = self._conn.execute(
+                    """UPDATE study_cards SET status=?, revision=revision+1, updated_at=?
+                       WHERE card_id=? AND revision=? AND status=?""",
+                    (status, now, card_id, expected_revision, current_status),
                 )
-            self._conn.commit()
-        return self.get_study_card(card_id)
+                if changed.rowcount != 1:
+                    raise StudyConflictError(
+                        "study_revision_stale", "study card revision is stale"
+                    )
+                if status == "active":
+                    self._conn.execute(
+                        """INSERT OR IGNORE INTO study_reviews
+                           (card_id, due_at, due_at_epoch_us, interval_days, ease,
+                            repetitions, lapses, updated_at)
+                           VALUES (?,?,?,?,?,?,?,?)""",
+                        (card_id, now, now_epoch, 0, 2.5, 0, 0, now),
+                    )
+                self._conn.commit()
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+        card = self.get_study_card(card_id)
+        if card is None:
+            raise StudyNotFoundError("card not found")
+        return card
 
     def delete_study_card(self, card_id: str) -> bool:
         with self._lock:
@@ -3221,64 +3316,237 @@ class Database:
     def record_study_review(
         self,
         *,
+        request_id: str,
         card_id: str,
         grade: str,
-        next_due_at: str,
-        interval_days: float,
-        ease: float,
-        repetitions: int,
-        lapses: int,
+        expected_revision: int,
         response_ms: int | None = None,
-        reviewed_at: str | None = None,
-    ) -> dict | None:
-        """写一次复习评分并更新 SRS 状态。返回更新后的卡片;卡片不存在返回 None。"""
-        now = reviewed_at or _now_iso()
-        log_id = f"srl_{uuid.uuid4().hex}"
+        reviewed_at: datetime | str | None = None,
+        fault_injector: StudyFaultInjector | None = None,
+    ) -> dict:
+        """在一个 IMMEDIATE 事务内完成幂等检查,CAS,调度和日志."""
+        normalized_request_id, normalized_grade = validate_review_request(
+            request_id=request_id,
+            card_id=card_id,
+            grade=grade,
+            response_ms=response_ms,
+            expected_revision=expected_revision,
+        )
+        fingerprint = review_request_fingerprint(
+            card_id=card_id,
+            grade=normalized_grade,
+            response_ms=response_ms,
+            expected_revision=expected_revision,
+        )
+        reviewed_dt = utc_now() if reviewed_at is None else require_aware_utc(
+            reviewed_at, "reviewed_at"
+        )
+        reviewed_iso = reviewed_dt.isoformat()
+        reviewed_epoch = datetime_to_epoch_us(reviewed_dt, "reviewed_at")
+
+        def inject(stage: str) -> None:
+            if fault_injector is not None:
+                fault_injector(stage)
+
         with self._lock:
-            current = self._conn.execute(
-                "SELECT due_at FROM study_reviews WHERE card_id=?", (card_id,)
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                existing = self._conn.execute(
+                    """SELECT request_fingerprint, outcome_json
+                       FROM study_review_logs WHERE request_id=?""",
+                    (normalized_request_id,),
+                ).fetchone()
+                if existing is not None:
+                    if existing["request_fingerprint"] != fingerprint:
+                        raise StudyConflictError(
+                            "study_request_id_conflict",
+                            "request_id was already used with a different payload",
+                        )
+                    outcome = json.loads(existing["outcome_json"])
+                    self._conn.commit()
+                    return outcome
+
+                row = self._conn.execute(
+                    """SELECT c.card_id, c.domain, c.job_id, c.concept_term, c.card_type,
+                              c.front, c.back, c.explanation, c.evidence_json, c.status,
+                              c.source, c.revision, c.created_at, c.updated_at,
+                              r.due_at AS review_due_at, r.due_at_epoch_us,
+                              r.interval_days, r.ease, r.repetitions, r.lapses,
+                              r.last_grade, r.last_reviewed_at,
+                              r.updated_at AS review_updated_at
+                       FROM study_cards c
+                       LEFT JOIN study_reviews r ON r.card_id=c.card_id
+                       WHERE c.card_id=?""",
+                    (card_id,),
+                ).fetchone()
+                if row is None:
+                    raise StudyNotFoundError("card not found")
+                if row["status"] != "active":
+                    raise StudyConflictError(
+                        "study_card_not_active", "only active study cards can be reviewed"
+                    )
+                if int(row["revision"]) != expected_revision:
+                    raise StudyConflictError(
+                        "study_revision_stale", "study card revision is stale"
+                    )
+                if expected_revision == MAX_SQLITE_INTEGER:
+                    raise StudyConflictError(
+                        "study_revision_exhausted",
+                        "study card revision exhausted SQLite integer range",
+                    )
+                card = self._row_to_study_card(row)
+                schedule = schedule_next_review(card, normalized_grade, reviewed_dt)
+                scheduled_due_at = row["review_due_at"]
+                scheduled_due_epoch = row["due_at_epoch_us"]
+                changed = self._conn.execute(
+                    """UPDATE study_cards SET revision=revision+1, updated_at=?
+                       WHERE card_id=? AND status='active' AND revision=?""",
+                    (reviewed_iso, card_id, expected_revision),
+                )
+                if changed.rowcount != 1:
+                    raise StudyConflictError(
+                        "study_revision_stale", "study card revision is stale"
+                    )
+                inject("after_card_cas")
+                self._conn.execute(
+                    """INSERT INTO study_reviews
+                       (card_id, due_at, due_at_epoch_us, interval_days, ease,
+                        repetitions, lapses, last_grade, last_reviewed_at,
+                        last_reviewed_at_epoch_us, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(card_id) DO UPDATE SET
+                         due_at=excluded.due_at,
+                         due_at_epoch_us=excluded.due_at_epoch_us,
+                         interval_days=excluded.interval_days,
+                         ease=excluded.ease,
+                         repetitions=excluded.repetitions,
+                         lapses=excluded.lapses,
+                         last_grade=excluded.last_grade,
+                         last_reviewed_at=excluded.last_reviewed_at,
+                         last_reviewed_at_epoch_us=excluded.last_reviewed_at_epoch_us,
+                         updated_at=excluded.updated_at""",
+                    (
+                        card_id,
+                        schedule["next_due_at"],
+                        schedule["next_due_at_epoch_us"],
+                        schedule["interval_days"],
+                        schedule["ease"],
+                        schedule["repetitions"],
+                        schedule["lapses"],
+                        normalized_grade,
+                        reviewed_iso,
+                        reviewed_epoch,
+                        reviewed_iso,
+                    ),
+                )
+                inject("after_review")
+                updated_row = self._conn.execute(
+                    """SELECT c.card_id, c.domain, c.job_id, c.concept_term, c.card_type,
+                              c.front, c.back, c.explanation, c.evidence_json, c.status,
+                              c.source, c.revision, c.created_at, c.updated_at,
+                              r.due_at AS review_due_at, r.due_at_epoch_us,
+                              r.interval_days, r.ease, r.repetitions, r.lapses,
+                              r.last_grade, r.last_reviewed_at,
+                              r.updated_at AS review_updated_at
+                       FROM study_cards c JOIN study_reviews r ON r.card_id=c.card_id
+                       WHERE c.card_id=?""",
+                    (card_id,),
+                ).fetchone()
+                if updated_row is None:
+                    raise RuntimeError("study review update disappeared inside transaction")
+                outcome = self._row_to_study_card(updated_row)
+                outcome_json = json.dumps(
+                    outcome, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                )
+                self._conn.execute(
+                    """INSERT INTO study_review_logs
+                       (id, card_id, request_id, request_fingerprint, grade, reviewed_at,
+                        reviewed_at_epoch_us, response_ms, scheduled_due_at,
+                        scheduled_due_at_epoch_us, next_due_at, next_due_at_epoch_us,
+                        interval_days, ease, repetitions, lapses, revision_before,
+                        revision_after, outcome_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        f"srl_{uuid.uuid4().hex}", card_id, normalized_request_id,
+                        fingerprint, normalized_grade, reviewed_iso, reviewed_epoch,
+                        response_ms, scheduled_due_at, scheduled_due_epoch,
+                        schedule["next_due_at"], schedule["next_due_at_epoch_us"],
+                        schedule["interval_days"], schedule["ease"],
+                        schedule["repetitions"], schedule["lapses"],
+                        expected_revision, expected_revision + 1, outcome_json,
+                    ),
+                )
+                inject("after_log")
+                inject("before_commit")
+                self._conn.commit()
+                return outcome
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    def get_study_stats(
+        self,
+        *,
+        domain: str | None = None,
+        now: datetime | str | None = None,
+    ) -> dict:
+        """单次 CTE 从已提交事实聚合卡片,到期,评分和留存统计."""
+        now_epoch = datetime_to_epoch_us(now or utc_now(), "now")
+        with self._lock:
+            row = self._conn.execute(
+                """WITH filtered_cards AS (
+                   SELECT card_id, status FROM study_cards
+                   WHERE (? IS NULL OR domain=?)
+                 ),
+                 card_totals AS (
+                   SELECT COUNT(*) AS total,
+                          COALESCE(SUM(status='suggested'),0) AS suggested,
+                          COALESCE(SUM(status='active'),0) AS active,
+                          COALESCE(SUM(status='suspended'),0) AS suspended,
+                          COALESCE(SUM(status='rejected'),0) AS rejected
+                   FROM filtered_cards
+                 ),
+                 due_totals AS (
+                   SELECT COUNT(*) AS due
+                   FROM filtered_cards c JOIN study_reviews r USING(card_id)
+                   WHERE c.status='active' AND r.due_at_epoch_us<=?
+                 ),
+                 log_totals AS (
+                   SELECT COUNT(l.id) AS reviews_total,
+                          COUNT(DISTINCT l.card_id) AS reviewed_cards,
+                          COALESCE(SUM(l.grade='again'),0) AS again_count,
+                          COALESCE(SUM(l.grade='hard'),0) AS hard_count,
+                          COALESCE(SUM(l.grade='good'),0) AS good_count,
+                          COALESCE(SUM(l.grade='easy'),0) AS easy_count
+                   FROM filtered_cards c
+                   LEFT JOIN study_review_logs l USING(card_id)
+                 )
+                     SELECT * FROM card_totals CROSS JOIN due_totals CROSS JOIN log_totals""",
+                (domain, domain, now_epoch),
             ).fetchone()
-            exists = self._conn.execute(
-                "SELECT card_id FROM study_cards WHERE card_id=?", (card_id,)
-            ).fetchone()
-            if exists is None:
-                return None
-            scheduled_due_at = current["due_at"] if current else None
-            self._conn.execute(
-                """INSERT INTO study_reviews
-                   (card_id, due_at, interval_days, ease, repetitions, lapses,
-                    last_grade, last_reviewed_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(card_id) DO UPDATE SET
-                     due_at=excluded.due_at,
-                     interval_days=excluded.interval_days,
-                     ease=excluded.ease,
-                     repetitions=excluded.repetitions,
-                     lapses=excluded.lapses,
-                     last_grade=excluded.last_grade,
-                     last_reviewed_at=excluded.last_reviewed_at,
-                     updated_at=excluded.updated_at""",
-                (
-                    card_id, next_due_at, interval_days, ease, repetitions, lapses,
-                    grade, now, now,
-                ),
-            )
-            self._conn.execute(
-                """INSERT INTO study_review_logs
-                   (id, card_id, grade, reviewed_at, response_ms, scheduled_due_at,
-                    next_due_at, interval_days, ease, repetitions, lapses)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    log_id, card_id, grade, now, response_ms, scheduled_due_at,
-                    next_due_at, interval_days, ease, repetitions, lapses,
-                ),
-            )
-            self._conn.execute(
-                "UPDATE study_cards SET status='active', updated_at=? WHERE card_id=?",
-                (now, card_id),
-            )
-            self._conn.commit()
-        return self.get_study_card(card_id)
+        reviews_total = int(row["reviews_total"])
+        retained = int(row["hard_count"]) + int(row["good_count"]) + int(row["easy_count"])
+        return {
+            "total": int(row["total"]),
+            "statuses": {
+                "suggested": int(row["suggested"]),
+                "active": int(row["active"]),
+                "suspended": int(row["suspended"]),
+                "rejected": int(row["rejected"]),
+            },
+            "due": int(row["due"]),
+            "reviewed_cards": int(row["reviewed_cards"]),
+            "reviews_total": reviews_total,
+            "grades": {
+                "again": int(row["again_count"]),
+                "hard": int(row["hard_count"]),
+                "good": int(row["good_count"]),
+                "easy": int(row["easy_count"]),
+            },
+            "retained_reviews": retained,
+            "retention_rate": round(retained / reviews_total, 4) if reviews_total else 0.0,
+        }
 
     # Private
 
@@ -3311,6 +3579,7 @@ class Database:
             "evidence": evidence,
             "status": row["status"],
             "source": row["source"],
+            "revision": row["revision"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "review": review,

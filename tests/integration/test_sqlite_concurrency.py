@@ -13,9 +13,80 @@ import pytest
 
 from shared.db import Database, SCHEMA_VERSION
 from shared.models import Job
+from shared.study import StudyConflictError
 
 
 pytestmark = pytest.mark.integration
+
+
+_REVIEWED_AT = "2026-07-09T00:00:00+00:00"
+
+
+def _concurrent_study_write(
+    db_path: str,
+    barrier,
+    results,
+    action: str,
+    request_id: str,
+) -> None:
+    database: Database | None = None
+    try:
+        database = Database(db_path)
+        database.init_schema()
+        barrier.wait(timeout=10)
+        if action == "review":
+            card = database.record_study_review(
+                request_id=request_id,
+                card_id="sc_race",
+                grade="good",
+                expected_revision=1,
+                reviewed_at=_REVIEWED_AT,
+            )
+            results.put(("ok", action, card["revision"], card["status"]))
+        else:
+            card = database.set_study_card_status(
+                "sc_race", "suspended", expected_revision=1
+            )
+            results.put(("ok", action, card["revision"], card["status"]))
+    except StudyConflictError as exc:
+        results.put(("conflict", action, exc.code))
+    except BaseException as exc:
+        results.put(("error", action, type(exc).__name__, str(exc)))
+    finally:
+        if database is not None:
+            database.close()
+
+
+def _run_spawn_study_race(
+    db_path: Path,
+    operations: list[tuple[str, str]],
+) -> list[tuple]:
+    context = multiprocessing.get_context("spawn")
+    barrier = context.Barrier(len(operations))
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_concurrent_study_write,
+            args=(str(db_path), barrier, results, action, request_id),
+        )
+        for action, request_id in operations
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=20)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+            pytest.fail(f"SRS spawn 竞态超时: pid={process.pid}")
+        assert process.exitcode == 0
+    outcomes = []
+    for _ in processes:
+        try:
+            outcomes.append(results.get(timeout=2))
+        except queue.Empty:
+            pytest.fail("SRS spawn 子进程没有返回结果")
+    return sorted(outcomes)
 
 
 def _job(job_id: str, title: str) -> Job:
@@ -145,3 +216,86 @@ def test_two_production_connections_share_commits_and_enforce_unique_job(
         total, jobs = verification.list_jobs(current_only=False, limit=10)
         assert total == 2
         assert {job.id for job in jobs} == {"jobs_visible", "jobs_unique"}
+
+
+def test_two_connections_same_review_request_write_once_and_replay(tmp_path: Path) -> None:
+    db_path = tmp_path / "study-two-connections.db"
+    first = Database(db_path)
+    first.init_schema()
+    first.create_study_card(card_id="sc_race", domain="ml", front="Q", back="A")
+    second = Database(db_path)
+    second.init_schema()
+    barrier = threading.Barrier(2)
+
+    def review(database: Database) -> dict:
+        barrier.wait(timeout=10)
+        return database.record_study_review(
+            request_id="same-request",
+            card_id="sc_race",
+            grade="good",
+            expected_revision=1,
+            reviewed_at=_REVIEWED_AT,
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = [
+                future.result(timeout=15)
+                for future in (
+                    executor.submit(review, first),
+                    executor.submit(review, second),
+                )
+            ]
+        assert outcomes[0] == outcomes[1]
+        assert outcomes[0]["revision"] == 2
+        assert first._conn.execute(
+            "SELECT COUNT(*) FROM study_review_logs WHERE card_id='sc_race'"
+        ).fetchone()[0] == 1
+    finally:
+        first.close()
+        second.close()
+
+
+def test_spawn_distinct_requests_on_same_revision_have_one_stale_loser(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "study-spawn-stale.db"
+    with Database(db_path) as database:
+        database.init_schema()
+        database.create_study_card(card_id="sc_race", domain="ml", front="Q", back="A")
+
+    outcomes = _run_spawn_study_race(
+        db_path,
+        [("review", "request-alpha"), ("review", "request-beta")],
+    )
+    assert [outcome[0] for outcome in outcomes] == ["conflict", "ok"]
+    assert outcomes[0][2] == "study_revision_stale"
+    with Database(db_path) as verification:
+        verification.init_schema()
+        assert verification.get_study_card("sc_race")["revision"] == 2
+        assert verification._conn.execute(
+            "SELECT COUNT(*) FROM study_review_logs WHERE card_id='sc_race'"
+        ).fetchone()[0] == 1
+
+
+def test_spawn_suspend_and_review_race_never_revives_or_double_writes(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "study-spawn-suspend.db"
+    with Database(db_path) as database:
+        database.init_schema()
+        database.create_study_card(card_id="sc_race", domain="ml", front="Q", back="A")
+
+    outcomes = _run_spawn_study_race(
+        db_path,
+        [("review", "request-review"), ("suspend", "unused")],
+    )
+    assert [outcome[0] for outcome in outcomes] == ["conflict", "ok"]
+    with Database(db_path) as verification:
+        verification.init_schema()
+        card = verification.get_study_card("sc_race")
+        logs = verification._conn.execute(
+            "SELECT COUNT(*) FROM study_review_logs WHERE card_id='sc_race'"
+        ).fetchone()[0]
+        assert card["revision"] == 2
+        assert (card["status"], logs) in {("active", 1), ("suspended", 0)}
