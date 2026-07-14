@@ -16,12 +16,15 @@ from pathlib import Path
 import pytest
 
 from shared.db import Database
-from shared.migrations import run_migrations
+from shared.migrations import migration_steps, run_migrations
 
 
 _MODULE_PATH = Path(__file__).parents[1] / "scripts" / "dr_snapshot.py"
 _SCHEMA_MANIFEST_PATH = Path(__file__).parents[1] / "shared" / "migrations" / "manifest.json"
 _MIGRATION_PACKAGE = _SCHEMA_MANIFEST_PATH.parent
+_CURRENT_SCHEMA_VERSION = int(json.loads(
+    _SCHEMA_MANIFEST_PATH.read_text(encoding="utf-8")
+)["current_version"])
 _MIGRATION_FIXTURES = Path(__file__).parent / "fixtures" / "migrations"
 _DR_FIXTURES = Path(__file__).parent / "fixtures" / "dr"
 _LEGACY_GLOSSARY_TABLE = "glossary_bak_clean_20260617"
@@ -148,11 +151,10 @@ def _extended_schema_manifest(root: Path, current_version: int) -> Path:
             shutil.copy2(source, package / source.name)
     manifest = json.loads(_SCHEMA_MANIFEST_PATH.read_text(encoding="utf-8"))
     module_names = [
-        "v0001_legacy_baseline",
-        "v0002_immutable_ledger",
-        "v0003_srs_consistency",
-        "v0004_study_suggestions",
+        migration.apply.__module__.rsplit(".", 1)[-1]
+        for migration in migration_steps()
     ]
+    assert len(module_names) == manifest["current_version"]
     for version in range(manifest["current_version"] + 1, current_version + 1):
         previous = module_names[-1]
         module_name = f"v{version:04d}_fixture"
@@ -1454,7 +1456,7 @@ def test_recover_set_rejects_accepted_and_uncommitted_status_mix(
     assert (_tree_state(left), _tree_state(right)) == before
 
 
-@pytest.mark.parametrize("user_version", [0, 1, 2, 3, 4])
+@pytest.mark.parametrize("user_version", range(_CURRENT_SCHEMA_VERSION + 1))
 def test_supported_database_versions_pass_backup_compatibility_matrix(
     tmp_path: Path, user_version: int
 ):
@@ -1526,24 +1528,29 @@ def test_dr_preserves_live_shape_legacy_glossary_through_restore_and_upgrade(
 
 
 def test_unsupported_sqlite_version_fails_compatibility_gate(tmp_path: Path):
-    future_manifest = _extended_schema_manifest(tmp_path, 5)
+    future_version = _CURRENT_SCHEMA_VERSION + 1
+    future_manifest = _extended_schema_manifest(tmp_path, future_version)
     archive, _ = _create(
-        tmp_path, user_version=5, schema_manifest_path=future_manifest
+        tmp_path, user_version=future_version, schema_manifest_path=future_manifest
     )
 
     with pytest.raises(dr.SnapshotError, match="不在当前恢复程序范围"):
         dr.validate_archive(archive)
 
 
-def test_v5_program_accepts_v4_snapshot_when_history_prefix_matches(tmp_path: Path):
-    archive, _ = _create(tmp_path, user_version=4)
-    future_manifest = _extended_schema_manifest(tmp_path, 5)
+def test_future_program_accepts_current_snapshot_when_history_prefix_matches(
+    tmp_path: Path,
+):
+    archive, _ = _create(tmp_path, user_version=_CURRENT_SCHEMA_VERSION)
+    future_manifest = _extended_schema_manifest(
+        tmp_path, _CURRENT_SCHEMA_VERSION + 1,
+    )
 
     manifest = dr.validate_archive(
         archive, schema_manifest_path=future_manifest
     )
 
-    assert manifest["sqlite"]["user_version"] == 4
+    assert manifest["sqlite"]["user_version"] == _CURRENT_SCHEMA_VERSION
 
 
 def test_same_user_version_with_divergent_migration_checksum_is_rejected(tmp_path: Path):

@@ -1,7 +1,7 @@
 {
   "format": "flori-sqlite-migrations",
   "minimum_supported_version": 0,
-  "current_version": 5,
+  "current_version": 6,
   "ledger_version": 2,
   "migrations": [
     {
@@ -28,6 +28,11 @@
       "version": 5,
       "name": "canonical-evidence-locators",
       "checksum": "a86cd76401c6dfced7379e9095440a61460ef2e0cad7568d836b4e33fc061c34"
+    },
+    {
+      "version": 6,
+      "name": "concept-definition-history",
+      "checksum": "92e3a3171526b31da68c28f8464d08556747c68d9bd7589df9e380db2ae10560"
     }
   ]
 }

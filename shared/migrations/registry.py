@@ -7,6 +7,7 @@ from . import v0002_immutable_ledger as migration_v2
 from . import v0003_srs_consistency as migration_v3
 from . import v0004_study_suggestions as migration_v4
 from . import v0005_canonical_evidence as migration_v5
+from . import v0006_concept_definition_history as migration_v6
 from .runner import Migration
 
 
@@ -47,5 +48,12 @@ def migration_steps() -> tuple[Migration, ...]:
             payload=migration_v5.source_payload(),
             apply=migration_v5.apply,
             validate=migration_v5.validate,
+        ),
+        Migration(
+            version=migration_v6.VERSION,
+            name=migration_v6.NAME,
+            payload=migration_v6.source_payload(),
+            apply=migration_v6.apply,
+            validate=migration_v6.validate,
         ),
     )

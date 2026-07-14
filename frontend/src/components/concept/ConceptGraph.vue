@@ -7,6 +7,8 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useDomainStore } from '../../stores/domains'
+import { useConceptDefinition } from '../../composables/useConceptDefinition'
+import ConceptDefinitionPanel from './ConceptDefinitionPanel.vue'
 import type { ConceptGraph, ConceptGraphNode } from '../../types'
 import { Share2, Search, Lightbulb, FileText, ExternalLink, X, Maximize2, Minimize2 } from 'lucide-vue-next'
 // vis-network 的类型仅用于标注,运行时实例懒加载;用宽松类型避免把库塞进首屏 chunk。
@@ -20,6 +22,12 @@ const loading = ref(true)
 const error = ref('')
 const data = ref<ConceptGraph | null>(null)
 const selected = ref<ConceptGraphNode | null>(null)
+const selectedTerm = computed(() => selected.value?.term ?? '')
+const selectedDefinition = useConceptDefinition(
+  computed(() => props.domain),
+  selectedTerm,
+  { enabled: computed(() => selected.value !== null) },
+)
 
 const containerEl = ref<HTMLElement | null>(null)
 let network: VisNetwork | null = null
@@ -340,8 +348,7 @@ defineExpose({ selectNode, focusTerm, selected })
           <button class="iconbtn" style="margin-left:auto" @click="selected = null"><X :size="15" /></button>
         </div>
 
-        <p v-if="selected.definition" class="cg-def">{{ selected.definition }}</p>
-        <p v-else class="cg-def cg-dim">（暂无定义）</p>
+        <ConceptDefinitionPanel :controller="selectedDefinition" compact />
 
         <div class="seclabel" style="margin-top:14px"><FileText :size="13" />出现处 · {{ selected.occurrence_count }}</div>
         <div v-if="neighbors.length" class="cg-related">
@@ -380,7 +387,6 @@ defineExpose({ selectNode, focusTerm, selected })
 .cg-state { color: var(--ink-500); font-size: 13px; padding: 60px 0; text-align: center; }
 .cg-dim { color: var(--ink-400); }
 .cg-panel { width: 320px; flex: none; position: sticky; top: 12px; }
-.cg-def { font-size: 13px; color: var(--ink-700); line-height: 1.6; margin-top: 10px; }
 .cg-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 @media (max-width: 880px) {
   .cg-layout { flex-direction: column; }

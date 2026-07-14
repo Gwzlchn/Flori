@@ -60,6 +60,18 @@ describe('useApi', () => {
       expect(init.headers).not.toHaveProperty('Authorization')
       expect(init.headers).not.toHaveProperty('Content-Type')
     })
+
+    it('把 AbortSignal 原样传给 fetch', async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>
+      fetchMock.mockResolvedValue(mockResp({ json: {} }))
+      const controller = new AbortController()
+
+      const { get } = useApi()
+      await get('/api/x', controller.signal)
+
+      const [, init] = lastFetchCall()
+      expect(init.signal).toBe(controller.signal)
+    })
   })
 
   describe('post', () => {

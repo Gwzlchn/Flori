@@ -15,6 +15,7 @@ _PROMPT_NAME = re.compile(r"^[a-z0-9_]+(?:\.[a-z0-9_-]+)*$")
 
 TRACKED_TEMPLATE_NAMES = (
     "study_suggestions",
+    "concept_resynthesis",
     "04_translate_article",
     "04_smart_article",
     "05_concepts",

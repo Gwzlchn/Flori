@@ -56,11 +56,12 @@ export function useApi() {
     if (!resp.ok) throw new ApiError(resp.status, await resp.text())
   }
 
-  async function request<T>(method: string, path: string, body?: any): Promise<T> {
+  async function request<T>(method: string, path: string, body?: any, signal?: AbortSignal): Promise<T> {
     const resp = await fetch(path, {
       method,
       headers: buildHeaders(body),
       body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
+      signal,
     })
     await checkResp(resp)
     if (resp.status === 204) return null as T
@@ -74,7 +75,7 @@ export function useApi() {
   }
 
   return {
-    get: <T>(path: string) => request<T>('GET', path),
+    get: <T>(path: string, signal?: AbortSignal) => request<T>('GET', path, undefined, signal),
     post: <T>(path: string, body?: any) => request<T>('POST', path, body),
     put: <T>(path: string, body?: any) => request<T>('PUT', path, body),
     del: (path: string) => request<void>('DELETE', path),

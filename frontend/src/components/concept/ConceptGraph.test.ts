@@ -47,6 +47,28 @@ function graph(over: Partial<any> = {}) {
   }
 }
 
+function conceptDetail(term: string, definition: string, occurrenceTotal = 3) {
+  const current = {
+    definition_version_id: `cdv-${term}`, domain: 'tech', term, version: 1, definition,
+    source_evidence_ids: [], source_set_fingerprint: '', strategy: 'manual_edit',
+    provider: null, model: null, prompt_hash: null, input_hash: null,
+    supersedes_version_id: null, actor: 'test', created_at: '2026-07-15T00:00:00Z',
+  }
+  return {
+    domain: 'tech', term, definition, zh_name: '', aliases: [], occurrences: [],
+    occurrence_total: occurrenceTotal, occurrence_limit: 100, related: [], status: 'accepted',
+    watched: false, is_topic: false, definition_locked: false,
+    current_definition_version_id: current.definition_version_id, lock_revision: 0,
+    created_at: null, updated_at: null, current_definition: current,
+    definition_history: [current], definition_history_total: 1, definition_history_limit: 100,
+    attestation: {
+      domain: 'tech', term, level: 'none', evidence_count: 0, job_count: 0,
+      source_fingerprint_count: 0, content_type_count: 0, source_set_fingerprint: '',
+      included: [], excluded: [],
+    },
+  }
+}
+
 async function mountGraph() {
   const w = mount(ConceptGraph, { props: { domain: 'tech' } })
   await flushPromises()
@@ -91,7 +113,9 @@ describe('ConceptGraph 加载与渲染', () => {
 
 describe('ConceptGraph 选中与侧栏', () => {
   it('选中节点打开侧栏:定义/主题徽标/相连概念/打开概念详情', async () => {
-    get.mockResolvedValue(graph())
+    get.mockImplementation((path: string) => path.endsWith('/concept-graph')
+      ? Promise.resolve(graph())
+      : Promise.resolve(conceptDetail('通胀', '物价普涨。')))
     const w = await mountGraph()
     // 侧栏初始不显示。
     expect(w.find('[data-test="panel"]').exists()).toBe(false)
@@ -106,14 +130,18 @@ describe('ConceptGraph 选中与侧栏', () => {
     expect(t).toContain('主题')          // is_topic 徽标
     expect(t).toContain('利率')          // 相连概念(共现边)
     expect(t).toContain('打开概念详情')
+    expect(panel.find('[data-test="concept-definition-panel"]').exists()).toBe(true)
+    expect(get.mock.calls.map((call) => call[0])).toContain('/api/glossary/tech/%E9%80%9A%E8%83%80')
   })
 
   it('点「打开概念详情」跳转术语页(含 encodeURIComponent)', async () => {
-    get.mockResolvedValue(graph({
-      nodes: [{ id: 'A B', term: 'A B', definition: 'x', status: 'accepted', is_topic: false, occurrence_count: 1 }],
-      edges: [],
-      stats: { node_count: 1, edge_count: 0, isolated_count: 1 },
-    }))
+    get.mockImplementation((path: string) => path.endsWith('/concept-graph')
+      ? Promise.resolve(graph({
+        nodes: [{ id: 'A B', term: 'A B', definition: 'x', status: 'accepted', is_topic: false, occurrence_count: 1 }],
+        edges: [],
+        stats: { node_count: 1, edge_count: 0, isolated_count: 1 },
+      }))
+      : Promise.resolve(conceptDetail('A B', 'x', 1)))
     const w = await mountGraph()
     ;(w.vm as any).selectNode('A B')
     await flushPromises()
@@ -122,7 +150,9 @@ describe('ConceptGraph 选中与侧栏', () => {
   })
 
   it('孤立节点侧栏提示无关联', async () => {
-    get.mockResolvedValue(graph())
+    get.mockImplementation((path: string) => path.endsWith('/concept-graph')
+      ? Promise.resolve(graph())
+      : Promise.resolve(conceptDetail('孤立词', '', 0)))
     const w = await mountGraph()
     ;(w.vm as any).selectNode('孤立词')
     await flushPromises()

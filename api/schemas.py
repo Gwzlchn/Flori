@@ -338,25 +338,49 @@ class CollectionResponse(BaseModel):
 # 术语表
 
 
+class GlossaryOccurrenceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str
+    content_type: str = ""
+    location: str | None = None
+    title: str | None = None
+
+
+class GlossaryRelationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    term: str
+    rel: str = "related"
+
+
 class GlossaryTermRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     term: str
     definition: str | None = None
     # 元素可为字符串(视为 rel='related')或 {term, rel};落库前经 norm_related 归一。
-    related: list[str | dict] | None = None
+    related: list[str | GlossaryRelationResponse] | None = None
+    expected_current_version_id: str | None = Field(default=None, min_length=1)
+    expected_lock_revision: int | None = Field(default=None, strict=True, ge=0)
 
 
 class GlossaryTermResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     domain: str
     term: str
     definition: str = ""
     zh_name: str = ""                                        # 标准中文译名(实体双语名)
     aliases: list[str] = Field(default_factory=list)         # 归并进本实体的变体名
-    occurrences: list[dict] = Field(default_factory=list)   # [{job_id, content_type, location, title?}]
-    related: list[dict] = Field(default_factory=list)        # [{term, rel}] 类型化关系边
+    occurrences: list[GlossaryOccurrenceResponse] = Field(default_factory=list)
+    related: list[GlossaryRelationResponse] = Field(default_factory=list)
     status: str = "accepted"
     watched: bool = False                                     # 概念订阅标记(单用户)
     is_topic: bool = False
     definition_locked: bool = False
+    current_definition_version_id: str | None = None
+    lock_revision: int = 0
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -377,9 +401,106 @@ class GlossaryTermResponse(BaseModel):
             watched=bool(row.get("watched")),
             is_topic=bool(row.get("is_topic")),
             definition_locked=bool(row.get("definition_locked")),
+            current_definition_version_id=row.get("current_definition_version_id"),
+            lock_revision=int(row.get("lock_revision") or 0),
             created_at=_iso(row.get("created_at")),
             updated_at=_iso(row.get("updated_at")),
         )
+
+
+class ConceptDefinitionVersionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    definition_version_id: str
+    domain: str
+    term: str
+    version: int = Field(ge=1)
+    definition: str
+    source_evidence_ids: list[str]
+    source_set_fingerprint: str
+    strategy: str
+    provider: str | None = None
+    model: str | None = None
+    prompt_hash: str | None = None
+    input_hash: str | None = None
+    supersedes_version_id: str | None = None
+    actor: str
+    created_at: str
+
+
+class ConceptEvidenceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: str
+    job_id: str
+    content_type: str
+    source_fingerprint: str | None = None
+    note_type: str | None = None
+    chunk_id: str | None = None
+    section: str | None = None
+    excerpt: str | None = None
+    reason: str | None = None
+    locator: CanonicalEvidenceLocator | None = None
+    link: CanonicalEvidenceLink | None = None
+
+
+class ConceptAttestationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    domain: str
+    term: str
+    level: Literal["none", "supported", "corroborated", "strong"]
+    evidence_count: int = Field(ge=0)
+    job_count: int = Field(ge=0)
+    source_fingerprint_count: int = Field(ge=0)
+    content_type_count: int = Field(ge=0)
+    source_set_fingerprint: str
+    included: list[ConceptEvidenceResponse]
+    excluded: list[ConceptEvidenceResponse]
+
+
+class ConceptTermDetailResponse(GlossaryTermResponse):
+    occurrences: list[GlossaryOccurrenceResponse] = Field(
+        default_factory=list, max_length=100,
+    )
+    occurrence_total: int = Field(ge=0)
+    occurrence_limit: Literal[100] = 100
+    current_definition: ConceptDefinitionVersionResponse
+    definition_history: list[ConceptDefinitionVersionResponse] = Field(max_length=100)
+    definition_history_total: int = Field(ge=1)
+    definition_history_limit: Literal[100] = 100
+    attestation: ConceptAttestationResponse
+
+
+class ConceptCasRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_current_version_id: str = Field(min_length=1)
+    expected_lock_revision: int = Field(strict=True, ge=0)
+
+
+class ConceptLockResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current_definition_version_id: str
+    lock_revision: int = Field(ge=0)
+    locked: bool
+    changed: bool
+
+
+class ConceptResynthesizeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    created: bool
+    reason: Literal[
+        "locked",
+        "no_quorum",
+        "source_set_unchanged",
+        "input_too_large",
+    ] | None = None
+    current: ConceptDefinitionVersionResponse | None = None
+    version: ConceptDefinitionVersionResponse | None = None
+    attestation: ConceptAttestationResponse | None = None
 
 
 # 搜索

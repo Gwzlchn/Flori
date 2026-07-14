@@ -212,6 +212,8 @@ async function submitEdit() {
       term: t.term,
       definition: editDefinition.value.trim() || null,
       related,
+      expected_current_version_id: t.current_definition_version_id,
+      expected_lock_revision: t.lock_revision,
     })
     showToast('已保存', 'success')
     editing.value = null
@@ -349,7 +351,11 @@ onMounted(loadTerms)
               :style="t.is_topic ? 'color:var(--brand-600)' : ''"
               @click.stop="toggleTopic(t)"
             ><Bookmark :size="15" /></button>
-            <button class="iconbtn" title="编辑定义" @click.stop="openEdit(t)"><Pencil :size="15" /></button>
+            <button
+              class="iconbtn"
+              :title="t.definition_locked ? '定义已锁定,仅可编辑关联' : '编辑定义'"
+              @click.stop="openEdit(t)"
+            ><Pencil :size="15" /></button>
             <button class="iconbtn" title="删除" @click.stop="removeTerm(t)"><Trash2 :size="15" /></button>
           </div>
         </div>
@@ -423,7 +429,11 @@ onMounted(loadTerms)
         <div class="bd">
           <div class="field">
             <label>定义</label>
-            <textarea v-model="editDefinition" class="input" placeholder="用一两句话说明该概念的核心含义…"></textarea>
+            <textarea
+              v-model="editDefinition" class="input" :disabled="editing.definition_locked"
+              placeholder="用一两句话说明该概念的核心含义…"
+            ></textarea>
+            <div v-if="editing.definition_locked" class="note-tip">定义已锁定,解锁后才能修改定义正文。</div>
           </div>
           <div class="field" style="margin-bottom:0">
             <label>关联概念</label>

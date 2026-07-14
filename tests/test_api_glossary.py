@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 import yaml
+
+from api.mcp_server.server import build_server
+from api.services import concepts as concept_service
+from shared.errors import AIProviderError
+from shared.storage import LocalStorage
 
 
 def _read_profile_terms(prompts_dir, domain):
@@ -38,6 +45,39 @@ class TestManualCRUD:
         assert "梯度下降: 优化算法" in terms
 
     @pytest.mark.asyncio
+    async def test_create_existing_term_is_conflict_and_cannot_bypass_lock(
+        self, client,
+    ):
+        created = await client.post(
+            "/api/glossary?domain=ml",
+            json={"term": "A", "definition": "原定义"},
+        )
+        before = (await client.get("/api/glossary/ml/A")).json()
+        locked = await client.post(
+            "/api/glossary/ml/A/lock",
+            json={
+                "expected_current_version_id": before[
+                    "current_definition_version_id"
+                ],
+                "expected_lock_revision": before["lock_revision"],
+            },
+        )
+        overwritten = await client.post(
+            "/api/glossary?domain=ml",
+            json={"term": "A", "definition": "越权覆盖"},
+        )
+
+        assert created.status_code == 201
+        assert locked.status_code == 200
+        assert overwritten.status_code == 409
+        after = (await client.get("/api/glossary/ml/A")).json()
+        assert after["definition"] == "原定义"
+        assert after["current_definition_version_id"] == before[
+            "current_definition_version_id"
+        ]
+        assert after["definition_locked"] is True
+
+    @pytest.mark.asyncio
     async def test_create_empty_term_rejected(self, client):
         resp = await client.post("/api/glossary?domain=ml", json={"term": "  "})
         assert resp.status_code == 400
@@ -65,13 +105,63 @@ class TestManualCRUD:
         assert resp.status_code == 404
 
     @pytest.mark.asyncio
+    async def test_rest_mcp_detail_parity_caps_occurrences_and_hides_stale_link(
+        self, client, db, test_config, monkeypatch,
+    ):
+        db.upsert_glossary_term("ml", "A", "definition")
+        for index in range(105):
+            db.add_glossary_suggestion("ml", "A", f"job-{index}", "article")
+
+        async def attestation(*_args):
+            return {
+                "domain": "ml",
+                "term": "A",
+                "level": "none",
+                "evidence_count": 0,
+                "job_count": 0,
+                "source_fingerprint_count": 0,
+                "content_type_count": 0,
+                "source_set_fingerprint": "0" * 64,
+                "included": [],
+                "excluded": [{
+                    "evidence_id": "ce_" + "a" * 64,
+                    "job_id": "job-stale",
+                    "content_type": "article",
+                    "source_fingerprint": "source-stale",
+                    "reason": "source_changed",
+                    "locator": None,
+                    "link": None,
+                }],
+            }
+
+        monkeypatch.setattr(concept_service, "project_concept_attestation", attestation)
+        rest = (await client.get("/api/glossary/ml/A")).json()
+        assert rest["occurrence_total"] == 105
+        assert rest["occurrence_limit"] == len(rest["occurrences"]) == 100
+        stale = rest["attestation"]["excluded"][0]
+        assert stale["locator"] is None and stale["link"] is None
+
+        mcp = build_server(db, LocalStorage(test_config.jobs_dir))
+        result = await mcp.call_tool("get_term", {"domain": "ml", "term": "A"})
+        blocks = result[0] if isinstance(result, tuple) else result
+        mcp_detail = json.loads(blocks[0].text)
+        assert mcp_detail == rest
+
+    @pytest.mark.asyncio
     async def test_update_definition(self, client):
         await client.post(
             "/api/glossary?domain=ml", json={"term": "A", "definition": "旧"}
         )
+        before = (await client.get("/api/glossary/ml/A")).json()
         resp = await client.put(
             "/api/glossary/ml/A",
-            json={"term": "A", "definition": "新", "related": ["B"]},
+            json={
+                "term": "A",
+                "definition": "新",
+                "related": ["B"],
+                "expected_current_version_id": before["current_definition_version_id"],
+                "expected_lock_revision": before["lock_revision"],
+            },
         )
         assert resp.status_code == 200
         assert resp.json()["definition"] == "新"
@@ -79,6 +169,106 @@ class TestManualCRUD:
         assert resp.json()["related"] == [{"term": "B", "rel": "related"}]
         # status 不动,仍 accepted。
         assert resp.json()["status"] == "accepted"
+
+    @pytest.mark.asyncio
+    async def test_definition_update_requires_cas_and_respects_lock(self, client):
+        await client.post(
+            "/api/glossary?domain=ml", json={"term": "A", "definition": "旧"}
+        )
+        before = (await client.get("/api/glossary/ml/A")).json()
+        missing = await client.put(
+            "/api/glossary/ml/A", json={"term": "A", "definition": "新"},
+        )
+        assert missing.status_code == 409
+
+        locked = await client.post(
+            "/api/glossary/ml/A/lock",
+            json={
+                "expected_current_version_id": before["current_definition_version_id"],
+                "expected_lock_revision": before["lock_revision"],
+            },
+        )
+        assert locked.status_code == 200
+        assert locked.json()["locked"] is True
+        blocked = await client.put(
+            "/api/glossary/ml/A",
+            json={
+                "term": "A",
+                "definition": "新",
+                "expected_current_version_id": before["current_definition_version_id"],
+                "expected_lock_revision": locked.json()["lock_revision"],
+            },
+        )
+        assert blocked.status_code == 409
+
+        stale_unlock = await client.post(
+            "/api/glossary/ml/A/unlock",
+            json={
+                "expected_current_version_id": before["current_definition_version_id"],
+                "expected_lock_revision": before["lock_revision"],
+            },
+        )
+        assert stale_unlock.status_code == 409
+        unlocked = await client.post(
+            "/api/glossary/ml/A/unlock",
+            json={
+                "expected_current_version_id": before["current_definition_version_id"],
+                "expected_lock_revision": locked.json()["lock_revision"],
+            },
+        )
+        assert unlocked.status_code == 200
+        assert unlocked.json()["locked"] is False
+
+    @pytest.mark.asyncio
+    async def test_related_only_update_does_not_append_definition(self, client):
+        await client.post(
+            "/api/glossary?domain=ml", json={"term": "A", "definition": "稳定"}
+        )
+        before = (await client.get("/api/glossary/ml/A")).json()
+        response = await client.put(
+            "/api/glossary/ml/A", json={"term": "A", "related": ["B"]},
+        )
+        assert response.status_code == 200
+        after = (await client.get("/api/glossary/ml/A")).json()
+        assert after["current_definition_version_id"] == before[
+            "current_definition_version_id"
+        ]
+        assert after["definition_history_total"] == before["definition_history_total"]
+
+    @pytest.mark.asyncio
+    async def test_resynthesize_no_quorum_and_provider_failure_are_fail_closed(
+        self, client, monkeypatch,
+    ):
+        await client.post(
+            "/api/glossary?domain=ml", json={"term": "A", "definition": "稳定"}
+        )
+        before = (await client.get("/api/glossary/ml/A")).json()
+        cas = {
+            "expected_current_version_id": before["current_definition_version_id"],
+            "expected_lock_revision": before["lock_revision"],
+        }
+        no_quorum = await client.post(
+            "/api/glossary/ml/A/resynthesize", json=cas,
+        )
+        assert no_quorum.status_code == 200
+        assert no_quorum.json()["created"] is False
+        assert no_quorum.json()["reason"] == "no_quorum"
+
+        async def provider_failure(*_args, **_kwargs):
+            raise AIProviderError("provider unavailable")
+
+        monkeypatch.setattr(
+            concept_service, "maybe_resynthesize_concept", provider_failure,
+        )
+        failed = await client.post(
+            "/api/glossary/ml/A/resynthesize", json=cas,
+        )
+        assert failed.status_code == 502
+        after = (await client.get("/api/glossary/ml/A")).json()
+        assert after["current_definition_version_id"] == before[
+            "current_definition_version_id"
+        ]
+        assert after["definition_history_total"] == before["definition_history_total"]
 
     @pytest.mark.asyncio
     async def test_update_missing_term_404(self, client):
@@ -252,6 +442,47 @@ class TestEntityP1:
         resp = await client.get("/api/glossary/ml/Momentum")
         occ = resp.json()["occurrences"][0]
         assert occ["title"] == "一篇文章"
+
+
+class TestConceptContract:
+    @pytest.mark.asyncio
+    async def test_openapi_exposes_exact_bounded_detail_and_cas(self, client):
+        spec = (await client.get("/openapi.json")).json()
+        schemas = spec["components"]["schemas"]
+        for name in (
+            "ConceptTermDetailResponse",
+            "ConceptDefinitionVersionResponse",
+            "ConceptEvidenceResponse",
+            "ConceptAttestationResponse",
+            "ConceptCasRequest",
+            "ConceptLockResponse",
+            "ConceptResynthesizeResponse",
+        ):
+            assert schemas[name]["additionalProperties"] is False
+
+        detail = schemas["ConceptTermDetailResponse"]["properties"]
+        assert detail["occurrences"]["maxItems"] == 100
+        assert detail["definition_history"]["maxItems"] == 100
+        assert {"occurrence_total", "occurrence_limit"} <= set(detail)
+        assert {"definition_history_total", "definition_history_limit"} <= set(detail)
+
+        lock = spec["paths"]["/api/glossary/{domain}/{term}/lock"]["post"]
+        request_ref = lock["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+        response_ref = lock["responses"]["200"]["content"]["application/json"][
+            "schema"
+        ]["$ref"]
+        assert request_ref.endswith("/ConceptCasRequest")
+        assert response_ref.endswith("/ConceptLockResponse")
+
+        rejected = await client.post(
+            "/api/glossary/ml/A/lock",
+            json={
+                "expected_current_version_id": "cdv",
+                "expected_lock_revision": 0,
+                "unexpected": True,
+            },
+        )
+        assert rejected.status_code == 422
 
 
 class TestDomainValidation:

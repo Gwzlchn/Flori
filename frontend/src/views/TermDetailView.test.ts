@@ -17,22 +17,47 @@ vi.mock('../composables/useApi', () => ({ useApi: () => api }))
 import TermDetailView from './TermDetailView.vue'
 
 function makeTerm(over: Record<string, any> = {}) {
+  const definition = over.definition ?? '梯度是函数的偏导数向量'
+  const occurrences = over.occurrences ?? [
+    { job_id: 'jobA', content_type: 'paper', location: 'p.3' },
+    { job_id: 'jobB', content_type: 'video', location: '' },
+  ]
+  const current = over.current_definition ?? {
+    definition_version_id: 'cdv-current', domain: 'ml', term: 'gradient', version: 2,
+    definition, source_evidence_ids: [], source_set_fingerprint: '', strategy: 'manual_edit',
+    provider: null, model: null, prompt_hash: null, input_hash: null,
+    supersedes_version_id: 'cdv-old', actor: 'test', created_at: '2026-07-15T00:00:00Z',
+  }
   return {
     domain: 'ml',
     term: 'gradient',
     zh_name: '梯度',
     aliases: [],
-    definition: '梯度是函数的偏导数向量',
+    definition,
     related: [
       { term: 'backprop', rel: 'related' },
       { term: 'loss', rel: 'prerequisite' },
     ],
-    occurrences: [
-      { job_id: 'jobA', content_type: 'paper', location: 'p.3' },
-      { job_id: 'jobB', content_type: 'video', location: '' },
-    ],
+    occurrences,
     status: 'accepted',
+    watched: false,
     is_topic: false,
+    definition_locked: false,
+    current_definition_version_id: current.definition_version_id,
+    lock_revision: 0,
+    created_at: null,
+    updated_at: null,
+    occurrence_total: occurrences.length,
+    occurrence_limit: 100,
+    current_definition: current,
+    definition_history: [current],
+    definition_history_total: 1,
+    definition_history_limit: 100,
+    attestation: {
+      domain: 'ml', term: 'gradient', level: 'none', evidence_count: 0, job_count: 0,
+      source_fingerprint_count: 0, content_type_count: 0, source_set_fingerprint: '',
+      included: [], excluded: [],
+    },
     ...over,
   }
 }
@@ -55,7 +80,7 @@ describe('TermDetailView', () => {
     api.get.mockResolvedValue(makeTerm())
     mountView()
     await flushPromises()
-    expect(api.get).toHaveBeenCalledWith('/api/domains/ml/terms/gradient')
+    expect(api.get.mock.calls[0][0]).toBe('/api/glossary/ml/gradient')
   })
 
   it('加载成功渲染概念名、定义、关联与出现处', async () => {
@@ -69,6 +94,7 @@ describe('TermDetailView', () => {
     expect(t).toContain('jobA')
     expect(t).toContain('2 处出现')
     expect(t).toContain('2 个关联')
+    expect(w.find('[data-test="concept-definition-panel"]').exists()).toBe(true)
   })
 
   it('is_topic 时显示主题概念徽标且按钮为取消主题', async () => {
@@ -117,8 +143,10 @@ describe('TermDetailView', () => {
   })
 
   it('点击标为主题调用 POST topic 接口并用返回值刷新', async () => {
-    api.get.mockResolvedValue(makeTerm({ is_topic: false }))
-    api.post.mockResolvedValue(makeTerm({ is_topic: true }))
+    api.get
+      .mockResolvedValueOnce(makeTerm({ is_topic: false }))
+      .mockResolvedValueOnce(makeTerm({ is_topic: true }))
+    api.post.mockResolvedValue({})
     const w = mountView()
     await flushPromises()
     const btn = w.findAll('button').find((b) => b.text().includes('标为主题'))!

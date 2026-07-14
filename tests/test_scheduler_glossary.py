@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import hashlib
 from pathlib import Path
@@ -13,6 +14,8 @@ from types import SimpleNamespace
 import pytest
 
 from scheduler.scheduler import Scheduler
+from shared.db import Database
+from shared.models import Job
 
 
 class _StorageStub:
@@ -118,6 +121,10 @@ class _DBStub:
         )
         self.calls: list[dict] = []
         self.relations: list[dict] = []
+        self.canonical_by_segment: dict[str, list[str]] = {}
+        self.canonical_queries: list[dict] = []
+        self.occurrence_replacements: list[dict] = []
+        self.definition_states: dict[str, dict] = {}
 
     def get_job(self, job_id: str):
         return self._job
@@ -133,13 +140,38 @@ class _DBStub:
 
     def list_glossary(self, domain=None, status=None, q=None):
         return [
-            {"term": c["term"], "zh_name": c["zh_name"] or "", "aliases": []}
+            {
+                "term": c["term"],
+                "zh_name": c["zh_name"] or "",
+                "aliases": [],
+                **self.definition_states.get(c["term"], {}),
+            }
             for c in self.calls
         ]
 
     def add_glossary_relations(self, domain, term, relations):
         self.relations.append({"domain": domain, "term": term, "relations": relations})
         return len(relations)
+
+    def canonical_evidence_ids_for_source_segments(
+        self, *, job_id, note_type, source_segment_ids,
+    ):
+        self.canonical_queries.append({
+            "job_id": job_id,
+            "note_type": note_type,
+            "source_segment_ids": list(source_segment_ids),
+        })
+        return {
+            segment_id: list(self.canonical_by_segment.get(segment_id, []))
+            for segment_id in source_segment_ids
+        }
+
+    def replace_job_concept_occurrences(self, *, domain, job_id, mapping):
+        self.occurrence_replacements.append({
+            "domain": domain,
+            "job_id": job_id,
+            "mapping": {term: list(ids) for term, ids in mapping.items()},
+        })
 
 
 def _make_engine(storage, db):
@@ -289,3 +321,322 @@ async def test_prefers_concepts_json_when_present():
     assert "注意力机制" in terms
     assert terms["注意力机制"]["definition"] == "权重分配"
     assert terms["注意力机制"]["domain"] == "dl"
+
+
+_SEGMENT_A = "seg_" + "a" * 64
+_SEGMENT_B = "seg_" + "b" * 64
+
+
+@pytest.mark.asyncio
+async def test_concept_source_segments_resolve_to_canonical_occurrences():
+    concepts = {
+        "evidence_note_type": "smart",
+        "key_terms": [{
+            "term": "Transformer",
+            "definition": "d",
+            "evidence_source_segment_ids": [_SEGMENT_A, _SEGMENT_B],
+        }],
+    }
+    db = _DBStub(domain="dl")
+    db.canonical_by_segment = {
+        _SEGMENT_A: ["ev-a"],
+        _SEGMENT_B: ["ev-b", "ev-a"],
+    }
+    engine = _make_engine(_ConceptsStorageStub(concepts), db)
+
+    await engine._collect_glossary("j_evidence")
+
+    assert db.canonical_queries == [{
+        "job_id": "j_evidence",
+        "note_type": "smart",
+        "source_segment_ids": [_SEGMENT_A, _SEGMENT_B],
+    }]
+    assert db.occurrence_replacements[-1]["mapping"] == {
+        "Transformer": ["ev-a", "ev-b"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_repeated_completion_is_idempotent_and_removed_term_is_omitted():
+    storage = _ConceptsStorageStub({
+        "evidence_note_type": "original",
+        "key_terms": [
+            {"term": "A", "evidence_source_segment_ids": [_SEGMENT_A]},
+            {"term": "B", "evidence_source_segment_ids": [_SEGMENT_B]},
+        ],
+    })
+    db = _DBStub()
+    db.canonical_by_segment = {_SEGMENT_A: ["ev-a"], _SEGMENT_B: ["ev-b"]}
+    engine = _make_engine(storage, db)
+
+    await engine._collect_glossary("j_replay")
+    await engine._collect_glossary("j_replay")
+    assert db.occurrence_replacements[-2] == db.occurrence_replacements[-1]
+    assert db.occurrence_replacements[-1]["mapping"] == {"A": ["ev-a"], "B": ["ev-b"]}
+
+    storage._data = json.dumps({
+        "evidence_note_type": "original",
+        "key_terms": [{"term": "A", "evidence_source_segment_ids": [_SEGMENT_A]}],
+    }).encode()
+    await engine._collect_glossary("j_replay")
+
+    assert db.occurrence_replacements[-1]["mapping"] == {"A": ["ev-a"]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", ["missing", "malformed", "non_object", "unreliable"],
+)
+async def test_untrustworthy_replay_clears_previous_job_occurrences(failure):
+    class MutableStorage:
+        def __init__(self):
+            self.concepts = json.dumps({
+                "evidence_note_type": "original",
+                "key_terms": [{
+                    "term": "A",
+                    "evidence_source_segment_ids": [_SEGMENT_A],
+                }],
+            }).encode()
+            self.review = None
+
+        async def read_file(self, job_id, rel):
+            if rel == "output/concepts.json":
+                return self.concepts
+            if rel == "output/review.json":
+                return self.review
+            return None
+
+        async def file_size(self, job_id, rel):
+            data = await self.read_file(job_id, rel)
+            return len(data) if data is not None else None
+
+        async def open_stream(
+            self, job_id, rel, *, start=0, length=None, chunk_size=1024 * 1024,
+        ):
+            data = await self.read_file(job_id, rel)
+            if data is None:
+                return None
+
+            async def chunks():
+                end = len(data) if length is None else min(len(data), start + length)
+                for offset in range(start, end, chunk_size):
+                    yield data[offset:min(end, offset + chunk_size)]
+
+            return chunks()
+
+    storage = MutableStorage()
+    db = _DBStub()
+    db.canonical_by_segment = {_SEGMENT_A: ["ev-a"]}
+    engine = _make_engine(storage, db)
+    await engine._collect_glossary("j_replay")
+    assert db.occurrence_replacements[-1]["mapping"] == {"A": ["ev-a"]}
+
+    if failure == "missing":
+        storage.concepts = storage.review = None
+    elif failure == "malformed":
+        storage.concepts = b"{broken"
+    elif failure == "non_object":
+        storage.concepts = b"[]"
+    else:
+        storage.concepts = None
+        storage.review = b'{"schema_version":2,"review_reliable":false}'
+    await engine._collect_glossary("j_replay")
+
+    assert db.occurrence_replacements[-1]["mapping"] == {}
+
+
+@pytest.mark.asyncio
+async def test_missing_artifacts_use_real_database_keyword_reconcile(tmp_path):
+    class EmptyStorage:
+        async def read_file(self, job_id, rel):
+            return None
+
+        async def file_size(self, job_id, rel):
+            return None
+
+        async def open_stream(self, job_id, rel, **kwargs):
+            return None
+
+    db = Database(tmp_path / "scheduler-glossary.db")
+    db.init_schema()
+    try:
+        db.create_job(Job(
+            id="job-missing", content_type="article", pipeline="article",
+        ))
+        await _make_engine(EmptyStorage(), db)._collect_glossary("job-missing")
+        assert db.list_concept_occurrences(
+            "general", "unused", include_invalid=True,
+        ) == []
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_review_fallback_and_rejected_term_never_fabricate_occurrences():
+    review_db = _DBStub()
+    await _make_engine(
+        _StorageStub({"key_terms": [{"term": "ReviewOnly", "definition": "d"}]}),
+        review_db,
+    )._collect_glossary("j_review")
+    assert review_db.canonical_queries == []
+    assert review_db.occurrence_replacements[-1]["mapping"] == {}
+
+    class RejectedDB(_DBStub):
+        def add_glossary_suggestion(self, *args, **kwargs):
+            return None
+
+        def list_glossary(self, domain=None, status=None, q=None):
+            return []
+
+    rejected_db = RejectedDB()
+    rejected_db.canonical_by_segment = {_SEGMENT_A: ["ev-rejected"]}
+    concepts = {
+        "evidence_note_type": "original",
+        "key_terms": [{
+            "term": "Rejected",
+            "evidence_source_segment_ids": [_SEGMENT_A],
+        }],
+    }
+    await _make_engine(
+        _ConceptsStorageStub(concepts), rejected_db,
+    )._collect_glossary("j_rejected")
+    assert rejected_db.occurrence_replacements[-1]["mapping"] == {}
+
+
+def _auto_synthesis_engine(*, locked: bool = False):
+    concepts = {
+        "evidence_note_type": "original",
+        "key_terms": [{
+            "term": "AutoTerm",
+            "evidence_source_segment_ids": [_SEGMENT_A],
+        }],
+    }
+    db = _DBStub(domain="dl")
+    db.canonical_by_segment = {_SEGMENT_A: ["ev-auto"]}
+    db.definition_states["AutoTerm"] = {
+        "current_definition_version_id": "cdv-current",
+        "lock_revision": 4,
+        "definition_locked": locked,
+    }
+    return _make_engine(_ConceptsStorageStub(concepts), db), db
+
+
+@pytest.mark.asyncio
+async def test_occurrence_reconcile_coalesces_one_latest_resynthesis(monkeypatch):
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def fake_resynthesize(*args, **kwargs):
+        calls.append((args, kwargs))
+        started.set()
+        await release.wait()
+        return {"created": True, "reason": None}
+
+    monkeypatch.setattr(
+        "api.services.concepts.maybe_resynthesize_concept",
+        fake_resynthesize,
+    )
+    engine, _ = _auto_synthesis_engine()
+
+    await engine._collect_glossary("j_auto")
+    await started.wait()
+    await engine._collect_glossary("j_auto")
+    await engine._collect_glossary("j_auto")
+    await asyncio.sleep(0)
+
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[3:5] == ("dl", "AutoTerm")
+    assert kwargs == {
+        "expected_current_version_id": "cdv-current",
+        "expected_lock_revision": 4,
+        "actor": "scheduler:auto",
+        "strategy": "automatic_resynthesis",
+    }
+    release.set()
+    await asyncio.gather(*list(engine._concept_synthesis_tasks.values()))
+    await asyncio.sleep(0)
+    if engine._concept_synthesis_tasks:
+        await asyncio.gather(*list(engine._concept_synthesis_tasks.values()))
+    assert len(calls) == 2
+    assert calls[1][0][3:5] == ("dl", "AutoTerm")
+    assert calls[1][1] == calls[0][1]
+    assert engine._concept_synthesis_tasks == {}
+    assert engine._concept_synthesis_pending == {}
+
+
+@pytest.mark.asyncio
+async def test_locked_or_unmapped_concept_never_schedules_resynthesis(monkeypatch):
+    calls = []
+
+    async def fake_resynthesize(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"created": False, "reason": "unexpected"}
+
+    monkeypatch.setattr(
+        "api.services.concepts.maybe_resynthesize_concept",
+        fake_resynthesize,
+    )
+    locked_engine, _ = _auto_synthesis_engine(locked=True)
+    await locked_engine._collect_glossary("j_locked")
+
+    unmapped_db = _DBStub(domain="dl")
+    unmapped_engine = _make_engine(
+        _ConceptsStorageStub({
+            "evidence_note_type": "original",
+            "key_terms": [{"term": "NoEvidence"}],
+        }),
+        unmapped_db,
+    )
+    await unmapped_engine._collect_glossary("j_unmapped")
+    await asyncio.sleep(0)
+
+    assert calls == []
+    assert locked_engine._concept_synthesis_tasks == {}
+    assert unmapped_engine._concept_synthesis_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_resynthesis_failure_is_best_effort_and_shutdown_cancels(monkeypatch):
+    attempts = 0
+
+    async def fail_resynthesize(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(
+        "api.services.concepts.maybe_resynthesize_concept",
+        fail_resynthesize,
+    )
+    engine, _ = _auto_synthesis_engine()
+    await engine._collect_glossary("j_failure")
+    for _ in range(20):
+        if not engine._concept_synthesis_tasks:
+            break
+        await asyncio.sleep(0)
+    assert attempts == 1
+    assert engine._concept_synthesis_tasks == {}
+
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def wait_resynthesize(*args, **kwargs):
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(
+        "api.services.concepts.maybe_resynthesize_concept",
+        wait_resynthesize,
+    )
+    shutdown_engine, _ = _auto_synthesis_engine()
+    await shutdown_engine._collect_glossary("j_shutdown")
+    await started.wait()
+    await shutdown_engine.shutdown()
+
+    assert cancelled.is_set()
+    assert all(task.done() for task in shutdown_engine._concept_synthesis_tasks.values())

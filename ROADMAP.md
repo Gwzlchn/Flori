@@ -106,6 +106,7 @@ E2E 分层见 [`scripts/test.sh`](scripts/test.sh) 与 [`docs/09-testing.md`](do
   - 对比分析：「这篇论文和那个视频的观点有什么不同？」
 - [x] Canonical evidence 首版：视频/音频时间、PDF 页码、文章锚点、OCR image bbox 及 Search/Ask/MCP/内容详情同身份闭环
 - [x] Smart exact-quote 门：四类 producer 的有界 support text、服务端双重复算与恶意降级拒绝
+- [x] 概念定义真实化：append-only history、精确 canonical occurrence、可靠评审 attestation、current+lock CAS 与自动/手动受控重综合；REST/MCP/UI 使用同一安全投影
 - [ ] 跨语言 translated/smart 与 paraphrase/semantic claim 的独立 attestation（当前显式空映射）
 - [x] 领域概念图首版（术语 / 主题 / occurrence / 时间线与跨来源聚合）
 - [ ] 自动实体关系与跨笔记推理关联

@@ -12,7 +12,7 @@ import pytest
 
 import shared.db as db_module
 from shared.db import Database
-from shared.migrations import v0004_study_suggestions as migration_v4
+from shared.migrations import v0006_concept_definition_history as migration_current
 from shared.models import Collection, Job, JobStatus
 from shared.study_suggestions import (
     StudySuggestionConflictError,
@@ -462,10 +462,10 @@ class TestStudySuggestionDb:
                 batch["batch_id"], task_id=batch["task_id"], result=result
             )
             assert replay[0]["domain"] == "machine-learning"
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
 
     @pytest.mark.parametrize("transition", ["domain", "concept"])
-    def test_v4_validator_replays_identity_transition_before_ready(self, db, transition):
+    def test_current_validator_replays_identity_transition_before_ready(self, db, transition):
         _seed(db, concept="concept-a")
         if transition == "concept":
             db.upsert_glossary_term("ml", "concept-b", "merged", status="accepted")
@@ -482,7 +482,7 @@ class TestStudySuggestionDb:
             batch["batch_id"], task_id=batch["task_id"], result=result
         )
 
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
 
     def test_lifecycle_replay_rejects_unledgered_identity_drift(self, db):
         _seed(db)
@@ -564,7 +564,7 @@ class TestStudySuggestionDb:
         assert not thread.is_alive()
         assert failures == []
         assert clock_calls == sorted(clock_calls) and len(clock_calls) == 2
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
 
     @pytest.mark.parametrize("transition", ["queued", "failed", "ready", "retry"])
     def test_lifecycle_clock_is_not_read_before_transaction_lock(
@@ -670,7 +670,7 @@ class TestStudySuggestionDb:
         assert not thread.is_alive()
         assert failures == []
         assert clock_called.is_set()
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
 
     @pytest.mark.parametrize("operation_kind", ["batch_queued", "batch_failed", "batch_ready"])
     def test_lifecycle_operation_write_failure_rolls_back_whole_transition(
@@ -902,7 +902,7 @@ class TestStudySuggestionDb:
         assert db.get_study_card(accepted["card_id"])["job_id"] is None
         assert db.get_study_card(manual["card_id"])["job_id"] is None
         assert db.get_job("jobs_study_1") is None
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
 
     @pytest.mark.parametrize("delete_mode", ["job", "collection"])
     def test_source_delete_fault_rolls_back_evidence_cards_and_job(
@@ -1193,7 +1193,7 @@ class TestStudySuggestionDb:
         )
 
         assert outcome["items"][0]["status"] == "rejected"
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
 
     def test_concept_merge_moves_current_pointers_and_terminal_card(self, db):
         _seed(db, concept="old")
@@ -1309,18 +1309,18 @@ class TestStudySuggestionDb:
             )
         db._conn.rollback()
 
-    def test_v4_validator_accepts_complete_and_renamed_audit_chain(self, db):
+    def test_current_validator_accepts_complete_and_renamed_audit_chain(self, db):
         _seed(db)
         batch, suggestion = _ready(db)
         _accept(db, batch, suggestion)
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
 
         db.rename_domain("ml", "machine-learning")
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
         db.delete_job_cascade("jobs_study_1")
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
 
-    def test_v4_validator_replays_multiple_domain_renames_and_concept_merges(self, db):
+    def test_current_validator_replays_multiple_domain_renames_and_concept_merges(self, db):
         _seed(db, concept="concept-a")
         db.upsert_glossary_term("ml", "concept-b", "middle", status="accepted")
         db.upsert_glossary_term("ml", "concept-c", "final", status="accepted")
@@ -1355,10 +1355,10 @@ class TestStudySuggestionDb:
             ],
         )
 
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
 
     @pytest.mark.parametrize("transition_kind", ["domain_rename", "concept_merge"])
-    def test_v4_validator_rejects_identity_transition_tamper(
+    def test_current_validator_rejects_identity_transition_tamper(
         self, db, transition_kind
     ):
         _seed(db, concept="concept-a")
@@ -1393,9 +1393,9 @@ class TestStudySuggestionDb:
         )
 
         with pytest.raises(sqlite3.DatabaseError, match="operation|identity"):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
-    def test_v4_validator_accepts_multiple_retry_transition_chain(self, db):
+    def test_current_validator_accepts_multiple_retry_transition_chain(self, db):
         _seed(db)
         batch = db.create_study_suggestion_batch(
             request_id="retry-twice-create", domain="ml", job_ids=["jobs_study_1"]
@@ -1434,9 +1434,9 @@ class TestStudySuggestionDb:
         )
 
         assert second_retry["attempt"] == 3
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
 
-    def test_v4_validator_rejects_failed_state_rollback_without_retry_ledger(self, db):
+    def test_current_validator_rejects_failed_state_rollback_without_retry_ledger(self, db):
         _seed(db)
         batch = db.create_study_suggestion_batch(
             request_id="rollback-ledger-create", domain="ml", job_ids=["jobs_study_1"]
@@ -1461,10 +1461,10 @@ class TestStudySuggestionDb:
         db._conn.commit()
 
         with pytest.raises(sqlite3.DatabaseError, match="重放|当前状态"):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
     @pytest.mark.parametrize("terminal_kind", ["batch_ready", "batch_failed"])
-    def test_v4_validator_rejects_missing_lifecycle_operation(self, db, terminal_kind):
+    def test_current_validator_rejects_missing_lifecycle_operation(self, db, terminal_kind):
         _seed(db)
         if terminal_kind == "batch_ready":
             batch, _suggestion = _ready(db, request_id="missing-ready-operation")
@@ -1494,7 +1494,7 @@ class TestStudySuggestionDb:
         with pytest.raises(
             sqlite3.DatabaseError, match="重放|lifecycle|当前状态|ledger|账本"
         ):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
     @pytest.mark.parametrize(
         ("field", "value"),
@@ -1509,7 +1509,7 @@ class TestStudySuggestionDb:
             ("deadline_at", "2100-01-01T00:00:00+00:00"),
         ],
     )
-    def test_v4_validator_rejects_failed_current_field_tamper(self, db, field, value):
+    def test_current_validator_rejects_failed_current_field_tamper(self, db, field, value):
         _seed(db)
         batch = db.create_study_suggestion_batch(
             request_id="failed-field-create", domain="ml", job_ids=["jobs_study_1"]
@@ -1539,10 +1539,10 @@ class TestStudySuggestionDb:
         db._conn.commit()
 
         with pytest.raises(sqlite3.DatabaseError, match="重放|当前状态"):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
     @pytest.mark.parametrize("history", ["ready", "reviewed", "domain", "concept"])
-    def test_v4_validator_rejects_suggestion_updated_at_tamper(self, db, history):
+    def test_current_validator_rejects_suggestion_updated_at_tamper(self, db, history):
         _seed(db, concept="concept-a")
         if history == "concept":
             db.upsert_glossary_term("ml", "concept-b", "merged", status="accepted")
@@ -1571,13 +1571,13 @@ class TestStudySuggestionDb:
         db._conn.commit()
 
         with pytest.raises(sqlite3.DatabaseError, match="候选当前状态"):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
     @pytest.mark.parametrize(
         "target",
         ["request", "outcome", "fingerprint", "noncanonical", "coherent-future"],
     )
-    def test_v4_validator_rejects_lifecycle_operation_tamper(self, db, target):
+    def test_current_validator_rejects_lifecycle_operation_tamper(self, db, target):
         _seed(db)
         batch = db.create_study_suggestion_batch(
             request_id="operation-tamper-create", domain="ml", job_ids=["jobs_study_1"]
@@ -1650,10 +1650,10 @@ class TestStudySuggestionDb:
             db._conn.commit()
 
         with pytest.raises(sqlite3.DatabaseError, match="建议操作|batch_failed|未来"):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
     @pytest.mark.parametrize("target", ["task_id", "attempt", "expected_revision"])
-    def test_v4_validator_rejects_lifecycle_precondition_tamper(self, db, target):
+    def test_current_validator_rejects_lifecycle_precondition_tamper(self, db, target):
         _seed(db)
         batch = db.create_study_suggestion_batch(
             request_id="precondition-create", domain="ml", job_ids=["jobs_study_1"]
@@ -1690,10 +1690,10 @@ class TestStudySuggestionDb:
         )
 
         with pytest.raises(sqlite3.DatabaseError, match="batch_queued"):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
     @pytest.mark.parametrize("target", ["missing-queued", "duplicate", "out-of-order"])
-    def test_v4_validator_rejects_missing_duplicate_or_disordered_lifecycle(
+    def test_current_validator_rejects_missing_duplicate_or_disordered_lifecycle(
         self, db, target
     ):
         _seed(db)
@@ -1752,9 +1752,9 @@ class TestStudySuggestionDb:
         with pytest.raises(
             sqlite3.DatabaseError, match="batch_|lifecycle|当前状态|ledger|账本"
         ):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
-    def test_v4_validator_rejects_retry_without_failed_lifecycle(self, db):
+    def test_current_validator_rejects_retry_without_failed_lifecycle(self, db):
         _seed(db)
         batch = db.create_study_suggestion_batch(
             request_id="retry-without-failed-create",
@@ -1786,9 +1786,9 @@ class TestStudySuggestionDb:
         with pytest.raises(
             sqlite3.DatabaseError, match="batch_retry|failed lifecycle|ledger|账本"
         ):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
-    def test_v4_validator_rejects_pending_retry_revision_drift(self, db):
+    def test_current_validator_rejects_pending_retry_revision_drift(self, db):
         _seed(db)
         batch = db.create_study_suggestion_batch(
             request_id="pending-drift-create", domain="ml", job_ids=["jobs_study_1"]
@@ -1816,9 +1816,9 @@ class TestStudySuggestionDb:
         db._conn.commit()
 
         with pytest.raises(sqlite3.DatabaseError, match="当前状态"):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
-    def test_v4_validator_rejects_queued_revision_without_increment(self, db):
+    def test_current_validator_rejects_queued_revision_without_increment(self, db):
         _seed(db)
         batch = db.create_study_suggestion_batch(
             request_id="queued-drift-create", domain="ml", job_ids=["jobs_study_1"]
@@ -1834,10 +1834,10 @@ class TestStudySuggestionDb:
         db._conn.commit()
 
         with pytest.raises(sqlite3.DatabaseError, match="当前状态"):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
     @pytest.mark.parametrize("terminal_status", ["ready", "failed"])
-    def test_v4_validator_rejects_terminal_updated_at_before_task_operation(
+    def test_current_validator_rejects_terminal_updated_at_before_task_operation(
         self, db, terminal_status
     ):
         _seed(db)
@@ -1866,10 +1866,10 @@ class TestStudySuggestionDb:
         db._conn.commit()
 
         with pytest.raises(sqlite3.DatabaseError, match="当前状态"):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
     @pytest.mark.parametrize("target", ["task_id", "attempt", "revision", "deadline"])
-    def test_v4_validator_binds_retry_outcome_to_transition_chain(self, db, target):
+    def test_current_validator_binds_retry_outcome_to_transition_chain(self, db, target):
         _seed(db)
         batch = db.create_study_suggestion_batch(
             request_id="retry-chain-create", domain="ml", job_ids=["jobs_study_1"]
@@ -1926,9 +1926,9 @@ class TestStudySuggestionDb:
         db._conn.commit()
 
         with pytest.raises(sqlite3.DatabaseError, match="batch_retry"):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
-    def test_v4_validator_replays_edit_then_accept_exactly(self, db):
+    def test_current_validator_replays_edit_then_accept_exactly(self, db):
         _seed(db)
         batch, suggestion = _ready(db)
         edited = db.apply_study_suggestion_operations(
@@ -1961,9 +1961,9 @@ class TestStudySuggestionDb:
             ],
         )
 
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
 
-    def test_v4_validator_uses_frozen_helpers(self, db, monkeypatch):
+    def test_current_validator_uses_frozen_helpers(self, db, monkeypatch):
         _seed(db)
         batch, suggestion = _ready(db)
         _accept(db, batch, suggestion)
@@ -1984,7 +1984,7 @@ class TestStudySuggestionDb:
             monkeypatch.setattr(runtime_suggestions, name, mutable_runtime_helper)
         monkeypatch.setattr(runtime_study, "datetime_to_epoch_us", mutable_runtime_helper)
 
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
 
     @pytest.mark.parametrize(
         "field",
@@ -1998,7 +1998,7 @@ class TestStudySuggestionDb:
             "evidence",
         ],
     )
-    def test_v4_validator_reconciles_every_result_field_by_ordinal(self, db, field):
+    def test_current_validator_reconciles_every_result_field_by_ordinal(self, db, field):
         _seed(db)
         batch, _suggestion = _ready(db)
         result = batch["result"]
@@ -2026,7 +2026,7 @@ class TestStudySuggestionDb:
         )
 
         with pytest.raises(sqlite3.DatabaseError):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
     @pytest.mark.parametrize(
         "target",
@@ -2039,7 +2039,7 @@ class TestStudySuggestionDb:
             "card-count",
         ],
     )
-    def test_v4_validator_replays_exact_review_outcome(self, db, target):
+    def test_current_validator_replays_exact_review_outcome(self, db, target):
         _seed(db)
         batch, suggestion = _ready(db)
         _accept(db, batch, suggestion)
@@ -2075,10 +2075,10 @@ class TestStudySuggestionDb:
         )
 
         with pytest.raises(sqlite3.DatabaseError, match="outcome"):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
     @pytest.mark.parametrize("target", ["job_ids", "concept_terms"])
-    def test_v4_validator_reconciles_batch_create_request_inputs(self, db, target):
+    def test_current_validator_reconciles_batch_create_request_inputs(self, db, target):
         _seed(db)
         _ready(db)
         row = db._conn.execute(
@@ -2101,7 +2101,7 @@ class TestStudySuggestionDb:
         )
 
         with pytest.raises(sqlite3.DatabaseError, match="batch_create"):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
     @pytest.mark.parametrize(
         ("target", "expected"),
@@ -2117,7 +2117,7 @@ class TestStudySuggestionDb:
             ("result-shape", "result_json JSON 类型"),
         ],
     )
-    def test_v4_validator_rejects_semantic_tamper(self, db, target, expected):
+    def test_current_validator_rejects_semantic_tamper(self, db, target, expected):
         _seed(db)
         batch, suggestion = _ready(db)
         accepted = _accept(db, batch, suggestion)
@@ -2194,10 +2194,10 @@ class TestStudySuggestionDb:
             )
 
         with pytest.raises(sqlite3.DatabaseError, match=expected):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
     @pytest.mark.parametrize("target", ["cross-batch", "fingerprint"])
-    def test_v4_validator_rejects_cross_batch_operation_and_fingerprint(self, db, target):
+    def test_current_validator_rejects_cross_batch_operation_and_fingerprint(self, db, target):
         _seed(db)
         first, _suggestion = _ready(db)
         _seed(
@@ -2233,7 +2233,7 @@ class TestStudySuggestionDb:
             )
             expected = "request fingerprint"
         with pytest.raises(sqlite3.DatabaseError, match=expected):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
 
 def _valid_ai_output() -> dict:
@@ -2516,7 +2516,7 @@ class TestStudySuggestionReleaseBlockers:
             current = db.get_study_suggestion_batch(batch["batch_id"])
 
         assert current["updated_at"] == queued["updated_at"]
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
 
     def test_wall_clock_rollback_is_clamped_for_queue_and_input_dedupe(
         self, db, monkeypatch
@@ -2551,7 +2551,7 @@ class TestStudySuggestionReleaseBlockers:
             "WHERE request_id='clock-clamp-input-dedupe'"
         ).fetchone()[0]
         assert operation_time == queued["updated_at"]
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
 
     def test_wall_clock_rollback_is_clamped_for_retry_and_review(self, db, monkeypatch):
         _seed(db)
@@ -2600,7 +2600,7 @@ class TestStudySuggestionReleaseBlockers:
             ],
         )
         assert reviewed["items"][0]["updated_at"] == before_review
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
 
     @pytest.mark.parametrize("transition", ["domain_rename", "concept_merge"])
     @pytest.mark.parametrize("phase", ["pending", "queued", "ready"])
@@ -2664,11 +2664,11 @@ class TestStudySuggestionReleaseBlockers:
             "input_ids": expected_input_ids,
             "suggestion_ids": suggestion_ids,
         }
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
 
     @pytest.mark.parametrize("transition", ["domain_rename", "concept_merge"])
     @pytest.mark.parametrize("target", ["input_ids", "suggestion_ids", "created_at"])
-    def test_v4_validator_rejects_identity_impact_or_order_tamper(
+    def test_current_validator_rejects_identity_impact_or_order_tamper(
         self, db, transition, target
     ):
         _seed(db, concept="concept-a")
@@ -2709,7 +2709,7 @@ class TestStudySuggestionReleaseBlockers:
             )
 
         with pytest.raises(sqlite3.DatabaseError, match="identity|时间线|影响"):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
     def test_same_timestamp_identity_chain_uses_ledger_sequence(self, db, monkeypatch):
         _seed(db, concept="concept-a")
@@ -2731,14 +2731,14 @@ class TestStudySuggestionReleaseBlockers:
         assert [row["ledger_seq"] for row in rows] == sorted(
             row["ledger_seq"] for row in rows
         )
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
 
     @pytest.mark.parametrize("operation_kind", ["batch_create", "suggestion_review"])
     @pytest.mark.parametrize(
         "reserved_request_id",
         ["study-lifecycle:external", "identity-transition:external"],
     )
-    def test_v4_validator_rejects_external_operation_in_internal_namespace(
+    def test_current_validator_rejects_external_operation_in_internal_namespace(
         self, db, operation_kind, reserved_request_id
     ):
         _seed(db)
@@ -2782,9 +2782,9 @@ class TestStudySuggestionReleaseBlockers:
         )
 
         with pytest.raises(sqlite3.DatabaseError, match="命名空间"):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
-    def test_v4_validator_rejects_noncanonical_lifecycle_request_id(self, db):
+    def test_current_validator_rejects_noncanonical_lifecycle_request_id(self, db):
         _seed(db)
         batch, _result = _queued(db, request_id="validator-lifecycle-canonical")
         operation = db._conn.execute(
@@ -2810,7 +2810,7 @@ class TestStudySuggestionReleaseBlockers:
         )
 
         with pytest.raises(sqlite3.DatabaseError, match="lifecycle"):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
     @pytest.mark.parametrize(
         "forged_request_id",
@@ -2819,7 +2819,7 @@ class TestStudySuggestionReleaseBlockers:
             "identity-transition:ABCDEF0123456789ABCDEF0123456789",
         ],
     )
-    def test_v4_validator_requires_lower_hex_identity_request_id(
+    def test_current_validator_requires_lower_hex_identity_request_id(
         self, db, forged_request_id
     ):
         _seed(db)
@@ -2846,7 +2846,7 @@ class TestStudySuggestionReleaseBlockers:
         )
 
         with pytest.raises(sqlite3.DatabaseError, match="identity_transition request_id"):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
     def test_multi_batch_identity_clamps_every_row_to_global_lower_bound(
         self, db, monkeypatch
@@ -2935,7 +2935,7 @@ class TestStudySuggestionReleaseBlockers:
                 "SELECT updated_at FROM study_suggestions ORDER BY suggestion_id"
             ).fetchall()
         } == {global_bound.isoformat()}
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
 
     def test_operation_ledger_sequence_is_canonical_when_rowid_order_changes(
         self, db, monkeypatch
@@ -3025,7 +3025,7 @@ class TestStudySuggestionReleaseBlockers:
         db._conn.execute(trigger_sql)
         db._conn.commit()
 
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
         replay_order = db._conn.execute(
             "SELECT request_id FROM study_suggestion_operations "
             "WHERE request_id LIKE 'ledger-rowid-review-%' ORDER BY ledger_seq"
@@ -3036,7 +3036,7 @@ class TestStudySuggestionReleaseBlockers:
         ]
 
     @pytest.mark.parametrize("target", ["gap", "swap", "hash"])
-    def test_v4_validator_rejects_operation_ledger_tamper(self, db, target):
+    def test_current_validator_rejects_operation_ledger_tamper(self, db, target):
         _seed(db)
         batch, suggestion = _ready(db, request_id=f"ledger-tamper-{target}")
         db.apply_study_suggestion_operations(
@@ -3093,7 +3093,7 @@ class TestStudySuggestionReleaseBlockers:
         db._conn.commit()
 
         with pytest.raises(sqlite3.DatabaseError, match="ledger|账本"):
-            migration_v4.validate(db._conn)
+            migration_current.validate(db._conn)
 
     def test_operation_ledger_rejects_duplicate_sequence_at_write_time(self, db):
         _seed(db)
@@ -3216,7 +3216,7 @@ class TestStudySuggestionReleaseBlockers:
             ).fetchall()
         }
         assert identity_times == {global_bound.isoformat()}
-        migration_v4.validate(db._conn)
+        migration_current.validate(db._conn)
 
 
 class TestStudySuggestionApi:

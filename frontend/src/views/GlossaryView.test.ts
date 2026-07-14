@@ -18,13 +18,19 @@ function makeTerm(over: Record<string, unknown> = {}) {
   return {
     domain: '机器学习',
     term: '注意力机制',
+    zh_name: '',
+    aliases: [],
     definition: '一种加权聚合机制',
     occurrences: [{}, {}],
-    related: ['自注意力'],
+    related: [{ term: '自注意力', rel: 'related' }],
     status: 'accepted',
+    watched: false,
     is_topic: false,
     definition_locked: false,
+    current_definition_version_id: 'cdv-current',
+    lock_revision: 3,
     created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
     ...over,
   }
 }
@@ -233,6 +239,25 @@ describe('GlossaryView', () => {
     expect(api.post).toHaveBeenCalledWith(
       '/api/glossary?domain=' + encodeURIComponent('NLP'),
       { term: '词向量', definition: null, related: [] },
+    )
+  })
+
+  it('编辑定义携带当前版本与 lock revision 双 CAS', async () => {
+    api.get.mockResolvedValue([makeTerm()])
+    const w = factory()
+    await flushPromises()
+    await w.find('button[title="编辑定义"]').trigger('click')
+    const definition = w.find('.modal textarea.input')
+    await definition.setValue('新定义')
+    const submit = w.findAll('.modal button').find((b) => b.text().includes('保存'))!
+    await submit.trigger('click')
+    await flushPromises()
+    expect(api.put).toHaveBeenCalledWith(
+      '/api/glossary/' + encodeURIComponent('机器学习') + '/' + encodeURIComponent('注意力机制'),
+      {
+        term: '注意力机制', definition: '新定义', related: ['自注意力'],
+        expected_current_version_id: 'cdv-current', expected_lock_revision: 3,
+      },
     )
   })
 })

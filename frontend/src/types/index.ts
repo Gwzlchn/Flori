@@ -559,7 +559,89 @@ export interface GlossaryTerm {
   is_topic: boolean
   watched: boolean            // 概念订阅:关注后雷达/工作台优先呈现新动向
   definition_locked: boolean
+  current_definition_version_id: string | null
+  lock_revision: number
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface ConceptDefinitionVersion {
+  definition_version_id: string
+  domain: string
+  term: string
+  version: number
+  definition: string
+  source_evidence_ids: string[]
+  source_set_fingerprint: string
+  strategy: string
+  provider: string | null
+  model: string | null
+  prompt_hash: string | null
+  input_hash: string | null
+  supersedes_version_id: string | null
+  actor: string
   created_at: string
+}
+
+export interface ConceptEvidence {
+  evidence_id: string
+  job_id: string
+  content_type: string
+  source_fingerprint: string | null
+  note_type: string | null
+  chunk_id: string | null
+  section: string | null
+  excerpt: string | null
+  reason: string | null
+  locator: CanonicalEvidenceLocator | null
+  link: CanonicalEvidenceLink | null
+}
+
+export type ConceptAttestationLevel = 'none' | 'supported' | 'corroborated' | 'strong'
+
+export interface ConceptAttestation {
+  domain: string
+  term: string
+  level: ConceptAttestationLevel
+  evidence_count: number
+  job_count: number
+  source_fingerprint_count: number
+  content_type_count: number
+  source_set_fingerprint: string
+  included: ConceptEvidence[]
+  excluded: ConceptEvidence[]
+}
+
+export interface ConceptTermDetail extends GlossaryTerm {
+  occurrence_total: number
+  occurrence_limit: 100
+  current_definition: ConceptDefinitionVersion
+  definition_history: ConceptDefinitionVersion[]
+  definition_history_total: number
+  definition_history_limit: 100
+  attestation: ConceptAttestation
+}
+
+export interface ConceptCasRequest {
+  expected_current_version_id: string
+  expected_lock_revision: number
+}
+
+export interface ConceptLockResponse {
+  current_definition_version_id: string
+  lock_revision: number
+  locked: boolean
+  changed: boolean
+}
+
+export type ConceptResynthesisReason = 'locked' | 'no_quorum' | 'source_set_unchanged' | 'input_too_large'
+
+export interface ConceptResynthesizeResponse {
+  created: boolean
+  reason: ConceptResynthesisReason | null
+  current: ConceptDefinitionVersion | null
+  version: ConceptDefinitionVersion | null
+  attestation: ConceptAttestation | null
 }
 
 // GET /api/jobs/{id}/concepts —— 本内容命中的概念(GlossaryTerm + 本 job 命中位置)

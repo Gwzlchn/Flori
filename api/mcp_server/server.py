@@ -19,7 +19,9 @@ import structlog
 from mcp.server.fastmcp import FastMCP
 
 from api.services import kb
+from api.services import concepts as concept_service
 from api.services.evidence import attach_canonical_evidence
+from api.schemas import ConceptTermDetailResponse
 from shared.db import Database
 from shared.storage import StorageBackend
 
@@ -210,15 +212,21 @@ def build_server(
         return res
 
     @mcp.tool()
-    def get_term(domain: str, term: str) -> dict | None:
-        """取某库单条术语/概念详情(定义 + 出处 occurrences + 相关 related + 状态)。
+    async def get_term(domain: str, term: str) -> ConceptTermDetailResponse | None:
+        """取某库单条概念详情，含版本历史与重验后佐证。
 
         - domain + term 必填(term 来自 get_glossary / search)。未命中返回 null。
         """
         sc = scope_domain()
         if sc is not None:
             domain = sc  # 作用域端点:锁定该库,忽略入参 domain
-        res = kb.get_term(db, domain, term)
+        projection = await concept_service.project_concept_detail(
+            db, storage, domain, term,
+        )
+        res = (
+            ConceptTermDetailResponse.model_validate(projection)
+            if projection is not None else None
+        )
         _record_call("get_term")
         log.info("mcp.get_term", domain=domain, term=term, found=res is not None)
         return res
@@ -243,7 +251,7 @@ def build_server(
 
         - domain 必填。返回 {nodes:[{id,term,definition,status,is_topic,occurrence_count}],
           edges:[{source,target,weight}], stats:{node_count,edge_count,isolated_count}}。
-        - 看这个库的概念彼此如何关联/聚成哪些簇;孤立概念(无共现)仍作节点保留。
+        - 图谱不逐节点重算佐证;需要版本、佐证或定位时调 get_term。
         """
         sc = scope_domain()
         if sc is not None:

@@ -170,7 +170,7 @@ occurrence = { job_id, content_type(video/paper/article/audio), location }
 
 - **多来源 = 多 occurrence，类型化**：论文、视频、文章、音频各记一条，带位置。**没有"第一个讲的占坑"**，对称登记。
 - **定义跨源综合，不取自单源**：论文给**严谨**、视频给**直觉**、文章给**应用**——AI 综合出的定义优于任何单一来源，且**随语料增长而精炼**；用户可**钉住**为标准版（钉住后语料增长只更新 occurrences/佐证，**不覆盖**定义，§1.10-11）。
-- **佐证强度 attestation（派生）** = 来源**广度**（几个不同 job）× **多样性**（几种 content_type）。一个被多源多类型提及的概念，比只被 1 个视频带过的，**可信度与中心度都更高**——这就是主题页/术语页里的 ★ 排序依据。（来源**权威度**——原始论文 vs 二手讲解——当前 occurrence 不足以判定，列为未来可选维度，暂不计入 ★。）
+- **佐证强度 attestation（派生）**只统计同时通过可靠评审、canonical evidence 当前有效和精确概念 occurrence 绑定的证据。等级固定为 `none`、`supported`、`corroborated`、`strong`；后两级分别要求至少 2/3 个独立 job、source fingerprint 与 content type，不使用不可解释的加权分。无效、删除、stale 或旧评审证据保留排除原因，但不得返回可点击定位。
 - **冲突即信息**：来源对同一概念说法不一时，综合定义在正文里以**人读注记**标注共识与分歧（MVP 不做结构化关联：删源不自动清理该注记）。
 - **巩固 = 跨源反复遇见**（即 §1.8 的 ②索引重复登记）：同一概念在不同来源、不同语境被再次提及，就强化该节点、补全定义（对应人脑"多样化重复"比"单一重复"记得更牢）。
 - **持久**：节点比任一来源长命（§1.5）。
@@ -304,15 +304,17 @@ class Job:
 class Concept:                     # 表名仍为 glossary（历史）
     domain: str                    # 主键之一（命名空间，原则二）
     name: str                      # 主键之一（旧字段名 term）
-    definition: str                # 跨源综合（原则三）
+    definition: str                # current definition 的兼容镜像（原则三）
+    current_definition_version_id: str # 指向最新 append-only version
     definition_locked: bool = False # 钉住后语料增长不自动覆盖定义（§1.10-11）
-    occurrences: list[dict]        # [{job_id, content_type, location}] 类型化出现处（替代旧 sources=[job_id]）
+    lock_revision: int = 0         # lock/unlock 与定义写入的 CAS 令牌
+    occurrences: list[dict]        # 兼容来源摘要；精确证据关系在 concept_occurrences
     related: list[str]             # 关联概念（仅同域）→ schema 图（含上下位）
     is_topic: bool = False         # 粗粒度浏览主题（给内容聚合落地页）
     status: str = "accepted"       # suggested / accepted
     created_at: datetime
     updated_at: datetime
-    # attestation（佐证强度）由 occurrences 派生（广度×多样性），不落列
+    # attestation 由可靠评审 + 当前 canonical evidence + concept_occurrences 现场派生
 ```
 
 > 术语与主题是同一实体的两端：`is_topic=True` 的（通常粗粒度）节点额外获得"主题页"。meta 标签不在此表，存于 `job.style_tags`。
@@ -414,6 +416,8 @@ CREATE TABLE glossary (
     term TEXT NOT NULL,                    -- 概念名
     definition TEXT DEFAULT '',            -- 跨源综合（原则三）
     definition_locked INTEGER DEFAULT 0,   -- 钉住后不被自动综合覆盖（§1.10-11）
+    current_definition_version_id TEXT,    -- 当前 append-only definition version
+    lock_revision INTEGER DEFAULT 0,       -- current+lock 的单调 CAS 令牌
     occurrences TEXT DEFAULT '[]',         -- [{job_id,content_type,location}] 类型化出现处（替代旧 sources）
     related TEXT DEFAULT '[]',             -- 关联概念（仅同域，含上下位）
     is_topic INTEGER DEFAULT 0,            -- 粗粒度浏览主题
@@ -422,6 +426,28 @@ CREATE TABLE glossary (
     PRIMARY KEY (domain, term)             -- 同名异域是两个节点
 );
 CREATE INDEX idx_glossary_domain_status ON glossary(domain, status);
+
+CREATE TABLE concept_definition_versions (
+    definition_version_id TEXT PRIMARY KEY,
+    domain TEXT NOT NULL, term TEXT NOT NULL, version INTEGER NOT NULL,
+    definition TEXT NOT NULL,
+    source_evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+    source_set_fingerprint TEXT NOT NULL,
+    strategy TEXT NOT NULL, provider TEXT, model TEXT,
+    prompt_hash TEXT, input_hash TEXT, supersedes_version_id TEXT,
+    actor TEXT NOT NULL, created_at TEXT NOT NULL,
+    UNIQUE(domain, term, version)
+);                                      -- UPDATE/DELETE trigger 一律拒绝
+
+CREATE TABLE concept_occurrences (
+    domain TEXT NOT NULL, term TEXT NOT NULL,
+    job_id TEXT NOT NULL, evidence_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(domain, term, job_id, evidence_id),
+    FOREIGN KEY(domain, term) REFERENCES glossary(domain, term),
+    FOREIGN KEY(job_id, domain) REFERENCES jobs(id, domain),
+    FOREIGN KEY(evidence_id, job_id) REFERENCES canonical_evidence(evidence_id, job_id)
+);                                      -- 同一 job 可有多个精确 evidence
 
 CREATE TABLE ai_usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

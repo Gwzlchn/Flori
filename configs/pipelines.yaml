@@ -213,7 +213,7 @@ video:
       extends: .ai-step
       run: steps.article.step_05_concepts
       prompt_template: 05_concepts
-      version: "3"
+      version: "4"
       # 复用 article 概念步:视频以最新版智能笔记为源(必有,11_smart 必跑)。
       needs: ["11_smart"]
       timeout: 120
@@ -324,8 +324,8 @@ paper:
       label: "概念 + 摘要"
       extends: .ai-step
       run: steps.article.step_05_concepts
-      version: "3"
-      # 复用 article 概念步(源优先级:智能笔记 > 译文 > 章节,paper 三源俱全)。
+      version: "4"
+      # 复用 article 概念步(源优先级:智能笔记 > 译文 > original.md;旧任务才回退章节)。
       # 此前 paper 概念只搭 06_review key_terms 便车(无 zh_name/related),图谱边稀疏的根因。
       needs: ["05_smart_paper"]
       timeout: 120
@@ -435,8 +435,8 @@ article:
       label: "概念 + 摘要"
       extends: .ai-step
       run: steps.article.step_05_concepts
-      version: "3"   # key_terms 增 related 关系边(rel: prerequisite/is_a/part_of/related,只引本文概念)
-      # 必跑,无 rules。源优先级:智能笔记 > 译文(非中文) > 原文章节;一句话摘要同出。
+      version: "4"   # key_terms 增 related 关系边(rel: prerequisite/is_a/part_of/related,只引本文概念)
+      # 必跑,无 rules。源优先级:智能笔记 > 译文(非中文) > original.md;一句话摘要同出。
       # needs 04_smart/04_translate:保证笔记/译文(若有)先就绪;被跳过时依赖视为满足,本步照常跑。
       needs: ["04_smart_article", "04_translate_article"]
       timeout: 120
@@ -530,7 +530,7 @@ audio:
       label: "概念 + 摘要"
       extends: .ai-step
       run: steps.article.step_05_concepts
-      version: "3"
+      version: "4"
       # 复用 article 概念步:播客以智能笔记为源。
       needs: ["04_smart_podcast"]
       timeout: 120

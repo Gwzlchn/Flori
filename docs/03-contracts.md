@@ -1148,6 +1148,8 @@ curl -X POST http://localhost:8000/api/domains/finance/rename \
   "status": "accepted",
   "is_topic": true,
   "definition_locked": false,
+  "current_definition_version_id": "cdv_<64hex>",
+  "lock_revision": 3,
   "created_at": "2026-05-16T20:00:00+08:00",
   "updated_at": "2026-05-16T20:00:00+08:00"
 }
@@ -1326,10 +1328,10 @@ Response `202`（投递成功；`markdown` 经 `GET /api/ai-tasks/{task_id}/resu
 - `watched`：概念订阅标记（bool，单用户）。watched 概念在雷达返回 `watched_concepts` 区（近窗有新出现的置顶），工作台顶部出提示条。
 - `zh_name`：标准中文译名（实体双语名，可为空串）。`aliases`：归并进本实体的变体名（采集归一与合并留痕，检索命中）。正文 term-link 对 `term`/`zh_name`/`aliases` **大小写不敏感**命中（纯 ASCII 变体按词边界），统一链到实体主名。
 - `related`：类型化关系边 `[{term, rel}]`，`rel` ∈ `prerequisite`/`is_a`/`part_of`/`related`（09 工单 P2）。写入端（PUT/POST body）元素可为字符串（视为 `rel="related"`）或对象，落库/读出统一归一为对象（存量字符串读出时同样归一）。来源：`05_concepts` v3 抽取（两端经 resolve 归一，目标未入库不建边）+ 手动维护 + `scripts/backfill_concept_edges.py` 存量补边。
-- `occurrences`：该术语出现过的来源，元素 `{job_id, content_type, location}`，由抽取步骤累积（同一 job 去重）。**详情端点**额外 enrich `title`（job 标题，job 已删则为 `null`）；列表端点不带。
-- `is_topic`：是否为主题概念。`definition_locked`：定义是否已钉住（钉住后自动采集不再覆盖定义）。
+- `occurrences`：兼容来源摘要，元素 `{job_id, content_type, location}`，由抽取步骤累积（同一 job 去重）。**详情端点**额外 enrich `title`，最多返回 100 项并给 `occurrence_total/occurrence_limit`；精确多证据关系存于正规化 `concept_occurrences`，通过详情的 `attestation` 投影。
+- `is_topic`：是否为主题概念。`definition_locked`：定义是否已钉住。`current_definition_version_id` 与 `lock_revision` 是定义写入、lock/unlock、重综合共用的 CAS 快照；定义版本只追加不原地修改。
 - `created_at` / `updated_at`：ISO8601 字符串，缺失时为 `null`。
-- **同一形态**：所有返回单条术语的端点（`/api/glossary` 列表与详情、`/api/glossary/{d}/{t}`、`/api/domains/{d}/terms/{t}`）字段完全一致（后端统一走 `GlossaryTermResponse.from_row`）。
+- **响应分层**：列表、domain 简版详情及普通写端点返回 `GlossaryTermResponse`；`GET /api/glossary/{d}/{t}` 返回其超集 `ConceptTermDetailResponse`，MCP `get_term` 与该详情共用同一 async projection。
 
 #### GET /api/glossary — 列术语
 
@@ -1343,7 +1345,7 @@ Response `200`：`GlossaryTermResponse` 数组（同上结构）。
 
 #### POST /api/glossary/{domain}/{term}/merge — 合并实体
 
-把 `{term}`（src）并入 body `target`（dst）实体：`occurrences` 并集按 `job_id` 去重、`definition` 取更长者、`zh_name` 补空、src 的 `term`/`zh_name`/`aliases` 全部进 dst 的 `aliases`（可逆留痕）、`status` 取更高档（`accepted` > `suggested` > `rejected`）、`is_topic`/`definition_locked` 取或、`related` 并集；然后删 src 行。存量批量清洗走 `scripts/merge_glossary_entities.py`（同一 db 方法）。
+把 `{term}`（src）并入 body `target`（dst）实体：兼容 occurrences、别名、status、topic、lock 与 related 按原规则合并；精确 occurrence 移到 dst，definition history 保持不可变，并为 dst 追加 `concept_merge` identity-transfer version 后切 current。旧 CAS 令牌通过 `lock_revision + 1` 失效；然后删 src 行。存量批量清洗走 `scripts/merge_glossary_entities.py`（同一 db 方法）。
 
 ```json
 {"target": "Attention Mechanism"}
@@ -1389,19 +1391,31 @@ Response `201`：`GlossaryTermResponse`（`status` 恒为 `accepted`）。
 
 #### GET /api/glossary/{domain}/{term} — 术语详情
 
-含 `occurrences` 关联来源列表。未命中 `404`。Response `200`：`GlossaryTermResponse`。
+未命中 `404`。Response `200`：`ConceptTermDetailResponse`，在 `GlossaryTermResponse` 基础上增加：
+
+- `current_definition` 与 `definition_history`：不可变版本完整投影；历史最多 100 条，并给 `definition_history_total/definition_history_limit`。
+- `attestation`：`level`、distinct evidence/job/source fingerprint/content type 计数、`source_set_fingerprint`，以及 `included/excluded`。只有当前 valid 且绑定可靠评审原文快照的 included evidence 才带 locator/link；excluded 始终不可跳转。
+- 每个 definition version 记录 evidence IDs、生成 strategy、provider/model、prompt/input hash、前驱、actor 与创建时间。manual edit 的 evidence 集为空，不伪装成自动佐证定义。
 
 #### PUT /api/glossary/{domain}/{term} — 修改术语
 
-仅改 `definition` / `related`；不动 `status` / `occurrences` / `is_topic`。body 中字段为 `null`（或省略）则保留原值。未命中 `404`。
+仅改 `definition` / `related`；不动 `status` / `occurrences` / `is_topic`。body 中字段为 `null`（或省略）则保留原值。变更 definition 时必须同时提交 `expected_current_version_id` 与严格非负整数 `expected_lock_revision`；current、revision 或锁状态变化返回 `409`，未命中 `404`。只改 related 不创建假 definition version。
 
 ```bash
 curl -X PUT "http://localhost:8000/api/glossary/deep-learning/注意力机制" \
   -H "Content-Type: application/json" \
-  -d '{"definition": "更新后的定义", "related": ["Transformer", "自注意力"]}'
+  -d '{"definition":"更新后的定义","related":["Transformer","自注意力"],"expected_current_version_id":"cdv_<64hex>","expected_lock_revision":3}'
 ```
 
 Response `200`：更新后的 `GlossaryTermResponse`。
+
+#### POST /api/glossary/{domain}/{term}/lock | unlock — 定义锁 CAS
+
+两端点请求体相同：`{"expected_current_version_id":"cdv_<64hex>","expected_lock_revision":3}`。成功返回 `{current_definition_version_id,lock_revision,locked,changed}`；幂等重复不增加 revision，真实 lock 状态切换恰好 `+1`。不存在返回 `404`，过期 current/revision 返回 `409`。locked 时人工定义改写与后台重综合都不得越过。
+
+#### POST /api/glossary/{domain}/{term}/resynthesize — 受控重综合
+
+请求体同 CAS。只在未锁定、至少两个可靠独立 job/source fingerprint 且 source set 变化时调用 provider；输入是 resolver 重验通过的有界 evidence excerpt。返回 `{created,reason,current?,version?,attestation?}`，`reason` 可为 `locked/no_quorum/source_set_unchanged/input_too_large`。provider/配置/解析失败返回 `502`且不切 current；AI 返回后会再次投影 attestation，证据、source set 或 input hash 改变返回 `409`。Scheduler 在精确 occurrence 对账后以同一服务 best-effort 自动触发，同概念在途去重，失败不阻塞 job 终态。
 
 #### DELETE /api/glossary/{domain}/{term} — 删除术语
 
@@ -2737,7 +2751,13 @@ v2 manifest 顶层字段必须精确为 `schema_version / job_id / ocr_refs / ev
 ### 4.11 概念实体与关系边(output/concepts.json / glossary 归一,工单 26-07-06/09)
 
 - **`output/concepts.json`**(四类链的 concepts 步产出,scheduler `_collect_glossary` 优先采集):
-  `key_terms` 元素 `{term, definition, zh_name|null, related:[{term, rel}]}`。`related.rel` ∈
+  顶层可带 `evidence_note_type=smart|translated|original`；`key_terms` 元素
+  `{term,definition,zh_name|null,related:[{term,rel}],evidence_source_segment_ids:[seg_<64hex>]}`。
+  evidence refs 不信任模型自报：producer 只从已重验 path/hash/job/pipeline 的 provenance anchor 中，
+  对 term/zh_name 做唯一逐字命中后覆盖生成；Latin 名称按 token boundary。Scheduler 在 canonical
+  index 完成后把 `(job,note_type,source_segment_id)` 映射为当前 evidence ID，并按整 job 原子替换
+  `concept_occurrences`；本次空/坏/不可靠输入会清旧精确映射，不删除 glossary 实体。
+  `related.rel` ∈
   `prerequisite`/`is_a`/`part_of`/`related`,只允许引用本次 `key_terms` 中的其它概念。
   采集时两端经 `shared.concepts.resolve` 归一到实体主名;目标未入库不建边(待其被采集后
   下次出现自动连上)。只有存量 job 缺 `output/concepts.json` 时才回退 `output/review.json`;
@@ -2924,8 +2944,8 @@ v2(未做):写工具(submit);sqlite-vec 语义后端。
   —— 集合(内容分组/订阅来源)清单;`domain` 可选限定;订阅集合才带 source 字段。
 - **`get_glossary(domain, status?=null)`** → `[{term, zh_name, definition, status, is_topic, occurrence_count}]`
   —— 某库概念/术语表;`status` 可选(accepted/review)。单条详情用 get_term。
-- **`get_term(domain, term)`** → `{domain, term, zh_name, aliases, definition, status, is_topic, occurrences, related} | null`
-  —— 单条术语详情(定义+译名/别名+出处+类型化 related);未命中 null。
+- **`get_term(domain, term)`** → `ConceptTermDetailResponse | null`
+  —— 与 REST `GET /api/glossary/{domain}/{term}` 共用同一详情投影，包含 current/history、精确 attestation 与有界 totals；stale/missing evidence 不返回可用 locator/link。未命中 null。
 - **`concept_timeline(domain, granularity?=month)`** → `{domain, granularity, ...buckets}`
   —— 概念按源内容发布时间分桶计数;`granularity`=day|week|month。
 - **`concept_graph(domain)`** → `{nodes:[{id,term,zh_name,definition,status,is_topic,occurrence_count}], edges:[{source,target,weight,kind}], stats:{node_count,edge_count,typed_edge_count,isolated_count}}`

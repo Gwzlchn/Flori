@@ -102,6 +102,18 @@ class PromptVersionExhaustedError(ValueError):
     """Prompt 历史已用完 SQLite 可表示的正整数版本."""
 
 
+class ConceptNotFoundError(LookupError):
+    """概念不存在，不能创建 occurrence 或定义版本。"""
+
+
+class ConceptConflictError(RuntimeError):
+    """概念版本、锁修订或证据集合已在并发中变化。"""
+
+
+class ConceptEvidenceError(ValueError):
+    """概念来源证据不存在、失效或不属于该概念身份。"""
+
+
 def _valid_prompt_version(version: object) -> bool:
     """DB 绑定前校验 Prompt 版本;bool 和整数子类也不作为版本."""
     return (
@@ -853,6 +865,48 @@ def _canonical_ids_from_evidence_json(value: object) -> list[str]:
 
 
 _MAX_NOTE_EVIDENCE_PROJECTION = 20
+
+
+def _concept_source_set(evidence_ids: list[str]) -> tuple[str, str]:
+    """把证据 ID 集合归一为可复算 JSON 和 fingerprint。"""
+    if not isinstance(evidence_ids, list) or any(
+        not isinstance(item, str) or not item.startswith("ce_")
+        for item in evidence_ids
+    ):
+        raise ConceptEvidenceError("source evidence ids 必须是 canonical evidence ID 列表")
+    canonical_ids = sorted(set(evidence_ids))
+    payload = json.dumps(canonical_ids, ensure_ascii=False, separators=(",", ":"))
+    return payload, hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _concept_definition_version_id(
+    *, domain: str, term: str, version: int, input_hash: str | None, actor: str
+) -> str:
+    payload = json.dumps(
+        {
+            "domain": domain,
+            "term": term,
+            "version": version,
+            "input_hash": input_hash,
+            "actor": actor,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "cdv_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _optional_sha256(value: str | None, field: str) -> str | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(char not in "0123456789abcdef" for char in value)
+    ):
+        raise ValueError(f"{field} 必须是小写 sha256")
+    return value
 
 
 def _parse_dt(s: str | None) -> datetime | None:
@@ -2520,15 +2574,64 @@ class Database:
                 now = self._study_suggestion_monotonic_now_locked(
                     affected_batches, _now_iso()
                 ).isoformat()
+                renamed_versions: dict[str, str] = {}
+                concept_rows = self._conn.execute(
+                    """SELECT term, current_definition_version_id
+                       FROM glossary WHERE domain=? ORDER BY term""",
+                    (old,),
+                ).fetchall()
+                for concept_row in concept_rows:
+                    previous = self._definition_row_locked(
+                        str(concept_row["current_definition_version_id"])
+                    )
+                    if previous is None:
+                        raise ConceptConflictError("domain rename current version 不存在")
+                    input_hash = hashlib.sha256(
+                        json.dumps(
+                            {
+                                "old_domain": old,
+                                "new_domain": new,
+                                "term": concept_row["term"],
+                                "source_version": previous["definition_version_id"],
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    renamed = self._insert_definition_version_locked(
+                        domain=new,
+                        term=str(concept_row["term"]),
+                        definition=str(previous["definition"] or ""),
+                        source_evidence_ids_json=previous["source_evidence_ids_json"],
+                        source_set_fingerprint=previous["source_set_fingerprint"],
+                        strategy="domain_rename",
+                        provider=previous["provider"],
+                        model=previous["model"],
+                        prompt_hash=previous["prompt_hash"],
+                        input_hash=input_hash,
+                        supersedes_version_id=str(previous["definition_version_id"]),
+                        actor="database:domain_rename",
+                        created_at=now,
+                    )
+                    renamed_versions[str(concept_row["term"])] = str(
+                        renamed["definition_version_id"]
+                    )
                 n_jobs = self._conn.execute(
                     "UPDATE jobs SET domain=? WHERE domain=?", (new, old)
                 ).rowcount
                 n_coll = self._conn.execute(
                     "UPDATE collections SET domain=? WHERE domain=?", (new, old)
                 ).rowcount
-                n_gloss = self._conn.execute(
-                    "UPDATE glossary SET domain=? WHERE domain=?", (new, old)
-                ).rowcount
+                n_gloss = 0
+                for term, version_id in renamed_versions.items():
+                    n_gloss += self._conn.execute(
+                        """UPDATE glossary
+                           SET domain=?, current_definition_version_id=?,
+                               lock_revision=lock_revision+1, updated_at=?
+                           WHERE domain=? AND term=?""",
+                        (new, version_id, now, old, term),
+                    ).rowcount
                 n_cards = self._conn.execute(
                     "UPDATE study_cards SET domain=?, updated_at=? WHERE domain=?",
                     (new, now, old),
@@ -2600,6 +2703,7 @@ class Database:
             "study_suggestion_batches": n_batches,
             "study_suggestions": n_suggestions,
             "study_suggestion_evidence": n_evidence,
+            "concept_definition_versions": len(renamed_versions),
         }
 
     # Domain(领域是派生视图:来自 jobs ∪ collections ∪ glossary 的 distinct domain)
@@ -2809,6 +2913,797 @@ class Database:
 
     # Glossary
 
+    def _validate_concept_source_evidence_locked(
+        self,
+        *,
+        domain: str,
+        term: str,
+        evidence_ids: list[str],
+    ) -> tuple[str, str]:
+        """验证定义来源都已精确挂到该概念，调用方负责事务与锁。"""
+        source_json, fingerprint = _concept_source_set(evidence_ids)
+        canonical_ids = json.loads(source_json)
+        if not canonical_ids:
+            return source_json, fingerprint
+        placeholders = ",".join("?" for _ in canonical_ids)
+        rows = self._conn.execute(
+            f"""SELECT c.evidence_id, c.job_id, c.status, j.domain,
+                       o.evidence_id AS occurrence_evidence_id
+                FROM canonical_evidence c
+                LEFT JOIN jobs j ON j.id=c.job_id
+                LEFT JOIN concept_occurrences o
+                  ON o.domain=? AND o.term=? AND o.job_id=c.job_id
+                 AND o.evidence_id=c.evidence_id
+                WHERE c.evidence_id IN ({placeholders})""",
+            (domain, term, *canonical_ids),
+        ).fetchall()
+        by_id = {str(row["evidence_id"]): row for row in rows}
+        for evidence_id in canonical_ids:
+            row = by_id.get(evidence_id)
+            if row is None:
+                raise ConceptEvidenceError(f"canonical evidence 不存在: {evidence_id}")
+            if row["status"] != "valid":
+                raise ConceptEvidenceError(f"canonical evidence 当前无效: {evidence_id}")
+            if row["domain"] != domain:
+                raise ConceptEvidenceError(f"canonical evidence domain 不匹配: {evidence_id}")
+            if row["occurrence_evidence_id"] is None:
+                raise ConceptEvidenceError(f"canonical evidence 未绑定该概念: {evidence_id}")
+        return source_json, fingerprint
+
+    def _definition_row_locked(self, definition_version_id: str | None) -> sqlite3.Row | None:
+        if definition_version_id is None:
+            return None
+        return self._conn.execute(
+            "SELECT * FROM concept_definition_versions WHERE definition_version_id=?",
+            (definition_version_id,),
+        ).fetchone()
+
+    def _insert_definition_version_locked(
+        self,
+        *,
+        domain: str,
+        term: str,
+        definition: str,
+        source_evidence_ids_json: str,
+        source_set_fingerprint: str,
+        strategy: str,
+        provider: str | None,
+        model: str | None,
+        prompt_hash: str | None,
+        input_hash: str | None,
+        supersedes_version_id: str | None,
+        actor: str,
+        created_at: str,
+    ) -> sqlite3.Row:
+        """只追加 definition history；调用方同事务切 current pointer。"""
+        if not domain.strip() or not term.strip() or not strategy.strip() or not actor.strip():
+            raise ValueError("concept identity、strategy 和 actor 不能为空")
+        prompt_hash = _optional_sha256(prompt_hash, "prompt_hash")
+        input_hash = _optional_sha256(input_hash, "input_hash")
+        next_version = int(
+            self._conn.execute(
+                "SELECT COALESCE(MAX(version),0)+1 FROM concept_definition_versions "
+                "WHERE domain=? AND term=?",
+                (domain, term),
+            ).fetchone()[0]
+        )
+        version_id = _concept_definition_version_id(
+            domain=domain,
+            term=term,
+            version=next_version,
+            input_hash=input_hash,
+            actor=actor,
+        )
+        self._conn.execute(
+            """INSERT INTO concept_definition_versions (
+                   definition_version_id, domain, term, version, definition,
+                   source_evidence_ids_json, source_set_fingerprint, strategy,
+                   provider, model, prompt_hash, input_hash,
+                   supersedes_version_id, actor, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                version_id,
+                domain,
+                term,
+                next_version,
+                definition,
+                source_evidence_ids_json,
+                source_set_fingerprint,
+                strategy,
+                provider,
+                model,
+                prompt_hash,
+                input_hash,
+                supersedes_version_id,
+                actor,
+                created_at,
+            ),
+        )
+        row = self._definition_row_locked(version_id)
+        assert row is not None
+        return row
+
+    def _create_initial_definition_locked(
+        self,
+        *,
+        domain: str,
+        term: str,
+        definition: str,
+        strategy: str,
+        actor: str,
+        created_at: str,
+    ) -> sqlite3.Row:
+        """为新建或曾删除后重建的概念追加首个 current version。"""
+        previous = self._conn.execute(
+            """SELECT definition_version_id
+               FROM concept_definition_versions
+               WHERE domain=? AND term=? ORDER BY version DESC LIMIT 1""",
+            (domain, term),
+        ).fetchone()
+        source_json, fingerprint = _concept_source_set([])
+        input_hash = hashlib.sha256(
+            json.dumps(
+                {"definition": definition, "strategy": strategy},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return self._insert_definition_version_locked(
+            domain=domain,
+            term=term,
+            definition=definition,
+            source_evidence_ids_json=source_json,
+            source_set_fingerprint=fingerprint,
+            strategy=strategy,
+            provider=None,
+            model=None,
+            prompt_hash=None,
+            input_hash=input_hash,
+            supersedes_version_id=(
+                str(previous["definition_version_id"]) if previous is not None else None
+            ),
+            actor=actor,
+            created_at=created_at,
+        )
+
+    def upsert_concept_occurrence(
+        self,
+        *,
+        domain: str,
+        term: str,
+        job_id: str,
+        evidence_id: str,
+    ) -> bool:
+        """精确绑定 concept/job/evidence；重复 completion 返回 False。"""
+        now = _now_iso()
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                concept = self._conn.execute(
+                    "SELECT status FROM glossary WHERE domain=? AND term=?",
+                    (domain, term),
+                ).fetchone()
+                if concept is None:
+                    raise ConceptNotFoundError(f"concept not found: {domain}/{term}")
+                if concept["status"] == "rejected":
+                    raise ConceptConflictError("rejected concept 不接受 occurrence")
+                evidence = self._conn.execute(
+                    """SELECT c.job_id, c.status, j.domain
+                       FROM canonical_evidence c
+                       LEFT JOIN jobs j ON j.id=c.job_id
+                       WHERE c.evidence_id=?""",
+                    (evidence_id,),
+                ).fetchone()
+                if evidence is None:
+                    raise ConceptEvidenceError(f"canonical evidence 不存在: {evidence_id}")
+                if evidence["job_id"] != job_id:
+                    raise ConceptEvidenceError("canonical evidence 不属于请求 job")
+                if evidence["domain"] != domain:
+                    raise ConceptEvidenceError("job domain 不属于请求 concept")
+                if evidence["status"] != "valid":
+                    raise ConceptEvidenceError("canonical evidence 当前不是 valid")
+                cursor = self._conn.execute(
+                    """INSERT OR IGNORE INTO concept_occurrences
+                       (domain, term, job_id, evidence_id, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (domain, term, job_id, evidence_id, now),
+                )
+                self._conn.commit()
+                return cursor.rowcount > 0
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    def replace_concept_occurrences_for_job(
+        self,
+        *,
+        domain: str,
+        term: str,
+        job_id: str,
+        evidence_ids: list[str],
+    ) -> bool:
+        """原子替换单 concept/job 的证据集合；完全相同返回 False。"""
+        source_json, _ = _concept_source_set(evidence_ids)
+        normalized_ids: list[str] = json.loads(source_json)
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                concept = self._conn.execute(
+                    "SELECT status FROM glossary WHERE domain=? AND term=?",
+                    (domain, term),
+                ).fetchone()
+                if concept is None:
+                    raise ConceptNotFoundError(f"concept not found: {domain}/{term}")
+                if concept["status"] == "rejected":
+                    raise ConceptConflictError("rejected concept 不接受 occurrence")
+                job = self._conn.execute(
+                    "SELECT domain FROM jobs WHERE id=?",
+                    (job_id,),
+                ).fetchone()
+                if job is None or job["domain"] != domain:
+                    raise ConceptEvidenceError("job 不存在或 domain 不属于请求 concept")
+                if normalized_ids:
+                    placeholders = ",".join("?" for _ in normalized_ids)
+                    rows = self._conn.execute(
+                        f"""SELECT evidence_id, job_id, status
+                            FROM canonical_evidence
+                            WHERE evidence_id IN ({placeholders})""",
+                        normalized_ids,
+                    ).fetchall()
+                    by_id = {str(row["evidence_id"]): row for row in rows}
+                    for evidence_id in normalized_ids:
+                        evidence = by_id.get(evidence_id)
+                        if evidence is None:
+                            raise ConceptEvidenceError(
+                                f"canonical evidence 不存在: {evidence_id}"
+                            )
+                        if evidence["job_id"] != job_id:
+                            raise ConceptEvidenceError(
+                                f"canonical evidence 跨 job: {evidence_id}"
+                            )
+                        if evidence["status"] != "valid":
+                            raise ConceptEvidenceError(
+                                f"canonical evidence 当前无效: {evidence_id}"
+                            )
+                existing_ids = [
+                    str(row["evidence_id"])
+                    for row in self._conn.execute(
+                        """SELECT evidence_id FROM concept_occurrences
+                           WHERE domain=? AND term=? AND job_id=?
+                           ORDER BY evidence_id""",
+                        (domain, term, job_id),
+                    ).fetchall()
+                ]
+                if existing_ids == normalized_ids:
+                    self._conn.commit()
+                    return False
+                if normalized_ids:
+                    placeholders = ",".join("?" for _ in normalized_ids)
+                    self._conn.execute(
+                        f"""DELETE FROM concept_occurrences
+                            WHERE domain=? AND term=? AND job_id=?
+                              AND evidence_id NOT IN ({placeholders})""",
+                        (domain, term, job_id, *normalized_ids),
+                    )
+                else:
+                    self._conn.execute(
+                        """DELETE FROM concept_occurrences
+                           WHERE domain=? AND term=? AND job_id=?""",
+                        (domain, term, job_id),
+                    )
+                now = _now_iso()
+                self._conn.executemany(
+                    """INSERT OR IGNORE INTO concept_occurrences
+                       (domain, term, job_id, evidence_id, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    [
+                        (domain, term, job_id, evidence_id, now)
+                        for evidence_id in normalized_ids
+                    ],
+                )
+                self._conn.commit()
+                return True
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    def replace_job_concept_occurrences(
+        self,
+        *,
+        domain: str,
+        job_id: str,
+        mapping: dict[str, list[str]],
+    ) -> bool:
+        """原子对账一个 job 的全部 concept/evidence 映射，移除消失概念。"""
+        if not isinstance(mapping, dict) or any(
+            not isinstance(term, str) or not term.strip()
+            for term in mapping
+        ):
+            raise ValueError("mapping 必须是 term 到 canonical evidence IDs 的对象")
+        normalized: dict[str, list[str]] = {}
+        for term, evidence_ids in mapping.items():
+            source_json, _ = _concept_source_set(evidence_ids)
+            normalized[term] = json.loads(source_json)
+        expected = sorted(
+            (term, evidence_id)
+            for term, evidence_ids in normalized.items()
+            for evidence_id in evidence_ids
+        )
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                job = self._conn.execute(
+                    "SELECT domain FROM jobs WHERE id=?",
+                    (job_id,),
+                ).fetchone()
+                if job is None or job["domain"] != domain:
+                    raise ConceptEvidenceError("job 不存在或 domain 不属于请求 concept")
+                if normalized:
+                    terms = sorted(normalized)
+                    placeholders = ",".join("?" for _ in terms)
+                    rows = self._conn.execute(
+                        f"""SELECT term, status FROM glossary
+                            WHERE domain=? AND term IN ({placeholders})""",
+                        (domain, *terms),
+                    ).fetchall()
+                    found_terms = {str(row["term"]) for row in rows}
+                    missing = [term for term in terms if term not in found_terms]
+                    if missing:
+                        raise ConceptNotFoundError(
+                            f"concept not found: {domain}/{missing[0]}"
+                        )
+                    rejected = [
+                        str(row["term"]) for row in rows if row["status"] == "rejected"
+                    ]
+                    if rejected:
+                        raise ConceptConflictError(
+                            f"rejected concept 不接受 occurrence: {rejected[0]}"
+                        )
+                evidence_ids = sorted({item[1] for item in expected})
+                if evidence_ids:
+                    placeholders = ",".join("?" for _ in evidence_ids)
+                    rows = self._conn.execute(
+                        f"""SELECT evidence_id, job_id, status
+                            FROM canonical_evidence
+                            WHERE evidence_id IN ({placeholders})""",
+                        evidence_ids,
+                    ).fetchall()
+                    by_id = {str(row["evidence_id"]): row for row in rows}
+                    for evidence_id in evidence_ids:
+                        evidence = by_id.get(evidence_id)
+                        if evidence is None:
+                            raise ConceptEvidenceError(
+                                f"canonical evidence 不存在: {evidence_id}"
+                            )
+                        if evidence["job_id"] != job_id:
+                            raise ConceptEvidenceError(
+                                f"canonical evidence 跨 job: {evidence_id}"
+                            )
+                        if evidence["status"] != "valid":
+                            raise ConceptEvidenceError(
+                                f"canonical evidence 当前无效: {evidence_id}"
+                            )
+                existing = [
+                    (str(row["term"]), str(row["evidence_id"]))
+                    for row in self._conn.execute(
+                        """SELECT term, evidence_id FROM concept_occurrences
+                           WHERE domain=? AND job_id=?
+                           ORDER BY term, evidence_id""",
+                        (domain, job_id),
+                    ).fetchall()
+                ]
+                if existing == expected:
+                    self._conn.commit()
+                    return False
+                self._conn.execute(
+                    "DELETE FROM concept_occurrences WHERE domain=? AND job_id=?",
+                    (domain, job_id),
+                )
+                now = _now_iso()
+                self._conn.executemany(
+                    """INSERT INTO concept_occurrences
+                       (domain, term, job_id, evidence_id, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    [
+                        (domain, term, job_id, evidence_id, now)
+                        for term, evidence_id in expected
+                    ],
+                )
+                self._conn.commit()
+                return True
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    def list_concept_occurrences(
+        self,
+        domain: str,
+        term: str,
+        *,
+        include_invalid: bool = False,
+    ) -> list[dict]:
+        """返回正规化 occurrence；默认排除 stale/missing canonical evidence。"""
+        valid_clause = "" if include_invalid else " AND c.status='valid'"
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT o.domain, o.term, o.job_id, o.evidence_id, o.created_at,
+                           c.status AS evidence_status, c.source_fingerprint,
+                           c.chunk_body_sha256,
+                           n.body AS evidence_excerpt,
+                           j.content_type
+                    FROM concept_occurrences o
+                    JOIN canonical_evidence c ON c.evidence_id=o.evidence_id
+                    JOIN jobs j ON j.id=o.job_id
+                    LEFT JOIN note_chunks n
+                      ON n.chunk_id=c.chunk_id AND n.job_id=c.job_id
+                     AND n.note_type=c.note_type
+                    WHERE o.domain=? AND o.term=?{valid_clause}
+                    ORDER BY o.job_id, o.evidence_id""",
+                (domain, term),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def remove_concept_occurrence(
+        self,
+        *,
+        domain: str,
+        term: str,
+        job_id: str,
+        evidence_id: str,
+    ) -> bool:
+        """只删除指定四元组，不影响同 job 的其他证据。"""
+        with self._lock:
+            cursor = self._conn.execute(
+                """DELETE FROM concept_occurrences
+                   WHERE domain=? AND term=? AND job_id=? AND evidence_id=?""",
+                (domain, term, job_id, evidence_id),
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def append_concept_definition_version(
+        self,
+        *,
+        domain: str,
+        term: str,
+        definition: str,
+        evidence_ids: list[str],
+        strategy: str,
+        actor: str,
+        expected_current_version_id: str,
+        expected_lock_revision: int,
+        provider: str | None = None,
+        model: str | None = None,
+        prompt_hash: str | None = None,
+        input_hash: str | None = None,
+        allow_locked: bool = False,
+        allow_same_source_set: bool = False,
+    ) -> dict:
+        """append + current pointer CAS；source set 未变时默认幂等 no-op。"""
+        if type(expected_lock_revision) is not int or expected_lock_revision < 0:
+            raise ValueError("expected_lock_revision 必须是非负整数")
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                glossary = self._conn.execute(
+                    """SELECT current_definition_version_id, lock_revision,
+                              definition_locked, status
+                       FROM glossary WHERE domain=? AND term=?""",
+                    (domain, term),
+                ).fetchone()
+                if glossary is None:
+                    raise ConceptNotFoundError(f"concept not found: {domain}/{term}")
+                if glossary["status"] == "rejected":
+                    raise ConceptConflictError("rejected concept 不接受定义版本")
+                if (
+                    glossary["current_definition_version_id"]
+                    != expected_current_version_id
+                    or int(glossary["lock_revision"]) != expected_lock_revision
+                ):
+                    raise ConceptConflictError("concept current version 或 lock revision 已变化")
+                if glossary["definition_locked"] and not allow_locked:
+                    raise ConceptConflictError("concept definition 已锁定")
+                source_json, fingerprint = self._validate_concept_source_evidence_locked(
+                    domain=domain,
+                    term=term,
+                    evidence_ids=evidence_ids,
+                )
+                current = self._definition_row_locked(expected_current_version_id)
+                if current is None:
+                    raise ConceptConflictError("concept current version 不存在")
+                if (
+                    not allow_same_source_set
+                    and current["source_set_fingerprint"] == fingerprint
+                ):
+                    self._conn.commit()
+                    result = self._row_to_concept_definition_version(current)
+                    result["created"] = False
+                    return result
+                now = _now_iso()
+                if input_hash is None:
+                    input_hash = hashlib.sha256(
+                        json.dumps(
+                            {
+                                "definition": definition,
+                                "evidence_ids": json.loads(source_json),
+                                "strategy": strategy,
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest()
+                inserted = self._insert_definition_version_locked(
+                    domain=domain,
+                    term=term,
+                    definition=definition,
+                    source_evidence_ids_json=source_json,
+                    source_set_fingerprint=fingerprint,
+                    strategy=strategy,
+                    provider=provider,
+                    model=model,
+                    prompt_hash=prompt_hash,
+                    input_hash=input_hash,
+                    supersedes_version_id=expected_current_version_id,
+                    actor=actor,
+                    created_at=now,
+                )
+                cursor = self._conn.execute(
+                    """UPDATE glossary
+                       SET definition=?, current_definition_version_id=?, updated_at=?
+                       WHERE domain=? AND term=?
+                         AND current_definition_version_id=? AND lock_revision=?""",
+                    (
+                        definition,
+                        inserted["definition_version_id"],
+                        now,
+                        domain,
+                        term,
+                        expected_current_version_id,
+                        expected_lock_revision,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ConceptConflictError("concept current pointer CAS 失败")
+                self._conn.commit()
+                result = self._row_to_concept_definition_version(inserted)
+                result["created"] = True
+                return result
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    def current_concept_definition(self, domain: str, term: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT v.* FROM glossary g
+                   JOIN concept_definition_versions v
+                     ON v.definition_version_id=g.current_definition_version_id
+                   WHERE g.domain=? AND g.term=?""",
+                (domain, term),
+            ).fetchone()
+        return self._row_to_concept_definition_version(row) if row is not None else None
+
+    def list_concept_definition_versions(
+        self,
+        domain: str,
+        term: str,
+        *,
+        limit: int | None = None,
+    ) -> list[dict]:
+        if limit is not None and (type(limit) is not int or not 1 <= limit <= 1000):
+            raise ValueError("limit 必须是 1..1000 的整数")
+        suffix = " LIMIT ?" if limit is not None else ""
+        params: tuple = (domain, term, limit) if limit is not None else (domain, term)
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM concept_definition_versions
+                   WHERE domain=? AND term=? ORDER BY version DESC""" + suffix,
+                params,
+            ).fetchall()
+        return [self._row_to_concept_definition_version(row) for row in rows]
+
+    def count_concept_definition_versions(self, domain: str, term: str) -> int:
+        with self._lock:
+            return int(self._conn.execute(
+                """SELECT COUNT(*) FROM concept_definition_versions
+                   WHERE domain=? AND term=?""",
+                (domain, term),
+            ).fetchone()[0])
+
+    def set_concept_definition_lock(
+        self,
+        *,
+        domain: str,
+        term: str,
+        locked: bool,
+        expected_current_version_id: str,
+        expected_lock_revision: int,
+    ) -> dict:
+        """以 current version + lock revision 做 lock/unlock CAS。"""
+        if type(locked) is not bool:
+            raise ValueError("locked 必须是 bool")
+        if type(expected_lock_revision) is not int or expected_lock_revision < 0:
+            raise ValueError("expected_lock_revision 必须是非负整数")
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                row = self._conn.execute(
+                    """SELECT current_definition_version_id, lock_revision,
+                              definition_locked
+                       FROM glossary WHERE domain=? AND term=?""",
+                    (domain, term),
+                ).fetchone()
+                if row is None:
+                    raise ConceptNotFoundError(f"concept not found: {domain}/{term}")
+                if (
+                    row["current_definition_version_id"] != expected_current_version_id
+                    or int(row["lock_revision"]) != expected_lock_revision
+                ):
+                    raise ConceptConflictError("concept current version 或 lock revision 已变化")
+                if bool(row["definition_locked"]) == locked:
+                    self._conn.commit()
+                    return {
+                        "current_definition_version_id": expected_current_version_id,
+                        "lock_revision": expected_lock_revision,
+                        "locked": locked,
+                        "changed": False,
+                    }
+                cursor = self._conn.execute(
+                    """UPDATE glossary
+                       SET definition_locked=?, lock_revision=lock_revision+1,
+                           updated_at=?
+                       WHERE domain=? AND term=?
+                         AND current_definition_version_id=? AND lock_revision=?""",
+                    (
+                        1 if locked else 0,
+                        _now_iso(),
+                        domain,
+                        term,
+                        expected_current_version_id,
+                        expected_lock_revision,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ConceptConflictError("concept lock CAS 失败")
+                self._conn.commit()
+                return {
+                    "current_definition_version_id": expected_current_version_id,
+                    "lock_revision": expected_lock_revision + 1,
+                    "locked": locked,
+                    "changed": True,
+                }
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    def update_glossary_definition_cas(
+        self,
+        *,
+        domain: str,
+        term: str,
+        definition: str | None,
+        related: list | None,
+        expected_current_version_id: str | None,
+        expected_lock_revision: int | None,
+        actor: str,
+    ) -> dict:
+        """人工定义与 related 在同一事务追加版本并 CAS 切换。"""
+        if not actor.strip():
+            raise ValueError("actor 不能为空")
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                glossary = self._conn.execute(
+                    """SELECT definition, related, current_definition_version_id,
+                              lock_revision, definition_locked, status
+                       FROM glossary WHERE domain=? AND term=?""",
+                    (domain, term),
+                ).fetchone()
+                if glossary is None:
+                    raise ConceptNotFoundError(f"concept not found: {domain}/{term}")
+                related_json = (
+                    glossary["related"]
+                    if related is None
+                    else json.dumps(_norm_related(related), ensure_ascii=False)
+                )
+                if definition is None or str(glossary["definition"] or "") == definition:
+                    self._conn.execute(
+                        """UPDATE glossary SET related=?, updated_at=?
+                           WHERE domain=? AND term=?""",
+                        (related_json, _now_iso(), domain, term),
+                    )
+                    self._conn.commit()
+                    current = self._definition_row_locked(
+                        str(glossary["current_definition_version_id"])
+                    )
+                    if current is None:
+                        raise ConceptConflictError("concept current version 不存在")
+                    result = self._row_to_concept_definition_version(current)
+                    result["created"] = False
+                    return result
+                if glossary["status"] == "rejected":
+                    raise ConceptConflictError("rejected concept 不接受定义版本")
+                if (
+                    not isinstance(expected_current_version_id, str)
+                    or not expected_current_version_id
+                    or type(expected_lock_revision) is not int
+                    or expected_lock_revision < 0
+                ):
+                    raise ConceptConflictError(
+                        "definition 变更必须携带 current version 与 lock revision"
+                    )
+                if (
+                    glossary["current_definition_version_id"]
+                    != expected_current_version_id
+                    or int(glossary["lock_revision"]) != expected_lock_revision
+                ):
+                    raise ConceptConflictError("concept current version 或 lock revision 已变化")
+                if glossary["definition_locked"]:
+                    raise ConceptConflictError("concept definition 已锁定")
+                previous = self._definition_row_locked(expected_current_version_id)
+                if previous is None:
+                    raise ConceptConflictError("concept current version 不存在")
+                source_json, source_fingerprint = _concept_source_set([])
+                input_hash = hashlib.sha256(
+                    json.dumps(
+                        {"definition": definition, "strategy": "manual_edit"},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                now = _now_iso()
+                current = self._insert_definition_version_locked(
+                    domain=domain,
+                    term=term,
+                    definition=definition,
+                    source_evidence_ids_json=source_json,
+                    source_set_fingerprint=source_fingerprint,
+                    strategy="manual_edit",
+                    provider=None,
+                    model=None,
+                    prompt_hash=None,
+                    input_hash=input_hash,
+                    supersedes_version_id=expected_current_version_id,
+                    actor=actor,
+                    created_at=now,
+                )
+                cursor = self._conn.execute(
+                    """UPDATE glossary
+                       SET definition=?, related=?, current_definition_version_id=?,
+                           updated_at=?
+                       WHERE domain=? AND term=?
+                         AND current_definition_version_id=? AND lock_revision=?
+                         AND definition_locked=0""",
+                    (
+                        definition,
+                        related_json,
+                        current["definition_version_id"],
+                        now,
+                        domain,
+                        term,
+                        expected_current_version_id,
+                        expected_lock_revision,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ConceptConflictError("concept current pointer CAS 失败")
+                self._conn.commit()
+                result = self._row_to_concept_definition_version(current)
+                result["created"] = True
+                return result
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
     def upsert_glossary_term(
         self,
         domain: str,
@@ -2816,6 +3711,8 @@ class Database:
         definition: str = "",
         related: list | None = None,
         status: str = "accepted",
+        *,
+        create_only: bool = False,
     ) -> None:
         """写入/覆盖一条术语(手动维护入口):按 (domain, term) 幂等 upsert,
         保留已有 occurrences,覆盖 definition/related/status。
@@ -2823,25 +3720,102 @@ class Database:
         now = _now_iso()
         related_json = json.dumps(_norm_related(related), ensure_ascii=False)
         with self._lock:
-            row = self._conn.execute(
-                "SELECT created_at FROM glossary WHERE domain=? AND term=?",
-                (domain, term),
-            ).fetchone()
-            if row is None:
-                self._conn.execute(
-                    """INSERT INTO glossary
-                       (domain, term, definition, occurrences, related, status,
-                        created_at, updated_at)
-                       VALUES (?,?,?,?,?,?,?,?)""",
-                    (domain, term, definition, "[]", related_json, status, now, now),
-                )
-            else:
-                self._conn.execute(
-                    """UPDATE glossary SET definition=?, related=?, status=?,
-                       updated_at=? WHERE domain=? AND term=?""",
-                    (definition, related_json, status, now, domain, term),
-                )
-            self._conn.commit()
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                row = self._conn.execute(
+                    """SELECT created_at, definition, current_definition_version_id,
+                              definition_locked
+                       FROM glossary WHERE domain=? AND term=?""",
+                    (domain, term),
+                ).fetchone()
+                if row is None:
+                    current = self._create_initial_definition_locked(
+                        domain=domain,
+                        term=term,
+                        definition=definition,
+                        strategy="manual_upsert",
+                        actor="database:manual_upsert",
+                        created_at=now,
+                    )
+                    self._conn.execute(
+                        """INSERT INTO glossary
+                           (domain, term, definition, occurrences, related, status,
+                            created_at, updated_at, current_definition_version_id)
+                           VALUES (?,?,?,?,?,?,?,?,?)""",
+                        (
+                            domain,
+                            term,
+                            definition,
+                            "[]",
+                            related_json,
+                            status,
+                            now,
+                            now,
+                            current["definition_version_id"],
+                        ),
+                    )
+                elif create_only:
+                    raise ConceptConflictError(
+                        f"concept already exists: {domain}/{term}"
+                    )
+                elif str(row["definition"] or "") != definition:
+                    if row["definition_locked"]:
+                        raise ConceptConflictError("concept definition 已锁定")
+                    previous = self._definition_row_locked(
+                        str(row["current_definition_version_id"])
+                    )
+                    if previous is None:
+                        raise ConceptConflictError("concept current version 不存在")
+                    source_json, source_fingerprint = _concept_source_set([])
+                    input_hash = hashlib.sha256(
+                        json.dumps(
+                            {"definition": definition, "strategy": "manual_upsert"},
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    current = self._insert_definition_version_locked(
+                        domain=domain,
+                        term=term,
+                        definition=definition,
+                        source_evidence_ids_json=source_json,
+                        source_set_fingerprint=source_fingerprint,
+                        strategy="manual_upsert",
+                        provider=None,
+                        model=None,
+                        prompt_hash=None,
+                        input_hash=input_hash,
+                        supersedes_version_id=str(previous["definition_version_id"]),
+                        actor="database:manual_upsert",
+                        created_at=now,
+                    )
+                    self._conn.execute(
+                        """UPDATE glossary
+                           SET definition=?, current_definition_version_id=?, related=?,
+                               status=?, updated_at=?
+                           WHERE domain=? AND term=?""",
+                        (
+                            definition,
+                            current["definition_version_id"],
+                            related_json,
+                            status,
+                            now,
+                            domain,
+                            term,
+                        ),
+                    )
+                else:
+                    self._conn.execute(
+                        """UPDATE glossary SET related=?, status=?, updated_at=?
+                           WHERE domain=? AND term=?""",
+                        (related_json, status, now, domain, term),
+                    )
+                self._conn.commit()
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
 
     def add_glossary_suggestion(
         self,
@@ -2867,80 +3841,145 @@ class Database:
             return
         now = _now_iso()
         occ = {"job_id": job_id, "content_type": content_type, "location": location}
-        cols = "term, occurrences, definition, definition_locked, zh_name, aliases, status"
+        cols = (
+            "term, occurrences, definition, definition_locked, zh_name, aliases, "
+            "status, current_definition_version_id"
+        )
         with self._lock:
-            row = self._conn.execute(
-                f"SELECT {cols} FROM glossary WHERE domain=? AND term=?",
-                (domain, term),
-            ).fetchone()
-            if row is None:
-                # 归一匹配:域内行的 term/zh_name/aliases 归一键 vs 本建议的候选键。
-                idx_rows = [
-                    {"term": r["term"], "zh_name": r["zh_name"],
-                     "aliases": json.loads(r["aliases"] or "[]")}
-                    for r in self._conn.execute(
-                        "SELECT term, zh_name, aliases FROM glossary "
-                        "WHERE domain=? ORDER BY term", (domain,),
-                    ).fetchall()
-                ]
-                hit = resolve(idx_rows, term, zh_name or None)
-                if hit is not None:
-                    row = self._conn.execute(
-                        f"SELECT {cols} FROM glossary WHERE domain=? AND term=?",
-                        (domain, hit),
-                    ).fetchone()
-            if row is not None and row["status"] == "rejected":
-                return   # 已驳回的实体不再收 occurrence,也不改状态
-            if row is None:
-                p_term, p_zh, p_aliases = primary_fields(term, zh_name)
-                self._conn.execute(
-                    """INSERT INTO glossary
-                       (domain, term, definition, zh_name, aliases, occurrences, related,
-                        status, created_at, updated_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                    (domain, p_term, definition, p_zh,
-                     json.dumps(p_aliases, ensure_ascii=False),
-                     json.dumps([occ], ensure_ascii=False),
-                     "[]", "suggested", now, now),
-                )
-            else:
-                occs = json.loads(row["occurrences"] or "[]")
-                changed = False
-                if not any(o.get("job_id") == job_id for o in occs):
-                    occs.append(occ)
-                    changed = True
-                new_def = row["definition"]
-                # 候选定义补空:仅当本条还没定义且未钉住时填,不覆盖已有/已钉住。
-                if definition and not (row["definition"] or "").strip() \
-                        and not row["definition_locked"]:
-                    new_def = definition
-                    changed = True
-                # 译名同定义策略:仅补空,不覆盖已有(人工定准/先到先得)。
-                new_zh = row["zh_name"]
-                if zh_name and not (row["zh_name"] or "").strip():
-                    new_zh = zh_name
-                    changed = True
-                # 新变体名留痕进 aliases(与 term/zh_name 重复的不记)。
-                aliases = json.loads(row["aliases"] or "[]")
-                if term != row["term"] and term != (new_zh or "") and term not in aliases:
-                    aliases.append(term)
-                    changed = True
-                # 自动晋升:suggested 且 occurrence 覆盖 ≥2 个不同 job → accepted
-                # (跨内容复现 = 真概念的强信号;正文 term-link 高亮即时生效)。
-                new_status = row["status"]
-                if row["status"] == "suggested" \
-                        and len({o.get("job_id") for o in occs if o.get("job_id")}) >= 2:
-                    new_status = "accepted"
-                    changed = True
-                if changed:
-                    self._conn.execute(
-                        "UPDATE glossary SET occurrences=?, definition=?, zh_name=?, "
-                        "aliases=?, status=?, updated_at=? WHERE domain=? AND term=?",
-                        (json.dumps(occs, ensure_ascii=False), new_def, new_zh,
-                         json.dumps(aliases, ensure_ascii=False), new_status,
-                         now, domain, row["term"]),
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                row = self._conn.execute(
+                    f"SELECT {cols} FROM glossary WHERE domain=? AND term=?",
+                    (domain, term),
+                ).fetchone()
+                if row is None:
+                    idx_rows = [
+                        {"term": r["term"], "zh_name": r["zh_name"],
+                         "aliases": json.loads(r["aliases"] or "[]")}
+                        for r in self._conn.execute(
+                            "SELECT term, zh_name, aliases FROM glossary "
+                            "WHERE domain=? ORDER BY term", (domain,),
+                        ).fetchall()
+                    ]
+                    hit = resolve(idx_rows, term, zh_name or None)
+                    if hit is not None:
+                        row = self._conn.execute(
+                            f"SELECT {cols} FROM glossary WHERE domain=? AND term=?",
+                            (domain, hit),
+                        ).fetchone()
+                if row is not None and row["status"] == "rejected":
+                    self._conn.commit()
+                    return
+                if row is None:
+                    p_term, p_zh, p_aliases = primary_fields(term, zh_name)
+                    current = self._create_initial_definition_locked(
+                        domain=domain,
+                        term=p_term,
+                        definition=definition,
+                        strategy="pipeline_suggestion",
+                        actor="database:pipeline_suggestion",
+                        created_at=now,
                     )
-            self._conn.commit()
+                    self._conn.execute(
+                        """INSERT INTO glossary
+                           (domain, term, definition, zh_name, aliases, occurrences,
+                            related, status, created_at, updated_at,
+                            current_definition_version_id)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            domain,
+                            p_term,
+                            definition,
+                            p_zh,
+                            json.dumps(p_aliases, ensure_ascii=False),
+                            json.dumps([occ], ensure_ascii=False),
+                            "[]",
+                            "suggested",
+                            now,
+                            now,
+                            current["definition_version_id"],
+                        ),
+                    )
+                else:
+                    occs = json.loads(row["occurrences"] or "[]")
+                    changed = False
+                    if not any(o.get("job_id") == job_id for o in occs):
+                        occs.append(occ)
+                        changed = True
+                    new_def = row["definition"]
+                    if definition and not (row["definition"] or "").strip() \
+                            and not row["definition_locked"]:
+                        new_def = definition
+                        changed = True
+                    new_zh = row["zh_name"]
+                    if zh_name and not (row["zh_name"] or "").strip():
+                        new_zh = zh_name
+                        changed = True
+                    aliases = json.loads(row["aliases"] or "[]")
+                    if term != row["term"] and term != (new_zh or "") and term not in aliases:
+                        aliases.append(term)
+                        changed = True
+                    new_status = row["status"]
+                    if row["status"] == "suggested" \
+                            and len({o.get("job_id") for o in occs if o.get("job_id")}) >= 2:
+                        new_status = "accepted"
+                        changed = True
+                    current_id = row["current_definition_version_id"]
+                    if str(new_def or "") != str(row["definition"] or ""):
+                        previous = self._definition_row_locked(str(current_id))
+                        if previous is None:
+                            raise ConceptConflictError("concept current version 不存在")
+                        input_hash = hashlib.sha256(
+                            json.dumps(
+                                {
+                                    "definition": new_def,
+                                    "job_id": job_id,
+                                    "strategy": "pipeline_suggestion",
+                                },
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode("utf-8")
+                        ).hexdigest()
+                        version = self._insert_definition_version_locked(
+                            domain=domain,
+                            term=str(row["term"]),
+                            definition=str(new_def or ""),
+                            source_evidence_ids_json=previous["source_evidence_ids_json"],
+                            source_set_fingerprint=previous["source_set_fingerprint"],
+                            strategy="pipeline_suggestion",
+                            provider=None,
+                            model=None,
+                            prompt_hash=None,
+                            input_hash=input_hash,
+                            supersedes_version_id=str(current_id),
+                            actor="database:pipeline_suggestion",
+                            created_at=now,
+                        )
+                        current_id = version["definition_version_id"]
+                    if changed:
+                        self._conn.execute(
+                            """UPDATE glossary
+                               SET occurrences=?, definition=?,
+                                   current_definition_version_id=?, zh_name=?, aliases=?,
+                                   status=?, updated_at=? WHERE domain=? AND term=?""",
+                            (
+                                json.dumps(occs, ensure_ascii=False),
+                                new_def,
+                                current_id,
+                                new_zh,
+                                json.dumps(aliases, ensure_ascii=False),
+                                new_status,
+                                now,
+                                domain,
+                                row["term"],
+                            ),
+                        )
+                self._conn.commit()
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
 
     _STATUS_RANK = {"accepted": 2, "suggested": 1, "rejected": 0}
 
@@ -3031,9 +4070,68 @@ class Database:
                 now = self._study_suggestion_monotonic_now_locked(
                     affected_batches, _now_iso()
                 ).isoformat()
+                src_version = self._definition_row_locked(
+                    str(s["current_definition_version_id"])
+                )
+                dst_version = self._definition_row_locked(
+                    str(d["current_definition_version_id"])
+                )
+                if src_version is None or dst_version is None:
+                    raise ConceptConflictError("merge concept current version 不存在")
+                self._conn.execute(
+                    """INSERT OR IGNORE INTO concept_occurrences
+                       (domain, term, job_id, evidence_id, created_at)
+                       SELECT domain, ?, job_id, evidence_id, created_at
+                       FROM concept_occurrences
+                       WHERE domain=? AND term=?""",
+                    (dst_term, domain, src_term),
+                )
+                merge_evidence_ids = [
+                    str(row["evidence_id"])
+                    for row in self._conn.execute(
+                        """SELECT o.evidence_id
+                           FROM concept_occurrences o
+                           JOIN canonical_evidence c ON c.evidence_id=o.evidence_id
+                           WHERE o.domain=? AND o.term=? AND c.status='valid'
+                           ORDER BY o.evidence_id""",
+                        (domain, dst_term),
+                    ).fetchall()
+                ]
+                source_json, source_fingerprint = _concept_source_set(
+                    merge_evidence_ids
+                )
+                merge_input_hash = hashlib.sha256(
+                    json.dumps(
+                        {
+                            "source_version": src_version["definition_version_id"],
+                            "target_version": dst_version["definition_version_id"],
+                            "definition": definition,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                merged_version = self._insert_definition_version_locked(
+                    domain=domain,
+                    term=dst_term,
+                    definition=definition,
+                    source_evidence_ids_json=source_json,
+                    source_set_fingerprint=source_fingerprint,
+                    strategy="concept_merge",
+                    provider=None,
+                    model=None,
+                    prompt_hash=None,
+                    input_hash=merge_input_hash,
+                    supersedes_version_id=str(dst_version["definition_version_id"]),
+                    actor="database:concept_merge",
+                    created_at=now,
+                )
                 self._conn.execute(
                     """UPDATE glossary SET definition=?, zh_name=?, aliases=?, occurrences=?,
-                       related=?, status=?, is_topic=?, definition_locked=?, updated_at=?
+                       related=?, status=?, is_topic=?, definition_locked=?,
+                       current_definition_version_id=?, lock_revision=lock_revision+1,
+                       updated_at=?
                        WHERE domain=? AND term=?""",
                     (
                         definition,
@@ -3044,6 +4142,7 @@ class Database:
                         status,
                         1 if (d["is_topic"] or s["is_topic"]) else 0,
                         1 if (d["definition_locked"] or s["definition_locked"]) else 0,
+                        merged_version["definition_version_id"],
                         now,
                         domain,
                         dst_term,
@@ -3616,6 +4715,57 @@ class Database:
             for row in rows
             for evidence_id in _canonical_ids_from_evidence_json(row["evidence_json"])
         ))
+
+    def canonical_evidence_ids_for_source_segments(
+        self,
+        *,
+        job_id: str,
+        note_type: str,
+        source_segment_ids: list[str],
+    ) -> dict[str, list[str]]:
+        """把 source segment 映到当前 note snapshot 的 canonical IDs。"""
+        if (
+            not isinstance(source_segment_ids, list)
+            or len(source_segment_ids) > 500
+            or any(
+                not isinstance(item, str) or not item.strip()
+                for item in source_segment_ids
+            )
+        ):
+            raise ValueError("source_segment_ids 必须是至多 500 个非空字符串")
+        normalized_segments = list(dict.fromkeys(source_segment_ids))
+        if not normalized_segments:
+            return {}
+        result = {segment_id: [] for segment_id in normalized_segments}
+        with self._lock:
+            chunk_rows = self._conn.execute(
+                """SELECT evidence_json FROM note_chunks
+                   WHERE job_id=? AND note_type=? ORDER BY chunk_id""",
+                (job_id, note_type),
+            ).fetchall()
+            current_ids = list(dict.fromkeys(
+                evidence_id
+                for row in chunk_rows
+                for evidence_id in _canonical_ids_from_evidence_json(
+                    row["evidence_json"]
+                )
+            ))
+            if not current_ids:
+                return result
+            id_placeholders = ",".join("?" for _ in current_ids)
+            segment_placeholders = ",".join("?" for _ in normalized_segments)
+            rows = self._conn.execute(
+                f"""SELECT evidence_id, source_segment_id
+                    FROM canonical_evidence
+                    WHERE job_id=? AND note_type=? AND status='valid'
+                      AND evidence_id IN ({id_placeholders})
+                      AND source_segment_id IN ({segment_placeholders})
+                    ORDER BY source_segment_id, evidence_id""",
+                (job_id, note_type, *current_ids, *normalized_segments),
+            ).fetchall()
+        for row in rows:
+            result[str(row["source_segment_id"])].append(str(row["evidence_id"]))
+        return result
 
     def canonical_evidence_ids_for_notes(
         self, refs: list[tuple[str, str]],
@@ -6335,8 +7485,36 @@ class Database:
             "watched": bool(row["watched"] if "watched" in row.keys() else 0),
             "is_topic": bool(row["is_topic"]),
             "definition_locked": bool(row["definition_locked"]),
+            "current_definition_version_id": (
+                row["current_definition_version_id"]
+                if "current_definition_version_id" in row.keys()
+                else None
+            ),
+            "lock_revision": int(
+                row["lock_revision"] if "lock_revision" in row.keys() else 0
+            ),
             "created_at": _parse_dt(row["created_at"]),
             "updated_at": _parse_dt(row["updated_at"]),
+        }
+
+    @staticmethod
+    def _row_to_concept_definition_version(row: sqlite3.Row) -> dict:
+        return {
+            "definition_version_id": row["definition_version_id"],
+            "domain": row["domain"],
+            "term": row["term"],
+            "version": int(row["version"]),
+            "definition": row["definition"],
+            "source_evidence_ids": json.loads(row["source_evidence_ids_json"]),
+            "source_set_fingerprint": row["source_set_fingerprint"],
+            "strategy": row["strategy"],
+            "provider": row["provider"],
+            "model": row["model"],
+            "prompt_hash": row["prompt_hash"],
+            "input_hash": row["input_hash"],
+            "supersedes_version_id": row["supersedes_version_id"],
+            "actor": row["actor"],
+            "created_at": _parse_dt(row["created_at"]),
         }
 
     def _row_to_job(self, row: sqlite3.Row) -> Job:

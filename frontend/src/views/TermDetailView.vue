@@ -1,28 +1,29 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useDomainStore } from '../stores/domains'
 import { useApi } from '../composables/useApi'
+import { useConceptDefinition } from '../composables/useConceptDefinition'
+import ConceptDefinitionPanel from '../components/concept/ConceptDefinitionPanel.vue'
 import { contentTypeIcon, contentTypePill, contentTypeLabel } from '../utils/contentType'
-import type { TermOccurrence, GlossaryTerm } from '../types'
+import type { TermOccurrence } from '../types'
 import {
-  Lightbulb, Bookmark, Check, FileText, Link, MapPin, ChevronRight, Star,
+  Lightbulb, Bookmark, Check, Link, MapPin, ChevronRight, Star,
 } from 'lucide-vue-next'
 
-// 概念详情页:定义 / 关联概念 / 出现处反查。
-// 返回形状见 api/schemas.py GlossaryTermResponse,以后端为准。
+// 概念详情页:定义版本 / 关联概念 / 出现处反查.
+// 返回形状见 api/schemas.py ConceptTermDetailResponse,以后端为准.
 const route = useRoute()
 const router = useRouter()
-const store = useDomainStore()
 const api = useApi()
 
 const domain = computed(() => String(route.params.domain))
 const term = computed(() => String(route.params.term))
 
-const data = ref<GlossaryTerm | null>(null)
-const loading = ref(false)
-const notFound = ref(false)
-const error = ref('')
+const concept = useConceptDefinition(domain, term)
+const data = concept.detail
+const loading = concept.loading
+const notFound = concept.notFound
+const error = concept.error
 const toggling = ref(false)
 
 import type { RelatedEdge } from '../types'
@@ -33,31 +34,16 @@ const aliases = computed<string[]>(() => (Array.isArray(data.value?.aliases) ? d
 const occurrences = computed<TermOccurrence[]>(() => (Array.isArray(data.value?.occurrences) ? data.value!.occurrences : []))
 const isTopic = computed<boolean>(() => data.value?.is_topic === true)
 
-async function load() {
-  loading.value = true
-  notFound.value = false
-  error.value = ''
-  data.value = null
-  try {
-    data.value = await store.term(domain.value, term.value)
-  } catch (e: any) {
-    const msg = String(e?.message ?? '')
-    if (msg.includes('404')) notFound.value = true
-    else error.value = msg || '加载失败'
-  } finally {
-    loading.value = false
-  }
-}
-
 // 标为主题 / 取消主题:POST /api/glossary/{domain}/{term}/topic,用返回的概念刷新本页。
 async function toggleTopic() {
   if (!data.value || toggling.value) return
   toggling.value = true
   try {
-    data.value = await api.post<GlossaryTerm>(
+    await api.post(
       `/api/glossary/${encodeURIComponent(domain.value)}/${encodeURIComponent(term.value)}/topic`,
       { is_topic: !isTopic.value },
     )
+    await concept.load()
   } catch {
     // 失败保持原状态,按钮可重试。
   } finally {
@@ -71,10 +57,11 @@ async function toggleWatch() {
   if (!data.value || watching.value) return
   watching.value = true
   try {
-    data.value = await api.post<GlossaryTerm>(
+    await api.post(
       `/api/glossary/${encodeURIComponent(domain.value)}/${encodeURIComponent(term.value)}/watch`,
       { watched: !data.value.watched },
     )
+    await concept.load()
   } catch {
     // 失败保持原状态,按钮可重试。
   } finally {
@@ -91,8 +78,6 @@ function goRelated(name: string) {
 function goJob(jobId: string) {
   router.push(`/content/${encodeURIComponent(jobId)}`)
 }
-onMounted(load)
-watch(() => [route.params.domain, route.params.term], load)
 </script>
 
 <template>
@@ -106,7 +91,7 @@ watch(() => [route.params.domain, route.params.term], load)
     <!-- 错误态 -->
     <div v-else-if="error && !data" class="card pad" style="text-align:center">
       <p class="muted" style="margin-bottom:12px">{{ error }}</p>
-      <button class="btn" @click="load">重试</button>
+      <button class="btn" @click="concept.load">重试</button>
     </div>
 
     <!-- 加载态 -->
@@ -131,7 +116,7 @@ watch(() => [route.params.domain, route.params.term], load)
             </div>
             <div class="lead">
               <a class="term-link" @click="goDomain">{{ data.domain }}</a>
-              · {{ occurrences.length }} 处出现 · {{ related.length }} 个关联
+              · {{ data.occurrence_total }} 处出现 · {{ related.length }} 个关联
               <template v-if="aliases.length"> · 别名：{{ aliases.join('、') }}</template>
             </div>
           </div>
@@ -152,9 +137,7 @@ watch(() => [route.params.domain, route.params.term], load)
 
       <!-- 定义 -->
       <div class="card pad" style="margin-bottom:16px">
-        <div class="card-h"><FileText :size="15" />定义</div>
-        <p v-if="data.definition" style="color:var(--ink-700);line-height:1.6;white-space:pre-wrap">{{ data.definition }}</p>
-        <p v-else class="muted">暂无定义</p>
+        <ConceptDefinitionPanel :controller="concept" />
       </div>
 
       <!-- 关联概念 -->
@@ -170,7 +153,7 @@ watch(() => [route.params.domain, route.params.term], load)
 
       <!-- 出现处反查 -->
       <div class="card pad">
-        <div class="card-h"><MapPin :size="15" />出现处 · {{ occurrences.length }}</div>
+        <div class="card-h"><MapPin :size="15" />出现处 · {{ data.occurrence_total }}</div>
         <template v-if="occurrences.length">
           <div v-for="o in occurrences" :key="o.job_id + (o.location || '')" class="occ" @click="goJob(o.job_id)">
             <span class="type-pill" :class="contentTypePill(o.content_type)" style="width:28px;height:28px">

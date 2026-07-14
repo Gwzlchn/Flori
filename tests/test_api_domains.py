@@ -184,6 +184,7 @@ class TestDomainRename:
             "study_suggestion_batches": 0,
             "study_suggestions": 0,
             "study_suggestion_evidence": 0,
+            "concept_definition_versions": 1,
         }
         names = [d["domain"] for d in (await client.get("/api/domains")).json()["domains"]]
         assert "investing" in names and "finance" not in names

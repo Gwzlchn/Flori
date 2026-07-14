@@ -66,6 +66,45 @@ def test_article_paper_source_priority(tmp_path, pipeline):
     assert smart._resolve_concept_source().kind == "smart_note"
 
 
+@pytest.mark.parametrize(
+    ("pipeline", "fixture", "expected_kind", "expected_note_type", "expected_path"),
+    [
+        ("video", "smart", "smart_note", "smart", "output/versions/notes_smart_"),
+        ("audio", "smart", "smart_note", "smart", "output/versions/notes_smart_"),
+        ("article", "original", "original", "original", "output/original.md"),
+        ("paper", "translated", "translation", "translated", "output/translated.md"),
+    ],
+)
+def test_four_pipelines_record_selected_note_identity(
+    tmp_path, monkeypatch, pipeline, fixture, expected_kind, expected_note_type, expected_path,
+):
+    job = _job(tmp_path, pipeline)
+    if fixture == "smart":
+        _smart(job)
+    elif fixture == "translated":
+        (job / "output/translated.md").write_text("TRANSLATED", encoding="utf-8")
+    else:
+        (job / "output/original.md").write_text("ORIGINAL", encoding="utf-8")
+    cfg = make_step_config(tmp_path, step_name="05_concepts", pool="ai", pipeline=pipeline)
+    step = ArticleConceptsStep("05_concepts", job, cfg)
+
+    source = step._resolve_concept_source()
+    monkeypatch.setattr(
+        step.ai,
+        "call_json",
+        lambda *args, **kwargs: ({"summary": "s", "key_terms": [{"term": "T"}]}, False),
+    )
+    result = step.execute()
+    output = json.loads((job / "output/concepts.json").read_text(encoding="utf-8"))
+
+    assert source.kind == expected_kind
+    assert source.note_type == expected_note_type
+    assert source.path.startswith(expected_path)
+    assert result["evidence_note_type"] == expected_note_type
+    assert output["evidence_note_type"] == expected_note_type
+    assert output["key_terms"][0]["evidence_source_segment_ids"] == []
+
+
 def test_concepts_validate_hash_execute_share_one_source_snapshot(tmp_path, monkeypatch):
     job = _job(tmp_path, "video")
     path = _smart(job, "FIRST SMART")

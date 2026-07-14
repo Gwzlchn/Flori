@@ -6,6 +6,7 @@ import asyncio
 import fnmatch
 import json
 import os
+import re
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -100,6 +101,14 @@ class Scheduler:
         self._delayed_tasks: set[asyncio.Task] = set()
         # 自动周报结果收割任务(fire-and-forget,done 自摘,防 GC 早收)。
         self._digest_harvest_tasks: set[asyncio.Task] = set()
+        # 概念重综合不阻塞 job 终态；同一概念只保留一个在途调用，避免 concepts/review
+        # 连续完成时重复消耗 provider。
+        self._concept_synthesis_tasks: dict[tuple[str, str], asyncio.Task] = {}
+        # 在途期间的新 completion 合并为一次 latest rerun；review 可能让原先
+        # no_quorum 的概念变得可综合，不能静默吞掉这次状态变化。
+        self._concept_synthesis_pending: dict[
+            tuple[str, str], tuple[str, int]
+        ] = {}
         # job_id -> 首次被判定"无 worker 可推进"的时刻,超宽限期才 fail-fast(容忍 worker 重启)。
         self._no_worker_since: dict[str, float] = {}
         # (job_id, step) -> 首次发现"在跑步骤的 worker 上报的 current_step 不是本步"的时刻,
@@ -149,6 +158,11 @@ class Scheduler:
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()
         pending = [t for t in self._delayed_tasks if not t.done()]
+        pending.extend(
+            task for task in self._concept_synthesis_tasks.values()
+            if not task.done()
+        )
+        self._concept_synthesis_pending.clear()
         for t in pending:
             t.cancel()
         if pending:
@@ -1058,6 +1072,23 @@ class Scheduler:
         主喂养源是评审"讲清楚了什么"一节;missing_concepts(知识缺口)只留评审面板,不喂术语库。
         采集源:优先 output/concepts.json(article 链的独立概念步,必跑),回退 output/review.json
         (video/paper/audio 由评审步出 key_terms)。"""
+        job = await asyncio.to_thread(self.db.get_job, job_id)
+        domain = (job.domain if job else "") or "general"
+
+        async def reconcile_empty(reason: str) -> None:
+            await asyncio.to_thread(
+                self.db.replace_job_concept_occurrences,
+                domain=domain,
+                job_id=job_id,
+                mapping={},
+            )
+            logger.info(
+                "concept_occurrences_reconciled",
+                job_id=job_id,
+                count=0,
+                reason=reason,
+            )
+
         data = await self.storage.read_file(job_id, "output/concepts.json")
         from_review = False
         if not data:
@@ -1066,12 +1097,16 @@ class Scheduler:
             )
             from_review = bool(data)
         if not data:
+            await reconcile_empty("source_missing")
             return
         try:
             review = json.loads(data.decode("utf-8", errors="replace"))
         except (json.JSONDecodeError, ValueError):
+            await reconcile_empty("source_invalid")
             return
-        job = await asyncio.to_thread(self.db.get_job, job_id)
+        if not isinstance(review, dict):
+            await reconcile_empty("source_invalid")
+            return
         # 旧版/抢救/截断评审只供诊断,不能沉淀术语或关系边。
         if from_review:
             async def reader(rel: str) -> bytes | None:
@@ -1084,11 +1119,12 @@ class Scheduler:
             if review.get("review_reliable") is not True:
                 logger.info("glossary_review_rejected", job_id=job_id,
                             reasons=review.get("reliability_reasons") or ["legacy_schema"])
+                await reconcile_empty("review_unreliable")
                 return
         key_terms = review.get("key_terms") or []
-        if not isinstance(key_terms, list) or not key_terms:
+        if not isinstance(key_terms, list):
+            await reconcile_empty("key_terms_invalid")
             return
-        domain = (job.domain if job else "") or "general"
         content_type = job.content_type if job else ""
         collected = 0
         with_related: list[tuple[str, str, list]] = []   # (term, zh_name, related)
@@ -1113,7 +1149,20 @@ class Scheduler:
             edges = await asyncio.to_thread(
                 self._write_concept_relations, domain, with_related,
             )
+        occurrences, synthesis_candidates = await asyncio.to_thread(
+            self._replace_concept_occurrences,
+            domain,
+            job_id,
+            key_terms,
+            None if from_review else review.get("evidence_note_type"),
+        )
+        self._schedule_concept_resynthesis(domain, synthesis_candidates)
         logger.info("glossary_collected", job_id=job_id, count=collected, edges=edges)
+        logger.info(
+            "concept_occurrences_reconciled",
+            job_id=job_id,
+            count=occurrences,
+        )
 
     async def _read_verification_artifact(
         self, job_id: str, rel: str,
@@ -1147,6 +1196,181 @@ class Scheduler:
             if rels:
                 added += self.db.add_glossary_relations(domain, src, rels)
         return added
+
+    def _replace_concept_occurrences(
+        self,
+        domain: str,
+        job_id: str,
+        key_terms: list,
+        evidence_note_type: object,
+    ) -> tuple[int, list[tuple[str, str, int]]]:
+        """把 producer 的来源段引用映射为当前 canonical IDs 后全量对账。"""
+        from shared.concepts import resolve
+
+        note_type = evidence_note_type if (
+            isinstance(evidence_note_type, str)
+            and evidence_note_type in {"smart", "translated", "original"}
+        ) else None
+        requested_ids: list[str] = []
+        if note_type:
+            for item in key_terms:
+                if not isinstance(item, dict):
+                    continue
+                refs = item.get("evidence_source_segment_ids")
+                if not isinstance(refs, list):
+                    continue
+                for ref in refs:
+                    if (
+                        isinstance(ref, str)
+                        and re.fullmatch(r"seg_[0-9a-f]{64}", ref)
+                        and ref not in requested_ids
+                    ):
+                        requested_ids.append(ref)
+
+        canonical_by_segment = (
+            self.db.canonical_evidence_ids_for_source_segments(
+                job_id=job_id,
+                note_type=note_type,
+                source_segment_ids=requested_ids,
+            )
+            if note_type and requested_ids else {}
+        )
+        glossary_rows = self.db.list_glossary(domain)
+        rows = [
+            {
+                "term": row["term"],
+                "zh_name": row.get("zh_name") or "",
+                "aliases": row.get("aliases") or [],
+            }
+            for row in glossary_rows
+        ]
+        mapping: dict[str, list[str]] = {}
+        for item in key_terms:
+            if not isinstance(item, dict):
+                continue
+            term = item.get("term")
+            if not isinstance(term, str) or not term.strip():
+                continue
+            zh_name = item.get("zh_name")
+            resolved = resolve(
+                rows,
+                term,
+                zh_name if isinstance(zh_name, str) else None,
+            )
+            if resolved is None:
+                continue
+            refs = item.get("evidence_source_segment_ids")
+            if not isinstance(refs, list):
+                continue
+            evidence_ids = mapping.setdefault(resolved, [])
+            for ref in refs:
+                for evidence_id in canonical_by_segment.get(ref, []):
+                    if isinstance(evidence_id, str) and evidence_id not in evidence_ids:
+                        evidence_ids.append(evidence_id)
+            if not evidence_ids:
+                mapping.pop(resolved, None)
+
+        self.db.replace_job_concept_occurrences(
+            domain=domain,
+            job_id=job_id,
+            mapping=mapping,
+        )
+        rows_by_term = {row["term"]: row for row in glossary_rows}
+        candidates: list[tuple[str, str, int]] = []
+        for term in sorted(mapping):
+            row = rows_by_term.get(term) or {}
+            current_id = row.get("current_definition_version_id")
+            if (
+                isinstance(current_id, str)
+                and current_id
+                and not row.get("definition_locked")
+            ):
+                candidates.append((term, current_id, int(row.get("lock_revision") or 0)))
+        return (
+            sum(len(evidence_ids) for evidence_ids in mapping.values()),
+            candidates,
+        )
+
+    def _schedule_concept_resynthesis(
+        self,
+        domain: str,
+        candidates: list[tuple[str, str, int]],
+    ) -> None:
+        """异步触发概念综合；失败只记日志，不反向阻塞 pipeline 完成。"""
+        for term, current_id, lock_revision in candidates:
+            key = (domain, term)
+            previous = self._concept_synthesis_tasks.get(key)
+            if previous is not None and not previous.done():
+                self._concept_synthesis_pending[key] = (current_id, lock_revision)
+                continue
+            task = asyncio.create_task(
+                self._auto_resynthesize_concept(
+                    domain,
+                    term,
+                    current_id,
+                    lock_revision,
+                ),
+                name=f"concept_resynthesis:{domain}:{term}",
+            )
+            self._concept_synthesis_tasks[key] = task
+            task.add_done_callback(
+                lambda finished, task_key=key: self._on_concept_synthesis_done(
+                    task_key, finished,
+                )
+            )
+
+    def _on_concept_synthesis_done(
+        self,
+        key: tuple[str, str],
+        task: asyncio.Task,
+    ) -> None:
+        if self._concept_synthesis_tasks.get(key) is task:
+            self._concept_synthesis_tasks.pop(key, None)
+            pending = self._concept_synthesis_pending.pop(key, None)
+            if pending is not None and not self._shutdown:
+                current_id, lock_revision = pending
+                self._schedule_concept_resynthesis(
+                    key[0], [(key[1], current_id, lock_revision)]
+                )
+
+    async def _auto_resynthesize_concept(
+        self,
+        domain: str,
+        term: str,
+        current_id: str,
+        lock_revision: int,
+    ) -> None:
+        """用对账时的 CAS 快照尝试重综合；并发编辑由服务层拒绝。"""
+        try:
+            from api.services.concepts import maybe_resynthesize_concept
+
+            result = await maybe_resynthesize_concept(
+                self.db,
+                self.storage,
+                self.config,
+                domain,
+                term,
+                expected_current_version_id=current_id,
+                expected_lock_revision=lock_revision,
+                actor="scheduler:auto",
+                strategy="automatic_resynthesis",
+            )
+            logger.info(
+                "concept_resynthesis_finished",
+                domain=domain,
+                term=term,
+                created=bool(result.get("created")),
+                reason=result.get("reason"),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "concept_resynthesis_failed",
+                domain=domain,
+                term=term,
+                exc_info=True,
+            )
 
     async def on_step_failed(
         self,
