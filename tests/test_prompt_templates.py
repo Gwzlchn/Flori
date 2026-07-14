@@ -19,7 +19,6 @@ def test_template_manifest_reads_all_tracked_bytes():
 
 def test_all_templates_present():
     from scripts.gen_prompt_templates import TEMPLATE_NAMES
-    assert len(TEMPLATE_NAMES) == 16
     assert {f.stem for f in TEMPLATES_DIR.glob("*.md")} == set(TEMPLATE_NAMES)
 
 

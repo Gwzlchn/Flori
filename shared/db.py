@@ -15,7 +15,7 @@ import struct
 import sys
 import tempfile
 import threading
-import time
+import time as _time
 import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -509,7 +509,7 @@ def _committed_wal_user_version(path: Path) -> int:
                 last_change = exc
                 if attempt < 2:
                     # 正常写事务会短暂改动 WAL；退避后仍须取得稳定副本，否则 fail-closed。
-                    time.sleep(0.01 * (attempt + 1))
+                    _time.sleep(0.01 * (attempt + 1))
                 continue
         raise UnsupportedSchemaVersionError(
             "SQLite DB/WAL 无法取得稳定副本，拒绝写性打开"
