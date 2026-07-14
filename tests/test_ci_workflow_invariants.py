@@ -112,7 +112,7 @@ def test_unit_shards_and_real_integration_use_the_single_test_entrypoint() -> No
     assert "bash scripts/test.sh --ci-worker" in worker
     assert '"$CI_WORKER_SPLITS"' in worker
     assert "docker compose" not in normal + worker
-    assert integration["timeout-minutes"] <= 3
+    assert integration["timeout-minutes"] == 5
     assert integration_run == "bash scripts/test.sh --integration"
     assert integration["env"]["TEST_WARM_NAME"].startswith("flori-ci-")
 

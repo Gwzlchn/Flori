@@ -146,7 +146,8 @@ jobs:
       group: ci-${{ github.event.pull_request.number || github.ref }}-integration
       cancel-in-progress: true
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    # Job timeout covers test-image load and cold dependency pulls as well as the gate itself.
+    timeout-minutes: 5
     permissions:
       contents: read
       packages: write
