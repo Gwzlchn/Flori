@@ -21,6 +21,8 @@ services:
       - ./configs:/app/configs
       # 变异分数驱动(scripts/mutation_score.py;mutation.yml 调用)
       - ./scripts:/app/scripts
+      # selected OpenAPI 快照与 manifest 由后端契约测试直接校验。
+      - ./frontend:/app/frontend
       # CI/workflow 结构不变量测试只读解析 workflow,不向容器写入.
       - ./.github:/app/.github:ro
       # 部署配置不变量测试解析 Compose/logging/healthcheck,全部只读挂载.

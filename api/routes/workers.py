@@ -23,8 +23,19 @@ from shared.status import (
 )
 from api.deps import get_config, get_db, get_redis, verify_token
 from api.schemas import WorkerConfigRequest, WorkerResponse, WorkerUpdateRequest
+from api.wire_schemas import (
+    API_ERROR_RESPONSES,
+    WorkerConfigResponse,
+    WorkerRegistrationStatusResponse,
+    WorkerRegistrationTokenResponse,
+    WorkerTaskResponse,
+    WorkerUpdatedResponse,
+)
 
-router = APIRouter(prefix="/api/workers", tags=["workers"], dependencies=[Depends(verify_token)])
+router = APIRouter(
+    prefix="/api/workers", tags=["workers"], dependencies=[Depends(verify_token)],
+    responses=API_ERROR_RESPONSES,
+)
 
 
 def _windows(config: AppConfig) -> tuple[int, int]:
@@ -212,7 +223,7 @@ async def merged_worker_responses(
     return list(by_id.values())
 
 
-@router.get("")
+@router.get("", response_model=list[WorkerResponse])
 async def list_workers(
     db: Database = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
@@ -221,7 +232,7 @@ async def list_workers(
     return await merged_worker_responses(db, redis, config)
 
 
-@router.post("/registration-token")
+@router.post("/registration-token", response_model=WorkerRegistrationTokenResponse)
 async def mint_registration_token(redis: RedisClient = Depends(get_redis)):
     """铸/重置接入 token,重铸即作废旧的。默认 24h 过期,泄漏自动失效;
     长期接入用 env WORKER_REGISTRATION_TOKEN。TTL 可经 REGISTRATION_TOKEN_TTL_SEC 调。"""
@@ -231,7 +242,7 @@ async def mint_registration_token(redis: RedisClient = Depends(get_redis)):
     return {"token": token, "expires_in_sec": ttl}
 
 
-@router.get("/registration-token")
+@router.get("/registration-token", response_model=WorkerRegistrationStatusResponse)
 async def registration_token_status(redis: RedisClient = Depends(get_redis)):
     """接入 token 状态(不回明文):是否已铸 + 剩余有效秒。注:env WORKER_REGISTRATION_TOKEN
     配的长期 token 不经 redis,不在此反映。须置于 GET /{worker_id} 之前,否则被路径参数路由遮蔽。"""
@@ -240,7 +251,7 @@ async def registration_token_status(redis: RedisClient = Depends(get_redis)):
     return {"exists": bool(tok), "expires_in_sec": (ttl if ttl and ttl > 0 else None)}
 
 
-@router.get("/{worker_id}")
+@router.get("/{worker_id}", response_model=WorkerResponse)
 async def get_worker(
     worker_id: str,
     db: Database = Depends(get_db),
@@ -277,7 +288,7 @@ async def get_worker(
     return resp
 
 
-@router.get("/{worker_id}/tasks")
+@router.get("/{worker_id}/tasks", response_model=list[WorkerTaskResponse])
 async def list_worker_tasks(
     worker_id: str,
     limit: int = Query(50, ge=1, le=200),
@@ -304,7 +315,7 @@ async def list_worker_tasks(
     ]
 
 
-@router.put("/{worker_id}/config")
+@router.put("/{worker_id}/config", response_model=WorkerConfigResponse)
 async def set_worker_config(
     worker_id: str,
     req: WorkerConfigRequest,
@@ -333,7 +344,7 @@ async def set_worker_config(
     return {"cfg_rev": rev, "desired_config": cfg}
 
 
-@router.put("/{worker_id}")
+@router.put("/{worker_id}", response_model=WorkerUpdatedResponse)
 async def update_worker(
     worker_id: str,
     req: WorkerUpdateRequest,

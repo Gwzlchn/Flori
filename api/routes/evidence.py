@@ -17,6 +17,7 @@ from api.services.evidence import (
     resolve_canonical_evidence,
     resolve_canonical_evidence_batch,
 )
+from api.wire_schemas import API_ERROR_RESPONSES
 from shared.db import Database
 from shared.storage import StorageBackend
 
@@ -25,6 +26,7 @@ router = APIRouter(
     prefix="/api/evidence",
     tags=["evidence"],
     dependencies=[Depends(verify_token)],
+    responses=API_ERROR_RESPONSES,
 )
 
 

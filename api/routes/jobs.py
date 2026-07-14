@@ -42,12 +42,31 @@ from api.schemas import (
     JobDetailResponse,
     JobListResponse,
     JobResponse,
+    GlossaryTermResponse,
     RerunRequest,
     RerunSmartRequest,
     StepResponse,
 )
+from api.wire_schemas import (
+    API_ERROR_RESPONSES,
+    AiLogsResponse,
+    JobConceptResponse,
+    JobCreatedResponse,
+    JobFacetsResponse,
+    JobRebuildResponse,
+    JobRerunResponse,
+    JobRerunSmartResponse,
+    JobStatusResponse,
+    JobUsageResponse,
+    JobsRebuiltResponse,
+    JobsRetriedResponse,
+    LineageVersionsResponse,
+)
 
-router = APIRouter(prefix="/api/jobs", tags=["jobs"], dependencies=[Depends(verify_token)])
+router = APIRouter(
+    prefix="/api/jobs", tags=["jobs"], dependencies=[Depends(verify_token)],
+    responses=API_ERROR_RESPONSES,
+)
 
 # 同模块第二个路由:/api/providers(不能挂在 /api/jobs 下,否则被 /{job_id} 截胡)。
 providers_router = APIRouter(prefix="/api/providers", tags=["providers"],
@@ -272,7 +291,7 @@ async def create_job_snapshot(
     return job
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, response_model=JobCreatedResponse)
 async def create_job(
     req: JobCreateRequest,
     db: Database = Depends(get_db),
@@ -295,7 +314,7 @@ async def create_job(
             "status": "pending", "created_at": job.created_at.isoformat()}
 
 
-@router.post("/upload", status_code=201)
+@router.post("/upload", status_code=201, response_model=JobCreatedResponse)
 async def upload_job(
     file: UploadFile = File(...),
     domain: str = Form("general"),
@@ -338,7 +357,7 @@ async def upload_job(
             "status": "pending", "created_at": job.created_at.isoformat()}
 
 
-@router.get("")
+@router.get("", response_model=JobListResponse)
 async def list_jobs(
     status: str | None = None,
     collection_id: str | None = None,
@@ -373,14 +392,14 @@ async def list_jobs(
     )
 
 
-@router.get("/facets")
+@router.get("/facets", response_model=JobFacetsResponse)
 async def job_facets(db: Database = Depends(get_db)):
     """全量 jobs 按 source / domain / status 的计数,供前端过滤 chip。
     注:须在 /{job_id} 之前注册,否则被路径参数捕获为 job_id='facets'。"""
     return await asyncio.to_thread(db.job_facets)
 
 
-@router.get("/{job_id}")
+@router.get("/{job_id}", response_model=JobDetailResponse)
 async def get_job(
     job_id: str,
     db: Database = Depends(get_db),
@@ -487,7 +506,7 @@ async def get_job(
             jd = json.loads(raw.decode("utf-8"))
             for stp, val in (jd.get("prompt_overrides") or {}).items():
                 if isinstance(val, dict) and val.get("version") is not None:
-                    prompt_versions[stp] = val["version"]
+                    prompt_versions[stp] = str(val["version"])
     except Exception:
         pass
     return JobDetailResponse(
@@ -514,7 +533,7 @@ async def get_job(
     )
 
 
-@router.get("/{job_id}/versions")
+@router.get("/{job_id}/versions", response_model=LineageVersionsResponse)
 async def job_versions(
     job_id: str,
     db: Database = Depends(get_db),
@@ -537,7 +556,7 @@ async def job_versions(
     }
 
 
-@router.get("/{job_id}/concepts")
+@router.get("/{job_id}/concepts", response_model=list[JobConceptResponse])
 async def job_concepts(
     job_id: str,
     db: Database = Depends(get_db),
@@ -548,10 +567,16 @@ async def job_concepts(
     if not job:
         raise HTTPException(404, "job not found")
     rows = await asyncio.to_thread(db.glossary_for_job, job_id, job.domain)
-    return rows
+    return [
+        JobConceptResponse(
+            **GlossaryTermResponse.from_row(row).model_dump(),
+            job_occurrences=row.get("job_occurrences") or [],
+        )
+        for row in rows
+    ]
 
 
-@router.get("/{job_id}/usage")
+@router.get("/{job_id}/usage", response_model=JobUsageResponse)
 async def job_usage(
     job_id: str,
     db: Database = Depends(get_db),
@@ -562,7 +587,7 @@ async def job_usage(
     return {"usage": await asyncio.to_thread(db.list_usage_by_job, job_id)}
 
 
-@router.get("/{job_id}/steps/{step}/log")
+@router.get("/{job_id}/steps/{step}/log", response_class=PlainTextResponse)
 async def get_step_log(
     job_id: str,
     step: str,
@@ -583,7 +608,7 @@ async def get_step_log(
     return PlainTextResponse(data.decode("utf-8", errors="replace"))
 
 
-@router.get("/{job_id}/ai-logs")
+@router.get("/{job_id}/ai-logs", response_model=AiLogsResponse)
 async def job_ai_logs(
     job_id: str,
     step: str | None = None,
@@ -674,7 +699,7 @@ async def _delete_job_full(
     })
 
 
-@router.post("/retry-failed")
+@router.post("/retry-failed", response_model=JobsRetriedResponse)
 async def retry_all_failed(
     collection_id: str | None = Query(None, description="仅重试该集合的失败 job;不传=全局所有失败"),
     db: Database = Depends(get_db),
@@ -697,7 +722,7 @@ async def retry_all_failed(
     return {"retried": len(jobs)}
 
 
-@router.post("/{job_id}/retry")
+@router.post("/{job_id}/retry", response_model=JobStatusResponse)
 async def retry_job(
     job_id: str,
     db: Database = Depends(get_db),
@@ -713,7 +738,7 @@ async def retry_job(
     return {"job_id": job_id, "status": "processing"}
 
 
-@router.post("/{job_id}/rerun")
+@router.post("/{job_id}/rerun", response_model=JobRerunResponse)
 async def rerun_job(
     job_id: str,
     req: RerunRequest,
@@ -730,7 +755,7 @@ async def rerun_job(
     return {"job_id": job_id, "status": "processing", "from_step": req.from_step}
 
 
-@router.post("/{job_id}/rebuild")
+@router.post("/{job_id}/rebuild", response_model=JobRebuildResponse)
 async def rebuild_job(
     job_id: str,
     db: Database = Depends(get_db),
@@ -746,7 +771,7 @@ async def rebuild_job(
             "lineage_key": job.lineage_key, "status": "pending"}
 
 
-@router.post("/rebuild-stale")
+@router.post("/rebuild-stale", response_model=JobsRebuiltResponse)
 async def rebuild_stale(
     db: Database = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
@@ -846,7 +871,7 @@ async def _rerun_step_requirements(
     return result
 
 
-@router.post("/{job_id}/rerun-smart")
+@router.post("/{job_id}/rerun-smart", response_model=JobRerunSmartResponse)
 async def rerun_smart(
     job_id: str,
     req: RerunSmartRequest,
@@ -897,7 +922,7 @@ async def rerun_smart(
             "from_step": smart_step, "review_step": review_step}
 
 
-@router.post("/{job_id}/resubmit")
+@router.post("/{job_id}/resubmit", response_model=JobStatusResponse)
 async def resubmit_job(
     job_id: str,
     db: Database = Depends(get_db),

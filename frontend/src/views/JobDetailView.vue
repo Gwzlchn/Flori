@@ -662,7 +662,7 @@ async function rerunFromStep() {
 // job.json.prompt_overrides[step].version 是本任务派发时用的版本快照,后端透出 job.prompt_versions。
 // 与当前激活版本对比:GET /api/prompts/{pipeline}/{step},按本 job domain 解析,domain 覆盖优先于 global。
 // 不一致(stale)则高亮并给「重跑该步」:复用 POST /api/jobs/{id}/rerun 传 from_step,清该步及下游 .done 重跑。
-type AiPromptRow = { step: string; label: string; used: number; current: number | null; stale: boolean }
+type AiPromptRow = { step: string; label: string; used: string; current: string | null; stale: boolean }
 const aiPromptRows = ref<AiPromptRow[]>([])
 
 async function loadPromptVersions() {
@@ -675,22 +675,22 @@ async function loadPromptVersions() {
   const rows: AiPromptRow[] = []
   for (const [step, used] of Object.entries(pv)) {
     // 当前激活版本:先按本 job domain 查(domain 覆盖优先),无则回退 global。两者都无表示无覆盖,走默认。
-    let current: number | null = null
+    let current: string | null = null
     try {
       if (dom) {
-        const dq = await api.get<{ active_version: number | null }>(
+        const dq = await api.get<{ active_version: string | null }>(
           `/api/prompts/${pipeline}/${step}?scope=domain&domain=${encodeURIComponent(dom)}`)
         if (dq.active_version != null) current = dq.active_version
       }
       if (current == null) {
-        const gq = await api.get<{ active_version: number | null }>(
+        const gq = await api.get<{ active_version: string | null }>(
           `/api/prompts/${pipeline}/${step}?scope=global`)
         current = gq.active_version ?? null
       }
     } catch { /* 读不到当前版本时按未知处理,不阻断 */ }
     const label = jobDagSteps.value.find(x => x.key === step)?.label
       || steps.value.find(x => x.name === step)?.label || step
-    rows.push({ step, label, used: used as number, current, stale: current !== (used as number) })
+    rows.push({ step, label, used, current, stale: current !== used })
   }
   if (jobId.value === fid) aiPromptRows.value = rows
 }

@@ -35,8 +35,21 @@ from shared.sysload import read_process_rss_mb
 from shared.version import FLORI_VERSION
 from api.deps import get_config, get_db, get_redis, get_storage, verify_token
 from api.routes.workers import merged_worker_responses
+from api.wire_schemas import (
+    API_ERROR_RESPONSES,
+    FullStatusResponse,
+    HealthLiveResponse,
+    LinkTrafficHistoryResponse,
+    PipelinesResponse,
+    PoolLimitsResponse,
+    PricingStatusResponse,
+    ReadinessResponse,
+    StatusUpdatedResponse,
+    SystemEventsResponse,
+    UsageAggregateResponse,
+)
 
-router = APIRouter(prefix="/api", tags=["admin"])
+router = APIRouter(prefix="/api", tags=["admin"], responses=API_ERROR_RESPONSES)
 
 
 def _health_item(
@@ -389,20 +402,24 @@ async def build_readiness(app, components: list[dict] | None = None) -> dict:
     return {"version": FLORI_VERSION, **summarize_readiness(checks)}
 
 
-@router.get("/health/live")
+@router.get("/health/live", response_model=HealthLiveResponse)
 async def health_live():
     """进程存活探针.依赖故障不改变 liveness,避免编排器重启健康 API 进程."""
     return {"status": "alive", "alive": True, "version": FLORI_VERSION}
 
 
-@router.get("/health/ready")
+@router.get(
+    "/health/ready",
+    response_model=ReadinessResponse,
+    responses={503: {"model": ReadinessResponse, "description": "存在必需阻断项"}},
+)
 async def health_ready(request: Request):
     """安全接单探针.阻断项存在时返回 503,供反代和发布门使用."""
     state = await build_readiness(request.app)
     return state if state["ready"] else JSONResponse(status_code=503, content=state)
 
 
-@router.get("/health")
+@router.get("/health", response_model=ReadinessResponse)
 async def health(request: Request):
     """兼容健康端点.返回统一 readiness 模型,但保持 HTTP 200 供旧监控读取."""
     return await build_readiness(request.app)
@@ -757,14 +774,19 @@ def _to_int(value, default):
         return default
 
 
-@router.get("/status", dependencies=[Depends(verify_token)])
+@router.get(
+    "/status", dependencies=[Depends(verify_token)], response_model=FullStatusResponse,
+)
 async def system_status(request: Request):
     """全量系统状态(version + 组件健康 + workers/pools/jobs/disk + throughput_1h)。
     components.detail 不暴露密钥/连接串;逐组件探测失败只影响该组件,整体不 500。"""
     return await build_full_status(request.app)
 
 
-@router.get("/link-traffic/history", dependencies=[Depends(verify_token)])
+@router.get(
+    "/link-traffic/history", dependencies=[Depends(verify_token)],
+    response_model=LinkTrafficHistoryResponse,
+)
 async def link_traffic_history(request: Request, limit: int = 120):
     """通联富时间线(tunnel_stats 上报器周期采的累计字节样本,最近在前):
     每样本含 总量 gw/tun + 每隧道 t{} + 每远程 worker w{}. 前端「通联」树点节点后切该节点序列算趋势.
@@ -777,19 +799,26 @@ async def link_traffic_history(request: Request, limit: int = 120):
     return {"samples": samples}
 
 
-@router.get("/usage", dependencies=[Depends(verify_token)])
+@router.get(
+    "/usage", dependencies=[Depends(verify_token)], response_model=UsageAggregateResponse,
+)
 async def usage_aggregate(db: Database = Depends(get_db)):
     """全量 AI 用量聚合:累计 token/缓存/成本 + 平均缓存命中率 + 按 model 分(供系统状态展示)。"""
     return await asyncio.to_thread(db.get_usage_aggregate)
 
 
-@router.get("/pricing", dependencies=[Depends(verify_token)])
+@router.get(
+    "/pricing", dependencies=[Depends(verify_token)], response_model=PricingStatusResponse,
+)
 async def pricing_status(request: Request):
     """LiteLLM 价表状态:{ready, model_count, fetched_at(ISO|null), source_url}。"""
     return request.app.state.pricing.status()
 
 
-@router.post("/pricing/refresh", dependencies=[Depends(verify_token)])
+@router.post(
+    "/pricing/refresh", dependencies=[Depends(verify_token)],
+    response_model=PricingStatusResponse,
+)
 async def pricing_refresh(request: Request, storage=Depends(get_storage)):
     """手动拉一次 LiteLLM 最新价表并存回 MinIO. 成功回新 status;拉取失败 502。"""
     pricing = request.app.state.pricing
@@ -805,7 +834,9 @@ async def pricing_raw(request: Request):
     return request.app.state.pricing.raw()
 
 
-@router.get("/events", dependencies=[Depends(verify_token)])
+@router.get(
+    "/events", dependencies=[Depends(verify_token)], response_model=SystemEventsResponse,
+)
 async def list_events(limit: int = 50, redis: RedisClient = Depends(get_redis)):
     """系统事件流(scheduler emit 的环形列表 events:system,最近在上,保留最近 200)。
     scheduler 在孤儿回收、卡步、无 worker、worker 清理、任务失败处 push_event;无事件或读失败返回空数组。"""
@@ -824,7 +855,9 @@ async def list_events(limit: int = 50, redis: RedisClient = Depends(get_redis)):
     return {"events": events}
 
 
-@router.get("/config/styles", dependencies=[Depends(verify_token)])
+@router.get(
+    "/config/styles", dependencies=[Depends(verify_token)], response_model=list[str],
+)
 async def get_styles_config(config: AppConfig = Depends(get_config)):
     """返回可用风格标签列表(从 prompts/styles/*.yaml 的文件名读取)。"""
     import yaml
@@ -871,7 +904,10 @@ async def update_pools_config(
     return {"status": "updated"}
 
 
-@router.get("/config/pool-limits", dependencies=[Depends(verify_token)])
+@router.get(
+    "/config/pool-limits", dependencies=[Depends(verify_token)],
+    response_model=PoolLimitsResponse,
+)
 async def get_pool_limits(
     config: AppConfig = Depends(get_config),
     redis: RedisClient = Depends(get_redis),
@@ -885,7 +921,10 @@ async def get_pool_limits(
     }
 
 
-@router.put("/config/pool-limits", dependencies=[Depends(verify_token)])
+@router.put(
+    "/config/pool-limits", dependencies=[Depends(verify_token)],
+    response_model=StatusUpdatedResponse,
+)
 async def update_pool_limits(
     body: dict,
     config: AppConfig = Depends(get_config),
@@ -908,7 +947,9 @@ async def update_pool_limits(
     return {"status": "updated"}
 
 
-@router.get("/pipelines", dependencies=[Depends(verify_token)])
+@router.get(
+    "/pipelines", dependencies=[Depends(verify_token)], response_model=PipelinesResponse,
+)
 async def list_pipelines(
     config: AppConfig = Depends(get_config), db: Database = Depends(get_db)
 ):

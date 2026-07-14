@@ -12,6 +12,7 @@
 #   scripts/test.sh --fe [vitest 参数…]            # 前端 vitest
 #   scripts/test.sh --integration [pytest 参数…]   # 真 Redis/SQLite 多进程/real-docker
 #   scripts/test.sh --external <场景|all>          # 显式公网 article/audio/rss/youtube
+#   scripts/test.sh --wire                         # selected OpenAPI/TS 生成漂移门
 #   scripts/test.sh -- <裸 pytest 参数…>           # 透传任意 pytest 参数(高级)
 #   scripts/test.sh --rebuild                      # 改了 pyproject [test] 依赖后重建测试镜像
 #   scripts/test.sh --down                         # 停/删热容器
@@ -91,11 +92,12 @@ while [ $# -gt 0 ]; do
         esac
       done
       exec docker compose -f "$FE_COMPOSE" run --rm fe-test \
-        sh -c 'npm install --no-audit --no-fund && npx vue-tsc --noEmit && npx vitest run --coverage "$@"' \
+        sh -c 'npm install --no-audit --no-fund && npx vue-tsc --noEmit && npm run typecheck:test && npx vitest run --coverage "$@"' \
         sh "${FE_ARGS[@]}"
       ;;
     --integration) shift; exec "$REPO/scripts/run-integration.sh" core "$@" ;;
     --external) shift; exec "$REPO/scripts/run-integration.sh" external "$@" ;;
+    --wire) shift; [ $# -eq 0 ] || usage 1; exec "$REPO/scripts/generate-frontend-wire.sh" --check ;;
     --ci-normal)
       shift
       [ $# -gt 0 ] || usage 1

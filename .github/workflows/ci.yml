@@ -64,6 +64,9 @@ jobs:
             type=gha,scope=flori-test
           # 仅 group 1 写 buildcache,避免多 shard 并行双写同 ref;其余只读。PR 回退 gha。
           cache-to: ${{ github.ref == 'refs/heads/main' && matrix.group == 1 && format('type=registry,ref=ghcr.io/{0}/flori-test:buildcache,mode=max', env.OWNER_LC) || (github.ref != 'refs/heads/main' && matrix.group == 1 && 'type=gha,scope=flori-test,mode=max' || '') }}
+      - name: Selected OpenAPI/TypeScript drift gate
+        if: matrix.group == 1
+        run: scripts/test.sh --wire
       # 非 step 测试(--ignore tests/steps + 根 tests/test_step_*.py + test_worker.py 归 unit-worker),再 pytest-split 拆 6 shard.
       - name: Unit tests(普通 shard ${{ matrix.group }}/${{ env.CI_NORMAL_SPLITS }},非 step)+ 部分覆盖率
         run: |

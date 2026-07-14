@@ -40,6 +40,35 @@ export function getAuthToken(): string {
   return authToken.value
 }
 
+type ErrorWire = import('../types/wire').ErrorWire
+
+export { ApiError }
+
+interface ApiError {
+  error: string
+}
+
+function createApiError(status: number, body: string, error: string, message: string): ApiError {
+  const result = new ApiError(status, body)
+  result.error = error
+  result.message = `API ${status}: ${message}`
+  return result
+}
+
+function parseErrorWire(body: string): ErrorWire | null {
+  try {
+    const parsed: unknown = JSON.parse(body)
+    if (
+      typeof parsed === 'object' && parsed !== null
+      && typeof (parsed as ErrorWire).error === 'string'
+      && typeof (parsed as ErrorWire).message === 'string'
+    ) return parsed as ErrorWire
+  } catch {
+    // 非 JSON 错误由调用方保留原始文本。
+  }
+  return null
+}
+
 export function useApi() {
   // 鉴权头 + 401 处理为 request/getText 共用,换 header 名只改一处。
   function buildHeaders(body?: any): Record<string, string> {
@@ -49,11 +78,18 @@ export function useApi() {
     return headers
   }
   async function checkResp(resp: Response): Promise<void> {
+    if (resp.ok) return
+    const body = await resp.text()
+    const wire = parseErrorWire(body)
     if (resp.status === 401) {
       clearToken()
-      throw new ApiError(401, 'unauthorized')
+      throw createApiError(
+        401, body || 'unauthorized', wire?.error ?? 'unauthorized', wire?.message ?? 'unauthorized',
+      )
     }
-    if (!resp.ok) throw new ApiError(resp.status, await resp.text())
+    throw createApiError(
+      resp.status, body, wire?.error ?? 'error', wire?.message ?? body,
+    )
   }
 
   async function request<T>(method: string, path: string, body?: any, signal?: AbortSignal): Promise<T> {

@@ -12,6 +12,7 @@
 // 复用 ProfileEditor 的 modal 范式(.overlay/.modal/.field/.btn 全局类)。
 import { ref, onMounted, inject, computed } from 'vue'
 import { useApi } from '../../composables/useApi'
+import type { PromptDetailWire } from '../../types/wire'
 import { X, Check, RotateCcw, GitBranch, Power } from 'lucide-vue-next'
 
 const props = defineProps<{ pipeline: string; step: string; label?: string }>()
@@ -31,21 +32,11 @@ const defaultTemplate = ref<string | null>(null)
 const defaultTemplates = ref<{ name: string; content: string }[]>([])
 const defaultSystem = ref<string | null>(null)
 // 版本管理:激活版本号(无覆盖 null)+ 全部历史版本元信息 + 当前下拉选中项('default' 或版本号)。
-const activeVersion = ref<number | null>(null)
-const versions = ref<{ version: number; note: string; created_at: string }[]>([])
-const selectedVersion = ref<'default' | number>('default')
+const activeVersion = ref<string | null>(null)
+const versions = ref<{ version: string; note: string | null; created_at: string }[]>([])
+const selectedVersion = ref<'default' | string>('default')
 const loading = ref(true)
 const saving = ref(false)
-
-interface VersionMeta { version: number; note: string; created_at: string }
-interface PromptDetail {
-  default_template: string | null
-  default_templates?: { name: string; content: string }[]
-  default_system?: string | null
-  override: { scope: string; domain: string; content: string; version?: number; updated_at: string } | null
-  active_version?: number | null
-  versions?: VersionMeta[]
-}
 
 // 主模板内容(预填默认用):后端 default_template 取主模板 {step}.md,没有则取首个变体。
 const defaultContent = computed(() => defaultTemplate.value ?? '')
@@ -81,7 +72,7 @@ function _query(): string {
 async function load() {
   loading.value = true
   try {
-    const d = await api.get<PromptDetail>(`/api/prompts/${props.pipeline}/${props.step}${_query()}`)
+    const d = await api.get<PromptDetailWire>(`/api/prompts/${props.pipeline}/${props.step}${_query()}`)
     defaultTemplate.value = d.default_template ?? null
     defaultTemplates.value = d.default_templates ?? []
     defaultSystem.value = d.default_system ?? null
@@ -144,7 +135,7 @@ async function save(mode: 'overwrite' | 'new') {
 
 // activate 指针操作的公共体:version=null 停用回内置默认、version=vN 设激活。成功后原地刷新
 // (active 标记移到所选)+ 通知父组件刷新圆点角标(不关闭面板)。
-async function _activate(version: number | null, okMsg: string) {
+async function _activate(version: string | null, okMsg: string) {
   if (scope.value === 'domain' && !domain.value.trim()) {
     showToast('请先填写领域', 'error')
     return

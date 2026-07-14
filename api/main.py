@@ -124,8 +124,9 @@ def create_app(
 
     _STATUS_ERROR_CODE = {
         400: "bad_request", 401: "unauthorized", 403: "forbidden", 404: "not_found",
-        409: "conflict", 413: "payload_too_large", 422: "invalid_request",
-        429: "rate_limited", 503: "unavailable",
+        409: "conflict", 413: "payload_too_large", 416: "range_not_satisfiable",
+        422: "invalid_request", 429: "rate_limited", 502: "bad_gateway",
+        503: "unavailable",
     }
 
     @app.exception_handler(_StarletteHTTPException)

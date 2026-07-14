@@ -535,11 +535,11 @@ class TestPromptVersionAPI:
             json={"scope": "global", "content": "B", "mode": "new", "note": "第二版"},
         )
         g = (await client.get("/api/prompts/video/11_smart")).json()
-        assert g["active_version"] == 2
-        assert [v["version"] for v in g["versions"]] == [1, 2]
+        assert g["active_version"] == "2"
+        assert [v["version"] for v in g["versions"]] == ["1", "2"]
         notes = {v["version"]: v["note"] for v in g["versions"]}
-        assert notes == {1: "首版", 2: "第二版"}
-        assert g["override"]["content"] == "B" and g["override"]["version"] == 2
+        assert notes == {"1": "首版", "2": "第二版"}
+        assert g["override"]["content"] == "B" and g["override"]["version"] == "2"
 
     async def test_get_no_override_active_version_none(self, client):
         g = (await client.get("/api/prompts/video/11_smart")).json()
@@ -549,15 +549,15 @@ class TestPromptVersionAPI:
         r1 = await client.put(
             "/api/prompts/video/11_smart", json={"scope": "global", "content": "A"}
         )
-        assert r1.json()["active_version"] == 1
+        assert r1.json()["active_version"] == "1"
         r2 = await client.put(
             "/api/prompts/video/11_smart",
             json={"scope": "global", "content": "A2", "mode": "overwrite"},
         )
-        assert r2.json()["active_version"] == 1
+        assert r2.json()["active_version"] == "1"
         g = (await client.get("/api/prompts/video/11_smart")).json()
-        assert g["active_version"] == 1 and g["override"]["content"] == "A2"
-        assert [v["version"] for v in g["versions"]] == [1]
+        assert g["active_version"] == "1" and g["override"]["content"] == "A2"
+        assert [v["version"] for v in g["versions"]] == ["1"]
 
     async def test_put_new_bumps_and_activates(self, client):
         await client.put("/api/prompts/video/11_smart", json={"scope": "global", "content": "A"})
@@ -565,7 +565,7 @@ class TestPromptVersionAPI:
             "/api/prompts/video/11_smart",
             json={"scope": "global", "content": "B", "mode": "new"},
         )
-        assert r.json()["active_version"] == 2
+        assert r.json()["active_version"] == "2"
 
     async def test_get_version_returns_content(self, client):
         await client.put("/api/prompts/video/11_smart", json={"scope": "global", "content": "A"})
@@ -574,7 +574,7 @@ class TestPromptVersionAPI:
             json={"scope": "global", "content": "B", "mode": "new", "note": "n2"},
         )
         v1 = (await client.get("/api/prompts/video/11_smart/versions/1")).json()
-        assert v1["content"] == "A" and v1["version"] == 1
+        assert v1["content"] == "A" and v1["version"] == "1"
         v2 = (await client.get("/api/prompts/video/11_smart/versions/2")).json()
         assert v2["content"] == "B" and v2["note"] == "n2"
 
@@ -612,7 +612,7 @@ class TestPromptActivateAPI:
         # GET:active_version 归 null,但 versions[] 仍非空(历史保留),override 为 null
         g = (await client.get("/api/prompts/video/11_smart")).json()
         assert g["active_version"] is None
-        assert [v["version"] for v in g["versions"]] == [1, 2]
+        assert [v["version"] for v in g["versions"]] == ["1", "2"]
         assert g["override"] is None
 
     async def test_activate_sets_active_version(self, client):
@@ -621,9 +621,9 @@ class TestPromptActivateAPI:
             "/api/prompts/video/11_smart", json={"scope": "global", "content": "B", "mode": "new"},
         )  # 激活 v2
         r = await client.post("/api/prompts/video/11_smart/activate", json={"scope": "global", "version": 1})
-        assert r.status_code == 200 and r.json()["active_version"] == 1
+        assert r.status_code == 200 and r.json()["active_version"] == "1"
         g = (await client.get("/api/prompts/video/11_smart")).json()
-        assert g["active_version"] == 1 and g["override"]["content"] == "A"
+        assert g["active_version"] == "1" and g["override"]["content"] == "A"
 
     async def test_reactivate_after_deactivate(self, client):
         await client.put("/api/prompts/video/11_smart", json={"scope": "global", "content": "A"})
@@ -633,9 +633,9 @@ class TestPromptActivateAPI:
         await client.post("/api/prompts/video/11_smart/activate", json={"scope": "global", "version": None})
         # 再激活 v2 → override 回来,active_version=2
         r = await client.post("/api/prompts/video/11_smart/activate", json={"scope": "global", "version": 2})
-        assert r.status_code == 200 and r.json()["active_version"] == 2
+        assert r.status_code == 200 and r.json()["active_version"] == "2"
         g = (await client.get("/api/prompts/video/11_smart")).json()
-        assert g["active_version"] == 2 and g["override"]["content"] == "B"
+        assert g["active_version"] == "2" and g["override"]["content"] == "B"
 
     async def test_activate_unknown_version_404(self, client):
         await client.put("/api/prompts/video/11_smart", json={"scope": "global", "content": "A"})
@@ -709,7 +709,7 @@ class TestCreateJobInjection:
         assert resp.status_code == 201
         job_id = resp.json()["job_id"]
         d = (await client.get(f"/api/jobs/{job_id}")).json()
-        assert d["prompt_versions"]["04_smart_article"] == 2
+        assert d["prompt_versions"]["04_smart_article"] == "2"
 
     async def test_job_detail_prompt_versions_empty_without_override(self, client):
         resp = await client.post(

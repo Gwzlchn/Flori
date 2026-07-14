@@ -17,11 +17,11 @@ const DETAIL = {
   default_template: 'DEFAULT TEMPLATE BODY',
   default_templates: [{ name: '11_smart', content: 'DEFAULT TEMPLATE BODY' }],
   default_system: null,
-  override: { scope: 'global', domain: '', content: 'V2 CONTENT', version: 2, updated_at: 't' },
-  active_version: 2,
+  override: { scope: 'global', domain: '', content: 'V2 CONTENT', version: '2', updated_at: 't' },
+  active_version: '2',
   versions: [
-    { version: 1, note: '首版', created_at: 't1' },
-    { version: 2, note: '第二版', created_at: 't2' },
+    { version: '1', note: '首版', created_at: 't1' },
+    { version: '2', note: '第二版', created_at: 't2' },
   ],
 }
 
@@ -29,7 +29,7 @@ function mockGet(detail: any = DETAIL) {
   get.mockImplementation((url: string) => {
     const m = url.match(/\/versions\/(\d+)/)
     if (m) {
-      const ver = Number(m[1])
+      const ver = m[1]
       return Promise.resolve({ version: ver, content: `V${ver} HISTORICAL`, note: '', created_at: 't' })
     }
     return Promise.resolve(detail)
@@ -39,8 +39,8 @@ function mockGet(detail: any = DETAIL) {
 beforeEach(() => {
   vi.clearAllMocks()
   mockGet()
-  put.mockResolvedValue({ status: 'saved', active_version: 3 })
-  post.mockResolvedValue({ status: 'activated', active_version: 1 })
+  put.mockResolvedValue({ status: 'saved', active_version: '3' })
+  post.mockResolvedValue({ status: 'activated', active_version: '1' })
   del.mockResolvedValue(null)
 })
 
@@ -147,7 +147,7 @@ describe('PromptEditor 版本管理', () => {
     expect(post).toHaveBeenCalledWith('/api/prompts/video/11_smart/activate', {
       scope: 'global',
       domain: undefined,
-      version: 1,
+      version: '1',
     })
     expect(w.emitted('changed')).toBeTruthy()
   })
@@ -196,7 +196,7 @@ describe('PromptEditor 版本管理', () => {
       default_templates: [{ name: '11_smart', content: 'DEFAULT TEMPLATE BODY' }],
       override: null,
       active_version: null,
-      versions: [{ version: 1, note: '首版', created_at: 't1' }],
+      versions: [{ version: '1', note: '首版', created_at: 't1' }],
     })
     const w = await mountEditor()
     const opts = w.find('[data-test="version-select"]').findAll('option')
@@ -207,7 +207,7 @@ describe('PromptEditor 版本管理', () => {
     expect(post).toHaveBeenCalledWith('/api/prompts/video/11_smart/activate', {
       scope: 'global',
       domain: undefined,
-      version: 1,
+      version: '1',
     })
   })
 

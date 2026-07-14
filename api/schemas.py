@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from shared.db import PROMPT_VERSION_EXCLUSIVE_MAX, PROMPT_VERSION_MIN
 from shared.source_registry import CONTENT_TYPE_NAMES, SUBSCRIPTION_SOURCE_NAMES
@@ -27,6 +27,15 @@ PromptVersion = Annotated[
     # 2^63 可被 JSON number 精确表示.用排他上界避免 OpenAPI 把 2^63-1
     # 转成浮点数后舍入为 2^63,语义仍等价于最大值 2^63-1.
     Field(strict=True, ge=PROMPT_VERSION_MIN, lt=PROMPT_VERSION_EXCLUSIVE_MAX),
+]
+PROMPT_VERSION_JS_SAFE_MAX = (1 << 53) - 1
+PromptVersionString = Annotated[
+    str,
+    Field(pattern=r"^[0-9]+$", min_length=1, max_length=19),
+]
+PromptVersionSafeInteger = Annotated[
+    int,
+    Field(strict=True, ge=PROMPT_VERSION_MIN, le=PROMPT_VERSION_JS_SAFE_MAX),
 ]
 
 
@@ -66,8 +75,8 @@ class JobDetailResponse(JobResponse):
     meta: dict = Field(default_factory=dict)
     steps: list[StepResponse] = Field(default_factory=list)
     # 本任务各 AI 步派发时用的 prompt 覆盖版本号快照,从 job.json.prompt_overrides[step].version 读,
-    # 无覆盖的步不出现。前端与当前激活版本(GET /api/prompts)比,不一致提示「重跑该步」,见 docs/03-contracts.md §1.14。
-    prompt_versions: dict = Field(default_factory=dict)
+    # 无覆盖的步不出现。前端与当前激活版本(GET /api/prompts)比,不一致提示「重跑该步」,见 docs/03-contracts.md §1.15。
+    prompt_versions: dict[str, str] = Field(default_factory=dict)
     # 论文源类型(intermediate/parsed.json.source_kind,best-effort null):"arxiv-html"=有干净 HTML 源
     # (原文变体直接渲染 original.md);"pdf-only"=只有 PDF(原文=内嵌 PDF,AI 步直喂)。非论文恒 null。
     source_kind: str | None = None
@@ -283,7 +292,24 @@ class PromptActivateRequest(BaseModel):
     # version=null:停用覆盖回内置默认,非破坏,保留全部历史版本。scope/domain 同 PromptOverrideRequest。
     scope: str = "global"
     domain: str | None = None
-    version: PromptVersion | None = None
+    version: PromptVersionString | PromptVersionSafeInteger | None = None
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def validate_wire_version(cls, value):
+        """HTTP wire 以十进制字符串为准;兼容期只接收 JS 安全整数。"""
+        if value is None:
+            return None
+        if type(value) is int:
+            if PROMPT_VERSION_MIN <= value <= PROMPT_VERSION_JS_SAFE_MAX:
+                return str(value)
+            raise ValueError("integer prompt version exceeds JavaScript safe range")
+        if type(value) is not str or not value.isascii() or not value.isdigit():
+            raise ValueError("prompt version must be a positive decimal string")
+        parsed = int(value)
+        if not PROMPT_VERSION_MIN <= parsed < PROMPT_VERSION_EXCLUSIVE_MAX:
+            raise ValueError("prompt version is outside SQLite INTEGER range")
+        return value
 
 
 # 集合

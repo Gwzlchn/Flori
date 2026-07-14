@@ -26,6 +26,7 @@ from shared.study_suggestions import (
     resolve_study_suggestion_prompt,
 )
 from api.deps import get_config, get_db, validate_path_segment, verify_token
+from api.wire_schemas import API_ERROR_RESPONSES
 
 
 CardType = Literal["basic", "cloze", "qa", "quiz_single", "quiz_multi"]
@@ -282,6 +283,7 @@ class StudyMasteryResponse(BaseModel):
 router = APIRouter(
     prefix="/api/study", tags=["study"],
     dependencies=[Depends(verify_token)],
+    responses=API_ERROR_RESPONSES,
 )
 
 

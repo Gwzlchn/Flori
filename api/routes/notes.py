@@ -29,8 +29,33 @@ from shared.storage import (
     read_verification_artifact_bounded,
 )
 from api.deps import get_config, get_db, get_storage, validate_path_segment, verify_token
+from api.wire_schemas import (
+    API_ERROR_RESPONSES,
+    ArtifactsResponse,
+    EvidenceProjectionResponse,
+    NoteVersionsResponse,
+    ReviewProjectionResponse,
+)
 
-router = APIRouter(prefix="/api/jobs", tags=["notes"], dependencies=[Depends(verify_token)])
+router = APIRouter(
+    prefix="/api/jobs", tags=["notes"], dependencies=[Depends(verify_token)],
+    responses=API_ERROR_RESPONSES,
+)
+
+_MARKDOWN_RESPONSE = {
+    200: {"content": {"text/markdown": {"schema": {"type": "string"}}}},
+}
+_BINARY_RESPONSE = {
+    200: {"content": {"application/octet-stream": {
+        "schema": {"type": "string", "format": "binary"},
+    }}},
+}
+_RANGE_RESPONSE = {
+    **_BINARY_RESPONSE,
+    206: {"content": {"application/octet-stream": {
+        "schema": {"type": "string", "format": "binary"},
+    }}},
+}
 
 def _artifact_kind(path: str) -> str:
     ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
@@ -106,7 +131,9 @@ async def _read_verification_artifact(
     return await read_verification_artifact_bounded(storage, job_id, rel)
 
 
-@router.get("/{job_id}/notes/smart")
+@router.get(
+    "/{job_id}/notes/smart", response_class=Response, responses=_MARKDOWN_RESPONSE,
+)
 async def get_smart_notes(job_id: str, file: str | None = None,
                           storage: StorageBackend = Depends(get_storage)):
     """默认取最新版本智能笔记;file= 指定某版本(output/versions/notes_smart_*.md)。"""
@@ -123,7 +150,7 @@ async def get_smart_notes(job_id: str, file: str | None = None,
                         "text/markdown; charset=utf-8", "smart notes not ready")
 
 
-@router.get("/{job_id}/note-versions")
+@router.get("/{job_id}/note-versions", response_model=NoteVersionsResponse)
 async def list_note_versions(
     job_id: str,
     storage: StorageBackend = Depends(get_storage),
@@ -163,13 +190,17 @@ async def list_note_versions(
     return {"versions": versions}
 
 
-@router.get("/{job_id}/notes/mechanical")
+@router.get(
+    "/{job_id}/notes/mechanical", response_class=Response, responses=_MARKDOWN_RESPONSE,
+)
 async def get_mechanical_notes(job_id: str, storage: StorageBackend = Depends(get_storage)):
     return await _serve(storage, job_id, "output/notes_mechanical.md",
                         "text/markdown; charset=utf-8", "mechanical notes not ready")
 
 
-@router.get("/{job_id}/notes/transcript")
+@router.get(
+    "/{job_id}/notes/transcript", response_class=Response, responses=_MARKDOWN_RESPONSE,
+)
 async def get_transcript(job_id: str, storage: StorageBackend = Depends(get_storage)):
     """音频/视频逐字稿(output/transcript.md)。注:前端当前无入口调用(仅笔记类型标签映射「逐字稿」),
     保留供直接拉取/将来接入。"""
@@ -177,7 +208,7 @@ async def get_transcript(job_id: str, storage: StorageBackend = Depends(get_stor
                         "text/markdown; charset=utf-8", "transcript not ready")
 
 
-@router.get("/{job_id}/review")
+@router.get("/{job_id}/review", response_model=ReviewProjectionResponse)
 async def get_review(job_id: str, file: str | None = None,
                      storage: StorageBackend = Depends(get_storage),
                      db: Database = Depends(get_db)):
@@ -205,10 +236,10 @@ async def get_review(job_id: str, file: str | None = None,
         storage, job_id, artifact, job.pipeline if job else None,
     )
     projected = project_review(verified)
-    return Response(content=json.dumps(projected, ensure_ascii=False), media_type="application/json")
+    return projected
 
 
-@router.get("/{job_id}/evidence")
+@router.get("/{job_id}/evidence", response_model=EvidenceProjectionResponse)
 async def get_evidence(job_id: str, storage: StorageBackend = Depends(get_storage)):
     """权威来源 API 投影:旧版/低置信/不合格来源保留诊断但不暴露可点击 URL。"""
     _validate_job_id(job_id)
@@ -227,10 +258,12 @@ async def get_evidence(job_id: str, storage: StorageBackend = Depends(get_storag
     projected = project_evidence(
         manifest, verified_ids=verified, validation_errors=validation_errors,
     )
-    return Response(content=json.dumps(projected, ensure_ascii=False), media_type="application/json")
+    return projected
 
 
-@router.get("/{job_id}/assets/{filename}")
+@router.get(
+    "/{job_id}/assets/{filename}", response_class=Response, responses=_BINARY_RESPONSE,
+)
 async def get_asset(job_id: str, filename: str, storage: StorageBackend = Depends(get_storage)):
     if ".." in filename or "/" in filename:
         raise HTTPException(400, "invalid filename")
@@ -239,7 +272,7 @@ async def get_asset(job_id: str, filename: str, storage: StorageBackend = Depend
                         cache=True)
 
 
-@router.get("/{job_id}/artifacts")
+@router.get("/{job_id}/artifacts", response_model=ArtifactsResponse)
 async def list_artifacts(
     job_id: str,
     storage: StorageBackend = Depends(get_storage),
@@ -291,7 +324,9 @@ async def list_artifacts(
     return {"groups": groups, "total_bytes": total_bytes}
 
 
-@router.get("/{job_id}/artifact")
+@router.get(
+    "/{job_id}/artifact", response_class=Response, responses=_BINARY_RESPONSE,
+)
 async def get_artifact(job_id: str, path: str, storage: StorageBackend = Depends(get_storage)):
     """取任意产物(仅放行真实存在且未隐藏的;按扩展名定 content-type;图片长缓存)。"""
     _validate_job_id(job_id)
@@ -317,7 +352,9 @@ async def get_artifact(job_id: str, path: str, storage: StorageBackend = Depends
 _MEDIA_CHUNK = 2 * 1024 * 1024   # 单次最多回 2MB:浏览器按 range 续拉,内存不被整片视频撑爆。
 
 
-@router.get("/{job_id}/media")
+@router.get(
+    "/{job_id}/media", response_class=Response, responses=_RANGE_RESPONSE,
+)
 async def get_media(job_id: str, path: str, request: Request,
                     storage: StorageBackend = Depends(get_storage)):
     """视频/音频 range 流式(经 StorageBackend,兼容本地/MinIO)。<video>/<audio> 用它播放。

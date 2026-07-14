@@ -68,6 +68,8 @@ def test_db_refuses_to_increment_past_sqlite_integer_limit(db):
 async def test_get_version_rejects_invalid_path_values(client, version):
     response = await client.get(f"/api/prompts/video/11_smart/versions/{version}")
     assert response.status_code == 422
+    assert set(response.json()) == {"error", "message"}
+    assert response.json()["error"] == "invalid_request"
 
 
 @pytest.mark.asyncio
@@ -94,7 +96,7 @@ async def test_get_version_accepts_boundaries_and_preserves_404(client, db):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "version",
-    [0, -1, PROMPT_VERSION_MAX + 1, 10**1000, 1.5, "1", True],
+    [0, -1, PROMPT_VERSION_MAX + 1, 10**1000, 1.5, "0", "-1", str(PROMPT_VERSION_MAX + 1), True],
 )
 async def test_activate_rejects_invalid_body_versions(client, version):
     response = await client.post(
@@ -102,6 +104,8 @@ async def test_activate_rejects_invalid_body_versions(client, version):
         json={"scope": "global", "version": version},
     )
     assert response.status_code == 422
+    assert set(response.json()) == {"error", "message"}
+    assert response.json()["error"] == "invalid_request"
 
 
 @pytest.mark.asyncio
@@ -112,20 +116,20 @@ async def test_activate_accepts_boundaries_and_preserves_404(client, db):
     )
     lower = await client.post(
         "/api/prompts/video/11_smart/activate",
-        json={"scope": "global", "version": PROMPT_VERSION_MIN},
+        json={"scope": "global", "version": str(PROMPT_VERSION_MIN)},
     )
     assert lower.status_code == 200
 
     missing = await client.post(
         "/api/prompts/video/11_smart/activate",
-        json={"scope": "global", "version": 2},
+        json={"scope": "global", "version": "2"},
     )
     assert missing.status_code == 404
 
     _insert_version(db, PROMPT_VERSION_MAX)
     upper = await client.post(
         "/api/prompts/video/11_smart/activate",
-        json={"scope": "global", "version": PROMPT_VERSION_MAX},
+        json={"scope": "global", "version": str(PROMPT_VERSION_MAX)},
     )
     assert upper.status_code == 200
 
@@ -145,7 +149,7 @@ async def test_new_version_at_integer_limit_returns_conflict(client, db):
 
 
 @pytest.mark.asyncio
-async def test_openapi_exposes_prompt_version_integer_boundaries(client):
+async def test_openapi_exposes_prompt_version_string_wire_and_safe_integer_compat(client):
     spec = (await client.get("/openapi.json")).json()
 
     path_operation = spec["paths"][
@@ -156,8 +160,9 @@ async def test_openapi_exposes_prompt_version_integer_boundaries(client):
         for param in path_operation["parameters"]
         if param["name"] == "version" and param["in"] == "path"
     )
-    assert path_schema["minimum"] == PROMPT_VERSION_MIN
-    assert path_schema["exclusiveMaximum"] == PROMPT_VERSION_EXCLUSIVE_MAX
+    assert path_schema["type"] == "string"
+    assert path_schema["pattern"] == "^[0-9]+$"
+    assert path_schema["maxLength"] == 19
 
     body_schema = spec["components"]["schemas"]["PromptActivateRequest"][
         "properties"
@@ -165,5 +170,16 @@ async def test_openapi_exposes_prompt_version_integer_boundaries(client):
     integer_schema = next(
         option for option in body_schema["anyOf"] if option.get("type") == "integer"
     )
-    assert integer_schema["minimum"] == PROMPT_VERSION_MIN
-    assert integer_schema["exclusiveMaximum"] == PROMPT_VERSION_EXCLUSIVE_MAX
+    assert integer_schema["maximum"] == (1 << 53) - 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", ["1", str(1 << 53), str(PROMPT_VERSION_MAX)])
+async def test_activate_accepts_decimal_string_without_precision_loss(client, db, version):
+    _insert_version(db, int(version))
+    response = await client.post(
+        "/api/prompts/video/11_smart/activate",
+        json={"scope": "global", "version": version},
+    )
+    assert response.status_code == 200
+    assert response.json()["active_version"] == version

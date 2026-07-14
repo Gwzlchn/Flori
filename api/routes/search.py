@@ -11,10 +11,12 @@ from shared.storage import StorageBackend
 from api.deps import get_db, get_storage, verify_token
 from api.schemas import SearchResponse, SearchResultItem
 from api.services.evidence import attach_canonical_evidence
+from api.wire_schemas import API_ERROR_RESPONSES
 
 router = APIRouter(
     prefix="/api/search", tags=["search"],
     dependencies=[Depends(verify_token)],
+    responses=API_ERROR_RESPONSES,
 )
 
 

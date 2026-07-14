@@ -16,6 +16,13 @@ from fastapi import APIRouter, Depends, HTTPException, Path
 
 from api.deps import get_config, get_db, validate_path_segment, verify_token
 from api.schemas import PromptActivateRequest, PromptOverrideRequest
+from api.wire_schemas import (
+    API_ERROR_RESPONSES,
+    PromptDetailResponse,
+    PromptListResponse,
+    PromptMutationResponse,
+    PromptVersionResponse,
+)
 from shared.config import AppConfig
 from shared.db import (
     Database,
@@ -25,7 +32,31 @@ from shared.db import (
 )
 from shared.prompt_resolver import PromptResolver, TRACKED_TEMPLATE_NAMES
 
-router = APIRouter(prefix="/api/prompts", tags=["prompts"], dependencies=[Depends(verify_token)])
+router = APIRouter(
+    prefix="/api/prompts", tags=["prompts"], dependencies=[Depends(verify_token)],
+    responses=API_ERROR_RESPONSES,
+)
+
+
+def _wire_version(value: int | None) -> str | None:
+    return str(value) if value is not None else None
+
+
+def _parse_wire_version(value: str) -> int:
+    if not value.isascii() or not value.isdigit():
+        raise HTTPException(422, "prompt version must be a positive decimal string")
+    parsed = int(value)
+    if not PROMPT_VERSION_MIN <= parsed < PROMPT_VERSION_EXCLUSIVE_MAX:
+        raise HTTPException(422, "prompt version is outside SQLite INTEGER range")
+    return parsed
+
+
+def _wire_history(rows: list[dict]) -> list[dict]:
+    return [{**row, "version": _wire_version(row["version"])} for row in rows]
+
+
+def _wire_override(row: dict | None) -> dict | None:
+    return {**row, "version": _wire_version(row["version"])} if row else None
 
 
 def _ai_steps(config: AppConfig) -> list[tuple[str, str, str | None, str | None]]:
@@ -120,7 +151,7 @@ def _default_system(config: AppConfig, step: str) -> str | None:
     ])
 
 
-@router.get("")
+@router.get("", response_model=PromptListResponse)
 async def list_prompts(
     config: AppConfig = Depends(get_config), db: Database = Depends(get_db)
 ):
@@ -143,7 +174,7 @@ async def list_prompts(
     return {"steps": steps}
 
 
-@router.get("/{pipeline}/{step}")
+@router.get("/{pipeline}/{step}", response_model=PromptDetailResponse)
 async def get_prompt(
     pipeline: str,
     step: str,
@@ -177,22 +208,21 @@ async def get_prompt(
         "default_template": _default_template(templates, primary_template),
         "default_templates": templates,
         "default_system": _default_system(config, step),
-        "override": ov,
+        "override": _wire_override(ov),
         # 版本管理:active_version=主表指向的激活版本号(无覆盖 None);versions=该 (scope,domain) 全部
         # 历史版本元信息 [{version,note,created_at}](version 升序,不含 content,内容经 versions/{version} 取)。
-        "active_version": (ov.get("version") if ov else None),
-        "versions": versions,
+        "active_version": _wire_version(ov.get("version") if ov else None),
+        "versions": _wire_history(versions),
     }
 
 
-@router.get("/{pipeline}/{step}/versions/{version}")
+@router.get(
+    "/{pipeline}/{step}/versions/{version}", response_model=PromptVersionResponse,
+)
 async def get_prompt_version(
     pipeline: str,
     step: str,
-    version: Annotated[
-        int,
-        Path(ge=PROMPT_VERSION_MIN, lt=PROMPT_VERSION_EXCLUSIVE_MAX),
-    ],
+    version: Annotated[str, Path(min_length=1, max_length=19, pattern=r"^[0-9]+$")],
     scope: str = "global",
     domain: str | None = None,
     db: Database = Depends(get_db),
@@ -202,18 +232,19 @@ async def get_prompt_version(
     validate_path_segment(step, "step")
     if domain:
         validate_path_segment(domain, "domain")
+    parsed_version = _parse_wire_version(version)
     row = await asyncio.to_thread(
-        db.get_prompt_override_version, scope, domain, pipeline, step, version
+        db.get_prompt_override_version, scope, domain, pipeline, step, parsed_version
     )
     if row is None:
         raise HTTPException(404, f"version {version} not found for {pipeline}/{step}")
     return {
-        "version": row["version"], "content": row["content"],
+        "version": _wire_version(row["version"]), "content": row["content"],
         "note": row["note"], "created_at": row["created_at"],
     }
 
 
-@router.put("/{pipeline}/{step}")
+@router.put("/{pipeline}/{step}", response_model=PromptMutationResponse)
 async def put_prompt(
     pipeline: str,
     step: str,
@@ -258,11 +289,11 @@ async def put_prompt(
     return {
         "status": "saved", "pipeline": pipeline, "step": step,
         "scope": req.scope, "domain": (req.domain or "") if req.scope == "domain" else "",
-        "active_version": version,
+        "active_version": _wire_version(version),
     }
 
 
-@router.post("/{pipeline}/{step}/activate")
+@router.post("/{pipeline}/{step}/activate", response_model=PromptMutationResponse)
 async def activate_prompt(
     pipeline: str,
     step: str,
@@ -294,8 +325,9 @@ async def activate_prompt(
             "scope": req.scope, "domain": (req.domain or "") if req.scope == "domain" else "",
             "active_version": None,
         }
+    parsed_version = _parse_wire_version(req.version)
     ok = await asyncio.to_thread(
-        db.set_active_prompt_version, req.scope, req.domain, pipeline, step, req.version
+        db.set_active_prompt_version, req.scope, req.domain, pipeline, step, parsed_version
     )
     if not ok:
         raise HTTPException(404, f"version {req.version} not found for {pipeline}/{step}")
@@ -306,7 +338,7 @@ async def activate_prompt(
     }
 
 
-@router.delete("/{pipeline}/{step}")
+@router.delete("/{pipeline}/{step}", response_model=PromptMutationResponse)
 async def delete_prompt(
     pipeline: str,
     step: str,

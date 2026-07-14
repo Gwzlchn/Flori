@@ -212,6 +212,36 @@ describe('useApi', () => {
       })
     })
 
+    it('统一解析 ErrorResponse 并暴露 error code/message', async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>
+      const body = JSON.stringify({ error: 'conflict', message: '版本已变化' })
+      fetchMock.mockResolvedValue(mockResp({ status: 409, ok: false, text: body }))
+
+      const { put } = useApi()
+      await expect(put('/api/glossary/ml/gradient', {})).rejects.toMatchObject({
+        status: 409,
+        body,
+        error: 'conflict',
+        message: 'API 409: 版本已变化',
+      })
+    })
+
+    it('401 ErrorResponse 清 token 且保留服务端消息', async () => {
+      const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>
+      const body = JSON.stringify({ error: 'unauthorized', message: '登录已失效' })
+      fetchMock.mockResolvedValue(mockResp({ status: 401, ok: false, text: body }))
+      setToken('will-be-cleared')
+
+      const { get } = useApi()
+      await expect(get('/api/secure')).rejects.toMatchObject({
+        status: 401, error: 'unauthorized', message: 'API 401: 登录已失效',
+      })
+      fetchMock.mockResolvedValue(mockResp({ json: {} }))
+      await get('/api/next')
+      const [, init] = lastFetchCall()
+      expect(init.headers).not.toHaveProperty('Authorization')
+    })
+
     it('ApiError.message 包含 status 与 body', async () => {
       const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>
       fetchMock.mockResolvedValue(

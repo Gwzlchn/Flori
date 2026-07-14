@@ -18,13 +18,21 @@ from shared.ask_citations import validate_bound_ask_citations
 from shared.db import Database
 from shared.redis_client import RedisClient
 from api.deps import get_db, get_redis, validate_path_segment, verify_token
+from api.wire_schemas import (
+    API_ERROR_RESPONSES,
+    AiTaskLogResponse,
+    AiTaskResultResponse,
+)
 
 log = structlog.get_logger(__name__)
 
-router = APIRouter(prefix="/api/ai-tasks", tags=["ai-tasks"], dependencies=[Depends(verify_token)])
+router = APIRouter(
+    prefix="/api/ai-tasks", tags=["ai-tasks"], dependencies=[Depends(verify_token)],
+    responses=API_ERROR_RESPONSES,
+)
 
 
-@router.get("/{task_id}/result")
+@router.get("/{task_id}/result", response_model=AiTaskResultResponse)
 async def ai_task_result(task_id: str, redis: RedisClient = Depends(get_redis)):
     """取独立 AI task 结果. 结果存 airesult:{task_id}(worker 写,TTL 约 600s):
     None 表示 pending;{"error":...} 表示 error;否则按 LLMResponse 返回 done.
@@ -79,7 +87,7 @@ async def ai_task_result(task_id: str, redis: RedisClient = Depends(get_redis)):
     }
 
 
-@router.get("/{task_id}/log")
+@router.get("/{task_id}/log", response_model=AiTaskLogResponse)
 async def ai_task_log(task_id: str, db: Database = Depends(get_db)):
     """独立 AI task 的完整白盒审计(prompt 白盒化,镜像 DAG 的 /jobs/{id}/ai-logs)。
     读 ai_task_logs. worker 每次执行写一条,内容包含路由,尝试链,渲染 prompt,输出,raw 与用量."""

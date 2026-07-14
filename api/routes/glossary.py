@@ -28,6 +28,7 @@ from api.schemas import (
     GlossaryTermResponse,
 )
 from api.services import concepts as concept_service
+from api.wire_schemas import API_ERROR_RESPONSES, GlossaryBatchResponse
 
 
 class TopicToggleRequest(BaseModel):
@@ -50,6 +51,7 @@ class BatchRequest(BaseModel):
 router = APIRouter(
     prefix="/api/glossary", tags=["glossary"],
     dependencies=[Depends(verify_token)],
+    responses=API_ERROR_RESPONSES,
 )
 
 
@@ -343,7 +345,7 @@ async def watch_term(
     return _to_response(updated)
 
 
-@router.post("/batch")
+@router.post("/batch", response_model=GlossaryBatchResponse)
 async def batch_terms(
     req: BatchRequest,
     db: Database = Depends(get_db),

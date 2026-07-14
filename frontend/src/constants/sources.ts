@@ -5,6 +5,7 @@ import {
   Rss, Youtube, FolderInput, Star, ListVideo, BookOpen,
 } from 'lucide-vue-next'
 import { useApi } from '../composables/useApi'
+import type { SourceCatalogWire } from '../types/wire'
 
 type Icon = Component
 
@@ -19,15 +20,6 @@ export interface SourceTypeMeta {
   homeUrlTemplate?: string
 }
 
-interface SourceCatalogResponse {
-  content_types: { type: string; label: string; upload_extensions?: string[] }[]
-  job_sources: { type: string; label: string }[]
-  subscription_sources: {
-    type: string; label: string; group: string; icon: string
-    id_label: string; placeholder: string; hint: string; home_url_template?: string
-  }[]
-}
-
 const ICONS: Record<string, Icon> = {
   rss: Rss, youtube: Youtube, 'folder-input': FolderInput,
   star: Star, 'list-video': ListVideo, 'book-open': BookOpen,
@@ -40,7 +32,7 @@ export const CONTENT_TYPE_CATALOG = reactive<{ type: string; label: string; uplo
 const BY_TYPE = reactive<Record<string, SourceTypeMeta>>({})
 let loading: Promise<void> | null = null
 
-export function installSourceCatalog(catalog: SourceCatalogResponse): void {
+export function installSourceCatalog(catalog: SourceCatalogWire): void {
   SOURCE_TYPES.splice(0, SOURCE_TYPES.length)
   CONTENT_TYPE_CATALOG.splice(0, CONTENT_TYPE_CATALOG.length)
   for (const key of Object.keys(BY_TYPE)) delete BY_TYPE[key]
@@ -52,7 +44,7 @@ export function installSourceCatalog(catalog: SourceCatalogResponse): void {
       type: raw.type, label: raw.label, group: raw.group,
       icon: ICONS[raw.icon] ?? Rss,
       idLabel: raw.id_label, placeholder: raw.placeholder, hint: raw.hint,
-      homeUrlTemplate: raw.home_url_template,
+      homeUrlTemplate: raw.home_url_template ?? undefined,
     }
     SOURCE_TYPES.push(meta)
     BY_TYPE[meta.type] = meta
@@ -70,7 +62,7 @@ export async function ensureSourceCatalog(): Promise<void> {
   if (SOURCE_TYPES.length) return
   if (!loading) {
     const api = useApi()
-    loading = api.get<SourceCatalogResponse>('/api/sources')
+    loading = api.get<SourceCatalogWire>('/api/sources')
       .then(installSourceCatalog)
       .catch(() => undefined)
       .finally(() => { loading = null })
