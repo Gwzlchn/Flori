@@ -31,7 +31,8 @@ export const useJobStore = defineStore('jobs', () => {
     }
   }
 
-  async function fetchDetail(jobId: string): Promise<JobDetail> {
+  async function fetchDetail(jobId: string, signal?: AbortSignal): Promise<JobDetail> {
+    if (signal) return api.get<JobDetail>(`/api/jobs/${jobId}`, signal)
     return api.get<JobDetail>(`/api/jobs/${jobId}`)
   }
 

@@ -71,6 +71,13 @@ function makeDetail(over: Partial<JobDetail> = {}): JobDetail {
   } as JobDetail
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((ok, fail) => { resolve = ok; reject = fail })
+  return { promise, resolve, reject }
+}
+
 const showToast = vi.fn()
 function mountView() {
   return mount(JobDetailView, {
@@ -575,4 +582,45 @@ describe('JobDetailView 切 job 重置(跨 job 串台回归)', () => {
     expect(content).toContain('B 的原文内容')
     expect(content).not.toContain('A 的原文内容')
   }, 10000)
+
+  it('A 详情迟到时不会覆盖已经完成的 B 路由', async () => {
+    const pendingA = deferred<JobDetail>()
+    fetchDetail.mockImplementation((id: string) => id === 'job_A'
+      ? pendingA.promise
+      : Promise.resolve(makeDetail({ job_id: id, title: 'B 的标题' })))
+
+    routeParams.id = 'job_A'
+    const wrapper = mountView()
+    await flushPromises()
+    routeParams.id = 'job_B'
+    await flushPromises()
+    expect(wrapper.text()).toContain('B 的标题')
+
+    pendingA.resolve(makeDetail({ job_id: 'job_A', title: '迟到的 A 标题' }))
+    await flushPromises()
+    expect(wrapper.text()).toContain('B 的标题')
+    expect(wrapper.text()).not.toContain('迟到的 A 标题')
+  })
+
+  it('WS 已进入终态后拒绝迟到 HTTP processing 快照降级', async () => {
+    const pending = deferred<JobDetail>()
+    fetchDetail.mockReturnValue(pending.promise)
+    const wrapper = mountView()
+    wsJobStatus.value = 'done'
+    await flushPromises()
+    pending.resolve(makeDetail({ status: 'processing' }))
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'StatusBadge' }).props('status')).toBe('done')
+  })
+
+  it('离页会中止在途详情请求并清除面包屑', async () => {
+    fetchDetail.mockReturnValue(new Promise(() => {}))
+    const wrapper = mountView()
+    await flushPromises()
+    const signal = fetchDetail.mock.calls[0][1] as AbortSignal
+    expect(signal.aborted).toBe(false)
+    wrapper.unmount()
+    expect(signal.aborted).toBe(true)
+    expect(setCrumbs).toHaveBeenLastCalledWith(null)
+  })
 })

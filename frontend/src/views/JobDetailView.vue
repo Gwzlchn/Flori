@@ -1,37 +1,37 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, watch, inject, nextTick } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { ref, computed, watch, inject, nextTick } from 'vue'
+import { useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { useJobStore } from '../stores/jobs'
-import { useGlobalStore } from '../stores/global'
-import { useJobWs } from '../composables/useJobWs'
-import MarkdownViewer from '../components/notes/MarkdownViewer.vue'
-import StepWorkbench from '../components/job/StepWorkbench.vue'
-import PipelineDag from '../components/PipelineDag.vue'
-import StatusBadge from '../components/common/StatusBadge.vue'
-import { fmtDateTime, fmtDuration } from '../utils/datetime'
+import { useJobDetailController } from '../composables/useJobDetailController'
+import JobHeaderPanel from '../components/job/detail/JobHeaderPanel.vue'
+import JobNotesPanel from '../components/job/detail/JobNotesPanel.vue'
+import JobReviewPanel from '../components/job/detail/JobReviewPanel.vue'
+import JobConceptsPanel from '../components/job/detail/JobConceptsPanel.vue'
+import JobPipelinePanel from '../components/job/detail/JobPipelinePanel.vue'
+import JobInfoPanel from '../components/job/detail/JobInfoPanel.vue'
+import JobEvidencePanel from '../components/job/detail/JobEvidencePanel.vue'
+import JobDeleteDialog from '../components/job/detail/JobDeleteDialog.vue'
 import { contentTypeIcon, contentTypePill, contentTypeLabel } from '../utils/contentType'
 import { jobSourceLabel } from '../constants/sources'
 import type { CanonicalEvidenceProjection, JobDetail, GlossaryTerm, JobConcept } from '../types'
 import {
-  Play, FileText, ExternalLink, BookOpen, Lightbulb,
-  GitBranch, Info, RefreshCw, ChevronDown, Star, List, RotateCcw, Trash2,
-  AlertTriangle, ChevronRight, Bookmark, ShieldCheck, Coins, Languages,
+  BookOpen, Lightbulb, GitBranch, Info, RefreshCw, RotateCcw, ShieldCheck,
   Image as ImageIcon,
 } from 'lucide-vue-next'
 
 // 内容详情(原型 #detail):头部 + 4 tab,即笔记/概念/流水线/元信息。
 // 一律默认落「笔记」(article/paper 有解析版原文,点开即可读,不等 AI 步)。
 // 另含步骤操作(重试/重跑/删除);笔记侧支持版本切换、评审、采纳、换 provider 重跑。
-const route = useRoute()
 const router = useRouter()
 const api = useApi()
 const jobStore = useJobStore()
-const global = useGlobalStore()
 const showToast = inject<(m: string, t?: 'success' | 'error' | 'info') => void>('showToast', () => {})
 
-const jobId = computed(() => String(route.params.id))
-const { steps, jobStatus, connected, setInitialSteps } = useJobWs(jobId)
+const {
+  jobId, job, loading, loadError, steps, jobStatus, connected,
+  fetchDetail, startPolling, stopPolling,
+} = useJobDetailController({ onReset: resetJobView, onLoaded: handleDetailLoaded })
 
 // 每个 job 的 DAG:流水线定义(含 needs)按 content_type 匹配 /api/pipelines,叠加各步实时状态着色。
 const pipelinesDef = ref<{ name: string; steps: { key: string; label: string | null; pool: string | null; needs: string[] }[] }[]>([])
@@ -67,9 +67,7 @@ const totalAi = computed(() => {
   for (const u of jobUsageRows.value) { cost += u.cost_usd || 0; if (u.provider === 'claude-cli') equiv = true }
   return { cost, equiv, calls: jobUsageRows.value.length }
 })
-const fmtCost = (v: number) => `$${(v ?? 0).toFixed(4)}`
 
-const job = ref<JobDetail | null>(null)
 // 同源 lineage 的所有快照:时间倒序;>1 则头部出历史版本跳转下拉。
 interface LineageVersion { job_id: string; created_at: string; is_current: boolean; title: string | null; status: string }
 const lineageVersions = ref<LineageVersion[]>([])
@@ -77,8 +75,6 @@ function jumpVersion(e: Event) {
   const id = (e.target as HTMLSelectElement).value
   if (id && id !== jobId.value) router.push(`/content/${encodeURIComponent(id)}`)
 }
-const loading = ref(true)
-const loadError = ref('')
 
 // tab
 type Tab = 'notes' | 'concepts' | 'proc' | 'info' | 'evidence' | 'figures'
@@ -99,23 +95,6 @@ const sourceDisplay = computed(() => job.value?.media?.venue || job.value?.media
 // BV 号(B 站)
 const bv = computed(() => jobId.value.match(/_(BV[0-9A-Za-z]+)/)?.[1] ?? null)
 
-// 码率:kbps,≥1000 转 Mbps。
-function fmtBitrate(kbps?: number): string {
-  if (kbps == null) return '—'
-  return kbps >= 1000 ? `${(kbps / 1000).toFixed(1)} Mbps` : `${kbps} kbps`
-}
-
-// 原始文件大小:字节优先(精确,可转 KB);无字节时回退 MB。
-function fmtSize(media: { file_size_bytes?: number; file_size_mb?: number }): string {
-  let b = media.file_size_bytes
-  if (b == null && media.file_size_mb != null) b = media.file_size_mb * 1048576
-  if (b == null) return '—'
-  if (b < 1024) return `${b} B`
-  const u = ['KB', 'MB', 'GB', 'TB']
-  let v = b / 1024, i = 0
-  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++ }
-  return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${u[i]}`
-}
 const anyRunning = computed(() => steps.value.some(s => s.status === 'running'))
 const genStart = computed(() => {
   const t = steps.value.map(s => s.started_at).filter(Boolean).map(x => +new Date(x as string))
@@ -132,41 +111,17 @@ const genDurSec = computed(() => (genStart.value && genEnd.value ? (genEnd.value
 const collectionId = computed(() => job.value?.collection_id ?? null)
 const collectionName = computed(() => job.value?.collection_name ?? null)
 
-async function fetchDetail() {
-  loading.value = true
-  loadError.value = ''
-  jobUsageRows.value = []  // 切 job 先清空:避免新 job 的 usage 请求失败/404 时残留上一个 job 的开销(跨 job 串台)
+async function handleDetailLoaded(_detail: JobDetail) {
   const fid = jobId.value
-  try {
-    const d = await jobStore.fetchDetail(jobId.value)
-    job.value = d
-    jobStatus.value = d.status
-    // 面包屑用真实内容:知识库 / 领域 / 标题。
-    global.setCrumbs([
-      { t: '知识库', to: '/' },
-      ...(d.domain ? [{ t: d.domain, to: `/kb/${encodeURIComponent(d.domain)}` }] : []),
-      { t: d.title || jobId.value },
-    ])
-    setInitialSteps(d.steps)
-    // 同源 lineage 快照(重投/来源更新/pipeline 重建产生的多个 job);>1 则头部出历史版本跳转。
-    api.get<{ versions: LineageVersion[] }>(`/api/jobs/${fid}/versions`).then(r => { if (jobId.value === fid) lineageVersions.value = r?.versions || [] }).catch(() => {})
-    loadEvidence()  // 权威来源(取证产物);有则显示「权威来源」tab
-    loadOriginal()  // 原文 MD(article 链 output/original.md);在笔记 tab 作「原文」变体展示
-    loadTranslated()  // 译文 MD(非中文文章 output/translated.md);有则显示「译文」tab
-    loadFigures()     // 论文图表(intermediate/figures.json);有渲染图则显示「图表」tab
-    // 本 job DAG 的 needs 依赖定义,来自 /api/pipelines 的 {pipelines:[...]};失败留空不影响详情。
-    api.get<{ pipelines?: any[] }>('/api/pipelines').then(r => { pipelinesDef.value = Array.isArray(r) ? r : (r?.pipelines ?? []) }).catch(() => {})
-    // 逐次 AI 用量 → DAG 节点 provider/开销 + 总开销。带 job 切换守卫,迟到的回填不串到新 job。
-    api.get<{ usage?: any[] }>(`/api/jobs/${fid}/usage`).then(r => { if (jobId.value === fid) jobUsageRows.value = r?.usage || [] }).catch(() => {})
-    // 本任务各 AI 步用的 prompt 版本 vs 当前激活版本(白盒版本管理);不一致给「重跑该步」。
-    loadPromptVersions().catch(() => {})
-    // 一律默认落笔记:article/paper 的解析版原文不等 AI 步,点开即有内容可读。
-    tab.value = 'notes'
-  } catch (e: any) {
-    loadError.value = e?.status === 404 ? '内容不存在或已删除' : (e?.message || '加载失败')
-  } finally {
-    loading.value = false
-  }
+  api.get<{ versions: LineageVersion[] }>(`/api/jobs/${fid}/versions`).then(r => { if (jobId.value === fid) lineageVersions.value = r?.versions || [] }).catch(() => {})
+  void loadEvidence()
+  void loadOriginal()
+  void loadTranslated()
+  void loadFigures()
+  api.get<{ pipelines?: any[] }>('/api/pipelines').then(r => { if (jobId.value === fid) pipelinesDef.value = Array.isArray(r) ? r : (r?.pipelines ?? []) }).catch(() => {})
+  api.get<{ usage?: any[] }>(`/api/jobs/${fid}/usage`).then(r => { if (jobId.value === fid) jobUsageRows.value = r?.usage || [] }).catch(() => {})
+  void loadPromptVersions()
+  tab.value = 'notes'
 }
 
 // 切 job 必须重置的每-job 视图态。notesInit 不复位会让 ensureNotes 对新 job 直接 no-op,
@@ -174,6 +129,8 @@ async function fetchDetail() {
 // 其余清空防切页瞬间闪现旧 job 内容。
 function resetJobView() {
   notesInit = false; conceptsInit = false
+  jobUsageRows.value = []
+  lineageVersions.value = []; pipelinesDef.value = []
   noteContent.value = ''; noteError.value = ''
   canonicalEvidence.value = []
   versions.value = []; review.value = null
@@ -183,10 +140,6 @@ function resetJobView() {
   activeFile.value = null; noteVariant.value = 'smart'
   selectedStep.value = ''
 }
-
-onMounted(fetchDetail)
-watch(jobId, () => { stopPolling(); resetJobView(); fetchDetail() })   // 切 job 先停旧轮询 + 清旧视图态
-onBeforeUnmount(() => { global.setCrumbs(null); stopPolling() })   // 离开详情页清面包屑覆盖 + 停轮询
 
 // 笔记 tab
 const domain = computed(() => job.value?.domain || '')
@@ -550,15 +503,9 @@ async function confirmRerun() {
     rerunning.value = false
   }
 }
-// 轮询定时器放组件作用域:卸载/切 job/再次重跑时统一清理,避免泄漏与对已销毁状态的写入。
-let pollTimer: ReturnType<typeof setInterval> | null = null
-function stopPolling() {
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
-}
 function pollForVersion(provider: string) {
-  stopPolling()
   let n = 0
-  pollTimer = setInterval(async () => {
+  startPolling(async () => {
     n++
     await loadVersions()
     const got = versions.value.find(v => v.provider === provider)
@@ -721,7 +668,6 @@ async function rebuildJob() {
 
 // 删除
 const showDelete = ref(false)
-const showArtifacts = ref(false)   // 产物路径默认折叠
 async function confirmDelete() {
   try {
     await jobStore.deleteJob(jobId.value)
@@ -767,51 +713,12 @@ watch(job, (j) => {
     </div>
 
     <template v-else-if="job">
-      <!-- 头部 -->
-      <div class="card pad" style="margin-bottom:16px">
-        <div style="display:flex;align-items:flex-start;gap:13px">
-          <span class="type-pill" :class="typeClass" style="width:42px;height:42px">
-            <component :is="typeIcon" />
-          </span>
-          <div style="flex:1;min-width:0">
-            <div class="h1 sm" style="overflow:hidden;text-overflow:ellipsis">{{ job.title || job.job_id }}</div>
-            <div class="meta" style="margin-top:5px">
-              <StatusBadge :status="jobStatus" />
-              <span class="badge b-mut">{{ contentTypeLabel(job.content_type) }}</span>
-              <span>{{ sourceDisplay }}</span>
-              <template v-if="job.domain">
-                <span class="sep">·</span><span>{{ job.domain }}</span>
-              </template>
-              <template v-if="bv">
-                <span class="sep">·</span><span class="mono dim">{{ bv }}</span>
-              </template>
-              <template v-if="job.url">
-                <span class="sep">·</span>
-                <a class="ghost" :href="job.url" target="_blank" rel="noopener" style="color:var(--info)">原始链接<ExternalLink :size="13" /></a>
-              </template>
-              <template v-if="lineageVersions.length > 1">
-                <span class="sep">·</span>
-                <select class="ver-jump" :value="job.job_id" @change="jumpVersion"
-                  title="同源内容的历史快照(重投/来源更新/pipeline 重建)——跳转查看/对比">
-                  <option v-for="(v, i) in lineageVersions" :key="v.job_id" :value="v.job_id">
-                    版本 {{ lineageVersions.length - i }}{{ v.is_current ? '(当前)' : '' }} · {{ fmtDateTime(v.created_at) }}
-                  </option>
-                </select>
-              </template>
-            </div>
-            <div class="dim" style="font-size:12px;margin-top:4px">
-              上传于 {{ fmtDateTime(job.published_at) }} · 生成
-              {{ genStart ? fmtDateTime(genStart) : '—' }} →
-              {{ anyRunning ? '进行中' : (genEnd ? fmtDateTime(genEnd) : '—') }}
-              · 耗时 {{ genEnd ? fmtDuration(genDurSec) : '—' }}
-            </div>
-            <div v-if="jobStatus === 'processing'" class="dim" style="font-size:11.5px;margin-top:4px;display:flex;align-items:center;gap:6px">
-              <span class="dot" :class="connected ? 'd-ok pulse' : 'd-bad'" />
-              {{ connected ? '实时更新中' : '连接断开，重连中…' }}
-            </div>
-          </div>
-        </div>
-      </div>
+      <JobHeaderPanel
+        :job="job" :job-status="jobStatus" :connected="connected" :type-icon="typeIcon"
+        :type-class="typeClass" :source-display="sourceDisplay" :bv="bv"
+        :lineage-versions="lineageVersions" :gen-start="genStart" :gen-end="genEnd"
+        :gen-dur-sec="genDurSec" :any-running="anyRunning" @jump-version="jumpVersion"
+      />
 
       <!-- tabs -->
       <div class="tabs">
@@ -828,184 +735,28 @@ watch(job, (j) => {
 
       <!-- 笔记(article:智能版可隐藏、机械版=原文) -->
       <div v-show="tab === 'notes'">
-        <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
-          <!-- 智能版:无智能笔记(如文章关笔记)时隐藏;机械版对文章即「原文」 -->
-          <div class="seg" v-if="hasSmartNote || hasTranslation">
-            <button v-if="hasSmartNote" :class="{ on: noteVariant === 'smart' }" @click="switchVariant('smart')">智能版</button>
-            <button :class="{ on: noteVariant === 'original' }" @click="switchVariant('original')">{{ hasReadableOriginal ? '原文' : '机械版' }}</button>
-            <button v-if="hasTranslation" :class="{ on: noteVariant === 'translated' }" @click="switchVariant('translated')">译文</button>
-          </div>
-          <span v-else class="dim" style="font-size:12px">{{ hasReadableOriginal ? '原文' : '机械版' }}（未生成智能笔记）</span>
-
-          <template v-if="noteVariant === 'smart'">
-            <span class="dim" style="font-size:12px;margin-left:6px">版本</span>
-            <span v-if="versions.length === 0" class="chip on" style="cursor:default">默认</span>
-            <span
-              v-for="v in versions" :key="v.file"
-              class="chip" :class="{ on: (activeFile ?? versions[0]?.file) === v.file }"
-              style="max-width:240px" @click="selectVersion(v.file)"
-            >
-              <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ v.provider }}/{{ v.model }} · {{ verLabel(v) }}</span>
-              <template v-if="v.overall != null"><Star :size="11" style="color:var(--amber)" />{{ v.overall }}</template>
-              <span v-else-if="v.review_state === 'unreliable'" class="dim">评审不可靠</span>
-              <span v-else-if="v.review_state === 'legacy_unverified'" class="dim">旧版未验证</span>
-            </span>
-
-            <!-- 换 provider 重跑 -->
-            <div style="position:relative;margin-left:auto">
-              <button class="btn sm" :disabled="rerunning" @click="showRerun = !showRerun">
-                <RefreshCw :size="13" :class="rerunning ? 'pulse' : ''" />
-                {{ rerunning ? '生成中…' : '换 provider 重跑' }}
-                <ChevronDown :size="13" />
-              </button>
-              <div
-                v-if="showRerun"
-                class="card"
-                style="position:absolute;right:0;top:calc(100% + 6px);width:200px;z-index:30;padding:5px;box-shadow:var(--sh-lg)"
-              >
-                <button
-                  v-for="p in providers" :key="p.name"
-                  class="iconbtn" :disabled="!p.available"
-                  style="width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 9px;border-radius:var(--r-sm);font-size:12px;text-align:left"
-                  :style="!p.available ? 'opacity:.5;cursor:not-allowed' : ''"
-                  @click="rerunWith(p)"
-                >
-                  <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p.name }} <span class="dim">({{ p.label }})</span></span>
-                  <span v-if="!p.available" class="dim" style="font-size:11px;flex:none">无 key</span>
-                </button>
-                <div v-if="providers.length === 0" class="dim" style="font-size:12px;padding:8px 9px">无可用 provider</div>
-              </div>
-            </div>
-          </template>
-        </div>
-
-        <!-- 质量评审面板 -->
-        <div v-if="noteVariant === 'smart' && review" class="review" style="margin-bottom:16px">
-          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-            <b style="font-size:13.5px;color:var(--ink-900)">质量评审</b>
-            <span v-if="reviewReliable && review.overall != null" class="badge b-warn"><Star :size="12" />{{ review.overall }} / 5</span>
-            <span v-if="reviewReliable" class="badge b-ok">可靠</span>
-            <span v-else-if="reviewState === 'unreliable'" class="badge b-warn">不可靠,仅供诊断</span>
-            <span v-else class="badge">旧版未验证</span>
-            <span class="dim" style="font-size:12px">
-              {{ review.provider }}<template v-if="review.model"> / {{ review.model }}</template>
-              <template v-if="review.generated_at"> · {{ review.generated_at }}</template>
-            </span>
-          </div>
-          <div v-if="!reviewReliable" class="lead" style="margin:8px 0;color:var(--warn,#b45309)">
-            本次评审不会用于术语采纳或知识沉淀。
-            <template v-if="reviewReasons.length">原因:{{ reviewReasons.join(' / ') }}</template>
-          </div>
-          <div v-if="reviewDims.length" class="dims">
-            <div v-for="d in reviewDims" :key="d.label" class="dim-g">
-              <div class="row-l">{{ d.label }}<b>{{ d.score }}</b></div>
-              <div class="track"><span :style="{ width: Math.max(0, Math.min(100, d.score * 20)) + '%' }" /></div>
-            </div>
-          </div>
-          <div v-if="reviewMissingConcepts.length" style="font-size:12.5px;color:var(--ink-600);margin-bottom:6px">
-            <span class="dim">缺失概念：</span>{{ reviewMissingConcepts.join(' / ') }}
-          </div>
-          <div v-if="reviewTop3.length" style="font-size:12.5px;color:var(--ink-600);margin-bottom:6px">
-            <span class="dim">改进建议：</span>
-            <ol style="margin:4px 0 0 18px">
-              <li v-for="(t, i) in reviewTop3" :key="i">{{ t }}</li>
-            </ol>
-          </div>
-          <div v-if="reviewIssues.length" class="review-issues" style="margin-bottom:8px">
-            <div class="dim" style="font-size:12.5px;margin-bottom:4px">结构化问题:</div>
-            <div v-for="(issue, i) in reviewIssues" :key="i" class="card pad" style="padding:8px 10px;margin-bottom:6px;font-size:12.5px">
-              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-                <span class="badge">{{ DIM_LABELS[issue.dimension] || issue.dimension || issue.type }}</span>
-                <b>{{ issue.claim || issue.message }}</b>
-                <span class="dim">{{ issue.severity }}</span>
-              </div>
-              <div v-if="issue.message && issue.message !== issue.claim" style="margin-top:3px">{{ issue.message }}</div>
-              <div v-if="reviewReliable && issue.evidence_status === 'supported' && issue.locator" class="dim" style="margin-top:3px">
-                证据 {{ issue.locator.source }}: “{{ issue.locator.quote }}”
-                <a v-if="reviewSourcePath(issue.locator.source)" :href="artifactUrl(reviewSourcePath(issue.locator.source))" target="_blank" rel="noopener" style="margin-left:6px">查看来源</a>
-              </div>
-              <div v-else-if="issue.evidence_status === 'insufficient'" class="dim" style="margin-top:3px">
-                证据不足: {{ issue.reason }}
-              </div>
-            </div>
-          </div>
-          <div v-if="keyTerms.length" style="font-size:12.5px;color:var(--ink-600)">
-            <span class="dim">已讲清的概念（可采纳）：</span>
-            <span v-for="kt in keyTerms" :key="kt.term" style="display:inline-flex;align-items:center;margin:0 6px 4px 0">
-              <b style="color:var(--ink-900)">{{ kt.term }}</b>
-              <button
-                class="btn sm" style="padding:2px 8px;margin-left:6px"
-                :disabled="!reviewReliable || acceptedTermNames.has(kt.term)"
-                :style="acceptedTermNames.has(kt.term) ? 'color:var(--ok);border-color:var(--ok-bd)' : ''"
-                @click="acceptKeyTerm(kt.term, kt.definition)"
-              >{{ acceptedTermNames.has(kt.term) ? '✓ 已采纳' : '采纳' }}</button>
-            </span>
-          </div>
-        </div>
-
-        <!-- 正文 + 章节 -->
-        <div v-if="noteLoading" class="card pad"><div class="state"><span class="spinner" />加载笔记…</div></div>
-        <div v-else-if="noteError" class="card pad">
-          <div class="state"><FileText class="big" /><div class="t">{{ noteError }}</div></div>
-        </div>
-        <!-- 论文「原文」= 内嵌 PDF(浏览器原生渲染;文本抽取排版损伤救不回,不走 MD) -->
-        <iframe
-          v-else-if="noteVariant === 'original' && isPaper && !paperHtmlSource"
-          :src="paperPdfUrl" class="pdf-frame" title="论文 PDF 原文"
-        />
-        <div v-else class="notes-wrap">
-          <p v-if="noteVariant === 'translated'" class="lead" style="grid-column:1/-1;margin:-6px 0 0"><Languages :size="13" /> 原文为非中文,以下是 AI 忠实全文译文(保留原结构与配图)。</p>
-          <!-- max-w-none:解除 @tailwindcss/typography 给 .prose 的 65ch 上限,
-               否则笔记正文被卡到 ~586px、在 762px 列里右侧留大片空白(笔记大小不对)。 -->
-          <div class="card pad prose max-w-none">
-            <MarkdownViewer
-              :content="noteContent" :job-id="jobId" :terms="terms" :domain="domain"
-              :evidence-ids="eligibleEvidenceIds"
-              :canonical-evidence="canonicalEvidence"
-              @headings="headings = $event" @pdf-page="onPdfPageJump"
-              @evidence-citation="onEvidenceCitation"
-            />
-          </div>
-          <nav v-if="headings.length" class="toc">
-            <div class="seclabel"><List :size="14" />章节</div>
-            <a
-              v-for="h in headings" :key="h.id"
-              :href="`#${h.id}`" :class="{ sub: h.level >= 3 }"
-            >{{ h.text }}</a>
-          </nav>
-        </div>
+        <JobNotesPanel :job-id="jobId" :domain="domain" :has-smart-note="hasSmartNote" :has-translation="hasTranslation"
+          :has-readable-original="hasReadableOriginal" :note-variant="noteVariant" :versions="versions" :active-file="activeFile"
+          :rerunning="rerunning" :show-rerun="showRerun" :providers="providers" :note-loading="noteLoading" :note-error="noteError"
+          :is-paper="isPaper" :paper-html-source="paperHtmlSource" :paper-pdf-url="paperPdfUrl" :note-content="noteContent"
+          :terms="terms" :evidence-ids="eligibleEvidenceIds" :canonical-evidence="canonicalEvidence" :headings="headings"
+          :version-label="verLabel" @switch-variant="switchVariant" @select-version="selectVersion"
+          @toggle-rerun="showRerun = !showRerun" @rerun="rerunWith" @headings="headings = $event"
+          @pdf-page="onPdfPageJump" @evidence-citation="onEvidenceCitation">
+          <JobReviewPanel v-if="noteVariant === 'smart' && review" :review="review" :reliable="reviewReliable"
+            :state="reviewState" :reasons="reviewReasons" :dimensions="reviewDims" :missing-concepts="reviewMissingConcepts"
+            :improvements="reviewTop3" :issues="reviewIssues" :dimension-labels="DIM_LABELS" :key-terms="keyTerms"
+            :accepted-terms="acceptedTermNames" :source-path="reviewSourcePath" :artifact-url="artifactUrl" @accept="acceptKeyTerm" />
+        </JobNotesPanel>
       </div>
 
       <!-- 权威来源 -->
       <div v-show="tab === 'evidence'">
-        <div class="card pad">
-          <div class="card-h"><ShieldCheck :size="15" />权威来源<template v-if="evidenceItems.length"> · {{ evidenceItems.length }}</template></div>
-          <p class="lead" style="margin:-6px 0 12px">候选来源经服务端受控下载与完整性校验。只有合格证据可从笔记 [E#] 跳转或打开原文。</p>
-          <p v-if="evidenceManifestState === 'legacy'" class="lead" style="color:var(--warn,#b45309)">旧版证据未验证,链接已禁用。</p>
-          <p v-else-if="evidenceManifestState === 'partial'" class="lead" style="color:var(--warn,#b45309)">部分证据未通过当前校验,仅已验证条目可用。</p>
-          <p v-else-if="evidenceManifestState === 'invalid'" class="lead" style="color:var(--warn,#b45309)">证据清单校验失败,链接已禁用。</p>
-          <p v-if="evidenceManifestErrors.length" class="lead" style="color:var(--warn,#b45309)">校验原因: {{ evidenceManifestErrors.join(' / ') }}</p>
-
-          <div v-for="s in evidenceItems" :key="s.id" class="card pad" style="margin-bottom:10px" :data-evidence-card="s.id">
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
-              <span class="chip on" style="cursor:default">{{ s.id }}</span>
-              <span class="badge">{{ s.source_tier || '来源待定' }}</span>
-              <span style="font-size:11px;font-weight:600" :style="{ color: s.confidence === 'high' ? '#15803d' : '#b45309' }">{{ s.confidence }}</span>
-              <strong style="font-size:13.5px">{{ s.title }}</strong>
-            </div>
-            <div style="font-size:12px;color:var(--ink-500);margin-bottom:6px">
-              {{ s.publisher }}
-              <a v-if="safeEvidenceUrl(s)" :href="safeEvidenceUrl(s)" target="_blank" rel="noopener" style="margin-left:6px;display:inline-flex;align-items:center;gap:2px">
-                <ExternalLink :size="12" />原文链接
-              </a>
-              <span v-else class="dim" style="margin-left:6px">链接不可用</span>
-              <a v-if="safeEvidenceArtifact(s)" :href="artifactUrl(safeEvidenceArtifact(s))" target="_blank" rel="noopener" style="margin-left:6px">证据全文</a>
-            </div>
-            <div v-if="evidenceMatches(s).length" class="dim" style="font-size:12px">命中锚点: {{ evidenceMatches(s).map((m: any) => m.anchor).join(' / ') }}</div>
-            <div v-if="evidenceReasons(s).length" class="dim" style="font-size:12px">{{ evidenceReasons(s).join(' / ') }}</div>
-            <div v-if="evidenceVerificationReasons(s).length" class="dim" style="font-size:12px">校验原因: {{ evidenceVerificationReasons(s).join(' / ') }}</div>
-          </div>
-        </div>
+        <JobEvidencePanel
+          :items="evidenceItems" :manifest-state="evidenceManifestState" :manifest-errors="evidenceManifestErrors"
+          :safe-url="safeEvidenceUrl" :safe-artifact="safeEvidenceArtifact" :artifact-url="artifactUrl"
+          :matches="evidenceMatches" :reasons="evidenceReasons" :verification-reasons="evidenceVerificationReasons"
+        />
       </div>
 
       <!-- 图表(论文按图注渲染的页面区域,含矢量图) -->
@@ -1019,158 +770,24 @@ watch(job, (j) => {
 
       <!-- 概念 -->
       <div v-show="tab === 'concepts'">
-        <div class="card pad">
-          <div class="card-h"><Lightbulb :size="15" />本内容涉及的概念<template v-if="jobConcepts.length"> · {{ jobConcepts.length }}</template></div>
-          <p class="lead" style="margin:-6px 0 12px">这条内容里命中的概念。点进去可反查它在整个知识库里——还有哪些内容也讲过它。</p>
-
-          <div v-if="conceptsLoading" class="state"><span class="spinner" />加载概念…</div>
-          <div v-else-if="conceptsError" class="state"><Lightbulb class="big" /><div class="t">{{ conceptsError }}</div>
-            <button class="btn" @click="loadConcepts"><RotateCcw :size="14" />重试</button></div>
-          <div v-else-if="jobConcepts.length === 0" class="state"><Lightbulb class="big" /><div class="t">这条内容暂未关联任何概念</div></div>
-          <div v-else>
-            <div v-for="c in jobConcepts" :key="c.term" class="concept" @click="goConcept(c)">
-              <Bookmark v-if="c.is_topic" class="pin" />
-              <span v-else style="width:14px;flex:none" />
-              <div style="flex:1;min-width:0">
-                <div class="t">
-                  {{ c.term }}
-                  <span v-if="c.is_topic" class="badge b-brand" style="margin-left:4px">主题概念</span>
-                </div>
-                <div v-if="c.definition" class="d" style="white-space:normal">{{ c.definition }}</div>
-                <div class="d">
-                  <template v-if="conceptOccText(c)">本内容 {{ conceptOccText(c) }} · </template>全库 {{ c.occurrences?.length ?? 0 }} 条内容讲过
-                </div>
-              </div>
-              <StatusBadge :status="c.status" />
-              <ChevronRight :size="15" class="dim" style="flex:none" />
-            </div>
-          </div>
-        </div>
+        <JobConceptsPanel :concepts="jobConcepts" :loading="conceptsLoading" :error="conceptsError"
+          :occurrence-text="conceptOccText" @retry="loadConcepts" @select="goConcept" />
       </div>
 
       <!-- 流水线 -->
       <div v-show="tab === 'proc'">
-        <div v-if="jobDagSteps.length" class="card pad" style="margin-bottom:14px;padding:13px 15px">
-          <div style="font-size:13px;font-weight:600;color:var(--ink-800);display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-            <GitBranch :size="14" />流程依赖图（DAG）
-            <span style="font-weight:400;font-size:11px;color:var(--ink-500);display:inline-flex;gap:9px;margin-left:4px">
-              <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:7px;height:7px;border-radius:50%;background:var(--ok)"></i>完成</span>
-              <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:7px;height:7px;border-radius:50%;background:var(--run)"></i>运行中</span>
-              <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:7px;height:7px;border-radius:50%;background:var(--bad)"></i>失败</span>
-              <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:7px;height:7px;border-radius:50%;background:var(--ink-300)"></i>跳过/待运行</span>
-              <span style="color:var(--ink-300)">|</span>
-              <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:3px;height:11px;border-radius:1px;background:var(--info)"></i>AI</span>
-              <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:3px;height:11px;border-radius:1px;background:var(--ink-400)"></i>CPU</span>
-              <span style="display:inline-flex;align-items:center;gap:4px"><i style="width:3px;height:11px;border-radius:1px;background:var(--warn)"></i>GPU</span>
-            </span>
-            <span v-if="totalAi.calls" style="margin-left:auto;font-weight:600;color:var(--ink-700);display:inline-flex;align-items:center;gap:5px;font-size:12px">
-              <Coins :size="13" style="color:var(--ink-400)" />AI 总开销 {{ fmtCost(totalAi.cost) }}<span v-if="totalAi.equiv" style="font-weight:400;color:var(--ink-400);font-size:11px">（等价）</span>
-            </span>
-          </div>
-          <PipelineDag :steps="jobDagSteps" :status-by-key="stepStatusByKey" :selected="selectedStep" :usage-by-step="usageByStep" @select="selectedStep = $event" style="margin-top:10px" />
-        </div>
-        <!-- 步骤操作:对当前选中步(上方 DAG 点选)重跑;失败 job 可整体重试。紧贴步骤与产物摆放 -->
-        <div v-if="jobStatus === 'done' || jobStatus === 'failed'" style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
-          <button v-if="jobStatus === 'failed'" class="btn pri" @click="retryJob"><RotateCcw :size="14" />重试</button>
-          <button v-if="selectedStep" class="btn" @click="rerunFromStep"><Play :size="14" />从「{{ selectedStepLabel }}」重跑</button>
-          <button class="btn" :disabled="rebuilding" @click="rebuildJob"
-            title="基于当前 pipeline/prompt 重建为新版本(只重跑变化步骤及下游,旧版本保留对比)">
-            <GitBranch :size="14" />{{ rebuilding ? '重建中…' : '重建新版本' }}
-          </button>
-        </div>
-        <!-- 本任务 Prompt 版本:AI 步显示派发时用的版本,与当前激活版本不一致则高亮 + 「重跑该步」 -->
-        <div v-if="aiPromptRows.length" class="card pad" style="margin-bottom:12px">
-          <div class="card-h"><FileText :size="15" />本任务 Prompt 版本</div>
-          <div v-for="r in aiPromptRows" :key="r.step" class="pver-row">
-            <span class="pver-step">{{ r.label }}</span>
-            <span class="pver-tag" :class="r.stale ? 'pv-stale' : 'pv-ok'">
-              本任务 prompt v{{ r.used }}<template v-if="r.stale"> · 当前 {{ r.current == null ? '默认(无覆盖)' : 'v' + r.current }}</template>
-            </span>
-            <span style="flex:1"></span>
-            <button v-if="r.stale" class="btn sm" @click="rerunStep(r.step)"><Play :size="13" />重跑该步</button>
-          </div>
-          <div class="dim" style="font-size:12px;margin-top:6px">
-            「本任务」= 该步派发时用的 prompt 版本快照;不一致表示之后改过 prompt,可「重跑该步」按当前版本重出(连同其下游)。
-          </div>
-        </div>
-        <StepWorkbench :job-id="jobId" :steps="steps" :selected-step="selectedStep" />
+        <JobPipelinePanel :job-id="jobId" :steps="steps" :dag-steps="jobDagSteps"
+          :status-by-key="stepStatusByKey" :selected-step="selectedStep" :selected-step-label="selectedStepLabel"
+          :usage-by-step="usageByStep" :total-ai="totalAi" :job-status="jobStatus" :rebuilding="rebuilding"
+          :prompt-rows="aiPromptRows" @select-step="selectedStep = $event" @retry="retryJob"
+          @rerun="rerunFromStep" @rebuild="rebuildJob" @rerun-prompt="rerunStep" />
       </div>
 
       <!-- 元信息 -->
       <div v-show="tab === 'info'">
-        <!-- 内容本身(源)信息 -->
-        <div class="card pad">
-          <div class="card-h"><Info :size="15" />内容信息</div>
-          <table class="kv">
-            <tr><td>标题</td><td>{{ job.title || '—' }}</td></tr>
-            <tr><td>类型</td><td>{{ contentTypeLabel(job.content_type) }}</td></tr>
-            <tr><td>来源</td><td>{{ sourceDisplay }}</td></tr>
-            <tr v-if="job.media?.authors?.length"><td>作者</td><td>{{ job.media.authors.join('、') }}</td></tr>
-            <tr><td>发布时间</td><td>{{ fmtDateTime(job.published_at) }}</td></tr>
-            <!-- 视频→时长+分辨率、文章→字数、通用→原始大小/字幕(metadata.json/parsed.json) -->
-            <tr v-if="job.media?.duration_sec"><td>时长</td><td>{{ fmtDuration(job.media.duration_sec) }}</td></tr>
-            <tr v-if="job.media?.resolution"><td>分辨率</td><td class="mono">{{ job.media.resolution }}</td></tr>
-            <tr v-if="job.media?.video_codec"><td>视频编码</td><td class="mono">{{ job.media.video_codec }}</td></tr>
-            <tr v-if="job.media?.audio_codec"><td>音频编码</td><td class="mono">{{ job.media.audio_codec }}</td></tr>
-            <tr v-if="job.media?.fps"><td>帧率</td><td>{{ job.media.fps }} fps</td></tr>
-            <tr v-if="job.media?.bitrate_kbps ?? job.media?.video_bitrate_kbps"><td>码率</td><td>{{ fmtBitrate(job.media.bitrate_kbps ?? job.media.video_bitrate_kbps) }}</td></tr>
-            <tr v-if="job.media?.word_count"><td>字数</td><td>{{ job.media.word_count.toLocaleString() }} 字</td></tr>
-            <tr v-if="job.media?.pages"><td>页数</td><td>{{ job.media.pages }} 页</td></tr>
-            <tr v-if="job.media?.lang"><td>语言</td><td>{{ job.media.lang === 'zh' ? '中文' : (job.media.lang === 'non-zh' ? '非中文(英文等,自动翻译)' : job.media.lang) }}</td></tr>
-            <tr v-if="job.media?.tags?.length"><td>标签</td><td>{{ job.media.tags.join('、') }}</td></tr>
-            <tr v-if="job.media?.abstract"><td>摘要</td><td style="line-height:1.6">{{ job.media.abstract }}</td></tr>
-            <tr v-if="job.media && (job.media.file_size_bytes != null || job.media.file_size_mb != null)">
-              <td>原始文件大小</td><td>{{ fmtSize(job.media) }}</td>
-            </tr>
-            <tr v-if="['video','audio'].includes(job.content_type) && job.media && (job.media.has_subtitle !== undefined || job.media.has_danmaku !== undefined)">
-              <td>字幕/弹幕</td>
-              <td>
-                <span class="badge" :class="job.media.has_subtitle ? 'b-ok' : 'b-mut'">{{ job.media.has_subtitle ? '有字幕' : '无字幕' }}</span>
-                <span v-if="job.media.has_danmaku" class="badge b-info" style="margin-left:5px">有弹幕</span>
-              </td>
-            </tr>
-            <tr v-if="bv"><td>BV 号</td><td class="mono">{{ bv }}</td></tr>
-            <tr v-if="job.url"><td>原始链接</td><td>
-              <a class="ghost" :href="job.url" target="_blank" rel="noopener" style="color:var(--info)">{{ job.url }}<ExternalLink :size="13" /></a>
-            </td></tr>
-          </table>
-        </div>
-
-        <!-- 处理(任务)信息 -->
-        <div class="card pad" style="margin-top:16px">
-          <div class="card-h"><GitBranch :size="15" />处理信息</div>
-          <table class="kv">
-            <tr><td>Job ID</td><td class="mono">{{ job.job_id }}</td></tr>
-            <tr><td>状态</td><td><StatusBadge :status="jobStatus" /></td></tr>
-            <tr><td>知识库</td><td>{{ job.domain || '—' }}</td></tr>
-            <tr><td>集合</td><td>
-              <template v-if="collectionName">
-                {{ collectionName }}
-                <span v-if="collectionId" class="mono dim" style="font-size:11.5px;margin-left:6px">{{ collectionId }}</span>
-              </template>
-              <span v-else class="dim">未归集合</span>
-            </td></tr>
-            <tr><td>创建于</td><td>{{ fmtDateTime(job.created_at) }}</td></tr>
-            <tr v-if="job.updated_at"><td>更新于</td><td>{{ fmtDateTime(job.updated_at) }}</td></tr>
-            <tr><td>生成耗时</td><td>{{ genEnd ? fmtDuration(genDurSec) : (anyRunning ? '进行中' : '—') }}</td></tr>
-          </table>
-
-          <!-- 产物路径(绝对路径,可折叠) -->
-          <div v-if="job.artifacts?.length" class="artifacts">
-            <button class="art-toggle" @click="showArtifacts = !showArtifacts">
-              <ChevronDown :size="14" class="art-caret" :class="{ open: showArtifacts }" />
-              产物路径 · {{ job.artifacts.length }}
-            </button>
-            <ul v-show="showArtifacts" class="art-list">
-              <li v-for="p in job.artifacts" :key="p" class="mono">{{ p }}</li>
-            </ul>
-          </div>
-
-          <div style="margin-top:16px;display:flex;gap:8px">
-            <button v-if="jobStatus === 'failed'" class="btn" @click="retryJob"><RotateCcw :size="14" />重新提交</button>
-            <button class="btn danger" @click="showDelete = true"><Trash2 :size="14" />删除内容</button>
-          </div>
-        </div>
+        <JobInfoPanel :job="job" :job-status="jobStatus" :source-display="sourceDisplay" :bv="bv"
+          :collection-id="collectionId" :collection-name="collectionName" :gen-end="genEnd"
+          :gen-dur-sec="genDurSec" :any-running="anyRunning" @retry="retryJob" @delete="showDelete = true" />
       </div>
     </template>
 
@@ -1191,52 +808,15 @@ watch(job, (j) => {
       </div>
     </div>
 
-    <!-- 删除确认 -->
-    <div v-if="showDelete" class="overlay show confirm" @click.self="showDelete = false">
-      <div class="modal">
-        <div class="hd">
-          <span class="danger-ic"><AlertTriangle :size="18" /></span>
-          <b>删除内容</b>
-        </div>
-        <div class="bd" style="font-size:13.5px;color:var(--ink-700)">确定删除此内容及所有产物？此操作不可恢复。</div>
-        <div class="ft">
-          <button class="btn" @click="showDelete = false">取消</button>
-          <button class="btn danger" @click="confirmDelete"><Trash2 :size="14" />删除</button>
-        </div>
-      </div>
-    </div>
+    <JobDeleteDialog v-if="showDelete" @cancel="showDelete = false" @confirm="confirmDelete" />
   </div>
 </template>
 
 <style scoped>
-/* 论文原文内嵌 PDF:占满列宽、接近整屏高,浏览器原生渲染 */
-.pdf-frame {
-  width: 100%; height: 82vh; border: 1px solid var(--line-soft);
-  border-radius: 10px; background: #f9fafb;
-}
 .fig-card { margin: 0 0 22px; }
 .fig-card img {
   max-width: 100%; display: block; border: 1px solid var(--line-soft);
   border-radius: 8px; background: #fff; padding: 8px;
 }
 .fig-card figcaption { margin-top: 6px; font-size: 13px; color: var(--ink-600); line-height: 1.5; }
-.artifacts { margin-top: 16px; border-top: 1px solid var(--line-soft); padding-top: 12px; }
-.art-toggle {
-  display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600;
-  color: var(--ink-700); background: none; cursor: pointer; padding: 0;
-}
-.art-caret { transition: transform .15s; transform: rotate(-90deg); }  /* 默认折叠 */
-.art-caret.open { transform: rotate(0deg); }                            /* 展开:箭头朝下 */
-.art-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
-.art-list li {
-  font-size: 12px; color: var(--ink-600); padding: 3px 8px; border-radius: 5px;
-  background: var(--raised); border: 1px solid var(--line-soft); word-break: break-all;
-}
-/* 本任务 Prompt 版本行 */
-.pver-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
-.pver-row + .pver-row { border-top: 1px solid var(--line-soft); }
-.pver-step { font-size: 13px; font-weight: 600; color: var(--ink-700); }
-.pver-tag { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
-.pv-ok { color: var(--ink-500, #6b7280); background: var(--mut-bg, #f1f5f9); }
-.pv-stale { color: var(--warn-700, #b45309); background: var(--warn-bg, #fffbeb); }
 </style>

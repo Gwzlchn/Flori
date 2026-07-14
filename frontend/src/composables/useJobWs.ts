@@ -64,12 +64,18 @@ export function useJobWs(jobId: Ref<string>) {
     steps.value = initialSteps
   }
 
+  function reset() {
+    steps.value = []
+    jobStatus.value = 'processing'
+  }
+
   watch(jobId, (newId, oldId) => {
     if (oldId) conn.disconnect()
+    reset()
     if (newId) conn.connect()
   }, { immediate: true })
 
   onUnmounted(conn.disconnect)
 
-  return { steps, jobStatus, connected: conn.connected, setInitialSteps }
+  return { steps, jobStatus, connected: conn.connected, setInitialSteps, reset }
 }

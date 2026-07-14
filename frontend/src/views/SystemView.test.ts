@@ -87,6 +87,7 @@ function stubStoreData(store: any, opts: { full?: any; usage?: any; events?: any
 
 beforeEach(() => {
   vi.clearAllMocks()
+  localStorage.clear()
   systemStatus.value = null
   pinia = createTestingPinia({ createSpy: vi.fn, stubActions: true })
   setActivePinia(pinia)
@@ -241,6 +242,19 @@ describe('SystemView', () => {
     expect(store.pause).toHaveBeenCalledWith('w-pause')
   })
 
+  it('worker 卡片与备注入口都使用 canonical /system/workers/:id', async () => {
+    const store = useWorkerStore()
+    stubStoreData(store)
+    const wrapper = mountView({ workers: [makeWorker({ id: 'worker / 1' })] })
+    await flushPromises()
+    await wrapper.find('.wcard').trigger('click')
+    expect(push).toHaveBeenCalledWith('/system/workers/worker%20%2F%201')
+    push.mockClear()
+    const note = wrapper.findAll('.wcard button').find(button => button.text().includes('备注'))
+    await note!.trigger('click')
+    expect(push).toHaveBeenCalledWith('/system/workers/worker%20%2F%201')
+  })
+
   it('worker 卡片不再提供配置入口', async () => {
     const store = useWorkerStore()
     stubStoreData(store)
@@ -288,6 +302,43 @@ describe('SystemView', () => {
     expect(store.mintToken).toHaveBeenCalled()
     expect(w.text()).toContain('flw-test')
     expect(w.text()).toContain('有效期 1h00m')
+  })
+
+  it('接入折叠状态写入 localStorage 且复制动作使用 Clipboard API', async () => {
+    const clipboard = { writeText: vi.fn().mockResolvedValue(undefined) }
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: clipboard })
+    const store = useWorkerStore()
+    stubStoreData(store)
+    const wrapper = mountView({ workers: [] })
+    await flushPromises()
+    const enrollment = wrapper.find('details.worker-enroll')
+    ;(enrollment.element as HTMLDetailsElement).open = true
+    enrollment.element.dispatchEvent(new Event('toggle'))
+    await flushPromises()
+    expect(localStorage.getItem('flori.system.enroll.open')).toBe('1')
+
+    const copyButton = wrapper.findAll('button').find(button => button.text().includes('复制 compose'))
+    await copyButton!.trigger('click')
+    await flushPromises()
+    expect(clipboard.writeText).toHaveBeenCalledWith(expect.stringContaining('GATEWAY_URL'))
+  })
+
+  it('慢请求未完成时轮询不重入,卸载后不再发请求', async () => {
+    vi.useFakeTimers()
+    const store = useWorkerStore()
+    stubStoreData(store)
+    let resolveStatus!: (value: any) => void
+    ;(store.fetchFullStatus as any).mockReturnValue(new Promise(resolve => { resolveStatus = resolve }))
+    const wrapper = mountView()
+    await Promise.resolve()
+    expect(store.fetchFullStatus).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(store.fetchFullStatus).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(store.fetchFullStatus).toHaveBeenCalledTimes(1)
+    resolveStatus(fullStatus())
+    vi.useRealTimers()
   })
 
   it('AI 用量聚合：有调用时展示命中率与成本', async () => {
