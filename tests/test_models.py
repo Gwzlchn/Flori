@@ -4,6 +4,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 from shared.models import (
     AITask,
     AIUsage,
@@ -224,21 +226,33 @@ class TestAITask:
 
     def test_payload_round_trip(self):
         req = LLMRequest(messages=[{"role": "user", "content": "Q"}], system="S", temperature=0.3)
-        payload = AITask(task_id="at_1", request=req, step_name="synthesis", domain="dl").to_task_payload()
+        audit_context = {"ask_source_manifest": {"task_id": "at_1", "sources": []}}
+        payload = AITask(
+            task_id="at_1", request=req, step_name="synthesis", domain="dl",
+            audit_context=audit_context,
+        ).to_task_payload()
         assert payload["kind"] == TaskKind.AI.value == "ai"
         assert payload["task_id"] == "at_1" and payload["step"] == "synthesis"
         assert payload["provider"] == "claude-cli" and payload["model"] == "claude-opus-4-8[1m]"
         assert payload["require_tags"] == ["claude-cli"] and payload["pool"] == "ai"
+        assert payload["audit_context"] == audit_context
         assert "job_id" not in payload  # AI task 不挂 job
         json.dumps(payload)  # 可入队
         back = AITask.from_task_payload(payload)
         assert back.task_id == "at_1" and back.step_name == "synthesis" and back.domain == "dl"
         assert back.provider == "claude-cli" and back.model == "claude-opus-4-8[1m]"
         assert back.request.messages == req.messages and back.request.system == "S"
+        assert back.audit_context == audit_context
 
     def test_defaults(self):
         task = AITask(task_id="at_2", request=LLMRequest(messages=[]))
         assert task.require_tags == ["claude-cli"] and task.step_name == "ai" and task.domain is None
+        assert task.audit_context == {}
+        assert "audit_context" not in task.to_task_payload()
+
+    def test_audit_context_must_be_json_object(self):
+        with pytest.raises(ValueError, match="audit_context"):
+            AITask(task_id="at_bad", request=LLMRequest(messages=[]), audit_context=[])
 
     def test_codex_provider_sets_codex_tag(self):
         task = AITask(

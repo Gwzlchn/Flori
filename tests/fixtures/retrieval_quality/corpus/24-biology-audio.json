@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-biology-audio", "content_type": "audio", "pipeline": "audio", "domain": "quality-biology", "topic": "biology", "title": "Single-Cell Expression Interview", "primary_language": "en", "meta": {}},
+  "note": {
+    "path": "output/versions/notes_smart_fixture_model_20260714-000000.md",
+    "note_type": "smart",
+    "lines": [
+      "# Single-Cell Expression Interview",
+      "",
+      "The discussion defines gene expression and 基因表达 as the path from DNA information to RNA and products.",
+      "",
+      "## Interpretation",
+      "",
+      "单细胞访谈说明零计数可能来自技术掉落，也可能来自真实低表达。",
+      "",
+      "## Aliases",
+      "",
+      "Transcript abundance, expression level, and 转录水平 are distinguished by measurement context.",
+      "",
+      "## Limits",
+      "",
+      "Cell-type composition must be considered before comparing bulk expression profiles."
+    ],
+    "source_sha256": "50aa41117aa5c439978923f96065f120c2207e4616cb6c1bf44149e35e2d74d7",
+    "artifact_sha256": "8efe3d5be7c5ee84d4bfa7fbb4c98cd81125d2d0e8d6aca45bf696b5522afd3d"
+  },
+  "chunks": {
+    "summary": {"anchor": "path from DNA information to RNA", "body_sha256": "ee3065e9d87b2137c2a4a78ff191817faaccc1af62ad13f3150cb8942af90214"},
+    "core": {"anchor": "单细胞访谈", "body_sha256": "4af36b84b3f9578a405b238f0a828784d7285e2df86225b220c3d41e25c4221c"},
+    "aliases": {"anchor": "measurement context", "body_sha256": "8c79d6013a6127f951717fdf624732fc5b587bcf47a73fa9bcddbd8cc7d864d1"},
+    "boundary": {"anchor": "Cell-type composition", "body_sha256": "24edc3247ab36ec69e75c14d171ce3f177dd8cded09a0dae142eb60e00207a61"}
+  }
+}

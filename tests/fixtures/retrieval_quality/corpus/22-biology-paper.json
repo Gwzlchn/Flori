@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-biology-paper", "content_type": "paper", "pipeline": "paper", "domain": "quality-biology", "topic": "biology", "title": "Gene Expression Analysis", "primary_language": "en", "meta": {}},
+  "note": {
+    "path": "output/versions/notes_smart_fixture_model_20260714-000000.md",
+    "note_type": "smart",
+    "lines": [
+      "# Gene Expression Analysis",
+      "",
+      "Gene expression, 中文基因表达, measures how DNA information becomes RNA and functional products.",
+      "",
+      "## Statistics",
+      "",
+      "差异表达统计 compares conditions while controlling library size and multiple testing. ",
+      "",
+      "## Aliases",
+      "",
+      "Expression level, transcript abundance, and 转录水平 describe related but not identical measurements.",
+      "",
+      "## Limits",
+      "",
+      "Batch effects can dominate biological signal when experimental design is unbalanced."
+    ],
+    "source_sha256": "3965d190f0b23ca90ed2f5ddcd0e4b967f045dd687b982c55b2b7ef0aa1663cb",
+    "artifact_sha256": "0b16a32f929cb795701af191747a941ae756689ed831f3f475e20c9f70c74f1a"
+  },
+  "chunks": {
+    "summary": {"anchor": "DNA information becomes RNA", "body_sha256": "d9ad43e61dae56a331f2453b035e363471145ea70015113c5264cc355e12e3ed"},
+    "core": {"anchor": "差异表达统计", "body_sha256": "655468a3a84cc36fbe8f8b463aa6e1dfddcd64be3a105fc881774655d12e0069"},
+    "aliases": {"anchor": "transcript abundance", "body_sha256": "1814c7f4c3e0a90ab92ab8de5a354a2b9fd0ec634601c906478def41691129b4"},
+    "boundary": {"anchor": "Batch effects", "body_sha256": "22dfb7cb64389ac05cae323812162b47e3ad7fab80cc283f674a3c8a4304d9a0"}
+  }
+}

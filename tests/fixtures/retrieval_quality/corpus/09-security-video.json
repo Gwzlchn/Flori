@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-security-video", "content_type": "video", "pipeline": "video", "domain": "quality-security", "topic": "security", "title": "零信任设备态势演示", "primary_language": "zh", "meta": {}},
+  "note": {
+    "path": "output/versions/notes_smart_fixture_model_20260714-000000.md",
+    "note_type": "smart",
+    "lines": [
+      "# 零信任设备态势演示",
+      "",
+      "零信任 zero trust 不因网络位置自动信任，每次访问都重新确认身份与设备状态。",
+      "",
+      "## 连续判断",
+      "",
+      "设备态势演示根据补丁、加密和风险信号动态调整访问。",
+      "",
+      "## 同义表达",
+      "",
+      "无边界安全与持续验证是零信任架构的常见描述。",
+      "",
+      "## 边界条件",
+      "",
+      "身份可信不代表请求安全，最小权限仍必须独立执行。"
+    ],
+    "source_sha256": "1e7d467003efc5f8659fba4fa5f92b2b6d92a6606d1a9fc1410dfbcc4621ef28",
+    "artifact_sha256": "643e660b504fe0d82138c960e17610cc23f5fcedf1fa79540bc68e51fd10f706"
+  },
+  "chunks": {
+    "summary": {"anchor": "每次访问都重新确认身份", "body_sha256": "3ed0277cf8bff89cf009ef145ff04115682e785bb982a940ec064aafe5fc9ede"},
+    "core": {"anchor": "根据补丁", "body_sha256": "bf6c01ef4b99867815a8cdacfc314241667f1a40ae2372d625670979afc9968b"},
+    "aliases": {"anchor": "无边界安全", "body_sha256": "e9245414d477cdae0f7690f91cba07fd2c44acdb5532b888cab5604c2f12a297"},
+    "boundary": {"anchor": "最小权限", "body_sha256": "c52d2c2bf15a7474ebeb4c1009db1799081ddf2b094ea79a9428657c469880c0"}
+  }
+}

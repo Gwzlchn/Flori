@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-learning-article", "content_type": "article", "pipeline": "article", "domain": "quality-learning", "topic": "learning", "title": "复习队列安排指南", "primary_language": "zh", "meta": {"flags": {"smart_note": false}}},
+  "note": {
+    "path": "output/original.md",
+    "note_type": "original",
+    "lines": [
+      "# 复习队列安排指南",
+      "",
+      "间隔复习 spaced repetition 根据遗忘风险安排快忘记内容的回顾。",
+      "",
+      "## 队列规则",
+      "",
+      "复习队列指南优先处理已到期且历史错误较多的卡片。",
+      "",
+      "## 同义表达",
+      "",
+      "分散复习、间隔练习和 distributed practice 都避免集中突击。",
+      "",
+      "## 风险",
+      "",
+      "未复习卡片不能抬高掌握度，候选卡也不能参与统计。"
+    ],
+    "source_sha256": "7dc673157fc978f84572254909f553951e213c1c6de89dd4f3fd0caaf387b381",
+    "artifact_sha256": "c62cbb511f6135fbe3a2c2916ad33944109fd42e8198cc1a6f84220199a29bc1"
+  },
+  "chunks": {
+    "summary": {"anchor": "安排快忘记内容的回顾", "body_sha256": "24843dc4e4f66b562bafba04255857e2da531998f06801e9940ddc06e5808749"},
+    "core": {"anchor": "已到期且历史错误", "body_sha256": "bc8b5e69ac951df79416aa7cf603d554acafa25130194f4d846b5fff29fc8d1b"},
+    "aliases": {"anchor": "间隔练习", "body_sha256": "4e19326ce56de8764b10d88682382400b9bee56492444d3e917b02469f6eb4a2"},
+    "boundary": {"anchor": "候选卡", "body_sha256": "0114ea2122921d3d882a8333253f7c94e3ad93a7d85f814e2ba04e0ce6f600a3"}
+  }
+}

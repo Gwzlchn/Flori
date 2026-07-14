@@ -1,7 +1,7 @@
 """Flori MCP server 测试:services 读层 + MCP 工具注册/委托。
 
 不 spawn 子进程(进程隔离会脱离内存 fixture DB);MCP 层用 in-process
-list_tools/call_tool 验证。trigram 检索需 ≥3 字符,故查询词都取 3+ 字。
+list_tools/call_tool 验证。两字 CJK 走参数化子串检索,3+ 字符走 trigram。
 """
 
 from __future__ import annotations
@@ -45,6 +45,11 @@ class TestKbServices:
         assert res and res[0]["job_id"] == "j1"
         assert set(res[0]) == {"title", "snippet", "job_id", "domain", "kind"}
         assert res[0]["domain"] == "finance" and res[0]["kind"] == "smart"
+
+    def test_search_two_cjk_query_and_single_cjk_rejection(self, db):
+        _seed(db)
+        assert kb.search(db, "坐庄", domain="finance")[0]["job_id"] == "j1"
+        assert kb.search(db, "坐", domain="finance") == []
 
     def test_search_domain_scope(self, db):
         _seed(db)

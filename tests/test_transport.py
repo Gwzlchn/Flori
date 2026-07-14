@@ -9,7 +9,12 @@ import pytest
 
 from tests.conftest import make_fakeredis
 from shared.db import Database
-from shared.runner_ops import TaskLease, bind_task_lease, clear_task_lease
+from shared.runner_ops import (
+    TaskLease,
+    bind_task_lease,
+    clear_task_lease,
+    current_task_lease,
+)
 from tests.pubsub_helpers import subscription_barrier
 from worker.transport import (
     RedisTransport,
@@ -449,6 +454,40 @@ class TestGatewayCoarseHTTP:
 
         assert result == claim
         assert gw._running == {}
+        assert gw._ai_execs == {"e"}
+        lease = current_task_lease()
+        assert lease is not None and lease.job_id == "at_codex" and lease.exec_id == "e"
+        clear_task_lease()
+
+    @pytest.mark.asyncio
+    async def test_ai_lifecycle_posts_with_bound_lease(self, redis, db, tmp_path):
+        gw, _ = make_gateway(redis, db, tmp_path)
+        setattr(gw, "_worker_" + "token", "wt")
+        claim = {
+            "kind": "ai", "task_id": "at_gateway", "step": "synthesis",
+            "pool": "ai", "exec_id": "exec-ai", "provider": "codex-cli",
+        }
+        gw._client.post.return_value = make_response(json_data={"claim": claim})
+        await gw.request_step("w1", ["ai"], {"ai": 1}, {"codex-cli"}, set())
+        assert current_task_lease().job_id == "at_gateway"
+
+        gw._client.post.return_value = make_response(json_data={"ok": True})
+        assert await gw.mark_ai_task_executing(claim) is True
+        assert gw._client.post.call_args.args[0].endswith("/executing")
+        await gw.set_ai_result("at_gateway", {"content": "answer"})
+        assert gw._client.post.call_args.kwargs["json"] == {
+            "result": {"content": "answer"},
+        }
+        assert await gw.record_ai_task_log({"task_id": "at_gateway"}) is True
+        assert await gw.renew_ai_task_claim(claim) is True
+        assert await gw.finish_ai_task_claim(claim, "succeeded") is True
+        await gw.publish_step_event("events:at_gateway", {"event": "ai_task_done"})
+        before_release = gw._client.post.await_count
+        await gw.release(claim)
+        assert gw._client.post.await_count == before_release + 1
+        assert gw._client.post.call_args.args[0].endswith("/release")
+        assert gw._ai_execs == set()
+        assert current_task_lease() is None
 
     @pytest.mark.asyncio
     async def test_request_step_null_claim_returns_none(self, redis, db, tmp_path):

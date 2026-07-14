@@ -22,6 +22,17 @@ _BODY_CHAR_BUDGET = 4000
 _MAX_QUERIES = 6
 # trigram 至少 3 字符才命中;<2 的 token(单字/单字母)留着也只会拖低信噪,丢弃。
 _MIN_TOKEN_LEN = 2
+# Reciprocal Rank Fusion 的平滑常量;固定值保证离线评测可复算。
+_RRF_K = 60
+# 同一 job 的不同笔记在 RRF 完全同分时优先使用综合笔记。机械笔记仍可在
+# 词法得分更高时胜出，这里只消除同分时按字符串把 mechanical 排在 smart 前的偏差。
+_NOTE_TYPE_TIE_PRIORITY = {
+    "smart": 0,
+    "translated": 1,
+    "original": 2,
+    "mechanical": 3,
+    "transcript": 4,
+}
 
 # 极常见中文/英文停用词:它们组成的短语 trigram 噪声大、区分度低,从派生查询里剔除。
 _STOPWORDS = {
@@ -63,6 +74,14 @@ def _dedup(seq: list[str]) -> list[str]:
     return list(dict.fromkeys(s for s in seq if s))
 
 
+def _is_plain_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value)
+    )
+
+
 def derive_queries(question: str, db: Database, domain: str | None = None) -> list[str]:
     """把自然语言问句拆成一组 FTS 友好的检索词,缓解整句字面短语无法命中的问题。
 
@@ -101,47 +120,112 @@ def derive_queries(question: str, db: Database, domain: str | None = None) -> li
 def retrieve(
     db: Database, question: str, domain: str | None = None, k: int = 8
 ) -> list[dict]:
-    """跨语料检索:只返回 chunk 级证据块。
-
-    返回 [{job_id,title,domain,content_type,body,evidence}]。命中以 chunk_id 去重;
-    rank 近似为派生查询顺序 + 命中序。
-    """
+    """用确定性 RRF 融合全部派生查询,每个 job 最多返回一个证据块。"""
+    if k <= 0:
+        return []
     queries = derive_queries(question, db, domain)
     if not queries:
         # 派生不出任何词(纯停用词/纯标点):退化为整句直检,聊胜于无。
         queries = [question] if (question or "").strip() else []
 
-    passages: list[dict] = []
-    seen_chunks: set[str] = set()
-    order = 0
+    candidates: dict[tuple[str, ...], dict] = {}
+    candidate_limit = min(100, max(k, k * 4))
     for qi in queries:
         try:
-            _total, items = db.search_note_chunks(qi, domain=domain, limit=k)
+            _total, items = db.search_note_chunks(
+                qi, domain=domain, limit=candidate_limit,
+            )
         except Exception:
             continue
-        for it in items:
-            chunk_id = it.get("chunk_id") or f"{it.get('job_id')}:{order}"
-            if chunk_id in seen_chunks:
-                order += 1
+        seen_in_query: set[tuple[str, ...]] = set()
+        for rank, it in enumerate(items, start=1):
+            chunk_id = it.get("chunk_id") or (
+                f"{it.get('job_id')}:{it.get('note_type') or ''}:{rank}"
+            )
+            evidence = it.get("evidence") or {}
+            artifact_sha = evidence.get("artifact_sha256")
+            body_sha = evidence.get("body_sha256")
+            if (
+                it.get("job_id")
+                and _is_plain_sha256(artifact_sha)
+                and _is_plain_sha256(body_sha)
+            ):
+                candidate_key = (it["job_id"], artifact_sha, body_sha)
+            else:
+                candidate_key = (chunk_id,)
+            candidate = candidates.get(candidate_key)
+            if candidate is None:
+                candidate = {
+                    "item": it,
+                    "chunk_id": chunk_id,
+                    "score": 0.0,
+                }
+                candidates[candidate_key] = candidate
+            elif (
+                _NOTE_TYPE_TIE_PRIORITY.get(it.get("note_type") or "", 99),
+                it.get("note_type") or "",
+                chunk_id,
+            ) < (
+                _NOTE_TYPE_TIE_PRIORITY.get(
+                    candidate["item"].get("note_type") or "", 99,
+                ),
+                candidate["item"].get("note_type") or "",
+                candidate["chunk_id"],
+            ):
+                # 完全相同的 artifact/body 在不同笔记类型中只算一份证据，
+                # 但保留质量更高的代表，避免索引插入顺序决定最终 note_type。
+                candidate["item"] = it
+                candidate["chunk_id"] = chunk_id
+            if candidate_key in seen_in_query:
                 continue
-            seen_chunks.add(chunk_id)
-            ev = dict(it.get("evidence") or {})
-            ev.setdefault("chunk_id", chunk_id)
-            ev.setdefault("section", it.get("section") or "")
-            ev["snippet"] = it.get("snippet") or ""
-            passages.append({
-                "job_id": it["job_id"],
-                "title": it.get("title") or "(无标题)",
-                "domain": it.get("domain") or "",
-                "content_type": it.get("content_type") or "",
-                "body": (it.get("body") or "")[:_BODY_CHAR_BUDGET],
-                "evidence": ev,
-            })
-            order += 1
-            if len(passages) >= k:
-                return passages[:k]
+            seen_in_query.add(candidate_key)
+            candidate["score"] += 1.0 / (_RRF_K + rank)
 
-    return passages[:k]
+    ranked = sorted(
+        candidates.values(),
+        key=lambda candidate: (
+            -candidate["score"],
+            candidate["item"].get("job_id") or "",
+            _NOTE_TYPE_TIE_PRIORITY.get(
+                candidate["item"].get("note_type") or "", 99,
+            ),
+            candidate["item"].get("note_type") or "",
+            candidate["chunk_id"],
+        ),
+    )
+    passages: list[dict] = []
+    seen_jobs: set[str] = set()
+    for candidate in ranked:
+        it = candidate["item"]
+        job_id = it.get("job_id") or ""
+        if not job_id or job_id in seen_jobs:
+            continue
+        chunk_id = candidate["chunk_id"]
+        note_type = it.get("note_type") or ""
+        ev = dict(it.get("evidence") or {})
+        ev.setdefault("chunk_id", chunk_id)
+        ev.setdefault("note_type", note_type)
+        ev.setdefault("section", it.get("section") or "")
+        ev["snippet"] = it.get("snippet") or ""
+        if (
+            not note_type
+            or not _is_plain_sha256(ev.get("artifact_sha256"))
+            or not _is_plain_sha256(ev.get("body_sha256"))
+        ):
+            continue
+        seen_jobs.add(job_id)
+        passages.append({
+            "job_id": job_id,
+            "note_type": note_type,
+            "title": it.get("title") or "(无标题)",
+            "domain": it.get("domain") or "",
+            "content_type": it.get("content_type") or "",
+            "body": (it.get("body") or "")[:_BODY_CHAR_BUDGET],
+            "evidence": ev,
+        })
+        if len(passages) >= k:
+            break
+    return passages
 
 
 def build_prompt(question: str, passages: list[dict]) -> tuple[str, str]:

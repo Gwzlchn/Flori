@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
@@ -474,6 +475,134 @@ class TestJobsRequest:
         assert claim["require_tags"] == ["codex-cli"]
         assert claim["exec_id"].startswith(f"{worker_id}:")
         assert "job_id" not in claim
+
+
+class TestGatewayAITaskLease:
+    @staticmethod
+    def _manifest(task_id: str, body: str, marker: str) -> dict:
+        from shared.ask_citations import build_source_manifest
+
+        return build_source_manifest(task_id, "问题", [{
+            "job_id": f"j_{marker}", "title": marker, "domain": "ml",
+            "content_type": "article", "note_type": "smart",
+            "artifact_sha256": marker[0] * 64,
+            "body": body,
+            "evidence": {"chunk_id": f"j_{marker}:smart:0", "section": "正文"},
+        }])
+
+    async def _claim(self, jobs_client, real_redis, task_id: str):
+        from shared.models import AITask, LLMRequest
+
+        worker_id, token = await _register_ai(jobs_client)
+        original = self._manifest(task_id, "可信事实。", "aaaa")
+        await real_redis.enqueue_ai_task(AITask(
+            task_id=task_id, request=LLMRequest(messages=[]),
+            provider="codex-cli", step_name="synthesis",
+            audit_context={"ask_source_manifest": original},
+        ).to_task_payload())
+        response = await jobs_client.post(
+            "/api/runner/jobs/request",
+            json={"pools": ["ai"], "pool_limits": {"ai": 1},
+                  "tags": ["codex-cli"], "reject_tags": []},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        claim = response.json()["claim"]
+        headers = _task_headers(
+            token, task_id, claim["step"], claim["exec_id"],
+        )
+        return worker_id, token, claim, headers, original
+
+    @pytest.mark.asyncio
+    async def test_gateway_result_is_bound_to_server_anchor(
+        self, jobs_client, real_redis, db,
+    ):
+        task_id = "at_gateway_anchor"
+        _, _, claim, headers, original = await self._claim(
+            jobs_client, real_redis, task_id,
+        )
+        assert (await jobs_client.post(
+            f"/api/runner/ai-tasks/{task_id}/executing", headers=headers,
+        )).status_code == 200
+
+        replacement = self._manifest(task_id, "伪造事实。", "bbbb")
+        result_response = await jobs_client.post(
+            f"/api/runner/ai-tasks/{task_id}/result", headers=headers,
+            json={"result": {
+                "content": "伪造事实 [来源1]。", "source_manifest": replacement,
+                "citation_validation": {"status": "valid"},
+            }},
+        )
+        assert result_response.status_code == 200
+        stored = await real_redis.get_ai_result(task_id)
+        assert stored["citation_validation"]["status"] == "invalid"
+        assert "source_manifest_mismatch" in stored["citation_validation"]["errors"]
+        assert (await real_redis.get_ai_task_original_payload(task_id))[
+            "audit_context"
+        ]["ask_source_manifest"] == original
+
+        log_response = await jobs_client.post(
+            f"/api/runner/ai-tasks/{task_id}/log", headers=headers,
+            json={"log": {
+                "task_id": "at_other", "exec_id": "stolen", "step_name": "digest",
+                "provider": "codex-cli", "model": "test", "ok": True,
+                "record": {"task_id": "at_other", "output": "x"},
+                "created_at": "2026-07-14T00:00:00+00:00",
+            }},
+        )
+        assert log_response.status_code == 200
+        row = db.get_ai_task_logs(task_id)[0]
+        assert row["task_id"] == task_id
+        assert row["exec_id"] == claim["exec_id"]
+        assert row["step_name"] == "synthesis"
+
+        assert (await jobs_client.post(
+            f"/api/runner/ai-tasks/{task_id}/finish", headers=headers,
+            json={"outcome": "succeeded"},
+        )).status_code == 200
+        assert (await jobs_client.post(
+            f"/api/runner/ai-tasks/{task_id}/release", headers=headers,
+        )).status_code == 200
+        assert await real_redis.get_pool_count("ai") == 0
+
+    @pytest.mark.asyncio
+    async def test_cross_task_exec_and_expired_ai_lease_are_rejected(
+        self, jobs_client, real_redis,
+    ):
+        task_id = "at_gateway_scope"
+        _, token, claim, headers, _ = await self._claim(
+            jobs_client, real_redis, task_id,
+        )
+        assert (await jobs_client.post(
+            "/api/runner/ai-tasks/at_other/executing", headers=headers,
+        )).status_code == 403
+        wrong_exec = _task_headers(token, task_id, claim["step"], "stolen-exec")
+        assert (await jobs_client.post(
+            f"/api/runner/ai-tasks/{task_id}/executing", headers=wrong_exec,
+        )).status_code == 403
+        await real_redis.r.hset(
+            f"ai:claim:{task_id}", "lease_until", str(time.time() - 1),
+        )
+        assert (await jobs_client.post(
+            f"/api/runner/ai-tasks/{task_id}/executing", headers=headers,
+        )).status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_result_write_fails_when_server_anchor_is_deleted(
+        self, jobs_client, real_redis,
+    ):
+        task_id = "at_gateway_missing_anchor"
+        _, _, _, headers, _ = await self._claim(jobs_client, real_redis, task_id)
+        assert (await jobs_client.post(
+            f"/api/runner/ai-tasks/{task_id}/executing", headers=headers,
+        )).status_code == 200
+        await real_redis.r.delete(f"ai:anchor:{task_id}")
+        await real_redis.r.hdel(f"ai:claim:{task_id}", "raw_json")
+        response = await jobs_client.post(
+            f"/api/runner/ai-tasks/{task_id}/result", headers=headers,
+            json={"result": {"content": "unbound", "citation_validation": {"status": "valid"}}},
+        )
+        assert response.status_code == 409
+        assert await real_redis.get_ai_result(task_id) is None
 
     @pytest.mark.asyncio
     async def test_returns_null_when_empty(self, jobs_client, monkeypatch):

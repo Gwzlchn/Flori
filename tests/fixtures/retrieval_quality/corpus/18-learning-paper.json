@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-learning-paper", "content_type": "paper", "pipeline": "paper", "domain": "quality-learning", "topic": "learning", "title": "Spaced Retrieval Practice", "primary_language": "en", "meta": {}},
+  "note": {
+    "path": "output/versions/notes_smart_fixture_model_20260714-000000.md",
+    "note_type": "smart",
+    "lines": [
+      "# Spaced Retrieval Practice",
+      "",
+      "Spaced repetition, 中文间隔复习, schedules recall near the predicted forgetting point.",
+      "",
+      "## Evidence",
+      "",
+      "检索练习效应表明主动回忆比重复阅读更能巩固长期记忆。",
+      "",
+      "## Aliases",
+      "",
+      "Distributed practice, spaced practice, and 分散复习 are related terms with different emphasis.",
+      "",
+      "## Limits",
+      "",
+      "A scheduling model must separate retrieval success from mere card exposure."
+    ],
+    "source_sha256": "a3eb3ffd50a7ae5c84e4ee1f670397c45817c2f885a17868c2a69c45701addfc",
+    "artifact_sha256": "35318ab91d5da47b52eb19134f43a16492e5ba5062cb6c42f6b284fc3edd9d3f"
+  },
+  "chunks": {
+    "summary": {"anchor": "predicted forgetting point", "body_sha256": "925ce195abc0063cb172f8ce460e4427967b4e02b5540b0d86ea44d2edd6ba21"},
+    "core": {"anchor": "检索练习效应", "body_sha256": "1a80bc11aff2da9aacc8792a88cd22762e2d9d82d1326a8ef72e979fad4d37c1"},
+    "aliases": {"anchor": "Distributed practice", "body_sha256": "f2c3cd9c1076bd26ce4d7e008a686bae6c296b9ce0b04c2a073d8f59a28ea539"},
+    "boundary": {"anchor": "mere card exposure", "body_sha256": "e66ff3f2a223d79b3a20b1c3924ce76fb467453acd31ee9d08789b46aa668a6b"}
+  }
+}

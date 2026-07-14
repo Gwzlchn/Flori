@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -267,6 +268,8 @@ class AITask:
     model: str = DEFAULT_AI_MODEL
     tags: list[str] = field(default_factory=list)                            # 软标签(reject 过滤用)
     require_tags: list[str] = field(default_factory=list)  # 硬门控:仅有对应 AI 接入方式的 worker 认领
+    # 检索来源等不可变执行上下文,随任务与审计持久化.
+    audit_context: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         from .ai_routing import provider_required_tag
@@ -279,10 +282,20 @@ class AITask:
             self.model = default_model
         # 调用方可以追加能力标签,但不能移除 provider 接入硬门。
         self.require_tags = sorted(set(self.require_tags + [provider_required_tag(self.provider)]))
+        if type(self.audit_context) is not dict:
+            raise ValueError("audit_context 必须是 JSON 对象")
+        try:
+            encoded = json.dumps(
+                self.audit_context, ensure_ascii=False, sort_keys=True, allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("audit_context 必须是 JSON 安全对象") from exc
+        if len(encoded) > 512 * 1024:
+            raise ValueError("audit_context 超出 512 KiB 上限")
 
     def to_task_payload(self) -> dict:
         """序列化为 queue:ai 的 task JSON dict(kind='ai',无 job_id)。"""
-        return {
+        payload = {
             "kind": TaskKind.AI.value,
             "task_id": self.task_id,
             "step": self.step_name,
@@ -294,6 +307,9 @@ class AITask:
             "require_tags": sorted(self.require_tags),
             "pool": "ai",
         }
+        if self.audit_context:
+            payload["audit_context"] = self.audit_context
+        return payload
 
     @classmethod
     def from_task_payload(cls, d: dict) -> "AITask":
@@ -306,6 +322,7 @@ class AITask:
             model=d.get("model", DEFAULT_AI_MODEL),
             tags=list(d.get("tags", [])),
             require_tags=list(d.get("require_tags", [])),
+            audit_context=d.get("audit_context", {}),
         )
 
 

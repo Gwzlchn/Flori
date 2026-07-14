@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-security-paper", "content_type": "paper", "pipeline": "paper", "domain": "quality-security", "topic": "security", "title": "Continuous Verification Model", "primary_language": "en", "meta": {}},
+  "note": {
+    "path": "output/versions/notes_smart_fixture_model_20260714-000000.md",
+    "note_type": "smart",
+    "lines": [
+      "# Continuous Verification Model",
+      "",
+      "Zero trust, or 零信任, replaces network-based trust with continuous identity and device checks.",
+      "",
+      "## Model",
+      "",
+      "持续验证模型重新评估主体、设备和资源风险，而不是永久授予会话信任。",
+      "",
+      "## Aliases",
+      "",
+      "Perimeterless security and never trust always verify are related labels. 无边界安全是对应中文说法。",
+      "",
+      "## Limits",
+      "",
+      "Policy evaluation needs fresh telemetry and an explicit least-privilege fallback."
+    ],
+    "source_sha256": "f9d952754a7a4ca29c35a68c41b4ee5cdaaeccc0c0c3d06387fc47976e6855db",
+    "artifact_sha256": "11d077e17272c4d797332d59e611bc7d6e1441d4b58d4c14feb79d3585ec5fde"
+  },
+  "chunks": {
+    "summary": {"anchor": "continuous identity and device checks", "body_sha256": "4b8ce8645c0160ebc35ded060938942faec764444610704e643f0b93843f9cf9"},
+    "core": {"anchor": "持续验证模型", "body_sha256": "7baa73134ef057464209d5c1ce450ee76fd3017acb895bfab3243b32359a711d"},
+    "aliases": {"anchor": "Perimeterless security", "body_sha256": "7f60d1b32e5cb9f6e4a971d713f9085c3c478bd27d42b70ec3d6322731b304e9"},
+    "boundary": {"anchor": "least-privilege fallback", "body_sha256": "80f8f3aaad07ecd42eb78623b85a9e9ca8c83ab285230c2febb786b882242b54"}
+  }
+}

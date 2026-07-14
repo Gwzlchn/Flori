@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-ml-audio", "content_type": "audio", "pipeline": "audio", "domain": "quality-ml", "topic": "ml", "title": "Sparse Attention Interview", "primary_language": "en", "meta": {}},
+  "note": {
+    "path": "output/versions/notes_smart_fixture_model_20260714-000000.md",
+    "note_type": "smart",
+    "lines": [
+      "# Sparse Attention Interview",
+      "",
+      "The interview explains sparse attention and 稀疏注意力 as a way to lower long-context computation.",
+      "",
+      "## Practical View",
+      "",
+      "注意力访谈记录强调先定位必须全局可见的 token，再选择局部窗口。",
+      "",
+      "## Aliases",
+      "",
+      "Sparse connectivity, selective attention, and 选择性注意力 are used with explicit definitions.",
+      "",
+      "## Limits",
+      "",
+      "A benchmark must include tasks whose evidence spans several distant passages."
+    ],
+    "source_sha256": "c357951eae361eeda2a2819821194a30cf88e6d5c9f812162c2b3ff3d1034c45",
+    "artifact_sha256": "692e5768a9347508f22eaeb6db7dc9caaa67447ca8ff77cbae53361e5034e4f6"
+  },
+  "chunks": {
+    "summary": {"anchor": "lower long-context computation", "body_sha256": "e49d6058044cb9af04cf3f5e177de8c81b9d876337856afc755ddde80ae690f6"},
+    "core": {"anchor": "注意力访谈记录", "body_sha256": "8b8f8f7c795185acfe643e091a3366262c1c18ef90b57a050fd09d60a9d4d01e"},
+    "aliases": {"anchor": "Sparse connectivity", "body_sha256": "9fa4bfb7dc951b9c6422da9a766ba16386ece8f52dc4d5b2ef01efbc73a07dc3"},
+    "boundary": {"anchor": "evidence spans several distant passages", "body_sha256": "9aa7119046e19fbf369e81b53d839fcf5f3c63d0627be2a25fbecaba652e0f1e"}
+  }
+}

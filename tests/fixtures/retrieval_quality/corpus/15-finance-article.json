@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-finance-article", "content_type": "article", "pipeline": "article", "domain": "quality-finance", "topic": "finance", "title": "自由现金流估值指南", "primary_language": "zh", "meta": {"flags": {"smart_note": false}}},
+  "note": {
+    "path": "output/original.md",
+    "note_type": "original",
+    "lines": [
+      "# 自由现金流估值指南",
+      "",
+      "现金流折现 discounted cash flow 把未来自由现金流转换为现值。",
+      "",
+      "## 现金流口径",
+      "",
+      "自由现金流指南要求经营现金流扣除维持性资本开支。",
+      "",
+      "## 同义表达",
+      "",
+      "DCF、折现现金流法和内在价值估值共享同一时间价值逻辑。",
+      "",
+      "## 风险",
+      "",
+      "增长、利润率和折现率应分别做区间敏感性分析。"
+    ],
+    "source_sha256": "e8bfc759603e01e1d0f3b77b7c7f0327dcc03176060346c1ff78868170ddcf71",
+    "artifact_sha256": "251a92d9ca23ba593f3656fe303bd8c9c571faa22132e6477fdfa9f54030b4a7"
+  },
+  "chunks": {
+    "summary": {"anchor": "转换为现值", "body_sha256": "8954dfa70c39135e943b799445cef09496d5df149191c88b7f727c3c5017151f"},
+    "core": {"anchor": "经营现金流扣除", "body_sha256": "87a1dd07eae54d86e9afcdcb7aa5e5e848b18b3a3e47ccf80abb74f7efc7a557"},
+    "aliases": {"anchor": "内在价值估值", "body_sha256": "b4cc2990df89a304a9f7454e4e97a4f7418d55cc68cf3cf8cc79c94862b8d4f1"},
+    "boundary": {"anchor": "区间敏感性分析", "body_sha256": "1322b07feab86b7f9c9c11e237ef0f9e4d6bf5af7df550392438a198083b9670"}
+  }
+}

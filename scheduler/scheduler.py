@@ -59,19 +59,47 @@ _PRIORITY_BOOST = {"02_whisper": 100}
 _DELAYED_PREFIX = "delayed_enqueue:"
 
 def _markdown_to_text(md: str) -> str:
-    """Markdown 去标记取纯文本(轻量、零依赖,够 FTS 索引用):剥代码围栏、
-    图片/链接、标题/列表/强调标记,折叠空白。"""
+    """Markdown 转可分节索引文本,保留标题、段落和 fenced code 正文。"""
     import re
 
-    md = re.sub(r"```.*?```", " ", md, flags=re.DOTALL)        # 代码围栏
-    md = re.sub(r"<[^>]+>", " ", md)                             # HTML 标签(防搜索高亮 XSS)
-    md = re.sub(r"`([^`]*)`", r"\1", md)                         # 行内代码
-    md = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", md)            # 图片:保留 alt 描述进 FTS
-    md = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", md)            # 链接取文字
-    md = re.sub(r"^\s{0,3}#{1,6}\s*", "", md, flags=re.MULTILINE)  # 标题井号
-    md = re.sub(r"^\s{0,3}[-*+]\s+", "", md, flags=re.MULTILINE)   # 无序列表标记
-    md = re.sub(r"[*_~>]+", " ", md)                             # 强调/引用标记
-    return " ".join(md.split())
+    text = (md or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines: list[str] = []
+    in_fence = False
+    fence_marker = ""
+    for raw_line in text.split("\n"):
+        stripped = raw_line.lstrip()
+        fence = re.match(r"(`{3,}|~{3,})", stripped)
+        if fence:
+            marker = fence.group(1)[0]
+            if not in_fence:
+                in_fence = True
+                fence_marker = marker
+                continue
+            if marker == fence_marker:
+                in_fence = False
+                fence_marker = ""
+                continue
+
+        # 高亮 snippet 会被前端渲染,HTML 标签不能进入索引正文。
+        line = re.sub(r"<[^>]+>", " ", raw_line)
+        if not in_fence:
+            line = re.sub(r"`([^`]*)`", r"\1", line)
+            line = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", line)
+            line = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", line)
+            line = re.sub(r"^(\s{0,3})[-*+]\s+", r"\1", line)
+            line = re.sub(r"^(\s{0,3})>\s?", r"\1", line)
+            line = re.sub(r"[*_~]+", "", line)
+        lines.append(line.rstrip())
+
+    compact: list[str] = []
+    for line in lines:
+        if line.strip():
+            compact.append(line)
+        elif compact and compact[-1] != "":
+            compact.append("")
+    while compact and compact[-1] == "":
+        compact.pop()
+    return "\n".join(compact)
 
 
 class Scheduler:

@@ -183,8 +183,16 @@ jobs:
       - name: Real dependency integration gate
         env:
           INTEGRATION_ARTIFACT_DIR: ${{ runner.temp }}/flori-integration-artifacts
+          RETRIEVAL_QUALITY_MAIN_SHA: ${{ github.sha }}
           CI_COVERAGE: "1"
         run: scripts/test.sh --integration
+      - name: Upload retrieval quality decision
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: retrieval-quality
+          path: ${{ runner.temp }}/flori-integration-artifacts/retrieval-quality.json
+          if-no-files-found: error
       - name: Upload integration JUnit
         if: always()
         uses: actions/upload-artifact@v7.0.1

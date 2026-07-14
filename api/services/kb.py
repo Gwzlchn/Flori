@@ -24,10 +24,10 @@ def list_knowledge_bases(db: Database) -> list[dict]:
 def search(
     db: Database, query: str, domain: str | None = None, limit: int = 10
 ) -> list[dict]:
-    """全文检索笔记(FTS5 trigram,中文子串友好),归一为 agent 友好结构。
+    """全文检索笔记(2 字 CJK 子串 + FTS5 trigram),归一为 agent 友好结构。
 
     返回 [{title, snippet, job_id, domain, kind}];snippet 内 <mark> 包裹命中。
-    注意:trigram 至少需 3 个字符才会命中,更短查询返回空。
+    单字查询返回空,3 字及以上仍走 trigram。
     """
     _total, items = db.search_notes(query, domain=domain, limit=limit)
     return [

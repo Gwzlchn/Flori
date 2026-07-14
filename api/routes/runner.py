@@ -19,6 +19,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from shared import runner_ops
+from shared.ask_citations import validate_bound_ask_citations
 from shared.config import AppConfig
 from shared.db import Database
 from shared.models import AIUsage, Worker, generate_worker_id
@@ -135,6 +136,45 @@ async def _require_task_lease(
         raise HTTPException(status_code=403, detail="task lease is stale or out of scope")
 
 
+async def _require_ai_claim(
+    redis: RedisClient,
+    worker_id: str,
+    task_id: str,
+    lease: RunnerTaskLeaseHeaders,
+    *,
+    states: set[str] | None = None,
+    require_unexpired: bool = True,
+) -> dict:
+    """校验独立 AI task 的 worker/task/step/exec 专用租约。"""
+    if lease.job_id != task_id or not lease.step or not lease.exec_id:
+        raise HTTPException(status_code=403, detail="AI task lease path mismatch")
+    validate_path_segment(task_id, "task_id")
+    validate_path_segment(lease.step, "lease step")
+    validate_path_segment(lease.exec_id, "lease exec_id")
+    claim = await redis.get_ai_task_claim(task_id)
+    original = await redis.get_ai_task_original_payload(task_id)
+    bound_step = claim.get("step") if claim else None
+    if not bound_step and type(original) is dict:
+        bound_step = original.get("step", "ai")
+    if (
+        not claim
+        or claim.get("task_id") != task_id
+        or claim.get("worker_id") != worker_id
+        or claim.get("claim_id") != lease.exec_id
+        or bound_step != lease.step
+        or (states is not None and claim.get("state") not in states)
+    ):
+        raise HTTPException(status_code=403, detail="AI task lease is stale or out of scope")
+    if require_unexpired:
+        try:
+            active = float(claim.get("lease_until", 0)) > time.time()
+        except (TypeError, ValueError):
+            active = False
+        if not active:
+            raise HTTPException(status_code=403, detail="AI task lease expired")
+    return claim
+
+
 async def _begin_terminal(
     redis: RedisClient,
     worker_id: str,
@@ -187,6 +227,18 @@ class RunnerHeartbeatRequest(BaseModel):
     # 在跑步集合 [{job_id,step,exec_id}]:心跳捎带,为每个并发步刷进度心跳.独立 alive 通道
     # 在部分外网链路不达(实测),心跳借道使 orphan_scan 判活不再依赖单点。
     running: list[dict] = Field(default_factory=list)
+
+
+class RunnerAIResultRequest(BaseModel):
+    result: dict = Field(default_factory=dict)
+
+
+class RunnerAILogRequest(BaseModel):
+    log: dict = Field(default_factory=dict)
+
+
+class RunnerAIFinishRequest(BaseModel):
+    outcome: str
 
 
 class RunnerOfflineRequest(BaseModel):
@@ -573,6 +625,159 @@ async def release_step(
     return {"ok": True}
 
 
+@router.post("/ai-tasks/{task_id}/release")
+async def release_ai_task(
+    task_id: str,
+    lease: RunnerTaskLeaseHeaders = Depends(_task_lease_headers),
+    worker_id: str = Depends(verify_worker_token),
+    db: Database = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+):
+    """释放当前 AI claim 的池槽;终态和过期 claim 也可按原身份幂等释放。"""
+    claim = await _require_ai_claim(
+        redis, worker_id, task_id, lease, require_unexpired=False,
+    )
+    await runner_ops.release_step(redis, db, worker_id, {
+        "kind": "ai", "task_id": task_id, "step": lease.step,
+        "pool": "ai", "exec_id": lease.exec_id,
+        "claim_id": claim.get("claim_id"),
+    })
+    return {"ok": True}
+
+
+def _ai_claim_kwargs(claim: dict, worker_id: str) -> dict:
+    """只从服务端 claim 取 CAS 身份,不采信 Worker body 自报。"""
+    return {
+        "task_id": claim["task_id"],
+        "batch_id": claim.get("batch_id", ""),
+        "attempt": int(claim.get("attempt", 0)),
+        "revision": int(claim.get("revision", 0)),
+        "worker_id": worker_id,
+        "claim_id": claim["claim_id"],
+    }
+
+
+@router.post("/ai-tasks/{task_id}/executing")
+async def mark_ai_task_executing(
+    task_id: str,
+    lease: RunnerTaskLeaseHeaders = Depends(_task_lease_headers),
+    worker_id: str = Depends(verify_worker_token),
+    redis: RedisClient = Depends(get_redis),
+):
+    claim = await _require_ai_claim(
+        redis, worker_id, task_id, lease, states={"claimed"},
+    )
+    changed = await redis.mark_ai_task_executing(
+        **_ai_claim_kwargs(claim, worker_id), now_epoch=time.time(),
+    )
+    if not changed:
+        raise HTTPException(status_code=403, detail="AI task claim transition rejected")
+    return {"ok": True}
+
+
+@router.post("/ai-tasks/{task_id}/renew")
+async def renew_ai_task_claim(
+    task_id: str,
+    lease: RunnerTaskLeaseHeaders = Depends(_task_lease_headers),
+    worker_id: str = Depends(verify_worker_token),
+    redis: RedisClient = Depends(get_redis),
+):
+    claim = await _require_ai_claim(
+        redis, worker_id, task_id, lease, states={"claimed", "executing"},
+    )
+    changed = await redis.renew_ai_task_claim(
+        **_ai_claim_kwargs(claim, worker_id),
+        state=claim["state"], now_epoch=time.time(),
+    )
+    if not changed:
+        raise HTTPException(status_code=403, detail="AI task claim renewal rejected")
+    return {"ok": True}
+
+
+@router.post("/ai-tasks/{task_id}/result")
+async def set_ai_task_result(
+    task_id: str,
+    req: RunnerAIResultRequest,
+    lease: RunnerTaskLeaseHeaders = Depends(_task_lease_headers),
+    worker_id: str = Depends(verify_worker_token),
+    redis: RedisClient = Depends(get_redis),
+):
+    await _require_ai_claim(
+        redis, worker_id, task_id, lease, states={"executing"},
+    )
+    # 服务端锚点必须先存在。Worker 只能提交结果副本,不能凭结果重建锚点。
+    original = await redis.get_ai_task_original_payload(task_id)
+    if original is None:
+        raise HTTPException(status_code=409, detail="AI task provenance anchor missing")
+    result = dict(req.result)
+    if lease.step == "synthesis":
+        audit_context = original.get("audit_context")
+        original_manifest = (
+            audit_context.get("ask_source_manifest")
+            if type(audit_context) is dict else None
+        )
+        result["citation_validation"] = validate_bound_ask_citations(
+            task_id, str(result.get("content") or ""),
+            result.get("source_manifest"), original_manifest,
+        )
+    await redis.set_ai_result(task_id, result)
+    return {"ok": True}
+
+
+@router.post("/ai-tasks/{task_id}/log")
+async def record_ai_task_log(
+    task_id: str,
+    req: RunnerAILogRequest,
+    lease: RunnerTaskLeaseHeaders = Depends(_task_lease_headers),
+    worker_id: str = Depends(verify_worker_token),
+    db: Database = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+):
+    await _require_ai_claim(
+        redis, worker_id, task_id, lease, states={"executing"},
+    )
+    record = dict(req.log)
+    record.update({
+        "task_id": task_id, "exec_id": lease.exec_id, "step_name": lease.step,
+    })
+    raw_record = record.get("record")
+    if type(raw_record) is dict:
+        raw_record = dict(raw_record)
+        raw_record.update({
+            "task_id": task_id, "exec_id": lease.exec_id, "step": lease.step,
+        })
+        record["record"] = raw_record
+    written = await asyncio.to_thread(db.record_ai_task_log, record)
+    if not written:
+        raise HTTPException(status_code=503, detail="AI task audit persistence failed")
+    return {"ok": True}
+
+
+@router.post("/ai-tasks/{task_id}/finish")
+async def finish_ai_task_claim(
+    task_id: str,
+    req: RunnerAIFinishRequest,
+    lease: RunnerTaskLeaseHeaders = Depends(_task_lease_headers),
+    worker_id: str = Depends(verify_worker_token),
+    redis: RedisClient = Depends(get_redis),
+):
+    if req.outcome not in {"succeeded", "failed"}:
+        raise HTTPException(status_code=422, detail="invalid AI task outcome")
+    claim = await _require_ai_claim(
+        redis, worker_id, task_id, lease, states={"executing"},
+    )
+    changed = await redis.finish_ai_task_claim(
+        **_ai_claim_kwargs(claim, worker_id), outcome=req.outcome,
+    )
+    if not changed:
+        raise HTTPException(status_code=403, detail="AI task claim finish rejected")
+    await redis.publish(f"events:{task_id}", {
+        "event": "ai_task_done" if req.outcome == "succeeded" else "ai_task_failed",
+        "task_id": task_id, "step": lease.step,
+    })
+    return {"ok": True}
+
+
 @router.post("/jobs/{job_id}/steps/{step}/progress")
 async def step_progress(
     job_id: str,
@@ -656,12 +861,19 @@ async def record_usage(
     redis: RedisClient = Depends(get_redis),
 ):
     """在当前任务租约内记录 AI 调用用量(exec_id UNIQUE,重复上报幂等)."""
-    if req.job_id != lease.job_id or req.step != lease.step:
-        raise HTTPException(status_code=403, detail="usage task lease mismatch")
-    await _require_task_lease(
-        redis, worker_id, lease.job_id, lease.step, lease.exec_id,
-        renew=True,
-    )
+    if req.job_id is None:
+        if req.step != lease.step or req.exec_id != lease.exec_id:
+            raise HTTPException(status_code=403, detail="usage AI task lease mismatch")
+        await _require_ai_claim(
+            redis, worker_id, lease.job_id, lease, states={"executing"},
+        )
+    else:
+        if req.job_id != lease.job_id or req.step != lease.step:
+            raise HTTPException(status_code=403, detail="usage task lease mismatch")
+        await _require_task_lease(
+            redis, worker_id, lease.job_id, lease.step, lease.exec_id,
+            renew=True,
+        )
     usage = AIUsage(
         exec_id=req.exec_id,
         provider=req.provider,

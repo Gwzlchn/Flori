@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import hashlib
+import html
 import json
 import os
 import shutil
@@ -13,6 +15,7 @@ import struct
 import sys
 import tempfile
 import threading
+import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -685,15 +688,65 @@ def _warn_plaintext_credentials_once() -> None:
         )
 
 
+def _clean_search_query(q: str) -> str:
+    """归一化检索输入;空字节不能进入 SQLite 字符串绑定。"""
+    return " ".join((q or "").replace("\x00", "").split())
+
+
 def _fts_match_query(q: str) -> str:
     """把用户查询串包成 fts5 安全的双引号短语,防 MATCH 语法注入。
     内部双引号转义为两个双引号;空白折叠;空查询返回空串(调用方按无结果处理)。"""
     # 剔除空字节(null byte):sqlite3 绑定含 \x00 的串会抛 "unterminated string";它也非有效检索词。
-    cleaned = " ".join((q or "").replace("\x00", "").split())
+    cleaned = _clean_search_query(q)
     if not cleaned:
         return ""
     escaped = cleaned.replace('"', '""')
     return f'"{escaped}"'
+
+
+def _two_cjk_query(q: str) -> str | None:
+    """返回恰好两个 CJK 字符的短查询,其他查询仍由 FTS5 处理。"""
+    cleaned = _clean_search_query(q)
+    if len(cleaned) != 2:
+        return None
+    if all("\u4e00" <= char <= "\u9fff" for char in cleaned):
+        return cleaned
+    return None
+
+
+def _substring_snippet(body: str, title: str, needle: str) -> str:
+    """为两字 CJK fallback 生成安全高亮摘要。"""
+    body_text = body or ""
+    title_text = title or ""
+    source = body_text if needle in body_text else title_text
+    if not source:
+        return ""
+    index = source.find(needle)
+    if index < 0:
+        index = 0
+    start = max(0, index - 60)
+    end = min(len(source), index + len(needle) + 60)
+    prefix = "…" if start else ""
+    suffix = "…" if end < len(source) else ""
+    escaped = html.escape(source[start:end])
+    escaped_needle = html.escape(needle)
+    highlighted = escaped.replace(
+        escaped_needle, f"<mark>{escaped_needle}</mark>"
+    )
+    return f"{prefix}{highlighted}{suffix}"
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def _normalized_body_sha256(text: str) -> str:
+    """按稳定换行与 Unicode 形态计算 chunk 指纹。"""
+    normalized = unicodedata.normalize(
+        "NFC", (text or "").replace("\r\n", "\n")
+    )
+    normalized = "\n".join(line.rstrip() for line in normalized.split("\n")).strip()
+    return _sha256_text(normalized)
 
 
 def _chunk_note_body(
@@ -742,6 +795,9 @@ def _chunk_note_body(
 
     for start, end, para in paragraphs:
         if para.lstrip().startswith("#"):
+            # 新 heading 开启新证据段;先结算旧 section,避免跨节归属。
+            if cur_parts:
+                emit()
             section = para.lstrip("#").strip() or section
         if len(para) > max_chars:
             emit()
@@ -3275,6 +3331,7 @@ class Database:
             (job_id, note_type),
         )
         now = _now_iso()
+        artifact_sha256 = _sha256_text(body)
         for idx, chunk in enumerate(_chunk_note_body(body)):
             chunk_id = f"{job_id}:{note_type}:{idx}"
             evidence = {
@@ -3288,6 +3345,8 @@ class Database:
                 "page": None,
                 "frame_path": None,
                 "image_path": None,
+                "artifact_sha256": artifact_sha256,
+                "body_sha256": _normalized_body_sha256(chunk["body"]),
             }
             evidence_json = json.dumps(evidence, ensure_ascii=False)
             values = (
@@ -3327,16 +3386,21 @@ class Database:
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[int, list[dict]]:
-        """全文检索笔记。q 走 fts5 MATCH(trigram,中文子串友好),做基本转义防注入;
-        可按 collection_id / domain / content_type 收窄。返回 (total, items),
-        items 含 job_id/note_type/title/snippet/content_type/domain/collection_id。
-        注意:trigram 至少需 3 个字符才能命中,更短的查询会无结果。"""
-        match = _fts_match_query(q)
-        if not match:
+        """全文检索笔记;2 字 CJK 用参数化 instr,3+ 字符用 FTS5。"""
+        cleaned = _clean_search_query(q)
+        if not cleaned or len(cleaned) == 1:
             return 0, []
 
-        where_parts = ["notes_fts5 MATCH ?"]
-        params: list = [match]
+        short_query = _two_cjk_query(cleaned)
+        if short_query:
+            where_parts = ["(instr(title, ?) > 0 OR instr(body, ?) > 0)"]
+            params: list = [short_query, short_query]
+        else:
+            match = _fts_match_query(cleaned)
+            if not match:
+                return 0, []
+            where_parts = ["notes_fts5 MATCH ?"]
+            params = [match]
         if collection_id:
             where_parts.append("collection_id=?")
             params.append(collection_id)
@@ -3352,21 +3416,35 @@ class Database:
             f"SELECT COUNT(*) FROM notes_fts5 WHERE {where}", params
         ).fetchone()[0]
 
-        # snippet(表, 列号 6=body, 高亮包裹, 省略号, 单片最多 12 token)。
-        rows = self._conn.execute(
-            f"""SELECT job_id, note_type, title, content_type, domain,
-                   collection_id,
-                   snippet(notes_fts5, 6, '<mark>', '</mark>', '…', 12) AS snippet
-                FROM notes_fts5 WHERE {where}
-                ORDER BY rank LIMIT ? OFFSET ?""",
-            params + [limit, offset],
-        ).fetchall()
+        if short_query:
+            rows = self._conn.execute(
+                f"""SELECT job_id, note_type, title, content_type, domain,
+                           collection_id, body
+                    FROM notes_fts5 WHERE {where}
+                    ORDER BY job_id COLLATE BINARY, note_type COLLATE BINARY
+                    LIMIT ? OFFSET ?""",
+                params + [limit, offset],
+            ).fetchall()
+        else:
+            # snippet(表, 列号 6=body, 高亮包裹, 省略号, 单片最多 12 token)。
+            rows = self._conn.execute(
+                f"""SELECT job_id, note_type, title, content_type, domain,
+                           collection_id,
+                           snippet(notes_fts5, 6, '<mark>', '</mark>', '…', 12) AS snippet
+                    FROM notes_fts5 WHERE {where}
+                    ORDER BY rank, job_id COLLATE BINARY, note_type COLLATE BINARY
+                    LIMIT ? OFFSET ?""",
+                params + [limit, offset],
+            ).fetchall()
         items = [
             {
                 "job_id": r["job_id"],
                 "note_type": r["note_type"],
                 "title": r["title"],
-                "snippet": r["snippet"],
+                "snippet": (
+                    _substring_snippet(r["body"], r["title"], short_query)
+                    if short_query else r["snippet"]
+                ),
                 "content_type": r["content_type"],
                 "domain": r["domain"],
                 "collection_id": r["collection_id"] or None,
@@ -3384,13 +3462,23 @@ class Database:
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[int, list[dict]]:
-        """全文检索问答证据块。返回 chunk 级 body/snippet/evidence,供 Ask 使用。"""
-        match = _fts_match_query(q)
-        if not match:
+        """全文检索问答证据块;2 字 CJK 兼容路径与公开 filter 语义一致。"""
+        cleaned = _clean_search_query(q)
+        if not cleaned or len(cleaned) == 1:
             return 0, []
 
-        where_parts = ["note_chunks_fts5 MATCH ?"]
-        params: list = [match]
+        short_query = _two_cjk_query(cleaned)
+        if short_query:
+            where_parts = [
+                "(instr(title, ?) > 0 OR instr(section, ?) > 0 OR instr(body, ?) > 0)"
+            ]
+            params: list = [short_query, short_query, short_query]
+        else:
+            match = _fts_match_query(cleaned)
+            if not match:
+                return 0, []
+            where_parts = ["note_chunks_fts5 MATCH ?"]
+            params = [match]
         if collection_id:
             where_parts.append("collection_id=?")
             params.append(collection_id)
@@ -3405,26 +3493,59 @@ class Database:
         total = self._conn.execute(
             f"SELECT COUNT(*) FROM note_chunks_fts5 WHERE {where}", params
         ).fetchone()[0]
-        rows = self._conn.execute(
-            f"""SELECT chunk_id, job_id, note_type, title, content_type, domain,
-                   collection_id, section, body, evidence_json,
-                   snippet(note_chunks_fts5, 8, '<mark>', '</mark>', '…', 12) AS snippet
-                FROM note_chunks_fts5 WHERE {where}
-                ORDER BY rank LIMIT ? OFFSET ?""",
-            params + [limit, offset],
-        ).fetchall()
+        if short_query:
+            rows = self._conn.execute(
+                f"""SELECT chunk_id, job_id, note_type, title, content_type, domain,
+                           collection_id, section, body, evidence_json
+                    FROM note_chunks_fts5 WHERE {where}
+                    ORDER BY job_id COLLATE BINARY, note_type COLLATE BINARY,
+                             chunk_id COLLATE BINARY
+                    LIMIT ? OFFSET ?""",
+                params + [limit, offset],
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                f"""SELECT chunk_id, job_id, note_type, title, content_type, domain,
+                           collection_id, section, body, evidence_json,
+                           snippet(note_chunks_fts5, 8, '<mark>', '</mark>', '…', 12) AS snippet
+                    FROM note_chunks_fts5 WHERE {where}
+                    ORDER BY rank, job_id COLLATE BINARY, note_type COLLATE BINARY,
+                             chunk_id COLLATE BINARY
+                    LIMIT ? OFFSET ?""",
+                params + [limit, offset],
+            ).fetchall()
         items = []
+        artifact_hashes: dict[tuple[str, str], str | None] = {}
         for r in rows:
             try:
                 evidence = json.loads(r["evidence_json"] or "{}")
             except (json.JSONDecodeError, TypeError):
                 evidence = {}
+            evidence.setdefault("note_type", r["note_type"])
+            evidence.setdefault("body_sha256", _normalized_body_sha256(r["body"]))
+            if not evidence.get("artifact_sha256"):
+                artifact_key = (r["job_id"], r["note_type"])
+                if artifact_key not in artifact_hashes:
+                    note_row = self._conn.execute(
+                        """SELECT body FROM notes_fts5
+                           WHERE job_id=? AND note_type=? LIMIT 1""",
+                        artifact_key,
+                    ).fetchone()
+                    artifact_hashes[artifact_key] = (
+                        _sha256_text(note_row["body"]) if note_row else None
+                    )
+                artifact_sha256 = artifact_hashes[artifact_key]
+                if artifact_sha256:
+                    evidence["artifact_sha256"] = artifact_sha256
             items.append({
                 "chunk_id": r["chunk_id"],
                 "job_id": r["job_id"],
                 "note_type": r["note_type"],
                 "title": r["title"],
-                "snippet": r["snippet"],
+                "snippet": (
+                    _substring_snippet(r["body"], r["title"], short_query)
+                    if short_query else r["snippet"]
+                ),
                 "body": r["body"],
                 "content_type": r["content_type"],
                 "domain": r["domain"],

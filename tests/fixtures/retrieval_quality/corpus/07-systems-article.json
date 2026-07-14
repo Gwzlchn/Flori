@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-systems-article", "content_type": "article", "pipeline": "article", "domain": "quality-systems", "topic": "systems", "title": "数据库恢复检查清单", "primary_language": "zh", "meta": {"flags": {"smart_note": false}}},
+  "note": {
+    "path": "output/original.md",
+    "note_type": "original",
+    "lines": [
+      "# 数据库恢复检查清单",
+      "",
+      "写前日志 write-ahead log 通过先记录意图来保证崩溃后的数据库一致性。",
+      "",
+      "## 操作步骤",
+      "",
+      "恢复检查清单要求验证日志尾、事务提交标记和数据页 LSN。",
+      "",
+      "## 同义表达",
+      "",
+      "预写日志、WAL 与 write-ahead logging 都描述相同的顺序约束。",
+      "",
+      "## 失败处理",
+      "",
+      "校验失败时应停止并保留原始副本，不能带病切换。"
+    ],
+    "source_sha256": "6bcd48b79a446fa53338b02580304482e3adfa18263de9d810b0c2bfc46d1330",
+    "artifact_sha256": "f7aa03f985e8e9501db1ff0a3135b3dc2d3810b733f8c523329b5c03955ccb4d"
+  },
+  "chunks": {
+    "summary": {"anchor": "崩溃后的数据库一致性", "body_sha256": "b8397fc9ff6dcf9289d25363b9e9b31a7cabea6d9abdd80b251ca6587cfa05e5"},
+    "core": {"anchor": "验证日志尾", "body_sha256": "e783bf204e6b5a489eb368b60010beab50d0276647ca0d91efd9bc71a59b5ec6"},
+    "aliases": {"anchor": "预写日志", "body_sha256": "36e8c3487b54186bd68112c5f5a440fe3feec6da18acb46f17aa83e518d86d54"},
+    "boundary": {"anchor": "保留原始副本", "body_sha256": "ed645ec1518537325639e8106049e97f4d53bc37a03c689d52075a0a5d8f791d"}
+  }
+}

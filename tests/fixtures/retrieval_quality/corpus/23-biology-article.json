@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-biology-article", "content_type": "article", "pipeline": "article", "domain": "quality-biology", "topic": "biology", "title": "基因表达实验批次指南", "primary_language": "zh", "meta": {"flags": {"smart_note": false}}},
+  "note": {
+    "path": "output/original.md",
+    "note_type": "original",
+    "lines": [
+      "# 基因表达实验批次指南",
+      "",
+      "基因表达 gene expression 研究 DNA 信息如何转成 RNA 和后续功能产物。",
+      "",
+      "## 实验设计",
+      "",
+      "实验批次指南要求处理组和对照组均匀分配到每个测序批次。",
+      "",
+      "## 同义表达",
+      "",
+      "表达量、transcript abundance 与转录水平需要结合测量方法解释。",
+      "",
+      "## 风险",
+      "",
+      "批次效应与生物条件完全重合时，统计模型无法可靠分离两者。"
+    ],
+    "source_sha256": "a62e4a854db218574316d4461cc6b50c582d1bd0aadb957d9083e76186956701",
+    "artifact_sha256": "45b2737d02555e906cc08904c5c7d8e8af051666651677128a6081593c1c4fcc"
+  },
+  "chunks": {
+    "summary": {"anchor": "DNA 信息如何转成 RNA", "body_sha256": "515acb20ecb1301b8653b937ac0ef83aa40762e60fce4893a6ad928c177bb552"},
+    "core": {"anchor": "均匀分配到每个测序批次", "body_sha256": "c99c3caf40fb7e34f18ab9715e101792200e789997946e79b9e893f1896ffbfd"},
+    "aliases": {"anchor": "表达量", "body_sha256": "e7733e3d3e34133589409392c10adb1db56262a24dcf6c8c891b72e2e841258a"},
+    "boundary": {"anchor": "批次效应", "body_sha256": "2206d98d8d73bc225aa443d24057b36ab9dbe57639570ed561504a4c0fbfca03"}
+  }
+}

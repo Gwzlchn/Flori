@@ -14,6 +14,7 @@ import json
 import structlog
 from fastapi import APIRouter, Depends
 
+from shared.ask_citations import validate_bound_ask_citations
 from shared.db import Database
 from shared.redis_client import RedisClient
 from api.deps import get_db, get_redis, validate_path_segment, verify_token
@@ -32,13 +33,49 @@ async def ai_task_result(task_id: str, redis: RedisClient = Depends(get_redis)):
     res = await redis.get_ai_result(task_id)
     if res is None:
         return {"status": "pending", "task_id": task_id}
-    if isinstance(res, dict) and res.get("error"):
-        return {"status": "error", "task_id": task_id, "error": res["error"]}
     content = (res or {}).get("content", "")
+    source_manifest = res.get("source_manifest")
+    citation_validation = res.get("citation_validation")
+    original_payload = await redis.get_ai_task_original_payload(task_id)
+    if original_payload is None:
+        # 结果由 Worker 提供,不能反过来充当服务端来源锚点。锚点与结果同时
+        # 缺失或锚点损坏时统一拒绝展示,避免恶意 Worker 自报 valid 后替换来源。
+        citation_validation = validate_bound_ask_citations(
+            task_id, content, source_manifest, None,
+        )
+        return {
+            "status": "error", "task_id": task_id,
+            "error": res.get("error") or "AI task provenance unavailable",
+            "source_manifest": source_manifest,
+            "citation_validation": citation_validation,
+        }
+    audit_context = (
+        original_payload.get("audit_context")
+        if original_payload is not None else None
+    )
+    original_manifest = (
+        audit_context.get("ask_source_manifest")
+        if type(audit_context) is dict
+        else None
+    )
+    is_ask = original_payload.get("step") == "synthesis"
+    if is_ask or source_manifest is not None or original_manifest is not None:
+        # claim 中的原始 payload 是不可变锚点,远端 Worker 不能替换整套来源后自报 valid.
+        citation_validation = validate_bound_ask_citations(
+            task_id, content, source_manifest, original_manifest,
+        )
+    if res.get("error"):
+        return {
+            "status": "error", "task_id": task_id, "error": res["error"],
+            "source_manifest": source_manifest,
+            "citation_validation": citation_validation,
+        }
     return {
         "status": "done", "task_id": task_id,
         "content": content, "answer_markdown": content, "markdown": content,
         "provider": res.get("provider"), "model": res.get("model"), "cost_usd": res.get("cost_usd"),
+        "source_manifest": source_manifest,
+        "citation_validation": citation_validation,
     }
 
 

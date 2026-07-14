@@ -18,7 +18,7 @@ router = APIRouter(
 
 @router.get("", response_model=SearchResponse)
 async def search_notes(
-    q: str = Query("", description="检索词；trigram 至少 3 字符才命中"),
+    q: str = Query("", description="检索词;2 字 CJK 可精确子串命中,3+ 字符走 trigram"),
     collection_id: str | None = None,
     domain: str | None = None,
     content_type: str | None = None,

@@ -823,6 +823,25 @@ class TestAITaskQueue:
         assert await rc.mark_ai_task_executing(**common) is False
 
     @pytest.mark.asyncio
+    async def test_original_ai_payload_is_frozen_at_claim(self, rc):
+        payload = {
+            "kind": "ai", "task_id": "at_manifest", "batch_id": "ssb_manifest",
+            "attempt": 1, "revision": 1,
+            "audit_context": {"ask_source_manifest": {"manifest_sha256": "a" * 64}},
+        }
+        await rc.enqueue_ai_task_once(payload)
+        await rc.claim_ai_task(
+            worker_id="worker-owner", lease_seconds=60, now_epoch=3_000,
+        )
+
+        assert await rc.get_ai_task_original_payload("at_manifest") == payload
+        # claim raw_json 属执行状态,即使被 trusted-local 直连路径误改也不能替换服务端锚点。
+        await rc.r.hset("ai:claim:at_manifest", "raw_json", "not-json")
+        assert await rc.get_ai_task_original_payload("at_manifest") == payload
+        await rc.r.set("ai:anchor:at_manifest", "not-json")
+        assert await rc.get_ai_task_original_payload("at_manifest") is None
+
+    @pytest.mark.asyncio
     async def test_claimed_task_is_requeued_at_most_once(self, rc):
         payload = {
             "kind": "ai", "task_id": "at_once_retry", "batch_id": "ssb_once",

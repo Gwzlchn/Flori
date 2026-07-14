@@ -14,6 +14,7 @@ import structlog
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
+from shared.ask_citations import build_source_manifest
 from shared.db import Database
 from shared.models import AITask, LLMRequest
 from shared.redis_client import RedisClient
@@ -29,7 +30,7 @@ router = APIRouter(
 
 
 class AskRequest(BaseModel):
-    question: str = Field(..., min_length=1, description="自然语言问题")
+    question: str = Field(..., min_length=1, max_length=4000, description="自然语言问题")
     domain: str | None = Field(None, description="限定知识库(domain);null=全库")
     limit: int = Field(8, ge=1, le=20, description="检索并喂给 LLM 的最大笔记数")
 
@@ -80,10 +81,15 @@ async def ask(
         max_tokens=4096, temperature=0.3,  # 综合问答求稳,低温减少臆造
     )
     task_id = f"at_{uuid.uuid4().hex}"
-    payload = AITask(
-        task_id=task_id, request=request_obj, step_name="synthesis", domain=req.domain,
-    ).to_task_payload()
     try:
+        source_manifest = build_source_manifest(task_id, req.question, passages)
+        payload = AITask(
+            task_id=task_id,
+            request=request_obj,
+            step_name="synthesis",
+            domain=req.domain,
+            audit_context={"ask_source_manifest": source_manifest},
+        ).to_task_payload()
         await redis.enqueue_ai_task(payload)
     except Exception as e:  # 投递失败时优雅降级,不冒 5xx;仍返回检索到的来源.
         log.warning("ask_enqueue_failed", error=str(e))

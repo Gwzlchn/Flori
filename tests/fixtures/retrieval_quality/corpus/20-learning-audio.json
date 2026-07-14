@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-learning-audio", "content_type": "audio", "pipeline": "audio", "domain": "quality-learning", "topic": "learning", "title": "Learning Rhythm Interview", "primary_language": "en", "meta": {}},
+  "note": {
+    "path": "output/versions/notes_smart_fixture_model_20260714-000000.md",
+    "note_type": "smart",
+    "lines": [
+      "# Learning Rhythm Interview",
+      "",
+      "The interview explains spaced repetition and 间隔复习 as reviewing material near likely forgetting.",
+      "",
+      "## Practice",
+      "",
+      "学习节奏访谈建议用真实回忆结果调整下一次复习时间。",
+      "",
+      "## Aliases",
+      "",
+      "Distributed practice, spaced practice, and 分散复习 all contrast with cramming.",
+      "",
+      "## Limits",
+      "",
+      "Easy recognition is not equivalent to successful free recall."
+    ],
+    "source_sha256": "ae73ceb43877db9ea1b471f49c58cd97a8ada080d73c2a6f4b0f9479df872b0e",
+    "artifact_sha256": "899235405fc33b5eca1c3f4bf04389eed20bb8241d058d1d7916da89a4ec1554"
+  },
+  "chunks": {
+    "summary": {"anchor": "reviewing material near likely forgetting", "body_sha256": "637fe435e595831d4c8ec1da6ff4042d444ae7f5542726d90106f094b4cae316"},
+    "core": {"anchor": "学习节奏访谈", "body_sha256": "0e547a34a86dd36cff00a31c55bd59cd0c0bad0e1f0ecd0a538a5c42ebd71d3d"},
+    "aliases": {"anchor": "contrast with cramming", "body_sha256": "25ef08d80a29832ce8b2bcd8f461b67ac8bb7dc63fbfdc7718679f4be96a90c7"},
+    "boundary": {"anchor": "successful free recall", "body_sha256": "8bae694d3cc72c30b273f180f46e93f85e13c7779e3d1ed7be59ef272be8a085"}
+  }
+}

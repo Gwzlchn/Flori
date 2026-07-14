@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-systems-video", "content_type": "video", "pipeline": "video", "domain": "quality-systems", "topic": "systems", "title": "写前日志演示", "primary_language": "zh", "meta": {}},
+  "note": {
+    "path": "output/versions/notes_smart_fixture_model_20260714-000000.md",
+    "note_type": "smart",
+    "lines": [
+      "# 写前日志演示",
+      "",
+      "写前日志 write-ahead logging 在数据页前持久化变更记录，帮助故障后保持写入一致。",
+      "",
+      "## 刷盘顺序",
+      "",
+      "日志刷盘演示先确认 WAL 已落盘，再允许脏页写回。",
+      "",
+      "## 同义表达",
+      "",
+      "预写式日志和 WAL 指同一类先记日志后改数据页的协议。",
+      "",
+      "## 恢复边界",
+      "",
+      "恢复必须区分已提交与未提交事务，不能只重放所有记录。"
+    ],
+    "source_sha256": "3e83ba107a313d2f2f0b6629024ad9336a76315fb48aff9691a48a08ce03f02b",
+    "artifact_sha256": "846f078418981af0e76734722fa539c4fad3ab9a9d26a8c5ad5fcb46d51d5d3a"
+  },
+  "chunks": {
+    "summary": {"anchor": "故障后保持写入一致", "body_sha256": "2e778bc72e9d3465cb2f0f5c909fb4d0a5d18f00544f53bdf71995bbf003a194"},
+    "core": {"anchor": "日志刷盘演示", "body_sha256": "21bfc33a215e285c93a50ee1a2595b081d8254b705822e6bbf349d621e37b622"},
+    "aliases": {"anchor": "预写式日志", "body_sha256": "4b7dfd8ccac16e46ed54a8ae240dec6e047ffa64fe16b424ffdf183122279941"},
+    "boundary": {"anchor": "区分已提交与未提交事务", "body_sha256": "c61e298ae149964431fbdc374af0a5e6a78fee6ce8aca296f9aa88506b5a896c"}
+  }
+}

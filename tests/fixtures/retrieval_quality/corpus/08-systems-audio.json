@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-systems-audio", "content_type": "audio", "pipeline": "audio", "domain": "quality-systems", "topic": "systems", "title": "Storage Engine Interview", "primary_language": "en", "meta": {}},
+  "note": {
+    "path": "output/versions/notes_smart_fixture_model_20260714-000000.md",
+    "note_type": "smart",
+    "lines": [
+      "# Storage Engine Interview",
+      "",
+      "The storage engine uses write-ahead logging, 中文写前日志, to recover committed writes after failure.",
+      "",
+      "## Operational Detail",
+      "",
+      "存储引擎访谈说明 checkpoint 只缩短重放范围，不替代 WAL。",
+      "",
+      "## Aliases",
+      "",
+      "Prewrite journal, WAL, and 预写式日志 refer to the durable intent record in this discussion.",
+      "",
+      "## Limits",
+      "",
+      "Recovery is fail-closed when the log sequence contains a gap."
+    ],
+    "source_sha256": "a7a28c98ffc78edbe384b05083b133659bc46fb14fcf57f19884df87838f9ad3",
+    "artifact_sha256": "61e80339208ce5e1d32f7e59935dbaf669b1137a518d4e125d9b20a5730492a9"
+  },
+  "chunks": {
+    "summary": {"anchor": "recover committed writes after failure", "body_sha256": "6ce6c664064e436b41bac689c66df26667ecb40e227dc0faa99ae6bd2c32147d"},
+    "core": {"anchor": "存储引擎访谈", "body_sha256": "1b67c1357ff6fec50070d058c21880591fb1c62aefac64a3ccee9ca7be2bbbb5"},
+    "aliases": {"anchor": "Prewrite journal", "body_sha256": "923789cdcc05f24b8614c12afd437a87e6ff2109b9334744a681276e4066cf68"},
+    "boundary": {"anchor": "log sequence contains a gap", "body_sha256": "1311be412479ef3a33cae1430a743d69799aa6d139e8932d45bbec5508529cb6"}
+  }
+}

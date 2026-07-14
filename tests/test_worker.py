@@ -1193,29 +1193,52 @@ class TestAITaskExecution:
     """worker 认领并执行独立 AI task(kind='ai'),含白盒审计、错误回执、认领路由。"""
 
     def _ai_claim(self, task_id="at_1", step="synthesis", domain="dl",
-                  provider="claude-cli", model="claude-opus-4-8[1m]"):
-        return {
+                  provider="claude-cli", model="claude-opus-4-8[1m]", audit_context=None):
+        claim = {
             "kind": "ai", "task_id": task_id, "step": step, "pool": "ai", "exec_id": "w:1",
             "request": LLMRequest(messages=[{"role": "user", "content": "Q"}], system="S").to_jsonable(),
             "domain": domain, "provider": provider, "model": model,
         }
+        if audit_context is not None:
+            claim["audit_context"] = audit_context
+        return claim
+
+    @staticmethod
+    def _ask_context(task_id: str) -> dict:
+        from shared.ask_citations import build_source_manifest
+
+        manifest = build_source_manifest(task_id, "反向传播如何工作?", [{
+            "job_id": "j_bp", "title": "反向传播", "domain": "ml",
+            "content_type": "video", "note_type": "smart",
+            "artifact_sha256": "a" * 64,
+            "body": "反向传播通过链式法则计算梯度。",
+            "evidence": {"chunk_id": "j_bp:smart:0", "section": "原理"},
+        }])
+        return {"ask_source_manifest": manifest}
 
     @pytest.mark.asyncio
     async def test_execute_success(self, worker, redis, db, monkeypatch):
-        resp = LLMResponse(content="ANSWER", model="claude-opus-4-8", provider="claude-cli",
+        resp = LLMResponse(content="反向传播通过链式法则计算梯度 [来源1]。",
+                           model="claude-opus-4-8", provider="claude-cli",
                            cost_usd=0.12, input_tokens=100, output_tokens=50, num_turns=1,
                            attempts=[{"tier": "primary"}], session_id="s1")
         monkeypatch.setattr("worker.worker.AIGateway", lambda p, pl: _FakeGateway(resp=resp))
-        await worker._execute_ai_task(self._ai_claim("at_ok"))
+        await worker._execute_ai_task(
+            self._ai_claim("at_ok", audit_context=self._ask_context("at_ok")),
+        )
         # 1) 结果回执 airesult
         got = await redis.get_ai_result("at_ok")
-        assert got["content"] == "ANSWER" and got["provider"] == "claude-cli"
+        assert got["content"].startswith("反向传播") and got["provider"] == "claude-cli"
+        assert got["citation_validation"]["status"] == "valid"
+        assert got["source_manifest"]["task_id"] == "at_ok"
         # 2) 白盒审计落表(渲染 prompt/输出/尝试链/用量)
         logs = db.get_ai_task_logs("at_ok")
         assert len(logs) == 1 and logs[0]["ok"] == 1
         assert logs[0]["provider"] == "claude-cli" and logs[0]["step_name"] == "synthesis"
         rec = json.loads(logs[0]["record_json"])
-        assert rec["output"] == "ANSWER" and rec["prompt"]["system"] == "S"
+        assert rec["output"].startswith("反向传播") and rec["prompt"]["system"] == "S"
+        assert rec["audit_context"]["ask_source_manifest"]["task_id"] == "at_ok"
+        assert rec["citation_validation"]["status"] == "valid"
         assert rec["routing"]["requested"] == {"provider": "claude-cli", "model": "claude-opus-4-8[1m]"}
         assert rec["routing"]["attempts"] == [{"tier": "primary"}]
         assert rec["usage"]["input_tokens"] == 100

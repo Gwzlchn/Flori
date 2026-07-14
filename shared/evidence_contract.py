@@ -864,6 +864,11 @@ def _normalize_citation_text(text: str) -> str:
     return text.strip(" \t\r\n,，.。;；:：!?！？()（）[]【】")
 
 
+def normalize_citation_text(text: str) -> str:
+    """公开确定性引用文本归一化,供不同引用标签的薄适配器复用。"""
+    return _normalize_citation_text(text)
+
+
 def _claim_has_semantic_context(claim: str) -> bool:
     remainder = _QUANTITY_RE.sub("", claim)
     semantic = re.sub(r"[^A-Za-z\u4e00-\u9fff]", "", remainder)

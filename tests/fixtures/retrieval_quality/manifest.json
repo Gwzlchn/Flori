@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "name": "flori-retrieval-quality-v1",
+  "description": "去敏的四类真实笔记产物形态,用于离线检索质量决策。",
+  "corpus_sha256": "f09d78b6afcf9e47fb9af8c9ae8c1d53016ea51331fdc67ad61def7640edd938",
+  "queries_sha256": "b40c6c3db24f60601d9917c1e2684df94a9d006b490e483e6bf5ff8311a99b6c",
+  "corpus": {
+    "jobs": 24,
+    "content_types": {
+      "video": 6,
+      "paper": 6,
+      "article": 6,
+      "audio": 6
+    },
+    "topics": [
+      "ml",
+      "systems",
+      "security",
+      "finance",
+      "learning",
+      "biology"
+    ],
+    "primary_languages": {
+      "zh": 12,
+      "en": 12
+    }
+  },
+  "queries": {
+    "total": 96,
+    "strata": {
+      "exact": 24,
+      "paraphrase": 10,
+      "synonym": 10,
+      "cross_language": 20,
+      "cross_source": 16,
+      "unanswerable": 16
+    },
+    "single_source_languages": {
+      "zh": 32,
+      "en": 32
+    },
+    "single_source_content_types": {
+      "video": 16,
+      "paper": 16,
+      "article": 16,
+      "audio": 16
+    },
+    "cross_language_directions": {
+      "zh_to_en": 10,
+      "en_to_zh": 10
+    }
+  },
+  "normalization": {
+    "chunk_body": "nfc-lf-rstrip-v1",
+    "definition": "NFC,CRLF 转 LF,逐行 rstrip,整体 strip,再以 UTF-8 计算 SHA256"
+  },
+  "sampling": {
+    "warmup_rounds": 5,
+    "measured_rounds": 30,
+    "percentile": "nearest-rank"
+  },
+  "citation_conformance": [
+    {"id":"citation-valid","kind":"valid","source":{"job_id":"rq-systems-paper","chunk_key":"summary"},"expected_status":"valid","expected_errors":[],"dimensions":["structural","source","claim","coverage"]},
+    {"id":"citation-unknown","kind":"unknown","source":{"job_id":"rq-systems-paper","chunk_key":"summary"},"expected_status":"invalid","expected_errors":["unknown_source_index"],"dimensions":["source"]},
+    {"id":"citation-malformed","kind":"malformed","source":{"job_id":"rq-systems-paper","chunk_key":"summary"},"expected_status":"invalid","expected_errors":["malformed_citation"],"dimensions":["structural"]},
+    {"id":"citation-unsupported","kind":"unsupported","source":{"job_id":"rq-systems-paper","chunk_key":"summary"},"expected_status":"invalid","expected_errors":["unsupported_claim"],"dimensions":["claim"]},
+    {"id":"citation-zero","kind":"zero","source":{"job_id":"rq-systems-paper","chunk_key":"summary"},"expected_status":"invalid","expected_errors":["missing_citations"],"dimensions":["structural","coverage"]},
+    {"id":"citation-cross-task","kind":"cross_task","source":{"job_id":"rq-systems-paper","chunk_key":"summary"},"expected_status":"invalid","expected_errors":["manifest_task_mismatch"],"dimensions":["source"]},
+    {"id":"citation-tampered","kind":"tampered","source":{"job_id":"rq-systems-paper","chunk_key":"summary"},"expected_status":"invalid","expected_errors":["invalid_source_manifest"],"dimensions":["source"]},
+    {"id":"citation-heading","kind":"heading","source":{"job_id":"rq-systems-paper","chunk_key":"summary"},"expected_status":"unverified","expected_errors":["uncited_claims"],"dimensions":["claim","coverage"]}
+  ],
+  "miss_reason_contract": {
+    "classifier": "evidence-v1",
+    "reasons": [
+      "semantic_lexical_gap",
+      "known_fix_regression",
+      "identity_mismatch",
+      "filter_truth_mismatch",
+      "filtered_unanswerable_false_positive",
+      "out_of_scope_false_positive",
+      "unknown"
+    ]
+  },
+  "thresholds": {
+    "exact": {
+      "recall_at_5": 0.95,
+      "mrr_at_10": 0.85
+    },
+    "semantic": {
+      "recall_at_5": 0.8,
+      "mrr_at_10": 0.6
+    },
+    "cross_source": {
+      "coverage_at_8": 0.75
+    },
+    "relevant_no_hit": {
+      "overall_max": 0.1,
+      "critical_stratum_max": 0.2
+    },
+    "unanswerable": {
+      "empty_min": 0.9,
+      "false_positive_max": 0.1
+    },
+    "citation": {
+      "structural_min": 1.0,
+      "source_min": 0.9,
+      "claim_min": 0.85,
+      "coverage_min": 0.8
+    },
+    "retrieval_evidence": {
+      "coverage_at_8": 0.8
+    },
+    "latency_ms": {
+      "engine_warm_p95_max": 100.0,
+      "api_mcp_warm_p95_max": 250.0
+    }
+  },
+  "known_fixes": [
+    "markdown_structure_preserved",
+    "heading_emits_previous_section",
+    "two_cjk_parameterized_fallback",
+    "ask_deterministic_rrf",
+    "ask_one_chunk_per_job"
+  ]
+}

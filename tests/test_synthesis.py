@@ -10,6 +10,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 import pytest
 
 from shared.db import Database
@@ -99,7 +102,9 @@ class TestRetrieve:
         passages = synthesis.retrieve(db, "反向传播", domain="ml", k=8)
         bp = next(p for p in passages if p["job_id"] == "j_bp")
         assert "链式法则" in bp["body"]
-        assert set(bp) == {"job_id", "title", "domain", "content_type", "body", "evidence"}
+        assert set(bp) == {
+            "job_id", "note_type", "title", "domain", "content_type", "body", "evidence",
+        }
         assert bp["evidence"]["chunk_id"] == "j_bp:smart:0"
 
     def test_domain_scope(self, db):
@@ -126,6 +131,116 @@ class TestRetrieve:
         passages = synthesis.retrieve(db, "反向传播原理", domain="ml", k=8)
         big = next(p for p in passages if p["job_id"] == "j_big")
         assert len(big["body"]) <= 4000
+
+    def test_rrf_uses_every_derived_query_before_ranking(self, monkeypatch):
+        class FakeDb:
+            def __init__(self):
+                self.calls = []
+
+            def search_note_chunks(self, query, **kwargs):
+                self.calls.append((query, kwargs))
+                evidence = {
+                    "artifact_sha256": "a" * 64,
+                    "body_sha256": "b" * 64,
+                }
+                rows = {
+                    "first": [
+                        {"chunk_id": "noise:smart:0", "job_id": "noise", "note_type": "smart",
+                         "title": "noise", "domain": "ml", "content_type": "paper",
+                         "body": "noise", "snippet": "noise", "section": "", "evidence": evidence},
+                        {"chunk_id": "target:smart:0", "job_id": "target", "note_type": "smart",
+                         "title": "target", "domain": "ml", "content_type": "paper",
+                         "body": "target", "snippet": "target", "section": "", "evidence": evidence},
+                    ],
+                    "second": [
+                        {"chunk_id": "target:smart:0", "job_id": "target", "note_type": "smart",
+                         "title": "target", "domain": "ml", "content_type": "paper",
+                         "body": "target", "snippet": "target", "section": "", "evidence": evidence},
+                    ],
+                }[query]
+                return len(rows), rows
+
+        fake = FakeDb()
+        monkeypatch.setattr(
+            synthesis, "derive_queries", lambda *_args, **_kwargs: ["first", "second"]
+        )
+        passages = synthesis.retrieve(fake, "question", domain="ml", k=2)
+
+        assert [passage["job_id"] for passage in passages] == ["target", "noise"]
+        assert [query for query, _kwargs in fake.calls] == ["first", "second"]
+        assert all(
+            kwargs == {"domain": "ml", "limit": 8}
+            for _query, kwargs in fake.calls
+        )
+
+    def test_one_passage_per_job_and_hashes_are_preserved(self, db):
+        body = "唯一检索锦标词与证据内容。"
+        db.index_job_notes("j_same", "smart", "智能", body, domain="ml")
+        db.index_job_notes("j_same", "mechanical", "机械", body, domain="ml")
+        db.index_job_notes("j_other", "smart", "其他", body, domain="ml")
+
+        passages = synthesis.retrieve(db, "唯一检索锦标", domain="ml", k=8)
+        assert [p["job_id"] for p in passages].count("j_same") == 1
+        assert {p["job_id"] for p in passages} == {"j_same", "j_other"}
+        assert next(p for p in passages if p["job_id"] == "j_same")["note_type"] == "smart"
+        for passage in passages:
+            assert passage["note_type"] in {"smart", "mechanical"}
+            assert len(passage["evidence"]["artifact_sha256"]) == 64
+            assert len(passage["evidence"]["body_sha256"]) == 64
+
+        first_digest = hashlib.sha256(
+            json.dumps(passages, ensure_ascii=False, sort_keys=True).encode()
+        ).hexdigest()
+        second_digest = hashlib.sha256(
+            json.dumps(
+                synthesis.retrieve(
+                    db, "唯一检索锦标", domain="ml", k=8
+                ),
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        assert first_digest == second_digest
+
+    def test_candidate_overfetch_preserves_job_diversity(self, monkeypatch):
+        evidence = {"artifact_sha256": "a" * 64, "body_sha256": "b" * 64}
+
+        class FakeDb:
+            def search_note_chunks(self, _query, **kwargs):
+                assert kwargs["limit"] == 8
+                rows = []
+                for index in range(4):
+                    rows.append({
+                        "chunk_id": f"same:smart:{index}", "job_id": "same",
+                        "note_type": "smart", "title": "same", "domain": "ml",
+                        "content_type": "video", "body": f"same-{index}",
+                        "snippet": "same", "section": "", "evidence": evidence,
+                    })
+                rows.append({
+                    "chunk_id": "other:smart:0", "job_id": "other",
+                    "note_type": "smart", "title": "other", "domain": "ml",
+                    "content_type": "paper", "body": "other", "snippet": "other",
+                    "section": "", "evidence": evidence,
+                })
+                return len(rows), rows
+
+        monkeypatch.setattr(synthesis, "derive_queries", lambda *_args, **_kwargs: ["q"])
+        passages = synthesis.retrieve(FakeDb(), "question", domain="ml", k=2)
+        assert [passage["job_id"] for passage in passages] == ["same", "other"]
+
+    def test_rejects_chunk_without_artifact_binding(self, db):
+        db.index_job_notes(
+            "j_unbound", "smart", "未绑定", "拒绝未绑定证据内容。", domain="ml"
+        )
+        db._conn.execute(
+            "UPDATE note_chunks_fts5 SET evidence_json='{}' WHERE job_id='j_unbound'"
+        )
+        db._conn.execute(
+            "DELETE FROM notes_fts5 WHERE job_id='j_unbound'"
+        )
+        db._conn.commit()
+
+        assert synthesis.retrieve(db, "拒绝未绑定证据", domain="ml", k=8) == []
 
 
 # build_prompt
@@ -226,6 +341,12 @@ class TestAskEndpoint:
         assert len(queued) == 1
         assert queued[0]["kind"] == "ai" and queued[0]["task_id"] == data["task_id"]
         assert queued[0]["step"] == "synthesis" and queued[0]["require_tags"] == ["claude-cli"]
+        raw = await ask_app.state.redis.r.zrange("queue:ai", 0, 0)
+        task_payload = json.loads(raw[0])
+        manifest = task_payload["audit_context"]["ask_source_manifest"]
+        assert manifest["task_id"] == data["task_id"]
+        assert len(manifest["sources"]) == data["retrieved_count"]
+        assert all(source["source_fingerprint"] for source in manifest["sources"])
 
     @pytest.mark.asyncio
     async def test_ask_no_match_skips_task(self, ask_client, ask_app):
@@ -243,9 +364,26 @@ class TestAskEndpoint:
         resp = await ask_client.post("/api/ask", json={"question": ""})
         assert resp.status_code == 422
 
+    @pytest.mark.asyncio
+    async def test_ask_oversized_question_422(self, ask_client):
+        resp = await ask_client.post("/api/ask", json={"question": "问" * 4001})
+        assert resp.status_code == 422
+
 
 class TestAITasksEndpoints:
     """/api/ai-tasks/{task_id}/result 的 pending/done/error 三态 + /log 白盒审计。"""
+
+    @staticmethod
+    async def _bind_original_manifest(redis, task_id: str, source_manifest: dict) -> None:
+        payload = {
+            "kind": "ai", "task_id": task_id,
+            "audit_context": {"ask_source_manifest": source_manifest},
+        }
+        await redis.r.hset(
+            f"ai:claim:{task_id}",
+            "raw_json",
+            json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        )
 
     @pytest.mark.asyncio
     async def test_result_pending(self, ask_client):
@@ -254,18 +392,169 @@ class TestAITasksEndpoints:
 
     @pytest.mark.asyncio
     async def test_result_done(self, ask_client, ask_app):
+        from shared.ask_citations import build_source_manifest
+
+        content = "反向传播通过链式法则计算梯度 [来源1]。"
+        source_manifest = build_source_manifest("at_done", "反向传播", [{
+            "job_id": "j_bp", "title": "反向传播", "domain": "ml",
+            "content_type": "video", "note_type": "smart",
+            "artifact_sha256": "a" * 64,
+            "body": "反向传播通过链式法则计算梯度。",
+            "evidence": {"chunk_id": "j_bp:smart:0", "section": "原理"},
+        }])
+        await self._bind_original_manifest(
+            ask_app.state.redis, "at_done", source_manifest,
+        )
         await ask_app.state.redis.set_ai_result(
-            "at_done", {"content": "ANS", "provider": "claude-cli", "model": "claude-opus-4-8[1m]", "cost_usd": 0.1})
+            "at_done", {"content": content, "provider": "claude-cli", "model": "claude-opus-4-8[1m]",
+                        "cost_usd": 0.1, "citation_validation": {"status": "spoofed"},
+                        "source_manifest": source_manifest})
         data = (await ask_client.get("/api/ai-tasks/at_done/result")).json()
-        assert data["status"] == "done" and data["content"] == "ANS"
-        assert data["answer_markdown"] == "ANS" and data["markdown"] == "ANS"
+        assert data["status"] == "done" and data["content"] == content
+        assert data["answer_markdown"] == content and data["markdown"] == content
         assert data["provider"] == "claude-cli"
+        assert data["citation_validation"]["status"] == "valid"
+        assert data["source_manifest"] == source_manifest
+
+    @pytest.mark.asyncio
+    async def test_result_rejects_cross_task_manifest(self, ask_client, ask_app):
+        from shared.ask_citations import build_source_manifest
+
+        original_manifest = build_source_manifest("at_done", "反向传播", [{
+            "job_id": "j_bp", "title": "反向传播", "domain": "ml",
+            "content_type": "video", "note_type": "smart",
+            "artifact_sha256": "a" * 64,
+            "body": "反向传播通过链式法则计算梯度。",
+            "evidence": {"chunk_id": "j_bp:smart:0", "section": "原理"},
+        }])
+        await self._bind_original_manifest(
+            ask_app.state.redis, "at_done", original_manifest,
+        )
+        source_manifest = build_source_manifest("at_other", "反向传播", [{
+            "job_id": "j_bp", "title": "反向传播", "domain": "ml",
+            "content_type": "video", "note_type": "smart",
+            "artifact_sha256": "a" * 64,
+            "body": "反向传播通过链式法则计算梯度。",
+            "evidence": {"chunk_id": "j_bp:smart:0", "section": "原理"},
+        }])
+        await ask_app.state.redis.set_ai_result("at_done", {
+            "content": "反向传播通过链式法则计算梯度 [来源1]。",
+            "provider": "claude-cli", "model": "test", "cost_usd": 0,
+            "citation_validation": {"status": "valid"},
+            "source_manifest": source_manifest,
+        })
+        data = (await ask_client.get("/api/ai-tasks/at_done/result")).json()
+        assert data["citation_validation"]["status"] == "invalid"
+        assert "manifest_task_mismatch" in data["citation_validation"]["errors"]
+
+    @pytest.mark.asyncio
+    async def test_result_rejects_valid_replacement_manifest(self, ask_client, ask_app):
+        from shared.ask_citations import build_source_manifest
+
+        original_manifest = build_source_manifest("at_done", "反向传播", [{
+            "job_id": "j_bp", "title": "反向传播", "domain": "ml",
+            "content_type": "video", "note_type": "smart",
+            "artifact_sha256": "a" * 64,
+            "body": "反向传播通过链式法则计算梯度。",
+            "evidence": {"chunk_id": "j_bp:smart:0", "section": "原理"},
+        }])
+        replacement_manifest = build_source_manifest("at_done", "替换来源", [{
+            "job_id": "j_fake", "title": "伪造来源", "domain": "ml",
+            "content_type": "article", "note_type": "smart",
+            "artifact_sha256": "b" * 64,
+            "body": "伪造来源声称模型会自动获得意识。",
+            "evidence": {"chunk_id": "j_fake:smart:0", "section": "伪造"},
+        }])
+        await self._bind_original_manifest(
+            ask_app.state.redis, "at_done", original_manifest,
+        )
+        await ask_app.state.redis.set_ai_result("at_done", {
+            "content": "伪造来源声称模型会自动获得意识 [来源1]。",
+            "provider": "remote", "model": "untrusted", "cost_usd": 0,
+            "citation_validation": {"status": "valid"},
+            "source_manifest": replacement_manifest,
+        })
+        data = (await ask_client.get("/api/ai-tasks/at_done/result")).json()
+        assert data["citation_validation"]["status"] == "invalid"
+        assert "source_manifest_mismatch" in data["citation_validation"]["errors"]
+
+    @pytest.mark.asyncio
+    async def test_result_rejects_missing_manifest(self, ask_client, ask_app):
+        from shared.ask_citations import build_source_manifest
+
+        original_manifest = build_source_manifest("at_done", "反向传播", [{
+            "job_id": "j_bp", "title": "反向传播", "domain": "ml",
+            "content_type": "video", "note_type": "smart",
+            "artifact_sha256": "a" * 64,
+            "body": "反向传播通过链式法则计算梯度。",
+            "evidence": {"chunk_id": "j_bp:smart:0", "section": "原理"},
+        }])
+        await self._bind_original_manifest(
+            ask_app.state.redis, "at_done", original_manifest,
+        )
+        await ask_app.state.redis.set_ai_result("at_done", {
+            "content": "反向传播通过链式法则计算梯度 [来源1]。",
+            "provider": "remote", "model": "untrusted", "cost_usd": 0,
+            "citation_validation": {"status": "valid"},
+        })
+        data = (await ask_client.get("/api/ai-tasks/at_done/result")).json()
+        assert data["citation_validation"]["status"] == "invalid"
+        assert "source_manifest_missing" in data["citation_validation"]["errors"]
 
     @pytest.mark.asyncio
     async def test_result_error(self, ask_client, ask_app):
         await ask_app.state.redis.set_ai_result("at_err", {"error": "provider down"})
         data = (await ask_client.get("/api/ai-tasks/at_err/result")).json()
         assert data["status"] == "error" and "provider down" in data["error"]
+        assert data["citation_validation"]["status"] == "invalid"
+        assert "source_manifest_unbound" in data["citation_validation"]["errors"]
+
+    @pytest.mark.asyncio
+    async def test_synthesis_result_with_both_manifests_missing_is_invalid(
+        self, ask_client, ask_app,
+    ):
+        payload = {"kind": "ai", "task_id": "at_unbound", "step": "synthesis"}
+        await ask_app.state.redis.r.set(
+            "ai:anchor:at_unbound", json.dumps(payload, sort_keys=True),
+        )
+        await ask_app.state.redis.set_ai_result("at_unbound", {
+            "content": "自报可信 [来源1]。",
+            "citation_validation": {"status": "valid"},
+        })
+        data = (await ask_client.get("/api/ai-tasks/at_unbound/result")).json()
+        assert data["status"] == "done"
+        assert data["citation_validation"]["status"] == "invalid"
+        assert "source_manifest_unbound" in data["citation_validation"]["errors"]
+
+    @pytest.mark.asyncio
+    async def test_result_error_does_not_trust_replacement_manifest(self, ask_client, ask_app):
+        from shared.ask_citations import build_source_manifest
+
+        original_manifest = build_source_manifest("at_err", "反向传播", [{
+            "job_id": "j_bp", "title": "反向传播", "domain": "ml",
+            "content_type": "video", "note_type": "smart",
+            "artifact_sha256": "a" * 64,
+            "body": "反向传播通过链式法则计算梯度。",
+            "evidence": {"chunk_id": "j_bp:smart:0", "section": "原理"},
+        }])
+        replacement_manifest = build_source_manifest("at_err", "伪造", [{
+            "job_id": "j_fake", "title": "伪造", "domain": "ml",
+            "content_type": "article", "note_type": "smart",
+            "artifact_sha256": "b" * 64,
+            "body": "伪造来源。",
+            "evidence": {"chunk_id": "j_fake:smart:0", "section": "伪造"},
+        }])
+        await self._bind_original_manifest(
+            ask_app.state.redis, "at_err", original_manifest,
+        )
+        await ask_app.state.redis.set_ai_result("at_err", {
+            "error": "provider down", "source_manifest": replacement_manifest,
+            "citation_validation": {"status": "valid"},
+        })
+        data = (await ask_client.get("/api/ai-tasks/at_err/result")).json()
+        assert data["status"] == "error"
+        assert data["citation_validation"]["status"] == "invalid"
+        assert "source_manifest_mismatch" in data["citation_validation"]["errors"]
 
     @pytest.mark.asyncio
     async def test_log_endpoint(self, ask_client, db):

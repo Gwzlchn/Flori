@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-finance-paper", "content_type": "paper", "pipeline": "paper", "domain": "quality-finance", "topic": "finance", "title": "Discounted Cash Flow Estimation", "primary_language": "en", "meta": {}},
+  "note": {
+    "path": "output/versions/notes_smart_fixture_model_20260714-000000.md",
+    "note_type": "smart",
+    "lines": [
+      "# Discounted Cash Flow Estimation",
+      "",
+      "Discounted cash flow, 中文现金流折现, converts future cash generation into present value.",
+      "",
+      "## Discount Rate",
+      "",
+      "资本成本估计 combines debt and equity risk with an explicit capital structure assumption.",
+      "",
+      "## Aliases",
+      "",
+      "DCF, intrinsic value model, and 折现现金流法 refer to the same valuation family here.",
+      "",
+      "## Limits",
+      "",
+      "Terminal value should be stress-tested instead of treated as a precise forecast."
+    ],
+    "source_sha256": "cffe41e99cf3f84df381770914dd16d39815316ffb68b29c1be9a3bf4254516d",
+    "artifact_sha256": "dbc3ccbcbf1931b7c10def4705f49853ca7cbaada2e9f2bd8bf7012126d3d0f0"
+  },
+  "chunks": {
+    "summary": {"anchor": "converts future cash generation into present value", "body_sha256": "ee1e62f244c5b7fa6fd9f56c625a3803d9bfb5b0b08bc305eef1efd6c2665fcf"},
+    "core": {"anchor": "资本成本估计", "body_sha256": "8d0bdd5c7c56e88221072877b7574ecede9c3e731d8d9838ad3e9d6536b6d173"},
+    "aliases": {"anchor": "intrinsic value model", "body_sha256": "2cc01c7c9c927f73d25316dbce28b04a5f3d815f32b421909854f7886eaededf"},
+    "boundary": {"anchor": "Terminal value should be stress-tested", "body_sha256": "b6d1b7e0c8c0221bcc638c32e232aa8830fc3cb2dec4a6c73134956de21945ab"}
+  }
+}

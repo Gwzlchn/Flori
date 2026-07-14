@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-ml-video", "content_type": "video", "pipeline": "video", "domain": "quality-ml", "topic": "ml", "title": "稀疏注意力视频", "primary_language": "zh", "meta": {}},
+  "note": {
+    "path": "output/versions/notes_smart_fixture_model_20260714-000000.md",
+    "note_type": "smart",
+    "lines": [
+      "# 稀疏注意力视频",
+      "",
+      "稀疏注意力 sparse attention 用选择连接减少长上下文计算成本。",
+      "",
+      "## 核心机制",
+      "",
+      "块稀疏窗口只计算局部位置和少数全局位置，保留关键依赖。",
+      "",
+      "```text",
+      "mask = local + global",
+      "```",
+      "",
+      "## 同义表达",
+      "",
+      "长文本稀疏关注机制与选择性注意力是这里采用的近义表达。",
+      "",
+      "## 边界条件",
+      "",
+      "极短序列不一定受益，模式选择错误会遗漏远距离信息。"
+    ],
+    "source_sha256": "49a823e130f17f252b3418485b218e40b25ada258d273263c3f0e06962fd600f",
+    "artifact_sha256": "7e403efc53229cf23e3ed6e573801627c68bf937bb367f0208f324257a93173f"
+  },
+  "chunks": {
+    "summary": {"anchor": "减少长上下文计算成本", "body_sha256": "b14535ed107b9f1270b5bf58afc0a1aa06bca27f29a4a87e9d36ebc6cd48864e"},
+    "core": {"anchor": "块稀疏窗口", "body_sha256": "2cfab7acb6f64247c674669ab22c85cefd73d4c4e7f53af538a585cdd44d25ce"},
+    "aliases": {"anchor": "长文本稀疏关注机制", "body_sha256": "b9a29e1092a7a2fbb4d5e8629d78656fe46090ca78d3ad408aa79f91d676f0c4"},
+    "boundary": {"anchor": "模式选择错误", "body_sha256": "4143c3e9d7b30d13939e8063688f6e9994c50c6f60d874534691e1852e464790"}
+  }
+}

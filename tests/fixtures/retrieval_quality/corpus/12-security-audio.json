@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-security-audio", "content_type": "audio", "pipeline": "audio", "domain": "quality-security", "topic": "security", "title": "Identity Boundary Interview", "primary_language": "en", "meta": {}},
+  "note": {
+    "path": "output/versions/notes_smart_fixture_model_20260714-000000.md",
+    "note_type": "smart",
+    "lines": [
+      "# Identity Boundary Interview",
+      "",
+      "The discussion treats zero trust and 零信任 as continuous verification for every access request.",
+      "",
+      "## Operational View",
+      "",
+      "身份边界访谈强调会话存续期间也要重新评估风险。",
+      "",
+      "## Aliases",
+      "",
+      "Perimeterless security, continuous verification, and 无边界安全 are aligned terms here.",
+      "",
+      "## Limits",
+      "",
+      "A trusted device cannot override a denied resource policy."
+    ],
+    "source_sha256": "0f6bf9f73326b853f7ed60f99fbaf152e173bce76e9e41c699db77d0f35e3185",
+    "artifact_sha256": "5294ec3e75c7af01df973903c7a948f8782103ca18fd25fd6bdff7666de2a9d2"
+  },
+  "chunks": {
+    "summary": {"anchor": "continuous verification for every access request", "body_sha256": "8a26527e74f27e7be241b44e5f79aac1d1cb3b36dc2b3fd7b04efb3a1cd3a971"},
+    "core": {"anchor": "身份边界访谈", "body_sha256": "3fa9a14c671514f55a9742e12a72e21de42c01e5b78569f25def22f38d128e98"},
+    "aliases": {"anchor": "Perimeterless security", "body_sha256": "b7472931d36df46055605d37ded6c73fd1da24a63e6da20c9b97207e80f6896f"},
+    "boundary": {"anchor": "trusted device cannot override", "body_sha256": "a460642c44bf02542760f2ad33725e185d863407d38b6d413f1e453d95e2d2da"}
+  }
+}

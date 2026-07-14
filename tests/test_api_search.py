@@ -55,6 +55,18 @@ class TestSearch:
         assert job_ids == {"j_ml", "j_paper"}
 
     @pytest.mark.asyncio
+    async def test_two_cjk_query_hits_but_single_cjk_is_rejected(self, client):
+        two = await client.get("/api/search", params={"q": "梯度", "domain": "ml"})
+        one = await client.get("/api/search", params={"q": "梯", "domain": "ml"})
+
+        assert two.status_code == 200
+        assert two.json()["total"] == 1
+        assert two.json()["items"][0]["job_id"] == "j_ml"
+        assert "<mark>" in two.json()["items"][0]["snippet"]
+        assert one.status_code == 200
+        assert one.json() == {"total": 0, "items": []}
+
+    @pytest.mark.asyncio
     async def test_snippet_highlight(self, client):
         # snippet 取自 body 列,故用 body 中出现的词(≥3 字)验证 <mark> 高亮。
         resp = await client.get("/api/search", params={"q": "炒糖色"})

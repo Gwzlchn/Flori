@@ -22,6 +22,7 @@ import redis.exceptions
 import structlog
 
 from shared.ai_gateway import AIGateway, collect_usage_from_file
+from shared.ask_citations import validate_ask_citations
 from shared.config import AppConfig, build_step_config
 from shared.models import AIUsage, DEFAULT_AI_MODEL, DEFAULT_AI_PROVIDER, LLMRequest, generate_worker_id
 from shared.runner_ops import parse_style_tags
@@ -768,6 +769,8 @@ class Worker:
         ts_start = datetime.now(timezone.utc)
         provider_name = claim.get("provider") or DEFAULT_AI_PROVIDER
         model_name = claim.get("model") or DEFAULT_AI_MODEL
+        audit_context = claim.get("audit_context") if type(claim.get("audit_context")) is dict else {}
+        source_manifest = audit_context.get("ask_source_manifest")
         managed_claim = bool(claim.get("claim_id"))
         executing = False
         renew_task: asyncio.Task | None = None
@@ -801,7 +804,10 @@ class Worker:
                 result_written = False
                 durable = False
                 try:
-                    await self.transport.set_ai_result(task_id, {"error": err})
+                    error_result = {"error": err}
+                    if type(source_manifest) is dict:
+                        error_result["source_manifest"] = source_manifest
+                    await self.transport.set_ai_result(task_id, error_result)
                     result_written = True
                 except Exception:
                     pass
@@ -810,6 +816,7 @@ class Worker:
                         durable = await self._write_ai_task_audit(
                             task_id, step_name, domain, exec_id, req, None, e,
                             ts_start, duration, provider_name, model_name,
+                            audit_context=audit_context,
                         )
                 except Exception:
                     pass
@@ -831,12 +838,22 @@ class Worker:
                 return
 
             duration = time.time() - start
+            citation_validation = None
+            result_payload = resp.to_jsonable()
+            if step_name == "synthesis":
+                citation_validation = validate_ask_citations(
+                    task_id, resp.content, source_manifest,
+                )
+                result_payload["source_manifest"] = source_manifest
+                result_payload["citation_validation"] = citation_validation
             try:
-                await self.transport.set_ai_result(task_id, resp.to_jsonable())
+                await self.transport.set_ai_result(task_id, result_payload)
                 await self._record_ai_task_usage(task_id, step_name, exec_id, resp)
                 durable = await self._write_ai_task_audit(
                     task_id, step_name, domain, exec_id, req, resp, None, ts_start, duration,
                     provider_name, model_name,
+                    audit_context=audit_context,
+                    citation_validation=citation_validation,
                 )
             except Exception:
                 logger.exception(
@@ -935,6 +952,7 @@ class Worker:
     async def _write_ai_task_audit(
         self, task_id, step_name, domain, exec_id, req, resp, error, ts_start, duration,
         requested_provider=DEFAULT_AI_PROVIDER, requested_model=DEFAULT_AI_MODEL,
+        *, audit_context=None, citation_validation=None,
     ) -> bool:
         """构建并落一条 AI task 白盒审计,对齐 DAG ai_logs 的路由/尝试链/渲染 prompt/输出/raw/用量/全轨迹."""
         ok = error is None and resp is not None
@@ -960,6 +978,8 @@ class Worker:
                 "max_tokens": req.max_tokens, "temperature": req.temperature,
                 "allowed_tools": req.allowed_tools,
             },
+            "audit_context": audit_context or {},
+            "citation_validation": citation_validation,
             "output": (resp.content if resp is not None else None),
             "raw": raw,
             # agentic 全轨迹(中间轮工具轨迹)内嵌:{"jsonl": 全文, "turns", "truncated"} 或 {"jsonl": None, "reason"}。

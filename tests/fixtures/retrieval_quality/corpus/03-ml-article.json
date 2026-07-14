@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-ml-article", "content_type": "article", "pipeline": "article", "domain": "quality-ml", "topic": "ml", "title": "长序列工程指南", "primary_language": "zh", "meta": {"flags": {"smart_note": false}}},
+  "note": {
+    "path": "output/original.md",
+    "note_type": "original",
+    "lines": [
+      "# 长序列工程指南",
+      "",
+      "稀疏注意力 sparse attention 通过减少无效连接控制长上下文成本。",
+      "",
+      "## 工程策略",
+      "",
+      "长序列工程指南建议先测局部窗口，再逐步增加全局位置。",
+      "",
+      "## 同义表达",
+      "",
+      "稀疏连接和选择性注意力都强调只计算必要的 token 关系。",
+      "",
+      "## 风险",
+      "",
+      "稀疏模式必须与任务依赖范围匹配，不能只追求吞吐。"
+    ],
+    "source_sha256": "2388522a4387e17607c1c4da2ce71b099191748619d3685e2ab25083daaf06d5",
+    "artifact_sha256": "bfa32bb4bb2d612771a9abfb7476005b9757a90c1b2b4f4c4999211c5061c996"
+  },
+  "chunks": {
+    "summary": {"anchor": "控制长上下文成本", "body_sha256": "4aac98ab80015d2ca7a8ac38d92f2c54b93942e63b0728bf86fdf71d76809245"},
+    "core": {"anchor": "先测局部窗口", "body_sha256": "6be83641e78f3afdedce8a9b0c7e1c0b85f8de169be1431fc7f65ce51ac5cee3"},
+    "aliases": {"anchor": "稀疏连接", "body_sha256": "357070b4e118ab28c42105e7b9e47191d2eb1a23cb427346ca3f888511d1e716"},
+    "boundary": {"anchor": "任务依赖范围匹配", "body_sha256": "57f07d799aeb6468657775ae06244abe6e220cc716ee3edeb96f8bdc64139ac0"}
+  }
+}

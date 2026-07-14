@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-systems-paper", "content_type": "paper", "pipeline": "paper", "domain": "quality-systems", "topic": "systems", "title": "Write-Ahead Log Recovery", "primary_language": "en", "meta": {}},
+  "note": {
+    "path": "output/versions/notes_smart_fixture_model_20260714-000000.md",
+    "note_type": "smart",
+    "lines": [
+      "# Write-Ahead Log Recovery",
+      "",
+      "Write-ahead logging, or 写前日志, records intent before database pages change so crashes preserve consistency.",
+      "",
+      "## Proof Obligation",
+      "",
+      "崩溃一致性证明依赖日志记录先于对应数据页稳定写入。",
+      "",
+      "```text",
+      "flush(log_lsn) before flush(page_lsn)",
+      "```",
+      "",
+      "## Aliases",
+      "",
+      "WAL and prewrite log are operational names for the same ordering discipline. 预写式日志是中文别名。",
+      "",
+      "## Limits",
+      "",
+      "A corrupt log checksum must stop recovery instead of applying uncertain bytes."
+    ],
+    "source_sha256": "df3bdcab84a5c3f18ed039a7fc166997fad37d2d88710c4996cd3c25e20e01c8",
+    "artifact_sha256": "30cf9e09389d52cb852eb6624b43a6449da556b73949def4ec1e3779f9fb9e06"
+  },
+  "chunks": {
+    "summary": {"anchor": "crashes preserve consistency", "body_sha256": "ab3a8276e8b19feee9a0cca02f75deef7f9e55237ec838e06946b77839be607a"},
+    "core": {"anchor": "崩溃一致性证明", "body_sha256": "7eeac2686b857475ad4e2bbbaf60a929e28078f552f894f569d7694cbde3799c"},
+    "aliases": {"anchor": "prewrite log", "body_sha256": "628c6624b790ce154e27c9c86a5bb9e01bb9be2d662edc5d1b74ac06967c7492"},
+    "boundary": {"anchor": "corrupt log checksum", "body_sha256": "c660993bcb272dcd44833301103b0982a213a2702a730ecc61353bcafee4bb77"}
+  }
+}

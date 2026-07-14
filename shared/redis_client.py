@@ -165,6 +165,7 @@ for index = 1, #entries, 2 do
                     local revision = task['revision'] or 0
                     redis.call('HSET', claim_key,
                         'task_id', task_id,
+                        'step', tostring(task['step'] or 'ai'),
                         'batch_id', tostring(batch_id),
                         'attempt', tostring(attempt),
                         'revision', tostring(revision),
@@ -401,7 +402,7 @@ class RedisClient:
         """投递独立 AI task(kind='ai')到 queue:ai。payload 由 AITask.to_task_payload() 生成
         (内联 LLMRequest + require_tags=[provider]);供 /api/ask、/digest 把 CLI/API 调用交给 ai-worker。
         与普通 task 同框、能进 /system 队列窥视;由 ai-worker 认领执行,结果回 airesult:{task_id}。"""
-        task = json.dumps(payload, sort_keys=True)
+        task = await self._bind_ai_task_anchor(payload)
         await self.r.zadd("queue:ai", {task: priority})
         try:
             await self.r.hset("queue:enqueued", self._enqueued_field("ai", payload), str(time.time()))
@@ -430,7 +431,7 @@ class RedisClient:
             from shared.study_suggestions import validate_study_suggestion_task_payload
 
             validate_study_suggestion_task_payload(payload)
-        task = json.dumps(payload, sort_keys=True)
+        task = await self._bind_ai_task_anchor(payload, ttl=marker_ttl_sec)
         result = await self.r.eval(
             _LUA_ENQUEUE_AI_ONCE,
             3,
@@ -449,6 +450,28 @@ class RedisClient:
                 f"AI task_id 已绑定不同 payload: {task_id}"
             )
         return status == 1
+
+    async def _bind_ai_task_anchor(
+        self, payload: dict, *, ttl: int = 7 * 86_400,
+    ) -> str:
+        """服务端按 task_id 冻结原始 payload;Worker 结果不能覆盖该锚点。"""
+        task_id = payload.get("task_id") if type(payload) is dict else None
+        if (
+            type(payload) is not dict
+            or payload.get("kind") != "ai"
+            or type(task_id) is not str
+            or not task_id.strip()
+        ):
+            raise ValueError("AI task payload 必须包含非空 task_id 且 kind='ai'")
+        task = json.dumps(payload, sort_keys=True)
+        key = f"ai:anchor:{task_id}"
+        if await self.r.set(key, task, nx=True, ex=ttl):
+            return task
+        if await self.r.get(key) != task:
+            raise AIEnqueueConflictError(
+                f"AI task_id 已绑定不同服务端锚点: {task_id}"
+            )
+        return task
 
     @staticmethod
     def _validate_ai_lease_inputs(
@@ -722,6 +745,21 @@ class RedisClient:
         except (KeyError, TypeError, ValueError):
             pass
         return data
+
+    async def get_ai_task_original_payload(self, task_id: str) -> dict | None:
+        """读取服务端提交锚点;兼容升级前 claim raw_json,损坏时 fail closed。"""
+        raw = await self.r.get(f"ai:anchor:{task_id}")
+        if raw is None:
+            raw = await self.r.hget(f"ai:claim:{task_id}", "raw_json")
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if type(payload) is not dict or payload.get("task_id") != task_id:
+            return None
+        return payload
 
     async def get_live_ai_claim_holders(
         self, *, now_epoch: int | float | None = None,

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-ml-paper", "content_type": "paper", "pipeline": "paper", "domain": "quality-ml", "topic": "ml", "title": "Sparse Attention Study", "primary_language": "en", "meta": {}},
+  "note": {
+    "path": "output/versions/notes_smart_fixture_model_20260714-000000.md",
+    "note_type": "smart",
+    "lines": [
+      "# Sparse Attention Study",
+      "",
+      "Sparse attention reduces long-context compute by limiting token connections; 中文称稀疏注意力。",
+      "",
+      "## Mechanism",
+      "",
+      "线性复杂度证明给出窗口大小固定时的计算上界。",
+      "",
+      "## Aliases",
+      "",
+      "Selective attention and sparse connectivity describe related formulations. 选择性注意力是常见译法。",
+      "",
+      "## Limits",
+      "",
+      "Global tokens remain necessary when evidence is distributed across distant sections."
+    ],
+    "source_sha256": "a4108d017f6ac0bde3b77c3e18c2924b79dafeac4d25b421ddedc11aecfc9102",
+    "artifact_sha256": "d893897ce1cbd00486c5b3f6b97be23e821315302ef69cb84ed0c748f32a1582"
+  },
+  "chunks": {
+    "summary": {"anchor": "reduces long-context compute", "body_sha256": "38a0684ce57f691c81a815b72db9741874e303c8eee39135d3cec689de755591"},
+    "core": {"anchor": "线性复杂度证明", "body_sha256": "3e3494d84f5f5d91a959a5c463b43bd13130a33b0e1332ee3e68ba632b93e117"},
+    "aliases": {"anchor": "sparse connectivity", "body_sha256": "b8b327b1ef74428c3863a1ff1009bf876bed0de2ae2751d7f83520c541d01412"},
+    "boundary": {"anchor": "Global tokens remain necessary", "body_sha256": "5c5b19eac9a4725633b666762c92fd7dcafc912b4f91ab1c53ad7837f352f1b9"}
+  }
+}

@@ -56,6 +56,7 @@ class GatewayTransport:
         self._worker_token = ""
         # 本 worker 当前在跑的 (job_id, step) 集合:心跳捎带上报刷各步进度心跳(并发>1 必需)
         self._running: dict[str, tuple[str, str]] = {}
+        self._ai_execs: set[str] = set()
         # 每个 runner 请求带的身份头(register 后填);即使 401(token 无效)服务端也能据此记下"谁/什么版本"在刷。
         self._identity_headers: dict[str, str] = {}
         self._client: httpx.AsyncClient | None = None
@@ -345,18 +346,21 @@ class GatewayTransport:
             self._raise_auth_status(resp, "/api/runner/jobs/request")
             resp.raise_for_status()
             claim = resp.json().get("claim")
-            if claim and claim.get("kind") != "ai":
+            if claim:
                 # 在跑步集合:心跳捎带上报(见 heartbeat body running),给每个并发步刷进度心跳。
                 # 独立 alive 通道在部分外网链路上不达(实测 8 并发 worker alive 0 送达,
                 # 步骤 150s 后被 orphan_scan 全量误回收);心跳是实测可靠通道,借道最稳。
                 lease = TaskLease(
                     worker_id=worker_id,
-                    job_id=claim["job_id"],
+                    job_id=(claim["task_id"] if claim.get("kind") == "ai" else claim["job_id"]),
                     step=claim["step"],
                     exec_id=claim["exec_id"],
                 )
                 bind_task_lease(lease)
-                self._running[claim["exec_id"]] = (claim["job_id"], claim["step"])
+                if claim.get("kind") == "ai":
+                    self._ai_execs.add(claim["exec_id"])
+                else:
+                    self._running[claim["exec_id"]] = (claim["job_id"], claim["step"])
             return claim
         except WorkerAuthRejected:
             raise
@@ -416,6 +420,17 @@ class GatewayTransport:
         )
 
     async def release(self, claim):
+        if claim.get("kind") == "ai":
+            task_id = claim["task_id"]
+            try:
+                await self._report_best_effort(
+                    f"/api/runner/ai-tasks/{task_id}/release", {},
+                    op="release_ai_task", job_id=task_id, step=claim["step"],
+                )
+            finally:
+                self._ai_execs.discard(claim["exec_id"])
+                clear_task_lease()
+            return
         job_id, step = claim["job_id"], claim["step"]
         try:
             await self._report_best_effort(
@@ -445,21 +460,49 @@ class GatewayTransport:
         )
 
     async def set_ai_result(self, task_id, result):
-        # 独立 AI task 由 require_tags=['claude-cli'] 门控,只直连 ai-worker(RedisTransport)认领执行。
-        # 网关模式(无 redis)不应跑 ai-task;真到这里说明路由错配,显式报错而非静默丢结果。
-        raise NotImplementedError("AI task 不支持网关模式 worker(需 claude-cli 直连 worker)")
+        if not await self._post_ai_claim(task_id, "result", {"result": result}):
+            raise WorkerContractError(
+                "AI task result rejected by gateway", endpoint="ai-task/result",
+            )
 
     async def record_ai_task_log(self, log):
-        raise NotImplementedError("AI task 审计不支持网关模式 worker(需 claude-cli 直连 worker)")
+        task_id = str(log.get("task_id") or "")
+        return await self._post_ai_claim(task_id, "log", {"log": log})
 
     async def mark_ai_task_executing(self, claim):
-        raise NotImplementedError("AI task claim 不支持网关模式 worker")
+        return await self._post_ai_claim(claim["task_id"], "executing", {})
 
     async def renew_ai_task_claim(self, claim):
-        raise NotImplementedError("AI task claim 不支持网关模式 worker")
+        return await self._post_ai_claim(claim["task_id"], "renew", {})
 
     async def finish_ai_task_claim(self, claim, outcome):
-        raise NotImplementedError("AI task claim 不支持网关模式 worker")
+        return await self._post_ai_claim(
+            claim["task_id"], "finish", {"outcome": outcome},
+        )
+
+    async def _post_ai_claim(self, task_id: str, operation: str, payload: dict) -> bool:
+        """按当前 task lease 调 AI gateway;403 表示 claim 陈旧,不伪装 token 失效。"""
+        lease = current_task_lease()
+        if lease is None or lease.job_id != task_id or lease.exec_id not in self._ai_execs:
+            return False
+        url = f"/api/runner/ai-tasks/{task_id}/{operation}"
+        try:
+            resp = await self._http.post(
+                url, headers=self._lease_auth(lease), json=payload,
+            )
+            if resp.status_code == 403:
+                return False
+            self._raise_auth_status(resp, url)
+            resp.raise_for_status()
+            return bool(self._json(resp, url).get("ok"))
+        except WorkerAuthRejected:
+            raise
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "gateway_ai_task_request_failed", task_id=task_id,
+                operation=operation, error=str(exc)[:200],
+            )
+            return False
 
     async def publish_step_event(self, channel, data):
         # worker 只通过 on_progress 发 events:{job} 进度;映射到 progress 端点。
@@ -472,6 +515,9 @@ class GatewayTransport:
                     "progress requires current task lease",
                     endpoint=f"/api/runner/jobs/{job_id}/steps/*/progress",
                 )
+            # AI 终态事件由服务端 finish 按 outcome 发布,Worker 侧重复上报是 no-op。
+            if lease.exec_id in self._ai_execs:
+                return
             try:
                 resp = await self._http.post(
                     f"/api/runner/jobs/{job_id}/steps/{lease.step}/progress",

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-learning-video", "content_type": "video", "pipeline": "video", "domain": "quality-learning", "topic": "learning", "title": "间隔复习遗忘曲线演示", "primary_language": "zh", "meta": {}},
+  "note": {
+    "path": "output/versions/notes_smart_fixture_model_20260714-000000.md",
+    "note_type": "smart",
+    "lines": [
+      "# 间隔复习遗忘曲线演示",
+      "",
+      "间隔复习 spaced repetition 在记忆即将衰退前安排再次提取。",
+      "",
+      "## 调度直觉",
+      "",
+      "遗忘曲线演示说明答对后拉长间隔，答错后缩短间隔。",
+      "",
+      "## 同义表达",
+      "",
+      "分散复习与 spaced practice 都强调把练习分布到不同时间。",
+      "",
+      "## 边界条件",
+      "",
+      "复习间隔要依据真实评分更新，不能只按日历固定循环。"
+    ],
+    "source_sha256": "04feb60c5ecc759fb49089934199212bb81f9562164d16074f17997780cf927b",
+    "artifact_sha256": "4536590e06e00ac263683f8b65d623e51e3aa747f45f0c93c1d3454770e48eaf"
+  },
+  "chunks": {
+    "summary": {"anchor": "记忆即将衰退前", "body_sha256": "ccfafa3ecde03fa9fd2818d038e378e198c80cb1baa17976640d4ace28d960b6"},
+    "core": {"anchor": "答对后拉长间隔", "body_sha256": "69339a5a0496caeb5577997b46dd44b991392696205168c6d8d16e419eb38a4c"},
+    "aliases": {"anchor": "分散复习", "body_sha256": "9afe46d72e3088be51c90ab804ac0022db44791131a472b1d5e1c15571c925b4"},
+    "boundary": {"anchor": "真实评分更新", "body_sha256": "fcc1b6fc4e7df2a6774757b513f29245caceeb6b25e82847b14251b4f5523412"}
+  }
+}

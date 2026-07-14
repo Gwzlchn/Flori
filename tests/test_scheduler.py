@@ -381,6 +381,30 @@ class TestNoWorkerFailFast:
 class TestMarkdownToText:
     """_markdown_to_text 在入 FTS 索引前剥 HTML 标签,断高亮 snippet XSS 之源。"""
 
+    def test_preserves_headings_paragraphs_and_fenced_code_body(self):
+        from scheduler.scheduler import _markdown_to_text
+
+        out = _markdown_to_text(
+            "# 主标题\n\n"
+            "第一段保留。\n\n"
+            "```python\nprint('fenced-code-token')\n```\n\n"
+            "## 次级标题\n\n第二段保留。\n"
+        )
+
+        assert out.startswith("# 主标题\n\n")
+        assert "\n\n第一段保留。\n\n" in out
+        assert "print('fenced-code-token')" in out
+        assert "```" not in out
+        assert "\n\n## 次级标题\n\n第二段保留。" in out
+
+    def test_preserves_fenced_code_indentation_at_document_edges(self):
+        from scheduler.scheduler import _markdown_to_text
+
+        out = _markdown_to_text(
+            "```python\n    if ready:\n        print('keep-indent')\n```"
+        )
+        assert out == "    if ready:\n        print('keep-indent')"
+
     def test_strips_html_tags(self):
         from scheduler.scheduler import _markdown_to_text
         out = _markdown_to_text("天 <img src=x onerror=alert(1)> 气 <script>bad</script>")

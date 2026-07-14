@@ -1,6 +1,9 @@
 """tests for shared/db.py"""
 
+import hashlib
+import json
 import threading
+import unicodedata
 
 import pytest
 
@@ -759,6 +762,122 @@ class TestGlossary:
 
 class TestNotesFTS:
     """笔记全文索引 + 中文子串检索(trigram)。"""
+
+    def test_chunk_heading_starts_a_new_section(self, db):
+        db.index_job_notes(
+            "j_sections", "smart", "分节笔记",
+            "# 第一节\n旧节内容唯一词。\n\n"
+            "## 第二节\n新节内容唯一词。\n",
+        )
+
+        _, old_rows = db.search_note_chunks("旧节内容")
+        _, new_rows = db.search_note_chunks("新节内容")
+        assert old_rows[0]["chunk_id"] == "j_sections:smart:0"
+        assert old_rows[0]["section"] == "第一节"
+        assert new_rows[0]["chunk_id"] == "j_sections:smart:1"
+        assert new_rows[0]["section"] == "第二节"
+
+    def test_chunk_evidence_has_deterministic_content_hashes(self, db):
+        body = "# 标题\n\n一段   含有\t空白的正文。"
+        db.index_job_notes("j_hash", "smart", "标题", body)
+        _, first = db.search_note_chunks("空白的")
+        db.index_job_notes("j_hash", "smart", "标题", body)
+        _, second = db.search_note_chunks("空白的")
+
+        first_evidence = first[0]["evidence"]
+        second_evidence = second[0]["evidence"]
+        assert first_evidence["note_type"] == "smart"
+        assert len(first_evidence["artifact_sha256"]) == 64
+        assert len(first_evidence["body_sha256"]) == 64
+        normalized_chunk = unicodedata.normalize(
+            "NFC", "# 标题\n一段   含有\t空白的正文。"
+        )
+        assert first_evidence["artifact_sha256"] == hashlib.sha256(
+            body.encode("utf-8")
+        ).hexdigest()
+        assert first_evidence["body_sha256"] == hashlib.sha256(
+            normalized_chunk.encode("utf-8")
+        ).hexdigest()
+        assert first_evidence == second_evidence
+
+    def test_body_hash_uses_nfc_lf_and_trailing_space_normalization(self, db):
+        body = "# Cafe\u0301  \r\n指纹规范内容   \r\n"
+        db.index_job_notes("j_normalized_hash", "smart", "指纹", body)
+
+        _, rows = db.search_note_chunks("指纹规范")
+        expected = "# Café\n指纹规范内容"
+        assert rows[0]["evidence"]["body_sha256"] == hashlib.sha256(
+            expected.encode("utf-8")
+        ).hexdigest()
+
+    def test_search_backfills_hashes_for_legacy_chunk_evidence(self, db):
+        body = "# 旧笔记\n遗留证据内容。"
+        db.index_job_notes("j_legacy_hash", "smart", "旧笔记", body)
+        row = db._conn.execute(
+            "SELECT evidence_json FROM note_chunks WHERE chunk_id=?",
+            ("j_legacy_hash:smart:0",),
+        ).fetchone()
+        evidence = json.loads(row["evidence_json"])
+        evidence.pop("artifact_sha256")
+        evidence.pop("body_sha256")
+        legacy_json = json.dumps(evidence, ensure_ascii=False)
+        db._conn.execute(
+            "UPDATE note_chunks SET evidence_json=? WHERE chunk_id=?",
+            (legacy_json, "j_legacy_hash:smart:0"),
+        )
+        db._conn.execute(
+            "UPDATE note_chunks_fts5 SET evidence_json=? WHERE chunk_id=?",
+            (legacy_json, "j_legacy_hash:smart:0"),
+        )
+        db._conn.commit()
+
+        _, rows = db.search_note_chunks("遗留证据")
+        assert len(rows[0]["evidence"]["artifact_sha256"]) == 64
+        assert len(rows[0]["evidence"]["body_sha256"]) == 64
+
+    def test_two_cjk_fallback_single_rejected_and_three_chars_use_fts(self, db):
+        db.index_job_notes(
+            "j_short", "smart", "机器学习",
+            "这篇笔记讲解机器学习算法。",
+            content_type="paper", domain="ml", collection_id="c_short",
+        )
+
+        for search in (db.search_notes, db.search_note_chunks):
+            two_total, two_rows = search("机器")
+            one_total, one_rows = search("机")
+            three_total, three_rows = search("机器学")
+            assert two_total == 1 and two_rows[0]["job_id"] == "j_short"
+            assert "<mark>" in two_rows[0]["snippet"]
+            assert (one_total, one_rows) == (0, [])
+            assert three_total == 1 and three_rows[0]["job_id"] == "j_short"
+
+    def test_two_cjk_fallback_respects_all_filters(self, db):
+        db.index_job_notes(
+            "j_filter_hit", "smart", "目标",
+            "包含两字关键词梯度。",
+            content_type="video", domain="ml", collection_id="c1",
+        )
+        db.index_job_notes(
+            "j_filter_miss", "smart", "其他",
+            "同样包含两字关键词梯度。",
+            content_type="paper", domain="nlp", collection_id="c2",
+        )
+
+        kwargs = {"collection_id": "c1", "domain": "ml", "content_type": "video"}
+        for search in (db.search_notes, db.search_note_chunks):
+            total, rows = search("梯度", **kwargs)
+            assert total == 1
+            assert [row["job_id"] for row in rows] == ["j_filter_hit"]
+
+    def test_equal_rank_results_have_a_stable_tie_break(self, db):
+        for job_id in ("j_z", "j_a", "j_m"):
+            db.index_job_notes(job_id, "smart", "同标题", "完全相同的排序锦标词。")
+
+        expected = ["j_a", "j_m", "j_z"]
+        for search in (db.search_notes, db.search_note_chunks):
+            first = [row["job_id"] for row in search("排序锦标")[1]]
+            second = [row["job_id"] for row in search("排序锦标")[1]]
+            assert first == second == expected
 
     def test_index_and_search_chinese_substring(self, db):
         db.index_job_notes(

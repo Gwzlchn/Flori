@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-security-article", "content_type": "article", "pipeline": "article", "domain": "quality-security", "topic": "security", "title": "零信任最小权限清单", "primary_language": "zh", "meta": {"flags": {"smart_note": false}}},
+  "note": {
+    "path": "output/original.md",
+    "note_type": "original",
+    "lines": [
+      "# 零信任最小权限清单",
+      "",
+      "零信任 zero trust 要求每个请求重新验证身份、设备与上下文。",
+      "",
+      "## 授权步骤",
+      "",
+      "最小权限清单只授予完成当前动作所需的最小资源集合。",
+      "",
+      "```text",
+      "allow = identity && device && policy",
+      "```",
+      "",
+      "## 同义表达",
+      "",
+      "无边界安全、持续验证与永不默认信任描述同一方向。",
+      "",
+      "## 风控",
+      "",
+      "风控信号缺失时必须降权或拒绝，不能静默放行。"
+    ],
+    "source_sha256": "d35d2e0803d67dc2d9ffed847e5d4bc9d8390c4446c5d273a2e5907ed75fa1fc",
+    "artifact_sha256": "3f2b913ec8b82c1fae8d01fa27d3c8b78afc6fc0b0c77bbe53c9d29de5c7b52c"
+  },
+  "chunks": {
+    "summary": {"anchor": "重新验证身份", "body_sha256": "0098112d227b7ae3c6f5887a613070acf1c22a3891f137f9e56865678f9433d1"},
+    "core": {"anchor": "当前动作所需", "body_sha256": "99fe5f7250b638be8ac624ae6996d9ea7c6b76963e3d5ccb93dedc04a4613df4"},
+    "aliases": {"anchor": "永不默认信任", "body_sha256": "28a957a7b8717158660e7b1f93b8f930ad9dc348c1289f715f5c7dd004ca3401"},
+    "boundary": {"anchor": "信号缺失", "body_sha256": "1cc4d55a34cc30be8313143f8240cc794b32fd8dbb11917a0ffe0c25e92d1f5f"}
+  }
+}

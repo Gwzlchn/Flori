@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-biology-video", "content_type": "video", "pipeline": "video", "domain": "quality-biology", "topic": "biology", "title": "基因表达转录调控演示", "primary_language": "zh", "meta": {}},
+  "note": {
+    "path": "output/versions/notes_smart_fixture_model_20260714-000000.md",
+    "note_type": "smart",
+    "lines": [
+      "# 基因表达转录调控演示",
+      "",
+      "基因表达 gene expression 包含把 DNA 信息转录成 RNA 并进一步调控产物的过程。",
+      "",
+      "## 调控层",
+      "",
+      "转录调控演示展示启动子、转录因子和染色质状态共同影响 RNA 产生。",
+      "",
+      "## 同义表达",
+      "",
+      "转录水平描述 RNA 生成阶段，expression level 常指测得的表达量。",
+      "",
+      "## 边界条件",
+      "",
+      "RNA 丰度不等同于蛋白丰度，解释时必须区分测量层级。"
+    ],
+    "source_sha256": "9ed260a14538c1fd752c013e34ac41ffa390240d4d5341211e0d1a93fed29210",
+    "artifact_sha256": "223eba15d2aac20f09e984d0fc7a2528ff06f87e3601d9fc64c6d9625c203e42"
+  },
+  "chunks": {
+    "summary": {"anchor": "把 DNA 信息转录成 RNA", "body_sha256": "5032d2943da2a5f201d21cdc25ebd84803a2526359b77057e7ae3f0ec5233532"},
+    "core": {"anchor": "启动子、转录因子", "body_sha256": "9a4f34381aa98add4f122abb45dd826e901db66d8509e29d85eed8afef80a6d8"},
+    "aliases": {"anchor": "转录水平", "body_sha256": "8faff817f66e7a006b3bce0219b7e9b934779f713280062e812dffed4dcb4ce0"},
+    "boundary": {"anchor": "RNA 丰度不等同于蛋白丰度", "body_sha256": "f64b96ba71e87db5974b08cba82897e214dc071a63604c572fb23709a112e5f8"}
+  }
+}

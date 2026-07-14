@@ -141,6 +141,29 @@ def test_integration_entrypoint_runs_production_redis_and_minio_restore_drill() 
     assert set(gate["needs"]) == {"unit-normal", "unit-worker", "integration"}
 
 
+def test_retrieval_quality_artifact_is_sha_bound_and_fail_closed() -> None:
+    workflow = load_workflow()
+    integration = workflow["jobs"]["integration"]
+    run_step = next(
+        step for step in integration["steps"]
+        if step.get("name") == "Real dependency integration gate"
+    )
+    assert run_step["env"]["RETRIEVAL_QUALITY_MAIN_SHA"] == "${{ github.sha }}"
+
+    upload = next(
+        step for step in integration["steps"]
+        if step.get("name") == "Upload retrieval quality decision"
+    )
+    assert upload["if"] == "always()"
+    assert upload["with"]["if-no-files-found"] == "error"
+    assert upload["with"]["path"].endswith("/retrieval-quality.json")
+
+    root = WORKFLOW.parents[2]
+    entrypoint = (root / "scripts" / "run-integration.sh").read_text()
+    assert "git -C \"$REPO\" rev-parse HEAD" in entrypoint
+    assert "export INTEGRATION_HOST_TMP INTEGRATION_ARTIFACT_DIR RETRIEVAL_QUALITY_MAIN_SHA" in entrypoint
+
+
 def test_all_nine_coverage_parts_fail_closed_before_combine() -> None:
     jobs = load_workflow()["jobs"]
     upload_jobs = (jobs["unit-normal"], jobs["unit-worker"], jobs["integration"])

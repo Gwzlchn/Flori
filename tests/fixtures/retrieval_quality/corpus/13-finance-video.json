@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-finance-video", "content_type": "video", "pipeline": "video", "domain": "quality-finance", "topic": "finance", "title": "现金流折现演示", "primary_language": "zh", "meta": {}},
+  "note": {
+    "path": "output/versions/notes_smart_fixture_model_20260714-000000.md",
+    "note_type": "smart",
+    "lines": [
+      "# 现金流折现演示",
+      "",
+      "现金流折现 discounted cash flow 用折现率把未来收益换算到今天。",
+      "",
+      "## 敏感性",
+      "",
+      "终值敏感性演示显示长期增长率的小变化会显著改变估值。",
+      "",
+      "## 同义表达",
+      "",
+      "折现现金流法、DCF 与内在价值模型是本例使用的关联说法。",
+      "",
+      "## 边界条件",
+      "",
+      "输入假设必须可审计，不能把单一点估计当成确定事实。"
+    ],
+    "source_sha256": "4b43b76bd93700d146f79fa45a2e161de95e15aa5c9fd85e9a81f7f25b1c7621",
+    "artifact_sha256": "375013b8f52e53f255321c043b08df9e6157eb202bf752dc6f8b2aeb31671950"
+  },
+  "chunks": {
+    "summary": {"anchor": "把未来收益换算到今天", "body_sha256": "42e601e9d0845a0c663d11dc0c2e63db29a2d968b3e71e698df2f4fc5cada629"},
+    "core": {"anchor": "终值敏感性演示", "body_sha256": "7c7e660938182817b2bd51120962c7007d259f77490567630fb51d5c55d65441"},
+    "aliases": {"anchor": "折现现金流法", "body_sha256": "7df4e66a09a9f048a920b5832a952cc70a1989f694ce1f4f3ac26445f50bf8cf"},
+    "boundary": {"anchor": "输入假设必须可审计", "body_sha256": "fc437af51d6aa2edc7fec351ba57ff3e8d2fc975fc4c8b9ada93f7fdd2290ebd"}
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "job": {"id": "rq-finance-audio", "content_type": "audio", "pipeline": "audio", "domain": "quality-finance", "topic": "finance", "title": "Valuation Assumptions Interview", "primary_language": "en", "meta": {}},
+  "note": {
+    "path": "output/versions/notes_smart_fixture_model_20260714-000000.md",
+    "note_type": "smart",
+    "lines": [
+      "# Valuation Assumptions Interview",
+      "",
+      "The interview uses discounted cash flow and 现金流折现 to translate future benefits into today's value.",
+      "",
+      "## Assumptions",
+      "",
+      "估值假设访谈 separates operating forecasts, discount rate, and terminal growth. ",
+      "",
+      "```text",
+      "present_value = cash_flow / (1 + rate) ** year",
+      "```",
+      "",
+      "## Aliases",
+      "",
+      "DCF, present-value model, and 折现现金流法 are equivalent labels in this corpus.",
+      "",
+      "## Limits",
+      "",
+      "A valuation range is more honest than a single unsupported target."
+    ],
+    "source_sha256": "cb1f471d2bee7815e548330f908d045d3bbd9c96dee697d5b3fbf6ec08fbcb79",
+    "artifact_sha256": "63dca5b7782f2ece1b91aee006d358323640e132cc1a0e0476f14cb3fa4b6fb0"
+  },
+  "chunks": {
+    "summary": {"anchor": "translate future benefits into today's value", "body_sha256": "3b373bdc5c1465c0c0519b09cc6a781c27d083140a226703ad12e1900d884aa6"},
+    "core": {"anchor": "估值假设访谈", "body_sha256": "32ed5bf136c4a40ee4c6ccb06bff5892980b56b71dd1f7890ae8e062b29fce02"},
+    "aliases": {"anchor": "present-value model", "body_sha256": "68b8e482ac43a0e6a385cbeee837d2d83eaf774f4261a079e5008266d8dadb6f"},
+    "boundary": {"anchor": "valuation range", "body_sha256": "596f36f44c4dcb5130f0e9e7e067cee8c590a645bfec86a4ea7abaf7ee33763d"}
+  }
+}
