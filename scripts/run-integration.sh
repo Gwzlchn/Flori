@@ -14,6 +14,8 @@ safe_name="${safe_name%-}"
 PROJECT="${safe_name:-flori-test}-integration"
 COMPOSE=(docker compose -p "$PROJECT" -f "$REPO/docker-compose.integration-test.yml")
 CREATED_IMAGES=()
+DRILL_PID=""
+PULL_PIDS=()
 
 INTEGRATION_HOST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/flori-integration.XXXXXX")"
 INTEGRATION_ARTIFACT_DIR="${INTEGRATION_ARTIFACT_DIR:-$INTEGRATION_HOST_TMP/artifacts}"
@@ -37,6 +39,14 @@ export INTEGRATION_NO_PROXY="${FLORI_EXTERNAL_NO_PROXY:-${NO_PROXY:-}}"
 cleanup() {
   status=$?
   trap - EXIT
+  if [ -n "$DRILL_PID" ]; then
+    kill "$DRILL_PID" >/dev/null 2>&1 || true
+    wait "$DRILL_PID" >/dev/null 2>&1 || true
+  fi
+  for pull_pid in "${PULL_PIDS[@]}"; do
+    kill "$pull_pid" >/dev/null 2>&1 || true
+    wait "$pull_pid" >/dev/null 2>&1 || true
+  done
   if [ "$status" -ne 0 ]; then
     "${COMPOSE[@]}" logs --no-color --tail 200 || true
   fi
@@ -85,17 +95,24 @@ ensure_image() {
 
 run_core() {
   ensure_image "$INTEGRATION_TEST_IMAGE" test
-  if ! docker image inspect "$DOCKER_TEST_IMAGE" >/dev/null 2>&1; then
-    docker pull "$DOCKER_TEST_IMAGE"
-  fi
-  if ! docker image inspect "$FLORI_INTEGRATION_MINIO_IMAGE" >/dev/null 2>&1; then
-    docker pull "$FLORI_INTEGRATION_MINIO_IMAGE"
-  fi
+  PULL_PIDS=()
+  for image in "$DOCKER_TEST_IMAGE" "$FLORI_INTEGRATION_MINIO_IMAGE"; do
+    if ! docker image inspect "$image" >/dev/null 2>&1; then
+      docker pull "$image" &
+      PULL_PIDS+=("$!")
+    fi
+  done
+  for pull_pid in "${PULL_PIDS[@]}"; do
+    wait "$pull_pid"
+  done
+  PULL_PIDS=()
   "${COMPOSE[@]}" up -d --wait --wait-timeout 30 redis
   redis_container="$("${COMPOSE[@]}" ps -q redis)"
+  drill_log="$INTEGRATION_HOST_TMP/redis-aof-restore.log"
   FLORI_INTEGRATION_APP_IMAGE="$INTEGRATION_TEST_IMAGE" \
     FLORI_INTEGRATION_REDIS_IMAGE="$(docker inspect --format '{{.Config.Image}}' "$redis_container")" \
-    "$REPO/tests/integration/redis_aof_restore.sh"
+    "$REPO/tests/integration/redis_aof_restore.sh" >"$drill_log" 2>&1 &
+  DRILL_PID="$!"
   run_options=(run --rm)
   coverage_args=()
   if [ "${CI_COVERAGE:-0}" = "1" ]; then
@@ -105,10 +122,21 @@ run_core() {
       --cov-branch --cov-report=
     )
   fi
+  set +e
   "${COMPOSE[@]}" "${run_options[@]}" test \
     pytest -p no:cacheprovider -m 'integration and not external' \
       tests/integration --junitxml="$INTEGRATION_ARTIFACT_DIR/junit-core.xml" \
       "${coverage_args[@]}" "$@"
+  pytest_status=$?
+  wait "$DRILL_PID"
+  drill_status=$?
+  DRILL_PID=""
+  set -e
+  cat "$drill_log"
+  if [ "$drill_status" -ne 0 ]; then
+    return "$drill_status"
+  fi
+  return "$pytest_status"
 }
 
 external_env_name() {

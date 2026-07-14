@@ -330,7 +330,7 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
     environment = _fake_docker_environment(tmp_path)
 
     completed = subprocess.run(
-        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "6", "6"],
+        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "12"],
         cwd=REPO,
         env=environment,
         capture_output=True,
@@ -339,12 +339,28 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert "--splits 6 --group 6" in completed.stdout
+    assert "--splitting-algorithm least_duration" in completed.stdout
+    assert "--ignore=tests/test_canonical_evidence_e2e.py" in completed.stdout
+    assert "--splits 12 --group 12" in completed.stdout
     assert "-n 4" in completed.stdout
-    assert ".coverage.normal.6" in completed.stdout
+    assert ".coverage.normal.12" in completed.stdout
+
+    worker = subprocess.run(
+        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-worker", "4", "4"],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert worker.returncode == 0, worker.stderr
+    assert "tests/test_canonical_evidence_e2e.py" in worker.stdout
+    assert "--splitting-algorithm least_duration" in worker.stdout
+    assert "--splits 4 --group 4" in worker.stdout
+    assert ".coverage.worker.4" in worker.stdout
 
     overflow = subprocess.run(
-        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "7", "6"],
+        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "13", "12"],
         cwd=REPO,
         env=environment,
         capture_output=True,
@@ -352,4 +368,4 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
         check=False,
     )
     assert overflow.returncode == 2
-    assert "CI shard 超出范围: 7/6" in overflow.stderr
+    assert "CI shard 超出范围: 13/12" in overflow.stderr

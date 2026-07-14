@@ -10,16 +10,14 @@ from shared.models import Job
 from shared.repositories.jobs import JobsReadRepository
 
 
-def _latencies(call, iterations: int) -> list[int]:
-    result: list[int] = []
+def _batch_latency(call, iterations: int) -> float:
+    started = time.perf_counter_ns()
     for _ in range(iterations):
-        started = time.perf_counter_ns()
         call()
-        result.append(time.perf_counter_ns() - started)
-    return result
+    return (time.perf_counter_ns() - started) / iterations
 
 
-def _percentiles(samples: list[int]) -> tuple[float, float]:
+def _percentiles(samples: list[float]) -> tuple[float, float]:
     return statistics.median(samples), statistics.quantiles(
         samples, n=100, method="inclusive"
     )[94]
@@ -41,15 +39,17 @@ def test_job_read_facade_p50_and_p95_stay_within_fifteen_percent(
         facade_call()
         direct_call()
 
-    facade: list[int] = []
-    direct: list[int] = []
-    for iteration in range(8):
+    # 单次 SQLite 查询很短，逐调用 p95 会把调度抢占误算成 façade 开销。
+    # 交替测量固定批次的单调用均值，仍保留 p50/p95 门且消除偶发抢占噪声。
+    facade: list[float] = []
+    direct: list[float] = []
+    for iteration in range(40):
         if iteration % 2:
-            direct.extend(_latencies(direct_call, 250))
-            facade.extend(_latencies(facade_call, 250))
+            direct.append(_batch_latency(direct_call, 200))
+            facade.append(_batch_latency(facade_call, 200))
         else:
-            facade.extend(_latencies(facade_call, 250))
-            direct.extend(_latencies(direct_call, 250))
+            facade.append(_batch_latency(facade_call, 200))
+            direct.append(_batch_latency(direct_call, 200))
 
     facade_p50, facade_p95 = _percentiles(facade)
     direct_p50, direct_p95 = _percentiles(direct)

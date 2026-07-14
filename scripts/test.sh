@@ -46,12 +46,15 @@ run_ci_shard() {
 
   cov_dir="${CI_COVERAGE_DIR:-$REPO/covdata}"
   mkdir -p "$cov_dir"
-  base=(pytest -p no:cacheprovider -m 'not fuzz' -n "${CI_XDIST_WORKERS:-4}")
+  base=(pytest -p no:cacheprovider -m 'not fuzz' -n "${CI_XDIST_WORKERS:-4}"
+        --splitting-algorithm least_duration)
   if [ "$kind" = "normal" ]; then
     paths=(--ignore=tests/integration --ignore=tests/steps
-           --ignore-glob='tests/test_step_*.py' --ignore=tests/test_worker.py)
+           --ignore-glob='tests/test_step_*.py' --ignore=tests/test_worker.py
+           --ignore=tests/test_canonical_evidence_e2e.py)
   else
-    paths=(tests/steps tests/test_step_*.py tests/test_worker.py)
+    paths=(tests/steps tests/test_step_*.py tests/test_worker.py
+           tests/test_canonical_evidence_e2e.py)
   fi
   exec docker compose -f "$COMPOSE" run --rm \
     -v "$cov_dir:/covdata" -e "COVERAGE_FILE=/covdata/.coverage.${kind}.${group}" \
@@ -103,9 +106,15 @@ while [ $# -gt 0 ]; do
       [ $# -gt 0 ] || usage 1
       group="$1"
       shift
-      run_ci_shard normal "$group" "${1:-${CI_NORMAL_SPLITS:-6}}"
+      run_ci_shard normal "$group" "${1:-${CI_NORMAL_SPLITS:-12}}"
       ;;
-    --ci-worker) shift; [ $# -gt 0 ] || usage 1; run_ci_shard worker "$1" 2 ;;
+    --ci-worker)
+      shift
+      [ $# -gt 0 ] || usage 1
+      group="$1"
+      shift
+      run_ci_shard worker "$group" "${1:-${CI_WORKER_SPLITS:-4}}"
+      ;;
     --all)  MODE="all"; shift ;;
     --changed) CHANGED=1; shift ;;
     -m)     shift; [ $# -gt 0 ] || usage 1; MODULES+=("$1"); shift ;;

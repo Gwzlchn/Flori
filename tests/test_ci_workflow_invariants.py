@@ -104,8 +104,13 @@ def test_unit_shards_and_real_integration_use_the_single_test_entrypoint() -> No
     )
     assert normal_job["env"]["CI_XDIST_WORKERS"] == "4"
     assert worker_job["env"]["CI_XDIST_WORKERS"] == "4"
+    worker_splits = int(worker_job["env"]["CI_WORKER_SPLITS"])
+    assert worker_job["strategy"]["matrix"]["group"] == list(
+        range(1, worker_splits + 1),
+    )
     assert '"$CI_NORMAL_SPLITS"' in normal
     assert "bash scripts/test.sh --ci-worker" in worker
+    assert '"$CI_WORKER_SPLITS"' in worker
     assert "docker compose" not in normal + worker
     assert integration["timeout-minutes"] <= 3
     assert integration_run == "bash scripts/test.sh --integration"
@@ -121,7 +126,11 @@ def test_integration_entrypoint_runs_production_redis_and_minio_restore_drill() 
     drill_text = drill.read_text()
     assert '"$REPO/tests/integration/redis_aof_restore.sh"' in entrypoint_text
     assert "minio/minio@sha256:" in entrypoint_text
-    assert 'docker pull "$FLORI_INTEGRATION_MINIO_IMAGE"' in entrypoint_text
+    assert 'for image in "$DOCKER_TEST_IMAGE" "$FLORI_INTEGRATION_MINIO_IMAGE"' in entrypoint_text
+    assert 'docker pull "$image" &' in entrypoint_text
+    assert '"$REPO/tests/integration/redis_aof_restore.sh" >"$drill_log" 2>&1 &' in entrypoint_text
+    assert 'wait "$DRILL_PID"' in entrypoint_text
+    assert 'return "$pytest_status"' in entrypoint_text
     assert 'MINIO_IMAGE="${FLORI_INTEGRATION_MINIO_IMAGE:?' in drill_text
     assert 'MINIO_REQUIRED=1' in drill_text
     assert 'MINIO_VOLUME="$SOURCE_MINIO_VOLUME"' in drill_text
@@ -164,7 +173,7 @@ def test_retrieval_quality_artifact_is_sha_bound_and_fail_closed() -> None:
     assert "export INTEGRATION_HOST_TMP INTEGRATION_ARTIFACT_DIR RETRIEVAL_QUALITY_MAIN_SHA" in entrypoint
 
 
-def test_all_nine_coverage_parts_fail_closed_before_combine() -> None:
+def test_all_coverage_parts_fail_closed_before_combine() -> None:
     jobs = load_workflow()["jobs"]
     upload_jobs = (jobs["unit-normal"], jobs["unit-worker"], jobs["integration"])
     coverage_uploads = [
@@ -181,16 +190,26 @@ def test_all_nine_coverage_parts_fail_closed_before_combine() -> None:
     )
 
     gate = jobs["coverage-gate"]
-    assertion = next(
+    assertion_step = next(
         step for step in gate["steps"]
-        if step.get("name") == "Assert all 9 coverage parts are present and non-empty"
-    )["run"]
+        if step.get("name") == "Assert all coverage parts are present and non-empty"
+    )
+    assertion = assertion_step["run"]
+    normal_splits = int(assertion_step["env"]["NORMAL_SPLITS"])
+    worker_splits = int(assertion_step["env"]["WORKER_SPLITS"])
     expected = {
-        *(f"covdata/.coverage.normal.{group}" for group in range(1, 7)),
-        *(f"covdata/.coverage.worker.{group}" for group in range(1, 3)),
+        *(f"covdata/.coverage.normal.{group}" for group in range(1, normal_splits + 1)),
+        *(f"covdata/.coverage.worker.{group}" for group in range(1, worker_splits + 1)),
         "covdata/.coverage.integration",
     }
-    assert all(path in assertion for path in expected)
+    assert normal_splits == int(jobs["unit-normal"]["env"]["CI_NORMAL_SPLITS"])
+    assert worker_splits == int(jobs["unit-worker"]["env"]["CI_WORKER_SPLITS"])
+    assert len(expected) == normal_splits + worker_splits + 1
+    assert "seq 1 \"$NORMAL_SPLITS\"" in assertion
+    assert "seq 1 \"$WORKER_SPLITS\"" in assertion
+    assert 'required+=("covdata/.coverage.normal.$group")' in assertion
+    assert 'required+=("covdata/.coverage.worker.$group")' in assertion
+    assert "covdata/.coverage.integration" in assertion
     assert '[ ! -s "$part" ]' in assertion
     assert "exit 1" in assertion
 
