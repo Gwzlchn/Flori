@@ -359,7 +359,7 @@ DRILL_RESULT_DIR=/mnt/nas/flori/dr-evidence scripts/dr-drill.sh
 scripts/dr-drill.sh --result-file /mnt/nas/flori/dr-evidence/latest.json
 ```
 
-演练在一次性容器临时根创建 SQLite/job/profile/Redis/MinIO/config 样本，使用同一 migration manifest、registry 和 runner 创建并验证当前 schema，覆盖原子发布、损坏归档拒绝、空环境业务读取和跨资产故障回滚，输出实测 RPO/RTO。它不挂 Docker socket，也不挂载现有生产卷。发布前的 real-docker integration 还会用隔离真实 Redis/MinIO 卷验证生产 `appendonly yes` 启动后 key 与对象可读。
+演练在一次性容器临时根创建 SQLite/job/profile/Redis/MinIO/config 样本，使用同一 migration manifest、registry 和 runner 创建并验证当前 schema，覆盖原子发布、损坏归档拒绝、空环境业务读取和跨资产故障回滚，输出实测 RPO/RTO。它不挂 Docker socket，也不挂载现有生产卷。发布前的 real-docker integration 还会用隔离真实 Redis/MinIO 卷恢复到全新目标；生产 `appendonly yes` Redis 必须读回 key，生产 MinIO client 必须逐字节读回 multipart 对象并保持 size、etag 与 user metadata。
 
 ### 7.4 磁盘回收 — `scripts/gc-jobs.sh`
 

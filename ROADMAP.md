@@ -39,7 +39,7 @@ E2E 分层见 [`scripts/test.sh`](scripts/test.sh) 与 [`docs/09-testing.md`](do
 - [x] 测试 (`docs/09-testing.md`)
 - [x] 可观测 (`docs/10-observability.md`)
 - [x] 开发流程 (`docs/11-dev-workflow.md`)
-- [x] ADR (`docs/adr/*.md`) — 8 个 + README
+- [x] ADR (`docs/adr/*.md`) — 14 个 + README
 - [x] CLAUDE.md — 已更新
 - [x] README.md — 已更新
 

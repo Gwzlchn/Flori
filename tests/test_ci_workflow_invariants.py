@@ -112,12 +112,23 @@ def test_unit_shards_and_real_integration_use_the_single_test_entrypoint() -> No
     assert integration["env"]["TEST_WARM_NAME"].startswith("flori-ci-")
 
 
-def test_integration_entrypoint_runs_production_redis_restore_drill() -> None:
+def test_integration_entrypoint_runs_production_redis_and_minio_restore_drill() -> None:
     entrypoint = WORKFLOW.parents[2] / "scripts" / "run-integration.sh"
     drill = WORKFLOW.parents[2] / "tests" / "integration" / "redis_aof_restore.sh"
 
     assert drill.is_file()
-    assert '"$REPO/tests/integration/redis_aof_restore.sh"' in entrypoint.read_text()
+    entrypoint_text = entrypoint.read_text()
+    drill_text = drill.read_text()
+    assert '"$REPO/tests/integration/redis_aof_restore.sh"' in entrypoint_text
+    assert "minio/minio@sha256:" in entrypoint_text
+    assert 'docker pull "$FLORI_INTEGRATION_MINIO_IMAGE"' in entrypoint_text
+    assert 'MINIO_IMAGE="${FLORI_INTEGRATION_MINIO_IMAGE:?' in drill_text
+    assert 'MINIO_REQUIRED=1' in drill_text
+    assert 'MINIO_VOLUME="$SOURCE_MINIO_VOLUME"' in drill_text
+    assert 'MINIO_VOLUME="$TARGET_MINIO_VOLUME"' in drill_text
+    assert "put_object(" in drill_text
+    assert "stat_object(" in drill_text
+    assert "source-minio-disabled" not in drill_text
 
     workflow = load_workflow()
     integration = workflow["jobs"]["integration"]

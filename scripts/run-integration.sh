@@ -20,6 +20,7 @@ INTEGRATION_ARTIFACT_DIR="${INTEGRATION_ARTIFACT_DIR:-$INTEGRATION_HOST_TMP/arti
 mkdir -p "$INTEGRATION_ARTIFACT_DIR"
 export INTEGRATION_HOST_TMP INTEGRATION_ARTIFACT_DIR
 export DOCKER_TEST_IMAGE="${DOCKER_TEST_IMAGE:-python:3.11-slim@sha256:9a7765b36773a37061455b332f18e265e7f58f6fea9c419a550d2a8b0e9db834}"
+export FLORI_INTEGRATION_MINIO_IMAGE="${FLORI_INTEGRATION_MINIO_IMAGE:-minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e}"
 export INTEGRATION_TEST_IMAGE="${INTEGRATION_TEST_IMAGE:-${safe_name}-integration:latest}"
 export INTEGRATION_EXTERNAL_IMAGE="${INTEGRATION_EXTERNAL_IMAGE:-${safe_name}-external:latest}"
 export INTEGRATION_HTTP_PROXY="${FLORI_EXTERNAL_HTTP_PROXY:-${HTTP_PROXY:-}}"
@@ -80,6 +81,9 @@ run_core() {
   ensure_image "$INTEGRATION_TEST_IMAGE" test
   if ! docker image inspect "$DOCKER_TEST_IMAGE" >/dev/null 2>&1; then
     docker pull "$DOCKER_TEST_IMAGE"
+  fi
+  if ! docker image inspect "$FLORI_INTEGRATION_MINIO_IMAGE" >/dev/null 2>&1; then
+    docker pull "$FLORI_INTEGRATION_MINIO_IMAGE"
   fi
   "${COMPOSE[@]}" up -d --wait --wait-timeout 30 redis
   redis_container="$("${COMPOSE[@]}" ps -q redis)"
