@@ -12,7 +12,7 @@ from tests.conftest import make_fakeredis
 from tests.pubsub_helpers import subscription_barrier
 from shared.config import AppConfig
 from shared.db import Database
-from shared.models import Job, JobStatus, StepStatus, Step, AIUsage
+from shared.models import Collection, Job, JobStatus, StepStatus, Step, AIUsage, Worker
 from shared.step_base import def_digest_for, pipeline_digest_for
 from shared.storage import LocalStorage
 from scheduler.scheduler import Scheduler
@@ -182,6 +182,32 @@ class TestSubmitJob:
         assert db_job.status == JobStatus.FAILED
         active = await redis.get_active_jobs()
         assert "j_test_001" not in active
+
+    @pytest.mark.asyncio
+    async def test_startup_recovers_pending_without_racing_book_chapters(
+        self, scheduler, redis, db,
+    ):
+        db.create_collection(Collection(
+            id="book", name="Book", domain="general",
+            source_type="book_toc", source_id="https://book.example/",
+        ))
+        ordinary = make_job(job_id="ordinary")
+        chapter_a = Job(
+            id="chapter-a", content_type="article", pipeline="test",
+            domain="general", collection_id="book",
+        )
+        chapter_b = Job(
+            id="chapter-b", content_type="article", pipeline="test",
+            domain="general", collection_id="book",
+        )
+        for job in (ordinary, chapter_a, chapter_b):
+            db.create_job(job)
+
+        await scheduler._recover_pending_jobs()
+
+        assert await redis.get_all_step_statuses("ordinary")
+        assert await redis.get_all_step_statuses("chapter-a")
+        assert await redis.get_all_step_statuses("chapter-b") == {}
 
 
 class TestSkipNoWorker:
@@ -1541,6 +1567,100 @@ class TestConcurrentCAS:
             asyncio.to_thread(db.record_ai_usage, u2),
         )
         assert set(results) == {True, False}  # exec_id UNIQUE → 一成一败
+
+    @pytest.mark.asyncio
+    async def test_job_finalizer_runs_effects_once_and_recovers_expired_owner(
+        self, scheduler, redis, db,
+    ):
+        from unittest.mock import AsyncMock
+
+        job = make_job()
+        db.create_job(job)
+        await scheduler.submit_job(job)
+        for step in ("A", "B", "C"):
+            await redis.set_step_status(job.id, step, "done")
+            db.update_step(job.id, step, status="done")
+        scheduler._reconcile_completed_effects = AsyncMock(return_value=True)
+        scheduler._advance_book_chain = AsyncMock()
+
+        results = await asyncio.gather(
+            scheduler.mark_job_done(job.id),
+            scheduler.mark_job_done(job.id),
+        )
+        assert sorted(results) == [False, True]
+        scheduler._reconcile_completed_effects.assert_awaited_once()
+        scheduler._advance_book_chain.assert_awaited_once()
+
+        await redis.advance_job_generation(job.id)
+        await redis.add_active_job(job.id)
+        assert await redis.acquire_job_finalizer(
+            job.id, 2, "done", "crashed", now=100, lease_sec=10,
+        ) == 1
+        assert await scheduler.mark_job_done(job.id) is True
+        assert not await redis.get_active_jobs()
+
+    @pytest.mark.asyncio
+    async def test_failed_job_rejects_late_sibling_without_side_effects(
+        self, scheduler, redis, db,
+    ):
+        from unittest.mock import AsyncMock
+
+        job = make_job()
+        db.create_job(job)
+        await scheduler.submit_job(job)
+        await redis.set_step_status(job.id, "B", "running")
+        await redis.set_step_exec_id(job.id, "B", "exec-b")
+        await redis.r.hset(f"job:{job.id}:step_generation", "B", "1")
+        db.update_step(job.id, "B", status="running")
+        scheduler._run_step_completion_effects = AsyncMock(return_value=True)
+        scheduler._check_downstream = AsyncMock()
+        scheduler._advance_book_chain = AsyncMock()
+
+        await scheduler.mark_job_failed(job.id, "A failed")
+        await scheduler.on_step_done(
+            job.id, "B", exec_id="exec-b", generation=1,
+        )
+
+        assert db.get_job(job.id).status == JobStatus.FAILED
+        assert next(step for step in db.get_steps(job.id) if step.name == "B").status == StepStatus.RUNNING
+        scheduler._run_step_completion_effects.assert_not_awaited()
+        scheduler._check_downstream.assert_not_awaited()
+        scheduler._advance_book_chain.assert_awaited_once()
+        assert await redis.get_pool_count("cpu") == 0
+
+    @pytest.mark.asyncio
+    async def test_durable_terminal_applies_metadata_and_worker_stats(
+        self, scheduler, redis, db,
+    ):
+        worker = Worker(id="worker-1", type="cpu", pools=["cpu"], status="busy")
+        db.upsert_worker(worker)
+        await redis.register_worker("worker-1", {
+            "type": "cpu", "pools": "cpu", "status": "busy",
+        })
+        job = make_job()
+        db.create_job(job)
+        await scheduler.submit_job(job)
+        await redis.set_step_status(job.id, "A", "running")
+        await redis.set_step_exec_id(job.id, "A", "exec-1")
+        await redis.r.hset(f"job:{job.id}:step_generation", "A", "1")
+        db.update_step(job.id, "A", status="running")
+
+        await scheduler._dispatch({
+            "status": "done", "job_id": job.id, "step": "A",
+            "worker": "worker-1", "exec_id": "exec-1", "generation": 1,
+            "duration": 12.5, "started_at": 100.0,
+        })
+
+        step = next(item for item in db.get_steps(job.id) if item.name == "A")
+        assert step.status == StepStatus.DONE
+        assert step.started_at.timestamp() == 100.0
+        assert step.duration_sec == 12.5
+        refreshed = db.get_worker("worker-1")
+        assert refreshed.tasks_completed == 1
+        assert refreshed.total_duration_sec == 12.5
+        info = await redis.get_worker_info("worker-1")
+        assert info["tasks_completed"] == "1"
+        assert info["total_duration_sec"] == "12.5"
 
 
 class TestResubmit:

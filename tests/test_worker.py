@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from tests.conftest import make_fakeredis
-from tests.pubsub_helpers import subscription_barrier
 from shared.config import AppConfig
 from shared.db import Database
 from shared.models import AITask, Job, LLMRequest, LLMResponse, Step, StepStatus
@@ -98,8 +97,33 @@ def make_claim(job_id="j_test_001", step="A", pool="cpu", pipeline="test",
     """构造一个 execute 入参 claim(等价 request_step 的返回)。"""
     return {
         "job_id": job_id, "step": step, "pool": pool, "exec_id": exec_id,
+        "generation": 1,
         "pipeline": pipeline, "domain": domain, "style_tags": style_tags or [],
     }
+
+
+async def activate_claim(redis, claim, worker_id="w_test"):
+    """把手工 claim 补成原子认领后的 Redis 状态。"""
+    job_id, step = claim["job_id"], claim["step"]
+    await redis.init_job(job_id, claim.get("pipeline", "test"), {
+        "domain": claim.get("domain", "general"), "style_tags": "[]",
+    })
+    await redis.set_step_status(job_id, step, "running")
+    await redis.set_step_worker(job_id, step, worker_id)
+    await redis.set_step_exec_id(job_id, step, claim["exec_id"])
+    await redis.r.hset(
+        f"job:{job_id}:step_generation", step, str(claim["generation"]),
+    )
+
+
+async def lifecycle_payloads(redis, topic):
+    """读取尚未由 Scheduler 消费的权威生命周期事件。"""
+    rows = await redis.r.xrange(redis.LIFECYCLE_STREAM)
+    return [
+        json.loads(fields["payload"])
+        for _, fields in rows
+        if fields.get("topic") == topic
+    ]
 
 
 async def setup_task_in_queue(redis, pool="cpu", job_id="j_test_001", step="A", tags=None, priority=0):
@@ -650,8 +674,8 @@ class TestExecuteFullFlow:
     """execute 全流程测试:mock _run_step 避免真实子进程。"""
 
     @pytest.mark.asyncio
-    async def test_success_publishes_and_updates_db(
-        self, worker, redis, db, tmp_jobs_dir, monkeypatch,
+    async def test_success_appends_durable_terminal(
+        self, worker, redis, db, tmp_jobs_dir,
     ):
         await worker.register()  # 让 transport._worker_id 与 worker.worker_id 一致
         job = make_job()
@@ -662,32 +686,22 @@ class TestExecuteFullFlow:
         job_dir = tmp_jobs_dir / "j_test_001"
         job_dir.mkdir(exist_ok=True)
 
-        completed_events = []
-
-        async def capture_completed():
-            async for msg in redis.subscribe("step_completed"):
-                completed_events.append(msg)
-                break
-
         async def mock_run_step(ctx, on_progress, on_tick):
             return 0, ""
 
         worker.runner.run_step = mock_run_step
+        claim = make_claim()
+        await activate_claim(redis, claim, worker.worker_id)
+        await worker.execute(claim)
 
-        ready = subscription_barrier(redis, monkeypatch)
-        listener = asyncio.create_task(capture_completed())
-        await asyncio.wait_for(ready.wait(), timeout=1.0)
-        await worker.execute(make_claim())
-        await asyncio.wait_for(listener, timeout=2.0)
-
+        completed_events = await lifecycle_payloads(redis, "step_completed")
         assert len(completed_events) == 1
         assert completed_events[0]["status"] == "done"
         assert completed_events[0]["job_id"] == "j_test_001"
         assert completed_events[0]["exec_id"] == "w_test:1"
 
-        db_step = db.get_steps("j_test_001")[0]
-        assert db_step.status == StepStatus.DONE
-        assert db_step.worker_id == worker.worker_id
+        # Scheduler 消费 Stream 后才落 DB,Worker 不再双写终态。
+        assert db.get_steps("j_test_001")[0].status == StepStatus.READY
 
         assert await redis.get_pool_count("cpu") == 0
 
@@ -709,10 +723,13 @@ class TestExecuteFullFlow:
             raise RuntimeError("minio down")
         worker.storage.push = boom_push
 
-        await worker.execute(make_claim())
+        claim = make_claim()
+        await activate_claim(redis, claim, worker.worker_id)
+        await worker.execute(claim)
 
-        assert db.get_steps("j_test_001")[0].status == StepStatus.FAILED  # 不是 DONE
-        assert await redis.get_pool_count("cpu") == 0                     # 槽位仍释放
+        assert len(await lifecycle_payloads(redis, "step_failed")) == 1
+        assert await lifecycle_payloads(redis, "step_completed") == []
+        assert await redis.get_pool_count("cpu") == 0
 
     @pytest.mark.asyncio
     async def test_minimal_claim_resolves_pipeline_via_transport(self, worker, redis, db, tmp_jobs_dir):
@@ -728,10 +745,12 @@ class TestExecuteFullFlow:
             return 0, ""
         worker.runner.run_step = mock_run_step
 
-        await worker.execute({"job_id": "j_test_001", "step": "A",
-                              "pool": "cpu", "exec_id": "w_test:1"})
+        claim = {"job_id": "j_test_001", "step": "A", "pool": "cpu",
+                 "exec_id": "w_test:1", "generation": 1}
+        await activate_claim(redis, claim, worker.worker_id)
+        await worker.execute(claim)
 
-        assert db.get_steps("j_test_001")[0].status == StepStatus.DONE
+        assert len(await lifecycle_payloads(redis, "step_completed")) == 1
 
     @pytest.mark.asyncio
     async def test_job_read_failure_fails_step_not_crash(self, worker, redis, db, tmp_jobs_dir):
@@ -746,15 +765,17 @@ class TestExecuteFullFlow:
             raise RuntimeError("redis down")
         worker.transport.get_job_pipeline = boom
 
-        await worker.execute({"job_id": "j_test_001", "step": "A",
-                              "pool": "cpu", "exec_id": "w_test:1"})
+        claim = {"job_id": "j_test_001", "step": "A", "pool": "cpu",
+                 "exec_id": "w_test:1", "generation": 1}
+        await activate_claim(redis, claim, worker.worker_id)
+        await worker.execute(claim)
 
-        assert db.get_steps("j_test_001")[0].status == StepStatus.FAILED
+        assert len(await lifecycle_payloads(redis, "step_failed")) == 1
         assert await redis.get_pool_count("cpu") == 0
 
     @pytest.mark.asyncio
-    async def test_failure_publishes_events_and_updates_db(
-        self, worker, redis, db, tmp_jobs_dir, monkeypatch,
+    async def test_failure_appends_durable_terminal(
+        self, worker, redis, db, tmp_jobs_dir,
     ):
         await worker.register()
         job = make_job()
@@ -765,54 +786,30 @@ class TestExecuteFullFlow:
         job_dir = tmp_jobs_dir / "j_test_001"
         job_dir.mkdir(exist_ok=True)
 
-        failed_events = []
-        ws_events = []
-
-        async def capture_failed():
-            async for msg in redis.subscribe("step_failed"):
-                failed_events.append(msg)
-                break
-
-        async def capture_ws():
-            async for msg in redis.subscribe(f"events:j_test_001"):
-                if msg.get("event") == "step_failed":
-                    ws_events.append(msg)
-                    break
-
         async def mock_run_step(ctx, on_progress, on_tick):
             return 1, "segfault"
 
         worker.runner.run_step = mock_run_step
+        claim = make_claim()
+        await activate_claim(redis, claim, worker.worker_id)
+        await worker.execute(claim)
 
-        ready = subscription_barrier(redis, monkeypatch, expected=2)
-        listener1 = asyncio.create_task(capture_failed())
-        listener2 = asyncio.create_task(capture_ws())
-        await asyncio.wait_for(ready.wait(), timeout=1.0)
-        await worker.execute(make_claim())
-        await asyncio.wait_for(listener1, timeout=2.0)
-        await asyncio.wait_for(listener2, timeout=2.0)
-
+        failed_events = await lifecycle_payloads(redis, "step_failed")
         assert len(failed_events) == 1
         assert failed_events[0]["status"] == "failed"
-        # rc!=0 分支带 exec_id(保留旧 payload 差异)
         assert failed_events[0]["exec_id"] == "w_test:1"
-
-        assert len(ws_events) == 1
-        assert ws_events[0]["event"] == "step_failed"
-
-        db_step = db.get_steps("j_test_001")[0]
-        assert db_step.status == StepStatus.FAILED
+        assert failed_events[0]["count_stats"] is True
 
         assert await redis.get_pool_count("cpu") == 0
-        # rc!=0 计入 failed 统计(count_stats=True)
+        # Scheduler 消费后才落终态与统计。
         db_worker = db.get_worker(worker.worker_id)
-        assert db_worker.tasks_failed == 1
+        assert db_worker.tasks_failed == 0
 
 
 class TestSubprocessTimeout:
     @pytest.mark.asyncio
     async def test_timeout_publishes_failure(
-        self, worker, redis, db, tmp_jobs_dir, monkeypatch,
+        self, worker, redis, db, tmp_jobs_dir,
     ):
         """When run_step times out, execute should publish step_failed with timeout error."""
         await worker.register()
@@ -829,23 +826,14 @@ class TestSubprocessTimeout:
 
         worker.runner.run_step = mock_run_step_timeout
 
-        failed_events = []
+        claim = make_claim()
+        await activate_claim(redis, claim, worker.worker_id)
+        await worker.execute(claim)
 
-        async def capture_failed():
-            async for msg in redis.subscribe("step_failed"):
-                failed_events.append(msg)
-                break
-
-        ready = subscription_barrier(redis, monkeypatch)
-        listener = asyncio.create_task(capture_failed())
-        await asyncio.wait_for(ready.wait(), timeout=1.0)
-        await worker.execute(make_claim())
-        await asyncio.wait_for(listener, timeout=2.0)
-
+        failed_events = await lifecycle_payloads(redis, "step_failed")
         assert len(failed_events) == 1
         assert "timeout" in failed_events[0].get("error", "").lower() or failed_events[0].get("error_type") == "timeout"
-        # timeout 分支不带 exec_id(保留旧 payload 差异)
-        assert "exec_id" not in failed_events[0]
+        assert failed_events[0]["exec_id"] == "w_test:1"
         # Slot should be released
         assert await redis.get_pool_count("cpu") == 0
         # timeout 分支不计 failed 统计(count_stats=False)
@@ -875,7 +863,7 @@ class TestPoolExhaustion:
 class TestStoragePullFailure:
     @pytest.mark.asyncio
     async def test_pull_failure_releases_slot_and_publishes_failed(
-        self, worker, redis, db, tmp_jobs_dir, monkeypatch,
+        self, worker, redis, db, tmp_jobs_dir,
     ):
         """When storage.pull raises, slot released + step_failed published + DB updated."""
         await worker.register()
@@ -889,26 +877,15 @@ class TestStoragePullFailure:
 
         worker.storage.pull = failing_pull
 
-        failed_events = []
-
-        async def capture_failed():
-            async for msg in redis.subscribe("step_failed"):
-                failed_events.append(msg)
-                break
-
-        ready = subscription_barrier(redis, monkeypatch)
-        listener = asyncio.create_task(capture_failed())
-        await asyncio.wait_for(ready.wait(), timeout=1.0)
-        await worker.execute(make_claim())
-        await asyncio.wait_for(listener, timeout=2.0)
+        claim = make_claim()
+        await activate_claim(redis, claim, worker.worker_id)
+        await worker.execute(claim)
 
         assert await redis.get_pool_count("cpu") == 0
+        failed_events = await lifecycle_payloads(redis, "step_failed")
         assert len(failed_events) == 1
         assert "disk full" in failed_events[0]["error"]
-        # 通用异常分支不带 exec_id(保留旧 payload 差异)
-        assert "exec_id" not in failed_events[0]
-        db_step = db.get_steps("j_test_001")[0]
-        assert db_step.status == StepStatus.FAILED
+        assert failed_events[0]["exec_id"] == "w_test:1"
         # 通用异常分支不计 failed 统计(count_stats=False)
         db_worker = db.get_worker(worker.worker_id)
         assert db_worker.tasks_failed == 0
@@ -1028,10 +1005,13 @@ class TestUploadFaultTolerance:
             raise RuntimeError("usage parse/upload exploded")
         # _collect_usage 内部依赖,模拟 usage 收集/上报抖动。
         with patch.object(worker_mod, "collect_usage_from_file", boom):
-            await worker.execute(make_claim())
+            claim = make_claim()
+            await activate_claim(redis, claim, worker.worker_id)
+            await worker.execute(claim)
 
         # 成功步骤未被上报通道抖动翻盘。
-        assert db.get_steps("j_test_001")[0].status == StepStatus.DONE
+        assert len(await lifecycle_payloads(redis, "step_completed")) == 1
+        assert await lifecycle_payloads(redis, "step_failed") == []
         assert await redis.get_pool_count("cpu") == 0
 
     @pytest.mark.asyncio
@@ -1645,9 +1625,11 @@ class TestCollectUsageOnFailure:
         worker.runner.run_step = mock_run_step
         calls = self._spy(worker)
 
-        await worker.execute(make_claim())
+        claim = make_claim()
+        await activate_claim(redis, claim, worker.worker_id)
+        await worker.execute(claim)
         assert calls == [("j_test_001", "A")]     # 失败路径也 collect
-        assert db.get_steps("j_test_001")[0].status == StepStatus.FAILED
+        assert len(await lifecycle_payloads(redis, "step_failed")) == 1
 
     @pytest.mark.asyncio
     async def test_timeout_still_collects_usage(self, worker, redis, db, tmp_jobs_dir):

@@ -125,7 +125,7 @@ async def _sync_collection_body(
         nxt = await next_chapter_job(db, redis, coll.id)
         if nxt:
             job = await asyncio.to_thread(db.get_job, nxt)
-            await redis.publish("job_command", {
+            await redis.append_lifecycle_event("job_command", {
                 "action": "new_job", "job_id": nxt, "pipeline": job.pipeline if job else "article",
             })
             logger.info("book_chain_kickoff", coll=coll.id, job_id=nxt)
@@ -284,7 +284,7 @@ async def delete_collection(
             await redis.remove_job_tasks(j.id)
             await redis.cleanup_job(j.id)
             await redis.remove_active_job(j.id)
-            await redis.publish("job_command", {"action": "delete", "job_id": j.id})
+            await redis.append_lifecycle_event("job_command", {"action": "delete", "job_id": j.id})
             await storage.delete(j.id)
             audit("job", j.id, "delete", actor="collection_purge",
                   detail={"collection_id": collection_id})

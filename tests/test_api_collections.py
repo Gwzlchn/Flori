@@ -13,6 +13,7 @@ from api.main import create_app
 def mock_redis():
     r = AsyncMock()
     r.publish = AsyncMock()
+    r.get_all_step_statuses.return_value = {}
     return r
 
 

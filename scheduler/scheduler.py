@@ -7,6 +7,7 @@ import fnmatch
 import json
 import os
 import re
+import secrets
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -90,6 +91,7 @@ class Scheduler:
         self.jobs_dir = config.jobs_dir
         self._shutdown = False
         self._pubsub_task: asyncio.Task | None = None
+        self._stream_task: asyncio.Task | None = None
         self._periodic_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
         # 心跳 payload 源:启动时刻(算 uptime)+ 上一拍 periodic 循环的实测延迟(loop_lag)。
@@ -131,12 +133,14 @@ class Scheduler:
         except Exception:
             logger.warning("credential_mirror_failed")
         await self._recover()
-        self._pubsub_task = asyncio.create_task(self._event_loop())
+        self._stream_task = asyncio.create_task(self._event_loop())
+        self._pubsub_task = asyncio.create_task(self._notification_loop())
         self._periodic_task = asyncio.create_task(self._periodic_loop())
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         try:
             await asyncio.gather(
                 self._pubsub_task,
+                self._stream_task,
                 self._periodic_task,
                 self._heartbeat_task,
             )
@@ -153,6 +157,8 @@ class Scheduler:
         self._shutdown = True
         if self._pubsub_task and not self._pubsub_task.done():
             self._pubsub_task.cancel()
+        if self._stream_task and not self._stream_task.done():
+            self._stream_task.cancel()
         if self._periodic_task and not self._periodic_task.done():
             self._periodic_task.cancel()
         if self._heartbeat_task and not self._heartbeat_task.done():
@@ -187,21 +193,39 @@ class Scheduler:
     # 主循环
 
     async def _event_loop(self) -> None:
-        """订阅事件并分发。连接级异常(redis 超时/断连)不崩进程:
-        指数退避后重连重订阅;启动恢复也会补推漏掉的步骤。"""
+        """消费 durable lifecycle Stream;成功后 ACK,失败留 PEL 重领。"""
+        consumer = f"scheduler-{os.getpid()}"
         backoff = 1
         while not self._shutdown:
             try:
-                async for msg in self.redis.subscribe(
-                    "step_started", "step_completed", "step_failed", "job_command",
-                ):
-                    if self._shutdown:
-                        break
-                    backoff = 1  # 收到任何消息说明连接健康,重置退避
+                messages = await self.redis.read_lifecycle_events(consumer)
+                backoff = 1
+                for message_id, fields in messages:
                     try:
-                        await self._dispatch(msg)
-                    except Exception:
-                        logger.exception("event_handler_error", msg=msg)
+                        topic = fields.get("topic")
+                        payload = json.loads(fields.get("payload", ""))
+                        if not isinstance(topic, str) or not isinstance(payload, dict):
+                            raise ValueError("invalid lifecycle envelope")
+                        payload["_stream_id"] = message_id
+                        await self._dispatch(payload)
+                    except asyncio.CancelledError:
+                        raise
+                    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                        await self.redis.reject_lifecycle_event(
+                            message_id, fields, f"invalid envelope: {exc}", max_attempts=1,
+                        )
+                        logger.warning("lifecycle_poison_isolated", message_id=message_id)
+                    except Exception as exc:
+                        isolated = await self.redis.reject_lifecycle_event(
+                            message_id, fields, str(exc),
+                        )
+                        logger.exception(
+                            "lifecycle_handler_error",
+                            message_id=message_id,
+                            poison_isolated=isolated,
+                        )
+                    else:
+                        await self.redis.ack_lifecycle_event(message_id)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -219,9 +243,20 @@ class Scheduler:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30)
 
+    async def _notification_loop(self) -> None:
+        """Pub/Sub 只承载可丢的 step_started 展示通知。"""
+        async for msg in self.redis.subscribe("step_started"):
+            if self._shutdown:
+                return
+            try:
+                await self._dispatch(msg)
+            except Exception:
+                logger.exception("notification_handler_error", msg=msg)
+
     async def _dispatch(self, msg: dict) -> None:
         status = msg.get("status")
         command = msg.get("command") or msg.get("action")
+        stream_id = msg.get("_stream_id")
 
         if status == "running":
             await self.on_step_started(
@@ -233,24 +268,33 @@ class Scheduler:
                 duration=msg.get("duration"),
                 worker=msg.get("worker"),
                 exec_id=msg.get("exec_id"),
+                generation=msg.get("generation"),
+                started_at=msg.get("started_at"),
             )
         elif status == "failed":
             await self.on_step_failed(
                 msg["job_id"], msg["step"],
                 msg.get("error", ""),
                 msg.get("error_type", "unknown"),
+                worker=msg.get("worker"),
                 exec_id=msg.get("exec_id"),
+                generation=msg.get("generation"),
+                duration=msg.get("duration"),
+                started_at=msg.get("started_at"),
+                count_stats=bool(msg.get("count_stats", False)),
             )
         elif command == "new_job":
             job = await asyncio.to_thread(self.db.get_job, msg["job_id"])
             if job:
                 await self.submit_job(job)
         elif command == "rerun":
-            await self.rerun(msg["job_id"], msg["from_step"])
+            await self.rerun(
+                msg["job_id"], msg["from_step"], idempotency_key=stream_id,
+            )
         elif command == "resubmit":
-            await self.resubmit(msg["job_id"])
+            await self.resubmit(msg["job_id"], idempotency_key=stream_id)
         elif command == "retry":
-            await self._retry_failed(msg["job_id"])
+            await self._retry_failed(msg["job_id"], idempotency_key=stream_id)
         elif command == "delete":
             # 消费 delete_job 端点的 publish,完成 job 编排状态收尾:取消在途重试,
             # 移出 active_jobs,清五个 Redis 编排 hash(job:{id}/steps/retries/step_worker/step_exec).
@@ -420,6 +464,7 @@ class Scheduler:
     async def _recover(self) -> None:
         """启动恢复:补推满足依赖的步骤,回收无主 running 步骤。"""
         await self.reconcile_study_suggestion_batches()
+        await self._recover_pending_jobs()
         active_jobs = await self.redis.get_active_jobs()
         logger.info("recover_start", active_jobs=len(active_jobs))
 
@@ -446,6 +491,33 @@ class Scheduler:
             await self._check_downstream(job_id)
 
         logger.info("recover_done", active_jobs=len(active_jobs))
+
+    async def _recover_pending_jobs(self) -> None:
+        """补偿 Scheduler 离线时落库但未消费 new_job 的普通 pending job。"""
+        _, pending = await asyncio.to_thread(
+            self.db.list_jobs,
+            status="pending",
+            limit=10_000,
+            current_only=False,
+        )
+        book_collections: set[str] = set()
+        for job in pending:
+            if job.collection_id:
+                collection = await asyncio.to_thread(
+                    self.db.get_collection, job.collection_id,
+                )
+                if collection and getattr(collection, "source_type", None) == "book_toc":
+                    book_collections.add(job.collection_id)
+                    continue
+            await self.submit_job(job)
+
+        if book_collections:
+            from shared.book_chain import next_chapter_job
+            by_id = {job.id: job for job in pending}
+            for collection_id in sorted(book_collections):
+                next_id = await next_chapter_job(self.db, self.redis, collection_id)
+                if next_id and next_id in by_id:
+                    await self.submit_job(by_id[next_id])
 
     @staticmethod
     def _study_suggestion_ai_payload(batch: dict) -> dict:
@@ -630,12 +702,29 @@ class Scheduler:
             "flags": (job.meta or {}).get("flags", {}),
         })
 
+        redis_status = await self.redis.get_all_step_statuses(job.id)
+        db_steps = {
+            item.name: item for item in await asyncio.to_thread(self.db.get_steps, job.id)
+        }
         for name, cfg in pipeline_steps.items():
-            await self.redis.set_step_status(job.id, name, "waiting")
-            await asyncio.to_thread(
-                self.db.upsert_step,
-                Step(job_id=job.id, name=name, status=StepStatus.WAITING, pool=cfg["pool"]),
-            )
+            status = redis_status.get(name)
+            if status is None and name in db_steps:
+                stored = db_steps[name].status
+                status = stored.value if isinstance(stored, StepStatus) else str(stored)
+            if status is None:
+                status = "waiting"
+            if name not in redis_status:
+                await self.redis.set_step_status(job.id, name, status)
+            if name not in db_steps:
+                await asyncio.to_thread(
+                    self.db.upsert_step,
+                    Step(
+                        job_id=job.id,
+                        name=name,
+                        status=StepStatus(status),
+                        pool=cfg["pool"],
+                    ),
+                )
 
         await self._export_term_map(job)
 
@@ -646,11 +735,23 @@ class Scheduler:
 
     # 事件处理
 
-    async def _exec_is_current(self, job_id: str, step: str, exec_id: str) -> bool:
-        """事件携带的 exec_id 是否为该步当前在跑的执行实例。
-        无记录(旧库/未写回)时放行,保持向后兼容。"""
+    async def _exec_is_current(
+        self, job_id: str, step: str, exec_id: str | None,
+        generation: int | None,
+    ) -> bool:
+        """存在当前执行身份时 fail closed;旧库无身份记录才兼容无 envelope 事件。"""
         current = await self.redis.get_step_exec_id(job_id, step)
-        return current is None or current == exec_id
+        if current is not None and current != exec_id:
+            return False
+        current_generation = await self.redis.get_step_generation(job_id, step)
+        if current_generation is not None and current_generation != generation:
+            return False
+        if generation is not None:
+            if await self.redis.get_job_generation(job_id) != generation:
+                return False
+            if await self.redis.job_generation_is_terminal(job_id, generation):
+                return False
+        return True
 
     async def on_step_started(
         self, job_id: str, step: str, worker: str | None = None,
@@ -672,10 +773,12 @@ class Scheduler:
         duration: float | None = None,
         worker: str | None = None,
         exec_id: str | None = None,
+        generation: int | None = None,
+        started_at: float | None = None,
     ) -> None:
         # 丢弃陈旧执行的完成事件:孤儿重排后旧 worker 迟到上报,其 exec_id 不再是当前在跑的实例.
         # 忽略旧上报,避免提前置 done 顶替仍在跑的新执行(双执行/读到不完整产物).
-        if exec_id is not None and not await self._exec_is_current(job_id, step, exec_id):
+        if not await self._exec_is_current(job_id, step, exec_id, generation):
             logger.warning("stale_exec_done_ignored", job_id=job_id, step=step, exec_id=exec_id)
             return
         ok = await self.redis.cas_step_status(job_id, step, "running", "done")
@@ -686,8 +789,15 @@ class Scheduler:
             self.db.update_step, job_id, step,
             status="done",
             worker_id=worker,
+            started_at=(
+                datetime.fromtimestamp(started_at, timezone.utc)
+                if isinstance(started_at, (int, float)) else None
+            ),
             finished_at=datetime.now(timezone.utc),
             duration_sec=duration,
+        )
+        await self._record_worker_terminal_stats(
+            worker, completed=1, duration=float(duration or 0),
         )
 
         progress = await self._update_progress(job_id)
@@ -1378,15 +1488,37 @@ class Scheduler:
         step: str,
         error: str,
         error_type: str = "unknown",
+        worker: str | None = None,
         exec_id: str | None = None,
+        generation: int | None = None,
+        duration: float | None = None,
+        started_at: float | None = None,
+        count_stats: bool = False,
     ) -> None:
         # 同 on_step_done:丢弃陈旧执行的失败事件,不让旧实例顶替当前在跑的步骤。
-        if exec_id is not None and not await self._exec_is_current(job_id, step, exec_id):
+        if not await self._exec_is_current(job_id, step, exec_id, generation):
             logger.warning("stale_exec_failed_ignored", job_id=job_id, step=step, exec_id=exec_id)
             return
         ok = await self.redis.cas_step_status(job_id, step, "running", "failed")
         if not ok:
             return
+
+        await asyncio.to_thread(
+            self.db.update_step,
+            job_id,
+            step,
+            status="failed",
+            error=error[:500],
+            worker_id=worker,
+            started_at=(
+                datetime.fromtimestamp(started_at, timezone.utc)
+                if isinstance(started_at, (int, float)) else None
+            ),
+            finished_at=datetime.now(timezone.utc),
+            duration_sec=duration,
+        )
+        if count_stats:
+            await self._record_worker_terminal_stats(worker, failed=1)
 
         logger.warning(
             "step_failed", job_id=job_id, step=step,
@@ -1447,6 +1579,30 @@ class Scheduler:
     async def _delayed_enqueue(self, delay: int, job_id: str, step: str) -> None:
         await asyncio.sleep(delay)
         await self.enqueue_step(job_id, step)
+
+    async def _record_worker_terminal_stats(
+        self,
+        worker_id: str | None,
+        *,
+        completed: int = 0,
+        failed: int = 0,
+        duration: float = 0.0,
+    ) -> None:
+        if not worker_id:
+            return
+        await asyncio.to_thread(
+            self.db.increment_worker_stats,
+            worker_id,
+            completed=completed,
+            failed=failed,
+            duration=duration,
+        )
+        if completed:
+            await self.redis.incr_worker_stat(worker_id, "tasks_completed", completed)
+        if failed:
+            await self.redis.incr_worker_stat(worker_id, "tasks_failed", failed)
+        if duration:
+            await self.redis.incr_worker_stat(worker_id, "total_duration_sec", duration)
 
     # DAG 推进
 
@@ -1823,6 +1979,20 @@ class Scheduler:
     # Job 状态
 
     async def mark_job_done(self, job_id: str) -> bool:
+        generation = await self.redis.get_job_generation(job_id)
+        owner = f"scheduler:{os.getpid()}:{secrets.token_hex(8)}"
+        finalizer = await self.redis.acquire_job_finalizer(
+            job_id, generation, "done", owner,
+        )
+        if finalizer == 0:
+            return False
+        if finalizer == 2:
+            await asyncio.to_thread(
+                self.db.update_job, job_id,
+                status=JobStatus.DONE, progress_pct=100,
+            )
+            await self.redis.remove_active_job(job_id)
+            return True
         # 只有声明副作用全部成功才越过 job 终态门。失败时步骤保持 done、job 留在 active,
         # 周期对账会继续幂等重放,不会要求 worker 重跑昂贵步骤。
         if not await self._reconcile_completed_effects(job_id):
@@ -1835,8 +2005,11 @@ class Scheduler:
         await self.redis.publish(f"events:{job_id}", {
             "event": "job_done", "progress_pct": 100,
         })
-        await self.redis.remove_active_job(job_id)
         await self._advance_book_chain(job_id)
+        await self.redis.complete_job_finalizer(
+            job_id, generation, "done", owner,
+        )
+        await self.redis.remove_active_job(job_id)
         logger.info("job_done", job_id=job_id)
         return True
 
@@ -1941,7 +2114,24 @@ class Scheduler:
             logger.warning("metadata_sync_failed", job_id=job_id)
 
     async def mark_job_failed(self, job_id: str, error: str) -> None:
+        generation = await self.redis.get_job_generation(job_id)
+        owner = f"scheduler:{os.getpid()}:{secrets.token_hex(8)}"
+        finalizer = await self.redis.acquire_job_finalizer(
+            job_id, generation, "failed", owner,
+        )
+        if finalizer == 0:
+            return
+        if finalizer == 2:
+            await asyncio.to_thread(
+                self.db.update_job, job_id,
+                status=JobStatus.FAILED, error=error[:500],
+            )
+            await self.redis.remove_active_job(job_id)
+            return
         self._cancel_delayed_tasks(job_id)
+        for step, status in (await self.redis.get_all_step_statuses(job_id)).items():
+            if status == "running":
+                await self._revoke_step_execution(job_id, step)
         progress = await self._update_progress(job_id)
         await asyncio.to_thread(
             self.db.update_job, job_id,
@@ -1951,7 +2141,6 @@ class Scheduler:
             "event": "job_failed", "error": error[:200], "progress_pct": progress,
         })
         await self.redis.push_event("job_failed", job_id=job_id, error=error[:200])
-        await self.redis.remove_active_job(job_id)
         # 失败即停:清掉该 job 仍残留在 queue:{pool} 的兄弟 ready task。并行分支下某步终态失败时,
         # 其它已入队的兄弟步是死任务,job 已 FAILED 不该再跑;不清则 worker 仍会认领,cas_step_status
         # 因 steps hash 未清而成功,跑已失败 job 的步,甚至 _check_downstream 把它重标 done,还留下
@@ -1959,6 +2148,10 @@ class Scheduler:
         await self.redis.remove_job_tasks(job_id)
         # book:失败章不卡整书,照样放行下一章(失败章单独 rerun;L2 术语表已含累积对照)。
         await self._advance_book_chain(job_id)
+        await self.redis.complete_job_finalizer(
+            job_id, generation, "failed", owner,
+        )
+        await self.redis.remove_active_job(job_id)
         logger.info("job_failed", job_id=job_id, error=error[:200])
 
     # 孤儿回收 + 卡住检测
@@ -2009,32 +2202,33 @@ class Scheduler:
         for k in [k for k in self._claim_mismatch_since if k not in live_mismatch]:
             self._claim_mismatch_since.pop(k, None)
 
+    async def _revoke_step_execution(
+        self, job_id: str, step: str,
+    ) -> tuple[str | None, int | None]:
+        """统一撤销 task lease 与所有 holder;重复调用安全。"""
+        holder = await self.redis.get_step_exec_id(job_id, step)
+        generation = await self.redis.get_step_generation(job_id, step)
+        if holder:
+            await self.redis.release_holders({holder})
+            await self.redis.revoke_task_lease(holder)
+        await self.redis.clear_step_resources(job_id, step)
+        return holder, generation
+
     async def _reclaim_step(
         self, job_id: str, step: str, reason: str,
+        error_type: str = "processing",
     ) -> None:
         logger.warning("reclaim_step", job_id=job_id, step=step, reason=reason)
         await self.redis.push_event("orphan_reclaimed", job_id=job_id, step=step, reason=reason)
 
-        # holder 集合:按本步 holder(=exec_id)SREM 释放其占的池槽/资源槽;SREM 幂等,即便 worker
-        # 仍存活、它自己的 release_step 也 SREM 同一 holder,双方都安全(不双减)。故 reclaim 一律按
-        # holder 释放:死 worker 的槽必被回收,不泄漏;活 worker 重复释放也无害。
-        holder = await self.redis.get_step_exec_id(job_id, step)
-        if holder:
-            pipeline_steps = await self._get_job_pipeline_steps(job_id)
-            if pipeline_steps:
-                pool = pipeline_steps.get(step, {}).get("pool")
-                if pool:
-                    await self.redis.release_slot(pool, holder)
-            resources = await self.redis.get_step_resources(job_id, step)
-            if resources:
-                for res in resources:
-                    await self.redis.release_resource(res, holder)
-                await self.redis.clear_step_resources(job_id, step)
+        holder, generation = await self._revoke_step_execution(job_id, step)
 
-        await self.redis.publish("step_failed", {
+        await self.redis.append_lifecycle_event("step_failed", {
             "job_id": job_id, "step": step, "status": "failed",
             "error": f"orphan reclaimed: {reason}",
-            "error_type": "processing",
+            "error_type": error_type,
+            "exec_id": holder,
+            "generation": generation,
         })
 
     async def reconcile_slots(self) -> None:
@@ -2106,11 +2300,12 @@ class Scheduler:
                         f"job {job_id} 的 {step} 进度停滞 {age:.0f}s,worker 可能卡死,已触发重试",
                         job_id=job_id, step=step, age_sec=round(age),
                     )
-                    await self.redis.publish("step_failed", {
-                        "job_id": job_id, "step": step, "status": "failed",
-                        "error": f"progress stale ({age:.0f}s, worker process may be stuck)",
-                        "error_type": "timeout",
-                    })
+                    await self._reclaim_step(
+                        job_id,
+                        step,
+                        f"progress stale ({age:.0f}s, worker process may be stuck)",
+                        error_type="timeout",
+                    )
 
     # 默认 90s 宽限即 fail-fast(无可用 worker 的 job)。可经 env 调大,用于
     # "只跑部分 worker"的运维窗口(如夜间仅 ECS download worker,其余步骤明天再跑),
@@ -2181,17 +2376,22 @@ class Scheduler:
 
     # 重跑 / 重提交
 
-    async def _retry_failed(self, job_id: str) -> None:
+    async def _retry_failed(
+        self, job_id: str, idempotency_key: str | None = None,
+    ) -> None:
         """重试失败 Job:从第一个 failed 步骤开始重跑。"""
         statuses = await self.redis.get_all_step_statuses(job_id)
         failed_steps = [s for s, st in statuses.items() if st == "failed"]
         if not failed_steps:
             return
         first_failed = sorted(failed_steps)[0]
-        await self.rerun(job_id, first_failed)
+        await self.rerun(job_id, first_failed, idempotency_key=idempotency_key)
         logger.info("job_retry", job_id=job_id, from_step=first_failed)
 
-    async def rerun(self, job_id: str, from_step: str) -> list[str]:
+    async def rerun(
+        self, job_id: str, from_step: str,
+        idempotency_key: str | None = None,
+    ) -> list[str]:
         """从指定步骤开始重跑,清除该步骤及所有下游的 .done 标记。返回被重置的步骤列表。"""
         self._cancel_delayed_tasks(job_id)  # 取消在途延迟重试,防与新一轮状态串台
         pipeline = await self.redis.get_job_pipeline(job_id)
@@ -2201,7 +2401,14 @@ class Scheduler:
         downstream = self._get_downstream(steps, from_step)
         reset_steps = [from_step] + downstream
 
+        generation, should_apply = await self.redis.begin_job_generation(
+            job_id, idempotency_key,
+        )
+        if not should_apply:
+            return reset_steps
+
         for step in reset_steps:
+            await self._revoke_step_execution(job_id, step)
             done_file = self.jobs_dir / job_id / f".{step}.done"
             await asyncio.to_thread(done_file.unlink, True)
             # 中心存储的 .done 必须一并删:MinIO 部署下 .done 在 bucket,只删本地是 no-op,
@@ -2232,12 +2439,17 @@ class Scheduler:
             self.db.update_job, job_id, status=JobStatus.PROCESSING,
         )
         await self.redis.add_active_job(job_id)
+        await self.redis.complete_job_generation(
+            job_id, idempotency_key, generation,
+        )
         await self._check_downstream(job_id)
 
         logger.info("job_rerun", job_id=job_id, from_step=from_step, reset=reset_steps)
         return reset_steps
 
-    async def resubmit(self, job_id: str) -> None:
+    async def resubmit(
+        self, job_id: str, idempotency_key: str | None = None,
+    ) -> None:
         """按当前 pipelines.yaml 重新初始化步骤,保留已有步骤的状态。
 
         以当前 pipeline 为准对齐 redis 与 DB 两侧:删去 pipeline 不再有的步(两侧都删)、
@@ -2248,6 +2460,11 @@ class Scheduler:
 
         pipeline = await self.redis.get_job_pipeline(job_id)
         if not pipeline:
+            return
+        generation, should_apply = await self.redis.begin_job_generation(
+            job_id, idempotency_key,
+        )
+        if not should_apply:
             return
         steps = self._get_pipeline_steps(pipeline)
         # 状态真源:redis(运行态)优先,redis 无则用 DB,都无则 waiting,并保留已完成/已跑步骤状态.
@@ -2284,6 +2501,9 @@ class Scheduler:
             self.db.update_job, job_id, status=JobStatus.PROCESSING,
         )
         await self.redis.add_active_job(job_id)
+        await self.redis.complete_job_generation(
+            job_id, idempotency_key, generation,
+        )
         await self._check_downstream(job_id)
 
         logger.info("job_resubmit", job_id=job_id, pipeline=pipeline)

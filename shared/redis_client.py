@@ -11,6 +11,7 @@ from typing import AsyncIterator
 import redis.asyncio as aioredis
 from redis.exceptions import (
     ConnectionError as RedisConnectionError,
+    ResponseError,
     TimeoutError as RedisTimeoutError,
 )
 
@@ -101,6 +102,184 @@ if redis.call('HGET', KEYS[1], 'worker_id') == ARGV[1]
     return 1
 end
 return 0
+"""
+
+_LUA_CLAIM_PIPELINE_STEP = """
+-- 一个脚本封闭 dequeue 到租约建立的崩溃窗口。Redis 为单机部署,可安全使用动态 job/resource key。
+-- KEYS: queue,pool holders,pool frozen,enqueued,pool overrides,resource limits.
+-- ARGV: pool,worker,exec,default limit,worker tags,reject tags,lease ttl,now.
+local pool = ARGV[1]
+local worker = ARGV[2]
+local exec_id = ARGV[3]
+local limit = tonumber(redis.call('HGET', KEYS[5], pool) or ARGV[4])
+if redis.call('GET', KEYS[3]) == '1' then return nil end
+if redis.call('SCARD', KEYS[2]) >= limit then return nil end
+
+local worker_tags = cjson.decode(ARGV[5])
+local reject_tags = cjson.decode(ARGV[6])
+local function contains(items, wanted)
+    for _, value in ipairs(items or {}) do
+        if value == wanted then return true end
+    end
+    return false
+end
+local function matches(task)
+    if task['kind'] == 'ai' then return false end
+    for _, tag in ipairs(task['require_tags'] or {}) do
+        if not contains(worker_tags, tag) then return false end
+    end
+    for _, tag in ipairs(task['tags'] or {}) do
+        if contains(reject_tags, tag) then return false end
+    end
+    return true
+end
+
+local items = redis.call('ZRANGE', KEYS[1], 0, -1, 'WITHSCORES')
+for index = 1, #items, 2 do
+    local raw = items[index]
+    local ok, task = pcall(cjson.decode, raw)
+    if not ok or type(task) ~= 'table' then
+        redis.call('ZREM', KEYS[1], raw)
+        redis.call('XADD', 'flori:lifecycle:poison', '*',
+            'source', KEYS[1], 'payload', raw, 'reason', 'invalid_json')
+    elseif matches(task) then
+        local job_id = task['job_id']
+        local step = task['step']
+        local status_key = 'job:' .. job_id .. ':steps'
+        if redis.call('HGET', status_key, step) == 'ready' then
+            local available = true
+            for _, resource in ipairs(task['resources'] or {}) do
+                local resource_limit = redis.call('HGET', KEYS[6], resource)
+                if resource_limit and
+                    redis.call('SCARD', 'res:' .. resource .. ':holders') >= tonumber(resource_limit) then
+                    available = false
+                    break
+                end
+            end
+            if available then
+                local job_key = 'job:' .. job_id
+                local generation = redis.call('HGET', job_key, 'lifecycle_generation')
+                if not generation then
+                    generation = '1'
+                    redis.call('HSET', job_key, 'lifecycle_generation', generation)
+                end
+                redis.call('ZREM', KEYS[1], raw)
+                redis.call('HDEL', KEYS[4], pool .. '|' .. job_id .. '|' .. step)
+                redis.call('SADD', KEYS[2], exec_id)
+                for _, resource in ipairs(task['resources'] or {}) do
+                    if redis.call('HGET', KEYS[6], resource) then
+                        redis.call('SADD', 'res:' .. resource .. ':holders', exec_id)
+                    end
+                end
+                redis.call('HSET', status_key, step, 'running')
+                redis.call('HSET', 'job:' .. job_id .. ':step_worker', step, worker)
+                redis.call('HSET', 'job:' .. job_id .. ':step_exec', step, exec_id)
+                redis.call('HSET', 'job:' .. job_id .. ':step_generation', step, generation)
+                redis.call('HSET', 'job:' .. job_id .. ':step_progress', step, ARGV[8])
+                if #(task['resources'] or {}) > 0 then
+                    redis.call('HSET', 'job:' .. job_id .. ':step_resources', step,
+                        cjson.encode(task['resources']))
+                end
+                local lease_key = 'runner:lease:' .. exec_id
+                redis.call('HSET', lease_key,
+                    'worker_id', worker, 'job_id', job_id, 'step', step,
+                    'exec_id', exec_id, 'pool', pool, 'generation', generation)
+                redis.call('EXPIRE', lease_key, tonumber(ARGV[7]))
+                return cjson.encode({job_id=job_id, step=step, pool=pool,
+                    exec_id=exec_id, generation=tonumber(generation)})
+            end
+        end
+    end
+end
+return nil
+"""
+
+_LUA_APPEND_TERMINAL = """
+-- 校验当前 execution/generation/job 未终态后,以 exec_id 单次追加 terminal Stream。
+local job_id = ARGV[1]
+local step = ARGV[2]
+local exec_id = ARGV[3]
+local generation = ARGV[4]
+local outcome = ARGV[5]
+if redis.call('HGET', KEYS[1], step) ~= 'running'
+    or redis.call('HGET', KEYS[2], step) ~= exec_id
+    or redis.call('HGET', KEYS[3], step) ~= generation
+    or redis.call('HGET', KEYS[4], 'lifecycle_generation') ~= generation
+    or redis.call('HGET', KEYS[4], 'terminal_generation') == generation then
+    return {0, ''}
+end
+local prior = redis.call('HGET', KEYS[5], exec_id)
+if prior then
+    local separator = string.find(prior, ':')
+    if string.sub(prior, 1, separator - 1) == outcome then
+        return {2, string.sub(prior, separator + 1)}
+    end
+    return {0, ''}
+end
+local message_id = redis.call('XADD', KEYS[6], '*',
+    'topic', ARGV[6], 'payload', ARGV[7], 'emitted_at', ARGV[8], 'schema', '1')
+redis.call('HSET', KEYS[5], exec_id, outcome .. ':' .. message_id)
+return {1, message_id}
+"""
+
+_LUA_FINALIZE_JOB = """
+-- generation 绑定 job 终态。1=首次赢家,2=同结果重放,0=旧代或冲突。
+local current = redis.call('HGET', KEYS[1], 'lifecycle_generation')
+if not current or current ~= ARGV[1] then return 0 end
+local terminal_generation = redis.call('HGET', KEYS[1], 'terminal_generation')
+local terminal_outcome = redis.call('HGET', KEYS[1], 'terminal_outcome')
+if terminal_generation == ARGV[1] then
+    if terminal_outcome == ARGV[2] then return 2 end
+    return 0
+end
+redis.call('HSET', KEYS[1], 'terminal_generation', ARGV[1], 'terminal_outcome', ARGV[2])
+return 1
+"""
+
+_LUA_ACQUIRE_JOB_FINALIZER = """
+-- 1=持有 applying,2=已 applied,0=旧代/冲突/另一活 owner。
+local current = redis.call('HGET', KEYS[1], 'lifecycle_generation')
+if not current or current ~= ARGV[1] then return 0 end
+local terminal_generation = redis.call('HGET', KEYS[1], 'terminal_generation')
+local terminal_outcome = redis.call('HGET', KEYS[1], 'terminal_outcome')
+if terminal_generation and (terminal_generation ~= ARGV[1] or terminal_outcome ~= ARGV[2]) then
+    return 0
+end
+local state = redis.call('HGET', KEYS[2], 'state')
+if state == 'applied' then return 2 end
+local lease_until = tonumber(redis.call('HGET', KEYS[2], 'lease_until') or '0')
+if state == 'applying' and lease_until > tonumber(ARGV[4]) then return 0 end
+redis.call('HSET', KEYS[1], 'terminal_generation', ARGV[1], 'terminal_outcome', ARGV[2])
+redis.call('HSET', KEYS[2],
+    'generation', ARGV[1], 'outcome', ARGV[2], 'state', 'applying',
+    'owner', ARGV[3], 'lease_until', ARGV[5])
+return 1
+"""
+
+_LUA_COMPLETE_JOB_FINALIZER = """
+if redis.call('HGET', KEYS[1], 'generation') == ARGV[1]
+    and redis.call('HGET', KEYS[1], 'outcome') == ARGV[2]
+    and redis.call('HGET', KEYS[1], 'state') == 'applying'
+    and redis.call('HGET', KEYS[1], 'owner') == ARGV[3] then
+    redis.call('HSET', KEYS[1], 'state', 'applied', 'lease_until', '0')
+    return 1
+end
+return 0
+"""
+
+_LUA_ADVANCE_GENERATION_ONCE = """
+local prior = redis.call('HGET', KEYS[2], ARGV[1])
+if prior then
+    local separator = string.find(prior, ':')
+    local generation = tonumber(string.sub(prior, 1, separator - 1))
+    local state = string.sub(prior, separator + 1)
+    return {generation, state == 'done' and 0 or 1}
+end
+local generation = redis.call('HINCRBY', KEYS[1], 'lifecycle_generation', 1)
+redis.call('HDEL', KEYS[1], 'terminal_generation', 'terminal_outcome')
+redis.call('DEL', KEYS[3])
+redis.call('HSET', KEYS[2], ARGV[1], generation .. ':applying')
+return {generation, 1}
 """
 
 _LUA_ENQUEUE_AI_ONCE = """
@@ -839,6 +1018,37 @@ class RedisClient:
             pass
         return task_json, parsed, score
 
+    async def claim_pipeline_step_atomic(
+        self,
+        *,
+        pool: str,
+        worker_id: str,
+        exec_id: str,
+        default_limit: int,
+        tags: set[str],
+        reject_tags: set[str],
+    ) -> dict | None:
+        """原子匹配并认领普通 pipeline step;不兼容队头不会限制后续候选。"""
+        raw = await self.r.eval(
+            _LUA_CLAIM_PIPELINE_STEP,
+            6,
+            f"queue:{pool}",
+            f"pool:{pool}:holders",
+            f"pool:{pool}:frozen",
+            "queue:enqueued",
+            self._POOL_LIMIT_OVERRIDES_KEY,
+            self._RESOURCE_LIMITS_KEY,
+            pool,
+            worker_id,
+            exec_id,
+            str(default_limit),
+            json.dumps(sorted(tags)),
+            json.dumps(sorted(reject_tags)),
+            str(self.TASK_LEASE_TTL_SEC),
+            str(time.time()),
+        )
+        return json.loads(raw) if raw else None
+
     async def get_queue_info(self, pool: str) -> dict:
         length = await self.r.zcard(f"queue:{pool}")
         return {"length": length}
@@ -1008,10 +1218,115 @@ class RedisClient:
     # Job 实时状态
 
     async def init_job(self, job_id: str, pipeline: str, info: dict) -> None:
-        await self.r.hset(f"job:{job_id}", mapping={
+        key = f"job:{job_id}"
+        await self.r.hset(key, mapping={
             "pipeline": pipeline,
             **{k: json.dumps(v) if isinstance(v, (list, dict)) else str(v) for k, v in info.items()},
         })
+        await self.r.hsetnx(key, "lifecycle_generation", "1")
+
+    async def get_job_generation(self, job_id: str) -> int:
+        raw = await self.r.hget(f"job:{job_id}", "lifecycle_generation")
+        return int(raw or 1)
+
+    async def job_generation_is_terminal(self, job_id: str, generation: int) -> bool:
+        raw = await self.r.hget(f"job:{job_id}", "terminal_generation")
+        return raw == str(generation)
+
+    async def advance_job_generation(
+        self, job_id: str, idempotency_key: str | None = None,
+    ) -> int:
+        """开始新一轮执行并清掉上一代终态;旧事件随后会被 generation/exec 双重拒绝。"""
+        key = f"job:{job_id}"
+        if idempotency_key:
+            result = await self.r.eval(
+                _LUA_ADVANCE_GENERATION_ONCE,
+                3,
+                key,
+                f"job:{job_id}:generation_tokens",
+                f"job:{job_id}:finalizer",
+                idempotency_key,
+            )
+            return int(result[0])
+        pipe = self.r.pipeline(transaction=True)
+        pipe.hincrby(key, "lifecycle_generation", 1)
+        pipe.hdel(key, "terminal_generation", "terminal_outcome")
+        pipe.delete(f"job:{job_id}:finalizer")
+        result = await pipe.execute()
+        return int(result[0])
+
+    async def begin_job_generation(
+        self, job_id: str, idempotency_key: str | None,
+    ) -> tuple[int, bool]:
+        if not idempotency_key:
+            return await self.advance_job_generation(job_id), True
+        result = await self.r.eval(
+            _LUA_ADVANCE_GENERATION_ONCE,
+            3,
+            f"job:{job_id}",
+            f"job:{job_id}:generation_tokens",
+            f"job:{job_id}:finalizer",
+            idempotency_key,
+        )
+        return int(result[0]), bool(result[1])
+
+    async def complete_job_generation(
+        self, job_id: str, idempotency_key: str | None, generation: int,
+    ) -> None:
+        if idempotency_key:
+            await self.r.hset(
+                f"job:{job_id}:generation_tokens",
+                idempotency_key,
+                f"{generation}:done",
+            )
+
+    async def try_finalize_job(
+        self, job_id: str, generation: int, outcome: str,
+    ) -> int:
+        if outcome not in {"done", "failed"}:
+            raise ValueError("job terminal outcome 非法")
+        return int(await self.r.eval(
+            _LUA_FINALIZE_JOB,
+            1,
+            f"job:{job_id}",
+            str(generation),
+            outcome,
+        ))
+
+    async def acquire_job_finalizer(
+        self,
+        job_id: str,
+        generation: int,
+        outcome: str,
+        owner: str,
+        *,
+        now: float | None = None,
+        lease_sec: float = 15.0,
+    ) -> int:
+        current_time = time.time() if now is None else now
+        return int(await self.r.eval(
+            _LUA_ACQUIRE_JOB_FINALIZER,
+            2,
+            f"job:{job_id}",
+            f"job:{job_id}:finalizer",
+            str(generation),
+            outcome,
+            owner,
+            str(current_time),
+            str(current_time + lease_sec),
+        ))
+
+    async def complete_job_finalizer(
+        self, job_id: str, generation: int, outcome: str, owner: str,
+    ) -> bool:
+        return bool(await self.r.eval(
+            _LUA_COMPLETE_JOB_FINALIZER,
+            1,
+            f"job:{job_id}:finalizer",
+            str(generation),
+            outcome,
+            owner,
+        ))
 
     async def get_job_pipeline(self, job_id: str) -> str | None:
         return await self.r.hget(f"job:{job_id}", "pipeline")
@@ -1054,6 +1369,10 @@ class RedisClient:
 
     async def get_step_exec_id(self, job_id: str, step: str) -> str | None:
         return await self.r.hget(f"job:{job_id}:step_exec", step)
+
+    async def get_step_generation(self, job_id: str, step: str) -> int | None:
+        raw = await self.r.hget(f"job:{job_id}:step_generation", step)
+        return int(raw) if raw is not None else None
 
     @staticmethod
     def _task_lease_key(exec_id: str) -> str:
@@ -1220,7 +1539,7 @@ class RedisClient:
 
     async def delete_step_status(self, job_id: str, step: str) -> None:
         # 清该步在所有 per-step hash 的 field(对齐 cleanup_job 清单),避免 resubmit 残留惰性垃圾。
-        for sub in ("steps", "retries", "step_worker", "step_exec",
+        for sub in ("steps", "retries", "step_worker", "step_exec", "step_generation",
                     "step_resources", "step_progress"):
             await self.r.hdel(f"job:{job_id}:{sub}", step)
 
@@ -1233,6 +1552,10 @@ class RedisClient:
             f"job:{job_id}:step_exec",
             f"job:{job_id}:step_resources",
             f"job:{job_id}:step_progress",
+            f"job:{job_id}:step_generation",
+            f"job:{job_id}:generation_tokens",
+            f"job:{job_id}:terminal_events",
+            f"job:{job_id}:finalizer",
         ]
         await self.r.delete(*keys)
 
@@ -1501,6 +1824,139 @@ class RedisClient:
         return await self.r.smembers("active_jobs")
 
     # 事件 Pub/Sub
+
+    LIFECYCLE_STREAM = "flori:lifecycle"
+    LIFECYCLE_GROUP = "flori:scheduler"
+    LIFECYCLE_POISON_STREAM = "flori:lifecycle:poison"
+
+    async def append_lifecycle_event(self, topic: str, data: dict) -> str:
+        """权威生命周期事件先落 Stream,再发 Pub/Sub 唤醒/兼容通知。"""
+        message_id = await self.r.xadd(
+            self.LIFECYCLE_STREAM,
+            {
+                "topic": topic,
+                "payload": json.dumps(data, ensure_ascii=False, sort_keys=True),
+                "emitted_at": str(time.time()),
+                "schema": "1",
+            },
+        )
+        # Stream 是权威通道。通知发送失败不能让已持久的命令对 API
+        # 表现为失败，否则客户端重试会生成第二条不同 ID 的命令。
+        try:
+            await self.publish(topic, data)
+        except Exception:
+            pass
+        return str(message_id)
+
+    async def append_terminal_if_current(
+        self, topic: str, data: dict,
+    ) -> tuple[int, str | None]:
+        """仅当前 execution 可把 step terminal 追加到权威 Stream。"""
+        job_id = data.get("job_id")
+        step = data.get("step")
+        exec_id = data.get("exec_id")
+        generation = data.get("generation")
+        if (
+            not isinstance(job_id, str)
+            or not isinstance(step, str)
+            or not isinstance(exec_id, str)
+            or not exec_id
+            or type(generation) is not int
+        ):
+            return 0, None
+        outcome = "done" if topic == "step_completed" else "failed"
+        result = await self.r.eval(
+            _LUA_APPEND_TERMINAL,
+            6,
+            f"job:{job_id}:steps",
+            f"job:{job_id}:step_exec",
+            f"job:{job_id}:step_generation",
+            f"job:{job_id}",
+            f"job:{job_id}:terminal_events",
+            self.LIFECYCLE_STREAM,
+            job_id,
+            step,
+            exec_id,
+            str(generation),
+            outcome,
+            topic,
+            json.dumps(data, ensure_ascii=False, sort_keys=True),
+            str(time.time()),
+        )
+        return int(result[0]), str(result[1]) if result[1] else None
+
+    async def ensure_lifecycle_group(self) -> None:
+        try:
+            await self.r.xgroup_create(
+                self.LIFECYCLE_STREAM,
+                self.LIFECYCLE_GROUP,
+                id="0",
+                mkstream=True,
+            )
+        except ResponseError as exc:
+            if "BUSYGROUP" not in str(exc):
+                raise
+
+    async def read_lifecycle_events(
+        self,
+        consumer: str,
+        *,
+        block_ms: int = 1_000,
+        reclaim_idle_ms: int = 5_000,
+        count: int = 32,
+    ) -> list[tuple[str, dict]]:
+        """先收割未 ACK pending,再阻塞读取新消息。"""
+        await self.ensure_lifecycle_group()
+        claimed = await self.r.xautoclaim(
+            self.LIFECYCLE_STREAM,
+            self.LIFECYCLE_GROUP,
+            consumer,
+            min_idle_time=reclaim_idle_ms,
+            start_id="0-0",
+            count=count,
+        )
+        entries = list(claimed[1] or []) if claimed else []
+        if not entries:
+            batches = await self.r.xreadgroup(
+                self.LIFECYCLE_GROUP,
+                consumer,
+                {self.LIFECYCLE_STREAM: ">"},
+                count=count,
+                block=block_ms,
+            )
+            entries = list(batches[0][1]) if batches else []
+        return [(str(message_id), fields) for message_id, fields in entries]
+
+    async def ack_lifecycle_event(self, message_id: str) -> None:
+        pipe = self.r.pipeline(transaction=True)
+        pipe.xack(self.LIFECYCLE_STREAM, self.LIFECYCLE_GROUP, message_id)
+        pipe.xdel(self.LIFECYCLE_STREAM, message_id)
+        pipe.hdel("flori:lifecycle:failures", message_id)
+        await pipe.execute()
+
+    async def reject_lifecycle_event(
+        self, message_id: str, fields: dict, error: str, *, max_attempts: int = 3,
+    ) -> bool:
+        """返回 True 表示 poison 已隔离并 ACK;否则保留 PEL 等待 XAUTOCLAIM。"""
+        failures = int(await self.r.hincrby(
+            "flori:lifecycle:failures", message_id, 1,
+        ))
+        if failures < max_attempts:
+            return False
+        await self.r.xadd(
+            self.LIFECYCLE_POISON_STREAM,
+            {
+                "source_id": message_id,
+                "topic": str(fields.get("topic", "")),
+                "payload": str(fields.get("payload", ""))[:16_384],
+                "error": error[:2_000],
+                "attempts": str(failures),
+            },
+            maxlen=1_000,
+            approximate=True,
+        )
+        await self.ack_lifecycle_event(message_id)
+        return True
 
     async def publish(self, channel: str, data: dict) -> None:
         await self.r.publish(channel, json.dumps(data, ensure_ascii=False))

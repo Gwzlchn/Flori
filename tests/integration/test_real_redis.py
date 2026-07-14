@@ -71,6 +71,125 @@ async def test_lua_slot_limit_is_atomic_across_clients(real_redis_clients) -> No
     assert holders in ({"exec-a"}, {"exec-b"})
 
 
+async def test_pipeline_claim_and_terminal_fence_are_atomic_across_clients(
+    real_redis_clients,
+) -> None:
+    first, second = real_redis_clients
+    await first.init_job("integration-claim", "test", {})
+    await first.set_step_status("integration-claim", "A", "ready")
+    await first.enqueue_step("cpu", "integration-claim", "A", [], priority=0)
+
+    claims = await asyncio.gather(
+        first.claim_pipeline_step_atomic(
+            pool="cpu", worker_id="worker-a", exec_id="exec-a",
+            default_limit=1, tags=set(), reject_tags=set(),
+        ),
+        second.claim_pipeline_step_atomic(
+            pool="cpu", worker_id="worker-b", exec_id="exec-b",
+            default_limit=1, tags=set(), reject_tags=set(),
+        ),
+    )
+    winner = next(claim for claim in claims if claim is not None)
+    assert sum(claim is not None for claim in claims) == 1
+    assert await first.get_step_status("integration-claim", "A") == "running"
+    assert await first.get_step_exec_id("integration-claim", "A") == winner["exec_id"]
+    assert await first.r.zcard("queue:cpu") == 0
+    assert await first.get_pool_count("cpu") == 1
+
+    generation = winner["generation"]
+    terminals = await asyncio.gather(
+        first.try_finalize_job("integration-claim", generation, "done"),
+        second.try_finalize_job("integration-claim", generation, "failed"),
+    )
+    assert sorted(terminals) == [0, 1]
+
+
+async def test_lifecycle_stream_survives_offline_and_reclaims_unacked(
+    real_redis_clients,
+) -> None:
+    first, second = real_redis_clients
+    message_id = await first.append_lifecycle_event(
+        "job_command", {"action": "new_job", "job_id": "offline-job"},
+    )
+
+    first_delivery = await second.read_lifecycle_events(
+        "scheduler-old", block_ms=1, reclaim_idle_ms=0,
+    )
+    assert first_delivery[0][0] == message_id
+    reclaimed = await first.read_lifecycle_events(
+        "scheduler-new", block_ms=1, reclaim_idle_ms=0,
+    )
+    assert reclaimed[0][0] == message_id
+    assert json.loads(reclaimed[0][1]["payload"])["job_id"] == "offline-job"
+
+    await first.ack_lifecycle_event(message_id)
+    assert await first.r.xlen(first.LIFECYCLE_STREAM) == 0
+    assert (await first.r.xpending(first.LIFECYCLE_STREAM, first.LIFECYCLE_GROUP))["pending"] == 0
+
+
+async def test_lifecycle_poison_isolated_without_blocking_next_message(
+    integration_redis,
+) -> None:
+    await integration_redis.ensure_lifecycle_group()
+    poison_id = await integration_redis.r.xadd(
+        integration_redis.LIFECYCLE_STREAM,
+        {"topic": "job_command", "payload": "not-json"},
+    )
+    good_id = await integration_redis.append_lifecycle_event(
+        "job_command", {"action": "new_job", "job_id": "good-job"},
+    )
+    messages = await integration_redis.read_lifecycle_events(
+        "scheduler", block_ms=1, reclaim_idle_ms=0,
+    )
+    by_id = dict(messages)
+    assert poison_id in by_id and good_id in by_id
+    assert await integration_redis.reject_lifecycle_event(
+        poison_id, by_id[poison_id], "invalid json", max_attempts=1,
+    )
+    await integration_redis.ack_lifecycle_event(good_id)
+    assert await integration_redis.r.xlen(
+        integration_redis.LIFECYCLE_POISON_STREAM,
+    ) == 1
+    assert await integration_redis.r.xlen(integration_redis.LIFECYCLE_STREAM) == 0
+
+
+async def test_terminal_append_rejects_old_exec_duplicate_and_terminal_sibling(
+    integration_redis,
+) -> None:
+    await integration_redis.init_job("terminal-job", "test", {})
+    for step, exec_id in (("A", "exec-a"), ("B", "exec-b")):
+        await integration_redis.set_step_status("terminal-job", step, "running")
+        await integration_redis.set_step_exec_id("terminal-job", step, exec_id)
+        await integration_redis.r.hset(
+            "job:terminal-job:step_generation", step, "1",
+        )
+    stale, _ = await integration_redis.append_terminal_if_current(
+        "step_completed",
+        {"job_id": "terminal-job", "step": "A", "exec_id": "old", "generation": 1},
+    )
+    first, message_id = await integration_redis.append_terminal_if_current(
+        "step_completed",
+        {"job_id": "terminal-job", "step": "A", "exec_id": "exec-a", "generation": 1},
+    )
+    duplicate, duplicate_id = await integration_redis.append_terminal_if_current(
+        "step_completed",
+        {"job_id": "terminal-job", "step": "A", "exec_id": "exec-a", "generation": 1},
+    )
+    assert (stale, first, duplicate) == (0, 1, 2)
+    assert duplicate_id == message_id
+    assert await integration_redis.r.xlen(integration_redis.LIFECYCLE_STREAM) == 1
+
+    owner = "finalizer"
+    assert await integration_redis.acquire_job_finalizer(
+        "terminal-job", 1, "failed", owner, now=100, lease_sec=10,
+    ) == 1
+    sibling, _ = await integration_redis.append_terminal_if_current(
+        "step_completed",
+        {"job_id": "terminal-job", "step": "B", "exec_id": "exec-b", "generation": 1},
+    )
+    assert sibling == 0
+
+
 async def test_ai_enqueue_once_is_unique_and_rejects_payload_conflict(
     real_redis_clients,
 ) -> None:

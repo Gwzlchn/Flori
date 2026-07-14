@@ -395,9 +395,11 @@ async def _activate_lease(
     exec_id: str | None = None,
 ) -> str:
     exec_id = exec_id or f"{worker_id}:{job_id}:{step}:lease"
+    await redis.init_job(job_id, "test", {})
     await redis.set_step_status(job_id, step, "running")
     await redis.set_step_worker(job_id, step, worker_id)
     await redis.set_step_exec_id(job_id, step, exec_id)
+    await redis.r.hset(f"job:{job_id}:step_generation", step, "1")
     await redis.create_task_lease(worker_id, job_id, step, exec_id, "cpu")
     return exec_id
 
@@ -702,7 +704,7 @@ class TestJobsComplete:
         assert resp.status_code == 401
 
     @pytest.mark.asyncio
-    async def test_writes_db_and_increments(self, jobs_client, db, real_redis):
+    async def test_appends_durable_terminal_for_scheduler(self, jobs_client, db, real_redis):
         from shared.models import Job, Step, StepStatus
 
         worker_id, token = await _register_real(jobs_client)
@@ -717,8 +719,10 @@ class TestJobsComplete:
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
-        assert db.get_steps("j1")[0].status == StepStatus.DONE
-        assert db.get_worker(worker_id).tasks_completed == 1
+        assert resp.json() == {"ok": True, "duplicate": False}
+        assert db.get_steps("j1")[0].status == StepStatus.RUNNING
+        assert db.get_worker(worker_id).tasks_completed == 0
+        assert await real_redis.r.xlen(real_redis.LIFECYCLE_STREAM) == 1
 
 
 class TestJobsFail:
@@ -739,8 +743,9 @@ class TestJobsFail:
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
-        assert db.get_steps("j1")[0].status == StepStatus.FAILED
-        assert db.get_worker(worker_id).tasks_failed == 1
+        assert resp.json() == {"ok": True, "duplicate": False}
+        assert db.get_steps("j1")[0].status == StepStatus.RUNNING
+        assert db.get_worker(worker_id).tasks_failed == 0
 
     @pytest.mark.asyncio
     async def test_count_stats_false_no_increment(self, jobs_client, db, real_redis):
@@ -760,7 +765,7 @@ class TestJobsFail:
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
-        assert db.get_steps("j1")[0].status == StepStatus.FAILED
+        assert db.get_steps("j1")[0].status == StepStatus.RUNNING
         assert db.get_worker(worker_id).tasks_failed == 0
 
 
@@ -946,7 +951,32 @@ class TestTaskScopedLease:
         assert first.status_code == 200
         assert duplicate.status_code == 200 and duplicate.json()["duplicate"] is True
         assert conflict.status_code == 403
-        assert db.get_worker(worker_id).tasks_completed == 1
+        assert db.get_worker(worker_id).tasks_completed == 0
+
+    @pytest.mark.asyncio
+    async def test_job_terminal_winner_makes_gateway_sibling_explicitly_stale(
+        self, jobs_client, real_redis, db,
+    ):
+        from shared.models import Job, Step, StepStatus
+
+        worker_id, token = await _register_real(jobs_client)
+        db.create_job(Job(id="j1", content_type="video", pipeline="video", domain="general"))
+        db.upsert_step(Step(job_id="j1", name="A", status=StepStatus.RUNNING, pool="cpu"))
+        exec_id = await _activate_lease(real_redis, worker_id)
+        assert await real_redis.acquire_job_finalizer(
+            "j1", 1, "failed", "winner", now=100, lease_sec=100,
+        ) == 1
+
+        response = await jobs_client.post(
+            "/api/runner/jobs/j1/steps/A/complete",
+            json={"pool": "cpu", "exec_id": exec_id, "duration": 1.0, "started_at": 0.0},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"ok": False, "stale": True}
+        assert await real_redis.r.xlen(real_redis.LIFECYCLE_STREAM) == 0
+        assert db.get_steps("j1")[0].status == StepStatus.RUNNING
 
     @pytest.mark.asyncio
     async def test_pool_tamper_cannot_release_or_finish(self, jobs_client, real_redis):

@@ -200,7 +200,7 @@ async def create_job_core(
     if collection_id:
         await asyncio.to_thread(db.increment_collection_count, collection_id, 1)
     if not defer_submit:
-        await redis.publish("job_command", {
+        await redis.append_lifecycle_event("job_command", {
             "action": "new_job", "job_id": job_id, "pipeline": pipeline,
         })
     # defer_submit(book 章序):job 落库但不触发调度,由 scheduler 的 book 投递器在
@@ -283,7 +283,7 @@ async def create_job_snapshot(
     await asyncio.to_thread(db.create_job, job)        # create_job 自动 demote 同 lineage 旧版
     if parent.collection_id:
         await asyncio.to_thread(db.increment_collection_count, parent.collection_id, 1)
-    await redis.publish(
+    await redis.append_lifecycle_event(
         "job_command", {"action": "new_job", "job_id": new_id, "pipeline": parent.pipeline},
     )
     audit("job", new_id, "create", actor=actor,
@@ -687,7 +687,7 @@ async def _delete_job_full(
     await redis.cleanup_job(job_id)                         #    7 个 job:{id}* 编排 hash
     await redis.remove_active_job(job_id)                   #    SREM active_jobs
     await redis.release_holders(stale_holders)              #    归还 running 步的池槽/资源槽(幂等)
-    await redis.publish("job_command", {"action": "delete", "job_id": job_id})  # 2. 取消在途重试
+    await redis.append_lifecycle_event("job_command", {"action": "delete", "job_id": job_id})  # 2. 取消在途重试
     await storage.delete(job_id)                            # 3. 产物
     await asyncio.to_thread(db.delete_job_cascade, job_id, job.collection_id, item_id)  # 4. DB 最后
     # 删的是 current → 把同 lineage 剩余最新一版提为 current(否则该内容在列表消失)。
@@ -718,7 +718,7 @@ async def retry_all_failed(
         db.list_jobs, status="failed", collection_id=collection_id, limit=100000
     )
     for j in jobs:
-        await redis.publish("job_command", {"action": "retry", "job_id": j.id})
+        await redis.append_lifecycle_event("job_command", {"action": "retry", "job_id": j.id})
     return {"retried": len(jobs)}
 
 
@@ -734,7 +734,7 @@ async def retry_job(
         raise HTTPException(404, "job not found")
     if job.status != JobStatus.FAILED:
         raise HTTPException(400, "job is not failed")
-    await redis.publish("job_command", {"action": "retry", "job_id": job_id})
+    await redis.append_lifecycle_event("job_command", {"action": "retry", "job_id": job_id})
     return {"job_id": job_id, "status": "processing"}
 
 
@@ -749,7 +749,7 @@ async def rerun_job(
     job = await asyncio.to_thread(db.get_job, job_id)
     if not job:
         raise HTTPException(404, "job not found")
-    await redis.publish("job_command", {
+    await redis.append_lifecycle_event("job_command", {
         "action": "rerun", "job_id": job_id, "from_step": req.from_step,
     })
     return {"job_id": job_id, "status": "processing", "from_step": req.from_step}
@@ -915,7 +915,7 @@ async def rerun_smart(
     doc["ai_overrides"][review_step] = req.provider
     await storage.write_file(job_id, "job.json",
                              json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8"))
-    await redis.publish("job_command", {
+    await redis.append_lifecycle_event("job_command", {
         "action": "rerun", "job_id": job_id, "from_step": smart_step,
     })
     return {"job_id": job_id, "status": "processing", "provider": req.provider,
@@ -933,5 +933,5 @@ async def resubmit_job(
     job = await asyncio.to_thread(db.get_job, job_id)
     if not job:
         raise HTTPException(404, "job not found")
-    await redis.publish("job_command", {"action": "resubmit", "job_id": job_id})
+    await redis.append_lifecycle_event("job_command", {"action": "resubmit", "job_id": job_id})
     return {"job_id": job_id, "status": "processing"}

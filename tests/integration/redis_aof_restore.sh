@@ -302,6 +302,13 @@ docker run -d --name "$SOURCE_CONTAINER" \
   "$REDIS_IMAGE" redis-server --appendonly yes --save "" >/dev/null
 wait_for_redis "$SOURCE_CONTAINER"
 docker exec "$SOURCE_CONTAINER" redis-cli SET flori:integration:aof restore-safe >/dev/null
+docker exec "$SOURCE_CONTAINER" redis-cli XADD flori:lifecycle '*' \
+  topic job_command payload '{"action":"new_job","job_id":"aof-pending"}' \
+  emitted_at 1 schema 1 >/dev/null
+docker exec "$SOURCE_CONTAINER" redis-cli XGROUP CREATE \
+  flori:lifecycle flori:scheduler 0 >/dev/null
+docker exec "$SOURCE_CONTAINER" redis-cli XREADGROUP GROUP \
+  flori:scheduler scheduler-before-crash COUNT 1 STREAMS flori:lifecycle '>' >/dev/null
 
 docker run -d --name "$SOURCE_MINIO_CONTAINER" \
   --network "$NETWORK" \
@@ -369,6 +376,16 @@ value="$(docker exec "$TARGET_CONTAINER" redis-cli --raw GET flori:integration:a
   exit 1
 }
 docker exec "$TARGET_CONTAINER" redis-cli INFO persistence | tr -d '\r' | grep -Fqx 'aof_enabled:1'
+stream_len="$(docker exec "$TARGET_CONTAINER" redis-cli --raw XLEN flori:lifecycle)"
+[ "$stream_len" = "1" ] || {
+  echo "生命周期 Stream 未从 AOF 恢复" >&2
+  exit 1
+}
+pending="$(docker exec "$TARGET_CONTAINER" redis-cli --raw XPENDING flori:lifecycle flori:scheduler | head -n 1)"
+[ "$pending" = "1" ] || {
+  echo "生命周期 pending PEL 未从 AOF 恢复" >&2
+  exit 1
+}
 
 docker run -d --name "$TARGET_MINIO_CONTAINER" \
   --network "$NETWORK" \

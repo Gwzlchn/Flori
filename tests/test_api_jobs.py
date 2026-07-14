@@ -91,8 +91,8 @@ class TestCreateJob:
         assert "job_id" in data
         assert data["content_type"] == "video"
         assert data["status"] == "pending"
-        mock_redis.publish.assert_called_once()
-        args = mock_redis.publish.call_args
+        mock_redis.append_lifecycle_event.assert_called_once()
+        args = mock_redis.append_lifecycle_event.call_args
         assert args[0][0] == "job_command"  # channel name
         assert args[0][1]["action"] == "new_job"  # data content
 
@@ -198,7 +198,7 @@ class TestCreateJob:
     @pytest.mark.asyncio
     async def test_create_publishes_article_pipeline(self, client, mock_redis):
         await client.post("/api/jobs", json={"url": "https://example.com/p"})
-        args = mock_redis.publish.call_args
+        args = mock_redis.append_lifecycle_event.call_args
         assert args[0][1]["pipeline"] == "article"
 
 
@@ -420,7 +420,7 @@ class TestRetryRerunResubmit:
         assert resp.status_code == 200
         assert resp.json()["from_step"] == "11_smart"
         # 真实副作用:job 以 rerun 命令被重新派发(而非只回显入参)。最后一次 publish 是 rerun。
-        ch, payload = mock_redis.publish.call_args[0]
+        ch, payload = mock_redis.append_lifecycle_event.call_args[0]
         assert ch == "job_command"
         assert payload["action"] == "rerun" and payload["job_id"] == job_id
         assert payload["from_step"] == "11_smart"
@@ -432,7 +432,7 @@ class TestRetryRerunResubmit:
         resp = await client.post(f"/api/jobs/{job_id}/resubmit")
         assert resp.status_code == 200
         # 真实副作用:job 以 resubmit 命令被重新派发。
-        ch, payload = mock_redis.publish.call_args[0]
+        ch, payload = mock_redis.append_lifecycle_event.call_args[0]
         assert ch == "job_command" and payload == {"action": "resubmit", "job_id": job_id}
 
     @pytest.mark.asyncio
@@ -446,7 +446,7 @@ class TestRetryRerunResubmit:
         resp = await client.post("/api/jobs/retry-failed")
         assert resp.status_code == 200
         assert resp.json()["retried"] >= 2
-        retried = {c[0][1]["job_id"] for c in mock_redis.publish.call_args_list
+        retried = {c[0][1]["job_id"] for c in mock_redis.append_lifecycle_event.call_args_list
                    if c[0][0] == "job_command" and c[0][1].get("action") == "retry"}
         assert set(ids) <= retried
 
@@ -465,7 +465,7 @@ class TestRetryRerunResubmit:
         resp = await client.post("/api/jobs/retry-failed?collection_id=c_a")
         assert resp.status_code == 200
         assert resp.json()["retried"] == 1   # 仅 c_a 的 1 个失败
-        retried = {c[0][1]["job_id"] for c in mock_redis.publish.call_args_list
+        retried = {c[0][1]["job_id"] for c in mock_redis.append_lifecycle_event.call_args_list
                    if c[0][0] == "job_command" and c[0][1].get("action") == "retry"}
         assert retried == {"ja_fail"}        # 不含 c_b 的失败、不含 c_a 的 done
 

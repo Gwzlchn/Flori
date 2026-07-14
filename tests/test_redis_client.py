@@ -2,6 +2,7 @@
 import json
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 from redis.exceptions import ResponseError
@@ -95,6 +96,23 @@ class TestQueue:
         item, score2 = await rc.dequeue_step("ai")
         assert item["job_id"] == "j_x"
         assert score2 == -5
+
+
+class TestLifecycleStream:
+    @pytest.mark.asyncio
+    async def test_persisted_command_survives_notification_failure(self, rc, monkeypatch):
+        monkeypatch.setattr(
+            rc, "publish", AsyncMock(side_effect=RuntimeError("notification unavailable")),
+        )
+
+        message_id = await rc.append_lifecycle_event(
+            "job_command", {"action": "retry", "job_id": "j_persisted"},
+        )
+
+        assert message_id
+        entries = await rc.r.xrange(rc.LIFECYCLE_STREAM)
+        assert len(entries) == 1
+        assert json.loads(entries[0][1]["payload"])["job_id"] == "j_persisted"
 
 
 class TestListQueue:

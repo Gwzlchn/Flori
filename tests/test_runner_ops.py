@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from unittest.mock import AsyncMock, patch
 
@@ -114,7 +115,7 @@ class TestClaimStep:
         )
 
         assert claim == {"job_id": "j1", "step": "A", "pool": "cpu",
-                         "exec_id": claim["exec_id"]}
+                         "exec_id": claim["exec_id"], "generation": 1}
         assert claim["exec_id"].startswith(f"{WORKER_ID}:")
         assert await redis.get_step_status("j1", "A") == "running"
         assert await redis.get_pool_count("cpu") == 1
@@ -302,20 +303,69 @@ class TestClaimStep:
         assert await redis.is_pool_frozen("cpu") is False
 
     @pytest.mark.asyncio
-    async def test_pop_then_crash_returns_raw_to_queue(self, redis, db):
+    async def test_atomic_claim_has_no_python_cas_crash_window(self, redis, db):
         await _register_worker(redis, db)
         await redis.enqueue_step("cpu", "j1", "A", [], priority=0)
         await redis.set_step_status("j1", "A", "ready")
 
-        # dequeue 成功后 CAS 抛错时 raw 必须回队列,槽位释放,异常透传.
+        # 普通 claim 不再经过 Python CAS;旧崩溃注入点不能吞掉已出队任务。
         with patch.object(redis, "cas_step_status", side_effect=RuntimeError("boom")):
-            with pytest.raises(RuntimeError):
-                await runner_ops.claim_step(
-                    redis, db, WORKER_ID, ["cpu"], POOL_LIMITS, {"vision"}, set(),
-                )
+            claim = await runner_ops.claim_step(
+                redis, db, WORKER_ID, ["cpu"], POOL_LIMITS, {"vision"}, set(),
+            )
 
-        assert (await redis.get_queue_info("cpu"))["length"] == 1
-        assert await redis.get_pool_count("cpu") == 0
+        assert claim is not None
+        assert (await redis.get_queue_info("cpu"))["length"] == 0
+        assert await redis.get_pool_count("cpu") == 1
+        assert await redis.get_step_status("j1", "A") == "running"
+
+    @pytest.mark.asyncio
+    async def test_incompatible_prefix_longer_than_five_does_not_starve(self, redis, db):
+        await _register_worker(redis, db)
+        for index in range(7):
+            job_id = f"blocked-{index}"
+            await redis.enqueue_step(
+                "cpu", job_id, "A", [], priority=index, require_tags=["gpu"],
+            )
+            await redis.set_step_status(job_id, "A", "ready")
+        await redis.enqueue_step("cpu", "compatible", "A", [], priority=8)
+        await redis.set_step_status("compatible", "A", "ready")
+
+        claim = await runner_ops.claim_step(
+            redis, db, WORKER_ID, ["cpu"], POOL_LIMITS, {"vision"}, set(),
+        )
+
+        assert claim is not None and claim["job_id"] == "compatible"
+        assert (await redis.get_queue_info("cpu"))["length"] == 7
+
+    @pytest.mark.asyncio
+    async def test_job_terminal_fence_is_generation_bound(self, redis):
+        await redis.init_job("j1", "test", {})
+        generation = await redis.get_job_generation("j1")
+        winners = await asyncio.gather(
+            redis.try_finalize_job("j1", generation, "done"),
+            redis.try_finalize_job("j1", generation, "failed"),
+        )
+        assert sorted(winners) == [0, 1]
+        new_generation = await redis.advance_job_generation("j1")
+        assert await redis.try_finalize_job("j1", generation, "done") == 0
+        assert await redis.try_finalize_job("j1", new_generation, "failed") == 1
+
+    @pytest.mark.asyncio
+    async def test_job_finalizer_single_owner_and_expired_takeover(self, redis):
+        await redis.init_job("j1", "test", {})
+        owners = await asyncio.gather(
+            redis.acquire_job_finalizer("j1", 1, "done", "owner-a", now=100, lease_sec=10),
+            redis.acquire_job_finalizer("j1", 1, "done", "owner-b", now=100, lease_sec=10),
+        )
+        assert sorted(owners) == [0, 1]
+        assert await redis.acquire_job_finalizer(
+            "j1", 1, "done", "recovery", now=111, lease_sec=10,
+        ) == 1
+        assert await redis.complete_job_finalizer("j1", 1, "done", "recovery")
+        assert await redis.acquire_job_finalizer(
+            "j1", 1, "done", "late", now=200, lease_sec=10,
+        ) == 2
 
 
 # report_step_done
@@ -323,31 +373,33 @@ class TestClaimStep:
 
 class TestReportDone:
     @pytest.mark.asyncio
-    async def test_publishes_writes_and_increments(self, redis, db, monkeypatch):
+    async def test_appends_current_terminal_without_writing_db(self, redis, db):
         await _register_worker(redis, db)
         db.create_job(Job(id="j1", content_type="video", pipeline="test", domain="general"))
         db.upsert_step(Step(job_id="j1", name="A", status=StepStatus.RUNNING, pool="cpu"))
-        claim = {"job_id": "j1", "step": "A", "pool": "cpu", "exec_id": f"{WORKER_ID}:1"}
+        await redis.init_job("j1", "test", {})
+        await redis.set_step_status("j1", "A", "running")
+        await redis.set_step_exec_id("j1", "A", f"{WORKER_ID}:1")
+        await redis.r.hset("job:j1:step_generation", "A", "1")
+        claim = {
+            "job_id": "j1", "step": "A", "pool": "cpu",
+            "exec_id": f"{WORKER_ID}:1", "generation": 1,
+        }
 
-        events = []
+        accepted = await runner_ops.report_step_done(
+            redis, db, WORKER_ID, claim, 12.34, time.time() - 12.34,
+        )
+        duplicate = await runner_ops.report_step_done(
+            redis, db, WORKER_ID, claim, 12.34, time.time() - 12.34,
+        )
 
-        async def capture():
-            async for msg in redis.subscribe("step_completed"):
-                events.append(msg)
-                break
-
-        ready = subscription_barrier(redis, monkeypatch)
-        listener = asyncio.create_task(capture())
-        await asyncio.wait_for(ready.wait(), timeout=1.0)
-        await runner_ops.report_step_done(redis, db, WORKER_ID, claim, 12.34, time.time() - 12.34)
-        await asyncio.wait_for(listener, timeout=2.0)
-
-        assert events[0]["status"] == "done"
-        assert events[0]["duration"] == 12.3
-        assert events[0]["exec_id"] == f"{WORKER_ID}:1"
-        assert events[0]["worker"] == WORKER_ID
-        assert db.get_steps("j1")[0].status == StepStatus.DONE
-        assert db.get_worker(WORKER_ID).tasks_completed == 1
+        assert accepted is True and duplicate is False
+        entries = await redis.r.xrange(redis.LIFECYCLE_STREAM)
+        payload = json.loads(entries[0][1]["payload"])
+        assert payload["duration"] == 12.3
+        assert payload["exec_id"] == f"{WORKER_ID}:1"
+        assert db.get_steps("j1")[0].status == StepStatus.RUNNING
+        assert db.get_worker(WORKER_ID).tasks_completed == 0
 
 
 # report_step_failed
@@ -355,79 +407,54 @@ class TestReportDone:
 
 class TestReportFailed:
     @pytest.mark.asyncio
-    async def test_count_stats_true_includes_exec_id_and_increments(
-        self, redis, db, monkeypatch,
-    ):
+    async def test_count_stats_flag_is_durable_but_not_applied_by_runner(self, redis, db):
         await _register_worker(redis, db)
         db.create_job(Job(id="j1", content_type="video", pipeline="test", domain="general"))
         db.upsert_step(Step(job_id="j1", name="A", status=StepStatus.RUNNING, pool="cpu"))
-        claim = {"job_id": "j1", "step": "A", "pool": "cpu", "exec_id": f"{WORKER_ID}:9"}
+        await redis.init_job("j1", "test", {})
+        await redis.set_step_status("j1", "A", "running")
+        await redis.set_step_exec_id("j1", "A", f"{WORKER_ID}:9")
+        await redis.r.hset("job:j1:step_generation", "A", "1")
+        claim = {
+            "job_id": "j1", "step": "A", "pool": "cpu",
+            "exec_id": f"{WORKER_ID}:9", "generation": 1,
+        }
 
-        topic_events, ws_events = [], []
-
-        async def capture_topic():
-            async for msg in redis.subscribe("step_failed"):
-                topic_events.append(msg)
-                break
-
-        async def capture_ws():
-            async for msg in redis.subscribe("events:j1"):
-                if msg.get("event") == "step_failed":
-                    ws_events.append(msg)
-                    break
-
-        ready = subscription_barrier(redis, monkeypatch, expected=2)
-        l1 = asyncio.create_task(capture_topic())
-        l2 = asyncio.create_task(capture_ws())
-        await asyncio.wait_for(ready.wait(), timeout=1.0)
-        await runner_ops.report_step_failed(
+        accepted = await runner_ops.report_step_failed(
             redis, db, WORKER_ID, claim, "x" * 600, "segfault", 5.0,
             time.time() - 5.0, count_stats=True,
         )
-        await asyncio.wait_for(l1, timeout=2.0)
-        await asyncio.wait_for(l2, timeout=2.0)
 
-        assert topic_events[0]["exec_id"] == f"{WORKER_ID}:9"
-        assert len(ws_events[0]["error"]) == 200
-        assert db.get_steps("j1")[0].status == StepStatus.FAILED
-        assert db.get_worker(WORKER_ID).tasks_failed == 1
+        assert accepted is True
+        entries = await redis.r.xrange(redis.LIFECYCLE_STREAM)
+        payload = json.loads(entries[0][1]["payload"])
+        assert payload["count_stats"] is True
+        assert payload["exec_id"] == f"{WORKER_ID}:9"
+        assert db.get_steps("j1")[0].status == StepStatus.RUNNING
+        assert db.get_worker(WORKER_ID).tasks_failed == 0
 
     @pytest.mark.asyncio
-    async def test_count_stats_false_skips_increment_and_omits_exec_id(
-        self, redis, db, monkeypatch,
-    ):
+    async def test_old_exec_is_rejected_without_stream_or_db_write(self, redis, db):
         await _register_worker(redis, db)
         db.create_job(Job(id="j1", content_type="video", pipeline="test", domain="general"))
         db.upsert_step(Step(job_id="j1", name="A", status=StepStatus.RUNNING, pool="cpu"))
-        claim = {"job_id": "j1", "step": "A", "pool": "cpu", "exec_id": f"{WORKER_ID}:9"}
+        await redis.init_job("j1", "test", {})
+        await redis.set_step_status("j1", "A", "running")
+        await redis.set_step_exec_id("j1", "A", "new-exec")
+        await redis.r.hset("job:j1:step_generation", "A", "1")
+        claim = {
+            "job_id": "j1", "step": "A", "pool": "cpu",
+            "exec_id": "old-exec", "generation": 1,
+        }
 
-        topic_events, ws_events = [], []
-
-        async def capture_topic():
-            async for msg in redis.subscribe("step_failed"):
-                topic_events.append(msg)
-                break
-
-        async def capture_ws():
-            async for msg in redis.subscribe("events:j1"):
-                if msg.get("event") == "step_failed":
-                    ws_events.append(msg)
-                    break
-
-        ready = subscription_barrier(redis, monkeypatch, expected=2)
-        l1 = asyncio.create_task(capture_topic())
-        l2 = asyncio.create_task(capture_ws())
-        await asyncio.wait_for(ready.wait(), timeout=1.0)
-        await runner_ops.report_step_failed(
+        accepted = await runner_ops.report_step_failed(
             redis, db, WORKER_ID, claim, "timeout", "timeout", 3.0,
             time.time() - 3.0, count_stats=False,
         )
-        await asyncio.wait_for(l1, timeout=2.0)
-        await asyncio.wait_for(l2, timeout=2.0)
 
-        assert "exec_id" not in topic_events[0]
-        assert ws_events[0]["error"] == "timeout"
-        assert db.get_steps("j1")[0].status == StepStatus.FAILED
+        assert accepted is False
+        assert await redis.r.xlen(redis.LIFECYCLE_STREAM) == 0
+        assert db.get_steps("j1")[0].status == StepStatus.RUNNING
         assert db.get_worker(WORKER_ID).tasks_failed == 0
 
 

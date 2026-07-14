@@ -558,15 +558,21 @@ async def complete_step(
     )
     if not first:
         return {"ok": True, "duplicate": True}
-    claim = {"job_id": job_id, "step": step, "pool": req.pool, "exec_id": req.exec_id}
+    generation = await redis.get_step_generation(job_id, step)
+    claim = {
+        "job_id": job_id, "step": step, "pool": req.pool,
+        "exec_id": req.exec_id, "generation": generation,
+    }
     try:
-        await runner_ops.report_step_done(
+        accepted = await runner_ops.report_step_done(
             redis, db, worker_id, claim, req.duration, req.started_at,
         )
     except Exception:
         await redis.reset_task_terminal(worker_id, job_id, step, req.exec_id, "done")
         raise
-    return {"ok": True}
+    if not accepted:
+        return {"ok": False, "stale": True}
+    return {"ok": True, "duplicate": False}
 
 
 @router.post("/jobs/{job_id}/steps/{step}/fail")
@@ -585,16 +591,22 @@ async def fail_step(
     )
     if not first:
         return {"ok": True, "duplicate": True}
-    claim = {"job_id": job_id, "step": step, "pool": req.pool, "exec_id": req.exec_id}
+    generation = await redis.get_step_generation(job_id, step)
+    claim = {
+        "job_id": job_id, "step": step, "pool": req.pool,
+        "exec_id": req.exec_id, "generation": generation,
+    }
     try:
-        await runner_ops.report_step_failed(
+        accepted = await runner_ops.report_step_failed(
             redis, db, worker_id, claim, req.error, req.error_type,
             req.duration, req.started_at, req.count_stats,
         )
     except Exception:
         await redis.reset_task_terminal(worker_id, job_id, step, req.exec_id, "failed")
         raise
-    return {"ok": True}
+    if not accepted:
+        return {"ok": False, "stale": True}
+    return {"ok": True, "duplicate": False}
 
 
 @router.post("/jobs/{job_id}/steps/{step}/release")

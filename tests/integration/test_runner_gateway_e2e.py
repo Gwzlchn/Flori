@@ -12,6 +12,7 @@ from api.main import create_app
 from shared.models import Job, Step, StepStatus
 from shared.runner_ops import current_task_lease
 from shared.storage import GatewayStorage
+from scheduler.scheduler import Scheduler
 from worker.gateway_transport import GatewayTransport
 from worker.step_runner import SubprocessStepRunner
 from worker.worker import Worker
@@ -161,6 +162,17 @@ async def test_gateway_production_worker_execute_closes_task_lifecycle(
         assert await redis.get_resource_count(resource) == 1
 
         await worker.execute(claim)
+
+        # Worker 只把终态写入权威 Stream；Scheduler 是唯一 DB 终态写入者。
+        events = await redis.read_lifecycle_events(
+            f"gateway-e2e-{job_id}", block_ms=1, reclaim_idle_ms=0,
+        )
+        assert len(events) == 1
+        message_id, fields = events[0]
+        terminal = json.loads(fields["payload"])
+        terminal["_stream_id"] = message_id
+        await Scheduler(redis, db, test_config, storage=app.state.storage)._dispatch(terminal)
+        await redis.ack_lifecycle_event(message_id)
 
         expected_artifact = b"failed-artifact" if step_fails else b"completed-artifact"
         assert await app.state.storage.read_file(
