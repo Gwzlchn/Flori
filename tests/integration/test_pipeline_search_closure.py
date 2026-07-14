@@ -11,7 +11,9 @@ from api.main import create_app
 from api.mcp_server.server import build_server
 from scheduler.scheduler import Scheduler
 from shared.models import Job, JobStatus
+from shared.step_base import def_digest_for
 from shared.storage import LocalStorage
+from tests.integration.provenance_fixture import publish_provenance_fixture
 
 
 pytestmark = pytest.mark.integration
@@ -44,22 +46,33 @@ async def _seed_artifacts(storage, job_id: str, pipeline: str, keyword: str) -> 
             ],
         }, ensure_ascii=False).encode(),
     )
+    notes: dict[str, tuple[str, bytes]] = {}
     if pipeline == "article":
+        note_path = "output/original.md"
+        note_data = f"# 原文\n{keyword}贯穿轻链路并保留完整证据。".encode()
         await storage.write_file(
-            job_id, "output/original.md",
-            f"# 原文\n{keyword}贯穿轻链路并保留完整证据。".encode(),
+            job_id, note_path, note_data,
         )
+        notes["original"] = (note_path, note_data)
     else:
+        note_path = "output/versions/notes_smart_anthropic_opus_20260714-012500.md"
+        note_data = f"# 智能笔记\n{keyword}由真实完成事件写入索引。".encode()
         await storage.write_file(
             job_id,
-            "output/versions/notes_smart_anthropic_opus_20260714-012500.md",
-            f"# 智能笔记\n{keyword}由真实完成事件写入索引。".encode(),
+            note_path,
+            note_data,
         )
+        notes["smart"] = (note_path, note_data)
     if pipeline == "video":
+        mechanical_path = "output/notes_mechanical.md"
+        mechanical_data = f"# 机械笔记\n{keyword}的机械稿证据。".encode()
         await storage.write_file(
-            job_id, "output/notes_mechanical.md",
-            f"# 机械笔记\n{keyword}的机械稿证据。".encode(),
+            job_id, mechanical_path, mechanical_data,
         )
+        notes["mechanical"] = (mechanical_path, mechanical_data)
+    await publish_provenance_fixture(
+        storage, job_id=job_id, pipeline=pipeline, notes=notes,
+    )
 
 
 async def _complete_real_pipeline(scheduler, redis, db, config, job_id: str) -> None:
@@ -189,8 +202,21 @@ async def test_missing_index_artifact_keeps_job_active_for_reconcile(
         await storage.write_file(
             job.id,
             "output/versions/notes_smart_anthropic_opus_20260714-012600.md",
-            "# 恢复\n补齐产物后周期对账可以完成索引。".encode(),
+            note_data := "# 恢复\n补齐产物后周期对账可以完成索引。".encode(),
         )
+        await publish_provenance_fixture(
+            storage,
+            job_id=job.id,
+            pipeline=job.pipeline,
+            notes={
+                "smart": (
+                    "output/versions/notes_smart_anthropic_opus_20260714-012600.md",
+                    note_data,
+                ),
+            },
+        )
+        # 周期任务下一拍发生在 finalizer 租约之后;压缩测试墙钟但保留真实重取租约路径。
+        await redis.r.hset(f"job:{job.id}:finalizer", "lease_until", "0")
         await scheduler.reconcile_completion_effects()
         assert db.get_job(job.id).status == JobStatus.DONE
         assert db.search_notes("周期对账")[0] == 1
@@ -213,6 +239,20 @@ async def test_reconcile_backfills_legacy_done_job_without_redis_state(
         job.id,
         "output/versions/notes_smart_anthropic_opus_20260714-012700.md",
         "# 历史补账\n历史完成任务无需 Redis 状态也能补齐检索。".encode(),
+    )
+    producer = next(
+        step for step in test_config.pipelines["audio"]["steps"]
+        if step["name"] == "04_smart_podcast"
+    )
+    await storage.write_file(
+        job.id,
+        ".04_smart_podcast.done",
+        json.dumps({
+            "step": "04_smart_podcast",
+            "input_hashes": {},
+            "def_digest": def_digest_for("1", producer.get("ai")),
+            "finished_at": "2026-07-01T00:00:00+00:00",
+        }, sort_keys=True).encode(),
     )
     scheduler = Scheduler(redis, db, test_config, storage=storage)
     try:
@@ -250,7 +290,21 @@ async def test_article_reconcile_supersedes_original_with_smart_without_duplicat
         await storage.write_file(
             job.id,
             "output/versions/notes_smart_anthropic_opus_20260714-012800.md",
-            "# 升级笔记\n智能升级证据替代原文回退。".encode(),
+            smart_data := "# 升级笔记\n智能升级证据替代原文回退。".encode(),
+        )
+        original_data = await storage.read_file(job.id, "output/original.md")
+        assert original_data is not None
+        await publish_provenance_fixture(
+            storage,
+            job_id=job.id,
+            pipeline=job.pipeline,
+            notes={
+                "original": ("output/original.md", original_data),
+                "smart": (
+                    "output/versions/notes_smart_anthropic_opus_20260714-012800.md",
+                    smart_data,
+                ),
+            },
         )
         assert await scheduler._reconcile_completed_effects(job.id) is True
 
@@ -258,5 +312,41 @@ async def test_article_reconcile_supersedes_original_with_smart_without_duplicat
         total, rows = db.search_notes("智能升级证据")
         assert total == 1 and rows[0]["note_type"] == "smart"
         assert _index_counts(db, job.id)[0] == 1
+    finally:
+        await redis.r.flushdb()
+
+
+@pytest.mark.asyncio
+async def test_current_note_without_provenance_stays_pending(
+    db, test_config, integration_redis,
+):
+    redis = integration_redis
+    storage = LocalStorage(test_config.jobs_dir)
+    job = Job(
+        id="j_current_without_provenance",
+        content_type="audio",
+        pipeline="audio",
+        domain="closure",
+    )
+    db.create_job(job)
+    await storage.write_file(
+        job.id,
+        "output/versions/notes_smart_fixture_20260714-012900.md",
+        "# 当前产物\n只有笔记不能越过当前溯源门。".encode(),
+    )
+    await storage.write_file(job.id, "output/concepts.json", b'{"key_terms": []}')
+    scheduler = Scheduler(redis, db, test_config, storage=storage)
+
+    async def _workers_present(_pool):
+        return True
+
+    scheduler._pool_has_workers = _workers_present
+    try:
+        await scheduler.submit_job(job)
+        await _complete_real_pipeline(scheduler, redis, db, test_config, job.id)
+
+        assert db.get_job(job.id).status == JobStatus.PENDING
+        assert job.id in await redis.get_active_jobs()
+        assert db.search_notes("只有笔记")[0] == 0
     finally:
         await redis.r.flushdb()

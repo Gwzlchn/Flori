@@ -12,6 +12,7 @@ import unicodedata
 from copy import deepcopy
 from collections import Counter, defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable
 
 from httpx import ASGITransport, AsyncClient
@@ -24,6 +25,7 @@ from shared.config import load_config
 from shared.db import Database
 from shared.models import Job, JobStatus
 from shared.storage import LocalStorage
+from tests.integration.provenance_fixture import publish_provenance_fixture
 
 
 FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "retrieval_quality"
@@ -285,11 +287,25 @@ async def ingest_fixture(
             job.id, "output/concepts.json", canonical_bytes(concepts) + b"\n",
         )
         await storage.write_file(job.id, snapshot["note"]["path"], note_bytes(snapshot))
+        provenance_notes = {
+            snapshot["note"]["note_type"]: (
+                snapshot["note"]["path"], note_bytes(snapshot),
+            ),
+        }
         if source["content_type"] == "video":
             # video 在 smart 前有独立 mechanical completion effect；真实形态必须同时存在。
             await storage.write_file(
                 job.id, "output/notes_mechanical.md", note_bytes(snapshot),
             )
+            provenance_notes["mechanical"] = (
+                "output/notes_mechanical.md", note_bytes(snapshot),
+            )
+        await publish_provenance_fixture(
+            storage,
+            job_id=job.id,
+            pipeline=job.pipeline,
+            notes=provenance_notes,
+        )
         await scheduler.submit_job(job)
         await _complete_pipeline(scheduler, redis, db, config, job.id)
         assert db.get_job(job.id).status == JobStatus.DONE
@@ -413,7 +429,11 @@ async def measure_surface_latencies(
 async def evaluate_rankings(fixture: dict, db: Database, storage: LocalStorage) -> dict:
     mcp = build_server(db, storage)
     api_client = AsyncClient(
-        transport=ASGITransport(app=create_app(db=db)), base_url="http://test",
+        transport=ASGITransport(app=create_app(
+            db=db,
+            config=SimpleNamespace(jobs_dir=storage.jobs_dir),
+        )),
+        base_url="http://test",
     )
     performance = await measure_surface_latencies(fixture, db, mcp, api_client)
     records: list[dict] = []
