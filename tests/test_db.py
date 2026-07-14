@@ -726,7 +726,9 @@ class TestGlossary:
         # (d) definition_locked=1(即便原定义为空) -> 第二次不补填。
         db.add_glossary_suggestion("ml", "钉住词", "j1")  # 无定义
         db._conn.execute(
-            "UPDATE glossary SET definition_locked=1 WHERE domain=? AND term=?",
+            "UPDATE glossary SET definition_locked=1, "
+            "lock_revision=lock_revision+1 "
+            "WHERE domain=? AND term=?",
             ("ml", "钉住词"),
         )
         db._conn.commit()

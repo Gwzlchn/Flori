@@ -49,10 +49,7 @@ def _rows(db) -> list[dict]:
             "aliases": json.loads(r["aliases"] or "[]"),
             "status": r["status"], "created_at": r["created_at"] or "",
         }
-        for r in db._conn.execute(
-            "SELECT domain, term, zh_name, definition, aliases, status, created_at "
-            "FROM glossary ORDER BY domain, term"
-        ).fetchall()
+        for r in db._maintenance_glossary_rows()
     ]
 
 

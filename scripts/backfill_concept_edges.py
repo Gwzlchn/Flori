@@ -39,10 +39,9 @@ def cmd_export(args) -> None:
     from shared.db import Database
     db = Database(Path(args.db))
     todo = []
-    for r in db._conn.execute(
-        "SELECT domain, term, zh_name, definition, occurrences, status FROM glossary "
-        "WHERE status != 'rejected'"
-    ).fetchall():
+    for r in db._maintenance_glossary_rows():
+        if r["status"] == "rejected":
+            continue
         occ_n = len(json.loads(r["occurrences"] or "[]"))
         if occ_n >= 2 or r["status"] == "accepted":
             todo.append({"domain": r["domain"], "term": r["term"],

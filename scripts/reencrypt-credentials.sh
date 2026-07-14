@@ -37,8 +37,7 @@ if _fernet() is None:
     print("请先在 api 容器注入有效的 Fernet key(改 .env + 重建容器)再跑。")
     raise SystemExit(1)
 
-rows = db._conn.execute("SELECT key FROM app_credentials ORDER BY key").fetchall()
-keys = [r["key"] for r in rows]
+keys = db._maintenance_credential_keys()
 print(f"app_credentials 共 {len(keys)} 条:")
 for k in keys:
     print(f"  - {k}")

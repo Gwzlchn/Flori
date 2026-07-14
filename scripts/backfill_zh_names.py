@@ -34,10 +34,11 @@ MODEL = "claude-opus-4-8[1m]"
 def cmd_export(args) -> None:
     from shared.db import Database
     db = Database(Path(args.db))
-    rows = db._conn.execute(
-        "SELECT domain, term, definition FROM glossary "
-        "WHERE zh_name IS NULL OR zh_name=''"
-    ).fetchall()
+    rows = [
+        row
+        for row in db._maintenance_glossary_rows()
+        if not (row["zh_name"] or "").strip()
+    ]
     todo = [{"domain": r["domain"], "term": r["term"], "definition": (r["definition"] or "")[:120]}
             for r in rows]
     out = Path(args.out)
@@ -103,9 +104,7 @@ def cmd_apply(args) -> None:
     mapping = json.loads(Path(args.map).read_text(encoding="utf-8"))
     updated = skipped = 0
     for term, info in mapping.items():
-        row = db._conn.execute(
-            "SELECT zh_name FROM glossary WHERE domain=? AND term=?",
-            (info["domain"], term)).fetchone()
+        row = db._maintenance_glossary_zh_name(info["domain"], term)
         if row is None or (row["zh_name"] or "").strip():
             skipped += 1          # 不存在 / 已有译名(人工或概念步先到)→ 不覆盖,幂等
             continue
