@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import os
+import stat
 import subprocess
 import tomllib
 from collections.abc import Iterable
@@ -11,6 +12,17 @@ from pathlib import Path
 
 
 REPO = Path(__file__).parents[1]
+
+
+def test_repository_shell_entrypoints_are_executable() -> None:
+    """新 checkout 必须保留脚本执行位;CI 用 bash 启动测试以输出精确失败."""
+    non_executable = [
+        path.relative_to(REPO).as_posix()
+        for path in sorted((REPO / "scripts").glob("*.sh"))
+        if not path.stat().st_mode & stat.S_IXUSR
+    ]
+
+    assert non_executable == []
 
 
 def _numeric_value(node: ast.AST) -> float | None:

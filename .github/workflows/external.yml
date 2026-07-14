@@ -80,7 +80,7 @@ jobs:
       - name: Run selected external validation
         env:
           INTEGRATION_ARTIFACT_DIR: ${{ runner.temp }}/flori-external-artifacts
-        run: scripts/test.sh --external "${{ inputs.scenario }}"
+        run: bash scripts/test.sh --external "${{ inputs.scenario }}"
       - name: Upload external JUnit
         if: always()
         uses: actions/upload-artifact@v7.0.1

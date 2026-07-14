@@ -97,7 +97,7 @@ def test_unit_shards_and_real_integration_use_the_single_test_entrypoint() -> No
         if step.get("name") == "Real dependency integration gate"
     )["run"]
 
-    assert "scripts/test.sh --ci-normal" in normal
+    assert "bash scripts/test.sh --ci-normal" in normal
     normal_splits = int(normal_job["env"]["CI_NORMAL_SPLITS"])
     assert normal_job["strategy"]["matrix"]["group"] == list(
         range(1, normal_splits + 1),
@@ -105,10 +105,10 @@ def test_unit_shards_and_real_integration_use_the_single_test_entrypoint() -> No
     assert normal_job["env"]["CI_XDIST_WORKERS"] == "4"
     assert worker_job["env"]["CI_XDIST_WORKERS"] == "4"
     assert '"$CI_NORMAL_SPLITS"' in normal
-    assert "scripts/test.sh --ci-worker" in worker
+    assert "bash scripts/test.sh --ci-worker" in worker
     assert "docker compose" not in normal + worker
     assert integration["timeout-minutes"] <= 3
-    assert integration_run == "scripts/test.sh --integration"
+    assert integration_run == "bash scripts/test.sh --integration"
     assert integration["env"]["TEST_WARM_NAME"].startswith("flori-ci-")
 
 
@@ -216,6 +216,6 @@ def test_external_workflow_requires_explicit_urls_and_single_entrypoint() -> Non
         if step.get("name") == "Run selected external validation"
     )["run"]
 
-    assert run.startswith("scripts/test.sh --external")
+    assert run.startswith("bash scripts/test.sh --external")
     for kind in ("ARTICLE", "AUDIO", "RSS", "YOUTUBE"):
         assert f"FLORI_EXTERNAL_{kind}_URL" in job["env"]

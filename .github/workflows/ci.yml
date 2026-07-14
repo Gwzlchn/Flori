@@ -66,12 +66,12 @@ jobs:
           cache-to: ${{ github.ref == 'refs/heads/main' && matrix.group == 1 && format('type=registry,ref=ghcr.io/{0}/flori-test:buildcache,mode=max', env.OWNER_LC) || (github.ref != 'refs/heads/main' && matrix.group == 1 && 'type=gha,scope=flori-test,mode=max' || '') }}
       - name: Selected OpenAPI/TypeScript drift gate
         if: matrix.group == 1
-        run: scripts/test.sh --wire
+        run: bash scripts/test.sh --wire
       # 非 step 测试(--ignore tests/steps + 根 tests/test_step_*.py + test_worker.py 归 unit-worker),再 pytest-split 拆 6 shard.
       - name: Unit tests(普通 shard ${{ matrix.group }}/${{ env.CI_NORMAL_SPLITS }},非 step)+ 部分覆盖率
         run: |
           CI_COVERAGE_DIR="$GITHUB_WORKSPACE/covdata" \
-            scripts/test.sh --ci-normal ${{ matrix.group }} "$CI_NORMAL_SPLITS"
+            bash scripts/test.sh --ci-normal ${{ matrix.group }} "$CI_NORMAL_SPLITS"
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: cov-normal-${{ matrix.group }}
@@ -131,7 +131,7 @@ jobs:
       - name: Unit tests(step/worker shard ${{ matrix.group }}/2)+ 部分覆盖率
         run: |
           CI_COVERAGE_DIR="$GITHUB_WORKSPACE/covdata" \
-            scripts/test.sh --ci-worker ${{ matrix.group }}
+            bash scripts/test.sh --ci-worker ${{ matrix.group }}
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: cov-worker-${{ matrix.group }}
@@ -188,7 +188,7 @@ jobs:
           INTEGRATION_ARTIFACT_DIR: ${{ runner.temp }}/flori-integration-artifacts
           RETRIEVAL_QUALITY_MAIN_SHA: ${{ github.sha }}
           CI_COVERAGE: "1"
-        run: scripts/test.sh --integration
+        run: bash scripts/test.sh --integration
       - name: Upload retrieval quality decision
         if: always()
         uses: actions/upload-artifact@v7.0.1
