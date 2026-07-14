@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from shared.step_review import ReviewExecution
 from steps.video.step_11_smart import SmartStep
 from tests.steps.conftest import make_step_config
 
@@ -59,7 +60,7 @@ class TestSmartStep:
         def fake_call_ai(prompt, images=None, **kw):
             calls.append({"has_images": bool(images), "prompt": prompt})
             return "0 | 红框圈住分时跳水" if images else note
-        step.call_ai = fake_call_ai
+        step.ai.call = fake_call_ai
 
         result = step.execute()
         assert len(calls) == 2
@@ -76,7 +77,7 @@ class TestSmartStep:
 
     def test_backfill_image_refs(self):
         # ![](img:N) 占位符:命中 N 回填成 assets/<filename>;未命中(AI 编的/越界)整条删掉。
-        out = SmartStep._backfill_image_refs(
+        out = ReviewExecution.backfill_image_refs(
             "![甲](img:0) 文字 ![乙](img:9) 尾 ![丙](img:1)",
             {0: "frame-0000.jpg", 1: "frame-0001.jpg"},
         )
@@ -95,7 +96,7 @@ class TestSmartStep:
 
         def fake_call_ai(prompt, images=None, **kw):
             calls.append(bool(images)); return note
-        step.call_ai = fake_call_ai
+        step.ai.call = fake_call_ai
         result = step.execute()
         assert calls == [False]                                # 仅一次、不带图
         assert result["images_sent"] == 0
@@ -209,7 +210,7 @@ class TestP1PromptAssets:
         config["paths"]["prompts_dir"] = str(_REAL_PROMPTS)
         step = SmartStep("11_smart", job_dir, config)
 
-        profile = step.load_domain_prompt_profile()
+        profile = step.ai.load_domain_prompt_profile()
         assert profile and profile.get("domain_context")          # 文件存在且解析
         prompt = step._build_user_prompt("正文")
         assert profile["domain_context"] in prompt
@@ -257,9 +258,9 @@ class TestP1PromptAssets:
         config["paths"]["prompts_dir"] = str(prompts)
         step = SmartStep("11_smart", job_dir, config)
 
-        assert "profile" not in step.prompt_profile_style_hashes()  # finance.yaml 尚不存在
+        assert "profile" not in step.ai.prompt_profile_style_hashes()  # finance.yaml 尚不存在
         step.mark_done()
         assert step.should_run() is False
         shutil.copy(_REAL_PROMPTS / "profiles" / "finance.yaml", prompts / "profiles" / "finance.yaml")
-        assert "profile" in step.prompt_profile_style_hashes()      # 文件出现
+        assert "profile" in step.ai.prompt_profile_style_hashes()      # 文件出现
         assert step.should_run() is True                            # 指纹变 → 重生成

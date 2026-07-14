@@ -35,7 +35,7 @@ class TestPdfParseStep:
         step = PdfParseStep("02_pdf_parse", job_dir, config)
         from types import SimpleNamespace
         # "MapReduce" 单 token 属可疑标题 → 会尝试 pdftotext 提取;返回空=启发式 None,保留 metadata 原值。
-        monkeypatch.setattr(step, "run_subprocess",
+        monkeypatch.setattr(step.commands, "run",
                             lambda cmd, timeout=None: SimpleNamespace(
                                 stdout="Title: x\nPages:          9\n" if cmd[0] == "pdfinfo" else ""))
         result = step.execute()
@@ -60,7 +60,7 @@ class TestPdfParseStep:
         config = make_step_config(tmp_path, step_name="02_pdf_parse", pool="cpu")
         step = PdfParseStep("02_pdf_parse", job_dir, config)
         from types import SimpleNamespace
-        monkeypatch.setattr(step, "run_subprocess",
+        monkeypatch.setattr(step.commands, "run",
                             lambda cmd, timeout=None: SimpleNamespace(stdout="garbage"))
         with pytest.raises(InputInvalidError):
             step.execute()
@@ -137,7 +137,7 @@ def test_pdf_only_suspicious_title_extracted_from_first_page(tmp_path, monkeypat
         assert cmd[0] == "pdftotext"
         return SimpleNamespace(stdout="PLOS Computational Biology 2013\n"
                                       "Ten Simple Rules for Reproducible Computational Research\nAuthors\n")
-    monkeypatch.setattr(step, "run_subprocess", fake_subprocess)
+    monkeypatch.setattr(step.commands, "run", fake_subprocess)
     step.execute()
     parsed = json.loads((job_dir / "intermediate" / "parsed.json").read_text())
     assert parsed["title"] == "Ten Simple Rules for Reproducible Computational Research"
@@ -153,7 +153,7 @@ def test_pdf_only_good_title_untouched(tmp_path, monkeypatch):
     def fake_subprocess(cmd, timeout=0):
         assert cmd[0] == "pdfinfo", "好标题不应触发 pdftotext"
         return SimpleNamespace(stdout="Pages:          8\n")
-    monkeypatch.setattr(step, "run_subprocess", fake_subprocess)
+    monkeypatch.setattr(step.commands, "run", fake_subprocess)
     step.execute()
     parsed = json.loads((job_dir / "intermediate" / "parsed.json").read_text())
     assert parsed["title"] == good

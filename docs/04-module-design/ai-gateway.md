@@ -415,21 +415,19 @@ class AnthropicBatchProvider(AnthropicProvider):
 
 当队列中积累多个同类型请求时，Gateway 自动批量提交。
 
-## 10. StepBase 集成
+## 10. AIInvocation 集成
 
-步骤统一经 `StepBase.call_ai` 走 Gateway：
+步骤经 StepBase 注入的 `AIInvocation` 走 Gateway：
 
 ```python
-def call_ai(self, prompt: str, images: list[Path] | None = None, **kwargs) -> str:
-    request = LLMRequest(
-        messages=[{"role": "user", "content": prompt}],
-        images=images or [],
-        system=self._load_system_prompt(),
-        **kwargs,
-    )
-    response = asyncio.run(self._gateway.call(self.step_name, request))
-    # 另记 usage 文件(logs/.{step}.usage.json)+ ai_logs 白盒审计
-    return response.content
+class SmartStep(StepBase):
+    def execute(self):
+        content = self.ai.call(prompt, images=images, max_tokens=8192)
+        self.artifacts.write("output/notes_smart.md", content)
+        return {
+            "provider": self.ai.last_provider,
+            "model": self.ai.last_model,
+        }
 ```
 
-步骤代码不关心底层用的是 Claude 还是 DeepSeek——Gateway 根据 pipelines.yaml 的 `ai` 配置自动路由。
+`AIInvocation` 负责 PromptResolver、provider capability、Gateway、usage、pending/final AI log 和 transcript。步骤代码不关心底层用的是 Claude 还是 DeepSeek,Gateway 根据 pipelines.yaml 的 `ai` 配置自动路由。

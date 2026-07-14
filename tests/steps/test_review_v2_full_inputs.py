@@ -46,15 +46,15 @@ def _base_job(tmp_path, smart_tail):
 
 
 def _run(step, keys, tail, *, locator_source=None):
-    step.last_ai_response = LLMResponse(
+    step.ai.last_response = LLMResponse(
         content="", model="gpt-4o", provider="openai", finish_reason="stop",
         tier_used="primary", attempts=[{
             "tier": "primary", "provider": "openai", "model": "gpt-4o", "ok": True,
         }],
     )
-    step.last_ai_provider = "openai"
-    step.last_ai_model = "gpt-4o"
-    step.call_ai = lambda *_a, **_k: _valid(
+    step.ai.last_provider = "openai"
+    step.ai.last_model = "gpt-4o"
+    step.ai.call = lambda *_a, **_k: _valid(
         keys, source=locator_source, quote=tail if locator_source else None,
     )
     result = step.execute()

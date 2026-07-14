@@ -80,7 +80,7 @@ class TestEvidenceStep:
         cfg = make_step_config(tmp_path, step_name="10_evidence", pool="ai")
         step = EvidenceStep("10_evidence", job, cfg)
         called = []
-        step.call_ai = lambda *a, **k: called.append(1) or "{}"
+        step.ai.call = lambda *a, **k: called.append(1) or "{}"
         assert step.execute() == {"skipped": "non-case"}
         assert not called
         assert not (job / "output" / "evidence.json").exists()
@@ -97,7 +97,7 @@ class TestEvidenceStep:
             cap["allowed_tools"] = kw.get("allowed_tools")
             cap["prompt"] = prompt
             return _VALID_EV
-        step.call_ai = fake
+        step.ai.call = fake
         monkeypatch.setattr(
             "steps.video.step_evidence.materialize_evidence",
             lambda job_dir, job_id, candidates, **kwargs: {
@@ -121,7 +121,7 @@ class TestEvidenceStep:
         cfg = make_step_config(tmp_path, step_name="10_evidence", pool="ai")
         cfg["style_tags"] = ["case-study"]
         step = EvidenceStep("10_evidence", job, cfg)
-        step.call_ai = lambda *a, **k: '{"candidates":[]}'
+        step.ai.call = lambda *a, **k: '{"candidates":[]}'
         assert step.execute()["evidence_count"] == 0
         assert (job / "output" / "evidence.json").exists()
 
@@ -131,7 +131,7 @@ class TestEvidenceStep:
         cfg["domain"] = {"name": "finance"}
         step = EvidenceStep("10_evidence", job, cfg)
         monkeypatch.setattr("steps.video.step_evidence.MAX_MECHANICAL_EVIDENCE_BYTES", 5)
-        step.call_ai = lambda *_args, **_kwargs: pytest.fail("AI must not run")
+        step.ai.call = lambda *_args, **_kwargs: pytest.fail("AI must not run")
 
         with pytest.raises(ValueError, match="too large"):
             step.execute()
@@ -141,7 +141,7 @@ class TestEvidenceStep:
         cfg = make_step_config(tmp_path, step_name="10_evidence", pool="ai")
         cfg["domain"] = {"name": "finance"}
         step = EvidenceStep("10_evidence", job, cfg)
-        step.call_ai = lambda *a, **k: "这不是 JSON，只是一段闲聊"
+        step.ai.call = lambda *a, **k: "这不是 JSON，只是一段闲聊"
         out = step.execute()
         assert out["parse_failed"] is True
         data = json.loads((job / "output" / "evidence.json").read_text(encoding="utf-8"))

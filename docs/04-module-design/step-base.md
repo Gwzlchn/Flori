@@ -1,88 +1,53 @@
 # StepBase 统一基类
 
-> 所有 steps/*.py 继承此基类。统一入口、输入校验、幂等检查、进度上报、错误处理。
+> 所有 `steps/*.py` 继承此基类。StepBase 只编排输入校验、幂等检查、执行和最终发布,执行能力由显式组件提供。
 
 ## 1. 基类接口
 
+`StepExecutionServices` 是不可变聚合,由构造函数中的 factory 创建。测试或扩展步可以注入自己的 factory,运行时没有模块级可变全局。
+
+| 属性 | 组件 | 责任 |
+|------|------|------|
+| `artifacts` | `ArtifactIO` | JSON/文本/二进制产物及 done/meta/error 文件 |
+| `progress` | `StepProgressReporter` | 步骤进度文件和结构化日志门 |
+| `commands` | `SubprocessExecutor` | 外部命令、timeout、stdout/stderr 和失败类型 |
+| `structured` | `StructuredOutputParser` | JSON 抽取、fallback 和分数 salvage |
+| `ai` | `AIInvocation` | PromptResolver、provider 路由、usage、AI logs 和 transcript |
+| `review` | `ReviewExecution` | 智能笔记净化、评审输入留痕和可靠性解析 |
+
 ```python
 class StepBase:
-    def __init__(self, step_name: str, job_dir: Path, config: dict):
-        # config 合并自三个来源（由 Worker 加载后传入）：
-        #   1. configs/domain/{domain}.yaml — 领域配置（scene 阈值、OCR 置信度等）
-        #   2. pipelines.yaml 中该步骤的 ai/tags/timeout 等
-        #   3. 全局配置（data_dir 等）
-        # 步骤通过 self.config["ocr"]["confidence_threshold"] 等访问
-        self.step_name = step_name
-        self.job_dir = job_dir
-        self.config = config
-        self.log = self._setup_logger()
+    def __init__(self, step_name, job_dir, config, *, service_factory=None):
+        self.log = structlog.get_logger(step=step_name, job_dir=str(job_dir))
+        context = StepExecutionContext(
+            step_name=step_name,
+            job_dir=job_dir,
+            config=config,
+            log=self.log,
+            input_hashes=self.input_hashes,
+        )
+        services = (service_factory or StepExecutionServices.create)(context)
+        self.artifacts = services.artifacts
+        self.progress = services.progress
+        self.commands = services.commands
+        self.structured = services.structured
+        self.ai = services.ai
+        self.review = services.review
 
     def run(self):
-        """统一入口：校验 → 幂等 → 执行 → 收尾"""
-        try:
-            missing = self.validate_inputs()
-            if missing:
-                self.write_error("input_missing", f"Missing: {missing}")
-                sys.exit(1)
-
-            if not self.should_run():
-                self.log.info("skip: up-to-date")
-                return
-
-            start = time.time()
-            result = self.execute()
-            duration = time.time() - start
-
-            self.mark_done()
-            self.write_meta({"status": "done", "duration_sec": round(duration, 1), **(result or {})})
-
-        except Exception as e:
-            self.write_error("exception", str(e), traceback.format_exc())
-            sys.exit(1)
-
-    # ── 子类必须实现 ──
+        """校验 provider 和输入,执行幂等步骤,最后发布 done/meta 或 error。"""
 
     def execute(self) -> dict | None:
-        """核心逻辑。返回 meta 字典。"""
         raise NotImplementedError
 
     def validate_inputs(self) -> list[str]:
-        """返回缺失的输入文件列表。空 = 校验通过。"""
         return []
 
-    def input_hashes(self) -> dict:
-        """返回输入文件指纹，用于幂等检查。"""
+    def input_hashes(self) -> dict[str, str]:
         return {}
-
-    # ── 基类提供 ──
-
-    def should_run(self) -> bool:
-        """幂等：输入指纹没变就跳过"""
-
-    def mark_done(self):
-        """写完成标记 + 输入指纹"""
-
-    def report_progress(self, current: int, total: int, message: str = ""):
-        """进度上报：写文件 + log"""
-
-    def write_output(self, filename: str, data):
-        """原子写文件：先 .tmp 再 rename"""
-
-    def write_meta(self, meta: dict):
-        """写 .{step}.meta.json"""
-
-    def write_error(self, error_type: str, message: str, trace: str = ""):
-        """写 .{step}.error.json"""
-
-    def load_json(self, filename: str) -> dict | list:
-        """读 JSON 文件"""
-
-    def call_ai(self, prompt: str, images: list[Path] = None, **kwargs) -> str:
-        """通用 AI 调用，通过 Gateway 路由到配置的 Provider/Model"""
-
-    def run_subprocess(self, cmd: list, timeout: int = 600):
-        """执行外部命令"""
 ```
+
+步骤不得绕回 StepBase 添加新的执行工具方法。新增通用能力应进入职责对应的组件,并通过 `StepExecutionServices` 装配。
 
 ## 2. 幂等机制
 
@@ -215,10 +180,10 @@ async def execute_with_heartbeat(self, job_id, step, job_dir, cmd, timeout):
 
 ### 第二层：步骤内细粒度进度（步骤自己报）
 
-步骤通过 `report_progress()` 覆盖 Worker 心跳，提供更细的进度信息：
+步骤通过 `self.progress.report()` 覆盖 Worker 心跳,提供更细的进度信息：
 
 ```python
-def report_progress(self, current: int, total: int, message: str = ""):
+def report(self, current: int, total: int, message: str = ""):
     pct = round(100 * current / max(total, 1))
 
     progress_file = self.job_dir / f".{self.step_name}.progress"
@@ -276,7 +241,7 @@ async def progress_relay(self, job_id, step, job_dir):
 ## 4. 原子写文件
 
 ```python
-def write_output(self, filename: str, data):
+def write(self, filename: str, data):
     target = self.job_dir / filename
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = str(target) + ".tmp"
@@ -296,36 +261,21 @@ def write_output(self, filename: str, data):
 
 ## 5. AI 调用（通过 Gateway）
 
-步骤以 subprocess 运行，Gateway 作为库内嵌到步骤进程中（不是独立服务）。初始化只需读 `providers.yaml` + 环境变量中的 API key，不需要 DB 连接。
+步骤以 subprocess 运行,`AIInvocation` 在步骤进程内调用 Gateway。初始化只读 provider 配置和环境变量中的凭证,不连接 DB。
 
-AI 调用的计费记录（ai_usage）先写到本地 JSON 文件 `.{step}.usage.json`，Worker 在步骤完成后统一收集写入 SQLite。这样步骤进程不需要 DB 连接。
+AI 调用的计费记录先写到 `logs/.{step}.usage.json`,Worker 在步骤完成后统一收集写入 SQLite。步骤进程不需要 DB 连接。
 
 ```python
-def call_ai(self, prompt: str, images: list[Path] = None, **kwargs) -> str:
-    request = LLMRequest(
-        messages=[{"role": "user", "content": prompt}],
-        system=self.load_system_prompt(),
-        images=images,
-        **kwargs
-    )
-    response = self.gateway.route(self.step_name, request)
-    self.log.info(f"ai: provider={response.provider} model={response.model} "
-                  f"cost=${response.cost_usd:.4f} tokens={response.input_tokens}+{response.output_tokens}")
-
-    # 计费记录写到本地 JSON（Worker 收集后写 DB）
-    self._append_usage(response)
-    return response.content
-
-def _append_usage(self, response: LLMResponse):
-    usage_file = self.job_dir / f".{self.step_name}.usage.json"
-    usages = json.loads(usage_file.read_text()) if usage_file.exists() else []
-    usages.append({
-        "provider": response.provider, "model": response.model,
-        "input_tokens": response.input_tokens, "output_tokens": response.output_tokens,
-        "cost_usd": response.cost_usd, "duration_sec": response.duration_sec,
-    })
-    usage_file.write_text(json.dumps(usages))
+def execute(self):
+    result = self.ai.call(prompt, images=images, max_tokens=8192)
+    return {
+        "provider": self.ai.last_provider,
+        "model": self.ai.last_model,
+        "chars": len(result),
+    }
 ```
+
+每次调用在发起前写 `pending` AI log,完成后以相同 `call_index` 原位替换为 `final`。usage 的 `exec_id` 保持 `{STEP_EXEC_ID}:{call_index}`,CLI transcript 保存到 `output/ai_logs/{step}.turns.{call_index}.jsonl`。
 
 详见 [AI 网关模块设计](ai-gateway.md)。
 
@@ -355,7 +305,9 @@ class AIRateLimitError(AIProviderError):
 
 ```python
 # steps/video/step_06_ocr.py
-from shared.step_base import StepBase
+import json
+
+from shared.step_base import StepBase, file_hash
 
 class OcrStep(StepBase):
     def validate_inputs(self):
@@ -370,21 +322,15 @@ class OcrStep(StepBase):
         }
 
     def execute(self):
-        # ... 核心逻辑 ...
-        self.write_output("intermediate/ocr.json", results)
+        results = run_ocr(self.artifacts.load_json("intermediate/dedup.json"))
+        nonempty = sum(bool(item.get("text")) for item in results)
+        self.progress.report(len(results), len(results), "done")
+        self.artifacts.write("intermediate/ocr.json", results)
         return {"total": len(results), "nonempty": nonempty}
 
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--job-dir", required=True)
-    parser.add_argument("--step-config", required=True)  # Worker 合并后的 JSON 文件路径
-    args = parser.parse_args()
-
-    config = json.loads(Path(args.step_config).read_text())
-    step = OcrStep("06_ocr", Path(args.job_dir), config)
-    step.run()
+    OcrStep.cli_main("06_ocr")
 ```
 
 ## 8. 输入校验规范

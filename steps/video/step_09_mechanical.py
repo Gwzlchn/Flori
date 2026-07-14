@@ -80,11 +80,11 @@ class MechanicalStep(StepBase):
         return hashes
 
     def execute(self) -> dict | None:
-        dedup = self.load_json("intermediate/dedup.json")
-        ocr = self.load_json("intermediate/ocr.json")
+        dedup = self.artifacts.load_json("intermediate/dedup.json")
+        ocr = self.artifacts.load_json("intermediate/ocr.json")
 
         danmaku_path = self.job_dir / "intermediate" / "danmaku.json"
-        danmaku = self.load_json("intermediate/danmaku.json") if danmaku_path.exists() else []
+        danmaku = self.artifacts.load_json("intermediate/danmaku.json") if danmaku_path.exists() else []
 
         # 口播:优先 08 的中文稿(中文加标点/非中文已翻译)。没有则直接读原始中文字幕,无需 claude
         # 就先出可看的机械版。非中文视频无中文稿时口播留空,等 08 翻译,不把外文塞进中文机械版。
@@ -104,7 +104,7 @@ class MechanicalStep(StepBase):
         events = self._build_timeline(kept_frames, ocr_map, danmaku, transcript_lines)
         md = self._render_markdown(events)
 
-        self.write_output("output/notes_mechanical.md", md)
+        self.artifacts.write("output/notes_mechanical.md", md)
         return {"frames": len(kept_frames), "events": len(events)}
 
     def _build_timeline(self, frames, ocr_map, danmaku, transcript_lines):

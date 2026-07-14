@@ -20,15 +20,15 @@ class SmartStep(StepBase):
         hashes: dict[str, str] = {
             "mechanical": file_hash(self.job_dir / "output" / "notes_mechanical.md"),
         }
-        hashes.update(self.prompt_profile_style_hashes())  # prompt(覆盖)+ 11_smart 模板 + profile + styles
-        vt = self.template_hash("11_smart.vision")  # 视觉指令模板(11_smart.md 已由 prompt_profile_style_hashes 含)
+        hashes.update(self.ai.prompt_profile_style_hashes())  # prompt(覆盖)+ 11_smart 模板 + profile + styles
+        vt = self.ai.template_hash("11_smart.vision")  # 视觉指令模板(11_smart.md 已由 prompt_profile_style_hashes 含)
         if vt:
             hashes["template_vision"] = vt
         # 取证产物纳入指纹(ADR-0012):evidence 更新→笔记重生成,因为正文引用 [E#]。非案例类无 evidence 则空。
         ev = self.job_dir / "output" / "evidence.json"
         hashes["evidence"] = file_hash(ev) if ev.exists() else ""
         # provider 覆盖纳入指纹:换 provider 重跑时指纹变化,绕过幂等跳过。
-        hashes["provider"] = self.override_provider()
+        hashes["provider"] = self.ai.override_provider()
         return hashes
 
     def execute(self) -> dict | None:
@@ -46,13 +46,13 @@ class SmartStep(StepBase):
         frame_desc = ""
         if frames:
             imgs = [self.job_dir / "assets" / f["filename"] for f in frames]
-            frame_desc = self.call_ai(self._build_vision_prompt(frames), images=imgs)
+            frame_desc = self.ai.call(self._build_vision_prompt(frames), images=imgs)
 
-        result = self.call_ai(self._build_user_prompt(mechanical, frame_desc))
+        result = self.ai.call(self._build_user_prompt(mechanical, frame_desc))
 
-        rel = self.write_smart_note(result, image_assets=frames)  # 回填占位符 + 版本化落盘
+        rel = self.review.write_smart_note(result, image_assets=frames)  # 回填占位符 + 版本化落盘
         return {"chars": len(result), "images_sent": len(frames),
-                "provider": self.last_ai_provider, "model": self.last_ai_model, "note_file": rel}
+                "provider": self.ai.last_provider, "model": self.ai.last_model, "note_file": rel}
 
     def _select_frames(self) -> list[dict]:
         """从 dedup.json(保留帧)取候选并 join ocr.json 文本。返回 [{n,filename,ts,ocr}],n=清单 index。"""
@@ -77,7 +77,7 @@ class SmartStep(StepBase):
 
     def _build_vision_prompt(self, frames: list[dict]) -> str:
         """视觉 pass:让 claude 逐张看帧,只产结构化"逐帧视觉描述"清单(按序号 N),不写笔记正文。"""
-        parts = [self._load_prompt_template("11_smart.vision")]
+        parts = [self.ai.load_prompt_template("11_smart.vision")]
         for f in frames:
             parts.append(f"[{f['n']}] {(self.job_dir / 'assets' / f['filename']).resolve()}\n")
         return "".join(parts)
@@ -119,10 +119,10 @@ class SmartStep(StepBase):
         return "\n".join(lines) + "\n"
 
     def _build_user_prompt(self, mechanical: str, frame_desc: str = "") -> str:
-        profile = self.load_domain_prompt_profile()
+        profile = self.ai.load_domain_prompt_profile()
         style_hints = self._load_style_hints()
 
-        parts = [self._load_prompt_template("11_smart")]
+        parts = [self.ai.load_prompt_template("11_smart")]
 
         if profile:
             if profile.get("role"):
@@ -134,7 +134,7 @@ class SmartStep(StepBase):
                 if isinstance(style, dict):
                     for k, v in style.items():
                         parts.append(f"- {k}：{v}\n")
-            parts.append(self.terminology_block(profile))  # 注入已沉淀的标准概念(与其他步共用)
+            parts.append(self.ai.terminology_block(profile))  # 注入已沉淀的标准概念(与其他步共用)
             if profile.get("do_not"):
                 parts.append("\n注意：\n")
                 for item in profile["do_not"]:

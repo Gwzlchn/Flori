@@ -26,7 +26,7 @@ def calc_progress(steps: list[dict]) -> int:
 
 ### 步骤内进度
 
-StepBase.report_progress() 写 `.{step}.progress` 文件。Worker 轮询此文件，通过 Redis publish 转发给 WebSocket。
+步骤通过 `self.progress.report()` 写 `.{step}.progress` 文件。Worker 轮询此文件，通过 Redis publish 转发给 WebSocket。
 
 ## 2. 结构化日志
 

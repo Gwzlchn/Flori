@@ -47,7 +47,7 @@ class TestReviewStep:
         job_dir = self._setup_job(tmp_path)
         config = make_step_config(tmp_path, step_name="12_review", pool="ai")
         step = ReviewStep("12_review", job_dir, config)
-        monkeypatch.setattr(step, "call_ai", lambda *a, **k: "not json at all")
+        monkeypatch.setattr(step.ai, "call", lambda *a, **k: "not json at all")
         result = step.execute()
         review = json.loads((job_dir / "output" / "review.json").read_text())
         assert review["overall"] is None
@@ -103,13 +103,13 @@ class TestReviewStep:
         step = ReviewStep(
             "12_review", job, make_step_config(tmp_path, step_name="12_review", pool="ai"),
         )
-        step.last_ai_response = LLMResponse(
+        step.ai.last_response = LLMResponse(
             content=raw, model="m", provider="openai", finish_reason="stop",
             tier_used="primary", attempts=[{
                 "tier": "primary", "provider": "openai", "model": "m", "ok": True,
             }],
         )
-        step.call_ai = lambda *_args, **_kwargs: raw
+        step.ai.call = lambda *_args, **_kwargs: raw
         step.execute()
 
         smart = next((job / "output/versions").glob("notes_smart_*.md"))
@@ -156,15 +156,15 @@ class TestReviewStep:
         step = ReviewStep(
             "12_review", job, make_step_config(tmp_path, step_name="12_review", pool="ai"),
         )
-        step.last_ai_response = LLMResponse(
+        step.ai.last_response = LLMResponse(
             content=raw, model="m", provider="openai", finish_reason="stop",
             tier_used="primary", attempts=[{
                 "tier": "primary", "provider": "openai", "model": "m", "ok": True,
             }],
         )
-        step.last_ai_provider = "openai"
-        step.last_ai_model = "m"
-        step.call_ai = lambda *_a, **_k: raw
+        step.ai.last_provider = "openai"
+        step.ai.last_model = "m"
+        step.ai.call = lambda *_a, **_k: raw
         step.execute()
         review = json.loads((job / "output/review.json").read_text())
 
@@ -260,15 +260,15 @@ class TestReviewStep:
         step = ReviewStep(
             "12_review", job, make_step_config(tmp_path, step_name="12_review", pool="ai"),
         )
-        step.last_ai_response = LLMResponse(
+        step.ai.last_response = LLMResponse(
             content=raw, model="m", provider="openai", finish_reason="stop",
             tier_used="primary", attempts=[{
                 "tier": "primary", "provider": "openai", "model": "m", "ok": True,
             }],
         )
-        step.last_ai_provider = "openai"
-        step.last_ai_model = "m"
-        step.call_ai = lambda *_a, **_k: raw
+        step.ai.last_provider = "openai"
+        step.ai.last_model = "m"
+        step.ai.call = lambda *_a, **_k: raw
         step.execute()
         review = json.loads((job / "output/review.json").read_text())
         assert review["citation_validation"]["status"] == "not_applicable"
@@ -321,15 +321,15 @@ class TestReviewStep:
         step = ReviewStep(
             "12_review", job, make_step_config(tmp_path, step_name="12_review", pool="ai"),
         )
-        step.last_ai_response = LLMResponse(
+        step.ai.last_response = LLMResponse(
             content=raw, model="m", provider="openai", finish_reason="stop",
             tier_used="primary", attempts=[{
                 "tier": "primary", "provider": "openai", "model": "m", "ok": True,
             }],
         )
-        step.last_ai_provider = "openai"
-        step.last_ai_model = "m"
-        step.call_ai = lambda *_a, **_k: raw
+        step.ai.last_provider = "openai"
+        step.ai.last_model = "m"
+        step.ai.call = lambda *_a, **_k: raw
 
         step.execute()
 

@@ -85,7 +85,7 @@ def test_concepts_validate_hash_execute_share_one_source_snapshot(tmp_path, monk
         captured["prompt"] = prompt
         return {"summary": "", "key_terms": []}, False
 
-    monkeypatch.setattr(step, "call_ai_json", fake_call)
+    monkeypatch.setattr(step.ai, "call_json", fake_call)
     result = step.execute()
     assert "FIRST SMART" in captured["prompt"]
     assert "SECOND SMART" not in captured["prompt"]
@@ -104,7 +104,7 @@ def test_video_runtime_override_targets_12_concepts_with_05_template(tmp_path):
     cfg = make_step_config(tmp_path, step_name="12_concepts", pool="ai", pipeline="video")
     cfg["step"]["prompt_template"] = "05_concepts"
     step = ArticleConceptsStep("12_concepts", job, cfg)
-    resolved = step._resolve_prompt_template("05_concepts")
+    resolved = step.ai.resolve_prompt_template("05_concepts")
     assert resolved.text == "VIDEO TEMPLATE <<BODY>>"
     assert resolved.version == 4
     assert resolved.source == "override"

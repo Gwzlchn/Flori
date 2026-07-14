@@ -62,7 +62,7 @@ def test_execute_writes_translated(tmp_path, monkeypatch):
     config = make_step_config(tmp_path, step_name="04_translate_paper", pool="ai")
     step = TranslatePaperStep("04_translate_paper", job_dir, config)
     cap: dict = {}
-    monkeypatch.setattr(step, "call_ai",
+    monkeypatch.setattr(step.ai, "call",
                         lambda prompt, **k: cap.update(p=prompt) or "# AlpaServe\n\n## 引言\n模型服务很重要。")
     result = step.execute()
     assert result["chars"] > 0
@@ -77,7 +77,7 @@ def test_execute_small_paper_single_chunk(tmp_path, monkeypatch):
     config = make_step_config(tmp_path, step_name="04_translate_paper", pool="ai")
     step = TranslatePaperStep("04_translate_paper", job_dir, config)
     calls = []
-    monkeypatch.setattr(step, "call_ai", lambda prompt, **k: calls.append(prompt) or "译文")
+    monkeypatch.setattr(step.ai, "call", lambda prompt, **k: calls.append(prompt) or "译文")
     result = step.execute()
     assert result["chunks"] == 1 and len(calls) == 1
 
@@ -103,7 +103,7 @@ def test_execute_large_paper_chunks(tmp_path, monkeypatch):
     assert len(md) > CHUNK_CHARS  # 前提:确实超预算
 
     calls = []
-    monkeypatch.setattr(step, "call_ai",
+    monkeypatch.setattr(step.ai, "call",
                         lambda prompt, **k: calls.append(prompt) or f"译文块{len(calls)}")
     result = step.execute()
     assert result["chunks"] > 1
@@ -161,7 +161,7 @@ def test_prefers_original_md_as_source(tmp_path, monkeypatch):
     def fake_call(prompt, **kw):
         seen["prompt"] = prompt
         return "译文"
-    monkeypatch.setattr(step, "call_ai", fake_call)
+    monkeypatch.setattr(step.ai, "call", fake_call)
     step.execute()
     assert "$E=mc^2$" in seen["prompt"]           # 干净原文直通
     assert "![](assets/x1.png)" in seen["prompt"]
@@ -199,7 +199,7 @@ def test_pdf_only_direct_translate(tmp_path, monkeypatch):
     def fake_call(prompt, **kw):
         calls.append((prompt, kw))
         return f"块{len(calls)}译文"
-    monkeypatch.setattr(step, "call_ai", fake_call)
+    monkeypatch.setattr(step.ai, "call", fake_call)
     result = step.execute()
 
     assert result["mode"] == "pdf-direct"
@@ -273,7 +273,7 @@ def test_text_snapshot_survives_source_disappearance_without_read_tool(tmp_path,
             )
 
     monkeypatch.setattr(step, "_read_optional_text", present_snapshot_then_disappear)
-    step._gateway = Gateway()
+    step.ai.gateway = Gateway()
     result = step.execute()
     assert result["chars"] == len("captured translation")
     assert "captured text source" in prompts[0]
@@ -313,10 +313,10 @@ def test_pdf_only_figure_placeholders_become_jump_links(tmp_path, monkeypatch):
     def _fake_ai(*a, **k):
         _n["i"] += 1
         return translated if _n["i"] == 1 else "尾块正文"
-    monkeypatch.setattr(step, "call_ai", _fake_ai)
+    monkeypatch.setattr(step.ai, "call", _fake_ai)
     def _no_subprocess(*a, **k):
         raise AssertionError("不应再调 pdftoppm 渲染整页图")
-    monkeypatch.setattr(step, "run_subprocess", _no_subprocess)
+    monkeypatch.setattr(step.commands, "run", _no_subprocess)
 
     result = step.execute()
     out = (job_dir / "output" / "translated.md").read_text()
@@ -353,7 +353,7 @@ class TestTermConsistency:
         config = make_step_config(tmp_path, step_name="04_translate_paper", pool="ai")
         step = TranslatePaperStep("04_translate_paper", job_dir, config)
         prompts = []
-        monkeypatch.setattr(step, "call_ai", lambda p, **k: prompts.append(p) or "译文")
+        monkeypatch.setattr(step.ai, "call", lambda p, **k: prompts.append(p) or "译文")
         result = step.execute()
         assert result["chunks"] >= 2
         # 命中才注入:含 martingale 的 chunk 注入同一对照;纯 filler 块无术语段(命中过滤)。
@@ -374,7 +374,7 @@ class TestTermConsistency:
                 return "首段:鞅（martingale），鞅无处不在"
             return "后续译文"
 
-        monkeypatch.setattr(step, "call_ai", fake_ai)
+        monkeypatch.setattr(step.ai, "call", fake_ai)
         result = step.execute()
         assert result["new_terms"] == 1
         assert "martingale → 鞅" in prompts[1]  # 第二 chunk 注入首 chunk 回收的对照
@@ -387,7 +387,7 @@ class TestTermConsistency:
         config = make_step_config(tmp_path, step_name="04_translate_paper", pool="ai")
         step = TranslatePaperStep("04_translate_paper", job_dir, config)
         prompts = []
-        monkeypatch.setattr(step, "call_ai", lambda p, **k: prompts.append(p) or "译文")
+        monkeypatch.setattr(step.ai, "call", lambda p, **k: prompts.append(p) or "译文")
         step.execute()
         assert all("术语对照表" not in p for p in prompts)   # 空表 prompt 无痕
         assert not (job_dir / "output" / "term_pairs.json").exists()

@@ -23,7 +23,7 @@ class DownloadStep(StepBase):
         }
 
     def execute(self) -> dict | None:
-        job = self.load_json("job.json")
+        job = self.artifacts.load_json("job.json")
         url = job.get("url", "")
         source = job.get("source") or detect_source(url)
         content_type = job.get("content_type", "video")
@@ -79,7 +79,7 @@ class DownloadStep(StepBase):
                 metadata["title"] = t
             if pub:
                 metadata["published_at"] = pub
-        self.write_output("input/metadata.json", metadata)
+        self.artifacts.write("input/metadata.json", metadata)
         return {"source": source, "duration_sec": metadata.get("duration_sec")}
 
     def _youtube_title_published(self) -> tuple[str | None, str | None]:
@@ -151,7 +151,7 @@ class DownloadStep(StepBase):
 
         # yutto 主力,失败转 yt-dlp 兜底,最后 ffprobe 验收挡坏下载。
         try:
-            self.run_subprocess(cmd, timeout=self.config["step"]["timeout_sec"])
+            self.commands.run(cmd, timeout=self.config["step"]["timeout_sec"])
             self._rename_downloaded_video(input_dir)
             self._prune_subtitles_danmaku(input_dir)
         except Exception as e:
@@ -192,7 +192,7 @@ class DownloadStep(StepBase):
         if sessdata:
             cmd += ["--add-header", f"Cookie:SESSDATA={sessdata}"]
         cmd += ["--", url]
-        self.run_subprocess(cmd, timeout=self.config["step"]["timeout_sec"])
+        self.commands.run(cmd, timeout=self.config["step"]["timeout_sec"])
         self._rename_to_source_mp4(input_dir)
 
     def _verify_download(self, mp4: Path) -> None:
@@ -236,7 +236,7 @@ class DownloadStep(StepBase):
                     cookies_file = f.name
                 cmd += ["--cookies", cookies_file]
             cmd += ["--", url]  # -- 分隔:挡以 "-" 开头的 url 被当作 yt-dlp 选项注入
-            self.run_subprocess(cmd, timeout=self.config["step"]["timeout_sec"])
+            self.commands.run(cmd, timeout=self.config["step"]["timeout_sec"])
         finally:
             if cookies_file:
                 Path(cookies_file).unlink(missing_ok=True)
@@ -256,7 +256,7 @@ class DownloadStep(StepBase):
 
         pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
         cmd = ["curl", "-fSL", "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "-o", str(input_dir / "source.pdf"), pdf_url]  # 浏览器 UA:NBER 等站挡 curl 默认 UA(278B 错误页),实测换 UA 即 200
-        self.run_subprocess(cmd, timeout=120)
+        self.commands.run(cmd, timeout=120)
 
         # HTML 源(论文源头重做):arxiv 官方/ar5iv 的 LaTeXML 渲染结构+公式无损,原文/翻译/笔记
         # 全吃它(pymupdf 逆向 PDF 断词、公式丢,已废)。PDF 仍保留(下载入口 + 无 HTML 论文兜底)。
@@ -282,7 +282,7 @@ class DownloadStep(StepBase):
             self.log.info("arxiv_html_unavailable", arxiv_id=arxiv_id)
             return
         html = self._localize_html_images(html, self._arxiv_html_base)
-        self.write_output("input/source.html", html)
+        self.artifacts.write("input/source.html", html)
         self.log.info("arxiv_html_fetched", arxiv_id=arxiv_id, base=self._arxiv_html_base,
                       bytes=len(html))
 
@@ -304,7 +304,7 @@ class DownloadStep(StepBase):
             fname = re.sub(r"[^A-Za-z0-9._-]", "_", src.split("?")[0].strip("/"))[-80:]
             try:
                 assets.mkdir(parents=True, exist_ok=True)
-                self.run_subprocess(
+                self.commands.run(
                     ["curl", "-fsSL", "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "-o", str(assets / fname), "--", absolute], timeout=60)
                 html = html.replace(f'src="{src}"', f'src="assets/{fname}"')
                 n_ok += 1
@@ -323,11 +323,11 @@ class DownloadStep(StepBase):
         best-effort 只兜【网络/坏响应】(curl 失败/超时/坏 XML → 回退 PDF 启发);编程错误照常上抛。"""
         import xml.etree.ElementTree as ET
 
-        from shared.step_base import SubprocessFailed
+        from shared.step_subprocess import SubprocessFailed
 
         api = f"http://export.arxiv.org/api/query?id_list={arxiv_id}"
         try:
-            r = self.run_subprocess(["curl", "-fsSL", api], timeout=30)
+            r = self.commands.run(["curl", "-fsSL", api], timeout=30)
             meta = self._parse_arxiv_atom(r.stdout)
         except (SubprocessFailed, subprocess.TimeoutExpired, ET.ParseError) as ex:
             self.log.warning("arxiv_meta_fetch_failed", arxiv_id=arxiv_id, error=str(ex)[:200])
@@ -372,7 +372,7 @@ class DownloadStep(StepBase):
         input_dir = self.job_dir / "input"
         input_dir.mkdir(parents=True, exist_ok=True)
         cmd = ["curl", "-fSL", "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "-o", str(input_dir / "source.pdf"), url]  # 同上:浏览器 UA
-        self.run_subprocess(cmd, timeout=120)
+        self.commands.run(cmd, timeout=120)
 
     def _download_article(self, url: str) -> None:
         """抓 HTML 原文写 input/source.html;同时用 trafilatura 抽正文/标题供后续解析。
@@ -398,7 +398,7 @@ class DownloadStep(StepBase):
         if not html:
             from shared.errors import InputInvalidError
             raise InputInvalidError(f"Cannot fetch article: {url} (5 次退避重试后仍失败)")
-        self.write_output("input/source.html", html)
+        self.artifacts.write("input/source.html", html)
 
         # 顺手抽一份标题等元数据,正文解析仍由 02_parse_article 负责(trafilatura)。
         article_meta: dict = {"url": url}
@@ -411,7 +411,7 @@ class DownloadStep(StepBase):
                 article_meta["date"] = meta.date or ""
         except Exception:
             pass
-        self.write_output("input/article_meta.json", article_meta)
+        self.artifacts.write("input/article_meta.json", article_meta)
 
     @staticmethod
     def _fetch_html(url: str, timeout: int) -> tuple[str | None, str | None]:
@@ -481,14 +481,14 @@ class DownloadStep(StepBase):
     def _curl_to(self, url: str, dest: Path) -> None:
         """curl 下载到 dest。带浏览器 UA:部分 CDN 对裸 curl UA 返回落地页而非音频文件。"""
         cmd = ["curl", "-fSL", "-A", "Mozilla/5.0", "-o", str(dest), "--", url]
-        self.run_subprocess(cmd, timeout=self.config["step"]["timeout_sec"])
+        self.commands.run(cmd, timeout=self.config["step"]["timeout_sec"])
 
     def _resolve_audio_from_page(self, page_url: str) -> str | None:
         """抓播客页面 HTML,解析出音频直链(og:audio/<audio>/<enclosure>/<a *.mp3>)。
         best-effort:网络/解析失败返回 None,由调用方按原 URL 继续(再失败则校验拦下)。"""
         from shared.source_detect import extract_audio_enclosure
         try:
-            r = self.run_subprocess(
+            r = self.commands.run(
                 ["curl", "-fsSL", "-A", "Mozilla/5.0", "--", page_url], timeout=60,
             )
             return extract_audio_enclosure(r.stdout or "", base_url=page_url)
@@ -583,7 +583,7 @@ class DownloadStep(StepBase):
             "--merge-output-format", "mp4",
             "--", url,  # -- 分隔:挡以 "-" 开头的 url 被当作 yt-dlp 选项注入
         ]
-        self.run_subprocess(cmd, timeout=self.config["step"]["timeout_sec"])
+        self.commands.run(cmd, timeout=self.config["step"]["timeout_sec"])
         self._rename_to_source_mp4(input_dir)
 
     def _rename_downloaded_video(self, input_dir: Path) -> None:

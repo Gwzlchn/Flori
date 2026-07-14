@@ -11,7 +11,10 @@ import pytest
 from shared.errors import InputInvalidError, ProcessingError
 from shared.models import LLMResponse
 from shared.review_contract import MAX_REVIEW_SOURCE_BYTES
+from shared.step_ai import AIInvocation
 from shared.step_base import StepBase, file_hash
+from shared.step_review import ReviewExecution
+from shared.structured_output import StructuredOutputParser
 
 
 # Test 子类
@@ -76,9 +79,9 @@ def test_step_override_invalid_shapes_fail_closed_without_mutating_ai(tmp_path, 
     step = DummyStep(tmp_path, config={"ai": ai.copy(), "providers": {"providers": {}}})
 
     with pytest.raises(InputInvalidError, match="invalid AI override"):
-        step.override_provider()
+        step.ai.override_provider()
     with pytest.raises(InputInvalidError, match="invalid AI override"):
-        step._apply_provider_override()
+        step.ai.apply_provider_override()
 
     assert step.config["ai"] == ai
 
@@ -94,10 +97,10 @@ def test_step_unknown_override_fails_before_gateway_or_config_mutation(tmp_path)
     })
 
     with pytest.raises(InputInvalidError, match="unknown_provider"):
-        step._apply_provider_override()
+        step.ai.apply_provider_override()
 
     assert step.config["ai"] == ai
-    assert step._gateway is None
+    assert step.ai.gateway is None
 
 
 def test_step_invalid_override_run_writes_input_invalid_error(tmp_path):
@@ -128,8 +131,8 @@ def test_step_override_parser_normalizes_valid_provider(tmp_path):
         "providers": {"providers": {"openai": {"models": ["gpt-test"]}}},
     })
 
-    assert step.override_provider() == "openai"
-    step._apply_provider_override()
+    assert step.ai.override_provider() == "openai"
+    step.ai.apply_provider_override()
 
     assert step.config["ai"] == {
         "primary": {"provider": "openai", "model": "gpt-test"},
@@ -152,12 +155,12 @@ def test_step_rechecks_read_capability_after_enqueue_artifact_race(tmp_path):
     })
 
     with pytest.raises(InputInvalidError, match="does not support read"):
-        step._apply_provider_override()
+        step.ai.apply_provider_override()
 
     assert step.config["ai"] == {
         "primary": {"provider": "claude-cli", "model": "primary"},
     }
-    assert step._gateway is None
+    assert step.ai.gateway is None
 
 
 def test_actual_read_tool_cannot_be_bypassed_by_artifact_appearance(tmp_path):
@@ -181,9 +184,9 @@ def test_actual_read_tool_cannot_be_bypassed_by_artifact_appearance(tmp_path):
         async def call(self, *args, **kwargs):
             raise AssertionError("provider call must be blocked by the Read capability gate")
 
-    step._gateway = GatewayMustNotRun()
+    step.ai.gateway = GatewayMustNotRun()
     with pytest.raises(InputInvalidError, match="does not support read"):
-        step.call_ai("read the PDF", allowed_tools=["Read"])
+        step.ai.call("read the PDF", allowed_tools=["Read"])
 
 
 def test_actual_non_read_request_does_not_inherit_stale_artifact_capability(tmp_path):
@@ -204,8 +207,8 @@ def test_actual_non_read_request_does_not_inherit_stale_artifact_capability(tmp_
                 finish_reason="stop",
             )
 
-    step._gateway = Gateway()
-    assert step.call_ai("use the captured text") == "captured text result"
+    step.ai.gateway = Gateway()
+    assert step.ai.call("use the captured text") == "captured text result"
 
 
 class TestShouldRun:
@@ -320,7 +323,7 @@ class TestMarkDone:
 class TestWriteOutput:
     def test_dict(self, tmp_path):
         step = DummyStep(tmp_path)
-        step.write_output("output/result.json", {"key": "value"})
+        step.artifacts.write("output/result.json", {"key": "value"})
         f = tmp_path / "output" / "result.json"
         assert f.exists()
         assert json.loads(f.read_text()) == {"key": "value"}
@@ -328,24 +331,24 @@ class TestWriteOutput:
 
     def test_string(self, tmp_path):
         step = DummyStep(tmp_path)
-        step.write_output("output/notes.md", "# Hello\n")
+        step.artifacts.write("output/notes.md", "# Hello\n")
         assert (tmp_path / "output" / "notes.md").read_text() == "# Hello\n"
 
     def test_bytes(self, tmp_path):
         step = DummyStep(tmp_path)
-        step.write_output("output/data.bin", b"\x00\x01\x02")
+        step.artifacts.write("output/data.bin", b"\x00\x01\x02")
         assert (tmp_path / "output" / "data.bin").read_bytes() == b"\x00\x01\x02"
 
     def test_creates_parent_dirs(self, tmp_path):
         step = DummyStep(tmp_path)
-        step.write_output("deep/nested/file.txt", "content")
+        step.artifacts.write("deep/nested/file.txt", "content")
         assert (tmp_path / "deep" / "nested" / "file.txt").exists()
 
 
 class TestWriteError:
     def test_format(self, tmp_path):
         step = DummyStep(tmp_path)
-        step.write_error("ai", "rate limited", "traceback here")
+        step.artifacts.write_error("ai", "rate limited", "traceback here")
         f = tmp_path / ".test_step.error.json"
         content = json.loads(f.read_text())
         assert content["step"] == "test_step"
@@ -358,7 +361,7 @@ class TestWriteError:
 class TestWriteMeta:
     def test_format(self, tmp_path):
         step = DummyStep(tmp_path)
-        step.write_meta({"status": "done", "items": 42})
+        step.artifacts.write_meta({"status": "done", "items": 42})
         f = tmp_path / ".test_step.meta.json"
         content = json.loads(f.read_text())
         assert content["status"] == "done"
@@ -368,7 +371,7 @@ class TestWriteMeta:
 class TestReportProgress:
     def test_writes_progress_file(self, tmp_path):
         step = DummyStep(tmp_path)
-        step.report_progress(50, 100, "halfway")
+        step.progress.report(50, 100, "halfway")
         f = tmp_path / ".test_step.progress"
         content = json.loads(f.read_text())
         assert content["source"] == "step"
@@ -379,7 +382,7 @@ class TestReportProgress:
 
     def test_zero_total(self, tmp_path):
         step = DummyStep(tmp_path)
-        step.report_progress(0, 0)
+        step.progress.report(0, 0)
         f = tmp_path / ".test_step.progress"
         content = json.loads(f.read_text())
         assert content["pct"] == 0
@@ -433,33 +436,33 @@ class TestRunFlow:
 class TestRunSubprocess:
     def test_success(self, tmp_path):
         step = DummyStep(tmp_path)
-        result = step.run_subprocess(["echo", "hello"])
+        result = step.commands.run(["echo", "hello"])
         assert result.returncode == 0
         assert "hello" in result.stdout
 
     def test_timeout(self, tmp_path):
         step = DummyStep(tmp_path)
         with pytest.raises(subprocess.TimeoutExpired):
-            step.run_subprocess(["sleep", "10"], timeout=1)
+            step.commands.run(["sleep", "10"], timeout=1)
 
     def test_failure_keeps_stderr_in_message(self, tmp_path):
         # 非零退出:仍是 CalledProcessError(子类),但 str() 带上 stderr,故障原因不被吞。
         step = DummyStep(tmp_path)
         with pytest.raises(subprocess.CalledProcessError) as ei:
-            step.run_subprocess(["sh", "-c", "echo boom-detail >&2; exit 3"])
+            step.commands.run(["sh", "-c", "echo boom-detail >&2; exit 3"])
         assert "boom-detail" in str(ei.value)
 
 
 class TestTerminologyBlock:
     def test_empty_when_no_terminology(self):
-        assert StepBase.terminology_block({}) == ""
-        assert StepBase.terminology_block({"terminology": []}) == ""
-        assert StepBase.terminology_block(None) == ""
+        assert AIInvocation.terminology_block({}) == ""
+        assert AIInvocation.terminology_block({"terminology": []}) == ""
+        assert AIInvocation.terminology_block(None) == ""
 
     def test_joins_and_caps_at_30(self):
-        block = StepBase.terminology_block({"terminology": ["A", "B", "C"]})
+        block = AIInvocation.terminology_block({"terminology": ["A", "B", "C"]})
         assert "本领域已沉淀的标准概念" in block and "A; B; C" in block
-        big = StepBase.terminology_block({"terminology": [str(i) for i in range(40)]})
+        big = AIInvocation.terminology_block({"terminology": [str(i) for i in range(40)]})
         assert "29" in big and "30" not in big   # 仅前 30 项(0..29)
 
 
@@ -468,20 +471,20 @@ class TestLoadJson:
         (tmp_path / "output").mkdir()
         (tmp_path / "output" / "result.json").write_text('{"key": "value"}')
         step = DummyStep(tmp_path)
-        data = step.load_json("output/result.json")
+        data = step.artifacts.load_json("output/result.json")
         assert data == {"key": "value"}
 
     def test_load_json_missing_file(self, tmp_path):
         step = DummyStep(tmp_path)
         with pytest.raises(FileNotFoundError):
-            step.load_json("nonexistent.json")
+            step.artifacts.load_json("nonexistent.json")
 
 
 class TestReportProgressExtra:
     def test_report_progress_over_total(self, tmp_path):
         """When current > total, pct should exceed 100 (no clamping in implementation)."""
         step = DummyStep(tmp_path)
-        step.report_progress(150, 100, "over")
+        step.progress.report(150, 100, "over")
         f = tmp_path / ".test_step.progress"
         content = json.loads(f.read_text())
         # Implementation: round(100 * current / max(total, 1)) = round(100 * 150 / 100) = 150
@@ -534,7 +537,7 @@ class TestCallAI:
             "providers": {},
             "ai": {},
         })
-        result = step.call_ai("hello")
+        result = step.ai.call("hello")
         assert "[DRY_RUN]" in result
 
         usage_file = tmp_path / "logs" / ".test_step.usage.json"
@@ -548,8 +551,8 @@ class TestCallAI:
 
         class AIStep(StepBase):
             def execute(self):
-                result = self.call_ai("test prompt")
-                self.write_output("output/result.txt", result)
+                result = self.ai.call("test prompt")
+                self.artifacts.write("output/result.txt", result)
                 return {"chars": len(result)}
 
         step = AIStep("test_ai", tmp_path, config={"providers": {}, "ai": {}})
@@ -577,13 +580,13 @@ class TestReviewInputGate:
     def test_aggregate_prompt_equal_to_limit_is_allowed(self, tmp_path):
         step = DummyStep(tmp_path)
         calls = []
-        step.last_ai_response = self._response()
-        step.call_ai = lambda prompt, **_kwargs: calls.append(len(prompt.encode())) or json.dumps({
+        step.ai.last_response = self._response()
+        step.ai.call = lambda prompt, **_kwargs: calls.append(len(prompt.encode())) or json.dumps({
             "accuracy": 5, "key_terms": [], "missing_concepts": [],
             "top3_improvements": ["a", "b", "c"], "issues": [],
         })
 
-        step.run_dimension_review(
+        step.review.run_dimension(
             "x" * MAX_REVIEW_SOURCE_BYTES, {}, ["accuracy"], "",
             {"truncated": False},
         )
@@ -594,10 +597,10 @@ class TestReviewInputGate:
     def test_aggregate_prompt_over_limit_has_zero_write_and_zero_ai(self, tmp_path):
         step = DummyStep(tmp_path)
         calls = []
-        step.call_ai = lambda *_args, **_kwargs: calls.append(True) or "{}"
+        step.ai.call = lambda *_args, **_kwargs: calls.append(True) or "{}"
 
         with pytest.raises(ValueError, match="review input exceeds"):
-            step.run_dimension_review(
+            step.review.run_dimension(
                 "x" * (MAX_REVIEW_SOURCE_BYTES + 1), {}, ["accuracy"],
                 "output/versions/notes_smart_x.md", {"truncated": False},
             )
@@ -658,61 +661,59 @@ class TestExtractJson:
     """call_ai_json 从 claude-cli 输出抽 JSON:剥 ```json 围栏 / 取首尾花括号。"""
 
     def test_fenced(self):
-        from shared.step_base import StepBase
-        assert json.loads(StepBase._extract_json('```json\n{"a": 1}\n```')) == {"a": 1}
+        assert json.loads(StructuredOutputParser.extract_json('```json\n{"a": 1}\n```')) == {"a": 1}
 
     def test_prose_wrapped(self):
-        from shared.step_base import StepBase
-        assert json.loads(StepBase._extract_json('好的,结果如下:\n{"a": 1, "b": 2}\n以上。')) == {"a": 1, "b": 2}
+        assert json.loads(StructuredOutputParser.extract_json(
+            '好的,结果如下:\n{"a": 1, "b": 2}\n以上。',
+        )) == {"a": 1, "b": 2}
 
     def test_plain(self):
-        from shared.step_base import StepBase
-        assert json.loads(StepBase._extract_json('{"a": 1}')) == {"a": 1}
+        assert json.loads(StructuredOutputParser.extract_json('{"a": 1}')) == {"a": 1}
 
 
 class TestSanitizeSmartNote:
     """落盘前净化 claude agentic 口水:剥开头汇报/结尾提议、判废退化输出(线上视觉笔记实测)。"""
 
-    from shared.step_base import StepBase as _SB
     BODY = "\n\n".join(f"## 第{i}章\n这是正文内容,足够长以通过长度判废。" * 3 for i in range(1, 8))
 
     def test_strips_chinese_preamble_to_first_header(self):
         raw = ("已完成重组。结构化学习笔记已生成并保存到 `/tmp/flori-work/x/学习笔记.md`。\n\n"
                "我做的关键处理：\n- 按章节重组\n\n# 庄股操盘复盘\n\n" + self.BODY)
-        out = self._SB._sanitize_smart_note(raw)
+        out = ReviewExecution.sanitize_smart_note(raw)
         assert out.startswith("# 庄股操盘复盘")
         assert "已完成" not in out and "/tmp/" not in out and "我做的关键处理" not in out
 
     def test_strips_english_preamble(self):
         raw = ("I've reviewed all 10 screenshots and will now restructure.\n\n"
                "# Deep Dive\n\n" + self.BODY)
-        out = self._SB._sanitize_smart_note(raw)
+        out = ReviewExecution.sanitize_smart_note(raw)
         assert out.startswith("# Deep Dive")
         assert "I've reviewed" not in out
 
     def test_strips_trailing_offer(self):
         raw = "# 标题\n\n" + self.BODY + "\n\n---\n\n需要我把笔记导出为其他格式（如纯 Markdown）吗？"
-        out = self._SB._sanitize_smart_note(raw)
+        out = ReviewExecution.sanitize_smart_note(raw)
         assert "需要我把笔记导出" not in out
         assert out.rstrip().endswith("足够长以通过长度判废。") or "第7章" in out
 
     def test_clean_note_unchanged(self):
         raw = "# 深度学习笔记\n\n" + self.BODY
-        out = self._SB._sanitize_smart_note(raw)
+        out = ReviewExecution.sanitize_smart_note(raw)
         assert out == raw.strip()
 
     def test_strips_trailing_first_person_signoff(self):
         # BV144 实况:正文后 --- 接一段"我已按…重组…内嵌了 N 张截图"的第一人称收尾签名。
         raw = ("# 标题\n\n" + self.BODY +
                "\n\n---\n\n我已按视频自然章节（引子 → 出货 → 结尾）重组，专业术语就近标注简释并内嵌了 11 张截图。")
-        out = self._SB._sanitize_smart_note(raw)
+        out = ReviewExecution.sanitize_smart_note(raw)
         assert "我已按" not in out and "内嵌了 11 张" not in out
         assert "第7章" in out                     # 正文保留
 
     def test_keeps_legit_third_person_ending(self):
         # 第三人称正文结尾不得误删(不以第一人称过程标记开头)。
         raw = "# 标题\n\n" + self.BODY + "\n\n本案的核心教训是:控盘资金再精妙也终将受罚。"
-        out = self._SB._sanitize_smart_note(raw)
+        out = ReviewExecution.sanitize_smart_note(raw)
         assert "本案的核心教训" in out
 
     def test_degenerate_lost_note_raises(self):
@@ -721,21 +722,21 @@ class TestSanitizeSmartNote:
                "## 我做了什么\n1. 并行审阅了全部 86 张截图\n2. 按章节重组\n\n"
                "## 笔记结构一览\n- 本案速览表 + 关键时间线")
         with pytest.raises(ProcessingError):
-            self._SB._sanitize_smart_note(raw)
+            ReviewExecution.sanitize_smart_note(raw)
 
     def test_too_short_raises(self):
         with pytest.raises(ProcessingError):
-            self._SB._sanitize_smart_note("# 标题\n\n太短了。")
+            ReviewExecution.sanitize_smart_note("# 标题\n\n太短了。")
 
     def test_dry_run_zero_does_not_bypass(self, monkeypatch):
         # DRY_RUN="0"(显式关闭但存在)不能旁路净化——只有 =="1" 才旁路。
         monkeypatch.setenv("DRY_RUN", "0")
         with pytest.raises(ProcessingError):
-            self._SB._sanitize_smart_note("# 标题\n\n太短了。")
+            ReviewExecution.sanitize_smart_note("# 标题\n\n太短了。")
 
     def test_dry_run_one_bypasses(self, monkeypatch):
         monkeypatch.setenv("DRY_RUN", "1")
-        assert self._SB._sanitize_smart_note("# 标题\n\n太短了。") == "# 标题\n\n太短了。"
+        assert ReviewExecution.sanitize_smart_note("# 标题\n\n太短了。") == "# 标题\n\n太短了。"
 
 
 class TestScoreSalvage:
@@ -759,7 +760,7 @@ class TestScoreSalvage:
                  '"rationale": {"completeness": "讲得很清楚')
 
     def test_salvage_from_truncated(self):
-        assert StepBase._salvage_scores(self.TRUNCATED, self.SCORE_KEYS) == {
+        assert StructuredOutputParser.salvage_scores(self.TRUNCATED, self.SCORE_KEYS) == {
             "completeness": 5, "accuracy": 4, "structure": 4,
             "terminology": 5, "visual_integration": 4, "readability": 4,
         }
@@ -767,28 +768,28 @@ class TestScoreSalvage:
     def test_salvage_ignores_rationale_strings(self):
         # rationale 里同名键值是字符串("5 分太高"),数字正则不应误命中
         raw = '{"completeness": 2, "rationale": {"completeness": "5 分太高"}}'
-        assert StepBase._salvage_scores(raw, ["completeness"]) == {"completeness": 2}
+        assert StructuredOutputParser.salvage_scores(raw, ["completeness"]) == {"completeness": 2}
 
     def test_salvage_below_half_returns_none(self):
         # 命中不足半数(2/6)不可信 → None,走 fallback
-        assert StepBase._salvage_scores('{"completeness": 5, "accuracy": 4}', self.SCORE_KEYS) is None
+        assert StructuredOutputParser.salvage_scores('{"completeness": 5, "accuracy": 4}', self.SCORE_KEYS) is None
 
     def test_salvage_partial_above_half_fills_mean(self):
         # 命中 >= 半数(4/6):缺的维度按已命中均值 round 补齐,不整体落 fallback 全 3
         raw = '{"completeness": 5, "accuracy": 4, "structure": 4, "terminology": 5}'
-        out = StepBase._salvage_scores(raw, self.SCORE_KEYS)
+        out = StructuredOutputParser.salvage_scores(raw, self.SCORE_KEYS)
         assert out["completeness"] == 5 and out["terminology"] == 5
         # 缺的 visual_integration/readability 按 (5+4+4+5)/4=4.5→round=4 补齐
         assert out["visual_integration"] == 4 and out["readability"] == 4
         assert set(out) == set(self.SCORE_KEYS)
 
     def test_salvage_no_score_keys_returns_none(self):
-        assert StepBase._salvage_scores('{"x": 1}', None) is None
+        assert StructuredOutputParser.salvage_scores('{"x": 1}', None) is None
 
     def test_call_ai_json_lifts_nested_scores(self, tmp_path):
         step = DummyStep(tmp_path)
-        step.call_ai = lambda *a, **k: self.NESTED
-        result, failed = step.call_ai_json("p", fallback=self.FALLBACK, score_keys=self.SCORE_KEYS)
+        step.ai.call = lambda *a, **k: self.NESTED
+        result, failed = step.ai.call_json("p", fallback=self.FALLBACK, score_keys=self.SCORE_KEYS)
         assert not failed
         assert result["completeness"] == 5 and result["terminology"] == 5
         assert result["overall"] == 4.3
@@ -796,16 +797,16 @@ class TestScoreSalvage:
 
     def test_call_ai_json_salvages_malformed(self, tmp_path):
         step = DummyStep(tmp_path)
-        step.call_ai = lambda *a, **k: self.TRUNCATED
-        result, failed = step.call_ai_json("p", fallback=self.FALLBACK, score_keys=self.SCORE_KEYS)
+        step.ai.call = lambda *a, **k: self.TRUNCATED
+        result, failed = step.ai.call_json("p", fallback=self.FALLBACK, score_keys=self.SCORE_KEYS)
         assert not failed                       # 救回分数,不算 parse 失败
         assert result["overall"] == 4.3         # 真分均值,不是 fallback 的 3.0
         assert result.get("parse_failed") is not True
 
     def test_call_ai_json_fallback_when_unsalvageable(self, tmp_path):
         step = DummyStep(tmp_path)
-        step.call_ai = lambda *a, **k: "完全不是 JSON 也没有分数"
-        result, failed = step.call_ai_json("p", fallback=self.FALLBACK, score_keys=self.SCORE_KEYS)
+        step.ai.call = lambda *a, **k: "完全不是 JSON 也没有分数"
+        result, failed = step.ai.call_json("p", fallback=self.FALLBACK, score_keys=self.SCORE_KEYS)
         assert failed
         assert result["overall"] == 3.0
         assert result["parse_failed"] is True

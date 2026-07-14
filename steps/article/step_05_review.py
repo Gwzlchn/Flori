@@ -12,7 +12,7 @@ from shared.step_base import StepBase, file_hash
 class ArticleReviewStep(StepBase):
     def validate_inputs(self) -> list[str]:
         missing = []
-        if self.latest_smart_note() is None:
+        if self.artifacts.latest_smart_note() is None:
             missing.append("output/versions/notes_smart_*.md")
         if not (self.job_dir / "intermediate" / "sections.json").exists():
             missing.append("intermediate/sections.json")
@@ -20,19 +20,19 @@ class ArticleReviewStep(StepBase):
 
     def input_hashes(self) -> dict[str, str]:
         hashes = {
-            "smart": file_hash(self.latest_smart_note()) if self.latest_smart_note() else "",
+            "smart": file_hash(self.artifacts.latest_smart_note()) if self.artifacts.latest_smart_note() else "",
             "sections": file_hash(self.job_dir / "intermediate" / "sections.json"),
             "original": file_hash(self.job_dir / "output" / "original.md")
                         if (self.job_dir / "output" / "original.md").exists() else "",
             "translated": file_hash(self.job_dir / "output" / "translated.md")
                           if (self.job_dir / "output" / "translated.md").exists() else "",
-            "provider": self.override_provider(),
+            "provider": self.ai.override_provider(),
         }
-        hashes["template"] = self.template_hash(self._primary_prompt_template())
+        hashes["template"] = self.ai.template_hash(self.ai.primary_prompt_template())
         return hashes
 
     def execute(self) -> dict | None:
-        smart_clip, coverage, note_file, smart_source = self.prepare_smart_for_review()
+        smart_clip, coverage, note_file, smart_source = self.review.prepare_smart()
         source_paths = [p for p in ("output/original.md", "output/translated.md")
                         if (self.job_dir / p).exists()]
         if not source_paths:
@@ -71,7 +71,7 @@ class ArticleReviewStep(StepBase):
             ("readability", "可读性"),
             ("insight", "观点提炼深度"),
         ]
-        prompt = self.build_review_prompt(
+        prompt = self.review.build_prompt(
             intro="请对以下文章笔记进行质量评审。",
             dimensions=dimensions,
             ref_block=(
@@ -80,8 +80,8 @@ class ArticleReviewStep(StepBase):
             ),
         )
         score_keys = [key for key, _ in dimensions]
-        review, parse_failed = self.run_dimension_review(
-            prompt, fallback=self.review_fallback(score_keys), score_keys=score_keys,
+        review, parse_failed = self.review.run_dimension(
+            prompt, fallback=self.review.fallback(score_keys), score_keys=score_keys,
             note_file=note_file, coverage=coverage,
             review_sources=[smart_source, *article_sources],
             review_source_texts={"smart": smart_clip, **article_source_texts},

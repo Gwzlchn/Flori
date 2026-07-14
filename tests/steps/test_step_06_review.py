@@ -54,7 +54,7 @@ class TestPaperReviewStep:
         job_dir = self._setup_job(tmp_path)
         config = make_step_config(tmp_path, step_name="06_review", pool="ai")
         step = PaperReviewStep("06_review", job_dir, config)
-        monkeypatch.setattr(step, "call_ai", lambda *a, **k: "完全不是 JSON 的自然语言回复")
+        monkeypatch.setattr(step.ai, "call", lambda *a, **k: "完全不是 JSON 的自然语言回复")
         result = step.execute()
         review = json.loads((job_dir / "output" / "review.json").read_text())
         assert review["overall"] is None
@@ -73,7 +73,7 @@ class TestPaperReviewStep:
                   "terminology": 4, "formula_integrity": 4, "figure_references": 4,
                   "key_terms": [], "missing_concepts": [],
                   "top3_improvements": ["a", "b", "c"], "issues": []}
-        monkeypatch.setattr(step, "call_ai", lambda *a, **k: json.dumps(scores))
+        monkeypatch.setattr(step.ai, "call", lambda *a, **k: json.dumps(scores))
         result = step.execute()
         review = json.loads((job_dir / "output" / "review.json").read_text())
         assert result["parse_failed"] is False

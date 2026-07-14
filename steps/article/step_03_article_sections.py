@@ -20,7 +20,7 @@ class ArticleSectionsStep(StepBase):
         }
 
     def execute(self) -> dict | None:
-        parsed = self.load_json("intermediate/parsed.json")
+        parsed = self.artifacts.load_json("intermediate/parsed.json")
 
         # 文章无原生标题层级,从正文切分扁平章节
         flat = parsed.get("sections", [])
@@ -38,7 +38,7 @@ class ArticleSectionsStep(StepBase):
             "total_sections": len(flat),
         }
 
-        self.write_output("intermediate/sections.json", result)
+        self.artifacts.write("intermediate/sections.json", result)
         return {"sections": len(tree), "total_sections": len(flat)}
 
     def _split_text(self, text: str) -> list[dict]:

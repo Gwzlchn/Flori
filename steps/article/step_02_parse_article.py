@@ -126,15 +126,15 @@ class ParseArticleStep(StepBase):
             "sections": sections,
             "text": text,
         }
-        self.write_output("intermediate/parsed.json", parsed)
+        self.artifacts.write("intermediate/parsed.json", parsed)
 
         # 非中文正文 → 写翻译标记,04_translate_article 经 rules:exists 门控触发(中文文章不译)。
         if lang != "zh" and len(text) > 200:
-            self.write_output("intermediate/needs_translation.json", {"lang": lang})
+            self.artifacts.write("intermediate/needs_translation.json", {"lang": lang})
 
         # 可读原文 Markdown(图片下载到 assets/ 改本地引用),供前端「原文」tab。
         md, img_count = self._original_markdown(html, parsed, extractor)
-        self.write_output("output/original.md", md)
+        self.artifacts.write("output/original.md", md)
 
         return {"chars": len(text), "title": title, "images": img_count,
                 "abstract": bool(abstract), "tags": len(tags),

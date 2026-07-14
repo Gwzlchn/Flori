@@ -21,7 +21,7 @@ class OcrStep(StepBase):
         }
 
     def execute(self) -> dict | None:
-        dedup = self.load_json("intermediate/dedup.json")
+        dedup = self.artifacts.load_json("intermediate/dedup.json")
         assets_dir = self.job_dir / "assets"
         keep_frames = [d for d in dedup if d.get("keep", False)]
 
@@ -32,7 +32,7 @@ class OcrStep(StepBase):
         nonempty = 0
 
         for i, frame in enumerate(keep_frames):
-            self.report_progress(i, len(keep_frames), "OCR scanning")
+            self.progress.report(i, len(keep_frames), "OCR scanning")
             img_path = assets_dir / frame["filename"]
 
             if not img_path.exists():
@@ -56,8 +56,8 @@ class OcrStep(StepBase):
                 "boxes": boxes,
             })
 
-        self.report_progress(len(keep_frames), len(keep_frames), "done")
-        self.write_output("intermediate/ocr.json", results)
+        self.progress.report(len(keep_frames), len(keep_frames), "done")
+        self.artifacts.write("intermediate/ocr.json", results)
         return {"total": len(results), "nonempty": nonempty}
 
     def _create_ocr_engine(self):

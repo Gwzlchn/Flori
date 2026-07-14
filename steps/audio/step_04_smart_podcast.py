@@ -25,34 +25,34 @@ class SmartPodcastStep(StepBase):
         hashes: dict[str, str] = {
             "transcript": file_hash(self.job_dir / "intermediate" / "transcript.json"),
         }
-        hashes.update(self.prompt_profile_style_hashes())  # prompt(可选覆盖)+ profile + styles
+        hashes.update(self.ai.prompt_profile_style_hashes())  # prompt(可选覆盖)+ profile + styles
         return hashes
 
     def execute(self) -> dict | None:
-        transcript = self.load_json("intermediate/transcript.json")
+        transcript = self.artifacts.load_json("intermediate/transcript.json")
         full_text = self._full_text(transcript)
 
         if len(full_text) <= SINGLE_PASS_CHAR_LIMIT:
             # 短集:一次成稿,full_text 全量喂入不截断。
-            result = self.call_ai(self._build_prompt(transcript), max_tokens=8192)
+            result = self.ai.call(self._build_prompt(transcript), max_tokens=8192)
             mode, chunks_n = "single", 1
         else:
             # 长集:map-reduce 覆盖全文。
             result, chunks_n = self._map_reduce(transcript)
             mode = "map_reduce"
 
-        rel = self.write_smart_note(result)   # 版本化落盘(含生成时间/方式/模型)
+        rel = self.review.write_smart_note(result)   # 版本化落盘(含生成时间/方式/模型)
         return {"chars": len(result), "mode": mode, "chunks": chunks_n,
-                "provider": self.last_ai_provider, "model": self.last_ai_model,
+                "provider": self.ai.last_provider, "model": self.ai.last_model,
                 "note_file": rel}
 
     # 单次成稿
 
     def _build_prompt(self, transcript: dict) -> str:
-        profile = self.load_domain_prompt_profile()
+        profile = self.ai.load_domain_prompt_profile()
 
-        parts = [self._load_prompt_template("04_smart_podcast")]
-        parts.append(self.terminology_block(profile))  # 注入已沉淀的标准概念,各 smart 步共用
+        parts = [self.ai.load_prompt_template("04_smart_podcast")]
+        parts.append(self.ai.terminology_block(profile))  # 注入已沉淀的标准概念,各 smart 步共用
         parts.append(self._duration_line(transcript))
         parts.append("\n--- 转写正文 ---\n")
         parts.append(self._full_text(transcript))      # 全量,不截断
@@ -61,20 +61,20 @@ class SmartPodcastStep(StepBase):
     # 长集 map-reduce
 
     def _map_reduce(self, transcript: dict) -> tuple[str, int]:
-        profile = self.load_domain_prompt_profile()
+        profile = self.ai.load_domain_prompt_profile()
         chunks = self._chunk_segments(transcript, MAP_CHUNK_CHARS)
         total = len(chunks) + 1  # +1 = reduce 合并步
 
         summaries: list[str] = []
         for i, chunk in enumerate(chunks):
-            self.report_progress(i, total, f"summarizing part {i + 1}/{len(chunks)}")
-            summaries.append(self.call_ai(self._map_prompt(chunk, i, len(chunks)),
+            self.progress.report(i, total, f"summarizing part {i + 1}/{len(chunks)}")
+            summaries.append(self.ai.call(self._map_prompt(chunk, i, len(chunks)),
                                           max_tokens=4096).strip())
 
-        self.report_progress(len(chunks), total, "merging")
-        result = self.call_ai(self._reduce_prompt(summaries, transcript, profile),
+        self.progress.report(len(chunks), total, "merging")
+        result = self.ai.call(self._reduce_prompt(summaries, transcript, profile),
                               max_tokens=8192)
-        self.report_progress(total, total, "done")
+        self.progress.report(total, total, "done")
         return result, len(chunks)
 
     def _map_prompt(self, chunk: str, idx: int, n: int) -> str:
@@ -84,8 +84,8 @@ class SmartPodcastStep(StepBase):
         )
 
     def _reduce_prompt(self, summaries: list[str], transcript: dict, profile: dict) -> str:
-        parts = [self._load_prompt_template("04_smart_podcast")]
-        parts.append(self.terminology_block(profile))
+        parts = [self.ai.load_prompt_template("04_smart_podcast")]
+        parts.append(self.ai.terminology_block(profile))
         parts.append(self._duration_line(transcript))
         parts.append(
             "\n以下是该音频【按顺序分段提炼的要点】(非完整转写)。请据此合并、去重、"

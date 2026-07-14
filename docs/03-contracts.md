@@ -238,7 +238,7 @@ GET /api/jobs/j_xxx/steps/11_smart/log?raw=1  → 完整
 
 #### GET /api/jobs/{id}/ai-logs — 完整 AI 审计日志（prompt 白盒化）
 
-返回该 job 各 AI 步的**完整 AI 调用审计**(只读)。读 `output/ai_logs/{step}.jsonl`(每个 AI 步每次 LLM 调用一条,经 StorageBackend 同时适用本地和 MinIO),按 `job_id` 归成一条 trace。`?step={step}` 只返回该步。每条记录含:路由(provider/api/model/tier_used + 逐 tier `attempts` 尝试链)、延迟(ttft_ms/api_ms/总时长)、prompt(`rendered` 是实际发出的 system+user,`template` 是模板名/来源/版本/路径/字节数/SHA-256,`values` 是注入值)、输出、`transcript`(agentic 全轨迹 sidecar 引用,见下)、用量(in/out/cache)、成本、原始返回 `raw`、溯源(Flori 版本/git_commit、input_hashes、env worker)、`ok/error`(失败调用也整条记)。模板元数据和 `rendered` 中的正文来自同一份解析快照。落盘点为 `shared.step_base.call_ai`,审计写入 best-effort 且不破坏主流程。
+返回该 job 各 AI 步的**完整 AI 调用审计**(只读)。读 `output/ai_logs/{step}.jsonl`(每个 AI 步每次 LLM 调用一条,经 StorageBackend 同时适用本地和 MinIO),按 `job_id` 归成一条 trace。`?step={step}` 只返回该步。每条记录含:路由(provider/api/model/tier_used + 逐 tier `attempts` 尝试链)、延迟(ttft_ms/api_ms/总时长)、prompt(`rendered` 是实际发出的 system+user,`template` 是模板名/来源/版本/路径/字节数/SHA-256,`values` 是注入值)、输出、`transcript`(agentic 全轨迹 sidecar 引用,见下)、用量(in/out/cache)、成本、原始返回 `raw`、溯源(Flori 版本/git_commit、input_hashes、env worker)、`ok/error`(失败调用也整条记)。模板元数据和 `rendered` 中的正文来自同一份解析快照。落盘点为 `shared.step_ai.AIInvocation.call`,审计写入 best-effort 且不破坏主流程。
 
 > **AI worker 接入方式 / provider 审计对齐**:Claude CLI、Codex CLI、Kimi API key 都归同一种 `ai` worker,差异只在接入方式/凭证方式。审计必须保留具体 `provider`、`requested_model`、`effective_model`(可解析时)、`worker_id`、`worker_tags`、`ai_access_method` 与 `credential_kind`。`pool=ai` 只表示资源池,不能推断接入方式。CLI provider 有 transcript sidecar;API-key provider 无 CLI transcript 时写 `{"file": null, "reason": "non_cli_provider"}`,但其它 prompt/response/usage/cost 字段必须与 CLI provider 同形。
 

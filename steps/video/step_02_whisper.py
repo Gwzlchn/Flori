@@ -46,12 +46,12 @@ class WhisperStep(StepBase):
             srt_lines.append(f"{idx}\n{start} --> {end}\n{segment.text.strip()}\n")
             idx += 1
             if total and idx % 50 == 0:
-                self.report_progress(min(segment.end, total), total, f"transcribing ({idx} segments)")
+                self.progress.report(min(segment.end, total), total, f"transcribing ({idx} segments)")
 
         srt_content = "\n".join(srt_lines)
-        self.write_output("input/subtitle.srt", srt_content)
+        self.artifacts.write("input/subtitle.srt", srt_content)
         if total:
-            self.report_progress(total, total, "done")
+            self.progress.report(total, total, "done")
         return {"segments": idx - 1, "language": info.language, "model": model_size}
 
     def _format_srt_ts(self, seconds: float) -> str:

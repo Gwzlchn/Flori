@@ -11,7 +11,7 @@ from shared.step_base import StepBase, file_hash
 class PodcastReviewStep(StepBase):
     def validate_inputs(self) -> list[str]:
         missing = []
-        if self.latest_smart_note() is None:
+        if self.artifacts.latest_smart_note() is None:
             missing.append("output/versions/notes_smart_*.md")
         if not (self.job_dir / "intermediate" / "transcript.json").exists():
             missing.append("intermediate/transcript.json")
@@ -19,15 +19,15 @@ class PodcastReviewStep(StepBase):
 
     def input_hashes(self) -> dict[str, str]:
         hashes = {
-            "smart": file_hash(self.latest_smart_note()) if self.latest_smart_note() else "",
+            "smart": file_hash(self.artifacts.latest_smart_note()) if self.artifacts.latest_smart_note() else "",
             "transcript": file_hash(self.job_dir / "intermediate" / "transcript.json"),
-            "provider": self.override_provider(),
+            "provider": self.ai.override_provider(),
         }
-        hashes["template"] = self.template_hash(self._primary_prompt_template())
+        hashes["template"] = self.ai.template_hash(self.ai.primary_prompt_template())
         return hashes
 
     def execute(self) -> dict | None:
-        smart_clip, coverage, note_file, smart_source = self.prepare_smart_for_review()
+        smart_clip, coverage, note_file, smart_source = self.review.prepare_smart()
         transcript_data, _ = source_record(
             self.job_dir, "intermediate/transcript.json", label="transcript_json",
         )
@@ -52,7 +52,7 @@ class PodcastReviewStep(StepBase):
             ("conciseness", "口语净化程度（是否去除冗余/停顿）"),
             ("readability", "可读性"),
         ]
-        prompt = self.build_review_prompt(
+        prompt = self.review.build_prompt(
             intro="请对以下播客笔记进行质量评审。",
             dimensions=dimensions,
             ref_block=(
@@ -61,8 +61,8 @@ class PodcastReviewStep(StepBase):
             ),
         )
         score_keys = [key for key, _ in dimensions]
-        review, parse_failed = self.run_dimension_review(
-            prompt, fallback=self.review_fallback(score_keys), score_keys=score_keys,
+        review, parse_failed = self.review.run_dimension(
+            prompt, fallback=self.review.fallback(score_keys), score_keys=score_keys,
             note_file=note_file, coverage=coverage,
             review_sources=[smart_source, transcript_source],
             review_source_texts={"smart": smart_clip, "transcript": full_text},

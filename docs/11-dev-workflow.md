@@ -209,7 +209,9 @@ chore(workflow): 以交付单元收敛开发与发布治理
 ```bash
 # 1. 写步骤脚本
 cat > steps/video/step_13_translate.py << 'EOF'
-from shared.step_base import StepBase
+import json
+
+from shared.step_base import StepBase, file_hash
 
 class TranslateStep(StepBase):
     def validate_inputs(self):
@@ -225,9 +227,13 @@ class TranslateStep(StepBase):
 
     def execute(self):
         transcript = (self.job_dir / "output/transcript.md").read_text()
-        translated = self.call_ai(f"翻译以下内容为英文:\n{transcript}")
-        self.write_output("output/transcript_en.md", translated)
+        translated = self.ai.call(f"翻译以下内容为英文:\n{transcript}")
+        self.artifacts.write("output/transcript_en.md", translated)
         return {"chars": len(translated)}
+
+
+if __name__ == "__main__":
+    TranslateStep.cli_main("13_translate")
 EOF
 
 # 2. 在 pipelines.yaml 加入步骤（GitLab-CI 风格：jobs + needs）
@@ -260,7 +266,7 @@ def detect_source(url):
 def download_douyin(url, output_dir):
     # yt-dlp 支持抖音
     cmd = ["yt-dlp", url, "-o", str(output_dir / "source.%(ext)s")]
-    self.run_subprocess(cmd)
+    self.commands.run(cmd)
 ```
 
 如果新来源的视频格式不同（如竖屏短视频），可以通过 style_tags 标签调整 AI prompt，不需要改 pipeline。

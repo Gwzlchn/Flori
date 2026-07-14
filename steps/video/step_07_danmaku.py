@@ -27,7 +27,7 @@ class DanmakuStep(StepBase):
         for i, ass_file in enumerate(ass_files):
             entries = load_ass(ass_file)
             all_entries.extend(entries)
-            self.report_progress(i + 1, total_files, f"parsing danmaku ({i + 1}/{total_files})")
+            self.progress.report(i + 1, total_files, f"parsing danmaku ({i + 1}/{total_files})")
 
         all_entries.sort(key=lambda e: e.time_sec)
 
@@ -41,8 +41,8 @@ class DanmakuStep(StepBase):
             seen.add(key)
             result.append({"time_sec": round(e.time_sec, 2), "text": e.text})
 
-        self.write_output("intermediate/danmaku.json", result)
-        self.report_progress(total_files, total_files, "done")
+        self.artifacts.write("intermediate/danmaku.json", result)
+        self.progress.report(total_files, total_files, "done")
         return {"comments": len(result)}
 
 

@@ -146,7 +146,7 @@ class TestSmartPodcastStep:
             "![配图](pic.png)\n\n"                          # 裸文件名 → 补 assets/ 前缀
             + "## 正文\n足够长的真实正文以通过净化长度判废。\n" * 30
         )
-        monkeypatch.setattr(step, "call_ai", lambda *a, **k: note)
+        monkeypatch.setattr(step.ai, "call", lambda *a, **k: note)
         step.execute()
         written = next(
             (job_dir / "output" / "versions").glob("notes_smart_*.md")
@@ -159,7 +159,7 @@ class TestSmartPodcastStep:
         job_dir = self._setup(tmp_path)
         config = make_step_config(tmp_path, step_name="04_smart_podcast")
         step = SmartPodcastStep("04_smart_podcast", job_dir, config)
-        transcript = step.load_json("intermediate/transcript.json")
+        transcript = step.artifacts.load_json("intermediate/transcript.json")
         prompt = step._build_prompt(transcript)
         assert "注意力机制" in prompt
         assert "口语" in prompt
@@ -203,7 +203,7 @@ class TestSmartPodcastStep:
             calls["n"] += 1
             return note
 
-        monkeypatch.setattr(step, "call_ai", fake_ai)
+        monkeypatch.setattr(step.ai, "call", fake_ai)
         result = step.execute()
         assert result["mode"] == "single"
         assert result["chunks"] == 1
@@ -229,7 +229,7 @@ class TestSmartPodcastStep:
             calls["n"] += 1
             return note
 
-        monkeypatch.setattr(step, "call_ai", fake_ai)
+        monkeypatch.setattr(step.ai, "call", fake_ai)
         result = step.execute()
         assert result["mode"] == "map_reduce"
         assert result["chunks"] >= 2
@@ -285,7 +285,7 @@ class TestPodcastReviewStep:
         job_dir = self._setup(tmp_path)
         config = make_step_config(tmp_path, step_name="05_review", pool="ai")
         step = PodcastReviewStep("05_review", job_dir, config)
-        monkeypatch.setattr(step, "call_ai", lambda *a, **k: "不是 JSON")
+        monkeypatch.setattr(step.ai, "call", lambda *a, **k: "不是 JSON")
         result = step.execute()
         review = json.loads((job_dir / "output" / "review.json").read_text())
         assert review["overall"] is None
@@ -303,7 +303,7 @@ class TestPodcastReviewStep:
                   "terminology": 4, "conciseness": 4, "readability": 4,
                   "key_terms": [], "missing_concepts": [],
                   "top3_improvements": ["a", "b", "c"], "issues": []}
-        monkeypatch.setattr(step, "call_ai", lambda *a, **k: json.dumps(scores))
+        monkeypatch.setattr(step.ai, "call", lambda *a, **k: json.dumps(scores))
         result = step.execute()
         review = json.loads((job_dir / "output" / "review.json").read_text())
         assert result["parse_failed"] is False

@@ -129,8 +129,8 @@ class TestAiLogDump:
             "ai": {"primary": {"provider": "claude-cli", "model": "claude-opus-4-8[1m]"}},
             "pool": "ai", "domain": {"name": "finance"},
         })
-        step._gateway = _FakeGW(response=_mk_response())
-        out = step.call_ai("hello prompt")
+        step.ai.gateway = _FakeGW(response=_mk_response())
+        out = step.ai.call("hello prompt")
         assert out == "# note"
 
         (r,) = _read_log(tmp_path)
@@ -151,10 +151,10 @@ class TestAiLogDump:
 
     def test_multiple_calls_append(self, tmp_path):
         step = _Step(tmp_path, {"ai": {}})
-        step._gateway = _FakeGW(response=_mk_response())
-        step.call_ai("p1")
-        step._gateway = _FakeGW(response=_mk_response(content="second"))
-        step.call_ai("p2")
+        step.ai.gateway = _FakeGW(response=_mk_response())
+        step.ai.call("p1")
+        step.ai.gateway = _FakeGW(response=_mk_response(content="second"))
+        step.ai.call("p2")
 
         recs = _read_log(tmp_path)
         assert len(recs) == 2
@@ -204,10 +204,10 @@ class TestAiLogDump:
                 "config_dir": str(tmp_path / "image"),
             },
         })
-        step.template_hash(*templates)
-        prompt = step._load_prompt_template(actual)
-        step._gateway = _FakeGW(response=_mk_response())
-        step.call_ai(prompt)
+        step.ai.template_hash(*templates)
+        prompt = step.ai.load_prompt_template(actual)
+        step.ai.gateway = _FakeGW(response=_mk_response())
+        step.ai.call(prompt)
 
         record = _read_log(tmp_path, step_name)[0]
         template = record["prompt"]["template"]
@@ -222,9 +222,9 @@ class TestAiLogDump:
         step = _Step(tmp_path, {"ai": {}})
         exc = AllProvidersFailedError(
             "all down", attempts=[{"tier": "primary", "provider": "x", "ok": False, "error": "boom"}])
-        step._gateway = _FakeGW(exc=exc)
+        step.ai.gateway = _FakeGW(exc=exc)
         with pytest.raises(AllProvidersFailedError):
-            step.call_ai("doomed")
+            step.ai.call("doomed")
 
         (r,) = _read_log(tmp_path)
         assert r["ok"] is False
@@ -235,9 +235,9 @@ class TestAiLogDump:
 
     def test_call_ai_json_amends_output_processed(self, tmp_path):
         step = _Step(tmp_path, {"ai": {}})
-        step._gateway = _FakeGW(
+        step.ai.gateway = _FakeGW(
             response=_mk_response(content='{"key_terms": ["A", "B"], "overall": 4}'))
-        result, parse_failed = step.call_ai_json("review prompt", fallback={"key_terms": []})
+        result, parse_failed = step.ai.call_json("review prompt", fallback={"key_terms": []})
         assert parse_failed is False
         assert result["key_terms"] == ["A", "B"]
 
@@ -250,10 +250,10 @@ class TestAiLogDump:
     def test_log_write_never_breaks_main_flow(self, tmp_path):
         """ai_logs 落盘异常不得影响主流程:即便记录组装出错,call_ai 仍返回内容。"""
         step = _Step(tmp_path, {"ai": {}})
-        step._gateway = _FakeGW(response=_mk_response(content="resilient"))
+        step.ai.gateway = _FakeGW(response=_mk_response(content="resilient"))
         # 破坏组装:让 _build_ai_log_record 抛错,验证被吞、主流程不受影响。
-        step._build_ai_log_record = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
-        assert step.call_ai("x") == "resilient"
+        step.ai._build_log_record = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+        assert step.ai.call("x") == "resilient"
 
 
 class TestTranscriptSidecar:
@@ -263,8 +263,8 @@ class TestTranscriptSidecar:
         src = tmp_path / "sess.jsonl"
         src.write_text('{"type":"user"}\n{"type":"assistant"}\n')
         step = _Step(tmp_path, {"ai": {}})
-        step._gateway = _FakeGW(response=_mk_response(transcript_path=str(src)))
-        step.call_ai("hello")
+        step.ai.gateway = _FakeGW(response=_mk_response(transcript_path=str(src)))
+        step.ai.call("hello")
         rec = _read_log(tmp_path)[0]
         assert rec["transcript"]["file"] == "output/ai_logs/11_smart.turns.0.jsonl"
         assert rec["transcript"]["turns"] == 2
@@ -274,8 +274,8 @@ class TestTranscriptSidecar:
     def test_sidecar_index_follows_call_index(self, tmp_path):
         src = tmp_path / "sess.jsonl"; src.write_text("{}\n")
         step = _Step(tmp_path, {"ai": {}})
-        step._gateway = _FakeGW(response=_mk_response(transcript_path=str(src)))
-        step.call_ai("a"); step.call_ai("b")
+        step.ai.gateway = _FakeGW(response=_mk_response(transcript_path=str(src)))
+        step.ai.call("a"); step.ai.call("b")
         recs = _read_log(tmp_path)
         assert recs[0]["transcript"]["file"].endswith(".turns.0.jsonl")
         assert recs[1]["transcript"]["file"].endswith(".turns.1.jsonl")
@@ -283,8 +283,8 @@ class TestTranscriptSidecar:
 
     def test_no_transcript_records_reason(self, tmp_path):
         step = _Step(tmp_path, {"ai": {}})
-        step._gateway = _FakeGW(response=_mk_response(transcript_path=None))
-        step.call_ai("hello")
+        step.ai.gateway = _FakeGW(response=_mk_response(transcript_path=None))
+        step.ai.call("hello")
         rec = _read_log(tmp_path)[0]
         assert rec["transcript"]["file"] is None and "reason" in rec["transcript"]
 
@@ -296,9 +296,9 @@ class TestTranscriptSidecar:
             attempts=[{"tier": "primary", "provider": "claude-cli", "model": "claude-opus-4-8[1m]",
                        "ok": False, "transcript_path": str(src)}])
         step = _Step(tmp_path, {"ai": {}})
-        step._gateway = _FakeGW(exc=exc)
+        step.ai.gateway = _FakeGW(exc=exc)
         with pytest.raises(AllProvidersFailedError):
-            step.call_ai("hello")
+            step.ai.call("hello")
         rec = _read_log(tmp_path)[0]
         assert rec["ok"] is False
         assert rec["transcript"]["file"] == "output/ai_logs/11_smart.turns.0.jsonl"
@@ -320,8 +320,8 @@ class TestPendingPhase:
                 return _mk_response()
 
         step = _Step(tmp_path, {"ai": {}})
-        step._gateway = _PeekGW()
-        step.call_ai("audited input")
+        step.ai.gateway = _PeekGW()
+        step.ai.call("audited input")
 
         assert seen["at_call"] == [("pending", None, "audited input")]   # 调用中:盘上已留输入
         recs = _read_log(tmp_path)
@@ -330,9 +330,9 @@ class TestPendingPhase:
 
     def test_exception_replaces_pending_no_duplicate(self, tmp_path):
         step = _Step(tmp_path, {"ai": {}})
-        step._gateway = _FakeGW(exc=AllProvidersFailedError("down", attempts=[]))
+        step.ai.gateway = _FakeGW(exc=AllProvidersFailedError("down", attempts=[]))
         with pytest.raises(AllProvidersFailedError):
-            step.call_ai("doomed")
+            step.ai.call("doomed")
         recs = _read_log(tmp_path)
         assert len(recs) == 1
         assert recs[0]["phase"] == "final" and recs[0]["ok"] is False
@@ -344,14 +344,14 @@ class TestPendingPhase:
         from datetime import datetime
         from shared.models import LLMRequest as _Req
         req = _Req(messages=[{"role": "user", "content": "killed call"}])
-        pos = step1._write_ai_log_pending("killed call", None, [], req, datetime.now())
+        pos = step1.ai._write_log_pending("killed call", None, [], req, datetime.now())
         assert pos == 0
         assert _read_log(tmp_path)[0]["phase"] == "pending"              # 外杀现场
 
         step2 = _Step(tmp_path, {"ai": {}})                              # 重试(新进程)
-        assert step2._call_index == 1                                    # 续增,不撞旧记录
-        step2._gateway = _FakeGW(response=_mk_response())
-        step2.call_ai("retry call")
+        assert step2.ai.call_index == 1                                    # 续增,不撞旧记录
+        step2.ai.gateway = _FakeGW(response=_mk_response())
+        step2.ai.call("retry call")
 
         recs = _read_log(tmp_path)
         assert len(recs) == 2                                            # 旧 pending 未被吞

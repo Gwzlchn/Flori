@@ -44,9 +44,9 @@ class EvidenceStep(StepBase):
         # 指纹=机械稿(锚点来源)+provider+模板;锚点不变不重抓,省外网/省钱。
         h = {
             "mechanical": file_hash(mech) if mech.exists() else "",
-            "provider": self.override_provider(),
+            "provider": self.ai.override_provider(),
         }
-        t = self.template_hash("10_evidence")
+        t = self.ai.template_hash("10_evidence")
         if t:
             h["template"] = t
         return h
@@ -72,7 +72,7 @@ class EvidenceStep(StepBase):
         except UnicodeDecodeError as exc:
             raise ValueError("mechanical source is not UTF-8") from exc
         refs = self._refs(mech)
-        raw = self.call_ai(self._build_prompt(refs, mech[:_MECH_CLIP]),
+        raw = self.ai.call(self._build_prompt(refs, mech[:_MECH_CLIP]),
                            allowed_tools=["WebSearch"], max_turns=12)
         candidates, parse_failed = self._parse_candidates(raw)
         evidence = materialize_evidence(
@@ -80,17 +80,17 @@ class EvidenceStep(StepBase):
         )
         evidence["ocr_refs"] = refs
         evidence["candidate_parse_failed"] = parse_failed
-        evidence["provider"] = self.last_ai_provider
-        self.write_output("output/evidence.json", evidence)
+        evidence["provider"] = self.ai.last_provider
+        self.artifacts.write("output/evidence.json", evidence)
         return {"evidence_count": len(evidence.get("evidence", [])),
                 "eligible_count": sum(1 for x in evidence.get("evidence", []) if x.get("eligible")),
                 "parse_failed": parse_failed,
-                "refs": refs, "provider": self.last_ai_provider}
+                "refs": refs, "provider": self.ai.last_provider}
 
     def _build_prompt(self, refs: list[str], mech_clip: str) -> str:
         ref_hint = ("视频 OCR 里的处罚文号/案号：" + "、".join(refs)) if refs else "OCR 未显式给出文号/案号"
         # 用 replace 注入:prompt 含字面 {},不能用 str.format。
-        tmpl = self._load_prompt_template("10_evidence")
+        tmpl = self.ai.load_prompt_template("10_evidence")
         return tmpl.replace("<<REF_HINT>>", ref_hint).replace("<<MECH_CLIP>>", mech_clip)
 
     def _parse_candidates(self, raw: str) -> tuple[list[dict], bool]:

@@ -54,14 +54,14 @@ class TranscriptParseStep(StepBase):
             "full_text": full_text,
             "duration_sec": duration_sec,
         }
-        self.write_output("intermediate/transcript.json", transcript)
+        self.artifacts.write("intermediate/transcript.json", transcript)
 
         # 顺带产出可读的段落式逐字稿
         md = self._render_markdown(segments)
-        self.write_output("output/transcript.md", md)
+        self.artifacts.write("output/transcript.md", md)
 
         # segments.json 供下游对齐 sections 雏形
-        self.write_output("intermediate/segments.json", segments)
+        self.artifacts.write("intermediate/segments.json", segments)
 
         return {"segments": len(segments), "duration_sec": duration_sec}
 

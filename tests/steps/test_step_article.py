@@ -285,7 +285,7 @@ class TestSmartArticleStep:
         job_dir = self._setup(tmp_path)
         config = make_step_config(tmp_path, step_name="04_smart_article", pool="ai")
         step = SmartArticleStep("04_smart_article", job_dir, config)
-        sections = step.load_json("intermediate/sections.json")
+        sections = step.artifacts.load_json("intermediate/sections.json")
         prompt = step._build_prompt(sections)
         assert "示例文章" in prompt
         assert "引言" in prompt
@@ -295,7 +295,7 @@ class TestSmartArticleStep:
         job_dir = self._setup(tmp_path)
         config = make_step_config(tmp_path, step_name="04_smart_article", pool="ai")
         step = SmartArticleStep("04_smart_article", job_dir, config)
-        sections = step.load_json("intermediate/sections.json")
+        sections = step.artifacts.load_json("intermediate/sections.json")
         prompt = step._build_prompt(sections, "## 中文译文章节\n这是基于译文的正文内容。")
         assert "基于译文的正文内容" in prompt
         assert "示例文章" in prompt
@@ -308,7 +308,7 @@ class TestSmartArticleStep:
         step = SmartArticleStep("04_smart_article", job_dir, config)
         cap: dict = {}
         note = "# 笔记\n\n" + "## 正文\n足够长的真实正文内容以通过净化长度判废。\n" * 30
-        monkeypatch.setattr(step, "call_ai", lambda prompt, **k: cap.update(p=prompt) or note)
+        monkeypatch.setattr(step.ai, "call", lambda prompt, **k: cap.update(p=prompt) or note)
         result = step.execute()
         assert result["source"] == "translation"
         assert "中文译文正文内容" in cap["p"]
@@ -335,7 +335,7 @@ class TestSmartArticleStep:
             "![配图](pic.png)\n\n"                          # 裸文件名 → 补 assets/ 前缀
             + "## 正文\n足够长的真实正文以通过净化长度判废。\n" * 30
         )
-        monkeypatch.setattr(step, "call_ai", lambda *a, **k: note)
+        monkeypatch.setattr(step.ai, "call", lambda *a, **k: note)
         step.execute()
         written = next(
             (job_dir / "output" / "versions").glob("notes_smart_*.md")
@@ -382,7 +382,7 @@ class TestArticleReviewStep:
         job_dir = self._setup(tmp_path)
         config = make_step_config(tmp_path, step_name="06_review", pool="ai")
         step = ArticleReviewStep("06_review", job_dir, config)
-        monkeypatch.setattr(step, "call_ai", lambda *a, **k: "不是 JSON")
+        monkeypatch.setattr(step.ai, "call", lambda *a, **k: "不是 JSON")
         result = step.execute()
         review = json.loads((job_dir / "output" / "review.json").read_text())
         assert review["overall"] is None
@@ -400,7 +400,7 @@ class TestArticleReviewStep:
                   "readability": 4, "insight": 4,
                   "key_terms": [], "missing_concepts": [],
                   "top3_improvements": ["a", "b", "c"], "issues": []}
-        monkeypatch.setattr(step, "call_ai", lambda *a, **k: json.dumps(scores))
+        monkeypatch.setattr(step.ai, "call", lambda *a, **k: json.dumps(scores))
         result = step.execute()
         review = json.loads((job_dir / "output" / "review.json").read_text())
         assert result["parse_failed"] is False
@@ -420,7 +420,7 @@ class TestConceptsStep:
         _write_sections(job_dir)
         config = make_step_config(tmp_path, step_name="05_concepts", pool="ai")
         step = ArticleConceptsStep("05_concepts", job_dir, config)
-        step._gateway = _FakeGW(json.dumps(
+        step.ai.gateway = _FakeGW(json.dumps(
             {"summary": "讲注意力", "key_terms": [{"term": "注意力机制", "definition": "权重分配"}]}))
         result = step.execute()
         assert result["source"] == "original"
@@ -439,7 +439,7 @@ class TestConceptsStep:
             "# 笔记\n注意力机制是核心。")
         config = make_step_config(tmp_path, step_name="05_concepts", pool="ai")
         step = ArticleConceptsStep("05_concepts", job_dir, config)
-        step._gateway = _FakeGW(json.dumps({"summary": "s", "key_terms": []}))
+        step.ai.gateway = _FakeGW(json.dumps({"summary": "s", "key_terms": []}))
         result = step.execute()
         assert result["source"] == "smart_note"
 
@@ -451,7 +451,7 @@ class TestConceptsStep:
             "# 标题\n这是中文译文,用于抽取概念与一句话摘要。", encoding="utf-8")
         config = make_step_config(tmp_path, step_name="05_concepts", pool="ai")
         step = ArticleConceptsStep("05_concepts", job_dir, config)
-        step._gateway = _FakeGW(json.dumps({"summary": "s", "key_terms": []}))
+        step.ai.gateway = _FakeGW(json.dumps({"summary": "s", "key_terms": []}))
         result = step.execute()
         assert result["source"] == "translation"
 
@@ -736,7 +736,7 @@ class TestTranslateArticleStep:
             "# Title\n\nHello world, this is a test.\n\n![](assets/img_00.png)", encoding="utf-8")
         config = make_step_config(tmp_path, step_name="04_translate_article", pool="ai")
         step = TranslateArticleStep("04_translate_article", job_dir, config)
-        monkeypatch.setattr(step, "call_ai",
+        monkeypatch.setattr(step.ai, "call",
                             lambda *a, **k: "# 标题\n\n你好世界,这是一个测试。\n\n![](assets/img_00.png)")
         result = step.execute()
         assert result["chars"] > 0
@@ -754,7 +754,7 @@ class TestTranslateArticleChunking:
         config = make_step_config(tmp_path, step_name="04_translate_article", pool="ai")
         step = TranslateArticleStep("04_translate_article", job_dir, config)
         calls = []
-        monkeypatch.setattr(step, "call_ai",
+        monkeypatch.setattr(step.ai, "call",
                             lambda prompt, **k: calls.append(prompt) or f"块{len(calls)}")
         result = step.execute()
         assert result["chunks"] > 1 and len(calls) == result["chunks"]

@@ -275,7 +275,7 @@ class TestDownloadYoutube:
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, source="youtube")
         monkeypatch.delenv("FLORI_YT_COOKIES", raising=False)
-        with patch.object(step, "run_subprocess") as run, \
+        with patch.object(step.commands, "run") as run, \
              patch.object(step, "_rename_to_source_mp4") as rn:
             step._download_youtube("https://youtu.be/abc")
             cmd = run.call_args[0][0]
@@ -295,7 +295,7 @@ class TestDownloadYoutube:
             i = cmd.index("--cookies")
             seen["path"] = cmd[i + 1]
             seen["content"] = Path(cmd[i + 1]).read_text(encoding="utf-8")
-        with patch.object(step, "run_subprocess", side_effect=_capture), \
+        with patch.object(step.commands, "run", side_effect=_capture), \
              patch.object(step, "_rename_to_source_mp4"):
             step._download_youtube("https://youtu.be/abc")
         assert "netscape cookies" in seen["content"]
@@ -310,7 +310,7 @@ class TestDownloadYoutube:
         def _boom(cmd, timeout=0):
             seen["path"] = cmd[cmd.index("--cookies") + 1]
             raise RuntimeError("network down")
-        with patch.object(step, "run_subprocess", side_effect=_boom), \
+        with patch.object(step.commands, "run", side_effect=_boom), \
              pytest.raises(RuntimeError):
             step._download_youtube("https://youtu.be/abc")
         assert not Path(seen["path"]).exists()
@@ -323,7 +323,7 @@ class TestDownloadArxiv:
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, source="arxiv", content_type="paper")
         # 元数据 curl 返回空响应(ParseError → best-effort 兜底);HTML 抓取 patch 掉(不碰网络)。
-        with patch.object(step, "run_subprocess", return_value=SimpleNamespace(stdout="")) as run, \
+        with patch.object(step.commands, "run", return_value=SimpleNamespace(stdout="")) as run, \
                 patch.object(step, "_fetch_html", return_value=(None, None)):
             step._download_arxiv("https://arxiv.org/abs/2301.00001")
             cmd = run.call_args[0][0]
@@ -334,7 +334,7 @@ class TestDownloadArxiv:
         from shared.errors import InputInvalidError
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, source="arxiv", content_type="paper")
-        with patch.object(step, "run_subprocess") as run:
+        with patch.object(step.commands, "run") as run:
             with pytest.raises(InputInvalidError):
                 step._download_arxiv("https://arxiv.org/notapaper")
             run.assert_not_called()
@@ -348,7 +348,7 @@ class TestDownloadAudio:
         step = _make_step(job_dir, tmp_path, source="podcast", content_type="audio")
         with patch("shared.net.assert_public_url") as ap, \
              patch.object(step, "_verify_audio", return_value=True), \
-             patch.object(step, "run_subprocess") as run:
+             patch.object(step.commands, "run") as run:
             step._download_audio("https://cdn.example.com/ep/1.mp3")
             ap.assert_called_once_with("https://cdn.example.com/ep/1.mp3")
             cmd = run.call_args[0][0]
@@ -362,7 +362,7 @@ class TestDownloadAudio:
         step = _make_step(job_dir, tmp_path, source="podcast", content_type="audio")
         with patch("shared.net.assert_public_url",
                    side_effect=InputInvalidError("internal")) as ap, \
-             patch.object(step, "run_subprocess") as run:
+             patch.object(step.commands, "run") as run:
             with pytest.raises(InputInvalidError):
                 step._download_audio("http://127.0.0.1/secret.mp3")
             run.assert_not_called()
@@ -375,7 +375,7 @@ class TestDownloadGeneric:
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path)
         with patch("shared.net.assert_public_url"), \
-             patch.object(step, "run_subprocess") as run, \
+             patch.object(step.commands, "run") as run, \
              patch.object(step, "_rename_to_source_mp4") as rn:
             step._download_generic("https://vid.example.com/x")
             cmd = run.call_args[0][0]
@@ -390,7 +390,7 @@ class TestDownloadGeneric:
         step = _make_step(job_dir, tmp_path)
         with patch("shared.net.assert_public_url",
                    side_effect=InputInvalidError("internal")), \
-             patch.object(step, "run_subprocess") as run:
+             patch.object(step.commands, "run") as run:
             with pytest.raises(InputInvalidError):
                 step._download_generic("http://10.0.0.1/x")
             run.assert_not_called()
@@ -403,7 +403,7 @@ class TestDownloadBilibili:
         job_dir = _make_job_dir(tmp_path)
         (job_dir / "input" / ".credentials.json").write_text(json.dumps({"sessdata": "TOK"}))
         step = _make_step(job_dir, tmp_path, source="bilibili")
-        with patch.object(step, "run_subprocess") as run, \
+        with patch.object(step.commands, "run") as run, \
              patch.object(step, "_rename_downloaded_video"), \
              patch.object(step, "_prune_subtitles_danmaku"), \
              patch.object(step, "_verify_download"):
@@ -417,7 +417,7 @@ class TestDownloadBilibili:
         monkeypatch.setenv("DATA_DIR", str(tmp_path / "nope"))
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, source="bilibili")
-        with patch.object(step, "run_subprocess") as run, \
+        with patch.object(step.commands, "run") as run, \
              patch.object(step, "_rename_downloaded_video"), \
              patch.object(step, "_prune_subtitles_danmaku"), \
              patch.object(step, "_verify_download"):
@@ -431,7 +431,7 @@ class TestDownloadBilibili:
         monkeypatch.setenv("BILI_SESSDATA", "dispatched-token")
         job_dir = _make_job_dir(tmp_path)   # 无 .credentials.json → 只能来自 env
         step = _make_step(job_dir, tmp_path, source="bilibili")
-        with patch.object(step, "run_subprocess") as run, \
+        with patch.object(step.commands, "run") as run, \
              patch.object(step, "_rename_downloaded_video"), \
              patch.object(step, "_prune_subtitles_danmaku"), \
              patch.object(step, "_verify_download"):
@@ -443,7 +443,7 @@ class TestDownloadBilibili:
         monkeypatch.setenv("DATA_DIR", str(tmp_path / "nope"))
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, source="bilibili")
-        with patch.object(step, "run_subprocess", side_effect=RuntimeError("yutto boom")), \
+        with patch.object(step.commands, "run", side_effect=RuntimeError("yutto boom")), \
              patch.object(step, "_download_bili_ytdlp") as fallback, \
              patch.object(step, "_verify_download"):
             step._download_bilibili("https://www.bilibili.com/video/BV1xx411c7mD")
@@ -459,7 +459,7 @@ class TestDownloadBilibili:
         monkeypatch.setenv("DATA_DIR", str(tmp_path / "nope"))
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, source="bilibili")
-        with patch.object(step, "run_subprocess") as run, \
+        with patch.object(step.commands, "run") as run, \
              patch.object(step, "_rename_downloaded_video"), \
              patch.object(step, "_prune_subtitles_danmaku"), \
              patch.object(step, "_verify_download"):
@@ -475,7 +475,7 @@ class TestDownloadBiliYtdlp:
     def test_with_sessdata_adds_cookie_header(self, tmp_path):
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path)
-        with patch.object(step, "run_subprocess") as run, \
+        with patch.object(step.commands, "run") as run, \
              patch.object(step, "_rename_to_source_mp4") as rn:
             step._download_bili_ytdlp("https://www.bilibili.com/video/BVx", job_dir / "input", "SESS")
             cmd = run.call_args[0][0]
@@ -487,7 +487,7 @@ class TestDownloadBiliYtdlp:
     def test_without_sessdata_no_cookie_header(self, tmp_path):
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path)
-        with patch.object(step, "run_subprocess") as run, \
+        with patch.object(step.commands, "run") as run, \
              patch.object(step, "_rename_to_source_mp4"):
             step._download_bili_ytdlp("https://www.bilibili.com/video/BVx", job_dir / "input", None)
             cmd = run.call_args[0][0]
@@ -738,7 +738,7 @@ class TestFetchArxivHtml:
         step = _make_step(job_dir, tmp_path, source="arxiv", content_type="paper")
         html = '<div class="ltx_page_main"><img src="x1v2/x1.png"></div>'
         with patch.object(step, "_fetch_html", return_value=(html, "https://arxiv.org/html/x1")), \
-                patch.object(step, "run_subprocess", return_value=SimpleNamespace(stdout="")) as run:
+                patch.object(step.commands, "run", return_value=SimpleNamespace(stdout="")) as run:
             step._fetch_arxiv_html("1810.04805")
         saved = (job_dir / "input" / "source.html").read_text(encoding="utf-8")
         assert 'src="assets/x1v2_x1.png"' in saved        # 引用重写为本地 assets(扁平名含相对目录段)
@@ -758,7 +758,7 @@ class TestFetchArxivHtml:
         step = _make_step(job_dir, tmp_path, source="arxiv", content_type="paper")
         html = '<div class="ltx_page_main"><img src="x1v2/x1.png"></div>'
         with patch.object(step, "_fetch_html", return_value=(html, "https://arxiv.org/html/x1")), \
-                patch.object(step, "run_subprocess", side_effect=RuntimeError("curl fail")):
+                patch.object(step.commands, "run", side_effect=RuntimeError("curl fail")):
             step._fetch_arxiv_html("1810.04805")
         saved = (job_dir / "input" / "source.html").read_text(encoding="utf-8")
         assert 'src="https://arxiv.org/html/x1v2/x1.png"' in saved  # 失败留绝对 URL(RFC3986 语义拼)

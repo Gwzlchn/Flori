@@ -24,7 +24,7 @@ class PunctuateStep(StepBase):
             return {}
         # 语言纳入指纹:同字幕在加标点与翻译两种模式下产物不同,须各自重算。
         h = {sub.name: file_hash(sub), "mode": "zh" if is_zh else "translate"}
-        t = self.template_hash("08_punctuate.zh", "08_punctuate.translate")
+        t = self.ai.template_hash("08_punctuate.zh", "08_punctuate.translate")
         if t:
             h["template"] = t
         return h
@@ -36,20 +36,20 @@ class PunctuateStep(StepBase):
         lines = [f"{format_timestamp(e.start_sec)} {e.text}" for e in all_entries]
         full_text = "\n".join(lines)
 
-        header = self._load_prompt_template(
+        header = self.ai.load_prompt_template(
             "08_punctuate.zh" if is_zh else "08_punctuate.translate",
         )
         chunks = self._split_chunks(full_text, CHUNK_SIZE)
         results = []
         action = "punctuating" if is_zh else "translating"
         for i, chunk in enumerate(chunks):
-            self.report_progress(i, len(chunks), f"{action} chunk {i + 1}/{len(chunks)}")
-            results.append(self.call_ai(header + chunk).strip())
+            self.progress.report(i, len(chunks), f"{action} chunk {i + 1}/{len(chunks)}")
+            results.append(self.ai.call(header + chunk).strip())
 
-        self.report_progress(len(chunks), len(chunks), "done")
+        self.progress.report(len(chunks), len(chunks), "done")
         # 每条 [MM:SS] 单独成段(空行分隔):否则 Markdown 会把单换行折叠成一坨墙、难读。
         cues = [ln.strip() for r in results for ln in r.splitlines() if ln.strip()]
-        self.write_output("output/transcript.md", "\n\n".join(cues))
+        self.artifacts.write("output/transcript.md", "\n\n".join(cues))
         return {"lines": len(all_entries), "chunks": len(chunks),
                 "mode": "zh" if is_zh else "translate"}
 

@@ -40,7 +40,7 @@ class TranslatePaperStep(StepBase):
             figs = self.job_dir / "intermediate" / "figures.json"
             if figs.exists():                  # 遗留组装路径:译文含图表引用,图变了要重译
                 h["figures"] = file_hash(figs)
-        active_template = getattr(self, "_active_prompt_name", None)
+        active_template = self.ai.active_prompt_name
         if active_template in {"04_translate_paper", "04_translate_paper.pdf"}:
             template_name = active_template
         else:
@@ -49,7 +49,7 @@ class TranslatePaperStep(StepBase):
                 if self._is_pdf_only()
                 else "04_translate_paper"
             )
-        t = self.template_hash(template_name)
+        t = self.ai.template_hash(template_name)
         if t:
             h["template"] = t
         return h
@@ -67,21 +67,21 @@ class TranslatePaperStep(StepBase):
         new_pairs: dict[str, str] = {}   # L3:本篇滚动新定译名(chunk 间传递,收尾落盘回流)
         parts: list[str] = []
         for i, chunk in enumerate(chunks):
-            self.report_progress(i, len(chunks), f"translating chunk {i + 1}/{len(chunks)}")
+            self.progress.report(i, len(chunks), f"translating chunk {i + 1}/{len(chunks)}")
             merged = {**base_map, **new_pairs}
             block = render_term_block(hit_terms(chunk, merged))
-            part = self.call_ai(self._build_prompt(chunk, block), max_tokens=16384).strip()
+            part = self.ai.call(self._build_prompt(chunk, block), max_tokens=16384).strip()
             parts.append(part)
             for en, zh in extract_pairs(part).items():
                 if en not in merged:      # 只收新词:已注入的恒定,避免中途改名
                     new_pairs[en] = zh
-        self.report_progress(len(chunks), len(chunks), "done")
+        self.progress.report(len(chunks), len(chunks), "done")
         result = "\n\n".join(parts)
 
-        self.write_output("output/translated.md", result)
+        self.artifacts.write("output/translated.md", result)
         self._write_term_pairs(new_pairs)
         return {"chars": len(result), "chunks": len(chunks), "new_terms": len(new_pairs),
-                "provider": self.last_ai_provider, "model": self.last_ai_model}
+                "provider": self.ai.last_provider, "model": self.ai.last_model}
 
     def _source_markdown(self) -> str:
         """翻译源文:首选 output/original.md(arxiv-html 由 02 产出,公式/图无损,图引用已在原位);
@@ -164,13 +164,13 @@ class TranslatePaperStep(StepBase):
 
     def _build_prompt(self, md: str, term_block: str = "") -> str:
         # <<TERMS>> = 本 chunk 命中的术语对照段(shared/terms.py;无命中为空串,prompt 无痕)。
-        tmpl = self._load_prompt_template("04_translate_paper")
+        tmpl = self.ai.load_prompt_template("04_translate_paper")
         return tmpl.replace("<<TERMS>>", term_block).replace("<<BODY>>", md)
 
     def _load_term_map(self) -> dict[str, str]:
         """input/term_map.json(scheduler 导出的 L1/L2 快照);缺失/坏 JSON 返回空表(降级无害)。"""
         try:
-            m = self.load_json("input/term_map.json")
+            m = self.artifacts.load_json("input/term_map.json")
             return m if isinstance(m, dict) else {}
         except Exception:
             return {}
@@ -179,7 +179,7 @@ class TranslatePaperStep(StepBase):
         """本篇新定译名落产物,供 scheduler 回流 glossary/集合表(空表不写,省一个对象)。"""
         if pairs:
             import json as _json
-            self.write_output("output/term_pairs.json",
+            self.artifacts.write("output/term_pairs.json",
                               _json.dumps(pairs, ensure_ascii=False, indent=1))
 
     # ── pdf-only 直喂:无文本可抽(pymupdf 已废),claude Read 按页区间读 PDF 翻译 ──
@@ -206,12 +206,12 @@ class TranslatePaperStep(StepBase):
             raise InputInvalidError("pdf-only translate needs parsed.json.pages > 0")
         ranges = [(i, min(i + self.PAGES_PER_CHUNK - 1, pages))
                   for i in range(1, pages + 1, self.PAGES_PER_CHUNK)]
-        tmpl = self._load_prompt_template("04_translate_paper.pdf")
+        tmpl = self.ai.load_prompt_template("04_translate_paper.pdf")
         base_map = self._load_term_map()
         new_pairs: dict[str, str] = {}
         parts: list[str] = []
         for n, (a, b) in enumerate(ranges):
-            self.report_progress(n, len(ranges), f"translating pages {a}-{b}/{pages}")
+            self.progress.report(n, len(ranges), f"translating pages {a}-{b}/{pages}")
             # pdf 直喂看不到原文文本 → 术语命中退化为「已收对照 + 全库表」直接给
             # (表通常远小于 40 上限;超限按注入表意义排序:L3 新词优先保留)。
             merged = {**base_map, **new_pairs}
@@ -221,21 +221,21 @@ class TranslatePaperStep(StepBase):
                           .replace("<<PDF_PATH>>", str(pdf))
                           .replace("<<START>>", str(a)).replace("<<END>>", str(b)))
             # Read 每页一轮 + 思考/生成余量;--add-dir 放行 PDF 所在目录(input/)。
-            part = self.call_ai(prompt, max_tokens=16384,
+            part = self.ai.call(prompt, max_tokens=16384,
                                 allowed_tools=["Read"], add_dirs=[str(pdf.parent)],
                                 max_turns=(b - a + 1) * 2 + 4).strip()
             parts.append(part)
             for en, zh in extract_pairs(part).items():
                 if en not in merged:
                     new_pairs[en] = zh
-        self.report_progress(len(ranges), len(ranges), "done")
+        self.progress.report(len(ranges), len(ranges), "done")
         result = "\n\n".join(parts)
         result, fig_pages = self._link_figure_pages(result, pages)
-        self.write_output("output/translated.md", result)
+        self.artifacts.write("output/translated.md", result)
         self._write_term_pairs(new_pairs)
         return {"chars": len(result), "chunks": len(ranges), "mode": "pdf-direct",
                 "figure_pages": fig_pages,
-                "provider": self.last_ai_provider, "model": self.last_ai_model}
+                "provider": self.ai.last_provider, "model": self.ai.last_model}
 
     # 占位行:【图 N|第 p 页】/【表 N|第 p 页】(prompt 规则 3;旧译文无 |页码 → 不匹配自然跳过)。
     _FIG_PAGE_RE = __import__("re").compile(r"【[图表]\s*[\d.]+[^】|]*\|\s*第\s*(\d+)\s*页】")

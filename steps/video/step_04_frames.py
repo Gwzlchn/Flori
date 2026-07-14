@@ -72,7 +72,7 @@ class FramesStep(StepBase):
         }
 
     def execute(self) -> dict | None:
-        scenes = self.load_json("intermediate/scenes.json")
+        scenes = self.artifacts.load_json("intermediate/scenes.json")
         video_path = self.job_dir / "input" / "source.mp4"
         assets_dir = self.job_dir / "assets"
         assets_dir.mkdir(parents=True, exist_ok=True)
@@ -91,7 +91,7 @@ class FramesStep(StepBase):
 
         try:
             for i, scene in enumerate(scenes):
-                self.report_progress(i, len(scenes), "extracting frames")
+                self.progress.report(i, len(scenes), "extracting frames")
                 start = float(scene["start_sec"])
                 end = float(scene["end_sec"])
                 sf = int(start * fps)
@@ -113,8 +113,8 @@ class FramesStep(StepBase):
         finally:
             reader.close()
 
-        self.report_progress(len(scenes), len(scenes), "done")
-        self.write_output("intermediate/candidates.json", candidates)
+        self.progress.report(len(scenes), len(scenes), "done")
+        self.artifacts.write("intermediate/candidates.json", candidates)
         scene_n = sum(1 for c in candidates if c.get("source") == "scene")
         return {"total": len(candidates), "scenes": len(scenes), "sampled": len(candidates) - scene_n}
 

@@ -77,7 +77,7 @@ class TestSmartPaperStep:
         step = SmartPaperStep("05_smart_paper", job_dir, config)
         cap: dict = {}
         note = "# 笔记\n\n" + "## 正文\n足够长的真实正文内容以通过净化长度判废。\n" * 30
-        monkeypatch.setattr(step, "call_ai", lambda prompt, **k: cap.update(p=prompt) or note)
+        monkeypatch.setattr(step.ai, "call", lambda prompt, **k: cap.update(p=prompt) or note)
         result = step.execute()
         assert result["source"] == "translation"
         assert "中文译文正文内容" in cap["p"]
@@ -103,7 +103,7 @@ class TestSmartPaperStep:
             "![流程](diagram.png)\n\n"                       # 裸文件名 → sanitize 补 assets/ 前缀
             + "## 正文\n足够长的真实正文以通过净化长度判废(strict 下 <500 触发重试)。\n" * 30
         )
-        monkeypatch.setattr(step, "call_ai", lambda *a, **k: note)
+        monkeypatch.setattr(step.ai, "call", lambda *a, **k: note)
 
         result = step.execute()
         written = next(
@@ -119,8 +119,8 @@ class TestSmartPaperStep:
         job_dir = self._setup_job(tmp_path)
         config = make_step_config(tmp_path, step_name="05_smart_paper")
         step = SmartPaperStep("05_smart_paper", job_dir, config)
-        sections = step.load_json("intermediate/sections.json")
-        figures = step.load_json("intermediate/figures.json")
+        sections = step.artifacts.load_json("intermediate/sections.json")
+        figures = step.artifacts.load_json("intermediate/figures.json")
         prompt = step._build_prompt(sections, figures)
         assert "Test Paper" in prompt
         assert "fig1" in prompt
@@ -147,8 +147,8 @@ def test_pdf_only_direct_notes(tmp_path, monkeypatch):
     def fake_call(prompt, **kw):
         seen["prompt"], seen["kw"] = prompt, kw
         return "# 笔记"
-    monkeypatch.setattr(step, "call_ai", fake_call)
-    monkeypatch.setattr(step, "write_smart_note", lambda text, image_assets=None: "output/versions/x.md")
+    monkeypatch.setattr(step.ai, "call", fake_call)
+    monkeypatch.setattr(step.review, "write_smart_note", lambda text, image_assets=None: "output/versions/x.md")
     r = step.execute()
     assert r["source"] == "pdf-direct"
     assert seen["kw"]["allowed_tools"] == ["Read"]
@@ -214,10 +214,10 @@ def test_text_body_snapshot_survives_disappearance_without_read_tool(tmp_path, m
 
     monkeypatch.setattr(step, "_read_optional_text", present_snapshot_then_disappear)
     monkeypatch.setattr(
-        step, "write_smart_note",
+        step.review, "write_smart_note",
         lambda _text, image_assets=None: "output/versions/captured.md",
     )
-    step._gateway = Gateway()
+    step.ai.gateway = Gateway()
     result = step.execute()
     assert result["source"] == "original"
     assert "captured body" in prompts[0]

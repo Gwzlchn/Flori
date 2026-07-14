@@ -36,22 +36,22 @@ def test_review_templates_share_skeleton():
 
 
 def _mk_step(tmp_path: Path):
-    """构造一个最小 StepBase 实例(只为测 _load_prompt_template/template_hash)。"""
+    """构造一个最小 StepBase 实例以验证 Prompt 解析快照。"""
     from shared.step_base import StepBase
-    s = StepBase.__new__(StepBase)
-    s.config = {"paths": {"prompts_dir": str(tmp_path), "config_dir": str(tmp_path / "image")},
-                "step": {"name": "x"}}
-    s.step_name = "x"
-    s._resolved_prompts = {}
-    s._prompt_overrides_snapshot = {}
-    return s
+    return StepBase("x", tmp_path, {
+        "paths": {
+            "prompts_dir": str(tmp_path),
+            "config_dir": str(tmp_path / "image"),
+        },
+        "step": {"name": "x"},
+    })
 
 
 def test_load_prompt_template_missing_fails_closed(tmp_path):
     s = _mk_step(tmp_path)
     from shared.prompt_resolver import PromptResolutionError
     with pytest.raises(PromptResolutionError, match="missing"):
-        s._load_prompt_template("nope")
+        s.ai.load_prompt_template("nope")
 
 
 def test_load_prompt_template_reads_file(tmp_path):
@@ -59,9 +59,9 @@ def test_load_prompt_template_reads_file(tmp_path):
     td = tmp_path / "templates"
     td.mkdir(parents=True)
     (td / "foo.md").write_text("FROM-FILE <<BODY>>", encoding="utf-8")
-    assert s._load_prompt_template("foo") == "FROM-FILE <<BODY>>"
+    assert s.ai.load_prompt_template("foo") == "FROM-FILE <<BODY>>"
     # 占位用 replace 注入(prompt 含字面 {},不可 format)
-    assert s._load_prompt_template("foo").replace("<<BODY>>", "X{a}") == "FROM-FILE X{a}"
+    assert s.ai.load_prompt_template("foo").replace("<<BODY>>", "X{a}") == "FROM-FILE X{a}"
 
 
 def test_template_hash_changes_on_edit(tmp_path):
@@ -70,11 +70,11 @@ def test_template_hash_changes_on_edit(tmp_path):
     td.mkdir()
     f = td / "foo.md"
     f.write_text("v1", encoding="utf-8")
-    h1 = s.template_hash("foo")
+    h1 = s.ai.template_hash("foo")
     assert h1  # 非空
     f.write_text("v2", encoding="utf-8")
-    assert s.template_hash("foo") == h1  # 同一次执行固定同一字节快照
-    assert _mk_step(tmp_path).template_hash("foo") != h1
+    assert s.ai.template_hash("foo") == h1  # 同一次执行固定同一字节快照
+    assert _mk_step(tmp_path).ai.template_hash("foo") != h1
 
 
 # 评审 prompt 白盒:build_review_prompt 骨架 + 运行期注入
@@ -95,7 +95,7 @@ def test_build_review_prompt_default_injects_all_placeholders(tmp_path):
     """镜像 tracked 骨架渲染 intro/维度表/score 示例/参照块."""
     s = _mk_review_step(tmp_path)
     dims = [("completeness", "信息完整性"), ("accuracy", "准确性")]
-    p = s.build_review_prompt(intro="请评审本笔记。", dimensions=dims, ref_block="REF-XYZ")
+    p = s.review.build_prompt(intro="请评审本笔记。", dimensions=dims, ref_block="REF-XYZ")
     assert "请评审本笔记。" in p
     assert "1. completeness: 信息完整性" in p
     assert "2. accuracy: 准确性" in p
@@ -111,9 +111,9 @@ def test_build_review_prompt_uses_db_override_with_refblock(tmp_path):
         '{"prompt_overrides":{"06_review":{"content":"自定义评审指令\\n\\n{{ref_block}}","version":1}}}',
         encoding="utf-8",
     )
-    s._prompt_overrides_snapshot = None
-    s._resolved_prompts = {}
-    p = s.build_review_prompt(intro="X", dimensions=[("a", "A")], ref_block="REFBLK")
+    s.ai.prompt_overrides_snapshot = None
+    s.ai.resolved_prompts = {}
+    p = s.review.build_prompt(intro="X", dimensions=[("a", "A")], ref_block="REFBLK")
     assert "自定义评审指令" in p
     assert "REFBLK" in p
 
@@ -125,9 +125,9 @@ def test_build_review_prompt_appends_refblock_when_placeholder_missing(tmp_path)
         '{"prompt_overrides":{"06_review":{"content":"覆盖里没有占位符","version":1}}}',
         encoding="utf-8",
     )
-    s._prompt_overrides_snapshot = None
-    s._resolved_prompts = {}
-    p = s.build_review_prompt(intro="X", dimensions=[("a", "A")], ref_block="REFBLK")
+    s.ai.prompt_overrides_snapshot = None
+    s.ai.resolved_prompts = {}
+    p = s.review.build_prompt(intro="X", dimensions=[("a", "A")], ref_block="REFBLK")
     assert "覆盖里没有占位符" in p
     assert p.rstrip().endswith("REFBLK")
 
@@ -138,5 +138,5 @@ def test_build_review_prompt_reads_template_file(tmp_path):
     td = tmp_path / "hot" / "templates"
     td.mkdir(parents=True)
     (td / "06_review.md").write_text("FILE骨架 {{intro}} || {{ref_block}}", encoding="utf-8")
-    p = s.build_review_prompt(intro="INTRO", dimensions=[("a", "A")], ref_block="RB")
+    p = s.review.build_prompt(intro="INTRO", dimensions=[("a", "A")], ref_block="RB")
     assert p == "FILE骨架 INTRO || RB"

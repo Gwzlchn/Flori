@@ -24,7 +24,7 @@ class TranslateArticleStep(StepBase):
 
     def input_hashes(self) -> dict[str, str]:
         h = {"original": file_hash(self.job_dir / "output" / "original.md")}
-        t = self.template_hash("04_translate_article")
+        t = self.ai.template_hash("04_translate_article")
         if t:
             h["template"] = t
         return h
@@ -39,34 +39,34 @@ class TranslateArticleStep(StepBase):
         new_pairs: dict[str, str] = {}   # L3:本篇滚动新定译名(chunk 间传递,收尾落盘回流)
         parts: list[str] = []
         for i, chunk in enumerate(chunks):
-            self.report_progress(i, len(chunks), f"translating chunk {i + 1}/{len(chunks)}")
+            self.progress.report(i, len(chunks), f"translating chunk {i + 1}/{len(chunks)}")
             merged = {**base_map, **new_pairs}
             block = render_term_block(hit_terms(chunk, merged))
-            part = self.call_ai(self._build_prompt(chunk, block), max_tokens=16384).strip()
+            part = self.ai.call(self._build_prompt(chunk, block), max_tokens=16384).strip()
             parts.append(part)
             for en, zh in extract_pairs(part).items():
                 if en not in merged:      # 只收新词:已注入的恒定,避免中途改名
                     new_pairs[en] = zh
-        self.report_progress(len(chunks), len(chunks), "done")
+        self.progress.report(len(chunks), len(chunks), "done")
         result = "\n\n".join(parts)
 
-        self.write_output("output/translated.md", result)
+        self.artifacts.write("output/translated.md", result)
         if new_pairs:
             import json as _json
-            self.write_output("output/term_pairs.json",
+            self.artifacts.write("output/term_pairs.json",
                               _json.dumps(new_pairs, ensure_ascii=False, indent=1))
         return {"chars": len(result), "chunks": len(chunks), "new_terms": len(new_pairs),
-                "provider": self.last_ai_provider, "model": self.last_ai_model}
+                "provider": self.ai.last_provider, "model": self.ai.last_model}
 
     def _build_prompt(self, md: str, term_block: str = "") -> str:
         # <<TERMS>> = 本 chunk 命中的术语对照段(shared/terms.py;无命中为空串,prompt 无痕)。
-        tmpl = self._load_prompt_template("04_translate_article")
+        tmpl = self.ai.load_prompt_template("04_translate_article")
         return tmpl.replace("<<TERMS>>", term_block).replace("<<BODY>>", md)
 
     def _load_term_map(self) -> dict[str, str]:
         """input/term_map.json(scheduler 导出的 L1/L2 快照);缺失/坏 JSON 返回空表(降级无害)。"""
         try:
-            m = self.load_json("input/term_map.json")
+            m = self.artifacts.load_json("input/term_map.json")
             return m if isinstance(m, dict) else {}
         except Exception:
             return {}

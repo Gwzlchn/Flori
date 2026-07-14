@@ -27,7 +27,7 @@ class SmartPaperStep(StepBase):
         translated = self.job_dir / "output" / "translated.md"
         if translated.exists():
             hashes["translated"] = file_hash(translated)   # 非中文论文随译文变化重跑
-        hashes.update(self.prompt_profile_style_hashes())  # prompt(可选覆盖)+ profile + styles
+        hashes.update(self.ai.prompt_profile_style_hashes())  # prompt(可选覆盖)+ profile + styles
         return hashes
 
     def execute(self) -> dict | None:
@@ -58,11 +58,11 @@ class SmartPaperStep(StepBase):
 
         prompt = self._build_prompt(sections, figures, body)
         # 结构化中文笔记常超默认 4096 output tokens,显式抬高上限防被静默截断(claude-cli 无视无害)。
-        result = self.call_ai(prompt, max_tokens=8192)
+        result = self.ai.call(prompt, max_tokens=8192)
 
-        rel = self.write_smart_note(result, image_assets=image_assets)  # 回填占位符 + 版本化落盘
-        return {"chars": len(result), "provider": self.last_ai_provider,
-                "model": self.last_ai_model, "note_file": rel,
+        rel = self.review.write_smart_note(result, image_assets=image_assets)  # 回填占位符 + 版本化落盘
+        return {"chars": len(result), "provider": self.ai.last_provider,
+                "model": self.ai.last_model, "note_file": rel,
                 "source": body_source or "original"}
 
     def _read_optional_text(self, rel_path: str) -> str | None:
@@ -105,24 +105,24 @@ class SmartPaperStep(StepBase):
         parsed = self._load_json_bounded("intermediate/parsed.json") or {}
         pages = int(parsed.get("pages") or 0) if isinstance(parsed, dict) else 0
         cap = min(pages or 30, 60)
-        prompt = (self._load_prompt_template("05_smart_paper")
-                  + self.terminology_block(self.load_domain_prompt_profile())
+        prompt = (self.ai.load_prompt_template("05_smart_paper")
+                  + self.ai.terminology_block(self.ai.load_domain_prompt_profile())
                   + f"\n论文标题：{sections.get('title', '未知')}\n"
                   + f"\n用 Read 工具阅读论文 PDF:{pdf}(共 {pages} 页,读前 {cap} 页),"
                     "然后按上面要求产出中文结构化学习笔记(不内嵌图片占位符)。\n")
-        result = self.call_ai(prompt, max_tokens=8192,
+        result = self.ai.call(prompt, max_tokens=8192,
                               allowed_tools=["Read"], add_dirs=[str(pdf.parent)],
                               max_turns=cap * 2 + 6)
-        rel = self.write_smart_note(result, image_assets=[])
-        return {"chars": len(result), "provider": self.last_ai_provider,
-                "model": self.last_ai_model, "note_file": rel, "source": "pdf-direct"}
+        rel = self.review.write_smart_note(result, image_assets=[])
+        return {"chars": len(result), "provider": self.ai.last_provider,
+                "model": self.ai.last_model, "note_file": rel, "source": "pdf-direct"}
 
     def _build_prompt(self, sections: dict, figures: list, body: str | None = None) -> str:
-        profile = self.load_domain_prompt_profile()
+        profile = self.ai.load_domain_prompt_profile()
 
-        parts = [self._load_prompt_template("05_smart_paper")]
+        parts = [self.ai.load_prompt_template("05_smart_paper")]
 
-        parts.append(self.terminology_block(profile))  # 注入已沉淀的标准概念,各 smart 步共用
+        parts.append(self.ai.terminology_block(profile))  # 注入已沉淀的标准概念,各 smart 步共用
 
         parts.append(f"\n论文标题：{sections.get('title', '未知')}\n")
         parts.append(f"作者：{', '.join(sections.get('authors', []))}\n")

@@ -48,7 +48,7 @@ class SceneStep(StepBase):
 
         total_frames = video.duration.frame_num
         scene_manager.detect_scenes(video, show_progress=False, callback=lambda frame_img, position: (
-            self.report_progress(position.frame_num, total_frames, "scanning frames")
+            self.progress.report(position.frame_num, total_frames, "scanning frames")
             if position.frame_num % 500 == 0 else None
         ))
 
@@ -65,8 +65,8 @@ class SceneStep(StepBase):
                 "duration_sec": round((end - start).get_seconds(), 2),
             })
 
-        self.report_progress(total_frames, total_frames, "done")
-        self.write_output("intermediate/scenes.json", scenes)
+        self.progress.report(total_frames, total_frames, "done")
+        self.artifacts.write("intermediate/scenes.json", scenes)
         return {"scenes": len(scenes)}
 
 

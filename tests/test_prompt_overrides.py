@@ -220,8 +220,8 @@ class TestSystemPromptFallback:
     def test_injected_override_wins(self, tmp_path):
         # 纯字符串格式:job.json.prompt_overrides[step] 为 str,兼容存量 job,不可去掉。
         s = _mk_step(tmp_path, {"custom_ai": "INJECTED"}, step="custom_ai")
-        assert s._injected_prompt_override() == "INJECTED"
-        assert s._load_system_prompt() == "INJECTED"
+        assert s.ai.injected_prompt_override() == "INJECTED"
+        assert s.ai.load_system_prompt() == "INJECTED"
 
     def test_injected_override_new_dict_format(self, tmp_path):
         # 字典格式:{content, version} → 注入取出正文,版本只供 Job 详情比对。
@@ -230,21 +230,21 @@ class TestSystemPromptFallback:
             {"custom_ai": {"content": "INJECTED", "version": 3}},
             step="custom_ai",
         )
-        assert s._injected_prompt_override() == "INJECTED"
-        assert s._load_system_prompt() == "INJECTED"
+        assert s.ai.injected_prompt_override() == "INJECTED"
+        assert s.ai.load_system_prompt() == "INJECTED"
 
     def test_injected_override_dict_missing_content_fails_closed(self, tmp_path):
         s = _mk_step(tmp_path, {"11_smart": {"version": 2}})
         from shared.prompt_resolver import PromptResolutionError
         with pytest.raises(PromptResolutionError, match="shape"):
-            s._injected_prompt_override()
+            s.ai.injected_prompt_override()
 
     def test_file_hook_used_when_no_injection(self, tmp_path):
         pd = tmp_path / "prompts"
         pd.mkdir()
         (pd / "11_smart.md").write_text("FROMFILE", encoding="utf-8")
         s = _mk_step(tmp_path, {}, prompts_dir=pd)
-        assert s._load_system_prompt() == "FROMFILE"
+        assert s.ai.load_system_prompt() == "FROMFILE"
 
     def test_injection_overrides_file_hook(self, tmp_path):
         pd = tmp_path / "prompts"
@@ -254,20 +254,20 @@ class TestSystemPromptFallback:
             tmp_path, {"custom_ai": "INJECTED"},
             prompts_dir=pd, step="custom_ai",
         )
-        assert s._load_system_prompt() == "INJECTED"
+        assert s.ai.load_system_prompt() == "INJECTED"
 
     def test_none_when_no_override_no_file(self, tmp_path):
         s = _mk_step(tmp_path, {})
-        assert s._load_system_prompt() is None
+        assert s.ai.load_system_prompt() is None
 
     def test_other_step_injection_ignored(self, tmp_path):
         s = _mk_step(tmp_path, {"12_review": "X"})
-        assert s._injected_prompt_override() == ""
-        assert s._load_system_prompt() is None
+        assert s.ai.injected_prompt_override() == ""
+        assert s.ai.load_system_prompt() is None
 
     def test_missing_job_json_safe(self, tmp_path):
         s = _Step("11_smart", tmp_path, {})   # 无 job.json
-        assert s._injected_prompt_override() == ""
+        assert s.ai.injected_prompt_override() == ""
 
     def test_explicit_null_prompt_override_map_fails_closed(self, tmp_path):
         (tmp_path / "job.json").write_text('{"prompt_overrides":null}', encoding="utf-8")
@@ -278,7 +278,7 @@ class TestSystemPromptFallback:
         })
         from shared.prompt_resolver import PromptResolutionError
         with pytest.raises(PromptResolutionError, match="map"):
-            s._injected_prompt_override()
+            s.ai.injected_prompt_override()
 
     def test_template_step_injection_not_used_as_system(self, tmp_path):
         # 有外置模板的步:覆盖作用于 user 模板层,不当 system,避免双重套用。
@@ -286,8 +286,8 @@ class TestSystemPromptFallback:
         (pd / "templates").mkdir(parents=True)
         (pd / "templates" / "11_smart.md").write_text("TPL", encoding="utf-8")
         s = _mk_step(tmp_path, {"11_smart": "INJECTED"}, prompts_dir=pd)
-        assert s._has_step_template() is True
-        assert s._load_system_prompt() is None
+        assert s.ai.has_step_template() is True
+        assert s.ai.load_system_prompt() is None
 
 
 class TestPromptTemplateOverride:
@@ -300,7 +300,7 @@ class TestPromptTemplateOverride:
         (pd / "templates" / "11_smart.md").write_text("FROM_FILE", encoding="utf-8")
         s = _mk_step(tmp_path, {"11_smart": "FROM_OVERRIDE"}, prompts_dir=pd)
         # 有覆盖 → 用覆盖(压过 hot 与 image 模板)
-        assert s._load_prompt_template("11_smart") == "FROM_OVERRIDE"
+        assert s.ai.load_prompt_template("11_smart") == "FROM_OVERRIDE"
 
     def test_fallback_file_when_no_override(self, tmp_path):
         pd = tmp_path / "prompts"
@@ -308,7 +308,7 @@ class TestPromptTemplateOverride:
         (pd / "templates" / "11_smart.md").write_text("FROM_FILE", encoding="utf-8")
         s = _mk_step(tmp_path, {}, prompts_dir=pd)
         # 2. 无覆盖、有模板文件 → 用文件
-        assert s._load_prompt_template("11_smart") == "FROM_FILE"
+        assert s.ai.load_prompt_template("11_smart") == "FROM_FILE"
 
     def test_all_template_sources_missing_fails_closed(self, tmp_path):
         pd = tmp_path / "prompts"
@@ -316,7 +316,7 @@ class TestPromptTemplateOverride:
         s = _mk_step(tmp_path, {}, prompts_dir=pd)
         from shared.prompt_resolver import PromptResolutionError
         with pytest.raises(PromptResolutionError, match="missing"):
-            s._load_prompt_template("11_smart")
+            s.ai.load_prompt_template("11_smart")
 
     def test_variant_not_overridden_when_main_template_exists(self, tmp_path):
         # 11_smart 有主模板 → 变体 11_smart.vision 不吃覆盖(两 pass 同 job 都跑,只改主笔记)。
@@ -325,8 +325,8 @@ class TestPromptTemplateOverride:
         (pd / "templates" / "11_smart.md").write_text("MAIN", encoding="utf-8")
         (pd / "templates" / "11_smart.vision.md").write_text("VISION_FILE", encoding="utf-8")
         s = _mk_step(tmp_path, {"11_smart": "OV"}, prompts_dir=pd)
-        assert s._load_prompt_template("11_smart") == "OV"            # 主吃覆盖
-        assert s._load_prompt_template("11_smart.vision") == "VISION_FILE"  # 变体不吃
+        assert s.ai.load_prompt_template("11_smart") == "OV"            # 主吃覆盖
+        assert s.ai.load_prompt_template("11_smart.vision") == "VISION_FILE"  # 变体不吃
 
     def test_variant_overridden_when_no_main_template(self, tmp_path):
         # 08_punctuate 只有 .zh/.translate 变体、无主模板 → 覆盖落到被加载的变体(同 job 只跑一个)。
@@ -335,8 +335,8 @@ class TestPromptTemplateOverride:
         (pd / "templates" / "08_punctuate.zh.md").write_text("ZH", encoding="utf-8")
         (pd / "templates" / "08_punctuate.translate.md").write_text("TR", encoding="utf-8")
         s = _mk_step(tmp_path, {"08_punctuate": "OV"}, prompts_dir=pd, step="08_punctuate")
-        assert s._load_prompt_template("08_punctuate.zh") == "OV"
-        assert s._load_prompt_template("08_punctuate.translate") == "OV"
+        assert s.ai.load_prompt_template("08_punctuate.zh") == "OV"
+        assert s.ai.load_prompt_template("08_punctuate.translate") == "OV"
 
     def test_variant_only_override_is_not_duplicated_as_system(self, tmp_path):
         pd = tmp_path / "prompts"
@@ -349,8 +349,8 @@ class TestPromptTemplateOverride:
             tmp_path, {"08_punctuate": "OVERRIDE"},
             prompts_dir=pd, step="08_punctuate",
         )
-        assert s._load_prompt_template("08_punctuate.zh") == "OVERRIDE"
-        assert s._load_system_prompt() is None
+        assert s.ai.load_prompt_template("08_punctuate.zh") == "OVERRIDE"
+        assert s.ai.load_system_prompt() is None
 
 
 # API 端点
@@ -452,7 +452,7 @@ class TestPromptAPI:
             "11_smart", job,
             build_step_config(test_config, "video", "11_smart"),
         )
-        worker_template = step._resolve_prompt_template("11_smart")
+        worker_template = step.ai.resolve_prompt_template("11_smart")
         assert worker_template.raw == raw
         assert api_template["content"] == worker_template.text
         assert api_template["sha256"] == worker_template.sha256

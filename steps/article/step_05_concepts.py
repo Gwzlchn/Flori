@@ -30,7 +30,7 @@ class ArticleConceptsStep(StepBase):
         if isinstance(pipeline, str) and pipeline:
             return pipeline
         try:
-            job = self.load_json("job.json")
+            job = self.artifacts.load_json("job.json")
         except (OSError, ValueError, TypeError):
             job = {}
         if isinstance(job, dict):
@@ -60,7 +60,7 @@ class ArticleConceptsStep(StepBase):
         if pipeline not in {"video", "audio", "article", "paper"}:
             raise InputInvalidError(f"unsupported concepts pipeline: {pipeline}")
 
-        smart = self.latest_smart_note()
+        smart = self.artifacts.latest_smart_note()
         if smart is not None:
             rel = str(smart.relative_to(self.job_dir))
             source = self._read_text(smart, rel)
@@ -118,7 +118,7 @@ class ArticleConceptsStep(StepBase):
         if source is None:
             return {}
         hashes = {"source": source.kind, "source_hash": source.sha256}
-        hashes.update(self.prompt_profile_style_hashes())
+        hashes.update(self.ai.prompt_profile_style_hashes())
         return hashes
 
     def execute(self) -> dict | None:
@@ -126,7 +126,7 @@ class ArticleConceptsStep(StepBase):
         if source is None:
             raise InputInvalidError("concept source is missing")
         prompt = self._build_prompt(source.text)
-        result, parse_failed = self.call_ai_json(
+        result, parse_failed = self.ai.call_json(
             prompt, fallback={"summary": "", "key_terms": []},
         )
         key_terms = result.get("key_terms") or []
@@ -136,20 +136,20 @@ class ArticleConceptsStep(StepBase):
             "source": source.kind,
             "parse_failed": parse_failed,
         }
-        self.write_output("output/concepts.json", out)
+        self.artifacts.write("output/concepts.json", out)
         return {
             "concepts": len(key_terms),
             "source": source.kind,
             "summary_len": len(out["summary"]),
             "parse_failed": parse_failed,
-            "provider": self.last_ai_provider,
-            "model": self.last_ai_model,
+            "provider": self.ai.last_provider,
+            "model": self.ai.last_model,
         }
 
     def _build_prompt(self, text: str) -> str:
-        profile = self.load_domain_prompt_profile()
-        parts = [self._load_prompt_template(self._primary_prompt_template())]
-        parts.append(self.terminology_block(profile))
+        profile = self.ai.load_domain_prompt_profile()
+        parts = [self.ai.load_prompt_template(self.ai.primary_prompt_template())]
+        parts.append(self.ai.terminology_block(profile))
         parts.append("\n--- 内容 ---\n")
         parts.append(text[:12000])
         return "".join(parts)

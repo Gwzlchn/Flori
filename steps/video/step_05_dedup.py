@@ -25,7 +25,7 @@ class DedupStep(StepBase):
         import imagehash
         from PIL import Image
 
-        candidates = self.load_json("intermediate/candidates.json")
+        candidates = self.artifacts.load_json("intermediate/candidates.json")
         assets_dir = self.job_dir / "assets"
 
         dedup_cfg = self.config.get("domain", {}).get("dedup", {})
@@ -38,7 +38,7 @@ class DedupStep(StepBase):
         seen_hashes: list[tuple[imagehash.ImageHash, int]] = []
 
         for i, cand in enumerate(candidates):
-            self.report_progress(i, len(candidates), "deduplicating")
+            self.progress.report(i, len(candidates), "deduplicating")
             img_path = assets_dir / cand["filename"]
 
             if not img_path.exists():
@@ -71,8 +71,8 @@ class DedupStep(StepBase):
             if not duplicate:
                 seen_hashes.append((ph, i))
 
-        self.report_progress(len(candidates), len(candidates), "done")
-        self.write_output("intermediate/dedup.json", results)
+        self.progress.report(len(candidates), len(candidates), "done")
+        self.artifacts.write("intermediate/dedup.json", results)
         kept = sum(1 for r in results if r["keep"])
         return {"total": len(results), "kept": kept, "removed": len(results) - kept}
 

@@ -66,10 +66,10 @@ class PdfParseStep(StepBase):
             "sections": sections,
             "source_kind": "arxiv-html",
         }
-        self.write_output("intermediate/parsed.json", parsed)
-        self.write_output("output/original.md", md)
+        self.artifacts.write("intermediate/parsed.json", parsed)
+        self.artifacts.write("output/original.md", md)
         if lang != "zh" and len(md.strip()) > 200:
-            self.write_output("intermediate/needs_translation.json", {"lang": lang})
+            self.artifacts.write("intermediate/needs_translation.json", {"lang": lang})
         return {"source_kind": "arxiv-html", "sections": len(sections),
                 "chars": len(md), "lang": lang}
 
@@ -112,15 +112,15 @@ class PdfParseStep(StepBase):
             "sections": sections,
             "source_kind": "pdf-only",
         }
-        self.write_output("intermediate/parsed.json", parsed)
-        self.write_output("intermediate/needs_translation.json", {"lang": "unknown"})
+        self.artifacts.write("intermediate/parsed.json", parsed)
+        self.artifacts.write("intermediate/needs_translation.json", {"lang": "unknown"})
         return {"source_kind": "pdf-only", "pages": num_pages, "lang": "unknown"}
 
     def _first_page_title(self, pdf_path) -> str | None:
         """pdftotext 第 1 页 → shared.titles 启发式提标题;任何失败返 None(保留 metadata 原值)。"""
         from shared.titles import title_from_first_page
         try:
-            r = self.run_subprocess(
+            r = self.commands.run(
                 ["pdftotext", "-f", "1", "-l", "1", str(pdf_path), "-"], timeout=60)
             return title_from_first_page(r.stdout or "")
         except Exception:
@@ -129,7 +129,7 @@ class PdfParseStep(StepBase):
     def _pdf_page_count(self, pdf_path) -> int:
         """poppler `pdfinfo` 取页数;失败(损坏 PDF/缺 poppler)fail-loud——页数是直喂分块的地基。"""
         import re as _re
-        r = self.run_subprocess(["pdfinfo", str(pdf_path)], timeout=60)
+        r = self.commands.run(["pdfinfo", str(pdf_path)], timeout=60)
         m = _re.search(r"^Pages:\s+(\d+)", r.stdout or "", _re.M)
         if not m:
             from shared.errors import InputInvalidError

@@ -209,7 +209,7 @@ class TestDownloadStep:
         from types import SimpleNamespace
         job_dir = tmp_path / "job"; job_dir.mkdir(); (job_dir / "input").mkdir()
         step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805", content_type="paper")
-        with patch.object(step, "run_subprocess", return_value=SimpleNamespace(stdout=self._ARXIV_ATOM)):
+        with patch.object(step.commands, "run", return_value=SimpleNamespace(stdout=self._ARXIV_ATOM)):
             step._fetch_arxiv_meta("1810.04805")
         m = step._arxiv_meta
         assert m["title"] == "BERT: Pre-training of Deep Bidirectional Transformers"
@@ -222,10 +222,10 @@ class TestDownloadStep:
 
     def test_fetch_arxiv_meta_network_failure_is_graceful(self, tmp_path):
         # 网络类失败(curl 挂)→ 不抛、不 stash;_extract_metadata 正常返回(回退 PDF 解析)。
-        from shared.step_base import SubprocessFailed
+        from shared.step_subprocess import SubprocessFailed
         job_dir = tmp_path / "job"; job_dir.mkdir(); (job_dir / "input").mkdir()
         step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805", content_type="paper")
-        with patch.object(step, "run_subprocess",
+        with patch.object(step.commands, "run",
                           side_effect=SubprocessFailed(22, ["curl"], output="", stderr="timeout")):
             step._fetch_arxiv_meta("1810.04805")
         assert getattr(step, "_arxiv_meta", {}) == {}
@@ -238,7 +238,7 @@ class TestDownloadStep:
         from types import SimpleNamespace
         job_dir = tmp_path / "job"; job_dir.mkdir(); (job_dir / "input").mkdir()
         step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805", content_type="paper")
-        with patch.object(step, "run_subprocess", return_value=SimpleNamespace(stdout="<html>oops")):
+        with patch.object(step.commands, "run", return_value=SimpleNamespace(stdout="<html>oops")):
             step._fetch_arxiv_meta("1810.04805")
         assert getattr(step, "_arxiv_meta", {}) == {}
 
@@ -248,7 +248,7 @@ class TestDownloadStep:
         empty = '<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"></feed>'
         job_dir = tmp_path / "job"; job_dir.mkdir(); (job_dir / "input").mkdir()
         step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805", content_type="paper")
-        with patch.object(step, "run_subprocess", return_value=SimpleNamespace(stdout=empty)):
+        with patch.object(step.commands, "run", return_value=SimpleNamespace(stdout=empty)):
             step._fetch_arxiv_meta("1810.04805")
         assert getattr(step, "_arxiv_meta", {}) == {}
 
@@ -257,7 +257,7 @@ class TestDownloadStep:
         import pytest
         job_dir = tmp_path / "job"; job_dir.mkdir(); (job_dir / "input").mkdir()
         step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805", content_type="paper")
-        with patch.object(step, "run_subprocess", side_effect=ModuleNotFoundError("feedparser")):
+        with patch.object(step.commands, "run", side_effect=ModuleNotFoundError("feedparser")):
             with pytest.raises(ModuleNotFoundError):
                 step._fetch_arxiv_meta("1810.04805")
 
