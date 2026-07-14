@@ -3,6 +3,7 @@
 - step_base.call_ai 把每次 LLM 调用落 output/ai_logs/{step}.jsonl(成功 + 失败均记);
 - call_ai_json 解析后回填 output_processed。"""
 
+import hashlib
 import json
 
 import pytest
@@ -160,6 +161,62 @@ class TestAiLogDump:
         assert recs[0]["call_index"] == 0 and recs[1]["call_index"] == 1
         assert recs[1]["prompt"]["rendered"]["user"] == "p2"
         assert recs[1]["output"]["content"] == "second"
+
+    @pytest.mark.parametrize(
+        ("step_name", "templates", "actual"),
+        [
+            (
+                "08_punctuate",
+                ("08_punctuate.zh", "08_punctuate.translate"),
+                "08_punctuate.zh",
+            ),
+            ("11_smart", ("11_smart", "11_smart.vision"), "11_smart.vision"),
+            (
+                "04_translate_paper",
+                ("04_translate_paper", "04_translate_paper.pdf"),
+                "04_translate_paper.pdf",
+            ),
+        ],
+    )
+    def test_log_identifies_template_used_by_this_call(
+        self, tmp_path, step_name, templates, actual,
+    ):
+        hot = tmp_path / "prompts" / "templates"
+        hot.mkdir(parents=True)
+        bodies = {}
+        for name in templates:
+            bodies[name] = f"BODY:{name}".encode("utf-8")
+            (hot / f"{name}.md").write_bytes(bodies[name])
+        job = {}
+        if step_name in {"11_smart", "04_translate_paper"}:
+            job = {
+                "prompt_overrides": {
+                    step_name: {"content": "PRIMARY OVERRIDE", "version": 7},
+                },
+            }
+        (tmp_path / "job.json").write_text(json.dumps(job), encoding="utf-8")
+        step = StepBase(step_name, tmp_path, {
+            "step": {"name": step_name, "pool": "ai"},
+            "ai": {},
+            "domain": {"name": "general"},
+            "paths": {
+                "prompts_dir": str(tmp_path / "prompts"),
+                "config_dir": str(tmp_path / "image"),
+            },
+        })
+        step.template_hash(*templates)
+        prompt = step._load_prompt_template(actual)
+        step._gateway = _FakeGW(response=_mk_response())
+        step.call_ai(prompt)
+
+        record = _read_log(tmp_path, step_name)[0]
+        template = record["prompt"]["template"]
+        assert template["name"] == actual
+        assert template["sha256"] == (
+            "sha256:" + hashlib.sha256(bodies[actual]).hexdigest()
+        )
+        assert template["source"] == "hot"
+        assert template["version"] is None
 
     def test_failed_call_logged_with_attempts(self, tmp_path):
         step = _Step(tmp_path, {"ai": {}})

@@ -16,6 +16,31 @@ default:
   # 在该步下加/改 `version: "2"` 即可,无需改代码。换 ai 模型也会自动触发。详见 shared/step_base._def_digest。
   version: "1"
 
+# 四类 pipeline 共用的 AI 角色变量.22 个键各定义一次,route 只引用,不在内容类型内重抄.
+variables:
+  AI_CONCEPTS_PRIMARY_PROVIDER: claude-cli
+  AI_CONCEPTS_PRIMARY_MODEL: "claude-opus-4-8[1m]"
+  AI_CONCEPTS_FALLBACK_PROVIDER: claude-cli
+  AI_CONCEPTS_FALLBACK_MODEL: "claude-opus-4-8[1m]"
+  AI_SMART_PRIMARY_PROVIDER: claude-cli
+  AI_SMART_PRIMARY_MODEL: "claude-opus-4-8[1m]"
+  AI_SMART_FALLBACK_PROVIDER: claude-cli
+  AI_SMART_FALLBACK_MODEL: "claude-opus-4-8[1m]"
+  AI_SMART_TEXT_PROVIDER: claude-cli
+  AI_SMART_TEXT_MODEL: "claude-opus-4-8[1m]"
+  AI_REVIEW_PRIMARY_PROVIDER: claude-cli
+  AI_REVIEW_PRIMARY_MODEL: "claude-opus-4-8[1m]"
+  AI_REVIEW_FALLBACK_PROVIDER: claude-cli
+  AI_REVIEW_FALLBACK_MODEL: "claude-opus-4-8[1m]"
+  AI_PUNCT_PRIMARY_PROVIDER: claude-cli
+  AI_PUNCT_PRIMARY_MODEL: "claude-opus-4-8[1m]"
+  AI_PUNCT_FALLBACK_PROVIDER: claude-cli
+  AI_PUNCT_FALLBACK_MODEL: "claude-opus-4-8[1m]"
+  AI_TRANSLATE_PRIMARY_PROVIDER: claude-cli
+  AI_TRANSLATE_PRIMARY_MODEL: "claude-opus-4-8[1m]"
+  AI_TRANSLATE_FALLBACK_PROVIDER: claude-cli
+  AI_TRANSLATE_FALLBACK_MODEL: "claude-opus-4-8[1m]"
+
 # 隐藏模板('.' 前缀,不直接运行):同类步只写差异,extends 按键深合并。
 .cpu-step:
   pool: cpu
@@ -36,26 +61,8 @@ default:
 
 video:
   variables:
-    AI_CONCEPTS_PRIMARY_PROVIDER: claude-cli
-    AI_CONCEPTS_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-    AI_CONCEPTS_FALLBACK_PROVIDER: claude-cli
-    AI_CONCEPTS_FALLBACK_MODEL: "claude-opus-4-8[1m]"
     OCR_TIMEOUT: 1800
     OCR_RETRIES: 1
-    AI_SMART_PRIMARY_PROVIDER: claude-cli
-    AI_SMART_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-    AI_SMART_FALLBACK_PROVIDER: claude-cli
-    AI_SMART_FALLBACK_MODEL: "claude-opus-4-8[1m]"
-    AI_SMART_TEXT_PROVIDER: claude-cli
-    AI_SMART_TEXT_MODEL: "claude-opus-4-8[1m]"
-    AI_REVIEW_PRIMARY_PROVIDER: claude-cli
-    AI_REVIEW_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-    AI_REVIEW_FALLBACK_PROVIDER: claude-cli
-    AI_REVIEW_FALLBACK_MODEL: "claude-opus-4-8[1m]"
-    AI_PUNCT_PRIMARY_PROVIDER: claude-cli
-    AI_PUNCT_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-    AI_PUNCT_FALLBACK_PROVIDER: claude-cli
-    AI_PUNCT_FALLBACK_MODEL: "claude-opus-4-8[1m]"
   jobs:
     "01_download":
       label: "下载"
@@ -202,6 +209,7 @@ video:
       label: "概念 + 摘要"
       extends: .ai-step
       run: steps.article.step_05_concepts
+      prompt_template: 05_concepts
       version: "3"
       # 复用 article 概念步:视频以最新版智能笔记为源(必有,11_smart 必跑)。
       needs: ["11_smart"]
@@ -235,23 +243,6 @@ video:
 
 paper:
   # provider 统一 claude-cli + 显式模型,由带 claude-cli tag 的 ai worker 认领。
-  variables:
-    AI_CONCEPTS_PRIMARY_PROVIDER: claude-cli
-    AI_CONCEPTS_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-    AI_CONCEPTS_FALLBACK_PROVIDER: claude-cli
-    AI_CONCEPTS_FALLBACK_MODEL: "claude-opus-4-8[1m]"
-    AI_SMART_PRIMARY_PROVIDER: claude-cli
-    AI_SMART_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-    AI_SMART_FALLBACK_PROVIDER: claude-cli
-    AI_SMART_FALLBACK_MODEL: "claude-opus-4-8[1m]"
-    AI_REVIEW_PRIMARY_PROVIDER: claude-cli
-    AI_REVIEW_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-    AI_REVIEW_FALLBACK_PROVIDER: claude-cli
-    AI_REVIEW_FALLBACK_MODEL: "claude-opus-4-8[1m]"
-    AI_TRANSLATE_PRIMARY_PROVIDER: claude-cli
-    AI_TRANSLATE_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-    AI_TRANSLATE_FALLBACK_PROVIDER: claude-cli
-    AI_TRANSLATE_FALLBACK_MODEL: "claude-opus-4-8[1m]"
   jobs:
     "01_download":
       label: "下载"
@@ -361,23 +352,6 @@ paper:
 article:
   # provider 统一 claude-cli + 显式模型,由带 claude-cli tag 的 ai worker 认领;
   # 智能笔记/评审随投递开关 smart_note 可选;概念步必跑。
-  variables:
-    AI_SMART_PRIMARY_PROVIDER: claude-cli
-    AI_SMART_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-    AI_SMART_FALLBACK_PROVIDER: claude-cli
-    AI_SMART_FALLBACK_MODEL: "claude-opus-4-8[1m]"
-    AI_REVIEW_PRIMARY_PROVIDER: claude-cli
-    AI_REVIEW_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-    AI_REVIEW_FALLBACK_PROVIDER: claude-cli
-    AI_REVIEW_FALLBACK_MODEL: "claude-opus-4-8[1m]"
-    AI_CONCEPTS_PRIMARY_PROVIDER: claude-cli
-    AI_CONCEPTS_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-    AI_CONCEPTS_FALLBACK_PROVIDER: claude-cli
-    AI_CONCEPTS_FALLBACK_MODEL: "claude-opus-4-8[1m]"
-    AI_TRANSLATE_PRIMARY_PROVIDER: claude-cli
-    AI_TRANSLATE_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-    AI_TRANSLATE_FALLBACK_PROVIDER: claude-cli
-    AI_TRANSLATE_FALLBACK_MODEL: "claude-opus-4-8[1m]"
   jobs:
     "01_download":
       label: "下载"
@@ -494,19 +468,6 @@ article:
 
 audio:
   # provider 统一 claude-cli + 显式模型,由带 claude-cli tag 的 ai worker 认领。
-  variables:
-    AI_CONCEPTS_PRIMARY_PROVIDER: claude-cli
-    AI_CONCEPTS_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-    AI_CONCEPTS_FALLBACK_PROVIDER: claude-cli
-    AI_CONCEPTS_FALLBACK_MODEL: "claude-opus-4-8[1m]"
-    AI_SMART_PRIMARY_PROVIDER: claude-cli
-    AI_SMART_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-    AI_SMART_FALLBACK_PROVIDER: claude-cli
-    AI_SMART_FALLBACK_MODEL: "claude-opus-4-8[1m]"
-    AI_REVIEW_PRIMARY_PROVIDER: claude-cli
-    AI_REVIEW_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-    AI_REVIEW_FALLBACK_PROVIDER: claude-cli
-    AI_REVIEW_FALLBACK_MODEL: "claude-opus-4-8[1m]"
   jobs:
     "01_download":
       label: "下载"

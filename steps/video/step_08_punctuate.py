@@ -10,17 +10,6 @@ from steps.utils.srt_parser import format_timestamp, load_srt, pick_native_srt
 
 CHUNK_SIZE = 30000
 
-_PUNCTUATE_PROMPT = (
-    "请给以下中文字幕文本添加标点符号。保留每行开头的 [MM:SS] 时间戳格式不变。"
-    "不要修改内容，只添加标点。直接输出结果，不要解释。\n\n"
-)
-# 英文等非中文视频:翻译成中文口播稿,逐行保留时间戳,供机械版/智能版用。
-_TRANSLATE_PROMPT = (
-    "请把以下字幕逐行翻译成简体中文。保留每行开头的 [MM:SS] 时间戳格式不变，"
-    "一行原文对应一行译文，标点用中文。直接输出结果，不要解释。\n\n"
-)
-
-
 class PunctuateStep(StepBase):
     def _pick(self) -> tuple[Path | None, bool]:
         return pick_native_srt(self.job_dir / "input")
@@ -47,10 +36,8 @@ class PunctuateStep(StepBase):
         lines = [f"{format_timestamp(e.start_sec)} {e.text}" for e in all_entries]
         full_text = "\n".join(lines)
 
-        # 模板外置 templates/08_punctuate.{zh,translate}.md(改文件不碰代码,进指纹);缺失回退内联常量。
         header = self._load_prompt_template(
             "08_punctuate.zh" if is_zh else "08_punctuate.translate",
-            _PUNCTUATE_PROMPT if is_zh else _TRANSLATE_PROMPT,
         )
         chunks = self._split_chunks(full_text, CHUNK_SIZE)
         results = []

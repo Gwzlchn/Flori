@@ -24,7 +24,7 @@ class ReviewStep(StepBase):
     def input_hashes(self) -> dict[str, str]:
         smart = self.latest_smart_note()
         ev = self.job_dir / "output" / "evidence.json"
-        return {
+        hashes = {
             "smart": file_hash(smart) if smart else "",
             "mechanical": file_hash(self.job_dir / "output" / "notes_mechanical.md"),
             # 取证产物纳入指纹:evidence 更新→重评(核 [E#] 忠实性)。非案例类无则空。
@@ -32,6 +32,8 @@ class ReviewStep(StepBase):
             # provider 覆盖纳入指纹:换 provider 重跑时强制重评。
             "provider": self.override_provider(),
         }
+        hashes["template"] = self.template_hash(self._primary_prompt_template())
+        return hashes
 
     def _evidence_for_review(
         self, smart: str | None = None, mechanical: str | None = None,

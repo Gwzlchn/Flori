@@ -17,7 +17,7 @@ import time
 from datetime import datetime, timezone
 
 from shared.db import Database
-from shared.models import AIUsage, DEFAULT_AI_MODEL, DEFAULT_AI_PROVIDER
+from shared.models import DEFAULT_AI_MODEL, DEFAULT_AI_PROVIDER
 from shared.redis_client import RedisClient
 
 

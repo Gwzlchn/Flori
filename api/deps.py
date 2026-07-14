@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import hmac
 import os
-from functools import lru_cache
 
 import structlog
 from fastapi import Depends, HTTPException, Request

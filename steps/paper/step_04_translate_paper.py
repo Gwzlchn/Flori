@@ -40,7 +40,16 @@ class TranslatePaperStep(StepBase):
             figs = self.job_dir / "intermediate" / "figures.json"
             if figs.exists():                  # 遗留组装路径:译文含图表引用,图变了要重译
                 h["figures"] = file_hash(figs)
-        t = self.template_hash("04_translate_paper")
+        active_template = getattr(self, "_active_prompt_name", None)
+        if active_template in {"04_translate_paper", "04_translate_paper.pdf"}:
+            template_name = active_template
+        else:
+            template_name = (
+                "04_translate_paper.pdf"
+                if self._is_pdf_only()
+                else "04_translate_paper"
+            )
+        t = self.template_hash(template_name)
         if t:
             h["template"] = t
         return h
@@ -154,9 +163,8 @@ class TranslatePaperStep(StepBase):
         return "".join(parts)
 
     def _build_prompt(self, md: str, term_block: str = "") -> str:
-        # 默认模板外置 templates/04_translate_paper.md(改文件不碰代码);缺失回退 _DEFAULT。
         # <<TERMS>> = 本 chunk 命中的术语对照段(shared/terms.py;无命中为空串,prompt 无痕)。
-        tmpl = self._load_prompt_template("04_translate_paper", _DEFAULT)
+        tmpl = self._load_prompt_template("04_translate_paper")
         return tmpl.replace("<<TERMS>>", term_block).replace("<<BODY>>", md)
 
     def _load_term_map(self) -> dict[str, str]:
@@ -198,7 +206,7 @@ class TranslatePaperStep(StepBase):
             raise InputInvalidError("pdf-only translate needs parsed.json.pages > 0")
         ranges = [(i, min(i + self.PAGES_PER_CHUNK - 1, pages))
                   for i in range(1, pages + 1, self.PAGES_PER_CHUNK)]
-        tmpl = self._load_prompt_template("04_translate_paper.pdf", _DEFAULT_PDF)
+        tmpl = self._load_prompt_template("04_translate_paper.pdf")
         base_map = self._load_term_map()
         new_pairs: dict[str, str] = {}
         parts: list[str] = []
@@ -249,36 +257,6 @@ class TranslatePaperStep(StepBase):
                 out_lines.append(line)
         return "\n".join(out_lines), n
 
-
-
-# pdf-only 直喂的分块翻译 prompt(= 外置模板 templates/04_translate_paper.pdf.md;
-# <<PDF_PATH>>/<<START>>/<<END>> 运行期注入)。规则经 OSDI04 MapReduce 三轮人工对读验证:
-# 层级映射与「截断句照译」是多块聚合一致性的关键。
-_DEFAULT_PDF = (
-    "<<TERMS>>"
-    "用 Read 工具读取 <<PDF_PATH>> 的第 <<START>> 页到第 <<END>> 页,把正文忠实翻译成中文。规则:\n"
-    "1. 标题层级固定映射:论文主标题用 #(仅出现在含主标题的页);编号章节 N 用 ##;小节 N.M 用 ###;"
-    "N.M.P 用 ####;无编号的段落小标题(如 Worker Failure)用**加粗**不用 #。"
-    "标题翻译成中文,括号保留英文原文(如「## 3 实现(Implementation)」)。\n"
-    "2. 不增删内容、不概括;代码/伪代码块用 ``` 围栏原样保留(代码不译,注释可译)。\n"
-    "3. 图表:在图/表出现位置写一行「【图 N|第 p 页】+图注中文翻译」/「【表 N|第 p 页】+…」"
-    "(p=该图/表所在的 PDF 页码,即你正在读的页)。\n"
-    "4. 页首/页尾被截断的句子照常翻译,不补全不省略(与相邻页区间自然衔接)。\n"
-    "5. 引用标记([1]/作者年份)与专有名词原样保留;只输出译文,不要任何解释。\n"
-)
-
-# 静态默认 prompt 骨架(= 外置模板内容;<<BODY>> 注入论文原文)。
-_DEFAULT = (
-    "<<TERMS>>"
-    "请将以下论文【忠实翻译】为简体中文。这是翻译,不是笔记/摘要,要求:\n"
-    "- 忠实原意,逐段完整翻译,不增删、不概括、不评论;\n"
-    "- 完整保留 Markdown 结构(标题层级、列表、表格、引用等)与原文章节顺序;\n"
-    "- 数学公式、变量名、代码、算法伪代码原样保留(LaTeX 不译);\n"
-    "- 专有名词/人名/方法名/数据集名首次出现用「中文(English)」;\n"
-    "- 图片引用行(![](assets/…))必须原样保留在原位,不译、不改路径;其后的斜体图注行随文翻译;\n"
-    "- 只输出翻译后的 Markdown 正文,不要任何前言、说明或结尾提议。\n\n"
-    "--- 论文原文 ---\n<<BODY>>"
-)
 
 
 if __name__ == "__main__":

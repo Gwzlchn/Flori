@@ -6,7 +6,6 @@ import asyncio
 import fnmatch
 import json
 import mimetypes
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response

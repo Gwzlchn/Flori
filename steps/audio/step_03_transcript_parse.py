@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from shared.step_base import StepBase, file_hash
 from steps.utils.srt_parser import format_timestamp, load_srt
 

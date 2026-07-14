@@ -89,9 +89,8 @@ class EvidenceStep(StepBase):
 
     def _build_prompt(self, refs: list[str], mech_clip: str) -> str:
         ref_hint = ("视频 OCR 里的处罚文号/案号：" + "、".join(refs)) if refs else "OCR 未显式给出文号/案号"
-        # 模板外置 templates/10_evidence.md(含 JSON schema 字面量;改文件不碰代码,进指纹);缺失回退 _DEFAULT。
         # 用 replace 注入:prompt 含字面 {},不能用 str.format。
-        tmpl = self._load_prompt_template("10_evidence", _DEFAULT)
+        tmpl = self._load_prompt_template("10_evidence")
         return tmpl.replace("<<REF_HINT>>", ref_hint).replace("<<MECH_CLIP>>", mech_clip)
 
     def _parse_candidates(self, raw: str) -> tuple[list[dict], bool]:
@@ -123,25 +122,6 @@ class EvidenceStep(StepBase):
             return clean, False
         except (ValueError, json.JSONDecodeError):
             return [], True
-
-
-# 静态默认 prompt,内容与外置模板 templates/10_evidence.md 一致;<<REF_HINT>>/<<MECH_CLIP>> 由 replace 注入。
-_DEFAULT = (
-    "你是案例取证助手。为下面这条视频笔记取**一手权威来源**（证监会处罚决定书 / 法院裁定 / "
-    "上市公司公告），不要用泛泛新闻分析冒充。\n\n"
-    "<<REF_HINT>>\n\n"
-    "任务：\n"
-    "1) 从机械稿识别：当事人、涉及股票、处罚文号/案号、年份。\n"
-    "2) 用 WebSearch 找一手——在查询里加 `site:csrc.gov.cn`（证监会案，省局子域亦可）或 "
-    "`site:wenshu.court.gov.cn`（法院案）优先官方；法院一手常被登录墙挡，可退**上市公司公告**"
-    "（《关于收到行政处罚/刑事裁定的公告》逐字转载）。可多次搜。\n"
-    "3) 只提出候选 URL,不要调用 Bash/curl,不要声称已读取正文;下载、DNS/redirect 校验与可信度"
-    "由服务端完成。\n\n"
-    "只输出严格 JSON（不要代码围栏或额外文字）：\n"
-    '{"candidates":[{"title":"标题","url":"真实URL","publisher":"发布方",'
-    '"reason":"为什么可能匹配 OCR 锚点"}]}\n\n'
-    "机械稿（节选）：\n<<MECH_CLIP>>"
-)
 
 
 if __name__ == "__main__":

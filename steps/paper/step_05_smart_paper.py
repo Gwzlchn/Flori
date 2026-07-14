@@ -105,7 +105,7 @@ class SmartPaperStep(StepBase):
         parsed = self._load_json_bounded("intermediate/parsed.json") or {}
         pages = int(parsed.get("pages") or 0) if isinstance(parsed, dict) else 0
         cap = min(pages or 30, 60)
-        prompt = (self._load_prompt_template("05_smart_paper", _DEFAULT_HEADER)
+        prompt = (self._load_prompt_template("05_smart_paper")
                   + self.terminology_block(self.load_domain_prompt_profile())
                   + f"\n论文标题：{sections.get('title', '未知')}\n"
                   + f"\n用 Read 工具阅读论文 PDF:{pdf}(共 {pages} 页,读前 {cap} 页),"
@@ -120,8 +120,7 @@ class SmartPaperStep(StepBase):
     def _build_prompt(self, sections: dict, figures: list, body: str | None = None) -> str:
         profile = self.load_domain_prompt_profile()
 
-        # 静态指令头外置 templates/05_smart_paper.md(经 prompt_profile_style_hashes 进指纹);缺失回退 _DEFAULT_HEADER。
-        parts = [self._load_prompt_template("05_smart_paper", _DEFAULT_HEADER)]
+        parts = [self._load_prompt_template("05_smart_paper")]
 
         parts.append(self.terminology_block(profile))  # 注入已沉淀的标准概念,各 smart 步共用
 
@@ -156,17 +155,6 @@ class SmartPaperStep(StepBase):
     def _render_section(self, section: dict, parts: list, level: int) -> None:
         from steps.utils.sections import render_section_tree
         render_section_tree(section, parts, level)
-
-
-# 静态指令头(= 外置模板 templates/05_smart_paper.md 内容)。动态(标题/章节/图表/术语)仍在代码拼。
-_DEFAULT_HEADER = (
-    "请将以下论文内容重组为中文结构化学习笔记。\n"
-    "要求：\n"
-    "- 用中文重述论文核心贡献\n"
-    "- 保留关键公式（LaTeX 格式）\n"
-    "- 在合适处用 ![中文图注](img:N) 占位符内嵌重要图表(N 见下方图表列表;不要写文件名/路径)\n"
-    "- 按逻辑结构组织，不必按原文章节顺序\n"
-)
 
 
 if __name__ == "__main__":

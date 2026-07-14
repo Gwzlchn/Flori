@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 logger = structlog.get_logger(component="admin")
 
-from shared.config import AppConfig, load_yaml
+from shared.config import AppConfig
 from shared.db import Database
 from shared.redis_client import RedisClient
 from shared.status import (

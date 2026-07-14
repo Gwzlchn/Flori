@@ -7,8 +7,10 @@ from pathlib import Path
 import pytest
 
 from shared.config import (
+    load_yaml,
     load_pipelines,
     normalize_pipelines,
+    validate_ai_pipeline_contract,
 )
 
 
@@ -154,6 +156,96 @@ class TestVariables:
         int_smart = next(s for s in int_norm["video"]["steps"] if s["name"] == "11_smart")
         assert prod_smart["ai"]["primary"]["provider"] == "anthropic"
         assert int_smart["ai"]["primary"]["provider"] == "kimi"
+
+
+class TestAIRoleContract:
+    def test_real_config_has_22_shared_variables_and_16_routes(self, configs_dir):
+        raw = load_yaml(configs_dir / "pipelines.yaml")
+        ai_variables = {
+            key: value for key, value in raw["variables"].items()
+            if key.startswith("AI_")
+        }
+        assert len(ai_variables) == 22
+        for pipeline in ("video", "paper", "article", "audio"):
+            assert not any(
+                key.startswith("AI_")
+                for key in (raw[pipeline].get("variables") or {})
+            )
+
+        pipelines = load_pipelines(configs_dir / "pipelines.yaml")
+        routes = {
+            (pipeline, step["name"]): step["ai"]
+            for pipeline, body in pipelines.items()
+            for step in body["steps"]
+            if step.get("pool") == "ai"
+        }
+        assert set(routes) == {
+            ("video", "08_punctuate"), ("video", "10_evidence"),
+            ("video", "11_smart"), ("video", "12_concepts"),
+            ("video", "12_review"),
+            ("paper", "04_translate_paper"), ("paper", "05_smart_paper"),
+            ("paper", "05_concepts"), ("paper", "06_review"),
+            ("article", "04_smart_article"), ("article", "04_translate_article"),
+            ("article", "05_concepts"), ("article", "06_review"),
+            ("audio", "04_smart_podcast"), ("audio", "05_concepts"),
+            ("audio", "05_review"),
+        }
+        expected_route = {
+            "primary": {"provider": "claude-cli", "model": "claude-opus-4-8[1m]"},
+            "fallback": {"provider": "claude-cli", "model": "claude-opus-4-8[1m]"},
+        }
+        for key, route in routes.items():
+            assert route["primary"] == expected_route["primary"], key
+            assert route["fallback"] == expected_route["fallback"], key
+        assert routes[("video", "11_smart")]["text_fallback"] == expected_route["primary"]
+        assert sum(len(route) for route in routes.values()) == 33
+
+    def test_shared_ai_variables_reject_undefined_unused_and_empty(self):
+        base = {
+            "variables": {"AI_PRIMARY_PROVIDER": "known", "AI_PRIMARY_MODEL": "m"},
+            "p": {"jobs": {"A": {
+                "run": "m.a", "pool": "ai",
+                "ai": {"primary": {
+                    "provider": "$AI_PRIMARY_PROVIDER", "model": "$AI_PRIMARY_MODEL",
+                }},
+            }}},
+        }
+        assert normalize_pipelines(base)["p"]["steps"][0]["ai"]["primary"]["provider"] == "known"
+
+        unused = {**base, "variables": {**base["variables"], "AI_UNUSED_MODEL": "x"}}
+        with pytest.raises(ValueError, match="unused"):
+            normalize_pipelines(unused)
+
+        undefined = {
+            **base,
+            "p": {"jobs": {"A": {
+                "run": "m.a", "pool": "ai",
+                "ai": {"primary": {
+                    "provider": "$AI_PRIMARY_PROVIDER", "model": "$AI_MISSING_MODEL",
+                }},
+            }}},
+        }
+        with pytest.raises(ValueError, match="undefined"):
+            normalize_pipelines(undefined)
+
+        empty = {**base, "variables": {**base["variables"], "AI_PRIMARY_MODEL": ""}}
+        with pytest.raises(ValueError, match="non-empty"):
+            normalize_pipelines(empty)
+
+    def test_ai_routes_reject_illegal_tier_shape_and_unknown_provider(self):
+        pipelines = {"p": {"steps": [{
+            "name": "A", "pool": "ai",
+            "ai": {"primary": {"provider": "known", "model": "m"},
+                   "shadow": {"provider": "known", "model": "m"}},
+        }]}}
+        with pytest.raises(ValueError, match="invalid AI tier"):
+            validate_ai_pipeline_contract(pipelines)
+
+        pipelines["p"]["steps"][0]["ai"] = {
+            "primary": {"provider": "unknown", "model": "m"},
+        }
+        with pytest.raises(ValueError, match="unknown AI provider"):
+            validate_ai_pipeline_contract(pipelines, {"providers": {"known": {}}})
 
 
 # rules:声明式跳过/运行(归一化映射为 condition,行为等价)

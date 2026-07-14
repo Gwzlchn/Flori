@@ -77,8 +77,7 @@ class SmartStep(StepBase):
 
     def _build_vision_prompt(self, frames: list[dict]) -> str:
         """视觉 pass:让 claude 逐张看帧,只产结构化"逐帧视觉描述"清单(按序号 N),不写笔记正文。"""
-        # 视觉指令头外置 templates/11_smart.vision.md(改文件不碰代码,进指纹);缺失回退 _DEFAULT_VISION。
-        parts = [self._load_prompt_template("11_smart.vision", _DEFAULT_VISION)]
+        parts = [self._load_prompt_template("11_smart.vision")]
         for f in frames:
             parts.append(f"[{f['n']}] {(self.job_dir / 'assets' / f['filename']).resolve()}\n")
         return "".join(parts)
@@ -123,8 +122,7 @@ class SmartStep(StepBase):
         profile = self.load_domain_prompt_profile()
         style_hints = self._load_style_hints()
 
-        # 用户指令头外置 templates/11_smart.md(经 prompt_profile_style_hashes 进指纹);缺失回退 _DEFAULT_USER_HEADER。
-        parts = [self._load_prompt_template("11_smart", _DEFAULT_USER_HEADER)]
+        parts = [self._load_prompt_template("11_smart")]
 
         if profile:
             if profile.get("role"):
@@ -175,19 +173,6 @@ class SmartStep(StepBase):
                 if data:
                     hints.append(data)
         return hints
-
-
-# 静态指令头,内容与外置模板一致,缺模板时作回退。
-# templates/11_smart.vision.md 对应视觉 pass,templates/11_smart.md 对应用户笔记 pass 头。
-# 动态部分(profile/术语/风格/帧路径/取证/机械稿)仍在代码拼。
-_DEFAULT_VISION = (
-    "请用 Read 工具逐张查看下列截图(每张前的 [N] 是它的序号)。为**有信息量**的截图各输出一行,"
-    "格式:\n`N | 这张图 OCR 文本给不出的视觉信息(箭头指向、红框位置、K线/分时形态、"
-    "放量特征、配色、版式等)`\n"
-    "N 原样照抄方括号里的序号。纯氛围/装饰帧(空镜、背景板、片头片尾)直接跳过、不输出。\n"
-    "只输出这个清单,**不要写任何笔记正文、不要总结、不要保存文件**。\n\n"
-)
-_DEFAULT_USER_HEADER = "请将以下机械版笔记重组为结构化学习笔记。\n"
 
 
 if __name__ == "__main__":

@@ -78,6 +78,9 @@ class StepBase:
         self.last_ai_model: str | None = None
         # 消费方只读最近一次响应元数据,正文仍由 call_ai 返回,不扩大各 step 接口。
         self.last_ai_response: LLMResponse | None = None
+        self._resolved_prompts: dict[str, object] = {}
+        self._prompt_overrides_snapshot: dict | None = None
+        self._active_prompt_name: str | None = None
         # AI 审计日志(prompt 白盒化):本步每次 LLM 调用一条,内存累积后落 output/ai_logs/{step}.jsonl。
         # 留内存副本是为 call_ai_json 解析后能回填 output_processed(amend 最后一条)。
         self._ai_log_records: list[dict] = []
@@ -124,7 +127,7 @@ class StepBase:
 
     @classmethod
     def cli_main(cls, step_name: str) -> None:
-        """步骤脚本统一入口:解析 --job-dir/--step-config,实例化并 run。"""
+        """步骤脚本统一入口,运行身份以 step config 为准."""
         import argparse
 
         from .logging_setup import setup_logging
@@ -135,7 +138,11 @@ class StepBase:
         parser.add_argument("--step-config", required=True)
         args = parser.parse_args()
         config = json.loads(Path(args.step_config).read_text())
-        cls(step_name, Path(args.job_dir), config).run()
+        configured_name = (config.get("step") or {}).get("name")
+        if not isinstance(configured_name, str) or not configured_name:
+            from .errors import InputInvalidError
+            raise InputInvalidError("step config is missing runtime name")
+        cls(configured_name, Path(args.job_dir), config).run()
 
     # 子类实现
 
@@ -340,56 +347,10 @@ class StepBase:
             if vrel:
                 self.write_output(vrel, review)
 
-    # 评审步共用骨架:四个 ReviewStep 的输入准备 + 调 AI + 落盘逐字相同,集中于此。
-    # 各评审步 prompt 里逐字相同的"另外输出"三段(各步维度/JSON 示例/参照块仍各自声明)。
-    _REVIEW_OUTPUT_EXTRAS = (
-        "另外输出：\n"
-        "- key_terms: 这篇笔记**讲清楚**的关键概念 + 一句话候选定义（用于沉淀进概念库）\n"
-        "- missing_concepts: 笔记**遗漏**的重要概念（知识缺口，仅供选题/查漏）\n"
-        "- top3_improvements: 最重要的 3 条改进建议\n\n"
-        "- issues: 结构化问题列表。type 只能是 consistency / missing_in_source / "
-        "missing_external / traceability；severity 只能是 info / warning / error。"
-        "dimension 必须是上方评分维度之一，claim 是待核验主张。有证据时 "
-        "evidence_status=supported 且给 locator={source,quote}，source 是下方来源标签，"
-        "quote 必须逐字来自该来源；证据不足时 "
-        "evidence_status=insufficient 且给 reason。\n\n"
-    )
-
-    # 评审步 prompt 里逐字相同的 JSON 示例尾(key_terms/missing/top3)。
-    _REVIEW_JSON_TAIL = (
-        '  "key_terms": [{"term": "概念名", "definition": "一句话候选定义"}],\n'
-        '  "missing_concepts": ["遗漏的重要概念"],\n'
-        '  "top3_improvements": ["改进建议1", "改进建议2", "改进建议3"],\n'
-        '  "issues": [{"type":"traceability","severity":"warning",'
-        '"dimension":"accuracy","claim":"待核验主张","message":"问题",'
-        '"evidence_status":"supported","locator":{"source":"smart","quote":"原文逐字片段"}}]\n'
-        "}\n\n"
-    )
-
-    @classmethod
-    def review_prompt_skeleton(cls) -> str:
-        """评审 prompt 的可编辑结构骨架,白盒化:外置成 templates/{review_step}.md 供网页展示+覆盖。
-        占位符 {{intro}}/{{dimensions}}/{{score_example}}/{{ref_block}} 由 build_review_prompt 在运行期
-        按本步实参 str.replace 注入。四条 pipeline 评审结构一致,共享同一骨架:05_review.md/06_review.md/
-        12_review.md 内容均等于本方法输出,各 job 注入自己的维度/参照块,渲染结果各自正确。
-        test_prompt_templates 钉死模板文件内容 == 本方法输出,防漂移。"""
-        return (
-            "{{intro}}\n\n"
-            "评分维度（每项打 1-5 的整数）：\n"
-            "{{dimensions}}\n"
-            + cls._REVIEW_OUTPUT_EXTRAS +
-            "只输出如下扁平 JSON：所有维度为顶层整数键，不要嵌套进 scores 子对象、"
-            "不要加 rationale 字段、不要代码围栏、不要任何额外说明文字。\n"
-            "{\n"
-            "  {{score_example}},\n"
-            + cls._REVIEW_JSON_TAIL
-            + "{{ref_block}}"
-        )
-
     def build_review_prompt(
         self, *, intro: str, dimensions: list[tuple[str, str]], ref_block: str,
     ) -> str:
-        """拼装评审 prompt:加载骨架(回退序 = DB 覆盖 > templates/{step}.md > 内联骨架),
+        """拼装评审 prompt:从 resolver 加载任务覆盖,热编辑或镜像 tracked 骨架,
         再把 {{intro}}/{{dimensions}}/{{score_example}}/{{ref_block}} 按本步实参注入(str.replace,
         prompt 含字面 {} 不可 format)。各评审步只传 intro / dimensions=[(维度键, 中文说明)] / ref_block。
         score_keys 解析始终从步内 dimensions 取(见各步 execute),绝不解析模板文本,故覆盖文本被
@@ -398,7 +359,7 @@ class StepBase:
             f"{i}. {key}: {desc}\n" for i, (key, desc) in enumerate(dimensions, 1)
         )
         example_scores = ", ".join(f'"{key}": 4' for key, _ in dimensions)
-        template = self._load_prompt_template(self.step_name, self.review_prompt_skeleton())
+        template = self._load_prompt_template(self.step_name)
         rendered = (
             template
             .replace("{{intro}}", intro)
@@ -840,16 +801,22 @@ class StepBase:
         except Exception:
             pass
 
-        # template.source:DB 注入覆盖 > 外置 {step}.md 钩子 > default。
-        # 与 _load_system_prompt 回退顺序一致,供 AI 日志佐证"该步用了哪层 prompt"。
-        template_source = "default"
-        try:
-            if self._injected_prompt_override():
-                template_source = "db_override"
-            elif prompts_dir and (Path(prompts_dir) / f"{self.step_name}.md").exists():
-                template_source = "override"
-        except Exception:
-            pass
+        resolved_templates = []
+        for name, item in sorted(getattr(self, "_resolved_prompts", {}).items()):
+            resolved_templates.append({
+                "name": name,
+                "source": item.source,
+                "sha256": item.sha256,
+                "bytes": len(item.raw),
+                "version": item.version,
+            })
+        active_name = getattr(self, "_active_prompt_name", None)
+        template_meta = next(
+            (item for item in resolved_templates if item["name"] == active_name),
+            None,
+        ) or {
+            "name": None, "source": None, "sha256": None, "bytes": 0, "version": None,
+        }
 
         try:
             in_hashes = self.input_hashes()
@@ -936,7 +903,8 @@ class StepBase:
             # 输入溯源(模板+值=渲染)
             "prompt": {
                 "rendered": {"system": system, "user": prompt},
-                "template": {"source": template_source},
+                "template": template_meta,
+                "templates": resolved_templates,
                 "values": {
                     "domain_profile_name": domain,
                     "terminology_snapshot": profile.get("terminology"),
@@ -1102,69 +1070,116 @@ class StepBase:
     def _setup_logger(self):
         return structlog.get_logger(step=self.step_name, job_dir=str(self.job_dir))
 
-    def _injected_prompt_override(self) -> str:
-        """job.json 里本步被注入的 prompt 覆盖正文(无/读失败则空串)。
-        来源 = api job 创建时按 DB prompt_overrides(scope/domain/pipeline/step)解析后写入
-        job.json.prompt_overrides[step](pure worker 无 DB,只能靠 job 带过去)。镜像 _read_override 读盘范式。
-        兼容两种 job.json 形态:新形态每步是 {content, version}(含激活版本号快照),旧形态
-        是纯字符串。两者都取出正文:版本号供 Job 详情比对,worker 注入只需正文。"""
+    def _job_prompt_overrides(self):
+        """读取任务固化的 Prompt 覆盖,坏 job 或坏映射不得静默使用镜像模板."""
+        snapshot = getattr(self, "_prompt_overrides_snapshot", None)
+        if snapshot is not None:
+            return snapshot
         job_dir = getattr(self, "job_dir", None)
-        if job_dir is None:  # 裸构造的 StepBase(仅测模板加载)无 job_dir,优雅返回空串
-            return ""
+        if job_dir is None:
+            self._prompt_overrides_snapshot = {}
+            return {}
         try:
             job = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return ""
-        val = (job.get("prompt_overrides") or {}).get(self.step_name)
-        if isinstance(val, dict):                 # 新格式 {content, version}
-            return val.get("content", "") or ""
-        return val or ""                          # 旧格式纯字符串(历史 job.json)
+        except FileNotFoundError:
+            self._prompt_overrides_snapshot = {}
+            return {}
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            from .prompt_resolver import PromptResolutionError
+            raise PromptResolutionError("prompt override job metadata is invalid") from exc
+        if not isinstance(job, dict):
+            from .prompt_resolver import PromptResolutionError
+            raise PromptResolutionError("prompt override job metadata is invalid")
+        if "prompt_overrides" not in job:
+            overrides = {}
+        else:
+            overrides = job["prompt_overrides"]
+            if not isinstance(overrides, dict):
+                from .prompt_resolver import PromptResolutionError
+                raise PromptResolutionError("prompt override map is invalid")
+        self._prompt_overrides_snapshot = overrides
+        return overrides
+
+    def _injected_prompt_override(self) -> str:
+        """返回本步固化覆盖正文,兼容存量字符串形态."""
+        from .prompt_resolver import parse_prompt_override
+
+        parsed = parse_prompt_override(self._job_prompt_overrides(), self.step_name)
+        return parsed[0].decode("utf-8") if parsed is not None else ""
+
+    def _primary_prompt_template(self) -> str:
+        step = self.config.get("step") or {}
+        name = step.get("prompt_template") or self.step_name
+        if not isinstance(name, str) or not name:
+            from .prompt_resolver import PromptResolutionError
+            raise PromptResolutionError("prompt template mapping is invalid")
+        return name
+
+    def _prompt_resolver(self):
+        from .prompt_resolver import PromptResolver
+
+        paths = self.config.get("paths") or {}
+        prompts_dir = Path(paths.get("prompts_dir", "/data/prompts"))
+        config_dir = Path(paths.get("config_dir", "/app/configs"))
+        return PromptResolver(
+            hot_dir=prompts_dir / "templates",
+            image_dir=config_dir / "prompts" / "templates",
+        )
+
+    def _resolve_prompt_template(self, name: str):
+        cache = getattr(self, "_resolved_prompts", None)
+        if cache is None:
+            cache = {}
+            self._resolved_prompts = cache
+        if name not in cache:
+            cache[name] = self._prompt_resolver().resolve(
+                name,
+                step_name=self.step_name,
+                prompt_overrides=self._job_prompt_overrides(),
+                primary_template=self._primary_prompt_template(),
+            )
+        return cache[name]
 
     def _has_step_template(self) -> bool:
-        """该步是否有外置默认 user-prompt 模板(templates/{step_name}*.md,含变体)。
-        有模板(多数 AI 步)→ DB 覆盖作用于 user-prompt 模板层(_load_prompt_template,所见即所改);
-        无模板(评审等 prompt 内联步)→ 覆盖回落为 system prompt(否则其网页覆盖会失效)。"""
-        prompts_dir = (self.config.get("paths") or {}).get("prompts_dir")
-        if not prompts_dir:
-            return False
-        try:
-            return any((Path(prompts_dir) / "templates").glob(f"{self.step_name}*.md"))
-        except OSError:
-            return False
+        """该运行步是否映射到 tracked user-prompt 主模板."""
+        from .prompt_resolver import TRACKED_TEMPLATE_NAMES
 
-    def _override_targets_template(self, name: str) -> bool:
-        """注入覆盖是否作用于该模板 name。
-        1. name==step_name:主模板,精确命中。
-        2. name 以 "step_name." 开头(变体)且该步无同名主模板 → 命中。如 08_punctuate 只有
-           .zh/.translate 变体,同一 job 只跑一个,覆盖落到被加载的那个。
-        反例:11_smart 有主模板 11_smart.md,变体 11_smart.vision 不吃覆盖:两 pass 同 job 都跑,
-        覆盖只改主笔记 pass,不污染视觉 pass。"""
-        if name == self.step_name:
+        primary = self._primary_prompt_template()
+        if any(
+            name == primary or name.startswith(primary + ".")
+            for name in TRACKED_TEMPLATE_NAMES
+        ):
             return True
-        if name.startswith(self.step_name + "."):
-            prompts_dir = (self.config.get("paths") or {}).get("prompts_dir")
-            if not prompts_dir:
-                return True  # 无 prompts_dir(空卷/测试):变体即视为覆盖目标
-            return not (Path(prompts_dir) / "templates" / f"{self.step_name}.md").exists()
-        return False
+        resolver = self._prompt_resolver()
+        return resolver.template_exists(primary)
 
     def _load_system_prompt(self) -> str | None:
-        """本步 system prompt,回退顺序 = DB 注入覆盖(仅无模板步)> 外置 {step_name}.md > None(内联默认)。
-        1. 覆盖对象对齐到该步实际起作用的那段 prompt:有 user-prompt 模板的步,DB 覆盖在
-           _load_prompt_template 替换该模板(所见即所改);故此处仅无模板步(评审等 prompt 内联)
-           才把注入覆盖当 system,避免有模板步双重套用。
-        2. 兼容钩子 prompts/{step_name}.md。
-        3. 都无则 None(provider 对 system=None 有守卫)。
-        注入覆盖在 job 创建期解析、固化进 job.json,故同一 job 生命周期内稳定(幂等一致)。"""
+        """加载独立 system 钩子;tracked user template 始终由 PromptResolver 处理.
+
+        旧的无模板扩展步仍可把任务覆盖当 system.当前 16 条 AI route 都有 tracked
+        user template,因此不会双重套用覆盖.system 文件使用独立的 prompts/{step}.md 契约.
+        """
         injected = self._injected_prompt_override()
         if injected and not self._has_step_template():
             return injected
-        prompts_dir = self.config.get("paths", {}).get("prompts_dir")
-        if not prompts_dir:
-            return None
-        path = Path(prompts_dir) / f"{self.step_name}.md"
-        if path.exists():
-            return path.read_text(encoding="utf-8")
+        paths = self.config.get("paths") or {}
+        candidates = (
+            Path(paths.get("prompts_dir", "/data/prompts")) / f"{self.step_name}.md",
+            Path(paths.get("config_dir", "/app/configs")) / "prompts" / f"{self.step_name}.md",
+        )
+        for path in candidates:
+            try:
+                raw = path.read_bytes()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                from .prompt_resolver import PromptResolutionError
+                raise PromptResolutionError("system prompt is unreadable") from exc
+            try:
+                return raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                from .prompt_resolver import PromptResolutionError
+                raise PromptResolutionError("system prompt is not UTF-8") from exc
         return None
 
     def load_domain_prompt_profile(self) -> dict:
@@ -1194,7 +1209,7 @@ class StepBase:
         )
 
     def prompt_profile_style_hashes(self) -> dict[str, str]:
-        """smart 步共用的指纹块:可选外置 prompt 覆盖({step_name}.md)+ 默认 prompt 模板(templates/{step_name}.md)
+        """smart 步共用的指纹块:独立 system 钩子 + resolver 实际模板字节
         + domain profile + style tags。改默认模板(外置可编辑)即变指纹 → should_run 重跑。
         profile/styles 的键名与取值口径不可轻改:变了即改变既有 .done 指纹,触发全量重跑。"""
         import json
@@ -1204,7 +1219,7 @@ class StepBase:
         prompt_path = prompts_dir / f"{self.step_name}.md"
         if prompt_path.exists():
             hashes["prompt"] = file_hash(prompt_path)
-        tpl = self.template_hash(self.step_name)
+        tpl = self.template_hash(self._primary_prompt_template())
         if tpl:
             hashes["template"] = tpl
         profile_path = prompts_dir / "profiles" / f"{domain_name}.yaml"
@@ -1217,29 +1232,16 @@ class StepBase:
         }, sort_keys=True)
         return hashes
 
-    # 外置默认 prompt 模板(templates/<name>.md;改文件不碰代码、自动进指纹)
-    def _templates_dir(self) -> Path:
-        """默认 prompt 模板目录 = prompts_dir/templates(与 profiles/styles 同卷不同子路径;
-        部署可把该子路径 bind-mount 到仓库 configs/prompts/templates,改模板即生效不 rebuild)。"""
-        return Path(self.config["paths"]["prompts_dir"]) / "templates"
-
-    def _load_prompt_template(self, name: str, default: str) -> str:
-        """该步默认 user-prompt 骨架,回退顺序 = DB 注入覆盖 > templates/{name}.md > 代码内 default。
-        网页编辑的覆盖(job.json.prompt_overrides[step])替换的就是这段展示的默认模板,
-        所见即所改;只对作为该步覆盖目标的 name 生效(_override_targets_template),变体 name 见其规则。
-        缺模板文件则用 default 兜底(空卷/旧部署/测试 tmp prompts_dir 缺模板仍能跑)。
-        调用方对动态部分用 str.replace 注入:prompt 含字面 {},不可 str.format。"""
-        injected = self._injected_prompt_override()
-        if injected and self._override_targets_template(name):
-            return injected
-        p = self._templates_dir() / f"{name}.md"
-        if p.exists():
-            return p.read_text(encoding="utf-8")
-        return default
+    def _load_prompt_template(self, name: str) -> str:
+        """返回 resolver 固化的模板快照,正文不在步骤代码中保留副本."""
+        resolved = self._resolve_prompt_template(name)
+        self._active_prompt_name = name
+        return resolved.text
 
     def template_hash(self, *names: str) -> str:
-        """默认 prompt 模板文件指纹(改模板→重跑)。多名(如 punctuate 双态)合并;全缺则空串。"""
-        import json
-        td = self._templates_dir()
-        present = {n: file_hash(td / f"{n}.md") for n in sorted(names) if (td / f"{n}.md").exists()}
-        return json.dumps(present, sort_keys=True) if present else ""
+        """实际解析模板的精确字节指纹;缺失或损坏直接失败."""
+        present = {
+            n: self._resolve_prompt_template(n).sha256
+            for n in sorted(names)
+        }
+        return json.dumps(present, sort_keys=True)

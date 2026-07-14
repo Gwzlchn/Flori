@@ -104,18 +104,6 @@ class AIRateLimitError(AIProviderError):
     error_type = "ai_rate_limit"
 
 
-class AITimeoutError(StepError):
-    """SYSTEM: 调用超时,瞬态,短延迟重试一次。"""
-
-    error_type = "timeout"
-
-
-class ResourceError(StepError):
-    """SYSTEM-pressure: OOM/磁盘满,立即重试难自愈,故归类不重试。"""
-
-    error_type = "resource"
-
-
 class AllProvidersFailedError(AIProviderError):
     """所有 AI Provider 都失败(primary + fallback + text_fallback)。
     error_type 随底层失败而定:任一为限流则 ai_rate_limit(走长退避等配额恢复),否则 ai。"""

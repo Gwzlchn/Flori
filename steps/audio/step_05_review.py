@@ -18,11 +18,13 @@ class PodcastReviewStep(StepBase):
         return missing
 
     def input_hashes(self) -> dict[str, str]:
-        return {
+        hashes = {
             "smart": file_hash(self.latest_smart_note()) if self.latest_smart_note() else "",
             "transcript": file_hash(self.job_dir / "intermediate" / "transcript.json"),
             "provider": self.override_provider(),
         }
+        hashes["template"] = self.template_hash(self._primary_prompt_template())
+        return hashes
 
     def execute(self) -> dict | None:
         smart_clip, coverage, note_file, smart_source = self.prepare_smart_for_review()

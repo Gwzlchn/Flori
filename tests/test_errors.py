@@ -4,12 +4,10 @@ from shared.errors import (
     RETRY_POLICY,
     AIProviderError,
     AIRateLimitError,
-    AITimeoutError,
     AllProvidersFailedError,
     InputInvalidError,
     InputMissingError,
     ProcessingError,
-    ResourceError,
     StepError,
     get_retry_delay,
 )
@@ -36,12 +34,6 @@ class TestErrorTypes:
     def test_ai_rate_limit(self):
         assert AIRateLimitError.error_type == "ai_rate_limit"
 
-    def test_ai_timeout(self):
-        assert AITimeoutError.error_type == "timeout"
-
-    def test_resource(self):
-        assert ResourceError.error_type == "resource"
-
     def test_all_providers_failed(self):
         assert AllProvidersFailedError.error_type == "ai"
 
@@ -54,8 +46,6 @@ class TestInheritance:
             ProcessingError,
             AIProviderError,
             AIRateLimitError,
-            AITimeoutError,
-            ResourceError,
             AllProvidersFailedError,
         ]:
             assert issubclass(cls, StepError)
@@ -82,12 +72,10 @@ class TestRetryPolicy:
                 ProcessingError,
                 AIProviderError,
                 AIRateLimitError,
-                AITimeoutError,
-                ResourceError,
             ]
         }
-        # storage(产物上传失败)由 worker 直接以字符串类型上报,无对应异常类。
-        assert all_types | {"storage"} == set(RETRY_POLICY.keys())
+        # storage/timeout/resource 由运行时以字符串类型上报,无对应异常类。
+        assert all_types | {"storage", "timeout", "resource"} == set(RETRY_POLICY.keys())
 
     def test_delay_length_ge_max(self):
         for error_type, policy in RETRY_POLICY.items():

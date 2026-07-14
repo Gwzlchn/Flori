@@ -1,18 +1,21 @@
 """步骤测试公用 fixture。"""
 
+from pathlib import Path
 
-def make_step_config(tmp_path, step_name="test", pool="cpu", **overrides):
+
+def make_step_config(tmp_path, step_name="test", pool="cpu", pipeline="article", **overrides):
     prompts_dir = tmp_path / "prompts"
     prompts_dir.mkdir(exist_ok=True)
     cfg = {
-        "step": {"name": step_name, "pool": pool, "timeout_sec": 60, "retries": 0},
+        "step": {"name": step_name, "pipeline": pipeline, "pool": pool,
+                 "timeout_sec": 60, "retries": 0},
         "ai": {},
         "domain": {"name": "general"},
         "style_tags": [],
         "paths": {
             "data_dir": str(tmp_path),
             "prompts_dir": str(prompts_dir),
-            "config_dir": str(tmp_path),
+            "config_dir": str(Path(__file__).resolve().parents[2] / "configs"),
         },
         "providers": {},
     }

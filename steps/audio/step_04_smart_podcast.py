@@ -51,8 +51,7 @@ class SmartPodcastStep(StepBase):
     def _build_prompt(self, transcript: dict) -> str:
         profile = self.load_domain_prompt_profile()
 
-        # 静态指令头外置 templates/04_smart_podcast.md(经 prompt_profile_style_hashes 进指纹);缺失回退 _DEFAULT_HEADER。
-        parts = [self._load_prompt_template("04_smart_podcast", _DEFAULT_HEADER)]
+        parts = [self._load_prompt_template("04_smart_podcast")]
         parts.append(self.terminology_block(profile))  # 注入已沉淀的标准概念,各 smart 步共用
         parts.append(self._duration_line(transcript))
         parts.append("\n--- 转写正文 ---\n")
@@ -85,7 +84,7 @@ class SmartPodcastStep(StepBase):
         )
 
     def _reduce_prompt(self, summaries: list[str], transcript: dict, profile: dict) -> str:
-        parts = [self._load_prompt_template("04_smart_podcast", _DEFAULT_HEADER)]
+        parts = [self._load_prompt_template("04_smart_podcast")]
         parts.append(self.terminology_block(profile))
         parts.append(self._duration_line(transcript))
         parts.append(
@@ -131,16 +130,6 @@ class SmartPodcastStep(StepBase):
             chunks.append("\n".join(cur))
         return chunks
 
-
-# 静态指令头(= 外置模板 templates/04_smart_podcast.md 内容)。动态(转写/术语)仍在代码拼。
-_DEFAULT_HEADER = (
-    "请将以下播客/音频的口语转写重组为中文结构化学习笔记。\n"
-    "要求：\n"
-    "- 去除口语停顿、重复、语气词，提炼为精准书面表达\n"
-    "- 净化中英混用，专业术语保留英文并括号附中文\n"
-    "- 按逻辑主题组织章节，不必按口播时间线\n"
-    "- 使用 Markdown 格式，包含 ## 章节标题\n"
-)
 
 # map 阶段:对长集的每个分段提炼要点(中间结果,不写总起/结语)。
 _MAP_HEADER = (

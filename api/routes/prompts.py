@@ -1,13 +1,10 @@
-"""Prompt 白盒:列出可编辑 AI 步 + 读/写/删每步 prompt 覆盖。
+"""Prompt 白盒:列出可编辑 AI 步 + 读/写/删每步 prompt 覆盖.
 
-覆盖按 (scope,domain,pipeline,step) 存 DB prompt_overrides。job 创建时由 api 解析注入
+覆盖按 (scope,domain,pipeline,step) 存 DB prompt_overrides.job 创建时由 api 解析注入
 job.json.prompt_overrides,见 shared.db.resolve_prompt_overrides 与 api/routes/jobs.py;
-worker step_base 派发时优先用(pure worker 无 DB,只能靠 job 带过去)。
-所见即所改:覆盖替换的就是编辑器展示的那段默认 user-prompt 模板,即 templates/{step}.md
-及 .zh/.translate/.vision 等变体。worker 回退序 = DB 覆盖 > 模板文件 > 内联默认,
-见 step_base._load_prompt_template。无模板的步(评审等 prompt 内联)覆盖回落为 system
-prompt,见 step_base._load_system_prompt。模板读取双保险:运行时 prompts_dir/templates 优先,
-缺失回退镜像烤入的 config_dir/prompts/templates,api 容器即使没挂 templates 也能看到默认。
+worker step_base 派发时优先用(pure worker 无 DB,只能靠 job 带过去).
+所见即所改:覆盖替换编辑器展示的 tracked user-prompt 模板.API 与 Worker 共用
+PromptResolver,严格按任务覆盖,运行时热编辑,镜像模板解析同一字节与指纹.
 """
 
 from __future__ import annotations
@@ -17,6 +14,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path
 
+from api.deps import get_config, get_db, validate_path_segment, verify_token
+from api.schemas import PromptActivateRequest, PromptOverrideRequest
 from shared.config import AppConfig
 from shared.db import (
     Database,
@@ -24,8 +23,7 @@ from shared.db import (
     PROMPT_VERSION_MIN,
     PromptVersionExhaustedError,
 )
-from api.deps import get_config, get_db, validate_path_segment, verify_token
-from api.schemas import PromptActivateRequest, PromptOverrideRequest
+from shared.prompt_resolver import PromptResolver, TRACKED_TEMPLATE_NAMES
 
 router = APIRouter(prefix="/api/prompts", tags=["prompts"], dependencies=[Depends(verify_token)])
 
@@ -56,12 +54,11 @@ def _find_step(config: AppConfig, pipeline: str, step: str) -> dict | None:
     return None
 
 
-def _template_dirs(config: AppConfig) -> list:
-    """默认 prompt 模板搜索目录(双保险,按优先级):
-    1. prompts_dir/templates(/data/prompts/templates,运行时挂载,改文件即生效);
-    2. config_dir/prompts/templates(/app/configs/prompts/templates,镜像烤入,永不被 /data 命名卷 shadow)。
-    api 容器即使没挂运行时目录,仍能从烤入目录读到默认模板。"""
-    return [config.prompts_dir / "templates", config.config_dir / "prompts" / "templates"]
+def _resolver(config: AppConfig) -> PromptResolver:
+    return PromptResolver(
+        hot_dir=config.prompts_dir / "templates",
+        image_dir=config.config_dir / "prompts" / "templates",
+    )
 
 
 def _read_first(paths: list) -> str | None:
@@ -75,38 +72,43 @@ def _read_first(paths: list) -> str | None:
     return None
 
 
-def _step_templates(config: AppConfig, step: str) -> list[dict]:
-    """该步全部外置默认 user-prompt 模板:主模板 {step}.md 加变体 {step}.<变体>.md,
-    如 08_punctuate.zh、11_smart.vision。按 name 去重(prompts_dir 优先于烤入),主模板排在变体前。
-    供白盒展示全变体。"""
-    by_name: dict[str, str] = {}
-    for d in _template_dirs(config):
-        if not d.is_dir():
-            continue
-        for p in sorted(d.glob(f"{step}*.md")):
-            name = p.stem
-            # 仅认 {step} 或 {step}.<变体>(防 11_smart 误收 11_smarter 这类前缀邻居)。
-            if name != step and not name.startswith(step + "."):
-                continue
-            if name in by_name:
-                continue
-            try:
-                by_name[name] = p.read_text(encoding="utf-8")
-            except OSError:
-                continue
-    ordered = sorted(by_name, key=lambda n: (n != step, n))  # 主模板优先,其余字典序
-    return [{"name": n, "content": by_name[n]} for n in ordered]
+def _step_templates(
+    config: AppConfig, step: str, step_config: dict | None = None,
+) -> list[dict]:
+    """按固定清单解析该运行步的主模板与变体,主模板排在变体前."""
+    primary = (step_config or {}).get("prompt_template") or step
+    names = [
+        name for name in TRACKED_TEMPLATE_NAMES
+        if name == primary or name.startswith(primary + ".")
+    ]
+    resolved = [
+        _resolver(config).resolve(
+            name, step_name=step, primary_template=primary,
+        )
+        for name in names
+    ]
+    ordered = sorted(resolved, key=lambda item: (item.name != primary, item.name))
+    return [
+        {
+            "name": item.name,
+            "content": item.text,
+            "bytes": len(item.raw),
+            "sha256": item.sha256,
+            "source": item.source,
+            "version": item.version,
+        }
+        for item in ordered
+    ]
 
 
-def _default_template(config: AppConfig, step: str) -> str | None:
-    """该步主默认 user-prompt 模板内容(向后兼容字段):{step}.md;无主则取首个变体;全无则 None。"""
-    tpls = _step_templates(config, step)
-    if not tpls:
+def _default_template(templates: list[dict], primary: str) -> str | None:
+    """从本次响应已解析的模板快照派生向后兼容主模板字段."""
+    if not templates:
         return None
-    for t in tpls:
-        if t["name"] == step:
+    for t in templates:
+        if t["name"] == primary:
             return t["content"]
-    return tpls[0]["content"]
+    return templates[0]["content"]
 
 
 def _default_system(config: AppConfig, step: str) -> str | None:
@@ -133,7 +135,7 @@ async def list_prompts(
         {
             "pipeline": pipeline, "step": key, "label": label, "pool": pool,
             "is_ai": True,
-            "has_template": bool(_step_templates(config, key)),
+            "has_template": bool(_step_templates(config, key, _find_step(config, pipeline, key))),
             "overrides": by_step.get((pipeline, key), []),
         }
         for pipeline, key, label, pool in _ai_steps(config)
@@ -162,7 +164,8 @@ async def get_prompt(
     versions = await asyncio.to_thread(
         db.list_prompt_override_versions, scope, domain, pipeline, step
     )
-    templates = _step_templates(config, step)
+    templates = _step_templates(config, step, s)
+    primary_template = s.get("prompt_template") or step
     return {
         "pipeline": pipeline,
         "step": step,
@@ -171,7 +174,7 @@ async def get_prompt(
         "is_ai": s.get("pool") == "ai",
         # 默认 prompt = 外置 user-prompt 模板(覆盖即替换它,所见即所改)。default_template 为主模板
         # (向后兼容);default_templates 列全变体 [{name,content}]。default_system = 外置 system 钩子(多数步 null)。
-        "default_template": _default_template(config, step),
+        "default_template": _default_template(templates, primary_template),
         "default_templates": templates,
         "default_system": _default_system(config, step),
         "override": ov,

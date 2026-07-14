@@ -29,6 +29,98 @@ _FIELD_ALIASES = {
 
 # 顶层非 pipeline 的保留键(模板/默认/包含/变量),归一化时不当作内容类型。
 _RESERVED_TOP_KEYS = {"default", "include", "variables"}
+_AI_TIERS = {"primary", "fallback", "text_fallback"}
+
+
+def _pipeline_variable_references(value) -> set[str]:
+    refs: set[str] = set()
+    if isinstance(value, str):
+        refs.update(
+            (match.group(1) or match.group(2))
+            for match in _PIPE_VAR_PATTERN.finditer(value)
+        )
+    elif isinstance(value, dict):
+        for item in value.values():
+            refs.update(_pipeline_variable_references(item))
+    elif isinstance(value, list):
+        for item in value:
+            refs.update(_pipeline_variable_references(item))
+    return refs
+
+
+def _validate_shared_ai_variables(raw: dict) -> None:
+    variables = raw.get("variables") or {}
+    if not isinstance(variables, dict):
+        raise ValueError("top-level variables must be a mapping")
+    ai_variables = {
+        name: value
+        for name, value in variables.items()
+        if name.startswith("AI_")
+    }
+    if not ai_variables:
+        return
+    invalid = sorted(
+        name for name, value in ai_variables.items()
+        if not isinstance(value, str) or not value.strip()
+    )
+    if invalid:
+        raise ValueError(f"AI variables must be non-empty strings: {invalid}")
+    bodies = {
+        name: body for name, body in raw.items()
+        if name not in _RESERVED_TOP_KEYS and not name.startswith(".")
+    }
+    references = {
+        name for name in _pipeline_variable_references(bodies)
+        if name.startswith("AI_")
+    }
+    undefined = sorted(references - set(ai_variables))
+    unused = sorted(set(ai_variables) - references)
+    if undefined or unused:
+        raise ValueError(
+            f"AI variable contract mismatch: undefined={undefined}, unused={unused}"
+        )
+
+
+def validate_ai_pipeline_contract(pipelines: dict, providers: dict | None = None) -> None:
+    """校验归一化 AI route,不改变 tier 顺序或调用次数."""
+    known = None
+    if providers is not None:
+        provider_map = providers.get("providers") if isinstance(providers, dict) else None
+        if not isinstance(provider_map, dict):
+            raise ValueError("providers config must contain a providers mapping")
+        known = set(provider_map)
+    for pipeline, body in pipelines.items():
+        for step in body.get("steps", []):
+            if step.get("pool") != "ai":
+                continue
+            ai = step.get("ai")
+            if not isinstance(ai, dict) or not ai:
+                raise ValueError(f"AI route is missing: {pipeline}/{step.get('name')}")
+            illegal = sorted(set(ai) - _AI_TIERS)
+            if illegal:
+                raise ValueError(
+                    f"invalid AI tier for {pipeline}/{step.get('name')}: {illegal}"
+                )
+            for tier, route in ai.items():
+                if not isinstance(route, dict) or set(route) != {"provider", "model"}:
+                    raise ValueError(
+                        f"invalid AI route shape: {pipeline}/{step.get('name')}/{tier}"
+                    )
+                provider = route.get("provider")
+                model = route.get("model")
+                if not isinstance(provider, str) or not provider.strip():
+                    raise ValueError("AI provider must be a non-empty string")
+                if not isinstance(model, str) or not model.strip():
+                    raise ValueError("AI model must be a non-empty string")
+                if (
+                    _PIPE_VAR_PATTERN.search(provider)
+                    or _PIPE_VAR_PATTERN.search(model)
+                ):
+                    raise ValueError(
+                        f"unresolved AI variable: {pipeline}/{step.get('name')}/{tier}"
+                    )
+                if known is not None and provider not in known:
+                    raise ValueError(f"unknown AI provider: {provider}")
 
 
 def resolve_env_vars(text: str) -> str:
@@ -227,6 +319,16 @@ def normalize_pipelines(raw: dict, config_dir: Path | None = None) -> dict:
     if config_dir is not None:
         raw = _collect_includes(raw, config_dir)
 
+    strict_ai_contract = any(
+        isinstance(name, str) and name.startswith("AI_")
+        for name in (
+            (raw.get("variables") or {})
+            if isinstance(raw.get("variables") or {}, dict)
+            else {}
+        )
+    )
+    _validate_shared_ai_variables(raw)
+
     default = raw.get("default") or {}
     # '.' 前缀的隐藏模板供 extends 引用,不作为内容类型流水线。
     templates = {k: v for k, v in raw.items() if k.startswith(".")}
@@ -242,6 +344,8 @@ def normalize_pipelines(raw: dict, config_dir: Path | None = None) -> dict:
         if "jobs" in body:
             body = {**body, "variables": {**global_vars, **(body.get("variables") or {})}}
         result[name] = normalize_pipeline(body, default=default, templates=templates)
+    if strict_ai_contract:
+        validate_ai_pipeline_contract(result)
     return result
 
 
@@ -276,15 +380,18 @@ def load_config(
     """一次性加载全部配置。"""
     config_dir = Path(config_dir)
     data_dir = Path(data_dir)
+    pipelines = load_pipelines(config_dir / "pipelines.yaml")
+    providers = _load_optional(config_dir / "providers.yaml")
+    validate_ai_pipeline_contract(pipelines, providers)
     return AppConfig(
         data_dir=data_dir,
         db_path=data_dir / "db" / "analyzer.db",
         jobs_dir=data_dir / "jobs",
         config_dir=config_dir,
         prompts_dir=data_dir / "prompts",
-        pipelines=load_pipelines(config_dir / "pipelines.yaml"),
+        pipelines=pipelines,
         pools=load_yaml(config_dir / "pools.yaml"),
-        providers=_load_optional(config_dir / "providers.yaml"),
+        providers=providers,
         net_routing=(_load_optional(config_dir / "sources.yaml") or {}).get("net_routing") or {},
         resources=(_load_optional(config_dir / "resources.yaml") or {}).get("resources") or {},
     )
@@ -328,6 +435,7 @@ def build_step_config(
 
     step_node: dict = {
         "name": step_name,
+        "pipeline": pipeline,
         "pool": step_cfg["pool"],
         "timeout_sec": step_cfg.get("timeout_sec", 600),
         "retries": step_cfg.get("retries", 0),
@@ -337,6 +445,8 @@ def build_step_config(
     }
     if "capability_rules" in step_cfg:
         step_node["capability_rules"] = copy.deepcopy(step_cfg["capability_rules"])
+    if "prompt_template" in step_cfg:
+        step_node["prompt_template"] = step_cfg["prompt_template"]
     # 超时随媒体时长伸缩(可选):仅当 pipeline 给了 timeout_per_min 才透传,worker 跑步前据
     # input/metadata.json 的 duration_sec 算有效超时(见 worker.compute_effective_timeout)。
     # 缺省时不写这俩键,行为完全不变。

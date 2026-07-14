@@ -23,7 +23,7 @@ from shared.ai_routing import (
 )
 from shared.db import Database
 from shared.ids import lineage_key_of as _lineage_key_of
-from shared.models import Job, JobStatus, Step, StepStatus, derive_job_id
+from shared.models import Job, JobStatus, derive_job_id
 from shared.redis_client import RedisClient
 from shared.source_detect import detect_source
 from shared.source_registry import (

@@ -263,7 +263,7 @@ POST /api/glossary                          → 手动新增（直接 accepted +
 
 ### 沉淀的作用
 
-术语表越丰富 → 10_smart 生成笔记时命中已沉淀概念就沿用统一措辞、只对新概念做首次解释 → review 评分越高 → 评审又产出新 key_terms → 形成正反馈循环。
+术语表越丰富 → 智能笔记步命中已沉淀概念就沿用统一措辞,只对新概念做首次解释 → review 评分越高 → 评审又产出新 key_terms → 形成正反馈循环。
 
 ```
 第 1 个内容: profile 几乎为空 → 笔记质量一般 → review 产出 5 个 key_terms 候选
@@ -271,31 +271,60 @@ POST /api/glossary                          → 手动新增（直接 accepted +
 第 20 个内容: profile 有 80 个术语 → 笔记接近专业水平
 ```
 
-## 5. Prompt 组装
+## 5. Prompt 正文与组装
 
-### 10_smart 的完整 Prompt 结构
+### 正文唯一真源
+
+`configs/prompts/templates/*.md` 中的 15 份 tracked 文件是所有当前 AI 路由的正文唯一真源:
+
+- 智能笔记:`04_smart_article`,`04_smart_podcast`,`05_smart_paper`,`11_smart`。
+- 翻译与标点:`04_translate_article`,`04_translate_paper`,`04_translate_paper.pdf`,`08_punctuate.zh`,`08_punctuate.translate`。
+- 概念、取证和评审:`05_concepts`,`10_evidence`,`05_review`,`06_review`,`12_review`。
+- 视觉 pass:`11_smart.vision`。
+
+Prompt API 和 Worker 执行使用同一解析契约。每次解析都从一份原始字节同时导出文本、SHA-256、来源、覆盖版本和路径；单次 API 响应复用该解析结果，单个 Worker 步骤实例缓存结果供幂等指纹、AI 审计和实际调用复用。API 与 Worker 是独立进程，不承诺跨请求共享内存快照；job override 由任务创建时固化的正文和版本保证执行可复现。
+
+解析顺序是:
+
+1. job 创建时固化在 `job.json.prompt_overrides[<runtime step>]` 的覆盖。
+2. `/data/prompts/templates/<template>.md` 运行时热编辑文件。
+3. `/app/configs/prompts/templates/<template>.md` 镜像内 tracked 文件。
+
+只有 ENOENT 允许回退到下一层。高优先级文件存在但读取失败、权限拒绝、非 UTF-8 或内容为空时 fail-closed;三层均缺失时返回结构化的输入失败。步骤代码不保留第三份内联正文,`prompts/<step>.md` 也不是正文兜底层。
+
+### 运行时身份与覆盖目标
+
+pipeline 中的 `config.step.name` 是 done marker、progress、AI log、provider override 和 prompt override 的唯一运行时身份。`prompt_template` 只是正文模板映射,不改变步骤身份。video 概念步因此使用运行时名 `12_concepts`,同时映射到 `05_concepts` 正文。
+
+`11_smart` 覆盖只替换主模板 `11_smart.md`,不作用于 `11_smart.vision.md`。`08_punctuate` 没有同名主模板,覆盖替换当次根据字幕语言实际加载的 `.zh` 或 `.translate` 变体。
+
+### `11_smart` 的两段式 Prompt
 
 ```mermaid
-block-beta
-  columns 1
-  block:sysprompt["System Prompt"]
-    columns 1
-    base["[base_template] 内联在 step_10_smart 代码（_build_user_prompt）<br/>可选覆盖: /data/prompts/10_smart.md（默认不存在）<br/>你是一个{role}。请将以下视频素材重组为结构化学习笔记..."]
-    domain["[domain_profile] ← profiles/{domain}.yaml<br/>领域背景: {domain_context} | 输出风格: {output_style}<br/>术语表(含回流概念): {terminology} | 注意事项: {do_not}"]
-    style["[style_hints] ← styles/{tag}.yaml × N<br/>内容形式提示: {hint_1}, {hint_2}<br/>截图解读重点: {screenshot_focus}"]
-  end
-  block:usermsg["User Message"]
-    columns 1
-    mech["[mechanical_notes] ← 本视频的机械版笔记"]
-    vdesc["[frame_descriptions] ← 视觉 pass 产出的逐帧视觉描述清单"]
-  end
+flowchart TD
+    V["11_smart.vision.md"] --> VP["视觉 pass: 逐帧描述"]
+    F["候选截图"] --> VP
+    M["11_smart.md"] --> TP["文本 pass: 结构化笔记"]
+    P["Domain Profile + Style Hints + terminology"] --> TP
+    N["机械稿 + 视觉描述 + 可用证据"] --> TP
+    VP --> N
 ```
 
-> 已采纳并回流进 Profile.terminology 的概念，会和领域术语表一起注入；命中时沿用统一措辞、只对未涵盖的新概念做首次解释（见 §4）。`10_smart` 是两段式生成（视觉 pass 看图产描述清单 → 文本 pass 纯文本成稿），细节见 [steps-video Step 10](04-module-design/steps-video.md)。
+视觉 pass 只产出帧描述清单。文本 pass 再组合主模板、Profile、Style Hints、已沉淀术语、机械稿、视觉描述和经验证的取证正文。已采纳并回流到 `Profile.terminology` 的概念会沿用统一措辞,只对未涵盖的新概念首次解释(见 §4)。
 
-### 08_punctuate / 各内容类型 review
+### 概念来源
 
-这两类步骤不吃领域 Profile（加标点是通用能力；评审是对照打分）。评审使用完整智能笔记和主来源，保存 `review_input.md` 与来源摘要；严格 JSON、1–5 整数分、完整输入、provider 明确正常结束及 citation 校验共同决定 `review_reliable`。提取抢救、截断、未知结束原因或伪 citation 只保留诊断，不显示为正常通过，也不向 glossary 喂 `key_terms`。
+四类概念步在 validate、input hash 和 execute 之间共用同一份来源快照:
+
+- video 和 audio 只读最新版本化智能笔记。
+- article 和 paper 按最新智能笔记 → `output/translated.md` → `intermediate/sections.json` 选择首个可用来源。
+- 来源缺失、损坏、非 UTF-8、为空或 pipeline 类型未知时 fail-closed,不用另一来源在后续阶段悄然替换。
+
+### 标点、评审与 AI tier
+
+`08_punctuate` 和各内容类型 review 不使用领域 Profile。评审使用完整智能笔记和主来源,保存 `review_input.md` 与来源摘要;严格 JSON、1..5 整数分、完整输入、provider 正常结束及 citation 校验共同决定 `review_reliable`。提取抢救、截断、未知结束原因或伪 citation 只保留诊断,不向 glossary 喂 `key_terms`。
+
+当前 16 个可执行 AI 路由声明 33 个有序 `primary/fallback/text_fallback` tier。tier 不按 provider/model 去重;相同配置的相邻 tier 仍保留独立尝试,因此调用次数、retry、usage、AI log 和请求 payload 都不变。
 
 ## 6. Profile 与 Style 管理
 
@@ -341,27 +370,11 @@ DELETE /api/profiles/{domain}/terms/{term}  → 删除术语
 
 ## 7. 与幂等的关系
 
-Profile、Style、(可选)外置 system prompt 都是 10_smart 的输入 → 任一变化 → input_hash 变化 → 重跑。
-base prompt 默认内联在步骤代码里，**不**计入指纹；仅当放置 `/data/prompts/10_smart.md`（可选覆盖，
-默认不存在）时，它作为 system prompt 生效并以 `prompt` 键计入指纹。
+步骤指纹使用 resolver 已固化的正文 SHA-256,不另行重读模板。job 覆盖、`/data` 热编辑或镜像 tracked 文件中实际命中的任何正文变化都会改变指纹。高优先级文件损坏时失败,不会通过回退到另一正文制造一个伪稳定指纹。
 
-```python
-# 10_smart 的 input_hashes()（简化示意，键名与代码一致）
-def input_hashes(self):
-    hashes = {
-        "mechanical": file_hash(self.job_dir / "output/notes_mechanical.md"),
-        "profile": file_hash(prompts_dir / "profiles" / f"{self.domain}.yaml"),
-        # style_tags 排序后逐个文件指纹序列化，标签顺序不影响指纹（键名为 styles）
-        "styles": json.dumps({tag: file_hash(prompts_dir / "styles" / f"{tag}.yaml")
-                              for tag in sorted(self.style_tags) if ...exists}, sort_keys=True),
-    }
-    # 可选外置 system prompt 覆盖文件存在时才计入（默认不存在 → 无 prompt 键）：
-    if (prompts_dir / "10_smart.md").exists():
-        hashes["prompt"] = file_hash(prompts_dir / "10_smart.md")
-    return hashes
-```
+`11_smart` 的幂等输入至少包含机械稿、主模板快照、视觉模板快照、Domain Profile、排序后的 Style Hints、取证产物和 provider 覆盖。Profile 或 Style 变化后 resubmit,`11_smart` 及其下游 `12_concepts/12_review` 按 DAG 失效;采纳 glossary 候选并回流到 Profile 也会改变该指纹。
 
-更新 Profile/Style 后 resubmit → 只有 10_smart 和 11_review 重跑。给同一个 Job 换标签也会触发重跑。（采纳 glossary 候选回流到 Profile，也会改变 profile 指纹。）
+概念步指纹使用已解析来源快照的类型和 SHA-256。validate、input hash 和 execute 复用这份快照,避免在新智能笔记或译文并发写入时计算一份指纹却执行另一份正文。
 
 ## 8. 跨内容类型、跨来源共享
 
@@ -369,9 +382,9 @@ def input_hashes(self):
 
 ```
 domain: "ml" 的 Profile
-  → Collection "LLM 学习" 下的 B站视频 → 10_smart 用它
+  → Collection "LLM 学习" 下的 B站视频 → 11_smart 用它
   → Collection "LLM 学习" 下的 arXiv 论文 → 05_smart_paper 用它
-  → Collection "CV 入门" 下的 YouTube 视频 → 10_smart 也用它
+  → Collection "CV 入门" 下的 YouTube 视频 → 11_smart 也用它
 ```
 
 术语表和风格说明是领域级别的，不绑定内容类型和来源。

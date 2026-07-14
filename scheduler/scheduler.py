@@ -9,7 +9,6 @@ import os
 import time
 from collections import deque
 from datetime import datetime, timezone
-from pathlib import Path
 
 import structlog
 
@@ -29,7 +28,7 @@ from shared.notify import notify
 from shared.redis_client import RedisClient
 from shared.runner_ops import parse_style_tags
 from shared.review_contract import verify_persisted_review
-from shared.terms import extract_pairs, zh_name_from_glossary_row
+from shared.terms import zh_name_from_glossary_row
 from shared.net_zone import required_zone
 from shared.source_detect import detect_source
 from shared.storage import (

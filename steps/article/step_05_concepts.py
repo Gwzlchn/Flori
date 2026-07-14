@@ -1,36 +1,131 @@
-"""Step 05: 概念提取 + 一句话摘要(必跑)。
-
-有智能笔记则从笔记抽,否则从原文/章节抽;产出 output/concepts.json
-({summary, key_terms:[{term,definition}]})供 scheduler._collect_glossary 采集进图谱。
-即便关闭智能笔记/评审,本步仍跑 → 概念始终进图谱。"""
+"""概念提取与摘要步骤,四类内容复用同一来源快照."""
 
 from __future__ import annotations
 
-from shared.step_base import StepBase, file_hash
+import hashlib
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+from shared.errors import InputInvalidError
+from shared.step_base import StepBase
+
+
+@dataclass(frozen=True)
+class _ConceptSource:
+    text: str
+    kind: str
+    sha256: str
+    path: str
+
+
+def _sha256(raw: bytes) -> str:
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
 class ArticleConceptsStep(StepBase):
+    def _pipeline(self) -> str:
+        step = self.config.get("step") or {}
+        pipeline = step.get("pipeline")
+        if isinstance(pipeline, str) and pipeline:
+            return pipeline
+        try:
+            job = self.load_json("job.json")
+        except (OSError, ValueError, TypeError):
+            job = {}
+        if isinstance(job, dict):
+            pipeline = job.get("pipeline") or job.get("content_type")
+            if isinstance(pipeline, str) and pipeline:
+                return pipeline
+        raise InputInvalidError("concepts pipeline identity is missing")
+
+    def _read_text(self, path: Path, rel: str) -> _ConceptSource:
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise InputInvalidError(f"concept source is unreadable: {rel}") from exc
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise InputInvalidError(f"concept source is not UTF-8: {rel}") from exc
+        if not text:
+            raise InputInvalidError(f"concept source is empty: {rel}")
+        return _ConceptSource(text=text, kind="", sha256=_sha256(raw), path=rel)
+
+    def _resolve_concept_source(self) -> _ConceptSource | None:
+        if hasattr(self, "_concept_source_snapshot"):
+            return self._concept_source_snapshot
+
+        pipeline = self._pipeline()
+        if pipeline not in {"video", "audio", "article", "paper"}:
+            raise InputInvalidError(f"unsupported concepts pipeline: {pipeline}")
+
+        smart = self.latest_smart_note()
+        if smart is not None:
+            rel = str(smart.relative_to(self.job_dir))
+            source = self._read_text(smart, rel)
+            source = _ConceptSource(source.text, "smart_note", source.sha256, rel)
+            self._concept_source_snapshot = source
+            return source
+
+        if pipeline in {"video", "audio"}:
+            self._concept_source_snapshot = None
+            return None
+        translated = self.job_dir / "output" / "translated.md"
+        if translated.is_file():
+            source = self._read_text(translated, "output/translated.md")
+            source = _ConceptSource(source.text, "translation", source.sha256, source.path)
+            self._concept_source_snapshot = source
+            return source
+
+        sections_path = self.job_dir / "intermediate" / "sections.json"
+        if not sections_path.is_file():
+            self._concept_source_snapshot = None
+            return None
+        source = self._read_text(sections_path, "intermediate/sections.json")
+        try:
+            sections = json.loads(source.text)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise InputInvalidError("concept sections source is invalid") from exc
+        if not isinstance(sections, dict):
+            raise InputInvalidError("concept sections source is invalid")
+        parts: list[str] = []
+        if sections.get("title"):
+            parts.append(f"# {sections['title']}\n")
+        if sections.get("abstract"):
+            parts.append(str(sections["abstract"]) + "\n")
+        from steps.utils.sections import render_section_tree
+        for section in sections.get("sections", []):
+            render_section_tree(section, parts, level=2)
+        rendered = "".join(parts)
+        if not rendered:
+            raise InputInvalidError("concept sections source is empty")
+        resolved = _ConceptSource(
+            rendered, "original", source.sha256, source.path,
+        )
+        self._concept_source_snapshot = resolved
+        return resolved
+
     def validate_inputs(self) -> list[str]:
-        if not (self.job_dir / "intermediate" / "sections.json").exists():
-            return ["intermediate/sections.json"]
-        return []
+        if self._resolve_concept_source() is not None:
+            return []
+        if self._pipeline() in {"video", "audio"}:
+            return ["output/versions/notes_smart_*.md"]
+        return ["intermediate/sections.json"]
 
     def input_hashes(self) -> dict[str, str]:
-        hashes: dict[str, str] = {
-            "sections": file_hash(self.job_dir / "intermediate" / "sections.json"),
-        }
-        note = self.latest_smart_note()
-        if note:
-            hashes["smart"] = file_hash(note)   # 有笔记则随笔记变化重跑
-        translated = self.job_dir / "output" / "translated.md"
-        if translated.exists():
-            hashes["translated"] = file_hash(translated)   # 非中文文章随译文变化重跑
+        source = self._resolve_concept_source()
+        if source is None:
+            return {}
+        hashes = {"source": source.kind, "source_hash": source.sha256}
         hashes.update(self.prompt_profile_style_hashes())
         return hashes
 
     def execute(self) -> dict | None:
-        source_text, source = self._source_text()
-        prompt = self._build_prompt(source_text)
+        source = self._resolve_concept_source()
+        if source is None:
+            raise InputInvalidError("concept source is missing")
+        prompt = self._build_prompt(source.text)
         result, parse_failed = self.call_ai_json(
             prompt, fallback={"summary": "", "key_terms": []},
         )
@@ -38,61 +133,26 @@ class ArticleConceptsStep(StepBase):
         out = {
             "summary": (result.get("summary") or "").strip(),
             "key_terms": key_terms,
-            "source": source,            # 'smart_note' | 'translation' | 'original'(概念抽自哪)
+            "source": source.kind,
             "parse_failed": parse_failed,
         }
         self.write_output("output/concepts.json", out)
-        return {"concepts": len(key_terms), "source": source,
-                "summary_len": len(out["summary"]), "parse_failed": parse_failed,
-                "provider": self.last_ai_provider, "model": self.last_ai_model}
-
-    def _source_text(self) -> tuple[str, str]:
-        """概念抽取的源文本优先级:智能笔记 > 译文(非中文文章)> 原文章节。
-        非中文文章基于中文译文抽概念/摘要,与译文术语一致(对齐 04_translate 依赖)。"""
-        note = self.latest_smart_note()
-        if note:
-            return note.read_text(encoding="utf-8"), "smart_note"
-        translated = self.job_dir / "output" / "translated.md"
-        if translated.exists():
-            return translated.read_text(encoding="utf-8"), "translation"
-        sections = self.load_json("intermediate/sections.json")
-        parts: list[str] = []
-        if sections.get("title"):
-            parts.append(f"# {sections['title']}\n")
-        if sections.get("abstract"):
-            parts.append(sections["abstract"] + "\n")
-        from steps.utils.sections import render_section_tree
-        for sec in sections.get("sections", []):
-            render_section_tree(sec, parts, level=2)
-        return "".join(parts), "original"
+        return {
+            "concepts": len(key_terms),
+            "source": source.kind,
+            "summary_len": len(out["summary"]),
+            "parse_failed": parse_failed,
+            "provider": self.last_ai_provider,
+            "model": self.last_ai_model,
+        }
 
     def _build_prompt(self, text: str) -> str:
         profile = self.load_domain_prompt_profile()
-        clip = text[:12000]   # 概念抽取不需全文逐字,限长防超
-        # 静态指令头外置 templates/05_concepts.md(经 prompt_profile_style_hashes 进指纹);缺失回退 _DEFAULT_HEADER。
-        parts = [self._load_prompt_template("05_concepts", _DEFAULT_HEADER)]
-        parts.append(self.terminology_block(profile))   # 已沉淀标准概念注入(共用)
+        parts = [self._load_prompt_template(self._primary_prompt_template())]
+        parts.append(self.terminology_block(profile))
         parts.append("\n--- 内容 ---\n")
-        parts.append(clip)
+        parts.append(text[:12000])
         return "".join(parts)
-
-
-# 静态指令头(= 外置模板 templates/05_concepts.md 内容)。动态(术语/内容)仍在代码拼。
-_DEFAULT_HEADER = (
-    "请从以下内容提取【核心概念】并写一句话摘要,严格输出 JSON。\n"
-    "要求:\n"
-    "- key_terms:文中讲清楚的关键概念(术语),每个给一句简洁中文定义;"
-    "英文专有名词原样保留、不翻译。\n"
-    "- zh_name:该术语的【标准中文译名】(不是解释,是短译名,如 Kelly criterion→凯利准则);"
-    "term 本身是中文或无通行译名时为 null。\n"
-    "- related:该概念与本次 key_terms 里【其它概念】的关系边(可空数组)。"
-    "rel 只允许 prerequisite(先修)/is_a(是一种)/part_of(是其组成)/related(相关);"
-    "term 必须逐字引用 key_terms 中的其它概念,文中没讲清楚的关系不要编。\n"
-    "- summary:用一句话(≤60 字)概括全文要点。\n"
-    '- 输出格式:{"summary": "...", "key_terms": [{"term": "...", "definition": "...", '
-    '"zh_name": "...|null", "related": [{"term": "...", "rel": "..."}]}]}\n'
-    "- 只输出 JSON,不要额外解释或代码块标记。\n"
-)
 
 
 if __name__ == "__main__":

@@ -206,7 +206,7 @@ class SubprocessStepRunner:
                         del stderr_tail[0]
 
         monitor_task = asyncio.create_task(
-            self._progress_monitor(ctx, on_progress, on_tick, lambda: proc.returncode is None)
+            _run_progress_monitor(ctx, on_progress, on_tick, lambda: proc.returncode is None)
         )
         drain_task = asyncio.gather(
             _drain(proc.stdout, ""),
@@ -238,16 +238,6 @@ class SubprocessStepRunner:
             raise asyncio.TimeoutError()
 
         return proc.returncode, "".join(stderr_tail)
-
-    async def _progress_monitor(
-        self,
-        ctx: StepContext,
-        on_progress: ProgressPublisher,
-        on_tick: TickCallback,
-        proc_alive: Callable[[], bool],
-    ) -> None:
-        await _run_progress_monitor(ctx, on_progress, on_tick, proc_alive)
-
 
 class DockerStepRunner:
     """每步一容器:work_dir bind-mount 到 /job,GPU 经 DeviceRequest,container.wait
@@ -366,7 +356,7 @@ class DockerStepRunner:
                 self._stream_logs(container, work_dir, step, log_stream)
             )
             monitor = asyncio.create_task(
-                self._progress_monitor(
+                _run_progress_monitor(
                     ctx, on_progress, on_tick, lambda: _alive(container),
                 )
             )
@@ -448,15 +438,6 @@ class DockerStepRunner:
         if timed_out:
             raise asyncio.TimeoutError()
         return returncode, stderr_tail
-
-    async def _progress_monitor(
-        self,
-        ctx: StepContext,
-        on_progress: ProgressPublisher,
-        on_tick: TickCallback,
-        proc_alive: Callable[[], bool],
-    ) -> None:
-        await _run_progress_monitor(ctx, on_progress, on_tick, proc_alive)
 
     async def _bounded_container_call(
         self,

@@ -39,8 +39,7 @@ class SmartArticleStep(StepBase):
     def _build_prompt(self, sections: dict, body: str | None = None) -> str:
         profile = self.load_domain_prompt_profile()
 
-        # 静态指令头外置 templates/04_smart_article.md(改文件不碰代码,经 prompt_profile_style_hashes 进指纹);缺失回退 _DEFAULT_HEADER。
-        parts = [self._load_prompt_template("04_smart_article", _DEFAULT_HEADER)]
+        parts = [self._load_prompt_template("04_smart_article")]
 
         parts.append(self.terminology_block(profile))  # 已沉淀标准概念注入(共用)
 
@@ -65,16 +64,6 @@ class SmartArticleStep(StepBase):
         from steps.utils.sections import render_section_tree
         render_section_tree(section, parts, level)
 
-
-# 静态指令头(= 外置模板内容;templates/04_smart_article.md 由此生成)。动态部分(标题/正文/术语)仍在代码拼。
-_DEFAULT_HEADER = (
-    "请将以下文章内容整理为中文结构化学习笔记。\n"
-    "要求：\n"
-    "- 提炼文章核心观点与关键信息\n"
-    "- 梳理论证脉络，按逻辑结构组织\n"
-    "- 保留重要事实、数据与结论\n"
-    "- 使用 Markdown 格式，含 ## 章节标题\n"
-)
 
 if __name__ == "__main__":
     SmartArticleStep.cli_main("04_smart_article")

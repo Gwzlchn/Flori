@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from worker.step_runner import DockerStepRunner, StepContext
+from worker.step_runner import DockerStepRunner, StepContext, _run_progress_monitor
 
 
 # 桩:伪 docker SDK
@@ -558,8 +558,6 @@ class TestProgressMonitor:
     async def test_tick_then_progress_publish(self, fake_docker, tmp_path, monkeypatch):
         """单跑 _progress_monitor:每周期先 on_tick 续约,再读 .progress 发 step_progress。"""
         fake_docker["client"] = _FakeClient(None)
-        runner = DockerStepRunner("w1")
-
         work_dir = tmp_path / "j1"
         work_dir.mkdir()
         (work_dir / ".A.progress").write_text(
@@ -582,7 +580,7 @@ class TestProgressMonitor:
 
         monkeypatch.setattr("worker.step_runner.asyncio.sleep", _fast_sleep)
 
-        await runner._progress_monitor(
+        await _run_progress_monitor(
             _ctx(work_dir, pool="cpu"), _progress, _tick, lambda: alive["v"],
         )
 
