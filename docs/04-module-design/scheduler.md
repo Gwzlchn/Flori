@@ -21,6 +21,22 @@
 | 处理重试逻辑 | |
 | 标记 Job 整体完成/失败 | |
 
+### 实现边界
+
+`scheduler.scheduler.Scheduler` 是稳定兼容入口，持有 Redis、Database、配置、Storage 和后台任务状态。内部职责通过显式组合拆分，不使用动态属性转发：
+
+| 组件 | 职责 |
+|------|------|
+| `DagPlanner` | 依赖满足、条件跳步、下游推进和进度计算 |
+| `TaskRouter` | pool/tag/网络区域选择、条件求值和入队 |
+| `LifecycleCoordinator` | Job 提交、步骤开始/完成/失败和执行身份校验 |
+| `RecoveryCoordinator` | 启动恢复、孤儿与卡住步骤回收、重跑和重提交 |
+| `EffectDispatcher` | pipeline 声明的索引、术语和证据副作用 |
+| `JobFinalizer` | generation-bound Job 终态、索引对账和书籍链推进 |
+| `BackgroundServices` | durable lifecycle Stream、通知、周期任务、心跳和关闭 |
+
+组件之间只经 `Scheduler` 的显式 façade 协作。外部调用仍以 `Scheduler` 为入口；子模块不依赖 API package，未知完成副作用按失败处理并由终态对账重试。
+
 ## 2. 核心流程
 
 ```python

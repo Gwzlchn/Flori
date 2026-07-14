@@ -3,74 +3,36 @@
 from __future__ import annotations
 
 import asyncio
-import fnmatch
-import json
 import os
-import re
-import secrets
 import time
-from collections import deque
 from datetime import datetime, timezone
 
 import structlog
 
 from shared.config import AppConfig, load_config
-from shared.ai_routing import (
-    InvalidAIOverrideError,
-    READ_TOOL_TAG,
-    ai_required_tags,
-    parse_ai_override,
-    step_required_capability_tags,
-    worker_satisfies_requirements,
-)
-from shared.db import Database, _chunk_note_body
-from shared.evidence_contract import (
-    MAX_CANONICAL_SIDECAR_BYTES,
-    build_canonical_evidence_records_with_reader,
-)
-from shared.errors import RETRY_POLICY, get_retry_delay
-from shared.models import AITask, Job, JobStatus, LLMRequest, Step, StepStatus
+from shared.db import Database
+from shared.models import AITask, Job, LLMRequest
 from shared.note_text import markdown_to_index_text
-from shared.notify import notify
 from shared.redis_client import RedisClient
-from shared.runner_ops import parse_style_tags
-from shared.study_suggestions import (
-    StudySuggestionConflictError,
-    canonical_json,
-    prefixed_sha256,
-    validate_study_suggestion_prompt_snapshot,
-)
-from shared.review_contract import verify_persisted_review
-from shared.step_base import def_digest_for, pipeline_digest_for
-from shared.terms import zh_name_from_glossary_row
-from shared.net_zone import required_zone
-from shared.source_detect import detect_source
-from shared.storage import (
-    StorageBackend,
-    read_file_bounded,
-    read_verification_artifact_bounded,
-    sha256_file,
-)
-from shared.status import OFFLINE, PAUSED
-from shared.version import FLORI_VERSION
+from shared.study_suggestions import canonical_json, prefixed_sha256, validate_study_suggestion_prompt_snapshot
+from shared.storage import StorageBackend
+
+from scheduler.background import BackgroundServices
+from scheduler.dag_planner import DagPlanner
+from scheduler.effects import EffectDispatcher
+from scheduler.job_finalizer import JobFinalizer
+from scheduler.lifecycle import LifecycleCoordinator
+from scheduler.recovery import RecoveryCoordinator
+from scheduler.task_router import TaskRouter
 
 logger = structlog.get_logger(component="scheduler")
 
 # 命中来源站点、需按网络可达区域(net-zone)路由的步骤;其余步骤本地/AI,不分区域。
 # 区域判定见 shared.net_zone(按 URL + 构建时烤入的 CN 域名表);worker 启动自动探测自报覆盖区域。
 # 网络路由 tag 只有 net-cn / net-global;B站 SESSDATA 等凭证是 worker 本地的事(下载步自读),非路由 tag。
-_NET_STEPS = {"01_download", "07_danmaku"}
-
-# 步骤静态优先级加权(分数 -= boost;zpopmin 越小越先)。02_whisper 防饿死(出稿硬依赖它)。
-_PRIORITY_BOOST = {"02_whisper": 100}
-
-# 延迟重试任务的 name 前缀,跟踪/按 job 取消时复用,避免格式漂移。
-_DELAYED_PREFIX = "delayed_enqueue:"
-
-_MAX_STEP_DONE_BYTES = 64 * 1024
 
 def _markdown_to_text(md: str) -> str:
-    """兼容旧调用点；归一化实现只保留在 shared.note_text。"""
+    """兼容旧调用点;归一化实现只保留在 shared.note_text。"""
     return markdown_to_index_text(md)
 
 
@@ -119,273 +81,52 @@ class Scheduler:
         # 上一拍判定为"陈旧"(持有槽但不属于任何 running 步)的 holder 集合。仅连续两拍都陈旧才 SREM,
         # 避开"刚占槽、尚未写 running 状态"的认领窗口被周期对账误清(同 _claim_mismatch_since 的宽限思路)。
         self._slot_reconcile_suspect: set[str] = set()
+        self._dag_planner = DagPlanner(self)
+        self._task_router = TaskRouter(self)
+        self._lifecycle = LifecycleCoordinator(self)
+        self._recovery = RecoveryCoordinator(self)
+        self._effects = EffectDispatcher(self)
+        self._job_finalizer = JobFinalizer(self)
+        self._background = BackgroundServices(self)
 
     # 生命周期
 
     async def run(self) -> None:
-        logger.info("scheduler_start")
-        self._started_at_iso = datetime.now(timezone.utc).isoformat()
-        await self._publish_resource_limits()
-        # 下载凭证镜像重灌:redis 卷重建/清库后 cred:* 丢,DB 是持久源(docs/03 §1.7.1)。
-        try:
-            from shared.credentials import mirror_all_from_db
-            await mirror_all_from_db(self.redis, self.db)
-        except Exception:
-            logger.warning("credential_mirror_failed")
-        await self._recover()
-        self._stream_task = asyncio.create_task(self._event_loop())
-        self._pubsub_task = asyncio.create_task(self._notification_loop())
-        self._periodic_task = asyncio.create_task(self._periodic_loop())
-        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-        try:
-            await asyncio.gather(
-                self._pubsub_task,
-                self._stream_task,
-                self._periodic_task,
-                self._heartbeat_task,
-            )
-        except asyncio.CancelledError:
-            logger.info("scheduler_cancelled")
+        return await self._background.run()
 
     async def _publish_resource_limits(self) -> None:
-        """把 configs/resources.yaml 的资源上限刷进 redis(单一事实源),供 claim_step 读。
-        资源上限改动需重启 scheduler 才重推(资源集稳定,极少改)。"""
-        await self.redis.set_resource_limits(self.config.resources or {})
+        return await self._background._publish_resource_limits()
 
     async def shutdown(self) -> None:
-        logger.info("scheduler_shutdown")
-        self._shutdown = True
-        if self._pubsub_task and not self._pubsub_task.done():
-            self._pubsub_task.cancel()
-        if self._stream_task and not self._stream_task.done():
-            self._stream_task.cancel()
-        if self._periodic_task and not self._periodic_task.done():
-            self._periodic_task.cancel()
-        if self._heartbeat_task and not self._heartbeat_task.done():
-            self._heartbeat_task.cancel()
-        pending = [t for t in self._delayed_tasks if not t.done()]
-        pending.extend(
-            task for task in self._concept_synthesis_tasks.values()
-            if not task.done()
-        )
-        self._concept_synthesis_pending.clear()
-        for t in pending:
-            t.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        return await self._background.shutdown()
 
     def _on_delayed_done(self, task: asyncio.Task) -> None:
-        """延迟任务完成回调:从跟踪集合移除;非取消的真异常上报。"""
-        self._delayed_tasks.discard(task)
-        if not task.cancelled() and task.exception() is not None:
-            logger.error(
-                "delayed_enqueue_failed",
-                task=task.get_name(), exc_info=task.exception(),
-            )
+        return self._background._on_delayed_done(task)
 
     def _cancel_delayed_tasks(self, job_id: str) -> None:
-        """取消某 job 在途的延迟重试任务(rerun / job 失败时调用)。"""
-        prefix = f"{_DELAYED_PREFIX}{job_id}:"
-        for t in list(self._delayed_tasks):
-            if t.get_name().startswith(prefix) and not t.done():
-                t.cancel()
+        return self._background._cancel_delayed_tasks(job_id)
 
     # 主循环
 
     async def _event_loop(self) -> None:
-        """消费 durable lifecycle Stream;成功后 ACK,失败留 PEL 重领。"""
-        consumer = f"scheduler-{os.getpid()}"
-        backoff = 1
-        while not self._shutdown:
-            try:
-                messages = await self.redis.read_lifecycle_events(consumer)
-                backoff = 1
-                for message_id, fields in messages:
-                    try:
-                        topic = fields.get("topic")
-                        payload = json.loads(fields.get("payload", ""))
-                        if not isinstance(topic, str) or not isinstance(payload, dict):
-                            raise ValueError("invalid lifecycle envelope")
-                        payload["_stream_id"] = message_id
-                        await self._dispatch(payload)
-                    except asyncio.CancelledError:
-                        raise
-                    except (ValueError, TypeError, json.JSONDecodeError) as exc:
-                        await self.redis.reject_lifecycle_event(
-                            message_id, fields, f"invalid envelope: {exc}", max_attempts=1,
-                        )
-                        logger.warning("lifecycle_poison_isolated", message_id=message_id)
-                    except Exception as exc:
-                        isolated = await self.redis.reject_lifecycle_event(
-                            message_id, fields, str(exc),
-                        )
-                        logger.exception(
-                            "lifecycle_handler_error",
-                            message_id=message_id,
-                            poison_isolated=isolated,
-                        )
-                    else:
-                        await self.redis.ack_lifecycle_event(message_id)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                if self._shutdown:
-                    break
-                logger.exception("event_loop_reconnect", backoff=backoff)
-                # 重连前先尝试重建底层连接 + 补推可能漏掉的事件
-                try:
-                    await self.redis.reconnect()
-                    await self._recover()
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.exception("event_loop_recover_failed")
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30)
+        return await self._background._event_loop()
 
     async def _notification_loop(self) -> None:
-        """Pub/Sub 只承载可丢的 step_started 展示通知。"""
-        async for msg in self.redis.subscribe("step_started"):
-            if self._shutdown:
-                return
-            try:
-                await self._dispatch(msg)
-            except Exception:
-                logger.exception("notification_handler_error", msg=msg)
+        return await self._background._notification_loop()
 
     async def _dispatch(self, msg: dict) -> None:
-        status = msg.get("status")
-        command = msg.get("command") or msg.get("action")
-        stream_id = msg.get("_stream_id")
-
-        if status == "running":
-            await self.on_step_started(
-                msg["job_id"], msg["step"], worker=msg.get("worker"),
-            )
-        elif status == "done":
-            await self.on_step_done(
-                msg["job_id"], msg["step"],
-                duration=msg.get("duration"),
-                worker=msg.get("worker"),
-                exec_id=msg.get("exec_id"),
-                generation=msg.get("generation"),
-                started_at=msg.get("started_at"),
-            )
-        elif status == "failed":
-            await self.on_step_failed(
-                msg["job_id"], msg["step"],
-                msg.get("error", ""),
-                msg.get("error_type", "unknown"),
-                worker=msg.get("worker"),
-                exec_id=msg.get("exec_id"),
-                generation=msg.get("generation"),
-                duration=msg.get("duration"),
-                started_at=msg.get("started_at"),
-                count_stats=bool(msg.get("count_stats", False)),
-            )
-        elif command == "new_job":
-            job = await asyncio.to_thread(self.db.get_job, msg["job_id"])
-            if job:
-                await self.submit_job(job)
-        elif command == "rerun":
-            await self.rerun(
-                msg["job_id"], msg["from_step"], idempotency_key=stream_id,
-            )
-        elif command == "resubmit":
-            await self.resubmit(msg["job_id"], idempotency_key=stream_id)
-        elif command == "retry":
-            await self._retry_failed(msg["job_id"], idempotency_key=stream_id)
-        elif command == "delete":
-            # 消费 delete_job 端点的 publish,完成 job 编排状态收尾:取消在途重试,
-            # 移出 active_jobs,清五个 Redis 编排 hash(job:{id}/steps/retries/step_worker/step_exec).
-            # 否则删在途 processing job 后这些键泄漏,幽灵 job 被 orphan_scan/check_no_worker/
-            # check_stuck 周期空扫,迟到的 on_step_done 还可能 CAS 推进已删 job。
-            job_id = msg["job_id"]
-            self._cancel_delayed_tasks(job_id)
-            await self.redis.remove_active_job(job_id)
-            await self.redis.cleanup_job(job_id)
-            # 清队列里该 job 尚未认领的排队 task(queue:{pool}+queue:enqueued)。
-            # API 删除路径已同步清过;此处兜底 CLI/其它经 pubsub 发起的删除。幂等。
-            await self.redis.remove_job_tasks(job_id)
-            logger.info("job_deleted_cleanup", job_id=job_id)
+        return await self._background._dispatch(msg)
 
     _PERIODIC_INTERVAL_SEC = 30
 
     async def _periodic_loop(self) -> None:
-        while not self._shutdown:
-            # 实测本拍与上一拍的间隔,超出期望(30s)的部分=loop_lag(循环被拖慢的信号);
-            # 心跳把它带给 /api/status 的 scheduler 组件(>5s 叠加 degraded)。
-            now = time.monotonic()
-            if self._last_tick is not None:
-                self._last_loop_lag = max(
-                    0.0, (now - self._last_tick) - self._PERIODIC_INTERVAL_SEC,
-                )
-            self._last_tick = now
-            try:
-                await self.orphan_scan()
-                await self.check_stuck()
-                await self.check_no_worker()
-                await self.cleanup_stale_workers()
-                await self.reconcile_slots()
-                await self.reconcile_completion_effects()
-                await self.reconcile_study_suggestion_batches()
-                await self.check_radar_digest()
-            except Exception:
-                logger.exception("periodic_error")
-            await asyncio.sleep(self._PERIODIC_INTERVAL_SEC)
+        return await self._background._periodic_loop()
 
     async def _heartbeat_loop(self) -> None:
-        """每 ~10s 写 component:scheduler 心跳(<online_window/3,容忍丢 2 拍仍 up)。
-        瞬态 redis 抖动不中断循环:记日志后续跑,下一拍重写;丢几拍由 stale 窗口容忍。"""
-        while not self._shutdown:
-            try:
-                await self.redis.set_component_heartbeat("scheduler", {
-                    "version": FLORI_VERSION,
-                    "started_at": self._started_at_iso,
-                    "loop_lag_sec": round(self._last_loop_lag, 2),
-                    "loop_interval_sec": self._PERIODIC_INTERVAL_SEC,
-                    "pid": os.getpid(),
-                })
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.warning("heartbeat_failed", exc_info=True)
-            await asyncio.sleep(10)
+        return await self._background._heartbeat_loop()
 
     async def cleanup_stale_workers(self, timeout_sec: int | None = None) -> None:
-        """清理僵尸 worker:DB 中 last_heartbeat 超时且 Redis 注册已过期(worker 真没了)
-        的记录删除;仅 DB 过期但 Redis 仍在的标 offline(容器可能刚重启换 id)。
-
-        删除阈值默认取 config.pools['worker_status'].stale_window_sec,与 API 侧
-        compute_worker_status 的 STALE 窗口对齐(单一事实源)。阈值若小于该窗口,
-        GC 会在 worker 进入 STALE 公开态之前就删 DB 行,使 STALE 态实际不可达;
-        对齐后 worker 在被判 STALE 之前不会被回收。"""
-        from datetime import timedelta
-
-        if timeout_sec is None:
-            ws = (self.config.pools.get("worker_status") or {}) if self.config else {}
-            timeout_sec = int(ws.get("stale_window_sec", 900))
-        workers = await asyncio.to_thread(self.db.list_workers)
-        now = datetime.now(timezone.utc)
-        for w in workers:
-            hb = w.last_heartbeat
-            stale = hb is None or (now - hb) > timedelta(seconds=timeout_sec)
-            if not stale:
-                continue
-            alive = await self.redis.worker_exists(w.id)
-            if alive:
-                # list_workers 已按心跳新鲜度衍生公共状态,故此处直接持久化(幂等),
-                # 不能用 w.status 判断是否需要写。
-                await asyncio.to_thread(
-                    self.db.set_worker_status, w.id, OFFLINE,
-                )
-            elif w.admin_status == PAUSED:
-                await asyncio.to_thread(self.db.set_worker_status, w.id, OFFLINE)
-                logger.info("paused_worker_preserved", worker_id=w.id)
-            else:
-                await asyncio.to_thread(self.db.delete_worker, w.id)
-                await self.redis.push_event("worker_cleaned", worker_id=w.id)
-                logger.info("worker_cleaned", worker_id=w.id)
+        return await self._background.cleanup_stale_workers(timeout_sec)
 
     async def check_radar_digest(self, today=None) -> int:
         """每周自动周报:当天 UTC 星期命中 RADAR_DIGEST_CRON_DOW 时给每个 domain 投 digest AI task.
@@ -462,62 +203,10 @@ class Scheduler:
         await self.redis.set_latest_auto_digest(domain, info)
 
     async def _recover(self) -> None:
-        """启动恢复:补推满足依赖的步骤,回收无主 running 步骤。"""
-        await self.reconcile_study_suggestion_batches()
-        await self._recover_pending_jobs()
-        active_jobs = await self.redis.get_active_jobs()
-        logger.info("recover_start", active_jobs=len(active_jobs))
-
-        for job_id in active_jobs:
-            statuses = await self.redis.get_all_step_statuses(job_id)
-            if not statuses:
-                await self.redis.remove_active_job(job_id)
-                continue
-
-            for step, status in statuses.items():
-                if status == "running":
-                    worker_id = await self.redis.get_step_worker(job_id, step)
-                    if not worker_id or not await self.redis.worker_exists(worker_id):
-                        await self._reclaim_step(
-                            job_id, step, f"recover: worker {worker_id or 'none'} lost"
-                        )
-                elif status == "ready":
-                    # ready-but-not-queued 孤儿补投:调度器/redis 在置 ready 后,入队前重启,或队列
-                    # 消息丢失时,步永远停在 ready 无人认领(线上:部署窗口把 03_scene 卡死)。
-                    # enqueue 的 ZADD 同成员幂等,task json 相同会去重,已在队的重复补投无害.
-                    if await self.enqueue_step(job_id, step):
-                        logger.info("recover_requeue_ready", job_id=job_id, step=step)
-
-            await self._check_downstream(job_id)
-
-        logger.info("recover_done", active_jobs=len(active_jobs))
+        return await self._recovery._recover()
 
     async def _recover_pending_jobs(self) -> None:
-        """补偿 Scheduler 离线时落库但未消费 new_job 的普通 pending job。"""
-        _, pending = await asyncio.to_thread(
-            self.db.list_jobs,
-            status="pending",
-            limit=10_000,
-            current_only=False,
-        )
-        book_collections: set[str] = set()
-        for job in pending:
-            if job.collection_id:
-                collection = await asyncio.to_thread(
-                    self.db.get_collection, job.collection_id,
-                )
-                if collection and getattr(collection, "source_type", None) == "book_toc":
-                    book_collections.add(job.collection_id)
-                    continue
-            await self.submit_job(job)
-
-        if book_collections:
-            from shared.book_chain import next_chapter_job
-            by_id = {job.id: job for job in pending}
-            for collection_id in sorted(book_collections):
-                next_id = await next_chapter_job(self.db, self.redis, collection_id)
-                if next_id and next_id in by_id:
-                    await self.submit_job(by_id[next_id])
+        return await self._recovery._recover_pending_jobs()
 
     @staticmethod
     def _study_suggestion_ai_payload(batch: dict) -> dict:
@@ -558,890 +247,69 @@ class Scheduler:
         )
         return payload
 
-    async def _fail_study_suggestion_batch(
-        self, batch: dict, code: str, message: str,
-    ) -> None:
-        try:
-            await asyncio.to_thread(
-                self.db.fail_study_suggestion_batch,
-                str(batch["batch_id"]),
-                task_id=str(batch["task_id"]),
-                expected_revision=int(batch["revision"]),
-                error_code=code,
-                error_message=(message or code)[:2_000],
-            )
-        except StudySuggestionConflictError:
-            # 另一 Scheduler 副本已推进同一 CAS,当前拍按幂等竞争结束。
-            return
+    async def _fail_study_suggestion_batch(self, batch: dict, code: str, message: str) -> None:
+        return await self._recovery._fail_study_suggestion_batch(batch, code, message)
 
-    async def reconcile_study_suggestion_batches(
-        self, *, now: datetime | None = None,
-    ) -> int:
-        """以 DB 为真相幂等投递并收割学习建议 AI task."""
-        current_time = now or datetime.now(timezone.utc)
-        await self.redis.reconcile_ai_task_claims(
-            now_epoch=current_time.timestamp(),
-        )
-        batches = await asyncio.to_thread(
-            self.db.list_study_suggestion_batches_for_reconcile,
-        )
-        progressed = 0
-        for snapshot in batches:
-            batch = snapshot
-            try:
-                if batch["status"] == "pending_enqueue":
-                    batch = await asyncio.to_thread(
-                        self.db.mark_study_suggestion_batch_queued,
-                        str(batch["batch_id"]),
-                        task_id=str(batch["task_id"]),
-                        expected_revision=int(batch["revision"]),
-                    )
-                    progressed += 1
-                payload = self._study_suggestion_ai_payload(batch)
-                await self.redis.enqueue_ai_task_once(payload, priority=-10)
-
-                claim = await self.redis.get_ai_task_claim(str(batch["task_id"]))
-                claim_state = claim.get("state") if claim else None
-                if claim_state == "ambiguous":
-                    await self._fail_study_suggestion_batch(
-                        batch,
-                        "ai_task_ambiguous",
-                        "AI task execution expired after provider start; manual retry required",
-                    )
-                    progressed += 1
-                    continue
-
-                result = await self.redis.get_ai_result(str(batch["task_id"]))
-                if result is None:
-                    log = await asyncio.to_thread(
-                        self.db.get_latest_ai_task_log, str(batch["task_id"]),
-                    )
-                    if log is not None:
-                        record = log["record"]
-                        result = (
-                            {"content": record.get("output")}
-                            if bool(log.get("ok"))
-                            else {"error": log.get("error") or record.get("error")}
-                        )
-
-                # Worker 先写结果/审计再 CAS 终态.有 claim 时只消费终态,隔离迟到旧执行。
-                if result is not None and (
-                    claim is None or claim_state in {"succeeded", "failed"}
-                ):
-                    if not isinstance(result, dict):
-                        await self._fail_study_suggestion_batch(
-                            batch, "ai_task_result_invalid", "AI task result is not an object",
-                        )
-                    elif result.get("error"):
-                        await self._fail_study_suggestion_batch(
-                            batch, "ai_task_failed", str(result["error"]),
-                        )
-                    else:
-                        content = result.get("content")
-                        try:
-                            parsed = json.loads(content) if isinstance(content, str) else content
-                            if not isinstance(parsed, dict):
-                                raise ValueError("AI task content is not an object")
-                            await asyncio.to_thread(
-                                self.db.materialize_study_suggestions,
-                                str(batch["batch_id"]),
-                                task_id=str(batch["task_id"]),
-                                result=parsed,
-                            )
-                        except (json.JSONDecodeError, ValueError) as exc:
-                            await self._fail_study_suggestion_batch(
-                                batch, "ai_task_result_invalid", str(exc),
-                            )
-                    progressed += 1
-                    continue
-
-                deadline = datetime.fromisoformat(str(batch["deadline_at"]))
-                if deadline.tzinfo is None or deadline.utcoffset() is None:
-                    raise ValueError("study suggestion deadline has no timezone")
-                if current_time >= deadline.astimezone(timezone.utc):
-                    if claim_state == "executing":
-                        continue
-                    if claim_state in {None, "claimed", "requeued", "canceled"}:
-                        cancel_state = await self.redis.cancel_ai_task_before_execution(
-                            payload,
-                        )
-                        if cancel_state != "canceled":
-                            continue
-                        await self._fail_study_suggestion_batch(
-                            batch, "ai_task_timeout", "AI task exceeded persistent deadline",
-                        )
-                        progressed += 1
-            except StudySuggestionConflictError:
-                continue
-            except Exception:
-                logger.exception(
-                    "study_suggestion_reconcile_error",
-                    batch_id=batch.get("batch_id"), task_id=batch.get("task_id"),
-                )
-        return progressed
+    async def reconcile_study_suggestion_batches(self, *, now: datetime | None = None) -> int:
+        return await self._recovery.reconcile_study_suggestion_batches(now=now)
 
     # Job 提交
 
     async def submit_job(self, job: Job) -> None:
-        """API 调用:提交新任务,初始化步骤状态,入队无依赖步骤。"""
-        pipeline_steps = self._get_pipeline_steps(job.pipeline)
-        if not pipeline_steps:
-            logger.warning("empty_pipeline", job_id=job.id, pipeline=job.pipeline)
-            await asyncio.to_thread(
-                self.db.update_job, job.id,
-                status=JobStatus.FAILED, error=f"unknown pipeline: {job.pipeline}",
-            )
-            return
-
-        await self.redis.init_job(job.id, job.pipeline, {
-            "domain": job.domain,
-            "style_tags": job.style_tags,
-            "url": job.url or "",
-            "source": job.source or "",
-            # 投递开关(如 smart_note),供 rules 的 if_flag 求值,条件跳步见 _eval_rules。
-            "flags": (job.meta or {}).get("flags", {}),
-        })
-
-        redis_status = await self.redis.get_all_step_statuses(job.id)
-        db_steps = {
-            item.name: item for item in await asyncio.to_thread(self.db.get_steps, job.id)
-        }
-        for name, cfg in pipeline_steps.items():
-            status = redis_status.get(name)
-            if status is None and name in db_steps:
-                stored = db_steps[name].status
-                status = stored.value if isinstance(stored, StepStatus) else str(stored)
-            if status is None:
-                status = "waiting"
-            if name not in redis_status:
-                await self.redis.set_step_status(job.id, name, status)
-            if name not in db_steps:
-                await asyncio.to_thread(
-                    self.db.upsert_step,
-                    Step(
-                        job_id=job.id,
-                        name=name,
-                        status=StepStatus(status),
-                        pool=cfg["pool"],
-                    ),
-                )
-
-        await self._export_term_map(job)
-
-        await self.redis.add_active_job(job.id)
-        await self._check_downstream(job.id)
-
-        logger.info("job_submitted", job_id=job.id, pipeline=job.pipeline)
+        return await self._lifecycle.submit_job(job)
 
     # 事件处理
 
-    async def _exec_is_current(
-        self, job_id: str, step: str, exec_id: str | None,
-        generation: int | None,
-    ) -> bool:
-        """存在当前执行身份时 fail closed;旧库无身份记录才兼容无 envelope 事件。"""
-        current = await self.redis.get_step_exec_id(job_id, step)
-        if current is not None and current != exec_id:
-            return False
-        current_generation = await self.redis.get_step_generation(job_id, step)
-        if current_generation is not None and current_generation != generation:
-            return False
-        if generation is not None:
-            if await self.redis.get_job_generation(job_id) != generation:
-                return False
-            if await self.redis.job_generation_is_terminal(job_id, generation):
-                return False
-        return True
+    async def _exec_is_current(self, job_id: str, step: str, exec_id: str | None, generation: int | None) -> bool:
+        return await self._lifecycle._exec_is_current(job_id, step, exec_id, generation)
 
-    async def on_step_started(
-        self, job_id: str, step: str, worker: str | None = None,
-    ) -> None:
-        # 把"运行中"落 DB,让 REST(/api/jobs)也能显示 running,不只 WebSocket。
-        # 仅当 Redis 仍为 running 时写:避免快步骤的 step_completed 先到、迟到的
-        # step_started 把已完成步骤倒回 running(两条不同频道,跨频道顺序无保证)。
-        if await self.redis.get_step_status(job_id, step) != "running":
-            return
-        await asyncio.to_thread(
-            self.db.update_step, job_id, step,
-            status="running", worker_id=worker, started_at=datetime.now(timezone.utc),
-        )
+    async def on_step_started(self, job_id: str, step: str, worker: str | None = None) -> None:
+        return await self._lifecycle.on_step_started(job_id, step, worker)
 
-    async def on_step_done(
-        self,
-        job_id: str,
-        step: str,
-        duration: float | None = None,
-        worker: str | None = None,
-        exec_id: str | None = None,
-        generation: int | None = None,
-        started_at: float | None = None,
-    ) -> None:
-        # 丢弃陈旧执行的完成事件:孤儿重排后旧 worker 迟到上报,其 exec_id 不再是当前在跑的实例.
-        # 忽略旧上报,避免提前置 done 顶替仍在跑的新执行(双执行/读到不完整产物).
-        if not await self._exec_is_current(job_id, step, exec_id, generation):
-            logger.warning("stale_exec_done_ignored", job_id=job_id, step=step, exec_id=exec_id)
-            return
-        ok = await self.redis.cas_step_status(job_id, step, "running", "done")
-        if not ok:
-            return
-
-        await asyncio.to_thread(
-            self.db.update_step, job_id, step,
-            status="done",
-            worker_id=worker,
-            started_at=(
-                datetime.fromtimestamp(started_at, timezone.utc)
-                if isinstance(started_at, (int, float)) else None
-            ),
-            finished_at=datetime.now(timezone.utc),
-            duration_sec=duration,
-        )
-        await self._record_worker_terminal_stats(
-            worker, completed=1, duration=float(duration or 0),
-        )
-
-        progress = await self._update_progress(job_id)
-        await self.redis.publish(f"events:{job_id}", {
-            "event": "step_done", "step": step,
-            "duration_sec": duration, "progress_pct": progress,
-        })
-
-        # 完成副作用来自 pipeline step 的 on_complete 声明。失败不回滚已完成步骤;
-        # job 终态门与周期对账会幂等重放,直到全部副作用成功。
-        await self._run_step_completion_effects(job_id, step)
-
-        logger.info("step_done", job_id=job_id, step=step, duration=duration)
-        await self._check_downstream(job_id)
+    async def on_step_done(self, job_id: str, step: str, duration: float | None = None, worker: str | None = None, exec_id: str | None = None, generation: int | None = None, started_at: float | None = None) -> None:
+        return await self._lifecycle.on_step_done(job_id, step, duration, worker, exec_id, generation, started_at)
 
     async def _run_step_completion_effects(self, job_id: str, step: str) -> bool:
-        """执行当前步骤声明的完成副作用。返回 False 时由终态门和周期对账重试。"""
-        steps = await self._get_job_pipeline_steps(job_id)
-        if not steps:
-            return True
-        effects = steps.get(step, {}).get("on_complete") or []
-        return await self._run_completion_effects(job_id, step, effects)
+        return await self._effects._run_step_completion_effects(job_id, step)
 
-    async def _run_completion_effects(
-        self, job_id: str, step: str, effects: list,
-    ) -> bool:
-        if not effects or self.storage is None:
-            return True
-        for effect in effects:
-            action = effect.get("action") if isinstance(effect, dict) else None
-            try:
-                if action == "sync_metadata":
-                    await self._sync_published_at(job_id)
-                elif action == "index_note":
-                    await self._index_first_available_note(
-                        job_id, effect.get("candidates") or [],
-                    )
-                elif action == "collect_glossary":
-                    await self._collect_glossary(job_id)
-                elif action == "collect_term_pairs":
-                    await self._collect_term_pairs(job_id)
-                else:
-                    raise ValueError(f"unknown completion action: {action!r}")
-                logger.info(
-                    "completion_effect_done", job_id=job_id, step=step, action=action,
-                )
-            except Exception:
-                logger.warning(
-                    "completion_effect_failed", job_id=job_id, step=step,
-                    action=action, exc_info=True,
-                )
-                return False
-        return True
+    async def _run_completion_effects(self, job_id: str, step: str, effects: list) -> bool:
+        return await self._effects._run_completion_effects(job_id, step, effects)
 
-    async def _index_first_available_note(
-        self, job_id: str, candidates: list[dict],
-    ) -> None:
-        """按配置顺序索引首个存在的笔记产物,避免回退来源重复进入 Ask。"""
-        candidate_types = [note_type for note_type in (
-            str(candidate.get("note_type") or "").strip()
-            for candidate in candidates if isinstance(candidate, dict)
-        ) if note_type]
-        files: list[str] | None = None
-        for candidate in candidates:
-            if not isinstance(candidate, dict):
-                continue
-            note_type = str(candidate.get("note_type") or "").strip()
-            pattern = str(candidate.get("path") or "").strip()
-            if not note_type or not pattern:
-                continue
-            rel = pattern
-            if any(ch in pattern for ch in "*?["):
-                if files is None:
-                    files = await self.storage.list_files(job_id)
-                matches = [f for f in files if fnmatch.fnmatch(f, pattern)]
-                if note_type == "smart":
-                    from shared.notes_versions import latest_smart
-                    rel = latest_smart(matches) or ""
-                else:
-                    rel = max(matches, default="")
-            if not rel:
-                continue
-            data = await self.storage.read_file(job_id, rel)
-            if not data:
-                continue
-            await self._index_job_notes(
-                job_id, note_type, rel, data, candidate_types=candidate_types,
-                source_manifest_path=(
-                    str(candidate.get("source_manifest") or "").strip() or None
-                ),
-                provenance_path=(
-                    str(candidate.get("provenance") or "").strip() or None
-                ),
-                provenance_step=(
-                    str(candidate.get("provenance_step") or "").strip() or None
-                ),
-                provenance_since_version=(
-                    str(candidate.get("provenance_since_version") or "").strip()
-                    or None
-                ),
-            )
-            return
-        raise FileNotFoundError(f"no indexable note artifact for {job_id}")
+    async def _index_first_available_note(self, job_id: str, candidates: list[dict]) -> None:
+        return await self._effects._index_first_available_note(job_id, candidates)
 
-    async def _index_job_notes(
-        self, job_id: str, note_type: str, rel: str, data: bytes,
-        *,
-        candidate_types: list[str] | None = None,
-        source_manifest_path: str | None = None,
-        provenance_path: str | None = None,
-        provenance_step: str | None = None,
-        provenance_since_version: str | None = None,
-    ) -> None:
-        """把指定 Markdown 产物去标记后写入全文与证据块索引。"""
-        md = data.decode("utf-8", errors="replace")
-        body = _markdown_to_text(md)
-        if not body:
-            raise ValueError(f"empty note body: {rel}")
-        job = await asyncio.to_thread(self.db.get_job, job_id)
-        title = (job.title if job else None) or job_id
-        domain = job.domain if job else ""
-        content_type = job.content_type if job else ""
-        collection_id = (job.collection_id if job else "") or ""
-        canonical_evidence: list[dict] | None = None
-        if (source_manifest_path is None) != (provenance_path is None):
-            raise ValueError(f"incomplete canonical provenance config: {note_type}")
-        if source_manifest_path is not None and provenance_path is not None:
-            source_manifest_data = await read_file_bounded(
-                self.storage, job_id, source_manifest_path,
-                MAX_CANONICAL_SIDECAR_BYTES,
-            )
-            provenance_data = await read_file_bounded(
-                self.storage, job_id, provenance_path,
-                MAX_CANONICAL_SIDECAR_BYTES,
-            )
-            canonical_evidence = []
-            if source_manifest_data is None or provenance_data is None:
-                if source_manifest_data is None and provenance_data is None:
-                    if not await self._is_legacy_provenance_completion(
-                        job, provenance_path,
-                        provenance_step=provenance_step,
-                        provenance_since_version=provenance_since_version,
-                    ):
-                        raise ValueError(
-                            f"missing canonical provenance sidecars: {note_type}"
-                        )
-                else:
-                    raise ValueError(
-                        f"incomplete canonical provenance sidecars: {note_type}"
-                    )
-            if source_manifest_data is not None and provenance_data is not None:
-                chunks = [
-                    {
-                        "chunk_id": f"{job_id}:{note_type}:{index}",
-                        "body": chunk["body"],
-                        "section": chunk["section"],
-                        "char_start": chunk["char_start"],
-                        "char_end": chunk["char_end"],
-                    }
-                    for index, chunk in enumerate(_chunk_note_body(body))
-                ]
+    async def _index_job_notes(self, job_id: str, note_type: str, rel: str, data: bytes, *, candidate_types: list[str] | None = None, source_manifest_path: str | None = None, provenance_path: str | None = None, provenance_step: str | None = None, provenance_since_version: str | None = None) -> None:
+        return await self._effects._index_job_notes(job_id, note_type, rel, data, candidate_types=candidate_types, source_manifest_path=source_manifest_path, provenance_path=provenance_path, provenance_step=provenance_step, provenance_since_version=provenance_since_version)
 
-                async def read_source(
-                    source_path: str, max_bytes: int,
-                ) -> bytes | None:
-                    return await read_file_bounded(
-                        self.storage, job_id, source_path, max_bytes,
-                    )
-
-                async def hash_source(source_path: str) -> str | None:
-                    return await sha256_file(self.storage, job_id, source_path)
-
-                canonical_evidence = await build_canonical_evidence_records_with_reader(
-                    job_id=job_id,
-                    pipeline=job.pipeline if job else "",
-                    note_type=note_type,
-                    note_path=rel,
-                    note_data=data,
-                    normalized_body=body,
-                    chunks=chunks,
-                    source_manifest_data=source_manifest_data,
-                    source_manifest_path=source_manifest_path,
-                    provenance_path=provenance_path,
-                    provenance_data=provenance_data,
-                    read_file=read_source,
-                    sha256_file=hash_source,
-                )
-        await asyncio.to_thread(
-            self.db.index_job_notes,
-            job_id, note_type, title, body,
-            content_type, domain, collection_id, candidate_types,
-            canonical_evidence,
-        )
-        logger.info(
-            "notes_indexed", job_id=job_id, note_type=note_type, source_file=rel,
-            canonical_evidence_count=len(canonical_evidence or []),
-        )
-
-    async def _is_legacy_provenance_completion(
-        self,
-        job: Job | None,
-        provenance_path: str,
-        *,
-        provenance_step: str | None,
-        provenance_since_version: str | None,
-    ) -> bool:
-        """仅当 producer 的 .done 能证明它早于当前 sidecar 版本时放行空证据。"""
-        if job is None or self.storage is None:
-            return False
-        pipeline_steps = self.config.pipelines.get(job.pipeline, {}).get("steps", [])
-        if (
-            job.pipeline_digest
-            and job.pipeline_digest == pipeline_digest_for(pipeline_steps)
-        ):
-            return False
-        if (
-            not provenance_step
-            or not provenance_since_version
-            or not provenance_since_version.isdigit()
-        ):
-            return False
-        producers = [
-            step for step in pipeline_steps
-            if step.get("name") == provenance_step
-        ]
-        if len(producers) != 1:
-            return False
-        producer = producers[0]
-        step_name = producer.get("name")
-        raw_version = producer.get("version", "1")
-        if (
-            not isinstance(step_name, str)
-            or not step_name
-            or type(raw_version) not in (str, int)
-        ):
-            return False
-        version_text = str(raw_version)
-        if not version_text.isdigit():
-            return False
-        current_version = int(version_text)
-        provenance_since = int(provenance_since_version)
-        outputs = producer.get("outputs")
-        if (
-            provenance_since <= 1
-            or current_version < provenance_since
-            or not isinstance(outputs, list)
-            or not any(
-                isinstance(pattern, str)
-                and fnmatch.fnmatch(provenance_path, pattern)
-                for pattern in outputs
-            )
-        ):
-            return False
-
-        raw_done = await read_file_bounded(
-            self.storage, job.id, f".{step_name}.done", _MAX_STEP_DONE_BYTES,
-        )
-        if raw_done is None or len(raw_done) > _MAX_STEP_DONE_BYTES:
-            return False
-        try:
-            done = json.loads(raw_done)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return False
-        if (
-            not isinstance(done, dict)
-            or done.get("step") != step_name
-            or not isinstance(done.get("input_hashes"), dict)
-            or not isinstance(done.get("finished_at"), str)
-            or not done["finished_at"].strip()
-        ):
-            return False
-
-        stored_digest = done.get("def_digest")
-        if stored_digest is None:
-            return True
-        if not isinstance(stored_digest, str):
-            return False
-        ai = producer.get("ai")
-        if ai is not None and not isinstance(ai, dict):
-            return False
-        return stored_digest in {
-            def_digest_for(version, ai)
-            for version in range(1, provenance_since)
-        }
+    async def _is_legacy_provenance_completion(self, job: Job | None, provenance_path: str, *, provenance_step: str | None, provenance_since_version: str | None) -> bool:
+        return await self._effects._is_legacy_provenance_completion(job, provenance_path, provenance_step=provenance_step, provenance_since_version=provenance_since_version)
 
     async def _reconcile_completed_effects(self, job_id: str) -> bool:
-        """幂等重放该 job 所有 done 步骤的声明副作用,闭合事件丢失与崩溃窗口。"""
-        steps = await self._get_job_pipeline_steps(job_id)
-        if not steps:
-            return True
-        statuses = await self.redis.get_all_step_statuses(job_id)
-        for step, cfg in steps.items():
-            if statuses.get(step) != "done":
-                continue
-            effects = cfg.get("on_complete") or []
-            if effects and not await self._run_completion_effects(job_id, step, effects):
-                return False
-        return True
+        return await self._effects._reconcile_completed_effects(job_id)
 
     async def _export_term_map(self, job: Job) -> None:
-        """术语一致性 L1(+L2)导出:把该 domain 的 glossary 译名快照写 input/term_map.json,
-        供翻译步(worker 无 DB)按 chunk 命中注入。job 属集合且集合有 terms.json(L2,book)
-        则合并(L2 覆盖 L1)。best-effort:失败只 warn,不阻塞提交。"""
-        if self.storage is None:
-            return
-        try:
-            rows = await asyncio.to_thread(self.db.glossary_term_rows, job.domain or "general")
-            tmap: dict[str, str] = {}
-            for r in rows:
-                pair = zh_name_from_glossary_row(r.get("term") or "", r.get("zh_name"), r.get("definition") or "")
-                if not pair:
-                    continue
-                tmap[pair[0]] = pair[1]
-                # 实体的英文别名(P1 归并变体)映射到同一译名,别名命中同样注入。
-                for alias in (r.get("aliases") or []):
-                    ap = zh_name_from_glossary_row(alias, pair[1], "")
-                    if ap:
-                        tmap.setdefault(ap[0], ap[1])
-            if job.collection_id:
-                raw = await self.storage.read_file(f"collections/{job.collection_id}", "terms.json")
-                if raw:
-                    try:
-                        tmap.update(json.loads(raw.decode("utf-8", errors="replace")))
-                    except (json.JSONDecodeError, ValueError):
-                        logger.warning("collection_terms_invalid", collection=job.collection_id)
-            if not tmap:
-                return
-            await self.storage.write_file(
-                job.id, "input/term_map.json",
-                json.dumps(tmap, ensure_ascii=False, indent=1).encode("utf-8"),
-            )
-            logger.info("term_map_exported", job_id=job.id, terms=len(tmap))
-        except Exception:
-            logger.warning("term_map_export_failed", job_id=job.id, exc_info=True)
+        return await self._effects._export_term_map(job)
 
     async def _collect_term_pairs(self, job_id: str) -> None:
-        """翻译步完成回流:读取 output/term_pairs.json,写入 glossary suggested 并带 zh_name.
-        job 属集合(book)时同步 merge 进 collections/{id}/terms.json(L2,后章注入)。"""
-        if self.storage is None:
-            return
-        data = await self.storage.read_file(job_id, "output/term_pairs.json")
-        if not data:
-            return
-        try:
-            pairs = json.loads(data.decode("utf-8", errors="replace"))
-        except (json.JSONDecodeError, ValueError):
-            return
-        if not isinstance(pairs, dict) or not pairs:
-            return
-        job = await asyncio.to_thread(self.db.get_job, job_id)
-        domain = (job.domain if job else "") or "general"
-        for en, zh in pairs.items():
-            if not isinstance(en, str) or not isinstance(zh, str) or not en or not zh:
-                continue
-            await asyncio.to_thread(
-                self.db.add_glossary_suggestion,
-                domain, en, job_id, job.content_type if job else "", None, "", zh,
-            )
-        if job and job.collection_id:
-            try:
-                prefix = f"collections/{job.collection_id}"
-                raw = await self.storage.read_file(prefix, "terms.json")
-                merged: dict = {}
-                if raw:
-                    try:
-                        merged = json.loads(raw.decode("utf-8", errors="replace")) or {}
-                    except (json.JSONDecodeError, ValueError):
-                        merged = {}
-                # 先到先得:已有译名不被后章覆盖(与注入层 L2>L1、篇内首译优先一致)。
-                for en, zh in pairs.items():
-                    merged.setdefault(en, zh)
-                await self.storage.write_file(
-                    prefix, "terms.json",
-                    json.dumps(merged, ensure_ascii=False, indent=1).encode("utf-8"),
-                )
-            except Exception:
-                logger.warning("collection_terms_merge_failed", job_id=job_id, exc_info=True)
-        logger.info("term_pairs_collected", job_id=job_id, count=len(pairs))
+        return await self._effects._collect_term_pairs(job_id)
 
     async def _collect_glossary(self, job_id: str) -> None:
-        """把 key_terms(这篇讲清楚的概念 + 候选定义)采集为候选术语。
-        主喂养源是评审"讲清楚了什么"一节;missing_concepts(知识缺口)只留评审面板,不喂术语库。
-        采集源:优先 output/concepts.json(article 链的独立概念步,必跑),回退 output/review.json
-        (video/paper/audio 由评审步出 key_terms)。"""
-        job = await asyncio.to_thread(self.db.get_job, job_id)
-        domain = (job.domain if job else "") or "general"
+        return await self._effects._collect_glossary(job_id)
 
-        async def reconcile_empty(reason: str) -> None:
-            await asyncio.to_thread(
-                self.db.replace_job_concept_occurrences,
-                domain=domain,
-                job_id=job_id,
-                mapping={},
-            )
-            logger.info(
-                "concept_occurrences_reconciled",
-                job_id=job_id,
-                count=0,
-                reason=reason,
-            )
+    async def _read_verification_artifact(self, job_id: str, rel: str) -> bytes | None:
+        return await self._effects._read_verification_artifact(job_id, rel)
 
-        data = await self.storage.read_file(job_id, "output/concepts.json")
-        from_review = False
-        if not data:
-            data = await self._read_verification_artifact(
-                job_id, "output/review.json",
-            )
-            from_review = bool(data)
-        if not data:
-            await reconcile_empty("source_missing")
-            return
-        try:
-            review = json.loads(data.decode("utf-8", errors="replace"))
-        except (json.JSONDecodeError, ValueError):
-            await reconcile_empty("source_invalid")
-            return
-        if not isinstance(review, dict):
-            await reconcile_empty("source_invalid")
-            return
-        # 旧版/抢救/截断评审只供诊断,不能沉淀术语或关系边。
-        if from_review:
-            async def reader(rel: str) -> bytes | None:
-                return await self._read_verification_artifact(job_id, rel)
+    def _write_concept_relations(self, domain: str, items: list[tuple[str, str, list]]) -> int:
+        return self._effects._write_concept_relations(domain, items)
 
-            review = await verify_persisted_review(
-                review, job_id=job_id, pipeline=job.pipeline if job else None,
-                read_file=reader,
-            )
-            if review.get("review_reliable") is not True:
-                logger.info("glossary_review_rejected", job_id=job_id,
-                            reasons=review.get("reliability_reasons") or ["legacy_schema"])
-                await reconcile_empty("review_unreliable")
-                return
-        key_terms = review.get("key_terms") or []
-        if not isinstance(key_terms, list):
-            await reconcile_empty("key_terms_invalid")
-            return
-        content_type = job.content_type if job else ""
-        collected = 0
-        with_related: list[tuple[str, str, list]] = []   # (term, zh_name, related)
-        for t in key_terms:
-            if isinstance(t, dict):
-                term, definition = t.get("term"), (t.get("definition") or "")
-                zh_name = t.get("zh_name") if isinstance(t.get("zh_name"), str) else ""
-                related = t.get("related") if isinstance(t.get("related"), list) else []
-            else:
-                term, definition, zh_name, related = t, "", "", []
-            if not term or not isinstance(term, str):
-                continue
-            await asyncio.to_thread(
-                self.db.add_glossary_suggestion,
-                domain, term, job_id, content_type, None, definition, zh_name,
-            )
-            if related:
-                with_related.append((term, zh_name or "", related))
-            collected += 1
-        edges = 0
-        if with_related:
-            edges = await asyncio.to_thread(
-                self._write_concept_relations, domain, with_related,
-            )
-        occurrences, synthesis_candidates = await asyncio.to_thread(
-            self._replace_concept_occurrences,
-            domain,
-            job_id,
-            key_terms,
-            None if from_review else review.get("evidence_note_type"),
-        )
-        self._schedule_concept_resynthesis(domain, synthesis_candidates)
-        logger.info("glossary_collected", job_id=job_id, count=collected, edges=edges)
-        logger.info(
-            "concept_occurrences_reconciled",
-            job_id=job_id,
-            count=occurrences,
-        )
+    def _replace_concept_occurrences(self, domain: str, job_id: str, key_terms: list, evidence_note_type: object) -> tuple[int, list[tuple[str, str, int]]]:
+        return self._effects._replace_concept_occurrences(domain, job_id, key_terms, evidence_note_type)
 
-    async def _read_verification_artifact(
-        self, job_id: str, rel: str,
-    ) -> bytes | None:
-        """调度器评审重验与 API 使用同一有界读取机制。"""
-        return await read_verification_artifact_bounded(self.storage, job_id, rel)
+    def _schedule_concept_resynthesis(self, domain: str, candidates: list[tuple[str, str, int]]) -> None:
+        return self._effects._schedule_concept_resynthesis(domain, candidates)
 
-    def _write_concept_relations(
-        self, domain: str, items: list[tuple[str, str, list]]
-    ) -> int:
-        """key_terms 的 related 写为实体间关系边:两端都经 resolve 归一到主名.
-        目标未入库时不建边,待其被采集后下次出现自动连上;同步调用,
-        由 _collect_glossary 包 to_thread。"""
-        from shared.concepts import norm_related, resolve
-
-        rows = [
-            {"term": r["term"], "zh_name": r.get("zh_name") or "",
-             "aliases": r.get("aliases") or []}
-            for r in self.db.list_glossary(domain)
-        ]
-        added = 0
-        for term, zh_name, related in items:
-            src = resolve(rows, term, zh_name or None)
-            if src is None:
-                continue
-            rels = []
-            for r in norm_related(related):
-                tgt = resolve(rows, r["term"])
-                if tgt is not None and tgt != src:
-                    rels.append({"term": tgt, "rel": r["rel"]})
-            if rels:
-                added += self.db.add_glossary_relations(domain, src, rels)
-        return added
-
-    def _replace_concept_occurrences(
-        self,
-        domain: str,
-        job_id: str,
-        key_terms: list,
-        evidence_note_type: object,
-    ) -> tuple[int, list[tuple[str, str, int]]]:
-        """把 producer 的来源段引用映射为当前 canonical IDs 后全量对账。"""
-        from shared.concepts import resolve
-
-        note_type = evidence_note_type if (
-            isinstance(evidence_note_type, str)
-            and evidence_note_type in {"smart", "translated", "original"}
-        ) else None
-        requested_ids: list[str] = []
-        if note_type:
-            for item in key_terms:
-                if not isinstance(item, dict):
-                    continue
-                refs = item.get("evidence_source_segment_ids")
-                if not isinstance(refs, list):
-                    continue
-                for ref in refs:
-                    if (
-                        isinstance(ref, str)
-                        and re.fullmatch(r"seg_[0-9a-f]{64}", ref)
-                        and ref not in requested_ids
-                    ):
-                        requested_ids.append(ref)
-
-        canonical_by_segment = (
-            self.db.canonical_evidence_ids_for_source_segments(
-                job_id=job_id,
-                note_type=note_type,
-                source_segment_ids=requested_ids,
-            )
-            if note_type and requested_ids else {}
-        )
-        glossary_rows = self.db.list_glossary(domain)
-        rows = [
-            {
-                "term": row["term"],
-                "zh_name": row.get("zh_name") or "",
-                "aliases": row.get("aliases") or [],
-            }
-            for row in glossary_rows
-        ]
-        mapping: dict[str, list[str]] = {}
-        for item in key_terms:
-            if not isinstance(item, dict):
-                continue
-            term = item.get("term")
-            if not isinstance(term, str) or not term.strip():
-                continue
-            zh_name = item.get("zh_name")
-            resolved = resolve(
-                rows,
-                term,
-                zh_name if isinstance(zh_name, str) else None,
-            )
-            if resolved is None:
-                continue
-            refs = item.get("evidence_source_segment_ids")
-            if not isinstance(refs, list):
-                continue
-            evidence_ids = mapping.setdefault(resolved, [])
-            for ref in refs:
-                for evidence_id in canonical_by_segment.get(ref, []):
-                    if isinstance(evidence_id, str) and evidence_id not in evidence_ids:
-                        evidence_ids.append(evidence_id)
-            if not evidence_ids:
-                mapping.pop(resolved, None)
-
-        self.db.replace_job_concept_occurrences(
-            domain=domain,
-            job_id=job_id,
-            mapping=mapping,
-        )
-        rows_by_term = {row["term"]: row for row in glossary_rows}
-        candidates: list[tuple[str, str, int]] = []
-        for term in sorted(mapping):
-            row = rows_by_term.get(term) or {}
-            current_id = row.get("current_definition_version_id")
-            if (
-                isinstance(current_id, str)
-                and current_id
-                and not row.get("definition_locked")
-            ):
-                candidates.append((term, current_id, int(row.get("lock_revision") or 0)))
-        return (
-            sum(len(evidence_ids) for evidence_ids in mapping.values()),
-            candidates,
-        )
-
-    def _schedule_concept_resynthesis(
-        self,
-        domain: str,
-        candidates: list[tuple[str, str, int]],
-    ) -> None:
-        """异步触发概念综合；失败只记日志，不反向阻塞 pipeline 完成。"""
-        for term, current_id, lock_revision in candidates:
-            key = (domain, term)
-            previous = self._concept_synthesis_tasks.get(key)
-            if previous is not None and not previous.done():
-                self._concept_synthesis_pending[key] = (current_id, lock_revision)
-                continue
-            task = asyncio.create_task(
-                self._auto_resynthesize_concept(
-                    domain,
-                    term,
-                    current_id,
-                    lock_revision,
-                ),
-                name=f"concept_resynthesis:{domain}:{term}",
-            )
-            self._concept_synthesis_tasks[key] = task
-            task.add_done_callback(
-                lambda finished, task_key=key: self._on_concept_synthesis_done(
-                    task_key, finished,
-                )
-            )
-
-    def _on_concept_synthesis_done(
-        self,
-        key: tuple[str, str],
-        task: asyncio.Task,
-    ) -> None:
-        if self._concept_synthesis_tasks.get(key) is task:
-            self._concept_synthesis_tasks.pop(key, None)
-            pending = self._concept_synthesis_pending.pop(key, None)
-            if pending is not None and not self._shutdown:
-                current_id, lock_revision = pending
-                self._schedule_concept_resynthesis(
-                    key[0], [(key[1], current_id, lock_revision)]
-                )
+    def _on_concept_synthesis_done(self, key: tuple[str, str], task: asyncio.Task) -> None:
+        return self._effects._on_concept_synthesis_done(key, task)
 
     async def _auto_resynthesize_concept(
         self,
@@ -1482,677 +350,66 @@ class Scheduler:
                 exc_info=True,
             )
 
-    async def on_step_failed(
-        self,
-        job_id: str,
-        step: str,
-        error: str,
-        error_type: str = "unknown",
-        worker: str | None = None,
-        exec_id: str | None = None,
-        generation: int | None = None,
-        duration: float | None = None,
-        started_at: float | None = None,
-        count_stats: bool = False,
-    ) -> None:
-        # 同 on_step_done:丢弃陈旧执行的失败事件,不让旧实例顶替当前在跑的步骤。
-        if not await self._exec_is_current(job_id, step, exec_id, generation):
-            logger.warning("stale_exec_failed_ignored", job_id=job_id, step=step, exec_id=exec_id)
-            return
-        ok = await self.redis.cas_step_status(job_id, step, "running", "failed")
-        if not ok:
-            return
-
-        await asyncio.to_thread(
-            self.db.update_step,
-            job_id,
-            step,
-            status="failed",
-            error=error[:500],
-            worker_id=worker,
-            started_at=(
-                datetime.fromtimestamp(started_at, timezone.utc)
-                if isinstance(started_at, (int, float)) else None
-            ),
-            finished_at=datetime.now(timezone.utc),
-            duration_sec=duration,
-        )
-        if count_stats:
-            await self._record_worker_terminal_stats(worker, failed=1)
-
-        logger.warning(
-            "step_failed", job_id=job_id, step=step,
-            error_type=error_type, error=error[:200],
-        )
-
-        pipeline_steps = await self._get_job_pipeline_steps(job_id)
-        if not pipeline_steps:
-            return
-        cfg = pipeline_steps.get(step, {})
-        pipeline_retries = cfg.get("retries", 0)
-
-        # 缺表项(如 unknown)按 max 0 处理:未归类失败默认 BUILD,不重试。
-        # pipeline_retries 二次封顶 policy_max:用户不可放大 SYSTEM 类的上限。
-        policy = RETRY_POLICY.get(error_type, {})
-        policy_max = policy.get("max", 0)
-        max_retries = min(policy_max, pipeline_retries)
-
-        current_retries = await self.redis.get_step_retries(job_id, step)
-
-        if current_retries < max_retries:
-            await self.redis.incr_step_retries(job_id, step)
-            # 同步 DB retries 列:重试计数权威在 redis(job:{id}:retries),但 DB 只在终态才写,
-            # 重试中 UI/排查看到 retries=0 会误判"超时不计数、无限循环"(线上 GPT-3 翻译步实证误读)。
-            await asyncio.to_thread(
-                self.db.update_step, job_id, step, retries=current_retries + 1,
-            )
-            delay = get_retry_delay(error_type, current_retries) or 0
-            logger.info(
-                "step_retry", job_id=job_id, step=step,
-                attempt=current_retries + 1, max=max_retries, delay=delay,
-            )
-            # enqueue_step will set status to "ready" (from current "failed")
-            if delay > 0:
-                task = asyncio.create_task(
-                    self._delayed_enqueue(delay, job_id, step),
-                    name=f"{_DELAYED_PREFIX}{job_id}:{step}",
-                )
-                self._delayed_tasks.add(task)
-                task.add_done_callback(self._on_delayed_done)
-            else:
-                await self.enqueue_step(job_id, step)
-
-            await self.redis.publish(f"events:{job_id}", {
-                "event": "step_failed", "step": step,
-                "error": error[:200], "retries": current_retries + 1,
-            })
-        else:
-            # CAS already set it to "failed", just update DB
-            await asyncio.to_thread(
-                self.db.update_step, job_id, step,
-                status="failed", error=error[:500],
-                finished_at=datetime.now(timezone.utc),
-                retries=current_retries,
-            )
-            await self.mark_job_failed(job_id, f"{step}: {error[:200]}")
+    async def on_step_failed(self, job_id: str, step: str, error: str, error_type: str = 'unknown', worker: str | None = None, exec_id: str | None = None, generation: int | None = None, duration: float | None = None, started_at: float | None = None, count_stats: bool = False) -> None:
+        return await self._lifecycle.on_step_failed(job_id, step, error, error_type, worker, exec_id, generation, duration, started_at, count_stats)
 
     async def _delayed_enqueue(self, delay: int, job_id: str, step: str) -> None:
-        await asyncio.sleep(delay)
-        await self.enqueue_step(job_id, step)
+        return await self._lifecycle._delayed_enqueue(delay, job_id, step)
 
-    async def _record_worker_terminal_stats(
-        self,
-        worker_id: str | None,
-        *,
-        completed: int = 0,
-        failed: int = 0,
-        duration: float = 0.0,
-    ) -> None:
-        if not worker_id:
-            return
-        await asyncio.to_thread(
-            self.db.increment_worker_stats,
-            worker_id,
-            completed=completed,
-            failed=failed,
-            duration=duration,
-        )
-        if completed:
-            await self.redis.incr_worker_stat(worker_id, "tasks_completed", completed)
-        if failed:
-            await self.redis.incr_worker_stat(worker_id, "tasks_failed", failed)
-        if duration:
-            await self.redis.incr_worker_stat(worker_id, "total_duration_sec", duration)
+    async def _record_worker_terminal_stats(self, worker_id: str | None, *, completed: int = 0, failed: int = 0, duration: float = 0.0) -> None:
+        return await self._lifecycle._record_worker_terminal_stats(worker_id, completed=completed, failed=failed, duration=duration)
 
     # DAG 推进
 
     async def _check_downstream(self, job_id: str) -> None:
-        """检查所有 waiting/skipped 步骤是否可推进。生产路径由 on_step_done 调用。"""
-        pipeline = await self.redis.get_job_pipeline(job_id)
-        if not pipeline:
-            return
-        steps = self._get_pipeline_steps(pipeline)
-        statuses = await self.redis.get_all_step_statuses(job_id)
-
-        for name, cfg in steps.items():
-            status = statuses.get(name)
-            if status not in ("waiting", "skipped"):
-                continue
-
-            deps = cfg.get("depends_on", [])
-            if not all(statuses.get(d) in ("done", "skipped") for d in deps):
-                continue
-
-            conditional = self._step_is_conditional(cfg)
-            if conditional and not await self._eval_step_condition(job_id, cfg):
-                if status == "waiting":
-                    await self.redis.set_step_status(job_id, name, "skipped")
-                    await asyncio.to_thread(
-                        self.db.update_step, job_id, name, status="skipped",
-                    )
-                    await self.redis.publish(f"events:{job_id}", {
-                        "event": "step_skipped", "step": name,
-                    })
-                    statuses[name] = "skipped"
-                continue
-
-            if status == "skipped":
-                if not conditional:
-                    continue
-                ok = await self.redis.cas_step_status(job_id, name, "skipped", "ready")
-                if not ok:
-                    continue
-            if not await self.enqueue_step(job_id, name):
-                statuses[name] = "failed"
-                return
-            statuses[name] = "ready"
-
-        fresh = await self.redis.get_all_step_statuses(job_id)
-        if fresh and all(v in ("done", "skipped") for v in fresh.values()):
-            await self.mark_job_done(job_id)
-        elif fresh:
-            # 死锁打破器:仅当剩余未完成步骤全部为 ready(无 running、无 waiting)才介入。
-            not_done = {k: v for k, v in fresh.items() if v not in ("done", "skipped")}
-            all_remaining_ready = bool(not_done) and all(
-                v == "ready" for v in not_done.values()
-            )
-            if all_remaining_ready:
-                pipeline = await self.redis.get_job_pipeline(job_id)
-                if pipeline:
-                    steps_cfg = self._get_pipeline_steps(pipeline)
-                    pool_ok: dict[str, bool] = {}  # 同 pool 只查一次,免逐步重复扫 worker
-                    for step_name in not_done:
-                        pool = steps_cfg.get(step_name, {}).get("pool", "")
-                        if pool not in pool_ok:
-                            pool_ok[pool] = await self._pool_has_workers(pool)
-                        if pool_ok[pool]:
-                            continue
-                        # 缺 worker 只 skip 条件步(可选步缺能力=合理跳过);必需步不 skip,留给
-                        # check_no_worker 超宽限 fail-fast,避免末端必需步被静默 skip 后 job
-                        # 不完整却显示完成(对齐 pools.yaml fail-fast 注释)。
-                        if not self._step_is_conditional(steps_cfg.get(step_name, {})):
-                            continue
-                        # CAS 保护 ready 到 skipped 的转换:若该步骤刚被 worker 抢成 running,
-                        # CAS 失败时放弃 skip,避免覆盖在途执行.
-                        if not await self.redis.cas_step_status(
-                            job_id, step_name, "ready", "skipped"
-                        ):
-                            continue
-                        logger.info(
-                            "skip_no_worker", job_id=job_id,
-                            step=step_name, pool=pool,
-                        )
-                        await asyncio.to_thread(
-                            self.db.update_step, job_id, step_name, status="skipped",
-                        )
-                        await self.redis.publish(f"events:{job_id}", {
-                            "event": "step_skipped", "step": step_name,
-                            "reason": f"no workers in pool '{pool}'",
-                        })
-                    fresh2 = await self.redis.get_all_step_statuses(job_id)
-                    if fresh2 and all(v in ("done", "skipped") for v in fresh2.values()):
-                        await self.mark_job_done(job_id)
+        return await self._dag_planner._check_downstream(job_id)
 
     async def enqueue_step(self, job_id: str, step_name: str) -> bool:
-        pipeline_steps = await self._get_job_pipeline_steps(job_id)
-        if not pipeline_steps:
-            return False
-        step_cfg = pipeline_steps.get(step_name)
-        if not step_cfg:
-            return False
+        return await self._task_router.enqueue_step(job_id, step_name)
 
-        pool = step_cfg["pool"]
+    async def _fail_invalid_ai_override(self, job_id: str, step_name: str, reason: str) -> None:
+        return await self._task_router._fail_invalid_ai_override(job_id, step_name, reason)
 
-        static_tags = step_cfg.get("tags", [])
-        if pool == "ai":
-            job_info = await self.redis.get_job_info(job_id)
-            domain = job_info.get("domain", "")
-            style_tags = parse_style_tags(job_info.get("style_tags", "[]"))
-            dynamic_tags = [domain] + style_tags
-            merged_tags = sorted(set(static_tags + [t for t in dynamic_tags if t]))
-        else:
-            merged_tags = list(static_tags)
-
-        # 网络区域路由(net-zone):任务分发时按 URL 判区域,require 对应 net-cn / net-global tag.
-        # 只有自报覆盖该区域的 worker 才能认领;境外内容走香港或带代理 worker,大陆内容走大陆 worker.
-        # 代理 HOW 全在 worker。区域判定与 tag 语义见文件头 _NET_STEPS 注释与 shared.net_zone。
-        nr = self.config.net_routing or {}
-        net_steps = set(nr.get("net_steps") or _NET_STEPS)
-        info = job_info if pool == "ai" else None
-        try:
-            require_tags = await self._required_tags_for_step(
-                job_id, step_name, step_cfg, info,
-            )
-        except InvalidAIOverrideError as exc:
-            await self._fail_invalid_ai_override(job_id, step_name, str(exc))
-            return False
-        if step_name in net_steps:
-            zone = next((tag for tag in require_tags if tag in {"net-cn", "net-global"}), None)
-            if zone:
-                merged_tags = sorted(set(merged_tags + [zone]))
-
-        await self.redis.set_step_status(job_id, step_name, "ready")
-        statuses = await self.redis.get_all_step_statuses(job_id)
-        done_count = sum(1 for v in statuses.values() if v in ("done", "skipped"))
-        # zpopmin:分数越小越先出。priority=-done_count 让晚到步骤优先,但 02_whisper 处在链路早段
-        # 会被各 job 的视觉步(04/05/06,同 cpu 池)长期抢占而饿死。给它静态加权(更小分数)抢先转写;
-        # 出稿硬依赖转写,不加权会让出稿步空等。
-        priority = -done_count - _PRIORITY_BOOST.get(step_name, 0)
-
-        await self.redis.enqueue_step(
-            pool, job_id, step_name, merged_tags, priority,
-            require_tags=require_tags,
-            resources=step_cfg.get("resources") or [],
-        )
-
-        await asyncio.to_thread(
-            self.db.update_step, job_id, step_name, status="ready",
-        )
-        await self.redis.publish(f"events:{job_id}", {
-            "event": "step_ready", "step": step_name,
-        })
-
-        logger.info("step_enqueued", job_id=job_id, step=step_name, pool=pool, priority=priority)
-        return True
-
-    async def _fail_invalid_ai_override(
-        self, job_id: str, step_name: str, reason: str,
-    ) -> None:
-        """非法 override 在入队前终止步骤与 job,不允许回退到 pipeline provider。"""
-        error = (
-            reason if reason.startswith("invalid AI override:")
-            else f"invalid AI override: {reason}"
-        )
-        await self.redis.set_step_status(job_id, step_name, "failed")
-        await asyncio.to_thread(
-            self.db.update_step, job_id, step_name,
-            status="failed", error=error[:500],
-            finished_at=datetime.now(timezone.utc),
-        )
-        await self.mark_job_failed(job_id, f"{step_name}: {error}")
-
-    async def _required_tags_for_step(
-        self, job_id: str, step_name: str, step_cfg: dict,
-        job_info: dict | None = None,
-    ) -> list[str]:
-        """计算 enqueue 与 no-worker 共用的硬标签,含 provider override。"""
-        required = set(step_cfg.get("tags") or [])
-        if step_cfg.get("pool") == "ai":
-            async def has_nonempty_artifact(rel: str) -> bool:
-                if self.storage is not None:
-                    data = await read_file_bounded(self.storage, job_id, rel, 0)
-                    return bool(data)
-                path = self.jobs_dir / job_id / rel
-                try:
-                    return await asyncio.to_thread(
-                        lambda: path.is_file() and path.stat().st_size > 0,
-                    )
-                except OSError as exc:
-                    raise InvalidAIOverrideError(
-                        "invalid AI capability input: artifact_unreadable",
-                    ) from exc
-
-            try:
-                capability_tags = await step_required_capability_tags(
-                    step_cfg, has_nonempty_artifact,
-                )
-            except InvalidAIOverrideError:
-                raise
-            except (OSError, ValueError, TypeError) as exc:
-                raise InvalidAIOverrideError(
-                    "invalid AI capability input",
-                ) from exc
-            override = None
-            raw = None
-            if self.storage is not None:
-                try:
-                    raw = await self.storage.read_file(job_id, "job.json")
-                except (OSError, ValueError, TypeError) as exc:
-                    logger.warning("ai_override_read_failed", job_id=job_id, step=step_name)
-                    raise InvalidAIOverrideError(
-                        "invalid AI override: job_json_unreadable",
-                    ) from exc
-            else:
-                path = self.jobs_dir / job_id / "job.json"
-                try:
-                    raw = await asyncio.to_thread(path.read_bytes)
-                except FileNotFoundError:
-                    raw = None
-                except OSError as exc:
-                    raise InvalidAIOverrideError(
-                        "invalid AI override: job_json_unreadable",
-                    ) from exc
-            if raw is not None:
-                try:
-                    doc = json.loads(raw)
-                    override, shape_error = parse_ai_override(
-                        doc, step_name, self.config.providers,
-                    )
-                    if shape_error:
-                        logger.warning(
-                            "ai_override_invalid", job_id=job_id,
-                            step=step_name, reason=shape_error,
-                        )
-                        raise InvalidAIOverrideError(f"invalid AI override: {shape_error}")
-                except InvalidAIOverrideError:
-                    raise
-                except (ValueError, json.JSONDecodeError, TypeError) as exc:
-                    logger.warning("ai_override_read_failed", job_id=job_id, step=step_name)
-                    raise InvalidAIOverrideError(
-                        "invalid AI override: job_json_invalid",
-                    ) from exc
-            try:
-                required.update(ai_required_tags(
-                    step_cfg.get("ai"), self.config.providers, override=override,
-                    required_tags=sorted(
-                        set(capability_tags)
-                        | ({READ_TOOL_TAG} if READ_TOOL_TAG in required else set())
-                    ),
-                ))
-            except ValueError as exc:
-                raise InvalidAIOverrideError(
-                    f"invalid AI capability: {exc}",
-                ) from exc
-        nr = self.config.net_routing or {}
-        if step_name in set(nr.get("net_steps") or _NET_STEPS):
-            info = job_info or await self.redis.get_job_info(job_id)
-            source = (info.get("source") or "").strip() or detect_source(info.get("url", ""))
-            required.add(required_zone(source, info.get("url", "")))
-        return sorted(required)
+    async def _required_tags_for_step(self, job_id: str, step_name: str, step_cfg: dict, job_info: dict | None = None) -> list[str]:
+        return await self._task_router._required_tags_for_step(job_id, step_name, step_cfg, job_info)
 
     async def _list_job_files(self, job_id: str) -> list[str]:
-        """列出 job 现有产物的相对路径。分布式部署产物在对象存储(MinIO)、不在调度器本地盘,
-        故优先走 storage;无 storage(单机/测试)回退本地 jobs_dir。条件/规则据此判存在。"""
-        if self.storage is not None:
-            try:
-                return await self.storage.list_files(job_id)
-            except Exception:
-                logger.warning("list_job_files_failed", job_id=job_id)
-                return []
-        job_dir = self.jobs_dir / job_id
-
-        def _local() -> list[str]:
-            if not job_dir.exists():
-                return []
-            return [p.relative_to(job_dir).as_posix() for p in job_dir.rglob("*") if p.is_file()]
-
-        return await asyncio.to_thread(_local)
+        return await self._task_router._list_job_files(job_id)
 
     async def check_condition(self, job_id: str, condition: str) -> bool:
-        files = await self._list_job_files(job_id)
-        has_srt = any(fnmatch.fnmatch(f, "input/*.srt") for f in files)
-        has_ass = any(fnmatch.fnmatch(f, "input/*.ass") for f in files)
-        if condition == "no_subtitle":
-            return not has_srt
-        if condition == "has_subtitle":
-            return has_srt
-        if condition == "has_danmaku":
-            return has_ass
-        return True
+        return await self._task_router.check_condition(job_id, condition)
 
     def _step_is_conditional(self, cfg: dict) -> bool:
-        """step 是否带跳过条件:condition 字符串或声明式 rules 均算。"""
-        return bool(cfg.get("condition") or cfg.get("rules"))
+        return self._task_router._step_is_conditional(cfg)
 
     async def _eval_step_condition(self, job_id: str, cfg: dict) -> bool:
-        """求值 step 是否应运行:优先 condition 字符串,否则用声明式 rules。"""
-        condition = cfg.get("condition")
-        if condition:
-            return await self.check_condition(job_id, condition)
-        rules = cfg.get("rules")
-        if rules:
-            return await self._eval_rules(job_id, rules)
-        return True
+        return await self._task_router._eval_step_condition(job_id, cfg)
 
     async def _eval_rules(self, job_id: str, rules: list) -> bool:
-        """声明式 rules 求值器:自上而下首条命中生效,命中 when=skip 则跳过,
-        支持 exists(相对 job 根的 glob)与 if_flag(投递开关),无命中默认运行。
-        存在性查 storage(产物在 MinIO,不在调度器本地盘);if_flag 查 redis job info。"""
-        files = await self._list_job_files(job_id)
-        _flags_cache: dict | None = None
-
-        async def _flags() -> dict:
-            nonlocal _flags_cache
-            if _flags_cache is None:
-                info = await self.redis.get_job_info(job_id)
-                try:
-                    _flags_cache = json.loads(info.get("flags") or "{}")
-                except (json.JSONDecodeError, ValueError, AttributeError):
-                    _flags_cache = {}
-            return _flags_cache
-
-        def _when(rule: dict) -> str:
-            when = rule.get("when", "on")
-            if when is True:
-                return "on"
-            if when is False:
-                return "skip"
-            return str(when)
-
-        for rule in rules:
-            if not isinstance(rule, dict):
-                continue
-            glob = rule.get("exists")
-            if glob is not None:
-                hit = any(fnmatch.fnmatch(f, glob) for f in files)
-                if not hit:
-                    continue
-            # if_flag:投递开关为真才命中(假则本条不生效,落到后续兜底规则)。
-            flag = rule.get("if_flag")
-            if flag is not None:
-                if not (await _flags()).get(flag):
-                    continue
-            # exists/if_flag 命中、或无条件的兜底规则:本条生效。
-            return _when(rule) != "skip"
-        return True
+        return await self._task_router._eval_rules(job_id, rules)
 
     async def _pool_has_workers(self, pool: str) -> bool:
-        """检查某个 pool 是否有可认领新任务的 worker;排除 paused/offline.
-        claim_step 对 paused 直接拒认领;若 pool 只剩 paused,no-worker 判定/死锁打破器会误判为可推进,
-        ready 步既无人认领又不被 fail-fast/skip,永久卡 ready。
-        暂停态算"无可用 worker":暂停期下载好的 job 进到该池会等候,超 NO_WORKER_GRACE_SEC 才 fail。"""
-        workers = await self.redis.list_worker_ids()
-        for wid in workers:
-            info = await self.redis.get_worker_info(wid)
-            if not info:
-                continue
-            if info.get("admin_status") == "paused" or info.get("status") == "offline":
-                continue
-            if pool in info.get("pools", "").split(","):
-                return True
-        return False
+        return await self._task_router._pool_has_workers(pool)
 
     async def _pool_has_workers_for(self, pool: str, require_tags: list[str]) -> bool:
-        """同 _pool_has_workers,但额外要求在线 worker 的 tags 满足 require_tags(硬门控)。
-        require_tags 为空时等价 _pool_has_workers;check_no_worker 若只看池不看 tag,
-        池有 worker 但无人满足 require_tags 时(如境外内容 require net-global 却无覆盖全球的
-        worker)会躲过 fail-fast、永久卡 ready 且无报错;用本函数后超 NO_WORKER_GRACE_SEC
-        给明确失败。"""
-        req = {t for t in (require_tags or []) if t}
-        workers = await self.redis.list_worker_ids()
-        for wid in workers:
-            info = await self.redis.get_worker_info(wid)
-            if worker_satisfies_requirements(info, pool, req):
-                return True
-        return False
+        return await self._task_router._pool_has_workers_for(pool, require_tags)
 
     # Job 状态
 
     async def mark_job_done(self, job_id: str) -> bool:
-        generation = await self.redis.get_job_generation(job_id)
-        owner = f"scheduler:{os.getpid()}:{secrets.token_hex(8)}"
-        finalizer = await self.redis.acquire_job_finalizer(
-            job_id, generation, "done", owner,
-        )
-        if finalizer == 0:
-            return False
-        if finalizer == 2:
-            await asyncio.to_thread(
-                self.db.update_job, job_id,
-                status=JobStatus.DONE, progress_pct=100,
-            )
-            await self.redis.remove_active_job(job_id)
-            return True
-        # 只有声明副作用全部成功才越过 job 终态门。失败时步骤保持 done、job 留在 active,
-        # 周期对账会继续幂等重放,不会要求 worker 重跑昂贵步骤。
-        if not await self._reconcile_completed_effects(job_id):
-            logger.warning("job_completion_effects_pending", job_id=job_id)
-            return False
-        await asyncio.to_thread(
-            self.db.update_job, job_id,
-            status=JobStatus.DONE, progress_pct=100,
-        )
-        await self.redis.publish(f"events:{job_id}", {
-            "event": "job_done", "progress_pct": 100,
-        })
-        await self._advance_book_chain(job_id)
-        await self.redis.complete_job_finalizer(
-            job_id, generation, "done", owner,
-        )
-        await self.redis.remove_active_job(job_id)
-        logger.info("job_done", job_id=job_id)
-        return True
+        return await self._job_finalizer.mark_job_done(job_id)
 
     async def reconcile_completion_effects(self) -> None:
-        """周期收敛 active 终态门,并补齐历史已完成但无全文索引的 job。"""
-        for job_id in await self.redis.get_active_jobs():
-            statuses = await self.redis.get_all_step_statuses(job_id)
-            if statuses and all(v in ("done", "skipped") for v in statuses.values()):
-                await self.mark_job_done(job_id)
-        if self.storage is None:
-            return
-        jobs = await asyncio.to_thread(self.db.list_unindexed_done_jobs)
-        for job in jobs:
-            indexed = False
-            for step, cfg in self._get_pipeline_steps(job.pipeline).items():
-                effects = [
-                    effect for effect in (cfg.get("on_complete") or [])
-                    if isinstance(effect, dict) and effect.get("action") == "index_note"
-                ]
-                for effect in effects:
-                    indexed = (
-                        await self._run_completion_effects(job.id, step, [effect])
-                        or indexed
-                    )
-            if indexed:
-                logger.info(
-                    "search_index_reconciled", job_id=job.id, pipeline=job.pipeline,
-                )
+        return await self._job_finalizer.reconcile_completion_effects()
 
     async def _advance_book_chain(self, job_id: str) -> None:
-        """book 章序:本 job 属 book_toc 集合且到终态后,按 created_at 序 submit 下一待投章.
-        best-effort:任何异常只 warn(书链卡住可由重新 sync 兜底 kick)。"""
-        try:
-            job = await asyncio.to_thread(self.db.get_job, job_id)
-            if not job or not job.collection_id:
-                return
-            coll = await asyncio.to_thread(self.db.get_collection, job.collection_id)
-            if not coll or getattr(coll, "source_type", None) != "book_toc":
-                return
-            from shared.book_chain import next_chapter_job
-            nxt = await next_chapter_job(self.db, self.redis, job.collection_id)
-            if not nxt:
-                return
-            nxt_job = await asyncio.to_thread(self.db.get_job, nxt)
-            if nxt_job:
-                await self.submit_job(nxt_job)
-                logger.info("book_chain_advanced", coll=job.collection_id,
-                            prev=job_id, next=nxt)
-        except Exception:
-            logger.warning("book_chain_advance_failed", job_id=job_id, exc_info=True)
+        return await self._job_finalizer._advance_book_chain(job_id)
 
     async def _sync_published_at(self, job_id: str) -> None:
-        """把源内容发布时间(01_download 写入 input/metadata.json 的 published_at)同步进 DB,
-        供概念时间线按源内容发布时间(而非入库时间)分桶;best-effort,读不到/解析失败/无该字段
-        都只记日志,绝不阻塞 job 完成。
-
-        经 storage 读 metadata.json:分布式部署产物在对象存储(MinIO)、不在调度器本地盘,
-        与 _index_job_notes/_collect_glossary 同一路径;未注入 storage(老式单机)则跳过,
-        留空时概念时间线对该 job 回退到 created_at,不丢计数。"""
-        if self.storage is None:
-            return
-        try:
-            raw = await self.storage.read_file(job_id, "input/metadata.json")
-            md = json.loads(raw.decode("utf-8", errors="replace")) if raw else {}
-            # 文章的 title/date 在 input/article_meta.json(metadata.json 常无这两项),这里合并兜底:
-            # 以 metadata.json 的非空值优先,article_meta 填补 title/date。
-            am_raw = await self.storage.read_file(job_id, "input/article_meta.json")
-            if am_raw:
-                am = json.loads(am_raw.decode("utf-8", errors="replace"))
-                md = {**am, **{k: v for k, v in md.items() if v}}
-            # 论文/文章的 title/date 也在 02 解析写的 intermediate/parsed.json,论文标题尤其只在此,
-            # 故作末位兜底;仍以已有非空值优先,不覆盖 metadata/article_meta 已填的。
-            if not md.get("title") or not (md.get("published_at") or md.get("date")):
-                pj_raw = await self.storage.read_file(job_id, "intermediate/parsed.json")
-                if pj_raw:
-                    pj = json.loads(pj_raw.decode("utf-8", errors="replace"))
-                    md = {**{k: pj[k] for k in ("title", "date") if pj.get(k)}, **{k: v for k, v in md.items() if v}}
-            if not md:
-                return
-            fields: dict = {}
-            published = md.get("published_at") or md.get("date")
-            if published:
-                fields["published_at"] = published
-            # 标题:01_download 从源(youtube info.json / article_meta)写入时回填,仅当 DB 标题为空,
-            # 不覆盖订阅/用户已填的标题。例外:已入库标题是垃圾(pdf-only 的 PDF 内嵌 metadata,
-            # 如 "10things"/"paper.dvi"/"NBER WORKING PAPER SERIES")且候选明显更像真标题
-            # 非垃圾,含空格且更长时允许覆盖,与 02 步提取共用 shared.titles 同一套判定.
-            title = (md.get("title") or "").strip()
-            if title:
-                from shared.titles import is_suspicious_title
-                job = await asyncio.to_thread(self.db.get_job, job_id)
-                cur = (job.title or "").strip() if job else ""
-                better = (is_suspicious_title(cur) and not is_suspicious_title(title)
-                          and " " in title and len(title) > len(cur))
-                if job and (not cur or better):
-                    fields["title"] = title
-            if not fields:
-                return
-            await asyncio.to_thread(self.db.update_job, job_id, **fields)
-            logger.info("metadata_synced", job_id=job_id, **fields)
-        except Exception:
-            logger.warning("metadata_sync_failed", job_id=job_id)
+        return await self._job_finalizer._sync_published_at(job_id)
 
     async def mark_job_failed(self, job_id: str, error: str) -> None:
-        generation = await self.redis.get_job_generation(job_id)
-        owner = f"scheduler:{os.getpid()}:{secrets.token_hex(8)}"
-        finalizer = await self.redis.acquire_job_finalizer(
-            job_id, generation, "failed", owner,
-        )
-        if finalizer == 0:
-            return
-        if finalizer == 2:
-            await asyncio.to_thread(
-                self.db.update_job, job_id,
-                status=JobStatus.FAILED, error=error[:500],
-            )
-            await self.redis.remove_active_job(job_id)
-            return
-        self._cancel_delayed_tasks(job_id)
-        for step, status in (await self.redis.get_all_step_statuses(job_id)).items():
-            if status == "running":
-                await self._revoke_step_execution(job_id, step)
-        progress = await self._update_progress(job_id)
-        await asyncio.to_thread(
-            self.db.update_job, job_id,
-            status=JobStatus.FAILED, error=error[:500],
-        )
-        await self.redis.publish(f"events:{job_id}", {
-            "event": "job_failed", "error": error[:200], "progress_pct": progress,
-        })
-        await self.redis.push_event("job_failed", job_id=job_id, error=error[:200])
-        # 失败即停:清掉该 job 仍残留在 queue:{pool} 的兄弟 ready task。并行分支下某步终态失败时,
-        # 其它已入队的兄弟步是死任务,job 已 FAILED 不该再跑;不清则 worker 仍会认领,cas_step_status
-        # 因 steps hash 未清而成功,跑已失败 job 的步,甚至 _check_downstream 把它重标 done,还留下
-        # 指向 FAILED job 的孤儿 task。保留 job:{id}:steps hash(不调 cleanup_job),重试/重跑仍可用。
-        await self.redis.remove_job_tasks(job_id)
-        # book:失败章不卡整书,照样放行下一章(失败章单独 rerun;L2 术语表已含累积对照)。
-        await self._advance_book_chain(job_id)
-        await self.redis.complete_job_finalizer(
-            job_id, generation, "failed", owner,
-        )
-        await self.redis.remove_active_job(job_id)
-        logger.info("job_failed", job_id=job_id, error=error[:200])
+        return await self._job_finalizer.mark_job_failed(job_id, error)
 
     # 孤儿回收 + 卡住检测
 
@@ -2166,146 +423,19 @@ class Scheduler:
     _STEP_PROGRESS_FRESH_SEC = 30
 
     async def orphan_scan(self) -> None:
-        active_jobs = await self.redis.get_active_jobs()
-        live_mismatch: set[tuple[str, str]] = set()
-        for job_id in active_jobs:
-            statuses = await self.redis.get_all_step_statuses(job_id)
-            for step, status in statuses.items():
-                if status != "running":
-                    continue
-                worker_id = await self.redis.get_step_worker(job_id, step)
-                if not worker_id:
-                    await self._reclaim_step(job_id, step, "no worker assigned")
-                    continue
-                if not await self.redis.worker_exists(worker_id):
-                    await self._reclaim_step(job_id, step, f"worker {worker_id} lost")
-                    continue
-                # worker 存活,但这步没有近期进度心跳;可能是认领响应丢失或未真正运行,实际没人在跑.
-                # 判活用每步独立的进度心跳(job:*:step_progress,worker on_tick 每 10s 刷一步),
-                # 而非 worker 的单个 current_step;后者在 concurrency>1 时只能反映 N 个并发步中的 1 个,
-                # 会把其余并发步全误判为 claim lost 反复回收(并发越高越严重,实测会致失败雪崩)。
-                # 持续超宽限期(容忍认领后首拍心跳延迟)才回收。
-                progress_at = await self.redis.get_step_progress_at(job_id, step)
-                if progress_at is not None and time.time() - progress_at < self._STEP_PROGRESS_FRESH_SEC:
-                    self._claim_mismatch_since.pop((job_id, step), None)
-                    continue
-                key = (job_id, step)
-                live_mismatch.add(key)
-                first = self._claim_mismatch_since.setdefault(key, time.time())
-                if time.time() - first >= self._CLAIM_MISMATCH_GRACE_SEC:
-                    self._claim_mismatch_since.pop(key, None)
-                    await self._reclaim_step(
-                        job_id, step,
-                        f"worker {worker_id} not running this step (claim lost?)",
-                    )
-        # 清理不再 mismatch 的计时,避免泄漏。
-        for k in [k for k in self._claim_mismatch_since if k not in live_mismatch]:
-            self._claim_mismatch_since.pop(k, None)
+        return await self._recovery.orphan_scan()
 
-    async def _revoke_step_execution(
-        self, job_id: str, step: str,
-    ) -> tuple[str | None, int | None]:
-        """统一撤销 task lease 与所有 holder;重复调用安全。"""
-        holder = await self.redis.get_step_exec_id(job_id, step)
-        generation = await self.redis.get_step_generation(job_id, step)
-        if holder:
-            await self.redis.release_holders({holder})
-            await self.redis.revoke_task_lease(holder)
-        await self.redis.clear_step_resources(job_id, step)
-        return holder, generation
+    async def _revoke_step_execution(self, job_id: str, step: str) -> tuple[str | None, int | None]:
+        return await self._recovery._revoke_step_execution(job_id, step)
 
-    async def _reclaim_step(
-        self, job_id: str, step: str, reason: str,
-        error_type: str = "processing",
-    ) -> None:
-        logger.warning("reclaim_step", job_id=job_id, step=step, reason=reason)
-        await self.redis.push_event("orphan_reclaimed", job_id=job_id, step=step, reason=reason)
-
-        holder, generation = await self._revoke_step_execution(job_id, step)
-
-        await self.redis.append_lifecycle_event("step_failed", {
-            "job_id": job_id, "step": step, "status": "failed",
-            "error": f"orphan reclaimed: {reason}",
-            "error_type": error_type,
-            "exec_id": holder,
-            "generation": generation,
-        })
+    async def _reclaim_step(self, job_id: str, step: str, reason: str, error_type: str = 'processing') -> None:
+        return await self._recovery._reclaim_step(job_id, step, reason, error_type)
 
     async def reconcile_slots(self) -> None:
-        """周期对账并发槽:持有 holder(=exec_id)但不属于任何 running 步的就是泄漏.
-        常见原因是 worker 突死没 release_step,删 running job 漏放,占槽后死在写状态前.
-        SCARD 是真实占用,但这些陈旧 holder 仍占名额,需要清掉收敛.
-        宽限:仅连续两拍(2×30s)都陈旧才 SREM,避开"刚占槽、还没写 running 状态"的认领窗口被误清。"""
-        try:
-            held = await self.redis.get_all_holders()
-            if not held:
-                self._slot_reconcile_suspect = set()
-                return
-            # live = 当前所有 running 步的 exec_id(= 合法持有者)。
-            live: set[str] = set()
-            for job_id in await self.redis.get_active_jobs():
-                statuses = await self.redis.get_all_step_statuses(job_id)
-                for step, status in statuses.items():
-                    if status == "running":
-                        ex = await self.redis.get_step_exec_id(job_id, step)
-                        if ex:
-                            live.add(ex)
-            live |= await self.redis.get_live_ai_claim_holders()
-            suspects = held - live
-            confirmed = suspects & self._slot_reconcile_suspect   # 连续两拍都陈旧才按真泄漏处理
-            if confirmed:
-                n = await self.redis.release_holders(confirmed)
-                logger.info("slots_reconciled", removed=n, holders=sorted(confirmed)[:10])
-            self._slot_reconcile_suspect = suspects
-        except Exception:
-            logger.exception("reconcile_slots_error")
+        return await self._recovery.reconcile_slots()
 
     async def check_stuck(self) -> None:
-        # 进度停滞检测:本地 job 读 jobs_dir/.{step}.progress(worker _progress_monitor 写其
-        # work_dir;单机 LocalStorage 下 work_dir==jobs_dir 才可见)。远程 job(Gateway/Remote
-        # 存储,work_dir 是 worker 本地 tmp,不落调度器盘)退回读 redis 步进度心跳;由 worker
-        # on_tick 每 10s(仅子进程存活时)经 set_step_progress_at 刷新。
-        active_jobs = await self.redis.get_active_jobs()
-        for job_id in active_jobs:
-            statuses = await self.redis.get_all_step_statuses(job_id)
-            for step, status in statuses.items():
-                if status != "running":
-                    continue
-                progress_file = self.jobs_dir / job_id / f".{step}.progress"
-                if progress_file.exists():
-                    try:
-                        data = json.loads(await asyncio.to_thread(progress_file.read_text))
-                    except (json.JSONDecodeError, OSError):
-                        continue
-                    latest = max(
-                        filter(None, [data.get("updated_at"), data.get("worker_heartbeat_at")]),
-                        default=None,
-                    )
-                else:
-                    # 远程 job:退回 redis 步进度心跳(无文件且无心跳=刚起步/未上报,跳过)。
-                    latest = await self.redis.get_step_progress_at(job_id, step)
-                if latest is None:
-                    continue
-                age = time.time() - latest
-                # 180s:worker 心跳每 10s(best-effort 走 gateway),但 api recreate/网络抖动可断 1-2 分钟,
-                # 60s 一次部署就误杀在跑的步(线上 04_translate 被 "stale 71s" 杀过);真卡死 180s 内回收仍可接受。
-                if age > 180:
-                    logger.warning(
-                        "step_stuck", job_id=job_id, step=step, age_sec=round(age),
-                    )
-                    await self.redis.push_event("step_stuck", job_id=job_id, step=step, stalled_sec=round(age))
-                    # 主动告警(设了 ALERT_WEBHOOK_URL 才外发;best-effort,不阻塞调度循环)。
-                    await asyncio.to_thread(
-                        notify, "step_stuck",
-                        f"job {job_id} 的 {step} 进度停滞 {age:.0f}s,worker 可能卡死,已触发重试",
-                        job_id=job_id, step=step, age_sec=round(age),
-                    )
-                    await self._reclaim_step(
-                        job_id,
-                        step,
-                        f"progress stale ({age:.0f}s, worker process may be stuck)",
-                        error_type="timeout",
-                    )
+        return await self._recovery.check_stuck()
 
     # 默认 90s 宽限即 fail-fast(无可用 worker 的 job)。可经 env 调大,用于
     # "只跑部分 worker"的运维窗口(如夜间仅 ECS download worker,其余步骤明天再跑),
@@ -2313,200 +443,18 @@ class Scheduler:
     _NO_WORKER_GRACE_SEC = int(os.environ.get("NO_WORKER_GRACE_SEC", "90"))
 
     async def check_no_worker(self) -> None:
-        """无法推进的 job 持续超宽限期则 fail-fast,避免永久卡住。
-
-        判定:无 running 步,且所有 ready 步所在 pool 都无在线 worker.
-        典型是未部署 gpu worker 时 audio 的 02_whisper 卡在 queue:gpu。
-        给出明确错误而非静默挂起;宽限期容忍 worker 短暂重启。
-        """
-        active_jobs = await self.redis.get_active_jobs()
-        # Worker 可用性在单轮扫描内是全局事实。active jobs 多时跨 job 复用,
-        # 避免每个 ready step 都重复扫 worker registry。
-        pool_ok: dict[tuple[str, frozenset[str]], bool] = {}
-        for job_id in active_jobs:
-            statuses = await self.redis.get_all_step_statuses(job_id)
-            if not statuses or any(v == "running" for v in statuses.values()):
-                self._no_worker_since.pop(job_id, None)
-                continue
-            ready = [s for s, v in statuses.items() if v == "ready"]
-            if not ready:
-                self._no_worker_since.pop(job_id, None)
-                continue
-
-            pipeline = await self.redis.get_job_pipeline(job_id)
-            steps_cfg = self._get_pipeline_steps(pipeline) if pipeline else {}
-            stuck: list[tuple[str, str]] = []
-            progressable = False
-            for step in ready:
-                cfg = steps_cfg.get(step, {})
-                pool = cfg.get("pool", "")
-                try:
-                    req = await self._required_tags_for_step(job_id, step, cfg)
-                except InvalidAIOverrideError as exc:
-                    await self._fail_invalid_ai_override(job_id, step, str(exc))
-                    stuck = []
-                    progressable = True
-                    break
-                key = (pool, frozenset(req))
-                if key not in pool_ok:
-                    pool_ok[key] = await self._pool_has_workers_for(pool, req)
-                if pool_ok[key]:
-                    progressable = True
-                    break
-                stuck.append((step, pool))
-            if progressable or not stuck:
-                self._no_worker_since.pop(job_id, None)
-                continue
-
-            first = self._no_worker_since.setdefault(job_id, time.time())
-            if time.time() - first < self._NO_WORKER_GRACE_SEC:
-                continue
-            waited = round(time.time() - first)
-            self._no_worker_since.pop(job_id, None)
-            pairs = ", ".join(f"{s}(pool '{p}')" for s, p in stuck)
-            logger.warning("job_no_worker", job_id=job_id, stuck=pairs)
-            await self.redis.push_event(
-                "no_worker", job_id=job_id, step=stuck[0][0], pool=stuck[0][1], waited_sec=waited)
-            await self.mark_job_failed(job_id, f"无可用 worker 执行步骤: {pairs}")
-
-        # 清理已离开 active 集合的计时,避免泄漏。
-        active_set = set(active_jobs)
-        for jid in [j for j in self._no_worker_since if j not in active_set]:
-            self._no_worker_since.pop(jid, None)
+        return await self._recovery.check_no_worker()
 
     # 重跑 / 重提交
 
-    async def _retry_failed(
-        self, job_id: str, idempotency_key: str | None = None,
-    ) -> None:
-        """重试失败 Job:从第一个 failed 步骤开始重跑。"""
-        statuses = await self.redis.get_all_step_statuses(job_id)
-        failed_steps = [s for s, st in statuses.items() if st == "failed"]
-        if not failed_steps:
-            return
-        first_failed = sorted(failed_steps)[0]
-        await self.rerun(job_id, first_failed, idempotency_key=idempotency_key)
-        logger.info("job_retry", job_id=job_id, from_step=first_failed)
+    async def _retry_failed(self, job_id: str, idempotency_key: str | None = None) -> None:
+        return await self._recovery._retry_failed(job_id, idempotency_key)
 
-    async def rerun(
-        self, job_id: str, from_step: str,
-        idempotency_key: str | None = None,
-    ) -> list[str]:
-        """从指定步骤开始重跑,清除该步骤及所有下游的 .done 标记。返回被重置的步骤列表。"""
-        self._cancel_delayed_tasks(job_id)  # 取消在途延迟重试,防与新一轮状态串台
-        pipeline = await self.redis.get_job_pipeline(job_id)
-        if not pipeline:
-            return []
-        steps = self._get_pipeline_steps(pipeline)
-        downstream = self._get_downstream(steps, from_step)
-        reset_steps = [from_step] + downstream
+    async def rerun(self, job_id: str, from_step: str, idempotency_key: str | None = None) -> list[str]:
+        return await self._recovery.rerun(job_id, from_step, idempotency_key)
 
-        generation, should_apply = await self.redis.begin_job_generation(
-            job_id, idempotency_key,
-        )
-        if not should_apply:
-            return reset_steps
-
-        for step in reset_steps:
-            await self._revoke_step_execution(job_id, step)
-            done_file = self.jobs_dir / job_id / f".{step}.done"
-            await asyncio.to_thread(done_file.unlink, True)
-            # 中心存储的 .done 必须一并删:MinIO 部署下 .done 在 bucket,只删本地是 no-op,
-            # worker pull 回旧 .done 指纹命中直接跳过,rerun/「重跑该步」整体失效。
-            # best-effort:删失败只告警不挡主流程(兜底=改步 version 失效指纹)。
-            if self.storage is not None:
-                try:
-                    await self.storage.delete_file(job_id, f".{step}.done")
-                except Exception:
-                    logger.warning("rerun_central_done_delete_failed",
-                                   job_id=job_id, step=step, exc_info=True)
-            await self.redis.set_step_status(job_id, step, "waiting")
-            # 清重试计数,否则重跑曾耗尽重试的步骤会零重试预算、首次失败即终止。
-            await self.redis.reset_step_retries(job_id, step)
-            await asyncio.to_thread(
-                self.db.update_step, job_id, step,
-                # 清掉上一轮的起止/耗时,否则重置成 waiting 的步骤会显示旧时间(诡异)。
-                status="waiting", error=None,
-                started_at=None, finished_at=None, duration_sec=None,
-            )
-
-        # 刷新术语快照:P3 修复路径 = 人工定准 glossary.zh_name 后 rerun 04,必须让新表生效。
-        job = await asyncio.to_thread(self.db.get_job, job_id)
-        if job:
-            await self._export_term_map(job)
-
-        await asyncio.to_thread(
-            self.db.update_job, job_id, status=JobStatus.PROCESSING,
-        )
-        await self.redis.add_active_job(job_id)
-        await self.redis.complete_job_generation(
-            job_id, idempotency_key, generation,
-        )
-        await self._check_downstream(job_id)
-
-        logger.info("job_rerun", job_id=job_id, from_step=from_step, reset=reset_steps)
-        return reset_steps
-
-    async def resubmit(
-        self, job_id: str, idempotency_key: str | None = None,
-    ) -> None:
-        """按当前 pipelines.yaml 重新初始化步骤,保留已有步骤的状态。
-
-        以当前 pipeline 为准对齐 redis 与 DB 两侧:删去 pipeline 不再有的步(两侧都删)、
-        补齐新步,并把每个步在 redis/DB 写到同一状态;不变量:redis 与 DB 步集一致.
-        删旧步若只删 redis 不删 DB,或用 redis existing 当判据跳过 DB 回填,renumber/改
-        pipeline 后流水线读 DB 会显示旧步、与实际执行的 redis 分叉。"""
-        self.reload_config()
-
-        pipeline = await self.redis.get_job_pipeline(job_id)
-        if not pipeline:
-            return
-        generation, should_apply = await self.redis.begin_job_generation(
-            job_id, idempotency_key,
-        )
-        if not should_apply:
-            return
-        steps = self._get_pipeline_steps(pipeline)
-        # 状态真源:redis(运行态)优先,redis 无则用 DB,都无则 waiting,并保留已完成/已跑步骤状态.
-        existing = await self.redis.get_all_step_statuses(job_id)
-        db_status = {
-            s.name: (s.status.value if isinstance(s.status, StepStatus) else s.status)
-            for s in await asyncio.to_thread(self.db.get_steps, job_id)
-        }
-
-        # 删去当前 pipeline 不再有的步:redis 与 DB 都删,否则 DB 残留旧步。
-        for name in (set(existing) | set(db_status)) - set(steps):
-            await self.redis.delete_step_status(job_id, name)
-            await asyncio.to_thread(self.db.delete_step, job_id, name)
-
-        # 当前 pipeline 的每个步:取已有状态(缺则 waiting),redis 与 DB 都对齐到该状态。
-        # DB 侧:已有行只在状态变化时 update_step(status=),不能 upsert_step 整行替换,
-        # 否则会抹掉已完成步的 started_at/finished_at/duration/input_hash(流水线显示无时间);
-        # 仅 DB 缺该步(分叉)时才 upsert_step 新建。
-        for name, cfg in steps.items():
-            status = existing.get(name) or db_status.get(name) or "waiting"
-            await self.redis.set_step_status(job_id, name, status)
-            if name in db_status:
-                if db_status[name] != status:
-                    await asyncio.to_thread(
-                        self.db.update_step, job_id, name, status=StepStatus(status),
-                    )
-            else:
-                await asyncio.to_thread(
-                    self.db.upsert_step,
-                    Step(job_id=job_id, name=name, status=StepStatus(status), pool=cfg["pool"]),
-                )
-
-        await asyncio.to_thread(
-            self.db.update_job, job_id, status=JobStatus.PROCESSING,
-        )
-        await self.redis.add_active_job(job_id)
-        await self.redis.complete_job_generation(
-            job_id, idempotency_key, generation,
-        )
-        await self._check_downstream(job_id)
-
-        logger.info("job_resubmit", job_id=job_id, pipeline=pipeline)
+    async def resubmit(self, job_id: str, idempotency_key: str | None = None) -> None:
+        return await self._recovery.resubmit(job_id, idempotency_key)
 
     def reload_config(self) -> None:
         self.config = load_config(
@@ -2528,40 +476,10 @@ class Scheduler:
         return self._get_pipeline_steps(pipeline)
 
     def _get_downstream(self, steps: dict[str, dict], from_step: str) -> list[str]:
-        """递归获取 from_step 的所有下游步骤。"""
-        dependents: dict[str, list[str]] = {}
-        for name, cfg in steps.items():
-            for dep in cfg.get("depends_on", []):
-                dependents.setdefault(dep, []).append(name)
-
-        result = []
-        q = deque(dependents.get(from_step, []))
-        visited = set()
-        while q:
-            s = q.popleft()
-            if s in visited:
-                continue
-            visited.add(s)
-            result.append(s)
-            q.extend(dependents.get(s, []))
-        return result
+        return self._dag_planner._get_downstream(steps, from_step)
 
     def _calc_progress(self, steps_config: list[dict], statuses: dict[str, str]) -> int:
-        done_weight = sum(
-            s.get("weight", 1) for s in steps_config
-            if statuses.get(s["name"]) in ("done", "skipped")
-        )
-        total_weight = sum(s.get("weight", 1) for s in steps_config)
-        return round(100 * done_weight / max(total_weight, 1))
+        return self._dag_planner._calc_progress(steps_config, statuses)
 
     async def _update_progress(self, job_id: str) -> int:
-        pipeline = await self.redis.get_job_pipeline(job_id)
-        if not pipeline:
-            return 0
-        steps_config = self.config.pipelines.get(pipeline, {}).get("steps", [])
-        statuses = await self.redis.get_all_step_statuses(job_id)
-        progress = self._calc_progress(steps_config, statuses)
-        await asyncio.to_thread(
-            self.db.update_job, job_id, progress_pct=progress,
-        )
-        return progress
+        return await self._dag_planner._update_progress(job_id)
