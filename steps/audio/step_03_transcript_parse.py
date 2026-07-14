@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+from shared.note_text import markdown_to_index_text
 from shared.step_base import StepBase, file_hash
+from steps.audio.provenance import (
+    SOURCE_MANIFEST_PATH,
+    build_audio_source_manifest,
+    persist_audio_note_provenance,
+    transcript_provenance_segments,
+    write_audio_source_manifest,
+)
 from steps.utils.srt_parser import format_timestamp, load_srt
 
 # 段落聚合时间间隔(秒)
@@ -34,9 +42,18 @@ class TranscriptParseStep(StepBase):
         return []
 
     def input_hashes(self) -> dict[str, str]:
-        return {
+        hashes = {
             "subtitle": file_hash(self.job_dir / "input" / "subtitle.srt"),
         }
+        metadata = self.job_dir / "input" / "metadata.json"
+        if metadata.exists():
+            hashes["metadata"] = file_hash(metadata)
+        for suffix in (".mp3", ".m4a", ".wav", ".aac", ".flac", ".mp4"):
+            media = self.job_dir / "input" / f"source{suffix}"
+            if media.exists():
+                hashes["source_media"] = file_hash(media)
+                break
+        return hashes
 
     def execute(self) -> dict | None:
         entries = load_srt(self.job_dir / "input" / "subtitle.srt")
@@ -63,7 +80,32 @@ class TranscriptParseStep(StepBase):
         # segments.json 供下游对齐 sections 雏形
         self.artifacts.write("intermediate/segments.json", segments)
 
-        return {"segments": len(segments), "duration_sec": duration_sec}
+        source_manifest = build_audio_source_manifest(self.job_dir, segments)
+        source_count = 0
+        provenance = {"status": "no_reliable_refs", "segments": 0}
+        if source_manifest is None:
+            (self.job_dir / SOURCE_MANIFEST_PATH).unlink(missing_ok=True)
+        else:
+            write_audio_source_manifest(self.job_dir, source_manifest)
+            source_count = len(source_manifest["segments"])
+            normalized_body = markdown_to_index_text(md)
+            mappings = transcript_provenance_segments(
+                segments, source_manifest, normalized_body,
+            )
+            provenance = persist_audio_note_provenance(
+                self.job_dir,
+                note_type="transcript",
+                note_artifact="output/transcript.md",
+                provenance_segments=mappings,
+            )
+
+        return {
+            "segments": len(segments),
+            "duration_sec": duration_sec,
+            "source_segments": source_count,
+            "provenance_segments": provenance["segments"],
+            "provenance_status": provenance["status"],
+        }
 
     def _aggregate(self, entries) -> list[dict]:
         # 把零碎 SRT 条目按 SEGMENT_INTERVAL_SEC 窗口合并成段落

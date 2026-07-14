@@ -80,3 +80,31 @@ describe('MarkdownViewer evidence citations', () => {
     expect(w.text()).toContain('[E1]')
   })
 })
+
+describe('MarkdownViewer canonical evidence', () => {
+  const valid = {
+    evidence_id: `ce_${'6'.repeat(64)}`, status: 'valid' as const, reason: null,
+    job_id: 'j', note_type: 'smart', chunk_id: 'j:smart:0', section: '第一节',
+    evidence_fingerprint: 'a'.repeat(64), source_fingerprint: 'b'.repeat(64),
+    locator: { kind: 'image' as const, bbox: [0, 0, 10, 20] as [number, number, number, number], start_ms: null, end_ms: null, page: 2 },
+    link: { kind: 'image' as const, href: `/api/evidence/ce_${'6'.repeat(64)}/open`, label: '第 2 页图像区域' },
+    validated_at: '2026-07-14T14:00:00Z',
+  }
+
+  it('正文下只展示resolver链接,不暴露或拼接图像路径', () => {
+    const w = mount(MarkdownViewer, {
+      props: { content: '正文', jobId: 'j', canonicalEvidence: [valid] },
+    })
+    expect(w.get('.canonical-evidence-list a').attributes('href')).toBe(valid.link.href)
+    expect(w.html()).not.toContain('asset_path')
+  })
+
+  it('missing 只显示不可用状态', () => {
+    const missing = { ...valid, status: 'missing' as const, reason: 'not_found', locator: null, link: null }
+    const w = mount(MarkdownViewer, {
+      props: { content: '正文', jobId: 'j', canonicalEvidence: [missing] },
+    })
+    expect(w.find('.canonical-evidence-list a').exists()).toBe(false)
+    expect(w.text()).toContain('证据缺失')
+  })
+})

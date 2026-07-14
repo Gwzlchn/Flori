@@ -21,9 +21,14 @@ from shared.ai_routing import (
     step_required_capability_tags,
     worker_satisfies_requirements,
 )
-from shared.db import Database
+from shared.db import Database, _chunk_note_body
+from shared.evidence_contract import (
+    MAX_CANONICAL_SIDECAR_BYTES,
+    build_canonical_evidence_records_with_reader,
+)
 from shared.errors import RETRY_POLICY, get_retry_delay
 from shared.models import AITask, Job, JobStatus, LLMRequest, Step, StepStatus
+from shared.note_text import markdown_to_index_text
 from shared.notify import notify
 from shared.redis_client import RedisClient
 from shared.runner_ops import parse_style_tags
@@ -34,6 +39,7 @@ from shared.study_suggestions import (
     validate_study_suggestion_prompt_snapshot,
 )
 from shared.review_contract import verify_persisted_review
+from shared.step_base import def_digest_for, pipeline_digest_for
 from shared.terms import zh_name_from_glossary_row
 from shared.net_zone import required_zone
 from shared.source_detect import detect_source
@@ -41,6 +47,7 @@ from shared.storage import (
     StorageBackend,
     read_file_bounded,
     read_verification_artifact_bounded,
+    sha256_file,
 )
 from shared.status import OFFLINE, PAUSED
 from shared.version import FLORI_VERSION
@@ -58,48 +65,11 @@ _PRIORITY_BOOST = {"02_whisper": 100}
 # 延迟重试任务的 name 前缀,跟踪/按 job 取消时复用,避免格式漂移。
 _DELAYED_PREFIX = "delayed_enqueue:"
 
+_MAX_STEP_DONE_BYTES = 64 * 1024
+
 def _markdown_to_text(md: str) -> str:
-    """Markdown 转可分节索引文本,保留标题、段落和 fenced code 正文。"""
-    import re
-
-    text = (md or "").replace("\r\n", "\n").replace("\r", "\n")
-    lines: list[str] = []
-    in_fence = False
-    fence_marker = ""
-    for raw_line in text.split("\n"):
-        stripped = raw_line.lstrip()
-        fence = re.match(r"(`{3,}|~{3,})", stripped)
-        if fence:
-            marker = fence.group(1)[0]
-            if not in_fence:
-                in_fence = True
-                fence_marker = marker
-                continue
-            if marker == fence_marker:
-                in_fence = False
-                fence_marker = ""
-                continue
-
-        # 高亮 snippet 会被前端渲染,HTML 标签不能进入索引正文。
-        line = re.sub(r"<[^>]+>", " ", raw_line)
-        if not in_fence:
-            line = re.sub(r"`([^`]*)`", r"\1", line)
-            line = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", line)
-            line = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", line)
-            line = re.sub(r"^(\s{0,3})[-*+]\s+", r"\1", line)
-            line = re.sub(r"^(\s{0,3})>\s?", r"\1", line)
-            line = re.sub(r"[*_~]+", "", line)
-        lines.append(line.rstrip())
-
-    compact: list[str] = []
-    for line in lines:
-        if line.strip():
-            compact.append(line)
-        elif compact and compact[-1] != "":
-            compact.append("")
-    while compact and compact[-1] == "":
-        compact.pop()
-    return "\n".join(compact)
+    """兼容旧调用点；归一化实现只保留在 shared.note_text。"""
+    return markdown_to_index_text(md)
 
 
 class Scheduler:
@@ -791,13 +761,31 @@ class Scheduler:
                 continue
             await self._index_job_notes(
                 job_id, note_type, rel, data, candidate_types=candidate_types,
+                source_manifest_path=(
+                    str(candidate.get("source_manifest") or "").strip() or None
+                ),
+                provenance_path=(
+                    str(candidate.get("provenance") or "").strip() or None
+                ),
+                provenance_step=(
+                    str(candidate.get("provenance_step") or "").strip() or None
+                ),
+                provenance_since_version=(
+                    str(candidate.get("provenance_since_version") or "").strip()
+                    or None
+                ),
             )
             return
         raise FileNotFoundError(f"no indexable note artifact for {job_id}")
 
     async def _index_job_notes(
         self, job_id: str, note_type: str, rel: str, data: bytes,
-        *, candidate_types: list[str] | None = None,
+        *,
+        candidate_types: list[str] | None = None,
+        source_manifest_path: str | None = None,
+        provenance_path: str | None = None,
+        provenance_step: str | None = None,
+        provenance_since_version: str | None = None,
     ) -> None:
         """把指定 Markdown 产物去标记后写入全文与证据块索引。"""
         md = data.decode("utf-8", errors="replace")
@@ -809,14 +797,167 @@ class Scheduler:
         domain = job.domain if job else ""
         content_type = job.content_type if job else ""
         collection_id = (job.collection_id if job else "") or ""
+        canonical_evidence: list[dict] | None = None
+        if (source_manifest_path is None) != (provenance_path is None):
+            raise ValueError(f"incomplete canonical provenance config: {note_type}")
+        if source_manifest_path is not None and provenance_path is not None:
+            source_manifest_data = await read_file_bounded(
+                self.storage, job_id, source_manifest_path,
+                MAX_CANONICAL_SIDECAR_BYTES,
+            )
+            provenance_data = await read_file_bounded(
+                self.storage, job_id, provenance_path,
+                MAX_CANONICAL_SIDECAR_BYTES,
+            )
+            canonical_evidence = []
+            if source_manifest_data is None or provenance_data is None:
+                if source_manifest_data is None and provenance_data is None:
+                    if not await self._is_legacy_provenance_completion(
+                        job, provenance_path,
+                        provenance_step=provenance_step,
+                        provenance_since_version=provenance_since_version,
+                    ):
+                        raise ValueError(
+                            f"missing canonical provenance sidecars: {note_type}"
+                        )
+                else:
+                    raise ValueError(
+                        f"incomplete canonical provenance sidecars: {note_type}"
+                    )
+            if source_manifest_data is not None and provenance_data is not None:
+                chunks = [
+                    {
+                        "chunk_id": f"{job_id}:{note_type}:{index}",
+                        "body": chunk["body"],
+                        "section": chunk["section"],
+                        "char_start": chunk["char_start"],
+                        "char_end": chunk["char_end"],
+                    }
+                    for index, chunk in enumerate(_chunk_note_body(body))
+                ]
+
+                async def read_source(
+                    source_path: str, max_bytes: int,
+                ) -> bytes | None:
+                    return await read_file_bounded(
+                        self.storage, job_id, source_path, max_bytes,
+                    )
+
+                async def hash_source(source_path: str) -> str | None:
+                    return await sha256_file(self.storage, job_id, source_path)
+
+                canonical_evidence = await build_canonical_evidence_records_with_reader(
+                    job_id=job_id,
+                    pipeline=job.pipeline if job else "",
+                    note_type=note_type,
+                    note_path=rel,
+                    note_data=data,
+                    normalized_body=body,
+                    chunks=chunks,
+                    source_manifest_data=source_manifest_data,
+                    source_manifest_path=source_manifest_path,
+                    provenance_path=provenance_path,
+                    provenance_data=provenance_data,
+                    read_file=read_source,
+                    sha256_file=hash_source,
+                )
         await asyncio.to_thread(
             self.db.index_job_notes,
             job_id, note_type, title, body,
             content_type, domain, collection_id, candidate_types,
+            canonical_evidence,
         )
         logger.info(
             "notes_indexed", job_id=job_id, note_type=note_type, source_file=rel,
+            canonical_evidence_count=len(canonical_evidence or []),
         )
+
+    async def _is_legacy_provenance_completion(
+        self,
+        job: Job | None,
+        provenance_path: str,
+        *,
+        provenance_step: str | None,
+        provenance_since_version: str | None,
+    ) -> bool:
+        """仅当 producer 的 .done 能证明它早于当前 sidecar 版本时放行空证据。"""
+        if job is None or self.storage is None:
+            return False
+        pipeline_steps = self.config.pipelines.get(job.pipeline, {}).get("steps", [])
+        if (
+            job.pipeline_digest
+            and job.pipeline_digest == pipeline_digest_for(pipeline_steps)
+        ):
+            return False
+        if (
+            not provenance_step
+            or not provenance_since_version
+            or not provenance_since_version.isdigit()
+        ):
+            return False
+        producers = [
+            step for step in pipeline_steps
+            if step.get("name") == provenance_step
+        ]
+        if len(producers) != 1:
+            return False
+        producer = producers[0]
+        step_name = producer.get("name")
+        raw_version = producer.get("version", "1")
+        if (
+            not isinstance(step_name, str)
+            or not step_name
+            or type(raw_version) not in (str, int)
+        ):
+            return False
+        version_text = str(raw_version)
+        if not version_text.isdigit():
+            return False
+        current_version = int(version_text)
+        provenance_since = int(provenance_since_version)
+        outputs = producer.get("outputs")
+        if (
+            provenance_since <= 1
+            or current_version < provenance_since
+            or not isinstance(outputs, list)
+            or not any(
+                isinstance(pattern, str)
+                and fnmatch.fnmatch(provenance_path, pattern)
+                for pattern in outputs
+            )
+        ):
+            return False
+
+        raw_done = await read_file_bounded(
+            self.storage, job.id, f".{step_name}.done", _MAX_STEP_DONE_BYTES,
+        )
+        if raw_done is None or len(raw_done) > _MAX_STEP_DONE_BYTES:
+            return False
+        try:
+            done = json.loads(raw_done)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return False
+        if (
+            not isinstance(done, dict)
+            or done.get("step") != step_name
+            or not isinstance(done.get("input_hashes"), dict)
+            or not isinstance(done.get("finished_at"), str)
+            or not done["finished_at"].strip()
+        ):
+            return False
+
+        stored_digest = done.get("def_digest")
+        if stored_digest is None:
+            return True
+        if not isinstance(stored_digest, str):
+            return False
+        ai = producer.get("ai")
+        if ai is not None and not isinstance(ai, dict):
+            return False
+        return stored_digest in {
+            def_digest_for(version, ai)
+            for version in range(1, provenance_since)
+        }
 
     async def _reconcile_completed_effects(self, job_id: str) -> bool:
         """幂等重放该 job 所有 done 步骤的声明副作用,闭合事件丢失与崩溃窗口。"""

@@ -6,6 +6,12 @@ import json
 
 from shared.step_base import StepBase, file_hash
 from shared.storage import read_path_bounded
+from steps.article.provenance import (
+    extract_note_markers,
+    load_source_manifest,
+    persist_note_provenance,
+    source_reference_block,
+)
 
 
 MAX_PAPER_TEXT_SOURCE_BYTES = 8 * 1024 * 1024
@@ -27,10 +33,14 @@ class SmartPaperStep(StepBase):
         translated = self.job_dir / "output" / "translated.md"
         if translated.exists():
             hashes["translated"] = file_hash(translated)   # 非中文论文随译文变化重跑
+        source_manifest = self.job_dir / "intermediate" / "source_segments.json"
+        if source_manifest.exists():
+            hashes["source_segments"] = file_hash(source_manifest)
         hashes.update(self.ai.prompt_profile_style_hashes())  # prompt(可选覆盖)+ profile + styles
         return hashes
 
     def execute(self) -> dict | None:
+        (self.job_dir / "output" / "provenance" / "smart.json").unlink(missing_ok=True)
         sections = self._load_json_bounded("intermediate/sections.json")
         figures: list = []
         try:
@@ -56,14 +66,27 @@ class SmartPaperStep(StepBase):
                         for f in figures
                         if f.get("filename") and f.get("index") is not None]
 
-        prompt = self._build_prompt(sections, figures, body)
+        source_manifest = load_source_manifest(self.job_dir, pipeline="paper")
+        prompt = self._build_prompt(
+            sections, figures, body, source_manifest=source_manifest,
+        )
         # 结构化中文笔记常超默认 4096 output tokens,显式抬高上限防被静默截断(claude-cli 无视无害)。
         result = self.ai.call(prompt, max_tokens=8192)
 
+        result, candidates = self._clean_source_markers(result, source_manifest)
         rel = self.review.write_smart_note(result, image_assets=image_assets)  # 回填占位符 + 版本化落盘
+        provenance = persist_note_provenance(
+            self.job_dir,
+            pipeline="paper",
+            note_type="smart",
+            note_artifact=rel,
+            candidates=candidates,
+        )
         return {"chars": len(result), "provider": self.ai.last_provider,
                 "model": self.ai.last_model, "note_file": rel,
-                "source": body_source or "original"}
+                "source": body_source or "original",
+                "provenance_segments": provenance["segments"],
+                "provenance_status": provenance["status"]}
 
     def _read_optional_text(self, rel_path: str) -> str | None:
         try:
@@ -101,23 +124,43 @@ class SmartPaperStep(StepBase):
     def _execute_pdf_direct(self, sections: dict, figures: list) -> dict:
         """pdf-only 直喂:无文本正文可用时,让 claude 用 Read 工具直接读 PDF 产笔记
         (worker 镜像带 poppler,Read 按页渲染;上限 60 页防超长 agentic)。"""
+        (self.job_dir / "output" / "provenance" / "smart.json").unlink(missing_ok=True)
         pdf = (self.job_dir / "input" / "source.pdf").resolve()
         parsed = self._load_json_bounded("intermediate/parsed.json") or {}
         pages = int(parsed.get("pages") or 0) if isinstance(parsed, dict) else 0
         cap = min(pages or 30, 60)
+        source_manifest = load_source_manifest(self.job_dir, pipeline="paper")
         prompt = (self.ai.load_prompt_template("05_smart_paper")
                   + self.ai.terminology_block(self.ai.load_domain_prompt_profile())
                   + f"\n论文标题：{sections.get('title', '未知')}\n"
                   + f"\n用 Read 工具阅读论文 PDF:{pdf}(共 {pages} 页,读前 {cap} 页),"
-                    "然后按上面要求产出中文结构化学习笔记(不内嵌图片占位符)。\n")
+                    "然后按上面要求产出中文结构化学习笔记(不内嵌图片占位符)。\n"
+                  + source_reference_block(source_manifest))
         result = self.ai.call(prompt, max_tokens=8192,
                               allowed_tools=["Read"], add_dirs=[str(pdf.parent)],
                               max_turns=cap * 2 + 6)
+        result, candidates = self._clean_source_markers(result, source_manifest)
         rel = self.review.write_smart_note(result, image_assets=[])
+        provenance = persist_note_provenance(
+            self.job_dir,
+            pipeline="paper",
+            note_type="smart",
+            note_artifact=rel,
+            candidates=candidates,
+        )
         return {"chars": len(result), "provider": self.ai.last_provider,
-                "model": self.ai.last_model, "note_file": rel, "source": "pdf-direct"}
+                "model": self.ai.last_model, "note_file": rel, "source": "pdf-direct",
+                "provenance_segments": provenance["segments"],
+                "provenance_status": provenance["status"]}
 
-    def _build_prompt(self, sections: dict, figures: list, body: str | None = None) -> str:
+    def _build_prompt(
+        self,
+        sections: dict,
+        figures: list,
+        body: str | None = None,
+        *,
+        source_manifest: dict | None = None,
+    ) -> str:
         profile = self.ai.load_domain_prompt_profile()
 
         parts = [self.ai.load_prompt_template("05_smart_paper")]
@@ -150,7 +193,22 @@ class SmartPaperStep(StepBase):
                     parts.append(f" (OCR: {ocr[:200]})")
                 parts.append("\n")
 
+        source_block = source_reference_block(source_manifest)
+        if source_block:
+            parts.append(source_block)
+
         return "".join(parts)
+
+    def _clean_source_markers(
+        self,
+        result: str,
+        source_manifest: dict | None,
+    ) -> tuple[str, list[dict]]:
+        if source_manifest is not None:
+            return extract_note_markers(result, source_manifest)
+        if "[[source:" in result:
+            raise ValueError("paper note contains a source marker without a manifest")
+        return result, []
 
     def _render_section(self, section: dict, parts: list, level: int) -> None:
         from steps.utils.sections import render_section_tree

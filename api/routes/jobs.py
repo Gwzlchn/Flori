@@ -547,7 +547,8 @@ async def job_concepts(
     job = await asyncio.to_thread(db.get_job, job_id)
     if not job:
         raise HTTPException(404, "job not found")
-    return await asyncio.to_thread(db.glossary_for_job, job_id, job.domain)
+    rows = await asyncio.to_thread(db.glossary_for_job, job_id, job.domain)
+    return rows
 
 
 @router.get("/{job_id}/usage")

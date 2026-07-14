@@ -6,7 +6,15 @@
 
 from __future__ import annotations
 
+from shared.note_text import markdown_to_index_text
 from shared.step_base import StepBase, file_hash
+from steps.audio.provenance import (
+    extract_smart_markers,
+    load_audio_source_manifest,
+    persist_audio_note_provenance,
+    smart_provenance_segments,
+    smart_reference_block,
+)
 
 # 单次喂 AI 的转写正文上限:不超过它就一次成稿(短集保持原质量);超过则分段 map-reduce。
 # 现代模型上下文足够,阈值取宽,常见集仍走单次,只有超长集才分段。
@@ -25,6 +33,9 @@ class SmartPodcastStep(StepBase):
         hashes: dict[str, str] = {
             "transcript": file_hash(self.job_dir / "intermediate" / "transcript.json"),
         }
+        source_manifest = self.job_dir / "intermediate" / "source_segments.json"
+        if source_manifest.exists():
+            hashes["source_segments"] = file_hash(source_manifest)
         hashes.update(self.ai.prompt_profile_style_hashes())  # prompt(可选覆盖)+ profile + styles
         return hashes
 
@@ -41,10 +52,33 @@ class SmartPodcastStep(StepBase):
             result, chunks_n = self._map_reduce(transcript)
             mode = "map_reduce"
 
+        # 先撤掉上一版清单,随后任何解析/校验失败都保持 fail-closed。
+        (self.job_dir / "output" / "provenance" / "smart.json").unlink(missing_ok=True)
+        source_manifest = load_audio_source_manifest(self.job_dir)
+        candidates = []
+        if source_manifest is not None:
+            result, candidates = extract_smart_markers(result, source_manifest)
+        elif "[[source:" in result:
+            raise ValueError("audio smart note contains a source marker without a source manifest")
+
         rel = self.review.write_smart_note(result)   # 版本化落盘(含生成时间/方式/模型)
+        mappings = []
+        if source_manifest is not None:
+            note_bytes = (self.job_dir / rel).read_bytes()
+            mappings = smart_provenance_segments(
+                markdown_to_index_text(note_bytes.decode("utf-8")), candidates,
+            )
+        provenance = persist_audio_note_provenance(
+            self.job_dir,
+            note_type="smart",
+            note_artifact=rel,
+            provenance_segments=mappings,
+        )
         return {"chars": len(result), "mode": mode, "chunks": chunks_n,
                 "provider": self.ai.last_provider, "model": self.ai.last_model,
-                "note_file": rel}
+                "note_file": rel,
+                "provenance_segments": provenance["segments"],
+                "provenance_status": provenance["status"]}
 
     # 单次成稿
 
@@ -54,15 +88,27 @@ class SmartPodcastStep(StepBase):
         parts = [self.ai.load_prompt_template("04_smart_podcast")]
         parts.append(self.ai.terminology_block(profile))  # 注入已沉淀的标准概念,各 smart 步共用
         parts.append(self._duration_line(transcript))
-        parts.append("\n--- 转写正文 ---\n")
-        parts.append(self._full_text(transcript))      # 全量,不截断
+        source_block = smart_reference_block(
+            transcript, load_audio_source_manifest(self.job_dir),
+        )
+        if source_block:
+            parts.append(source_block)
+        else:
+            parts.append("\n--- 转写正文 ---\n")
+            parts.append(self._full_text(transcript))      # 全量,不截断
         return "".join(parts)
 
     # 长集 map-reduce
 
     def _map_reduce(self, transcript: dict) -> tuple[str, int]:
         profile = self.ai.load_domain_prompt_profile()
-        chunks = self._chunk_segments(transcript, MAP_CHUNK_CHARS)
+        source_block = smart_reference_block(
+            transcript, load_audio_source_manifest(self.job_dir),
+        )
+        chunks = (
+            self._chunk_text(source_block, MAP_CHUNK_CHARS)
+            if source_block else self._chunk_segments(transcript, MAP_CHUNK_CHARS)
+        )
         total = len(chunks) + 1  # +1 = reduce 合并步
 
         summaries: list[str] = []
@@ -89,7 +135,8 @@ class SmartPodcastStep(StepBase):
         parts.append(self._duration_line(transcript))
         parts.append(
             "\n以下是该音频【按顺序分段提炼的要点】(非完整转写)。请据此合并、去重、"
-            "重组为一篇完整的中文结构化学习笔记,覆盖全部分段、不要遗漏任何要点:\n"
+            "重组为一篇完整的中文结构化学习笔记,覆盖全部分段、不要遗漏任何要点。"
+            "其中 [[source:segment_id]] 是来源坐标,只能原样保留且每个最多出现一次:\n"
         )
         for i, s in enumerate(summaries):
             parts.append(f"\n--- 第 {i + 1}/{len(summaries)} 部分要点 ---\n{s}\n")
@@ -130,12 +177,29 @@ class SmartPodcastStep(StepBase):
             chunks.append("\n".join(cur))
         return chunks
 
+    @staticmethod
+    def _chunk_text(text: str, max_chars: int) -> list[str]:
+        """按行切带来源标记的文本,不拆断 segment_id。"""
+        chunks: list[str] = []
+        current: list[str] = []
+        current_len = 0
+        for line in text.splitlines():
+            if current and current_len + len(line) + 1 > max_chars:
+                chunks.append("\n".join(current))
+                current, current_len = [], 0
+            current.append(line)
+            current_len += len(line) + 1
+        if current:
+            chunks.append("\n".join(current))
+        return chunks or [""]
+
 
 # map 阶段:对长集的每个分段提炼要点(中间结果,不写总起/结语)。
 _MAP_HEADER = (
     "下面是一段较长播客/音频转写的第 {i}/{n} 部分(口语逐字稿)。\n"
     "请提炼这一部分的要点：保留关键信息、论点、事实、例子与专业术语(术语保留英文)，"
-    "不要遗漏；用简洁中文条目输出。这是中间结果，不要写开场白或结语。\n\n"
+    "不要遗漏；用简洁中文条目输出。[[source:segment_id]] 是不可改写的来源坐标,"
+    "必须跟随对应要点且每个最多保留一次。这是中间结果，不要写开场白或结语。\n\n"
 )
 
 

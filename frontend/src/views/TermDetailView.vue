@@ -91,7 +91,6 @@ function goRelated(name: string) {
 function goJob(jobId: string) {
   router.push(`/content/${encodeURIComponent(jobId)}`)
 }
-
 onMounted(load)
 watch(() => [route.params.domain, route.params.term], load)
 </script>

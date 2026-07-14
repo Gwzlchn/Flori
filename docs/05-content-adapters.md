@@ -18,6 +18,34 @@ graph TD
 
 适配器是 `01_download` 步骤（`steps/common/step_01_download.py`）的内部实现——同一个步骤脚本，根据 content_type 和 source 选择不同的下载/转换逻辑。
 
+### 1.1 多模态 provenance sidecar
+
+可定位笔记必须显式产出 `intermediate/source_segments.json` 和
+`output/provenance/{note_type}.json`。前者登记原始来源 artifact 摘要及 media/PDF/text segment；
+后者把笔记中唯一可解的文本锚点绑到一个或多个 source segment。Scheduler 只在两份 sidecar、
+当前 note 和当前 chunk 边界全部重验通过后写 canonical evidence。
+
+- video/audio 用毫秒区间绑定媒体；时长越界失败。video OCR 额外把机械稿实际渲染且唯一的画面文字绑定到 image locator。
+- PDF 用真实页码和可选 `[x0,y0,x1,y1]` bbox，不把伪章节序号当页码。
+- article/论文 HTML 用 `exact+prefix+suffix+dom_path` 锚定 UTF-8 原文；多解或无解不入库。
+- video image locator 只从 `06_ocr` 同时记录的帧 SHA-256、真实尺寸、时间戳和 OCR 框生成。`08_punctuate` 等 OCR 完成后一次发布来源清单；当前帧 hash/尺寸不符、bbox 超出图像或机械稿未实际渲染该帧时均不发布映射。其他图片来源仍不能推断或伪造 bbox。
+
+sidecar writer 使用 v2。source segment 除 locator 外还携带完整且不超过 4096 bytes 的
+`support_text` 和指向实际 producer 产物的 `support_artifact`，没有可复算文本时两者都为
+`null`；note mapping 声明
+`verification_policy=direct_locator_v1|exact_quote_v1`。v1 的确定性 original/transcript/mechanical
+映射继续可读，但历史 smart 非空映射不受信任。
+
+AI smart note 的 marker 只负责选择候选 segment，不能自证事实。producer 移除 marker 后保留唯一整行
+claim；每行恰好一个 source segment，该行只经 NFC 和有限空白归一后仍逐字包含于该
+segment 的 `support_text`，且 producer 与 Scheduler 都重读 `support_artifact` 复算通过，才以
+`exact_quote_v1` 发布。PDF-only 由 Poppler 一次提取全文后按实测页严格分配有界原文，
+marker 展示该页真实原文摘要，不用页码标签冒充支持；空白、提取失败或超限页保持 `null`。改写、概括、
+纯数字、无支持页、未知引用和任意多引用均不产生映射。译文及基于跨语言译文生成的 claim 在独立 attestation 落地前保持
+`written_empty`，不得把翻译等价冒充逐字证据。transcript、mechanical 和 original 的确定性映射不受影响。
+
+四类 pipeline 的 producer 和消费者必须在同一交付中整合；仅有前端投影或仅有 DB 表都不代表该闭环完成。
+
 ## 2. 视频适配器（M1）
 
 ### B站

@@ -503,6 +503,40 @@ export interface TermOccurrence {
   title?: string | null
 }
 
+export type CanonicalEvidenceStatus = 'valid' | 'stale' | 'missing'
+export type CanonicalEvidenceLinkKind = 'media' | 'pdf' | 'text' | 'image'
+
+export type EvidenceBoundingBox = [number, number, number, number]
+
+// locator 只是服务端的安全投影,不包含原始文件路径。前端不从它拼接 URL。
+export type CanonicalEvidenceLocator =
+  | { kind: 'media'; start_ms: number; end_ms: number }
+  | { kind: 'pdf'; page: number; bbox: EvidenceBoundingBox | null }
+  | { kind: 'text'; exact: string; prefix: string; suffix: string; dom_path: string | null }
+  | { kind: 'image'; bbox: EvidenceBoundingBox; start_ms: number | null; end_ms: number | null; page: number | null }
+
+export interface CanonicalEvidenceLink {
+  kind: CanonicalEvidenceLinkKind
+  href: string
+  label: string
+}
+
+// GET/POST /api/evidence/* 的唯一消费者投影。stale/missing 的 locator/link 必须为 null。
+export interface CanonicalEvidenceProjection {
+  evidence_id: string
+  status: CanonicalEvidenceStatus
+  reason: string | null
+  job_id: string | null
+  note_type: string | null
+  chunk_id: string | null
+  section: string | null
+  evidence_fingerprint: string | null
+  source_fingerprint: string | null
+  locator: CanonicalEvidenceLocator | null
+  link: CanonicalEvidenceLink | null
+  validated_at: string | null
+}
+
 // 概念主题:域内被标为主题(is_topic=1)的概念。与后端 GET /api/domains/{domain}/topic-concepts 对齐。
 export interface TopicConcept {
   term: string
@@ -542,6 +576,7 @@ export interface SearchResultItem {
   content_type: string
   domain: string
   collection_id: string | null
+  canonical_evidence: CanonicalEvidenceProjection[]
 }
 
 export interface SearchResponse {
@@ -568,6 +603,7 @@ export interface AskSource {
     frame_path?: string | null
     image_path?: string | null
   }
+  canonical_evidence: CanonicalEvidenceProjection[]
 }
 
 export interface AskResponse {

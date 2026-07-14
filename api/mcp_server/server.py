@@ -19,6 +19,7 @@ import structlog
 from mcp.server.fastmcp import FastMCP
 
 from api.services import kb
+from api.services.evidence import attach_canonical_evidence
 from shared.db import Database
 from shared.storage import StorageBackend
 
@@ -131,7 +132,7 @@ def build_server(
         return res
 
     @mcp.tool()
-    def search(query: str, domain: str | None = None, limit: int = 10) -> list[dict]:
+    async def search(query: str, domain: str | None = None, limit: int = 10) -> list[dict]:
         """在知识库里全文检索内容/笔记,返回候选列表。
 
         - domain 可选:限定某个知识库(来自 list_knowledge_bases)。
@@ -147,6 +148,14 @@ def build_server(
         except Exception as e:  # noqa: BLE001 — 工具边界,记录后回抛给 client
             log.warning("mcp.search.error", query=query, domain=domain, err=str(e))
             raise
+        refs = [
+            (str(item.get("job_id") or ""), str(item.get("kind") or ""))
+            for item in res
+        ]
+        ids_by_note = db.canonical_evidence_ids_for_notes(refs)
+        for item, ref in zip(res, refs):
+            item["canonical_evidence_ids"] = ids_by_note.get(ref, [])
+        await attach_canonical_evidence(db, storage, res)
         _record_call("search")
         log.info("mcp.search", query=query, domain=domain, n=len(res))
         return res
@@ -164,6 +173,8 @@ def build_server(
         except KeyError:
             log.warning("mcp.get_note.not_found", job_id=job_id, scope=scope_domain())
             raise
+        res["canonical_evidence_ids"] = db.canonical_evidence_ids_for_job(job_id)
+        await attach_canonical_evidence(db, storage, [res])
         _record_call("get_note")
         log.info("mcp.get_note", job_id=job_id, has_md=bool(res.get("markdown")),
                  scope=scope_domain())

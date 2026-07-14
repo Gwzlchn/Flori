@@ -116,6 +116,8 @@ class TestParseArticleStep:
         assert "核心论点" in parsed["text"]
         assert result["chars"] > 0
         assert parsed["sections"] and parsed["sections"][0]["text"]
+        assert (job_dir / "intermediate/source_segments.json").is_file()
+        assert (job_dir / "output/provenance/original.json").is_file()
 
     def test_meta_optional(self, tmp_path):
         job_dir = _mk_job(tmp_path)

@@ -1,7 +1,7 @@
 {
   "format": "flori-sqlite-migrations",
   "minimum_supported_version": 0,
-  "current_version": 4,
+  "current_version": 5,
   "ledger_version": 2,
   "migrations": [
     {
@@ -23,6 +23,11 @@
       "version": 4,
       "name": "evidence-backed-study-suggestions",
       "checksum": "8072748477611271039055bce57f40a00f2f095e71e235263e3087687202a3a2"
+    },
+    {
+      "version": 5,
+      "name": "canonical-evidence-locators",
+      "checksum": "a86cd76401c6dfced7379e9095440a61460ef2e0cad7568d836b4e33fc061c34"
     }
   ]
 }

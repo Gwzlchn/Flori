@@ -29,6 +29,14 @@ function makeItem(over: Record<string, any> = {}) {
     content_type: 'video',
     domain: 'ai',
     collection_id: null,
+    canonical_evidence: [{
+      evidence_id: `ce_${'2'.repeat(64)}`, status: 'valid', reason: null,
+      job_id: 'job-1', note_type: 'smart', chunk_id: 'job-1:smart:0', section: '第一节',
+      evidence_fingerprint: 'a'.repeat(64), source_fingerprint: 'b'.repeat(64),
+      locator: { kind: 'text', exact: '神经网络', prefix: '关于', suffix: '的摘要', dom_path: null },
+      link: { kind: 'text', href: `/api/evidence/ce_${'2'.repeat(64)}/open`, label: '第一节' },
+      validated_at: '2026-07-14T14:00:00Z',
+    }],
     ...over,
   }
 }
@@ -116,11 +124,16 @@ describe('SearchView 搜索流程', () => {
 })
 
 describe('SearchView 交互', () => {
-  it('点击结果项 router.push 到 encode 后的详情路由', async () => {
-    api.get.mockResolvedValue({ total: 1, items: [makeItem({ job_id: 'a b/c' })] })
+  it('卡片保留普通 job 导航,定位链接只使用 resolver 投影且不冒泡', async () => {
+    const item = makeItem({ job_id: 'a b/c' })
+    api.get.mockResolvedValue({ total: 1, items: [item] })
     const w = mount(SearchView)
     await typeAndSettle(w, 'click')
-    await w.find('.list .card').trigger('click')
+    expect(w.get('.list .card a.evidence-locator').attributes('href')).toBe(item.canonical_evidence[0].link.href)
+    w.get('.list .card a.evidence-locator').element.addEventListener('click', (event) => event.preventDefault())
+    await w.get('.list .card a.evidence-locator').trigger('click')
+    expect(push).not.toHaveBeenCalled()
+    await w.get('.list .card').trigger('click')
     expect(push).toHaveBeenCalledWith('/content/a%20b%2Fc')
   })
 
@@ -135,5 +148,21 @@ describe('SearchView 交互', () => {
     expect(html).toContain('<mark>hit</mark>')   // 高亮保留
     expect(html).not.toContain('<img')           // 危险标签被转义
     expect(html).toContain('&lt;img')            // 转义为实体
+  })
+
+  it('stale 证据禁用深链但仍保留普通 job 导航', async () => {
+    const base = makeItem().canonical_evidence[0]
+    api.get.mockResolvedValue({
+      total: 1,
+      items: [makeItem({ canonical_evidence: [{ ...base, status: 'stale', reason: 'source_changed', locator: null, link: null }] })],
+    })
+    const w = mount(SearchView)
+    await typeAndSettle(w, 'stale')
+    const unavailable = w.get('.evidence-unavailable')
+    expect(unavailable.text()).toContain('证据已过期')
+    await unavailable.trigger('click')
+    expect(push).not.toHaveBeenCalled()
+    await w.find('.list .card').trigger('click')
+    expect(push).toHaveBeenCalledWith('/content/job-1')
   })
 })

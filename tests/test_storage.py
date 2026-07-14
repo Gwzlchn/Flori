@@ -298,6 +298,29 @@ class TestLocalStorage:
         assert (job_dir / "test.txt").read_text() == "data"
 
     @pytest.mark.asyncio
+    async def test_object_version_changes_after_same_size_replacement(
+        self, storage, tmp_path,
+    ):
+        await storage.write_file("j1", "source.bin", b"first")
+        before = await storage.object_version("j1", "source.bin")
+        assert before is not None
+        assert before.size == 5
+        assert before.namespace == f"local:{tmp_path.resolve()}"
+
+        path = tmp_path / "j1/source.bin"
+        previous_stat = path.stat()
+        path.write_bytes(b"other")
+        os.utime(path, ns=(
+            previous_stat.st_atime_ns,
+            previous_stat.st_mtime_ns + 1_000_000_000,
+        ))
+        after = await storage.object_version("j1", "source.bin")
+        assert after is not None and after != before
+
+        path.unlink()
+        assert await storage.object_version("j1", "source.bin") is None
+
+    @pytest.mark.asyncio
     async def test_stream_roundtrip_has_bounded_python_memory(self, storage):
         chunk = b"x" * (1024 * 1024)
         base_rss = _rss_bytes()
@@ -543,6 +566,27 @@ class TestRemoteListFiles:
 
 
 class TestRemoteStreaming:
+    @pytest.mark.asyncio
+    async def test_object_version_uses_minio_stat_identity(self, tmp_path):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        client.stat_object.return_value = MagicMock(
+            size=42,
+            etag="etag-1",
+            version_id="version-1",
+            last_modified="2026-07-14T00:00:00Z",
+        )
+        rs._client = lambda: client
+
+        version = await rs.object_version("j1", "source.pdf")
+        assert version is not None
+        assert version.namespace == "minio:http://h:9000/b"
+        assert version.size == 42
+        assert version.token == (
+            "etag-1:version-1:2026-07-14T00:00:00Z"
+        )
+        client.stat_object.assert_called_once_with("b", "j1/source.pdf")
+
     @pytest.mark.asyncio
     async def test_write_stream_stages_then_atomically_copies(self, tmp_path):
         import hashlib

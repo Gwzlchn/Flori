@@ -139,11 +139,12 @@ describe('TermDetailView', () => {
     expect(push).toHaveBeenCalledWith('/kb/ml/concepts/backprop')
   })
 
-  it('点击出现处跳转到内容详情', async () => {
+  it('精确 evidence 关系落库前,出现处只保留普通 job 导航', async () => {
     api.get.mockResolvedValue(makeTerm())
     const w = mountView()
     await flushPromises()
-    await w.find('.occ').trigger('click')
-    expect(push).toHaveBeenCalledWith('/content/jobA')
+    expect(w.find('.occ a.evidence-locator').exists()).toBe(false)
+    await w.findAll('.occ')[1].trigger('click')
+    expect(push).toHaveBeenCalledWith('/content/jobB')
   })
 })

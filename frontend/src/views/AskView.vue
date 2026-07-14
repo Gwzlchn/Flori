@@ -8,6 +8,7 @@ import { useApi } from '../composables/useApi'
 import { useDomainStore } from '../stores/domains'
 import MarkdownViewer from '../components/notes/MarkdownViewer.vue'
 import AiTaskAuditPanel from '../components/job/AiTaskAuditPanel.vue'
+import EvidenceLocatorLink from '../components/evidence/EvidenceLocatorLink.vue'
 import { contentTypeIcon } from '../utils/contentType'
 import type { AskResponse, AiTaskResult } from '../types'
 import { Sparkles, MessageCircleQuestion, Send, ScrollText } from 'lucide-vue-next'
@@ -205,21 +206,30 @@ function evidenceLabel(s: AskResponse['sources'][number]) {
         <div v-if="submitted.sources.length" style="margin-top:16px">
           <div class="muted" style="font-size:12.5px;margin-bottom:9px">引用来源</div>
           <div class="source-chips">
-            <button
+            <div
               v-for="(s, i) in submitted.sources"
               :key="`${s.job_id}-${s.evidence.chunk_id || i}`"
               class="source-chip"
               :title="s.title"
-              @click="openSource(s.job_id)"
             >
-              <span class="chip-head">
-                <span class="chip-idx">来源{{ i + 1 }}</span>
-                <component :is="contentTypeIcon(s.content_type)" :size="14" />
-                <span class="chip-title">{{ s.title }}</span>
-                <span v-if="s.domain && s.domain !== 'general'" class="chip-dom">{{ s.domain }}</span>
+              <button class="source-job" @click="openSource(s.job_id)">
+                <span class="chip-head">
+                  <span class="chip-idx">来源{{ i + 1 }}</span>
+                  <component :is="contentTypeIcon(s.content_type)" :size="14" />
+                  <span class="chip-title">{{ s.title }}</span>
+                  <span v-if="s.domain && s.domain !== 'general'" class="chip-dom">{{ s.domain }}</span>
+                </span>
+                <span v-if="evidenceLabel(s)" class="chip-evidence">{{ evidenceLabel(s) }}</span>
+              </button>
+              <span
+                v-for="evidence in s.canonical_evidence"
+                :key="evidence.evidence_id"
+                class="chip-evidence canonical-evidence"
+                @click.stop
+              >
+                <EvidenceLocatorLink :evidence="evidence" />
               </span>
-              <span v-if="evidenceLabel(s)" class="chip-evidence">{{ evidenceLabel(s) }}</span>
-            </button>
+            </div>
           </div>
         </div>
       </template>
@@ -238,8 +248,13 @@ function evidenceLabel(s: AskResponse['sources'][number]) {
   display:inline-flex; flex-direction:column; align-items:flex-start; gap:3px;
   max-width:340px; min-width:0; padding:6px 11px;
   background:var(--surface); border:1px solid var(--line);
-  border-radius:999px; cursor:pointer; font-size:12.5px; color:var(--ink-700);
+  border-radius:999px; font-size:12.5px; color:var(--ink-700);
   transition:border-color .12s, background .12s;
+}
+.source-job {
+  display:flex; flex-direction:column; align-items:flex-start; gap:3px;
+  width:100%; min-width:0; padding:0; border:0; background:transparent;
+  color:inherit; font:inherit; cursor:pointer; text-align:left;
 }
 .source-chip:hover { border-color:var(--brand-300); background:var(--brand-50); }
 .chip-head { display:flex; align-items:center; gap:7px; min-width:0; width:100%; }

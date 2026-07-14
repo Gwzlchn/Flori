@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import pytest
@@ -156,6 +157,30 @@ class TestVariables:
         int_smart = next(s for s in int_norm["video"]["steps"] if s["name"] == "11_smart")
         assert prod_smart["ai"]["primary"]["provider"] == "anthropic"
         assert int_smart["ai"]["primary"]["provider"] == "kimi"
+
+    def test_video_manifest_producer_waits_for_ocr(self, configs_dir):
+        pipeline = load_pipelines(configs_dir / "pipelines.yaml")["video"]
+        ocr = next(
+            step for step in pipeline["steps"] if step["name"] == "06_ocr"
+        )
+        punctuate = next(
+            step for step in pipeline["steps"] if step["name"] == "08_punctuate"
+        )
+        assert ocr["version"] == "2"
+        assert punctuate["depends_on"] == ["01_download", "02_whisper", "06_ocr"]
+        assert punctuate["version"] == "4"
+
+    def test_provenance_v2_writers_invalidate_existing_done_markers(self, configs_dir):
+        pipelines = load_pipelines(configs_dir / "pipelines.yaml")
+        expected = {
+            "video": {"08_punctuate": "4", "11_smart": "4"},
+            "paper": {"02_pdf_parse": "5", "05_smart_paper": "3"},
+            "article": {"02_parse_article": "5", "04_smart_article": "3"},
+            "audio": {"03_transcript_parse": "3", "04_smart_podcast": "3"},
+        }
+        for pipeline, versions in expected.items():
+            actual = {step["name"]: step["version"] for step in pipelines[pipeline]["steps"]}
+            assert {name: actual[name] for name in versions} == versions
 
 
 class TestAIRoleContract:
@@ -345,6 +370,25 @@ class TestImagePreserved:
 
 
 class TestCompletionEffects:
+    @staticmethod
+    def _provenance_pipeline() -> dict:
+        return {"p": {"jobs": {
+            "producer": {
+                "run": "m.producer", "pool": "cpu", "version": "3",
+                "outputs": ["output/note.md", "output/provenance/smart.json"],
+            },
+            "indexer": {
+                "run": "m.indexer", "pool": "cpu", "needs": ["producer"],
+                "on_complete": [{"action": "index_note", "candidates": [{
+                    "note_type": "smart", "path": "output/note.md",
+                    "source_manifest": "intermediate/source_segments.json",
+                    "provenance": "output/provenance/smart.json",
+                    "provenance_step": "producer",
+                    "provenance_since_version": "2",
+                }]}],
+            },
+        }}}
+
     def test_on_complete_preserved(self):
         raw = {"p": {"jobs": {"A": {
             "run": "m.a", "pool": "cpu",
@@ -381,6 +425,49 @@ class TestCompletionEffects:
         assert [candidate["note_type"] for candidate in effect["candidates"]] == [
             "smart", "translated", "original",
         ]
+
+    def test_provenance_boundary_survives_later_producer_version_bump(self):
+        pipeline = normalize_pipelines(self._provenance_pipeline())["p"]
+        producer = next(step for step in pipeline["steps"] if step["name"] == "producer")
+        assert producer["version"] == "3"
+
+    @pytest.mark.parametrize(("field", "value", "message"), [
+        ("provenance_step", None, "candidate fields"),
+        ("provenance_step", "missing", "producer step is unknown"),
+        ("provenance_since_version", "4", "version boundary"),
+        ("provenance_since_version", "2.0", "version boundary"),
+    ])
+    def test_invalid_provenance_boundary_is_rejected(
+        self, field, value, message,
+    ):
+        raw = copy.deepcopy(self._provenance_pipeline())
+        candidate = raw["p"]["jobs"]["indexer"]["on_complete"][0]["candidates"][0]
+        candidate[field] = value
+        with pytest.raises(ValueError, match=message):
+            normalize_pipelines(raw)
+
+    def test_provenance_path_must_be_declared_by_producer(self):
+        raw = copy.deepcopy(self._provenance_pipeline())
+        raw["p"]["jobs"]["producer"]["outputs"] = ["output/note.md"]
+        with pytest.raises(ValueError, match="not declared by producer"):
+            normalize_pipelines(raw)
+
+    def test_real_provenance_candidates_have_fixed_boundaries(self, configs_dir):
+        pipelines = load_pipelines(configs_dir / "pipelines.yaml")
+        candidates = [
+            candidate
+            for pipeline in pipelines.values()
+            for step in pipeline["steps"]
+            for effect in step.get("on_complete", [])
+            if effect.get("action") == "index_note"
+            for candidate in effect["candidates"]
+            if candidate.get("provenance")
+        ]
+        assert len(candidates) == 7
+        assert all(candidate.get("provenance_step") for candidate in candidates)
+        assert all(
+            candidate.get("provenance_since_version") for candidate in candidates
+        )
 
 
 # 端到端:pipelines.yaml 归一化输出的契约形状稳定

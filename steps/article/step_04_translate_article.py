@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from shared.step_base import StepBase, file_hash
 from shared.terms import extract_pairs, hit_terms, render_term_block
+from steps.article.provenance import persist_note_provenance
 from steps.utils.chunking import split_markdown_chunks
 
 # 单 chunk 字符预算(与 04_translate_paper 同理):超长文整篇单调用会撞步/CLI 双 600s 超时;
@@ -27,9 +28,13 @@ class TranslateArticleStep(StepBase):
         t = self.ai.template_hash("04_translate_article")
         if t:
             h["template"] = t
+        source_manifest = self.job_dir / "intermediate" / "source_segments.json"
+        if source_manifest.exists():
+            h["source_segments"] = file_hash(source_manifest)
         return h
 
     def execute(self) -> dict | None:
+        (self.job_dir / "output" / "provenance" / "translated.json").unlink(missing_ok=True)
         md = (self.job_dir / "output" / "original.md").read_text(encoding="utf-8")
 
         # 逐 chunk 翻译(每块一次 call_ai=各自审计+transcript sidecar),按原顺序聚合;
@@ -51,12 +56,21 @@ class TranslateArticleStep(StepBase):
         result = "\n\n".join(parts)
 
         self.artifacts.write("output/translated.md", result)
+        provenance = persist_note_provenance(
+            self.job_dir,
+            pipeline="article",
+            note_type="translated",
+            note_artifact="output/translated.md",
+            candidates=[],
+        )
         if new_pairs:
             import json as _json
             self.artifacts.write("output/term_pairs.json",
                               _json.dumps(new_pairs, ensure_ascii=False, indent=1))
         return {"chars": len(result), "chunks": len(chunks), "new_terms": len(new_pairs),
-                "provider": self.ai.last_provider, "model": self.ai.last_model}
+                "provider": self.ai.last_provider, "model": self.ai.last_model,
+                "provenance_segments": provenance["segments"],
+                "provenance_status": provenance["status"]}
 
     def _build_prompt(self, md: str, term_block: str = "") -> str:
         # <<TERMS>> = 本 chunk 命中的术语对照段(shared/terms.py;无命中为空串,prompt 无痕)。

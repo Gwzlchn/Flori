@@ -6,6 +6,7 @@ import hashlib
 import html
 import http.client
 import ipaddress
+import json
 import re
 import socket
 import ssl
@@ -15,10 +16,34 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
+from .provenance import (
+    DIRECT_LOCATOR_POLICY,
+    EXACT_QUOTE_POLICY,
+    MAX_NOTE_MAPPINGS,
+    MAX_PROVENANCE_BYTES,
+    MAX_SOURCE_ARTIFACTS,
+    MAX_SOURCE_SEGMENTS,
+    canonical_json,
+    canonical_json_bytes,
+    sha256_bytes,
+    validate_locator,
+    validate_exact_quote_mapping,
+    validate_provenance_manifest,
+    validate_source_manifest,
+)
+from .source_support import (
+    MAX_SUPPORT_ARTIFACT_BYTES,
+    support_text_from_artifact,
+)
 from .storage import read_path_bounded, write_path_atomic
 
 
 EVIDENCE_SCHEMA_VERSION = 2
+# canonical_evidence 的 DB 契约仍是 v1;provenance sidecar 可独立演进。
+CANONICAL_EVIDENCE_SCHEMA_VERSION = 1
+MAX_CANONICAL_SIDECAR_BYTES = MAX_PROVENANCE_BYTES
+MAX_CANONICAL_SOURCE_ARTIFACTS = MAX_SOURCE_ARTIFACTS
+MAX_CANONICAL_SEGMENTS = min(MAX_SOURCE_SEGMENTS, MAX_NOTE_MAPPINGS)
 MAX_EVIDENCE_BYTES = 1_048_576
 MAX_TOTAL_EVIDENCE_BYTES = 4 * 1_048_576
 MAX_EVIDENCE_ITEMS = 12
@@ -62,6 +87,64 @@ _MANIFEST_FIELDS = {
 _EVIDENCE_REF_RE = re.compile(
     r"\[(E(?:\s*\d*\s*|-\d+|abc))\](?![\(\[])",
 )
+
+
+class CanonicalEvidenceError(ValueError):
+    """显式 provenance 无法安全映射到当前 job 产物。"""
+
+
+def _canonical_json(value: Any) -> str:
+    return canonical_json(value)
+
+
+def _sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _canonical_fingerprint(value: Any) -> str:
+    return _sha256_hex(_canonical_json(value).encode("utf-8"))
+
+
+def canonical_source_fingerprint(source_identity: dict[str, Any]) -> str:
+    """从已重验来源身份生成稳定指纹，不包含有效性和链接。"""
+    return _canonical_fingerprint(source_identity)
+
+
+def canonical_evidence_fingerprint(evidence_identity: dict[str, Any]) -> str:
+    """从内容绑定身份生成证据指纹，产物变化会得到新指纹。"""
+    return _canonical_fingerprint(evidence_identity)
+
+
+def canonical_evidence_id(identity: dict[str, Any]) -> str:
+    """生成可复算 ID；validation 状态与服务端派生链接不进入身份。"""
+    expected = {
+        "schema_version", "job_id", "note_type", "chunk_id",
+        "source_ref", "source_segment_id", "evidence_fingerprint",
+    }
+    if not isinstance(identity, dict) or set(identity) != expected:
+        raise CanonicalEvidenceError("canonical evidence identity fields are invalid")
+    return "ce_" + _canonical_fingerprint(identity)
+
+
+def _safe_job_relative(value: Any) -> str:
+    if type(value) is not str or not value or value != value.strip():
+        raise CanonicalEvidenceError("artifact path must be a normalized relative path")
+    path = Path(value)
+    if path.is_absolute() or "\x00" in value or any(part in {"", ".", ".."} for part in path.parts):
+        raise CanonicalEvidenceError("artifact path escapes job root")
+    return value
+
+
+def validate_canonical_locator(
+    value: Any,
+    *,
+    source_artifact: dict[str, Any],
+) -> dict[str, Any]:
+    """复用 provenance v1 的唯一 locator 规则。"""
+    try:
+        return validate_locator(value, source_artifact)
+    except ValueError as exc:
+        raise CanonicalEvidenceError(str(exc)) from exc
 
 
 def _sha256(data: bytes) -> str:
@@ -651,7 +734,7 @@ def validate_manifest(job_dir: Path, job_id: str, manifest: Any) -> tuple[dict[s
 async def validate_manifest_with_reader(
     job_id: str,
     manifest: Any,
-    read_file: Callable[[str], Awaitable[bytes | None]],
+    read_file: Callable[[str, int], Awaitable[bytes | None]],
 ) -> tuple[dict[str, dict], list[str]]:
     """StorageBackend 版 manifest 重验,与本地 Path 版共用派生规则。"""
     if (
@@ -1140,3 +1223,396 @@ def _evidence_item_errors(errors: list[str], evidence_id: str | None) -> list[st
     targeted = [error for error in errors if evidence_id in error.split(":")[1:]]
     global_errors = [error for error in errors if ":" not in error]
     return list(dict.fromkeys([*targeted, *global_errors]))
+
+
+def _load_canonical_sidecar(data: bytes, *, name: str) -> dict[str, Any]:
+    if not isinstance(data, bytes) or not data or len(data) > MAX_CANONICAL_SIDECAR_BYTES:
+        raise CanonicalEvidenceError(f"{name} is missing or exceeds size limit")
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise CanonicalEvidenceError(f"{name} is not valid UTF-8 JSON") from exc
+    if not isinstance(value, dict):
+        raise CanonicalEvidenceError(f"{name} root must be an object")
+    return value
+
+
+def _normalized_string(value: Any, *, field: str, nullable: bool = False) -> str | None:
+    if value is None and nullable:
+        return None
+    if type(value) is not str or not value or value != value.strip():
+        raise CanonicalEvidenceError(f"{field} must be a normalized string")
+    return value
+
+
+def locate_provenance_anchor(
+    body: str,
+    *,
+    anchor: str,
+    prefix: str,
+    suffix: str,
+) -> tuple[int, int]:
+    offsets: list[int] = []
+    cursor = 0
+    while True:
+        offset = body.find(anchor, cursor)
+        if offset < 0:
+            break
+        end = offset + len(anchor)
+        if (
+            (not prefix or body[:offset].endswith(prefix))
+            and (not suffix or body[end:].startswith(suffix))
+        ):
+            offsets.append(offset)
+        cursor = offset + 1
+    if len(offsets) != 1:
+        raise CanonicalEvidenceError("provenance anchor must resolve exactly once")
+    return offsets[0], offsets[0] + len(anchor)
+
+
+def canonical_evidence_content_identity(
+    *,
+    job_id: str,
+    note_type: str,
+    note_path: str,
+    note_sha256: str,
+    provenance_sha256: str,
+    chunk_id: str,
+    chunk_body_sha256: str,
+    chunk_char_start: int,
+    chunk_char_end: int,
+    anchor_start: int,
+    anchor_end: int,
+    source_fingerprint: str,
+    provenance_schema_version: int,
+    verification_policy: str,
+) -> dict[str, Any]:
+    """构造 builder 与 resolver 共用的完整 evidence fingerprint 身份。"""
+    identity = {
+        "job_id": job_id,
+        "note_type": note_type,
+        "note_path": note_path,
+        "note_sha256": note_sha256,
+        "provenance_sha256": provenance_sha256,
+        "chunk_id": chunk_id,
+        "chunk_body_sha256": chunk_body_sha256,
+        "chunk_char_start": chunk_char_start,
+        "chunk_char_end": chunk_char_end,
+        "anchor_start": anchor_start,
+        "anchor_end": anchor_end,
+        "source_fingerprint": source_fingerprint,
+    }
+    if provenance_schema_version >= 2:
+        identity["verification_policy"] = verification_policy
+    return identity
+
+
+async def build_canonical_evidence_records_with_reader(
+    *,
+    job_id: str,
+    pipeline: str,
+    note_type: str,
+    note_path: str,
+    note_data: bytes,
+    normalized_body: str,
+    chunks: list[dict[str, Any]],
+    source_manifest_data: bytes,
+    source_manifest_path: str,
+    provenance_path: str,
+    provenance_data: bytes,
+    read_file: Callable[[str, int], Awaitable[bytes | None]],
+    sha256_file: Callable[[str], Awaitable[str | None]],
+) -> list[dict[str, Any]]:
+    """重验显式 provenance 并投影到 scheduler 的唯一 chunk 边界。"""
+    _normalized_string(job_id, field="job_id")
+    _normalized_string(pipeline, field="pipeline")
+    _normalized_string(note_type, field="note_type")
+    note_path = _safe_job_relative(note_path)
+    provenance_path = _safe_job_relative(provenance_path)
+    if (
+        not isinstance(note_data, bytes)
+        or not note_data
+        or len(note_data) > MAX_CANONICAL_SIDECAR_BYTES
+    ):
+        raise CanonicalEvidenceError("note artifact is empty or exceeds size limit")
+    if type(normalized_body) is not str or not normalized_body:
+        raise CanonicalEvidenceError("normalized note body is empty")
+
+    source_manifest_path = _safe_job_relative(source_manifest_path)
+    source_manifest = _load_canonical_sidecar(
+        source_manifest_data, name="source_segments"
+    )
+    try:
+        source_manifest = validate_source_manifest(source_manifest)
+    except ValueError as exc:
+        raise CanonicalEvidenceError(str(exc)) from exc
+    if source_manifest.get("job_id") != job_id or source_manifest.get("pipeline") != pipeline:
+        raise CanonicalEvidenceError("source_segments identity does not match job")
+    if source_manifest_data != canonical_json_bytes(source_manifest):
+        raise CanonicalEvidenceError("source_segments is not canonical JSON")
+    artifacts = {
+        str(item["source_id"]): item for item in source_manifest["source_artifacts"]
+    }
+    source_segments = {
+        str(item["segment_id"]): item for item in source_manifest["segments"]
+    }
+
+    text_source_ids = {
+        str(segment["source_id"])
+        for segment in source_segments.values()
+        if segment["locator"]["kind"] == "text"
+    }
+    source_payloads: dict[str, bytes] = {}
+    for source_id, artifact in artifacts.items():
+        actual_sha256 = await sha256_file(artifact["path"])
+        if actual_sha256 is None:
+            raise CanonicalEvidenceError(f"source artifact is missing: {source_id}")
+        if actual_sha256 != artifact["sha256"]:
+            raise CanonicalEvidenceError(f"source artifact sha256 changed: {source_id}")
+        if source_id in text_source_ids:
+            payload = await read_file(artifact["path"], MAX_CANONICAL_SIDECAR_BYTES)
+            if (
+                not isinstance(payload, bytes)
+                or len(payload) > MAX_CANONICAL_SIDECAR_BYTES
+            ):
+                raise CanonicalEvidenceError(
+                    f"text source is missing or exceeds size limit: {source_id}"
+                )
+            source_payloads[source_id] = payload
+
+    for segment_id, segment in source_segments.items():
+        if segment["locator"]["kind"] != "text":
+            continue
+        source_id = str(segment["source_id"])
+        try:
+            source_text = source_payloads[source_id].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise CanonicalEvidenceError(
+                f"text source is not UTF-8: {segment_id}"
+            ) from exc
+        start, end = int(segment["start"]), int(segment["end"])
+        locator = segment["locator"]
+        if end > len(source_text) or source_text[start:end] != locator["exact"]:
+            raise CanonicalEvidenceError(f"text locator range changed: {segment_id}")
+        if locator["prefix"] and not source_text[:start].endswith(locator["prefix"]):
+            raise CanonicalEvidenceError(f"text locator prefix changed: {segment_id}")
+        if locator["suffix"] and not source_text[end:].startswith(locator["suffix"]):
+            raise CanonicalEvidenceError(f"text locator suffix changed: {segment_id}")
+
+    provenance = _load_canonical_sidecar(provenance_data, name="note provenance")
+    try:
+        provenance = validate_provenance_manifest(
+            provenance,
+            source_manifest=source_manifest,
+            note_bytes=note_data,
+            normalized_body=normalized_body,
+        )
+    except ValueError as exc:
+        raise CanonicalEvidenceError(str(exc)) from exc
+    if (
+        provenance.get("job_id") != job_id
+        or provenance.get("note_type") != note_type
+        or provenance.get("note_artifact") != note_path
+        or provenance.get("source_manifest") != source_manifest_path
+        or provenance_data != canonical_json_bytes(provenance)
+    ):
+        raise CanonicalEvidenceError("note provenance identity is invalid")
+    raw_mappings = provenance["segments"]
+
+    support_payloads: dict[tuple[str, str], bytes] = {}
+    referenced_segment_ids = {
+        str(segment_id)
+        for mapping in raw_mappings
+        for segment_id in mapping["source_segment_ids"]
+    }
+    if source_manifest["schema_version"] >= 2:
+        for segment_id in sorted(referenced_segment_ids):
+            segment = source_segments[segment_id]
+            support_artifact = segment.get("support_artifact")
+            if support_artifact is None:
+                continue
+            path = str(support_artifact["path"])
+            expected_sha256 = str(support_artifact["sha256"])
+            key = (path, expected_sha256)
+            payload = support_payloads.get(key)
+            if payload is None:
+                actual_sha256 = await sha256_file(path)
+                if actual_sha256 is None:
+                    raise CanonicalEvidenceError(
+                        f"support artifact is missing: {segment_id}"
+                    )
+                if actual_sha256 != expected_sha256:
+                    raise CanonicalEvidenceError(
+                        f"support artifact sha256 changed: {segment_id}"
+                    )
+                payload = await read_file(path, MAX_SUPPORT_ARTIFACT_BYTES)
+                if (
+                    not isinstance(payload, bytes)
+                    or len(payload) > MAX_SUPPORT_ARTIFACT_BYTES
+                ):
+                    raise CanonicalEvidenceError(
+                        f"support artifact is unreadable: {segment_id}"
+                    )
+                support_payloads[key] = payload
+            artifact = artifacts[str(segment["source_id"])]
+            try:
+                expected_support = support_text_from_artifact(
+                    payload, support_artifact, segment, artifact,
+                )
+            except ValueError as exc:
+                raise CanonicalEvidenceError(str(exc)) from exc
+            if expected_support != segment.get("support_text"):
+                raise CanonicalEvidenceError(
+                    f"support text does not match artifact: {segment_id}"
+                )
+
+    prepared_chunks: list[dict[str, Any]] = []
+    chunk_fields = {"chunk_id", "body", "section", "char_start", "char_end"}
+    seen_chunk_ids: set[str] = set()
+    for chunk in chunks:
+        if not isinstance(chunk, dict) or set(chunk) != chunk_fields:
+            raise CanonicalEvidenceError("scheduler chunk fields are invalid")
+        chunk_id = _normalized_string(chunk.get("chunk_id"), field="chunk_id")
+        if chunk_id in seen_chunk_ids:
+            raise CanonicalEvidenceError("scheduler chunk_id is duplicated")
+        seen_chunk_ids.add(str(chunk_id))
+        start, end = chunk.get("char_start"), chunk.get("char_end")
+        if (
+            type(chunk.get("body")) is not str or not chunk["body"]
+            or type(chunk.get("section")) is not str
+            or type(start) is not int or type(end) is not int
+            or not 0 <= start < end <= len(normalized_body)
+        ):
+            raise CanonicalEvidenceError("scheduler chunk values are invalid")
+        prepared_chunks.append(chunk)
+
+    note_sha256 = _sha256_hex(note_data)
+    provenance_sha256 = _sha256_hex(provenance_data)
+    records: dict[str, dict[str, Any]] = {}
+    mapping_fields = {"anchor", "prefix", "suffix", "section", "source_segment_ids"}
+    if provenance["schema_version"] >= 2:
+        mapping_fields.add("verification_policy")
+    for mapping in raw_mappings:
+        if not isinstance(mapping, dict) or set(mapping) != mapping_fields:
+            raise CanonicalEvidenceError("note provenance segment fields are invalid")
+        anchor = _normalized_string(mapping.get("anchor"), field="note anchor")
+        prefix, suffix = mapping.get("prefix"), mapping.get("suffix")
+        if type(prefix) is not str or type(suffix) is not str:
+            raise CanonicalEvidenceError("note anchor context is invalid")
+        section = mapping.get("section")
+        if section is not None:
+            _normalized_string(section, field="note provenance section")
+        refs = mapping.get("source_segment_ids")
+        if (
+            not isinstance(refs, list) or not refs
+            or any(type(ref) is not str or not ref or ref != ref.strip() for ref in refs)
+            or len(set(refs)) != len(refs)
+        ):
+            raise CanonicalEvidenceError("source_segment_ids are invalid")
+        verification_policy = mapping.get(
+            "verification_policy", DIRECT_LOCATOR_POLICY,
+        )
+        if verification_policy not in {DIRECT_LOCATOR_POLICY, EXACT_QUOTE_POLICY}:
+            raise CanonicalEvidenceError("verification_policy is invalid")
+        if verification_policy == EXACT_QUOTE_POLICY:
+            try:
+                validate_exact_quote_mapping(
+                    mapping, source_manifest, field="canonical provenance segment",
+                )
+            except ValueError as exc:
+                raise CanonicalEvidenceError(str(exc)) from exc
+        anchor_start, anchor_end = locate_provenance_anchor(
+            normalized_body, anchor=str(anchor), prefix=prefix, suffix=suffix,
+        )
+        overlapping = [
+            chunk for chunk in prepared_chunks
+            if int(chunk["char_start"]) < anchor_end and int(chunk["char_end"]) > anchor_start
+        ]
+        if not overlapping:
+            raise CanonicalEvidenceError("note provenance anchor does not overlap a chunk")
+        for segment_id in refs:
+            source_segment = source_segments.get(segment_id)
+            if source_segment is None:
+                raise CanonicalEvidenceError("note provenance references unknown segment")
+            artifact = artifacts[str(source_segment["source_id"])]
+            locator = source_segment["locator"]
+            if locator["kind"] == "image":
+                asset_sha256 = await sha256_file(locator["asset_path"])
+                if asset_sha256 != locator["asset_sha256"]:
+                    raise CanonicalEvidenceError("image locator asset changed")
+            source_ref = str(source_segment["source_id"])
+            source_identity = {
+                "source_ref": source_ref,
+                "source_segment_id": segment_id,
+                "path": artifact["path"],
+                "sha256": artifact["sha256"],
+                "revision": artifact["revision"],
+                "start": source_segment["start"],
+                "end": source_segment["end"],
+                "section": source_segment["section"],
+                "locator": locator,
+            }
+            if source_manifest["schema_version"] >= 2:
+                source_identity["support_text"] = source_segment.get("support_text")
+                source_identity["support_artifact"] = source_segment.get(
+                    "support_artifact"
+                )
+            source_fingerprint = canonical_source_fingerprint(source_identity)
+            for chunk in overlapping:
+                body_sha256 = _sha256_hex(chunk["body"].encode("utf-8"))
+                evidence_identity = canonical_evidence_content_identity(
+                    job_id=job_id,
+                    note_type=note_type,
+                    note_path=note_path,
+                    note_sha256=note_sha256,
+                    provenance_sha256=provenance_sha256,
+                    chunk_id=chunk["chunk_id"],
+                    chunk_body_sha256=body_sha256,
+                    chunk_char_start=chunk["char_start"],
+                    chunk_char_end=chunk["char_end"],
+                    anchor_start=anchor_start,
+                    anchor_end=anchor_end,
+                    source_fingerprint=source_fingerprint,
+                    provenance_schema_version=provenance["schema_version"],
+                    verification_policy=verification_policy,
+                )
+                evidence_fingerprint = canonical_evidence_fingerprint(evidence_identity)
+                identity = {
+                    "schema_version": CANONICAL_EVIDENCE_SCHEMA_VERSION,
+                    "job_id": job_id,
+                    "note_type": note_type,
+                    "chunk_id": chunk["chunk_id"],
+                    "source_ref": source_ref,
+                    "source_segment_id": segment_id,
+                    "evidence_fingerprint": evidence_fingerprint,
+                }
+                evidence_id = canonical_evidence_id(identity)
+                record = {
+                    "evidence_id": evidence_id,
+                    "schema_version": CANONICAL_EVIDENCE_SCHEMA_VERSION,
+                    "job_id": job_id,
+                    "note_type": note_type,
+                    "chunk_id": chunk["chunk_id"],
+                    "section": chunk["section"],
+                    "source_ref": source_ref,
+                    "source_segment_id": segment_id,
+                    "source_path": artifact["path"],
+                    "source_sha256": artifact["sha256"],
+                    "source_revision": artifact["revision"],
+                    "note_path": note_path,
+                    "note_sha256": note_sha256,
+                    "provenance_path": provenance_path,
+                    "provenance_sha256": provenance_sha256,
+                    "chunk_body_sha256": body_sha256,
+                    "chunk_char_start": chunk["char_start"],
+                    "chunk_char_end": chunk["char_end"],
+                    "locator_kind": locator["kind"],
+                    "locator_json": _canonical_json(locator),
+                    "evidence_fingerprint": evidence_fingerprint,
+                    "source_fingerprint": source_fingerprint,
+                }
+                previous = records.get(evidence_id)
+                if previous is not None and previous != record:
+                    raise CanonicalEvidenceError("canonical evidence id collision")
+                records[evidence_id] = record
+    return [records[key] for key in sorted(records)]

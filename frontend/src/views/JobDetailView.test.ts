@@ -238,6 +238,33 @@ describe('JobDetailView 概念 tab', () => {
 })
 
 describe('JobDetailView 笔记 tab', () => {
+  it('把当前智能笔记的服务端安全定位投影传给正文组件', async () => {
+    fetchDetail.mockResolvedValue(makeDetail({ status: 'done' }))
+    const canonical = {
+      evidence_id: `ce_${'1'.repeat(64)}`, status: 'valid', reason: null,
+      job_id: 'job_BV1abc', note_type: 'smart', chunk_id: 'job_BV1abc:smart:0',
+      section: '概览', evidence_fingerprint: 'a'.repeat(64), source_fingerprint: 'b'.repeat(64),
+      locator: { kind: 'media', start_ms: 1000, end_ms: 2000 },
+      link: { kind: 'media', href: '/api/jobs/job_BV1abc/media?path=input.mp4#t=1', label: '跳到 00:01' },
+      validated_at: '2026-07-14T14:00:00Z',
+    }
+    api.get.mockImplementation((url: string) => {
+      if (url.includes('note-versions')) return Promise.resolve({ versions: [{
+        provider: 'p', model: 'm', version: '20260101-000000', file: 'f.md',
+        review_file: null, overall: 4,
+      }] })
+      if (url.includes('/api/evidence/jobs/job_BV1abc?note_type=smart')) {
+        return Promise.resolve({ items: [canonical] })
+      }
+      return Promise.resolve([])
+    })
+    api.getText.mockResolvedValue('# 智能笔记')
+
+    const w = mountView()
+    await flushPromises()
+    expect(w.findComponent({ name: 'MarkdownViewer' }).props('canonicalEvidence')).toEqual([canonical])
+  })
+
   it('笔记 404 显示「笔记尚未生成」', async () => {
     fetchDetail.mockResolvedValue(makeDetail({ status: 'done' }))
     api.getText.mockRejectedValue(Object.assign(new Error('nf'), { status: 404 }))

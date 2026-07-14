@@ -12,6 +12,7 @@ import json
 from shared.step_base import StepBase, file_hash
 from shared.storage import read_path_bounded
 from shared.terms import extract_pairs, hit_terms, render_term_block
+from steps.article.provenance import persist_note_provenance
 from steps.utils.chunking import split_markdown_chunks
 
 # 单 chunk 字符预算:大论文(GPT-3 75页)整篇单调用必撞步/CLI 双 600s 超时(线上实证)。
@@ -52,9 +53,13 @@ class TranslatePaperStep(StepBase):
         t = self.ai.template_hash(template_name)
         if t:
             h["template"] = t
+        source_manifest = self.job_dir / "intermediate" / "source_segments.json"
+        if source_manifest.exists():
+            h["source_segments"] = file_hash(source_manifest)
         return h
 
     def execute(self) -> dict | None:
+        (self.job_dir / "output" / "provenance" / "translated.json").unlink(missing_ok=True)
         original = self._read_optional_text("output/original.md")
         if original is None and self._source_kind() == "pdf-only":
             return self._execute_pdf_direct()
@@ -80,8 +85,11 @@ class TranslatePaperStep(StepBase):
 
         self.artifacts.write("output/translated.md", result)
         self._write_term_pairs(new_pairs)
+        provenance = self._persist_translation_provenance()
         return {"chars": len(result), "chunks": len(chunks), "new_terms": len(new_pairs),
-                "provider": self.ai.last_provider, "model": self.ai.last_model}
+                "provider": self.ai.last_provider, "model": self.ai.last_model,
+                "provenance_segments": provenance["segments"],
+                "provenance_status": provenance["status"]}
 
     def _source_markdown(self) -> str:
         """翻译源文:首选 output/original.md(arxiv-html 由 02 产出,公式/图无损,图引用已在原位);
@@ -233,9 +241,22 @@ class TranslatePaperStep(StepBase):
         result, fig_pages = self._link_figure_pages(result, pages)
         self.artifacts.write("output/translated.md", result)
         self._write_term_pairs(new_pairs)
+        provenance = self._persist_translation_provenance()
         return {"chars": len(result), "chunks": len(ranges), "mode": "pdf-direct",
                 "figure_pages": fig_pages,
-                "provider": self.ai.last_provider, "model": self.ai.last_model}
+                "provider": self.ai.last_provider, "model": self.ai.last_model,
+                "provenance_segments": provenance["segments"],
+                "provenance_status": provenance["status"]}
+
+    def _persist_translation_provenance(self) -> dict:
+        """译文无逐句可靠映射时显式发布空清单,禁止把整页猜成逐句证据。"""
+        return persist_note_provenance(
+            self.job_dir,
+            pipeline="paper",
+            note_type="translated",
+            note_artifact="output/translated.md",
+            candidates=[],
+        )
 
     # 占位行:【图 N|第 p 页】/【表 N|第 p 页】(prompt 规则 3;旧译文无 |页码 → 不匹配自然跳过)。
     _FIG_PAGE_RE = __import__("re").compile(r"【[图表]\s*[\d.]+[^】|]*\|\s*第\s*(\d+)\s*页】")

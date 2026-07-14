@@ -121,6 +121,7 @@ video:
       label: "画面文字(OCR)"
       extends: .cpu-step
       run: steps.video.step_06_ocr
+      version: "2"
       image: flori/step-heavy
       needs: ["05_dedup"]
       timeout: $OCR_TIMEOUT
@@ -143,10 +144,11 @@ video:
       label: "口播稿"
       extends: .ai-step
       run: steps.video.step_08_punctuate
-      # 依赖 02_whisper:无原生字幕时等 whisper 转写出 input/subtitle.srt 再出口播稿
+      version: "4"
+      # 依赖 whisper 与 OCR:来源清单必须一次绑定字幕段和真实帧,不能在 OCR 前提前发布.
       # (whisper 有原生 srt 则 skip,视为满足依赖)。否则规则在 whisper 前求值,彼时无 srt,
       # 本步被跳过,笔记只剩 OCR。规则保留作兜底(whisper 万一没产 srt 则优雅跳过)。
-      needs: ["01_download", "02_whisper"]
+      needs: ["01_download", "02_whisper", "06_ocr"]
       timeout: 1800
       retry: 5
       tags: []
@@ -156,11 +158,12 @@ video:
       ai:
         primary: {provider: $AI_PUNCT_PRIMARY_PROVIDER, model: $AI_PUNCT_PRIMARY_MODEL}
         fallback: {provider: $AI_PUNCT_FALLBACK_PROVIDER, model: $AI_PUNCT_FALLBACK_MODEL}
-      outputs: ["output/transcript.md"]
+      outputs: ["output/transcript.md", "intermediate/source_segments.json", "output/provenance/transcript.json"]
 
     "09_mechanical":
       label: "机械版笔记"
       run: steps.video.step_09_mechanical
+      version: "2"
       pool: io
       # 依赖 08:口播稿(标点版,源自原生字幕或 whisper 转写)必须先就绪再出机械版。否则无字幕视频
       # (如 YouTube 无 CC)只会得到纯 OCR 笔记、丢失口播主体内容。08 有 retry:5 容错。
@@ -170,8 +173,8 @@ video:
       on_complete:
         - action: index_note
           candidates:
-            - {note_type: mechanical, path: "output/notes_mechanical.md"}
-      outputs: ["output/notes_mechanical.md"]
+            - {note_type: mechanical, path: "output/notes_mechanical.md", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/mechanical.json", provenance_step: "09_mechanical", provenance_since_version: "2"}
+      outputs: ["output/notes_mechanical.md", "output/provenance/mechanical.json"]
 
     "10_evidence":
       label: "权威来源"
@@ -194,7 +197,7 @@ video:
       label: "智能版笔记"
       extends: .ai-step
       run: steps.video.step_11_smart
-      version: "2"
+      version: "4"
       # 依赖取证:案例类笔记据 evidence.json 引 [E#] 一手来源(非案例类 10_evidence 秒 skip,不挡)。
       needs: ["09_mechanical", "10_evidence"]
       tags: ["vision"]
@@ -203,7 +206,7 @@ video:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
         text_fallback: {provider: $AI_SMART_TEXT_PROVIDER, model: $AI_SMART_TEXT_MODEL}
-      outputs: ["output/versions/notes_smart_*"]
+      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json"]
 
     "12_concepts":
       label: "概念 + 摘要"
@@ -221,7 +224,7 @@ video:
       on_complete:
         - action: index_note
           candidates:
-            - {note_type: smart, path: "output/versions/notes_smart_*"}
+            - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "11_smart", provenance_since_version: "3"}
         - action: collect_glossary
       outputs: ["output/concepts.json"]
 
@@ -261,11 +264,12 @@ paper:
       extends: .cpu-step
       run: steps.paper.step_02_pdf_parse
       needs: ["01_download"]
-      version: "3"   # pdf-only 垃圾标题(内嵌 metadata)启发式改从首页文本提取,失效旧指纹
+      # 解析语义含首页标题修复与 provenance v2 support identity,旧 done 必须失效.
+      version: "5"
       # 非中文论文写 needs_translation.json 标记(供 04_translate_paper 的 rules:exists 门控)。
       on_complete:
         - action: sync_metadata
-      outputs: ["intermediate/parsed.json", "intermediate/needs_translation.json", "output/original.md"]
+      outputs: ["intermediate/parsed.json", "intermediate/needs_translation.json", "intermediate/source_segments.json", "intermediate/pdf_page_support.json", "output/original.md", "output/provenance/original.json"]
 
     "03_sections":
       label: "章节切分"
@@ -281,7 +285,7 @@ paper:
       extends: .ai-step
       run: steps.paper.step_04_translate_paper
       needs: ["03_sections"]
-      version: "6"   # 术语一致性:chunk 注入 term_map + 回收 term_pairs(工单 26-07-06/04),失效旧指纹
+      version: "7"   # 术语一致性:chunk 注入 term_map + 回收 term_pairs(工单 26-07-06/04),失效旧指纹
       # 大论文多 chunk 串行翻译,步墙钟须覆盖全部 chunk(~15 块 × 2-4min);600 默认必超时。
       timeout: 7200
       tags: []
@@ -298,12 +302,13 @@ paper:
         fallback: {provider: $AI_TRANSLATE_FALLBACK_PROVIDER, model: $AI_TRANSLATE_FALLBACK_MODEL}
       on_complete:
         - action: collect_term_pairs
-      outputs: ["output/translated.md"]
+      outputs: ["output/translated.md", "output/provenance/translated.json"]
 
     "05_smart_paper":
       label: "智能版笔记"
       extends: .ai-step
       run: steps.paper.step_05_smart_paper
+      version: "3"
       # needs 04_translate_paper:非中文论文先翻译,笔记基于译文做(译文跳过=中文论文时依赖视为满足)。
       needs: ["03_sections", "04_translate_paper"]
       tags: []
@@ -313,7 +318,7 @@ paper:
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
-      outputs: ["output/versions/notes_smart_*"]
+      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json"]
 
     "05_concepts":
       label: "概念 + 摘要"
@@ -331,7 +336,7 @@ paper:
       on_complete:
         - action: index_note
           candidates:
-            - {note_type: smart, path: "output/versions/notes_smart_*"}
+            - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "05_smart_paper", provenance_since_version: "2"}
         - action: collect_glossary
       outputs: ["output/concepts.json"]
 
@@ -373,12 +378,13 @@ article:
       needs: ["01_download"]
       # 图片本地化网络受限:图多的页(26 图)并行 5 路仍需分批,60s 会超时。
       timeout: 300
-      version: "3"   # 图片找回(extractor+锚点插回,readability 剔深嵌套正文图),失效旧指纹
+      # 解析语义含正文图片找回与 provenance v2 support identity,旧 done 必须失效.
+      version: "5"
       # 补全元信息(abstract/image/tags/author),并产出图片本地引用的可读原文 Markdown;
       # 非中文正文写 needs_translation.json 标记(供 04_translate_article 的 rules:exists 门控)。
       on_complete:
         - action: sync_metadata
-      outputs: ["intermediate/parsed.json", "output/original.md", "intermediate/needs_translation.json", "assets/*"]
+      outputs: ["intermediate/parsed.json", "intermediate/source_segments.json", "output/original.md", "output/provenance/original.json", "intermediate/needs_translation.json", "assets/*"]
 
     "03_article_sections":
       label: "章节切分"
@@ -392,6 +398,7 @@ article:
       label: "智能版笔记"
       extends: .ai-step
       run: steps.article.step_04_smart_article
+      version: "3"
       # needs 04_translate:非中文文章先翻译,笔记基于中文译文做(译文跳过=中文文章时依赖视为满足,读原文)。
       needs: ["03_article_sections", "04_translate_article"]
       tags: []
@@ -403,14 +410,14 @@ article:
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
-      outputs: ["output/versions/notes_smart_*"]
+      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json"]
 
     "04_translate_article":
       label: "翻译"
       extends: .ai-step
       run: steps.article.step_04_translate_article
       needs: ["02_parse_article"]
-      version: "2"   # 术语一致性:chunk 注入 term_map + 回收 term_pairs(工单 26-07-06/04),失效旧指纹
+      version: "3"   # 术语一致性:chunk 注入 term_map + 回收 term_pairs(工单 26-07-06/04),失效旧指纹
       tags: []
       # 仅非中文文章触发:02_parse 写了 needs_translation.json 才跑,中文文章跳过。
       rules:
@@ -422,7 +429,7 @@ article:
         fallback: {provider: $AI_TRANSLATE_FALLBACK_PROVIDER, model: $AI_TRANSLATE_FALLBACK_MODEL}
       on_complete:
         - action: collect_term_pairs
-      outputs: ["output/translated.md"]
+      outputs: ["output/translated.md", "output/provenance/translated.json"]
 
     "05_concepts":
       label: "概念 + 摘要"
@@ -441,9 +448,9 @@ article:
         - action: index_note
           # 轻链路没有 smart;按最终可用内容降级,仍只索引一个版本,避免 Ask 重复证据。
           candidates:
-            - {note_type: smart, path: "output/versions/notes_smart_*"}
-            - {note_type: translated, path: "output/translated.md"}
-            - {note_type: original, path: "output/original.md"}
+            - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "04_smart_article", provenance_since_version: "2"}
+            - {note_type: translated, path: "output/translated.md", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/translated.json", provenance_step: "04_translate_article", provenance_since_version: "3"}
+            - {note_type: original, path: "output/original.md", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/original.json", provenance_step: "02_parse_article", provenance_since_version: "4"}
         - action: collect_glossary
       outputs: ["output/concepts.json"]
 
@@ -502,20 +509,22 @@ audio:
       label: "转写解析"
       extends: .cpu-step
       run: steps.audio.step_03_transcript_parse
+      version: "3"
       needs: ["02_whisper"]
       timeout: 60
-      outputs: ["intermediate/transcript.json", "output/transcript.md", "intermediate/segments.json"]
+      outputs: ["intermediate/transcript.json", "output/transcript.md", "intermediate/segments.json", "intermediate/source_segments.json", "output/provenance/transcript.json"]
 
     "04_smart_podcast":
       label: "智能版笔记"
       extends: .ai-step
       run: steps.audio.step_04_smart_podcast
+      version: "3"
       needs: ["03_transcript_parse"]
       tags: []
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
-      outputs: ["output/versions/notes_smart_*"]
+      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json"]
 
     "05_concepts":
       label: "概念 + 摘要"
@@ -532,7 +541,7 @@ audio:
       on_complete:
         - action: index_note
           candidates:
-            - {note_type: smart, path: "output/versions/notes_smart_*"}
+            - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "04_smart_podcast", provenance_since_version: "2"}
         - action: collect_glossary
       outputs: ["output/concepts.json"]
 

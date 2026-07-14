@@ -493,6 +493,29 @@ evidence    valid <-> stale -> unavailable
 - 批量审核最多 100 项，使用全局 request id 和 `BEGIN IMMEDIATE`。同 id 同 canonical payload 返回原响应，同 id 异 payload 冲突；revision/state/evidence 任一冲突时不提交任何项。
 - 知识 fingerprint 和内容 fingerprint 由确定性规范化函数计算，并由 SQLite trigger 与 current-schema validator 双重校验。该阶段不创建 vector/embedding schema。
 
+### 2.3.3 Canonical evidence 定位事实
+
+`canonical_evidence` 是 note chunk 到原始来源的可重验映射，不是前端 deep link 缓存。每行同时绑定
+job/note/chunk、source/note/provenance hash、chunk 边界、locator union 和两类 fingerprint。`evidence_id`
+为 `ce_` + 64 位小写十六进制，由稳定 identity 派生；验证时间和三态不进入 ID。
+
+```
+valid --(原文/chunk/provenance 变化)--> stale
+valid --(job/source 不存在)---------> missing
+stale/missing --(原 identity 重验可用)--> valid
+```
+
+- 重建索引先将该 job/note 旧行标 stale，再在同一事务 upsert 本次 valid 集合；旧 ID 保留供历史引用诊断。
+- Search、Ask、MCP、内容详情和学习建议只存 evidence id，读时经 resolver 生成安全投影。概念
+  occurrence 要等精确 `(concept,job,evidence)` 关系落库后才能接入，不能用整个 job 的证据代替。
+- 数据库保留用于重验的受控相对路径；对外投影不暴露这些路径，只有 valid 才由服务端派生 link。
+- 存量无 provenance 的记录返回空证据数组，不反向猜页码、时间戳或 DOM 锚点。
+- provenance sidecar v2 的 source segment 以可空、有界 `support_text` 绑定 producer 原文，mapping 以
+  `direct_locator_v1|exact_quote_v1` 区分确定性定位和 smart 逐字 claim。policy、support 和 sidecar hash
+  一并进入 fingerprint；读时恢复原 sidecar 可使原 evidence identity 重新 valid。
+- v1 仅兼容确定性 direct mapping；历史 smart 非空 mapping fail-closed。跨语言 translated/smart claim
+  未经独立 attestation 不建立 canonical evidence。
+
 ## 2.4 文件存储布局
 
 ```

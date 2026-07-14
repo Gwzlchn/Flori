@@ -11,6 +11,7 @@
 |------|------|
 | 完整 | 来源 registry、OpenAPI 枚举、API 入队前 fail-closed 与前端来源目录同源 |
 | first-pass | 视频 / 论文 / 文章 / 音频四类摄入；FTS5 Search、跨源 Ask 与 MCP；集合订阅；概念图与评审；手工建卡 SRS；知识雷达；远程 Worker 网关 |
+| first-pass | Canonical evidence 已接通视频/音频时间、PDF 页码、文章锚点、OCR image bbox 与四类 smart exact-quote 的 producer / resolver / Search/Ask/MCP/内容详情；跨语言与语义改写仍等待独立 attestation |
 | 未开始 | 原生客户端、通知 / PWA、自动分类、知识缺口与矛盾检测、证据型自动卡片 |
 
 向量检索由检索黄金集决定。24 个四类型 job 和 96 条冻结查询证明 exact、跨来源、过滤、
@@ -102,8 +103,10 @@ E2E 分层见 [`scripts/test.sh`](scripts/test.sh) 与 [`docs/09-testing.md`](do
 - [x] 混合向量检索收益门（候选质量达标但延迟门失败，生产路径完整回滚并保留纯 FTS5）
 - [x] 知识对话首版（Ask）
   - 跨文档问答：「Transformer 有哪些注意力变体？」→ 检索多篇笔记 → 综合回答
-  - 带视觉证据：回答嵌入截图 + 时间戳跳转（纯文本 RAG 做不到的差异化）
   - 对比分析：「这篇论文和那个视频的观点有什么不同？」
+- [x] Canonical evidence 首版：视频/音频时间、PDF 页码、文章锚点、OCR image bbox 及 Search/Ask/MCP/内容详情同身份闭环
+- [x] Smart exact-quote 门：四类 producer 的有界 support text、服务端双重复算与恶意降级拒绝
+- [ ] 跨语言 translated/smart 与 paraphrase/semantic claim 的独立 attestation（当前显式空映射）
 - [x] 领域概念图首版（术语 / 主题 / occurrence / 时间线与跨来源聚合）
 - [ ] 自动实体关系与跨笔记推理关联
 - [ ] 自动标签 + 智能分类（摄入时自动归类到已有集合）

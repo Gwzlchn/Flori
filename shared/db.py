@@ -831,6 +831,30 @@ def _chunk_note_body(
     return chunks
 
 
+def _canonical_ids_from_evidence_json(value: object) -> list[str]:
+    """读取当前 chunk 快照中的 canonical ID；畸形存量 JSON 安全降级为空。"""
+    try:
+        payload = json.loads(str(value or "{}"))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return []
+    raw = payload.get("canonical_evidence_ids") if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return list(dict.fromkeys(
+        item
+        for item in raw
+        if (
+            type(item) is str
+            and len(item) == 67
+            and item.startswith("ce_")
+            and all(char in "0123456789abcdef" for char in item[3:])
+        )
+    ))
+
+
+_MAX_NOTE_EVIDENCE_PROJECTION = 20
+
+
 def _parse_dt(s: str | None) -> datetime | None:
     """解析 ISO 时间串为 aware-UTC。旧库里存的 naive 串补上 UTC tzinfo,
     避免与 aware 的 now() 相减时崩 'can't subtract offset-naive and offset-aware'。"""
@@ -1370,6 +1394,14 @@ class Database:
             try:
                 self._conn.execute("BEGIN IMMEDIATE")
                 self._detach_study_sources_locked([job_id])
+                now = _now_iso()
+                self._conn.execute(
+                    """UPDATE canonical_evidence
+                       SET status='missing', invalid_reason='job_deleted',
+                           validated_at=?, updated_at=?
+                       WHERE job_id=?""",
+                    (now, now, job_id),
+                )
                 self._conn.execute("DELETE FROM notes_fts5 WHERE job_id=?", (job_id,))
                 self._conn.execute("DELETE FROM note_chunks WHERE job_id=?", (job_id,))
                 self._conn.execute("DELETE FROM note_chunks_fts5 WHERE job_id=?", (job_id,))
@@ -3267,6 +3299,7 @@ class Database:
         domain: str = "",
         collection_id: str = "",
         supersede_note_types: list[str] | None = None,
+        canonical_evidence: list[dict] | None = None,
     ) -> None:
         """原子替换某 job/note_type 的全文与证据块索引,失败时保留旧版本。"""
         with self._lock:
@@ -3289,6 +3322,14 @@ class Database:
                     self._revalidate_study_suggestion_evidence_locked(
                         job_id=job_id, note_type=stale_type
                     )
+                    now = _now_iso()
+                    self._conn.execute(
+                        """UPDATE canonical_evidence
+                           SET status='missing', invalid_reason='note_superseded',
+                               validated_at=?, updated_at=?
+                           WHERE job_id=? AND note_type=?""",
+                        (now, now, job_id, stale_type),
+                    )
                 self._conn.execute(
                     "DELETE FROM notes_fts5 WHERE job_id=? AND note_type=?",
                     (job_id, note_type),
@@ -3310,6 +3351,12 @@ class Database:
                     domain=domain,
                     collection_id=collection_id,
                 )
+                if canonical_evidence is not None:
+                    self._replace_canonical_evidence_locked(
+                        job_id=job_id,
+                        note_type=note_type,
+                        records=canonical_evidence,
+                    )
 
     def _replace_note_chunks_locked(
         self,
@@ -3376,6 +3423,294 @@ class Database:
         self._revalidate_study_suggestion_evidence_locked(
             job_id=job_id, note_type=note_type
         )
+
+    def _replace_canonical_evidence_locked(
+        self,
+        *,
+        job_id: str,
+        note_type: str,
+        records: list[dict],
+    ) -> None:
+        """原子替换当前证据集合；旧 ID 留存并失效，不随 chunk 删除。"""
+        if not isinstance(records, list):
+            raise ValueError("canonical evidence records must be a list")
+        now = _now_iso()
+        self._conn.execute(
+            """UPDATE canonical_evidence
+               SET status='stale', invalid_reason='note_reindexed',
+                   validated_at=?, updated_at=?
+               WHERE job_id=? AND note_type=?""",
+            (now, now, job_id, note_type),
+        )
+        expected_fields = {
+            "evidence_id", "schema_version", "job_id", "note_type", "chunk_id",
+            "section", "source_ref", "source_segment_id", "source_path", "source_sha256",
+            "source_revision", "note_path", "note_sha256", "provenance_path",
+            "provenance_sha256", "chunk_body_sha256", "chunk_char_start",
+            "chunk_char_end", "locator_kind", "locator_json",
+            "evidence_fingerprint", "source_fingerprint",
+        }
+        seen: set[str] = set()
+        for record in records:
+            if not isinstance(record, dict) or set(record) != expected_fields:
+                raise ValueError("canonical evidence record fields are invalid")
+            if record["job_id"] != job_id or record["note_type"] != note_type:
+                raise ValueError("canonical evidence crosses job or note")
+            evidence_id = str(record["evidence_id"])
+            if evidence_id in seen:
+                raise ValueError("canonical evidence id is duplicated")
+            seen.add(evidence_id)
+            chunk = self._conn.execute(
+                """SELECT job_id, note_type, section, char_start, char_end, body
+                   FROM note_chunks WHERE chunk_id=?""",
+                (record["chunk_id"],),
+            ).fetchone()
+            if (
+                chunk is None
+                or chunk["job_id"] != job_id
+                or chunk["note_type"] != note_type
+                or chunk["section"] != record["section"]
+                or int(chunk["char_start"]) != record["chunk_char_start"]
+                or int(chunk["char_end"]) != record["chunk_char_end"]
+                or _sha256_text(str(chunk["body"])) != record["chunk_body_sha256"]
+            ):
+                raise ValueError("canonical evidence does not match current chunk")
+            self._conn.execute(
+                """INSERT INTO canonical_evidence
+                   (evidence_id, schema_version, job_id, note_type, chunk_id, section,
+                    source_ref, source_segment_id, source_path, source_sha256, source_revision,
+                    note_path, note_sha256, provenance_path, provenance_sha256,
+                    chunk_body_sha256, chunk_char_start, chunk_char_end,
+                    locator_kind, locator_json, evidence_fingerprint,
+                    source_fingerprint, status, invalid_reason, validated_at,
+                    created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                           'valid',NULL,?,?,?)
+                   ON CONFLICT(evidence_id) DO UPDATE SET
+                       status='valid', invalid_reason=NULL, validated_at=excluded.validated_at,
+                       updated_at=excluded.updated_at""",
+                (
+                    record["evidence_id"], record["schema_version"], record["job_id"],
+                    record["note_type"], record["chunk_id"], record["section"],
+                    record["source_ref"], record["source_segment_id"],
+                    record["source_path"], record["source_sha256"],
+                    record["source_revision"], record["note_path"], record["note_sha256"],
+                    record["provenance_path"], record["provenance_sha256"],
+                    record["chunk_body_sha256"], record["chunk_char_start"],
+                    record["chunk_char_end"], record["locator_kind"],
+                    record["locator_json"], record["evidence_fingerprint"],
+                    record["source_fingerprint"], now, now, now,
+                ),
+            )
+        rows = self._conn.execute(
+            """SELECT chunk_id, evidence_id FROM canonical_evidence
+               WHERE job_id=? AND note_type=? AND status='valid'
+               ORDER BY chunk_id, evidence_id""",
+            (job_id, note_type),
+        ).fetchall()
+        ids_by_chunk: dict[str, list[str]] = {}
+        for row in rows:
+            ids_by_chunk.setdefault(str(row["chunk_id"]), []).append(
+                str(row["evidence_id"])
+            )
+        chunks = self._conn.execute(
+            """SELECT chunk_id, evidence_json FROM note_chunks
+               WHERE job_id=? AND note_type=? ORDER BY chunk_id""",
+            (job_id, note_type),
+        ).fetchall()
+        for chunk in chunks:
+            try:
+                projection = json.loads(str(chunk["evidence_json"]))
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                raise ValueError("note chunk evidence projection is invalid") from exc
+            projection["canonical_evidence_ids"] = ids_by_chunk.get(
+                str(chunk["chunk_id"]), []
+            )
+            encoded = json.dumps(
+                projection, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+            self._conn.execute(
+                "UPDATE note_chunks SET evidence_json=?, updated_at=? WHERE chunk_id=?",
+                (encoded, now, chunk["chunk_id"]),
+            )
+            self._conn.execute(
+                "UPDATE note_chunks_fts5 SET evidence_json=? WHERE chunk_id=?",
+                (encoded, chunk["chunk_id"]),
+            )
+
+    def canonical_evidence_database_states(
+        self,
+        evidence_ids: list[str],
+    ) -> dict[str, dict]:
+        """批量重算 DB 侧有效性；文件 SHA 由 resolver 在同一批次继续验证。"""
+        if (
+            not isinstance(evidence_ids, list)
+            or not 1 <= len(evidence_ids) <= 100
+            or any(type(item) is not str or not item for item in evidence_ids)
+            or len(set(evidence_ids)) != len(evidence_ids)
+        ):
+            raise ValueError("evidence_ids must contain 1..100 unique strings")
+        placeholders = ",".join("?" for _ in evidence_ids)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM canonical_evidence WHERE evidence_id IN ({placeholders})",
+                evidence_ids,
+            ).fetchall()
+            result: dict[str, dict] = {}
+            for row in rows:
+                item = self._row_to_canonical_evidence(row)
+                job = self._conn.execute(
+                    "SELECT status, is_current FROM jobs WHERE id=?",
+                    (row["job_id"],),
+                ).fetchone()
+                if job is None:
+                    status, reason = "missing", "job_deleted"
+                elif job["status"] != "done":
+                    status, reason = "stale", "job_not_done"
+                elif int(job["is_current"]) != 1:
+                    status, reason = "stale", "job_superseded"
+                else:
+                    chunk = self._conn.execute(
+                        """SELECT job_id, note_type, section, char_start, char_end, body
+                           FROM note_chunks WHERE chunk_id=?""",
+                        (row["chunk_id"],),
+                    ).fetchone()
+                    if chunk is None:
+                        status, reason = "missing", "chunk_removed"
+                    elif (
+                        chunk["job_id"] != row["job_id"]
+                        or chunk["note_type"] != row["note_type"]
+                        or chunk["section"] != row["section"]
+                        or int(chunk["char_start"]) != int(row["chunk_char_start"])
+                        or int(chunk["char_end"]) != int(row["chunk_char_end"])
+                        or _sha256_text(str(chunk["body"])) != row["chunk_body_sha256"]
+                    ):
+                        status, reason = "stale", "chunk_changed"
+                    else:
+                        status, reason = "valid", None
+                item["database_status"] = status
+                item["database_reason"] = reason
+                result[str(row["evidence_id"])] = item
+        return result
+
+    def canonical_evidence_ids_for_job(
+        self,
+        job_id: str,
+        note_type: str | None = None,
+    ) -> list[str]:
+        """从当前 chunk 快照返回稳定 ID；失效 ID 仍交 resolver 显式投影。"""
+        where = "job_id=?"
+        params: list[object] = [job_id]
+        if note_type is not None:
+            where += " AND note_type=?"
+            params.append(note_type)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT evidence_json FROM note_chunks
+                    WHERE {where}
+                    ORDER BY note_type, chunk_id""",
+                params,
+            ).fetchall()
+        return list(dict.fromkeys(
+            evidence_id
+            for row in rows
+            for evidence_id in _canonical_ids_from_evidence_json(row["evidence_json"])
+        ))
+
+    def canonical_evidence_ids_for_notes(
+        self, refs: list[tuple[str, str]],
+    ) -> dict[tuple[str, str], list[str]]:
+        """批量返回检索笔记的当前证据 ID，避免按结果逐条查询。"""
+        normalized = list(dict.fromkeys(refs))
+        result = {ref: [] for ref in normalized}
+        if not normalized:
+            return result
+        where = " OR ".join("(job_id=? AND note_type=?)" for _ in normalized)
+        params = [value for ref in normalized for value in ref]
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT job_id,note_type,evidence_json FROM note_chunks
+                    WHERE ({where})
+                    ORDER BY job_id COLLATE BINARY,note_type COLLATE BINARY,
+                             chunk_id COLLATE BINARY""",
+                params,
+            ).fetchall()
+        for row in rows:
+            key = (str(row["job_id"]), str(row["note_type"]))
+            for evidence_id in _canonical_ids_from_evidence_json(row["evidence_json"]):
+                if (
+                    len(result[key]) < _MAX_NOTE_EVIDENCE_PROJECTION
+                    and evidence_id not in result[key]
+                ):
+                    result[key].append(evidence_id)
+        return result
+
+    def set_canonical_evidence_states(self, states: list[dict]) -> None:
+        """原子落下 resolver 结论；状态不参与 ID，可随当前文件事实变化。"""
+        if not isinstance(states, list) or len(states) > 100:
+            raise ValueError("canonical evidence states count is invalid")
+        expected = {"evidence_id", "status", "reason"}
+        now = _now_iso()
+        with self._lock:
+            with self._conn:
+                for state in states:
+                    if not isinstance(state, dict) or set(state) != expected:
+                        raise ValueError("canonical evidence state fields are invalid")
+                    status, reason = state.get("status"), state.get("reason")
+                    if status not in {"valid", "stale", "missing"}:
+                        raise ValueError("canonical evidence status is invalid")
+                    if (
+                        (status == "valid" and reason is not None)
+                        or (
+                            status != "valid"
+                            and (type(reason) is not str or not reason.strip())
+                        )
+                    ):
+                        raise ValueError("canonical evidence reason is invalid")
+                    changed = self._conn.execute(
+                        """UPDATE canonical_evidence
+                           SET status=?, invalid_reason=?, validated_at=?, updated_at=?
+                           WHERE evidence_id=?""",
+                        (status, reason, now, now, state["evidence_id"]),
+                    )
+                    if changed.rowcount != 1:
+                        raise KeyError(f"canonical evidence not found: {state['evidence_id']}")
+
+    @staticmethod
+    def _row_to_canonical_evidence(row: sqlite3.Row) -> dict:
+        try:
+            locator = json.loads(str(row["locator_json"]))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            locator = None
+        return {
+            "evidence_id": row["evidence_id"],
+            "schema_version": row["schema_version"],
+            "job_id": row["job_id"],
+            "note_type": row["note_type"],
+            "chunk_id": row["chunk_id"],
+            "section": row["section"],
+            "source_ref": row["source_ref"],
+            "source_segment_id": row["source_segment_id"],
+            "source_path": row["source_path"],
+            "source_sha256": row["source_sha256"],
+            "source_revision": row["source_revision"],
+            "note_path": row["note_path"],
+            "note_sha256": row["note_sha256"],
+            "provenance_path": row["provenance_path"],
+            "provenance_sha256": row["provenance_sha256"],
+            "chunk_body_sha256": row["chunk_body_sha256"],
+            "chunk_char_start": row["chunk_char_start"],
+            "chunk_char_end": row["chunk_char_end"],
+            "locator_kind": row["locator_kind"],
+            "locator": locator,
+            "evidence_fingerprint": row["evidence_fingerprint"],
+            "source_fingerprint": row["source_fingerprint"],
+            "status": row["status"],
+            "reason": row["invalid_reason"],
+            "validated_at": row["validated_at"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
 
     def search_notes(
         self,
@@ -3451,6 +3786,13 @@ class Database:
             }
             for r in rows
         ]
+        evidence_ids = self.canonical_evidence_ids_for_notes([
+            (str(item["job_id"]), str(item["note_type"])) for item in items
+        ])
+        for item in items:
+            item["canonical_evidence_ids"] = evidence_ids.get(
+                (str(item["job_id"]), str(item["note_type"])), []
+            )
         return total, items
 
     def search_note_chunks(

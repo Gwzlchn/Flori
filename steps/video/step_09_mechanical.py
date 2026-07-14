@@ -5,7 +5,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from shared.note_text import markdown_to_index_text
 from shared.step_base import StepBase, file_hash
+from steps.video.provenance import (
+    ensure_video_source_manifest,
+    mechanical_ocr_provenance_segments,
+    mechanical_provenance_segments,
+    persist_video_note_provenance,
+)
 from steps.utils.srt_parser import load_srt, pick_native_srt
 
 
@@ -56,7 +63,7 @@ class MechanicalStep(StepBase):
         return missing
 
     # 渲染版本:渲染逻辑变了但输入文件没变时,bump 这个值让幂等失效、强制重渲染。
-    RENDER_VERSION = "v5-asset-frame-naming"
+    RENDER_VERSION = "v6-canonical-ocr-image"
 
     # 时间节粒度:口播按节成段,该节的截图/OCR 并置在同一节内,三者按时间往下读。
     BEAT_SEC = 30
@@ -77,6 +84,9 @@ class MechanicalStep(StepBase):
             sub, is_zh = pick_native_srt(self.job_dir / "input")
             if sub and is_zh:  # 仅中文原生字幕可无 claude 直用;非中文等 08 翻译
                 hashes["subtitle"] = file_hash(sub)
+        source_manifest = self.job_dir / "intermediate" / "source_segments.json"
+        if source_manifest.exists():
+            hashes["source_segments"] = file_hash(source_manifest)
         return hashes
 
     def execute(self) -> dict | None:
@@ -105,7 +115,31 @@ class MechanicalStep(StepBase):
         md = self._render_markdown(events)
 
         self.artifacts.write("output/notes_mechanical.md", md)
-        return {"frames": len(kept_frames), "events": len(events)}
+        source_manifest = ensure_video_source_manifest(self.job_dir)
+        mappings = []
+        if source_manifest is not None:
+            mappings = mechanical_provenance_segments(
+                transcript_lines,
+                source_manifest,
+                markdown_to_index_text(md),
+                beat_sec=self.BEAT_SEC,
+            )
+            mappings.extend(mechanical_ocr_provenance_segments(
+                ocr, source_manifest, markdown_to_index_text(md),
+                rendered_markdown=md,
+            ))
+        provenance = persist_video_note_provenance(
+            self.job_dir,
+            note_type="mechanical",
+            note_artifact="output/notes_mechanical.md",
+            provenance_segments=mappings,
+        )
+        return {
+            "frames": len(kept_frames),
+            "events": len(events),
+            "provenance_segments": provenance["segments"],
+            "provenance_status": provenance["status"],
+        }
 
     def _build_timeline(self, frames, ocr_map, danmaku, transcript_lines):
         events = []

@@ -14,6 +14,12 @@ import re
 
 from steps.article.extractors import pick_extractor
 from shared.step_base import StepBase, file_hash
+from steps.article.provenance import (
+    build_html_source_manifest,
+    direct_text_provenance_candidates,
+    persist_note_provenance,
+    publish_source_manifest,
+)
 
 
 # 空正文护栏。付费墙 / JS 渲染 / 订阅残桩页常被 trafilatura 抽出空或极短正文(仅标题 + "订阅后阅读")。
@@ -50,6 +56,8 @@ class ParseArticleStep(StepBase):
     def execute(self) -> dict | None:
         import trafilatura
 
+        (self.job_dir / "intermediate" / "source_segments.json").unlink(missing_ok=True)
+        (self.job_dir / "output" / "provenance" / "original.json").unlink(missing_ok=True)
         html = (self.job_dir / "input" / "source.html").read_text(encoding="utf-8")
 
         extracted = trafilatura.extract(
@@ -135,10 +143,29 @@ class ParseArticleStep(StepBase):
         # 可读原文 Markdown(图片下载到 assets/ 改本地引用),供前端「原文」tab。
         md, img_count = self._original_markdown(html, parsed, extractor)
         self.artifacts.write("output/original.md", md)
+        source_manifest = publish_source_manifest(
+            self.job_dir,
+            build_html_source_manifest(
+                self.job_dir, pipeline="article",
+            ),
+        )
+        provenance = {"status": "legacy_no_source_manifest", "segments": 0}
+        if source_manifest is not None:
+            provenance = persist_note_provenance(
+                self.job_dir,
+                pipeline="article",
+                note_type="original",
+                note_artifact="output/original.md",
+                candidates=direct_text_provenance_candidates(
+                    source_manifest, md, section="original",
+                ),
+            )
 
         return {"chars": len(text), "title": title, "images": img_count,
                 "abstract": bool(abstract), "tags": len(tags),
-                "lang": lang, "extractor": extractor.name}
+                "lang": lang, "extractor": extractor.name,
+                "provenance_segments": provenance["segments"],
+                "provenance_status": provenance["status"]}
 
     @staticmethod
     def _effective_len(text: str) -> int:

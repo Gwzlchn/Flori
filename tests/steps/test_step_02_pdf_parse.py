@@ -9,6 +9,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from steps.paper.step_02_pdf_parse import PdfParseStep
+from steps.article.provenance import source_reference_block
+from shared.provenance import MAX_PROVENANCE_BYTES
 from tests.steps.conftest import make_step_config
 
 
@@ -29,26 +31,57 @@ class TestPdfParseStep:
             (job_dir / d).mkdir()
         (job_dir / "input" / "source.pdf").write_bytes(b"%PDF-1.4 fake")
         (job_dir / "input" / "metadata.json").write_text(
-            json.dumps({"title": "MapReduce", "authors": ["Author A", "Author B"]}))
+            json.dumps({
+                "title": "MapReduce Processing at Scale",
+                "authors": ["Author A", "Author B"],
+            }),
+        )
 
         config = make_step_config(tmp_path, step_name="02_pdf_parse", pool="cpu")
         step = PdfParseStep("02_pdf_parse", job_dir, config)
-        from types import SimpleNamespace
-        # "MapReduce" 单 token 属可疑标题 → 会尝试 pdftotext 提取;返回空=启发式 None,保留 metadata 原值。
-        monkeypatch.setattr(step.commands, "run",
-                            lambda cmd, timeout=None: SimpleNamespace(
-                                stdout="Title: x\nPages:          9\n" if cmd[0] == "pdfinfo" else ""))
+        calls = []
+
+        def fake_subprocess(cmd, timeout=0):
+            if cmd[0] == "pdfinfo":
+                return SimpleNamespace(stdout="Title: x\nPages:          9\n")
+            Path(cmd[-1]).write_text(
+                "\f".join(
+                    f"Page {page} contains bounded source evidence."
+                    for page in range(1, 10)
+                ) + "\f",
+                encoding="utf-8",
+            )
+            calls.append(cmd)
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr(step.commands, "run", fake_subprocess)
         result = step.execute()
 
         parsed = json.loads((job_dir / "intermediate" / "parsed.json").read_text())
         assert parsed["source_kind"] == "pdf-only"
         assert parsed["pages"] == 9
-        assert parsed["title"] == "MapReduce"            # 只认 metadata.json 权威源
+        assert parsed["title"] == "MapReduce Processing at Scale"
         assert len(parsed["authors"]) == 2
         assert parsed["sections"][0]["title"] == "Pages 1-4"   # 每 4 页一伪章节
         assert parsed["sections"][-1]["title"] == "Pages 9-9"
         assert not (job_dir / "output" / "original.md").exists()  # 不产原文 MD(原文=内嵌 PDF)
         assert (job_dir / "intermediate" / "needs_translation.json").exists()
+        source_manifest = json.loads(
+            (job_dir / "intermediate/source_segments.json").read_text()
+        )
+        assert source_manifest["source_artifacts"][0]["page_count"] == 9
+        assert [item["locator"]["page"] for item in source_manifest["segments"]] == list(
+            range(1, 10)
+        )
+        assert all(item["locator"]["bbox"] is None for item in source_manifest["segments"])
+        assert source_manifest["segments"][0]["support_text"] == (
+            "Page 1 contains bounded source evidence."
+        )
+        assert "PDF 第" not in source_reference_block(source_manifest)
+        assert "Page 1 contains bounded source evidence." in source_reference_block(
+            source_manifest
+        )
+        assert len(calls) == 1
 
     def test_pdfinfo_unreadable_fails_loud(self, tmp_path, monkeypatch):
         # 页数是直喂分块地基,pdfinfo 读不出 → InputInvalidError(不静默 0 页)。
@@ -135,8 +168,16 @@ def test_pdf_only_suspicious_title_extracted_from_first_page(tmp_path, monkeypat
         if cmd[0] == "pdfinfo":
             return SimpleNamespace(stdout="Pages:          8\n")
         assert cmd[0] == "pdftotext"
-        return SimpleNamespace(stdout="PLOS Computational Biology 2013\n"
-                                      "Ten Simple Rules for Reproducible Computational Research\nAuthors\n")
+        first = (
+            "PLOS Computational Biology 2013\n"
+            "Ten Simple Rules for Reproducible Computational Research\nAuthors\n"
+        )
+        Path(cmd[-1]).write_text(
+            "\f".join([first, *(f"Page {page} source text" for page in range(2, 9))])
+            + "\f",
+            encoding="utf-8",
+        )
+        return SimpleNamespace(stdout="")
     monkeypatch.setattr(step.commands, "run", fake_subprocess)
     step.execute()
     parsed = json.loads((job_dir / "intermediate" / "parsed.json").read_text())
@@ -151,9 +192,51 @@ def test_pdf_only_good_title_untouched(tmp_path, monkeypatch):
     step = PdfParseStep("02_pdf_parse", job_dir, config)
 
     def fake_subprocess(cmd, timeout=0):
-        assert cmd[0] == "pdfinfo", "好标题不应触发 pdftotext"
-        return SimpleNamespace(stdout="Pages:          8\n")
+        if cmd[0] == "pdfinfo":
+            return SimpleNamespace(stdout="Pages:          8\n")
+        Path(cmd[-1]).write_text(
+            "\f".join(f"Page {page} source text" for page in range(1, 9)) + "\f",
+            encoding="utf-8",
+        )
+        return SimpleNamespace(stdout="")
     monkeypatch.setattr(step.commands, "run", fake_subprocess)
     step.execute()
     parsed = json.loads((job_dir / "intermediate" / "parsed.json").read_text())
     assert parsed["title"] == good
+
+
+@pytest.mark.parametrize(
+    "mode", ["failure", "empty", "oversized", "misaligned", "global-oversized"],
+)
+def test_pdf_page_support_failure_modes_publish_null(tmp_path, monkeypatch, mode):
+    job_dir = _make_job(tmp_path)
+    (job_dir / "input/metadata.json").write_text(
+        json.dumps({"title": "A Trustworthy Paper Title"}), encoding="utf-8",
+    )
+    config = make_step_config(tmp_path, step_name="02_pdf_parse", pool="cpu")
+    step = PdfParseStep("02_pdf_parse", job_dir, config)
+
+    def fake_subprocess(cmd, timeout=0):
+        if cmd[0] == "pdfinfo":
+            return SimpleNamespace(stdout="Pages:          1\n")
+        if mode == "failure":
+            raise RuntimeError("pdftotext failed")
+        if mode == "empty":
+            text = "\f"
+        elif mode == "misaligned":
+            text = "first\fsecond\f"
+        elif mode == "global-oversized":
+            text = "x" * (MAX_PROVENANCE_BYTES + 1)
+        else:
+            text = "x" * 4097 + "\f"
+        Path(cmd[-1]).write_text(text, encoding="utf-8")
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr(step.commands, "run", fake_subprocess)
+    step.execute()
+
+    manifest = json.loads(
+        (job_dir / "intermediate/source_segments.json").read_text(encoding="utf-8")
+    )
+    assert manifest["segments"][0]["support_text"] is None
+    assert source_reference_block(manifest) == ""

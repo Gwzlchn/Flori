@@ -6,6 +6,8 @@ import MarkdownIt from 'markdown-it'
 // html:false 不影响插件——katex 经 token 渲染器输出,非原始 HTML 透传。
 import katexPlugin from '@vscode/markdown-it-katex'
 import 'katex/dist/katex.min.css'
+import EvidenceLocatorLink from '../evidence/EvidenceLocatorLink.vue'
+import type { CanonicalEvidenceProjection } from '../../types'
 
 // terms/domain 用于笔记内联可点:正文里命中的已接受术语包成链接 → 该领域术语详情。
 // 不传则不做术语链接(其它调用方无需改动)。元素可为裸串(旧用法)或实体对象——
@@ -17,6 +19,7 @@ const props = defineProps<{
   terms?: Array<string | TermRef>
   domain?: string
   evidenceIds?: string[]
+  canonicalEvidence?: CanonicalEvidenceProjection[]
 }>()
 const emit = defineEmits<{
   headings: [{ id: string; text: string; level: number }[]]
@@ -244,6 +247,12 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onEsc))
 
 <template>
   <div class="prose prose-sm max-w-none prose-headings:scroll-mt-20" v-html="rendered" @click="onClick" />
+  <div v-if="canonicalEvidence?.length" class="canonical-evidence-list" aria-label="正文定位证据">
+    <EvidenceLocatorLink
+      v-for="evidence in canonicalEvidence" :key="evidence.evidence_id"
+      :evidence="evidence"
+    />
+  </div>
   <Teleport to="body">
     <div v-if="lightboxSrc" class="lightbox" @click.self="closeLightbox">
       <button class="lightbox-x" aria-label="关闭" @click="closeLightbox">×</button>
@@ -302,6 +311,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onEsc))
 .prose .term-link:hover { background: #eff6ff; border-bottom-style: solid; }
 .prose .evidence-citation { border: 0; padding: 0 2px; background: transparent; color: #2563eb; cursor: pointer; font: inherit; font-weight: 600; }
 .prose .evidence-citation:hover { background: #eff6ff; border-radius: 3px; }
+.canonical-evidence-list { display: flex; flex-wrap: wrap; gap: 8px 12px; margin-top: 0.75rem; }
 .prose details.ocr-fold { margin: 0.2rem 0 0.7rem; }
 .prose details.ocr-fold > summary { cursor: pointer; font-size: 0.72rem; color: #9ca3af; user-select: none; }
 .prose details.ocr-fold > summary::before { content: "🔎 "; }

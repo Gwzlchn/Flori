@@ -21,6 +21,7 @@ import stat
 import tempfile
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterable, AsyncIterator, Callable, Protocol
 
@@ -36,6 +37,15 @@ _STAGING_PREFIX = ".flori-upload/"
 
 class ArtifactTooLarge(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class StorageObjectVersion:
+    """可用于重验 memo 的可信对象版本;token 必须随对象替换而变化。"""
+
+    namespace: str
+    size: int
+    token: str
 
 
 def read_path_bounded(
@@ -231,6 +241,30 @@ async def read_file_bounded(
             await close()
 
 
+async def sha256_file(
+    storage: "StorageBackend",
+    job_id: str,
+    rel_path: str,
+    *,
+    chunk_size: int = 1024 * 1024,
+) -> str | None:
+    """流式计算对象 SHA-256；不会把媒体或 PDF 整体读入内存。"""
+    stream = await storage.open_stream(job_id, rel_path, chunk_size=chunk_size)
+    if stream is None:
+        return None
+    digest = hashlib.sha256()
+    try:
+        async for chunk in stream:
+            if not isinstance(chunk, bytes):
+                raise ValueError("artifact stream yielded non-bytes")
+            digest.update(chunk)
+    finally:
+        close = getattr(stream, "aclose", None)
+        if callable(close):
+            await close()
+    return digest.hexdigest()
+
+
 def verification_artifact_limit(rel_path: str) -> int:
     """返回评审/取证重验路径的单一字节上限。"""
     from shared.evidence_contract import MAX_EVIDENCE_BYTES, MAX_MECHANICAL_EVIDENCE_BYTES
@@ -327,6 +361,10 @@ class StorageBackend(Protocol):
     async def list_file_sizes(self, job_id: str) -> dict[str, int]: ...
     # 供 api range 流式播放视频/音频:取文件大小 + 读指定字节区间。找不到返回 None。
     async def file_size(self, job_id: str, rel_path: str) -> int | None: ...
+    # 只供内容重验 memo 判定对象是否仍是同一版本。无可信版本或不存在时返回 None。
+    async def object_version(
+        self, job_id: str, rel_path: str,
+    ) -> StorageObjectVersion | None: ...
     async def read_range(self, job_id: str, rel_path: str, start: int, length: int) -> bytes | None: ...
     # 健康探活(供 /api/status 的 minio 组件):返回 {status, mode, bucket, ...};不抛(异常由调用方包超时)。
     async def health(self) -> dict: ...
@@ -430,6 +468,25 @@ class LocalStorage:
     async def file_size(self, job_id: str, rel_path: str) -> int | None:
         path = self._safe_path(job_id, rel_path)
         return path.stat().st_size if path.is_file() else None
+
+    async def object_version(
+        self, job_id: str, rel_path: str,
+    ) -> StorageObjectVersion | None:
+        path = self._safe_path(job_id, rel_path)
+        try:
+            value = path.stat()
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(value.st_mode):
+            return None
+        return StorageObjectVersion(
+            namespace=f"local:{self.jobs_dir.resolve()}",
+            size=value.st_size,
+            token=(
+                f"{value.st_dev}:{value.st_ino}:{value.st_mtime_ns}:"
+                f"{value.st_ctime_ns}"
+            ),
+        )
 
     async def read_range(self, job_id: str, rel_path: str, start: int, length: int) -> bytes | None:
         path = self._safe_path(job_id, rel_path)
@@ -868,6 +925,34 @@ class RemoteStorage:
                 return None
         return await asyncio.to_thread(_stat)
 
+    async def object_version(
+        self, job_id: str, rel_path: str,
+    ) -> StorageObjectVersion | None:
+        def _stat() -> StorageObjectVersion | None:
+            from minio.error import S3Error
+            try:
+                value = self._client().stat_object(
+                    self._bucket, f"{job_id}/{rel_path}",
+                )
+            except S3Error:
+                return None
+            size = getattr(value, "size", None)
+            etag = getattr(value, "etag", None)
+            version_id = getattr(value, "version_id", None)
+            last_modified = getattr(value, "last_modified", None)
+            if type(size) is not int or size < 0 or not isinstance(etag, str) or not etag:
+                return None
+            return StorageObjectVersion(
+                namespace=(
+                    f"minio:{'https' if self._secure else 'http'}://"
+                    f"{self._endpoint}/{self._bucket}"
+                ),
+                size=size,
+                token=f"{etag}:{version_id or ''}:{last_modified or ''}",
+            )
+
+        return await asyncio.to_thread(_stat)
+
     async def read_range(self, job_id: str, rel_path: str, start: int, length: int) -> bytes | None:
         def _read() -> bytes | None:
             from minio.error import S3Error
@@ -1292,6 +1377,12 @@ class GatewayStorage:
                 return int(value)
             resp.raise_for_status()
             raise ValueError("gateway artifact size metadata is invalid")
+
+    async def object_version(
+        self, job_id: str, rel_path: str,
+    ) -> StorageObjectVersion | None:
+        # Runner artifact 响应没有可信 ETag/Last-Modified,不能用 size 代替对象版本。
+        return None
 
     async def read_range(self, job_id: str, rel_path: str, start: int, length: int) -> bytes | None:
         data = await self.read_file(job_id, rel_path)

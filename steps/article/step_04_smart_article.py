@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 from shared.step_base import StepBase, file_hash
+from steps.article.provenance import (
+    extract_note_markers,
+    load_source_manifest,
+    persist_note_provenance,
+    source_reference_block,
+)
 
 
 class SmartArticleStep(StepBase):
@@ -18,25 +24,50 @@ class SmartArticleStep(StepBase):
         translated = self.job_dir / "output" / "translated.md"
         if translated.exists():
             hashes["translated"] = file_hash(translated)   # 非中文文章随译文变化重跑
+        source_manifest = self.job_dir / "intermediate" / "source_segments.json"
+        if source_manifest.exists():
+            hashes["source_segments"] = file_hash(source_manifest)
         hashes.update(self.ai.prompt_profile_style_hashes())  # prompt(可选覆盖)+ profile + styles
         return hashes
 
     def execute(self) -> dict | None:
+        (self.job_dir / "output" / "provenance" / "smart.json").unlink(missing_ok=True)
         sections = self.artifacts.load_json("intermediate/sections.json")
         # 非中文文章:基于中文译文做笔记(对齐 04_translate 依赖),术语与译文一致,避免重复英译中。
         translated = self.job_dir / "output" / "translated.md"
         body = translated.read_text(encoding="utf-8") if translated.exists() else None
 
-        prompt = self._build_prompt(sections, body)
+        source_manifest = load_source_manifest(self.job_dir, pipeline="article")
+        prompt = self._build_prompt(sections, body, source_manifest=source_manifest)
         # 结构化中文笔记常超默认 4096 output tokens,显式抬高上限防被静默截断(claude-cli 无视无害)。
         result = self.ai.call(prompt, max_tokens=8192)
 
+        candidates = []
+        if source_manifest is not None:
+            result, candidates = extract_note_markers(result, source_manifest)
+        elif "[[source:" in result:
+            raise ValueError("article note contains a source marker without a manifest")
         rel = self.review.write_smart_note(result)   # 版本化落盘,含生成时间/方式/模型
+        provenance = persist_note_provenance(
+            self.job_dir,
+            pipeline="article",
+            note_type="smart",
+            note_artifact=rel,
+            candidates=candidates,
+        )
         return {"chars": len(result), "provider": self.ai.last_provider,
                 "model": self.ai.last_model, "note_file": rel,
-                "source": "translation" if body else "original"}
+                "source": "translation" if body else "original",
+                "provenance_segments": provenance["segments"],
+                "provenance_status": provenance["status"]}
 
-    def _build_prompt(self, sections: dict, body: str | None = None) -> str:
+    def _build_prompt(
+        self,
+        sections: dict,
+        body: str | None = None,
+        *,
+        source_manifest: dict | None = None,
+    ) -> str:
         profile = self.ai.load_domain_prompt_profile()
 
         parts = [self.ai.load_prompt_template("04_smart_article")]
@@ -57,6 +88,10 @@ class SmartArticleStep(StepBase):
         else:                                             # 中文文章:用原文章节树
             for sec in sections.get("sections", []):
                 self._render_section(sec, parts, level=2)
+
+        source_block = source_reference_block(source_manifest)
+        if source_block:
+            parts.append(source_block)
 
         return "".join(parts)
 

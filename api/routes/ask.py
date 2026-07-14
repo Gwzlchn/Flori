@@ -18,8 +18,11 @@ from shared.ask_citations import build_source_manifest
 from shared.db import Database
 from shared.models import AITask, LLMRequest
 from shared.redis_client import RedisClient
-from api.deps import get_db, get_redis, verify_token
+from shared.storage import StorageBackend
+from api.deps import get_db, get_redis, get_storage, verify_token
 from api.services import synthesis
+from api.schemas import CanonicalEvidenceProjection
+from api.services.evidence import attach_canonical_evidence
 
 log = structlog.get_logger(__name__)
 
@@ -41,6 +44,7 @@ class SourceItem(BaseModel):
     domain: str
     content_type: str
     evidence: dict
+    canonical_evidence: list[CanonicalEvidenceProjection] = Field(default_factory=list)
 
 
 class AskResponse(BaseModel):
@@ -56,6 +60,7 @@ async def ask(
     req: AskRequest,
     db: Database = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
+    storage: StorageBackend = Depends(get_storage),
 ) -> AskResponse:
     """先检索 DB,有命中才投递 AI task. 无命中直接返回空答案,不投 task."""
     passages = await asyncio.to_thread(
@@ -68,10 +73,13 @@ async def ask(
             sources=[], retrieved_count=0,
         )
 
+    await attach_canonical_evidence(db, storage, passages)
+
     sources = [
         SourceItem(
             job_id=p["job_id"], title=p["title"], domain=p["domain"],
             content_type=p["content_type"], evidence=p["evidence"],
+            canonical_evidence=p["canonical_evidence"],
         )
         for p in passages
     ]

@@ -93,13 +93,18 @@ async def create_term(
 
 
 @router.get("/{domain}/{term}", response_model=GlossaryTermResponse)
-async def get_term(domain: str, term: str, db: Database = Depends(get_db)):
+async def get_term(
+    domain: str,
+    term: str,
+    db: Database = Depends(get_db),
+):
     """术语详情(出现处带 job 标题)。"""
     validate_path_segment(domain, "domain")
     row = await asyncio.to_thread(db.get_glossary_term, domain, term)
     if row is None:
         raise HTTPException(404, "term not found")
-    return _to_response(await asyncio.to_thread(enrich_occurrence_titles, db, row))
+    row = await asyncio.to_thread(enrich_occurrence_titles, db, row)
+    return _to_response(row)
 
 
 @router.post("/{domain}/{term}/merge", response_model=GlossaryTermResponse)

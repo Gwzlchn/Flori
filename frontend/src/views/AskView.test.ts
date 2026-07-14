@@ -27,11 +27,35 @@ function askResp(over: Record<string, any> = {}) {
     sources: [
       {
         job_id: 'j_bp', title: '反向传播详解', domain: 'ml', content_type: 'video',
-        evidence: { chunk_id: 'j_bp:smart:0', chunk_index: 0, section: null, snippet: '反向传播' },
+        evidence: {
+          chunk_id: 'j_bp:smart:0', note_type: 'smart', section: '训练过程', snippet: '反向传播',
+          chunk_index: 0, char_start: 0, char_end: 640, timestamp_sec: 13,
+          page: null, frame_path: null, image_path: null,
+        },
+        canonical_evidence: [{
+          evidence_id: `ce_${'1'.repeat(64)}`, status: 'valid', reason: null,
+          job_id: 'j_bp', note_type: 'smart', chunk_id: 'j_bp:smart:0', section: '训练过程',
+          evidence_fingerprint: 'a'.repeat(64), source_fingerprint: 'b'.repeat(64),
+          locator: { kind: 'media', start_ms: 12500, end_ms: 16000 },
+          link: { kind: 'media', href: `/api/evidence/ce_${'1'.repeat(64)}/open`, label: '00:12' },
+          validated_at: '2026-07-14T14:00:00Z',
+        }],
       },
       {
         job_id: 'j_grad', title: '梯度下降综述', domain: 'ml', content_type: 'paper',
-        evidence: { chunk_id: 'j_grad:smart:0', chunk_index: 0, section: null, snippet: '梯度下降' },
+        evidence: {
+          chunk_id: 'j_grad:smart:0', note_type: 'smart', section: '方法', snippet: '梯度下降',
+          chunk_index: 0, char_start: 0, char_end: 520, timestamp_sec: null,
+          page: 4, frame_path: null, image_path: null,
+        },
+        canonical_evidence: [{
+          evidence_id: `ce_${'2'.repeat(64)}`, status: 'valid', reason: null,
+          job_id: 'j_grad', note_type: 'smart', chunk_id: 'j_grad:smart:0', section: '方法',
+          evidence_fingerprint: 'c'.repeat(64), source_fingerprint: 'd'.repeat(64),
+          locator: { kind: 'pdf', page: 4, bbox: null },
+          link: { kind: 'pdf', href: `/api/evidence/ce_${'2'.repeat(64)}/open`, label: '第 4 页' },
+          validated_at: '2026-07-14T14:00:00Z',
+        }],
       },
     ],
     retrieved_count: 2,
@@ -94,7 +118,7 @@ describe('AskView 提问流程(异步)', () => {
     expect(t).toContain('共识 / 分歧')
     expect(t).toContain('综合自 2 条来源')
     expect(t).toContain('反向传播详解')           // 来源 chips(随 202 即得)
-    expect(t).toContain('片段 1')
+    expect(t).toContain('00:12')
     expect(t).toContain('梯度下降综述')
   })
 
@@ -117,11 +141,19 @@ describe('AskView 提问流程(异步)', () => {
     expect(post).not.toHaveBeenCalled()
   })
 
-  it('点击来源 chip 跳 /content/{job_id}（encode）', async () => {
+  it('标题保留普通 job 导航,定位链接只使用 resolver 投影且不冒泡', async () => {
+    const eid = `ce_${'3'.repeat(64)}`
+    const base = askResp().sources[0]
     post.mockResolvedValue(askResp({
       sources: [{
         job_id: 'a b/c', title: 'T', domain: 'ml', content_type: 'video',
-        evidence: { chunk_id: 'a-b-c:smart:0', chunk_index: 0, section: null, snippet: 'T' },
+        evidence: base.evidence,
+        canonical_evidence: [{
+          ...base.canonical_evidence[0],
+          evidence_id: eid, job_id: 'a b/c', chunk_id: 'a-b-c:smart:0',
+          locator: { kind: 'text', exact: '正文锚点', prefix: null, suffix: null, dom_path: null },
+          link: { kind: 'text', href: `/api/evidence/${eid}/open`, label: '正文锚点' },
+        }],
       }],
     }))
     const w = await mountView()
@@ -129,8 +161,32 @@ describe('AskView 提问流程(异步)', () => {
     await w.find('textarea').setValue('问题')
     await w.find('button.btn-submit').trigger('click')
     await flushPromises()
-    await w.find('.source-chip').trigger('click')
+    expect(w.get('.source-chip a.evidence-locator').attributes('href')).toBe(`/api/evidence/${eid}/open`)
+    w.get('.source-chip a.evidence-locator').element.addEventListener('click', (event) => event.preventDefault())
+    await w.get('.source-chip a.evidence-locator').trigger('click')
+    expect(push).not.toHaveBeenCalled()
+    await w.get('.source-job').trigger('click')
     expect(push).toHaveBeenCalledWith('/content/a%20b%2Fc')
+  })
+
+  it.each(['stale', 'missing'] as const)('%s 证据禁用深链但来源仍可打开 job', async (status) => {
+    const base = askResp().sources[0]
+    post.mockResolvedValue(askResp({
+      sources: [{
+        ...base,
+        canonical_evidence: [{ ...base.canonical_evidence[0], status, reason: status, locator: null, link: null }],
+      }],
+      retrieved_count: 1,
+    }))
+    const w = await mountView()
+    get.mockResolvedValue(doneResult())
+    await w.find('textarea').setValue('问题')
+    await w.find('button.btn-submit').trigger('click')
+    await flushPromises()
+    expect(w.find('.source-chip a.evidence-locator').exists()).toBe(false)
+    expect(w.text()).toContain(status === 'stale' ? '证据已过期' : '证据缺失')
+    await w.get('.source-job').trigger('click')
+    expect(push).toHaveBeenCalledWith('/content/j_bp')
   })
 })
 

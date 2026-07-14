@@ -5,6 +5,7 @@
 import { ref, watch, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
+import EvidenceLocatorLink from '../components/evidence/EvidenceLocatorLink.vue'
 import { contentTypeIcon, contentTypePill, contentTypeLabel, noteTypeLabel } from '../utils/contentType'
 import type { SearchResponse, SearchResultItem } from '../types'
 import { Search } from 'lucide-vue-next'
@@ -170,6 +171,16 @@ function open(item: SearchResultItem) {
               <template v-if="item.domain && item.domain !== 'general'">
                 <span class="sep">·</span><span>{{ item.domain }}</span>
               </template>
+              <!-- 定位链接只使用服务端 resolver 投影;点击时不触发卡片的普通 job 导航。 -->
+              <span
+                v-for="evidence in item.canonical_evidence"
+                :key="evidence.evidence_id"
+                class="canonical-evidence"
+                @click.stop
+              >
+                <span class="sep">·</span>
+                <EvidenceLocatorLink :evidence="evidence" />
+              </span>
             </div>
           </div>
         </div>

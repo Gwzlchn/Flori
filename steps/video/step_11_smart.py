@@ -7,7 +7,15 @@ from pathlib import Path
 
 import yaml
 
+from shared.note_text import markdown_to_index_text
 from shared.step_base import StepBase, file_hash
+from steps.video.provenance import (
+    ensure_video_source_manifest,
+    extract_smart_markers,
+    persist_video_note_provenance,
+    smart_provenance_segments,
+    smart_reference_block,
+)
 
 
 class SmartStep(StepBase):
@@ -27,6 +35,9 @@ class SmartStep(StepBase):
         # 取证产物纳入指纹(ADR-0012):evidence 更新→笔记重生成,因为正文引用 [E#]。非案例类无 evidence 则空。
         ev = self.job_dir / "output" / "evidence.json"
         hashes["evidence"] = file_hash(ev) if ev.exists() else ""
+        source_manifest = self.job_dir / "intermediate" / "source_segments.json"
+        if source_manifest.exists():
+            hashes["source_segments"] = file_hash(source_manifest)
         # provider 覆盖纳入指纹:换 provider 重跑时指纹变化,绕过幂等跳过。
         hashes["provider"] = self.ai.override_provider()
         return hashes
@@ -50,9 +61,31 @@ class SmartStep(StepBase):
 
         result = self.ai.call(self._build_user_prompt(mechanical, frame_desc))
 
+        (self.job_dir / "output" / "provenance" / "smart.json").unlink(missing_ok=True)
+        source_manifest = ensure_video_source_manifest(self.job_dir)
+        candidates = []
+        if source_manifest is not None:
+            result, candidates = extract_smart_markers(result, source_manifest)
+        elif "[[source:" in result:
+            raise ValueError("video smart note contains a source marker without a source manifest")
+
         rel = self.review.write_smart_note(result, image_assets=frames)  # 回填占位符 + 版本化落盘
+        mappings = []
+        if source_manifest is not None:
+            note_bytes = (self.job_dir / rel).read_bytes()
+            mappings = smart_provenance_segments(
+                markdown_to_index_text(note_bytes.decode("utf-8")), candidates,
+            )
+        provenance = persist_video_note_provenance(
+            self.job_dir,
+            note_type="smart",
+            note_artifact=rel,
+            provenance_segments=mappings,
+        )
         return {"chars": len(result), "images_sent": len(frames),
-                "provider": self.ai.last_provider, "model": self.ai.last_model, "note_file": rel}
+                "provider": self.ai.last_provider, "model": self.ai.last_model, "note_file": rel,
+                "provenance_segments": provenance["segments"],
+                "provenance_status": provenance["status"]}
 
     def _select_frames(self) -> list[dict]:
         """从 dedup.json(保留帧)取候选并 join ocr.json 文本。返回 [{n,filename,ts,ocr}],n=清单 index。"""
@@ -160,6 +193,11 @@ class SmartStep(StepBase):
         ev = self._load_evidence()
         if ev and ev.get("evidence"):
             parts.append(self._evidence_block(ev))
+        source_block = smart_reference_block(
+            self.job_dir, ensure_video_source_manifest(self.job_dir),
+        )
+        if source_block:
+            parts.append(source_block)
         parts.append(f"\n---\n\n{mechanical}")
         return "".join(parts)
 

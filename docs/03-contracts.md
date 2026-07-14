@@ -1468,11 +1468,103 @@ Response `200`（`note_type` 区分命中的是哪类笔记，如 `smart`/`mecha
       "snippet": "…介绍了<mark>注意力机制</mark>的核心思想…",
       "content_type": "video",
       "domain": "deep-learning",
-      "collection_id": "c_xxx"
+      "collection_id": "c_xxx",
+      "canonical_evidence": [{
+        "evidence_id": "ce_<64 lowercase hex>",
+        "status": "valid",
+        "reason": null,
+        "job_id": "j_20260516_abc123",
+        "note_type": "smart",
+        "chunk_id": "j_20260516_abc123:smart:0",
+        "section": "训练过程",
+        "evidence_fingerprint": "<64 lowercase hex>",
+        "source_fingerprint": "<64 lowercase hex>",
+        "locator": {"kind": "media", "start_ms": 12500, "end_ms": 16000},
+        "link": {"kind": "media", "href": "/api/jobs/.../media?...#t=12.5", "label": "00:12"},
+        "validated_at": "2026-07-14T14:00:00Z"
+      }]
     }
   ]
 }
 ```
+
+`items[].canonical_evidence` 是下节 canonical evidence 安全投影的稳定 ID 顺序数组。同一 chunk
+可以绑定多个来源片段；Search/MCP 的 note 级结果最多投影当前稳定顺序的前 20 项，完整笔记证据走分页
+job endpoint。无 provenance 的存量笔记返回空数组，不得用 `job_id` 或历史文件路径在消费端猜链接。
+
+#### Canonical evidence 安全投影与解析
+
+Search、Ask、MCP 和内容详情共用同一个 evidence identity 与三态投影。概念出处只有在后续
+`(concept,job,evidence)` 精确关系落库后才允许接入，禁止按 job 附加整篇证据：
+
+内部 sidecar 契约为：
+
+- `intermediate/source_segments.json` v2 顶层保持
+  `schema_version/job_id/pipeline/source_artifacts/segments`；每个 segment 在 v1 坐标字段之外必须有
+  `support_text:string|null` 和 `support_artifact:object|null`，两者必须同时为空或同时非空。
+  `support_text` UTF-8 最大 4096 bytes；`support_artifact` 只允许
+  `kind/path/sha256/selector`，`path` 为 job 内规范相对路径，`sha256` 为 64 位小写十六进制。
+  五种绑定为：`html` 使用与 source artifact 相同的 path/SHA 及 `start/end`；
+  `audio_segments` 使用 `intermediate/segments.json` 及 `index`；`video_subtitle` 使用
+  `input/*.srt` 及 `index`；`video_ocr` 使用 `intermediate/ocr.json` 及
+  `entry_index/box_index`；`pdf_pages` 使用 `intermediate/pdf_page_support.json` 及 `page`。
+  Scheduler builder 与读时 resolver 都必须重读 SHA 对应的实际产物，按 selector 复算
+  support text 并与 manifest 精确比较。HTML、音视频转写和 OCR box 写真实文本，
+  PDF-only 由 `PdfParseStep` 使用 Poppler 一次提取全文，再按实测页严格分配原文并绑定对应页码和 PDF SHA；空白页、
+  提取失败、非 UTF-8 或单页超限时该页写 `null`，不得截断或错位绑定。
+- `output/provenance/{note_type}.json` v2 的每个 mapping 在 v1 锚点字段之外必须有
+  `verification_policy=direct_locator_v1|exact_quote_v1`。direct 用于确定性 producer；smart 只能用
+  exact quote，且每个 mapping 必须恰好绑定一个 source segment。整行 claim 只做 NFC 和有限
+  空白归一后，必须逐字包含于该 segment 的 support text；不做 NFKC 兼容归一，也不对
+  所有来源全局做 HTML entity 解码。同行多 ref，包括同源和跨模态组合，均不产生映射。
+- reader 严格兼容 v1 direct original/transcript/mechanical；v1 smart 非空 mapping、额外字段、未知 policy、
+  改写/纯数字 claim、PDF 空白页或提取失败页、跨语言 translated/smart claim 均 fail-closed。
+  producer 和 Scheduler 分别复算，客户端不能提交或拼装 canonical mapping。
+
+```json
+{
+  "evidence_id": "ce_<64 lowercase hex>",
+  "status": "valid|stale|missing",
+  "reason": null,
+  "job_id": "j_xxx",
+  "note_type": "smart",
+  "chunk_id": "j_xxx:smart:0",
+  "section": "引言",
+  "evidence_fingerprint": "<64 lowercase hex>",
+  "source_fingerprint": "<64 lowercase hex>",
+  "locator": {"kind": "pdf", "page": 3, "bbox": null},
+  "link": {"kind": "pdf", "href": "/api/jobs/.../media?...#page=3", "label": "跳到 PDF 页"},
+  "validated_at": "2026-07-14T14:00:00Z"
+}
+```
+
+- `valid` 才允许 `reason=null` 且返回安全 `locator/link`。`link` 只能由服务端 resolver 派生，
+  消费端不从 locator、job_id 或任何 path 拼接 URL。
+- `stale/missing` 必须有非空 `reason`，且 `locator=null/link=null`。跨 job 绑定、原始 path 越界、
+  source/note/chunk hash 篡改、text anchor 多解或无解均 fail-closed，不产生链接。
+- locator union 字段固定：`media={kind,start_ms,end_ms}`；
+  `pdf={kind,page,bbox:[x0,y0,x1,y1]|null}`；
+  `text={kind,exact,prefix,suffix,dom_path}`；
+  `image={kind,bbox:[x0,y0,x1,y1],start_ms,end_ms,page}`。可选定位值用 `null`，
+  image 投影永不暴露 `asset_path/asset_sha256`。
+- `link={kind,href,label}` 的 `kind` 与 locator 一致。前端只在 `status=valid` 且 link 存在时渲染可点定位；
+  其余情况明确显示「证据已过期」或「证据缺失」。
+
+Resolver：
+
+```
+GET  /api/evidence/{evidence_id}/resolve
+POST /api/evidence/resolve  {"evidence_ids":["ce_...", "ce_..."]}
+GET  /api/evidence/jobs/{job_id}?note_type=smart&offset=0&limit=100
+```
+
+GET 中非法 id 返回 `422`；合法但未知 id 返回 `404 canonical_evidence_not_found`；已存在但失效的
+id 返回 `200 stale|missing`。batch 最多 100 个且不允许重复，响应 `{"items":[...]}` 严格保持请求顺序；
+未知 id 在原位返回 `missing` 占位，不让批量消费者丢失位置关系。
+job 端点按当前 note chunk 快照分页返回投影 `{"total":N,"items":[...]}`，供内容详情展示；`limit`
+范围为 1..100，job 不存在返回 `404`，存在但当前 note type 没有 canonical evidence 返回
+`{"total":0,"items":[]}`。它只读取当前 chunk 绑定的 ID，因此不会
+带回重建索引前的历史 ID；当前 ID 即使暂时 stale/missing 也保留在结果中，以便来源恢复后重新变为 valid。
 
 #### POST /api/ask — 跨源综合问答（Cross-Source Synthesis Q&A）
 
@@ -1519,13 +1611,29 @@ Response `202`（`sources` 提交时已算好；`answer_markdown` 经 `GET /api/
         "page": null,
         "frame_path": null,
         "image_path": null
-      }
+      },
+      "canonical_evidence": [{
+        "evidence_id": "ce_<64 lowercase hex>",
+        "status": "valid",
+        "reason": null,
+        "job_id": "j_bp",
+        "note_type": "smart",
+        "chunk_id": "j_bp:smart:0",
+        "section": "训练过程",
+        "evidence_fingerprint": "<64 lowercase hex>",
+        "source_fingerprint": "<64 lowercase hex>",
+        "locator": {"kind": "media", "start_ms": 12500, "end_ms": 16000},
+        "link": {"kind": "media", "href": "/api/jobs/.../media?...#t=12.5", "label": "00:12"},
+        "validated_at": "2026-07-14T14:00:00Z"
+      }]
     }
   ],
   "retrieved_count": 1
 }
 ```
-- `sources[].evidence` 必填。第一阶段只保证 chunk 文本位置和 `snippet`；视频时间戳、论文页码、截图路径等字段预留,后续由多模态 evidence 回填。
+- `sources[].evidence` 保持既有 chunk 摘要契约，供 citation/source manifest 冻结和兼容旧消费者；
+  `sources[].canonical_evidence` 是稳定 ID 顺序数组，无 provenance 时为空。同一 canonical evidence 在
+  Search/Ask/MCP 返回相同 `evidence_id/status/evidence_fingerprint/source_fingerprint`。
 - 投递前服务端把本次来源冻结为 `ask_sources` manifest：每项固定绑定 `index/job_id/note_type/chunk_id/artifact_sha256/body_sha256/body/source_fingerprint`，manifest 再绑定 `task_id/question/manifest_sha256`。`body` 最多 4000 字；`artifact_sha256` 是完整被索引 note artifact，`body_sha256` 是规范化 chunk body，均为 64 位小写 hex。该清单只随 AI task 的 `audit_context.ask_source_manifest`、结果与审计持久化，不信任模型自行回报的来源。
 - 命中为 0 → `task_id:null`、`answer_markdown` 为固定提示文案、`sources:[]`，**不投 task**（短路）。
 - 投递失败（redis 不可用）→ `task_id:null` + 降级文案 + 已检索 `sources`（不 5xx）。
@@ -2328,6 +2436,7 @@ video:
     "06_ocr":
       extends: .cpu-step
       run: steps.video.step_06_ocr
+      version: "2"
       image: flori/step-heavy
       needs: ["05_dedup"]
       timeout: $OCR_TIMEOUT
@@ -2336,7 +2445,8 @@ video:
     "08_punctuate":
       extends: .ai-step
       run: steps.video.step_08_punctuate
-      needs: ["01_download"]
+      version: "3"
+      needs: ["01_download", "02_whisper", "06_ocr"]
       timeout: 300
       retry: 3
       rules:
@@ -2384,7 +2494,7 @@ video:
 
 **各 content_type 的 job 链**（`needs` 推导）：
 
-- **video**:`01_download` → `03_scene` → `04_frames` → `05_dedup` → `06_ocr`;`07_danmaku` / `08_punctuate` / `02_whisper` 由 `01_download` 旁路触发;`09_mechanical` 汇合 `06_ocr` + `07_danmaku` + `08_punctuate` → `10_evidence` → `11_smart` → `12_concepts` → `12_review`。`11_smart` 同时依赖 `09_mechanical` 与 `10_evidence`。
+- **video**:`01_download` → `03_scene` → `04_frames` → `05_dedup` → `06_ocr`;`02_whisper` 由 `01_download` 旁路触发;`08_punctuate` 汇合 `01_download` + `02_whisper` + `06_ocr`,一次发布含字幕与 OCR 图像段的来源清单;`09_mechanical` 再汇合 `06_ocr` + `07_danmaku` + `08_punctuate` → `10_evidence` → `11_smart` → `12_concepts` → `12_review`。`11_smart` 同时依赖 `09_mechanical` 与 `10_evidence`。
 - **paper**:`01_download` → `02_pdf_parse` → `03_sections` → `04_translate_paper`(条件) → `05_smart_paper` → `05_concepts` → `06_review`。(`04_figures` 已随 pymupdf 删除:arxiv 图随 HTML 进正文,pdf-only 图在 PDF 里模型直读;旧 job 的 `figures.json` 仍被 05/06 可选消费。)
   - **源头(2026-07 重做,HTML 优先)**:`01_download` 对 arxiv 除 PDF 外抓 **HTML 源**(官方 `arxiv.org/html/<id>` → 404 再 `ar5iv`)→ `input/source.html`,页内图片下载到 job 根 `assets/`、引用重写 `assets/<名>`。`02_pdf_parse`(步名保留,语义=论文解析):有 `source.html` → LaTeXML HTML 转干净 Markdown(`steps/utils/html_paper.py`;`<math alttext>`→`$…$`/`$$…$$`,图+图注,表 best-effort)→ **`output/original.md`(02 产,03 不再覆盖)** + 扁平 `sections`;`parsed.json.source_kind="arxiv-html"`。无 `source.html` → `source_kind="pdf-only"`,不产 original.md(原文=内嵌 PDF;AI 步直喂 PDF,见下一提交)。
   - **JobDetail 新字段 `source_kind`**(`"arxiv-html"|"pdf-only"|null`,读 parsed.json best-effort):前端原文变体据此分流——`arxiv-html` 直接渲染 `original.md`(公式/图无损);其余内嵌 PDF。
@@ -2492,7 +2602,7 @@ net_routing:
 
 ### 4.6 ocr.json — OCR 结果
 
-仅对 `keep=true` 的帧做 OCR。`text` 是各识别行用换行拼接的纯文本，`boxes` 是逐行的框/置信度明细：
+仅对 `keep=true` 的帧做 OCR。`asset_sha256`、`width`、`height` 绑定 OCR 当时读取的真实图像；步骤在识别前后复算 SHA-256，帧变化时整步失败且不发布 sidecar。`text` 是各识别行用换行拼接的纯文本，`boxes` 是逐行的框/置信度明细：
 
 ```json
 [
@@ -2500,6 +2610,9 @@ net_routing:
     "index": 0,
     "filename": "frame-0000.jpg",
     "timestamp_sec": 1.5,
+    "asset_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "width": 1920,
+    "height": 1080,
     "text": "0.32\nloss\nepoch",
     "boxes": [
       {"text": "0.32", "confidence": 0.987, "box": [[10, 8], [60, 8], [60, 28], [10, 28]]}
@@ -2507,6 +2620,8 @@ net_routing:
   }
 ]
 ```
+
+缺图条目保留 `filename/timestamp_sec`，但 `asset_sha256/width/height` 均为 `null`、`text` 为空且 `boxes=[]`。视频 image locator producer 只接受 64 位小写 SHA-256、正整数尺寸且与当前 `assets/<filename>` 字节和实际尺寸完全一致的条目；bbox 规范化为 `[x0,y0,x1,y1]` 后还必须落在图像尺寸内。旧 OCR sidecar 缺少这些身份字段时只跳过 image locator，不影响同一视频的 media locator。
 
 ### 4.7 danmaku.json — 弹幕
 
@@ -2799,11 +2914,12 @@ v2(未做):写工具(submit);sqlite-vec 语义后端。
 ### 工具(7,只读)
 - **`list_knowledge_bases()`** → `[{domain, collection_count, job_count, concept_count, subscription_count, last_active_at}]`
   —— agent 探索起点。
-- **`search(query, domain?=null, limit?=10)`** → `[{title, snippet, job_id, domain, kind}]`
+- **`search(query, domain?=null, limit?=10)`** → `[{title, snippet, job_id, domain, kind, canonical_evidence}]`
   —— 全文检索(2 字 CJK 参数化子串 + FTS5 trigram;单字不命中);`snippet` 内 `<mark>` 包裹命中;`domain` 限定某库;
-  `kind`=note_type。先 search 再 get_note。
-- **`get_note(job_id)`** → `{job_id, title, domain, collection_id, content_type, status, note_file, markdown}`
+  `kind`=note_type；`canonical_evidence` 是与 REST Search/Ask 同 identity/status 的稳定数组。先 search 再 get_note。
+- **`get_note(job_id)`** → `{job_id, title, domain, collection_id, content_type, status, note_file, markdown, canonical_evidence}`
   —— 取最新版智能笔记完整 Markdown;`markdown=null` 表示该内容智能笔记未生成。job 不存在→错误。
+  `canonical_evidence` 与 REST job evidence 端点共用当前 ID 和 resolver 安全投影，无 provenance 时为空数组。
 - **`list_collections(domain?=null)`** → `[{id, name, domain, job_count, [source_type, source_id, last_synced_at, last_sync_status]}]`
   —— 集合(内容分组/订阅来源)清单;`domain` 可选限定;订阅集合才带 source 字段。
 - **`get_glossary(domain, status?=null)`** → `[{term, zh_name, definition, status, is_topic, occurrence_count}]`

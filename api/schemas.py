@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -83,6 +83,92 @@ class StepResponse(BaseModel):
     meta: dict = Field(default_factory=dict)
     error: str | None = None
     worker_id: str | None = None      # 执行本步的 worker(前端「由 xxx 完成」)
+
+
+class CanonicalEvidenceLink(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["media", "pdf", "text", "image"]
+    href: str
+    label: str
+
+
+class CanonicalMediaLocator(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["media"]
+    start_ms: int
+    end_ms: int
+
+
+class CanonicalPdfLocator(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["pdf"]
+    page: int
+    bbox: tuple[float, float, float, float] | None = None
+
+
+class CanonicalTextLocator(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["text"]
+    exact: str
+    prefix: str
+    suffix: str
+    dom_path: str | None = None
+
+
+class CanonicalImageLocator(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["image"]
+    bbox: tuple[float, float, float, float]
+    start_ms: int | None = None
+    end_ms: int | None = None
+    page: int | None = None
+
+
+CanonicalEvidenceLocator = Annotated[
+    CanonicalMediaLocator
+    | CanonicalPdfLocator
+    | CanonicalTextLocator
+    | CanonicalImageLocator,
+    Field(discriminator="kind"),
+]
+
+
+class CanonicalEvidenceProjection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: str
+    status: Literal["valid", "stale", "missing"]
+    reason: str | None = None
+    job_id: str | None = None
+    note_type: str | None = None
+    chunk_id: str | None = None
+    section: str | None = None
+    evidence_fingerprint: str | None = None
+    source_fingerprint: str | None = None
+    locator: CanonicalEvidenceLocator | None = None
+    link: CanonicalEvidenceLink | None = None
+    validated_at: str | None = None
+
+
+class CanonicalEvidenceResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class CanonicalEvidenceResolveResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[CanonicalEvidenceProjection]
+
+
+class CanonicalEvidenceJobResponse(CanonicalEvidenceResolveResponse):
+    total: int
 
 
 JobDetailResponse.model_rebuild()
@@ -307,6 +393,7 @@ class SearchResultItem(BaseModel):
     content_type: str = ""
     domain: str = ""
     collection_id: str | None = None
+    canonical_evidence: list[CanonicalEvidenceProjection] = Field(default_factory=list)
 
 
 class SearchResponse(BaseModel):

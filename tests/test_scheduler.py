@@ -13,6 +13,8 @@ from tests.pubsub_helpers import subscription_barrier
 from shared.config import AppConfig
 from shared.db import Database
 from shared.models import Job, JobStatus, StepStatus, Step, AIUsage
+from shared.step_base import def_digest_for, pipeline_digest_for
+from shared.storage import LocalStorage
 from scheduler.scheduler import Scheduler
 
 
@@ -590,6 +592,130 @@ class TestConditions:
         s = _stub_workers_present(Scheduler(redis, db, config, storage=storage))
         assert await s.check_condition("j_empty", "has_subtitle") is False
         assert await s.check_condition("j_empty", "no_subtitle") is True
+
+
+class TestCanonicalProvenanceCompatibility:
+    candidate = {
+        "note_type": "smart",
+        "path": "output/notes.md",
+        "source_manifest": "intermediate/source_segments.json",
+        "provenance": "output/provenance/smart.json",
+        "provenance_step": "produce",
+        "provenance_since_version": "2",
+    }
+
+    def _make_scheduler(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir, *, current_job: bool,
+    ) -> tuple[Scheduler, Path]:
+        pipelines = {"evidence": {"steps": [{
+            "name": "produce", "pool": "cpu", "depends_on": [],
+            "version": "3", "ai": {},
+            "outputs": [
+                "output/notes.md",
+                "intermediate/source_segments.json",
+                "output/provenance/smart.json",
+            ],
+        }]}}
+        config = make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir)
+        scheduler = Scheduler(
+            redis, db, config, storage=LocalStorage(tmp_jobs_dir),
+        )
+        job = Job(
+            id="j_provenance_policy", content_type="article",
+            pipeline="evidence", title="Provenance policy",
+            pipeline_digest=(
+                pipeline_digest_for(pipelines["evidence"]["steps"])
+                if current_job else None
+            ),
+        )
+        db.create_job(job)
+        job_dir = tmp_jobs_dir / job.id
+        (job_dir / "output").mkdir(parents=True)
+        (job_dir / "output/notes.md").write_text(
+            "# Legacy\n\nlegacy evidence note", encoding="utf-8",
+        )
+        return scheduler, job_dir
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "present",
+        [(), ("source",), ("provenance",)],
+        ids=["missing-both", "missing-provenance", "missing-source"],
+    )
+    @pytest.mark.parametrize(
+        "done_digest", [def_digest_for("3", {}), None],
+        ids=["current-done", "legacy-shaped-done"],
+    )
+    async def test_current_completion_missing_sidecars_fails_closed(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir, present, done_digest,
+    ):
+        scheduler, job_dir = self._make_scheduler(
+            redis, db, tmp_path, tmp_jobs_dir, configs_dir, current_job=True,
+        )
+        done = {
+            "step": "produce",
+            "input_hashes": {},
+            "finished_at": "2026-07-14T00:00:00+00:00",
+        }
+        if done_digest is not None:
+            done["def_digest"] = done_digest
+        (job_dir / ".produce.done").write_text(json.dumps(done))
+        if "source" in present:
+            (job_dir / "intermediate").mkdir()
+            (job_dir / "intermediate/source_segments.json").write_text("{}")
+        if "provenance" in present:
+            (job_dir / "output/provenance").mkdir()
+            (job_dir / "output/provenance/smart.json").write_text("{}")
+
+        with pytest.raises(ValueError, match="canonical provenance sidecars"):
+            await scheduler._index_first_available_note(
+                "j_provenance_policy", [self.candidate],
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("legacy_digest", [def_digest_for("1", {}), None])
+    async def test_proven_legacy_completion_allows_empty_evidence_index(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir, legacy_digest,
+    ):
+        scheduler, job_dir = self._make_scheduler(
+            redis, db, tmp_path, tmp_jobs_dir, configs_dir, current_job=False,
+        )
+        done = {
+            "step": "produce",
+            "input_hashes": {},
+            "finished_at": "2026-07-01T00:00:00+00:00",
+        }
+        if legacy_digest is not None:
+            done["def_digest"] = legacy_digest
+        (job_dir / ".produce.done").write_text(json.dumps(done))
+
+        await scheduler._index_first_available_note(
+            "j_provenance_policy", [self.candidate],
+        )
+
+        total, items = db.search_notes("legacy")
+        assert total == 1
+        assert items[0]["job_id"] == "j_provenance_policy"
+        assert db.canonical_evidence_ids_for_job("j_provenance_policy") == []
+
+    @pytest.mark.asyncio
+    async def test_post_introduction_old_version_still_fails_closed(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+    ):
+        scheduler, job_dir = self._make_scheduler(
+            redis, db, tmp_path, tmp_jobs_dir, configs_dir, current_job=False,
+        )
+        (job_dir / ".produce.done").write_text(json.dumps({
+            "step": "produce",
+            "input_hashes": {},
+            "def_digest": def_digest_for("2", {}),
+            "finished_at": "2026-07-10T00:00:00+00:00",
+        }))
+
+        with pytest.raises(ValueError, match="missing canonical provenance sidecars"):
+            await scheduler._index_first_available_note(
+                "j_provenance_policy", [self.candidate],
+            )
 
 
 class TestWhisperPunctuateRecheck:

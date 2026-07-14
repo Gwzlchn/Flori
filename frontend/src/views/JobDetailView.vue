@@ -12,7 +12,7 @@ import StatusBadge from '../components/common/StatusBadge.vue'
 import { fmtDateTime, fmtDuration } from '../utils/datetime'
 import { contentTypeIcon, contentTypePill, contentTypeLabel } from '../utils/contentType'
 import { jobSourceLabel } from '../constants/sources'
-import type { JobDetail, GlossaryTerm, JobConcept } from '../types'
+import type { CanonicalEvidenceProjection, JobDetail, GlossaryTerm, JobConcept } from '../types'
 import {
   Play, FileText, ExternalLink, BookOpen, Lightbulb,
   GitBranch, Info, RefreshCw, ChevronDown, Star, List, RotateCcw, Trash2,
@@ -175,6 +175,7 @@ async function fetchDetail() {
 function resetJobView() {
   notesInit = false; conceptsInit = false
   noteContent.value = ''; noteError.value = ''
+  canonicalEvidence.value = []
   versions.value = []; review.value = null
   originalMd.value = ''; translatedMd.value = ''
   evidence.value = null; figures.value = []
@@ -193,6 +194,7 @@ const domain = computed(() => job.value?.domain || '')
 type NoteVariant = 'smart' | 'original' | 'translated'
 const noteVariant = ref<NoteVariant>('smart')
 const noteContent = ref('')
+const canonicalEvidence = ref<CanonicalEvidenceProjection[]>([])
 const noteLoading = ref(false)
 const noteError = ref('')
 const headings = ref<{ id: string; text: string; level: number }[]>([])
@@ -200,6 +202,27 @@ const headings = ref<{ id: string; text: string; level: number }[]>([])
 // 中文说法/变体也高亮到同一实体。
 const terms = ref<{ term: string; zh_name?: string; aliases?: string[] }[]>([])
 const acceptedTermNames = computed(() => new Set(terms.value.map((t) => t.term)))
+
+function currentCanonicalNoteType(): string {
+  if (noteVariant.value === 'smart') return 'smart'
+  if (noteVariant.value === 'translated') return 'translated'
+  return hasReadableOriginal.value ? 'original' : 'mechanical'
+}
+
+async function loadCanonicalEvidence(fid: string) {
+  const noteType = currentCanonicalNoteType()
+  try {
+    const response = await api.get<{ items: CanonicalEvidenceProjection[] }>(
+      `/api/evidence/jobs/${fid}?note_type=${encodeURIComponent(noteType)}`)
+    if (jobId.value === fid && currentCanonicalNoteType() === noteType) {
+      canonicalEvidence.value = response.items || []
+    }
+  } catch {
+    if (jobId.value === fid && currentCanonicalNoteType() === noteType) {
+      canonicalEvidence.value = []
+    }
+  }
+}
 
 type Version = { provider: string; model: string; version: string; file: string; review_file: string | null; overall: number | null; review_state?: string | null }
 const versions = ref<Version[]>([])
@@ -320,6 +343,7 @@ async function loadNote() {
         `/api/jobs/${fid}/artifact?path=${encodeURIComponent('output/translated.md')}`)
     } else if (noteVariant.value === 'original' && isPaper.value && !paperHtmlSource.value) {
       noteContent.value = ''   // pdf-only/旧论文:原文 = 模板内嵌 PDF,不走文本
+      canonicalEvidence.value = []
       return
     } else if (noteVariant.value === 'original' && (isArticle.value || paperHtmlSource.value)) {
       // 文章 / arxiv-html 论文「原文」= output/original.md(已由 loadOriginal 载入;兜底再拉一次)
@@ -336,6 +360,7 @@ async function loadNote() {
     }
     if (jobId.value !== fid) return
     noteContent.value = text
+    await loadCanonicalEvidence(fid)
   } catch (e: any) {
     if (jobId.value !== fid) return
     noteError.value = e?.status === 404
@@ -343,6 +368,7 @@ async function loadNote() {
         : noteVariant.value === 'original' && hasReadableOriginal.value ? '原文未生成' : '笔记尚未生成')
       : (e?.message || '加载失败')
     noteContent.value = ''
+    canonicalEvidence.value = []
   } finally {
     noteLoading.value = false
   }
@@ -935,6 +961,7 @@ watch(job, (j) => {
             <MarkdownViewer
               :content="noteContent" :job-id="jobId" :terms="terms" :domain="domain"
               :evidence-ids="eligibleEvidenceIds"
+              :canonical-evidence="canonicalEvidence"
               @headings="headings = $event" @pdf-page="onPdfPageJump"
               @evidence-citation="onEvidenceCitation"
             />

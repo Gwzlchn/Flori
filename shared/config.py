@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import fnmatch
 import os
 import re
 from dataclasses import dataclass, field
@@ -121,6 +122,83 @@ def validate_ai_pipeline_contract(pipelines: dict, providers: dict | None = None
                     )
                 if known is not None and provider not in known:
                     raise ValueError(f"unknown AI provider: {provider}")
+
+
+def validate_provenance_pipeline_contract(pipelines: dict) -> None:
+    """校验 index candidate 的 sidecar producer 与引入版本边界。"""
+    for pipeline, body in pipelines.items():
+        steps = body.get("steps", [])
+        step_by_name = {
+            step.get("name"): step
+            for step in steps
+            if isinstance(step, dict) and isinstance(step.get("name"), str)
+        }
+        for owner in steps:
+            if not isinstance(owner, dict):
+                continue
+            for effect in owner.get("on_complete") or []:
+                if not isinstance(effect, dict) or effect.get("action") != "index_note":
+                    continue
+                candidates = effect.get("candidates")
+                if not isinstance(candidates, list) or not candidates:
+                    raise ValueError(
+                        f"index_note candidates are invalid: {pipeline}/{owner.get('name')}"
+                    )
+                for index, candidate in enumerate(candidates):
+                    if not isinstance(candidate, dict):
+                        raise ValueError(
+                            f"index_note candidate is invalid: "
+                            f"{pipeline}/{owner.get('name')}/{index}"
+                        )
+                    sidecar_fields = (
+                        "source_manifest", "provenance",
+                        "provenance_step", "provenance_since_version",
+                    )
+                    if not any(field in candidate for field in sidecar_fields):
+                        continue
+                    if any(
+                        not isinstance(candidate.get(field), str)
+                        or not candidate[field].strip()
+                        for field in sidecar_fields
+                    ):
+                        raise ValueError(
+                            f"provenance candidate fields are invalid: "
+                            f"{pipeline}/{owner.get('name')}/{index}"
+                        )
+                    producer_name = candidate["provenance_step"]
+                    producer = step_by_name.get(producer_name)
+                    if producer is None:
+                        raise ValueError(
+                            f"provenance producer step is unknown: "
+                            f"{pipeline}/{producer_name}"
+                        )
+                    since_text = candidate["provenance_since_version"]
+                    current_version = producer.get("version", "1")
+                    current_text = (
+                        str(current_version)
+                        if type(current_version) in (str, int) else ""
+                    )
+                    if (
+                        not since_text.isdigit()
+                        or int(since_text) < 1
+                        or not current_text.isdigit()
+                        or int(current_text) < int(since_text)
+                    ):
+                        raise ValueError(
+                            f"provenance version boundary is invalid: "
+                            f"{pipeline}/{producer_name}"
+                        )
+                    outputs = producer.get("outputs")
+                    provenance_path = candidate["provenance"]
+                    if not isinstance(outputs, list) or not any(
+                        isinstance(pattern, str)
+                        and fnmatch.fnmatch(provenance_path, pattern)
+                        for pattern in outputs
+                    ):
+                        raise ValueError(
+                            f"provenance output is not declared by producer: "
+                            f"{pipeline}/{producer_name}"
+                        )
 
 
 def resolve_env_vars(text: str) -> str:
@@ -344,6 +422,7 @@ def normalize_pipelines(raw: dict, config_dir: Path | None = None) -> dict:
         if "jobs" in body:
             body = {**body, "variables": {**global_vars, **(body.get("variables") or {})}}
         result[name] = normalize_pipeline(body, default=default, templates=templates)
+    validate_provenance_pipeline_contract(result)
     if strict_ai_contract:
         validate_ai_pipeline_contract(result)
     return result
