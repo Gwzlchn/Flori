@@ -416,8 +416,24 @@ class TestActiveJobs:
 
 class TestPubSub:
     @pytest.mark.asyncio
-    async def test_publish_subscribe(self, rc):
+    async def test_publish_subscribe(self, rc, monkeypatch):
         received = []
+        subscribed = asyncio.Event()
+        real_pubsub = rc.r.pubsub
+
+        def tracked_pubsub(*args, **kwargs):
+            pubsub = real_pubsub(*args, **kwargs)
+            real_subscribe = pubsub.subscribe
+
+            async def tracked_subscribe(*channels, **options):
+                result = await real_subscribe(*channels, **options)
+                subscribed.set()
+                return result
+
+            pubsub.subscribe = tracked_subscribe
+            return pubsub
+
+        monkeypatch.setattr(rc.r, "pubsub", tracked_pubsub)
 
         async def listener():
             async for msg in rc.subscribe("test_channel"):
@@ -425,7 +441,7 @@ class TestPubSub:
                 break
 
         task = asyncio.create_task(listener())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(subscribed.wait(), timeout=1.0)
         await rc.publish("test_channel", {"event": "step_done", "step": "03_scene"})
         await asyncio.wait_for(task, timeout=2.0)
 
@@ -439,12 +455,20 @@ class TestPubSub:
 
         received = []
         calls = {"pubsub": 0, "getmsg": 0}
+        resubscribed = asyncio.Event()
         real_pubsub = rc.r.pubsub
 
         def flaky_pubsub(*a, **kw):
             calls["pubsub"] += 1
             ps = real_pubsub(*a, **kw)
             real_get = ps.get_message
+            real_subscribe = ps.subscribe
+
+            async def tracked_subscribe(*channels, **options):
+                result = await real_subscribe(*channels, **options)
+                if calls["pubsub"] >= 2:
+                    resubscribed.set()
+                return result
 
             async def flaky_get_message(*ga, **gkw):
                 calls["getmsg"] += 1
@@ -454,6 +478,7 @@ class TestPubSub:
                 return await real_get(*ga, **gkw)
 
             ps.get_message = flaky_get_message  # type: ignore[assignment]
+            ps.subscribe = tracked_subscribe  # type: ignore[assignment]
             return ps
 
         # reconnect 不真正换连接(fakeredis),只让 pubsub 重新创建走 real 路径。
@@ -469,12 +494,7 @@ class TestPubSub:
                 break
 
         task = asyncio.create_task(listener())
-        # 轮询等"重订阅真正发生"(pubsub 重建,calls>=2),而非赌固定 1.4s——
-        # 后者把生产退避常量(1s)硬编码进测试,慢机器上 1.4s 不够会偶发 flaky。
-        for _ in range(80):                 # 上限 4s,够 1s 退避 + 调度余量
-            if calls["pubsub"] >= 2:
-                break
-            await asyncio.sleep(0.05)
+        await asyncio.wait_for(resubscribed.wait(), timeout=4.0)
         await rc.publish("ch2", {"event": "ok"})
         await asyncio.wait_for(task, timeout=4.0)
 

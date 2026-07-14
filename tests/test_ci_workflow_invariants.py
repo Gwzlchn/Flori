@@ -28,7 +28,7 @@ def test_cancelable_jobs_use_scoped_job_concurrency() -> None:
         assert "github.ref" in concurrency["group"]
         assert matrix_key in concurrency["group"]
 
-    for job_name in ("coverage-gate", "fe-test", "detect", "coverage-badge"):
+    for job_name in ("coverage-gate", "fe-test", "integration", "detect", "coverage-badge"):
         concurrency = jobs[job_name]["concurrency"]
         assert concurrency["cancel-in-progress"] is True
         assert "github.ref" in concurrency["group"]
@@ -41,7 +41,9 @@ def test_release_is_non_cancelable_and_coverage_gated() -> None:
     assert concurrency["cancel-in-progress"] is False
     assert "github.ref" in concurrency["group"]
     assert "matrix.image" in concurrency["group"]
-    assert set(push["needs"]) == {"coverage-gate", "fe-test", "detect", "build-images"}
+    assert set(push["needs"]) == {
+        "coverage-gate", "fe-test", "integration", "detect", "build-images",
+    }
 
     # GitHub concurrency 对同组只保留最新 pending;这里明确采用 latest-wins.
     # 累计基线负责把被替代运行的改动带入最新 HEAD.
@@ -75,3 +77,111 @@ def test_detect_uses_last_successful_run_and_fail_safe_classification() -> None:
     assert "ci_docker_change.py" in classify_run
     assert '"$HEAD_SHA" docker' in classify_run
     assert '"$HEAD_SHA" frontend' in classify_run
+
+
+def test_unit_shards_and_real_integration_use_the_single_test_entrypoint() -> None:
+    jobs = load_workflow()["jobs"]
+    normal_job = jobs["unit-normal"]
+    normal = next(
+        step for step in normal_job["steps"]
+        if step.get("name", "").startswith("Unit tests")
+    )["run"]
+    worker_job = jobs["unit-worker"]
+    worker = next(
+        step for step in worker_job["steps"]
+        if step.get("name", "").startswith("Unit tests")
+    )["run"]
+    integration = jobs["integration"]
+    integration_run = next(
+        step for step in integration["steps"]
+        if step.get("name") == "Real dependency integration gate"
+    )["run"]
+
+    assert "scripts/test.sh --ci-normal" in normal
+    normal_splits = int(normal_job["env"]["CI_NORMAL_SPLITS"])
+    assert normal_job["strategy"]["matrix"]["group"] == list(
+        range(1, normal_splits + 1),
+    )
+    assert normal_job["env"]["CI_XDIST_WORKERS"] == "4"
+    assert worker_job["env"]["CI_XDIST_WORKERS"] == "4"
+    assert '"$CI_NORMAL_SPLITS"' in normal
+    assert "scripts/test.sh --ci-worker" in worker
+    assert "docker compose" not in normal + worker
+    assert integration["timeout-minutes"] <= 3
+    assert integration_run == "scripts/test.sh --integration"
+    assert integration["env"]["TEST_WARM_NAME"].startswith("flori-ci-")
+
+
+def test_integration_entrypoint_runs_production_redis_restore_drill() -> None:
+    entrypoint = WORKFLOW.parents[2] / "scripts" / "run-integration.sh"
+    drill = WORKFLOW.parents[2] / "tests" / "integration" / "redis_aof_restore.sh"
+
+    assert drill.is_file()
+    assert '"$REPO/tests/integration/redis_aof_restore.sh"' in entrypoint.read_text()
+
+    workflow = load_workflow()
+    integration = workflow["jobs"]["integration"]
+    gate = workflow["jobs"]["coverage-gate"]
+    run_step = next(
+        step for step in integration["steps"]
+        if step.get("name") == "Real dependency integration gate"
+    )
+    assert run_step["env"]["CI_COVERAGE"] == "1"
+    assert set(gate["needs"]) == {"unit-normal", "unit-worker", "integration"}
+
+
+def test_all_nine_coverage_parts_fail_closed_before_combine() -> None:
+    jobs = load_workflow()["jobs"]
+    upload_jobs = (jobs["unit-normal"], jobs["unit-worker"], jobs["integration"])
+    coverage_uploads = [
+        step
+        for job in upload_jobs
+        for step in job["steps"]
+        if step.get("uses", "").startswith("actions/upload-artifact@")
+        and str(step.get("with", {}).get("name", "")).startswith("cov-")
+    ]
+    assert len(coverage_uploads) == 3
+    assert all(
+        step["with"].get("if-no-files-found") == "error"
+        for step in coverage_uploads
+    )
+
+    gate = jobs["coverage-gate"]
+    assertion = next(
+        step for step in gate["steps"]
+        if step.get("name") == "Assert all 9 coverage parts are present and non-empty"
+    )["run"]
+    expected = {
+        *(f"covdata/.coverage.normal.{group}" for group in range(1, 7)),
+        *(f"covdata/.coverage.worker.{group}" for group in range(1, 3)),
+        "covdata/.coverage.integration",
+    }
+    assert all(path in assertion for path in expected)
+    assert '[ ! -s "$part" ]' in assertion
+    assert "exit 1" in assertion
+
+
+def test_external_workflow_rejects_whitespace_only_urls() -> None:
+    external_path = WORKFLOW.with_name("external.yml")
+    external = yaml.safe_load(external_path.read_text())
+    validation = next(
+        step for step in external["jobs"]["external-content"]["steps"]
+        if step.get("name") == "Validate selected public URL variables"
+    )["run"]
+    assert 'value="${!var:-}"' in validation
+    assert '${value//[[:space:]]/}' in validation
+    assert '[ "$missing" -eq 0 ]' in validation
+
+
+def test_external_workflow_requires_explicit_urls_and_single_entrypoint() -> None:
+    external_path = WORKFLOW.with_name("external.yml")
+    external = yaml.safe_load(external_path.read_text())
+    job = external["jobs"]["external-content"]
+    run = next(
+        step for step in job["steps"]
+        if step.get("name") == "Run selected external validation"
+    )["run"]
+
+    assert run.startswith("scripts/test.sh --external")
+    for kind in ("ARTICLE", "AUDIO", "RSS", "YOUTUBE"):
+        assert f"FLORI_EXTERNAL_{kind}_URL" in job["env"]

@@ -10,6 +10,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from tests.conftest import make_fakeredis
+from tests.pubsub_helpers import subscription_barrier
 from api.main import create_app
 
 REG_TOKEN = "flw-registration-secret"
@@ -666,7 +667,9 @@ class TestJobsProgress:
         assert resp.status_code == 401
 
     @pytest.mark.asyncio
-    async def test_publishes_to_events_channel(self, jobs_client, real_redis):
+    async def test_publishes_to_events_channel(
+        self, jobs_client, real_redis, monkeypatch,
+    ):
         import asyncio
 
         worker_id, token = await _register_real(jobs_client)
@@ -678,8 +681,9 @@ class TestJobsProgress:
                 events.append(msg)
                 break
 
+        ready = subscription_barrier(real_redis, monkeypatch)
         listener = asyncio.create_task(capture())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(ready.wait(), timeout=1.0)
         resp = await jobs_client.post(
             "/api/runner/jobs/j1/steps/A/progress",
             json={"payload": {"line": "hello"}},

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import make_fakeredis
+from tests.pubsub_helpers import subscription_barrier
 from shared.config import AppConfig
 from shared.db import Database
 from shared.models import Job, JobStatus, StepStatus, Step, AIUsage
@@ -909,7 +910,7 @@ class TestIdempotent:
 
 class TestOrphanScan:
     @pytest.mark.asyncio
-    async def test_reclaims_lost_worker(self, scheduler, redis, db):
+    async def test_reclaims_lost_worker(self, scheduler, redis, db, monkeypatch):
         job = make_job()
         db.create_job(job)
         await scheduler.submit_job(job)
@@ -924,9 +925,9 @@ class TestOrphanScan:
                 received.append(msg)
                 break
 
-        import asyncio
+        ready = subscription_barrier(redis, monkeypatch)
         task = asyncio.create_task(collect())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(ready.wait(), timeout=1.0)
         await scheduler.orphan_scan()
         await asyncio.wait_for(task, timeout=2.0)
 
@@ -948,7 +949,9 @@ class TestOrphanScan:
         assert await redis.get_step_status("j_test_001", "A") == "running"
 
     @pytest.mark.asyncio
-    async def test_reclaim_releases_pool_slot(self, scheduler, redis, db, tmp_path, tmp_jobs_dir, configs_dir):
+    async def test_reclaim_releases_pool_slot(
+        self, scheduler, redis, db, tmp_path, tmp_jobs_dir, configs_dir, monkeypatch,
+    ):
         """Orphan reclaim should release the pool slot."""
         pipelines = {
             "test": {
@@ -978,8 +981,9 @@ class TestOrphanScan:
                 received.append(msg)
                 break
 
+        ready = subscription_barrier(redis, monkeypatch)
         task = asyncio.create_task(collect())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(ready.wait(), timeout=1.0)
         await sched.orphan_scan()
         await asyncio.wait_for(task, timeout=2.0)
 
@@ -1047,7 +1051,9 @@ class TestReconcileSlots:
 
 class TestCheckStuck:
     @pytest.mark.asyncio
-    async def test_detects_stale_progress(self, scheduler, redis, db, tmp_jobs_dir):
+    async def test_detects_stale_progress(
+        self, scheduler, redis, db, tmp_jobs_dir, monkeypatch,
+    ):
         job = make_job()
         db.create_job(job)
         await scheduler.submit_job(job)
@@ -1066,9 +1072,9 @@ class TestCheckStuck:
                 received.append(msg)
                 break
 
-        import asyncio
+        ready = subscription_barrier(redis, monkeypatch)
         task = asyncio.create_task(collect())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(ready.wait(), timeout=1.0)
         await scheduler.check_stuck()
         await asyncio.wait_for(task, timeout=2.0)
 
@@ -1188,7 +1194,9 @@ class TestRerun:
 
 class TestRecover:
     @pytest.mark.asyncio
-    async def test_recovers_orphaned_running(self, scheduler, redis, db):
+    async def test_recovers_orphaned_running(
+        self, scheduler, redis, db, monkeypatch,
+    ):
         job = make_job()
         db.create_job(job)
         await scheduler.submit_job(job)
@@ -1203,9 +1211,9 @@ class TestRecover:
                 received.append(msg)
                 break
 
-        import asyncio
+        ready = subscription_barrier(redis, monkeypatch)
         task = asyncio.create_task(collect())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(ready.wait(), timeout=1.0)
         await scheduler._recover()
         await asyncio.wait_for(task, timeout=2.0)
 

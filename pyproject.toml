@@ -3,7 +3,7 @@ name = "flori"
 # 版本递增三档:普通改动 patch(第3段)+1;大的重构 minor(中段)+1;架构级大重构 major(首段)+1.
 # 逢10进位,如 0.8.9 到 0.9.0,0.9.9 到 1.0.0. 发布交付最终提交才 bump;checkpoint 与非发布治理不 bump. 详见 CLAUDE.md 提交规范.
 # 全系统单一版本,所有组件(api/scheduler/worker)统一. 运行时 = 此值 + 构建短 sha(见 shared/version.py).
-version = "1.6.3"
+version = "1.6.4"
 description = "AI-assisted personal learning knowledge base"
 requires-python = ">=3.11"
 # 上界封顶:挡住新 major/minor 静默引入(USTC 与官方源解析差异曾坑过 CI);
@@ -58,8 +58,8 @@ mcp = [
 test = [
     "pytest>=8.0,<9",
     "pytest-asyncio>=0.24,<1",
-    "pytest-xdist>=3,<4",   # 多进程并行(-n auto):用例进程内 fakeredis,无跨进程共享态,xdist 安全.
-    "pytest-split>=0.9,<1",  # 静态均衡分片(--splits N --group M):CI unit-normal 轻镜像再拆 2 shard 摊平关键路径
+    "pytest-xdist>=3,<4",   # 多进程并行:本地全量 -n auto,CI shard 固定 4 workers;用例无跨进程共享态.
+    "pytest-split>=0.9,<1",  # 静态均衡分片(--splits N --group M):CI unit-normal 轻镜像拆 6 shard 摊平关键路径
     "pytest-testmon>=2,<3",  # 只跑受本次改动影响的用例(scripts/test.sh --changed):迭代循环秒级
     "fakeredis[lua]>=2.28,<4",
     "pytest-cov>=5,<7",
@@ -83,6 +83,8 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "fuzz: OpenAPI 模糊/契约测试(schemathesis,较慢)。默认套件用 -m 'not fuzz' 跳过;手动 -m fuzz 跑。",
+    "integration: 需要真 Redis、SQLite 多进程或 Docker daemon 的真实依赖测试。",
+    "external: 需要显式公网测试 URL 的人工外网验证。",
 ]
 
 [tool.coverage.run]

@@ -5,15 +5,15 @@
 ## 1. Pipeline 概览
 
 ```
-Push/PR to main   → Unit Test（普通 4 shard + worker 2 shard）+ 前端 vitest + 分支覆盖率门(≥75%)
+Push/PR to main   → Unit Test（普通 6 shard + worker 2 shard）+ 真依赖 Integration + 前端 vitest + 分支覆盖率门(≥75%)
 Merge to main     → 上述现有门全部通过 + Push Image (ghcr.io，构建已与测试并行暖好缓存) → Watchtower 自动拉取重建（CD）
 每日 cron          → Schemathesis 模糊(无 5xx，fuzz.yml) / Mutation 变异测试（mutation.yml）
 手动触发           → paper pipeline E2E（e2e.yml）
 ```
 
-每次 PR / push 跑容器内分片单测、分支覆盖率门和前端 Vitest；纯文档提交(`paths-ignore`)不触发。
-Schemathesis 与 Mutation 是每日 cron；paper pipeline E2E 由 `e2e.yml` 手动触发。真 Redis、SQLite
-并发、real-docker 和条件外网场景当前尚未统一接入 required job，不能把手动验证计作每次 PR 的覆盖。
+每次 PR / push 跑容器内分片单测、真依赖 integration、分支覆盖率门和前端 Vitest；纯文档提交(`paths-ignore`)不触发。
+Schemathesis 与 Mutation 是每日 cron；paper pipeline E2E 由 `e2e.yml` 手动触发。条件外网场景通过
+`scripts/test.sh --external` 显式执行，不能把缺 URL 或未执行计作每次 PR 的覆盖。
 
 ## 2. 镜像发布
 
@@ -53,10 +53,12 @@ sudo ./svc.sh install && sudo ./svc.sh start
 `e2e.yml`（paper pipeline E2E，手动）+
 `step-images.yml`（按步执行镜像，手动）+ `mutation.yml`（变异测试，每日 cron + 手动）：
 
-- `unit-normal` / `unit-worker`：push / PR 到 main 触发；普通 job 拆 4 shard，worker / step job 拆 2 shard，
-  当前 workflow 直接在测试容器中调用 pytest，分片用 pytest-split 按实测时长均衡。各 shard 产部分
+- `unit-normal` / `unit-worker`：push / PR 到 main 触发；普通 job 拆 6 shard，worker / step job 拆 2 shard，
+  每片固定 4 个 xdist worker，避免 runner CPU 暴露数变化导致时长漂移。workflow 通过 `scripts/test.sh --ci-normal/--ci-worker`
+  调用 pytest，分片用 pytest-split 按实测时长均衡。各 shard 产部分
   覆盖率并上传 artifact；本地开发仍统一走 `scripts/test.sh`。
-- `coverage-gate`：下载全部 shard 的部分覆盖率,在 `python:slim` 容器里 `coverage combine` 后判**分支覆盖率门** `--fail-under=75`。低于 75% 直接红,防覆盖率倒退。覆盖率配置(分支/markers)单一事实源在 `pyproject.toml`。
+- `integration`：与 unit 并行，通过 `scripts/test.sh --integration` 验证真 Redis 双客户端、生产 Database 冷启动/多连接、迁移整链回滚、future/ledger fail-closed、固定 DR v1/v2 恢复查询、Gateway Worker、real-docker、四类 pipeline 检索闭环和生产 AOF 恢复。它上传 JUnit 与 coverage artifact，是 coverage gate 和镜像发布必经门。
+- `coverage-gate`：下载 unit 各 shard 和 integration 的部分覆盖率,在 `python:slim` 容器里 `coverage combine` 后判**分支覆盖率门** `--fail-under=75`。低于 75% 直接红,防覆盖率倒退。覆盖率配置(分支/markers)单一事实源在 `pyproject.toml`。
 - `fe-test`：容器化 vitest 跑前端单测 + 覆盖率,与后端并行,各自为门。
 - `coverage-badge`：仅 main。把前后端覆盖率写成 shields endpoint JSON,force-push 到 `badges` 数据分支,README 徽章读它。
 - `fuzz.yml`（每日 cron + 可手动）：**Schemathesis 模糊/契约**,`pytest -m fuzz tests/test_openapi_fuzz.py`。in-process 从 `/openapi.json` 自动派生用例喂每个端点,断言不 5xx(`not_a_server_error` + `response_schema_conformance`,检查集见仓库根 `schemathesis.toml`)。曾借此揪出分页 `offset` 溢出 SQLite int64 的 500 并修复。从 push CI 拆出,不再拖慢每次 push 的关键路径。

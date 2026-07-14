@@ -1,0 +1,71 @@
+# 真实依赖测试栈. scripts/test.sh --integration/--external 是唯一入口.
+services:
+  redis:
+    image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    command: redis-server --appendonly no --save ""
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 1s
+      retries: 20
+
+  test:
+    image: ${INTEGRATION_TEST_IMAGE:-flori-test-integration:latest}
+    build:
+      context: .
+      dockerfile: docker/base.Dockerfile
+      target: test
+      args:
+        USE_USTC_MIRROR: "${USE_USTC_MIRROR:-1}"
+    working_dir: /app
+    environment:
+      INTEGRATION_REDIS_URL: redis://redis:6379/15
+      INTEGRATION_HOST_TMP: ${INTEGRATION_HOST_TMP:-/tmp/flori-integration-host-tmp}
+      DOCKER_TEST_IMAGE: ${DOCKER_TEST_IMAGE:-python:3.11-slim@sha256:9a7765b36773a37061455b332f18e265e7f58f6fea9c419a550d2a8b0e9db834}
+    volumes:
+      - ./shared:/app/shared
+      - ./steps:/app/steps
+      - ./api:/app/api
+      - ./scheduler:/app/scheduler
+      - ./worker:/app/worker
+      - ./tests:/app/tests
+      - ./configs:/app/configs
+      - ./scripts:/app/scripts:ro
+      - ./pyproject.toml:/app/pyproject.toml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${INTEGRATION_HOST_TMP:-/tmp/flori-integration-host-tmp}:${INTEGRATION_HOST_TMP:-/tmp/flori-integration-host-tmp}
+      - ${INTEGRATION_ARTIFACT_DIR:-/tmp/flori-integration-artifacts}:${INTEGRATION_ARTIFACT_DIR:-/tmp/flori-integration-artifacts}
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  external:
+    image: ${INTEGRATION_EXTERNAL_IMAGE:-flori-test-external:latest}
+    build:
+      context: .
+      dockerfile: docker/base.Dockerfile
+      target: test-worker
+      args:
+        USE_USTC_MIRROR: "${USE_USTC_MIRROR:-1}"
+    working_dir: /app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      FLORI_EXTERNAL_ARTICLE_URL: ${FLORI_EXTERNAL_ARTICLE_URL:-}
+      FLORI_EXTERNAL_AUDIO_URL: ${FLORI_EXTERNAL_AUDIO_URL:-}
+      FLORI_EXTERNAL_RSS_URL: ${FLORI_EXTERNAL_RSS_URL:-}
+      FLORI_EXTERNAL_YOUTUBE_URL: ${FLORI_EXTERNAL_YOUTUBE_URL:-}
+      HTTP_PROXY: ${INTEGRATION_HTTP_PROXY:-}
+      HTTPS_PROXY: ${INTEGRATION_HTTPS_PROXY:-}
+      ALL_PROXY: ${INTEGRATION_ALL_PROXY:-}
+      NO_PROXY: ${INTEGRATION_NO_PROXY:-}
+    volumes:
+      - ./shared:/app/shared
+      - ./steps:/app/steps
+      - ./api:/app/api
+      - ./scheduler:/app/scheduler
+      - ./worker:/app/worker
+      - ./tests:/app/tests
+      - ./configs:/app/configs
+      - ./pyproject.toml:/app/pyproject.toml:ro
+      - ${INTEGRATION_ARTIFACT_DIR:-/tmp/flori-integration-artifacts}:${INTEGRATION_ARTIFACT_DIR:-/tmp/flori-integration-artifacts}

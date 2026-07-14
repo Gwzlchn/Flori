@@ -1,4 +1,4 @@
-"""四类真实 pipeline 完成事件到 Search、Ask 与 MCP 的检索闭环。"""
+"""四类真实 pipeline 完成事件到 Search, Ask 与 MCP 的检索闭环."""
 
 from __future__ import annotations
 
@@ -12,13 +12,15 @@ from api.mcp_server.server import build_server
 from scheduler.scheduler import Scheduler
 from shared.models import Job, JobStatus
 from shared.storage import LocalStorage
-from tests.conftest import make_fakeredis
+
+
+pytestmark = pytest.mark.integration
 
 
 _CASES = [
     ("video", "闭环视频证据", "smart"),
     ("paper", "闭环论文证据", "smart"),
-    # article 默认轻链路不生成 smart,应回退到原文而不是漏索引。
+    # article 默认轻链路不生成 smart,应回退到原文而不是漏索引.
     ("article", "闭环文章证据", "original"),
     ("audio", "闭环音频证据", "smart"),
 ]
@@ -61,7 +63,7 @@ async def _seed_artifacts(storage, job_id: str, pipeline: str, keyword: str) -> 
 
 
 async def _complete_real_pipeline(scheduler, redis, db, config, job_id: str) -> None:
-    """按真实归一化步骤表发送完成事件;已由 rules 跳过的步骤保持 skipped。"""
+    """按真实归一化步骤表发送完成事件;已由 rules 跳过的步骤保持 skipped."""
     for step in config.pipelines[db.get_job(job_id).pipeline]["steps"]:
         name = step["name"]
         status = await redis.get_step_status(job_id, name)
@@ -83,9 +85,9 @@ def _index_counts(db, job_id: str) -> tuple[int, int, int]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("pipeline", "keyword", "expected_note_type"), _CASES)
 async def test_pipeline_completion_reaches_search_ask_and_mcp(
-    db, test_config, pipeline, keyword, expected_note_type,
+    db, test_config, pipeline, keyword, expected_note_type, integration_redis,
 ):
-    redis = make_fakeredis()
+    redis = integration_redis
     storage = LocalStorage(test_config.jobs_dir)
     job_id = f"j_closure_{pipeline}"
     domain = f"closure-{pipeline}"
@@ -141,7 +143,7 @@ async def test_pipeline_completion_reaches_search_ask_and_mcp(
             {"term": "闭环辅概念", "rel": "prerequisite"},
         ]
 
-        # 重复 complete 被 CAS 丢弃;终态 reconcile 会重放声明,两者都不能累加索引或概念边。
+        # 重复 complete 被 CAS 丢弃;终态 reconcile 会重放声明,两者都不能累加索引或概念边.
         index_step = next(
             step["name"]
             for step in test_config.pipelines[pipeline]["steps"]
@@ -156,12 +158,14 @@ async def test_pipeline_completion_reaches_search_ask_and_mcp(
         assert len(concept_after["occurrences"]) == 1
         assert concept_after["related"] == concept_before["related"]
     finally:
-        await redis.close()
+        await redis.r.flushdb()
 
 
 @pytest.mark.asyncio
-async def test_missing_index_artifact_keeps_job_active_for_reconcile(db, test_config):
-    redis = make_fakeredis()
+async def test_missing_index_artifact_keeps_job_active_for_reconcile(
+    db, test_config, integration_redis,
+):
+    redis = integration_redis
     storage = LocalStorage(test_config.jobs_dir)
     job = Job(
         id="j_missing_audio", content_type="audio", pipeline="audio", domain="closure",
@@ -191,12 +195,14 @@ async def test_missing_index_artifact_keeps_job_active_for_reconcile(db, test_co
         assert db.get_job(job.id).status == JobStatus.DONE
         assert db.search_notes("周期对账")[0] == 1
     finally:
-        await redis.close()
+        await redis.r.flushdb()
 
 
 @pytest.mark.asyncio
-async def test_reconcile_backfills_legacy_done_job_without_redis_state(db, test_config):
-    redis = make_fakeredis()
+async def test_reconcile_backfills_legacy_done_job_without_redis_state(
+    db, test_config, integration_redis,
+):
+    redis = integration_redis
     storage = LocalStorage(test_config.jobs_dir)
     job = Job(
         id="j_legacy_audio", content_type="audio", pipeline="audio",
@@ -215,14 +221,14 @@ async def test_reconcile_backfills_legacy_done_job_without_redis_state(db, test_
         assert db.search_notes("历史完成任务")[0] == 1
         assert db.list_unindexed_done_jobs() == []
     finally:
-        await redis.close()
+        await redis.r.flushdb()
 
 
 @pytest.mark.asyncio
 async def test_article_reconcile_supersedes_original_with_smart_without_duplicates(
-    db, test_config,
+    db, test_config, integration_redis,
 ):
-    redis = make_fakeredis()
+    redis = integration_redis
     storage = LocalStorage(test_config.jobs_dir)
     job = Job(
         id="j_article_upgrade", content_type="article", pipeline="article",
@@ -253,4 +259,4 @@ async def test_article_reconcile_supersedes_original_with_smart_without_duplicat
         assert total == 1 and rows[0]["note_type"] == "smart"
         assert _index_counts(db, job.id)[0] == 1
     finally:
-        await redis.close()
+        await redis.r.flushdb()

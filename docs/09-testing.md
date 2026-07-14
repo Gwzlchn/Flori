@@ -4,16 +4,16 @@
 
 > **唯一入口 `scripts/test.sh`**（跨会话/多 agent 统一,权威规约见 CLAUDE.md §测试规约）:
 > `scripts/test.sh -m <模块>`(快测) / `--changed`(受改动影响) / `--all`(全量+75%门) / `--fe`(前端)。
-> 用常驻热容器免启停税、`-n auto` 并行；主 CI 运行 unit 分片、frontend、coverage gate 和镜像构建 / 发布，Schemathesis 独立每日 cron。**别再各写 `docker compose run …`**。
+> 用常驻热容器免启停税、`-n auto` 并行；主 CI 运行 unit 分片、真依赖 integration、frontend、coverage gate 和镜像构建 / 发布，Schemathesis 独立每日 cron。**别再各写 `docker compose run …`**。
 
 ## 验证层级与门禁事实
 
 | 层级 | 当前自动化与入口 | 是否主 CI 必经 |
 |------|------------------|----------------|
-| 主 CI | backend normal 4 分片 + worker 2 分片、frontend Vitest、coverage gate、按路径构建并在现有门通过后 push 镜像；拓扑以 `.github/workflows/ci.yml` 为准 | 是，非纯文档 push / PR |
-| 组件集成 | 真 Redis、SQLite 并发和 real-docker 用例分散在 pytest / 运维脚本中，当前尚无统一入口或主 CI required job | 否，发布前显式执行 |
-| pipeline E2E | `.github/workflows/e2e.yml` 的 `workflow_dispatch`；`tests/integration/ci_paper_e2e.sh` 运行真实 PDF 的 01 / 02 / 03，后续 AI 步在 DRY_RUN 下合成 | 否，需显式触发 |
-| 条件外网 / 凭证 | article、audio、RSS、YouTube、B站、arXiv 与真实 AI 场景当前按素材、网络和凭证条件手工执行，尚无统一 workflow | 否，只在条件满足的受控环境执行 |
+| 主 CI | backend normal 6 分片 + worker 2 分片、真依赖 integration、frontend Vitest、coverage gate、按路径构建并在现有门通过后 push 镜像；拓扑以 `.github/workflows/ci.yml` 为准 | 是，非纯文档 push / PR |
+| 组件集成 | `scripts/test.sh --integration` 统一编排真 Redis、生产 Database 多连接/多进程冷启动、迁移整链失败回滚、固定 DR v1/v2 恢复查询、Gateway Worker、real-docker 和生产 AOF 空环境恢复 | 是，`integration` required job |
+| pipeline E2E | 主 CI integration 覆盖 video / paper / article / audio 真实完成事件到 Search / Ask / MCP 命中；`.github/workflows/e2e.yml` 另保留真实 PDF 步骤链手动验收 | 闭环必经；外部素材需显式触发 |
+| 条件外网 / 凭证 | `scripts/test.sh --external <article|audio|rss|youtube|all>` 统一编排公网场景，缺所选 URL 返回非零；B 站、arXiv 与真实 AI 仍按素材、网络和凭证条件执行 | 否，只在条件满足的受控环境执行 |
 | 浏览器与视觉 | `docker-compose.e2e.yml` + `tests/e2e/smoke.py` 做已部署栈路由冒烟；UI 视觉验收另在 3840×2160、1512×982、440×956 三视口检查 | 否，当前为人工 / 发布验收 |
 
 “脚本存在”不等于“每个 PR 已覆盖”。文档记录某项通过时必须同时写明入口、素材、是否 DRY_RUN、
@@ -66,6 +66,11 @@ scripts/test.sh -- tests/steps/test_step_05_dedup.py
 | 12_review | 扁平 6 维整数分（completeness/accuracy/structure/terminology/visual_integration/readability）各 1-5、overall 1-5、key_terms 为 `[{term,definition}]`、parse_failed 非 true |
 
 ## 3. 集成测试
+
+主 CI 的 required integration 入口直接运行 `scripts/test.sh --integration`。数据库矩阵使用生产 `Database`
+验证冷启动、跨连接可见、唯一键竞争和 current+1/current+2 后段故障的整链回滚。固定
+format-v1 与 format-v2/schema-v2 归档均经生产 restore 入口恢复，再由当前 Database 执行
+`init_schema/get_job/list_jobs`，避免只验压缩包形状而没有验证真实升级和读路径。
 
 调度器 + Worker + Redis 联调：
 

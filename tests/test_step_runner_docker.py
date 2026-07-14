@@ -409,11 +409,15 @@ class TestDockerCleanup:
         work_dir = tmp_path / "j1"
         work_dir.mkdir()
         release = threading.Event()
+        wait_finished = threading.Event()
 
         class _StuckWaitContainer(_FakeContainer):
             def wait(self):
-                release.wait(10)
-                return {"StatusCode": 0}
+                try:
+                    release.wait(10)
+                    return {"StatusCode": 0}
+                finally:
+                    wait_finished.set()
 
         container = _StuckWaitContainer()
         fake_docker["client"] = _FakeClient(container)
@@ -427,7 +431,7 @@ class TestDockerCleanup:
                 )
         finally:
             release.set()
-            await asyncio.sleep(0.05)
+            assert await asyncio.to_thread(wait_finished.wait, 1)
 
         assert time.monotonic() - started < 0.5
         assert container.killed and container.removed

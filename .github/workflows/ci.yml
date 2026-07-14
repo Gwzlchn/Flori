@@ -13,14 +13,14 @@ on:
 # 后端单测按"普通 vs worker"拆两 job 并行(与部署镜像同理拆):
 #   unit-normal:轻镜像 test([api,worker,mcp,test],~350MB,build/load 秒级)跑非 step 测试(绝大多数)。
 #   unit-worker:重镜像 test-worker(test + ffmpeg + [steps] 媒体库)跑 step/worker 测试(tests/steps + test_step_* + test_worker)。
-#   各产部分覆盖率上传;coverage-gate 合并判 75%.关键路径 = max(两 job) 后进入 push-images,压 <2min.
+#   各产部分覆盖率上传;coverage-gate 合并判 75%.关键路径 = max(unit, integration) 后进入 push-images,压 <2min.
 jobs:
   unit-normal:
-    # 轻镜像 build/load 便宜,把 1234 个非 step 用例拆 4 shard 并行(不吃重镜像重建惩罚),摊平关键路径。
+    # 普通测试在发布关键路径,拆 6 shard 缩短测试段.
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2, 3, 4]
+        group: [1, 2, 3, 4, 5, 6]
     concurrency:
       group: ci-${{ github.event.pull_request.number || github.ref }}-unit-normal-${{ matrix.group }}
       cancel-in-progress: true
@@ -30,6 +30,8 @@ jobs:
       packages: write
     env:
       USE_USTC_MIRROR: "0"
+      CI_NORMAL_SPLITS: "6"
+      CI_XDIST_WORKERS: "4"
     steps:
       - uses: actions/checkout@v6
       - name: Lowercase owner
@@ -62,23 +64,17 @@ jobs:
             type=gha,scope=flori-test
           # 仅 group 1 写 buildcache,避免多 shard 并行双写同 ref;其余只读。PR 回退 gha。
           cache-to: ${{ github.ref == 'refs/heads/main' && matrix.group == 1 && format('type=registry,ref=ghcr.io/{0}/flori-test:buildcache,mode=max', env.OWNER_LC) || (github.ref != 'refs/heads/main' && matrix.group == 1 && 'type=gha,scope=flori-test,mode=max' || '') }}
-      # 非 step 测试(--ignore tests/steps + 根 tests/test_step_*.py + test_worker.py 归 unit-worker),再 pytest-split 拆 4 shard。
-      - name: Unit tests(普通 shard ${{ matrix.group }}/4,非 step)+ 部分覆盖率
+      # 非 step 测试(--ignore tests/steps + 根 tests/test_step_*.py + test_worker.py 归 unit-worker),再 pytest-split 拆 6 shard.
+      - name: Unit tests(普通 shard ${{ matrix.group }}/${{ env.CI_NORMAL_SPLITS }},非 step)+ 部分覆盖率
         run: |
-          mkdir -p covdata
-          docker compose -f docker-compose.test.yml run --rm \
-            -v "$GITHUB_WORKSPACE/covdata:/covdata" -e COVERAGE_FILE=/covdata/.coverage.normal.${{ matrix.group }} \
-            test \
-            pytest -p no:cacheprovider -m 'not fuzz' -n auto \
-              --ignore=tests/steps --ignore-glob='tests/test_step_*.py' --ignore=tests/test_worker.py \
-              --splits 4 --group ${{ matrix.group }} \
-              --cov=shared --cov=api --cov=scheduler --cov=worker --cov=steps \
-              --cov-branch --cov-report=
+          CI_COVERAGE_DIR="$GITHUB_WORKSPACE/covdata" \
+            scripts/test.sh --ci-normal ${{ matrix.group }} "$CI_NORMAL_SPLITS"
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: cov-normal-${{ matrix.group }}
           path: covdata/.coverage.normal.${{ matrix.group }}
           include-hidden-files: true
+          if-no-files-found: error
 
   unit-worker:
     # 重镜像也拆 2 shard(step 测试并行,pytest-split),摊平关键路径。
@@ -95,6 +91,7 @@ jobs:
       packages: write
     env:
       USE_USTC_MIRROR: "0"
+      CI_XDIST_WORKERS: "4"
     steps:
       - uses: actions/checkout@v6
       - name: Lowercase owner
@@ -130,25 +127,83 @@ jobs:
       # step/worker 测试(tests/steps 目录 + 根 tests/test_step_*.py + test_worker.py;真需媒体库),再 pytest-split 拆 2 shard。
       - name: Unit tests(step/worker shard ${{ matrix.group }}/2)+ 部分覆盖率
         run: |
-          mkdir -p covdata
-          docker compose -f docker-compose.test.yml run --rm \
-            -v "$GITHUB_WORKSPACE/covdata:/covdata" -e COVERAGE_FILE=/covdata/.coverage.worker.${{ matrix.group }} \
-            test \
-            pytest -p no:cacheprovider -m 'not fuzz' -n auto \
-              tests/steps tests/test_step_*.py tests/test_worker.py \
-              --splits 2 --group ${{ matrix.group }} \
-              --cov=shared --cov=api --cov=scheduler --cov=worker --cov=steps \
-              --cov-branch --cov-report=
+          CI_COVERAGE_DIR="$GITHUB_WORKSPACE/covdata" \
+            scripts/test.sh --ci-worker ${{ matrix.group }}
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: cov-worker-${{ matrix.group }}
           path: covdata/.coverage.worker.${{ matrix.group }}
           include-hidden-files: true
+          if-no-files-found: error
 
-  # 合并普通 + worker 各 shard 的部分覆盖率,判分支覆盖率门 75%(拆 job 后不能各自判,部分覆盖会误判)。
+  # 真 Redis + 生产 Database 冷启动/迁移/DR 兼容 + real-docker + AOF 恢复.与 unit 并行,并作为镜像发布门.
+  integration:
+    concurrency:
+      group: ci-${{ github.event.pull_request.number || github.ref }}-integration
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      packages: write
+    env:
+      USE_USTC_MIRROR: "0"
+      TEST_WARM_NAME: flori-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      INTEGRATION_TEST_IMAGE: flori-integration-test:${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Lowercase owner
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - name: 稳定 pip 缓存(取真实版本 + 抹 pyproject version 为占位)
+        run: |
+          echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_ENV"
+          sed -i 's/^version = .*/version = "0.0.0"/' pyproject.toml
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to ghcr.io
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build integration test image(target test,只读既有 cache)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/base.Dockerfile
+          target: test
+          tags: ${{ env.INTEGRATION_TEST_IMAGE }}
+          load: true
+          build-args: |
+            USE_USTC_MIRROR=0
+            FLORI_VERSION=${{ env.FLORI_VERSION }}
+          cache-from: |
+            type=registry,ref=ghcr.io/${{ env.OWNER_LC }}/flori-test:buildcache
+            type=gha,scope=flori-test
+      - name: Real dependency integration gate
+        env:
+          INTEGRATION_ARTIFACT_DIR: ${{ runner.temp }}/flori-integration-artifacts
+          CI_COVERAGE: "1"
+        run: scripts/test.sh --integration
+      - name: Upload integration JUnit
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: integration-junit
+          path: ${{ runner.temp }}/flori-integration-artifacts/*.xml
+          if-no-files-found: warn
+      - name: Upload integration coverage
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: cov-integration
+          path: ${{ runner.temp }}/flori-integration-artifacts/.coverage.integration
+          include-hidden-files: true
+          if-no-files-found: error
+
+  # 合并普通 + worker 各 shard 与 integration 的部分覆盖率,判分支覆盖率门 75%(拆 job 后不能各自判,部分覆盖会误判)。
   # 用 python:slim 挂 checkout 到 /app 里 combine(记录的 /app/* 路径直接对齐,免 [paths]),不建 test 镜像也能秒级完成。
   coverage-gate:
-    needs: [unit-normal, unit-worker]
+    needs: [unit-normal, unit-worker, integration]
     concurrency:
       group: ci-${{ github.event.pull_request.number || github.ref }}-coverage-gate
       cancel-in-progress: true
@@ -164,7 +219,22 @@ jobs:
         with:
           pattern: cov-*
           path: covdata
-          merge-multiple: true          # cov-normal-{1..4} + cov-worker-{1,2} 写入 covdata/.coverage.*
+          merge-multiple: true          # cov-normal-{1..6} + cov-worker-{1,2} + cov-integration 写入 covdata/.coverage.*
+      - name: Assert all 9 coverage parts are present and non-empty
+        run: |
+          required=(
+            covdata/.coverage.normal.1 covdata/.coverage.normal.2
+            covdata/.coverage.normal.3 covdata/.coverage.normal.4
+            covdata/.coverage.normal.5 covdata/.coverage.normal.6
+            covdata/.coverage.worker.1 covdata/.coverage.worker.2
+            covdata/.coverage.integration
+          )
+          for part in "${required[@]}"; do
+            if [ ! -s "$part" ]; then
+              echo "::error::missing or empty coverage part: $part"
+              exit 1
+            fi
+          done
       - name: Combine + 判分支覆盖率门(轻量 python:slim,不建 test 镜像,省约 25s 串行)
         id: cov
         run: |
@@ -175,7 +245,7 @@ jobs:
             | tee /tmp/cov.log
           pct=$(awk '/^TOTAL/{gsub("%","",$NF); print $NF}' /tmp/cov.log | tail -1)
           echo "pct=${pct:-unknown}" >> "$GITHUB_OUTPUT"
-          echo "### 后端分支覆盖率(合并 普通+worker):${pct:-unknown}%" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 后端分支覆盖率(合并 普通+worker+integration):${pct:-unknown}%" >> "$GITHUB_STEP_SUMMARY"
 
   # 注:OpenAPI 模糊/契约(schemathesis)在独立每日 cron .github/workflows/fuzz.yml 跑,不拖慢 push CI。
 
@@ -417,7 +487,7 @@ jobs:
 
   # build/push 拆分之二:覆盖率门 + 前端测试通过且镜像缓存已暖后快速 push.仅 main.
   push-images:
-    needs: [coverage-gate, fe-test, detect, build-images]
+    needs: [coverage-gate, fe-test, integration, detect, build-images]
     if: github.ref == 'refs/heads/main'
     # 已启动的同镜像发布不取消;新 run 发布当前 HEAD,可覆盖未启动的旧排队.
     concurrency:

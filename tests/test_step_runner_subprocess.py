@@ -315,16 +315,40 @@ class TestSubprocessProgress:
         async def on_tick() -> None:
             tick_calls.append(1)
 
-        # 把 monitor 的 10s 周期改短,让进程结束前能触发一次。
+        # 用可观测屏障释放 monitor 的第一拍;后续拍停在未置位 Event,直到 runner
+        # 取消 monitor.不能用短 sleep 猜子进程与 monitor 的调度先后.
         real_sleep = asyncio.sleep
+        monitor_waiting = asyncio.Event()
+        release_monitor = asyncio.Event()
+        park_later_cycles = asyncio.Event()
+        monitor_cycles = 0
 
-        async def fast_sleep(secs):
-            await real_sleep(0.05 if secs == 10 else secs)
+        async def gated_sleep(secs):
+            nonlocal monitor_cycles
+            if secs != 10:
+                await real_sleep(secs)
+                return
+            monitor_cycles += 1
+            if monitor_cycles == 1:
+                monitor_waiting.set()
+                await release_monitor.wait()
+            else:
+                await park_later_cycles.wait()
 
-        monkeypatch.setattr("worker.step_runner.asyncio.sleep", fast_sleep)
-
+        monkeypatch.setattr("worker.step_runner.asyncio.sleep", gated_sleep)
         runner = SubprocessStepRunner()
-        await runner.run_step(_ctx(work_dir, module), on_progress, on_tick)
+        run_task = asyncio.create_task(
+            runner.run_step(_ctx(work_dir, module), on_progress, on_tick)
+        )
+        try:
+            await asyncio.wait_for(monitor_waiting.wait(), timeout=1)
+            release_monitor.set()
+            await run_task
+        finally:
+            if not run_task.done():
+                run_task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await run_task
 
         assert tick_calls, "on_tick should be called each cycle"
         assert progress_calls, "on_progress should be called with progress data"

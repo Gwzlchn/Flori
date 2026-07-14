@@ -1,7 +1,7 @@
 """tests for shared/runner_ops.py:认领/上报编排(fakeredis + db).
 
-这套测试针对抽出来的纯函数,与 test_transport.py 的 RedisTransport 用例互为镜像;
-两者都过,才能保证薄包装与服务端端点共用同一份编排、行为不分叉。
+状态机语义只在本文件验证;test_transport.py 只守薄适配的参数转调与错误映射,
+避免两套镜像断言让重构时一同错误通过.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from tests.conftest import make_fakeredis
+from tests.pubsub_helpers import subscription_barrier
 from shared import runner_ops
 from shared.db import Database
 from shared.models import Job, Step, StepStatus
@@ -212,6 +213,39 @@ class TestClaimStep:
         assert await redis.get_pool_count("cpu") == 0
 
     @pytest.mark.asyncio
+    async def test_reject_tag_returns_to_queue_and_releases_slot(self, redis, db):
+        await _register_worker(redis, db)
+        await redis.enqueue_step(
+            "cpu", "j1", "A", ["vision", "private"], priority=0,
+            require_tags=["vision"],
+        )
+
+        claim = await runner_ops.claim_step(
+            redis, db, WORKER_ID, ["cpu"], POOL_LIMITS, {"vision"}, {"private"},
+        )
+
+        assert claim is None
+        assert (await redis.get_queue_info("cpu"))["length"] == 1
+        assert await redis.get_pool_count("cpu") == 0
+
+    @pytest.mark.asyncio
+    async def test_max_tries_returns_all_mismatches_to_queue(self, redis, db):
+        await _register_worker(redis, db)
+        for index in range(6):
+            await redis.enqueue_step(
+                "cpu", f"j_{index}", "A", ["exotic"], priority=0,
+                require_tags=["exotic"],
+            )
+
+        claim = await runner_ops.claim_step(
+            redis, db, WORKER_ID, ["cpu"], POOL_LIMITS, {"vision"}, set(),
+        )
+
+        assert claim is None
+        assert (await redis.get_queue_info("cpu"))["length"] == 6
+        assert await redis.get_pool_count("cpu") == 0
+
+    @pytest.mark.asyncio
     async def test_cas_lost_releases_slot_and_unfreezes(self, redis, db):
         await _register_worker(redis, db)
         await redis.enqueue_step("scene", "j1", "A", [], priority=0)
@@ -248,7 +282,7 @@ class TestClaimStep:
 
 class TestReportDone:
     @pytest.mark.asyncio
-    async def test_publishes_writes_and_increments(self, redis, db):
+    async def test_publishes_writes_and_increments(self, redis, db, monkeypatch):
         await _register_worker(redis, db)
         db.create_job(Job(id="j1", content_type="video", pipeline="test", domain="general"))
         db.upsert_step(Step(job_id="j1", name="A", status=StepStatus.RUNNING, pool="cpu"))
@@ -261,8 +295,9 @@ class TestReportDone:
                 events.append(msg)
                 break
 
+        ready = subscription_barrier(redis, monkeypatch)
         listener = asyncio.create_task(capture())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(ready.wait(), timeout=1.0)
         await runner_ops.report_step_done(redis, db, WORKER_ID, claim, 12.34, time.time() - 12.34)
         await asyncio.wait_for(listener, timeout=2.0)
 
@@ -279,7 +314,9 @@ class TestReportDone:
 
 class TestReportFailed:
     @pytest.mark.asyncio
-    async def test_count_stats_true_includes_exec_id_and_increments(self, redis, db):
+    async def test_count_stats_true_includes_exec_id_and_increments(
+        self, redis, db, monkeypatch,
+    ):
         await _register_worker(redis, db)
         db.create_job(Job(id="j1", content_type="video", pipeline="test", domain="general"))
         db.upsert_step(Step(job_id="j1", name="A", status=StepStatus.RUNNING, pool="cpu"))
@@ -298,9 +335,10 @@ class TestReportFailed:
                     ws_events.append(msg)
                     break
 
+        ready = subscription_barrier(redis, monkeypatch, expected=2)
         l1 = asyncio.create_task(capture_topic())
         l2 = asyncio.create_task(capture_ws())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(ready.wait(), timeout=1.0)
         await runner_ops.report_step_failed(
             redis, db, WORKER_ID, claim, "x" * 600, "segfault", 5.0,
             time.time() - 5.0, count_stats=True,
@@ -314,7 +352,9 @@ class TestReportFailed:
         assert db.get_worker(WORKER_ID).tasks_failed == 1
 
     @pytest.mark.asyncio
-    async def test_count_stats_false_skips_increment_and_omits_exec_id(self, redis, db):
+    async def test_count_stats_false_skips_increment_and_omits_exec_id(
+        self, redis, db, monkeypatch,
+    ):
         await _register_worker(redis, db)
         db.create_job(Job(id="j1", content_type="video", pipeline="test", domain="general"))
         db.upsert_step(Step(job_id="j1", name="A", status=StepStatus.RUNNING, pool="cpu"))
@@ -333,9 +373,10 @@ class TestReportFailed:
                     ws_events.append(msg)
                     break
 
+        ready = subscription_barrier(redis, monkeypatch, expected=2)
         l1 = asyncio.create_task(capture_topic())
         l2 = asyncio.create_task(capture_ws())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(ready.wait(), timeout=1.0)
         await runner_ops.report_step_failed(
             redis, db, WORKER_ID, claim, "timeout", "timeout", 3.0,
             time.time() - 3.0, count_stats=False,

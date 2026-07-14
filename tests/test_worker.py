@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from tests.conftest import make_fakeredis
+from tests.pubsub_helpers import subscription_barrier
 from shared.config import AppConfig
 from shared.db import Database
 from shared.models import AITask, Job, LLMRequest, LLMResponse, Step, StepStatus
@@ -634,7 +635,9 @@ class TestExecuteFullFlow:
     """execute 全流程测试:mock _run_step 避免真实子进程。"""
 
     @pytest.mark.asyncio
-    async def test_success_publishes_and_updates_db(self, worker, redis, db, tmp_jobs_dir):
+    async def test_success_publishes_and_updates_db(
+        self, worker, redis, db, tmp_jobs_dir, monkeypatch,
+    ):
         await worker.register()  # 让 transport._worker_id 与 worker.worker_id 一致
         job = make_job()
         db.create_job(job)
@@ -656,8 +659,9 @@ class TestExecuteFullFlow:
 
         worker.runner.run_step = mock_run_step
 
+        ready = subscription_barrier(redis, monkeypatch)
         listener = asyncio.create_task(capture_completed())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(ready.wait(), timeout=1.0)
         await worker.execute(make_claim())
         await asyncio.wait_for(listener, timeout=2.0)
 
@@ -734,7 +738,9 @@ class TestExecuteFullFlow:
         assert await redis.get_pool_count("cpu") == 0
 
     @pytest.mark.asyncio
-    async def test_failure_publishes_events_and_updates_db(self, worker, redis, db, tmp_jobs_dir):
+    async def test_failure_publishes_events_and_updates_db(
+        self, worker, redis, db, tmp_jobs_dir, monkeypatch,
+    ):
         await worker.register()
         job = make_job()
         db.create_job(job)
@@ -763,9 +769,10 @@ class TestExecuteFullFlow:
 
         worker.runner.run_step = mock_run_step
 
+        ready = subscription_barrier(redis, monkeypatch, expected=2)
         listener1 = asyncio.create_task(capture_failed())
         listener2 = asyncio.create_task(capture_ws())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(ready.wait(), timeout=1.0)
         await worker.execute(make_claim())
         await asyncio.wait_for(listener1, timeout=2.0)
         await asyncio.wait_for(listener2, timeout=2.0)
@@ -789,7 +796,9 @@ class TestExecuteFullFlow:
 
 class TestSubprocessTimeout:
     @pytest.mark.asyncio
-    async def test_timeout_publishes_failure(self, worker, redis, db, tmp_jobs_dir):
+    async def test_timeout_publishes_failure(
+        self, worker, redis, db, tmp_jobs_dir, monkeypatch,
+    ):
         """When run_step times out, execute should publish step_failed with timeout error."""
         await worker.register()
         job = make_job()
@@ -812,8 +821,9 @@ class TestSubprocessTimeout:
                 failed_events.append(msg)
                 break
 
+        ready = subscription_barrier(redis, monkeypatch)
         listener = asyncio.create_task(capture_failed())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(ready.wait(), timeout=1.0)
         await worker.execute(make_claim())
         await asyncio.wait_for(listener, timeout=2.0)
 
@@ -849,7 +859,9 @@ class TestPoolExhaustion:
 
 class TestStoragePullFailure:
     @pytest.mark.asyncio
-    async def test_pull_failure_releases_slot_and_publishes_failed(self, worker, redis, db, tmp_jobs_dir):
+    async def test_pull_failure_releases_slot_and_publishes_failed(
+        self, worker, redis, db, tmp_jobs_dir, monkeypatch,
+    ):
         """When storage.pull raises, slot released + step_failed published + DB updated."""
         await worker.register()
         job = make_job()
@@ -869,8 +881,9 @@ class TestStoragePullFailure:
                 failed_events.append(msg)
                 break
 
+        ready = subscription_barrier(redis, monkeypatch)
         listener = asyncio.create_task(capture_failed())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(ready.wait(), timeout=1.0)
         await worker.execute(make_claim())
         await asyncio.wait_for(listener, timeout=2.0)
 
@@ -925,11 +938,14 @@ class TestConcurrency:
             concurrency=3,
         )
         slots: list[int] = []
+        slots_ready = asyncio.Event()
+        stop = asyncio.Event()
 
         async def fake_loop(slot=0):
             slots.append(slot)
-            while not w._shutdown:          # 常驻直到 shutdown(贴近真实循环,避免被判定重生)
-                await asyncio.sleep(0.05)
+            if len(slots) >= 3:
+                slots_ready.set()
+            await stop.wait()
 
         async def fake_hb():
             return
@@ -937,11 +953,9 @@ class TestConcurrency:
         w._claim_loop = fake_loop
         w.heartbeat_loop = fake_hb
         task = asyncio.create_task(w.run())
-        for _ in range(100):
-            if len(slots) >= 3:
-                break
-            await asyncio.sleep(0.05)
+        await asyncio.wait_for(slots_ready.wait(), timeout=2.0)
         w.shutdown()
+        stop.set()
         await asyncio.wait_for(task, timeout=10)
         assert sorted(slots) == [0, 1, 2]
 
