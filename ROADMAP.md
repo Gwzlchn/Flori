@@ -13,9 +13,10 @@
 | first-pass | 视频 / 论文 / 文章 / 音频四类摄入；FTS5 Search、跨源 Ask 与 MCP；集合订阅；概念图与评审；手工建卡 SRS；知识雷达；远程 Worker 网关 |
 | 未开始 | 原生客户端、通知 / PWA、自动分类、知识缺口与矛盾检测、证据型自动卡片 |
 
-向量检索由检索黄金集决定。24 个四类型 job 和 96 条冻结查询已证明 exact、跨来源、过滤、
-确定性与延迟基线可靠，但 paraphrase、synonym、cross-language 低于预声明阈值，因此已触发独立
-embedding / rerank 阶段；触发前未预建任何向量 schema。
+向量检索由检索黄金集决定。24 个四类型 job 和 96 条冻结查询证明 exact、跨来源、过滤、
+确定性与延迟基线可靠，并因 paraphrase、synonym、cross-language 缺口触发独立候选实验。
+候选虽达到质量收益门，但同层 Search warm P95 持续超过 FTS5 的 2 倍预算，因此该阶段已关闭并
+完整回滚；生产仍只使用 FTS5，未引入向量 schema、依赖、配置或模型文件。
 
 测试结果不在文档冻结数字。主分支实时结果看 README 的 CI / coverage 徽章；本地唯一入口和
 E2E 分层见 [`scripts/test.sh`](scripts/test.sh) 与 [`docs/09-testing.md`](docs/09-testing.md)。
@@ -98,7 +99,7 @@ E2E 分层见 [`scripts/test.sh`](scripts/test.sh) 与 [`docs/09-testing.md`](do
 目标：从"处理工具"变为"知识应用"。用户可以和自己的知识库对话、提问、发现关联。
 
 - [x] FTS5 检索 + 跨源综合问答 + MCP 搜索 / 读取（四类真实 completion、引用清单与 24/96 质量门已闭环）
-- [ ] 混合向量检索阶段（黄金集已量化触发；以独立交付实现 embedding / rerank、可重建索引和纯 FTS 回退）
+- [x] 混合向量检索收益门（候选质量达标但延迟门失败，生产路径完整回滚并保留纯 FTS5）
 - [x] 知识对话首版（Ask）
   - 跨文档问答：「Transformer 有哪些注意力变体？」→ 检索多篇笔记 → 综合回答
   - 带视觉证据：回答嵌入截图 + 时间戳跳转（纯文本 RAG 做不到的差异化）
