@@ -344,7 +344,7 @@ stateDiagram-v2
 
 ## 2.3 数据库表结构
 
-SQLite，直接写 SQL，不用 ORM。下表反映当前已落库的 schema（订阅并入 collection 列、概念图 typed occurrences、`notes_fts5` trigram 等均已实现）。
+SQLite，直接写 SQL，不用 ORM。完整 DDL 的单一来源是 `shared/migrations/manifest.json` 指向的冻结迁移链；下表只列核心业务表，避免复制完整 DDL 后与生产 schema 漂移。
 
 ```sql
 CREATE TABLE jobs (
@@ -424,6 +424,14 @@ CREATE TABLE ai_usage (
     created_at TEXT NOT NULL
 );
 
+-- 不可变迁移账本；PRAGMA user_version 是数据库当前 schema 版本。
+CREATE TABLE schema_migrations (
+    version INTEGER PRIMARY KEY CHECK(version > 0),
+    name TEXT NOT NULL,
+    checksum TEXT NOT NULL CHECK(length(checksum) = 64),
+    applied_at TEXT NOT NULL
+);
+
 -- 全文搜索（表名 notes_fts5）：跨领域检索的逃生口（原则二）
 -- trigram tokenizer 对中文做子串匹配，零外部依赖。
 CREATE VIRTUAL TABLE notes_fts5 USING fts5(
@@ -435,6 +443,15 @@ CREATE VIRTUAL TABLE notes_fts5 USING fts5(
 
 -- annotations（视频回放标注）尚未建表，属 M3（视频回放 + 标注 + PDF 导出），见 ROADMAP。
 ```
+
+### 2.3.1 Schema 版本与迁移不变式
+
+- `PRAGMA user_version` 记录数据库当前版本；程序支持上限来自 migration manifest 的 `current_version`，本文不复制当前数字。
+- manifest、代码 registry 与 `schema_migrations` 必须逐项一致。迁移版本从 1 连续递增，已经发布的名称、payload 和 checksum 不可修改。
+- 当 `user_version >= ledger_version` 时，ledger 必须精确覆盖 `1..user_version`；每行 `version/name/checksum` 必须匹配清单且 `applied_at` 非空。缺行、多行、篡改或完整 schema validator 发现形状漂移时，服务拒绝启动。
+- 整条 pending chain 在同一个 `BEGIN IMMEDIATE` 事务中执行，并逐版运行 validator。任一步失败时，DDL、数据回填、ledger 和 `user_version` 一并回滚到初始版本。
+- 多个后端进程由数据库同目录的 `.analyzer.db.migration.lock` 序列化。非空旧库升级前先创建、校验并原子发布 migration safety snapshot；快照失败则不开始迁移。当前版本即使没有 pending migration，也会重新校验 ledger 和完整 schema。
+- 在真实 SQLite 写性连接前，系统会在隔离副本上恢复 WAL 或 hot journal 的最后 committed 状态并判定版本。未来版本或无法安全判断的 sidecar 会 fail-closed，不允许真实连接先改写 DB/WAL 或创建 SHM。
 
 ## 2.4 文件存储布局
 
@@ -448,8 +465,17 @@ CREATE VIRTUAL TABLE notes_fts5 USING fts5(
 │   ├── output/                   # notes_mechanical.md / transcript.md / review.json
 │   │   └── versions/             # notes_smart_{provider}_{model}_{ts}.md, review_{...}.json
 │   └── logs/{step}.log
-├── cookies/  ├── configs/(pools/pipelines/domain)  ├── prompts/(.../profiles/styles)  └── db/analyzer.db
+├── cookies/
+├── configs/(pools/pipelines/domain)
+├── prompts/(.../profiles/styles)
+└── db/
+    ├── analyzer.db
+    ├── .analyzer.db.migration.lock
+    └── migration-backups/
+        └── analyzer.pre-v{from}-to-v{target}.db
 ```
+
+`migration-backups/` 中的 safety snapshot 只用于本地 SQLite 迁移回退，不替代包含 jobs、Redis、MinIO 和配置的完整 DR 备份。同一个 `from -> target` 重试会原子刷新同名快照；新建空库不创建快照。
 
 ## 2.5 实体关系 + ID 规则
 

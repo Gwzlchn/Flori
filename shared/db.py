@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import json
 import os
+import shutil
 import sqlite3
+import stat
+import struct
+import sys
+import tempfile
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -15,6 +22,15 @@ import structlog
 
 from .concepts import norm_related as _norm_related
 from .models import AIUsage, Collection, Job, JobStatus, Step, StepStatus, Worker
+from .migrations import (
+    Migration,
+    UnsupportedSchemaVersionError,
+    assert_schema_compatible,
+    current_schema_version,
+    migration_steps,
+    run_migrations,
+    validate_registry,
+)
 from .ids import lineage_key_of as _lineage_key_of
 from .status import (
     DEFAULT_ONLINE_WINDOW_SEC,
@@ -23,9 +39,8 @@ from .status import (
     compute_worker_status,
 )
 
-# DB schema 版本戳。当前仅做加列(additive)迁移,无需版本驱动;此戳是为将来
-# 非加列迁移(改列/删列/数据回填)与备份兼容校验预留的钩子——可经 PRAGMA user_version 查询。
-SCHEMA_VERSION = 1
+# schema 版本只从不可变迁移清单读取。
+SCHEMA_VERSION = current_schema_version()
 
 # SQLite INTEGER 是有符号 64 位整数.Prompt 版本从 1 开始,这组边界同时供
 # API schema 和 DB 绑定前防御使用.
@@ -46,319 +61,530 @@ def _valid_prompt_version(version: object) -> bool:
     )
 
 
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS jobs (
-    id TEXT PRIMARY KEY,
-    content_type TEXT NOT NULL,
-    pipeline TEXT NOT NULL,
-    collection_id TEXT,
-    url TEXT,
-    title TEXT,
-    domain TEXT NOT NULL DEFAULT 'general',
-    source TEXT,
-    style_tags TEXT DEFAULT '[]',
-    status TEXT NOT NULL DEFAULT 'pending',
-    progress_pct INTEGER DEFAULT 0,
-    meta TEXT DEFAULT '{}',
-    published_at TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    error TEXT,
-    lineage_key TEXT,
-    is_current INTEGER NOT NULL DEFAULT 1,
-    source_digest TEXT,
-    pipeline_digest TEXT,
-    parent_job_id TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_jobs_lineage ON jobs(lineage_key);
+_SQLITE_HEADER = b"SQLite format 3\x00"
+_WAL_MAGIC = frozenset({0x377F0682, 0x377F0683})
+_WAL_FORMAT_VERSION = 3_007_000
+_WAL_INDEX_PAGE_SIZE = 32_768
+_ROLLBACK_JOURNAL_MAGIC = b"\xd9\xd5\x05\xf9 \xa1c\xd7"
 
-CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
-CREATE INDEX IF NOT EXISTS idx_jobs_collection ON jobs(collection_id);
 
-CREATE TABLE IF NOT EXISTS job_steps (
-    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-    step TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'waiting',
-    pool TEXT NOT NULL DEFAULT '',
-    input_hash TEXT,
-    worker_id TEXT,
-    started_at TEXT,
-    finished_at TEXT,
-    duration_sec REAL,
-    meta TEXT,
-    error TEXT,
-    retries INTEGER DEFAULT 0,
-    PRIMARY KEY (job_id, step)
-);
+class _ProbeFilesChanged(UnsupportedSchemaVersionError):
+    """连接前副本采集期间源文件变化,允许有限次重新取稳定状态。"""
 
-CREATE TABLE IF NOT EXISTS workers (
-    id TEXT PRIMARY KEY,
-    type TEXT NOT NULL,
-    pools TEXT NOT NULL DEFAULT '[]',
-    tags TEXT NOT NULL DEFAULT '[]',
-    reject_tags TEXT NOT NULL DEFAULT '[]',
-    hostname TEXT,
-    gpu_name TEXT,
-    gpu_memory_mb INTEGER,
-    concurrency INTEGER NOT NULL DEFAULT 1,
-    remote_addr TEXT,
-    status TEXT NOT NULL DEFAULT 'offline',
-    admin_status TEXT NOT NULL DEFAULT '',
-    current_job TEXT,
-    current_step TEXT,
-    tasks_completed INTEGER DEFAULT 0,
-    tasks_failed INTEGER DEFAULT 0,
-    total_duration_sec REAL DEFAULT 0,
-    desired_config TEXT,
-    cfg_rev INTEGER NOT NULL DEFAULT 0,
-    first_seen TEXT NOT NULL,
-    started_at TEXT,
-    last_heartbeat TEXT,
-    admin_note TEXT
-);
 
-CREATE TABLE IF NOT EXISTS ai_usage (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    exec_id TEXT NOT NULL UNIQUE,
-    job_id TEXT,
-    step TEXT,
-    worker_id TEXT,
-    provider TEXT NOT NULL,
-    model TEXT NOT NULL,
-    input_tokens INTEGER DEFAULT 0,
-    output_tokens INTEGER DEFAULT 0,
-    cache_creation_input_tokens INTEGER DEFAULT 0,
-    cache_read_input_tokens INTEGER DEFAULT 0,
-    cost_usd REAL DEFAULT 0,
-    duration_sec REAL DEFAULT 0,
-    num_turns INTEGER DEFAULT 0,
-    cached INTEGER DEFAULT 0,
-    created_at TEXT NOT NULL
-);
+class _WalIndexValidationError(UnsupportedSchemaVersionError):
+    """WAL-index advisory 结构无效,不影响 WAL recovery 真相。"""
 
-CREATE INDEX IF NOT EXISTS idx_ai_usage_job ON ai_usage(job_id);
-CREATE INDEX IF NOT EXISTS idx_ai_usage_provider ON ai_usage(provider);
 
--- 独立 AI task 的白盒审计(DAG 步审计落 output/ai_logs/{step}.jsonl;AI task 无 job_dir → 入库)。
--- 与 ai_usage(成本归因)并存:本表是 prompt 白盒(渲染 prompt/输出/尝试链/raw),record_json 存全量(同 DAG jsonl 一行)。
-CREATE TABLE IF NOT EXISTS ai_task_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id TEXT NOT NULL,
-    exec_id TEXT,
-    step_name TEXT,
-    domain TEXT,
-    provider TEXT,
-    model TEXT,
-    ok INTEGER DEFAULT 1,
-    error TEXT,
-    input_tokens INTEGER DEFAULT 0,
-    output_tokens INTEGER DEFAULT 0,
-    cache_creation_input_tokens INTEGER DEFAULT 0,
-    cache_read_input_tokens INTEGER DEFAULT 0,
-    cost_usd REAL DEFAULT 0,
-    duration_sec REAL DEFAULT 0,
-    num_turns INTEGER DEFAULT 0,
-    record_json TEXT,
-    created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_ai_task_logs_task ON ai_task_logs(task_id);
+def _header_user_version(page_one: bytes) -> int:
+    if len(page_one) < 64 or not page_one.startswith(_SQLITE_HEADER):
+        raise ValueError("SQLite page-1 header 非法")
+    return struct.unpack(">I", page_one[60:64])[0]
 
--- prompt 白盒化:按 (scope,domain,pipeline,step) 覆盖某 AI 步的 system prompt。
--- scope='global'(domain='')或 'domain'(domain=域名);job 创建时 server 端解析,domain 优先于 global,
--- 注入 job.json.prompt_overrides[step],worker step_base 优先用。pure worker 无 DB,派发时带过去。
--- domain NOT NULL DEFAULT '' 以保证复合主键唯一:SQLite 把 PK 里的 NULL 视作互异会破唯一。
--- version=当前激活版本号,类 Grafana save 的指针;content 仍存激活内容供注入快速读。
--- 历史全量在 prompt_override_versions;主表存在时指向其中一行(version 列)。
--- 停用覆盖回内置默认(deactivate)= 删本表那一行激活指针,历史表完整保留,主表可缺行而历史仍在;
--- 缺行即 resolve 返回空(回内置默认),可经 set_active_prompt_version 重建指针重新激活某历史版本。
-CREATE TABLE IF NOT EXISTS prompt_overrides (
-    scope TEXT NOT NULL DEFAULT 'global',
-    domain TEXT NOT NULL DEFAULT '',
-    pipeline TEXT NOT NULL,
-    step TEXT NOT NULL,
-    content TEXT NOT NULL DEFAULT '',
-    version INTEGER NOT NULL DEFAULT 1,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (scope, domain, pipeline, step)
-);
 
--- prompt 覆盖的版本历史,类 Grafana save:另存为新版本加一行(version=max+1),
--- 覆盖当前版本更新对应 version 行的 content/note。主表 prompt_overrides.version 指向激活版本。
--- 停用覆盖回默认(deactivate)只删主表指针,本表全保留;唯有 delete_prompt_override 彻底删除
--- 才连同此处所有版本一并清除。created_at=该版本首次创建时间。
-CREATE TABLE IF NOT EXISTS prompt_override_versions (
-    scope TEXT NOT NULL DEFAULT 'global',
-    domain TEXT NOT NULL DEFAULT '',
-    pipeline TEXT NOT NULL,
-    step TEXT NOT NULL,
-    version INTEGER NOT NULL,
-    content TEXT NOT NULL DEFAULT '',
-    note TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL,
-    PRIMARY KEY (scope, domain, pipeline, step, version)
-);
+def _wal_checksum(
+    payload: bytes,
+    checksum: tuple[int, int] = (0, 0),
+    *,
+    byteorder: str,
+) -> tuple[int, int]:
+    """按 SQLite wal.c 的 8-byte rolling checksum 计算连续校验值。"""
+    if len(payload) % 8:
+        raise ValueError("WAL checksum payload 未按 8 字节对齐")
+    first, second = checksum
+    for offset in range(0, len(payload), 8):
+        word_one = int.from_bytes(payload[offset : offset + 4], byteorder)
+        word_two = int.from_bytes(payload[offset + 4 : offset + 8], byteorder)
+        first = (first + word_one + second) & 0xFFFFFFFF
+        second = (second + word_two + first) & 0xFFFFFFFF
+    return first, second
 
--- 集合:订阅是集合的属性(source_type/source_id 非空=订阅集合),无独立 subscriptions 表。
-CREATE TABLE IF NOT EXISTS collections (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    domain TEXT NOT NULL,
-    description TEXT DEFAULT '',
-    tags TEXT DEFAULT '[]',
-    job_count INTEGER DEFAULT 0,
-    source_type TEXT,
-    source_id TEXT,
-    sync_enabled INTEGER NOT NULL DEFAULT 1,
-    last_synced_at TEXT,
-    last_sync_status TEXT,
-    last_sync_error TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
 
-CREATE TABLE IF NOT EXISTS worker_tokens (
-    token_hash TEXT PRIMARY KEY,
-    worker_id  TEXT NOT NULL,
-    pools      TEXT NOT NULL DEFAULT '[]',
-    tags       TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL,
-    last_used  TEXT,
-    revoked    INTEGER NOT NULL DEFAULT 0
-);
+def _validate_wal_index(
+    payload: bytes,
+    *,
+    wal_header: bytes,
+    page_size: int,
+    checksum_byteorder: str,
+    file_size: int | None = None,
+) -> tuple[int, int, tuple[int, int]]:
+    """验证 WAL-index 双 header 与 checkpoint 边界。"""
+    measured_size = len(payload) if file_size is None else file_size
+    if (
+        len(payload) < 136
+        or measured_size < 136
+        or measured_size % _WAL_INDEX_PAGE_SIZE
+    ):
+        raise _WalIndexValidationError(
+            "SQLite WAL-index advisory 大小非法"
+        )
+    header = payload[:48]
+    if header != payload[48:96]:
+        raise _WalIndexValidationError(
+            "SQLite WAL-index advisory 双 header 不一致"
+        )
 
-CREATE INDEX IF NOT EXISTS idx_worker_tokens_worker ON worker_tokens(worker_id);
+    def native_uint(offset: int, size: int = 4) -> int:
+        return int.from_bytes(header[offset : offset + size], sys.byteorder)
 
-CREATE TABLE IF NOT EXISTS app_credentials (
-    key TEXT PRIMARY KEY,
-    value TEXT,
-    updated_at TEXT
-);
+    if native_uint(0) != _WAL_FORMAT_VERSION or header[4:8] != b"\x00" * 4:
+        raise _WalIndexValidationError(
+            "SQLite WAL-index advisory version 或 padding 非法"
+        )
+    if header[12] != 1:
+        raise _WalIndexValidationError(
+            "SQLite WAL-index advisory 尚未初始化"
+        )
+    expected_big_end = 1 if checksum_byteorder == "big" else 0
+    if header[13] != expected_big_end:
+        raise _WalIndexValidationError(
+            "SQLite WAL-index advisory checksum 字节序与 WAL 不一致"
+        )
+    index_page_size = native_uint(14, 2)
+    if index_page_size == 1:
+        index_page_size = 65_536
+    if index_page_size != page_size:
+        raise _WalIndexValidationError(
+            "SQLite WAL-index advisory page_size 与 WAL 不一致"
+        )
+    if header[32:40] != wal_header[16:24]:
+        raise _WalIndexValidationError(
+            "SQLite WAL-index advisory salt 与 WAL 不一致"
+        )
+    calculated = _wal_checksum(header[:40], byteorder=sys.byteorder)
+    stored = (native_uint(40), native_uint(44))
+    if calculated != stored:
+        raise _WalIndexValidationError(
+            "SQLite WAL-index advisory header checksum 非法"
+        )
 
--- 订阅去重,通用跨来源:记录一个集合已入库过哪些 item(B站=bvid、youtube=videoId、
--- rss=entry id/link、local=文件名)。各来源统一用 item_id 去重。
-CREATE TABLE IF NOT EXISTS ingested_items (
-    collection_id TEXT NOT NULL,
-    item_id TEXT NOT NULL,
-    ingested_at TEXT NOT NULL,
-    PRIMARY KEY (collection_id, item_id)
-);
+    mx_frame = native_uint(16)
+    database_pages = native_uint(20)
+    frame_checksum = (native_uint(24), native_uint(28))
+    n_backfill = int.from_bytes(payload[96:100], sys.byteorder)
+    n_backfill_attempted = int.from_bytes(payload[128:132], sys.byteorder)
+    if not (n_backfill <= n_backfill_attempted <= mx_frame):
+        raise _WalIndexValidationError(
+            "SQLite WAL-index advisory checkpoint 边界非法"
+        )
+    return mx_frame, database_pages, frame_checksum
 
--- 概念图/知识层:occurrences=[{job_id,content_type,location}] 类型化出现索引;
--- is_topic=粗粒度浏览主题;definition_locked=钉住后不被自动综合覆盖;
--- aliases=归并进本实体的变体名(JSON list,resolve 匹配 + merge 可逆留痕)。
-CREATE TABLE IF NOT EXISTS glossary (
-    domain TEXT NOT NULL,
-    term TEXT NOT NULL,
-    definition TEXT DEFAULT '',
-    zh_name TEXT DEFAULT '',
-    aliases TEXT DEFAULT '[]',
-    occurrences TEXT DEFAULT '[]',
-    related TEXT DEFAULT '[]',
-    status TEXT DEFAULT 'accepted',
-    watched INTEGER DEFAULT 0,
-    is_topic INTEGER DEFAULT 0,
-    definition_locked INTEGER DEFAULT 0,
-    created_at TEXT,
-    updated_at TEXT,
-    PRIMARY KEY (domain, term)
-);
 
-CREATE INDEX IF NOT EXISTS idx_glossary_domain_status ON glossary(domain, status);
+def _validate_wal_bytes(
+    database: Path,
+    wal: Path,
+    shm_header: bytes | None = None,
+    shm_size: int | None = None,
+) -> tuple[int, int, int]:
+    """验证 current-salt 连续前缀,返回最后 committed WAL 字节边界。"""
+    with database.open("rb") as stream:
+        database_header = stream.read(100)
+    if not database_header.startswith(_SQLITE_HEADER):
+        raise UnsupportedSchemaVersionError("SQLite WAL 对应主库 header 非法")
+    if database_header[18:20] != b"\x02\x02":
+        raise UnsupportedSchemaVersionError(
+            "SQLite WAL 对应主库未声明 WAL 模式，拒绝写性打开"
+        )
+    with wal.open("rb") as stream:
+        header = stream.read(32)
+        if len(header) != 32:
+            raise UnsupportedSchemaVersionError(
+                "SQLite WAL header 不完整，拒绝写性打开"
+            )
+        magic, format_version, page_size = struct.unpack(">III", header[:12])
+        if magic not in _WAL_MAGIC:
+            raise UnsupportedSchemaVersionError(
+                "SQLite WAL magic 非法，拒绝写性打开"
+            )
+        if format_version != _WAL_FORMAT_VERSION:
+            raise UnsupportedSchemaVersionError(
+                "SQLite WAL format version 非法，拒绝写性打开"
+            )
+        stored_page_size = struct.unpack(">H", database_header[16:18])[0]
+        if stored_page_size == 1:
+            stored_page_size = 65536
+        if (
+            page_size < 512
+            or page_size > 65536
+            or page_size & (page_size - 1)
+            or page_size != stored_page_size
+        ):
+            raise UnsupportedSchemaVersionError(
+                "SQLite WAL page_size 非法，拒绝写性打开"
+            )
+        byteorder = "big" if magic == 0x377F0683 else "little"
+        checksum = _wal_checksum(header[:24], byteorder=byteorder)
+        stored_header_checksum = struct.unpack(">II", header[24:32])
+        if checksum != stored_header_checksum:
+            raise UnsupportedSchemaVersionError(
+                "SQLite WAL header checksum 非法，拒绝写性打开"
+            )
+        frame_size = 24 + page_size
+        wal_size = wal.stat().st_size
+        if (wal_size - 32) % frame_size:
+            raise UnsupportedSchemaVersionError(
+                "SQLite WAL trailing bytes 未组成完整 frame，拒绝写性打开"
+            )
+        physical_frames = (wal_size - 32) // frame_size
+        index_state = None
+        if shm_header is not None:
+            try:
+                index_state = _validate_wal_index(
+                    shm_header,
+                    wal_header=header,
+                    page_size=page_size,
+                    checksum_byteorder=byteorder,
+                    file_size=shm_size,
+                )
+            except _WalIndexValidationError as exc:
+                _log.warning(
+                    "sqlite_wal_index_advisory_invalid",
+                    reason=str(exc),
+                )
 
--- trigram tokenizer:对中文做子串匹配,零外部依赖。
-CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts5 USING fts5(
-    job_id UNINDEXED,
-    content_type UNINDEXED,
-    note_type UNINDEXED,
-    collection_id UNINDEXED,
-    domain UNINDEXED,
-    title,
-    body,
-    tokenize='trigram'
-);
+        salts = header[16:24]
+        frame_count = 0
+        commit_count = 0
+        last_commit_frame = 0
+        index_boundary: tuple[int, tuple[int, int]] | None = None
+        stale_tail = False
+        for frame_index in range(1, physical_frames + 1):
+            frame_header = stream.read(24)
+            if len(frame_header) != 24:
+                raise UnsupportedSchemaVersionError(
+                    "SQLite WAL trailing frame header 不完整，拒绝写性打开"
+                )
+            page = stream.read(page_size)
+            if len(page) != page_size:
+                raise UnsupportedSchemaVersionError(
+                    "SQLite WAL trailing frame page 不完整，拒绝写性打开"
+                )
+            page_number, database_pages = struct.unpack(">II", frame_header[:8])
+            frame_salts = frame_header[8:16]
+            if stale_tail:
+                if page_number == 0 or frame_salts == salts:
+                    raise UnsupportedSchemaVersionError(
+                        "SQLite WAL 旧代物理尾结构非法，拒绝写性打开"
+                    )
+                continue
+            if frame_salts != salts:
+                if page_number == 0:
+                    raise UnsupportedSchemaVersionError(
+                        "SQLite WAL frame salt 非法，拒绝写性打开"
+                    )
+                stale_tail = True
+                continue
+            if page_number == 0:
+                raise UnsupportedSchemaVersionError(
+                    "SQLite WAL frame page number 非法，拒绝写性打开"
+                )
+            checksum = _wal_checksum(
+                frame_header[:8] + page,
+                checksum,
+                byteorder=byteorder,
+            )
+            if checksum != struct.unpack(">II", frame_header[16:24]):
+                raise UnsupportedSchemaVersionError(
+                    "SQLite WAL frame checksum 非法，拒绝写性打开"
+                )
+            frame_count += 1
+            if database_pages:
+                commit_count += 1
+                last_commit_frame = frame_index
+                if index_state is not None and frame_index == index_state[0]:
+                    index_boundary = (database_pages, checksum)
+        if index_state is not None:
+            index_frame, index_pages, index_checksum = index_state
+            if index_frame > last_commit_frame or (
+                index_frame
+                and (
+                    index_boundary is None
+                    or index_boundary[0] != index_pages
+                    or index_boundary[1] != index_checksum
+                )
+            ):
+                _log.warning(
+                    "sqlite_wal_index_advisory_stale",
+                    index_mx_frame=index_frame,
+                    wal_commit_frame=last_commit_frame,
+                )
+    logical_size = 32 + last_commit_frame * frame_size
+    return frame_count, commit_count, logical_size
 
-CREATE TABLE IF NOT EXISTS note_chunks (
-    chunk_id TEXT PRIMARY KEY,
-    job_id TEXT NOT NULL,
-    note_type TEXT NOT NULL,
-    content_type TEXT NOT NULL DEFAULT '',
-    collection_id TEXT NOT NULL DEFAULT '',
-    domain TEXT NOT NULL DEFAULT '',
-    title TEXT NOT NULL DEFAULT '',
-    section TEXT NOT NULL DEFAULT '',
-    chunk_index INTEGER NOT NULL,
-    char_start INTEGER NOT NULL DEFAULT 0,
-    char_end INTEGER NOT NULL DEFAULT 0,
-    body TEXT NOT NULL DEFAULT '',
-    evidence_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(job_id, note_type, chunk_index)
-);
-CREATE INDEX IF NOT EXISTS idx_note_chunks_job ON note_chunks(job_id);
-CREATE INDEX IF NOT EXISTS idx_note_chunks_domain ON note_chunks(domain);
 
-CREATE VIRTUAL TABLE IF NOT EXISTS note_chunks_fts5 USING fts5(
-    chunk_id UNINDEXED,
-    job_id UNINDEXED,
-    note_type UNINDEXED,
-    content_type UNINDEXED,
-    collection_id UNINDEXED,
-    domain UNINDEXED,
-    title,
-    section,
-    body,
-    evidence_json UNINDEXED,
-    tokenize='trigram'
-);
+def _optional_file_signature(path: Path) -> tuple[int, int, int, int] | None:
+    if path.is_symlink():
+        raise UnsupportedSchemaVersionError(
+            f"SQLite sidecar 不得是符号链接: {path.name}"
+        )
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise UnsupportedSchemaVersionError(
+            f"SQLite sidecar 不是普通文件: {path.name}"
+        )
+    return _file_snapshot_signature(path)
 
-CREATE TABLE IF NOT EXISTS study_cards (
-    card_id TEXT PRIMARY KEY,
-    domain TEXT NOT NULL DEFAULT 'general',
-    job_id TEXT,
-    concept_term TEXT,
-    card_type TEXT NOT NULL DEFAULT 'basic',
-    front TEXT NOT NULL,
-    back TEXT NOT NULL,
-    explanation TEXT NOT NULL DEFAULT '',
-    evidence_json TEXT NOT NULL DEFAULT '[]',
-    status TEXT NOT NULL DEFAULT 'active',
-    source TEXT NOT NULL DEFAULT 'manual',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_study_cards_domain ON study_cards(domain);
-CREATE INDEX IF NOT EXISTS idx_study_cards_status ON study_cards(status);
-CREATE INDEX IF NOT EXISTS idx_study_cards_job ON study_cards(job_id);
 
-CREATE TABLE IF NOT EXISTS study_reviews (
-    card_id TEXT PRIMARY KEY REFERENCES study_cards(card_id) ON DELETE CASCADE,
-    due_at TEXT NOT NULL,
-    interval_days REAL NOT NULL DEFAULT 0,
-    ease REAL NOT NULL DEFAULT 2.5,
-    repetitions INTEGER NOT NULL DEFAULT 0,
-    lapses INTEGER NOT NULL DEFAULT 0,
-    last_grade TEXT,
-    last_reviewed_at TEXT,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_study_reviews_due ON study_reviews(due_at);
+def _assert_file_signatures(
+    expected: dict[Path, tuple[int, int, int, int] | None],
+) -> None:
+    current = {path: _optional_file_signature(path) for path in expected}
+    if current != expected:
+        raise _ProbeFilesChanged(
+            "SQLite DB/WAL/SHM 在连接前探测期间发生变化，拒绝写性打开"
+        )
 
-CREATE TABLE IF NOT EXISTS study_review_logs (
-    id TEXT PRIMARY KEY,
-    card_id TEXT NOT NULL REFERENCES study_cards(card_id) ON DELETE CASCADE,
-    grade TEXT NOT NULL,
-    reviewed_at TEXT NOT NULL,
-    response_ms INTEGER,
-    scheduled_due_at TEXT,
-    next_due_at TEXT NOT NULL,
-    interval_days REAL NOT NULL,
-    ease REAL NOT NULL,
-    repetitions INTEGER NOT NULL,
-    lapses INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_study_review_logs_card ON study_review_logs(card_id);
-"""
+
+def _assert_optional_regular_file(path: Path) -> None:
+    """SHM 内容可随运行时变化，但路径不得变成链接或特殊文件。"""
+    _optional_file_signature(path)
+
+
+def _read_wal_index_advisory(path: Path) -> tuple[bytes, int] | None:
+    """只读 WAL-index 固定前缀；内容不可读时仍以 WAL 作恢复真相。"""
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, flags)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise UnsupportedSchemaVersionError(
+                f"SQLite sidecar 不是普通文件: {path.name}"
+            )
+        if info.st_size == 0:
+            return b"", 0
+        return os.read(descriptor, 136), info.st_size
+    except UnsupportedSchemaVersionError:
+        raise
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise UnsupportedSchemaVersionError(
+                f"SQLite sidecar 不得是符号链接: {path.name}"
+            ) from exc
+        _log.warning(
+            "sqlite_wal_index_advisory_unreadable",
+            error_type=type(exc).__name__,
+            errno=exc.errno,
+        )
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _committed_wal_user_version(path: Path) -> int:
+    """机械验 WAL 后在隔离副本交给 SQLite 判定最后 committed state。"""
+    wal_path = path.with_name(path.name + "-wal")
+    shm_path = path.with_name(path.name + "-shm")
+    last_change: BaseException | None = None
+    try:
+        for _attempt in range(3):
+            try:
+                wal_signature = _optional_file_signature(wal_path)
+                _assert_optional_regular_file(shm_path)
+                signatures = {
+                    path: _optional_file_signature(path),
+                    wal_path: wal_signature,
+                }
+                if wal_signature is None or wal_signature[2] == 0:
+                    with path.open("rb") as stream:
+                        version = _header_user_version(stream.read(100))
+                    _assert_file_signatures(signatures)
+                    _assert_optional_regular_file(shm_path)
+                    return version
+                with tempfile.TemporaryDirectory(
+                    prefix="flori-sqlite-wal-probe-"
+                ) as temporary:
+                    copied_database = Path(temporary) / path.name
+                    copied_wal = copied_database.with_name(
+                        copied_database.name + "-wal"
+                    )
+                    shm_advisory = _read_wal_index_advisory(shm_path)
+                    shm_header, shm_size = (
+                        shm_advisory if shm_advisory is not None else (None, None)
+                    )
+                    shutil.copy2(path, copied_database)
+                    shutil.copy2(wal_path, copied_wal)
+                    _assert_file_signatures(signatures)
+                    _assert_optional_regular_file(shm_path)
+                    _frames, _commits, logical_size = _validate_wal_bytes(
+                        copied_database,
+                        copied_wal,
+                        shm_header,
+                        shm_size,
+                    )
+                    with copied_wal.open("r+b") as stream:
+                        stream.truncate(logical_size)
+                    connection = sqlite3.connect(str(copied_database))
+                    try:
+                        version = int(
+                            connection.execute("PRAGMA user_version").fetchone()[0]
+                        )
+                        integrity = connection.execute(
+                            "PRAGMA integrity_check"
+                        ).fetchone()
+                    finally:
+                        connection.close()
+                    if not integrity or integrity[0] != "ok":
+                        raise UnsupportedSchemaVersionError(
+                            "SQLite WAL 恢复副本 integrity_check 失败: "
+                            f"{integrity}"
+                        )
+                    _assert_file_signatures(signatures)
+                    _assert_optional_regular_file(shm_path)
+                    return version
+            except (_ProbeFilesChanged, FileNotFoundError) as exc:
+                last_change = exc
+                continue
+        raise UnsupportedSchemaVersionError(
+            "SQLite DB/WAL 无法取得稳定副本，拒绝写性打开"
+        ) from last_change
+    except UnsupportedSchemaVersionError:
+        raise
+    except (OSError, sqlite3.DatabaseError, ValueError) as exc:
+        raise UnsupportedSchemaVersionError(
+            f"SQLite WAL 无法安全预恢复，拒绝写性打开: {exc}"
+        ) from exc
+
+
+def _file_snapshot_signature(path: Path) -> tuple[int, int, int, int]:
+    info = path.stat()
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _validate_rollback_journal_header(path: Path, journal: Path) -> None:
+    """只核 journal 头部边界；page recovery 仍完全交给 SQLite 副本。"""
+    with path.open("rb") as stream:
+        database_header = stream.read(100)
+    with journal.open("rb") as stream:
+        header = stream.read(32)
+    if len(header) < 28 or header[:8] != _ROLLBACK_JOURNAL_MAGIC:
+        raise UnsupportedSchemaVersionError(
+            "SQLite rollback journal 非法或非 hot 状态，拒绝写性打开"
+        )
+    if not database_header.startswith(_SQLITE_HEADER):
+        raise UnsupportedSchemaVersionError(
+            "SQLite rollback journal 对应主库 header 非法，拒绝写性打开"
+        )
+    records, _nonce, database_pages, sector_size, page_size = struct.unpack(
+        ">IIIII", header[8:28]
+    )
+    stored_page_size = struct.unpack(">H", database_header[16:18])[0]
+    if stored_page_size == 1:
+        stored_page_size = 65536
+    if records == 0 or (
+        database_pages == 0
+        or sector_size < 512
+        or sector_size > 65536
+        or sector_size & (sector_size - 1)
+        or page_size != stored_page_size
+        or page_size < 512
+        or page_size > 65536
+        or page_size & (page_size - 1)
+        or journal.stat().st_size < sector_size + page_size + 4
+    ):
+        raise UnsupportedSchemaVersionError(
+            "SQLite rollback journal header 边界非法，拒绝写性打开"
+        )
+
+
+def _rollback_journal_user_version(path: Path) -> int | None:
+    """在隔离副本恢复 hot journal，避免探测阶段改写真实 DB。"""
+    journal = path.with_name(path.name + "-journal")
+    journal_signature = _optional_file_signature(journal)
+    if journal_signature is None or journal_signature[2] == 0:
+        return None
+    wal = path.with_name(path.name + "-wal")
+    wal_signature = _optional_file_signature(wal)
+    shm = path.with_name(path.name + "-shm")
+    shm_signature = _optional_file_signature(shm)
+    if wal_signature is not None and wal_signature[2]:
+        raise UnsupportedSchemaVersionError(
+            "SQLite 同时存在 WAL 与 rollback journal，拒绝写性打开"
+        )
+    try:
+        _validate_rollback_journal_header(path, journal)
+        signatures = {
+            path: _optional_file_signature(path),
+            journal: journal_signature,
+            wal: wal_signature,
+            shm: shm_signature,
+        }
+        with tempfile.TemporaryDirectory(prefix="flori-sqlite-probe-") as temporary:
+            copied_database = Path(temporary) / path.name
+            copied_journal = copied_database.with_name(
+                copied_database.name + "-journal"
+            )
+            shutil.copy2(path, copied_database)
+            shutil.copy2(journal, copied_journal)
+            _assert_file_signatures(signatures)
+            connection = sqlite3.connect(str(copied_database))
+            try:
+                version = int(
+                    connection.execute("PRAGMA user_version").fetchone()[0]
+                )
+                integrity = connection.execute("PRAGMA integrity_check").fetchone()
+            finally:
+                connection.close()
+            if not integrity or integrity[0] != "ok":
+                raise UnsupportedSchemaVersionError(
+                    f"SQLite rollback journal 恢复副本 integrity_check 失败: {integrity}"
+                )
+            if copied_journal.exists() and copied_journal.stat().st_size:
+                with copied_journal.open("rb") as stream:
+                    recovered_magic = stream.read(len(_ROLLBACK_JOURNAL_MAGIC))
+                if recovered_magic == _ROLLBACK_JOURNAL_MAGIC:
+                    raise UnsupportedSchemaVersionError(
+                        "SQLite rollback journal 副本未完成恢复，拒绝写性打开"
+                    )
+            _assert_file_signatures(signatures)
+            return version
+    except UnsupportedSchemaVersionError:
+        raise
+    except (OSError, sqlite3.DatabaseError, ValueError) as exc:
+        raise UnsupportedSchemaVersionError(
+            f"SQLite rollback journal 无法安全预恢复，拒绝写性打开: {exc}"
+        ) from exc
+
+
+def _probe_schema_version_without_sqlite(path: Path) -> int | None:
+    """连接前探测 recovery 后版本；真实 DB 仍保留 copy 到 connect 的 TOCTOU。"""
+    sidecar_signatures = {
+        suffix: _optional_file_signature(path.with_name(path.name + suffix))
+        for suffix in ("-wal", "-journal", "-shm")
+    }
+    if not path.exists() or path.stat().st_size == 0:
+        active_sidecars = [
+            path.name + suffix
+            for suffix, signature in sidecar_signatures.items()
+            if signature is not None and signature[2]
+        ]
+        if active_sidecars:
+            raise UnsupportedSchemaVersionError(
+                f"SQLite 主库为空但存在非空 sidecar，拒绝写性打开: {active_sidecars}"
+            )
+        return 0
+    journal_version = _rollback_journal_user_version(path)
+    if journal_version is not None:
+        return journal_version
+    with path.open("rb") as stream:
+        header = stream.read(100)
+    if not header.startswith(_SQLITE_HEADER):
+        return None
+    try:
+        _header_user_version(header)
+    except ValueError:
+        return None
+    return _committed_wal_user_version(path)
 
 
 _JOB_UPDATABLE = {
@@ -516,14 +742,43 @@ def _parse_dt(s: str | None) -> datetime | None:
 
 class Database:
     def __init__(self, db_path: Path | str):
+        # 先固定并校验代码迁移集。清单分叉时不得创建目录、锁或 SQLite sidecar。
+        validate_registry(migration_steps())
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        # api/scheduler/worker 三进程各开连接写同一文件,撞 SQLITE_BUSY 时等待而非立刻报错。
-        self._conn.execute("PRAGMA busy_timeout=5000")
-        self._conn.row_factory = sqlite3.Row
+        lock_path = self._path.parent / f".{self._path.name}.migration.lock"
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            # 同一把跨进程锁也覆盖 probe -> connect -> WAL 切换,避免另一启动
+            # 进程把这里的瞬态 rollback journal 误判为 crash 残留.
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            probed_version = _probe_schema_version_without_sqlite(self._path)
+            if probed_version is not None and probed_version > SCHEMA_VERSION:
+                raise UnsupportedSchemaVersionError(
+                    f"SQLite user_version={probed_version} 高于当前程序上限 "
+                    f"{SCHEMA_VERSION}，已在连接前拒绝"
+                )
+            self._conn = sqlite3.connect(
+                str(self._path), check_same_thread=False
+            )
+            self._conn.row_factory = sqlite3.Row
+            try:
+                # 未知新 schema 必须在 WAL 切换等任何写性 PRAGMA 之前拒绝。
+                assert_schema_compatible(
+                    self._conn,
+                    minimum_version=0,
+                    maximum_version=SCHEMA_VERSION,
+                )
+            except BaseException:
+                self._conn.close()
+                raise
+            # 多进程各开连接写同一文件,撞 SQLITE_BUSY 时等待而非立刻报错.
+            self._conn.execute("PRAGMA busy_timeout=5000")
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA foreign_keys=ON")
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
         # RLock(可重入):写方法持锁 execute+commit,序列化对单一共享连接的写访问。
         # 读方法多数直接走单一共享连接(check_same_thread=False),依赖 C 层(GIL + SQLite
         # 单条语句)的原子性而不额外持锁;少数"多条读+组装"的复合读(如 get_job/list_jobs)
@@ -532,163 +787,74 @@ class Database:
         self._lock = threading.RLock()
 
     def init_schema(self) -> None:
-        with self._lock:
-            # 先补旧表缺列,再跑 schema:否则 schema 里 ON jobs(collection_id) 的
-            # CREATE INDEX 会在缺该列的老库上先行报错。新库此步无表可补、直接跳过。
-            self._ensure_columns()
-            self._conn.executescript(_SCHEMA_SQL)
-            # 版本戳钩子:user_version=0 表示全新库或尚未打戳的旧库,统一标记为 1。
-            # 当前只做加列迁移、无需版本驱动;此处仅建立版本号以便将来非加列迁移
-            # (改列/删列/回填)按 user_version 分支处理 + 做备份兼容校验。不在此放迁移逻辑。
-            if self._conn.execute("PRAGMA user_version").fetchone()[0] == 0:
-                self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        # 回填存量 job 的 lineage_key + is_current;幂等(无 NULL lineage_key 即跳过)。
-        self._backfill_lineage()
-        # 回填存量 prompt 覆盖的版本历史(给每个无历史的 override 补一条 v1);幂等。
-        self._backfill_prompt_versions()
+        # 三个后端进程会同时启动，文件锁覆盖读版本、快照和整条迁移。
+        lock_path = self._path.parent / f".{self._path.name}.migration.lock"
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            with self._lock:
+                before = self.schema_version()
+                if before < SCHEMA_VERSION and self._has_user_schema():
+                    self._create_migration_backup(before)
+                run_migrations(self._conn, self._migration_steps())
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
 
-    def _backfill_lineage(self) -> None:
-        """一次性回填缺 lineage_key 的旧 job:lineage_key(有 url 按 url 重算,否则=自身 id)+ is_current
-        (每个 lineage 取 created_at 最新者为 current)。幂等:无 lineage_key 为 NULL 的行即直接返回。"""
-        from .ids import lineage_key as _lk
-        with self._lock:
-            cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(jobs)").fetchall()}
-            if "lineage_key" not in cols:
-                return  # 列还没建(极简/异常表),无可回填
-            has_url, has_ct, has_src = "url" in cols, "content_type" in cols, "source" in cols
-            sel = "id" + (", url" if has_url else "") + (", content_type" if has_ct else "") + (", source" if has_src else "")
-            rows = self._conn.execute(
-                f"SELECT {sel} FROM jobs WHERE lineage_key IS NULL"
-            ).fetchall()
-            if not rows:
-                return
-            for r in rows:
-                url = r["url"] if has_url else None
-                lk = _lk(url, r["content_type"] if has_ct else None, r["source"] if has_src else None) if url else r["id"]
-                self._conn.execute("UPDATE jobs SET lineage_key=? WHERE id=?", (lk, r["id"]))
-            # 每个 lineage 仅最新 created_at 的快照为 current,其余历史。
-            self._conn.execute("UPDATE jobs SET is_current=0 WHERE lineage_key IS NOT NULL")
-            self._conn.execute(
-                """UPDATE jobs SET is_current=1 WHERE id IN (
-                     SELECT id FROM jobs j WHERE j.created_at = (
-                       SELECT MAX(created_at) FROM jobs j2 WHERE j2.lineage_key = j.lineage_key
-                     ) GROUP BY j.lineage_key
-                   )"""
+    def _migration_steps(self) -> tuple[Migration, ...]:
+        return migration_steps()
+
+    def _has_user_schema(self) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' "
+            "AND name != 'schema_migrations' LIMIT 1"
+        ).fetchone()
+        return row is not None
+
+    def _create_migration_backup(self, from_version: int) -> Path:
+        """为非空库保留升级前一致快照，同版迁移重试时原子刷新。"""
+        backup_dir = self._path.parent / "migration-backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        target = backup_dir / (
+            f"{self._path.stem}.pre-v{from_version}-to-v{SCHEMA_VERSION}.db"
+        )
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        destination: sqlite3.Connection | None = None
+        try:
+            destination = sqlite3.connect(str(temporary))
+            self._conn.backup(destination, pages=256, sleep=0.01)
+            destination.commit()
+            integrity = destination.execute("PRAGMA integrity_check").fetchone()
+            copied_version = int(
+                destination.execute("PRAGMA user_version").fetchone()[0]
             )
-            self._conn.commit()
-
-    def _backfill_prompt_versions(self) -> None:
-        """一次性回填:存量 prompt_overrides 行只有 content、无版本历史时补齐。
-        给每个在 prompt_override_versions 里尚无任何版本的 override:
-        1. 把主表 version 归一到 1(ALTER 默认已是 1,这里兜底覆盖 NULL/异常);
-        2. 在历史表补一条 v1(content=主表当前内容,note='初始版本')。
-        幂等:已有历史的 override 跳过。空 content 的 override(逻辑上=无覆盖)不补历史。"""
-        with self._lock:
-            tabs = {
-                r["name"] for r in self._conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
-            if "prompt_overrides" not in tabs or "prompt_override_versions" not in tabs:
-                return
-            rows = self._conn.execute(
-                "SELECT scope, domain, pipeline, step, content FROM prompt_overrides"
-            ).fetchall()
-            if not rows:
-                return
-            now = _now_iso()
-            for r in rows:
-                key = (r["scope"], r["domain"], r["pipeline"], r["step"])
-                # 主表 version 兜底归一到 1(旧库 ALTER 后默认 1;防极端 NULL)。
-                self._conn.execute(
-                    "UPDATE prompt_overrides SET version=1 WHERE scope=? AND domain=? "
-                    "AND pipeline=? AND step=? AND (version IS NULL OR version<1)",
-                    key,
+            if integrity != ("ok",) or copied_version != from_version:
+                raise sqlite3.DatabaseError(
+                    f"迁移前快照校验失败: integrity={integrity}, "
+                    f"user_version={copied_version}"
                 )
-                has_hist = self._conn.execute(
-                    "SELECT 1 FROM prompt_override_versions WHERE scope=? AND domain=? "
-                    "AND pipeline=? AND step=? LIMIT 1",
-                    key,
-                ).fetchone()
-                if has_hist or not (r["content"] or "").strip():
-                    continue
-                self._conn.execute(
-                    """INSERT OR IGNORE INTO prompt_override_versions
-                       (scope, domain, pipeline, step, version, content, note, created_at)
-                       VALUES (?,?,?,?,1,?,?,?)""",
-                    (*key, r["content"], "初始版本", now),
-                )
-            self._conn.commit()
+            destination.close()
+            destination = None
+            source_mode = stat.S_IMODE(self._path.stat().st_mode)
+            os.chmod(temporary, source_mode)
+            with temporary.open("rb") as stream:
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+            directory_fd = os.open(backup_dir, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except BaseException:
+            if destination is not None:
+                destination.close()
+            temporary.unlink(missing_ok=True)
+            raise
+        return target
 
     def schema_version(self) -> int:
         """当前库的 schema 版本(PRAGMA user_version)。供备份兼容/未来迁移判断。"""
         return self._conn.execute("PRAGMA user_version").fetchone()[0]
-
-    # 各表的期望列(列名 -> 建列 SQL 片段)。旧库缺列时按需 ALTER ADD,
-    # 避免"代码加了新列、旧库没有 → 查询崩"。新增列只在此登记即可平滑升级。
-    _EXPECTED_COLUMNS: dict[str, dict[str, str]] = {
-        "jobs": {
-            "collection_id": "collection_id TEXT",
-            "source": "source TEXT",
-            "published_at": "published_at TEXT",
-            "lineage_key": "lineage_key TEXT",
-            "is_current": "is_current INTEGER NOT NULL DEFAULT 1",
-            "source_digest": "source_digest TEXT",
-            "pipeline_digest": "pipeline_digest TEXT",
-            "parent_job_id": "parent_job_id TEXT",
-        },
-        "job_steps": {"retries": "retries INTEGER DEFAULT 0"},
-        "ai_usage": {
-            "worker_id": "worker_id TEXT",
-            "cache_creation_input_tokens": "cache_creation_input_tokens INTEGER DEFAULT 0",
-            "cache_read_input_tokens": "cache_read_input_tokens INTEGER DEFAULT 0",
-            "num_turns": "num_turns INTEGER DEFAULT 0",
-        },
-        "workers": {
-            "reject_tags": "reject_tags TEXT NOT NULL DEFAULT '[]'",
-            "admin_note": "admin_note TEXT",
-            "admin_status": "admin_status TEXT NOT NULL DEFAULT ''",
-            "concurrency": "concurrency INTEGER NOT NULL DEFAULT 1",
-            "remote_addr": "remote_addr TEXT",
-            "desired_config": "desired_config TEXT",
-            "cfg_rev": "cfg_rev INTEGER NOT NULL DEFAULT 0",
-        },
-        "collections": {
-            "source_type": "source_type TEXT",
-            "source_id": "source_id TEXT",
-            "sync_enabled": "sync_enabled INTEGER NOT NULL DEFAULT 1",
-            "last_synced_at": "last_synced_at TEXT",
-            "last_sync_status": "last_sync_status TEXT",
-            "last_sync_error": "last_sync_error TEXT",
-        },
-        "glossary": {
-            "occurrences": "occurrences TEXT DEFAULT '[]'",
-            # 标准中文译名:概念步回填,backfill 脚本补,术语页可编辑。
-            "zh_name": "zh_name TEXT DEFAULT ''",
-            # 概念实体化:变体名归并留痕,resolve 用其归一键匹配。
-            "aliases": "aliases TEXT DEFAULT '[]'",
-            # 概念订阅:单用户 watch 标记,雷达「我关注的概念」区数据源。
-            "watched": "watched INTEGER DEFAULT 0",
-            "is_topic": "is_topic INTEGER DEFAULT 0",
-            "definition_locked": "definition_locked INTEGER DEFAULT 0",
-        },
-        # prompt 版本管理:旧库 prompt_overrides 无 version 列 → 补上(默认激活 v1),
-        # 配合 _backfill_prompt_versions 把存量 override 内容补一条历史 v1。
-        "prompt_overrides": {"version": "version INTEGER NOT NULL DEFAULT 1"},
-    }
-
-    def _ensure_columns(self) -> None:
-        """幂等的列迁移:对已存在的表补齐期望列(SQLite 不支持 IF NOT EXISTS 加列)。"""
-        for table, cols in self._EXPECTED_COLUMNS.items():
-            existing = {
-                r["name"]
-                for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
-            }
-            if not existing:
-                continue  # 表不存在(schema 会建),跳过
-            for col, ddl in cols.items():
-                if col not in existing:
-                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
     def close(self) -> None:
         # 持锁关闭,确保没有线程正在使用连接。

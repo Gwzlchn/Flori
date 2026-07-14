@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from shared.db import Database
+from shared.db import Database, SCHEMA_VERSION
 from shared.models import (
     AIUsage,
     Collection,
@@ -1143,19 +1143,22 @@ class TestAuditFixes:
         assert counts.get("done") == 2 and counts.get("failed") == 1
 
     def test_schema_version_stamped_after_init(self, db):
-        # init_schema 后 user_version 被打戳为 1(可查询的迁移钩子)。
-        assert db.schema_version() == 1
+        # init_schema 后必须到达当前迁移清单版本。
+        assert db.schema_version() == SCHEMA_VERSION
 
     def test_ensure_columns_adds_missing(self, tmp_path):
         # 旧库缺列时 init_schema 通过 _ensure_columns 自动补齐,不崩
         import sqlite3
         p = tmp_path / "legacy.db"
         con = sqlite3.connect(str(p))
-        # 造一个缺 collection_id/source 列的老 jobs 表
+        # 造一个核心语义正确但缺后续 additive 列的老 jobs 表
         con.execute(
-            "CREATE TABLE jobs (id TEXT PRIMARY KEY, content_type TEXT, pipeline TEXT, "
-            "domain TEXT, status TEXT, progress_pct INTEGER, meta TEXT, "
-            "created_at TEXT, updated_at TEXT, error TEXT)"
+            "CREATE TABLE jobs (id TEXT PRIMARY KEY, content_type TEXT NOT NULL, "
+            "pipeline TEXT NOT NULL, url TEXT, title TEXT, "
+            "domain TEXT NOT NULL DEFAULT 'general', style_tags TEXT DEFAULT '[]', "
+            "status TEXT NOT NULL DEFAULT 'pending', progress_pct INTEGER DEFAULT 0, "
+            "meta TEXT DEFAULT '{}', created_at TEXT NOT NULL, "
+            "updated_at TEXT NOT NULL, error TEXT)"
         )
         con.commit()
         con.close()

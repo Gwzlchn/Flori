@@ -4,6 +4,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-flori}"
 FLORI_DATA_DIR_WAS_SET="${FLORI_DATA_DIR+x}"
 FLORI_DATA_VOLUME_WAS_SET="${FLORI_DATA_VOLUME+x}"
@@ -22,6 +23,7 @@ MINIO_VOLUME="${MINIO_VOLUME:-${COMPOSE_PROJECT}_minio-data}"
 MINIO_CONTAINER="${MINIO_CONTAINER-flori-minio}"
 RESTORE_CONFIG_DIR="${RESTORE_CONFIG_DIR:-}"
 FLORI_MAX_DB_USER_VERSION="${FLORI_MAX_DB_USER_VERSION:-}"
+FLORI_SCHEMA_MANIFEST="${FLORI_SCHEMA_MANIFEST:-$REPO/shared/migrations/manifest.json}"
 FLORI_DR_IMAGE="${FLORI_DR_IMAGE:-python:3.11-slim}"
 RESTORE_RESULT_FILE="${RESTORE_RESULT_FILE:-}"
 
@@ -51,6 +53,7 @@ usage() {
 
 RESTORE_CONFIG_DIR 为空时，配置资产仍校验但不覆盖镜像管理的 /app/configs。
 空环境恢复应显式设置 RESTORE_CONFIG_DIR。
+FLORI_SCHEMA_MANIFEST 缺省指向仓库迁移清单，必须存在且不可用环境变量放宽上限。
 EOF
   exit "${1:-0}"
 }
@@ -78,6 +81,13 @@ done
 
 command -v docker >/dev/null 2>&1 || { echo "错误: 找不到 docker" >&2; exit 1; }
 [ -f "$SCRIPT_DIR/dr_snapshot.py" ] || { echo "错误: 缺少 scripts/dr_snapshot.py" >&2; exit 1; }
+[ -f "$FLORI_SCHEMA_MANIFEST" ] || {
+  echo "错误: 缺少 schema manifest: $FLORI_SCHEMA_MANIFEST" >&2
+  exit 1
+}
+FLORI_SCHEMA_MANIFEST="$(cd "$(dirname "$FLORI_SCHEMA_MANIFEST")" && pwd)/$(basename "$FLORI_SCHEMA_MANIFEST")"
+FLORI_SCHEMA_DIR="$(dirname "$FLORI_SCHEMA_MANIFEST")"
+FLORI_SCHEMA_NAME="$(basename "$FLORI_SCHEMA_MANIFEST")"
 
 discover_data_mount() {
   local container="$1" destination="$2" descriptor type name source
@@ -125,7 +135,9 @@ ARCHIVE_DIR="$(cd "$(dirname "$ARCHIVE")" && pwd)"
 ARCHIVE_NAME="$(basename "$ARCHIVE")"
 ARCHIVE="$ARCHIVE_DIR/$ARCHIVE_NAME"
 
-VALIDATE_ARGS=(python /tool/dr_snapshot.py validate --archive "/archive/$ARCHIVE_NAME")
+VALIDATE_ARGS=(python /tool/dr_snapshot.py validate
+  --archive "/archive/$ARCHIVE_NAME"
+  --schema-manifest "/tool/migrations/$FLORI_SCHEMA_NAME")
 if [ -n "$FLORI_MAX_DB_USER_VERSION" ]; then
   case "$FLORI_MAX_DB_USER_VERSION" in
     *[!0-9]*|'') echo "错误: FLORI_MAX_DB_USER_VERSION 必须是非负整数" >&2; exit 1 ;;
@@ -136,6 +148,7 @@ fi
 echo "==> 只读校验快照: $ARCHIVE"
 VALIDATION_JSON="$(docker run --rm \
   -v "$SCRIPT_DIR/dr_snapshot.py:/tool/dr_snapshot.py:ro" \
+  -v "$FLORI_SCHEMA_DIR:/tool/migrations:ro" \
   -v "$ARCHIVE_DIR:/archive:ro" \
   "$FLORI_DR_IMAGE" "${VALIDATE_ARGS[@]}")"
 echo "$VALIDATION_JSON"
@@ -180,9 +193,11 @@ prepare_bind_target() {
 
 DOCKER_ARGS=(run --rm
   -v "$SCRIPT_DIR/dr_snapshot.py:/tool/dr_snapshot.py:ro"
+  -v "$FLORI_SCHEMA_DIR:/tool/migrations:ro"
   -v "$ARCHIVE_DIR:/archive:ro")
 RESTORE_ARGS=(python /tool/dr_snapshot.py restore
   --archive "/archive/$ARCHIVE_NAME"
+  --schema-manifest "/tool/migrations/$FLORI_SCHEMA_NAME"
   --data-target /target-data
   --redis-target /target-redis
   --owner-uid "$(id -u)"

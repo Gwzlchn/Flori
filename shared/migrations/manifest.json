@@ -1,0 +1,18 @@
+{
+  "format": "flori-sqlite-migrations",
+  "minimum_supported_version": 0,
+  "current_version": 2,
+  "ledger_version": 2,
+  "migrations": [
+    {
+      "version": 1,
+      "name": "legacy-baseline",
+      "checksum": "eb95fe418a34b7ede453f810b60b81d8d59b306e5a7b752e79c73fcf9c42d0c6"
+    },
+    {
+      "version": 2,
+      "name": "immutable-migration-ledger",
+      "checksum": "5c44c10e97e05077ea28e3ec7530c4816daf9c42137b39a89b455e2634c8f360"
+    }
+  ]
+}

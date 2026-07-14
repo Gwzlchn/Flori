@@ -7,6 +7,7 @@ import argparse
 import contextlib
 import datetime as dt
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -22,14 +23,215 @@ from typing import Any, Callable
 
 
 FORMAT_NAME = "flori-disaster-recovery"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+SUPPORTED_FORMAT_VERSIONS = frozenset({1, FORMAT_VERSION})
 MANIFEST_NAME = "manifest.json"
 TRANSACTION_FILE = ".flori-dr-transaction.json"
 STAGE_PREFIX = ".flori-dr-"
+SCHEMA_MANIFEST_FORMAT = "flori-sqlite-migrations"
+DEFAULT_SCHEMA_MANIFEST = Path(__file__).parents[1] / "shared" / "migrations" / "manifest.json"
 
 
 class SnapshotError(RuntimeError):
     """表示快照不完整或恢复无法在不破坏现态的前提下继续."""
+
+
+def _schema_manifest(path: Path) -> dict[str, Any]:
+    """校验数据库迁移清单，避免灾备脚本凭手工上限放行 schema。"""
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SnapshotError(f"无法读取 schema manifest {path}: {exc}") from exc
+    if not isinstance(manifest, dict) or manifest.get("format") != SCHEMA_MANIFEST_FORMAT:
+        raise SnapshotError("schema manifest format 不匹配")
+    minimum = manifest.get("minimum_supported_version")
+    current = manifest.get("current_version")
+    ledger = manifest.get("ledger_version")
+    if (
+        type(minimum) is not int
+        or type(current) is not int
+        or type(ledger) is not int
+        or minimum != 0
+        or current < 1
+        or not 1 <= ledger <= current
+    ):
+        raise SnapshotError("schema manifest 版本边界非法")
+    migrations = manifest.get("migrations")
+    if not isinstance(migrations, list) or len(migrations) != current:
+        raise SnapshotError("schema manifest 必须覆盖 1..current_version")
+    for expected, migration in enumerate(migrations, start=1):
+        if (
+            not isinstance(migration, dict)
+            or type(migration.get("version")) is not int
+            or migration["version"] != expected
+            or not isinstance(migration.get("name"), str)
+            or not migration["name"]
+        ):
+            raise SnapshotError("schema manifest 迁移版本或名称非法")
+        checksum = migration.get("checksum")
+        if (
+            not isinstance(checksum, str)
+            or len(checksum) != 64
+            or any(ch not in "0123456789abcdef" for ch in checksum)
+        ):
+            raise SnapshotError("schema manifest 迁移 checksum 非法")
+    return {
+        "minimum_supported_version": minimum,
+        "current_version": current,
+        "ledger_version": ledger,
+        "migrations": [
+            {
+                "version": migration["version"],
+                "name": migration["name"],
+                "checksum": migration["checksum"],
+            }
+            for migration in migrations
+        ],
+    }
+
+
+def _migration_history_fingerprint(history: list[dict[str, Any]]) -> str:
+    encoded = json.dumps(
+        history, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _schema_support(
+    schema_manifest_path: Path | None,
+    *,
+    allow_synthetic_zero: bool = False,
+) -> dict[str, Any]:
+    candidate = schema_manifest_path
+    if candidate is None and DEFAULT_SCHEMA_MANIFEST.is_file():
+        candidate = DEFAULT_SCHEMA_MANIFEST
+    if candidate is not None:
+        resolved = candidate.resolve()
+        return {**_schema_manifest(resolved), "_manifest_path": resolved}
+    if allow_synthetic_zero:
+        # 仅供隔离 drill 自建 user_version=0 样本，不用于外部归档恢复。
+        return {
+            "minimum_supported_version": 0,
+            "current_version": 0,
+            "ledger_version": 1,
+            "migrations": [],
+        }
+    raise SnapshotError("缺少本地 schema manifest，拒绝在无版本上限时处理快照")
+
+
+def _effective_schema_range(
+    schema_manifest_path: Path | None,
+    *,
+    minimum_override: int | None = None,
+    maximum_override: int | None = None,
+    allow_synthetic_zero: bool = False,
+) -> dict[str, Any]:
+    support = _schema_support(
+        schema_manifest_path, allow_synthetic_zero=allow_synthetic_zero
+    )
+    minimum = support["minimum_supported_version"]
+    maximum = support["current_version"]
+    if minimum_override is not None:
+        if type(minimum_override) is not int or minimum_override < minimum:
+            raise SnapshotError("显式 schema 下限不得放宽本地 migration manifest")
+        minimum = minimum_override
+    if maximum_override is not None:
+        if type(maximum_override) is not int or maximum_override > maximum:
+            raise SnapshotError("显式 schema 上限不得放宽本地 migration manifest")
+        maximum = maximum_override
+    if minimum > maximum:
+        raise SnapshotError("schema 兼容范围为空")
+    return {**support, "minimum": minimum, "maximum": maximum}
+
+
+def _load_migration_runtime(
+    schema_support: dict[str, Any],
+) -> tuple[Any, str]:
+    """从 manifest 同目录加载生产 migration package，不复制结构规则。"""
+    manifest_path = schema_support.get("_manifest_path")
+    if not isinstance(manifest_path, Path):
+        raise SnapshotError("缺少 migration package 路径，无法验证应用可启动性")
+    package_dir = manifest_path.parent
+    init_path = package_dir / "__init__.py"
+    if not init_path.is_file():
+        raise SnapshotError(f"缺少 migration package: {init_path}")
+    package_name = f"_flori_dr_migrations_{uuid.uuid4().hex}"
+    spec = importlib.util.spec_from_file_location(
+        package_name,
+        init_path,
+        submodule_search_locations=[str(package_dir)],
+    )
+    if spec is None or spec.loader is None:
+        raise SnapshotError("无法创建 migration package loader")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[package_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException as exc:
+        _unload_migration_runtime(package_name)
+        if not isinstance(exc, Exception):
+            raise
+        raise SnapshotError(f"无法加载 migration package: {exc}") from exc
+    if not callable(getattr(module, "migration_steps", None)) or not callable(
+        getattr(module, "run_migrations", None)
+    ):
+        _unload_migration_runtime(package_name)
+        raise SnapshotError("migration package 缺少统一 registry/runner 入口")
+    return module, package_name
+
+
+def _unload_migration_runtime(package_name: str) -> None:
+    loaded_names = [
+        name
+        for name in sys.modules
+        if name == package_name or name.startswith(package_name + ".")
+    ]
+    for loaded in loaded_names:
+        sys.modules.pop(loaded, None)
+
+
+def _run_frozen_migration_chain(
+    connection: sqlite3.Connection,
+    schema_support: dict[str, Any],
+) -> int:
+    target = int(schema_support["current_version"])
+    if target == 0:
+        return int(connection.execute("PRAGMA user_version").fetchone()[0])
+    runtime, package_name = _load_migration_runtime(schema_support)
+    try:
+        return int(
+            runtime.run_migrations(
+                connection,
+                runtime.migration_steps(),
+                manifest_path=schema_support["_manifest_path"],
+                target_version=target,
+            )
+        )
+    except Exception as exc:
+        raise SnapshotError(f"SQLite 无法按冻结 migration chain 启动: {exc}") from exc
+    finally:
+        _unload_migration_runtime(package_name)
+
+
+def _validate_application_schema(
+    path: Path,
+    schema_support: dict[str, Any],
+) -> None:
+    """只迁移临时副本，证明归档 DB 能按当前生产入口启动。"""
+    with tempfile.TemporaryDirectory(prefix="flori-dr-schema-check-") as temporary:
+        validation_copy = Path(temporary) / "analyzer.db"
+        shutil.copy2(path, validation_copy)
+        connection = sqlite3.connect(validation_copy)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA foreign_keys=ON")
+            final = _run_frozen_migration_chain(connection, schema_support)
+            if final != schema_support["current_version"]:
+                raise SnapshotError(
+                    f"migration chain 结束于 v{final}，预期 v{schema_support['current_version']}"
+                )
+        finally:
+            connection.close()
 
 
 def _utc_now() -> str:
@@ -166,6 +368,47 @@ def _sqlite_schema_hash(connection: sqlite3.Connection) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _sqlite_migration_history(
+    connection: sqlite3.Connection,
+) -> list[dict[str, Any]] | None:
+    exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+    ).fetchone()
+    if exists is None:
+        return None
+    try:
+        rows = connection.execute(
+            "SELECT version, name, checksum FROM schema_migrations ORDER BY version"
+        ).fetchall()
+    except sqlite3.DatabaseError as exc:
+        raise SnapshotError(f"SQLite schema_migrations 无法读取: {exc}") from exc
+    return [
+        {"version": int(row[0]), "name": str(row[1]), "checksum": str(row[2])}
+        for row in rows
+    ]
+
+
+def _validate_sqlite_migration_history(
+    *,
+    user_version: int,
+    actual_history: list[dict[str, Any]] | None,
+    schema_support: dict[str, Any],
+) -> list[dict[str, Any]]:
+    expected = schema_support["migrations"][:user_version]
+    ledger_version = schema_support["ledger_version"]
+    if user_version >= ledger_version:
+        if actual_history != expected:
+            raise SnapshotError(
+                "SQLite schema_migrations 与本地 migration manifest 历史前缀不一致"
+            )
+        return expected
+    if actual_history is not None:
+        raise SnapshotError(
+            f"SQLite user_version={user_version} 不应含 schema_migrations 记录"
+        )
+    return expected
+
+
 def _snapshot_sqlite(source: Path, destination: Path) -> dict[str, Any]:
     if not source.is_file():
         raise SnapshotError(f"SQLite 主库不存在: {source}")
@@ -182,6 +425,7 @@ def _snapshot_sqlite(source: Path, destination: Path) -> dict[str, Any]:
         user_version = int(dst.execute("PRAGMA user_version").fetchone()[0])
         application_id = int(dst.execute("PRAGMA application_id").fetchone()[0])
         schema_hash = _sqlite_schema_hash(dst)
+        migration_history = _sqlite_migration_history(dst)
     finally:
         dst.close()
         src.close()
@@ -195,6 +439,7 @@ def _snapshot_sqlite(source: Path, destination: Path) -> dict[str, Any]:
         "user_version": user_version,
         "application_id": application_id,
         "schema_sha256": schema_hash,
+        "migration_history": migration_history,
     }
 
 
@@ -263,6 +508,8 @@ def create_snapshot(
     app_version: str = "unknown",
     redis_mode: str = "offline-volume",
     data_excludes: tuple[str, ...] = (),
+    schema_manifest_path: Path | None = None,
+    _schema_support_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """生成完整快照,只有全部资产和校验通过才原子发布归档."""
     started_monotonic = time.monotonic()
@@ -294,6 +541,26 @@ def create_snapshot(
         sqlite_meta = _snapshot_sqlite(
             data_root / "db" / "analyzer.db",
             data_destination / "db" / "analyzer.db",
+        )
+        schema_support = _schema_support_override or _schema_support(schema_manifest_path)
+        db_version = int(sqlite_meta["user_version"])
+        if not (
+            schema_support["minimum_supported_version"]
+            <= db_version
+            <= schema_support["current_version"]
+        ):
+            raise SnapshotError(
+                f"SQLite user_version={db_version} 不在生产者迁移链范围 "
+                f"{schema_support['minimum_supported_version']}.."
+                f"{schema_support['current_version']}"
+            )
+        migration_history = _validate_sqlite_migration_history(
+            user_version=db_version,
+            actual_history=sqlite_meta["migration_history"],
+            schema_support=schema_support,
+        )
+        _validate_application_schema(
+            data_destination / "db" / "analyzer.db", schema_support
         )
 
         redis_destination = assets_root / "redis"
@@ -374,6 +641,17 @@ def create_snapshot(
             "compatibility": {
                 "min_restore_format": FORMAT_VERSION,
                 "sqlite_user_version": sqlite_meta["user_version"],
+                "database_schema": {
+                    "version": db_version,
+                    "minimum_supported_version": schema_support[
+                        "minimum_supported_version"
+                    ],
+                    "maximum_supported_version": schema_support["current_version"],
+                    "migration_history": migration_history,
+                    "migration_history_sha256": _migration_history_fingerprint(
+                        migration_history
+                    ),
+                },
             },
             "sqlite": sqlite_meta,
             "assets": assets,
@@ -446,13 +724,19 @@ def _extract_archive(archive_path: Path, destination: Path) -> None:
                 os.chown(target, member.uid, member.gid)
 
 
-def _validate_sqlite(path: Path, expected: dict[str, Any], max_user_version: int | None) -> None:
+def _validate_sqlite(
+    path: Path,
+    expected: dict[str, Any],
+    minimum_user_version: int,
+    maximum_user_version: int,
+) -> tuple[int, list[dict[str, Any]] | None]:
     try:
         connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
         integrity = connection.execute("PRAGMA integrity_check").fetchone()
         user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         application_id = int(connection.execute("PRAGMA application_id").fetchone()[0])
         schema_hash = _sqlite_schema_hash(connection)
+        migration_history = _sqlite_migration_history(connection)
     except sqlite3.DatabaseError as exc:
         raise SnapshotError(f"SQLite 快照无法打开: {exc}") from exc
     finally:
@@ -460,19 +744,34 @@ def _validate_sqlite(path: Path, expected: dict[str, Any], max_user_version: int
             connection.close()
     if not integrity or integrity[0] != "ok":
         raise SnapshotError(f"SQLite integrity_check 失败: {integrity}")
-    if user_version != int(expected.get("user_version", -1)):
+    if type(expected.get("user_version")) is not int:
+        raise SnapshotError("manifest.sqlite.user_version 必须是整数")
+    if type(expected.get("application_id")) is not int:
+        raise SnapshotError("manifest.sqlite.application_id 必须是整数")
+    if user_version != expected["user_version"]:
         raise SnapshotError("SQLite user_version 与 manifest 不一致")
-    if application_id != int(expected.get("application_id", -1)):
+    if application_id != expected["application_id"]:
         raise SnapshotError("SQLite application_id 与 manifest 不一致")
     if schema_hash != expected.get("schema_sha256"):
         raise SnapshotError("SQLite schema 指纹与 manifest 不一致")
-    if max_user_version is not None and user_version > max_user_version:
+    if "migration_history" in expected and migration_history != expected["migration_history"]:
+        raise SnapshotError("SQLite schema_migrations 与 manifest.sqlite 不一致")
+    if not minimum_user_version <= user_version <= maximum_user_version:
         raise SnapshotError(
-            f"SQLite user_version={user_version} 超出当前恢复程序上限 {max_user_version}"
+            f"SQLite user_version={user_version} 不在当前恢复程序范围 "
+            f"{minimum_user_version}..{maximum_user_version}"
         )
+    return user_version, migration_history
 
 
-def validate_extracted(root: Path, max_db_user_version: int | None = None) -> dict[str, Any]:
+def validate_extracted(
+    root: Path,
+    max_db_user_version: int | None = None,
+    *,
+    min_db_user_version: int | None = None,
+    schema_manifest_path: Path | None = None,
+    _schema_support_override: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     manifest_path = root / MANIFEST_NAME
     if not manifest_path.is_file():
         raise SnapshotError("快照缺少 manifest.json")
@@ -482,9 +781,10 @@ def validate_extracted(root: Path, max_db_user_version: int | None = None) -> di
         raise SnapshotError(f"manifest.json 无法读取: {exc}") from exc
     if manifest.get("format") != FORMAT_NAME:
         raise SnapshotError("快照 format 不匹配")
-    if manifest.get("format_version") != FORMAT_VERSION:
+    format_version = manifest.get("format_version")
+    if type(format_version) is not int or format_version not in SUPPORTED_FORMAT_VERSIONS:
         raise SnapshotError(
-            f"不支持的快照 format_version={manifest.get('format_version')}"
+            f"不支持的快照 format_version={format_version}"
         )
     _safe_generation(str(manifest.get("generation", "")))
     declared = manifest.get("files")
@@ -504,6 +804,11 @@ def validate_extracted(root: Path, max_db_user_version: int | None = None) -> di
         metadata = declared[rel]
         if not isinstance(metadata, dict):
             raise SnapshotError(f"manifest 文件元数据非法: {rel}")
+        if any(
+            type(metadata.get(field)) is not int
+            for field in ("size", "mode", "uid", "gid")
+        ):
+            raise SnapshotError(f"manifest 文件整数元数据非法: {rel}")
         if path.stat().st_size != metadata.get("size"):
             raise SnapshotError(f"文件大小校验失败: {rel}")
         if _sha256(path) != metadata.get("sha256"):
@@ -516,16 +821,135 @@ def validate_extracted(root: Path, max_db_user_version: int | None = None) -> di
     sqlite_meta = manifest.get("sqlite")
     if not isinstance(sqlite_meta, dict):
         raise SnapshotError("manifest.sqlite 缺失")
+    if (
+        type(sqlite_meta.get("user_version")) is not int
+        or type(sqlite_meta.get("application_id")) is not int
+    ):
+        raise SnapshotError("manifest.sqlite 版本字段必须是整数")
+    declared_sqlite_history = sqlite_meta.get("migration_history")
+    if declared_sqlite_history is not None:
+        if not isinstance(declared_sqlite_history, list):
+            raise SnapshotError("manifest.sqlite.migration_history 必须是数组")
+        for expected_version, migration in enumerate(
+            declared_sqlite_history, start=1
+        ):
+            if (
+                not isinstance(migration, dict)
+                or type(migration.get("version")) is not int
+                or migration["version"] != expected_version
+            ):
+                raise SnapshotError("manifest.sqlite.migration_history 版本非法")
     sqlite_rel = sqlite_meta.get("path")
     if sqlite_rel not in actual:
         raise SnapshotError("manifest.sqlite.path 不在快照成员中")
-    _validate_sqlite(actual[sqlite_rel], sqlite_meta, max_db_user_version)
+    if _schema_support_override is None:
+        schema_range = _effective_schema_range(
+            schema_manifest_path,
+            minimum_override=min_db_user_version,
+            maximum_override=max_db_user_version,
+        )
+    else:
+        schema_range = {
+            **_schema_support_override,
+            "minimum": _schema_support_override["minimum_supported_version"],
+            "maximum": _schema_support_override["current_version"],
+        }
+    sqlite_user_version, sqlite_migration_history = _validate_sqlite(
+        actual[sqlite_rel],
+        sqlite_meta,
+        schema_range["minimum"],
+        schema_range["maximum"],
+    )
+    compatibility = manifest.get("compatibility")
+    if not isinstance(compatibility, dict):
+        raise SnapshotError("manifest.compatibility 缺失")
+    min_restore_format = compatibility.get("min_restore_format")
+    if (
+        type(min_restore_format) is not int
+        or min_restore_format < 1
+        or min_restore_format > FORMAT_VERSION
+    ):
+        raise SnapshotError("manifest 要求的恢复 format 不受支持")
+    if (
+        type(compatibility.get("sqlite_user_version")) is not int
+        or compatibility["sqlite_user_version"] != sqlite_user_version
+    ):
+        raise SnapshotError(
+            "manifest compatibility.sqlite_user_version 必须是整数且与 SQLite 一致"
+        )
+    if format_version >= 2:
+        database_schema = compatibility.get("database_schema")
+        if not isinstance(database_schema, dict):
+            raise SnapshotError("manifest 缺少 database_schema 兼容元数据")
+        producer_minimum = database_schema.get("minimum_supported_version")
+        producer_maximum = database_schema.get("maximum_supported_version")
+        history = database_schema.get("migration_history")
+        fingerprint = database_schema.get("migration_history_sha256")
+        if (
+            type(database_schema.get("version")) is not int
+            or database_schema["version"] != sqlite_user_version
+            or type(producer_minimum) is not int
+            or type(producer_maximum) is not int
+            or not 0 <= producer_minimum <= sqlite_user_version <= producer_maximum
+            or not isinstance(history, list)
+            or len(history) != sqlite_user_version
+            or not isinstance(fingerprint, str)
+            or len(fingerprint) != 64
+            or any(ch not in "0123456789abcdef" for ch in fingerprint)
+        ):
+            raise SnapshotError("manifest database_schema 兼容元数据非法")
+        for expected, migration in enumerate(history, start=1):
+            if (
+                not isinstance(migration, dict)
+                or type(migration.get("version")) is not int
+                or migration["version"] != expected
+                or not isinstance(migration.get("name"), str)
+                or not migration["name"]
+                or not isinstance(migration.get("checksum"), str)
+                or len(migration["checksum"]) != 64
+                or any(
+                    ch not in "0123456789abcdef" for ch in migration["checksum"]
+                )
+            ):
+                raise SnapshotError("manifest migration_history 条目非法")
+        if _migration_history_fingerprint(history) != fingerprint:
+            raise SnapshotError("manifest migration_history 指纹不一致")
+        local_history = schema_range["migrations"][:sqlite_user_version]
+        if history != local_history:
+            raise SnapshotError("SQLite 迁移历史与本地 migration manifest 分叉")
+        if sqlite_user_version >= schema_range["ledger_version"]:
+            if sqlite_migration_history != history:
+                raise SnapshotError(
+                    "SQLite schema_migrations 与归档 migration_history 不一致"
+                )
+        elif sqlite_migration_history is not None:
+            raise SnapshotError(
+                "SQLite 低版本库含不应存在的 schema_migrations 记录"
+            )
+    # format v1 无历史声明，但仍在临时副本上跑同一生产 migration chain。
+    _validate_application_schema(actual[sqlite_rel], schema_range)
     assets = manifest.get("assets")
     if not isinstance(assets, dict):
         raise SnapshotError("manifest.assets 缺失")
     for required in ("data", "redis"):
-        if not isinstance(assets.get(required), dict) or not assets[required].get("included"):
+        if (
+            not isinstance(assets.get(required), dict)
+            or assets[required].get("included") is not True
+        ):
             raise SnapshotError(f"快照缺少必需资产: {required}")
+    for name, metadata in assets.items():
+        if (
+            not isinstance(metadata, dict)
+            or type(metadata.get("included")) is not bool
+        ):
+            raise SnapshotError(f"manifest.assets.{name} 元数据非法")
+        if metadata["included"] and (
+            type(metadata.get("file_count")) is not int
+            or metadata["file_count"] < 0
+            or type(metadata.get("total_bytes")) is not int
+            or metadata["total_bytes"] < 0
+        ):
+            raise SnapshotError(f"manifest.assets.{name} 计数字段非法")
     return manifest
 
 
@@ -542,44 +966,230 @@ def _validate_archive_sidecar(archive_path: Path) -> None:
         raise SnapshotError("快照外部 sha256 校验失败")
 
 
-def validate_archive(archive_path: Path, max_db_user_version: int | None = None) -> dict[str, Any]:
+def validate_archive(
+    archive_path: Path,
+    max_db_user_version: int | None = None,
+    *,
+    min_db_user_version: int | None = None,
+    schema_manifest_path: Path | None = None,
+    _schema_support_override: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     _validate_archive_sidecar(archive_path)
     with tempfile.TemporaryDirectory(prefix="flori-dr-validate-") as temporary:
         root = Path(temporary)
         _extract_archive(archive_path, root)
-        return validate_extracted(root, max_db_user_version)
+        return validate_extracted(
+            root,
+            max_db_user_version,
+            min_db_user_version=min_db_user_version,
+            schema_manifest_path=schema_manifest_path,
+            _schema_support_override=_schema_support_override,
+        )
 
 
 def _marker_path(target: Path) -> Path:
     return target / TRANSACTION_FILE
 
 
-def _load_marker(target: Path) -> dict[str, Any] | None:
+_MARKER_FIELDS = frozenset(
+    {
+        "format",
+        "generation",
+        "asset",
+        "base",
+        "status",
+        "old_names",
+        "new_names",
+        "preserve_names",
+        "moved_old",
+        "moved_new",
+    }
+)
+_MARKER_NAME_FIELDS = (
+    "old_names",
+    "new_names",
+    "preserve_names",
+    "moved_old",
+    "moved_new",
+)
+_MARKER_STATUSES = frozenset(
+    {"prepared", "switching", "committed", "accepted", "finalizing"}
+)
+_RESTORE_ASSETS = frozenset({"data", "redis", "minio", "config"})
+
+
+def _is_stage_entry(name: str) -> bool:
+    return name.startswith(STAGE_PREFIX) and name != TRANSACTION_FILE
+
+
+def _stage_base_name(generation: object) -> str:
+    if type(generation) is not str:
+        raise SnapshotError("恢复事务 generation 必须是字符串")
+    safe_generation = _safe_generation(generation)
+    base = f"{STAGE_PREFIX}{safe_generation}"
+    if base == TRANSACTION_FILE:
+        raise SnapshotError("恢复事务 generation 与事务标记名称冲突")
+    return base
+
+
+def _safe_marker_name(value: object, field: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value in {".", ".."}
+        or "\x00" in value
+        or "/" in value
+        or "\\" in value
+        or Path(value).is_absolute()
+        or Path(value).name != value
+        or value == TRANSACTION_FILE
+        or value.startswith(STAGE_PREFIX)
+    ):
+        raise SnapshotError(f"恢复事务 {field} 含非法顶层名称")
+    return value
+
+
+def _direct_child(parent: Path, name: str, field: str) -> Path:
+    candidate = parent / name
+    try:
+        parent_resolved = parent.resolve(strict=True)
+        candidate_resolved = candidate.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise SnapshotError(f"恢复事务 {field} 路径无法安全解析: {exc}") from exc
+    if candidate_resolved.parent != parent_resolved:
+        raise SnapshotError(f"恢复事务 {field} 路径逃出受控根")
+    return candidate
+
+
+def _validate_marker(
+    target: Path,
+    marker: object,
+    *,
+    expected_asset: str | None = None,
+) -> dict[str, Any]:
+    if type(marker) is not dict or set(marker) != _MARKER_FIELDS:
+        raise SnapshotError("恢复事务标记字段集合非法")
+    if type(marker.get("format")) is not str or marker["format"] != FORMAT_NAME:
+        raise SnapshotError("恢复事务标记 format 非法")
+    expected_base = _stage_base_name(marker.get("generation"))
+    base_name = marker.get("base")
+    if type(base_name) is not str or base_name != expected_base:
+        raise SnapshotError("恢复事务标记 base 与 generation 不一致")
+    asset = marker.get("asset")
+    if type(asset) is not str or asset not in _RESTORE_ASSETS:
+        raise SnapshotError("恢复事务标记 asset 非法")
+    if expected_asset is not None and asset != expected_asset:
+        raise SnapshotError(
+            f"恢复事务标记 asset 与目标不一致: {asset} != {expected_asset}"
+        )
+    status = marker.get("status")
+    if type(status) is not str or status not in _MARKER_STATUSES:
+        raise SnapshotError("恢复事务标记 status 非法")
+
+    name_lists: dict[str, list[str]] = {}
+    for field in _MARKER_NAME_FIELDS:
+        raw = marker.get(field)
+        if type(raw) is not list:
+            raise SnapshotError(f"恢复事务 {field} 必须是列表")
+        values = [_safe_marker_name(value, field) for value in raw]
+        if values != sorted(set(values)):
+            raise SnapshotError(f"恢复事务 {field} 必须唯一且有序")
+        name_lists[field] = values
+    if not set(name_lists["moved_old"]).issubset(name_lists["old_names"]):
+        raise SnapshotError("恢复事务 moved_old 不是 old_names 子集")
+    if not set(name_lists["moved_new"]).issubset(name_lists["new_names"]):
+        raise SnapshotError("恢复事务 moved_new 不是 new_names 子集")
+    if name_lists["moved_old"] != name_lists["old_names"][: len(name_lists["moved_old"])]:
+        raise SnapshotError("恢复事务 moved_old 不是 old_names 已移动前缀")
+    if name_lists["moved_new"] != name_lists["new_names"][: len(name_lists["moved_new"])]:
+        raise SnapshotError("恢复事务 moved_new 不是 new_names 已移动前缀")
+    preserved = set(name_lists["preserve_names"])
+    if preserved & (
+        set(name_lists["old_names"]) | set(name_lists["new_names"])
+    ):
+        raise SnapshotError("恢复事务 preserve_names 与切换名称重叠")
+    if status == "prepared" and any(
+        name_lists[field]
+        for field in ("old_names", "new_names", "moved_old", "moved_new")
+    ):
+        raise SnapshotError("prepared 恢复事务不得含切换进度")
+    if status == "switching" and name_lists["moved_new"] and (
+        name_lists["moved_old"] != name_lists["old_names"]
+    ):
+        raise SnapshotError("恢复事务开始移动新资产前必须移完旧资产")
+    if status in {"committed", "accepted", "finalizing"} and (
+        name_lists["moved_old"] != name_lists["old_names"]
+        or name_lists["moved_new"] != name_lists["new_names"]
+    ):
+        raise SnapshotError(f"{status} 恢复事务切换进度不完整")
+
+    if not target.is_dir():
+        raise SnapshotError(f"恢复目标不存在或不是目录: {target}")
+    base = _direct_child(target, expected_base, "base")
+    if status == "finalizing":
+        if base.is_symlink() or (base.exists() and not base.is_dir()):
+            raise SnapshotError("恢复事务 finalizing base 路径非法")
+        return marker
+    if base.is_symlink() or not base.is_dir():
+        raise SnapshotError("恢复事务 base 必须是目标内真实目录")
+    old_root = _direct_child(base, "old", "old")
+    new_root = _direct_child(base, "new", "new")
+    for field, root in (("old", old_root), ("new", new_root)):
+        if root.is_symlink() or not root.is_dir():
+            raise SnapshotError(f"恢复事务 {field} 必须是 base 内真实目录")
+    for field, values in name_lists.items():
+        for value in values:
+            _direct_child(target, value, field)
+            _direct_child(old_root, value, field)
+            _direct_child(new_root, value, field)
+    return marker
+
+
+def _load_marker(
+    target: Path,
+    *,
+    expected_asset: str | None = None,
+) -> dict[str, Any] | None:
     path = _marker_path(target)
-    if not path.exists():
+    if not path.exists() and not path.is_symlink():
         return None
+    if path.is_symlink() or not path.is_file():
+        raise SnapshotError(f"恢复事务标记必须是普通文件: {path}")
     try:
         marker = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise SnapshotError(f"恢复事务标记损坏，需人工检查 {path}: {exc}") from exc
-    if not isinstance(marker, dict):
-        raise SnapshotError(f"恢复事务标记非法: {path}")
-    return marker
+    return _validate_marker(target, marker, expected_asset=expected_asset)
 
 
-def _persist_marker(target: Path, marker: dict[str, Any]) -> None:
+def _persist_marker(
+    target: Path,
+    marker: dict[str, Any],
+    *,
+    expected_asset: str | None = None,
+) -> None:
+    _validate_marker(target, marker, expected_asset=expected_asset)
     _write_json_atomic(_marker_path(target), marker)
 
 
-def _rollback_target(target: Path) -> None:
-    marker = _load_marker(target)
+def _rollback_target(
+    target: Path,
+    *,
+    expected_asset: str | None = None,
+    require_marker: bool = False,
+) -> None:
+    marker = _load_marker(target, expected_asset=expected_asset)
     if marker is None:
+        if require_marker:
+            raise SnapshotError(f"回滚目标缺失活跃 marker: {expected_asset}")
         return
-    base = target / str(marker.get("base", ""))
+    if marker.get("status") in {"accepted", "finalizing"}:
+        raise SnapshotError("全局提交决策已落盘，禁止回滚")
+    base = target / marker["base"]
     new_root = base / "new"
     old_root = base / "old"
-    old_names = marker.get("old_names", marker.get("moved_old", []))
-    new_names = marker.get("new_names", marker.get("moved_new", []))
+    old_names = marker["old_names"]
+    new_names = marker["new_names"]
     for name in reversed(new_names):
         current = target / name
         old_was_moved = (old_root / name).exists() or (old_root / name).is_symlink()
@@ -599,38 +1209,89 @@ def _rollback_target(target: Path) -> None:
     _fsync_dir(target)
 
 
-def _recover_target(target: Path) -> None:
+def _recover_target(target: Path, *, expected_asset: str | None = None) -> None:
     target.mkdir(parents=True, exist_ok=True)
-    if _marker_path(target).exists():
-        _rollback_target(target)
-    for child in target.iterdir():
-        if child.name.startswith(STAGE_PREFIX):
-            _remove(child)
+    if _marker_path(target).exists() or _marker_path(target).is_symlink():
+        marker = _load_marker(target, expected_asset=expected_asset)
+        if marker is not None and marker.get("status") in {"accepted", "finalizing"}:
+            _finalize_target(target, expected_asset=expected_asset)
+        else:
+            _rollback_target(target, expected_asset=expected_asset)
+    orphan_stages = sorted(
+        child.name for child in target.iterdir() if _is_stage_entry(child.name)
+    )
+    if orphan_stages:
+        raise SnapshotError(
+            f"恢复目标含无 marker 孤立 stage，已保留现场: {orphan_stages}"
+        )
 
 
-def _recover_target_set(targets: list[Path]) -> None:
+def _recover_target_set(targets: dict[str, Path] | list[Path]) -> None:
     """任一目标已 accepted 说明全部 commit 已完成,否则统一回滚中断事务."""
-    markers = {target: _load_marker(target) for target in targets if target.exists()}
+    entries = (
+        list(targets.items())
+        if isinstance(targets, dict)
+        else [(None, target) for target in targets]
+    )
+    expected_assets = {target: asset for asset, target in entries}
+    markers = {
+        target: _load_marker(target, expected_asset=expected_assets[target])
+        for _asset, target in entries
+        if target.exists()
+    }
     active = {target: marker for target, marker in markers.items() if marker is not None}
-    if any(marker.get("status") == "accepted" for marker in active.values()):
+    for _asset, target in entries:
+        if not target.exists():
+            continue
+        marker = markers.get(target)
+        allowed = {marker["base"]} if marker is not None else set()
+        unexpected = sorted(
+            child.name
+            for child in target.iterdir()
+            if _is_stage_entry(child.name) and child.name not in allowed
+        )
+        if unexpected:
+            raise SnapshotError(
+                f"恢复目标含无 marker 孤立 stage，已保留现场: {unexpected}"
+            )
+    generations = {marker["generation"] for marker in active.values()}
+    if len(generations) > 1:
+        raise SnapshotError(f"恢复目标含混合 generation: {sorted(generations)}")
+    assets = [marker["asset"] for marker in active.values()]
+    if len(assets) != len(set(assets)):
+        raise SnapshotError(f"恢复目标含重复 asset: {sorted(assets)}")
+    if any(
+        marker.get("status") in {"accepted", "finalizing"}
+        for marker in active.values()
+    ):
         invalid = {
             str(target): marker.get("status")
             for target, marker in active.items()
-            if marker.get("status") not in {"committed", "accepted"}
+            if marker.get("status") not in {"committed", "accepted", "finalizing"}
         }
         if invalid:
             raise SnapshotError(f"已接受的恢复事务与未提交目标混合: {invalid}")
         for target, marker in active.items():
             if marker.get("status") == "committed":
                 marker["status"] = "accepted"
-                _persist_marker(target, marker)
+                _persist_marker(
+                    target,
+                    marker,
+                    expected_asset=expected_assets[target],
+                )
         for target in active:
-            _finalize_target(target)
+            _finalize_target(
+                target,
+                expected_asset=expected_assets[target],
+            )
     else:
         for target in reversed(list(active)):
-            _rollback_target(target)
-    for target in targets:
-        _recover_target(target)
+            _rollback_target(
+                target,
+                expected_asset=expected_assets[target],
+            )
+    for _asset, target in entries:
+        _recover_target(target, expected_asset=expected_assets[target])
 
 
 def _prepare_target(
@@ -641,7 +1302,7 @@ def _prepare_target(
     preserve_names: set[str] | None = None,
 ) -> dict[str, Any]:
     target.mkdir(parents=True, exist_ok=True)
-    base_name = f"{STAGE_PREFIX}{generation}"
+    base_name = _stage_base_name(generation)
     base = target / base_name
     new_root = base / "new"
     old_root = base / "old"
@@ -669,12 +1330,23 @@ def _prepare_target(
         "moved_old": [],
         "moved_new": [],
     }
-    _persist_marker(target, marker)
+    try:
+        _persist_marker(target, marker, expected_asset=asset)
+    except BaseException:
+        _marker_path(target).unlink(missing_ok=True)
+        _remove(base)
+        _fsync_dir(target)
+        raise
     return marker
 
 
-def _commit_target(target: Path) -> None:
-    marker = _load_marker(target)
+def _commit_target(
+    target: Path,
+    *,
+    expected_asset: str | None = None,
+    rollback_on_error: bool = True,
+) -> None:
+    marker = _load_marker(target, expected_asset=expected_asset)
     if marker is None or marker.get("status") != "prepared":
         raise SnapshotError(f"目标未处于 prepared 状态: {target}")
     base = target / marker["base"]
@@ -691,40 +1363,45 @@ def _commit_target(target: Path) -> None:
         marker["old_names"] = current_names
         marker["new_names"] = new_names
         marker["status"] = "switching"
-        _persist_marker(target, marker)
+        _persist_marker(target, marker, expected_asset=expected_asset)
         for name in current_names:
             os.replace(target / name, old_root / name)
             marker["moved_old"].append(name)
-            _persist_marker(target, marker)
+            _persist_marker(target, marker, expected_asset=expected_asset)
         for child in sorted(new_root.iterdir(), key=lambda item: item.name):
             name = child.name
             os.replace(child, target / name)
             marker["moved_new"].append(name)
-            _persist_marker(target, marker)
+            _persist_marker(target, marker, expected_asset=expected_asset)
         marker["status"] = "committed"
-        _persist_marker(target, marker)
+        _persist_marker(target, marker, expected_asset=expected_asset)
         _fsync_dir(target)
     except BaseException:
-        _rollback_target(target)
+        if rollback_on_error:
+            _rollback_target(target, expected_asset=expected_asset)
         raise
 
 
-def _finalize_target(target: Path) -> None:
-    marker = _load_marker(target)
-    if marker is None or marker.get("status") != "accepted":
+def _finalize_target(target: Path, *, expected_asset: str | None = None) -> None:
+    marker = _load_marker(target, expected_asset=expected_asset)
+    if marker is None or marker.get("status") not in {"accepted", "finalizing"}:
         raise SnapshotError(f"目标未处于 accepted 状态: {target}")
+    if marker.get("status") == "accepted":
+        marker["status"] = "finalizing"
+        _persist_marker(target, marker, expected_asset=expected_asset)
     base = target / marker["base"]
-    _marker_path(target).unlink(missing_ok=True)
     _remove(base)
+    _fsync_dir(target)
+    _marker_path(target).unlink(missing_ok=True)
     _fsync_dir(target)
 
 
-def _accept_target(target: Path) -> None:
-    marker = _load_marker(target)
+def _accept_target(target: Path, *, expected_asset: str | None = None) -> None:
+    marker = _load_marker(target, expected_asset=expected_asset)
     if marker is None or marker.get("status") != "committed":
         raise SnapshotError(f"目标未处于 committed 状态: {target}")
     marker["status"] = "accepted"
-    _persist_marker(target, marker)
+    _persist_marker(target, marker, expected_asset=expected_asset)
 
 
 def _validate_target_roots(targets: dict[str, Path]) -> None:
@@ -762,14 +1439,100 @@ def _target_preserves(targets: dict[str, Path]) -> dict[str, set[str]]:
     return preserves
 
 
+def _roll_forward_target_set(
+    targets: dict[str, Path],
+) -> list[tuple[str, BaseException]]:
+    """全局提交决策后提升并收尾所有资产，不再进入回滚分支。"""
+    markers = {
+        name: _load_marker(target, expected_asset=name)
+        for name, target in targets.items()
+        if target.exists()
+    }
+    active = {name: marker for name, marker in markers.items() if marker is not None}
+    missing = [name for name in targets if name not in active]
+    if missing:
+        raise SnapshotError(
+            f"全局提交决策缺失活跃 marker: {missing}"
+        )
+    generations = {marker["generation"] for marker in active.values()}
+    if len(generations) > 1:
+        raise SnapshotError(
+            f"全局提交决策含混合 generation: {sorted(generations)}"
+        )
+    invalid = {
+        name: marker.get("status")
+        for name, marker in active.items()
+        if marker.get("status") not in {"committed", "accepted", "finalizing"}
+    }
+    if invalid:
+        raise SnapshotError(f"全局提交决策含未提交目标: {invalid}")
+    cleanup_errors: list[tuple[str, BaseException]] = []
+    if active and not any(
+        marker.get("status") in {"accepted", "finalizing"}
+        for marker in active.values()
+    ):
+        first = next(name for name in targets if name in active)
+        try:
+            _accept_target(targets[first], expected_asset=first)
+            active[first]["status"] = "accepted"
+        except BaseException as error:
+            cleanup_errors.append((f"accept:{first}", error))
+    for name in targets:
+        if active[name].get("status") != "committed":
+            continue
+        try:
+            _accept_target(targets[name], expected_asset=name)
+            active[name]["status"] = "accepted"
+        except BaseException as error:
+            cleanup_errors.append((f"accept:{name}", error))
+    if cleanup_errors:
+        return cleanup_errors
+    for name in targets:
+        try:
+            _finalize_target(targets[name], expected_asset=name)
+        except BaseException as error:
+            cleanup_errors.append((f"finalize:{name}", error))
+    return cleanup_errors
+
+
+def _raise_restore_failure(
+    primary: BaseException,
+    cleanup_errors: list[tuple[str, BaseException]],
+    summary: str,
+) -> None:
+    """清理尽力完成后保留控制流异常，普通错误则聚合为可恢复诊断。"""
+    if not cleanup_errors:
+        raise primary
+    details = ", ".join(
+        f"{name}({type(error).__name__})" for name, error in cleanup_errors
+    )
+    note = f"{summary}: {details}"
+    primary.add_note(note)
+    if not isinstance(primary, Exception):
+        raise primary
+    control_error = next(
+        (error for _name, error in cleanup_errors if not isinstance(error, Exception)),
+        None,
+    )
+    if control_error is not None:
+        control_error.add_note(
+            f"原恢复异常: {type(primary).__name__}; {note}"
+        )
+        raise control_error from primary
+    raise SnapshotError(f"{summary}: {details}") from primary
+
+
 def restore_snapshot(
     *,
     archive_path: Path,
     targets: dict[str, Path],
     max_db_user_version: int | None = None,
+    min_db_user_version: int | None = None,
+    schema_manifest_path: Path | None = None,
     fail_after_commits: int | None = None,
+    _schema_support_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """校验后两阶段切换所有目标,后续目标失败会回滚已切换目标."""
+    """校验后两阶段切换所有目标;accept 开始后异常只统一前滚。"""
     started_at = _utc_now()
     started_monotonic = time.monotonic()
     _validate_target_roots(targets)
@@ -780,7 +1543,13 @@ def restore_snapshot(
     with tempfile.TemporaryDirectory(prefix="flori-dr-restore-") as temporary:
         extracted = Path(temporary)
         _extract_archive(archive_path, extracted)
-        manifest = validate_extracted(extracted, max_db_user_version)
+        manifest = validate_extracted(
+            extracted,
+            max_db_user_version,
+            min_db_user_version=min_db_user_version,
+            schema_manifest_path=schema_manifest_path,
+            _schema_support_override=_schema_support_override,
+        )
         generation = manifest["generation"]
         included = {
             name
@@ -791,10 +1560,14 @@ def restore_snapshot(
         if missing_targets:
             raise SnapshotError(f"快照资产缺少恢复目标: {missing_targets}")
         selected = [name for name in ("data", "redis", "minio", "config") if name in included and name in targets]
-        _recover_target_set([targets[name] for name in selected])
+        _recover_target_set({name: targets[name] for name in selected})
         prepared: list[str] = []
         committed: list[str] = []
         accepted = False
+        accept_phase_started = False
+        commit_recovered_after_error = False
+        recovered_error_type: str | None = None
+        recovery_already_finalized = False
         try:
             for name in selected:
                 _prepare_target(
@@ -806,26 +1579,87 @@ def restore_snapshot(
                 )
                 prepared.append(name)
             for name in selected:
-                _commit_target(targets[name])
+                _commit_target(
+                    targets[name],
+                    expected_asset=name,
+                    rollback_on_error=False,
+                )
                 committed.append(name)
                 if fail_after_commits is not None and len(committed) >= fail_after_commits:
                     raise SnapshotError("测试故障注入: 目标切换后中断")
             for name in selected:
-                _accept_target(targets[name])
+                accept_phase_started = True
+                _accept_target(targets[name], expected_asset=name)
             accepted = True
-        except BaseException:
-            for name in reversed(committed):
-                with contextlib.suppress(Exception):
-                    _rollback_target(targets[name])
-            for name in reversed(prepared):
-                with contextlib.suppress(Exception):
-                    _rollback_target(targets[name])
-            raise
+        except BaseException as restore_error:
+            selected_targets = {name: targets[name] for name in selected}
+            roll_forward_required = accept_phase_started
+            decision_errors: list[tuple[str, BaseException]] = []
+            if not roll_forward_required:
+                current_markers: dict[str, dict[str, Any]] = {}
+                for name in prepared:
+                    try:
+                        if not targets[name].is_dir():
+                            raise SnapshotError(f"恢复目标缺失或不是目录: {name}")
+                        marker = _load_marker(targets[name], expected_asset=name)
+                        if marker is None:
+                            raise SnapshotError(f"恢复目标缺失活跃 marker: {name}")
+                        current_markers[name] = marker
+                    except BaseException as decision_error:
+                        decision_errors.append((f"commit-decision:{name}", decision_error))
+                if decision_errors:
+                    _raise_restore_failure(
+                        restore_error,
+                        decision_errors,
+                        "恢复决策无法安全判定，现场已保留",
+                    )
+                roll_forward_required = any(
+                    marker.get("status") == "accepted"
+                    for marker in current_markers.values()
+                )
+            if roll_forward_required:
+                try:
+                    recovery_errors = _roll_forward_target_set(selected_targets)
+                except BaseException as recovery_error:
+                    decision_errors.append(("roll-forward", recovery_error))
+                else:
+                    decision_errors.extend(recovery_errors)
+                if decision_errors:
+                    _raise_restore_failure(
+                        restore_error,
+                        decision_errors,
+                        "恢复全局提交待继续，marker 已保留",
+                    )
+                if not isinstance(restore_error, Exception):
+                    restore_error.add_note(
+                        "恢复全局提交已统一前滚完成"
+                    )
+                    raise restore_error
+                accepted = True
+                commit_recovered_after_error = True
+                recovered_error_type = type(restore_error).__name__
+                recovery_already_finalized = True
+            else:
+                rollback_errors: list[tuple[str, BaseException]] = []
+                for name in reversed(prepared):
+                    try:
+                        _rollback_target(
+                            targets[name],
+                            expected_asset=name,
+                            require_marker=True,
+                        )
+                    except BaseException as cleanup_error:
+                        rollback_errors.append((name, cleanup_error))
+                _raise_restore_failure(
+                    restore_error,
+                    rollback_errors,
+                    "恢复失败且回滚未完成，marker 已保留",
+                )
         cleanup_pending: list[str] = []
-        if accepted:
+        if accepted and not recovery_already_finalized:
             for name in selected:
                 try:
-                    _finalize_target(targets[name])
+                    _finalize_target(targets[name], expected_asset=name)
                 except Exception:
                     cleanup_pending.append(name)
     return {
@@ -838,6 +1672,8 @@ def restore_snapshot(
         "restored_assets": selected,
         "skipped_assets": sorted(included - set(selected)),
         "cleanup_pending": cleanup_pending,
+        "commit_recovered_after_error": commit_recovered_after_error,
+        "error_type": recovered_error_type,
         "preserved_target_entries": {
             name: sorted(values) for name, values in preserves.items() if values
         },
@@ -851,10 +1687,16 @@ def restore_snapshot(
     }
 
 
-def run_empty_environment_drill(result_file: Path | None = None) -> dict[str, Any]:
+def run_empty_environment_drill(
+    result_file: Path | None = None,
+    schema_manifest_path: Path | None = None,
+) -> dict[str, Any]:
     """在隔离临时根中演练完整恢复、损坏拒绝和跨目标回滚."""
     started = time.monotonic()
     checks: dict[str, str] = {}
+    schema_support = _schema_support(
+        schema_manifest_path, allow_synthetic_zero=True
+    )
     with tempfile.TemporaryDirectory(prefix="flori-dr-drill-") as temporary:
         root = Path(temporary)
         source = {name: root / "source" / name for name in ("data", "redis", "minio", "config")}
@@ -864,8 +1706,22 @@ def run_empty_environment_drill(result_file: Path | None = None) -> dict[str, An
         database = source["data"] / "db" / "analyzer.db"
         database.parent.mkdir(parents=True)
         connection = sqlite3.connect(database)
-        connection.execute("CREATE TABLE jobs(id TEXT PRIMARY KEY, title TEXT NOT NULL)")
-        connection.execute("INSERT INTO jobs VALUES('jobs_drill', '灾备演练')")
+        connection.row_factory = sqlite3.Row
+        if schema_support["current_version"]:
+            connection.execute("PRAGMA foreign_keys=ON")
+            _run_frozen_migration_chain(connection, schema_support)
+            connection.execute(
+                "INSERT INTO jobs "
+                "(id, content_type, pipeline, title, domain, created_at, updated_at) "
+                "VALUES ('jobs_drill', 'article', 'article', '灾备演练', "
+                "'general', '2026-01-01T00:00:00+00:00', "
+                "'2026-01-01T00:00:00+00:00')"
+            )
+        else:
+            connection.execute(
+                "CREATE TABLE jobs(id TEXT PRIMARY KEY, title TEXT NOT NULL)"
+            )
+            connection.execute("INSERT INTO jobs VALUES('jobs_drill', '灾备演练')")
         connection.commit()
         connection.close()
         (source["data"] / "jobs" / "jobs_drill").mkdir(parents=True)
@@ -887,6 +1743,8 @@ def run_empty_environment_drill(result_file: Path | None = None) -> dict[str, An
             generation="drill",
             redis_mode="offline-volume",
             app_version="drill",
+            schema_manifest_path=schema_manifest_path,
+            _schema_support_override=schema_support,
         )
         checks["backup_atomic_publish"] = "ok"
 
@@ -896,7 +1754,12 @@ def run_empty_environment_drill(result_file: Path | None = None) -> dict[str, An
         raw = archive.read_bytes()
         corrupt.write_bytes(raw[: max(1, len(raw) // 2)])
         try:
-            restore_snapshot(archive_path=corrupt, targets=target)
+            restore_snapshot(
+                archive_path=corrupt,
+                targets=target,
+                schema_manifest_path=schema_manifest_path,
+                _schema_support_override=schema_support,
+            )
         except SnapshotError:
             pass
         else:
@@ -905,7 +1768,12 @@ def run_empty_environment_drill(result_file: Path | None = None) -> dict[str, An
             raise SnapshotError("损坏快照校验失败后修改了现态")
         checks["corrupt_snapshot_fail_closed"] = "ok"
 
-        restore_result = restore_snapshot(archive_path=archive, targets=target)
+        restore_result = restore_snapshot(
+            archive_path=archive,
+            targets=target,
+            schema_manifest_path=schema_manifest_path,
+            _schema_support_override=schema_support,
+        )
         connection = sqlite3.connect(target["data"] / "db" / "analyzer.db")
         row = connection.execute("SELECT title FROM jobs WHERE id='jobs_drill'").fetchone()
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
@@ -930,7 +1798,13 @@ def run_empty_environment_drill(result_file: Path | None = None) -> dict[str, An
             for name in target
         }
         try:
-            restore_snapshot(archive_path=archive, targets=target, fail_after_commits=1)
+            restore_snapshot(
+                archive_path=archive,
+                targets=target,
+                schema_manifest_path=schema_manifest_path,
+                fail_after_commits=1,
+                _schema_support_override=schema_support,
+            )
         except SnapshotError:
             pass
         else:
@@ -993,6 +1867,7 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--result-file")
     create.add_argument("--owner-uid", type=int)
     create.add_argument("--owner-gid", type=int)
+    create.add_argument("--schema-manifest")
 
     validate = subparsers.add_parser("validate", help="只读校验快照")
     validate.add_argument("--archive", required=True)
@@ -1000,6 +1875,7 @@ def _parser() -> argparse.ArgumentParser:
     validate.add_argument("--result-file")
     validate.add_argument("--owner-uid", type=int)
     validate.add_argument("--owner-gid", type=int)
+    validate.add_argument("--schema-manifest")
 
     restore = subparsers.add_parser("restore", help="校验后两阶段恢复")
     restore.add_argument("--archive", required=True)
@@ -1011,11 +1887,13 @@ def _parser() -> argparse.ArgumentParser:
     restore.add_argument("--result-file")
     restore.add_argument("--owner-uid", type=int)
     restore.add_argument("--owner-gid", type=int)
+    restore.add_argument("--schema-manifest")
 
     drill = subparsers.add_parser("drill", help="运行隔离空环境恢复演练")
     drill.add_argument("--result-file")
     drill.add_argument("--owner-uid", type=int)
     drill.add_argument("--owner-gid", type=int)
+    drill.add_argument("--schema-manifest")
     return parser
 
 
@@ -1035,9 +1913,14 @@ def main(argv: list[str] | None = None) -> int:
                 app_version=args.app_version,
                 redis_mode=args.redis_mode,
                 data_excludes=tuple(args.data_exclude),
+                schema_manifest_path=_path_or_none(args.schema_manifest),
             )
         elif args.command == "validate":
-            manifest = validate_archive(Path(args.archive), args.max_db_user_version)
+            manifest = validate_archive(
+                Path(args.archive),
+                args.max_db_user_version,
+                schema_manifest_path=_path_or_none(args.schema_manifest),
+            )
             result = {
                 "status": "success",
                 "operation": "validate",
@@ -1055,9 +1938,12 @@ def main(argv: list[str] | None = None) -> int:
                 archive_path=Path(args.archive),
                 targets=targets,
                 max_db_user_version=args.max_db_user_version,
+                schema_manifest_path=_path_or_none(args.schema_manifest),
             )
         else:
-            result = run_empty_environment_drill(result_file)
+            result = run_empty_environment_drill(
+                result_file, _path_or_none(args.schema_manifest)
+            )
             result_file = None
         _write_result(result_file, result)
         if args.command == "create":

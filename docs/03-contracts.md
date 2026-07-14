@@ -2420,6 +2420,74 @@ net_routing:
   `scripts/merge_glossary_entities.py`(scan 确定性合并 / suggest 语义组+junk / apply-llm),
   `scripts/backfill_concept_edges.py`(export 核心概念 / suggest 关系边 / apply)。
 
+### 4.12 `shared/migrations/manifest.json` + `schema_migrations`
+
+SQLite schema 由不可变 migration manifest、代码 registry 和数据库 ledger 共同约束：
+
+- manifest 的 `format` 固定为 `flori-sqlite-migrations`。`minimum_supported_version`、`current_version`、`ledger_version` 和 `migrations[].version` 必须是真正的 JSON integer，`bool` 不可冒充整数。
+- 当前格式要求 `minimum_supported_version == 0`、`current_version >= 1`、`1 <= ledger_version <= current_version`。`migrations` 长度必须等于 `current_version`，版本从 1 连续递增；`name` 非空，`checksum` 是 64 位小写十六进制 SHA-256。
+- 代码 registry 的版本、名称和 payload checksum 必须与 manifest 完全一致，而且必须在触碰数据库前完成验证。已发布条目只可追加，不可改写。
+- ledger 字段固定为 `version/name/checksum/applied_at`。达到 `ledger_version` 后，`schema_migrations` 必须精确覆盖 `1..PRAGMA user_version`，每条记录匹配 manifest，且 `applied_at` 为非空字符串。
+- 当前 schema 数字不在本文硬编码，以 tracked manifest 为单一来源。
+
+### 4.13 DR archive manifest v2
+
+新发布归档的顶层格式为：
+
+```text
+format = "flori-disaster-recovery"
+format_version = 2
+compatibility.min_restore_format = 2
+compatibility.sqlite_user_version = N
+compatibility.database_schema:
+  version = N
+  minimum_supported_version
+  maximum_supported_version
+  migration_history = manifest.migrations[0:N] 的 {version,name,checksum} 投影
+  migration_history_sha256
+sqlite.migration_history = 数据库 ledger 的 {version,name,checksum} 投影；低于 ledger_version 时为 null
+```
+
+- `database_schema.migration_history` 长度必须等于 SQLite `user_version`，版本连续，并且是恢复端本地 migration manifest 的完全相同前缀。
+- `migration_history_sha256` 是 history 使用 UTF-8、对象 key 排序、无多余空白的 canonical JSON 编码后的 SHA-256。
+- 达到 ledger 版本后，归档数据库内 `schema_migrations` 的 `version/name/checksum` 投影、`sqlite.migration_history` 和 `database_schema.migration_history` 三者必须一致；`applied_at` 只保留在数据库 ledger 中，不进入归档 history。低版本库不得伪造 ledger。
+- 恢复端除比较版本和 checksum 外，还会在临时数据库副本上执行同一生产 migration runner，证明归档能迁移到当前版本并通过完整 validator。
+- 当前恢复器仍接受 legacy format v1。v1 可以没有 migration history，但仍受本地版本范围和生产迁移链 dry-run 约束。
+- 未来版本、同版本 checksum 分叉、篡改 ledger 或无法通过启动 validator 的 schema，均在切换目标前被拒绝。
+
+### 4.14 Restore transaction marker 与 result JSON
+
+每个资产切换使用 `.flori-dr-transaction.json`，字段集合固定为：
+
+```text
+format, generation, asset, base, status,
+old_names, new_names, preserve_names, moved_old, moved_new
+```
+
+状态机为：
+
+```text
+prepared -> switching -> committed -> accepted -> finalizing -> marker 删除
+```
+
+- `asset` 仅可为 `data/redis/minio/config`，`generation` 和 `base` 必须与本次恢复一致。名称列表必须唯一、有序且只含目标根直属名称；marker、base、old/new 和受控名称都不得经 symlink 逃逸。
+- `moved_old` 和 `moved_new` 必须分别是声明列表的已移动前缀；进入 `committed/accepted/finalizing` 时必须完成全部切换。
+- commit 阶段完成后、accept 阶段开始前发生切换错误时，本次调用统一反向回滚。当前进程一旦开始 accept，普通异常会尝试统一 roll-forward；即使首个 `accepted` marker 尚未持久化，也不在同一调用中回滚已经 commit 的新代。
+- 进程重启后的恢复只以持久 marker 为准：全部资产仍是 `committed` 时统一反向回滚；任一资产已经进入 `accepted/finalizing` 即形成持久的全局提交决策，其余 `committed` 资产只能 roll-forward，禁止回滚。
+- `finalizing` 表示新代已经生效，只剩 stage 或旧代清理；即使 stage 已删除但 marker 尚在，也必须幂等完成 marker 清理。
+- marker 损坏、活动事务所需 marker 缺失、stage 存在但 marker 缺失、混合 generation、重复 asset，或 `accepted` 与未提交状态混合时，恢复器保留现场并 fail-closed，不自动猜测或删除。没有活动事务或 finalize 已正常完成时，目标根无需保留 marker。
+
+成功 restore result 的字段为：
+
+```text
+status, operation, generation, started_at, completed_at, rto_seconds,
+restored_assets, skipped_assets, cleanup_pending,
+commit_recovered_after_error, error_type,
+preserved_target_entries, checks
+```
+
+正常成功时 `commit_recovered_after_error=false`、`error_type=null`。若 accept 阶段发生普通错误，但统一前滚和收尾成功，仍返回 `status=success`，同时令 `commit_recovered_after_error=true`、`error_type=<原异常类>`。`cleanup_pending` 非空表示新代已经提交，只是对应 marker 处于 `accepted/finalizing` 的清理待续状态，不是回滚信号。常规失败 result 仅保证 `status/operation/error_type/error/completed_at`。
+
 ## 5. 错误码
 
 错误体统一为 `{"error": <机器码>, "message": <说明>}`（由 `api/main.py` 注册的 exception_handler

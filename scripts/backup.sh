@@ -24,6 +24,7 @@ MINIO_VOLUME="${MINIO_VOLUME:-${COMPOSE_PROJECT}_minio-data}"
 MINIO_CONTAINER="${MINIO_CONTAINER-flori-minio}"
 MINIO_REQUIRED="${MINIO_REQUIRED:-auto}"
 FLORI_CONFIG_DIR="${FLORI_CONFIG_DIR:-$REPO/configs}"
+FLORI_SCHEMA_MANIFEST="${FLORI_SCHEMA_MANIFEST:-$REPO/shared/migrations/manifest.json}"
 FLORI_DR_IMAGE="${FLORI_DR_IMAGE:-python:3.11-slim}"
 FLORI_REDIS_IMAGE="${FLORI_REDIS_IMAGE:-redis:7-alpine}"
 REDIS_MATERIALIZE_TIMEOUT="${REDIS_MATERIALIZE_TIMEOUT:-60}"
@@ -61,7 +62,8 @@ flori-backup-<generation>.tar.gz、.sha256 与机器可读 result JSON。任一�
   FLORI_DATA_DIR / FLORI_DATA_VOLUME
   REDIS_DATA_DIR / REDIS_VOLUME / REDIS_CONTAINER
   MINIO_DATA_DIR / MINIO_VOLUME / MINIO_REQUIRED=auto|0|1
-  FLORI_CONFIG_DIR / FLORI_DR_IMAGE / BACKUP_GENERATION / BACKUP_RESULT_FILE
+  FLORI_CONFIG_DIR / FLORI_SCHEMA_MANIFEST / FLORI_DR_IMAGE
+  BACKUP_GENERATION / BACKUP_RESULT_FILE
   FLORI_REDIS_IMAGE / REDIS_MATERIALIZE_TIMEOUT
 EOF
   exit "${1:-0}"
@@ -82,6 +84,13 @@ done
 
 command -v docker >/dev/null 2>&1 || { echo "错误: 找不到 docker" >&2; exit 1; }
 [ -f "$SCRIPT_DIR/dr_snapshot.py" ] || { echo "错误: 缺少 scripts/dr_snapshot.py" >&2; exit 1; }
+[ -f "$FLORI_SCHEMA_MANIFEST" ] || {
+  echo "错误: 缺少 schema manifest: $FLORI_SCHEMA_MANIFEST" >&2
+  exit 1
+}
+FLORI_SCHEMA_MANIFEST="$(cd "$(dirname "$FLORI_SCHEMA_MANIFEST")" && pwd)/$(basename "$FLORI_SCHEMA_MANIFEST")"
+FLORI_SCHEMA_DIR="$(dirname "$FLORI_SCHEMA_MANIFEST")"
+FLORI_SCHEMA_NAME="$(basename "$FLORI_SCHEMA_MANIFEST")"
 
 discover_data_mount() {
   local container="$1" destination="$2" descriptor type name source
@@ -158,6 +167,7 @@ RESULT_NAME="$(basename "$BACKUP_RESULT_FILE")"
 
 DOCKER_ARGS=(run --rm
   -v "$SCRIPT_DIR/dr_snapshot.py:/tool/dr_snapshot.py:ro"
+  -v "$FLORI_SCHEMA_DIR:/tool/migrations:ro"
   -v "$BACKUP_DIR:/output"
   -v "$RESULT_DIR:/result")
 CREATE_ARGS=(python /tool/dr_snapshot.py create
@@ -165,6 +175,7 @@ CREATE_ARGS=(python /tool/dr_snapshot.py create
   --redis /source-redis
   --output "/output/$ARCHIVE_NAME"
   --generation "$BACKUP_GENERATION"
+  --schema-manifest "/tool/migrations/$FLORI_SCHEMA_NAME"
   --result-file "/result/$RESULT_NAME"
   --owner-uid "$(id -u)"
   --owner-gid "$(id -g)")

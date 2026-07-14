@@ -4,7 +4,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 FLORI_DR_IMAGE="${FLORI_DR_IMAGE:-python:3.11-slim}"
+FLORI_SCHEMA_MANIFEST="${FLORI_SCHEMA_MANIFEST:-$REPO/shared/migrations/manifest.json}"
 DRILL_RESULT_DIR="${DRILL_RESULT_DIR:-./backups}"
 DRILL_RESULT_FILE="${DRILL_RESULT_FILE:-}"
 
@@ -38,6 +40,13 @@ done
 
 command -v docker >/dev/null 2>&1 || { echo "错误: 找不到 docker" >&2; exit 1; }
 [ -f "$SCRIPT_DIR/dr_snapshot.py" ] || { echo "错误: 缺少 scripts/dr_snapshot.py" >&2; exit 1; }
+[ -f "$FLORI_SCHEMA_MANIFEST" ] || {
+  echo "错误: 缺少 schema manifest: $FLORI_SCHEMA_MANIFEST" >&2
+  exit 1
+}
+FLORI_SCHEMA_MANIFEST="$(cd "$(dirname "$FLORI_SCHEMA_MANIFEST")" && pwd)/$(basename "$FLORI_SCHEMA_MANIFEST")"
+FLORI_SCHEMA_DIR="$(dirname "$FLORI_SCHEMA_MANIFEST")"
+FLORI_SCHEMA_NAME="$(basename "$FLORI_SCHEMA_MANIFEST")"
 if [ -z "$DRILL_RESULT_FILE" ]; then
   mkdir -p "$DRILL_RESULT_DIR"
   DRILL_RESULT_FILE="$DRILL_RESULT_DIR/flori-dr-drill-$(date -u +%Y%m%dT%H%M%SZ)-$$.json"
@@ -49,9 +58,11 @@ RESULT_NAME="$(basename "$DRILL_RESULT_FILE")"
 echo "==> 启动隔离空环境灾备演练"
 docker run --rm \
   -v "$SCRIPT_DIR/dr_snapshot.py:/tool/dr_snapshot.py:ro" \
+  -v "$FLORI_SCHEMA_DIR:/tool/migrations:ro" \
   -v "$RESULT_DIR:/result" \
   "$FLORI_DR_IMAGE" \
   python /tool/dr_snapshot.py drill \
+    --schema-manifest "/tool/migrations/$FLORI_SCHEMA_NAME" \
     --result-file "/result/$RESULT_NAME" \
     --owner-uid "$(id -u)" \
     --owner-gid "$(id -g)"
