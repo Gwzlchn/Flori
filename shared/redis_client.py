@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import time
 from datetime import datetime, timezone
 from typing import AsyncIterator
@@ -102,6 +103,229 @@ end
 return 0
 """
 
+_LUA_ENQUEUE_AI_ONCE = """
+-- KEYS: submitted marker,queue ZSET,enqueued hash.
+-- ARGV: task JSON,priority,enqueued field,epoch seconds,marker ttl.
+local marker_type = redis.call('TYPE', KEYS[1])['ok']
+local queue_type = redis.call('TYPE', KEYS[2])['ok']
+local enqueued_type = redis.call('TYPE', KEYS[3])['ok']
+if marker_type ~= 'none' and marker_type ~= 'string' then
+    return redis.error_reply('WRONGTYPE submitted marker must be a string')
+end
+if queue_type ~= 'none' and queue_type ~= 'zset' then
+    return redis.error_reply('WRONGTYPE AI queue must be a sorted set')
+end
+if enqueued_type ~= 'none' and enqueued_type ~= 'hash' then
+    return redis.error_reply('WRONGTYPE enqueue timestamps must be a hash')
+end
+if marker_type == 'string' then
+    if redis.call('GET', KEYS[1]) == ARGV[1] then return {0, 'replay'} end
+    return {-1, 'payload_conflict'}
+end
+redis.call('ZADD', KEYS[2], ARGV[2], ARGV[1])
+redis.call('HSET', KEYS[3], ARGV[3], ARGV[4])
+redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[5]))
+return {1, 'enqueued'}
+"""
+
+_LUA_CLAIM_AI_TASK = """
+-- KEYS: queue ZSET,enqueued HASH,expiry ZSET,claim key prefix.
+-- ARGV: worker,claim_id,lease_until,now,max_scan,accepted tags JSON,rejected tags JSON,lease seconds.
+local accepted = cjson.decode(ARGV[6])
+local rejected = cjson.decode(ARGV[7])
+local accepted_set = {}
+local rejected_set = {}
+for _, tag in ipairs(accepted) do accepted_set[tag] = true end
+for _, tag in ipairs(rejected) do rejected_set[tag] = true end
+local entries = redis.call('ZRANGE', KEYS[1], 0, tonumber(ARGV[5]) - 1, 'WITHSCORES')
+for index = 1, #entries, 2 do
+    local raw = entries[index]
+    local score = entries[index + 1]
+    local ok, task = pcall(cjson.decode, raw)
+    if ok and task['kind'] == 'ai' and type(task['task_id']) == 'string'
+        and task['task_id'] ~= '' then
+        local eligible = true
+        local required = task['require_tags'] or {}
+        local tags = task['tags'] or {}
+        for _, tag in ipairs(required) do
+            if not accepted_set[tag] then eligible = false end
+        end
+        for _, tag in ipairs(tags) do
+            if rejected_set[tag] then eligible = false end
+        end
+        if eligible then
+            local task_id = task['task_id']
+            local claim_key = KEYS[4] .. task_id
+            local previous_state = redis.call('HGET', claim_key, 'state')
+            if not previous_state or previous_state == 'requeued' then
+                if redis.call('ZREM', KEYS[1], raw) == 1 then
+                    local requeue_count = redis.call('HGET', claim_key, 'requeue_count') or '0'
+                    local batch_id = task['batch_id'] or ''
+                    local attempt = task['attempt'] or 0
+                    local revision = task['revision'] or 0
+                    redis.call('HSET', claim_key,
+                        'task_id', task_id,
+                        'batch_id', tostring(batch_id),
+                        'attempt', tostring(attempt),
+                        'revision', tostring(revision),
+                        'worker_id', ARGV[1],
+                        'claim_id', ARGV[2],
+                        'state', 'claimed',
+                        'lease_until', ARGV[3],
+                        'lease_seconds', ARGV[8],
+                        'raw_json', raw,
+                        'score', score,
+                        'requeue_count', requeue_count)
+                    redis.call('ZADD', KEYS[3], ARGV[3], task_id)
+                    redis.call('HDEL', KEYS[2], 'ai|ai|' .. task_id)
+                    return {raw, score, requeue_count}
+                end
+            end
+        end
+    end
+end
+return nil
+"""
+
+_LUA_AI_CLAIM_CAS = """
+-- KEYS: claim HASH,expiry ZSET. ARGV: task,batch,attempt,revision,worker,claim,
+-- expected state,new state,lease until,terminal flag.
+if redis.call('HGET', KEYS[1], 'task_id') ~= ARGV[1]
+    or redis.call('HGET', KEYS[1], 'batch_id') ~= ARGV[2]
+    or redis.call('HGET', KEYS[1], 'attempt') ~= ARGV[3]
+    or redis.call('HGET', KEYS[1], 'revision') ~= ARGV[4]
+    or redis.call('HGET', KEYS[1], 'worker_id') ~= ARGV[5]
+    or redis.call('HGET', KEYS[1], 'claim_id') ~= ARGV[6]
+    or redis.call('HGET', KEYS[1], 'state') ~= ARGV[7] then
+    return 0
+end
+redis.call('HSET', KEYS[1], 'state', ARGV[8], 'lease_until', ARGV[9])
+if ARGV[10] == '1' then
+    redis.call('ZREM', KEYS[2], ARGV[1])
+else
+    redis.call('ZADD', KEYS[2], ARGV[9], ARGV[1])
+end
+return 1
+"""
+
+_LUA_RECONCILE_AI_CLAIMS = """
+-- KEYS: expiry ZSET,queue ZSET,enqueued HASH,claim key prefix.
+-- ARGV: now epoch.
+local task_ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+local actions = {}
+for _, task_id in ipairs(task_ids) do
+    local claim_key = KEYS[4] .. task_id
+    local state = redis.call('HGET', claim_key, 'state')
+    local lease_until = tonumber(redis.call('HGET', claim_key, 'lease_until') or '0')
+    if lease_until <= tonumber(ARGV[1]) then
+        if state == 'claimed' then
+            local count = tonumber(redis.call('HGET', claim_key, 'requeue_count') or '0')
+            if count < 1 then
+                local raw = redis.call('HGET', claim_key, 'raw_json')
+                local score = redis.call('HGET', claim_key, 'score')
+                if raw and score then
+                    redis.call('ZADD', KEYS[2], 'NX', score, raw)
+                    redis.call('HSET', KEYS[3], 'ai|ai|' .. task_id, ARGV[1])
+                    redis.call('HSET', claim_key, 'state', 'requeued',
+                        'requeue_count', '1', 'lease_until', '0')
+                    redis.call('ZREM', KEYS[1], task_id)
+                    table.insert(actions, task_id)
+                    table.insert(actions, 'requeued')
+                end
+            else
+                redis.call('HSET', claim_key, 'state', 'ambiguous', 'lease_until', '0')
+                redis.call('ZREM', KEYS[1], task_id)
+                table.insert(actions, task_id)
+                table.insert(actions, 'ambiguous')
+            end
+        elseif state == 'executing' then
+            redis.call('HSET', claim_key, 'state', 'ambiguous', 'lease_until', '0')
+            redis.call('ZREM', KEYS[1], task_id)
+            table.insert(actions, task_id)
+            table.insert(actions, 'ambiguous')
+        else
+            redis.call('ZREM', KEYS[1], task_id)
+        end
+    end
+end
+return actions
+"""
+
+_LUA_CANCEL_AI_BEFORE_EXECUTION = """
+-- KEYS: queue ZSET,enqueued HASH,claim HASH,expiry ZSET,pool holders SET.
+-- ARGV: task,batch,attempt,revision,raw JSON,enqueued field.
+local queue_type = redis.call('TYPE', KEYS[1])['ok']
+local enqueued_type = redis.call('TYPE', KEYS[2])['ok']
+local claim_type = redis.call('TYPE', KEYS[3])['ok']
+local expiry_type = redis.call('TYPE', KEYS[4])['ok']
+local holders_type = redis.call('TYPE', KEYS[5])['ok']
+if queue_type ~= 'none' and queue_type ~= 'zset' then
+    return redis.error_reply('WRONGTYPE AI queue must be a sorted set')
+end
+if enqueued_type ~= 'none' and enqueued_type ~= 'hash' then
+    return redis.error_reply('WRONGTYPE enqueue timestamps must be a hash')
+end
+if claim_type ~= 'none' and claim_type ~= 'hash' then
+    return redis.error_reply('WRONGTYPE AI claim must be a hash')
+end
+if expiry_type ~= 'none' and expiry_type ~= 'zset' then
+    return redis.error_reply('WRONGTYPE AI claim expiry must be a sorted set')
+end
+if holders_type ~= 'none' and holders_type ~= 'set' then
+    return redis.error_reply('WRONGTYPE AI pool holders must be a set')
+end
+local state = redis.call('HGET', KEYS[3], 'state')
+if state then
+    if redis.call('HGET', KEYS[3], 'task_id') ~= ARGV[1]
+        or redis.call('HGET', KEYS[3], 'batch_id') ~= ARGV[2]
+        or redis.call('HGET', KEYS[3], 'attempt') ~= ARGV[3]
+        or redis.call('HGET', KEYS[3], 'revision') ~= ARGV[4] then
+        return 'stale'
+    end
+    if state == 'canceled' then return 'canceled' end
+    if state == 'executing' then return 'executing' end
+    if state == 'claimed' then
+        local claim_id = redis.call('HGET', KEYS[3], 'claim_id') or ''
+        redis.call('HSET', KEYS[3], 'state', 'canceled', 'lease_until', '0')
+        redis.call('ZREM', KEYS[4], ARGV[1])
+        if claim_id ~= '' then redis.call('SREM', KEYS[5], claim_id) end
+        redis.call('HDEL', KEYS[2], ARGV[6])
+        return 'canceled'
+    end
+    if state == 'requeued' then
+        if redis.call('ZREM', KEYS[1], ARGV[5]) ~= 1 then return 'race' end
+        local claim_id = redis.call('HGET', KEYS[3], 'claim_id') or ''
+        redis.call('HSET', KEYS[3], 'state', 'canceled', 'lease_until', '0')
+        redis.call('ZREM', KEYS[4], ARGV[1])
+        if claim_id ~= '' then redis.call('SREM', KEYS[5], claim_id) end
+        redis.call('HDEL', KEYS[2], ARGV[6])
+        return 'canceled'
+    end
+    return state
+end
+if redis.call('ZREM', KEYS[1], ARGV[5]) ~= 1 then return 'missing' end
+redis.call('HSET', KEYS[3],
+    'task_id', ARGV[1],
+    'batch_id', ARGV[2],
+    'attempt', ARGV[3],
+    'revision', ARGV[4],
+    'worker_id', '',
+    'claim_id', '',
+    'state', 'canceled',
+    'lease_until', '0',
+    'lease_seconds', '0',
+    'raw_json', ARGV[5],
+    'requeue_count', '0')
+redis.call('HDEL', KEYS[2], ARGV[6])
+return 'canceled'
+"""
+
+
+class AIEnqueueConflictError(RuntimeError):
+    """同一 AI task_id 已绑定不同 canonical payload."""
+
+    code = "ai_task_payload_conflict"
+
 
 class RedisClient:
     TASK_LEASE_TTL_SEC = 180
@@ -183,6 +407,333 @@ class RedisClient:
             await self.r.hset("queue:enqueued", self._enqueued_field("ai", payload), str(time.time()))
         except Exception:
             pass
+
+    async def enqueue_ai_task_once(
+        self,
+        payload: dict,
+        priority: int = 0,
+        marker_ttl_sec: int = 7 * 86_400,
+    ) -> bool:
+        """按 task_id 原子标记并入队,防止 Scheduler 重启后重复付费投递."""
+        task_id = payload.get("task_id")
+        if (
+            payload.get("kind") != "ai"
+            or not isinstance(task_id, str)
+            or not task_id.strip()
+        ):
+            raise ValueError("AI task payload 必须包含非空 task_id 且 kind='ai'")
+        if type(priority) is not int:
+            raise ValueError("priority 必须是整数")
+        if type(marker_ttl_sec) is not int or not 60 <= marker_ttl_sec <= 30 * 86_400:
+            raise ValueError("marker_ttl_sec 必须是 60..2592000 的整数")
+        if payload.get("step") == "study_suggestions":
+            from shared.study_suggestions import validate_study_suggestion_task_payload
+
+            validate_study_suggestion_task_payload(payload)
+        task = json.dumps(payload, sort_keys=True)
+        result = await self.r.eval(
+            _LUA_ENQUEUE_AI_ONCE,
+            3,
+            f"ai:submitted:{task_id}",
+            "queue:ai",
+            "queue:enqueued",
+            task,
+            str(priority),
+            self._enqueued_field("ai", payload),
+            str(time.time()),
+            str(marker_ttl_sec),
+        )
+        status = int(result[0])
+        if status == -1:
+            raise AIEnqueueConflictError(
+                f"AI task_id 已绑定不同 payload: {task_id}"
+            )
+        return status == 1
+
+    @staticmethod
+    def _validate_ai_lease_inputs(
+        *, worker_id: str, lease_seconds: int, now_epoch: int | float,
+    ) -> None:
+        if not isinstance(worker_id, str) or not worker_id.strip():
+            raise ValueError("worker_id 必须是非空字符串")
+        if type(lease_seconds) is not int or not 1 <= lease_seconds <= 86_400:
+            raise ValueError("lease_seconds 必须是 1..86400 的整数")
+        if isinstance(now_epoch, bool) or not isinstance(now_epoch, (int, float)):
+            raise ValueError("now_epoch 必须是 epoch 秒")
+
+    async def claim_ai_task(
+        self,
+        *,
+        worker_id: str,
+        lease_seconds: int = TASK_LEASE_TTL_SEC,
+        now_epoch: int | float | None = None,
+        claim_id: str | None = None,
+        tags: set[str] | list[str] | None = None,
+        reject_tags: set[str] | list[str] | None = None,
+        max_scan: int = 20,
+    ) -> dict | None:
+        """原子把匹配的 queue:ai 成员转成 claimed 租约,消除 ZPOPMIN 崩溃窗口."""
+        now = time.time() if now_epoch is None else now_epoch
+        self._validate_ai_lease_inputs(
+            worker_id=worker_id, lease_seconds=lease_seconds, now_epoch=now,
+        )
+        if type(max_scan) is not int or not 1 <= max_scan <= 200:
+            raise ValueError("max_scan 必须是 1..200 的整数")
+        token = claim_id or secrets.token_urlsafe(24)
+        if not isinstance(token, str) or not token:
+            raise ValueError("claim_id 必须是非空字符串")
+        lease_until = float(now) + lease_seconds
+        result = await self.r.eval(
+            _LUA_CLAIM_AI_TASK,
+            4,
+            "queue:ai",
+            "queue:enqueued",
+            "ai:claims:expiry",
+            "ai:claim:",
+            worker_id,
+            token,
+            str(lease_until),
+            str(float(now)),
+            str(max_scan),
+            json.dumps(sorted(set(tags or []))),
+            json.dumps(sorted(set(reject_tags or []))),
+            str(lease_seconds),
+        )
+        if not result:
+            return None
+        raw_json, score, requeue_count = result
+        payload = json.loads(raw_json)
+        return {
+            **payload,
+            "state": "claimed",
+            "claim_id": token,
+            "worker_id": worker_id,
+            "lease_until": lease_until,
+            "lease_seconds": lease_seconds,
+            "score": float(score),
+            "requeue_count": int(requeue_count),
+        }
+
+    async def _ai_claim_cas(
+        self,
+        *,
+        task_id: str,
+        claim_id: str,
+        worker_id: str,
+        attempt: int,
+        revision: int,
+        batch_id: str | None,
+        expected_state: str,
+        new_state: str,
+        lease_until: float,
+        terminal: bool,
+    ) -> bool:
+        key = f"ai:claim:{task_id}"
+        bound_batch = batch_id
+        if bound_batch is None:
+            bound_batch = await self.r.hget(key, "batch_id")
+        if bound_batch is None:
+            return False
+        result = await self.r.eval(
+            _LUA_AI_CLAIM_CAS,
+            2,
+            key,
+            "ai:claims:expiry",
+            task_id,
+            str(bound_batch),
+            str(attempt),
+            str(revision),
+            worker_id,
+            claim_id,
+            expected_state,
+            new_state,
+            str(lease_until),
+            "1" if terminal else "0",
+        )
+        return int(result) == 1
+
+    async def mark_ai_task_executing(
+        self,
+        *,
+        task_id: str,
+        claim_id: str,
+        worker_id: str,
+        attempt: int,
+        revision: int,
+        now_epoch: int | float | None = None,
+        lease_seconds: int | None = None,
+        batch_id: str | None = None,
+    ) -> bool:
+        """在首次 provider 调用前把同一 claim 从 claimed CAS 为 executing."""
+        now = time.time() if now_epoch is None else now_epoch
+        if lease_seconds is None:
+            raw_lease = await self.r.hget(f"ai:claim:{task_id}", "lease_seconds")
+            lease_seconds = int(raw_lease) if raw_lease is not None else self.TASK_LEASE_TTL_SEC
+        self._validate_ai_lease_inputs(
+            worker_id=worker_id, lease_seconds=lease_seconds, now_epoch=now,
+        )
+        return await self._ai_claim_cas(
+            task_id=task_id, claim_id=claim_id, worker_id=worker_id,
+            attempt=attempt, revision=revision, batch_id=batch_id,
+            expected_state="claimed", new_state="executing",
+            lease_until=float(now) + lease_seconds, terminal=False,
+        )
+
+    async def renew_ai_task_claim(
+        self,
+        *,
+        task_id: str,
+        claim_id: str,
+        worker_id: str,
+        attempt: int,
+        revision: int,
+        now_epoch: int | float | None = None,
+        lease_seconds: int | None = None,
+        batch_id: str | None = None,
+        state: str = "executing",
+    ) -> bool:
+        """续约仍由完整任务身份 CAS,陈旧 worker 不能延长新执行."""
+        if state not in {"claimed", "executing"}:
+            raise ValueError("state 必须是 claimed/executing")
+        now = time.time() if now_epoch is None else now_epoch
+        if lease_seconds is None:
+            raw_lease = await self.r.hget(f"ai:claim:{task_id}", "lease_seconds")
+            lease_seconds = int(raw_lease) if raw_lease is not None else self.TASK_LEASE_TTL_SEC
+        self._validate_ai_lease_inputs(
+            worker_id=worker_id, lease_seconds=lease_seconds, now_epoch=now,
+        )
+        return await self._ai_claim_cas(
+            task_id=task_id, claim_id=claim_id, worker_id=worker_id,
+            attempt=attempt, revision=revision, batch_id=batch_id,
+            expected_state=state, new_state=state,
+            lease_until=float(now) + lease_seconds, terminal=False,
+        )
+
+    async def finish_ai_task_claim(
+        self,
+        *,
+        task_id: str,
+        claim_id: str,
+        worker_id: str,
+        attempt: int,
+        revision: int,
+        outcome: str,
+        batch_id: str | None = None,
+    ) -> bool:
+        """结果和持久审计落地后才把 executing claim 收口为终态."""
+        if outcome not in {"succeeded", "failed"}:
+            raise ValueError("outcome 必须是 succeeded/failed")
+        return await self._ai_claim_cas(
+            task_id=task_id, claim_id=claim_id, worker_id=worker_id,
+            attempt=attempt, revision=revision, batch_id=batch_id,
+            expected_state="executing", new_state=outcome,
+            lease_until=0, terminal=True,
+        )
+
+    async def abandon_ai_task_claim(
+        self,
+        *,
+        task_id: str,
+        claim_id: str,
+        worker_id: str,
+        attempt: int,
+        revision: int,
+        batch_id: str | None = None,
+        now_epoch: int | float | None = None,
+    ) -> bool:
+        """provider 尚未开始时把 claimed 租约立即到期,交统一收割器安全回队."""
+        now = time.time() if now_epoch is None else now_epoch
+        changed = await self._ai_claim_cas(
+            task_id=task_id, claim_id=claim_id, worker_id=worker_id,
+            attempt=attempt, revision=revision, batch_id=batch_id,
+            expected_state="claimed", new_state="claimed",
+            lease_until=float(now), terminal=False,
+        )
+        if changed:
+            await self.reconcile_ai_task_claims(now_epoch=now)
+        return changed
+
+    async def reconcile_ai_task_claims(
+        self, *, now_epoch: int | float | None = None,
+    ) -> list[dict[str, str]]:
+        """claimed 最多安全回队一次;executing 到期只进入 ambiguous."""
+        now = time.time() if now_epoch is None else now_epoch
+        if isinstance(now, bool) or not isinstance(now, (int, float)):
+            raise ValueError("now_epoch 必须是 epoch 秒")
+        raw = await self.r.eval(
+            _LUA_RECONCILE_AI_CLAIMS,
+            4,
+            "ai:claims:expiry",
+            "queue:ai",
+            "queue:enqueued",
+            "ai:claim:",
+            str(float(now)),
+        )
+        return [
+            {"task_id": raw[index], "action": raw[index + 1]}
+            for index in range(0, len(raw), 2)
+        ]
+
+    async def cancel_ai_task_before_execution(self, payload: dict) -> str:
+        """只在任务尚未进入 provider 时原子撤队并终止精确批次身份."""
+        if payload.get("kind") != "ai":
+            raise ValueError("AI task payload kind 非法")
+        task_id = payload.get("task_id")
+        batch_id = payload.get("batch_id")
+        attempt = payload.get("attempt")
+        revision = payload.get("revision")
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError("AI task payload task_id 非法")
+        if not isinstance(batch_id, str) or not batch_id:
+            raise ValueError("AI task payload batch_id 非法")
+        if type(attempt) is not int or attempt < 1:
+            raise ValueError("AI task payload attempt 非法")
+        if type(revision) is not int or revision < 1:
+            raise ValueError("AI task payload revision 非法")
+        raw = json.dumps(payload, sort_keys=True)
+        result = await self.r.eval(
+            _LUA_CANCEL_AI_BEFORE_EXECUTION,
+            5,
+            "queue:ai",
+            "queue:enqueued",
+            f"ai:claim:{task_id}",
+            "ai:claims:expiry",
+            "pool:ai:holders",
+            task_id,
+            batch_id,
+            str(attempt),
+            str(revision),
+            raw,
+            self._enqueued_field("ai", payload),
+        )
+        return str(result)
+
+    async def get_ai_task_claim(self, task_id: str) -> dict | None:
+        data = await self.r.hgetall(f"ai:claim:{task_id}")
+        if not data:
+            return None
+        for field in ("attempt", "revision", "requeue_count", "lease_seconds"):
+            try:
+                data[field] = int(data[field])
+            except (KeyError, TypeError, ValueError):
+                pass
+        try:
+            data["lease_until"] = float(data["lease_until"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        return data
+
+    async def get_live_ai_claim_holders(
+        self, *, now_epoch: int | float | None = None,
+    ) -> set[str]:
+        now = time.time() if now_epoch is None else float(now_epoch)
+        task_ids = await self.r.zrangebyscore("ai:claims:expiry", now, "+inf")
+        holders: set[str] = set()
+        for task_id in task_ids:
+            data = await self.r.hmget(f"ai:claim:{task_id}", "state", "claim_id")
+            if data and data[0] in {"claimed", "executing"} and data[1]:
+                holders.add(data[1])
+        return holders
 
     async def set_ai_result(self, task_id: str, result: dict, ttl: int = 600) -> None:
         """回写 AI task 结果(LLMResponse.to_jsonable() 或 {'error': ...}),airesult:{task_id} 带 TTL,供 API 取回。"""

@@ -14,14 +14,24 @@ import sys
 import tempfile
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 
 import structlog
 
 from .concepts import norm_related as _norm_related
-from .models import AIUsage, Collection, Job, JobStatus, Step, StepStatus, Worker
+from .models import (
+    AIUsage,
+    Collection,
+    DEFAULT_AI_MODEL,
+    DEFAULT_AI_PROVIDER,
+    Job,
+    JobStatus,
+    Step,
+    StepStatus,
+    Worker,
+)
 from .migrations import (
     Migration,
     UnsupportedSchemaVersionError,
@@ -51,6 +61,28 @@ from .study import (
     schedule_next_review,
     utc_now,
     validate_review_request,
+)
+from .study_suggestions import (
+    MAX_GENERATED_CARDS,
+    StudySuggestionConflictError,
+    StudySuggestionFaultInjector,
+    StudySuggestionNotFoundError,
+    canonical_json,
+    content_fingerprint,
+    knowledge_fingerprint,
+    operation_payload,
+    parse_ai_suggestions,
+    payload_fingerprint,
+    require_external_request_id,
+    require_identifier,
+    require_plain_int,
+    require_revision,
+    resolve_study_suggestion_prompt,
+    sha256_text,
+    study_suggestion_generator_fingerprint,
+    validate_study_suggestion_prompt_snapshot,
+    validate_card_content,
+    validate_operation_items,
 )
 
 # schema 版本只从不可变迁移清单读取。
@@ -776,6 +808,26 @@ class Database:
                 str(self._path), check_same_thread=False
             )
             self._conn.row_factory = sqlite3.Row
+            # v4 指纹 trigger 调用与 Python 写路同一实现.未通过 Database
+            # 打开的连接没有这两个函数,直接篡改会 fail-closed.
+            self._conn.create_function(
+                "flori_study_knowledge_fingerprint",
+                2,
+                lambda domain, key: knowledge_fingerprint(str(domain), str(key)),
+                deterministic=True,
+            )
+            self._conn.create_function(
+                "flori_study_content_fingerprint",
+                5,
+                lambda domain, card_type, front, back, explanation: content_fingerprint(
+                    domain=str(domain),
+                    card_type=str(card_type),
+                    front=str(front),
+                    back=str(back),
+                    explanation=str(explanation or ""),
+                ),
+                deterministic=True,
+            )
             try:
                 # 未知新 schema 必须在 WAL 切换等任何写性 PRAGMA 之前拒绝。
                 assert_schema_compatible(
@@ -887,44 +939,59 @@ class Database:
         # lineage_key 缺省由 id 反推(去时间戳),保证同源快照归一组。
         lineage = job.lineage_key or _lineage_key_of(job.id)
         with self._lock:
-            self._conn.execute(
-                """INSERT INTO jobs
-                   (id, content_type, pipeline, collection_id, url, title,
-                    domain, source, style_tags, status, progress_pct, meta,
-                    published_at, created_at, updated_at, error,
-                    lineage_key, is_current, source_digest, pipeline_digest, parent_job_id)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    job.id,
-                    job.content_type,
-                    job.pipeline,
-                    job.collection_id,
-                    job.url,
-                    job.title,
-                    job.domain,
-                    job.source,
-                    json.dumps(job.style_tags, ensure_ascii=False),
-                    job.status.value if isinstance(job.status, JobStatus) else job.status,
-                    job.progress_pct,
-                    json.dumps(job.meta, ensure_ascii=False),
-                    job.published_at.isoformat() if job.published_at else None,
-                    job.created_at.isoformat(),
-                    job.updated_at.isoformat(),
-                    job.error,
-                    lineage,
-                    1 if job.is_current else 0,
-                    job.source_digest,
-                    job.pipeline_digest,
-                    job.parent_job_id,
-                ),
-            )
-            # 新快照设为 current → 同 lineage 其余降为历史(列表/KB 默认只显 current)。
-            if job.is_current and lineage:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
                 self._conn.execute(
-                    "UPDATE jobs SET is_current=0 WHERE lineage_key=? AND id!=?",
-                    (lineage, job.id),
+                    """INSERT INTO jobs
+                       (id, content_type, pipeline, collection_id, url, title,
+                        domain, source, style_tags, status, progress_pct, meta,
+                        published_at, created_at, updated_at, error,
+                        lineage_key, is_current, source_digest, pipeline_digest, parent_job_id)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        job.id,
+                        job.content_type,
+                        job.pipeline,
+                        job.collection_id,
+                        job.url,
+                        job.title,
+                        job.domain,
+                        job.source,
+                        json.dumps(job.style_tags, ensure_ascii=False),
+                        job.status.value if isinstance(job.status, JobStatus) else job.status,
+                        job.progress_pct,
+                        json.dumps(job.meta, ensure_ascii=False),
+                        job.published_at.isoformat() if job.published_at else None,
+                        job.created_at.isoformat(),
+                        job.updated_at.isoformat(),
+                        job.error,
+                        lineage,
+                        1 if job.is_current else 0,
+                        job.source_digest,
+                        job.pipeline_digest,
+                        job.parent_job_id,
+                    ),
                 )
-            self._conn.commit()
+                # 降级旧快照和证据失效必须同事务提交。
+                # 否则新 current 可见时旧证据仍会被接受。
+                if job.is_current and lineage:
+                    superseded = self._conn.execute(
+                        "SELECT id FROM jobs WHERE lineage_key=? AND id!=? AND is_current=1",
+                        (lineage, job.id),
+                    ).fetchall()
+                    self._conn.execute(
+                        "UPDATE jobs SET is_current=0 WHERE lineage_key=? AND id!=?",
+                        (lineage, job.id),
+                    )
+                    for row in superseded:
+                        self._revalidate_study_suggestion_evidence_locked(
+                            job_id=str(row["id"])
+                        )
+                self._conn.commit()
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
 
     def get_job(self, job_id: str) -> Job | None:
         with self._lock:
@@ -1026,20 +1093,31 @@ class Database:
         if not lineage_key:
             return
         with self._lock:
-            has = self._conn.execute(
-                "SELECT 1 FROM jobs WHERE lineage_key=? AND is_current=1 LIMIT 1", (lineage_key,)
-            ).fetchone()
-            if has:
-                return
-            latest = self._conn.execute(
-                "SELECT id FROM jobs WHERE lineage_key=? ORDER BY created_at DESC LIMIT 1",
-                (lineage_key,),
-            ).fetchone()
-            if latest:
-                self._conn.execute(
-                    "UPDATE jobs SET is_current=1 WHERE id=?", (latest["id"],)
-                )
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                has = self._conn.execute(
+                    "SELECT 1 FROM jobs WHERE lineage_key=? AND is_current=1 LIMIT 1",
+                    (lineage_key,),
+                ).fetchone()
+                if has:
+                    self._conn.commit()
+                    return
+                latest = self._conn.execute(
+                    "SELECT id FROM jobs WHERE lineage_key=? ORDER BY created_at DESC LIMIT 1",
+                    (lineage_key,),
+                ).fetchone()
+                if latest:
+                    self._conn.execute(
+                        "UPDATE jobs SET is_current=1 WHERE id=?", (latest["id"],)
+                    )
+                    self._revalidate_study_suggestion_evidence_locked(
+                        job_id=str(latest["id"])
+                    )
                 self._conn.commit()
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
 
     def lineage_counts(self, lineage_keys: list[str]) -> dict[str, int]:
         """批量取各 lineage 的快照总数(供列表「N 个历史版本」提示)。一次 IN 查询。"""
@@ -1108,6 +1186,11 @@ class Database:
         invalid = set(fields.keys()) - _JOB_UPDATABLE
         if invalid:
             raise ValueError(f"Invalid job columns: {invalid}")
+        if "is_current" in fields:
+            raw_current = fields["is_current"]
+            if type(raw_current) not in (bool, int) or raw_current not in (0, 1):
+                raise ValueError("is_current 必须是 bool/0/1")
+            fields["is_current"] = 1 if raw_current else 0
         fields["updated_at"] = _now_iso()
         if "style_tags" in fields:
             fields["style_tags"] = json.dumps(fields["style_tags"], ensure_ascii=False)
@@ -1123,24 +1206,62 @@ class Database:
         # FTS 行冗余存 title/domain/collection_id,这几项变更要同步,否则检索元数据漂移。
         fts_sync = {k: fields[k] for k in ("title", "domain", "collection_id") if k in fields}
         with self._lock:
-            self._conn.execute(
-                f"UPDATE jobs SET {set_clause} WHERE id=?", values
-            )
-            if fts_sync:
-                fts_clause = ", ".join(f"{k}=?" for k in fts_sync)
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                before = self._conn.execute(
+                    "SELECT lineage_key, is_current FROM jobs WHERE id=?", (job_id,)
+                ).fetchone()
+                if (
+                    before is not None
+                    and "lineage_key" in fields
+                    and fields["lineage_key"] != before["lineage_key"]
+                    and int(fields.get("is_current", before["is_current"])) == 1
+                ):
+                    raise ValueError("current job 不允许单独变更 lineage_key")
                 self._conn.execute(
-                    f"UPDATE notes_fts5 SET {fts_clause} WHERE job_id=?",
-                    [("" if v is None else v) for v in fts_sync.values()] + [job_id],
+                    f"UPDATE jobs SET {set_clause} WHERE id=?", values
                 )
-                self._conn.execute(
-                    f"UPDATE note_chunks SET {fts_clause} WHERE job_id=?",
-                    [("" if v is None else v) for v in fts_sync.values()] + [job_id],
-                )
-                self._conn.execute(
-                    f"UPDATE note_chunks_fts5 SET {fts_clause} WHERE job_id=?",
-                    [("" if v is None else v) for v in fts_sync.values()] + [job_id],
-                )
-            self._conn.commit()
+                if fts_sync:
+                    fts_clause = ", ".join(f"{k}=?" for k in fts_sync)
+                    self._conn.execute(
+                        f"UPDATE notes_fts5 SET {fts_clause} WHERE job_id=?",
+                        [("" if v is None else v) for v in fts_sync.values()] + [job_id],
+                    )
+                    self._conn.execute(
+                        f"UPDATE note_chunks SET {fts_clause} WHERE job_id=?",
+                        [("" if v is None else v) for v in fts_sync.values()] + [job_id],
+                    )
+                    self._conn.execute(
+                        f"UPDATE note_chunks_fts5 SET {fts_clause} WHERE job_id=?",
+                        [("" if v is None else v) for v in fts_sync.values()] + [job_id],
+                    )
+                if fields.get("is_current"):
+                    current = self._conn.execute(
+                        "SELECT lineage_key FROM jobs WHERE id=?", (job_id,)
+                    ).fetchone()
+                    if current is not None and current["lineage_key"]:
+                        superseded = self._conn.execute(
+                            """SELECT id FROM jobs
+                               WHERE lineage_key=? AND id!=? AND is_current=1""",
+                            (current["lineage_key"], job_id),
+                        ).fetchall()
+                        self._conn.execute(
+                            "UPDATE jobs SET is_current=0 WHERE lineage_key=? AND id!=?",
+                            (current["lineage_key"], job_id),
+                        )
+                        for row in superseded:
+                            self._revalidate_study_suggestion_evidence_locked(
+                                job_id=str(row["id"])
+                            )
+                if {"status", "domain", "is_current", "lineage_key"} & fields.keys():
+                    self._revalidate_study_suggestion_evidence_locked(
+                        job_id=job_id,
+                    )
+                self._conn.commit()
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
 
     def _strip_occurrences_for_jobs(self, job_ids: list[str]) -> None:
         """从 glossary.occurrences 摘除指向这些 job 的出现(保留概念与定义)。
@@ -1163,6 +1284,24 @@ class Database:
                         (json.dumps(kept, ensure_ascii=False), r["domain"], r["term"]),
                     )
 
+    def _detach_study_sources_locked(self, job_ids: list[str]) -> None:
+        """删源前保留学习审计事实,调用方负责事务和锁."""
+        if not job_ids:
+            return
+        now = _now_iso()
+        for job_id in job_ids:
+            self._conn.execute(
+                """UPDATE study_suggestion_evidence
+                   SET status='unavailable', invalid_reason='job_deleted',
+                       validated_at=?
+                   WHERE job_id=?""",
+                (now, job_id),
+            )
+            self._conn.execute(
+                "UPDATE study_cards SET job_id=NULL, updated_at=? WHERE job_id=?",
+                (now, job_id),
+            )
+
     def delete_job_cascade(
         self, job_id: str, collection_id: str | None = None, item_id: str | None = None
     ) -> None:
@@ -1172,24 +1311,31 @@ class Database:
         item_id:订阅来源 job 的去重键(从 job.meta['source_item_id'] 取);传了才清 ingested_items
         → 该条下轮订阅枚举可重新入库(彻底删除)。"""
         with self._lock:
-            self._conn.execute("DELETE FROM notes_fts5 WHERE job_id=?", (job_id,))
-            self._conn.execute("DELETE FROM note_chunks WHERE job_id=?", (job_id,))
-            self._conn.execute("DELETE FROM note_chunks_fts5 WHERE job_id=?", (job_id,))
-            # ai_usage 无外键,不会随 jobs 行 CASCADE,须显式删,否则 token/费用行成永久悬挂孤儿。
-            self._conn.execute("DELETE FROM ai_usage WHERE job_id=?", (job_id,))
-            self._conn.execute("DELETE FROM jobs WHERE id=?", (job_id,))
-            if collection_id:
-                self._conn.execute(
-                    "UPDATE collections SET job_count = MAX(0, job_count - 1) WHERE id=?",
-                    (collection_id,),
-                )
-                if item_id:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                self._detach_study_sources_locked([job_id])
+                self._conn.execute("DELETE FROM notes_fts5 WHERE job_id=?", (job_id,))
+                self._conn.execute("DELETE FROM note_chunks WHERE job_id=?", (job_id,))
+                self._conn.execute("DELETE FROM note_chunks_fts5 WHERE job_id=?", (job_id,))
+                # ai_usage 无外键,不会随 jobs 行 CASCADE,须显式删,否则 token/费用行成永久悬挂孤儿。
+                self._conn.execute("DELETE FROM ai_usage WHERE job_id=?", (job_id,))
+                self._conn.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+                if collection_id:
                     self._conn.execute(
-                        "DELETE FROM ingested_items WHERE collection_id=? AND item_id=?",
-                        (collection_id, item_id),
+                        "UPDATE collections SET job_count = MAX(0, job_count - 1) WHERE id=?",
+                        (collection_id,),
                     )
-            self._strip_occurrences_for_jobs([job_id])
-            self._conn.commit()
+                    if item_id:
+                        self._conn.execute(
+                            "DELETE FROM ingested_items WHERE collection_id=? AND item_id=?",
+                            (collection_id, item_id),
+                        )
+                self._strip_occurrences_for_jobs([job_id])
+                self._conn.commit()
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
 
     # Step
 
@@ -1684,6 +1830,25 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_latest_ai_task_log(self, task_id: str) -> dict | None:
+        """返回独立 AI task 最近一条持久审计,并解析 record 供 TTL 丢失恢复."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM ai_task_logs WHERE task_id=? ORDER BY id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        try:
+            record = json.loads(str(value["record_json"]))
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(record, dict) or record.get("task_id") != task_id:
+            return None
+        value["record"] = record
+        return value
+
     # Prompt Overrides
 
     @staticmethod
@@ -2125,54 +2290,60 @@ class Database:
         注:产物/MinIO 清理走既有 job 删除路径)。
         两种都清该集合 ingested_items(便于重订阅重新入库)。FTS 索引行同步处理,避免悬空行。"""
         with self._lock:
-            if purge:
-                # 先摘除名下 job 的 glossary 出现记录,避免删 job 后留悬空 job_id(与 delete_job_cascade 一致)。
-                job_rows = self._conn.execute(
-                    "SELECT id FROM jobs WHERE collection_id=?", (collection_id,)
-                ).fetchall()
-                self._strip_occurrences_for_jobs([r["id"] for r in job_rows])
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                if purge:
+                    job_rows = self._conn.execute(
+                        "SELECT id FROM jobs WHERE collection_id=?", (collection_id,)
+                    ).fetchall()
+                    job_ids = [str(row["id"]) for row in job_rows]
+                    self._detach_study_sources_locked(job_ids)
+                    self._strip_occurrences_for_jobs(job_ids)
+                    self._conn.execute(
+                        "DELETE FROM notes_fts5 WHERE collection_id=?", (collection_id,)
+                    )
+                    self._conn.execute(
+                        "DELETE FROM note_chunks WHERE collection_id=?", (collection_id,)
+                    )
+                    self._conn.execute(
+                        "DELETE FROM note_chunks_fts5 WHERE collection_id=?", (collection_id,)
+                    )
+                    self._conn.execute(
+                        "DELETE FROM ai_usage WHERE job_id IN "
+                        "(SELECT id FROM jobs WHERE collection_id=?)",
+                        (collection_id,),
+                    )
+                    self._conn.execute(
+                        "DELETE FROM jobs WHERE collection_id=?", (collection_id,)
+                    )
+                else:
+                    self._conn.execute(
+                        "UPDATE jobs SET collection_id=NULL WHERE collection_id=?",
+                        (collection_id,),
+                    )
+                    self._conn.execute(
+                        "UPDATE notes_fts5 SET collection_id='' WHERE collection_id=?",
+                        (collection_id,),
+                    )
+                    self._conn.execute(
+                        "UPDATE note_chunks SET collection_id='' WHERE collection_id=?",
+                        (collection_id,),
+                    )
+                    self._conn.execute(
+                        "UPDATE note_chunks_fts5 SET collection_id='' WHERE collection_id=?",
+                        (collection_id,),
+                    )
                 self._conn.execute(
-                    "DELETE FROM notes_fts5 WHERE collection_id=?", (collection_id,)
+                    "DELETE FROM ingested_items WHERE collection_id=?", (collection_id,)
                 )
                 self._conn.execute(
-                    "DELETE FROM note_chunks WHERE collection_id=?", (collection_id,)
+                    "DELETE FROM collections WHERE id=?", (collection_id,)
                 )
-                self._conn.execute(
-                    "DELETE FROM note_chunks_fts5 WHERE collection_id=?", (collection_id,)
-                )
-                # ai_usage 无外键,须显式删名下各 job 的用量行(与 delete_job_cascade 一致)。
-                self._conn.execute(
-                    "DELETE FROM ai_usage WHERE job_id IN "
-                    "(SELECT id FROM jobs WHERE collection_id=?)",
-                    (collection_id,),
-                )
-                self._conn.execute(
-                    "DELETE FROM jobs WHERE collection_id=?", (collection_id,)
-                )
-            else:
-                self._conn.execute(
-                    "UPDATE jobs SET collection_id=NULL WHERE collection_id=?",
-                    (collection_id,),
-                )
-                self._conn.execute(
-                    "UPDATE notes_fts5 SET collection_id='' WHERE collection_id=?",
-                    (collection_id,),
-                )
-                self._conn.execute(
-                    "UPDATE note_chunks SET collection_id='' WHERE collection_id=?",
-                    (collection_id,),
-                )
-                self._conn.execute(
-                    "UPDATE note_chunks_fts5 SET collection_id='' WHERE collection_id=?",
-                    (collection_id,),
-                )
-            self._conn.execute(
-                "DELETE FROM ingested_items WHERE collection_id=?", (collection_id,)
-            )
-            self._conn.execute(
-                "DELETE FROM collections WHERE id=?", (collection_id,)
-            )
-            self._conn.commit()
+                self._conn.commit()
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
 
     def mark_collection_synced(self, collection_id: str, dt: datetime) -> None:
         """订阅集合同步成功后记录 last_synced_at,并置 last_sync_status=ok、清除错误。"""
@@ -2201,18 +2372,66 @@ class Database:
     def domain_exists(self, domain: str) -> bool:
         """领域键是否已被使用(jobs/collections/glossary 任一有行)。用于 rename 防撞。"""
         with self._lock:
-            for tbl in ("jobs", "collections", "glossary"):
+            for tbl in (
+                "jobs",
+                "collections",
+                "glossary",
+                "study_cards",
+                "study_suggestion_batches",
+                "study_suggestions",
+            ):
                 if self._conn.execute(
                     f"SELECT 1 FROM {tbl} WHERE domain=? LIMIT 1", (domain,)
                 ).fetchone():
                     return True
+            if self._conn.execute(
+                "SELECT 1 FROM study_suggestion_evidence WHERE current_domain=? LIMIT 1",
+                (domain,),
+            ).fetchone():
+                return True
         return False
 
     def rename_domain(self, old: str, new: str) -> dict[str, int]:
         """把领域键 old 原子改成 new(领域是派生键,散在 jobs/collections/glossary + notes_fts5 冗余列)。
         一个事务内迁移所有引用,任一失败回滚。返回各表迁移行数。调用方须先校验 new 合法且不冲突。"""
+        if old == new:
+            raise ValueError("new domain 不得与 old 相同")
         with self._lock:
             try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                for table in (
+                    "jobs",
+                    "collections",
+                    "glossary",
+                    "study_cards",
+                    "study_suggestion_batches",
+                    "study_suggestions",
+                ):
+                    if self._conn.execute(
+                        f"SELECT 1 FROM {table} WHERE domain=? LIMIT 1", (new,)
+                    ).fetchone():
+                        raise ValueError(f"目标 domain 已存在: {new}")
+                if self._conn.execute(
+                    "SELECT 1 FROM study_suggestion_evidence WHERE current_domain=? LIMIT 1",
+                    (new,),
+                ).fetchone():
+                    raise ValueError(f"目标 domain 已存在: {new}")
+                affected_batches = [
+                    str(row["batch_id"])
+                    for row in self._conn.execute(
+                        "SELECT batch_id FROM study_suggestion_batches "
+                        "WHERE domain=? ORDER BY batch_id",
+                        (old,),
+                    ).fetchall()
+                ]
+                identity_impacts = self._study_identity_transition_impacts_locked(
+                    batch_ids=affected_batches,
+                    transition_kind="domain_rename",
+                    source_concept=None,
+                )
+                now = self._study_suggestion_monotonic_now_locked(
+                    affected_batches, _now_iso()
+                ).isoformat()
                 n_jobs = self._conn.execute(
                     "UPDATE jobs SET domain=? WHERE domain=?", (new, old)
                 ).rowcount
@@ -2221,6 +2440,45 @@ class Database:
                 ).rowcount
                 n_gloss = self._conn.execute(
                     "UPDATE glossary SET domain=? WHERE domain=?", (new, old)
+                ).rowcount
+                n_cards = self._conn.execute(
+                    "UPDATE study_cards SET domain=?, updated_at=? WHERE domain=?",
+                    (new, now, old),
+                ).rowcount
+                n_batches = self._conn.execute(
+                    "UPDATE study_suggestion_batches SET domain=?, updated_at=? WHERE domain=?",
+                    (new, now, old),
+                ).rowcount
+                suggestion_rows = self._conn.execute(
+                    """SELECT suggestion_id, knowledge_key, card_type, front, back,
+                              explanation FROM study_suggestions WHERE domain=?
+                       ORDER BY suggestion_id""",
+                    (old,),
+                ).fetchall()
+                for row in suggestion_rows:
+                    self._conn.execute(
+                        """UPDATE study_suggestions
+                           SET domain=?, knowledge_fingerprint=?, content_fingerprint=?,
+                               updated_at=? WHERE suggestion_id=?""",
+                        (
+                            new,
+                            knowledge_fingerprint(new, str(row["knowledge_key"])),
+                            content_fingerprint(
+                                domain=new,
+                                card_type=str(row["card_type"]),
+                                front=str(row["front"]),
+                                back=str(row["back"]),
+                                explanation=str(row["explanation"] or ""),
+                            ),
+                            now,
+                            row["suggestion_id"],
+                        ),
+                    )
+                n_suggestions = len(suggestion_rows)
+                n_evidence = self._conn.execute(
+                    """UPDATE study_suggestion_evidence
+                       SET current_domain=?, validated_at=? WHERE current_domain=?""",
+                    (new, now, old),
                 ).rowcount
                 self._conn.execute(
                     "UPDATE notes_fts5 SET domain=? WHERE domain=?", (new, old)
@@ -2231,18 +2489,44 @@ class Database:
                 self._conn.execute(
                     "UPDATE note_chunks_fts5 SET domain=? WHERE domain=?", (new, old)
                 )
+                self._record_study_identity_transition_locked(
+                    batch_ids=affected_batches,
+                    transition_kind="domain_rename",
+                    source_domain=old,
+                    target_domain=new,
+                    source_concept=None,
+                    target_concept=None,
+                    created_at=now,
+                    impacts=identity_impacts,
+                )
                 self._conn.commit()
-            except Exception:
-                self._conn.rollback()
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
                 raise
-        return {"jobs": n_jobs, "collections": n_coll, "glossary": n_gloss}
+        return {
+            "jobs": n_jobs,
+            "collections": n_coll,
+            "glossary": n_gloss,
+            "study_cards": n_cards,
+            "study_suggestion_batches": n_batches,
+            "study_suggestions": n_suggestions,
+            "study_suggestion_evidence": n_evidence,
+        }
 
     # Domain(领域是派生视图:来自 jobs ∪ collections ∪ glossary 的 distinct domain)
 
     def list_domains(self) -> list[dict]:
         """领域总览:每个 domain 的 集合数/内容数/概念数/订阅数/最近活跃(派生,无 domains 表)。"""
         domains: set[str] = set()
-        for tbl in ("jobs", "collections", "glossary"):
+        for tbl in (
+            "jobs",
+            "collections",
+            "glossary",
+            "study_cards",
+            "study_suggestion_batches",
+            "study_suggestions",
+        ):
             for r in self._conn.execute(
                 f"SELECT DISTINCT domain FROM {tbl} WHERE domain IS NOT NULL AND domain<>''"
             ):
@@ -2581,59 +2865,139 @@ class Database:
         if src_term == dst_term:
             raise ValueError("src and dst are the same term")
         with self._lock:
-            rows = {
-                r["term"]: r for r in self._conn.execute(
-                    "SELECT * FROM glossary WHERE domain=? AND term IN (?,?)",
-                    (domain, src_term, dst_term),
-                ).fetchall()
-            }
-            if src_term not in rows or dst_term not in rows:
-                missing = src_term if src_term not in rows else dst_term
-                raise ValueError(f"term not found: {missing}")
-            s, d = rows[src_term], rows[dst_term]
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                rows = {
+                    r["term"]: r for r in self._conn.execute(
+                        "SELECT * FROM glossary WHERE domain=? AND term IN (?,?)",
+                        (domain, src_term, dst_term),
+                    ).fetchall()
+                }
+                if src_term not in rows or dst_term not in rows:
+                    missing = src_term if src_term not in rows else dst_term
+                    raise ValueError(f"term not found: {missing}")
+                s, d = rows[src_term], rows[dst_term]
 
-            occs = json.loads(d["occurrences"] or "[]")
-            seen_jobs = {o.get("job_id") for o in occs}
-            for o in json.loads(s["occurrences"] or "[]"):
-                if o.get("job_id") not in seen_jobs:
-                    occs.append(o)
-                    seen_jobs.add(o.get("job_id"))
+                occs = json.loads(d["occurrences"] or "[]")
+                seen_jobs = {o.get("job_id") for o in occs}
+                for occurrence in json.loads(s["occurrences"] or "[]"):
+                    if occurrence.get("job_id") not in seen_jobs:
+                        occs.append(occurrence)
+                        seen_jobs.add(occurrence.get("job_id"))
 
-            d_def, s_def = (d["definition"] or "").strip(), (s["definition"] or "").strip()
-            definition = d_def if len(d_def) >= len(s_def) else s_def
-            zh_name = (d["zh_name"] or "").strip() or (s["zh_name"] or "").strip()
+                d_def = (d["definition"] or "").strip()
+                s_def = (s["definition"] or "").strip()
+                definition = d_def if len(d_def) >= len(s_def) else s_def
+                zh_name = (d["zh_name"] or "").strip() or (s["zh_name"] or "").strip()
 
-            aliases = json.loads(d["aliases"] or "[]")
-            for cand in (json.loads(s["aliases"] or "[]")
-                         + [s["term"], (s["zh_name"] or "").strip()]):
-                if cand and cand != dst_term and cand != zh_name and cand not in aliases:
-                    aliases.append(cand)
+                aliases = json.loads(d["aliases"] or "[]")
+                candidates = json.loads(s["aliases"] or "[]") + [
+                    s["term"],
+                    (s["zh_name"] or "").strip(),
+                ]
+                for candidate in candidates:
+                    if (
+                        candidate
+                        and candidate != dst_term
+                        and candidate != zh_name
+                        and candidate not in aliases
+                    ):
+                        aliases.append(candidate)
 
-            related = _norm_related(json.loads(d["related"] or "[]"))
-            rel_terms = {r["term"] for r in related}
-            for r in _norm_related(json.loads(s["related"] or "[]")):
-                if r["term"] not in rel_terms:
-                    related.append(r)
-                    rel_terms.add(r["term"])
+                related = _norm_related(json.loads(d["related"] or "[]"))
+                related_terms = {relation["term"] for relation in related}
+                for relation in _norm_related(json.loads(s["related"] or "[]")):
+                    if relation["term"] not in related_terms:
+                        related.append(relation)
+                        related_terms.add(relation["term"])
 
-            rank = self._STATUS_RANK
-            status = max((d["status"], s["status"]), key=lambda x: rank.get(x, 1))
-
-            self._conn.execute(
-                """UPDATE glossary SET definition=?, zh_name=?, aliases=?, occurrences=?,
-                   related=?, status=?, is_topic=?, definition_locked=?, updated_at=?
-                   WHERE domain=? AND term=?""",
-                (definition, zh_name, json.dumps(aliases, ensure_ascii=False),
-                 json.dumps(occs, ensure_ascii=False),
-                 json.dumps(related, ensure_ascii=False), status,
-                 1 if (d["is_topic"] or s["is_topic"]) else 0,
-                 1 if (d["definition_locked"] or s["definition_locked"]) else 0,
-                 _now_iso(), domain, dst_term),
-            )
-            self._conn.execute(
-                "DELETE FROM glossary WHERE domain=? AND term=?", (domain, src_term)
-            )
-            self._conn.commit()
+                rank = self._STATUS_RANK
+                status = max(
+                    (d["status"], s["status"]), key=lambda value: rank.get(value, 1)
+                )
+                affected_batches = [
+                    str(row["batch_id"])
+                    for row in self._conn.execute(
+                        """SELECT b.batch_id
+                           FROM study_suggestion_batches b
+                           WHERE b.domain=? AND (
+                             EXISTS (
+                               SELECT 1 FROM study_suggestion_inputs i
+                               WHERE i.batch_id=b.batch_id
+                                 AND i.current_concept_term=?
+                             )
+                             OR EXISTS (
+                               SELECT 1 FROM study_suggestions s
+                               WHERE s.batch_id=b.batch_id AND s.concept_term=?
+                             )
+                           )
+                           ORDER BY b.batch_id""",
+                        (domain, src_term, src_term),
+                    ).fetchall()
+                ]
+                identity_impacts = self._study_identity_transition_impacts_locked(
+                    batch_ids=affected_batches,
+                    transition_kind="concept_merge",
+                    source_concept=src_term,
+                )
+                now = self._study_suggestion_monotonic_now_locked(
+                    affected_batches, _now_iso()
+                ).isoformat()
+                self._conn.execute(
+                    """UPDATE glossary SET definition=?, zh_name=?, aliases=?, occurrences=?,
+                       related=?, status=?, is_topic=?, definition_locked=?, updated_at=?
+                       WHERE domain=? AND term=?""",
+                    (
+                        definition,
+                        zh_name,
+                        json.dumps(aliases, ensure_ascii=False),
+                        json.dumps(occs, ensure_ascii=False),
+                        json.dumps(related, ensure_ascii=False),
+                        status,
+                        1 if (d["is_topic"] or s["is_topic"]) else 0,
+                        1 if (d["definition_locked"] or s["definition_locked"]) else 0,
+                        now,
+                        domain,
+                        dst_term,
+                    ),
+                )
+                # 指纹故意不包含展示 concept,合并只迁移可变 canonical pointer.
+                self._conn.execute(
+                    """UPDATE study_suggestion_inputs
+                       SET current_concept_term=?
+                       WHERE current_concept_term=? AND batch_id IN (
+                         SELECT batch_id FROM study_suggestion_batches WHERE domain=?
+                       )""",
+                    (dst_term, src_term, domain),
+                )
+                self._conn.execute(
+                    """UPDATE study_suggestions SET concept_term=?, updated_at=?
+                       WHERE domain=? AND concept_term=?""",
+                    (dst_term, now, domain, src_term),
+                )
+                self._conn.execute(
+                    """UPDATE study_cards SET concept_term=?, updated_at=?
+                       WHERE domain=? AND concept_term=?""",
+                    (dst_term, now, domain, src_term),
+                )
+                self._conn.execute(
+                    "DELETE FROM glossary WHERE domain=? AND term=?", (domain, src_term)
+                )
+                self._record_study_identity_transition_locked(
+                    batch_ids=affected_batches,
+                    transition_kind="concept_merge",
+                    source_domain=domain,
+                    target_domain=domain,
+                    source_concept=src_term,
+                    target_concept=dst_term,
+                    created_at=now,
+                    impacts=identity_impacts,
+                )
+                self._conn.commit()
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
         merged = self.get_glossary_term(domain, dst_term)
         assert merged is not None
         return merged
@@ -2866,6 +3230,9 @@ class Database:
                         "DELETE FROM note_chunks_fts5 WHERE job_id=? AND note_type=?",
                         (job_id, stale_type),
                     )
+                    self._revalidate_study_suggestion_evidence_locked(
+                        job_id=job_id, note_type=stale_type
+                    )
                 self._conn.execute(
                     "DELETE FROM notes_fts5 WHERE job_id=? AND note_type=?",
                     (job_id, note_type),
@@ -2947,6 +3314,9 @@ class Database:
                     domain or "", title or "", chunk["section"], chunk["body"], evidence_json,
                 ),
             )
+        self._revalidate_study_suggestion_evidence_locked(
+            job_id=job_id, note_type=note_type
+        )
 
     def search_notes(
         self,
@@ -3063,6 +3433,1345 @@ class Database:
                 "evidence": evidence,
             })
         return total, items
+
+    # Evidence-backed study suggestions
+
+    def create_study_suggestion_batch(
+        self,
+        *,
+        request_id: str,
+        domain: str,
+        job_ids: list[str] | None = None,
+        concept_terms: list[str] | None = None,
+        max_cards: int = 10,
+        provider: str = DEFAULT_AI_PROVIDER,
+        model: str = DEFAULT_AI_MODEL,
+        prompt_snapshot: dict[str, object] | None = None,
+        deadline_seconds: int = 1_800,
+    ) -> dict:
+        """在一个快照事务中固化候选的 chunk 和 concept 输入."""
+        normalized_request_id = require_external_request_id(request_id)
+        normalized_domain = require_identifier(domain, "domain", max_length=256)
+        normalized_provider = require_identifier(provider, "provider", max_length=128)
+        normalized_model = require_identifier(model, "model", max_length=256)
+        normalized_max = require_plain_int(
+            max_cards,
+            "max_cards",
+            minimum=1,
+            maximum=MAX_GENERATED_CARDS,
+        )
+        normalized_deadline = require_plain_int(
+            deadline_seconds,
+            "deadline_seconds",
+            minimum=60,
+            maximum=86_400,
+        )
+
+        def normalize_values(
+            values: list[str] | None,
+            field: str,
+            *,
+            limit: int = 100,
+        ) -> list[str]:
+            if values is None:
+                return []
+            if not isinstance(values, list) or len(values) > limit:
+                raise ValueError(f"{field} 最多 {limit} 项")
+            normalized = [require_identifier(value, field) for value in values]
+            if len(set(normalized)) != len(normalized):
+                raise ValueError(f"{field} 不得重复")
+            return sorted(normalized)
+
+        normalized_jobs = normalize_values(job_ids, "job_ids")
+        normalized_concepts = normalize_values(concept_terms, "concept_terms")
+        prompt = prompt_snapshot or resolve_study_suggestion_prompt()
+        validate_study_suggestion_prompt_snapshot(prompt)
+        prompt = dict(prompt)
+        generator = study_suggestion_generator_fingerprint(prompt)
+        if (
+            not isinstance(generator, str)
+            or len(generator) != 71
+            or not generator.startswith("sha256:")
+            or any(ch not in "0123456789abcdef" for ch in generator[7:])
+        ):
+            raise ValueError("generator_fingerprint 必须是 sha256:<小写64hex>")
+        request_payload = {
+            "operation_kind": "batch_create",
+            "request_id": normalized_request_id,
+            "domain": normalized_domain,
+            "job_ids": normalized_jobs,
+            "concept_terms": normalized_concepts,
+            "max_cards": normalized_max,
+            "provider": normalized_provider,
+            "model": normalized_model,
+            "generator_fingerprint": generator,
+            "prompt_snapshot": prompt,
+            "deadline_seconds": normalized_deadline,
+        }
+        request_json = canonical_json(request_payload)
+        request_fingerprint = sha256_text(request_json)
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                replay = self._study_suggestion_operation_replay_locked(
+                    normalized_request_id, request_fingerprint
+                )
+                if replay is not None:
+                    self._conn.commit()
+                    return replay
+                now_dt = self._study_suggestion_monotonic_now_locked([], utc_now())
+                now = now_dt.isoformat()
+                deadline = now_dt + timedelta(seconds=normalized_deadline)
+
+                if normalized_jobs:
+                    placeholders = ",".join("?" for _ in normalized_jobs)
+                    job_rows = self._conn.execute(
+                        f"""SELECT id, domain, status, is_current FROM jobs
+                            WHERE id IN ({placeholders}) ORDER BY id""",
+                        normalized_jobs,
+                    ).fetchall()
+                    found_jobs = {str(row["id"]): row for row in job_rows}
+                    missing = [job_id for job_id in normalized_jobs if job_id not in found_jobs]
+                    if missing:
+                        raise StudySuggestionNotFoundError(
+                            "study_suggestion_job_not_found",
+                            f"job not found: {missing[0]}",
+                        )
+                    invalid = [
+                        job_id
+                        for job_id, row in found_jobs.items()
+                        if row["domain"] != normalized_domain
+                        or row["status"] != "done"
+                        or int(row["is_current"]) != 1
+                    ]
+                    if invalid:
+                        raise StudySuggestionConflictError(
+                            "study_suggestion_job_ineligible",
+                            f"job is not current/done in domain: {invalid[0]}",
+                        )
+                    chunk_rows = self._conn.execute(
+                        f"""SELECT n.* FROM note_chunks n
+                            WHERE n.job_id IN ({placeholders})
+                            ORDER BY n.job_id, n.note_type, n.chunk_index LIMIT 101""",
+                        normalized_jobs,
+                    ).fetchall()
+                else:
+                    job_rows = self._conn.execute(
+                        """SELECT id, domain, status, is_current FROM jobs
+                           WHERE domain=? AND status='done' AND is_current=1
+                           ORDER BY id""",
+                        (normalized_domain,),
+                    ).fetchall()
+                    chunk_rows = self._conn.execute(
+                        """SELECT n.* FROM note_chunks n
+                           JOIN jobs j ON j.id=n.job_id
+                           WHERE j.domain=? AND j.status='done' AND j.is_current=1
+                             AND n.domain=?
+                           ORDER BY n.job_id, n.note_type, n.chunk_index LIMIT 101""",
+                        (normalized_domain, normalized_domain),
+                    ).fetchall()
+                if not job_rows:
+                    raise ValueError("指定领域没有可用的 current/done job")
+                invalid_chunk = next(
+                    (
+                        str(row["chunk_id"])
+                        for row in chunk_rows
+                        if str(row["domain"]) != normalized_domain
+                    ),
+                    None,
+                )
+                if invalid_chunk is not None:
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_chunk_domain_mismatch",
+                        f"note chunk is outside requested domain: {invalid_chunk}",
+                    )
+
+                selected_chunks: list[sqlite3.Row] = []
+                selected_bytes = 0
+                for row in chunk_rows:
+                    body = str(row["body"] or "")
+                    if not body:
+                        continue
+                    size = len(body.encode("utf-8"))
+                    if len(selected_chunks) >= 100 or selected_bytes + size > 512 * 1024:
+                        break
+                    selected_chunks.append(row)
+                    selected_bytes += size
+                if not selected_chunks:
+                    raise ValueError("指定输入没有可用的 note chunk")
+
+                if normalized_concepts:
+                    placeholders = ",".join("?" for _ in normalized_concepts)
+                    concept_rows = self._conn.execute(
+                        f"""SELECT term, status FROM glossary
+                            WHERE domain=? AND term IN ({placeholders}) ORDER BY term""",
+                        [normalized_domain, *normalized_concepts],
+                    ).fetchall()
+                    found_concepts = {str(row["term"]): str(row["status"]) for row in concept_rows}
+                    missing = [term for term in normalized_concepts if term not in found_concepts]
+                    if missing:
+                        raise StudySuggestionNotFoundError(
+                            "study_suggestion_concept_not_found",
+                            f"concept not found: {missing[0]}",
+                        )
+                    rejected = [term for term, status in found_concepts.items() if status != "accepted"]
+                    if rejected:
+                        raise StudySuggestionConflictError(
+                            "study_suggestion_concept_unavailable",
+                            f"concept is not accepted: {rejected[0]}",
+                        )
+                    selected_concepts = sorted(found_concepts)
+                else:
+                    selected_concepts = [
+                        str(row[0])
+                        for row in self._conn.execute(
+                            """SELECT term FROM glossary
+                               WHERE domain=? AND status='accepted'
+                               ORDER BY term LIMIT 100""",
+                            (normalized_domain,),
+                        ).fetchall()
+                    ]
+
+                chunk_facts = []
+                for row in selected_chunks:
+                    try:
+                        locator = json.loads(str(row["evidence_json"] or "{}"))
+                    except (json.JSONDecodeError, TypeError):
+                        locator = {}
+                    chunk_facts.append(
+                        {
+                            "chunk_id": str(row["chunk_id"]),
+                            "job_id": str(row["job_id"]),
+                            "note_type": str(row["note_type"]),
+                            "domain": str(row["domain"]),
+                            "title": str(row["title"] or ""),
+                            "section": str(row["section"] or ""),
+                            "body_sha256": sha256_text(str(row["body"])),
+                            "locator": locator,
+                        }
+                    )
+                input_fingerprint = payload_fingerprint(
+                    {
+                        "domain": normalized_domain,
+                        "chunks": chunk_facts,
+                        "concept_terms": selected_concepts,
+                        "max_cards": normalized_max,
+                        "provider": normalized_provider,
+                        "model": normalized_model,
+                        "generator_fingerprint": generator,
+                        "prompt_snapshot": prompt,
+                    }
+                )
+                existing = self._conn.execute(
+                    """SELECT * FROM study_suggestion_batches
+                       WHERE domain=? AND input_fingerprint=?""",
+                    (normalized_domain, input_fingerprint),
+                ).fetchone()
+                if existing is not None:
+                    outcome = self._row_to_study_suggestion_batch(existing)
+                    operation_now = self._study_suggestion_monotonic_now_locked(
+                        [str(existing["batch_id"])], now_dt
+                    ).isoformat()
+                    self._insert_study_suggestion_operation_locked(
+                        request_id=normalized_request_id,
+                        request_fingerprint=request_fingerprint,
+                        operation_kind="batch_create",
+                        batch_id=str(existing["batch_id"]),
+                        request_json=request_json,
+                        outcome=outcome,
+                        created_at=operation_now,
+                    )
+                    self._conn.commit()
+                    return outcome
+
+                batch_id = f"ssb_{uuid.uuid4().hex}"
+                task_id = f"study-suggestions:{uuid.uuid4().hex}"
+                evidence_payloads: list[dict] = []
+                input_rows: list[tuple] = []
+                evidence_rows: list[tuple] = []
+                ordinal = 0
+                for row in selected_chunks:
+                    input_id = f"ssi_{uuid.uuid4().hex}"
+                    evidence_id = f"sse_{uuid.uuid4().hex}"
+                    body = str(row["body"])
+                    body_hash = sha256_text(body)
+                    input_hash = payload_fingerprint(
+                        {
+                            "kind": "evidence",
+                            "job_id": row["job_id"],
+                            "chunk_id": row["chunk_id"],
+                            "body_sha256": body_hash,
+                        }
+                    )
+                    try:
+                        locator = json.loads(str(row["evidence_json"] or "{}"))
+                    except (json.JSONDecodeError, TypeError):
+                        locator = {}
+                    locator_json = canonical_json(locator)
+                    input_rows.append(
+                        (input_id, batch_id, ordinal, "evidence", None, None, input_hash, now)
+                    )
+                    evidence_rows.append(
+                        (
+                            evidence_id, batch_id, input_id, str(row["job_id"]),
+                            str(row["chunk_id"]), str(row["note_type"]), normalized_domain,
+                            normalized_domain, str(row["title"] or ""),
+                            str(row["section"] or ""), body, body_hash, locator_json,
+                            "valid", None, now, now,
+                        )
+                    )
+                    evidence_payloads.append(
+                        {
+                            "evidence_id": evidence_id,
+                            "title": str(row["title"] or ""),
+                            "section": str(row["section"] or ""),
+                            "untrusted_body": body,
+                        }
+                    )
+                    ordinal += 1
+                concept_payloads: list[dict] = []
+                for term in selected_concepts:
+                    input_id = f"ssi_{uuid.uuid4().hex}"
+                    input_hash = payload_fingerprint({"kind": "concept", "term": term})
+                    input_rows.append(
+                        (input_id, batch_id, ordinal, "concept", term, term, input_hash, now)
+                    )
+                    concept_payloads.append({"input_id": input_id, "term": term})
+                    ordinal += 1
+                llm_request = {
+                    "schema_version": 1,
+                    "batch_id": batch_id,
+                    "max_cards": normalized_max,
+                    "domain": normalized_domain,
+                    "concepts": concept_payloads,
+                    "evidence": evidence_payloads,
+                    "prompt_snapshot": prompt,
+                }
+                self._conn.execute(
+                    """INSERT INTO study_suggestion_batches
+                       (batch_id, domain, status, revision, attempt,
+                        generator_fingerprint, input_fingerprint, task_id, provider,
+                        model, max_cards, llm_request_json, result_json, error_code,
+                        error_message, deadline_at, deadline_at_epoch_us,
+                        created_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        batch_id, normalized_domain, "pending_enqueue", 1, 1,
+                        generator, input_fingerprint, task_id, normalized_provider,
+                        normalized_model, normalized_max, canonical_json(llm_request),
+                        None, None, None, deadline.isoformat(),
+                        datetime_to_epoch_us(deadline, "deadline_at"), now, now,
+                    ),
+                )
+                self._conn.executemany(
+                    """INSERT INTO study_suggestion_inputs
+                       (input_id, batch_id, ordinal, kind, concept_term_snapshot,
+                        current_concept_term, input_fingerprint, created_at)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    input_rows,
+                )
+                self._conn.executemany(
+                    """INSERT INTO study_suggestion_evidence
+                       (evidence_id, batch_id, input_id, job_id, chunk_id, note_type,
+                        source_domain_snapshot, current_domain, title_snapshot,
+                        section_snapshot, body_snapshot, body_sha256, locator_json,
+                        status, invalid_reason, validated_at, created_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    evidence_rows,
+                )
+                created_row = self._conn.execute(
+                    "SELECT * FROM study_suggestion_batches WHERE batch_id=?",
+                    (batch_id,),
+                ).fetchone()
+                if created_row is None:
+                    raise RuntimeError("study suggestion batch disappeared inside transaction")
+                outcome = self._row_to_study_suggestion_batch(created_row)
+                self._insert_study_suggestion_operation_locked(
+                    request_id=normalized_request_id,
+                    request_fingerprint=request_fingerprint,
+                    operation_kind="batch_create",
+                    batch_id=batch_id,
+                    request_json=request_json,
+                    outcome=outcome,
+                    created_at=now,
+                )
+                self._conn.commit()
+                return outcome
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    def get_study_suggestion_batch(self, batch_id: str) -> dict | None:
+        normalized = require_identifier(batch_id, "batch_id")
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM study_suggestion_batches WHERE batch_id=?", (normalized,)
+            ).fetchone()
+            if row is None:
+                return None
+            result = self._row_to_study_suggestion_batch(row)
+            result["evidence_count"] = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) FROM study_suggestion_evidence WHERE batch_id=?",
+                    (normalized,),
+                ).fetchone()[0]
+            )
+            result["suggestion_count"] = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) FROM study_suggestions WHERE batch_id=?",
+                    (normalized,),
+                ).fetchone()[0]
+            )
+            return result
+
+    def list_study_suggestion_batches_for_reconcile(
+        self,
+        *,
+        statuses: tuple[str, ...] = ("pending_enqueue", "queued"),
+        limit: int = 200,
+    ) -> list[dict]:
+        """按持久状态列出待投递/收割批次,供任意 Scheduler 副本幂等对账."""
+        allowed = {"pending_enqueue", "queued"}
+        if (
+            not isinstance(statuses, tuple)
+            or not statuses
+            or any(status not in allowed for status in statuses)
+        ):
+            raise ValueError("statuses 只允许 pending_enqueue/queued")
+        normalized_limit = require_plain_int(limit, "limit", minimum=1, maximum=1_000)
+        placeholders = ",".join("?" for _ in statuses)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT * FROM study_suggestion_batches
+                    WHERE status IN ({placeholders})
+                    ORDER BY deadline_at_epoch_us, batch_id LIMIT ?""",
+                [*statuses, normalized_limit],
+            ).fetchall()
+        return [self._row_to_study_suggestion_batch(row) for row in rows]
+
+    def mark_study_suggestion_batch_queued(
+        self,
+        batch_id: str,
+        *,
+        task_id: str,
+        expected_revision: int,
+    ) -> dict:
+        normalized_batch = require_identifier(batch_id, "batch_id")
+        normalized_task = require_identifier(task_id, "task_id")
+        revision = require_revision(expected_revision)
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                row = self._conn.execute(
+                    "SELECT * FROM study_suggestion_batches WHERE batch_id=?",
+                    (normalized_batch,),
+                ).fetchone()
+                if row is None:
+                    raise StudySuggestionNotFoundError(
+                        "study_suggestion_batch_not_found", "batch not found"
+                    )
+                request_id, request_json, fingerprint = (
+                    self._study_suggestion_lifecycle_operation_payload(
+                        operation_kind="batch_queued",
+                        batch_id=normalized_batch,
+                        task_id=normalized_task,
+                        attempt=int(row["attempt"]),
+                        expected_revision=revision,
+                    )
+                )
+                if row["status"] == "queued":
+                    if (
+                        row["task_id"] != normalized_task
+                        or int(row["revision"]) != revision + 1
+                    ):
+                        raise StudySuggestionConflictError(
+                            "study_suggestion_batch_not_pending",
+                            "batch is not pending for this task",
+                        )
+                    replay = self._study_suggestion_operation_replay_locked(
+                        request_id, fingerprint
+                    )
+                    current = self._row_to_study_suggestion_batch(row)
+                    if not self._study_suggestion_lifecycle_replay_matches_current(
+                        request_id=request_id,
+                        batch_id=normalized_batch,
+                        replay=replay,
+                        current=current,
+                    ):
+                        raise StudySuggestionConflictError(
+                            "study_suggestion_lifecycle_conflict",
+                            "queued lifecycle operation is missing or inconsistent",
+                        )
+                    self._conn.commit()
+                    return current
+                if row["status"] != "pending_enqueue" or row["task_id"] != normalized_task:
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_batch_not_pending", "batch is not pending for this task"
+                    )
+                if int(row["revision"]) != revision:
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_revision_stale", "batch revision is stale"
+                    )
+                if revision == MAX_SQLITE_INTEGER:
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_revision_exhausted", "batch revision is exhausted"
+                    )
+                now = self._study_suggestion_monotonic_now_locked(
+                    [normalized_batch], _now_iso()
+                ).isoformat()
+                changed = self._conn.execute(
+                    """UPDATE study_suggestion_batches
+                       SET status='queued', revision=revision+1, updated_at=?
+                       WHERE batch_id=? AND status='pending_enqueue'
+                         AND task_id=? AND revision=?""",
+                    (now, normalized_batch, normalized_task, revision),
+                )
+                if changed.rowcount != 1:
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_revision_stale", "batch revision is stale"
+                    )
+                updated = self._conn.execute(
+                    "SELECT * FROM study_suggestion_batches WHERE batch_id=?",
+                    (normalized_batch,),
+                ).fetchone()
+                outcome = self._row_to_study_suggestion_batch(updated)
+                self._insert_study_suggestion_operation_locked(
+                    request_id=request_id,
+                    request_fingerprint=fingerprint,
+                    operation_kind="batch_queued",
+                    batch_id=normalized_batch,
+                    request_json=request_json,
+                    outcome=outcome,
+                    created_at=now,
+                )
+                self._conn.commit()
+                return outcome
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    def fail_study_suggestion_batch(
+        self,
+        batch_id: str,
+        *,
+        task_id: str,
+        expected_revision: int,
+        error_code: str,
+        error_message: str,
+    ) -> dict:
+        normalized_batch = require_identifier(batch_id, "batch_id")
+        normalized_task = require_identifier(task_id, "task_id")
+        revision = require_revision(expected_revision)
+        code = require_identifier(error_code, "error_code", max_length=128)
+        message = require_identifier(error_message, "error_message", max_length=2_000)
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                row = self._conn.execute(
+                    "SELECT * FROM study_suggestion_batches WHERE batch_id=?",
+                    (normalized_batch,),
+                ).fetchone()
+                if row is None:
+                    raise StudySuggestionNotFoundError(
+                        "study_suggestion_batch_not_found", "batch not found"
+                    )
+                request_id, request_json, fingerprint = (
+                    self._study_suggestion_lifecycle_operation_payload(
+                        operation_kind="batch_failed",
+                        batch_id=normalized_batch,
+                        task_id=normalized_task,
+                        attempt=int(row["attempt"]),
+                        expected_revision=revision,
+                        details={"error_code": code, "error_message": message},
+                    )
+                )
+                if row["status"] == "failed":
+                    if (
+                        row["task_id"] == normalized_task
+                        and int(row["revision"]) == revision + 1
+                        and row["error_code"] == code
+                        and row["error_message"] == message
+                    ):
+                        replay = self._study_suggestion_operation_replay_locked(
+                            request_id, fingerprint
+                        )
+                        current = self._row_to_study_suggestion_batch(row)
+                        if not self._study_suggestion_lifecycle_replay_matches_current(
+                            request_id=request_id,
+                            batch_id=normalized_batch,
+                            replay=replay,
+                            current=current,
+                        ):
+                            raise StudySuggestionConflictError(
+                                "study_suggestion_lifecycle_conflict",
+                                "failed lifecycle operation is missing or inconsistent",
+                            )
+                        self._conn.commit()
+                        return current
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_failure_conflict",
+                        "failed batch was already finalized with a different payload",
+                    )
+                if (
+                    row["status"] != "queued"
+                    or row["task_id"] != normalized_task
+                    or int(row["revision"]) != revision
+                ):
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_batch_state_conflict",
+                        "batch task/status/revision no longer matches",
+                    )
+                if revision == MAX_SQLITE_INTEGER:
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_revision_exhausted", "batch revision is exhausted"
+                    )
+                now = self._study_suggestion_monotonic_now_locked(
+                    [normalized_batch], _now_iso()
+                ).isoformat()
+                changed = self._conn.execute(
+                    """UPDATE study_suggestion_batches
+                       SET status='failed', revision=revision+1, error_code=?,
+                           error_message=?, updated_at=?
+                       WHERE batch_id=? AND status='queued' AND task_id=? AND revision=?""",
+                    (code, message, now, normalized_batch, normalized_task, revision),
+                )
+                if changed.rowcount != 1:
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_batch_state_conflict",
+                        "batch task/status/revision no longer matches",
+                    )
+                updated = self._conn.execute(
+                    "SELECT * FROM study_suggestion_batches WHERE batch_id=?",
+                    (normalized_batch,),
+                ).fetchone()
+                outcome = self._row_to_study_suggestion_batch(updated)
+                self._insert_study_suggestion_operation_locked(
+                    request_id=request_id,
+                    request_fingerprint=fingerprint,
+                    operation_kind="batch_failed",
+                    batch_id=normalized_batch,
+                    request_json=request_json,
+                    outcome=outcome,
+                    created_at=now,
+                )
+                self._conn.commit()
+                return outcome
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    def retry_study_suggestion_batch(
+        self,
+        batch_id: str,
+        *,
+        request_id: str,
+        expected_revision: int,
+        deadline_seconds: int = 1_800,
+    ) -> dict:
+        normalized_batch = require_identifier(batch_id, "batch_id")
+        normalized_request = require_external_request_id(request_id)
+        revision = require_revision(expected_revision)
+        deadline_sec = require_plain_int(
+            deadline_seconds, "deadline_seconds", minimum=60, maximum=86_400
+        )
+        payload = {
+            "operation_kind": "batch_retry",
+            "request_id": normalized_request,
+            "batch_id": normalized_batch,
+            "expected_revision": revision,
+            "deadline_seconds": deadline_sec,
+        }
+        request_json = canonical_json(payload)
+        fingerprint = sha256_text(request_json)
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                replay = self._study_suggestion_operation_replay_locked(
+                    normalized_request, fingerprint
+                )
+                if replay is not None:
+                    self._conn.commit()
+                    return replay
+                row = self._conn.execute(
+                    "SELECT * FROM study_suggestion_batches WHERE batch_id=?",
+                    (normalized_batch,),
+                ).fetchone()
+                if row is None:
+                    raise StudySuggestionNotFoundError(
+                        "study_suggestion_batch_not_found", "batch not found"
+                    )
+                if row["status"] != "failed":
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_batch_not_retryable", "only failed batch can retry"
+                    )
+                if int(row["revision"]) != revision:
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_revision_stale", "batch revision is stale"
+                    )
+                if revision == MAX_SQLITE_INTEGER or int(row["attempt"]) == MAX_SQLITE_INTEGER:
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_revision_exhausted", "batch retry counter is exhausted"
+                    )
+                now_dt = self._study_suggestion_monotonic_now_locked(
+                    [normalized_batch], utc_now()
+                )
+                now = now_dt.isoformat()
+                deadline = now_dt + timedelta(seconds=deadline_sec)
+                task_id = f"study-suggestions:{uuid.uuid4().hex}"
+                changed = self._conn.execute(
+                    """UPDATE study_suggestion_batches
+                       SET status='pending_enqueue', revision=revision+1, attempt=attempt+1,
+                           task_id=?, result_json=NULL, error_code=NULL, error_message=NULL,
+                           deadline_at=?, deadline_at_epoch_us=?, updated_at=?
+                       WHERE batch_id=? AND status='failed' AND revision=?""",
+                    (
+                        task_id, deadline.isoformat(),
+                        datetime_to_epoch_us(deadline, "deadline_at"), now,
+                        normalized_batch, revision,
+                    ),
+                )
+                if changed.rowcount != 1:
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_revision_stale", "batch revision is stale"
+                    )
+                updated = self._conn.execute(
+                    "SELECT * FROM study_suggestion_batches WHERE batch_id=?",
+                    (normalized_batch,),
+                ).fetchone()
+                outcome = self._row_to_study_suggestion_batch(updated)
+                self._insert_study_suggestion_operation_locked(
+                    request_id=normalized_request,
+                    request_fingerprint=fingerprint,
+                    operation_kind="batch_retry",
+                    batch_id=normalized_batch,
+                    request_json=request_json,
+                    outcome=outcome,
+                    created_at=now,
+                )
+                self._conn.commit()
+                return outcome
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    def materialize_study_suggestions(
+        self,
+        batch_id: str,
+        *,
+        task_id: str,
+        result: object,
+    ) -> list[dict]:
+        """严格校验 AI 输出并原子物化整批候选."""
+        normalized_batch = require_identifier(batch_id, "batch_id")
+        normalized_task = require_identifier(task_id, "task_id")
+        if isinstance(result, str):
+            try:
+                parsed_result: object = json.loads(result)
+            except json.JSONDecodeError as exc:
+                raise ValueError("AI 输出不是有效 JSON") from exc
+        else:
+            parsed_result = result
+        canonical_result = canonical_json(parsed_result)
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                batch = self._conn.execute(
+                    "SELECT * FROM study_suggestion_batches WHERE batch_id=?",
+                    (normalized_batch,),
+                ).fetchone()
+                if batch is None:
+                    raise StudySuggestionNotFoundError(
+                        "study_suggestion_batch_not_found", "batch not found"
+                    )
+                if batch["task_id"] != normalized_task:
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_task_stale", "task result no longer belongs to batch"
+                    )
+                if batch["status"] == "ready":
+                    if batch["result_json"] != canonical_result:
+                        raise StudySuggestionConflictError(
+                            "study_suggestion_result_conflict",
+                            "ready batch received a different result",
+                        )
+                    expected_revision = int(batch["revision"]) - 1
+                    request_id, request_json, fingerprint = (
+                        self._study_suggestion_lifecycle_operation_payload(
+                            operation_kind="batch_ready",
+                            batch_id=normalized_batch,
+                            task_id=normalized_task,
+                            attempt=int(batch["attempt"]),
+                            expected_revision=expected_revision,
+                            details={"result_sha256": sha256_text(canonical_result)},
+                        )
+                    )
+                    replay = self._study_suggestion_operation_replay_locked(
+                        request_id, fingerprint
+                    )
+                    current = self._row_to_study_suggestion_batch(batch)
+                    if not self._study_suggestion_lifecycle_replay_matches_current(
+                        request_id=request_id,
+                        batch_id=normalized_batch,
+                        replay=replay,
+                        current=current,
+                    ):
+                        raise StudySuggestionConflictError(
+                            "study_suggestion_lifecycle_conflict",
+                            "ready lifecycle operation is missing or inconsistent",
+                        )
+                    items = self._list_study_suggestions_locked(
+                        batch_id=normalized_batch, domain=None, status=None, limit=200, offset=0
+                    )[1]
+                    self._conn.commit()
+                    return items
+                if batch["status"] != "queued":
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_batch_not_queued", "batch is not queued"
+                    )
+                revision = int(batch["revision"])
+                if revision == MAX_SQLITE_INTEGER:
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_revision_exhausted", "batch revision is exhausted"
+                    )
+                request_id, request_json, fingerprint = (
+                    self._study_suggestion_lifecycle_operation_payload(
+                        operation_kind="batch_ready",
+                        batch_id=normalized_batch,
+                        task_id=normalized_task,
+                        attempt=int(batch["attempt"]),
+                        expected_revision=revision,
+                        details={"result_sha256": sha256_text(canonical_result)},
+                    )
+                )
+                if self._study_suggestion_operation_replay_locked(
+                    request_id, fingerprint
+                ) is not None:
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_lifecycle_conflict",
+                        "ready operation exists before batch transition",
+                    )
+                now = self._study_suggestion_monotonic_now_locked(
+                    [normalized_batch], _now_iso()
+                ).isoformat()
+                evidence_rows = self._conn.execute(
+                    "SELECT * FROM study_suggestion_evidence WHERE batch_id=?",
+                    (normalized_batch,),
+                ).fetchall()
+                for evidence_row in evidence_rows:
+                    self._assert_study_suggestion_evidence_row_current_locked(
+                        evidence_row,
+                        expected_domain=str(batch["domain"]),
+                    )
+                evidence = {str(row["evidence_id"]): row for row in evidence_rows}
+                concept_rows = self._conn.execute(
+                    """SELECT input_id, current_concept_term FROM study_suggestion_inputs
+                       WHERE batch_id=? AND kind='concept'""",
+                    (normalized_batch,),
+                ).fetchall()
+                concepts = {str(row["input_id"]): row["current_concept_term"] for row in concept_rows}
+                parsed = parse_ai_suggestions(
+                    parsed_result,
+                    max_cards=int(batch["max_cards"]),
+                    evidence_ids=set(evidence),
+                    concept_input_ids=set(concepts),
+                )
+                staged: list[dict] = []
+                seen_knowledge: set[str] = set()
+                seen_content: set[str] = set()
+                for ordinal, item in enumerate(parsed):
+                    for ref in item["evidence"]:
+                        evidence_row = evidence[ref["evidence_id"]]
+                        if evidence_row["status"] != "valid":
+                            raise StudySuggestionConflictError(
+                                "study_suggestion_evidence_unavailable",
+                                "AI result references non-current evidence",
+                            )
+                        if ref["quote"] not in str(evidence_row["body_snapshot"]):
+                            raise ValueError("AI quote 不是证据快照的原文子串")
+                    concept_term = (
+                        concepts.get(item["concept_input_id"])
+                        if item["concept_input_id"] is not None
+                        else None
+                    )
+                    if concept_term is not None:
+                        concept = self._conn.execute(
+                            "SELECT status FROM glossary WHERE domain=? AND term=?",
+                            (batch["domain"], concept_term),
+                        ).fetchone()
+                        if concept is None or concept["status"] != "accepted":
+                            raise StudySuggestionConflictError(
+                                "study_suggestion_concept_unavailable",
+                                f"concept is not accepted: {concept_term}",
+                            )
+                    knowledge_hash = knowledge_fingerprint(
+                        str(batch["domain"]), item["knowledge_key"]
+                    )
+                    content_hash = content_fingerprint(
+                        domain=str(batch["domain"]),
+                        card_type=item["card_type"],
+                        front=item["front"],
+                        back=item["back"],
+                        explanation=item["explanation"],
+                    )
+                    if knowledge_hash in seen_knowledge or content_hash in seen_content:
+                        raise ValueError("AI 输出包含重复知识或卡片内容")
+                    seen_knowledge.add(knowledge_hash)
+                    seen_content.add(content_hash)
+                    staged.append(
+                        {
+                            **item,
+                            "suggestion_id": f"ss_{uuid.uuid4().hex}",
+                            "ordinal": ordinal,
+                            "concept_term": concept_term,
+                            "knowledge_fingerprint": knowledge_hash,
+                            "content_fingerprint": content_hash,
+                        }
+                    )
+                for item in staged:
+                    self._conn.execute(
+                        """INSERT INTO study_suggestions
+                           (suggestion_id, batch_id, ordinal, status, revision, domain,
+                            concept_term, knowledge_key, card_type, front, back,
+                            explanation, knowledge_fingerprint, content_fingerprint,
+                            accepted_card_id, rejection_reason, created_at, updated_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            item["suggestion_id"], normalized_batch, item["ordinal"],
+                            "suggested", 1, batch["domain"], item["concept_term"],
+                            item["knowledge_key"], item["card_type"], item["front"],
+                            item["back"], item["explanation"],
+                            item["knowledge_fingerprint"], item["content_fingerprint"],
+                            None, None, now, now,
+                        ),
+                    )
+                    for ref_ordinal, ref in enumerate(item["evidence"]):
+                        self._conn.execute(
+                            """INSERT INTO study_suggestion_evidence_links
+                               (batch_id, suggestion_id, evidence_id, ordinal,
+                                quote_snapshot, quote_sha256, created_at)
+                               VALUES (?,?,?,?,?,?,?)""",
+                            (
+                                normalized_batch, item["suggestion_id"], ref["evidence_id"],
+                                ref_ordinal, ref["quote"], sha256_text(ref["quote"]), now,
+                            ),
+                        )
+                changed = self._conn.execute(
+                    """UPDATE study_suggestion_batches
+                       SET status='ready', revision=revision+1, result_json=?,
+                           error_code=NULL, error_message=NULL, updated_at=?
+                       WHERE batch_id=? AND status='queued' AND task_id=? AND revision=?""",
+                    (canonical_result, now, normalized_batch, normalized_task, revision),
+                )
+                if changed.rowcount != 1:
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_batch_state_conflict",
+                        "batch task/status/revision no longer matches",
+                    )
+                updated = self._conn.execute(
+                    "SELECT * FROM study_suggestion_batches WHERE batch_id=?",
+                    (normalized_batch,),
+                ).fetchone()
+                outcome = self._row_to_study_suggestion_batch(updated)
+                self._insert_study_suggestion_operation_locked(
+                    request_id=request_id,
+                    request_fingerprint=fingerprint,
+                    operation_kind="batch_ready",
+                    batch_id=normalized_batch,
+                    request_json=request_json,
+                    outcome=outcome,
+                    created_at=now,
+                )
+                items = self._list_study_suggestions_locked(
+                    batch_id=normalized_batch, domain=None, status=None, limit=200, offset=0
+                )[1]
+                self._conn.commit()
+                return items
+            except sqlite3.IntegrityError as exc:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                detail = str(exc)
+                duplicate_constraints = (
+                    "study_suggestions.domain, study_suggestions.knowledge_fingerprint",
+                    "study_suggestions.domain, study_suggestions.content_fingerprint",
+                )
+                if any(constraint in detail for constraint in duplicate_constraints):
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_duplicate",
+                        "suggestion knowledge/content fingerprint already exists",
+                    ) from exc
+                raise StudySuggestionConflictError(
+                    "study_suggestion_constraint_conflict",
+                    "suggestion materialization violated a committed invariant",
+                ) from exc
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    def list_study_suggestions(
+        self,
+        *,
+        batch_id: str | None = None,
+        domain: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[int, list[dict]]:
+        normalized_batch = (
+            require_identifier(batch_id, "batch_id") if batch_id is not None else None
+        )
+        normalized_domain = (
+            require_identifier(domain, "domain") if domain is not None else None
+        )
+        if status is not None and status not in {"suggested", "accepted", "rejected"}:
+            raise ValueError("status 必须是 suggested/accepted/rejected")
+        normalized_limit = require_plain_int(limit, "limit", minimum=1, maximum=200)
+        normalized_offset = require_plain_int(
+            offset, "offset", minimum=0, maximum=2_147_483_647
+        )
+        with self._lock:
+            return self._list_study_suggestions_locked(
+                batch_id=normalized_batch,
+                domain=normalized_domain,
+                status=status,
+                limit=normalized_limit,
+                offset=normalized_offset,
+            )
+
+    def get_study_suggestion(self, suggestion_id: str) -> dict | None:
+        normalized = require_identifier(suggestion_id, "suggestion_id")
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM study_suggestions WHERE suggestion_id=?", (normalized,)
+            ).fetchone()
+            return self._row_to_study_suggestion_locked(row) if row else None
+
+    def apply_study_suggestion_operations(
+        self,
+        *,
+        request_id: str,
+        batch_id: str,
+        items: object,
+        fault_injector: StudySuggestionFaultInjector | None = None,
+    ) -> dict:
+        """在一个 IMMEDIATE 事务中编辑,接受或拒绝最多 100 项."""
+        normalized_request = require_external_request_id(request_id)
+        normalized_batch = require_identifier(batch_id, "batch_id")
+        normalized_items = validate_operation_items(items)
+        payload = operation_payload(
+            request_id=normalized_request,
+            batch_id=normalized_batch,
+            items=normalized_items,
+        )
+        payload["operation_kind"] = "suggestion_review"
+        request_json = canonical_json(payload)
+        request_fingerprint = sha256_text(request_json)
+
+        def inject(stage: str) -> None:
+            if fault_injector is not None:
+                fault_injector(stage)
+
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                replay = self._study_suggestion_operation_replay_locked(
+                    normalized_request, request_fingerprint
+                )
+                if replay is not None:
+                    self._conn.commit()
+                    return replay
+                batch = self._conn.execute(
+                    "SELECT status, domain FROM study_suggestion_batches WHERE batch_id=?",
+                    (normalized_batch,),
+                ).fetchone()
+                if batch is None:
+                    raise StudySuggestionNotFoundError(
+                        "study_suggestion_batch_not_found", "batch not found"
+                    )
+                if batch["status"] != "ready":
+                    raise StudySuggestionConflictError(
+                        "study_suggestion_batch_not_ready", "batch is not ready"
+                    )
+                now_dt = self._study_suggestion_monotonic_now_locked(
+                    [normalized_batch], utc_now()
+                )
+                now = now_dt.isoformat()
+                now_epoch = datetime_to_epoch_us(now_dt)
+                created_cards: list[dict] = []
+                touched_ids: list[str] = []
+                for item in normalized_items:
+                    suggestion_id = item["suggestion_id"]
+                    row = self._conn.execute(
+                        "SELECT * FROM study_suggestions WHERE suggestion_id=?",
+                        (suggestion_id,),
+                    ).fetchone()
+                    if row is None or row["batch_id"] != normalized_batch:
+                        raise StudySuggestionNotFoundError(
+                            "study_suggestion_not_found",
+                            f"suggestion not found in batch: {suggestion_id}",
+                        )
+                    if row["status"] != "suggested":
+                        raise StudySuggestionConflictError(
+                            "study_suggestion_terminal",
+                            f"suggestion is already {row['status']}: {suggestion_id}",
+                        )
+                    expected_revision = int(item["expected_revision"])
+                    if int(row["revision"]) != expected_revision:
+                        raise StudySuggestionConflictError(
+                            "study_suggestion_revision_stale",
+                            f"suggestion revision is stale: {suggestion_id}",
+                        )
+                    if expected_revision == MAX_SQLITE_INTEGER:
+                        raise StudySuggestionConflictError(
+                            "study_suggestion_revision_exhausted",
+                            f"suggestion revision is exhausted: {suggestion_id}",
+                        )
+                    action = str(item["action"])
+                    patch = dict(item["patch"])
+                    concept_term = row["concept_term"]
+                    if "concept_term" in patch:
+                        raw_concept = patch["concept_term"]
+                        if raw_concept is None or (
+                            isinstance(raw_concept, str) and not raw_concept.strip()
+                        ):
+                            concept_term = None
+                        else:
+                            concept_term = require_identifier(
+                                raw_concept, "concept_term", max_length=256
+                            )
+                    if action != "reject" and concept_term is not None:
+                        concept = self._conn.execute(
+                            """SELECT status FROM glossary
+                               WHERE domain=? AND term=?""",
+                            (row["domain"], concept_term),
+                        ).fetchone()
+                        if concept is None or concept["status"] != "accepted":
+                            raise StudySuggestionConflictError(
+                                "study_suggestion_concept_unavailable",
+                                f"concept is not accepted: {concept_term}",
+                            )
+
+                    if action == "reject":
+                        reason = item["reason"] or "user_rejected"
+                        changed = self._conn.execute(
+                            """UPDATE study_suggestions
+                               SET status='rejected', revision=revision+1,
+                                   rejection_reason=?, updated_at=?
+                               WHERE suggestion_id=? AND status='suggested' AND revision=?""",
+                            (reason, now, suggestion_id, expected_revision),
+                        )
+                    else:
+                        card_type, front, back, explanation = validate_card_content(
+                            card_type=patch.get("card_type", row["card_type"]),
+                            front=patch.get("front", row["front"]),
+                            back=patch.get("back", row["back"]),
+                            explanation=patch.get("explanation", row["explanation"]),
+                        )
+                        content_hash = content_fingerprint(
+                            domain=str(row["domain"]),
+                            card_type=card_type,
+                            front=front,
+                            back=back,
+                            explanation=explanation,
+                        )
+                        duplicate = self._conn.execute(
+                            """SELECT suggestion_id FROM study_suggestions
+                               WHERE domain=? AND content_fingerprint=?
+                                 AND suggestion_id<>? LIMIT 1""",
+                            (row["domain"], content_hash, suggestion_id),
+                        ).fetchone()
+                        if duplicate is not None:
+                            raise StudySuggestionConflictError(
+                                "study_suggestion_duplicate",
+                                "edited card content duplicates an existing suggestion",
+                            )
+                        if action == "edit":
+                            changed = self._conn.execute(
+                                """UPDATE study_suggestions
+                                   SET revision=revision+1, concept_term=?, card_type=?,
+                                       front=?, back=?, explanation=?, content_fingerprint=?,
+                                       updated_at=?
+                                   WHERE suggestion_id=? AND status='suggested' AND revision=?""",
+                                (
+                                    concept_term, card_type, front, back, explanation,
+                                    content_hash, now, suggestion_id, expected_revision,
+                                ),
+                            )
+                        else:
+                            evidence = self._assert_study_suggestion_evidence_current_locked(
+                                row
+                            )
+                            if self._study_card_content_duplicate_locked(
+                                domain=str(row["domain"]),
+                                card_type=card_type,
+                                front=front,
+                                back=back,
+                                explanation=explanation,
+                            ):
+                                raise StudySuggestionConflictError(
+                                    "study_suggestion_card_duplicate",
+                                    "an equivalent study card already exists",
+                                )
+                            card_id = f"sc_{uuid.uuid4().hex}"
+                            job_ids = {entry["job_id"] for entry in evidence}
+                            card_job_id = next(iter(job_ids)) if len(job_ids) == 1 else None
+                            self._conn.execute(
+                                """INSERT INTO study_cards
+                                   (card_id, domain, job_id, concept_term, card_type,
+                                    front, back, explanation, evidence_json, status,
+                                    source, revision, created_at, updated_at)
+                                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                (
+                                    card_id, row["domain"], card_job_id, concept_term,
+                                    card_type, front, back, explanation,
+                                    canonical_json(evidence), "active",
+                                    f"suggestion:{suggestion_id}", 1, now, now,
+                                ),
+                            )
+                            inject(f"after_card:{suggestion_id}")
+                            self._conn.execute(
+                                """INSERT INTO study_reviews
+                                   (card_id, due_at, due_at_epoch_us, interval_days,
+                                    ease, repetitions, lapses, updated_at)
+                                   VALUES (?,?,?,?,?,?,?,?)""",
+                                (card_id, now, now_epoch, 0, 2.5, 0, 0, now),
+                            )
+                            inject(f"after_due:{suggestion_id}")
+                            changed = self._conn.execute(
+                                """UPDATE study_suggestions
+                                   SET status='accepted', revision=revision+1,
+                                       concept_term=?, card_type=?, front=?, back=?,
+                                       explanation=?, content_fingerprint=?,
+                                       accepted_card_id=?, updated_at=?
+                                   WHERE suggestion_id=? AND status='suggested' AND revision=?""",
+                                (
+                                    concept_term, card_type, front, back, explanation,
+                                    content_hash, card_id, now, suggestion_id,
+                                    expected_revision,
+                                ),
+                            )
+                            card = self.get_study_card(card_id)
+                            if card is None:
+                                raise RuntimeError("accepted study card disappeared in transaction")
+                            created_cards.append(card)
+                    if changed.rowcount != 1:
+                        raise StudySuggestionConflictError(
+                            "study_suggestion_revision_stale",
+                            f"suggestion revision changed: {suggestion_id}",
+                        )
+                    inject(f"after_suggestion:{suggestion_id}")
+                    touched_ids.append(suggestion_id)
+
+                updated_items = []
+                for suggestion_id in touched_ids:
+                    updated = self._conn.execute(
+                        "SELECT * FROM study_suggestions WHERE suggestion_id=?",
+                        (suggestion_id,),
+                    ).fetchone()
+                    if updated is None:
+                        raise RuntimeError("study suggestion disappeared in transaction")
+                    updated_items.append(self._row_to_study_suggestion_locked(updated))
+                outcome = {
+                    "batch_id": normalized_batch,
+                    "items": updated_items,
+                    "cards": created_cards,
+                }
+                self._insert_study_suggestion_operation_locked(
+                    request_id=normalized_request,
+                    request_fingerprint=request_fingerprint,
+                    operation_kind="suggestion_review",
+                    batch_id=normalized_batch,
+                    request_json=request_json,
+                    outcome=outcome,
+                    created_at=now,
+                )
+                inject("after_operation")
+                inject("before_commit")
+                self._conn.commit()
+                return outcome
+            except sqlite3.IntegrityError as exc:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise StudySuggestionConflictError(
+                    "study_suggestion_constraint_conflict",
+                    "suggestion operation conflicts with a committed fact",
+                ) from exc
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    def get_study_mastery(self, *, domain: str | None = None) -> dict:
+        """按每卡最后一次真实评分聚合 canonical concept 掌握度."""
+        normalized_domain = (
+            require_identifier(domain, "domain") if domain is not None else None
+        )
+        with self._lock:
+            rows = self._conn.execute(
+                """WITH eligible AS (
+                     SELECT c.card_id, c.domain, c.concept_term
+                     FROM study_cards c
+                     WHERE c.status IN ('active','suspended')
+                       AND c.concept_term IS NOT NULL
+                       AND length(trim(c.concept_term)) > 0
+                       AND (? IS NULL OR c.domain=?)
+                   ),
+                   ranked AS (
+                     SELECT e.card_id, e.domain, e.concept_term, l.id, l.grade,
+                            l.reviewed_at, l.reviewed_at_epoch_us,
+                            ROW_NUMBER() OVER (
+                              PARTITION BY e.card_id
+                              ORDER BY l.reviewed_at_epoch_us DESC, l.id DESC
+                            ) AS rank
+                     FROM eligible e
+                     JOIN study_review_logs l ON l.card_id=e.card_id
+                   ),
+                   per_card AS (
+                     SELECT card_id, domain, concept_term, reviewed_at,
+                            CASE grade
+                              WHEN 'again' THEN 0
+                              WHEN 'hard' THEN 50
+                              WHEN 'good' THEN 80
+                              WHEN 'easy' THEN 100
+                            END AS score
+                     FROM ranked WHERE rank=1
+                   ),
+                   review_counts AS (
+                     SELECT e.card_id, COUNT(l.id) AS reviews_total
+                     FROM eligible e
+                     JOIN study_review_logs l ON l.card_id=e.card_id
+                     GROUP BY e.card_id
+                   )
+                   SELECT p.domain, p.concept_term,
+                          CAST(ROUND(AVG(p.score), 0) AS INTEGER) AS score,
+                          COUNT(*) AS reviewed_cards,
+                          SUM(rc.reviews_total) AS reviews_total,
+                          MAX(p.reviewed_at) AS last_reviewed_at
+                   FROM per_card p
+                   JOIN review_counts rc ON rc.card_id=p.card_id
+                   GROUP BY p.domain, p.concept_term
+                   ORDER BY score ASC, p.concept_term ASC""",
+                (normalized_domain, normalized_domain),
+            ).fetchall()
+        items = []
+        for row in rows:
+            score = int(row["score"])
+            level = "mastered" if score >= 85 else "learning" if score >= 60 else "fragile"
+            items.append(
+                {
+                    "domain": row["domain"],
+                    "concept_term": row["concept_term"],
+                    "score": score,
+                    "level": level,
+                    "reviewed_cards": int(row["reviewed_cards"]),
+                    "reviews_total": int(row["reviews_total"]),
+                    "last_reviewed_at": row["last_reviewed_at"],
+                }
+            )
+        return {"total": len(items), "items": items}
 
     # Study cards / SRS
 
@@ -3309,9 +5018,17 @@ class Database:
 
     def delete_study_card(self, card_id: str) -> bool:
         with self._lock:
-            cur = self._conn.execute("DELETE FROM study_cards WHERE card_id=?", (card_id,))
-            self._conn.commit()
-            return cur.rowcount > 0
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                cur = self._conn.execute(
+                    "DELETE FROM study_cards WHERE card_id=?", (card_id,)
+                )
+                self._conn.commit()
+                return cur.rowcount > 0
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
 
     def record_study_review(
         self,
@@ -3549,6 +5266,560 @@ class Database:
         }
 
     # Private
+
+    def _study_suggestion_monotonic_now_locked(
+        self,
+        batch_ids: list[str],
+        wall_time: datetime | str,
+    ) -> datetime:
+        """在持有写事务时把墙钟钳制到整本建议账本的全局前态之后."""
+        candidate = (
+            datetime.fromisoformat(wall_time)
+            if isinstance(wall_time, str)
+            else wall_time
+        )
+        if candidate.tzinfo is None or candidate.utcoffset() is None:
+            raise ValueError("study suggestion wall time 必须带 UTC 时区")
+        # batch_ids 保留在签名中,避免调用方误以为可在事务外预取时间.
+        # 下界必须覆盖整本账本,否则另一批次的后提交事实可被墙钟回拨越过.
+        del batch_ids
+        tail = self._conn.execute(
+            """SELECT created_at AS value FROM study_suggestion_operations
+               ORDER BY ledger_seq DESC LIMIT 1"""
+        ).fetchone()
+        lower_bound = candidate.astimezone(timezone.utc)
+        if tail is not None:
+            value = datetime.fromisoformat(str(tail["value"]))
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise RuntimeError("study suggestion 时间前态缺少时区")
+            lower_bound = max(lower_bound, value.astimezone(timezone.utc))
+        return lower_bound
+
+    @staticmethod
+    def _study_suggestion_lifecycle_operation_payload(
+        *,
+        operation_kind: str,
+        batch_id: str,
+        task_id: str,
+        attempt: int,
+        expected_revision: int,
+        details: dict[str, object] | None = None,
+    ) -> tuple[str, str, str]:
+        """为一次 batch 状态迁移生成稳定幂等键和 canonical request."""
+        identity = {
+            "operation_kind": operation_kind,
+            "batch_id": batch_id,
+            "task_id": task_id,
+            "attempt": attempt,
+            "expected_revision": expected_revision,
+        }
+        request_id = (
+            f"study-lifecycle:{operation_kind}:"
+            f"{payload_fingerprint(identity)}"
+        )
+        request = {**identity, "request_id": request_id, **(details or {})}
+        request_json = canonical_json(request)
+        return request_id, request_json, sha256_text(request_json)
+
+    def _study_suggestion_lifecycle_replay_matches_current(
+        self,
+        *,
+        request_id: str,
+        batch_id: str,
+        replay: dict | None,
+        current: dict,
+    ) -> bool:
+        """从 lifecycle outcome 继续重放 identity 变化后核对 current row."""
+        if replay is None or set(replay) != set(current):
+            return False
+        lifecycle = self._conn.execute(
+            """SELECT ledger_seq FROM study_suggestion_operations
+               WHERE request_id=? AND batch_id=?""",
+            (request_id, batch_id),
+        ).fetchone()
+        if lifecycle is None:
+            return False
+        expected = dict(replay)
+        identity_rows = self._conn.execute(
+            """SELECT request_json, created_at
+               FROM study_suggestion_operations
+               WHERE batch_id=? AND operation_kind='identity_transition'
+                 AND ledger_seq>?
+               ORDER BY ledger_seq""",
+            (batch_id, lifecycle["ledger_seq"]),
+        ).fetchall()
+        for row in identity_rows:
+            try:
+                request = json.loads(str(row["request_json"]))
+            except (json.JSONDecodeError, TypeError):
+                return False
+            if (
+                request.get("batch_id") != batch_id
+                or request.get("source_domain") != expected["domain"]
+            ):
+                return False
+            if request.get("transition_kind") == "domain_rename":
+                expected["domain"] = request.get("target_domain")
+                expected["updated_at"] = row["created_at"]
+            elif (
+                request.get("transition_kind") != "concept_merge"
+                or request.get("target_domain") != expected["domain"]
+            ):
+                return False
+        return expected == current
+
+    def _study_suggestion_operation_replay_locked(
+        self,
+        request_id: str,
+        request_fingerprint: str,
+    ) -> dict | None:
+        row = self._conn.execute(
+            """SELECT request_fingerprint, outcome_json
+               FROM study_suggestion_operations WHERE request_id=?""",
+            (request_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["request_fingerprint"] != request_fingerprint:
+            raise StudySuggestionConflictError(
+                "study_suggestion_request_id_conflict",
+                "request_id was already used with a different payload",
+            )
+        return json.loads(str(row["outcome_json"]))
+
+    def _insert_study_suggestion_operation_locked(
+        self,
+        *,
+        request_id: str,
+        request_fingerprint: str,
+        operation_kind: str,
+        batch_id: str,
+        request_json: str,
+        outcome: dict,
+        created_at: str,
+    ) -> None:
+        previous = self._conn.execute(
+            """SELECT ledger_seq, ledger_sha256
+               FROM study_suggestion_operations ORDER BY ledger_seq DESC LIMIT 1"""
+        ).fetchone()
+        if previous is None:
+            ledger_seq = 1
+            previous_ledger_sha256 = "0" * 64
+        else:
+            previous_seq = int(previous["ledger_seq"])
+            if previous_seq == MAX_SQLITE_INTEGER:
+                raise StudySuggestionConflictError(
+                    "study_suggestion_ledger_exhausted",
+                    "study suggestion operation ledger is exhausted",
+                )
+            ledger_seq = previous_seq + 1
+            previous_ledger_sha256 = str(previous["ledger_sha256"])
+        outcome_json = canonical_json(outcome)
+        ledger_sha256 = payload_fingerprint(
+            {
+                "ledger_seq": ledger_seq,
+                "previous_ledger_sha256": previous_ledger_sha256,
+                "request_id": request_id,
+                "request_fingerprint": request_fingerprint,
+                "operation_kind": operation_kind,
+                "batch_id": batch_id,
+                "request_json": request_json,
+                "outcome_json": outcome_json,
+                "created_at": created_at,
+            }
+        )
+        self._conn.execute(
+            """INSERT INTO study_suggestion_operations
+               (request_id, ledger_seq, previous_ledger_sha256, ledger_sha256,
+                request_fingerprint, operation_kind, batch_id, request_json,
+                outcome_json, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                request_id, ledger_seq, previous_ledger_sha256, ledger_sha256,
+                request_fingerprint, operation_kind, batch_id, request_json,
+                outcome_json, created_at,
+            ),
+        )
+
+    def _record_study_identity_transition_locked(
+        self,
+        *,
+        batch_ids: list[str],
+        transition_kind: str,
+        source_domain: str,
+        target_domain: str,
+        source_concept: str | None,
+        target_concept: str | None,
+        created_at: str,
+        impacts: dict[str, dict[str, list[str]]],
+    ) -> None:
+        """把 canonical identity 变化写入既有不可变操作账本."""
+        for batch_id in batch_ids:
+            request_id = f"identity-transition:{uuid.uuid4().hex}"
+            payload = {
+                "operation_kind": "identity_transition",
+                "request_id": request_id,
+                "batch_id": batch_id,
+                "transition_kind": transition_kind,
+                "source_domain": source_domain,
+                "target_domain": target_domain,
+                "source_concept": source_concept,
+                "target_concept": target_concept,
+            }
+            request_json = canonical_json(payload)
+            self._insert_study_suggestion_operation_locked(
+                request_id=request_id,
+                request_fingerprint=sha256_text(request_json),
+                operation_kind="identity_transition",
+                batch_id=batch_id,
+                request_json=request_json,
+                outcome={
+                    "batch_id": batch_id,
+                    "input_ids": impacts[batch_id]["input_ids"],
+                    "suggestion_ids": impacts[batch_id]["suggestion_ids"],
+                },
+                created_at=created_at,
+            )
+
+    def _study_identity_transition_impacts_locked(
+        self,
+        *,
+        batch_ids: list[str],
+        transition_kind: str,
+        source_concept: str | None,
+    ) -> dict[str, dict[str, list[str]]]:
+        """在 identity 写入前冻结实际受影响的输入和已物化候选集合."""
+        impacts: dict[str, dict[str, list[str]]] = {}
+        for batch_id in batch_ids:
+            if transition_kind == "concept_merge":
+                input_ids = [
+                    str(row["input_id"])
+                    for row in self._conn.execute(
+                        """SELECT input_id FROM study_suggestion_inputs
+                           WHERE batch_id=? AND kind='concept'
+                             AND current_concept_term=? ORDER BY input_id""",
+                        (batch_id, source_concept),
+                    ).fetchall()
+                ]
+                suggestion_ids = [
+                    str(row["suggestion_id"])
+                    for row in self._conn.execute(
+                        """SELECT suggestion_id FROM study_suggestions
+                           WHERE batch_id=? AND concept_term=? ORDER BY suggestion_id""",
+                        (batch_id, source_concept),
+                    ).fetchall()
+                ]
+            else:
+                input_ids = []
+                suggestion_ids = [
+                    str(row["suggestion_id"])
+                    for row in self._conn.execute(
+                        """SELECT suggestion_id FROM study_suggestions
+                           WHERE batch_id=? ORDER BY suggestion_id""",
+                        (batch_id,),
+                    ).fetchall()
+                ]
+            impacts[batch_id] = {
+                "input_ids": input_ids,
+                "suggestion_ids": suggestion_ids,
+            }
+        return impacts
+
+    @staticmethod
+    def _row_to_study_suggestion_batch(row: sqlite3.Row) -> dict:
+        try:
+            llm_request = json.loads(str(row["llm_request_json"]))
+        except (json.JSONDecodeError, TypeError):
+            llm_request = {}
+        try:
+            result = json.loads(str(row["result_json"])) if row["result_json"] else None
+        except (json.JSONDecodeError, TypeError):
+            result = None
+        return {
+            "batch_id": row["batch_id"],
+            "domain": row["domain"],
+            "status": row["status"],
+            "revision": row["revision"],
+            "attempt": row["attempt"],
+            "generator_fingerprint": row["generator_fingerprint"],
+            "input_fingerprint": row["input_fingerprint"],
+            "task_id": row["task_id"],
+            "provider": row["provider"],
+            "model": row["model"],
+            "max_cards": row["max_cards"],
+            "llm_request": llm_request,
+            "result": result,
+            "error_code": row["error_code"],
+            "error_message": row["error_message"],
+            "deadline_at": row["deadline_at"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def _list_study_suggestions_locked(
+        self,
+        *,
+        batch_id: str | None,
+        domain: str | None,
+        status: str | None,
+        limit: int,
+        offset: int,
+    ) -> tuple[int, list[dict]]:
+        where = ["1=1"]
+        params: list[object] = []
+        if batch_id is not None:
+            where.append("batch_id=?")
+            params.append(batch_id)
+        if domain is not None:
+            where.append("domain=?")
+            params.append(domain)
+        if status is not None:
+            where.append("status=?")
+            params.append(status)
+        clause = " AND ".join(where)
+        total = int(
+            self._conn.execute(
+                f"SELECT COUNT(*) FROM study_suggestions WHERE {clause}", params
+            ).fetchone()[0]
+        )
+        rows = self._conn.execute(
+            f"""SELECT * FROM study_suggestions WHERE {clause}
+                ORDER BY created_at DESC, ordinal ASC LIMIT ? OFFSET ?""",
+            [*params, limit, offset],
+        ).fetchall()
+        return total, [self._row_to_study_suggestion_locked(row) for row in rows]
+
+    def _row_to_study_suggestion_locked(self, row: sqlite3.Row) -> dict:
+        evidence_rows = self._conn.execute(
+            """SELECT l.evidence_id, l.ordinal, l.quote_snapshot, l.quote_sha256,
+                      e.job_id, e.chunk_id, e.note_type, e.source_domain_snapshot,
+                      e.current_domain, e.title_snapshot, e.section_snapshot,
+                      e.body_sha256, e.locator_json, e.status, e.invalid_reason
+               FROM study_suggestion_evidence_links l
+               JOIN study_suggestion_evidence e ON e.evidence_id=l.evidence_id
+               WHERE l.suggestion_id=? ORDER BY l.ordinal""",
+            (row["suggestion_id"],),
+        ).fetchall()
+        evidence = []
+        for entry in evidence_rows:
+            try:
+                locator = json.loads(str(entry["locator_json"]))
+            except (json.JSONDecodeError, TypeError):
+                locator = {}
+            evidence.append(
+                {
+                    "evidence_id": entry["evidence_id"],
+                    "job_id": entry["job_id"],
+                    "chunk_id": entry["chunk_id"],
+                    "note_type": entry["note_type"],
+                    "source_domain": entry["source_domain_snapshot"],
+                    "current_domain": entry["current_domain"],
+                    "title": entry["title_snapshot"],
+                    "section": entry["section_snapshot"],
+                    "quote": entry["quote_snapshot"],
+                    "quote_sha256": entry["quote_sha256"],
+                    "body_sha256": entry["body_sha256"],
+                    "locator": locator,
+                    "status": entry["status"],
+                    "invalid_reason": entry["invalid_reason"],
+                }
+            )
+        return {
+            "suggestion_id": row["suggestion_id"],
+            "batch_id": row["batch_id"],
+            "ordinal": row["ordinal"],
+            "status": row["status"],
+            "revision": row["revision"],
+            "domain": row["domain"],
+            "concept_term": row["concept_term"],
+            "knowledge_key": row["knowledge_key"],
+            "card_type": row["card_type"],
+            "front": row["front"],
+            "back": row["back"],
+            "explanation": row["explanation"],
+            "knowledge_fingerprint": row["knowledge_fingerprint"],
+            "content_fingerprint": row["content_fingerprint"],
+            "accepted_card_id": row["accepted_card_id"],
+            "rejection_reason": row["rejection_reason"],
+            "evidence": evidence,
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def _assert_study_suggestion_evidence_current_locked(
+        self,
+        suggestion: sqlite3.Row,
+    ) -> list[dict]:
+        rows = self._conn.execute(
+            """SELECT l.evidence_id, l.quote_snapshot, l.quote_sha256,
+                      e.job_id, e.chunk_id, e.note_type, e.current_domain,
+                      e.title_snapshot, e.section_snapshot, e.body_snapshot,
+                      e.body_sha256, e.locator_json, e.status, e.invalid_reason
+               FROM study_suggestion_evidence_links l
+               JOIN study_suggestion_evidence e ON e.evidence_id=l.evidence_id
+               WHERE l.suggestion_id=? ORDER BY l.ordinal""",
+            (suggestion["suggestion_id"],),
+        ).fetchall()
+        if not rows:
+            raise StudySuggestionConflictError(
+                "study_suggestion_evidence_missing", "suggestion has no evidence"
+            )
+        output = []
+        for row in rows:
+            self._assert_study_suggestion_evidence_row_current_locked(
+                row,
+                expected_domain=str(suggestion["domain"]),
+            )
+            if (
+                row["quote_snapshot"] not in str(row["body_snapshot"])
+                or sha256_text(str(row["quote_snapshot"])) != row["quote_sha256"]
+            ):
+                raise StudySuggestionConflictError(
+                    "study_suggestion_evidence_stale", "evidence no longer matches current chunk"
+                )
+            try:
+                locator = json.loads(str(row["locator_json"]))
+            except (json.JSONDecodeError, TypeError):
+                locator = {}
+            output.append(
+                {
+                    "evidence_id": row["evidence_id"],
+                    "job_id": row["job_id"],
+                    "chunk_id": row["chunk_id"],
+                    "note_type": row["note_type"],
+                    "title": row["title_snapshot"],
+                    "section": row["section_snapshot"],
+                    "quote": row["quote_snapshot"],
+                    "body_sha256": row["body_sha256"],
+                    "locator": locator,
+                }
+            )
+        return output
+
+    def _study_suggestion_evidence_state_locked(
+        self,
+        evidence: sqlite3.Row,
+        *,
+        expected_domain: str,
+    ) -> tuple[str, str | None, str]:
+        """从当前 job 和 chunk 重算证据状态,不信任缓存的 status."""
+        job = self._conn.execute(
+            "SELECT domain, status, is_current FROM jobs WHERE id=?",
+            (evidence["job_id"],),
+        ).fetchone()
+        if job is None:
+            return "unavailable", "job_deleted", str(evidence["current_domain"])
+        current_domain = str(job["domain"] or "")
+        if current_domain != expected_domain:
+            return "stale", "job_domain_changed", current_domain
+        if job["status"] != "done":
+            return "stale", "job_not_done", current_domain
+        if int(job["is_current"]) != 1:
+            return "stale", "job_superseded", current_domain
+        current = self._conn.execute(
+            """SELECT job_id, note_type, domain, body FROM note_chunks
+               WHERE chunk_id=?""",
+            (evidence["chunk_id"],),
+        ).fetchone()
+        if current is None:
+            return "unavailable", "chunk_removed", current_domain
+        current_hash = sha256_text(str(current["body"]))
+        if (
+            current["job_id"] != evidence["job_id"]
+            or current["note_type"] != evidence["note_type"]
+            or current["domain"] != expected_domain
+            or current_hash != evidence["body_sha256"]
+            or current_hash != sha256_text(str(evidence["body_snapshot"]))
+        ):
+            return "stale", "chunk_changed", current_domain
+        return "valid", None, current_domain
+
+    def _assert_study_suggestion_evidence_row_current_locked(
+        self,
+        evidence: sqlite3.Row,
+        *,
+        expected_domain: str,
+    ) -> None:
+        state, reason, current_domain = self._study_suggestion_evidence_state_locked(
+            evidence,
+            expected_domain=expected_domain,
+        )
+        if (
+            evidence["status"] != "valid"
+            or state != "valid"
+            or evidence["current_domain"] != current_domain
+        ):
+            raise StudySuggestionConflictError(
+                "study_suggestion_evidence_unavailable"
+                if evidence["status"] != "valid" else "study_suggestion_evidence_stale",
+                f"evidence is not current: {evidence['evidence_id']} ({reason or state})",
+            )
+
+    def _study_card_content_duplicate_locked(
+        self,
+        *,
+        domain: str,
+        card_type: str,
+        front: str,
+        back: str,
+        explanation: str,
+    ) -> bool:
+        expected = content_fingerprint(
+            domain=domain,
+            card_type=card_type,
+            front=front,
+            back=back,
+            explanation=explanation,
+        )
+        rows = self._conn.execute(
+            """SELECT card_type, front, back, explanation FROM study_cards
+               WHERE domain=?""",
+            (domain,),
+        ).fetchall()
+        return any(
+            content_fingerprint(
+                domain=domain,
+                card_type=str(row["card_type"]),
+                front=str(row["front"]),
+                back=str(row["back"]),
+                explanation=str(row["explanation"] or ""),
+            )
+            == expected
+            for row in rows
+        )
+
+    def _revalidate_study_suggestion_evidence_locked(
+        self,
+        *,
+        job_id: str,
+        note_type: str | None = None,
+    ) -> None:
+        """job 或 chunk 变化后更新可变有效性,快照始终不改."""
+        note_filter = " AND e.note_type=?" if note_type is not None else ""
+        params: list[object] = [job_id]
+        if note_type is not None:
+            params.append(note_type)
+        rows = self._conn.execute(
+            f"""SELECT e.*, b.domain AS expected_domain
+               FROM study_suggestion_evidence e
+               JOIN study_suggestion_batches b ON b.batch_id=e.batch_id
+               WHERE e.job_id=?{note_filter}""",
+            params,
+        ).fetchall()
+        now = _now_iso()
+        for row in rows:
+            if row["status"] == "unavailable":
+                continue
+            status, reason, current_domain = self._study_suggestion_evidence_state_locked(
+                row,
+                expected_domain=str(row["expected_domain"]),
+            )
+            self._conn.execute(
+                """UPDATE study_suggestion_evidence
+                   SET current_domain=?, status=?, invalid_reason=?, validated_at=?
+                   WHERE evidence_id=?""",
+                (current_domain, status, reason, now, row["evidence_id"]),
+            )
 
     def _row_to_study_card(self, row: sqlite3.Row) -> dict:
         try:

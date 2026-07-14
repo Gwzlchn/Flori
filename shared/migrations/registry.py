@@ -5,6 +5,7 @@ from __future__ import annotations
 from . import v0001_legacy_baseline as migration_v1
 from . import v0002_immutable_ledger as migration_v2
 from . import v0003_srs_consistency as migration_v3
+from . import v0004_study_suggestions as migration_v4
 from .runner import Migration
 
 
@@ -31,5 +32,12 @@ def migration_steps() -> tuple[Migration, ...]:
             payload=migration_v3.source_payload(),
             apply=migration_v3.apply,
             validate=migration_v3.validate,
+        ),
+        Migration(
+            version=migration_v4.VERSION,
+            name=migration_v4.NAME,
+            payload=migration_v4.source_payload(),
+            apply=migration_v4.apply,
+            validate=migration_v4.validate,
         ),
     )

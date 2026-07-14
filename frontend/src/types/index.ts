@@ -666,6 +666,90 @@ export interface StudyStats {
   retention_rate: number
 }
 
+export type StudySuggestionStatus = 'suggested' | 'accepted' | 'rejected'
+
+export interface StudySuggestionBatch {
+  batch_id: string
+  domain: string
+  status: 'pending_enqueue' | 'queued' | 'ready' | 'failed'
+  revision: number
+  attempt: number
+  task_id: string
+  provider: string
+  model: string
+  max_cards: number
+  error_code: string | null
+  error_message: string | null
+  deadline_at: string
+  evidence_count: number
+  suggestion_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface StudySuggestionEvidence {
+  evidence_id: string
+  job_id: string
+  chunk_id: string
+  note_type: string
+  source_domain: string
+  current_domain: string
+  title: string
+  section: string
+  quote: string
+  quote_sha256: string
+  body_sha256: string
+  locator: Record<string, unknown>
+  status: 'valid' | 'stale' | 'unavailable'
+  invalid_reason: string | null
+}
+
+export interface StudySuggestion {
+  suggestion_id: string
+  batch_id: string
+  ordinal: number
+  status: StudySuggestionStatus
+  revision: number
+  domain: string
+  concept_term: string | null
+  knowledge_key: string
+  card_type: 'basic' | 'cloze' | 'qa'
+  front: string
+  back: string
+  explanation: string
+  accepted_card_id: string | null
+  rejection_reason: string | null
+  evidence: StudySuggestionEvidence[]
+  created_at: string
+  updated_at: string
+}
+
+export interface StudySuggestionListResponse {
+  total: number
+  items: StudySuggestion[]
+}
+
+export interface StudySuggestionOperationsResponse {
+  batch_id: string
+  items: StudySuggestion[]
+  cards: StudyCard[]
+}
+
+export interface StudyMasteryItem {
+  domain: string
+  concept_term: string
+  score: number
+  level: 'fragile' | 'learning' | 'mastered'
+  reviewed_cards: number
+  reviews_total: number
+  last_reviewed_at: string
+}
+
+export interface StudyMasteryResponse {
+  total: number
+  items: StudyMasteryItem[]
+}
+
 export interface WsEvent {
   event: string
   step?: string

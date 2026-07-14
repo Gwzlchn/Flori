@@ -104,7 +104,10 @@ class WorkerTransport(Protocol):
 
     # 独立 AI task(kind='ai')
     async def set_ai_result(self, task_id: str, result: dict) -> None: ...
-    async def record_ai_task_log(self, log: dict) -> None: ...
+    async def record_ai_task_log(self, log: dict) -> bool: ...
+    async def mark_ai_task_executing(self, claim: dict) -> bool: ...
+    async def renew_ai_task_claim(self, claim: dict) -> bool: ...
+    async def finish_ai_task_claim(self, claim: dict, outcome: str) -> bool: ...
 
     # Job 上下文
     async def get_job_pipeline(self, job_id: str) -> str | None: ...
@@ -287,7 +290,28 @@ class RedisTransport:
         await self._redis.set_ai_result(task_id, result)
 
     async def record_ai_task_log(self, log):
-        await asyncio.to_thread(self._db.record_ai_task_log, log)
+        return await asyncio.to_thread(self._db.record_ai_task_log, log)
+
+    async def mark_ai_task_executing(self, claim):
+        return await self._redis.mark_ai_task_executing(
+            task_id=claim["task_id"], batch_id=claim.get("batch_id", ""),
+            attempt=int(claim.get("attempt", 0)), revision=int(claim.get("revision", 0)),
+            worker_id=self._worker_id, claim_id=claim["claim_id"],
+        )
+
+    async def renew_ai_task_claim(self, claim):
+        return await self._redis.renew_ai_task_claim(
+            task_id=claim["task_id"], batch_id=claim.get("batch_id", ""),
+            attempt=int(claim.get("attempt", 0)), revision=int(claim.get("revision", 0)),
+            worker_id=self._worker_id, claim_id=claim["claim_id"],
+        )
+
+    async def finish_ai_task_claim(self, claim, outcome):
+        return await self._redis.finish_ai_task_claim(
+            task_id=claim["task_id"], batch_id=claim.get("batch_id", ""),
+            attempt=int(claim.get("attempt", 0)), revision=int(claim.get("revision", 0)),
+            worker_id=self._worker_id, claim_id=claim["claim_id"], outcome=outcome,
+        )
 
     # Job 上下文
     async def get_job_pipeline(self, job_id):

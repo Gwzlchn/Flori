@@ -17,7 +17,6 @@ import time
 from datetime import datetime, timezone
 
 from shared.db import Database
-from shared.models import DEFAULT_AI_MODEL, DEFAULT_AI_PROVIDER
 from shared.redis_client import RedisClient
 
 
@@ -113,19 +112,30 @@ async def _increment_worker_stats(
         await redis.incr_worker_stat(worker_id, "total_duration_sec", duration)
 
 
-async def pop_matching(redis: RedisClient, pool, tags, reject_tags, max_tries=5):
-    # 从池队列取出首个标签匹配的任务,不匹配则放回,最多重试 max_tries 次。
-    for _ in range(max_tries):
-        result = await redis.dequeue_step_raw(pool)
-        if result is None:
-            return None
-        raw_json, task, score = result
-        require_tags = set(task.get("require_tags", []))
-        all_tags = set(task.get("tags", []))
-        if require_tags.issubset(tags) and not all_tags.intersection(reject_tags):
-            return task, raw_json, score
-        await redis.return_step(pool, raw_json, score)
-    return None
+async def pop_matching(
+    redis: RedisClient, pool, tags, reject_tags, max_tries=5, *, exclude_kind=None,
+):
+    # 不匹配项先暂存,否则同分数成员每次放回后可能连续弹到自己,永远看不到后续任务。
+    skipped: list[tuple[str, float]] = []
+    try:
+        for _ in range(max_tries):
+            result = await redis.dequeue_step_raw(pool)
+            if result is None:
+                return None
+            raw_json, task, score = result
+            require_tags = set(task.get("require_tags", []))
+            all_tags = set(task.get("tags", []))
+            if (
+                (exclude_kind is None or task.get("kind") != exclude_kind)
+                and require_tags.issubset(tags)
+                and not all_tags.intersection(reject_tags)
+            ):
+                return task, raw_json, score
+            skipped.append((raw_json, score))
+        return None
+    finally:
+        for raw_json, score in skipped:
+            await redis.return_step(pool, raw_json, score)
 
 
 # 粗粒度编排
@@ -158,46 +168,57 @@ async def claim_step(
         if not await redis.try_acquire_slot(pool, limit, holder):
             continue
 
-        matched = await pop_matching(redis, pool, tags, reject_tags)
+        # 独立 AI task 的 queue -> claimed 必须是一个 Lua 原子操作.ZPOPMIN 后再写状态会在
+        # 进程崩溃窗口永久吞任务,而 submitted marker 又会阻止调度器重投。
+        if pool == "ai":
+            ai_claim = await redis.claim_ai_task(
+                worker_id=worker_id,
+                claim_id=holder,
+                tags=tags,
+                reject_tags=reject_tags,
+            )
+            if ai_claim is not None:
+                task_id = ai_claim["task_id"]
+                step_name = ai_claim.get("step", "ai")
+                try:
+                    await _set_status(redis, db, worker_id, "busy", task_id, step_name)
+                    await redis.publish(f"events:{task_id}", {
+                        "event": "ai_task_start", "task_id": task_id,
+                        "step": step_name, "worker": worker_id,
+                    })
+                except Exception:
+                    try:
+                        await redis.abandon_ai_task_claim(
+                            task_id=task_id,
+                            batch_id=ai_claim.get("batch_id", ""),
+                            attempt=int(ai_claim.get("attempt", 0)),
+                            revision=int(ai_claim.get("revision", 0)),
+                            worker_id=worker_id,
+                            claim_id=ai_claim["claim_id"],
+                        )
+                    finally:
+                        await redis.release_slot(pool, holder)
+                        try:
+                            await _set_status(redis, db, worker_id, "idle")
+                        except Exception:
+                            pass
+                    raise
+                return {
+                    **ai_claim,
+                    "kind": "ai",
+                    "pool": pool,
+                    "exec_id": holder,
+                }
+
+        matched = await pop_matching(
+            redis, pool, tags, reject_tags,
+            exclude_kind="ai" if pool == "ai" else None,
+        )
         if matched is None:
             await redis.release_slot(pool, holder)
             continue
 
         task, raw_json, score = matched
-
-        # 独立 AI task(kind='ai')分流
-        # 没有 job_id / job:{id}:steps hash,绝不喂进下方 job-step 状态机(cas_step_status/set_step_*),
-        # 也不占资源槽。已占的池槽(上方 try_acquire_slot)持槽执行,done 由 release_step 的 ai 分支释放。
-        if task.get("kind") == "ai":
-            task_id = task.get("task_id")
-            step_name = task.get("step", "ai")
-            exec_id = holder
-            try:
-                await _set_status(redis, db, worker_id, "busy", task_id, step_name)
-                await redis.publish(f"events:{task_id}", {
-                    "event": "ai_task_start", "task_id": task_id,
-                    "step": step_name, "worker": worker_id,
-                })
-            except Exception:
-                # dequeue 成功但随后写状态/publish 抛错:放回任务 + 释放槽,避免吞任务/泄漏槽。
-                try:
-                    await redis.return_step(pool, raw_json, score)
-                except Exception:
-                    pass
-                try:
-                    await redis.release_slot(pool, holder)
-                except Exception:
-                    pass
-                raise
-            return {
-                "kind": "ai", "task_id": task_id, "step": step_name, "pool": pool,
-                "exec_id": exec_id, "request": task.get("request", {}),
-                "domain": task.get("domain"),
-                "provider": task.get("provider", DEFAULT_AI_PROVIDER),
-                "model": task.get("model", DEFAULT_AI_MODEL),
-                "tags": task.get("tags", []),
-                "require_tags": task.get("require_tags", []),
-            }
 
         job_id = task["job_id"]
         step = task["step"]

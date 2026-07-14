@@ -1,7 +1,7 @@
 {
   "format": "flori-sqlite-migrations",
   "minimum_supported_version": 0,
-  "current_version": 3,
+  "current_version": 4,
   "ledger_version": 2,
   "migrations": [
     {
@@ -18,6 +18,11 @@
       "version": 3,
       "name": "srs-transaction-consistency",
       "checksum": "075a7567ca1289e857491a854625aea0dec7e46025d1dd6d55bd08d9c7af81e3"
+    },
+    {
+      "version": 4,
+      "name": "evidence-backed-study-suggestions",
+      "checksum": "8072748477611271039055bce57f40a00f2f095e71e235263e3087687202a3a2"
     }
   ]
 }

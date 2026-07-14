@@ -151,6 +151,7 @@ def _extended_schema_manifest(root: Path, current_version: int) -> Path:
         "v0001_legacy_baseline",
         "v0002_immutable_ledger",
         "v0003_srs_consistency",
+        "v0004_study_suggestions",
     ]
     for version in range(manifest["current_version"] + 1, current_version + 1):
         previous = module_names[-1]
@@ -1453,7 +1454,7 @@ def test_recover_set_rejects_accepted_and_uncommitted_status_mix(
     assert (_tree_state(left), _tree_state(right)) == before
 
 
-@pytest.mark.parametrize("user_version", [0, 1, 2, 3])
+@pytest.mark.parametrize("user_version", [0, 1, 2, 3, 4])
 def test_supported_database_versions_pass_backup_compatibility_matrix(
     tmp_path: Path, user_version: int
 ):
@@ -1525,24 +1526,24 @@ def test_dr_preserves_live_shape_legacy_glossary_through_restore_and_upgrade(
 
 
 def test_unsupported_sqlite_version_fails_compatibility_gate(tmp_path: Path):
-    future_manifest = _extended_schema_manifest(tmp_path, 4)
+    future_manifest = _extended_schema_manifest(tmp_path, 5)
     archive, _ = _create(
-        tmp_path, user_version=4, schema_manifest_path=future_manifest
+        tmp_path, user_version=5, schema_manifest_path=future_manifest
     )
 
     with pytest.raises(dr.SnapshotError, match="不在当前恢复程序范围"):
         dr.validate_archive(archive)
 
 
-def test_v4_program_accepts_v3_snapshot_when_history_prefix_matches(tmp_path: Path):
-    archive, _ = _create(tmp_path, user_version=3)
-    future_manifest = _extended_schema_manifest(tmp_path, 4)
+def test_v5_program_accepts_v4_snapshot_when_history_prefix_matches(tmp_path: Path):
+    archive, _ = _create(tmp_path, user_version=4)
+    future_manifest = _extended_schema_manifest(tmp_path, 5)
 
     manifest = dr.validate_archive(
         archive, schema_manifest_path=future_manifest
     )
 
-    assert manifest["sqlite"]["user_version"] == 3
+    assert manifest["sqlite"]["user_version"] == 4
 
 
 def test_same_user_version_with_divergent_migration_checksum_is_rejected(tmp_path: Path):

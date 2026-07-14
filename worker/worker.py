@@ -766,10 +766,27 @@ class Worker:
         domain = claim.get("domain")
         start = time.time()
         ts_start = datetime.now(timezone.utc)
-        req = LLMRequest.from_jsonable(claim.get("request", {}))
         provider_name = claim.get("provider") or DEFAULT_AI_PROVIDER
         model_name = claim.get("model") or DEFAULT_AI_MODEL
+        managed_claim = bool(claim.get("claim_id"))
+        executing = False
+        renew_task: asyncio.Task | None = None
+        req: LLMRequest | None = None
         try:
+            if step_name == "study_suggestions":
+                from shared.study_suggestions import validate_study_suggestion_task_payload
+
+                validate_study_suggestion_task_payload(claim)
+            req = LLMRequest.from_jsonable(claim.get("request", {}))
+            if managed_claim:
+                executing = await self.transport.mark_ai_task_executing(claim)
+                if not executing:
+                    logger.warning(
+                        "ai_task_claim_stale", worker_id=self.worker_id,
+                        task_id=task_id, claim_id=claim.get("claim_id"),
+                    )
+                    return
+                renew_task = asyncio.create_task(self._renew_ai_task_claim(claim))
             try:
                 gateway = AIGateway(
                     self.config.providers,
@@ -777,37 +794,105 @@ class Worker:
                                 "ai": {"primary": {"provider": provider_name, "model": model_name}}}]},
                 )
                 resp = await gateway.call(step_name, req)
-                duration = time.time() - start
-                await self.transport.set_ai_result(task_id, resp.to_jsonable())
-                await self._record_ai_task_usage(task_id, step_name, exec_id, resp)
-                await self._write_ai_task_audit(
-                    task_id, step_name, domain, exec_id, req, resp, None, ts_start, duration,
-                    provider_name, model_name,
-                )
-                await self.transport.publish_step_event(
-                    f"events:{task_id}", {"event": "ai_task_done", "task_id": task_id, "step": step_name})
-                logger.info("ai_task_done", worker_id=self.worker_id, task_id=task_id,
-                            step=step_name, provider=resp.provider, duration=round(duration, 1))
             except Exception as e:
                 duration = time.time() - start
                 err = str(e)[:500]
                 # 失败:回执 {"error"} + 审计(含尝试链/当时 prompt)+ 完成事件;全 best-effort,绝不崩 worker.
-                for op in (
-                    lambda: self.transport.set_ai_result(task_id, {"error": err}),
-                    lambda: self._write_ai_task_audit(
-                        task_id, step_name, domain, exec_id, req, None, e, ts_start, duration,
-                        provider_name, model_name,
-                    ),
-                    lambda: self.transport.publish_step_event(
-                        f"events:{task_id}", {"event": "ai_task_failed", "task_id": task_id, "error": err[:200]}),
-                ):
+                result_written = False
+                durable = False
+                try:
+                    await self.transport.set_ai_result(task_id, {"error": err})
+                    result_written = True
+                except Exception:
+                    pass
+                try:
+                    if req is not None:
+                        durable = await self._write_ai_task_audit(
+                            task_id, step_name, domain, exec_id, req, None, e,
+                            ts_start, duration, provider_name, model_name,
+                        )
+                except Exception:
+                    pass
+                if managed_claim and executing and result_written and durable:
                     try:
-                        await op()
+                        await self.transport.finish_ai_task_claim(claim, "failed")
                     except Exception:
                         pass
+                try:
+                    await self.transport.publish_step_event(
+                        f"events:{task_id}", {
+                            "event": "ai_task_failed", "task_id": task_id,
+                            "error": err[:200],
+                        },
+                    )
+                except Exception:
+                    pass
                 logger.warning("ai_task_failed", worker_id=self.worker_id, task_id=task_id, error=err[:200])
+                return
+
+            duration = time.time() - start
+            try:
+                await self.transport.set_ai_result(task_id, resp.to_jsonable())
+                await self._record_ai_task_usage(task_id, step_name, exec_id, resp)
+                durable = await self._write_ai_task_audit(
+                    task_id, step_name, domain, exec_id, req, resp, None, ts_start, duration,
+                    provider_name, model_name,
+                )
+            except Exception:
+                logger.exception(
+                    "ai_task_success_persist_failed",
+                    worker_id=self.worker_id, task_id=task_id,
+                )
+                return
+
+            terminal = not managed_claim
+            if managed_claim and durable:
+                try:
+                    terminal = await self.transport.finish_ai_task_claim(claim, "succeeded")
+                except Exception:
+                    logger.exception(
+                        "ai_task_success_finish_failed",
+                        worker_id=self.worker_id, task_id=task_id,
+                    )
+                    terminal = False
+            if managed_claim and not terminal:
+                logger.warning(
+                    "ai_task_success_not_terminal",
+                    worker_id=self.worker_id, task_id=task_id,
+                )
+                return
+            try:
+                await self.transport.publish_step_event(
+                    f"events:{task_id}", {
+                        "event": "ai_task_done", "task_id": task_id, "step": step_name,
+                    },
+                )
+            except Exception:
+                logger.warning(
+                    "ai_task_done_publish_failed",
+                    worker_id=self.worker_id, task_id=task_id,
+                )
+            logger.info(
+                "ai_task_done", worker_id=self.worker_id, task_id=task_id,
+                step=step_name, provider=resp.provider, duration=round(duration, 1),
+            )
         finally:
+            if renew_task is not None:
+                renew_task.cancel()
+                await asyncio.gather(renew_task, return_exceptions=True)
             await self.transport.release(claim)
+
+    async def _renew_ai_task_claim(self, claim: dict) -> None:
+        """provider 调用期间续租;CAS 失败即停止,不替陈旧执行续命."""
+        interval = max(1.0, float(claim.get("lease_seconds", 180)) / 3)
+        while True:
+            await asyncio.sleep(interval)
+            if not await self.transport.renew_ai_task_claim(claim):
+                logger.warning(
+                    "ai_task_claim_renew_rejected", worker_id=self.worker_id,
+                    task_id=claim.get("task_id"), claim_id=claim.get("claim_id"),
+                )
+                return
 
     async def _record_ai_task_usage(self, task_id: str, step_name: str, exec_id: str, resp) -> None:
         """AI task 成本归因(与白盒审计并存):record_ai_usage(job_id=null, step=step_name).失败仅降级统计."""
@@ -850,7 +935,7 @@ class Worker:
     async def _write_ai_task_audit(
         self, task_id, step_name, domain, exec_id, req, resp, error, ts_start, duration,
         requested_provider=DEFAULT_AI_PROVIDER, requested_model=DEFAULT_AI_MODEL,
-    ) -> None:
+    ) -> bool:
         """构建并落一条 AI task 白盒审计,对齐 DAG ai_logs 的路由/尝试链/渲染 prompt/输出/raw/用量/全轨迹."""
         ok = error is None and resp is not None
         if resp is not None:
@@ -902,4 +987,4 @@ class Worker:
             "record": record,
             "created_at": ts_start.isoformat(),
         }
-        await self.transport.record_ai_task_log(log)
+        return bool(await self.transport.record_ai_task_log(log))

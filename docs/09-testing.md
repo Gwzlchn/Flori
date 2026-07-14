@@ -11,7 +11,7 @@
 | 层级 | 当前自动化与入口 | 是否主 CI 必经 |
 |------|------------------|----------------|
 | 主 CI | backend normal 6 分片 + worker 2 分片、真依赖 integration、frontend Vitest、coverage gate、按路径构建并在现有门通过后 push 镜像；拓扑以 `.github/workflows/ci.yml` 为准 | 是，非纯文档 push / PR |
-| 组件集成 | `scripts/test.sh --integration` 统一编排真 Redis、生产 Database 多连接/多进程冷启动、迁移整链失败回滚、固定 DR v1/v2 恢复查询、Gateway Worker、real-docker 和生产 AOF 空环境恢复 | 是，`integration` required job |
+| 组件集成 | `scripts/test.sh --integration` 统一编排真 Redis、生产 Database 多连接/多进程冷启动、迁移整链失败回滚、已发布历史版本到当前 manifest 的 DR 恢复查询、Gateway Worker、real-docker 和生产 AOF 空环境恢复 | 是，`integration` required job |
 | pipeline E2E | 主 CI integration 覆盖 video / paper / article / audio 真实完成事件到 Search / Ask / MCP 命中；`.github/workflows/e2e.yml` 另保留真实 PDF 步骤链手动验收 | 闭环必经；外部素材需显式触发 |
 | 条件外网 / 凭证 | `scripts/test.sh --external <article|audio|rss|youtube|all>` 统一编排公网场景，缺所选 URL 返回非零；B 站、arXiv 与真实 AI 仍按素材、网络和凭证条件执行 | 否，只在条件满足的受控环境执行 |
 | 浏览器与视觉 | `docker-compose.e2e.yml` + `tests/e2e/smoke.py` 做已部署栈路由冒烟；UI 视觉验收另在 3840×2160、1512×982、440×956 三视口检查 | 否，当前为人工 / 发布验收 |
@@ -71,6 +71,8 @@ scripts/test.sh -- tests/steps/test_step_05_dedup.py
 验证冷启动、跨连接可见、唯一键竞争和 current+1/current+2 后段故障的整链回滚。固定
 format-v1 与 format-v2/schema-v2 归档均经生产 restore 入口恢复，再由当前 Database 执行
 `init_schema/get_job/list_jobs`，避免只验压缩包形状而没有验证真实升级和读路径。
+
+涉及学习候选 schema 时，还必须验证旧版本备份恢复后能继续升级到当前 manifest，当前版本快照能通过冻结 migration chain 自校验，未来版本仍在兼容门 fail-closed。测试不得只修改 `PRAGMA user_version` 伪造兼容性。
 
 调度器 + Worker + Redis 联调：
 
@@ -275,6 +277,23 @@ scripts/test.sh -m scheduler -m worker
 # 开发调试时（想看完整流程但不花钱；这是起服务，不是跑测试）
 DRY_RUN=1 docker compose up
 ```
+
+## 5.1 证据型自动学习卡测试矩阵
+
+该能力把 AI 输出、人工审核和 SRS 写入串成一个事务边界，至少覆盖下列层级：
+
+| 层级 | 必测不变量 | 入口 |
+|---|---|---|
+| migration | 历史 checksum 不变；上一版本到当前版本升级；故障后 DDL、ledger、`user_version` 全部回滚；exact current schema；无 vector/embedding 占位 | `scripts/test.sh -- tests/test_db_migrations.py` |
+| DB / API | 伪 evidence id、跨 batch、domain/concept/hash/quote 失效、revision 竞态、bool/负数/SQLite 64 位边界、101 项、同 request 异 payload、整批回滚 | `scripts/test.sh -- tests/test_study_suggestions.py` |
+| Redis | 多调用方对同 task id 只有一个原子 enqueue-once；marker、ZSET 和等待时间戳一起提交；重放不恢复已弹出的旧任务 | `scripts/test.sh -- tests/test_redis_client.py` |
+| DR | 当前 suggestion 表和不可变审计可被快照、验证、恢复并重新打开；未来 schema 拒绝恢复 | `scripts/test.sh -- tests/test_backup_restore.py` |
+| UI | 生成、跨刷新轮询、失败重试、证据预览、编辑、同 batch 批量接受/拒绝、409 刷新和掌握度 | `scripts/test.sh --fe frontend/src/views/StudyView.test.ts` |
+| 真依赖闭环 | 真 Redis + production Worker + controlled AI Gateway；Scheduler 重启/收割后只产生一份 suggestion/card/operation，接受后 due，真实 `good` 评分后 mastery=80 | `scripts/test.sh --integration` |
+
+真依赖闭环不得调用公网 LLM。controlled gateway 返回固定 JSON，并记录调用次数；Redis result TTL 丢失时从持久 AI log 恢复，旧 task 迟到、超时 retry 和多 Scheduler 副本必须分别有测试。最终还需断言队列、holder 和临时 result 清理完成。
+
+证据一致性测试必须同时覆盖：chunk 同 hash 重建仍有效，正文变化变 `stale`，chunk/job 消失变 `unavailable`；job 删除保留快照与复习审计；concept merge 和 domain rename 在同一事务移动当前指针、已接受卡片和 fingerprint。掌握度只允许真实 review log 参与，候选、未复习卡和 rejected 卡均不得抬高分数。
 
 ## 6. 性能基线
 

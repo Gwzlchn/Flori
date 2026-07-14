@@ -27,6 +27,12 @@ from shared.models import AITask, Job, JobStatus, LLMRequest, Step, StepStatus
 from shared.notify import notify
 from shared.redis_client import RedisClient
 from shared.runner_ops import parse_style_tags
+from shared.study_suggestions import (
+    StudySuggestionConflictError,
+    canonical_json,
+    prefixed_sha256,
+    validate_study_suggestion_prompt_snapshot,
+)
 from shared.review_contract import verify_persisted_review
 from shared.terms import zh_name_from_glossary_row
 from shared.net_zone import required_zone
@@ -266,6 +272,7 @@ class Scheduler:
                 await self.cleanup_stale_workers()
                 await self.reconcile_slots()
                 await self.reconcile_completion_effects()
+                await self.reconcile_study_suggestion_batches()
                 await self.check_radar_digest()
             except Exception:
                 logger.exception("periodic_error")
@@ -400,6 +407,7 @@ class Scheduler:
 
     async def _recover(self) -> None:
         """启动恢复:补推满足依赖的步骤,回收无主 running 步骤。"""
+        await self.reconcile_study_suggestion_batches()
         active_jobs = await self.redis.get_active_jobs()
         logger.info("recover_start", active_jobs=len(active_jobs))
 
@@ -426,6 +434,167 @@ class Scheduler:
             await self._check_downstream(job_id)
 
         logger.info("recover_done", active_jobs=len(active_jobs))
+
+    @staticmethod
+    def _study_suggestion_ai_payload(batch: dict) -> dict:
+        """只从持久批次快照构造任务,重启和 retry 不再读取当前 Prompt 文件."""
+        persisted = batch.get("llm_request")
+        if not isinstance(persisted, dict):
+            raise ValueError("study suggestion llm_request is invalid")
+        prompt = persisted.get("prompt_snapshot")
+        raw = validate_study_suggestion_prompt_snapshot(prompt)
+        request_input = {
+            key: value for key, value in persisted.items() if key != "prompt_snapshot"
+        }
+        request = LLMRequest(
+            messages=[{"role": "user", "content": canonical_json(request_input)}],
+            system=raw.decode("utf-8"),
+            max_tokens=8_192,
+            temperature=0.2,
+            response_format="json_object",
+        )
+        payload = AITask(
+            task_id=str(batch["task_id"]),
+            request=request,
+            step_name="study_suggestions",
+            domain=str(batch["domain"]),
+            provider=str(batch["provider"]),
+            model=str(batch["model"]),
+        ).to_task_payload()
+        payload.update({
+            "batch_id": str(batch["batch_id"]),
+            "attempt": int(batch["attempt"]),
+            "revision": int(batch["revision"]),
+            "generator_fingerprint": str(batch["generator_fingerprint"]),
+            "input_fingerprint": str(batch["input_fingerprint"]),
+            "prompt_snapshot": prompt,
+        })
+        payload["task_payload_sha256"] = prefixed_sha256(
+            canonical_json(payload).encode("utf-8")
+        )
+        return payload
+
+    async def _fail_study_suggestion_batch(
+        self, batch: dict, code: str, message: str,
+    ) -> None:
+        try:
+            await asyncio.to_thread(
+                self.db.fail_study_suggestion_batch,
+                str(batch["batch_id"]),
+                task_id=str(batch["task_id"]),
+                expected_revision=int(batch["revision"]),
+                error_code=code,
+                error_message=(message or code)[:2_000],
+            )
+        except StudySuggestionConflictError:
+            # 另一 Scheduler 副本已推进同一 CAS,当前拍按幂等竞争结束。
+            return
+
+    async def reconcile_study_suggestion_batches(
+        self, *, now: datetime | None = None,
+    ) -> int:
+        """以 DB 为真相幂等投递并收割学习建议 AI task."""
+        current_time = now or datetime.now(timezone.utc)
+        await self.redis.reconcile_ai_task_claims(
+            now_epoch=current_time.timestamp(),
+        )
+        batches = await asyncio.to_thread(
+            self.db.list_study_suggestion_batches_for_reconcile,
+        )
+        progressed = 0
+        for snapshot in batches:
+            batch = snapshot
+            try:
+                if batch["status"] == "pending_enqueue":
+                    batch = await asyncio.to_thread(
+                        self.db.mark_study_suggestion_batch_queued,
+                        str(batch["batch_id"]),
+                        task_id=str(batch["task_id"]),
+                        expected_revision=int(batch["revision"]),
+                    )
+                    progressed += 1
+                payload = self._study_suggestion_ai_payload(batch)
+                await self.redis.enqueue_ai_task_once(payload, priority=-10)
+
+                claim = await self.redis.get_ai_task_claim(str(batch["task_id"]))
+                claim_state = claim.get("state") if claim else None
+                if claim_state == "ambiguous":
+                    await self._fail_study_suggestion_batch(
+                        batch,
+                        "ai_task_ambiguous",
+                        "AI task execution expired after provider start; manual retry required",
+                    )
+                    progressed += 1
+                    continue
+
+                result = await self.redis.get_ai_result(str(batch["task_id"]))
+                if result is None:
+                    log = await asyncio.to_thread(
+                        self.db.get_latest_ai_task_log, str(batch["task_id"]),
+                    )
+                    if log is not None:
+                        record = log["record"]
+                        result = (
+                            {"content": record.get("output")}
+                            if bool(log.get("ok"))
+                            else {"error": log.get("error") or record.get("error")}
+                        )
+
+                # Worker 先写结果/审计再 CAS 终态.有 claim 时只消费终态,隔离迟到旧执行。
+                if result is not None and (
+                    claim is None or claim_state in {"succeeded", "failed"}
+                ):
+                    if not isinstance(result, dict):
+                        await self._fail_study_suggestion_batch(
+                            batch, "ai_task_result_invalid", "AI task result is not an object",
+                        )
+                    elif result.get("error"):
+                        await self._fail_study_suggestion_batch(
+                            batch, "ai_task_failed", str(result["error"]),
+                        )
+                    else:
+                        content = result.get("content")
+                        try:
+                            parsed = json.loads(content) if isinstance(content, str) else content
+                            if not isinstance(parsed, dict):
+                                raise ValueError("AI task content is not an object")
+                            await asyncio.to_thread(
+                                self.db.materialize_study_suggestions,
+                                str(batch["batch_id"]),
+                                task_id=str(batch["task_id"]),
+                                result=parsed,
+                            )
+                        except (json.JSONDecodeError, ValueError) as exc:
+                            await self._fail_study_suggestion_batch(
+                                batch, "ai_task_result_invalid", str(exc),
+                            )
+                    progressed += 1
+                    continue
+
+                deadline = datetime.fromisoformat(str(batch["deadline_at"]))
+                if deadline.tzinfo is None or deadline.utcoffset() is None:
+                    raise ValueError("study suggestion deadline has no timezone")
+                if current_time >= deadline.astimezone(timezone.utc):
+                    if claim_state == "executing":
+                        continue
+                    if claim_state in {None, "claimed", "requeued", "canceled"}:
+                        cancel_state = await self.redis.cancel_ai_task_before_execution(
+                            payload,
+                        )
+                        if cancel_state != "canceled":
+                            continue
+                        await self._fail_study_suggestion_batch(
+                            batch, "ai_task_timeout", "AI task exceeded persistent deadline",
+                        )
+                        progressed += 1
+            except StudySuggestionConflictError:
+                continue
+            except Exception:
+                logger.exception(
+                    "study_suggestion_reconcile_error",
+                    batch_id=batch.get("batch_id"), task_id=batch.get("task_id"),
+                )
+        return progressed
 
     # Job 提交
 
@@ -1494,6 +1663,7 @@ class Scheduler:
                         ex = await self.redis.get_step_exec_id(job_id, step)
                         if ex:
                             live.add(ex)
+            live |= await self.redis.get_live_ai_claim_holders()
             suspects = held - live
             confirmed = suspects & self._slot_reconcile_suspect   # 连续两拍都陈旧才按真泄漏处理
             if confirmed:

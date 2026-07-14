@@ -7,7 +7,7 @@ import json
 import os
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -1289,6 +1289,107 @@ class TestAITaskExecution:
         assert claim is not None and claim["provider"] == "codex-cli"
         assert claim["model"] == "gpt-5-codex"
         assert claim["require_tags"] == ["codex-cli"]
+
+    @pytest.mark.asyncio
+    async def test_production_claim_marks_executing_then_terminal_success(
+        self, redis, db, config, storage, monkeypatch,
+    ):
+        w = Worker(
+            transport=RedisTransport(redis, db), config=config, storage=storage,
+            worker_type="ai", pools=["ai"], tags={"claude-cli"}, reject_tags=set(),
+        )
+        await w.register()
+        payload = AITask(
+            task_id="at_managed_success",
+            request=LLMRequest(messages=[{"role": "user", "content": "Q"}]),
+        ).to_task_payload()
+        await redis.enqueue_ai_task_once(payload)
+        claim = await request_step(w)
+        monkeypatch.setattr(
+            "worker.worker.AIGateway",
+            lambda p, pl: _FakeGateway(resp=LLMResponse(
+                content="ANSWER", model="test", provider="claude-cli",
+            )),
+        )
+
+        await w.execute(claim)
+
+        state = await redis.get_ai_task_claim(payload["task_id"])
+        assert state["state"] == "succeeded"
+        assert await redis.get_pool_count("ai") == 0
+        assert (await redis.get_ai_result(payload["task_id"]))["content"] == "ANSWER"
+
+    @pytest.mark.asyncio
+    async def test_stale_managed_claim_never_calls_provider(
+        self, redis, db, config, storage, monkeypatch,
+    ):
+        w = Worker(
+            transport=RedisTransport(redis, db), config=config, storage=storage,
+            worker_type="ai", pools=["ai"], tags={"claude-cli"}, reject_tags=set(),
+        )
+        await w.register()
+        payload = AITask(
+            task_id="at_managed_stale", request=LLMRequest(messages=[]),
+        ).to_task_payload()
+        await redis.enqueue_ai_task_once(payload)
+        claim = await request_step(w)
+        await redis.r.hset(f"ai:claim:{payload['task_id']}", "claim_id", "new-owner")
+        calls = 0
+
+        def forbidden_gateway(*args):
+            nonlocal calls
+            calls += 1
+            return _FakeGateway()
+
+        monkeypatch.setattr("worker.worker.AIGateway", forbidden_gateway)
+        await w.execute(claim)
+        assert calls == 0
+        assert await redis.get_pool_count("ai") == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "post_success_failure",
+        ["finish_false", "finish_raise", "publish_raise"],
+    )
+    async def test_post_success_transport_failure_never_reclassifies_provider_result(
+        self, redis, db, config, storage, monkeypatch, post_success_failure,
+    ):
+        w = Worker(
+            transport=RedisTransport(redis, db), config=config, storage=storage,
+            worker_type="ai", pools=["ai"], tags={"claude-cli"}, reject_tags=set(),
+        )
+        await w.register()
+        payload = AITask(
+            task_id=f"at_post_success_{post_success_failure}",
+            request=LLMRequest(messages=[{"role": "user", "content": "Q"}]),
+        ).to_task_payload()
+        await redis.enqueue_ai_task_once(payload)
+        claim = await request_step(w)
+        monkeypatch.setattr(
+            "worker.worker.AIGateway",
+            lambda p, pl: _FakeGateway(resp=LLMResponse(
+                content="ANSWER", model="test", provider="claude-cli",
+            )),
+        )
+        if post_success_failure == "finish_false":
+            w.transport.finish_ai_task_claim = AsyncMock(return_value=False)
+        elif post_success_failure == "finish_raise":
+            w.transport.finish_ai_task_claim = AsyncMock(
+                side_effect=RuntimeError("finish unavailable"),
+            )
+        else:
+            w.transport.publish_step_event = AsyncMock(
+                side_effect=RuntimeError("publish unavailable"),
+            )
+
+        await w.execute(claim)
+
+        assert (await redis.get_ai_result(payload["task_id"]))["content"] == "ANSWER"
+        logs = db.get_ai_task_logs(payload["task_id"])
+        assert len(logs) == 1 and logs[0]["ok"] == 1
+        state = await redis.get_ai_task_claim(payload["task_id"])
+        expected = "succeeded" if post_success_failure == "publish_raise" else "executing"
+        assert state["state"] == expected
 
 
 class TestComputeEffectiveTimeout:

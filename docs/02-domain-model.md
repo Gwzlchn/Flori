@@ -193,6 +193,14 @@ occurrence = { job_id, content_type(video/paper/article/audio), location }
 - 主题页/浏览 = 对 `is_topic` 的粗节点做内容聚合，**与抽取同源**（抽取一次，既沉淀知识又生成可浏览主题，不维护两套）。
 - 评审的 `missing_concepts` 是「知识缺口」（讲漏了什么），属评审面板/选题建议，**不是**概念库主喂养源；主源是 ①「讲清楚了什么」。
 
+### 1.8.1 证据型学习卡闭环
+
+自动学习卡不是笔记生成的无条件副作用。它从已提交的 `note_chunks` 和已接受概念创建不可变输入快照，AI 只能引用服务端分配的 opaque evidence id。AI 输出先成为 `suggested` 候选，人工编辑、接受或拒绝后才形成学习事实。
+
+接受候选时，服务端在同一事务中重新检查当前 chunk、正文 hash、精确 quote、domain、concept、revision 和重复内容。全部检查通过后才创建 `active` 卡片及立即到期的 SRS 状态；任一检查失败则整批操作回滚。拒绝记录作为 tombstone 保留，防止相同知识被反复建议。
+
+概念掌握度不是 AI 推断值。它只聚合 `active` / `suspended` 卡片的真实 review log，并取每张卡最近一次评分：`again=0`、`hard=50`、`good=80`、`easy=100`。没有真实评分的候选或卡片不进入掌握度。
+
 ---
 
 ## 1.9 全景图
@@ -453,6 +461,38 @@ CREATE VIRTUAL TABLE notes_fts5 USING fts5(
 - 多个后端进程由数据库同目录的 `.analyzer.db.migration.lock` 序列化。非空旧库升级前先创建、校验并原子发布 migration safety snapshot；快照失败则不开始迁移。当前版本即使没有 pending migration，也会重新校验 ledger 和完整 schema。
 - 在真实 SQLite 写性连接前，系统会在隔离副本上恢复 WAL 或 hot journal 的最后 committed 状态并判定版本。未来版本或无法安全判断的 sidecar 会 fail-closed，不允许真实连接先改写 DB/WAL 或创建 SHM。
 
+### 2.3.2 证据型学习卡状态与持久事实
+
+完整 DDL 仍以冻结 migration chain 为准。该能力使用六类持久事实，不在本文复制列级定义：
+
+| 表 | 职责 | 可变边界 |
+|---|---|---|
+| `study_suggestion_batches` | 持久生成批次、AI task、attempt、deadline、结果或错误 | 只按状态机迁移 |
+| `study_suggestion_inputs` | batch 使用的 chunk / concept 输入清单 | 快照不可改；仅 current concept 指针可随 merge 迁移 |
+| `study_suggestion_evidence` | 正文、quote、locator、domain/job/chunk 与 hash 快照 | 快照不可改；当前 domain、有效性和失效原因可更新 |
+| `study_suggestions` | 去重后的候选内容、revision 和审核终态 | `suggested` 可编辑；终态内容冻结 |
+| `study_suggestion_evidence_links` | 候选到同 batch 证据的有序绑定 | 不可变 |
+| `study_suggestion_operations` | 全局 request id、canonical payload、完整响应和连续 hash 链 | `ledger_seq` 是唯一重放顺序，重复、缺口或篡改均 fail-closed |
+
+状态机：
+
+```
+batch       pending_enqueue -> queued -> ready
+                                 \----> failed -> pending_enqueue (新 task_id / 新 attempt)
+
+suggestion  suggested -> accepted
+                     \-> rejected
+
+evidence    valid <-> stale -> unavailable
+                \------------> unavailable
+```
+
+- batch 的进行态不带 result/error；`ready` 必须有 result 且无 error；`failed` 必须有非空 error 且无 result。旧 attempt 的迟到结果不能覆盖新 revision。
+- suggestion 只有 `accepted` 才绑定 `study_cards.card_id`，且卡片 `source` 必须为 `suggestion:{suggestion_id}`。accepted/rejected 均为终态。
+- 证据失效不删除快照。chunk 重建将证据更新为 `stale` 或 `unavailable`；job 删除将其标记为 `unavailable`，同时保留候选、operation、卡片和复习日志。
+- 批量审核最多 100 项，使用全局 request id 和 `BEGIN IMMEDIATE`。同 id 同 canonical payload 返回原响应，同 id 异 payload 冲突；revision/state/evidence 任一冲突时不提交任何项。
+- 知识 fingerprint 和内容 fingerprint 由确定性规范化函数计算，并由 SQLite trigger 与 current-schema validator 双重校验。该阶段不创建 vector/embedding schema。
+
 ## 2.4 文件存储布局
 
 ```
@@ -485,6 +525,9 @@ Domain        1 ──< N Job             （job.domain 直接锚定，可未分
 Collection    1 ──< N Job             （多对一；可跨 content_type/source；单 domain）
 Job           1 ──< N Step / Annotation(M3)
 (domain,name) N >──< N Job            （概念通过 occurrences 跨集合关联）
+Batch         1 ──< N Suggestion       （一个持久 AI 批次产生多个待审核候选）
+Suggestion    N >──< N Evidence        （只允许绑定同 batch 的不可变证据）
+Suggestion    0..1 ── 1 StudyCard      （人工接受后才创建 active 卡片）
 ```
 
 | 实体 | 格式 | 示例 |
@@ -494,6 +537,8 @@ Job           1 ──< N Step / Annotation(M3)
 | Worker | `{type}-{8 hex}` | `ai-a1b2c3d4` |
 | Step | 各 pipeline 内 `NN_name` | `03_scene` |
 | Concept | 复合键 `(domain, name)` | `(finance, 国债期货)` |
+| Suggestion batch / input | `ssb_{uuid hex}` / `ssi_{uuid hex}` | `ssb_...` / `ssi_...` |
+| Suggestion / evidence | `ss_{uuid hex}` / `sse_{uuid hex}` | `ss_...` / `sse_...` |
 
 ## 2.6 落地状态
 

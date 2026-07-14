@@ -452,6 +452,15 @@ class GatewayTransport:
     async def record_ai_task_log(self, log):
         raise NotImplementedError("AI task 审计不支持网关模式 worker(需 claude-cli 直连 worker)")
 
+    async def mark_ai_task_executing(self, claim):
+        raise NotImplementedError("AI task claim 不支持网关模式 worker")
+
+    async def renew_ai_task_claim(self, claim):
+        raise NotImplementedError("AI task claim 不支持网关模式 worker")
+
+    async def finish_ai_task_claim(self, claim, outcome):
+        raise NotImplementedError("AI task claim 不支持网关模式 worker")
+
     async def publish_step_event(self, channel, data):
         # worker 只通过 on_progress 发 events:{job} 进度;映射到 progress 端点。
         # 非 events 频道(step_started/completed/failed)由服务端发,worker 不走这里。

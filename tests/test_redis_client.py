@@ -4,7 +4,9 @@ import json
 import asyncio
 
 import pytest
+from redis.exceptions import ResponseError
 
+from shared.redis_client import AIEnqueueConflictError
 from tests.conftest import make_fakeredis
 
 
@@ -687,6 +689,252 @@ class TestAITaskQueue:
         assert item["job_id"] is None and item["step"] == "synthesis"
         assert item["require_tags"] == ["claude-cli"]
         assert item["enqueued_at"] is not None  # ai|at_x 入队时间戳能 join 上
+
+    @pytest.mark.asyncio
+    async def test_enqueue_ai_task_once_is_atomic_for_same_payload(self, rc):
+        payload = {
+            "kind": "ai",
+            "task_id": "at_once",
+            "step": "synthesis",
+            "request": {"messages": [{"role": "user", "content": "first"}]},
+        }
+
+        results = await asyncio.gather(
+            rc.enqueue_ai_task_once(payload, priority=-2),
+            rc.enqueue_ai_task_once(payload, priority=-2),
+        )
+
+        assert sorted(results) == [False, True]
+        queued = await rc.r.zrange("queue:ai", 0, -1, withscores=True)
+        assert queued == [(json.dumps(payload, sort_keys=True), -2.0)]
+        assert await rc.r.hlen("queue:enqueued") == 1
+        marker = await rc.r.get("ai:submitted:at_once")
+        assert json.loads(marker) == payload
+        assert 0 < await rc.r.ttl("ai:submitted:at_once") <= 7 * 86_400
+
+    @pytest.mark.asyncio
+    async def test_enqueue_ai_task_once_rejects_same_id_with_different_payload(self, rc):
+        first = {"kind": "ai", "task_id": "at_conflict", "request": {"value": 1}}
+        conflicting = {**first, "request": {"value": 2}}
+        assert await rc.enqueue_ai_task_once(first) is True
+
+        with pytest.raises(AIEnqueueConflictError) as conflict:
+            await rc.enqueue_ai_task_once(conflicting)
+
+        assert conflict.value.code == "ai_task_payload_conflict"
+        assert await rc.r.zrange("queue:ai", 0, -1) == [
+            json.dumps(first, sort_keys=True)
+        ]
+
+    @pytest.mark.asyncio
+    async def test_enqueue_ai_task_once_replay_does_not_recreate_queue_entry(self, rc):
+        payload = {"kind": "ai", "task_id": "at_replay", "request": {}}
+        assert await rc.enqueue_ai_task_once(payload) is True
+        await rc.r.zrem("queue:ai", json.dumps(payload, sort_keys=True))
+
+        assert await rc.enqueue_ai_task_once(payload) is False
+        assert await rc.r.zcard("queue:ai") == 0
+
+    @pytest.mark.asyncio
+    async def test_expired_claim_before_execution_requeues_same_ai_task_once(self, rc):
+        payload = {
+            "kind": "ai",
+            "task_id": "at_claimed_crash",
+            "batch_id": "ssb_claimed_crash",
+            "attempt": 1,
+            "revision": 2,
+            "request": {},
+        }
+        assert await rc.enqueue_ai_task_once(payload) is True
+        claim = await rc.claim_ai_task(
+            worker_id="worker-ai-1", lease_seconds=60, now_epoch=1_000
+        )
+        assert {
+            key: claim[key]
+            for key in ("task_id", "batch_id", "attempt", "revision", "state")
+        } == {
+            "task_id": "at_claimed_crash",
+            "batch_id": "ssb_claimed_crash",
+            "attempt": 1,
+            "revision": 2,
+            "state": "claimed",
+        }
+        assert isinstance(claim["claim_id"], str) and claim["claim_id"]
+
+        recovered = await rc.reconcile_ai_task_claims(now_epoch=1_061)
+
+        assert recovered == [{"task_id": "at_claimed_crash", "action": "requeued"}]
+        assert await rc.r.zcard("queue:ai") == 1
+        assert await rc.reconcile_ai_task_claims(now_epoch=1_062) == []
+
+    @pytest.mark.asyncio
+    async def test_expired_executing_claim_is_ambiguous_and_never_auto_requeued(self, rc):
+        payload = {
+            "kind": "ai",
+            "task_id": "at_paid_crash",
+            "batch_id": "ssb_paid_crash",
+            "attempt": 3,
+            "revision": 8,
+            "request": {},
+        }
+        assert await rc.enqueue_ai_task_once(payload) is True
+        claim = await rc.claim_ai_task(
+            worker_id="worker-ai-1", lease_seconds=60, now_epoch=2_000
+        )
+        await rc.mark_ai_task_executing(
+            task_id=payload["task_id"],
+            claim_id=claim["claim_id"],
+            worker_id="worker-ai-1",
+            attempt=payload["attempt"],
+            revision=payload["revision"],
+            now_epoch=2_001,
+        )
+
+        recovered = await rc.reconcile_ai_task_claims(now_epoch=2_061)
+
+        assert recovered == [{"task_id": "at_paid_crash", "action": "ambiguous"}]
+        assert await rc.r.zcard("queue:ai") == 0
+
+    @pytest.mark.asyncio
+    async def test_ai_claim_cas_rejects_cross_owner_batch_attempt_revision_and_token(self, rc):
+        payload = {
+            "kind": "ai", "task_id": "at_bound", "batch_id": "ssb_bound",
+            "attempt": 4, "revision": 9, "request": {},
+        }
+        await rc.enqueue_ai_task_once(payload)
+        claim = await rc.claim_ai_task(
+            worker_id="worker-owner", lease_seconds=60, now_epoch=3_000,
+        )
+        common = {
+            "task_id": payload["task_id"], "claim_id": claim["claim_id"],
+            "worker_id": "worker-owner", "attempt": 4, "revision": 9,
+            "batch_id": "ssb_bound", "now_epoch": 3_001,
+        }
+        for changed in (
+            {"worker_id": "worker-attacker"},
+            {"claim_id": "stolen-token"},
+            {"batch_id": "ssb_other"},
+            {"attempt": 5},
+            {"revision": 10},
+        ):
+            assert await rc.mark_ai_task_executing(**{**common, **changed}) is False
+        assert (await rc.get_ai_task_claim(payload["task_id"]))["state"] == "claimed"
+        assert await rc.mark_ai_task_executing(**common) is True
+        assert await rc.mark_ai_task_executing(**common) is False
+
+    @pytest.mark.asyncio
+    async def test_claimed_task_is_requeued_at_most_once(self, rc):
+        payload = {
+            "kind": "ai", "task_id": "at_once_retry", "batch_id": "ssb_once",
+            "attempt": 1, "revision": 2, "request": {},
+        }
+        await rc.enqueue_ai_task_once(payload)
+        await rc.claim_ai_task(worker_id="worker-a", lease_seconds=10, now_epoch=10)
+        assert await rc.reconcile_ai_task_claims(now_epoch=21) == [
+            {"task_id": "at_once_retry", "action": "requeued"}
+        ]
+        second = await rc.claim_ai_task(
+            worker_id="worker-b", lease_seconds=10, now_epoch=22,
+        )
+        assert second is not None
+        assert await rc.reconcile_ai_task_claims(now_epoch=33) == [
+            {"task_id": "at_once_retry", "action": "ambiguous"}
+        ]
+        assert await rc.r.zcard("queue:ai") == 0
+
+    @pytest.mark.asyncio
+    async def test_stale_claim_cannot_renew_or_finish_new_execution(self, rc):
+        payload = {
+            "kind": "ai", "task_id": "at_stale_finish", "batch_id": "ssb_stale",
+            "attempt": 1, "revision": 2, "request": {},
+        }
+        await rc.enqueue_ai_task_once(payload)
+        first = await rc.claim_ai_task(worker_id="worker-a", lease_seconds=10, now_epoch=10)
+        await rc.reconcile_ai_task_claims(now_epoch=21)
+        second = await rc.claim_ai_task(worker_id="worker-b", lease_seconds=10, now_epoch=22)
+        assert await rc.mark_ai_task_executing(
+            task_id=payload["task_id"], batch_id=payload["batch_id"],
+            claim_id=second["claim_id"], worker_id="worker-b", attempt=1,
+            revision=2, now_epoch=23,
+        )
+        assert not await rc.renew_ai_task_claim(
+            task_id=payload["task_id"], batch_id=payload["batch_id"],
+            claim_id=first["claim_id"], worker_id="worker-a", attempt=1,
+            revision=2, now_epoch=24,
+        )
+        assert not await rc.finish_ai_task_claim(
+            task_id=payload["task_id"], batch_id=payload["batch_id"],
+            claim_id=first["claim_id"], worker_id="worker-a", attempt=1,
+            revision=2, outcome="succeeded",
+        )
+        assert await rc.finish_ai_task_claim(
+            task_id=payload["task_id"], batch_id=payload["batch_id"],
+            claim_id=second["claim_id"], worker_id="worker-b", attempt=1,
+            revision=2, outcome="succeeded",
+        )
+
+    @pytest.mark.asyncio
+    async def test_cancel_before_execution_is_exact_and_releases_claim_resources(self, rc):
+        payload = {
+            "kind": "ai", "task_id": "at_cancel", "batch_id": "ssb_cancel",
+            "attempt": 1, "revision": 2, "step": "synthesis", "request": {},
+        }
+        await rc.enqueue_ai_task_once(payload)
+        claim = await rc.claim_ai_task(
+            worker_id="worker-cancel", claim_id="claim-cancel",
+            lease_seconds=60, now_epoch=100,
+        )
+        await rc.r.sadd("pool:ai:holders", claim["claim_id"])
+        assert await rc.r.zscore("ai:claims:expiry", payload["task_id"]) is not None
+
+        assert await rc.cancel_ai_task_before_execution({**payload, "revision": 3}) == "stale"
+        assert (await rc.get_ai_task_claim(payload["task_id"]))["state"] == "claimed"
+        assert await rc.cancel_ai_task_before_execution(payload) == "canceled"
+        assert (await rc.get_ai_task_claim(payload["task_id"]))["state"] == "canceled"
+        assert await rc.r.zscore("ai:claims:expiry", payload["task_id"]) is None
+        assert not await rc.r.sismember("pool:ai:holders", claim["claim_id"])
+
+    @pytest.mark.asyncio
+    async def test_cancel_wrongtype_has_no_partial_writes(self, rc):
+        payload = {
+            "kind": "ai", "task_id": "at_cancel_wrongtype",
+            "batch_id": "ssb_cancel_wrongtype", "attempt": 1, "revision": 2,
+            "step": "synthesis", "request": {},
+        }
+        await rc.enqueue_ai_task_once(payload)
+        await rc.claim_ai_task(
+            worker_id="worker-cancel", claim_id="claim-wrongtype",
+            lease_seconds=60, now_epoch=200,
+        )
+        expiry_before = await rc.r.zscore("ai:claims:expiry", payload["task_id"])
+        await rc.r.set("pool:ai:holders", "wrong-type")
+
+        with pytest.raises(ResponseError, match="WRONGTYPE"):
+            await rc.cancel_ai_task_before_execution(payload)
+
+        claim = await rc.get_ai_task_claim(payload["task_id"])
+        assert claim["state"] == "claimed"
+        assert claim["lease_until"] == expiry_before
+        assert await rc.r.zscore("ai:claims:expiry", payload["task_id"]) == expiry_before
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("payload", "priority", "ttl"),
+        [
+            ({"kind": "step", "task_id": "at"}, 0, 60),
+            ({"kind": "ai", "task_id": ""}, 0, 60),
+            ({"kind": "ai", "task_id": "at"}, True, 60),
+            ({"kind": "ai", "task_id": "at"}, 0, True),
+            ({"kind": "ai", "task_id": "at"}, 0, 59),
+            ({"kind": "ai", "task_id": "at"}, 0, 30 * 86_400 + 1),
+        ],
+    )
+    async def test_enqueue_ai_task_once_rejects_malformed_input(
+        self, rc, payload, priority, ttl
+    ):
+        with pytest.raises(ValueError):
+            await rc.enqueue_ai_task_once(payload, priority=priority, marker_ttl_sec=ttl)
+        assert await rc.r.zcard("queue:ai") == 0
 
     @pytest.mark.asyncio
     async def test_step_task_backward_compatible(self, rc):

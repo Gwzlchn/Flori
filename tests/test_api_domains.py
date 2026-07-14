@@ -176,7 +176,15 @@ class TestDomainRename:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["new"] == "investing"
-        assert body["moved"] == {"jobs": 2, "collections": 1, "glossary": 1}
+        assert body["moved"] == {
+            "jobs": 2,
+            "collections": 1,
+            "glossary": 1,
+            "study_cards": 0,
+            "study_suggestion_batches": 0,
+            "study_suggestions": 0,
+            "study_suggestion_evidence": 0,
+        }
         names = [d["domain"] for d in (await client.get("/api/domains")).json()["domains"]]
         assert "investing" in names and "finance" not in names
         # 内容/集合/术语都迁到了新 key(经工作台聚合验证)

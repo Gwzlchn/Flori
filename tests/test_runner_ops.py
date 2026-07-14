@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -61,6 +61,47 @@ async def _register_worker(redis, db, worker_id=WORKER_ID):
 
 
 class TestClaimStep:
+    @pytest.mark.asyncio
+    async def test_ai_queue_claim_is_atomic_and_bound_to_holder(self, redis, db):
+        await _register_worker(redis, db)
+        payload = {
+            "kind": "ai", "task_id": "at-runner", "step": "synthesis",
+            "request": {}, "tags": [], "require_tags": ["vision"],
+        }
+        await redis.enqueue_ai_task_once(payload)
+
+        claim = await runner_ops.claim_step(
+            redis, db, WORKER_ID, ["ai"], {"ai": 1}, {"vision"}, {"private"},
+        )
+
+        assert claim["task_id"] == "at-runner" and claim["state"] == "claimed"
+        assert claim["claim_id"] == claim["exec_id"]
+        assert await redis.r.zcard("queue:ai") == 0
+        persisted = await redis.get_ai_task_claim("at-runner")
+        assert persisted["worker_id"] == WORKER_ID
+        assert persisted["claim_id"] == claim["exec_id"]
+
+    @pytest.mark.asyncio
+    async def test_ai_claim_publish_failure_requeues_and_releases_slot(self, redis, db):
+        await _register_worker(redis, db)
+        payload = {
+            "kind": "ai", "task_id": "at-publish-fail", "step": "synthesis",
+            "request": {}, "tags": [], "require_tags": ["vision"],
+        }
+        await redis.enqueue_ai_task_once(payload)
+        redis.publish = AsyncMock(side_effect=RuntimeError("publish down"))
+
+        with pytest.raises(RuntimeError, match="publish down"):
+            await runner_ops.claim_step(
+                redis, db, WORKER_ID, ["ai"], {"ai": 1}, {"vision"}, {"private"},
+            )
+
+        assert await redis.r.zcard("queue:ai") == 1
+        assert await redis.get_pool_count("ai") == 0
+        assert (await redis.get_ai_task_claim("at-publish-fail"))["state"] == "requeued"
+        assert (await redis.get_worker_info(WORKER_ID))["status"] == "idle"
+        assert db.get_worker(WORKER_ID).status == "online-idle"
+
     @pytest.mark.asyncio
     async def test_claims_ready_step_with_cas_and_exec_id(self, redis, db):
         await _register_worker(redis, db)

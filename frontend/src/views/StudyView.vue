@@ -1,9 +1,13 @@
 <script setup lang="ts">
-import { computed, inject, onMounted, reactive, ref } from 'vue'
+import { computed, inject, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { fmtClock, fmtDateTime } from '../utils/datetime'
-import type { StudyCard, StudyCardListResponse, StudyStats } from '../types'
+import type {
+  StudyCard, StudyCardListResponse, StudyMasteryItem, StudyMasteryResponse,
+  StudyStats, StudySuggestion, StudySuggestionBatch, StudySuggestionListResponse,
+  StudySuggestionOperationsResponse,
+} from '../types'
 import {
   BookOpenCheck, CheckCircle2, Eye, GraduationCap, Pause, Plus, RotateCcw,
   Sparkles, Trash2,
@@ -22,6 +26,29 @@ const cards = ref<StudyCard[]>([])
 const totalCards = ref(0)
 const selectedDomain = ref('')
 const revealed = ref(false)
+const qualityLoading = ref(false)
+const qualityError = ref('')
+const suggestions = ref<StudySuggestion[]>([])
+const mastery = ref<StudyMasteryItem[]>([])
+const currentBatch = ref<StudySuggestionBatch | null>(null)
+const generating = ref(false)
+const operating = ref(false)
+const selectedSuggestionIds = ref<string[]>([])
+const rejectReason = ref('')
+const maxCards = ref(10)
+const suggestionDrafts = reactive<Record<string, {
+  card_type: 'basic' | 'cloze' | 'qa'
+  front: string
+  back: string
+  explanation: string
+  concept_term: string
+}>>({})
+let batchPollTimer: ReturnType<typeof setTimeout> | null = null
+let batchPollEpoch = 0
+let componentAlive = false
+let pendingBatchCreate: { signature: string; request_id: string } | null = null
+let pendingBatchRetry: { signature: string; request_id: string } | null = null
+let pendingSuggestionOperation: { signature: string; request_id: string } | null = null
 const stats = ref<StudyStats>({
   total: 0,
   statuses: { suggested: 0, active: 0, suspended: 0, rejected: 0 },
@@ -58,6 +85,37 @@ const domainOptions = computed(() => {
   if (form.domain) set.add(form.domain)
   return [...set].sort()
 })
+const selectedSuggestions = computed(() => suggestions.value.filter(
+  (item) => selectedSuggestionIds.value.includes(item.suggestion_id),
+))
+const selectedBatchId = computed(() => selectedSuggestions.value[0]?.batch_id || '')
+const generationDomain = computed(() => selectedDomain.value || form.domain.trim() || 'general')
+
+function requestId(prefix: string): string {
+  const suffix = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  return `${prefix}:${suffix}`
+}
+
+function requestFor(
+  pending: { signature: string; request_id: string } | null,
+  signature: string,
+  prefix: string,
+): { signature: string; request_id: string } {
+  return pending?.signature === signature
+    ? pending
+    : { signature, request_id: requestId(prefix) }
+}
+
+function isAmbiguousFailure(value: any): boolean {
+  const status = value?.status
+  return typeof status !== 'number'
+    || status <= 0
+    || status === 408
+    || status === 429
+    || status >= 500
+}
 
 function evidenceText(card: StudyCard): string {
   const ev = Array.isArray(card.evidence) ? card.evidence[0] : card.evidence
@@ -93,6 +151,288 @@ async function load() {
   } finally {
     loading.value = false
   }
+}
+
+function syncSuggestionDrafts(items: StudySuggestion[]) {
+  for (const item of items) {
+    suggestionDrafts[item.suggestion_id] = {
+      card_type: item.card_type,
+      front: item.front,
+      back: item.back,
+      explanation: item.explanation,
+      concept_term: item.concept_term || '',
+    }
+  }
+}
+
+async function loadQuality() {
+  qualityLoading.value = true
+  qualityError.value = ''
+  try {
+    const domain = selectedDomain.value
+      ? `domain=${encodeURIComponent(selectedDomain.value)}&`
+      : ''
+    const masteryPath = selectedDomain.value
+      ? `/api/study/mastery?domain=${encodeURIComponent(selectedDomain.value)}`
+      : '/api/study/mastery'
+    const [suggestionResp, masteryResp] = await Promise.all([
+      api.get<StudySuggestionListResponse>(`/api/study/suggestions?${domain}status=suggested&limit=100`),
+      api.get<StudyMasteryResponse>(masteryPath),
+    ])
+    suggestions.value = suggestionResp.items || []
+    mastery.value = masteryResp.items || []
+    syncSuggestionDrafts(suggestions.value)
+    const liveIds = new Set(suggestions.value.map((item) => item.suggestion_id))
+    selectedSuggestionIds.value = selectedSuggestionIds.value.filter((id) => liveIds.has(id))
+  } catch (e: any) {
+    qualityError.value = e?.message || '加载自动卡片失败'
+  } finally {
+    qualityLoading.value = false
+  }
+}
+
+async function reloadAll() {
+  await Promise.all([load(), loadQuality()])
+}
+
+function clearBatchPoll() {
+  if (batchPollTimer !== null) {
+    clearTimeout(batchPollTimer)
+    batchPollTimer = null
+  }
+}
+
+function scheduleBatchPoll(
+  epoch = batchPollEpoch,
+  batchId = currentBatch.value?.batch_id || '',
+  force = false,
+) {
+  clearBatchPoll()
+  const activeId = currentBatch.value?.batch_id || localStorage.getItem('study_suggestion_batch_id')
+  const canPoll = force
+    || !currentBatch.value
+    || ['pending_enqueue', 'queued'].includes(currentBatch.value.status)
+  if (
+    componentAlive
+    && epoch === batchPollEpoch
+    && batchId
+    && activeId === batchId
+    && canPoll
+  ) {
+    batchPollTimer = setTimeout(() => void pollBatch(epoch, batchId), 2000)
+  }
+}
+
+async function pollBatch(epoch = batchPollEpoch, requestedBatchId?: string) {
+  const batchId = requestedBatchId
+    || currentBatch.value?.batch_id
+    || localStorage.getItem('study_suggestion_batch_id')
+  if (!batchId) return
+  const isCurrentRequest = () => {
+    if (!componentAlive || epoch !== batchPollEpoch) return false
+    const activeId = currentBatch.value?.batch_id
+    return activeId ? activeId === batchId : localStorage.getItem('study_suggestion_batch_id') === batchId
+  }
+  try {
+    const batch = await api.get<StudySuggestionBatch>(
+      `/api/study/suggestion-batches/${encodeURIComponent(batchId)}`,
+    )
+    if (!isCurrentRequest()) return
+    if (batch.batch_id !== batchId) {
+      qualityError.value = '读取生成批次返回了错误批次'
+      scheduleBatchPoll(epoch, batchId, true)
+      return
+    }
+    currentBatch.value = batch
+    qualityError.value = ''
+    if (batch.status === 'ready') {
+      await loadQuality()
+      if (!isCurrentRequest()) return
+    }
+    scheduleBatchPoll(epoch, batchId)
+  } catch (e: any) {
+    if (!isCurrentRequest()) return
+    clearBatchPoll()
+    if (e?.status === 404) {
+      localStorage.removeItem('study_suggestion_batch_id')
+      currentBatch.value = null
+    } else {
+      qualityError.value = e?.message || '读取生成批次失败'
+      scheduleBatchPoll(epoch, batchId, true)
+    }
+  }
+}
+
+async function generateSuggestions() {
+  if (generating.value) return
+  generating.value = true
+  clearBatchPoll()
+  const epoch = ++batchPollEpoch
+  const signature = JSON.stringify({
+    domain: generationDomain.value,
+    max_cards: maxCards.value,
+  })
+  pendingBatchCreate = requestFor(
+    pendingBatchCreate,
+    signature,
+    'study-suggestion-batch',
+  )
+  try {
+    currentBatch.value = await api.post<StudySuggestionBatch>('/api/study/suggestion-batches', {
+      request_id: pendingBatchCreate.request_id,
+      domain: generationDomain.value,
+      max_cards: maxCards.value,
+    })
+    pendingBatchCreate = null
+    localStorage.setItem('study_suggestion_batch_id', currentBatch.value.batch_id)
+    showToast('已创建自动卡片批次', 'success')
+    if (currentBatch.value.status === 'ready') await loadQuality()
+    else scheduleBatchPoll(epoch, currentBatch.value.batch_id)
+  } catch (e: any) {
+    if (!isAmbiguousFailure(e)) pendingBatchCreate = null
+    showToast(e?.message || '创建自动卡片批次失败', 'error')
+    if (currentBatch.value) scheduleBatchPoll(epoch, currentBatch.value.batch_id)
+  } finally {
+    generating.value = false
+  }
+}
+
+async function retryBatch() {
+  const batch = currentBatch.value
+  if (!batch || batch.status !== 'failed' || generating.value) return
+  generating.value = true
+  clearBatchPoll()
+  const epoch = ++batchPollEpoch
+  const signature = JSON.stringify({
+    batch_id: batch.batch_id,
+    expected_revision: batch.revision,
+  })
+  pendingBatchRetry = requestFor(
+    pendingBatchRetry,
+    signature,
+    'study-suggestion-retry',
+  )
+  try {
+    currentBatch.value = await api.post<StudySuggestionBatch>(
+      `/api/study/suggestion-batches/${encodeURIComponent(batch.batch_id)}/retry`,
+      {
+        request_id: pendingBatchRetry.request_id,
+        expected_revision: batch.revision,
+      },
+    )
+    pendingBatchRetry = null
+    showToast('已重新提交生成任务', 'success')
+    scheduleBatchPoll(epoch, currentBatch.value.batch_id)
+  } catch (e: any) {
+    if (!isAmbiguousFailure(e)) pendingBatchRetry = null
+    if (e?.status === 409) await pollBatch(epoch, batch.batch_id)
+    else scheduleBatchPoll(epoch, batch.batch_id, true)
+    showToast(e?.message || '重试失败', 'error')
+  } finally {
+    generating.value = false
+  }
+}
+
+function toggleSuggestion(item: StudySuggestion, checked: boolean) {
+  if (!checked) {
+    selectedSuggestionIds.value = selectedSuggestionIds.value.filter(
+      (id) => id !== item.suggestion_id,
+    )
+    return
+  }
+  const otherBatch = selectedSuggestions.value.some(
+    (selected) => selected.batch_id !== item.batch_id,
+  )
+  if (otherBatch) {
+    selectedSuggestionIds.value = [item.suggestion_id]
+    showToast('批量操作一次只能处理同一生成批次', 'error')
+    return
+  }
+  if (!selectedSuggestionIds.value.includes(item.suggestion_id)) {
+    selectedSuggestionIds.value = [...selectedSuggestionIds.value, item.suggestion_id]
+  }
+}
+
+function toggleSuggestionEvent(item: StudySuggestion, event: Event) {
+  toggleSuggestion(item, (event.target as HTMLInputElement).checked)
+}
+
+async function submitSuggestionOperations(
+  batchId: string,
+  items: Array<Record<string, unknown>>,
+) {
+  if (operating.value) return
+  operating.value = true
+  const signature = JSON.stringify({ batch_id: batchId, items })
+  pendingSuggestionOperation = requestFor(
+    pendingSuggestionOperation,
+    signature,
+    'study-suggestion-operation',
+  )
+  try {
+    await api.post<StudySuggestionOperationsResponse>('/api/study/suggestions/operations', {
+      request_id: pendingSuggestionOperation.request_id,
+      batch_id: batchId,
+      items,
+    })
+    pendingSuggestionOperation = null
+    selectedSuggestionIds.value = []
+    rejectReason.value = ''
+    showToast('候选卡片已更新', 'success')
+    await Promise.all([load(), loadQuality()])
+  } catch (e: any) {
+    if (!isAmbiguousFailure(e)) pendingSuggestionOperation = null
+    if (e?.status === 409) {
+      showToast('候选已变化,已刷新最新状态', 'error')
+      await loadQuality()
+    } else {
+      showToast(e?.message || '候选操作失败', 'error')
+    }
+  } finally {
+    operating.value = false
+  }
+}
+
+async function saveSuggestion(item: StudySuggestion) {
+  const draft = suggestionDrafts[item.suggestion_id]
+  if (!draft || !draft.front.trim() || !draft.back.trim()) return
+  await submitSuggestionOperations(item.batch_id, [{
+    suggestion_id: item.suggestion_id,
+    expected_revision: item.revision,
+    action: 'edit',
+    patch: {
+      card_type: draft.card_type,
+      front: draft.front.trim(),
+      back: draft.back.trim(),
+      explanation: draft.explanation.trim(),
+      concept_term: draft.concept_term.trim() || null,
+    },
+  }])
+}
+
+async function bulkSuggestions(action: 'accept' | 'reject') {
+  if (!selectedSuggestions.value.length || !selectedBatchId.value) return
+  const reason = rejectReason.value.trim()
+  if (action === 'reject' && !reason) return
+  await submitSuggestionOperations(
+    selectedBatchId.value,
+    selectedSuggestions.value.map((item) => {
+      const draft = suggestionDrafts[item.suggestion_id]
+      return {
+        suggestion_id: item.suggestion_id,
+        expected_revision: item.revision,
+        action,
+        patch: action === 'accept' && draft ? {
+          card_type: draft.card_type,
+          front: draft.front.trim(),
+          back: draft.back.trim(),
+          explanation: draft.explanation.trim(),
+          concept_term: draft.concept_term.trim() || null,
+        } : undefined,
+        reason: action === 'reject' ? reason : undefined,
+      }
+    }),
+  )
 }
 
 async function createCard() {
@@ -160,6 +500,10 @@ async function gradeCurrent(grade: 'again' | 'hard' | 'good' | 'easy') {
     showToast('已记录复习', 'success')
     await load()
   } catch (e: any) {
+    if (!isAmbiguousFailure(e)) {
+      pendingReview.value = null
+      if (e?.status === 409) await load()
+    }
     showToast(e?.message || '记录失败', 'error')
   } finally {
     reviewing.value = false
@@ -194,7 +538,20 @@ function openSource(card: StudyCard) {
   if (card.job_id) router.push(`/content/${encodeURIComponent(card.job_id)}`)
 }
 
-onMounted(load)
+onMounted(async () => {
+  componentAlive = true
+  await Promise.all([load(), loadQuality()])
+  const batchId = localStorage.getItem('study_suggestion_batch_id')
+  if (componentAlive && batchId) {
+    const epoch = ++batchPollEpoch
+    await pollBatch(epoch, batchId)
+  }
+})
+onUnmounted(() => {
+  componentAlive = false
+  batchPollEpoch += 1
+  clearBatchPoll()
+})
 </script>
 
 <template>
@@ -209,11 +566,11 @@ onMounted(load)
         </div>
       </div>
       <div class="head-actions">
-        <select v-model="selectedDomain" class="input domain-select" @change="load">
+        <select v-model="selectedDomain" class="input domain-select" @change="reloadAll">
           <option value="">全部知识库</option>
           <option v-for="d in domainOptions" :key="d" :value="d">{{ d }}</option>
         </select>
-        <button class="btn sm" :disabled="loading" @click="load">刷新</button>
+        <button class="btn sm" :disabled="loading || qualityLoading" @click="reloadAll">刷新</button>
       </div>
     </div>
 
@@ -302,6 +659,128 @@ onMounted(load)
         </article>
       </div>
     </section>
+
+    <section class="quality-section">
+      <div class="suggestion-head">
+        <div>
+          <div class="panel-title quality-title"><Sparkles :size="16" /><span>证据型自动卡片</span></div>
+          <p class="section-lead">候选只有经人工接受后才会进入复习队列。</p>
+        </div>
+        <div class="generate-controls">
+          <label>
+            数量
+            <input v-model.number="maxCards" class="input suggestion-max" type="number" min="1" max="50" />
+          </label>
+          <button class="btn sm generate-suggestions" :disabled="generating" @click="generateSuggestions">
+            <Sparkles :size="14" />生成 {{ generationDomain }} 卡片
+          </button>
+        </div>
+      </div>
+
+      <div v-if="currentBatch" class="batch-status" :class="`is-${currentBatch.status}`">
+        <div>
+          <strong>生成批次 {{ currentBatch.status }}</strong>
+          <span>第 {{ currentBatch.attempt }} 次 · {{ currentBatch.suggestion_count }} 张候选</span>
+          <span v-if="currentBatch.error_message" class="batch-error">{{ currentBatch.error_message }}</span>
+        </div>
+        <button
+          v-if="currentBatch.status === 'failed'"
+          class="btn sm"
+          :disabled="generating"
+          @click="retryBatch"
+        >重试</button>
+      </div>
+
+      <div v-if="qualityError" class="state-panel compact">
+        <p>{{ qualityError }}</p>
+        <button class="btn sm" @click="loadQuality">重试</button>
+      </div>
+      <div v-else-if="qualityLoading && !suggestions.length" class="state-panel compact">加载候选中...</div>
+      <div v-else-if="!suggestions.length" class="state-panel compact">暂无待审核候选</div>
+      <template v-else>
+        <div class="bulk-bar">
+          <span>已选 {{ selectedSuggestionIds.length }} / {{ suggestions.length }}</span>
+          <input v-model="rejectReason" class="input reject-reason" placeholder="批量拒绝原因" />
+          <button
+            class="btn sm"
+            :disabled="operating || !selectedSuggestionIds.length"
+            @click="bulkSuggestions('accept')"
+          >接受所选</button>
+          <button
+            class="btn sm danger-btn"
+            :disabled="operating || !selectedSuggestionIds.length || !rejectReason.trim()"
+            @click="bulkSuggestions('reject')"
+          >拒绝所选</button>
+        </div>
+        <div class="suggestion-list">
+          <article v-for="item in suggestions" :key="item.suggestion_id" class="suggestion-card">
+            <label class="suggestion-select">
+              <input
+                type="checkbox"
+                :checked="selectedSuggestionIds.includes(item.suggestion_id)"
+                @change="toggleSuggestionEvent(item, $event)"
+              />
+              <span>#{{ item.ordinal + 1 }}</span>
+              <span class="pill">{{ item.domain }}</span>
+              <span class="revision">revision {{ item.revision }}</span>
+            </label>
+            <div v-if="suggestionDrafts[item.suggestion_id]" class="suggestion-editor">
+              <div class="suggestion-fields compact-fields">
+                <label>
+                  类型
+                  <select v-model="suggestionDrafts[item.suggestion_id].card_type" class="input">
+                    <option value="basic">basic</option>
+                    <option value="cloze">cloze</option>
+                    <option value="qa">qa</option>
+                  </select>
+                </label>
+                <label>
+                  概念
+                  <input v-model="suggestionDrafts[item.suggestion_id].concept_term" class="input" />
+                </label>
+              </div>
+              <label>正面<textarea v-model="suggestionDrafts[item.suggestion_id].front" class="input" rows="2" /></label>
+              <label>背面<textarea v-model="suggestionDrafts[item.suggestion_id].back" class="input" rows="2" /></label>
+              <label>解释<textarea v-model="suggestionDrafts[item.suggestion_id].explanation" class="input" rows="2" /></label>
+            </div>
+            <details class="evidence-preview">
+              <summary>证据 {{ item.evidence.length }} 条</summary>
+              <blockquote
+                v-for="evidence in item.evidence"
+                :key="evidence.evidence_id"
+                :class="{ invalid: evidence.status !== 'valid' }"
+              >
+                <div>{{ evidence.quote }}</div>
+                <small>{{ evidence.title }} · {{ evidence.section || evidence.note_type }} · {{ evidence.status }}</small>
+              </blockquote>
+            </details>
+            <div class="suggestion-actions">
+              <button
+                class="btn sm save-suggestion"
+                :disabled="operating || !suggestionDrafts[item.suggestion_id]?.front.trim() || !suggestionDrafts[item.suggestion_id]?.back.trim()"
+                @click="saveSuggestion(item)"
+              >保存编辑</button>
+            </div>
+          </article>
+        </div>
+      </template>
+    </section>
+
+    <section class="mastery-section">
+      <div class="panel-title"><GraduationCap :size="16" /><span>概念掌握度</span><span class="dim">{{ mastery.length }}</span></div>
+      <p v-if="!mastery.length" class="section-lead">完成真实复习后，这里会按概念汇总最近评分。</p>
+      <div v-else class="mastery-list">
+        <article v-for="item in mastery" :key="`${item.domain}:${item.concept_term}`" class="mastery-row">
+          <div>
+            <strong>{{ item.concept_term }}</strong>
+            <span>{{ item.domain }} · {{ item.reviewed_cards }} 张卡 · {{ item.reviews_total }} 次复习</span>
+          </div>
+          <div class="mastery-score" :class="`is-${item.level}`">
+            <strong>{{ item.score }}</strong><span>{{ item.level }}</span>
+          </div>
+        </article>
+      </div>
+    </section>
   </section>
 </template>
 
@@ -357,12 +836,72 @@ onMounted(load)
 .icon-btn { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid var(--line-soft); border-radius: var(--r-sm); background: var(--surface); color: var(--ink-500); cursor: pointer; }
 .icon-btn:hover { color: var(--ink-900); background: var(--line-soft); }
 .icon-btn.danger:hover { color: #dc2626; }
+.quality-section, .mastery-section {
+  margin-top: 14px; padding: 16px; border: 1px solid var(--line-soft);
+  border-radius: var(--r-sm); background: var(--surface);
+}
+.suggestion-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.quality-title { margin-bottom: 2px; }
+.section-lead { margin: 0; color: var(--ink-500); font-size: 13px; line-height: 1.5; }
+.generate-controls { display: flex; align-items: flex-end; gap: 8px; }
+.generate-controls label, .suggestion-editor label {
+  display: grid; gap: 5px; color: var(--ink-500); font-size: 12px; font-weight: 700;
+}
+.suggestion-max { width: 74px; }
+.batch-status {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin-top: 14px; padding: 10px 12px; border-radius: var(--r-sm);
+  background: var(--brand-50); color: var(--ink-700);
+}
+.batch-status > div { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.batch-status span { font-size: 12px; color: var(--ink-500); }
+.batch-status.is-failed { background: #fff7ed; }
+.batch-error { color: #c2410c !important; }
+.bulk-bar {
+  display: flex; align-items: center; gap: 8px; margin-top: 14px; padding: 9px 10px;
+  border-radius: var(--r-sm); background: var(--bg-soft, #f6f7f9); color: var(--ink-600); font-size: 13px;
+}
+.reject-reason { flex: 1; min-width: 180px; }
+.danger-btn { color: #b91c1c; }
+.suggestion-list { display: grid; gap: 10px; margin-top: 10px; }
+.suggestion-card { padding: 12px; border: 1px solid var(--line-soft); border-radius: var(--r-sm); }
+.suggestion-select { display: flex; align-items: center; gap: 7px; color: var(--ink-700); font-size: 12px; font-weight: 700; }
+.suggestion-select input { accent-color: var(--brand-600); }
+.revision { margin-left: auto; color: var(--ink-400); font-weight: 500; }
+.suggestion-editor { display: grid; gap: 9px; margin-top: 10px; }
+.suggestion-fields { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 9px; }
+.suggestion-editor textarea { resize: vertical; }
+.evidence-preview { margin-top: 10px; color: var(--ink-600); font-size: 12px; }
+.evidence-preview summary { cursor: pointer; font-weight: 700; }
+.evidence-preview blockquote {
+  margin: 8px 0 0; padding: 8px 10px; border-left: 2px solid var(--brand-200);
+  background: var(--brand-50); color: var(--ink-700); line-height: 1.5;
+}
+.evidence-preview blockquote.invalid { border-color: #f59e0b; background: #fff7ed; }
+.evidence-preview small { display: block; margin-top: 4px; color: var(--ink-400); }
+.suggestion-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+.mastery-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.mastery-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 12px; border: 1px solid var(--line-soft); border-radius: var(--r-sm);
+}
+.mastery-row > div:first-child { display: grid; gap: 4px; min-width: 0; }
+.mastery-row > div:first-child span { color: var(--ink-400); font-size: 12px; }
+.mastery-score { display: grid; justify-items: end; color: #b45309; }
+.mastery-score strong { font-size: 20px; }
+.mastery-score span { font-size: 11px; }
+.mastery-score.is-mastered { color: #047857; }
+.mastery-score.is-learning { color: var(--brand-700); }
 
 @media (max-width: 900px) {
   .study-head { flex-direction: column; }
   .head-actions { width: 100%; }
   .domain-select { flex: 1; width: auto; }
   .study-grid { grid-template-columns: 1fr; }
+  .suggestion-head { flex-direction: column; }
+  .generate-controls { width: 100%; }
+  .generate-suggestions { flex: 1; justify-content: center; }
+  .mastery-list { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 560px) {
@@ -370,5 +909,10 @@ onMounted(load)
   .grade-row, .form-row { grid-template-columns: 1fr 1fr; }
   .card-row { grid-template-columns: 1fr; }
   .row-actions { justify-content: flex-start; }
+  .bulk-bar { align-items: stretch; flex-direction: column; }
+  .reject-reason { min-width: 0; width: 100%; }
+  .suggestion-fields { grid-template-columns: 1fr; }
+  .generate-controls { align-items: stretch; flex-direction: column; }
+  .suggestion-max { width: 100%; }
 }
 </style>

@@ -1545,7 +1545,7 @@ Response `202`（`sources` 提交时已算好；`answer_markdown` 经 `GET /api/
 
 ### 1.12 学习闭环 / Flashcards / SRS（`/api/study/*`）
 
-学习卡片是个人知识库的复习层。当前闭环支持手动卡片、到期队列、四档评分、幂等重试、revision CAS 和全量统计。所有端点走 Basic/Token 鉴权。
+学习卡片是个人知识库的复习层。当前闭环支持手动卡片、证据型自动建议、批量审核、到期队列、四档评分、概念掌握度、幂等重试、revision CAS 和全量统计。所有端点走 Basic/Token 鉴权。
 
 **StudyCard 字段**：
 
@@ -1585,6 +1585,96 @@ Response `202`（`sources` 提交时已算好；`answer_markdown` 经 `GET /api/
 - `review` 为空表示未排入复习队列；`active` 新卡默认立即 due。
 - 公开时间都返回 UTC ISO 8601；库内同时保存 epoch 微秒作为排序和到期判定真相。新写入拒绝无时区 datetime，所以 `Z/+08:00/-05:00` 表示同一时刻时语义相同。
 - 评分 `grade` ∈ `again` / `hard` / `good` / `easy`。简化 SM-2: `again` 精确 600 秒后重来并增加 lapses；`good` 前两次分别为 1/3 天；`easy` 前两次分别为 3/6 天。ease 限制在 1.3–3.0，interval 不超过 36500 天，datetime 溢出时截断到可表示上界。
+
+#### POST /api/study/suggestion-batches — 创建证据型建议批次
+
+请求体:
+
+```json
+{
+  "request_id": "study-suggest:018f...",
+  "domain": "deep-learning",
+  "job_ids": ["j_..."],
+  "concept_terms": ["反向传播"],
+  "max_cards": 10
+}
+```
+
+`request_id` 是 1–128 字符的全局幂等 key；`job_ids` 和 `concept_terms` 各最多 100 项且不得重复；`max_cards` 为 1–50。服务端在单个 `BEGIN IMMEDIATE` 事务中固化当前 note chunks、已采纳概念、证据 locator、正文/引用 hash、AI 请求和 prompt 原始字节，之后才由 Scheduler 投递 AI task。没有可用证据、job 不属于该 domain、job 未完成或概念未采纳时 fail-closed。同一 `request_id` 的相同 canonical payload 返回既有批次，异 payload 返回 `409 study_suggestion_request_id_conflict`。
+
+内部 `llm_request.prompt_snapshot` 固定为:
+
+```json
+{
+  "name": "study_suggestions",
+  "content_b64": "<原始 UTF-8 字节的 base64>",
+  "bytes": 1234,
+  "sha256": "sha256:<64 lowercase hex>",
+  "source": "override|hot|image",
+  "version": 7
+}
+```
+
+prompt 路径不入快照。Scheduler 重启、Redis 丢失和显式 retry 都只读取该持久快照，不重新解析当前文件；`generator_fingerprint=sha256:<64 lowercase hex>` 绑定生成器 schema、parser 和 prompt hash。返回 `202 StudySuggestionBatch`，状态机为 `pending_enqueue → queued → ready|failed`，`revision` 和 `attempt` 均为 SQLite 64 位正整数。
+
+#### GET /api/study/suggestion-batches/{batch_id} — 查询持久批次
+
+返回 `StudySuggestionBatch`:
+
+```json
+{
+  "batch_id": "ssb_...",
+  "domain": "deep-learning",
+  "status": "queued",
+  "revision": 2,
+  "attempt": 1,
+  "task_id": "at_...",
+  "provider": "claude-cli",
+  "model": "<explicit-model>",
+  "max_cards": 10,
+  "error_code": null,
+  "error_message": null,
+  "deadline_at": "...",
+  "evidence_count": 3,
+  "suggestion_count": 0,
+  "created_at": "...",
+  "updated_at": "..."
+}
+```
+
+批次状态以 SQLite 为真相，可跨 API/Scheduler 重启轮询。Scheduler 用 `(batch_id,task_id,attempt,revision)` 推进 CAS；多副本只能投递同一个 canonical task。Redis `airesult` 过期时，成功或失败结果可从 `ai_task_logs` 的持久审计恢复。进入 provider 后租约失效的任务标为 `failed/error_code=ai_task_ambiguous`，不得自动重试或消费迟到结果。
+
+#### POST /api/study/suggestion-batches/{batch_id}/retry — 重试失败批次
+
+请求体: `{"request_id":"study-retry:018f...","expected_revision":4}`。仅 `failed` 批次可重试；保留原输入、证据和 prompt 快照，增加 `attempt/revision` 并生成新 `task_id`。同 request payload 重放返回首次结果；旧 task 的 Redis 结果或审计不得推进新 attempt。返回 `202 StudySuggestionBatch`。
+
+#### GET /api/study/suggestions — 建议列表
+
+查询参数: `domain`、`batch_id`、`status=suggested|accepted|rejected` 可选；`limit` 1–200，`offset` 0–2147483647。返回 `{"total":n,"items":[StudySuggestion...]}`。每项包含 `suggestion_id/batch_id/ordinal/status/revision/domain/concept_term/knowledge_key/card_type/front/back/explanation/accepted_card_id/rejection_reason/evidence/created_at/updated_at`。`evidence[]` 携带已固化 quote、quote/body hash、locator 和当前有效性；接受前再次验证来源 job、domain、chunk 和正文 hash，证据漂移则拒绝提交。
+
+#### POST /api/study/suggestions/operations — 批量审核建议
+
+```json
+{
+  "request_id": "study-operate:018f...",
+  "batch_id": "ssb_...",
+  "items": [{
+    "suggestion_id": "ss_...",
+    "expected_revision": 1,
+    "action": "edit|accept|reject",
+    "patch": {"front": "...", "back": "...", "concept_term": "反向传播"},
+    "reason": "duplicate"
+  }]
+}
+```
+
+一次最多 100 项，extra 字段拒绝。服务端在一个 `BEGIN IMMEDIATE` 事务中完成全局 request replay、批次/证据校验、逐建议 revision CAS、去重、卡片与 due 状态创建、建议终态和 append-only operation ledger；任一步失败则整批回滚。`accept` 产生一张 `source=suggestion:{suggestion_id}` 的 active 卡片并立即 due；`edit` 保持 suggested；`reject` 必须写入 reason。返回 `{"batch_id":...,"items":[...],"cards":[...]}`。
+
+#### GET /api/study/mastery — 概念掌握度
+
+查询参数 `domain` 可选。只聚合 active/suspended、绑定概念且至少有一次真实 review log 的卡片；每张卡取最新评分，`again/hard/good/easy` 分别映射 `0/50/80/100`，再按概念取平均。返回项含 `score`、`level=fragile|learning|mastered`、`reviewed_cards`、`reviews_total` 和 `last_reviewed_at`；没有真实评分的自动卡不进入结果。
+
+建议接口的结构化业务错误使用 `404/409/422`，常见 `message.code` 包括 `study_suggestion_batch_not_found`、`study_suggestion_not_found`、`study_suggestion_request_id_conflict`、`study_suggestion_revision_stale`、`study_suggestion_evidence_unavailable`、`study_suggestion_duplicate`、`study_suggestion_terminal` 和 `study_suggestion_constraint_conflict`。
 
 #### POST /api/study/cards — 创建卡片
 
@@ -1922,7 +2012,7 @@ Score:  priority (负数，越小越优先)
 
 优先级计算：`score = -(已完成步骤数)`
 
-**独立 AI task（P1 AI-worker-split）**：`/api/ask`、`/digest` 把单次 AI 调用作为独立 task 投进 `queue:ai`，由具备对应 AI 接入方式 tag 的 ai-worker 执行——**不挂 job、不走 storage**，载荷与结果都内联。member 形态带 `kind:"ai"`（与 pipeline-step task 区分）：
+**独立 AI task**：`/api/ask`、`/digest` 和学习建议把单次 AI 调用作为独立 task 投进 `queue:ai`，由具备对应 AI 接入方式 tag 的 ai-worker 执行——**不挂 job、不走 storage**，载荷与结果都内联。member 形态带 `kind:"ai"`（与 pipeline-step task 区分）：
 
 ```
 Key:    queue:ai
@@ -1931,12 +2021,20 @@ Member: {"kind":"ai","task_id":"at_xxx","step":"synthesis|digest","domain":"<dom
          "request":<LLMRequest jsonable>,"tags":[...],"require_tags":["<provider-tag>","<capability-tag>"],"pool":"ai"}  (JSON string)
 ```
 
+`step=study_suggestions` 额外携带 `batch_id/attempt/revision/generator_fingerprint/input_fingerprint/prompt_snapshot/task_payload_sha256`。prompt、generator 和 task payload 这三类跨组件 hash 使用 `sha256:<64 lowercase hex>`；`input_fingerprint` 保持 64 位小写 hex。`task_payload_sha256` 覆盖除自身和认领运行字段外的 canonical JSON，Scheduler 入队和 Worker 调 provider 前都必须校验。
+
 - `request` = `shared.models.LLMRequest.to_jsonable()`（messages/system/max_tokens/temperature/allowed_tools…；images 序列化为 str 路径，AI-RPC 路径一般不带图）。
 - `provider/model` = 本次独立 AI task 请求的 provider 与模型,必须显式带出。缺失视为非法 AI task,不得补默认 provider/model。
 - `require_tags` = provider 与运行能力的完整硬门控:Claude/Codex CLI 分别用 `claude-cli` / `codex-cli`;API provider 使用 `<provider>-api`(`anthropic-api` / `deepseek-api` / `kimi-api` / `openai-api`);需要文件 Read 时另加 `read`。无全部标签的 `ai` worker 不得认领该 task。
 - `model` 必须是具体模型名。CLI provider 与 API-key provider 都不得使用模型占位符。
 - pipeline-step task 的 member **不带 `kind`**（向后兼容，缺省即 `step`）。
 - `queue:enqueued` field（§3.x 等待时长用）：step task=`{pool}|{job_id}|{step}`；**ai task=`{pool}|ai|{task_id}`**。
+- 幂等投递: `ai:submitted:{task_id}` 保存 canonical task JSON 并带 7 天 TTL。相同 task 重放不重复入队；同 task_id 异 payload 直接冲突，不能覆盖。
+- 原子认领: 一个 Lua 操作把 ZSET member 移出队列并写 `ai:claim:{task_id}` HASH，同时写 `ai:claims:expiry` ZSET；不存在 `ZPOPMIN` 后再建租约的任务丢失窗口。claim 精确绑定 `(task_id,batch_id,attempt,revision,worker_id,claim_id)`，状态为 `claimed → executing → succeeded|failed`，任何字段不匹配的 renew/finish 都失败。
+- 崩溃恢复: `claimed` 到期最多安全回队一次并记录 `requeue_count=1`；再次到期进入 `ambiguous`。`executing` 表示 provider 可能已经产生副作用，到期只进入 `ambiguous`，绝不自动重试。Worker 在 provider 调用前 CAS 到 executing，调用期间续租，先写 Redis 结果和 DB 审计，再 CAS 终态。终态或 ambiguous 的迟到 worker 无权续租或覆盖新执行。
+- 持久 deadline: 仍在 queue 的 task 必须原子移除 exact member 后才能把 DB 批次标为 timeout；`claimed` 只能用完整 `(task_id,batch_id,attempt,revision)` 在 provider 前 CAS 为 `canceled`。取消竞争失败不得推进 DB。持有活租约的 `executing` 不受业务 deadline 强制终止，继续等待 Worker 终态或租约到期转 `ambiguous`。
+- 成功后处理: provider 成功与结果/审计/终态/事件发布分层处理。finish CAS 返回 false 或异常时保留成功 `airesult` 和唯一成功审计，claim 留在 `executing` 等待租约收敛；事件发布仅 best-effort，失败不得覆盖成功结果、追加 provider-failed 审计或把 claim 转成 failed。
+- 槽位对账: `claimed/executing` 的 claim_id 是合法 `pool:ai:holders` holder，Scheduler `reconcile_slots` 不得当作泄漏释放；Worker `finally` 幂等释放。终态后 `ai:claims:expiry` 不再保留该 task。
 - 结果回执：`airesult:{task_id}`（STRING，JSON = `LLMResponse.to_jsonable()` 或 `{"error":"..."}`，带 TTL≈600s），供 API 端 `GET …/result/{task_id}` / 同步等待取回（P1-3）。AI 用量经 `ai_usage`（`job_id=null, step=<step_name>`）记账（worker 侧，P1-2）。
 - 自动周报（09 工单 P3）：`radar:digest:auto:{domain}:{YYYY-MM-DD}`（STRING SET NX，TTL 3 天，当日投递防重锁）；`radar:digest:latest:{domain}`（STRING JSON，无 TTL，最新一期 `{task_id, queued_at, [markdown, generated_at, error]}`——scheduler 收割 `airesult` 后搬入长存，`GET /api/domains/{d}/digest/latest` 读它）。
 - 完成事件：worker 执行后 `publish events:{task_id}`（`ai_task_start/ai_task_done/ai_task_failed`，见 §3.5），供 `/ask`、`/digest` 经 `WS /api/ws/jobs/{task_id}`（端点对任意 id 通用）或轮询取信号。
