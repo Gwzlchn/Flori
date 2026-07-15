@@ -13,14 +13,13 @@ import structlog
 
 from shared.ai_routing import (
     InvalidAIOverrideError,
-    READ_TOOL_TAG,
-    ai_required_tags,
     parse_ai_override,
+    step_required_route_tags,
     step_required_capability_tags,
+    step_task_tags,
     worker_satisfies_requirements,
 )
 from shared.runner_ops import parse_style_tags
-from shared.net_zone import required_zone
 from shared.source_detect import detect_source
 from shared.storage import read_file_bounded
 
@@ -52,15 +51,7 @@ class TaskRouter:
 
         pool = step_cfg["pool"]
 
-        static_tags = step_cfg.get("tags", [])
-        if pool == "ai":
-            job_info = await self.owner.redis.get_job_info(job_id)
-            domain = job_info.get("domain", "")
-            style_tags = parse_style_tags(job_info.get("style_tags", "[]"))
-            dynamic_tags = [domain] + style_tags
-            merged_tags = sorted(set(static_tags + [t for t in dynamic_tags if t]))
-        else:
-            merged_tags = list(static_tags)
+        job_info = await self.owner.redis.get_job_info(job_id) if pool == "ai" else None
 
         # 网络区域路由(net-zone):任务分发时按 URL 判区域,require 对应 net-cn / net-global tag.
         # 只有自报覆盖该区域的 worker 才能认领;境外内容走香港或带代理 worker,大陆内容走大陆 worker.
@@ -75,10 +66,12 @@ class TaskRouter:
         except InvalidAIOverrideError as exc:
             await self.owner._fail_invalid_ai_override(job_id, step_name, str(exc))
             return False
-        if step_name in net_steps:
-            zone = next((tag for tag in require_tags if tag in {"net-cn", "net-global"}), None)
-            if zone:
-                merged_tags = sorted(set(merged_tags + [zone]))
+        merged_tags = step_task_tags(
+            step_cfg,
+            domain=(job_info or {}).get("domain", ""),
+            style_tags=parse_style_tags((job_info or {}).get("style_tags", "[]")),
+            required_tags=require_tags,
+        )
 
         await self.owner.redis.set_step_status(job_id, step_name, "ready")
         statuses = await self.owner.redis.get_all_step_statuses(job_id)
@@ -126,6 +119,8 @@ class TaskRouter:
     ) -> list[str]:
         """计算 enqueue 与 no-worker 共用的硬标签,含 provider override。"""
         required = set(step_cfg.get("tags") or [])
+        override = None
+        capability_tags: set[str] = set()
         if step_cfg.get("pool") == "ai":
             async def has_nonempty_artifact(rel: str) -> bool:
                 if self.owner.storage is not None:
@@ -142,16 +137,15 @@ class TaskRouter:
                     ) from exc
 
             try:
-                capability_tags = await step_required_capability_tags(
+                capability_tags = set(await step_required_capability_tags(
                     step_cfg, has_nonempty_artifact,
-                )
+                ))
             except InvalidAIOverrideError:
                 raise
             except (OSError, ValueError, TypeError) as exc:
                 raise InvalidAIOverrideError(
                     "invalid AI capability input",
                 ) from exc
-            override = None
             raw = None
             if self.owner.storage is not None:
                 try:
@@ -190,24 +184,24 @@ class TaskRouter:
                     raise InvalidAIOverrideError(
                         "invalid AI override: job_json_invalid",
                     ) from exc
-            try:
-                required.update(ai_required_tags(
-                    step_cfg.get("ai"), self.owner.config.providers, override=override,
-                    required_tags=sorted(
-                        set(capability_tags)
-                        | ({READ_TOOL_TAG} if READ_TOOL_TAG in required else set())
-                    ),
-                ))
-            except ValueError as exc:
-                raise InvalidAIOverrideError(
-                    f"invalid AI capability: {exc}",
-                ) from exc
         nr = self.owner.config.net_routing or {}
-        if step_name in set(nr.get("net_steps") or _NET_STEPS):
-            info = job_info or await self.owner.redis.get_job_info(job_id)
-            source = (info.get("source") or "").strip() or detect_source(info.get("url", ""))
-            required.add(required_zone(source, info.get("url", "")))
-        return sorted(required)
+        net_steps = set(nr.get("net_steps") or _NET_STEPS)
+        info = job_info
+        if step_name in net_steps:
+            info = info or await self.owner.redis.get_job_info(job_id)
+        info = info or {}
+        source = (info.get("source") or "").strip() or detect_source(info.get("url", ""))
+        try:
+            return step_required_route_tags(
+                step_cfg, self.owner.config.providers,
+                source=source, url=info.get("url", ""),
+                net_steps=net_steps,
+                override=override, capability_tags=capability_tags,
+            )
+        except ValueError as exc:
+            raise InvalidAIOverrideError(
+                f"invalid AI capability: {exc}",
+            ) from exc
 
     async def _list_job_files(self, job_id: str) -> list[str]:
         """列出 job 现有产物的相对路径。分布式部署产物在对象存储(MinIO)、不在调度器本地盘,

@@ -13,7 +13,9 @@ from api.main import create_app
 
 @pytest.fixture
 def mock_redis():
-    r = AsyncMock()
+    from tests.conftest import make_redis_mock
+
+    r = make_redis_mock()
     r.publish = AsyncMock()
     return r
 

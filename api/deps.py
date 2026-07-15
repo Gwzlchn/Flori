@@ -94,8 +94,20 @@ def get_config(request: Request) -> AppConfig:
 
 
 async def verify_token(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_security),
 ) -> str:
+    principal = getattr(request.state, "api_principal", None)
+    if principal:
+        return principal
+    return authenticate_api_request(
+        request,
+        credentials.credentials if credentials is not None else None,
+    )
+
+
+def authenticate_api_request(request: Request, presented: str | None = None) -> str:
+    """认证业务请求并只返回不可逆 principal,避免限流键泄露 token。"""
     api_token = os.environ.get("API_TOKEN", "")
     if not api_token:
         # fail-closed:未设 API_TOKEN 时必须显式 API_ALLOW_NO_AUTH=1 才放行(仅可信内网),
@@ -113,12 +125,16 @@ async def verify_token(
                 "api_token_empty",
                 msg="API_TOKEN 未设且 API_ALLOW_NO_AUTH=1:鉴权已关闭(仅限可信内网)",
             )
-        return "no-auth"
-    if credentials is None or not hmac.compare_digest(
-        credentials.credentials.encode(), api_token.encode()
+        host = request.client.host if request.client is not None else "unknown"
+        return "client:" + hashlib.sha256(host.encode()).hexdigest()
+    if presented is None:
+        scheme, _, value = request.headers.get("authorization", "").partition(" ")
+        presented = value if scheme.lower() == "bearer" and value else None
+    if presented is None or not hmac.compare_digest(
+        presented.encode(), api_token.encode()
     ):
         raise HTTPException(status_code=401, detail="unauthorized")
-    return credentials.credentials
+    return "token:" + hashlib.sha256(api_token.encode()).hexdigest()
 
 
 async def verify_worker_token(

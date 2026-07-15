@@ -61,16 +61,11 @@ class TestPipelineFor:
 
 @pytest.fixture
 def mock_redis():
-    r = AsyncMock()
+    from tests.conftest import make_redis_mock
+
+    r = make_redis_mock()
     r.publish = AsyncMock()
-    r.list_worker_ids = AsyncMock(return_value=["w-ai"])
     r.get_all_step_statuses = AsyncMock(return_value={})
-    r.get_worker_info = AsyncMock(return_value={
-        "pools": "ai",
-        "tags": "claude-cli,vision,read",
-        "status": "idle",
-        "admin_status": "active",
-    })
     return r
 
 
@@ -180,7 +175,7 @@ class TestCreateJob:
     @pytest.mark.asyncio
     async def test_unsupported_upload_extension_rejected(self, client, mock_redis):
         resp = await client.post(
-            "/api/jobs/upload",
+            "/api/jobs/upload?content_type=article",
             files={"file": ("payload.zip", b"not-media", "application/zip")},
         )
         assert resp.status_code == 422

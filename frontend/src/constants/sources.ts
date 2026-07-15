@@ -74,6 +74,13 @@ export function uploadAccept(): string {
   return CONTENT_TYPE_CATALOG.flatMap((item) => item.uploadExtensions).join(',')
 }
 
+export function contentTypeForUpload(filename: string): string | undefined {
+  const lower = filename.toLowerCase()
+  return CONTENT_TYPE_CATALOG.find((item) =>
+    item.uploadExtensions.some((extension) => lower.endsWith(extension.toLowerCase())),
+  )?.type
+}
+
 export function jobSourceLabel(s: string | null | undefined): string {
   return s ? (JOB_SOURCE_LABELS[s] || s) : '—'
 }

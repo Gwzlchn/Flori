@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { useApi } from '../composables/useApi'
 import type { JobSummary, JobDetail, JobListResponse, JobFacets, JobConcept } from '../types'
+import { contentTypeForUpload } from '../constants/sources'
 
 export const useJobStore = defineStore('jobs', () => {
   const api = useApi()
@@ -41,11 +42,16 @@ export const useJobStore = defineStore('jobs', () => {
   }
 
   async function uploadJob(file: File, domain: string, styleTags: string[]) {
+    const contentType = contentTypeForUpload(file.name)
+    if (!contentType) throw new Error('不支持的上传文件类型')
     const form = new FormData()
     form.append('file', file)
     form.append('domain', domain)
     form.append('style_tags', JSON.stringify(styleTags))
-    return api.upload<{ job_id: string }>('/api/jobs/upload', form)
+    return api.upload<{ job_id: string }>(
+      `/api/jobs/upload?content_type=${encodeURIComponent(contentType)}`,
+      form,
+    )
   }
 
   async function retryJob(jobId: string) {

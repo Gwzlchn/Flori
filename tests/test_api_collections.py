@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
-
 import pytest
 
 from api.main import create_app
@@ -11,8 +9,9 @@ from api.main import create_app
 
 @pytest.fixture
 def mock_redis():
-    r = AsyncMock()
-    r.publish = AsyncMock()
+    from tests.conftest import make_redis_mock
+
+    r = make_redis_mock()
     r.get_all_step_statuses.return_value = {}
     return r
 

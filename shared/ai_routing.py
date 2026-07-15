@@ -6,6 +6,7 @@ from pathlib import PurePosixPath
 from typing import Any, Awaitable, Callable
 
 from .errors import InputInvalidError
+from .net_zone import required_zone
 
 
 _KNOWN_API_PROVIDERS = {"anthropic", "deepseek", "kimi", "openai"}
@@ -70,7 +71,7 @@ def worker_satisfies_requirements(
     """按 scheduler 的活 worker 口径检查 pool 与全部硬标签。"""
     if not isinstance(worker, dict):
         return False
-    if worker.get("admin_status") == "paused" or worker.get("status") in {"paused", "offline"}:
+    if worker.get("admin_status") == "paused" or worker.get("status") in {"paused", "offline", "stale"}:
         return False
     pools_raw = worker.get("pools")
     tags_raw = worker.get("tags", "")
@@ -160,6 +161,46 @@ def ai_required_tags(
         ))
     if required_tags and not tags:
         raise ValueError("AI capability has no configured provider")
+    return sorted(tags)
+
+
+def step_required_route_tags(
+    step: dict,
+    providers_config: dict | None,
+    *,
+    source: str,
+    url: str,
+    net_steps: set[str],
+    override: str | None = None,
+    capability_tags: set[str] | list[str] | tuple[str, ...] = (),
+) -> list[str]:
+    """投影 scheduler/API 共用的 static/provider/net 硬标签。"""
+    required = {str(tag) for tag in step.get("tags") or [] if tag}
+    if step.get("pool") == "ai":
+        ai_capabilities = set(capability_tags)
+        if READ_TOOL_TAG in required:
+            ai_capabilities.add(READ_TOOL_TAG)
+        required.update(ai_required_tags(
+            step.get("ai"), providers_config, override=override,
+            required_tags=sorted(ai_capabilities),
+        ))
+    if source != "upload" and step.get("name") in net_steps:
+        required.add(required_zone(source, url))
+    return sorted(required)
+
+
+def step_task_tags(
+    step: dict,
+    *,
+    domain: str,
+    style_tags: list[str],
+    required_tags: set[str] | list[str] | tuple[str, ...],
+) -> list[str]:
+    """投影 claim reject_tags 使用的任务标签,保持与 enqueue 完全同源。"""
+    tags = {str(tag) for tag in step.get("tags") or [] if tag}
+    if step.get("pool") == "ai":
+        tags.update(tag for tag in [domain, *style_tags] if tag)
+    tags.update(set(required_tags).intersection({"net-cn", "net-global"}))
     return sorted(tags)
 
 

@@ -76,7 +76,7 @@ sudo ./svc.sh install && sudo ./svc.sh start
   4. 跑容器内全量单测（与主 CI 同路径）兜底回归。
 
   **② `paper-e2e` —— 真实素材端到端**（`tests/integration/ci_paper_e2e.sh`，`DRY_RUN=1` 起同一栈）：
-  投一个仓库自带的微型 PDF `tests/fixtures/sample.pdf`，走 `POST /api/jobs/upload` 进 **paper** pipeline，轮询到 `done`，断言 `notes/smart`(200) + `review`(200,合法 JSON) + `sections.json` 非空。**无需任何外部网络 / arXiv / B站 / API key**。这是 GitHub-hosted runner 上的真实接线覆盖，不等同于外网与真实模型验收。
+  投一个仓库自带的微型 PDF `tests/fixtures/sample.pdf`，走 `POST /api/jobs/upload?content_type=paper` 进 **paper** pipeline，轮询到 `done`，断言 `notes/smart`(200) + `review`(200,合法 JSON) + `sections.json` 非空。**无需任何外部网络 / arXiv / B站 / API key**。这是 GitHub-hosted runner 上的真实接线覆盖，不等同于外网与真实模型验收。
   - **真跑(REAL)**：`01_download`(upload 模式)、`02_pdf_parse`(pdfinfo/metadata/首页标题兜底)、`03_sections`(页区间章节树)。
   - **合成(SYNTHETIC)**：`04_translate_paper`、`05_smart_paper`、`05_concepts`、`06_review` 经 `DRY_RUN=1` 产占位结果；DAG、落盘与版本化接线仍真实。
   - 脚本用独立 compose 项目名（默认 `flori-ci-paper`）+ 退出 trap `down -v` 拆栈，本地跑也不会误碰生产栈（本地若 8000 被占，需先停占用方或换独立项目；CI runner 干净直接用 8000）。

@@ -11,10 +11,18 @@ vi.mock('../composables/useApi', () => ({
 }))
 
 import { useJobStore } from './jobs'
+import { installSourceCatalog } from '../constants/sources'
 
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
+  installSourceCatalog({
+    subscription_sources: [], job_sources: [],
+    content_types: [
+      { type: 'video', label: '视频', upload_extensions: ['.mp4'] },
+      { type: 'article', label: '文章', upload_extensions: ['.txt'] },
+    ],
+  })
 })
 
 function makeListResponse(n: number, total = 100) {
@@ -141,7 +149,7 @@ describe('useJobStore 其它 action', () => {
 
     expect(upload).toHaveBeenCalledTimes(1)
     const [path, form] = upload.mock.calls[0]
-    expect(path).toBe('/api/jobs/upload')
+    expect(path).toBe('/api/jobs/upload?content_type=article')
     expect(form).toBeInstanceOf(FormData)
     expect((form as FormData).get('domain')).toBe('tech')
     expect((form as FormData).get('style_tags')).toBe(JSON.stringify(['a', 'b']))

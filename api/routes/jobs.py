@@ -48,7 +48,13 @@ from shared.storage import (
 )
 
 from api.deps import get_config, get_db, get_redis, get_storage, validate_path_segment, verify_token
+from api.business_admission import (
+    JobAdmissionRoute,
+    ensure_job_workers,
+    job_admission_guard,
+)
 from api.schemas import (
+    ContentType,
     JobCreateRequest,
     JobDetailResponse,
     JobListResponse,
@@ -76,7 +82,7 @@ from api.wire_schemas import (
 
 router = APIRouter(
     prefix="/api/jobs", tags=["jobs"], dependencies=[Depends(verify_token)],
-    responses=API_ERROR_RESPONSES,
+    responses=API_ERROR_RESPONSES, route_class=JobAdmissionRoute,
 )
 
 MAX_UPLOAD_SIZE = 2 * 1024 * 1024 * 1024
@@ -662,6 +668,7 @@ async def create_job_snapshot(
 
 
 @router.post("", status_code=201, response_model=JobCreatedResponse)
+@job_admission_guard("create")
 async def create_job(
     req: JobCreateRequest,
     db: Database = Depends(get_db),
@@ -671,6 +678,18 @@ async def create_job(
 ):
     # 注:url 接受 http(s) 链接或裸 BV 号(detect_source 解析),故不强校验 http(s) 前缀;
     # invalid_url 语义以 docs/03-contracts.md 为准。
+    source = detect_source(req.url or "")
+    content_type = getattr(req.content_type, "value", req.content_type) or default_content_type(source)
+    if content_type:
+        try:
+            validate_job_route(source, content_type)
+        except SourceRegistryError as exc:
+            raise HTTPException(422, f"unsupported_source: {exc}") from exc
+        await ensure_job_workers(
+            redis=redis, config=config, content_type=content_type,
+            source=source, url=req.url, domain=req.domain,
+            style_tags=req.style_tags, smart_note=req.smart_note,
+        )
     # 校验 collection_id 存在,避免孤儿绑定 + job_count 漂移。
     if req.collection_id:
         if not await asyncio.to_thread(db.get_collection, req.collection_id):
@@ -685,7 +704,9 @@ async def create_job(
 
 
 @router.post("/upload", status_code=201, response_model=JobCreatedResponse)
+@job_admission_guard("upload")
 async def upload_job(
+    content_type: ContentType = Query(...),
     file: UploadFile = File(...),
     domain: str = Form("general"),
     style_tags: str = Form("[]"),
@@ -696,13 +717,25 @@ async def upload_job(
     storage: StorageBackend = Depends(get_storage),
     config: AppConfig = Depends(get_config),
 ):
-    content_type = _detect_content_type(None, file.filename)
-    if content_type is None:
+    filename_type = _detect_content_type(None, file.filename)
+    if filename_type is None:
         raise HTTPException(422, "unsupported_upload_type")
+    if filename_type != content_type:
+        raise HTTPException(422, "upload_content_type_mismatch")
+    try:
+        validate_job_route("upload", content_type)
+    except SourceRegistryError as exc:
+        raise HTTPException(422, f"unsupported_source: {exc}") from exc
     try:
         tags = json.loads(style_tags)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         raise HTTPException(400, "invalid style_tags JSON")
+    if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+        raise HTTPException(400, "style_tags must be a string array")
+    await ensure_job_workers(
+        redis=redis, config=config, content_type=content_type,
+        source="upload", url=None, domain=domain, style_tags=tags,
+    )
     # 与 URL 投递路径一致:校验 collection_id 存在,支持归集合 + title。
     if collection_id:
         if not await asyncio.to_thread(db.get_collection, collection_id):

@@ -183,9 +183,15 @@ def create_app(
 
     @app.exception_handler(_StarletteHTTPException)
     async def _http_exc_handler(request: _Request, exc: _StarletteHTTPException):
+        from api.business_admission import BusinessAdmissionError
+
+        error_code = (
+            exc.error_code if isinstance(exc, BusinessAdmissionError)
+            else _STATUS_ERROR_CODE.get(exc.status_code, "error")
+        )
         return _JSONResponse(
             status_code=exc.status_code,
-            content={"error": _STATUS_ERROR_CODE.get(exc.status_code, "error"),
+            content={"error": error_code,
                      "message": exc.detail},
             headers=exc.headers,   # 透传 HTTPException 的头(如 429 的 Retry-After);多数为 None 无影响
         )

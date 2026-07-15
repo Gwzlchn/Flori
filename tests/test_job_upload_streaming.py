@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tracemalloc
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -36,7 +37,13 @@ def _job_count(db) -> int:
 @pytest.fixture
 def mock_redis():
     redis = AsyncMock()
-    redis.list_worker_ids.return_value = ["w-ai"]
+    redis.consume_rate_limit.return_value = (True, 1, 60)
+    redis.list_worker_ids.return_value = ["w-all"]
+    redis.get_worker_info.return_value = {
+        "pools": "io,cpu,ai", "tags": "claude-cli,vision,read",
+        "reject_tags": "", "status": "idle", "admin_status": "active",
+        "last_heartbeat": datetime.now(timezone.utc).isoformat(),
+    }
     return redis
 
 
@@ -57,7 +64,7 @@ async def test_upload_uses_stream_writer_and_accepts_exact_limit(
     storage.write_file = AsyncMock(wraps=original_write)
 
     response = await client.post(
-        "/api/jobs/upload",
+        "/api/jobs/upload?content_type=video",
         files={"file": ("boundary.mp4", b"abcdef", "video/mp4")},
     )
 
@@ -88,7 +95,7 @@ async def test_upload_limit_plus_one_leaves_no_job_object_or_event(
     monkeypatch.setattr(jobs_route, "MAX_UPLOAD_SIZE", 6)
 
     response = await client.post(
-        "/api/jobs/upload",
+        "/api/jobs/upload?content_type=video",
         files={"file": ("oversize.mp4", b"abcdefg", "video/mp4")},
     )
 
@@ -107,6 +114,7 @@ async def test_upload_disconnect_cleans_staging_db_and_event(
 
     with pytest.raises(ConnectionError, match="client disconnected"):
         await jobs_route.upload_job(
+            content_type="video",
             file=upload,
             domain="general",
             style_tags="[]",
@@ -138,7 +146,7 @@ async def test_upload_storage_failure_removes_published_source_before_db(
 
     with pytest.raises(OSError, match="job metadata write unavailable"):
         await client.post(
-            "/api/jobs/upload",
+            "/api/jobs/upload?content_type=video",
             files={"file": ("failure.mp4", b"source", "video/mp4")},
         )
     assert _job_count(db) == 0
@@ -162,7 +170,7 @@ async def test_job_metadata_failure_removes_source_db_and_event(
 
     with pytest.raises(OSError, match="job metadata unavailable"):
         await client.post(
-            "/api/jobs/upload",
+            "/api/jobs/upload?content_type=video",
             files={"file": ("failure.mp4", b"source", "video/mp4")},
         )
     assert _job_count(db) == 0
@@ -181,7 +189,7 @@ async def test_db_create_failure_removes_source_metadata_and_event(
 
     with pytest.raises(RuntimeError, match="database create failed"):
         await client.post(
-            "/api/jobs/upload",
+            "/api/jobs/upload?content_type=video",
             files={"file": ("failure.mp4", b"source", "video/mp4")},
         )
     assert _job_count(db) == 0
@@ -261,7 +269,7 @@ async def test_cleanup_failure_is_logged_without_masking_original(
 
     with pytest.raises(OSError, match="source write failed") as raised:
         await client.post(
-            "/api/jobs/upload",
+            "/api/jobs/upload?content_type=video",
             files={"file": ("failure.mp4", b"source", "video/mp4")},
         )
     assert any("cleanup unavailable" in note for note in raised.value.__notes__)
@@ -286,6 +294,7 @@ async def test_upload_route_memory_is_bounded_by_chunk(
     tracemalloc.start()
     tracemalloc.reset_peak()
     result = await jobs_route.upload_job(
+        content_type="video",
         file=upload,
         domain="general",
         style_tags="[]",

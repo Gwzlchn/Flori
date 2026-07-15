@@ -95,7 +95,7 @@ done
 
 # ── 3) 上传 fixture(.pdf → paper pipeline) ───────────────────────────────
 log "上传 fixture → POST ${API}/api/jobs/upload (domain=test)"
-RESP="$(curl -fsS --noproxy '*' -X POST "${API}/api/jobs/upload" \
+RESP="$(curl -fsS --noproxy '*' -X POST "${API}/api/jobs/upload?content_type=paper" \
   -F "file=@${FIXTURE}" \
   -F "domain=test" \
   -F 'style_tags=[]')" || { "${COMPOSE[@]}" logs api; die "上传请求失败"; }

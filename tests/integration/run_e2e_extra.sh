@@ -56,21 +56,21 @@ log "TC-5: 并发 3 个任务（2 视频上传 + 1 PDF）"
 
 JOBS=()
 # 视频 1
-RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload" \
+RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload?content_type=video" \
   -F "file=@$VIDEO_FILE" -F "domain=deep-learning")
 JID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
 JOBS+=("$JID:video")
 log "  视频 1: $JID"
 
 # 视频 2（同一个文件，不同 domain）
-RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload" \
+RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload?content_type=video" \
   -F "file=@$VIDEO_FILE" -F "domain=programming")
 JID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
 JOBS+=("$JID:video")
 log "  视频 2: $JID"
 
 # PDF
-RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload" \
+RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload?content_type=paper" \
   -F "file=@/tmp/test_paper.pdf" -F "domain=ml")
 JID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
 JOBS+=("$JID:paper")
@@ -346,7 +346,7 @@ async def test():
     async with httpx.AsyncClient() as client:
         with open('$VIDEO_FILE', 'rb') as f:
             resp = await client.post(
-                '$API/api/jobs/upload',
+                '$API/api/jobs/upload?content_type=video',
                 files={'file': ('test.mp4', f, 'video/mp4')},
                 data={'domain': 'general'},
             )

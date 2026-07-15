@@ -7651,7 +7651,9 @@ export interface operations {
     };
     upload_job_api_jobs_upload_post: {
         parameters: {
-            query?: never;
+            query: {
+                content_type: components["schemas"]["ContentType"];
+            };
             header?: never;
             path?: never;
             cookie?: never;

@@ -73,7 +73,7 @@ VIDEO_FILE="${TEST_VIDEO_FILE:?请设置 TEST_VIDEO_FILE 环境变量指向一�
 
 log "TC-1: 视频上传 → CPU 步骤链"
 log "  文件: $(du -m "$VIDEO_FILE" | cut -f1)MB"
-RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload" \
+RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload?content_type=video" \
   -F "file=@$VIDEO_FILE" \
   -F "domain=deep-learning" \
   -F 'style_tags=["case-study"]')
@@ -126,7 +126,7 @@ log ""
 
 # ─── TC-3: 论文 PDF 上传 ───
 log "TC-3: PDF 上传 → paper pipeline CPU 步骤"
-RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload" \
+RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload?content_type=paper" \
   -F "file=@/tmp/test_paper.pdf" \
   -F "domain=ml")
 JOB3=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")

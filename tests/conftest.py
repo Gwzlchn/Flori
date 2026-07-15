@@ -1,6 +1,7 @@
 """公用 test fixtures。"""
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -47,11 +48,24 @@ def make_fakeredis() -> RedisClient:
 # app:多数纯 CRUD 路由不触 redis,默认给 AsyncMock 即可。真正需要路由特异 redis
 # 行为(publish/ping/事件流等)的文件就近覆盖本 fixture(jobs/workers/admin/bili/collections/runner)。
 def make_redis_mock() -> AsyncMock:
-    """API 测试默认 redis AsyncMock。get_traffic 须返回真 dict——裸 AsyncMock 的
-    `await get_traffic()` 回 AsyncMock,对其 .get() 又得 coroutine,污染 /api/status、
-    /api/workers 等读流量的端点。单一构造来源,各文件就近 mock 复用。"""
+    """构造带全能力在线 Worker 的 API Redis mock。
+
+    任务创建默认应具备可执行前置条件。无 Worker、离线和能力不足等门禁用例在
+    就近 fixture 中显式覆盖。get_traffic 必须返回真 dict,避免裸 AsyncMock 污染
+    `/api/status` 和 `/api/workers` 的读流量端点。
+    """
     rc = AsyncMock()
+    rc.consume_rate_limit.return_value = (True, 1, 60)
     rc.get_traffic.return_value = {"total": 0, "by_worker": {}}
+    rc.list_worker_ids.return_value = ["w-all"]
+    rc.get_worker_info.return_value = {
+        "pools": "io,cpu,ai",
+        "tags": "claude-cli,vision,read,net-cn,net-global",
+        "reject_tags": "",
+        "status": "idle",
+        "admin_status": "active",
+        "last_heartbeat": datetime.now(timezone.utc).isoformat(),
+    }
     return rc
 
 

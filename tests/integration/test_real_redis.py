@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+from datetime import datetime, timezone
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from redis.exceptions import ResponseError
 
 from shared.redis_client import AIEnqueueConflictError, RedisClient
+from api.main import create_app
 
 
 pytestmark = pytest.mark.integration
@@ -69,6 +73,77 @@ async def test_lua_slot_limit_is_atomic_across_clients(real_redis_clients) -> No
     assert await first.get_pool_count("integration") == 1
     holders = await second.get_pool_holders("integration")
     assert holders in ({"exec-a"}, {"exec-b"})
+
+
+async def test_api_rate_limit_is_atomic_across_clients(real_redis_clients) -> None:
+    first, second = real_redis_clients
+
+    outcomes = await asyncio.gather(
+        first.consume_rate_limit("jobs:create", "token:shared", 1, 60),
+        second.consume_rate_limit("jobs:create", "token:shared", 1, 60),
+    )
+
+    assert sorted(result[0] for result in outcomes) == [False, True]
+    assert sorted(result[1] for result in outcomes) == [1, 2]
+    assert all(1 <= result[2] <= 60 for result in outcomes)
+
+
+async def test_two_apps_compete_for_one_shared_job_quota(
+    real_redis_clients, db, test_config, monkeypatch,
+) -> None:
+    first, second = real_redis_clients
+    monkeypatch.setenv("FLORI_JOBS_CREATE_RATE_LIMIT", "1")
+    monkeypatch.setenv("FLORI_JOBS_CREATE_RATE_WINDOW_SEC", "60")
+    worker = {
+        "pools": "io,cpu,ai", "tags": "claude-cli,read,vision,net-cn,net-global",
+        "reject_tags": "", "status": "idle", "admin_status": "active",
+        "last_heartbeat": datetime.now(timezone.utc).isoformat(),
+    }
+    await first.register_worker("integration-all", worker)
+    apps = [
+        create_app(db=db, redis=first, config=test_config),
+        create_app(db=db, redis=second, config=test_config),
+    ]
+    clients = [
+        AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+        for app in apps
+    ]
+    try:
+        responses = await asyncio.gather(
+            clients[0].post("/api/jobs", json={"url": "BV1xx411c7mD"}),
+            clients[1].post("/api/jobs", json={"url": "BV1xx411c7mE"}),
+        )
+    finally:
+        await asyncio.gather(*(client.aclose() for client in clients))
+
+    assert sorted(response.status_code for response in responses) == [201, 429]
+    rejected = next(response for response in responses if response.status_code == 429)
+    assert rejected.json()["error"] == "rate_limited"
+    assert int(rejected.headers["retry-after"]) > 0
+    assert db.list_jobs(limit=10)[0] == 1
+
+
+async def test_real_redis_wrongtype_rate_key_is_stable_unavailable(
+    integration_redis, db, test_config, monkeypatch,
+) -> None:
+    monkeypatch.setenv("API_TOKEN", "integration-secret")
+    monkeypatch.delenv("API_ALLOW_NO_AUTH", raising=False)
+    principal = "token:" + hashlib.sha256(b"integration-secret").hexdigest()
+    key = "rate:api:jobs_create:" + hashlib.sha256(principal.encode()).hexdigest()
+    await integration_redis.r.hset(key, mapping={"bad": "type"})
+    app = create_app(db=db, redis=integration_redis, config=test_config)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/api/jobs", json={"url": "BV1xx411c7mD"},
+            headers={"Authorization": "Bearer integration-secret"},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["error"] == "unavailable"
+    assert db.list_jobs(limit=1)[0] == 0
 
 
 async def test_pipeline_claim_and_terminal_fence_are_atomic_across_clients(

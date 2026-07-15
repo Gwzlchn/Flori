@@ -11807,6 +11807,16 @@
     "/api/jobs/upload": {
       "post": {
         "operationId": "upload_job_api_jobs_upload_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "content_type",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ContentType"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "multipart/form-data": {

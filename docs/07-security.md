@@ -75,9 +75,11 @@ SSH              key-only (禁密码)            服务器管理
 
 即使边缘 Basic Auth 被绕过，应用层仍可用 API Bearer Token 兜底（`API_TOKEN`，只存核心机本地 `.env`）。注：边缘+反向 SSH 部署下 NAS 端 `API_TOKEN` 常置空、由 Caddy Basic Auth 把门；直连暴露 API 时务必设强随机 `API_TOKEN`。
 
-> 限流 / 防爆破在边缘层(边缘 Caddy Basic Auth)做,应用内不内置限流——
-> API 默认零公网端口、仅绑本机(`API_BIND_IP`),verify_token 用常量时间比对。
-> 直接把 API 端口暴露到公网时,务必同时设强随机 `API_TOKEN` 并在边缘加限流。
+> 边缘层继续负责 Basic Auth 防爆破；应用层另对 job 创建与上传使用 Redis 原子业务限流。
+> API token 先常量时间校验，再以不可逆 principal 指纹计数；无鉴权模式按真实 ASGI client address
+> 计数，不采信 `X-Forwarded-For`。Redis 不可用时 fail-closed 返回 503，不回落为单进程额度。
+> API 默认零公网端口、仅绑本机(`API_BIND_IP`)；直接暴露到公网时仍必须设置强随机
+> `API_TOKEN`，并保留边缘限流，不能把业务额度当作通用防爆破替代品。
 
 **fail-closed(空 token 行为)**：未设 `API_TOKEN` 时后端不再静默放行,而是要求显式
 `API_ALLOW_NO_AUTH=1` 才放行(仅限可信内网),否则受保护端点返回 `503 auth not configured`。

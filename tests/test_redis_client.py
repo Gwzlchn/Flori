@@ -1,5 +1,6 @@
 """tests for shared/redis_client.py — 使用 fakeredis。"""
 import json
+import hashlib
 
 import asyncio
 from unittest.mock import AsyncMock
@@ -17,6 +18,48 @@ async def rc():
     client = make_fakeredis()
     yield client
     await client.close()
+
+
+class TestApiRateLimit:
+    @pytest.mark.asyncio
+    async def test_fixed_window_is_shared_and_has_ttl(self, rc):
+        assert await rc.consume_rate_limit("jobs:create", "token:secret", 2, 60) == (
+            True, 1, 60,
+        )
+        allowed, count, ttl = await rc.consume_rate_limit(
+            "jobs:create", "token:secret", 2, 60,
+        )
+        assert (allowed, count) == (True, 2)
+        assert 1 <= ttl <= 60
+        allowed, count, ttl = await rc.consume_rate_limit(
+            "jobs:create", "token:secret", 2, 60,
+        )
+        assert (allowed, count) == (False, 3)
+        assert 1 <= ttl <= 60
+
+    @pytest.mark.asyncio
+    async def test_key_hashes_principal_and_repairs_missing_ttl(self, rc):
+        principal = "token:raw-secret"
+        digest = hashlib.sha256(principal.encode()).hexdigest()
+        key = f"rate:api:jobs_create:{digest}"
+        await rc.r.set(key, "7")
+
+        allowed, count, ttl = await rc.consume_rate_limit(
+            "jobs:create", principal, 10, 45,
+        )
+
+        assert (allowed, count, ttl) == (True, 8, 45)
+        assert "raw-secret" not in key
+
+    @pytest.mark.asyncio
+    async def test_wrongtype_fails_closed(self, rc):
+        principal = "client:abc"
+        digest = hashlib.sha256(principal.encode()).hexdigest()
+        key = f"rate:api:jobs_create:{digest}"
+        await rc.r.hset(key, mapping={"bad": "type"})
+
+        with pytest.raises(ResponseError, match="WRONGTYPE"):
+            await rc.consume_rate_limit("jobs:create", principal, 2, 60)
 
 
 class TestQueue:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import secrets
 import time
 from datetime import datetime, timezone
@@ -37,6 +38,21 @@ if redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then
     return 1
 end
 return 0
+"""
+
+_LUA_FIXED_WINDOW_RATE_LIMIT = """
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+local ttl = redis.call('TTL', KEYS[1])
+if ttl < 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[2])
+    ttl = tonumber(ARGV[2])
+end
+local allowed = 0
+if count <= tonumber(ARGV[1]) then allowed = 1 end
+return {allowed, count, ttl}
 """
 
 _LUA_RELEASE_SLOT = """
@@ -535,6 +551,28 @@ class RedisClient:
 
     async def ping(self) -> bool:
         return await self.r.ping()
+
+    async def consume_rate_limit(
+        self,
+        operation: str,
+        principal: str,
+        limit: int,
+        window_sec: int,
+    ) -> tuple[bool, int, int]:
+        """原子消费固定窗口额度;Redis 中只保存 principal 哈希。"""
+        if not operation or not principal or limit < 1 or window_sec < 1:
+            raise ValueError("invalid rate limit arguments")
+        safe_operation = operation.replace(":", "_")
+        principal_hash = hashlib.sha256(principal.encode()).hexdigest()
+        raw = await self.r.eval(
+            _LUA_FIXED_WINDOW_RATE_LIMIT,
+            1,
+            f"rate:api:{safe_operation}:{principal_hash}",
+            limit,
+            window_sec,
+        )
+        allowed, count, ttl = (int(value) for value in raw)
+        return bool(allowed), count, ttl
 
     @property
     def r(self) -> aioredis.Redis:
