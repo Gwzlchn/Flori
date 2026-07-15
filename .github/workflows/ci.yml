@@ -16,11 +16,11 @@ on:
 #   各产部分覆盖率上传;coverage-gate 合并判 75%.关键路径 = max(unit, integration) 后进入 push-images,压 <2min.
 jobs:
   unit-normal:
-    # 普通测试在发布关键路径,拆 12 shard 缩短测试段.
+    # 普通测试在发布关键路径,拆 14 shard 缩短测试段.
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        group: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     concurrency:
       group: ci-${{ github.event.pull_request.number || github.ref }}-unit-normal-${{ matrix.group }}
       cancel-in-progress: true
@@ -30,8 +30,9 @@ jobs:
       packages: write
     env:
       USE_USTC_MIRROR: "0"
-      CI_NORMAL_SPLITS: "12"
-      CI_XDIST_WORKERS: "4"
+      CI_NORMAL_SPLITS: "14"
+      # 14 分片已提供跨 runner 并行;片内 2 worker 减少全量 collection 重复税.
+      CI_XDIST_WORKERS: "2"
     steps:
       - uses: actions/checkout@v6
       - name: Lowercase owner
@@ -60,11 +61,11 @@ jobs:
             USE_USTC_MIRROR=0
             FLORI_VERSION=${{ env.FLORI_VERSION }}
           cache-from: |
-            type=registry,ref=ghcr.io/${{ env.OWNER_LC }}/flori-test:buildcache
+            ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}/flori-test:buildcache', env.OWNER_LC) || '' }}
             type=gha,scope=flori-test
-          # 仅 group 1 写 buildcache,避免多 shard 并行双写同 ref;其余只读。PR 回退 gha。
+          # 仅 group 1 写 buildcache,避免多 shard 并行双写同 ref.
           cache-to: ${{ github.ref == 'refs/heads/main' && matrix.group == 1 && format('type=registry,ref=ghcr.io/{0}/flori-test:buildcache,mode=max', env.OWNER_LC) || (github.ref != 'refs/heads/main' && matrix.group == 1 && 'type=gha,scope=flori-test,mode=max' || '') }}
-      # 非媒体测试按 least-duration 拆 12 shard;真实调用 pdfinfo 的 canonical E2E 归 unit-worker.
+      # 非媒体测试按 least-duration 拆 14 shard;真实调用 pdfinfo 的 canonical E2E 归 unit-worker.
       - name: Unit tests(普通 shard ${{ matrix.group }}/${{ env.CI_NORMAL_SPLITS }},非 step)+ 部分覆盖率
         run: |
           CI_COVERAGE_DIR="$GITHUB_WORKSPACE/covdata" \
@@ -77,11 +78,11 @@ jobs:
           if-no-files-found: error
 
   unit-worker:
-    # 重镜像拆 3 shard，给两路 integration 预留账号并发槽。
+    # 重镜像拆 2 shard，将释放的槽给 normal 长杆。
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2, 3]
+        group: [1, 2]
     concurrency:
       group: ci-${{ github.event.pull_request.number || github.ref }}-unit-worker-${{ matrix.group }}
       cancel-in-progress: true
@@ -92,7 +93,7 @@ jobs:
     env:
       USE_USTC_MIRROR: "0"
       CI_XDIST_WORKERS: "4"
-      CI_WORKER_SPLITS: "3"
+      CI_WORKER_SPLITS: "2"
     steps:
       - uses: actions/checkout@v6
       - name: Lowercase owner
@@ -121,11 +122,11 @@ jobs:
             USE_USTC_MIRROR=0
             FLORI_VERSION=${{ env.FLORI_VERSION }}
           cache-from: |
-            type=registry,ref=ghcr.io/${{ env.OWNER_LC }}/flori-test-worker:buildcache
+            ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}/flori-test-worker:buildcache', env.OWNER_LC) || '' }}
             type=gha,scope=flori-test-worker
-          # 仅 group 1 写 buildcache,避免多 shard 并行双写同 ref;其余只读。PR 回退 gha。
+          # 仅 group 1 写 buildcache,避免多 shard 并行双写同 ref.
           cache-to: ${{ github.ref == 'refs/heads/main' && matrix.group == 1 && format('type=registry,ref=ghcr.io/{0}/flori-test-worker:buildcache,mode=max', env.OWNER_LC) || (github.ref != 'refs/heads/main' && matrix.group == 1 && 'type=gha,scope=flori-test-worker,mode=max' || '') }}
-      # step/worker/media 测试使用重镜像并按 least-duration 拆 3 shard。
+      # step/worker/media 测试使用重镜像并按 least-duration 拆 2 shard。
       - name: Unit tests(step/worker/media shard ${{ matrix.group }}/${{ env.CI_WORKER_SPLITS }})+ 部分覆盖率
         run: |
           CI_COVERAGE_DIR="$GITHUB_WORKSPACE/covdata" \
@@ -185,7 +186,7 @@ jobs:
             USE_USTC_MIRROR=0
             FLORI_VERSION=${{ env.FLORI_VERSION }}
           cache-from: |
-            type=registry,ref=ghcr.io/${{ env.OWNER_LC }}/flori-test:buildcache
+            ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}/flori-test:buildcache', env.OWNER_LC) || '' }}
             type=gha,scope=flori-test
       - name: Real dependency integration gate
         env:
@@ -194,7 +195,7 @@ jobs:
           CI_COVERAGE: "1"
         run: bash scripts/test.sh --integration
       - name: Upload retrieval quality decision
-        if: always() && matrix.partition == 'data'
+        if: always() && matrix.partition == 'services'
         uses: actions/upload-artifact@v7.0.1
         with:
           name: retrieval-quality
@@ -237,8 +238,8 @@ jobs:
           merge-multiple: true          # normal + worker + 两路 integration 都写入 covdata/.coverage.*
       - name: Assert all coverage parts are present and non-empty
         env:
-          NORMAL_SPLITS: "12"
-          WORKER_SPLITS: "3"
+          NORMAL_SPLITS: "14"
+          WORKER_SPLITS: "2"
         run: |
           required=(
             covdata/.coverage.integration.data
@@ -280,13 +281,23 @@ jobs:
       cov: ${{ steps.cov.outputs.pct }}
     steps:
       - uses: actions/checkout@v6
+      - name: Restore npm download cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/npm-cache
+          key: npm-${{ runner.os }}-${{ runner.arch }}-node22-${{ hashFiles('frontend/package-lock.json') }}
       - name: Frontend unit tests + 覆盖率(vitest)
         id: cov
         run: |
-          docker compose -f docker-compose.fe-test.yml run --rm \
-            -e npm_config_registry=https://registry.npmjs.org fe-test | tee /tmp/fe-cov.log
+          NPM_CACHE_DIR="$RUNNER_TEMP/npm-cache" \
+            NPM_CONFIG_REGISTRY=https://registry.npmjs.org \
+            FE_INSTALL_MODE=ci \
+            bash scripts/test.sh --fe | tee /tmp/fe-cov.log
           pct=$(grep -oP 'Statements\s*:\s*\K[0-9.]+' /tmp/fe-cov.log | tail -1 || true)
-          pct=${pct:-unknown}
+          if ! [[ "$pct" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            echo "::error::无法从 Vitest 输出提取覆盖率"
+            exit 1
+          fi
           echo "pct=$pct" >> "$GITHUB_OUTPUT"
           echo "### 前端语句覆盖率:${pct}%" >> "$GITHUB_STEP_SUMMARY"
 

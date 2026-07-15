@@ -46,7 +46,12 @@ run_ci_shard() {
 
   cov_dir="${CI_COVERAGE_DIR:-$REPO/covdata}"
   mkdir -p "$cov_dir"
-  base=(pytest -p no:cacheprovider -m 'not fuzz' -n "${CI_XDIST_WORKERS:-4}"
+  if [ "$kind" = "normal" ]; then
+    default_xdist_workers=2
+  else
+    default_xdist_workers=4
+  fi
+  base=(pytest -p no:cacheprovider -m 'not fuzz' -n "${CI_XDIST_WORKERS:-$default_xdist_workers}"
         --splitting-algorithm least_duration)
   if [ "$kind" = "normal" ]; then
     paths=(--ignore=tests/integration --ignore=tests/steps
@@ -95,8 +100,7 @@ while [ $# -gt 0 ]; do
         esac
       done
       exec docker compose -f "$FE_COMPOSE" run --rm fe-test \
-        sh -c 'npm install --no-audit --no-fund && npx vue-tsc --noEmit && npm run typecheck:test && npx vitest run --coverage "$@"' \
-        sh "${FE_ARGS[@]}"
+        sh /repo-scripts/fe-test.sh "${FE_ARGS[@]}"
       ;;
     --integration) shift; exec "$REPO/scripts/run-integration.sh" core "$@" ;;
     --external) shift; exec "$REPO/scripts/run-integration.sh" external "$@" ;;
@@ -106,14 +110,14 @@ while [ $# -gt 0 ]; do
       [ $# -gt 0 ] || usage 1
       group="$1"
       shift
-      run_ci_shard normal "$group" "${1:-${CI_NORMAL_SPLITS:-12}}"
+      run_ci_shard normal "$group" "${1:-${CI_NORMAL_SPLITS:-14}}"
       ;;
     --ci-worker)
       shift
       [ $# -gt 0 ] || usage 1
       group="$1"
       shift
-      run_ci_shard worker "$group" "${1:-${CI_WORKER_SPLITS:-3}}"
+      run_ci_shard worker "$group" "${1:-${CI_WORKER_SPLITS:-2}}"
       ;;
     --all)  MODE="all"; shift ;;
     --changed) CHANGED=1; shift ;;

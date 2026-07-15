@@ -108,7 +108,6 @@ run_core() {
       pytest_paths=(
         tests/integration/test_database_migration_recovery.py
         tests/integration/test_dr_compatibility.py
-        tests/integration/test_retrieval_quality.py
         tests/integration/test_sqlite_concurrency.py
       )
       coverage_file="$INTEGRATION_ARTIFACT_DIR/.coverage.integration.data"
@@ -121,6 +120,7 @@ run_core() {
         tests/integration/test_pipeline_search_closure.py
         tests/integration/test_real_docker.py
         tests/integration/test_real_redis.py
+        tests/integration/test_retrieval_quality.py
         tests/integration/test_runner_gateway_e2e.py
         tests/integration/test_study_suggestion_worker_e2e.py
       )

@@ -105,12 +105,12 @@ def test_unit_shards_and_real_integration_use_the_single_test_entrypoint() -> No
     assert normal_job["strategy"]["matrix"]["group"] == list(
         range(1, normal_splits + 1),
     )
-    assert normal_job["env"]["CI_XDIST_WORKERS"] == "4"
-    assert worker_job["env"]["CI_XDIST_WORKERS"] == "4"
+    assert normal_job["env"]["CI_XDIST_WORKERS"] == "2"
     worker_splits = int(worker_job["env"]["CI_WORKER_SPLITS"])
     assert worker_job["strategy"]["matrix"]["group"] == list(
         range(1, worker_splits + 1),
     )
+    assert worker_job["env"]["CI_XDIST_WORKERS"] == "4"
     assert '"$CI_NORMAL_SPLITS"' in normal
     assert "bash scripts/test.sh --ci-worker" in worker
     assert '"$CI_WORKER_SPLITS"' in worker
@@ -172,6 +172,10 @@ def test_integration_partitions_are_isolated_and_cover_every_core_file_once() ->
     }
 
     assert all(entrypoint.count(name) == 1 for name in expected)
+    data_block = entrypoint.split("    data)", 1)[1].split("    services)", 1)[0]
+    services_block = entrypoint.split("    services)", 1)[1].split("    *)", 1)[0]
+    assert "test_retrieval_quality.py" not in data_block
+    assert "test_retrieval_quality.py" in services_block
     assert 'redis_database=14' in entrypoint
     assert 'redis_database=15' in entrypoint
     assert '.coverage.integration.data' in entrypoint
@@ -195,7 +199,7 @@ def test_retrieval_quality_artifact_is_sha_bound_and_fail_closed() -> None:
         step for step in integration["steps"]
         if step.get("name") == "Upload retrieval quality decision"
     )
-    assert upload["if"] == "always() && matrix.partition == 'data'"
+    assert upload["if"] == "always() && matrix.partition == 'services'"
     assert upload["with"]["if-no-files-found"] == "error"
     assert upload["with"]["path"].endswith("/retrieval-quality.json")
 
@@ -253,7 +257,65 @@ def test_ci_first_layer_fits_account_slots_and_images_share_one_runner() -> None
     normal = len(jobs["unit-normal"]["strategy"]["matrix"]["group"])
     worker = len(jobs["unit-worker"]["strategy"]["matrix"]["group"])
     integration = len(jobs["integration"]["strategy"]["matrix"]["partition"])
-    assert normal + worker + integration + 2 == 19  # fe-test + detect
+    # detect 先行完成;测试层的 +2 是 fe-test 与单 runner build-images.
+    assert normal + worker + integration + 2 == 20
+
+    for job_name in ("unit-normal", "unit-worker"):
+        steps = jobs[job_name]["steps"]
+        setup = next(
+            step for step in steps
+            if step.get("uses", "").startswith("docker/setup-buildx-action@")
+        )
+        login = next(step for step in steps if step.get("name") == "Log in to ghcr.io")
+        build = next(
+            step for step in steps
+            if step.get("uses", "").startswith("docker/build-push-action@")
+        )
+        assert "if" not in setup
+        assert login["if"] == "github.ref == 'refs/heads/main'"
+        assert "type=gha" in build["with"]["cache-from"]
+        assert "github.ref == 'refs/heads/main'" in build["with"]["cache-from"]
+        assert "matrix.group == 1" in build["with"]["cache-to"]
+
+    integration_steps = jobs["integration"]["steps"]
+    integration_setup = next(
+        step for step in integration_steps
+        if step.get("uses", "").startswith("docker/setup-buildx-action@")
+    )
+    assert "if" not in integration_setup
+    integration_login = next(
+        step for step in integration_steps if step.get("name") == "Log in to ghcr.io"
+    )
+    assert integration_login["if"] == "github.ref == 'refs/heads/main'"
+    integration_build = next(
+        step for step in integration_steps
+        if step.get("uses", "").startswith("docker/build-push-action@")
+    )
+    assert "type=gha" in integration_build["with"]["cache-from"]
+    assert "github.ref == 'refs/heads/main'" in integration_build["with"]["cache-from"]
+
+    frontend_steps = jobs["fe-test"]["steps"]
+    npm_cache = next(
+        step for step in frontend_steps
+        if step.get("name") == "Restore npm download cache"
+    )
+    assert npm_cache["uses"] == "actions/cache@v5"
+    assert "runner.arch" in npm_cache["with"]["key"]
+    assert "node22" in npm_cache["with"]["key"]
+    assert "frontend/package-lock.json" in npm_cache["with"]["key"]
+    frontend_run = next(step for step in frontend_steps if step.get("id") == "cov")["run"]
+    assert "NPM_CACHE_DIR=" in frontend_run
+    assert "FE_INSTALL_MODE=ci" in frontend_run
+    assert "bash scripts/test.sh --fe" in frontend_run
+    assert "无法从 Vitest 输出提取覆盖率" in frontend_run
+    frontend_compose = (WORKFLOW.parents[2] / "docker-compose.fe-test.yml").read_text()
+    assert "${NPM_CACHE_DIR:-fe_npm_cache}:/root/.npm" in frontend_compose
+    assert "FE_INSTALL_MODE: ${FE_INSTALL_MODE:-install}" in frontend_compose
+    frontend_script = (WORKFLOW.parents[2] / "scripts" / "fe-test.sh").read_text()
+    assert "npm ci --prefer-offline" in frontend_script
+    assert "npm install --no-audit" in frontend_script
+    assert frontend_script.count("if ! wait") == 3
+    assert 'npx vitest run --coverage "$@"' in frontend_script
 
     assert "strategy" not in jobs["build-images"]
     assert "strategy" not in jobs["push-images"]

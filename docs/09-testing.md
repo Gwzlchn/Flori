@@ -10,7 +10,7 @@
 
 | 层级 | 当前自动化与入口 | 是否主 CI 必经 |
 |------|------------------|----------------|
-| 主 CI | backend normal 12 分片 + worker 3 分片、真依赖 integration 两分组、frontend Vitest、coverage gate、按路径构建并在现有门通过后 push 镜像；拓扑以 `.github/workflows/ci.yml` 为准 | 是，非纯文档 push / PR |
+| 主 CI | backend normal 14 分片(2 xdist worker) + worker 2 分片(4 xdist worker)、真依赖 integration 两分组、frontend Vitest、coverage gate、按路径构建并在现有门通过后 push 镜像；拓扑以 `.github/workflows/ci.yml` 为准 | 是，非纯文档 push / PR |
 | 组件集成 | `scripts/test.sh --integration` 统一编排真 Redis、生产 Database 多连接/多进程冷启动、迁移整链失败回滚、已发布历史版本到当前 manifest 的 DR 恢复查询、Gateway Worker、real-docker 和生产 AOF 空环境恢复 | 是，`integration` 两分组均为 required |
 | pipeline E2E | 主 CI integration 覆盖 video / paper / article / audio 真实完成事件到 Search / Ask / MCP 命中；`.github/workflows/e2e.yml` 另保留真实 PDF 步骤链手动验收 | 闭环必经；外部素材需显式触发 |
 | 检索质量决策 | 24 个冻结 job 经真实 Scheduler completion 摄入，96 条查询分层评估 Search / MCP / Ask；输出 `retrieval-quality.json` | 是，`decision_evidence_gate` 必须通过 |

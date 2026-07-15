@@ -252,10 +252,9 @@ def test_frontend_arguments_remain_vitest_arguments(tmp_path: Path) -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert "run --rm fe-test sh -c" in completed.stdout
-    assert 'npx vitest run --coverage "$@"' in completed.stdout
-    assert "sh src/components/settings/BiliLogin.test.ts -t confirmed" in completed.stdout
-    assert "sh frontend/src/components/settings/BiliLogin.test.ts" not in completed.stdout
+    assert "run --rm fe-test sh /repo-scripts/fe-test.sh" in completed.stdout
+    assert "/repo-scripts/fe-test.sh src/components/settings/BiliLogin.test.ts -t confirmed" in completed.stdout
+    assert "/repo-scripts/fe-test.sh frontend/src/components/settings/BiliLogin.test.ts" not in completed.stdout
 
 
 def test_external_rebuild_replaces_and_cleans_only_unique_image(tmp_path: Path) -> None:
@@ -330,7 +329,7 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
     environment = _fake_docker_environment(tmp_path)
 
     completed = subprocess.run(
-        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "12"],
+        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "14"],
         cwd=REPO,
         env=environment,
         capture_output=True,
@@ -341,12 +340,12 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
     assert completed.returncode == 0, completed.stderr
     assert "--splitting-algorithm least_duration" in completed.stdout
     assert "--ignore=tests/test_canonical_evidence_e2e.py" in completed.stdout
-    assert "--splits 12 --group 12" in completed.stdout
-    assert "-n 4" in completed.stdout
-    assert ".coverage.normal.12" in completed.stdout
+    assert "--splits 14 --group 14" in completed.stdout
+    assert "-n 2" in completed.stdout
+    assert ".coverage.normal.14" in completed.stdout
 
     worker = subprocess.run(
-        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-worker", "3", "3"],
+        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-worker", "2", "2"],
         cwd=REPO,
         env=environment,
         capture_output=True,
@@ -356,11 +355,12 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
     assert worker.returncode == 0, worker.stderr
     assert "tests/test_canonical_evidence_e2e.py" in worker.stdout
     assert "--splitting-algorithm least_duration" in worker.stdout
-    assert "--splits 3 --group 3" in worker.stdout
-    assert ".coverage.worker.3" in worker.stdout
+    assert "--splits 2 --group 2" in worker.stdout
+    assert "-n 4" in worker.stdout
+    assert ".coverage.worker.2" in worker.stdout
 
     overflow = subprocess.run(
-        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "13", "12"],
+        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "15", "14"],
         cwd=REPO,
         env=environment,
         capture_output=True,
@@ -368,7 +368,74 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
         check=False,
     )
     assert overflow.returncode == 2
-    assert "CI shard 超出范围: 13/12" in overflow.stderr
+    assert "CI shard 超出范围: 15/14" in overflow.stderr
+
+
+def _fake_frontend_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
+    log = tmp_path / "frontend-tools.log"
+    for command in ("npm", "npx", "cmp"):
+        executable = tmp_path / command
+        executable.write_text(
+            """#!/bin/sh
+printf '%s %s\n' \"$(basename \"$0\")\" \"$*\" >> \"$FAKE_FRONTEND_LOG\"
+if [ -n \"${FAIL_MATCH:-}\" ]; then
+  case \"$*\" in *\"$FAIL_MATCH\"*) exit 9 ;; esac
+fi
+exit 0
+""",
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
+    environment = os.environ.copy()
+    environment.update({
+        "PATH": f"{tmp_path}:{environment['PATH']}",
+        "FAKE_FRONTEND_LOG": str(log),
+        "FE_INSTALL_MODE": "ci",
+    })
+    return environment, log
+
+
+def test_frontend_gate_uses_ci_install_and_runs_all_gates(tmp_path: Path) -> None:
+    environment, log = _fake_frontend_environment(tmp_path)
+
+    completed = subprocess.run(
+        ["sh", str(REPO / "scripts" / "fe-test.sh"), "src/App.test.ts"],
+        cwd=REPO / "frontend",
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert "npm ci --prefer-offline --no-audit --no-fund" in calls
+    assert "npx vue-tsc --noEmit" in calls
+    assert "npm run typecheck:test" in calls
+    assert any(call.startswith("npx openapi-typescript ") for call in calls)
+    assert any(call.startswith("cmp -s ") for call in calls)
+    assert "npx vitest run --coverage src/App.test.ts" in calls
+
+
+def test_frontend_gate_waits_all_static_checks_and_fails_closed(tmp_path: Path) -> None:
+    environment, log = _fake_frontend_environment(tmp_path)
+    environment["FAIL_MATCH"] = "vue-tsc"
+
+    completed = subprocess.run(
+        ["sh", str(REPO / "scripts" / "fe-test.sh")],
+        cwd=REPO / "frontend",
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert any(call.startswith("npx openapi-typescript ") for call in calls)
+    assert "npm run typecheck:test" in calls
+    assert not any("vitest run" in call for call in calls)
+    assert "前端静态门失败" in completed.stderr
 
 
 def test_ci_image_runner_launches_all_selected_builds_and_propagates_failure(

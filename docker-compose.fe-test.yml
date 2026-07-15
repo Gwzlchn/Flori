@@ -8,18 +8,16 @@ services:
     image: node:22-alpine
     working_dir: /app
     environment:
-      - npm_config_registry=https://registry.npmmirror.com
+      npm_config_registry: ${NPM_CONFIG_REGISTRY:-https://registry.npmmirror.com}
+      FE_INSTALL_MODE: ${FE_INSTALL_MODE:-install}
     volumes:
       - ./frontend:/app
       - fe_node_modules:/app/node_modules   # node_modules 放卷里,不污染工作区、re-run 更快
-    # 类型、selected OpenAPI 生成物和 Vitest 共用一次 npm install。
-    command: >-
-      sh -c "npm install --no-audit --no-fund &&
-      npx vue-tsc --noEmit &&
-      npm run typecheck:test &&
-      npx openapi-typescript openapi/openapi.json -o /tmp/flori-api.ts >/dev/null &&
-      cmp -s /tmp/flori-api.ts src/types/generated/api.ts &&
-      npx vitest run --coverage"
+      - ${NPM_CACHE_DIR:-fe_npm_cache}:/root/.npm
+      - ./scripts:/repo-scripts:ro
+    # 本地保留 npm install 热卷;CI 通过 FE_INSTALL_MODE=ci 改用锁文件安装.
+    command: ["sh", "/repo-scripts/fe-test.sh"]
 
 volumes:
   fe_node_modules:
+  fe_npm_cache:
