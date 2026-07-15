@@ -89,6 +89,16 @@ sudo ./svc.sh install && sudo ./svc.sh start
 
 - `mutation.yml`（**变异测试**，每日 cron + `workflow_dispatch` 手动）：对核心模块注入变异,逐个跑相关测试。目标清单在 `scripts/mutation_score.py` 的 `TARGETS`：`shared/ai_gateway.py` 计费与 `exec_id` 去重、`shared/db.py`、`scheduler/` 状态机、`worker/` 乐观锁。**存活变异 = 测试抓不住的真实 bug**——`ai_usage` 去重或乐观锁里若有存活变异 = 字面意义的重复计费/双跑风险。每个目标先跑 clean baseline；只有 pytest 退出码 1 计 killed，退出码 0 计 survived，其余均计 infra-error 并让整次测量失败。含 infra-error 的运行不输出可持久化 CSV，不得用基础设施故障虚高分数。慢 → 不挂 PR;有效分数写 job summary,并追加到 `mutation-data` 分支的 `history.csv`,再生成趋势与徽章 JSON 供 README 读取。手动可传 `target`(如 `ai_gateway`)只跑子集;只跑子集时不写历史。注:mutmut 3.x 配置键是 `source_paths`(非 v2 的 `paths_to_mutate`)。
 
+### CI 性能调优与停止规则
+
+CI 性能是一个 `perf(ci)` 交付单元,不能在 `main` 上用连续微提交逐秒试错:
+
+1. 先从至少 3 次可比 run 提取 job 起止、关键路径、runner 排队、cache hit/miss 和分片 timing。分别记录 push→created、created→required success 和 runner 实际执行时间,不得把平台排队伪装成代码耗时。
+2. 修改前先用历史 timing 离线模拟分片、依赖和 runner 槽。每个候选必须写出瓶颈、预计节省和不变量;预计无法减少至少 10 秒且不修正确性问题的候选默认不进入真实 run。
+3. 实验在独立分支进行,默认最多 3 个远端候选周期。失败候选用新 SHA fix-forward,不 rerun 同一坏 SHA;证明有效后 squash/整理成一个可回滚的正式 CI 价值提交进入 `main`。
+4. 默认以 3 次可比 warm run 的 p50/p90 判断稳定收益。若用户明确指定单次硬 SLA,仍必须同时报告排队与执行时间;可以继续实验直到满足终止条件,但不得因此把每轮试错提交留在 `main`。
+5. 任何优化都不得降低覆盖率、删除 required job、弱化真实 integration、绕过镜像 gate、伪造 success 或把失败标成允许失败。外部 runner/registry 故障单独记录,不通过降低门禁“修复”。
+
 部署为自动 CD：生产 `docker-compose.yml` 跑 Watchtower（`ghcr.io/containrrr/watchtower`），每 120s 查 ghcr，只更新带 `com.centurylinklabs.watchtower.enable=true` 标签的容器，自动 pull + 重建 + 清理旧镜像。无 SSH 自动部署脚本。
 
 ## 5. docker-compose.yml 改造

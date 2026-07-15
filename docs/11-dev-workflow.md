@@ -114,25 +114,58 @@ services:
       - ${FLORI_DATA_DIR:-./data}:/data
 ```
 
-## 4. Git 工作流
+## 4. 统一交付工作流
+
+单个与多个交付单元共用同一状态机:
 
 ```
-main
-  │
-  ├── $FLORI_WORKING_DIR/wt/<slug-a>   agent A 租约 scope
-  ├── $FLORI_WORKING_DIR/wt/<slug-b>   agent B 租约 scope
-  └── integrator 整合 → squash 为候选 diff → 并集验证 → main 正式提交
+范围与不变量 → profile → 租约 → 实现 → 定向验证 → 风险审查
+             → 集成验证 → 价值提交 → 发布验证 → 回收
 ```
+
+单单元是一个节点的发布列车。多单元只增加依赖调度、共享 owner、批次集成和统一发布,不另建一套开发流程。
+
+项目执行入口是 `.agents/skills/flori-delivery-train/SKILL.md`。Skill 只负责按本章编排动作,不复制或覆盖 `CLAUDE.md` 的权威规则;规约变化先改权威文档,再同步 skill。
+
+### 4.1 Profile 选择
+
+开工前分别选择三个 profile,写入工作项:
+
+| 维度 | 取值 | 额外要求 |
+|------|------|----------|
+| 规模 | `single` / `multi` | `multi` 必须生成依赖 DAG、共享热点 owner 表和集成批次 |
+| 风险 | `normal` / `contract` / `critical` | `contract` 同步契约和消费方;`critical` 先冻结威胁/不变量矩阵,再写恶意与恢复测试 |
+| 发布 | `review-first` / `ci` / `full-deploy` | 分别停在用户复核、CI 全绿、完整本地与 ECS 外部验收 |
+
+安全边界、数据库迁移、灾备恢复、身份与权限默认是 `critical`。一个高风险单元不能因为规模是 `single` 而降低门禁;多个普通单元也不能仅因数量多就逐个重复全量测试和部署。
+
+### 4.2 多单元发布列车
+
+`multi` 开工前在列车工作项记录:
+
+1. 每个节点的 unit ID、验收与回滚边界、依赖和 integrator。
+2. 可并行节点、共享热点串行链和每个热点的唯一 owner。
+3. 集成批次以及每批触发的跨单元测试、镜像和手验。
+4. 唯一列车 integrator、发布分支、目标版本和最终 push/deploy 条件。
+5. 以候选标识为键的证据账本;优先使用 checkpoint/tree SHA,未提交的 `review-first` 候选使用确定性 diff digest。单元 TXT 只引用证据 ID,不复制完整输出。
+
+每个单元在发布分支保留一个不 bump 的可回滚价值 commit。全部批次通过后,列车 integrator 创建一个 `build(release)` commit 统一 bump,再一次 push、CI 和部署。若必须提前 push,就在该边界结束当前列车并形成一次独立发布;后续节点进入下一列车。
+
+### 4.3 Worktree 租约与停滞回收
 
 并行会话或主工作树有未提交改动时,每个会话必须在租约制 worktree 中工作。`$FLORI_WORKING_DIR` 是仓库外工作区,本机真实路径只放 `.local/` 或 shell 环境,不要写入 git 文档。
 
-创建 worktree 前先登记到本次工作项:验收目标、integrator、分支、worktree path、base commit、文件 scope、共享热点 owner、测试责任、合并方式和预计回收条件。推荐目录:
+创建 worktree 前登记验收目标、profile、integrator、分支、worktree path、base commit、文件 scope、共享热点 owner、测试责任、首个有效产物期限、合并方式和预计回收条件。推荐目录:
 
 ```
 $FLORI_WORKING_DIR/
 ├── tmp/            临时产物和 scratch
 └── wt/<slug>/      活跃 worktree
 ```
+
+默认 10 分钟内必须出现首个有效产物。有效心跳至少包含一项:可检查 diff/checkpoint、仍在运行的测试或构建、已完成的证据、可复现阻塞。只报告“规划中”不算。首次超时提醒一次;默认再等 5 分钟仍无证据就中断,归档已有内容并重派。租约中声明的长命令可使用更长期限,但必须能观察进程和当前阶段。
+
+被上游阻塞时只允许一次不超过 15 分钟的轻量 preflight,记录可行性、预期 scope 和依赖风险。详细文件审计、实现和正式 review 等依赖稳定后再启动,不要周期性重扫同一范围。
 
 合入 `main` 后立即回收。最终正式提交所在分支已成为 `main` 祖先时:
 
@@ -141,49 +174,56 @@ git worktree remove "$FLORI_WORKING_DIR/wt/<slug>"
 git branch -d <final-branch>
 ```
 
-checkpoint 分支经 squash 后不会成为 `main` 祖先。integrator 必须先确认 checkpoint diff 已完整纳入最终 `main` SHA、worktree 无未归档改动，再回收 worktree 并用 `git branch -D <checkpoint-branch>` 删除。本任务创建的远程分支已纳入后同步删除;`badges`、`mutation-data` 等自动数据分支例外。若 worktree 因未合入、脏 diff、用户要求保留或阻塞项不能清理,必须在最终回复说明原因,并写入 `.local/processing/待办池.txt`。
+checkpoint 分支经 squash 后不会成为 `main` 祖先。integrator 必须先确认 checkpoint diff 已完整纳入最终 `main` SHA、worktree 无未归档改动,再回收 worktree并用 `git branch -D <checkpoint-branch>` 删除。本任务创建的远程分支已纳入后同步删除;`badges`、`mutation-data` 等自动数据分支例外。无法清理时必须在最终回复说明原因,并写入 `.local/processing/待办池.txt`。
 
-每个交付单元只有一个 integrator。子 agent 默认只在自己的租约 scope 内实现、测试和报告，可创建 `wip:` / `fixup!` checkpoint，但不得自行修改最终版本、合入 `main`、push 或部署。integrator 必须用 squash 方式把全部 checkpoint 整合为待提交 diff，原 checkpoint 不得进入主线历史；对全部 touched paths 重跑并集相关测试、build 和手验并通过价值门后，才创建一个正式提交。
+### 4.4 审查预算
 
-`pyproject.toml`、`docs/03-contracts.md`、`shared/db.py`、`shared/models.py`、`configs/pipelines.yaml`、前端 router/types、CI 和 deploy 文件是共享热点。同一交付单元内每个热点只能有一个 owner，多 agent 不得同时操作同一 git worktree、Docker build tag、容器、版本号或部署资源。
+1. 开工前把已知不变量、攻击类别、拒绝条件和恢复场景转成检查表或红测试,不要等每轮 reviewer 临时扩充范围。
+2. `normal` 默认一次实现审查;`contract` / `critical` 默认一次实现审查加一次独立终审。发现新的 P0/P1 类别可以重开门禁;同类小修继续在当前轮关闭,P2/P3 新范围进入后续工作项。
+3. reviewer 优先验证风险矩阵、diff 和未覆盖边界,复用绑定 tree SHA 的已有证据;没有输入变化时不机械重跑全量套件。
+4. checkpoint 是可恢复保存点,不是审查或正式提交单位。多轮反馈继续写入同一工作项时间线。
 
-### 提交规范
+### 4.5 提交规范
 
-> **权威定义在 `CLAUDE.md` §提交规范**（交付单元 / integrator / checkpoint / 标题格式 / 版本判定 / body / trailer，跨会话·多 agent 统一）。本节只留示例，规则改动请改 CLAUDE.md，勿在两处各写一份。
-
-```
-feat(scheduler): 实现 DAG 推进逻辑;0.2.0
-fix(worker): 修复 scene 池未冻结 cpu 的问题;0.2.1
-contract(api): 任务队列接口 + 同步 docs/03-contracts.md;0.7.1
-chore(workflow): 以交付单元收敛开发与发布治理
-```
-
-## 5. 集成测试顺序
+> 权威定义在 `CLAUDE.md` §提交规范。本节只展示三种边界,规则改动只改权威源。
 
 ```
-1. integrator 汇总全部 touched paths 与验收目标
-2. 子 agent 在各自 scope 跑相关测试并报告结果
-3. integrator 整合全部改动，把 checkpoint squash 为待提交 diff
-4. 按 touched paths 跑并集相关测试与跨模块联调
-5. 构建受影响镜像并做 API / Playwright 手验
-6. 契约、迁移、文档与消费方闭环后进入 main
+feat(scheduler): 实现 DAG 推进逻辑              # 列车内价值 commit,未单独发布
+feat(scheduler): 实现 DAG 推进逻辑;0.2.0        # single 直接发布
+build(release): 发布本列车已验收价值;0.3.0      # multi 统一发布
 ```
 
-子 agent 的局部测试结果可复用为证据，但不能替代第 4-6 步。跨调度器、Worker、API 和前端的交付单元仍按依赖顺序联调，端到端验收覆盖完整用户路径。
+## 5. 验证阶梯与证据复用
 
-## 6. 每完成一个交付单元
+| 阶段 | 责任人 | 默认验证 | 输出证据 |
+|------|--------|----------|----------|
+| 实现 | agent | 新增、红测试和直接相关用例 | 候选标识、输入、命令、结果、产物路径 |
+| 审查 | reviewer | 风险矩阵、审查新增范围、无法核验项 | issue 类别、结论和复跑结果 |
+| 单元集成 | unit integrator | touched-path 并集、契约/迁移/消费方闭环 | 单元候选 SHA 与验收清单 |
+| 批次集成 | train integrator | 跨单元联调、对应镜像、API/Playwright 手验 | 批次 SHA 与集成证据 |
+| 发布 | CI/deployer | 全量门禁、镜像提升、部署和外部验证 | run URL、digest、版本、health |
 
-```
-1. 在工作项写清验收目标、integrator、scope、共享热点 owner 和回滚边界
-2. 子 agent 在租约 worktree 内实现、测试，可按需创建 checkpoint
-3. integrator 整合全部改动，把 checkpoint squash 为待提交 diff
-4. 跑并集相关测试、构建和手验，全量回归交 CI
-5. 同步契约、迁移、消费方、ROADMAP 和必要文档
-6. 只有发布交付 bump 一次版本；治理提交和 checkpoint 不 bump
-7. integrator 创建一个正式提交，按授权 push、部署
-8. 删除已合入 worktree 和本地分支
-9. 最终回复前复查 git worktree list --porcelain、本单元登记的全部分支(--list + --merged/--no-merged main)、git status --short --branch
-```
+证据只有在候选标识、测试输入、运行配置和依赖镜像未变化时才可复用。单元之后合入了无关节点,原定向证据仍可引用,但批次集成不能省略。镜像默认每个集成批次构建一次;只有 Dockerfile、依赖、构建上下文或运行时输入变化才提前重建。
+
+## 6. 收口规则
+
+### 6.1 单个交付单元
+
+1. 填好三个 profile、验收目标、不变量、scope、owner 和回滚边界。
+2. 实现与定向验证后按风险 profile 完成审查。
+3. integrator squash checkpoint,执行单元集成并同步契约、迁移、消费方和必要文档。
+4. `review-first` 停在用户可检查状态;`ci` 或 `full-deploy` 的产品改动直接把该价值 commit 作为发布 commit 并 bump 一次。纯文档、公约、调研、测试或 CI 治理仍不 bump。
+5. 按 profile 完成 CI/部署,再回收 worktree 和分支。
+
+### 6.2 多个交付单元
+
+1. 先冻结 DAG、串行热点链、集成批次、列车 integrator 和证据账本。
+2. 各单元按同一生命周期推进,只在依赖满足时做详细审计和实现。
+3. 单元完成后形成不 bump 的价值 commit;每批只跑一次跨单元集成与镜像构建。
+4. 全部批次通过后创建一个发布 commit,一次 push、CI、版本发布和部署。
+5. 按证据账本生成完成矩阵,再统一回收 worktree、checkpoint、临时分支和实验资源。
+
+所有 profile 最终回复前都复查 `git worktree list --porcelain`、登记的全部分支(`--list` + `--merged/--no-merged main`)和 `git status --short --branch`。
 
 ## 7. 扩展指南
 
