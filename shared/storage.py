@@ -15,13 +15,16 @@ import hmac
 import io
 import json
 import os
+import queue
 import re
 import shutil
 import stat
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterable, AsyncIterator, Callable, Protocol
 
@@ -32,11 +35,88 @@ from shared.runner_ops import current_task_lease
 # B站登录态等敏感凭证的本地侧载文件:只供同机(LocalStorage)下载步本地读取,
 # 绝不入中心对象存储、绝不经 runner 网关下发给远端 worker(见 RemoteStorage / api/routes/runner.py)。
 CREDENTIAL_REL = "input/.credentials.json"
+INITIALIZATION_MARKER_REL = ".flori-initializing.json"
 _STAGING_PREFIX = ".flori-upload/"
+_GLOBAL_STAGING_PREFIX = ".flori-staging/"
+_GLOBAL_INITIALIZATION_PREFIX = ".flori-initializing/"
+_STAGING_LIFECYCLE_RULE_ID = "flori-staging-recovery"
+_MINIO_STREAM_PART_SIZE = 5 * 1024 * 1024
+_STREAM_EOF = object()
 
 
 class ArtifactTooLarge(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class _StreamFailure:
+    error: BaseException
+
+
+class _AsyncToSyncStream:
+    """以有界队列把 ASGI async chunks 接到 MinIO 同步 multipart reader。"""
+
+    def __init__(self, max_chunks: int = 2):
+        self._queue: queue.Queue = queue.Queue(maxsize=max_chunks)
+        self._buffer = bytearray()
+        self._stopped = threading.Event()
+        self._eof = False
+
+    def _put(self, item: object) -> None:
+        while not self._stopped.is_set():
+            try:
+                self._queue.put(item, timeout=0.1)
+                return
+            except queue.Full:
+                continue
+        raise OSError("object upload stream stopped")
+
+    async def put(self, chunk: bytes) -> None:
+        await asyncio.to_thread(self._put, chunk)
+
+    async def finish(self) -> None:
+        await asyncio.to_thread(self._put, _STREAM_EOF)
+
+    def _fail(self, error: BaseException) -> None:
+        if self._stopped.is_set():
+            return
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
+        try:
+            self._queue.put_nowait(_StreamFailure(error))
+        except queue.Full:
+            pass
+
+    async def fail(self, error: BaseException) -> None:
+        await asyncio.to_thread(self._fail, error)
+
+    def abort(self, error: BaseException) -> None:
+        self._fail(error)
+
+    def stop(self) -> None:
+        self._stopped.set()
+
+    def read(self, size: int = -1) -> bytes:
+        if size == 0:
+            return b""
+        if size < 0:
+            size = _MINIO_STREAM_PART_SIZE
+        while len(self._buffer) < size and not self._eof:
+            item = self._queue.get()
+            if item is _STREAM_EOF:
+                self._eof = True
+                break
+            if isinstance(item, _StreamFailure):
+                raise item.error
+            if not isinstance(item, bytes):
+                raise TypeError("artifact stream yielded non-bytes")
+            self._buffer.extend(item)
+        data = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return data
 
 
 @dataclass(frozen=True)
@@ -302,6 +382,20 @@ def _is_staging_file(rel: str) -> bool:
     return rel.replace("\\", "/").startswith(_STAGING_PREFIX)
 
 
+def _is_internal_file(rel: str) -> bool:
+    normalized = rel.replace("\\", "/")
+    return normalized == INITIALIZATION_MARKER_REL or _is_staging_file(normalized)
+
+
+def _is_s3_not_found(error: BaseException) -> bool:
+    return (
+        getattr(error, "code", None) in {
+            "NoSuchKey", "NoSuchObject", "NoSuchVersion",
+        }
+        or getattr(getattr(error, "response", None), "status", None) == 404
+    )
+
+
 def _raise_gateway_auth(resp, endpoint: str) -> None:
     status = getattr(resp, "status_code", None)
     if status in (401, 403, 429):
@@ -331,7 +425,9 @@ class StorageBackend(Protocol):
     async def cleanup(self, job_id: str, step: str, work_dir: Path) -> None: ...
     # 删 job 时清掉该 job 的全部产物:LocalStorage 删 job 目录、RemoteStorage 删 {job_id}/ 前缀对象。
     # 幂等(无产物即 no-op),避免 MinIO/分布式部署删 job 后中心存储留孤儿产物。
-    async def delete(self, job_id: str) -> None: ...
+    async def delete(
+        self, job_id: str, *, defer_if_busy: bool = False,
+    ) -> None: ...
     # 把 src job 的全部产物 + .done 复制到 dst job,供 fork 重建播种新快照,只重跑分叉步及下游。
     # 排除凭证侧载文件;Local=copytree、Remote=服务端 copy_object;Gateway 不支持(重建在 API/中心侧跑)。
     async def clone(self, src_job_id: str, dst_job_id: str) -> None: ...
@@ -352,8 +448,16 @@ class StorageBackend(Protocol):
     async def write_stream(
         self, job_id: str, rel_path: str, chunks: AsyncIterable[bytes], *,
         expected_size: int | None = None, expected_sha256: str | None = None,
-        max_bytes: int | None = None,
+        max_bytes: int | None = None, staging_token: str | None = None,
     ) -> dict: ...
+    # API 初始化恢复:枚举 marker,并按保守时间界限清全局 staging。
+    async def list_initialization_markers(self) -> list[str]: ...
+    async def cleanup_stale_staging(
+        self, *, active_tokens: set[tuple[str, str]],
+        protected_job_ids: set[str], stale_before_epoch: float,
+    ) -> int: ...
+    # API shutdown 在有界时间内等待后台 multipart finalizer 与其 delete barrier。
+    async def wait_for_finalizers(self) -> None: ...
     # 列出某 job 的全部产物相对路径(供 gateway 产物清单端点 / GatewayStorage.pull 用)。
     async def list_files(self, job_id: str) -> list[str]: ...
     # 列产物相对路径 → 字节大小(供 /artifacts 透出每步/每 job 产物体积)。一次列举拿全,
@@ -394,6 +498,26 @@ class LocalStorage:
             raise ValueError("path escapes job dir")
         return path
 
+    def _staging_path(self, job_id: str, token: str) -> Path:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", token):
+            raise ValueError("invalid staging token")
+        self._safe_path(job_id)
+        root = self.jobs_dir.resolve()
+        staging_root = (root / _GLOBAL_STAGING_PREFIX / job_id).resolve()
+        if root not in staging_root.parents:
+            raise ValueError("staging path escapes jobs_dir")
+        return staging_root / token
+
+    def _initialization_path(self, job_id: str) -> Path:
+        self._safe_path(job_id)
+        root = self.jobs_dir.resolve()
+        return root / _GLOBAL_INITIALIZATION_PREFIX / job_id / "marker.json"
+
+    def _data_path(self, job_id: str, rel_path: str) -> Path:
+        if rel_path == INITIALIZATION_MARKER_REL:
+            return self._initialization_path(job_id)
+        return self._safe_path(job_id, rel_path)
+
     async def pull(self, job_id: str, step: str) -> Path:
         return self._safe_path(job_id)
 
@@ -403,10 +527,34 @@ class LocalStorage:
     async def cleanup(self, job_id: str, step: str, work_dir: Path) -> None:
         pass
 
-    async def delete(self, job_id: str) -> None:
-        # _safe_path 兜底防穿越(job_id 不得逃出 jobs_dir);ignore_errors 保证幂等(目录不存在即 no-op)。
+    async def wait_for_finalizers(self) -> None:
+        pass
+
+    async def delete(
+        self, job_id: str, *, defer_if_busy: bool = False,
+    ) -> None:
         root = self._safe_path(job_id)
-        await asyncio.to_thread(shutil.rmtree, root, ignore_errors=True)
+        staging = self._staging_path(job_id, "placeholder").parent
+        initializing = self._initialization_path(job_id).parent
+
+        def _delete_tree(path: Path) -> None:
+            try:
+                shutil.rmtree(path)
+            except FileNotFoundError:
+                pass
+
+        await asyncio.to_thread(_delete_tree, root)
+        await asyncio.to_thread(_delete_tree, staging)
+        await asyncio.to_thread(_delete_tree, initializing)
+        await asyncio.to_thread(self._remove_empty_staging_parents, staging)
+        await asyncio.to_thread(self._remove_empty_staging_parents, initializing)
+
+    def _remove_empty_staging_parents(self, staging_job_dir: Path) -> None:
+        for path in (staging_job_dir, staging_job_dir.parent):
+            try:
+                path.rmdir()
+            except OSError:
+                pass
 
     async def clone(self, src_job_id: str, dst_job_id: str) -> None:
         # 整目录复制(含 .done dotfile,供 fork 播种);排除凭证侧载文件,不克隆到新 job。源不存在=no-op。
@@ -430,11 +578,13 @@ class LocalStorage:
         await asyncio.to_thread(_copy)
 
     async def delete_file(self, job_id: str, rel_path: str) -> None:
-        path = self._safe_path(job_id, rel_path)
+        path = self._data_path(job_id, rel_path)
         await asyncio.to_thread(path.unlink, True)
+        if rel_path == INITIALIZATION_MARKER_REL:
+            await asyncio.to_thread(self._remove_empty_staging_parents, path.parent)
 
     async def read_file(self, job_id: str, rel_path: str) -> bytes | None:
-        path = self._safe_path(job_id, rel_path)
+        path = self._data_path(job_id, rel_path)
         if not path.is_file():
             return None
         return await asyncio.to_thread(path.read_bytes)
@@ -501,27 +651,24 @@ class LocalStorage:
         return await asyncio.to_thread(_read)
 
     async def write_file(self, job_id: str, rel_path: str, data: bytes) -> None:
-        path = self._safe_path(job_id, rel_path)
-
-        def _write() -> None:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
-
-        await asyncio.to_thread(_write)
+        path = self._data_path(job_id, rel_path)
+        await asyncio.to_thread(write_path_atomic, path, data)
 
     async def write_stream(
         self, job_id: str, rel_path: str, chunks: AsyncIterable[bytes], *,
         expected_size: int | None = None, expected_sha256: str | None = None,
-        max_bytes: int | None = None,
+        max_bytes: int | None = None, staging_token: str | None = None,
     ) -> dict:
         target = self._safe_path(job_id, rel_path)
-        staging = self._safe_path(job_id, f"{_STAGING_PREFIX}{uuid.uuid4().hex}")
+        staging = self._staging_path(job_id, staging_token or uuid.uuid4().hex)
         await asyncio.to_thread(staging.parent.mkdir, parents=True, exist_ok=True)
         digest = hashlib.sha256()
         total = 0
         fp = await asyncio.to_thread(open, staging, "wb")
         try:
             async for chunk in chunks:
+                if not isinstance(chunk, bytes):
+                    raise TypeError("artifact stream yielded non-bytes")
                 if not chunk:
                     continue
                 total += len(chunk)
@@ -540,11 +687,61 @@ class LocalStorage:
                 raise ValueError("artifact checksum mismatch")
             await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
             await asyncio.to_thread(os.replace, staging, target)
+            await asyncio.to_thread(_fsync_directory, target.parent)
             return {"size": total, "sha256": actual}
         finally:
             if fp is not None:
                 await asyncio.to_thread(fp.close)
             await asyncio.to_thread(staging.unlink, True)
+            await asyncio.to_thread(self._remove_empty_staging_parents, staging.parent)
+
+    async def list_initialization_markers(self) -> list[str]:
+        def _list() -> list[str]:
+            root = self.jobs_dir / _GLOBAL_INITIALIZATION_PREFIX
+            if not root.is_dir():
+                return []
+            return sorted(
+                child.name
+                for child in root.iterdir()
+                if child.is_dir()
+                and (child / "marker.json").is_file()
+            )
+
+        return await asyncio.to_thread(_list)
+
+    async def cleanup_stale_staging(
+        self, *, active_tokens: set[tuple[str, str]],
+        protected_job_ids: set[str], stale_before_epoch: float,
+    ) -> int:
+        root = self.jobs_dir / _GLOBAL_STAGING_PREFIX
+
+        def _cleanup() -> int:
+            removed = 0
+            if not root.is_dir():
+                return 0
+            for job_dir in root.iterdir():
+                if not job_dir.is_dir() or job_dir.name in protected_job_ids:
+                    continue
+                for path in job_dir.iterdir():
+                    token = path.name.split(".", 1)[0]
+                    if (job_dir.name, token) in active_tokens:
+                        continue
+                    try:
+                        modified = path.stat().st_mtime
+                    except FileNotFoundError:
+                        continue
+                    if modified >= stale_before_epoch:
+                        continue
+                    if path.is_file():
+                        path.unlink(missing_ok=True)
+                        removed += 1
+                try:
+                    job_dir.rmdir()
+                except OSError:
+                    pass
+            return removed
+
+        return await asyncio.to_thread(_cleanup)
 
     async def list_files(self, job_id: str) -> list[str]:
         return await asyncio.to_thread(self._list_files_sync, job_id)
@@ -557,7 +754,7 @@ class LocalStorage:
         return [
             p.relative_to(root).as_posix()
             for p in root.rglob("*")
-            if p.is_file() and not _is_staging_file(p.relative_to(root).as_posix())
+            if p.is_file() and not _is_internal_file(p.relative_to(root).as_posix())
         ]
 
     async def list_file_sizes(self, job_id: str) -> dict[str, int]:
@@ -571,7 +768,7 @@ class LocalStorage:
         return {
             p.relative_to(root).as_posix(): p.stat().st_size
             for p in root.rglob("*")
-            if p.is_file() and not _is_staging_file(p.relative_to(root).as_posix())
+            if p.is_file() and not _is_internal_file(p.relative_to(root).as_posix())
         }
 
     async def health(self) -> dict:
@@ -629,6 +826,12 @@ class RemoteStorage:
         self._readiness_client_obj = None
         self._readiness_io_timeout_sec: float | None = None
         self._readiness_http_client = None
+        self._finalizer_tasks: set[asyncio.Task] = set()
+        self._finalizers_by_job: dict[str, set[asyncio.Task]] = {}
+        self._active_writers: dict[str, set[asyncio.Task]] = {}
+        self._job_locks: dict[str, asyncio.Lock] = {}
+        self._delete_requested: set[str] = set()
+        self._delete_tasks: dict[str, asyncio.Task] = {}
 
     def _client(self):
         # 延迟连接:构造时不导入 minio、不连服务器(便于选型与单测),首次用到才建。
@@ -644,6 +847,12 @@ class RemoteStorage:
             self._tmp_root.mkdir(parents=True, exist_ok=True)
             self._client_obj = c
         return self._client_obj
+
+    @staticmethod
+    def _object_key(job_id: str, rel_path: str) -> str:
+        if rel_path == INITIALIZATION_MARKER_REL:
+            return f"{_GLOBAL_INITIALIZATION_PREFIX}{job_id}/marker.json"
+        return f"{job_id}/{rel_path}"
 
     def _readiness_client(self, timeout_sec: float):
         """创建 SDK 层有界的专用客户端,不复用业务客户端的长 I/O 配置."""
@@ -688,7 +897,7 @@ class RemoteStorage:
         prefix = f"{job_id}/"
         for obj in self._client().list_objects(self._bucket, prefix=prefix, recursive=True):
             rel = obj.object_name[len(prefix):]
-            if not rel or _is_staging_file(rel):
+            if not rel or _is_internal_file(rel):
                 continue
             dest = work_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -707,7 +916,7 @@ class RemoteStorage:
             if not path.is_file():
                 continue
             rel = str(path.relative_to(work_dir))
-            if is_credential_file(rel):
+            if is_credential_file(rel) or _is_internal_file(rel):
                 continue  # 敏感凭证永不上行中心存储
             st = path.stat()
             prev = snapshot.get(rel)
@@ -722,26 +931,152 @@ class RemoteStorage:
         self._snapshots.pop(str(work_dir), None)
         shutil.rmtree(work_dir, ignore_errors=True)
 
-    async def delete(self, job_id: str) -> None:
-        await asyncio.to_thread(self._delete_sync, job_id)
+    async def delete(
+        self, job_id: str, *, defer_if_busy: bool = False,
+    ) -> None:
+        async with self._job_lock(job_id):
+            self._delete_requested.add(job_id)
+            task = self._maybe_start_delete(job_id)
+        if defer_if_busy and task is None:
+            return
+        while task is None:
+            pending: set[asyncio.Task] = set(
+                self._active_writers.get(job_id, set())
+            )
+            pending.update(self._finalizers_by_job.get(job_id, set()))
+            if not pending:
+                task = self._maybe_start_delete(job_id)
+                break
+            await asyncio.gather(
+                *(asyncio.shield(item) for item in pending),
+                return_exceptions=True,
+            )
+            task = self._maybe_start_delete(job_id)
+        if task is not None:
+            await asyncio.shield(task)
+
+    def _job_lock(self, job_id: str) -> asyncio.Lock:
+        lock = self._job_locks.get(job_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._job_locks[job_id] = lock
+        return lock
+
+    async def _register_writer(self, job_id: str) -> None:
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("stream writer must run in an asyncio task")
+        async with self._job_lock(job_id):
+            if job_id in self._delete_requested:
+                raise OSError("job deletion is in progress")
+            self._active_writers.setdefault(job_id, set()).add(task)
+
+    def _unregister_writer(self, job_id: str) -> None:
+        task = asyncio.current_task()
+        writers = self._active_writers.get(job_id)
+        if writers is not None:
+            writers.discard(task)
+            if not writers:
+                self._active_writers.pop(job_id, None)
+        self._maybe_start_delete(job_id)
+        self._cleanup_job_barrier_state(job_id)
+
+    def _cleanup_job_barrier_state(self, job_id: str) -> None:
+        if (
+            not self._active_writers.get(job_id)
+            and not self._finalizers_by_job.get(job_id)
+            and job_id not in self._delete_requested
+            and job_id not in self._delete_tasks
+        ):
+            self._job_locks.pop(job_id, None)
+
+    async def _ensure_publish_allowed(self, job_id: str) -> None:
+        async with self._job_lock(job_id):
+            if job_id in self._delete_requested:
+                raise OSError("job deletion is in progress")
+
+    async def _start_publish_operation(
+        self,
+        job_id: str,
+        operations: dict[str, asyncio.Task],
+        phase: str,
+        callback: Callable,
+        *args,
+    ) -> asyncio.Task:
+        """在 delete barrier 锁内先登记同步操作，再把 Task 交还调用方。"""
+        async with self._job_lock(job_id):
+            if job_id in self._delete_requested:
+                raise OSError("job deletion is in progress")
+            task = asyncio.create_task(asyncio.to_thread(callback, *args))
+            operations[phase] = task
+            return task
+
+    def _maybe_start_delete(self, job_id: str) -> asyncio.Task | None:
+        if job_id not in self._delete_requested:
+            return None
+        existing = self._delete_tasks.get(job_id)
+        if existing is not None:
+            return existing
+        if self._active_writers.get(job_id):
+            return None
+        if self._finalizers_by_job.get(job_id):
+            return None
+
+        task = asyncio.create_task(asyncio.to_thread(self._delete_sync, job_id))
+        self._delete_tasks[job_id] = task
+
+        def _done(done: asyncio.Task) -> None:
+            if self._delete_tasks.get(job_id) is done:
+                self._delete_tasks.pop(job_id, None)
+            try:
+                done.result()
+            except BaseException as exc:
+                import structlog
+                structlog.get_logger().error(
+                    "storage_delete_barrier_failed",
+                    job_id=job_id,
+                    error=type(exc).__name__,
+                    detail=str(exc),
+                )
+            else:
+                self._delete_requested.discard(job_id)
+                if (
+                    not self._active_writers.get(job_id)
+                    and not self._finalizers_by_job.get(job_id)
+                ):
+                    self._job_locks.pop(job_id, None)
+
+        task.add_done_callback(_done)
+        return task
 
     def _delete_sync(self, job_id: str) -> None:
         from minio.deleteobjects import DeleteObject
 
         client = self._client()
-        prefix = f"{job_id}/"
-        objs = [
-            DeleteObject(o.object_name)
-            for o in client.list_objects(self._bucket, prefix=prefix, recursive=True)
-        ]
+        prefixes = (
+            f"{job_id}/",
+            f"{_GLOBAL_STAGING_PREFIX}{job_id}/",
+            f"{_GLOBAL_INITIALIZATION_PREFIX}{job_id}/",
+        )
+        objs = []
+        for prefix in prefixes:
+            objs.extend(
+                DeleteObject(o.object_name)
+                for o in client.list_objects(
+                    self._bucket, prefix=prefix, recursive=True,
+                )
+            )
         if objs:
             # remove_objects 惰性返回错误迭代器,必须消费(list)才真正发起删除。
             errors = list(client.remove_objects(self._bucket, objs))
             if errors:
-                import structlog
-                structlog.get_logger().warning(
-                    "storage_delete_partial", job_id=job_id,
-                    errors=[str(e) for e in errors],
+                details = [
+                    f"{getattr(error, 'code', type(error).__name__)}:"
+                    f"{getattr(error, 'object_name', '')}"
+                    for error in errors
+                ]
+                raise OSError(
+                    f"storage delete partial for {job_id}: {'; '.join(details)}"
                 )
         # 顺带清掉本机为该 job 留存的临时工作目录与快照(幂等)。
         work_dir = self._tmp_root / job_id
@@ -759,7 +1094,7 @@ class RemoteStorage:
         src_prefix = f"{src_job_id}/"
         for o in client.list_objects(self._bucket, prefix=src_prefix, recursive=True):
             rel = o.object_name[len(src_prefix):]
-            if is_credential_file(rel) or _is_staging_file(rel):
+            if is_credential_file(rel) or _is_internal_file(rel):
                 continue
             try:
                 client.copy_object(
@@ -788,8 +1123,10 @@ class RemoteStorage:
             await asyncio.to_thread(
                 self._client().stat_object, self._bucket, f"{job_id}/{rel_path}",
             )
-        except S3Error:
-            return None
+        except S3Error as exc:
+            if _is_s3_not_found(exc):
+                return None
+            raise
 
         async def _chunks() -> AsyncIterator[bytes]:
             resp = None
@@ -822,81 +1159,567 @@ class RemoteStorage:
     async def write_stream(
         self, job_id: str, rel_path: str, chunks: AsyncIterable[bytes], *,
         expected_size: int | None = None, expected_sha256: str | None = None,
-        max_bytes: int | None = None,
+        max_bytes: int | None = None, staging_token: str | None = None,
     ) -> dict:
-        tmp_root = Path(self._tmp_root or tempfile.gettempdir()) / ".flori-upload"
-        await asyncio.to_thread(tmp_root.mkdir, parents=True, exist_ok=True)
-        local_tmp = tmp_root / uuid.uuid4().hex
-        staging_key = f"{job_id}/{_STAGING_PREFIX}{uuid.uuid4().hex}"
+        try:
+            await self._register_writer(job_id)
+            return await self._write_stream_registered(
+                job_id,
+                rel_path,
+                chunks,
+                expected_size=expected_size,
+                expected_sha256=expected_sha256,
+                max_bytes=max_bytes,
+                staging_token=staging_token,
+            )
+        finally:
+            task = asyncio.current_task()
+            if (
+                task is not None
+                and task in self._active_writers.get(job_id, set())
+            ):
+                self._unregister_writer(job_id)
+
+    async def _write_stream_registered(
+        self, job_id: str, rel_path: str, chunks: AsyncIterable[bytes], *,
+        expected_size: int | None = None, expected_sha256: str | None = None,
+        max_bytes: int | None = None, staging_token: str | None = None,
+    ) -> dict:
+        token = staging_token or uuid.uuid4().hex
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", token):
+            raise ValueError("invalid staging token")
+        staging_key = f"{_GLOBAL_STAGING_PREFIX}{job_id}/{token}"
+        backup_key = f"{staging_key}.backup"
+        final_key = f"{job_id}/{rel_path}"
         digest = hashlib.sha256()
         total = 0
-        fp = await asyncio.to_thread(open, local_tmp, "wb")
+        bridge = _AsyncToSyncStream()
+        operation_tasks: dict[str, asyncio.Task] = {}
+        upload_task: asyncio.Task | None = None
+        backup_task: asyncio.Task | None = None
+        publish_task: asyncio.Task | None = None
+        staging_cleanup_task: asyncio.Task | None = None
+        had_final = False
+        deferred_cleanup = False
+        publish_committed = False
+
+        def _upload() -> None:
+            try:
+                self._client().put_object(
+                    self._bucket,
+                    staging_key,
+                    bridge,
+                    length=-1,
+                    part_size=_MINIO_STREAM_PART_SIZE,
+                )
+            finally:
+                bridge.stop()
+
         try:
-            async for chunk in chunks:
-                if not chunk:
-                    continue
-                total += len(chunk)
-                if max_bytes is not None and total > max_bytes:
-                    raise ArtifactTooLarge(f"artifact exceeds {max_bytes} bytes")
-                digest.update(chunk)
-                await asyncio.to_thread(fp.write, chunk)
-            await asyncio.to_thread(fp.flush)
-            await asyncio.to_thread(os.fsync, fp.fileno())
-            await asyncio.to_thread(fp.close)
-            fp = None
+            try:
+                upload_task = await self._start_publish_operation(
+                    job_id, operation_tasks, "upload", _upload,
+                )
+                async for chunk in chunks:
+                    if not isinstance(chunk, bytes):
+                        raise TypeError("artifact stream yielded non-bytes")
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if max_bytes is not None and total > max_bytes:
+                        raise ArtifactTooLarge(f"artifact exceeds {max_bytes} bytes")
+                    digest.update(chunk)
+                    try:
+                        await bridge.put(chunk)
+                    except OSError:
+                        await asyncio.shield(upload_task)
+                        raise
+                try:
+                    await bridge.finish()
+                except OSError:
+                    await asyncio.shield(upload_task)
+                    raise
+                await asyncio.shield(upload_task)
+            except BaseException as exc:
+                upload_task = operation_tasks.get("upload")
+                if upload_task is not None and not upload_task.done():
+                    stream_error = (
+                        OSError("artifact stream cancelled")
+                        if isinstance(exc, asyncio.CancelledError)
+                        else exc
+                    )
+                    bridge.abort(stream_error)
+                if isinstance(exc, asyncio.CancelledError):
+                    self._schedule_cancelled_finalizer(
+                        job_id,
+                        final_key,
+                        staging_key,
+                        backup_key,
+                        list(operation_tasks.values()),
+                        backup_task=operation_tasks.get("backup"),
+                        publish_task=operation_tasks.get("publish"),
+                        had_final=had_final,
+                    )
+                    deferred_cleanup = True
+                    raise
+                if upload_task is not None:
+                    try:
+                        await asyncio.shield(upload_task)
+                    except BaseException:
+                        pass
+                raise
+
+            await self._ensure_publish_allowed(job_id)
+
             actual = digest.hexdigest()
             if expected_size is not None and total != expected_size:
                 raise ValueError("artifact size mismatch")
             if expected_sha256 and not hmac.compare_digest(actual, expected_sha256.lower()):
                 raise ValueError("artifact checksum mismatch")
 
-            await asyncio.to_thread(
-                self._client().fput_object,
-                self._bucket,
-                staging_key,
-                str(local_tmp),
-            )
+            had_final = await asyncio.to_thread(self._object_exists_sync, final_key)
+            await self._ensure_publish_allowed(job_id)
+            if had_final:
+                try:
+                    backup_task = await self._start_publish_operation(
+                        job_id,
+                        operation_tasks,
+                        "backup",
+                        self._copy_object_sync,
+                        final_key,
+                        backup_key,
+                    )
+                    await asyncio.shield(backup_task)
+                    await self._ensure_publish_allowed(job_id)
+                except asyncio.CancelledError:
+                    self._schedule_cancelled_finalizer(
+                        job_id, final_key, staging_key, backup_key,
+                        list(operation_tasks.values()),
+                        backup_task=operation_tasks.get("backup"),
+                        publish_task=None, had_final=True,
+                    )
+                    deferred_cleanup = True
+                    raise
 
-            def _publish() -> None:
-                from minio.commonconfig import CopySource
-
-                self._client().copy_object(
-                    self._bucket,
-                    f"{job_id}/{rel_path}",
-                    CopySource(self._bucket, staging_key),
+            try:
+                publish_task = await self._start_publish_operation(
+                    job_id,
+                    operation_tasks,
+                    "publish",
+                    self._copy_object_sync,
+                    staging_key,
+                    final_key,
                 )
-
-            await asyncio.to_thread(_publish)
+                await asyncio.shield(publish_task)
+                await self._ensure_publish_allowed(job_id)
+            except asyncio.CancelledError:
+                self._schedule_cancelled_finalizer(
+                    job_id, final_key, staging_key, backup_key,
+                    list(operation_tasks.values()),
+                    backup_task=operation_tasks.get("backup"),
+                    publish_task=operation_tasks.get("publish"),
+                    had_final=had_final,
+                )
+                deferred_cleanup = True
+                raise
+            publish_committed = True
             return {"size": total, "sha256": actual}
         finally:
-            if fp is not None:
-                await asyncio.to_thread(fp.close)
-            await asyncio.to_thread(local_tmp.unlink, True)
+            bridge.stop()
+            if not deferred_cleanup:
+                staging_cleanup_task = asyncio.create_task(
+                    self._remove_staging_keys(staging_key),
+                )
+                self._track_finalizer_task(job_id, staging_cleanup_task)
+                try:
+                    staging_cleanup_succeeded = await asyncio.shield(
+                        staging_cleanup_task,
+                    )
+                except asyncio.CancelledError:
+                    staging_cleanup_succeeded = (
+                        publish_committed
+                        and self._cleanup_task_succeeded(staging_cleanup_task)
+                    )
+                    if not staging_cleanup_succeeded:
+                        self._schedule_cancelled_finalizer(
+                            job_id, final_key, staging_key, backup_key,
+                            list(operation_tasks.values()),
+                            backup_task=operation_tasks.get("backup"),
+                            publish_task=operation_tasks.get("publish"),
+                            had_final=had_final,
+                            staging_cleanup_task=staging_cleanup_task,
+                        )
+                        deferred_cleanup = True
+                        raise
+                if not staging_cleanup_succeeded:
+                    self._schedule_cancelled_finalizer(
+                        job_id, final_key, staging_key, backup_key,
+                        list(operation_tasks.values()),
+                        backup_task=operation_tasks.get("backup"),
+                        publish_task=operation_tasks.get("publish"),
+                        had_final=had_final,
+                        staging_cleanup_task=staging_cleanup_task,
+                    )
+                    deferred_cleanup = True
+                    if publish_committed:
+                        raise OSError("storage staging cleanup failed")
+                elif had_final:
+                    cleanup_task = asyncio.create_task(
+                        self._remove_staging_keys(backup_key),
+                    )
+                    self._track_finalizer_task(job_id, cleanup_task)
+                    if publish_committed:
+                        # staging 删除后即为提交点。backup 只由强引用任务异步收口，
+                        # request task 不再留下可交付取消的 await。
+                        pass
+                    else:
+                        await asyncio.shield(cleanup_task)
+
+    def _copy_object_sync(self, source_key: str, target_key: str) -> None:
+        from minio.commonconfig import CopySource
+
+        self._client().copy_object(
+            self._bucket,
+            target_key,
+            CopySource(self._bucket, source_key),
+        )
+
+    def _object_exists_sync(self, object_key: str) -> bool:
+        from minio.error import S3Error
+
+        try:
+            value = self._client().stat_object(self._bucket, object_key)
+        except S3Error as exc:
+            if _is_s3_not_found(exc):
+                return False
+            raise
+        return isinstance(getattr(value, "size", None), int)
+
+    async def _remove_staging_keys(self, *keys: str) -> bool:
+        succeeded = True
+        for key in keys:
             try:
                 await asyncio.to_thread(
-                    self._client().remove_object, self._bucket, staging_key,
+                    self._client().remove_object, self._bucket, key,
                 )
             except Exception as exc:
                 import structlog
-                structlog.get_logger().warning(
-                    "storage_staging_cleanup_failed", object_key=staging_key,
+                structlog.get_logger().error(
+                    "storage_staging_cleanup_failed", object_key=key,
                     error=str(exc),
                 )
+                succeeded = False
+        return succeeded
+
+    @staticmethod
+    def _cleanup_task_succeeded(task: asyncio.Task) -> bool:
+        """仅把已完成、未取消且明确返回 True 的 cleanup Task 视为提交点。"""
+        if not task.done() or task.cancelled():
+            return False
+        try:
+            return task.result() is True
+        except BaseException:
+            return False
+
+    def _schedule_cancelled_finalizer(
+        self,
+        job_id: str,
+        final_key: str,
+        staging_key: str,
+        backup_key: str,
+        operation_tasks: list[asyncio.Task],
+        *,
+        backup_task: asyncio.Task | None,
+        publish_task: asyncio.Task | None,
+        had_final: bool,
+        staging_cleanup_task: asyncio.Task | None = None,
+    ) -> None:
+        task = asyncio.create_task(self._finalize_cancelled_upload(
+            job_id,
+            final_key,
+            staging_key,
+            backup_key,
+            list(operation_tasks),
+            backup_task=backup_task,
+            publish_task=publish_task,
+            had_final=had_final,
+            staging_cleanup_task=staging_cleanup_task,
+        ))
+        self._track_finalizer_task(job_id, task)
+
+    def _track_finalizer_task(
+        self, job_id: str, task: asyncio.Task,
+    ) -> None:
+        """强引用 job 收口任务，使 delete barrier 与 lifespan 能等待它。"""
+        self._finalizer_tasks.add(task)
+        self._finalizers_by_job.setdefault(job_id, set()).add(task)
+
+        def _done(done: asyncio.Task) -> None:
+            self._finalizer_tasks.discard(done)
+            per_job = self._finalizers_by_job.get(job_id)
+            if per_job is not None:
+                per_job.discard(done)
+                if not per_job:
+                    self._finalizers_by_job.pop(job_id, None)
+            try:
+                done.result()
+            except BaseException as exc:
+                import structlog
+                structlog.get_logger().error(
+                    "storage_finalizer_unexpected_failure",
+                    job_id=job_id,
+                    error=type(exc).__name__,
+                    detail=str(exc),
+                )
+            self._maybe_start_delete(job_id)
+            self._cleanup_job_barrier_state(job_id)
+
+        task.add_done_callback(_done)
+
+    async def _finalize_cancelled_upload(
+        self,
+        job_id: str,
+        final_key: str,
+        staging_key: str,
+        backup_key: str,
+        operation_tasks: list[asyncio.Task],
+        *,
+        backup_task: asyncio.Task | None,
+        publish_task: asyncio.Task | None,
+        had_final: bool,
+        staging_cleanup_task: asyncio.Task | None = None,
+    ) -> None:
+        import structlog
+
+        task_errors: list[str] = []
+        staging_cleanup_succeeded = False
+        if staging_cleanup_task is not None:
+            try:
+                await asyncio.shield(staging_cleanup_task)
+            except BaseException as exc:
+                task_errors.append(f"cleanup {type(exc).__name__}: {exc}")
+            staging_cleanup_succeeded = self._cleanup_task_succeeded(
+                staging_cleanup_task,
+            )
+            if not staging_cleanup_succeeded:
+                task_errors.append("cleanup did not remove staging")
+        for task in operation_tasks:
+            try:
+                await asyncio.shield(task)
+            except BaseException as exc:
+                task_errors.append(f"{type(exc).__name__}: {exc}")
+
+        backup_ready = backup_task is not None and not backup_task.cancelled()
+        if backup_ready:
+            try:
+                backup_task.result()
+            except BaseException:
+                backup_ready = False
+        publish_succeeded = publish_task is not None and not publish_task.cancelled()
+        if publish_succeeded:
+            try:
+                publish_task.result()
+            except BaseException:
+                publish_succeeded = False
+
+        rollback_task: asyncio.Task | None = None
+        if publish_succeeded:
+            async with self._job_lock(job_id):
+                if job_id not in self._delete_requested:
+                    if had_final and backup_ready:
+                        rollback_task = asyncio.create_task(asyncio.to_thread(
+                            self._copy_object_sync, backup_key, final_key,
+                        ))
+                    elif not had_final:
+                        rollback_task = asyncio.create_task(asyncio.to_thread(
+                            self._client().remove_object,
+                            self._bucket,
+                            final_key,
+                        ))
+        if rollback_task is not None:
+            try:
+                await asyncio.shield(rollback_task)
+            except Exception as exc:
+                task_errors.append(f"rollback {type(exc).__name__}: {exc}")
+
+        keys = [] if staging_cleanup_succeeded else [staging_key]
+        if had_final:
+            keys.append(backup_key)
+        if keys:
+            await self._remove_staging_keys(*keys)
+
+        if task_errors:
+            structlog.get_logger().warning(
+                "storage_cancelled_upload_finalized",
+                job_id=job_id,
+                errors=task_errors,
+            )
+
+    async def wait_for_finalizers(self) -> None:
+        while True:
+            tasks = set(self._finalizer_tasks)
+            for writers in self._active_writers.values():
+                tasks.update(writers)
+            tasks.update(
+                task for task in self._delete_tasks.values() if not task.done()
+            )
+            if not tasks:
+                return
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in tasks),
+                return_exceptions=True,
+            )
+
+    async def list_initialization_markers(self) -> list[str]:
+        return await asyncio.to_thread(self._list_initialization_markers_sync)
+
+    def _list_initialization_markers_sync(self) -> list[str]:
+        prefix = _GLOBAL_INITIALIZATION_PREFIX
+        suffix = "/marker.json"
+        jobs: list[str] = []
+        for obj in self._client().list_objects(
+            self._bucket, prefix=prefix, recursive=True,
+        ):
+            name = getattr(obj, "object_name", "")
+            if (
+                not isinstance(name, str)
+                or not name.startswith(prefix)
+                or not name.endswith(suffix)
+            ):
+                continue
+            job_id = name[len(prefix):-len(suffix)]
+            if job_id and "/" not in job_id and not job_id.startswith("."):
+                jobs.append(job_id)
+        return sorted(set(jobs))
+
+    async def cleanup_stale_staging(
+        self, *, active_tokens: set[tuple[str, str]],
+        protected_job_ids: set[str], stale_before_epoch: float,
+    ) -> int:
+        return await asyncio.to_thread(
+            self._cleanup_stale_staging_sync,
+            active_tokens,
+            protected_job_ids,
+            stale_before_epoch,
+        )
+
+    def _cleanup_stale_staging_sync(
+        self,
+        active_tokens: set[tuple[str, str]],
+        protected_job_ids: set[str],
+        stale_before_epoch: float,
+    ) -> int:
+        """删除已完成的陈旧暂存对象;未完成 multipart 由 bucket lifecycle 回收。"""
+        self._ensure_staging_lifecycle_sync()
+        client = self._client()
+        candidates: list[str] = []
+        errors: list[str] = []
+        for obj in client.list_objects(
+            self._bucket, prefix=_GLOBAL_STAGING_PREFIX, recursive=True,
+        ):
+            name = getattr(obj, "object_name", "")
+            match = re.fullmatch(
+                rf"{re.escape(_GLOBAL_STAGING_PREFIX)}([^/]+)/"
+                r"([A-Za-z0-9_-]{1,128})(?:\.backup)?",
+                name,
+            )
+            if match is None:
+                errors.append(f"invalid staging object:{name}")
+                continue
+            job_id, token = match.groups()
+            if job_id in protected_job_ids or (job_id, token) in active_tokens:
+                continue
+            modified = getattr(obj, "last_modified", None)
+            if not isinstance(modified, datetime):
+                errors.append(f"missing last_modified:{name}")
+                continue
+            if modified.tzinfo is None:
+                modified = modified.replace(tzinfo=timezone.utc)
+            if modified.timestamp() < stale_before_epoch:
+                candidates.append(name)
+
+        removed = 0
+        for name in candidates:
+            try:
+                client.remove_object(self._bucket, name)
+            except Exception as exc:
+                errors.append(f"remove {name}:{type(exc).__name__}:{exc}")
+            else:
+                removed += 1
+        if errors:
+            raise OSError("staging cleanup partial: " + "; ".join(errors))
+        return removed
+
+    def _ensure_staging_lifecycle_sync(self) -> None:
+        """使用 MinIO 公共 lifecycle API 回收进程崩溃留下的 multipart。"""
+        from minio.commonconfig import ENABLED, Filter
+        from minio.lifecycleconfig import (
+            AbortIncompleteMultipartUpload,
+            Expiration,
+            LifecycleConfig,
+            Rule,
+        )
+
+        client = self._client()
+        try:
+            current = client.get_bucket_lifecycle(self._bucket)
+        except Exception as exc:
+            if getattr(exc, "code", None) != "NoSuchLifecycleConfiguration":
+                raise
+            current = None
+        rules = list(getattr(current, "rules", None) or [])
+        existing = next(
+            (
+                rule for rule in rules
+                if getattr(rule, "rule_id", None) == _STAGING_LIFECYCLE_RULE_ID
+            ),
+            None,
+        )
+        if existing is not None and (
+            getattr(existing, "status", None) == ENABLED
+            and getattr(getattr(existing, "rule_filter", None), "prefix", None)
+            == _GLOBAL_STAGING_PREFIX
+            and getattr(
+                getattr(existing, "abort_incomplete_multipart_upload", None),
+                "days_after_initiation",
+                None,
+            ) == 1
+            and getattr(getattr(existing, "expiration", None), "days", None) == 1
+        ):
+            return
+        rules = [
+            rule for rule in rules
+            if getattr(rule, "rule_id", None) != _STAGING_LIFECYCLE_RULE_ID
+        ]
+        rules.append(Rule(
+            ENABLED,
+            Filter(prefix=_GLOBAL_STAGING_PREFIX),
+            rule_id=_STAGING_LIFECYCLE_RULE_ID,
+            abort_incomplete_multipart_upload=AbortIncompleteMultipartUpload(
+                days_after_initiation=1,
+            ),
+            expiration=Expiration(days=1),
+        ))
+        client.set_bucket_lifecycle(self._bucket, LifecycleConfig(rules))
 
     def _write_file_sync(self, job_id: str, rel_path: str, data: bytes) -> None:
         import io
 
         self._client().put_object(
-            self._bucket, f"{job_id}/{rel_path}", io.BytesIO(data), length=len(data),
+            self._bucket, self._object_key(job_id, rel_path),
+            io.BytesIO(data), length=len(data),
         )
 
     async def delete_file(self, job_id: str, rel_path: str) -> None:
         def _rm() -> None:
             from minio.error import S3Error
             try:
-                self._client().remove_object(self._bucket, f"{job_id}/{rel_path}")
-            except S3Error:
-                pass    # 不存在即幂等 no-op
+                self._client().remove_object(
+                    self._bucket, self._object_key(job_id, rel_path),
+                )
+            except S3Error as exc:
+                if not _is_s3_not_found(exc):
+                    raise
         await asyncio.to_thread(_rm)
 
     async def read_file(self, job_id: str, rel_path: str) -> bytes | None:
@@ -907,10 +1730,14 @@ class RemoteStorage:
 
         resp = None
         try:
-            resp = self._client().get_object(self._bucket, f"{job_id}/{rel_path}")
+            resp = self._client().get_object(
+                self._bucket, self._object_key(job_id, rel_path),
+            )
             return resp.read()
-        except S3Error:
-            return None
+        except S3Error as exc:
+            if _is_s3_not_found(exc):
+                return None
+            raise
         finally:
             if resp is not None:
                 resp.close()
@@ -921,8 +1748,10 @@ class RemoteStorage:
             from minio.error import S3Error
             try:
                 return self._client().stat_object(self._bucket, f"{job_id}/{rel_path}").size
-            except S3Error:
-                return None
+            except S3Error as exc:
+                if _is_s3_not_found(exc):
+                    return None
+                raise
         return await asyncio.to_thread(_stat)
 
     async def object_version(
@@ -934,8 +1763,10 @@ class RemoteStorage:
                 value = self._client().stat_object(
                     self._bucket, f"{job_id}/{rel_path}",
                 )
-            except S3Error:
-                return None
+            except S3Error as exc:
+                if _is_s3_not_found(exc):
+                    return None
+                raise
             size = getattr(value, "size", None)
             etag = getattr(value, "etag", None)
             version_id = getattr(value, "version_id", None)
@@ -962,8 +1793,10 @@ class RemoteStorage:
                     self._bucket, f"{job_id}/{rel_path}", offset=start, length=length,
                 )
                 return resp.read()
-            except S3Error:
-                return None
+            except S3Error as exc:
+                if _is_s3_not_found(exc):
+                    return None
+                raise
             finally:
                 if resp is not None:
                     resp.close()
@@ -978,7 +1811,7 @@ class RemoteStorage:
         out: list[str] = []
         for obj in self._client().list_objects(self._bucket, prefix=prefix, recursive=True):
             rel = obj.object_name[len(prefix):]
-            if rel and not _is_staging_file(rel):  # 跳过前缀本身/目录占位
+            if rel and not _is_internal_file(rel):  # 跳过前缀本身/目录占位
                 out.append(rel)
         return out
 
@@ -991,7 +1824,7 @@ class RemoteStorage:
         # list_objects 自带 obj.size,无需逐对象 stat_object。
         for obj in self._client().list_objects(self._bucket, prefix=prefix, recursive=True):
             rel = obj.object_name[len(prefix):]
-            if rel and not _is_staging_file(rel):
+            if rel and not _is_internal_file(rel):
                 out[rel] = obj.size or 0
         return out
 
@@ -1258,7 +2091,9 @@ class GatewayStorage:
             return
         await asyncio.to_thread(shutil.rmtree, work_dir, ignore_errors=True)
 
-    async def delete(self, job_id: str) -> None:
+    async def delete(
+        self, job_id: str, *, defer_if_busy: bool = False,
+    ) -> None:
         # worker 侧 gateway 不负责删中心产物(那是 API/中心存储的职责,删 job 在 API 端走 Local/Remote);
         # 这里仅清掉本机为该 job 留存的(复用)工作目录与快照,保证幂等。
         work_dir = self._work_root / job_id
@@ -1320,7 +2155,7 @@ class GatewayStorage:
     async def write_stream(
         self, job_id: str, rel_path: str, chunks: AsyncIterable[bytes], *,
         expected_size: int | None = None, expected_sha256: str | None = None,
-        max_bytes: int | None = None,
+        max_bytes: int | None = None, staging_token: str | None = None,
     ) -> dict:
         headers = self._auth(job_id)
         if expected_size is not None:
@@ -1337,6 +2172,18 @@ class GatewayStorage:
         data = resp.json()
         return {"size": int(data.get("size") or expected_size or 0),
                 "sha256": data.get("sha256") or expected_sha256}
+
+    async def list_initialization_markers(self) -> list[str]:
+        return []
+
+    async def cleanup_stale_staging(
+        self, *, active_tokens: set[tuple[str, str]],
+        protected_job_ids: set[str], stale_before_epoch: float,
+    ) -> int:
+        return 0
+
+    async def wait_for_finalizers(self) -> None:
+        pass
 
     async def list_files(self, job_id: str) -> list[str]:
         resp = await self._client().get(

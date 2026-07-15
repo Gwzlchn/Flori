@@ -76,9 +76,28 @@ JSON 创建不接受文件；文件上传走独立的 `POST /api/jobs/upload`（
 `multipart/form-data`：`file`（必填）+ `domain`（默认 `general`）+ `style_tags`（JSON 字符串，默认 `[]`）。
 按 `configs/sources.yaml` 的扩展名识别类型：`.pdf`→paper，
 `.mp4/.mkv/.webm/.flv/.mov`→video，`.mp3/.m4a/.wav/.aac/.flac`→audio，
-`.html/.htm/.txt/.md`→article；未知扩展名在读取文件体和创建 job 前返回 `422`。上限 2GB。
+`.html/.htm/.txt/.md`→article；未知扩展名在进入 storage writer 和创建 job 前返回 `422`。上限为
+2 GiB，按实际读取字节计算；第一个越界 chunk 立即中止并返回 `413 payload_too_large`。
 上传进入 pipeline 前会规范化为既有输入契约：视频统一为 `input/source.mp4`，文章统一为
 `input/source.html`，论文和音频保留各自受支持的标准扩展名。
+
+API 从 `UploadFile` 每次读取 1 MiB，并把 async chunks 直接交给 `StorageBackend.write_stream`；不得把
+完整文件聚合为 `bytes`。LocalStorage 写入 job 目录外的隐藏全局 staging，文件 `fsync` 后以
+`os.replace` 发布并同步父目录；RemoteStorage 以未知长度 MinIO multipart 写隐藏 staging object，
+再用服务端 copy 原子发布。Python 内存上界只与 chunk 和有界桥接队列有关，不随文件总大小增长。
+
+初始化期间使用全局 marker 绑定 `job_id/source_rel/staging_token/owner/timestamps/defer_submit/event_published`。
+顺序固定为 source 原子发布 → `job.json` → DB/collection → lifecycle event；任一步失败都会补偿尚未
+完成的 storage/DB/Redis 副作用，客户端断线或协程取消不得留下可调度半成品。覆盖已有 MinIO final 时
+先做隐藏 backup；publish、staging/backup cleanup 和 rollback 的同步 I/O 都登记为 job-scoped task，
+delete barrier 与 API shutdown drain 必须等待。取消发生在提交点前时恢复旧 final 或删除新 final；
+staging 已成功删除后即视为提交完成，不把成功误报为取消。
+
+API 启动后立即、此后每小时运行初始化恢复：24 小时内有 heartbeat 的 marker 视为 active；过期且无
+DB job 的初始化前缀整体删除，有 DB job 但未发布事件的补发后清 marker。损坏、未知 schema 或时间异常的
+marker fail-closed 并保留现场，不能猜测删除。Local/MinIO 都按同一 marker/staging 语义恢复；MinIO 另安装
+只针对全局 staging 前缀的 lifecycle，1 天后清 staging object 并 abort 未完成 multipart。持久删除错误写
+结构化日志，并由后续 recovery/lifecycle 继续收敛。
 
 ```bash
 curl -X POST http://localhost:8000/api/jobs/upload \

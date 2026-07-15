@@ -5,6 +5,7 @@ import socket
 import threading
 import time
 import tracemalloc
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -12,6 +13,7 @@ import pytest
 from shared.errors import WorkerAuthRejected
 from shared.runner_ops import TaskLease, bind_task_lease, clear_task_lease
 from shared.storage import (
+    ArtifactTooLarge,
     GatewayStorage,
     LocalStorage,
     RemoteStorage,
@@ -386,7 +388,7 @@ class TestLocalStorage:
             await storage.write_stream("j1", "a.bin", broken())
         assert await storage.read_file("j1", "a.bin") == b"old"
         assert await storage.list_files("j1") == ["a.bin"]
-        assert not list((tmp_path / "j1" / ".flori-upload").glob("*"))
+        assert not (tmp_path / ".flori-staging").exists()
 
     @pytest.mark.asyncio
     async def test_stream_size_and_checksum_mismatch_are_atomic(self, storage):
@@ -404,6 +406,70 @@ class TestLocalStorage:
             )
         assert await storage.read_file("j1", "a.bin") == b"old"
 
+    @pytest.mark.asyncio
+    async def test_stream_limit_plus_one_is_atomic_and_cleans_staging(
+        self, storage, tmp_path,
+    ):
+        await storage.write_file("j1", "a.bin", b"old")
+
+        async def source():
+            yield b"1234"
+            yield b"567"
+
+        with pytest.raises(ArtifactTooLarge, match="6 bytes"):
+            await storage.write_stream("j1", "a.bin", source(), max_bytes=6)
+        assert await storage.read_file("j1", "a.bin") == b"old"
+        assert not (tmp_path / ".flori-staging").exists()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid", ["text", bytearray(b"x"), memoryview(b"x")])
+    async def test_stream_rejects_non_bytes_without_publishing(
+        self, storage, tmp_path, invalid,
+    ):
+        await storage.write_file("j1", "a.bin", b"old")
+
+        async def source():
+            yield invalid
+
+        with pytest.raises(TypeError, match="non-bytes"):
+            await storage.write_stream("j1", "a.bin", source())
+        assert await storage.read_file("j1", "a.bin") == b"old"
+        assert not (tmp_path / ".flori-staging").exists()
+
+    @pytest.mark.asyncio
+    async def test_delete_propagates_local_io_failure(
+        self, storage, tmp_path, monkeypatch,
+    ):
+        from shared import storage as storage_module
+
+        await storage.write_file("j1", "source.bin", b"source")
+        real_rmtree = storage_module.shutil.rmtree
+
+        def deny_job(path, *args, **kwargs):
+            if path == tmp_path / "j1":
+                raise PermissionError("delete denied")
+            return real_rmtree(path, *args, **kwargs)
+
+        monkeypatch.setattr(storage_module.shutil, "rmtree", deny_job)
+        with pytest.raises(PermissionError, match="delete denied"):
+            await storage.delete("j1")
+        assert (tmp_path / "j1/source.bin").read_bytes() == b"source"
+
+    @pytest.mark.asyncio
+    async def test_initialization_marker_is_not_worker_artifact(
+        self, storage, tmp_path,
+    ):
+        await storage.write_file("j1", "job.json", b"{}")
+        await storage.write_file("j1", ".flori-initializing.json", b"marker")
+
+        assert await storage.list_initialization_markers() == ["j1"]
+        assert await storage.list_files("j1") == ["job.json"]
+        assert await storage.list_file_sizes("j1") == {"job.json": 2}
+        work_dir = await storage.pull("j1", "01_download")
+        assert not (work_dir / ".flori-initializing.json").exists()
+        assert (
+            tmp_path / ".flori-initializing/j1/marker.json"
+        ).read_bytes() == b"marker"
 
     @pytest.mark.asyncio
     async def test_pull_missing_dir(self, storage, tmp_path):
@@ -544,13 +610,15 @@ class TestRemoteListFiles:
         rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
         objs = [MagicMock(object_name="j1/job.json"), MagicMock(object_name="j1/out/n.md")]
         client = MagicMock()
-        client.list_objects.return_value = objs
+        client.list_objects.side_effect = [objs, [], []]
         client.remove_objects.return_value = []  # 无删除错误
         rs._client = lambda: client
 
         await rs.delete("j1")
 
-        client.list_objects.assert_called_once_with("b", prefix="j1/", recursive=True)
+        assert [call.kwargs["prefix"] for call in client.list_objects.call_args_list] == [
+            "j1/", ".flori-staging/j1/", ".flori-initializing/j1/",
+        ]
         bucket, deletes = client.remove_objects.call_args.args
         assert bucket == "b"
         assert len(list(deletes)) == 2  # 每个对象键一个 DeleteObject
@@ -563,6 +631,72 @@ class TestRemoteListFiles:
         rs._client = lambda: client
         await rs.delete("none")  # 幂等:无对象不调 remove_objects
         client.remove_objects.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_delete_request_keeps_strict_delete_task(self, tmp_path):
+        import asyncio
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        release_delete = threading.Event()
+        delete_scan_started = threading.Event()
+        request_registered = asyncio.Event()
+
+        def list_objects(*_args, **_kwargs):
+            delete_scan_started.set()
+            release_delete.wait(2)
+            return []
+
+        client.list_objects.side_effect = list_objects
+        rs._client = lambda: client
+        original_start = rs._maybe_start_delete
+
+        def cancel_after_start(job_id):
+            task = original_start(job_id)
+            request_registered.set()
+            asyncio.current_task().cancel()
+            return task
+
+        rs._maybe_start_delete = cancel_after_start
+        delete_request = asyncio.create_task(rs.delete("j1"))
+        await asyncio.wait_for(request_registered.wait(), timeout=1)
+        done, _ = await asyncio.wait({delete_request}, timeout=0.2)
+        assert delete_request in done
+        with pytest.raises(asyncio.CancelledError):
+            await delete_request
+        assert "j1" in rs._delete_requested
+        assert "j1" in rs._delete_tasks
+
+        release_delete.set()
+        await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
+
+        assert await asyncio.to_thread(delete_scan_started.wait, 1)
+        assert len(client.list_objects.call_args_list) == 3
+        assert "j1" not in rs._delete_requested
+        assert "j1" not in rs._delete_tasks
+        assert "j1" not in rs._job_locks
+
+    @pytest.mark.asyncio
+    async def test_delete_partial_error_is_consumed_and_raised(self, tmp_path):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        client.list_objects.side_effect = [
+            [MagicMock(object_name="j1/job.json")],
+            [],
+            [],
+        ]
+        consumed = []
+
+        def errors():
+            consumed.append(True)
+            yield MagicMock(code="AccessDenied", object_name="j1/job.json")
+
+        client.remove_objects.return_value = errors()
+        rs._client = lambda: client
+
+        with pytest.raises(OSError, match="AccessDenied"):
+            await rs.delete("j1")
+        assert consumed == [True]
 
 
 class TestRemoteStreaming:
@@ -593,6 +727,12 @@ class TestRemoteStreaming:
 
         rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
         client = MagicMock()
+        uploaded = []
+
+        def consume_stream(_bucket, _key, data, **_kwargs):
+            uploaded.append(b"".join(iter(lambda: data.read(3), b"")))
+
+        client.put_object.side_effect = consume_stream
         rs._client = lambda: client
 
         async def source():
@@ -604,13 +744,179 @@ class TestRemoteStreaming:
             expected_size=6, expected_sha256=hashlib.sha256(b"abcdef").hexdigest(),
         )
         assert result == {"size": 6, "sha256": hashlib.sha256(b"abcdef").hexdigest()}
-        staging_key = client.fput_object.call_args.args[1]
-        assert staging_key.startswith("j1/.flori-upload/")
+        staging_key = client.put_object.call_args.args[1]
+        assert staging_key.startswith(".flori-staging/j1/")
+        assert uploaded == [b"abcdef"]
+        assert client.put_object.call_args.kwargs["length"] == -1
+        assert client.put_object.call_args.kwargs["part_size"] == 5 * 1024 * 1024
         copy_source = client.copy_object.call_args.args[2]
         assert client.copy_object.call_args.args[:2] == ("b", "j1/out/a.bin")
         assert copy_source.object_name == staging_key
         client.remove_object.assert_called_once_with("b", staging_key)
-        assert not list((tmp_path / ".flori-upload").glob("*"))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "code"),
+        [(403, "AccessDenied"), (500, "InternalError")],
+    )
+    async def test_final_stat_failure_never_starts_publish(
+        self, tmp_path, status, code,
+    ):
+        from minio.error import S3Error
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+
+        def consume_stream(_bucket, _key, data, **_kwargs):
+            while data.read(3):
+                pass
+
+        client.put_object.side_effect = consume_stream
+        client.stat_object.side_effect = S3Error(
+            MagicMock(status=status), code, "stat failed", "resource", "req", "host",
+        )
+        rs._client = lambda: client
+
+        async def source():
+            yield b"new"
+
+        with pytest.raises(S3Error) as raised:
+            await rs.write_stream("j1", "out/a.bin", source())
+        assert raised.value.code == code
+        client.copy_object.assert_not_called()
+        staging_key = client.put_object.call_args.args[1]
+        client.remove_object.assert_called_once_with("b", staging_key)
+
+    @pytest.mark.asyncio
+    async def test_remote_marker_uses_global_enumerable_prefix(self, tmp_path):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        client.list_objects.return_value = [
+            MagicMock(object_name=".flori-initializing/j1/marker.json"),
+            MagicMock(object_name=".flori-initializing/j2/not-marker.json"),
+        ]
+        rs._client = lambda: client
+
+        await rs.write_file("j1", ".flori-initializing.json", b"marker")
+        jobs = await rs.list_initialization_markers()
+
+        assert client.put_object.call_args.args[:2] == (
+            "b", ".flori-initializing/j1/marker.json",
+        )
+        assert jobs == ["j1"]
+        client.list_objects.assert_called_once_with(
+            "b", prefix=".flori-initializing/", recursive=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_remote_marker_permission_errors_fail_closed(self, tmp_path):
+        from minio.error import S3Error
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        denied = S3Error(
+            MagicMock(status=403), "AccessDenied", "denied",
+            "resource", "req", "host",
+        )
+        client.get_object.side_effect = denied
+        client.remove_object.side_effect = denied
+        rs._client = lambda: client
+
+        with pytest.raises(S3Error, match="AccessDenied"):
+            await rs.read_file("j1", ".flori-initializing.json")
+        with pytest.raises(S3Error, match="AccessDenied"):
+            await rs.delete_file("j1", ".flori-initializing.json")
+
+    @pytest.mark.asyncio
+    async def test_staging_lifecycle_merges_existing_rules_and_filters_objects(
+        self, tmp_path,
+    ):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        existing = MagicMock(rule_id="keep-existing")
+        client.get_bucket_lifecycle.return_value = MagicMock(rules=[existing])
+        old = datetime.now(timezone.utc) - timedelta(days=2)
+        fresh = datetime.now(timezone.utc)
+        client.list_objects.return_value = [
+            MagicMock(object_name=".flori-staging/stale/token-a", last_modified=old),
+            MagicMock(object_name=".flori-staging/active/token-b", last_modified=old),
+            MagicMock(object_name=".flori-staging/protected/token-c", last_modified=old),
+            MagicMock(object_name=".flori-staging/fresh/token-d", last_modified=fresh),
+        ]
+        rs._client = lambda: client
+
+        removed = await rs.cleanup_stale_staging(
+            active_tokens={("active", "token-b")},
+            protected_job_ids={"protected"},
+            stale_before_epoch=(fresh - timedelta(hours=1)).timestamp(),
+        )
+
+        assert removed == 1
+        config = client.set_bucket_lifecycle.call_args.args[1]
+        assert config.rules[0] is existing
+        assert [rule.rule_id for rule in config.rules] == [
+            "keep-existing", "flori-staging-recovery",
+        ]
+        client.remove_object.assert_called_once_with(
+            "b", ".flori-staging/stale/token-a",
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_lifecycle_configuration_installs_rule(self, tmp_path):
+        from minio.error import S3Error
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        client.get_bucket_lifecycle.side_effect = S3Error(
+            MagicMock(status=404), "NoSuchLifecycleConfiguration", "missing",
+            "resource", "req", "host",
+        )
+        client.list_objects.return_value = []
+        rs._client = lambda: client
+
+        assert await rs.cleanup_stale_staging(
+            active_tokens=set(), protected_job_ids=set(), stale_before_epoch=0,
+        ) == 0
+        config = client.set_bucket_lifecycle.call_args.args[1]
+        assert [rule.rule_id for rule in config.rules] == [
+            "flori-staging-recovery",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_invalid_named_lifecycle_rule_is_replaced(self, tmp_path):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        invalid = MagicMock(
+            rule_id="flori-staging-recovery",
+            status="Disabled",
+        )
+        client.get_bucket_lifecycle.return_value = MagicMock(rules=[invalid])
+        client.list_objects.return_value = []
+        rs._client = lambda: client
+
+        await rs.cleanup_stale_staging(
+            active_tokens=set(), protected_job_ids=set(), stale_before_epoch=0,
+        )
+
+        config = client.set_bucket_lifecycle.call_args.args[1]
+        assert len(config.rules) == 1
+        assert config.rules[0] is not invalid
+        assert config.rules[0].rule_id == "flori-staging-recovery"
+        assert config.rules[0].status == "Enabled"
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_set_failure_aborts_cleanup(self, tmp_path):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        client.get_bucket_lifecycle.return_value = None
+        client.set_bucket_lifecycle.side_effect = PermissionError("lifecycle denied")
+        rs._client = lambda: client
+
+        with pytest.raises(PermissionError, match="lifecycle denied"):
+            await rs.cleanup_stale_staging(
+                active_tokens=set(), protected_job_ids=set(), stale_before_epoch=0,
+            )
+        client.list_objects.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_open_stream_reads_chunks_and_closes_response(self, tmp_path):
@@ -631,7 +937,18 @@ class TestRemoteStreaming:
     async def test_publish_failure_removes_staging_object(self, tmp_path):
         rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
         client = MagicMock()
-        client.copy_object.side_effect = RuntimeError("copy failed")
+        final = {"value": b"old"}
+
+        def fail_copy(*_args, **_kwargs):
+            raise RuntimeError("copy failed")
+
+        client.copy_object.side_effect = fail_copy
+
+        def consume_stream(_bucket, _key, data, **_kwargs):
+            while data.read(3):
+                pass
+
+        client.put_object.side_effect = consume_stream
         rs._client = lambda: client
 
         async def source():
@@ -639,15 +956,15 @@ class TestRemoteStreaming:
 
         with pytest.raises(RuntimeError, match="copy failed"):
             await rs.write_stream("j1", "out/a.bin", source())
-        staging_key = client.fput_object.call_args.args[1]
+        staging_key = client.put_object.call_args.args[1]
         client.remove_object.assert_called_once_with("b", staging_key)
-        assert not list((tmp_path / ".flori-upload").glob("*"))
+        assert final["value"] == b"old"
 
     @pytest.mark.asyncio
     async def test_upload_failure_still_attempts_staging_cleanup(self, tmp_path):
         rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
         client = MagicMock()
-        client.fput_object.side_effect = ConnectionError("upload interrupted")
+        client.put_object.side_effect = ConnectionError("upload interrupted")
         rs._client = lambda: client
 
         async def source():
@@ -655,9 +972,1212 @@ class TestRemoteStreaming:
 
         with pytest.raises(ConnectionError, match="upload interrupted"):
             await rs.write_stream("j1", "out/a.bin", source())
-        staging_key = client.fput_object.call_args.args[1]
+        staging_key = client.put_object.call_args.args[1]
         client.remove_object.assert_called_once_with("b", staging_key)
-        assert not list((tmp_path / ".flori-upload").glob("*"))
+
+    @pytest.mark.asyncio
+    async def test_stream_limit_aborts_multipart_and_never_publishes(self, tmp_path):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+
+        def consume_stream(_bucket, _key, data, **_kwargs):
+            while data.read(3):
+                pass
+
+        client.put_object.side_effect = consume_stream
+        rs._client = lambda: client
+
+        async def source():
+            yield b"1234"
+            yield b"567"
+
+        with pytest.raises(ArtifactTooLarge, match="6 bytes"):
+            await rs.write_stream("j1", "out/a.bin", source(), max_bytes=6)
+        client.copy_object.assert_not_called()
+        staging_key = client.put_object.call_args.args[1]
+        client.remove_object.assert_called_once_with("b", staging_key)
+
+    @pytest.mark.asyncio
+    async def test_source_disconnect_aborts_multipart_and_cleans_staging(self, tmp_path):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+
+        def consume_stream(_bucket, _key, data, **_kwargs):
+            while data.read(3):
+                pass
+
+        client.put_object.side_effect = consume_stream
+        rs._client = lambda: client
+
+        async def source():
+            yield b"partial"
+            raise ConnectionError("client disconnected")
+
+        with pytest.raises(ConnectionError, match="client disconnected"):
+            await rs.write_stream("j1", "out/a.bin", source())
+        client.copy_object.assert_not_called()
+        staging_key = client.put_object.call_args.args[1]
+        client.remove_object.assert_called_once_with("b", staging_key)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "invalid", ["", "not-bytes", bytearray(b"x"), memoryview(b"x")],
+    )
+    async def test_non_bytes_source_aborts_without_publishing(
+        self, tmp_path, invalid,
+    ):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+
+        def consume_stream(_bucket, _key, data, **_kwargs):
+            while data.read(3):
+                pass
+
+        client.put_object.side_effect = consume_stream
+        rs._client = lambda: client
+
+        async def source():
+            yield invalid
+
+        with pytest.raises(TypeError, match="non-bytes"):
+            await rs.write_stream("j1", "out/a.bin", source())
+        client.copy_object.assert_not_called()
+        staging_key = client.put_object.call_args.args[1]
+        client.remove_object.assert_called_once_with("b", staging_key)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("kwargs", "error"),
+        [
+            ({"expected_size": 4}, "size mismatch"),
+            ({"expected_sha256": "0" * 64}, "checksum mismatch"),
+        ],
+    )
+    async def test_validation_failure_does_not_replace_existing_final(
+        self, tmp_path, kwargs, error,
+    ):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        final = {"value": b"old"}
+
+        def consume_stream(_bucket, _key, data, **_kwargs):
+            while data.read(3):
+                pass
+
+        def replace_final(*_args, **_kwargs):
+            final["value"] = b"new"
+
+        client.put_object.side_effect = consume_stream
+        client.copy_object.side_effect = replace_final
+        rs._client = lambda: client
+
+        async def source():
+            yield b"new"
+
+        with pytest.raises(ValueError, match=error):
+            await rs.write_stream("j1", "out/a.bin", source(), **kwargs)
+        client.copy_object.assert_not_called()
+        assert final["value"] == b"old"
+        staging_key = client.put_object.call_args.args[1]
+        client.remove_object.assert_called_once_with("b", staging_key)
+
+    @pytest.mark.asyncio
+    async def test_cancellation_aborts_reader_without_deadlock(self, tmp_path):
+        import asyncio
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        reader_started = threading.Event()
+        hold_source = asyncio.Event()
+
+        def consume_stream(_bucket, _key, data, **_kwargs):
+            reader_started.set()
+            while data.read(3):
+                pass
+
+        client.put_object.side_effect = consume_stream
+        rs._client = lambda: client
+
+        async def source():
+            yield b"partial"
+            await hold_source.wait()
+
+        task = asyncio.create_task(rs.write_stream("j1", "out/a.bin", source()))
+        assert await asyncio.to_thread(reader_started.wait, 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+        await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
+        client.copy_object.assert_not_called()
+        staging_key = client.put_object.call_args.args[1]
+        client.remove_object.assert_called_once_with("b", staging_key)
+
+    @pytest.mark.asyncio
+    async def test_cancellation_returns_before_blocked_minio_and_finalizes_later(
+        self, tmp_path,
+    ):
+        import asyncio
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        reader_started = threading.Event()
+        release_minio = threading.Event()
+        hold_source = asyncio.Event()
+
+        def blocked_upload(_bucket, _key, data, **_kwargs):
+            reader_started.set()
+            try:
+                while data.read(3):
+                    pass
+            except OSError:
+                release_minio.wait(2)
+                raise
+
+        client.put_object.side_effect = blocked_upload
+        rs._client = lambda: client
+
+        async def source():
+            yield b"partial"
+            await hold_source.wait()
+
+        task = asyncio.create_task(rs.write_stream("j1", "out/a.bin", source()))
+        assert await asyncio.to_thread(reader_started.wait, 1)
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=0.2)
+        try:
+            assert task in done
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release_minio.set()
+        await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
+        client.copy_object.assert_not_called()
+        staging_key = client.put_object.call_args.args[1]
+        client.remove_object.assert_called_once_with("b", staging_key)
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_publish_removes_new_final(self, tmp_path):
+        import asyncio
+        from minio.error import S3Error
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        publish_started = threading.Event()
+        release_publish = threading.Event()
+
+        def consume_stream(_bucket, _key, data, **_kwargs):
+            while data.read(3):
+                pass
+
+        def block_publish(*_args, **_kwargs):
+            publish_started.set()
+            release_publish.wait(2)
+
+        client.put_object.side_effect = consume_stream
+        client.stat_object.side_effect = S3Error(
+            MagicMock(status=404), "NoSuchKey", "missing",
+            "resource", "req", "host",
+        )
+        client.copy_object.side_effect = block_publish
+        rs._client = lambda: client
+
+        async def source():
+            yield b"new"
+
+        task = asyncio.create_task(rs.write_stream("j1", "out/a.bin", source()))
+        assert await asyncio.to_thread(publish_started.wait, 1)
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=0.2)
+        assert task in done
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release_publish.set()
+        await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
+        client.remove_object.assert_any_call("b", "j1/out/a.bin")
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_overwrite_restores_previous_final(self, tmp_path):
+        import asyncio
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        publish_started = threading.Event()
+        release_publish = threading.Event()
+        copy_targets: list[str] = []
+
+        def consume_stream(_bucket, _key, data, **_kwargs):
+            while data.read(3):
+                pass
+
+        def copy(_bucket, target, _source):
+            copy_targets.append(target)
+            if target == "j1/out/a.bin" and len(copy_targets) == 2:
+                publish_started.set()
+                release_publish.wait(2)
+
+        client.put_object.side_effect = consume_stream
+        client.stat_object.return_value = MagicMock(size=3)
+        client.copy_object.side_effect = copy
+        rs._client = lambda: client
+
+        async def source():
+            yield b"new"
+
+        task = asyncio.create_task(rs.write_stream("j1", "out/a.bin", source()))
+        assert await asyncio.to_thread(publish_started.wait, 1)
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=0.2)
+        assert task in done
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release_publish.set()
+        await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
+
+        assert copy_targets[0].endswith(".backup")
+        assert copy_targets[1:] == ["j1/out/a.bin", "j1/out/a.bin"]
+
+    @pytest.mark.asyncio
+    async def test_cancel_in_post_publish_barrier_removes_new_final(self, tmp_path):
+        import asyncio
+        from minio.error import S3Error
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        objects: dict[str, bytes] = {}
+        post_publish = asyncio.Event()
+        ensure_calls = 0
+
+        def consume_stream(_bucket, key, data, **_kwargs):
+            objects[key] = b"".join(iter(lambda: data.read(3), b""))
+
+        def stat_object(_bucket, key):
+            if key not in objects:
+                raise S3Error(
+                    MagicMock(status=404), "NoSuchKey", "missing",
+                    "resource", "req", "host",
+                )
+            return MagicMock(size=len(objects[key]))
+
+        def copy_object(_bucket, target, _source):
+            staging_key = client.put_object.call_args.args[1]
+            objects[target] = objects[staging_key]
+
+        def remove_object(_bucket, key):
+            objects.pop(key, None)
+
+        client.put_object.side_effect = consume_stream
+        client.stat_object.side_effect = stat_object
+        client.copy_object.side_effect = copy_object
+        client.remove_object.side_effect = remove_object
+        rs._client = lambda: client
+        original_ensure = rs._ensure_publish_allowed
+
+        async def hold_post_publish(job_id):
+            nonlocal ensure_calls
+            ensure_calls += 1
+            if ensure_calls == 3:
+                post_publish.set()
+                await asyncio.Event().wait()
+            await original_ensure(job_id)
+
+        rs._ensure_publish_allowed = hold_post_publish
+
+        async def source():
+            yield b"new"
+
+        writer = asyncio.create_task(rs.write_stream("j1", "out/a.bin", source()))
+        await asyncio.wait_for(post_publish.wait(), timeout=1)
+        assert objects["j1/out/a.bin"] == b"new"
+        writer.cancel()
+        done, _ = await asyncio.wait({writer}, timeout=0.2)
+        assert writer in done
+        with pytest.raises(asyncio.CancelledError):
+            await writer
+        await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
+
+        assert "j1/out/a.bin" not in objects
+        assert not any(key.startswith(".flori-staging/j1/") for key in objects)
+        assert not rs._finalizer_tasks
+
+    @pytest.mark.asyncio
+    async def test_cancel_in_post_publish_barrier_restores_existing_final(
+        self, tmp_path,
+    ):
+        import asyncio
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        objects = {"j1/out/a.bin": b"old"}
+        post_publish = asyncio.Event()
+        ensure_calls = 0
+        final_copies = 0
+
+        def consume_stream(_bucket, key, data, **_kwargs):
+            objects[key] = b"".join(iter(lambda: data.read(3), b""))
+
+        def copy_object(_bucket, target, _source):
+            nonlocal final_copies
+            if target.endswith(".backup"):
+                objects[target] = objects["j1/out/a.bin"]
+            elif target == "j1/out/a.bin":
+                final_copies += 1
+                if final_copies == 1:
+                    staging_key = client.put_object.call_args.args[1]
+                    objects[target] = objects[staging_key]
+                else:
+                    backup_key = next(
+                        key for key in objects if key.endswith(".backup")
+                    )
+                    objects[target] = objects[backup_key]
+
+        def remove_object(_bucket, key):
+            objects.pop(key, None)
+
+        client.put_object.side_effect = consume_stream
+        client.stat_object.side_effect = lambda _bucket, key: MagicMock(
+            size=len(objects[key]),
+        )
+        client.copy_object.side_effect = copy_object
+        client.remove_object.side_effect = remove_object
+        rs._client = lambda: client
+        original_ensure = rs._ensure_publish_allowed
+
+        async def hold_post_publish(job_id):
+            nonlocal ensure_calls
+            ensure_calls += 1
+            if ensure_calls == 4:
+                post_publish.set()
+                await asyncio.Event().wait()
+            await original_ensure(job_id)
+
+        rs._ensure_publish_allowed = hold_post_publish
+
+        async def source():
+            yield b"new"
+
+        writer = asyncio.create_task(rs.write_stream("j1", "out/a.bin", source()))
+        await asyncio.wait_for(post_publish.wait(), timeout=1)
+        assert objects["j1/out/a.bin"] == b"new"
+        writer.cancel()
+        done, _ = await asyncio.wait({writer}, timeout=0.2)
+        assert writer in done
+        with pytest.raises(asyncio.CancelledError):
+            await writer
+        await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
+
+        assert objects == {"j1/out/a.bin": b"old"}
+        assert final_copies == 2
+        assert not rs._finalizer_tasks
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("has_existing_final", [False, True])
+    async def test_cancel_in_success_cleanup_rolls_back_and_job_is_reusable(
+        self, tmp_path, has_existing_final,
+    ):
+        import asyncio
+        from minio.error import S3Error
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        objects = {"j1/out/a.bin": b"old"} if has_existing_final else {}
+        cleanup_started = threading.Event()
+        release_cleanup = threading.Event()
+        staging_calls = 0
+        backup_calls = 0
+
+        def consume_stream(_bucket, key, data, **_kwargs):
+            objects[key] = b"".join(iter(lambda: data.read(3), b""))
+
+        def stat_object(_bucket, key):
+            if key not in objects:
+                raise S3Error(
+                    MagicMock(status=404), "NoSuchKey", "missing",
+                    "resource", "req", "host",
+                )
+            return MagicMock(size=len(objects[key]))
+
+        def copy_object(_bucket, target, source):
+            objects[target] = objects[source.object_name]
+
+        def remove_object(_bucket, key):
+            nonlocal backup_calls, staging_calls
+            if key.endswith(".backup"):
+                backup_calls += 1
+            elif key.startswith(".flori-staging/"):
+                staging_calls += 1
+                cleanup_started.set()
+                release_cleanup.wait(2)
+            objects.pop(key, None)
+
+        client.put_object.side_effect = consume_stream
+        client.stat_object.side_effect = stat_object
+        client.copy_object.side_effect = copy_object
+        client.remove_object.side_effect = remove_object
+        rs._client = lambda: client
+
+        async def source(body):
+            yield body
+
+        writer = asyncio.create_task(rs.write_stream(
+            "j1", "out/a.bin", source(b"new"),
+        ))
+        assert await asyncio.to_thread(cleanup_started.wait, 1)
+        writer.cancel()
+        done, _ = await asyncio.wait({writer}, timeout=0.2)
+        assert writer in done
+        with pytest.raises(asyncio.CancelledError):
+            await writer
+
+        drain = asyncio.create_task(rs.wait_for_finalizers())
+        await asyncio.sleep(0)
+        assert not drain.done()
+        assert staging_calls == 1
+        release_cleanup.set()
+        await asyncio.wait_for(drain, timeout=1)
+
+        expected = {"j1/out/a.bin": b"old"} if has_existing_final else {}
+        assert objects == expected
+        assert "j1" not in rs._active_writers
+        assert "j1" not in rs._job_locks
+        assert not rs._finalizer_tasks
+        assert staging_calls == 1
+        assert backup_calls == (1 if has_existing_final else 0)
+
+        result = await rs.write_stream("j1", "out/a.bin", source(b"reused"))
+        assert result["size"] == 6
+        await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
+        assert objects == {"j1/out/a.bin": b"reused"}
+        assert "j1" not in rs._job_locks
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("has_existing_final", [False, True])
+    async def test_cleanup_commit_wins_when_cancel_callback_runs_before_wakeup(
+        self, tmp_path, has_existing_final,
+    ):
+        import asyncio
+        from minio.error import S3Error
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        objects = {"j1/out/a.bin": b"old"} if has_existing_final else {}
+
+        def consume_stream(_bucket, key, data, **_kwargs):
+            objects[key] = b"".join(iter(lambda: data.read(3), b""))
+
+        def stat_object(_bucket, key):
+            if key not in objects:
+                raise S3Error(
+                    MagicMock(status=404), "NoSuchKey", "missing",
+                    "resource", "req", "host",
+                )
+            return MagicMock(size=len(objects[key]))
+
+        def copy_object(_bucket, target, source):
+            objects[target] = objects[source.object_name]
+
+        def remove_object(_bucket, key):
+            objects.pop(key, None)
+
+        client.put_object.side_effect = consume_stream
+        client.stat_object.side_effect = stat_object
+        client.copy_object.side_effect = copy_object
+        client.remove_object.side_effect = remove_object
+        rs._client = lambda: client
+        original_cleanup = rs._remove_staging_keys
+        cancel_scheduled = False
+        writer = None
+
+        async def cleanup_then_cancel_writer(*keys):
+            nonlocal cancel_scheduled
+            result = await original_cleanup(*keys)
+            if not cancel_scheduled and not keys[0].endswith(".backup"):
+                cancel_scheduled = True
+                asyncio.get_running_loop().call_soon(writer.cancel)
+            return result
+
+        rs._remove_staging_keys = cleanup_then_cancel_writer
+
+        async def source():
+            yield b"new"
+
+        writer = asyncio.create_task(rs.write_stream("j1", "out/a.bin", source()))
+        result = await writer
+        await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
+
+        assert cancel_scheduled
+        assert result["size"] == 3
+        assert objects == {"j1/out/a.bin": b"new"}
+        assert "j1" not in rs._job_locks
+
+    @pytest.mark.asyncio
+    async def test_success_cleanup_failure_is_not_a_commit_point(self, tmp_path):
+        import asyncio
+        from minio.error import S3Error
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        objects: dict[str, bytes] = {}
+        staging_calls = 0
+
+        def consume_stream(_bucket, key, data, **_kwargs):
+            objects[key] = b"".join(iter(lambda: data.read(3), b""))
+
+        def stat_object(_bucket, key):
+            if key not in objects:
+                raise S3Error(
+                    MagicMock(status=404), "NoSuchKey", "missing",
+                    "resource", "req", "host",
+                )
+            return MagicMock(size=len(objects[key]))
+
+        def copy_object(_bucket, target, source):
+            objects[target] = objects[source.object_name]
+
+        def remove_object(_bucket, key):
+            nonlocal staging_calls
+            if key.startswith(".flori-staging/") and not key.endswith(".backup"):
+                staging_calls += 1
+                if staging_calls == 1:
+                    raise RuntimeError("cleanup denied")
+            objects.pop(key, None)
+
+        client.put_object.side_effect = consume_stream
+        client.stat_object.side_effect = stat_object
+        client.copy_object.side_effect = copy_object
+        client.remove_object.side_effect = remove_object
+        rs._client = lambda: client
+
+        async def source():
+            yield b"new"
+
+        with pytest.raises(OSError, match="staging cleanup failed"):
+            await rs.write_stream("j1", "out/a.bin", source())
+        await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
+
+        assert objects == {}
+        assert staging_calls == 2
+        assert "j1" not in rs._job_locks
+        assert not rs._finalizer_tasks
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_failed_publish_backup_cleanup_is_drained(
+        self, tmp_path,
+    ):
+        import asyncio
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        objects = {"j1/out/a.bin": b"old"}
+        backup_cleanup_started = threading.Event()
+        release_backup_cleanup = threading.Event()
+
+        def consume_stream(_bucket, key, data, **_kwargs):
+            objects[key] = b"".join(iter(lambda: data.read(3), b""))
+
+        def copy_object(_bucket, target, source):
+            if target == "j1/out/a.bin":
+                raise RuntimeError("publish failed")
+            objects[target] = objects[source.object_name]
+
+        def remove_object(_bucket, key):
+            if key.endswith(".backup"):
+                backup_cleanup_started.set()
+                release_backup_cleanup.wait(2)
+            objects.pop(key, None)
+
+        client.put_object.side_effect = consume_stream
+        client.stat_object.return_value = MagicMock(size=3)
+        client.copy_object.side_effect = copy_object
+        client.remove_object.side_effect = remove_object
+        rs._client = lambda: client
+
+        async def source():
+            yield b"new"
+
+        writer = asyncio.create_task(rs.write_stream("j1", "out/a.bin", source()))
+        assert await asyncio.to_thread(backup_cleanup_started.wait, 1)
+        writer.cancel()
+        done, _ = await asyncio.wait({writer}, timeout=0.2)
+        assert writer in done
+        with pytest.raises(asyncio.CancelledError):
+            await writer
+        drain = asyncio.create_task(rs.wait_for_finalizers())
+        await asyncio.sleep(0)
+        assert not drain.done()
+        release_backup_cleanup.set()
+        await asyncio.wait_for(drain, timeout=1)
+
+        assert objects == {"j1/out/a.bin": b"old"}
+        assert "j1" not in rs._job_locks
+        assert not rs._finalizer_tasks
+
+    @pytest.mark.asyncio
+    async def test_failed_backup_cleanup_does_not_replace_publish_error(self, tmp_path):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        objects = {"j1/out/a.bin": b"old"}
+
+        def consume_stream(_bucket, key, data, **_kwargs):
+            objects[key] = b"".join(iter(lambda: data.read(3), b""))
+
+        def copy_object(_bucket, target, source):
+            if target == "j1/out/a.bin":
+                raise RuntimeError("publish failed")
+            objects[target] = objects[source.object_name]
+
+        def remove_object(_bucket, key):
+            if key.endswith(".backup"):
+                raise OSError("backup cleanup denied")
+            objects.pop(key, None)
+
+        client.put_object.side_effect = consume_stream
+        client.stat_object.return_value = MagicMock(size=3)
+        client.copy_object.side_effect = copy_object
+        client.remove_object.side_effect = remove_object
+        rs._client = lambda: client
+
+        async def source():
+            yield b"new"
+
+        with pytest.raises(RuntimeError, match="publish failed"):
+            await rs.write_stream("j1", "out/a.bin", source())
+
+        assert objects["j1/out/a.bin"] == b"old"
+        assert not any(
+            key.startswith(".flori-staging/") and not key.endswith(".backup")
+            for key in objects
+        )
+
+    @pytest.mark.asyncio
+    async def test_delete_wins_when_cancelled_during_success_cleanup(self, tmp_path):
+        import asyncio
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        objects = {"j1/out/a.bin": b"old"}
+        cleanup_entered = threading.Event()
+        release_cleanup = threading.Event()
+        staging_calls = 0
+        backup_calls = 0
+
+        def consume_stream(_bucket, key, data, **_kwargs):
+            objects[key] = b"".join(iter(lambda: data.read(3), b""))
+
+        def copy_object(_bucket, target, source):
+            objects[target] = objects[source.object_name]
+
+        def remove_object(_bucket, key):
+            nonlocal backup_calls, staging_calls
+            if key.endswith(".backup"):
+                backup_calls += 1
+            elif key.startswith(".flori-staging/"):
+                staging_calls += 1
+                cleanup_entered.set()
+                release_cleanup.wait(2)
+            objects.pop(key, None)
+
+        def list_objects(_bucket, *, prefix, recursive):
+            assert recursive is True
+            return [
+                MagicMock(object_name=key)
+                for key in list(objects)
+                if key.startswith(prefix)
+            ]
+
+        def remove_objects(_bucket, _deletes):
+            objects.clear()
+            return []
+
+        client.put_object.side_effect = consume_stream
+        client.stat_object.side_effect = lambda _bucket, key: MagicMock(
+            size=len(objects[key]),
+        )
+        client.copy_object.side_effect = copy_object
+        client.remove_object.side_effect = remove_object
+        client.list_objects.side_effect = list_objects
+        client.remove_objects.side_effect = remove_objects
+        rs._client = lambda: client
+
+        async def source():
+            yield b"new"
+
+        writer = asyncio.create_task(rs.write_stream("j1", "out/a.bin", source()))
+        assert await asyncio.to_thread(cleanup_entered.wait, 1)
+        assert objects["j1/out/a.bin"] == b"new"
+        await rs.delete("j1", defer_if_busy=True)
+        delete_waiter = asyncio.create_task(rs.delete("j1"))
+        writer.cancel()
+        done, _ = await asyncio.wait({writer}, timeout=0.2)
+        assert writer in done
+        with pytest.raises(asyncio.CancelledError):
+            await writer
+        assert not delete_waiter.done()
+        assert staging_calls == 1
+        release_cleanup.set()
+        await asyncio.wait_for(delete_waiter, timeout=1)
+        await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
+
+        assert objects == {}
+        assert "j1" not in rs._delete_requested
+        assert "j1" not in rs._job_locks
+        assert not rs._finalizer_tasks
+        assert staging_calls == 1
+        assert backup_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_cancel_at_writer_register_return_seam_releases_state(
+        self, tmp_path,
+    ):
+        import asyncio
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        rs._client = lambda: client
+        original_register = rs._register_writer
+        registered = asyncio.Event()
+
+        async def cancel_after_registration(job_id):
+            await original_register(job_id)
+            registered.set()
+            asyncio.current_task().cancel()
+            await asyncio.sleep(0)
+
+        rs._register_writer = cancel_after_registration
+
+        async def source():
+            yield b"unreachable"
+
+        writer = asyncio.create_task(rs.write_stream("j1", "out/a.bin", source()))
+        await asyncio.wait_for(registered.wait(), timeout=1)
+        done, _ = await asyncio.wait({writer}, timeout=0.2)
+        assert writer in done
+        with pytest.raises(asyncio.CancelledError):
+            await writer
+
+        client.put_object.assert_not_called()
+        assert "j1" not in rs._active_writers
+        assert "j1" not in rs._job_locks
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("cancel_phase", "has_existing_final"),
+        [("upload", False), ("backup", True), ("publish", True)],
+    )
+    async def test_cancel_at_operation_start_return_seam_has_no_orphan(
+        self, tmp_path, cancel_phase, has_existing_final,
+    ):
+        import asyncio
+        from minio.error import S3Error
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        objects = {"j1/out/a.bin": b"old"} if has_existing_final else {}
+        cancelled_at_seam = asyncio.Event()
+        final_copies = 0
+
+        def consume_stream(_bucket, key, data, **_kwargs):
+            body = bytearray()
+            while chunk := data.read(3):
+                body.extend(chunk)
+            objects[key] = bytes(body)
+
+        def stat_object(_bucket, key):
+            if key not in objects:
+                raise S3Error(
+                    MagicMock(status=404), "NoSuchKey", "missing",
+                    "resource", "req", "host",
+                )
+            return MagicMock(size=len(objects[key]))
+
+        def copy_object(_bucket, target, _source):
+            nonlocal final_copies
+            if target.endswith(".backup"):
+                objects[target] = objects["j1/out/a.bin"]
+            elif target == "j1/out/a.bin":
+                final_copies += 1
+                if final_copies == 1:
+                    staging_key = client.put_object.call_args.args[1]
+                    objects[target] = objects[staging_key]
+                else:
+                    backup_key = next(
+                        key for key in objects if key.endswith(".backup")
+                    )
+                    objects[target] = objects[backup_key]
+
+        def remove_object(_bucket, key):
+            objects.pop(key, None)
+
+        client.put_object.side_effect = consume_stream
+        client.stat_object.side_effect = stat_object
+        client.copy_object.side_effect = copy_object
+        client.remove_object.side_effect = remove_object
+        rs._client = lambda: client
+        original_start = rs._start_publish_operation
+
+        async def cancel_after_registration(
+            job_id, operations, phase, callback, *args,
+        ):
+            task = await original_start(
+                job_id, operations, phase, callback, *args,
+            )
+            if phase == cancel_phase:
+                cancelled_at_seam.set()
+                asyncio.current_task().cancel()
+                await asyncio.sleep(0)
+            return task
+
+        rs._start_publish_operation = cancel_after_registration
+
+        async def source():
+            yield b"new"
+
+        writer = asyncio.create_task(rs.write_stream("j1", "out/a.bin", source()))
+        await asyncio.wait_for(cancelled_at_seam.wait(), timeout=1)
+        done, _ = await asyncio.wait({writer}, timeout=0.2)
+        assert writer in done
+        with pytest.raises(asyncio.CancelledError):
+            await writer
+        await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
+
+        if has_existing_final:
+            assert objects == {"j1/out/a.bin": b"old"}
+        else:
+            assert objects == {}
+        assert not rs._finalizer_tasks
+        assert "j1" not in rs._active_writers
+
+    @pytest.mark.asyncio
+    async def test_delete_wins_over_post_publish_cancelled_rollback(self, tmp_path):
+        import asyncio
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        objects = {"j1/out/a.bin": b"old"}
+        post_publish = asyncio.Event()
+        ensure_calls = 0
+        final_copies = 0
+
+        def consume_stream(_bucket, key, data, **_kwargs):
+            objects[key] = b"".join(iter(lambda: data.read(3), b""))
+
+        def copy_object(_bucket, target, _source):
+            nonlocal final_copies
+            if target.endswith(".backup"):
+                objects[target] = objects["j1/out/a.bin"]
+            elif target == "j1/out/a.bin":
+                final_copies += 1
+                staging_key = client.put_object.call_args.args[1]
+                objects[target] = objects[staging_key]
+
+        def remove_object(_bucket, key):
+            objects.pop(key, None)
+
+        def list_objects(_bucket, *, prefix, recursive):
+            assert recursive is True
+            return [
+                MagicMock(object_name=key)
+                for key in list(objects)
+                if key.startswith(prefix)
+            ]
+
+        def remove_objects(_bucket, _deletes):
+            objects.clear()
+            return []
+
+        client.put_object.side_effect = consume_stream
+        client.stat_object.side_effect = lambda _bucket, key: MagicMock(
+            size=len(objects[key]),
+        )
+        client.copy_object.side_effect = copy_object
+        client.remove_object.side_effect = remove_object
+        client.list_objects.side_effect = list_objects
+        client.remove_objects.side_effect = remove_objects
+        rs._client = lambda: client
+        original_ensure = rs._ensure_publish_allowed
+
+        async def hold_post_publish(job_id):
+            nonlocal ensure_calls
+            ensure_calls += 1
+            if ensure_calls == 4:
+                post_publish.set()
+                await asyncio.Event().wait()
+            await original_ensure(job_id)
+
+        rs._ensure_publish_allowed = hold_post_publish
+
+        async def source():
+            yield b"new"
+
+        writer = asyncio.create_task(rs.write_stream("j1", "out/a.bin", source()))
+        await asyncio.wait_for(post_publish.wait(), timeout=1)
+        assert objects["j1/out/a.bin"] == b"new"
+        await rs.delete("j1", defer_if_busy=True)
+        delete_waiter = asyncio.create_task(rs.delete("j1"))
+        writer.cancel()
+        done, _ = await asyncio.wait({writer}, timeout=0.2)
+        assert writer in done
+        with pytest.raises(asyncio.CancelledError):
+            await writer
+        await asyncio.wait_for(delete_waiter, timeout=1)
+        await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
+
+        assert objects == {}
+        assert final_copies == 1
+        assert "j1" not in rs._delete_requested
+        assert "j1" not in rs._job_locks
+        assert not rs._finalizer_tasks
+
+    @pytest.mark.asyncio
+    async def test_delete_barrier_waits_for_all_cancelled_writers_inverse_order(
+        self, tmp_path,
+    ):
+        import asyncio
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        started = {name: threading.Event() for name in ("first", "second")}
+        release = {name: threading.Event() for name in ("first", "second")}
+        cleaned = {name: threading.Event() for name in ("first", "second")}
+        holds = {name: asyncio.Event() for name in ("first", "second")}
+
+        def blocked_upload(_bucket, key, data, **_kwargs):
+            token = key.rsplit("/", 1)[-1]
+            started[token].set()
+            try:
+                while data.read(3):
+                    pass
+            except OSError:
+                release[token].wait(2)
+                raise
+
+        def remove(_bucket, key):
+            token = key.rsplit("/", 1)[-1].split(".", 1)[0]
+            if token in cleaned:
+                cleaned[token].set()
+
+        client.put_object.side_effect = blocked_upload
+        client.remove_object.side_effect = remove
+        client.list_objects.return_value = []
+        rs._client = lambda: client
+
+        async def source(name):
+            yield name.encode()
+            await holds[name].wait()
+
+        first = asyncio.create_task(rs.write_stream(
+            "j1", "out/first.bin", source("first"), staging_token="first",
+        ))
+        second = asyncio.create_task(rs.write_stream(
+            "j1", "out/second.bin", source("second"), staging_token="second",
+        ))
+        assert await asyncio.to_thread(started["first"].wait, 1)
+        assert await asyncio.to_thread(started["second"].wait, 1)
+        first.cancel()
+        second.cancel()
+        for task in (first, second):
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        await rs.delete("j1", defer_if_busy=True)
+        await rs.delete("j1", defer_if_busy=True)
+        delete_waiter = asyncio.create_task(rs.delete("j1"))
+        client.list_objects.assert_not_called()
+        release["second"].set()
+        assert await asyncio.to_thread(cleaned["second"].wait, 1)
+        assert not cleaned["first"].is_set()
+        client.list_objects.assert_not_called()
+        release["first"].set()
+        await asyncio.wait_for(delete_waiter, timeout=1)
+        await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
+
+        assert len(client.list_objects.call_args_list) == 3
+        assert "j1" not in rs._delete_requested
+        assert "j1" not in rs._job_locks
+
+    @pytest.mark.asyncio
+    async def test_existing_final_cancel_then_delete_never_restores(self, tmp_path):
+        import asyncio
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        publish_started = threading.Event()
+        release_publish = threading.Event()
+        copy_targets: list[str] = []
+
+        def consume_stream(_bucket, _key, data, **_kwargs):
+            while data.read(3):
+                pass
+
+        def copy(_bucket, target, _source):
+            copy_targets.append(target)
+            if target == "j1/out/a.bin":
+                publish_started.set()
+                release_publish.wait(2)
+
+        client.put_object.side_effect = consume_stream
+        client.stat_object.return_value = MagicMock(size=3)
+        client.copy_object.side_effect = copy
+        client.list_objects.return_value = []
+        rs._client = lambda: client
+
+        async def source():
+            yield b"new"
+
+        task = asyncio.create_task(rs.write_stream("j1", "out/a.bin", source()))
+        assert await asyncio.to_thread(publish_started.wait, 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await rs.delete("j1", defer_if_busy=True)
+        delete_waiter = asyncio.create_task(rs.delete("j1"))
+        release_publish.set()
+        await asyncio.wait_for(delete_waiter, timeout=1)
+        await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
+
+        assert len(copy_targets) == 2
+        assert copy_targets[0].endswith(".backup")
+        assert copy_targets[1] == "j1/out/a.bin"
+        assert len(client.list_objects.call_args_list) == 3
+
+    @pytest.mark.asyncio
+    async def test_delete_barrier_blocks_normal_writer_publish(self, tmp_path):
+        import asyncio
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        reader_started = threading.Event()
+        release_source = asyncio.Event()
+
+        def consume_stream(_bucket, _key, data, **_kwargs):
+            reader_started.set()
+            while data.read(3):
+                pass
+
+        client.put_object.side_effect = consume_stream
+        client.list_objects.return_value = []
+        rs._client = lambda: client
+
+        async def source():
+            yield b"partial"
+            await release_source.wait()
+
+        task = asyncio.create_task(rs.write_stream("j1", "out/a.bin", source()))
+        assert await asyncio.to_thread(reader_started.wait, 1)
+        await rs.delete("j1", defer_if_busy=True)
+        delete_waiter = asyncio.create_task(rs.delete("j1"))
+        client.list_objects.assert_not_called()
+        release_source.set()
+        with pytest.raises(OSError, match="deletion"):
+            await task
+        await asyncio.wait_for(delete_waiter, timeout=1)
+        await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
+
+        client.copy_object.assert_not_called()
+        assert len(client.list_objects.call_args_list) == 3
+
+    @pytest.mark.asyncio
+    async def test_delete_during_normal_publish_waits_then_removes_job(self, tmp_path):
+        import asyncio
+        from minio.error import S3Error
+
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        publish_started = threading.Event()
+        release_publish = threading.Event()
+        order: list[str] = []
+
+        def consume_stream(_bucket, _key, data, **_kwargs):
+            while data.read(3):
+                pass
+
+        def publish(*_args, **_kwargs):
+            order.append("publish_started")
+            publish_started.set()
+            release_publish.wait(2)
+            order.append("publish_done")
+
+        def list_objects(*_args, **_kwargs):
+            order.append("delete_scan")
+            return []
+
+        client.put_object.side_effect = consume_stream
+        client.stat_object.side_effect = S3Error(
+            MagicMock(status=404), "NoSuchKey", "missing",
+            "resource", "req", "host",
+        )
+        client.copy_object.side_effect = publish
+        client.list_objects.side_effect = list_objects
+        rs._client = lambda: client
+
+        async def source():
+            yield b"new"
+
+        writer = asyncio.create_task(rs.write_stream("j1", "out/a.bin", source()))
+        assert await asyncio.to_thread(publish_started.wait, 1)
+        await rs.delete("j1", defer_if_busy=True)
+        delete_waiter = asyncio.create_task(rs.delete("j1"))
+        assert "delete_scan" not in order
+        release_publish.set()
+        with pytest.raises(OSError, match="deletion"):
+            await writer
+        await asyncio.wait_for(delete_waiter, timeout=1)
+        await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
+
+        assert order.index("publish_done") < order.index("delete_scan")
+        assert order.count("delete_scan") == 3
+
+    @pytest.mark.asyncio
+    async def test_successful_delete_releases_state_for_reused_job_id(self, tmp_path):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        client.list_objects.return_value = []
+
+        def consume_stream(_bucket, _key, data, **_kwargs):
+            while data.read(3):
+                pass
+
+        client.put_object.side_effect = consume_stream
+        rs._client = lambda: client
+
+        await rs.delete("same-job")
+        assert "same-job" not in rs._delete_requested
+        assert "same-job" not in rs._job_locks
+
+        async def source():
+            yield b"reused"
+
+        result = await rs.write_stream("same-job", "out/a.bin", source())
+        assert result["size"] == 6
+        client.copy_object.assert_called_once()
+        assert "same-job" not in rs._job_locks
+
+    @pytest.mark.asyncio
+    async def test_failed_delete_keeps_barrier_until_explicit_retry(self, tmp_path):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        client.list_objects.side_effect = [
+            [MagicMock(object_name="j1/source.bin")], [], [],
+        ]
+        client.remove_objects.return_value = [
+            MagicMock(code="AccessDenied", object_name="j1/source.bin"),
+        ]
+        rs._client = lambda: client
+
+        with pytest.raises(OSError, match="AccessDenied"):
+            await rs.delete("j1")
+        assert "j1" in rs._delete_requested
+
+        async def source():
+            yield b"blocked"
+
+        with pytest.raises(OSError, match="deletion"):
+            await rs.write_stream("j1", "out/a.bin", source())
+
+        client.list_objects.side_effect = [[], [], []]
+        client.remove_objects.return_value = []
+        await rs.delete("j1")
+        assert "j1" not in rs._delete_requested
+        assert "j1" not in rs._job_locks
 
 
 class TestRemoteHealthVersion:

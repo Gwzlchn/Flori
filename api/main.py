@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -34,6 +35,8 @@ from shared.storage import create_storage
 from api.pricing_store import PricingStore
 from api.minio_capacity_store import MinioCapacityStore
 
+_UPLOAD_FINALIZER_DRAIN_TIMEOUT_SEC = 15.0
+
 
 async def _subscription_sync_loop(app: FastAPI) -> None:
     """周期同步所有启用自动追更的订阅集合。失败只记日志,不影响 API。"""
@@ -58,6 +61,28 @@ async def _subscription_sync_loop(app: FastAPI) -> None:
         except Exception:
             log.exception("sync_loop_error")
         await asyncio.sleep(hours * 3600)
+
+
+async def _initialization_recovery_loop(app: FastAPI) -> None:
+    """启动即恢复中断上传,之后周期清理 marker 与全局 staging。"""
+    import structlog
+
+    from api.routes.jobs import reconcile_incomplete_job_uploads
+
+    log = structlog.get_logger(component="upload-recovery")
+    interval = 3600
+    while True:
+        try:
+            await reconcile_incomplete_job_uploads(
+                app.state.db,
+                app.state.redis,
+                app.state.storage,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("upload_recovery_loop_error")
+        await asyncio.sleep(interval)
 
 
 def create_app(
@@ -91,8 +116,11 @@ def create_app(
         sync_task = None
         pricing_task = None
         capacity_task = None
+        upload_recovery_task = None
         if getattr(app.state, "_own_resources", False):
-            import asyncio
+            upload_recovery_task = asyncio.create_task(
+                _initialization_recovery_loop(app)
+            )
             sync_task = asyncio.create_task(_subscription_sync_loop(app))
             # LiteLLM 价表:启动从 MinIO 载入 + 每日拉最新(仅生产起;测试/注入态空表→runner 回退)。
             pricing_task = asyncio.create_task(app.state.pricing.daily_loop(app.state.storage))
@@ -104,6 +132,30 @@ def create_app(
 
         yield
 
+        if upload_recovery_task:
+            upload_recovery_task.cancel()
+            await asyncio.gather(upload_recovery_task, return_exceptions=True)
+        wait_for_finalizers = getattr(
+            getattr(app.state, "storage", None), "wait_for_finalizers", None,
+        )
+        if callable(wait_for_finalizers):
+            try:
+                await asyncio.wait_for(
+                    wait_for_finalizers(),
+                    timeout=_UPLOAD_FINALIZER_DRAIN_TIMEOUT_SEC,
+                )
+            except TimeoutError:
+                import structlog
+                structlog.get_logger(component="upload-recovery").error(
+                    "upload_finalizer_drain_timeout",
+                    timeout_sec=_UPLOAD_FINALIZER_DRAIN_TIMEOUT_SEC,
+                    recovery="initialization_marker_reconciler",
+                )
+            except Exception:
+                import structlog
+                structlog.get_logger(component="upload-recovery").exception(
+                    "upload_finalizer_drain_failed",
+                )
         if sync_task:
             sync_task.cancel()
         if pricing_task:

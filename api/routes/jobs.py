@@ -5,9 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import secrets
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import AsyncIterable, AsyncIterator
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import PlainTextResponse
 
@@ -34,7 +39,13 @@ from shared.source_registry import (
     validate_job_route,
 )
 from shared.step_base import def_digest_for, pipeline_digest_for
-from shared.storage import CREDENTIAL_REL, StorageBackend, read_file_bounded
+from shared.storage import (
+    ArtifactTooLarge,
+    CREDENTIAL_REL,
+    INITIALIZATION_MARKER_REL,
+    StorageBackend,
+    read_file_bounded,
+)
 
 from api.deps import get_config, get_db, get_redis, get_storage, validate_path_segment, verify_token
 from api.schemas import (
@@ -67,6 +78,14 @@ router = APIRouter(
     prefix="/api/jobs", tags=["jobs"], dependencies=[Depends(verify_token)],
     responses=API_ERROR_RESPONSES,
 )
+
+MAX_UPLOAD_SIZE = 2 * 1024 * 1024 * 1024
+UPLOAD_CHUNK_SIZE = 1024 * 1024
+INITIALIZATION_MARKER_SCHEMA = "flori-job-initialization"
+INITIALIZATION_MARKER_VERSION = 1
+INITIALIZATION_STALE_AFTER_SEC = 24 * 60 * 60
+INITIALIZATION_HEARTBEAT_SEC = 30
+_LOG = structlog.get_logger()
 
 # 同模块第二个路由:/api/providers(不能挂在 /api/jobs 下,否则被 /{job_id} 截胡)。
 providers_router = APIRouter(prefix="/api/providers", tags=["providers"],
@@ -108,8 +127,209 @@ def _pipeline_for(content_type: str) -> str | None:
 
 
 def _now_iso() -> str:
-    from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
+
+
+def _initialization_marker(
+    job_id: str,
+    source_rel: str,
+    staging_token: str,
+    *,
+    defer_submit: bool,
+) -> dict:
+    now = _now_iso()
+    return {
+        "schema": INITIALIZATION_MARKER_SCHEMA,
+        "version": INITIALIZATION_MARKER_VERSION,
+        "job_id": job_id,
+        "source_rel": source_rel,
+        "staging_token": staging_token,
+        "owner_id": secrets.token_hex(12),
+        "created_at": now,
+        "updated_at": now,
+        "defer_submit": defer_submit,
+        "event_published": False,
+    }
+
+
+def _marker_bytes(marker: dict) -> bytes:
+    return json.dumps(
+        marker, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _parse_initialization_marker(
+    raw: bytes, expected_job_id: str, now: datetime,
+) -> tuple[dict, datetime]:
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("marker is not valid UTF-8 JSON") from exc
+    fields = {
+        "schema", "version", "job_id", "source_rel", "staging_token",
+        "owner_id", "created_at", "updated_at", "defer_submit",
+        "event_published",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("marker fields do not match schema")
+    if value["schema"] != INITIALIZATION_MARKER_SCHEMA:
+        raise ValueError("marker schema is unsupported")
+    if type(value["version"]) is not int or value["version"] != INITIALIZATION_MARKER_VERSION:
+        raise ValueError("marker version is unsupported")
+    if value["job_id"] != expected_job_id or not re.fullmatch(
+        r"[A-Za-z0-9_-]{1,200}", value["job_id"],
+    ):
+        raise ValueError("marker job_id is invalid")
+    if not isinstance(value["source_rel"], str) or not re.fullmatch(
+        r"input/source[^/\\\x00]{0,32}", value["source_rel"],
+    ):
+        raise ValueError("marker source_rel is invalid")
+    if not isinstance(value["staging_token"], str) or not re.fullmatch(
+        r"[A-Za-z0-9_-]{1,128}", value["staging_token"],
+    ):
+        raise ValueError("marker staging_token is invalid")
+    if not isinstance(value["owner_id"], str) or not re.fullmatch(
+        r"[A-Za-z0-9_-]{1,128}", value["owner_id"],
+    ):
+        raise ValueError("marker owner_id is invalid")
+    if type(value["defer_submit"]) is not bool or type(value["event_published"]) is not bool:
+        raise ValueError("marker flags are invalid")
+    try:
+        created = datetime.fromisoformat(value["created_at"])
+        updated = datetime.fromisoformat(value["updated_at"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("marker timestamps are invalid") from exc
+    if created.tzinfo is None or updated.tzinfo is None:
+        raise ValueError("marker timestamps must be timezone-aware")
+    created = created.astimezone(timezone.utc)
+    updated = updated.astimezone(timezone.utc)
+    if updated < created or updated > now + timedelta(minutes=5):
+        raise ValueError("marker timestamp ordering is invalid")
+    return value, updated
+
+
+async def _write_initialization_marker(
+    storage: StorageBackend, job_id: str, marker: dict,
+) -> None:
+    await storage.write_file(job_id, INITIALIZATION_MARKER_REL, _marker_bytes(marker))
+
+
+async def _remove_initialization_marker(
+    storage: StorageBackend, job_id: str,
+) -> None:
+    try:
+        await storage.delete_file(job_id, INITIALIZATION_MARKER_REL)
+    except Exception as exc:
+        _LOG.error(
+            "job_initialization_marker_cleanup_failed",
+            job_id=job_id,
+            error=type(exc).__name__,
+            detail=str(exc),
+        )
+
+
+async def reconcile_incomplete_job_uploads(
+    db: Database,
+    redis: RedisClient,
+    storage: StorageBackend,
+    *,
+    now: datetime | None = None,
+    stale_after_sec: int = INITIALIZATION_STALE_AFTER_SEC,
+) -> dict:
+    """恢复 API 进程中断的上传初始化;损坏 marker 一律保留现场。"""
+    if type(stale_after_sec) is not int or stale_after_sec <= 0:
+        raise ValueError("stale_after_sec must be a positive integer")
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    current = current.astimezone(timezone.utc)
+    cutoff = current.timestamp() - stale_after_sec
+    report: dict = {
+        "status": "ok",
+        "active": 0,
+        "deleted_orphans": 0,
+        "recovered_db_jobs": 0,
+        "staging_removed": 0,
+        "errors": [],
+    }
+    active_tokens: set[tuple[str, str]] = set()
+    protected_job_ids: set[str] = set()
+    try:
+        job_ids = await storage.list_initialization_markers()
+    except Exception as exc:
+        report["status"] = "partial"
+        report["errors"].append({
+            "job_id": None,
+            "stage": "list_markers",
+            "error": f"{type(exc).__name__}: {exc}",
+        })
+        _LOG.error("job_initialization_recovery_partial", report=report)
+        return report
+
+    for job_id in job_ids:
+        try:
+            raw = await storage.read_file(job_id, INITIALIZATION_MARKER_REL)
+            if raw is None:
+                continue
+            marker, updated = _parse_initialization_marker(raw, job_id, current)
+        except Exception as exc:
+            protected_job_ids.add(job_id)
+            report["errors"].append({
+                "job_id": job_id,
+                "stage": "parse_marker",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            continue
+
+        token = marker["staging_token"]
+        if updated.timestamp() >= cutoff:
+            active_tokens.add((job_id, token))
+            report["active"] += 1
+            continue
+
+        try:
+            job = await asyncio.to_thread(db.get_job, job_id)
+            if job is None:
+                await storage.delete(job_id)
+                report["deleted_orphans"] += 1
+                continue
+            if not marker["defer_submit"] and not marker["event_published"]:
+                await redis.append_lifecycle_event("job_command", {
+                    "action": "new_job",
+                    "job_id": job_id,
+                    "pipeline": job.pipeline,
+                })
+                marker["event_published"] = True
+                marker["updated_at"] = _now_iso()
+                await _write_initialization_marker(storage, job_id, marker)
+            await storage.delete_file(job_id, INITIALIZATION_MARKER_REL)
+            report["recovered_db_jobs"] += 1
+        except Exception as exc:
+            protected_job_ids.add(job_id)
+            report["errors"].append({
+                "job_id": job_id,
+                "stage": "recover_job",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+
+    try:
+        report["staging_removed"] = await storage.cleanup_stale_staging(
+            active_tokens=active_tokens,
+            protected_job_ids=protected_job_ids,
+            stale_before_epoch=cutoff,
+        )
+    except Exception as exc:
+        report["errors"].append({
+            "job_id": None,
+            "stage": "cleanup_staging",
+            "error": f"{type(exc).__name__}: {exc}",
+        })
+    if report["errors"]:
+        report["status"] = "partial"
+        _LOG.error("job_initialization_recovery_partial", report=report)
+    else:
+        _LOG.info("job_initialization_recovery_complete", report=report)
+    return report
 
 
 def _bili_sessdata(db: Database) -> str | None:
@@ -123,19 +343,95 @@ def _bili_sessdata(db: Database) -> str | None:
         return None
 
 
+async def _cleanup_failed_job(
+    storage: StorageBackend, job_id: str, original: BaseException,
+) -> None:
+    """初始创建失败时清产物;清理故障只加诊断,不覆盖原始失败。"""
+    try:
+        if isinstance(original, asyncio.CancelledError):
+            await storage.delete(job_id, defer_if_busy=True)
+        else:
+            await storage.delete(job_id)
+    except Exception as cleanup_error:
+        original.add_note(
+            "job artifact cleanup failed: "
+            f"{type(cleanup_error).__name__}: {cleanup_error}"
+        )
+        _LOG.error(
+            "job_initialization_cleanup_failed",
+            job_id=job_id,
+            original_error=type(original).__name__,
+            cleanup_error=type(cleanup_error).__name__,
+            cleanup_detail=str(cleanup_error),
+        )
+
+
+async def _rollback_created_job(
+    db: Database,
+    redis: RedisClient,
+    storage: StorageBackend,
+    job: Job,
+    original: BaseException,
+    *,
+    collection_incremented: bool,
+) -> None:
+    """投递确认前失败时回滚 DB 与产物;补偿失败不覆盖原始错误。"""
+    db_rolled_back = False
+    try:
+        await asyncio.to_thread(
+            db.delete_job_cascade,
+            job.id,
+            job.collection_id if collection_incremented else None,
+            (job.meta or {}).get("source_item_id"),
+        )
+        db_rolled_back = True
+    except Exception as cleanup_error:
+        original.add_note(
+            "job database rollback failed: "
+            f"{type(cleanup_error).__name__}: {cleanup_error}"
+        )
+        _LOG.error(
+            "job_initialization_db_rollback_failed",
+            job_id=job.id,
+            original_error=type(original).__name__,
+            cleanup_error=type(cleanup_error).__name__,
+            cleanup_detail=str(cleanup_error),
+        )
+    if db_rolled_back:
+        for method_name in (
+            "remove_job_tasks", "cleanup_job", "remove_active_job",
+        ):
+            try:
+                await getattr(redis, method_name)(job.id)
+            except Exception as cleanup_error:
+                original.add_note(
+                    f"job redis rollback {method_name} failed: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
+                _LOG.error(
+                    "job_initialization_redis_rollback_failed",
+                    job_id=job.id,
+                    operation=method_name,
+                    original_error=type(original).__name__,
+                    cleanup_error=type(cleanup_error).__name__,
+                    cleanup_detail=str(cleanup_error),
+                )
+        await _cleanup_failed_job(storage, job.id, original)
+
+
 async def create_job_core(
     db: Database, redis: RedisClient, storage: StorageBackend,
     url: str | None, content_type: str | None = None,
     domain: str = "general", style_tags: list[str] | None = None,
     collection_id: str | None = None, title: str | None = None,
-    upload: tuple[str, bytes] | None = None,
+    upload: tuple[str, bytes | AsyncIterable[bytes]] | None = None,
     smart_note: bool | None = None,
     item_id: str | None = None, actor: str = "api",
     config: AppConfig | None = None,
     defer_submit: bool = False,
 ) -> Job:
     """建 job 的核心流程(create_job 路由 + upload + 订阅同步共用)。返回 Job。
-    upload=(ext, data):上传路径,把源文件经 storage 写入 input/source{ext}(兼容本地/MinIO)。"""
+    upload=(ext, data/stream):源文件先原子发布,其余初始文件失败时整项清理。"""
     style_tags = style_tags or []
     source = "upload" if upload is not None else detect_source(url or "")
     requested_type = getattr(content_type, "value", content_type)
@@ -166,24 +462,61 @@ async def create_job_core(
     overrides = await asyncio.to_thread(db.resolve_prompt_overrides, pipeline, domain)
     if overrides:
         job_doc["prompt_overrides"] = overrides
-    await storage.write_file(
-        job_id, "job.json",
-        json.dumps(job_doc, ensure_ascii=False, indent=2).encode("utf-8"),
-    )
-    # 上传源文件必须经 storage 落库(本地/MinIO 一致):直写 API 容器本地盘的话,
-    # MinIO 部署下远端 worker 拉不到 input/source.*。
-    if upload is not None:
-        ext, data = upload
-        await storage.write_file(job_id, f"input/source{ext}", data)
-    # SESSDATA 不进 job.json(那是会下发到远端 worker 的通用文档);写入本机侧载凭证文件,
-    # 由 storage/runner 保证绝不入中心存储、绝不下发远端(见 shared/storage.is_credential_file)。
-    if source == "bilibili":
-        sessdata = await asyncio.to_thread(_bili_sessdata, db)
-        if sessdata:
-            await storage.write_file(
-                job_id, CREDENTIAL_REL,
-                json.dumps({"sessdata": sessdata}, ensure_ascii=False).encode("utf-8"),
+    initialization_marker: dict | None = None
+    try:
+        # 源文件先走不可见暂存并原子发布。job.json 随后失败时删除整个 job 前缀,
+        # DB 和生命周期事件均尚未创建,不会留下可调度的半成品。
+        if upload is not None:
+            ext, data = upload
+            rel_path = f"input/source{ext}"
+            staging_token = secrets.token_hex(16)
+            initialization_marker = _initialization_marker(
+                job_id,
+                rel_path,
+                staging_token,
+                defer_submit=defer_submit,
             )
+            await _write_initialization_marker(storage, job_id, initialization_marker)
+
+            async def _source_chunks() -> AsyncIterator[bytes]:
+                last_heartbeat = time.monotonic()
+                if isinstance(data, bytes):
+                    source: AsyncIterable[bytes] = _single_chunk(data)
+                else:
+                    source = data
+                async for chunk in source:
+                    current = time.monotonic()
+                    if current - last_heartbeat >= INITIALIZATION_HEARTBEAT_SEC:
+                        initialization_marker["updated_at"] = _now_iso()
+                        await _write_initialization_marker(
+                            storage, job_id, initialization_marker,
+                        )
+                        last_heartbeat = current
+                    yield chunk
+
+            await storage.write_stream(
+                job_id,
+                rel_path,
+                _source_chunks(),
+                max_bytes=MAX_UPLOAD_SIZE,
+                staging_token=staging_token,
+            )
+        await storage.write_file(
+            job_id, "job.json",
+            json.dumps(job_doc, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+        # SESSDATA 不进 job.json(那是会下发到远端 worker 的通用文档);写入本机侧载凭证文件,
+        # 由 storage/runner 保证绝不入中心存储、绝不下发远端(见 shared/storage.is_credential_file)。
+        if source == "bilibili":
+            sessdata = await asyncio.to_thread(_bili_sessdata, db)
+            if sessdata:
+                await storage.write_file(
+                    job_id, CREDENTIAL_REL,
+                    json.dumps({"sessdata": sessdata}, ensure_ascii=False).encode("utf-8"),
+                )
+    except (Exception, asyncio.CancelledError) as exc:
+        await _cleanup_failed_job(storage, job_id, exc)
+        raise
     # item_id:订阅来源去重键,落 meta 供删除时按 (collection_id, item_id) 精准清 ingested_items(彻底删除)。
     job_meta: dict = {"flags": flags}
     if item_id:
@@ -196,18 +529,55 @@ async def create_job_core(
         domain=domain, source=source, style_tags=style_tags, collection_id=collection_id,
         meta=job_meta, pipeline_digest=pdigest,
     )
-    await asyncio.to_thread(db.create_job, job)
-    if collection_id:
-        await asyncio.to_thread(db.increment_collection_count, collection_id, 1)
-    if not defer_submit:
-        await redis.append_lifecycle_event("job_command", {
-            "action": "new_job", "job_id": job_id, "pipeline": pipeline,
-        })
+    try:
+        await asyncio.to_thread(db.create_job, job)
+    except (Exception, asyncio.CancelledError) as exc:
+        await _cleanup_failed_job(storage, job_id, exc)
+        raise
+    collection_incremented = False
+    try:
+        if collection_id:
+            await asyncio.to_thread(db.increment_collection_count, collection_id, 1)
+            collection_incremented = True
+        if not defer_submit:
+            await redis.append_lifecycle_event("job_command", {
+                "action": "new_job", "job_id": job_id, "pipeline": pipeline,
+            })
+            if initialization_marker is not None:
+                initialization_marker["event_published"] = True
+                initialization_marker["updated_at"] = _now_iso()
+                try:
+                    await _write_initialization_marker(
+                        storage, job_id, initialization_marker,
+                    )
+                except Exception as exc:
+                    _LOG.error(
+                        "job_initialization_marker_update_failed",
+                        job_id=job_id,
+                        error=type(exc).__name__,
+                        detail=str(exc),
+                    )
+    except (Exception, asyncio.CancelledError) as exc:
+        await _rollback_created_job(
+            db,
+            redis,
+            storage,
+            job,
+            exc,
+            collection_incremented=collection_incremented,
+        )
+        raise
+    if initialization_marker is not None:
+        await _remove_initialization_marker(storage, job_id)
     # defer_submit(book 章序):job 落库但不触发调度,由 scheduler 的 book 投递器在
     # 前章终态时按 created_at 顺序 submit(shared/book_chain.next_chapter_job)。
     audit("job", job_id, "create", actor=actor,
           detail={"content_type": ctype, "source": source, "collection_id": collection_id})
     return job
+
+
+async def _single_chunk(data: bytes) -> AsyncIterator[bytes]:
+    yield data
 
 
 def _pipeline_digest(config: AppConfig | None, pipeline: str) -> str | None:
@@ -338,21 +708,21 @@ async def upload_job(
         if not await asyncio.to_thread(db.get_collection, collection_id):
             raise HTTPException(400, "collection_id not found")
 
-    MAX_UPLOAD_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
-    # 流式累加并超限早退;做完大小校验后统一经 create_job_core → storage 落库(兼容 MinIO)。
-    # NOTE:storage.write_file 入参为 bytes,大文件整体驻留内存(上界 2GB);流式 put 为后续优化。
-    buf = bytearray()
-    while chunk := await file.read(1024 * 1024):
-        buf.extend(chunk)
-        if len(buf) > MAX_UPLOAD_SIZE:
-            raise HTTPException(413, f"file too large (max {MAX_UPLOAD_SIZE})")
+    async def _chunks() -> AsyncIterator[bytes]:
+        while chunk := await file.read(UPLOAD_CHUNK_SIZE):
+            yield chunk
 
     ext = Path(file.filename).suffix if file.filename else ".mp4"
-    job = await create_job_core(
-        db, redis, storage, url=None, content_type=content_type,
-        domain=domain, style_tags=tags, collection_id=collection_id, title=title,
-        upload=(ext, bytes(buf)), config=config,
-    )
+    try:
+        job = await create_job_core(
+            db, redis, storage, url=None, content_type=content_type,
+            domain=domain, style_tags=tags, collection_id=collection_id, title=title,
+            upload=(ext, _chunks()), config=config,
+        )
+    except ArtifactTooLarge as exc:
+        raise HTTPException(
+            413, f"file too large (max {MAX_UPLOAD_SIZE})",
+        ) from exc
     return {"job_id": job.id, "content_type": job.content_type,
             "status": "pending", "created_at": job.created_at.isoformat()}
 

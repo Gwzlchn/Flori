@@ -1913,6 +1913,21 @@ class TestDispatch:
         assert "A" in statuses
 
     @pytest.mark.asyncio
+    async def test_duplicate_new_job_dispatch_is_idempotent(self, scheduler, redis, db):
+        job = make_job()
+        db.create_job(job)
+
+        await scheduler._dispatch({"command": "new_job", "job_id": job.id})
+        first_statuses = await redis.get_all_step_statuses(job.id)
+        first_steps = db.get_steps(job.id)
+        await scheduler._dispatch({"command": "new_job", "job_id": job.id})
+
+        assert await redis.get_all_step_statuses(job.id) == first_statuses
+        assert [step.name for step in db.get_steps(job.id)] == [
+            step.name for step in first_steps
+        ]
+
+    @pytest.mark.asyncio
     async def test_dispatch_rerun(self, scheduler, redis, db, tmp_jobs_dir):
         job = make_job()
         db.create_job(job)
