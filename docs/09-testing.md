@@ -10,8 +10,8 @@
 
 | 层级 | 当前自动化与入口 | 是否主 CI 必经 |
 |------|------------------|----------------|
-| 主 CI | backend normal 12 分片 + worker 4 分片、真依赖 integration、frontend Vitest、coverage gate、按路径构建并在现有门通过后 push 镜像；拓扑以 `.github/workflows/ci.yml` 为准 | 是，非纯文档 push / PR |
-| 组件集成 | `scripts/test.sh --integration` 统一编排真 Redis、生产 Database 多连接/多进程冷启动、迁移整链失败回滚、已发布历史版本到当前 manifest 的 DR 恢复查询、Gateway Worker、real-docker 和生产 AOF 空环境恢复 | 是，`integration` required job |
+| 主 CI | backend normal 12 分片 + worker 3 分片、真依赖 integration 两分组、frontend Vitest、coverage gate、按路径构建并在现有门通过后 push 镜像；拓扑以 `.github/workflows/ci.yml` 为准 | 是，非纯文档 push / PR |
+| 组件集成 | `scripts/test.sh --integration` 统一编排真 Redis、生产 Database 多连接/多进程冷启动、迁移整链失败回滚、已发布历史版本到当前 manifest 的 DR 恢复查询、Gateway Worker、real-docker 和生产 AOF 空环境恢复 | 是，`integration` 两分组均为 required |
 | pipeline E2E | 主 CI integration 覆盖 video / paper / article / audio 真实完成事件到 Search / Ask / MCP 命中；`.github/workflows/e2e.yml` 另保留真实 PDF 步骤链手动验收 | 闭环必经；外部素材需显式触发 |
 | 检索质量决策 | 24 个冻结 job 经真实 Scheduler completion 摄入，96 条查询分层评估 Search / MCP / Ask；输出 `retrieval-quality.json` | 是，`decision_evidence_gate` 必须通过 |
 | Canonical evidence | 四类 producer sidecar → Scheduler → DB → Search/Ask/MCP/UI；同 identity/status 与 resolver 恶意边界 | 是，跟随 pipeline integration |
@@ -73,6 +73,10 @@ scripts/test.sh -- tests/steps/test_step_05_dedup.py
 验证冷启动、跨连接可见、唯一键竞争和 current+1/current+2 后段故障的整链回滚。固定
 format-v1 与 format-v2/schema-v2 归档均经生产 restore 入口恢复，再由当前 Database 执行
 `init_schema/get_job/list_jobs`，避免只验压缩包形状而没有验证真实升级和读路径。
+
+主 CI 把上述场景分为 data 与 services 两个独立 Compose project，分别使用 Redis DB 14/15，JUnit、pytest basetemp 和 coverage 工件也互不共享。本地不指定分组时仍串行运行全部场景。
+
+不验收迁移语义的 unit 测试从 session/xdist-worker 级 current-schema 空库复制独立 SQLite 文件，避免每个用例重放迁移链。`test_db_migrations`、backup/restore、冷启动和多进程 integration 仍必须调用生产 `init_schema`，不得改成模板副本。
 
 涉及学习候选 schema 时，还必须验证旧版本备份恢复后能继续升级到当前 manifest，当前版本快照能通过冻结 migration chain 自校验，未来版本仍在兼容门 fail-closed。测试不得只修改 `PRAGMA user_version` 伪造兼容性。
 

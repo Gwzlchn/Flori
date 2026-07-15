@@ -28,6 +28,7 @@ services:
       # 部署配置不变量测试解析 Compose/logging/healthcheck,全部只读挂载.
       - ./docker-compose.yml:/app/docker-compose.yml:ro
       - ./docker-compose.dev.yml:/app/docker-compose.dev.yml:ro
+      - ./docker-compose.integration-test.yml:/app/docker-compose.integration-test.yml:ro
       - ./deploy:/app/deploy:ro
       - ./docs/08-deployment.md:/app/docs/08-deployment.md:ro
       # pytest/coverage 配置(markers、[tool.coverage])的单一事实源:挂进来,改了不用重建镜像

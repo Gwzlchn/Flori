@@ -113,7 +113,7 @@ while [ $# -gt 0 ]; do
       [ $# -gt 0 ] || usage 1
       group="$1"
       shift
-      run_ci_shard worker "$group" "${1:-${CI_WORKER_SPLITS:-4}}"
+      run_ci_shard worker "$group" "${1:-${CI_WORKER_SPLITS:-3}}"
       ;;
     --all)  MODE="all"; shift ;;
     --changed) CHANGED=1; shift ;;

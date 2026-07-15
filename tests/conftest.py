@@ -10,8 +10,11 @@ from httpx import ASGITransport, AsyncClient
 
 from api.main import create_app
 from shared.config import load_config
-from shared.db import Database
 from shared.redis_client import RedisClient
+from tests.current_schema_db import (
+    build_current_schema_template,
+    clone_current_schema_database,
+)
 
 # 测试环境视为可信本地:默认放行无 token 鉴权(verify_token fail-closed 的逃生口),
 # 否则所有命中受保护端点、未设 API_TOKEN 的用例都会 503。需测 fail-closed 的用例自行清此项。
@@ -68,11 +71,20 @@ def test_config(tmp_path, configs_dir):
 
 
 @pytest.fixture
-def db(test_config):
-    d = Database(test_config.db_path)
-    d.init_schema()
+def db(test_config, current_schema_db_template):
+    d = clone_current_schema_database(
+        current_schema_db_template,
+        test_config.db_path,
+    )
     yield d
     d.close()
+
+
+@pytest.fixture(scope="session")
+def current_schema_db_template(tmp_path_factory):
+    """每个 pytest worker 只迁移一次，每个用例仍使用独立空库。"""
+    path = tmp_path_factory.mktemp("current-schema") / "template.db"
+    return build_current_schema_template(path)
 
 
 @pytest.fixture

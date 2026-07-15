@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from shared.db import Database
+from tests.current_schema_db import clone_current_schema_database
 
 
 @pytest.fixture
-def db(test_config):
-    d = Database(test_config.db_path)
-    d.init_schema()
+def db(test_config, current_schema_db_template):
+    d = clone_current_schema_database(current_schema_db_template, test_config.db_path)
     # 灌入若干中文笔记,覆盖不同 domain / content_type / collection。
     d.index_job_notes(
         "j_ml", "smart", "深度学习入门",

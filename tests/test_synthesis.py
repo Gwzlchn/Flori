@@ -18,6 +18,7 @@ import pytest
 from shared.db import Database
 from shared.models import LLMResponse
 from api.services import synthesis
+from tests.current_schema_db import clone_current_schema_database
 
 
 # 共享 seed:三篇 ml 笔记 + 一篇无关,外加术语表
@@ -281,9 +282,11 @@ class _FakeGateway:
 
 
 @pytest.fixture
-def db(test_config):
-    d = Database(test_config.db_path)
-    d.init_schema()
+def db(test_config, current_schema_db_template):
+    d = clone_current_schema_database(
+        current_schema_db_template,
+        test_config.db_path,
+    )
     _seed(d)
     yield d
     d.close()

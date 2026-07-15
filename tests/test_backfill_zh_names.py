@@ -12,13 +12,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import backfill_zh_names as bf  # noqa: E402
 
-from shared.db import Database  # noqa: E402
+from tests.current_schema_db import clone_current_schema_database  # noqa: E402
 
 
 @pytest.fixture
-def db(tmp_path):
-    d = Database(tmp_path / "t.db")
-    d.init_schema()
+def db(tmp_path, current_schema_db_template):
+    d = clone_current_schema_database(current_schema_db_template, tmp_path / "t.db")
     d.add_glossary_suggestion("finance", "Kelly criterion", "j1", definition="凯利准则,最优下注。")
     d.add_glossary_suggestion("finance", "martingale", "j1", definition="一种随机过程")
     d.add_glossary_suggestion("finance", "named already", "j1", zh_name="已有译名")

@@ -64,9 +64,6 @@ jobs:
             type=gha,scope=flori-test
           # 仅 group 1 写 buildcache,避免多 shard 并行双写同 ref;其余只读。PR 回退 gha。
           cache-to: ${{ github.ref == 'refs/heads/main' && matrix.group == 1 && format('type=registry,ref=ghcr.io/{0}/flori-test:buildcache,mode=max', env.OWNER_LC) || (github.ref != 'refs/heads/main' && matrix.group == 1 && 'type=gha,scope=flori-test,mode=max' || '') }}
-      - name: Selected OpenAPI/TypeScript drift gate
-        if: matrix.group == 1
-        run: bash scripts/test.sh --wire
       # 非媒体测试按 least-duration 拆 12 shard;真实调用 pdfinfo 的 canonical E2E 归 unit-worker.
       - name: Unit tests(普通 shard ${{ matrix.group }}/${{ env.CI_NORMAL_SPLITS }},非 step)+ 部分覆盖率
         run: |
@@ -80,11 +77,11 @@ jobs:
           if-no-files-found: error
 
   unit-worker:
-    # 重镜像拆 4 shard(step/worker/media 测试并行,pytest-split),摊平关键路径。
+    # 重镜像拆 3 shard，给两路 integration 预留账号并发槽。
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2, 3, 4]
+        group: [1, 2, 3]
     concurrency:
       group: ci-${{ github.event.pull_request.number || github.ref }}-unit-worker-${{ matrix.group }}
       cancel-in-progress: true
@@ -95,7 +92,7 @@ jobs:
     env:
       USE_USTC_MIRROR: "0"
       CI_XDIST_WORKERS: "4"
-      CI_WORKER_SPLITS: "4"
+      CI_WORKER_SPLITS: "3"
     steps:
       - uses: actions/checkout@v6
       - name: Lowercase owner
@@ -128,7 +125,7 @@ jobs:
             type=gha,scope=flori-test-worker
           # 仅 group 1 写 buildcache,避免多 shard 并行双写同 ref;其余只读。PR 回退 gha。
           cache-to: ${{ github.ref == 'refs/heads/main' && matrix.group == 1 && format('type=registry,ref=ghcr.io/{0}/flori-test-worker:buildcache,mode=max', env.OWNER_LC) || (github.ref != 'refs/heads/main' && matrix.group == 1 && 'type=gha,scope=flori-test-worker,mode=max' || '') }}
-      # step/worker/media 测试使用重镜像并按 least-duration 拆 4 shard。
+      # step/worker/media 测试使用重镜像并按 least-duration 拆 3 shard。
       - name: Unit tests(step/worker/media shard ${{ matrix.group }}/${{ env.CI_WORKER_SPLITS }})+ 部分覆盖率
         run: |
           CI_COVERAGE_DIR="$GITHUB_WORKSPACE/covdata" \
@@ -142,8 +139,12 @@ jobs:
 
   # 真 Redis + 生产 Database 冷启动/迁移/DR 兼容 + real-docker + AOF 恢复.与 unit 并行,并作为镜像发布门.
   integration:
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [data, services]
     concurrency:
-      group: ci-${{ github.event.pull_request.number || github.ref }}-integration
+      group: ci-${{ github.event.pull_request.number || github.ref }}-integration-${{ matrix.partition }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
     # Job timeout covers test-image load and cold dependency pulls as well as the gate itself.
@@ -153,8 +154,9 @@ jobs:
       packages: write
     env:
       USE_USTC_MIRROR: "0"
-      TEST_WARM_NAME: flori-ci-${{ github.run_id }}-${{ github.run_attempt }}
-      INTEGRATION_TEST_IMAGE: flori-integration-test:${{ github.run_id }}-${{ github.run_attempt }}
+      TEST_WARM_NAME: flori-ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.partition }}
+      INTEGRATION_TEST_IMAGE: flori-integration-test:${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.partition }}
+      INTEGRATION_PARTITION: ${{ matrix.partition }}
     steps:
       - uses: actions/checkout@v6
       - name: Lowercase owner
@@ -192,7 +194,7 @@ jobs:
           CI_COVERAGE: "1"
         run: bash scripts/test.sh --integration
       - name: Upload retrieval quality decision
-        if: always()
+        if: always() && matrix.partition == 'data'
         uses: actions/upload-artifact@v7.0.1
         with:
           name: retrieval-quality
@@ -202,14 +204,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: integration-junit
+          name: integration-junit-${{ matrix.partition }}
           path: ${{ runner.temp }}/flori-integration-artifacts/*.xml
           if-no-files-found: warn
       - name: Upload integration coverage
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: cov-integration
-          path: ${{ runner.temp }}/flori-integration-artifacts/.coverage.integration
+          name: cov-integration-${{ matrix.partition }}
+          path: ${{ runner.temp }}/flori-integration-artifacts/.coverage.integration.${{ matrix.partition }}
           include-hidden-files: true
           if-no-files-found: error
 
@@ -232,13 +234,16 @@ jobs:
         with:
           pattern: cov-*
           path: covdata
-          merge-multiple: true          # cov-normal-{1..12} + cov-worker-{1..4} + cov-integration 写入 covdata/.coverage.*
+          merge-multiple: true          # normal + worker + 两路 integration 都写入 covdata/.coverage.*
       - name: Assert all coverage parts are present and non-empty
         env:
           NORMAL_SPLITS: "12"
-          WORKER_SPLITS: "4"
+          WORKER_SPLITS: "3"
         run: |
-          required=(covdata/.coverage.integration)
+          required=(
+            covdata/.coverage.integration.data
+            covdata/.coverage.integration.services
+          )
           for group in $(seq 1 "$NORMAL_SPLITS"); do
             required+=("covdata/.coverage.normal.$group")
           done
@@ -356,10 +361,12 @@ jobs:
               - 'worker/**'
               - 'tunnel_stats/**'
               - 'configs/**'
+              - 'scripts/ci-images.sh'
             docker:
               - 'docker/**'
             frontend:
               - 'frontend/**'
+              - 'scripts/ci-images.sh'
             pyproject:
               - 'pyproject.toml'
       - name: 汇总运行时实质变化
@@ -416,161 +423,84 @@ jobs:
           git commit -q -m "chore(badges): 覆盖率 be=${BE}% fe=${FE}% [skip ci]"
           git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" badges
 
-  # build/push 拆分之一:与测试并行构建相关 prod 镜像(push:false,只 build + 暖 buildcache)。
-  #   build 不需先过测试,藏进测试的 ~80s 窗口。PR 也构建(验 Dockerfile/vue-tsc)。路径过滤:仅构建相关镜像。
+  # 四个 prod 镜像在一个 runner 内并行暖 cache，避免 matrix 占满账号槽位。
   build-images:
     needs: [detect]
     concurrency:
-      group: ci-${{ github.event.pull_request.number || github.ref }}-build-${{ matrix.image }}
+      group: ci-${{ github.event.pull_request.number || github.ref }}-build-images
       cancel-in-progress: true
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    strategy:
-      matrix:
-        include:
-          - image: flori-scheduler
-            dockerfile: docker/base.Dockerfile
-            context: .
-            target: scheduler
-          - image: flori-api
-            dockerfile: docker/base.Dockerfile
-            context: .
-            target: api
-          - image: flori-worker
-            dockerfile: docker/base.Dockerfile
-            context: .
-            target: worker
-          - image: flori-frontend  # nginx + 构建好的 Vue 静态资源(无 target 时建末 stage)
-            dockerfile: frontend/Dockerfile
-            context: ./frontend
     steps:
       - uses: actions/checkout@v6
-      - name: 是否需要构建本镜像
-        id: gate
-        run: |
-          if [ "${{ matrix.image }}" = "flori-frontend" ]; then
-            want="${{ needs.detect.outputs.frontend }}"
-          else
-            want="${{ needs.detect.outputs.backend }}"
-          fi
-          echo "build=$want" >> "$GITHUB_OUTPUT"
-          [ "$want" = "true" ] && echo "构建 ${{ matrix.image }}" || echo "跳过 ${{ matrix.image }}(无相关改动)"
+        if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
+      - name: 无运行镜像变化
+        if: needs.detect.outputs.backend != 'true' && needs.detect.outputs.frontend != 'true'
+        run: echo "跳过镜像预构建"
       - name: Lowercase owner
-        if: steps.gate.outputs.build == 'true'
+        if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
         run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
       - name: 稳定 pip 缓存(取真实版本 + 抹 pyproject version 为占位)
-        if: steps.gate.outputs.build == 'true'
+        if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
         run: |
           echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_ENV"
           sed -i 's/^version = .*/version = "0.0.0"/' pyproject.toml
       - uses: docker/setup-buildx-action@v4
-        if: steps.gate.outputs.build == 'true'
+        if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
       - name: Log in to ghcr.io
-        if: steps.gate.outputs.build == 'true' && github.ref == 'refs/heads/main'
+        if: (needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true') && github.ref == 'refs/heads/main'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Image tags
-        id: meta
-        if: steps.gate.outputs.build == 'true'
-        uses: docker/metadata-action@v6
-        with:
-          images: ghcr.io/${{ env.OWNER_LC }}/${{ matrix.image }}
-          tags: |
-            type=raw,value=latest
-            type=sha,format=short
-      - name: Build(不 push,只暖 buildcache)
-        if: steps.gate.outputs.build == 'true'
-        uses: docker/build-push-action@v7
-        with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
-          target: ${{ matrix.target }}
-          platforms: linux/amd64
-          push: false          # 只 build 暖缓存,不推;推由 push-images 在测过后做
-          build-args: |
-            USE_USTC_MIRROR=0
-            FLORI_BUILD_SHA=${{ github.sha }}
-            FLORI_VERSION=${{ env.FLORI_VERSION }}
-          cache-from: |
-            type=registry,ref=ghcr.io/${{ env.OWNER_LC }}/${{ matrix.image }}:buildcache
-            type=gha
-          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}/{1}:buildcache,mode=max', env.OWNER_LC, matrix.image) || 'type=gha,mode=max' }}
+      - name: Build 并行暖 cache
+        if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
+        run: >-
+          bash scripts/ci-images.sh warm
+          "${{ needs.detect.outputs.backend }}"
+          "${{ needs.detect.outputs.frontend }}"
 
-  # build/push 拆分之二:覆盖率门 + 前端测试通过且镜像缓存已暖后快速 push.仅 main.
+  # 覆盖率门后使用单 runner 并行 push，任一镜像失败则整体失败。
   push-images:
     needs: [coverage-gate, fe-test, integration, detect, build-images]
     if: github.ref == 'refs/heads/main'
-    # 已启动的同镜像发布不取消;新 run 发布当前 HEAD,可覆盖未启动的旧排队.
+    # 已启动的发布不取消;新 run 发布当前 HEAD,可覆盖未启动的旧排队.
     concurrency:
-      group: ci-${{ github.ref }}-release-${{ matrix.image }}
+      group: ci-${{ github.ref }}-release-images
       cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    strategy:
-      matrix:
-        include:
-          - { image: flori-scheduler, dockerfile: docker/base.Dockerfile, context: ., target: scheduler }
-          - { image: flori-api,       dockerfile: docker/base.Dockerfile, context: ., target: api }
-          - { image: flori-worker,    dockerfile: docker/base.Dockerfile, context: ., target: worker }
-          - { image: flori-frontend,  dockerfile: frontend/Dockerfile,    context: ./frontend }
     steps:
       - uses: actions/checkout@v6
-      - name: 是否需要 push 本镜像(同 detect 路径过滤)
-        id: gate
-        run: |
-          if [ "${{ matrix.image }}" = "flori-frontend" ]; then
-            want="${{ needs.detect.outputs.frontend }}"
-          else
-            want="${{ needs.detect.outputs.backend }}"
-          fi
-          echo "build=$want" >> "$GITHUB_OUTPUT"
+        if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
+      - name: 无运行镜像变化
+        if: needs.detect.outputs.backend != 'true' && needs.detect.outputs.frontend != 'true'
+        run: echo "跳过镜像发布"
       - name: Lowercase owner
-        if: steps.gate.outputs.build == 'true'
+        if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
         run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
       - name: 稳定 pip 缓存(取真实版本 + 抹 pyproject version 为占位)
-        if: steps.gate.outputs.build == 'true'
+        if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
         run: |
           echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_ENV"
           sed -i 's/^version = .*/version = "0.0.0"/' pyproject.toml
       - uses: docker/setup-buildx-action@v4
-        if: steps.gate.outputs.build == 'true'
+        if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
       - name: Log in to ghcr.io
-        if: steps.gate.outputs.build == 'true'
+        if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Image tags
-        id: meta
-        if: steps.gate.outputs.build == 'true'
-        uses: docker/metadata-action@v6
-        with:
-          images: ghcr.io/${{ env.OWNER_LC }}/${{ matrix.image }}
-          tags: |
-            type=raw,value=latest
-            type=sha,format=short
-      - name: Push(cache-from 已暖,秒级 build + push)
-        if: steps.gate.outputs.build == 'true'
-        uses: docker/build-push-action@v7
-        with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
-          target: ${{ matrix.target }}
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          build-args: |
-            USE_USTC_MIRROR=0
-            FLORI_BUILD_SHA=${{ github.sha }}
-            FLORI_VERSION=${{ env.FLORI_VERSION }}
-          cache-from: |
-            type=registry,ref=ghcr.io/${{ env.OWNER_LC }}/${{ matrix.image }}:buildcache
-            type=gha
+      - name: Push 四镜像(已暖 cache)
+        if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
+        run: >-
+          bash scripts/ci-images.sh push
+          "${{ needs.detect.outputs.backend }}"
+          "${{ needs.detect.outputs.frontend }}"

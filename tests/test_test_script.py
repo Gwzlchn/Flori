@@ -346,7 +346,7 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
     assert ".coverage.normal.12" in completed.stdout
 
     worker = subprocess.run(
-        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-worker", "4", "4"],
+        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-worker", "3", "3"],
         cwd=REPO,
         env=environment,
         capture_output=True,
@@ -356,8 +356,8 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
     assert worker.returncode == 0, worker.stderr
     assert "tests/test_canonical_evidence_e2e.py" in worker.stdout
     assert "--splitting-algorithm least_duration" in worker.stdout
-    assert "--splits 4 --group 4" in worker.stdout
-    assert ".coverage.worker.4" in worker.stdout
+    assert "--splits 3 --group 3" in worker.stdout
+    assert ".coverage.worker.3" in worker.stdout
 
     overflow = subprocess.run(
         ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "13", "12"],
@@ -369,3 +369,86 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
     )
     assert overflow.returncode == 2
     assert "CI shard 超出范围: 13/12" in overflow.stderr
+
+
+def test_ci_image_runner_launches_all_selected_builds_and_propagates_failure(
+    tmp_path: Path,
+) -> None:
+    fake_docker = tmp_path / "docker"
+    log = tmp_path / "docker.log"
+    fake_docker.write_text(
+        """#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+case "$*" in
+  *"flori-api:buildcache"*) exit 9 ;;
+esac
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    environment = os.environ.copy()
+    environment.update({
+        "PATH": f"{tmp_path}:{environment['PATH']}",
+        "FAKE_DOCKER_LOG": str(log),
+        "RUNNER_TEMP": str(tmp_path),
+        "OWNER_LC": "gwzlchn",
+        "FLORI_VERSION": "9.9.9",
+        "GITHUB_SHA": "1234567890abcdef",
+        "GITHUB_REF": "refs/heads/main",
+    })
+
+    completed = subprocess.run(
+        ["bash", str(REPO / "scripts/ci-images.sh"), "warm", "true", "true"],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert len(calls) == 4
+    assert sum("--file docker/base.Dockerfile" in call for call in calls) == 3
+    assert sum("--file frontend/Dockerfile" in call for call in calls) == 1
+    assert "flori-api warm failed" in completed.stderr
+    assert list(tmp_path.glob("flori-ci-images-warm-*")) == []
+
+
+def test_ci_image_push_uses_latest_and_short_sha_tags(tmp_path: Path) -> None:
+    fake_docker = tmp_path / "docker"
+    log = tmp_path / "docker.log"
+    fake_docker.write_text(
+        """#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    environment = os.environ.copy()
+    environment.update({
+        "PATH": f"{tmp_path}:{environment['PATH']}",
+        "FAKE_DOCKER_LOG": str(log),
+        "RUNNER_TEMP": str(tmp_path),
+        "OWNER_LC": "gwzlchn",
+        "FLORI_VERSION": "9.9.9",
+        "GITHUB_SHA": "1234567890abcdef",
+        "GITHUB_REF": "refs/heads/main",
+    })
+
+    completed = subprocess.run(
+        ["bash", str(REPO / "scripts/ci-images.sh"), "push", "true", "false"],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert len(calls) == 3
+    assert all("--push" in call for call in calls)
+    assert all(":latest" in call and ":sha-1234567" in call for call in calls)

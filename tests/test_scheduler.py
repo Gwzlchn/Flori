@@ -11,11 +11,11 @@ import pytest
 from tests.conftest import make_fakeredis
 from tests.pubsub_helpers import subscription_barrier
 from shared.config import AppConfig
-from shared.db import Database
 from shared.models import Collection, Job, JobStatus, StepStatus, Step, AIUsage, Worker
 from shared.step_base import def_digest_for, pipeline_digest_for
 from shared.storage import LocalStorage
 from scheduler.scheduler import Scheduler
+from tests.current_schema_db import clone_current_schema_database
 
 
 # Fixtures
@@ -29,9 +29,11 @@ def tmp_jobs_dir(tmp_path):
 
 
 @pytest.fixture
-def db(tmp_path):
-    d = Database(tmp_path / "test.db")
-    d.init_schema()
+def db(tmp_path, current_schema_db_template):
+    d = clone_current_schema_database(
+        current_schema_db_template,
+        tmp_path / "test.db",
+    )
     yield d
     d.close()
 

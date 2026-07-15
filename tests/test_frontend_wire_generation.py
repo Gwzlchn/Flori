@@ -5,7 +5,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from scripts.generate_selected_openapi import MANIFEST, build_snapshot, render_snapshot
+from scripts.generate_selected_openapi import (
+    MANIFEST,
+    SNAPSHOT,
+    build_snapshot,
+    render_snapshot,
+)
 
 
 def test_selected_manifest_is_unique_and_covers_declared_domains():
@@ -32,6 +37,10 @@ def test_selected_snapshot_generation_is_byte_deterministic():
     assert parsed == build_snapshot()
     assert set(parsed) == {"openapi", "info", "paths", "components"}
     assert "ErrorResponse" in parsed["components"]["schemas"]
+
+
+def test_selected_snapshot_matches_checked_in_contract():
+    assert SNAPSHOT.read_text(encoding="utf-8") == render_snapshot()
 
 
 def test_selected_snapshot_has_no_unselected_manual_boundaries():

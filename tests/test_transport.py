@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from tests.conftest import make_fakeredis
-from shared.db import Database
 from shared.runner_ops import (
     TaskLease,
     bind_task_lease,
@@ -23,15 +22,18 @@ from worker.transport import (
     WorkerContractError,
 )
 from worker.gateway_transport import GatewayTransport
+from tests.current_schema_db import clone_current_schema_database
 
 
 # Fixtures
 
 
 @pytest.fixture
-def db(tmp_path):
-    d = Database(tmp_path / "test.db")
-    d.init_schema()
+def db(tmp_path, current_schema_db_template):
+    d = clone_current_schema_database(
+        current_schema_db_template,
+        tmp_path / "test.db",
+    )
     yield d
     d.close()
 

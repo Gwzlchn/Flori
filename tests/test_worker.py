@@ -13,7 +13,6 @@ import pytest
 
 from tests.conftest import make_fakeredis
 from shared.config import AppConfig
-from shared.db import Database
 from shared.models import AITask, Job, LLMRequest, LLMResponse, Step, StepStatus
 from shared.storage import LocalStorage
 from worker.worker import (
@@ -21,6 +20,7 @@ from worker.worker import (
     compute_effective_timeout, _read_media_duration, _codex_logged_in,
 )
 from worker.transport import RedisTransport
+from tests.current_schema_db import clone_current_schema_database
 
 
 # Fixtures
@@ -34,9 +34,11 @@ def tmp_jobs_dir(tmp_path):
 
 
 @pytest.fixture
-def db(tmp_path):
-    d = Database(tmp_path / "test.db")
-    d.init_schema()
+def db(tmp_path, current_schema_db_template):
+    d = clone_current_schema_database(
+        current_schema_db_template,
+        tmp_path / "test.db",
+    )
     yield d
     d.close()
 

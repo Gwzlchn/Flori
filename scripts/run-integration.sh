@@ -94,6 +94,43 @@ ensure_image() {
 }
 
 run_core() {
+  partition="${INTEGRATION_PARTITION:-all}"
+  case "$partition" in
+    all)
+      redis_database=15
+      pytest_paths=(tests/integration)
+      coverage_file="$INTEGRATION_ARTIFACT_DIR/.coverage.integration"
+      junit_file="$INTEGRATION_ARTIFACT_DIR/junit-core.xml"
+      run_drill=1
+      ;;
+    data)
+      redis_database=14
+      pytest_paths=(
+        tests/integration/test_database_migration_recovery.py
+        tests/integration/test_dr_compatibility.py
+        tests/integration/test_retrieval_quality.py
+        tests/integration/test_sqlite_concurrency.py
+      )
+      coverage_file="$INTEGRATION_ARTIFACT_DIR/.coverage.integration.data"
+      junit_file="$INTEGRATION_ARTIFACT_DIR/junit-core-data.xml"
+      run_drill=1
+      ;;
+    services)
+      redis_database=15
+      pytest_paths=(
+        tests/integration/test_pipeline_search_closure.py
+        tests/integration/test_real_docker.py
+        tests/integration/test_real_redis.py
+        tests/integration/test_runner_gateway_e2e.py
+        tests/integration/test_study_suggestion_worker_e2e.py
+      )
+      coverage_file="$INTEGRATION_ARTIFACT_DIR/.coverage.integration.services"
+      junit_file="$INTEGRATION_ARTIFACT_DIR/junit-core-services.xml"
+      run_drill=0
+      ;;
+    *) echo "未知 integration 分组: $partition" >&2; return 2 ;;
+  esac
+  export INTEGRATION_REDIS_URL="redis://redis:6379/$redis_database"
   ensure_image "$INTEGRATION_TEST_IMAGE" test
   PULL_PIDS=()
   for image in "$DOCKER_TEST_IMAGE" "$FLORI_INTEGRATION_MINIO_IMAGE"; do
@@ -107,16 +144,18 @@ run_core() {
   done
   PULL_PIDS=()
   "${COMPOSE[@]}" up -d --wait --wait-timeout 30 redis
-  redis_container="$("${COMPOSE[@]}" ps -q redis)"
   drill_log="$INTEGRATION_HOST_TMP/redis-aof-restore.log"
-  FLORI_INTEGRATION_APP_IMAGE="$INTEGRATION_TEST_IMAGE" \
-    FLORI_INTEGRATION_REDIS_IMAGE="$(docker inspect --format '{{.Config.Image}}' "$redis_container")" \
-    "$REPO/tests/integration/redis_aof_restore.sh" >"$drill_log" 2>&1 &
-  DRILL_PID="$!"
+  if [ "$run_drill" = "1" ]; then
+    redis_container="$("${COMPOSE[@]}" ps -q redis)"
+    FLORI_INTEGRATION_APP_IMAGE="$INTEGRATION_TEST_IMAGE" \
+      FLORI_INTEGRATION_REDIS_IMAGE="$(docker inspect --format '{{.Config.Image}}' "$redis_container")" \
+      "$REPO/tests/integration/redis_aof_restore.sh" >"$drill_log" 2>&1 &
+    DRILL_PID="$!"
+  fi
   run_options=(run --rm)
   coverage_args=()
   if [ "${CI_COVERAGE:-0}" = "1" ]; then
-    run_options+=(-e "COVERAGE_FILE=$INTEGRATION_ARTIFACT_DIR/.coverage.integration")
+    run_options+=(-e "COVERAGE_FILE=$coverage_file")
     coverage_args+=(
       --cov=shared --cov=api --cov=scheduler --cov=worker --cov=steps
       --cov-branch --cov-report=
@@ -125,14 +164,18 @@ run_core() {
   set +e
   "${COMPOSE[@]}" "${run_options[@]}" test \
     pytest -p no:cacheprovider -m 'integration and not external' \
-      tests/integration --junitxml="$INTEGRATION_ARTIFACT_DIR/junit-core.xml" \
+      "${pytest_paths[@]}" --basetemp="/tmp/flori-pytest-$partition" \
+      --junitxml="$junit_file" \
       "${coverage_args[@]}" "$@"
   pytest_status=$?
-  wait "$DRILL_PID"
-  drill_status=$?
-  DRILL_PID=""
+  drill_status=0
+  if [ -n "$DRILL_PID" ]; then
+    wait "$DRILL_PID"
+    drill_status=$?
+    DRILL_PID=""
+  fi
   set -e
-  cat "$drill_log"
+  [ ! -f "$drill_log" ] || cat "$drill_log"
   if [ "$drill_status" -ne 0 ]; then
     return "$drill_status"
   fi

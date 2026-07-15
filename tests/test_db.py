@@ -17,12 +17,15 @@ from shared.models import (
     StepStatus,
     Worker,
 )
+from tests.current_schema_db import clone_current_schema_database
 
 
 @pytest.fixture
-def db(tmp_path):
-    d = Database(tmp_path / "test.db")
-    d.init_schema()
+def db(tmp_path, current_schema_db_template):
+    d = clone_current_schema_database(
+        current_schema_db_template,
+        tmp_path / "test.db",
+    )
     yield d
     d.close()
 

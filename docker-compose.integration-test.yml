@@ -19,7 +19,7 @@ services:
         USE_USTC_MIRROR: "${USE_USTC_MIRROR:-1}"
     working_dir: /app
     environment:
-      INTEGRATION_REDIS_URL: redis://redis:6379/15
+      INTEGRATION_REDIS_URL: ${INTEGRATION_REDIS_URL:-redis://redis:6379/15}
       INTEGRATION_HOST_TMP: ${INTEGRATION_HOST_TMP:-/tmp/flori-integration-host-tmp}
       INTEGRATION_ARTIFACT_DIR: ${INTEGRATION_ARTIFACT_DIR:-/tmp/flori-integration-artifacts}
       RETRIEVAL_QUALITY_MAIN_SHA: ${RETRIEVAL_QUALITY_MAIN_SHA:?RETRIEVAL_QUALITY_MAIN_SHA is required}
