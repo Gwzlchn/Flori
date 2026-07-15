@@ -1538,9 +1538,32 @@ Search、Ask、MCP 和内容详情共用同一个 evidence identity 与三态投
   exact quote，且每个 mapping 必须恰好绑定一个 source segment。整行 claim 只做 NFC 和有限
   空白归一后，必须逐字包含于该 segment 的 support text；不做 NFKC 兼容归一，也不对
   所有来源全局做 HTML entity 解码。同行多 ref，包括同源和跨模态组合，均不产生映射。
+- 跨语言翻译和语义改写不得放宽 v2 的 exact-quote 规则。producer 另写
+  `output/provenance_candidates/{smart|translated}.json` v2；顶层状态为
+  `ready|empty|no_source`，后两者是覆盖旧候选的显式 tombstone。每个候选必须绑定 note/source
+  SHA、唯一正文锚点及 prefix/suffix/section 上下文、单个 source segment、`transform_kind`、producer
+  component 和 invocation identity。候选文件只能作为待核验输入，不能直接进入 canonical evidence。
+- 四类 pipeline 在 producer 与 concepts 之间增加独立语义核验步：video 为
+  `11_semantic_attestation`，paper 为 `05_semantic_attestation`，article/audio 为
+  `04_semantic_attestation`。同一 job 的 smart/translated 候选合并为一次 AI 调用；批次总候选最多
+  100 条，UTF-8 prompt 最多 64 KiB，超限在调用前 fail-closed。只有 `confidence_ppm >= 950000`
+  且 decision 同时声明 `semantic_equivalent` 和 `critical_facts_match` 时，才生成
+  `verification_policy=semantic_attestation_v1` 的 provenance v3 mapping；数字、单位、货币、比例、
+  否定、主体或范围冲突一律拒绝，不得回退到 exact quote 或弱匹配。
+- 对独立语义核验上线前已经完成的存量任务，Scheduler 只在 pipeline candidate 显式登记旧 producer
+  和 sidecar 引入版本，且旧 `.done` 的 step、def digest、输出路径与版本边界全部匹配时，允许以空
+  canonical evidence 补 FTS。当前 pipeline digest、缺一侧 sidecar、未知 producer、引入版本之后的
+  marker 或任何畸形字段均 fail-closed。配置存在旧 producer 时只检查该 producer，不接受新 attestor
+  的虚构旧版本或缺少 def digest 的 marker；不得为历史笔记合成 evidence。
+- `output/provenance/semantic_batch.json` v1 是 commit-last 批次提交清单。它绑定 job/pipeline/batch、
+  attestor component、候选 manifest 和最终 provenance 的 path/SHA，以及实际 AI 日志记录中的
+  provider/model/session/prompt/response/decision。canonical reader 必须在受信 job 根目录内重读并
+  复算全部候选、最终产物、source manifest 和 AI 日志；日志最大 2 MiB、128 条记录。缺少提交清单、
+  部分发布、跨 job 重放、字段篡改、哈希重签、日志不一致或未知 schema 均 fail-closed。
 - reader 严格兼容 v1 direct original/transcript/mechanical；v1 smart 非空 mapping、额外字段、未知 policy、
-  改写/纯数字 claim、PDF 空白页或提取失败页、跨语言 translated/smart claim 均 fail-closed。
-  producer 和 Scheduler 分别复算，客户端不能提交或拼装 canonical mapping。
+  改写/纯数字 claim、PDF 空白页或提取失败页均 fail-closed。未经上述独立批次核验的跨语言
+  translated/smart claim 仍 fail-closed。producer、独立 attestor 和 Scheduler 分别复算，客户端不能
+  提交、重签或拼装 canonical mapping。
 
 ```json
 {
@@ -2543,8 +2566,8 @@ video:
 
 **各 content_type 的 job 链**（`needs` 推导）：
 
-- **video**:`01_download` → `03_scene` → `04_frames` → `05_dedup` → `06_ocr`;`02_whisper` 由 `01_download` 旁路触发;`08_punctuate` 汇合 `01_download` + `02_whisper` + `06_ocr`,一次发布含字幕与 OCR 图像段的来源清单;`09_mechanical` 再汇合 `06_ocr` + `07_danmaku` + `08_punctuate` → `10_evidence` → `11_smart` → `12_concepts` → `12_review`。`11_smart` 同时依赖 `09_mechanical` 与 `10_evidence`。
-- **paper**:`01_download` → `02_pdf_parse` → `03_sections` → `04_translate_paper`(条件) → `05_smart_paper` → `05_concepts` → `06_review`。(`04_figures` 已随 pymupdf 删除:arxiv 图随 HTML 进正文,pdf-only 图在 PDF 里模型直读;旧 job 的 `figures.json` 仍被 05/06 可选消费。)
+- **video**:`01_download` → `03_scene` → `04_frames` → `05_dedup` → `06_ocr`;`02_whisper` 由 `01_download` 旁路触发;`08_punctuate` 汇合 `01_download` + `02_whisper` + `06_ocr`,一次发布含字幕与 OCR 图像段的来源清单;`09_mechanical` 再汇合 `06_ocr` + `07_danmaku` + `08_punctuate` → `10_evidence` → `11_smart` → `11_semantic_attestation` → `12_concepts` → `12_review`。`11_smart` 同时依赖 `09_mechanical` 与 `10_evidence`。
+- **paper**:`01_download` → `02_pdf_parse` → `03_sections` → `04_translate_paper`(条件) → `05_smart_paper` → `05_semantic_attestation` → `05_concepts` → `06_review`。(`04_figures` 已随 pymupdf 删除:arxiv 图随 HTML 进正文,pdf-only 图在 PDF 里模型直读;旧 job 的 `figures.json` 仍被 05/06 可选消费。)
   - **源头(2026-07 重做,HTML 优先)**:`01_download` 对 arxiv 除 PDF 外抓 **HTML 源**(官方 `arxiv.org/html/<id>` → 404 再 `ar5iv`)→ `input/source.html`,页内图片下载到 job 根 `assets/`、引用重写 `assets/<名>`。`02_pdf_parse`(步名保留,语义=论文解析):有 `source.html` → LaTeXML HTML 转干净 Markdown(`steps/utils/html_paper.py`;`<math alttext>`→`$…$`/`$$…$$`,图+图注,表 best-effort)→ **`output/original.md`(02 产,03 不再覆盖)** + 扁平 `sections`;`parsed.json.source_kind="arxiv-html"`。无 `source.html` → `source_kind="pdf-only"`,不产 original.md(原文=内嵌 PDF;AI 步直喂 PDF,见下一提交)。
   - **JobDetail 新字段 `source_kind`**(`"arxiv-html"|"pdf-only"|null`,读 parsed.json best-effort):前端原文变体据此分流——`arxiv-html` 直接渲染 `original.md`(公式/图无损);其余内嵌 PDF。
   - `02_pdf_parse` 检测正文主语言写 `parsed.json.lang`(判据与文章共用 `steps.utils.lang`);**非中文**额外写 `intermediate/needs_translation.json`;元信息(title/authors/abstract/pages/lang/**venue**)经 JobDetail `media` 透出「元信息」tab(与文章同)。
@@ -2553,12 +2576,12 @@ video:
   - **pdf-only 直喂**:`02` 用 poppler `pdfinfo` 取页数(fail-loud)→ `parsed.json.pages` + 页区间伪章节(`sections[].kind="page-range"`,每 4 页);语言不可判 → `lang="unknown"` 且**恒写** `needs_translation.json`(用户约定:纯 PDF 默认要译)。`04_translate_paper` 按**每 2 页一块**逐块 `claude Read` 直读 PDF 翻译(prompt 模板 `templates/04_translate_paper.pdf.md`:标题层级固定映射/截断句照译/图表占位带页码 **`【图 N|第 p 页】`**,OSDI04 三轮人工对读验证);翻译聚合后**渲染含图页插真图**——对占位页码去重跑 `pdftoppm -r 110` → job `assets/pdf-page-<p>.png`,占位行下插 `![](assets/pdf-page-<p>.png)`(PDF 矢量图无法通用抽取,整页渲染兜底;单页失败留占位)。pdf-only 标题:PDF 内嵌 metadata 为垃圾(`"10things"`/`paper.dvi`/系列名)时,`02` 从 `pdftotext` 首页启发式提真标题(`shared/titles.py`),scheduler `metadata_sync` 对**已入库垃圾标题**允许被更优候选覆盖(同一套判定);`05_smart_paper` 无任何文本正文时同法 Read 直喂产笔记(≤60 页 cap)。`LLMRequest` 新增 `add_dirs`(claude-cli `--add-dir` 放行 PDF 目录,仅 allowed_tools 分支);worker 镜像新增 **poppler-utils**(Read 渲染 PDF 依赖 pdftoppm)。
   - `04_translate_paper`(AI,`rules.exists` 门控,仅非中文论文):**翻译源 = `output/original.md`**(arxiv-html 干净原文,图/公式已在原位;老 job 无 original.md 时回退 sections+figures 组装),分 chunk 忠实翻译为简体中文 → `output/translated.md`,供「译文」变体。步 `timeout: 7200`(多 chunk 串行,默认 600 必超)。
   - `05_smart_paper` `needs` 含 `04_translate_paper`:非中文论文笔记**基于 章节+图表+译文**(有译文则用译文正文);译文跳过(中文论文)依赖视为满足、读原文。
-- **article**：`01_download` → `02_parse_article` → `03_article_sections` → `04_smart_article`(可选,`smart_note`)/`04_translate_article`(条件) → `05_concepts`(必跑) → `06_review`(可选)。
+- **article**：`01_download` → `02_parse_article` → `03_article_sections` → `04_smart_article`(可选,`smart_note`)/`04_translate_article`(条件) → `04_semantic_attestation` → `05_concepts`(必跑) → `06_review`(可选)。
   - `02_parse_article` 检测正文主语言写入 `parsed.json` 的 `lang`(`zh`/`non-zh`/`unknown`);**非中文**正文额外写标记 `intermediate/needs_translation.json`。
   - **空正文护栏**:`02_parse_article` 抽出的正文【有效字符数】(去空白后)< `MIN_BODY_CHARS`(=200)→ 直接抛 `InputInvalidError`(`error_type=input_invalid`,不重试),**不写任何产物**,job 明确 `failed`。挡付费墙/JS 渲染/订阅残桩页(抽 0 或极短正文)流向 `03/04/05` 的 AI 步——否则 LLM 拿空正文幻觉编笔记/概念,污染概念库与图谱(`key_terms` 是图谱唯一概念来源)。命中常见付费墙/登录墙标记仅细化错误信息,判废只看正文长度。
   - `04_translate_article`(AI):`rules.exists: intermediate/needs_translation.json` 门控——**仅非中文文章触发**,把 `output/original.md` 忠实全文翻译为简体中文 → `output/translated.md`(保留 Markdown 结构与 `![](assets/…)` 图位),供前端「译文」tab。
   - `04_smart_article` / `05_concepts` **`needs` 含 `04_translate_article`**:非中文文章的中文产出**基于译文**(术语一致,不重复英→中)——`04_smart` 有 `translated.md` 则笔记基于译文;`05_concepts` 源优先级 **智能笔记 > 译文 > 原文章节**。译文被跳过(中文文章)时依赖视为满足,两步照常读原文。
-- **audio**:`01_download` → `02_whisper` → `03_transcript_parse` → `04_smart_podcast` → `05_concepts` → `05_review`。
+- **audio**:`01_download` → `02_whisper` → `03_transcript_parse` → `04_smart_podcast` → `04_semantic_attestation` → `05_concepts` → `05_review`。
   - `01_download`(`content_type=audio`):支持音频直链(`.mp3/.m4a/.wav/.aac/.flac`)与播客**页面 URL**(best-effort 从页面 `og:audio`/`<audio>`/`<source>`/`<enclosure>`/裸 `*.mp3` 链解析音频真链);下载后 **ffprobe 校验**(无可解码时长=拿到 HTML/404 → `InputInvalidError`,不再拖到 whisper 才报晦涩 ffmpeg 错)。
   - `02_whisper`:超时**随时长伸缩**(见 `timeout_per_min`/`timeout_max_sec`)——无 GPU 时长集 CPU 转写远超固定 1800s。worker 跑步前读 `input/metadata.json.duration_sec`,有效超时 = `clamp(max(timeout, ceil(分钟)*timeout_per_min), timeout_max_sec)`;缺 `timeout_per_min` 或读不到时长则用静态 `timeout`(行为不变)。机制通用,任何步均可在 pipeline 加这两字段启用。
   - `04_smart_podcast`:**不再 12k 截断**。转写 ≤ `SINGLE_PASS_CHAR_LIMIT`(24000 字)单次成稿;超过则 **map-reduce**(按 segment 边界分段提炼要点 → 合并成完整笔记),覆盖全集不丢正文。`result.meta` 增 `mode`(`single`/`map_reduce`)与 `chunks`。

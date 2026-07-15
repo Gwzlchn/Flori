@@ -14,12 +14,14 @@ from shared.provenance import (
     bounded_support_text,
     build_provenance_manifest,
     build_source_manifest,
+    extract_attestable_markers,
     extract_exact_quote_markers,
     make_segment_id,
     validate_source_manifest,
     write_provenance_manifest,
     write_source_manifest,
 )
+from steps.utils.provenance_attestation import producer_invocation_id
 from steps.utils.srt_parser import load_srt, pick_native_srt
 
 
@@ -376,6 +378,25 @@ def extract_smart_markers(
     """校验并移除中间 marker;只发布来源 support_text 的逐字 claim。"""
     return extract_exact_quote_markers(
         marked_text, source_manifest, error_prefix="video smart note",
+    )
+
+
+def extract_attestable_smart_markers(
+    marked_text: str,
+    source_manifest: Mapping[str, Any],
+    *,
+    ai,
+) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+    invocation_id = producer_invocation_id(ai)
+    if invocation_id is None:
+        cleaned, exact = extract_smart_markers(marked_text, source_manifest)
+        return cleaned, exact, []
+    return extract_attestable_markers(
+        marked_text,
+        source_manifest,
+        error_prefix="video smart note",
+        producer_component=ai.step_name,
+        producer_invocation_id=invocation_id,
     )
 
 

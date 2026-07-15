@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from shared.step_base import StepBase, file_hash
 from steps.article.provenance import (
-    extract_note_markers,
+    extract_attestable_note_markers,
     load_source_manifest,
     persist_note_provenance,
     source_reference_block,
 )
+from steps.utils.provenance_attestation import persist_semantic_candidates
 
 
 class SmartArticleStep(StepBase):
@@ -43,8 +44,11 @@ class SmartArticleStep(StepBase):
         result = self.ai.call(prompt, max_tokens=8192)
 
         candidates = []
+        semantic_candidates = []
         if source_manifest is not None:
-            result, candidates = extract_note_markers(result, source_manifest)
+            result, candidates, semantic_candidates = extract_attestable_note_markers(
+                result, source_manifest, ai=self.ai,
+            )
         elif "[[source:" in result:
             raise ValueError("article note contains a source marker without a manifest")
         rel = self.review.write_smart_note(result)   # 版本化落盘,含生成时间/方式/模型
@@ -55,11 +59,19 @@ class SmartArticleStep(StepBase):
             note_artifact=rel,
             candidates=candidates,
         )
+        candidate_state = persist_semantic_candidates(
+            self.job_dir,
+            pipeline="article",
+            note_type="smart",
+            note_artifact=rel,
+            candidates=semantic_candidates,
+        )
         return {"chars": len(result), "provider": self.ai.last_provider,
                 "model": self.ai.last_model, "note_file": rel,
                 "source": "translation" if body else "original",
                 "provenance_segments": provenance["segments"],
-                "provenance_status": provenance["status"]}
+                "provenance_status": provenance["status"],
+                "semantic_candidates": candidate_state["candidates"]}
 
     def _build_prompt(
         self,

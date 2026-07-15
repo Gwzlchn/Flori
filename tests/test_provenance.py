@@ -1,4 +1,4 @@
-"""来源分段与笔记 provenance v1/v2 的严格契约测试。"""
+"""来源分段与笔记 provenance v1/v2/v3 的严格契约测试。"""
 
 from __future__ import annotations
 
@@ -10,10 +10,14 @@ import pytest
 
 from shared.provenance import (
     EXACT_QUOTE_POLICY,
+    SEMANTIC_ATTESTATION_POLICY,
+    build_semantic_attestation_mapping,
+    build_provenance_candidate_manifest,
     build_provenance_manifest,
     build_source_manifest,
     canonical_json,
     canonical_json_bytes,
+    extract_attestable_markers,
     extract_exact_quote_markers,
     make_segment_id,
     sha256_bytes,
@@ -451,6 +455,293 @@ def test_exact_quote_policy_requires_bound_support_and_rejects_paraphrase() -> N
             source_manifest=source,
             segments=[mapping],
         )
+
+
+def _semantic_source() -> tuple[dict, str]:
+    source = _source_manifest()
+    segment = source["segments"][0]
+    segment["support_text"] = "The model does not exceed 5 kg."
+    segment["support_artifact"] = {
+        "kind": "video_subtitle",
+        "path": "input/subtitle.srt",
+        "sha256": "f" * 64,
+        "selector": {"index": 0},
+    }
+    return source, segment["segment_id"]
+
+
+def _semantic_mapping(source: dict, segment_id: str, **overrides) -> dict:
+    prompt = "independently compare source and claim"
+    decision = {
+        "candidate_id": "cand_" + "a" * 64,
+        "decision": "supported",
+        "confidence_ppm": 990_000,
+        "reason_codes": ["semantic_equivalent", "critical_facts_match"],
+    }
+    values = {
+        "anchor": "该模型不超过 5 kg。",
+        "prefix": "",
+        "suffix": "",
+        "section": "正文",
+        "source_segment_id": segment_id,
+        "source_manifest": source,
+        "transform_kind": "cross_language",
+        "producer_component": "04_translate_article",
+        "producer_invocation_id": "producer-session",
+        "candidate_id": decision["candidate_id"],
+        "job_id": source["job_id"],
+        "note_type": "translated",
+        "note_sha256": sha256_bytes("该模型不超过 5 kg。".encode()),
+        "source_manifest_sha256": sha256_bytes(canonical_json_bytes(source)),
+        "batch_id": "b" * 64,
+        "attestor_component": "04_semantic_attestation",
+        "attestor_invocation_id": "attestor-session",
+        "attestor_provider": "claude-cli",
+        "attestor_model": "claude-opus-4-8",
+        "attestor_prompt": prompt,
+        "ai_log_binding": {
+            "path": "output/ai_logs/04_semantic_attestation.jsonl",
+            "call_index": 0,
+            "record_sha256": "c" * 64,
+            "session_id": "attestor-session",
+            "provider": "claude-cli",
+            "model": "claude-opus-4-8",
+            "step": "04_semantic_attestation",
+            "job_id": source["job_id"],
+            "prompt_user_sha256": sha256_bytes(prompt.encode()),
+            "response_content_sha256": "d" * 64,
+            "response_decision_sha256": sha256_bytes(canonical_json_bytes(decision)),
+        },
+        "decision": "supported",
+        "confidence_ppm": 990_000,
+        "reason_codes": ["semantic_equivalent", "critical_facts_match"],
+    }
+    values.update(overrides)
+    return build_semantic_attestation_mapping(**values)
+
+
+def test_semantic_attestation_allows_bound_cross_language_claim() -> None:
+    source, segment_id = _semantic_source()
+    mapping = _semantic_mapping(source, segment_id)
+
+    built = build_provenance_manifest(
+        job_id="job-11c",
+        note_type="translated",
+        note_artifact="output/translated.md",
+        note_bytes=mapping["anchor"].encode(),
+        normalized_body=mapping["anchor"],
+        source_manifest_path="intermediate/source_segments.json",
+        source_manifest=source,
+        segments=[mapping],
+    )
+
+    assert built["schema_version"] == 3
+    assert built["segments"][0]["verification_policy"] == SEMANTIC_ATTESTATION_POLICY
+    assert built["segments"][0]["attestation"]["decision"] == "supported"
+
+
+@pytest.mark.parametrize(
+    ("source_text", "claim"),
+    [
+        (
+            "Model A has 5 GB and responds in 20 ms for 3 days with 4 people and 2 units.",
+            "模型 A 有 5 GB，响应耗时 20 ms，持续 3 天，有 4 人和 2 台。",
+        ),
+        ("Model A lacks 2 units.", "模型 A 没有 2 台。"),
+    ],
+)
+def test_semantic_protected_facts_accept_declared_unit_and_absence_aliases(
+    source_text: str, claim: str,
+) -> None:
+    source, segment_id = _semantic_source()
+    source["segments"][0]["support_text"] = source_text
+    mapping = _semantic_mapping(source, segment_id, anchor=claim)
+    assert mapping["attestation"]["critical_facts"]["claim_quantity_tokens"]
+
+
+@pytest.mark.parametrize(
+    ("source_text", "claim", "message"),
+    [
+        ("Model A uses 5widgets.", "模型 A 使用 5gadgets。", "quantity or unit"),
+        ("Model A uses at least 5 GB.", "模型 A 至多使用 5 GB。", "range"),
+        ("Model A usage increased by 5 GB.", "模型 A 使用量下降 5 GB。", "polarity"),
+        ("Model A uses 5 GB.", "模型 B 使用 5 GB。", "subject"),
+        ("Model A has 5 GB.", "模型 A 没有 5 GB。", "negation"),
+    ],
+)
+def test_semantic_protected_facts_fail_closed_on_unknown_units_and_role_changes(
+    source_text: str, claim: str, message: str,
+) -> None:
+    source, segment_id = _semantic_source()
+    source["segments"][0]["support_text"] = source_text
+    with pytest.raises(ValueError, match=message):
+        _semantic_mapping(source, segment_id, anchor=claim)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"attestor_invocation_id": "producer-session"}, "independent"),
+        ({"attestor_component": "04_translate_article"}, "independent"),
+        ({"confidence_ppm": 949_999}, "confidence"),
+        ({"attestor_provider": "unknown"}, "attestor"),
+        ({"decision": "rejected"}, "supported"),
+        ({"reason_codes": ["semantic_equivalent"]}, "critical_facts_match"),
+        ({"anchor": "该模型不超过 6 kg。"}, "quantity"),
+        ({"anchor": "该模型不超过 5 m。"}, "quantity"),
+        ({"anchor": "该模型超过 5 kg。"}, "negation"),
+    ],
+)
+def test_semantic_attestation_rejects_untrusted_or_conflicting_decision(
+    overrides: dict, message: str,
+) -> None:
+    source, segment_id = _semantic_source()
+    with pytest.raises(ValueError, match=message):
+        _semantic_mapping(source, segment_id, **overrides)
+
+
+def test_semantic_attestation_rejects_claim_source_policy_and_replay_tampering() -> None:
+    source, segment_id = _semantic_source()
+    mapping = _semantic_mapping(source, segment_id)
+    note = mapping["anchor"]
+
+    for mutate, message in [
+        (lambda value: value.update({"anchor": "该模型不超过 50 kg。"}), "claim"),
+        (lambda value: value.update({"verification_policy": "semantic_unknown_v9"}), "unsupported"),
+        (lambda value: value["attestation"].update({"policy_version": 99}), "policy"),
+        (lambda value: value["attestation"].update({"source_segment_id": "other"}), "source"),
+    ]:
+        candidate = copy.deepcopy(mapping)
+        mutate(candidate)
+        with pytest.raises(ValueError, match=message):
+            build_provenance_manifest(
+                job_id="job-11c",
+                note_type="translated",
+                note_artifact="output/translated.md",
+                note_bytes=note.encode(),
+                normalized_body=note,
+                source_manifest_path="intermediate/source_segments.json",
+                source_manifest=source,
+                segments=[candidate],
+            )
+
+    changed_source = copy.deepcopy(source)
+    changed_source["segments"][0]["support_text"] = "The model does not exceed 50 kg."
+    with pytest.raises(ValueError, match="source support"):
+        build_provenance_manifest(
+            job_id="job-11c",
+            note_type="translated",
+            note_artifact="output/translated.md",
+            note_bytes=note.encode(),
+            normalized_body=note,
+            source_manifest_path="intermediate/source_segments.json",
+            source_manifest=changed_source,
+            segments=[mapping],
+        )
+
+
+@pytest.mark.parametrize(
+    ("claim", "force_semantic", "expected_kind"),
+    [
+        ("该模型不超过 5 kg。", False, "cross_language"),
+        ("The model weighs at most 5 kg.", False, "paraphrase"),
+        ("该模型不超过 5 kg。", True, "translated"),
+    ],
+)
+def test_non_exact_marker_becomes_untrusted_semantic_candidate(
+    claim: str, force_semantic: bool, expected_kind: str,
+) -> None:
+    source, segment_id = _semantic_source()
+    token = segment_id.removeprefix("seg_")
+
+    clean, exact, semantic = extract_attestable_markers(
+        f"{claim} [[source:{token}]]",
+        source,
+        error_prefix="smart note",
+        producer_component="04_smart_article",
+        producer_invocation_id="producer-session",
+        force_semantic=force_semantic,
+    )
+
+    assert clean == claim
+    assert exact == []
+    assert len(semantic) == 1
+    assert semantic[0]["transform_kind"] == expected_kind
+    assert set(semantic[0]) == {
+        "anchor", "prefix", "suffix", "section", "source_segment_id",
+        "transform_kind", "producer_component", "producer_invocation_id",
+    }
+
+
+@pytest.mark.parametrize(
+    ("producer", "force_semantic", "source_text", "claim", "transform_kind"),
+    [
+        ("11_smart", False, "The model is efficient.", "The model works efficiently.", "paraphrase"),
+        ("11_smart", False, "The model is efficient.", "该模型效率很高。", "cross_language"),
+        ("05_smart_paper", False, "The model is efficient.", "The model works efficiently.", "paraphrase"),
+        ("05_smart_paper", False, "The model is efficient.", "该模型效率很高。", "cross_language"),
+        ("04_smart_article", False, "The model is efficient.", "The model works efficiently.", "paraphrase"),
+        ("04_smart_article", False, "The model is efficient.", "该模型效率很高。", "cross_language"),
+        ("04_smart_podcast", False, "The model is efficient.", "The model works efficiently.", "paraphrase"),
+        ("04_smart_podcast", False, "The model is efficient.", "该模型效率很高。", "cross_language"),
+        ("04_translate_paper", True, "The model is efficient.", "该模型效率很高。", "translated"),
+        ("04_translate_article", True, "The model is efficient.", "该模型效率很高。", "translated"),
+    ],
+)
+def test_ten_producer_transform_vertical_slices_emit_only_untrusted_candidates(
+    producer: str,
+    force_semantic: bool,
+    source_text: str,
+    claim: str,
+    transform_kind: str,
+) -> None:
+    source, segment_id = _semantic_source()
+    source["segments"][0]["support_text"] = source_text
+    token = segment_id.removeprefix("seg_")
+    clean, exact, semantic = extract_attestable_markers(
+        f"{claim} [[source:{token}]]",
+        source,
+        error_prefix="vertical slice",
+        producer_component=producer,
+        producer_invocation_id=f"{producer}-session",
+        force_semantic=force_semantic,
+    )
+    assert claim in clean and exact == []
+    assert len(semantic) == 1
+    assert semantic[0]["producer_component"] == producer
+    assert semantic[0]["transform_kind"] == transform_kind
+    assert "decision" not in semantic[0] and "attestor" not in semantic[0]
+
+
+def test_candidate_identity_binds_prefix_suffix_and_section() -> None:
+    source, segment_id = _semantic_source()
+    note = b"before Semantic claim after"
+    normalized = note.decode()
+    base = {
+        "anchor": "Semantic claim",
+        "prefix": "before ",
+        "suffix": " after",
+        "section": "smart",
+        "source_segment_id": segment_id,
+        "transform_kind": "paraphrase",
+        "producer_component": "11_smart",
+        "producer_invocation_id": "producer-session",
+    }
+    candidate_ids = []
+    for change in ({}, {"prefix": ""}, {"suffix": ""}, {"section": "other"}):
+        candidate = {**base, **change}
+        manifest = build_provenance_candidate_manifest(
+            job_id=source["job_id"],
+            note_type="smart",
+            note_artifact="output/smart.md",
+            note_bytes=note,
+            normalized_body=normalized,
+            source_manifest_path="intermediate/source_segments.json",
+            source_manifest=source,
+            candidates=[candidate],
+        )
+        candidate_ids.append(manifest["candidates"][0]["candidate_id"])
+    assert len(set(candidate_ids)) == 4
 
 
 def test_exact_quote_marker_requires_consecutive_refs_and_textual_claim() -> None:

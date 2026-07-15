@@ -317,11 +317,41 @@ class Scheduler:
     async def _index_first_available_note(self, job_id: str, candidates: list[dict]) -> None:
         return await self._effects._index_first_available_note(job_id, candidates)
 
-    async def _index_job_notes(self, job_id: str, note_type: str, rel: str, data: bytes, *, candidate_types: list[str] | None = None, source_manifest_path: str | None = None, provenance_path: str | None = None, provenance_step: str | None = None, provenance_since_version: str | None = None) -> None:
-        return await self._effects._index_job_notes(job_id, note_type, rel, data, candidate_types=candidate_types, source_manifest_path=source_manifest_path, provenance_path=provenance_path, provenance_step=provenance_step, provenance_since_version=provenance_since_version)
+    async def _index_job_notes(
+        self, job_id: str, note_type: str, rel: str, data: bytes, *,
+        candidate_types: list[str] | None = None,
+        source_manifest_path: str | None = None,
+        provenance_path: str | None = None,
+        provenance_step: str | None = None,
+        provenance_since_version: str | None = None,
+        legacy_provenance_step: str | None = None,
+        legacy_provenance_since_version: str | None = None,
+    ) -> None:
+        return await self._effects._index_job_notes(
+            job_id, note_type, rel, data,
+            candidate_types=candidate_types,
+            source_manifest_path=source_manifest_path,
+            provenance_path=provenance_path,
+            provenance_step=provenance_step,
+            provenance_since_version=provenance_since_version,
+            legacy_provenance_step=legacy_provenance_step,
+            legacy_provenance_since_version=legacy_provenance_since_version,
+        )
 
-    async def _is_legacy_provenance_completion(self, job: Job | None, provenance_path: str, *, provenance_step: str | None, provenance_since_version: str | None) -> bool:
-        return await self._effects._is_legacy_provenance_completion(job, provenance_path, provenance_step=provenance_step, provenance_since_version=provenance_since_version)
+    async def _is_legacy_provenance_completion(
+        self, job: Job | None, provenance_path: str, *,
+        provenance_step: str | None,
+        provenance_since_version: str | None,
+        legacy_provenance_step: str | None = None,
+        legacy_provenance_since_version: str | None = None,
+    ) -> bool:
+        return await self._effects._is_legacy_provenance_completion(
+            job, provenance_path,
+            provenance_step=provenance_step,
+            provenance_since_version=provenance_since_version,
+            legacy_provenance_step=legacy_provenance_step,
+            legacy_provenance_since_version=legacy_provenance_since_version,
+        )
 
     async def _reconcile_completed_effects(self, job_id: str) -> bool:
         return await self._effects._reconcile_completed_effects(job_id)

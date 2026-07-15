@@ -631,6 +631,13 @@ class TestCanonicalProvenanceCompatibility:
         "provenance_step": "produce",
         "provenance_since_version": "2",
     }
+    semantic_candidate = {
+        **candidate,
+        "provenance_step": "attest",
+        "provenance_since_version": "2",
+        "legacy_provenance_step": "produce",
+        "legacy_provenance_since_version": "2",
+    }
 
     def _make_scheduler(
         self, redis, db, tmp_path, tmp_jobs_dir, configs_dir, *, current_job: bool,
@@ -643,6 +650,14 @@ class TestCanonicalProvenanceCompatibility:
                 "intermediate/source_segments.json",
                 "output/provenance/smart.json",
             ],
+        }, {
+            "name": "attest", "pool": "ai", "depends_on": ["produce"],
+            "version": "2", "ai": {},
+            "outputs": ["output/provenance/smart.json"],
+        }, {
+            "name": "wrong", "pool": "cpu", "depends_on": [],
+            "version": "3", "ai": {},
+            "outputs": ["output/provenance/other.json"],
         }]}}
         config = make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir)
         scheduler = Scheduler(
@@ -701,9 +716,8 @@ class TestCanonicalProvenanceCompatibility:
             )
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("legacy_digest", [def_digest_for("1", {}), None])
     async def test_proven_legacy_completion_allows_empty_evidence_index(
-        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir, legacy_digest,
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
     ):
         scheduler, job_dir = self._make_scheduler(
             redis, db, tmp_path, tmp_jobs_dir, configs_dir, current_job=False,
@@ -713,8 +727,7 @@ class TestCanonicalProvenanceCompatibility:
             "input_hashes": {},
             "finished_at": "2026-07-01T00:00:00+00:00",
         }
-        if legacy_digest is not None:
-            done["def_digest"] = legacy_digest
+        done["def_digest"] = def_digest_for("1", {})
         (job_dir / ".produce.done").write_text(json.dumps(done))
 
         await scheduler._index_first_available_note(
@@ -744,6 +757,97 @@ class TestCanonicalProvenanceCompatibility:
             await scheduler._index_first_available_note(
                 "j_provenance_policy", [self.candidate],
             )
+
+    @pytest.mark.asyncio
+    async def test_pre_attestor_producer_marker_allows_legacy_reindex(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+    ):
+        scheduler, job_dir = self._make_scheduler(
+            redis, db, tmp_path, tmp_jobs_dir, configs_dir, current_job=False,
+        )
+        (job_dir / ".produce.done").write_text(json.dumps({
+            "step": "produce",
+            "input_hashes": {},
+            "def_digest": def_digest_for("1", {}),
+            "finished_at": "2026-07-01T00:00:00+00:00",
+        }))
+        await scheduler._index_first_available_note(
+            "j_provenance_policy", [self.semantic_candidate],
+        )
+
+        total, items = db.search_notes("legacy")
+        assert total == 1
+        assert items[0]["job_id"] == "j_provenance_policy"
+        assert db.canonical_evidence_ids_for_job("j_provenance_policy") == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("current_job", [True, False], ids=[
+        "current-pipeline", "post-introduction-marker",
+    ])
+    async def test_legacy_fallback_rejects_current_or_boundary_marker(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir, current_job,
+    ):
+        scheduler, job_dir = self._make_scheduler(
+            redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+            current_job=current_job,
+        )
+        (job_dir / ".produce.done").write_text(json.dumps({
+            "step": "produce",
+            "input_hashes": {},
+            "def_digest": def_digest_for("1" if current_job else "2", {}),
+            "finished_at": "2026-07-10T00:00:00+00:00",
+        }))
+
+        with pytest.raises(ValueError, match="missing canonical provenance sidecars"):
+            await scheduler._index_first_available_note(
+                "j_provenance_policy", [self.semantic_candidate],
+            )
+        assert db.search_notes("legacy")[0] == 0
+        assert db.canonical_evidence_ids_for_job("j_provenance_policy") == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("marker_name", "marker_step", "digest", "legacy_step"),
+        [
+            ("attest", "attest", def_digest_for("1", {}), "produce"),
+            ("attest", "attest", None, "produce"),
+            ("produce", "produce", None, "produce"),
+            ("produce", "attest", def_digest_for("1", {}), "produce"),
+            ("wrong", "wrong", def_digest_for("1", {}), "wrong"),
+            ("ghost", "ghost", def_digest_for("1", {}), "ghost"),
+        ],
+        ids=[
+            "forged-attestor-v1", "attestor-no-digest",
+            "legacy-no-digest", "wrong-marker-step",
+            "legacy-output-mismatch", "unknown-legacy-producer",
+        ],
+    )
+    async def test_semantic_legacy_fallback_rejects_unproven_markers(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+        marker_name, marker_step, digest, legacy_step,
+    ):
+        scheduler, job_dir = self._make_scheduler(
+            redis, db, tmp_path, tmp_jobs_dir, configs_dir, current_job=False,
+        )
+        done = {
+            "step": marker_step,
+            "input_hashes": {},
+            "finished_at": "2026-07-10T00:00:00+00:00",
+        }
+        if digest is not None:
+            done["def_digest"] = digest
+        (job_dir / f".{marker_name}.done").write_text(json.dumps(done))
+        candidate = {
+            **self.semantic_candidate,
+            "legacy_provenance_step": legacy_step,
+        }
+
+        with pytest.raises(ValueError, match="missing canonical provenance sidecars"):
+            await scheduler._index_first_available_note(
+                "j_provenance_policy", [candidate],
+            )
+        assert db.search_notes("legacy")[0] == 0
+        assert db.canonical_evidence_ids_for_job("j_provenance_policy") == []
 
 
 class TestWhisperPunctuateRecheck:

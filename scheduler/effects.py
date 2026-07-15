@@ -127,6 +127,14 @@ class EffectDispatcher:
                     str(candidate.get("provenance_since_version") or "").strip()
                     or None
                 ),
+                legacy_provenance_step=(
+                    str(candidate.get("legacy_provenance_step") or "").strip()
+                    or None
+                ),
+                legacy_provenance_since_version=(
+                    str(candidate.get("legacy_provenance_since_version") or "").strip()
+                    or None
+                ),
             )
             return
         raise FileNotFoundError(f"no indexable note artifact for {job_id}")
@@ -139,6 +147,8 @@ class EffectDispatcher:
         provenance_path: str | None = None,
         provenance_step: str | None = None,
         provenance_since_version: str | None = None,
+        legacy_provenance_step: str | None = None,
+        legacy_provenance_since_version: str | None = None,
     ) -> None:
         """把指定 Markdown 产物去标记后写入全文与证据块索引。"""
         md = data.decode("utf-8", errors="replace")
@@ -169,6 +179,10 @@ class EffectDispatcher:
                         job, provenance_path,
                         provenance_step=provenance_step,
                         provenance_since_version=provenance_since_version,
+                        legacy_provenance_step=legacy_provenance_step,
+                        legacy_provenance_since_version=(
+                            legacy_provenance_since_version
+                        ),
                     ):
                         raise ValueError(
                             f"missing canonical provenance sidecars: {note_type}"
@@ -232,8 +246,10 @@ class EffectDispatcher:
         *,
         provenance_step: str | None,
         provenance_since_version: str | None,
+        legacy_provenance_step: str | None = None,
+        legacy_provenance_since_version: str | None = None,
     ) -> bool:
-        """仅当 producer 的 .done 能证明它早于当前 sidecar 版本时放行空证据。"""
+        """仅当当前或显式旧 producer 的 .done 证明早期完成时放行空证据。"""
         if job is None or self.owner.storage is None:
             return False
         pipeline_steps = self.owner.config.pipelines.get(job.pipeline, {}).get("steps", [])
@@ -242,24 +258,47 @@ class EffectDispatcher:
             and job.pipeline_digest == pipeline_digest_for(pipeline_steps)
         ):
             return False
+        if legacy_provenance_step or legacy_provenance_since_version:
+            proofs = ((
+                legacy_provenance_step,
+                legacy_provenance_since_version,
+            ),)
+        else:
+            proofs = ((provenance_step, provenance_since_version),)
+        for step_name, since_version in proofs:
+            if await self._step_completion_predates_provenance(
+                job, pipeline_steps, provenance_path,
+                step_name=step_name, since_version=since_version,
+            ):
+                return True
+        return False
+
+    async def _step_completion_predates_provenance(
+        self,
+        job: Job,
+        pipeline_steps: list[dict],
+        provenance_path: str,
+        *,
+        step_name: str | None,
+        since_version: str | None,
+    ) -> bool:
+        """验证单个 producer marker 的 step、输出与版本边界。"""
         if (
-            not provenance_step
-            or not provenance_since_version
-            or not provenance_since_version.isdigit()
+            not step_name
+            or not since_version
+            or not since_version.isdigit()
         ):
             return False
         producers = [
             step for step in pipeline_steps
-            if step.get("name") == provenance_step
+            if step.get("name") == step_name
         ]
         if len(producers) != 1:
             return False
         producer = producers[0]
-        step_name = producer.get("name")
         raw_version = producer.get("version", "1")
         if (
-            not isinstance(step_name, str)
-            or not step_name
+            producer.get("name") != step_name
             or type(raw_version) not in (str, int)
         ):
             return False
@@ -267,7 +306,7 @@ class EffectDispatcher:
         if not version_text.isdigit():
             return False
         current_version = int(version_text)
-        provenance_since = int(provenance_since_version)
+        provenance_since = int(since_version)
         outputs = producer.get("outputs")
         if (
             provenance_since <= 1
@@ -300,8 +339,6 @@ class EffectDispatcher:
             return False
 
         stored_digest = done.get("def_digest")
-        if stored_digest is None:
-            return True
         if not isinstance(stored_digest, str):
             return False
         ai = producer.get("ai")

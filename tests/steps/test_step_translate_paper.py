@@ -7,6 +7,10 @@ import pytest
 
 from shared.errors import InputInvalidError
 from shared.models import LLMResponse
+from steps.article.provenance import (
+    build_pdf_source_manifest,
+    translation_reference_block,
+)
 from steps.paper.step_04_translate_paper import TranslatePaperStep
 from tests.steps.conftest import make_step_config
 
@@ -37,6 +41,26 @@ def _read_capability_config(tmp_path, step_name):
         "openai": {"type": "openai", "features": [], "models": ["gpt-test"]},
     }}
     return config
+
+
+def test_pdf_translation_reference_keeps_late_page_range_before_limit(tmp_path):
+    job_dir = _setup(tmp_path)
+    (job_dir / "input").mkdir()
+    (job_dir / "input/source.pdf").write_bytes(b"%PDF-late-pages")
+    supports = [f"Canonical support for page {page}." for page in range(1, 81)]
+    (job_dir / "intermediate/pdf_page_support.json").write_text(
+        json.dumps({"pages": supports}), encoding="utf-8",
+    )
+    manifest = build_pdf_source_manifest(
+        job_dir,
+        pipeline="paper",
+        page_count=80,
+        page_support_texts=supports,
+    )
+    assert manifest is not None
+    block = translation_reference_block(manifest, page_range=(70, 72))
+    assert "page 70" in block and "page 72" in block
+    assert "page 69" not in block and "page 1." not in block
 
 
 def test_validate_inputs_missing(tmp_path):

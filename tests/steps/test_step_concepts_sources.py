@@ -7,8 +7,8 @@ import json
 
 import pytest
 
-from steps.article.step_05_concepts import ArticleConceptsStep
 from shared.errors import InputInvalidError
+from steps.article.step_05_concepts import ArticleConceptsStep
 from tests.steps.conftest import make_job_dir, make_step_config
 
 

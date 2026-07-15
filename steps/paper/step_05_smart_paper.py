@@ -7,11 +7,12 @@ import json
 from shared.step_base import StepBase, file_hash
 from shared.storage import read_path_bounded
 from steps.article.provenance import (
-    extract_note_markers,
+    extract_attestable_note_markers,
     load_source_manifest,
     persist_note_provenance,
     source_reference_block,
 )
+from steps.utils.provenance_attestation import persist_semantic_candidates
 
 
 MAX_PAPER_TEXT_SOURCE_BYTES = 8 * 1024 * 1024
@@ -73,7 +74,9 @@ class SmartPaperStep(StepBase):
         # 结构化中文笔记常超默认 4096 output tokens,显式抬高上限防被静默截断(claude-cli 无视无害)。
         result = self.ai.call(prompt, max_tokens=8192)
 
-        result, candidates = self._clean_source_markers(result, source_manifest)
+        result, candidates, semantic_candidates = self._clean_source_markers(
+            result, source_manifest,
+        )
         rel = self.review.write_smart_note(result, image_assets=image_assets)  # 回填占位符 + 版本化落盘
         provenance = persist_note_provenance(
             self.job_dir,
@@ -82,11 +85,19 @@ class SmartPaperStep(StepBase):
             note_artifact=rel,
             candidates=candidates,
         )
+        candidate_state = persist_semantic_candidates(
+            self.job_dir,
+            pipeline="paper",
+            note_type="smart",
+            note_artifact=rel,
+            candidates=semantic_candidates,
+        )
         return {"chars": len(result), "provider": self.ai.last_provider,
                 "model": self.ai.last_model, "note_file": rel,
                 "source": body_source or "original",
                 "provenance_segments": provenance["segments"],
-                "provenance_status": provenance["status"]}
+                "provenance_status": provenance["status"],
+                "semantic_candidates": candidate_state["candidates"]}
 
     def _read_optional_text(self, rel_path: str) -> str | None:
         try:
@@ -139,7 +150,9 @@ class SmartPaperStep(StepBase):
         result = self.ai.call(prompt, max_tokens=8192,
                               allowed_tools=["Read"], add_dirs=[str(pdf.parent)],
                               max_turns=cap * 2 + 6)
-        result, candidates = self._clean_source_markers(result, source_manifest)
+        result, candidates, semantic_candidates = self._clean_source_markers(
+            result, source_manifest,
+        )
         rel = self.review.write_smart_note(result, image_assets=[])
         provenance = persist_note_provenance(
             self.job_dir,
@@ -148,10 +161,18 @@ class SmartPaperStep(StepBase):
             note_artifact=rel,
             candidates=candidates,
         )
+        candidate_state = persist_semantic_candidates(
+            self.job_dir,
+            pipeline="paper",
+            note_type="smart",
+            note_artifact=rel,
+            candidates=semantic_candidates,
+        )
         return {"chars": len(result), "provider": self.ai.last_provider,
                 "model": self.ai.last_model, "note_file": rel, "source": "pdf-direct",
                 "provenance_segments": provenance["segments"],
-                "provenance_status": provenance["status"]}
+                "provenance_status": provenance["status"],
+                "semantic_candidates": candidate_state["candidates"]}
 
     def _build_prompt(
         self,
@@ -203,12 +224,14 @@ class SmartPaperStep(StepBase):
         self,
         result: str,
         source_manifest: dict | None,
-    ) -> tuple[str, list[dict]]:
+    ) -> tuple[str, list[dict], list[dict]]:
         if source_manifest is not None:
-            return extract_note_markers(result, source_manifest)
+            return extract_attestable_note_markers(
+                result, source_manifest, ai=self.ai,
+            )
         if "[[source:" in result:
             raise ValueError("paper note contains a source marker without a manifest")
-        return result, []
+        return result, [], []
 
     def _render_section(self, section: dict, parts: list, level: int) -> None:
         from steps.utils.sections import render_section_tree

@@ -148,7 +148,12 @@ def test_pdf_only_direct_notes(tmp_path, monkeypatch):
         seen["prompt"], seen["kw"] = prompt, kw
         return "# 笔记"
     monkeypatch.setattr(step.ai, "call", fake_call)
-    monkeypatch.setattr(step.review, "write_smart_note", lambda text, image_assets=None: "output/versions/x.md")
+    def write_note(text, image_assets=None):
+        path = job_dir / "output/versions/x.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return "output/versions/x.md"
+    monkeypatch.setattr(step.review, "write_smart_note", write_note)
     r = step.execute()
     assert r["source"] == "pdf-direct"
     assert seen["kw"]["allowed_tools"] == ["Read"]
@@ -213,10 +218,12 @@ def test_text_body_snapshot_survives_disappearance_without_read_tool(tmp_path, m
             )
 
     monkeypatch.setattr(step, "_read_optional_text", present_snapshot_then_disappear)
-    monkeypatch.setattr(
-        step.review, "write_smart_note",
-        lambda _text, image_assets=None: "output/versions/captured.md",
-    )
+    def write_captured(text, image_assets=None):
+        path = job_dir / "output/versions/captured.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return "output/versions/captured.md"
+    monkeypatch.setattr(step.review, "write_smart_note", write_captured)
     step.ai.gateway = Gateway()
     result = step.execute()
     assert result["source"] == "original"

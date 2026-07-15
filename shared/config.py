@@ -155,6 +155,14 @@ def validate_provenance_pipeline_contract(pipelines: dict) -> None:
                         "provenance_step", "provenance_since_version",
                     )
                     if not any(field in candidate for field in sidecar_fields):
+                        if any(field in candidate for field in (
+                            "legacy_provenance_step",
+                            "legacy_provenance_since_version",
+                        )):
+                            raise ValueError(
+                                f"legacy provenance requires sidecar fields: "
+                                f"{pipeline}/{owner.get('name')}/{index}"
+                            )
                         continue
                     if any(
                         not isinstance(candidate.get(field), str)
@@ -165,40 +173,63 @@ def validate_provenance_pipeline_contract(pipelines: dict) -> None:
                             f"provenance candidate fields are invalid: "
                             f"{pipeline}/{owner.get('name')}/{index}"
                         )
-                    producer_name = candidate["provenance_step"]
-                    producer = step_by_name.get(producer_name)
-                    if producer is None:
-                        raise ValueError(
-                            f"provenance producer step is unknown: "
-                            f"{pipeline}/{producer_name}"
-                        )
-                    since_text = candidate["provenance_since_version"]
-                    current_version = producer.get("version", "1")
-                    current_text = (
-                        str(current_version)
-                        if type(current_version) in (str, int) else ""
+                    legacy_fields = (
+                        "legacy_provenance_step",
+                        "legacy_provenance_since_version",
                     )
-                    if (
-                        not since_text.isdigit()
-                        or int(since_text) < 1
-                        or not current_text.isdigit()
-                        or int(current_text) < int(since_text)
+                    has_legacy = any(field in candidate for field in legacy_fields)
+                    if has_legacy and any(
+                        not isinstance(candidate.get(field), str)
+                        or not candidate[field].strip()
+                        for field in legacy_fields
                     ):
                         raise ValueError(
-                            f"provenance version boundary is invalid: "
-                            f"{pipeline}/{producer_name}"
+                            f"legacy provenance boundary fields are invalid: "
+                            f"{pipeline}/{owner.get('name')}/{index}"
                         )
-                    outputs = producer.get("outputs")
-                    provenance_path = candidate["provenance"]
-                    if not isinstance(outputs, list) or not any(
-                        isinstance(pattern, str)
-                        and fnmatch.fnmatch(provenance_path, pattern)
-                        for pattern in outputs
-                    ):
-                        raise ValueError(
-                            f"provenance output is not declared by producer: "
-                            f"{pipeline}/{producer_name}"
+                    boundaries = [
+                        ("provenance_step", "provenance_since_version"),
+                    ]
+                    if has_legacy:
+                        boundaries.append((
+                            "legacy_provenance_step",
+                            "legacy_provenance_since_version",
+                        ))
+                    for step_field, since_field in boundaries:
+                        producer_name = candidate[step_field]
+                        producer = step_by_name.get(producer_name)
+                        if producer is None:
+                            raise ValueError(
+                                f"provenance producer step is unknown: "
+                                f"{pipeline}/{producer_name}"
+                            )
+                        since_text = candidate[since_field]
+                        current_version = producer.get("version", "1")
+                        current_text = (
+                            str(current_version)
+                            if type(current_version) in (str, int) else ""
                         )
+                        if (
+                            not since_text.isdigit()
+                            or int(since_text) < 1
+                            or not current_text.isdigit()
+                            or int(current_text) < int(since_text)
+                        ):
+                            raise ValueError(
+                                f"provenance version boundary is invalid: "
+                                f"{pipeline}/{producer_name}"
+                            )
+                        outputs = producer.get("outputs")
+                        provenance_path = candidate["provenance"]
+                        if not isinstance(outputs, list) or not any(
+                            isinstance(pattern, str)
+                            and fnmatch.fnmatch(provenance_path, pattern)
+                            for pattern in outputs
+                        ):
+                            raise ValueError(
+                                f"provenance output is not declared by producer: "
+                                f"{pipeline}/{producer_name}"
+                            )
 
 
 def resolve_env_vars(text: str) -> str:

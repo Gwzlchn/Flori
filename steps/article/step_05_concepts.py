@@ -205,6 +205,7 @@ class ArticleConceptsStep(StepBase):
         result, parse_failed = self.ai.call_json(
             prompt, fallback={"summary": "", "key_terms": []},
         )
+        concept_provider, concept_model = self.ai.provider_model()
         key_terms = attach_concept_source_segments(
             result.get("key_terms") or [],
             job_id=self.job_dir.name,
@@ -236,8 +237,8 @@ class ArticleConceptsStep(StepBase):
             "evidence_note_type": source.note_type,
             "summary_len": len(out["summary"]),
             "parse_failed": parse_failed,
-            "provider": self.ai.last_provider,
-            "model": self.ai.last_model,
+            "provider": concept_provider,
+            "model": concept_model,
         }
 
     def _build_prompt(self, text: str) -> str:

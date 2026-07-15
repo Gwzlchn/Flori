@@ -14,12 +14,14 @@ from shared.provenance import (
     bounded_support_text,
     build_provenance_manifest,
     build_source_manifest,
+    extract_attestable_markers,
     extract_exact_quote_markers,
     make_segment_id,
     validate_source_manifest,
     write_provenance_manifest,
     write_source_manifest,
 )
+from steps.utils.provenance_attestation import producer_invocation_id
 
 
 SOURCE_MANIFEST_PATH = "intermediate/source_segments.json"
@@ -223,6 +225,43 @@ def source_reference_block(source_manifest: Mapping[str, Any] | None) -> str:
     return "".join(lines) if len(lines) > 2 else ""
 
 
+def translation_reference_block(
+    source_manifest: Mapping[str, Any] | None,
+    *,
+    source_text: str | None = None,
+    page_range: tuple[int, int] | None = None,
+) -> str:
+    """给译文 producer 只注入当前 chunk/page 的 canonical marker。"""
+    if source_manifest is None:
+        return ""
+    lines = [
+        "\n--- 译文证据坐标 ---\n",
+        "每个被翻译的来源段,在对应译文句末原样保留一个 [[source:ID]]。"
+        "不得把 marker 单独成行,不得重复或编造;marker 落盘前会移除。\n",
+    ]
+    normalized_source = re.sub(r"\s+", " ", source_text or "").strip()
+    added = 0
+    for segment in source_manifest["segments"]:
+        support = segment.get("support_text")
+        if type(support) is not str or not support.strip():
+            continue
+        locator = segment["locator"]
+        if page_range is not None:
+            if locator["kind"] != "pdf" or not page_range[0] <= locator["page"] <= page_range[1]:
+                continue
+        elif source_text is not None:
+            normalized_support = re.sub(r"\s+", " ", support).strip()
+            if normalized_support not in normalized_source:
+                continue
+        excerpt = re.sub(r"\s+", " ", support).strip()[:_MAX_REFERENCE_CHARS]
+        excerpt = excerpt.replace("[[source:", "[source:")
+        lines.append(f"[[source:{_source_token(segment['segment_id'])}]] {excerpt}\n")
+        added += 1
+        if added >= _MAX_HTML_SEGMENTS:
+            break
+    return "".join(lines) if len(lines) > 2 else ""
+
+
 def extract_note_markers(
     marked_text: str,
     source_manifest: Mapping[str, Any],
@@ -230,6 +269,28 @@ def extract_note_markers(
     """校验并移除内部 marker;只发布来源 support_text 的逐字 claim。"""
     return extract_exact_quote_markers(
         marked_text, source_manifest, error_prefix="note",
+    )
+
+
+def extract_attestable_note_markers(
+    marked_text: str,
+    source_manifest: Mapping[str, Any],
+    *,
+    ai,
+    force_semantic: bool = False,
+) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+    """按真实 producer session 分流 exact 与下游 concepts 待证明候选。"""
+    invocation_id = producer_invocation_id(ai)
+    if invocation_id is None:
+        cleaned, exact = extract_note_markers(marked_text, source_manifest)
+        return cleaned, exact, []
+    return extract_attestable_markers(
+        marked_text,
+        source_manifest,
+        error_prefix="note",
+        producer_component=ai.step_name,
+        producer_invocation_id=invocation_id,
+        force_semantic=force_semantic,
     )
 
 

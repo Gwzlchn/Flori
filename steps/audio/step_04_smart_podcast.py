@@ -9,12 +9,13 @@ from __future__ import annotations
 from shared.note_text import markdown_to_index_text
 from shared.step_base import StepBase, file_hash
 from steps.audio.provenance import (
-    extract_smart_markers,
+    extract_attestable_smart_markers,
     load_audio_source_manifest,
     persist_audio_note_provenance,
     smart_provenance_segments,
     smart_reference_block,
 )
+from steps.utils.provenance_attestation import persist_semantic_candidates
 
 # 单次喂 AI 的转写正文上限:不超过它就一次成稿(短集保持原质量);超过则分段 map-reduce。
 # 现代模型上下文足够,阈值取宽,常见集仍走单次,只有超长集才分段。
@@ -56,8 +57,11 @@ class SmartPodcastStep(StepBase):
         (self.job_dir / "output" / "provenance" / "smart.json").unlink(missing_ok=True)
         source_manifest = load_audio_source_manifest(self.job_dir)
         candidates = []
+        semantic_candidates = []
         if source_manifest is not None:
-            result, candidates = extract_smart_markers(result, source_manifest)
+            result, candidates, semantic_candidates = extract_attestable_smart_markers(
+                result, source_manifest, ai=self.ai,
+            )
         elif "[[source:" in result:
             raise ValueError("audio smart note contains a source marker without a source manifest")
 
@@ -74,11 +78,19 @@ class SmartPodcastStep(StepBase):
             note_artifact=rel,
             provenance_segments=mappings,
         )
+        candidate_state = persist_semantic_candidates(
+            self.job_dir,
+            pipeline="audio",
+            note_type="smart",
+            note_artifact=rel,
+            candidates=semantic_candidates,
+        )
         return {"chars": len(result), "mode": mode, "chunks": chunks_n,
                 "provider": self.ai.last_provider, "model": self.ai.last_model,
                 "note_file": rel,
                 "provenance_segments": provenance["segments"],
-                "provenance_status": provenance["status"]}
+                "provenance_status": provenance["status"],
+                "semantic_candidates": candidate_state["candidates"]}
 
     # 单次成稿
 

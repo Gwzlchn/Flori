@@ -19,16 +19,24 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 from .provenance import (
     DIRECT_LOCATOR_POLICY,
     EXACT_QUOTE_POLICY,
+    MAX_SEMANTIC_AI_LOG_BYTES,
+    MAX_SEMANTIC_AI_LOG_RECORDS,
+    SEMANTIC_ATTESTATION_POLICY,
+    SEMANTIC_BATCH_COMMIT_PATH,
     MAX_NOTE_MAPPINGS,
     MAX_PROVENANCE_BYTES,
     MAX_SOURCE_ARTIFACTS,
     MAX_SOURCE_SEGMENTS,
     canonical_json,
     canonical_json_bytes,
+    build_semantic_attestation_prompt,
+    semantic_attestation_batch_id,
     sha256_bytes,
     validate_locator,
     validate_exact_quote_mapping,
     validate_provenance_manifest,
+    validate_provenance_candidate_manifest,
+    validate_semantic_batch_commit,
     validate_source_manifest,
 )
 from .source_support import (
@@ -1307,6 +1315,209 @@ def canonical_evidence_content_identity(
     return identity
 
 
+async def _verify_semantic_attestation_batch(
+    *,
+    job_id: str,
+    pipeline: str,
+    note_type: str,
+    note_path: str,
+    note_data: bytes,
+    normalized_body: str,
+    provenance_path: str,
+    provenance_data: bytes,
+    source_manifest: dict[str, Any],
+    mappings: list[dict[str, Any]],
+    read_file: Callable[[str, int], Awaitable[bytes | None]],
+) -> None:
+    """从 commit、candidate 和真实 ai_logs 重建完整 semantic 信任链。"""
+    commit_data = await read_file(SEMANTIC_BATCH_COMMIT_PATH, MAX_CANONICAL_SIDECAR_BYTES)
+    if not isinstance(commit_data, bytes) or len(commit_data) > MAX_CANONICAL_SIDECAR_BYTES:
+        raise CanonicalEvidenceError("semantic batch commit is missing or exceeds size limit")
+    commit_raw = _load_canonical_sidecar(commit_data, name="semantic batch commit")
+    try:
+        commit = validate_semantic_batch_commit(commit_raw)
+    except ValueError as exc:
+        raise CanonicalEvidenceError(str(exc)) from exc
+    if (
+        commit["job_id"] != job_id
+        or commit["pipeline"] != pipeline
+        or commit_data != canonical_json_bytes(commit)
+    ):
+        raise CanonicalEvidenceError("semantic batch commit identity is invalid")
+
+    candidate_manifests: list[dict[str, Any]] = []
+    candidates_by_id: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+    for artifact in commit["candidate_manifests"]:
+        data = await read_file(artifact["path"], MAX_CANONICAL_SIDECAR_BYTES)
+        if (
+            not isinstance(data, bytes)
+            or len(data) > MAX_CANONICAL_SIDECAR_BYTES
+            or _sha256_hex(data) != artifact["sha256"]
+        ):
+            raise CanonicalEvidenceError("semantic candidate artifact changed")
+        raw = _load_canonical_sidecar(data, name="semantic candidates")
+        candidate_note_path = raw.get("note_artifact")
+        if type(candidate_note_path) is not str:
+            raise CanonicalEvidenceError("semantic candidate note path is invalid")
+        if raw.get("note_type") == note_type and candidate_note_path == note_path:
+            candidate_note_data = note_data
+            candidate_body = normalized_body
+        else:
+            candidate_note_data = await read_file(
+                candidate_note_path, MAX_CANONICAL_SIDECAR_BYTES,
+            )
+            if (
+                not isinstance(candidate_note_data, bytes)
+                or not candidate_note_data
+                or len(candidate_note_data) > MAX_CANONICAL_SIDECAR_BYTES
+            ):
+                raise CanonicalEvidenceError("semantic candidate note is unreadable")
+            try:
+                from .note_text import markdown_to_index_text
+                candidate_body = markdown_to_index_text(candidate_note_data.decode("utf-8"))
+            except UnicodeDecodeError as exc:
+                raise CanonicalEvidenceError("semantic candidate note is not UTF-8") from exc
+        try:
+            manifest = validate_provenance_candidate_manifest(
+                raw,
+                source_manifest=source_manifest,
+                note_bytes=candidate_note_data,
+                normalized_body=candidate_body,
+            )
+        except ValueError as exc:
+            raise CanonicalEvidenceError(str(exc)) from exc
+        if manifest["job_id"] != job_id or manifest["note_type"] != artifact["note_type"]:
+            raise CanonicalEvidenceError("semantic candidate identity is invalid")
+        candidate_manifests.append(manifest)
+        for candidate in manifest["candidates"]:
+            if candidate["candidate_id"] in candidates_by_id:
+                raise CanonicalEvidenceError("semantic candidate id is duplicated across batch")
+            candidates_by_id[candidate["candidate_id"]] = (manifest, candidate)
+
+    for artifact in commit["provenance_manifests"]:
+        if artifact["note_type"] == note_type and artifact["path"] == provenance_path:
+            data = provenance_data
+        else:
+            data = await read_file(artifact["path"], MAX_CANONICAL_SIDECAR_BYTES)
+        if (
+            not isinstance(data, bytes)
+            or len(data) > MAX_CANONICAL_SIDECAR_BYTES
+            or _sha256_hex(data) != artifact["sha256"]
+        ):
+            raise CanonicalEvidenceError("semantic batch provenance is incomplete")
+
+    ai_log_binding = commit.get("ai_log")
+    if not isinstance(ai_log_binding, dict):
+        raise CanonicalEvidenceError("semantic batch has no attestor log")
+    expected_batch_id = semantic_attestation_batch_id(
+        job_id=job_id,
+        pipeline=pipeline,
+        attestor_component=commit["attestor_component"],
+        candidate_manifests=commit["candidate_manifests"],
+        ai_log=ai_log_binding,
+    )
+    if expected_batch_id != commit["batch_id"]:
+        raise CanonicalEvidenceError("semantic batch identity changed")
+    log_data = await read_file(ai_log_binding["path"], MAX_SEMANTIC_AI_LOG_BYTES)
+    if not isinstance(log_data, bytes) or len(log_data) > MAX_SEMANTIC_AI_LOG_BYTES:
+        raise CanonicalEvidenceError("semantic attestor ai_log is missing or exceeds size limit")
+    lines = [line for line in log_data.splitlines() if line.strip()]
+    if len(lines) > MAX_SEMANTIC_AI_LOG_RECORDS:
+        raise CanonicalEvidenceError("semantic attestor ai_log has too many records")
+    matched: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise CanonicalEvidenceError("semantic attestor ai_log is invalid JSONL") from exc
+        if not isinstance(record, dict):
+            raise CanonicalEvidenceError("semantic attestor ai_log record is invalid")
+        if record.get("call_index") == ai_log_binding["call_index"]:
+            matched.append(record)
+    if len(matched) != 1:
+        raise CanonicalEvidenceError("semantic attestor ai_log record is not unique")
+    record = matched[0]
+    if _sha256_hex(canonical_json_bytes(record)) != ai_log_binding["record_sha256"]:
+        raise CanonicalEvidenceError("semantic attestor ai_log record changed")
+    routing = record.get("routing") or {}
+    prompt = (record.get("prompt") or {}).get("rendered", {}).get("user")
+    response_content = (record.get("output") or {}).get("content")
+    if (
+        record.get("ok") is not True
+        or record.get("job_id") != job_id
+        or record.get("step") != commit["attestor_component"]
+        or record.get("session_id") != ai_log_binding["session_id"]
+        or routing.get("provider") != ai_log_binding["provider"]
+        or routing.get("model") != ai_log_binding["model"]
+        or type(prompt) is not str
+        or _sha256_hex(prompt.encode("utf-8")) != ai_log_binding["prompt_user_sha256"]
+        or type(response_content) is not str
+        or _sha256_hex(response_content.encode("utf-8"))
+        != ai_log_binding["response_content_sha256"]
+    ):
+        raise CanonicalEvidenceError("semantic attestor ai_log identity changed")
+    expected_prompt = build_semantic_attestation_prompt(candidate_manifests, source_manifest)
+    if prompt != expected_prompt:
+        raise CanonicalEvidenceError("semantic attestor rendered prompt changed")
+    try:
+        response = json.loads(response_content)
+        decisions = response["decisions"]
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise CanonicalEvidenceError("semantic attestor response is invalid") from exc
+    if (
+        type(decisions) is not list
+        or _sha256_hex(canonical_json_bytes(decisions))
+        != ai_log_binding["response_decision_sha256"]
+    ):
+        raise CanonicalEvidenceError("semantic attestor decisions changed")
+    decision_by_id = {
+        item.get("candidate_id"): item for item in decisions if isinstance(item, dict)
+    }
+    if len(decision_by_id) != len(decisions) or set(decision_by_id) != set(candidates_by_id):
+        raise CanonicalEvidenceError("semantic attestor decision set changed")
+
+    source_sha = _sha256_hex(canonical_json_bytes(source_manifest))
+    for mapping in mappings:
+        if mapping.get("verification_policy") != SEMANTIC_ATTESTATION_POLICY:
+            continue
+        attestation = mapping.get("attestation") or {}
+        candidate_id = attestation.get("candidate_id")
+        bound = candidates_by_id.get(candidate_id)
+        if bound is None:
+            raise CanonicalEvidenceError("semantic attestation candidate is missing")
+        manifest, candidate = bound
+        decision = decision_by_id[candidate_id]
+        per_log = attestation.get("ai_log") or {}
+        common_log = {key: value for key, value in per_log.items() if key != "response_decision_sha256"}
+        expected_common = {key: value for key, value in ai_log_binding.items() if key != "response_decision_sha256"}
+        if (
+            attestation.get("batch_id") != commit["batch_id"]
+            or attestation.get("job_id") != job_id
+            or attestation.get("note_type") != note_type
+            or attestation.get("note_sha256") != _sha256_hex(note_data)
+            or attestation.get("source_manifest_sha256") != source_sha
+            or manifest["note_type"] != note_type
+            or candidate["anchor"] != mapping.get("anchor")
+            or candidate["prefix"] != mapping.get("prefix")
+            or candidate["suffix"] != mapping.get("suffix")
+            or candidate["section"] != mapping.get("section")
+            or candidate["source_segment_id"] not in mapping.get("source_segment_ids", [])
+            or candidate["transform_kind"] != attestation.get("transform_kind")
+            or candidate["producer_component"] != attestation.get("producer_component")
+            or candidate["producer_invocation_id"] != attestation.get("producer_invocation_id")
+            or common_log != expected_common
+            or per_log.get("response_decision_sha256")
+            != _sha256_hex(canonical_json_bytes(decision))
+            or decision.get("decision") != "supported"
+            or decision.get("confidence_ppm") != attestation.get("confidence_ppm")
+            or decision.get("reason_codes") != attestation.get("reason_codes")
+            or set(decision) != {
+                "candidate_id", "decision", "confidence_ppm", "reason_codes",
+            }
+        ):
+            raise CanonicalEvidenceError("semantic attestation binding changed")
+
+
 async def build_canonical_evidence_records_with_reader(
     *,
     job_id: str,
@@ -1418,6 +1629,24 @@ async def build_canonical_evidence_records_with_reader(
     ):
         raise CanonicalEvidenceError("note provenance identity is invalid")
     raw_mappings = provenance["segments"]
+    if any(
+        mapping.get("verification_policy") == SEMANTIC_ATTESTATION_POLICY
+        for mapping in raw_mappings
+        if isinstance(mapping, dict)
+    ):
+        await _verify_semantic_attestation_batch(
+            job_id=job_id,
+            pipeline=pipeline,
+            note_type=note_type,
+            note_path=note_path,
+            note_data=note_data,
+            normalized_body=normalized_body,
+            provenance_path=provenance_path,
+            provenance_data=provenance_data,
+            source_manifest=source_manifest,
+            mappings=raw_mappings,
+            read_file=read_file,
+        )
 
     support_payloads: dict[tuple[str, str], bytes] = {}
     referenced_segment_ids = {
@@ -1493,7 +1722,14 @@ async def build_canonical_evidence_records_with_reader(
     if provenance["schema_version"] >= 2:
         mapping_fields.add("verification_policy")
     for mapping in raw_mappings:
-        if not isinstance(mapping, dict) or set(mapping) != mapping_fields:
+        expected_mapping_fields = set(mapping_fields)
+        if (
+            provenance["schema_version"] >= 3
+            and isinstance(mapping, dict)
+            and mapping.get("verification_policy") == SEMANTIC_ATTESTATION_POLICY
+        ):
+            expected_mapping_fields.add("attestation")
+        if not isinstance(mapping, dict) or set(mapping) != expected_mapping_fields:
             raise CanonicalEvidenceError("note provenance segment fields are invalid")
         anchor = _normalized_string(mapping.get("anchor"), field="note anchor")
         prefix, suffix = mapping.get("prefix"), mapping.get("suffix")
@@ -1512,7 +1748,11 @@ async def build_canonical_evidence_records_with_reader(
         verification_policy = mapping.get(
             "verification_policy", DIRECT_LOCATOR_POLICY,
         )
-        if verification_policy not in {DIRECT_LOCATOR_POLICY, EXACT_QUOTE_POLICY}:
+        if verification_policy not in {
+            DIRECT_LOCATOR_POLICY,
+            EXACT_QUOTE_POLICY,
+            SEMANTIC_ATTESTATION_POLICY,
+        }:
             raise CanonicalEvidenceError("verification_policy is invalid")
         if verification_policy == EXACT_QUOTE_POLICY:
             try:

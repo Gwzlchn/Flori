@@ -11,11 +11,12 @@ from shared.note_text import markdown_to_index_text
 from shared.step_base import StepBase, file_hash
 from steps.video.provenance import (
     ensure_video_source_manifest,
-    extract_smart_markers,
+    extract_attestable_smart_markers,
     persist_video_note_provenance,
     smart_provenance_segments,
     smart_reference_block,
 )
+from steps.utils.provenance_attestation import persist_semantic_candidates
 
 
 class SmartStep(StepBase):
@@ -64,8 +65,11 @@ class SmartStep(StepBase):
         (self.job_dir / "output" / "provenance" / "smart.json").unlink(missing_ok=True)
         source_manifest = ensure_video_source_manifest(self.job_dir)
         candidates = []
+        semantic_candidates = []
         if source_manifest is not None:
-            result, candidates = extract_smart_markers(result, source_manifest)
+            result, candidates, semantic_candidates = extract_attestable_smart_markers(
+                result, source_manifest, ai=self.ai,
+            )
         elif "[[source:" in result:
             raise ValueError("video smart note contains a source marker without a source manifest")
 
@@ -82,10 +86,18 @@ class SmartStep(StepBase):
             note_artifact=rel,
             provenance_segments=mappings,
         )
+        candidate_state = persist_semantic_candidates(
+            self.job_dir,
+            pipeline="video",
+            note_type="smart",
+            note_artifact=rel,
+            candidates=semantic_candidates,
+        )
         return {"chars": len(result), "images_sent": len(frames),
                 "provider": self.ai.last_provider, "model": self.ai.last_model, "note_file": rel,
                 "provenance_segments": provenance["segments"],
-                "provenance_status": provenance["status"]}
+                "provenance_status": provenance["status"],
+                "semantic_candidates": candidate_state["candidates"]}
 
     def _select_frames(self) -> list[dict]:
         """从 dedup.json(保留帧)取候选并 join ocr.json 文本。返回 [{n,filename,ts,ocr}],n=清单 index。"""

@@ -170,17 +170,72 @@ class TestVariables:
         assert punctuate["depends_on"] == ["01_download", "02_whisper", "06_ocr"]
         assert punctuate["version"] == "4"
 
-    def test_provenance_v2_writers_invalidate_existing_done_markers(self, configs_dir):
+    def test_provenance_writers_invalidate_existing_done_markers(self, configs_dir):
         pipelines = load_pipelines(configs_dir / "pipelines.yaml")
         expected = {
-            "video": {"08_punctuate": "4", "11_smart": "4"},
-            "paper": {"02_pdf_parse": "5", "05_smart_paper": "3"},
-            "article": {"02_parse_article": "5", "04_smart_article": "3"},
-            "audio": {"03_transcript_parse": "3", "04_smart_podcast": "3"},
+            "video": {"08_punctuate": "4", "11_smart": "5"},
+            "paper": {"02_pdf_parse": "5", "05_smart_paper": "4"},
+            "article": {"02_parse_article": "5", "04_smart_article": "4"},
+            "audio": {"03_transcript_parse": "3", "04_smart_podcast": "4"},
         }
         for pipeline, versions in expected.items():
             actual = {step["name"]: step["version"] for step in pipelines[pipeline]["steps"]}
             assert {name: actual[name] for name in versions} == versions
+
+
+class TestSemanticAttestationPipeline:
+    def test_candidates_are_outputs_only_and_concepts_indexes_final(self, configs_dir):
+        raw = load_yaml(configs_dir / "pipelines.yaml")
+        producers = {
+            "video": {"11_smart": "smart"},
+            "paper": {"04_translate_paper": "translated", "05_smart_paper": "smart"},
+            "article": {
+                "04_translate_article": "translated", "04_smart_article": "smart",
+            },
+            "audio": {"04_smart_podcast": "smart"},
+        }
+        attestors = {
+            "video": "11_semantic_attestation",
+            "paper": "05_semantic_attestation",
+            "article": "04_semantic_attestation",
+            "audio": "04_semantic_attestation",
+        }
+        concepts = {"video": "12_concepts", "paper": "05_concepts", "article": "05_concepts", "audio": "05_concepts"}
+        for pipeline, steps in producers.items():
+            jobs = raw[pipeline]["jobs"]
+
+            def depends_on(step: str, target: str) -> bool:
+                pending = list(jobs[step].get("needs", []))
+                seen = set()
+                while pending:
+                    current = pending.pop()
+                    if current == target:
+                        return True
+                    if current not in seen:
+                        seen.add(current)
+                        pending.extend(jobs[current].get("needs", []))
+                return False
+
+            for producer, note_type in steps.items():
+                assert (
+                    f"output/provenance_candidates/{note_type}.json"
+                    in jobs[producer]["outputs"]
+                )
+                assert depends_on(attestors[pipeline], producer)
+
+            attestor = jobs[attestors[pipeline]]
+            assert any(path.startswith("output/provenance/") for path in attestor["outputs"])
+            assert attestor["timeout"] == 180
+            assert depends_on(concepts[pipeline], attestors[pipeline])
+            index_actions = [
+                action for action in jobs[concepts[pipeline]].get("on_complete", [])
+                if action.get("action") == "index_note"
+            ]
+            for action in index_actions:
+                assert all(
+                    "provenance_candidates" not in candidate["provenance"]
+                    for candidate in action["candidates"]
+                )
 
 
 class TestAIRoleContract:
@@ -207,13 +262,17 @@ class TestAIRoleContract:
         assert set(routes) == {
             ("video", "08_punctuate"), ("video", "10_evidence"),
             ("video", "11_smart"), ("video", "12_concepts"),
+            ("video", "11_semantic_attestation"),
             ("video", "12_review"),
             ("paper", "04_translate_paper"), ("paper", "05_smart_paper"),
             ("paper", "05_concepts"), ("paper", "06_review"),
+            ("paper", "05_semantic_attestation"),
             ("article", "04_smart_article"), ("article", "04_translate_article"),
             ("article", "05_concepts"), ("article", "06_review"),
+            ("article", "04_semantic_attestation"),
             ("audio", "04_smart_podcast"), ("audio", "05_concepts"),
             ("audio", "05_review"),
+            ("audio", "04_semantic_attestation"),
         }
         expected_route = {
             "primary": {"provider": "claude-cli", "model": "claude-opus-4-8[1m]"},
@@ -223,7 +282,7 @@ class TestAIRoleContract:
             assert route["primary"] == expected_route["primary"], key
             assert route["fallback"] == expected_route["fallback"], key
         assert routes[("video", "11_smart")]["text_fallback"] == expected_route["primary"]
-        assert sum(len(route) for route in routes.values()) == 33
+        assert sum(len(route) for route in routes.values()) == 41
 
     def test_shared_ai_variables_reject_undefined_unused_and_empty(self):
         base = {
@@ -452,6 +511,51 @@ class TestCompletionEffects:
         with pytest.raises(ValueError, match="not declared by producer"):
             normalize_pipelines(raw)
 
+    @pytest.mark.parametrize(("field", "value", "message"), [
+        ("legacy_provenance_step", None, "boundary fields"),
+        ("legacy_provenance_step", "missing", "producer step is unknown"),
+        ("legacy_provenance_since_version", "4", "version boundary"),
+        ("legacy_provenance_since_version", "2.0", "version boundary"),
+    ])
+    def test_invalid_legacy_provenance_boundary_is_rejected(
+        self, field, value, message,
+    ):
+        raw = copy.deepcopy(self._provenance_pipeline())
+        candidate = raw["p"]["jobs"]["indexer"]["on_complete"][0]["candidates"][0]
+        candidate.update({
+            "legacy_provenance_step": "producer",
+            "legacy_provenance_since_version": "2",
+        })
+        candidate[field] = value
+        with pytest.raises(ValueError, match=message):
+            normalize_pipelines(raw)
+
+    def test_legacy_boundary_without_sidecars_is_rejected(self):
+        raw = {"p": {"jobs": {"indexer": {
+            "run": "m.indexer", "pool": "cpu",
+            "on_complete": [{"action": "index_note", "candidates": [{
+                "note_type": "smart", "path": "output/note.md",
+                "legacy_provenance_step": "producer",
+                "legacy_provenance_since_version": "2",
+            }]}],
+        }}}}
+        with pytest.raises(ValueError, match="requires sidecar fields"):
+            normalize_pipelines(raw)
+
+    def test_legacy_provenance_path_must_be_declared_by_old_producer(self):
+        raw = copy.deepcopy(self._provenance_pipeline())
+        raw["p"]["jobs"]["legacy"] = {
+            "run": "m.legacy", "pool": "cpu", "version": "3",
+            "outputs": ["output/provenance/other.json"],
+        }
+        candidate = raw["p"]["jobs"]["indexer"]["on_complete"][0]["candidates"][0]
+        candidate.update({
+            "legacy_provenance_step": "legacy",
+            "legacy_provenance_since_version": "2",
+        })
+        with pytest.raises(ValueError, match="not declared by producer"):
+            normalize_pipelines(raw)
+
     def test_real_provenance_candidates_have_fixed_boundaries(self, configs_dir):
         pipelines = load_pipelines(configs_dir / "pipelines.yaml")
         candidates = [
@@ -467,6 +571,16 @@ class TestCompletionEffects:
         assert all(candidate.get("provenance_step") for candidate in candidates)
         assert all(
             candidate.get("provenance_since_version") for candidate in candidates
+        )
+        semantic_candidates = [
+            candidate for candidate in candidates
+            if candidate["provenance_step"].endswith("semantic_attestation")
+        ]
+        assert len(semantic_candidates) == 5
+        assert all(
+            candidate.get("legacy_provenance_step")
+            and candidate.get("legacy_provenance_since_version")
+            for candidate in semantic_candidates
         )
 
 

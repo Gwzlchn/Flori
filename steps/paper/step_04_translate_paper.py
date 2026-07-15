@@ -12,8 +12,15 @@ import json
 from shared.step_base import StepBase, file_hash
 from shared.storage import read_path_bounded
 from shared.terms import extract_pairs, hit_terms, render_term_block
-from steps.article.provenance import persist_note_provenance
+from shared.note_text import markdown_to_index_text
+from steps.article.provenance import (
+    extract_attestable_note_markers,
+    load_source_manifest,
+    persist_note_provenance,
+    translation_reference_block,
+)
 from steps.utils.chunking import split_markdown_chunks
+from steps.utils.provenance_attestation import persist_semantic_candidates
 
 # 单 chunk 字符预算:大论文(GPT-3 75页)整篇单调用必撞步/CLI 双 600s 超时(线上实证)。
 # 16000 字英文原文的中文译文 ≈ 万级 tokens,稳在 max_tokens=16384 与单调用几分钟内;
@@ -71,25 +78,43 @@ class TranslatePaperStep(StepBase):
         base_map = self._load_term_map()
         new_pairs: dict[str, str] = {}   # L3:本篇滚动新定译名(chunk 间传递,收尾落盘回流)
         parts: list[str] = []
+        semantic_candidates: list[dict] = []
+        source_manifest = load_source_manifest(self.job_dir, pipeline="paper")
         for i, chunk in enumerate(chunks):
             self.progress.report(i, len(chunks), f"translating chunk {i + 1}/{len(chunks)}")
             merged = {**base_map, **new_pairs}
             block = render_term_block(hit_terms(chunk, merged))
-            part = self.ai.call(self._build_prompt(chunk, block), max_tokens=16384).strip()
+            reference_block = translation_reference_block(
+                source_manifest, source_text=chunk,
+            )
+            part = self.ai.call(
+                self._build_prompt(chunk, block, reference_block), max_tokens=16384,
+            ).strip()
+            if source_manifest is not None and reference_block:
+                part, _exact, pending = extract_attestable_note_markers(
+                    part, source_manifest, ai=self.ai, force_semantic=True,
+                )
+                semantic_candidates.extend(pending)
             parts.append(part)
             for en, zh in extract_pairs(part).items():
                 if en not in merged:      # 只收新词:已注入的恒定,避免中途改名
                     new_pairs[en] = zh
         self.progress.report(len(chunks), len(chunks), "done")
         result = "\n\n".join(parts)
+        normalized_result = markdown_to_index_text(result)
+        semantic_candidates = [
+            candidate for candidate in semantic_candidates
+            if normalized_result.count(candidate["anchor"]) == 1
+        ]
 
         self.artifacts.write("output/translated.md", result)
         self._write_term_pairs(new_pairs)
-        provenance = self._persist_translation_provenance()
+        provenance = self._persist_translation_provenance(semantic_candidates)
         return {"chars": len(result), "chunks": len(chunks), "new_terms": len(new_pairs),
                 "provider": self.ai.last_provider, "model": self.ai.last_model,
                 "provenance_segments": provenance["segments"],
-                "provenance_status": provenance["status"]}
+                "provenance_status": provenance["status"],
+                "semantic_candidates": provenance["semantic_candidates"]}
 
     def _source_markdown(self) -> str:
         """翻译源文:首选 output/original.md(arxiv-html 由 02 产出,公式/图无损,图引用已在原位);
@@ -170,10 +195,15 @@ class TranslatePaperStep(StepBase):
                 fi += 1
         return "".join(parts)
 
-    def _build_prompt(self, md: str, term_block: str = "") -> str:
+    def _build_prompt(
+        self, md: str, term_block: str = "", reference_block: str = "",
+    ) -> str:
         # <<TERMS>> = 本 chunk 命中的术语对照段(shared/terms.py;无命中为空串,prompt 无痕)。
         tmpl = self.ai.load_prompt_template("04_translate_paper")
-        return tmpl.replace("<<TERMS>>", term_block).replace("<<BODY>>", md)
+        return (
+            tmpl.replace("<<TERMS>>", term_block).replace("<<BODY>>", md)
+            + reference_block
+        )
 
     def _load_term_map(self) -> dict[str, str]:
         """input/term_map.json(scheduler 导出的 L1/L2 快照);缺失/坏 JSON 返回空表(降级无害)。"""
@@ -218,6 +248,8 @@ class TranslatePaperStep(StepBase):
         base_map = self._load_term_map()
         new_pairs: dict[str, str] = {}
         parts: list[str] = []
+        semantic_candidates: list[dict] = []
+        source_manifest = load_source_manifest(self.job_dir, pipeline="paper")
         for n, (a, b) in enumerate(ranges):
             self.progress.report(n, len(ranges), f"translating pages {a}-{b}/{pages}")
             # pdf 直喂看不到原文文本 → 术语命中退化为「已收对照 + 全库表」直接给
@@ -227,11 +259,19 @@ class TranslatePaperStep(StepBase):
             block = render_term_block(hits)
             prompt = (tmpl.replace("<<TERMS>>", block)
                           .replace("<<PDF_PATH>>", str(pdf))
-                          .replace("<<START>>", str(a)).replace("<<END>>", str(b)))
+                          .replace("<<START>>", str(a)).replace("<<END>>", str(b))
+                      + translation_reference_block(
+                          source_manifest, page_range=(a, b),
+                      ))
             # Read 每页一轮 + 思考/生成余量;--add-dir 放行 PDF 所在目录(input/)。
             part = self.ai.call(prompt, max_tokens=16384,
                                 allowed_tools=["Read"], add_dirs=[str(pdf.parent)],
                                 max_turns=(b - a + 1) * 2 + 4).strip()
+            if source_manifest is not None:
+                part, _exact, pending = extract_attestable_note_markers(
+                    part, source_manifest, ai=self.ai, force_semantic=True,
+                )
+                semantic_candidates.extend(pending)
             parts.append(part)
             for en, zh in extract_pairs(part).items():
                 if en not in merged:
@@ -239,24 +279,40 @@ class TranslatePaperStep(StepBase):
         self.progress.report(len(ranges), len(ranges), "done")
         result = "\n\n".join(parts)
         result, fig_pages = self._link_figure_pages(result, pages)
+        normalized_result = markdown_to_index_text(result)
+        semantic_candidates = [
+            candidate for candidate in semantic_candidates
+            if normalized_result.count(candidate["anchor"]) == 1
+        ]
         self.artifacts.write("output/translated.md", result)
         self._write_term_pairs(new_pairs)
-        provenance = self._persist_translation_provenance()
+        provenance = self._persist_translation_provenance(semantic_candidates)
         return {"chars": len(result), "chunks": len(ranges), "mode": "pdf-direct",
                 "figure_pages": fig_pages,
                 "provider": self.ai.last_provider, "model": self.ai.last_model,
                 "provenance_segments": provenance["segments"],
-                "provenance_status": provenance["status"]}
+                "provenance_status": provenance["status"],
+                "semantic_candidates": provenance["semantic_candidates"]}
 
-    def _persist_translation_provenance(self) -> dict:
-        """译文无逐句可靠映射时显式发布空清单,禁止把整页猜成逐句证据。"""
-        return persist_note_provenance(
+    def _persist_translation_provenance(
+        self, semantic_candidates: list[dict],
+    ) -> dict:
+        """producer 发布空 final 与无信任候选,由下游 concepts 独立证明。"""
+        provenance = persist_note_provenance(
             self.job_dir,
             pipeline="paper",
             note_type="translated",
             note_artifact="output/translated.md",
             candidates=[],
         )
+        candidate_state = persist_semantic_candidates(
+            self.job_dir,
+            pipeline="paper",
+            note_type="translated",
+            note_artifact="output/translated.md",
+            candidates=semantic_candidates,
+        )
+        return {**provenance, "semantic_candidates": candidate_state["candidates"]}
 
     # 占位行:【图 N|第 p 页】/【表 N|第 p 页】(prompt 规则 3;旧译文无 |页码 → 不匹配自然跳过)。
     _FIG_PAGE_RE = __import__("re").compile(r"【[图表]\s*[\d.]+[^】|]*\|\s*第\s*(\d+)\s*页】")

@@ -197,7 +197,7 @@ video:
       label: "智能版笔记"
       extends: .ai-step
       run: steps.video.step_11_smart
-      version: "4"
+      version: "5"
       # 依赖取证:案例类笔记据 evidence.json 引 [E#] 一手来源(非案例类 10_evidence 秒 skip,不挡)。
       needs: ["09_mechanical", "10_evidence"]
       tags: ["vision"]
@@ -206,16 +206,16 @@ video:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
         text_fallback: {provider: $AI_SMART_TEXT_PROVIDER, model: $AI_SMART_TEXT_MODEL}
-      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json"]
+      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json", "output/provenance_candidates/smart.json"]
 
     "12_concepts":
       label: "概念 + 摘要"
       extends: .ai-step
       run: steps.article.step_05_concepts
       prompt_template: 05_concepts
-      version: "4"
+      version: "5"
       # 复用 article 概念步:视频以最新版智能笔记为源(必有,11_smart 必跑)。
-      needs: ["11_smart"]
+      needs: ["11_semantic_attestation"]
       timeout: 120
       tags: []
       ai:
@@ -224,9 +224,22 @@ video:
       on_complete:
         - action: index_note
           candidates:
-            - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "11_smart", provenance_since_version: "3"}
+            - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "11_semantic_attestation", provenance_since_version: "2", legacy_provenance_step: "11_smart", legacy_provenance_since_version: "3"}
         - action: collect_glossary
       outputs: ["output/concepts.json"]
+
+    "11_semantic_attestation":
+      label: "语义证据独立核验"
+      extends: .ai-step
+      run: steps.utils.step_semantic_attestation
+      version: "2"
+      needs: ["11_smart"]
+      timeout: 180
+      tags: []
+      ai:
+        primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
+        fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
+      outputs: ["output/provenance/smart.json", "output/provenance/semantic_batch.json"]
 
     "12_review":
       label: "评审"
@@ -285,7 +298,7 @@ paper:
       extends: .ai-step
       run: steps.paper.step_04_translate_paper
       needs: ["03_sections"]
-      version: "7"   # 术语一致性:chunk 注入 term_map + 回收 term_pairs(工单 26-07-06/04),失效旧指纹
+      version: "8"   # 译文证据候选交由下游 concepts 独立核验,失效旧指纹
       # 大论文多 chunk 串行翻译,步墙钟须覆盖全部 chunk(~15 块 × 2-4min);600 默认必超时。
       timeout: 7200
       tags: []
@@ -302,13 +315,13 @@ paper:
         fallback: {provider: $AI_TRANSLATE_FALLBACK_PROVIDER, model: $AI_TRANSLATE_FALLBACK_MODEL}
       on_complete:
         - action: collect_term_pairs
-      outputs: ["output/translated.md", "output/provenance/translated.json"]
+      outputs: ["output/translated.md", "output/provenance/translated.json", "output/provenance_candidates/translated.json"]
 
     "05_smart_paper":
       label: "智能版笔记"
       extends: .ai-step
       run: steps.paper.step_05_smart_paper
-      version: "3"
+      version: "4"
       # needs 04_translate_paper:非中文论文先翻译,笔记基于译文做(译文跳过=中文论文时依赖视为满足)。
       needs: ["03_sections", "04_translate_paper"]
       tags: []
@@ -318,16 +331,16 @@ paper:
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
-      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json"]
+      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json", "output/provenance_candidates/smart.json"]
 
     "05_concepts":
       label: "概念 + 摘要"
       extends: .ai-step
       run: steps.article.step_05_concepts
-      version: "4"
+      version: "5"
       # 复用 article 概念步(源优先级:智能笔记 > 译文 > original.md;旧任务才回退章节)。
       # 此前 paper 概念只搭 06_review key_terms 便车(无 zh_name/related),图谱边稀疏的根因。
-      needs: ["05_smart_paper"]
+      needs: ["05_semantic_attestation"]
       timeout: 120
       tags: []
       ai:
@@ -336,9 +349,22 @@ paper:
       on_complete:
         - action: index_note
           candidates:
-            - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "05_smart_paper", provenance_since_version: "2"}
+            - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "05_semantic_attestation", provenance_since_version: "2", legacy_provenance_step: "05_smart_paper", legacy_provenance_since_version: "2"}
         - action: collect_glossary
       outputs: ["output/concepts.json"]
+
+    "05_semantic_attestation":
+      label: "语义证据独立核验"
+      extends: .ai-step
+      run: steps.utils.step_semantic_attestation
+      version: "2"
+      needs: ["05_smart_paper", "04_translate_paper"]
+      timeout: 180
+      tags: []
+      ai:
+        primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
+        fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
+      outputs: ["output/provenance/smart.json", "output/provenance/translated.json", "output/provenance/semantic_batch.json"]
 
     "06_review":
       label: "评审"
@@ -398,7 +424,7 @@ article:
       label: "智能版笔记"
       extends: .ai-step
       run: steps.article.step_04_smart_article
-      version: "3"
+      version: "4"
       # needs 04_translate:非中文文章先翻译,笔记基于中文译文做(译文跳过=中文文章时依赖视为满足,读原文)。
       needs: ["03_article_sections", "04_translate_article"]
       tags: []
@@ -410,14 +436,14 @@ article:
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
-      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json"]
+      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json", "output/provenance_candidates/smart.json"]
 
     "04_translate_article":
       label: "翻译"
       extends: .ai-step
       run: steps.article.step_04_translate_article
       needs: ["02_parse_article"]
-      version: "3"   # 术语一致性:chunk 注入 term_map + 回收 term_pairs(工单 26-07-06/04),失效旧指纹
+      version: "4"   # 译文证据候选交由下游 concepts 独立核验,失效旧指纹
       tags: []
       # 仅非中文文章触发:02_parse 写了 needs_translation.json 才跑,中文文章跳过。
       rules:
@@ -429,16 +455,16 @@ article:
         fallback: {provider: $AI_TRANSLATE_FALLBACK_PROVIDER, model: $AI_TRANSLATE_FALLBACK_MODEL}
       on_complete:
         - action: collect_term_pairs
-      outputs: ["output/translated.md", "output/provenance/translated.json"]
+      outputs: ["output/translated.md", "output/provenance/translated.json", "output/provenance_candidates/translated.json"]
 
     "05_concepts":
       label: "概念 + 摘要"
       extends: .ai-step
       run: steps.article.step_05_concepts
-      version: "4"   # key_terms 增 related 关系边(rel: prerequisite/is_a/part_of/related,只引本文概念)
+      version: "5"   # key_terms 关系边 + 独立 semantic attestor
       # 必跑,无 rules。源优先级:智能笔记 > 译文(非中文) > original.md;一句话摘要同出。
       # needs 04_smart/04_translate:保证笔记/译文(若有)先就绪;被跳过时依赖视为满足,本步照常跑。
-      needs: ["04_smart_article", "04_translate_article"]
+      needs: ["04_semantic_attestation"]
       timeout: 120
       tags: []
       ai:
@@ -448,11 +474,24 @@ article:
         - action: index_note
           # 轻链路没有 smart;按最终可用内容降级,仍只索引一个版本,避免 Ask 重复证据。
           candidates:
-            - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "04_smart_article", provenance_since_version: "2"}
-            - {note_type: translated, path: "output/translated.md", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/translated.json", provenance_step: "04_translate_article", provenance_since_version: "3"}
+            - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "04_semantic_attestation", provenance_since_version: "2", legacy_provenance_step: "04_smart_article", legacy_provenance_since_version: "2"}
+            - {note_type: translated, path: "output/translated.md", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/translated.json", provenance_step: "04_semantic_attestation", provenance_since_version: "2", legacy_provenance_step: "04_translate_article", legacy_provenance_since_version: "3"}
             - {note_type: original, path: "output/original.md", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/original.json", provenance_step: "02_parse_article", provenance_since_version: "4"}
         - action: collect_glossary
       outputs: ["output/concepts.json"]
+
+    "04_semantic_attestation":
+      label: "语义证据独立核验"
+      extends: .ai-step
+      run: steps.utils.step_semantic_attestation
+      version: "2"
+      needs: ["04_smart_article", "04_translate_article"]
+      timeout: 180
+      tags: []
+      ai:
+        primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
+        fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
+      outputs: ["output/provenance/smart.json", "output/provenance/translated.json", "output/provenance/semantic_batch.json"]
 
     "06_review":
       label: "评审"
@@ -518,21 +557,21 @@ audio:
       label: "智能版笔记"
       extends: .ai-step
       run: steps.audio.step_04_smart_podcast
-      version: "3"
+      version: "4"
       needs: ["03_transcript_parse"]
       tags: []
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
-      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json"]
+      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json", "output/provenance_candidates/smart.json"]
 
     "05_concepts":
       label: "概念 + 摘要"
       extends: .ai-step
       run: steps.article.step_05_concepts
-      version: "4"
+      version: "5"
       # 复用 article 概念步:播客以智能笔记为源。
-      needs: ["04_smart_podcast"]
+      needs: ["04_semantic_attestation"]
       timeout: 120
       tags: []
       ai:
@@ -541,9 +580,22 @@ audio:
       on_complete:
         - action: index_note
           candidates:
-            - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "04_smart_podcast", provenance_since_version: "2"}
+            - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "04_semantic_attestation", provenance_since_version: "2", legacy_provenance_step: "04_smart_podcast", legacy_provenance_since_version: "2"}
         - action: collect_glossary
       outputs: ["output/concepts.json"]
+
+    "04_semantic_attestation":
+      label: "语义证据独立核验"
+      extends: .ai-step
+      run: steps.utils.step_semantic_attestation
+      version: "2"
+      needs: ["04_smart_podcast"]
+      timeout: 180
+      tags: []
+      ai:
+        primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
+        fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
+      outputs: ["output/provenance/smart.json", "output/provenance/semantic_batch.json"]
 
     "05_review":
       label: "评审"
