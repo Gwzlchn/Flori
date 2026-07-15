@@ -438,6 +438,190 @@ def test_frontend_gate_waits_all_static_checks_and_fails_closed(tmp_path: Path) 
     assert "前端静态门失败" in completed.stderr
 
 
+def _fake_test_runtime_environment(
+    tmp_path: Path,
+) -> tuple[dict[str, str], Path, Path]:
+    fake_docker = tmp_path / "docker"
+    log = tmp_path / "docker.log"
+    github_output = tmp_path / "github-output"
+    fake_docker.write_text(
+        """#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+if [ "$1 $2 $3" = "buildx imagetools inspect" ]; then
+  case "$4" in
+    *flori-test-worker*)
+      [ -f "$FAKE_WORKER_READY" ] || exit 1
+      printf '{"digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}\n'
+      ;;
+    *flori-test*)
+      [ -f "$FAKE_NORMAL_READY" ] || exit 1
+      printf '{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n'
+      ;;
+    *) exit 1 ;;
+  esac
+  exit 0
+fi
+target=""
+metadata=""
+previous=""
+for argument in "$@"; do
+  case "$previous" in
+    --target) target="$argument" ;;
+    --metadata-file) metadata="$argument" ;;
+  esac
+  previous="$argument"
+done
+[ "$target" != "${FAIL_TARGET:-}" ] || exit 9
+if [ "$target" = "test-worker-runtime" ]; then
+  printf '{"containerimage.digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}\n' > "$metadata"
+  : > "$FAKE_WORKER_READY"
+else
+  printf '{"containerimage.digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n' > "$metadata"
+  : > "$FAKE_NORMAL_READY"
+fi
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    environment = os.environ.copy()
+    environment.update({
+        "PATH": f"{tmp_path}:{environment['PATH']}",
+        "FAKE_DOCKER_LOG": str(log),
+        "FAKE_NORMAL_READY": str(tmp_path / "normal-ready"),
+        "FAKE_WORKER_READY": str(tmp_path / "worker-ready"),
+        "RUNNER_TEMP": str(tmp_path),
+        "OWNER_LC": "example-owner",
+        "GITHUB_REF": "refs/heads/main",
+        "GITHUB_OUTPUT": str(github_output),
+    })
+    return environment, log, github_output
+
+
+def test_ci_test_runtime_builds_once_and_outputs_immutable_refs(tmp_path: Path) -> None:
+    environment, log, github_output = _fake_test_runtime_environment(
+        tmp_path,
+    )
+
+    completed = subprocess.run(
+        ["bash", str(REPO / "scripts/ci-test-runtime.sh")],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert len(calls) == 6
+    assert sum("--target test-runtime" in call for call in calls) == 1
+    assert sum("--target test-worker-runtime" in call for call in calls) == 1
+    assert sum("--push" in call for call in calls) == 2
+    worker_build = next(call for call in calls if "--target test-worker-runtime" in call)
+    assert "flori-test-worker:buildcache" in worker_build
+    assert "flori-test:buildcache" in worker_build
+    assert not any("FLORI_VERSION=" in call for call in calls)
+    outputs = github_output.read_text(encoding="utf-8").splitlines()
+    assert outputs == [
+        "ready=true",
+        "normal=ghcr.io/example-owner/flori-test@sha256:" + "a" * 64,
+        "worker=ghcr.io/example-owner/flori-test-worker@sha256:" + "b" * 64,
+    ]
+
+
+def test_ci_test_runtime_probe_reuses_content_keyed_immutable_refs(
+    tmp_path: Path,
+) -> None:
+    environment, log, github_output = _fake_test_runtime_environment(tmp_path)
+    Path(environment["FAKE_NORMAL_READY"]).touch()
+    Path(environment["FAKE_WORKER_READY"]).touch()
+
+    completed = subprocess.run(
+        ["bash", str(REPO / "scripts/ci-test-runtime.sh"), "probe"],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert len(calls) == 2
+    assert all("buildx imagetools inspect" in call for call in calls)
+    assert not any("buildx build" in call for call in calls)
+    outputs = github_output.read_text(encoding="utf-8").splitlines()
+    assert outputs == [
+        "ready=true",
+        "normal=ghcr.io/example-owner/flori-test@sha256:" + "a" * 64,
+        "worker=ghcr.io/example-owner/flori-test-worker@sha256:" + "b" * 64,
+    ]
+
+
+def test_ci_test_runtime_probe_reports_cache_miss_without_building(
+    tmp_path: Path,
+) -> None:
+    environment, log, github_output = _fake_test_runtime_environment(tmp_path)
+
+    completed = subprocess.run(
+        ["bash", str(REPO / "scripts/ci-test-runtime.sh"), "probe"],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "未命中" in completed.stdout
+    assert github_output.read_text(encoding="utf-8").splitlines() == [
+        "ready=false",
+    ]
+    assert not any(
+        "buildx build" in call
+        for call in log.read_text(encoding="utf-8").splitlines()
+    )
+
+
+def test_ci_test_runtime_propagates_parallel_build_failure(tmp_path: Path) -> None:
+    environment, _log, github_output = _fake_test_runtime_environment(
+        tmp_path,
+    )
+    environment["FAIL_TARGET"] = "test-worker-runtime"
+
+    completed = subprocess.run(
+        ["bash", str(REPO / "scripts/ci-test-runtime.sh")],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "flori-test-worker build failed" in completed.stderr
+    assert not github_output.exists()
+
+
+def test_ci_test_runtime_is_main_only(tmp_path: Path) -> None:
+    environment, _log, _github_output = _fake_test_runtime_environment(
+        tmp_path,
+    )
+    environment["GITHUB_REF"] = "refs/pull/9/merge"
+
+    completed = subprocess.run(
+        ["bash", str(REPO / "scripts/ci-test-runtime.sh")],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "测试运行时仅允许在 main 发布" in completed.stderr
+
+
 def test_ci_image_runner_launches_all_selected_builds_and_propagates_failure(
     tmp_path: Path,
 ) -> None:

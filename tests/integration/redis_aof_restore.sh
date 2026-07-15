@@ -3,6 +3,7 @@
 set -euo pipefail
 
 REPO="${FLORI_INTEGRATION_DR_REPO:-$(cd "$(dirname "$0")/../.." && pwd)}"
+HOST_REPO="${FLORI_INTEGRATION_DR_HOST_REPO:-$REPO}"
 DR_IMAGE="${DOCKER_TEST_IMAGE:?DOCKER_TEST_IMAGE 未设置}"
 APP_IMAGE="${FLORI_INTEGRATION_APP_IMAGE:?FLORI_INTEGRATION_APP_IMAGE 未设置}"
 REDIS_IMAGE="${FLORI_INTEGRATION_REDIS_IMAGE:?FLORI_INTEGRATION_REDIS_IMAGE 未设置}"
@@ -285,7 +286,8 @@ printf '%s\n' '{"source":"integration"}' > "$SOURCE_DATA/jobs/job-integration/in
 printf '%s\n' 'role: integration' > "$SOURCE_DATA/prompts/profiles/integration.yaml"
 printf '%s\n' 'pipelines: {}' > "$SOURCE_CONFIG/pipelines.yaml"
 docker run -d --name "$SOURCE_DB_CONTAINER" \
-  -v "$REPO/shared:/app/shared:ro" \
+  -v "$HOST_REPO/shared:/app/shared:ro" \
+  -v "$HOST_REPO/configs:/app/configs:ro" \
   -v "$SOURCE_DATA:/fixture" \
   -w /app \
   "$APP_IMAGE" \
@@ -396,7 +398,8 @@ wait_for_minio "$TARGET_MINIO_CONTAINER"
 verify_restored_minio_fixture
 
 docker run --rm \
-  -v "$REPO/shared:/app/shared:ro" \
+  -v "$HOST_REPO/shared:/app/shared:ro" \
+  -v "$HOST_REPO/configs:/app/configs:ro" \
   -v "$TARGET_DATA:/fixture" \
   -w /app \
   "$APP_IMAGE" \

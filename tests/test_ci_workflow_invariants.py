@@ -29,7 +29,8 @@ def test_cancelable_jobs_use_scoped_job_concurrency() -> None:
         assert matrix_key in concurrency["group"]
 
     for job_name in (
-        "coverage-gate", "fe-test", "detect", "coverage-badge", "build-images",
+        "prepare-test-runtime", "coverage-gate", "fe-test", "detect",
+        "coverage-badge", "build-images",
     ):
         concurrency = jobs[job_name]["concurrency"]
         assert concurrency["cancel-in-progress"] is True
@@ -71,6 +72,7 @@ def test_detect_uses_last_successful_run_and_fail_safe_classification() -> None:
     assert "steps.baseline.outputs.sha" in filters["base"]
     assert "docker:" in filters["filters"]
     assert filters["filters"].count("- 'scripts/ci-images.sh'") == 2
+    assert filters["filters"].count("- 'scripts/ci-test-runtime.sh'") == 1
 
     classify_run = steps["classify"]["run"]
     assert "steps.baseline.outputs.force_all" in classify_run
@@ -120,6 +122,8 @@ def test_unit_shards_and_real_integration_use_the_single_test_entrypoint() -> No
     assert integration["env"]["TEST_WARM_NAME"].startswith("flori-ci-")
     assert integration["strategy"]["matrix"]["partition"] == ["data", "services"]
     assert integration["env"]["INTEGRATION_PARTITION"] == "${{ matrix.partition }}"
+    for job in (normal_job, worker_job, integration):
+        assert job["needs"] == ["prepare-test-runtime"]
 
 
 def test_integration_entrypoint_runs_production_redis_and_minio_restore_drill() -> None:
@@ -290,28 +294,93 @@ def test_ci_first_layer_fits_account_slots_and_images_share_one_runner() -> None
             step for step in steps
             if step.get("uses", "").startswith("docker/build-push-action@")
         )
-        assert "if" not in setup
+        assert setup["if"] == "github.ref != 'refs/heads/main'"
         assert login["if"] == "github.ref == 'refs/heads/main'"
+        assert jobs[job_name]["permissions"]["packages"] == "read"
+        pull = next(
+            step for step in steps
+            if step.get("name", "").startswith("Pull shared")
+        )
+        assert pull["if"] == "github.ref == 'refs/heads/main'"
+        assert "digest 缺失" in pull["run"]
+        assert "docker pull" in pull["run"]
+        assert build["if"] == "github.ref != 'refs/heads/main'"
         assert "type=gha" in build["with"]["cache-from"]
-        assert "github.ref == 'refs/heads/main'" in build["with"]["cache-from"]
-        assert "matrix.group == 1" in build["with"]["cache-to"]
+        assert "type=registry" not in build["with"]["cache-from"]
 
     integration_steps = jobs["integration"]["steps"]
     integration_setup = next(
         step for step in integration_steps
         if step.get("uses", "").startswith("docker/setup-buildx-action@")
     )
-    assert "if" not in integration_setup
+    assert integration_setup["if"] == "github.ref != 'refs/heads/main'"
     integration_login = next(
         step for step in integration_steps if step.get("name") == "Log in to ghcr.io"
     )
     assert integration_login["if"] == "github.ref == 'refs/heads/main'"
+    assert jobs["integration"]["permissions"]["packages"] == "read"
+    integration_pull = next(
+        step for step in integration_steps
+        if step.get("name") == "Pull shared integration runtime"
+    )
+    assert "digest 缺失" in integration_pull["run"]
+    assert 'docker tag "$RUNTIME_IMAGE" "$INTEGRATION_TEST_IMAGE"' in integration_pull["run"]
     integration_build = next(
         step for step in integration_steps
         if step.get("uses", "").startswith("docker/build-push-action@")
     )
     assert "type=gha" in integration_build["with"]["cache-from"]
-    assert "github.ref == 'refs/heads/main'" in integration_build["with"]["cache-from"]
+    assert integration_build["if"] == "github.ref != 'refs/heads/main'"
+
+    prepare = jobs["prepare-test-runtime"]
+    assert prepare["permissions"]["packages"] == "write"
+    assert prepare["outputs"] == {
+        "normal": "${{ steps.resolve.outputs.normal }}",
+        "worker": "${{ steps.resolve.outputs.worker }}",
+    }
+    probe_step = next(
+        step for step in prepare["steps"]
+        if step.get("name") == "Probe shared test runtimes"
+    )
+    assert probe_step["run"] == "bash scripts/ci-test-runtime.sh probe"
+    assert probe_step["if"] == "github.ref == 'refs/heads/main'"
+    setup_step = next(
+        step for step in prepare["steps"]
+        if step.get("uses", "").startswith("docker/setup-buildx-action@")
+    )
+    assert "steps.probe.outputs.ready != 'true'" in setup_step["if"]
+    build_step = next(
+        step for step in prepare["steps"]
+        if step.get("name") == "Build shared test runtimes on cache miss"
+    )
+    assert build_step["run"] == "bash scripts/ci-test-runtime.sh build"
+    assert "steps.probe.outputs.ready != 'true'" in build_step["if"]
+    resolve_step = next(
+        step for step in prepare["steps"] if step.get("id") == "resolve"
+    )
+    assert "@sha256:[0-9a-f]{64}" in resolve_step["run"]
+
+    dockerfile = (WORKFLOW.parents[2] / "docker/base.Dockerfile").read_text()
+    assert "FROM common AS test-runtime" in dockerfile
+    assert "FROM test-runtime AS test" in dockerfile
+    assert "FROM test-runtime AS test-worker-runtime" in dockerfile
+    assert "FROM test-worker-runtime AS test-worker" in dockerfile
+    compose = (WORKFLOW.parents[2] / "docker-compose.test.yml").read_text()
+    integration_compose = (
+        WORKFLOW.parents[2] / "docker-compose.integration-test.yml"
+    ).read_text()
+    assert "./tunnel_stats:/app/tunnel_stats" in compose
+    assert "./docker:/app/docker:ro" in compose
+    assert "./tunnel_stats:/app/tunnel_stats" in integration_compose
+    assert "FLORI_INTEGRATION_DR_HOST_REPO" in integration_compose
+    entrypoint = (WORKFLOW.parents[2] / "scripts/run-integration.sh").read_text()
+    drill = (
+        WORKFLOW.parents[2] / "tests/integration/redis_aof_restore.sh"
+    ).read_text()
+    assert 'export FLORI_INTEGRATION_DR_HOST_REPO="$REPO"' in entrypoint
+    assert 'HOST_REPO="${FLORI_INTEGRATION_DR_HOST_REPO:-$REPO}"' in drill
+    assert drill.count('-v "$HOST_REPO/shared:/app/shared:ro"') == 2
+    assert drill.count('-v "$HOST_REPO/configs:/app/configs:ro"') == 2
 
     frontend_steps = jobs["fe-test"]["steps"]
     npm_cache = next(
@@ -350,12 +419,13 @@ def test_ci_first_layer_fits_account_slots_and_images_share_one_runner() -> None
     assert "mode=check" in product_gate
     assert "mode=candidate" in product_gate
     assert 'bash scripts/ci-images.sh "$mode"' in product_gate
-    assert promote.startswith("bash scripts/ci-images.sh promote")
+    assert promote.startswith('bash "$RUNNER_TEMP/candidate-digests/ci-images.sh" promote')
     candidate_upload = next(
         step for step in jobs["build-images"]["steps"]
         if step.get("with", {}).get("name") == "candidate-digests"
     )
     assert candidate_upload["with"]["if-no-files-found"] == "error"
+    assert candidate_upload["with"]["path"].endswith("/candidate-artifacts")
     candidate_download = next(
         step for step in jobs["push-images"]["steps"]
         if step.get("name") == "Download immutable candidate digests"
@@ -363,6 +433,10 @@ def test_ci_first_layer_fits_account_slots_and_images_share_one_runner() -> None
     assert candidate_download["with"]["name"] == "candidate-digests"
     assert not any(
         step.get("uses", "").startswith("docker/setup-buildx-action@")
+        for step in jobs["push-images"]["steps"]
+    )
+    assert not any(
+        step.get("uses", "").startswith("actions/checkout@")
         for step in jobs["push-images"]["steps"]
     )
 

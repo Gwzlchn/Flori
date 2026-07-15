@@ -15,7 +15,64 @@ on:
 #   unit-worker:重镜像 test-worker(test + ffmpeg + [steps] 媒体库)跑 step/worker 测试(tests/steps + test_step_* + test_worker)。
 #   各产部分覆盖率上传;coverage-gate 合并判 75%.候选镜像与测试并行,门后只提升 manifest,关键路径目标 <2min.
 jobs:
+  prepare-test-runtime:
+    concurrency:
+      group: ci-${{ github.event.pull_request.number || github.ref }}-prepare-test-runtime
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      normal: ${{ steps.resolve.outputs.normal }}
+      worker: ${{ steps.resolve.outputs.worker }}
+    steps:
+      - name: PR 沿用各 runner 本地构建
+        if: github.ref != 'refs/heads/main'
+        run: echo "PR 不发布共享测试运行时"
+      - uses: actions/checkout@v6
+        if: github.ref == 'refs/heads/main'
+      - name: Lowercase owner
+        if: github.ref == 'refs/heads/main'
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - name: 稳定 pip 缓存(抹 pyproject version 为占位)
+        if: github.ref == 'refs/heads/main'
+        run: sed -i 's/^version = .*/version = "0.0.0"/' pyproject.toml
+      - name: Log in to ghcr.io
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Probe shared test runtimes
+        id: probe
+        if: github.ref == 'refs/heads/main'
+        run: bash scripts/ci-test-runtime.sh probe
+      - uses: docker/setup-buildx-action@v4
+        if: github.ref == 'refs/heads/main' && steps.probe.outputs.ready != 'true'
+      - name: Build shared test runtimes on cache miss
+        id: build
+        if: github.ref == 'refs/heads/main' && steps.probe.outputs.ready != 'true'
+        run: bash scripts/ci-test-runtime.sh build
+      - name: Resolve immutable runtime references
+        id: resolve
+        if: github.ref == 'refs/heads/main'
+        env:
+          PROBE_NORMAL: ${{ steps.probe.outputs.normal }}
+          PROBE_WORKER: ${{ steps.probe.outputs.worker }}
+          BUILD_NORMAL: ${{ steps.build.outputs.normal }}
+          BUILD_WORKER: ${{ steps.build.outputs.worker }}
+        run: |
+          normal="${PROBE_NORMAL:-${BUILD_NORMAL:-}}"
+          worker="${PROBE_WORKER:-${BUILD_WORKER:-}}"
+          [[ "$normal" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "::error::normal runtime digest 缺失"; exit 1; }
+          [[ "$worker" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "::error::worker runtime digest 缺失"; exit 1; }
+          printf 'normal=%s\nworker=%s\n' "$normal" "$worker" >> "$GITHUB_OUTPUT"
+
   unit-normal:
+    needs: [prepare-test-runtime]
     # 普通测试在发布关键路径,拆 15 shard 缩短测试段.
     strategy:
       fail-fast: false
@@ -27,20 +84,25 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      packages: read
     env:
       USE_USTC_MIRROR: "0"
       CI_NORMAL_SPLITS: "15"
       CI_XDIST_WORKERS: "4"
     steps:
       - uses: actions/checkout@v6
-      - name: Lowercase owner
-        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - name: Inject runtime build identity
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_ENV"
+          echo "FLORI_BUILD_SHA=$GITHUB_SHA" >> "$GITHUB_ENV"
       - name: 稳定 pip 缓存(取真实版本 + 抹 pyproject version 为占位)
+        if: github.ref != 'refs/heads/main'
         run: |
           echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_ENV"
           sed -i 's/^version = .*/version = "0.0.0"/' pyproject.toml
       - uses: docker/setup-buildx-action@v4
+        if: github.ref != 'refs/heads/main'
       - name: Log in to ghcr.io
         if: github.ref == 'refs/heads/main'
         uses: docker/login-action@v4
@@ -48,7 +110,16 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull shared normal runtime
+        if: github.ref == 'refs/heads/main'
+        env:
+          RUNTIME_IMAGE: ${{ needs.prepare-test-runtime.outputs.normal }}
+        run: |
+          [ -n "$RUNTIME_IMAGE" ] || { echo "::error::normal runtime digest 缺失"; exit 1; }
+          docker pull "$RUNTIME_IMAGE"
+          docker tag "$RUNTIME_IMAGE" flori-test:latest
       - name: Build 普通 test 镜像(target test,轻)
+        if: github.ref != 'refs/heads/main'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -60,10 +131,9 @@ jobs:
             USE_USTC_MIRROR=0
             FLORI_VERSION=${{ env.FLORI_VERSION }}
           cache-from: |
-            ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}/flori-test:buildcache', env.OWNER_LC) || '' }}
             type=gha,scope=flori-test
-          # 仅 group 1 写 buildcache,避免多 shard 并行双写同 ref.
-          cache-to: ${{ github.ref == 'refs/heads/main' && matrix.group == 1 && format('type=registry,ref=ghcr.io/{0}/flori-test:buildcache,mode=max', env.OWNER_LC) || (github.ref != 'refs/heads/main' && matrix.group == 1 && 'type=gha,scope=flori-test,mode=max' || '') }}
+          # PR 仅 group 1 写 GHA cache,避免多 shard 并行双写.
+          cache-to: ${{ matrix.group == 1 && 'type=gha,scope=flori-test,mode=max' || '' }}
       # 非媒体测试按 least-duration 拆 15 shard;真实调用 pdfinfo 的 canonical E2E 归 unit-worker.
       - name: Unit tests(普通 shard ${{ matrix.group }}/${{ env.CI_NORMAL_SPLITS }},非 step)+ 部分覆盖率
         run: |
@@ -90,6 +160,7 @@ jobs:
           if-no-files-found: error
 
   unit-worker:
+    needs: [prepare-test-runtime]
     # 重镜像单 shard 跑 4 xdist worker,将释放的槽给 normal 长杆.
     strategy:
       fail-fast: false
@@ -101,20 +172,25 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      packages: read
     env:
       USE_USTC_MIRROR: "0"
       CI_XDIST_WORKERS: "4"
       CI_WORKER_SPLITS: "1"
     steps:
       - uses: actions/checkout@v6
-      - name: Lowercase owner
-        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - name: Inject runtime build identity
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_ENV"
+          echo "FLORI_BUILD_SHA=$GITHUB_SHA" >> "$GITHUB_ENV"
       - name: 稳定 pip 缓存(取真实版本 + 抹 pyproject version 为占位)
+        if: github.ref != 'refs/heads/main'
         run: |
           echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_ENV"
           sed -i 's/^version = .*/version = "0.0.0"/' pyproject.toml
       - uses: docker/setup-buildx-action@v4
+        if: github.ref != 'refs/heads/main'
       - name: Log in to ghcr.io
         if: github.ref == 'refs/heads/main'
         uses: docker/login-action@v4
@@ -122,7 +198,16 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull shared worker runtime
+        if: github.ref == 'refs/heads/main'
+        env:
+          RUNTIME_IMAGE: ${{ needs.prepare-test-runtime.outputs.worker }}
+        run: |
+          [ -n "$RUNTIME_IMAGE" ] || { echo "::error::worker runtime digest 缺失"; exit 1; }
+          docker pull "$RUNTIME_IMAGE"
+          docker tag "$RUNTIME_IMAGE" flori-test:latest
       - name: Build worker test 镜像(target test-worker,含 [steps] 媒体库)
+        if: github.ref != 'refs/heads/main'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -134,10 +219,8 @@ jobs:
             USE_USTC_MIRROR=0
             FLORI_VERSION=${{ env.FLORI_VERSION }}
           cache-from: |
-            ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}/flori-test-worker:buildcache', env.OWNER_LC) || '' }}
             type=gha,scope=flori-test-worker
-          # 仅 group 1 写 buildcache,避免多 shard 并行双写同 ref.
-          cache-to: ${{ github.ref == 'refs/heads/main' && matrix.group == 1 && format('type=registry,ref=ghcr.io/{0}/flori-test-worker:buildcache,mode=max', env.OWNER_LC) || (github.ref != 'refs/heads/main' && matrix.group == 1 && 'type=gha,scope=flori-test-worker,mode=max' || '') }}
+          cache-to: type=gha,scope=flori-test-worker,mode=max
       # step/worker/media 测试使用重镜像和 4 xdist worker.
       - name: Unit tests(step/worker/media shard ${{ matrix.group }}/${{ env.CI_WORKER_SPLITS }})+ 部分覆盖率
         run: |
@@ -152,6 +235,7 @@ jobs:
 
   # 真 Redis + 生产 Database 冷启动/迁移/DR 兼容 + real-docker + AOF 恢复.与 unit 并行,并作为镜像发布门.
   integration:
+    needs: [prepare-test-runtime]
     strategy:
       fail-fast: false
       matrix:
@@ -164,7 +248,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      packages: write
+      packages: read
     env:
       USE_USTC_MIRROR: "0"
       TEST_WARM_NAME: flori-ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.partition }}
@@ -172,13 +256,18 @@ jobs:
       INTEGRATION_PARTITION: ${{ matrix.partition }}
     steps:
       - uses: actions/checkout@v6
-      - name: Lowercase owner
-        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - name: Inject runtime build identity
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_ENV"
+          echo "FLORI_BUILD_SHA=$GITHUB_SHA" >> "$GITHUB_ENV"
       - name: 稳定 pip 缓存(取真实版本 + 抹 pyproject version 为占位)
+        if: github.ref != 'refs/heads/main'
         run: |
           echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_ENV"
           sed -i 's/^version = .*/version = "0.0.0"/' pyproject.toml
       - uses: docker/setup-buildx-action@v4
+        if: github.ref != 'refs/heads/main'
       - name: Log in to ghcr.io
         if: github.ref == 'refs/heads/main'
         uses: docker/login-action@v4
@@ -186,7 +275,16 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull shared integration runtime
+        if: github.ref == 'refs/heads/main'
+        env:
+          RUNTIME_IMAGE: ${{ needs.prepare-test-runtime.outputs.normal }}
+        run: |
+          [ -n "$RUNTIME_IMAGE" ] || { echo "::error::integration runtime digest 缺失"; exit 1; }
+          docker pull "$RUNTIME_IMAGE"
+          docker tag "$RUNTIME_IMAGE" "$INTEGRATION_TEST_IMAGE"
       - name: Build integration test image(target test,只读既有 cache)
+        if: github.ref != 'refs/heads/main'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -198,7 +296,6 @@ jobs:
             USE_USTC_MIRROR=0
             FLORI_VERSION=${{ env.FLORI_VERSION }}
           cache-from: |
-            ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/{0}/flori-test:buildcache', env.OWNER_LC) || '' }}
             type=gha,scope=flori-test
       - name: Real dependency integration gate
         env:
@@ -400,6 +497,7 @@ jobs:
               - 'tunnel_stats/**'
               - 'configs/**'
               - 'scripts/ci-images.sh'
+              - 'scripts/ci-test-runtime.sh'
             docker:
               - 'docker/**'
             frontend:
@@ -497,19 +595,22 @@ jobs:
       - name: Build 产品镜像门
         if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
         env:
-          CI_IMAGE_DIGEST_FILE: ${{ runner.temp }}/candidate-digests.tsv
+          CI_IMAGE_DIGEST_FILE: ${{ runner.temp }}/candidate-artifacts/candidate-digests.tsv
         run: |
           mode=check
           [ "$GITHUB_REF" != "refs/heads/main" ] || mode=candidate
           bash scripts/ci-images.sh "$mode" \
             "${{ needs.detect.outputs.backend }}" \
             "${{ needs.detect.outputs.frontend }}"
+          if [ "$mode" = "candidate" ]; then
+            cp scripts/ci-images.sh "$RUNNER_TEMP/candidate-artifacts/ci-images.sh"
+          fi
       - name: Upload immutable candidate digests
         if: github.ref == 'refs/heads/main' && (needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true')
         uses: actions/upload-artifact@v7.0.1
         with:
           name: candidate-digests
-          path: ${{ runner.temp }}/candidate-digests.tsv
+          path: ${{ runner.temp }}/candidate-artifacts
           if-no-files-found: error
 
   # 覆盖率门后使用单 runner 提升精确 SHA 候选,任一镜像失败则整体失败.
@@ -525,8 +626,6 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v6
-        if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
       - name: 无运行镜像变化
         if: needs.detect.outputs.backend != 'true' && needs.detect.outputs.frontend != 'true'
         run: echo "跳过镜像发布"
@@ -551,6 +650,6 @@ jobs:
         env:
           CI_IMAGE_DIGEST_FILE: ${{ runner.temp }}/candidate-digests/candidate-digests.tsv
         run: >-
-          bash scripts/ci-images.sh promote
+          bash "$RUNNER_TEMP/candidate-digests/ci-images.sh" promote
           "${{ needs.detect.outputs.backend }}"
           "${{ needs.detect.outputs.frontend }}"

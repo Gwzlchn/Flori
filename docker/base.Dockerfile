@@ -128,11 +128,14 @@ ARG FLORI_VERSION=
 ENV FLORI_VERSION=${FLORI_VERSION}
 ENV DISABLE_UPDATES=1
 
+# test-runtime 不含源码,供 CI 构建一次后由各 runner 拉取;测试源码通过 Compose bind mount 注入.
+FROM common AS test-runtime
+RUN --mount=type=cache,target=/root/.cache/pip pip install ".[api,worker,mcp,test]"
+
 # test(普通):纯逻辑单测镜像 —— 仅 [api,worker,mcp,test],无 ffmpeg / 无 [steps] 媒体库(opencv/pymupdf/skimage 等)。
 #    跑非 step 测试,即 scheduler/api/shared/db/redis 等绝大多数:app+tests 无任何顶层 import 重库(全惰性 + mock),
 #    collection 与运行都不需要。与部署镜像同理拆普通与 worker 两档:普通镜像轻(~350MB,build/load 秒级)。
-FROM common AS test
-RUN --mount=type=cache,target=/root/.cache/pip pip install ".[api,worker,mcp,test]"
+FROM test-runtime AS test
 COPY shared/ shared/
 COPY configs/ configs/
 COPY steps/ steps/
@@ -146,16 +149,17 @@ ENV FLORI_BUILD_SHA=${FLORI_BUILD_SHA}
 ARG FLORI_VERSION=
 ENV FLORI_VERSION=${FLORI_VERSION}
 
-# test-worker(重):跑 step/worker 测试(tests/steps/ + tests/test_step_*.py + test_worker.py,真 import
-#    opencv/pymupdf/scikit-image/trafilatura/imagehash)。复用现有 [steps] extras,不含 [gpu](测试全 mock 不需)。
-#    必须 FROM common 而非 FROM test:否则 test 的源码 COPY 夹在依赖层中间,一改源码就冷重建下面的 [steps] 层
-#    (装 opencv/scikit-image 约 100s)。故 apt + 全 pip 装在前、源码 COPY 放最后,改源码只重末层 COPY,
-#    apt/[steps] 层恒命中 buildcache。
-FROM common AS test-worker
+# test-worker-runtime 复用普通测试依赖并追加媒体库,仍然不含源码.
+FROM test-runtime AS test-worker-runtime
 RUN apt-get -o Acquire::Retries=5 update \
     && apt-get -o Acquire::Retries=5 install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 poppler-utils \
     && rm -rf /var/lib/apt/lists/*
-RUN --mount=type=cache,target=/root/.cache/pip pip install ".[api,worker,mcp,test,steps]"
+RUN --mount=type=cache,target=/root/.cache/pip pip install ".[steps]"
+
+# test-worker(重):跑 step/worker 测试(tests/steps/ + tests/test_step_*.py + test_worker.py,真 import
+#    opencv/pymupdf/scikit-image/trafilatura/imagehash)。复用现有 [steps] extras,不含 [gpu](测试全 mock 不需)。
+#    runtime 与源码层分离,改源码只重最终 COPY,apt/[steps] 依赖层恒命中 buildcache.
+FROM test-worker-runtime AS test-worker
 COPY shared/ shared/
 COPY configs/ configs/
 COPY steps/ steps/
