@@ -4,13 +4,12 @@ set -euo pipefail
 
 MODE="${1:-build}"
 : "${OWNER_LC:?OWNER_LC is required}"
-: "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
 [ "${GITHUB_REF:-}" = "refs/heads/main" ] || {
   echo "测试运行时仅允许在 main 发布" >&2
   exit 2
 }
 case "$MODE" in
-  probe|build) ;;
+  probe|build|tag|pull) ;;
   *) echo "未知测试运行时模式: $MODE" >&2; exit 2 ;;
 esac
 
@@ -19,6 +18,73 @@ RUNTIME_KEY="$({
   sha256sum docker/base.Dockerfile
   sed 's/^version = .*/version = "0.0.0"/' pyproject.toml | sha256sum
 } | sha256sum | cut -c1-32)"
+
+runtime_name() {
+  case "$1" in
+    normal) printf 'flori-test' ;;
+    worker) printf 'flori-test-worker' ;;
+    *) echo "未知测试运行时类型: $1" >&2; return 2 ;;
+  esac
+}
+
+runtime_tag() {
+  printf 'ghcr.io/%s/%s:runtime-%s' "$OWNER_LC" "$1" "$RUNTIME_KEY"
+}
+
+if [ "$MODE" = "tag" ]; then
+  [ $# -eq 2 ] || { echo "用法: $0 tag normal|worker" >&2; exit 2; }
+  runtime_tag "$(runtime_name "$2")"
+  exit 0
+fi
+
+if [ "$MODE" = "pull" ]; then
+  [ $# -eq 3 ] || { echo "用法: $0 pull normal|worker local-tag" >&2; exit 2; }
+  name="$(runtime_name "$2")"
+  tag="$(runtime_tag "$name")"
+  attempts="${CI_RUNTIME_PULL_ATTEMPTS:-36}"
+  delay="${CI_RUNTIME_PULL_DELAY:-5}"
+  [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || { echo "CI_RUNTIME_PULL_ATTEMPTS 必须是正整数" >&2; exit 2; }
+  [[ "$delay" =~ ^[0-9]+$ ]] || { echo "CI_RUNTIME_PULL_DELAY 必须是非负整数" >&2; exit 2; }
+
+  pulled=false
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if docker pull "$tag"; then
+      pulled=true
+      break
+    fi
+    if [ "$attempt" -lt "$attempts" ]; then
+      echo "共享测试运行时尚未就绪: $name ($attempt/$attempts)" >&2
+      sleep "$delay"
+    fi
+  done
+  [ "$pulled" = true ] || {
+    echo "等待共享测试运行时超时: $tag" >&2
+    exit 1
+  }
+
+  repo="ghcr.io/$OWNER_LC/$name"
+  digest_ref=""
+  while IFS= read -r candidate; do
+    case "$candidate" in
+      "$repo"@sha256:*)
+        digest="${candidate#"$repo"@}"
+        if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+          digest_ref="$repo@$digest"
+          break
+        fi
+        ;;
+    esac
+  done < <(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tag")
+  [ -n "$digest_ref" ] || {
+    echo "共享测试运行时缺少有效 RepoDigest: $tag" >&2
+    exit 1
+  }
+  docker tag "$digest_ref" "$3"
+  echo "共享测试运行时固定到: $digest_ref"
+  exit 0
+fi
+
+: "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
 RUN_TMP="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/flori-ci-test-runtime-$$"
 mkdir -p "$RUN_TMP"
 PIDS=()
@@ -39,10 +105,6 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-
-runtime_tag() {
-  printf 'ghcr.io/%s/%s:runtime-%s' "$OWNER_LC" "$1" "$RUNTIME_KEY"
-}
 
 inspect_runtime() {
   name="$1"

@@ -5,7 +5,7 @@
 ## 1. Pipeline 概览
 
 ```
-Push/PR to main   → Unit Test（普通 15 shard + worker 1 shard）+ 真依赖 Integration 两分组 + 前端 vitest + 分支覆盖率门(≥75%)
+Push/PR to main   → Unit Test（普通文件级 14 shard + worker 1 shard）+ 真依赖 Integration 两分组 + 前端 vitest + 分支覆盖率门(≥75%)
 Merge to main     → 与测试并行构建 candidate-<full-sha> → 上述门全部通过后提升 latest/sha → Watchtower 自动拉取重建（CD）
 每日 cron          → Schemathesis 模糊(无 5xx，fuzz.yml) / Mutation 变异测试（mutation.yml）
 手动触发           → paper pipeline E2E（e2e.yml）
@@ -53,10 +53,10 @@ sudo ./svc.sh install && sudo ./svc.sh start
 `e2e.yml`（paper pipeline E2E，手动）+
 `step-images.yml`（按步执行镜像，手动）+ `mutation.yml`（变异测试，每日 cron + 手动）：
 
-- `prepare-test-runtime`：仅 main 发布无源码测试依赖层。先以 Dockerfile 和去版本 pyproject 的内容键探测 GHCR；命中时直接解析 immutable digest，不 setup Buildx；未命中时并行构建 normal / worker runtime，worker 同时读取普通与自身 registry cache。该 job 输出的 digest 是后续测试唯一拉取引用；PR no-op 并由各 runner 构建当前 checkout 的最终 test stage。
-- `unit-normal` / `unit-worker`：push / PR 到 main 触发；普通 job 拆 15 shard，worker / step / media job 拆 1 shard，
+- `prepare-test-runtime`：仅 main 发布无源码测试依赖层。先以 Dockerfile 和去版本 pyproject 的内容键探测 GHCR；命中时直接解析 immutable digest，不 setup Buildx；未命中时并行构建 normal / worker runtime，worker 同时读取普通与自身 registry cache。main consumer 与它并行启动，按同一内容键限时等待；coverage gate 直接依赖 prepare，cache miss 或构建失败不会被隐藏。PR no-op 并由各 runner 构建当前 checkout 的最终 test stage。
+- `unit-normal` / `unit-worker`：push / PR 到 main 触发；普通 job 在 pytest collection 前按完整文件历史时长做确定性 LPT 预分 14 shard，未知新文件用已有文件中位数估重，保证所有文件并集完整、互不重叠且文件内新增用例自动进入；worker / step / media job 拆 1 shard，
   每片固定 4 个 xdist worker，避免 runner CPU 暴露数变化导致时长漂移。workflow 通过 `scripts/test.sh --ci-normal/--ci-worker`
-  调用 pytest，分片用 pytest-split 的 `least_duration` 算法；已有时长用于均衡，新用例也分散到各片，避免陈旧时长文件形成连续长尾。真实调用媒体工具的 canonical evidence E2E 归 worker 镜像。main 的所有 shard 拉 prepare 输出的精确 runtime digest 并通过 Compose 挂当前源码，不重复 setup Buildx 或 build/load；PR 保留各 runner 的 GHA cache build。各 shard 产部分覆盖率并上传 artifact，本地开发仍统一走 `scripts/test.sh`。
+  调用 pytest；worker 单分片保留 pytest-split。真实调用媒体工具的 canonical evidence E2E 归 worker 镜像。main 的所有 runner 拉内容键 tag 后从本地 `RepoDigests` 校验精确 digest，再通过 Compose 挂当前源码，不重复 setup Buildx 或 build/load；PR 保留各 runner 的 GHA cache build。各 shard 产部分覆盖率并上传 artifact，本地开发仍统一走 `scripts/test.sh`。
 - `integration`：与 unit 并行，main 复用 normal runtime digest，data/services 两分组使用独立 Compose project、Redis DB、basetemp、JUnit 和 coverage，共同覆盖真 Redis 双客户端、生产 Database 冷启动/多连接、迁移整链回滚、future/ledger fail-closed、固定 DR v1/v2 恢复查询、检索黄金集、Gateway Worker、real-docker、四类 pipeline 检索闭环和生产 AOF 恢复。无源码 runtime 下，AOF/MinIO 灾备演练显式把 host checkout 的 `shared/` 与 `configs/` 挂入嵌套 Docker 容器。黄金集放入较短的 services 分组平衡墙钟；DR drill 只执行一次并与 data pytest 并行，两分组都是 coverage gate 和镜像发布必经门。
 - `coverage-gate`：下载 unit 各 shard 和 integration 的部分覆盖率，同时使用 unit-normal group 1 从共享测试 runtime 导出的 coverage 包；在同系 `python:slim` 容器里 `coverage combine` 后判**分支覆盖率门** `--fail-under=75`，不在串行尾部联网安装。低于 75% 直接红，防覆盖率倒退。覆盖率配置(分支/markers)单一事实源在 `pyproject.toml`。
 - `fe-test`：容器化 vue-tsc、selected OpenAPI TypeScript 生成物漂移检查、Vitest 和覆盖率共用一次依赖安装。CI 用 `npm ci` 且下载 cache 按 OS/arch/Node/lockfile 跨 run 复用，本地保留 `npm install` 热卷；三个只读静态门并行后再跑 Vitest，与后端并行。覆盖率无法解析时 fail-closed。Python OpenAPI 快照漂移由 normal unit 直接检查。

@@ -72,12 +72,11 @@ jobs:
           printf 'normal=%s\nworker=%s\n' "$normal" "$worker" >> "$GITHUB_OUTPUT"
 
   unit-normal:
-    needs: [prepare-test-runtime]
-    # 普通测试在发布关键路径,拆 15 shard 缩短测试段.
+    # 普通测试在发布关键路径,按完整文件预分成 14 shard 后再 collection.
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        group: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     concurrency:
       group: ci-${{ github.event.pull_request.number || github.ref }}-unit-normal-${{ matrix.group }}
       cancel-in-progress: true
@@ -87,15 +86,18 @@ jobs:
       packages: read
     env:
       USE_USTC_MIRROR: "0"
-      CI_NORMAL_SPLITS: "15"
+      CI_NORMAL_SPLITS: "14"
       CI_XDIST_WORKERS: "4"
     steps:
       - uses: actions/checkout@v6
       - name: Inject runtime build identity
         if: github.ref == 'refs/heads/main'
         run: |
-          echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_ENV"
-          echo "FLORI_BUILD_SHA=$GITHUB_SHA" >> "$GITHUB_ENV"
+          {
+            echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)"
+            echo "FLORI_BUILD_SHA=$GITHUB_SHA"
+            echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}"
+          } >> "$GITHUB_ENV"
       - name: 稳定 pip 缓存(取真实版本 + 抹 pyproject version 为占位)
         if: github.ref != 'refs/heads/main'
         run: |
@@ -112,12 +114,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Pull shared normal runtime
         if: github.ref == 'refs/heads/main'
-        env:
-          RUNTIME_IMAGE: ${{ needs.prepare-test-runtime.outputs.normal }}
-        run: |
-          [ -n "$RUNTIME_IMAGE" ] || { echo "::error::normal runtime digest 缺失"; exit 1; }
-          docker pull "$RUNTIME_IMAGE"
-          docker tag "$RUNTIME_IMAGE" flori-test:latest
+        run: bash scripts/ci-test-runtime.sh pull normal flori-test:latest
       - name: Build 普通 test 镜像(target test,轻)
         if: github.ref != 'refs/heads/main'
         uses: docker/build-push-action@v7
@@ -134,7 +131,7 @@ jobs:
             type=gha,scope=flori-test
           # PR 仅 group 1 写 GHA cache,避免多 shard 并行双写.
           cache-to: ${{ matrix.group == 1 && 'type=gha,scope=flori-test,mode=max' || '' }}
-      # 非媒体测试按 least-duration 拆 15 shard;真实调用 pdfinfo 的 canonical E2E 归 unit-worker.
+      # 非媒体测试按历史时长预分完整文件;真实调用 pdfinfo 的 canonical E2E 归 unit-worker.
       - name: Unit tests(普通 shard ${{ matrix.group }}/${{ env.CI_NORMAL_SPLITS }},非 step)+ 部分覆盖率
         run: |
           CI_COVERAGE_DIR="$GITHUB_WORKSPACE/covdata" \
@@ -160,7 +157,6 @@ jobs:
           if-no-files-found: error
 
   unit-worker:
-    needs: [prepare-test-runtime]
     # 重镜像单 shard 跑 4 xdist worker,将释放的槽给 normal 长杆.
     strategy:
       fail-fast: false
@@ -182,8 +178,11 @@ jobs:
       - name: Inject runtime build identity
         if: github.ref == 'refs/heads/main'
         run: |
-          echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_ENV"
-          echo "FLORI_BUILD_SHA=$GITHUB_SHA" >> "$GITHUB_ENV"
+          {
+            echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)"
+            echo "FLORI_BUILD_SHA=$GITHUB_SHA"
+            echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}"
+          } >> "$GITHUB_ENV"
       - name: 稳定 pip 缓存(取真实版本 + 抹 pyproject version 为占位)
         if: github.ref != 'refs/heads/main'
         run: |
@@ -200,12 +199,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Pull shared worker runtime
         if: github.ref == 'refs/heads/main'
-        env:
-          RUNTIME_IMAGE: ${{ needs.prepare-test-runtime.outputs.worker }}
-        run: |
-          [ -n "$RUNTIME_IMAGE" ] || { echo "::error::worker runtime digest 缺失"; exit 1; }
-          docker pull "$RUNTIME_IMAGE"
-          docker tag "$RUNTIME_IMAGE" flori-test:latest
+        run: bash scripts/ci-test-runtime.sh pull worker flori-test:latest
       - name: Build worker test 镜像(target test-worker,含 [steps] 媒体库)
         if: github.ref != 'refs/heads/main'
         uses: docker/build-push-action@v7
@@ -235,7 +229,6 @@ jobs:
 
   # 真 Redis + 生产 Database 冷启动/迁移/DR 兼容 + real-docker + AOF 恢复.与 unit 并行,并作为镜像发布门.
   integration:
-    needs: [prepare-test-runtime]
     strategy:
       fail-fast: false
       matrix:
@@ -259,8 +252,11 @@ jobs:
       - name: Inject runtime build identity
         if: github.ref == 'refs/heads/main'
         run: |
-          echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_ENV"
-          echo "FLORI_BUILD_SHA=$GITHUB_SHA" >> "$GITHUB_ENV"
+          {
+            echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)"
+            echo "FLORI_BUILD_SHA=$GITHUB_SHA"
+            echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}"
+          } >> "$GITHUB_ENV"
       - name: 稳定 pip 缓存(取真实版本 + 抹 pyproject version 为占位)
         if: github.ref != 'refs/heads/main'
         run: |
@@ -277,12 +273,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Pull shared integration runtime
         if: github.ref == 'refs/heads/main'
-        env:
-          RUNTIME_IMAGE: ${{ needs.prepare-test-runtime.outputs.normal }}
-        run: |
-          [ -n "$RUNTIME_IMAGE" ] || { echo "::error::integration runtime digest 缺失"; exit 1; }
-          docker pull "$RUNTIME_IMAGE"
-          docker tag "$RUNTIME_IMAGE" "$INTEGRATION_TEST_IMAGE"
+        run: bash scripts/ci-test-runtime.sh pull normal "$INTEGRATION_TEST_IMAGE"
       - name: Build integration test image(target test,只读既有 cache)
         if: github.ref != 'refs/heads/main'
         uses: docker/build-push-action@v7
@@ -328,7 +319,7 @@ jobs:
   # 合并普通 + worker 各 shard 与 integration 的部分覆盖率,判分支覆盖率门 75%(拆 job 后不能各自判,部分覆盖会误判).
   # 用 unit 镜像导出的 runtime 在 python:slim 内 combine,消除串行联网安装.
   coverage-gate:
-    needs: [unit-normal, unit-worker, integration]
+    needs: [prepare-test-runtime, unit-normal, unit-worker, integration]
     concurrency:
       group: ci-${{ github.event.pull_request.number || github.ref }}-coverage-gate
       cancel-in-progress: true
@@ -352,7 +343,7 @@ jobs:
           path: coverage-runtime
       - name: Assert all coverage parts are present and non-empty
         env:
-          NORMAL_SPLITS: "15"
+          NORMAL_SPLITS: "14"
           WORKER_SPLITS: "1"
         run: |
           required=(
@@ -561,7 +552,7 @@ jobs:
 
   # 四个 prod 镜像在一个 runner 内并行;PR 只验构建,main push 精确 SHA 候选.
   build-images:
-    needs: [detect]
+    needs: [detect, prepare-test-runtime]
     concurrency:
       group: ci-${{ github.event.pull_request.number || github.ref }}-build-images
       cancel-in-progress: true

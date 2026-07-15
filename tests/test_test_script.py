@@ -329,7 +329,7 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
     environment = _fake_docker_environment(tmp_path)
 
     completed = subprocess.run(
-        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "15"],
+        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "14"],
         cwd=REPO,
         env=environment,
         capture_output=True,
@@ -338,11 +338,10 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert "--splitting-algorithm least_duration" in completed.stdout
-    assert "--ignore=tests/test_canonical_evidence_e2e.py" in completed.stdout
-    assert "--splits 15 --group 15" in completed.stdout
+    assert "test python scripts/ci_test_shard.py --group 14 --splits 14 -- pytest" in completed.stdout
+    assert "--splitting-algorithm least_duration" not in completed.stdout
     assert "-n 4" in completed.stdout
-    assert ".coverage.normal.15" in completed.stdout
+    assert ".coverage.normal.14" in completed.stdout
 
     worker = subprocess.run(
         ["bash", str(REPO / "scripts" / "test.sh"), "--ci-worker", "1", "1"],
@@ -360,7 +359,7 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
     assert ".coverage.worker.1" in worker.stdout
 
     overflow = subprocess.run(
-        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "16", "15"],
+        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "15", "14"],
         cwd=REPO,
         env=environment,
         capture_output=True,
@@ -368,7 +367,7 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
         check=False,
     )
     assert overflow.returncode == 2
-    assert "CI shard 超出范围: 16/15" in overflow.stderr
+    assert "CI shard 超出范围: 15/14" in overflow.stderr
 
 
 def _fake_frontend_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
@@ -447,6 +446,34 @@ def _fake_test_runtime_environment(
     fake_docker.write_text(
         """#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+if [ "$1" = "pull" ]; then
+  count=0
+  [ ! -f "$FAKE_PULL_COUNT" ] || count=$(cat "$FAKE_PULL_COUNT")
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FAKE_PULL_COUNT"
+  [ "$count" -ge "${FAKE_PULL_READY_AFTER:-1}" ]
+  exit $?
+fi
+if [ "$1 $2" = "image inspect" ]; then
+  [ "${FAKE_INVALID_REPO_DIGEST:-0}" != 1 ] || {
+    printf 'ghcr.io/example-owner/flori-test@sha256:bad\n'
+    exit 0
+  }
+  last=""
+  for argument in "$@"; do last="$argument"; done
+  case "$last" in
+    *flori-test-worker*)
+      printf 'ghcr.io/example-owner/flori-test-worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n'
+      ;;
+    *)
+      printf 'ghcr.io/example-owner/flori-test@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+      ;;
+  esac
+  exit 0
+fi
+if [ "$1" = "tag" ]; then
+  exit 0
+fi
 if [ "$1 $2 $3" = "buildx imagetools inspect" ]; then
   case "$4" in
     *flori-test-worker*)
@@ -489,6 +516,7 @@ fi
         "FAKE_DOCKER_LOG": str(log),
         "FAKE_NORMAL_READY": str(tmp_path / "normal-ready"),
         "FAKE_WORKER_READY": str(tmp_path / "worker-ready"),
+        "FAKE_PULL_COUNT": str(tmp_path / "pull-count"),
         "RUNNER_TEMP": str(tmp_path),
         "OWNER_LC": "example-owner",
         "GITHUB_REF": "refs/heads/main",
@@ -620,6 +648,84 @@ def test_ci_test_runtime_is_main_only(tmp_path: Path) -> None:
 
     assert completed.returncode == 2
     assert "测试运行时仅允许在 main 发布" in completed.stderr
+
+
+def test_ci_test_runtime_tag_does_not_require_github_output(tmp_path: Path) -> None:
+    environment, _log, _github_output = _fake_test_runtime_environment(tmp_path)
+    environment.pop("GITHUB_OUTPUT")
+
+    completed = subprocess.run(
+        ["bash", str(REPO / "scripts/ci-test-runtime.sh"), "tag", "normal"],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.startswith(
+        "ghcr.io/example-owner/flori-test:runtime-",
+    )
+
+
+def test_ci_test_runtime_pull_retries_then_tags_immutable_digest(
+    tmp_path: Path,
+) -> None:
+    environment, log, _github_output = _fake_test_runtime_environment(tmp_path)
+    environment.update({
+        "FAKE_PULL_READY_AFTER": "3",
+        "CI_RUNTIME_PULL_ATTEMPTS": "4",
+        "CI_RUNTIME_PULL_DELAY": "0",
+    })
+
+    completed = subprocess.run(
+        [
+            "bash", str(REPO / "scripts/ci-test-runtime.sh"),
+            "pull", "normal", "flori-test:latest",
+        ],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert sum(call.startswith("pull ") for call in calls) == 3
+    assert any(call.startswith("image inspect --format ") for call in calls)
+    assert calls[-1] == (
+        "tag ghcr.io/example-owner/flori-test@sha256:"
+        + "a" * 64
+        + " flori-test:latest"
+    )
+    assert "固定到" in completed.stdout
+
+
+def test_ci_test_runtime_pull_rejects_invalid_repo_digest(tmp_path: Path) -> None:
+    environment, log, _github_output = _fake_test_runtime_environment(tmp_path)
+    environment["FAKE_INVALID_REPO_DIGEST"] = "1"
+    environment["CI_RUNTIME_PULL_DELAY"] = "0"
+
+    completed = subprocess.run(
+        [
+            "bash", str(REPO / "scripts/ci-test-runtime.sh"),
+            "pull", "normal", "flori-test:latest",
+        ],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "缺少有效 RepoDigest" in completed.stderr
+    assert not any(
+        call.startswith("tag ")
+        for call in log.read_text(encoding="utf-8").splitlines()
+    )
 
 
 def test_ci_image_runner_launches_all_selected_builds_and_propagates_failure(

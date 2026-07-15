@@ -123,7 +123,7 @@ def test_unit_shards_and_real_integration_use_the_single_test_entrypoint() -> No
     assert integration["strategy"]["matrix"]["partition"] == ["data", "services"]
     assert integration["env"]["INTEGRATION_PARTITION"] == "${{ matrix.partition }}"
     for job in (normal_job, worker_job, integration):
-        assert job["needs"] == ["prepare-test-runtime"]
+        assert "needs" not in job
 
 
 def test_integration_entrypoint_runs_production_redis_and_minio_restore_drill() -> None:
@@ -156,7 +156,9 @@ def test_integration_entrypoint_runs_production_redis_and_minio_restore_drill() 
         if step.get("name") == "Real dependency integration gate"
     )
     assert run_step["env"]["CI_COVERAGE"] == "1"
-    assert set(gate["needs"]) == {"unit-normal", "unit-worker", "integration"}
+    assert set(gate["needs"]) == {
+        "prepare-test-runtime", "unit-normal", "unit-worker", "integration",
+    }
 
 
 def test_integration_partitions_are_isolated_and_cover_every_core_file_once() -> None:
@@ -280,8 +282,8 @@ def test_ci_first_layer_fits_account_slots_and_images_share_one_runner() -> None
     normal = len(jobs["unit-normal"]["strategy"]["matrix"]["group"])
     worker = len(jobs["unit-worker"]["strategy"]["matrix"]["group"])
     integration = len(jobs["integration"]["strategy"]["matrix"]["partition"])
-    # detect 先行完成;测试层的 +2 是 fe-test 与单 runner build-images.
-    assert normal + worker + integration + 2 == 20
+    # 第一层含 prepare、detect 和 fe-test；产品镜像等 prepare + detect 后进入第二层。
+    assert normal + worker + integration + 3 == 20
 
     for job_name in ("unit-normal", "unit-worker"):
         steps = jobs[job_name]["steps"]
@@ -302,8 +304,8 @@ def test_ci_first_layer_fits_account_slots_and_images_share_one_runner() -> None
             if step.get("name", "").startswith("Pull shared")
         )
         assert pull["if"] == "github.ref == 'refs/heads/main'"
-        assert "digest 缺失" in pull["run"]
-        assert "docker pull" in pull["run"]
+        assert "ci-test-runtime.sh pull" in pull["run"]
+        assert "needs.prepare-test-runtime.outputs" not in pull["run"]
         assert build["if"] == "github.ref != 'refs/heads/main'"
         assert "type=gha" in build["with"]["cache-from"]
         assert "type=registry" not in build["with"]["cache-from"]
@@ -323,8 +325,9 @@ def test_ci_first_layer_fits_account_slots_and_images_share_one_runner() -> None
         step for step in integration_steps
         if step.get("name") == "Pull shared integration runtime"
     )
-    assert "digest 缺失" in integration_pull["run"]
-    assert 'docker tag "$RUNTIME_IMAGE" "$INTEGRATION_TEST_IMAGE"' in integration_pull["run"]
+    assert integration_pull["run"] == (
+        'bash scripts/ci-test-runtime.sh pull normal "$INTEGRATION_TEST_IMAGE"'
+    )
     integration_build = next(
         step for step in integration_steps
         if step.get("uses", "").startswith("docker/build-push-action@")
@@ -359,6 +362,18 @@ def test_ci_first_layer_fits_account_slots_and_images_share_one_runner() -> None
         step for step in prepare["steps"] if step.get("id") == "resolve"
     )
     assert "@sha256:[0-9a-f]{64}" in resolve_step["run"]
+    assert set(jobs["coverage-gate"]["needs"]) == {
+        "prepare-test-runtime", "unit-normal", "unit-worker", "integration",
+    }
+    assert jobs["build-images"]["needs"] == ["detect", "prepare-test-runtime"]
+
+    runtime_script = (
+        WORKFLOW.parents[2] / "scripts" / "ci-test-runtime.sh"
+    ).read_text()
+    assert "CI_RUNTIME_PULL_ATTEMPTS:-36" in runtime_script
+    assert "docker image inspect --format" in runtime_script
+    assert 'docker tag "$digest_ref" "$3"' in runtime_script
+    assert "^sha256:[0-9a-f]{64}$" in runtime_script
 
     dockerfile = (WORKFLOW.parents[2] / "docker/base.Dockerfile").read_text()
     assert "FROM common AS test-runtime" in dockerfile

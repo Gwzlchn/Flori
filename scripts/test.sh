@@ -46,12 +46,14 @@ run_ci_shard() {
 
   cov_dir="${CI_COVERAGE_DIR:-$REPO/covdata}"
   mkdir -p "$cov_dir"
-  base=(pytest -p no:cacheprovider -m 'not fuzz' -n "${CI_XDIST_WORKERS:-4}"
-        --splitting-algorithm least_duration)
+  base=(pytest -p no:cacheprovider -m 'not fuzz' -n "${CI_XDIST_WORKERS:-4}")
   if [ "$kind" = "normal" ]; then
-    paths=(--ignore=tests/integration --ignore=tests/steps
-           --ignore-glob='tests/test_step_*.py' --ignore=tests/test_worker.py
-           --ignore=tests/test_canonical_evidence_e2e.py)
+    exec docker compose -f "$COMPOSE" run --rm \
+      -v "$cov_dir:/covdata" -e "COVERAGE_FILE=/covdata/.coverage.${kind}.${group}" \
+      test python scripts/ci_test_shard.py \
+        --group "$group" --splits "$splits" -- "${base[@]}" \
+        --cov=shared --cov=api --cov=scheduler --cov=worker --cov=steps \
+        --cov-branch --cov-report=
   else
     paths=(tests/steps tests/test_step_*.py tests/test_worker.py
            tests/test_canonical_evidence_e2e.py)
@@ -59,6 +61,7 @@ run_ci_shard() {
   exec docker compose -f "$COMPOSE" run --rm \
     -v "$cov_dir:/covdata" -e "COVERAGE_FILE=/covdata/.coverage.${kind}.${group}" \
     test "${base[@]}" "${paths[@]}" \
+      --splitting-algorithm least_duration \
       --splits "$splits" --group "$group" \
       --cov=shared --cov=api --cov=scheduler --cov=worker --cov=steps \
       --cov-branch --cov-report=
@@ -105,7 +108,7 @@ while [ $# -gt 0 ]; do
       [ $# -gt 0 ] || usage 1
       group="$1"
       shift
-      run_ci_shard normal "$group" "${1:-${CI_NORMAL_SPLITS:-15}}"
+      run_ci_shard normal "$group" "${1:-${CI_NORMAL_SPLITS:-14}}"
       ;;
     --ci-worker)
       shift
