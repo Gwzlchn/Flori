@@ -17,6 +17,10 @@ EXCLUDED_NORMAL_FILES = {
     "test_worker.py",
 }
 
+# pytest collection、fixture 和 xdist 调度对每个 item 都有固定成本，call duration 不包含它。
+NODE_SCHEDULING_WEIGHT_SECONDS = 0.2
+MIN_NODE_SPLIT_COUNT = 32
+
 
 def normal_test_files(repo: Path) -> list[str]:
     """枚举普通测试文件，worker 和 integration 套件由独立 job 持有。"""
@@ -58,7 +62,7 @@ def file_duration_weights(
     for nodeid, value in durations.items():
         path = nodeid.split("::", 1)[0]
         if path in known:
-            totals[path] += value
+            totals[path] += value + NODE_SCHEDULING_WEIGHT_SECONDS
             seen.add(path)
 
     positive = [totals[path] for path in seen if totals[path] > 0]
@@ -69,13 +73,32 @@ def file_duration_weights(
     }
 
 
+def file_node_counts(
+    durations: dict[str, float],
+    files: list[str],
+) -> dict[str, int]:
+    """统计历史 node 数，供大量极短用例文件避免原子长杆。"""
+    counts = {path: 0 for path in files}
+    for nodeid in durations:
+        path = nodeid.split("::", 1)[0]
+        if path in counts:
+            counts[path] += 1
+    return counts
+
+
 def heavy_test_files(
     weights: dict[str, float],
+    node_counts: dict[str, int],
     splits: int,
 ) -> list[str]:
-    """超过单组平均历史负载的文件需拆 nodeid，不能独占长杆 runner。"""
-    target = sum(weights.values()) / splits
-    return sorted(path for path, weight in weights.items() if weight > target)
+    """按耗时或 node 数接近半组负载的文件需拆开，避免原子长杆。"""
+    duration_target = sum(weights.values()) / splits
+    node_target = max(MIN_NODE_SPLIT_COUNT, sum(node_counts.values()) / splits / 2)
+    return sorted(
+        path
+        for path, weight in weights.items()
+        if weight > duration_target or node_counts[path] > node_target
+    )
 
 
 def collect_nodeids(repo: Path, files: list[str]) -> dict[str, list[str]]:
@@ -131,14 +154,17 @@ def build_hybrid_shards(
 
     durations = load_durations(durations_path)
     file_weights = file_duration_weights(durations, files)
-    heavy = heavy_test_files(file_weights, splits)
+    node_counts = file_node_counts(durations, files)
+    heavy = heavy_test_files(file_weights, node_counts, splits)
     if collected is None:
         collected = collect_nodeids(repo, heavy)
     if set(collected) != set(heavy):
         raise ValueError("巨型测试文件 collection 集合与计划不一致")
 
     positive_nodes = [value for value in durations.values() if value > 0]
-    node_fallback = statistics.median(positive_nodes) if positive_nodes else 1.0
+    node_fallback = (
+        statistics.median(positive_nodes) if positive_nodes else 1.0
+    ) + NODE_SCHEDULING_WEIGHT_SECONDS
     items = [
         (path, file_weights[path])
         for path in files
@@ -149,7 +175,13 @@ def build_hybrid_shards(
         if not nodeids:
             raise ValueError(f"巨型测试文件未 collection 到 nodeid: {path}")
         items.extend(
-            (nodeid, durations.get(nodeid, node_fallback))
+            (
+                nodeid,
+                durations.get(
+                    nodeid,
+                    node_fallback - NODE_SCHEDULING_WEIGHT_SECONDS,
+                ) + NODE_SCHEDULING_WEIGHT_SECONDS,
+            )
             for nodeid in nodeids
         )
     names = [name for name, _weight in items]

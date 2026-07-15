@@ -9,9 +9,11 @@ from pathlib import Path
 import pytest
 
 from scripts.ci_test_shard import (
+    NODE_SCHEDULING_WEIGHT_SECONDS,
     build_hybrid_shards,
     collect_nodeids,
     file_duration_weights,
+    file_node_counts,
     heavy_test_files,
     load_durations,
     normal_test_files,
@@ -32,7 +34,8 @@ def test_real_hybrid_shards_are_complete_disjoint_and_deterministic() -> None:
     files = normal_test_files(REPO)
     durations = load_durations(REPO / ".test_durations")
     weights = file_duration_weights(durations, files)
-    heavy = heavy_test_files(weights, 14)
+    node_counts = file_node_counts(durations, files)
+    heavy = heavy_test_files(weights, node_counts, 14)
     collected = collect_nodeids(REPO, heavy)
 
     first, first_heavy = build_hybrid_shards(
@@ -49,7 +52,11 @@ def test_real_hybrid_shards_are_complete_disjoint_and_deterministic() -> None:
 
     assert first == second
     assert first_heavy == second_heavy == heavy
-    assert {"tests/test_backup_restore.py", "tests/test_db_migrations.py"} <= set(heavy)
+    assert {
+        "tests/test_backup_restore.py",
+        "tests/test_db_migrations.py",
+        "tests/test_scheduler.py",
+    } <= set(heavy)
     assert set(flattened) == expected
     assert len(flattened) == len(expected)
     assert all(group for group in first)
@@ -96,6 +103,27 @@ def test_unknown_new_file_and_dynamic_nodeid_are_included(tmp_path: Path) -> Non
     }
     assert len(flattened) == len(set(flattened))
     assert "tests/test_slow.py" not in flattened
+
+
+def test_file_weight_includes_per_node_collection_and_scheduling_cost() -> None:
+    files = ["tests/test_many.py", "tests/test_one.py"]
+    durations = {
+        **{
+            f"tests/test_many.py::test_{index}": 1.0
+            for index in range(10)
+        },
+        "tests/test_one.py::test_value": 10.0,
+    }
+
+    weights = file_duration_weights(durations, files)
+
+    assert weights["tests/test_many.py"] == pytest.approx(
+        10.0 + 10 * NODE_SCHEDULING_WEIGHT_SECONDS,
+    )
+    assert weights["tests/test_one.py"] == pytest.approx(
+        10.0 + NODE_SCHEDULING_WEIGHT_SECONDS,
+    )
+    assert weights["tests/test_many.py"] > weights["tests/test_one.py"]
 
 
 def test_invalid_duration_and_collection_sets_fail_closed(tmp_path: Path) -> None:
