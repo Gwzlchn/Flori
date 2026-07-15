@@ -329,7 +329,7 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
     environment = _fake_docker_environment(tmp_path)
 
     completed = subprocess.run(
-        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "14"],
+        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "15"],
         cwd=REPO,
         env=environment,
         capture_output=True,
@@ -340,12 +340,12 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
     assert completed.returncode == 0, completed.stderr
     assert "--splitting-algorithm least_duration" in completed.stdout
     assert "--ignore=tests/test_canonical_evidence_e2e.py" in completed.stdout
-    assert "--splits 14 --group 14" in completed.stdout
-    assert "-n 2" in completed.stdout
-    assert ".coverage.normal.14" in completed.stdout
+    assert "--splits 15 --group 15" in completed.stdout
+    assert "-n 4" in completed.stdout
+    assert ".coverage.normal.15" in completed.stdout
 
     worker = subprocess.run(
-        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-worker", "2", "2"],
+        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-worker", "1", "1"],
         cwd=REPO,
         env=environment,
         capture_output=True,
@@ -355,12 +355,12 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
     assert worker.returncode == 0, worker.stderr
     assert "tests/test_canonical_evidence_e2e.py" in worker.stdout
     assert "--splitting-algorithm least_duration" in worker.stdout
-    assert "--splits 2 --group 2" in worker.stdout
+    assert "--splits 1 --group 1" in worker.stdout
     assert "-n 4" in worker.stdout
-    assert ".coverage.worker.2" in worker.stdout
+    assert ".coverage.worker.1" in worker.stdout
 
     overflow = subprocess.run(
-        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "15", "14"],
+        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "16", "15"],
         cwd=REPO,
         env=environment,
         capture_output=True,
@@ -368,7 +368,7 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
         check=False,
     )
     assert overflow.returncode == 2
-    assert "CI shard 超出范围: 15/14" in overflow.stderr
+    assert "CI shard 超出范围: 16/15" in overflow.stderr
 
 
 def _fake_frontend_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
@@ -446,9 +446,16 @@ def test_ci_image_runner_launches_all_selected_builds_and_propagates_failure(
     fake_docker.write_text(
         """#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+metadata=""
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "--metadata-file" ]; then metadata="$argument"; fi
+  previous="$argument"
+done
 case "$*" in
   *"flori-api:buildcache"*) exit 9 ;;
 esac
+[ -z "$metadata" ] || printf '{"containerimage.digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n' > "$metadata"
 exit 0
 """,
         encoding="utf-8",
@@ -461,12 +468,13 @@ exit 0
         "RUNNER_TEMP": str(tmp_path),
         "OWNER_LC": "gwzlchn",
         "FLORI_VERSION": "9.9.9",
-        "GITHUB_SHA": "1234567890abcdef",
+        "GITHUB_SHA": "1234567890abcdef1234567890abcdef12345678",
         "GITHUB_REF": "refs/heads/main",
+        "CI_IMAGE_DIGEST_FILE": str(tmp_path / "candidate-digests.tsv"),
     })
 
     completed = subprocess.run(
-        ["bash", str(REPO / "scripts/ci-images.sh"), "warm", "true", "true"],
+        ["bash", str(REPO / "scripts/ci-images.sh"), "candidate", "true", "true"],
         cwd=REPO,
         env=environment,
         capture_output=True,
@@ -479,17 +487,67 @@ exit 0
     assert len(calls) == 4
     assert sum("--file docker/base.Dockerfile" in call for call in calls) == 3
     assert sum("--file frontend/Dockerfile" in call for call in calls) == 1
-    assert "flori-api warm failed" in completed.stderr
-    assert list(tmp_path.glob("flori-ci-images-warm-*")) == []
+    assert all(
+        "--push" in call
+        and ":candidate-1234567890abcdef1234567890abcdef12345678" in call
+        for call in calls
+    )
+    assert "flori-api candidate failed" in completed.stderr
+    assert not (tmp_path / "candidate-digests.tsv").exists()
+    assert list(tmp_path.glob("flori-ci-images-candidate-*")) == []
 
 
-def test_ci_image_push_uses_latest_and_short_sha_tags(tmp_path: Path) -> None:
+def test_ci_image_candidate_writes_immutable_digest_manifest(tmp_path: Path) -> None:
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text(
+        """#!/bin/sh
+metadata=""
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "--metadata-file" ]; then metadata="$argument"; fi
+  previous="$argument"
+done
+printf '{"containerimage.digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}\n' > "$metadata"
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    digest_file = tmp_path / "artifacts" / "candidate-digests.tsv"
+    environment = os.environ.copy()
+    environment.update({
+        "PATH": f"{tmp_path}:{environment['PATH']}",
+        "RUNNER_TEMP": str(tmp_path),
+        "OWNER_LC": "gwzlchn",
+        "FLORI_VERSION": "9.9.9",
+        "GITHUB_SHA": "1234567890abcdef1234567890abcdef12345678",
+        "GITHUB_REF": "refs/heads/main",
+        "CI_IMAGE_DIGEST_FILE": str(digest_file),
+    })
+
+    completed = subprocess.run(
+        ["bash", str(REPO / "scripts/ci-images.sh"), "candidate", "true", "false"],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    lines = digest_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 3
+    assert {line.split("\t", 1)[0] for line in lines} == {
+        "flori-scheduler", "flori-api", "flori-worker",
+    }
+    assert all(line.endswith("sha256:" + "b" * 64) for line in lines)
+
+
+def test_ci_image_check_builds_products_without_push(tmp_path: Path) -> None:
     fake_docker = tmp_path / "docker"
     log = tmp_path / "docker.log"
     fake_docker.write_text(
         """#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
-exit 0
 """,
         encoding="utf-8",
     )
@@ -501,12 +559,60 @@ exit 0
         "RUNNER_TEMP": str(tmp_path),
         "OWNER_LC": "gwzlchn",
         "FLORI_VERSION": "9.9.9",
-        "GITHUB_SHA": "1234567890abcdef",
-        "GITHUB_REF": "refs/heads/main",
+        "GITHUB_SHA": "1234567890abcdef1234567890abcdef12345678",
+        "GITHUB_REF": "refs/pull/7/merge",
     })
 
     completed = subprocess.run(
-        ["bash", str(REPO / "scripts/ci-images.sh"), "push", "true", "false"],
+        ["bash", str(REPO / "scripts/ci-images.sh"), "check", "true", "true"],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert len(calls) == 4
+    assert all("--cache-from" in call for call in calls)
+    assert not any("--push" in call or "--cache-to" in call for call in calls)
+    assert not any("--metadata-file" in call or "--tag" in call for call in calls)
+
+
+def test_ci_image_promote_uses_exact_candidate_and_release_tags(tmp_path: Path) -> None:
+    fake_docker = tmp_path / "docker"
+    log = tmp_path / "docker.log"
+    fake_docker.write_text(
+        """#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    digest_file = tmp_path / "candidate-digests.tsv"
+    digest_file.write_text(
+        """flori-scheduler\tsha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+flori-api\tsha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+flori-worker\tsha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+""",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment.update({
+        "PATH": f"{tmp_path}:{environment['PATH']}",
+        "FAKE_DOCKER_LOG": str(log),
+        "RUNNER_TEMP": str(tmp_path),
+        "OWNER_LC": "gwzlchn",
+        "FLORI_VERSION": "9.9.9",
+        "GITHUB_SHA": "1234567890abcdef1234567890abcdef12345678",
+        "GITHUB_REF": "refs/heads/main",
+        "CI_IMAGE_DIGEST_FILE": str(digest_file),
+    })
+
+    completed = subprocess.run(
+        ["bash", str(REPO / "scripts/ci-images.sh"), "promote", "true", "false"],
         cwd=REPO,
         env=environment,
         capture_output=True,
@@ -517,5 +623,101 @@ exit 0
     assert completed.returncode == 0, completed.stderr
     calls = log.read_text(encoding="utf-8").splitlines()
     assert len(calls) == 3
-    assert all("--push" in call for call in calls)
+    assert all(call.startswith("buildx imagetools create ") for call in calls)
     assert all(":latest" in call and ":sha-1234567" in call for call in calls)
+    assert all("@sha256:" in call for call in calls)
+    assert not any(":candidate-" in call for call in calls)
+
+
+def test_ci_image_promote_retries_and_propagates_failure(tmp_path: Path) -> None:
+    fake_docker = tmp_path / "docker"
+    log = tmp_path / "docker.log"
+    fake_docker.write_text(
+        """#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+case "$*" in
+  *"flori-api:latest"*) exit 7 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    digest_file = tmp_path / "candidate-digests.tsv"
+    digest_file.write_text(
+        """flori-scheduler\tsha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+flori-api\tsha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+flori-worker\tsha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+""",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment.update({
+        "PATH": f"{tmp_path}:{environment['PATH']}",
+        "FAKE_DOCKER_LOG": str(log),
+        "RUNNER_TEMP": str(tmp_path),
+        "OWNER_LC": "gwzlchn",
+        "GITHUB_SHA": "1234567890abcdef1234567890abcdef12345678",
+        "GITHUB_REF": "refs/heads/main",
+        "CI_IMAGE_DIGEST_FILE": str(digest_file),
+    })
+
+    completed = subprocess.run(
+        ["bash", str(REPO / "scripts/ci-images.sh"), "promote", "true", "false"],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert sum("flori-api:latest" in call for call in calls) == 3
+    assert "flori-api promote failed" in completed.stderr
+
+
+def test_ci_image_candidate_is_main_only(tmp_path: Path) -> None:
+    environment = os.environ.copy()
+    environment.update({
+        "OWNER_LC": "gwzlchn",
+        "FLORI_VERSION": "9.9.9",
+        "GITHUB_SHA": "1234567890abcdef1234567890abcdef12345678",
+        "GITHUB_REF": "refs/pull/7/merge",
+        "RUNNER_TEMP": str(tmp_path),
+        "CI_IMAGE_DIGEST_FILE": str(tmp_path / "candidate-digests.tsv"),
+    })
+
+    completed = subprocess.run(
+        ["bash", str(REPO / "scripts/ci-images.sh"), "candidate", "true", "true"],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "candidate 仅允许在 main 执行" in completed.stderr
+
+
+def test_ci_image_promote_is_main_only(tmp_path: Path) -> None:
+    environment = os.environ.copy()
+    environment.update({
+        "OWNER_LC": "gwzlchn",
+        "GITHUB_SHA": "1234567890abcdef1234567890abcdef12345678",
+        "GITHUB_REF": "refs/pull/7/merge",
+        "RUNNER_TEMP": str(tmp_path),
+        "CI_IMAGE_DIGEST_FILE": str(tmp_path / "candidate-digests.tsv"),
+    })
+
+    completed = subprocess.run(
+        ["bash", str(REPO / "scripts/ci-images.sh"), "promote", "true", "true"],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "promote 仅允许在 main 执行" in completed.stderr

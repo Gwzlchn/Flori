@@ -13,14 +13,14 @@ on:
 # 后端单测按"普通 vs worker"拆两 job 并行(与部署镜像同理拆):
 #   unit-normal:轻镜像 test([api,worker,mcp,test],~350MB,build/load 秒级)跑非 step 测试(绝大多数)。
 #   unit-worker:重镜像 test-worker(test + ffmpeg + [steps] 媒体库)跑 step/worker 测试(tests/steps + test_step_* + test_worker)。
-#   各产部分覆盖率上传;coverage-gate 合并判 75%.关键路径 = max(unit, integration) 后进入 push-images,压 <2min.
+#   各产部分覆盖率上传;coverage-gate 合并判 75%.候选镜像与测试并行,门后只提升 manifest,关键路径目标 <2min.
 jobs:
   unit-normal:
-    # 普通测试在发布关键路径,拆 14 shard 缩短测试段.
+    # 普通测试在发布关键路径,拆 15 shard 缩短测试段.
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        group: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     concurrency:
       group: ci-${{ github.event.pull_request.number || github.ref }}-unit-normal-${{ matrix.group }}
       cancel-in-progress: true
@@ -30,9 +30,8 @@ jobs:
       packages: write
     env:
       USE_USTC_MIRROR: "0"
-      CI_NORMAL_SPLITS: "14"
-      # 14 分片已提供跨 runner 并行;片内 2 worker 减少全量 collection 重复税.
-      CI_XDIST_WORKERS: "2"
+      CI_NORMAL_SPLITS: "15"
+      CI_XDIST_WORKERS: "4"
     steps:
       - uses: actions/checkout@v6
       - name: Lowercase owner
@@ -65,11 +64,24 @@ jobs:
             type=gha,scope=flori-test
           # 仅 group 1 写 buildcache,避免多 shard 并行双写同 ref.
           cache-to: ${{ github.ref == 'refs/heads/main' && matrix.group == 1 && format('type=registry,ref=ghcr.io/{0}/flori-test:buildcache,mode=max', env.OWNER_LC) || (github.ref != 'refs/heads/main' && matrix.group == 1 && 'type=gha,scope=flori-test,mode=max' || '') }}
-      # 非媒体测试按 least-duration 拆 14 shard;真实调用 pdfinfo 的 canonical E2E 归 unit-worker.
+      # 非媒体测试按 least-duration 拆 15 shard;真实调用 pdfinfo 的 canonical E2E 归 unit-worker.
       - name: Unit tests(普通 shard ${{ matrix.group }}/${{ env.CI_NORMAL_SPLITS }},非 step)+ 部分覆盖率
         run: |
           CI_COVERAGE_DIR="$GITHUB_WORKSPACE/covdata" \
             bash scripts/test.sh --ci-normal ${{ matrix.group }} "$CI_NORMAL_SPLITS"
+      - name: 导出 coverage runtime
+        if: matrix.group == 1
+        run: |
+          mkdir -p coverage-runtime
+          docker run --rm flori-test:latest \
+            tar -C /usr/local/lib/python3.11/site-packages -czf - coverage \
+            > coverage-runtime/coverage-site.tar.gz
+      - uses: actions/upload-artifact@v7.0.1
+        if: matrix.group == 1
+        with:
+          name: coverage-runtime
+          path: coverage-runtime/coverage-site.tar.gz
+          if-no-files-found: error
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: cov-normal-${{ matrix.group }}
@@ -78,11 +90,11 @@ jobs:
           if-no-files-found: error
 
   unit-worker:
-    # 重镜像拆 2 shard，将释放的槽给 normal 长杆。
+    # 重镜像单 shard 跑 4 xdist worker,将释放的槽给 normal 长杆.
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2]
+        group: [1]
     concurrency:
       group: ci-${{ github.event.pull_request.number || github.ref }}-unit-worker-${{ matrix.group }}
       cancel-in-progress: true
@@ -93,7 +105,7 @@ jobs:
     env:
       USE_USTC_MIRROR: "0"
       CI_XDIST_WORKERS: "4"
-      CI_WORKER_SPLITS: "2"
+      CI_WORKER_SPLITS: "1"
     steps:
       - uses: actions/checkout@v6
       - name: Lowercase owner
@@ -126,7 +138,7 @@ jobs:
             type=gha,scope=flori-test-worker
           # 仅 group 1 写 buildcache,避免多 shard 并行双写同 ref.
           cache-to: ${{ github.ref == 'refs/heads/main' && matrix.group == 1 && format('type=registry,ref=ghcr.io/{0}/flori-test-worker:buildcache,mode=max', env.OWNER_LC) || (github.ref != 'refs/heads/main' && matrix.group == 1 && 'type=gha,scope=flori-test-worker,mode=max' || '') }}
-      # step/worker/media 测试使用重镜像并按 least-duration 拆 2 shard。
+      # step/worker/media 测试使用重镜像和 4 xdist worker.
       - name: Unit tests(step/worker/media shard ${{ matrix.group }}/${{ env.CI_WORKER_SPLITS }})+ 部分覆盖率
         run: |
           CI_COVERAGE_DIR="$GITHUB_WORKSPACE/covdata" \
@@ -216,8 +228,8 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
-  # 合并普通 + worker 各 shard 与 integration 的部分覆盖率,判分支覆盖率门 75%(拆 job 后不能各自判,部分覆盖会误判)。
-  # 用 python:slim 挂 checkout 到 /app 里 combine(记录的 /app/* 路径直接对齐,免 [paths]),不建 test 镜像也能秒级完成。
+  # 合并普通 + worker 各 shard 与 integration 的部分覆盖率,判分支覆盖率门 75%(拆 job 后不能各自判,部分覆盖会误判).
+  # 用 unit 镜像导出的 runtime 在 python:slim 内 combine,消除串行联网安装.
   coverage-gate:
     needs: [unit-normal, unit-worker, integration]
     concurrency:
@@ -236,10 +248,15 @@ jobs:
           pattern: cov-*
           path: covdata
           merge-multiple: true          # normal + worker + 两路 integration 都写入 covdata/.coverage.*
+      - name: Download coverage runtime
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: coverage-runtime
+          path: coverage-runtime
       - name: Assert all coverage parts are present and non-empty
         env:
-          NORMAL_SPLITS: "14"
-          WORKER_SPLITS: "2"
+          NORMAL_SPLITS: "15"
+          WORKER_SPLITS: "1"
         run: |
           required=(
             covdata/.coverage.integration.data
@@ -257,16 +274,26 @@ jobs:
               exit 1
             fi
           done
-      - name: Combine + 判分支覆盖率门(轻量 python:slim,不建 test 镜像,省约 25s 串行)
+      - name: Combine + 判分支覆盖率门(复用 unit 镜像内 runtime)
         id: cov
         run: |
-          # 挂 checkout 到 /app,与两 unit job 记录的 /app/* 路径一致,免 [paths] 重映射;pip 装 coverage 秒级。
-          docker run --rm -v "$GITHUB_WORKSPACE:/app" -v "$GITHUB_WORKSPACE/covdata:/covdata" -w /app \
+          mkdir -p coverage-site "$RUNNER_TEMP/coverage-work"
+          tar -xzf coverage-runtime/coverage-site.tar.gz -C coverage-site
+          # 挂 checkout 到 /app,与部分 coverage 记录的 /app/* 路径一致,免 [paths] 重映射.
+          docker run --rm \
+            -e PYTHONPATH=/coverage-site -e COVERAGE_RCFILE=/app/pyproject.toml \
+            -v "$GITHUB_WORKSPACE:/app:ro" -v "$GITHUB_WORKSPACE/covdata:/covdata:ro" \
+            -v "$GITHUB_WORKSPACE/coverage-site:/coverage-site:ro" \
+            -v "$RUNNER_TEMP/coverage-work:/work" -w /work \
             python:3.11-slim sh -c \
-            'pip install -q "coverage[toml]<8" && cp /covdata/.coverage.* . && coverage combine && coverage report --fail-under=75' \
+            'python -m coverage combine --keep /covdata && python -m coverage report --fail-under=75' \
             | tee /tmp/cov.log
           pct=$(awk '/^TOTAL/{gsub("%","",$NF); print $NF}' /tmp/cov.log | tail -1)
-          echo "pct=${pct:-unknown}" >> "$GITHUB_OUTPUT"
+          if ! [[ "$pct" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            echo "::error::无法从 coverage report 解析覆盖率"
+            exit 1
+          fi
+          echo "pct=$pct" >> "$GITHUB_OUTPUT"
           echo "### 后端分支覆盖率(合并 普通+worker+integration):${pct:-unknown}%" >> "$GITHUB_STEP_SUMMARY"
 
   # 注:OpenAPI 模糊/契约(schemathesis)在独立每日 cron .github/workflows/fuzz.yml 跑,不拖慢 push CI。
@@ -434,7 +461,7 @@ jobs:
           git commit -q -m "chore(badges): 覆盖率 be=${BE}% fe=${FE}% [skip ci]"
           git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" badges
 
-  # 四个 prod 镜像在一个 runner 内并行暖 cache，避免 matrix 占满账号槽位。
+  # 四个 prod 镜像在一个 runner 内并行;PR 只验构建,main push 精确 SHA 候选.
   build-images:
     needs: [detect]
     concurrency:
@@ -461,20 +488,31 @@ jobs:
       - uses: docker/setup-buildx-action@v4
         if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
       - name: Log in to ghcr.io
-        if: (needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true') && github.ref == 'refs/heads/main'
+        if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build 并行暖 cache
+      - name: Build 产品镜像门
         if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
-        run: >-
-          bash scripts/ci-images.sh warm
-          "${{ needs.detect.outputs.backend }}"
-          "${{ needs.detect.outputs.frontend }}"
+        env:
+          CI_IMAGE_DIGEST_FILE: ${{ runner.temp }}/candidate-digests.tsv
+        run: |
+          mode=check
+          [ "$GITHUB_REF" != "refs/heads/main" ] || mode=candidate
+          bash scripts/ci-images.sh "$mode" \
+            "${{ needs.detect.outputs.backend }}" \
+            "${{ needs.detect.outputs.frontend }}"
+      - name: Upload immutable candidate digests
+        if: github.ref == 'refs/heads/main' && (needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true')
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: candidate-digests
+          path: ${{ runner.temp }}/candidate-digests.tsv
+          if-no-files-found: error
 
-  # 覆盖率门后使用单 runner 并行 push，任一镜像失败则整体失败。
+  # 覆盖率门后使用单 runner 提升精确 SHA 候选,任一镜像失败则整体失败.
   push-images:
     needs: [coverage-gate, fe-test, integration, detect, build-images]
     if: github.ref == 'refs/heads/main'
@@ -495,13 +533,6 @@ jobs:
       - name: Lowercase owner
         if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
         run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
-      - name: 稳定 pip 缓存(取真实版本 + 抹 pyproject version 为占位)
-        if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
-        run: |
-          echo "FLORI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)" >> "$GITHUB_ENV"
-          sed -i 's/^version = .*/version = "0.0.0"/' pyproject.toml
-      - uses: docker/setup-buildx-action@v4
-        if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
       - name: Log in to ghcr.io
         if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
         uses: docker/login-action@v4
@@ -509,9 +540,17 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Push 四镜像(已暖 cache)
+      - name: Download immutable candidate digests
         if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: candidate-digests
+          path: ${{ runner.temp }}/candidate-digests
+      - name: Promote 四镜像候选
+        if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
+        env:
+          CI_IMAGE_DIGEST_FILE: ${{ runner.temp }}/candidate-digests/candidate-digests.tsv
         run: >-
-          bash scripts/ci-images.sh push
+          bash scripts/ci-images.sh promote
           "${{ needs.detect.outputs.backend }}"
           "${{ needs.detect.outputs.frontend }}"

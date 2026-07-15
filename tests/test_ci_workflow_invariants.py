@@ -105,7 +105,7 @@ def test_unit_shards_and_real_integration_use_the_single_test_entrypoint() -> No
     assert normal_job["strategy"]["matrix"]["group"] == list(
         range(1, normal_splits + 1),
     )
-    assert normal_job["env"]["CI_XDIST_WORKERS"] == "2"
+    assert normal_job["env"]["CI_XDIST_WORKERS"] == "4"
     worker_splits = int(worker_job["env"]["CI_WORKER_SPLITS"])
     assert worker_job["strategy"]["matrix"]["group"] == list(
         range(1, worker_splits + 1),
@@ -251,6 +251,25 @@ def test_all_coverage_parts_fail_closed_before_combine() -> None:
     assert '[ ! -s "$part" ]' in assertion
     assert "exit 1" in assertion
 
+    runtime_upload = next(
+        step for step in jobs["unit-normal"]["steps"]
+        if step.get("with", {}).get("name") == "coverage-runtime"
+    )
+    assert runtime_upload["if"] == "matrix.group == 1"
+    assert runtime_upload["with"]["if-no-files-found"] == "error"
+    runtime_download = next(
+        step for step in gate["steps"]
+        if step.get("name") == "Download coverage runtime"
+    )
+    assert runtime_download["with"]["name"] == "coverage-runtime"
+    combine = next(step for step in gate["steps"] if step.get("id") == "cov")["run"]
+    assert "pip install" not in combine
+    assert "PYTHONPATH=/coverage-site" in combine
+    assert "python -m coverage combine --keep /covdata" in combine
+    assert "python -m coverage report --fail-under=75" in combine
+    assert '[[ "$pct" =~ ^[0-9]+([.][0-9]+)?$ ]]' in combine
+    assert 'echo "pct=$pct" >> "$GITHUB_OUTPUT"' in combine
+
 
 def test_ci_first_layer_fits_account_slots_and_images_share_one_runner() -> None:
     jobs = load_workflow()["jobs"]
@@ -319,19 +338,41 @@ def test_ci_first_layer_fits_account_slots_and_images_share_one_runner() -> None
 
     assert "strategy" not in jobs["build-images"]
     assert "strategy" not in jobs["push-images"]
-    warm = next(
+    product_gate = next(
         step for step in jobs["build-images"]["steps"]
-        if step.get("name") == "Build 并行暖 cache"
+        if step.get("name") == "Build 产品镜像门"
     )["run"]
-    push = next(
+    promote = next(
         step for step in jobs["push-images"]["steps"]
-        if step.get("name") == "Push 四镜像(已暖 cache)"
+        if step.get("name") == "Promote 四镜像候选"
     )["run"]
-    assert warm.startswith("bash scripts/ci-images.sh warm")
-    assert push.startswith("bash scripts/ci-images.sh push")
+    assert "if" not in jobs["build-images"]
+    assert "mode=check" in product_gate
+    assert "mode=candidate" in product_gate
+    assert 'bash scripts/ci-images.sh "$mode"' in product_gate
+    assert promote.startswith("bash scripts/ci-images.sh promote")
+    candidate_upload = next(
+        step for step in jobs["build-images"]["steps"]
+        if step.get("with", {}).get("name") == "candidate-digests"
+    )
+    assert candidate_upload["with"]["if-no-files-found"] == "error"
+    candidate_download = next(
+        step for step in jobs["push-images"]["steps"]
+        if step.get("name") == "Download immutable candidate digests"
+    )
+    assert candidate_download["with"]["name"] == "candidate-digests"
+    assert not any(
+        step.get("uses", "").startswith("docker/setup-buildx-action@")
+        for step in jobs["push-images"]["steps"]
+    )
 
     image_script = (WORKFLOW.parents[2] / "scripts" / "ci-images.sh").read_text()
     assert image_script.count("start_build flori-") == 4
+    assert 'candidate="ghcr.io/$OWNER_LC/$image:candidate-$GITHUB_SHA"' in image_script
+    assert '--metadata-file "$metadata"' in image_script
+    assert '"ghcr.io/$OWNER_LC/$image@$digest"' in image_script
+    assert "docker buildx imagetools create" in image_script
+    assert "for attempt in 1 2 3" in image_script
     assert '"${command[@]}" >"$log" 2>&1 &' in image_script
     assert 'if wait "$pid"' in image_script
     assert 'failed=1' in image_script

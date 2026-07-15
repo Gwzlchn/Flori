@@ -222,14 +222,14 @@ flori/
   - `scripts/test.sh --fe [参数]` → 前端 vitest;`--rebuild`(改了 pyproject `[test]` 依赖后重建镜像)、`--down`(收热容器)。
   - `scripts/test.sh --integration` → 真 Redis、生产 Database 冷启动/迁移/DR 兼容、Docker daemon、Gateway Worker、pipeline 检索闭环和 AOF 恢复门。
   - `scripts/test.sh --external <场景|all>` → 显式公网 article / audio / RSS / YouTube 验证;缺 URL 返回非零，不计为通过。
-- **本地/CI 分工**：本地只跑【新增/相关】用例(`-m` 或 `--changed`);**全量回归 + 覆盖率门(75%) + 前端 vitest 交 CI**（`.github/workflows/ci.yml`:普通 14 分片 + worker 2 分片 + 真依赖 integration 两分组 → `coverage-gate` 合并判门 → 单一 `push-images` 并行发布;纯文档提交 `paths-ignore` 跳 CI;路径分类从最近完整成功 run 累计到当前 HEAD，前端-only 改动不重建后端镜像;同 ref 新 run 只取消旧测试/build，已启动的镜像发布不取消;schemathesis 独立每日 cron `fuzz.yml`）。
+- **本地/CI 分工**：本地只跑【新增/相关】用例(`-m` 或 `--changed`);**全量回归 + 覆盖率门(75%) + 前端 vitest 交 CI**（`.github/workflows/ci.yml`:普通 15 分片 + worker 1 分片 + 真依赖 integration 两分组 → `coverage-gate` 合并判门 → 候选镜像提升;纯文档提交 `paths-ignore` 跳 CI;路径分类从最近完整成功 run 累计到当前 HEAD，前端-only 改动不重建后端镜像;同 ref 新 run 只取消旧测试/build，已启动的镜像发布不取消;schemathesis 独立每日 cron `fuzz.yml`）。
 
 ### 开发 / 测试 / 交付节奏（全容器内,宿主不装依赖）
 - 开发热更新：`docker compose -f docker-compose.dev.yml up -d`
 - 容器内测试：**唯一入口 `scripts/test.sh`**（见上 §测试规约;全量 `scripts/test.sh --all` 本地少用,全量回归交 CI）
 - **本地快测 + CI 异步回归 + 即时部署**（提速节奏,务必遵守）：
   1. 本地只跑【新增 / 直接相关】用例（不跑全量）：**`scripts/test.sh -m <新模块>`**（或 `--changed` 只跑受影响用例;前端 `scripts/test.sh --fe`）。见 §测试规约。
-     全量回归由 **CI 承担**：push/PR 自动跑后端普通 14 分片 + worker 2 分片 + 真依赖 integration 两分组 + 覆盖率门(75%) + 前端 vitest（`.github/workflows/ci.yml`);schemathesis 独立每日 cron。
+     全量回归由 **CI 承担**：push/PR 自动跑后端普通 15 分片 + worker 1 分片 + 真依赖 integration 两分组 + 覆盖率门(75%) + 前端 vitest（`.github/workflows/ci.yml`);schemathesis 独立每日 cron。
   2. **「子任务完成」判定** = 约定 scope 实现完成 + 相关用例绿 + 改动与验证清单已报告。子 agent 完成不等于交付单元可发布。
   3. **「交付单元完成」判定** = integrator 已整合全部 diff + 并集相关测试绿 + 本地 build 对应镜像 +（API 调用 或 Playwright MCP）手验通过 + 必要契约/文档已同步。
   4. 交付单元完成后：① integrator 按 §提交规范创建一个正式提交（发布交付才 bump）→ push main（触发 CI 全量回归,异步）；② **部署**：NAS 即时 recreate（本地 build-uptest 镜像,不等 CI）。★**后端发布交付一律三件套全建全滚**（`scripts/build-uptest.sh scheduler api worker` + recreate 全部后端容器）——共享 shared/ 且全系统单一版本,只滚"改到的那个"必致版本漂移（scheduler/api 停旧版、/system 报 worker 版本漂移,踩过两回）；前端-only 发布交付才可只滚 frontend。ECS 边缘**无手动直传**——git push → CI 建 ghcr → Watchtower（120s 轮询）自动 pull+重建（单一路径,不回退,见 §部署）。

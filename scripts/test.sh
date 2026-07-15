@@ -46,12 +46,7 @@ run_ci_shard() {
 
   cov_dir="${CI_COVERAGE_DIR:-$REPO/covdata}"
   mkdir -p "$cov_dir"
-  if [ "$kind" = "normal" ]; then
-    default_xdist_workers=2
-  else
-    default_xdist_workers=4
-  fi
-  base=(pytest -p no:cacheprovider -m 'not fuzz' -n "${CI_XDIST_WORKERS:-$default_xdist_workers}"
+  base=(pytest -p no:cacheprovider -m 'not fuzz' -n "${CI_XDIST_WORKERS:-4}"
         --splitting-algorithm least_duration)
   if [ "$kind" = "normal" ]; then
     paths=(--ignore=tests/integration --ignore=tests/steps
@@ -110,14 +105,14 @@ while [ $# -gt 0 ]; do
       [ $# -gt 0 ] || usage 1
       group="$1"
       shift
-      run_ci_shard normal "$group" "${1:-${CI_NORMAL_SPLITS:-14}}"
+      run_ci_shard normal "$group" "${1:-${CI_NORMAL_SPLITS:-15}}"
       ;;
     --ci-worker)
       shift
       [ $# -gt 0 ] || usage 1
       group="$1"
       shift
-      run_ci_shard worker "$group" "${1:-${CI_WORKER_SPLITS:-2}}"
+      run_ci_shard worker "$group" "${1:-${CI_WORKER_SPLITS:-1}}"
       ;;
     --all)  MODE="all"; shift ;;
     --changed) CHANGED=1; shift ;;
