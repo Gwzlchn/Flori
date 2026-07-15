@@ -42,7 +42,7 @@ services:
       - ./pyproject.toml:/app/pyproject.toml
       # schemathesis 检查配置(只跑 not_a_server_error + response_schema_conformance)
       - ./schemathesis.toml:/app/schemathesis.toml
-      # CI 时长档:normal 在 collection 前按文件预分，worker 用 pytest-split 均衡。
+      # CI 时长档:normal 轻文件保持完整，巨型文件局部 collection 后拆 nodeid；worker 用 pytest-split。
       # 改了用例分布后重新 `pytest --store-durations --durations-path .test_durations` 生成即可,不用重建镜像。
       - ./.test_durations:/app/.test_durations
     # 测试依赖([test] extra,单一事实源 pyproject)已烤进 test stage 镜像,见 base.Dockerfile;此处不做运行时

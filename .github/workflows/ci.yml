@@ -72,7 +72,7 @@ jobs:
           printf 'normal=%s\nworker=%s\n' "$normal" "$worker" >> "$GITHUB_OUTPUT"
 
   unit-normal:
-    # 普通测试在发布关键路径,按完整文件预分成 14 shard 后再 collection.
+    # 普通测试先按文件预分；巨型文件局部 collection 后按实际 nodeid 拆开，避免单文件长杆.
     strategy:
       fail-fast: false
       matrix:
@@ -131,7 +131,7 @@ jobs:
             type=gha,scope=flori-test
           # PR 仅 group 1 写 GHA cache,避免多 shard 并行双写.
           cache-to: ${{ matrix.group == 1 && 'type=gha,scope=flori-test,mode=max' || '' }}
-      # 非媒体测试按历史时长预分完整文件;真实调用 pdfinfo 的 canonical E2E 归 unit-worker.
+      # 轻文件按历史时长保持完整；巨型文件动态 nodeid 预分，canonical E2E 归 unit-worker.
       - name: Unit tests(普通 shard ${{ matrix.group }}/${{ env.CI_NORMAL_SPLITS }},非 step)+ 部分覆盖率
         run: |
           CI_COVERAGE_DIR="$GITHUB_WORKSPACE/covdata" \
