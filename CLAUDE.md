@@ -222,7 +222,7 @@ flori/
   - `scripts/test.sh --fe [参数]` → 前端 vitest;`--rebuild`(改了 pyproject `[test]` 依赖后重建镜像)、`--down`(收热容器)。
   - `scripts/test.sh --integration` → 真 Redis、生产 Database 冷启动/迁移/DR 兼容、Docker daemon、Gateway Worker、pipeline 检索闭环和 AOF 恢复门。
   - `scripts/test.sh --external <场景|all>` → 显式公网 article / audio / RSS / YouTube 验证;缺 URL 返回非零，不计为通过。
-- **本地/CI 分工**：本地只跑【新增/相关】用例(`-m` 或 `--changed`);**全量回归 + 覆盖率门(75%) + 前端 vitest 交 CI**（`.github/workflows/ci.yml`:main 按 Dockerfile + 去版本 pyproject 内容键复用无源码测试 runtime，普通测试在全量 collection 前预分 15 组；轻文件保持完整，超过平均负载的巨型文件只做局部真实 collection 并按动态 nodeid 分组。worker 1 分片 + 真依赖 integration 两分组与 runtime prepare 并行启动，detect 在 prepare 释放槽后进入第二层；runner 拉取后固定本地 RepoDigest 并挂当前源码 → `coverage-gate` 合并判门 → 候选镜像提升;PR 仍在各 runner 本地构建测试 stage;纯文档提交 `paths-ignore` 跳 CI;路径分类从最近完整成功 run 累计到当前 HEAD，前端-only 改动不重建后端镜像;同 ref 新 run 只取消旧测试/build，已启动的镜像发布不取消;schemathesis 独立每日 cron `fuzz.yml`）。
+- **本地/CI 分工**：本地只跑【新增/相关】用例(`-m` 或 `--changed`);**全量回归 + 覆盖率门(75%) + 前端 vitest 交 CI**（`.github/workflows/ci.yml`:main 按 Dockerfile + 去版本 pyproject 内容键复用无源码测试 runtime，普通测试在全量 collection 前预分 15 组；轻文件保持完整，超过平均负载的巨型文件只做局部真实 collection 并按动态 nodeid 分组，组内 xdist 单项调度消除批量预取长尾。worker 1 分片 + 真依赖 integration 两分组与 runtime prepare 并行启动，detect 和 build-images 先占用 prepare 释放槽完成短控制链，coverage gate 随后预热并以当前 run/attempt 的全部成功生产 job 为屏障；制品下载、逐文件非空断言和 coverage combine 全部 fail-closed，判门后才允许候选镜像提升;PR 仍在各 runner 本地构建测试 stage;纯文档提交 `paths-ignore` 跳 CI;路径分类从最近完整成功 run 累计到当前 HEAD，前端-only 改动不重建后端镜像;同 ref 新 run 只取消旧测试/build，已启动的镜像发布不取消;schemathesis 独立每日 cron `fuzz.yml`）。
 
 ### 开发 / 测试 / 交付节奏（全容器内,宿主不装依赖）
 - 开发热更新：`docker compose -f docker-compose.dev.yml up -d`

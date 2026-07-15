@@ -156,9 +156,8 @@ def test_integration_entrypoint_runs_production_redis_and_minio_restore_drill() 
         if step.get("name") == "Real dependency integration gate"
     )
     assert run_step["env"]["CI_COVERAGE"] == "1"
-    assert set(gate["needs"]) == {
-        "prepare-test-runtime", "unit-normal", "unit-worker", "integration",
-    }
+    assert gate["needs"] == ["prepare-test-runtime", "detect", "build-images"]
+    assert gate["permissions"]["actions"] == "read"
 
 
 def test_integration_partitions_are_isolated_and_cover_every_core_file_once() -> None:
@@ -232,13 +231,19 @@ def test_all_coverage_parts_fail_closed_before_combine() -> None:
     )
 
     gate = jobs["coverage-gate"]
+    wait_step = next(
+        step for step in gate["steps"]
+        if step.get("name") == "Wait for every coverage producer"
+    )
+    assert "ci_wait_coverage.py --phase all" in wait_step["run"]
+    assert wait_step["env"]["GH_TOKEN"] == "${{ github.token }}"
     assertion_step = next(
         step for step in gate["steps"]
         if step.get("name") == "Assert all coverage parts are present and non-empty"
     )
     assertion = assertion_step["run"]
-    normal_splits = int(assertion_step["env"]["NORMAL_SPLITS"])
-    worker_splits = int(assertion_step["env"]["WORKER_SPLITS"])
+    normal_splits = int(gate["env"]["NORMAL_SPLITS"])
+    worker_splits = int(gate["env"]["WORKER_SPLITS"])
     expected = {
         *(f"covdata/.coverage.normal.{group}" for group in range(1, normal_splits + 1)),
         *(f"covdata/.coverage.worker.{group}" for group in range(1, worker_splits + 1)),
@@ -268,6 +273,14 @@ def test_all_coverage_parts_fail_closed_before_combine() -> None:
         if step.get("name") == "Download coverage runtime"
     )
     assert runtime_download["with"]["name"] == "coverage-runtime"
+    prewarm = next(
+        step for step in gate["steps"]
+        if step.get("name") == "Prewarm coverage image and wait for group 1"
+    )
+    assert "docker pull \"$COVERAGE_IMAGE\"" in prewarm["run"]
+    assert "ci_wait_coverage.py --phase runtime" in prewarm["run"]
+    assert gate["env"]["COVERAGE_IMAGE"].startswith("python@sha256:")
+    assert len(gate["env"]["COVERAGE_IMAGE"].split(":", 1)[1]) == 64
     combine = next(step for step in gate["steps"] if step.get("id") == "cov")["run"]
     assert "pip install" not in combine
     assert "PYTHONPATH=/coverage-site" in combine
@@ -285,6 +298,10 @@ def test_ci_first_layer_fits_account_slots_and_images_share_one_runner() -> None
     # 第一层含 prepare 和 fe-test；detect 等 prepare 释放槽后进入第二层。
     assert normal + worker + integration + 2 == 20
     assert jobs["detect"]["needs"] == ["prepare-test-runtime"]
+    assert jobs["coverage-gate"]["needs"] == [
+        "prepare-test-runtime", "detect", "build-images",
+    ]
+    assert jobs["coverage-gate"]["timeout-minutes"] == 5
 
     for job_name in ("unit-normal", "unit-worker"):
         steps = jobs[job_name]["steps"]
@@ -363,9 +380,9 @@ def test_ci_first_layer_fits_account_slots_and_images_share_one_runner() -> None
         step for step in prepare["steps"] if step.get("id") == "resolve"
     )
     assert "@sha256:[0-9a-f]{64}" in resolve_step["run"]
-    assert set(jobs["coverage-gate"]["needs"]) == {
-        "prepare-test-runtime", "unit-normal", "unit-worker", "integration",
-    }
+    assert jobs["coverage-gate"]["needs"] == [
+        "prepare-test-runtime", "detect", "build-images",
+    ]
     assert jobs["build-images"]["needs"] == ["detect", "prepare-test-runtime"]
 
     runtime_script = (

@@ -48,6 +48,8 @@ run_ci_shard() {
   mkdir -p "$cov_dir"
   base=(pytest -p no:cacheprovider -m 'not fuzz' -n "${CI_XDIST_WORKERS:-4}")
   if [ "$kind" = "normal" ]; then
+    # 单项调度避免默认批量预取把一组慢 node 留在单个 worker 尾部.
+    base+=(--dist load --maxschedchunk=1)
     exec docker compose -f "$COMPOSE" run --rm \
       -v "$cov_dir:/covdata" -e "COVERAGE_FILE=/covdata/.coverage.${kind}.${group}" \
       test python scripts/ci_test_shard.py \

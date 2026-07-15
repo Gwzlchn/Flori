@@ -316,35 +316,55 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+  # 短控制链完成后提前启动并预热 coverage runner;内部屏障等待当前 attempt 全部生产 job,避免串行尾部再付启动税.
   # 合并普通 + worker 各 shard 与 integration 的部分覆盖率,判分支覆盖率门 75%(拆 job 后不能各自判,部分覆盖会误判).
-  # 用 unit 镜像导出的 runtime 在 python:slim 内 combine,消除串行联网安装.
   coverage-gate:
-    needs: [prepare-test-runtime, unit-normal, unit-worker, integration]
+    needs: [prepare-test-runtime, detect, build-images]
     concurrency:
       group: ci-${{ github.event.pull_request.number || github.ref }}-coverage-gate
       cancel-in-progress: true
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
+      actions: read
       contents: read
+    env:
+      NORMAL_SPLITS: "15"
+      WORKER_SPLITS: "1"
+      COVERAGE_IMAGE: python@sha256:baf89808ec37adeaab83cec287adb4a2afa4a11c1d51e961c7ec737877e61af6
     outputs:
       cov: ${{ steps.cov.outputs.pct }}
     steps:
       - uses: actions/checkout@v6
+      - name: Prewarm coverage image and wait for group 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          docker pull "$COVERAGE_IMAGE"
+          python3 scripts/ci_wait_coverage.py --phase runtime \
+            --normal-splits "$NORMAL_SPLITS" --worker-splits "$WORKER_SPLITS"
+      - name: Download coverage runtime
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: coverage-runtime
+          path: coverage-runtime
+      - name: Prepare coverage runtime while tests continue
+        run: |
+          mkdir -p coverage-site
+          tar -xzf coverage-runtime/coverage-site.tar.gz -C coverage-site
+      - name: Wait for every coverage producer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/ci_wait_coverage.py --phase all
+          --normal-splits "$NORMAL_SPLITS" --worker-splits "$WORKER_SPLITS"
       - name: Download 各 shard 部分覆盖率
         uses: actions/download-artifact@v8.0.1
         with:
           pattern: cov-*
           path: covdata
           merge-multiple: true          # normal + worker + 两路 integration 都写入 covdata/.coverage.*
-      - name: Download coverage runtime
-        uses: actions/download-artifact@v8.0.1
-        with:
-          name: coverage-runtime
-          path: coverage-runtime
       - name: Assert all coverage parts are present and non-empty
-        env:
-          NORMAL_SPLITS: "15"
-          WORKER_SPLITS: "1"
         run: |
           required=(
             covdata/.coverage.integration.data
@@ -365,15 +385,14 @@ jobs:
       - name: Combine + 判分支覆盖率门(复用 unit 镜像内 runtime)
         id: cov
         run: |
-          mkdir -p coverage-site "$RUNNER_TEMP/coverage-work"
-          tar -xzf coverage-runtime/coverage-site.tar.gz -C coverage-site
+          mkdir -p "$RUNNER_TEMP/coverage-work"
           # 挂 checkout 到 /app,与部分 coverage 记录的 /app/* 路径一致,免 [paths] 重映射.
           docker run --rm \
             -e PYTHONPATH=/coverage-site -e COVERAGE_RCFILE=/app/pyproject.toml \
             -v "$GITHUB_WORKSPACE:/app:ro" -v "$GITHUB_WORKSPACE/covdata:/covdata:ro" \
             -v "$GITHUB_WORKSPACE/coverage-site:/coverage-site:ro" \
             -v "$RUNNER_TEMP/coverage-work:/work" -w /work \
-            python:3.11-slim sh -c \
+            "$COVERAGE_IMAGE" sh -c \
             'python -m coverage combine --keep /covdata && python -m coverage report --fail-under=75' \
             | tee /tmp/cov.log
           pct=$(awk '/^TOTAL/{gsub("%","",$NF); print $NF}' /tmp/cov.log | tail -1)

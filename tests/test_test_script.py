@@ -341,6 +341,7 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
     assert "test python scripts/ci_test_shard.py --group 15 --splits 15 -- pytest" in completed.stdout
     assert "--splitting-algorithm least_duration" not in completed.stdout
     assert "-n 4" in completed.stdout
+    assert "--dist load --maxschedchunk=1" in completed.stdout
     assert ".coverage.normal.15" in completed.stdout
 
     worker = subprocess.run(
@@ -354,6 +355,7 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
     assert worker.returncode == 0, worker.stderr
     assert "tests/test_canonical_evidence_e2e.py" in worker.stdout
     assert "--splitting-algorithm least_duration" in worker.stdout
+    assert "--maxschedchunk" not in worker.stdout
     assert "--splits 1 --group 1" in worker.stdout
     assert "-n 4" in worker.stdout
     assert ".coverage.worker.1" in worker.stdout
