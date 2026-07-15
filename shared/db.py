@@ -1018,6 +1018,33 @@ class Database:
             current_only,
         )
 
+    def list_jobs_in_window(
+        self,
+        *,
+        domain: str,
+        since: datetime,
+        until: datetime,
+    ) -> list[Job]:
+        """返回 domain 在 `[since, until)` 内的全部 current job。"""
+        return _JobsReadRepository.list_jobs_in_window(
+            self, domain=domain, since=since, until=until,
+        )
+
+    def list_digest_evidence_in_window(
+        self,
+        *,
+        domain: str,
+        since: datetime,
+        until: datetime,
+        limit: int,
+        per_job_limit: int,
+    ) -> tuple[int, list[dict]]:
+        """读取周摘要的 canonical evidence 候选,limit 只约束显式 prompt 预算。"""
+        return _JobsReadRepository.list_digest_evidence_in_window(
+            self, domain=domain, since=since, until=until, limit=limit,
+            per_job_limit=per_job_limit,
+        )
+
     def lineage_versions(self, job_id: str) -> list[Job]:
         """同一 lineage(同源内容)的所有快照,按 created_at 倒序(供详情页历史版本跳转)。
         若该 job 无 lineage_key(旧库未回填)则只返它自己。"""

@@ -47,16 +47,54 @@ async def post_digest(
     前端轮询 /api/ai-tasks/{task_id}/result 取 markdown,digest 读 markdown 别名。"""
     validate_path_segment(domain, "domain")
     radar_data = await asyncio.to_thread(radar_service.radar, db, domain, window_days)
-    recent_titles = [j["title"] for j in radar_data.get("recent_jobs", []) if j.get("title")]
+    if not (
+        radar_data["recent_jobs"]
+        or radar_data["rising_concepts"]
+        or radar_data["new_concepts"]
+    ):
+        return {
+            "task_id": None,
+            "window": radar_data["window"],
+            "markdown": "本周暂无可验证的新内容。",
+            "citation_validation": {
+                "kind": "digest_citations", "status": "not_applicable",
+                "reliable": True, "issues": [], "items": [],
+                "checked_claims": 0, "supported_claims": 0,
+                "manifest_sha256": None,
+            },
+        }
 
-    system, user = radar_service.build_digest_prompt(radar_data, recent_titles)
+    task_id = f"at_{uuid.uuid4().hex}"
+    source_manifest = await asyncio.to_thread(
+        radar_service.build_digest_source_manifest,
+        db,
+        task_id=task_id,
+        radar_data=radar_data,
+    )
+    if not source_manifest["sources"]:
+        return {
+            "task_id": None,
+            "window": radar_data["window"],
+            "markdown": "⚠️ 窗口内内容尚无可验证证据，未生成周摘要。",
+            "citation_validation": {
+                "kind": "digest_citations", "status": "unverified",
+                "reliable": False, "issues": ["canonical_evidence_unavailable"],
+                "items": [], "checked_claims": 0, "supported_claims": 0,
+                "manifest_sha256": source_manifest["manifest_sha256"],
+            },
+        }
+
+    system, user = radar_service.build_digest_prompt(radar_data, source_manifest)
     request_obj = LLMRequest(
         messages=[{"role": "user", "content": user}], system=system,
-        max_tokens=2048, temperature=0.7,
+        max_tokens=2048, temperature=0,
     )
-    task_id = f"at_{uuid.uuid4().hex}"
     payload = AITask(
-        task_id=task_id, request=request_obj, step_name="digest", domain=domain,
+        task_id=task_id,
+        request=request_obj,
+        step_name="digest",
+        domain=domain,
+        audit_context={"digest_source_manifest": source_manifest},
     ).to_task_payload()
     try:
         await redis.enqueue_ai_task(payload)
@@ -65,9 +103,20 @@ async def post_digest(
         return {
             "task_id": None, "window": radar_data["window"],
             "markdown": "⚠️ 周报生成暂不可用（任务投递失败）。雷达各板块见上方。",
+            "citation_validation": {
+                "kind": "digest_citations", "status": "unverified",
+                "reliable": False, "issues": ["digest_enqueue_failed"],
+                "items": [], "checked_claims": 0, "supported_claims": 0,
+                "manifest_sha256": source_manifest["manifest_sha256"],
+            },
         }
 
-    return {"task_id": task_id, "window": radar_data["window"]}
+    return {
+        "task_id": task_id,
+        "window": radar_data["window"],
+        "source_count": len(source_manifest["sources"]),
+        "manifest_sha256": source_manifest["manifest_sha256"],
+    }
 
 
 @router.get("/{domain}/digest/latest")
@@ -83,4 +132,34 @@ async def get_latest_digest(
     except Exception as e:   # Redis 不可用时优雅降级,不冒 5xx.
         log.warning("digest_latest_failed", domain=domain, error=str(e))
         info = None
-    return info or {"task_id": None}
+    if not info:
+        return {"task_id": None}
+    result = dict(info)
+    validation = result.get("citation_validation")
+    if type(validation) is dict and validation.get("reliable") is True:
+        return result
+
+    result.pop("markdown", None)
+    original_issues = (
+        validation.get("issues")
+        if type(validation) is dict and type(validation.get("issues")) is list
+        else []
+    )
+    result["citation_validation"] = {
+        "kind": "digest_citations",
+        "status": "unverified",
+        "reliable": False,
+        "issues": list(dict.fromkeys([
+            "latest_digest_not_reliable",
+            *(str(issue) for issue in original_issues),
+        ])),
+        "items": [],
+        "checked_claims": 0,
+        "supported_claims": 0,
+        "manifest_sha256": (
+            validation.get("manifest_sha256")
+            if type(validation) is dict else None
+        ),
+    }
+    result.setdefault("error", "digest citation validation unavailable")
+    return result

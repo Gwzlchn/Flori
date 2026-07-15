@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from shared.models import Job
+from shared.models import Job, JobStatus
 from tests.conftest import make_fakeredis
 
 
@@ -170,11 +171,16 @@ class TestRadarDigestCron:
 
     @pytest.mark.asyncio
     async def test_queues_on_configured_dow_and_dedups(self, db, monkeypatch):
+        from tests.test_api_radar import _evidence
+
         monkeypatch.setenv("RADAR_DIGEST_CRON_DOW", "0")
         redis = make_fakeredis()
         try:
-            db.create_job(Job(id="jd1", content_type="article", pipeline="article_v2",
-                              domain="ml", title="本周内容"))
+            db.create_job(Job(
+                id="jd1", content_type="article", pipeline="article_v2",
+                domain="ml", title="本周内容", status=JobStatus.DONE,
+            ))
+            _evidence(db, "jd1", "Momentum 是本周被反复讨论的概念。", domain="ml")
             db.add_glossary_suggestion("ml", "Momentum", "jd1")
             eng = self._engine(db, redis)
             monday = date(2026, 7, 6)   # 周一
@@ -182,6 +188,9 @@ class TestRadarDigestCron:
             assert n == 1
             info = await redis.get_latest_auto_digest("ml")
             assert info and info["task_id"].startswith("at_")
+            queued = await redis.r.zrange("queue:ai", 0, 0)
+            assert queued
+            assert json.loads(queued[0])["request"]["temperature"] == 0
             # 同日再跑:当日锁防重复。
             assert await eng.check_radar_digest(today=monday) == 0
             # 收割任务别在测试残留。
@@ -204,21 +213,65 @@ class TestRadarDigestCron:
 
     @pytest.mark.asyncio
     async def test_harvest_moves_result_to_latest(self, db):
+        from api.services.radar import build_digest_source_manifest, radar
+        from tests.test_api_radar import _evidence
+
         redis = make_fakeredis()
         try:
             eng = self._engine(db, redis)
-            await redis.set_ai_result("at_x1", {"content": "# 周报"})
+            db.create_job(Job(
+                id="digest-harvest", content_type="article", pipeline="article_v2",
+                domain="ml", title="本周内容", status=JobStatus.DONE,
+            ))
+            _evidence(db, "digest-harvest", "Momentum 是本周热点。", domain="ml")
+            manifest = build_digest_source_manifest(
+                db, task_id="at_x1", radar_data=radar(db, "ml", 7),
+            )
+            source = manifest["sources"][0]
+            content = f"# 周报\n{source['excerpt']} [来源:{source['source_id']}]"
+            await redis.r.set(
+                "ai:anchor:at_x1",
+                json.dumps({
+                    "kind": "ai", "task_id": "at_x1", "step": "digest",
+                    "audit_context": {"digest_source_manifest": manifest},
+                }, ensure_ascii=False, sort_keys=True),
+            )
+            await redis.set_ai_result("at_x1", {"content": content})
             await eng._harvest_digest_result("ml", "at_x1", "2026-07-06T00:00:00+00:00",
                                              timeout_sec=5, poll_sec=0.01)
             info = await redis.get_latest_auto_digest("ml")
-            assert info["markdown"] == "# 周报"
+            assert info["markdown"] == content
+            assert info["citation_validation"]["reliable"] is True
             assert info["task_id"] == "at_x1"
         finally:
             await redis.close()
 
     @pytest.mark.asyncio
+    async def test_harvest_legacy_result_is_not_published_as_reliable(self, db):
+        redis = make_fakeredis()
+        try:
+            eng = self._engine(db, redis)
+            await redis.r.set(
+                "ai:anchor:at_legacy",
+                json.dumps({
+                    "kind": "ai", "task_id": "at_legacy", "step": "digest",
+                }, sort_keys=True),
+            )
+            await redis.set_ai_result("at_legacy", {"content": "旧周报"})
+            await eng._harvest_digest_result(
+                "ml", "at_legacy", "2026-07-06T00:00:00+00:00",
+                timeout_sec=5, poll_sec=0.01,
+            )
+            info = await redis.get_latest_auto_digest("ml")
+            assert "markdown" not in info
+            assert info["citation_validation"]["status"] == "unverified"
+            assert info["error"] == "digest citation validation failed"
+        finally:
+            await redis.close()
+
+    @pytest.mark.asyncio
     async def test_latest_digest_endpoint(self, client, app):
-        # 未生成过 → task_id null;redis 里有 → 原样返回。
+        # 未生成过 → task_id null;只有可靠校验通过的持久摘要才返回正文。
         app.state.redis.get_latest_auto_digest.return_value = None
         r = await client.get("/api/domains/ml/digest/latest")
         assert r.status_code == 200 and r.json() == {"task_id": None}
@@ -226,4 +279,32 @@ class TestRadarDigestCron:
             "task_id": "at_1", "queued_at": "2026-07-06T00:00:00+00:00", "markdown": "# 周报",
         }
         r2 = await client.get("/api/domains/ml/digest/latest")
-        assert r2.json()["markdown"] == "# 周报"
+        legacy = r2.json()
+        assert "markdown" not in legacy
+        assert legacy["citation_validation"]["status"] == "unverified"
+        assert legacy["citation_validation"]["reliable"] is False
+        assert legacy["error"] == "digest citation validation unavailable"
+
+        app.state.redis.get_latest_auto_digest.return_value = {
+            "task_id": "at_2", "markdown": "# 可靠周报",
+            "citation_validation": {
+                "kind": "digest_citations", "status": "valid", "reliable": True,
+                "issues": [], "manifest_sha256": "a" * 64,
+            },
+        }
+        reliable = (await client.get("/api/domains/ml/digest/latest")).json()
+        assert reliable["markdown"] == "# 可靠周报"
+
+        app.state.redis.get_latest_auto_digest.return_value = {
+            "task_id": "at_3", "markdown": "# 不可靠周报",
+            "citation_validation": {
+                "kind": "digest_citations", "status": "invalid", "reliable": False,
+                "issues": ["unknown_source_id"], "manifest_sha256": "b" * 64,
+            },
+        }
+        invalid = (await client.get("/api/domains/ml/digest/latest")).json()
+        assert "markdown" not in invalid
+        assert invalid["citation_validation"]["status"] == "unverified"
+        assert invalid["citation_validation"]["issues"] == [
+            "latest_digest_not_reliable", "unknown_source_id",
+        ]

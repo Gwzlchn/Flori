@@ -1264,14 +1264,16 @@ Response `200`：
 
 - `rising_concepts`：最近窗口出现次数 > 前窗口的概念，按 `delta` 降序。
 - `new_concepts`：最早一次出现落在最近窗口内的概念（按 `first_seen` 降序）。
-- `recent_jobs`：时间落在最近窗口内的内容（按时间降序）。
+- `recent_jobs`：时间落在最近窗口内的全部 current 内容（按时间降序）。查询不设固定条数上限；SQL 只做带安全余量的候选粗筛，最终由 aware-UTC 精确比较保证 `[since, until)` 微秒边界。
 - `top_recent_concepts`：最近窗口出现最多的概念（最多 10 个）。
 - `watched_concepts`：关注（`watched=1`）的概念全量列出，近窗有新出现（`recent`）的排前；驱动雷达页「我关注的概念」区与工作台提示条。
 - 统计口径：`rejected` 概念不参与任何板块。
 
 #### POST /api/domains/{domain}/digest — 本周摘要（按需调 LLM）
 
-先算同款雷达，再用 `digest` builder 拼 prompt → **投递独立 AI task（`queue:ai`，§3.1）给 ai-worker** 异步生成中文周报（本周在聊什么 / 新概念 / 热点）；**API 进程不再调 claude**（claude 全在 ai-worker，用量 `ai_usage`/白盒审计 `ai_task_logs` 也在 worker 侧记，P1）。与 GET radar 分离：页面先秒开雷达，用户点「生成本周摘要」再触发本端点。`window_days` 同 radar（`1..90`，越界 `422`）。
+先算同款雷达，再从窗口内 current/done job 的 canonical note chunks 冻结 `digest_sources` manifest，最后用 `digest` builder 拼 prompt → **投递独立 AI task（`queue:ai`，§3.1）给 ai-worker** 异步生成中文周报。**API 进程不调 claude**（用量 `ai_usage`/白盒审计 `ai_task_logs` 在 worker 侧记）。与 GET radar 分离：页面先秒开雷达，用户点「生成本周摘要」再触发本端点。`window_days` 同 radar（`1..90`，越界 `422`）。
+
+`digest_sources` 清单绑定 `task_id/domain/window`，每条绑定 canonical `source_id/job_id/note_type/chunk_id`、excerpt/chunk hash 和 source fingerprint，清单再签 `manifest_sha256`。硬上限为 16 个 source、每 job 2 个 source、单 excerpt 1200 字符、excerpt 总计 12000 字符，最终 system+user prompt 按 UTF-8 不得超过 32 KiB。候选顺序按 job 公平分配，超界只在 manifest 记 `selection_truncated=true`，不会改变雷达窗口统计或静默伪装成全量证据。title/section/excerpt 全部按不可信 JSON 数据渲染，生成温度固定为 0。
 
 ```
 POST /api/domains/finance/digest?window_days=7
@@ -1282,21 +1284,25 @@ Response `202`（投递成功；`markdown` 经 `GET /api/ai-tasks/{task_id}/resu
 ```json
 {
   "task_id": "at_3f9c…",
-  "window": {"days": 7, "since": "2026-06-19T...", "until": "2026-06-26T..."}
+  "window": {"days": 7, "since": "2026-06-19T...", "until": "2026-06-26T..."},
+  "source_count": 8,
+  "manifest_sha256": "<64 lowercase hex>"
 }
 ```
 
-投递失败（redis 不可用）→ 仍 `202`，`{"task_id": null, "window": {...}, "markdown": "⚠️ 周报生成暂不可用…"}`（优雅降级，不 5xx）。
+每个实质事实行必须是某个冻结 excerpt 内有词元、数量/币种/单位和否定极性边界的连续原文，并在行尾使用精确标签 `[来源:ce_<64 lowercase hex>]`。Worker 写入和 API 读取都从服务端 original payload 重算 `citation_validation`，不信任 Worker 自报的 manifest 或 reliable 标记。未引用、引用未知/畸形/错位、孤立标签、一行多事实、不受原文支持、manifest 篡改和旧任务缺 manifest 都 fail-closed，`citation_validation.reliable=false`。
+
+无窗口活动或无 canonical evidence 时不投任务，返回 `task_id:null` 和 `citation_validation`（分别为 `not_applicable/reliable=true` 或 `unverified/reliable=false`）。投递失败（Redis 不可用）仍返回 `202`，但降级正文必带 `unverified/reliable=false` 和 `digest_enqueue_failed`，不 5xx。
 
 #### GET /api/domains/{domain}/digest/latest — 最新自动周报
 
 **每周自动周报（09 工单 P3）**：scheduler periodic 循环每天检查，当天（UTC）是配置星期（env `RADAR_DIGEST_CRON_DOW`，`0`=周一，默认 `0`）则给每个近 7 天有动静（新内容/飙升/新概念任一非空）的 domain 投一条 digest AI task；当日防重复靠 redis `radar:digest:auto:{domain}:{day}` SET NX 锁（TTL 3 天）。`airesult` 只有 ~600s TTL 而自动周报没人守屏，scheduler 收割结果搬进 `radar:digest:latest:{domain}`（无 TTL），并 `push_event`（`radar_digest_queued` / `radar_digest_ready`）进事件页。本端点读该键：
 
 ```json
-{"task_id": "at_…", "queued_at": "2026-07-06T00:00:30+00:00", "markdown": "# 本周…", "generated_at": "2026-07-06T00:02:10+00:00"}
+{"task_id": "at_…", "queued_at": "2026-07-06T00:00:30+00:00", "markdown": "# 本周…", "generated_at": "2026-07-06T00:02:10+00:00", "source_manifest": {...}, "citation_validation": {"status": "valid", "reliable": true, ...}}
 ```
 
-从未生成过 → `{"task_id": null}`；生成失败/超时 → 带 `error` 字段（无 `markdown`）。前端雷达页加载时读它，把最近一期自动周报直接铺进「本周摘要」卡。
+从未生成过 → `{"task_id": null}`；生成失败/超时/旧数据缺验证/任一 citation 门未通过 → 带 `error` 和 `citation_validation.reliable=false`，服务端不返回 `markdown`。只有 `reliable=true` 的自动周报才保存和公开正文；前端同样只展示这一状态，domain 切换会使旧请求和旧 poll 的迟到结果失效。
 
 ### 1.10 术语库 / 概念图
 
@@ -1667,7 +1673,9 @@ Response `202`（`sources` 提交时已算好；`answer_markdown` 经 `GET /api/
 
 `answer_markdown`/`markdown` 均 = `content`（ask 读前者、digest 读后者）。前端也可 `WS /api/ws/jobs/{task_id}` 收 `ai_task_done`（§3.5）后再取本端点。
 
-Ask 的 `citation_validation` 由 Worker 先做本地检查，Gateway 写入结果和 API 读取结果时再以 URL 中的 `task_id` 重算，并与入队端冻结在 `ai:anchor:{task_id}` 的 `audit_context.ask_source_manifest` 精确比对，不信任远端 Worker 自报 `valid` 或替换整套来源。识别格式只允许 `[来源N]`。返回 `status=valid|unverified|invalid`、`checked/items/errors`，以及 `metrics.structural_precision/source_precision/claim_precision/coverage`。unknown index、跨 task manifest、原始 manifest 缺失、结果 manifest 缺失或替换、manifest/source/body hash 篡改、非逐字支撑 claim、畸形标签和零引用均 fail-closed，绝不标为 `valid`；`digest` 等非 Ask task 的两个新增字段为 `null`。
+Ask 的 `citation_validation` 由 Worker 先做本地检查，Gateway 写入结果和 API 读取结果时再以 URL 中的 `task_id` 重算，并与入队端冻结在 `ai:anchor:{task_id}` 的 `audit_context.ask_source_manifest` 精确比对，不信任远端 Worker 自报 `valid` 或替换整套来源。识别格式只允许 `[来源N]`。返回 `status=valid|unverified|invalid`、`checked/items/errors`，以及 `metrics.structural_precision/source_precision/claim_precision/coverage`。unknown index、跨 task manifest、原始 manifest 缺失、结果 manifest 缺失或替换、manifest/source/body hash 篡改、非逐字支撑 claim、畸形标签和零引用均 fail-closed，绝不标为 `valid`。
+
+Digest task 的 `source_manifest` 与 `citation_validation` 同样只从 original payload 的 `audit_context.digest_source_manifest` 派生。识别格式只允许 `[来源:ce_<64 lowercase hex>]`；返回 `kind=digest_citations`、`status=valid|unverified|invalid`、`reliable`、`checked_claims/supported_claims/items/issues/manifest_sha256`。公开 `source_manifest.manifest_sha256` 必须与 validation 的 hash 一致，Worker 回传的替换 manifest/audit/validation 字段在写入端删除，读取端也不使用。
 
 #### GET /api/ai-tasks/{task_id}/log — 独立 AI task 白盒审计
 

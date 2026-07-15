@@ -11,6 +11,7 @@ from ..db import (
     _now_iso,
     datetime,
     json,
+    timezone,
 )
 
 class JobsReadRepository:
@@ -92,6 +93,135 @@ class JobsReadRepository:
                 params + [limit, offset],
             ).fetchall()
         return total, [database._row_to_job(row) for row in rows]
+
+    @staticmethod
+    def list_jobs_in_window(
+        database,
+        *,
+        domain: str,
+        since: datetime,
+        until: datetime,
+    ) -> list[Job]:
+        """返回 domain 在半开发布时间窗内的全部 current job,不做隐式分页。"""
+        since_utc, until_utc = JobsReadRepository._utc_window(since, until)
+        with database._lock:
+            rows = database._conn.execute(
+                """SELECT *, COALESCE(published_at, created_at) AS occurred_at
+                   FROM jobs
+                   WHERE is_current=1 AND domain=?
+                     AND julianday(COALESCE(published_at, created_at))
+                         >= julianday(?) - (1.0 / 86400.0)
+                     AND julianday(COALESCE(published_at, created_at))
+                         < julianday(?) + (1.0 / 86400.0)""",
+                (domain, since_utc.isoformat(), until_utc.isoformat()),
+            ).fetchall()
+        exact = [
+            (occurred_at, row)
+            for row in rows
+            if (occurred_at := JobsReadRepository._exact_window_time(
+                row["occurred_at"], since_utc, until_utc,
+            )) is not None
+        ]
+        exact.sort(key=lambda item: str(item[1]["id"]))
+        exact.sort(key=lambda item: item[0], reverse=True)
+        return [database._row_to_job(row) for _, row in exact]
+
+    @staticmethod
+    def list_digest_evidence_in_window(
+        database,
+        *,
+        domain: str,
+        since: datetime,
+        until: datetime,
+        limit: int,
+        per_job_limit: int,
+    ) -> tuple[int, list[dict]]:
+        """返回窗口内可用于摘要的 current canonical evidence 候选及全量计数。"""
+        since_utc, until_utc = JobsReadRepository._utc_window(since, until)
+        if type(limit) is not int or not 1 <= limit <= 512:
+            raise ValueError("limit 必须是 1..512 的整数")
+        if type(per_job_limit) is not int or not 1 <= per_job_limit <= 32:
+            raise ValueError("per_job_limit 必须是 1..32 的整数")
+        where = """j.is_current=1 AND j.status='done' AND j.domain=?
+                   AND c.status='valid'
+                   AND julianday(COALESCE(j.published_at, j.created_at))
+                       >= julianday(?) - (1.0 / 86400.0)
+                   AND julianday(COALESCE(j.published_at, j.created_at))
+                       < julianday(?) + (1.0 / 86400.0)"""
+        params = (domain, since_utc.isoformat(), until_utc.isoformat())
+        with database._lock:
+            rows = database._conn.execute(
+                f"""SELECT c.evidence_id, c.job_id, c.note_type, c.chunk_id,
+                           c.chunk_body_sha256, c.source_fingerprint,
+                           n.section, n.body, j.title, j.content_type,
+                           COALESCE(j.published_at, j.created_at) AS occurred_at
+                    FROM canonical_evidence c
+                    JOIN jobs j ON j.id=c.job_id
+                    JOIN note_chunks n
+                      ON n.chunk_id=c.chunk_id AND n.job_id=c.job_id
+                     AND n.note_type=c.note_type
+                    WHERE {where}""",
+                params,
+            ).fetchall()
+        exact = [
+            (occurred_at, dict(row))
+            for row in rows
+            if (occurred_at := JobsReadRepository._exact_window_time(
+                row["occurred_at"], since_utc, until_utc,
+            )) is not None
+        ]
+        exact.sort(key=lambda item: str(item[1]["evidence_id"]))
+        exact.sort(key=lambda item: item[0], reverse=True)
+        total = len(exact)
+        selected: list[dict] = []
+        per_job: dict[str, int] = {}
+        for _, row in exact:
+            job_id = str(row["job_id"])
+            if per_job.get(job_id, 0) >= per_job_limit:
+                continue
+            selected.append(row)
+            per_job[job_id] = per_job.get(job_id, 0) + 1
+            if len(selected) >= limit:
+                break
+        return total, selected
+
+    @staticmethod
+    def _utc_window(since: datetime, until: datetime) -> tuple[datetime, datetime]:
+        if (
+            not isinstance(since, datetime)
+            or not isinstance(until, datetime)
+            or since.tzinfo is None
+            or until.tzinfo is None
+            or since.utcoffset() is None
+            or until.utcoffset() is None
+        ):
+            raise ValueError("窗口时间必须是 aware datetime")
+        since_utc = since.astimezone(timezone.utc)
+        until_utc = until.astimezone(timezone.utc)
+        if since_utc >= until_utc:
+            raise ValueError("窗口必须满足 since < until")
+        return since_utc, until_utc
+
+    @staticmethod
+    def _exact_window_time(
+        value: object,
+        since_utc: datetime,
+        until_utc: datetime,
+    ) -> datetime | None:
+        """把存量 ISO 时间精确归一到 UTC；无时区或窗外值均 fail-closed。"""
+        if isinstance(value, datetime):
+            occurred_at = value
+        elif isinstance(value, str):
+            try:
+                occurred_at = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        else:
+            return None
+        if occurred_at.tzinfo is None or occurred_at.utcoffset() is None:
+            return None
+        occurred_utc = occurred_at.astimezone(timezone.utc)
+        return occurred_utc if since_utc <= occurred_utc < until_utc else None
 
     @staticmethod
     def lineage_versions(database, job_id: str) -> list[Job]:

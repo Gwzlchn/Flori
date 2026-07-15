@@ -23,6 +23,7 @@ from api.wire_schemas import (
     AiTaskLogResponse,
     AiTaskResultResponse,
 )
+from api.services.radar import validate_digest_citations
 
 log = structlog.get_logger(__name__)
 
@@ -54,7 +55,7 @@ async def ai_task_result(task_id: str, redis: RedisClient = Depends(get_redis)):
         return {
             "status": "error", "task_id": task_id,
             "error": res.get("error") or "AI task provenance unavailable",
-            "source_manifest": source_manifest,
+            "source_manifest": None,
             "citation_validation": citation_validation,
         }
     audit_context = (
@@ -67,10 +68,23 @@ async def ai_task_result(task_id: str, redis: RedisClient = Depends(get_redis)):
         else None
     )
     is_ask = original_payload.get("step") == "synthesis"
-    if is_ask or source_manifest is not None or original_manifest is not None:
+    is_digest = original_payload.get("step") == "digest"
+    if not is_digest and (
+        is_ask or source_manifest is not None or original_manifest is not None
+    ):
         # claim 中的原始 payload 是不可变锚点,远端 Worker 不能替换整套来源后自报 valid.
         citation_validation = validate_bound_ask_citations(
             task_id, content, source_manifest, original_manifest,
+        )
+    if is_digest:
+        digest_manifest = (
+            audit_context.get("digest_source_manifest")
+            if type(audit_context) is dict
+            else None
+        )
+        source_manifest = digest_manifest if type(digest_manifest) is dict else None
+        citation_validation = validate_digest_citations(
+            task_id, content, digest_manifest,
         )
     if res.get("error"):
         return {

@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
+import { nextTick, reactive } from 'vue'
 
 // RadarView 直接走 useApi.get('/radar') + useApi.post('/digest')。mock useApi 与 vue-router。
-const route = { params: { domain: 'finance' }, query: {} }
+const route = reactive({ params: { domain: 'finance' }, query: {} })
 const push = vi.fn()
 vi.mock('vue-router', () => ({
   useRoute: () => route,
@@ -31,6 +32,22 @@ const RADAR = {
     { term: '高频量化', recent: 1 },
   ],
   window: { days: 7, since: '2026-06-20T00:00:00+00:00', until: '2026-06-26T00:00:00+00:00' },
+}
+
+const RADAR_B = {
+  ...RADAR,
+  rising_concepts: [{ term: '材料科学', recent: 2, prior: 0, delta: 2 }],
+  new_concepts: [],
+  recent_jobs: [
+    { job_id: 'b1', title: 'B 域内容', published_at: '2026-06-25T00:00:00+00:00', content_type: 'paper' },
+  ],
+  top_recent_concepts: [{ term: '材料科学', recent: 2 }],
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
 }
 
 function mountView() {
@@ -89,7 +106,10 @@ describe('RadarView', () => {
     const md = '## 本周摘要\n量化交易是焦点。'
     api.get.mockImplementation((p: string) =>
       p.includes('/result')
-        ? Promise.resolve({ status: 'done', task_id: 'at_d', markdown: md, content: md })
+        ? Promise.resolve({
+            status: 'done', task_id: 'at_d', markdown: md, content: md,
+            citation_validation: { status: 'valid', reliable: true, issues: [] },
+          })
         : Promise.resolve(RADAR))
     api.post.mockResolvedValue({ task_id: 'at_d', window: RADAR.window })
     const w = mountView()
@@ -102,6 +122,39 @@ describe('RadarView', () => {
     expect(api.get).toHaveBeenCalledWith('/api/ai-tasks/at_d/result')
     expect(w.text()).toContain('本周摘要')
     expect(w.text()).toContain('量化交易是焦点')
+  })
+
+  it('摘要引用校验失败时不展示模型正文', async () => {
+    api.get.mockImplementation((p: string) =>
+      p.includes('/result')
+        ? Promise.resolve({
+            status: 'done', task_id: 'at_d', markdown: '伪造结论',
+            citation_validation: {
+              status: 'invalid', reliable: false, issues: ['unknown_source_id'],
+            },
+          })
+        : Promise.resolve(RADAR))
+    api.post.mockResolvedValue({ task_id: 'at_d', window: RADAR.window })
+    const w = mountView()
+    await flushPromises()
+    const btn = w.findAll('button').find((b) => b.text().includes('生成本周摘要'))!
+    await btn.trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain('摘要未通过证据引用校验')
+    expect(w.text()).not.toContain('伪造结论')
+  })
+
+  it('旧自动周报没有当前 validation 时不展示正文', async () => {
+    api.get.mockImplementation((p: string) =>
+      p.includes('/digest/latest')
+        ? Promise.resolve({
+            task_id: 'at_legacy', error: 'digest citation validation unavailable',
+            citation_validation: { status: 'unverified', reliable: false, issues: [] },
+          })
+        : Promise.resolve(RADAR))
+    const w = mountView()
+    await flushPromises()
+    expect(w.text()).toContain('历史自动摘要未经过当前证据引用校验')
   })
 
   it('摘要轮询 result 返回 error → 显示错误文案', async () => {
@@ -141,6 +194,118 @@ describe('RadarView', () => {
     await retry.trigger('click')
     await flushPromises()
     expect(w.text()).toContain('量化交易入门')
+  })
+
+  it('切换 domain 立即清空已完成的旧摘要并加载新域', async () => {
+    api.get.mockImplementation((path: string) => {
+      if (path.includes('/finance/radar')) return Promise.resolve(RADAR)
+      if (path.includes('/finance/digest/latest')) {
+        return Promise.resolve({
+          task_id: 'at_finance', markdown: 'A 域可靠摘要',
+          citation_validation: { status: 'valid', reliable: true, issues: [] },
+        })
+      }
+      if (path.includes('/science/radar')) return Promise.resolve(RADAR_B)
+      return Promise.resolve({ task_id: null })
+    })
+    const w = mountView()
+    await flushPromises()
+    expect(w.text()).toContain('A 域可靠摘要')
+
+    route.params = { domain: 'science' }
+    await nextTick()
+    expect(w.text()).not.toContain('A 域可靠摘要')
+    await flushPromises()
+    expect(w.text()).toContain('B 域内容')
+  })
+
+  it('旧域手动摘要的迟到结果不能覆盖新域', async () => {
+    const oldResult = deferred<any>()
+    api.get.mockImplementation((path: string) => {
+      if (path.includes('/ai-tasks/at_finance/result')) return oldResult.promise
+      if (path.includes('/science/radar')) return Promise.resolve(RADAR_B)
+      if (path.includes('/digest/latest')) return Promise.resolve({ task_id: null })
+      return Promise.resolve(RADAR)
+    })
+    api.post.mockResolvedValue({ task_id: 'at_finance', window: RADAR.window })
+    const w = mountView()
+    await flushPromises()
+    const button = w.findAll('button').find((item) => item.text().includes('生成本周摘要'))!
+    await button.trigger('click')
+    await nextTick()
+
+    route.params = { domain: 'science' }
+    await nextTick()
+    await flushPromises()
+    oldResult.resolve({
+      status: 'done', task_id: 'at_finance', markdown: 'A 域迟到摘要',
+      citation_validation: { status: 'valid', reliable: true, issues: [] },
+    })
+    await flushPromises()
+    expect(w.text()).toContain('B 域内容')
+    expect(w.text()).not.toContain('A 域迟到摘要')
+  })
+
+  it('旧域 radar 请求迟到不能覆盖新域', async () => {
+    const oldRadar = deferred<any>()
+    api.get.mockImplementation((path: string) => {
+      if (path.includes('/finance/radar')) return oldRadar.promise
+      if (path.includes('/science/radar')) return Promise.resolve(RADAR_B)
+      return Promise.resolve({ task_id: null })
+    })
+    const w = mountView()
+    await nextTick()
+    route.params = { domain: 'science' }
+    await nextTick()
+    await flushPromises()
+    oldRadar.resolve(RADAR)
+    await flushPromises()
+    expect(w.text()).toContain('B 域内容')
+    expect(w.text()).not.toContain('量化交易入门')
+  })
+
+  it('旧域 latest 请求迟到不能覆盖新域', async () => {
+    const oldLatest = deferred<any>()
+    api.get.mockImplementation((path: string) => {
+      if (path.includes('/finance/radar')) return Promise.resolve(RADAR)
+      if (path.includes('/finance/digest/latest')) return oldLatest.promise
+      if (path.includes('/science/radar')) return Promise.resolve(RADAR_B)
+      return Promise.resolve({ task_id: null })
+    })
+    const w = mountView()
+    await nextTick()
+    await flushPromises()
+    expect(api.get).toHaveBeenCalledWith('/api/domains/finance/digest/latest')
+
+    route.params = { domain: 'science' }
+    await nextTick()
+    await flushPromises()
+    oldLatest.resolve({
+      task_id: 'at_finance', markdown: 'A 域迟到历史摘要',
+      citation_validation: { status: 'valid', reliable: true, issues: [] },
+    })
+    await flushPromises()
+    expect(w.text()).toContain('B 域内容')
+    expect(w.text()).not.toContain('A 域迟到历史摘要')
+  })
+
+  it('切换 domain 后点击刷新只请求当前域', async () => {
+    api.get.mockImplementation((path: string) =>
+      Promise.resolve(path.includes('/science/radar') ? RADAR_B : (
+        path.includes('/radar') ? RADAR : { task_id: null }
+      )))
+    const w = mountView()
+    await flushPromises()
+    route.params = { domain: 'science' }
+    await nextTick()
+    await flushPromises()
+    api.get.mockClear()
+
+    const refresh = w.findAll('button').find((item) => item.text().includes('刷新'))!
+    await refresh.trigger('click')
+    await flushPromises()
+    expect(api.get).toHaveBeenCalledWith('/api/domains/science/radar?window_days=7')
+    expect(api.get).not.toHaveBeenCalledWith('/api/domains/finance/radar?window_days=7')
   })
 
   it('摘要生成失败渲染错误文案', async () => {

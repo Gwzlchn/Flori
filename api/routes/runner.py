@@ -732,6 +732,25 @@ async def set_ai_task_result(
             task_id, str(result.get("content") or ""),
             result.get("source_manifest"), original_manifest,
         )
+    elif lease.step == "digest":
+        from api.services.radar import validate_digest_citations
+
+        audit_context = original.get("audit_context")
+        original_manifest = (
+            audit_context.get("digest_source_manifest")
+            if type(audit_context) is dict else None
+        )
+        for field in (
+            "audit_context", "digest_source_manifest", "manifest_sha256",
+            "source_manifest",
+        ):
+            result.pop(field, None)
+        result["source_manifest"] = (
+            original_manifest if type(original_manifest) is dict else None
+        )
+        result["citation_validation"] = validate_digest_citations(
+            task_id, str(result.get("content") or ""), original_manifest,
+        )
     await redis.set_ai_result(task_id, result)
     return {"ok": True}
 

@@ -155,19 +155,41 @@ class Scheduler:
             data = await asyncio.to_thread(radar_service.radar, self.db, domain, 7)
             if not (data["recent_jobs"] or data["rising_concepts"] or data["new_concepts"]):
                 continue
-            titles = [j["title"] for j in data["recent_jobs"] if j.get("title")]
-            system, user = radar_service.build_digest_prompt(data, titles)
             task_id = f"at_{uuid.uuid4().hex}"
+            source_manifest = await asyncio.to_thread(
+                radar_service.build_digest_source_manifest,
+                self.db,
+                task_id=task_id,
+                radar_data=data,
+            )
+            queued_at = datetime.now(timezone.utc).isoformat()
+            if not source_manifest["sources"]:
+                await self.redis.set_latest_auto_digest(domain, {
+                    "task_id": None,
+                    "queued_at": queued_at,
+                    "error": "canonical evidence unavailable",
+                    "citation_validation": {
+                        "kind": "digest_citations", "status": "unverified",
+                        "reliable": False,
+                        "issues": ["canonical_evidence_unavailable"],
+                        "items": [], "checked_claims": 0,
+                        "supported_claims": 0,
+                        "manifest_sha256": source_manifest["manifest_sha256"],
+                    },
+                })
+                continue
+            system, user = radar_service.build_digest_prompt(data, source_manifest)
             payload = AITask(
                 task_id=task_id,
                 request=LLMRequest(
                     messages=[{"role": "user", "content": user}], system=system,
-                    max_tokens=2048, temperature=0.7,
+                    max_tokens=2048, temperature=0,
                 ),
-                step_name="digest", domain=domain,
+                step_name="digest",
+                domain=domain,
+                audit_context={"digest_source_manifest": source_manifest},
             ).to_task_payload()
             await self.redis.enqueue_ai_task(payload)
-            queued_at = datetime.now(timezone.utc).isoformat()
             await self.redis.set_latest_auto_digest(domain, {
                 "task_id": task_id, "queued_at": queued_at,
             })
@@ -194,7 +216,24 @@ class Scheduler:
                 if isinstance(res, dict) and res.get("error"):
                     info["error"] = str(res["error"])[:300]
                 else:
-                    info["markdown"] = (res or {}).get("content", "")
+                    from api.services.radar import validate_digest_citations
+
+                    original = await self.redis.get_ai_task_original_payload(task_id)
+                    audit_context = (
+                        original.get("audit_context")
+                        if type(original) is dict else None
+                    )
+                    manifest = (
+                        audit_context.get("digest_source_manifest")
+                        if type(audit_context) is dict else None
+                    )
+                    content = str((res or {}).get("content") or "")
+                    validation = validate_digest_citations(task_id, content, manifest)
+                    info["citation_validation"] = validation
+                    if validation["reliable"]:
+                        info["markdown"] = content
+                    else:
+                        info["error"] = "digest citation validation failed"
                 await self.redis.set_latest_auto_digest(domain, info)
                 await self.redis.push_event("radar_digest_ready", domain=domain, task_id=task_id)
                 return

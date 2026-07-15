@@ -42,6 +42,17 @@ const digesting = ref(false)
 const digestError = ref('')
 const digestTaskId = ref<string | null>(null)
 const showDigestAudit = ref(false)
+interface DigestValidation { reliable?: boolean; status?: string; issues?: string[] }
+interface LatestDigest {
+  task_id: string | null
+  queued_at?: string
+  markdown?: string
+  generated_at?: string
+  error?: string
+  citation_validation?: DigestValidation
+}
+const autoDigest = ref<LatestDigest | null>(null)
+let domainGeneration = 0
 let digestPollToken = ''
 const D_POLL_MS = 1500
 const D_TIMEOUT_MS = 90000
@@ -69,38 +80,75 @@ const isEmpty = computed(() =>
 
 const watchedConcepts = computed<WatchedConcept[]>(() => data.value?.watched_concepts ?? [])
 
-async function load() {
+function isCurrentDomain(snapshot: string, generation: number): boolean {
+  return domain.value === snapshot && domainGeneration === generation
+}
+
+function beginDomainLoad() {
+  const snapshot = domain.value
+  const generation = ++domainGeneration
+  digestPollToken = ''
+  data.value = null
   loading.value = true
   error.value = ''
+  digest.value = ''
+  digesting.value = false
+  digestError.value = ''
+  digestTaskId.value = null
+  showDigestAudit.value = false
+  autoDigest.value = null
+  void load(snapshot, generation)
+}
+
+async function load(snapshot: string, generation: number) {
   try {
-    data.value = await api.get<RadarData>(
-      `/api/domains/${encodeURIComponent(domain.value)}/radar?window_days=7`,
+    const result = await api.get<RadarData>(
+      `/api/domains/${encodeURIComponent(snapshot)}/radar?window_days=7`,
     )
+    if (!isCurrentDomain(snapshot, generation)) return
+    data.value = result
   } catch (e: any) {
+    if (!isCurrentDomain(snapshot, generation)) return
     error.value = e?.message || '加载知识雷达失败'
   } finally {
-    loading.value = false
+    if (isCurrentDomain(snapshot, generation)) loading.value = false
   }
-  void loadLatestAutoDigest()
+  if (isCurrentDomain(snapshot, generation)) {
+    void loadLatestAutoDigest(snapshot, generation)
+  }
 }
 
 // 自动周报(scheduler 每周投递,结果长存 redis):有历史周报就直接展示,免手动点生成。
-interface LatestDigest { task_id: string | null; queued_at?: string; markdown?: string; generated_at?: string; error?: string }
-const autoDigest = ref<LatestDigest | null>(null)
-async function loadLatestAutoDigest() {
+async function loadLatestAutoDigest(snapshot: string, generation: number) {
   try {
     const r = await api.get<LatestDigest>(
-      `/api/domains/${encodeURIComponent(domain.value)}/digest/latest`,
+      `/api/domains/${encodeURIComponent(snapshot)}/digest/latest`,
     )
+    if (!isCurrentDomain(snapshot, generation)) return
     autoDigest.value = r?.task_id ? r : null
     // 用户尚未手动生成过 → 把最近一期自动周报直接铺进摘要卡。
-    if (!digest.value && autoDigest.value?.markdown) digest.value = autoDigest.value.markdown
+    if (!digest.value && autoDigest.value) {
+      if (
+        autoDigest.value.markdown
+        && autoDigest.value.citation_validation?.reliable === true
+      ) {
+        digest.value = autoDigest.value.markdown
+      } else if (
+        autoDigest.value.error
+        || autoDigest.value.citation_validation?.reliable === false
+        || autoDigest.value.markdown
+      ) {
+        digestError.value = '历史自动摘要未经过当前证据引用校验，已停止展示。'
+      }
+    }
   } catch {
-    autoDigest.value = null
+    if (isCurrentDomain(snapshot, generation)) autoDigest.value = null
   }
 }
 
 async function generateDigest() {
+  const snapshot = domain.value
+  const generation = domainGeneration
   digesting.value = true
   digestError.value = ''
   digest.value = ''
@@ -109,34 +157,59 @@ async function generateDigest() {
   digestPollToken = ''
   try {
     // 异步:POST 返 202 {task_id, window};投递成功则轮询 result 取 markdown(claude 在 ai-worker)。
-    const r = await api.post<{ task_id: string | null; window: any; markdown?: string }>(
-      `/api/domains/${encodeURIComponent(domain.value)}/digest?window_days=7`,
+    const r = await api.post<{
+      task_id: string | null
+      window: any
+      markdown?: string
+      citation_validation?: DigestValidation
+    }>(
+      `/api/domains/${encodeURIComponent(snapshot)}/digest?window_days=7`,
     )
+    if (!isCurrentDomain(snapshot, generation)) return
     if (r?.task_id) {
       digestTaskId.value = r.task_id
       digestPollToken = r.task_id
-      await pollDigest(r.task_id)
+      await pollDigest(r.task_id, snapshot, generation)
     } else {
-      digest.value = r?.markdown || ''   // 投递失败:后端给降级 markdown
+      if (r?.citation_validation?.reliable === true) {
+        digest.value = r?.markdown || ''
+      } else {
+        digestError.value = r?.markdown || '摘要缺少可验证证据，已停止展示。'
+      }
     }
   } catch (e: any) {
+    if (!isCurrentDomain(snapshot, generation)) return
     digestError.value = e?.message || '生成摘要失败'
   } finally {
-    digesting.value = false
+    if (isCurrentDomain(snapshot, generation)) digesting.value = false
   }
 }
 
-async function pollDigest(taskId: string) {
+async function pollDigest(taskId: string, snapshot: string, generation: number) {
   const start = Date.now()
-  while (digestPollToken === taskId) {
+  while (
+    digestPollToken === taskId
+    && isCurrentDomain(snapshot, generation)
+  ) {
     let r: AiTaskResult
     try {
       r = await api.get<AiTaskResult>(`/api/ai-tasks/${encodeURIComponent(taskId)}/result`)
     } catch {
       r = { status: 'pending', task_id: taskId }
     }
-    if (digestPollToken !== taskId) return
-    if (r.status === 'done') { digest.value = r.markdown ?? r.content ?? ''; return }
+    if (
+      digestPollToken !== taskId
+      || !isCurrentDomain(snapshot, generation)
+    ) return
+    if (r.status === 'done') {
+      if (r.citation_validation?.reliable === true) {
+        digest.value = r.markdown ?? r.content ?? ''
+      } else {
+        const issues = r.citation_validation?.issues?.join('、')
+        digestError.value = `摘要未通过证据引用校验${issues ? `：${issues}` : ''}`
+      }
+      return
+    }
     if (r.status === 'error') { digestError.value = r.error || 'AI 调用失败。'; return }
     if (Date.now() - start > D_TIMEOUT_MS) { digestError.value = 'AI 暂不可用（超时），请稍后重试。'; return }
     await dsleep(D_POLL_MS)
@@ -153,8 +226,8 @@ function openJob(j: RecentJob) {
   router.push(`/content/${j.job_id}`)
 }
 
-onMounted(load)
-watch(domain, load)
+onMounted(beginDomainLoad)
+watch(domain, beginDomainLoad)
 </script>
 
 <template>
@@ -170,13 +243,13 @@ watch(domain, load)
           </template>
         </div>
       </div>
-      <button class="btn sm" style="margin-left:auto" :disabled="loading" @click="load">刷新</button>
+      <button class="btn sm" style="margin-left:auto" :disabled="loading" @click="beginDomainLoad">刷新</button>
     </div>
 
     <!-- 错误态 -->
     <div v-if="error" class="card pad" style="text-align:center;margin-top:20px">
       <p class="muted" style="margin-bottom:12px">{{ error }}</p>
-      <button class="btn" @click="load">重试</button>
+      <button class="btn" @click="beginDomainLoad">重试</button>
     </div>
 
     <!-- 加载态 -->

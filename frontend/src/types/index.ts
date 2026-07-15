@@ -708,6 +708,13 @@ export interface AiTaskResult {
   model?: string
   cost_usd?: number
   error?: string
+  citation_validation?: {
+    kind?: string
+    status?: string
+    reliable?: boolean
+    issues?: string[]
+    [key: string]: unknown
+  }
 }
 
 // 独立 AI task 白盒审计(GET /api/ai-tasks/{task_id}/log):每次 claude 调用一条。

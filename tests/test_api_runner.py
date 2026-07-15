@@ -514,6 +514,37 @@ class TestGatewayAITaskLease:
         )
         return worker_id, token, claim, headers, original
 
+    async def _claim_digest(self, jobs_client, real_redis, db, task_id: str):
+        from api.services.radar import build_digest_source_manifest, radar
+        from shared.models import AITask, Job, JobStatus, LLMRequest
+        from tests.test_api_radar import _evidence
+
+        now = datetime.now(timezone.utc)
+        db.create_job(Job(
+            id=f"j_{task_id}", content_type="article", pipeline="article_v2",
+            domain="ml", title="可信摘要来源", status=JobStatus.DONE,
+            created_at=now, updated_at=now, published_at=now,
+        ))
+        _evidence(db, f"j_{task_id}", "可信摘要事实。", domain="ml")
+        original = build_digest_source_manifest(
+            db, task_id=task_id, radar_data=radar(db, "ml", 7),
+        )
+        worker_id, token = await _register_ai(jobs_client)
+        await real_redis.enqueue_ai_task(AITask(
+            task_id=task_id, request=LLMRequest(messages=[]),
+            provider="codex-cli", step_name="digest",
+            audit_context={"digest_source_manifest": original},
+        ).to_task_payload())
+        response = await jobs_client.post(
+            "/api/runner/jobs/request",
+            json={"pools": ["ai"], "pool_limits": {"ai": 1},
+                  "tags": ["codex-cli"], "reject_tags": []},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        claim = response.json()["claim"]
+        headers = _task_headers(token, task_id, claim["step"], claim["exec_id"])
+        return claim, headers, original
+
     @pytest.mark.asyncio
     async def test_gateway_result_is_bound_to_server_anchor(
         self, jobs_client, real_redis, db,
@@ -565,6 +596,49 @@ class TestGatewayAITaskLease:
             f"/api/runner/ai-tasks/{task_id}/release", headers=headers,
         )).status_code == 200
         assert await real_redis.get_pool_count("ai") == 0
+
+    @pytest.mark.asyncio
+    async def test_digest_result_write_recomputes_from_server_anchor(
+        self, jobs_client, real_redis, db,
+    ):
+        task_id = "at_digest_anchor"
+        _, headers, original = await self._claim_digest(
+            jobs_client, real_redis, db, task_id,
+        )
+        assert (await jobs_client.post(
+            f"/api/runner/ai-tasks/{task_id}/executing", headers=headers,
+        )).status_code == 200
+
+        response = await jobs_client.post(
+            f"/api/runner/ai-tasks/{task_id}/result", headers=headers,
+            json={"result": {
+                "content": f"伪造摘要 [来源:ce_{'f' * 64}]",
+                "citation_validation": {"status": "valid", "reliable": True},
+                "source_manifest": {"worker": "replacement"},
+                "digest_source_manifest": {"worker": "replacement"},
+                "manifest_sha256": "f" * 64,
+                "audit_context": {
+                    "digest_source_manifest": {
+                        "task_id": task_id, "sources": "worker replacement",
+                    },
+                },
+            }},
+        )
+
+        assert response.status_code == 200
+        stored = await real_redis.get_ai_result(task_id)
+        assert stored["citation_validation"]["status"] == "invalid"
+        assert stored["citation_validation"]["reliable"] is False
+        assert "unknown_source_id" in stored["citation_validation"]["issues"]
+        assert stored["source_manifest"] == original
+        assert stored["source_manifest"]["manifest_sha256"] == (
+            stored["citation_validation"]["manifest_sha256"]
+        )
+        assert "audit_context" not in stored
+        assert "digest_source_manifest" not in stored
+        assert "manifest_sha256" not in stored
+        anchor = await real_redis.get_ai_task_original_payload(task_id)
+        assert anchor["audit_context"]["digest_source_manifest"] == original
 
     @pytest.mark.asyncio
     async def test_cross_task_exec_and_expired_ai_lease_are_rejected(
