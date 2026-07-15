@@ -108,7 +108,7 @@ while [ $# -gt 0 ]; do
       [ $# -gt 0 ] || usage 1
       group="$1"
       shift
-      run_ci_shard normal "$group" "${1:-${CI_NORMAL_SPLITS:-14}}"
+      run_ci_shard normal "$group" "${1:-${CI_NORMAL_SPLITS:-15}}"
       ;;
     --ci-worker)
       shift

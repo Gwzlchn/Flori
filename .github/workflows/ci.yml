@@ -76,7 +76,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        group: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     concurrency:
       group: ci-${{ github.event.pull_request.number || github.ref }}-unit-normal-${{ matrix.group }}
       cancel-in-progress: true
@@ -86,7 +86,7 @@ jobs:
       packages: read
     env:
       USE_USTC_MIRROR: "0"
-      CI_NORMAL_SPLITS: "14"
+      CI_NORMAL_SPLITS: "15"
       CI_XDIST_WORKERS: "4"
     steps:
       - uses: actions/checkout@v6
@@ -343,7 +343,7 @@ jobs:
           path: coverage-runtime
       - name: Assert all coverage parts are present and non-empty
         env:
-          NORMAL_SPLITS: "14"
+          NORMAL_SPLITS: "15"
           WORKER_SPLITS: "1"
         run: |
           required=(
@@ -418,6 +418,7 @@ jobs:
 
   # 改动路径侦测:据此只重建相关镜像.pyproject 仅合法版本值或注释变化不触发后端构建.
   detect:
+    needs: [prepare-test-runtime]
     concurrency:
       group: ci-${{ github.event.pull_request.number || github.ref }}-detect
       cancel-in-progress: true

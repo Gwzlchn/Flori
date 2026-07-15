@@ -35,14 +35,14 @@ def test_real_hybrid_shards_are_complete_disjoint_and_deterministic() -> None:
     durations = load_durations(REPO / ".test_durations")
     weights = file_duration_weights(durations, files)
     node_counts = file_node_counts(durations, files)
-    heavy = heavy_test_files(weights, node_counts, 14)
+    heavy = heavy_test_files(weights, node_counts, 15)
     collected = collect_nodeids(REPO, heavy)
 
     first, first_heavy = build_hybrid_shards(
-        REPO, REPO / ".test_durations", 14, collected,
+        REPO, REPO / ".test_durations", 15, collected,
     )
     second, second_heavy = build_hybrid_shards(
-        REPO, REPO / ".test_durations", 14, collected,
+        REPO, REPO / ".test_durations", 15, collected,
     )
     expected = {
         *(path for path in files if path not in heavy),

@@ -329,7 +329,7 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
     environment = _fake_docker_environment(tmp_path)
 
     completed = subprocess.run(
-        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "14"],
+        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "15"],
         cwd=REPO,
         env=environment,
         capture_output=True,
@@ -338,10 +338,10 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert "test python scripts/ci_test_shard.py --group 14 --splits 14 -- pytest" in completed.stdout
+    assert "test python scripts/ci_test_shard.py --group 15 --splits 15 -- pytest" in completed.stdout
     assert "--splitting-algorithm least_duration" not in completed.stdout
     assert "-n 4" in completed.stdout
-    assert ".coverage.normal.14" in completed.stdout
+    assert ".coverage.normal.15" in completed.stdout
 
     worker = subprocess.run(
         ["bash", str(REPO / "scripts" / "test.sh"), "--ci-worker", "1", "1"],
@@ -359,7 +359,7 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
     assert ".coverage.worker.1" in worker.stdout
 
     overflow = subprocess.run(
-        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "15", "14"],
+        ["bash", str(REPO / "scripts" / "test.sh"), "--ci-normal", "16", "15"],
         cwd=REPO,
         env=environment,
         capture_output=True,
@@ -367,7 +367,7 @@ def test_ci_normal_uses_explicit_split_count_and_rejects_overflow(tmp_path: Path
         check=False,
     )
     assert overflow.returncode == 2
-    assert "CI shard 超出范围: 15/14" in overflow.stderr
+    assert "CI shard 超出范围: 16/15" in overflow.stderr
 
 
 def _fake_frontend_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:

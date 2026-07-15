@@ -282,8 +282,9 @@ def test_ci_first_layer_fits_account_slots_and_images_share_one_runner() -> None
     normal = len(jobs["unit-normal"]["strategy"]["matrix"]["group"])
     worker = len(jobs["unit-worker"]["strategy"]["matrix"]["group"])
     integration = len(jobs["integration"]["strategy"]["matrix"]["partition"])
-    # 第一层含 prepare、detect 和 fe-test；产品镜像等 prepare + detect 后进入第二层。
-    assert normal + worker + integration + 3 == 20
+    # 第一层含 prepare 和 fe-test；detect 等 prepare 释放槽后进入第二层。
+    assert normal + worker + integration + 2 == 20
+    assert jobs["detect"]["needs"] == ["prepare-test-runtime"]
 
     for job_name in ("unit-normal", "unit-worker"):
         steps = jobs[job_name]["steps"]
