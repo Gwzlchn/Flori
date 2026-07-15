@@ -1,63 +1,110 @@
-"""量化 façade 转发相对等价 repository SQL 的延迟和语句数。"""
+"""冻结 façade 单次直接委派,等价 SQL 和主键查询计划."""
 
 from __future__ import annotations
 
-import statistics
-import time
+import ast
+import inspect
+import textwrap
+import types
 
+import pytest
+
+import shared.db as db_module
 from shared.db import Database
 from shared.models import Job
 from shared.repositories.jobs import JobsReadRepository
 
 
-def _batch_cpu_latency(call, iterations: int) -> float:
-    started = time.thread_time_ns()
-    for _ in range(iterations):
-        call()
-    return (time.thread_time_ns() - started) / iterations
+def _assert_direct_get_job_facade(function: object) -> None:
+    """校验 façade 只有一次原样 repository 委派."""
+    assert isinstance(function, types.FunctionType)
+    signature = inspect.signature(function)
+    parameters = list(signature.parameters.values())
+    assert [parameter.name for parameter in parameters] == ["self", "job_id"]
+    assert all(
+        parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        and parameter.default is inspect.Parameter.empty
+        for parameter in parameters
+    )
+
+    source = textwrap.dedent(inspect.getsource(function))
+    module = ast.parse(source)
+    assert len(module.body) == 1
+    node = module.body[0]
+    assert isinstance(node, ast.FunctionDef)
+    assert node.name == "get_job"
+    assert node.decorator_list == []
+    assert len(node.body) == 1
+    statement = node.body[0]
+    assert isinstance(statement, ast.Return)
+    call = statement.value
+    assert isinstance(call, ast.Call)
+    assert isinstance(call.func, ast.Attribute)
+    assert isinstance(call.func.value, ast.Name)
+    assert call.func.value.id == "_JobsReadRepository"
+    assert call.func.attr == "get_job"
+    assert [argument.id for argument in call.args if isinstance(argument, ast.Name)] == [
+        "self", "job_id",
+    ]
+    assert len(call.args) == 2
+    assert call.keywords == []
 
 
-def _percentiles(samples: list[float]) -> tuple[float, float]:
-    return statistics.median(samples), statistics.quantiles(
-        samples, n=100, method="inclusive"
-    )[94]
-
-
-def test_job_read_facade_p50_and_p95_stay_within_fifteen_percent(
-    db: Database,
+def test_job_read_facade_is_one_direct_repository_delegation(
+    db: Database, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    job = Job(
-        id="jobs_repository_perf",
-        content_type="article",
-        pipeline="article",
-        title="repository performance",
-    )
-    db.create_job(job)
-    facade_call = lambda: db.get_job(job.id)
-    direct_call = lambda: JobsReadRepository.get_job(db, job.id)
-    for _ in range(100):
-        facade_call()
-        direct_call()
+    function = Database.__dict__["get_job"]
+    _assert_direct_get_job_facade(function)
+    assert db_module._JobsReadRepository is JobsReadRepository
+    assert Database.__getattribute__ is object.__getattribute__
 
-    # façade 只增加 Python 转发，线程 CPU 时间排除同 runner 进程的调度抢占。
-    # 每轮相邻测量后直接取 ratio，避免两个独立 p95 来自不同负载窗口。
-    ratios: list[float] = []
-    for iteration in range(40):
-        if iteration % 2:
-            direct = _batch_cpu_latency(direct_call, 200)
-            facade = _batch_cpu_latency(facade_call, 200)
-        else:
-            facade = _batch_cpu_latency(facade_call, 200)
-            direct = _batch_cpu_latency(direct_call, 200)
-        ratios.append(facade / direct)
+    calls: list[tuple[Database, object]] = []
+    sentinel = object()
+    job_id = object()
 
-    p50_ratio, p95_ratio = _percentiles(ratios)
-    print(
-        "repository get_job latency: "
-        f"p50={p50_ratio:.4f}x, p95={p95_ratio:.4f}x"
+    def spy(database: Database, value: object) -> object:
+        calls.append((database, value))
+        return sentinel
+
+    monkeypatch.setattr(JobsReadRepository, "get_job", spy)
+    assert db.get_job(job_id) is sentinel
+    assert len(calls) == 1
+    assert calls[0][0] is db
+    assert calls[0][1] is job_id
+
+
+def test_facade_shape_validator_rejects_indirect_work() -> None:
+    def decorator(function):
+        return function
+
+    class ExtraStatement:
+        def get_job(self, job_id):
+            job_id = str(job_id)
+            return _JobsReadRepository.get_job(self, job_id)
+
+    class Decorated:
+        @decorator
+        def get_job(self, job_id):
+            return _JobsReadRepository.get_job(self, job_id)
+
+    class ArgumentTransform:
+        def get_job(self, job_id):
+            return _JobsReadRepository.get_job(self, str(job_id))
+
+    class DoubleCall:
+        def get_job(self, job_id):
+            _JobsReadRepository.get_job(self, job_id)
+            return _JobsReadRepository.get_job(self, job_id)
+
+    invalid_functions = (
+        ExtraStatement.__dict__["get_job"],
+        Decorated.__dict__["get_job"],
+        ArgumentTransform.__dict__["get_job"],
+        DoubleCall.__dict__["get_job"],
     )
-    assert p50_ratio <= 1.15
-    assert p95_ratio <= 1.15
+    for invalid in invalid_functions:
+        with pytest.raises(AssertionError):
+            _assert_direct_get_job_facade(invalid)
 
 
 def test_job_read_facade_preserves_sql_statement_count(db: Database) -> None:
