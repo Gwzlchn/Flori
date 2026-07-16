@@ -8,7 +8,7 @@ import json
 import mimetypes
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 from shared.config import AppConfig
 from shared.db import Database
@@ -349,7 +349,46 @@ async def get_artifact(job_id: str, path: str, storage: StorageBackend = Depends
                         cache=_artifact_kind(path) == "image")
 
 
-_MEDIA_CHUNK = 2 * 1024 * 1024   # 单次最多回 2MB:浏览器按 range 续拉,内存不被整片视频撑爆。
+_MEDIA_CHUNK = 2 * 1024 * 1024
+
+
+def _media_range(value: str | None, size: int) -> tuple[int, int, int]:
+    """解析单段 bytes Range;无 Range 时返回完整流式响应."""
+    if not value:
+        return 0, size, 200
+    if not value.startswith("bytes=") or "," in value:
+        raise HTTPException(
+            416, "invalid Range header",
+            headers={"Content-Range": f"bytes */{size}"},
+        )
+    left, sep, right = value[6:].partition("-")
+    if not sep:
+        raise HTTPException(
+            416, "invalid Range header",
+            headers={"Content-Range": f"bytes */{size}"},
+        )
+    try:
+        if not left:
+            suffix = int(right)
+            if suffix <= 0:
+                raise ValueError
+            start = max(0, size - suffix)
+            end = size - 1
+        else:
+            start = int(left)
+            end = int(right) if right else size - 1
+    except ValueError:
+        raise HTTPException(
+            416, "invalid Range header",
+            headers={"Content-Range": f"bytes */{size}"},
+        )
+    if size <= 0 or start < 0 or start >= size or end < start:
+        raise HTTPException(
+            416, "invalid Range header",
+            headers={"Content-Range": f"bytes */{size}"},
+        )
+    end = min(end, size - 1, start + _MEDIA_CHUNK - 1)
+    return start, end - start + 1, 206
 
 
 @router.get(
@@ -357,8 +396,7 @@ _MEDIA_CHUNK = 2 * 1024 * 1024   # 单次最多回 2MB:浏览器按 range 续拉
 )
 async def get_media(job_id: str, path: str, request: Request,
                     storage: StorageBackend = Depends(get_storage)):
-    """视频/音频 range 流式(经 StorageBackend,兼容本地/MinIO)。<video>/<audio> 用它播放。
-    每次最多回 _MEDIA_CHUNK,开放区间(bytes=N-)也只回一段,避免把整片视频读进内存。"""
+    """流式返回媒体或 PDF;单段 Range 封顶 2 MiB,无 Range 不截断文件."""
     _validate_job_id(job_id)
     if ".." in path or path.startswith("/") or "\x00" in path:
         raise HTTPException(400, "invalid path")
@@ -369,33 +407,18 @@ async def get_media(job_id: str, path: str, request: Request,
         raise HTTPException(404, "media not found")
     ct = mimetypes.guess_type(path)[0] or "application/octet-stream"
 
-    range_header = request.headers.get("range")
-    if not range_header:
-        # 无 range:只回首段 + Accept-Ranges,引导浏览器改用 range(不整片加载)。
-        data = await storage.read_range(job_id, path, 0, min(_MEDIA_CHUNK, size))
-        status = 206 if size > _MEDIA_CHUNK else 200
-        headers = {"Accept-Ranges": "bytes", "Content-Length": str(len(data or b""))}
-        if status == 206:
-            headers["Content-Range"] = f"bytes 0-{len(data) - 1}/{size}"
-        return Response(content=data or b"", status_code=status, media_type=ct, headers=headers)
-
-    try:
-        parts = range_header.replace("bytes=", "").split("-")
-        start = int(parts[0]) if parts[0] else 0
-        end = int(parts[1]) if len(parts) > 1 and parts[1] else size - 1
-        end = min(end, size - 1, start + _MEDIA_CHUNK - 1)   # 封顶单段大小
-        if start < 0 or start > end or start >= size:
-            raise ValueError
-        length = end - start + 1
-    except (ValueError, IndexError):
-        raise HTTPException(416, "invalid Range header")
-
-    data = await storage.read_range(job_id, path, start, length)
-    return Response(
-        content=data or b"", status_code=206, media_type=ct,
-        headers={
-            "Content-Range": f"bytes {start}-{end}/{size}",
-            "Accept-Ranges": "bytes",
-            "Content-Length": str(length),
-        },
+    start, length, status = _media_range(request.headers.get("range"), size)
+    stream = await storage.open_stream(
+        job_id, path, start=start, length=length, chunk_size=_MEDIA_CHUNK,
+    )
+    if stream is None:
+        raise HTTPException(404, "media not found")
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(length),
+    }
+    if status == 206:
+        headers["Content-Range"] = f"bytes {start}-{start + length - 1}/{size}"
+    return StreamingResponse(
+        stream, status_code=status, media_type=ct, headers=headers,
     )

@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ChevronDown, FileText, Languages, List, RefreshCw, Star } from 'lucide-vue-next'
+import { ChevronDown, ExternalLink, FileText, Languages, List, RefreshCw, Star } from 'lucide-vue-next'
 import MarkdownViewer from '../../notes/MarkdownViewer.vue'
 import type { CanonicalEvidenceProjection } from '../../../types'
 
-type NoteVariant = 'smart' | 'original' | 'translated'
+type NoteVariant = 'smart' | 'original' | 'translated' | 'pdf'
 interface Version { provider: string; model: string; version: string; file: string; review_file: string | null; overall: number | null; review_state?: string | null }
 interface Provider { name: string; type: string; available: boolean; label: string }
 interface Heading { id: string; text: string; level: number }
@@ -15,6 +15,7 @@ defineProps<{
   hasSmartNote: boolean
   hasTranslation: boolean
   hasReadableOriginal: boolean
+  hasPaperPdf: boolean
   noteVariant: NoteVariant
   versions: Version[]
   activeFile: string | null
@@ -24,7 +25,6 @@ defineProps<{
   noteLoading: boolean
   noteError: string
   isPaper: boolean
-  paperHtmlSource: boolean
   paperPdfUrl: string
   noteContent: string
   terms: Term[]
@@ -47,10 +47,11 @@ defineEmits<{
 
 <template>
   <div class="note-toolbar">
-    <div v-if="hasSmartNote || hasTranslation" class="seg">
+    <div v-if="hasSmartNote || hasTranslation || hasPaperPdf" class="seg">
       <button v-if="hasSmartNote" :class="{ on: noteVariant === 'smart' }" @click="$emit('switchVariant', 'smart')">智能版</button>
-      <button :class="{ on: noteVariant === 'original' }" @click="$emit('switchVariant', 'original')">{{ hasReadableOriginal ? '原文' : '机械版' }}</button>
+      <button v-if="!isPaper || hasReadableOriginal" :class="{ on: noteVariant === 'original' }" @click="$emit('switchVariant', 'original')">{{ hasReadableOriginal ? '原文' : '机械版' }}</button>
       <button v-if="hasTranslation" :class="{ on: noteVariant === 'translated' }" @click="$emit('switchVariant', 'translated')">译文</button>
+      <button v-if="hasPaperPdf" :class="{ on: noteVariant === 'pdf' }" @click="$emit('switchVariant', 'pdf')">原文 PDF</button>
     </div>
     <span v-else class="dim" style="font-size:12px">{{ hasReadableOriginal ? '原文' : '机械版' }}（未生成智能笔记）</span>
     <template v-if="noteVariant === 'smart'">
@@ -73,7 +74,13 @@ defineEmits<{
   <slot />
   <div v-if="noteLoading" class="card pad"><div class="state"><span class="spinner" />加载笔记…</div></div>
   <div v-else-if="noteError" class="card pad"><div class="state"><FileText class="big" /><div class="t">{{ noteError }}</div></div></div>
-  <iframe v-else-if="noteVariant === 'original' && isPaper && !paperHtmlSource" :src="paperPdfUrl" class="pdf-frame" title="论文 PDF 原文" />
+  <div v-else-if="noteVariant === 'pdf' && hasPaperPdf" class="pdf-wrap">
+    <div class="pdf-head">
+      <span class="lead"><FileText :size="13" /> PDF 保留论文原始公式、图表和版式。</span>
+      <a :href="paperPdfUrl" target="_blank" rel="noopener">新窗口打开<ExternalLink :size="13" /></a>
+    </div>
+    <iframe :src="paperPdfUrl" class="pdf-frame" title="论文 PDF 原文" loading="lazy" />
+  </div>
   <div v-else class="notes-wrap">
     <p v-if="noteVariant === 'translated'" class="lead translated"><Languages :size="13" /> 原文为非中文,以下是 AI 忠实全文译文(保留原结构与配图)。</p>
     <div class="card pad prose max-w-none">
@@ -96,6 +103,14 @@ defineEmits<{
 .provider-menu button > span:last-child { font-size: 11px; flex: none; }
 .provider-menu button.unavailable { opacity: .5; cursor: not-allowed; }
 .empty-provider { font-size: 12px; padding: 8px 9px; }
+.pdf-wrap { min-width: 0; }
+.pdf-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.pdf-head .lead { display: inline-flex; align-items: center; gap: 5px; margin: 0; }
+.pdf-head a { display: inline-flex; align-items: center; gap: 4px; flex: none; font-size: 12px; }
 .pdf-frame { width: 100%; height: 82vh; border: 1px solid var(--line-soft); border-radius: 10px; background: #f9fafb; }
 .translated { grid-column: 1/-1; margin: -6px 0 0; }
+@media (max-width: 600px) {
+  .pdf-head { align-items: flex-start; }
+  .pdf-frame { height: 72vh; }
+}
 </style>

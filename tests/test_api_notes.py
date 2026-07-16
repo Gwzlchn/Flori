@@ -130,6 +130,56 @@ class TestBoundedVerificationReads:
 
 class TestNotes:
     @pytest.mark.asyncio
+    async def test_media_without_range_streams_complete_pdf(self, client, test_config):
+        job = _create_job_files(test_config.jobs_dir, "j_test")
+        payload = b"%PDF-1.7\n" + b"x" * (2 * 1024 * 1024 + 17)
+        (job / "input/source.pdf").write_bytes(payload)
+
+        resp = await client.get("/api/jobs/j_test/media?path=input/source.pdf")
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "application/pdf"
+        assert resp.headers["content-length"] == str(len(payload))
+        assert resp.headers["accept-ranges"] == "bytes"
+        assert "content-range" not in resp.headers
+        assert resp.content == payload
+
+    @pytest.mark.asyncio
+    async def test_media_range_is_bounded_and_supports_suffix(self, client, test_config):
+        job = _create_job_files(test_config.jobs_dir, "j_test")
+        payload = bytes(range(64))
+        (job / "input/source.pdf").write_bytes(payload)
+
+        middle = await client.get(
+            "/api/jobs/j_test/media?path=input/source.pdf",
+            headers={"Range": "bytes=5-9"},
+        )
+        suffix = await client.get(
+            "/api/jobs/j_test/media?path=input/source.pdf",
+            headers={"Range": "bytes=-4"},
+        )
+
+        assert middle.status_code == 206
+        assert middle.headers["content-range"] == "bytes 5-9/64"
+        assert middle.content == payload[5:10]
+        assert suffix.status_code == 206
+        assert suffix.headers["content-range"] == "bytes 60-63/64"
+        assert suffix.content == payload[-4:]
+
+    @pytest.mark.asyncio
+    async def test_media_rejects_invalid_range_with_size(self, client, test_config):
+        job = _create_job_files(test_config.jobs_dir, "j_test")
+        (job / "input/source.pdf").write_bytes(b"%PDF")
+
+        resp = await client.get(
+            "/api/jobs/j_test/media?path=input/source.pdf",
+            headers={"Range": "bytes=99-100"},
+        )
+
+        assert resp.status_code == 416
+        assert resp.headers["content-range"] == "bytes */4"
+
+    @pytest.mark.asyncio
     async def test_smart_notes(self, client, test_config):
         _create_job_files(test_config.jobs_dir, "j_test")
         resp = await client.get("/api/jobs/j_test/notes/smart")

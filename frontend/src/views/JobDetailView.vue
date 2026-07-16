@@ -138,13 +138,14 @@ function resetJobView() {
   evidence.value = null; figures.value = []
   jobConcepts.value = []; conceptsError.value = ''
   activeFile.value = null; noteVariant.value = 'smart'
+  pdfJumpPage.value = 0
   selectedStep.value = ''
 }
 
 // 笔记 tab
 const domain = computed(() => job.value?.domain || '')
-// 笔记三变体:智能笔记 / 原文(video、audio 为机械版) / 译文——译文收在笔记下,不再是顶层 tab。
-type NoteVariant = 'smart' | 'original' | 'translated'
+// paper 的可检索原文和版式 PDF 是两种不同阅读面,不用 HTML→Markdown 代替 PDF 真相源。
+type NoteVariant = 'smart' | 'original' | 'translated' | 'pdf'
 const noteVariant = ref<NoteVariant>('smart')
 const noteContent = ref('')
 const canonicalEvidence = ref<CanonicalEvidenceProjection[]>([])
@@ -181,19 +182,21 @@ type Version = { provider: string; model: string; version: string; file: string;
 const versions = ref<Version[]>([])
 const activeFile = ref<string | null>(null)
 const isArticle = computed(() => job.value?.content_type === 'article')
-// 文章 + 论文都有「原文」变体:article=02_parse readability MD;paper 按源类型分流——
-// arxiv-html(02 由 HTML 源转的干净 MD,公式/图无损)直接渲染 original.md;
-// pdf-only / 旧 job(pymupdf 时代,解析 MD 排版损伤救不回)内嵌 PDF 浏览器原生渲染。
 const isPaper = computed(() => job.value?.content_type === 'paper')
-const hasReadableOriginal = computed(() => isArticle.value || isPaper.value)
 const paperHtmlSource = computed(() => isPaper.value && job.value?.source_kind === 'arxiv-html')
+// 「原文」只表示可检索文本:article readability MD 或 arXiv HTML 解析文本。
+// pdf-only / 旧 paper 的解析 MD 排版损伤无法恢复,只展示独立 PDF 变体。
+const hasReadableOriginal = computed(() => isArticle.value || paperHtmlSource.value)
+const hasPaperPdf = computed(() => isPaper.value && (job.value?.artifacts || []).some((path) => (
+  path === 'input/source.pdf' || path.endsWith('/input/source.pdf')
+)))
 const pdfJumpPage = ref(0)   // 译文图占位点击跳原文 PDF 的目标页(0=无;iframe #page= 原生支持)
 const paperPdfUrl = computed(() =>
-  `/api/jobs/${jobId.value}/artifact?path=${encodeURIComponent('input/source.pdf')}`
+  `/api/jobs/${jobId.value}/media?path=${encodeURIComponent('input/source.pdf')}`
   + (pdfJumpPage.value > 0 ? `#page=${pdfJumpPage.value}` : ''))
 function onPdfPageJump(p: number) {
   pdfJumpPage.value = p
-  noteVariant.value = 'original'
+  noteVariant.value = 'pdf'
 }
 // 有无智能笔记:有版本即有(文章关笔记时为空 → 隐藏智能版、机械版即原文)
 const hasSmartNote = computed(() => versions.value.length > 0)
@@ -291,15 +294,14 @@ async function loadNote() {
   noteError.value = ''
   try {
     let text: string
-    if (noteVariant.value === 'translated') {
-      text = translatedMd.value || await api.getText(
-        `/api/jobs/${fid}/artifact?path=${encodeURIComponent('output/translated.md')}`)
-    } else if (noteVariant.value === 'original' && isPaper.value && !paperHtmlSource.value) {
-      noteContent.value = ''   // pdf-only/旧论文:原文 = 模板内嵌 PDF,不走文本
+    if (noteVariant.value === 'pdf') {
+      noteContent.value = ''
       canonicalEvidence.value = []
       return
-    } else if (noteVariant.value === 'original' && (isArticle.value || paperHtmlSource.value)) {
-      // 文章 / arxiv-html 论文「原文」= output/original.md(已由 loadOriginal 载入;兜底再拉一次)
+    } else if (noteVariant.value === 'translated') {
+      text = translatedMd.value || await api.getText(
+        `/api/jobs/${fid}/artifact?path=${encodeURIComponent('output/translated.md')}`)
+    } else if (noteVariant.value === 'original' && hasReadableOriginal.value) {
       text = originalMd.value || await api.getText(
         `/api/jobs/${fid}/artifact?path=${encodeURIComponent('output/original.md')}`)
     } else {
@@ -404,6 +406,7 @@ async function loadEvidence() {
 const originalMd = ref('')
 async function loadOriginal() {
   const fid = jobId.value
+  if (!hasReadableOriginal.value) { originalMd.value = ''; return }
   try {
     const text = await api.getText(
       `/api/jobs/${fid}/artifact?path=${encodeURIComponent('output/original.md')}`)
@@ -448,8 +451,11 @@ async function ensureNotes() {
   notesInit = true
   await loadTerms()
   await Promise.all([loadVersions(), loadProviders()])
-  // 无智能笔记时默认显示原文(video/audio 无可读原文则停留智能位显示 404 提示,与旧行为一致)
-  if (!versions.value.length && hasReadableOriginal.value) noteVariant.value = 'original'
+  // 无智能笔记时优先可检索原文;pdf-only paper 直接落版式原文。
+  if (!versions.value.length) {
+    if (hasReadableOriginal.value) noteVariant.value = 'original'
+    else if (hasPaperPdf.value) noteVariant.value = 'pdf'
+  }
   await Promise.all([loadNote(), loadReview()])
 }
 
@@ -736,9 +742,9 @@ watch(job, (j) => {
       <!-- 笔记(article:智能版可隐藏、机械版=原文) -->
       <div v-show="tab === 'notes'">
         <JobNotesPanel :job-id="jobId" :domain="domain" :has-smart-note="hasSmartNote" :has-translation="hasTranslation"
-          :has-readable-original="hasReadableOriginal" :note-variant="noteVariant" :versions="versions" :active-file="activeFile"
+          :has-readable-original="hasReadableOriginal" :has-paper-pdf="hasPaperPdf" :note-variant="noteVariant" :versions="versions" :active-file="activeFile"
           :rerunning="rerunning" :show-rerun="showRerun" :providers="providers" :note-loading="noteLoading" :note-error="noteError"
-          :is-paper="isPaper" :paper-html-source="paperHtmlSource" :paper-pdf-url="paperPdfUrl" :note-content="noteContent"
+          :is-paper="isPaper" :paper-pdf-url="paperPdfUrl" :note-content="noteContent"
           :terms="terms" :evidence-ids="eligibleEvidenceIds" :canonical-evidence="canonicalEvidence" :headings="headings"
           :version-label="verLabel" @switch-variant="switchVariant" @select-version="selectVersion"
           @toggle-rerun="showRerun = !showRerun" @rerun="rerunWith" @headings="headings = $event"

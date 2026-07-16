@@ -409,7 +409,7 @@ GET /api/jobs/{id}/evidence             → application/json (取证安全投影
 GET /api/jobs/{id}/assets/{filename}    → image/* (截图/图表等;长缓存)
 GET /api/jobs/{id}/artifacts            → application/json (产物清单,按步骤分组;隐藏 job.json/点文件)
 GET /api/jobs/{id}/artifact?path=<rel>  → 任意产物文件 (按扩展名定 content-type;仅放行已存在且未隐藏的)
-GET /api/jobs/{id}/media?path=<rel>     → video/audio Range/206 流式 (<video>/<audio> 播放;单段封顶 2MB)
+GET /api/jobs/{id}/media?path=<rel>     → video/audio/PDF 流式 (无 Range 完整 200;单段 Range/206 封顶 2 MiB)
 ```
 
 视频特有端点：
@@ -419,6 +419,7 @@ GET /api/jobs/{id}/notes/transcript     → text/markdown (逐字稿)
 ```
 
 > 说明:源视频/音频经 `GET .../media?path=input/source.mp4` 走 Range 流式(非独立 `/source` 端点);
+> 论文 PDF 原件经同一端点流式返回。浏览器首次未携带 Range 时返回完整 `200`,避免把文件截断为不可渲染的前 2 MiB;
 > 任意单个产物用 `GET .../artifact?path=<相对路径>`(非 `/output/{filename}`)。`job.json`(含凭证)
 > 与 `.` 开头的内部/凭证文件一律隐藏、不可经产物端点取。`/note-versions` 返回:
 > `{"versions": [{"provider","model","version","file","review_file","overall","review_state"}...]}`(按 version 倒序)。`review_state` 为 `reliable` / `unreliable` / `legacy_unverified`;只有 `reliable` 评审返回 `overall`,其余为 `null`。
