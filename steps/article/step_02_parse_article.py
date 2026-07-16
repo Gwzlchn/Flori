@@ -129,7 +129,7 @@ class ParseArticleStep(StepBase):
             # 来源网站名:trafilatura sitename > 下载元数据 > URL 域名(去 www)。供「来源」展示。
             "sitename": sitename_src or meta.get("sitename", "") or self._domain(url),
             "date": date,
-            "lang": lang,                              # 正文主语言(zh / non-zh)
+            "lang": lang,                              # 正文主语言(ISO 639-1 或 unknown)
             "word_count": len(text),
             "sections": sections,
             "text": text,

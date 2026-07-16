@@ -68,6 +68,7 @@
 | [httpx](https://github.com/encode/httpx) | HTTP 客户端（asyncio） | BSD-3 |
 | [anthropic](https://github.com/anthropics/anthropic-sdk-python) | Claude API | MIT |
 | [openai](https://github.com/openai/openai-python) | OpenAI 兼容 API | Apache-2.0 |
+| [langdetect](https://github.com/Mimino666/langdetect) | 文章/论文正文主语言检测 | Apache-2.0 |
 
 ## 7. 前端
 

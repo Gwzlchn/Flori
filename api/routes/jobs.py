@@ -28,6 +28,7 @@ from shared.ai_routing import (
 )
 from shared.db import Database
 from shared.ids import lineage_key_of as _lineage_key_of
+from shared.language import detect_language
 from shared.models import Job, JobStatus, derive_job_id
 from shared.redis_client import RedisClient
 from shared.source_detect import detect_source
@@ -858,6 +859,7 @@ async def get_job(
         pass
     # 文章/论文:从 02 解析(parsed.json)透元信息进「元信息」tab。article 字数/标签/封面;paper 页数。
     source_kind = None
+    language_sample = ""
     if job.content_type in ("article", "paper"):
         try:
             raw = await storage.read_file(job_id, "intermediate/parsed.json")
@@ -871,6 +873,7 @@ async def get_job(
                     media["abstract"] = p["abstract"]
                 if p.get("lang"):
                     media["lang"] = p["lang"]
+                language_sample = str(p.get("text") or p.get("abstract") or "")
                 if job.content_type == "article":
                     if p.get("word_count") is not None:
                         media["word_count"] = p["word_count"]
@@ -887,6 +890,18 @@ async def get_job(
                         media["venue"] = p["venue"]
         except Exception:
             pass
+    # 旧任务可能只写 unknown/non-zh.优先用解析正文,再回退可读原文,只修正展示而不改历史产物.
+    if job.content_type in ("article", "paper") and media.get("lang") in {None, "unknown", "non-zh"}:
+        if not language_sample:
+            try:
+                original = await storage.read_file(job_id, "output/original.md")
+                if original:
+                    language_sample = original[:200000].decode("utf-8", errors="ignore")
+            except Exception:
+                pass
+        detected = detect_language(language_sample)
+        if detected != "unknown":
+            media["lang"] = detected
     # 产物路径(元信息"产物路径"):NAS 宿主绝对路径。job 产物实际落在对象存储/本地盘,
     # 其在 NAS 上的根由 JOB_ARTIFACT_HOST_ROOT 指定(MinIO 部署=<NAS>/minio/<bucket>;
     # 本地盘部署=<NAS>/jobs)。未配置则回退容器内 $DATA_DIR/jobs。列可见产物(隐藏点文件/job.json)。
@@ -903,13 +918,45 @@ async def get_job(
     # 本任务 AI 步用的 prompt 覆盖版本号快照:从 job.json.prompt_overrides[step].version 读,
     # 注入形态为 {content, version};旧 job 的覆盖是纯字符串无版本,跳过。供前端比对本任务与当前版本。
     prompt_versions: dict = {}
+    prompt_snapshot: dict = {}
     try:
         raw = await storage.read_file(job_id, "job.json")
         if raw:
             jd = json.loads(raw.decode("utf-8"))
-            for stp, val in (jd.get("prompt_overrides") or {}).items():
+            stored_prompts = jd.get("prompt_overrides") or {}
+            prompt_snapshot = stored_prompts if isinstance(stored_prompts, dict) else {}
+            for stp, val in prompt_snapshot.items():
                 if isinstance(val, dict) and val.get("version") is not None:
                     prompt_versions[stp] = str(val["version"])
+    except Exception:
+        pass
+    try:
+        update_state = await is_job_expired(storage, config, job)
+    except Exception:
+        update_state = {"expired": False, "first_changed_step": None}
+    # Prompt 覆盖不属于 pipeline def_digest,需独立比较任务快照与当前激活内容.
+    try:
+        active_prompts = await asyncio.to_thread(
+            db.resolve_prompt_overrides, job.pipeline, job.domain,
+        )
+        changed_prompts = {
+            step_name
+            for step_name in set(prompt_snapshot) | set(active_prompts)
+            if prompt_snapshot.get(step_name) != active_prompts.get(step_name)
+        }
+        if changed_prompts:
+            pipeline_order = [
+                step["name"]
+                for step in config.pipelines.get(job.pipeline, {}).get("steps", [])
+            ]
+            changed_steps = set(changed_prompts)
+            if update_state["first_changed_step"]:
+                changed_steps.add(update_state["first_changed_step"])
+            first_changed = next(
+                (step_name for step_name in pipeline_order if step_name in changed_steps),
+                sorted(changed_steps)[0],
+            )
+            update_state = {"expired": True, "first_changed_step": first_changed}
     except Exception:
         pass
     return JobDetailResponse(
@@ -922,6 +969,8 @@ async def get_job(
         progress_pct=job.progress_pct, source=job.source, domain=job.domain,
         collection_id=job.collection_id, collection_name=collection_name,
         meta=job.meta, source_kind=source_kind,
+        update_available=bool(update_state["expired"]),
+        update_from_step=update_state["first_changed_step"],
         steps=[
             StepResponse(
                 name=s.name, label=labels.get(s.name), status=s.status.value,

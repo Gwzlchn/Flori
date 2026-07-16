@@ -7,10 +7,11 @@ import { fmtDateTime, fmtDuration } from '../../utils/datetime'
 import { fmtBytes } from '../../utils/format'
 import { statusLabel } from '../../utils/status'
 import type { StepInfo, StepUsage } from '../../types'
-import { Check, X, Minus, Loader, Clock, ChevronRight, FileText, Braces, Package, Coins, HardDrive } from 'lucide-vue-next'
+import { Check, X, Minus, Loader, Clock, ChevronRight, FileText, Braces, Package, Coins, HardDrive, RotateCcw } from 'lucide-vue-next'
 
 // selectedStep 由父组件(JobDetailView 的 DAG 点选)驱动;本组件不自带步骤选择轨。
-const props = defineProps<{ jobId: string; steps: StepInfo[]; selectedStep?: string }>()
+const props = defineProps<{ jobId: string; steps: StepInfo[]; selectedStep?: string; canRerun?: boolean }>()
+defineEmits<{ rerun: [] }>()
 const api = useApi()
 
 const statusIcon: Record<string, any> = { done: Check, failed: X, skipped: Minus, running: Loader }
@@ -100,7 +101,7 @@ async function loadGroups() {
   } catch { groups.value = []; jobBytes.value = 0 }
 }
 
-// 逐次 AI 调用明细(按步聚合;一个步可能多次调用 → 取该步全部行)。
+// 逐次 AI 调用明细.非 AI 步没有记录,不能回退展示 job 总计.
 const usage = ref<StepUsage[]>([])
 async function loadUsage() {
   try {
@@ -110,32 +111,38 @@ async function loadUsage() {
 }
 const selUsage = computed(() => usage.value.filter(u => u.step === sel.value))
 const fmtCost = (v: number) => `$${(v ?? 0).toFixed(4)}`
-const costSuffix = (provider: string) => (provider === 'claude-cli' ? '（等价）' : '')
+
+// 选中 AI 步的汇总只承担概览;展开后由 AiLogPanel 展示逐次调用与完整白盒审计.
+const selUsageSummary = computed(() => {
+  const rows = selUsage.value
+  if (!rows.length) return null
+  let input = 0, output = 0, cacheRead = 0, cacheCreation = 0, cost = 0, claudeCli = false
+  for (const row of rows) {
+    input += row.input_tokens
+    output += row.output_tokens
+    cacheRead += row.cache_read_tokens
+    cacheCreation += row.cache_creation_tokens
+    cost += row.cost_usd || 0
+    if (row.provider === 'claude-cli') claudeCli = true
+  }
+  const cacheDenom = input + cacheRead + cacheCreation
+  return {
+    calls: rows.length,
+    input,
+    output,
+    cacheRead,
+    cacheCreation,
+    cost,
+    hit: cacheDenom ? Math.round((cacheRead / cacheDenom) * 1000) / 10 : 0,
+    claudeCli,
+  }
+})
 
 // 选中步的产物体积合计(后端按步给 total_bytes;无则回退各文件 size 之和)。
 const selBytes = computed(() => {
   const g = groups.value.find(g => g.step === sel.value)
   if (!g) return 0
   return g.total_bytes ?? g.files.reduce((s, f) => s + (f.size || 0), 0)
-})
-
-// 本 job 级 AI 用量小计(逐次明细前端聚合,避免再调聚合端点)。命中率=读缓存/(入+读+写)。
-const jobUsage = computed(() => {
-  const us = usage.value
-  if (!us.length) return null
-  let inp = 0, cr = 0, cc = 0, cost = 0, claudeCli = false
-  for (const u of us) {
-    inp += u.input_tokens
-    cr += u.cache_read_tokens; cc += u.cache_creation_tokens
-    cost += u.cost_usd || 0
-    if (u.provider === 'claude-cli') claudeCli = true
-  }
-  const denom = inp + cr + cc
-  return {
-    calls: us.length, cost,
-    hit: denom ? Math.round((cr / denom) * 1000) / 10 : 0,
-    claudeCli,   // 任一调用为订阅 → 成本标「(等价)」
-  }
 })
 
 // 选中步(父经 selectedStep 驱动)变化:重置文件/日志态,自动预览首个产物。
@@ -184,15 +191,10 @@ onMounted(async () => {
   <div class="bg-white border border-gray-200 rounded-xl p-4">
     <div class="flex items-center gap-2 flex-wrap mb-3">
       <h3 class="text-sm font-semibold text-gray-700">步骤与产物</h3>
-      <!-- job 级小计:全 job 产物体积 + AI 用量(累计成本/命中率/调用次数);克制,仅一行 -->
+      <!-- 标题只保留 job 级产物体积.AI 开销按所选步骤展示,避免 CPU 步误挂全局总计. -->
       <div class="ml-auto flex items-center gap-3 text-xs text-gray-500">
         <span v-if="jobBytes" class="flex items-center gap-1" title="本内容全部产物体积">
           <HardDrive :size="12" class="text-gray-400" />产物 <span class="font-medium text-gray-700">{{ fmtBytes(jobBytes) }}</span>
-        </span>
-        <span v-if="jobUsage" class="flex items-center gap-1" title="本内容 AI 用量累计">
-          <Coins :size="12" class="text-gray-400" />
-          <span class="font-medium text-gray-700">{{ fmtCost(jobUsage.cost) }}<span class="text-gray-400">{{ jobUsage.claudeCli ? '（等价）' : '' }}</span></span>
-          <span class="text-gray-400">· {{ jobUsage.calls }} 次 · 命中 {{ jobUsage.hit }}%</span>
         </span>
       </div>
     </div>
@@ -201,6 +203,9 @@ onMounted(async () => {
             <h4 class="text-base font-semibold text-gray-800">{{ stepLabel(selStep) }}</h4>
             <span class="text-xs px-1.5 py-0.5 rounded" :class="statusColor[selStep.status] || statusColor.waiting">{{ statusLabel(selStep.status) }}</span>
             <span class="text-xs text-gray-400 font-mono">{{ selStep.name }}</span>
+            <button v-if="canRerun" class="btn sm ml-auto" title="覆盖当前任务中该步骤及其后续产物" @click="$emit('rerun')">
+              <RotateCcw :size="13" />重跑此步骤及后续
+            </button>
           </div>
 
           <!-- 时间仅对真正跑过的步骤显示;等待/就绪(可能被重跑重置)不展示旧时间 -->
@@ -235,37 +240,24 @@ onMounted(async () => {
             </span>
           </div>
 
-          <!-- AI 用量(本步 AI 调用:token/缓存/命中率/成本/轮数/worker;claude-cli 成本标「等价」) -->
-          <div v-if="selUsage.length" class="mt-3 pt-3 border-t border-gray-100">
-            <div class="text-xs font-semibold text-gray-700 flex items-center gap-1.5 mb-2"><Coins :size="13" class="text-gray-500" />AI 用量</div>
-            <div v-for="(u, i) in selUsage" :key="i" class="text-xs text-gray-600 bg-gray-50 border border-gray-100 rounded p-2 mb-1.5">
-              <div class="flex items-center gap-2 flex-wrap mb-1">
-                <span class="font-mono text-gray-800">{{ u.model }}</span>
-                <span class="text-gray-400">{{ u.provider }}</span>
-                <span class="ml-auto text-gray-800 font-medium">{{ fmtCost(u.cost_usd) }}<span class="text-gray-400">{{ costSuffix(u.provider) }}</span></span>
-              </div>
-              <div class="flex flex-wrap gap-x-3 gap-y-0.5 text-gray-500">
-                <span>入 {{ u.input_tokens.toLocaleString() }}</span>
-                <span>出 {{ u.output_tokens.toLocaleString() }}</span>
-                <span>读缓存 {{ u.cache_read_tokens.toLocaleString() }}</span>
-                <span>写缓存 {{ u.cache_creation_tokens.toLocaleString() }}</span>
-                <span>命中 {{ u.cache_hit_rate_pct }}%</span>
-                <span v-if="u.num_turns">轮数 {{ u.num_turns }}</span>
-                <span v-if="u.duration_sec">耗时 {{ fmtDuration(u.duration_sec, { decimalSeconds: true }) }}</span>
-                <span v-if="u.worker_id">worker <span class="font-mono">{{ u.worker_id }}</span></span>
-              </div>
-            </div>
-          </div>
-
-          <!-- AI 日志(本步每次 LLM 调用的完整审计;只读) -->
-          <div v-if="selUsage.length" class="mt-3 pt-3 border-t border-gray-100">
-            <div class="flex items-center gap-2 mb-1.5">
-              <span class="text-xs font-semibold text-gray-700 flex items-center gap-1.5"><Braces :size="13" class="text-gray-500" />AI 日志</span>
-              <button @click="aiLogOpen = !aiLogOpen" class="text-xs text-blue-600 hover:text-blue-700 flex items-center gap-0.5">
-                <ChevronRight :size="12" :class="aiLogOpen ? 'rotate-90' : ''" class="transition-transform" />{{ aiLogOpen ? '收起' : '展开' }}
-              </button>
-              <span class="text-xs text-gray-400">prompt / 输出 / token / 尝试链 / raw</span>
-            </div>
+          <!-- 所选 AI 步汇总 + 逐次审计.一个箭头控制同一信息域,不再把 usage/log 拆成两块. -->
+          <div v-if="selUsageSummary" class="mt-3 pt-3 border-t border-gray-100">
+            <button
+              class="w-full text-left flex items-center gap-2 flex-wrap text-xs"
+              :aria-expanded="aiLogOpen" @click="aiLogOpen = !aiLogOpen"
+            >
+              <Coins :size="13" class="text-gray-500" />
+              <span class="font-semibold text-gray-700">AI 用量</span>
+              <ChevronRight :size="12" :class="aiLogOpen ? 'rotate-90' : ''" class="transition-transform text-blue-600" />
+              <span class="font-medium text-gray-800">{{ fmtCost(selUsageSummary.cost) }}<span class="text-gray-400">{{ selUsageSummary.claudeCli ? '（等价）' : '' }}</span></span>
+              <span class="text-gray-500">{{ selUsageSummary.calls }} 次</span>
+              <span class="text-gray-500">入 {{ selUsageSummary.input.toLocaleString() }}</span>
+              <span class="text-gray-500">出 {{ selUsageSummary.output.toLocaleString() }}</span>
+              <span class="text-gray-500">读缓存 {{ selUsageSummary.cacheRead.toLocaleString() }}</span>
+              <span class="text-gray-500">写缓存 {{ selUsageSummary.cacheCreation.toLocaleString() }}</span>
+              <span class="text-gray-500">命中 {{ selUsageSummary.hit }}%</span>
+              <span class="ml-auto text-gray-400">{{ aiLogOpen ? '收起审计日志' : '展开审计日志' }}</span>
+            </button>
             <AiLogPanel v-if="aiLogOpen" :job-id="jobId" :step="sel" />
           </div>
 

@@ -94,7 +94,7 @@ export interface JobMedia {
   has_danmaku?: boolean
   word_count?: number           // 文章:字数
   pages?: number                // 论文:页数
-  lang?: string                 // 文章/论文:正文主语言(zh / non-zh)
+  lang?: string                 // 文章/论文:正文主语言(ISO 639-1 或 unknown)
   sitename?: string             // 文章来源:网站名(SemiAnalysis / 华尔街见闻 / 域名)
   venue?: string                // 论文来源:会议/期刊 + 年份(OSDI 2023 / arXiv)
   authors?: string[]            // 文章/论文:作者
@@ -119,6 +119,8 @@ export interface JobDetail extends JobSummary {
   steps: StepInfo[]
   prompt_versions?: Record<string, string>  // 十进制字符串,避免 int64 在 JavaScript 中丢精度
   source_kind?: 'arxiv-html' | 'pdf-only' | null  // 论文源类型:arxiv-html=原文渲染 original.md;pdf-only=内嵌 PDF
+  update_available?: boolean    // 当前流程或 Prompt 相对该快照已有更新
+  update_from_step?: string | null
 }
 
 export interface JobListResponse {

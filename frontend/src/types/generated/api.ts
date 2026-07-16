@@ -2346,6 +2346,13 @@ export interface components {
             steps?: components["schemas"]["StepResponse"][];
             /** Title */
             title?: string | null;
+            /**
+             * Update Available
+             * @default false
+             */
+            update_available: boolean;
+            /** Update From Step */
+            update_from_step?: string | null;
             /** Updated At */
             updated_at?: string | null;
             /** Url */

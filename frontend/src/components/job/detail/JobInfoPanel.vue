@@ -5,6 +5,7 @@ import StatusBadge from '../../common/StatusBadge.vue'
 import { contentTypeLabel } from '../../../utils/contentType'
 import { fmtDateTime, fmtDuration } from '../../../utils/datetime'
 import type { JobDetail } from '../../../types'
+import { languageName } from '../../../utils/language'
 
 defineProps<{
   job: JobDetail
@@ -54,7 +55,7 @@ function fmtSize(media: { file_size_bytes?: number; file_size_mb?: number }): st
       <tr v-if="job.media?.bitrate_kbps ?? job.media?.video_bitrate_kbps"><td>码率</td><td>{{ fmtBitrate(job.media.bitrate_kbps ?? job.media.video_bitrate_kbps) }}</td></tr>
       <tr v-if="job.media?.word_count"><td>字数</td><td>{{ job.media.word_count.toLocaleString() }} 字</td></tr>
       <tr v-if="job.media?.pages"><td>页数</td><td>{{ job.media.pages }} 页</td></tr>
-      <tr v-if="job.media?.lang"><td>语言</td><td>{{ job.media.lang === 'zh' ? '中文' : (job.media.lang === 'non-zh' ? '非中文(英文等,自动翻译)' : job.media.lang) }}</td></tr>
+      <tr v-if="job.media?.lang"><td>语言</td><td>{{ languageName(job.media.lang) }}</td></tr>
       <tr v-if="job.media?.tags?.length"><td>标签</td><td>{{ job.media.tags.join('、') }}</td></tr>
       <tr v-if="job.media?.abstract"><td>摘要</td><td style="line-height:1.6">{{ job.media.abstract }}</td></tr>
       <tr v-if="job.media && (job.media.file_size_bytes != null || job.media.file_size_mb != null)"><td>原始文件大小</td><td>{{ fmtSize(job.media) }}</td></tr>
@@ -79,7 +80,7 @@ function fmtSize(media: { file_size_bytes?: number; file_size_mb?: number }): st
       <ul v-show="showArtifacts" class="art-list"><li v-for="path in job.artifacts" :key="path" class="mono">{{ path }}</li></ul>
     </div>
     <div style="margin-top:16px;display:flex;gap:8px">
-      <button v-if="jobStatus === 'failed'" class="btn" @click="$emit('retry')"><RotateCcw :size="14" />重新提交</button>
+      <button v-if="jobStatus === 'failed'" class="btn" @click="$emit('retry')"><RotateCcw :size="14" />从失败处继续</button>
       <button class="btn danger" @click="$emit('delete')"><Trash2 :size="14" />删除内容</button>
     </div>
   </div>

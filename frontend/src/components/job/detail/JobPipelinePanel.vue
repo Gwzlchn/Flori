@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Coins, FileText, GitBranch, Play, RotateCcw } from 'lucide-vue-next'
+import { Coins, FileText, GitBranch, RotateCcw } from 'lucide-vue-next'
 import PipelineDag from '../../PipelineDag.vue'
 import StepWorkbench from '../StepWorkbench.vue'
 import type { StepInfo } from '../../../types'
@@ -14,11 +14,11 @@ defineProps<{
   dagSteps: DagStep[]
   statusByKey: Record<string, string>
   selectedStep: string
-  selectedStepLabel: string
   usageByStep: Record<string, { provider: string; cost: number; equiv: boolean }>
   totalAi: TotalAi
   jobStatus: string
   rebuilding: boolean
+  updateAvailable: boolean
   promptRows: PromptRow[]
 }>()
 
@@ -27,10 +27,9 @@ defineEmits<{
   retry: []
   rerun: []
   rebuild: []
-  rerunPrompt: [step: string]
 }>()
 
-const fmtCost = (value: number) => `$${(value ?? 0).toFixed(4)}`
+const fmtCost = (value: number) => `$${(value ?? 0).toFixed(2)}`
 </script>
 
 <template>
@@ -46,23 +45,21 @@ const fmtCost = (value: number) => `$${(value ?? 0).toFixed(4)}`
     </div>
     <PipelineDag :steps="dagSteps" :status-by-key="statusByKey" :selected="selectedStep" :usage-by-step="usageByStep" style="margin-top:10px" @select="$emit('selectStep', $event)" />
   </div>
-  <div v-if="jobStatus === 'done' || jobStatus === 'failed'" style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
-    <button v-if="jobStatus === 'failed'" class="btn pri" @click="$emit('retry')"><RotateCcw :size="14" />重试</button>
-    <button v-if="selectedStep" class="btn" @click="$emit('rerun')"><Play :size="14" />从「{{ selectedStepLabel }}」重跑</button>
-    <button class="btn" :disabled="rebuilding" title="基于当前 pipeline/prompt 重建为新版本(只重跑变化步骤及下游,旧版本保留对比)" @click="$emit('rebuild')">
-      <GitBranch :size="14" />{{ rebuilding ? '重建中…' : '重建新版本' }}
-    </button>
+  <div v-if="jobStatus === 'failed' || updateAvailable" class="job-actions" data-test="job-actions">
+    <button v-if="jobStatus === 'failed'" class="btn pri" @click="$emit('retry')"><RotateCcw :size="14" />从失败处继续</button>
+    <button v-if="updateAvailable" class="btn" data-test="pipeline-update" :disabled="rebuilding" @click="$emit('rebuild')"><GitBranch :size="14" />{{ rebuilding ? '更新中…' : '更新到最新流程' }}</button>
+    <span v-if="updateAvailable" class="dim update-desc">流程或 Prompt 已更新,将创建新版本并保留当前版本</span>
   </div>
   <div v-if="promptRows.length" class="card pad" style="margin-bottom:12px">
     <div class="card-h"><FileText :size="15" />本任务 Prompt 版本</div>
     <div v-for="row in promptRows" :key="row.step" class="pver-row">
       <span class="pver-step">{{ row.label }}</span>
       <span class="pver-tag" :class="row.stale ? 'pv-stale' : 'pv-ok'">本任务 prompt v{{ row.used }}<template v-if="row.stale"> · 当前 {{ row.current == null ? '默认(无覆盖)' : 'v' + row.current }}</template></span>
-      <span style="flex:1" /><button v-if="row.stale" class="btn sm" @click="$emit('rerunPrompt', row.step)"><Play :size="13" />重跑该步</button>
+      <span style="flex:1" />
     </div>
-    <div class="dim" style="font-size:12px;margin-top:6px">「本任务」= 该步派发时用的 prompt 版本快照;不一致表示之后改过 prompt,可「重跑该步」按当前版本重出(连同其下游)。</div>
+    <div class="dim" style="font-size:12px;margin-top:6px">「本任务」是该步派发时使用的 Prompt 快照;有更新时使用上方版本升级入口,当前版本不会被覆盖。</div>
   </div>
-  <StepWorkbench :job-id="jobId" :steps="steps" :selected-step="selectedStep" />
+  <StepWorkbench :job-id="jobId" :steps="steps" :selected-step="selectedStep" :can-rerun="jobStatus === 'done' || jobStatus === 'failed'" @rerun="$emit('rerun')" />
 </template>
 
 <style scoped>
@@ -76,6 +73,9 @@ const fmtCost = (value: number) => `$${(value ?? 0).toFixed(4)}`
 .total-ai { margin-left: auto; font-weight: 600; color: var(--ink-700); display: inline-flex; align-items: center; gap: 5px; font-size: 12px; }
 .total-ai svg { color: var(--ink-400); }
 .total-ai span { font-weight: 400; color: var(--ink-400); font-size: 11px; }
+.job-actions { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; white-space: nowrap; }
+.job-actions .btn { flex: none; }
+.update-desc { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
 .pver-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
 .pver-row + .pver-row { border-top: 1px solid var(--line-soft); }
 .pver-step { font-size: 13px; font-weight: 600; color: var(--ink-700); }

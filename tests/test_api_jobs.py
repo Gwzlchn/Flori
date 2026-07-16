@@ -233,6 +233,56 @@ class TestGetJob:
         resp = await client.get("/api/jobs/nonexistent")
         assert resp.status_code == 404
 
+    @pytest.mark.asyncio
+    async def test_legacy_coarse_language_is_enriched_from_readable_original(self, client, app):
+        created = await client.post("/api/jobs", json={
+            "url": "https://example.com/paper.pdf", "content_type": "paper",
+        })
+        job_id = created.json()["job_id"]
+        storage = app.state.storage
+        await storage.write_file(
+            job_id, "intermediate/parsed.json",
+            json.dumps({"source_kind": "pdf-only", "lang": "unknown"}).encode(),
+        )
+        await storage.write_file(
+            job_id, "output/original.md",
+            ("This paper presents a reliable coordination service for distributed systems. " * 8).encode(),
+        )
+
+        body = (await client.get(f"/api/jobs/{job_id}")).json()
+
+        assert body["media"]["lang"] == "en"
+        assert body["update_available"] is False
+
+    @pytest.mark.asyncio
+    async def test_detail_reports_pipeline_update_only_when_done_digest_is_stale(self, client, app):
+        created = await client.post("/api/jobs", json={
+            "url": "https://example.com/paper.pdf", "content_type": "paper",
+        })
+        job_id = created.json()["job_id"]
+        first_step = app.state.config.pipelines["paper"]["steps"][0]["name"]
+        await app.state.storage.write_file(
+            job_id, f".{first_step}.done", b'{"def_digest":"sha256:stale"}',
+        )
+
+        body = (await client.get(f"/api/jobs/{job_id}")).json()
+
+        assert body["update_available"] is True
+        assert body["update_from_step"] == first_step
+
+    @pytest.mark.asyncio
+    async def test_detail_reports_prompt_update_after_job_snapshot(self, client, app):
+        created = await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        job_id = created.json()["job_id"]
+        app.state.db.set_prompt_override(
+            "global", None, "video", "11_smart", "新的智能笔记提示词",
+        )
+
+        body = (await client.get(f"/api/jobs/{job_id}")).json()
+
+        assert body["update_available"] is True
+        assert body["update_from_step"] == "11_smart"
+
 
 class TestDeleteJob:
     @pytest.mark.asyncio

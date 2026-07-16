@@ -80,6 +80,9 @@ class JobDetailResponse(JobResponse):
     # 论文源类型(intermediate/parsed.json.source_kind,best-effort null):"arxiv-html"=有干净 HTML 源
     # (原文变体直接渲染 original.md);"pdf-only"=只有 PDF(原文=内嵌 PDF,AI 步直喂)。非论文恒 null。
     source_kind: str | None = None
+    # 当前 pipeline/Prompt 定义相对该快照有更新时才允许前端展示版本升级入口.
+    update_available: bool = False
+    update_from_step: str | None = None
 
 
 class StepResponse(BaseModel):

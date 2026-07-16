@@ -149,7 +149,14 @@ class PdfParseStep(StepBase):
             if extracted:
                 title = extracted
 
-        # 语言不可判(不抽正文):按用户约定默认需要翻译(中文会议论文极少;翻译步对中文输入无害)。
+        from steps.utils.lang import detect_lang
+        language_sample = " ".join(
+            [title, abstract, first_page_text]
+            + [text for text in page_support_texts if text]
+        )
+        lang = detect_lang(language_sample)
+
+        # 无法识别时仍进入翻译,避免旧的 PDF-only 行为因提取失败而漏译.
         sections = [
             {"level": 1, "title": f"Pages {i}-{min(i + self.PAGES_PER_SECTION - 1, num_pages)}",
              "page": i, "text": "", "kind": "page-range"}
@@ -162,12 +169,13 @@ class PdfParseStep(StepBase):
             "abstract": abstract,
             "venue": "",
             "pages": num_pages,
-            "lang": "unknown",
+            "lang": lang,
             "sections": sections,
             "source_kind": "pdf-only",
         }
         self.artifacts.write("intermediate/parsed.json", parsed)
-        self.artifacts.write("intermediate/needs_translation.json", {"lang": "unknown"})
+        if lang != "zh":
+            self.artifacts.write("intermediate/needs_translation.json", {"lang": lang})
         publish_source_manifest(
             self.job_dir,
             build_pdf_source_manifest(
@@ -177,7 +185,7 @@ class PdfParseStep(StepBase):
                 page_support_texts=page_support_texts,
             ),
         )
-        return {"source_kind": "pdf-only", "pages": num_pages, "lang": "unknown"}
+        return {"source_kind": "pdf-only", "pages": num_pages, "lang": lang}
 
     def _pdf_page_support_texts(
         self, pdf_path: Path, page_count: int,

@@ -61,11 +61,15 @@ class TestPdfParseStep:
         assert parsed["source_kind"] == "pdf-only"
         assert parsed["pages"] == 9
         assert parsed["title"] == "MapReduce Processing at Scale"
+        assert parsed["lang"] == "en"
         assert len(parsed["authors"]) == 2
         assert parsed["sections"][0]["title"] == "Pages 1-4"   # 每 4 页一伪章节
         assert parsed["sections"][-1]["title"] == "Pages 9-9"
         assert not (job_dir / "output" / "original.md").exists()  # 不产原文 MD(原文=内嵌 PDF)
         assert (job_dir / "intermediate" / "needs_translation.json").exists()
+        assert json.loads(
+            (job_dir / "intermediate" / "needs_translation.json").read_text()
+        )["lang"] == "en"
         source_manifest = json.loads(
             (job_dir / "intermediate/source_segments.json").read_text()
         )

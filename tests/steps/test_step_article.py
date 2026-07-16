@@ -694,7 +694,7 @@ class TestArticleLangDetect:
     """语言检测 + 翻译标记:非中文文章写 needs_translation.json,中文不写。"""
 
     def test_detect_lang(self):
-        assert ParseArticleStep._detect_lang("The quick brown fox jumps over the lazy dog. " * 4) == "non-zh"
+        assert ParseArticleStep._detect_lang("The quick brown fox jumps over the lazy dog. " * 4) == "en"
         assert ParseArticleStep._detect_lang("这是一篇讲人工智能发展与应用的中文文章。" * 3) == "zh"
         assert ParseArticleStep._detect_lang("") == "unknown"
         # 中文夹少量英文术语仍判 zh
@@ -712,7 +712,7 @@ class TestArticleLangDetect:
         config = make_step_config(tmp_path, step_name="02_parse_article", pool="cpu")
         step = ParseArticleStep("02_parse_article", job_dir, config)
         result = step.execute()
-        assert result["lang"] == "non-zh"
+        assert result["lang"] == "en"
         assert (job_dir / "intermediate" / "needs_translation.json").exists()
 
     def test_chinese_article_no_marker(self, tmp_path):

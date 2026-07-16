@@ -2635,6 +2635,22 @@
             ],
             "title": "Title"
           },
+          "update_available": {
+            "default": false,
+            "title": "Update Available",
+            "type": "boolean"
+          },
+          "update_from_step": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Update From Step"
+          },
           "updated_at": {
             "anyOf": [
               {

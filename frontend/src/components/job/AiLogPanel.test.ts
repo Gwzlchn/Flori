@@ -38,17 +38,36 @@ async function mountPanel(step = '11_smart') {
 }
 
 describe('AiLogPanel', () => {
-  it('打 ai-logs 端点并渲染调用卡(provider/用量/成本/prompt)', async () => {
+  it('先渲染折叠的调用概览,逐次展开后审计字段仍默认折叠', async () => {
     mockLogs([callFixture()])
     const w = await mountPanel()
     expect(get).toHaveBeenCalledWith(expect.stringContaining('/api/jobs/j1/ai-logs?step=11_smart'))
+    expect(w.text()).toContain('1 次调用概览')
     expect(w.text()).toContain('调用 1/1')
     expect(w.text()).toContain('claude-cli')
-    expect(w.text()).toContain('USER PROMPT')
-    expect(w.text()).toContain('# 智能笔记')
     expect(w.text()).toContain('$0.0430')
     expect(w.text()).toContain('（等价）')
+
+    const call = w.find('details.audit-call')
+    expect(call.attributes('open')).toBeUndefined()
+    await call.find('summary.audit-summary').trigger('click')
+    expect((call.element as HTMLDetailsElement).open).toBe(true)
+
+    const fields = call.findAll('details.audit-field')
+    expect(fields).toHaveLength(3)
+    expect(fields.every(field => field.attributes('open') == null)).toBe(true)
+    expect(w.text()).toContain('USER PROMPT')
+    expect(w.text()).toContain('# 智能笔记')
     expect(w.text()).toContain('session sess-1')
+  })
+
+  it('多次调用只显示等高概览行,不默认铺开 prompt', async () => {
+    mockLogs([callFixture(), callFixture({ call_index: 1, cost: { cost_usd: 0.05 } })])
+    const w = await mountPanel()
+
+    expect(w.text()).toContain('2 次调用概览')
+    expect(w.findAll('details.audit-call')).toHaveLength(2)
+    expect(w.findAll('details.audit-call').every(call => call.attributes('open') == null)).toBe(true)
   })
 
   it('空态提示', async () => {

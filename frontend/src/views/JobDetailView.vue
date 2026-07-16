@@ -604,6 +604,7 @@ async function retryJob() {
 }
 async function rerunFromStep() {
   if (!selectedStep.value) return
+  if (!confirm(`从「${selectedStepLabel.value}」重新处理?该步骤及后续产物会在当前任务中重新生成。`)) return
   try {
     await jobStore.rerunJob(jobId.value, selectedStep.value)
     showToast(`从 ${selectedStepLabel.value} 开始重跑`, 'success')
@@ -648,23 +649,15 @@ async function loadPromptVersions() {
   if (jobId.value === fid) aiPromptRows.value = rows
 }
 
-// 「重跑该步」:复用 job 级 rerun(from_step=该步)。scheduler 清该步及下游 .done 后重跑,应用新激活 prompt。
-async function rerunStep(step: string) {
-  try {
-    await jobStore.rerunJob(jobId.value, step)
-    showToast('已发起重跑该步(及其下游)', 'success')
-    jobStatus.value = 'processing'
-  } catch (e: any) { showToast(e?.message || '重跑失败', 'error') }
-}
-// 重建为新版本快照:fork 当前 job,只重跑定义已变的步骤及下游,旧版本保留对比。
+// 流程更新通过新快照完成:只重跑变化步骤及下游,旧版本保留对比.
 const rebuilding = ref(false)
 async function rebuildJob() {
   if (rebuilding.value) return
-  if (!confirm('重建为新版本?将基于当前 pipeline/prompt 建一个新版本(只重跑变化的步骤及下游,旧版本保留可对比)。')) return
+  if (!confirm('更新到最新流程?系统会创建新版本,只运行变化步骤及后续;当前版本仍会保留。')) return
   rebuilding.value = true
   try {
     const { job_id } = await jobStore.rebuildJob(jobId.value)
-    showToast('已重建为新版本', 'success')
+    showToast('已创建最新流程版本', 'success')
     router.push(`/content/${encodeURIComponent(job_id)}`)
   } catch (e: any) {
     showToast(e?.message || '重建失败', 'error')
@@ -745,6 +738,7 @@ watch(job, (j) => {
           :has-readable-original="hasReadableOriginal" :has-paper-pdf="hasPaperPdf" :note-variant="noteVariant" :versions="versions" :active-file="activeFile"
           :rerunning="rerunning" :show-rerun="showRerun" :providers="providers" :note-loading="noteLoading" :note-error="noteError"
           :is-paper="isPaper" :paper-pdf-url="paperPdfUrl" :note-content="noteContent"
+          :original-language="job.media?.lang"
           :terms="terms" :evidence-ids="eligibleEvidenceIds" :canonical-evidence="canonicalEvidence" :headings="headings"
           :version-label="verLabel" @switch-variant="switchVariant" @select-version="selectVersion"
           @toggle-rerun="showRerun = !showRerun" @rerun="rerunWith" @headings="headings = $event"
@@ -767,7 +761,7 @@ watch(job, (j) => {
 
       <!-- 图表(论文按图注渲染的页面区域,含矢量图) -->
       <div v-show="tab === 'figures'">
-        <p class="lead" style="margin:-6px 0 12px"><ImageIcon :size="13" /> 从 PDF 按图注渲染的图表({{ figuresWithImage.length }} 张,含矢量图)。</p>
+        <p class="lead figures-lead"><ImageIcon :size="13" /><span>从 PDF 按图注渲染的图表({{ figuresWithImage.length }} 张,含矢量图)。</span></p>
         <figure v-for="f in figuresWithImage" :key="f.id" class="fig-card">
           <img :src="figureUrl(f.filename!)" :alt="f.caption" loading="lazy" />
           <figcaption><b>{{ f.id }}</b><span v-if="f.caption"> · {{ f.caption }}</span></figcaption>
@@ -783,10 +777,10 @@ watch(job, (j) => {
       <!-- 流水线 -->
       <div v-show="tab === 'proc'">
         <JobPipelinePanel :job-id="jobId" :steps="steps" :dag-steps="jobDagSteps"
-          :status-by-key="stepStatusByKey" :selected-step="selectedStep" :selected-step-label="selectedStepLabel"
+          :status-by-key="stepStatusByKey" :selected-step="selectedStep"
           :usage-by-step="usageByStep" :total-ai="totalAi" :job-status="jobStatus" :rebuilding="rebuilding"
-          :prompt-rows="aiPromptRows" @select-step="selectedStep = $event" @retry="retryJob"
-          @rerun="rerunFromStep" @rebuild="rebuildJob" @rerun-prompt="rerunStep" />
+          :update-available="Boolean(job.update_available)" :prompt-rows="aiPromptRows"
+          @select-step="selectedStep = $event" @retry="retryJob" @rerun="rerunFromStep" @rebuild="rebuildJob" />
       </div>
 
       <!-- 元信息 -->
@@ -819,6 +813,11 @@ watch(job, (j) => {
 </template>
 
 <style scoped>
+.figures-lead {
+  margin: -6px 0 12px; display: flex; align-items: center; gap: 5px;
+  white-space: nowrap;
+}
+.figures-lead svg { flex: none; }
 .fig-card { margin: 0 0 22px; }
 .fig-card img {
   max-width: 100%; display: block; border: 1px solid var(--line-soft);

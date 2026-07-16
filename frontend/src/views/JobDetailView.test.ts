@@ -199,6 +199,25 @@ describe('JobDetailView tab 默认与切换', () => {
     expect(t).toContain('删除内容')   // 元信息 tab 底部按钮
     expect(t).toContain('未归集合')   // collection_name 为 null 的回退文案
   })
+
+  it('图表说明把图标和文案保持在同一行', async () => {
+    api.getText.mockImplementation(async (url: string) => {
+      if (url.includes('intermediate%2Ffigures.json')) {
+        return JSON.stringify([{ id: 'fig1', page: 1, caption: '测试图表', filename: 'fig1.png' }])
+      }
+      return ''
+    })
+    const w = mountView()
+    await flushPromises()
+    const figuresBtn = w.find('.tabs').findAll('button').find(b => b.text().includes('图表'))
+    await figuresBtn!.trigger('click')
+    await flushPromises()
+
+    const lead = w.find('.figures-lead')
+    expect(lead.exists()).toBe(true)
+    expect(lead.find(':scope > svg').exists()).toBe(true)
+    expect(lead.find(':scope > span').text()).toContain('从 PDF 按图注渲染的图表(1 张,含矢量图)')
+  })
 })
 
 describe('JobDetailView 概念 tab', () => {
@@ -296,7 +315,7 @@ describe('JobDetailView 笔记 tab', () => {
   })
 
   it('文章无智能笔记也无译文时隐藏变体切换,显示「原文(未生成智能笔记)」', async () => {
-    fetchDetail.mockResolvedValue(makeDetail({ status: 'done', content_type: 'article' }))
+    fetchDetail.mockResolvedValue(makeDetail({ status: 'done', content_type: 'article', media: { lang: 'en' } }))
     api.get.mockResolvedValue([])         // note-versions 空 → 无智能笔记
     // 只有 original.md 有内容;translated.md 无(否则译文变体合理出现,seg 不该隐藏)
     api.getText.mockImplementation(async (url: string) =>
@@ -310,7 +329,7 @@ describe('JobDetailView 笔记 tab', () => {
   })
 
   it('有译文时笔记内出现「译文」变体并可切换(不再是顶层 tab)', async () => {
-    fetchDetail.mockResolvedValue(makeDetail({ status: 'done', content_type: 'article' }))
+    fetchDetail.mockResolvedValue(makeDetail({ status: 'done', content_type: 'article', media: { lang: 'en' } }))
     api.get.mockResolvedValue([])
     api.getText.mockImplementation(async (url: string) =>
       url.includes('translated.md') ? '# 译文内容' : '# 原文内容')
@@ -324,6 +343,7 @@ describe('JobDetailView 笔记 tab', () => {
     const btn = seg.findAll('button').find(b => b.text() === '译文')
     await btn!.trigger('click')
     await flushPromises()
+    expect(w.text()).toContain('原文为英语,以下为 AI 忠实全文译文')
     expect(w.find('markdown-viewer-stub').attributes('content')).toContain('译文内容')
     // 切回原文,切换器仍在(不消失)
     const back = seg.findAll('button').find(b => b.text() === '原文')
@@ -506,7 +526,7 @@ describe('JobDetailView 流水线 tab 操作', () => {
     // jobStatus 由 fetchDetail 写入 ws ref;保险起见对齐(读它决定按钮可见)
     wsJobStatus.value = 'failed'
     await flushPromises()
-    const retry = w.findAll('button').find(b => b.text().trim() === '重试')
+    const retry = w.findAll('button').find(b => b.text().trim() === '从失败处继续')
     expect(retry).toBeTruthy()
     await retry!.trigger('click')
     await flushPromises()

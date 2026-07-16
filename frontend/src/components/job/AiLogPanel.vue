@@ -3,7 +3,7 @@ import { ref, watch, onMounted } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { fmtDuration } from '../../utils/datetime'
 import type { AiLogCall, AiLogsResponse } from '../../types'
-import { Check, X, Copy } from 'lucide-vue-next'
+import { Check, X, Copy, ChevronRight } from 'lucide-vue-next'
 
 // 只读:展示该 job 某 AI 步当时的完整 AI 审计日志(每次 LLM 调用一条)。改 prompt 去设置页。
 const props = defineProps<{ jobId: string; step: string }>()
@@ -41,87 +41,108 @@ function pretty(v: any): string { try { return JSON.stringify(v, null, 2) } catc
     <div v-else-if="!calls.length" class="text-xs text-gray-400">
       该步骤暂无 AI 日志(此 job 跑该步时尚未启用审计记录)
     </div>
-    <div v-else class="space-y-2">
-      <div
-        v-for="(c, i) in calls" :key="i" class="border rounded-lg p-2.5"
-        :class="c.ok === false ? 'border-red-200 bg-red-50/40' : 'border-gray-200 bg-gray-50/40'"
-      >
-        <!-- 头:调用序 + 状态 + provider/model/tier + 成本 -->
-        <div class="flex items-center gap-2 flex-wrap text-xs mb-1.5">
-          <span class="font-semibold text-gray-700">调用 {{ (c.call_index ?? i) + 1 }}/{{ calls.length }}</span>
-          <component :is="c.ok === false ? X : Check" :size="13"
-                     :class="c.ok === false ? 'text-red-500' : 'text-green-500'" />
-          <span class="font-mono text-gray-800">{{ c.routing?.provider || '—' }}</span>
-          <span class="text-gray-500">{{ c.routing?.model }}</span>
-          <span v-if="c.routing?.tier_used" class="px-1 rounded bg-gray-200 text-gray-600">{{ c.routing.tier_used }}</span>
-          <span class="ml-auto text-gray-800 font-medium">
-            {{ fmtCost(c.cost?.cost_usd) }}<span v-if="c.cost?.basis === 'cli-equiv'" class="text-gray-400">（等价）</span>
-          </span>
-        </div>
-        <!-- 用量 + 延迟 -->
-        <div class="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-gray-500 mb-1.5">
-          <span>入 {{ num(c.usage?.input_tokens) }}</span>
-          <span>出 {{ num(c.usage?.output_tokens) }}</span>
-          <span>读缓存 {{ num(c.usage?.cache_read_input_tokens) }}</span>
-          <span>写缓存 {{ num(c.usage?.cache_creation_input_tokens) }}</span>
-          <span v-if="c.output?.num_turns">轮数 {{ c.output.num_turns }}</span>
-          <span v-if="c.latency?.ttft_ms != null">ttft {{ Math.round(c.latency.ttft_ms) }}ms</span>
-          <span v-if="c.latency?.api_ms != null">api {{ Math.round(c.latency.api_ms) }}ms</span>
-          <span v-if="c.latency?.duration_total_sec != null">耗时 {{ fmtDuration(c.latency.duration_total_sec, { decimalSeconds: true }) }}</span>
-          <span v-if="c.call_meta?.images_count">帧图 {{ c.call_meta.images_count }}</span>
-        </div>
-        <!-- 尝试链(降级/失败时有看头) -->
-        <div v-if="(c.routing?.attempts?.length || 0) > 1 || c.ok === false" class="text-xs text-gray-500 mb-1.5">
-          尝试链:
-          <span v-for="(a, ai) in c.routing?.attempts || []" :key="ai">
-            <span :class="a.ok ? 'text-green-600' : 'text-red-600'">{{ a.tier }}/{{ a.provider }} {{ a.ok ? '✓' : '✗' }}</span>
-            <span v-if="ai < (c.routing?.attempts?.length || 0) - 1"> · </span>
-          </span>
-        </div>
-        <!-- 失败错误 -->
-        <p v-if="c.ok === false && c.error" class="text-xs text-red-600 bg-red-50 rounded p-1.5 mb-1.5 break-all">✗ {{ c.error }}</p>
+    <div v-else>
+      <div class="mb-2 text-xs text-gray-400">{{ calls.length }} 次调用概览,逐条展开查看 prompt / 输出 / 尝试链 / raw</div>
+      <div class="space-y-2">
+        <details
+          v-for="(c, i) in calls" :key="i" class="audit-call border rounded-lg overflow-hidden"
+          :class="c.ok === false ? 'border-red-200' : 'border-gray-200'"
+        >
+          <summary class="audit-summary cursor-pointer select-none px-3 py-2.5 hover:bg-gray-50">
+            <div class="flex items-center gap-2 flex-wrap text-xs">
+              <ChevronRight :size="13" class="call-caret text-blue-600 transition-transform" />
+              <span class="font-semibold text-gray-700">调用 {{ (c.call_index ?? i) + 1 }}/{{ calls.length }}</span>
+              <component :is="c.ok === false ? X : Check" :size="13"
+                         :class="c.ok === false ? 'text-red-500' : 'text-green-500'" />
+              <span class="font-mono text-gray-800">{{ c.routing?.provider || '—' }}</span>
+              <span class="text-gray-500">{{ c.routing?.model }}</span>
+              <span v-if="c.routing?.tier_used" class="px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">{{ c.routing.tier_used }}</span>
+              <span class="ml-auto text-gray-800 font-medium">
+                {{ fmtCost(c.cost?.cost_usd) }}<span v-if="c.cost?.basis === 'cli-equiv'" class="text-gray-400">（等价）</span>
+              </span>
+            </div>
+            <div class="mt-1 pl-5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-gray-500">
+              <span>入 {{ num(c.usage?.input_tokens) }}</span>
+              <span>出 {{ num(c.usage?.output_tokens) }}</span>
+              <span>读缓存 {{ num(c.usage?.cache_read_input_tokens) }}</span>
+              <span>写缓存 {{ num(c.usage?.cache_creation_input_tokens) }}</span>
+              <span v-if="c.output?.num_turns">轮数 {{ c.output.num_turns }}</span>
+              <span v-if="c.latency?.duration_total_sec != null">耗时 {{ fmtDuration(c.latency.duration_total_sec, { decimalSeconds: true }) }}</span>
+              <span v-if="c.call_meta?.images_count">帧图 {{ c.call_meta.images_count }}</span>
+            </div>
+          </summary>
 
-        <!-- 折叠字段:System / User(渲染后) / 输出 / 解析 / raw -->
-        <details class="mb-1">
-          <summary class="text-xs text-gray-600 cursor-pointer select-none flex items-center gap-1.5">
-            System
-            <button @click.prevent.stop="copy(c.prompt?.rendered?.system)" class="text-blue-500 hover:text-blue-700"><Copy :size="11" /></button>
-            <span class="text-gray-400">{{ c.prompt?.template?.source === 'override' ? '(覆盖)' : '(默认:无)' }}</span>
-          </summary>
-          <pre class="text-xs mt-1 bg-white border border-gray-100 rounded p-2 whitespace-pre-wrap break-all max-h-72 overflow-auto">{{ c.prompt?.rendered?.system || '(无)' }}</pre>
-        </details>
-        <details class="mb-1" open>
-          <summary class="text-xs text-gray-600 cursor-pointer select-none flex items-center gap-1.5">
-            User(渲染后实际发出)
-            <button @click.prevent.stop="copy(c.prompt?.rendered?.user)" class="text-blue-500 hover:text-blue-700"><Copy :size="11" /></button>
-          </summary>
-          <pre class="text-xs mt-1 bg-white border border-gray-100 rounded p-2 whitespace-pre-wrap break-all max-h-72 overflow-auto">{{ c.prompt?.rendered?.user }}</pre>
-        </details>
-        <details class="mb-1">
-          <summary class="text-xs text-gray-600 cursor-pointer select-none flex items-center gap-1.5">
-            输出
-            <button @click.prevent.stop="copy(c.output?.content)" class="text-blue-500 hover:text-blue-700"><Copy :size="11" /></button>
-            <span v-if="c.output?.finish_reason" class="text-gray-400">{{ c.output.finish_reason }}</span>
-          </summary>
-          <pre class="text-xs mt-1 bg-white border border-gray-100 rounded p-2 whitespace-pre-wrap break-all max-h-72 overflow-auto">{{ c.output?.content || '(无)' }}</pre>
-        </details>
-        <details v-if="c.output_processed" class="mb-1">
-          <summary class="text-xs text-gray-600 cursor-pointer select-none">解析 / 抽取(output_processed)</summary>
-          <pre class="text-xs mt-1 bg-white border border-gray-100 rounded p-2 whitespace-pre-wrap break-all max-h-72 overflow-auto">{{ pretty(c.output_processed) }}</pre>
-        </details>
-        <details v-if="c.raw" class="mb-1">
-          <summary class="text-xs text-gray-600 cursor-pointer select-none">原始 raw</summary>
-          <pre class="text-xs mt-1 bg-white border border-gray-100 rounded p-2 whitespace-pre-wrap break-all max-h-72 overflow-auto">{{ pretty(c.raw) }}</pre>
-        </details>
+          <div class="audit-body border-t border-gray-100 bg-gray-50/50 px-3 py-3">
+            <div v-if="c.latency?.ttft_ms != null || c.latency?.api_ms != null" class="flex flex-wrap gap-x-3 text-xs text-gray-500 mb-2">
+              <span v-if="c.latency?.ttft_ms != null">ttft {{ Math.round(c.latency.ttft_ms) }}ms</span>
+              <span v-if="c.latency?.api_ms != null">api {{ Math.round(c.latency.api_ms) }}ms</span>
+            </div>
+            <div v-if="(c.routing?.attempts?.length || 0) > 1 || c.ok === false" class="text-xs text-gray-500 mb-2">
+              尝试链:
+              <span v-for="(a, ai) in c.routing?.attempts || []" :key="ai">
+                <span :class="a.ok ? 'text-green-600' : 'text-red-600'">{{ a.tier }}/{{ a.provider }} {{ a.ok ? '✓' : '✗' }}</span>
+                <span v-if="ai < (c.routing?.attempts?.length || 0) - 1"> · </span>
+              </span>
+            </div>
+            <p v-if="c.ok === false && c.error" class="text-xs text-red-600 bg-red-50 rounded p-2 mb-2 break-all">✗ {{ c.error }}</p>
 
-        <!-- 溯源行 -->
-        <div class="text-[11px] text-gray-400 mt-1 flex flex-wrap gap-x-3">
-          <span v-if="c.session_id">session {{ c.session_id }}</span>
-          <span v-if="c.flori?.version">flori {{ c.flori.version }}</span>
-          <span v-if="c.flori?.git_commit">commit {{ String(c.flori.git_commit).slice(0, 8) }}</span>
-          <span v-if="c.env?.worker_id">worker {{ c.env.worker_id }}</span>
-        </div>
+            <div class="space-y-1.5">
+              <details class="audit-field rounded border border-gray-200 bg-white">
+                <summary class="cursor-pointer select-none flex items-center gap-1.5 px-2.5 py-2 text-xs text-gray-600">
+                  <ChevronRight :size="12" class="field-caret text-gray-400 transition-transform" />System
+                  <span class="text-gray-400">{{ c.prompt?.template?.source === 'override' ? '(覆盖)' : '(默认:无)' }}</span>
+                  <button title="复制 System" @click.prevent.stop="copy(c.prompt?.rendered?.system)" class="ml-auto text-blue-500 hover:text-blue-700"><Copy :size="11" /></button>
+                </summary>
+                <pre class="text-xs mx-2.5 mb-2.5 bg-gray-50 border border-gray-100 rounded p-2 whitespace-pre-wrap break-all max-h-72 overflow-auto">{{ c.prompt?.rendered?.system || '(无)' }}</pre>
+              </details>
+              <details class="audit-field rounded border border-gray-200 bg-white">
+                <summary class="cursor-pointer select-none flex items-center gap-1.5 px-2.5 py-2 text-xs text-gray-600">
+                  <ChevronRight :size="12" class="field-caret text-gray-400 transition-transform" />User(渲染后实际发出)
+                  <button title="复制 User" @click.prevent.stop="copy(c.prompt?.rendered?.user)" class="ml-auto text-blue-500 hover:text-blue-700"><Copy :size="11" /></button>
+                </summary>
+                <pre class="text-xs mx-2.5 mb-2.5 bg-gray-50 border border-gray-100 rounded p-2 whitespace-pre-wrap break-all max-h-72 overflow-auto">{{ c.prompt?.rendered?.user }}</pre>
+              </details>
+              <details class="audit-field rounded border border-gray-200 bg-white">
+                <summary class="cursor-pointer select-none flex items-center gap-1.5 px-2.5 py-2 text-xs text-gray-600">
+                  <ChevronRight :size="12" class="field-caret text-gray-400 transition-transform" />输出
+                  <span v-if="c.output?.finish_reason" class="text-gray-400">{{ c.output.finish_reason }}</span>
+                  <button title="复制输出" @click.prevent.stop="copy(c.output?.content)" class="ml-auto text-blue-500 hover:text-blue-700"><Copy :size="11" /></button>
+                </summary>
+                <pre class="text-xs mx-2.5 mb-2.5 bg-gray-50 border border-gray-100 rounded p-2 whitespace-pre-wrap break-all max-h-72 overflow-auto">{{ c.output?.content || '(无)' }}</pre>
+              </details>
+              <details v-if="c.output_processed" class="audit-field rounded border border-gray-200 bg-white">
+                <summary class="cursor-pointer select-none flex items-center gap-1.5 px-2.5 py-2 text-xs text-gray-600">
+                  <ChevronRight :size="12" class="field-caret text-gray-400 transition-transform" />解析 / 抽取(output_processed)
+                </summary>
+                <pre class="text-xs mx-2.5 mb-2.5 bg-gray-50 border border-gray-100 rounded p-2 whitespace-pre-wrap break-all max-h-72 overflow-auto">{{ pretty(c.output_processed) }}</pre>
+              </details>
+              <details v-if="c.raw" class="audit-field rounded border border-gray-200 bg-white">
+                <summary class="cursor-pointer select-none flex items-center gap-1.5 px-2.5 py-2 text-xs text-gray-600">
+                  <ChevronRight :size="12" class="field-caret text-gray-400 transition-transform" />原始 raw
+                </summary>
+                <pre class="text-xs mx-2.5 mb-2.5 bg-gray-50 border border-gray-100 rounded p-2 whitespace-pre-wrap break-all max-h-72 overflow-auto">{{ pretty(c.raw) }}</pre>
+              </details>
+            </div>
+
+            <div class="text-[11px] text-gray-400 mt-2 flex flex-wrap gap-x-3">
+              <span v-if="c.session_id">session {{ c.session_id }}</span>
+              <span v-if="c.flori?.version">flori {{ c.flori.version }}</span>
+              <span v-if="c.flori?.git_commit">commit {{ String(c.flori.git_commit).slice(0, 8) }}</span>
+              <span v-if="c.env?.worker_id">worker {{ c.env.worker_id }}</span>
+            </div>
+          </div>
+        </details>
       </div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.audit-call > summary,
+.audit-field > summary { list-style: none; }
+.audit-call > summary::-webkit-details-marker,
+.audit-field > summary::-webkit-details-marker { display: none; }
+.audit-call[open] > summary .call-caret,
+.audit-field[open] > summary .field-caret { transform: rotate(90deg); }
+.audit-call[open] > .audit-summary { background: var(--surface, #fff); }
+</style>

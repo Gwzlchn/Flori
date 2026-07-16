@@ -44,7 +44,7 @@ function dotCls(s: Step): string {
   if (props.statusByKey) return 'st-' + (props.statusByKey[s.key] || 'waiting')
   return 'pl-' + (s.pool || 'io')
 }
-const fmtCost = (v: number) => `$${(v ?? 0).toFixed(4)}`
+const fmtCost = (v: number) => `$${(v ?? 0).toFixed(2)}`
 // hover 提示依次给步骤、池、AI 步的 provider 开销。节点本体保持窄,详情挪到 tooltip。
 function nodeTitle(s: Step): string {
   let t = `${s.label || s.key} · ${s.pool || 'io'} 池`
@@ -125,7 +125,7 @@ watch(
         <span class="dag-dot" :class="dotCls(s)"></span>
         <span class="dag-text">
           <span class="dag-label">{{ s.label || s.key }}</span>
-          <span v-if="usageByStep && usageByStep[s.key]" class="dag-cost">{{ usageByStep[s.key].equiv ? '≈' : '' }}{{ fmtCost(usageByStep[s.key].cost) }}</span>
+          <span v-if="usageByStep && usageByStep[s.key]" class="dag-cost">{{ fmtCost(usageByStep[s.key].cost) }}</span>
         </span>
       </div>
     </div>

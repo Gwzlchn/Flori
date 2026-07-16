@@ -2,6 +2,7 @@
 import { ChevronDown, ExternalLink, FileText, Languages, List, RefreshCw, Star } from 'lucide-vue-next'
 import MarkdownViewer from '../../notes/MarkdownViewer.vue'
 import type { CanonicalEvidenceProjection } from '../../../types'
+import { languageName } from '../../../utils/language'
 
 type NoteVariant = 'smart' | 'original' | 'translated' | 'pdf'
 interface Version { provider: string; model: string; version: string; file: string; review_file: string | null; overall: number | null; review_state?: string | null }
@@ -27,6 +28,7 @@ defineProps<{
   isPaper: boolean
   paperPdfUrl: string
   noteContent: string
+  originalLanguage?: string | null
   terms: Term[]
   evidenceIds: string[]
   canonicalEvidence: CanonicalEvidenceProjection[]
@@ -82,7 +84,9 @@ defineEmits<{
     <iframe :src="paperPdfUrl" class="pdf-frame" title="论文 PDF 原文" loading="lazy" />
   </div>
   <div v-else class="notes-wrap">
-    <p v-if="noteVariant === 'translated'" class="lead translated"><Languages :size="13" /> 原文为非中文,以下是 AI 忠实全文译文(保留原结构与配图)。</p>
+    <p v-if="noteVariant === 'translated'" class="lead translated">
+      <Languages :size="13" /><span>原文为{{ languageName(originalLanguage) }},以下为 AI 忠实全文译文(保留原结构与配图)。</span>
+    </p>
     <div class="card pad prose max-w-none">
       <MarkdownViewer :content="noteContent" :job-id="jobId" :terms="terms" :domain="domain" :evidence-ids="evidenceIds" :canonical-evidence="canonicalEvidence"
         @headings="$emit('headings', $event)" @pdf-page="$emit('pdfPage', $event)" @evidence-citation="$emit('evidenceCitation', $event)" />
@@ -108,7 +112,8 @@ defineEmits<{
 .pdf-head .lead { display: inline-flex; align-items: center; gap: 5px; margin: 0; }
 .pdf-head a { display: inline-flex; align-items: center; gap: 4px; flex: none; font-size: 12px; }
 .pdf-frame { width: 100%; height: 82vh; border: 1px solid var(--line-soft); border-radius: 10px; background: #f9fafb; }
-.translated { grid-column: 1/-1; margin: -6px 0 0; }
+.translated { grid-column: 1/-1; margin: -6px 0 0; display: flex; align-items: flex-start; gap: 5px; }
+.translated svg { flex: none; margin-top: 2px; }
 @media (max-width: 600px) {
   .pdf-head { align-items: flex-start; }
   .pdf-frame { height: 72vh; }
