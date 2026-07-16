@@ -38,6 +38,17 @@ def test_catalog_exposes_book_without_private_routing_fields():
     assert "slug_strategy" not in book
 
 
+def test_catalog_exposes_youtube_playlist():
+    catalog = source_catalog()
+    playlist = next(
+        item for item in catalog["subscription_sources"]
+        if item["type"] == "youtube_playlist"
+    )
+    assert playlist["label"] == "YouTube 播放列表"
+    assert playlist["group"] == "youtube"
+    assert playlist["home_url_template"] == "https://www.youtube.com/playlist?list={source_id}"
+
+
 @pytest.mark.parametrize(
     ("filename", "content_type"),
     [

@@ -64,6 +64,67 @@ class TestCreateCollection:
         assert body["subscription"]["source_label"] == "book"
 
     @pytest.mark.asyncio
+    async def test_youtube_playlist_is_creatable_and_exposed(self, client):
+        resp = await client.post("/api/collections", json={
+            "name": "CS336",
+            "domain": "deep-learning",
+            "source_type": "youtube_playlist",
+            "source_id": "https://www.youtube.com/playlist?list=PLabc_123-xyz",
+            "sync_now": False,
+        })
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["id"].startswith("col_yt_list_")
+        assert body["subscription"]["source_type"] == "youtube_playlist"
+        assert body["subscription"]["source_label"] == "youtube"
+
+    @pytest.mark.asyncio
+    async def test_youtube_playlist_source_id_is_canonical_and_deduplicated(self, client):
+        first = await client.post("/api/collections", json={
+            "name": "课程",
+            "domain": "deep-learning",
+            "source_type": "youtube_playlist",
+            "source_id": "https://youtu.be/abcdefghijk?list=PLabc_123-xyz",
+            "sync_now": False,
+        })
+        assert first.status_code == 201, first.text
+        canonical = "https://www.youtube.com/playlist?list=PLabc_123-xyz"
+        assert first.json()["subscription"]["source_id"] == canonical
+
+        duplicate = await client.post("/api/collections", json={
+            "name": "重复课程",
+            "domain": "deep-learning",
+            "source_type": "youtube_playlist",
+            "source_id": "PLabc_123-xyz",
+            "sync_now": False,
+        })
+        assert duplicate.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_youtube_playlist_invalid_source_rejected_before_write(self, client, app):
+        resp = await client.post("/api/collections", json={
+            "name": "坏来源",
+            "domain": "deep-learning",
+            "source_type": "youtube_playlist",
+            "source_id": "https://example.com/playlist?list=PLabc_123-xyz",
+            "sync_now": False,
+        })
+        assert resp.status_code == 422
+        assert app.state.db.list_collections() == []
+
+    @pytest.mark.asyncio
+    async def test_youtube_channel_rejects_playlist_url_before_write(self, client, app):
+        resp = await client.post("/api/collections", json={
+            "name": "错分来源",
+            "domain": "deep-learning",
+            "source_type": "youtube_channel",
+            "source_id": "https://www.youtube.com/playlist?list=PL1234567890abcdef",
+            "sync_now": False,
+        })
+        assert resp.status_code == 422
+        assert app.state.db.list_collections() == []
+
+    @pytest.mark.asyncio
     async def test_partial_subscription_source_rejected(self, client):
         resp = await client.post("/api/collections", json={
             "name": "bad", "domain": "learning", "source_type": "rss",

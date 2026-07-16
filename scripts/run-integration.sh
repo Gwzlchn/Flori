@@ -189,14 +189,19 @@ external_env_name() {
     audio) printf '%s' FLORI_EXTERNAL_AUDIO_URL ;;
     rss) printf '%s' FLORI_EXTERNAL_RSS_URL ;;
     youtube) printf '%s' FLORI_EXTERNAL_YOUTUBE_URL ;;
+    youtube_playlist) printf '%s' FLORI_EXTERNAL_YOUTUBE_PLAYLIST_URL ;;
     *) return 1 ;;
   esac
 }
 
 run_external() {
   case "$SCENARIO" in
-    all) scenarios=(article audio rss youtube); selector='test_external_' ;;
-    article|audio|rss|youtube) scenarios=("$SCENARIO"); selector="test_external_${SCENARIO}" ;;
+    all) scenarios=(article audio rss youtube youtube_playlist); selector='test_external_' ;;
+    article) scenarios=(article); selector='test_external_article_download_and_parse' ;;
+    audio) scenarios=(audio); selector='test_external_audio_download_is_playable' ;;
+    rss) scenarios=(rss); selector='test_external_rss_enumerates_real_items' ;;
+    youtube) scenarios=(youtube); selector='test_external_youtube_enumerates_real_channel' ;;
+    youtube_playlist) scenarios=(youtube_playlist); selector='test_external_youtube_playlist_enumerates_real_items' ;;
     *) echo "未知 external 场景: $SCENARIO" >&2; return 2 ;;
   esac
 

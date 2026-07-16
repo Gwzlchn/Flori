@@ -11,7 +11,7 @@ import pytest
 
 from shared.subscriptions.base import SourceContext
 from shared.subscriptions.rss import enumerate_rss
-from shared.subscriptions.youtube import enumerate_youtube_channel
+from shared.subscriptions.youtube import enumerate_youtube_channel, enumerate_youtube_playlist
 from steps.article.step_02_parse_article import MIN_BODY_CHARS, ParseArticleStep
 from steps.common.step_01_download import DownloadStep
 
@@ -83,3 +83,14 @@ async def test_external_youtube_enumerates_real_channel() -> None:
     assert items
     assert all(item.content_type == "video" for item in items)
     assert all(item.url.startswith("https://www.youtube.com/watch?v=") for item in items)
+
+
+async def test_external_youtube_playlist_enumerates_real_items() -> None:
+    url = _public_url("FLORI_EXTERNAL_YOUTUBE_PLAYLIST_URL")
+    title, items = await enumerate_youtube_playlist(url, SourceContext())
+
+    assert title
+    assert items
+    assert len({item.item_id for item in items}) == len(items)
+    assert all(item.content_type == "video" for item in items)
+    assert all(item.url == f"https://www.youtube.com/watch?v={item.item_id}" for item in items)

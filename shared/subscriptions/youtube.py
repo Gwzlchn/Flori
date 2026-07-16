@@ -1,4 +1,4 @@
-"""YouTube 频道 source-adapter。实现 'youtube_channel'(频道/用户全部投稿枚举)。
+"""YouTube source-adapter,支持频道和播放列表逐视频枚举。
 
 用 yt-dlp 子进程 `--flat-playlist --dump-json` 浅枚举频道投稿(不深解析每条,快)。
 source_id 可以是频道页 URL(/@handle、/channel/UC...、/c/...)、youtu.be/频道主页,
@@ -16,6 +16,7 @@ import asyncio
 import json
 import re
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 # yt-dlp 浅枚举每页/每条投稿可能很多,留足超时;频道页投稿数大时 --flat-playlist 仍较快。
 _YT_DLP_TIMEOUT_SEC = 180
@@ -35,8 +36,15 @@ def _normalize_channel_url(source_id: str) -> str:
     if not sid:
         return sid
 
-    # 已是 http(s) URL:确保指向投稿列表(末尾补 /videos,除非已带 tab)。
+    # 已是 http(s) URL:只接受频道形态,避免 playlist/watch 被错建成频道订阅。
     if re.match(r"https?://", sid):
+        parsed = urlparse(sid)
+        if (parsed.hostname or "").lower() not in _YOUTUBE_HOSTS or not re.match(
+            r"^/(?:@[^/]+|channel/[^/]+|c/[^/]+|user/[^/]+)(?:/(?:videos|streams|shorts|playlists|featured|community))?/?$",
+            parsed.path,
+            re.IGNORECASE,
+        ):
+            raise ValueError("invalid YouTube channel source")
         return _ensure_videos_tab(sid)
 
     # 裸频道 id(UC + 22 位)→ /channel/<id>/videos
@@ -46,6 +54,32 @@ def _normalize_channel_url(source_id: str) -> str:
     # 裸 handle(@xxx 或 xxx)→ /@handle/videos
     handle = sid.lstrip("@")
     return f"https://www.youtube.com/@{handle}/videos"
+
+
+_PLAYLIST_ID_RE = re.compile(r"[A-Za-z0-9_-]{12,128}")
+_YOUTUBE_HOSTS = {
+    "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be",
+}
+
+
+def _normalize_playlist_url(source_id: str) -> str:
+    """把 playlist URL 或裸 ID 规整为稳定的 YouTube playlist URL。
+
+    watch/youtu.be 链接只有带 list 参数时才接受。任意外站 URL、缺 list 参数和可疑裸值均拒绝,
+    避免 youtube_playlist 适配器被借作通用 yt-dlp URL 执行入口。
+    """
+    sid = (source_id or "").strip()
+    playlist_id = ""
+    if sid.startswith(("http://", "https://")):
+        parsed = urlparse(sid)
+        if (parsed.hostname or "").lower() not in _YOUTUBE_HOSTS:
+            raise ValueError("invalid YouTube playlist source")
+        playlist_id = (parse_qs(parsed.query).get("list") or [""])[0].strip()
+    elif _PLAYLIST_ID_RE.fullmatch(sid):
+        playlist_id = sid
+    if not _PLAYLIST_ID_RE.fullmatch(playlist_id):
+        raise ValueError("invalid YouTube playlist source")
+    return f"https://www.youtube.com/playlist?list={playlist_id}"
 
 
 _TAB_RE = re.compile(r"/(videos|streams|shorts|playlists|featured|community)/?$", re.I)
@@ -119,7 +153,75 @@ def _watch_url(video_id: str) -> str:
     return f"https://www.youtube.com/watch?v={video_id}"
 
 
-from shared.subscriptions.base import SourceContext, SourceItem, register
+from shared.subscriptions.base import (
+    SourceContext,
+    SourceItem,
+    register,
+    register_source_id_normalizer,
+)
+
+register_source_id_normalizer("youtube_playlist", _normalize_playlist_url)
+
+
+def _validate_channel_source_id(source_id: str) -> str:
+    """建集合前验证频道形态,但保留既有 source_id 表示和 collection ID。"""
+    _normalize_channel_url(source_id)
+    return source_id
+
+
+register_source_id_normalizer("youtube_channel", _validate_channel_source_id)
+
+
+async def _enumerate_youtube_url(
+    source_url: str, ctx: SourceContext,
+) -> tuple[str | None, list[dict]]:
+    """用统一 cookies 与 yt-dlp 参数浅枚举一个 YouTube 聚合 URL。"""
+    args = [
+        "--flat-playlist",
+        "--dump-json",
+        "--ignore-errors",
+        "--no-warnings",
+    ]
+    import tempfile
+    cookies_text = ""
+    if ctx.db is not None:
+        cookies_text = (await asyncio.to_thread(
+            ctx.db.get_credential, "youtube_cookies") or "").strip()
+    cookies_file: str | None = None
+    try:
+        if cookies_text:
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=".txt", delete=False, encoding="utf-8"
+            ) as f:
+                f.write(cookies_text + "\n")
+                cookies_file = f.name
+            args += ["--cookies", cookies_file]
+        args += ["--", source_url]
+        import shared.subscriptions.youtube as _self
+
+        stdout = await asyncio.to_thread(_self._run_yt_dlp, args)
+    finally:
+        if cookies_file:
+            Path(cookies_file).unlink(missing_ok=True)
+    return _parse_entries(stdout)
+
+
+def _source_items(entries: list[dict]) -> list[SourceItem]:
+    """把 yt-dlp 浅条目转为稳定 watch URL,并按 video ID 保序去重。"""
+    items: list[SourceItem] = []
+    seen: set[str] = set()
+    for entry in entries:
+        video_id = entry.get("id")
+        if not video_id or video_id in seen:
+            continue
+        seen.add(video_id)
+        items.append(SourceItem(
+            item_id=video_id,
+            title=(entry.get("title") or "").strip(),
+            url=_watch_url(video_id),
+            content_type="video",
+        ))
+    return items
 
 
 @register("youtube_channel")
@@ -139,55 +241,20 @@ async def enumerate_youtube_channel(
     if not channel_url:
         return None, []
 
-    args = [
-        "--flat-playlist",   # 不深解析每条,只列清单,快
-        "--dump-json",       # 每个 entry 一行 JSON
-        "--ignore-errors",   # 个别条目失败不中断整页枚举
-        "--no-warnings",
-    ]
-    # YouTube cookies(上传入库 credentials 表,Netscape 文本)用于枚举私有/会员/年龄限制
-    # 内容;缺失则匿名枚举。枚举跑在 api 进程(有 db 句柄),经 ctx.db 直读;
-    # yt-dlp --cookies 只认文件:写临时文件传入,用毕即删。
-    import tempfile
-    cookies_text = ""
-    if ctx.db is not None:
-        cookies_text = (await asyncio.to_thread(
-            ctx.db.get_credential, "youtube_cookies") or "").strip()
-    cookies_file: str | None = None
-    try:
-        if cookies_text:
-            with tempfile.NamedTemporaryFile(
-                "w", suffix=".txt", delete=False, encoding="utf-8"
-            ) as f:
-                f.write(cookies_text + "\n")
-                cookies_file = f.name
-            args += ["--cookies", cookies_file]
-        args += [
-            "--",                # 分隔:挡以 "-" 开头的 source_id 被当作 yt-dlp 选项注入
-            channel_url,
-        ]
-        # 经模块属性调用 _run_yt_dlp,使测试的 monkeypatch.setattr(...) 生效。
-        import shared.subscriptions.youtube as _self
+    channel_title, entries = await _enumerate_youtube_url(channel_url, ctx)
+    return channel_title, _source_items(entries)
 
-        stdout = await asyncio.to_thread(_self._run_yt_dlp, args)
-    finally:
-        if cookies_file:
-            Path(cookies_file).unlink(missing_ok=True)
-    channel_title, entries = _parse_entries(stdout)
 
-    items: list[SourceItem] = []
-    seen: set[str] = set()
-    for e in entries:
-        vid = e.get("id")
-        if not vid or vid in seen:
-            continue
-        seen.add(vid)
-        # url 优先用稳定 watch 链接;某些 entry 自带 url 可能是相对/短链,统一规整。
-        url = _watch_url(vid)
-        items.append(SourceItem(
-            item_id=vid,
-            title=(e.get("title") or "").strip(),
-            url=url,
-            content_type="video",
-        ))
-    return channel_title, items
+@register("youtube_playlist")
+async def enumerate_youtube_playlist(
+    source_id: str, ctx: SourceContext,
+) -> tuple[str | None, list[SourceItem]]:
+    """枚举一个 YouTube playlist,每个可识别视频映射为独立 video SourceItem。"""
+    playlist_url = _normalize_playlist_url(source_id)
+    fallback_title, entries = await _enumerate_youtube_url(playlist_url, ctx)
+    playlist_title = next((
+        (entry.get("playlist_title") or entry.get("playlist") or "").strip()
+        for entry in entries
+        if (entry.get("playlist_title") or entry.get("playlist") or "").strip()
+    ), None)
+    return playlist_title or fallback_title, _source_items(entries)

@@ -15,7 +15,7 @@
 | pipeline E2E | 主 CI integration 覆盖 video / paper / article / audio 真实完成事件到 Search / Ask / MCP 命中；`.github/workflows/e2e.yml` 另保留真实 PDF 步骤链手动验收 | 闭环必经；外部素材需显式触发 |
 | 检索质量决策 | 24 个冻结 job 经真实 Scheduler completion 摄入，96 条查询分层评估 Search / MCP / Ask；输出 `retrieval-quality.json` | 是，`decision_evidence_gate` 必须通过 |
 | Canonical evidence | 四类 producer sidecar → Scheduler → DB → Search/Ask/MCP/UI；同 identity/status 与 resolver 恶意边界 | 是，跟随 pipeline integration |
-| 条件外网 / 凭证 | `scripts/test.sh --external <article|audio|rss|youtube|all>` 统一编排公网场景，缺所选 URL 返回非零；B 站、arXiv 与真实 AI 仍按素材、网络和凭证条件执行 | 否，只在条件满足的受控环境执行 |
+| 条件外网 / 凭证 | `scripts/test.sh --external <article|audio|rss|youtube|youtube_playlist|all>` 统一编排公网场景，缺所选 URL 返回非零；B 站、arXiv 与真实 AI 仍按素材、网络和凭证条件执行 | 否，只在条件满足的受控环境执行 |
 | 浏览器与视觉 | `docker-compose.e2e.yml` + `tests/e2e/smoke.py` 做已部署栈路由冒烟；UI 视觉验收另在 3840×2160、1512×982、440×956 三视口检查 | 否，当前为人工 / 发布验收 |
 
 “脚本存在”不等于“每个 PR 已覆盖”。文档记录某项通过时必须同时写明入口、素材、是否 DRY_RUN、

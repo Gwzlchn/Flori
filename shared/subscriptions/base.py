@@ -57,6 +57,7 @@ SourceAdapter = Callable[[str, SourceContext], Awaitable[tuple[Optional[str], li
 
 # source_type -> 适配器函数。@register 在 import 适配器模块时填充。
 SOURCE_ADAPTERS: dict[str, SourceAdapter] = {}
+SOURCE_ID_NORMALIZERS: dict[str, Callable[[str], str]] = {}
 
 # 来源徽标/标签:统一来自 shared.sources 注册表(唯一事实源),不在此重复定义。
 from shared.sources import subscription_badge as source_label  # noqa: E402,F401
@@ -69,6 +70,19 @@ def register(source_type: str) -> Callable[[SourceAdapter], SourceAdapter]:
         SOURCE_ADAPTERS[source_type] = fn
         return fn
     return deco
+
+
+def register_source_id_normalizer(
+    source_type: str, normalizer: Callable[[str], str],
+) -> None:
+    """登记来源 ID 的规范化与输入边界,供创建集合前 fail-closed 校验。"""
+    SOURCE_ID_NORMALIZERS[source_type] = normalizer
+
+
+def normalize_source_id(source_type: str, source_id: str) -> str:
+    """返回来源的持久化规范 ID;未登记类型保持原值。"""
+    normalizer = SOURCE_ID_NORMALIZERS.get(source_type)
+    return normalizer(source_id) if normalizer else source_id
 
 
 async def enumerate_source(

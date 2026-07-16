@@ -896,7 +896,7 @@ worker 启动参数收敛为永不变化的最小集：`GATEWAY_URL` + `WORKER_R
 
 Base: `/api/collections`。集合是内容分组；当 `source_type`+`source_id` 非空时该集合即"订阅集合"，会自动从来源追更新内容。来源由 source-adapter 模式扩展（见 `shared/subscriptions/`）。订阅没有独立实体，全部由集合的字段拼装为 `subscription` 对象返回。
 
-<!-- contract: source_type 全量取值(2026-06-22 起六种适配器全部接线并通过测试) -->
+<!-- contract: source_type 全量取值与 configs/sources.yaml、SOURCE_ADAPTERS 保持一致 -->
 
 `source_type` 取值（全部已实现并注册到 `SOURCE_ADAPTERS`，`enumerate_source` 可分派）：
 
@@ -906,12 +906,16 @@ Base: `/api/collections`。集合是内容分组；当 `source_type`+`source_id`
 | `bilibili_fav` | B 站收藏夹 | media_id（纯数字）或 favlist URL（取其中 `fid`） | `bilibili` | video |
 | `bilibili_collection` | B 站合集/系列 | 合集/列表 URL，或紧凑式 `mid:season:sid` / `mid:series:sid` | `bilibili` | video |
 | `youtube_channel` | YouTube 频道/用户全部投稿 | 频道 URL（`/@handle`、`/channel/UC...`、`/c/...`、`/user/...`）、裸 handle（`@xxx`）或裸频道 id（`UC...`） | `youtube` | video |
+| `youtube_playlist` | YouTube 播放列表 | `playlist?list=...`、带 `list` 参数的 watch/youtu.be URL，或裸 playlist ID | `youtube` | video；每个 video ID 独立入库，保持列表顺序 |
 | `rss` | 通用 RSS/Atom feed（含 RSSHub/公众号桥、博客、arxiv、播客、YouTube 频道 RSS 等） | feed URL | `rss` | 按 entry 判定：arxiv→paper、youtube→video、audio enclosure→audio，否则 article。**audio 条目的 `url` = 音频 enclosure 真链**（非页面 link），下载步据此取音源；`item_id` 仍用 guid/link 作去重键 |
 | `local_dir` | 本地目录（挂进 api+worker 容器的监听目录） | 容器内绝对路径（约定 `/data/inbox`） | `local` | 按 registry 扩展名：pdf→paper、mp4/mkv/webm/flv/mov→video、mp3/m4a/wav/aac/flac→audio、md/txt/html/htm→article（其它扩展名忽略） |
 | `book_toc` | Jupyter Book / Sphinx 等在线书目录 | 目录页 URL | `book` | article；章 job 强制 `smart_note=true`，按目录顺序串行投递 |
 
 - 同一来源种类可通过 registry 的 `group` 收敛为同一**来源标签**：三种 B 站来源都收敛到 `bilibili`。
-- 去重键 `item_id`（记在 `ingested_items` 表，按 `(collection_id, item_id)`）随来源不同：B 站=bvid、youtube=videoId、rss=entry id（缺则 link）、local_dir=`相对路径|大小|mtime秒`（文件被原地修改后 item_id 变化→重新入库）。
+- 去重键 `item_id`（记在 `ingested_items` 表，按 `(collection_id, item_id)`）随来源不同：B 站=bvid、YouTube 频道/playlist=videoId、rss=entry id（缺则 link）、local_dir=`相对路径|大小|mtime秒`（文件被原地修改后 item_id 变化→重新入库）。
+- `youtube_playlist` 在集合落库前把各种输入规整为 `https://www.youtube.com/playlist?list=<id>`，同一列表用 URL、watch 链接或裸 ID 重复创建都会命中同一来源。
+- 订阅去重边界是单个集合。频道集合和 playlist 集合同时包含同一视频时会各建一份 job；playlist 删除或重排也不会删除、重排已入库 job。
+- playlist 按 yt-dlp 返回顺序创建任务，但任务进入现有并行 video pipeline，不承诺按课程顺序完成。需要严格串行时应使用有序课程链，而不是把完成顺序附会为 playlist 契约。
 - `local_dir` 用 `file://` url 投递，01_download 复制源文件进 job（无网络下载）；故订阅创建/同步与 worker 必须在同一容器内能解析该路径（compose 把宿主 `${FLORI_INBOX_DIR}` 挂到 api+worker 的 `/data/inbox`，见 `docs/08-deployment`）。
 
 `CollectionResponse` 公共结构：
@@ -960,6 +964,11 @@ curl -X POST http://localhost:8000/api/collections \
 curl -X POST http://localhost:8000/api/collections \
   -H "Content-Type: application/json" \
   -d '{"name": "某 UP", "domain": "deep-learning", "source_type": "bilibili_up", "source_id": "12345678", "sync_now": true}'
+
+# YouTube 课程播放列表，每节视频建立独立 video job
+curl -X POST http://localhost:8000/api/collections \
+  -H "Content-Type: application/json" \
+  -d '{"name": "CS336", "domain": "deep-learning", "source_type": "youtube_playlist", "source_id": "https://www.youtube.com/playlist?list=PL...", "sync_now": true}'
 ```
 
 请求体字段：`name`、`domain`（必填）、`description`、`tags`（默认 `[]`）、`source_type`/`source_id`（成对给出才算订阅）、`sync_now`（默认 `true`，仅订阅集合有效，建后立即首次同步）。
@@ -971,13 +980,13 @@ curl -X POST http://localhost:8000/api/collections \
 
 <!-- contract: 订阅创建/同步行为 -->
 
-订阅集合约束：`domain` 必须是真实领域，不能为空或 `general`；同一来源全局唯一（已订阅会被拒）。首次同步失败不阻塞集合创建（集合照常建好）。去重按 `(collection_id, item_id)` 记录在 `ingested_items` 表（item_id 含义随来源，见上表），跨来源统一。同步流程统一为 `enumerate_source(source_type, source_id, ctx)` 枚举来源全集 →  按 `ingested_item_ids` 去重 → 新内容自动建 job 归入本集合（适配器只枚举全集、不自去重）。
+订阅集合约束：`domain` 必须是真实领域，不能为空或 `general`；同一来源全局唯一（已订阅会被拒）。首次同步失败不阻塞集合创建（集合照常建好）。去重按 `(collection_id, item_id)` 记录在 `ingested_items` 表（item_id 含义随来源，见上表），在各集合内使用统一机制。同步流程统一为 `enumerate_source(source_type, source_id, ctx)` 枚举来源全集 →  按 `ingested_item_ids` 去重 → 新内容自动建 job 归入本集合（适配器只枚举全集、不自去重）。
 
 Response `201`：`CollectionResponse`。
 
 错误：`400` 手动集合 name 为空 / 订阅集合 domain 为 general / 该来源已订阅；`422`
-`source_type` 与 `source_id` 未成对提供、source_type 不在 registry enum，或 registry 声明的适配器
-未加载。校验均发生在写集合前。
+`source_type` 与 `source_id` 未成对提供、source_type 不在 registry enum、registry 声明的适配器
+未加载，或来源 ID 未通过该适配器的规范化校验(`invalid_source_id`)。校验均发生在写集合前。
 
 #### GET /api/collections — 集合列表
 

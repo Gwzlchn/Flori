@@ -19,8 +19,10 @@ from shared.subscriptions.base import SourceContext, SourceItem
 from shared.subscriptions.youtube import (
     _ensure_videos_tab,
     _normalize_channel_url,
+    _normalize_playlist_url,
     _parse_entries,
     enumerate_youtube_channel,
+    enumerate_youtube_playlist,
 )
 
 
@@ -59,6 +61,43 @@ def test_normalize_channel_url(source_id, expected):
 def test_normalize_channel_url_empty():
     assert _normalize_channel_url("") == ""
     assert _normalize_channel_url("   ") == ""
+
+
+@pytest.mark.parametrize("source_id", [
+    "https://www.youtube.com/playlist?list=PL1234567890abcdef",
+    "https://www.youtube.com/watch?v=abcdefghijk",
+    "https://example.com/@channel",
+])
+def test_normalize_channel_url_rejects_non_channel_url(source_id):
+    with pytest.raises(ValueError, match="invalid YouTube channel"):
+        _normalize_channel_url(source_id)
+
+
+@pytest.mark.parametrize(
+    "source_id, expected",
+    [
+        ("PL1234567890abcdef", "https://www.youtube.com/playlist?list=PL1234567890abcdef"),
+        ("EC1234567890abcdef", "https://www.youtube.com/playlist?list=EC1234567890abcdef"),
+        ("https://www.youtube.com/playlist?list=PLabc_123-xyz",
+         "https://www.youtube.com/playlist?list=PLabc_123-xyz"),
+        ("https://youtube.com/watch?v=abcdefghijk&list=PLabc_123-xyz&index=2",
+         "https://www.youtube.com/playlist?list=PLabc_123-xyz"),
+        ("https://youtu.be/abcdefghijk?list=PLabc_123-xyz",
+         "https://www.youtube.com/playlist?list=PLabc_123-xyz"),
+    ],
+)
+def test_normalize_playlist_url(source_id, expected):
+    assert _normalize_playlist_url(source_id) == expected
+
+
+@pytest.mark.parametrize("source_id", [
+    "", "   ", "https://example.com/playlist?list=PLabc_123-xyz",
+    "https://www.youtube.com/playlist", "not a playlist id", "-dangerous",
+    "abcdefghijk", "PL123456789",
+])
+def test_normalize_playlist_url_rejects_invalid_source(source_id):
+    with pytest.raises(ValueError, match="invalid YouTube playlist"):
+        _normalize_playlist_url(source_id)
 
 
 # 逐行 JSON 解析
@@ -144,6 +183,34 @@ async def test_enumerate_maps_items(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_enumerate_playlist_maps_items_and_title(monkeypatch):
+    captured: dict = {}
+
+    def fake_run(args, timeout=None):
+        captured["args"] = args
+        return _fake_stdout([
+            {"id": "aaa", "title": " 第一课 ", "playlist_title": "CS336 2026"},
+            {"id": "bbb", "title": "第二课", "playlist_title": "CS336 2026"},
+            {"id": "aaa", "title": "重复", "playlist_title": "CS336 2026"},
+            {"title": "不可用条目", "playlist_title": "CS336 2026"},
+        ])
+
+    monkeypatch.setattr("shared.subscriptions.youtube._run_yt_dlp", fake_run)
+    title, items = await enumerate_youtube_playlist(
+        "https://www.youtube.com/watch?v=abcdefghijk&list=PLabc_123-xyz",
+        SourceContext(),
+    )
+
+    assert title == "CS336 2026"
+    assert [item.item_id for item in items] == ["aaa", "bbb"]
+    assert [item.title for item in items] == ["第一课", "第二课"]
+    assert all(item.content_type == "video" for item in items)
+    assert captured["args"][-1] == "https://www.youtube.com/playlist?list=PLabc_123-xyz"
+    assert "--flat-playlist" in captured["args"]
+    assert "--ignore-errors" in captured["args"]
+
+
+@pytest.mark.asyncio
 async def test_enumerate_dedup_and_skip_missing_id(monkeypatch):
     def fake_run(args, timeout=None):
         return _fake_stdout([
@@ -190,6 +257,7 @@ async def test_enumerate_no_channel_name_returns_none(monkeypatch):
 def test_registered_in_table():
     from shared.subscriptions.base import SOURCE_ADAPTERS
     assert SOURCE_ADAPTERS.get("youtube_channel") is enumerate_youtube_channel
+    assert SOURCE_ADAPTERS.get("youtube_playlist") is enumerate_youtube_playlist
 
 
 @pytest.mark.asyncio
@@ -205,6 +273,23 @@ async def test_dispatch_via_enumerate_source(monkeypatch):
     )
     assert title == "频道Q"
     assert [i.item_id for i in items] == ["q"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_youtube_playlist(monkeypatch):
+    from shared.subscriptions.base import enumerate_source
+
+    def fake_run(args, timeout=None):
+        return _fake_stdout([
+            {"id": "q", "title": "T", "playlist_title": "课程列表"},
+        ])
+
+    monkeypatch.setattr("shared.subscriptions.youtube._run_yt_dlp", fake_run)
+    title, items = await enumerate_source(
+        "youtube_playlist", "PLabc_123-xyz", SourceContext(),
+    )
+    assert title == "课程列表"
+    assert [item.item_id for item in items] == ["q"]
 
 
 @pytest.mark.asyncio

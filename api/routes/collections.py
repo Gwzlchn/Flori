@@ -153,15 +153,19 @@ async def create_collection(
         raise HTTPException(422, "source_type and source_id must be provided together")
     is_sub = bool(req.source_type and req.source_id)
     if is_sub:
-        from shared.subscriptions import SOURCE_ADAPTERS
+        from shared.subscriptions import SOURCE_ADAPTERS, normalize_source_id
         if req.source_type not in SOURCE_ADAPTERS:
             raise HTTPException(422, f"unsupported_source_type: {req.source_type}")
+        try:
+            source_id = normalize_source_id(req.source_type, req.source_id)
+        except ValueError as exc:
+            raise HTTPException(422, f"invalid_source_id: {exc}") from exc
         # 订阅集合:domain 必须显式且非 general(否则术语沉错领域);来源全局唯一。
         if not req.domain or req.domain == "general":
             raise HTTPException(400, "订阅集合必须选择真实领域(不能为 general)")
-        if await asyncio.to_thread(db.find_collection_by_source, req.source_type, req.source_id):
+        if await asyncio.to_thread(db.find_collection_by_source, req.source_type, source_id):
             raise HTTPException(400, "该来源已订阅")
-        cid = collection_id_for_subscription(req.source_type, req.source_id)
+        cid = collection_id_for_subscription(req.source_type, source_id)
     else:
         # 手动集合必须有名(订阅集合可留空,首次同步自动命名)。
         if not (req.name or "").strip():
@@ -172,13 +176,13 @@ async def create_collection(
     # source_title 后由 sync_collection 回填,占位判定见 _is_placeholder_name。
     name = (req.name or "").strip()
     if is_sub and not name:
-        name = req.source_id
+        name = source_id
 
     collection = Collection(
         id=cid, name=name, domain=req.domain,
         description=req.description or "", tags=req.tags,
         source_type=req.source_type if is_sub else None,
-        source_id=req.source_id if is_sub else None,
+        source_id=source_id if is_sub else None,
     )
     await asyncio.to_thread(db.create_collection, collection)
 

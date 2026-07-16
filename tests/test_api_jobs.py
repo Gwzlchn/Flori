@@ -171,6 +171,7 @@ class TestCreateJob:
             "video", "paper", "article", "audio",
         }
         assert "book_toc" in schemas["SubscriptionSourceType"]["enum"]
+        assert "youtube_playlist" in schemas["SubscriptionSourceType"]["enum"]
 
     @pytest.mark.asyncio
     async def test_unsupported_upload_extension_rejected(self, client, mock_redis):

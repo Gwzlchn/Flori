@@ -19,7 +19,9 @@ from .base import (  # noqa: F401  (re-export 公共接口)
     SourceContext,
     SourceItem,
     enumerate_source,
+    normalize_source_id,
     register,
+    register_source_id_normalizer,
     source_label,
 )
 

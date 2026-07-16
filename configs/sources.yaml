@@ -106,6 +106,16 @@ subscription_sources:
     placeholder: "https://www.youtube.com/@handle 或 /channel/UC..."
     hint: "频道主页链接(@handle、/channel/UC...、/c/...),追更频道全部上传。"
     home_url_template: "{source_id}"
+  youtube_playlist:
+    label: "YouTube 播放列表"
+    group: "youtube"
+    icon: "list-video"
+    collection_prefix: "yt_list"
+    slug_strategy: "hash"
+    id_label: "播放列表链接 / ID"
+    placeholder: "https://www.youtube.com/playlist?list=PL..."
+    hint: "导入并追更一个 YouTube 播放列表,每个视频作为独立任务入库。"
+    home_url_template: "https://www.youtube.com/playlist?list={source_id}"
   rss:
     label: "RSS / Atom(含公众号)"
     group: "rss"

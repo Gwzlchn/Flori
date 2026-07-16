@@ -11,7 +11,7 @@
 #   scripts/test.sh --all                          # 全量 + 覆盖率门 75%(对齐 CI)
 #   scripts/test.sh --fe [vitest 参数…]            # 前端 vitest
 #   scripts/test.sh --integration [pytest 参数…]   # 真 Redis/SQLite 多进程/real-docker
-#   scripts/test.sh --external <场景|all>          # 显式公网 article/audio/rss/youtube
+#   scripts/test.sh --external <场景|all>          # 显式公网 article/audio/rss/youtube/youtube_playlist
 #   scripts/test.sh --wire                         # selected OpenAPI/TS 生成漂移门
 #   scripts/test.sh -- <裸 pytest 参数…>           # 透传任意 pytest 参数(高级)
 #   scripts/test.sh --rebuild                      # 改了 pyproject [test] 依赖后重建测试镜像

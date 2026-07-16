@@ -21,6 +21,11 @@ beforeEach(() => {
         id_label: '目录页 URL', placeholder: 'https://book.example.com/index.html',
         hint: '按目录顺序串行入库各章节。', home_url_template: '{source_id}',
       },
+      {
+        type: 'youtube_playlist', label: 'YouTube 播放列表', group: 'youtube', icon: 'list-video',
+        id_label: '播放列表链接 / ID', placeholder: 'https://www.youtube.com/playlist?list=PL...',
+        hint: '逐视频入库。', home_url_template: 'https://www.youtube.com/playlist?list={source_id}',
+      },
     ],
   })
 })
@@ -47,6 +52,7 @@ describe('AddSubscriptionDialog', () => {
     const t = w.text()
     for (const s of SOURCE_TYPES) expect(t).toContain(s.label)
     expect(t).toContain('在线书目录')
+    expect(t).toContain('YouTube 播放列表')
   })
 
   it('defaultDomain prop 预填知识库输入框', () => {
@@ -151,5 +157,19 @@ describe('AddSubscriptionDialog', () => {
     expect(payload.source_id).toBe('247209804')
     expect(payload.sync_now).toBe(true)
     expect(payload.name).toBeUndefined()
+  })
+
+  it('playlist 来源按动态目录提交原始 URL,由后端统一规范化', async () => {
+    const w = mount(AddSubscriptionDialog, { props: { defaultDomain: 'deep-learning' } })
+    const playlistIndex = SOURCE_TYPES.findIndex((source) => source.type === 'youtube_playlist')
+    await w.findAll('.src-opt')[playlistIndex + 1].trigger('click')
+    const url = 'https://youtu.be/abcdefghijk?list=PLabc_123-xyz'
+    await w.find(`input[placeholder="${SOURCE_TYPES[playlistIndex].placeholder}"]`).setValue(url)
+    await w.find('.btn.pri').trigger('click')
+
+    const payload = w.emitted('create')![0][0] as Record<string, unknown>
+    expect(payload.source_type).toBe('youtube_playlist')
+    expect(payload.source_id).toBe(url)
+    expect(payload.sync_now).toBe(true)
   })
 })
