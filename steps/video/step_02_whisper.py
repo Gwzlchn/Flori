@@ -2,7 +2,40 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from shared.step_base import StepBase, file_hash
+
+
+def _model_source(model_size: str) -> str:
+    local_path = os.environ.get("WHISPER_MODEL_PATH")
+    local_name = os.environ.get("WHISPER_MODEL_NAME")
+    if not local_path:
+        if local_name:
+            raise RuntimeError("WHISPER_MODEL_NAME requires WHISPER_MODEL_PATH")
+        return model_size
+    if local_name != model_size:
+        raise RuntimeError("WHISPER_MODEL_NAME must match the selected model")
+
+    path = Path(local_path)
+    if not path.is_absolute() or not path.is_dir():
+        raise RuntimeError("WHISPER_MODEL_PATH must be an existing absolute directory")
+    required = {"config.json", "model.bin", "tokenizer.json"}
+    missing = sorted(name for name in required if not (path / name).is_file())
+    if missing:
+        raise RuntimeError(f"WHISPER_MODEL_PATH misses required files: {', '.join(missing)}")
+    if not any(path.glob("vocabulary.*")):
+        raise RuntimeError("WHISPER_MODEL_PATH misses vocabulary")
+    return str(path)
+
+
+def _model_options(model_size: str, compute_type: str) -> tuple[str, dict[str, str | None]]:
+    source = _model_source(model_size)
+    options: dict[str, str | None] = {"compute_type": compute_type}
+    if not os.environ.get("WHISPER_MODEL_PATH"):
+        options["download_root"] = os.environ.get("MODEL_CACHE_DIR") or None
+    return source, options
 
 
 class WhisperStep(StepBase):
@@ -21,17 +54,18 @@ class WhisperStep(StepBase):
 
         video_path = self.job_dir / "input" / "source.mp4"
         model_size, compute_type = select_whisper_model()
-        self.log.info("whisper_config", model=model_size, compute_type=compute_type)
-
-        import os
+        model_source, model_options = _model_options(model_size, compute_type)
+        self.log.info(
+            "whisper_config",
+            model=model_size,
+            compute_type=compute_type,
+            local_model=bool(os.environ.get("WHISPER_MODEL_PATH")),
+        )
 
         from faster_whisper import WhisperModel
         # 模型缓存目录显式可配:设 MODEL_CACHE_DIR 即把权重缓存到该目录,不设则用库默认 HF 缓存。
         # 这是无状态部署唯一该挂的卷,可挂 warm 卷跨重启复用。
-        model = WhisperModel(
-            model_size, compute_type=compute_type,
-            download_root=os.environ.get("MODEL_CACHE_DIR") or None,
-        )
+        model = WhisperModel(model_source, **model_options)
 
         # 不写死语种:faster-whisper 自动检测。本步仅在无原生 srt 时跑,外文无字幕内容若强制
         # language="zh" 会被按中文声学模型解码出乱码,且 info.language 恒为 zh 丢失真实语种(下游 08 据此判翻译)。

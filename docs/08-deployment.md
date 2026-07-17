@@ -268,7 +268,10 @@ docker run -d --restart unless-stopped \
 - `io`(下载)：**零凭证预置**——B站/YouTube cookies 由中心在认领下载步时经 runner API
   下发(docs/03 §1.7.1),在管理页扫码/上传一次即全部 worker 生效。
 - GPU 加速 Whisper：`--gpus all` + `--pools gpu cpu`；发布的 worker 镜像已包含 `[gpu]` extra；
-  可选模型 warm 缓存(免每次重下)`-v whisper-cache:/cache -e MODEL_CACHE_DIR=/cache`。
+  可选模型 warm 缓存(免每次重下)`-v whisper-cache:/cache -e MODEL_CACHE_DIR=/cache`。完全离线运行时先校验
+  snapshot,再用 `WHISPER_MODEL_NAME=base` 和
+  `WHISPER_MODEL_PATH=/cache/models--<owner>--<repo>/snapshots/<commit>` 绑定逻辑模型与绝对目录；
+  两者必须匹配当前设备选择的模型,worker 才会直接加载该目录并跳过 Hugging Face Hub 元数据查询。
 
 一条命令接入，纯出站 HTTPS；删除 worker 即吊销其 token。除 GPU 模型缓存(可选)外,worker 本地无任何状态。
 (可选只读文件)外，worker 不需任何持久化卷。
