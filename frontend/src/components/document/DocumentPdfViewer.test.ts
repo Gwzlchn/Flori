@@ -4,12 +4,13 @@ import DocumentPdfViewer from './DocumentPdfViewer.vue'
 
 const mocks = vi.hoisted(() => {
   const destroy = vi.fn()
-  const render = vi.fn(() => ({ promise: Promise.resolve() }))
-  const getTextContent = vi.fn(async () => ({ items: [{ str: 'Selectable PDF text' }], styles: {} }))
+  const renderCancel = vi.fn()
+  const render = vi.fn(() => ({ promise: Promise.resolve(), cancel: renderCancel }))
+  const getTextContent = vi.fn(async (page: number) => ({ items: [{ str: `Selectable PDF text ${page}` }], styles: {} }))
   const getPage = vi.fn(async (page: number) => ({
     getViewport: ({ scale }: { scale: number }) => ({ width: 960, height: 1280, scale }),
-    getTextContent,
-    render,
+    getTextContent: () => getTextContent(page),
+    render: () => render(page),
     page,
   }))
   const getDocument = vi.fn(() => ({
@@ -26,7 +27,7 @@ const mocks = vi.hoisted(() => {
   const TextLayer = vi.fn(function (this: object, options: object) {
     return { ...options, render: textLayerRender, cancel: textLayerCancel }
   })
-  return { destroy, render, getTextContent, getPage, getDocument, TextLayer, textLayerRender, textLayerCancel }
+  return { destroy, render, renderCancel, getTextContent, getPage, getDocument, TextLayer, textLayerRender, textLayerCancel }
 })
 
 vi.mock('pdfjs-dist', () => ({
@@ -36,15 +37,49 @@ vi.mock('pdfjs-dist', () => ({
 }))
 vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '/pdf.worker.mjs' }))
 
+interface ObserverRecord {
+  callback: IntersectionObserverCallback
+  targets: Set<Element>
+}
+
+let observers: ObserverRecord[] = []
+
+function intersect(page: number, isIntersecting: boolean): void {
+  const record = observers.find(observer => [...observer.targets].some(
+    target => target.getAttribute('data-page-number') === String(page),
+  ))
+  const target = record && [...record.targets].find(
+    element => element.getAttribute('data-page-number') === String(page),
+  )
+  if (!record || !target) throw new Error(`page ${page} is not observed`)
+  record.callback([{ isIntersecting, target } as IntersectionObserverEntry], {} as IntersectionObserver)
+}
+
 describe('DocumentPdfViewer', () => {
   beforeEach(() => {
+    observers = []
+    vi.stubGlobal('IntersectionObserver', class {
+      readonly record: ObserverRecord
+      constructor(callback: IntersectionObserverCallback) {
+        this.record = { callback, targets: new Set() }
+        observers.push(this.record)
+      }
+      observe = (target: Element) => { this.record.targets.add(target) }
+      unobserve = (target: Element) => { this.record.targets.delete(target) }
+      disconnect = () => { this.record.targets.clear() }
+    })
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({} as CanvasRenderingContext2D)
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: vi.fn(),
+    })
   })
   afterEach(() => {
     vi.restoreAllMocks()
     mocks.getDocument.mockClear()
     mocks.getPage.mockClear()
     mocks.render.mockClear()
+    mocks.renderCancel.mockClear()
     mocks.destroy.mockClear()
     mocks.getTextContent.mockClear()
     mocks.TextLayer.mockClear()
@@ -52,7 +87,7 @@ describe('DocumentPdfViewer', () => {
     mocks.textLayerCancel.mockClear()
   })
 
-  it('用 PDF.js 渲染指定页并按 bbox 叠加证据高亮', async () => {
+  it('建立连续页流并优先渲染证据页的文字和 bbox', async () => {
     const wrapper = mount(DocumentPdfViewer, {
       props: {
         url: '/api/jobs/j/media?path=input%2Fsource.pdf',
@@ -63,27 +98,35 @@ describe('DocumentPdfViewer', () => {
     await vi.waitFor(() => expect(mocks.getPage).toHaveBeenCalledWith(2))
 
     expect(mocks.getDocument).toHaveBeenCalledWith(expect.objectContaining({ withCredentials: true }))
-    expect(mocks.getTextContent).toHaveBeenCalledOnce()
+    expect(wrapper.findAll('.pdfjs-page-shell')).toHaveLength(3)
+    expect(wrapper.find('[aria-label="上一页"]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="下一页"]').exists()).toBe(false)
+    expect(wrapper.findAll('a')).toHaveLength(1)
+    expect(wrapper.get('a').text()).toBe('新窗口打开')
+    expect(mocks.getTextContent).toHaveBeenCalledWith(2)
     expect(mocks.TextLayer).toHaveBeenCalledWith(expect.objectContaining({
       container: expect.any(HTMLElement),
       viewport: expect.objectContaining({ width: 960, height: 1280, scale: 1.6 }),
     }))
-    expect(wrapper.get('.textLayer').text()).toBe('Selectable PDF text')
+    expect(wrapper.get('[data-page-number="2"] .textLayer').text()).toBe('Selectable PDF text 2')
     expect(wrapper.text()).toContain('第 2 / 3 页')
-    const highlight = wrapper.get('.pdfjs-highlight')
+    const highlight = wrapper.get('[data-page-number="2"] .pdfjs-highlight')
     expect(highlight.attributes('style')).toContain('left: 16%')
     expect(highlight.attributes('style')).toContain('top: 16%')
     wrapper.unmount()
   })
 
-  it('支持上一页和下一页且不会越界', async () => {
+  it('滚到相邻页时懒渲染并释放离开预取窗口的旧页', async () => {
     const wrapper = mount(DocumentPdfViewer, { props: { url: '/document.pdf', page: 1 } })
-    await vi.waitFor(() => expect(mocks.getPage).toHaveBeenCalledWith(1))
-    expect(wrapper.get('[aria-label="上一页"]').attributes('disabled')).toBeDefined()
-    await wrapper.get('[aria-label="下一页"]').trigger('click')
-    await vi.waitFor(() => expect(mocks.getPage).toHaveBeenCalledWith(2))
-    expect(wrapper.text()).toContain('第 2 / 3 页')
+    await vi.waitFor(() => expect(wrapper.get('[data-page-number="1"] .textLayer').text()).toBe('Selectable PDF text 1'))
+
+    intersect(2, true)
+    await vi.waitFor(() => expect(wrapper.get('[data-page-number="2"] .textLayer').text()).toBe('Selectable PDF text 2'))
+    await wrapper.setProps({ page: 2 })
+    intersect(1, false)
+    await vi.waitFor(() => expect(wrapper.get('[data-page-number="1"] .textLayer').text()).toBe(''))
     expect(mocks.textLayerCancel).toHaveBeenCalled()
+    expect(mocks.renderCancel).toHaveBeenCalled()
     wrapper.unmount()
   })
 

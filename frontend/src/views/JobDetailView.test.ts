@@ -603,8 +603,8 @@ describe('JobDetailView Document 原文阅读面', () => {
     expect(viewer.props('url')).toContain('/media?')
     expect(viewer.props('url')).toContain('input%2Fsource.pdf')
     expect(w.find('.notes-wrap').exists()).toBe(false)
-    expect(w.text()).toContain('PDF 保留论文原始公式、图表和版式')
-    expect(w.find('.pdf-head a').attributes('target')).toBe('_blank')
+    expect(w.text()).not.toContain('PDF 保留论文原始公式、图表和版式')
+    expect(w.find('.pdf-head').exists()).toBe(false)
   })
 
   it('学术 HTML 文档同时保留原文、译文和 PDF 版式原文', async () => {

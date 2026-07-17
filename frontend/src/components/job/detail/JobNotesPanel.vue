@@ -80,10 +80,6 @@ defineEmits<{
   <div v-if="noteLoading" class="card pad"><div class="state"><span class="spinner" />加载笔记…</div></div>
   <div v-else-if="noteError" class="card pad"><div class="state"><FileText class="big" /><div class="t">{{ noteError }}</div></div></div>
   <div v-else-if="noteVariant === 'pdf' && hasDocumentPdf" class="pdf-wrap">
-    <div class="pdf-head">
-      <span class="lead"><FileText :size="13" /> PDF 保留论文原始公式、图表和版式。</span>
-      <a :href="documentPdfUrl" target="_blank" rel="noopener">新窗口打开<ExternalLink :size="13" /></a>
-    </div>
     <DocumentPdfViewer :url="documentPdfUrl" :page="documentPdfPage" :bboxes="documentPdfBboxes" />
   </div>
   <div v-else-if="isDocument && noteVariant === 'original' && hasSourceHtml" class="document-reader-wrap">
