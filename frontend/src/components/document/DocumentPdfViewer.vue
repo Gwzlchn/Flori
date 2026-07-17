@@ -19,8 +19,17 @@ const currentPage = ref(Math.max(1, props.page || 1))
 const pageCount = ref(0)
 const pageNumbers = ref<number[]>([])
 const defaultViewport = ref({ width: 960, height: 1280, scale: 1.6 })
+const outputScale = ref(1)
 let loadToken = 0
 let scrollFrame = 0
+
+// DPR 3 会把单页像素放大 9 倍;两倍已覆盖常见 Retina,同时限制连续阅读内存.
+const MAX_OUTPUT_SCALE = 2
+
+function syncOutputScale(): void {
+  const deviceScale = typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1
+  outputScale.value = Math.min(MAX_OUTPUT_SCALE, Math.max(1, deviceScale))
+}
 
 const evidencePage = computed(() => Math.min(pageCount.value || 1, Math.max(1, props.page || 1)))
 
@@ -96,10 +105,17 @@ watch(() => props.page, async () => {
   scrollToPage(evidencePage.value, 'smooth')
 })
 
-onMounted(() => { void load() })
+onMounted(() => {
+  syncOutputScale()
+  window.addEventListener('resize', syncOutputScale)
+  window.visualViewport?.addEventListener('resize', syncOutputScale)
+  void load()
+})
 onBeforeUnmount(() => {
   loadToken += 1
   if (scrollFrame) cancelAnimationFrame(scrollFrame)
+  window.removeEventListener('resize', syncOutputScale)
+  window.visualViewport?.removeEventListener('resize', syncOutputScale)
   documentProxy.value?.destroy()
   documentProxy.value = null
 })
@@ -121,6 +137,7 @@ onBeforeUnmount(() => {
           :document-proxy="documentProxy"
           :page-number="pageNumber"
           :default-viewport="defaultViewport"
+          :output-scale="outputScale"
           :priority="pageNumber === evidencePage"
           :bboxes="pageNumber === evidencePage ? (bboxes || []) : []"
         />

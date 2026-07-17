@@ -5,12 +5,12 @@ import DocumentPdfViewer from './DocumentPdfViewer.vue'
 const mocks = vi.hoisted(() => {
   const destroy = vi.fn()
   const renderCancel = vi.fn()
-  const render = vi.fn(() => ({ promise: Promise.resolve(), cancel: renderCancel }))
+  const render = vi.fn((_page: number, _options: unknown) => ({ promise: Promise.resolve(), cancel: renderCancel }))
   const getTextContent = vi.fn(async (page: number) => ({ items: [{ str: `Selectable PDF text ${page}` }], styles: {} }))
   const getPage = vi.fn(async (page: number) => ({
     getViewport: ({ scale }: { scale: number }) => ({ width: 960, height: 1280, scale }),
     getTextContent: () => getTextContent(page),
-    render: () => render(page),
+    render: (options: unknown) => render(page, options),
     page,
   }))
   const getDocument = vi.fn(() => ({
@@ -58,6 +58,7 @@ function intersect(page: number, isIntersecting: boolean): void {
 describe('DocumentPdfViewer', () => {
   beforeEach(() => {
     observers = []
+    vi.stubGlobal('devicePixelRatio', 2)
     vi.stubGlobal('IntersectionObserver', class {
       readonly record: ObserverRecord
       constructor(callback: IntersectionObserverCallback) {
@@ -76,6 +77,7 @@ describe('DocumentPdfViewer', () => {
   })
   afterEach(() => {
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
     mocks.getDocument.mockClear()
     mocks.getPage.mockClear()
     mocks.render.mockClear()
@@ -108,6 +110,13 @@ describe('DocumentPdfViewer', () => {
       container: expect.any(HTMLElement),
       viewport: expect.objectContaining({ width: 960, height: 1280, scale: 1.6 }),
     }))
+    expect(mocks.render).toHaveBeenCalledWith(2, expect.objectContaining({
+      viewport: expect.objectContaining({ width: 960, height: 1280, scale: 1.6 }),
+      transform: [2, 0, 0, 2, 0, 0],
+    }))
+    const canvas = wrapper.get('[data-page-number="2"] canvas').element as HTMLCanvasElement
+    expect(canvas.width).toBe(1920)
+    expect(canvas.height).toBe(2560)
     expect(wrapper.get('[data-page-number="2"] .textLayer').text()).toBe('Selectable PDF text 2')
     expect(wrapper.text()).toContain('第 2 / 3 页')
     const highlight = wrapper.get('[data-page-number="2"] .pdfjs-highlight')
@@ -138,6 +147,24 @@ describe('DocumentPdfViewer', () => {
     expect(wrapper.find('canvas').exists()).toBe(true)
     expect(wrapper.get('.textLayer').text()).toBe('')
     expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('设备像素比变化时封顶两倍并重渲染活跃页', async () => {
+    vi.stubGlobal('devicePixelRatio', 3)
+    const wrapper = mount(DocumentPdfViewer, { props: { url: '/document.pdf', page: 1 } })
+    await vi.waitFor(() => expect(wrapper.get('[data-page-number="1"] .textLayer').text()).toBe('Selectable PDF text 1'))
+
+    const canvas = wrapper.get('[data-page-number="1"] canvas').element as HTMLCanvasElement
+    expect(canvas.width).toBe(1920)
+    expect(mocks.render).toHaveBeenLastCalledWith(1, expect.objectContaining({ transform: [2, 0, 0, 2, 0, 0] }))
+
+    mocks.render.mockClear()
+    vi.stubGlobal('devicePixelRatio', 1)
+    window.dispatchEvent(new Event('resize'))
+    await vi.waitFor(() => expect(mocks.render).toHaveBeenCalledWith(1, expect.objectContaining({ transform: undefined })))
+    expect(canvas.width).toBe(960)
+    expect(canvas.height).toBe(1280)
     wrapper.unmount()
   })
 })

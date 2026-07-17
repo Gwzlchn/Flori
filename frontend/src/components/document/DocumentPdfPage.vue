@@ -13,6 +13,7 @@ const props = defineProps<{
   documentProxy: PDFDocumentProxy
   pageNumber: number
   defaultViewport: ViewportSize
+  outputScale: number
   priority: boolean
   bboxes: [number, number, number, number][]
 }>()
@@ -73,9 +74,12 @@ async function renderPage(): Promise<void> {
     }
     const context = canvas.value.getContext('2d')
     if (!context) throw new Error('canvas context unavailable')
-    canvas.value.width = Math.ceil(nextViewport.width)
-    canvas.value.height = Math.ceil(nextViewport.height)
-    renderTask = page.render({ canvasContext: context, viewport: nextViewport })
+    canvas.value.width = Math.ceil(nextViewport.width * props.outputScale)
+    canvas.value.height = Math.ceil(nextViewport.height * props.outputScale)
+    const transform: [number, number, number, number, number, number] | undefined = props.outputScale === 1
+      ? undefined
+      : [props.outputScale, 0, 0, props.outputScale, 0, 0]
+    renderTask = page.render({ canvasContext: context, viewport: nextViewport, transform })
     const textContentPromise = page.getTextContent()
     await renderTask.promise
     const textContent = await textContentPromise
@@ -104,6 +108,13 @@ async function renderPage(): Promise<void> {
 watch(() => props.priority, (priority) => {
   if (priority) void renderPage()
   else if (!nearViewport) releasePage()
+})
+
+watch(() => props.outputScale, () => {
+  const shouldRender = nearViewport || props.priority
+  if (status.value === 'idle' && !shouldRender) return
+  releasePage()
+  if (shouldRender) void renderPage()
 })
 
 onMounted(() => {
@@ -151,7 +162,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .pdfjs-page-shell { width: max-content; max-width: none; margin: 0 auto 22px; }
 .pdfjs-page { position: relative; overflow: hidden; background: #fff; box-shadow: 0 8px 28px rgba(34, 45, 63, .16); }
-.pdfjs-page canvas { display: block; max-width: none; background: #fff; }
+.pdfjs-page canvas { display: block; width: 100%; height: 100%; max-width: none; background: #fff; }
 .pdfjs-highlight { position: absolute; z-index: 2; border: 2px solid #d98b00; border-radius: 3px; background: rgba(255, 214, 61, .34); box-shadow: 0 0 0 2px rgba(255,255,255,.72); pointer-events: none; }
 .pdfjs-page-state { position: absolute; inset: 0; z-index: 3; display: flex; align-items: center; justify-content: center; gap: 7px; color: var(--ink-500); font-size: 12px; background: rgba(255,255,255,.72); }
 .pdfjs-page-state svg { animation: spin 1s linear infinite; }
