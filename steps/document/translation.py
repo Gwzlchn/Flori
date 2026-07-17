@@ -25,6 +25,10 @@ _PROTECTED_RE = re.compile(
     r"(?:%|％|ms|s|GB|MB|KB|TB|Hz|kHz|MHz|GHz|B|K|M|×|x)?)",
     re.IGNORECASE,
 )
+_SPLIT_MARKERS = (
+    "\n\n", "\n", ". ", "? ", "! ", "。", "？", "！",
+    "; ", "；", ", ", "，", " ",
+)
 
 
 def text_hash(text: str) -> str:
@@ -62,7 +66,9 @@ def translation_units(document: Mapping[str, Any]) -> list[dict[str, Any]]:
 def translation_batches(
     units: Sequence[Mapping[str, Any]], *, max_chars: int,
 ) -> list[list[dict[str, Any]]]:
-    """只按完整 block 分批；单 block 超预算时显式拒绝，不截断来源。"""
+    """按来源范围安全分片后分批；protected token 不跨分片。"""
+    if max_chars < 1:
+        raise ValueError("document translation max_chars must be positive")
     batches: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     current_chars = 0
@@ -70,21 +76,73 @@ def translation_batches(
         unit = dict(raw)
         if unit["transform_kind"] != "translated":
             continue
-        size = len(str(unit["source_text"]))
-        if size > max_chars:
-            raise ValueError(
-                f"document translation block exceeds {max_chars} chars: "
-                f"{unit['source_segment_id']}"
-            )
-        if current and current_chars + size > max_chars:
-            batches.append(current)
-            current = []
-            current_chars = 0
-        current.append(unit)
-        current_chars += size
+        source_text = str(unit["source_text"])
+        ranges = _split_text_ranges(source_text, max_chars=max_chars)
+        for start, end in ranges:
+            fragment = dict(unit)
+            fragment_text = source_text[start:end]
+            split = len(ranges) > 1
+            fragment.update({
+                "translation_request_id": (
+                    stable_id(
+                        "trq", str(unit["source_segment_id"]), str(start), str(end),
+                    )
+                    if split else str(unit["source_segment_id"])
+                ),
+                "translated_segment_id": (
+                    stable_id(
+                        "tr", str(unit["translated_segment_id"]), str(start), str(end),
+                    )
+                    if split else str(unit["translated_segment_id"])
+                ),
+                "source_start": start,
+                "source_end": end,
+                "source_text": fragment_text,
+                "protected_tokens": protected_tokens(fragment_text),
+            })
+            size = len(fragment_text)
+            if current and current_chars + size > max_chars:
+                batches.append(current)
+                current = []
+                current_chars = 0
+            current.append(fragment)
+            current_chars += size
     if current:
         batches.append(current)
     return batches
+
+
+def _split_text_ranges(text: str, *, max_chars: int) -> list[tuple[int, int]]:
+    """返回连续、无重叠、完整覆盖 text 的稳定范围。"""
+    if len(text) <= max_chars:
+        return [(0, len(text))]
+    protected_spans = [match.span() for match in _PROTECTED_RE.finditer(text)]
+    for start, end in protected_spans:
+        if end - start > max_chars:
+            raise ValueError("document translation protected token exceeds batch budget")
+    ranges: list[tuple[int, int]] = []
+    cursor = 0
+    while cursor < len(text):
+        limit = min(cursor + max_chars, len(text))
+        if limit == len(text):
+            end = limit
+        else:
+            floor = cursor + max(1, max_chars // 2)
+            candidates = []
+            for marker in _SPLIT_MARKERS:
+                position = text.rfind(marker, cursor, limit)
+                if position >= floor:
+                    candidates.append(position + len(marker))
+            end = max(candidates, default=limit)
+            for protected_start, protected_end in protected_spans:
+                if protected_start < end < protected_end:
+                    end = protected_start if protected_start > cursor else protected_end
+                    break
+        if end <= cursor or end - cursor > max_chars:
+            raise ValueError("document translation cannot find a safe split boundary")
+        ranges.append((cursor, end))
+        cursor = end
+    return ranges
 
 
 def validate_batch_response(
@@ -96,7 +154,7 @@ def validate_batch_response(
     items = response["segments"]
     if not isinstance(items, list) or len(items) != len(batch):
         raise ValueError("translation response segment count mismatch")
-    expected_ids = [str(item["source_segment_id"]) for item in batch]
+    expected_ids = [str(item["translation_request_id"]) for item in batch]
     actual_ids = [
         item.get("id") if isinstance(item, Mapping) else None for item in items
     ]
@@ -113,9 +171,9 @@ def validate_batch_response(
         if missing:
             raise ValueError(
                 "translation changed protected token for "
-                f"{source['source_segment_id']}: {missing[0]}"
+                f"{source['translation_request_id']}: {missing[0]}"
             )
-        translated[str(source["source_segment_id"])] = text.strip()
+        translated[str(source["translation_request_id"])] = text.strip()
     return translated
 
 
@@ -123,37 +181,77 @@ def materialize_translation_segments(
     units: Sequence[Mapping[str, Any]],
     translated: Mapping[str, str],
     invocation_ids: Mapping[str, str | None],
+    *,
+    translated_fragments: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    fragments = list(translated_fragments or [])
+    if not fragments:
+        fragments = [
+            {
+                **dict(unit),
+                "translation_request_id": str(unit["source_segment_id"]),
+                "source_start": 0,
+                "source_end": len(str(unit["source_text"])),
+            }
+            for unit in units if unit["transform_kind"] == "translated"
+        ]
+    by_source: dict[str, list[Mapping[str, Any]]] = {}
+    for fragment in fragments:
+        by_source.setdefault(str(fragment["source_segment_id"]), []).append(fragment)
+    for parts in by_source.values():
+        parts.sort(key=lambda item: int(item["source_start"]))
+
     segments: list[dict[str, Any]] = []
     for unit in units:
         source_id = str(unit["source_segment_id"])
         if unit["transform_kind"] == "passthrough":
-            text = str(unit["source_text"])
+            parts = [{
+                **dict(unit),
+                "translation_request_id": source_id,
+                "source_start": 0,
+                "source_end": len(str(unit["source_text"])),
+            }]
         else:
-            text = translated.get(source_id, "")
-            if not text:
-                raise ValueError(f"translation is missing source segment: {source_id}")
-        segments.append({
-            "translated_segment_id": str(unit["translated_segment_id"]),
-            "source_segment_ids": [source_id],
-            "parent_id": unit.get("parent_id"),
-            "order": int(unit["order"]),
-            "kind": str(unit["kind"]),
-            "text": text,
-            "transform_kind": str(unit["transform_kind"]),
-            "alignment_kind": "one_to_one",
-            "source_ranges": [{
-                "source_segment_id": source_id,
-                "start": 0,
-                "end": len(str(unit["source_text"])),
-                "exact": str(unit["source_text"]),
-            }],
-            "translated_range": {"start": 0, "end": len(text), "exact": text},
-            "source_hash": text_hash(str(unit["source_text"])),
-            "translated_hash": text_hash(text),
-            "protected_tokens": list(unit["protected_tokens"]),
-            "producer_invocation_id": invocation_ids.get(source_id),
-        })
+            parts = by_source.get(source_id, [])
+            cursor = 0
+            for part in parts:
+                start, end = int(part["source_start"]), int(part["source_end"])
+                if start != cursor or str(unit["source_text"])[start:end] != str(part["source_text"]):
+                    raise ValueError(f"translation ranges do not cover source segment: {source_id}")
+                cursor = end
+            if cursor != len(str(unit["source_text"])):
+                raise ValueError(f"translation ranges do not close source segment: {source_id}")
+        alignment_kind = "one_to_many" if len(parts) > 1 else "one_to_one"
+        for part in parts:
+            request_id = str(part["translation_request_id"])
+            source_text = str(part["source_text"])
+            if unit["transform_kind"] == "passthrough":
+                text = source_text
+            else:
+                text = translated.get(request_id, "")
+                if not text:
+                    raise ValueError(f"translation is missing request segment: {request_id}")
+            segments.append({
+                "translated_segment_id": str(part["translated_segment_id"]),
+                "source_segment_ids": [source_id],
+                "parent_id": unit.get("parent_id"),
+                "order": int(unit["order"]),
+                "kind": str(unit["kind"]),
+                "text": text,
+                "transform_kind": str(unit["transform_kind"]),
+                "alignment_kind": alignment_kind,
+                "source_ranges": [{
+                    "source_segment_id": source_id,
+                    "start": int(part["source_start"]),
+                    "end": int(part["source_end"]),
+                    "exact": source_text,
+                }],
+                "translated_range": {"start": 0, "end": len(text), "exact": text},
+                "source_hash": text_hash(source_text),
+                "translated_hash": text_hash(text),
+                "protected_tokens": list(part["protected_tokens"]),
+                "producer_invocation_id": invocation_ids.get(request_id),
+            })
     return segments
 
 
@@ -395,7 +493,7 @@ def translation_prompt_payload(batch: Sequence[Mapping[str, Any]]) -> str:
         "schema_version": 1,
         "segments": [
             {
-                "id": item["source_segment_id"],
+                "id": item["translation_request_id"],
                 "kind": item["kind"],
                 "text": item["source_text"],
                 "protected_tokens": item["protected_tokens"],

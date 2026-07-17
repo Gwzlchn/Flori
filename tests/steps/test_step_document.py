@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from shared.document_contract import DOCUMENT_SCHEMA_VERSION
+from shared.document_contract import (
+    DOCUMENT_SCHEMA_VERSION,
+    TRANSLATION_SCHEMA_VERSION,
+    validate_translation,
+)
 from shared.models import LLMResponse
 from steps.document.step_02_parse import DocumentParseStep
 from steps.document.step_03_structure import DocumentStructureStep
@@ -13,6 +17,12 @@ from steps.document.step_04_translate import DocumentTranslateStep
 from steps.document.step_05_smart import DocumentSmartStep
 from steps.document.step_07_concepts import DocumentConceptsStep
 from steps.document.step_08_review import DocumentReviewStep
+from steps.document.translation import (
+    materialize_translation_segments,
+    translation_batches,
+    translation_units,
+    validate_batch_response,
+)
 from tests.steps.conftest import make_job_dir, make_step_config
 
 
@@ -215,6 +225,69 @@ def test_translation_is_block_aligned_and_never_creates_original_markdown(tmp_pa
     assert rendered.index("<h1>标题</h1>") < rendered.index("<strong>英文标题：</strong>Title")
     assert 'data-source-segment="S1.P1"' in rendered
     assert not (job / "output" / "original.md").exists()
+
+
+def test_translation_splits_oversized_block_into_contiguous_one_to_many_ranges(tmp_path):
+    job = _fixture(tmp_path)
+    document = json.loads(
+        (job / "intermediate" / "document.json").read_text(encoding="utf-8")
+    )
+    source_text = ("Long sentence keeps 3 ms unchanged. " * 20).strip()
+    document["blocks"][1]["text"] = source_text
+    units = translation_units(document)
+    batches = translation_batches(units, max_chars=80)
+    fragments = [item for batch in batches for item in batch]
+    oversized = [item for item in fragments if item["source_segment_id"] == "S1.P1"]
+
+    assert len(oversized) > 1
+    assert all(len(item["source_text"]) <= 80 for item in fragments)
+    assert len({item["translation_request_id"] for item in oversized}) == len(oversized)
+    assert [item["source_start"] for item in oversized] == [
+        0, *[item["source_end"] for item in oversized[:-1]],
+    ]
+    assert "".join(item["source_text"] for item in oversized) == source_text
+
+    translated: dict[str, str] = {}
+    invocation_ids: dict[str, str] = {}
+    for batch in batches:
+        response = {"segments": [
+            {"id": item["translation_request_id"], "text": item["source_text"]}
+            for item in batch
+        ]}
+        translated.update(validate_batch_response(batch, response))
+        invocation_ids.update({
+            item["translation_request_id"]: "inv_fragment" for item in batch
+        })
+    segments = materialize_translation_segments(
+        units, translated, invocation_ids, translated_fragments=fragments,
+    )
+    aligned = [item for item in segments if item["source_segment_ids"] == ["S1.P1"]]
+    assert len(aligned) == len(oversized)
+    assert {item["alignment_kind"] for item in aligned} == {"one_to_many"}
+    assert "".join(item["source_ranges"][0]["exact"] for item in aligned) == source_text
+
+    coverage = {
+        "source_segments": len({
+            source_id for item in segments for source_id in item["source_segment_ids"]
+        }),
+        "translated_segments": sum(
+            item["transform_kind"] == "translated" for item in segments
+        ),
+        "passthrough_segments": sum(
+            item["transform_kind"] == "passthrough" for item in segments
+        ),
+    }
+    artifact = {
+        "schema_version": TRANSLATION_SCHEMA_VERSION,
+        "job_id": job.name,
+        "source_fingerprint": document["sources"][0]["fingerprint"],
+        "source_lang": "en",
+        "target_lang": "zh",
+        "status": "complete",
+        "coverage": coverage,
+        "segments": segments,
+    }
+    assert validate_translation(artifact, expected_job_id=job.name)["coverage"] == coverage
 
 
 def test_smart_note_title_is_deterministic_and_uses_translation(tmp_path, monkeypatch):

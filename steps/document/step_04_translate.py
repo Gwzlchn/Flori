@@ -76,6 +76,7 @@ class DocumentTranslateStep(StepBase):
         if not units:
             raise InputInvalidError("document contains no translatable blocks")
         batches = translation_batches(units, max_chars=BATCH_CHARS)
+        translated_fragments = [item for batch in batches for item in batch]
         translated: dict[str, str] = {}
         invocation_ids: dict[str, str | None] = {}
         for index, batch in enumerate(batches):
@@ -83,11 +84,14 @@ class DocumentTranslateStep(StepBase):
             response = self._translate_batch(batch)
             invocation_id = producer_invocation_id(self.ai)
             translated.update(response)
-            invocation_ids.update({item["source_segment_id"]: invocation_id for item in batch})
+            invocation_ids.update({
+                item["translation_request_id"]: invocation_id for item in batch
+            })
         self.progress.report(len(batches), len(batches), "done")
 
         segments = materialize_translation_segments(
             units, translated, invocation_ids,
+            translated_fragments=translated_fragments,
         )
         translated_count = sum(
             item["transform_kind"] == "translated" for item in segments
@@ -100,7 +104,11 @@ class DocumentTranslateStep(StepBase):
             "target_lang": "zh",
             "status": "complete",
             "coverage": {
-                "source_segments": len(segments),
+                "source_segments": len({
+                    source_id
+                    for segment in segments
+                    for source_id in segment["source_segment_ids"]
+                }),
                 "translated_segments": translated_count,
                 "passthrough_segments": len(segments) - translated_count,
             },
