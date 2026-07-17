@@ -1328,6 +1328,7 @@ async def _verify_semantic_attestation_batch(
     source_manifest: dict[str, Any],
     mappings: list[dict[str, Any]],
     read_file: Callable[[str, int], Awaitable[bytes | None]],
+    attestation_protocol: Callable[[], str],
 ) -> None:
     """从 commit、candidate 和真实 ai_logs 重建完整 semantic 信任链。"""
     commit_data = await read_file(SEMANTIC_BATCH_COMMIT_PATH, MAX_CANONICAL_SIDECAR_BYTES)
@@ -1456,7 +1457,11 @@ async def _verify_semantic_attestation_batch(
         != ai_log_binding["response_content_sha256"]
     ):
         raise CanonicalEvidenceError("semantic attestor ai_log identity changed")
-    expected_prompt = build_semantic_attestation_prompt(candidate_manifests, source_manifest)
+    # 用 reader 自己信任的协议文本复算期望 prompt,防被篡改的渲染混入决策;协议文本
+    # 与 attestor 同源(tracked 模板,无覆盖),模板变更会使旧 batch 复验失败(须重跑核验步)。
+    expected_prompt = build_semantic_attestation_prompt(
+        candidate_manifests, source_manifest, protocol=attestation_protocol(),
+    )
     if prompt != expected_prompt:
         raise CanonicalEvidenceError("semantic attestor rendered prompt changed")
     try:
@@ -1533,6 +1538,7 @@ async def build_canonical_evidence_records_with_reader(
     provenance_data: bytes,
     read_file: Callable[[str, int], Awaitable[bytes | None]],
     sha256_file: Callable[[str], Awaitable[str | None]],
+    attestation_protocol: Callable[[], str],
 ) -> list[dict[str, Any]]:
     """重验显式 provenance 并投影到 scheduler 的唯一 chunk 边界。"""
     _normalized_string(job_id, field="job_id")
@@ -1646,6 +1652,7 @@ async def build_canonical_evidence_records_with_reader(
             source_manifest=source_manifest,
             mappings=raw_mappings,
             read_file=read_file,
+            attestation_protocol=attestation_protocol,
         )
 
     support_payloads: dict[tuple[str, str], bytes] = {}

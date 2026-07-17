@@ -299,3 +299,36 @@ describe('PromptEditor 版本管理', () => {
     expect(taVal(w)).not.toContain('VISION BODY')
   })
 })
+
+describe('PromptEditor 锁定协议步(只读)', () => {
+  const LOCKED_DETAIL = {
+    locked: true,
+    default_template: 'PROTOCOL BODY',
+    default_templates: [{ name: 'semantic_attestation', content: 'PROTOCOL BODY' }],
+    default_system: null,
+    override: null,
+    active_version: null,
+    versions: [],
+  }
+
+  it('锁定步:模板只读展示,无编辑/版本/保存控件,footer 仅关闭', async () => {
+    mockGet(LOCKED_DETAIL)
+    const w = await mountEditor({ step: '11_semantic_attestation', label: '语义证据独立核验' })
+    expect(w.find('[data-test="locked-tag"]').exists()).toBe(true)
+    expect(w.find('[data-test="locked-content"]').text()).toBe('PROTOCOL BODY')
+    expect(w.find('textarea').exists()).toBe(false)
+    expect(w.find('[data-test="version-select"]').exists()).toBe(false)
+    expect(w.find('[data-test="restore-default"]').exists()).toBe(false)
+    const labels = w.findAll('button').map((b) => b.text())
+    expect(labels.some((t) => t.includes('另存为新版本'))).toBe(false)
+    expect(labels.some((t) => t.includes('保存为覆盖') || t.includes('覆盖当前版本'))).toBe(false)
+    expect(labels.some((t) => t.includes('关闭'))).toBe(true)
+    expect(w.text()).toContain('查看 Prompt')
+  })
+
+  it('未锁定详情(无 locked 字段)不进入只读模式', async () => {
+    const w = await mountEditor()
+    expect(w.find('[data-test="locked-tag"]').exists()).toBe(false)
+    expect(w.find('textarea').exists()).toBe(true)
+  })
+})

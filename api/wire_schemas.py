@@ -478,6 +478,7 @@ class PipelineStepResponse(WireModel):
     needs: list[str]
     is_ai: bool
     has_override: bool
+    prompt_locked: bool
 
 
 class PipelineResponse(WireModel):
@@ -506,6 +507,7 @@ class PromptListStep(WireModel):
     label: str | None
     pool: str | None
     is_ai: bool
+    locked: bool
     has_template: bool
     overrides: list[PromptOverrideScope]
 
@@ -546,6 +548,7 @@ class PromptDetailResponse(WireModel):
     label: str | None
     pool: str | None
     is_ai: bool
+    locked: bool
     default_template: str | None
     default_templates: list[PromptTemplateResponse]
     default_system: str | None

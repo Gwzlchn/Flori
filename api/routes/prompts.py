@@ -74,10 +74,10 @@ def _prompt_document_kind(pipeline: str, value: str | None) -> str | None:
         raise HTTPException(422, str(exc)) from exc
 
 
-def _ai_steps(config: AppConfig) -> list[tuple[str, str, str | None, str | None]]:
-    """枚举各 pipeline 的 AI 步(pool=='ai'),返回 (pipeline, step_key, label, pool)。
+def _ai_steps(config: AppConfig) -> list[tuple[str, dict]]:
+    """枚举各 pipeline 的 AI 步(pool=='ai'),返回 (pipeline, step_config)。
     模板/'.'前缀/default 不算 pipeline(与 GET /api/pipelines 同口径)。"""
-    out: list[tuple[str, str, str | None, str | None]] = []
+    out: list[tuple[str, dict]] = []
     for name, pc in (config.pipelines or {}).items():
         if name.startswith(".") or name == "default":
             continue
@@ -86,8 +86,18 @@ def _ai_steps(config: AppConfig) -> list[tuple[str, str, str | None, str | None]
             continue
         for s in steps:
             if s.get("pool") == "ai":
-                out.append((name, s.get("name"), s.get("label"), s.get("pool")))
+                out.append((name, s))
     return out
+
+
+def _ensure_unlocked(step_config: dict, step: str) -> None:
+    """prompt_locked 步为协议 prompt:可读不可覆盖,写操作一律 403(改动只能走仓库模板文件)。"""
+    if step_config.get("prompt_locked"):
+        raise HTTPException(
+            403,
+            f"step '{step}' prompt is locked; edit its tracked template under "
+            "configs/prompts/templates/ in the repository",
+        )
 
 
 def _find_step(config: AppConfig, pipeline: str, step: str) -> dict | None:
@@ -180,12 +190,14 @@ async def list_prompts(
         )
     steps = [
         {
-            "pipeline": pipeline, "step": key, "label": label, "pool": pool,
+            "pipeline": pipeline, "step": s.get("name"), "label": s.get("label"),
+            "pool": s.get("pool"),
             "is_ai": True,
-            "has_template": bool(_step_templates(config, key, _find_step(config, pipeline, key))),
-            "overrides": by_step.get((pipeline, key), []),
+            "locked": bool(s.get("prompt_locked")),
+            "has_template": bool(_step_templates(config, s.get("name"), s)),
+            "overrides": by_step.get((pipeline, s.get("name")), []),
         }
-        for pipeline, key, label, pool in _ai_steps(config)
+        for pipeline, s in _ai_steps(config)
     ]
     return {"steps": steps}
 
@@ -223,6 +235,8 @@ async def get_prompt(
         "label": s.get("label"),
         "pool": s.get("pool"),
         "is_ai": s.get("pool") == "ai",
+        # locked=协议 prompt(如 semantic_attestation):模板可读,覆盖被 403,改动走仓库模板文件。
+        "locked": bool(s.get("prompt_locked")),
         # 默认 prompt = 外置 user-prompt 模板(覆盖即替换它,所见即所改)。default_template 为主模板
         # (向后兼容);default_templates 列全变体 [{name,content}]。default_system = 外置 system 钩子(多数步 null)。
         "default_template": _default_template(templates, primary_template),
@@ -287,6 +301,7 @@ async def put_prompt(
         raise HTTPException(404, f"step '{step}' not found in pipeline '{pipeline}'")
     if s.get("pool") != "ai":
         raise HTTPException(400, f"step '{step}' is not an AI step")
+    _ensure_unlocked(s, step)
     if req.scope == "domain" and not (req.domain or "").strip():
         raise HTTPException(400, "domain scope requires a non-empty domain")
     kind = _prompt_document_kind(
@@ -343,6 +358,7 @@ async def activate_prompt(
         raise HTTPException(404, f"step '{step}' not found in pipeline '{pipeline}'")
     if s.get("pool") != "ai":
         raise HTTPException(400, f"step '{step}' is not an AI step")
+    _ensure_unlocked(s, step)
     if req.scope == "domain" and not (req.domain or "").strip():
         raise HTTPException(400, "domain scope requires a non-empty domain")
     kind = _prompt_document_kind(
@@ -381,15 +397,19 @@ async def delete_prompt(
     scope: str = "global",
     domain: str | None = None,
     document_kind: str | None = None,
+    config: AppConfig = Depends(get_config),
     db: Database = Depends(get_db),
 ):
     """彻底删除该步 (scope,domain) 覆盖,连同其全部历史版本一并清除。无则 no-op。
     注:恢复默认/回内置默认请用 POST .../activate {version:null}(非破坏,保留历史);
-    此 DELETE 仅用于真正要丢弃所有版本的场景。"""
+    此 DELETE 仅用于真正要丢弃所有版本的场景。锁定步 403(与 PUT/activate 同口径)。"""
     validate_path_segment(pipeline, "pipeline")
     validate_path_segment(step, "step")
     if domain:
         validate_path_segment(domain, "domain")
+    s = _find_step(config, pipeline, step)
+    if s is not None:
+        _ensure_unlocked(s, step)
     kind = _prompt_document_kind(pipeline, document_kind)
     await asyncio.to_thread(
         db.delete_prompt_override, scope, domain, pipeline, step, kind,

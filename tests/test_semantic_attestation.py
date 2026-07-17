@@ -213,6 +213,14 @@ class _Attestor:
         self.call_index = 0
         self.log = _Log()
 
+    def load_prompt_template(self, name: str) -> str:
+        # 与真实步同源:协议文本来自 tracked 模板(prompt_locked 步不吃覆盖)。
+        assert name == "semantic_attestation"
+        template = Path(__file__).resolve().parent.parent / (
+            "configs/prompts/templates/semantic_attestation.md"
+        )
+        return template.read_text(encoding="utf-8")
+
     def call(self, prompt: str, **_kwargs) -> str:
         request = json.loads(prompt.split("INPUT=", 1)[1])
         decisions = [{
@@ -314,6 +322,10 @@ async def _records(
         ),
         read_file=read_file,
         sha256_file=sha256_file,
+        attestation_protocol=lambda: (
+            Path(__file__).resolve().parent.parent
+            / "configs/prompts/templates/semantic_attestation.md"
+        ).read_text(encoding="utf-8"),
     )
 
 

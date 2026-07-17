@@ -195,6 +195,7 @@ def finalize_pending_semantic_provenance(
     if candidates:
         prompt = build_semantic_attestation_prompt(
             [item["manifest"] for item in loaded], source_manifest,
+            protocol=ai.load_prompt_template("semantic_attestation"),
         )
         try:
             response_text = ai.call(prompt, response_format="json", temperature=0)

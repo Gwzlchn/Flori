@@ -275,13 +275,14 @@ POST /api/glossary                          → 手动新增（直接 accepted +
 
 ### 正文唯一真源
 
-`configs/prompts/templates/*.md` 中的 14 份 tracked 文件是所有当前 AI 路由的正文唯一真源:
+`configs/prompts/templates/*.md` 中的 15 份 tracked 文件是所有当前 AI 路由的正文唯一真源:
 
 - 智能笔记:`04_smart_podcast`,`05_smart_document`,`11_smart`。
 - 翻译与标点:`04_translate_document`,`08_punctuate.zh`,`08_punctuate.translate`。
 - 概念、取证和评审:`05_concepts`,`10_evidence`,`05_review`,`08_review`,`12_review`。
 - 学习与综合:`study_suggestions`,`concept_resynthesis`。
 - 视觉 pass:`11_smart.vision`。
+- 语义核验协议:`semantic_attestation`(`prompt_locked` 锁定步共用,只读展示、禁覆盖;协议与服务端解析器成对,reader 复算期望 prompt,改模板须 bump 步 version 并重跑核验,见 `docs/03-contracts.md` §1.15)。
 
 Prompt API 和 Worker 执行使用同一解析契约。每次解析都从一份原始字节同时导出文本、SHA-256、来源、覆盖版本和路径；单次 API 响应复用该解析结果，单个 Worker 步骤实例缓存结果供幂等指纹、AI 审计和实际调用复用。API 与 Worker 是独立进程，不承诺跨请求共享内存快照；job override 由任务创建时固化的正文和版本保证执行可复现。
 

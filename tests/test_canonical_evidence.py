@@ -259,6 +259,10 @@ async def _records(
         provenance_data=storage.files[f"output/provenance/{note_type}.json"],
         read_file=read_file,
         sha256_file=hash_file,
+        attestation_protocol=lambda: (
+            Path(__file__).resolve().parent.parent
+            / "configs/prompts/templates/semantic_attestation.md"
+        ).read_text(encoding="utf-8"),
     )
     return body, records
 

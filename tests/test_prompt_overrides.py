@@ -770,3 +770,89 @@ class TestCreateJobInjection:
         job_id = resp.json()["job_id"]
         d = (await client.get(f"/api/jobs/{job_id}")).json()
         assert d["prompt_versions"] == {}
+
+
+@pytest.mark.asyncio
+class TestPromptLockedAPI:
+    """prompt_locked 协议步(semantic_attestation):模板可读,任何覆盖写入 403。"""
+
+    async def test_list_marks_locked_and_template(self, client):
+        steps = (await client.get("/api/prompts")).json()["steps"]
+        by_key = {(s["pipeline"], s["step"]): s for s in steps}
+        sem = by_key[("video", "11_semantic_attestation")]
+        assert sem["locked"] is True and sem["has_template"] is True
+        assert by_key[("video", "11_smart")]["locked"] is False
+
+    async def test_detail_readable_with_locked_flag(self, client):
+        g = (await client.get("/api/prompts/video/11_semantic_attestation")).json()
+        assert g["locked"] is True
+        assert g["default_templates"][0]["name"] == "semantic_attestation"
+        assert "独立证据核验器" in g["default_template"]
+
+    async def test_put_locked_403(self, client):
+        r = await client.put(
+            "/api/prompts/video/11_semantic_attestation",
+            json={"scope": "global", "content": "x"},
+        )
+        assert r.status_code == 403
+
+    async def test_activate_locked_403(self, client):
+        r = await client.post(
+            "/api/prompts/document/06_semantic_attestation/activate",
+            json={"scope": "global", "version": None},
+        )
+        assert r.status_code == 403
+
+    async def test_delete_locked_403(self, client):
+        r = await client.delete(
+            "/api/prompts/audio/04_semantic_attestation?scope=global"
+        )
+        assert r.status_code == 403
+
+    async def test_pipelines_endpoint_exposes_prompt_locked(self, client):
+        data = (await client.get("/api/pipelines")).json()
+        video = next(p for p in data["pipelines"] if p["name"] == "video")
+        sem = next(s for s in video["steps"] if s["key"] == "11_semantic_attestation")
+        assert sem["prompt_locked"] is True
+        smart = next(s for s in video["steps"] if s["key"] == "11_smart")
+        assert smart["prompt_locked"] is False
+
+
+class TestPromptLockedResolution:
+    """worker 兜底:prompt_locked 步解析时跳过 job 覆盖,存量脏覆盖也不得生效。"""
+
+    def _mk_locked_step(self, tmp_path, prompt_overrides):
+        (tmp_path / "job.json").write_text(
+            json.dumps({"prompt_overrides": prompt_overrides}), encoding="utf-8"
+        )
+        hot = tmp_path / "prompts" / "templates"
+        hot.mkdir(parents=True, exist_ok=True)
+        (hot / "semantic_attestation.md").write_text("PROTOCOL BODY", encoding="utf-8")
+        return _Step("11_semantic_attestation", tmp_path, {
+            "paths": {
+                "prompts_dir": str(tmp_path / "prompts"),
+                "config_dir": str(tmp_path / "image-config"),
+            },
+            "step": {
+                "name": "11_semantic_attestation",
+                "prompt_template": "semantic_attestation",
+                "prompt_locked": True,
+            },
+        })
+
+    def test_locked_step_ignores_injected_override(self, tmp_path):
+        s = self._mk_locked_step(tmp_path, {
+            "11_semantic_attestation": {"content": "EVIL OVERRIDE", "version": 1},
+        })
+        resolved = s.ai.resolve_prompt_template("semantic_attestation")
+        assert resolved.text == "PROTOCOL BODY"
+        assert resolved.source == "hot"
+
+    def test_unlocked_step_still_honors_override(self, tmp_path):
+        hot = tmp_path / "prompts" / "templates"
+        hot.mkdir(parents=True, exist_ok=True)
+        (hot / "11_smart.md").write_text("TEMPLATE BODY", encoding="utf-8")
+        s = _mk_step(tmp_path, {"11_smart": {"content": "MY OVERRIDE", "version": 1}})
+        resolved = s.ai.resolve_prompt_template("11_smart")
+        assert resolved.text == "MY OVERRIDE"
+        assert resolved.source == "override"

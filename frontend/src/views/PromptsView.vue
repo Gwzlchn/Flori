@@ -4,7 +4,7 @@ import { ref, onMounted, reactive } from 'vue'
 import { useApi } from '../composables/useApi'
 import PipelineDag from '../components/PipelineDag.vue'
 import PromptEditor from '../components/settings/PromptEditor.vue'
-import { FileCode2 } from 'lucide-vue-next'
+import { FileCode2, Lock } from 'lucide-vue-next'
 import { documentKindLabel } from '../utils/contentType'
 
 interface PStep {
@@ -14,6 +14,7 @@ interface PStep {
   needs: string[]
   is_ai?: boolean
   has_override?: boolean
+  prompt_locked?: boolean
 }
 interface Pipeline {
   name: string
@@ -74,7 +75,7 @@ function onSaved() {
     <div class="h1" style="margin-bottom:6px"><FileCode2 :size="18" />AI 工作流</div>
     <p style="font-size:13px;color:var(--ink-600);margin-bottom:18px">
       Video、Document、Audio 流水线的完整步骤。点蓝色 AI 步编辑全局/领域覆盖;
-      Document 可先选全部体裁或某一体裁。<b>●</b> = 已有覆盖。
+      Document 可先选全部体裁或某一体裁。<b>●</b> = 已有覆盖;锁标 = 协议 prompt,只读。
       覆盖存数据库,下个任务派发时注入该步。
     </p>
 
@@ -100,7 +101,8 @@ function onSaved() {
         <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:14px">
           <button v-for="s in aiSteps(p)" :key="s.key" class="badge b-info"
             style="cursor:pointer;border:none" @click="openStep(p, s.key)">
-            <span v-if="s.has_override" style="margin-right:4px">●</span>{{ s.label || s.key }}
+            <Lock v-if="s.prompt_locked" :size="11" style="margin-right:4px" data-test="step-lock" />
+            <span v-else-if="s.has_override" style="margin-right:4px">●</span>{{ s.label || s.key }}
           </button>
         </div>
       </div>

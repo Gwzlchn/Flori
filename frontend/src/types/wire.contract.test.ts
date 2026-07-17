@@ -36,6 +36,7 @@ const error = { error: 'invalid_request', message: 'bad input' } satisfies Error
 
 const prompt = {
   pipeline: 'video', step: '11_smart', label: '智能笔记', pool: 'ai', is_ai: true,
+  locked: false,
   default_template: null, default_templates: [], default_system: null, override: null,
   active_version: '9223372036854775807',
   versions: [{ version: '9223372036854775807', note: null, created_at: '2026-07-15T00:00:00Z' }],

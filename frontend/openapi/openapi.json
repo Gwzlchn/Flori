@@ -3611,6 +3611,10 @@
               }
             ],
             "title": "Pool"
+          },
+          "prompt_locked": {
+            "title": "Prompt Locked",
+            "type": "boolean"
           }
         },
         "required": [
@@ -3619,7 +3623,8 @@
           "pool",
           "needs",
           "is_ai",
-          "has_override"
+          "has_override",
+          "prompt_locked"
         ],
         "title": "PipelineStepResponse",
         "type": "object"
@@ -3843,6 +3848,10 @@
             ],
             "title": "Label"
           },
+          "locked": {
+            "title": "Locked",
+            "type": "boolean"
+          },
           "override": {
             "anyOf": [
               {
@@ -3886,6 +3895,7 @@
           "label",
           "pool",
           "is_ai",
+          "locked",
           "default_template",
           "default_templates",
           "default_system",
@@ -3935,6 +3945,10 @@
             ],
             "title": "Label"
           },
+          "locked": {
+            "title": "Locked",
+            "type": "boolean"
+          },
           "overrides": {
             "items": {
               "$ref": "#/components/schemas/PromptOverrideScope"
@@ -3968,6 +3982,7 @@
           "label",
           "pool",
           "is_ai",
+          "locked",
           "has_template",
           "overrides"
         ],
@@ -15540,7 +15555,7 @@
     },
     "/api/prompts/{pipeline}/{step}": {
       "delete": {
-        "description": "彻底删除该步 (scope,domain) 覆盖,连同其全部历史版本一并清除。无则 no-op。\n注:恢复默认/回内置默认请用 POST .../activate {version:null}(非破坏,保留历史);\n此 DELETE 仅用于真正要丢弃所有版本的场景。",
+        "description": "彻底删除该步 (scope,domain) 覆盖,连同其全部历史版本一并清除。无则 no-op。\n注:恢复默认/回内置默认请用 POST .../activate {version:null}(非破坏,保留历史);\n此 DELETE 仅用于真正要丢弃所有版本的场景。锁定步 403(与 PUT/activate 同口径)。",
         "operationId": "delete_prompt_api_prompts__pipeline___step__delete",
         "parameters": [
           {

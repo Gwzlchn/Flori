@@ -985,6 +985,7 @@ async def list_pipelines(
                  # 依赖(YAML needs 归一化为内部 depends_on,见 config._FIELD_ALIASES),供前端画 DAG
                  "needs": s.get("depends_on") or [],
                  "is_ai": s.get("pool") == "ai",
+                 "prompt_locked": bool(s.get("prompt_locked")),
                  "has_override": (name, s.get("name")) in overridden}
                 for s in steps
             ],

@@ -18,6 +18,7 @@ from shared.evidence_contract import (
 )
 from shared.models import Job
 from shared.note_text import markdown_to_index_text
+from shared.prompt_resolver import PromptResolver
 from shared.review_contract import verify_persisted_review
 from shared.step_base import def_digest_for, pipeline_digest_for
 from shared.terms import zh_name_from_glossary_row
@@ -213,6 +214,16 @@ class EffectDispatcher:
                 async def hash_source(source_path: str) -> str | None:
                     return await sha256_file(self.owner.storage, job_id, source_path)
 
+                def attestation_protocol() -> str:
+                    # reader 与 attestor 同源取协议文本(tracked 模板,hot→image,永不吃覆盖)。
+                    config = self.owner.config
+                    return PromptResolver(
+                        hot_dir=config.prompts_dir / "templates",
+                        image_dir=config.config_dir / "prompts" / "templates",
+                    ).resolve(
+                        "semantic_attestation", step_name="semantic_attestation",
+                    ).text
+
                 canonical_evidence = await build_canonical_evidence_records_with_reader(
                     job_id=job_id,
                     pipeline=job.pipeline if job else "",
@@ -227,6 +238,7 @@ class EffectDispatcher:
                     provenance_data=provenance_data,
                     read_file=read_source,
                     sha256_file=hash_source,
+                    attestation_protocol=attestation_protocol,
                 )
         await asyncio.to_thread(
             self.owner.db.index_job_notes,

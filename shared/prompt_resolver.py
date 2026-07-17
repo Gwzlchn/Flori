@@ -25,6 +25,7 @@ TRACKED_TEMPLATE_NAMES = (
     "11_smart.vision",
     "11_smart",
     "10_evidence",
+    "semantic_attestation",
     "05_review",
     "08_review",
     "12_review",

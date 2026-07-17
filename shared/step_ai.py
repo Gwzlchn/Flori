@@ -606,12 +606,19 @@ class AIInvocation:
             image_dir=config_dir / "prompts" / "templates",
         )
 
+    def prompt_locked(self) -> bool:
+        """协议 prompt 锁定步(step.prompt_locked):只认 tracked 模板,任何覆盖不得生效。"""
+        step = self.config.get("step") or {}
+        return bool(step.get("prompt_locked"))
+
     def resolve_prompt_template(self, name: str):
         if name not in self.resolved_prompts:
+            # 锁定步跳过 job 覆盖:API 已拒写,这里兜底让存量脏覆盖也失效。
+            overrides = None if self.prompt_locked() else self.job_prompt_overrides()
             self.resolved_prompts[name] = self.prompt_resolver().resolve(
                 name,
                 step_name=self.step_name,
-                prompt_overrides=self.job_prompt_overrides(),
+                prompt_overrides=overrides,
                 primary_template=self.primary_prompt_template(),
             )
         return self.resolved_prompts[name]

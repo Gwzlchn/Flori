@@ -40,6 +40,8 @@ const defaultSystem = ref<string | null>(null)
 const activeVersion = ref<string | null>(null)
 const versions = ref<{ version: string; note: string | null; created_at: string }[]>([])
 const selectedVersion = ref<'default' | string>('default')
+// 协议 prompt(如语义核验):模板只读展示,作用域/版本/保存控件全部隐藏,覆盖被后端 403。
+const locked = ref(false)
 const loading = ref(true)
 const saving = ref(false)
 
@@ -83,6 +85,7 @@ async function load() {
   loading.value = true
   try {
     const d = await api.get<PromptDetailWire>(`/api/prompts/${props.pipeline}/${props.step}${_query()}`)
+    locked.value = !!d.locked
     defaultTemplate.value = d.default_template ?? null
     defaultTemplates.value = d.default_templates ?? []
     defaultSystem.value = d.default_system ?? null
@@ -191,7 +194,7 @@ async function restoreDefault() {
     <div class="modal wide">
       <div class="hd">
         <b>
-          编辑 Prompt · {{ pipeline }} · {{ documentKind || 'common' }} · {{ label || step }}
+          {{ locked ? '查看' : '编辑' }} Prompt · {{ pipeline }} · {{ documentKind || 'common' }} · {{ label || step }}
         </b>
         <button class="ghost" @click="emit('close')"><X :size="16" /></button>
       </div>
@@ -201,8 +204,23 @@ async function restoreDefault() {
       </div>
 
       <div v-else class="bd">
+        <!-- 协议 prompt:只读展示,无作用域/版本/保存控件 -->
+        <template v-if="locked">
+          <div class="field" style="margin-bottom:0">
+            <label style="display:flex;align-items:center;gap:8px">
+              <span>Prompt(协议,只读)</span>
+              <span class="state-tag s-locked" data-test="locked-tag">锁定</span>
+            </label>
+            <pre class="default-tpl" style="max-height:340px" data-test="locked-content">{{ defaultContent }}</pre>
+            <div class="note-tip">
+              该步为锁定的协议 prompt:响应结构与服务端校验逻辑成对,不支持前端修改或领域覆盖。
+              如需调整,修改仓库 configs/prompts/templates/ 下的对应模板并随代码评审发布。
+            </div>
+          </div>
+        </template>
+
         <!-- 作用域 -->
-        <div class="field">
+        <div v-if="!locked" class="field">
           <label>作用域</label>
           <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
             <label style="display:flex;gap:6px;align-items:center;cursor:pointer">
@@ -218,7 +236,7 @@ async function restoreDefault() {
         </div>
 
         <!-- 版本下拉:默认 + 各历史版本(标当前激活) -->
-        <div class="field" style="margin-bottom:10px">
+        <div v-if="!locked" class="field" style="margin-bottom:10px">
           <label style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
             <span>版本</span>
             <span v-if="hasOverride" class="state-tag s-override">当前激活 v{{ activeVersion }}</span>
@@ -243,7 +261,7 @@ async function restoreDefault() {
         </div>
 
         <!-- prompt 编辑(预填当前生效 prompt;直接改) -->
-        <div class="field" style="margin-bottom:6px">
+        <div v-if="!locked" class="field" style="margin-bottom:6px">
           <label style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
             <span>Prompt(直接编辑)</span>
             <span style="flex:1"></span>
@@ -257,7 +275,7 @@ async function restoreDefault() {
         </div>
 
         <!-- 新版本备注(另存为新版本时记录) -->
-        <div class="field" style="margin-bottom:6px">
+        <div v-if="!locked" class="field" style="margin-bottom:6px">
           <label>版本备注(另存为新版本时记录,可空)</label>
           <input v-model="note" class="input" placeholder="如:加了配图要求 / 收紧字数" data-test="version-note" />
         </div>
@@ -277,18 +295,20 @@ async function restoreDefault() {
       </div>
 
       <div v-if="!loading" class="ft">
-        <button class="btn" :disabled="saving || !hasOverride" @click="restoreDefault"
+        <button v-if="!locked" class="btn" :disabled="saving || !hasOverride" @click="restoreDefault"
           data-test="restore-default" title="停用覆盖,派发回内置默认;保留全部历史版本(不删除)">
           <RotateCcw :size="15" />回到内置默认
         </button>
         <span style="flex:1"></span>
-        <button class="btn" @click="emit('close')">取消</button>
-        <button class="btn" :disabled="saving" @click="save('overwrite')">
-          <Check :size="16" />{{ hasOverride ? `覆盖当前版本 v${activeVersion}` : '保存为覆盖' }}
-        </button>
-        <button class="btn pri" :disabled="saving" @click="save('new')">
-          <GitBranch :size="15" />另存为新版本
-        </button>
+        <button class="btn" @click="emit('close')">{{ locked ? '关闭' : '取消' }}</button>
+        <template v-if="!locked">
+          <button class="btn" :disabled="saving" @click="save('overwrite')">
+            <Check :size="16" />{{ hasOverride ? `覆盖当前版本 v${activeVersion}` : '保存为覆盖' }}
+          </button>
+          <button class="btn pri" :disabled="saving" @click="save('new')">
+            <GitBranch :size="15" />另存为新版本
+          </button>
+        </template>
       </div>
     </div>
   </div>
@@ -308,6 +328,10 @@ async function restoreDefault() {
 .s-override {
   color: var(--info-700, #1d4ed8);
   background: var(--info-bg, #eff6ff);
+}
+.s-locked {
+  color: var(--warn-700, #b45309);
+  background: var(--warn-bg, #fffbeb);
 }
 .char-count {
   font-size: 11px;

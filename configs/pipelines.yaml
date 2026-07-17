@@ -240,6 +240,9 @@ video:
       needs: ["11_smart"]
       timeout: 180
       tags: []
+      # 协议 prompt:tracked 模板可读,prompt_locked 禁前端覆盖(响应 schema 与解析器成对,改模板须 bump version)。
+      prompt_template: semantic_attestation
+      prompt_locked: true
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
@@ -366,6 +369,8 @@ document:
       needs: ["05_smart", "04_translate"]
       timeout: 180
       tags: []
+      prompt_template: semantic_attestation
+      prompt_locked: true
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
@@ -469,6 +474,8 @@ audio:
       needs: ["04_smart_podcast"]
       timeout: 180
       tags: []
+      prompt_template: semantic_attestation
+      prompt_locked: true
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}

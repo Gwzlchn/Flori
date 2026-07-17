@@ -1012,7 +1012,7 @@ export interface paths {
          * Delete Prompt
          * @description 彻底删除该步 (scope,domain) 覆盖,连同其全部历史版本一并清除。无则 no-op。
          *     注:恢复默认/回内置默认请用 POST .../activate {version:null}(非破坏,保留历史);
-         *     此 DELETE 仅用于真正要丢弃所有版本的场景。
+         *     此 DELETE 仅用于真正要丢弃所有版本的场景。锁定步 403(与 PUT/activate 同口径)。
          */
         delete: operations["delete_prompt_api_prompts__pipeline___step__delete"];
         options?: never;
@@ -2697,6 +2697,8 @@ export interface components {
             needs: string[];
             /** Pool */
             pool: string | null;
+            /** Prompt Locked */
+            prompt_locked: boolean;
         };
         /** PipelinesResponse */
         PipelinesResponse: {
@@ -2761,6 +2763,8 @@ export interface components {
             is_ai: boolean;
             /** Label */
             label: string | null;
+            /** Locked */
+            locked: boolean;
             override: components["schemas"]["PromptOverrideResponse"] | null;
             /** Pipeline */
             pipeline: string;
@@ -2784,6 +2788,8 @@ export interface components {
             is_ai: boolean;
             /** Label */
             label: string | null;
+            /** Locked */
+            locked: boolean;
             /** Overrides */
             overrides: components["schemas"]["PromptOverrideScope"][];
             /** Pipeline */

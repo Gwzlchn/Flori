@@ -136,6 +136,10 @@ async def _index_document_note(
         provenance_data=(job_dir / provenance_rel).read_bytes(),
         read_file=read_file,
         sha256_file=sha256_file,
+        attestation_protocol=lambda: (
+            Path(__file__).resolve().parent.parent
+            / "configs/prompts/templates/semantic_attestation.md"
+        ).read_text(encoding="utf-8"),
     )
     assert len(records) == 1
     db.index_job_notes(
