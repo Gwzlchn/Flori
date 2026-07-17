@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, ExternalLink, LoaderCircle } from 'lucide-vue-next'
-import type { PDFDocumentProxy } from 'pdfjs-dist'
+import type { PDFDocumentProxy, TextLayer as PDFTextLayer } from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 
 const props = defineProps<{
@@ -11,13 +11,22 @@ const props = defineProps<{
 }>()
 
 const canvas = ref<HTMLCanvasElement | null>(null)
+const textLayer = ref<HTMLDivElement | null>(null)
 const loading = ref(true)
 const error = ref('')
 const currentPage = ref(Math.max(1, props.page || 1))
 const pageCount = ref(0)
 const viewportSize = ref({ width: 1, height: 1, scale: 1 })
 let documentProxy: PDFDocumentProxy | null = null
+let pdfjsModule: typeof import('pdfjs-dist') | null = null
+let textLayerRender: PDFTextLayer | null = null
 let renderToken = 0
+
+function clearTextLayer(): void {
+  textLayerRender?.cancel()
+  textLayerRender = null
+  textLayer.value?.replaceChildren()
+}
 
 const percent = (value: number) => `${Number(value.toFixed(6))}%`
 const overlayBoxes = computed(() => (props.bboxes || []).map((bbox) => ({
@@ -29,9 +38,10 @@ const overlayBoxes = computed(() => (props.bboxes || []).map((bbox) => ({
 
 async function renderPage(): Promise<void> {
   const token = ++renderToken
-  if (!documentProxy || !canvas.value) return
+  clearTextLayer()
+  if (!documentProxy || !canvas.value || !textLayer.value || !pdfjsModule) return
   const page = await documentProxy.getPage(currentPage.value)
-  if (token !== renderToken || !canvas.value) return
+  if (token !== renderToken || !canvas.value || !textLayer.value) return
   const viewport = page.getViewport({ scale: 1.6 })
   const context = canvas.value.getContext('2d')
   if (!context) throw new Error('canvas context unavailable')
@@ -43,13 +53,28 @@ async function renderPage(): Promise<void> {
     scale: viewport.scale,
   }
   await page.render({ canvasContext: context, viewport }).promise
+  const textContent = await page.getTextContent()
+  if (token !== renderToken || !textLayer.value) return
+  const layer = new pdfjsModule.TextLayer({
+    textContentSource: textContent,
+    container: textLayer.value,
+    viewport,
+  })
+  textLayerRender = layer
+  await layer.render()
+  if (token !== renderToken || textLayerRender !== layer) {
+    layer.cancel()
+  }
 }
 
 async function load(): Promise<void> {
+  renderToken += 1
+  clearTextLayer()
   loading.value = true
   error.value = ''
   try {
     const pdfjs = await import('pdfjs-dist')
+    pdfjsModule = pdfjs
     pdfjs.GlobalWorkerOptions.workerSrc = workerUrl
     documentProxy?.destroy()
     documentProxy = await pdfjs.getDocument({ url: props.url, withCredentials: true }).promise
@@ -85,8 +110,10 @@ watch(() => props.page, (page) => {
 onMounted(() => { void load() })
 onBeforeUnmount(() => {
   renderToken += 1
+  clearTextLayer()
   documentProxy?.destroy()
   documentProxy = null
+  pdfjsModule = null
 })
 </script>
 
@@ -105,6 +132,7 @@ onBeforeUnmount(() => {
       <div v-if="loading" class="pdfjs-loading"><LoaderCircle :size="22" />正在渲染 PDF…</div>
       <div class="pdfjs-page">
         <canvas ref="canvas" />
+        <div ref="textLayer" class="textLayer" aria-label="PDF 可选择文字层" />
         <span
           v-for="(box, index) in overlayBoxes"
           :key="index"
@@ -135,5 +163,64 @@ onBeforeUnmount(() => {
 @media (max-width: 600px) {
   .pdfjs-toolbar { align-items: flex-start; flex-direction: column; }
   .pdfjs-stage { min-height: 72vh; }
+}
+</style>
+
+<style>
+.pdfjs-page .textLayer {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: clip;
+  line-height: 1;
+  text-align: initial;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: CanvasText;
+}
+
+.pdfjs-page .textLayer :is(span, br) {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+}
+
+.pdfjs-page .textLayer > :not(.markedContent),
+.pdfjs-page .textLayer .markedContent span:not(.markedContent) {
+  z-index: 1;
+}
+
+.pdfjs-page .textLayer span.markedContent {
+  top: 0;
+  height: 0;
+}
+
+.pdfjs-page .textLayer span[role='img'] {
+  cursor: default;
+  user-select: none;
+}
+
+.pdfjs-page .textLayer ::selection {
+  background: rgb(0 0 255 / 25%);
+}
+
+.pdfjs-page .textLayer br::selection {
+  background: transparent;
+}
+
+.pdfjs-page .textLayer .endOfContent {
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: 0;
+  display: block;
+  cursor: default;
+  user-select: none;
+}
+
+.pdfjs-page .textLayer.selecting .endOfContent {
+  top: 0;
 }
 </style>

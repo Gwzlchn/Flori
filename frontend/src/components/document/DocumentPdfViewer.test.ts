@@ -5,19 +5,34 @@ import DocumentPdfViewer from './DocumentPdfViewer.vue'
 const mocks = vi.hoisted(() => {
   const destroy = vi.fn()
   const render = vi.fn(() => ({ promise: Promise.resolve() }))
-  const getPage = vi.fn(async () => ({
+  const getTextContent = vi.fn(async () => ({ items: [{ str: 'Selectable PDF text' }], styles: {} }))
+  const getPage = vi.fn(async (page: number) => ({
     getViewport: ({ scale }: { scale: number }) => ({ width: 960, height: 1280, scale }),
+    getTextContent,
     render,
+    page,
   }))
   const getDocument = vi.fn(() => ({
     promise: Promise.resolve({ numPages: 3, getPage, destroy }),
   }))
-  return { destroy, render, getPage, getDocument }
+  const textLayerCancel = vi.fn()
+  const textLayerRender = vi.fn(async function (this: { container: HTMLElement; textContentSource: { items: { str: string }[] } }) {
+    for (const item of this.textContentSource.items) {
+      const span = document.createElement('span')
+      span.textContent = item.str
+      this.container.append(span)
+    }
+  })
+  const TextLayer = vi.fn(function (this: object, options: object) {
+    return { ...options, render: textLayerRender, cancel: textLayerCancel }
+  })
+  return { destroy, render, getTextContent, getPage, getDocument, TextLayer, textLayerRender, textLayerCancel }
 })
 
 vi.mock('pdfjs-dist', () => ({
   GlobalWorkerOptions: { workerSrc: '' },
   getDocument: mocks.getDocument,
+  TextLayer: mocks.TextLayer,
 }))
 vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '/pdf.worker.mjs' }))
 
@@ -31,6 +46,10 @@ describe('DocumentPdfViewer', () => {
     mocks.getPage.mockClear()
     mocks.render.mockClear()
     mocks.destroy.mockClear()
+    mocks.getTextContent.mockClear()
+    mocks.TextLayer.mockClear()
+    mocks.textLayerRender.mockClear()
+    mocks.textLayerCancel.mockClear()
   })
 
   it('用 PDF.js 渲染指定页并按 bbox 叠加证据高亮', async () => {
@@ -44,6 +63,12 @@ describe('DocumentPdfViewer', () => {
     await vi.waitFor(() => expect(mocks.getPage).toHaveBeenCalledWith(2))
 
     expect(mocks.getDocument).toHaveBeenCalledWith(expect.objectContaining({ withCredentials: true }))
+    expect(mocks.getTextContent).toHaveBeenCalledOnce()
+    expect(mocks.TextLayer).toHaveBeenCalledWith(expect.objectContaining({
+      container: expect.any(HTMLElement),
+      viewport: expect.objectContaining({ width: 960, height: 1280, scale: 1.6 }),
+    }))
+    expect(wrapper.get('.textLayer').text()).toBe('Selectable PDF text')
     expect(wrapper.text()).toContain('第 2 / 3 页')
     const highlight = wrapper.get('.pdfjs-highlight')
     expect(highlight.attributes('style')).toContain('left: 16%')
@@ -58,6 +83,18 @@ describe('DocumentPdfViewer', () => {
     await wrapper.get('[aria-label="下一页"]').trigger('click')
     await vi.waitFor(() => expect(mocks.getPage).toHaveBeenCalledWith(2))
     expect(wrapper.text()).toContain('第 2 / 3 页')
+    expect(mocks.textLayerCancel).toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('扫描版页面没有文本项时仍保留画布阅读', async () => {
+    mocks.getTextContent.mockResolvedValueOnce({ items: [], styles: {} })
+    const wrapper = mount(DocumentPdfViewer, { props: { url: '/scanned.pdf', page: 1 } })
+    await vi.waitFor(() => expect(mocks.TextLayer).toHaveBeenCalledOnce())
+
+    expect(wrapper.find('canvas').exists()).toBe(true)
+    expect(wrapper.get('.textLayer').text()).toBe('')
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
     wrapper.unmount()
   })
 })
