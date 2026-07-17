@@ -58,6 +58,9 @@ _PAGINATION_TOKEN_RE = re.compile(
     r"(?:^|[-_\s])(pagination|pager|next[-_]?page|page[-_]?next)(?:$|[-_\s])",
     re.I,
 )
+_CONTENT_TOKEN_RE = re.compile(
+    r"(?:^|[-_\s])(article|content|entry|main|post)(?:$|[-_\s])", re.I,
+)
 _BLOCK_TAGS = frozenset({
     "article", "main", "section", "div", "p", "h1", "h2", "h3", "h4",
     "h5", "h6", "ul", "ol", "blockquote", "pre", "table", "figure",
@@ -234,6 +237,16 @@ def _select_body(root: HtmlNode) -> tuple[HtmlNode, str]:
         candidates = _nodes(root, tag)
         if candidates:
             return max(candidates, key=lambda node: _effective_len(_text(node))), tag
+    content_candidates = [
+        node for node in root.descendants()
+        if node.tag in {"div", "section"}
+        and _CONTENT_TOKEN_RE.search(_tokens(node))
+        and not _is_noise(node)
+    ]
+    if content_candidates:
+        return max(
+            content_candidates, key=lambda node: _effective_len(_text(node)),
+        ), "content"
     body = _first(root, "body")
     return (body, "body") if body is not None else (root, "document")
 
@@ -877,7 +890,7 @@ class GenericHtmlAdapter:
             reasons.append("canonical_cross_origin")
 
         metadata, title_node = self._metadata(root, body, meta, article_json)
-        self._merge_sidecar_metadata(metadata, sidecar)
+        reasons.extend(self._merge_sidecar_metadata(metadata, sidecar))
         builder = _ContentBuilder(actual_fingerprint, base_url, self.job_dir)
         builder.build(body, title=metadata.get("title", ""), title_node=title_node)
         hero_image = metadata.get("hero_image")
@@ -894,6 +907,21 @@ class GenericHtmlAdapter:
         coverage = min(1.0, body_chars / declared_chars) if declared_chars else None
         pagination = self._has_pagination(root)
         read_more = any(_READ_MORE_RE.search(_tokens(node)) for node in body.descendants())
+        heading_count = sum(
+            node.tag in {"h1", "h2", "h3", "h4", "h5", "h6"}
+            for node in body.descendants()
+        )
+        pdf_candidate = bool(_meta_first(meta, "citation_pdf_url")) or any(
+            urlparse(node.attrs.get("href", "")).path.lower().endswith(".pdf")
+            for node in body.descendants("a")
+        )
+        metadata_only = (
+            context.document_kind == "research_paper"
+            and pdf_candidate
+            and body_chars < 4000
+            and heading_count < 3
+            and not declared_body
+        )
 
         if not body_text:
             rejected.append("body_missing")
@@ -911,6 +939,8 @@ class GenericHtmlAdapter:
             reasons.append("pagination_detected")
         if read_more:
             reasons.append("read_more_boundary_detected")
+        if metadata_only:
+            rejected.append("full_text_unavailable")
         if body_kind in {"body", "document"}:
             reasons.append("body_boundary_uncertain")
 
@@ -961,6 +991,7 @@ class GenericHtmlAdapter:
                 "body_chars": body_chars,
                 "declared_body_chars": declared_chars or None,
                 "extraction_coverage": round(coverage, 6) if coverage is not None else None,
+                "full_text_candidate": not metadata_only,
                 "blocks": len(builder.blocks),
                 "headings": sum(block["kind"] == "heading" for block in builder.blocks),
                 "lists": sum(block["kind"] == "list" for block in builder.blocks),
@@ -1023,9 +1054,9 @@ class GenericHtmlAdapter:
         h1 = _first(body, "h1")
         title_tag = _first(root, "title")
         title = (
-            _meta_first(meta, "og:title", "twitter:title")
+            (_text(h1) if h1 is not None else "")
             or str(article_json.get("headline") or "").strip()
-            or (_text(h1) if h1 is not None else "")
+            or _meta_first(meta, "og:title", "twitter:title")
             or (_text(title_tag) if title_tag is not None else "")
         )
         authors = _author_names(article_json.get("author"))
@@ -1057,7 +1088,7 @@ class GenericHtmlAdapter:
             "publisher": publisher,
             "published_at": (
                 str(article_json.get("datePublished") or "").strip()
-                or _meta_first(meta, "article:published_time", "date")
+                or _meta_first(meta, "article:published_time")
             ),
             "updated_at": (
                 str(article_json.get("dateModified") or "").strip()
@@ -1073,10 +1104,16 @@ class GenericHtmlAdapter:
         }, h1 or title_tag
 
     @staticmethod
-    def _merge_sidecar_metadata(metadata: dict[str, Any], sidecar: Mapping[str, Any]) -> None:
+    def _merge_sidecar_metadata(
+        metadata: dict[str, Any], sidecar: Mapping[str, Any],
+    ) -> list[str]:
+        reasons: list[str] = []
+        sidecar_title = str(sidecar.get("title") or "").strip()
+        if sidecar_title and metadata.get("title") and sidecar_title != metadata["title"]:
+            reasons.append("metadata_title_conflict")
         for target, source in (
             ("title", "title"), ("publisher", "sitename"),
-            ("published_at", "date"),
+            ("published_at", "published_at"), ("updated_at", "updated_at"),
         ):
             if not metadata.get(target) and str(sidecar.get(source) or "").strip():
                 metadata[target] = str(sidecar[source]).strip()
@@ -1084,6 +1121,7 @@ class GenericHtmlAdapter:
             metadata["authors"] = [
                 item.strip() for item in str(sidecar["author"]).split(";") if item.strip()
             ]
+        return reasons
 
     @staticmethod
     def _meta_node(root: HtmlNode, *keys: str) -> HtmlNode | None:

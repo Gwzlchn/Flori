@@ -109,3 +109,57 @@ def test_unsafe_embed_is_sanitized_and_degrades_quality(tmp_path):
     assert quality["status"] == "degraded"
     assert "unsafe_embed_ignored" in quality["reasons"]
     assert quality["metrics"]["unsafe_embeds"] == 1
+
+
+def test_content_container_beats_navigation_h1_and_template_date(tmp_path):
+    prose = " ".join(["The assignment implements attention, RoPE, and optimization."] * 8)
+    source = f"""<!doctype html><html><head>
+    <meta name="date" content="2013-01-01"><title>Main Navigation</title></head><body>
+    <div class="trigger"><h1>Main Navigation</h1><p>Menu</p></div>
+    <div class="page-content"><h1>Assignment 1: Build Your Own LLaMa</h1>
+    <p>{prose}</p><h2>Submission Instructions</h2><p>{prose}</p></div>
+    </body></html>"""
+    job_dir = tmp_path / "multi-h1-course"
+    (job_dir / "input").mkdir(parents=True)
+    (job_dir / "input" / "source.html").write_text(source, encoding="utf-8")
+    (job_dir / "input" / "metadata.json").write_text(
+        '{"title":"Main Navigation","date":"2013-01-01"}', encoding="utf-8",
+    )
+
+    document, quality = parse_generic_html(job_dir, {
+        "id": job_dir.name,
+        "content_type": "document",
+        "document_kind": "article",
+        "url": "https://cmu.example/assignments/assignment1",
+    })
+
+    assert document["metadata"]["titles"]["original"] == (
+        "Assignment 1: Build Your Own LLaMa"
+    )
+    assert document["metadata"]["published_at"] == ""
+    assert quality["metrics"]["body_candidate"] == "content"
+    assert "body_boundary_uncertain" not in quality["reasons"]
+    assert "metadata_title_conflict" in quality["reasons"]
+
+
+def test_research_paper_landing_page_with_pdf_link_is_rejected(tmp_path):
+    source = """<!doctype html><html><head>
+    <meta name="citation_pdf_url" content="https://example.org/report.pdf">
+    </head><body><main><h1>Research report</h1>
+    <p>This page contains bibliographic metadata and an abstract, but not the report body.
+    The complete publication is available only from the linked PDF download.</p>
+    <a href="https://example.org/report.pdf">Download full text</a>
+    </main></body></html>"""
+    job_dir = tmp_path / "metadata-only-paper"
+    (job_dir / "input").mkdir(parents=True)
+    (job_dir / "input" / "source.html").write_text(source, encoding="utf-8")
+
+    _document, quality = parse_generic_html(job_dir, {
+        "id": job_dir.name,
+        "content_type": "document",
+        "document_kind": "research_paper",
+        "url": "https://example.org/report",
+    })
+
+    assert quality["status"] == "rejected"
+    assert "full_text_unavailable" in quality["reasons"]

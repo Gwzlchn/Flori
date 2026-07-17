@@ -32,6 +32,7 @@ _NOISE_CLASSES = frozenset({
 _FIGURE_LABEL = re.compile(r"(?:Figure|Fig\.?|图)\s*([A-Za-z]?\d+(?:[.:-]\d+)*)", re.I)
 _TABLE_LABEL = re.compile(r"(?:Table|表)\s*([A-Za-z]?\d+(?:[.:-]\d+)*)", re.I)
 _EMAIL = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
+_ARXIV_PATH = re.compile(r"/(?:abs|html|pdf)/([0-9]{4}\.[0-9]{4,5})(v\d+)?(?:\.pdf)?(?:$|[/?#])", re.I)
 
 
 def _has_class(node: HtmlNode, *names: str) -> bool:
@@ -131,18 +132,19 @@ class ScholarlyHtmlAdapter:
             if key and value:
                 meta.setdefault(key, []).append(value)
 
+        sidecar = self._sidecar_metadata()
         title_node = first_node(
             self.root,
             lambda node: _class_contains(node, "title_document") or node.tag == "h1",
         )
-        title = self._meta_first(meta, "citation_title", "dc.title", "og:title")
+        title = str(sidecar.get("title") or "").strip()
+        title = title or self._meta_first(meta, "citation_title", "dc.title", "og:title")
         title = title or (title_node.text() if title_node else "")
         abstract_node = first_node(self.root, lambda node: _class_contains(node, "abstract"))
         abstract = self._meta_first(meta, "citation_abstract", "dc.description")
         if not abstract and abstract_node:
             abstract = re.sub(r"^Abstract\s*", "", abstract_node.text(), flags=re.I).strip()
 
-        sidecar = self._sidecar_metadata()
         authors = self._dom_authors(sidecar)
         if not authors:
             names = meta.get("citation_author", []) or meta.get("author", [])
@@ -154,14 +156,9 @@ class ScholarlyHtmlAdapter:
                 "emails": [emails[index]] if index < len(emails) else [],
                 "notes": [],
             } for index, name in enumerate(names)]
-        if not authors and isinstance(sidecar.get("authors"), list):
-            authors = [
-                {
-                    "name": str(item.get("name") if isinstance(item, dict) else item),
-                    "affiliations": [], "emails": [], "notes": [],
-                }
-                for item in sidecar["authors"] if str(item).strip()
-            ]
+        sidecar_authors = self._sidecar_authors(sidecar)
+        if not authors or (len(sidecar_authors) > 1 and len(authors) != len(sidecar_authors)):
+            authors = sidecar_authors
         institutions = list(dict.fromkeys(
             affiliation for author in authors for affiliation in author["affiliations"]
         ))
@@ -182,22 +179,35 @@ class ScholarlyHtmlAdapter:
             ),
             *(note for author in authors for note in author.get("notes", []) if note),
         ]))
-        source_text = self.root.text()
-        arxiv_match = re.search(r"\barXiv:(\d{4}\.\d{4,5})(v\d+)?\b", source_text, re.I)
-        arxiv_id = self._meta_first(meta, "citation_arxiv_id")
-        arxiv_id = arxiv_id or (arxiv_match.group(1) if arxiv_match else "")
+        entry_match = self._arxiv_entry_match(sidecar)
+        citation_arxiv_id = self._normalized_arxiv_id(
+            self._meta_first(meta, "citation_arxiv_id"),
+        )
+        sidecar_arxiv_id = self._normalized_arxiv_id(
+            str(sidecar.get("arxiv_id") or ""),
+        )
+        arxiv_id = (
+            entry_match.group(1) if entry_match
+            else sidecar_arxiv_id or citation_arxiv_id
+        )
+        if entry_match and citation_arxiv_id and citation_arxiv_id != arxiv_id:
+            self.reasons.append("metadata_identifier_conflict")
         arxiv_version = self._meta_first(meta, "citation_arxiv_version")
-        arxiv_version = arxiv_version or (arxiv_match.group(2) if arxiv_match else "")
+        arxiv_version = arxiv_version or (entry_match.group(2) if entry_match else "")
         return {
             "title": title or str(sidecar.get("title") or ""),
             "original_title": title,
             "authors": authors,
             "institutions": institutions,
             "author_notes": author_notes,
-            "abstract": abstract or str(sidecar.get("abstract") or ""),
+            "abstract": str(sidecar.get("abstract") or "").strip() or abstract,
             "keywords": self._meta_values(meta, "citation_keywords", "keywords"),
-            "published_at": self._meta_first(meta, "citation_publication_date", "article:published_time"),
-            "updated_at": self._meta_first(meta, "citation_online_date", "article:modified_time"),
+            "published_at": str(sidecar.get("published_at") or "").strip() or self._meta_first(
+                meta, "citation_publication_date", "article:published_time",
+            ),
+            "updated_at": str(sidecar.get("updated_at") or "").strip() or self._meta_first(
+                meta, "citation_online_date", "article:modified_time",
+            ),
             "publisher": self._meta_first(meta, "citation_publisher", "og:site_name"),
             "venue": self._meta_first(meta, "citation_journal_title", "citation_conference_title"),
             "license": license_text,
@@ -211,6 +221,10 @@ class ScholarlyHtmlAdapter:
                 "doi": self._meta_first(meta, "citation_doi", "dc.identifier"),
                 "arxiv_id": arxiv_id,
             },
+            "language": str(
+                sidecar.get("language") or sidecar.get("lang")
+                or self._html_language() or ""
+            ).strip(),
         }
 
     def _sidecar_metadata(self) -> dict[str, Any]:
@@ -220,6 +234,59 @@ class ScholarlyHtmlAdapter:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
             return {}
         return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _sidecar_authors(sidecar: dict[str, Any]) -> list[dict[str, Any]]:
+        raw = sidecar.get("authors")
+        if not isinstance(raw, list):
+            return []
+        result: list[dict[str, Any]] = []
+        for item in raw:
+            if isinstance(item, dict):
+                name = str(item.get("name") or "").strip()
+                affiliations = item.get("affiliations")
+                emails = item.get("emails")
+                notes = item.get("notes")
+            else:
+                name = str(item).strip()
+                affiliations = emails = notes = None
+            if not name:
+                continue
+            result.append({
+                "name": name,
+                "affiliations": ScholarlyHtmlAdapter._metadata_values(affiliations),
+                "emails": ScholarlyHtmlAdapter._metadata_values(emails),
+                "notes": ScholarlyHtmlAdapter._metadata_values(notes),
+            })
+        return result
+
+    @staticmethod
+    def _metadata_values(value: object) -> list[str]:
+        raw = value if isinstance(value, list) else [value]
+        return [str(item).strip() for item in raw if item is not None and str(item).strip()]
+
+    @staticmethod
+    def _normalized_arxiv_id(value: str) -> str:
+        match = re.search(r"(?:arXiv:)?(\d{4}\.\d{4,5})(?:v\d+)?", value, re.I)
+        return match.group(1) if match else ""
+
+    def _html_language(self) -> str:
+        node = first_node(self.root, lambda item: item.tag == "html")
+        return node.attrs.get("lang", "") if node is not None else ""
+
+    def _arxiv_entry_match(self, sidecar: dict[str, Any]) -> re.Match[str] | None:
+        for value in (
+            self.job.get("url"), self.job.get("final_url"),
+            sidecar.get("source_url"), sidecar.get("final_url"),
+        ):
+            parsed = urlparse(str(value or ""))
+            if parsed.hostname and parsed.hostname.lower().removeprefix("www.") in {
+                "arxiv.org", "ar5iv.labs.arxiv.org",
+            }:
+                match = _ARXIV_PATH.search(parsed.path + "?")
+                if match:
+                    return match
+        return None
 
     @staticmethod
     def _meta_first(meta: dict[str, list[str]], *keys: str) -> str:

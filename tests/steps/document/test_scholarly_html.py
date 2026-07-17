@@ -209,6 +209,65 @@ def test_ar5iv_grouped_author_header_uses_sidecar_names_and_line_mapping(tmp_pat
     )
 
 
+def test_arxiv_identity_uses_entry_url_and_sidecar_not_reference_text(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs_arxiv_2309.06180"
+    (job_dir / "input").mkdir(parents=True)
+    raw = b"""<html><body><article class="ltx_document ltx_authors_1line">
+      <h1 class="ltx_title_document">PagedAttention</h1>
+      <div class="ltx_authors"><span class="ltx_creator ltx_role_author">
+        <span class="ltx_personname">Ada One1 Bob Two2 Carol Three1</span>
+        <span class="ltx_affiliation">1 Example University 2 Example Lab</span>
+      </span></div>
+      <div class="ltx_abstract">Serving systems need deterministic identity.</div>
+      <section><h2>References</h2><p>Related work. arXiv:2207.00032.</p></section>
+    </article></body></html>"""
+    (job_dir / "input" / "source.html").write_bytes(raw)
+    (job_dir / "input" / "metadata.json").write_text(json.dumps({
+        "title": "Efficient Memory Management for Large Language Model Serving with PagedAttention",
+        "authors": ["Ada One", "Bob Two", "Carol Three"],
+        "published_at": "2023-09-12",
+        "updated_at": "2023-09-12",
+    }), encoding="utf-8")
+
+    document, quality = parse_scholarly_html(job_dir, {
+        "job_id": job_dir.name,
+        "document_kind": "research_paper",
+        "url": "https://arxiv.org/abs/2309.06180",
+        "source_fingerprint": _fingerprint(raw),
+    })
+
+    metadata = document["metadata"]
+    assert metadata["titles"]["original"].startswith("Efficient Memory Management")
+    assert metadata["identifiers"]["arxiv_id"] == "2309.06180"
+    assert [author["name"] for author in metadata["authors"]] == [
+        "Ada One", "Bob Two", "Carol Three",
+    ]
+    assert metadata["published_at"] == "2023-09-12"
+    assert metadata["updated_at"] == "2023-09-12"
+    assert "metadata_identifier_conflict" not in quality["reasons"]
+
+
+def test_arxiv_entry_identity_wins_conflicting_citation_meta(tmp_path: Path) -> None:
+    job_dir = tmp_path / "jobs_arxiv_2205.14135"
+    (job_dir / "input").mkdir(parents=True)
+    raw = b"""<html><head><meta name="citation_arxiv_id" content="2102.08602">
+      </head><body><article><h1>FlashAttention</h1>
+      <p>This paper has enough scholarly body text for identity validation.</p>
+      </article></body></html>"""
+    (job_dir / "input" / "source.html").write_bytes(raw)
+
+    document, quality = parse_scholarly_html(job_dir, {
+        "job_id": job_dir.name,
+        "document_kind": "research_paper",
+        "url": "https://arxiv.org/abs/2205.14135",
+        "source_fingerprint": _fingerprint(raw),
+    })
+
+    assert document["metadata"]["identifiers"]["arxiv_id"] == "2205.14135"
+    assert quality["status"] == "degraded"
+    assert "metadata_identifier_conflict" in quality["reasons"]
+
+
 def test_appendix_visuals_are_collected_and_algorithms_are_not_figures(tmp_path: Path) -> None:
     job_dir = tmp_path / "job_appendix_visuals"
     (job_dir / "input").mkdir(parents=True)
