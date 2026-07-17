@@ -210,7 +210,7 @@ flori/
 - 品牌 **Flori**（README/文档/UI 标题）；技术标识符全小写 `flori`（仓库/包/镜像/容器/卷/CLI）；env 前缀 `FLORI_`。GitHub 仓库 `Gwzlchn/Flori`。
 
 ### 目录布局（顶层契约）
-- 入 git：`api/ shared/ scheduler/ worker/ steps/ frontend/ configs/ docker/ deploy/ scripts/ tests/ docs/` + 项目 Codex skill `.agents/skills/` + 根级 `*.md / pyproject.toml / docker-compose*.yml / .github/ / .gitignore / .dockerignore / .env.example`。
+- 入 git：`api/ shared/ scheduler/ worker/ steps/ frontend/ configs/ docker/ deploy/ scripts/ tests/ docs/` + 项目 agent skills `.agents/skills/`（Claude/Codex 共用，Claude 经 `.claude/skills` symlink 读取）+ 根级 `*.md / pyproject.toml / docker-compose*.yml / .github/ / .gitignore / .dockerignore / .env.example`。
 - **禁 `_前缀` 顶层目录**。本地专用 → `.local/`（gitignored）；可分享部署配方 → `deploy/`（入 git,密钥用 `${ENV}` 外置 + `.env.example`）。
 - **永不入 git**：运行时数据（`data/ inbox/ output/ backups/` + Docker 命名卷）、密钥（`.env`、`deploy/**/.env`、`deploy/tunnel/ssh/`）。
 - `inbox/` = local_dir 订阅监听目录（丢文件即入库）；`.local/processing/<日期>/` = 每次迭代工作日志（规范见该目录根的 `迭代记录规范.txt`）。
@@ -317,7 +317,7 @@ docker compose -f docker-compose.yml -f .local/docker-compose.uptest.yml --env-f
 - Flori MCP server 的方向是把知识库作为 MCP 提供给 agent，工具围绕搜索、读取、概念图谱、问答等能力扩展。传输、契约和安全边界要与 `docs/03-contracts.md` / MCP 路由保持同步。
 - `flori.wiki` HTTPS 证书来自 DNS-01 续期流程；未备案杭州 ECS 存在 SNI 阻断现实。证书/续期脚本、Caddy 和 tunnel 改动前先查 `.local/acme/` 与部署文件。
 - 已上线的“工厂非仓库”能力包括概念图谱、跨源综合问答、概念雷达/周报。相关后端端点、MCP 工具和前端视图要保持一致；图谱深链初开要注意容器尺寸和 canvas 0x0 问题。
-- 前端视觉验收用 Dockerized Playwright MCP：`$PLAYWRIGHT_MCP_WRAPPER` 运行官方 `mcr.microsoft.com/playwright/mcp`，`--network host`，挂当前项目到 `/workspace`，输出到 `$FLORI_WORKING_DIR/tmp/playwright-mcp`。常规 UI 验证至少覆盖 3 个 CSS viewport：4K 显示器 `3840x2160`、14 寸 MacBook `1512x982`、iPhone 16 Pro Max `440x956`。
+- 前端视觉验收用 Dockerized Playwright MCP：常驻容器 `playwright-mcp`（官方 `mcr.microsoft.com/playwright/mcp`，`--network host`），Claude Code 与 Codex 统一以 `http://127.0.0.1:8931/mcp` 接入；挂本机 coding 根到 `/workspace`，输出落 `/tmp/flori-work/playwright-mcp`。常规 UI 验证至少覆盖 3 个 CSS viewport：4K 显示器 `3840x2160`、14 寸 MacBook `1512x982`、iPhone 16 Pro Max `440x956`。
 - NAS 部署/重跑：`api`、`scheduler` 是长驻进程，代码改动需重启；步骤子进程通常自动重载。强制重跑某步要理解 `.done` 与 input hash，必要时删对应 done marker 或走专门 rerun API。
 - 下载网络路由使用 worker 自动探测的 `net-cn` / `net-global` 区域 tag。旧 `net-proxy` / `net-direct` / `bili` 路由 tag 已废弃；URL 分类在 scheduler enqueue 时决定，代理是 worker 本地问题。
 - 并发槽模型是 holder SET，不是裸计数器：`pool:{pool}:holders` / `res:{resource}:holders`，`used = SCARD`，holder 是 `exec_id`。释放用 `SREM`，幂等；查槽不要再看旧 `:count`。
@@ -327,7 +327,7 @@ docker compose -f docker-compose.yml -f .local/docker-compose.uptest.yml --env-f
 
 ### 凭证与本机 secret
 - MCP 凭证已迁到 `~/.bashrc`：`CONTEXT7_API_KEY` 和 `GITHUB_COPILOT_MCP_TOKEN`。`~/.codex/config.toml` 只引用环境变量；真实值不要进仓库。
-- Playwright MCP 无 secret，使用本机 Docker wrapper `$PLAYWRIGHT_MCP_WRAPPER`。
+- Playwright MCP 无 secret，走常驻容器 `playwright-mcp` 的本机 HTTP 端点；旧 stdio wrapper 脚本仅作回退保留。
 - Claude worker 认证现在按 worker 独立 home 管理：`$FLORI_WORKER_HOME_ROOT/<name>/` 内含 `.claude/` 凭证副本。临时用某个 worker home 跑批任务前，先 `FORCE=1 scripts/seed-worker-home.sh <name>` 重 seed，并立即跑完，避免 OAuth refresh 轮换导致闲置副本失效。
 - B 站字幕下载依赖 `/data/cookies/bilibili.txt`。该文件过期会导致匿名下载、无字幕、降清晰度。刷新时从应用凭证库读取有效 `bili_cookies`，写 Netscape cookie 文件并 `chmod 600`；不要把 cookie 原文写进日志或文档。
 - worker registration token 属本地运行 secret：来源在 `.local/docker-compose.uptest.yml`，运行态在 Redis `runner:registration_token`。只记录位置和恢复流程，不记录值。

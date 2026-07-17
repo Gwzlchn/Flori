@@ -1,6 +1,6 @@
 ---
 name: flori-delivery-train
-description: Plan and execute Flori repository delivery through one unified lifecycle for either a single review-first change or multiple dependent units. Use when Codex changes, reviews, tests, commits, releases, deploys, or coordinates agents/worktrees in the Flori repo and must select scale, risk, and release profiles, reuse evidence, enforce review gates, or close a release train without micro-commit churn.
+description: Plan and execute Flori repository delivery through one unified lifecycle for either a single review-first change or multiple dependent units. Use when an agent (Codex or Claude Code) changes, reviews, tests, commits, releases, deploys, or coordinates agents/worktrees in the Flori repo and must select scale, risk, and release profiles, reuse evidence, enforce review gates, or close a release train without micro-commit churn.
 ---
 
 # Flori Delivery Train

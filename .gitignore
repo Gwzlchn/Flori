@@ -38,7 +38,8 @@ LOCAL.md
 .githooks/
 shared/PLAN.md
 plans/
-.claude/
+.claude/*
+!.claude/skills
 .coverage
 
 # 个人暂存/归档(笔记、旧计划、部署速查等,不入 git)
