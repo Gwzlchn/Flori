@@ -100,7 +100,11 @@ class ReviewExecution:
         )
 
     def write_smart_note(
-        self, content: str, image_assets: list | None = None,
+        self,
+        content: str,
+        image_assets: list | None = None,
+        *,
+        title: str | None = None,
     ) -> str:
         provider, model = self.ai.provider_model()
         if image_assets:
@@ -120,11 +124,12 @@ class ReviewExecution:
             f"output/versions/notes_smart_{safe(provider)}_{safe(model)}_"
             f"{now.strftime('%Y%m%d-%H%M%S')}.md"
         )
-        header = (
+        generation = (
             f"> 生成于 {now.strftime('%Y/%m/%d %H:%M:%S')} · "
             f"方式 {provider} · 模型 {model}\n\n"
         )
-        self.artifacts.write(rel, header + content)
+        header = f"# {title.strip()}\n\n" if isinstance(title, str) and title.strip() else ""
+        self.artifacts.write(rel, header + generation + content)
         return rel
 
     @staticmethod

@@ -62,7 +62,8 @@ async def _overview_map(db: Database, config: AppConfig) -> dict[str, dict]:
 
 def _job_brief(j) -> dict:
     return {
-        "job_id": j.id, "content_type": j.content_type, "status": j.status.value,
+        "job_id": j.id, "content_type": j.content_type,
+        "document_kind": j.document_kind or None, "status": j.status.value,
         "created_at": j.created_at.isoformat(), "title": j.title,
         "progress_pct": j.progress_pct, "source": j.source, "domain": j.domain,
         "collection_id": j.collection_id,

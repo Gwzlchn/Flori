@@ -291,7 +291,7 @@ docker run -d --name "$SOURCE_DB_CONTAINER" \
   -v "$SOURCE_DATA:/fixture" \
   -w /app \
   "$APP_IMAGE" \
-  python -u -c 'import signal; from shared.db import Database; from shared.models import Job; database=Database("/fixture/db/analyzer.db"); database.init_schema(); job=Job(id="job-integration", content_type="article", pipeline="article", title="Redis AOF restore", lineage_key="job-integration"); database.create_job(job); assert database.get_job(job.id).title == job.title; print("database-ready", flush=True); signal.pause()' \
+  python -u -c 'import signal; from shared.db import Database; from shared.models import Job; database=Database("/fixture/db/analyzer.db"); database.init_schema(); job=Job(id="job-integration", content_type="document", pipeline="document", document_kind="article", title="Redis AOF restore", lineage_key="job-integration"); database.create_job(job); assert database.get_job(job.id).title == job.title; print("database-ready", flush=True); signal.pause()' \
   >/dev/null
 wait_for_database
 

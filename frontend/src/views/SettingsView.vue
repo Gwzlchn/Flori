@@ -82,7 +82,7 @@ onMounted(loadAuth)
         <span class="type-pill" style="background:var(--brand-50);color:var(--brand-600)"><FileCode2 :size="17" /></span>
         <div class="body">
           <div class="title">流水线 &amp; 提示词</div>
-          <div class="meta"><span>查看四条内容流水线,编辑每个 AI 步的提示词覆盖(全局/按领域)</span></div>
+          <div class="meta"><span>查看三类内容流水线,编辑 AI 步的全局、领域与文档体裁覆盖</span></div>
         </div>
         <ChevronRight :size="16" class="dim" />
       </div>

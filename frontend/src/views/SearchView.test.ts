@@ -19,6 +19,7 @@ const api = {
 vi.mock('../composables/useApi', () => ({ useApi: () => api }))
 
 import SearchView from './SearchView.vue'
+import { installSourceCatalog } from '../constants/sources'
 
 function makeItem(over: Record<string, any> = {}) {
   return {
@@ -27,6 +28,7 @@ function makeItem(over: Record<string, any> = {}) {
     note_type: 'smart',
     snippet: '一段关于<mark>神经网络</mark>的摘要',
     content_type: 'video',
+    document_kind: null,
     domain: 'ai',
     collection_id: null,
     canonical_evidence: [{
@@ -44,6 +46,19 @@ function makeItem(over: Record<string, any> = {}) {
 beforeEach(() => {
   vi.clearAllMocks()
   vi.useFakeTimers()
+  installSourceCatalog({
+    content_types: [
+      { type: 'video', label: '视频', pipeline: 'video', upload_extensions: [] },
+      { type: 'document', label: '文档', pipeline: 'document', upload_extensions: ['.pdf'] },
+      { type: 'audio', label: '播客', pipeline: 'audio', upload_extensions: [] },
+    ],
+    document_kinds: [
+      { kind: 'research_paper', label: '论文', description: '', note_profile: 'paper', review_profile: 'paper' },
+      { kind: 'article', label: '文章', description: '', note_profile: 'article', review_profile: 'article' },
+      { kind: 'whitepaper', label: '白皮书', description: '', note_profile: 'whitepaper', review_profile: 'whitepaper' },
+    ],
+    source_profiles: [], job_sources: [], subscription_sources: [],
+  } as any)
 })
 
 afterEach(() => {
@@ -92,8 +107,8 @@ describe('SearchView 搜索流程', () => {
   it('buildQuery 把 类型/知识库/集合 过滤拼进 query', async () => {
     api.get.mockResolvedValue({ total: 0, items: [] })
     const w = mount(SearchView)
-    const selects = w.findAll('select')
-    await selects[0].setValue('paper')
+    await w.findAll('select')[0].setValue('document')
+    await w.findAll('select')[1].setValue('research_paper')
     await w.findAll('input.input')[0].setValue('  ml  ') // domain,前后空格应被 trim
     await w.findAll('input.input')[1].setValue('col-9')  // collection_id
     await typeAndSettle(w, 'transformer')
@@ -101,7 +116,8 @@ describe('SearchView 搜索流程', () => {
     const calls = api.get.mock.calls
     const url = calls[calls.length - 1][0] as string
     expect(url).toContain('q=transformer')
-    expect(url).toContain('content_type=paper')
+    expect(url).toContain('content_type=document')
+    expect(url).toContain('document_kind=research_paper')
     expect(url).toContain('domain=ml')      // 已 trim
     expect(url).not.toContain('domain=+')
     expect(url).toContain('collection_id=col-9')

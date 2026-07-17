@@ -110,8 +110,9 @@ def test_facade_shape_validator_rejects_indirect_work() -> None:
 def test_job_read_facade_preserves_sql_statement_count(db: Database) -> None:
     job = Job(
         id="jobs_repository_trace",
-        content_type="article",
-        pipeline="article",
+        content_type="document",
+        document_kind="article",
+        pipeline="document",
         title="repository trace",
     )
     db.create_job(job)

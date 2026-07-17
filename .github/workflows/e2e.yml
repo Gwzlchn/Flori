@@ -13,11 +13,11 @@ name: E2E (manual)
 #        c) 确认 scheduler / worker-cpu / worker-ai 容器拉起且不在崩溃重启;
 #        d) 跑容器内单测套件(与主 CI 同路径)兜底回归。
 #
-#   2) paper-e2e —— 真实素材端到端:
+#   2) document-pdf-e2e —— 真实素材端到端:
 #        投一个自带的微型 PDF(tests/fixtures/sample.pdf,~2KB,无需网络/arXiv/B站/API key),
-#        把 paper 这条最轻的真实链路从 upload 跑到 done,真正回归
-#        DAG↔scheduler↔worker↔step 接线 + 真实 PDF 解析(02/03/04 真跑;05/06 经 DRY_RUN 合成)。
-#        逻辑全在 tests/integration/ci_paper_e2e.sh,见该 job 的注释。
+#        把 Document/research_paper 链从 upload 跑到 done,回归 DAG↔scheduler↔worker↔step
+#        接线、真实 PDF 解析和严格 Document 文件契约。
+#        逻辑全在 tests/integration/ci_document_pdf_e2e.sh。
 #
 # 仍属人工/自托管覆盖(本 workflow 不跑):真实视频/B站/arXiv 联网下载 + 真实 AI 笔记全链路——
 #   01_download 对 URL 源会真连 B站/arXiv、真实 AI 步需真 API key,GitHub-hosted runner 跑不动;
@@ -107,22 +107,22 @@ jobs:
           $COMPOSE down -v || true
           docker compose -f docker-compose.test.yml down -v || true
 
-  # paper-e2e:真实素材 paper pipeline 端到端回归。
+  # document-pdf-e2e:真实素材 Document PDF/research_paper 端到端回归。
   #
   # 与上面的 integration-smoke 不同:这里不止"探活",而是投一个自带的微型 PDF
-  # (tests/fixtures/sample.pdf,~2KB,无需任何网络/arXiv/B站/API key),把 paper 这条
+  # (tests/fixtures/sample.pdf,~2KB,无需任何网络/arXiv/B站/API key),把 Document 这条
   # 最轻的真实链路从 upload 一路跑到 done,真正回归 DAG↔scheduler↔worker↔step 接线 + 真实解析。
   #
   #   真跑(REAL):
   #     01_download   upload 模式(文件已落 input/source.pdf,本步只抽 metadata,不联网下载)
-  #     02_pdf_parse  poppler 真解析 PDF 元数据并建立页区间章节
-  #     03_sections   扁平章节 → 树(断言 total_sections>0)
+  #     02_parse      poppler/PyMuPDF 真解析为 Document schema
+  #     03_structure  校验结构并发布来源锚点和原文索引投影
   #   合成(SYNTHETIC,DRY_RUN=1 → DryRunProvider,无需 key):
-  #     04_translate_paper / 05_smart_paper / 05_concepts / 06_review
+  #     04_translate / 05_smart / 06_semantic_attestation / 07_concepts / 08_review
   #
   # 仍属人工/自托管覆盖(本 job 不跑):真实视频 / B站与 arXiv 联网下载 / 真实 AI 笔记链路
   #   —— 见 tests/integration/run_e2e_cpu.sh、run_e2e_ai.sh 与 docs/12-cicd.md。
-  paper-e2e:
+  document-pdf-e2e:
     runs-on: ubuntu-latest
     # 与 integration-smoke 互不依赖,可并行;失败只影响本 job,不连坐探针。
     env:
@@ -131,20 +131,20 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Run paper pipeline E2E (real fixture, dry-run AI)
-        # 脚本自起集成栈、上传 fixture、轮询至 done、断言 notes/smart + review + sections,
+      - name: Run Document PDF E2E (real fixture, dry-run AI)
+        # 脚本自起集成栈、上传 fixture、轮询至 done、断言 Document/translation/review,
         # 并在退出时(成功或失败)自动 down -v 拆栈。失败即非零退出,CI 据此 gate。
-        run: bash tests/integration/ci_paper_e2e.sh
+        run: bash tests/integration/ci_document_pdf_e2e.sh
 
       - name: Dump stack logs on failure
         if: failure()
         run: |
-          docker compose -p flori-ci-paper -f docker-compose.integration.yml \
+          docker compose -p flori-ci-document-pdf -f docker-compose.integration.yml \
             logs --tail 200 api scheduler worker-cpu worker-ai || true
 
       - name: Tear down (safety net)
         # 脚本自带 trap 拆栈;此步是兜底(若脚本在 trap 前被强杀)。KEEP_STACK 未设即正常拆。
         if: always()
         run: |
-          docker compose -p flori-ci-paper -f docker-compose.integration.yml \
+          docker compose -p flori-ci-document-pdf -f docker-compose.integration.yml \
             down -v --remove-orphans || true

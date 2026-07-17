@@ -1,4 +1,4 @@
-"""四类真实 pipeline 完成事件到 Search, Ask 与 MCP 的检索闭环."""
+"""三类 pipeline 与两种 Document 体裁完成事件的检索闭环。"""
 
 from __future__ import annotations
 
@@ -20,15 +20,17 @@ pytestmark = pytest.mark.integration
 
 
 _CASES = [
-    ("video", "闭环视频证据", "smart"),
-    ("paper", "闭环论文证据", "smart"),
-    # article 默认轻链路不生成 smart,应回退到原文而不是漏索引.
-    ("article", "闭环文章证据", "original"),
-    ("audio", "闭环音频证据", "smart"),
+    ("video", "video", None, "闭环视频证据", "smart"),
+    ("research", "document", "research_paper", "闭环论文证据", "smart"),
+    ("article", "document", "article", "闭环文章证据", "original"),
+    ("audio", "audio", None, "闭环音频证据", "smart"),
 ]
 
 
-async def _seed_artifacts(storage, job_id: str, pipeline: str, keyword: str) -> None:
+async def _seed_artifacts(
+    storage, job_id: str, pipeline: str, document_kind: str | None,
+    keyword: str,
+) -> None:
     await storage.write_file(
         job_id, "input/metadata.json",
         json.dumps({"title": f"{pipeline} 检索闭环"}, ensure_ascii=False).encode(),
@@ -47,21 +49,15 @@ async def _seed_artifacts(storage, job_id: str, pipeline: str, keyword: str) -> 
         }, ensure_ascii=False).encode(),
     )
     notes: dict[str, tuple[str, bytes]] = {}
-    if pipeline == "article":
-        note_path = "output/original.md"
-        note_data = f"# 原文\n{keyword}贯穿轻链路并保留完整证据。".encode()
-        await storage.write_file(
-            job_id, note_path, note_data,
-        )
-        notes["original"] = (note_path, note_data)
-    else:
+    if pipeline == "document":
+        original_path = "intermediate/document_index.md"
+        original_data = f"# Document 原文投影\n{keyword}由结构完成事件写入索引。".encode()
+        await storage.write_file(job_id, original_path, original_data)
+        notes["original"] = (original_path, original_data)
+    if pipeline != "document" or document_kind == "research_paper":
         note_path = "output/versions/notes_smart_anthropic_opus_20260714-012500.md"
         note_data = f"# 智能笔记\n{keyword}由真实完成事件写入索引。".encode()
-        await storage.write_file(
-            job_id,
-            note_path,
-            note_data,
-        )
+        await storage.write_file(job_id, note_path, note_data)
         notes["smart"] = (note_path, note_data)
     if pipeline == "video":
         mechanical_path = "output/notes_mechanical.md"
@@ -96,21 +92,26 @@ def _index_counts(db, job_id: str) -> tuple[int, int, int]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("pipeline", "keyword", "expected_note_type"), _CASES)
+@pytest.mark.parametrize(
+    ("case_name", "pipeline", "document_kind", "keyword", "expected_note_type"),
+    _CASES,
+)
 async def test_pipeline_completion_reaches_search_ask_and_mcp(
-    db, test_config, pipeline, keyword, expected_note_type, integration_redis,
+    db, test_config, case_name, pipeline, document_kind, keyword,
+    expected_note_type, integration_redis,
 ):
     redis = integration_redis
     storage = LocalStorage(test_config.jobs_dir)
-    job_id = f"j_closure_{pipeline}"
-    domain = f"closure-{pipeline}"
-    flags = {"smart_note": False} if pipeline == "article" else {}
+    job_id = f"j_closure_{case_name}"
+    domain = f"closure-{case_name}"
+    flags = {"smart_note": document_kind != "article"}
     job = Job(
         id=job_id, content_type=pipeline, pipeline=pipeline, domain=domain,
-        title=f"{pipeline} 检索闭环", meta={"flags": flags},
+        document_kind=document_kind or "", title=f"{case_name} 检索闭环",
+        meta={"flags": flags},
     )
     db.create_job(job)
-    await _seed_artifacts(storage, job_id, pipeline, keyword)
+    await _seed_artifacts(storage, job_id, pipeline, document_kind, keyword)
     scheduler = Scheduler(redis, db, test_config, storage=storage)
 
     async def _workers_present(_pool):
@@ -135,19 +136,27 @@ async def test_pipeline_completion_reaches_search_ask_and_mcp(
         ) as client:
             search = await client.get("/api/search", params={"q": keyword, "domain": domain})
             assert search.status_code == 200
-            assert job_id in {item["job_id"] for item in search.json()["items"]}
+            search_item = next(
+                item for item in search.json()["items"] if item["job_id"] == job_id
+            )
+            assert search_item.get("document_kind") == (document_kind or None)
 
             ask = await client.post(
                 "/api/ask", json={"question": keyword, "domain": domain},
             )
             assert ask.status_code == 202
-            assert job_id in {source["job_id"] for source in ask.json()["sources"]}
+            ask_source = next(
+                source for source in ask.json()["sources"] if source["job_id"] == job_id
+            )
+            assert ask_source.get("document_kind") == (document_kind or None)
 
         mcp = build_server(db, storage)
         result = await mcp.call_tool(
             "search", {"query": keyword, "domain": domain, "limit": 10},
         )
         assert job_id in str(result)
+        if document_kind:
+            assert document_kind in str(result)
 
         before = _index_counts(db, job_id)
         concept_before = db.get_glossary_term(domain, "闭环主概念")
@@ -260,58 +269,6 @@ async def test_reconcile_backfills_legacy_done_job_without_redis_state(
         await scheduler.reconcile_completion_effects()
         assert db.search_notes("历史完成任务")[0] == 1
         assert db.list_unindexed_done_jobs() == []
-    finally:
-        await redis.r.flushdb()
-
-
-@pytest.mark.asyncio
-async def test_article_reconcile_supersedes_original_with_smart_without_duplicates(
-    db, test_config, integration_redis,
-):
-    redis = integration_redis
-    storage = LocalStorage(test_config.jobs_dir)
-    job = Job(
-        id="j_article_upgrade", content_type="article", pipeline="article",
-        domain="closure", meta={"flags": {"smart_note": False}},
-    )
-    db.create_job(job)
-    await _seed_artifacts(storage, job.id, "article", "原文回退证据")
-    scheduler = Scheduler(redis, db, test_config, storage=storage)
-
-    async def _workers_present(_pool):
-        return True
-
-    scheduler._pool_has_workers = _workers_present
-    try:
-        await scheduler.submit_job(job)
-        await _complete_real_pipeline(scheduler, redis, db, test_config, job.id)
-        assert db.search_notes("原文回退证据")[1][0]["note_type"] == "original"
-
-        await storage.write_file(
-            job.id,
-            "output/versions/notes_smart_anthropic_opus_20260714-012800.md",
-            smart_data := "# 升级笔记\n智能升级证据替代原文回退。".encode(),
-        )
-        original_data = await storage.read_file(job.id, "output/original.md")
-        assert original_data is not None
-        await publish_provenance_fixture(
-            storage,
-            job_id=job.id,
-            pipeline=job.pipeline,
-            notes={
-                "original": ("output/original.md", original_data),
-                "smart": (
-                    "output/versions/notes_smart_anthropic_opus_20260714-012800.md",
-                    smart_data,
-                ),
-            },
-        )
-        assert await scheduler._reconcile_completed_effects(job.id) is True
-
-        assert db.search_notes("原文回退证据")[0] == 0
-        total, rows = db.search_notes("智能升级证据")
-        assert total == 1 and rows[0]["note_type"] == "smart"
-        assert _index_counts(db, job.id)[0] == 1
     finally:
         await redis.r.flushdb()
 

@@ -28,7 +28,6 @@ from shared.ai_routing import (
 )
 from shared.db import Database
 from shared.ids import lineage_key_of as _lineage_key_of
-from shared.language import detect_language
 from shared.models import Job, JobStatus, derive_job_id
 from shared.redis_client import RedisClient
 from shared.source_detect import detect_source
@@ -37,7 +36,7 @@ from shared.source_registry import (
     content_type_for_filename,
     default_content_type,
     pipeline_for_content_type,
-    validate_job_route,
+    resolve_job_route,
 )
 from shared.step_base import def_digest_for, pipeline_digest_for
 from shared.storage import (
@@ -56,6 +55,7 @@ from api.business_admission import (
 )
 from api.schemas import (
     ContentType,
+    DocumentKind,
     JobCreateRequest,
     JobDetailResponse,
     JobListResponse,
@@ -433,6 +433,7 @@ async def create_job_core(
     collection_id: str | None = None, title: str | None = None,
     upload: tuple[str, bytes | AsyncIterable[bytes]] | None = None,
     smart_note: bool | None = None,
+    document_kind: str | None = None,
     item_id: str | None = None, actor: str = "api",
     config: AppConfig | None = None,
     defer_submit: bool = False,
@@ -442,17 +443,23 @@ async def create_job_core(
     style_tags = style_tags or []
     source = "upload" if upload is not None else detect_source(url or "")
     requested_type = getattr(content_type, "value", content_type)
-    ctype = requested_type or _detect_content_type(url)
+    requested_kind = getattr(document_kind, "value", document_kind)
     try:
-        validate_job_route(source, ctype, allow_internal=(actor == "subscription"))
+        route = resolve_job_route(
+            source, requested_type or _detect_content_type(url),
+            document_kind=requested_kind,
+            allow_internal=(actor == "subscription"),
+        )
     except SourceRegistryError as exc:
         raise HTTPException(422, f"unsupported_source: {exc}") from exc
-    pipeline = _pipeline_for(ctype)
+    ctype = route.content_type
+    resolved_kind = route.document_kind or ""
+    pipeline = route.pipeline
     if not pipeline or (config is not None and pipeline not in config.pipelines):
         raise HTTPException(422, f"source_pipeline_unavailable: {ctype}")
     # 投递开关:smart_note None=按类型默认(article 轻链路默认关,其余默认开)。
     # 存进 flags 随 job 落库 → scheduler 读 redis flags 求值 rules 的 if_flag(条件跳步)。
-    resolved_smart = smart_note if smart_note is not None else (ctype != "article")
+    resolved_smart = smart_note if smart_note is not None else resolved_kind != "article"
     flags = {"smart_note": bool(resolved_smart)}
 
     # 有意义的 id: jobs_{类别}_{inner}(bili=BV);撞已存在(同 BV 重投/上传随机撞库)加随机后缀。
@@ -461,12 +468,16 @@ async def create_job_core(
         job_id = f"{job_id}_{secrets.token_hex(3)}"
     job_doc = {
         "id": job_id, "url": url, "source": source, "content_type": ctype,
+        "document_kind": resolved_kind or None,
+        "source_profile": route.source_profile,
         "domain": domain, "style_tags": style_tags, "created_at": _now_iso(),
         "flags": flags,
     }
     # prompt 白盒:job 创建时由 api 解析该 pipeline+domain 的 prompt 覆盖(domain 优先于 global),
     # 写进 job.json 随 job 下发;worker 是 pure 进程无 DB,其 step_base 读取注入覆盖作 system prompt。
-    overrides = await asyncio.to_thread(db.resolve_prompt_overrides, pipeline, domain)
+    overrides = await asyncio.to_thread(
+        db.resolve_prompt_overrides, pipeline, domain, resolved_kind or None,
+    )
     if overrides:
         job_doc["prompt_overrides"] = overrides
     initialization_marker: dict | None = None
@@ -532,7 +543,8 @@ async def create_job_core(
     # is_job_expired 会回退逐 .done 比对,不影响正确性。
     pdigest = _pipeline_digest(config, pipeline)
     job = Job(
-        id=job_id, content_type=ctype, pipeline=pipeline, url=url, title=title,
+        id=job_id, content_type=ctype, pipeline=pipeline,
+        document_kind=resolved_kind, url=url, title=title,
         domain=domain, source=source, style_tags=style_tags, collection_id=collection_id,
         meta=job_meta, pipeline_digest=pdigest,
     )
@@ -579,7 +591,8 @@ async def create_job_core(
     # defer_submit(book 章序):job 落库但不触发调度,由 scheduler 的 book 投递器在
     # 前章终态时按 created_at 顺序 submit(shared/book_chain.next_chapter_job)。
     audit("job", job_id, "create", actor=actor,
-          detail={"content_type": ctype, "source": source, "collection_id": collection_id})
+          detail={"content_type": ctype, "document_kind": resolved_kind or None,
+                  "source": source, "collection_id": collection_id})
     return job
 
 
@@ -642,7 +655,12 @@ async def create_job_snapshot(
             doc = {}
     doc.update({"id": new_id, "created_at": _now_iso()})
     # prompt 白盒:重建快照也重解析 prompt 覆盖,拾取最新编辑;父 job.json 里的旧覆盖会被替换。
-    overrides = await asyncio.to_thread(db.resolve_prompt_overrides, parent.pipeline, parent.domain)
+    overrides = await asyncio.to_thread(
+        db.resolve_prompt_overrides,
+        parent.pipeline,
+        parent.domain,
+        parent.document_kind or None,
+    )
     if overrides:
         doc["prompt_overrides"] = overrides
     else:
@@ -652,6 +670,7 @@ async def create_job_snapshot(
     )
     job = Job(
         id=new_id, content_type=parent.content_type, pipeline=parent.pipeline,
+        document_kind=parent.document_kind,
         url=parent.url, title=parent.title, domain=parent.domain, source=parent.source,
         style_tags=parent.style_tags, collection_id=parent.collection_id, meta=parent.meta,
         lineage_key=lineage, is_current=True, parent_job_id=parent.id,
@@ -680,17 +699,20 @@ async def create_job(
     # 注:url 接受 http(s) 链接或裸 BV 号(detect_source 解析),故不强校验 http(s) 前缀;
     # invalid_url 语义以 docs/03-contracts.md 为准。
     source = detect_source(req.url or "")
-    content_type = getattr(req.content_type, "value", req.content_type) or default_content_type(source)
-    if content_type:
-        try:
-            validate_job_route(source, content_type)
-        except SourceRegistryError as exc:
-            raise HTTPException(422, f"unsupported_source: {exc}") from exc
-        await ensure_job_workers(
-            redis=redis, config=config, content_type=content_type,
-            source=source, url=req.url, domain=req.domain,
-            style_tags=req.style_tags, smart_note=req.smart_note,
+    try:
+        route = resolve_job_route(
+            source,
+            getattr(req.content_type, "value", req.content_type),
+            document_kind=getattr(req.document_kind, "value", req.document_kind),
         )
+    except SourceRegistryError as exc:
+        raise HTTPException(422, f"unsupported_source: {exc}") from exc
+    await ensure_job_workers(
+        redis=redis, config=config, content_type=route.content_type,
+        source=source, url=req.url, domain=req.domain,
+        style_tags=req.style_tags, smart_note=req.smart_note,
+        document_kind=route.document_kind,
+    )
     # 校验 collection_id 存在,避免孤儿绑定 + job_count 漂移。
     if req.collection_id:
         if not await asyncio.to_thread(db.get_collection, req.collection_id):
@@ -698,9 +720,10 @@ async def create_job(
     job = await create_job_core(
         db, redis, storage, req.url, req.content_type,
         req.domain, req.style_tags, req.collection_id,
-        smart_note=req.smart_note, config=config,
+        smart_note=req.smart_note, document_kind=route.document_kind, config=config,
     )
     return {"job_id": job.id, "content_type": job.content_type,
+            "document_kind": job.document_kind or None, "pipeline": job.pipeline,
             "status": "pending", "created_at": job.created_at.isoformat()}
 
 
@@ -708,6 +731,7 @@ async def create_job(
 @job_admission_guard("upload")
 async def upload_job(
     content_type: ContentType = Query(...),
+    document_kind: DocumentKind | None = Query(None),
     file: UploadFile = File(...),
     domain: str = Form("general"),
     style_tags: str = Form("[]"),
@@ -724,7 +748,10 @@ async def upload_job(
     if filename_type != content_type:
         raise HTTPException(422, "upload_content_type_mismatch")
     try:
-        validate_job_route("upload", content_type)
+        route = resolve_job_route(
+            "upload", getattr(content_type, "value", content_type),
+            document_kind=getattr(document_kind, "value", document_kind),
+        )
     except SourceRegistryError as exc:
         raise HTTPException(422, f"unsupported_source: {exc}") from exc
     try:
@@ -734,8 +761,9 @@ async def upload_job(
     if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
         raise HTTPException(400, "style_tags must be a string array")
     await ensure_job_workers(
-        redis=redis, config=config, content_type=content_type,
+        redis=redis, config=config, content_type=route.content_type,
         source="upload", url=None, domain=domain, style_tags=tags,
+        document_kind=route.document_kind,
     )
     # 与 URL 投递路径一致:校验 collection_id 存在,支持归集合 + title。
     if collection_id:
@@ -751,13 +779,14 @@ async def upload_job(
         job = await create_job_core(
             db, redis, storage, url=None, content_type=content_type,
             domain=domain, style_tags=tags, collection_id=collection_id, title=title,
-            upload=(ext, _chunks()), config=config,
+            upload=(ext, _chunks()), document_kind=route.document_kind, config=config,
         )
     except ArtifactTooLarge as exc:
         raise HTTPException(
             413, f"file too large (max {MAX_UPLOAD_SIZE})",
         ) from exc
     return {"job_id": job.id, "content_type": job.content_type,
+            "document_kind": job.document_kind or None, "pipeline": job.pipeline,
             "status": "pending", "created_at": job.created_at.isoformat()}
 
 
@@ -785,7 +814,9 @@ async def list_jobs(
         total=total,
         items=[
             JobResponse(
-                job_id=j.id, content_type=j.content_type, status=j.status.value,
+                job_id=j.id, content_type=j.content_type,
+                document_kind=j.document_kind or None, pipeline=j.pipeline,
+                status=j.status.value,
                 created_at=j.created_at.isoformat(), title=j.title,
                 progress_pct=j.progress_pct, source=j.source, domain=j.domain,
                 collection_id=j.collection_id,
@@ -857,51 +888,24 @@ async def get_job(
             }
     except Exception:
         pass
-    # 文章/论文:从 02 解析(parsed.json)透元信息进「元信息」tab。article 字数/标签/封面;paper 页数。
-    source_kind = None
-    language_sample = ""
-    if job.content_type in ("article", "paper"):
+    # Document metadata 以 document.json 为真相源；旧 parsed.json 不再参与新文档链。
+    source_profile = None
+    if job.content_type == "document":
         try:
-            raw = await storage.read_file(job_id, "intermediate/parsed.json")
+            raw = await storage.read_file(job_id, "intermediate/document.json")
             if raw:
                 p = json.loads(raw.decode("utf-8"))
-                source_kind = p.get("source_kind")   # paper 源类型(arxiv-html/pdf-only;旧 job null)
-                # 通用(article + paper):作者 / 摘要 / 正文语言。
-                if p.get("authors"):
-                    media["authors"] = p["authors"]
-                if p.get("abstract"):
-                    media["abstract"] = p["abstract"]
-                if p.get("lang"):
-                    media["lang"] = p["lang"]
-                language_sample = str(p.get("text") or p.get("abstract") or "")
-                if job.content_type == "article":
-                    if p.get("word_count") is not None:
-                        media["word_count"] = p["word_count"]
-                    if p.get("tags"):
-                        media["tags"] = p["tags"]
-                    if p.get("image"):
-                        media["image"] = p["image"]
-                    if p.get("sitename"):           # 来源:网站名(SemiAnalysis / 华尔街见闻 / 域名)
-                        media["sitename"] = p["sitename"]
-                else:                                # paper
-                    if p.get("pages") is not None:
-                        media["pages"] = p["pages"]
-                    if p.get("venue"):              # 来源:会议/期刊 + 年份(OSDI 2023 / arXiv)
-                        media["venue"] = p["venue"]
+                source_profile = p.get("source_profile")
+                metadata = p.get("metadata") if isinstance(p.get("metadata"), dict) else {}
+                for key in (
+                    "authors", "affiliations", "abstract", "lang", "word_count",
+                    "tags", "image", "sitename", "pages", "venue", "source_license",
+                    "rights_notices", "version", "published_at",
+                ):
+                    if metadata.get(key) is not None:
+                        media[key] = metadata[key]
         except Exception:
             pass
-    # 旧任务可能只写 unknown/non-zh.优先用解析正文,再回退可读原文,只修正展示而不改历史产物.
-    if job.content_type in ("article", "paper") and media.get("lang") in {None, "unknown", "non-zh"}:
-        if not language_sample:
-            try:
-                original = await storage.read_file(job_id, "output/original.md")
-                if original:
-                    language_sample = original[:200000].decode("utf-8", errors="ignore")
-            except Exception:
-                pass
-        detected = detect_language(language_sample)
-        if detected != "unknown":
-            media["lang"] = detected
     # 产物路径(元信息"产物路径"):NAS 宿主绝对路径。job 产物实际落在对象存储/本地盘,
     # 其在 NAS 上的根由 JOB_ARTIFACT_HOST_ROOT 指定(MinIO 部署=<NAS>/minio/<bucket>;
     # 本地盘部署=<NAS>/jobs)。未配置则回退容器内 $DATA_DIR/jobs。列可见产物(隐藏点文件/job.json)。
@@ -960,7 +964,9 @@ async def get_job(
     except Exception:
         pass
     return JobDetailResponse(
-        job_id=job.id, content_type=job.content_type, status=job.status.value,
+        job_id=job.id, content_type=job.content_type,
+        document_kind=job.document_kind or None, pipeline=job.pipeline,
+        status=job.status.value,
         created_at=job.created_at.isoformat(),
         updated_at=job.updated_at.isoformat() if job.updated_at else None,
         published_at=(job.published_at.isoformat() if job.published_at else published_at),
@@ -968,7 +974,7 @@ async def get_job(
         title=job.title, url=job.url,
         progress_pct=job.progress_pct, source=job.source, domain=job.domain,
         collection_id=job.collection_id, collection_name=collection_name,
-        meta=job.meta, source_kind=source_kind,
+        meta=job.meta, source_profile=source_profile,
         update_available=bool(update_state["expired"]),
         update_from_step=update_state["first_changed_step"],
         steps=[
@@ -1196,11 +1202,20 @@ async def rerun_job(
     req: RerunRequest,
     db: Database = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
+    config: AppConfig = Depends(get_config),
 ):
     validate_path_segment(job_id, "job_id")
     job = await asyncio.to_thread(db.get_job, job_id)
     if not job:
         raise HTTPException(404, "job not found")
+    pipeline = config.pipelines.get(job.pipeline)
+    steps = pipeline.get("steps") if isinstance(pipeline, dict) else None
+    allowed_steps = {
+        str(step.get("name")) for step in steps or []
+        if isinstance(step, dict) and step.get("name")
+    }
+    if req.from_step not in allowed_steps:
+        raise HTTPException(422, "from_step is not part of the job pipeline")
     await redis.append_lifecycle_event("job_command", {
         "action": "rerun", "job_id": job_id, "from_step": req.from_step,
     })

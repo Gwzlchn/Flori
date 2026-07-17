@@ -8,11 +8,15 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from shared.db import PROMPT_VERSION_EXCLUSIVE_MAX, PROMPT_VERSION_MIN
+from shared.document_registry import DOCUMENT_KIND_NAMES
 from shared.source_registry import CONTENT_TYPE_NAMES, SUBSCRIPTION_SOURCE_NAMES
 
 
 ContentType = Enum(
     "ContentType", {name: name for name in CONTENT_TYPE_NAMES}, type=str, module=__name__,
+)
+DocumentKind = Enum(
+    "DocumentKind", {name: name for name in DOCUMENT_KIND_NAMES}, type=str, module=__name__,
 )
 SubscriptionSourceType = Enum(
     "SubscriptionSourceType",
@@ -44,6 +48,7 @@ class JobCreateRequest(BaseModel):
 
     url: str | None = None
     content_type: ContentType | None = None
+    document_kind: DocumentKind | None = None
     domain: str = "general"
     style_tags: list[str] = Field(default_factory=list)
     collection_id: str | None = None
@@ -55,6 +60,8 @@ class JobCreateRequest(BaseModel):
 class JobResponse(BaseModel):
     job_id: str
     content_type: str
+    document_kind: str | None = None
+    pipeline: str
     status: str
     created_at: str
     updated_at: str | None = None
@@ -70,19 +77,18 @@ class JobResponse(BaseModel):
 
 class JobDetailResponse(JobResponse):
     collection_name: str | None = None   # 由 collection_id join 出的集合名(无则 null)
-    media: dict = Field(default_factory=dict)  # 源媒体元信息(resolution/duration_sec/file_size_mb/has_subtitle/word_count),来自 metadata.json / parsed.json
+    media: dict = Field(default_factory=dict)  # 源媒体元信息来自 metadata.json / document.json
     artifacts: list[str] = Field(default_factory=list)  # 可见产物文件路径(元信息标签页"产物路径")
     meta: dict = Field(default_factory=dict)
     steps: list[StepResponse] = Field(default_factory=list)
     # 本任务各 AI 步派发时用的 prompt 覆盖版本号快照,从 job.json.prompt_overrides[step].version 读,
     # 无覆盖的步不出现。前端与当前激活版本(GET /api/prompts)比,不一致提示「重跑该步」,见 docs/03-contracts.md §1.15。
     prompt_versions: dict[str, str] = Field(default_factory=dict)
-    # 论文源类型(intermediate/parsed.json.source_kind,best-effort null):"arxiv-html"=有干净 HTML 源
-    # (原文变体直接渲染 original.md);"pdf-only"=只有 PDF(原文=内嵌 PDF,AI 步直喂)。非论文恒 null。
-    source_kind: str | None = None
     # 当前 pipeline/Prompt 定义相对该快照有更新时才允许前端展示版本升级入口.
     update_available: bool = False
     update_from_step: str | None = None
+    # Document adapter profile(scholarly_html/generic_html/digital_pdf/scanned_pdf).
+    source_profile: str | None = None
 
 
 class StepResponse(BaseModel):
@@ -282,6 +288,7 @@ class PromptOverrideRequest(BaseModel):
     # content=覆盖正文,空串会被当删除处理。
     scope: str = "global"
     domain: str | None = None
+    document_kind: DocumentKind | None = None
     content: str = ""
     # 版本管理类 Grafana save。mode='overwrite' 为默认,改当前激活版本内容;
     # mode='new' 另存为新版本(version=max+1 并设为激活)。note=该版本一行备注,可空。
@@ -295,6 +302,7 @@ class PromptActivateRequest(BaseModel):
     # version=null:停用覆盖回内置默认,非破坏,保留全部历史版本。scope/domain 同 PromptOverrideRequest。
     scope: str = "global"
     domain: str | None = None
+    document_kind: DocumentKind | None = None
     version: PromptVersionString | PromptVersionSafeInteger | None = None
 
     @field_validator("version", mode="before")
@@ -372,6 +380,7 @@ class GlossaryOccurrenceResponse(BaseModel):
 
     job_id: str
     content_type: str = ""
+    document_kind: str | None = None
     location: str | None = None
     title: str | None = None
 
@@ -463,6 +472,7 @@ class ConceptEvidenceResponse(BaseModel):
     evidence_id: str
     job_id: str
     content_type: str
+    document_kind: str | None = None
     source_fingerprint: str | None = None
     note_type: str | None = None
     chunk_id: str | None = None
@@ -541,6 +551,7 @@ class SearchResultItem(BaseModel):
     note_type: str
     snippet: str
     content_type: str = ""
+    document_kind: str | None = None
     domain: str = ""
     collection_id: str | None = None
     canonical_evidence: list[CanonicalEvidenceProjection] = Field(default_factory=list)

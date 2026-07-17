@@ -1,8 +1,8 @@
 {
-  "schema_version": 1,
-  "job": {"id": "rq-biology-article", "content_type": "article", "pipeline": "article", "domain": "quality-biology", "topic": "biology", "title": "基因表达实验批次指南", "primary_language": "zh", "meta": {"flags": {"smart_note": false}}},
+  "schema_version": 2,
+  "job": {"id": "rq-biology-article", "content_type": "document", "pipeline": "document", "document_kind": "article", "domain": "quality-biology", "topic": "biology", "title": "基因表达实验批次指南", "primary_language": "zh", "meta": {"flags": {"smart_note": false}}},
   "note": {
-    "path": "output/original.md",
+    "path": "intermediate/document_index.md",
     "note_type": "original",
     "lines": [
       "# 基因表达实验批次指南",

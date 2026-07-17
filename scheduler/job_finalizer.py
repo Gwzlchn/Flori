@@ -121,26 +121,31 @@ class JobFinalizer:
         try:
             raw = await self.owner.storage.read_file(job_id, "input/metadata.json")
             md = json.loads(raw.decode("utf-8", errors="replace")) if raw else {}
-            # 文章的 title/date 在 input/article_meta.json(metadata.json 常无这两项),这里合并兜底:
-            # 以 metadata.json 的非空值优先,article_meta 填补 title/date。
-            am_raw = await self.owner.storage.read_file(job_id, "input/article_meta.json")
-            if am_raw:
-                am = json.loads(am_raw.decode("utf-8", errors="replace"))
-                md = {**am, **{k: v for k, v in md.items() if v}}
-            # 论文/文章的 title/date 也在 02 解析写的 intermediate/parsed.json,论文标题尤其只在此,
-            # 故作末位兜底;仍以已有非空值优先,不覆盖 metadata/article_meta 已填的。
+            # 下载元数据优先；Document parser 的 canonical metadata 只补齐空标题/日期。
             if not md.get("title") or not (md.get("published_at") or md.get("date")):
-                pj_raw = await self.owner.storage.read_file(job_id, "intermediate/parsed.json")
-                if pj_raw:
-                    pj = json.loads(pj_raw.decode("utf-8", errors="replace"))
-                    md = {**{k: pj[k] for k in ("title", "date") if pj.get(k)}, **{k: v for k, v in md.items() if v}}
+                document_raw = await self.owner.storage.read_file(
+                    job_id, "intermediate/document.json",
+                )
+                if document_raw:
+                    document = json.loads(document_raw.decode("utf-8", errors="replace"))
+                    metadata = document.get("metadata") if isinstance(document, dict) else {}
+                    metadata = metadata if isinstance(metadata, dict) else {}
+                    titles = metadata.get("titles") if isinstance(metadata.get("titles"), dict) else {}
+                    fallback = {
+                        "title": titles.get("original"),
+                        "published_at": metadata.get("published_at"),
+                    }
+                    md = {
+                        **{key: value for key, value in fallback.items() if value},
+                        **{key: value for key, value in md.items() if value},
+                    }
             if not md:
                 return
             fields: dict = {}
             published = md.get("published_at") or md.get("date")
             if published:
                 fields["published_at"] = published
-            # 标题:01_download 从源(youtube info.json / article_meta)写入时回填,仅当 DB 标题为空,
+            # 标题:01_download 从源 metadata 写入时回填,仅当 DB 标题为空,
             # 不覆盖订阅/用户已填的标题。例外:已入库标题是垃圾(pdf-only 的 PDF 内嵌 metadata,
             # 如 "10things"/"paper.dvi"/"NBER WORKING PAPER SERIES")且候选明显更像真标题
             # 非垃圾,含空格且更长时允许覆盖,与 02 步提取共用 shared.titles 同一套判定.

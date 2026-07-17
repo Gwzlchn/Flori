@@ -54,7 +54,7 @@ _SUPPORT_SELECTOR_KEYS = {
     "audio_segments": {"index"},
     "video_subtitle": {"index"},
     "video_ocr": {"entry_index", "box_index"},
-    "pdf_pages": {"page"},
+    "pdf_pages": {"page", "start", "end"},
 }
 _PROVENANCE_KEYS = {
     "schema_version", "job_id", "note_type", "note_artifact", "note_sha256",
@@ -1756,10 +1756,15 @@ def _validate_support_artifact(
             raise ValueError(f"{label} does not match video OCR")
     else:
         page = _require_positive_int(selector.get("page"), f"{label}.selector.page")
+        start = _require_nonnegative_int(
+            selector.get("start"), f"{label}.selector.start",
+        )
+        end = _require_nonnegative_int(selector.get("end"), f"{label}.selector.end")
         if (
             locator.get("kind") != "pdf"
             or page != locator.get("page")
             or path != "intermediate/pdf_page_support.json"
+            or start >= end
         ):
             raise ValueError(f"{label} does not match the PDF page")
     return value

@@ -21,8 +21,10 @@ ISSUE_TYPES = {"consistency", "missing_in_source", "missing_external", "traceabi
 ISSUE_SEVERITIES = {"info", "warning", "error"}
 _SCORE_KEYS_BY_PIPELINE = {
     "video": ("completeness", "accuracy", "structure", "terminology", "visual_integration", "readability"),
-    "paper": ("completeness", "accuracy", "structure", "terminology", "formula_integrity", "figure_references"),
-    "article": ("completeness", "accuracy", "structure", "readability", "insight"),
+    "document": (
+        "completeness", "accuracy", "structure", "terminology",
+        "formula_integrity", "visual_references", "traceability",
+    ),
     "audio": ("completeness", "accuracy", "structure", "terminology", "conciseness", "readability"),
 }
 _REVIEW_RESPONSE_KEYS = {
@@ -401,7 +403,10 @@ def parse_review(
 def _safe_review_rel(rel: Any) -> bool:
     return (
         isinstance(rel, str)
-        and rel.startswith("output/")
+        and (
+            rel.startswith("output/")
+            or rel in {"intermediate/document.json", "intermediate/quality.json"}
+        )
         and "\x00" not in rel
         and ".." not in Path(rel).parts
         and not Path(rel).is_absolute()
@@ -662,27 +667,6 @@ def _content_addressed_source_is_bound(record: dict[str, Any], label: str) -> bo
     )
 
 
-def paper_figures_review_text(figures: Any) -> str:
-    """把 figures.json 投影为稳定、可内容寻址的评审事实文本。"""
-    if not isinstance(figures, list) or any(not isinstance(item, dict) for item in figures):
-        raise ValueError("paper figures must be a list of objects")
-    projected = []
-    for item in figures:
-        ref = item.get("index") if item.get("index") is not None else item.get("id", "")
-        caption = item.get("caption", "")
-        filename = item.get("filename")
-        if type(ref) not in {int, str} or not isinstance(caption, str):
-            raise ValueError("paper figure fields are invalid")
-        if filename is not None and not isinstance(filename, str):
-            raise ValueError("paper figure filename is invalid")
-        projected.append({
-            "ref": ref, "caption": caption, "embeddable": bool(filename),
-        })
-    return json.dumps(
-        projected, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-    )
-
-
 async def _validate_pipeline_sources(
     pipeline: str | None,
     source_records: dict[str, dict],
@@ -709,63 +693,26 @@ async def _validate_pipeline_sources(
         ):
             errors.append("audio_transcript_source_invalid")
         return
-    if pipeline not in {"article", "paper"}:
+    if pipeline != "document":
         return
-
-    direct_paths = {
-        "original": "output/original.md",
-        "translated": "output/translated.md",
-    }
-    present_direct: set[str] = set()
-    for label, rel in direct_paths.items():
-        try:
-            body = await read_file(rel)
-        except (OSError, ValueError):
-            body = None
-        if body is not None:
-            present_direct.add(label)
-    paper_figures_present = False
-    if pipeline == "paper":
-        try:
-            figures_raw = await read_file("intermediate/figures.json")
-        except (OSError, ValueError):
-            figures_raw = None
-        if figures_raw is not None:
-            paper_figures_present = True
-            if not isinstance(figures_raw, bytes):
-                errors.append("paper_figures_current_fact_invalid")
-            elif len(figures_raw) > MAX_REVIEW_SOURCE_BYTES:
-                errors.append("paper_figures_current_fact_too_large")
-            else:
-                try:
-                    figures = json.loads(figures_raw.decode("utf-8"))
-                    current_text = paper_figures_review_text(figures)
-                except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
-                    errors.append("paper_figures_current_fact_invalid")
-                else:
-                    if source_texts.get("figures") != current_text:
-                        errors.append("paper_figures_source_mismatch")
-            figures_record = source_records.get("figures")
-            if not isinstance(figures_record, dict) or not _content_addressed_source_is_bound(
-                figures_record, "figures",
-            ):
-                errors.append("paper_figures_source_invalid")
-
-    expected = {"smart", *present_direct} if present_direct else {"smart", "sections"}
-    if paper_figures_present:
-        expected.add("figures")
+    expected = {"smart", "document", "quality"}
+    try:
+        translation = await read_file("output/translation.json")
+    except (OSError, ValueError):
+        translation = None
+    if translation is not None:
+        expected.add("translation")
     if labels != expected:
-        errors.append(f"{pipeline}_source_profile_mismatch")
-    for label in present_direct:
+        errors.append("document_source_profile_mismatch")
+    exact_paths = {
+        "document": "intermediate/document.json",
+        "quality": "intermediate/quality.json",
+        "translation": "output/translation.json",
+    }
+    for label in expected - {"smart"}:
         record = source_records.get(label)
-        if not isinstance(record, dict) or record.get("artifact") != direct_paths[label]:
-            errors.append(f"{pipeline}_{label}_source_invalid")
-    if not present_direct:
-        sections = source_records.get("sections")
-        if not isinstance(sections, dict) or not _content_addressed_source_is_bound(
-            sections, "sections",
-        ):
-            errors.append(f"{pipeline}_sections_source_invalid")
+        if not isinstance(record, dict) or record.get("artifact") != exact_paths[label]:
+            errors.append(f"document_{label}_source_invalid")
 
 
 async def verify_persisted_review(

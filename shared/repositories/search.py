@@ -200,6 +200,7 @@ class SearchRepository:
         collection_id: str | None = None,
         domain: str | None = None,
         content_type: str | None = None,
+        document_kind: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[int, list[dict]]:
@@ -227,6 +228,12 @@ class SearchRepository:
         if content_type:
             where_parts.append("content_type=?")
             params.append(content_type)
+        if document_kind:
+            where_parts.append(
+                "EXISTS (SELECT 1 FROM jobs AS j "
+                "WHERE j.id=notes_fts5.job_id AND j.document_kind=?)"
+            )
+            params.append(document_kind)
         where = " AND ".join(where_parts)
 
         total = self._conn.execute(
@@ -236,7 +243,9 @@ class SearchRepository:
         if short_query:
             rows = self._conn.execute(
                 f"""SELECT job_id, note_type, title, content_type, domain,
-                           collection_id, body
+                           collection_id, body,
+                           (SELECT j.document_kind FROM jobs AS j
+                            WHERE j.id=notes_fts5.job_id) AS document_kind
                     FROM notes_fts5 WHERE {where}
                     ORDER BY job_id COLLATE BINARY, note_type COLLATE BINARY
                     LIMIT ? OFFSET ?""",
@@ -247,6 +256,8 @@ class SearchRepository:
             rows = self._conn.execute(
                 f"""SELECT job_id, note_type, title, content_type, domain,
                            collection_id,
+                           (SELECT j.document_kind FROM jobs AS j
+                            WHERE j.id=notes_fts5.job_id) AS document_kind,
                            snippet(notes_fts5, 6, '<mark>', '</mark>', '…', 12) AS snippet
                     FROM notes_fts5 WHERE {where}
                     ORDER BY rank, job_id COLLATE BINARY, note_type COLLATE BINARY
@@ -263,6 +274,7 @@ class SearchRepository:
                     if short_query else r["snippet"]
                 ),
                 "content_type": r["content_type"],
+                "document_kind": r["document_kind"] or None,
                 "domain": r["domain"],
                 "collection_id": r["collection_id"] or None,
             }
@@ -283,6 +295,7 @@ class SearchRepository:
         collection_id: str | None = None,
         domain: str | None = None,
         content_type: str | None = None,
+        document_kind: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[int, list[dict]]:
@@ -312,6 +325,12 @@ class SearchRepository:
         if content_type:
             where_parts.append("content_type=?")
             params.append(content_type)
+        if document_kind:
+            where_parts.append(
+                "EXISTS (SELECT 1 FROM jobs AS j "
+                "WHERE j.id=note_chunks_fts5.job_id AND j.document_kind=?)"
+            )
+            params.append(document_kind)
         where = " AND ".join(where_parts)
 
         total = self._conn.execute(
@@ -320,7 +339,9 @@ class SearchRepository:
         if short_query:
             rows = self._conn.execute(
                 f"""SELECT chunk_id, job_id, note_type, title, content_type, domain,
-                           collection_id, section, body, evidence_json
+                           collection_id, section, body, evidence_json,
+                           (SELECT j.document_kind FROM jobs AS j
+                            WHERE j.id=note_chunks_fts5.job_id) AS document_kind
                     FROM note_chunks_fts5 WHERE {where}
                     ORDER BY job_id COLLATE BINARY, note_type COLLATE BINARY,
                              chunk_id COLLATE BINARY
@@ -331,6 +352,8 @@ class SearchRepository:
             rows = self._conn.execute(
                 f"""SELECT chunk_id, job_id, note_type, title, content_type, domain,
                            collection_id, section, body, evidence_json,
+                           (SELECT j.document_kind FROM jobs AS j
+                            WHERE j.id=note_chunks_fts5.job_id) AS document_kind,
                            snippet(note_chunks_fts5, 8, '<mark>', '</mark>', '…', 12) AS snippet
                     FROM note_chunks_fts5 WHERE {where}
                     ORDER BY rank, job_id COLLATE BINARY, note_type COLLATE BINARY,
@@ -372,6 +395,7 @@ class SearchRepository:
                 ),
                 "body": r["body"],
                 "content_type": r["content_type"],
+                "document_kind": r["document_kind"] or None,
                 "domain": r["domain"],
                 "collection_id": r["collection_id"] or None,
                 "section": r["section"] or "",

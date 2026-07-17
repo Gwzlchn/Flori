@@ -15,6 +15,7 @@ class DatabaseRowMappers:
             id=row["id"],
             content_type=row["content_type"],
             pipeline=row["pipeline"],
+            document_kind=row["document_kind"],
             collection_id=row["collection_id"],
             url=row["url"],
             title=row["title"],

@@ -1,4 +1,4 @@
-"""对显式公网样本运行 article、audio、RSS 与 YouTube 验证."""
+"""对显式公网样本运行 Document、audio、RSS 与 YouTube 验证。"""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ import pytest
 from shared.subscriptions.base import SourceContext
 from shared.subscriptions.rss import enumerate_rss
 from shared.subscriptions.youtube import enumerate_youtube_channel, enumerate_youtube_playlist
-from steps.article.step_02_parse_article import MIN_BODY_CHARS, ParseArticleStep
 from steps.common.step_01_download import DownloadStep
+from steps.document.adapters.generic_html import parse_generic_html
 
 
 pytestmark = pytest.mark.external
@@ -43,14 +43,19 @@ def _write_job(job_dir: Path, url: str, content_type: str) -> None:
 def test_external_article_download_and_parse(tmp_path) -> None:
     url = _public_url("FLORI_EXTERNAL_ARTICLE_URL")
     job_dir = tmp_path / "article"
-    _write_job(job_dir, url, "article")
+    _write_job(job_dir, url, "document")
 
     DownloadStep("01_download", job_dir, _DOWNLOAD_CONFIG).execute()
-    parsed = ParseArticleStep("02_parse_article", job_dir, {}).execute()
+    document, quality = parse_generic_html(job_dir, {
+        "job_id": job_dir.name,
+        "content_type": "document",
+        "document_kind": "article",
+        "url": url,
+    })
 
-    original = (job_dir / "output" / "original.md").read_text(encoding="utf-8")
-    assert len(original.strip()) >= MIN_BODY_CHARS
-    assert parsed is not None and parsed["chars"] >= MIN_BODY_CHARS
+    assert quality["status"] != "rejected"
+    assert document["document_kind"] == "article"
+    assert sum(len(block.get("text") or "") for block in document["blocks"]) >= 200
 
 
 def test_external_audio_download_is_playable(tmp_path) -> None:
@@ -72,7 +77,11 @@ async def test_external_rss_enumerates_real_items() -> None:
     assert title
     assert items
     assert all(item.item_id and item.url for item in items)
-    assert {item.content_type for item in items} <= {"article", "audio", "paper", "video"}
+    assert {item.content_type for item in items} <= {"document", "audio", "video"}
+    assert all(
+        item.document_kind in {"article", "research_paper"}
+        for item in items if item.content_type == "document"
+    )
 
 
 async def test_external_youtube_enumerates_real_channel() -> None:

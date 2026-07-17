@@ -126,7 +126,8 @@ class TestManualCRUD:
                 "excluded": [{
                     "evidence_id": "ce_" + "a" * 64,
                     "job_id": "job-stale",
-                    "content_type": "article",
+                    "content_type": "document",
+                    "document_kind": "article",
                     "source_fingerprint": "source-stale",
                     "reason": "source_changed",
                     "locator": None,
@@ -436,7 +437,8 @@ class TestEntityP1:
     @pytest.mark.asyncio
     async def test_term_detail_occurrence_titles(self, client, db):
         from shared.models import Job
-        db.create_job(Job(id="jt1", content_type="article", pipeline="article_v2",
+        db.create_job(Job(id="jt1", content_type="document", document_kind="article",
+                          pipeline="document",
                           title="一篇文章"))
         db.add_glossary_suggestion("ml", "Momentum", "jt1", "article")
         resp = await client.get("/api/glossary/ml/Momentum")

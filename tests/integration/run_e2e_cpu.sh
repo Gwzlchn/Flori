@@ -124,54 +124,55 @@ fi
 
 log ""
 
-# ─── TC-3: 论文 PDF 上传 ───
-log "TC-3: PDF 上传 → paper pipeline CPU 步骤"
-RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload?content_type=paper" \
+# ─── TC-3: Document PDF 上传 ───
+log "TC-3: PDF 上传 → Document/research_paper CPU 步骤"
+RESP=$(curl --noproxy '*' -s -X POST \
+  "$API/api/jobs/upload?content_type=document&document_kind=research_paper" \
   -F "file=@/tmp/test_paper.pdf" \
   -F "domain=ml")
 JOB3=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
 CT=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['content_type'])")
 log "  Job: $JOB3 (content_type=$CT)"
 
-PAPER_CPU_STEPS="01_download,02_pdf_parse,03_sections"
-if wait_steps_done "$JOB3" "$PAPER_CPU_STEPS" 300; then
+DOCUMENT_CPU_STEPS="01_download,02_parse,03_structure"
+if wait_steps_done "$JOB3" "$DOCUMENT_CPU_STEPS" 1800; then
   report_steps "$JOB3"
-  # 验证 sections.json 存在
+  # 验证统一 Document 和原文索引投影存在。
   SECTIONS=$(docker compose -f docker-compose.integration.yml exec -T worker-cpu \
-    python3 -c "import json; d=json.load(open('/data/jobs/$JOB3/intermediate/sections.json')); print(len(d))" 2>/dev/null)
+    python3 -c "import json; from pathlib import Path; p=Path('/data/jobs/$JOB3'); d=json.load(open(p/'intermediate/document.json')); assert (p/'intermediate/document_index.md').stat().st_size>0; print(len(d['blocks']))" 2>/dev/null)
   if [ -n "$SECTIONS" ] && [ "$SECTIONS" -gt 0 ]; then
-    pass "TC-3: PDF 上传 paper pipeline CPU 完成 (sections=$SECTIONS)"
+    pass "TC-3: PDF 上传 Document CPU 完成 (blocks=$SECTIONS)"
   else
-    fail "TC-3" "sections.json 为空或不存在"
+    fail "TC-3" "document.json 或 document_index.md 为空/不存在"
   fi
 else
   report_steps "$JOB3"
-  fail "TC-3" "paper CPU 步骤未在超时内完成"
+  fail "TC-3" "Document CPU 步骤未在超时内完成"
 fi
 
 log ""
 
 # ─── TC-4: arXiv URL 下载 ───
-log "TC-4: arXiv URL → 下载 + paper pipeline CPU"
+log "TC-4: arXiv URL → registry 识别 + Document CPU"
 ARXIV_URL="https://arxiv.org/abs/2106.09685"
 RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs" \
   -H "Content-Type: application/json" \
-  -d "{\"url\": \"$ARXIV_URL\", \"content_type\": \"paper\", \"domain\": \"ml\"}")
+  -d "{\"url\": \"$ARXIV_URL\", \"domain\": \"ml\"}")
 JOB4=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
 log "  Job: $JOB4"
 
-if wait_steps_done "$JOB4" "$PAPER_CPU_STEPS" 300; then
+if wait_steps_done "$JOB4" "$DOCUMENT_CPU_STEPS" 1800; then
   report_steps "$JOB4"
   SECTIONS=$(docker compose -f docker-compose.integration.yml exec -T worker-cpu \
-    python3 -c "import json; d=json.load(open('/data/jobs/$JOB4/intermediate/sections.json')); print(len(d))" 2>/dev/null)
+    python3 -c "import json; from pathlib import Path; p=Path('/data/jobs/$JOB4'); d=json.load(open(p/'intermediate/document.json')); assert (p/'intermediate/document_index.md').stat().st_size>0; print(len(d['blocks']))" 2>/dev/null)
   if [ -n "$SECTIONS" ] && [ "$SECTIONS" -gt 0 ]; then
-    pass "TC-4: arXiv 下载 + paper CPU 完成 (sections=$SECTIONS)"
+    pass "TC-4: arXiv 下载 + Document CPU 完成 (blocks=$SECTIONS)"
   else
-    fail "TC-4" "sections.json 为空或不存在"
+    fail "TC-4" "document.json 或 document_index.md 为空/不存在"
   fi
 else
   report_steps "$JOB4"
-  fail "TC-4" "paper CPU 步骤未在超时内完成"
+  fail "TC-4" "Document CPU 步骤未在超时内完成"
 fi
 
 log ""

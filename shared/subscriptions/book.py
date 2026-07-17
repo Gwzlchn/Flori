@@ -1,6 +1,6 @@
 """book_toc source-adapter:在线书目录页 → 章节列表。
 
-book = collection(source_type=book_toc,source_id=目录 URL)+ 每章一个 article job。
+book = collection(source_type=book_toc,source_id=目录 URL)+ 每章一个 document job。
 首个实现认 jupyter-book / sphinx 结构(QuantEcon 系列即此):目录页 nav 里的
 `<a class="reference internal" href="chapter.html">` 有序即章序。
 
@@ -89,7 +89,13 @@ def parse_toc(html: str, base_url: str, max_chapters: int) -> tuple[str | None, 
         if not slug or slug in seen or slug in ("index", "intro-toc", "genindex", "search"):
             continue
         seen.add(slug)
-        items.append(SourceItem(item_id=slug, title=text or slug, url=url, content_type="article"))
+        items.append(SourceItem(
+            item_id=slug,
+            title=text or slug,
+            url=url,
+            content_type="document",
+            document_kind="book_chapter",
+        ))
         if len(items) >= max_chapters:
             break
     title = (p.title or "").split("—")[0].strip() or None

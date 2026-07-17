@@ -11,6 +11,7 @@ from shared.source_registry import (
     SUBSCRIPTION_SOURCE_NAMES,
     SourceRegistryError,
     content_type_for_filename,
+    default_document_kind,
     load_source_registry,
     source_catalog,
     validate_job_route,
@@ -53,8 +54,8 @@ def test_catalog_exposes_youtube_playlist():
     ("filename", "content_type"),
     [
         ("lesson.MOV", "video"),
-        ("paper.pdf", "paper"),
-        ("chapter.md", "article"),
+        ("paper.pdf", "document"),
+        ("chapter.md", "document"),
         ("episode.flac", "audio"),
         ("archive.zip", None),
     ],
@@ -67,11 +68,25 @@ def test_job_route_rejects_unknown_source_and_mismatch():
     with pytest.raises(SourceRegistryError, match="unsupported source"):
         validate_job_route("other", "video")
     with pytest.raises(SourceRegistryError, match="does not support"):
-        validate_job_route("youtube", "article")
+        validate_job_route("youtube", "document", document_kind="article")
     with pytest.raises(SourceRegistryError, match="unsupported source"):
-        validate_job_route("local_file", "article")
-    validate_job_route("local_file", "article", allow_internal=True)
+        validate_job_route("local_file", "document", document_kind="article")
+    validate_job_route(
+        "local_file", "document", document_kind="article", allow_internal=True,
+    )
     validate_job_route("http_article", "audio")
+
+
+def test_document_source_defaults_and_catalog_are_explicit():
+    assert default_document_kind("arxiv") == "research_paper"
+    assert default_document_kind("pdf") == "unknown"
+    catalog = source_catalog()
+    assert any(item["kind"] == "whitepaper" for item in catalog["document_kinds"])
+    web = next(item for item in catalog["job_sources"] if item["type"] == "http_article")
+    assert web["default_document_kind"] == "article"
+    assert web["default_source_profile"] == "generic_html"
+    with pytest.raises(SourceRegistryError, match="does not support document_kind"):
+        validate_job_route("arxiv", "document", document_kind="whitepaper")
 
 
 def test_invalid_registry_fails_closed(tmp_path):

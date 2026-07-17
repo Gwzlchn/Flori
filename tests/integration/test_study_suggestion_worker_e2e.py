@@ -35,8 +35,9 @@ def _seed_knowledge(db) -> None:
     db.create_job(
         Job(
             id="study-e2e-job",
-            content_type="article",
-            pipeline="article",
+            content_type="document",
+            pipeline="document",
+            document_kind="article",
             status=JobStatus.DONE,
             title="反向传播",
             domain="ml",
@@ -47,7 +48,7 @@ def _seed_knowledge(db) -> None:
         "smart",
         "反向传播",
         "## 反向传播\n\n反向传播通过链式法则高效计算梯度。",
-        content_type="article",
+        content_type="document",
         domain="ml",
     )
     db.upsert_glossary_term(

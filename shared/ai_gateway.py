@@ -84,9 +84,37 @@ def _extract_cli_model(obj: dict) -> str:
 class DryRunProvider:
     """DRY_RUN 模式:不调真实 API。"""
 
+    @staticmethod
+    def _content(request: LLMRequest) -> str:
+        prompt = "\n".join(
+            str(message.get("content") or "")
+            for message in request.messages
+            if isinstance(message, dict)
+        )
+        marker = "\nINPUT="
+        if (
+            request.response_format == "json"
+            and "Document 流水线的忠实翻译器" in prompt
+            and marker in prompt
+        ):
+            try:
+                payload = json.loads(prompt.rsplit(marker, 1)[1])
+                segments = payload["segments"]
+                if isinstance(segments, list):
+                    return json.dumps({
+                        "segments": [
+                            {"id": item["id"], "text": item["text"]}
+                            for item in segments
+                            if isinstance(item, dict)
+                        ],
+                    }, ensure_ascii=False, separators=(",", ":"))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                pass
+        return f"[DRY_RUN] {len(request.messages)} messages, model={request.model}"
+
     async def complete(self, request: LLMRequest) -> LLMResponse:
         return LLMResponse(
-            content=f"[DRY_RUN] {len(request.messages)} messages, model={request.model}",
+            content=self._content(request),
             model=request.model or "dry-run",
             provider="dry-run",
             input_tokens=0,

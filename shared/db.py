@@ -658,6 +658,7 @@ _JOB_UPDATABLE = {
     "meta", "style_tags", "domain", "source", "collection_id",
     "published_at",
     "lineage_key", "is_current", "source_digest", "pipeline_digest", "parent_job_id",
+    "document_kind",
 }
 _STEP_UPDATABLE = {
     "status", "input_hash", "worker_id", "started_at", "finished_at",
@@ -1505,6 +1506,7 @@ class Database:
         content: str,
         mode: str = "overwrite",
         note: str | None = None,
+        document_kind: str | None = None,
     ) -> int:
         """存某步的 prompt 覆盖,带版本管理(类 Grafana save)。返回激活版本号。
         - 该 (scope,domain,pipeline,step) 此前无任何覆盖 → 首版 v1(mode 忽略)。
@@ -1515,7 +1517,7 @@ class Database:
         return self._runtime.run_transaction(
             self,
             _PromptsRepository.set_prompt_override_in_tx,
-            (scope, domain, pipeline, step, content, mode, note),
+            (scope, domain, pipeline, step, content, mode, note, document_kind),
             {},
             begin_immediate=False,
             commit_on_success=True,
@@ -1524,7 +1526,8 @@ class Database:
         )
 
     def list_prompt_override_versions(
-        self, scope: str, domain: str | None, pipeline: str, step: str
+        self, scope: str, domain: str | None, pipeline: str, step: str,
+        document_kind: str | None = None,
     ) -> list[dict]:
         """该 (scope,domain,pipeline,step) 的全部历史版本元信息(不含 content),version 升序。"""
         return _PromptsRepository.list_prompt_override_versions(
@@ -1533,10 +1536,12 @@ class Database:
             domain,
             pipeline,
             step,
+            document_kind,
         )
 
     def get_prompt_override_version(
-        self, scope: str, domain: str | None, pipeline: str, step: str, version: int
+        self, scope: str, domain: str | None, pipeline: str, step: str, version: int,
+        document_kind: str | None = None,
     ) -> dict | None:
         """读某历史版本(含 content),未命中返回 None。"""
         return _PromptsRepository.get_prompt_override_version(
@@ -1546,16 +1551,18 @@ class Database:
             pipeline,
             step,
             version,
+            document_kind,
         )
 
     def delete_prompt_override(
-        self, scope: str, domain: str | None, pipeline: str, step: str
+        self, scope: str, domain: str | None, pipeline: str, step: str,
+        document_kind: str | None = None,
     ) -> None:
         """删某步的 prompt 覆盖(恢复默认)——连同其全部历史版本一并删。无则 no-op。"""
         return self._runtime.run_transaction(
             self,
             _PromptsRepository.delete_prompt_override_in_tx,
-            (scope, domain, pipeline, step),
+            (scope, domain, pipeline, step, document_kind),
             {},
             begin_immediate=False,
             commit_on_success=True,
@@ -1564,7 +1571,8 @@ class Database:
         )
 
     def deactivate_prompt_override(
-        self, scope: str, domain: str | None, pipeline: str, step: str
+        self, scope: str, domain: str | None, pipeline: str, step: str,
+        document_kind: str | None = None,
     ) -> None:
         """停用某步覆盖(恢复内置默认)——非破坏:只删主表 prompt_overrides 那一行(激活指针),
         prompt_override_versions 全部历史版本完整保留(下拉里仍能看到 v1/v2…,可重新激活)。
@@ -1573,7 +1581,7 @@ class Database:
         return self._runtime.run_transaction(
             self,
             _PromptsRepository.deactivate_prompt_override_in_tx,
-            (scope, domain, pipeline, step),
+            (scope, domain, pipeline, step, document_kind),
             {},
             begin_immediate=False,
             commit_on_success=True,
@@ -1582,7 +1590,8 @@ class Database:
         )
 
     def set_active_prompt_version(
-        self, scope: str, domain: str | None, pipeline: str, step: str, version: int
+        self, scope: str, domain: str | None, pipeline: str, step: str, version: int,
+        document_kind: str | None = None,
     ) -> bool:
         """把激活指针指向某历史版本(re-activate):主表 content/version 同步成该版本,
         下次派发即用它。该版本不存在于 prompt_override_versions → 返回 False(不动);成功 True。
@@ -1590,7 +1599,7 @@ class Database:
         return self._runtime.run_transaction(
             self,
             _PromptsRepository.set_active_prompt_version_in_tx,
-            (scope, domain, pipeline, step, version),
+            (scope, domain, pipeline, step, version, document_kind),
             {},
             begin_immediate=False,
             commit_on_success=True,
@@ -1599,7 +1608,8 @@ class Database:
         )
 
     def get_prompt_override(
-        self, scope: str, domain: str | None, pipeline: str, step: str
+        self, scope: str, domain: str | None, pipeline: str, step: str,
+        document_kind: str | None = None,
     ) -> dict | None:
         """读单条 prompt 覆盖,未命中返回 None。"""
         return _PromptsRepository.get_prompt_override(
@@ -1608,6 +1618,7 @@ class Database:
             domain,
             pipeline,
             step,
+            document_kind,
         )
 
     def list_prompt_overrides(self) -> list[dict]:
@@ -1617,7 +1628,7 @@ class Database:
         )
 
     def resolve_prompt_overrides(
-        self, pipeline: str, domain: str | None
+        self, pipeline: str, domain: str | None, document_kind: str | None = None,
     ) -> dict[str, dict]:
         """派发注入用:给定 job 的 pipeline + domain,返回 {step: {content, version}} 解析结果。
         domain 覆盖优先于 global;同一步两者都有则取 domain(连同其版本号)。job 创建时(api 有 DB)
@@ -1628,6 +1639,7 @@ class Database:
             self,
             pipeline,
             domain,
+            document_kind,
         )
 
     def get_usage_summary(
@@ -2178,6 +2190,7 @@ class Database:
         location: str | None = None,
         definition: str = "",
         zh_name: str = "",
+        document_kind: str = "",
     ) -> None:
         """采集候选概念(resolve-then-merge):先按 (domain, term) 精确匹配,
         再经 shared.concepts.resolve 用归一键撞现有实体的 term/zh_name/aliases——
@@ -2195,6 +2208,7 @@ class Database:
             location,
             definition,
             zh_name,
+            document_kind,
         )
 
     _STATUS_RANK = {"accepted": 2, "suggested": 1, "rejected": 0}
@@ -2496,6 +2510,7 @@ class Database:
         collection_id: str | None = None,
         domain: str | None = None,
         content_type: str | None = None,
+        document_kind: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[int, list[dict]]:
@@ -2506,6 +2521,7 @@ class Database:
             collection_id,
             domain,
             content_type,
+            document_kind,
             limit,
             offset,
         )
@@ -2516,6 +2532,7 @@ class Database:
         collection_id: str | None = None,
         domain: str | None = None,
         content_type: str | None = None,
+        document_kind: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[int, list[dict]]:
@@ -2526,6 +2543,7 @@ class Database:
             collection_id,
             domain,
             content_type,
+            document_kind,
             limit,
             offset,
         )

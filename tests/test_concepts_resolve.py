@@ -171,7 +171,8 @@ class TestListGlossaryQ:
 class TestGetJobTitles:
     def test_titles(self, db):
         from shared.models import Job
-        db.create_job(Job(id="jt1", content_type="article", pipeline="article_v2",
+        db.create_job(Job(id="jt1", content_type="document", document_kind="article",
+                          pipeline="document",
                           title="标题一"))
         assert db.get_job_titles(["jt1", "missing"]) == {"jt1": "标题一"}
 

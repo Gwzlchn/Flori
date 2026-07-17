@@ -18,3 +18,4 @@
 | [0012](0012-case-evidence-authoritative-sources.md) | 案例取证/权威来源（fetch 判决书+报道·带引用·评审逐条核·改写 0010） | 2026-06-22 |
 | [0013](0013-version-semver-build-sha.md) | 版本号 = 单一语义版本 + 构建短 sha,所有组件共用（递增:patch+1·逢10进位·大重构 major+1） | 2026-06-26 |
 | [0014](0014-observability-and-job-dag.md) | 可观测体系 + 每个 job 的流水线 DAG（纯 CSS/SVG·pipelines.yaml 单一事实源） | 2026-06-26 |
+| [0015](0015-unified-document-family.md) | 论文、文章和白皮书统一为 Document 内容族，体裁与媒介能力正交 | 2026-07-17 |

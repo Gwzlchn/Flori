@@ -26,7 +26,8 @@ def search(
 ) -> list[dict]:
     """全文检索笔记(2 字 CJK 子串 + FTS5 trigram),归一为 agent 友好结构。
 
-    返回 [{title, snippet, job_id, domain, kind}];snippet 内 <mark> 包裹命中。
+    返回 [{title, snippet, job_id, domain, content_type, document_kind, kind}];
+    snippet 内 <mark> 包裹命中。
     单字查询返回空,3 字及以上仍走 trigram。
     """
     _total, items = db.search_notes(query, domain=domain, limit=limit)
@@ -36,6 +37,8 @@ def search(
             "snippet": it["snippet"],
             "job_id": it["job_id"],
             "domain": it["domain"],
+            "content_type": it["content_type"],
+            "document_kind": it.get("document_kind"),
             "kind": it["note_type"],
         }
         for it in items
@@ -63,6 +66,7 @@ async def get_note(db: Database, storage: StorageBackend, job_id: str) -> dict:
         "domain": job.domain,
         "collection_id": job.collection_id,
         "content_type": job.content_type,
+        "document_kind": job.document_kind or None,
         "status": job.status.value,
         "note_file": rel,
         "markdown": markdown,

@@ -241,7 +241,7 @@ video:
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
 ```
 
-当前默认值：video/article 链的 variables 全为 claude-cli（订阅），paper/audio 链为 anthropic 主、deepseek 备（见 configs/pipelines.yaml）。
+当前 provider/model 默认值只在 `configs/pipelines.yaml` 的 variables 定义。Video、Document、Audio 三条链引用同一角色变量，Document 体裁不能另建 provider 分支。
 
 `tags` 控制哪个 Worker 能接这个任务（亲和性），`ai` 控制 Gateway 在该 Worker 上用哪个 Provider/Model。两层独立。
 

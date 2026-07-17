@@ -22,7 +22,10 @@ class TestParseToc:
         assert title == "A First Course"
         assert [i.item_id for i in items] == ["about", "growth", "cycle"]  # 去锚点重复/外链/genindex
         assert items[0].url == "https://book.example.org/about.html"
-        assert all(i.content_type == "article" for i in items)
+        assert all(
+            i.content_type == "document" and i.document_kind == "book_chapter"
+            for i in items
+        )
 
     def test_max_chapters(self):
         _, items = parse_toc(_TOC, "https://book.example.org/", 2)
@@ -41,7 +44,8 @@ class TestBookChain:
         db = Database(tmp_path / "t.db"); db.init_schema()
         redis = make_fakeredis()
         for i, jid in enumerate(["jobs_article_ch1", "jobs_article_ch2"]):
-            db.create_job(Job(id=jid, content_type="article", pipeline="article",
+            db.create_job(Job(id=jid, content_type="document", document_kind="book_chapter",
+                              pipeline="document",
                               domain="finance", collection_id="col_book_b",
                               created_at=datetime(2026, 7, 6, i, tzinfo=timezone.utc)))
         # 全部待投 → 返回最早章

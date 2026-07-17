@@ -18,8 +18,7 @@ _PROVIDER_RUNTIME_CAPABILITIES = {"claude-cli": {READ_TOOL_TAG}}
 # rerun-smart 只消费这一份角色映射,避免 API 为 video 写死步骤名。
 PIPELINE_AI_ROLES: dict[str, tuple[str, str]] = {
     "video": ("11_smart", "12_review"),
-    "paper": ("05_smart_paper", "06_review"),
-    "article": ("04_smart_article", "06_review"),
+    "document": ("05_smart", "08_review"),
     "audio": ("04_smart_podcast", "05_review"),
 }
 

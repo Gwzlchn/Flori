@@ -44,7 +44,8 @@ function evidence(over: Partial<ConceptEvidence> = {}): ConceptEvidence {
   return {
     evidence_id: validEvidenceId,
     job_id: 'job-paper',
-    content_type: 'paper',
+    content_type: 'document',
+    document_kind: 'research_paper',
     source_fingerprint: 'd'.repeat(64),
     note_type: 'smart',
     chunk_id: 'job-paper:smart:0',
@@ -66,7 +67,7 @@ function detail(over: Partial<ConceptTermDetail> = {}): ConceptTermDetail {
     zh_name: '梯度',
     aliases: [],
     occurrences: [
-      { job_id: 'job-paper', content_type: 'paper', location: 'p.3', title: '论文' },
+      { job_id: 'job-paper', content_type: 'document', document_kind: 'research_paper', location: 'p.3', title: '论文' },
       { job_id: 'job-video', content_type: 'video', location: '03:20', title: '视频' },
     ],
     occurrence_total: 12,

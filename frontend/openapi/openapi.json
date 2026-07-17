@@ -1201,6 +1201,17 @@
             "title": "Content Type",
             "type": "string"
           },
+          "document_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Kind"
+          },
           "evidence_id": {
             "title": "Evidence Id",
             "type": "string"
@@ -1560,8 +1571,7 @@
       "ContentType": {
         "enum": [
           "video",
-          "paper",
-          "article",
+          "document",
           "audio"
         ],
         "title": "ContentType",
@@ -1595,6 +1605,21 @@
         ],
         "title": "DiskInfoResponse",
         "type": "object"
+      },
+      "DocumentKind": {
+        "enum": [
+          "research_paper",
+          "article",
+          "whitepaper",
+          "report",
+          "book_chapter",
+          "documentation",
+          "standard",
+          "thesis",
+          "unknown"
+        ],
+        "title": "DocumentKind",
+        "type": "string"
       },
       "ErrorResponse": {
         "additionalProperties": false,
@@ -1964,6 +1989,17 @@
             "default": "",
             "title": "Content Type",
             "type": "string"
+          },
+          "document_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Kind"
           },
           "job_id": {
             "title": "Job Id",
@@ -2442,6 +2478,16 @@
               }
             ]
           },
+          "document_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DocumentKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "domain": {
             "default": "general",
             "title": "Domain",
@@ -2492,8 +2538,23 @@
             "title": "Created At",
             "type": "string"
           },
+          "document_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Kind"
+          },
           "job_id": {
             "title": "Job Id",
+            "type": "string"
+          },
+          "pipeline": {
+            "title": "Pipeline",
             "type": "string"
           },
           "status": {
@@ -2504,6 +2565,8 @@
         "required": [
           "job_id",
           "content_type",
+          "document_kind",
+          "pipeline",
           "status",
           "created_at"
         ],
@@ -2549,6 +2612,17 @@
             "title": "Created At",
             "type": "string"
           },
+          "document_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Kind"
+          },
           "domain": {
             "default": "general",
             "title": "Domain",
@@ -2567,6 +2641,10 @@
             "additionalProperties": true,
             "title": "Meta",
             "type": "object"
+          },
+          "pipeline": {
+            "title": "Pipeline",
+            "type": "string"
           },
           "progress_pct": {
             "default": 0,
@@ -2602,7 +2680,7 @@
             ],
             "title": "Source"
           },
-          "source_kind": {
+          "source_profile": {
             "anyOf": [
               {
                 "type": "string"
@@ -2611,7 +2689,7 @@
                 "type": "null"
               }
             ],
-            "title": "Source Kind"
+            "title": "Source Profile"
           },
           "status": {
             "title": "Status",
@@ -2682,6 +2760,7 @@
         "required": [
           "job_id",
           "content_type",
+          "pipeline",
           "status",
           "created_at"
         ],
@@ -2895,6 +2974,17 @@
             "title": "Created At",
             "type": "string"
           },
+          "document_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Kind"
+          },
           "domain": {
             "default": "general",
             "title": "Domain",
@@ -2902,6 +2992,10 @@
           },
           "job_id": {
             "title": "Job Id",
+            "type": "string"
+          },
+          "pipeline": {
+            "title": "Pipeline",
             "type": "string"
           },
           "progress_pct": {
@@ -2977,6 +3071,7 @@
         "required": [
           "job_id",
           "content_type",
+          "pipeline",
           "status",
           "created_at"
         ],
@@ -3359,9 +3454,38 @@
       "PipelineResponse": {
         "additionalProperties": false,
         "properties": {
+          "content_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Content Types",
+            "type": "array"
+          },
+          "document_kinds": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Document Kinds",
+            "type": "array"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "source_profiles": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Profiles",
+            "type": "array"
           },
           "steps": {
             "items": {
@@ -3373,6 +3497,11 @@
         },
         "required": [
           "name",
+          "key",
+          "label",
+          "content_types",
+          "document_kinds",
+          "source_profiles",
           "steps"
         ],
         "title": "PipelineResponse",
@@ -3546,6 +3675,16 @@
       },
       "PromptActivateRequest": {
         "properties": {
+          "document_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DocumentKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "domain": {
             "anyOf": [
               {
@@ -3788,6 +3927,17 @@
             ],
             "title": "Active Version"
           },
+          "document_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Kind"
+          },
           "domain": {
             "anyOf": [
               {
@@ -3844,6 +3994,16 @@
             "title": "Content",
             "type": "string"
           },
+          "document_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DocumentKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "domain": {
             "anyOf": [
               {
@@ -3887,6 +4047,10 @@
             "title": "Content",
             "type": "string"
           },
+          "document_kind": {
+            "title": "Document Kind",
+            "type": "string"
+          },
           "domain": {
             "title": "Domain",
             "type": "string"
@@ -3917,6 +4081,7 @@
           "scope",
           "domain",
           "pipeline",
+          "document_kind",
           "step",
           "content",
           "version",
@@ -3928,6 +4093,17 @@
       "PromptOverrideScope": {
         "additionalProperties": false,
         "properties": {
+          "document_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Kind"
+          },
           "domain": {
             "anyOf": [
               {
@@ -3946,7 +4122,8 @@
         },
         "required": [
           "scope",
-          "domain"
+          "domain",
+          "document_kind"
         ],
         "title": "PromptOverrideScope",
         "type": "object"
@@ -4241,20 +4418,6 @@
             "title": "Diagnostic Overall",
             "type": "null"
           },
-          "figure_references": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Figure References"
-          },
           "formula_integrity": {
             "anyOf": [
               {
@@ -4279,20 +4442,6 @@
               }
             ],
             "title": "Generated At"
-          },
-          "insight": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Insight"
           },
           "issues": {
             "items": {
@@ -4468,6 +4617,20 @@
             "title": "Top3 Improvements",
             "type": "array"
           },
+          "traceability": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Traceability"
+          },
           "visual_integration": {
             "anyOf": [
               {
@@ -4481,6 +4644,20 @@
               }
             ],
             "title": "Visual Integration"
+          },
+          "visual_references": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Visual References"
           }
         },
         "required": [
@@ -4511,8 +4688,8 @@
           "visual_integration",
           "readability",
           "formula_integrity",
-          "figure_references",
-          "insight",
+          "visual_references",
+          "traceability",
           "conciseness"
         ],
         "title": "ReviewProjectionResponse",
@@ -4564,6 +4741,17 @@
             "title": "Content Type",
             "type": "string"
           },
+          "document_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Kind"
+          },
           "domain": {
             "default": "",
             "title": "Domain",
@@ -4611,11 +4799,25 @@
             "title": "Content Types",
             "type": "array"
           },
+          "document_kinds": {
+            "items": {
+              "$ref": "#/components/schemas/SourceDocumentKind"
+            },
+            "title": "Document Kinds",
+            "type": "array"
+          },
           "job_sources": {
             "items": {
               "$ref": "#/components/schemas/SourceJobSource"
             },
             "title": "Job Sources",
+            "type": "array"
+          },
+          "source_profiles": {
+            "items": {
+              "$ref": "#/components/schemas/SourceProfile"
+            },
+            "title": "Source Profiles",
             "type": "array"
           },
           "subscription_sources": {
@@ -4629,7 +4831,9 @@
         "required": [
           "content_types",
           "job_sources",
-          "subscription_sources"
+          "subscription_sources",
+          "document_kinds",
+          "source_profiles"
         ],
         "title": "SourceCatalogResponse",
         "type": "object"
@@ -4666,6 +4870,40 @@
         "title": "SourceContentType",
         "type": "object"
       },
+      "SourceDocumentKind": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "note_profile": {
+            "title": "Note Profile",
+            "type": "string"
+          },
+          "review_profile": {
+            "title": "Review Profile",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "label",
+          "description",
+          "note_profile",
+          "review_profile"
+        ],
+        "title": "SourceDocumentKind",
+        "type": "object"
+      },
       "SourceItem": {
         "properties": {
           "canonical_evidence": {
@@ -4678,6 +4916,17 @@
           "content_type": {
             "title": "Content Type",
             "type": "string"
+          },
+          "document_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Kind"
           },
           "domain": {
             "title": "Domain",
@@ -4721,6 +4970,35 @@
             "title": "Creatable",
             "type": "boolean"
           },
+          "default_document_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Document Kind"
+          },
+          "default_source_profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Source Profile"
+          },
+          "document_kinds": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Document Kinds",
+            "type": "array"
+          },
           "label": {
             "title": "Label",
             "type": "string"
@@ -4734,9 +5012,39 @@
           "type",
           "label",
           "content_types",
+          "document_kinds",
+          "default_document_kind",
+          "default_source_profile",
           "creatable"
         ],
         "title": "SourceJobSource",
+        "type": "object"
+      },
+      "SourceProfile": {
+        "additionalProperties": false,
+        "properties": {
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "profile": {
+            "title": "Profile",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile",
+          "label",
+          "capabilities"
+        ],
+        "title": "SourceProfile",
         "type": "object"
       },
       "SourceSubscription": {
@@ -11831,6 +12139,22 @@
             "schema": {
               "$ref": "#/components/schemas/ContentType"
             }
+          },
+          {
+            "in": "query",
+            "name": "document_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/DocumentKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Document Kind"
+            }
           }
         ],
         "requestBody": {
@@ -14984,6 +15308,22 @@
               ],
               "title": "Domain"
             }
+          },
+          {
+            "in": "query",
+            "name": "document_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Document Kind"
+            }
           }
         ],
         "responses": {
@@ -15164,6 +15504,22 @@
                 }
               ],
               "title": "Domain"
+            }
+          },
+          {
+            "in": "query",
+            "name": "document_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Document Kind"
             }
           }
         ],
@@ -15692,6 +16048,22 @@
               ],
               "title": "Domain"
             }
+          },
+          {
+            "in": "query",
+            "name": "document_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Document Kind"
+            }
           }
         ],
         "responses": {
@@ -15883,13 +16255,29 @@
             "schema": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "$ref": "#/components/schemas/ContentType"
                 },
                 {
                   "type": "null"
                 }
               ],
               "title": "Content Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "document_kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/DocumentKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Document Kind"
             }
           },
           {

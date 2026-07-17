@@ -59,10 +59,13 @@ class TestPromptOverrideDB:
 
     def test_resolve_filters_empty_and_other_pipeline(self, pdb):
         pdb.set_prompt_override("global", None, "video", "11_smart", "")     # 空 = 无覆盖
-        pdb.set_prompt_override("global", None, "paper", "05_smart_paper", "P")
+        pdb.set_prompt_override(
+            "global", None, "document", "05_smart", "P",
+            document_kind="research_paper",
+        )
         assert pdb.resolve_prompt_overrides("video", "general") == {}
-        r = pdb.resolve_prompt_overrides("paper", "general")
-        assert r["05_smart_paper"]["content"] == "P" and r["05_smart_paper"]["version"] == 1
+        r = pdb.resolve_prompt_overrides("document", "general", "research_paper")
+        assert r["05_smart"]["content"] == "P" and r["05_smart"]["version"] == 1
 
     def test_delete_restores_default(self, pdb):
         pdb.set_prompt_override("global", None, "video", "11_smart", "x")
@@ -71,10 +74,14 @@ class TestPromptOverrideDB:
 
     def test_list_all(self, pdb):
         pdb.set_prompt_override("global", None, "video", "11_smart", "a")
-        pdb.set_prompt_override("domain", "finance", "paper", "05_smart_paper", "b")
+        pdb.set_prompt_override(
+            "domain", "finance", "document", "05_smart", "b",
+            document_kind="research_paper",
+        )
         rows = pdb.list_prompt_overrides()
-        assert {(r["pipeline"], r["step"]) for r in rows} == {
-            ("video", "11_smart"), ("paper", "05_smart_paper")
+        assert {(r["pipeline"], r["document_kind"], r["step"]) for r in rows} == {
+            ("video", "", "11_smart"),
+            ("document", "research_paper", "05_smart"),
         }
 
 
@@ -134,7 +141,10 @@ class TestPromptOverrideVersions:
         pdb.set_prompt_override("global", None, "video", "11_smart", "A")
         pdb.set_prompt_override("global", None, "video", "11_smart", "B", mode="new")  # 激活 v2
         r = pdb.resolve_prompt_overrides("video", "general")
-        assert r["11_smart"] == {"content": "B", "version": 2}
+        assert r["11_smart"] == {
+            "content": "B", "version": 2,
+            "document_kind": None, "scope": "global",
+        }
 
 
 class TestPromptActivateDeactivateDB:
@@ -164,7 +174,12 @@ class TestPromptActivateDeactivateDB:
         assert pdb.set_active_prompt_version("global", None, "video", "11_smart", 1) is True
         ov = pdb.get_prompt_override("global", None, "video", "11_smart")
         assert ov["version"] == 1 and ov["content"] == "A"
-        assert pdb.resolve_prompt_overrides("video", "general") == {"11_smart": {"content": "A", "version": 1}}
+        assert pdb.resolve_prompt_overrides("video", "general") == {
+            "11_smart": {
+                "content": "A", "version": 1,
+                "document_kind": None, "scope": "global",
+            },
+        }
 
     def test_set_active_unknown_version_false(self, pdb):
         pdb.set_prompt_override("global", None, "video", "11_smart", "A")
@@ -179,7 +194,12 @@ class TestPromptActivateDeactivateDB:
         assert pdb.resolve_prompt_overrides("video", "general") == {}
         # 重新激活 v2 → 主表指针重建,resolve 返回该版本
         assert pdb.set_active_prompt_version("global", None, "video", "11_smart", 2) is True
-        assert pdb.resolve_prompt_overrides("video", "general") == {"11_smart": {"content": "B", "version": 2}}
+        assert pdb.resolve_prompt_overrides("video", "general") == {
+            "11_smart": {
+                "content": "B", "version": 2,
+                "document_kind": None, "scope": "global",
+            },
+        }
 
     def test_delete_still_clears_history(self, pdb):
         # delete_prompt_override 是真删整个(含历史),与 deactivate 区分
@@ -224,10 +244,13 @@ class TestSystemPromptFallback:
         assert s.ai.load_system_prompt() == "INJECTED"
 
     def test_injected_override_new_dict_format(self, tmp_path):
-        # 字典格式:{content, version} → 注入取出正文,版本只供 Job 详情比对。
+        # 派发快照携带 kind/scope 元数据,Worker 只消费正文与版本。
         s = _mk_step(
             tmp_path,
-            {"custom_ai": {"content": "INJECTED", "version": 3}},
+            {"custom_ai": {
+                "content": "INJECTED", "version": 3,
+                "document_kind": "article", "scope": "domain",
+            }},
             step="custom_ai",
         )
         assert s.ai.injected_prompt_override() == "INJECTED"
@@ -363,7 +386,9 @@ class TestPromptAPI:
         steps = data["steps"]
         keys = {(s["pipeline"], s["step"]) for s in steps}
         assert ("video", "11_smart") in keys
-        assert ("article", "04_smart_article") in keys
+        assert ("document", "04_translate") in keys
+        assert ("document", "05_smart") in keys
+        assert ("document", "08_review") in keys
         assert ("video", "01_download") not in keys   # io 步不在列
         assert all(s["is_ai"] for s in steps)
 
@@ -470,20 +495,22 @@ class TestPromptAPI:
     async def test_get_default_falls_back_to_baked_configs(self, client):
         # prompts_dir/templates 为空(模拟 api 没挂 templates)时,仍从镜像烤入的
         # config_dir/prompts/templates 读到默认 → GET 回非空,白盒能看到默认。
-        g = (await client.get("/api/prompts/paper/05_smart_paper")).json()
+        g = (await client.get(
+            "/api/prompts/document/05_smart?document_kind=research_paper"
+        )).json()
         assert g["default_template"]                      # 非空
         names = {t["name"] for t in g["default_templates"]}
-        assert "05_smart_paper" in names
+        assert "05_smart_document" in names
         assert g["default_templates"][0]["content"].strip()
 
     async def test_get_review_steps_return_nonempty_default(self, client):
-        # 评审步外置骨架模板(05/06/12_review):GET 回非空 default,含 {{ref_block}} 占位。
+        # 评审步外置骨架模板(05/08/12_review):GET 回非空 default,含 {{ref_block}} 占位。
         # prompts_dir 未挂时经镜像烤入的 config_dir/prompts/templates 兜底读到。
-        for pipeline, step in [
-            ("article", "06_review"), ("paper", "06_review"),
-            ("audio", "05_review"), ("video", "12_review"),
+        for pipeline, step, query in [
+            ("document", "08_review", "?document_kind=article"),
+            ("audio", "05_review", ""), ("video", "12_review", ""),
         ]:
-            g = (await client.get(f"/api/prompts/{pipeline}/{step}")).json()
+            g = (await client.get(f"/api/prompts/{pipeline}/{step}{query}")).json()
             assert g["default_template"], f"{pipeline}/{step} default 为空"
             assert "{{ref_block}}" in g["default_template"]
             assert step in {t["name"] for t in g["default_templates"]}
@@ -492,13 +519,22 @@ class TestPromptAPI:
     async def test_review_step_override_roundtrip(self, client):
         # 评审步可存/取/删覆盖(与 smart 步同机制,验白盒可编辑闭环)。
         r = await client.put(
-            "/api/prompts/paper/06_review", json={"scope": "global", "content": "评审覆盖"}
+            "/api/prompts/document/08_review",
+            json={
+                "scope": "global", "content": "评审覆盖",
+                "document_kind": "research_paper",
+            },
         )
         assert r.status_code == 200 and r.json()["status"] == "saved"
-        g = (await client.get("/api/prompts/paper/06_review")).json()
+        query = "?document_kind=research_paper"
+        g = (await client.get(f"/api/prompts/document/08_review{query}")).json()
         assert g["override"]["content"] == "评审覆盖"
-        await client.delete("/api/prompts/paper/06_review?scope=global")
-        assert (await client.get("/api/prompts/paper/06_review")).json()["override"] is None
+        await client.delete(
+            "/api/prompts/document/08_review?scope=global&document_kind=research_paper"
+        )
+        assert (await client.get(
+            f"/api/prompts/document/08_review{query}"
+        )).json()["override"] is None
 
     async def test_get_variant_step_returns_all_variants(self, client):
         # 变体步(08_punctuate 只有 .zh/.translate 变体,无主模板)也非空,且列出全变体。
@@ -653,12 +689,16 @@ class TestPromptActivateAPI:
     async def test_deactivate_does_not_touch_default_resolved_job(self, client):
         # deactivate 后 resolve 空 → 该步派发回内置默认(借 create_job 注入验证不带覆盖)
         await client.put(
-            "/api/prompts/article/04_smart_article", json={"scope": "global", "content": "ART"},
+            "/api/prompts/document/05_smart",
+            json={"scope": "global", "content": "ART", "document_kind": "article"},
         )
         await client.post(
-            "/api/prompts/article/04_smart_article/activate", json={"scope": "global", "version": None},
+            "/api/prompts/document/05_smart/activate",
+            json={"scope": "global", "version": None, "document_kind": "article"},
         )
-        g = (await client.get("/api/prompts/article/04_smart_article")).json()
+        g = (await client.get(
+            "/api/prompts/document/05_smart?document_kind=article"
+        )).json()
         assert g["active_version"] is None and g["versions"]  # 历史还在
 
 
@@ -666,25 +706,31 @@ class TestPromptActivateAPI:
 class TestCreateJobInjection:
     async def test_create_job_injects_resolved_overrides(self, client, app):
         await client.put(
-            "/api/prompts/article/04_smart_article",
-            json={"scope": "global", "content": "ART OVERRIDE"},
+            "/api/prompts/document/05_smart",
+            json={
+                "scope": "global", "content": "ART OVERRIDE",
+                "document_kind": "article",
+            },
         )
         resp = await client.post(
             "/api/jobs",
-            json={"url": "https://example.com/post", "content_type": "article", "domain": "general"},
+            json={"url": "https://example.com/post", "content_type": "document",
+                  "document_kind": "article", "domain": "general"},
         )
         assert resp.status_code == 201
         job_id = resp.json()["job_id"]
         raw = await app.state.storage.read_file(job_id, "job.json")
         doc = json.loads(raw)
         # 注入快照含版本号 {content, version}。
-        assert doc["prompt_overrides"]["04_smart_article"]["content"] == "ART OVERRIDE"
-        assert doc["prompt_overrides"]["04_smart_article"]["version"] == 1
+        snapshot = doc["prompt_overrides"]["05_smart"]
+        assert snapshot["content"] == "ART OVERRIDE" and snapshot["version"] == 1
+        assert snapshot["document_kind"] == "article" and snapshot["scope"] == "global"
 
     async def test_create_job_without_override_has_no_key(self, client, app):
         resp = await client.post(
             "/api/jobs",
-            json={"url": "https://example.com/post2", "content_type": "article", "domain": "general"},
+            json={"url": "https://example.com/post2", "content_type": "document",
+                  "document_kind": "article", "domain": "general"},
         )
         assert resp.status_code == 201
         job_id = resp.json()["job_id"]
@@ -694,27 +740,32 @@ class TestCreateJobInjection:
     async def test_job_detail_exposes_prompt_versions(self, client):
         # 建覆盖后新建 job,详情 prompt_versions 含该步派发时的版本快照。
         await client.put(
-            "/api/prompts/article/04_smart_article",
-            json={"scope": "global", "content": "OV"},
+            "/api/prompts/document/05_smart",
+            json={"scope": "global", "content": "OV", "document_kind": "article"},
         )
         # 再 new 一版 → 激活 v2,新 job 应快照 v2。
         await client.put(
-            "/api/prompts/article/04_smart_article",
-            json={"scope": "global", "content": "OV2", "mode": "new"},
+            "/api/prompts/document/05_smart",
+            json={
+                "scope": "global", "content": "OV2", "mode": "new",
+                "document_kind": "article",
+            },
         )
         resp = await client.post(
             "/api/jobs",
-            json={"url": "https://example.com/pv", "content_type": "article", "domain": "general"},
+            json={"url": "https://example.com/pv", "content_type": "document",
+                  "document_kind": "article", "domain": "general"},
         )
         assert resp.status_code == 201
         job_id = resp.json()["job_id"]
         d = (await client.get(f"/api/jobs/{job_id}")).json()
-        assert d["prompt_versions"]["04_smart_article"] == "2"
+        assert d["prompt_versions"]["05_smart"] == "2"
 
     async def test_job_detail_prompt_versions_empty_without_override(self, client):
         resp = await client.post(
             "/api/jobs",
-            json={"url": "https://example.com/pv2", "content_type": "article", "domain": "general"},
+            json={"url": "https://example.com/pv2", "content_type": "document",
+                  "document_kind": "article", "domain": "general"},
         )
         job_id = resp.json()["job_id"]
         d = (await client.get(f"/api/jobs/{job_id}")).json()

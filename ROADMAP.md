@@ -10,11 +10,11 @@
 | 状态 | 能力 |
 |------|------|
 | 完整 | 来源 registry、OpenAPI 枚举、API 入队前 fail-closed 与前端来源目录同源 |
-| first-pass | 视频 / 论文 / 文章 / 音频四类摄入；FTS5 Search、跨源 Ask 与 MCP；集合订阅；概念图与评审；手工建卡 SRS；知识雷达；远程 Worker 网关 |
-| first-pass | Canonical evidence 已接通视频/音频时间、PDF 页码、文章锚点、OCR image bbox 与四类 smart exact-quote 的 producer / resolver / Search/Ask/MCP/内容详情；跨语言与语义改写仍等待独立 attestation |
+| first-pass | Video / Document / Audio 三类流水线与多体裁文档摄入；FTS5 Search、跨源 Ask 与 MCP；集合订阅；概念图与评审；手工建卡 SRS；知识雷达；远程 Worker 网关 |
+| first-pass | Canonical evidence 已接通视频/音频时间、HTML 段落、PDF 页码+bbox、OCR image bbox 与 smart exact-quote 的 producer / resolver / Search/Ask/MCP/内容详情；跨语言与语义改写使用独立 attestation |
 | 未开始 | 原生客户端、通知 / PWA、自动分类、知识缺口与矛盾检测、证据型自动卡片 |
 
-向量检索由检索黄金集决定。24 个四类型 job 和 96 条冻结查询证明 exact、跨来源、过滤、
+向量检索由检索黄金集决定。24 个三顶层类型 job 和 96 条冻结查询证明 exact、跨来源、过滤、
 确定性与延迟基线可靠，并因 paraphrase、synonym、cross-language 缺口触发独立候选实验。
 候选虽达到质量收益门，但同层 Search warm P95 持续超过 FTS5 的 2 倍预算，因此该阶段已关闭并
 完整回滚；生产仍只使用 FTS5，未引入向量 schema、依赖、配置或模型文件。
@@ -41,7 +41,7 @@ E2E 分层见 [`scripts/test.sh`](scripts/test.sh) 与 [`docs/09-testing.md`](do
 - [x] 测试 (`docs/09-testing.md`)
 - [x] 可观测 (`docs/10-observability.md`)
 - [x] 开发流程 (`docs/11-dev-workflow.md`)
-- [x] ADR (`docs/adr/*.md`) — 14 个 + README
+- [x] ADR (`docs/adr/*.md`) — 15 个 + README
 - [x] CLAUDE.md — 已更新
 - [x] README.md — 已更新
 
@@ -63,8 +63,8 @@ E2E 分层见 [`scripts/test.sh`](scripts/test.sh) 与 [`docs/09-testing.md`](do
 - [x] 下载 + CPU 步骤链的首版 integration 场景
   - [x] 视频上传 → 全 video pipeline CPU 链（scene 26s + frames 18s + dedup 2s + OCR 189s）
   - [x] B站 BV 号真实下载 → CPU 链 + 弹幕解析
-  - [x] PDF 上传 → paper pipeline CPU 链（download + PDF 元数据 + sections）
-  - [x] arXiv URL 真实下载 → paper pipeline CPU 链
+  - [x] PDF 上传 → Document pipeline（原生 PDF + 结构化 Document + locator）
+  - [x] arXiv URL 真实下载 → Document pipeline（HTML/PDF 双来源）
 - [x] Bug fixes：tag 调度 + 场景检测 callback + yutto 参数 + 文件搜索范围（6 个）
 - [x] 集成测试：AI 步骤（TC-AI-1 视频 + TC-AI-2 论文，Kimi provider）
 - [x] 并发安全测试（乐观锁 CAS 冲突 + exec_id 去重 + on_step_done 幂等 + skip 死锁守卫 + 延迟任务取消）
@@ -99,15 +99,15 @@ E2E 分层见 [`scripts/test.sh`](scripts/test.sh) 与 [`docs/09-testing.md`](do
 
 目标：从"处理工具"变为"知识应用"。用户可以和自己的知识库对话、提问、发现关联。
 
-- [x] FTS5 检索 + 跨源综合问答 + MCP 搜索 / 读取（四类真实 completion、引用清单与 24/96 质量门已闭环）
+- [x] FTS5 检索 + 跨源综合问答 + MCP 搜索 / 读取（三类 pipeline、多体裁 Document、引用清单与 24/96 质量门已闭环）
 - [x] 混合向量检索收益门（候选质量达标但延迟门失败，生产路径完整回滚并保留纯 FTS5）
 - [x] 知识对话首版（Ask）
   - 跨文档问答：「Transformer 有哪些注意力变体？」→ 检索多篇笔记 → 综合回答
   - 对比分析：「这篇论文和那个视频的观点有什么不同？」
 - [x] Canonical evidence 首版：视频/音频时间、PDF 页码、文章锚点、OCR image bbox 及 Search/Ask/MCP/内容详情同身份闭环
-- [x] Smart exact-quote 门：四类 producer 的有界 support text、服务端双重复算与恶意降级拒绝
+- [x] Smart exact-quote 门：三类 pipeline producer 的有界 support text、服务端双重复算与恶意降级拒绝
 - [x] 概念定义真实化：append-only history、精确 canonical occurrence、可靠评审 attestation、current+lock CAS 与自动/手动受控重综合；REST/MCP/UI 使用同一安全投影
-- [ ] 跨语言 translated/smart 与 paraphrase/semantic claim 的独立 attestation（当前显式空映射）
+- [x] 跨语言 translated/smart 与 paraphrase/semantic claim 的独立 attestation
 - [x] 领域概念图首版（术语 / 主题 / occurrence / 时间线与跨来源聚合）
 - [ ] 自动实体关系与跨笔记推理关联
 - [ ] 自动标签 + 智能分类（摄入时自动归类到已有集合）
@@ -148,13 +148,13 @@ E2E 分层见 [`scripts/test.sh`](scripts/test.sh) 与 [`docs/09-testing.md`](do
 - [ ] 场景检测 GPU 解码
 - [x] GitLab Runner 化接入（见 M-W：gateway + token + 每步镜像；GPU worker 单出站接入就绪）
 
-### M6 · 文章分析 + 多源扩展 ✅（2026-06-07 完成）
+### M6 · Document 分析 + 多源扩展 ✅（2026-07-17 统一）
 
 目标：网页文章/公众号/播客也能入库。
 
 - [x] 网页抓取适配器（source_detect http_article + step_01_download 抓 HTML）
-- [x] 正文提取（trafilatura，中文友好，纯 Python）
-- [x] 文章笔记模板（article pipeline：parse→sections→smart→review）
+- [x] 学术 HTML、通用 HTML、数字 PDF 与扫描 PDF 统一 Document adapter
+- [x] 论文、文章、白皮书等体裁共用 Document pipeline 与 kind-scoped Prompt
 - [x] 播客 / 音频支持（单集音频 URL + 上传；audio pipeline：whisper→分段→smart_podcast→review；RSS / Atom 订阅已提供首版）
 
 ### M7 · 多租户 + 商业化

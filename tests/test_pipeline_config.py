@@ -174,8 +174,7 @@ class TestVariables:
         pipelines = load_pipelines(configs_dir / "pipelines.yaml")
         expected = {
             "video": {"08_punctuate": "4", "11_smart": "5"},
-            "paper": {"02_pdf_parse": "5", "05_smart_paper": "4"},
-            "article": {"02_parse_article": "5", "04_smart_article": "4"},
+            "document": {"02_parse": "3", "04_translate": "1", "05_smart": "1"},
             "audio": {"03_transcript_parse": "3", "04_smart_podcast": "4"},
         }
         for pipeline, versions in expected.items():
@@ -188,19 +187,15 @@ class TestSemanticAttestationPipeline:
         raw = load_yaml(configs_dir / "pipelines.yaml")
         producers = {
             "video": {"11_smart": "smart"},
-            "paper": {"04_translate_paper": "translated", "05_smart_paper": "smart"},
-            "article": {
-                "04_translate_article": "translated", "04_smart_article": "smart",
-            },
+            "document": {"04_translate": "translated", "05_smart": "smart"},
             "audio": {"04_smart_podcast": "smart"},
         }
         attestors = {
             "video": "11_semantic_attestation",
-            "paper": "05_semantic_attestation",
-            "article": "04_semantic_attestation",
+            "document": "06_semantic_attestation",
             "audio": "04_semantic_attestation",
         }
-        concepts = {"video": "12_concepts", "paper": "05_concepts", "article": "05_concepts", "audio": "05_concepts"}
+        concepts = {"video": "12_concepts", "document": "07_concepts", "audio": "05_concepts"}
         for pipeline, steps in producers.items():
             jobs = raw[pipeline]["jobs"]
 
@@ -239,14 +234,14 @@ class TestSemanticAttestationPipeline:
 
 
 class TestAIRoleContract:
-    def test_real_config_has_22_shared_variables_and_16_routes(self, configs_dir):
+    def test_real_config_has_22_shared_variables_and_15_routes(self, configs_dir):
         raw = load_yaml(configs_dir / "pipelines.yaml")
         ai_variables = {
             key: value for key, value in raw["variables"].items()
             if key.startswith("AI_")
         }
         assert len(ai_variables) == 22
-        for pipeline in ("video", "paper", "article", "audio"):
+        for pipeline in ("video", "document", "audio"):
             assert not any(
                 key.startswith("AI_")
                 for key in (raw[pipeline].get("variables") or {})
@@ -264,12 +259,9 @@ class TestAIRoleContract:
             ("video", "11_smart"), ("video", "12_concepts"),
             ("video", "11_semantic_attestation"),
             ("video", "12_review"),
-            ("paper", "04_translate_paper"), ("paper", "05_smart_paper"),
-            ("paper", "05_concepts"), ("paper", "06_review"),
-            ("paper", "05_semantic_attestation"),
-            ("article", "04_smart_article"), ("article", "04_translate_article"),
-            ("article", "05_concepts"), ("article", "06_review"),
-            ("article", "04_semantic_attestation"),
+            ("document", "04_translate"), ("document", "05_smart"),
+            ("document", "06_semantic_attestation"),
+            ("document", "07_concepts"), ("document", "08_review"),
             ("audio", "04_smart_podcast"), ("audio", "05_concepts"),
             ("audio", "05_review"),
             ("audio", "04_semantic_attestation"),
@@ -282,7 +274,7 @@ class TestAIRoleContract:
             assert route["primary"] == expected_route["primary"], key
             assert route["fallback"] == expected_route["fallback"], key
         assert routes[("video", "11_smart")]["text_fallback"] == expected_route["primary"]
-        assert sum(len(route) for route in routes.values()) == 41
+        assert sum(len(route) for route in routes.values()) == 31
 
     def test_shared_ai_variables_reject_undefined_unused_and_empty(self):
         base = {
@@ -460,7 +452,7 @@ class TestCompletionEffects:
 
     def test_every_real_pipeline_declares_search_index(self, configs_dir):
         pipelines = load_pipelines(configs_dir / "pipelines.yaml")
-        assert {"video", "paper", "article", "audio"} <= set(pipelines)
+        assert set(pipelines) == {"video", "document", "audio"}
         for name, pipeline in pipelines.items():
             effects = [
                 effect
@@ -473,15 +465,24 @@ class TestCompletionEffects:
                 "sync_metadata", "index_note", "collect_glossary", "collect_term_pairs",
             }
 
-    def test_article_index_has_lightweight_fallbacks(self, configs_dir):
-        steps = load_pipelines(configs_dir / "pipelines.yaml")["article"]["steps"]
-        effect = next(
-            effect
+    def test_document_index_has_source_projection_and_preferred_generated_notes(self, configs_dir):
+        steps = load_pipelines(configs_dir / "pipelines.yaml")["document"]["steps"]
+        effects = [
+            (step["name"], effect)
             for step in steps
             for effect in step.get("on_complete", [])
             if effect.get("action") == "index_note"
-        )
-        assert [candidate["note_type"] for candidate in effect["candidates"]] == [
+        ]
+        assert [name for name, _effect in effects] == ["03_structure", "07_concepts"]
+        assert effects[0][1]["candidates"] == [{
+            "note_type": "original",
+            "path": "intermediate/document_index.md",
+            "source_manifest": "intermediate/source_segments.json",
+            "provenance": "output/provenance/original.json",
+            "provenance_step": "03_structure",
+            "provenance_since_version": "1",
+        }]
+        assert [candidate["note_type"] for candidate in effects[1][1]["candidates"]] == [
             "smart", "translated", "original",
         ]
 
@@ -576,11 +577,20 @@ class TestCompletionEffects:
             candidate for candidate in candidates
             if candidate["provenance_step"].endswith("semantic_attestation")
         ]
-        assert len(semantic_candidates) == 5
+        assert len(semantic_candidates) == 4
+        legacy_semantic = [
+            candidate for candidate in semantic_candidates
+            if candidate["provenance_step"] in {
+                "11_semantic_attestation", "04_semantic_attestation",
+            }
+            and candidate["note_type"] == "smart"
+            and candidate.get("legacy_provenance_step")
+        ]
+        assert len(legacy_semantic) == 2
         assert all(
             candidate.get("legacy_provenance_step")
             and candidate.get("legacy_provenance_since_version")
-            for candidate in semantic_candidates
+            for candidate in legacy_semantic
         )
 
 

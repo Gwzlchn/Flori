@@ -3,7 +3,7 @@
 from pathlib import Path
 
 
-def make_step_config(tmp_path, step_name="test", pool="cpu", pipeline="article", **overrides):
+def make_step_config(tmp_path, step_name="test", pool="cpu", pipeline="document", **overrides):
     prompts_dir = tmp_path / "prompts"
     prompts_dir.mkdir(exist_ok=True)
     cfg = {

@@ -5,14 +5,10 @@ content_types:
     label: "视频"
     pipeline: "video"
     upload_extensions: [".mp4", ".mkv", ".webm", ".flv", ".mov"]
-  paper:
-    label: "论文"
-    pipeline: "paper"
-    upload_extensions: [".pdf"]
-  article:
-    label: "文章"
-    pipeline: "article"
-    upload_extensions: [".html", ".htm", ".txt", ".md"]
+  document:
+    label: "文档"
+    pipeline: "document"
+    upload_extensions: [".pdf", ".html", ".htm", ".txt", ".md"]
   audio:
     label: "播客 / 音频"
     pipeline: "audio"
@@ -32,13 +28,19 @@ job_sources:
     patterns: ["youtube\\.com", "youtu\\.be"]
   arxiv:
     label: "arXiv"
-    default_content_type: "paper"
-    content_types: ["paper"]
+    default_content_type: "document"
+    default_document_kind: "research_paper"
+    default_source_profile: "scholarly_html"
+    document_kinds: ["research_paper"]
+    content_types: ["document"]
     patterns: ["arxiv\\.org"]
   pdf:
     label: "PDF"
-    default_content_type: "paper"
-    content_types: ["paper"]
+    default_content_type: "document"
+    default_document_kind: "unknown"
+    default_source_profile: "digital_pdf"
+    document_kinds: ["research_paper", "whitepaper", "report", "book_chapter", "standard", "thesis", "unknown"]
+    content_types: ["document"]
     suffixes: [".pdf"]
   podcast:
     label: "播客"
@@ -47,19 +49,26 @@ job_sources:
     suffixes: [".mp3", ".m4a", ".wav", ".aac", ".flac"]
   local_file:
     label: "本地文件"
-    content_types: ["video", "paper", "article", "audio"]
+    default_document_kind: "unknown"
+    document_kinds: ["research_paper", "article", "whitepaper", "report", "book_chapter", "documentation", "standard", "thesis", "unknown"]
+    content_types: ["video", "document", "audio"]
     patterns: ["^file://"]
     creatable: false
     internal: true
   http_article:
-    label: "网页文章"
-    default_content_type: "article"
+    label: "网页文档"
+    default_content_type: "document"
+    default_document_kind: "article"
+    default_source_profile: "generic_html"
+    document_kinds: ["research_paper", "article", "whitepaper", "report", "book_chapter", "documentation", "standard", "thesis", "unknown"]
     # 显式 audio 用于不带音频后缀的播客落地页,下载步再解析 enclosure。
-    content_types: ["article", "audio"]
+    content_types: ["document", "audio"]
     patterns: ["^https?://"]
   upload:
     label: "本地上传"
-    content_types: ["video", "paper", "article", "audio"]
+    default_document_kind: "unknown"
+    document_kinds: ["research_paper", "article", "whitepaper", "report", "book_chapter", "documentation", "standard", "thesis", "unknown"]
+    content_types: ["video", "document", "audio"]
   other:
     label: "未支持来源"
     content_types: []

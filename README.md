@@ -2,7 +2,7 @@
 
 > 自托管的 AI 学习知识库 —— 把视频、论文、文章、播客自动炼成结构化笔记，沉淀为按领域分桶、可检索的个人知识体系。
 >
-> *Self-hosted AI knowledge base that turns videos, papers, articles & podcasts into structured, searchable notes.*
+> *Self-hosted AI knowledge base that turns videos, documents and podcasts into structured, searchable notes.*
 
 ![Python](https://img.shields.io/badge/python-3.11+-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Docker](https://img.shields.io/badge/deploy-docker-2496ED)
 
@@ -18,11 +18,11 @@
 
 ## 能做什么
 
-- **多源摄入**：视频 / 论文 / 文章 / 音频四类 pipeline；可创建来源、上传扩展名与订阅类型以 [`configs/sources.yaml`](configs/sources.yaml) 为准
+- **多源摄入**：Video / Document / Audio 三类 pipeline；论文、文章、白皮书等是 Document 体裁，来源、上传扩展名与订阅类型以 [`configs/sources.yaml`](configs/sources.yaml) 为准
 - **视频流水线**：下载 → 转写 → 场景检测 → 关键帧 → 去重 → OCR → 弹幕 → 口播稿 → 机械版笔记 → AI 智能版 → 质量评审
-- **论文 / 文章 / 播客流水线**：论文（HTML 优先 / PDF 直读 → 章节 → 条件翻译 → AI 笔记 → 概念 → 评审）/ 文章（正文解析 → 章节 → AI 笔记 → 概念 → 评审）/ 播客（转写 → 解析 → AI 笔记 → 评审）
-- **原始材料与智能笔记**：视频有机械版（逐字稿 + 关键帧 + OCR + 弹幕）和智能版；论文、文章、音频各自保留原文 / 章节 / 转写并生成智能笔记。视频智能版采用视觉描述 + 机械稿两段式生成
-- **视觉证据首版**：视频笔记可内嵌关键帧与时间戳；PDF 页码、文章锚点等多模态定位仍待统一质量门
+- **Document 流水线**：HTML / 数字 PDF / 扫描 PDF 统一解析为 Document Model，再按需翻译、生成 AI 笔记、概念与评审；体裁决定 Prompt profile，媒介能力决定 adapter
+- **原始材料与智能笔记**：Document 原文直接阅读安全 HTML 或原生 PDF，不再制造有损原文 Markdown；翻译、图表和笔记均由结构化来源生成
+- **多模态证据**：视频/音频时间、HTML 段落、PDF 页码与 bbox、Figure/Table 深链使用统一 locator，可从 Search / Ask / MCP 返回原位置
 - **知识库（领域中心）**：知识按领域分桶成一组并行的概念图——术语页（跨来源综合定义 + 类型化出现处）、主题页（域内跨集合内容聚合）、术语库 CRUD（候选→采纳→回流 Prompt）；评审产出的概念自动喂养
 - **全文搜索**：SQLite FTS5（trigram 中文子串匹配），跨领域/集合检索所有笔记
 - **集合与订阅**：手动策展，或订阅 B站 UP/收藏夹/合集、YouTube 频道/播放列表、RSS、容器内目录和在线书目录；订阅是集合属性
@@ -77,7 +77,7 @@ Python 3.11 · FastAPI · Redis · SQLite · Vue 3 · Docker
 | 状态 | 能力 |
 |------|------|
 | 完整 | 来源 registry、OpenAPI 枚举、API 入队前 fail-closed 与前端来源目录同源 |
-| first-pass | 四类摄入、FTS5 Search / Ask / MCP、集合订阅、概念图、评审、手工建卡 SRS、知识雷达、远程 Worker 网关 |
+| first-pass | 三类流水线与多体裁 Document 摄入、FTS5 Search / Ask / MCP、集合订阅、概念图、评审、手工建卡 SRS、知识雷达、远程 Worker 网关 |
 | 未开始 | 原生客户端、通知 / PWA、自动分类、知识缺口与矛盾检测、证据型自动卡片 |
 
 测试结果不在文档冻结数字：主分支实时结果看页首 CI/coverage 徽章；本地权威入口是 `scripts/test.sh --all` 与 `scripts/test.sh --fe`，真实接线和条件外网验证见 [docs/09-testing.md](docs/09-testing.md)。

@@ -55,14 +55,14 @@ def test_read_tool_capability_has_one_provider_routing_gate():
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("nonempty", "expected"), [
     (set(), [READ_TOOL_TAG]),
-    ({"output/original.md"}, []),
-    ({"output/translated.md"}, []),
+    ({"input/source.html"}, []),
+    ({"input/source.pdf"}, []),
 ])
 async def test_scheduler_and_step_capability_evaluators_are_identical(nonempty, expected):
     step = {"capability_rules": {
         READ_TOOL_TAG: {
             "unless_any_nonempty": [
-                "output/translated.md", "output/original.md",
+                "input/source.html", "input/source.pdf",
             ],
         },
     }}
@@ -124,8 +124,7 @@ def test_ai_task_cannot_remove_provider_hard_gate():
 
 @pytest.mark.parametrize(("pipeline", "steps"), [
     ("video", ("11_smart", "12_review")),
-    ("paper", ("05_smart_paper", "06_review")),
-    ("article", ("04_smart_article", "06_review")),
+    ("document", ("05_smart", "08_review")),
     ("audio", ("04_smart_podcast", "05_review")),
 ])
 def test_pipeline_rerun_roles(pipeline, steps):

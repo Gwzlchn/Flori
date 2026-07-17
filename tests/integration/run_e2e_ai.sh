@@ -105,9 +105,10 @@ fi
 
 log ""
 
-# TC-AI-2:PDF 上传到 paper pipeline + AI 笔记
-log "TC-AI-2: PDF 上传到 paper pipeline + AI 笔记 (domain=ml)"
-RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload?content_type=paper" \
+# TC-AI-2:PDF 上传到 Document/research_paper pipeline + AI 笔记
+log "TC-AI-2: PDF 上传到 Document pipeline + AI 笔记 (domain=ml)"
+RESP=$(curl --noproxy '*' -s -X POST \
+  "$API/api/jobs/upload?content_type=document&document_kind=research_paper" \
   -F "file=@/tmp/test_paper.pdf" \
   -F "domain=ml")
 JOB2=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")

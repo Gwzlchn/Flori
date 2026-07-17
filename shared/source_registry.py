@@ -5,14 +5,33 @@ from __future__ import annotations
 import copy
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from .document_registry import (
+    DOCUMENT_KIND_NAMES,
+    SOURCE_PROFILE_NAMES,
+    document_catalog,
+    validate_document_kind,
+)
+
 
 class SourceRegistryError(ValueError):
     """来源注册表或投递路由不满足完整性约束。"""
+
+
+@dataclass(frozen=True)
+class ResolvedJobRoute:
+    """单次解析后的投递路由，供门禁和真实创建共用。"""
+
+    source: str
+    content_type: str
+    document_kind: str | None
+    pipeline: str
+    source_profile: str | None
 
 
 _DEFAULT_PATH = Path(__file__).resolve().parents[1] / "configs" / "sources.yaml"
@@ -52,6 +71,7 @@ def _validate_registry(raw: dict[str, Any]) -> None:
     subscriptions = _mapping(raw, "subscription_sources")
 
     known_types = set(content_types)
+    known_document_kinds = set(DOCUMENT_KIND_NAMES)
     seen_extensions: set[str] = set()
     seen_pipelines: set[str] = set()
     for name, spec in content_types.items():
@@ -84,6 +104,19 @@ def _validate_registry(raw: dict[str, Any]) -> None:
         default = spec.get("default_content_type")
         if default is not None and default not in allowed:
             raise SourceRegistryError(f"job_sources.{name} has invalid default_content_type")
+        kinds = spec.get("document_kinds") or []
+        if not isinstance(kinds, list) or not set(kinds) <= known_document_kinds:
+            raise SourceRegistryError(f"job_sources.{name} has invalid document_kinds")
+        default_kind = spec.get("default_document_kind")
+        if default_kind is not None and default_kind not in kinds:
+            raise SourceRegistryError(f"job_sources.{name} has invalid default_document_kind")
+        if kinds and "document" not in allowed:
+            raise SourceRegistryError(
+                f"job_sources.{name} declares document_kinds without document content type"
+            )
+        source_profile = spec.get("default_source_profile")
+        if source_profile is not None and source_profile not in SOURCE_PROFILE_NAMES:
+            raise SourceRegistryError(f"job_sources.{name} has invalid default_source_profile")
         patterns = spec.get("patterns") or []
         suffixes = spec.get("suffixes") or []
         if not isinstance(patterns, list) or not isinstance(suffixes, list):
@@ -148,13 +181,64 @@ def default_content_type(source: str) -> str | None:
     return str(value) if value else None
 
 
+def default_document_kind(source: str) -> str:
+    """返回来源可证明的默认体裁；缺失时显式 unknown。"""
+    spec = JOB_SOURCE_SPECS.get(source) or {}
+    return validate_document_kind(spec.get("default_document_kind"))
+
+
+def default_source_profile(source: str) -> str | None:
+    spec = JOB_SOURCE_SPECS.get(source) or {}
+    value = spec.get("default_source_profile")
+    return str(value) if value else None
+
+
 def pipeline_for_content_type(content_type: str) -> str | None:
     spec = CONTENT_TYPE_SPECS.get(content_type)
     return str(spec["pipeline"]) if spec else None
 
 
+def resolve_job_route(
+    source: str,
+    content_type: str | None = None,
+    *,
+    document_kind: str | None = None,
+    allow_internal: bool = False,
+) -> ResolvedJobRoute:
+    """默认值、校验和 pipeline/profile 必须在一处解析，避免前置门禁与创建分叉。"""
+    resolved_type = content_type or default_content_type(source)
+    resolved_kind = (
+        validate_document_kind(
+            document_kind if document_kind not in (None, "")
+            else default_document_kind(source)
+        )
+        if resolved_type == "document"
+        else None
+    )
+    validate_job_route(
+        source,
+        resolved_type,
+        document_kind=resolved_kind,
+        allow_internal=allow_internal,
+    )
+    pipeline = pipeline_for_content_type(str(resolved_type))
+    if not pipeline:
+        raise SourceRegistryError(f"content_type {resolved_type} has no pipeline")
+    return ResolvedJobRoute(
+        source=source,
+        content_type=str(resolved_type),
+        document_kind=resolved_kind,
+        pipeline=pipeline,
+        source_profile=default_source_profile(source),
+    )
+
+
 def validate_job_route(
-    source: str, content_type: str | None, *, allow_internal: bool = False,
+    source: str,
+    content_type: str | None,
+    *,
+    document_kind: str | None = None,
+    allow_internal: bool = False,
 ) -> None:
     """保证来源可创建且内容类型有真实 pipeline,否则拒绝入队。"""
     source_spec = JOB_SOURCE_SPECS.get(source)
@@ -173,6 +257,18 @@ def validate_job_route(
         )
     if not pipeline_for_content_type(content_type):
         raise SourceRegistryError(f"content_type {content_type} has no pipeline")
+    if content_type == "document":
+        try:
+            kind = validate_document_kind(document_kind)
+        except ValueError as exc:
+            raise SourceRegistryError(str(exc)) from exc
+        allowed_kinds = set(source_spec.get("document_kinds") or [])
+        if kind not in allowed_kinds:
+            raise SourceRegistryError(
+                f"source {source} does not support document_kind {kind}"
+            )
+    elif document_kind not in (None, ""):
+        raise SourceRegistryError("document_kind is only valid for document content")
 
 
 def subscription_source_spec(source_type: str) -> dict[str, Any] | None:
@@ -191,6 +287,9 @@ def source_catalog() -> dict[str, Any]:
             "type": name,
             "label": spec["label"],
             "content_types": list(spec.get("content_types") or []),
+            "document_kinds": list(spec.get("document_kinds") or []),
+            "default_document_kind": spec.get("default_document_kind"),
+            "default_source_profile": spec.get("default_source_profile"),
             "creatable": bool(spec.get("creatable", True)),
         }
         for name, spec in JOB_SOURCE_SPECS.items()
@@ -210,4 +309,5 @@ def source_catalog() -> dict[str, Any]:
         "content_types": content_types,
         "job_sources": job_sources,
         "subscription_sources": subscriptions,
+        **document_catalog(),
     }

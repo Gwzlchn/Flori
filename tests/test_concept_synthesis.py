@@ -73,7 +73,8 @@ def _attestation(*, jobs: int = 2, sources: int = 2, fingerprint: str = "new"):
         {
             "evidence_id": f"ce_{index:064x}",
             "job_id": f"job-{index}",
-            "content_type": "article",
+            "content_type": "document",
+            "document_kind": "article",
             "source_fingerprint": f"source-{index}",
             "note_type": "smart",
             "section": "S",

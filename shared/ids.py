@@ -37,7 +37,7 @@ _PLATFORM: dict[str, tuple[str, "callable | None"]] = {
     "podcast": ("audio", None),
     "http_article": ("article", None),
 }
-_TYPE_PREFIX = {"video": "video", "article": "article", "paper": "paper", "audio": "audio"}
+_TYPE_PREFIX = {"video": "video", "document": "document", "audio": "audio"}
 
 # job_id 末尾时间戳段:%y%m%d%H%M%S(12 位数字)+ 4 位 hex 随机(同秒不撞)。lineage_key_of 据此剥离。
 _TS_RE = re.compile(r"_\d{12}[0-9a-f]{4}$")

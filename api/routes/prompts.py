@@ -30,6 +30,7 @@ from shared.db import (
     PROMPT_VERSION_MIN,
     PromptVersionExhaustedError,
 )
+from shared.document_registry import DocumentRegistryError, validate_document_kind
 from shared.prompt_resolver import PromptResolver, TRACKED_TEMPLATE_NAMES
 
 router = APIRouter(
@@ -57,6 +58,20 @@ def _wire_history(rows: list[dict]) -> list[dict]:
 
 def _wire_override(row: dict | None) -> dict | None:
     return {**row, "version": _wire_version(row["version"])} if row else None
+
+
+def _prompt_document_kind(pipeline: str, value: str | None) -> str | None:
+    """规范 Prompt kind 维度；非 Document pipeline 禁止携带。"""
+    if pipeline != "document":
+        if value not in (None, ""):
+            raise HTTPException(422, "document_kind is only valid for document pipeline")
+        return None
+    if value in (None, ""):
+        return None
+    try:
+        return validate_document_kind(value)
+    except DocumentRegistryError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 def _ai_steps(config: AppConfig) -> list[tuple[str, str, str | None, str | None]]:
@@ -160,7 +175,8 @@ async def list_prompts(
     by_step: dict[tuple[str, str], list[dict]] = {}
     for o in overrides:
         by_step.setdefault((o["pipeline"], o["step"]), []).append(
-            {"scope": o["scope"], "domain": o["domain"]}
+            {"scope": o["scope"], "domain": o["domain"],
+             "document_kind": o.get("document_kind") or None}
         )
     steps = [
         {
@@ -180,6 +196,7 @@ async def get_prompt(
     step: str,
     scope: str = "global",
     domain: str | None = None,
+    document_kind: str | None = None,
     config: AppConfig = Depends(get_config),
     db: Database = Depends(get_db),
 ):
@@ -191,9 +208,12 @@ async def get_prompt(
     s = _find_step(config, pipeline, step)
     if s is None:
         raise HTTPException(404, f"step '{step}' not found in pipeline '{pipeline}'")
-    ov = await asyncio.to_thread(db.get_prompt_override, scope, domain, pipeline, step)
+    kind = _prompt_document_kind(pipeline, document_kind)
+    ov = await asyncio.to_thread(
+        db.get_prompt_override, scope, domain, pipeline, step, kind,
+    )
     versions = await asyncio.to_thread(
-        db.list_prompt_override_versions, scope, domain, pipeline, step
+        db.list_prompt_override_versions, scope, domain, pipeline, step, kind,
     )
     templates = _step_templates(config, step, s)
     primary_template = s.get("prompt_template") or step
@@ -225,6 +245,7 @@ async def get_prompt_version(
     version: Annotated[str, Path(min_length=1, max_length=19, pattern=r"^[0-9]+$")],
     scope: str = "global",
     domain: str | None = None,
+    document_kind: str | None = None,
     db: Database = Depends(get_db),
 ):
     """查看某历史版本的完整内容(供编辑器选历史版本载入 textarea 后基于它改)。未命中 404。"""
@@ -233,8 +254,10 @@ async def get_prompt_version(
     if domain:
         validate_path_segment(domain, "domain")
     parsed_version = _parse_wire_version(version)
+    kind = _prompt_document_kind(pipeline, document_kind)
     row = await asyncio.to_thread(
-        db.get_prompt_override_version, scope, domain, pipeline, step, parsed_version
+        db.get_prompt_override_version,
+        scope, domain, pipeline, step, parsed_version, kind,
     )
     if row is None:
         raise HTTPException(404, f"version {version} not found for {pipeline}/{step}")
@@ -266,12 +289,16 @@ async def put_prompt(
         raise HTTPException(400, f"step '{step}' is not an AI step")
     if req.scope == "domain" and not (req.domain or "").strip():
         raise HTTPException(400, "domain scope requires a non-empty domain")
+    kind = _prompt_document_kind(
+        pipeline, getattr(req.document_kind, "value", req.document_kind),
+    )
     content = req.content or ""
     if not content.strip():
         await asyncio.to_thread(
-            db.delete_prompt_override, req.scope, req.domain, pipeline, step
+            db.delete_prompt_override, req.scope, req.domain, pipeline, step, kind,
         )
-        return {"status": "deleted", "pipeline": pipeline, "step": step}
+        return {"status": "deleted", "pipeline": pipeline, "step": step,
+                "document_kind": kind}
     mode = req.mode if req.mode in ("overwrite", "new") else "overwrite"
     try:
         version = await asyncio.to_thread(
@@ -283,12 +310,14 @@ async def put_prompt(
             content,
             mode,
             req.note,
+            kind,
         )
     except PromptVersionExhaustedError as exc:
         raise HTTPException(409, "prompt version limit reached") from exc
     return {
         "status": "saved", "pipeline": pipeline, "step": step,
         "scope": req.scope, "domain": (req.domain or "") if req.scope == "domain" else "",
+        "document_kind": kind,
         "active_version": _wire_version(version),
     }
 
@@ -316,24 +345,31 @@ async def activate_prompt(
         raise HTTPException(400, f"step '{step}' is not an AI step")
     if req.scope == "domain" and not (req.domain or "").strip():
         raise HTTPException(400, "domain scope requires a non-empty domain")
+    kind = _prompt_document_kind(
+        pipeline, getattr(req.document_kind, "value", req.document_kind),
+    )
     if req.version is None:
         await asyncio.to_thread(
-            db.deactivate_prompt_override, req.scope, req.domain, pipeline, step
+            db.deactivate_prompt_override,
+            req.scope, req.domain, pipeline, step, kind,
         )
         return {
             "status": "deactivated", "pipeline": pipeline, "step": step,
             "scope": req.scope, "domain": (req.domain or "") if req.scope == "domain" else "",
+            "document_kind": kind,
             "active_version": None,
         }
     parsed_version = _parse_wire_version(req.version)
     ok = await asyncio.to_thread(
-        db.set_active_prompt_version, req.scope, req.domain, pipeline, step, parsed_version
+        db.set_active_prompt_version,
+        req.scope, req.domain, pipeline, step, parsed_version, kind,
     )
     if not ok:
         raise HTTPException(404, f"version {req.version} not found for {pipeline}/{step}")
     return {
         "status": "activated", "pipeline": pipeline, "step": step,
         "scope": req.scope, "domain": (req.domain or "") if req.scope == "domain" else "",
+        "document_kind": kind,
         "active_version": req.version,
     }
 
@@ -344,6 +380,7 @@ async def delete_prompt(
     step: str,
     scope: str = "global",
     domain: str | None = None,
+    document_kind: str | None = None,
     db: Database = Depends(get_db),
 ):
     """彻底删除该步 (scope,domain) 覆盖,连同其全部历史版本一并清除。无则 no-op。
@@ -353,5 +390,9 @@ async def delete_prompt(
     validate_path_segment(step, "step")
     if domain:
         validate_path_segment(domain, "domain")
-    await asyncio.to_thread(db.delete_prompt_override, scope, domain, pipeline, step)
-    return {"status": "deleted", "pipeline": pipeline, "step": step}
+    kind = _prompt_document_kind(pipeline, document_kind)
+    await asyncio.to_thread(
+        db.delete_prompt_override, scope, domain, pipeline, step, kind,
+    )
+    return {"status": "deleted", "pipeline": pipeline, "step": step,
+            "document_kind": kind}

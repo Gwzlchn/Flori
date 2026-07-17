@@ -92,8 +92,9 @@ def _run_spawn_study_race(
 def _job(job_id: str, title: str) -> Job:
     return Job(
         id=job_id,
-        content_type="article",
-        pipeline="article",
+        content_type="document",
+        pipeline="document",
+        document_kind="article",
         title=title,
         lineage_key=job_id,
     )

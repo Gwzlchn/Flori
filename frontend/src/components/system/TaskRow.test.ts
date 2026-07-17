@@ -25,7 +25,7 @@ function mountRow(props: Record<string, any>) {
 
 beforeEach(() => {
   installSourceCatalog({
-    content_types: [{ type: 'paper', label: '论文', upload_extensions: ['.pdf'] }],
+    content_types: [{ type: 'document', label: '文档', upload_extensions: ['.pdf'] }],
     job_sources: [],
     subscription_sources: [],
   })
@@ -35,8 +35,8 @@ describe('TaskRow', () => {
   it('主显作业标题;无标题退 类型 → 流水线 → job_id', () => {
     expect(mountRow({ state: 'queued', jobId: 'j_1', step: 's', title: 'RLHF 综述' }).find('.title').text())
       .toBe('RLHF 综述')
-    expect(mountRow({ state: 'queued', jobId: 'j_1', step: 's', contentType: 'paper' }).find('.title').text())
-      .toBe('论文')
+    expect(mountRow({ state: 'queued', jobId: 'j_1', step: 's', contentType: 'document' }).find('.title').text())
+      .toBe('文档')
     expect(mountRow({ state: 'queued', jobId: 'j_1', step: 's', pipeline: 'video' }).find('.title').text())
       .toBe('video')
     // 全缺 → 兜底 job_id(保证旧 worker 历史无 enrich 时仍可读)

@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ChevronDown, ExternalLink, FileText, Languages, List, RefreshCw, Star } from 'lucide-vue-next'
 import MarkdownViewer from '../../notes/MarkdownViewer.vue'
+import DocumentPdfViewer from '../../document/DocumentPdfViewer.vue'
 import type { CanonicalEvidenceProjection } from '../../../types'
-import { languageName } from '../../../utils/language'
 
 type NoteVariant = 'smart' | 'original' | 'translated' | 'pdf'
 interface Version { provider: string; model: string; version: string; file: string; review_file: string | null; overall: number | null; review_state?: string | null }
@@ -15,8 +15,8 @@ defineProps<{
   domain: string
   hasSmartNote: boolean
   hasTranslation: boolean
-  hasReadableOriginal: boolean
-  hasPaperPdf: boolean
+  hasSourceHtml: boolean
+  hasDocumentPdf: boolean
   noteVariant: NoteVariant
   versions: Version[]
   activeFile: string | null
@@ -25,10 +25,13 @@ defineProps<{
   providers: Provider[]
   noteLoading: boolean
   noteError: string
-  isPaper: boolean
-  paperPdfUrl: string
+  isDocument: boolean
+  sourceHtmlUrl: string
+  documentPdfUrl: string
+  documentPdfPage: number
+  documentPdfBboxes: [number, number, number, number][]
+  translatedHtmlUrl: string
   noteContent: string
-  originalLanguage?: string | null
   terms: Term[]
   evidenceIds: string[]
   canonicalEvidence: CanonicalEvidenceProjection[]
@@ -49,13 +52,13 @@ defineEmits<{
 
 <template>
   <div class="note-toolbar">
-    <div v-if="hasSmartNote || hasTranslation || hasPaperPdf" class="seg">
+    <div v-if="hasSmartNote || hasTranslation || hasDocumentPdf || hasSourceHtml" class="seg">
       <button v-if="hasSmartNote" :class="{ on: noteVariant === 'smart' }" @click="$emit('switchVariant', 'smart')">智能版</button>
-      <button v-if="!isPaper || hasReadableOriginal" :class="{ on: noteVariant === 'original' }" @click="$emit('switchVariant', 'original')">{{ hasReadableOriginal ? '原文' : '机械版' }}</button>
+      <button v-if="!isDocument || hasSourceHtml" :class="{ on: noteVariant === 'original' }" @click="$emit('switchVariant', 'original')">{{ isDocument ? '原文' : '机械版' }}</button>
       <button v-if="hasTranslation" :class="{ on: noteVariant === 'translated' }" @click="$emit('switchVariant', 'translated')">译文</button>
-      <button v-if="hasPaperPdf" :class="{ on: noteVariant === 'pdf' }" @click="$emit('switchVariant', 'pdf')">原文 PDF</button>
+      <button v-if="hasDocumentPdf" :class="{ on: noteVariant === 'pdf' }" @click="$emit('switchVariant', 'pdf')">原文 PDF</button>
     </div>
-    <span v-else class="dim" style="font-size:12px">{{ hasReadableOriginal ? '原文' : '机械版' }}（未生成智能笔记）</span>
+    <span v-else class="dim" style="font-size:12px">机械版（未生成智能笔记）</span>
     <template v-if="noteVariant === 'smart'">
       <span class="dim" style="font-size:12px;margin-left:6px">版本</span><span v-if="versions.length === 0" class="chip on" style="cursor:default">默认</span>
       <span v-for="version in versions" :key="version.file" class="chip version" :class="{ on: (activeFile ?? versions[0]?.file) === version.file }" @click="$emit('selectVersion', version.file)">
@@ -76,17 +79,28 @@ defineEmits<{
   <slot />
   <div v-if="noteLoading" class="card pad"><div class="state"><span class="spinner" />加载笔记…</div></div>
   <div v-else-if="noteError" class="card pad"><div class="state"><FileText class="big" /><div class="t">{{ noteError }}</div></div></div>
-  <div v-else-if="noteVariant === 'pdf' && hasPaperPdf" class="pdf-wrap">
+  <div v-else-if="noteVariant === 'pdf' && hasDocumentPdf" class="pdf-wrap">
     <div class="pdf-head">
       <span class="lead"><FileText :size="13" /> PDF 保留论文原始公式、图表和版式。</span>
-      <a :href="paperPdfUrl" target="_blank" rel="noopener">新窗口打开<ExternalLink :size="13" /></a>
+      <a :href="documentPdfUrl" target="_blank" rel="noopener">新窗口打开<ExternalLink :size="13" /></a>
     </div>
-    <iframe :src="paperPdfUrl" class="pdf-frame" title="论文 PDF 原文" loading="lazy" />
+    <DocumentPdfViewer :url="documentPdfUrl" :page="documentPdfPage" :bboxes="documentPdfBboxes" />
+  </div>
+  <div v-else-if="isDocument && noteVariant === 'original' && hasSourceHtml" class="document-reader-wrap">
+    <div class="pdf-head">
+      <span class="lead"><FileText :size="13" /> HTML 原文保留来源结构、公式和稳定锚点。</span>
+      <a :href="sourceHtmlUrl" target="_blank" rel="noopener">新窗口打开<ExternalLink :size="13" /></a>
+    </div>
+    <iframe :src="sourceHtmlUrl" sandbox="" class="document-reader-frame" title="文档 HTML 原文" loading="lazy" />
+  </div>
+  <div v-else-if="isDocument && noteVariant === 'translated' && hasTranslation" class="document-reader-wrap">
+    <div class="pdf-head">
+      <span class="lead translated"><Languages :size="13" /> 与原文 block 严格对齐的中文译文。</span>
+      <a :href="translatedHtmlUrl" target="_blank" rel="noopener">新窗口打开<ExternalLink :size="13" /></a>
+    </div>
+    <iframe :src="translatedHtmlUrl" sandbox="" class="document-reader-frame" title="文档中文译文" loading="lazy" />
   </div>
   <div v-else class="notes-wrap">
-    <p v-if="noteVariant === 'translated'" class="lead translated">
-      <Languages :size="13" /><span>原文为{{ languageName(originalLanguage) }},以下为 AI 忠实全文译文(保留原结构与配图)。</span>
-    </p>
     <div class="card pad prose max-w-none">
       <MarkdownViewer :content="noteContent" :job-id="jobId" :terms="terms" :domain="domain" :evidence-ids="evidenceIds" :canonical-evidence="canonicalEvidence"
         @headings="$emit('headings', $event)" @pdf-page="$emit('pdfPage', $event)" @evidence-citation="$emit('evidenceCitation', $event)" />
@@ -111,11 +125,10 @@ defineEmits<{
 .pdf-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .pdf-head .lead { display: inline-flex; align-items: center; gap: 5px; margin: 0; }
 .pdf-head a { display: inline-flex; align-items: center; gap: 4px; flex: none; font-size: 12px; }
-.pdf-frame { width: 100%; height: 82vh; border: 1px solid var(--line-soft); border-radius: 10px; background: #f9fafb; }
-.translated { grid-column: 1/-1; margin: -6px 0 0; display: flex; align-items: flex-start; gap: 5px; }
-.translated svg { flex: none; margin-top: 2px; }
+.document-reader-frame { width: 100%; height: 82vh; border: 1px solid var(--line-soft); border-radius: 10px; background: #fff; }
+.translated { grid-column: 1/-1; margin: -6px 0 0; }
 @media (max-width: 600px) {
   .pdf-head { align-items: flex-start; }
-  .pdf-frame { height: 72vh; }
+  .document-reader-frame { height: 72vh; }
 }
 </style>

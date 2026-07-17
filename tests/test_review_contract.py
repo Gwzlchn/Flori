@@ -396,20 +396,35 @@ def _persisted_review(job):
     note_rel = "output/versions/notes_smart_openai_m_20260101-000000.md"
     (job / note_rel).write_text("# 笔记\n精确原文", encoding="utf-8")
     smart, smart_record = source_record(job, note_rel, label="smart")
-    original_rel = "output/original.md"
-    (job / original_rel).write_text("# 原文\n精确来源", encoding="utf-8")
-    original, original_record = source_record(job, original_rel, label="original")
+    (job / "intermediate").mkdir()
+    document_rel = "intermediate/document.json"
+    quality_rel = "intermediate/quality.json"
+    (job / document_rel).write_text(
+        '{"schema_version":2,"job_id":"job","content_type":"document"}',
+        encoding="utf-8",
+    )
+    (job / quality_rel).write_text(
+        '{"schema_version":1,"job_id":"job","status":"complete","reasons":[]}',
+        encoding="utf-8",
+    )
+    document, document_record = source_record(job, document_rel, label="document")
+    quality, quality_record = source_record(job, quality_rel, label="quality")
     prompt_rel = "output/versions/review_input_openai_m_20260101-000000.md"
-    (job / prompt_rel).write_text("prompt\n" + smart + original, encoding="utf-8")
+    (job / prompt_rel).write_text(
+        "prompt\n" + smart + document + quality, encoding="utf-8",
+    )
     _, prompt_record = source_record(job, prompt_rel, label="prompt")
     prompt_record.pop("label")
-    prompt_record["sources"] = [smart_record, original_record]
+    prompt_record["sources"] = [smart_record, document_record, quality_record]
     issue = {
         "type": "traceability", "severity": "warning", "dimension": "accuracy",
         "claim": "原文可定位", "message": "已定位", "evidence_status": "supported",
         "locator": {"source": "smart", "quote": "精确原文"},
     }
-    score_keys = ["completeness", "accuracy", "structure", "readability", "insight"]
+    score_keys = [
+        "completeness", "accuracy", "structure", "terminology",
+        "formula_integrity", "visual_references", "traceability",
+    ]
     raw = json.dumps({
         **{key: 5 for key in score_keys},
         "key_terms": [{"term": "FTS", "definition": "全文搜索"}],
@@ -418,7 +433,9 @@ def _persisted_review(job):
     }, ensure_ascii=False)
     review, _ = parse_review(
         raw, score_keys, _response(), review_input=prompt_record,
-        review_source_texts={"smart": smart, "original": original},
+        review_source_texts={
+            "smart": smart, "document": document, "quality": quality,
+        },
     )
     review.update({
         "note_file": note_rel, "provider": "openai", "model": "m",
@@ -440,7 +457,7 @@ async def test_persisted_review_verifier_accepts_complete_bound_artifact(tmp_pat
         return path.read_bytes() if path.exists() else None
 
     verified = await verify_persisted_review(
-        review, job_id="job", pipeline="article", read_file=reader,
+        review, job_id="job", pipeline="document", read_file=reader,
     )
     assert verified["review_reliable"] is True
 
@@ -459,7 +476,7 @@ async def test_persisted_review_uses_one_snapshot_per_artifact(tmp_path):
         return path.read_bytes() if path.exists() else None
 
     verified = await verify_persisted_review(
-        review, job_id="job", pipeline="article", read_file=reader,
+        review, job_id="job", pipeline="document", read_file=reader,
     )
 
     assert verified["review_reliable"] is True
@@ -516,7 +533,7 @@ async def test_review_source_count_preflight_stops_all_artifact_reads(tmp_path):
         raise AssertionError("source envelope must fail before any read")
 
     verified = await verify_persisted_review(
-        review, job_id="job", pipeline="article", read_file=reader,
+        review, job_id="job", pipeline="document", read_file=reader,
     )
     assert verified["review_reliable"] is False
     assert "review_sources_too_many" in verified["reliability_reasons"]
@@ -539,7 +556,7 @@ async def test_review_declared_source_aggregate_stops_all_artifact_reads(tmp_pat
         raise AssertionError("declared aggregate must fail before any read")
 
     verified = await verify_persisted_review(
-        review, job_id="job", pipeline="article", read_file=reader,
+        review, job_id="job", pipeline="document", read_file=reader,
     )
     assert "review_sources_declared_too_large" in verified["reliability_reasons"]
     assert calls == []
@@ -576,7 +593,7 @@ async def test_review_actual_source_aggregate_stops_before_next_artifact(tmp_pat
         return bodies.get(rel)
 
     verified = await verify_persisted_review(
-        review, job_id="job", pipeline="article", read_file=reader,
+        review, job_id="job", pipeline="document", read_file=reader,
     )
     assert "review_sources_actual_too_large" in verified["reliability_reasons"]
     assert calls == [prompt_rel, records[0]["artifact"], records[1]["artifact"]]
@@ -605,7 +622,7 @@ async def test_review_accepts_fourteen_source_envelopes_before_profile_checks(tm
         return None
 
     verified = await verify_persisted_review(
-        review, job_id="job", pipeline="article", read_file=reader,
+        review, job_id="job", pipeline="document", read_file=reader,
     )
     assert verified["review_reliable"] is False
     assert "review_sources_too_many" not in verified["reliability_reasons"]
@@ -652,7 +669,7 @@ async def test_persisted_review_accepts_canonical_gateway_attempts(tmp_path):
         return path.read_bytes() if path.exists() else None
 
     verified = await verify_persisted_review(
-        review, job_id="job", pipeline="article", read_file=reader,
+        review, job_id="job", pipeline="document", read_file=reader,
     )
     assert verified["review_reliable"] is True
 
@@ -678,7 +695,7 @@ async def test_persisted_completion_status_is_recomputed_from_finish_reason(
         return path.read_bytes() if path.exists() else None
 
     verified = await verify_persisted_review(
-        review, job_id="job", pipeline="article", read_file=reader,
+        review, job_id="job", pipeline="document", read_file=reader,
     )
     assert verified["review_reliable"] is False
     assert "completion_status_mismatch" in verified["reliability_reasons"]
@@ -709,7 +726,7 @@ async def test_persisted_cli_completion_recomputes_only_explicit_raw_proof(
         return path.read_bytes() if path.exists() else None
 
     verified = await verify_persisted_review(
-        review, job_id="job", pipeline="article", read_file=reader,
+        review, job_id="job", pipeline="document", read_file=reader,
     )
     assert verified["review_reliable"] is reliable
     if not reliable:
@@ -728,9 +745,11 @@ async def test_persisted_review_reapplies_source_size_gate_before_decode_or_hash
         "sha256": sha256_bytes(oversized), "bytes": len(oversized),
         "chars": len(oversized),
     })
-    original_record = review["review_input"]["sources"][1]
-    original = (job / original_record["artifact"]).read_bytes()
-    prompt = b"prompt\n" + oversized + original
+    document_record = review["review_input"]["sources"][1]
+    document = (job / document_record["artifact"]).read_bytes()
+    quality_record = review["review_input"]["sources"][2]
+    quality = (job / quality_record["artifact"]).read_bytes()
+    prompt = b"prompt\n" + oversized + document + quality
     (job / review["review_input"]["artifact"]).write_bytes(prompt)
     review["review_input"].update({
         "sha256": sha256_bytes(prompt), "bytes": len(prompt), "chars": len(prompt),
@@ -745,7 +764,7 @@ async def test_persisted_review_reapplies_source_size_gate_before_decode_or_hash
         return path.read_bytes() if path.exists() else None
 
     verified = await verify_persisted_review(
-        review, job_id="job", pipeline="article", read_file=reader,
+        review, job_id="job", pipeline="document", read_file=reader,
     )
     assert verified["review_reliable"] is False
     assert any("too_large" in reason for reason in verified["reliability_reasons"])
@@ -797,7 +816,7 @@ async def test_persisted_review_completion_chain_is_bound_to_final_success(
         return path.read_bytes() if path.exists() else None
 
     verified = await verify_persisted_review(
-        review, job_id="job", pipeline="article", read_file=reader,
+        review, job_id="job", pipeline="document", read_file=reader,
     )
 
     assert verified["review_reliable"] is False
@@ -877,7 +896,7 @@ async def test_persisted_review_verifier_is_total_and_fail_closed(tmp_path, muta
         return path.read_bytes() if path.exists() else None
 
     verified = await verify_persisted_review(
-        review, job_id="job", pipeline="article", read_file=reader,
+        review, job_id="job", pipeline="document", read_file=reader,
     )
     projected = project_review(verified)
     assert projected["review_reliable"] is False

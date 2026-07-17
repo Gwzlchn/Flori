@@ -172,9 +172,9 @@ class TestAiLogDump:
             ),
             ("11_smart", ("11_smart", "11_smart.vision"), "11_smart.vision"),
             (
-                "04_translate_paper",
-                ("04_translate_paper", "04_translate_paper.pdf"),
-                "04_translate_paper.pdf",
+                "04_translate",
+                ("04_translate_document",),
+                "04_translate_document",
             ),
         ],
     )
@@ -188,7 +188,7 @@ class TestAiLogDump:
             bodies[name] = f"BODY:{name}".encode("utf-8")
             (hot / f"{name}.md").write_bytes(bodies[name])
         job = {}
-        if step_name in {"11_smart", "04_translate_paper"}:
+        if step_name == "11_smart":
             job = {
                 "prompt_overrides": {
                     step_name: {"content": "PRIMARY OVERRIDE", "version": 7},

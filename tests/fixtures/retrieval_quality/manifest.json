@@ -1,16 +1,19 @@
 {
-  "schema_version": 1,
-  "name": "flori-retrieval-quality-v1",
-  "description": "去敏的四类真实笔记产物形态,用于离线检索质量决策。",
-  "corpus_sha256": "f09d78b6afcf9e47fb9af8c9ae8c1d53016ea51331fdc67ad61def7640edd938",
+  "schema_version": 2,
+  "name": "flori-retrieval-quality-v2",
+  "description": "去敏的三类 pipeline 与两种 Document 体裁笔记产物,用于离线检索质量决策。",
+  "corpus_sha256": "94b189644938273cc91cbcea092b69eabc39a6d024e9b18bcac9f4cd4e264c98",
   "queries_sha256": "b40c6c3db24f60601d9917c1e2684df94a9d006b490e483e6bf5ff8311a99b6c",
   "corpus": {
     "jobs": 24,
     "content_types": {
       "video": 6,
-      "paper": 6,
-      "article": 6,
+      "document": 12,
       "audio": 6
+    },
+    "document_kinds": {
+      "research_paper": 6,
+      "article": 6
     },
     "topics": [
       "ml",
@@ -41,9 +44,12 @@
     },
     "single_source_content_types": {
       "video": 16,
-      "paper": 16,
-      "article": 16,
+      "document": 32,
       "audio": 16
+    },
+    "single_source_document_kinds": {
+      "research_paper": 16,
+      "article": 16
     },
     "cross_language_directions": {
       "zh_to_en": 10,

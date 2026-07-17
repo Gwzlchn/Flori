@@ -52,6 +52,8 @@ function makeDetail(over: Partial<JobDetail> = {}): JobDetail {
   return {
     job_id: 'job_BV1abc',
     content_type: 'video',
+    document_kind: null,
+    pipeline: 'video',
     status: 'done',
     created_at: '2026-01-01T00:00:00Z',
     updated_at: null,
@@ -63,6 +65,8 @@ function makeDetail(over: Partial<JobDetail> = {}): JobDetail {
     collection_id: null,
     collection_name: null,
     url: 'https://example.com/v',
+    media: {},
+    artifacts: [],
     meta: {},
     steps: [
       { name: 'download', label: '下载', status: 'done', started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:01:00Z', duration_sec: 60, meta: {}, error: null },
@@ -84,7 +88,15 @@ function mountView() {
     global: {
       provide: { showToast },
       // 子组件 stub:非本测目标,避免其内部依赖
-      stubs: { MarkdownViewer: true, StepWorkbench: true },
+      stubs: {
+        MarkdownViewer: true,
+        StepWorkbench: true,
+        DocumentPdfViewer: {
+          name: 'DocumentPdfViewer',
+          props: ['url', 'page', 'bboxes'],
+          template: '<div class="pdf-viewer-stub" />',
+        },
+      },
     },
   })
 }
@@ -200,12 +212,19 @@ describe('JobDetailView tab 默认与切换', () => {
     expect(t).toContain('未归集合')   // collection_name 为 null 的回退文案
   })
 
-  it('图表说明把图标和文案保持在同一行', async () => {
-    api.getText.mockImplementation(async (url: string) => {
-      if (url.includes('intermediate%2Ffigures.json')) {
-        return JSON.stringify([{ id: 'fig1', page: 1, caption: '测试图表', filename: 'fig1.png' }])
+  it('Document 图表 tab 展示图表分组与数量', async () => {
+    fetchDetail.mockResolvedValue(makeDetail({
+      content_type: 'document', pipeline: 'document', document_kind: 'research_paper',
+      artifacts: ['intermediate/document.json'],
+    }))
+    api.get.mockImplementation(async (url: string) => {
+      if (url.includes('intermediate%2Fdocument.json')) {
+        return {
+          blocks: [], assets: [], tables: [],
+          figures: [{ figure_id: 'fig1', label: '图 1', caption: '测试图表', order: 0, media: [] }],
+        }
       }
-      return ''
+      return []
     })
     const w = mountView()
     await flushPromises()
@@ -213,10 +232,10 @@ describe('JobDetailView tab 默认与切换', () => {
     await figuresBtn!.trigger('click')
     await flushPromises()
 
-    const lead = w.find('.figures-lead')
-    expect(lead.exists()).toBe(true)
-    expect(lead.find(':scope > svg').exists()).toBe(true)
-    expect(lead.find(':scope > span').text()).toContain('从 PDF 按图注渲染的图表(1 张,含矢量图)')
+    const panel = w.find('.document-visuals')
+    expect(panel.exists()).toBe(true)
+    expect(panel.find('.document-visuals-head').text()).toContain('图 1 · 表 0')
+    expect(panel.text()).toContain('测试图表')
   })
 })
 
@@ -314,25 +333,26 @@ describe('JobDetailView 笔记 tab', () => {
     expect(seg.text()).toContain('机械版')
   })
 
-  it('文章无智能笔记也无译文时隐藏变体切换,显示「原文(未生成智能笔记)」', async () => {
-    fetchDetail.mockResolvedValue(makeDetail({ status: 'done', content_type: 'article', media: { lang: 'en' } }))
-    api.get.mockResolvedValue([])         // note-versions 空 → 无智能笔记
-    // 只有 original.md 有内容;translated.md 无(否则译文变体合理出现,seg 不该隐藏)
-    api.getText.mockImplementation(async (url: string) =>
-      url.includes('original.md') ? '# 原文\n正文' : Promise.reject({ status: 404 }))
+  it('Document 无智能笔记也无译文时只显示 HTML 原文', async () => {
+    fetchDetail.mockResolvedValue(makeDetail({
+      status: 'done', content_type: 'document', pipeline: 'document',
+      document_kind: 'article', artifacts: ['input/source.html'],
+    }))
+    api.get.mockResolvedValue([])
     const w = mountView()
     await flushPromises()
-    expect(w.find('.seg').exists()).toBe(false)   // 无第二变体 → 切换器隐藏
-    expect(w.text()).toContain('原文')
+    expect(w.find('.seg').findAll('button').map(button => button.text())).toEqual(['原文'])
+    expect(w.find('iframe.document-reader-frame').attributes('src')).toBe('/api/jobs/job_BV1abc/document/source')
     expect(w.text()).not.toContain('原文 PDF')
     expect(w.text()).not.toContain('智能版')
   })
 
-  it('有译文时笔记内出现「译文」变体并可切换(不再是顶层 tab)', async () => {
-    fetchDetail.mockResolvedValue(makeDetail({ status: 'done', content_type: 'article', media: { lang: 'en' } }))
+  it('Document 有译文时使用隔离 HTML 阅读面切换', async () => {
+    fetchDetail.mockResolvedValue(makeDetail({
+      status: 'done', content_type: 'document', pipeline: 'document', document_kind: 'article',
+      artifacts: ['input/source.html', 'output/translated.html'],
+    }))
     api.get.mockResolvedValue([])
-    api.getText.mockImplementation(async (url: string) =>
-      url.includes('translated.md') ? '# 译文内容' : '# 原文内容')
     const w = mountView()
     await flushPromises()
     const tabs = w.find('.tabs')
@@ -343,9 +363,7 @@ describe('JobDetailView 笔记 tab', () => {
     const btn = seg.findAll('button').find(b => b.text() === '译文')
     await btn!.trigger('click')
     await flushPromises()
-    expect(w.text()).toContain('原文为英语,以下为 AI 忠实全文译文')
-    expect(w.find('markdown-viewer-stub').attributes('content')).toContain('译文内容')
-    // 切回原文,切换器仍在(不消失)
+    expect(w.find('iframe.document-reader-frame').attributes('src')).toBe('/api/jobs/job_BV1abc/document/translation')
     const back = seg.findAll('button').find(b => b.text() === '原文')
     await back!.trigger('click')
     await flushPromises()
@@ -569,35 +587,32 @@ describe('JobDetailView 删除流程', () => {
   })
 })
 
-describe('JobDetailView 论文 PDF 版式原文', () => {
-  it('pdf-only paper 无智能笔记时默认渲染独立 PDF 变体', async () => {
+describe('JobDetailView Document 原文阅读面', () => {
+  it('纯 PDF 文档无智能笔记时默认渲染独立 PDF 变体', async () => {
     fetchDetail.mockResolvedValue(makeDetail({
-      content_type: 'paper', source_kind: 'pdf-only', status: 'processing',
+      content_type: 'document', pipeline: 'document', source_profile: 'digital_pdf', status: 'processing',
+      document_kind: 'research_paper',
       artifacts: ['input/source.pdf'],
     }))
     const w = mountView()
     await flushPromises()
     expect(w.find('.seg').text()).toContain('原文 PDF')
     expect(w.find('.seg').findAll('button').map(b => b.text())).toEqual(['原文 PDF'])
-    const frame = w.find('iframe.pdf-frame')
-    expect(frame.exists()).toBe(true)
-    expect(frame.attributes('src')).toContain('/media?')
-    expect(frame.attributes('src')).toContain('input%2Fsource.pdf')
+    const viewer = w.findComponent({ name: 'DocumentPdfViewer' })
+    expect(viewer.exists()).toBe(true)
+    expect(viewer.props('url')).toContain('/media?')
+    expect(viewer.props('url')).toContain('input%2Fsource.pdf')
     expect(w.find('.notes-wrap').exists()).toBe(false)
     expect(w.text()).toContain('PDF 保留论文原始公式、图表和版式')
     expect(w.find('.pdf-head a').attributes('target')).toBe('_blank')
   })
 
-  it('arxiv-html paper 同时保留可检索原文、译文和 PDF 版式原文', async () => {
+  it('学术 HTML 文档同时保留原文、译文和 PDF 版式原文', async () => {
     fetchDetail.mockResolvedValue(makeDetail({
-      content_type: 'paper', source_kind: 'arxiv-html', status: 'failed',
-      artifacts: ['/data/jobs/example/input/source.pdf'],
+      content_type: 'document', pipeline: 'document', source_profile: 'scholarly_html', status: 'failed',
+      document_kind: 'research_paper',
+      artifacts: ['input/source.html', 'input/source.pdf', 'output/translated.html'],
     }))
-    api.getText.mockImplementation(async (url: string) => {
-      if (url.includes('translated.md')) return '# 中文译文'
-      if (url.includes('original.md')) return '# Searchable HTML original'
-      return ''
-    })
 
     const w = mountView()
     await flushPromises()
@@ -605,53 +620,52 @@ describe('JobDetailView 论文 PDF 版式原文', () => {
     expect(seg.text()).toContain('原文')
     expect(seg.text()).toContain('译文')
     expect(seg.text()).toContain('原文 PDF')
-    expect(w.find('markdown-viewer-stub').attributes('content')).toContain('Searchable HTML original')
+    expect(w.find('iframe.document-reader-frame').attributes('src')).toContain('/document/source')
 
     const translated = seg.findAll('button').find(b => b.text() === '译文')
     await translated!.trigger('click')
     await flushPromises()
-    expect(w.find('markdown-viewer-stub').attributes('content')).toContain('中文译文')
+    expect(w.find('iframe.document-reader-frame').attributes('src')).toContain('/document/translation')
 
     const pdf = seg.findAll('button').find(b => b.text() === '原文 PDF')
     await pdf!.trigger('click')
     await flushPromises()
-    const frame = w.find('iframe.pdf-frame')
-    expect(frame.exists()).toBe(true)
-    expect(frame.attributes('src')).toBe('/api/jobs/job_BV1abc/media?path=input%2Fsource.pdf')
+    const viewer = w.findComponent({ name: 'DocumentPdfViewer' })
+    expect(viewer.exists()).toBe(true)
+    expect(viewer.props('url')).toBe('/api/jobs/job_BV1abc/media?path=input%2Fsource.pdf')
   })
 
-  it('译文 PDF 页码引用切到 PDF 变体并定位目标页', async () => {
+  it('PDF 页码跳转切到 PDF 变体并定位目标页', async () => {
     fetchDetail.mockResolvedValue(makeDetail({
-      content_type: 'paper', source_kind: 'arxiv-html', status: 'done',
-      artifacts: ['input/source.pdf'],
+      content_type: 'document', pipeline: 'document', source_profile: 'scholarly_html', status: 'done',
+      document_kind: 'research_paper', artifacts: ['input/source.html', 'input/source.pdf', 'output/translated.html'],
     }))
-    api.getText.mockImplementation(async (url: string) => (
-      url.includes('translated.md') ? '# 译文 [第 4 页](#pdf-page=4)' : '# 原文'
-    ))
     const w = mountView()
     await flushPromises()
     const translated = w.find('.seg').findAll('button').find(b => b.text() === '译文')
     await translated!.trigger('click')
     await flushPromises()
-    w.findComponent({ name: 'MarkdownViewer' }).vm.$emit('pdfPage', 4)
+    w.findComponent({ name: 'JobNotesPanel' }).vm.$emit('pdfPage', 4)
     await flushPromises()
-    expect(w.find('iframe.pdf-frame').attributes('src')).toContain('#page=4')
+    const viewer = w.findComponent({ name: 'DocumentPdfViewer' })
+    expect(viewer.props('url')).toBe('/api/jobs/job_BV1abc/media?path=input%2Fsource.pdf')
+    expect(viewer.props('page')).toBe(4)
   })
 })
 
 describe('JobDetailView 切 job 重置(跨 job 串台回归)', () => {
   it('切 job 后笔记重新加载,不残留上一个 job 的原文', async () => {
-    // 复现实测事故:A(文章,已看原文)→ 切到 B,notesInit 不复位则 ensureNotes no-op,
+    // 复现实测事故:A(视频,已看机械笔记)→ 切到 B,notesInit 不复位则 ensureNotes no-op,
     // B 标题下挂着 A 的原文。断言切换后 MarkdownViewer 拿到 B 的内容。
     fetchDetail.mockImplementation(async (id: string) =>
-      makeDetail({ job_id: id, content_type: 'article', status: 'done', title: `title-${id}` }))
+      makeDetail({ job_id: id, content_type: 'video', pipeline: 'video', status: 'done', title: `title-${id}` }))
     api.getText.mockImplementation(async (url: string) =>
       url.includes('job_A') ? 'A 的原文内容' : 'B 的原文内容')
 
     routeParams.id = 'job_A'
     const w = mountView()
     await flushPromises()
-    // done 态默认落笔记 tab;文章无智能笔记 → 显示原文(机械变体)
+    // done 态默认落笔记 tab;视频无智能笔记 → 显示机械变体。
     expect(w.find('markdown-viewer-stub').attributes('content')).toContain('A 的原文内容')
 
     routeParams.id = 'job_B'

@@ -27,9 +27,11 @@ def _job(db, jid: str, when: datetime, *, domain="finance", title=None, ct="vide
 
 def _evidence(db, jid: str, body: str, *, domain="finance", title=None) -> str:
     """为测试 job 的每个当前 chunk 建 hash 精确绑定的 canonical evidence。"""
+    job = db.get_job(jid)
+    assert job is not None
     db.index_job_notes(
         jid, "smart", title or jid, body,
-        content_type="article", domain=domain,
+        content_type=job.content_type, domain=domain,
     )
     with db._lock:
         chunks = db._conn.execute(

@@ -38,7 +38,24 @@ class SourceJobSource(WireModel):
     type: str
     label: str
     content_types: list[str]
+    document_kinds: list[str]
+    default_document_kind: str | None
+    default_source_profile: str | None
     creatable: bool
+
+
+class SourceDocumentKind(WireModel):
+    kind: str
+    label: str
+    description: str
+    note_profile: str
+    review_profile: str
+
+
+class SourceProfile(WireModel):
+    profile: str
+    label: str
+    capabilities: list[str]
 
 
 class SourceSubscription(WireModel):
@@ -56,11 +73,15 @@ class SourceCatalogResponse(WireModel):
     content_types: list[SourceContentType]
     job_sources: list[SourceJobSource]
     subscription_sources: list[SourceSubscription]
+    document_kinds: list[SourceDocumentKind]
+    source_profiles: list[SourceProfile]
 
 
 class JobCreatedResponse(WireModel):
     job_id: str
     content_type: str
+    document_kind: str | None
+    pipeline: str
     status: str
     created_at: DateTimeString
 
@@ -215,8 +236,8 @@ class ReviewProjectionResponse(WireModel):
     visual_integration: int | float | None
     readability: int | float | None
     formula_integrity: int | float | None
-    figure_references: int | float | None
-    insight: int | float | None
+    visual_references: int | float | None
+    traceability: int | float | None
     conciseness: int | float | None
 
 
@@ -459,6 +480,11 @@ class PipelineStepResponse(WireModel):
 
 class PipelineResponse(WireModel):
     name: str
+    key: str
+    label: str
+    content_types: list[str]
+    document_kinds: list[str]
+    source_profiles: list[str]
     steps: list[PipelineStepResponse]
 
 
@@ -469,6 +495,7 @@ class PipelinesResponse(WireModel):
 class PromptOverrideScope(WireModel):
     scope: str
     domain: str | None
+    document_kind: str | None
 
 
 class PromptListStep(WireModel):
@@ -498,6 +525,7 @@ class PromptOverrideResponse(WireModel):
     scope: str
     domain: str
     pipeline: str
+    document_kind: str
     step: str
     content: str
     version: str
@@ -537,6 +565,7 @@ class PromptMutationResponse(WireModel):
     step: str
     scope: str | None = None
     domain: str | None = None
+    document_kind: str | None = None
     active_version: str | None = None
 
 

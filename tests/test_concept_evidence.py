@@ -20,9 +20,9 @@ from shared.provenance import (
 def _sidecars(
     *,
     job_id: str = "job-concepts",
-    pipeline: str = "article",
+    pipeline: str = "document",
     note_type: str = "original",
-    note_path: str = "output/original.md",
+    note_path: str = "intermediate/document_index.md",
     mappings: list[dict] | None = None,
 ):
     source_bytes = b"first source second source"
@@ -96,9 +96,9 @@ def _sidecars(
 def _attach(key_terms, *, note, source, provenance, **overrides):
     arguments = {
         "job_id": "job-concepts",
-        "pipeline": "article",
+        "pipeline": "document",
         "note_type": "original",
-        "note_path": "output/original.md",
+        "note_path": "intermediate/document_index.md",
         "note_bytes": note,
         "normalized_body": markdown_to_index_text(note.decode()),
         "source_manifest_path": "intermediate/source_segments.json",
@@ -150,7 +150,7 @@ def test_invalid_identity_path_hash_or_sidecar_fails_closed(overrides):
 def test_valid_empty_translation_provenance_never_binds():
     note, source, provenance, _ = _sidecars(
         note_type="translated",
-        note_path="output/translated.md",
+        note_path="output/translated.html",
         mappings=[],
     )
     attached = _attach(
@@ -159,7 +159,7 @@ def test_valid_empty_translation_provenance_never_binds():
         source=source,
         provenance=provenance,
         note_type="translated",
-        note_path="output/translated.md",
+        note_path="output/translated.html",
         provenance_path="output/provenance/translated.json",
     )
     assert attached[0]["evidence_source_segment_ids"] == []

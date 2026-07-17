@@ -29,15 +29,27 @@ export const SOURCE_TYPES = reactive<SourceTypeMeta[]>([])
 export const JOB_SOURCE_LABELS = reactive<Record<string, string>>({})
 export const CONTENT_TYPE_LABELS = reactive<Record<string, string>>({})
 export const CONTENT_TYPE_CATALOG = reactive<{ type: string; label: string; uploadExtensions: string[] }[]>([])
+export const DOCUMENT_KIND_LABELS = reactive<Record<string, string>>({})
+export const DOCUMENT_KIND_CATALOG = reactive<{
+  kind: string
+  label: string
+  description: string
+  noteProfile: string
+  reviewProfile: string
+}[]>([])
+export const SOURCE_PROFILE_LABELS = reactive<Record<string, string>>({})
 const BY_TYPE = reactive<Record<string, SourceTypeMeta>>({})
 let loading: Promise<void> | null = null
 
 export function installSourceCatalog(catalog: SourceCatalogWire): void {
   SOURCE_TYPES.splice(0, SOURCE_TYPES.length)
   CONTENT_TYPE_CATALOG.splice(0, CONTENT_TYPE_CATALOG.length)
+  DOCUMENT_KIND_CATALOG.splice(0, DOCUMENT_KIND_CATALOG.length)
   for (const key of Object.keys(BY_TYPE)) delete BY_TYPE[key]
   for (const key of Object.keys(JOB_SOURCE_LABELS)) delete JOB_SOURCE_LABELS[key]
   for (const key of Object.keys(CONTENT_TYPE_LABELS)) delete CONTENT_TYPE_LABELS[key]
+  for (const key of Object.keys(DOCUMENT_KIND_LABELS)) delete DOCUMENT_KIND_LABELS[key]
+  for (const key of Object.keys(SOURCE_PROFILE_LABELS)) delete SOURCE_PROFILE_LABELS[key]
 
   for (const raw of catalog.subscription_sources || []) {
     const meta: SourceTypeMeta = {
@@ -56,10 +68,34 @@ export function installSourceCatalog(catalog: SourceCatalogWire): void {
       type: raw.type, label: raw.label, uploadExtensions: raw.upload_extensions || [],
     })
   }
+  const documentCatalog = catalog as SourceCatalogWire & {
+    document_kinds?: {
+      kind: string
+      label: string
+      description: string
+      note_profile: string
+      review_profile: string
+    }[]
+    source_profiles?: { profile: string; label: string; capabilities: string[] }[]
+  }
+  for (const raw of documentCatalog.document_kinds || []) {
+    DOCUMENT_KIND_LABELS[raw.kind] = raw.label
+    DOCUMENT_KIND_CATALOG.push({
+      kind: raw.kind,
+      label: raw.label,
+      description: raw.description,
+      noteProfile: raw.note_profile,
+      reviewProfile: raw.review_profile,
+    })
+  }
+  for (const raw of documentCatalog.source_profiles || []) {
+    SOURCE_PROFILE_LABELS[raw.profile] = raw.label
+  }
 }
 
 export async function ensureSourceCatalog(): Promise<void> {
-  if (SOURCE_TYPES.length) return
+  // Search/About 等只消费内容类型,不应以是否存在订阅源判定 catalog 未加载。
+  if (CONTENT_TYPE_CATALOG.length) return
   if (!loading) {
     const api = useApi()
     loading = api.get<SourceCatalogWire>('/api/sources')

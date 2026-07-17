@@ -54,8 +54,8 @@ def _artifact(
 def _source_manifest() -> dict:
     artifacts = [
         _artifact("media", "input/media.mp4", "a" * 64, duration=10_000),
-        _artifact("paper", "input/paper.pdf", "b" * 64, pages=12),
-        _artifact("article", "input/article.html", "c" * 64),
+        _artifact("pdf", "input/source.pdf", "b" * 64, pages=12),
+        _artifact("html", "input/source.html", "c" * 64),
         _artifact(
             "figure", "input/slides.pdf", "d" * 64, duration=20_000, pages=20,
         ),
@@ -69,14 +69,14 @@ def _source_manifest() -> dict:
             "locator": {"kind": "media", "start_ms": 1_000, "end_ms": 2_000},
         },
         {
-            "source_id": "paper",
+            "source_id": "pdf",
             "start": None,
             "end": None,
             "section": "论文",
             "locator": {"kind": "pdf", "page": 3, "bbox": [12.5, 20, 240, 360]},
         },
         {
-            "source_id": "article",
+            "source_id": "html",
             "start": 40,
             "end": 60,
             "section": None,
@@ -486,7 +486,7 @@ def _semantic_mapping(source: dict, segment_id: str, **overrides) -> dict:
         "source_segment_id": segment_id,
         "source_manifest": source,
         "transform_kind": "cross_language",
-        "producer_component": "04_translate_article",
+        "producer_component": "04_translate",
         "producer_invocation_id": "producer-session",
         "candidate_id": decision["candidate_id"],
         "job_id": source["job_id"],
@@ -494,19 +494,19 @@ def _semantic_mapping(source: dict, segment_id: str, **overrides) -> dict:
         "note_sha256": sha256_bytes("该模型不超过 5 kg。".encode()),
         "source_manifest_sha256": sha256_bytes(canonical_json_bytes(source)),
         "batch_id": "b" * 64,
-        "attestor_component": "04_semantic_attestation",
+        "attestor_component": "06_semantic_attestation",
         "attestor_invocation_id": "attestor-session",
         "attestor_provider": "claude-cli",
         "attestor_model": "claude-opus-4-8",
         "attestor_prompt": prompt,
         "ai_log_binding": {
-            "path": "output/ai_logs/04_semantic_attestation.jsonl",
+            "path": "output/ai_logs/06_semantic_attestation.jsonl",
             "call_index": 0,
             "record_sha256": "c" * 64,
             "session_id": "attestor-session",
             "provider": "claude-cli",
             "model": "claude-opus-4-8",
-            "step": "04_semantic_attestation",
+            "step": "06_semantic_attestation",
             "job_id": source["job_id"],
             "prompt_user_sha256": sha256_bytes(prompt.encode()),
             "response_content_sha256": "d" * 64,
@@ -582,7 +582,7 @@ def test_semantic_protected_facts_fail_closed_on_unknown_units_and_role_changes(
     ("overrides", "message"),
     [
         ({"attestor_invocation_id": "producer-session"}, "independent"),
-        ({"attestor_component": "04_translate_article"}, "independent"),
+        ({"attestor_component": "04_translate"}, "independent"),
         ({"confidence_ppm": 949_999}, "confidence"),
         ({"attestor_provider": "unknown"}, "attestor"),
         ({"decision": "rejected"}, "supported"),
@@ -658,7 +658,7 @@ def test_non_exact_marker_becomes_untrusted_semantic_candidate(
         f"{claim} [[source:{token}]]",
         source,
         error_prefix="smart note",
-        producer_component="04_smart_article",
+        producer_component="05_smart",
         producer_invocation_id="producer-session",
         force_semantic=force_semantic,
     )
@@ -678,17 +678,14 @@ def test_non_exact_marker_becomes_untrusted_semantic_candidate(
     [
         ("11_smart", False, "The model is efficient.", "The model works efficiently.", "paraphrase"),
         ("11_smart", False, "The model is efficient.", "该模型效率很高。", "cross_language"),
-        ("05_smart_paper", False, "The model is efficient.", "The model works efficiently.", "paraphrase"),
-        ("05_smart_paper", False, "The model is efficient.", "该模型效率很高。", "cross_language"),
-        ("04_smart_article", False, "The model is efficient.", "The model works efficiently.", "paraphrase"),
-        ("04_smart_article", False, "The model is efficient.", "该模型效率很高。", "cross_language"),
+        ("05_smart", False, "The model is efficient.", "The model works efficiently.", "paraphrase"),
+        ("05_smart", False, "The model is efficient.", "该模型效率很高。", "cross_language"),
         ("04_smart_podcast", False, "The model is efficient.", "The model works efficiently.", "paraphrase"),
         ("04_smart_podcast", False, "The model is efficient.", "该模型效率很高。", "cross_language"),
-        ("04_translate_paper", True, "The model is efficient.", "该模型效率很高。", "translated"),
-        ("04_translate_article", True, "The model is efficient.", "该模型效率很高。", "translated"),
+        ("04_translate", True, "The model is efficient.", "该模型效率很高。", "translated"),
     ],
 )
-def test_ten_producer_transform_vertical_slices_emit_only_untrusted_candidates(
+def test_current_producer_transform_vertical_slices_emit_only_untrusted_candidates(
     producer: str,
     force_semantic: bool,
     source_text: str,
@@ -844,7 +841,7 @@ def test_exact_quote_rejects_cross_modal_multi_reference_claim() -> None:
     text_segment["support_text"] = "跨模态逐字事实"
     text_segment["support_artifact"] = {
         "kind": "html",
-        "path": "input/article.html",
+        "path": "input/source.html",
         "sha256": "c" * 64,
         "selector": {"start": 40, "end": 60},
     }

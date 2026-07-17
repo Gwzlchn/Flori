@@ -77,7 +77,10 @@ class TestJobCRUD:
 
     def test_list_all(self, db, sample_job):
         db.create_job(sample_job)
-        j2 = Job(id="j_20260517_bbbbbb", content_type="paper", pipeline="paper")
+        j2 = Job(
+            id="j_20260517_bbbbbb", content_type="document", pipeline="document",
+            document_kind="research_paper",
+        )
         db.create_job(j2)
         total, jobs = db.list_jobs()
         assert total == 2
@@ -844,7 +847,7 @@ class TestNotesFTS:
         db.index_job_notes(
             "j_short", "smart", "机器学习",
             "这篇笔记讲解机器学习算法。",
-            content_type="paper", domain="ml", collection_id="c_short",
+            content_type="document", domain="ml", collection_id="c_short",
         )
 
         for search in (db.search_notes, db.search_note_chunks):
@@ -865,7 +868,7 @@ class TestNotesFTS:
         db.index_job_notes(
             "j_filter_miss", "smart", "其他",
             "同样包含两字关键词梯度。",
-            content_type="paper", domain="nlp", collection_id="c2",
+            content_type="document", domain="nlp", collection_id="c2",
         )
 
         kwargs = {"collection_id": "c1", "domain": "ml", "content_type": "video"}
@@ -948,10 +951,10 @@ class TestNotesFTS:
 
     def test_search_filter_domain_and_content_type(self, db):
         db.index_job_notes("j1", "smart", "a", "讲优化器。", domain="ml", content_type="video")
-        db.index_job_notes("j2", "smart", "b", "讲优化器。", domain="dl", content_type="paper")
+        db.index_job_notes("j2", "smart", "b", "讲优化器。", domain="dl", content_type="document")
         total, items = db.search_notes("优化器", domain="dl")
         assert total == 1 and items[0]["job_id"] == "j2"
-        total2, items2 = db.search_notes("优化器", content_type="paper")
+        total2, items2 = db.search_notes("优化器", content_type="document")
         assert total2 == 1 and items2[0]["job_id"] == "j2"
 
     def test_search_no_match(self, db):
@@ -1130,7 +1133,10 @@ class TestDBEdgeCases:
     def test_create_duplicate_job_id(self, db):
         job1 = Job(id="j_dup", content_type="video", pipeline="test")
         db.create_job(job1)
-        job2 = Job(id="j_dup", content_type="paper", pipeline="test2")
+        job2 = Job(
+            id="j_dup", content_type="document", pipeline="test2",
+            document_kind="research_paper",
+        )
         # Should raise IntegrityError or similar
         with pytest.raises(Exception):
             db.create_job(job2)
@@ -1426,8 +1432,11 @@ class TestJobFacets:
                           domain="ml", source="bilibili", status=JobStatus.DONE))
         db.create_job(Job(id="j2", content_type="video", pipeline="video",
                           domain="ml", source="bilibili", status=JobStatus.PENDING))
-        db.create_job(Job(id="j3", content_type="paper", pipeline="paper",
-                          domain="dl", source="arxiv", status=JobStatus.DONE))
+        db.create_job(Job(
+            id="j3", content_type="document", pipeline="document",
+            document_kind="research_paper", domain="dl", source="arxiv",
+            status=JobStatus.DONE,
+        ))
         facets = db.job_facets()
         assert set(facets.keys()) == {"source", "domain", "status"}
         assert facets["source"] == {"bilibili": 2, "arxiv": 1}
@@ -1453,13 +1462,15 @@ class TestJobsBrief:
     def test_batch_enrich(self, db):
         db.create_job(Job(id="j_a", content_type="video", pipeline="video",
                           title="深入理解 Transformer", domain="ai"))
-        db.create_job(Job(id="j_b", content_type="paper", pipeline="paper",
-                          title=None, domain="ml"))
+        db.create_job(Job(
+            id="j_b", content_type="document", pipeline="document",
+            document_kind="research_paper", title=None, domain="ml",
+        ))
         out = db.jobs_brief(["j_a", "j_b", "j_missing"])
         assert out["j_a"] == {"title": "深入理解 Transformer", "content_type": "video",
                               "domain": "ai", "status": "pending", "pipeline": "video"}
         assert out["j_b"]["title"] is None
-        assert out["j_b"]["content_type"] == "paper"
+        assert out["j_b"]["content_type"] == "document"
         assert "j_missing" not in out   # 查不到的 id 不出现(前端按缺失回退)
 
     def test_empty_and_dedup(self, db):
@@ -1474,8 +1485,10 @@ class TestDeleteCascadeCompleteness:
     """删 job/集合时彻底清:ai_usage + 订阅 ingested_items。"""
 
     def test_delete_job_cascade_clears_ai_usage_and_ingested(self, db):
-        db.create_job(Job(id="jc_1", content_type="article", pipeline="article",
-                          collection_id="col_x"))
+        db.create_job(Job(
+            id="jc_1", content_type="document", pipeline="document",
+            document_kind="article", collection_id="col_x",
+        ))
         db.record_ai_usage(AIUsage(exec_id="e1", provider="claude-cli", model="sonnet",
                                    job_id="jc_1", step="04_smart", cost_usd=0.1))
         db.mark_ingested("col_x", "item_42")
@@ -1490,16 +1503,20 @@ class TestDeleteCascadeCompleteness:
 
     def test_delete_job_cascade_keeps_ingested_when_no_item_id(self, db):
         # 不传 item_id(手动 job)→ 不动 ingested_items。
-        db.create_job(Job(id="jc_2", content_type="article", pipeline="article",
-                          collection_id="col_y"))
+        db.create_job(Job(
+            id="jc_2", content_type="document", pipeline="document",
+            document_kind="article", collection_id="col_y",
+        ))
         db.mark_ingested("col_y", "keepme")
         db.delete_job_cascade("jc_2", collection_id="col_y")
         assert "keepme" in db.ingested_item_ids("col_y")
 
     def test_delete_collection_purge_clears_ai_usage(self, db):
         db.create_collection(Collection(id="col_p", name="p", domain="deep-learning"))
-        db.create_job(Job(id="jp_1", content_type="article", pipeline="article",
-                          collection_id="col_p"))
+        db.create_job(Job(
+            id="jp_1", content_type="document", pipeline="document",
+            document_kind="article", collection_id="col_p",
+        ))
         db.record_ai_usage(AIUsage(exec_id="e2", provider="claude-cli", model="sonnet",
                                    job_id="jp_1", cost_usd=0.2))
         db.delete_collection("col_p", purge=True)
@@ -1510,11 +1527,12 @@ class TestDeleteCascadeCompleteness:
 class TestLineageP2b:
     """lineage_key / is_current 归组、版本列表、删 current 后回退。"""
 
-    def _mk(self, db, jid, lineage, created, ct="article", cid=None):
+    def _mk(self, db, jid, lineage, created, ct="document", cid=None):
         from datetime import datetime, timezone
         from shared.models import Job
         db.create_job(Job(
-            id=jid, content_type=ct, pipeline=ct, lineage_key=lineage, collection_id=cid,
+            id=jid, content_type=ct, pipeline=ct, document_kind="article",
+            lineage_key=lineage, collection_id=cid,
             created_at=datetime(2026, 6, 27, 10, 0, created, tzinfo=timezone.utc),
         ))
 

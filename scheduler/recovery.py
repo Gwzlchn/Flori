@@ -429,11 +429,19 @@ class RecoveryCoordinator:
         idempotency_key: str | None = None,
     ) -> list[str]:
         """从指定步骤开始重跑,清除该步骤及所有下游的 .done 标记。返回被重置的步骤列表。"""
-        self.owner._cancel_delayed_tasks(job_id)  # 取消在途延迟重试,防与新一轮状态串台
         pipeline = await self.owner.redis.get_job_pipeline(job_id)
         if not pipeline:
             return []
         steps = self.owner._get_pipeline_steps(pipeline)
+        if from_step not in steps:
+            logger.warning(
+                "job_rerun_invalid_step",
+                job_id=job_id,
+                pipeline=pipeline,
+                from_step=from_step,
+            )
+            return []
+        self.owner._cancel_delayed_tasks(job_id)  # 取消在途延迟重试,防与新一轮状态串台
         downstream = self.owner._get_downstream(steps, from_step)
         reset_steps = [from_step] + downstream
 

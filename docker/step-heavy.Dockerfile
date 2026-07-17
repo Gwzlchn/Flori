@@ -9,7 +9,7 @@ RUN if [ "$USE_USTC_MIRROR" = "1" ]; then \
         sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list.d/debian.sources; \
     fi \
     && apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg curl \
+    && apt-get install -y --no-install-recommends ffmpeg curl poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 RUN if [ "$USE_USTC_MIRROR" = "1" ]; then \

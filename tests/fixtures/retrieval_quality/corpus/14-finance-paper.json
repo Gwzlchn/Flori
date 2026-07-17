@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "job": {"id": "rq-finance-paper", "content_type": "paper", "pipeline": "paper", "domain": "quality-finance", "topic": "finance", "title": "Discounted Cash Flow Estimation", "primary_language": "en", "meta": {}},
+  "schema_version": 2,
+  "job": {"id": "rq-finance-paper", "content_type": "document", "pipeline": "document", "document_kind": "research_paper", "domain": "quality-finance", "topic": "finance", "title": "Discounted Cash Flow Estimation", "primary_language": "en", "meta": {"flags": {"smart_note": true}}},
   "note": {
     "path": "output/versions/notes_smart_fixture_model_20260714-000000.md",
     "note_type": "smart",

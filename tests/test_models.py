@@ -63,15 +63,15 @@ class TestDeriveJobId:
 
     def test_timestamped_unique_same_lineage(self):
         # 同 url 重投 = 不同 job_id(时间戳)但同 lineage_key(同源归组)。
-        a = derive_job_id("https://example.com/x", "article")
-        b = derive_job_id("https://example.com/x", "article")
+        a = derive_job_id("https://example.com/x", "document")
+        b = derive_job_id("https://example.com/x", "document")
         assert a != b                                            # 时间戳/随机 → 各自新快照
         assert a.startswith("jobs_article_")
         assert lineage_key_of(a) == lineage_key_of(b)            # 同 lineage
-        assert lineage_key("https://example.com/x", "article") == lineage_key_of(a)
+        assert lineage_key("https://example.com/x", "document") == lineage_key_of(a)
 
     def test_no_url_random(self):
-        assert derive_job_id(None, "paper").startswith("jobs_paper_")
+        assert derive_job_id(None, "document").startswith("jobs_document_")
 
 
 class TestWorkerId:
@@ -100,14 +100,16 @@ class TestJobDefaults:
     def test_full_creation(self):
         job = Job(
             id="j_20260517_abc123",
-            content_type="paper",
-            pipeline="paper",
+            content_type="document",
+            document_kind="research_paper",
+            pipeline="document",
             status=JobStatus.PROCESSING,
             domain="ml",
             style_tags=["lecture"],
             meta={"pages": 12},
         )
-        assert job.content_type == "paper"
+        assert job.content_type == "document"
+        assert job.document_kind == "research_paper"
         assert job.style_tags == ["lecture"]
         assert job.meta["pages"] == 12
 

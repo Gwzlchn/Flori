@@ -3,7 +3,7 @@ import type { Component } from 'vue'
 import { ExternalLink } from 'lucide-vue-next'
 import StatusBadge from '../../common/StatusBadge.vue'
 import { fmtDateTime, fmtDuration } from '../../../utils/datetime'
-import { contentTypeLabel } from '../../../utils/contentType'
+import { contentTypeLabel, documentKindLabel } from '../../../utils/contentType'
 import type { JobDetail } from '../../../types'
 
 interface LineageVersion {
@@ -39,6 +39,7 @@ defineEmits<{ jumpVersion: [event: Event] }>()
         <div class="meta" style="margin-top:5px">
           <StatusBadge :status="jobStatus" />
           <span class="badge b-mut">{{ contentTypeLabel(job.content_type) }}</span>
+          <span v-if="job.document_kind" class="badge b-info">{{ documentKindLabel(job.document_kind) }}</span>
           <span>{{ sourceDisplay }}</span>
           <template v-if="job.domain"><span class="sep">·</span><span>{{ job.domain }}</span></template>
           <template v-if="bv"><span class="sep">·</span><span class="mono dim">{{ bv }}</span></template>

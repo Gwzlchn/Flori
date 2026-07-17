@@ -43,7 +43,7 @@
 class Scheduler:
     def __init__(self, redis: Redis, pipelines_config: dict, pools_config: dict):
         self.redis = redis
-        self.pipelines = pipelines_config    # pipelines.yaml: {video: {steps: [...]}, paper: ...}
+        self.pipelines = pipelines_config    # pipelines.yaml: video / document / audio
         self.pools = PoolManager(redis, pools_config)
 
     def get_steps(self, pipeline: str) -> dict:

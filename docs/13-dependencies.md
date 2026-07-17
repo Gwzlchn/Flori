@@ -34,26 +34,25 @@
 | [openai/whisper](https://github.com/openai/whisper) | 备选 | MIT | 原版，更稳但慢 |
 | [FunASR](https://github.com/modelscope/FunASR) | 待评估 | MIT | 阿里开源，中文识别可能优于 Whisper |
 
-## 4. PDF 论文处理
+## 4. Document 解析
 
 | 工具 | 步骤 | License | 说明 |
 |------|------|---------|------|
-| [Poppler](https://poppler.freedesktop.org/) | 02_pdf_parse / AI PDF Read | GPL-2.0+ | `pdfinfo` 取页数、`pdftotext` 首页标题兜底、模型读取 PDF 时渲染页面 |
-| arXiv LaTeXML HTML | 02_pdf_parse（arxiv-html） | 上游内容 | HTML 转保结构 Markdown；无 HTML 时保留 PDF 直读 |
-| [PyMuPDF](https://github.com/pymupdf/PyMuPDF) | 当前无步骤调用 | AGPL-3.0 | `docker/step-heavy.Dockerfile` 仍安装的兼容残留；分发该镜像仍需履行许可，待独立清理 |
+| [Poppler](https://poppler.freedesktop.org/) | Document `02_parse` | GPL-2.0+ | `pdfinfo` 取元数据，`pdftohtml -xml` 建主文本层，`pdftotext -bbox-layout` 作降级 |
+| arXiv LaTeXML HTML | Document `02_parse` | 上游内容 | 学术 HTML 直接保留 DOM、公式和引用结构，不先转换为 Markdown |
+| [PyMuPDF](https://github.com/pymupdf/PyMuPDF) | Document `02_parse` | AGPL-3.0 | 扫描 PDF 逐页渲染、OCR 坐标换算和 Figure/Table 区域提取 |
+| [RapidOCR](https://github.com/RapidAI/RapidOCR) | Document `02_parse` | Apache-2.0 | 扫描 PDF 无可靠文本层时生成带置信度的 OCR locator |
 | [marker](https://github.com/VikParuchuri/marker) | **待评估** | GPL-3.0 | PDF → Markdown，含公式/表格/图片 |
 | [MinerU](https://github.com/opendatalab/MinerU) | **待评估** | AGPL-3.0 | 上海 AI Lab，中文论文效果好 |
 | [Nougat](https://github.com/facebookresearch/nougat) | 待评估 | MIT | Meta，学术论文专用 |
 
-> 当前不把 PDF 逆向抽正文作为主路径。只有量化评测证明 HTML 优先 + PDF 直读不满足需求时，才评估 marker/MinerU 等替代方案。
+> HTML 和 PDF 都是原始真相源。PDF adapter 只生成结构化 Document、文本层和定位坐标，不生成原文 Markdown；只有量化评测证明当前 adapter 不满足需求时，才评估 marker/MinerU。
 
-## 5. 文章抓取（M6 已实现）
+## 5. HTML Document 抓取
 
 | 工具 | License | 说明 |
 |------|---------|------|
-| [trafilatura](https://github.com/adbar/trafilatura) | Apache-2.0 | 网页正文提取（parsed.json 正文/元数据）；其树丢 `<pre>` 换行，不用于原文 MD 主路径 |
-| [readability-lxml](https://github.com/buriy/python-readability) | Apache-2.0 | 原文 MD 主路径：定位正文，返回原始 HTML 无损子树（保代码块/图原位） |
-| [markdownify](https://github.com/matthewwithanm/python-markdownify) | MIT | 原文 HTML→Markdown 忠实转换（围栏代码/表格；关 `_`/`*` 转义保数学） |
+| [trafilatura](https://github.com/adbar/trafilatura) | Apache-2.0 | 下载阶段的通用元数据与正文辅助提取；Document adapter 仍以不可变 HTML DOM 为原文真相 |
 | [newspaper3k](https://github.com/codelucas/newspaper) | MIT | 新闻文章提取，含图片（备选，未用） |
 
 ## 6. 后端
@@ -99,7 +98,7 @@
 
 | License | 影响 | 涉及工具 |
 |---------|------|---------|
-| **AGPL-3.0** | 网络使用与镜像分发需关注源码提供义务 | PyMuPDF(旧 step-heavy 镜像残留), MinerU(未采用), MinIO |
+| **AGPL-3.0** | 网络使用与镜像分发需关注源码提供义务 | PyMuPDF(Document PDF/OCR), MinerU(未采用), MinIO |
 | **Apache-2.0** | 公网入口（替代 Cloudflare Tunnel） | Caddy |
 | **GPL-3.0** | 分发需开源 | yutto, pysrt, marker |
 | MIT/Apache/BSD | 无限制 | 其他大部分工具 |

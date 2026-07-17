@@ -13,7 +13,7 @@ services:
       target: api
     command: python -m api.main
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
     volumes:
       - ./shared:/app/shared
       - ./api:/app/api
@@ -55,6 +55,8 @@ services:
       context: .
       dockerfile: docker/base.Dockerfile
       target: worker
+      args:
+        INSTALL_CLAUDE_CODE: "0"
     command: python -m worker.main --pools cpu
     volumes:
       - ./shared:/app/shared
@@ -67,6 +69,7 @@ services:
       - DATA_DIR=/data
       - CONFIG_DIR=/app/configs
       - DRY_RUN=${DRY_RUN:-0}
+      - WORKER_NAME=integration-cpu
     depends_on:
       - redis
 
@@ -75,6 +78,8 @@ services:
       context: .
       dockerfile: docker/base.Dockerfile
       target: worker
+      args:
+        INSTALL_CLAUDE_CODE: "0"
     command: python -m worker.main --pools io
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -89,6 +94,7 @@ services:
       - DATA_DIR=/data
       - CONFIG_DIR=/app/configs
       - DRY_RUN=${DRY_RUN:-0}
+      - WORKER_NAME=integration-io
       - HTTPS_PROXY=http://host.docker.internal:11081
       - HTTP_PROXY=http://host.docker.internal:11081
     depends_on:
@@ -99,7 +105,10 @@ services:
       context: .
       dockerfile: docker/base.Dockerfile
       target: worker
-    command: python -m worker.main --pools ai --tags vision
+      args:
+        INSTALL_CLAUDE_CODE: "0"
+    # DRY_RUN 不调用 Claude CLI,但入口能力门仍需覆盖生产路由标签。
+    command: python -m worker.main --pools ai --tags vision claude-cli
     volumes:
       - ./shared:/app/shared
       - ./worker:/app/worker
@@ -114,6 +123,7 @@ services:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - KIMI_API_KEY=${KIMI_API_KEY:-}
       - DRY_RUN=${DRY_RUN:-0}
+      - WORKER_NAME=integration-ai
     depends_on:
       - redis
 

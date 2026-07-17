@@ -21,7 +21,8 @@ def _seed(db):
     )
     db.create_job(Job(id="j1", content_type="video", pipeline="video",
                       domain="finance", collection_id="c1", title="庄家坐庄解析"))
-    db.create_job(Job(id="j2", content_type="paper", pipeline="paper",
+    db.create_job(Job(id="j2", content_type="document", document_kind="research_paper",
+                      pipeline="document",
                       domain="deep-learning", title="注意力机制"))
     db.index_job_notes("j1", "smart", "庄家坐庄解析",
                        "讲庄家如何坐庄收割散户的手法", domain="finance", collection_id="c1")
@@ -43,7 +44,10 @@ class TestKbServices:
         _seed(db)
         res = kb.search(db, "坐庄收割", limit=10)
         assert res and res[0]["job_id"] == "j1"
-        assert set(res[0]) == {"title", "snippet", "job_id", "domain", "kind"}
+        assert set(res[0]) == {
+            "title", "snippet", "job_id", "domain", "kind",
+            "content_type", "document_kind",
+        }
         assert res[0]["domain"] == "finance" and res[0]["kind"] == "smart"
 
     def test_search_two_cjk_query_and_single_cjk_rejection(self, db):

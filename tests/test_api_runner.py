@@ -486,7 +486,8 @@ class TestGatewayAITaskLease:
 
         return build_source_manifest(task_id, "问题", [{
             "job_id": f"j_{marker}", "title": marker, "domain": "ml",
-            "content_type": "article", "note_type": "smart",
+            "content_type": "document", "document_kind": "article",
+            "note_type": "smart",
             "artifact_sha256": marker[0] * 64,
             "body": body,
             "evidence": {"chunk_id": f"j_{marker}:smart:0", "section": "正文"},
@@ -521,7 +522,8 @@ class TestGatewayAITaskLease:
 
         now = datetime.now(timezone.utc)
         db.create_job(Job(
-            id=f"j_{task_id}", content_type="article", pipeline="article_v2",
+            id=f"j_{task_id}", content_type="document", document_kind="article",
+            pipeline="document",
             domain="ml", title="可信摘要来源", status=JobStatus.DONE,
             created_at=now, updated_at=now, published_at=now,
         ))
@@ -529,6 +531,8 @@ class TestGatewayAITaskLease:
         original = build_digest_source_manifest(
             db, task_id=task_id, radar_data=radar(db, "ml", 7),
         )
+        assert original["sources"][0]["content_type"] == "document"
+        assert original["sources"][0]["document_kind"] == "article"
         worker_id, token = await _register_ai(jobs_client)
         await real_redis.enqueue_ai_task(AITask(
             task_id=task_id, request=LLMRequest(messages=[]),

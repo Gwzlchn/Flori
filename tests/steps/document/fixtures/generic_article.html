@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <title>Fallback title</title>
+  <link rel="canonical" href="/posts/document-model">
+  <meta property="og:url" content="https://example.com/posts/document-model">
+  <meta property="og:title" content="A Structured Document Model">
+  <meta property="og:site_name" content="Example Engineering">
+  <meta property="article:published_time" content="2026-07-01T08:00:00Z">
+  <script type="application/ld+json">
+  {
+    "@type": "TechArticle",
+    "headline": "A Structured Document Model",
+    "author": [{"@type": "Person", "name": "Ada Example"}],
+    "datePublished": "2026-07-01T08:00:00Z",
+    "dateModified": "2026-07-02T09:00:00Z",
+    "keywords": ["documents", "evidence"]
+  }
+  </script>
+</head>
+<body>
+  <header>Site navigation must not become article text.</header>
+  <article>
+    <h1>A Structured Document Model</h1>
+    <p>
+      A document adapter must preserve the original hierarchy instead of flattening every
+      paragraph into an anonymous string. Stable blocks make translation, search, citations,
+      and review point back to the same source without asking downstream consumers to guess.
+      See the <a href="/standards/evidence">evidence specification</a> for the complete rules.
+    </p>
+    <h2>Preserved structures</h2>
+    <p>
+      Lists, code, figures, tables, footnotes, and safe embed descriptors retain their reading
+      order and source locator. The adapter records remote assets without executing scripts or
+      rewriting the immutable HTML input, so later download and rendering stages remain auditable.
+    </p>
+    <ul>
+      <li>Keep a stable block identifier.</li>
+      <li>Keep source evidence and <a href="#fn1">a footnote</a>.</li>
+    </ul>
+    <pre><code class="language-python">def stable(value):
+    return value
+</code></pre>
+    <figure>
+      <picture>
+        <source srcset="/img/chart.webp 2x" type="image/webp">
+        <img src="/img/chart.png" alt="Block coverage chart" width="800" height="450">
+      </picture>
+      <figcaption>Figure 1. Coverage by block kind.</figcaption>
+    </figure>
+    <table>
+      <caption>Table 1. Coverage thresholds.</caption>
+      <thead>
+        <tr><th rowspan="2">Status</th><th colspan="2">Coverage</th></tr>
+        <tr><th>Minimum</th><th>Action</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Complete</td><td>90%</td><td>Publish</td></tr>
+        <tr><td>Rejected</td><td>49%</td><td>Stop</td></tr>
+      </tbody>
+      <tfoot><tr><td colspan="3">Percentages use declared source length.</td></tr></tfoot>
+    </table>
+    <p id="fn1" class="footnote">1. The locator is bound to the immutable source fingerprint.</p>
+    <iframe src="https://www.youtube.com/embed/abcdefghijk" title="Architecture talk"></iframe>
+    <audio controls><source src="/media/summary.mp3" type="audio/mpeg"></audio>
+  </article>
+  <aside class="related-posts">Related content is not part of the document.</aside>
+</body>
+</html>

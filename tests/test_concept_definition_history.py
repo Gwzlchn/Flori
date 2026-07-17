@@ -14,7 +14,7 @@ from shared.db import (
     ConceptNotFoundError,
     Database,
 )
-from shared.migrations import v0006_concept_definition_history as migration_v6
+from shared.migrations import v0007_unified_document as migration_current
 
 
 _NOW = "2026-07-14T00:00:00+00:00"
@@ -29,13 +29,13 @@ def _insert_job(
     job_id: str,
     *,
     domain: str = "ml",
-    content_type: str = "article",
+    content_type: str = "document",
 ) -> None:
     database._conn.execute(
         """INSERT INTO jobs
-           (id, content_type, pipeline, title, domain, status, is_current,
+           (id, content_type, document_kind, pipeline, title, domain, status, is_current,
             created_at, updated_at)
-           VALUES (?, ?, 'article', ?, ?, 'done', 1, ?, ?)""",
+           VALUES (?, ?, 'article', 'document', ?, ?, 'done', 1, ?, ?)""",
         (job_id, content_type, job_id, domain, _NOW, _NOW),
     )
     database._conn.commit()
@@ -64,7 +64,7 @@ def _insert_evidence(
             "job_id": job_id,
             "note_type": note_type,
             "chunk_id": chunk_id,
-            "source_ref": "article:body",
+            "source_ref": "document:body",
             "source_segment_id": segment_id,
             "evidence_fingerprint": evidence_fingerprint,
         },
@@ -114,7 +114,7 @@ def _insert_evidence(
             chunk_char_end, locator_kind, locator_json, evidence_fingerprint,
             source_fingerprint, status, invalid_reason, validated_at,
             created_at, updated_at)
-           VALUES (?,1,?,?,?,'section','article:body',?,'output/original.md',?,
+           VALUES (?,1,?,?,?,'section','document:body',?,'input/source.html',?,
                    NULL,'output/notes.md',?,'output/provenance/smart.json',?,
                    ?,0,?,'text',?,?,?,'valid',NULL,?,?,?)""",
         (
@@ -208,9 +208,9 @@ def _raw_insert_definition_version(
     return version_id
 
 
-def test_fresh_v6_has_frozen_concept_schema(db: Database) -> None:
-    assert db.schema_version() == 6
-    migration_v6.validate(db._conn)
+def test_current_schema_keeps_frozen_concept_and_document_invariants(db: Database) -> None:
+    assert db.schema_version() == 7
+    migration_current.validate(db._conn)
     tables = {
         str(row[0])
         for row in db._conn.execute(
@@ -806,7 +806,7 @@ def test_definition_validator_rejects_broken_version_chain_without_trigger(
     db._conn.commit()
 
     with pytest.raises(sqlite3.DatabaseError, match=message):
-        migration_v6.validate(db._conn)
+        migration_current.validate(db._conn)
 
 
 def test_domain_rename_and_merge_append_identity_transfer_versions(db: Database) -> None:
@@ -864,7 +864,7 @@ def test_domain_rename_and_merge_append_identity_transfer_versions(db: Database)
         item["evidence_id"]
         for item in db.list_concept_occurrences("retrieval", "RRF")
     } == {src_evidence, dst_evidence}
-    migration_v6.validate(db._conn)
+    migration_current.validate(db._conn)
 
 
 def test_job_and_concept_delete_remove_occurrences_but_preserve_history(
@@ -895,22 +895,22 @@ def test_job_and_concept_delete_remove_occurrences_but_preserve_history(
         (evidence_id,),
     )
     db._conn.commit()
-    migration_v6.validate(db._conn)
+    migration_current.validate(db._conn)
     db.delete_job_cascade("job-delete")
     assert db.list_concept_occurrences("ml", "RRF", include_invalid=True) == []
     assert db.list_concept_definition_versions("ml", "RRF")
-    migration_v6.validate(db._conn)
+    migration_current.validate(db._conn)
 
     db.rename_domain("ml", "retrieval")
     renamed = db.current_concept_definition("retrieval", "RRF")
     assert renamed is not None and renamed["source_evidence_ids"] == [evidence_id]
-    migration_v6.validate(db._conn)
+    migration_current.validate(db._conn)
 
     db.delete_glossary_term("retrieval", "RRF")
     assert db.get_glossary_term("retrieval", "RRF") is None
     assert db.list_concept_definition_versions("ml", "RRF")
     assert db.list_concept_definition_versions("retrieval", "RRF")
-    migration_v6.validate(db._conn)
+    migration_current.validate(db._conn)
 
 
 def test_invalid_reconciliation_rolls_back_existing_mapping(db: Database) -> None:

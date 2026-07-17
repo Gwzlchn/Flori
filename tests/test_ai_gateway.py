@@ -79,6 +79,23 @@ class TestDryRunProvider:
         assert resp.cost_usd == 0.0
         assert resp.input_tokens == 0
 
+    @pytest.mark.asyncio
+    async def test_document_translation_echoes_strict_segment_shape(self):
+        prompt = (
+            "你是 Document 流水线的忠实翻译器。\nINPUT="
+            '{"schema_version":1,"segments":['
+            '{"id":"S1","kind":"paragraph","text":"Latency is 3 ms.",'
+            '"protected_tokens":["3 ms"]}]}'
+        )
+        response = await DryRunProvider().complete(LLMRequest(
+            messages=[{"role": "user", "content": prompt}],
+            response_format="json",
+        ))
+
+        assert json.loads(response.content) == {
+            "segments": [{"id": "S1", "text": "Latency is 3 ms."}],
+        }
+
 
 class TestProviderKeyFromEnv:
     """配置不落密钥时,_create_provider 按 {NAME}_API_KEY 约定从环境补齐。"""

@@ -7,7 +7,7 @@
   docker exec flori-api python /app/scripts/term_consistency_check.py --domain finance
   加 --json 输出机器可读结果(供脚本消费/before-after 对比)。
 
-逻辑:拉取范围内全部 output/translated.md → shared.terms.extract_pairs 抽「中文(English)」
+逻辑:拉取范围内全部 output/translation.json → shared.terms.extract_pairs 抽「中文(English)」
 对照(含复现验证)→ 按 English 归组 → 组内译名 >1 种即冲突。
 
 修复路径(刻意不自动改译文——中文语境文本替换有误伤风险,rerun 已被 chunk 化摊薄):
@@ -73,10 +73,18 @@ def main() -> None:
     pairs_by_job: dict[str, dict[str, str]] = {}
     for jid in _job_ids(args):
         try:
-            md = cli.get_object(bucket, f"{jid}/output/translated.md").read().decode()
-        except Exception:
+            raw = cli.get_object(bucket, f"{jid}/output/translation.json").read().decode()
+            translation = json.loads(raw)
+            segments = translation.get("segments")
+            if not isinstance(segments, list):
+                continue
+            text = "\n".join(
+                item.get("text", "") for item in segments
+                if isinstance(item, dict) and isinstance(item.get("text"), str)
+            )
+        except (Exception, json.JSONDecodeError):
             continue                       # 无译文(中文原文/未翻)跳过
-        pairs = extract_pairs(md)
+        pairs = extract_pairs(text)
         if pairs:
             pairs_by_job[jid] = pairs
 

@@ -1846,6 +1846,8 @@ export interface components {
             chunk_id?: string | null;
             /** Content Type */
             content_type: string;
+            /** Document Kind */
+            document_kind?: string | null;
             /** Evidence Id */
             evidence_id: string;
             /** Excerpt */
@@ -1963,7 +1965,7 @@ export interface components {
          * ContentType
          * @enum {string}
          */
-        ContentType: "video" | "paper" | "article" | "audio";
+        ContentType: "video" | "document" | "audio";
         /** DiskInfoResponse */
         DiskInfoResponse: {
             /** Available Gb */
@@ -1975,6 +1977,11 @@ export interface components {
             /** Used Pct */
             used_pct: number;
         };
+        /**
+         * DocumentKind
+         * @enum {string}
+         */
+        DocumentKind: "research_paper" | "article" | "whitepaper" | "report" | "book_chapter" | "documentation" | "standard" | "thesis" | "unknown";
         /** ErrorResponse */
         ErrorResponse: {
             /** Error */
@@ -2083,6 +2090,8 @@ export interface components {
              * @default
              */
             content_type: string;
+            /** Document Kind */
+            document_kind?: string | null;
             /** Job Id */
             job_id: string;
             /** Location */
@@ -2272,6 +2281,7 @@ export interface components {
             /** Collection Id */
             collection_id?: string | null;
             content_type?: components["schemas"]["ContentType"] | null;
+            document_kind?: components["schemas"]["DocumentKind"] | null;
             /**
              * Domain
              * @default general
@@ -2293,8 +2303,12 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
+            /** Document Kind */
+            document_kind: string | null;
             /** Job Id */
             job_id: string;
+            /** Pipeline */
+            pipeline: string;
             /** Status */
             status: string;
         };
@@ -2310,6 +2324,8 @@ export interface components {
             content_type: string;
             /** Created At */
             created_at: string;
+            /** Document Kind */
+            document_kind?: string | null;
             /**
              * Domain
              * @default general
@@ -2325,6 +2341,8 @@ export interface components {
             meta?: {
                 [key: string]: unknown;
             };
+            /** Pipeline */
+            pipeline: string;
             /**
              * Progress Pct
              * @default 0
@@ -2338,8 +2356,8 @@ export interface components {
             published_at?: string | null;
             /** Source */
             source?: string | null;
-            /** Source Kind */
-            source_kind?: string | null;
+            /** Source Profile */
+            source_profile?: string | null;
             /** Status */
             status: string;
             /** Steps */
@@ -2435,6 +2453,8 @@ export interface components {
             content_type: string;
             /** Created At */
             created_at: string;
+            /** Document Kind */
+            document_kind?: string | null;
             /**
              * Domain
              * @default general
@@ -2442,6 +2462,8 @@ export interface components {
             domain: string;
             /** Job Id */
             job_id: string;
+            /** Pipeline */
+            pipeline: string;
             /**
              * Progress Pct
              * @default 0
@@ -2590,8 +2612,18 @@ export interface components {
         };
         /** PipelineResponse */
         PipelineResponse: {
+            /** Content Types */
+            content_types: string[];
+            /** Document Kinds */
+            document_kinds: string[];
+            /** Key */
+            key: string;
+            /** Label */
+            label: string;
             /** Name */
             name: string;
+            /** Source Profiles */
+            source_profiles: string[];
             /** Steps */
             steps: components["schemas"]["PipelineStepResponse"][];
         };
@@ -2648,6 +2680,7 @@ export interface components {
         };
         /** PromptActivateRequest */
         PromptActivateRequest: {
+            document_kind?: components["schemas"]["DocumentKind"] | null;
             /** Domain */
             domain?: string | null;
             /**
@@ -2708,6 +2741,8 @@ export interface components {
         PromptMutationResponse: {
             /** Active Version */
             active_version?: string | null;
+            /** Document Kind */
+            document_kind?: string | null;
             /** Domain */
             domain?: string | null;
             /** Pipeline */
@@ -2729,6 +2764,7 @@ export interface components {
              * @default
              */
             content: string;
+            document_kind?: components["schemas"]["DocumentKind"] | null;
             /** Domain */
             domain?: string | null;
             /**
@@ -2748,6 +2784,8 @@ export interface components {
         PromptOverrideResponse: {
             /** Content */
             content: string;
+            /** Document Kind */
+            document_kind: string;
             /** Domain */
             domain: string;
             /** Pipeline */
@@ -2766,6 +2804,8 @@ export interface components {
         };
         /** PromptOverrideScope */
         PromptOverrideScope: {
+            /** Document Kind */
+            document_kind: string | null;
             /** Domain */
             domain: string | null;
             /** Scope */
@@ -2874,14 +2914,10 @@ export interface components {
             conciseness: number | null;
             /** Diagnostic Overall */
             diagnostic_overall: null;
-            /** Figure References */
-            figure_references: number | null;
             /** Formula Integrity */
             formula_integrity: number | null;
             /** Generated At */
             generated_at: string | null;
-            /** Insight */
-            insight: number | null;
             /** Issues */
             issues: {
                 [key: string]: unknown;
@@ -2933,8 +2969,12 @@ export interface components {
             terminology: number | null;
             /** Top3 Improvements */
             top3_improvements: string[];
+            /** Traceability */
+            traceability: number | null;
             /** Visual Integration */
             visual_integration: number | null;
+            /** Visual References */
+            visual_references: number | null;
         };
         /** SearchResponse */
         SearchResponse: {
@@ -2954,6 +2994,8 @@ export interface components {
              * @default
              */
             content_type: string;
+            /** Document Kind */
+            document_kind?: string | null;
             /**
              * Domain
              * @default
@@ -2972,8 +3014,12 @@ export interface components {
         SourceCatalogResponse: {
             /** Content Types */
             content_types: components["schemas"]["SourceContentType"][];
+            /** Document Kinds */
+            document_kinds: components["schemas"]["SourceDocumentKind"][];
             /** Job Sources */
             job_sources: components["schemas"]["SourceJobSource"][];
+            /** Source Profiles */
+            source_profiles: components["schemas"]["SourceProfile"][];
             /** Subscription Sources */
             subscription_sources: components["schemas"]["SourceSubscription"][];
         };
@@ -2988,12 +3034,27 @@ export interface components {
             /** Upload Extensions */
             upload_extensions: string[];
         };
+        /** SourceDocumentKind */
+        SourceDocumentKind: {
+            /** Description */
+            description: string;
+            /** Kind */
+            kind: string;
+            /** Label */
+            label: string;
+            /** Note Profile */
+            note_profile: string;
+            /** Review Profile */
+            review_profile: string;
+        };
         /** SourceItem */
         SourceItem: {
             /** Canonical Evidence */
             canonical_evidence?: components["schemas"]["CanonicalEvidenceProjection"][];
             /** Content Type */
             content_type: string;
+            /** Document Kind */
+            document_kind?: string | null;
             /** Domain */
             domain: string;
             /** Evidence */
@@ -3011,10 +3072,25 @@ export interface components {
             content_types: string[];
             /** Creatable */
             creatable: boolean;
+            /** Default Document Kind */
+            default_document_kind: string | null;
+            /** Default Source Profile */
+            default_source_profile: string | null;
+            /** Document Kinds */
+            document_kinds: string[];
             /** Label */
             label: string;
             /** Type */
             type: string;
+        };
+        /** SourceProfile */
+        SourceProfile: {
+            /** Capabilities */
+            capabilities: string[];
+            /** Label */
+            label: string;
+            /** Profile */
+            profile: string;
         };
         /** SourceSubscription */
         SourceSubscription: {
@@ -7660,6 +7736,7 @@ export interface operations {
         parameters: {
             query: {
                 content_type: components["schemas"]["ContentType"];
+                document_kind?: components["schemas"]["DocumentKind"] | null;
             };
             header?: never;
             path?: never;
@@ -10208,6 +10285,7 @@ export interface operations {
             query?: {
                 scope?: string;
                 domain?: string | null;
+                document_kind?: string | null;
             };
             header?: never;
             path: {
@@ -10459,6 +10537,7 @@ export interface operations {
             query?: {
                 scope?: string;
                 domain?: string | null;
+                document_kind?: string | null;
             };
             header?: never;
             path: {
@@ -10710,6 +10789,7 @@ export interface operations {
             query?: {
                 scope?: string;
                 domain?: string | null;
+                document_kind?: string | null;
             };
             header?: never;
             path: {
@@ -10838,7 +10918,8 @@ export interface operations {
                 q?: string;
                 collection_id?: string | null;
                 domain?: string | null;
-                content_type?: string | null;
+                content_type?: components["schemas"]["ContentType"] | null;
+                document_kind?: components["schemas"]["DocumentKind"] | null;
                 limit?: number;
                 offset?: number;
             };

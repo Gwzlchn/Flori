@@ -1,7 +1,7 @@
 """通用 RSS/Atom source-adapter(shared/subscriptions/rss.py)单测。
 
 不联网:用静态 RSS/Atom XML 字符串喂真实 feedparser,parse 既吃 URL 也吃 XML 串。
-覆盖 content_type 四种判定(article / arxiv->paper / youtube->video / audio enclosure),
+覆盖三种顶层类型及 Document 子类(article / research_paper / video / audio enclosure),
 item_id 回退按 id 优先、缺则 link,另验 source_title 提取。
 
 autouse fixture 把 shared.rss_fetch.parse_feed 换成直接 feedparser.parse,
@@ -86,14 +86,24 @@ async def test_rss_content_type_detection():
     assert len(items) == 4
 
     by_id = {it.item_id: it for it in items}
-    assert by_id["urn:guid:article-1"].content_type == "article"
-    assert by_id["urn:guid:paper-1"].content_type == "paper"
-    assert by_id["urn:guid:video-1"].content_type == "video"
+    assert (
+        by_id["urn:guid:article-1"].content_type,
+        by_id["urn:guid:article-1"].document_kind,
+    ) == ("document", "article")
+    assert (
+        by_id["urn:guid:paper-1"].content_type,
+        by_id["urn:guid:paper-1"].document_kind,
+    ) == ("document", "research_paper")
+    assert (
+        by_id["urn:guid:video-1"].content_type,
+        by_id["urn:guid:video-1"].document_kind,
+    ) == ("video", None)
 
     # 第 4 条无 guid → item_id 回退为页面 link;audio enclosure(type=audio/mpeg)→ audio。
     # url 用音频 enclosure 真链(而非页面 link),否则下载步 curl 到的是网页 → whisper 挂。
     audio = next(it for it in items if it.title == "播客单集")
     assert audio.content_type == "audio"
+    assert audio.document_kind is None
     assert audio.item_id == "https://podcast.example.com/ep/5"   # 去重键仍用页面 link
     assert audio.url == "https://cdn.example.com/ep5.mp3"        # 下载用音频真链
 
@@ -114,10 +124,12 @@ async def test_atom_parses_and_audio_by_suffix():
 
     by_id = {it.item_id: it for it in items}
     # Atom entry.id 作 item_id
-    assert by_id["https://wechat.example.com/s/aaa"].content_type == "article"
+    article = by_id["https://wechat.example.com/s/aaa"]
+    assert (article.content_type, article.document_kind) == ("document", "article")
     # 仅靠 .m4a 后缀(无 audio type)也判 audio;url = enclosure 真链(非页面)
     bbb = by_id["https://wechat.example.com/s/bbb"]
     assert bbb.content_type == "audio"
+    assert bbb.document_kind is None
     assert bbb.url == "https://cdn.example.com/show.m4a"
 
 

@@ -15,10 +15,10 @@ from shared.repositories.maintenance import MaintenanceRepository
 
 
 _PUBLIC_CONTRACT_SHA256 = (
-    "0dcb477f7e5d5152bf55deeb6a84cdce8dc7acd1add1f2fb3a0334a03d217842"
+    "a79ace54f5f7b77456c9969d53c9c6cc62bf5cede0ec10a0b504887ba7815e96"
 )
 _SCHEMA_CONTRACT_SHA256 = (
-    "0d497582d9ed7f2093543b2e4237d3ee2c14f12e0bf389357067d077f155e529"
+    "0368b7896541af8a0afccf51c904179022c7ebaf8ef21652ea7467e376ee0d8f"
 )
 
 

@@ -263,6 +263,33 @@ def _safe_locator_projection(locator: dict[str, Any]) -> dict[str, Any]:
 def _derived_link(row: dict[str, Any], locator: dict[str, Any]) -> dict[str, str]:
     kind = locator["kind"]
     job_path = quote(str(row["job_id"]), safe="")
+    source_path = str(row.get("source_path") or "")
+    is_document_source = source_path in {
+        "input/source.html", "input/source.pdf", "intermediate/pdf_page_support.json",
+    }
+    if is_document_source and kind in {"text", "pdf"}:
+        view = "translated" if row.get("note_type") == "translated" else (
+            "pdf" if kind == "pdf" else "source"
+        )
+        params: dict[str, str | int] = {
+            "tab": "notes",
+            "view": view,
+            "segment": str(row.get("source_segment_id") or ""),
+        }
+        if kind == "pdf":
+            params["page"] = int(locator["page"])
+            bbox = locator.get("bbox")
+            if isinstance(bbox, list) and len(bbox) == 4:
+                params["bbox"] = ",".join(str(value) for value in bbox)
+        elif locator.get("exact"):
+            params["exact"] = str(locator["exact"])
+        return {
+            "kind": kind,
+            "href": f"/content/{job_path}?{urlencode(params)}",
+            "label": "跳到译文证据" if view == "translated" else (
+                "跳到 PDF 证据" if view == "pdf" else "跳到原文证据"
+            ),
+        }
     if kind == "media":
         href = (
             f"/api/jobs/{job_path}/media?"

@@ -14,7 +14,7 @@ class SemanticAttestationStep(StepBase):
     def _pipeline(self) -> str:
         step = self.config.get("step") or {}
         pipeline = step.get("pipeline")
-        if isinstance(pipeline, str) and pipeline in {"video", "paper", "article", "audio"}:
+        if isinstance(pipeline, str) and pipeline in {"video", "document", "audio"}:
             return pipeline
         raise InputInvalidError("semantic attestation pipeline identity is missing")
 

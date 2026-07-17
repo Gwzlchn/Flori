@@ -24,7 +24,8 @@ class DownloadStep(StepBase):
 
     def execute(self) -> dict | None:
         job = self.artifacts.load_json("job.json")
-        url = job.get("url", "")
+        # 上传任务把 url 持久化为 null,不能只依赖 dict.get 的缺省值。
+        url = job.get("url") or ""
         source = job.get("source") or detect_source(url)
         content_type = job.get("content_type", "video")
 
@@ -35,14 +36,14 @@ class DownloadStep(StepBase):
             self.log.info("local_file_mode", content_type=content_type)
             source = "local_file"
             self._copy_local_file(url, content_type)
-            if content_type == "article":
-                self._normalize_article_input(self.job_dir / "input")
+            if content_type == "document":
+                self._normalize_document_input(self.job_dir / "input")
         elif source == "upload":
             self.log.info("upload_mode", content_type=content_type)
             if content_type == "video":
                 self._rename_to_source_mp4(self.job_dir / "input")
-            elif content_type == "article":
-                self._normalize_article_input(self.job_dir / "input")
+            elif content_type == "document":
+                self._normalize_document_input(self.job_dir / "input")
         elif content_type == "audio" and source not in ("bilibili", "youtube"):
             # 显式音频任务:无论 URL 是音频直链(podcast 源)还是播客页面,都走音频下载——
             # 否则页面 URL 被 detect_source 判成 http_article 走文章分支,whisper 无音源会挂。
@@ -365,7 +366,7 @@ class DownloadStep(StepBase):
         return meta
 
     def _download_pdf(self, url: str) -> None:
-        """非 arxiv 的直链 PDF(OSDI/usenix/会议/期刊等)→ input/source.pdf,供 02_pdf_parse 消费。"""
+        """非 arxiv 的直链 PDF 写入 input/source.pdf,供 Document parser 消费。"""
         from shared.net import assert_public_url
 
         assert_public_url(url)   # 抓取前挡内网/回环目标(SSRF),与 _download_article 一致
@@ -387,11 +388,12 @@ class DownloadStep(StepBase):
         input_dir.mkdir(parents=True, exist_ok=True)
 
         # 慢站首拍常超时 → 指数退避重试:超时 30→60→120→240→480s。
-        # 步超时(pipelines.yaml article 01_download)须 ≥ 各拍之和 ~930s,否则退避被腰斩。
+        # Document 下载步超时须覆盖完整退避窗口,否则慢站恢复前会被提前终止。
         html = None
+        final_url = None
         timeout = 30
         for _ in range(5):
-            html, _final = self._fetch_html(url, timeout)
+            html, final_url = self._fetch_html(url, timeout)
             if html:
                 break
             timeout *= 2
@@ -400,18 +402,18 @@ class DownloadStep(StepBase):
             raise InputInvalidError(f"Cannot fetch article: {url} (5 次退避重试后仍失败)")
         self.artifacts.write("input/source.html", html)
 
-        # 顺手抽一份标题等元数据,正文解析仍由 02_parse_article 负责(trafilatura)。
-        article_meta: dict = {"url": url}
+        # 下载元数据与其它来源统一并入 input/metadata.json，不再维护文章专用 sidecar。
+        source_meta: dict = {"source_url": url, "final_url": final_url or url}
         try:
             meta = trafilatura.extract_metadata(html)
             if meta:
-                article_meta["title"] = meta.title or ""
-                article_meta["author"] = meta.author or ""
-                article_meta["sitename"] = meta.sitename or ""
-                article_meta["date"] = meta.date or ""
+                source_meta["title"] = meta.title or ""
+                source_meta["author"] = meta.author or ""
+                source_meta["sitename"] = meta.sitename or ""
+                source_meta["date"] = meta.date or ""
         except Exception:
             pass
-        self.artifacts.write("input/article_meta.json", article_meta)
+        self._document_source_meta = source_meta
 
     @staticmethod
     def _fetch_html(url: str, timeout: int) -> tuple[str | None, str | None]:
@@ -537,9 +539,8 @@ class DownloadStep(StepBase):
         # _link_audio_for_whisper 备一份 source.mp4)。
         ext = src.suffix.lower()
         name_by_type = {
-            "paper": "source.pdf",
             "video": "source.mp4",
-            "article": f"source{ext or '.html'}",
+            "document": f"source{ext or '.html'}",
             "audio": f"source{ext or '.mp3'}",
         }
         dest = input_dir / name_by_type.get(content_type, f"source{ext}")
@@ -549,8 +550,8 @@ class DownloadStep(StepBase):
             self._verify_download(dest)
 
     @staticmethod
-    def _normalize_article_input(input_dir: Path) -> None:
-        """把支持的文章上传格式规范成下游唯一入口 input/source.html。"""
+    def _normalize_document_input(input_dir: Path) -> None:
+        """把文本型文档规范成 HTML；PDF 保持不可变原文件。"""
         target = input_dir / "source.html"
         if target.exists():
             return
@@ -568,6 +569,8 @@ class DownloadStep(StepBase):
             target.write_text(f"<html><body><pre>{body}</pre></body></html>", encoding="utf-8")
             source.unlink()
             return
+
+    _normalize_article_input = _normalize_document_input
 
     def _download_generic(self, url: str) -> None:
         from shared.net import assert_public_url
@@ -718,6 +721,7 @@ class DownloadStep(StepBase):
         metadata["has_danmaku"] = any(input_dir.glob("*.ass"))
         # 并入 arxiv API 元数据(title/authors/abstract/published_at),作权威来源,优先于 PDF 启发。
         metadata.update(getattr(self, "_arxiv_meta", {}) or {})
+        metadata.update(getattr(self, "_document_source_meta", {}) or {})
         return metadata
 
     def _get_video_duration(self, video_path: Path) -> float | None:

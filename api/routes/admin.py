@@ -21,6 +21,8 @@ logger = structlog.get_logger(component="admin")
 from shared.config import AppConfig
 from shared.db import Database
 from shared.redis_client import RedisClient
+from shared.document_registry import DOCUMENT_KIND_NAMES, SOURCE_PROFILE_NAMES
+from shared.source_registry import CONTENT_TYPE_SPECS
 from shared.status import (
     DEFAULT_ONLINE_WINDOW_SEC,
     DEFAULT_STALE_WINDOW_SEC,
@@ -967,8 +969,17 @@ async def list_pipelines(
         steps = (pc or {}).get("steps")
         if not isinstance(steps, list):
             continue
+        content_types = [
+            content_type for content_type, spec in CONTENT_TYPE_SPECS.items()
+            if spec.get("pipeline") == name
+        ]
         out.append({
             "name": name,
+            "key": name,
+            "label": CONTENT_TYPE_SPECS.get(name, {}).get("label", name),
+            "content_types": content_types,
+            "document_kinds": list(DOCUMENT_KIND_NAMES) if name == "document" else [],
+            "source_profiles": list(SOURCE_PROFILE_NAMES) if name == "document" else [],
             "steps": [
                 {"key": s.get("name"), "label": s.get("label"), "pool": s.get("pool"),
                  # 依赖(YAML needs 归一化为内部 depends_on,见 config._FIELD_ALIASES),供前端画 DAG

@@ -133,6 +133,10 @@ def validate_fixture(fixture: dict) -> None:
     assert Counter(item["job"]["content_type"] for item in corpus) == Counter(
         manifest["corpus"]["content_types"],
     )
+    assert Counter(
+        item["job"].get("document_kind") for item in corpus
+        if item["job"]["content_type"] == "document"
+    ) == Counter(manifest["corpus"]["document_kinds"])
     assert Counter(item["job"]["primary_language"] for item in corpus) == Counter(
         manifest["corpus"]["primary_languages"],
     )
@@ -179,6 +183,12 @@ def validate_fixture(fixture: dict) -> None:
         jobs[query["relevant"][0]["job_id"]]["job"]["content_type"]
         for query in single
     ) == Counter(manifest["queries"]["single_source_content_types"])
+    assert Counter(
+        jobs[query["relevant"][0]["job_id"]]["job"].get("document_kind")
+        for query in single
+        if jobs[query["relevant"][0]["job_id"]]["job"]["content_type"]
+        == "document"
+    ) == Counter(manifest["queries"]["single_source_document_kinds"])
     cross_language = [q for q in queries if q["stratum"] == "cross_language"]
     assert Counter(query["direction"] for query in cross_language) == Counter(
         manifest["queries"]["cross_language_directions"],
@@ -264,6 +274,7 @@ async def ingest_fixture(
             id=source["id"],
             content_type=source["content_type"],
             pipeline=source["pipeline"],
+            document_kind=source.get("document_kind") or "",
             domain=source["domain"],
             title=source["title"],
             meta=source.get("meta") or {},
@@ -286,12 +297,15 @@ async def ingest_fixture(
         await storage.write_file(
             job.id, "output/concepts.json", canonical_bytes(concepts) + b"\n",
         )
-        await storage.write_file(job.id, snapshot["note"]["path"], note_bytes(snapshot))
+        note_data = note_bytes(snapshot)
+        await storage.write_file(job.id, snapshot["note"]["path"], note_data)
         provenance_notes = {
-            snapshot["note"]["note_type"]: (
-                snapshot["note"]["path"], note_bytes(snapshot),
-            ),
+            snapshot["note"]["note_type"]: (snapshot["note"]["path"], note_data),
         }
+        if source["content_type"] == "document":
+            original_path = "intermediate/document_index.md"
+            await storage.write_file(job.id, original_path, note_data)
+            provenance_notes["original"] = (original_path, note_data)
         if source["content_type"] == "video":
             # video 在 smart 前有独立 mechanical completion effect；真实形态必须同时存在。
             await storage.write_file(
@@ -309,6 +323,14 @@ async def ingest_fixture(
         await scheduler.submit_job(job)
         await _complete_pipeline(scheduler, redis, db, config, job.id)
         assert db.get_job(job.id).status == JobStatus.DONE
+        indexed_types = {
+            row[0] for row in db._conn.execute(
+                "SELECT DISTINCT note_type FROM note_chunks WHERE job_id=?",
+                (job.id,),
+            ).fetchall()
+        }
+        if source["content_type"] == "document":
+            assert indexed_types == {snapshot["note"]["note_type"]}
     return db, config, storage
 
 
@@ -610,19 +632,29 @@ def _aggregate(
         for direction in ("zh_to_en", "en_to_zh")
     }
     by_content_type = {}
-    for content_type in ("video", "paper", "article", "audio"):
+    for content_type in ("video", "document", "audio"):
         rows = [
             record for record in single_source
             if fixture["jobs"][record["truth"][0]["job_id"]]["job"]["content_type"]
             == content_type
         ]
         by_content_type[content_type] = _score_rows(rows, surface)
+    by_document_kind = {}
+    for document_kind in ("research_paper", "article"):
+        rows = [
+            record for record in single_source
+            if fixture["jobs"][record["truth"][0]["job_id"]]["job"].get(
+                "document_kind"
+            ) == document_kind
+        ]
+        by_document_kind[document_kind] = _score_rows(rows, surface)
     return {
         "strata": strata,
         "answerable": _score_rows(answerable, surface),
         "by_language": by_language,
         "by_direction": by_direction,
         "by_content_type": by_content_type,
+        "by_document_kind": by_document_kind,
         "cross_source_coverage_at_8": sum(coverages) / len(coverages),
         "relevant_no_hit": sum(no_hit) / len(no_hit),
         "unanswerable_empty": sum(empty) / len(empty),

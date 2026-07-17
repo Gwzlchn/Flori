@@ -19,15 +19,17 @@ from shared.models import Job
 
 
 class _StorageStub:
-    """read_file:concepts.json 缺时回 None,回退读 review.json(video/paper/audio 路径)。"""
+    """concepts.json 缺失时提供可重验的 Document review。"""
 
     def __init__(self, payload: dict):
         smart_rel = "output/versions/notes_smart_openai_m_20260101-000000.md"
-        original_rel = "output/original.md"
+        document_rel = "intermediate/document.json"
+        quality_rel = "intermediate/quality.json"
         prompt_rel = "output/versions/review_input_openai_m_20260101-000000.md"
         smart = b"# smart\n"
-        original = b"# original\n"
-        prompt = b"prompt\n# smart\n# original\n"
+        document = b'{"schema_version":1,"blocks":[]}'
+        quality = b'{"schema_version":1,"status":"accepted"}'
+        prompt = b"prompt\n# smart\n" + document + b"\n" + quality + b"\n"
 
         def record(rel, data, label=None):
             value = {
@@ -38,7 +40,10 @@ class _StorageStub:
                 value["label"] = label
             return value
 
-        scores = ["completeness", "accuracy", "structure", "readability", "insight"]
+        scores = [
+            "completeness", "accuracy", "structure", "terminology",
+            "formula_integrity", "visual_references", "traceability",
+        ]
         review = {
             "schema_version": 2, "score_keys": scores,
             **{key: 5 for key in scores}, "overall": 5.0,
@@ -49,7 +54,8 @@ class _StorageStub:
             "review_input": {
                 **record(prompt_rel, prompt), "sources": [
                     record(smart_rel, smart, "smart"),
-                    record(original_rel, original, "original"),
+                    record(document_rel, document, "document"),
+                    record(quality_rel, quality, "quality"),
                 ],
             },
             "completion": {
@@ -69,7 +75,12 @@ class _StorageStub:
             "generated_at": "2026/07/14 12:00:00",
         }
         self._data = json.dumps(review, ensure_ascii=False).encode("utf-8")
-        self._files = {smart_rel: smart, original_rel: original, prompt_rel: prompt}
+        self._files = {
+            smart_rel: smart,
+            document_rel: document,
+            quality_rel: quality,
+            prompt_rel: prompt,
+        }
 
     async def read_file(self, job_id: str, rel: str) -> bytes | None:
         if rel == "output/concepts.json":
@@ -98,7 +109,7 @@ class _StorageStub:
 
 
 class _ConceptsStorageStub:
-    """article 链:concepts.json 存在 → 优先采集自它(不读 review)。"""
+    """Document 链:concepts.json 存在时优先采集自它。"""
 
     def __init__(self, payload: dict):
         self._data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -113,11 +124,12 @@ class _DBStub:
     domain/content_type;list_glossary 返回已采集的最小行(供 relations 段 resolve)。"""
 
     def __init__(
-        self, domain: str = "ml", content_type: str = "article",
-        pipeline: str | None = None,
+        self, domain: str = "ml", content_type: str = "document",
+        pipeline: str | None = None, document_kind: str = "article",
     ):
         self._job = SimpleNamespace(
             domain=domain, content_type=content_type, pipeline=pipeline or content_type,
+            document_kind=document_kind if content_type == "document" else "",
         )
         self.calls: list[dict] = []
         self.relations: list[dict] = []
@@ -130,12 +142,14 @@ class _DBStub:
         return self._job
 
     def add_glossary_suggestion(
-        self, domain, term, job_id, content_type="", location=None, definition="", zh_name=""
+        self, domain, term, job_id, content_type="", location=None, definition="", zh_name="",
+        document_kind="",
     ):
         self.calls.append({
             "domain": domain, "term": term, "job_id": job_id,
             "content_type": content_type, "location": location,
             "definition": definition, "zh_name": zh_name,
+            "document_kind": document_kind,
         })
 
     def list_glossary(self, domain=None, status=None, q=None):
@@ -187,7 +201,7 @@ async def test_collects_key_terms_with_definition():
         "key_terms": [{"term": "X", "definition": "d"}],
         "missing_concepts": ["Y"],
     }
-    db = _DBStub(domain="ml", content_type="article")
+    db = _DBStub(domain="ml", content_type="document", document_kind="article")
     engine = _make_engine(_StorageStub(review), db)
 
     await engine._collect_glossary("j_g_001")
@@ -196,7 +210,8 @@ async def test_collects_key_terms_with_definition():
     assert "X" in terms
     assert terms["X"]["definition"] == "d"
     assert terms["X"]["domain"] == "ml"
-    assert terms["X"]["content_type"] == "article"
+    assert terms["X"]["content_type"] == "document"
+    assert terms["X"]["document_kind"] == "article"
     assert terms["X"]["job_id"] == "j_g_001"
 
 
@@ -287,7 +302,7 @@ async def test_related_edges_resolved_and_written():
             {"term": "注意力机制", "definition": "d2"},
         ],
     }
-    db = _DBStub(domain="dl", content_type="article")
+    db = _DBStub(domain="dl", content_type="document", document_kind="article")
     engine = _make_engine(_ConceptsStorageStub(concepts), db)
 
     await engine._collect_glossary("j_r_001")
@@ -309,10 +324,10 @@ async def test_no_related_no_relations_call():
 
 @pytest.mark.asyncio
 async def test_prefers_concepts_json_when_present():
-    # article 链:concepts.json 存在 → 采集源是它(不读 review)。_ConceptsStorageStub
+    # Document 链:concepts.json 存在 → 采集源是它(不读 review)。
     # 的 read_file 断言只被以 concepts.json 调用,确保不回退 review。
     concepts = {"summary": "一句话", "key_terms": [{"term": "注意力机制", "definition": "权重分配"}]}
-    db = _DBStub(domain="dl", content_type="article")
+    db = _DBStub(domain="dl", content_type="document", document_kind="article")
     engine = _make_engine(_ConceptsStorageStub(concepts), db)
 
     await engine._collect_glossary("j_c_001")
@@ -461,7 +476,8 @@ async def test_missing_artifacts_use_real_database_keyword_reconcile(tmp_path):
     db.init_schema()
     try:
         db.create_job(Job(
-            id="job-missing", content_type="article", pipeline="article",
+            id="job-missing", content_type="document", pipeline="document",
+            document_kind="article",
         ))
         await _make_engine(EmptyStorage(), db)._collect_glossary("job-missing")
         assert db.list_concept_occurrences(

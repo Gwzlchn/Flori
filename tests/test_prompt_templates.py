@@ -23,15 +23,17 @@ def test_all_templates_present():
 
 
 def test_review_templates_share_skeleton():
-    """三个评审模板彼此逐字相同,动态占位符由 StepBase 注入."""
-    bodies = [
-        (TEMPLATES_DIR / f"{n}.md").read_text(encoding="utf-8")
-        for n in ("05_review", "06_review", "12_review")
-    ]
-    assert bodies[0] == bodies[1] == bodies[2]
+    """通用与 Document 评审骨架共享占位契约,来源约束各自独立."""
+    names = ("05_review", "08_review", "12_review")
+    bodies = {
+        name: (TEMPLATES_DIR / f"{name}.md").read_text(encoding="utf-8")
+        for name in names
+    }
+    assert bodies["05_review"] == bodies["12_review"]
+    assert '"source":"document"' in bodies["08_review"]
     # 骨架含运行期注入的占位符(build_review_prompt 用 str.replace 填)。
     for ph in ("{{intro}}", "{{dimensions}}", "{{score_example}}", "{{ref_block}}"):
-        assert ph in bodies[0]
+        assert all(ph in body for body in bodies.values())
 
 
 def _mk_step(tmp_path: Path):
@@ -79,7 +81,7 @@ def test_template_hash_changes_on_edit(tmp_path):
 # 评审 prompt 白盒:build_review_prompt 骨架 + 运行期注入
 
 
-def _mk_review_step(tmp_path, step="06_review"):
+def _mk_review_step(tmp_path, step="08_review"):
     from shared.step_base import StepBase
     (tmp_path / "job.json").write_text("{}", encoding="utf-8")
     return StepBase(step, tmp_path, {
@@ -107,7 +109,7 @@ def test_build_review_prompt_uses_db_override_with_refblock(tmp_path):
     """DB 注入覆盖替换骨架;保留 {{ref_block}} → 参照块仍按本步实参注入(所见即所改)。"""
     s = _mk_review_step(tmp_path)
     (tmp_path / "job.json").write_text(
-        '{"prompt_overrides":{"06_review":{"content":"自定义评审指令\\n\\n{{ref_block}}","version":1}}}',
+        '{"prompt_overrides":{"08_review":{"content":"自定义评审指令\\n\\n{{ref_block}}","version":1}}}',
         encoding="utf-8",
     )
     s.ai.prompt_overrides_snapshot = None
@@ -121,7 +123,7 @@ def test_build_review_prompt_appends_refblock_when_placeholder_missing(tmp_path)
     """覆盖把 {{ref_block}} 删了 → 兜底把参照块补在末尾,被评内容绝不丢。"""
     s = _mk_review_step(tmp_path)
     (tmp_path / "job.json").write_text(
-        '{"prompt_overrides":{"06_review":{"content":"覆盖里没有占位符","version":1}}}',
+        '{"prompt_overrides":{"08_review":{"content":"覆盖里没有占位符","version":1}}}',
         encoding="utf-8",
     )
     s.ai.prompt_overrides_snapshot = None
@@ -136,6 +138,6 @@ def test_build_review_prompt_reads_template_file(tmp_path):
     s = _mk_review_step(tmp_path)
     td = tmp_path / "hot" / "templates"
     td.mkdir(parents=True)
-    (td / "06_review.md").write_text("FILE骨架 {{intro}} || {{ref_block}}", encoding="utf-8")
+    (td / "08_review.md").write_text("FILE骨架 {{intro}} || {{ref_block}}", encoding="utf-8")
     p = s.review.build_prompt(intro="INTRO", dimensions=[("a", "A")], ref_block="RB")
     assert p == "FILE骨架 INTRO || RB"

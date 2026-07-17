@@ -19,7 +19,7 @@ import TermDetailView from './TermDetailView.vue'
 function makeTerm(over: Record<string, any> = {}) {
   const definition = over.definition ?? '梯度是函数的偏导数向量'
   const occurrences = over.occurrences ?? [
-    { job_id: 'jobA', content_type: 'paper', location: 'p.3' },
+    { job_id: 'jobA', content_type: 'document', document_kind: 'research_paper', location: 'p.3' },
     { job_id: 'jobB', content_type: 'video', location: '' },
   ]
   const current = over.current_definition ?? {

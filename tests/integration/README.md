@@ -35,5 +35,6 @@ required CI 无论测试成功或失败都上传 JSON，缺文件直接失败。
 外网入口只接受公开且不含凭证的 URL。`article`、`audio`、`rss`、`youtube` 分别由同名 `FLORI_EXTERNAL_*_URL` 提供；缺少所选 URL 时会打印 `SKIPPED` 原因并返回非零，不能把未执行记成通过。
 如公网必须经过宿主代理，用 `FLORI_EXTERNAL_HTTP_PROXY` / `FLORI_EXTERNAL_HTTPS_PROXY` 指向容器可访问的地址，例如 `http://host.docker.internal:11081`；入口不会打印代理值。
 
-四类 pipeline 的基本命中继续由搜索闭环回归承担；24/96 黄金集负责可复算的质量决策。
+三条 pipeline、两种 Document 体裁和四种来源形态的基本命中继续由搜索闭环回归承担；
+24/96 黄金集负责可复算的质量决策。
 本目录统一真实依赖、进程隔离、超时、清理和 CI gate，领域语义仍由对应测试模块持有。

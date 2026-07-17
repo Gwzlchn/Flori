@@ -187,7 +187,16 @@ def _pdf_support(
         raise ValueError("PDF page support entry is invalid")
     if item.get("page") != page:
         raise ValueError("PDF page support entry is out of order")
-    return bounded_support_text(item.get("support_text"))
+    page_text = item.get("support_text")
+    start, end = selector.get("start"), selector.get("end")
+    if (
+        type(page_text) is not str
+        or type(start) is not int
+        or type(end) is not int
+        or not 0 <= start < end <= len(page_text)
+    ):
+        raise ValueError("PDF page support selector is outside page text")
+    return bounded_support_text(page_text[start:end])
 
 
 def _seconds_to_ms(value: Any) -> int:

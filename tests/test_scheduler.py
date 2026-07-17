@@ -48,14 +48,18 @@ async def redis():
 @pytest.fixture
 def simple_pipelines():
     """三步线性 pipeline: A → B → C"""
+    steps = [
+        {"name": "A", "pool": "cpu", "depends_on": [], "retries": 2},
+        {"name": "B", "pool": "cpu", "depends_on": ["A"], "retries": 1},
+        {"name": "C", "pool": "cpu", "depends_on": ["B"], "retries": 0},
+    ]
     return {
-        "test": {
+        pipeline: {
             "steps": [
-                {"name": "A", "pool": "cpu", "depends_on": [], "retries": 2},
-                {"name": "B", "pool": "cpu", "depends_on": ["A"], "retries": 1},
-                {"name": "C", "pool": "cpu", "depends_on": ["B"], "retries": 0},
-            ]
+                {**step, "depends_on": list(step["depends_on"])} for step in steps
+            ],
         }
+        for pipeline in ("test", "document")
     }
 
 
@@ -195,11 +199,13 @@ class TestSubmitJob:
         ))
         ordinary = make_job(job_id="ordinary")
         chapter_a = Job(
-            id="chapter-a", content_type="article", pipeline="test",
+            id="chapter-a", content_type="document", document_kind="book_chapter",
+            pipeline="document",
             domain="general", collection_id="book",
         )
         chapter_b = Job(
-            id="chapter-b", content_type="article", pipeline="test",
+            id="chapter-b", content_type="document", document_kind="book_chapter",
+            pipeline="document",
             domain="general", collection_id="book",
         )
         for job in (ordinary, chapter_a, chapter_b):
@@ -599,17 +605,17 @@ class TestConditions:
     @pytest.mark.asyncio
     async def test_rules_if_flag(self, redis, db, config):
         """if_flag:投递开关求值——flag 真→本条生效(run);假→落兜底规则(skip)。
-        article 链的 smart_note 用此机制让智能笔记/评审可选。"""
+        Document 链的 smart_note 用此机制让智能笔记/评审可选。"""
         from unittest.mock import AsyncMock
         storage = AsyncMock()
         storage.list_files.return_value = []
         s = _stub_workers_present(Scheduler(redis, db, config, storage=storage))
         rules = [{"if_flag": "smart_note", "when": "on"}, {"when": "skip"}]
-        await redis.init_job("j_on", "article", {"flags": {"smart_note": True}})
+        await redis.init_job("j_on", "document", {"flags": {"smart_note": True}})
         assert await s._eval_rules("j_on", rules) is True
-        await redis.init_job("j_off", "article", {"flags": {"smart_note": False}})
+        await redis.init_job("j_off", "document", {"flags": {"smart_note": False}})
         assert await s._eval_rules("j_off", rules) is False
-        await redis.init_job("j_none", "article", {})   # 无 flags 视为假,落 skip
+        await redis.init_job("j_none", "document", {})   # 无 flags 视为假,落 skip
         assert await s._eval_rules("j_none", rules) is False
 
     @pytest.mark.asyncio
@@ -664,7 +670,7 @@ class TestCanonicalProvenanceCompatibility:
             redis, db, config, storage=LocalStorage(tmp_jobs_dir),
         )
         job = Job(
-            id="j_provenance_policy", content_type="article",
+            id="j_provenance_policy", content_type="document", document_kind="article",
             pipeline="evidence", title="Provenance policy",
             pipeline_digest=(
                 pipeline_digest_for(pipelines["evidence"]["steps"])
@@ -2096,7 +2102,7 @@ class TestEnqueueTags:
         ("openai", None, None, True),
         ("openai", b"", None, True),
     ])
-    async def test_paper_read_capability_uses_current_artifact_and_provider(
+    async def test_document_read_capability_uses_current_artifact_and_provider(
         self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
         provider, original, expected, fails,
     ):
@@ -2106,12 +2112,12 @@ class TestEnqueueTags:
                 return json.dumps({"ai_overrides": {"A": provider}}).encode()
 
             async def file_size(self, job_id, rel):
-                if rel != "output/original.md" or original is None:
+                if rel != "intermediate/document.json" or original is None:
                     return None
                 return len(original)
 
             async def open_stream(self, job_id, rel, **kwargs):
-                if rel != "output/original.md" or original is None:
+                if rel != "intermediate/document.json" or original is None:
                     return None
 
                 async def chunks():
@@ -2122,7 +2128,7 @@ class TestEnqueueTags:
         pipelines = {"tagged": {"steps": [{
             "name": "A", "pool": "ai", "depends_on": [], "tags": [],
             "capability_rules": {
-                "read": {"unless_any_nonempty": ["output/original.md"]},
+                "read": {"unless_any_nonempty": ["intermediate/document.json"]},
             },
             "ai": {"primary": {"provider": "claude-cli"}},
         }]}}
@@ -2305,7 +2311,8 @@ class TestEnqueueTags:
         pipelines = {"p": {"steps": [{"name": "01_download", "pool": "io", "depends_on": [], "tags": []}]}}
         config = make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir)
         sched = Scheduler(redis, db, config)
-        job = Job(id="j_adl", content_type="paper", pipeline="p")
+        job = Job(id="j_adl", content_type="document", document_kind="research_paper",
+                  pipeline="document")
         db.create_job(job)
         await redis.init_job("j_adl", "p", {"source": "arxiv", "url": "https://arxiv.org/abs/1"})
         await redis.set_step_status("j_adl", "01_download", "waiting")
@@ -2747,13 +2754,14 @@ class TestBookChainAdvance:
         db.create_collection(Collection(id="col_book_b", name="书", domain="general",
                                         source_type="book_toc", source_id="https://b.example/"))
         for i, jid in enumerate(["j_ch1", "j_ch2"]):
-            db.create_job(Job(id=jid, content_type="article", pipeline="test",
+            db.create_job(Job(id=jid, content_type="document", document_kind="book_chapter",
+                              pipeline="document",
                               domain="general", collection_id="col_book_b",
                               created_at=datetime(2026, 7, 6, i, tzinfo=timezone.utc)))
         storage = AsyncMock(); storage.read_file.return_value = None
         s = _stub_workers_present(Scheduler(redis, db, config, storage=storage))
         # ch1 跑完到终态:
-        await redis.init_job("j_ch1", "test", {})
+        await redis.init_job("j_ch1", "document", {})
         await redis.set_step_status("j_ch1", "A", "done")
         db.update_job("j_ch1", status="done")
         await s._advance_book_chain("j_ch1")

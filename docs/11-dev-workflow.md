@@ -66,7 +66,7 @@ flori/
 ├── steps/                  # 从原型迁移（按 pipeline 分子目录）
 │   ├── common/step_01_download.py
 │   ├── video/step_02_whisper.py ... step_12_review.py
-│   ├── paper/  article/  audio/
+│   ├── document/  audio/
 │   └── utils/
 │
 ├── configs/
@@ -370,7 +370,7 @@ docker run -d --restart unless-stopped --gpus all \
   -e GATEWAY_URL=https://<主机域名> \
   -e WORKER_REGISTRATION_TOKEN=<flw- 接入 token> \
   -e WORKER_NAME=gpu-1 \
-  ghcr.io/gwzlchn/flori-worker:latest \
+  ghcr.io/<owner>/flori-worker:latest \
   python -m worker.main --pools cpu gpu
 ```
 

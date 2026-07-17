@@ -60,6 +60,7 @@ def scan_dir(root: str) -> list[SourceItem]:
                 title=fname,
                 url=f"file://{fpath}",
                 content_type=content_type,
+                document_kind="unknown" if content_type == "document" else None,
             ))
     return items
 

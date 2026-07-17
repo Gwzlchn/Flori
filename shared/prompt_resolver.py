@@ -16,12 +16,9 @@ _PROMPT_NAME = re.compile(r"^[a-z0-9_]+(?:\.[a-z0-9_-]+)*$")
 TRACKED_TEMPLATE_NAMES = (
     "study_suggestions",
     "concept_resynthesis",
-    "04_translate_article",
-    "04_smart_article",
     "05_concepts",
-    "04_translate_paper",
-    "04_translate_paper.pdf",
-    "05_smart_paper",
+    "04_translate_document",
+    "05_smart_document",
     "04_smart_podcast",
     "08_punctuate.zh",
     "08_punctuate.translate",
@@ -29,7 +26,7 @@ TRACKED_TEMPLATE_NAMES = (
     "11_smart",
     "10_evidence",
     "05_review",
-    "06_review",
+    "08_review",
     "12_review",
 )
 
@@ -79,7 +76,9 @@ def parse_prompt_override(
         if not value:
             raise PromptResolutionError("prompt override content is empty")
         return value.encode("utf-8"), None
-    if not isinstance(value, dict) or set(value) != {"content", "version"}:
+    required = {"content", "version"}
+    allowed = required | {"document_kind", "scope"}
+    if not isinstance(value, dict) or not required <= set(value) <= allowed:
         raise PromptResolutionError("prompt override shape is invalid")
     content = value.get("content")
     version = value.get("version")
@@ -87,6 +86,14 @@ def parse_prompt_override(
         raise PromptResolutionError("prompt override content is invalid")
     if type(version) is not int or not 1 <= version < (1 << 63):
         raise PromptResolutionError("prompt override version is invalid")
+    document_kind = value.get("document_kind")
+    if document_kind is not None and (
+        not isinstance(document_kind, str)
+        or _PROMPT_NAME.fullmatch(document_kind) is None
+    ):
+        raise PromptResolutionError("prompt override document_kind is invalid")
+    if "scope" in value and value.get("scope") not in {"global", "domain"}:
+        raise PromptResolutionError("prompt override scope is invalid")
     return content.encode("utf-8"), version
 
 

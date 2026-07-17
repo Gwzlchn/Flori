@@ -97,7 +97,7 @@ ROADMAP.md                  → 里程碑和进度
 - 单单元直接发布，或多单元列车末尾的发布 commit：`<type>(<scope>): <中文摘要>;<新版本>`。
 - 尚未单独 push/部署的列车内价值 commit，以及文档、公约、调研、测试或 CI 治理 commit：`<type>(<scope>): <中文摘要>`，不带版本。
 - `type` ∈ `feat / fix / refactor / chore / ops / contract / test / docs / perf / build`（与迭代记录类型对齐）。
-- `scope` = 受影响模块/领域，小写：`article / jobs / ui / mcp / net-zone / concept-graph / build`…（尽量带，可省）。
+- `scope` = 受影响模块/领域，小写：`document / jobs / ui / mcp / net-zone / concept-graph / build`…（尽量带，可省）。
 - 摘要用**中文**、一句话说清「做了什么 + 为什么」，**不写句号**，逗号用半角 `,`（沿用既有风格）。
 - 动了**对外接口**（API / WebSocket / Redis / 文件 Schema）→ 用 `contract:` 或 `contract(scope):`，并**同提交**更新 `docs/03-contracts.md`。
 
@@ -127,14 +127,14 @@ chore(workflow): 以交付单元收敛开发与发布治理
 
 **示例**：
 ```
-feat(article): 非中文文章自动翻译步(忠实全文译文 + 独立「译文」tab);0.8.0
+feat(document): Document 对齐翻译与独立译文阅读面;0.8.0
 
-英文等非中文文章希望有中文翻译。新增条件 AI 步,与 04_smart 正交——这里是忠实全文翻译。
-- 02_parse_article:检测正文主语言写 parsed.json.lang;非中文额外标记 needs_translation。
-- 新步 04_translate_article:忠实翻译 original.md → translated.md(保留 MD 结构 + 图位)。
-- 前端 JobDetailView:hasTranslation → 独立「译文」tab。
-tests:TestArticleLangDetect + TestTranslateArticleStep;article 步 39 passed。
-contract: docs/03-contracts.md 更新 article 链 + lang 字段 + translated.md。
+非中文 Document 需要可核验的中文阅读面。新增按稳定 segment 对齐的条件翻译,原生 HTML/PDF 保持不可变。
+- 02_parse:检测来源语言并发布 Document Model 与 locator。
+- 04_translate:翻译自然语言 segment,公式/引用/数字冻结校验后发布 translation.json 与 translated.html。
+- 前端 JobDetailView:译文高亮可反向跳回 HTML segment 或 PDF page+bbox。
+tests:Document contract + translation alignment + reader 定向测试通过。
+contract: docs/03-contracts.md 更新 Document/Translation/locator 文件契约。
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 ```

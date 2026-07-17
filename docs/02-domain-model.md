@@ -98,8 +98,8 @@ domain（一个知识领域）
 
 ```
 Collection「LLM 学习」 (domain: deep-learning)  ← 手动集合（跨类型/来源，同一 domain）
-  ├── Job 某论文精读视频 (video, bilibili)  ├── Job Attention…(paper, arxiv)
-  └── Job 某讲解视频 (video, youtube)        └── Job 某博客 (article, web)
+  ├── Job 某论文精读视频 (video, bilibili)  ├── Job Attention…(document/research_paper, arxiv)
+  └── Job 某讲解视频 (video, youtube)        └── Job 某博客 (document/article, web)
 
 Collection「财经说(PAKEN)」(domain: finance)  ← 订阅集合 source_type=bilibili_up, source_id=247209804
   ├── Job BV…（自动拉取）  └── Job BV…（你手动补充的相关视频）← 允许
@@ -138,8 +138,8 @@ Concept  key = (domain, name)
 **出现 (occurrence) ≠ 来源 (source)**——对称、带类型与位置：
 
 ```
-occurrence = { job_id, content_type(video/paper/article/audio), location }
-   location: video/audio→时间点;  paper→页/章节;  article→锚点
+occurrence = { job_id, content_type(video/document/audio), document_kind?, locator }
+   locator: video/audio→时间点; document→HTML segment 或 PDF page+bbox
 ```
 任何提到该概念的内容都登记一条，无先后；"美债收益率倒挂 出现在 7 处" = 跨内容引用索引。
 **域绑定**：一条 occurrence 只把概念连到**同 domain** 的 job（`concept.domain == job.domain`），不跨域登记（§1.10-10）。
@@ -175,7 +175,7 @@ occurrence = { job_id, content_type(video/paper/article/audio), location }
 - **巩固 = 跨源反复遇见**（即 §1.8 的 ②索引重复登记）：同一概念在不同来源、不同语境被再次提及，就强化该节点、补全定义（对应人脑"多样化重复"比"单一重复"记得更牢）。
 - **持久**：节点比任一来源长命（§1.5）。
 
-> 例：`(finance, 国债期货)` 的 occurrences 来自 财经说 BV…(video, 12:30) + 某游资 BV…(video, 03:10) + 一篇研报(article)；定义综合三者，佐证 ★★★。删掉其中一个视频，节点与定义不变，只少一条 occurrence。
+> 例：`(finance, 国债期货)` 的 occurrences 来自 财经说 BV…(video, 12:30) + 某游资 BV…(video, 03:10) + 一篇研报(document/report)；定义综合三者，佐证 ★★★。删掉其中一个视频，节点与定义不变，只少一条 occurrence。
 
 ---
 
@@ -271,7 +271,7 @@ class Collection:
 ### Job（作业流水线）
 
 > **三层命名(领域核心,2026-06-27 统一)**:
-> - **Job(作业流水线)** = 一个内容项(视频/论文/文章/播客)的整条处理流水线。id `jobs_{src}_{原生id}`,jobs 表。
+> - **Job(作业流水线)** = 一个内容项(视频/文档/音频)的整条处理流水线。论文、文章和白皮书是文档子类别。id `jobs_{src}_{原生id}`,jobs 表。
 > - **Step(步骤)** = 流水线里的一步(pipelines.yaml 定义 + 该 job 的步骤状态,job_steps 表 / Step 模型 / StepStatus)。
 > - **Task(任务)** = worker 认领执行的**最小单元** = 「某 Job 的某 Step 的一次执行」(claim={job_id,step,pool,exec_id},进 `queue:{pool}` 被 worker 认领)。**不是独立持久表**——一个 Task 落地为一条 job_steps 记录的一次执行;worker 的「当前任务」由 `current_job`+`current_step` 两字段表征。
 > 关系:Job 1 ──< N Step;每个 Step 的一次执行 = 一个 Task。**没有「子 job」**——job 含 step,worker 跑的是 task。
@@ -280,7 +280,8 @@ class Collection:
 @dataclass
 class Job:
     id: str                        # "jobs_bili_BV..." / "jobs_{cat}_{hash}"
-    content_type: str              # "video" | "paper" | "article" | "audio"
+    content_type: str              # "video" | "document" | "audio"
+    document_kind: str             # Document 必填；其他类型必须为空
     pipeline: str                  # 步骤链名 → pipelines.yaml
     collection_id: str | None      # 家集合（多对一，可空=未分类）
     url: str | None
@@ -291,11 +292,26 @@ class Job:
     status: JobStatus
     current_step: str | None       # 派生（job_steps 中 running），不存 DB
     progress_pct: int
-    meta: dict                     # 内容类型特有：video {duration_sec}; paper {pages,authors}...
+    meta: dict                     # 媒介特有字段；Document 结构写入 document.json
     created_at: datetime
     updated_at: datetime
     error: str | None
 ```
+
+`content_type` 表示顶层原始媒介与执行族，只允许 `video|document|audio`。`document_kind`
+表示业务体裁，来自可扩展 registry，例如 `research_paper|article|whitepaper|report|book_chapter|documentation|standard|thesis|unknown`。
+Document 必须有 kind；无法可靠分类时写 `unknown`，不得猜成 article；非 Document 禁止携带 kind。
+
+`document_kind` 不决定解析器。解析技术由 source profile 和 capability 决定：
+`scholarly_html|generic_html|digital_pdf|scanned_pdf` 分别声明 MathML、bibliography、text layer、page bbox、OCR 等能力。
+同一白皮书可来自 HTML 或 PDF，但始终是 `content_type=document, document_kind=whitepaper, pipeline=document`。
+
+Document 的加工真相源是 `intermediate/document.json`，质量结论是
+`intermediate/quality.json`，译文对齐真相源是 `output/translation.json`。原始
+`input/source.html|source.pdf` 不可变；系统不生成或读取 Document `output/original.md`。
+每个 block、Figure、Table 和译文 segment 使用稳定 ID，并以独立 source fingerprint
+绑定 HTML locator、PDF page+bbox 和译文 range。质量状态只允许
+`complete|degraded|rejected`；歧义 crosswalk、低置信 OCR 或不可靠表格必须降级或拒绝，不能伪造精确定位。
 
 ### Concept / Term（概念节点 = 知识轴）
 
@@ -359,7 +375,8 @@ SQLite，直接写 SQL，不用 ORM。完整 DDL 的单一来源是 `shared/migr
 ```sql
 CREATE TABLE jobs (
     id TEXT PRIMARY KEY,
-    content_type TEXT NOT NULL,           -- video/paper/article/audio
+    content_type TEXT NOT NULL,           -- video/document/audio
+    document_kind TEXT NOT NULL DEFAULT '', -- Document 必填；非 Document 为空
     pipeline TEXT NOT NULL,
     collection_id TEXT,                    -- 家集合，多对一，可空
     url TEXT, title TEXT,
@@ -418,7 +435,7 @@ CREATE TABLE glossary (
     definition_locked INTEGER DEFAULT 0,   -- 钉住后不被自动综合覆盖（§1.10-11）
     current_definition_version_id TEXT,    -- 当前 append-only definition version
     lock_revision INTEGER DEFAULT 0,       -- current+lock 的单调 CAS 令牌
-    occurrences TEXT DEFAULT '[]',         -- [{job_id,content_type,location}] 类型化出现处（替代旧 sources）
+    occurrences TEXT DEFAULT '[]',         -- [{job_id,content_type,document_kind,locator}]
     related TEXT DEFAULT '[]',             -- 关联概念（仅同域，含上下位）
     is_topic INTEGER DEFAULT 0,            -- 粗粒度浏览主题
     status TEXT DEFAULT 'accepted',        -- suggested/accepted
@@ -548,10 +565,10 @@ stale/missing --(原 identity 重验可用)--> valid
 /data/
 ├── jobs/{job_id}/
 │   ├── job.json                  # 任务元信息（含凭证, 不对外暴露）
-│   ├── input/                    # metadata.json + 原始内容(video:source.mp4,*.srt,danmaku.ass; paper:source.pdf; article:source.html)
-│   ├── intermediate/             # 步骤间中间产物
-│   ├── assets/                   # 截图/图表(video:frame-{NNNN}.jpg; paper:figure-{NNNN}.png)
-│   ├── output/                   # notes_mechanical.md / transcript.md / review.json
+│   ├── input/                    # 原始媒介；Document 为不可变 source.html|source.pdf
+│   ├── intermediate/             # document.json / quality.json / source_segments.json 等
+│   ├── assets/                   # 视频截图或 Document Figure/Table 受控资源
+│   ├── output/                   # translation.json / translated.html / notes*.md / review.json
 │   │   └── versions/             # notes_smart_{provider}_{model}_{ts}.md, review_{...}.json
 │   └── logs/{step}.log
 ├── cookies/

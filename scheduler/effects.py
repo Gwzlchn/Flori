@@ -421,6 +421,7 @@ class EffectDispatcher:
             await asyncio.to_thread(
                 self.owner.db.add_glossary_suggestion,
                 domain, en, job_id, job.content_type if job else "", None, "", zh,
+                document_kind=job.document_kind if job else "",
             )
         if job and job.collection_id:
             try:
@@ -446,8 +447,7 @@ class EffectDispatcher:
     async def _collect_glossary(self, job_id: str) -> None:
         """把 key_terms(这篇讲清楚的概念 + 候选定义)采集为候选术语。
         主喂养源是评审"讲清楚了什么"一节;missing_concepts(知识缺口)只留评审面板,不喂术语库。
-        采集源:优先 output/concepts.json(article 链的独立概念步,必跑),回退 output/review.json
-        (video/paper/audio 由评审步出 key_terms)。"""
+        采集源:优先 output/concepts.json,回退 output/review.json。"""
         job = await asyncio.to_thread(self.owner.db.get_job, job_id)
         domain = (job.domain if job else "") or "general"
 
@@ -516,6 +516,7 @@ class EffectDispatcher:
             await asyncio.to_thread(
                 self.owner.db.add_glossary_suggestion,
                 domain, term, job_id, content_type, None, definition, zh_name,
+                document_kind=getattr(job, "document_kind", "") if job else "",
             )
             if related:
                 with_related.append((term, zh_name or "", related))

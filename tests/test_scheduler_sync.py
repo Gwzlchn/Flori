@@ -1,5 +1,4 @@
-"""_sync_published_at:论文/文章 title 从 intermediate/parsed.json 兜底同步进 DB
-(metadata.json / article_meta.json 都没有时;不覆盖已有标题)。"""
+"""_sync_published_at 从统一 Document metadata 兜底同步标题和发布时间。"""
 
 import json
 from pathlib import Path
@@ -33,17 +32,13 @@ class _DB:
 
 class _Redis:
     async def get_job_pipeline(self, job_id: str):
-        return "article" if "article" in job_id else "paper"
+        return "document"
 
 
 def _engine(storage, db):
     pipelines = {
-        "paper": {"steps": [{
-            "name": "02_pdf_parse",
-            "on_complete": [{"action": "sync_metadata"}],
-        }]},
-        "article": {"steps": [{
-            "name": "02_parse_article",
+        "document": {"steps": [{
+            "name": "02_parse",
             "on_complete": [{"action": "sync_metadata"}],
         }]},
     }
@@ -55,27 +50,29 @@ def _engine(storage, db):
 
 
 @pytest.mark.asyncio
-async def test_paper_title_synced_from_parsed_json():
-    # 论文标题只在 parsed.json(metadata/article_meta 都没有)→ 兜底同步。
-    storage = _Storage({"intermediate/parsed.json": {"title": "AlpaServe", "date": "2023-07"}})
+async def test_document_title_synced_from_document_json():
+    storage = _Storage({"intermediate/document.json": {"metadata": {
+        "titles": {"original": "AlpaServe"}, "published_at": "2023-07",
+    }}})
     db = _DB(title="")
-    await _engine(storage, db)._sync_published_at("jobs_paper_x")
+    await _engine(storage, db)._sync_published_at("jobs_document_x")
     assert db.updates.get("title") == "AlpaServe"
     assert db.updates.get("published_at") == "2023-07"
 
 
 @pytest.mark.asyncio
 async def test_existing_title_not_overwritten():
-    storage = _Storage({"intermediate/parsed.json": {"title": "AlpaServe"}})
+    storage = _Storage({"intermediate/document.json": {"metadata": {
+        "titles": {"original": "AlpaServe"},
+    }}})
     db = _DB(title="用户已填的标题")
-    await _engine(storage, db)._sync_published_at("jobs_paper_x")
+    await _engine(storage, db)._sync_published_at("jobs_document_x")
     assert "title" not in db.updates   # 已有标题不被覆盖
 
 
 @pytest.mark.asyncio
-async def test_pdf_parse_triggers_title_sync(monkeypatch):
-    # 02_pdf_parse / 02_parse_article 完成后触发同步:论文标题此步才写入 parsed.json;
-    # 不能只等 01_download 或 job_done,AI 步未跑时 job 会卡住。
+async def test_document_parse_triggers_title_sync(monkeypatch):
+    # 02_parse 完成后同步 canonical metadata，不能等后续 AI 步。
     eng = _engine(_Storage({}), _DB())
     called: list = []
 
@@ -83,28 +80,29 @@ async def test_pdf_parse_triggers_title_sync(monkeypatch):
         called.append(jid)
 
     monkeypatch.setattr(eng, "_sync_published_at", _fake_sync)
-    await eng._run_step_completion_effects("jobs_paper_x", "02_pdf_parse")
-    await eng._run_step_completion_effects("jobs_article_x", "02_parse_article")
-    assert called == ["jobs_paper_x", "jobs_article_x"]
+    await eng._run_step_completion_effects("jobs_document_x", "02_parse")
+    assert called == ["jobs_document_x"]
 
 
 @pytest.mark.asyncio
-async def test_metadata_title_preferred_over_parsed():
-    # metadata.json 有 title 时优先,不被 parsed.json 覆盖。
+async def test_download_metadata_title_preferred_over_document():
+    # 下载 metadata 有 title 时优先，不被结构化 Document 覆盖。
     storage = _Storage({
         "input/metadata.json": {"title": "来自下载的标题"},
-        "intermediate/parsed.json": {"title": "来自解析的标题"},
+        "intermediate/document.json": {
+            "metadata": {"titles": {"original": "来自解析的标题"}},
+        },
     })
     db = _DB(title="")
-    await _engine(storage, db)._sync_published_at("jobs_paper_x")
+    await _engine(storage, db)._sync_published_at("jobs_document_x")
     assert db.updates.get("title") == "来自下载的标题"
 
 
 @pytest.mark.asyncio
 async def test_suspicious_title_overridden_by_better_candidate():
     # 已入库垃圾标题("10things",pdf-only 内嵌 metadata)→ 允许被更像真标题的候选覆盖。
-    storage = _Storage({"intermediate/parsed.json":
-                        {"title": "Ten Simple Rules for Reproducible Computational Research"}})
+    storage = _Storage({"intermediate/document.json": {"metadata": {"titles":
+                        {"original": "Ten Simple Rules for Reproducible Computational Research"}}}})
     db = _DB(title="10things")
     await _engine(storage, db)._sync_published_at("j1")
     assert db.updates.get("title") == "Ten Simple Rules for Reproducible Computational Research"
@@ -112,7 +110,8 @@ async def test_suspicious_title_overridden_by_better_candidate():
 
 @pytest.mark.asyncio
 async def test_normal_title_still_not_overwritten():
-    storage = _Storage({"intermediate/parsed.json": {"title": "Some Other Candidate Title"}})
+    storage = _Storage({"intermediate/document.json": {"metadata": {"titles":
+                        {"original": "Some Other Candidate Title"}}}})
     db = _DB(title="A Perfectly Good Existing Title")
     await _engine(storage, db)._sync_published_at("j1")
     assert "title" not in db.updates

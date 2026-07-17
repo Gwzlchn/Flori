@@ -37,21 +37,20 @@ export const useJobStore = defineStore('jobs', () => {
     return api.get<JobDetail>(`/api/jobs/${jobId}`)
   }
 
-  async function createJob(payload: { url?: string; content_type?: string; domain?: string; style_tags?: string[]; collection_id?: string; smart_note?: boolean }) {
+  async function createJob(payload: { url?: string; content_type?: string; document_kind?: string; domain?: string; style_tags?: string[]; collection_id?: string; smart_note?: boolean }) {
     return api.post<{ job_id: string }>('/api/jobs', payload)
   }
 
-  async function uploadJob(file: File, domain: string, styleTags: string[]) {
+  async function uploadJob(file: File, domain: string, styleTags: string[], documentKind?: string) {
     const contentType = contentTypeForUpload(file.name)
     if (!contentType) throw new Error('不支持的上传文件类型')
     const form = new FormData()
     form.append('file', file)
     form.append('domain', domain)
     form.append('style_tags', JSON.stringify(styleTags))
-    return api.upload<{ job_id: string }>(
-      `/api/jobs/upload?content_type=${encodeURIComponent(contentType)}`,
-      form,
-    )
+    const query = new URLSearchParams({ content_type: contentType })
+    if (contentType === 'document' && documentKind) query.set('document_kind', documentKind)
+    return api.upload<{ job_id: string }>(`/api/jobs/upload?${query}`, form)
   }
 
   async function retryJob(jobId: string) {

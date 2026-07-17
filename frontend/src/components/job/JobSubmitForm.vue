@@ -4,7 +4,12 @@ import { useRouter } from 'vue-router'
 import { useJobStore } from '../../stores/jobs'
 import { useGlobalStore } from '../../stores/global'
 import { Send, Upload, X } from 'lucide-vue-next'
-import { ensureSourceCatalog, uploadAccept } from '../../constants/sources'
+import {
+  DOCUMENT_KIND_CATALOG,
+  contentTypeForUpload,
+  ensureSourceCatalog,
+  uploadAccept,
+} from '../../constants/sources'
 
 // bare:不渲染外层卡片/标题(嵌入弹窗时用)。done:投递成功后通知外层(如关闭弹窗)。
 defineProps<{ bare?: boolean }>()
@@ -16,8 +21,9 @@ const globalStore = useGlobalStore()
 
 const url = ref('')
 const domain = ref('general')
-// AI 智能笔记开关:auto=按内容类型默认(文章关/其余开)、on=强制生成、off=强制不生成。
+// AI 智能笔记开关:auto=按文档体裁默认(article 关/其余开)、on=强制生成、off=强制不生成。
 const smartNote = ref<'auto' | 'on' | 'off'>('auto')
+const documentKind = ref('')
 const selectedTags = ref<string[]>([])
 const file = ref<File | null>(null)
 const submitting = ref(false)
@@ -28,6 +34,8 @@ const domains = computed(() => {
   if (!list.includes('general')) list.unshift('general')
   return list
 })
+const selectedUploadType = computed(() => file.value ? contentTypeForUpload(file.value.name) : undefined)
+const canChooseDocumentKind = computed(() => !file.value || selectedUploadType.value === 'document')
 
 onMounted(() => {
   globalStore.fetchProfiles()
@@ -58,13 +66,19 @@ async function submit() {
   try {
     let jobId: string
     if (file.value) {
-      const res = await jobStore.uploadJob(file.value, domain.value, selectedTags.value)
+      const res = await jobStore.uploadJob(
+        file.value,
+        domain.value,
+        selectedTags.value,
+        documentKind.value || undefined,
+      )
       jobId = res.job_id
     } else {
       const res = await jobStore.createJob({
         url: url.value.trim(),
         domain: domain.value,
         style_tags: selectedTags.value,
+        ...(documentKind.value ? { document_kind: documentKind.value } : {}),
         // auto 时省略字段(后端按内容类型定默认);on/off 显式传布尔。
         ...(smartNote.value === 'auto' ? {} : { smart_note: smartNote.value === 'on' }),
       })
@@ -99,7 +113,20 @@ async function submit() {
           <option v-for="d in domains" :key="d" :value="d">{{ d }}</option>
         </select>
 
-        <!-- AI 智能笔记开关:文章默认走轻链路(关),可强制开/关 -->
+        <select
+          v-if="canChooseDocumentKind"
+          v-model="documentKind"
+          class="px-2 py-1.5 border border-gray-300 rounded-lg text-sm bg-white"
+          title="可选。留空时由来源给出可证明的默认体裁，无法证明则标记为未分类文档"
+          data-test="document-kind"
+        >
+          <option value="">文档类别:自动</option>
+          <option v-for="item in DOCUMENT_KIND_CATALOG" :key="item.kind" :value="item.kind">
+            {{ item.label }}
+          </option>
+        </select>
+
+        <!-- AI 智能笔记开关:article 子类默认走轻链路(关),可强制开/关 -->
         <select v-model="smartNote" class="px-2 py-1.5 border border-gray-300 rounded-lg text-sm bg-white" title="是否生成 AI 智能笔记(概念提取与摘要始终生成)">
           <option value="auto">智能笔记:自动</option>
           <option value="on">智能笔记:开</option>

@@ -14,7 +14,10 @@ def _seed(db):
                       collection_id="col_bili_up_1", style_tags=["宏观经济", "利率"]))
     db.create_job(Job(id="j2", content_type="video", pipeline="video", domain="finance",
                       style_tags=["宏观经济"]))   # 未分类
-    db.create_job(Job(id="j3", content_type="paper", pipeline="paper", domain="deep-learning"))
+    db.create_job(Job(
+        id="j3", content_type="document", document_kind="research_paper",
+        pipeline="document", domain="deep-learning",
+    ))
     db.add_glossary_suggestion("finance", "国债期货", "j1", "review")
 
 

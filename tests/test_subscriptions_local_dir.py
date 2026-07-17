@@ -32,20 +32,22 @@ class TestScanDir:
         _write(tmp_path / "page.html")
 
         items = local_dir.scan_dir(str(tmp_path))
-        by_name = {it.title: it.content_type for it in items}
+        by_name = {
+            it.title: (it.content_type, it.document_kind) for it in items
+        }
         assert by_name == {
-            "paper.pdf": "paper",
-            "clip.mp4": "video",
-            "talk.mkv": "video",
-            "movie.webm": "video",
-            "rec.mov": "video",
-            "ep.mp3": "audio",
-            "ep.m4a": "audio",
-            "ep.wav": "audio",
-            "ep.flac": "audio",
-            "note.md": "article",
-            "readme.txt": "article",
-            "page.html": "article",
+            "paper.pdf": ("document", "unknown"),
+            "clip.mp4": ("video", None),
+            "talk.mkv": ("video", None),
+            "movie.webm": ("video", None),
+            "rec.mov": ("video", None),
+            "ep.mp3": ("audio", None),
+            "ep.m4a": ("audio", None),
+            "ep.wav": ("audio", None),
+            "ep.flac": ("audio", None),
+            "note.md": ("document", "unknown"),
+            "readme.txt": ("document", "unknown"),
+            "page.html": ("document", "unknown"),
         }
 
     def test_unsupported_extensions_ignored(self, tmp_path):
@@ -125,7 +127,7 @@ class TestEnumerateLocalDir:
     async def test_calls_scan_dir_via_module_attr(self, tmp_path, monkeypatch):
         # 经模块属性调用 → monkeypatch 生效(契约要求,便于 mock 外部枚举)。
         sentinel = [SourceItem(item_id="x|1|1", title="x.pdf", url="file:///x.pdf",
-                               content_type="paper")]
+                               content_type="document", document_kind="research_paper")]
         monkeypatch.setattr("shared.subscriptions.local_dir.scan_dir", lambda root: sentinel)
         _title, items = await local_dir.enumerate_local_dir(str(tmp_path), SourceContext())
         assert items is sentinel

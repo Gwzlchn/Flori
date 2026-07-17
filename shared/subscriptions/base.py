@@ -19,7 +19,8 @@ SourceItem 字段:
                枚举要给同一个 item_id,否则会重复建 job。
   - title:     内容标题(可空字符串)。
   - url:       投递给 create_job_core 的 url(下载/抓取入口)。
-  - content_type: video / paper / article / audio 之一(决定走哪条 pipeline)。
+  - content_type: video / document / audio 之一(决定走哪条 pipeline)。
+  - document_kind: document 的业务体裁；其它类型为 None。
 
 SourceContext(ctx)给适配器提供:
   - ctx.bili_cookies: B站 cookie JSON 串(由 sync_collection 从 db.get_credential('bili_cookies') 取),
@@ -41,7 +42,8 @@ class SourceItem:
     item_id: str          # 来源内稳定唯一 ID(去重键):bvid / videoId / rss entry id / 文件名
     title: str            # 内容标题(可空字符串)
     url: str              # 投递给 create_job_core 的下载/抓取 url
-    content_type: str     # video / paper / article / audio
+    content_type: str     # video / document / audio
+    document_kind: str | None = None
 
 
 @dataclass

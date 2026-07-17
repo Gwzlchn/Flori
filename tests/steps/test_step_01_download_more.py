@@ -24,8 +24,11 @@ def _make_job_dir(tmp_path):
     return job_dir
 
 
-def _make_step(job_dir, tmp_path, url="https://example.com/x", source=None, content_type="video"):
+def _make_step(job_dir, tmp_path, url="https://example.com/x", source=None,
+               content_type="video", document_kind=None):
     job_data = {"url": url, "content_type": content_type}
+    if document_kind:
+        job_data["document_kind"] = document_kind
     if source:
         job_data["source"] = source
     (job_dir / "job.json").write_text(json.dumps(job_data))
@@ -321,7 +324,8 @@ class TestDownloadYoutube:
 class TestDownloadArxiv:
     def test_builds_pdf_url(self, tmp_path):
         job_dir = _make_job_dir(tmp_path)
-        step = _make_step(job_dir, tmp_path, source="arxiv", content_type="paper")
+        step = _make_step(job_dir, tmp_path, source="arxiv", content_type="document",
+                          document_kind="research_paper")
         # 元数据 curl 返回空响应(ParseError → best-effort 兜底);HTML 抓取 patch 掉(不碰网络)。
         with patch.object(step.commands, "run", return_value=SimpleNamespace(stdout="")) as run, \
                 patch.object(step, "_fetch_html", return_value=(None, None)):
@@ -333,7 +337,8 @@ class TestDownloadArxiv:
     def test_bad_url_raises(self, tmp_path):
         from shared.errors import InputInvalidError
         job_dir = _make_job_dir(tmp_path)
-        step = _make_step(job_dir, tmp_path, source="arxiv", content_type="paper")
+        step = _make_step(job_dir, tmp_path, source="arxiv", content_type="document",
+                          document_kind="research_paper")
         with patch.object(step.commands, "run") as run:
             with pytest.raises(InputInvalidError):
                 step._download_arxiv("https://arxiv.org/notapaper")
@@ -554,7 +559,8 @@ class TestExecuteDispatch:
     def test_http_article_branch(self, tmp_path):
         """execute 走 http_article 分支:_download_article 被调,metadata 落盘。"""
         job_dir = _make_job_dir(tmp_path)
-        step = _make_step(job_dir, tmp_path, url="https://blog.example.com/post", content_type="article")
+        step = _make_step(job_dir, tmp_path, url="https://blog.example.com/post",
+                          content_type="document", document_kind="article")
         with patch.object(step, "_download_article") as dl:
             result = step.execute()
             dl.assert_called_once_with("https://blog.example.com/post")
@@ -633,23 +639,27 @@ class TestDownloadArticle:
 
     def test_writes_html_and_meta(self, tmp_path, monkeypatch):
         job_dir = _make_job_dir(tmp_path)
-        step = _make_step(job_dir, tmp_path, url="https://blog.example.com/p", content_type="article")
+        step = _make_step(job_dir, tmp_path, url="https://blog.example.com/p",
+                          content_type="document", document_kind="article")
         meta = SimpleNamespace(title="T", author="A", sitename="S", date="2024-01-01")
         self._fake_fetch(monkeypatch, meta=meta)
         with patch("shared.net.assert_public_url") as ap:
             step._download_article("https://blog.example.com/p")
             ap.assert_called_once_with("https://blog.example.com/p")
         assert (job_dir / "input" / "source.html").read_text() == "<html>body</html>"
-        am = json.loads((job_dir / "input" / "article_meta.json").read_text())
-        assert am["url"] == "https://blog.example.com/p"
-        assert am["title"] == "T"
-        assert am["author"] == "A"
+        assert step._document_source_meta == {
+            "source_url": "https://blog.example.com/p",
+            "final_url": "https://final.example/p",
+            "title": "T", "author": "A", "sitename": "S", "date": "2024-01-01",
+        }
+        assert not (job_dir / "input" / "article_meta.json").exists()
 
     def test_fetch_returns_none_raises_after_backoff(self, tmp_path, monkeypatch):
         # 5 拍退避全空才判失败;每拍 use_config 设超时递增(30→480)。
         from shared.errors import InputInvalidError
         job_dir = _make_job_dir(tmp_path)
-        step = _make_step(job_dir, tmp_path, url="https://blog.example.com/p", content_type="article")
+        step = _make_step(job_dir, tmp_path, url="https://blog.example.com/p",
+                          content_type="document", document_kind="article")
         fetch, _ = self._fake_fetch(monkeypatch, html=None)
         with patch("shared.net.assert_public_url"):
             with pytest.raises(InputInvalidError):
@@ -659,7 +669,8 @@ class TestDownloadArticle:
     def test_fetch_transient_fail_recovers_on_retry(self, tmp_path, monkeypatch):
         # 首拍超时返 None、次拍成功 → 不判失败(退避的意义)。
         job_dir = _make_job_dir(tmp_path)
-        step = _make_step(job_dir, tmp_path, url="https://blog.example.com/p", content_type="article")
+        step = _make_step(job_dir, tmp_path, url="https://blog.example.com/p",
+                          content_type="document", document_kind="article")
         fetch, _ = self._fake_fetch(monkeypatch, fetch_side_effect=[None, "<html>slow</html>"])
         with patch("shared.net.assert_public_url"):
             step._download_article("https://blog.example.com/p")
@@ -667,20 +678,25 @@ class TestDownloadArticle:
         assert (job_dir / "input" / "source.html").read_text() == "<html>slow</html>"
 
     def test_meta_extraction_exception_swallowed(self, tmp_path, monkeypatch):
-        """extract_metadata 抛错时仍写 article_meta.json(只含 url),不冒泡。"""
+        """extract_metadata 抛错时仍保留统一来源 URL 元数据，不冒泡。"""
         job_dir = _make_job_dir(tmp_path)
-        step = _make_step(job_dir, tmp_path, url="https://blog.example.com/p", content_type="article")
+        step = _make_step(job_dir, tmp_path, url="https://blog.example.com/p",
+                          content_type="document", document_kind="article")
         _, mod = self._fake_fetch(monkeypatch, html="<html>x</html>")
         mod.extract_metadata.side_effect = RuntimeError("parse boom")
         with patch("shared.net.assert_public_url"):
             step._download_article("https://blog.example.com/p")
-        am = json.loads((job_dir / "input" / "article_meta.json").read_text())
-        assert am == {"url": "https://blog.example.com/p"}
+        assert step._document_source_meta == {
+            "source_url": "https://blog.example.com/p",
+            "final_url": "https://final.example/p",
+        }
+        assert not (job_dir / "input" / "article_meta.json").exists()
 
     def test_ssrf_blocked_no_fetch(self, tmp_path, monkeypatch):
         from shared.errors import InputInvalidError
         job_dir = _make_job_dir(tmp_path)
-        step = _make_step(job_dir, tmp_path, url="http://127.0.0.1/p", content_type="article")
+        step = _make_step(job_dir, tmp_path, url="http://127.0.0.1/p",
+                          content_type="document", document_kind="article")
         fetch, _ = self._fake_fetch(monkeypatch)
         with patch("shared.net.assert_public_url",
                    side_effect=InputInvalidError("internal")):
@@ -735,7 +751,8 @@ class TestExtractMetadataTypes:
 class TestFetchArxivHtml:
     def test_fetch_and_localize(self, tmp_path):
         job_dir = _make_job_dir(tmp_path)
-        step = _make_step(job_dir, tmp_path, source="arxiv", content_type="paper")
+        step = _make_step(job_dir, tmp_path, source="arxiv", content_type="document",
+                          document_kind="research_paper")
         html = '<div class="ltx_page_main"><img src="x1v2/x1.png"></div>'
         with patch.object(step, "_fetch_html", return_value=(html, "https://arxiv.org/html/x1")), \
                 patch.object(step.commands, "run", return_value=SimpleNamespace(stdout="")) as run:
@@ -747,7 +764,8 @@ class TestFetchArxivHtml:
 
     def test_ar5iv_fallback_then_unavailable(self, tmp_path):
         job_dir = _make_job_dir(tmp_path)
-        step = _make_step(job_dir, tmp_path, source="arxiv", content_type="paper")
+        step = _make_step(job_dir, tmp_path, source="arxiv", content_type="document",
+                          document_kind="research_paper")
         # 官方与 ar5iv 都无 LaTeXML 产物(None / 落地页无 ltx_)→ 不写 source.html。
         with patch.object(step, "_fetch_html", side_effect=[(None, None), ("<html>no latexml</html>", "u")]):
             step._fetch_arxiv_html("9901.00001")
@@ -755,7 +773,8 @@ class TestFetchArxivHtml:
 
     def test_image_download_failure_keeps_absolute_url(self, tmp_path):
         job_dir = _make_job_dir(tmp_path)
-        step = _make_step(job_dir, tmp_path, source="arxiv", content_type="paper")
+        step = _make_step(job_dir, tmp_path, source="arxiv", content_type="document",
+                          document_kind="research_paper")
         html = '<div class="ltx_page_main"><img src="x1v2/x1.png"></div>'
         with patch.object(step, "_fetch_html", return_value=(html, "https://arxiv.org/html/x1")), \
                 patch.object(step.commands, "run", side_effect=RuntimeError("curl fail")):

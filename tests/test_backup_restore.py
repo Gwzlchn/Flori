@@ -75,12 +75,20 @@ def _fixture_roots(
             target_version=min(user_version, local_current),
         )
         connection = database._conn
-    connection.execute(
-        "INSERT INTO jobs "
-        "(id, content_type, pipeline, title, domain, created_at, updated_at) "
-        "VALUES ('jobs_test', 'article', 'article', '灾备测试', 'general', "
-        "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')"
-    )
+    if user_version >= 7:
+        connection.execute(
+            "INSERT INTO jobs "
+            "(id, content_type, document_kind, pipeline, title, domain, created_at, updated_at) "
+            "VALUES ('jobs_test', 'document', 'article', 'document', '灾备测试', 'general', "
+            "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')"
+        )
+    else:
+        connection.execute(
+            "INSERT INTO jobs "
+            "(id, content_type, pipeline, title, domain, created_at, updated_at) "
+            "VALUES ('jobs_test', 'article', 'article', '灾备测试', 'general', "
+            "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')"
+        )
     if user_version > local_current:
         migration_manifest = json.loads(
             (schema_manifest_path or _SCHEMA_MANIFEST_PATH).read_text(encoding="utf-8")

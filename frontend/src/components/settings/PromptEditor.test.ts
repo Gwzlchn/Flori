@@ -248,6 +248,37 @@ describe('PromptEditor 版本管理', () => {
     expect(put).not.toHaveBeenCalled()
   })
 
+  it('Document 子类作用域贯穿读取、保存和激活请求', async () => {
+    const w = await mountEditor({ pipeline: 'document', step: '05_smart', documentKind: 'whitepaper' })
+    expect(get).toHaveBeenCalledWith(
+      '/api/prompts/document/05_smart?scope=global&document_kind=whitepaper',
+    )
+
+    await w.find('textarea').setValue('WHITEPAPER PROMPT')
+    await btn(w, '另存为新版本').trigger('click')
+    await flushPromises()
+    expect(put).toHaveBeenCalledWith('/api/prompts/document/05_smart', {
+      scope: 'global',
+      domain: undefined,
+      document_kind: 'whitepaper',
+      content: 'WHITEPAPER PROMPT',
+      mode: 'new',
+      note: undefined,
+    })
+
+    const opts = w.find('[data-test="version-select"]').findAll('option')
+    await opts[1].setSelected()
+    await flushPromises()
+    await w.find('[data-test="set-active"]').trigger('click')
+    await flushPromises()
+    expect(post).toHaveBeenCalledWith('/api/prompts/document/05_smart/activate', {
+      scope: 'global',
+      domain: undefined,
+      document_kind: 'whitepaper',
+      version: '1',
+    })
+  })
+
   it('多模板步:其余变体只读展示,不混进可编辑 textarea', async () => {
     mockGet({
       default_template: 'MAIN BODY',

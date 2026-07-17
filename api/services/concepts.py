@@ -26,7 +26,7 @@ from shared.structured_output import StructuredOutputParser
 
 
 _SYNTHESIS_STEP = "concept_resynthesis"
-_SYNTHESIS_ROUTE_STEP = "05_concepts"
+_SYNTHESIS_ROUTE_STEP = "07_concepts"
 _MAX_DEFINITION_CHARS = 100_000
 _MAX_EVIDENCE_EXCERPT_BYTES = 8 * 1024
 _MAX_SYNTHESIS_EVIDENCE = 50
@@ -92,8 +92,8 @@ def _attestation_level(
 
 
 def _concept_ai_route(config: AppConfig) -> dict[str, Any]:
-    """概念综合复用 article 概念步的受控 provider/model route。"""
-    pipeline = config.pipelines.get("article")
+    """概念综合复用 Document 概念步的受控 provider/model route。"""
+    pipeline = config.pipelines.get("document")
     steps = pipeline.get("steps") if isinstance(pipeline, dict) else None
     for step in steps if isinstance(steps, list) else []:
         if isinstance(step, dict) and step.get("name") == _SYNTHESIS_ROUTE_STEP:
@@ -139,7 +139,7 @@ def _synthesis_input_json(
             key: item.get(key)
             for key in (
                 "evidence_id", "job_id", "content_type", "source_fingerprint",
-                "note_type", "section", "excerpt", "locator",
+                "document_kind", "note_type", "section", "excerpt", "locator",
             )
         }
         for item in attestation["included"]
@@ -315,6 +315,7 @@ async def project_concept_attestation(
             "evidence_id": evidence_id,
             "job_id": job_id,
             "content_type": occurrence.get("content_type") or "",
+            "document_kind": occurrence.get("document_kind") or None,
             "source_fingerprint": (
                 projection.get("source_fingerprint")
                 if projection is not None else occurrence.get("source_fingerprint")
@@ -349,7 +350,8 @@ async def project_concept_attestation(
         and item["source_fingerprint"]
     }
     content_types = {
-        item["content_type"] for item in included if item["content_type"]
+        (item["content_type"], item.get("document_kind") or "")
+        for item in included if item["content_type"]
     }
     return {
         "domain": domain,

@@ -93,7 +93,7 @@ class TestLoadConfig:
         assert cfg.db_path == tmp_data_dir / "db" / "analyzer.db"
         assert cfg.jobs_dir == tmp_data_dir / "jobs"
         assert "video" in cfg.pipelines
-        assert "paper" in cfg.pipelines
+        assert set(cfg.pipelines) == {"video", "document", "audio"}
         assert "pools" in cfg.pools
         assert "providers" in cfg.providers
 
@@ -144,17 +144,12 @@ class TestBuildStepConfig:
         assert step_cfg["ai"]["primary"]["provider"] == "claude-cli"  # 默认走 Claude CLI 接入方式
         assert "text_fallback" in step_cfg["ai"]
 
-    def test_conditional_capability_rules_reach_worker_step(self, configs_dir, tmp_data_dir):
+    def test_document_smart_has_no_legacy_markdown_capability_rule(self, configs_dir, tmp_data_dir):
         cfg = load_config(config_dir=configs_dir, data_dir=tmp_data_dir)
-        step_cfg = build_step_config(cfg, "paper", "05_smart_paper")
+        step_cfg = build_step_config(cfg, "document", "05_smart")
 
-        assert step_cfg["step"]["capability_rules"] == {
-            "read": {
-                "unless_any_nonempty": [
-                    "output/translated.md", "output/original.md",
-                ],
-            },
-        }
+        assert "capability_rules" not in step_cfg["step"]
+        assert step_cfg["step"]["prompt_template"] == "05_smart_document"
 
     def test_no_ai_config(self, configs_dir, tmp_data_dir):
         cfg = load_config(config_dir=configs_dir, data_dir=tmp_data_dir)
@@ -260,16 +255,16 @@ class TestLoadPipelinesShape:
 
     def test_steps_is_list_of_dicts(self, configs_dir):
         p = load_pipelines(configs_dir / "pipelines.yaml")
-        assert isinstance(p["video"]["steps"], list)
-        assert isinstance(p["paper"]["steps"], list)
-        for s in p["video"]["steps"]:
-            assert isinstance(s, dict)
-            for key in ("name", "module", "image", "pool", "depends_on"):
-                assert key in s
+        for pipeline in ("video", "document", "audio"):
+            assert isinstance(p[pipeline]["steps"], list)
+            for step in p[pipeline]["steps"]:
+                assert isinstance(step, dict)
+                for key in ("name", "module", "image", "pool", "depends_on"):
+                    assert key in step
 
     def test_every_step_has_image(self, configs_dir):
         p = load_pipelines(configs_dir / "pipelines.yaml")
-        for pl in ("video", "paper"):
+        for pl in ("video", "document", "audio"):
             for s in p[pl]["steps"]:
                 assert s["image"], f"{pl}/{s['name']} 缺少 image"
 

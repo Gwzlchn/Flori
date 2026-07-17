@@ -17,7 +17,10 @@ class TestAutoPromote:
     def test_two_distinct_jobs_promote(self, db):
         db.add_glossary_suggestion("ml", "Transformer", "j1", "video")
         assert db.get_glossary_term("ml", "Transformer")["status"] == "suggested"
-        db.add_glossary_suggestion("ml", "Transformer", "j2", "paper")
+        db.add_glossary_suggestion(
+            "ml", "Transformer", "j2", "document",
+            document_kind="research_paper",
+        )
         assert db.get_glossary_term("ml", "Transformer")["status"] == "accepted"
 
     def test_same_job_twice_stays_suggested(self, db):
@@ -54,9 +57,12 @@ class TestReject:
         assert {t["term"] for t in db.list_glossary("ml", status="rejected")} == {"Junk"}
 
     def test_rejected_excluded_from_consumers(self, db):
-        db.create_job(Job(id="jr1", content_type="article", pipeline="article_v2",
+        db.create_job(Job(id="jr1", content_type="document", document_kind="article",
+                          pipeline="document",
                           domain="ml", title="内容"))
-        db.add_glossary_suggestion("ml", "Junk", "jr1")
+        db.add_glossary_suggestion(
+            "ml", "Junk", "jr1", "document", document_kind="article",
+        )
         db.set_glossary_topic("ml", "Junk", True)
         db.reject_glossary_term("ml", "Junk")
         assert db.glossary_for_job("jr1", "ml") == []
@@ -82,10 +88,15 @@ class TestWatch:
 class TestRadarWatchedSection:
     def test_watched_concepts_in_radar(self, db):
         from api.services.radar import radar
-        db.create_job(Job(id="jw1", content_type="article", pipeline="article_v2",
+        db.create_job(Job(id="jw1", content_type="document", document_kind="article",
+                          pipeline="document",
                           domain="ml", title="新内容"))
-        db.add_glossary_suggestion("ml", "Momentum", "jw1")
-        db.add_glossary_suggestion("ml", "Silent", "jw1")
+        db.add_glossary_suggestion(
+            "ml", "Momentum", "jw1", "document", document_kind="article",
+        )
+        db.add_glossary_suggestion(
+            "ml", "Silent", "jw1", "document", document_kind="article",
+        )
         db.set_glossary_watched("ml", "Momentum", True)
         data = radar(db, "ml", 7)
         watched = data["watched_concepts"]
@@ -152,7 +163,8 @@ class TestTermMapAliasExport:
         storage = LocalStorage(tmp_path)
         config = SimpleNamespace(jobs_dir=Path(str(tmp_path)))
         eng = Scheduler(redis=None, db=db, config=config, storage=storage)
-        job = Job(id="jm_tgt", content_type="article", pipeline="article_v2", domain="ml")
+        job = Job(id="jm_tgt", content_type="document", document_kind="article",
+                  pipeline="document", domain="ml")
         await eng._export_term_map(job)
 
         import json as _json
@@ -177,11 +189,14 @@ class TestRadarDigestCron:
         redis = make_fakeredis()
         try:
             db.create_job(Job(
-                id="jd1", content_type="article", pipeline="article_v2",
+                id="jd1", content_type="document", document_kind="article",
+                pipeline="document",
                 domain="ml", title="本周内容", status=JobStatus.DONE,
             ))
             _evidence(db, "jd1", "Momentum 是本周被反复讨论的概念。", domain="ml")
-            db.add_glossary_suggestion("ml", "Momentum", "jd1")
+            db.add_glossary_suggestion(
+                "ml", "Momentum", "jd1", "document", document_kind="article",
+            )
             eng = self._engine(db, redis)
             monday = date(2026, 7, 6)   # 周一
             n = await eng.check_radar_digest(today=monday)
@@ -220,7 +235,8 @@ class TestRadarDigestCron:
         try:
             eng = self._engine(db, redis)
             db.create_job(Job(
-                id="digest-harvest", content_type="article", pipeline="article_v2",
+                id="digest-harvest", content_type="document", document_kind="article",
+                pipeline="document",
                 domain="ml", title="本周内容", status=JobStatus.DONE,
             ))
             _evidence(db, "digest-harvest", "Momentum 是本周热点。", domain="ml")
@@ -228,6 +244,8 @@ class TestRadarDigestCron:
                 db, task_id="at_x1", radar_data=radar(db, "ml", 7),
             )
             source = manifest["sources"][0]
+            assert source["content_type"] == "document"
+            assert source["document_kind"] == "article"
             content = f"# 周报\n{source['excerpt']} [来源:{source['source_id']}]"
             await redis.r.set(
                 "ai:anchor:at_x1",

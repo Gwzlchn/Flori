@@ -37,7 +37,7 @@ def _sha(data: bytes) -> str:
 def _job(tmp_path: Path) -> tuple[Path, dict, bytes, str]:
     job_dir = tmp_path / "job-semantic"
     source_data = b"The model does not exceed 5 kg."
-    source_path = job_dir / "output" / "original.md"
+    source_path = job_dir / "input" / "source.html"
     source_path.parent.mkdir(parents=True)
     source_path.write_bytes(source_data)
     locator = {
@@ -48,14 +48,14 @@ def _job(tmp_path: Path) -> tuple[Path, dict, bytes, str]:
         "dom_path": None,
     }
     segment_id = make_segment_id(
-        "article:body", start=0, end=len(source_data), section="body", locator=locator,
+        "html", start=0, end=len(source_data), section="body", locator=locator,
     )
     source_manifest = build_source_manifest(
         job_id=job_dir.name,
-        pipeline="article",
+        pipeline="document",
         source_artifacts=[{
-            "source_id": "article:body",
-            "path": "output/original.md",
+            "source_id": "html",
+            "path": "input/source.html",
             "sha256": _sha(source_data),
             "revision": None,
             "media_duration_ms": None,
@@ -63,7 +63,7 @@ def _job(tmp_path: Path) -> tuple[Path, dict, bytes, str]:
         }],
         segments=[{
             "segment_id": segment_id,
-            "source_id": "article:body",
+            "source_id": "html",
             "start": 0,
             "end": len(source_data),
             "section": "body",
@@ -71,7 +71,7 @@ def _job(tmp_path: Path) -> tuple[Path, dict, bytes, str]:
             "support_text": source_data.decode(),
             "support_artifact": {
                 "kind": "html",
-                "path": "output/original.md",
+                "path": "input/source.html",
                 "sha256": _sha(source_data),
                 "selector": {"start": 0, "end": len(source_data)},
             },
@@ -84,6 +84,7 @@ def _job(tmp_path: Path) -> tuple[Path, dict, bytes, str]:
 
     note = "# 翻译\n\n该模型不超过 5 kg。"
     note_path = job_dir / "output" / "translated.md"
+    note_path.parent.mkdir(parents=True, exist_ok=True)
     note_path.write_text(note, encoding="utf-8")
     normalized = _markdown_to_text(note)
     empty = build_provenance_manifest(
@@ -135,7 +136,7 @@ def _add_smart_candidate(
     )
     persist_semantic_candidates(
         job_dir,
-        pipeline="article",
+        pipeline="document",
         note_type="smart",
         note_artifact="output/smart.md",
         candidates=[{
@@ -145,7 +146,7 @@ def _add_smart_candidate(
             "section": "smart",
             "source_segment_id": segment_id,
             "transform_kind": "cross_language",
-            "producer_component": "04_smart_article",
+            "producer_component": "05_smart",
             "producer_invocation_id": "producer-smart-session",
         }],
     )
@@ -161,7 +162,7 @@ def _replace_note_candidates(
     count: int,
 ) -> None:
     note_artifact = "output/smart.md" if note_type == "smart" else "output/translated.md"
-    component = "04_smart_article" if note_type == "smart" else "04_translate_article"
+    component = "05_smart" if note_type == "smart" else "04_translate"
     claims = [f"Semantic {note_type} claim {index} remains stable." for index in range(count)]
     note = f"# {note_type}\n\n" + "\n\n".join(claims)
     note_data = note.encode()
@@ -187,7 +188,7 @@ def _replace_note_candidates(
     )
     persist_semantic_candidates(
         job_dir,
-        pipeline="article",
+        pipeline="document",
         note_type=note_type,
         note_artifact=note_artifact,
         candidates=[{
@@ -204,7 +205,7 @@ def _replace_note_candidates(
 
 
 class _Attestor:
-    step_name = "04_semantic_attestation"
+    step_name = "06_semantic_attestation"
 
     def __init__(self, job_dir: Path) -> None:
         self.job_dir = job_dir
@@ -295,7 +296,7 @@ async def _records(
 
     return await build_canonical_evidence_records_with_reader(
         job_id=job_dir.name,
-        pipeline="article",
+        pipeline="document",
         note_type="translated",
         note_path="output/translated.md",
         note_data=note_data,
@@ -328,12 +329,12 @@ async def test_candidate_is_untrusted_until_concepts_publishes_final_v3(
         "section": "translated",
         "source_segment_id": segment_id,
         "transform_kind": "translated",
-        "producer_component": "04_translate_article",
+        "producer_component": "04_translate",
         "producer_invocation_id": "producer-session",
     }
     persist_semantic_candidates(
         job_dir,
-        pipeline="article",
+        pipeline="document",
         note_type="translated",
         note_artifact="output/translated.md",
         candidates=[candidate],
@@ -355,7 +356,7 @@ async def test_candidate_is_untrusted_until_concepts_publishes_final_v3(
         )
 
     result = finalize_pending_semantic_provenance(
-        job_dir, pipeline="article", ai=_Attestor(job_dir),
+        job_dir, pipeline="document", ai=_Attestor(job_dir),
     )
 
     assert {key: result[key] for key in ("note_types", "accepted", "rejected", "failed", "calls")} == {
@@ -366,8 +367,8 @@ async def test_candidate_is_untrusted_until_concepts_publishes_final_v3(
     ).read_text())
     assert final["schema_version"] == 3
     attestation = final["segments"][0]["attestation"]
-    assert attestation["producer_component"] == "04_translate_article"
-    assert attestation["attestor_component"] == "04_semantic_attestation"
+    assert attestation["producer_component"] == "04_translate"
+    assert attestation["attestor_component"] == "06_semantic_attestation"
     assert len(await _records(job_dir, note_data)) == 1
 
 
@@ -376,7 +377,7 @@ async def test_final_attestation_tampering_fails_closed(tmp_path: Path) -> None:
     job_dir, _source_manifest, note_data, segment_id = _job(tmp_path)
     persist_semantic_candidates(
         job_dir,
-        pipeline="article",
+        pipeline="document",
         note_type="translated",
         note_artifact="output/translated.md",
         candidates=[{
@@ -386,12 +387,12 @@ async def test_final_attestation_tampering_fails_closed(tmp_path: Path) -> None:
             "section": "translated",
             "source_segment_id": segment_id,
             "transform_kind": "translated",
-            "producer_component": "04_translate_article",
+            "producer_component": "04_translate",
             "producer_invocation_id": "producer-session",
         }],
     )
     finalize_pending_semantic_provenance(
-        job_dir, pipeline="article", ai=_Attestor(job_dir),
+        job_dir, pipeline="document", ai=_Attestor(job_dir),
     )
     provenance_path = job_dir / "output" / "provenance" / "translated.json"
     final = json.loads(provenance_path.read_text())
@@ -409,7 +410,7 @@ async def test_candidate_section_binding_survives_rehashed_final_commit(
     job_dir, _source_manifest, note_data, segment_id = _job(tmp_path)
     persist_semantic_candidates(
         job_dir,
-        pipeline="article",
+        pipeline="document",
         note_type="translated",
         note_artifact="output/translated.md",
         candidates=[{
@@ -419,12 +420,12 @@ async def test_candidate_section_binding_survives_rehashed_final_commit(
             "section": "translated",
             "source_segment_id": segment_id,
             "transform_kind": "translated",
-            "producer_component": "04_translate_article",
+            "producer_component": "04_translate",
             "producer_invocation_id": "producer-session",
         }],
     )
     finalize_pending_semantic_provenance(
-        job_dir, pipeline="article", ai=_Attestor(job_dir),
+        job_dir, pipeline="document", ai=_Attestor(job_dir),
     )
     provenance_path = job_dir / "output/provenance/translated.json"
     final = json.loads(provenance_path.read_text())
@@ -478,7 +479,7 @@ def test_exact_v2_survives_failure_then_retry_publishes_v3(tmp_path: Path) -> No
     )
     persist_semantic_candidates(
         job_dir,
-        pipeline="article",
+        pipeline="document",
         note_type="smart",
         note_artifact="output/smart.md",
         candidates=[{
@@ -488,7 +489,7 @@ def test_exact_v2_survives_failure_then_retry_publishes_v3(tmp_path: Path) -> No
             "section": "智能笔记",
             "source_segment_id": segment_id,
             "transform_kind": "translated",
-            "producer_component": "04_smart_article",
+            "producer_component": "05_smart",
             "producer_invocation_id": "producer-session",
         }],
     )
@@ -497,7 +498,7 @@ def test_exact_v2_survives_failure_then_retry_publishes_v3(tmp_path: Path) -> No
     attestor = _FlakyAttestor(job_dir)
     with pytest.raises(AIProviderError, match="semantic attestation failed"):
         finalize_pending_semantic_provenance(
-            job_dir, pipeline="article", ai=attestor,
+            job_dir, pipeline="document", ai=attestor,
         )
     assert provenance_path.read_bytes() == before
     assert json.loads(before)["schema_version"] == 2
@@ -505,7 +506,7 @@ def test_exact_v2_survives_failure_then_retry_publishes_v3(tmp_path: Path) -> No
     assert candidate_path.is_file()
 
     result = finalize_pending_semantic_provenance(
-        job_dir, pipeline="article", ai=attestor,
+        job_dir, pipeline="document", ai=attestor,
     )
     assert {key: result[key] for key in ("note_types", "accepted", "rejected", "failed", "calls")} == {
         "note_types": 1, "accepted": 1, "rejected": 0, "failed": 0, "calls": 1,
@@ -527,15 +528,15 @@ def test_worker_rotation_empty_candidate_overwrites_old_manifest(tmp_path: Path)
         "section": "translated",
         "source_segment_id": segment_id,
         "transform_kind": "translated",
-        "producer_component": "04_translate_article",
+        "producer_component": "04_translate",
         "producer_invocation_id": "producer-session",
     }
     persist_semantic_candidates(
-        job_dir, pipeline="article", note_type="translated",
+        job_dir, pipeline="document", note_type="translated",
         note_artifact="output/translated.md", candidates=[candidate],
     )
     state = persist_semantic_candidates(
-        job_dir, pipeline="article", note_type="translated",
+        job_dir, pipeline="document", note_type="translated",
         note_artifact="output/translated.md", candidates=[],
     )
     manifest = json.loads((
@@ -549,18 +550,18 @@ def test_dual_note_types_are_attested_in_one_call(tmp_path: Path) -> None:
     job_dir, source, _note_data, segment_id = _job(tmp_path)
     _add_smart_candidate(job_dir, source, segment_id)
     persist_semantic_candidates(
-        job_dir, pipeline="article", note_type="translated",
+        job_dir, pipeline="document", note_type="translated",
         note_artifact="output/translated.md", candidates=[{
             "anchor": "该模型不超过 5 kg。", "prefix": "", "suffix": "",
             "section": "translated", "source_segment_id": segment_id,
             "transform_kind": "translated",
-            "producer_component": "04_translate_article",
+            "producer_component": "04_translate",
             "producer_invocation_id": "producer-translate-session",
         }],
     )
     attestor = _Attestor(job_dir)
     result = finalize_pending_semantic_provenance(
-        job_dir, pipeline="article", ai=attestor,
+        job_dir, pipeline="document", ai=attestor,
     )
     commit = json.loads((job_dir / "output/provenance/semantic_batch.json").read_text())
     assert result["note_types"] == 2 and result["accepted"] == 2
@@ -580,7 +581,7 @@ def test_batch_candidate_limit_allows_dual_fifty_with_one_call(tmp_path: Path) -
     )
     attestor = _Attestor(job_dir)
     result = finalize_pending_semantic_provenance(
-        job_dir, pipeline="article", ai=attestor,
+        job_dir, pipeline="document", ai=attestor,
     )
     assert result["calls"] == 1 and attestor.call_index == 1
     assert result["accepted"] + result["rejected"] == 100
@@ -597,7 +598,7 @@ def test_batch_candidate_limit_rejects_dual_101_before_ai_call(tmp_path: Path) -
     attestor = _Attestor(job_dir)
     with pytest.raises(ValueError, match="batch candidates exceed limit"):
         finalize_pending_semantic_provenance(
-            job_dir, pipeline="article", ai=attestor,
+            job_dir, pipeline="document", ai=attestor,
         )
     assert attestor.call_index == 0
     assert not (job_dir / "output/provenance/semantic_batch.json").exists()
@@ -610,12 +611,12 @@ def test_second_final_publish_failure_or_interrupt_rolls_back_batch(
     job_dir, source, _note_data, segment_id = _job(tmp_path)
     _add_smart_candidate(job_dir, source, segment_id)
     persist_semantic_candidates(
-        job_dir, pipeline="article", note_type="translated",
+        job_dir, pipeline="document", note_type="translated",
         note_artifact="output/translated.md", candidates=[{
             "anchor": "该模型不超过 5 kg。", "prefix": "", "suffix": "",
             "section": "translated", "source_segment_id": segment_id,
             "transform_kind": "translated",
-            "producer_component": "04_translate_article",
+            "producer_component": "04_translate",
             "producer_invocation_id": "producer-translate-session",
         }],
     )
@@ -638,7 +639,7 @@ def test_second_final_publish_failure_or_interrupt_rolls_back_batch(
     monkeypatch.setattr(Path, "replace", fail_second_staged)
     with pytest.raises(type(failure)):
         finalize_pending_semantic_provenance(
-            job_dir, pipeline="article", ai=_Attestor(job_dir),
+            job_dir, pipeline="document", ai=_Attestor(job_dir),
         )
     assert [path.read_bytes() for path in finals] == before
     assert not (job_dir / "output/provenance/semantic_batch.json").exists()
@@ -648,17 +649,17 @@ def test_second_final_publish_failure_or_interrupt_rolls_back_batch(
 async def test_cross_job_batch_replay_fails_closed(tmp_path: Path) -> None:
     job_dir, _source, note_data, segment_id = _job(tmp_path)
     persist_semantic_candidates(
-        job_dir, pipeline="article", note_type="translated",
+        job_dir, pipeline="document", note_type="translated",
         note_artifact="output/translated.md", candidates=[{
             "anchor": "该模型不超过 5 kg。", "prefix": "", "suffix": "",
             "section": "translated", "source_segment_id": segment_id,
             "transform_kind": "translated",
-            "producer_component": "04_translate_article",
+            "producer_component": "04_translate",
             "producer_invocation_id": "producer-session",
         }],
     )
     finalize_pending_semantic_provenance(
-        job_dir, pipeline="article", ai=_Attestor(job_dir),
+        job_dir, pipeline="document", ai=_Attestor(job_dir),
     )
     commit_path = job_dir / "output/provenance/semantic_batch.json"
     commit = json.loads(commit_path.read_text())
@@ -674,19 +675,19 @@ async def test_ai_log_record_replacement_and_unbounded_history_fail_closed(
 ) -> None:
     job_dir, _source, note_data, segment_id = _job(tmp_path)
     persist_semantic_candidates(
-        job_dir, pipeline="article", note_type="translated",
+        job_dir, pipeline="document", note_type="translated",
         note_artifact="output/translated.md", candidates=[{
             "anchor": "该模型不超过 5 kg。", "prefix": "", "suffix": "",
             "section": "translated", "source_segment_id": segment_id,
             "transform_kind": "translated",
-            "producer_component": "04_translate_article",
+            "producer_component": "04_translate",
             "producer_invocation_id": "producer-session",
         }],
     )
     finalize_pending_semantic_provenance(
-        job_dir, pipeline="article", ai=_Attestor(job_dir),
+        job_dir, pipeline="document", ai=_Attestor(job_dir),
     )
-    log_path = job_dir / "output/ai_logs/04_semantic_attestation.jsonl"
+    log_path = job_dir / "output/ai_logs/06_semantic_attestation.jsonl"
     original = log_path.read_bytes()
     record = json.loads(original)
     record["output"]["content"] = json.dumps({"schema_version": 1, "decisions": []})
@@ -729,7 +730,7 @@ def test_utf8_prompt_budget_fails_before_ai_call(tmp_path: Path) -> None:
     )
     persist_semantic_candidates(
         job_dir,
-        pipeline="article",
+        pipeline="document",
         note_type="translated",
         note_artifact="output/translated.md",
         candidates=[{
@@ -739,13 +740,13 @@ def test_utf8_prompt_budget_fails_before_ai_call(tmp_path: Path) -> None:
             "section": "translated",
             "source_segment_id": segment_id,
             "transform_kind": "translated",
-            "producer_component": "04_translate_article",
+            "producer_component": "04_translate",
             "producer_invocation_id": "producer-session",
         } for claim in claims],
     )
     attestor = _Attestor(job_dir)
     with pytest.raises(ValueError, match="UTF-8 byte budget"):
         finalize_pending_semantic_provenance(
-            job_dir, pipeline="article", ai=attestor,
+            job_dir, pipeline="document", ai=attestor,
         )
     assert attestor.call_index == 0

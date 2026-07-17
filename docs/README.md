@@ -12,8 +12,8 @@ docs/
 │   ├── api.md                      # API 服务（FastAPI）
 │   ├── step-base.md                # StepBase 统一基类
 │   ├── steps-video.md              # 视频分析步骤（00-09）
-│   ├── steps-paper.md              # 论文分析步骤（M1 已实现）
-│   ├── steps-article.md            # 文章分析步骤（M6 已实现）
+│   ├── steps-document.md           # 文档统一流水线（论文/文章/白皮书等）
+│   ├── steps-audio.md              # 音频/播客步骤
 │   ├── ai-gateway.md               # AI 网关（多 Provider/路由/对比/成本追踪）
 │   ├── knowledge-store.md          # 知识存储（搜索/术语/关联）
 │   └── frontend.md                 # 前端（Vue3 页面+组件）
@@ -42,5 +42,6 @@ docs/
 │   ├── 0011-worker-runtime-orchestration.md
 │   ├── 0012-case-evidence-authoritative-sources.md
 │   ├── 0013-version-semver-build-sha.md
-│   └── 0014-observability-and-job-dag.md
+│   ├── 0014-observability-and-job-dag.md
+│   └── 0015-unified-document-family.md
 ```

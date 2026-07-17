@@ -24,7 +24,7 @@ graph LR
     Smart --> Review["11_review"]
 ```
 
-> 步骤编号在每个 pipeline 内独立（video 为 `01..11`，paper `01..06`，article `01..05`，audio `01..05`），不是全局编号。
+> 步骤编号在每个 pipeline 内独立。当前顶层为 video、document、audio，具体步骤以 `configs/pipelines.yaml` 为准。
 
 ## Step 01: 下载 (step_01_download.py)
 

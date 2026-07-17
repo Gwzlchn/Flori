@@ -58,7 +58,7 @@ describe('TopicView', () => {
   it('有内容时渲染列表项标题与计数', async () => {
     api.get.mockResolvedValue({
       jobs: [
-        { job_id: 'j1', title: 'Attention Is All You Need', content_type: 'paper', status: 'done', created_at: '2026-01-01', source: 'arxiv' },
+        { job_id: 'j1', title: 'Attention Is All You Need', content_type: 'document', document_kind: 'research_paper', status: 'done', created_at: '2026-01-01', source: 'arxiv' },
         { job_id: 'j2', title: null, content_type: 'video', status: 'pending', created_at: '2026-01-02' },
       ],
       total: 2,
@@ -75,7 +75,7 @@ describe('TopicView', () => {
 
   it('点击列表项跳转到内容详情', async () => {
     api.get.mockResolvedValue({
-      jobs: [{ job_id: 'j1', title: 'X', content_type: 'paper', status: 'done', created_at: '2026-01-01' }],
+      jobs: [{ job_id: 'j1', title: 'X', content_type: 'document', document_kind: 'research_paper', status: 'done', created_at: '2026-01-01' }],
       total: 1,
     })
     const w = mountView()

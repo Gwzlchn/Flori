@@ -108,6 +108,7 @@ async def _sync_collection_body(
                 collection_id=coll.id, title=it.title or None,
                 item_id=it.item_id, actor="subscription",
                 smart_note=True if is_book else None,
+                document_kind=it.document_kind,
                 defer_submit=is_book,
             )
             await asyncio.to_thread(db.mark_ingested, coll.id, it.item_id)
@@ -126,7 +127,7 @@ async def _sync_collection_body(
         if nxt:
             job = await asyncio.to_thread(db.get_job, nxt)
             await redis.append_lifecycle_event("job_command", {
-                "action": "new_job", "job_id": nxt, "pipeline": job.pipeline if job else "article",
+                "action": "new_job", "job_id": nxt, "pipeline": job.pipeline if job else "document",
             })
             logger.info("book_chain_kickoff", coll=coll.id, job_id=nxt)
     await asyncio.to_thread(db.mark_collection_synced, coll.id, datetime.now(timezone.utc))
@@ -317,7 +318,9 @@ async def list_collection_jobs(
         total=total,
         items=[
             JobResponse(
-                job_id=j.id, content_type=j.content_type, status=j.status.value,
+                job_id=j.id, content_type=j.content_type,
+                document_kind=j.document_kind or None, pipeline=j.pipeline,
+                status=j.status.value,
                 created_at=j.created_at.isoformat(), title=j.title,
                 progress_pct=j.progress_pct, source=j.source, domain=j.domain,
                 collection_id=j.collection_id,

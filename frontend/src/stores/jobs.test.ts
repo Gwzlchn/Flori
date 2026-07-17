@@ -20,7 +20,7 @@ beforeEach(() => {
     subscription_sources: [], job_sources: [],
     content_types: [
       { type: 'video', label: '视频', upload_extensions: ['.mp4'] },
-      { type: 'article', label: '文章', upload_extensions: ['.txt'] },
+      { type: 'document', label: '文档', upload_extensions: ['.txt'] },
     ],
   })
 })
@@ -141,15 +141,18 @@ describe('useJobStore 其它 action', () => {
     expect(res).toEqual({ job_id: 'new' })
   })
 
-  it('uploadJob 走 upload 且 FormData 含 file/domain/style_tags(JSON)', async () => {
+  it('uploadJob 走 upload 且透传 Document 子类,FormData 含 file/domain/style_tags(JSON)', async () => {
     upload.mockResolvedValue({ job_id: 'up' })
     const store = useJobStore()
     const file = new File(['x'], 'a.txt', { type: 'text/plain' })
-    await store.uploadJob(file, 'tech', ['a', 'b'])
+    await store.uploadJob(file, 'tech', ['a', 'b'], 'whitepaper')
 
     expect(upload).toHaveBeenCalledTimes(1)
     const [path, form] = upload.mock.calls[0]
-    expect(path).toBe('/api/jobs/upload?content_type=article')
+    const parsed = new URL(`http://local${path}`)
+    expect(parsed.pathname).toBe('/api/jobs/upload')
+    expect(parsed.searchParams.get('content_type')).toBe('document')
+    expect(parsed.searchParams.get('document_kind')).toBe('whitepaper')
     expect(form).toBeInstanceOf(FormData)
     expect((form as FormData).get('domain')).toBe('tech')
     expect((form as FormData).get('style_tags')).toBe(JSON.stringify(['a', 'b']))

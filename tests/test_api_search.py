@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from shared.models import Job
 from tests.current_schema_db import clone_current_schema_database
 
 
@@ -11,6 +12,15 @@ from tests.current_schema_db import clone_current_schema_database
 def db(test_config, current_schema_db_template):
     d = clone_current_schema_database(current_schema_db_template, test_config.db_path)
     # 灌入若干中文笔记,覆盖不同 domain / content_type / collection。
+    d.create_job(Job(id="j_ml", content_type="video", pipeline="video", domain="ml"))
+    d.create_job(Job(
+        id="j_paper", content_type="document", pipeline="document",
+        document_kind="research_paper", domain="nlp",
+    ))
+    d.create_job(Job(
+        id="j_cook", content_type="document", pipeline="document",
+        document_kind="article", domain="food",
+    ))
     d.index_job_notes(
         "j_ml", "smart", "深度学习入门",
         "反向传播算法是神经网络训练的核心机制，用于计算梯度。",
@@ -22,14 +32,14 @@ def db(test_config, current_schema_db_template):
         content_type="video", domain="ml", collection_id="c_ai",
     )
     d.index_job_notes(
-        "j_paper", "paper", "Transformer 论文精读",
+        "j_paper", "smart", "Transformer 论文精读",
         "自注意力机制让模型并行处理序列，反向传播效率更高。",
-        content_type="paper", domain="nlp", collection_id="c_ai",
+        content_type="document", domain="nlp", collection_id="c_ai",
     )
     d.index_job_notes(
         "j_cook", "smart", "红烧肉做法",
         "先焯水再炒糖色，小火慢炖一小时即可。",
-        content_type="article", domain="food", collection_id="",
+        content_type="document", domain="food", collection_id="",
     )
     yield d
     d.close()
@@ -91,6 +101,19 @@ class TestSearch:
         data = resp.json()
         assert data["total"] == 2
         assert all(it["content_type"] == "video" for it in data["items"])
+
+    @pytest.mark.asyncio
+    async def test_facet_document_kind(self, client):
+        resp = await client.get(
+            "/api/search",
+            params={"q": "反向传播", "content_type": "document",
+                    "document_kind": "research_paper"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["job_id"] == "j_paper"
+        assert data["items"][0]["document_kind"] == "research_paper"
 
     @pytest.mark.asyncio
     async def test_facet_collection(self, client):

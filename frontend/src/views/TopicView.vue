@@ -26,7 +26,7 @@ const error = ref('')
 function normalizeJob(raw: any): JobSummary {
   return {
     job_id: String(raw?.job_id ?? ''),
-    content_type: raw?.content_type ?? 'article',
+    content_type: raw?.content_type ?? 'document',
     status: String(raw?.status ?? 'pending'),
     created_at: String(raw?.created_at ?? ''),
     title: raw?.title ?? null,

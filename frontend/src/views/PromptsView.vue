@@ -1,10 +1,11 @@
 <script setup lang="ts">
-// AI 工作流:把四条流水线的全部步骤画成 DAG,在 AI 步上编辑提示词覆盖。
-import { ref, onMounted } from 'vue'
+// AI 工作流:展示三类内容流水线,Document 可编辑 common 或具体体裁覆盖。
+import { ref, onMounted, reactive } from 'vue'
 import { useApi } from '../composables/useApi'
 import PipelineDag from '../components/PipelineDag.vue'
 import PromptEditor from '../components/settings/PromptEditor.vue'
 import { FileCode2 } from 'lucide-vue-next'
+import { documentKindLabel } from '../utils/contentType'
 
 interface PStep {
   key: string
@@ -16,6 +17,8 @@ interface PStep {
 }
 interface Pipeline {
   name: string
+  label?: string
+  document_kinds?: string[]
   steps: PStep[]
 }
 
@@ -23,7 +26,13 @@ const api = useApi()
 const pipelines = ref<Pipeline[]>([])
 const loading = ref(true)
 const error = ref('')
-const editing = ref<{ pipeline: string; step: string; label: string } | null>(null)
+const editing = ref<{
+  pipeline: string
+  step: string
+  label: string
+  documentKind: string | null
+} | null>(null)
+const selectedKinds = reactive<Record<string, string>>({})
 
 async function load() {
   loading.value = true
@@ -46,7 +55,12 @@ function aiSteps(p: Pipeline): PStep[] {
 function openStep(p: Pipeline, key: string) {
   const s = p.steps.find((x) => x.key === key)
   if (!s || !(s.is_ai || s.pool === 'ai')) return // 非 AI 步不可编辑
-  editing.value = { pipeline: p.name, step: key, label: s.label || key }
+  editing.value = {
+    pipeline: p.name,
+    step: key,
+    label: s.label || key,
+    documentKind: p.name === 'document' ? (selectedKinds[p.name] || null) : null,
+  }
 }
 
 function onSaved() {
@@ -59,7 +73,8 @@ function onSaved() {
   <section class="page">
     <div class="h1" style="margin-bottom:6px"><FileCode2 :size="18" />AI 工作流</div>
     <p style="font-size:13px;color:var(--ink-600);margin-bottom:18px">
-      四条内容流水线的完整步骤。点蓝色 AI 步编辑其提示词覆盖(全局或按领域);<b>●</b> = 已有覆盖。
+      Video、Document、Audio 流水线的完整步骤。点蓝色 AI 步编辑全局/领域覆盖;
+      Document 可先选全部体裁或某一体裁。<b>●</b> = 已有覆盖。
       覆盖存数据库,下个任务派发时注入该步。
     </p>
 
@@ -70,7 +85,16 @@ function onSaved() {
 
     <template v-else>
       <div v-for="p in pipelines" :key="p.name" class="card pad" style="margin-bottom:18px">
-        <div class="seclabel" style="margin-bottom:12px">{{ p.name }}</div>
+        <div class="seclabel" style="margin-bottom:12px">{{ p.label || p.name }}</div>
+        <div v-if="p.name === 'document'" class="field" style="max-width:260px;margin-bottom:12px">
+          <label>Document Prompt 体裁</label>
+          <select v-model="selectedKinds[p.name]" class="input" data-test="document-kind-select">
+            <option value="">全部体裁(common)</option>
+            <option v-for="kind in p.document_kinds || []" :key="kind" :value="kind">
+              {{ documentKindLabel(kind) || kind }}
+            </option>
+          </select>
+        </div>
         <PipelineDag :steps="p.steps" @select="openStep(p, $event)" />
         <!-- AI 步可编辑入口(可靠的编辑面;DAG 上方为流程白盒)-->
         <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:14px">
@@ -83,6 +107,7 @@ function onSaved() {
     </template>
 
     <PromptEditor v-if="editing" :pipeline="editing.pipeline" :step="editing.step" :label="editing.label"
+      :document-kind="editing.documentKind"
       @close="editing = null" @saved="onSaved" @changed="load" />
   </section>
 </template>

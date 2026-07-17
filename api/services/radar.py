@@ -14,7 +14,7 @@ from shared.db import Database
 from shared.evidence_contract import normalize_citation_text
 
 
-DIGEST_SOURCE_SCHEMA_VERSION = 1
+DIGEST_SOURCE_SCHEMA_VERSION = 2
 MAX_DIGEST_SOURCES = 16
 MAX_DIGEST_SOURCES_PER_JOB = 2
 MAX_DIGEST_CANDIDATES = 256
@@ -97,6 +97,7 @@ _MANIFEST_KEYS = {
 }
 _SOURCE_KEYS = {
     "source_id", "job_id", "title", "content_type", "note_type", "chunk_id",
+    "document_kind",
     "section", "excerpt", "excerpt_sha256", "chunk_body_sha256",
     "source_fingerprint", "truncated",
 }
@@ -193,6 +194,7 @@ def radar(
             "title": job.title,
             "published_at": occurred_at.astimezone(timezone.utc).isoformat(),
             "content_type": job.content_type,
+            "document_kind": job.document_kind or None,
         })
 
     return {
@@ -270,6 +272,7 @@ def build_digest_source_manifest(
                 "job_id": job_id,
                 "title": _bounded_text(candidate.get("title"), 256),
                 "content_type": _bounded_text(candidate.get("content_type"), 64),
+                "document_kind": _bounded_text(candidate.get("document_kind"), 64),
                 "note_type": _required_text(candidate.get("note_type"), "note_type", 128),
                 "chunk_id": chunk_id,
                 "section": _bounded_text(candidate.get("section"), 256),
@@ -362,6 +365,7 @@ def _digest_prompt_parts(
                 "source_id": item["source_id"],
                 "title": item["title"],
                 "content_type": item["content_type"],
+                "document_kind": item["document_kind"],
                 "section": item["section"],
                 "excerpt": item["excerpt"],
             }
@@ -410,6 +414,7 @@ def validate_digest_source_manifest(
         _required_text(source.get("job_id"), "job_id", 512)
         _bounded_field(source.get("title"), "title", 256)
         _bounded_field(source.get("content_type"), "content_type", 64)
+        _bounded_field(source.get("document_kind"), "document_kind", 64)
         _required_text(source.get("note_type"), "note_type", 128)
         _required_text(source.get("chunk_id"), "chunk_id", 1_024)
         _bounded_field(source.get("section"), "section", 256)

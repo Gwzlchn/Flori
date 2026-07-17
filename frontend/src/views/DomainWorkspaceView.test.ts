@@ -116,7 +116,8 @@ describe('DomainWorkspaceView tab 内容', () => {
         collections: [],
         recent_jobs: [
           {
-            job_id: 'jx', content_type: 'article', status: 'done', created_at: '2026-01-01',
+            job_id: 'jx', content_type: 'document', document_kind: 'article',
+            status: 'done', created_at: '2026-01-01',
             title: '游离文章', progress_pct: 100, source: null, domain: 'tech', collection_id: null,
           },
         ],

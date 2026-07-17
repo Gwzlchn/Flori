@@ -53,6 +53,7 @@ class Job:
     id: str
     content_type: str
     pipeline: str
+    document_kind: str = ""
     status: JobStatus = JobStatus.PENDING
     collection_id: str | None = None
     url: str | None = None

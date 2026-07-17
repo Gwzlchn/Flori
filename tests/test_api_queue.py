@@ -42,7 +42,8 @@ class TestQueue:
 
     @pytest.mark.asyncio
     async def test_queued_enriched(self, client, db, redis_mock):
-        db.create_job(Job(id="j_y", content_type="paper", pipeline="paper",
+        db.create_job(Job(id="j_y", content_type="document", document_kind="research_paper",
+                          pipeline="document",
                           title="RLHF 综述", domain="ai"))
 
         async def _info(p):
@@ -64,7 +65,7 @@ class TestQueue:
         t = ai["queued"][0]
         assert t["state"] == "queued"
         assert t["title"] == "RLHF 综述"          # enrich:作业标题
-        assert t["content_type"] == "paper"
+        assert t["content_type"] == "document"
         assert t["priority"] == 100
         assert t["enqueued_at"] == 1747483200.0
 

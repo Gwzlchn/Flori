@@ -7,7 +7,7 @@ import fnmatch
 import json
 import mimetypes
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 
 from shared.config import AppConfig
@@ -23,12 +23,18 @@ from shared.review_contract import (
     project_review,
     verify_persisted_review,
 )
+from shared.document_contract import DocumentContractError, validate_document
 from shared.storage import (
     StorageBackend,
     read_file_bounded,
     read_verification_artifact_bounded,
 )
 from api.deps import get_config, get_db, get_storage, validate_path_segment, verify_token
+from api.services.document_reader import (
+    DOCUMENT_HTML_MAX_BYTES,
+    document_html_headers,
+    render_document_html,
+)
 from api.wire_schemas import (
     API_ERROR_RESPONSES,
     ArtifactsResponse,
@@ -55,6 +61,9 @@ _RANGE_RESPONSE = {
     206: {"content": {"application/octet-stream": {
         "schema": {"type": "string", "format": "binary"},
     }}},
+}
+_HTML_RESPONSE = {
+    200: {"content": {"text/html": {"schema": {"type": "string"}}}},
 }
 
 def _artifact_kind(path: str) -> str:
@@ -347,6 +356,76 @@ async def get_artifact(job_id: str, path: str, storage: StorageBackend = Depends
     }.get(ext) or (mimetypes.guess_type(path)[0] or "application/octet-stream")
     return await _serve(storage, job_id, path, ct, "artifact not found",
                         cache=_artifact_kind(path) == "image")
+
+
+async def _bounded_document_artifact(
+    storage: StorageBackend, job_id: str, path: str, missing: str,
+) -> bytes:
+    data = await read_file_bounded(storage, job_id, path, DOCUMENT_HTML_MAX_BYTES)
+    if data is None:
+        raise HTTPException(404, missing)
+    if len(data) > DOCUMENT_HTML_MAX_BYTES:
+        raise HTTPException(413, "document HTML exceeds reader limit")
+    return data
+
+
+@router.get(
+    "/{job_id}/document/source", response_class=Response, responses=_HTML_RESPONSE,
+)
+async def get_document_source(
+    job_id: str,
+    segment: str | None = Query(default=None, min_length=1, max_length=128),
+    exact: str | None = Query(default=None, min_length=1, max_length=512),
+    storage: StorageBackend = Depends(get_storage),
+):
+    """返回原始 HTML 的安全阅读副本；原始字节保持不可变且永不直接执行。"""
+    _validate_job_id(job_id)
+    source = await _bounded_document_artifact(
+        storage, job_id, "input/source.html", "document HTML source not found",
+    )
+    model_data = await read_file_bounded(
+        storage, job_id, "intermediate/document.json", DOCUMENT_HTML_MAX_BYTES,
+    )
+    if model_data is None:
+        raise HTTPException(404, "document model not ready")
+    if len(model_data) > DOCUMENT_HTML_MAX_BYTES:
+        raise HTTPException(413, "document model exceeds reader limit")
+    try:
+        model = validate_document(json.loads(model_data), expected_job_id=job_id)
+    except (DocumentContractError, json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(422, "document model is invalid")
+    return Response(
+        content=render_document_html(
+            source, job_id=job_id, document=model,
+            target_segment=segment, target_exact=exact,
+        ),
+        media_type="text/html; charset=utf-8",
+        headers=document_html_headers(),
+    )
+
+
+@router.get(
+    "/{job_id}/document/translation", response_class=Response, responses=_HTML_RESPONSE,
+)
+async def get_document_translation(
+    job_id: str,
+    segment: str | None = Query(default=None, min_length=1, max_length=128),
+    exact: str | None = Query(default=None, min_length=1, max_length=512),
+    storage: StorageBackend = Depends(get_storage),
+):
+    """返回确定性译文 HTML 的二次净化阅读副本。"""
+    _validate_job_id(job_id)
+    source = await _bounded_document_artifact(
+        storage, job_id, "output/translated.html", "document translation not ready",
+    )
+    return Response(
+        content=render_document_html(
+            source, job_id=job_id,
+            target_segment=segment, target_exact=exact,
+        ),
+        media_type="text/html; charset=utf-8",
+        headers=document_html_headers(),
+    )
 
 
 _MEDIA_CHUNK = 2 * 1024 * 1024

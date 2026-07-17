@@ -1,7 +1,7 @@
 {
   "format": "flori-sqlite-migrations",
   "minimum_supported_version": 0,
-  "current_version": 6,
+  "current_version": 7,
   "ledger_version": 2,
   "migrations": [
     {
@@ -33,6 +33,11 @@
       "version": 6,
       "name": "concept-definition-history",
       "checksum": "92e3a3171526b31da68c28f8464d08556747c68d9bd7589df9e380db2ae10560"
+    },
+    {
+      "version": 7,
+      "name": "unified-document-content-family",
+      "checksum": "f5c34d7b976471c8974a50c34273e70679e923b7c6b562e6df81081df9ea3e68"
     }
   ]
 }

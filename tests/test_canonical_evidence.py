@@ -147,11 +147,11 @@ def _sidecars(
             "kind": "pdf_pages",
             "path": "intermediate/pdf_page_support.json",
             "sha256": _sha(pages),
-            "selector": {"page": 2},
+            "selector": {"page": 2, "start": 0, "end": 14},
         }
     else:
-        source_id = "article:body"
-        source_path = "output/original.md"
+        source_id = "document:body"
+        source_path = "input/source.html"
         media_duration_ms = None
         page_count = None
         locator = {
@@ -172,7 +172,7 @@ def _sidecars(
     source_manifest = {
         "schema_version": 2,
         "job_id": "job-evidence",
-        "pipeline": "article",
+        "pipeline": "document",
         "source_artifacts": [{
             "source_id": source_id,
             "path": source_path,
@@ -247,7 +247,7 @@ async def _records(
 
     records = await build_canonical_evidence_records_with_reader(
         job_id="job-evidence",
-        pipeline="article",
+        pipeline="document",
         note_type=note_type,
         note_path="output/notes.md",
         note_data=note_data,
@@ -268,8 +268,8 @@ def _database(path: Path) -> Database:
     db.init_schema()
     db._conn.execute(
         """INSERT INTO jobs
-           (id,content_type,pipeline,title,domain,status,is_current,created_at,updated_at)
-           VALUES ('job-evidence','article','article','Evidence','general','done',1,'now','now')"""
+           (id,content_type,document_kind,pipeline,title,domain,status,is_current,created_at,updated_at)
+           VALUES ('job-evidence','document','article','document','Evidence','general','done',1,'now','now')"""
     )
     db._conn.commit()
     return db
@@ -294,7 +294,7 @@ async def test_v1_direct_sidecar_keeps_pre_v2_fingerprints(tmp_path: Path) -> No
     provenance_bytes = canonical_json_bytes(provenance)
     storage = MemoryStorage({
         "output/notes.md": note,
-        "output/original.md": b"alpha Claim evidence beta",
+        "input/source.html": b"alpha Claim evidence beta",
         "intermediate/source_segments.json": source_bytes,
         "output/provenance/original.json": provenance_bytes,
     })
@@ -337,7 +337,7 @@ async def test_v1_direct_sidecar_keeps_pre_v2_fingerprints(tmp_path: Path) -> No
     try:
         db.index_job_notes(
             "job-evidence", "original", "Evidence", body,
-            "article", "general", "", ["original"], records,
+            "document", "general", "", ["original"], records,
         )
         resolved = await resolve_canonical_evidence(
             db, storage, records[0]["evidence_id"],
@@ -373,13 +373,13 @@ async def test_canonical_evidence_reindex_is_idempotent_and_old_id_becomes_stale
     storage = MemoryStorage({
         **support_files,
         "output/notes.md": note,
-        "output/original.md": b"alpha Claim evidence beta",
+        "input/source.html": b"alpha Claim evidence beta",
         "intermediate/source_segments.json": source,
         "output/provenance/smart.json": provenance,
     })
     body, records = await _records(note, storage)
     assert len(records) == 1
-    assert records[0]["source_ref"] == "article:body"
+    assert records[0]["source_ref"] == "document:body"
     assert records[0]["source_segment_id"] == "paragraph:1"
 
     db = _database(tmp_path / "canonical.db")
@@ -387,7 +387,7 @@ async def test_canonical_evidence_reindex_is_idempotent_and_old_id_becomes_stale
         for _ in range(2):
             db.index_job_notes(
                 "job-evidence", "smart", "Evidence", body,
-                "article", "general", "", ["smart"], records,
+                "document", "general", "", ["smart"], records,
             )
         old_id = records[0]["evidence_id"]
         assert db._conn.execute(
@@ -412,7 +412,7 @@ async def test_canonical_evidence_reindex_is_idempotent_and_old_id_becomes_stale
         assert new_id != old_id
         db.index_job_notes(
             "job-evidence", "smart", "Evidence", changed_body,
-            "article", "general", "", ["smart"], changed_records,
+            "document", "general", "", ["smart"], changed_records,
         )
         states = db.canonical_evidence_database_states([old_id, new_id])
         assert states[old_id]["status"] == "stale"
@@ -429,7 +429,7 @@ async def test_resolver_rejects_database_policy_fingerprint_drift(tmp_path: Path
     storage = MemoryStorage({
         **support_files,
         "output/notes.md": note,
-        "output/original.md": b"alpha Claim evidence beta",
+        "input/source.html": b"alpha Claim evidence beta",
         "intermediate/source_segments.json": source,
         "output/provenance/smart.json": provenance,
     })
@@ -466,7 +466,7 @@ async def test_resolver_rejects_database_policy_fingerprint_drift(tmp_path: Path
     try:
         db.index_job_notes(
             "job-evidence", "smart", "Evidence", body,
-            "article", "general", "", ["smart"], records,
+            "document", "general", "", ["smart"], records,
         )
         db._conn.execute(
             """UPDATE canonical_evidence
@@ -508,7 +508,7 @@ async def test_empty_provenance_segments_indexes_note_without_evidence(tmp_path:
     try:
         db.index_job_notes(
             "job-evidence", "smart", "Evidence", body,
-            "article", "general", "", ["smart"], records,
+            "document", "general", "", ["smart"], records,
         )
         chunk = db._conn.execute(
             "SELECT body,evidence_json FROM note_chunks WHERE job_id=?",
@@ -559,7 +559,7 @@ async def test_builder_rejects_fabricated_html_support_text() -> None:
     storage = MemoryStorage({
         **support_files,
         "output/notes.md": note,
-        "output/original.md": b"alpha Claim evidence beta",
+        "input/source.html": b"alpha Claim evidence beta",
         "intermediate/source_segments.json": source,
         "output/provenance/smart.json": provenance,
     })
@@ -605,7 +605,7 @@ async def test_resolver_batches_shared_artifacts_once_and_uses_real_content_rout
     storage = MemoryStorage({
         **support_files,
         "output/notes.md": note,
-        "output/original.md": b"alpha Claim evidence beta",
+        "input/source.html": b"alpha Claim evidence beta",
         "intermediate/source_segments.json": source,
         "output/provenance/smart.json": provenance,
     })
@@ -614,7 +614,7 @@ async def test_resolver_batches_shared_artifacts_once_and_uses_real_content_rout
     try:
         db.index_job_notes(
             "job-evidence", "smart", "Evidence", body,
-            "article", "general", "", ["smart"], records,
+            "document", "general", "", ["smart"], records,
         )
         assert len(records) == 2
         evidence_ids = [record["evidence_id"] for record in records]
@@ -625,20 +625,21 @@ async def test_resolver_batches_shared_artifacts_once_and_uses_real_content_rout
         assert [item["evidence_id"] for item in items] == [*evidence_ids, unknown]
         assert [item["status"] for item in items[:2]] == ["valid", "valid"]
         assert items[0]["link"]["href"].startswith(
-            "/api/jobs/job-evidence/artifact?path=output%2Foriginal.md"
+            "/content/job-evidence?tab=notes&view=source"
         )
-        assert "#:~:text=Claim%20evidence" in items[0]["link"]["href"]
+        assert "segment=paragraph%3A1" in items[0]["link"]["href"]
+        assert "exact=Claim+evidence" in items[0]["link"]["href"]
         assert items[2]["reason"] == "evidence_not_found"
         assert all(count == 1 for count in storage.opens.values())
 
-        storage.files["output/original.md"] = b"alpha changed beta"
+        storage.files["input/source.html"] = b"alpha changed beta"
         stale = await resolve_canonical_evidence(db, storage, evidence_ids[0])
         assert stale is not None
         assert stale["status"] == "stale"
         assert stale["link"] is None
         assert db.canonical_evidence_ids_for_job("job-evidence") == evidence_ids
 
-        storage.files["output/original.md"] = b"alpha Claim evidence beta"
+        storage.files["input/source.html"] = b"alpha Claim evidence beta"
         recovered = await resolve_canonical_evidence(db, storage, evidence_ids[0])
         assert recovered is not None
         assert recovered["status"] == "valid"
@@ -672,7 +673,7 @@ async def test_resolver_memo_rehashes_large_source_only_after_version_change(
     try:
         db.index_job_notes(
             "job-evidence", "smart", "Evidence", body,
-            "article", "general", "", ["smart"], records,
+            "document", "general", "", ["smart"], records,
         )
         evidence_id = records[0]["evidence_id"]
 
@@ -705,7 +706,7 @@ async def test_malformed_or_cross_job_provenance_fails_closed():
     source = json.dumps(manifest, separators=(",", ":")).encode()
     storage = MemoryStorage({
         **support_files,
-        "output/original.md": b"alpha Claim evidence beta",
+        "input/source.html": b"alpha Claim evidence beta",
         "intermediate/source_segments.json": source,
         "output/provenance/smart.json": provenance,
     })

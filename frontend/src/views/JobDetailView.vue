@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, inject, nextTick } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { useJobStore } from '../stores/jobs'
 import { useJobDetailController } from '../composables/useJobDetailController'
@@ -12,6 +12,10 @@ import JobPipelinePanel from '../components/job/detail/JobPipelinePanel.vue'
 import JobInfoPanel from '../components/job/detail/JobInfoPanel.vue'
 import JobEvidencePanel from '../components/job/detail/JobEvidencePanel.vue'
 import JobDeleteDialog from '../components/job/detail/JobDeleteDialog.vue'
+import DocumentVisualsPanel from '../components/document/DocumentVisualsPanel.vue'
+import type {
+  DocumentFigure, DocumentQualityReport, DocumentTable, DocumentTableCell,
+} from '../components/document/types'
 import { contentTypeIcon, contentTypePill, contentTypeLabel } from '../utils/contentType'
 import { jobSourceLabel } from '../constants/sources'
 import type { CanonicalEvidenceProjection, JobDetail, GlossaryTerm, JobConcept } from '../types'
@@ -20,10 +24,10 @@ import {
   Image as ImageIcon,
 } from 'lucide-vue-next'
 
-// 内容详情(原型 #detail):头部 + 4 tab,即笔记/概念/流水线/元信息。
-// 一律默认落「笔记」(article/paper 有解析版原文,点开即可读,不等 AI 步)。
+// 内容详情由笔记、概念、流水线、元信息和 Document 专属阅读面组成。
 // 另含步骤操作(重试/重跑/删除);笔记侧支持版本切换、评审、采纳、换 provider 重跑。
 const router = useRouter()
+const route = useRoute()
 const api = useApi()
 const jobStore = useJobStore()
 const showToast = inject<(m: string, t?: 'success' | 'error' | 'info') => void>('showToast', () => {})
@@ -35,7 +39,7 @@ const {
 
 // 每个 job 的 DAG:流水线定义(含 needs)按 content_type 匹配 /api/pipelines,叠加各步实时状态着色。
 const pipelinesDef = ref<{ name: string; steps: { key: string; label: string | null; pool: string | null; needs: string[] }[] }[]>([])
-const jobDagSteps = computed(() => pipelinesDef.value.find(p => p.name === job.value?.content_type)?.steps || [])
+const jobDagSteps = computed(() => pipelinesDef.value.find(p => p.name === job.value?.pipeline)?.steps || [])
 const stepStatusByKey = computed<Record<string, string>>(() => {
   const m: Record<string, string> = {}
   for (const s of steps.value) m[s.name] = s.status
@@ -115,13 +119,25 @@ async function handleDetailLoaded(_detail: JobDetail) {
   const fid = jobId.value
   api.get<{ versions: LineageVersion[] }>(`/api/jobs/${fid}/versions`).then(r => { if (jobId.value === fid) lineageVersions.value = r?.versions || [] }).catch(() => {})
   void loadEvidence()
-  void loadOriginal()
-  void loadTranslated()
-  void loadFigures()
+  void loadDocumentArtifacts()
   api.get<{ pipelines?: any[] }>('/api/pipelines').then(r => { if (jobId.value === fid) pipelinesDef.value = Array.isArray(r) ? r : (r?.pipelines ?? []) }).catch(() => {})
   api.get<{ usage?: any[] }>(`/api/jobs/${fid}/usage`).then(r => { if (jobId.value === fid) jobUsageRows.value = r?.usage || [] }).catch(() => {})
   void loadPromptVersions()
-  tab.value = 'notes'
+  tab.value = route.query.tab === 'figures' ? 'figures' : 'notes'
+  if (route.query.view === 'source' && hasSourceHtml.value) noteVariant.value = 'original'
+  else if (route.query.view === 'translated' && hasTranslation.value) noteVariant.value = 'translated'
+  else if (route.query.view === 'pdf' && hasDocumentPdf.value) noteVariant.value = 'pdf'
+  if (typeof route.query.page === 'string') {
+    const page = Number.parseInt(route.query.page, 10)
+    if (Number.isInteger(page) && page > 0) pdfJumpPage.value = page
+  }
+  if (typeof route.query.bbox === 'string') {
+    const values = route.query.bbox.split(',').map(Number)
+    if (values.length === 4 && values.every(Number.isFinite)
+      && values[2] > values[0] && values[3] > values[1]) {
+      pdfJumpBboxes.value = [values as [number, number, number, number]]
+    }
+  }
 }
 
 // 切 job 必须重置的每-job 视图态。notesInit 不复位会让 ensureNotes 对新 job 直接 no-op,
@@ -134,17 +150,19 @@ function resetJobView() {
   noteContent.value = ''; noteError.value = ''
   canonicalEvidence.value = []
   versions.value = []; review.value = null
-  originalMd.value = ''; translatedMd.value = ''
-  evidence.value = null; figures.value = []
+  evidence.value = null
+  documentFigures.value = []; documentTables.value = []; documentQuality.value = null
+  documentBlocks.value = []; documentAssets.value = []
   jobConcepts.value = []; conceptsError.value = ''
   activeFile.value = null; noteVariant.value = 'smart'
   pdfJumpPage.value = 0
+  pdfJumpBboxes.value = []
   selectedStep.value = ''
 }
 
 // 笔记 tab
 const domain = computed(() => job.value?.domain || '')
-// paper 的可检索原文和版式 PDF 是两种不同阅读面,不用 HTML→Markdown 代替 PDF 真相源。
+// Document 的 HTML 原文和版式 PDF 是两种不同阅读面,不再生成有损 original.md。
 type NoteVariant = 'smart' | 'original' | 'translated' | 'pdf'
 const noteVariant = ref<NoteVariant>('smart')
 const noteContent = ref('')
@@ -160,7 +178,7 @@ const acceptedTermNames = computed(() => new Set(terms.value.map((t) => t.term))
 function currentCanonicalNoteType(): string {
   if (noteVariant.value === 'smart') return 'smart'
   if (noteVariant.value === 'translated') return 'translated'
-  return hasReadableOriginal.value ? 'original' : 'mechanical'
+  return isDocument.value ? 'original' : 'mechanical'
 }
 
 async function loadCanonicalEvidence(fid: string) {
@@ -181,24 +199,34 @@ async function loadCanonicalEvidence(fid: string) {
 type Version = { provider: string; model: string; version: string; file: string; review_file: string | null; overall: number | null; review_state?: string | null }
 const versions = ref<Version[]>([])
 const activeFile = ref<string | null>(null)
-const isArticle = computed(() => job.value?.content_type === 'article')
-const isPaper = computed(() => job.value?.content_type === 'paper')
-const paperHtmlSource = computed(() => isPaper.value && job.value?.source_kind === 'arxiv-html')
-// 「原文」只表示可检索文本:article readability MD 或 arXiv HTML 解析文本。
-// pdf-only / 旧 paper 的解析 MD 排版损伤无法恢复,只展示独立 PDF 变体。
-const hasReadableOriginal = computed(() => isArticle.value || paperHtmlSource.value)
-const hasPaperPdf = computed(() => isPaper.value && (job.value?.artifacts || []).some((path) => (
-  path === 'input/source.pdf' || path.endsWith('/input/source.pdf')
-)))
-const pdfJumpPage = ref(0)   // 译文图占位点击跳原文 PDF 的目标页(0=无;iframe #page= 原生支持)
-const paperPdfUrl = computed(() =>
-  `/api/jobs/${jobId.value}/media?path=${encodeURIComponent('input/source.pdf')}`
-  + (pdfJumpPage.value > 0 ? `#page=${pdfJumpPage.value}` : ''))
+const isDocument = computed(() => job.value?.content_type === 'document')
+const hasArtifact = (path: string) => (job.value?.artifacts || []).some((item) => (
+  item === path || item.endsWith(`/${path}`)
+))
+const hasSourceHtml = computed(() => isDocument.value && hasArtifact('input/source.html'))
+const hasDocumentPdf = computed(() => isDocument.value && hasArtifact('input/source.pdf'))
+const hasTranslation = computed(() => isDocument.value && hasArtifact('output/translated.html'))
+const routeSegment = computed(() => typeof route.query.segment === 'string' ? route.query.segment : '')
+const routeExact = computed(() => typeof route.query.exact === 'string' ? route.query.exact : '')
+function documentReaderUrl(kind: 'source' | 'translation'): string {
+  const params = new URLSearchParams()
+  if (routeSegment.value) params.set('segment', routeSegment.value)
+  if (routeExact.value) params.set('exact', routeExact.value)
+  const query = params.toString()
+  return `/api/jobs/${jobId.value}/document/${kind}${query ? `?${query}` : ''}`
+}
+const sourceHtmlUrl = computed(() => documentReaderUrl('source'))
+const translatedHtmlUrl = computed(() => documentReaderUrl('translation'))
+const pdfJumpPage = ref(0)
+const pdfJumpBboxes = ref<[number, number, number, number][]>([])
+const documentPdfUrl = computed(() =>
+  `/api/jobs/${jobId.value}/media?path=${encodeURIComponent('input/source.pdf')}`)
 function onPdfPageJump(p: number) {
   pdfJumpPage.value = p
+  pdfJumpBboxes.value = []
   noteVariant.value = 'pdf'
 }
-// 有无智能笔记:有版本即有(文章关笔记时为空 → 隐藏智能版、机械版即原文)
+// 有无智能笔记:有版本即有。
 const hasSmartNote = computed(() => versions.value.length > 0)
 
 type Provider = { name: string; type: string; available: boolean; label: string }
@@ -227,7 +255,8 @@ const reviewIssues = computed(() => Array.isArray(review.value?.issues)
 const DIM_LABELS: Record<string, string> = {
   completeness: '完整性', accuracy: '准确性', structure: '结构', terminology: '概念',
   visual_integration: '配图', readability: '可读性', formula_integrity: '公式',
-  figure_references: '图表引用', conciseness: '口语净化', insight: '观点提炼',
+  visual_references: '图表引用', traceability: '证据可追溯',
+  conciseness: '口语净化', insight: '观点提炼',
 }
 const reviewDims = computed(() => {
   if (!reviewReliable.value) return []
@@ -254,8 +283,12 @@ const reviewSourcePath = (label: string) => {
   return safeArtifactPath(source?.artifact)
 }
 const safeArtifactPath = (value: unknown) => {
-  if (typeof value !== 'string' || !value.startsWith('output/') || value.includes('\0')) return ''
-  return value.split('/').includes('..') ? '' : value
+  if (typeof value !== 'string' || value.includes('\0') || value.split('/').includes('..')) return ''
+  if (value.startsWith('output/')) return value
+  return new Set([
+    'intermediate/document.json', 'intermediate/quality.json',
+    'intermediate/source_segments.json',
+  ]).has(value) ? value : ''
 }
 const artifactUrl = (path: string) =>
   `/api/jobs/${jobId.value}/artifact?path=${encodeURIComponent(path)}`
@@ -294,16 +327,10 @@ async function loadNote() {
   noteError.value = ''
   try {
     let text: string
-    if (noteVariant.value === 'pdf') {
+    if (noteVariant.value === 'pdf' || (isDocument.value && ['original', 'translated'].includes(noteVariant.value))) {
       noteContent.value = ''
       canonicalEvidence.value = []
       return
-    } else if (noteVariant.value === 'translated') {
-      text = translatedMd.value || await api.getText(
-        `/api/jobs/${fid}/artifact?path=${encodeURIComponent('output/translated.md')}`)
-    } else if (noteVariant.value === 'original' && hasReadableOriginal.value) {
-      text = originalMd.value || await api.getText(
-        `/api/jobs/${fid}/artifact?path=${encodeURIComponent('output/original.md')}`)
     } else {
       const base = noteVariant.value === 'original'
         ? `/api/jobs/${fid}/notes/mechanical`
@@ -320,7 +347,7 @@ async function loadNote() {
     if (jobId.value !== fid) return
     noteError.value = e?.status === 404
       ? (noteVariant.value === 'translated' ? '译文尚未生成'
-        : noteVariant.value === 'original' && hasReadableOriginal.value ? '原文未生成' : '笔记尚未生成')
+        : noteVariant.value === 'original' && isDocument.value ? '原文未生成' : '笔记尚未生成')
       : (e?.message || '加载失败')
     noteContent.value = ''
     canonicalEvidence.value = []
@@ -401,48 +428,164 @@ async function loadEvidence() {
   } catch { if (jobId.value === fid) evidence.value = null }
 }
 
-// 原文(article output/original.md)
-// 可读原文 Markdown(图片本地化);在笔记 tab 作「原文」变体展示,404 即无。
-const originalMd = ref('')
-async function loadOriginal() {
-  const fid = jobId.value
-  if (!hasReadableOriginal.value) { originalMd.value = ''; return }
-  try {
-    const text = await api.getText(
-      `/api/jobs/${fid}/artifact?path=${encodeURIComponent('output/original.md')}`)
-    if (jobId.value === fid) originalMd.value = text
-  } catch { if (jobId.value === fid) originalMd.value = '' }
+interface RawDocumentBlock {
+  block_id: string
+  kind: string
+  locator?: { html?: { dom_path?: string }; pdf?: { page?: number } }
+}
+interface RawDocumentAsset {
+  asset_id: string
+  path?: string | null
+  local_path?: string | null
+  state?: string
+  status?: string
+  alt?: string | null
+  width?: number | null
+  height?: number | null
+}
+interface RawDocument {
+  blocks?: RawDocumentBlock[]
+  assets?: RawDocumentAsset[]
+  figures?: Record<string, any>[]
+  tables?: Record<string, any>[]
 }
 
-// 译文(article output/translated.md) tab
-// 非中文文章的中文全文译文;有则显示「译文」tab,404 即无。
-const translatedMd = ref('')
-const hasTranslation = computed(() => !!translatedMd.value)
-async function loadTranslated() {
-  const fid = jobId.value
-  try {
-    const text = await api.getText(
-      `/api/jobs/${fid}/artifact?path=${encodeURIComponent('output/translated.md')}`)
-    if (jobId.value === fid) translatedMd.value = text
-  } catch { if (jobId.value === fid) translatedMd.value = '' }
+const documentFigures = ref<DocumentFigure[]>([])
+const documentTables = ref<DocumentTable[]>([])
+const documentQuality = ref<DocumentQualityReport | null>(null)
+const documentBlocks = ref<RawDocumentBlock[]>([])
+const documentAssets = ref<RawDocumentAsset[]>([])
+const hasFigures = computed(() => documentFigures.value.length + documentTables.value.length > 0)
+
+function availableAssetPath(asset: RawDocumentAsset | undefined): string | null {
+  if (!asset) return null
+  const state = asset.state ?? asset.status
+  if (!['available', 'available_local'].includes(String(state))) return null
+  const path = asset.local_path ?? asset.path
+  if (typeof path !== 'string' || !path || path.startsWith('/') || path.includes('\0')) return null
+  return path.split('/').includes('..') ? null : path
 }
 
-// 图表(论文 intermediate/figures.json) tab
-// 兼容旧 paper job 的 figures.json;当前链不生成该产物。只列仍有 filename 的历史渲染图。
-interface FigureItem { id: string; page: number; caption: string; filename: string | null; ocr_text?: string }
-const figures = ref<FigureItem[]>([])
-const figuresWithImage = computed(() => figures.value.filter(f => f.filename))
-const hasFigures = computed(() => figuresWithImage.value.length > 0)
-async function loadFigures() {
-  const fid = jobId.value
-  try {
-    const raw = await api.getText(
-      `/api/jobs/${fid}/artifact?path=${encodeURIComponent('intermediate/figures.json')}`)
-    if (jobId.value === fid) figures.value = JSON.parse(raw)
-  } catch { if (jobId.value === fid) figures.value = [] }
+function visualExtraction(raw: Record<string, any>) {
+  const status = raw.extraction?.status ?? raw.quality_status ?? raw.status ?? 'complete'
+  const reasons = raw.extraction?.reasons ?? raw.quality_reasons ?? []
+  return { ...raw.extraction, status, reasons: Array.isArray(reasons) ? reasons : [] }
 }
-function figureUrl(filename: string): string {
-  return `/api/jobs/${jobId.value}/assets/${filename}`
+
+function normalizeFigure(raw: Record<string, any>, index: number, assets: Map<string, RawDocumentAsset>): DocumentFigure {
+  const rawMedia = Array.isArray(raw.media) ? raw.media : (
+    Array.isArray(raw.panels) ? raw.panels : (raw.asset_ids || []).map((assetId: string) => ({ asset_id: assetId }))
+  )
+  return {
+    figure_id: String(raw.figure_id),
+    label: String(raw.label || `Figure ${index + 1}`),
+    caption: String(raw.caption || ''),
+    source_locator: raw.source_locator,
+    order: Number(raw.order ?? raw.reading_order ?? index),
+    media: rawMedia.map((item: Record<string, any>, mediaIndex: number) => {
+      const asset = assets.get(String(item.asset_id || ''))
+      return {
+        media_id: String(item.media_id || item.panel_id || `${raw.figure_id}-${mediaIndex}`),
+        role: item.role ?? item.label ?? null,
+        artifact: item.artifact ?? availableAssetPath(asset),
+        alt: item.alt ?? asset?.alt ?? null,
+        width: item.width ?? asset?.width ?? null,
+        height: item.height ?? asset?.height ?? null,
+      }
+    }),
+    extraction: visualExtraction(raw),
+  }
+}
+
+function rowCells(raw: Record<string, any>): DocumentTableCell[] {
+  if (Array.isArray(raw.cells)) {
+    return raw.cells.map((cell: Record<string, any>) => ({
+      cell_id: String(cell.cell_id), row: Number(cell.row), col: Number(cell.col ?? cell.column ?? 0),
+      rowspan: Number(cell.rowspan || 1), colspan: Number(cell.colspan || 1),
+      role: cell.role === 'header' ? 'column_header' : (cell.role || 'data'), text: String(cell.text || ''),
+    }))
+  }
+  const result: DocumentTableCell[] = []
+  const occupied = new Set<string>()
+  for (const [rowIndex, row] of (raw.rows || []).entries()) {
+    let col = 0
+    for (const cell of row.cells || []) {
+      while (occupied.has(`${rowIndex}:${col}`)) col++
+      const rowspan = Number(cell.rowspan || 1), colspan = Number(cell.colspan || 1)
+      for (let r = 0; r < rowspan; r++) for (let c = 0; c < colspan; c++) occupied.add(`${rowIndex + r}:${col + c}`)
+      result.push({
+        cell_id: String(cell.cell_id), row: rowIndex, col, rowspan, colspan,
+        role: cell.kind === 'header' ? (row.section === 'header' ? 'column_header' : 'row_header') : 'data',
+        text: String(cell.text || ''),
+      })
+      col += colspan
+    }
+  }
+  return result
+}
+
+function normalizeTable(raw: Record<string, any>, index: number): DocumentTable {
+  return {
+    table_id: String(raw.table_id), label: String(raw.label || `Table ${index + 1}`),
+    caption: String(raw.caption || ''), source_locator: raw.source_locator,
+    order: Number(raw.order ?? raw.reading_order ?? index), cells: rowCells(raw),
+    representations: Array.isArray(raw.representations) ? raw.representations : [],
+    footnotes: Array.isArray(raw.footnotes) ? raw.footnotes : [],
+    extraction: visualExtraction(raw),
+  }
+}
+
+async function loadDocumentArtifacts() {
+  const fid = jobId.value
+  if (!isDocument.value || !hasArtifact('intermediate/document.json')) return
+  try {
+    const [model, quality] = await Promise.all([
+      api.get<RawDocument>(`/api/jobs/${fid}/artifact?path=${encodeURIComponent('intermediate/document.json')}`),
+      hasArtifact('intermediate/quality.json')
+        ? api.get<DocumentQualityReport>(`/api/jobs/${fid}/artifact?path=${encodeURIComponent('intermediate/quality.json')}`)
+        : Promise.resolve(null),
+    ])
+    if (jobId.value !== fid) return
+    const assets = new Map((model.assets || []).map(item => [item.asset_id, item]))
+    documentBlocks.value = model.blocks || []
+    documentAssets.value = model.assets || []
+    documentFigures.value = (model.figures || []).map((item, index) => normalizeFigure(item, index, assets))
+    documentTables.value = (model.tables || []).map((item, index) => normalizeTable(item, index))
+    documentQuality.value = quality
+  } catch {
+    if (jobId.value !== fid) return
+    documentBlocks.value = []; documentAssets.value = []
+    documentFigures.value = []; documentTables.value = []; documentQuality.value = null
+  }
+}
+
+function documentAssetUrl(path: string): string {
+  if (!path || path.startsWith('/') || path.includes('\0') || path.split('/').includes('..')) return ''
+  return `/api/jobs/${jobId.value}/artifact?path=${encodeURIComponent(path)}`
+}
+
+function visualSourceUrl(visualId: string): string | null {
+  const visual = [...documentFigures.value, ...documentTables.value].find(item => (
+    ('figure_id' in item ? item.figure_id : item.table_id) === visualId
+  ))
+  const locator = visual?.source_locator
+  if (hasSourceHtml.value && locator?.html) {
+    const raw = [...(documentFigures.value as any[]), ...(documentTables.value as any[])].find(item => (
+      (item.figure_id ?? item.table_id) === visualId
+    ))
+    const sourceVisual = [...((raw as any)?.block_id ? [raw] : [])][0]
+    const blockId = sourceVisual?.block_id || documentBlocks.value.find(block => block.locator?.html?.dom_path === locator.html?.dom_path)?.block_id
+    const params = new URLSearchParams({ tab: 'notes', view: 'source' })
+    if (blockId) params.set('segment', blockId)
+    return `/content/${encodeURIComponent(jobId.value)}?${params.toString()}`
+  }
+  if (!hasDocumentPdf.value) return null
+  const params = new URLSearchParams({ tab: 'notes', view: 'pdf' })
+  const page = locator?.pdf?.page
+  if (page) params.set('page', String(page))
+  const bbox = locator?.pdf?.bboxes?.[0]
+  if (bbox?.length === 4) params.set('bbox', bbox.join(','))
+  return `/content/${encodeURIComponent(jobId.value)}?${params.toString()}`
 }
 
 let notesInit = false
@@ -451,10 +594,10 @@ async function ensureNotes() {
   notesInit = true
   await loadTerms()
   await Promise.all([loadVersions(), loadProviders()])
-  // 无智能笔记时优先可检索原文;pdf-only paper 直接落版式原文。
-  if (!versions.value.length) {
-    if (hasReadableOriginal.value) noteVariant.value = 'original'
-    else if (hasPaperPdf.value) noteVariant.value = 'pdf'
+  // 无智能笔记时 HTML 原文优先；纯 PDF 文档直接落版式原文。
+  if (!versions.value.length && typeof route.query.view !== 'string') {
+    if (hasSourceHtml.value) noteVariant.value = 'original'
+    else if (hasDocumentPdf.value) noteVariant.value = 'pdf'
   }
   await Promise.all([loadNote(), loadReview()])
 }
@@ -469,15 +612,13 @@ async function switchVariant(v: NoteVariant) {
 
 // AI 步实时刷新:智能笔记/译文/评审步翻到 done 时更新变体可用性与内容——
 // ensureNotes 只跑一次,不刷会「已生成却显示未生成」(BERT 实测踩过)。
-const _aiArtifactSteps = ['04_smart_article', '05_smart_paper', '11_smart',
-                          '04_translate_article', '04_translate_paper',
-                          '06_review', '05_review', '12_review']
+const _aiArtifactSteps = ['04_translate', '05_smart', '08_review']
 const aiStepsDone = computed(() =>
   steps.value.filter(st => _aiArtifactSteps.includes(st.name) && st.status === 'done')
     .map(st => st.name).sort().join(','))
 watch(aiStepsDone, (now, prev) => {
   if (!notesInit || now === prev || !now) return
-  loadVersions(); loadTranslated()
+  loadVersions(); loadDocumentArtifacts()
   if (tab.value === 'notes') { loadNote(); loadReview() }
 })
 
@@ -622,7 +763,8 @@ const aiPromptRows = ref<AiPromptRow[]>([])
 async function loadPromptVersions() {
   aiPromptRows.value = []
   const pv = job.value?.prompt_versions || {}
-  const pipeline = job.value?.content_type
+  const pipeline = job.value?.pipeline
+  const documentKind = job.value?.document_kind
   const dom = (job.value?.domain || '').trim()
   const fid = jobId.value
   if (!pipeline || !Object.keys(pv).length) return
@@ -633,12 +775,14 @@ async function loadPromptVersions() {
     try {
       if (dom) {
         const dq = await api.get<{ active_version: string | null }>(
-          `/api/prompts/${pipeline}/${step}?scope=domain&domain=${encodeURIComponent(dom)}`)
+          `/api/prompts/${pipeline}/${step}?scope=domain&domain=${encodeURIComponent(dom)}`
+          + (documentKind ? `&document_kind=${encodeURIComponent(documentKind)}` : ''))
         if (dq.active_version != null) current = dq.active_version
       }
       if (current == null) {
         const gq = await api.get<{ active_version: string | null }>(
-          `/api/prompts/${pipeline}/${step}?scope=global`)
+          `/api/prompts/${pipeline}/${step}?scope=global`
+          + (documentKind ? `&document_kind=${encodeURIComponent(documentKind)}` : ''))
         current = gq.active_version ?? null
       }
     } catch { /* 读不到当前版本时按未知处理,不阻断 */ }
@@ -732,13 +876,14 @@ watch(job, (j) => {
         </button>
       </div>
 
-      <!-- 笔记(article:智能版可隐藏、机械版=原文) -->
+      <!-- 笔记与 Document 原生阅读面。 -->
       <div v-show="tab === 'notes'">
         <JobNotesPanel :job-id="jobId" :domain="domain" :has-smart-note="hasSmartNote" :has-translation="hasTranslation"
-          :has-readable-original="hasReadableOriginal" :has-paper-pdf="hasPaperPdf" :note-variant="noteVariant" :versions="versions" :active-file="activeFile"
+          :has-source-html="hasSourceHtml" :has-document-pdf="hasDocumentPdf" :note-variant="noteVariant" :versions="versions" :active-file="activeFile"
           :rerunning="rerunning" :show-rerun="showRerun" :providers="providers" :note-loading="noteLoading" :note-error="noteError"
-          :is-paper="isPaper" :paper-pdf-url="paperPdfUrl" :note-content="noteContent"
-          :original-language="job.media?.lang"
+          :is-document="isDocument" :source-html-url="sourceHtmlUrl" :document-pdf-url="documentPdfUrl"
+          :document-pdf-page="pdfJumpPage || 1" :document-pdf-bboxes="pdfJumpBboxes"
+          :translated-html-url="translatedHtmlUrl" :note-content="noteContent"
           :terms="terms" :evidence-ids="eligibleEvidenceIds" :canonical-evidence="canonicalEvidence" :headings="headings"
           :version-label="verLabel" @switch-variant="switchVariant" @select-version="selectVersion"
           @toggle-rerun="showRerun = !showRerun" @rerun="rerunWith" @headings="headings = $event"
@@ -759,13 +904,10 @@ watch(job, (j) => {
         />
       </div>
 
-      <!-- 图表(论文按图注渲染的页面区域,含矢量图) -->
+      <!-- 图表和表格统一从 Document Model 展示。 -->
       <div v-show="tab === 'figures'">
-        <p class="lead figures-lead"><ImageIcon :size="13" /><span>从 PDF 按图注渲染的图表({{ figuresWithImage.length }} 张,含矢量图)。</span></p>
-        <figure v-for="f in figuresWithImage" :key="f.id" class="fig-card">
-          <img :src="figureUrl(f.filename!)" :alt="f.caption" loading="lazy" />
-          <figcaption><b>{{ f.id }}</b><span v-if="f.caption"> · {{ f.caption }}</span></figcaption>
-        </figure>
+        <DocumentVisualsPanel :figures="documentFigures" :tables="documentTables"
+          :quality="documentQuality" :asset-url="documentAssetUrl" :source-url="visualSourceUrl" />
       </div>
 
       <!-- 概念 -->
@@ -811,17 +953,3 @@ watch(job, (j) => {
     <JobDeleteDialog v-if="showDelete" @cancel="showDelete = false" @confirm="confirmDelete" />
   </div>
 </template>
-
-<style scoped>
-.figures-lead {
-  margin: -6px 0 12px; display: flex; align-items: center; gap: 5px;
-  white-space: nowrap;
-}
-.figures-lead svg { flex: none; }
-.fig-card { margin: 0 0 22px; }
-.fig-card img {
-  max-width: 100%; display: block; border: 1px solid var(--line-soft);
-  border-radius: 8px; background: #fff; padding: 8px;
-}
-.fig-card figcaption { margin-top: 6px; font-size: 13px; color: var(--ink-600); line-height: 1.5; }
-</style>

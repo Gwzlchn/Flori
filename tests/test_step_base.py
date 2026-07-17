@@ -145,7 +145,7 @@ def test_step_rechecks_read_capability_after_enqueue_artifact_race(tmp_path):
     }), encoding="utf-8")
     step = DummyStep(tmp_path, config={
         "step": {"capability_rules": {
-            "read": {"unless_any_nonempty": ["output/original.md"]},
+            "read": {"unless_any_nonempty": ["intermediate/document_index.md"]},
         }},
         "ai": {"primary": {"provider": "claude-cli", "model": "primary"}},
         "providers": {"providers": {
@@ -164,14 +164,16 @@ def test_step_rechecks_read_capability_after_enqueue_artifact_race(tmp_path):
 
 
 def test_actual_read_tool_cannot_be_bypassed_by_artifact_appearance(tmp_path):
-    (tmp_path / "output").mkdir()
-    (tmp_path / "output/original.md").write_text("appeared after mode selection")
+    (tmp_path / "intermediate").mkdir()
+    (tmp_path / "intermediate/document_index.md").write_text(
+        "appeared after mode selection"
+    )
     (tmp_path / "job.json").write_text(json.dumps({
         "ai_overrides": {"test_step": "openai"},
     }), encoding="utf-8")
     step = DummyStep(tmp_path, config={
         "step": {"capability_rules": {
-            "read": {"unless_any_nonempty": ["output/original.md"]},
+            "read": {"unless_any_nonempty": ["intermediate/document_index.md"]},
         }},
         "ai": {"primary": {"provider": "claude-cli", "model": "primary"}},
         "providers": {"providers": {
@@ -192,7 +194,7 @@ def test_actual_read_tool_cannot_be_bypassed_by_artifact_appearance(tmp_path):
 def test_actual_non_read_request_does_not_inherit_stale_artifact_capability(tmp_path):
     step = DummyStep(tmp_path, config={
         "step": {"capability_rules": {
-            "read": {"unless_any_nonempty": ["output/original.md"]},
+            "read": {"unless_any_nonempty": ["intermediate/document_index.md"]},
         }},
         "ai": {"primary": {"provider": "openai", "model": "gpt-test"}},
         "providers": {"providers": {
@@ -612,27 +614,66 @@ class TestReviewInputGate:
 
 class TestCliMainEndToEnd:
     """经 cli_main 真跑一个 step 模块,覆盖 runner 命令 + config schema + StepBase 粘合缝。
-    用纯 Python 的 03_article_sections(base 镜像即可跑),不依赖外部命令/AI。"""
+    用纯 Python 的 Document 03_structure(base 镜像即可跑),不依赖外部命令/AI。"""
 
     def test_cli_main_runs_real_step(self, tmp_path):
         for d in ["input", "intermediate", "output", "assets", "logs"]:
             (tmp_path / d).mkdir()
-        # 03_article_sections 的输入:intermediate/parsed.json
-        parsed = {
-            "title": "测试文章",
-            "authors": ["甲"],
-            "abstract": "",
-            "sections": [{"level": 1, "title": "正文", "page": 1,
-                          "text": "# 引言\n这是引言段落。\n# 方法\n这是方法段落。"}],
-            "text": "",
+        document = {
+            "schema_version": 2,
+            "job_id": tmp_path.name,
+            "content_type": "document",
+            "document_kind": "article",
+            "classification": {"method": "user", "confidence": 1.0},
+            "source_profile": "generic_html",
+            "capabilities": ["html", "embedded_media"],
+            "primary_source_id": "html",
+            "sources": [{
+                "source_id": "html", "source_profile": "generic_html",
+                "capabilities": ["html", "embedded_media"],
+                "path": "input/source.html", "mime_type": "text/html",
+                "fingerprint": "sha256:" + "a" * 64, "immutable": True,
+            }],
+            "metadata": {
+                "titles": {"original": "测试文章", "zh": "测试文章"},
+                "authors": [{
+                    "author_id": "author_a", "order": 0, "name": "甲",
+                    "affiliation_ids": [], "affiliations": [],
+                    "emails": [], "notes": [], "note_refs": [],
+                    "equal_contribution": False,
+                }],
+                "affiliations": [], "author_notes": [], "abstract": "", "lang": "zh",
+                "identifiers": {}, "keywords": [], "license": None,
+                "source_license": "", "rights_notices": [],
+                "published_at": None,
+            },
+            "blocks": [{
+                "block_id": "blk_intro", "parent_id": None, "order": 0,
+                "kind": "paragraph", "text": "这是正文。",
+                "locator": {"html": {
+                    "source_id": "html", "source_fingerprint": "sha256:" + "a" * 64,
+                    "dom_path": "/article[1]/p[1]", "exact": "这是正文。",
+                    "prefix": "", "suffix": "", "start": 0, "end": 5,
+                }},
+            }],
+            "figures": [], "tables": [], "assets": [], "references": [],
         }
-        (tmp_path / "intermediate" / "parsed.json").write_text(
-            json.dumps(parsed, ensure_ascii=False), encoding="utf-8")
+        quality = {
+            "schema_version": 1, "job_id": tmp_path.name,
+            "status": "complete", "reasons": [],
+            "metrics": {"blocks": 1},
+        }
+        (tmp_path / "intermediate" / "document.json").write_text(
+            json.dumps(document, ensure_ascii=False), encoding="utf-8")
+        (tmp_path / "intermediate" / "quality.json").write_text(
+            json.dumps(quality, ensure_ascii=False), encoding="utf-8")
+        (tmp_path / "input" / "source.html").write_text(
+            "这是正文。", encoding="utf-8")
 
         prompts = tmp_path / "prompts"
         prompts.mkdir(exist_ok=True)
         cfg = {
-            "step": {"name": "03_article_sections", "pool": "cpu", "timeout_sec": 60, "retries": 0},
+            "step": {"name": "03_structure", "pool": "cpu", "timeout_sec": 60, "retries": 0},
             "ai": {}, "domain": {"name": "general"}, "style_tags": [],
             "paths": {"data_dir": str(tmp_path), "prompts_dir": str(prompts),
                       "config_dir": str(tmp_path)},
@@ -641,20 +682,20 @@ class TestCliMainEndToEnd:
         cfg_file = tmp_path / "step.config.json"
         cfg_file.write_text(json.dumps(cfg), encoding="utf-8")
 
-        # 经真实入口 python -m steps.article.step_03_article_sections 跑(cli_main)
+        # 经真实入口 python -m steps.document.step_03_structure 跑(cli_main)
         import sys
         result = subprocess.run(
-            [sys.executable, "-m", "steps.article.step_03_article_sections",
+            [sys.executable, "-m", "steps.document.step_03_structure",
              "--job-dir", str(tmp_path), "--step-config", str(cfg_file)],
             capture_output=True, text=True, timeout=60,
         )
         assert result.returncode == 0, result.stderr
-        out = tmp_path / "intermediate" / "sections.json"
+        out = tmp_path / "intermediate" / "source_segments.json"
         assert out.exists()
         data = json.loads(out.read_text(encoding="utf-8"))
-        assert data["title"] == "测试文章"
-        assert data["total_sections"] >= 2  # 引言 / 方法
-        assert (tmp_path / ".03_article_sections.done").exists()  # 幂等标记
+        assert data["job_id"] == tmp_path.name
+        assert len(data["segments"]) == 1
+        assert (tmp_path / ".03_structure.done").exists()  # 幂等标记
 
 
 class TestExtractJson:

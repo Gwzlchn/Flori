@@ -1,8 +1,8 @@
 {
-  "schema_version": 1,
-  "job": {"id": "rq-systems-article", "content_type": "article", "pipeline": "article", "domain": "quality-systems", "topic": "systems", "title": "数据库恢复检查清单", "primary_language": "zh", "meta": {"flags": {"smart_note": false}}},
+  "schema_version": 2,
+  "job": {"id": "rq-systems-article", "content_type": "document", "pipeline": "document", "document_kind": "article", "domain": "quality-systems", "topic": "systems", "title": "数据库恢复检查清单", "primary_language": "zh", "meta": {"flags": {"smart_note": false}}},
   "note": {
-    "path": "output/original.md",
+    "path": "intermediate/document_index.md",
     "note_type": "original",
     "lines": [
       "# 数据库恢复检查清单",

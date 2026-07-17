@@ -220,6 +220,7 @@ def retrieve(
             "title": it.get("title") or "(无标题)",
             "domain": it.get("domain") or "",
             "content_type": it.get("content_type") or "",
+            "document_kind": it.get("document_kind") or "",
             "body": (it.get("body") or "")[:_BODY_CHAR_BUDGET],
             "evidence": ev,
         })
@@ -248,6 +249,8 @@ def build_prompt(question: str, passages: list[dict]) -> tuple[str, str]:
             tags.append(f"领域={p['domain']}")
         if p.get("content_type"):
             tags.append(f"类型={p['content_type']}")
+        if p.get("document_kind"):
+            tags.append(f"文档类别={p['document_kind']}")
         ev = p["evidence"]
         if ev.get("section"):
             tags.append(f"段落={ev['section']}")

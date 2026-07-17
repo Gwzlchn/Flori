@@ -33,19 +33,80 @@ def _create_job_files(jobs_dir, job_id):
 def _write_valid_review(job_dir, rel="output/review.json"):
     note_file = "output/versions/notes_smart_claude-cli_claude-opus-4-8_20260101-000000.md"
     smart_text, smart_record = source_record(job_dir, note_file, label="smart")
-    original_rel = "output/original.md"
-    (job_dir / original_rel).write_text("# Original\nsource body", encoding="utf-8")
-    original_text, original_record = source_record(job_dir, original_rel, label="original")
+    (job_dir / "intermediate").mkdir(exist_ok=True)
+    document_rel = "intermediate/document.json"
+    quality_rel = "intermediate/quality.json"
+    fingerprint = "sha256:" + "a" * 64
+    locator = {
+        "html": {
+            "source_id": "html", "source_fingerprint": fingerprint,
+            "dom_path": "article > p:nth-of-type(1)", "exact": "source body",
+        },
+    }
+    document = {
+        "schema_version": 2,
+        "job_id": job_dir.name,
+        "content_type": "document",
+        "document_kind": "article",
+        "classification": {"method": "user", "confidence": 1.0},
+        "source_profile": "generic_html",
+        "capabilities": ["html", "embedded_media"],
+        "primary_source_id": "html",
+        "sources": [{
+            "source_id": "html",
+            "source_profile": "generic_html",
+            "capabilities": ["html", "embedded_media"],
+            "fingerprint": fingerprint,
+            "path": "input/source.html",
+            "mime_type": "text/html",
+            "immutable": True,
+        }],
+        "metadata": {
+            "titles": {"original": "Source title", "zh": "来源标题"},
+            "authors": [], "affiliations": [], "author_notes": [],
+            "abstract": "", "keywords": [], "lang": "en",
+            "license": "", "source_license": "", "rights_notices": [],
+            "identifiers": {},
+        },
+        "blocks": [{
+            "block_id": "S1.P1", "parent_id": None, "order": 0,
+            "kind": "paragraph", "level": None, "text": "source body",
+            "locator": locator,
+        }],
+        "references": [], "assets": [], "figures": [], "tables": [],
+    }
+    quality = {
+        "schema_version": 1,
+        "job_id": job_dir.name,
+        "status": "complete",
+        "reasons": [],
+        "metrics": {"source_block_count": 1, "registry_block_count": 1},
+    }
+    (job_dir / document_rel).write_text(
+        json.dumps(document, ensure_ascii=False), encoding="utf-8",
+    )
+    (job_dir / quality_rel).write_text(
+        json.dumps(quality, ensure_ascii=False), encoding="utf-8",
+    )
+    document_text, document_record = source_record(
+        job_dir, document_rel, label="document",
+    )
+    quality_text, quality_record = source_record(job_dir, quality_rel, label="quality")
     prompt_rel = "output/versions/review_input_claude-cli_claude-opus-4-8_20260101-000000.md"
     (job_dir / prompt_rel).write_text(
-        "strict review prompt\n" + smart_text + original_text, encoding="utf-8",
+        "strict review prompt\n" + smart_text + document_text + quality_text,
+        encoding="utf-8",
     )
     _, prompt_record = source_record(job_dir, prompt_rel, label="prompt")
     prompt_record.pop("label")
-    prompt_record["sources"] = [smart_record, original_record]
+    prompt_record["sources"] = [smart_record, document_record, quality_record]
+    score_keys = [
+        "completeness", "accuracy", "structure", "terminology",
+        "formula_integrity", "visual_references", "traceability",
+    ]
     raw = json.dumps({
-        "completeness": 5, "accuracy": 5, "structure": 4, "readability": 4,
-        "insight": 5,
+        "completeness": 5, "accuracy": 5, "structure": 4, "terminology": 4,
+        "formula_integrity": 5, "visual_references": 5, "traceability": 5,
         "key_terms": [{"term": "FTS", "definition": "全文检索"}],
         "missing_concepts": [], "top3_improvements": ["a", "b", "c"],
         "issues": [{
@@ -56,7 +117,7 @@ def _write_valid_review(job_dir, rel="output/review.json"):
     }, ensure_ascii=False)
     review, _ = parse_review(
         raw,
-        ["completeness", "accuracy", "structure", "readability", "insight"],
+        score_keys,
         LLMResponse(
             content=raw, model="m", provider="openai", finish_reason="stop",
             tier_used="primary", attempts=[{
@@ -64,7 +125,11 @@ def _write_valid_review(job_dir, rel="output/review.json"):
             }],
         ),
         review_input=prompt_record,
-        review_source_texts={"smart": smart_text, "original": original_text},
+        review_source_texts={
+            "smart": smart_text,
+            "document": document_text,
+            "quality": quality_text,
+        },
     )
     review.update({
         "note_file": note_file,
@@ -220,7 +285,8 @@ class TestNotes:
         assert data["overall"] is None and data.get("diagnostic_overall") is None
         assert data["key_terms"] == []
         assert all(data.get(key) is None for key in (
-            "completeness", "accuracy", "structure", "readability", "insight",
+            "completeness", "accuracy", "structure", "terminology",
+            "formula_integrity", "visual_references", "traceability",
         ))
 
     @pytest.mark.asyncio
@@ -407,7 +473,8 @@ class TestNotes:
     @pytest.mark.asyncio
     async def test_note_versions_lists_with_overall(self, client, test_config, db):
         job_dir = _create_job_files(test_config.jobs_dir, "j_test")
-        db.create_job(Job(id="j_test", content_type="article", pipeline="article"))
+        db.create_job(Job(id="j_test", content_type="document", document_kind="article",
+                          pipeline="document"))
         # 与该版笔记 1:1 配对的版本化评审,使 note-versions 能读到 overall
         paired = "output/versions/review_claude-cli_claude-opus-4-8_20260101-000000.json"
         _write_valid_review(job_dir, paired)
@@ -417,7 +484,7 @@ class TestNotes:
         assert len(versions) == 1
         v = versions[0]
         assert v["provider"] == "claude-cli" and v["version"] == "20260101-000000"
-        assert v["review_file"] == paired and v["overall"] == 4.6
+        assert v["review_file"] == paired and v["overall"] == 4.7
         assert v["review_state"] == "reliable"
 
     @pytest.mark.asyncio
@@ -436,7 +503,8 @@ class TestNotes:
         self, client, test_config, db, tamper,
     ):
         job = _create_job_files(test_config.jobs_dir, "j_test")
-        db.create_job(Job(id="j_test", content_type="article", pipeline="article"))
+        db.create_job(Job(id="j_test", content_type="document", document_kind="article",
+                          pipeline="document"))
         review = _write_valid_review(job)
         assert (await client.get("/api/jobs/j_test/review")).json()["reliability_state"] == "reliable"
         if tamper == "prompt":
@@ -459,7 +527,8 @@ class TestNotes:
         self, client, test_config, db, mutation,
     ):
         job = _create_job_files(test_config.jobs_dir, "j_test")
-        db.create_job(Job(id="j_test", content_type="article", pipeline="article"))
+        db.create_job(Job(id="j_test", content_type="document", document_kind="article",
+                          pipeline="document"))
         review = copy.deepcopy(_write_valid_review(job))
         if mutation == "score_keys":
             review["score_keys"] = [{}]

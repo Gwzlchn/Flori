@@ -4,12 +4,12 @@ source_id 是 feed URL(RSS 或 Atom 均可)。用 feedparser 解析,逐条 entry
 SourceItem。公众号(经 RSSHub / wechat2rss 桥产出的 feed)、博客、arxiv RSS、播客
 feed、YouTube 频道 RSS 等都走这里 —— 只要对方吐标准 RSS/Atom。
 
-content_type 判定(决定走哪条 pipeline):
-  - link 含 arxiv.org                          -> paper
+content_type/document_kind 判定(决定走哪条 pipeline/profile):
+  - link 含 arxiv.org                          -> document/research_paper
   - link 含 youtube.com / youtu.be             -> video
   - entry 带 audio enclosure(type 含 audio,
     或 href 后缀属 source_detect.AUDIO_SUFFIXES)  -> audio
-  - 否则(普通网页/公众号文章)                  -> article
+  - 否则(普通网页/公众号文章)                  -> document/article
 
 去重键 item_id:优先 entry.id(RSS guid / Atom id,最稳定),回退到 link。
 source_title:feed.feed.title(频道/公众号名),拿不到返回 None(命名层回退 source_id)。
@@ -66,17 +66,16 @@ def _entry_has_audio(entry: object) -> bool:
     return _audio_enclosure_href(entry) is not None
 
 
-def _content_type_for(link: str, entry: object) -> str:
-    """按 link 平台 + entry enclosure 判定 content_type。
-    顺序:arxiv(paper) > youtube(video) > audio enclosure(audio) > article。"""
+def _content_type_for(link: str, entry: object) -> tuple[str, str | None]:
+    """按平台与 enclosure 同时返回顶层类型和文档体裁。"""
     low = (link or "").lower()
     if "arxiv.org" in low:
-        return "paper"
+        return "document", "research_paper"
     if "youtube.com" in low or "youtu.be" in low:
-        return "video"
+        return "video", None
     if _entry_has_audio(entry):
-        return "audio"
-    return "article"
+        return "audio", None
+    return "document", "article"
 
 
 @register("rss")
@@ -106,7 +105,7 @@ async def enumerate_rss(
         item_id = (get("id") or "").strip() or link
         if not item_id:
             continue
-        content_type = _content_type_for(link, entry)
+        content_type, document_kind = _content_type_for(link, entry)
         # audio 条目 url 用音频 enclosure 真链而非页面 link:否则下载步 curl 到的是网页 HTML,
         # whisper 无音源会挂。enclosure 缺失时回退页面 link(下载步再 best-effort 解析)。
         url = link or item_id
@@ -117,5 +116,6 @@ async def enumerate_rss(
             title=(get("title") or "").strip(),
             url=url,
             content_type=content_type,
+            document_kind=document_kind,
         ))
     return source_title, items

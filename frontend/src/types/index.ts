@@ -10,6 +10,8 @@ export type ContentType = string
 export interface JobSummary {
   job_id: string
   content_type: ContentType
+  document_kind?: string | null
+  pipeline?: string
   status: string
   created_at: string
   title: string | null
@@ -118,9 +120,9 @@ export interface JobDetail extends JobSummary {
   meta: Record<string, any>
   steps: StepInfo[]
   prompt_versions?: Record<string, string>  // 十进制字符串,避免 int64 在 JavaScript 中丢精度
-  source_kind?: 'arxiv-html' | 'pdf-only' | null  // 论文源类型:arxiv-html=原文渲染 original.md;pdf-only=内嵌 PDF
   update_available?: boolean    // 当前流程或 Prompt 相对该快照已有更新
   update_from_step?: string | null
+  source_profile?: 'scholarly_html' | 'generic_html' | 'digital_pdf' | 'scanned_pdf' | null
 }
 
 export interface JobListResponse {
@@ -501,6 +503,7 @@ export interface Collection {
 export interface TermOccurrence {
   job_id: string
   content_type: string
+  document_kind?: string | null
   location: string | null
   title?: string | null
 }
@@ -589,6 +592,7 @@ export interface ConceptEvidence {
   evidence_id: string
   job_id: string
   content_type: string
+  document_kind: string | null
   source_fingerprint: string | null
   note_type: string | null
   chunk_id: string | null
@@ -658,6 +662,7 @@ export interface SearchResultItem {
   note_type: string
   snippet: string
   content_type: string
+  document_kind: string | null
   domain: string
   collection_id: string | null
   canonical_evidence: CanonicalEvidenceProjection[]
@@ -674,6 +679,7 @@ export interface AskSource {
   title: string
   domain: string
   content_type: string
+  document_kind: string | null
   evidence: {
     chunk_id?: string | null
     note_type?: string | null

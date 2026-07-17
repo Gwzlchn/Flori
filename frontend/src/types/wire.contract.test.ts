@@ -8,15 +8,27 @@ import type {
 
 const sourceCatalog = {
   content_types: [{ type: 'video', label: '视频', pipeline: 'video', upload_extensions: ['.mp4'] }],
-  job_sources: [{ type: 'upload', label: '上传', content_types: ['video'], creatable: true }],
+  job_sources: [{
+    type: 'upload', label: '上传', content_types: ['video', 'document'],
+    document_kinds: ['unknown'], default_document_kind: 'unknown',
+    default_source_profile: null, creatable: true,
+  }],
   subscription_sources: [{
     type: 'rss', label: 'RSS', group: 'rss', icon: 'rss', id_label: 'URL',
     placeholder: 'https://example.com/feed.xml', hint: 'RSS feed', home_url_template: null,
   }],
+  document_kinds: [{
+    kind: 'unknown', label: '待分类', description: '无法可靠判定的文档',
+    note_profile: 'generic', review_profile: 'generic',
+  }],
+  source_profiles: [{
+    profile: 'generic_html', label: '通用 HTML', capabilities: ['html'],
+  }],
 } satisfies SourceCatalogWire
 
 const created = {
-  job_id: 'job_video_demo', content_type: 'video', status: 'pending',
+  job_id: 'job_video_demo', content_type: 'video', document_kind: null,
+  pipeline: 'video', status: 'pending',
   created_at: '2026-07-15T00:00:00Z',
 } satisfies JobCreatedWire
 

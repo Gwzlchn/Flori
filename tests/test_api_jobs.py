@@ -15,8 +15,8 @@ from api.routes.jobs import _detect_content_type, _pipeline_for
 
 
 class TestDetectContentType:
-    def test_pdf_file_is_paper(self):
-        assert _detect_content_type(None, "x.pdf") == "paper"
+    def test_pdf_file_is_document(self):
+        assert _detect_content_type(None, "x.pdf") == "document"
 
     def test_video_file_is_video(self):
         assert _detect_content_type(None, "x.mkv") == "video"
@@ -25,9 +25,9 @@ class TestDetectContentType:
         for name in ("x.mp3", "x.m4a", "x.wav", "x.aac"):
             assert _detect_content_type(None, name) == "audio"
 
-    def test_html_txt_file_is_article(self):
-        assert _detect_content_type(None, "x.html") == "article"
-        assert _detect_content_type(None, "x.txt") == "article"
+    def test_html_txt_file_is_document(self):
+        assert _detect_content_type(None, "x.html") == "document"
+        assert _detect_content_type(None, "x.txt") == "document"
 
     def test_filename_case_insensitive(self):
         assert _detect_content_type(None, "X.MP3") == "audio"
@@ -35,11 +35,11 @@ class TestDetectContentType:
     def test_unknown_file_has_no_default_pipeline(self):
         assert _detect_content_type(None, "payload.zip") is None
 
-    def test_arxiv_url_is_paper(self):
-        assert _detect_content_type("https://arxiv.org/abs/2301.00001") == "paper"
+    def test_arxiv_url_is_document(self):
+        assert _detect_content_type("https://arxiv.org/abs/2301.00001") == "document"
 
-    def test_http_article_url_is_article(self):
-        assert _detect_content_type("https://example.com/post") == "article"
+    def test_http_article_url_is_document(self):
+        assert _detect_content_type("https://example.com/post") == "document"
 
     def test_podcast_url_is_audio(self):
         assert _detect_content_type("https://cdn.example.com/ep/1.mp3") == "audio"
@@ -51,8 +51,7 @@ class TestDetectContentType:
 class TestPipelineFor:
     def test_known_mappings(self):
         assert _pipeline_for("video") == "video"
-        assert _pipeline_for("paper") == "paper"
-        assert _pipeline_for("article") == "article"
+        assert _pipeline_for("document") == "document"
         assert _pipeline_for("audio") == "audio"
 
     def test_unknown_has_no_pipeline(self):
@@ -98,7 +97,9 @@ class TestCreateJob:
             "domain": "ml",
         })
         assert resp.status_code == 201
-        assert resp.json()["content_type"] == "paper"
+        assert resp.json()["content_type"] == "document"
+        assert resp.json()["document_kind"] == "research_paper"
+        assert resp.json()["pipeline"] == "document"
 
     @pytest.mark.asyncio
     async def test_create_with_style_tags(self, client):
@@ -123,7 +124,9 @@ class TestCreateJob:
             "url": "https://example.com/post/intro",
         })
         assert resp.status_code == 201
-        assert resp.json()["content_type"] == "article"
+        assert resp.json()["content_type"] == "document"
+        assert resp.json()["document_kind"] == "article"
+        assert resp.json()["pipeline"] == "document"
 
     @pytest.mark.asyncio
     async def test_create_podcast_job(self, client):
@@ -144,7 +147,8 @@ class TestCreateJob:
     @pytest.mark.asyncio
     async def test_explicit_source_content_type_mismatch_rejected(self, client, mock_redis):
         resp = await client.post("/api/jobs", json={
-            "url": "https://youtu.be/dQw4w9WgXcQ", "content_type": "article",
+            "url": "https://youtu.be/dQw4w9WgXcQ", "content_type": "document",
+            "document_kind": "article",
         })
         assert resp.status_code == 422
         mock_redis.publish.assert_not_awaited()
@@ -160,7 +164,7 @@ class TestCreateJob:
     async def test_source_catalog_and_openapi_enums_follow_registry(self, client):
         catalog = (await client.get("/api/sources")).json()
         assert {item["type"] for item in catalog["content_types"]} == {
-            "video", "paper", "article", "audio",
+            "video", "document", "audio",
         }
         assert "book_toc" in {
             item["type"] for item in catalog["subscription_sources"]
@@ -168,7 +172,7 @@ class TestCreateJob:
         openapi = (await client.get("/openapi.json")).json()
         schemas = openapi["components"]["schemas"]
         assert set(schemas["ContentType"]["enum"]) == {
-            "video", "paper", "article", "audio",
+            "video", "document", "audio",
         }
         assert "book_toc" in schemas["SubscriptionSourceType"]["enum"]
         assert "youtube_playlist" in schemas["SubscriptionSourceType"]["enum"]
@@ -176,7 +180,7 @@ class TestCreateJob:
     @pytest.mark.asyncio
     async def test_unsupported_upload_extension_rejected(self, client, mock_redis):
         resp = await client.post(
-            "/api/jobs/upload?content_type=article",
+            "/api/jobs/upload?content_type=document&document_kind=unknown",
             files={"file": ("payload.zip", b"not-media", "application/zip")},
         )
         assert resp.status_code == 422
@@ -186,16 +190,19 @@ class TestCreateJob:
     async def test_direct_file_url_is_not_a_publicly_creatable_source(self, client, mock_redis):
         resp = await client.post(
             "/api/jobs",
-            json={"url": "file:///data/private.txt", "content_type": "article"},
+            json={
+                "url": "file:///data/private.txt", "content_type": "document",
+                "document_kind": "article",
+            },
         )
         assert resp.status_code == 422
         mock_redis.publish.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_create_publishes_article_pipeline(self, client, mock_redis):
+    async def test_create_publishes_document_pipeline(self, client, mock_redis):
         await client.post("/api/jobs", json={"url": "https://example.com/p"})
         args = mock_redis.append_lifecycle_event.call_args
-        assert args[0][1]["pipeline"] == "article"
+        assert args[0][1]["pipeline"] == "document"
 
 
 class TestListJobs:
@@ -234,19 +241,15 @@ class TestGetJob:
         assert resp.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_legacy_coarse_language_is_enriched_from_readable_original(self, client, app):
+    async def test_document_language_comes_from_structured_metadata(self, client, app):
         created = await client.post("/api/jobs", json={
-            "url": "https://example.com/paper.pdf", "content_type": "paper",
+            "url": "https://arxiv.org/abs/2301.00001",
         })
         job_id = created.json()["job_id"]
         storage = app.state.storage
         await storage.write_file(
-            job_id, "intermediate/parsed.json",
-            json.dumps({"source_kind": "pdf-only", "lang": "unknown"}).encode(),
-        )
-        await storage.write_file(
-            job_id, "output/original.md",
-            ("This paper presents a reliable coordination service for distributed systems. " * 8).encode(),
+            job_id, "intermediate/document.json",
+            json.dumps({"source_profile": "scholarly_html", "metadata": {"lang": "en"}}).encode(),
         )
 
         body = (await client.get(f"/api/jobs/{job_id}")).json()
@@ -257,10 +260,10 @@ class TestGetJob:
     @pytest.mark.asyncio
     async def test_detail_reports_pipeline_update_only_when_done_digest_is_stale(self, client, app):
         created = await client.post("/api/jobs", json={
-            "url": "https://example.com/paper.pdf", "content_type": "paper",
+            "url": "https://arxiv.org/abs/2301.00001",
         })
         job_id = created.json()["job_id"]
-        first_step = app.state.config.pipelines["paper"]["steps"][0]["name"]
+        first_step = app.state.config.pipelines["document"]["steps"][0]["name"]
         await app.state.storage.write_file(
             job_id, f".{first_step}.done", b'{"def_digest":"sha256:stale"}',
         )
@@ -340,7 +343,10 @@ class TestJobFiltersAndFacets:
     async def test_filter_domain_source(self, client, app):
         db = app.state.db
         db.create_job(Job(id="j1", content_type="video", pipeline="video", domain="finance", source="bilibili"))
-        db.create_job(Job(id="j2", content_type="paper", pipeline="paper", domain="ml", source="arxiv"))
+        db.create_job(Job(
+            id="j2", content_type="document", pipeline="document",
+            document_kind="research_paper", domain="ml", source="arxiv",
+        ))
         db.create_job(Job(id="j3", content_type="video", pipeline="video", domain="finance", source="bilibili"))
         assert (await client.get("/api/jobs?domain=finance")).json()["total"] == 2
         assert (await client.get("/api/jobs?source=arxiv")).json()["total"] == 1
@@ -350,7 +356,10 @@ class TestJobFiltersAndFacets:
     async def test_facets(self, client, app):
         db = app.state.db
         db.create_job(Job(id="j1", content_type="video", pipeline="video", domain="finance", source="bilibili"))
-        db.create_job(Job(id="j2", content_type="paper", pipeline="paper", domain="ml", source="arxiv"))
+        db.create_job(Job(
+            id="j2", content_type="document", pipeline="document",
+            document_kind="research_paper", domain="ml", source="arxiv",
+        ))
         db.create_job(Job(id="j3", content_type="video", pipeline="video", domain="finance", source="bilibili"))
         f = (await client.get("/api/jobs/facets")).json()       # 须未被 /{job_id} 捕获
         assert f["source"]["bilibili"] == 2 and f["source"]["arxiv"] == 1
@@ -649,67 +658,20 @@ class TestProviderVersions:
         assert doc["ai_overrides"]["12_review"] == "claude-cli"
 
     @pytest.mark.asyncio
-    async def test_paper_rerun_requires_read_capability_and_claude_provider(
-        self, client, app, db, mock_redis,
-    ):
-        jid = "j_paper_read_gate"
-        db.create_job(Job(id=jid, content_type="paper", pipeline="paper"))
-        storage = app.state.storage
-        await storage.write_file(jid, "job.json", b'{"id":"x"}')
-
-        mock_redis.get_worker_info.return_value = {
-            "pools": "ai", "tags": "claude-cli", "status": "idle",
-        }
-        response = await client.post(
-            f"/api/jobs/{jid}/rerun-smart", json={"provider": "claude-cli"},
-        )
-        assert response.status_code == 400
-
-        mock_redis.get_worker_info.return_value = {
-            "pools": "ai", "tags": "openai-api,read", "status": "idle",
-        }
-        response = await client.post(
-            f"/api/jobs/{jid}/rerun-smart", json={"provider": "openai"},
-        )
-        assert response.status_code == 400
-
-        mock_redis.get_worker_info.return_value = {
-            "pools": "ai", "tags": "claude-cli,read", "status": "idle",
-        }
-        response = await client.post(
-            f"/api/jobs/{jid}/rerun-smart", json={"provider": "claude-cli"},
-        )
-        assert response.status_code == 200
-        document = json.loads((await storage.read_file(jid, "job.json")).decode())
-        assert document["ai_overrides"] == {
-            "05_smart_paper": "claude-cli", "06_review": "claude-cli",
-        }
-
-        await storage.write_file(jid, "output/original.md", b"# text-backed paper")
-        mock_redis.get_worker_info.return_value = {
-            "pools": "ai", "tags": "openai-api", "status": "idle",
-        }
-        response = await client.post(
-            f"/api/jobs/{jid}/rerun-smart", json={"provider": "openai"},
-        )
-        assert response.status_code == 200
-        document = json.loads((await storage.read_file(jid, "job.json")).decode())
-        assert document["ai_overrides"] == {
-            "05_smart_paper": "openai", "06_review": "openai",
-        }
-
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("pipeline", "smart", "review"), [
         ("video", "11_smart", "12_review"),
-        ("paper", "05_smart_paper", "06_review"),
-        ("article", "04_smart_article", "06_review"),
+        ("document", "05_smart", "08_review"),
         ("audio", "04_smart_podcast", "05_review"),
     ])
     async def test_rerun_smart_uses_pipeline_roles(
         self, pipeline, smart, review, client, app, db, mock_redis,
     ):
         jid = f"j_role_{pipeline}"
-        db.create_job(Job(id=jid, content_type=pipeline, pipeline=pipeline))
+        db.create_job(Job(
+            id=jid, content_type=pipeline, pipeline=pipeline,
+            document_kind="research_paper" if pipeline == "document" else "",
+        ))
         storage = app.state.storage
         await storage.write_file(jid, "job.json", b'{"id":"x"}')
         resp = await client.post(f"/api/jobs/{jid}/rerun-smart", json={"provider": "claude-cli"})
@@ -725,10 +687,12 @@ class TestRebuildP2c:
     @pytest.mark.asyncio
     async def test_rebuild_creates_snapshot(self, client, app):
         db, storage, config = app.state.db, app.state.storage, app.state.config
-        first = config.pipelines["paper"]["steps"][0]["name"]
-        db.create_job(Job(id="jobs_paper_p1", content_type="paper", pipeline="paper",
-                          url="https://arxiv.org/abs/1810.04805", source="arxiv",
-                          lineage_key="jobs_paper_p1"))
+        first = config.pipelines["document"]["steps"][0]["name"]
+        db.create_job(Job(
+            id="jobs_paper_p1", content_type="document", pipeline="document",
+            document_kind="research_paper", url="https://arxiv.org/abs/1810.04805",
+            source="arxiv", lineage_key="jobs_paper_p1",
+        ))
         await storage.write_file("jobs_paper_p1", "job.json", b'{"id":"jobs_paper_p1"}')
         await storage.write_file("jobs_paper_p1", "output/note.md", b"hello")
         await storage.write_file("jobs_paper_p1", f".{first}.done", b'{"def_digest":"sha256:old"}')
@@ -749,13 +713,19 @@ class TestRebuildP2c:
     @pytest.mark.asyncio
     async def test_rebuild_stale_only_expired(self, client, app):
         db, storage, config = app.state.db, app.state.storage, app.state.config
-        first = config.pipelines["paper"]["steps"][0]["name"]
-        db.create_job(Job(id="jobs_paper_stale", content_type="paper", pipeline="paper",
-                          source="arxiv", lineage_key="jobs_paper_stale"))
+        first = config.pipelines["document"]["steps"][0]["name"]
+        db.create_job(Job(
+            id="jobs_paper_stale", content_type="document", pipeline="document",
+            document_kind="research_paper", source="arxiv",
+            lineage_key="jobs_paper_stale",
+        ))
         await storage.write_file("jobs_paper_stale", "job.json", b"{}")
         await storage.write_file("jobs_paper_stale", f".{first}.done", b'{"def_digest":"sha256:STALE"}')
-        db.create_job(Job(id="jobs_paper_fresh", content_type="paper", pipeline="paper",
-                          source="arxiv", lineage_key="jobs_paper_fresh"))  # 无 .done → 不过期
+        db.create_job(Job(
+            id="jobs_paper_fresh", content_type="document", pipeline="document",
+            document_kind="research_paper", source="arxiv",
+            lineage_key="jobs_paper_fresh",
+        ))  # 无 .done → 不过期
         resp = await client.post("/api/jobs/rebuild-stale")
         assert resp.status_code == 200
         body = resp.json()

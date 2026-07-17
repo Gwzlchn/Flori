@@ -20,6 +20,7 @@ def _occurrence(
     job_id: str,
     source_fingerprint: str,
     content_type: str,
+    document_kind: str | None = None,
 ) -> dict:
     excerpt = f"fact-{index}"
     return {
@@ -27,6 +28,7 @@ def _occurrence(
         "job_id": job_id,
         "source_fingerprint": source_fingerprint,
         "content_type": content_type,
+        "document_kind": document_kind,
         "evidence_excerpt": excerpt,
         "chunk_body_sha256": hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
     }
@@ -44,7 +46,7 @@ class FakeDatabase:
         return list(self.occurrences)
 
     def get_job(self, job_id: str):
-        return SimpleNamespace(pipeline="article") if job_id in self.jobs else None
+        return SimpleNamespace(pipeline="document") if job_id in self.jobs else None
 
     def canonical_evidence_database_states(self, evidence_ids: list[str]) -> dict:
         by_id = {item["evidence_id"]: item for item in self.occurrences}
@@ -160,9 +162,16 @@ async def test_non_text_locator_uses_only_bound_note_chunk_excerpt(
 async def test_level_boundaries_require_independent_jobs_sources_and_types(
     monkeypatch, size: int, expected: str,
 ):
-    content_types = ["article", "paper", "video"]
+    content_types = [
+        ("document", "article"),
+        ("document", "research_paper"),
+        ("video", None),
+    ]
     occurrences = [
-        _occurrence(index, f"job-{index}", f"source-{index}", content_types[index - 1])
+        _occurrence(
+            index, f"job-{index}", f"source-{index}",
+            content_types[index - 1][0], content_types[index - 1][1],
+        )
         for index in range(1, size + 1)
     ]
     projections = {item["evidence_id"]: _projection(item) for item in occurrences}
@@ -194,16 +203,19 @@ async def test_one_repeated_independence_dimension_cannot_claim_corroboration(
     values = [
         ["job-1", "job-2"],
         ["source-1", "source-2"],
-        ["article", "paper"],
+        [("document", "article"), ("document", "research_paper")],
     ]
     if same_dimension == "job":
         values[0] = ["job-1", "job-1"]
     elif same_dimension == "source":
         values[1] = ["source-1", "source-1"]
     else:
-        values[2] = ["article", "article"]
+        values[2] = [("document", "article"), ("document", "article")]
     occurrences = [
-        _occurrence(index + 1, values[0][index], values[1][index], values[2][index])
+        _occurrence(
+            index + 1, values[0][index], values[1][index],
+            values[2][index][0], values[2][index][1],
+        )
         for index in range(2)
     ]
     projections = {item["evidence_id"]: _projection(item) for item in occurrences}
@@ -230,7 +242,7 @@ async def test_one_repeated_independence_dimension_cannot_claim_corroboration(
 async def test_invalid_and_unreliable_evidence_is_excluded_without_locator(
     monkeypatch, case: str, expected_reason: str,
 ):
-    occurrence = _occurrence(1, "job-1", "source-1", "article")
+    occurrence = _occurrence(1, "job-1", "source-1", "document", "article")
     projection = _projection(occurrence)
     jobs = {"job-1"}
     review = b'{"reliable":true}'
@@ -257,7 +269,8 @@ async def test_invalid_and_unreliable_evidence_is_excluded_without_locator(
     assert result["excluded"] == [{
         "evidence_id": occurrence["evidence_id"],
         "job_id": "job-1",
-        "content_type": "article",
+        "content_type": "document",
+        "document_kind": "article",
         "source_fingerprint": "source-1",
         "reason": expected_reason,
         "locator": None,
@@ -269,8 +282,8 @@ async def test_invalid_and_unreliable_evidence_is_excluded_without_locator(
 @pytest.mark.asyncio
 async def test_projection_sort_fingerprint_and_review_cache_are_deterministic(monkeypatch):
     occurrences = [
-        _occurrence(2, "job-1", "source-2", "paper"),
-        _occurrence(1, "job-1", "source-1", "article"),
+        _occurrence(2, "job-1", "source-2", "document", "research_paper"),
+        _occurrence(1, "job-1", "source-1", "document", "article"),
     ]
     projections = {item["evidence_id"]: _projection(item) for item in occurrences}
     calls = _install_fakes(monkeypatch, projections)
@@ -311,7 +324,7 @@ async def test_deleted_occurrences_leave_empty_attestation(monkeypatch):
 async def test_unbound_or_oversized_excerpt_is_excluded(
     monkeypatch, excerpt, digest, reason,
 ):
-    occurrence = _occurrence(1, "job-1", "source-1", "article")
+    occurrence = _occurrence(1, "job-1", "source-1", "document", "article")
     occurrence["evidence_excerpt"] = excerpt
     occurrence["chunk_body_sha256"] = digest
     projection = _projection(occurrence)
@@ -334,7 +347,7 @@ async def test_unbound_or_oversized_excerpt_is_excluded(
 async def test_old_reliable_review_cannot_authorize_new_smart_evidence(
     monkeypatch, review_change: dict, expected_reason: str,
 ):
-    occurrence = _occurrence(1, "job-1", "source-1", "article")
+    occurrence = _occurrence(1, "job-1", "source-1", "document", "article")
     projection = _projection(occurrence)
     _install_fakes(monkeypatch, {occurrence["evidence_id"]: projection})
     review = json.dumps({"reliable": True, **review_change}).encode("utf-8")

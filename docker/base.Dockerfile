@@ -72,14 +72,16 @@ FROM common AS worker
 ARG USE_USTC_MIRROR=1
 ARG TARGETARCH
 ARG CLAUDE_CODE_VERSION=v2.1.202
-# poppler-utils:claude Read 工具渲染 PDF 页面靠 pdftoppm(纯 PDF 论文直喂,无它 Read 必败);
-#               02 解析步 pdfinfo 取页数。pymupdf 已废(断词/公式丢,arxiv 走 HTML 源)。
+ARG INSTALL_CLAUDE_CODE=1
+# poppler-utils:Document PDF adapter 用 pdfinfo、pdftohtml XML 和 pdftotext bbox 建立文本层;
+#               PyMuPDF 负责扫描 PDF 页渲染和视觉区域,不把逆向 Markdown 当真相源。
 RUN apt-get -o Acquire::Retries=5 update \
     && apt-get -o Acquire::Retries=5 install -y --no-install-recommends ffmpeg poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 # Claude Code CLI:claude-cli provider 需要 `claude` 在 PATH。旧包管理器安装已废弃,这里消费 GitHub release
 # native binary,并用同 release 的 SHASUMS256.txt 校验,避免 registry/Node 版本漂移。
-RUN set -eux; \
+RUN if [ "$INSTALL_CLAUDE_CODE" = "0" ]; then echo "claude-code skipped for synthetic integration"; exit 0; fi; \
+    set -eux; \
     case "${TARGETARCH:-amd64}" in \
         amd64) claude_asset="claude-linux-x64.tar.gz" ;; \
         arm64) claude_asset="claude-linux-arm64.tar.gz" ;; \

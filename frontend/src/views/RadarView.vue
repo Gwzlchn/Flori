@@ -21,7 +21,7 @@ const domain = computed(() => String(route.params.domain))
 
 interface Rising { term: string; recent: number; prior: number; delta: number }
 interface NewConcept { term: string; definition: string; first_seen: string }
-interface RecentJob { job_id: string; title: string | null; published_at: string; content_type: string }
+interface RecentJob { job_id: string; title: string | null; published_at: string; content_type: string; document_kind?: string | null }
 interface TopConcept { term: string; recent: number }
 interface WatchedConcept { term: string; zh_name: string; recent: number; total: number }
 interface RadarData {

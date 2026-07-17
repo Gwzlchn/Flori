@@ -70,10 +70,11 @@ JOBS+=("$JID:video")
 log "  视频 2: $JID"
 
 # PDF
-RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload?content_type=paper" \
+RESP=$(curl --noproxy '*' -s -X POST \
+  "$API/api/jobs/upload?content_type=document&document_kind=research_paper" \
   -F "file=@/tmp/test_paper.pdf" -F "domain=ml")
 JID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
-JOBS+=("$JID:paper")
+JOBS+=("$JID:document")
 log "  论文:   $JID"
 
 # 等所有 CPU 步骤完成（最长 20 分钟，3 个视频串行 OCR）
@@ -84,8 +85,8 @@ for entry in "${JOBS[@]}"; do
   log "  等待 $jid ($pipeline)..."
 
   TARGET_STEPS="09_mechanical"
-  if [ "$pipeline" = "paper" ]; then
-    TARGET_STEPS="03_sections"
+  if [ "$pipeline" = "document" ]; then
+    TARGET_STEPS="03_structure"
   fi
 
   # 轮询直到目标步骤完成

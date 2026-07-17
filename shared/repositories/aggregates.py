@@ -126,15 +126,16 @@ class DatabaseAggregates:
                 self._conn.execute("BEGIN IMMEDIATE")
                 self._conn.execute(
                     """INSERT INTO jobs
-                       (id, content_type, pipeline, collection_id, url, title,
+                       (id, content_type, pipeline, document_kind, collection_id, url, title,
                         domain, source, style_tags, status, progress_pct, meta,
                         published_at, created_at, updated_at, error,
                         lineage_key, is_current, source_digest, pipeline_digest, parent_job_id)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         job.id,
                         job.content_type,
                         job.pipeline,
+                        job.document_kind,
                         job.collection_id,
                         job.url,
                         job.title,
@@ -2602,6 +2603,7 @@ class DatabaseAggregates:
         location: str | None = None,
         definition: str = "",
         zh_name: str = "",
+        document_kind: str = "",
     ) -> None:
         """采集候选概念(resolve-then-merge):先按 (domain, term) 精确匹配,
         再经 shared.concepts.resolve 用归一键撞现有实体的 term/zh_name/aliases——
@@ -2616,7 +2618,12 @@ class DatabaseAggregates:
         if not term:
             return
         now = _db._now_iso()
-        occ = {"job_id": job_id, "content_type": content_type, "location": location}
+        occ = {
+            "job_id": job_id,
+            "content_type": content_type,
+            "document_kind": (document_kind or "unknown") if content_type == "document" else "",
+            "location": location,
+        }
         cols = (
             "term, occurrences, definition, definition_locked, zh_name, aliases, "
             "status, current_definition_version_id"

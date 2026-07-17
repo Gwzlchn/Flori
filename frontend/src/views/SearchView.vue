@@ -6,7 +6,10 @@ import { ref, watch, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import EvidenceLocatorLink from '../components/evidence/EvidenceLocatorLink.vue'
-import { contentTypeIcon, contentTypePill, contentTypeLabel, noteTypeLabel } from '../utils/contentType'
+import {
+  contentTypeIcon, contentTypePill, contentTypeLabel, documentKindLabel, noteTypeLabel,
+} from '../utils/contentType'
+import { DOCUMENT_KIND_CATALOG, ensureSourceCatalog } from '../constants/sources'
 import type { SearchResponse, SearchResultItem } from '../types'
 import { Search } from 'lucide-vue-next'
 
@@ -16,6 +19,7 @@ const router = useRouter()
 const q = ref('')
 const domain = ref('')
 const contentType = ref('')
+const documentKind = ref('')
 const collectionId = ref('')
 const loading = ref(false)
 const error = ref('')
@@ -36,8 +40,15 @@ function onKeydown(e: KeyboardEvent) {
     searchInput.value?.focus()
   }
 }
-onMounted(() => window.addEventListener('keydown', onKeydown))
+onMounted(async () => {
+  window.addEventListener('keydown', onKeydown)
+  await ensureSourceCatalog()
+})
 onUnmounted(() => window.removeEventListener('keydown', onKeydown))
+
+watch(contentType, (value) => {
+  if (value !== 'document') documentKind.value = ''
+})
 
 // snippet 安全渲染:整段先转义,再仅还原 <mark> 高亮,确保 v-html 不注入。
 function safeSnippet(raw: string): string {
@@ -57,6 +68,9 @@ function buildQuery(): string {
   p.set('q', term.value)
   if (domain.value.trim()) p.set('domain', domain.value.trim())
   if (contentType.value) p.set('content_type', contentType.value)
+  if (contentType.value === 'document' && documentKind.value) {
+    p.set('document_kind', documentKind.value)
+  }
   if (collectionId.value.trim()) p.set('collection_id', collectionId.value.trim())
   return p.toString()
 }
@@ -83,7 +97,7 @@ async function runSearch() {
 
 // 输入防抖:停止键入 300ms 后再查。
 let timer: ReturnType<typeof setTimeout> | undefined
-watch([q, domain, contentType, collectionId], () => {
+watch([q, domain, contentType, documentKind, collectionId], () => {
   if (timer) clearTimeout(timer)
   timer = setTimeout(runSearch, 300)
 })
@@ -109,9 +123,19 @@ function open(item: SearchResultItem) {
       <select v-model="contentType" class="input" style="max-width:140px">
         <option value="">全部类型</option>
         <option value="video">视频</option>
-        <option value="paper">论文</option>
-        <option value="article">文章</option>
+        <option value="document">文档</option>
         <option value="audio">播客</option>
+      </select>
+      <select
+        v-if="contentType === 'document'"
+        v-model="documentKind"
+        class="input"
+        style="max-width:160px"
+      >
+        <option value="">全部文档体裁</option>
+        <option v-for="kind in DOCUMENT_KIND_CATALOG" :key="kind.kind" :value="kind.kind">
+          {{ kind.label }}
+        </option>
       </select>
       <input v-model="domain" class="input" placeholder="知识库过滤" style="max-width:160px" />
       <input v-model="collectionId" class="input" placeholder="集合 ID（可选）" style="max-width:160px" />
@@ -167,7 +191,7 @@ function open(item: SearchResultItem) {
             <!-- snippet 经 safeSnippet 转义,仅保留 <mark> 高亮,杜绝注入。 -->
             <p class="search-snippet" style="font-size:13px;color:var(--ink-600);margin:6px 0 0" v-html="safeSnippet(item.snippet)"></p>
             <div class="meta" style="margin-top:7px">
-              <span>{{ contentTypeLabel(item.content_type) }}</span>
+              <span>{{ item.document_kind ? documentKindLabel(item.document_kind) : contentTypeLabel(item.content_type) }}</span>
               <template v-if="item.domain && item.domain !== 'general'">
                 <span class="sep">·</span><span>{{ item.domain }}</span>
               </template>

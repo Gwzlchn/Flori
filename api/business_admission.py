@@ -15,9 +15,8 @@ from shared.source_detect import detect_source
 from shared.source_registry import (
     CONTENT_TYPE_NAMES,
     SourceRegistryError,
-    default_content_type,
     pipeline_for_content_type,
-    validate_job_route,
+    resolve_job_route,
 )
 
 
@@ -64,13 +63,16 @@ async def ensure_job_workers(
     domain: str = "general",
     style_tags: list[str] | None = None,
     smart_note: bool | None = None,
+    document_kind: str | None = None,
 ) -> None:
     pipeline = pipeline_for_content_type(content_type)
     try:
         pipelines = config.pipelines
         if not pipeline or not isinstance(pipelines, dict) or pipeline not in pipelines:
             raise ValueError("pipeline admission configuration unavailable")
-        resolved_smart = smart_note if smart_note is not None else content_type != "article"
+        resolved_smart = (
+            smart_note if smart_note is not None else document_kind != "article"
+        )
         requirements = pipeline_requirements(
             config, pipeline, source=source, url=url, domain=domain,
             style_tags=style_tags or [], flags={"smart_note": bool(resolved_smart)},
@@ -89,7 +91,7 @@ async def ensure_job_workers(
 
 def _content_type_from_create(
     payload: dict,
-) -> tuple[str | None, str, str | None] | None:
+) -> tuple[str | None, str, str | None, str | None] | None:
     url = payload.get("url")
     content_type = payload.get("content_type")
     if url is not None and not isinstance(url, str):
@@ -105,8 +107,10 @@ def _content_type_from_create(
     if smart_note is not None and not isinstance(smart_note, bool):
         return None
     source = detect_source(url or "")
-    content_type = content_type or default_content_type(source)
-    return content_type, source, url
+    document_kind = payload.get("document_kind")
+    if document_kind is not None and not isinstance(document_kind, str):
+        return None
+    return content_type, source, url, document_kind
 
 
 class JobAdmissionRoute(APIRoute):
@@ -140,19 +144,23 @@ class JobAdmissionRoute(APIRoute):
 
             if admission_kind == "upload":
                 content_type = request.query_params.get("content_type")
+                document_kind = request.query_params.get("document_kind")
                 if content_type not in CONTENT_TYPE_NAMES:
                     raise BusinessAdmissionError(
                         422, "invalid_request", "content_type query is required",
                     )
                 try:
-                    validate_job_route("upload", content_type)
+                    route = resolve_job_route(
+                        "upload", content_type, document_kind=document_kind,
+                    )
                 except SourceRegistryError as exc:
                     raise BusinessAdmissionError(
                         422, "invalid_request", f"unsupported_source: {exc}",
                     ) from exc
                 await ensure_job_workers(
                     redis=request.app.state.redis, config=request.app.state.config,
-                    content_type=content_type, source="upload", url=None,
+                    content_type=route.content_type, source="upload", url=None,
+                    document_kind=route.document_kind,
                 )
             else:
                 try:
@@ -166,20 +174,23 @@ class JobAdmissionRoute(APIRoute):
                 if isinstance(payload, dict):
                     projection = _content_type_from_create(payload)
                     if projection is not None:
-                        content_type, source, url = projection
+                        content_type, source, url, document_kind = projection
                     else:
                         content_type = None
-                    if projection is not None and content_type in CONTENT_TYPE_NAMES:
+                    if projection is not None:
                         try:
-                            validate_job_route(source, content_type)
+                            route = resolve_job_route(
+                                source, content_type, document_kind=document_kind,
+                            )
                         except SourceRegistryError:
                             return await original(request)
                         await ensure_job_workers(
                             redis=request.app.state.redis, config=request.app.state.config,
-                            content_type=content_type, source=source, url=url,
+                            content_type=route.content_type, source=source, url=url,
                             domain=str(payload.get("domain") or "general"),
                             style_tags=payload.get("style_tags") if isinstance(payload.get("style_tags"), list) else [],
                             smart_note=payload.get("smart_note") if isinstance(payload.get("smart_note"), bool) else None,
+                            document_kind=route.document_kind,
                         )
             return await original(request)
 

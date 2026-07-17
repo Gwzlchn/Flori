@@ -15,7 +15,12 @@ import { useApi } from '../../composables/useApi'
 import type { PromptDetailWire } from '../../types/wire'
 import { X, Check, RotateCcw, GitBranch, Power } from 'lucide-vue-next'
 
-const props = defineProps<{ pipeline: string; step: string; label?: string }>()
+const props = defineProps<{
+  pipeline: string
+  step: string
+  label?: string
+  documentKind?: string | null
+}>()
 const emit = defineEmits<{ (e: 'close'): void; (e: 'saved'): void; (e: 'changed'): void }>()
 
 const api = useApi()
@@ -63,10 +68,15 @@ const selectedIsActive = computed(() =>
 )
 
 function _query(): string {
+  const params = new URLSearchParams()
   if (scope.value === 'domain' && domain.value.trim()) {
-    return `?scope=domain&domain=${encodeURIComponent(domain.value.trim())}`
+    params.set('scope', 'domain')
+    params.set('domain', domain.value.trim())
+  } else {
+    params.set('scope', 'global')
   }
-  return '?scope=global'
+  if (props.documentKind) params.set('document_kind', props.documentKind)
+  return `?${params.toString()}`
 }
 
 async function load() {
@@ -120,6 +130,7 @@ async function save(mode: 'overwrite' | 'new') {
     await api.put(`/api/prompts/${props.pipeline}/${props.step}`, {
       scope: scope.value,
       domain: scope.value === 'domain' ? domain.value.trim() : undefined,
+      ...(props.documentKind ? { document_kind: props.documentKind } : {}),
       content: content.value,
       mode,
       note: mode === 'new' ? (note.value.trim() || undefined) : undefined,
@@ -145,6 +156,7 @@ async function _activate(version: string | null, okMsg: string) {
     await api.post(`/api/prompts/${props.pipeline}/${props.step}/activate`, {
       scope: scope.value,
       domain: scope.value === 'domain' ? domain.value.trim() : undefined,
+      ...(props.documentKind ? { document_kind: props.documentKind } : {}),
       version,
     })
     showToast(okMsg, 'success')
@@ -178,7 +190,9 @@ async function restoreDefault() {
   <div class="overlay show" @click.self="emit('close')">
     <div class="modal wide">
       <div class="hd">
-        <b>编辑 Prompt · {{ pipeline }} · {{ label || step }}</b>
+        <b>
+          编辑 Prompt · {{ pipeline }} · {{ documentKind || 'common' }} · {{ label || step }}
+        </b>
         <button class="ghost" @click="emit('close')"><X :size="16" /></button>
       </div>
 

@@ -1712,8 +1712,8 @@ def run_empty_environment_drill(
             _run_frozen_migration_chain(connection, schema_support)
             connection.execute(
                 "INSERT INTO jobs "
-                "(id, content_type, pipeline, title, domain, created_at, updated_at) "
-                "VALUES ('jobs_drill', 'article', 'article', '灾备演练', "
+                "(id, content_type, pipeline, document_kind, title, domain, created_at, updated_at) "
+                "VALUES ('jobs_drill', 'document', 'document', 'unknown', '灾备演练', "
                 "'general', '2026-01-01T00:00:00+00:00', "
                 "'2026-01-01T00:00:00+00:00')"
             )

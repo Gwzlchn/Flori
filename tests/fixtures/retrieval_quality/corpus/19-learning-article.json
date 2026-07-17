@@ -1,8 +1,8 @@
 {
-  "schema_version": 1,
-  "job": {"id": "rq-learning-article", "content_type": "article", "pipeline": "article", "domain": "quality-learning", "topic": "learning", "title": "复习队列安排指南", "primary_language": "zh", "meta": {"flags": {"smart_note": false}}},
+  "schema_version": 2,
+  "job": {"id": "rq-learning-article", "content_type": "document", "pipeline": "document", "document_kind": "article", "domain": "quality-learning", "topic": "learning", "title": "复习队列安排指南", "primary_language": "zh", "meta": {"flags": {"smart_note": false}}},
   "note": {
-    "path": "output/original.md",
+    "path": "intermediate/document_index.md",
     "note_type": "original",
     "lines": [
       "# 复习队列安排指南",

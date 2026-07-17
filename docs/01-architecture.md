@@ -198,22 +198,14 @@ graph LR
     style punctuate fill:#fff3cd,stroke:#d97706
 ```
 
-**论文 (paper)** — M1 实现：
+**文档 (document)** — 论文、文章、白皮书等共用：
 ```mermaid
 graph LR
-    dl_p["01_download"] --> parse["02_pdf_parse"]
-    parse --> sections["03_sections"]
-    sections --> translate_p["04_translate_paper(条件)"]
-    sections --> smart_p["05_smart_paper"]
-    translate_p --> smart_p
-    smart_p --> concepts_p["05_concepts"]
-    concepts_p --> review_p["06_review"]
-```
-
-**文章 (article)** — M6 实现：
-```mermaid
-graph LR
-    dl_a["01_download"] --> parse_a["02_parse_article"] --> sections_a["03_article_sections"] --> smart_a["04_smart_article"] --> review_a["05_review"]
+    dl_d["01_download"] --> parse_d["02_parse"] --> structure_d["03_structure"]
+    structure_d --> translate_d["04_translate(条件)"]
+    structure_d --> smart_d["05_smart(条件)"]
+    translate_d --> smart_d
+    smart_d --> attest_d["06_semantic_attestation"] --> concepts_d["07_concepts"] --> review_d["08_review(条件)"]
 ```
 
 **音频 / 播客 (audio)** — M6 实现：
@@ -222,7 +214,8 @@ graph LR
     dl_au["01_download"] --> whisper_au["02_whisper"] --> transcript["03_transcript_parse"] --> smart_au["04_smart_podcast"] --> review_au["05_review"]
 ```
 
-每种类型共享 `01_download`（下载/获取原始内容）和 `*_smart` / `*_review`（AI 笔记 + 评审）的模式，中间的处理步骤按内容类型各异。audio 复用 video 的 whisper 步做转写（落在 gpu 池，含 cpu fallback）。
+三类顶层内容共享 StepBase、调度器和证据基础设施。Document 的体裁由 `document_kind` 表示，
+HTML/PDF/OCR adapter 只按 source profile/capability 选择。audio 复用 video 的 whisper 步做转写。
 
 ### 视频步骤 DAG 详解
 
@@ -232,14 +225,14 @@ graph LR
 
 步骤映射到资源池，资源池限制并发。池与内容类型无关——不同类型的步骤可以共享同一个池：
 
-> 步骤编号在每条 pipeline 内独立，下表「示例步骤」标注所属 pipeline（v=video, p=paper, a=article, au=audio）。
+> 步骤编号在每条 pipeline 内独立，下表「示例步骤」标注所属 pipeline（v=video, d=document, au=audio）。
 
 | 池名 | 并发上限 | 说明 | 示例步骤 |
 |------|---------|------|---------|
 | io | 不限 | 轻量 IO | 01_download（各 pipeline）, 07_danmaku(v), 09_mechanical(v) |
 | scene | 1 | CPU 全占，与 cpu 池互斥 | 03_scene(v) |
-| cpu | 3 | 中等 CPU | 04_frames/05_dedup/06_ocr(v)、02_whisper(v)、02_pdf_parse(p)、02_parse_article/03_article_sections(a)、03_transcript_parse(au) |
-| ai | 2 | LLM 并发（按 Provider 各自限速） | 08_punctuate/10_smart/11_review(v)、05_smart_paper/06_review(p)、04_smart_article/05_review(a)、04_smart_podcast/05_review(au) |
+| cpu | 3 | 中等 CPU | 04_frames/05_dedup/06_ocr(v)、02_whisper(v)、02_parse/03_structure(d)、03_transcript_parse(au) |
+| ai | 2 | LLM 并发（按 Provider 各自限速） | 08_punctuate/10_smart/11_review(v)、04_translate/05_smart/06_semantic_attestation/07_concepts/08_review(d)、04_smart_podcast/05_review(au) |
 | gpu | 1 | GPU 独占 | 02_whisper(au)（video 的 02_whisper 落 cpu 池兜底） |
 
 **互斥规则**：scene 运行时冻结 cpu 池（场景检测吃满全部核心）。

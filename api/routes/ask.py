@@ -45,6 +45,7 @@ class SourceItem(BaseModel):
     title: str
     domain: str
     content_type: str
+    document_kind: str | None = None
     evidence: dict
     canonical_evidence: list[CanonicalEvidenceProjection] = Field(default_factory=list)
 
@@ -80,7 +81,8 @@ async def ask(
     sources = [
         SourceItem(
             job_id=p["job_id"], title=p["title"], domain=p["domain"],
-            content_type=p["content_type"], evidence=p["evidence"],
+            content_type=p["content_type"], document_kind=p.get("document_kind") or None,
+            evidence=p["evidence"],
             canonical_evidence=p["canonical_evidence"],
         )
         for p in passages

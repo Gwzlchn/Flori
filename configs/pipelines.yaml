@@ -16,7 +16,7 @@ default:
   # 在该步下加/改 `version: "2"` 即可,无需改代码。换 ai 模型也会自动触发。详见 shared/step_base._def_digest。
   version: "1"
 
-# 四类 pipeline 共用的 AI 角色变量.22 个键各定义一次,route 只引用,不在内容类型内重抄.
+# 三类 pipeline 共用的 AI 角色变量.22 个键各定义一次,route 只引用,不在内容类型内重抄.
 variables:
   AI_CONCEPTS_PRIMARY_PROVIDER: claude-cli
   AI_CONCEPTS_PRIMARY_MODEL: "claude-opus-4-8[1m]"
@@ -211,10 +211,10 @@ video:
     "12_concepts":
       label: "概念 + 摘要"
       extends: .ai-step
-      run: steps.article.step_05_concepts
+      run: steps.common.step_concepts
       prompt_template: 05_concepts
       version: "5"
-      # 复用 article 概念步:视频以最新版智能笔记为源(必有,11_smart 必跑)。
+      # 统一概念步:视频以最新版智能笔记为源(必有,11_smart 必跑)。
       needs: ["11_semantic_attestation"]
       timeout: 120
       tags: []
@@ -257,8 +257,8 @@ video:
         - action: collect_glossary
       outputs: ["output/review.json", "output/review_input.md", "output/review_sources/*", "output/versions/review_*", "output/versions/review_input_*"]
 
-paper:
-  # provider 统一 claude-cli + 显式模型,由带 claude-cli tag 的 ai worker 认领。
+document:
+  # 所有文档共用 DAG；document_kind 决定 Prompt profile，source_profile 决定解析 adapter。
   jobs:
     "01_download":
       label: "下载"
@@ -271,41 +271,40 @@ paper:
         - action: sync_metadata
       outputs: ["input/source.pdf", "input/source.html", "input/metadata.json", "assets/*"]
 
-    "02_pdf_parse":
-      # 步名保留 "02_pdf_parse"(历史 job 步身份/重跑兼容),语义已是「论文解析(HTML 优先)」。
-      label: "解析"
+    "02_parse":
+      label: "结构化解析"
       extends: .cpu-step
-      run: steps.paper.step_02_pdf_parse
+      run: steps.document.step_02_parse
+      image: flori/step-heavy
       needs: ["01_download"]
-      # 解析语义含首页标题修复与 provenance v2 support identity,旧 done 必须失效.
-      version: "5"
-      # 非中文论文写 needs_translation.json 标记(供 04_translate_paper 的 rules:exists 门控)。
+      version: "3"
+      timeout: 1800
       on_complete:
         - action: sync_metadata
-      outputs: ["intermediate/parsed.json", "intermediate/needs_translation.json", "intermediate/source_segments.json", "intermediate/pdf_page_support.json", "output/original.md", "output/provenance/original.json"]
+      outputs: ["intermediate/document.json", "intermediate/quality.json", "intermediate/source_segments.json", "intermediate/needs_translation.json", "assets/*"]
 
-    "03_sections":
-      label: "章节切分"
+    "03_structure":
+      label: "结构验收"
       extends: .cpu-step
-      run: steps.paper.step_03_sections
-      needs: ["02_pdf_parse"]
+      run: steps.document.step_03_structure
+      needs: ["02_parse"]
       timeout: 60
-      version: "3"   # original.md 让位 02(arxiv-html 干净版),仅文本解析兜底时才由本步渲染
-      outputs: ["intermediate/sections.json"]
+      version: "1"
+      on_complete:
+        - action: index_note
+          candidates:
+            - {note_type: original, path: "intermediate/document_index.md", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/original.json", provenance_step: "03_structure", provenance_since_version: "1"}
+      outputs: ["intermediate/document.json", "intermediate/quality.json", "intermediate/source_segments.json", "intermediate/document_index.md", "output/provenance/original.json"]
 
-    "04_translate_paper":
+    "04_translate":
       label: "翻译"
       extends: .ai-step
-      run: steps.paper.step_04_translate_paper
-      needs: ["03_sections"]
-      version: "8"   # 译文证据候选交由下游 concepts 独立核验,失效旧指纹
-      # 大论文多 chunk 串行翻译,步墙钟须覆盖全部 chunk(~15 块 × 2-4min);600 默认必超时。
+      run: steps.document.step_04_translate
+      prompt_template: 04_translate_document
+      needs: ["03_structure"]
+      version: "1"
       timeout: 7200
       tags: []
-      capability_rules:
-        read:
-          unless_any_nonempty: ["output/original.md"]
-      # 仅非中文论文触发:02_pdf_parse 写了 needs_translation.json 才跑,中文论文跳过。
       rules:
         - exists: "intermediate/needs_translation.json"
           when: on
@@ -315,120 +314,16 @@ paper:
         fallback: {provider: $AI_TRANSLATE_FALLBACK_PROVIDER, model: $AI_TRANSLATE_FALLBACK_MODEL}
       on_complete:
         - action: collect_term_pairs
-      outputs: ["output/translated.md", "output/provenance/translated.json", "output/provenance_candidates/translated.json"]
+      outputs: ["output/translation.json", "output/translated.html", "output/provenance/translated.json", "output/provenance_candidates/translated.json"]
 
-    "05_smart_paper":
+    "05_smart":
       label: "智能版笔记"
       extends: .ai-step
-      run: steps.paper.step_05_smart_paper
-      version: "4"
-      # needs 04_translate_paper:非中文论文先翻译,笔记基于译文做(译文跳过=中文论文时依赖视为满足)。
-      needs: ["03_sections", "04_translate_paper"]
+      run: steps.document.step_05_smart
+      prompt_template: 05_smart_document
+      version: "1"
+      needs: ["03_structure", "04_translate"]
       tags: []
-      capability_rules:
-        read:
-          unless_any_nonempty: ["output/translated.md", "output/original.md"]
-      ai:
-        primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
-        fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
-      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json", "output/provenance_candidates/smart.json"]
-
-    "05_concepts":
-      label: "概念 + 摘要"
-      extends: .ai-step
-      run: steps.article.step_05_concepts
-      version: "5"
-      # 复用 article 概念步(源优先级:智能笔记 > 译文 > original.md;旧任务才回退章节)。
-      # 此前 paper 概念只搭 06_review key_terms 便车(无 zh_name/related),图谱边稀疏的根因。
-      needs: ["05_semantic_attestation"]
-      timeout: 120
-      tags: []
-      ai:
-        primary: {provider: $AI_CONCEPTS_PRIMARY_PROVIDER, model: $AI_CONCEPTS_PRIMARY_MODEL}
-        fallback: {provider: $AI_CONCEPTS_FALLBACK_PROVIDER, model: $AI_CONCEPTS_FALLBACK_MODEL}
-      on_complete:
-        - action: index_note
-          candidates:
-            - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "05_semantic_attestation", provenance_since_version: "2", legacy_provenance_step: "05_smart_paper", legacy_provenance_since_version: "2"}
-        - action: collect_glossary
-      outputs: ["output/concepts.json"]
-
-    "05_semantic_attestation":
-      label: "语义证据独立核验"
-      extends: .ai-step
-      run: steps.utils.step_semantic_attestation
-      version: "2"
-      needs: ["05_smart_paper", "04_translate_paper"]
-      timeout: 180
-      tags: []
-      ai:
-        primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
-        fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
-      outputs: ["output/provenance/smart.json", "output/provenance/translated.json", "output/provenance/semantic_batch.json"]
-
-    "06_review":
-      label: "评审"
-      extends: .review
-      run: steps.paper.step_06_review
-      version: "2"
-      needs: ["05_concepts"]
-      tags: []
-      ai:
-        primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
-        fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
-      on_complete:
-        - action: collect_glossary
-      outputs: ["output/review.json", "output/review_input.md", "output/review_sources/*", "output/versions/review_*", "output/versions/review_input_*"]
-
-article:
-  # provider 统一 claude-cli + 显式模型,由带 claude-cli tag 的 ai worker 认领;
-  # 智能笔记/评审随投递开关 smart_note 可选;概念步必跑。
-  jobs:
-    "01_download":
-      label: "下载"
-      run: steps.common.step_01_download
-      pool: io
-      # 慢站指数退避重试 5 拍(30→60→120→240→480s,见 step_01_download._download_article),
-      # 步超时须 ≥ 各拍之和 ~930s,否则退避被腰斩;死链最坏 ~930s 才判失败(接受此代价换慢站成功率)。
-      timeout: 1000
-      retry: 3
-      on_complete:
-        - action: sync_metadata
-      # 正文内图片本地化 → assets/(下载步抓取,供原文 MD 内嵌)。
-      outputs: ["input/source.html", "input/metadata.json", "input/article_meta.json", "assets/*"]
-
-    "02_parse_article":
-      label: "正文解析"
-      extends: .cpu-step
-      run: steps.article.step_02_parse_article
-      needs: ["01_download"]
-      # 图片本地化网络受限:图多的页(26 图)并行 5 路仍需分批,60s 会超时。
-      timeout: 300
-      # 解析语义含正文图片找回与 provenance v2 support identity,旧 done 必须失效.
-      version: "5"
-      # 补全元信息(abstract/image/tags/author),并产出图片本地引用的可读原文 Markdown;
-      # 非中文正文写 needs_translation.json 标记(供 04_translate_article 的 rules:exists 门控)。
-      on_complete:
-        - action: sync_metadata
-      outputs: ["intermediate/parsed.json", "intermediate/source_segments.json", "output/original.md", "output/provenance/original.json", "intermediate/needs_translation.json", "assets/*"]
-
-    "03_article_sections":
-      label: "章节切分"
-      extends: .cpu-step
-      run: steps.article.step_03_article_sections
-      needs: ["02_parse_article"]
-      timeout: 60
-      outputs: ["intermediate/sections.json"]
-
-    "04_smart_article":
-      label: "智能版笔记"
-      extends: .ai-step
-      run: steps.article.step_04_smart_article
-      version: "4"
-      # needs 04_translate:非中文文章先翻译,笔记基于中文译文做(译文跳过=中文文章时依赖视为满足,读原文)。
-      needs: ["03_article_sections", "04_translate_article"]
-      tags: []
-      # 投递开关 smart_note=on 才生成笔记;否则跳过(短文走轻链路)。
       rules:
         - if_flag: smart_note
           when: on
@@ -438,33 +333,13 @@ article:
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
       outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json", "output/provenance_candidates/smart.json"]
 
-    "04_translate_article":
-      label: "翻译"
-      extends: .ai-step
-      run: steps.article.step_04_translate_article
-      needs: ["02_parse_article"]
-      version: "4"   # 译文证据候选交由下游 concepts 独立核验,失效旧指纹
-      tags: []
-      # 仅非中文文章触发:02_parse 写了 needs_translation.json 才跑,中文文章跳过。
-      rules:
-        - exists: "intermediate/needs_translation.json"
-          when: on
-        - when: skip
-      ai:
-        primary: {provider: $AI_TRANSLATE_PRIMARY_PROVIDER, model: $AI_TRANSLATE_PRIMARY_MODEL}
-        fallback: {provider: $AI_TRANSLATE_FALLBACK_PROVIDER, model: $AI_TRANSLATE_FALLBACK_MODEL}
-      on_complete:
-        - action: collect_term_pairs
-      outputs: ["output/translated.md", "output/provenance/translated.json", "output/provenance_candidates/translated.json"]
-
-    "05_concepts":
+    "07_concepts":
       label: "概念 + 摘要"
       extends: .ai-step
-      run: steps.article.step_05_concepts
-      version: "5"   # key_terms 关系边 + 独立 semantic attestor
-      # 必跑,无 rules。源优先级:智能笔记 > 译文(非中文) > original.md;一句话摘要同出。
-      # needs 04_smart/04_translate:保证笔记/译文(若有)先就绪;被跳过时依赖视为满足,本步照常跑。
-      needs: ["04_semantic_attestation"]
+      run: steps.document.step_07_concepts
+      prompt_template: 05_concepts
+      version: "1"
+      needs: ["06_semantic_attestation"]
       timeout: 120
       tags: []
       ai:
@@ -472,20 +347,19 @@ article:
         fallback: {provider: $AI_CONCEPTS_FALLBACK_PROVIDER, model: $AI_CONCEPTS_FALLBACK_MODEL}
       on_complete:
         - action: index_note
-          # 轻链路没有 smart;按最终可用内容降级,仍只索引一个版本,避免 Ask 重复证据。
           candidates:
-            - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "04_semantic_attestation", provenance_since_version: "2", legacy_provenance_step: "04_smart_article", legacy_provenance_since_version: "2"}
-            - {note_type: translated, path: "output/translated.md", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/translated.json", provenance_step: "04_semantic_attestation", provenance_since_version: "2", legacy_provenance_step: "04_translate_article", legacy_provenance_since_version: "3"}
-            - {note_type: original, path: "output/original.md", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/original.json", provenance_step: "02_parse_article", provenance_since_version: "4"}
+            - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "06_semantic_attestation", provenance_since_version: "1"}
+            - {note_type: translated, path: "output/translated.html", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/translated.json", provenance_step: "06_semantic_attestation", provenance_since_version: "1"}
+            - {note_type: original, path: "intermediate/document_index.md", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/original.json", provenance_step: "03_structure", provenance_since_version: "1"}
         - action: collect_glossary
       outputs: ["output/concepts.json"]
 
-    "04_semantic_attestation":
+    "06_semantic_attestation":
       label: "语义证据独立核验"
       extends: .ai-step
       run: steps.utils.step_semantic_attestation
-      version: "2"
-      needs: ["04_smart_article", "04_translate_article"]
+      version: "1"
+      needs: ["05_smart", "04_translate"]
       timeout: 180
       tags: []
       ai:
@@ -493,14 +367,13 @@ article:
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
       outputs: ["output/provenance/smart.json", "output/provenance/translated.json", "output/provenance/semantic_batch.json"]
 
-    "06_review":
+    "08_review":
       label: "评审"
       extends: .review
-      run: steps.article.step_05_review
-      version: "2"
-      needs: ["05_concepts"]
+      run: steps.document.step_08_review
+      version: "1"
+      needs: ["07_concepts"]
       tags: []
-      # 评审跟随智能笔记(smart_note=on 才评审)。
       rules:
         - if_flag: smart_note
           when: on
@@ -568,9 +441,9 @@ audio:
     "05_concepts":
       label: "概念 + 摘要"
       extends: .ai-step
-      run: steps.article.step_05_concepts
+      run: steps.common.step_concepts
       version: "5"
-      # 复用 article 概念步:播客以智能笔记为源。
+      # 统一概念步:播客以智能笔记为源。
       needs: ["04_semantic_attestation"]
       timeout: 120
       tags: []

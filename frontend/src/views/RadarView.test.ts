@@ -39,7 +39,7 @@ const RADAR_B = {
   rising_concepts: [{ term: '材料科学', recent: 2, prior: 0, delta: 2 }],
   new_concepts: [],
   recent_jobs: [
-    { job_id: 'b1', title: 'B 域内容', published_at: '2026-06-25T00:00:00+00:00', content_type: 'paper' },
+    { job_id: 'b1', title: 'B 域内容', published_at: '2026-06-25T00:00:00+00:00', content_type: 'document', document_kind: 'research_paper' },
   ],
   top_recent_concepts: [{ term: '材料科学', recent: 2 }],
 }

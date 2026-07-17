@@ -199,9 +199,12 @@ async def test_retrieval_quality_artifact_from_two_independent_databases(
             assert metrics["by_language"]["en"]["n"] == 32
             assert metrics["by_direction"]["zh_to_en"]["n"] == 10
             assert metrics["by_direction"]["en_to_zh"]["n"] == 10
+            assert metrics["by_content_type"]["video"]["n"] == 16
+            assert metrics["by_content_type"]["document"]["n"] == 32
+            assert metrics["by_content_type"]["audio"]["n"] == 16
             assert all(
-                metrics["by_content_type"][kind]["n"] == 16
-                for kind in ("video", "paper", "article", "audio")
+                metrics["by_document_kind"][kind]["n"] == 16
+                for kind in ("research_paper", "article")
             )
             for stratum in (
                 "exact", "paraphrase", "synonym", "cross_language", "cross_source",

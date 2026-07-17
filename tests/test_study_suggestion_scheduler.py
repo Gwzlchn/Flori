@@ -27,8 +27,9 @@ def _seed(db, *, job_id: str = "job-suggestion-scheduler") -> None:
     db.create_job(
         Job(
             id=job_id,
-            content_type="article",
-            pipeline="article",
+            content_type="document",
+            document_kind="article",
+            pipeline="document",
             status=JobStatus.DONE,
             title="反向传播",
             domain="ml",
@@ -39,7 +40,7 @@ def _seed(db, *, job_id: str = "job-suggestion-scheduler") -> None:
         "smart",
         "反向传播",
         "反向传播通过链式法则高效计算梯度。",
-        content_type="article",
+        content_type="document",
         domain="ml",
     )
     db.upsert_glossary_term("ml", "反向传播", "链式法则求梯度", status="accepted")

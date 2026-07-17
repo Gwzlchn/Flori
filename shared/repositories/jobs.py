@@ -153,7 +153,7 @@ class JobsReadRepository:
             rows = database._conn.execute(
                 f"""SELECT c.evidence_id, c.job_id, c.note_type, c.chunk_id,
                            c.chunk_body_sha256, c.source_fingerprint,
-                           n.section, n.body, j.title, j.content_type,
+                           n.section, n.body, j.title, j.content_type, j.document_kind,
                            COALESCE(j.published_at, j.created_at) AS occurred_at
                     FROM canonical_evidence c
                     JOIN jobs j ON j.id=c.job_id

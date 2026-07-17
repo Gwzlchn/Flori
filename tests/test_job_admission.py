@@ -33,7 +33,7 @@ def test_task_tags_match_scheduler_by_pool(test_config):
         test_config, "video", "03_scene", domain="tech", style_tags=["formal"],
     )
     ai = _requirement(
-        test_config, "article", "05_concepts", domain="tech", style_tags=["formal"],
+        test_config, "document", "07_concepts", domain="tech", style_tags=["formal"],
     )
 
     assert cpu.task_tags == frozenset()
@@ -62,22 +62,24 @@ def test_upload_has_no_network_zone_requirement(test_config):
 
 
 def test_flag_skip_is_excluded_but_future_artifact_rule_is_reachable(test_config):
-    article = pipeline_requirements(
-        test_config, "article", source="upload", url=None,
+    without_smart = pipeline_requirements(
+        test_config, "document", source="upload", url=None,
         domain="general", style_tags=[], flags={"smart_note": False},
     )
-    paper = pipeline_requirements(
-        test_config, "paper", source="upload", url=None,
+    with_smart = pipeline_requirements(
+        test_config, "document", source="upload", url=None,
         domain="general", style_tags=[], flags={"smart_note": True},
     )
-    article_names = {item.name for item in article}
-    paper_names = {item.name for item in paper}
+    without_smart_names = {item.name for item in without_smart}
+    with_smart_names = {item.name for item in with_smart}
 
-    assert "04_smart_article" not in article_names
-    assert "06_review" not in article_names
-    assert "04_translate_paper" in paper_names
+    assert "05_smart" not in without_smart_names
+    assert "08_review" not in without_smart_names
+    assert "05_smart" in with_smart_names
+    assert "08_review" in with_smart_names
+    assert "04_translate" in without_smart_names
     assert "read" not in next(
-        item.required_tags for item in paper if item.name == "04_translate_paper"
+        item.required_tags for item in with_smart if item.name == "04_translate"
     )
 
 
@@ -88,7 +90,7 @@ def test_paused_stale_and_reject_tag_workers_do_not_cover_pipeline(test_config):
         "reject_tags": "tech", "admin_status": "active", "last_heartbeat": heartbeat,
     }]
     requirements = pipeline_requirements(
-        test_config, "article", source="upload", url=None,
+        test_config, "document", source="upload", url=None,
         domain="tech", style_tags=[], flags={"smart_note": False},
     )
     assert not workers_cover_pipeline(workers, requirements, test_config)
@@ -106,7 +108,7 @@ def test_paused_stale_and_reject_tag_workers_do_not_cover_pipeline(test_config):
 
 def test_pool_or_provider_tag_mismatch_is_rejected(test_config):
     requirements = pipeline_requirements(
-        test_config, "article", source="upload", url=None,
+        test_config, "document", source="upload", url=None,
         domain="general", style_tags=[], flags={"smart_note": False},
     )
     wrong_pool = [_worker("io,cpu", "claude-cli")]
@@ -118,7 +120,7 @@ def test_pool_or_provider_tag_mismatch_is_rejected(test_config):
 
 def test_different_workers_may_cover_different_pipeline_steps(test_config):
     requirements = pipeline_requirements(
-        test_config, "article", source="upload", url=None,
+        test_config, "document", source="upload", url=None,
         domain="general", style_tags=[], flags={"smart_note": False},
     )
     workers = [
@@ -132,7 +134,7 @@ def test_different_workers_may_cover_different_pipeline_steps(test_config):
 
 def test_net_global_url_is_rejected_by_net_cn_only_worker(test_config):
     requirements = pipeline_requirements(
-        test_config, "article", source="web", url="https://example.com/post",
+        test_config, "document", source="web", url="https://example.com/post",
         domain="general", style_tags=[], flags={"smart_note": False},
     )
     workers = [

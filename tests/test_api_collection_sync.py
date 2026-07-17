@@ -33,7 +33,8 @@ class TestSubscriptionCollectionDB:
     def test_ingested_bvids(self, db):
         db.create_job(Job(id="j1", content_type="video", pipeline="video",
                           url="https://www.bilibili.com/video/BV1hT7k6JEq7"))
-        db.create_job(Job(id="j2", content_type="article", pipeline="article",
+        db.create_job(Job(id="j2", content_type="document", document_kind="article",
+                          pipeline="document",
                           url="https://example.com/x"))
         assert db.ingested_bvids() == {"BV1hT7k6JEq7"}
 

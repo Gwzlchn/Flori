@@ -1,0 +1,61 @@
+# 文档体裁只表达业务语义；媒介和解析能力由 source profile/capabilities 决定。
+document_kinds:
+  research_paper:
+    label: "论文"
+    description: "学术论文、预印本和会议论文"
+    note_profile: "research"
+    review_profile: "research"
+  article:
+    label: "文章"
+    description: "网页文章、博客和新闻长文"
+    note_profile: "article"
+    review_profile: "article"
+  whitepaper:
+    label: "白皮书"
+    description: "机构发布的技术或行业白皮书"
+    note_profile: "whitepaper"
+    review_profile: "document"
+  report:
+    label: "报告"
+    description: "研究、行业或项目报告"
+    note_profile: "document"
+    review_profile: "document"
+  book_chapter:
+    label: "书籍章节"
+    description: "书籍或在线教材的独立章节"
+    note_profile: "document"
+    review_profile: "document"
+  documentation:
+    label: "技术文档"
+    description: "产品、工程和 API 文档"
+    note_profile: "document"
+    review_profile: "document"
+  standard:
+    label: "标准"
+    description: "标准、规范和正式技术提案"
+    note_profile: "document"
+    review_profile: "document"
+  thesis:
+    label: "学位论文"
+    description: "硕士或博士学位论文"
+    note_profile: "research"
+    review_profile: "research"
+  unknown:
+    label: "未分类文档"
+    description: "尚无可靠体裁证据的文档"
+    note_profile: "document"
+    review_profile: "document"
+
+source_profiles:
+  scholarly_html:
+    label: "学术 HTML"
+    capabilities: [html, math, bibliography, embedded_media]
+  generic_html:
+    label: "网页 HTML"
+    capabilities: [html, embedded_media]
+  digital_pdf:
+    label: "数字 PDF"
+    capabilities: [pdf, text_layer, page_bbox]
+  scanned_pdf:
+    label: "扫描 PDF"
+    capabilities: [pdf, ocr, page_bbox]

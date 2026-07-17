@@ -11,8 +11,11 @@ from tests.steps.conftest import make_step_config
 
 
 class TestDownloadStep:
-    def _make(self, job_dir, tmp_path, url="https://example.com/v.mp4", source=None, content_type="video"):
+    def _make(self, job_dir, tmp_path, url="https://example.com/v.mp4", source=None,
+              content_type="video", document_kind=None):
         job_data = {"url": url, "content_type": content_type}
+        if document_kind:
+            job_data["document_kind"] = document_kind
         if source:
             job_data["source"] = source
         (job_dir / "job.json").write_text(json.dumps(job_data))
@@ -61,7 +64,8 @@ class TestDownloadStep:
         job_dir.mkdir()
         for d in ["input", "intermediate", "output", "assets", "logs"]:
             (job_dir / d).mkdir()
-        step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/2301.00001", content_type="paper")
+        step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/2301.00001",
+                          content_type="document", document_kind="research_paper")
         with patch.object(step, "_download_arxiv") as mock_dl:
             result = step.execute()
             mock_dl.assert_called_once_with("https://arxiv.org/abs/2301.00001")
@@ -74,7 +78,8 @@ class TestDownloadStep:
         for d in ["input", "intermediate", "output", "assets", "logs"]:
             (job_dir / d).mkdir()
         url = "https://www.usenix.org/system/files/osdi23-li-zhuohan.pdf"
-        step = self._make(job_dir, tmp_path, url=url, content_type="paper")
+        step = self._make(job_dir, tmp_path, url=url, content_type="document",
+                          document_kind="research_paper")
         with patch.object(step, "_download_pdf") as mock_dl:
             result = step.execute()
             mock_dl.assert_called_once_with(url)
@@ -173,6 +178,19 @@ class TestDownloadStep:
         assert result["source"] == "upload"
         assert (job_dir / "input" / "metadata.json").exists()
 
+    def test_document_upload_accepts_null_url(self, tmp_path):
+        job_dir = self._mk_dirs(tmp_path)
+        (job_dir / "input" / "source.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+        step = self._make(
+            job_dir, tmp_path, url=None, source="upload",
+            content_type="document", document_kind="research_paper",
+        )
+
+        result = step.execute()
+
+        assert result["source"] == "upload"
+        assert (job_dir / "input" / "metadata.json").exists()
+
     def test_metadata_extraction(self, tmp_path):
         job_dir = tmp_path / "job"
         job_dir.mkdir()
@@ -208,7 +226,8 @@ class TestDownloadStep:
         # arxiv API 元数据解析(标题去换行/作者/摘要/发布日),并入 _extract_metadata 时 API 为权威、优先于 PDF 解析。
         from types import SimpleNamespace
         job_dir = tmp_path / "job"; job_dir.mkdir(); (job_dir / "input").mkdir()
-        step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805", content_type="paper")
+        step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805",
+                          content_type="document", document_kind="research_paper")
         with patch.object(step.commands, "run", return_value=SimpleNamespace(stdout=self._ARXIV_ATOM)):
             step._fetch_arxiv_meta("1810.04805")
         m = step._arxiv_meta
@@ -224,7 +243,8 @@ class TestDownloadStep:
         # 网络类失败(curl 挂)→ 不抛、不 stash;_extract_metadata 正常返回(回退 PDF 解析)。
         from shared.step_subprocess import SubprocessFailed
         job_dir = tmp_path / "job"; job_dir.mkdir(); (job_dir / "input").mkdir()
-        step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805", content_type="paper")
+        step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805",
+                          content_type="document", document_kind="research_paper")
         with patch.object(step.commands, "run",
                           side_effect=SubprocessFailed(22, ["curl"], output="", stderr="timeout")):
             step._fetch_arxiv_meta("1810.04805")
@@ -237,7 +257,8 @@ class TestDownloadStep:
         # arxiv 返回坏响应(半截 HTML 等)→ ParseError 按网络类失败兜底,不抛不 stash。
         from types import SimpleNamespace
         job_dir = tmp_path / "job"; job_dir.mkdir(); (job_dir / "input").mkdir()
-        step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805", content_type="paper")
+        step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805",
+                          content_type="document", document_kind="research_paper")
         with patch.object(step.commands, "run", return_value=SimpleNamespace(stdout="<html>oops")):
             step._fetch_arxiv_meta("1810.04805")
         assert getattr(step, "_arxiv_meta", {}) == {}
@@ -247,7 +268,8 @@ class TestDownloadStep:
         from types import SimpleNamespace
         empty = '<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"></feed>'
         job_dir = tmp_path / "job"; job_dir.mkdir(); (job_dir / "input").mkdir()
-        step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805", content_type="paper")
+        step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805",
+                          content_type="document", document_kind="research_paper")
         with patch.object(step.commands, "run", return_value=SimpleNamespace(stdout=empty)):
             step._fetch_arxiv_meta("1810.04805")
         assert getattr(step, "_arxiv_meta", {}) == {}
@@ -256,7 +278,8 @@ class TestDownloadStep:
         # 编程/打包类错误(如曾经的 ModuleNotFoundError)不许静默吞——否则所有 arxiv 标题丢了都没人知道。
         import pytest
         job_dir = tmp_path / "job"; job_dir.mkdir(); (job_dir / "input").mkdir()
-        step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805", content_type="paper")
+        step = self._make(job_dir, tmp_path, url="https://arxiv.org/abs/1810.04805",
+                          content_type="document", document_kind="research_paper")
         with patch.object(step.commands, "run", side_effect=ModuleNotFoundError("feedparser")):
             with pytest.raises(ModuleNotFoundError):
                 step._fetch_arxiv_meta("1810.04805")
@@ -314,7 +337,8 @@ class TestDownloadStep:
         src.parent.mkdir()
         src.write_bytes(b"%PDF-1.4 fake pdf content")
 
-        step = self._make(job_dir, tmp_path, url=f"file://{src}", content_type="paper")
+        step = self._make(job_dir, tmp_path, url=f"file://{src}", content_type="document",
+                          document_kind="research_paper")
         result = step.execute()
 
         assert result["source"] == "local_file"
@@ -349,7 +373,7 @@ class TestDownloadStep:
             (job_dir / d).mkdir()
         step = self._make(job_dir, tmp_path,
                           url=f"file://{tmp_path / 'inbox' / 'gone.pdf'}",
-                          content_type="paper")
+                          content_type="document", document_kind="research_paper")
         with pytest.raises(InputInvalidError):
             step.execute()
 
@@ -363,7 +387,8 @@ class TestDownloadStep:
         src.parent.mkdir()
         src.write_text("hello article body")
 
-        step = self._make(job_dir, tmp_path, url=f"file://{src}", content_type="article")
+        step = self._make(job_dir, tmp_path, url=f"file://{src}", content_type="document",
+                          document_kind="article")
         with patch.object(step, "_download_generic") as mock_generic:
             result = step.execute()
             mock_generic.assert_not_called()

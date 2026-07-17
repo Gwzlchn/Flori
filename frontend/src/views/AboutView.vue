@@ -1,32 +1,42 @@
 <script setup lang="ts">
 // 关于 Flori(原型 #about):三层心智模型 + 真实能力概览。
-// 「四条内容流水线」从 /api/pipelines 动态拉取,configs/pipelines.yaml 为单一事实源,与实际步骤链保持一致。
+// 内容流水线从 /api/pipelines 动态拉取,服务端 metadata 是名称与适用范围的单一事实源.
 import { ref, onMounted } from 'vue'
 import { useWorkerStore } from '../stores/workers'
-import { contentTypeLabel } from '../utils/contentType'
+import { contentTypeIcon, contentTypePill, documentKindLabel } from '../utils/contentType'
+import { ensureSourceCatalog, SOURCE_PROFILE_LABELS } from '../constants/sources'
 import {
   BookOpen, Info, GitBranch, RefreshCw, FileText, Check, Send,
-  Search, Layers, Cpu, Play, Newspaper, Headphones, ChevronRight,
+  Search, Layers, Cpu, ChevronRight,
   Sparkles, Network, Tag, Server, Rss, Library, Database, Star,
 } from 'lucide-vue-next'
 
 interface PipeStep { key: string; label: string | null; pool: string | null; needs: string[] }
-interface Pipeline { name: string; steps: PipeStep[] }
+interface Pipeline {
+  name: string
+  key: string
+  label: string
+  content_types: string[]
+  document_kinds: string[]
+  source_profiles: string[]
+  steps: PipeStep[]
+}
 
 const store = useWorkerStore()
 const pipelines = ref<Pipeline[]>([])
 onMounted(async () => {
-  try { pipelines.value = await store.fetchPipelines() } catch { /* 非致命:留空,显加载态 */ }
+  try {
+    await ensureSourceCatalog()
+    pipelines.value = await store.fetchPipelines() as Pipeline[]
+  } catch { /* 非致命:留空,显加载态 */ }
 })
 
-// 内容类型 → 展示(中文名 / 图标 / 色 pill);未知类型回退。
-const CT: Record<string, { icon: any; pill: string }> = {
-  video: { icon: Play, pill: 't-video' },
-  paper: { icon: FileText, pill: 't-paper' },
-  article: { icon: Newspaper, pill: 't-article' },
-  audio: { icon: Headphones, pill: 't-audio' },
+function pipelineContentType(pipeline: Pipeline): string {
+  return pipeline.content_types[0] || pipeline.key
 }
-function ct(name: string) { return CT[name] || { icon: Layers, pill: 't-video' } }
+function sourceProfileLabel(profile: string): string {
+  return SOURCE_PROFILE_LABELS[profile] || profile
+}
 // 步骤徽章配色(复用既有 badge 语义):评审→绿、AI 步→蓝、其余→灰。
 function stepBadge(s: PipeStep): string {
   if ((s.key || '').toLowerCase().includes('review') || (s.label || '').includes('评审')) return 'b-ok'
@@ -38,7 +48,7 @@ function stepBadge(s: PipeStep): string {
 <template>
   <section class="page">
     <div class="h1"><BookOpen :size="18" />关于 Flori</div>
-    <div class="lead">自托管的 AI 学习知识库 —— 把视频 / 论文 / 文章 / 播客自动炼成结构化笔记，沉淀为按领域分桶、可检索、互相关联的个人知识体系。</div>
+    <div class="lead">自托管的 AI 学习知识库 —— 把视频、文档和音频自动炼成结构化笔记，沉淀为按领域分桶、可检索、互相关联的个人知识体系。</div>
     <div style="margin-top:10px;color:var(--ink-600);font-size:13px">名字来源：Flori 取自拉丁语 <i>florilegium</i>（“采花集”）——中世纪指从群书中采撷精华、汇编成册的选集，正是“把素材摘录、沉淀为知识”的隐喻。</div>
 
     <!-- 这是什么 -->
@@ -52,7 +62,7 @@ function stepBadge(s: PipeStep): string {
           <div style="display:flex;align-items:center;gap:7px;color:var(--ink-900);font-weight:600;font-size:13.5px">
             <FileText :size="15" class="dim" />原始 / 机械材料
           </div>
-          <div class="l" style="margin-top:5px">视频保留逐字稿、关键帧、OCR 与弹幕；论文、文章和音频保留各自的原文、章节或转写，可回到来源核对。</div>
+          <div class="l" style="margin-top:5px">视频保留逐字稿、关键帧、OCR 与弹幕；文档保留原生 HTML 或 PDF、结构与定位；音频保留转写，均可回到来源核对。</div>
         </div>
         <div class="metric">
           <div style="display:flex;align-items:center;gap:7px;color:var(--ink-900);font-weight:600;font-size:13.5px">
@@ -85,15 +95,19 @@ function stepBadge(s: PipeStep): string {
       <div class="note-tip" style="margin-top:11px">采纳的概念会回流到该领域的 Prompt Profile，让后续 AI 笔记的措辞逐步统一。</div>
     </div>
 
-    <!-- 四条内容流水线 -->
+    <!-- 内容处理流水线 -->
     <div class="card pad" style="margin-top:16px">
-      <div class="card-h"><RefreshCw :size="15" />四条内容流水线</div>
-      <p class="note-tip" style="margin-top:-4px;margin-bottom:13px">每种内容走各自的步骤链；步骤间以 JSON / MD 文件通信，输入指纹未变则跳过（幂等）。</p>
+      <div class="card-h"><RefreshCw :size="15" />内容处理流水线</div>
+      <p class="note-tip" style="margin-top:-4px;margin-bottom:13px">Video、Document、Audio 共用统一执行约定；步骤间以文件通信，输入指纹未变则跳过（幂等）。</p>
       <div class="list">
-        <div v-for="p in pipelines" :key="p.name" class="row" style="cursor:default;align-items:flex-start">
-          <span class="type-pill" :class="ct(p.name).pill"><component :is="ct(p.name).icon" :size="17" /></span>
+        <div v-for="p in pipelines" :key="p.key" class="row" style="cursor:default;align-items:flex-start">
+          <span class="type-pill" :class="contentTypePill(pipelineContentType(p))"><component :is="contentTypeIcon(pipelineContentType(p))" :size="17" /></span>
           <div class="body">
-            <div class="title">{{ contentTypeLabel(p.name) }}<span style="font-weight:400;color:var(--ink-400);margin-left:7px;font-size:12px">{{ p.steps.length }} 步</span></div>
+            <div class="title">{{ p.label }}<span style="font-weight:400;color:var(--ink-400);margin-left:7px;font-size:12px">{{ p.steps.length }} 步</span></div>
+            <div v-if="p.key === 'document'" class="pipeline-scope">
+              <span>{{ p.document_kinds.map(documentKindLabel).join('、') }}</span>
+              <span>{{ p.source_profiles.map(sourceProfileLabel).join('、') }}</span>
+            </div>
             <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">
               <span v-for="s in p.steps" :key="s.key" class="badge" :class="stepBadge(s)">{{ s.label || s.key }}</span>
             </div>
@@ -101,7 +115,7 @@ function stepBadge(s: PipeStep): string {
         </div>
         <div v-if="!pipelines.length" class="note-tip" style="margin:0">流水线信息加载中…</div>
       </div>
-      <div class="note-tip" style="margin-top:11px">视频智能版走<b>两段式</b>：先逐帧看图产出视觉描述，再据机械稿 + 视觉描述纯文本成稿。</div>
+      <div class="note-tip" style="margin-top:11px">Document 中论文、文章、白皮书等体裁决定展示与 Prompt profile；HTML、数字 PDF、扫描 PDF 等来源能力决定 adapter。</div>
     </div>
 
     <!-- 三层心智模型 -->
@@ -111,7 +125,7 @@ function stepBadge(s: PipeStep): string {
         <tbody>
           <tr><td>领域知识库</td><td>按知识范围分桶、互相隔离 —— 你知识体系的一级容器，由内容与概念派生而成</td></tr>
           <tr><td>集合</td><td>领域内对内容的分组 —— 手动收藏，或连接一个受支持的订阅源；订阅是集合的一种属性</td></tr>
-          <tr><td>内容</td><td>每条投递的视频 · 论文 · 文章 · 播客，可归入集合并产出对应原始材料与智能笔记</td></tr>
+          <tr><td>内容</td><td>每条投递的视频、文档或音频；文档再按论文、文章、白皮书等体裁组织，可归入集合并产出原始材料与智能笔记</td></tr>
         </tbody>
       </table>
       <div class="note-tip" style="margin-top:9px">在这三层之上，<b>概念图</b>横向贯通所有内容：术语、主题与时间线跨来源互相引用。</div>
@@ -170,14 +184,14 @@ function stepBadge(s: PipeStep): string {
           </div>
         </div>
         <div class="row" style="cursor:default">
-          <span class="type-pill t-article"><Server :size="17" /></span>
+          <span class="type-pill t-document"><Server :size="17" /></span>
           <div class="body">
             <div class="title">分布式 Worker</div>
             <div class="meta"><span>资源池 + 标签亲和；远程 worker 经 API 网关单条出站 HTTPS 接入，不直连中心 Redis / MinIO，可随时加一台 GPU 机器</span></div>
           </div>
         </div>
         <div class="row" style="cursor:default">
-          <span class="type-pill t-paper"><Star :size="17" /></span>
+          <span class="type-pill t-document"><Star :size="17" /></span>
           <div class="body">
             <div class="title">质量评审</div>
             <div class="meta"><span>每篇智能笔记按多维度打分，并析出可采纳的关键概念</span></div>
@@ -203,7 +217,7 @@ function stepBadge(s: PipeStep): string {
         </div>
         <div class="row" style="cursor:default">
           <span class="badge b-info">first-pass</span>
-          <div class="body"><div class="meta"><span>四类摄入、FTS5 Search / Ask / MCP、订阅、概念图、评审、手工建卡 SRS、知识雷达与远程 Worker 网关</span></div></div>
+          <div class="body"><div class="meta"><span>三类内容族摄入、FTS5 Search / Ask / MCP、订阅、概念图、评审、手工建卡 SRS、知识雷达与远程 Worker 网关</span></div></div>
         </div>
         <div class="row" style="cursor:default">
           <span class="badge b-mut">未开始</span>
@@ -226,3 +240,7 @@ function stepBadge(s: PipeStep): string {
     </div>
   </section>
 </template>
+
+<style scoped>
+.pipeline-scope { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; color: var(--ink-500); font-size: 12px; }
+</style>

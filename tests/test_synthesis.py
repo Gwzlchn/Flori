@@ -16,7 +16,7 @@ import json
 import pytest
 
 from shared.db import Database
-from shared.models import LLMResponse
+from shared.models import Job, LLMResponse
 from api.services import synthesis
 from tests.current_schema_db import clone_current_schema_database
 
@@ -25,6 +25,22 @@ from tests.current_schema_db import clone_current_schema_database
 
 
 def _seed(db: Database) -> None:
+    for job in (
+        Job(id="j_bp", content_type="video", pipeline="video", domain="ml"),
+        Job(
+            id="j_grad", content_type="document", document_kind="research_paper",
+            pipeline="document", domain="ml",
+        ),
+        Job(
+            id="j_attn", content_type="document", document_kind="research_paper",
+            pipeline="document", domain="ml",
+        ),
+        Job(
+            id="j_cook", content_type="document", document_kind="article",
+            pipeline="document", domain="food",
+        ),
+    ):
+        db.create_job(job)
     db.index_job_notes(
         "j_bp", "smart", "反向传播详解",
         "反向传播算法通过链式法则计算梯度,是神经网络训练的核心。多数资料认为它高效且稳定。",
@@ -33,17 +49,17 @@ def _seed(db: Database) -> None:
     db.index_job_notes(
         "j_grad", "smart", "梯度下降综述",
         "梯度下降依赖反向传播得到的梯度更新参数。有人认为学习率难调是其主要缺点。",
-        content_type="paper", domain="ml", collection_id="c_ai",
+        content_type="document", domain="ml", collection_id="c_ai",
     )
     db.index_job_notes(
         "j_attn", "smart", "注意力机制",
         "自注意力机制让模型并行处理序列,同样依赖反向传播训练。",
-        content_type="paper", domain="ml", collection_id="c_ai",
+        content_type="document", domain="ml", collection_id="c_ai",
     )
     db.index_job_notes(
         "j_cook", "smart", "红烧肉做法",
         "先焯水再炒糖色,小火慢炖一小时即可。",
-        content_type="article", domain="food", collection_id="",
+        content_type="document", domain="food", collection_id="",
     )
     # 术语表:其 term 出现在问句中时应被 derive_queries 采为高信噪检索词。
     db.upsert_glossary_term("ml", "反向传播", "误差反传算法")
@@ -55,32 +71,27 @@ def _seed(db: Database) -> None:
 
 class TestDeriveQueries:
     def test_extracts_keywords_drops_stopwords(self, db):
-        _seed(db)
         qs = synthesis.derive_queries("反向传播是如何工作的?", db, domain="ml")
         # 停用词 "是/如何/的" 不应作为单独检索词;实义词应在。
         assert "的" not in qs and "如何" not in qs
         assert any("反向传播" in q or "传播" in q for q in qs)
 
     def test_includes_glossary_terms(self, db):
-        _seed(db)
         qs = synthesis.derive_queries("反向传播和梯度下降有什么区别?", db, domain="ml")
         # 两个术语表词都出现在问句中 → 应被采为检索词(且因术语优先,排在前面)。
         assert "反向传播" in qs
         assert "梯度下降" in qs
 
     def test_glossary_not_in_question_excluded(self, db):
-        _seed(db)
         qs = synthesis.derive_queries("注意力机制怎么并行?", db, domain="ml")
         assert "反向传播" not in qs  # 该术语未出现在问句
 
     def test_capped_at_max(self, db):
-        _seed(db)
         long_q = "反向传播 梯度下降 注意力机制 卷积神经网络 循环神经网络 强化学习 生成对抗网络"
         qs = synthesis.derive_queries(long_q, db, domain="ml")
         assert len(qs) <= 6
 
     def test_ascii_tokens_and_dedup(self, db):
-        _seed(db)
         qs = synthesis.derive_queries("transformer transformer model", db, domain="ml")
         assert qs.count("transformer") == 1  # 去重
         assert "transformer" in qs
@@ -91,7 +102,6 @@ class TestDeriveQueries:
 
 class TestRetrieve:
     def test_union_and_dedupe_across_queries(self, db):
-        _seed(db)
         # "反向传播" 命中三篇 ml;问句拆词后并集去重应覆盖多篇且每篇只一次。
         passages = synthesis.retrieve(db, "反向传播和梯度下降哪个更重要?", domain="ml", k=8)
         job_ids = [p["job_id"] for p in passages]
@@ -99,28 +109,25 @@ class TestRetrieve:
         assert "j_bp" in job_ids and "j_grad" in job_ids
 
     def test_bodies_attached(self, db):
-        _seed(db)
         passages = synthesis.retrieve(db, "反向传播", domain="ml", k=8)
         bp = next(p for p in passages if p["job_id"] == "j_bp")
         assert "链式法则" in bp["body"]
         assert set(bp) == {
-            "job_id", "note_type", "title", "domain", "content_type", "body", "evidence",
+            "job_id", "note_type", "title", "domain", "content_type",
+            "document_kind", "body", "evidence",
         }
         assert bp["evidence"]["chunk_id"] == "j_bp:smart:0"
 
     def test_domain_scope(self, db):
-        _seed(db)
         # 限定 food 域:ml 笔记不应出现。
         passages = synthesis.retrieve(db, "反向传播", domain="food", k=8)
         assert all(p["domain"] == "food" for p in passages)
         assert "j_bp" not in {p["job_id"] for p in passages}
 
     def test_no_match_returns_empty(self, db):
-        _seed(db)
         assert synthesis.retrieve(db, "量子计算机超导体", domain="ml", k=8) == []
 
     def test_no_chunks_returns_empty(self, db):
-        _seed(db)
         db._conn.execute("DELETE FROM note_chunks")
         db._conn.execute("DELETE FROM note_chunks_fts5")
         db._conn.commit()
@@ -147,15 +154,18 @@ class TestRetrieve:
                 rows = {
                     "first": [
                         {"chunk_id": "noise:smart:0", "job_id": "noise", "note_type": "smart",
-                         "title": "noise", "domain": "ml", "content_type": "paper",
+                         "title": "noise", "domain": "ml", "content_type": "document",
+                         "document_kind": "research_paper",
                          "body": "noise", "snippet": "noise", "section": "", "evidence": evidence},
                         {"chunk_id": "target:smart:0", "job_id": "target", "note_type": "smart",
-                         "title": "target", "domain": "ml", "content_type": "paper",
+                         "title": "target", "domain": "ml", "content_type": "document",
+                         "document_kind": "research_paper",
                          "body": "target", "snippet": "target", "section": "", "evidence": evidence},
                     ],
                     "second": [
                         {"chunk_id": "target:smart:0", "job_id": "target", "note_type": "smart",
-                         "title": "target", "domain": "ml", "content_type": "paper",
+                         "title": "target", "domain": "ml", "content_type": "document",
+                         "document_kind": "research_paper",
                          "body": "target", "snippet": "target", "section": "", "evidence": evidence},
                     ],
                 }[query]
@@ -220,7 +230,8 @@ class TestRetrieve:
                 rows.append({
                     "chunk_id": "other:smart:0", "job_id": "other",
                     "note_type": "smart", "title": "other", "domain": "ml",
-                    "content_type": "paper", "body": "other", "snippet": "other",
+                    "content_type": "document", "document_kind": "research_paper",
+                    "body": "other", "snippet": "other",
                     "section": "", "evidence": evidence,
                 })
                 return len(rows), rows
@@ -255,7 +266,8 @@ class TestBuildPrompt:
                 "body": "正文A", "evidence": {"chunk_id": "a:smart:0", "section": ""},
             },
             {
-                "job_id": "b", "title": "B", "domain": "ml", "content_type": "paper",
+                "job_id": "b", "title": "B", "domain": "ml",
+                "content_type": "document", "document_kind": "research_paper",
                 "body": "正文B", "evidence": {"chunk_id": "b:smart:0", "section": ""},
             },
         ]
@@ -463,7 +475,8 @@ class TestAITasksEndpoints:
         }])
         replacement_manifest = build_source_manifest("at_done", "替换来源", [{
             "job_id": "j_fake", "title": "伪造来源", "domain": "ml",
-            "content_type": "article", "note_type": "smart",
+            "content_type": "document", "document_kind": "article",
+            "note_type": "smart",
             "artifact_sha256": "b" * 64,
             "body": "伪造来源声称模型会自动获得意识。",
             "evidence": {"chunk_id": "j_fake:smart:0", "section": "伪造"},
@@ -542,7 +555,8 @@ class TestAITasksEndpoints:
         }])
         replacement_manifest = build_source_manifest("at_err", "伪造", [{
             "job_id": "j_fake", "title": "伪造", "domain": "ml",
-            "content_type": "article", "note_type": "smart",
+            "content_type": "document", "document_kind": "article",
+            "note_type": "smart",
             "artifact_sha256": "b" * 64,
             "body": "伪造来源。",
             "evidence": {"chunk_id": "j_fake:smart:0", "section": "伪造"},

@@ -24,8 +24,7 @@
 
   /* 内容类型(Notion tag 柔和色) */
   --t-video:#2383e2; --t-video-bg:#eaf3fb;
-  --t-paper:#9065b0; --t-paper-bg:#f4eef8;
-  --t-article:#448361; --t-article-bg:#edf3ee;
+  --t-document:#6155a6; --t-document-bg:#f1eff8;
   --t-audio:#d9730d; --t-audio-bg:#faf0e6;
 
   /* 形: Notion 小圆角,扁平阴影 */
@@ -158,8 +157,7 @@ i[data-lucide]{width:16px;height:16px;stroke-width:1.75;flex:none}
 /* 内容类型图标块 */
 .type-pill{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;flex:none}
 .t-video{background:var(--t-video-bg);color:var(--t-video)}
-.t-paper{background:var(--t-paper-bg);color:var(--t-paper)}
-.t-article{background:var(--t-article-bg);color:var(--t-article)}
+.t-document{background:var(--t-document-bg);color:var(--t-document)}
 .t-audio{background:var(--t-audio-bg);color:var(--t-audio)}
 
 /* DOMAIN CARDS */

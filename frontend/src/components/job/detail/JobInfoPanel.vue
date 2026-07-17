@@ -2,7 +2,8 @@
 import { ref } from 'vue'
 import { ChevronDown, ExternalLink, GitBranch, Info, RotateCcw, Trash2 } from 'lucide-vue-next'
 import StatusBadge from '../../common/StatusBadge.vue'
-import { contentTypeLabel } from '../../../utils/contentType'
+import { contentTypeLabel, documentKindLabel } from '../../../utils/contentType'
+import { SOURCE_PROFILE_LABELS } from '../../../constants/sources'
 import { fmtDateTime, fmtDuration } from '../../../utils/datetime'
 import type { JobDetail } from '../../../types'
 import { languageName } from '../../../utils/language'
@@ -38,6 +39,13 @@ function fmtSize(media: { file_size_bytes?: number; file_size_mb?: number }): st
   while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++ }
   return `${value.toFixed(value >= 100 || unit === 0 ? 0 : 1)} ${units[unit]}`
 }
+
+function authorNames(value: unknown): string {
+  if (!Array.isArray(value)) return ''
+  return value.map((item) => (
+    typeof item === 'string' ? item : String(item?.name ?? '')
+  )).filter(Boolean).join('、')
+}
 </script>
 
 <template>
@@ -45,7 +53,9 @@ function fmtSize(media: { file_size_bytes?: number; file_size_mb?: number }): st
     <div class="card-h"><Info :size="15" />内容信息</div>
     <table class="kv"><tbody>
       <tr><td>标题</td><td>{{ job.title || '—' }}</td></tr><tr><td>类型</td><td>{{ contentTypeLabel(job.content_type) }}</td></tr>
-      <tr><td>来源</td><td>{{ sourceDisplay }}</td></tr><tr v-if="job.media?.authors?.length"><td>作者</td><td>{{ job.media.authors.join('、') }}</td></tr>
+      <tr v-if="job.document_kind"><td>文档类别</td><td>{{ documentKindLabel(job.document_kind) }}</td></tr>
+      <tr v-if="job.source_profile"><td>原文形态</td><td>{{ SOURCE_PROFILE_LABELS[job.source_profile] || job.source_profile }}</td></tr>
+      <tr><td>来源</td><td>{{ sourceDisplay }}</td></tr><tr v-if="authorNames(job.media?.authors)"><td>作者</td><td>{{ authorNames(job.media?.authors) }}</td></tr>
       <tr><td>发布时间</td><td>{{ fmtDateTime(job.published_at) }}</td></tr>
       <tr v-if="job.media?.duration_sec"><td>时长</td><td>{{ fmtDuration(job.media.duration_sec) }}</td></tr>
       <tr v-if="job.media?.resolution"><td>分辨率</td><td class="mono">{{ job.media.resolution }}</td></tr>

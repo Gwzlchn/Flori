@@ -12,7 +12,7 @@ import pytest
 
 import shared.db as db_module
 from shared.db import Database
-from shared.migrations import v0006_concept_definition_history as migration_current
+from shared.migrations import v0007_unified_document as migration_current
 from shared.models import Collection, Job, JobStatus
 from shared.study_suggestions import (
     StudySuggestionConflictError,
@@ -41,8 +41,9 @@ def _seed(
     db.create_job(
         Job(
             id=job_id,
-            content_type="article",
-            pipeline="article",
+            content_type="document",
+            document_kind="article",
+            pipeline="document",
             status=JobStatus.DONE,
             title=f"title-{job_id}",
             domain=domain,
@@ -55,7 +56,7 @@ def _seed(
         "smart",
         f"title-{job_id}",
         body,
-        content_type="article",
+        content_type="document",
         domain=domain,
     )
     db.upsert_glossary_term(domain, concept, "用链式法则求梯度", status="accepted")
@@ -865,7 +866,7 @@ class TestStudySuggestionDb:
             "smart",
             "changed",
             "## 新版\n\n这段正文已经改变。",
-            content_type="article",
+            content_type="document",
             domain="ml",
         )
         current = db.get_study_suggestion(suggestion["suggestion_id"])
@@ -941,8 +942,9 @@ class TestStudySuggestionDb:
 
         db.create_job(Job(
             id="source-v2",
-            content_type="article",
-            pipeline="article",
+            content_type="document",
+            document_kind="article",
+            pipeline="document",
             status=JobStatus.DONE,
             title="source-v2",
             domain="ml",
@@ -968,8 +970,9 @@ class TestStudySuggestionDb:
         batch, suggestion = _ready(db, job_id="source-v1")
         db.create_job(Job(
             id="source-v2",
-            content_type="article",
-            pipeline="article",
+            content_type="document",
+            document_kind="article",
+            pipeline="document",
             status=JobStatus.DONE,
             title="source-v2",
             domain="ml",
@@ -1003,8 +1006,9 @@ class TestStudySuggestionDb:
         ] == "valid"
         db.create_job(Job(
             id="source-v2",
-            content_type="article",
-            pipeline="article",
+            content_type="document",
+            document_kind="article",
+            pipeline="document",
             status=JobStatus.DONE,
             title="source-v2",
             domain="ml",
@@ -1049,8 +1053,9 @@ class TestStudySuggestionDb:
         with pytest.raises(RuntimeError, match="fault:source-v1"):
             db.create_job(Job(
                 id="source-v2",
-                content_type="article",
-                pipeline="article",
+                content_type="document",
+                document_kind="article",
+                pipeline="document",
                 status=JobStatus.DONE,
                 title="source-v2",
                 domain="ml",
@@ -1089,8 +1094,9 @@ class TestStudySuggestionDb:
         def supersede() -> None:
             second.create_job(Job(
                 id="source-v2",
-                content_type="article",
-                pipeline="article",
+                content_type="document",
+                document_kind="article",
+                pipeline="document",
                 status=JobStatus.DONE,
                 title="source-v2",
                 domain="ml",

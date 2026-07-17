@@ -42,7 +42,8 @@ function askResp(over: Record<string, any> = {}) {
         }],
       },
       {
-        job_id: 'j_grad', title: '梯度下降综述', domain: 'ml', content_type: 'paper',
+        job_id: 'j_grad', title: '梯度下降综述', domain: 'ml',
+        content_type: 'document', document_kind: 'research_paper',
         evidence: {
           chunk_id: 'j_grad:smart:0', note_type: 'smart', section: '方法', snippet: '梯度下降',
           chunk_index: 0, char_start: 0, char_end: 520, timestamp_sec: null,
