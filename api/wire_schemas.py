@@ -113,6 +113,8 @@ class JobRerunSmartResponse(JobRerunResponse):
 class JobRebuildResponse(JobStatusResponse):
     parent_job_id: str | None
     lineage_key: str | None
+    from_step: str | None = None
+    processing_mode: Literal["full", "mechanical_only"]
 
 
 class JobRebuiltItem(WireModel):

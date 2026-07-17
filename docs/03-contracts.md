@@ -103,9 +103,17 @@ arXiv 推断为 `document/research_paper`，非 arXiv 直链 PDF 推断为 `docu
 `document_kind=article` 默认关闭，其他顶层类型/Document kind 默认开启。概念提取仍执行；关闭时跳过
 Document `05_smart` 和 `08_review`。该开关写入 `job.meta.flags`，由 scheduler 的规则求值。
 
+可选字段 `mechanical_only`(bool,默认 `false`)定义纯机械处理范围。为 `true` 时入口门禁不要求
+AI Worker,scheduler 对当前及未来所有 `pool=ai` 步骤统一标记 `skipped(reason=mechanical_only)`,这些
+步骤不得进入 `queue:ai`、占用 AI slot、调用 provider 或写 `ai_usage`。非 AI 步仍按原 DAG 推进,
+依赖中的 skipped 视为已满足;全部机械步骤完成后 job 的通用 `status` 为 `done`,同时响应以
+`processing_mode=mechanical_only`、`completion_scope=mechanical` 明确表示这不是完整 AI 处理。
+该 flag 同时持久化到 `jobs.meta.flags` 与 `job.json.flags`;未传字段的旧客户端保持完整模式。
+
 #### POST /api/jobs/upload — 文件上传创建
 
-Query 必须携带 `content_type=video|document|audio`；Document 可额外携带 `document_kind`。它让 API 能在读取 multipart body 前完成
+Query 必须携带 `content_type=video|document|audio`；Document 可额外携带 `document_kind`,所有类型可携带
+`mechanical_only=true|false`。它让 API 能在读取 multipart body 前完成
 限流与 Worker 门禁。`multipart/form-data` 包含 `file`（必填）+ `domain`（默认 `general`）+
 `style_tags`（JSON 字符串，默认 `[]`）。body 解析后会再次按文件扩展名推导类型并与 query 比对，
 缺少 query、未知类型或两者不一致均返回 `422 invalid_request`，且前两种拒绝不会调用 ASGI receive。
@@ -372,6 +380,23 @@ Response `200`:
 {"job_id": "j_20260516_abc123", "status": "processing"}
 ```
 
+#### POST /api/jobs/{id}/continue-ai — 从纯机械终态继续 AI
+
+仅允许 `is_current=true,status=done` 且步骤均为 `done|skipped` 的纯机械快照。端点先按完整模式重新
+执行 Worker admission,再 fork 一个 `mechanical_only=false,smart_note=true` 的不可变新快照。父机械
+快照不修改。新快照从当前 pipeline 中所有“没有 AI 祖先的 AI 根”开始,重置这些根及其 DAG 下游的
+done marker 和声明 outputs,因此 AI 后面的机械汇总步骤也会重算,不会复用基于 skipped AI 生成的旧产物。
+同一父快照固定使用 durable `continue-ai:v1` operation key,重复点击返回同一新快照。
+
+Response `200`:
+```json
+{"job_id": "jr_xxx", "status": "pending"}
+```
+
+job 不存在返回 `404`;机械快照仍在运行、不是 current、步骤未全部终态或已不在纯机械模式返回 `409`;
+完整模式 Worker 不足返回 `503 no_workers`。若首次事件发布在快照提升后失败,父快照虽已 non-current,
+重复调用仍会定位 matching ready child 并补发事件,不再要求 Worker admission。创建成功后前端跳转到返回的新 `job_id`。
+
 #### POST /api/jobs/{id}/rebuild — 重建为新版本快照(P2c fork)
 
 基于当前 pipeline/prompt 定义,把该 job【fork 成一个新版本快照】(同 lineage、新时间戳 id):
@@ -379,15 +404,54 @@ clone 父 job 的产物 + `.{step}.done` 播种新 job_dir → 走 `submit_job`,
 【定义已变(`def_digest` 不符)的步及其下游】,未变步跳过;**旧版本保留供 A/B**,新版自动成为该 lineage 的 `is_current`。
 (不走 `rerun(from_step)`——那 unlink 本地 `.done` 在对象存储是 no-op;用 clone 播种 + 指纹。)
 
+请求体可省略。需要把已有 full job 分叉成纯机械快照时传:
+```json
+{"mechanical_only":true,"from_step":"02_parse","idempotency_key":"u18-paper-001"}
+```
+
+- `mechanical_only` 可选;传值只修改新快照的 `jobs.meta.flags` 与 `job.json.flags`,父快照不变。
+- `from_step` 可选,必须是该 job 当前 pipeline 的真实步骤名。新快照 clone 完成后删除该步及
+  DAG 下游的 `.{step}.done` 和各步 `outputs` 声明匹配的旧产物;上游 done/产物与父快照全部保持不变。
+  上游步骤同时继承 DB 终态,防止 `new_job` 初始化把它们降回 waiting 后重新下载/转写;每个 done 上游
+  必须同时有 DB `done` 与中心 `.{step}.done` marker,skipped 上游必须有 DB `skipped`,缺失或非终态返回
+  `409`。glob 先基于中心存储文件清单展开再逐对象删除,未知步骤在 clone/DB 前返回 `422`。
+- `idempotency_key` 可选,长度 `1..128`,只允许字母、数字、`.`、`_`、`:`、`-`。同一 parent + key
+  使用确定性目标 job ID,请求参数指纹写入新 job meta 与 `job.json.rebuild_request`。相同 key+参数的
+  顺序或并发重放均返回同一 job;相同 key 改参数返回 `409`。省略 key 时 API 按请求参数、目标
+  `pipeline_digest` 和已解析 prompt overrides 派生 `rebuild-default` operation key。空 body/前端重放不会
+  重复 fork,而 pipeline/prompt 定义更新会得到新 operation;确需同定义再建一版必须显式传新 key。
+
+首次请求在短 Redis 临界区内原子插入 `is_current=false,status=processing,phase=cloning` 的 DB reservation,
+随后释放 Redis 锁并在长 clone 期间每 10 秒写 DB owner heartbeat。只有同一 owner 能把 reservation 原子
+提升为 `is_current=true,status=pending,phase=ready`;父 current 在 clone 完整成功前不降级。为避免暂停进程
+与接管者同时写 deterministic target,系统不自动接管过期 reservation;发现 heartbeat 过期返回 `409`,要求
+运维受控清理 reservation/target 后再重试。heartbeat 在 DB 单事务内只允许 patch
+`owner_token` 匹配、`phase=cloning,is_current=0` 的 reservation,不得用旧 meta 覆盖 ready/event checkpoint。
+
+首次 clone 还要求 parent 不处于 `pending|downloading|processing`,否则返回 `409`,防止 clone 得到跨执行时点
+的 artifacts/markers。已有 matching ready reservation 的 durable replay 先于该安全门和 full Worker admission,
+因此事件补偿不会因 parent 状态或 Worker 暂时离线而被阻断。
+
+RemoteStorage clone 任一对象复制失败即 fail-closed,不得带缺失对象建 DB 快照。clone/job.json/marker/output
+清理阶段失败会删除整个 deterministic target 与本次 reservation;reservation insert 失败时尚未写 target。
+快照提升成功后 DB 行保留完整快照,
+`rebuild_request.event_published=false` 明确标记 durable `new_job` 的 crash window;同 key 重试只在该位
+为 false 时补发事件并置 true,已成功快照的普通重放不重复入队。collection `job_count` 不做可重放的
+`+1`,而是按 `jobs` 真值幂等重算,因此 event/响应失败后的重试不会重复累计。
+
 Response `200`:
 ```json
-{"job_id": "jobs_document_xxx_260627...", "parent_job_id": "jobs_document_xxx", "lineage_key": "jobs_document_xxx", "status": "pending"}
+{"job_id":"jr_xxx","parent_job_id":"jobs_document_xxx","lineage_key":"jobs_document_xxx","status":"pending","from_step":"02_parse","processing_mode":"mechanical_only"}
 ```
 
 #### POST /api/jobs/rebuild-stale — 批量重建所有过期内容(P2c)
 
-遍历 current 作业,对【过期者】(其某步 `.done` 存的 `def_digest` ≠ 当前 pipeline 该步 `def_digest`;
-缺 `def_digest` 键的老 `.done` 保守判过期)逐个走 `/rebuild`。Response `200`:
+遍历 current 作业,跳过 `pending|downloading|processing` 候选,对【过期者】(其某步 `.done` 存的
+`def_digest` ≠ 当前 pipeline 该步 `def_digest`;缺键保守判过期)从 `first_changed_step` 重建。
+operation key 由 `lineage_key + pipeline_digest + first_changed_step` 派生,连续调用不会在新 worker
+重写 marker 前反复 fork。继承到 full 模式时必须重新通过完整 Worker admission;机械模式只要求机械 Worker。
+若 stale rebuild 已提升 current 但事件未发布,入口在跳过 pending current 前先补发该 matching child。
+Response `200`:
 ```json
 {"rebuilt": 3, "items": [{"parent_job_id": "...", "job_id": "...", "from_step": "05_smart"}]}
 ```
@@ -1024,7 +1088,7 @@ curl -X POST http://localhost:8000/api/collections \
   -d '{"name": "CS336", "domain": "deep-learning", "source_type": "youtube_playlist", "source_id": "https://www.youtube.com/playlist?list=PL...", "sync_now": true}'
 ```
 
-请求体字段：`name`、`domain`（必填）、`description`、`tags`（默认 `[]`）、`source_type`/`source_id`（成对给出才算订阅）、`sync_now`（默认 `true`，仅订阅集合有效，建后立即首次同步）。
+请求体字段：`name`、`domain`（必填）、`description`、`tags`（默认 `[]`）、`source_type`/`source_id`（成对给出才算订阅）、`sync_now`（默认 `true`，仅订阅集合有效，建后立即首次同步）、`mechanical_only`（默认 `false`，仅影响本次首次同步中新建的 job）。
 
 <!-- contract: 集合存纯名 name + 派生来源标签 source_label（不拼接入库），显示 = name + 来源徽标 -->
 
@@ -1077,10 +1141,15 @@ curl -X PUT http://localhost:8000/api/collections/c_xxx \
 
 #### POST /api/collections/{id}/sync — 立即同步
 
-仅订阅集合可调，枚举来源 → 与已入库去重 → 复用未归类的同源 current lineage 或新建 job 归入本集合，并刷新 `last_synced_at`。
+仅订阅集合可调，枚举来源 → 与已入库去重 → 复用未归类的同源 current lineage 或新建 job 归入本集合，并刷新 `last_synced_at`。请求体可省略；传 `{"mechanical_only": true}` 时仅让本轮新建 job 使用纯机械模式。该选项不写入集合配置，不改变后续自动追更默认值，也不改写已复用 job 的原处理模式。
 
 ```bash
 curl -X POST http://localhost:8000/api/collections/c_xxx/sync
+
+# 本轮只创建纯机械 job
+curl -X POST http://localhost:8000/api/collections/c_xxx/sync \
+  -H "Content-Type: application/json" \
+  -d '{"mechanical_only": true}'
 ```
 
 Response `200`：
@@ -2581,6 +2650,10 @@ default:
 替换在同一 SQLite 事务中幂等执行；job 进 done 前重放所有已完成步骤的声明，失败时保持 active 并由周期对账收敛。
 
 pipeline 中的 `step.name` 是唯一运行时身份。复用共同步骤模块或通过 `prompt_template` 复用正文都不改变这个身份；done marker、progress、AI log、provider override 和 prompt override 全部使用运行时名。
+
+`mechanical_only` 是 DAG 的 pool 级硬门,不维护 AI 步骤名白名单。新增 `pool=ai` 步自动受该门约束;
+入口 admission 与 scheduler 使用同一规则,避免入口放行后仍入 AI 队列。`continue-ai` 不原地改运行态;
+它 fork full 快照并重置所有 AI 根的 DAG 下游,机械父快照保持不可变。
 
 > **AI provider / model 显式规则**：`ai.provider` 和 `ai.model` 必须在任务配置或载荷中显式出现,不得由 `pool=ai`、worker 名称或运行时默认推断 provider。pipeline 和独立 AI task 必须使用具体模型名（如 `claude-opus-4-8[1m]`、Codex CLI 可接受的模型名、`moonshot-v1-128k`）。缺 provider 或缺 model 是契约错误,不得用运行时默认值补齐。
 

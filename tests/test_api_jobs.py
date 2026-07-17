@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -9,7 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from shared.config import AppConfig, load_config
-from shared.models import Collection, Job
+from shared.models import Collection, Job, JobStatus, Step, StepStatus
 from api.main import create_app
 from api.routes.jobs import _detect_content_type, _pipeline_for
 
@@ -74,6 +76,106 @@ def app(db, mock_redis, test_config):
 
 
 class TestCreateJob:
+    async def _complete_mechanical_job(self, app, job_id: str) -> None:
+        job = app.state.db.get_job(job_id)
+        for cfg in app.state.config.pipelines[job.pipeline]["steps"]:
+            is_ai = cfg["pool"] == "ai"
+            status = StepStatus.SKIPPED if is_ai else StepStatus.DONE
+            app.state.db.upsert_step(Step(
+                job_id=job_id, name=cfg["name"], status=status,
+                pool=cfg["pool"], input_hash=f"parent:{cfg['name']}",
+            ))
+            if not is_ai:
+                await app.state.storage.write_file(
+                    job_id, f".{cfg['name']}.done", b'{"def_digest":"sha256:old"}',
+                )
+        app.state.db.update_job(job_id, status=JobStatus.DONE)
+
+    @pytest.mark.asyncio
+    async def test_create_mechanical_only_persists_visible_mode(self, client, app):
+        resp = await client.post("/api/jobs", json={
+            "url": "https://www.bilibili.com/video/BV1xx411c7mD",
+            "mechanical_only": True,
+        })
+
+        assert resp.status_code == 201
+        job_id = resp.json()["job_id"]
+        job = app.state.db.get_job(job_id)
+        assert job.meta["flags"]["mechanical_only"] is True
+        detail = (await client.get(f"/api/jobs/{job_id}")).json()
+        assert detail["processing_mode"] == "mechanical_only"
+        assert detail["completion_scope"] == "mechanical"
+        raw = await app.state.storage.read_file(job_id, "job.json")
+        assert json.loads(raw)["flags"]["mechanical_only"] is True
+
+    @pytest.mark.asyncio
+    async def test_continue_ai_forks_idempotent_full_snapshot(
+        self, client, app, mock_redis
+    ):
+        created = await client.post("/api/jobs", json={
+            "url": "https://www.bilibili.com/video/BV1xx411c7mD",
+            "mechanical_only": True,
+        })
+        job_id = created.json()["job_id"]
+        await self._complete_mechanical_job(app, job_id)
+        mock_redis.append_lifecycle_event.reset_mock()
+
+        resp = await client.post(f"/api/jobs/{job_id}/continue-ai")
+
+        assert resp.status_code == 200
+        new_id = resp.json()["job_id"]
+        assert new_id != job_id
+        assert resp.json()["status"] == "pending"
+        assert app.state.db.get_job(job_id).meta["flags"]["mechanical_only"] is True
+        assert app.state.db.get_job(job_id).is_current is False
+        assert app.state.db.get_job(new_id).meta["flags"]["mechanical_only"] is False
+        raw = await app.state.storage.read_file(new_id, "job.json")
+        assert json.loads(raw)["flags"]["mechanical_only"] is False
+        command = mock_redis.append_lifecycle_event.await_args.args[1]
+        assert command["action"] == "new_job"
+        assert command["job_id"] == new_id
+
+        repeated = await client.post(f"/api/jobs/{job_id}/continue-ai")
+        assert repeated.status_code == 200
+        assert repeated.json()["job_id"] == new_id
+        mock_redis.append_lifecycle_event.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_continue_ai_rejects_inflight_mechanical_snapshot(self, client):
+        created = await client.post("/api/jobs", json={
+            "url": "https://www.bilibili.com/video/BV1xx411c7mD",
+            "mechanical_only": True,
+        })
+        resp = await client.post(f"/api/jobs/{created.json()['job_id']}/continue-ai")
+        assert resp.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_continue_ai_repairs_post_promotion_event_failure(
+        self, client, app, mock_redis,
+    ):
+        created = await client.post("/api/jobs", json={
+            "url": "https://www.bilibili.com/video/BV1xx411c7mD",
+            "mechanical_only": True,
+        })
+        parent_id = created.json()["job_id"]
+        await self._complete_mechanical_job(app, parent_id)
+        mock_redis.append_lifecycle_event.side_effect = RuntimeError("event failed")
+
+        with pytest.raises(RuntimeError, match="event failed"):
+            await client.post(f"/api/jobs/{parent_id}/continue-ai")
+        child = next(
+            item for item in app.state.db.lineage_versions(parent_id)
+            if item.id != parent_id
+        )
+        assert child.meta["rebuild_request"]["event_published"] is False
+
+        mock_redis.append_lifecycle_event.side_effect = None
+        mock_redis.list_worker_ids.return_value = []
+        repaired = await client.post(f"/api/jobs/{parent_id}/continue-ai")
+        assert repaired.status_code == 200
+        assert repaired.json()["job_id"] == child.id
+        assert app.state.db.get_job(child.id).meta["rebuild_request"]["event_published"] is True
+
     @pytest.mark.asyncio
     async def test_create_url_job(self, client, mock_redis):
         resp = await client.post("/api/jobs", json={
@@ -176,6 +278,8 @@ class TestCreateJob:
         }
         assert "book_toc" in schemas["SubscriptionSourceType"]["enum"]
         assert "youtube_playlist" in schemas["SubscriptionSourceType"]["enum"]
+        assert schemas["JobCreateRequest"]["properties"]["mechanical_only"]["default"] is False
+        assert "/api/jobs/{job_id}/continue-ai" in openapi["paths"]
 
     @pytest.mark.asyncio
     async def test_unsupported_upload_extension_rejected(self, client, mock_redis):
@@ -682,6 +786,106 @@ class TestProviderVersions:
 
 
 class TestRebuildP2c:
+    @pytest.mark.asyncio
+    async def test_rebuild_rejects_active_parent(self, client, app):
+        parent_id = "jobs_rebuild_active"
+        app.state.db.create_job(Job(
+            id=parent_id, content_type="document", pipeline="document",
+            document_kind="research_paper", source="arxiv",
+            meta={"flags": {"mechanical_only": True}},
+            status=JobStatus.PROCESSING,
+        ))
+        response = await client.post(f"/api/jobs/{parent_id}/rebuild")
+        assert response.status_code == 409
+        assert len(app.state.db.lineage_versions(parent_id)) == 1
+
+    def test_late_heartbeat_cannot_overwrite_ready_event_checkpoint(self, app):
+        db = app.state.db
+        owner = "owner-a"
+        job = Job(
+            id="jr_heartbeat_cas", content_type="document", pipeline="document",
+            document_kind="research_paper", source="arxiv", is_current=False,
+            status=JobStatus.PROCESSING,
+            meta={"rebuild_request": {
+                "owner_token": owner, "phase": "cloning", "event_published": False,
+            }},
+        )
+        db.create_job(job)
+        ready_meta = {"rebuild_request": {
+            "owner_token": owner, "phase": "ready", "event_published": True,
+        }}
+        assert db._update_rebuild_reservation(
+            job.id, owner, ready_meta, status=JobStatus.PENDING, is_current=True,
+        ) is True
+
+        assert db._heartbeat_rebuild_reservation(job.id, owner, "later") is False
+        assert db.get_job(job.id).meta["rebuild_request"] == ready_meta["rebuild_request"]
+
+    @pytest.mark.asyncio
+    async def test_empty_rebuild_body_uses_stable_server_operation_key(
+        self, client, app,
+    ):
+        db, storage = app.state.db, app.state.storage
+        parent_id = "jobs_rebuild_default_key"
+        db.create_job(Job(
+            id=parent_id, content_type="document", pipeline="document",
+            document_kind="research_paper", source="arxiv",
+            meta={"flags": {"mechanical_only": True}}, status=JobStatus.DONE,
+        ))
+        await storage.write_file(parent_id, "job.json", b"{}")
+
+        first = await client.post(f"/api/jobs/{parent_id}/rebuild")
+        second = await client.post(f"/api/jobs/{parent_id}/rebuild")
+
+        assert first.status_code == second.status_code == 200
+        assert first.json()["job_id"] == second.json()["job_id"]
+        assert len(db.lineage_versions(parent_id)) == 2
+
+        app.state.config.pipelines["document"]["steps"][0]["version"] = "operation-v2"
+        after_definition_change = await client.post(f"/api/jobs/{parent_id}/rebuild")
+        assert after_definition_change.status_code == 200
+        assert after_definition_change.json()["job_id"] != first.json()["job_id"]
+        assert len(db.lineage_versions(parent_id)) == 3
+
+    @pytest.mark.asyncio
+    async def test_rebuild_reservation_keeps_parent_current_until_clone_finishes(
+        self, client, app, monkeypatch,
+    ):
+        db, storage = app.state.db, app.state.storage
+        parent_id, key = "jobs_rebuild_reservation", "reservation-proof"
+        target_id = "jr_" + hashlib.sha256(f"{parent_id}\0{key}".encode()).hexdigest()[:24]
+        db.create_job(Job(
+            id=parent_id, content_type="document", pipeline="document",
+            document_kind="research_paper", source="arxiv",
+            meta={"flags": {"mechanical_only": True}}, status=JobStatus.DONE,
+        ))
+        await storage.write_file(parent_id, "job.json", b"{}")
+        clone_started, release_clone = asyncio.Event(), asyncio.Event()
+        original_clone = storage.clone
+
+        async def slow_clone(source, target):
+            clone_started.set()
+            await release_clone.wait()
+            await original_clone(source, target)
+
+        monkeypatch.setattr(storage, "clone", slow_clone)
+        request = asyncio.create_task(client.post(
+            f"/api/jobs/{parent_id}/rebuild",
+            json={"mechanical_only": True, "idempotency_key": key},
+        ))
+        await clone_started.wait()
+
+        assert db.get_job(parent_id).is_current is True
+        reservation = db.get_job(target_id)
+        assert reservation is not None
+        assert reservation.is_current is False
+        assert reservation.status == JobStatus.PROCESSING
+
+        release_clone.set()
+        response = await request
+        assert response.status_code == 200
+        assert db.get_job(target_id).is_current is True
+
     """/rebuild 建新快照(fork:clone 产物+.done、父降级、新版 current);/rebuild-stale 只挑过期。"""
 
     @pytest.mark.asyncio
@@ -691,7 +895,7 @@ class TestRebuildP2c:
         db.create_job(Job(
             id="jobs_paper_p1", content_type="document", pipeline="document",
             document_kind="research_paper", url="https://arxiv.org/abs/1810.04805",
-            source="arxiv", lineage_key="jobs_paper_p1",
+            source="arxiv", lineage_key="jobs_paper_p1", status=JobStatus.DONE,
         ))
         await storage.write_file(
             "jobs_paper_p1", "job.json",
@@ -720,13 +924,272 @@ class TestRebuildP2c:
         assert "pipeline" not in rebuilt_doc
 
     @pytest.mark.asyncio
+    async def test_rebuild_can_switch_snapshot_to_mechanical_from_validated_step(
+        self, client, app, mock_redis,
+    ):
+        db, storage, config = app.state.db, app.state.storage, app.state.config
+        held: set[tuple[str, str]] = set()
+
+        async def acquire(job_id, action, _token, ttl_sec=30):
+            key = (job_id, action)
+            if key in held:
+                return False
+            held.add(key)
+            return True
+
+        async def release(job_id, action, _token):
+            held.discard((job_id, action))
+            return True
+
+        mock_redis.acquire_job_control_lock.side_effect = acquire
+        mock_redis.release_job_control_lock.side_effect = release
+        steps = [item["name"] for item in config.pipelines["document"]["steps"]]
+        parent_flags = {"smart_note": True, "mechanical_only": False}
+        db.create_job(Job(
+            id="jobs_paper_full", content_type="document", pipeline="document",
+            document_kind="research_paper", url="https://arxiv.org/abs/1810.04805",
+            source="arxiv", lineage_key="jobs_paper_full",
+            meta={"flags": parent_flags}, status=JobStatus.DONE,
+        ))
+        await storage.write_file(
+            "jobs_paper_full", "job.json",
+            json.dumps({"id": "jobs_paper_full", "flags": parent_flags}).encode(),
+        )
+        for name in steps:
+            await storage.write_file(
+                "jobs_paper_full", f".{name}.done", b'{"def_digest":"sha256:old"}',
+            )
+            cfg = next(
+                item for item in config.pipelines["document"]["steps"]
+                if item["name"] == name
+            )
+            db.upsert_step(Step(
+                job_id="jobs_paper_full", name=name, status=StepStatus.DONE,
+                pool=cfg["pool"], input_hash=f"parent:{name}",
+            ))
+        await storage.write_file("jobs_paper_full", "input/source.pdf", b"source")
+        await storage.write_file("jobs_paper_full", "intermediate/document.json", b"stale")
+
+        request = {
+            "mechanical_only": True, "from_step": "02_parse",
+            "idempotency_key": "u18-paper-full-mechanical",
+        }
+        resp, replay = await asyncio.gather(
+            client.post("/api/jobs/jobs_paper_full/rebuild", json=request),
+            client.post("/api/jobs/jobs_paper_full/rebuild", json=request),
+        )
+
+        assert resp.status_code == 200
+        assert replay.status_code == 200
+        body = resp.json()
+        assert replay.json()["job_id"] == body["job_id"]
+        assert body["from_step"] == "02_parse"
+        assert body["processing_mode"] == "mechanical_only"
+        new_id = body["job_id"]
+        assert db.get_job(new_id).meta["flags"]["mechanical_only"] is True
+        new_doc = json.loads((await storage.read_file(new_id, "job.json")).decode())
+        assert new_doc["flags"]["mechanical_only"] is True
+        assert db.get_job("jobs_paper_full").meta["flags"] == parent_flags
+        assert await storage.read_file(new_id, ".01_download.done") is not None
+        assert await storage.read_file(new_id, ".02_parse.done") is None
+        assert await storage.read_file(new_id, ".03_structure.done") is None
+        child_steps = {step.name: step for step in db.get_steps(new_id)}
+        assert child_steps["01_download"].status == StepStatus.DONE
+        assert child_steps["01_download"].input_hash == "parent:01_download"
+        assert "02_parse" not in child_steps
+        assert await storage.read_file(new_id, "input/source.pdf") == b"source"
+        assert await storage.read_file(new_id, "intermediate/document.json") is None
+        assert await storage.read_file("jobs_paper_full", ".02_parse.done") is not None
+        assert len(db.lineage_versions(new_id)) == 2
+
+        conflict = await client.post("/api/jobs/jobs_paper_full/rebuild", json={
+            **request, "from_step": "03_structure",
+        })
+        assert conflict.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_rebuild_rejects_unknown_from_step_without_creating_snapshot(
+        self, client, app,
+    ):
+        db = app.state.db
+        db.create_job(Job(
+            id="jobs_paper_invalid_step", content_type="document", pipeline="document",
+            document_kind="research_paper", source="arxiv",
+            lineage_key="jobs_paper_invalid_step", meta={"flags": {}}, status=JobStatus.DONE,
+        ))
+        before, _ = db.list_jobs(limit=100, current_only=False)
+
+        resp = await client.post("/api/jobs/jobs_paper_invalid_step/rebuild", json={
+            "mechanical_only": True, "from_step": "not_a_step",
+        })
+
+        after, _ = db.list_jobs(limit=100, current_only=False)
+        assert resp.status_code == 422
+        assert after == before
+
+    @pytest.mark.asyncio
+    async def test_partial_rebuild_rejects_missing_upstream_done_marker(
+        self, client, app,
+    ):
+        db, storage = app.state.db, app.state.storage
+        parent_id = "jobs_paper_missing_upstream_marker"
+        db.create_job(Job(
+            id=parent_id, content_type="document", pipeline="document",
+            document_kind="research_paper", url="https://arxiv.org/abs/1810.04805",
+            source="arxiv", lineage_key=parent_id, status=JobStatus.DONE,
+        ))
+        db.upsert_step(Step(
+            job_id=parent_id, name="01_download", status=StepStatus.DONE,
+            pool="io", input_hash="parent-download",
+        ))
+        await storage.write_file(parent_id, "job.json", b"{}")
+
+        response = await client.post(f"/api/jobs/{parent_id}/rebuild", json={
+            "mechanical_only": True,
+            "from_step": "02_parse",
+            "idempotency_key": "missing-upstream-marker",
+        })
+
+        assert response.status_code == 409
+        assert "without done marker" in response.text
+        assert db.get_job(parent_id).is_current is True
+        assert [job.id for job in db.lineage_versions(parent_id)] == [parent_id]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure_stage", ["clone", "db"])
+    async def test_idempotent_rebuild_cleans_partial_target_before_db_commit(
+        self, failure_stage, client, app, monkeypatch,
+    ):
+        db, storage = app.state.db, app.state.storage
+        parent_id = f"jobs_rebuild_fail_{failure_stage}"
+        key = f"failure-{failure_stage}"
+        target_id = "jr_" + hashlib.sha256(
+            f"{parent_id}\0{key}".encode(),
+        ).hexdigest()[:24]
+        db.create_job(Job(
+            id=parent_id, content_type="document", pipeline="document",
+            document_kind="research_paper", source="arxiv", meta={"flags": {}},
+            status=JobStatus.DONE,
+        ))
+        await storage.write_file(parent_id, "job.json", b"{}")
+        if failure_stage == "clone":
+            original_clone = storage.clone
+
+            async def fail_clone(source, target):
+                await original_clone(source, target)
+                await storage.write_file(target, "partial.tmp", b"partial")
+                raise RuntimeError("clone failed")
+
+            monkeypatch.setattr(storage, "clone", fail_clone)
+        else:
+            original_create = db.create_job
+
+            def fail_create(job):
+                if job.id == target_id:
+                    raise RuntimeError("db failed")
+                return original_create(job)
+
+            monkeypatch.setattr(db, "create_job", fail_create)
+
+        with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
+            await client.post(f"/api/jobs/{parent_id}/rebuild", json={
+                "mechanical_only": True, "idempotency_key": key,
+            })
+
+        assert db.get_job(target_id) is None
+        assert await storage.read_file(target_id, "job.json") is None
+        assert await storage.read_file(target_id, "partial.tmp") is None
+
+    @pytest.mark.asyncio
+    async def test_idempotent_rebuild_repairs_event_failure_without_count_duplication(
+        self, client, app, mock_redis,
+    ):
+        db, storage = app.state.db, app.state.storage
+        db.create_collection(Collection(id="c_rebuild", name="R", domain="general"))
+        db.create_job(Job(
+            id="jobs_rebuild_event", content_type="document", pipeline="document",
+            document_kind="research_paper", source="arxiv", collection_id="c_rebuild",
+            meta={"flags": {}}, status=JobStatus.DONE,
+        ))
+        db._reconcile_collection_count("c_rebuild")
+        await storage.write_file("jobs_rebuild_event", "job.json", b"{}")
+        original_append = mock_redis.append_lifecycle_event
+        original_append.side_effect = RuntimeError("event failed")
+        request = {"mechanical_only": False, "idempotency_key": "event-repair"}
+
+        with pytest.raises(RuntimeError, match="event failed"):
+            await client.post("/api/jobs/jobs_rebuild_event/rebuild", json=request)
+        versions = db.lineage_versions("jobs_rebuild_event")
+        assert len(versions) == 2
+        target = next(item for item in versions if item.id != "jobs_rebuild_event")
+        assert target.meta["rebuild_request"]["event_published"] is False
+        assert db.get_collection("c_rebuild").job_count == 2
+
+        original_append.side_effect = None
+        mock_redis.list_worker_ids.return_value = []
+        replay = await client.post("/api/jobs/jobs_rebuild_event/rebuild", json=request)
+
+        assert replay.status_code == 200
+        assert replay.json()["job_id"] == target.id
+        assert len(db.lineage_versions("jobs_rebuild_event")) == 2
+        assert db.get_collection("c_rebuild").job_count == 2
+        assert db.get_job(target.id).meta["rebuild_request"]["event_published"] is True
+
+    @pytest.mark.asyncio
+    async def test_rebuild_stale_repairs_ready_event_before_pending_skip(
+        self, client, app, mock_redis,
+    ):
+        db, storage, config = app.state.db, app.state.storage, app.state.config
+        parent_id = "jobs_stale_event_repair"
+        first = config.pipelines["document"]["steps"][0]["name"]
+        db.create_job(Job(
+            id=parent_id, content_type="document", pipeline="document",
+            document_kind="research_paper", source="arxiv", status=JobStatus.DONE,
+            meta={"flags": {"mechanical_only": True}},
+        ))
+        await storage.write_file(parent_id, "job.json", b"{}")
+        await storage.write_file(parent_id, f".{first}.done", b'{"def_digest":"stale"}')
+        mock_redis.append_lifecycle_event.side_effect = RuntimeError("stale event failed")
+
+        with pytest.raises(RuntimeError, match="stale event failed"):
+            await client.post("/api/jobs/rebuild-stale")
+        child = next(item for item in db.lineage_versions(parent_id) if item.id != parent_id)
+        assert child.status == JobStatus.PENDING
+        assert child.meta["rebuild_request"]["event_published"] is False
+
+        mock_redis.append_lifecycle_event.side_effect = None
+        repaired = await client.post("/api/jobs/rebuild-stale")
+        assert repaired.status_code == 200
+        assert repaired.json()["items"][0]["job_id"] == child.id
+        assert db.get_job(child.id).meta["rebuild_request"]["event_published"] is True
+
+    @pytest.mark.asyncio
+    async def test_rebuild_stale_full_target_requires_workers(
+        self, client, app, mock_redis,
+    ):
+        db, storage, config = app.state.db, app.state.storage, app.state.config
+        parent_id = "jobs_stale_full_no_workers"
+        first = config.pipelines["document"]["steps"][0]["name"]
+        db.create_job(Job(
+            id=parent_id, content_type="document", pipeline="document",
+            document_kind="research_paper", source="arxiv", status=JobStatus.DONE,
+            meta={"flags": {"mechanical_only": False, "smart_note": True}},
+        ))
+        await storage.write_file(parent_id, f".{first}.done", b'{"def_digest":"stale"}')
+        mock_redis.list_worker_ids.return_value = []
+
+        response = await client.post("/api/jobs/rebuild-stale")
+        assert response.status_code == 503
+        assert len(db.lineage_versions(parent_id)) == 1
+
+    @pytest.mark.asyncio
     async def test_rebuild_stale_only_expired(self, client, app):
         db, storage, config = app.state.db, app.state.storage, app.state.config
         first = config.pipelines["document"]["steps"][0]["name"]
         db.create_job(Job(
             id="jobs_paper_stale", content_type="document", pipeline="document",
             document_kind="research_paper", source="arxiv",
-            lineage_key="jobs_paper_stale",
+            lineage_key="jobs_paper_stale", status=JobStatus.DONE,
         ))
         await storage.write_file("jobs_paper_stale", "job.json", b"{}")
         await storage.write_file("jobs_paper_stale", f".{first}.done", b'{"def_digest":"sha256:STALE"}')
@@ -741,3 +1204,8 @@ class TestRebuildP2c:
         parents = [it["parent_job_id"] for it in body["items"]]
         assert "jobs_paper_stale" in parents
         assert "jobs_paper_fresh" not in parents
+        first_count = len(db.lineage_versions("jobs_paper_stale"))
+        repeated = await client.post("/api/jobs/rebuild-stale")
+        assert repeated.status_code == 200
+        assert repeated.json()["rebuilt"] == 0
+        assert len(db.lineage_versions("jobs_paper_stale")) == first_count

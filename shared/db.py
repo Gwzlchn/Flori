@@ -1105,6 +1105,28 @@ class Database:
             source_position=source_position,
         )
 
+    def _update_rebuild_reservation(
+        self,
+        job_id: str,
+        owner_token: str,
+        meta: dict,
+        *,
+        status: JobStatus | None = None,
+        is_current: bool | None = None,
+        collection_id: str | None = None,
+    ) -> bool:
+        return _DatabaseAggregates._update_rebuild_reservation(
+            self, job_id, owner_token, meta, status=status,
+            is_current=is_current, collection_id=collection_id,
+        )
+
+    def _heartbeat_rebuild_reservation(
+        self, job_id: str, owner_token: str, heartbeat_at: str,
+    ) -> bool:
+        return _DatabaseAggregates._heartbeat_rebuild_reservation(
+            self, job_id, owner_token, heartbeat_at,
+        )
+
     def _strip_occurrences_for_jobs(self, job_ids: list[str]) -> None:
         """从 glossary.occurrences 摘除指向这些 job 的出现(保留概念与定义)。
         调用方须已持锁且在同一事务内;本方法只 execute,不 commit。"""
@@ -1900,6 +1922,19 @@ class Database:
             (collection_id, delta),
             {},
             begin_immediate=False,
+            commit_on_success=True,
+            commit_if_false=True,
+            rollback_on_error=False,
+        )
+
+    def _reconcile_collection_count(self, collection_id: str) -> None:
+        """按 jobs 真值幂等修复集合计数。"""
+        return self._runtime.run_transaction(
+            self,
+            _CollectionsRepository.reconcile_collection_count_in_tx,
+            (collection_id,),
+            {},
+            begin_immediate=True,
             commit_on_success=True,
             commit_if_false=True,
             rollback_on_error=False,

@@ -2493,6 +2493,11 @@
             "title": "Domain",
             "type": "string"
           },
+          "mechanical_only": {
+            "default": false,
+            "title": "Mechanical Only",
+            "type": "boolean"
+          },
           "smart_note": {
             "anyOf": [
               {
@@ -2604,6 +2609,15 @@
             ],
             "title": "Collection Name"
           },
+          "completion_scope": {
+            "default": "full",
+            "enum": [
+              "full",
+              "mechanical"
+            ],
+            "title": "Completion Scope",
+            "type": "string"
+          },
           "content_type": {
             "title": "Content Type",
             "type": "string"
@@ -2644,6 +2658,15 @@
           },
           "pipeline": {
             "title": "Pipeline",
+            "type": "string"
+          },
+          "processing_mode": {
+            "default": "full",
+            "enum": [
+              "full",
+              "mechanical_only"
+            ],
+            "title": "Processing Mode",
             "type": "string"
           },
           "progress_pct": {
@@ -2824,6 +2847,17 @@
       "JobRebuildResponse": {
         "additionalProperties": false,
         "properties": {
+          "from_step": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From Step"
+          },
           "job_id": {
             "title": "Job Id",
             "type": "string"
@@ -2850,6 +2884,14 @@
             ],
             "title": "Parent Job Id"
           },
+          "processing_mode": {
+            "enum": [
+              "full",
+              "mechanical_only"
+            ],
+            "title": "Processing Mode",
+            "type": "string"
+          },
           "status": {
             "title": "Status",
             "type": "string"
@@ -2859,7 +2901,8 @@
           "job_id",
           "status",
           "parent_job_id",
-          "lineage_key"
+          "lineage_key",
+          "processing_mode"
         ],
         "title": "JobRebuildResponse",
         "type": "object"
@@ -2966,6 +3009,15 @@
             ],
             "title": "Collection Id"
           },
+          "completion_scope": {
+            "default": "full",
+            "enum": [
+              "full",
+              "mechanical"
+            ],
+            "title": "Completion Scope",
+            "type": "string"
+          },
           "content_type": {
             "title": "Content Type",
             "type": "string"
@@ -2996,6 +3048,15 @@
           },
           "pipeline": {
             "title": "Pipeline",
+            "type": "string"
+          },
+          "processing_mode": {
+            "default": "full",
+            "enum": [
+              "full",
+              "mechanical_only"
+            ],
+            "title": "Processing Mode",
             "type": "string"
           },
           "progress_pct": {
@@ -4331,6 +4392,48 @@
           "reasons"
         ],
         "title": "ReadinessResponse",
+        "type": "object"
+      },
+      "RebuildRequest": {
+        "properties": {
+          "from_step": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From Step"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9._:-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          },
+          "mechanical_only": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mechanical Only"
+          }
+        },
+        "title": "RebuildRequest",
         "type": "object"
       },
       "RerunRequest": {
@@ -12155,6 +12258,16 @@
               ],
               "title": "Document Kind"
             }
+          },
+          {
+            "in": "query",
+            "name": "mechanical_only",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Mechanical Only",
+              "type": "boolean"
+            }
           }
         ],
         "requestBody": {
@@ -13049,6 +13162,154 @@
         ]
       }
     },
+    "/api/jobs/{job_id}/continue-ai": {
+      "post": {
+        "description": "机械版完成后 fork 完整处理快照;父快照不可变,新快照重算 AI 根及其全部下游。",
+        "operationId": "continue_job_ai_api_jobs__job_id__continue_ai_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "416": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested Range Not Satisfiable"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Continue Job Ai",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
     "/api/jobs/{job_id}/evidence": {
       "get": {
         "description": "权威来源 API 投影:旧版/低置信/不合格来源保留诊断但不暴露可点击 URL。",
@@ -13360,6 +13621,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RebuildRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Req"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {

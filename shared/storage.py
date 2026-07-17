@@ -429,7 +429,7 @@ class StorageBackend(Protocol):
         self, job_id: str, *, defer_if_busy: bool = False,
     ) -> None: ...
     # 把 src job 的全部产物 + .done 复制到 dst job,供 fork 重建播种新快照,只重跑分叉步及下游。
-    # 排除凭证侧载文件;Local=copytree、Remote=服务端 copy_object;Gateway 不支持(重建在 API/中心侧跑)。
+    # 排除凭证侧载文件;Remote 任一对象失败即整体失败,不得发布不完整快照;Gateway 不支持。
     async def clone(self, src_job_id: str, dst_job_id: str) -> None: ...
     # 删单个产物(scheduler rerun 清中心 .done 用):幂等,文件不存在即 no-op。
     # 只删本地 jobs_dir 的 .done 在 MinIO 部署下是 no-op → worker pull 回旧 .done 指纹命中跳过,
@@ -1092,6 +1092,7 @@ class RemoteStorage:
 
         client = self._client()
         src_prefix = f"{src_job_id}/"
+        failures: list[str] = []
         for o in client.list_objects(self._bucket, prefix=src_prefix, recursive=True):
             rel = o.object_name[len(src_prefix):]
             if is_credential_file(rel) or _is_internal_file(rel):
@@ -1102,11 +1103,12 @@ class RemoteStorage:
                     CopySource(self._bucket, o.object_name),
                 )
             except Exception as e:
-                # 大对象(>~5GiB)copy_object 单 PUT 超限等:记 warning 跳过。多数产物小;大源视频常配 NO_PUSH,不在中心。
-                import structlog
-                structlog.get_logger().warning(
-                    "storage_clone_skip", src=o.object_name, dst=f"{dst_job_id}/{rel}", error=str(e),
-                )
+                failures.append(f"{o.object_name}: {e}")
+        if failures:
+            raise OSError(
+                f"storage clone incomplete for {src_job_id} -> {dst_job_id}: "
+                + "; ".join(failures)
+            )
 
     async def write_file(self, job_id: str, rel_path: str, data: bytes) -> None:
         if is_credential_file(rel_path):

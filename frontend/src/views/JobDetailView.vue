@@ -743,6 +743,13 @@ async function retryJob() {
     jobStatus.value = 'processing'
   } catch (e: any) { showToast(e?.message || '重试失败', 'error') }
 }
+async function continueAi() {
+  try {
+    const result = await jobStore.continueAi(jobId.value)
+    showToast('已创建完整 AI 处理快照', 'success')
+    await router.push(`/content/${encodeURIComponent(result.job_id)}`)
+  } catch (e: any) { showToast(e?.message || '继续 AI 失败', 'error') }
+}
 async function rerunFromStep() {
   if (!selectedStep.value) return
   if (!confirm(`从「${selectedStepLabel.value}」重新处理?该步骤及后续产物会在当前任务中重新生成。`)) return
@@ -862,6 +869,11 @@ watch(job, (j) => {
         :lineage-versions="lineageVersions" :gen-start="genStart" :gen-end="genEnd"
         :gen-dur-sec="genDurSec" :any-running="anyRunning" @jump-version="jumpVersion"
       />
+
+      <div v-if="job.processing_mode === 'mechanical_only'" class="card pad" style="margin-top:12px;display:flex;align-items:center;justify-content:space-between;gap:12px">
+        <span>纯机械处理范围:不会产生 AI 调用或用量。</span>
+        <button class="btn pri" @click="continueAi"><RefreshCw :size="14" />继续完整 AI 处理</button>
+      </div>
 
       <!-- tabs -->
       <div class="tabs">

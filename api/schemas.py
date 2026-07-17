@@ -55,6 +55,8 @@ class JobCreateRequest(BaseModel):
     # 投递开关:是否生成 AI 智能笔记(及随附评审)。None=按内容类型默认
     # (article 默认 False 走轻链路;video/paper/audio 默认 True)。概念提取+摘要始终跑。
     smart_note: bool | None = None
+    # 仅执行非 AI 步骤;之后可通过 continue-ai 显式续跑完整 AI 链。
+    mechanical_only: bool = False
 
 
 class JobCollectionUpdateRequest(BaseModel):
@@ -88,6 +90,8 @@ class JobResponse(BaseModel):
     domain: str = "general"
     collection_id: str | None = None
     versions: int = 1   # 同 lineage(同源内容)快照总数;>1 表示有历史版本可跳转
+    processing_mode: Literal["full", "mechanical_only"] = "full"
+    completion_scope: Literal["full", "mechanical"] = "full"
 
 
 class JobDetailResponse(JobResponse):
@@ -218,6 +222,14 @@ class RerunRequest(BaseModel):
 
 class RerunSmartRequest(BaseModel):
     provider: str
+
+
+class RebuildRequest(BaseModel):
+    mechanical_only: bool | None = None
+    from_step: str | None = None
+    idempotency_key: str | None = Field(
+        None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$",
+    )
 
 
 class WorkerResponse(BaseModel):
@@ -354,6 +366,11 @@ class CollectionCreateRequest(BaseModel):
     source_type: SubscriptionSourceType | None = None
     source_id: str | None = None        # 来源 id / URL / 容器内目录,具体语义由 registry 元数据给出
     sync_now: bool = True               # 建后立即首次同步
+    mechanical_only: bool = False       # 仅影响本次首次同步新建的 job,不持久化为订阅默认值
+
+
+class CollectionSyncRequest(BaseModel):
+    mechanical_only: bool = False       # 仅影响本轮新建 job;已复用内容保持原处理模式
 
 
 class CollectionUpdateRequest(BaseModel):

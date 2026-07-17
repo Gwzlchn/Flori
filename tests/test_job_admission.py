@@ -83,6 +83,20 @@ def test_flag_skip_is_excluded_but_future_artifact_rule_is_reachable(test_config
     )
 
 
+def test_mechanical_only_excludes_all_ai_pool_requirements(test_config):
+    requirements = pipeline_requirements(
+        test_config, "video", source="upload", url=None,
+        domain="general", style_tags=[],
+        flags={"smart_note": True, "mechanical_only": True},
+    )
+
+    assert requirements
+    assert all(item.pool != "ai" for item in requirements)
+    assert {item.name for item in requirements}.issuperset({
+        "01_download", "02_whisper", "03_scene", "09_mechanical",
+    })
+
+
 def test_paused_stale_and_reject_tag_workers_do_not_cover_pipeline(test_config):
     heartbeat = datetime.now(timezone.utc).isoformat()
     workers = [{

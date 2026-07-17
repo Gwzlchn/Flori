@@ -18,9 +18,10 @@ const fetchDetail = vi.fn()
 const fetchConcepts = vi.fn()
 const retryJob = vi.fn()
 const rerunJob = vi.fn()
+const continueAi = vi.fn()
 const deleteJob = vi.fn()
 vi.mock('../stores/jobs', () => ({
-  useJobStore: () => ({ fetchDetail, fetchConcepts, retryJob, rerunJob, deleteJob }),
+  useJobStore: () => ({ fetchDetail, fetchConcepts, retryJob, rerunJob, continueAi, deleteJob }),
 }))
 
 const setCrumbs = vi.fn()
@@ -156,6 +157,24 @@ describe('JobDetailView 加载/错误态', () => {
 })
 
 describe('JobDetailView 头部渲染', () => {
+  it('纯机械终态明确展示范围并可继续完整 AI', async () => {
+    fetchDetail.mockResolvedValue(makeDetail({
+      processing_mode: 'mechanical_only', completion_scope: 'mechanical',
+    }))
+    continueAi.mockResolvedValue({ job_id: 'job_full_snapshot', status: 'pending' })
+    const w = mountView()
+    await flushPromises()
+
+    expect(w.text()).toContain('纯机械处理范围')
+    await w.get('button.btn.pri').trigger('click')
+
+    expect(continueAi).toHaveBeenCalledWith('job_BV1abc')
+    expect(push).toHaveBeenCalledWith('/content/job_full_snapshot')
+    expect(showToast).toHaveBeenCalledWith(
+      '已创建完整 AI 处理快照', 'success',
+    )
+  })
+
   it('加载成功渲染标题/来源/领域/BV 号/类型', async () => {
     const w = mountView()
     await flushPromises()

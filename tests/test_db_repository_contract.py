@@ -15,7 +15,7 @@ from shared.repositories.maintenance import MaintenanceRepository
 
 
 _PUBLIC_CONTRACT_SHA256 = (
-    "a79ace54f5f7b77456c9969d53c9c6cc62bf5cede0ec10a0b504887ba7815e96"
+    "e38edfea1fa0eed45827740ad27d5c373f6a491e74ff37813df45bfb01897b03"
 )
 _SCHEMA_CONTRACT_SHA256 = (
     "0368b7896541af8a0afccf51c904179022c7ebaf8ef21652ea7467e376ee0d8f"
@@ -118,6 +118,7 @@ def test_cross_domain_transactions_have_one_explicit_owner():
         "create_job",
         "promote_lineage_current",
         "update_job",
+        "move_job_to_collection",
         "delete_job_cascade",
         "delete_collection",
         "rename_domain",

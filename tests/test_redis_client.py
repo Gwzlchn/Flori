@@ -350,6 +350,17 @@ class TestJobState:
         assert info["domain"] == "deep-learning"
 
     @pytest.mark.asyncio
+    async def test_job_control_lock_is_token_fenced(self, rc):
+        assert await rc.acquire_job_control_lock("j_x", "continue_ai", "owner-a") is True
+        assert await rc.acquire_job_control_lock("j_x", "continue_ai", "owner-b") is False
+        assert await rc.refresh_job_control_lock("j_x", "continue_ai", "owner-b") is False
+        assert await rc.refresh_job_control_lock("j_x", "continue_ai", "owner-a") is True
+        assert await rc.release_job_control_lock("j_x", "continue_ai", "owner-b") is False
+        assert await rc.acquire_job_control_lock("j_x", "continue_ai", "owner-b") is False
+        assert await rc.release_job_control_lock("j_x", "continue_ai", "owner-a") is True
+        assert await rc.acquire_job_control_lock("j_x", "continue_ai", "owner-b") is True
+
+    @pytest.mark.asyncio
     async def test_step_status(self, rc):
         await rc.set_step_status("j_x", "03_scene", "waiting")
         assert await rc.get_step_status("j_x", "03_scene") == "waiting"

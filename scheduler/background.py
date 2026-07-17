@@ -199,6 +199,8 @@ class BackgroundServices:
             )
         elif command == "resubmit":
             await self.owner.resubmit(msg["job_id"], idempotency_key=stream_id)
+        elif command == "continue_ai":
+            await self.owner.continue_ai(msg["job_id"], idempotency_key=stream_id)
         elif command == "retry":
             await self.owner._retry_failed(msg["job_id"], idempotency_key=stream_id)
         elif command == "delete":

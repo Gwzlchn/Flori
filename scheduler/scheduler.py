@@ -525,6 +525,11 @@ class Scheduler:
     async def resubmit(self, job_id: str, idempotency_key: str | None = None) -> None:
         return await self._recovery.resubmit(job_id, idempotency_key)
 
+    async def continue_ai(
+        self, job_id: str, idempotency_key: str | None = None,
+    ) -> list[str]:
+        return await self._recovery.continue_ai(job_id, idempotency_key)
+
     def reload_config(self) -> None:
         self.config = load_config(
             config_dir=self.config.config_dir,

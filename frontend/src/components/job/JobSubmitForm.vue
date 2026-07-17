@@ -23,6 +23,7 @@ const url = ref('')
 const domain = ref('general')
 // AI 智能笔记开关:auto=按文档体裁默认(article 关/其余开)、on=强制生成、off=强制不生成。
 const smartNote = ref<'auto' | 'on' | 'off'>('auto')
+const processingMode = ref<'full' | 'mechanical_only'>('full')
 const documentKind = ref('')
 const selectedTags = ref<string[]>([])
 const file = ref<File | null>(null)
@@ -71,6 +72,7 @@ async function submit() {
         domain.value,
         selectedTags.value,
         documentKind.value || undefined,
+        processingMode.value === 'mechanical_only',
       )
       jobId = res.job_id
     } else {
@@ -81,6 +83,7 @@ async function submit() {
         ...(documentKind.value ? { document_kind: documentKind.value } : {}),
         // auto 时省略字段(后端按内容类型定默认);on/off 显式传布尔。
         ...(smartNote.value === 'auto' ? {} : { smart_note: smartNote.value === 'on' }),
+        ...(processingMode.value === 'mechanical_only' ? { mechanical_only: true } : {}),
       })
       jobId = res.job_id
     }
@@ -126,8 +129,13 @@ async function submit() {
           </option>
         </select>
 
+        <select v-model="processingMode" class="px-2 py-1.5 border border-gray-300 rounded-lg text-sm bg-white" title="纯机械模式不会调度任何 AI 步骤,可在任务详情中继续 AI">
+          <option value="full">处理模式:完整</option>
+          <option value="mechanical_only">处理模式:纯机械</option>
+        </select>
+
         <!-- AI 智能笔记开关:article 子类默认走轻链路(关),可强制开/关 -->
-        <select v-model="smartNote" class="px-2 py-1.5 border border-gray-300 rounded-lg text-sm bg-white" title="是否生成 AI 智能笔记(概念提取与摘要始终生成)">
+        <select v-model="smartNote" :disabled="processingMode === 'mechanical_only'" class="px-2 py-1.5 border border-gray-300 rounded-lg text-sm bg-white disabled:bg-gray-100" title="是否生成 AI 智能笔记(概念提取与摘要始终生成)">
           <option value="auto">智能笔记:自动</option>
           <option value="on">智能笔记:开</option>
           <option value="off">智能笔记:关</option>

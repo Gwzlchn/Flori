@@ -159,6 +159,17 @@ describe('useJobStore 其它 action', () => {
     expect((form as FormData).get('file')).toBeInstanceOf(File)
   })
 
+  it('uploadJob 纯机械模式写入 query', async () => {
+    upload.mockResolvedValue({ job_id: 'up' })
+    const store = useJobStore()
+    const file = new File(['x'], 'a.mp4', { type: 'video/mp4' })
+
+    await store.uploadJob(file, 'tech', [], undefined, true)
+
+    const path = upload.mock.calls[0][0] as string
+    expect(new URL(`http://local${path}`).searchParams.get('mechanical_only')).toBe('true')
+  })
+
   it('retryJob POST /api/jobs/:id/retry', async () => {
     post.mockResolvedValue({})
     const store = useJobStore()
@@ -171,6 +182,23 @@ describe('useJobStore 其它 action', () => {
     const store = useJobStore()
     await store.rerunJob('j1', 'extract')
     expect(post).toHaveBeenCalledWith('/api/jobs/j1/rerun', { from_step: 'extract' })
+  })
+
+  it('continueAi POST /api/jobs/:id/continue-ai', async () => {
+    post.mockResolvedValue({})
+    const store = useJobStore()
+    await store.continueAi('j1')
+    expect(post).toHaveBeenCalledWith('/api/jobs/j1/continue-ai')
+  })
+
+  it('rebuildJob 可显式切纯机械并传幂等键和分叉步', async () => {
+    post.mockResolvedValue({ job_id: 'j2' })
+    const store = useJobStore()
+    const options = {
+      mechanical_only: true, from_step: '02_parse', idempotency_key: 'u18-paper',
+    }
+    await store.rebuildJob('j1', options)
+    expect(post).toHaveBeenCalledWith('/api/jobs/j1/rebuild', options)
   })
 
   it('deleteJob DELETE /api/jobs/:id', async () => {

@@ -512,6 +512,68 @@ class TestDAGProgression:
 
 class TestSkipPropagation:
     @pytest.mark.asyncio
+    async def test_mechanical_only_skips_every_ai_step_and_finishes_without_usage(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir
+    ):
+        """机械模式的硬边界是 pool=ai 永不入队,不是依赖某几个步骤名。"""
+        from shared.config import normalize_pipelines
+
+        raw = {
+            "default": {"image": "flori/step-base"},
+            "mechanical": {
+                "jobs": {
+                    "parse": {"run": "m.parse", "pool": "cpu"},
+                    # 故意把多级 AI 下游写在依赖之前,冻结 YAML key 非拓扑序的契约。
+                    "concepts": {
+                        "run": "m.concepts", "pool": "ai", "needs": ["attestation"],
+                    },
+                    "attestation": {
+                        "run": "m.attestation", "pool": "ai", "needs": ["materialize"],
+                    },
+                    "translate": {
+                        "run": "m.translate", "pool": "ai", "needs": ["parse"],
+                    },
+                    "materialize": {
+                        "run": "m.materialize", "pool": "io", "needs": ["translate"],
+                    },
+                }
+            },
+        }
+        config = make_config(
+            tmp_path, tmp_jobs_dir, normalize_pipelines(raw), configs_dir,
+        )
+        sched = _stub_workers_present(Scheduler(redis, db, config))
+        job = make_job(pipeline="mechanical")
+        job.meta = {"flags": {"smart_note": True, "mechanical_only": True}}
+        db.create_job(job)
+
+        await sched.submit_job(job)
+        await redis.set_step_status(job.id, "parse", "running")
+        await sched.on_step_done(job.id, "parse")
+        assert await redis.get_step_status(job.id, "translate") == "skipped"
+        assert await redis.get_step_status(job.id, "materialize") == "ready"
+
+        await redis.set_step_status(job.id, "materialize", "running")
+        await sched.on_step_done(job.id, "materialize")
+
+        assert await redis.get_step_status(job.id, "concepts") == "skipped"
+        assert await redis.get_step_status(job.id, "attestation") == "skipped"
+        assert db.get_job(job.id).status == JobStatus.DONE
+        assert db.get_usage_summary(job_id=job.id)["calls"] == 0
+        assert await redis.r.zcard("queue:ai") == 0
+
+        flags = {"smart_note": True, "mechanical_only": False}
+        await redis.init_job(job.id, job.pipeline, {"flags": flags})
+        reset = await sched.continue_ai(job.id)
+
+        assert reset == []
+        assert await redis.get_step_status(job.id, "parse") == "done"
+        assert await redis.get_step_status(job.id, "materialize") == "done"
+        assert await redis.get_step_status(job.id, "translate") == "skipped"
+        assert await redis.get_step_status(job.id, "concepts") == "skipped"
+        assert await redis.r.zcard("queue:ai") == 0
+
+    @pytest.mark.asyncio
     async def test_skipped_unblocks_downstream(self, scheduler, redis, db):
         """A done, B skipped → C should become ready (skipped counts as done for deps)."""
         job = make_job()

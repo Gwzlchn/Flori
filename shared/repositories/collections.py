@@ -339,3 +339,14 @@ class CollectionsRepository:
             "UPDATE collections SET job_count = MAX(0, job_count + ?) WHERE id=?",
             (delta, collection_id),
         )
+
+    def reconcile_collection_count_in_tx(self, connection, collection_id: str) -> None:
+        """按 jobs 真值重算计数;用于可重放快照创建,避免 crash retry 重复 +1。"""
+        if not collection_id:
+            return
+        connection.execute(
+            """UPDATE collections
+               SET job_count=(SELECT COUNT(*) FROM jobs WHERE collection_id=?)
+               WHERE id=?""",
+            (collection_id, collection_id),
+        )

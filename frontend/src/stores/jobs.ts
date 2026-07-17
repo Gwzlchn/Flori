@@ -37,11 +37,11 @@ export const useJobStore = defineStore('jobs', () => {
     return api.get<JobDetail>(`/api/jobs/${jobId}`)
   }
 
-  async function createJob(payload: { url?: string; content_type?: string; document_kind?: string; domain?: string; style_tags?: string[]; collection_id?: string; smart_note?: boolean }) {
+  async function createJob(payload: { url?: string; content_type?: string; document_kind?: string; domain?: string; style_tags?: string[]; collection_id?: string; smart_note?: boolean; mechanical_only?: boolean }) {
     return api.post<{ job_id: string }>('/api/jobs', payload)
   }
 
-  async function uploadJob(file: File, domain: string, styleTags: string[], documentKind?: string) {
+  async function uploadJob(file: File, domain: string, styleTags: string[], documentKind?: string, mechanicalOnly = false) {
     const contentType = contentTypeForUpload(file.name)
     if (!contentType) throw new Error('不支持的上传文件类型')
     const form = new FormData()
@@ -50,6 +50,7 @@ export const useJobStore = defineStore('jobs', () => {
     form.append('style_tags', JSON.stringify(styleTags))
     const query = new URLSearchParams({ content_type: contentType })
     if (contentType === 'document' && documentKind) query.set('document_kind', documentKind)
+    if (mechanicalOnly) query.set('mechanical_only', 'true')
     return api.upload<{ job_id: string }>(`/api/jobs/upload?${query}`, form)
   }
 
@@ -72,9 +73,18 @@ export const useJobStore = defineStore('jobs', () => {
     return api.post(`/api/jobs/${jobId}/rerun`, { from_step: fromStep })
   }
 
+  async function continueAi(jobId: string): Promise<{ job_id: string; status: string }> {
+    return api.post<{ job_id: string; status: string }>(`/api/jobs/${jobId}/continue-ai`)
+  }
+
   // 重建为新快照:fork 父 job,只重跑分叉步及下游;旧快照保留供 A/B 对比。返回新 job_id。
-  async function rebuildJob(jobId: string): Promise<{ job_id: string }> {
-    return api.post<{ job_id: string }>(`/api/jobs/${jobId}/rebuild`)
+  async function rebuildJob(
+    jobId: string,
+    options?: { mechanical_only?: boolean; from_step?: string; idempotency_key?: string },
+  ): Promise<{ job_id: string; from_step?: string | null; processing_mode: 'full' | 'mechanical_only' }> {
+    const path = `/api/jobs/${jobId}/rebuild`
+    if (options) return api.post(path, options)
+    return api.post(path)
   }
 
   // 批量重建所有"过期"(pipeline 定义已变)的 current job 为新快照。
@@ -106,5 +116,5 @@ export const useJobStore = defineStore('jobs', () => {
     return api.get<JobConcept[]>(`/api/jobs/${encodeURIComponent(jobId)}/concepts`)
   }
 
-  return { list, total, loading, fetchList, fetchDetail, createJob, uploadJob, retryJob, retryAllFailed, retryFailedInCollection, rerunJob, rebuildJob, rebuildStale, deleteJob, deleteJobs, fetchFacets, fetchConcepts }
+  return { list, total, loading, fetchList, fetchDetail, createJob, uploadJob, retryJob, retryAllFailed, retryFailedInCollection, rerunJob, continueAi, rebuildJob, rebuildStale, deleteJob, deleteJobs, fetchFacets, fetchConcepts }
 })

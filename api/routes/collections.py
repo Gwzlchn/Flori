@@ -23,6 +23,7 @@ from api.schemas import (
     CollectionCreateRequest,
     CollectionResponse,
     CollectionSubscriptionInfo,
+    CollectionSyncRequest,
     CollectionUpdateRequest,
     JobListResponse,
     JobResponse,
@@ -57,6 +58,7 @@ def _to_response(
 
 async def sync_collection(
     coll: Collection, db: Database, redis: RedisClient, storage: StorageBackend,
+    *, mechanical_only: bool = False,
 ) -> dict:
     """枚举订阅集合的来源,跟已入库内容去重,并为新内容自动建 job。
     经 enumerate_source 按 source_type 分派到注册的 source-adapter(B站 UP/收藏夹/
@@ -67,7 +69,9 @@ async def sync_collection(
     # 异常置 error+存摘要后向上抛,故障隔离不掩盖错误.
     await asyncio.to_thread(db.set_sync_status, coll.id, "syncing")
     try:
-        return await _sync_collection_body(coll, db, redis, storage)
+        return await _sync_collection_body(
+            coll, db, redis, storage, mechanical_only=mechanical_only,
+        )
     except Exception as e:
         await asyncio.to_thread(db.set_sync_status, coll.id, "error", str(e))
         raise
@@ -75,6 +79,7 @@ async def sync_collection(
 
 async def _sync_collection_body(
     coll: Collection, db: Database, redis: RedisClient, storage: StorageBackend,
+    *, mechanical_only: bool = False,
 ) -> dict:
     from shared.subscriptions import SourceContext, enumerate_source
     from api.routes.jobs import create_job_core
@@ -162,6 +167,7 @@ async def _sync_collection_body(
                 item_id=it.item_id, actor="subscription",
                 source_position=position,
                 smart_note=True if is_book else None,
+                mechanical_only=mechanical_only,
                 document_kind=it.document_kind,
                 defer_submit=is_book,
             )
@@ -250,7 +256,10 @@ async def create_collection(
 
     if is_sub and req.sync_now:
         try:
-            await sync_collection(collection, db, redis, storage)
+            await sync_collection(
+                collection, db, redis, storage,
+                mechanical_only=req.mechanical_only,
+            )
         except Exception as e:  # 首次同步失败不阻塞集合创建
             logger.warning("initial_sync_failed", coll=cid, error=str(e)[:200])
         collection = await asyncio.to_thread(db.get_collection, cid)
@@ -309,6 +318,7 @@ async def update_collection(
 @router.post("/{collection_id}/sync")
 async def trigger_sync(
     collection_id: str,
+    req: CollectionSyncRequest | None = None,
     db: Database = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
     storage: StorageBackend = Depends(get_storage),
@@ -321,7 +331,10 @@ async def trigger_sync(
     if not c.is_subscription:
         raise HTTPException(400, "非订阅集合，无可同步来源")
     try:
-        return await sync_collection(c, db, redis, storage)
+        return await sync_collection(
+            c, db, redis, storage,
+            mechanical_only=req.mechanical_only if req is not None else False,
+        )
     except Exception as e:
         raise HTTPException(502, f"同步失败: {str(e)[:200]}")
 

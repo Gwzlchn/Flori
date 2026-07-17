@@ -39,6 +39,7 @@
     {"method":"GET","path":"/api/jobs/{job_id}/ai-logs","operation_id":"job_ai_logs_api_jobs__job_id__ai_logs_get"},
     {"method":"GET","path":"/api/jobs/{job_id}/artifacts","operation_id":"list_artifacts_api_jobs__job_id__artifacts_get"},
     {"method":"GET","path":"/api/jobs/{job_id}/concepts","operation_id":"job_concepts_api_jobs__job_id__concepts_get"},
+    {"method":"POST","path":"/api/jobs/{job_id}/continue-ai","operation_id":"continue_job_ai_api_jobs__job_id__continue_ai_post"},
     {"method":"GET","path":"/api/jobs/{job_id}/evidence","operation_id":"get_evidence_api_jobs__job_id__evidence_get"},
     {"method":"GET","path":"/api/jobs/{job_id}/note-versions","operation_id":"list_note_versions_api_jobs__job_id__note_versions_get"},
     {"method":"POST","path":"/api/jobs/{job_id}/rebuild","operation_id":"rebuild_job_api_jobs__job_id__rebuild_post"},

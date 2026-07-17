@@ -42,6 +42,89 @@ class TestSubscriptionCollectionDB:
 
 class TestSubscriptionCollectionAPI:
     @pytest.mark.asyncio
+    async def test_initial_sync_can_create_mechanical_only_jobs(
+        self, client, app, monkeypatch,
+    ):
+        items = [SourceItem(
+            "course-01", "第一课",
+            "https://www.youtube.com/watch?v=course00001", "video",
+        )]
+
+        async def fake_enumerate(_source_type, _source_id, _ctx):
+            return "机械课程", list(items)
+
+        monkeypatch.setattr("shared.subscriptions.enumerate_source", fake_enumerate)
+        created = await client.post("/api/collections", json={
+            "name": "机械课程",
+            "domain": "deep-learning",
+            "source_type": "youtube_playlist",
+            "source_id": "PLmechanical-initial",
+            "sync_now": True,
+            "mechanical_only": True,
+        })
+        assert created.status_code == 201, created.text
+        collection_id = created.json()["id"]
+        _, jobs = app.state.db.list_jobs(collection_id=collection_id, limit=20)
+        assert len(jobs) == 1
+        assert jobs[0].meta["flags"]["mechanical_only"] is True
+
+    @pytest.mark.asyncio
+    async def test_manual_sync_mode_only_applies_to_new_jobs(
+        self, client, app, monkeypatch,
+    ):
+        items = [SourceItem(
+            "course-01", "第一课",
+            "https://www.youtube.com/watch?v=manual00001", "video",
+        )]
+
+        async def fake_enumerate(_source_type, _source_id, _ctx):
+            return "混合课程", list(items)
+
+        monkeypatch.setattr("shared.subscriptions.enumerate_source", fake_enumerate)
+        created = await client.post("/api/collections", json={
+            "name": "混合课程",
+            "domain": "deep-learning",
+            "source_type": "youtube_playlist",
+            "source_id": "PLmechanical-manual",
+            "sync_now": False,
+        })
+        assert created.status_code == 201, created.text
+        collection_id = created.json()["id"]
+
+        first = await client.post(
+            f"/api/collections/{collection_id}/sync",
+            json={"mechanical_only": True},
+        )
+        assert first.status_code == 200, first.text
+        _, first_jobs = app.state.db.list_jobs(collection_id=collection_id, limit=20)
+        assert len(first_jobs) == 1
+        first_job_id = first_jobs[0].id
+        assert first_jobs[0].meta["flags"]["mechanical_only"] is True
+
+        items.append(SourceItem(
+            "course-02", "第二课",
+            "https://www.youtube.com/watch?v=manual00002", "video",
+        ))
+        second = await client.post(f"/api/collections/{collection_id}/sync")
+        assert second.status_code == 200, second.text
+        assert second.json()["new"] == 1
+        _, jobs = app.state.db.list_jobs(collection_id=collection_id, limit=20)
+        modes = {
+            job.meta["source_item_id"]: job.meta["flags"]["mechanical_only"]
+            for job in jobs
+        }
+        assert modes == {"course-01": True, "course-02": False}
+        assert app.state.db.get_job(first_job_id).meta["flags"]["mechanical_only"] is True
+
+        repeated = await client.post(
+            f"/api/collections/{collection_id}/sync",
+            json={"mechanical_only": False},
+        )
+        assert repeated.status_code == 200
+        assert repeated.json()["new"] == 0
+        assert app.state.db.get_job(first_job_id).meta["flags"]["mechanical_only"] is True
+
+    @pytest.mark.asyncio
     async def test_playlist_sync_reuses_lineage_preserves_order_and_is_idempotent(
         self, client, app, monkeypatch,
     ):

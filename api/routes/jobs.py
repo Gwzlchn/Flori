@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -28,7 +30,7 @@ from shared.ai_routing import (
 )
 from shared.db import Database
 from shared.ids import lineage_key_of as _lineage_key_of
-from shared.models import Job, JobStatus, derive_job_id
+from shared.models import Job, JobStatus, Step, StepStatus, derive_job_id
 from shared.redis_client import RedisClient
 from shared.source_detect import detect_source
 from shared.source_registry import (
@@ -65,6 +67,7 @@ from api.schemas import (
     GlossaryTermResponse,
     RerunRequest,
     RerunSmartRequest,
+    RebuildRequest,
     StepResponse,
 )
 from api.wire_schemas import (
@@ -435,6 +438,7 @@ async def create_job_core(
     collection_id: str | None = None, title: str | None = None,
     upload: tuple[str, bytes | AsyncIterable[bytes]] | None = None,
     smart_note: bool | None = None,
+    mechanical_only: bool = False,
     document_kind: str | None = None,
     item_id: str | None = None, actor: str = "api",
     source_position: int | None = None,
@@ -463,7 +467,10 @@ async def create_job_core(
     # 投递开关:smart_note None=按类型默认(article 轻链路默认关,其余默认开)。
     # 存进 flags 随 job 落库 → scheduler 读 redis flags 求值 rules 的 if_flag(条件跳步)。
     resolved_smart = smart_note if smart_note is not None else resolved_kind != "article"
-    flags = {"smart_note": bool(resolved_smart)}
+    flags = {
+        "smart_note": bool(resolved_smart),
+        "mechanical_only": bool(mechanical_only),
+    }
 
     # 有意义的 id: jobs_{类别}_{inner}(bili=BV);撞已存在(同 BV 重投/上传随机撞库)加随机后缀。
     job_id = derive_job_id(url, ctype, source)
@@ -637,9 +644,15 @@ async def is_job_expired(storage: StorageBackend, config: AppConfig, job: Job) -
     return {"expired": False, "first_changed_step": None}
 
 
-async def create_job_snapshot(
+async def _create_job_snapshot_once(
     db: Database, redis: RedisClient, storage: StorageBackend,
     config: AppConfig, parent_job_id: str, actor: str = "api",
+    *, mechanical_only: bool | None = None, smart_note: bool | None = None,
+    from_step: str | None = None,
+    reset_roots: list[str] | None = None,
+    new_id_override: str | None = None,
+    rebuild_request: dict | None = None,
+    reserved: bool = False,
 ) -> Job:
     """从父 job fork 一个新快照(同 lineage、新时间戳 id):clone 父产物+.done 播种 → submit_job,
     worker should_run 指纹自然只重跑分叉步及下游;旧快照保留供 A/B。
@@ -656,63 +669,411 @@ async def create_job_snapshot(
         )
     except SourceRegistryError as exc:
         raise HTTPException(409, f"parent job route is no longer supported: {exc}") from exc
-    new_id = derive_job_id(parent.url, route.content_type, route.source)  # 带时间戳
-    if new_id == parent.id or await asyncio.to_thread(db.get_job, new_id):
+    pipeline_steps = config.pipelines.get(route.pipeline, {}).get("steps", [])
+    by_name = {
+        step.get("name"): step for step in pipeline_steps
+        if isinstance(step, dict) and isinstance(step.get("name"), str)
+    }
+    requested_roots = ([from_step] if from_step is not None else []) + list(reset_roots or [])
+    if any(root not in by_name for root in requested_roots):
+        raise HTTPException(422, "from_step is not part of the job pipeline")
+
+    reset_steps: set[str] = set(requested_roots)
+    if reset_steps:
+        changed = True
+        while changed:
+            changed = False
+            for name, step in by_name.items():
+                if name in reset_steps:
+                    continue
+                if any(dep in reset_steps for dep in step.get("depends_on", [])):
+                    reset_steps.add(name)
+                    changed = True
+    new_id = new_id_override or derive_job_id(
+        parent.url, route.content_type, route.source,
+    )
+    if new_id_override is None and (
+        new_id == parent.id or await asyncio.to_thread(db.get_job, new_id)
+    ):
         new_id = f"{new_id}_{secrets.token_hex(3)}"   # 极小概率撞;绝不复用父 id
     lineage = parent.lineage_key or _lineage_key_of(parent.id)
-    await storage.clone(parent.id, new_id)            # 播种父产物 + .done
-    raw = await storage.read_file(parent.id, "job.json")
-    doc = {}
-    if raw:
-        try:
-            doc = json.loads(raw)
-        except Exception:
-            doc = {}
-    if not isinstance(doc, dict):
+    flags = dict((parent.meta or {}).get("flags") or {})
+    if mechanical_only is not None:
+        flags["mechanical_only"] = mechanical_only
+    if smart_note is not None:
+        flags["smart_note"] = smart_note
+    preserved_steps: list[Step] = []
+    try:
+        if requested_roots:
+            parent_steps = {
+                step.name: step
+                for step in await asyncio.to_thread(db.get_steps, parent.id)
+            }
+            for name, cfg in by_name.items():
+                if name in reset_steps:
+                    continue
+                source_step = parent_steps.get(name)
+                if source_step is None or source_step.status not in {
+                    StepStatus.DONE, StepStatus.SKIPPED,
+                }:
+                    raise HTTPException(
+                        409,
+                        f"cannot preserve non-terminal upstream step: {name}",
+                    )
+                if (
+                    source_step.status == StepStatus.DONE
+                    and await storage.read_file(parent.id, f".{name}.done") is None
+                ):
+                    raise HTTPException(
+                        409,
+                        f"cannot preserve upstream step without done marker: {name}",
+                    )
+                preserved_steps.append(Step(
+                    job_id=new_id,
+                    name=name,
+                    status=source_step.status,
+                    pool=cfg["pool"],
+                    input_hash=source_step.input_hash,
+                    worker_id=source_step.worker_id,
+                    started_at=source_step.started_at,
+                    finished_at=source_step.finished_at,
+                    duration_sec=source_step.duration_sec,
+                    meta=dict(source_step.meta),
+                    error=source_step.error,
+                    retries=source_step.retries,
+                ))
+            if preserved_steps and not reserved:
+                raise HTTPException(
+                    409,
+                    "partial snapshot rebuild requires an idempotency reservation",
+                )
+        await storage.clone(parent.id, new_id)            # 播种父产物 + .done
+        raw = await storage.read_file(parent.id, "job.json")
         doc = {}
-    doc.pop("pipeline", None)
-    doc.update({
-        "id": new_id,
-        "url": parent.url,
-        "source": route.source,
-        "content_type": route.content_type,
-        "document_kind": route.document_kind,
-        "source_profile": route.source_profile,
-        "domain": parent.domain,
-        "style_tags": parent.style_tags,
-        "created_at": _now_iso(),
-    })
-    # prompt 白盒:重建快照也重解析 prompt 覆盖,拾取最新编辑;父 job.json 里的旧覆盖会被替换。
-    overrides = await asyncio.to_thread(
-        db.resolve_prompt_overrides,
-        route.pipeline,
-        parent.domain,
-        route.document_kind,
-    )
-    if overrides:
-        doc["prompt_overrides"] = overrides
-    else:
-        doc.pop("prompt_overrides", None)
-    await storage.write_file(
-        new_id, "job.json", json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8"),
-    )
+        if raw:
+            try:
+                doc = json.loads(raw)
+            except Exception:
+                doc = {}
+        if not isinstance(doc, dict):
+            doc = {}
+        doc.pop("pipeline", None)
+        doc.update({
+            "id": new_id,
+            "url": parent.url,
+            "source": route.source,
+            "content_type": route.content_type,
+            "document_kind": route.document_kind,
+            "source_profile": route.source_profile,
+            "domain": parent.domain,
+            "style_tags": parent.style_tags,
+            "created_at": _now_iso(),
+            "flags": flags,
+        })
+        if rebuild_request is not None:
+            doc["rebuild_request"] = rebuild_request
+        # prompt 白盒:重建快照也重解析 prompt 覆盖,拾取最新编辑;父 job.json 里的旧覆盖会被替换。
+        overrides = await asyncio.to_thread(
+            db.resolve_prompt_overrides,
+            route.pipeline,
+            parent.domain,
+            route.document_kind,
+        )
+        if overrides:
+            doc["prompt_overrides"] = overrides
+        else:
+            doc.pop("prompt_overrides", None)
+        await storage.write_file(
+            new_id, "job.json",
+            json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+        cloned_files = await storage.list_files(new_id)
+        for step_name in reset_steps:
+            await storage.delete_file(new_id, f".{step_name}.done")
+        output_patterns = {
+            pattern
+            for step_name in reset_steps
+            for pattern in by_name[step_name].get("outputs", [])
+            if isinstance(pattern, str)
+        }
+        for rel_path in cloned_files:
+            if any(fnmatch.fnmatch(rel_path, pattern) for pattern in output_patterns):
+                await storage.delete_file(new_id, rel_path)
+        # reservation 行先承载上游终态,再与 target current 状态一并发布。否则 new_job
+        # 初始化会把全部步骤置 waiting,使 from_step 之前的下载/转写再次执行。
+        for step in preserved_steps:
+            await asyncio.to_thread(db.upsert_step, step)
+    except (Exception, asyncio.CancelledError):
+        await storage.delete(new_id)
+        if reserved:
+            await asyncio.to_thread(db.delete_job_cascade, new_id, None, None)
+        raise
+    meta = dict(parent.meta or {})
+    meta["flags"] = flags
+    if rebuild_request is not None:
+        meta["rebuild_request"] = rebuild_request
     job = Job(
         id=new_id, content_type=route.content_type, pipeline=route.pipeline,
         document_kind=route.document_kind or "",
         url=parent.url, title=parent.title, domain=parent.domain, source=route.source,
-        style_tags=parent.style_tags, collection_id=parent.collection_id, meta=parent.meta,
+        style_tags=parent.style_tags, collection_id=parent.collection_id, meta=meta,
         lineage_key=lineage, is_current=True, parent_job_id=parent.id,
         pipeline_digest=_pipeline_digest(config, route.pipeline),
     )
-    await asyncio.to_thread(db.create_job, job)        # create_job 自动 demote 同 lineage 旧版
+    if reserved:
+        ready_meta = dict(meta)
+        ready_record = dict(ready_meta.get("rebuild_request") or {})
+        ready_record["phase"] = "ready"
+        ready_record["heartbeat_at"] = _now_iso()
+        ready_meta["rebuild_request"] = ready_record
+        owner_token = ready_record.get("owner_token")
+        if not isinstance(owner_token, str) or not await asyncio.to_thread(
+            db._update_rebuild_reservation, new_id, owner_token, ready_meta,
+            status=JobStatus.PENDING, is_current=True,
+            collection_id=parent.collection_id,
+        ):
+            raise RuntimeError("rebuild reservation ownership was lost before promotion")
+        job.meta = ready_meta
+        job.status = JobStatus.PENDING
+        job.is_current = True
+    else:
+        try:
+            await asyncio.to_thread(db.create_job, job)    # create_job 自动 demote 同 lineage 旧版
+        except (Exception, asyncio.CancelledError):
+            # to_thread 取消时 SQL 可能已提交;有 DB 行就保留完整 target,由幂等重放续作。
+            if not await asyncio.to_thread(db.get_job, new_id):
+                await storage.delete(new_id)
+            raise
     if parent.collection_id:
-        await asyncio.to_thread(db.increment_collection_count, parent.collection_id, 1)
+        await asyncio.to_thread(db._reconcile_collection_count, parent.collection_id)
     await redis.append_lifecycle_event(
         "job_command", {"action": "new_job", "job_id": new_id, "pipeline": route.pipeline},
     )
+    if rebuild_request is not None:
+        await _mark_rebuild_event_published(db, storage, job)
     audit("job", new_id, "create", actor=actor,
           detail={"rebuilt_from": parent.id, "lineage_key": lineage})
     return job
+
+
+def _assert_rebuild_request_matches(job: Job, fingerprint: str) -> Job:
+    record = (job.meta or {}).get("rebuild_request")
+    if isinstance(record, dict) and record.get("fingerprint") == fingerprint:
+        return job
+    raise HTTPException(409, "idempotency_key was already used with different rebuild parameters")
+
+
+async def _mark_rebuild_event_published(
+    db: Database, storage: StorageBackend, job: Job,
+) -> None:
+    fresh = await asyncio.to_thread(db.get_job, job.id)
+    if not fresh:
+        raise RuntimeError("rebuild snapshot disappeared before event checkpoint")
+    meta = dict(fresh.meta or {})
+    record = dict(meta.get("rebuild_request") or {})
+    record["event_published"] = True
+    meta["rebuild_request"] = record
+    raw = await storage.read_file(job.id, "job.json")
+    try:
+        doc = json.loads(raw) if raw is not None else {}
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as exc:
+        raise RuntimeError("rebuild snapshot job.json is invalid") from exc
+    if not isinstance(doc, dict):
+        raise RuntimeError("rebuild snapshot job.json must be an object")
+    doc["rebuild_request"] = record
+    await storage.write_file(
+        job.id, "job.json",
+        json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8"),
+    )
+    await asyncio.to_thread(db.update_job, job.id, meta=meta)
+    job.meta = meta
+
+
+async def _replay_existing_snapshot(
+    db: Database, redis: RedisClient, storage: StorageBackend,
+    job: Job, fingerprint: str,
+) -> Job:
+    matched = _assert_rebuild_request_matches(job, fingerprint)
+    if matched.collection_id:
+        await asyncio.to_thread(db._reconcile_collection_count, matched.collection_id)
+    record = (matched.meta or {}).get("rebuild_request") or {}
+    if record.get("event_published") is not True:
+        await redis.append_lifecycle_event(
+            "job_command", {
+                "action": "new_job", "job_id": matched.id, "pipeline": matched.pipeline,
+            },
+        )
+        await _mark_rebuild_event_published(db, storage, matched)
+    return matched
+
+
+async def create_job_snapshot(
+    db: Database, redis: RedisClient, storage: StorageBackend,
+    config: AppConfig, parent_job_id: str, actor: str = "api",
+    *, mechanical_only: bool | None = None, smart_note: bool | None = None,
+    from_step: str | None = None,
+    reset_roots: list[str] | None = None,
+    idempotency_key: str | None = None,
+) -> Job:
+    """创建重建快照;幂等请求先持久化非 current reservation,克隆完成后才原子发布。"""
+    if idempotency_key is None:
+        return await _create_job_snapshot_once(
+            db, redis, storage, config, parent_job_id, actor,
+            mechanical_only=mechanical_only, smart_note=smart_note, from_step=from_step,
+            reset_roots=reset_roots,
+        )
+
+    parent = await asyncio.to_thread(db.get_job, parent_job_id)
+    if not parent:
+        raise HTTPException(404, "job not found")
+    try:
+        route = resolve_job_route(
+            parent.source or detect_source(parent.url or ""),
+            parent.content_type,
+            document_kind=parent.document_kind or None,
+            allow_internal=True,
+        )
+    except SourceRegistryError as exc:
+        raise HTTPException(409, f"parent job route is no longer supported: {exc}") from exc
+    step_names = {
+        step.get("name")
+        for step in config.pipelines.get(route.pipeline, {}).get("steps", [])
+        if isinstance(step, dict)
+    }
+    requested_roots = ([from_step] if from_step is not None else []) + list(reset_roots or [])
+    if any(root not in step_names for root in requested_roots):
+        raise HTTPException(422, "from_step is not part of the job pipeline")
+
+    payload = {
+        "parent_job_id": parent_job_id,
+        "mechanical_only": mechanical_only,
+        "smart_note": smart_note,
+        "from_step": from_step,
+        "reset_roots": sorted(reset_roots or []),
+    }
+    fingerprint = "sha256:" + hashlib.sha256(json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    target_id = "jr_" + hashlib.sha256(
+        f"{parent_job_id}\0{idempotency_key}".encode("utf-8")
+    ).hexdigest()[:24]
+    request_record: dict = {
+        "idempotency_key": idempotency_key,
+        "fingerprint": fingerprint,
+        "event_published": False,
+        **payload,
+    }
+    action = f"rebuild:{hashlib.sha256(idempotency_key.encode()).hexdigest()[:16]}"
+    clone_owner: str | None = None
+    for _ in range(12000):
+        existing = await asyncio.to_thread(db.get_job, target_id)
+        if existing:
+            matched = _assert_rebuild_request_matches(existing, fingerprint)
+            record = (matched.meta or {}).get("rebuild_request") or {}
+            phase = record.get("phase")
+            if phase == "ready":
+                token = secrets.token_hex(16)
+                if await redis.acquire_job_control_lock(parent_job_id, action, token, ttl_sec=30):
+                    try:
+                        fresh = await asyncio.to_thread(db.get_job, target_id)
+                        if fresh:
+                            return await _replay_existing_snapshot(
+                                db, redis, storage, fresh, fingerprint,
+                            )
+                    finally:
+                        await redis.release_job_control_lock(parent_job_id, action, token)
+                await asyncio.sleep(0.05)
+                continue
+            heartbeat_raw = record.get("heartbeat_at")
+            try:
+                heartbeat = datetime.fromisoformat(heartbeat_raw)
+            except (TypeError, ValueError):
+                heartbeat = None
+            fresh_heartbeat = heartbeat is not None and (
+                datetime.now(timezone.utc) - heartbeat
+            ) < timedelta(seconds=45)
+            if phase == "cloning" and fresh_heartbeat:
+                await asyncio.sleep(0.05)
+                continue
+            raise HTTPException(
+                409,
+                "stale rebuild reservation requires controlled cleanup before retry",
+            )
+
+        token = secrets.token_hex(16)
+        if not await redis.acquire_job_control_lock(parent_job_id, action, token, ttl_sec=30):
+            await asyncio.sleep(0.05)
+            continue
+        try:
+            existing = await asyncio.to_thread(db.get_job, target_id)
+            if existing:
+                _assert_rebuild_request_matches(existing, fingerprint)
+                raise HTTPException(
+                    409,
+                    "rebuild reservation appeared while acquiring ownership; retry",
+                )
+            clone_owner = secrets.token_hex(16)
+            claimed_record = {
+                **request_record,
+                "phase": "cloning",
+                "owner_token": clone_owner,
+                "heartbeat_at": _now_iso(),
+            }
+            flags = dict((parent.meta or {}).get("flags") or {})
+            if mechanical_only is not None:
+                flags["mechanical_only"] = mechanical_only
+            if smart_note is not None:
+                flags["smart_note"] = smart_note
+            reservation_meta = dict(parent.meta or {})
+            reservation_meta["flags"] = flags
+            reservation_meta["rebuild_request"] = claimed_record
+            reservation = Job(
+                id=target_id, content_type=route.content_type, pipeline=route.pipeline,
+                document_kind=route.document_kind or "", url=parent.url,
+                title=parent.title, domain=parent.domain, source=route.source,
+                style_tags=parent.style_tags, collection_id=None,
+                meta=reservation_meta, lineage_key=parent.lineage_key or _lineage_key_of(parent.id),
+                is_current=False, parent_job_id=parent.id,
+                pipeline_digest=_pipeline_digest(config, route.pipeline),
+                status=JobStatus.PROCESSING,
+            )
+            await asyncio.to_thread(db.create_job, reservation)
+        finally:
+            await redis.release_job_control_lock(parent_job_id, action, token)
+        break
+    if clone_owner is None:
+        raise HTTPException(409, "rebuild with this idempotency_key is already in progress")
+
+    stop_heartbeat = asyncio.Event()
+
+    async def _heartbeat() -> None:
+        while not stop_heartbeat.is_set():
+            try:
+                await asyncio.wait_for(stop_heartbeat.wait(), timeout=10)
+                return
+            except asyncio.TimeoutError:
+                if not await asyncio.to_thread(
+                    db._heartbeat_rebuild_reservation,
+                    target_id, clone_owner, _now_iso(),
+                ):
+                    return
+
+    heartbeat_task = asyncio.create_task(_heartbeat())
+    try:
+        existing = await asyncio.to_thread(db.get_job, target_id)
+        if not existing:
+            raise RuntimeError("rebuild reservation disappeared before clone")
+        claimed_record = dict((existing.meta or {}).get("rebuild_request") or {})
+        return await _create_job_snapshot_once(
+            db, redis, storage, config, parent_job_id, actor,
+            mechanical_only=mechanical_only, smart_note=smart_note, from_step=from_step,
+            reset_roots=reset_roots,
+            new_id_override=target_id, rebuild_request=claimed_record,
+            reserved=True,
+        )
+    finally:
+        stop_heartbeat.set()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
 
 
 @router.post("", status_code=201, response_model=JobCreatedResponse)
@@ -747,12 +1108,14 @@ async def create_job(
         redis=redis, config=config, content_type=route.content_type,
         source=source, url=req.url, domain=resolved_domain,
         style_tags=req.style_tags, smart_note=req.smart_note,
+        mechanical_only=req.mechanical_only,
         document_kind=route.document_kind,
     )
     job = await create_job_core(
         db, redis, storage, req.url, req.content_type,
         resolved_domain, req.style_tags, req.collection_id,
         smart_note=req.smart_note, document_kind=route.document_kind, config=config,
+        mechanical_only=req.mechanical_only,
     )
     return {"job_id": job.id, "content_type": job.content_type,
             "document_kind": job.document_kind or None, "pipeline": job.pipeline,
@@ -764,6 +1127,7 @@ async def create_job(
 async def upload_job(
     content_type: ContentType = Query(...),
     document_kind: DocumentKind | None = Query(None),
+    mechanical_only: bool = Query(False),
     file: UploadFile = File(...),
     domain: str = Form("general"),
     style_tags: str = Form("[]"),
@@ -804,6 +1168,7 @@ async def upload_job(
         redis=redis, config=config, content_type=route.content_type,
         source="upload", url=None, domain=resolved_domain, style_tags=tags,
         document_kind=route.document_kind,
+        mechanical_only=mechanical_only,
     )
 
     async def _chunks() -> AsyncIterator[bytes]:
@@ -816,6 +1181,7 @@ async def upload_job(
             db, redis, storage, url=None, content_type=content_type,
             domain=resolved_domain, style_tags=tags, collection_id=collection_id, title=title,
             upload=(ext, _chunks()), document_kind=route.document_kind, config=config,
+            mechanical_only=mechanical_only,
         )
     except ArtifactTooLarge as exc:
         raise HTTPException(
@@ -899,6 +1265,14 @@ async def list_jobs(
                 progress_pct=j.progress_pct, source=j.source, domain=j.domain,
                 collection_id=j.collection_id,
                 versions=counts.get(j.lineage_key, 1) if j.lineage_key else 1,
+                processing_mode=(
+                    "mechanical_only"
+                    if (j.meta.get("flags") or {}).get("mechanical_only") else "full"
+                ),
+                completion_scope=(
+                    "mechanical"
+                    if (j.meta.get("flags") or {}).get("mechanical_only") else "full"
+                ),
             )
             for j in jobs
         ],
@@ -1053,6 +1427,14 @@ async def get_job(
         progress_pct=job.progress_pct, source=job.source, domain=job.domain,
         collection_id=job.collection_id, collection_name=collection_name,
         meta=job.meta, source_profile=source_profile,
+        processing_mode=(
+            "mechanical_only"
+            if (job.meta.get("flags") or {}).get("mechanical_only") else "full"
+        ),
+        completion_scope=(
+            "mechanical"
+            if (job.meta.get("flags") or {}).get("mechanical_only") else "full"
+        ),
         update_available=bool(update_state["expired"]),
         update_from_step=update_state["first_changed_step"],
         steps=[
@@ -1303,6 +1685,7 @@ async def rerun_job(
 @router.post("/{job_id}/rebuild", response_model=JobRebuildResponse)
 async def rebuild_job(
     job_id: str,
+    req: RebuildRequest | None = None,
     db: Database = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
     storage: StorageBackend = Depends(get_storage),
@@ -1311,9 +1694,60 @@ async def rebuild_job(
     """重建为新快照(fork 父 job:播种产物+.done,只重跑分叉步及下游;旧版保留 A/B)。
     返回新 job_id;新版自动成为该 lineage 的 current。"""
     validate_path_segment(job_id, "job_id")
-    job = await create_job_snapshot(db, redis, storage, config, job_id)
+    request = req or RebuildRequest()
+    parent = await asyncio.to_thread(db.get_job, job_id)
+    if not parent:
+        raise HTTPException(404, "job not found")
+    operation_key = request.idempotency_key
+    if operation_key is None:
+        prompt_overrides = await asyncio.to_thread(
+            db.resolve_prompt_overrides,
+            parent.pipeline,
+            parent.domain,
+            parent.document_kind or None,
+        )
+        operation_key = "rebuild-default:" + hashlib.sha256(json.dumps({
+            "mechanical_only": request.mechanical_only,
+            "from_step": request.from_step,
+            "pipeline_digest": _pipeline_digest(config, parent.pipeline),
+            "prompt_overrides": prompt_overrides or {},
+        }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    target_id = "jr_" + hashlib.sha256(
+        f"{job_id}\0{operation_key}".encode("utf-8")
+    ).hexdigest()[:24]
+    existing = await asyncio.to_thread(db.get_job, target_id)
+    if existing is None:
+        if parent.status in {
+            JobStatus.PENDING, JobStatus.DOWNLOADING, JobStatus.PROCESSING,
+        }:
+            raise HTTPException(409, "cannot rebuild an active parent job")
+        inherited_mechanical = (
+            (parent.meta.get("flags") or {}).get("mechanical_only") is True
+        )
+        effective_mechanical = (
+            request.mechanical_only
+            if request.mechanical_only is not None
+            else inherited_mechanical
+        )
+        if not effective_mechanical:
+            await ensure_job_workers(
+                redis=redis, config=config, content_type=parent.content_type,
+                source=parent.source or detect_source(parent.url or ""), url=parent.url,
+                domain=parent.domain, style_tags=parent.style_tags,
+                smart_note=(parent.meta.get("flags") or {}).get("smart_note"),
+                mechanical_only=False, document_kind=parent.document_kind or None,
+            )
+    job = await create_job_snapshot(
+        db, redis, storage, config, job_id,
+        mechanical_only=request.mechanical_only,
+        from_step=request.from_step,
+        idempotency_key=operation_key,
+    )
+    mechanical = (job.meta.get("flags") or {}).get("mechanical_only") is True
     return {"job_id": job.id, "parent_job_id": job.parent_job_id,
-            "lineage_key": job.lineage_key, "status": "pending"}
+            "lineage_key": job.lineage_key, "status": "pending",
+            "from_step": request.from_step,
+            "processing_mode": "mechanical_only" if mechanical else "full"}
 
 
 @router.post("/rebuild-stale", response_model=JobsRebuiltResponse)
@@ -1328,9 +1762,54 @@ async def rebuild_stale(
     _, jobs = await asyncio.to_thread(db.list_jobs, None, None, 10000, 0, None, None, False, True)
     rebuilt = []
     for job in jobs:
+        record = (job.meta or {}).get("rebuild_request") or {}
+        if (
+            isinstance(record, dict)
+            and record.get("phase") == "ready"
+            and record.get("event_published") is not True
+            and str(record.get("idempotency_key", "")).startswith("rebuild-stale:")
+            and isinstance(record.get("parent_job_id"), str)
+        ):
+            repaired = await create_job_snapshot(
+                db, redis, storage, config, record["parent_job_id"],
+                mechanical_only=record.get("mechanical_only"),
+                smart_note=record.get("smart_note"),
+                from_step=record.get("from_step"),
+                reset_roots=record.get("reset_roots") or [],
+                idempotency_key=record["idempotency_key"],
+            )
+            rebuilt.append({
+                "parent_job_id": record["parent_job_id"],
+                "job_id": repaired.id,
+                "from_step": record.get("from_step"),
+            })
+            continue
+        if job.status in {JobStatus.PENDING, JobStatus.PROCESSING, JobStatus.DOWNLOADING}:
+            continue
         exp = await is_job_expired(storage, config, job)
         if exp["expired"]:
-            new = await create_job_snapshot(db, redis, storage, config, job.id)
+            operation = {
+                "lineage_key": job.lineage_key or _lineage_key_of(job.id),
+                "pipeline_digest": _pipeline_digest(config, job.pipeline),
+                "first_changed_step": exp["first_changed_step"],
+            }
+            durable_key = "rebuild-stale:" + hashlib.sha256(json.dumps(
+                operation, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            mechanical = (job.meta.get("flags") or {}).get("mechanical_only") is True
+            if not mechanical:
+                await ensure_job_workers(
+                    redis=redis, config=config, content_type=job.content_type,
+                    source=job.source or detect_source(job.url or ""), url=job.url,
+                    domain=job.domain, style_tags=job.style_tags,
+                    smart_note=(job.meta.get("flags") or {}).get("smart_note"),
+                    mechanical_only=False, document_kind=job.document_kind or None,
+                )
+            new = await create_job_snapshot(
+                db, redis, storage, config, job.id,
+                from_step=exp["first_changed_step"],
+                idempotency_key=durable_key,
+            )
             rebuilt.append({"parent_job_id": job.id, "job_id": new.id,
                             "from_step": exp["first_changed_step"]})
     return {"rebuilt": len(rebuilt), "items": rebuilt}
@@ -1480,3 +1959,78 @@ async def resubmit_job(
         raise HTTPException(404, "job not found")
     await redis.append_lifecycle_event("job_command", {"action": "resubmit", "job_id": job_id})
     return {"job_id": job_id, "status": "processing"}
+
+
+@router.post("/{job_id}/continue-ai", response_model=JobStatusResponse)
+async def continue_job_ai(
+    job_id: str,
+    db: Database = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+    storage: StorageBackend = Depends(get_storage),
+    config: AppConfig = Depends(get_config),
+):
+    """机械版完成后 fork 完整处理快照;父快照不可变,新快照重算 AI 根及其全部下游。"""
+    validate_path_segment(job_id, "job_id")
+    job = await asyncio.to_thread(db.get_job, job_id)
+    if not job:
+        raise HTTPException(404, "job not found")
+    flags = dict((job.meta or {}).get("flags") or {})
+    if flags.get("mechanical_only") is not True:
+        raise HTTPException(409, "job is not in mechanical_only mode")
+    steps = config.pipelines.get(job.pipeline, {}).get("steps", [])
+    by_name = {
+        step.get("name"): step for step in steps
+        if isinstance(step, dict) and isinstance(step.get("name"), str)
+    }
+
+    def _has_ai_ancestor(name: str, seen: set[str] | None = None) -> bool:
+        visited = set(seen or ())
+        if name in visited:
+            return False
+        visited.add(name)
+        for dep in by_name[name].get("depends_on", by_name[name].get("needs", [])):
+            cfg = by_name.get(dep)
+            if cfg is None:
+                continue
+            if cfg.get("pool") == "ai" or _has_ai_ancestor(dep, visited):
+                return True
+        return False
+
+    ai_roots = sorted(
+        name for name, cfg in by_name.items()
+        if cfg.get("pool") == "ai" and not _has_ai_ancestor(name)
+    )
+    if not ai_roots:
+        raise HTTPException(409, "pipeline has no AI steps to continue")
+    if not job.is_current:
+        versions = await asyncio.to_thread(db.lineage_versions, job_id)
+        for version in versions:
+            record = (version.meta or {}).get("rebuild_request") or {}
+            if (
+                version.parent_job_id == job_id
+                and record.get("idempotency_key") == "continue-ai:v1"
+                and record.get("phase") == "ready"
+            ):
+                repaired = await create_job_snapshot(
+                    db, redis, storage, config, job_id,
+                    mechanical_only=False, smart_note=True, reset_roots=ai_roots,
+                    idempotency_key="continue-ai:v1",
+                )
+                return {"job_id": repaired.id, "status": repaired.status.value}
+    if not job.is_current or job.status != JobStatus.DONE:
+        raise HTTPException(409, "continue-ai requires a completed current mechanical snapshot")
+    step_rows = await asyncio.to_thread(db.get_steps, job_id)
+    if any(step.status not in {StepStatus.DONE, StepStatus.SKIPPED} for step in step_rows):
+        raise HTTPException(409, "mechanical steps are not all terminal")
+    await ensure_job_workers(
+        redis=redis, config=config, content_type=job.content_type,
+        source=job.source or detect_source(job.url or ""), url=job.url,
+        domain=job.domain, style_tags=job.style_tags, smart_note=True,
+        mechanical_only=False, document_kind=job.document_kind or None,
+    )
+    new = await create_job_snapshot(
+        db, redis, storage, config, job_id,
+        mechanical_only=False, smart_note=True, reset_roots=ai_roots,
+        idempotency_key="continue-ai:v1",
+    )
+    return {"job_id": new.id, "status": "pending"}

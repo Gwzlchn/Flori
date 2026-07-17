@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import asyncio
+import json
 from collections import deque
 
 import structlog
@@ -29,39 +30,70 @@ class DagPlanner:
             return
         steps = self.owner._get_pipeline_steps(pipeline)
         statuses = await self.owner.redis.get_all_step_statuses(job_id)
+        info = await self.owner.redis.get_job_info(job_id)
+        try:
+            flags = json.loads(info.get("flags") or "{}")
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            flags = {}
+        mechanical_only = flags.get("mechanical_only") is True
 
-        for name, cfg in steps.items():
-            status = statuses.get(name)
-            if status not in ("waiting", "skipped"):
-                continue
+        # YAML 只表达依赖关系,不保证 key 按拓扑排序。跳过一个 AI/条件步骤后必须重新扫描,
+        # 否则声明在依赖之前的下游会永久停在 waiting。每轮只在真实状态转换时继续。
+        while True:
+            progressed = False
+            for name, cfg in steps.items():
+                status = statuses.get(name)
+                if status not in ("waiting", "skipped"):
+                    continue
 
-            deps = cfg.get("depends_on", [])
-            if not all(statuses.get(d) in ("done", "skipped") for d in deps):
-                continue
+                deps = cfg.get("depends_on", [])
+                if not all(statuses.get(d) in ("done", "skipped") for d in deps):
+                    continue
 
-            conditional = self.owner._step_is_conditional(cfg)
-            if conditional and not await self.owner._eval_step_condition(job_id, cfg):
-                if status == "waiting":
-                    await self.owner.redis.set_step_status(job_id, name, "skipped")
-                    await asyncio.to_thread(
-                        self.owner.db.update_step, job_id, name, status="skipped",
+                # 纯机械模式按执行池建硬边界。不能依赖步骤名清单,否则新增 AI 步会静默漏网。
+                if mechanical_only and cfg.get("pool") == "ai":
+                    if status == "waiting":
+                        await self.owner.redis.set_step_status(job_id, name, "skipped")
+                        await asyncio.to_thread(
+                            self.owner.db.update_step, job_id, name, status="skipped",
+                        )
+                        await self.owner.redis.publish(f"events:{job_id}", {
+                            "event": "step_skipped", "step": name,
+                            "reason": "mechanical_only",
+                        })
+                        statuses[name] = "skipped"
+                        progressed = True
+                    continue
+
+                conditional = self.owner._step_is_conditional(cfg)
+                if conditional and not await self.owner._eval_step_condition(job_id, cfg):
+                    if status == "waiting":
+                        await self.owner.redis.set_step_status(job_id, name, "skipped")
+                        await asyncio.to_thread(
+                            self.owner.db.update_step, job_id, name, status="skipped",
+                        )
+                        await self.owner.redis.publish(f"events:{job_id}", {
+                            "event": "step_skipped", "step": name,
+                        })
+                        statuses[name] = "skipped"
+                        progressed = True
+                    continue
+
+                if status == "skipped":
+                    if not conditional:
+                        continue
+                    ok = await self.owner.redis.cas_step_status(
+                        job_id, name, "skipped", "ready",
                     )
-                    await self.owner.redis.publish(f"events:{job_id}", {
-                        "event": "step_skipped", "step": name,
-                    })
-                    statuses[name] = "skipped"
-                continue
-
-            if status == "skipped":
-                if not conditional:
-                    continue
-                ok = await self.owner.redis.cas_step_status(job_id, name, "skipped", "ready")
-                if not ok:
-                    continue
-            if not await self.owner.enqueue_step(job_id, name):
-                statuses[name] = "failed"
-                return
-            statuses[name] = "ready"
+                    if not ok:
+                        continue
+                if not await self.owner.enqueue_step(job_id, name):
+                    statuses[name] = "failed"
+                    return
+                statuses[name] = "ready"
+                progressed = True
+            if not progressed:
+                break
 
         fresh = await self.owner.redis.get_all_step_statuses(job_id)
         if fresh and all(v in ("done", "skipped") for v in fresh.values()):

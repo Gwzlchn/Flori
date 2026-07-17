@@ -1263,6 +1263,40 @@ class RedisClient:
         })
         await self.r.hsetnx(key, "lifecycle_generation", "1")
 
+    async def acquire_job_control_lock(
+        self, job_id: str, action: str, token: str, ttl_sec: int = 30,
+    ) -> bool:
+        """串行化同一 job 的破坏性控制命令;token 防止过期后的旧持有者误删新锁。"""
+        return bool(await self.r.set(
+            f"job:{job_id}:control:{action}", token, nx=True, ex=ttl_sec,
+        ))
+
+    async def release_job_control_lock(
+        self, job_id: str, action: str, token: str,
+    ) -> bool:
+        script = """
+        if redis.call('GET', KEYS[1]) == ARGV[1] then
+            return redis.call('DEL', KEYS[1])
+        end
+        return 0
+        """
+        return bool(await self.r.eval(
+            script, 1, f"job:{job_id}:control:{action}", token,
+        ))
+
+    async def refresh_job_control_lock(
+        self, job_id: str, action: str, token: str, ttl_sec: int = 30,
+    ) -> bool:
+        script = """
+        if redis.call('GET', KEYS[1]) == ARGV[1] then
+            return redis.call('EXPIRE', KEYS[1], ARGV[2])
+        end
+        return 0
+        """
+        return bool(await self.r.eval(
+            script, 1, f"job:{job_id}:control:{action}", token, str(ttl_sec),
+        ))
+
     async def get_job_generation(self, job_id: str) -> int:
         raw = await self.r.hget(f"job:{job_id}", "lifecycle_generation")
         return int(raw or 1)

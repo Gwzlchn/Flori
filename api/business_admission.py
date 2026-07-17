@@ -63,6 +63,7 @@ async def ensure_job_workers(
     domain: str = "general",
     style_tags: list[str] | None = None,
     smart_note: bool | None = None,
+    mechanical_only: bool = False,
     document_kind: str | None = None,
 ) -> None:
     pipeline = pipeline_for_content_type(content_type)
@@ -75,7 +76,10 @@ async def ensure_job_workers(
         )
         requirements = pipeline_requirements(
             config, pipeline, source=source, url=url, domain=domain,
-            style_tags=style_tags or [], flags={"smart_note": bool(resolved_smart)},
+            style_tags=style_tags or [], flags={
+                "smart_note": bool(resolved_smart),
+                "mechanical_only": mechanical_only,
+            },
         )
         available = await _workers(redis)
         covered = workers_cover_pipeline(available, requirements, config)
@@ -105,6 +109,9 @@ def _content_type_from_create(
         return None
     smart_note = payload.get("smart_note")
     if smart_note is not None and not isinstance(smart_note, bool):
+        return None
+    mechanical_only = payload.get("mechanical_only", False)
+    if not isinstance(mechanical_only, bool):
         return None
     source = detect_source(url or "")
     document_kind = payload.get("document_kind")
@@ -145,6 +152,12 @@ class JobAdmissionRoute(APIRoute):
             if admission_kind == "upload":
                 content_type = request.query_params.get("content_type")
                 document_kind = request.query_params.get("document_kind")
+                mechanical_raw = request.query_params.get("mechanical_only", "false").lower()
+                if mechanical_raw not in {"true", "false", "1", "0"}:
+                    raise BusinessAdmissionError(
+                        422, "invalid_request", "mechanical_only must be boolean",
+                    )
+                mechanical_only = mechanical_raw in {"true", "1"}
                 if content_type not in CONTENT_TYPE_NAMES:
                     raise BusinessAdmissionError(
                         422, "invalid_request", "content_type query is required",
@@ -161,6 +174,7 @@ class JobAdmissionRoute(APIRoute):
                     redis=request.app.state.redis, config=request.app.state.config,
                     content_type=route.content_type, source="upload", url=None,
                     document_kind=route.document_kind,
+                    mechanical_only=mechanical_only,
                 )
             else:
                 try:
@@ -190,6 +204,7 @@ class JobAdmissionRoute(APIRoute):
                             domain=str(payload.get("domain") or "general"),
                             style_tags=payload.get("style_tags") if isinstance(payload.get("style_tags"), list) else [],
                             smart_note=payload.get("smart_note") if isinstance(payload.get("smart_note"), bool) else None,
+                            mechanical_only=payload.get("mechanical_only", False) is True,
                             document_kind=route.document_kind,
                         )
             return await original(request)

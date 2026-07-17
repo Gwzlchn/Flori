@@ -357,6 +357,103 @@ class DatabaseAggregates:
                         )
                 self._conn.commit()
                 return previous, collection_id, changed
+
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    def _update_rebuild_reservation(
+        self, job_id: str, owner_token: str, meta: dict, *,
+        status: JobStatus | None = None, is_current: bool | None = None,
+        collection_id: str | None = None,
+    ) -> bool:
+        """仅 reservation 当前 owner 可发布快照,防止旧 clone 在接管后提交。"""
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                row = self._conn.execute(
+                    "SELECT meta, lineage_key FROM jobs WHERE id=?", (job_id,),
+                ).fetchone()
+                if row is None:
+                    self._conn.rollback()
+                    return False
+                try:
+                    current = json.loads(row["meta"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    current = {}
+                record = current.get("rebuild_request") or {}
+                if record.get("owner_token") != owner_token:
+                    self._conn.rollback()
+                    return False
+                fields: dict[str, object] = {
+                    "meta": json.dumps(meta, ensure_ascii=False),
+                    "updated_at": _now_iso(),
+                }
+                if status is not None:
+                    fields["status"] = status.value
+                if is_current is not None:
+                    fields["is_current"] = 1 if is_current else 0
+                if collection_id is not None:
+                    fields["collection_id"] = collection_id
+                clause = ", ".join(f"{name}=?" for name in fields)
+                self._conn.execute(
+                    f"UPDATE jobs SET {clause} WHERE id=?", [*fields.values(), job_id],
+                )
+                if is_current and row["lineage_key"]:
+                    superseded = self._conn.execute(
+                        "SELECT id FROM jobs WHERE lineage_key=? AND id!=? AND is_current=1",
+                        (row["lineage_key"], job_id),
+                    ).fetchall()
+                    self._conn.execute(
+                        "UPDATE jobs SET is_current=0 WHERE lineage_key=? AND id!=?",
+                        (row["lineage_key"], job_id),
+                    )
+                    for old in superseded:
+                        self._revalidate_study_suggestion_evidence_locked(
+                            job_id=str(old["id"]),
+                        )
+                self._conn.commit()
+                return True
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    def _heartbeat_rebuild_reservation(
+        self, job_id: str, owner_token: str, heartbeat_at: str,
+    ) -> bool:
+        """原子 patch cloning reservation heartbeat,不覆盖 phase/event checkpoint。"""
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                row = self._conn.execute(
+                    "SELECT meta, is_current FROM jobs WHERE id=?", (job_id,),
+                ).fetchone()
+                if row is None or int(row["is_current"]) != 0:
+                    self._conn.rollback()
+                    return False
+                try:
+                    meta = json.loads(row["meta"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    self._conn.rollback()
+                    return False
+                record = meta.get("rebuild_request")
+                if not isinstance(record, dict) or (
+                    record.get("owner_token") != owner_token
+                    or record.get("phase") != "cloning"
+                ):
+                    self._conn.rollback()
+                    return False
+                patched = dict(record)
+                patched["heartbeat_at"] = heartbeat_at
+                meta["rebuild_request"] = patched
+                self._conn.execute(
+                    "UPDATE jobs SET meta=?, updated_at=? WHERE id=?",
+                    (json.dumps(meta, ensure_ascii=False), _now_iso(), job_id),
+                )
+                self._conn.commit()
+                return True
             except BaseException:
                 if self._conn.in_transaction:
                     self._conn.rollback()

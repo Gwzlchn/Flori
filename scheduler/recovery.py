@@ -551,3 +551,10 @@ class RecoveryCoordinator:
         await self.owner._check_downstream(job_id)
 
         logger.info("job_resubmit", job_id=job_id, pipeline=pipeline)
+
+    async def continue_ai(
+        self, job_id: str, idempotency_key: str | None = None,
+    ) -> list[str]:
+        """旧命令不再原地改快照;API 现以不可变 full snapshot 实现继续 AI。"""
+        logger.warning("legacy_continue_ai_ignored", job_id=job_id)
+        return []

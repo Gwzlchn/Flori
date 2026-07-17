@@ -24,6 +24,8 @@ class StepRequirement:
 
 def _may_run(step: dict, flags: dict[str, bool]) -> bool:
     """仅排除 flags 已确定跳过的分支;产物条件尚未知时仍视为可达。"""
+    if flags.get("mechanical_only", False) and step.get("pool") == "ai":
+        return False
     if step.get("condition"):
         return True
     rules = step.get("rules")

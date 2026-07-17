@@ -665,6 +665,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/jobs/{job_id}/continue-ai": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Continue Job Ai
+         * @description 机械版完成后 fork 完整处理快照;父快照不可变,新快照重算 AI 根及其全部下游。
+         */
+        post: operations["continue_job_ai_api_jobs__job_id__continue_ai_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/jobs/{job_id}/evidence": {
         parameters: {
             query?: never;
@@ -2287,6 +2307,11 @@ export interface components {
              * @default general
              */
             domain: string;
+            /**
+             * Mechanical Only
+             * @default false
+             */
+            mechanical_only: boolean;
             /** Smart Note */
             smart_note?: boolean | null;
             /** Style Tags */
@@ -2320,6 +2345,12 @@ export interface components {
             collection_id?: string | null;
             /** Collection Name */
             collection_name?: string | null;
+            /**
+             * Completion Scope
+             * @default full
+             * @enum {string}
+             */
+            completion_scope: "full" | "mechanical";
             /** Content Type */
             content_type: string;
             /** Created At */
@@ -2343,6 +2374,12 @@ export interface components {
             };
             /** Pipeline */
             pipeline: string;
+            /**
+             * Processing Mode
+             * @default full
+             * @enum {string}
+             */
+            processing_mode: "full" | "mechanical_only";
             /**
              * Progress Pct
              * @default 0
@@ -2405,12 +2442,19 @@ export interface components {
         };
         /** JobRebuildResponse */
         JobRebuildResponse: {
+            /** From Step */
+            from_step?: string | null;
             /** Job Id */
             job_id: string;
             /** Lineage Key */
             lineage_key: string | null;
             /** Parent Job Id */
             parent_job_id: string | null;
+            /**
+             * Processing Mode
+             * @enum {string}
+             */
+            processing_mode: "full" | "mechanical_only";
             /** Status */
             status: string;
         };
@@ -2449,6 +2493,12 @@ export interface components {
         JobResponse: {
             /** Collection Id */
             collection_id?: string | null;
+            /**
+             * Completion Scope
+             * @default full
+             * @enum {string}
+             */
+            completion_scope: "full" | "mechanical";
             /** Content Type */
             content_type: string;
             /** Created At */
@@ -2464,6 +2514,12 @@ export interface components {
             job_id: string;
             /** Pipeline */
             pipeline: string;
+            /**
+             * Processing Mode
+             * @default full
+             * @enum {string}
+             */
+            processing_mode: "full" | "mechanical_only";
             /**
              * Progress Pct
              * @default 0
@@ -2885,6 +2941,15 @@ export interface components {
             status: "ready" | "degraded" | "not_ready";
             /** Version */
             version: string;
+        };
+        /** RebuildRequest */
+        RebuildRequest: {
+            /** From Step */
+            from_step?: string | null;
+            /** Idempotency Key */
+            idempotency_key?: string | null;
+            /** Mechanical Only */
+            mechanical_only?: boolean | null;
         };
         /** RerunRequest */
         RerunRequest: {
@@ -7737,6 +7802,7 @@ export interface operations {
             query: {
                 content_type: components["schemas"]["ContentType"];
                 document_kind?: components["schemas"]["DocumentKind"] | null;
+                mechanical_only?: boolean;
             };
             header?: never;
             path?: never;
@@ -8463,6 +8529,127 @@ export interface operations {
             };
         };
     };
+    continue_job_ai_api_jobs__job_id__continue_ai_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobStatusResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Requested Range Not Satisfiable */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Bad Gateway */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     get_evidence_api_jobs__job_id__evidence_get: {
         parameters: {
             query?: never;
@@ -8714,7 +8901,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["RebuildRequest"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

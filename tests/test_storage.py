@@ -589,6 +589,22 @@ class TestLocalStorage:
 
 class TestRemoteListFiles:
     @pytest.mark.asyncio
+    async def test_clone_fails_closed_when_any_object_copy_fails(self, monkeypatch):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=None)
+        client = MagicMock()
+        client.list_objects.return_value = [
+            MagicMock(object_name="src/job.json"),
+            MagicMock(object_name="src/output/notes.md"),
+        ]
+        client.copy_object.side_effect = [None, RuntimeError("copy broke")]
+        monkeypatch.setattr(rs, "_client", lambda: client)
+
+        with pytest.raises(OSError, match="storage clone incomplete"):
+            await rs.clone("src", "dst")
+
+        assert client.copy_object.call_count == 2
+
+    @pytest.mark.asyncio
     async def test_list_objects_under_prefix_strips_prefix(self, monkeypatch):
         rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=None)
         objs = [
