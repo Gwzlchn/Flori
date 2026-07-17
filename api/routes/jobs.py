@@ -56,6 +56,8 @@ from api.business_admission import (
 from api.schemas import (
     ContentType,
     DocumentKind,
+    JobCollectionUpdateRequest,
+    JobCollectionUpdateResponse,
     JobCreateRequest,
     JobDetailResponse,
     JobListResponse,
@@ -435,6 +437,7 @@ async def create_job_core(
     smart_note: bool | None = None,
     document_kind: str | None = None,
     item_id: str | None = None, actor: str = "api",
+    source_position: int | None = None,
     config: AppConfig | None = None,
     defer_submit: bool = False,
 ) -> Job:
@@ -539,6 +542,9 @@ async def create_job_core(
     job_meta: dict = {"flags": flags}
     if item_id:
         job_meta["source_item_id"] = item_id
+        job_meta["source_present"] = True
+    if source_position is not None:
+        job_meta["source_position"] = source_position
     # pipeline_digest:当前 pipeline 各步定义指纹聚合(供"重建过期"批量快查);config 缺省(如订阅同步)则留空,
     # is_job_expired 会回退逐 .done 比对,不影响正确性。
     pdigest = _pipeline_digest(config, pipeline)
@@ -729,19 +735,23 @@ async def create_job(
         )
     except SourceRegistryError as exc:
         raise HTTPException(422, f"unsupported_source: {exc}") from exc
+    resolved_domain = req.domain
+    if req.collection_id:
+        collection = await asyncio.to_thread(db.get_collection, req.collection_id)
+        if not collection:
+            raise HTTPException(400, "collection_id not found")
+        if req.domain not in ("general", collection.domain):
+            raise HTTPException(409, "job and collection domain mismatch")
+        resolved_domain = collection.domain
     await ensure_job_workers(
         redis=redis, config=config, content_type=route.content_type,
-        source=source, url=req.url, domain=req.domain,
+        source=source, url=req.url, domain=resolved_domain,
         style_tags=req.style_tags, smart_note=req.smart_note,
         document_kind=route.document_kind,
     )
-    # 校验 collection_id 存在,避免孤儿绑定 + job_count 漂移。
-    if req.collection_id:
-        if not await asyncio.to_thread(db.get_collection, req.collection_id):
-            raise HTTPException(400, "collection_id not found")
     job = await create_job_core(
         db, redis, storage, req.url, req.content_type,
-        req.domain, req.style_tags, req.collection_id,
+        resolved_domain, req.style_tags, req.collection_id,
         smart_note=req.smart_note, document_kind=route.document_kind, config=config,
     )
     return {"job_id": job.id, "content_type": job.content_type,
@@ -782,15 +792,19 @@ async def upload_job(
         raise HTTPException(400, "invalid style_tags JSON")
     if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
         raise HTTPException(400, "style_tags must be a string array")
+    resolved_domain = domain
+    if collection_id:
+        collection = await asyncio.to_thread(db.get_collection, collection_id)
+        if not collection:
+            raise HTTPException(400, "collection_id not found")
+        if domain not in ("general", collection.domain):
+            raise HTTPException(409, "job and collection domain mismatch")
+        resolved_domain = collection.domain
     await ensure_job_workers(
         redis=redis, config=config, content_type=route.content_type,
-        source="upload", url=None, domain=domain, style_tags=tags,
+        source="upload", url=None, domain=resolved_domain, style_tags=tags,
         document_kind=route.document_kind,
     )
-    # 与 URL 投递路径一致:校验 collection_id 存在,支持归集合 + title。
-    if collection_id:
-        if not await asyncio.to_thread(db.get_collection, collection_id):
-            raise HTTPException(400, "collection_id not found")
 
     async def _chunks() -> AsyncIterator[bytes]:
         while chunk := await file.read(UPLOAD_CHUNK_SIZE):
@@ -800,7 +814,7 @@ async def upload_job(
     try:
         job = await create_job_core(
             db, redis, storage, url=None, content_type=content_type,
-            domain=domain, style_tags=tags, collection_id=collection_id, title=title,
+            domain=resolved_domain, style_tags=tags, collection_id=collection_id, title=title,
             upload=(ext, _chunks()), document_kind=route.document_kind, config=config,
         )
     except ArtifactTooLarge as exc:
@@ -810,6 +824,48 @@ async def upload_job(
     return {"job_id": job.id, "content_type": job.content_type,
             "document_kind": job.document_kind or None, "pipeline": job.pipeline,
             "status": "pending", "created_at": job.created_at.isoformat()}
+
+
+@router.put("/{job_id}/collection", response_model=JobCollectionUpdateResponse)
+async def update_job_collection(
+    job_id: str,
+    req: JobCollectionUpdateRequest,
+    db: Database = Depends(get_db),
+):
+    """把已有 job 归入、移动到或移出集合,不复制 lineage 也不重跑流水线。"""
+    validate_path_segment(job_id, "job_id")
+    if req.collection_id is not None:
+        validate_path_segment(req.collection_id, "collection_id")
+    job = await asyncio.to_thread(db.get_job, job_id)
+    if not job:
+        raise HTTPException(404, "job not found")
+    if not job.is_current:
+        raise HTTPException(409, "only current job can change collection")
+    if req.collection_id is not None:
+        collection = await asyncio.to_thread(db.get_collection, req.collection_id)
+        if not collection:
+            raise HTTPException(404, "collection not found")
+        if collection.domain != job.domain:
+            raise HTTPException(409, "job and collection domain mismatch")
+    try:
+        previous, current, changed = await asyncio.to_thread(
+            db.move_job_to_collection, job_id, req.collection_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc).strip("'")) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    audit(
+        "job", job_id, "collection_update", actor="api",
+        detail={"previous_collection_id": previous, "collection_id": current,
+                "changed": changed},
+    )
+    return JobCollectionUpdateResponse(
+        job_id=job_id,
+        previous_collection_id=previous,
+        collection_id=current,
+        changed=changed,
+    )
 
 
 @router.get("", response_model=JobListResponse)

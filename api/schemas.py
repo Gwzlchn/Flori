@@ -57,6 +57,21 @@ class JobCreateRequest(BaseModel):
     smart_note: bool | None = None
 
 
+class JobCollectionUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    collection_id: str | None = None
+
+
+class JobCollectionUpdateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str
+    previous_collection_id: str | None = None
+    collection_id: str | None = None
+    changed: bool
+
+
 class JobResponse(BaseModel):
     job_id: str
     content_type: str

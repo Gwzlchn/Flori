@@ -990,6 +990,9 @@ class Database:
     def get_job(self, job_id: str) -> Job | None:
         return _JobsReadRepository.get_job(self, job_id)
 
+    def get_current_job_by_lineage(self, lineage_key: str) -> Job | None:
+        return _JobsReadRepository.get_current_job_by_lineage(self, lineage_key)
+
     def jobs_brief(self, job_ids: list[str]) -> dict[str, dict]:
         """批量取作业简要(队列 / worker 历史 enrich 用):
         {job_id: {title, content_type, domain, status, pipeline}}。pipeline 供运行中 task 解析 step→pool。
@@ -1006,6 +1009,7 @@ class Database:
         source: str | None = None,
         uncategorized: bool = False,
         current_only: bool = True,
+        source_order: bool = False,
     ) -> tuple[int, list[Job]]:
         return _JobsReadRepository.list_jobs(
             self,
@@ -1017,6 +1021,7 @@ class Database:
             source,
             uncategorized,
             current_only,
+            source_order,
         )
 
     def list_jobs_in_window(
@@ -1082,6 +1087,22 @@ class Database:
             self,
             job_id,
             **fields,
+        )
+
+    def move_job_to_collection(
+        self,
+        job_id: str,
+        collection_id: str | None,
+        *,
+        source_item_id: str | None = None,
+        source_position: int | None = None,
+    ) -> tuple[str | None, str | None, bool]:
+        return _DatabaseAggregates.move_job_to_collection(
+            self,
+            job_id,
+            collection_id,
+            source_item_id=source_item_id,
+            source_position=source_position,
         )
 
     def _strip_occurrences_for_jobs(self, job_ids: list[str]) -> None:

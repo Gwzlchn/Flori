@@ -97,6 +97,8 @@ arXiv 推断为 `document/research_paper`，非 arXiv 直链 PDF 推断为 `docu
 
 `document_kind` 仅对 Document 有效，来自可扩展 registry；Document 未显式给出且来源不能可靠判定时写
 `unknown`，非 Document 携带 kind 返回 `422`。`document_kind` 表示体裁，不决定 HTML/PDF/OCR adapter。
+投递指定 `collection_id` 时，省略 `domain` 或传 `general` 会继承集合 domain；显式传入其它 domain
+返回 `409`，避免 collection 与 job 的领域不变量漂移。upload 路径遵循同一规则。
 可选字段 `smart_note`（bool，默认 `null`）控制智能笔记及评审；`null` 时
 `document_kind=article` 默认关闭，其他顶层类型/Document kind 默认开启。概念提取仍执行；关闭时跳过
 Document `05_smart` 和 `08_review`。该开关写入 `job.meta.flags`，由 scheduler 的规则求值。
@@ -140,6 +142,18 @@ curl -X POST 'http://localhost:8000/api/jobs/upload?content_type=video' \
 ```
 
 Response `201`（同 `POST /api/jobs`）。
+
+#### PUT /api/jobs/{id}/collection — 变更已有作业的集合归属
+
+Request `{"collection_id":"col_xxx"}` 将 current job 归入或移动到目标集合；
+`{"collection_id":null}` 解绑。该操作只原子更新成员关系、集合计数和检索冗余字段，不复制 lineage、
+不新建快照、不重跑流水线。job 与目标 collection 的 `domain` 必须一致；重复设置同一集合幂等返回
+`changed=false`。目标 job/collection 不存在返回 404，domain 冲突返回 409。
+
+Response `200`：
+```json
+{"job_id":"jobs_xxx","previous_collection_id":null,"collection_id":"col_xxx","changed":true}
+```
 
 Response `201`:
 ```json
@@ -1019,7 +1033,7 @@ curl -X POST http://localhost:8000/api/collections \
 
 <!-- contract: 订阅创建/同步行为 -->
 
-订阅集合约束：`domain` 必须是真实领域，不能为空或 `general`；同一来源全局唯一（已订阅会被拒）。首次同步失败不阻塞集合创建（集合照常建好）。去重按 `(collection_id, item_id)` 记录在 `ingested_items` 表（item_id 含义随来源，见上表），在各集合内使用统一机制。同步流程统一为 `enumerate_source(source_type, source_id, ctx)` 枚举来源全集 →  按 `ingested_item_ids` 去重 → 新内容自动建 job 归入本集合（适配器只枚举全集、不自去重）。
+订阅集合约束：`domain` 必须是真实领域，不能为空或 `general`；同一来源全局唯一（已订阅会被拒）。首次同步失败不阻塞集合创建（集合照常建好）。去重按 `(collection_id, item_id)` 记录在 `ingested_items` 表（item_id 含义随来源，见上表），在各集合内使用统一机制；单次枚举的重复 `item_id` 保留首项。同步流程统一为 `enumerate_source(source_type, source_id, ctx)` 枚举来源全集 → 按 `ingested_item_ids` 去重 → 优先复用同 domain 且未归属集合的 current lineage，否则新建 job。复用只变更集合归属，不生成快照或重跑；已属于其它集合的 lineage 不会被同步静默抢走。同步产物在 job `meta.source_position` 保存来源顺序、`meta.source_present` 标记本轮是否仍可见。订阅集合的 jobs 端点按本轮可见项在前、来源顺序稳定、已下架或暂不可见历史项在后的规则返回；重复同步刷新顺序但不删除历史内容。
 
 Response `201`：`CollectionResponse`。
 
@@ -1063,7 +1077,7 @@ curl -X PUT http://localhost:8000/api/collections/c_xxx \
 
 #### POST /api/collections/{id}/sync — 立即同步
 
-仅订阅集合可调，枚举来源 → 与已入库去重 → 新内容自动建 job 归入本集合，并刷新 `last_synced_at`。
+仅订阅集合可调，枚举来源 → 与已入库去重 → 复用未归类的同源 current lineage 或新建 job 归入本集合，并刷新 `last_synced_at`。
 
 ```bash
 curl -X POST http://localhost:8000/api/collections/c_xxx/sync
@@ -1072,8 +1086,11 @@ curl -X POST http://localhost:8000/api/collections/c_xxx/sync
 Response `200`：
 
 ```json
-{"total": 50, "new": 3, "skipped": 47}
+{"total": 50, "new": 3, "reused": 1, "skipped": 47, "failed": 0}
 ```
+
+`new` 包含新建与复用后新增到本集合的内容，`reused` 是其中复用已有 lineage 的数量；
+单条失败计入 `failed` 且不写去重标记，下次同步可继续重试。
 
 错误：`400` 非法 id / 非订阅集合、`404` 不存在、`502` 同步失败（如来源访问失败）。
 

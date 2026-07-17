@@ -292,6 +292,76 @@ class DatabaseAggregates:
                     self._conn.rollback()
                 raise
 
+    def move_job_to_collection(
+        self,
+        job_id: str,
+        collection_id: str | None,
+        *,
+        source_item_id: str | None = None,
+        source_position: int | None = None,
+    ) -> tuple[str | None, str | None, bool]:
+        """原子变更 job 的集合归属并同步计数、检索冗余和订阅来源位置。"""
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                row = self._conn.execute(
+                    "SELECT collection_id, domain, meta, is_current FROM jobs WHERE id=?",
+                    (job_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError("job not found")
+                if not bool(row["is_current"]):
+                    raise ValueError("only current job can change collection")
+                previous = row["collection_id"]
+                if collection_id is not None:
+                    target = self._conn.execute(
+                        "SELECT domain FROM collections WHERE id=?", (collection_id,)
+                    ).fetchone()
+                    if target is None:
+                        raise KeyError("collection not found")
+                    if target["domain"] != row["domain"]:
+                        raise ValueError("job and collection domain mismatch")
+
+                meta = json.loads(row["meta"] or "{}")
+                if not isinstance(meta, dict):
+                    meta = {}
+                if source_item_id is not None:
+                    meta["source_item_id"] = source_item_id
+                    meta["source_present"] = True
+                if source_position is not None:
+                    meta["source_position"] = source_position
+
+                changed = previous != collection_id
+                self._conn.execute(
+                    "UPDATE jobs SET collection_id=?, meta=?, updated_at=? WHERE id=?",
+                    (collection_id, json.dumps(meta, ensure_ascii=False), _db._now_iso(), job_id),
+                )
+                normalized = collection_id or ""
+                for table in ("notes_fts5", "note_chunks", "note_chunks_fts5"):
+                    self._conn.execute(
+                        f"UPDATE {table} SET collection_id=? WHERE job_id=?",
+                        (normalized, job_id),
+                    )
+                if changed:
+                    now = _db._now_iso()
+                    if previous:
+                        self._conn.execute(
+                            "UPDATE collections SET job_count=MAX(0, job_count-1), updated_at=? "
+                            "WHERE id=?",
+                            (now, previous),
+                        )
+                    if collection_id:
+                        self._conn.execute(
+                            "UPDATE collections SET job_count=job_count+1, updated_at=? WHERE id=?",
+                            (now, collection_id),
+                        )
+                self._conn.commit()
+                return previous, collection_id, changed
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
     def delete_job_cascade(
         self, job_id: str, collection_id: str | None = None, item_id: str | None = None
     ) -> None:

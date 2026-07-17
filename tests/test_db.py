@@ -589,6 +589,54 @@ class TestCollectionM2:
         # collection_id 为空串 -> no-op,不抛。
         db.increment_collection_count("", 1)
 
+    def test_move_job_to_collection_updates_counts_and_rejects_domain_mismatch(self, db):
+        db.create_collection(Collection(id="c1", name="一", domain="ml"))
+        db.create_collection(Collection(id="c2", name="二", domain="ml"))
+        db.create_collection(Collection(id="c3", name="三", domain="finance"))
+        db.create_job(Job(
+            id="j-move", content_type="document", pipeline="document",
+            document_kind="article", domain="ml", collection_id="c1",
+        ))
+        db.increment_collection_count("c1", 1)
+        db.index_job_notes(
+            "j-move", "smart", "标题", "正文", content_type="document",
+            domain="ml", collection_id="c1",
+        )
+
+        result = db.move_job_to_collection(
+            "j-move", "c2", source_item_id="item-1", source_position=4,
+        )
+        assert result == ("c1", "c2", True)
+        assert db.get_collection("c1").job_count == 0
+        assert db.get_collection("c2").job_count == 1
+        moved = db.get_job("j-move")
+        assert moved.collection_id == "c2"
+        assert moved.meta["source_item_id"] == "item-1"
+        assert moved.meta["source_position"] == 4
+        assert db._conn.execute(
+            "SELECT collection_id FROM notes_fts5 WHERE job_id='j-move'"
+        ).fetchone()[0] == "c2"
+        assert db._conn.execute(
+            "SELECT collection_id FROM note_chunks WHERE job_id='j-move'"
+        ).fetchone()[0] == "c2"
+        assert db._conn.execute(
+            "SELECT collection_id FROM note_chunks_fts5 WHERE job_id='j-move'"
+        ).fetchone()[0] == "c2"
+
+        assert db.move_job_to_collection("j-move", "c2") == ("c2", "c2", False)
+        assert db.get_collection("c2").job_count == 1
+        with pytest.raises(ValueError, match="domain"):
+            db.move_job_to_collection("j-move", "c3")
+        assert db.get_job("j-move").collection_id == "c2"
+        assert db.get_collection("c2").job_count == 1
+        assert db.get_collection("c3").job_count == 0
+
+        db.update_job("j-move", is_current=False)
+        with pytest.raises(ValueError, match="only current"):
+            db.move_job_to_collection("j-move", None)
+        assert db.get_job("j-move").collection_id == "c2"
+        assert db.get_collection("c2").job_count == 1
+
 
 class TestCollectionSyncStatus:
     """集合同步状态字段(last_sync_status / last_sync_error)读写。"""

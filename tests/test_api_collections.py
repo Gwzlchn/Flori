@@ -336,6 +336,117 @@ class TestJobCount:
         assert resp.json()["job_count"] == 0
 
 
+class TestAssignJobCollection:
+    @pytest.mark.asyncio
+    async def test_job_created_in_collection_inherits_collection_domain(self, client, app):
+        collection = await _create(client, name="课程", domain="deep-learning")
+        created = await client.post("/api/jobs", json={
+            "url": "https://example.com/collection-domain-inherit",
+            "content_type": "document",
+            "document_kind": "article",
+            "collection_id": collection["id"],
+        })
+        assert created.status_code == 201, created.text
+        job = app.state.db.get_job(created.json()["job_id"])
+        assert job.domain == "deep-learning"
+
+        conflict = await client.post("/api/jobs", json={
+            "url": "https://example.com/collection-domain-conflict",
+            "content_type": "document",
+            "document_kind": "article",
+            "domain": "finance",
+            "collection_id": collection["id"],
+        })
+        assert conflict.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_assign_move_detach_is_atomic_and_idempotent(
+        self, client, app, mock_redis,
+    ):
+        first = await _create(client, name="课程一", domain="deep-learning")
+        second = await _create(client, name="课程二", domain="deep-learning")
+        created = await client.post("/api/jobs", json={
+            "url": "https://example.com/collection-move",
+            "content_type": "document",
+            "document_kind": "article",
+            "domain": "deep-learning",
+            "collection_id": first["id"],
+        })
+        assert created.status_code == 201, created.text
+        job_id = created.json()["job_id"]
+        mock_redis.reset_mock()
+
+        moved = await client.put(
+            f"/api/jobs/{job_id}/collection",
+            json={"collection_id": second["id"]},
+        )
+        assert moved.status_code == 200, moved.text
+        assert moved.json() == {
+            "job_id": job_id,
+            "previous_collection_id": first["id"],
+            "collection_id": second["id"],
+            "changed": True,
+        }
+        assert app.state.db.get_collection(first["id"]).job_count == 0
+        assert app.state.db.get_collection(second["id"]).job_count == 1
+        assert app.state.db.get_job(job_id).collection_id == second["id"]
+        assert mock_redis.mock_calls == []
+
+        same = await client.put(
+            f"/api/jobs/{job_id}/collection",
+            json={"collection_id": second["id"]},
+        )
+        assert same.status_code == 200
+        assert same.json()["changed"] is False
+        assert app.state.db.get_collection(second["id"]).job_count == 1
+
+        detached = await client.put(
+            f"/api/jobs/{job_id}/collection", json={"collection_id": None},
+        )
+        assert detached.status_code == 200
+        assert detached.json()["collection_id"] is None
+        assert app.state.db.get_collection(second["id"]).job_count == 0
+        assert app.state.db.get_job(job_id).collection_id is None
+
+    @pytest.mark.asyncio
+    async def test_assign_rejects_missing_and_cross_domain_targets(self, client, app):
+        job = await client.post("/api/jobs", json={
+            "url": "https://example.com/collection-domain",
+            "content_type": "document",
+            "document_kind": "article",
+            "domain": "deep-learning",
+        })
+        job_id = job.json()["job_id"]
+        finance = await _create(client, name="量化", domain="finance")
+
+        missing = await client.put(
+            f"/api/jobs/{job_id}/collection",
+            json={"collection_id": "col_missing"},
+        )
+        assert missing.status_code == 404
+        mismatch = await client.put(
+            f"/api/jobs/{job_id}/collection",
+            json={"collection_id": finance["id"]},
+        )
+        assert mismatch.status_code == 409
+        assert app.state.db.get_job(job_id).collection_id is None
+        assert app.state.db.get_collection(finance["id"]).job_count == 0
+
+        no_job = await client.put(
+            "/api/jobs/jobs_missing/collection",
+            json={"collection_id": finance["id"]},
+        )
+        assert no_job.status_code == 404
+
+        app.state.db.update_job(job_id, is_current=False)
+        historical = await client.put(
+            f"/api/jobs/{job_id}/collection",
+            json={"collection_id": None},
+        )
+        assert historical.status_code == 409
+        assert app.state.db.get_job(job_id).collection_id is None
+
+
 class TestListCollectionJobs:
     @pytest.mark.asyncio
     async def test_list_jobs_in_collection(self, client):

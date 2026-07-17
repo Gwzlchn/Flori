@@ -28,6 +28,18 @@ class JobsReadRepository:
         return database._row_to_job(row)
 
     @staticmethod
+    def get_current_job_by_lineage(database, lineage_key: str) -> Job | None:
+        if not lineage_key:
+            return None
+        with database._lock:
+            row = database._conn.execute(
+                "SELECT * FROM jobs WHERE lineage_key=? AND is_current=1 "
+                "ORDER BY created_at DESC LIMIT 1",
+                (lineage_key,),
+            ).fetchone()
+        return database._row_to_job(row) if row else None
+
+    @staticmethod
     def jobs_brief(database, job_ids: list[str]) -> dict[str, dict]:
         ids = [job_id for job_id in dict.fromkeys(job_ids) if job_id]
         if not ids:
@@ -63,6 +75,7 @@ class JobsReadRepository:
         source: str | None = None,
         uncategorized: bool = False,
         current_only: bool = True,
+        source_order: bool = False,
     ) -> tuple[int, list[Job]]:
         where_parts: list[str] = []
         params: list = []
@@ -87,9 +100,15 @@ class JobsReadRepository:
             total = database._conn.execute(
                 f"SELECT COUNT(*) FROM jobs {where}", params
             ).fetchone()[0]
+            order_by = (
+                "CASE WHEN json_type(meta, '$.source_present')='false' THEN 1 ELSE 0 END ASC, "
+                "CASE WHEN json_type(meta, '$.source_position')='integer' "
+                "THEN json_extract(meta, '$.source_position') ELSE 9223372036854775807 END ASC, "
+                "created_at ASC"
+                if source_order else "created_at DESC"
+            )
             rows = database._conn.execute(
-                f"SELECT * FROM jobs {where} "
-                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                f"SELECT * FROM jobs {where} ORDER BY {order_by} LIMIT ? OFFSET ?",
                 params + [limit, offset],
             ).fetchall()
         return total, [database._row_to_job(row) for row in rows]

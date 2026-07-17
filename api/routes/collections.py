@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from shared.audit import audit
 from shared.db import Database
+from shared.ids import lineage_key
 from shared.models import Collection, collection_id_for_subscription, generate_collection_id
 from shared.redis_client import RedisClient
 from shared.storage import StorageBackend
@@ -81,6 +82,16 @@ async def _sync_collection_body(
     cookies = await asyncio.to_thread(db.get_credential, "bili_cookies")
     ctx = SourceContext(bili_cookies=cookies, db=db)
     source_title, items = await enumerate_source(coll.source_type, coll.source_id, ctx)
+    # 来源适配器应自行去重,同步边界仍按稳定 item_id 保留首项兜底。分页重叠或
+    # 上游脏数据不能在同一轮创建重复 lineage。
+    unique_items = []
+    seen_item_ids: set[str] = set()
+    for item in items:
+        if item.item_id in seen_item_ids:
+            continue
+        seen_item_ids.add(item.item_id)
+        unique_items.append(item)
+    items = unique_items
 
     # 首次同步拿到 source_title 后回填集合名:仅当当前名为占位(空/等于
     # source_id/等于集合 id)时改,避免覆盖用户手填名。回填后用于响应与后续展示。
@@ -91,22 +102,65 @@ async def _sync_collection_body(
             coll.name = desired
 
     ingested = await asyncio.to_thread(db.ingested_item_ids, coll.id)
-    # 迁移兜底:B站来源的 item_id=bvid。新去重表上线前已入库的 B站视频不在 ingested_items,
-    # 把"jobs.url 里出现过的 BV 号"并入,避免历史视频被重复建 job(其它来源无此问题)。
-    if coll.source_type and coll.source_type.startswith("bilibili"):
-        ingested |= await asyncio.to_thread(db.ingested_bvids)
-    new = [it for it in items if it.item_id not in ingested]
     created = 0
+    reused = 0
+    failed = 0
+    _, collection_jobs = await asyncio.to_thread(
+        db.list_jobs, collection_id=coll.id, limit=100000,
+    )
+    by_item_id = {
+        job.meta.get("source_item_id"): job
+        for job in collection_jobs
+        if isinstance(job.meta, dict) and job.meta.get("source_item_id")
+    }
+    visible_item_ids = {item.item_id for item in items}
+    for item_id, existing in by_item_id.items():
+        present = item_id in visible_item_ids
+        if existing.meta.get("source_present") != present:
+            meta = dict(existing.meta)
+            meta["source_present"] = present
+            await asyncio.to_thread(db.update_job, existing.id, meta=meta)
+            existing.meta = meta
     # book(章序):全部章 defer 建好(不触发调度),由 scheduler 在前章终态时按序 submit;
     # 章 job 强制 smart_note=True(article 链默认 off,书章要笔记)。
     is_book = coll.source_type == "book_toc"
-    for it in new:
+    for position, it in enumerate(items):
+        existing = by_item_id.get(it.item_id)
+        if it.item_id in ingested:
+            if existing and (
+                existing.meta.get("source_position") != position
+                or existing.meta.get("source_present") is not True
+            ):
+                meta = dict(existing.meta)
+                meta["source_position"] = position
+                meta["source_present"] = True
+                await asyncio.to_thread(db.update_job, existing.id, meta=meta)
+            continue
         try:
+            current = await asyncio.to_thread(
+                db.get_current_job_by_lineage,
+                lineage_key(it.url, it.content_type),
+            )
+            if current is not None:
+                if current.collection_id not in (None, coll.id):
+                    raise ValueError("lineage already belongs to another collection")
+                await asyncio.to_thread(
+                    db.move_job_to_collection,
+                    current.id,
+                    coll.id,
+                    source_item_id=it.item_id,
+                    source_position=position,
+                )
+                await asyncio.to_thread(db.mark_ingested, coll.id, it.item_id)
+                created += 1
+                reused += 1
+                continue
             await create_job_core(
                 db, redis, storage,
                 url=it.url, content_type=it.content_type, domain=coll.domain,
                 collection_id=coll.id, title=it.title or None,
                 item_id=it.item_id, actor="subscription",
+                source_position=position,
                 smart_note=True if is_book else None,
                 document_kind=it.document_kind,
                 defer_submit=is_book,
@@ -117,6 +171,7 @@ async def _sync_collection_body(
             # 下轮自动重试。否则一条坏数据会卡住其后所有条目本轮入库(违反"单任务失败不影响其他")。
             logger.warning("collection_sync_item_failed", coll=coll.id,
                            item_id=it.item_id, url=it.url, error=str(e)[:200])
+            failed += 1
             continue
         created += 1
         await asyncio.sleep(0.2)  # 轻微间隔,别瞬时灌爆队列/触发风控
@@ -132,8 +187,14 @@ async def _sync_collection_body(
             logger.info("book_chain_kickoff", coll=coll.id, job_id=nxt)
     await asyncio.to_thread(db.mark_collection_synced, coll.id, datetime.now(timezone.utc))
     logger.info("collection_synced", coll=coll.id, total=len(items),
-                new=created, failed=len(new) - created)
-    return {"total": len(items), "new": created, "skipped": len(items) - len(new)}
+                new=created, reused=reused, failed=failed)
+    return {
+        "total": len(items),
+        "new": created,
+        "reused": reused,
+        "skipped": len(items) - created - failed,
+        "failed": failed,
+    }
 
 
 def _is_placeholder_name(name: str | None, coll: Collection) -> bool:
@@ -313,6 +374,7 @@ async def list_collection_jobs(
         raise HTTPException(404, "collection not found")
     total, jobs = await asyncio.to_thread(
         db.list_jobs, None, collection_id, limit, offset,
+        source_order=c.is_subscription,
     )
     return JobListResponse(
         total=total,
