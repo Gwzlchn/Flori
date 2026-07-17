@@ -41,6 +41,14 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install "."
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+# api 的 YouTube playlist 枚举与 worker 下载共用同一受支持 JS runtime。
+FROM common AS deno
+ARG TARGETARCH
+ARG DENO_VERSION=v2.9.3
+COPY docker/install-deno.sh /tmp/install-deno.sh
+RUN DENO_VERSION="${DENO_VERSION}" TARGETARCH="${TARGETARCH}" sh /tmp/install-deno.sh \
+    && rm -f /tmp/install-deno.sh
+
 # scheduler:仅 core(调度器 + 通联上报)
 FROM common AS scheduler
 COPY shared/ shared/
@@ -53,8 +61,9 @@ ARG FLORI_VERSION=
 ENV FLORI_VERSION=${FLORI_VERSION}
 
 # api:+[api,mcp](api + mcp_server),无 claude/ffmpeg。/data/prompts seed(profiles 管理读它)
-FROM common AS api
-RUN --mount=type=cache,target=/root/.cache/pip pip install ".[api,mcp]"
+FROM deno AS api
+RUN --mount=type=cache,target=/root/.cache/pip pip install ".[api,mcp]" \
+    && python -c "import yt_dlp_ejs"
 COPY shared/ shared/
 COPY configs/ configs/
 COPY api/ api/
@@ -68,16 +77,17 @@ ENV FLORI_VERSION=${FLORI_VERSION}
 
 # worker:重镜像 —— ffmpeg(steps 调 ffmpeg/ffprobe + PyAV 解码)+ claude-code native binary(claude-cli)
 #    + [steps,gpu,worker] + cn_domains bake(net-zone CN 表)+ /data/prompts seed(AI 步读 profiles)
-FROM common AS worker
+FROM deno AS worker
 ARG USE_USTC_MIRROR=1
-ARG TARGETARCH
 ARG CLAUDE_CODE_VERSION=v2.1.202
 ARG INSTALL_CLAUDE_CODE=1
 # poppler-utils:Document PDF adapter 用 pdfinfo、pdftohtml XML 和 pdftotext bbox 建立文本层;
 #               PyMuPDF 负责扫描 PDF 页渲染和视觉区域,不把逆向 Markdown 当真相源。
-RUN apt-get -o Acquire::Retries=5 update \
-    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends ffmpeg poppler-utils \
-    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get -o Acquire::Retries=10 update \
+    && apt-get -o Acquire::Retries=10 -o APT::Keep-Downloaded-Packages=true \
+        install -y --no-install-recommends ffmpeg poppler-utils
 # Claude Code CLI:claude-cli provider 需要 `claude` 在 PATH。旧包管理器安装已废弃,这里消费 GitHub release
 # native binary,并用同 release 的 SHASUMS256.txt 校验,避免 registry/Node 版本漂移。
 RUN if [ "$INSTALL_CLAUDE_CODE" = "0" ]; then echo "claude-code skipped for synthetic integration"; exit 0; fi; \
@@ -105,7 +115,8 @@ RUN if [ "$INSTALL_CLAUDE_CODE" = "0" ]; then echo "claude-code skipped for synt
     chmod 0755 /usr/local/bin/claude; \
     rm -f "/tmp/${claude_asset}" /tmp/SHASUMS256.txt; \
     claude --version
-RUN --mount=type=cache,target=/root/.cache/pip pip install ".[steps,gpu,worker]"
+RUN --mount=type=cache,target=/root/.cache/pip pip install ".[steps,gpu,worker]" \
+    && python -c "import yt_dlp_ejs"
 # net-zone CN 域名表:构建时从 GitHub 上游(felixonmars/dnsmasq-china-list)拉取,不自维护 → /app/data/cn_domains.txt
 # (运行时 shared.net_zone 只读不拉)。只用 curl、不依赖应用源码 → 放在 COPY 源码之前(改源码不重新联网拉)。
 # 国内(=1)优先 gitee(~4s),jsdelivr/ghproxy 兜底;海外(=0)走 github raw。

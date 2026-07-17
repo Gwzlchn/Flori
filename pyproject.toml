@@ -24,7 +24,7 @@ dependencies = [
 [project.optional-dependencies]
 steps = [
     "yutto>=2.0,<3",
-    "yt-dlp>=2024.0,<2027.0",
+    "yt-dlp[default]>=2025.11.12,<2027.0",
     "scenedetect[opencv]>=0.6,<1",
     "Pillow>=10.0,<13",
     "imagehash>=4.3,<5",
@@ -42,7 +42,7 @@ api = [
     "qrcode>=7.4,<9",
     "Pillow>=10.0,<13",
     "bilibili-api-python>=16.0,<18",
-    "yt-dlp>=2024.0,<2027.0",   # YouTube 订阅 sync 枚举(shared/subscriptions/youtube.py 子进程调 yt-dlp;下载在 worker)
+    "yt-dlp[default]>=2025.11.12,<2027.0",   # YouTube 订阅 sync 枚举(shared/subscriptions/youtube.py 子进程调 yt-dlp;下载在 worker)
     "feedparser>=6.0,<7",   # RSS source-adapter(shared/subscriptions/rss.py,后续实现)
 ]
 gpu = [

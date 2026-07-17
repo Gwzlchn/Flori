@@ -4,6 +4,8 @@ FROM python:3.11-slim
 
 # 默认用 USTC 镜像源(国内构建快);海外 CI 传 --build-arg USE_USTC_MIRROR=0 用官方源。
 ARG USE_USTC_MIRROR=1
+ARG TARGETARCH
+ARG DENO_VERSION=v2.9.3
 
 RUN if [ "$USE_USTC_MIRROR" = "1" ]; then \
         sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list.d/debian.sources; \
@@ -18,10 +20,15 @@ RUN if [ "$USE_USTC_MIRROR" = "1" ]; then \
 
 WORKDIR /app
 
+COPY docker/install-deno.sh /tmp/install-deno.sh
+RUN DENO_VERSION="${DENO_VERSION}" TARGETARCH="${TARGETARCH}" sh /tmp/install-deno.sh \
+    && rm -f /tmp/install-deno.sh
+
 # 纯 Python 步骤只需下载器,不装 ffmpeg/scenedetect/ocr/pdf(各拆专用镜像)。
 COPY pyproject.toml .
 RUN pip install --no-cache-dir . \
-    && pip install --no-cache-dir "yutto>=2.0,<3" "yt-dlp>=2024.0"
+    && pip install --no-cache-dir "yutto>=2.0,<3" "yt-dlp[default]>=2025.11.12,<2027.0" \
+    && python -c "import yt_dlp_ejs"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
