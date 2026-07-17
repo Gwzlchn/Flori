@@ -351,12 +351,28 @@ def _copy_stable_tree(
 
 
 def _base_data_excluded(rel: Path) -> bool:
+    # Worker 模型缓存可重建且按上游约定包含同树相对 symlink。把它当持久资产会让
+    # fail-closed 的归档路径门拒绝整代备份,也会无意义放大每代体积。
+    if len(rel.parts) >= 3 and rel.parts[0] == "workers" and rel.parts[2] == ".cache":
+        return True
     return rel.as_posix() in {
         "db/analyzer.db",
         "db/analyzer.db-wal",
         "db/analyzer.db-shm",
         "db/analyzer.db-journal",
     }
+
+
+def _excluded_subtrees(values: tuple[str, ...], asset: str) -> set[PurePosixPath]:
+    result: set[PurePosixPath] = set()
+    for value in values:
+        path = PurePosixPath(value)
+        if path.is_absolute() or not path.parts or any(
+            part in {"", ".", ".."} for part in path.parts
+        ):
+            raise SnapshotError(f"{asset}排除路径非法: {value}")
+        result.add(path)
+    return result
 
 
 def _sqlite_schema_hash(connection: sqlite3.Connection) -> str:
@@ -508,6 +524,7 @@ def create_snapshot(
     app_version: str = "unknown",
     redis_mode: str = "offline-volume",
     data_excludes: tuple[str, ...] = (),
+    minio_excludes: tuple[str, ...] = (),
     schema_manifest_path: Path | None = None,
     _schema_support_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -515,12 +532,8 @@ def create_snapshot(
     started_monotonic = time.monotonic()
     started_at = _utc_now()
     generation = _safe_generation(generation)
-    excluded_subtrees: set[PurePosixPath] = set()
-    for value in data_excludes:
-        path = PurePosixPath(value)
-        if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
-            raise SnapshotError(f"数据排除路径非法: {value}")
-        excluded_subtrees.add(path)
+    excluded_subtrees = _excluded_subtrees(data_excludes, "数据")
+    excluded_minio_subtrees = _excluded_subtrees(minio_excludes, "MinIO")
     if minio_root is not None and minio_root.exists():
         for child in data_root.iterdir():
             with contextlib.suppress(OSError):
@@ -531,6 +544,13 @@ def create_snapshot(
         pure = PurePosixPath(rel.as_posix())
         return _base_data_excluded(rel) or any(
             pure == excluded or excluded in pure.parents for excluded in excluded_subtrees
+        )
+
+    def minio_excluded(rel: Path) -> bool:
+        pure = PurePosixPath(rel.as_posix())
+        return any(
+            pure == excluded or excluded in pure.parents
+            for excluded in excluded_minio_subtrees
         )
 
     with tempfile.TemporaryDirectory(prefix="flori-dr-create-") as temporary:
@@ -592,7 +612,7 @@ def create_snapshot(
         }
         if minio_root is not None:
             minio_destination = assets_root / "minio"
-            _copy_stable_tree(minio_root, minio_destination)
+            _copy_stable_tree(minio_root, minio_destination, minio_excluded)
             included_roots["minio"] = minio_destination
             capture_modes["minio"] = "stable-filesystem-copy"
         if config_root is not None:
@@ -660,6 +680,13 @@ def create_snapshot(
         manifest["assets"]["data"]["excluded_external_subtrees"] = sorted(
             path.as_posix() for path in excluded_subtrees
         )
+        manifest["assets"]["data"]["excluded_runtime_subtrees"] = [
+            "workers/*/.cache",
+        ]
+        if minio_root is not None:
+            manifest["assets"]["minio"]["excluded_external_subtrees"] = sorted(
+                path.as_posix() for path in excluded_minio_subtrees
+            )
         _write_json_atomic(stage / MANIFEST_NAME, manifest)
         _tar_stage(stage, output)
     digest = _sha256(output)
@@ -1864,6 +1891,7 @@ def _parser() -> argparse.ArgumentParser:
         default="offline-volume",
     )
     create.add_argument("--data-exclude", action="append", default=[])
+    create.add_argument("--minio-exclude", action="append", default=[])
     create.add_argument("--result-file")
     create.add_argument("--owner-uid", type=int)
     create.add_argument("--owner-gid", type=int)
@@ -1913,6 +1941,7 @@ def main(argv: list[str] | None = None) -> int:
                 app_version=args.app_version,
                 redis_mode=args.redis_mode,
                 data_excludes=tuple(args.data_exclude),
+                minio_excludes=tuple(args.minio_exclude),
                 schema_manifest_path=_path_or_none(args.schema_manifest),
             )
         elif args.command == "validate":

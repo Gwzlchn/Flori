@@ -784,6 +784,73 @@ def test_running_redis_mode_archives_materialized_rdb_and_aof(tmp_path: Path):
     ]
 
 
+def test_reconstructible_worker_cache_is_excluded_without_hiding_worker_state(
+    tmp_path: Path,
+):
+    sources = _fixture_roots(tmp_path / "source")
+    worker = sources["data"] / "workers" / "nas-cpu"
+    cache = worker / ".cache" / "huggingface" / "snapshots" / "revision"
+    blobs = worker / ".cache" / "huggingface" / "blobs"
+    cache.mkdir(parents=True)
+    blobs.mkdir(parents=True)
+    (blobs / "config.json").write_text("{}", encoding="utf-8")
+    (cache / "config.json").symlink_to("../../blobs/config.json")
+    (worker / "worker.json").write_text('{"id":"nas-cpu"}', encoding="utf-8")
+
+    archive = tmp_path / "backups" / "worker-cache.tar.gz"
+    dr.create_snapshot(
+        data_root=sources["data"],
+        redis_root=sources["redis"],
+        minio_root=sources["minio"],
+        config_root=sources["config"],
+        output=archive,
+        generation="worker-cache",
+    )
+    manifest = dr.validate_archive(archive)
+
+    declared = set(manifest["files"])
+    assert "assets/data/workers/nas-cpu/worker.json" in declared
+    assert not any("/workers/nas-cpu/.cache/" in path for path in declared)
+    assert manifest["assets"]["data"]["excluded_runtime_subtrees"] == [
+        "workers/*/.cache",
+    ]
+
+
+def test_explicit_minio_exclude_keeps_business_and_durable_internal_metadata(
+    tmp_path: Path,
+):
+    sources = _fixture_roots(tmp_path / "source")
+    internal = sources["minio"] / ".minio.sys" / "tmp"
+    internal.mkdir(parents=True)
+    (internal / "volatile").symlink_to("missing-target")
+    durable = sources["minio"] / ".minio.sys" / "config"
+    durable.mkdir(parents=True)
+    (sources["minio"] / ".minio.sys" / "format.json").write_text(
+        '{"format":"xl-single"}', encoding="utf-8",
+    )
+    (durable / "iam.json").write_text('{"policy":"kept"}', encoding="utf-8")
+    archive = tmp_path / "backups" / "minio-exclude.tar.gz"
+
+    dr.create_snapshot(
+        data_root=sources["data"],
+        redis_root=sources["redis"],
+        minio_root=sources["minio"],
+        config_root=sources["config"],
+        output=archive,
+        generation="minio-exclude",
+        minio_excludes=(".minio.sys/tmp",),
+    )
+    manifest = dr.validate_archive(archive)
+
+    assert "assets/minio/flori/jobs_test/artifact.bin" in manifest["files"]
+    assert "assets/minio/.minio.sys/format.json" in manifest["files"]
+    assert "assets/minio/.minio.sys/config/iam.json" in manifest["files"]
+    assert not any("/minio/.minio.sys/tmp/" in path for path in manifest["files"])
+    assert manifest["assets"]["minio"]["excluded_external_subtrees"] == [
+        ".minio.sys/tmp",
+    ]
+
+
 def test_cli_accepts_materialized_redis_mode():
     args = dr._parser().parse_args([
         "create",

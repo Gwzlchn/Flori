@@ -30,6 +30,8 @@ FLORI_REDIS_IMAGE="${FLORI_REDIS_IMAGE:-redis:7-alpine}"
 REDIS_MATERIALIZE_TIMEOUT="${REDIS_MATERIALIZE_TIMEOUT:-60}"
 BACKUP_GENERATION="${BACKUP_GENERATION:-}"
 BACKUP_RESULT_FILE="${BACKUP_RESULT_FILE:-}"
+DATA_EXCLUDES=()
+MINIO_EXCLUDES=()
 TEMP_REDIS_VOLUME=""
 TEMP_REDIS_CONTAINER=""
 
@@ -46,6 +48,7 @@ trap cleanup EXIT
 usage() {
   cat <<'EOF'
 用法: scripts/backup.sh [备份目录] [--result-file <JSON>]
+       [--data-exclude <相对子树>] [--minio-exclude <相对子树>]
 
 快照内容:
   - /data 全部持久状态，其中 db/analyzer.db 通过 SQLite online backup 单独获取。
@@ -64,6 +67,7 @@ flori-backup-<generation>.tar.gz、.sha256 与机器可读 result JSON。任一�
   MINIO_DATA_DIR / MINIO_VOLUME / MINIO_REQUIRED=auto|0|1
   FLORI_CONFIG_DIR / FLORI_SCHEMA_MANIFEST / FLORI_DR_IMAGE
   BACKUP_GENERATION / BACKUP_RESULT_FILE
+  --data-exclude / --minio-exclude 可重复,分别作用于对应资产;排除项写入 manifest
   FLORI_REDIS_IMAGE / REDIS_MATERIALIZE_TIMEOUT
 EOF
   exit "${1:-0}"
@@ -75,6 +79,16 @@ while [ "$#" -gt 0 ]; do
     --result-file)
       [ "$#" -ge 2 ] || usage 1
       BACKUP_RESULT_FILE="$2"
+      shift 2
+      ;;
+    --data-exclude)
+      [ "$#" -ge 2 ] || usage 1
+      DATA_EXCLUDES+=("$2")
+      shift 2
+      ;;
+    --minio-exclude)
+      [ "$#" -ge 2 ] || usage 1
+      MINIO_EXCLUDES+=("$2")
       shift 2
       ;;
     -*) echo "未知选项: $1" >&2; usage 1 ;;
@@ -179,6 +193,12 @@ CREATE_ARGS=(python /tool/dr_snapshot.py create
   --result-file "/result/$RESULT_NAME"
   --owner-uid "$(id -u)"
   --owner-gid "$(id -g)")
+for excluded in "${DATA_EXCLUDES[@]}"; do
+  CREATE_ARGS+=(--data-exclude "$excluded")
+done
+for excluded in "${MINIO_EXCLUDES[@]}"; do
+  CREATE_ARGS+=(--minio-exclude "$excluded")
+done
 
 if [ -n "$FLORI_DATA_DIR" ]; then
   FLORI_DATA_DIR="$(absolute_existing_dir "$FLORI_DATA_DIR")"
