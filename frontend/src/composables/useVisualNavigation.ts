@@ -2,6 +2,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Comput
 import { useRoute, useRouter } from 'vue-router'
 
 type VisualElement = HTMLElement | null
+const PROGRAMMATIC_SCROLL_IDLE_MS = 160
 
 function reducedMotion(): boolean {
   return typeof window !== 'undefined'
@@ -17,6 +18,8 @@ export function useVisualNavigation(visualIds: ComputedRef<string[]>) {
   const visible = new Map<string, number>()
   let observer: IntersectionObserver | null = null
   let mounted = false
+  let programmaticVisualId = ''
+  let programmaticScrollTimer: ReturnType<typeof setTimeout> | null = null
 
   const allowed = computed(() => new Set(visualIds.value))
 
@@ -26,11 +29,37 @@ export function useVisualNavigation(visualIds: ComputedRef<string[]>) {
     void router.replace({ query: { ...route.query, tab: 'figures', visual: id } })
   }
 
+  function finishProgrammaticScroll(id: string): void {
+    if (id !== programmaticVisualId) return
+    programmaticScrollTimer = null
+    programmaticVisualId = ''
+    const rect = elements.get(id)?.getBoundingClientRect()
+    const targetReached = rect
+      && rect.bottom > 96
+      && rect.top < window.innerHeight * 0.5
+    if (!targetReached) updateFromVisible()
+  }
+
+  function scheduleProgrammaticScrollFinish(id: string): void {
+    if (programmaticScrollTimer) clearTimeout(programmaticScrollTimer)
+    programmaticScrollTimer = setTimeout(() => finishProgrammaticScroll(id), PROGRAMMATIC_SCROLL_IDLE_MS)
+  }
+
+  function beginProgrammaticScroll(id: string): void {
+    programmaticVisualId = id
+    scheduleProgrammaticScrollFinish(id)
+  }
+
+  function onWindowScroll(): void {
+    if (programmaticVisualId) scheduleProgrammaticScrollFinish(programmaticVisualId)
+  }
+
   function focusAndScroll(id: string, focus: boolean): boolean {
     if (!allowed.value.has(id)) return false
     const element = elements.get(id)
     if (!element) return false
     activeVisualId.value = id
+    beginProgrammaticScroll(id)
     element.scrollIntoView({ behavior: reducedMotion() ? 'auto' : 'smooth', block: 'start' })
     if (focus) element.focus({ preventScroll: true })
     return true
@@ -45,6 +74,8 @@ export function useVisualNavigation(visualIds: ComputedRef<string[]>) {
   }
 
   function updateFromVisible(): void {
+    // 平滑滚动会途经其他卡片。期间由目标项持有 active 状态,避免 scroll-spy 把导航拉回中途项。
+    if (programmaticVisualId) return
     const candidates = [...visible.entries()]
       .filter(([id, ratio]) => allowed.value.has(id) && ratio > 0)
       .sort((left, right) => {
@@ -104,11 +135,16 @@ export function useVisualNavigation(visualIds: ComputedRef<string[]>) {
 
   onMounted(() => {
     mounted = true
+    window.addEventListener('scroll', onWindowScroll, { passive: true })
     ensureObserver()
     void restoreRouteTarget()
   })
 
   onBeforeUnmount(() => {
+    window.removeEventListener('scroll', onWindowScroll)
+    if (programmaticScrollTimer) clearTimeout(programmaticScrollTimer)
+    programmaticScrollTimer = null
+    programmaticVisualId = ''
     observer?.disconnect()
     observer = null
     elements.clear()

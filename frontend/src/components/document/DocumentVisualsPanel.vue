@@ -21,34 +21,36 @@ const props = defineProps<{
   sourceUrl?: SourceUrlResolver
 }>()
 
-type Visual =
-  | { id: string; kind: 'figure'; label: string; caption: string; order: number; value: DocumentFigure }
-  | { id: string; kind: 'table'; label: string; caption: string; order: number; value: DocumentTable }
+type FigureVisual = {
+  id: string; kind: 'figure'; label: string; caption: string; order: number; value: DocumentFigure
+}
+type TableVisual = {
+  id: string; kind: 'table'; label: string; caption: string; order: number; value: DocumentTable
+}
+type Visual = FigureVisual | TableVisual
 
-const figureCatalog = computed<VisualCatalogItem[]>(() => props.figures.map((figure, index) => ({
-  id: figure.figure_id,
-  kind: 'figure',
-  label: figure.label,
-  caption: figure.caption,
-  order: figure.order ?? index,
+function compareVisual(left: Visual, right: Visual): number {
+  return left.order - right.order || left.id.localeCompare(right.id)
+}
+
+const figureVisuals = computed<FigureVisual[]>(() => props.figures.map((value, index): FigureVisual => ({
+  id: value.figure_id, kind: 'figure', label: value.label, caption: value.caption,
+  order: value.order ?? index, value,
+})).sort(compareVisual))
+const tableVisuals = computed<TableVisual[]>(() => props.tables.map((value, index): TableVisual => ({
+  id: value.table_id, kind: 'table', label: value.label, caption: value.caption,
+  order: value.order ?? index, value,
+})).sort(compareVisual))
+const figureCatalog = computed<VisualCatalogItem[]>(() => figureVisuals.value.map((item) => ({
+  id: item.id, kind: item.kind, label: item.label, caption: item.caption, order: item.order,
 })))
-const tableCatalog = computed<VisualCatalogItem[]>(() => props.tables.map((table, index) => ({
-  id: table.table_id,
-  kind: 'table',
-  label: table.label,
-  caption: table.caption,
-  order: table.order ?? props.figures.length + index,
+const tableCatalog = computed<VisualCatalogItem[]>(() => tableVisuals.value.map((item) => ({
+  id: item.id, kind: item.kind, label: item.label, caption: item.caption, order: item.order,
 })))
 const visuals = computed<Visual[]>(() => [
-  ...props.figures.map((value, index): Visual => ({
-    id: value.figure_id, kind: 'figure', label: value.label, caption: value.caption,
-    order: value.order ?? index, value,
-  })),
-  ...props.tables.map((value, index): Visual => ({
-    id: value.table_id, kind: 'table', label: value.label, caption: value.caption,
-    order: value.order ?? props.figures.length + index, value,
-  })),
-].sort((left, right) => left.order - right.order || left.id.localeCompare(right.id)))
+  ...figureVisuals.value,
+  ...tableVisuals.value,
+])
 const visualIds = computed(() => visuals.value.map((item) => item.id))
 const { activeVisualId, registerVisual, selectVisual } = useVisualNavigation(visualIds)
 

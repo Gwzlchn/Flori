@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 
 const navigation = vi.hoisted(() => ({
@@ -46,7 +46,7 @@ const locator = {
   pdf: { page: 1, bboxes: [] as [number, number, number, number][] },
 }
 const figures: DocumentFigure[] = [{
-  figure_id: 'F1', label: '图 1', caption: '无可用图片', source_locator: locator, order: 1, media: [],
+  figure_id: 'F1', label: '图 1', caption: '无可用图片', source_locator: locator, order: 4, media: [],
   extraction: { status: 'degraded', reasons: ['asset_missing'] },
 }, {
   figure_id: 'F2', label: '图 2', caption: '左右两个子图', source_locator: locator, order: 2,
@@ -90,6 +90,10 @@ beforeEach(() => {
   })
 })
 
+afterEach(() => {
+  vi.useRealTimers()
+})
+
 describe('DocumentVisualsPanel', () => {
   it('图表分组完整保留零 media Figure、多 panel Figure 与 Table', async () => {
     const wrapper = mountPanel()
@@ -99,10 +103,14 @@ describe('DocumentVisualsPanel', () => {
     expect(wrapper.findAll('.figure-card')).toHaveLength(2)
     expect(wrapper.findAll('.table-card')).toHaveLength(1)
     expect(wrapper.get('.figure-card .visual-missing').text()).toContain('原始图像不可用')
-    expect(wrapper.findAll('.figure-card')[1].findAll('img')).toHaveLength(2)
+    expect(wrapper.get('[data-visual-id="F2"]').findAll('img')).toHaveLength(2)
     expect(wrapper.get('.visual-catalog-desktop').text()).toContain('图 2')
     expect(wrapper.get('.visual-catalog-desktop').text()).toContain('表 1')
     expect(wrapper.get('.document-quality-reasons').text()).toContain('table_crop_fallback')
+    expect(wrapper.findAll('.document-visual-list > [data-visual-id]').map(item => item.attributes('data-visual-id')))
+      .toEqual(['F2', 'F1', 'T1'])
+    expect(wrapper.findAll('.visual-catalog-desktop .visual-nav-item').map(item => item.get('b').text()))
+      .toEqual(['图 2', '图 1', '表 1'])
   })
 
   it('稳定 query 深链等待 registry 后定位且目录点击只 replace 当前 URL', async () => {
@@ -134,5 +142,23 @@ describe('DocumentVisualsPanel', () => {
 
     expect(navigation.replace).toHaveBeenCalledWith({ query: { tab: 'figures', visual: 'F2' } })
     expect(wrapper.get('.visual-catalog-desktop [aria-current="location"]').text()).toContain('图 2')
+  })
+
+  it('目录平滑滚动期间不被途经的图表抢占选中状态', async () => {
+    vi.useFakeTimers()
+    const wrapper = mountPanel()
+    await flushPromises()
+    const observer = IntersectionObserverMock.instances[0]
+    const tableButton = wrapper.findAll('.visual-catalog-desktop .visual-nav-item')
+      .find((button) => button.text().includes('表 1'))!
+
+    await tableButton.trigger('click')
+    await flushPromises()
+    observer.trigger(wrapper.get('[data-visual-id="F2"]').element, 1)
+    await flushPromises()
+
+    expect(navigation.replace).toHaveBeenLastCalledWith({ query: { tab: 'figures', visual: 'T1' } })
+    expect(wrapper.get('.visual-catalog-desktop [aria-current="location"]').text()).toContain('表 1')
+    wrapper.unmount()
   })
 })
