@@ -63,6 +63,13 @@ class DocumentParseStep(StepBase):
                 self.job_dir, document, quality, job,
             )
 
+        if html.is_file():
+            from steps.document.visual_assets import materialize_html_visuals
+
+            document, quality = materialize_html_visuals(
+                self.job_dir, document, quality,
+            )
+
         if pdf.is_file():
             from steps.document.visual_assets import materialize_pdf_visuals
 

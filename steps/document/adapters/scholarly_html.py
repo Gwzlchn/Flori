@@ -544,7 +544,33 @@ class ScholarlyHtmlAdapter:
         return block_id
 
     def _caption_node(self, node: HtmlNode) -> HtmlNode | None:
-        return next(node.descendants(lambda child: child.tag in {"figcaption", "caption"}), None)
+        direct = next(
+            (
+                child for child in node.children
+                if isinstance(child, HtmlNode) and child.tag in {"figcaption", "caption"}
+            ),
+            None,
+        )
+        if direct is not None:
+            return direct
+        return next(
+            (
+                child for child in node.descendants(
+                    lambda item: item.tag in {"figcaption", "caption"},
+                )
+                if self._nearest_figure(child) in {None, node}
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _nearest_figure(node: HtmlNode) -> HtmlNode | None:
+        current = node.parent
+        while current is not None:
+            if current.tag == "figure":
+                return current
+            current = current.parent
+        return None
 
     def _add_figure(self, node: HtmlNode) -> None:
         caption_node = self._caption_node(node)
@@ -555,19 +581,50 @@ class ScholarlyHtmlAdapter:
         block_id = self._add_block("figure", caption, node, figure_id=figure_id)
         if caption_node and caption:
             self._add_block("caption", caption, caption_node, parent_id=block_id)
-        media = [
-            child for child in node.descendants()
-            if child.tag in {"img", "svg", "object", "embed"}
+        nested_panels = [
+            child for child in node.descendants(
+                lambda item: item.tag == "figure" and _class_contains(item, "figure_panel"),
+            )
+            if self._nearest_figure(child) is node
         ]
         panels: list[dict[str, Any]] = []
-        for index, media_node in enumerate(media):
-            asset_id = self._asset_for_node(media_node, figure_id=figure_id)
-            panel_label = media_node.attrs.get("alt", "").strip() or chr(ord("a") + index)
+        panel_sources: list[tuple[HtmlNode, HtmlNode | None, str]] = []
+        if nested_panels:
+            for panel_node in nested_panels:
+                panel_caption = self._caption_node(panel_node)
+                panel_label = panel_caption.text() if panel_caption else ""
+                media_nodes = [
+                    child for child in panel_node.descendants()
+                    if child.tag in {"img", "svg", "object", "embed"}
+                    and self._nearest_figure(child) is panel_node
+                ]
+                if media_nodes:
+                    panel_sources.extend(
+                        (panel_node, media_node, panel_label) for media_node in media_nodes
+                    )
+                else:
+                    panel_sources.append((panel_node, None, panel_label))
+        else:
+            panel_sources = [
+                (node, child, "") for child in node.descendants()
+                if child.tag in {"img", "svg", "object", "embed"}
+                and self._nearest_figure(child) is node
+            ]
+        for index, (panel_node, media_node, panel_caption) in enumerate(panel_sources):
+            asset_id = (
+                self._asset_for_node(media_node, figure_id=figure_id)
+                if media_node is not None else None
+            )
+            panel_label = panel_caption or (
+                media_node.attrs.get("alt", "").strip() if media_node is not None else ""
+            ) or chr(ord("a") + index)
             panels.append({
                 "panel_id": make_id("panel", self.fingerprint, figure_id, index),
                 "label": panel_label,
                 "asset_id": asset_id,
-                "source_locator": html_locator(self.fingerprint, dom_path(media_node)),
+                "source_locator": html_locator(
+                    self.fingerprint, dom_path(media_node or panel_node),
+                ),
             })
         status = "complete" if panels and all(panel["asset_id"] for panel in panels) else "degraded"
         if status != "complete":

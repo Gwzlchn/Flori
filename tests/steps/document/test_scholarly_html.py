@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from shared.document_contract import validate_document, validate_quality
 from steps.document.adapters import parse_scholarly_html
@@ -22,7 +23,7 @@ def scholarly_html_job(tmp_path: Path) -> tuple[Path, dict[str, str], bytes]:
     (job_dir / "input").mkdir(parents=True)
     (job_dir / "assets").mkdir()
     for name in ("overview.png", "panel-a.png", "panel-b.png"):
-        (job_dir / "assets" / name).write_bytes(("image:" + name).encode())
+        Image.new("RGB", (4, 3)).save(job_dir / "assets" / name)
     raw = b"""<!doctype html>
 <html><head>
   <meta name="citation_title" content="Attention Is All You Need">
@@ -272,7 +273,7 @@ def test_appendix_visuals_are_collected_and_algorithms_are_not_figures(tmp_path:
     job_dir = tmp_path / "job_appendix_visuals"
     (job_dir / "input").mkdir(parents=True)
     (job_dir / "assets").mkdir()
-    (job_dir / "assets" / "appendix.png").write_bytes(b"appendix-image")
+    Image.new("RGB", (4, 3)).save(job_dir / "assets" / "appendix.png")
     raw = b"""<html><body><article><h1>Paper</h1><p>Body.</p>
       <figure class="ltx_float ltx_float_algorithm"><figcaption>Algorithm 1</figcaption>
       <p>Fused kernel.</p></figure>
@@ -296,6 +297,39 @@ def test_appendix_visuals_are_collected_and_algorithms_are_not_figures(tmp_path:
     assert any(block["kind"] == "algorithm" for block in document["blocks"])
     assert any(block["kind"] == "formula" and block["text"] == "x=y" for block in document["blocks"])
     assert quality["status"] == "complete"
+
+
+def test_nested_figure_uses_outer_caption_and_tracks_missing_panel(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job_nested_figure"
+    (job_dir / "input").mkdir(parents=True)
+    (job_dir / "assets").mkdir()
+    Image.new("RGB", (4, 3)).save(job_dir / "assets" / "right.png")
+    raw = b"""<html><body><article><h1>Paper</h1><p>Body.</p>
+      <figure class="ltx_figure" id="fig11">
+        <figure class="ltx_figure_panel"><figcaption>(a) Missing left panel.</figcaption></figure>
+        <figure class="ltx_figure_panel"><img src="assets/right.png" alt="right">
+          <figcaption>(b) Available right panel.</figcaption></figure>
+        <figcaption>Figure 11: Complete outer comparison caption.</figcaption>
+      </figure></article></body></html>"""
+    (job_dir / "input" / "source.html").write_bytes(raw)
+
+    document, quality = parse_scholarly_html(job_dir, {
+        "job_id": job_dir.name,
+        "document_kind": "research_paper",
+        "source_fingerprint": _fingerprint(raw),
+    })
+
+    figure = document["figures"][0]
+    assert figure["label"] == "Figure 11"
+    assert figure["caption"] == "Figure 11: Complete outer comparison caption."
+    assert [media["role"] for media in figure["media"]] == [
+        "(a) Missing left panel.", "(b) Available right panel.",
+    ]
+    assert [media["artifact"] for media in figure["media"]] == [
+        None, "assets/right.png",
+    ]
+    assert figure["extraction"]["status"] == "degraded"
+    assert "html_figure_media_incomplete" in quality["reasons"]
 
 
 def test_relative_reference_is_resolved_but_active_scheme_is_rejected(tmp_path: Path) -> None:

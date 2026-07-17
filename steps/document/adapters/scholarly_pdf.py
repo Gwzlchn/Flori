@@ -19,8 +19,16 @@ from ._common import (
 )
 
 
-_FIGURE_CAPTION = re.compile(r"^(?:Figure|Fig\.?|图)\s*([A-Za-z]?\d+(?:[.:-]\d+)*)\b", re.I)
-_TABLE_CAPTION = re.compile(r"^(?:Table|表)\s*([A-Za-z]?\d+(?:[.:-]\d+)*)\b", re.I)
+_FIGURE_CAPTION = re.compile(
+    r"^(?:Figure|Fig\.?|图)\s*([A-Za-z]?\d+(?:[.:-]\d+)*)\b"
+    r"(?=\s*(?:[.:|\u2013\u2014-]|$))",
+    re.I,
+)
+_TABLE_CAPTION = re.compile(
+    r"^(?:Table|表)\s*([A-Za-z]?\d+(?:[.:-]\d+)*)\b"
+    r"(?=\s*(?:[.:|\u2013\u2014-]|$))",
+    re.I,
+)
 _URL = re.compile(r"https?://[^\s<>()\[\]{}]+", re.I)
 _DOI = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", re.I)
 _SCAN_CHARS_PER_PAGE = 40
@@ -52,6 +60,14 @@ def _float(value: str | None, default: float = 0.0) -> float:
         return round(float(value or default), 3)
     except ValueError:
         return default
+
+
+def _valid_bboxes(bboxes: list[list[float]]) -> list[list[float]]:
+    """保留有实际面积的 PDF 区域；退化字形仍由 page locator 表达。"""
+    return [
+        bbox for bbox in bboxes
+        if len(bbox) == 4 and bbox[2] > bbox[0] and bbox[3] > bbox[1]
+    ]
 
 
 class ScholarlyPdfAdapter:
@@ -350,7 +366,12 @@ class ScholarlyPdfAdapter:
                 figure_match = _FIGURE_CAPTION.match(item.text)
                 table_match = _TABLE_CAPTION.match(item.text)
                 if allow_visuals and figure_match:
-                    self._add_pdf_figure(page, item, figure_match.group(1))
+                    caption_items = self._figure_caption_items(page, item_index)
+                    consumed.update(index for index, _item in caption_items[1:])
+                    self._add_pdf_figure(
+                        page, [value for _index, value in caption_items],
+                        figure_match.group(1),
+                    )
                     continue
                 if allow_visuals and table_match:
                     consumed.update(
@@ -379,7 +400,7 @@ class ScholarlyPdfAdapter:
         **extra: Any,
     ) -> str:
         block_id = make_id("blk", self.fingerprint, kind, page, self._order, text[:80])
-        locator = pdf_locator(self.fingerprint, page, bboxes)
+        locator = pdf_locator(self.fingerprint, page, _valid_bboxes(bboxes))
         confidence = extra.get("ocr_confidence")
         if type(confidence) in (int, float):
             locator["pdf"]["ocr_confidence"] = confidence
@@ -395,13 +416,63 @@ class ScholarlyPdfAdapter:
         self._order += 1
         return block_id
 
-    def _add_pdf_figure(self, page: PageLayout, caption: LayoutItem, label_id: str) -> None:
+    @staticmethod
+    def _figure_caption_items(
+        page: PageLayout,
+        caption_index: int,
+    ) -> list[tuple[int, LayoutItem]]:
+        result = [(caption_index, page.text_items[caption_index])]
+        for index in range(caption_index + 1, min(len(page.text_items), caption_index + 4)):
+            previous = result[-1][1]
+            candidate = page.text_items[index]
+            if previous.text.rstrip().endswith((".", "!", "?", ";")):
+                break
+            if _FIGURE_CAPTION.match(candidate.text) or _TABLE_CAPTION.match(candidate.text):
+                break
+            previous_height = max(previous.bbox[3] - previous.bbox[1], 1)
+            vertical_gap = candidate.bbox[1] - previous.bbox[3]
+            horizontal_overlap = min(previous.bbox[2], candidate.bbox[2]) - max(
+                previous.bbox[0], candidate.bbox[0],
+            )
+            if (
+                vertical_gap < -2 or vertical_gap > max(8, previous_height * 0.6)
+                or horizontal_overlap <= 0
+            ):
+                break
+            result.append((index, candidate))
+        return result
+
+    def _add_pdf_figure(
+        self,
+        page: PageLayout,
+        caption_items: list[LayoutItem],
+        label_id: str,
+    ) -> None:
+        caption = LayoutItem(
+            " ".join(item.text for item in caption_items),
+            [
+                min(item.bbox[0] for item in caption_items),
+                min(item.bbox[1] for item in caption_items),
+                max(item.bbox[2] for item in caption_items),
+                max(item.bbox[3] for item in caption_items),
+            ],
+            min(
+                (item.confidence for item in caption_items if item.confidence is not None),
+                default=None,
+            ),
+        )
         label = f"Figure {label_id}"
         figure_id = make_id("fig", self.fingerprint, page.number, label, caption.bbox)
-        candidate_panels = [
+        eligible_panels = [
             bbox for bbox in page.image_bboxes
             if bbox[3] <= caption.bbox[1] + 3
             and caption.bbox[1] - bbox[1] <= max(page.height * 0.55, 1)
+        ]
+        nearest_bottom = max((bbox[3] for bbox in eligible_panels), default=None)
+        row_tolerance = max(10.0, (caption.bbox[3] - caption.bbox[1]) * 0.75)
+        candidate_panels = [
+            bbox for bbox in eligible_panels
+            if nearest_bottom is not None and nearest_bottom - bbox[3] <= row_tolerance
         ]
         if not candidate_panels:
             crop = [0.0, max(0.0, caption.bbox[1] - page.height * 0.4), page.width, caption.bbox[1]]

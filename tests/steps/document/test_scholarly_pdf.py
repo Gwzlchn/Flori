@@ -10,6 +10,8 @@ import pytest
 from shared.document_contract import validate_document, validate_quality
 from steps.document.adapters import parse_pdf_document
 from steps.document.adapters.scholarly_pdf import (
+    _FIGURE_CAPTION,
+    _TABLE_CAPTION,
     LayoutItem,
     PageLayout,
     ScholarlyPdfAdapter,
@@ -272,6 +274,127 @@ def test_pdf_xml_parsers_preserve_coordinates() -> None:
       </line></block></flow>
     </page></doc>""")
     assert text_pages[0].text_items == [LayoutItem("Hello PDF", [20.0, 10.0, 95.0, 25.0])]
+
+
+def test_zero_area_text_bbox_falls_back_to_page_locator(
+    monkeypatch: pytest.MonkeyPatch,
+    pdf_job: tuple[Path, dict[str, str], bytes],
+) -> None:
+    job_dir, job, _ = pdf_job
+    page = PageLayout(1, 600, 800, text_items=[
+        LayoutItem("Paper title", [60, 40, 500, 70]),
+        LayoutItem("M", [376, 222, 376, 232]),
+    ])
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_pdf_info",
+        lambda self: {"Pages": "1", "Title": "Paper title"},
+    )
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+    )
+
+    document, _quality = parse_pdf_document(job_dir, job)
+    manifest = build_document_source_manifest(job_dir, document)
+
+    glyph = next(block for block in document["blocks"] if block["text"] == "M")
+    assert glyph["locator"]["pdf"]["bboxes"] == []
+    segment = next(item for item in manifest["segments"] if item["segment_id"] == glyph["block_id"])
+    assert segment["locator"] == {"kind": "pdf", "page": 1, "bbox": None}
+
+
+def test_prose_figure_references_are_not_registered_as_figures(
+    monkeypatch: pytest.MonkeyPatch,
+    pdf_job: tuple[Path, dict[str, str], bytes],
+) -> None:
+    job_dir, job, _ = pdf_job
+    page = PageLayout(1, 600, 800, text_items=[
+        LayoutItem("Paper title", [60, 40, 500, 70]),
+        LayoutItem("Figure 2 shows the measured roofline results.", [60, 100, 500, 120]),
+        LayoutItem("Figure 1: Measured throughput.", [60, 400, 500, 425]),
+    ], image_bboxes=[[60, 180, 500, 380]])
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_pdf_info",
+        lambda self: {"Pages": "1", "Title": "Paper title"},
+    )
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+    )
+
+    document, _quality = parse_pdf_document(job_dir, job)
+
+    assert [figure["label"] for figure in document["figures"]] == ["Figure 1"]
+    assert any(
+        block["kind"] == "paragraph" and block["text"].startswith("Figure 2 shows")
+        for block in document["blocks"]
+    )
+
+
+def test_prose_table_references_are_not_registered_as_tables(
+    monkeypatch: pytest.MonkeyPatch,
+    pdf_job: tuple[Path, dict[str, str], bytes],
+) -> None:
+    job_dir, job, _ = pdf_job
+    page = PageLayout(1, 600, 800, text_items=[
+        LayoutItem("Paper title", [60, 40, 500, 70]),
+        LayoutItem("Table 2 shows the measured throughput.", [60, 100, 500, 120]),
+        LayoutItem("Table 1 | Benchmark results", [60, 400, 500, 425]),
+    ])
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_pdf_info",
+        lambda self: {"Pages": "1", "Title": "Paper title"},
+    )
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+    )
+
+    document, _quality = parse_pdf_document(job_dir, job)
+
+    assert [table["label"] for table in document["tables"]] == ["Table 1"]
+    assert any(
+        block["kind"] == "paragraph" and block["text"].startswith("Table 2 shows")
+        for block in document["blocks"]
+    )
+
+
+@pytest.mark.parametrize("separator", [":", ".", "-", "–", "—", "|"])
+def test_visual_caption_labels_accept_common_separators(separator: str) -> None:
+    assert _FIGURE_CAPTION.match(f"Figure A1 {separator} Result")
+    assert _TABLE_CAPTION.match(f"Table 2 {separator} Result")
+
+
+def test_multiline_figure_caption_uses_nearest_image_row(
+    monkeypatch: pytest.MonkeyPatch,
+    pdf_job: tuple[Path, dict[str, str], bytes],
+) -> None:
+    job_dir, job, _ = pdf_job
+    page = PageLayout(1, 600, 800, text_items=[
+        LayoutItem("Paper title", [60, 40, 500, 70]),
+        LayoutItem("Figure 1: Roofline performance for floating-point", [60, 500, 500, 520]),
+        LayoutItem("programs and multicore architectures.", [60, 522, 500, 542]),
+    ], image_bboxes=[
+        [60, 100, 500, 240],
+        [60, 330, 275, 485], [285, 330, 500, 485],
+    ])
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_pdf_info",
+        lambda self: {"Pages": "1", "Title": "Paper title"},
+    )
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+    )
+
+    document, _quality = parse_pdf_document(job_dir, job)
+
+    figure = document["figures"][0]
+    assert figure["caption"] == (
+        "Figure 1: Roofline performance for floating-point "
+        "programs and multicore architectures."
+    )
+    assert len(figure["media"]) == 2
+    assert [media["source_locator"]["pdf"]["bboxes"][0] for media in figure["media"]] == [
+        [60, 330, 275, 485], [285, 330, 500, 485],
+    ]
+    assert not any(block["text"].startswith("programs and") for block in document["blocks"])
 
 
 def test_pdf_primary_layout_extracts_images_only_in_temporary_directory(
