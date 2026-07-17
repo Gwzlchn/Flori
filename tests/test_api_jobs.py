@@ -693,7 +693,10 @@ class TestRebuildP2c:
             document_kind="research_paper", url="https://arxiv.org/abs/1810.04805",
             source="arxiv", lineage_key="jobs_paper_p1",
         ))
-        await storage.write_file("jobs_paper_p1", "job.json", b'{"id":"jobs_paper_p1"}')
+        await storage.write_file(
+            "jobs_paper_p1", "job.json",
+            b'{"id":"jobs_paper_p1","content_type":"paper","pipeline":"paper"}',
+        )
         await storage.write_file("jobs_paper_p1", "output/note.md", b"hello")
         await storage.write_file("jobs_paper_p1", f".{first}.done", b'{"def_digest":"sha256:old"}')
         resp = await client.post("/api/jobs/jobs_paper_p1/rebuild")
@@ -709,6 +712,12 @@ class TestRebuildP2c:
         assert db.get_job("jobs_paper_p1").is_current is False        # 父降级
         assert await storage.read_file(new_id, "output/note.md") == b"hello"   # 产物 clone
         assert await storage.read_file(new_id, f".{first}.done") is not None   # .done 播种
+        rebuilt_doc = json.loads((await storage.read_file(new_id, "job.json")).decode())
+        assert rebuilt_doc["content_type"] == "document"
+        assert rebuilt_doc["document_kind"] == "research_paper"
+        assert rebuilt_doc["source_profile"] == "scholarly_html"
+        assert rebuilt_doc["source"] == "arxiv"
+        assert "pipeline" not in rebuilt_doc
 
     @pytest.mark.asyncio
     async def test_rebuild_stale_only_expired(self, client, app):

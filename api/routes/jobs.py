@@ -641,7 +641,16 @@ async def create_job_snapshot(
     parent = await asyncio.to_thread(db.get_job, parent_job_id)
     if not parent:
         raise HTTPException(404, "job not found")
-    new_id = derive_job_id(parent.url, parent.content_type, parent.source)  # 带时间戳
+    try:
+        route = resolve_job_route(
+            parent.source or detect_source(parent.url or ""),
+            parent.content_type,
+            document_kind=parent.document_kind or None,
+            allow_internal=True,
+        )
+    except SourceRegistryError as exc:
+        raise HTTPException(409, f"parent job route is no longer supported: {exc}") from exc
+    new_id = derive_job_id(parent.url, route.content_type, route.source)  # 带时间戳
     if new_id == parent.id or await asyncio.to_thread(db.get_job, new_id):
         new_id = f"{new_id}_{secrets.token_hex(3)}"   # 极小概率撞;绝不复用父 id
     lineage = parent.lineage_key or _lineage_key_of(parent.id)
@@ -653,13 +662,26 @@ async def create_job_snapshot(
             doc = json.loads(raw)
         except Exception:
             doc = {}
-    doc.update({"id": new_id, "created_at": _now_iso()})
+    if not isinstance(doc, dict):
+        doc = {}
+    doc.pop("pipeline", None)
+    doc.update({
+        "id": new_id,
+        "url": parent.url,
+        "source": route.source,
+        "content_type": route.content_type,
+        "document_kind": route.document_kind,
+        "source_profile": route.source_profile,
+        "domain": parent.domain,
+        "style_tags": parent.style_tags,
+        "created_at": _now_iso(),
+    })
     # prompt 白盒:重建快照也重解析 prompt 覆盖,拾取最新编辑;父 job.json 里的旧覆盖会被替换。
     overrides = await asyncio.to_thread(
         db.resolve_prompt_overrides,
-        parent.pipeline,
+        route.pipeline,
         parent.domain,
-        parent.document_kind or None,
+        route.document_kind,
     )
     if overrides:
         doc["prompt_overrides"] = overrides
@@ -669,18 +691,18 @@ async def create_job_snapshot(
         new_id, "job.json", json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8"),
     )
     job = Job(
-        id=new_id, content_type=parent.content_type, pipeline=parent.pipeline,
-        document_kind=parent.document_kind,
-        url=parent.url, title=parent.title, domain=parent.domain, source=parent.source,
+        id=new_id, content_type=route.content_type, pipeline=route.pipeline,
+        document_kind=route.document_kind or "",
+        url=parent.url, title=parent.title, domain=parent.domain, source=route.source,
         style_tags=parent.style_tags, collection_id=parent.collection_id, meta=parent.meta,
         lineage_key=lineage, is_current=True, parent_job_id=parent.id,
-        pipeline_digest=_pipeline_digest(config, parent.pipeline),
+        pipeline_digest=_pipeline_digest(config, route.pipeline),
     )
     await asyncio.to_thread(db.create_job, job)        # create_job 自动 demote 同 lineage 旧版
     if parent.collection_id:
         await asyncio.to_thread(db.increment_collection_count, parent.collection_id, 1)
     await redis.append_lifecycle_event(
-        "job_command", {"action": "new_job", "job_id": new_id, "pipeline": parent.pipeline},
+        "job_command", {"action": "new_job", "job_id": new_id, "pipeline": route.pipeline},
     )
     audit("job", new_id, "create", actor=actor,
           detail={"rebuilt_from": parent.id, "lineage_key": lineage})
