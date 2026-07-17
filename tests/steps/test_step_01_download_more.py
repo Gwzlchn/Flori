@@ -8,11 +8,11 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from steps.common.step_01_download import DownloadStep
+from steps.common.step_01_download import DownloadStep, HttpFetchResult
 from tests.steps.conftest import make_step_config
 
 
@@ -563,7 +563,9 @@ class TestExecuteDispatch:
                           content_type="document", document_kind="article")
         with patch.object(step, "_download_article") as dl:
             result = step.execute()
-            dl.assert_called_once_with("https://blog.example.com/post")
+            dl.assert_called_once_with(
+                "https://blog.example.com/post", document_kind="article",
+            )
         assert result["source"] == "http_article"
         assert (job_dir / "input" / "metadata.json").exists()
 
@@ -621,17 +623,32 @@ class TestExecuteDispatch:
 class TestDownloadArticle:
     def _fake_fetch(self, monkeypatch, html="<html>body</html>", meta=None,
                     fetch_side_effect=None):
-        """抓取走 step._fetch_html(urllib,尊重代理 env)→ 直接 patch 它;
-        trafilatura 只剩解析(extract_metadata),假模块随之瘦身。"""
+        """抓取走 step._fetch_response;trafilatura 只保留元数据解析."""
         from steps.common.step_01_download import DownloadStep
+
+        def result(value):
+            if isinstance(value, HttpFetchResult):
+                return value
+            final_url = "https://final.example/p"
+            if isinstance(value, tuple):
+                value, final_url = value
+            if value is None:
+                return HttpFetchResult(
+                    body=b"", final_url=final_url or "https://blog.example.com/p",
+                    status_code=None, content_type="", error="URLError:mock",
+                )
+            body = value.encode() if isinstance(value, str) else value
+            return HttpFetchResult(
+                body=body, final_url=final_url, status_code=200,
+                content_type="text/html; charset=utf-8", error=None,
+            )
+
         fetch = MagicMock()
         if fetch_side_effect is not None:
-            # 便捷:元素可为 html|None(自动包成 (html, url) tuple)或现成 tuple
-            fetch.side_effect = [e if isinstance(e, tuple) else (e, "https://final.example/p" if e else None)
-                                 for e in fetch_side_effect]
+            fetch.side_effect = [result(value) for value in fetch_side_effect]
         else:
-            fetch.return_value = (html, "https://final.example/p")
-        monkeypatch.setattr(DownloadStep, "_fetch_html", staticmethod(fetch))
+            fetch.return_value = result(html)
+        monkeypatch.setattr(DownloadStep, "_fetch_response", staticmethod(fetch))
         mod = MagicMock()
         mod.extract_metadata.return_value = meta
         monkeypatch.setitem(sys.modules, "trafilatura", mod)
@@ -645,13 +662,18 @@ class TestDownloadArticle:
         self._fake_fetch(monkeypatch, meta=meta)
         with patch("shared.net.assert_public_url") as ap:
             step._download_article("https://blog.example.com/p")
-            ap.assert_called_once_with("https://blog.example.com/p")
+            assert ap.call_args_list == [
+                call("https://blog.example.com/p"),
+                call("https://final.example/p"),
+            ]
         assert (job_dir / "input" / "source.html").read_text() == "<html>body</html>"
         assert step._document_source_meta == {
             "source_url": "https://blog.example.com/p",
             "final_url": "https://final.example/p",
-            "title": "T", "author": "A", "sitename": "S", "date": "2024-01-01",
+            "title": "T", "author": "A", "sitename": "S",
+            "published_at": "2024-01-01",
         }
+        assert "date" not in step._document_source_meta
         assert not (job_dir / "input" / "article_meta.json").exists()
 
     def test_fetch_returns_none_raises_after_backoff(self, tmp_path, monkeypatch):

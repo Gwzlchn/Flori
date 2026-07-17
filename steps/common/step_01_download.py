@@ -5,10 +5,55 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+from urllib.parse import urljoin
 
+from shared.document_source_resolver import (
+    DocumentSourceAlternative,
+    detect_access_challenge,
+    extract_research_pdf_url,
+    resolve_document_source_alternative,
+)
 from shared.source_detect import detect_source, extract_arxiv_id, extract_bilibili_bvid
 from shared.step_base import StepBase, file_hash
+
+
+@dataclass(frozen=True)
+class HttpFetchResult:
+    """一次文档抓取的有界响应,保留失败诊断但不记录敏感响应头."""
+
+    body: bytes
+    final_url: str
+    status_code: int | None
+    content_type: str
+    error: str | None
+
+
+class _PublicUrlRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """每个 HTTP redirect 在连接前重做公网 URL 校验."""
+
+    max_redirections: int = 5
+    max_repeats: int = 2
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        from shared.net import assert_public_url
+
+        target = urljoin(req.full_url, newurl)
+        assert_public_url(target)
+        return super().redirect_request(
+            req, fp, code, msg, headers, target,
+        )
 
 
 class DownloadStep(StepBase):
@@ -58,7 +103,7 @@ class DownloadStep(StepBase):
         elif source == "pdf":
             self._download_pdf(url)
         elif source == "http_article":
-            self._download_article(url)
+            self._download_article(url, document_kind=job.get("document_kind"))
         elif source == "podcast":
             self._download_audio(url)
         else:
@@ -375,69 +420,374 @@ class DownloadStep(StepBase):
         cmd = ["curl", "-fSL", "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "-o", str(input_dir / "source.pdf"), url]  # 同上:浏览器 UA
         self.commands.run(cmd, timeout=120)
 
-    def _download_article(self, url: str) -> None:
-        """抓 HTML 原文写 input/source.html;同时用 trafilatura 抽正文/标题供后续解析。
-        抓取用 urllib(尊重 HTTP(S)_PROXY env)——trafilatura.fetch_url 内部 urllib3 不读代理 env,
-        必须走代理的站(HF 等)直连必败、把退避整轮白烧;trafilatura 只负责解析不再负责下载。"""
-        import trafilatura
-
+    def _download_article(self, url: str, document_kind: str | None = None) -> None:
+        """抓取 HTML;研究论文优先跟随明确全文 PDF,失败保留可操作诊断."""
+        from shared.errors import InputInvalidError
         from shared.net import assert_public_url
 
-        assert_public_url(url)  # 抓取前挡内网/回环目标(SSRF)
+        assert_public_url(url)
         input_dir = self.job_dir / "input"
         input_dir.mkdir(parents=True, exist_ok=True)
+        kind = document_kind or "article"
+        alternative = (
+            resolve_document_source_alternative(url, document_kind=kind)
+            if kind == "research_paper" else None
+        )
 
-        # 慢站首拍常超时 → 指数退避重试:超时 30→60→120→240→480s。
-        # Document 下载步超时须覆盖完整退避窗口,否则慢站恢复前会被提前终止。
-        html = None
-        final_url = None
+        response = self._fetch_primary_document(url)
+        challenge = detect_access_challenge(response.body)
+        if not self._fetch_succeeded(response) or challenge:
+            use_alternative = alternative is not None and (
+                challenge or self._is_deterministic_http_failure(response)
+            )
+            if use_alternative:
+                self._download_resolved_pdf(
+                    original_url=url,
+                    original=response,
+                    candidate_url=alternative.resolved_url,
+                    strategy="configured_alternative",
+                    min_pages=alternative.min_pages,
+                    challenge=challenge,
+                    alternative=alternative,
+                )
+                return
+            resolver = (
+                "alternative_skipped_transient"
+                if alternative is not None else "no_alternative"
+            )
+            raise InputInvalidError(self._fetch_failure_message(
+                original_url=url,
+                response=response,
+                challenge=challenge,
+                resolver=resolver,
+            ))
+
+        assert_public_url(response.final_url)
+        if self._has_pdf_signature(response.body):
+            self._store_resolved_pdf(
+                original_url=url,
+                original=response,
+                resolved=response,
+                strategy="direct_pdf",
+                min_pages=2 if kind == "research_paper" else 1,
+            )
+            return
+
+        html = self._decode_fetch_body(response)
+        source_meta = self._extract_article_source_meta(
+            html, source_url=url, final_url=response.final_url,
+        )
+        if kind == "research_paper":
+            citation_pdf = extract_research_pdf_url(html, response.final_url)
+            if citation_pdf:
+                try:
+                    self._download_resolved_pdf(
+                        original_url=url,
+                        original=response,
+                        candidate_url=citation_pdf,
+                        strategy="citation_pdf",
+                        min_pages=2,
+                        source_meta=source_meta,
+                    )
+                    return
+                except InputInvalidError:
+                    if alternative is None or alternative.resolved_url == citation_pdf:
+                        raise
+                    self._download_resolved_pdf(
+                        original_url=url,
+                        original=response,
+                        candidate_url=alternative.resolved_url,
+                        strategy="configured_alternative",
+                        min_pages=alternative.min_pages,
+                        alternative=alternative,
+                        source_meta=source_meta,
+                    )
+                    return
+
+        self.artifacts.write("input/source.html", html)
+        (input_dir / "source.pdf").unlink(missing_ok=True)
+        self._document_source_meta = source_meta
+
+    def _fetch_primary_document(self, url: str) -> HttpFetchResult:
+        """网络/5xx 保留原退避,确定性 4xx 或 challenge 首次即返回决策."""
+        response = HttpFetchResult(b"", url, None, "", "not_started")
         timeout = 30
         for _ in range(5):
-            html, final_url = self._fetch_html(url, timeout)
-            if html:
-                break
+            response = self._fetch_response(url, timeout)
+            challenge = detect_access_challenge(response.body)
+            if self._fetch_succeeded(response) or challenge:
+                return response
+            if self._is_deterministic_http_failure(response):
+                return response
             timeout *= 2
-        if not html:
-            from shared.errors import InputInvalidError
-            raise InputInvalidError(f"Cannot fetch article: {url} (5 次退避重试后仍失败)")
-        self.artifacts.write("input/source.html", html)
+        return response
 
-        # 下载元数据与其它来源统一并入 input/metadata.json，不再维护文章专用 sidecar。
-        source_meta: dict = {"source_url": url, "final_url": final_url or url}
+    @staticmethod
+    def _fetch_succeeded(response: HttpFetchResult) -> bool:
+        return bool(
+            response.status_code is not None
+            and 200 <= response.status_code < 300
+            and response.body
+            and response.error is None
+        )
+
+    @staticmethod
+    def _is_deterministic_http_failure(response: HttpFetchResult) -> bool:
+        status = response.status_code
+        return bool(
+            response.error == "response_too_large"
+            or (
+                status is not None
+                and (
+                    300 <= status < 400
+                    or (400 <= status < 500 and status not in {408, 425, 429})
+                )
+            )
+        )
+
+    def _download_resolved_pdf(
+        self,
+        *,
+        original_url: str,
+        original: HttpFetchResult,
+        candidate_url: str,
+        strategy: str,
+        min_pages: int,
+        challenge: str | None = None,
+        alternative: DocumentSourceAlternative | None = None,
+        source_meta: dict | None = None,
+    ) -> None:
+        from shared.errors import InputInvalidError
+        from shared.net import assert_public_url
+
+        assert_public_url(candidate_url)
+        resolved = self._fetch_primary_document(candidate_url)
+        resolved_challenge = detect_access_challenge(resolved.body)
+        if not self._fetch_succeeded(resolved) or resolved_challenge:
+            raise InputInvalidError(self._fetch_failure_message(
+                original_url=original_url,
+                response=resolved,
+                challenge=resolved_challenge,
+                resolver=strategy,
+            ))
+        assert_public_url(resolved.final_url)
+        self._store_resolved_pdf(
+            original_url=original_url,
+            original=original,
+            resolved=resolved,
+            strategy=strategy,
+            min_pages=min_pages,
+            challenge=challenge,
+            alternative=alternative,
+            source_meta=source_meta,
+        )
+
+    def _store_resolved_pdf(
+        self,
+        *,
+        original_url: str,
+        original: HttpFetchResult,
+        resolved: HttpFetchResult,
+        strategy: str,
+        min_pages: int,
+        challenge: str | None = None,
+        alternative: DocumentSourceAlternative | None = None,
+        source_meta: dict | None = None,
+    ) -> None:
+        from shared.errors import InputInvalidError
+
+        content_type = resolved.content_type.split(";", 1)[0].strip().lower()
+        if not self._has_pdf_signature(resolved.body):
+            raise InputInvalidError(
+                "resolved research source is not PDF: "
+                f"original_url={original_url} final_url={resolved.final_url} "
+                f"http_status={resolved.status_code} resolver={strategy} "
+                f"content_type={resolved.content_type or '(missing)'} pdf_signature=invalid"
+            )
+        if "pdf" not in content_type and content_type not in {
+            "application/octet-stream", "binary/octet-stream",
+        }:
+            raise InputInvalidError(
+                "resolved research source has invalid MIME: "
+                f"original_url={original_url} final_url={resolved.final_url} "
+                f"http_status={resolved.status_code} resolver={strategy} "
+                f"content_type={resolved.content_type or '(missing)'} pdf_signature=valid"
+            )
+        if len(resolved.body) < 1024:
+            raise InputInvalidError(
+                "resolved research source is too small: "
+                f"original_url={original_url} final_url={resolved.final_url} "
+                f"resolver={strategy} bytes={len(resolved.body)}"
+            )
+
+        input_dir = self.job_dir / "input"
+        part = input_dir / ".source.pdf.part"
+        target = input_dir / "source.pdf"
+        part.write_bytes(resolved.body)
+        try:
+            page_count = self._pdf_page_count(part)
+        except InputInvalidError as exc:
+            part.unlink(missing_ok=True)
+            raise InputInvalidError(
+                "resolved research PDF validation failed: "
+                f"original_url={original_url} final_url={resolved.final_url} "
+                f"http_status={resolved.status_code} resolver={strategy} "
+                f"content_type={resolved.content_type or '(missing)'} detail={exc}"
+            ) from exc
+        if page_count < min_pages:
+            part.unlink(missing_ok=True)
+            raise InputInvalidError(
+                "resolved research source is not full text: "
+                f"original_url={original_url} final_url={resolved.final_url} "
+                f"resolver={strategy} pdf_pages={page_count} min_pages={min_pages}"
+            )
+        try:
+            part.replace(target)
+            (input_dir / "source.html").unlink(missing_ok=True)
+        except Exception:
+            part.unlink(missing_ok=True)
+            raise
+
+        resolution: dict = {
+            "strategy": strategy,
+            "original_url": original_url,
+            "original_status": original.status_code,
+            "original_content_type": original.content_type,
+            "resolved_url": resolved.final_url,
+            "resolved_status": resolved.status_code,
+            "resolved_content_type": resolved.content_type,
+            "pdf_pages": page_count,
+        }
+        if challenge:
+            resolution["challenge"] = challenge
+        if alternative is not None:
+            resolution["alternative_reason"] = alternative.reason
+        self._document_source_meta = {
+            **(source_meta or {}),
+            "source_url": original_url,
+            "final_url": resolved.final_url,
+            "source_resolution": resolution,
+        }
+
+    def _pdf_page_count(self, path: Path) -> int:
+        """pdfinfo 验证 PDF 可解析并返回页数,损坏文件确定性拒绝."""
+        from shared.errors import InputInvalidError
+
+        try:
+            result = self.commands.run(["pdfinfo", str(path)], timeout=30)
+        except Exception as exc:
+            raise InputInvalidError("resolved research PDF cannot be parsed by pdfinfo") from exc
+        match = re.search(r"^Pages:\s+(\d+)\s*$", result.stdout or "", flags=re.MULTILINE)
+        if not match:
+            raise InputInvalidError("resolved research PDF page count is unavailable")
+        return int(match.group(1))
+
+    @staticmethod
+    def _has_pdf_signature(body: bytes) -> bool:
+        return body[:1024].lstrip().startswith(b"%PDF-")
+
+    @staticmethod
+    def _fetch_failure_message(
+        *,
+        original_url: str,
+        response: HttpFetchResult,
+        challenge: str | None,
+        resolver: str,
+    ) -> str:
+        return (
+            "document source fetch failed: "
+            f"original_url={original_url} final_url={response.final_url or original_url} "
+            f"http_status={response.status_code if response.status_code is not None else 'none'} "
+            f"content_type={response.content_type or '(missing)'} "
+            f"challenge={challenge or 'none'} resolver={resolver} "
+            f"transport={response.error or 'none'}"
+        )
+
+    @staticmethod
+    def _extract_article_source_meta(
+        html: str, *, source_url: str, final_url: str,
+    ) -> dict:
+        import trafilatura
+
+        source_meta: dict = {"source_url": source_url, "final_url": final_url}
         try:
             meta = trafilatura.extract_metadata(html)
             if meta:
                 source_meta["title"] = meta.title or ""
                 source_meta["author"] = meta.author or ""
                 source_meta["sitename"] = meta.sitename or ""
-                source_meta["date"] = meta.date or ""
+                source_meta["published_at"] = meta.date or ""
         except Exception:
             pass
-        self._document_source_meta = source_meta
+        return source_meta
+
+    @staticmethod
+    def _fetch_response(url: str, timeout: int) -> HttpFetchResult:
+        """urllib 抓取有界文档,保留状态,MIME,最终 URL 和 challenge 体."""
+        import http.client
+        import urllib.error
+
+        max_bytes = 64 * 1024 * 1024
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        opener = urllib.request.build_opener(_PublicUrlRedirectHandler())
+        try:
+            with opener.open(req, timeout=timeout) as response:
+                body = response.read(max_bytes + 1)
+                content_type = response.headers.get("Content-Type", "")
+                final_url = response.geturl()
+                status = getattr(response, "status", None) or response.getcode()
+        except urllib.error.HTTPError as exc:
+            try:
+                body = exc.read(512_001)
+            except OSError:
+                body = b""
+            return HttpFetchResult(
+                body=body,
+                final_url=exc.geturl() or url,
+                status_code=exc.code,
+                content_type=exc.headers.get("Content-Type", "") if exc.headers else "",
+                error=f"HTTPError:{exc.code}",
+            )
+        except (
+            urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException,
+        ) as exc:
+            return HttpFetchResult(
+                body=b"",
+                final_url=url,
+                status_code=None,
+                content_type="",
+                error=f"{type(exc).__name__}:{str(exc)[:160]}",
+            )
+        if len(body) > max_bytes:
+            return HttpFetchResult(
+                body=body[:max_bytes],
+                final_url=final_url,
+                status_code=status,
+                content_type=content_type,
+                error="response_too_large",
+            )
+        return HttpFetchResult(body, final_url, status, content_type, None)
+
+    @staticmethod
+    def _decode_fetch_body(response: HttpFetchResult) -> str:
+        match = re.search(r"charset\s*=\s*['\"]?([^;'\"\s]+)", response.content_type, re.I)
+        declared = match.group(1) if match else None
+        for encoding in filter(None, (declared, "utf-8", "gb18030")):
+            try:
+                return response.body.decode(encoding)
+            except (UnicodeDecodeError, LookupError):
+                continue
+        return response.body.decode("utf-8", errors="replace")
 
     @staticmethod
     def _fetch_html(url: str, timeout: int) -> tuple[str | None, str | None]:
-        """urllib 抓单页(尊重代理 env),返回 (html, 最终URL);失败返 (None, None)。
-        ★最终 URL = 跟随重定向后的(arxiv.org/html/<id> → 302 → …/<id>v2):页内图的相对
-        src 必须以它为 base 拼绝对地址,用请求前 URL 会拼出双段 404(线上:译文图全外链裸奔)。
-        解码链:HTTP header charset → utf-8 → gb18030(GBK/GB2312 中文站) → utf-8 宽容兜底。"""
-        import urllib.request
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                raw = r.read()
-                charset = r.headers.get_content_charset()
-                final_url = r.geturl()
-        except Exception:
+        """HTML 来源的 best-effort 兼容入口，论文 resolver 使用完整响应。"""
+        response = DownloadStep._fetch_response(url, timeout)
+        if not DownloadStep._fetch_succeeded(response):
             return None, None
-        if not raw:
-            return None, None
-        for enc in filter(None, (charset, "utf-8", "gb18030")):
-            try:
-                return raw.decode(enc), final_url
-            except (UnicodeDecodeError, LookupError):
-                continue
-        return raw.decode("utf-8", errors="replace"), final_url
+        if DownloadStep._has_pdf_signature(response.body):
+            return None, response.final_url
+        return DownloadStep._decode_fetch_body(response), response.final_url
 
     def _download_audio(self, url: str) -> None:
         """音频任务下载 → input/source.mp3,后续复制为 source.mp4 供 whisper;ffmpeg 按内容

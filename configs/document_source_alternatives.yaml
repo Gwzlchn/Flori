@@ -1,0 +1,9 @@
+schema_version: 1
+
+# 跨站替代必须由人工核对为同一全文,运行时仍校验公网 URL,MIME,PDF 签名和页数.
+alternatives:
+  - original_url: https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2326253
+    resolved_url: https://escholarship.org/content/qt4hn4t174/qt4hn4t174.pdf
+    document_kind: research_paper
+    reason: publisher_cloudflare_challenge
+    min_pages: 2
