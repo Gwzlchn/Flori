@@ -164,10 +164,18 @@ class TestBuildStepConfig:
         assert step_cfg["step"]["timeout_per_min"] == 90
         assert step_cfg["step"]["timeout_max_sec"] == 21600
 
+    def test_video_scene_timeout_scales_for_long_sources(self, configs_dir, tmp_data_dir):
+        cfg = load_config(config_dir=configs_dir, data_dir=tmp_data_dir)
+        step_cfg = build_step_config(cfg, "video", "03_scene")
+
+        assert step_cfg["step"]["timeout_sec"] == 600
+        assert step_cfg["step"]["timeout_per_min"] == 12
+        assert step_cfg["step"]["timeout_max_sec"] == 7200
+
     def test_no_dynamic_timeout_when_unset(self, configs_dir, tmp_data_dir):
         # 未配 timeout_per_min 的步:step dict 不含这俩键(行为不变)。
         cfg = load_config(config_dir=configs_dir, data_dir=tmp_data_dir)
-        step_cfg = build_step_config(cfg, "video", "03_scene")
+        step_cfg = build_step_config(cfg, "video", "05_dedup")
         assert "timeout_per_min" not in step_cfg["step"]
         assert "timeout_max_sec" not in step_cfg["step"]
 

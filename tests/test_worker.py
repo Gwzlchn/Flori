@@ -1398,7 +1398,7 @@ class TestAITaskExecution:
 
 
 class TestComputeEffectiveTimeout:
-    """长集 whisper 超时随媒体时长伸缩(纯函数)。"""
+    """媒体步骤超时随来源时长伸缩(纯函数)。"""
 
     def test_no_per_min_returns_base(self):
         assert compute_effective_timeout(1800, None, 6000) == 1800
@@ -1422,6 +1422,12 @@ class TestComputeEffectiveTimeout:
     def test_cap_clamps(self):
         # 10h * 90 = 54000,但 cap=21600,返回 21600.
         assert compute_effective_timeout(1800, 90, 10 * 3600, 21600) == 21600
+
+    def test_long_video_scene_uses_duration_budget(self):
+        assert compute_effective_timeout(600, 12, 6979.9, 7200) == 1404
+
+    def test_short_video_scene_keeps_base_budget(self):
+        assert compute_effective_timeout(600, 12, 20 * 60, 7200) == 600
 
 
 class TestReadMediaDuration:

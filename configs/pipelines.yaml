@@ -96,6 +96,10 @@ video:
       image: flori/step-heavy
       pool: cpu
       needs: ["01_download"]
+      # AdaptiveDetector 逐帧扫描,长视频需要随时长放大执行窗口。短于 50 分钟仍使用 600 秒基线。
+      timeout: 600
+      timeout_per_min: 12
+      timeout_max_sec: 7200
       retry: 2
       outputs: ["intermediate/scenes.json"]
 
