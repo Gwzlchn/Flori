@@ -181,12 +181,13 @@ class AIInvocation:
         step_exec_id = os.environ.get(
             "STEP_EXEC_ID", f"{self.job_dir.name}:{self.step_name}",
         )
+        job_id = os.environ.get("STEP_JOB_ID", self.job_dir.name)
         record_usage_to_file(
             AIUsage(
                 exec_id=f"{step_exec_id}:{self.call_index}",
                 provider=response.provider,
                 model=response.model,
-                job_id=self.job_dir.name,
+                job_id=job_id,
                 step=self.step_name,
                 input_tokens=response.input_tokens,
                 output_tokens=response.output_tokens,
@@ -446,7 +447,7 @@ class AIInvocation:
             attempts, tier_used = (getattr(error, "attempts", []) or []), None
         content_type = job_meta.get("content_type") or config.get("content_type")
         return {
-            "job_id": self.job_dir.name,
+            "job_id": os.environ.get("STEP_JOB_ID", self.job_dir.name),
             "step": self.step_name,
             "content_type": content_type,
             "pipeline": content_type,

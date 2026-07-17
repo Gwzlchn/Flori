@@ -9,6 +9,7 @@ from . import v0004_study_suggestions as migration_v4
 from . import v0005_canonical_evidence as migration_v5
 from . import v0006_concept_definition_history as migration_v6
 from . import v0007_unified_document as migration_v7
+from . import v0008_multipart_jobs as migration_v8
 from .runner import Migration
 
 
@@ -63,5 +64,12 @@ def migration_steps() -> tuple[Migration, ...]:
             payload=migration_v7.source_payload(),
             apply=migration_v7.apply,
             validate=migration_v7.validate,
+        ),
+        Migration(
+            version=migration_v8.VERSION,
+            name=migration_v8.NAME,
+            payload=migration_v8.source_payload(),
+            apply=migration_v8.apply,
+            validate=migration_v8.validate,
         ),
     )

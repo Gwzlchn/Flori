@@ -110,8 +110,8 @@ async def test_two_apps_compete_for_one_shared_job_quota(
     ]
     try:
         responses = await asyncio.gather(
-            clients[0].post("/api/jobs", json={"url": "BV1xx411c7mD"}),
-            clients[1].post("/api/jobs", json={"url": "BV1xx411c7mE"}),
+            clients[0].post("/api/jobs", json={"content_type": "video", "parts": [{"url": "BV1xx411c7mD"}]}),
+            clients[1].post("/api/jobs", json={"content_type": "video", "parts": [{"url": "BV1xx411c7mE"}]}),
         )
     finally:
         await asyncio.gather(*(client.aclose() for client in clients))
@@ -137,7 +137,7 @@ async def test_real_redis_wrongtype_rate_key_is_stable_unavailable(
         transport=ASGITransport(app=app), base_url="http://test",
     ) as client:
         response = await client.post(
-            "/api/jobs", json={"url": "BV1xx411c7mD"},
+            "/api/jobs", json={"content_type": "video", "parts": [{"url": "BV1xx411c7mD"}]},
             headers={"Authorization": "Bearer integration-secret"},
         )
 

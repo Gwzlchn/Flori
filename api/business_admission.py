@@ -65,6 +65,7 @@ async def ensure_job_workers(
     smart_note: bool | None = None,
     mechanical_only: bool = False,
     document_kind: str | None = None,
+    allow_waiting: bool = False,
 ) -> None:
     pipeline = pipeline_for_content_type(content_type)
     try:
@@ -87,7 +88,7 @@ async def ensure_job_workers(
         raise BusinessAdmissionError(
             503, "unavailable", "worker availability check unavailable",
         ) from exc
-    if not covered:
+    if not covered and not allow_waiting:
         raise BusinessAdmissionError(
             503, "no_workers", "no workers can execute the requested pipeline",
         )
@@ -98,6 +99,14 @@ def _content_type_from_create(
 ) -> tuple[str | None, str, str | None, str | None] | None:
     url = payload.get("url")
     content_type = payload.get("content_type")
+    if content_type == "video":
+        parts = payload.get("parts")
+        if not isinstance(parts, list) or not parts:
+            return None
+        first = parts[0]
+        if not isinstance(first, dict) or not isinstance(first.get("url"), str):
+            return None
+        url = first["url"]
     if url is not None and not isinstance(url, str):
         return None
     if content_type is not None and not isinstance(content_type, str):
@@ -162,6 +171,10 @@ class JobAdmissionRoute(APIRoute):
                     raise BusinessAdmissionError(
                         422, "invalid_request", "content_type query is required",
                     )
+                if content_type == "video":
+                    raise BusinessAdmissionError(
+                        422, "invalid_request", "video upload is replaced by parts[]",
+                    )
                 try:
                     route = resolve_job_route(
                         "upload", content_type, document_kind=document_kind,
@@ -175,6 +188,7 @@ class JobAdmissionRoute(APIRoute):
                     content_type=route.content_type, source="upload", url=None,
                     document_kind=route.document_kind,
                     mechanical_only=mechanical_only,
+                    allow_waiting=route.content_type == "video",
                 )
             else:
                 try:
@@ -206,6 +220,7 @@ class JobAdmissionRoute(APIRoute):
                             smart_note=payload.get("smart_note") if isinstance(payload.get("smart_note"), bool) else None,
                             mechanical_only=payload.get("mechanical_only", False) is True,
                             document_kind=route.document_kind,
+                            allow_waiting=route.content_type == "video",
                         )
             return await original(request)
 

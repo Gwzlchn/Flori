@@ -6,7 +6,7 @@ import type { AiLogCall, AiLogsResponse } from '../../types'
 import { Check, X, Copy, ChevronRight } from 'lucide-vue-next'
 
 // 只读:展示该 job 某 AI 步当时的完整 AI 审计日志(每次 LLM 调用一条)。改 prompt 去设置页。
-const props = defineProps<{ jobId: string; step: string }>()
+const props = defineProps<{ jobId: string; step: string; partId?: string | null }>()
 const api = useApi()
 
 const calls = ref<AiLogCall[]>([])
@@ -17,8 +17,9 @@ async function load() {
   if (!props.step) { calls.value = []; return }
   loading.value = true; err.value = ''
   try {
+    const partQuery = props.partId ? `&part_id=${encodeURIComponent(props.partId)}` : ''
     const r = await api.get<AiLogsResponse>(
-      `/api/jobs/${props.jobId}/ai-logs?step=${encodeURIComponent(props.step)}`)
+      `/api/jobs/${props.jobId}/ai-logs?step=${encodeURIComponent(props.step)}${partQuery}`)
     calls.value = (r.steps || []).find(s => s.step === props.step)?.calls || []
   } catch (e: any) {
     err.value = e?.message || '加载失败'; calls.value = []
@@ -26,7 +27,7 @@ async function load() {
 }
 
 onMounted(load)
-watch(() => props.step, load)
+watch(() => [props.step, props.partId], load)
 
 const fmtCost = (v?: number) => `$${(v ?? 0).toFixed(4)}`
 const num = (v?: number) => (v ?? 0).toLocaleString()

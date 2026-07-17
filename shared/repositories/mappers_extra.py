@@ -245,6 +245,7 @@ class DatabaseRowMappersExtra:
         return Step(
             job_id=row["job_id"],
             name=row["step"],
+            scope_key=row["scope_key"],
             status=StepStatus(row["status"]),
             pool=row["pool"],
             input_hash=row["input_hash"],

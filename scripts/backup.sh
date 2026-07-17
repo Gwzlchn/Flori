@@ -23,6 +23,7 @@ MINIO_DATA_DIR="${MINIO_DATA_DIR:-}"
 MINIO_VOLUME="${MINIO_VOLUME:-${COMPOSE_PROJECT}_minio-data}"
 MINIO_CONTAINER="${MINIO_CONTAINER-flori-minio}"
 MINIO_REQUIRED="${MINIO_REQUIRED:-auto}"
+FLORI_BACKUP_SOURCE_MOUNT_MODE="${FLORI_BACKUP_SOURCE_MOUNT_MODE:-ro}"
 FLORI_CONFIG_DIR="${FLORI_CONFIG_DIR:-$REPO/configs}"
 FLORI_SCHEMA_MANIFEST="${FLORI_SCHEMA_MANIFEST:-$REPO/shared/migrations/manifest.json}"
 FLORI_DR_IMAGE="${FLORI_DR_IMAGE:-python:3.11-slim}"
@@ -66,6 +67,7 @@ flori-backup-<generation>.tar.gz、.sha256 与机器可读 result JSON。任一�
   REDIS_DATA_DIR / REDIS_VOLUME / REDIS_CONTAINER
   MINIO_DATA_DIR / MINIO_VOLUME / MINIO_REQUIRED=auto|0|1
   FLORI_CONFIG_DIR / FLORI_SCHEMA_MANIFEST / FLORI_DR_IMAGE
+  FLORI_BACKUP_SOURCE_MOUNT_MODE=ro|rw（默认 ro；仅隔离副本需要 SQLite sidecar 时用 rw）
   BACKUP_GENERATION / BACKUP_RESULT_FILE
   --data-exclude / --minio-exclude 可重复,分别作用于对应资产;排除项写入 manifest
   FLORI_REDIS_IMAGE / REDIS_MATERIALIZE_TIMEOUT
@@ -168,6 +170,10 @@ esac
 case "$REDIS_MATERIALIZE_TIMEOUT" in
   *[!0-9]*|'') echo "错误: REDIS_MATERIALIZE_TIMEOUT 必须是非负整数" >&2; exit 1 ;;
 esac
+case "$FLORI_BACKUP_SOURCE_MOUNT_MODE" in
+  ro|rw) ;;
+  *) echo "错误: FLORI_BACKUP_SOURCE_MOUNT_MODE 必须是 ro 或 rw" >&2; exit 1 ;;
+esac
 ARCHIVE_NAME="flori-backup-${BACKUP_GENERATION}.tar.gz"
 ARCHIVE="$BACKUP_DIR/$ARCHIVE_NAME"
 [ ! -e "$ARCHIVE" ] || { echo "错误: 备份已存在，拒绝覆盖: $ARCHIVE" >&2; exit 1; }
@@ -202,14 +208,14 @@ done
 
 if [ -n "$FLORI_DATA_DIR" ]; then
   FLORI_DATA_DIR="$(absolute_existing_dir "$FLORI_DATA_DIR")"
-  DOCKER_ARGS+=(-v "$FLORI_DATA_DIR:/source-data:ro")
+  DOCKER_ARGS+=(-v "$FLORI_DATA_DIR:/source-data:$FLORI_BACKUP_SOURCE_MOUNT_MODE")
   DATA_LABEL="bind"
 else
   docker volume inspect "$FLORI_DATA_VOLUME" >/dev/null 2>&1 || {
     echo "错误: 数据卷不存在: $FLORI_DATA_VOLUME" >&2
     exit 1
   }
-  DOCKER_ARGS+=(-v "$FLORI_DATA_VOLUME:/source-data:ro")
+  DOCKER_ARGS+=(-v "$FLORI_DATA_VOLUME:/source-data:$FLORI_BACKUP_SOURCE_MOUNT_MODE")
   DATA_LABEL="volume"
 fi
 
@@ -290,11 +296,11 @@ CREATE_ARGS+=(--redis-mode "$REDIS_MODE")
 MINIO_INCLUDED=0
 if [ -n "$MINIO_DATA_DIR" ]; then
   MINIO_DATA_DIR="$(absolute_existing_dir "$MINIO_DATA_DIR")"
-  DOCKER_ARGS+=(-v "$MINIO_DATA_DIR:/source-minio:ro")
+  DOCKER_ARGS+=(-v "$MINIO_DATA_DIR:/source-minio:$FLORI_BACKUP_SOURCE_MOUNT_MODE")
   CREATE_ARGS+=(--minio /source-minio)
   MINIO_INCLUDED=1
 elif docker volume inspect "$MINIO_VOLUME" >/dev/null 2>&1; then
-  DOCKER_ARGS+=(-v "$MINIO_VOLUME:/source-minio:ro")
+  DOCKER_ARGS+=(-v "$MINIO_VOLUME:/source-minio:$FLORI_BACKUP_SOURCE_MOUNT_MODE")
   CREATE_ARGS+=(--minio /source-minio)
   MINIO_INCLUDED=1
 elif [ "$MINIO_REQUIRED" = "1" ]; then

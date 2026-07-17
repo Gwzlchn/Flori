@@ -50,6 +50,15 @@ def test_catalog_exposes_youtube_playlist():
     assert playlist["home_url_template"] == "https://www.youtube.com/playlist?list={source_id}"
 
 
+def test_video_extensions_remain_internal_but_are_not_public_uploads():
+    assert content_type_for_filename("lesson.mp4") == "video"
+    video = next(
+        item for item in source_catalog()["content_types"]
+        if item["type"] == "video"
+    )
+    assert video["upload_extensions"] == []
+
+
 @pytest.mark.parametrize(
     ("filename", "content_type"),
     [

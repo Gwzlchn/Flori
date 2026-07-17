@@ -38,6 +38,16 @@ async function mountPanel(step = '11_smart') {
 }
 
 describe('AiLogPanel', () => {
+  it('Part审计使用显式part_id查询', async () => {
+    mockLogs([callFixture()])
+    const w = mount(AiLogPanel, { props: { jobId: 'j1', step: '11_smart', partId: 'pt_a' } })
+    await flushPromises()
+    expect(get).toHaveBeenCalledWith(
+      '/api/jobs/j1/ai-logs?step=11_smart&part_id=pt_a',
+    )
+    expect(w.text()).toContain('1 次调用概览')
+  })
+
   it('先渲染折叠的调用概览,逐次展开后审计字段仍默认折叠', async () => {
     mockLogs([callFixture()])
     const w = await mountPanel()

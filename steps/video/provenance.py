@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -29,8 +30,24 @@ SOURCE_MANIFEST_PATH = "intermediate/source_segments.json"
 _TIMESTAMP_LINE_RE = re.compile(r"^\[(\d+):(\d{2})\]\s+(.+)$")
 
 
-def build_video_source_manifest(job_dir: Path, entries: Sequence[Any]) -> dict[str, Any] | None:
+def _job_id(job_dir: Path) -> str:
+    return os.environ.get("STEP_JOB_ID", job_dir.name)
+
+
+def _part_id() -> str | None:
+    return os.environ.get("STEP_PART_ID") or None
+
+
+def build_video_source_manifest(
+    job_dir: Path,
+    entries: Sequence[Any],
+    *,
+    job_id: str | None = None,
+    part_id: str | None = None,
+) -> dict[str, Any] | None:
     """用实际视频字节、字幕范围和 OCR 帧坐标构建来源清单。"""
+    resolved_job_id = job_id or _job_id(job_dir)
+    resolved_part_id = part_id or _part_id()
     media_path = job_dir / "input" / "source.mp4"
     duration_ms = _measured_duration_ms(job_dir)
     if not media_path.is_file() or duration_ms is None:
@@ -48,8 +65,11 @@ def build_video_source_manifest(job_dir: Path, entries: Sequence[Any]) -> dict[s
         start_ms = _seconds_to_ms(entry.start_sec, "subtitle start")
         end_ms = _seconds_to_ms(entry.end_sec, "subtitle end")
         locator = {"kind": "media", "start_ms": start_ms, "end_ms": end_ms}
+        if resolved_part_id:
+            locator["part_id"] = resolved_part_id
+        source_id = f"part:{resolved_part_id}" if resolved_part_id else "video"
         segment_id = make_segment_id(
-            "video", start=None, end=None, section="subtitle", locator=locator,
+            source_id, start=None, end=None, section="subtitle", locator=locator,
         )
         actual = actual_entries[index] if index < len(actual_entries) else None
         support_text = None
@@ -61,7 +81,7 @@ def build_video_source_manifest(job_dir: Path, entries: Sequence[Any]) -> dict[s
             support_text = bounded_support_text(actual.text)
         by_id[segment_id] = {
             "segment_id": segment_id,
-            "source_id": "video",
+            "source_id": source_id,
             "start": None,
             "end": None,
             "section": "subtitle",
@@ -79,16 +99,18 @@ def build_video_source_manifest(job_dir: Path, entries: Sequence[Any]) -> dict[s
             ) else None),
         }
 
-    for segment in video_ocr_source_segments(job_dir, duration_ms=duration_ms):
+    for segment in video_ocr_source_segments(
+        job_dir, duration_ms=duration_ms, part_id=resolved_part_id,
+    ):
         by_id[segment["segment_id"]] = segment
     if not by_id:
         return None
 
     return build_source_manifest(
-        job_id=job_dir.name,
+        job_id=resolved_job_id,
         pipeline="video",
         source_artifacts=[{
-            "source_id": "video",
+            "source_id": f"part:{resolved_part_id}" if resolved_part_id else "video",
             "path": "input/source.mp4",
             "sha256": _sha256_file(media_path),
             "revision": None,
@@ -100,7 +122,7 @@ def build_video_source_manifest(job_dir: Path, entries: Sequence[Any]) -> dict[s
 
 
 def video_ocr_source_segments(
-    job_dir: Path, *, duration_ms: int,
+    job_dir: Path, *, duration_ms: int, part_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """从真实 OCR 帧与框生成 image locator;不完整条目不进入来源清单。"""
     ocr_path = job_dir / "intermediate" / "ocr.json"
@@ -163,13 +185,15 @@ def video_ocr_source_segments(
                 "end_ms": time_range[1],
                 "page": None,
             }
+            resolved_part_id = part_id or _part_id()
+            source_id = f"part:{resolved_part_id}" if resolved_part_id else "video"
             segment_id = make_segment_id(
-                "video", start=None, end=None, section="ocr", locator=locator,
+                source_id, start=None, end=None, section="ocr", locator=locator,
             )
             support_text = bounded_support_text(text)
             result[segment_id] = {
                 "segment_id": segment_id,
-                "source_id": "video",
+                "source_id": source_id,
                 "start": None,
                 "end": None,
                 "section": "ocr",
@@ -211,9 +235,14 @@ def mechanical_ocr_provenance_segments(
         filename = entry.get("filename")
         if type(filename) is not str:
             continue
-        asset_path = f"assets/{filename}"
+        rendered_asset_path = f"assets/{filename}"
+        source_asset_path = rendered_asset_path
+        part_id = entry.get("part_id")
+        part_filename = entry.get("part_filename")
+        if type(part_id) is str and type(part_filename) is str:
+            source_asset_path = f"parts/{part_id}/assets/{part_filename}"
         rendered_blocks = re.findall(
-            rf"\]\({re.escape(asset_path)}\)\n\n> OCR：([^\n]+)",
+            rf"\]\({re.escape(rendered_asset_path)}\)\n\n> OCR：([^\n]+)",
             rendered_markdown,
         )
         if len(rendered_blocks) != 1:
@@ -230,7 +259,7 @@ def mechanical_ocr_provenance_segments(
             if type(text) is not str or bbox is None:
                 continue
             anchor = " ".join(text.split())
-            ref = refs.get((asset_path, _canonical_bbox(bbox)))
+            ref = refs.get((source_asset_path, _canonical_bbox(bbox)))
             if (
                 not anchor
                 or anchor not in rendered_ocr
@@ -261,18 +290,22 @@ def load_video_source_manifest(job_dir: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     value = validate_source_manifest(json.loads(path.read_text(encoding="utf-8")))
-    if value["job_id"] != job_dir.name or value["pipeline"] != "video":
+    if value["job_id"] != _job_id(job_dir) or value["pipeline"] != "video":
         raise ValueError("video source manifest belongs to another job or pipeline")
     return value
 
 
-def ensure_video_source_manifest(job_dir: Path) -> dict[str, Any] | None:
+def ensure_video_source_manifest(
+    job_dir: Path, *, job_id: str | None = None, part_id: str | None = None,
+) -> dict[str, Any] | None:
     existing = load_video_source_manifest(job_dir)
     if existing is not None:
         return existing
     subtitle, _ = pick_native_srt(job_dir / "input")
     entries = load_srt(subtitle) if subtitle else []
-    manifest = build_video_source_manifest(job_dir, entries)
+    manifest = build_video_source_manifest(
+        job_dir, entries, job_id=job_id, part_id=part_id,
+    )
     if manifest is not None:
         write_video_source_manifest(job_dir, manifest)
     return manifest
@@ -428,7 +461,7 @@ def persist_video_note_provenance(
     note_bytes = note_path.read_bytes()
     normalized_body = markdown_to_index_text(note_bytes.decode("utf-8"))
     manifest = build_provenance_manifest(
-        job_id=job_dir.name,
+        job_id=_job_id(job_dir),
         note_type=note_type,
         note_artifact=note_artifact,
         note_bytes=note_bytes,
@@ -457,7 +490,10 @@ def _refs_by_range(source_manifest: Mapping[str, Any]) -> dict[tuple[int, int], 
         locator = item["locator"]
         if locator["kind"] != "media":
             continue
-        key = (locator["start_ms"], locator["end_ms"])
+        key = (
+            locator.get("timeline_start_ms", locator["start_ms"]),
+            locator.get("timeline_end_ms", locator["end_ms"]),
+        )
         if key in refs:
             raise ValueError("video source manifest has duplicate media ranges")
         refs[key] = item["segment_id"]
@@ -469,7 +505,8 @@ def _refs_by_start_second(source_manifest: Mapping[str, Any]) -> dict[int, list[
     for item in source_manifest["segments"]:
         locator = item["locator"]
         if locator["kind"] == "media":
-            refs.setdefault(locator["start_ms"] // 1000, []).append(item["segment_id"])
+            start_ms = locator.get("timeline_start_ms", locator["start_ms"])
+            refs.setdefault(start_ms // 1000, []).append(item["segment_id"])
     return refs
 
 

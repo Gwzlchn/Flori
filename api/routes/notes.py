@@ -29,6 +29,7 @@ from shared.storage import (
     read_file_bounded,
     read_verification_artifact_bounded,
 )
+from shared.step_scope import JOB_SCOPE, part_scope
 from api.deps import get_config, get_db, get_storage, validate_path_segment, verify_token
 from api.services.document_reader import (
     DOCUMENT_HTML_MAX_BYTES,
@@ -298,37 +299,65 @@ async def list_artifacts(
     sizes = await storage.list_file_sizes(job_id)
     files = [f for f in await storage.list_files(job_id) if not _artifact_hidden(f)]
     steps = config.pipelines.get(job.pipeline, {}).get("steps", [])
+    parts = await asyncio.to_thread(db.get_parts, job_id)
     assigned: set[str] = set()
-    by_step: dict[str, list[str]] = {}
+    by_step: dict[tuple[str, str], list[str]] = {}
 
-    def _claim(step_name: str, f: str) -> None:
-        by_step.setdefault(step_name, []).append(f)
+    def _claim(scope_key: str, step_name: str, f: str) -> None:
+        by_step.setdefault((scope_key, step_name), []).append(f)
         assigned.add(f)
+
+    scopes: list[tuple[str, str, str | None]] = [(JOB_SCOPE, "", None)]
+    scopes.extend((part_scope(part.id), f"parts/{part.id}/", part.id) for part in parts)
+
+    def _steps_for(scope_key: str) -> list[dict]:
+        expected = "job" if scope_key == JOB_SCOPE else "part"
+        return [step for step in steps if step.get("scope", "job") == expected]
 
     # 第一轮:精确路径(无通配)的 outputs 优先认领,避免被别的步的宽 glob 抢走——
     # 例如 02_whisper 的 input/subtitle.srt 若被 01_download 的 input/*.srt 抢走,字幕会错归「下载」。
-    for s in steps:
-        for p in (s.get("outputs") or []):
-            if not any(c in p for c in "*?[") and p in files and p not in assigned:
-                _claim(s["name"], p)
+    for scope_key, prefix, _ in scopes:
+        for s in _steps_for(scope_key):
+            for p in (s.get("outputs") or []):
+                full_path = f"{prefix}{p}"
+                if (
+                    not any(c in p for c in "*?[")
+                    and full_path in files
+                    and full_path not in assigned
+                ):
+                    _claim(scope_key, s["name"], full_path)
     # 第二轮:glob 匹配,按步顺序认领剩余文件。
-    for s in steps:
-        pats = s.get("outputs") or []
-        for f in files:
-            if f not in assigned and any(fnmatch.fnmatch(f, p) for p in pats):
-                _claim(s["name"], f)
+    for scope_key, prefix, _ in scopes:
+        for s in _steps_for(scope_key):
+            pats = s.get("outputs") or []
+            for f in files:
+                if f in assigned or not f.startswith(prefix):
+                    continue
+                relative = f[len(prefix):]
+                if scope_key == JOB_SCOPE and relative.startswith("parts/"):
+                    continue
+                if any(fnmatch.fnmatch(relative, p) for p in pats):
+                    _claim(scope_key, s["name"], f)
 
     groups = []
     total_bytes = 0
-    for s in steps:
-        matched = sorted(by_step.get(s["name"], []))
-        if matched:
-            step_bytes = sum(sizes.get(f, 0) for f in matched)
-            total_bytes += step_bytes
-            groups.append({"step": s["name"], "label": s.get("label") or s["name"],
-                           "total_bytes": step_bytes,
-                           "files": [{"path": f, "kind": _artifact_kind(f),
-                                      "size": sizes.get(f, 0)} for f in matched]})
+    for scope_key, _, part_id in scopes:
+        for s in _steps_for(scope_key):
+            matched = sorted(by_step.get((scope_key, s["name"]), []))
+            if matched:
+                step_bytes = sum(sizes.get(f, 0) for f in matched)
+                total_bytes += step_bytes
+                groups.append({
+                    "scope_key": scope_key,
+                    "part_id": part_id,
+                    "step": s["name"],
+                    "label": s.get("label") or s["name"],
+                    "total_bytes": step_bytes,
+                    "files": [
+                        {"path": f, "kind": _artifact_kind(f), "size": sizes.get(f, 0)}
+                        for f in matched
+                    ],
+                })
     # total_bytes:本 job 全部已分组产物体积合计,供前端汇总产物总体积。
     return {"groups": groups, "total_bytes": total_bytes}
 

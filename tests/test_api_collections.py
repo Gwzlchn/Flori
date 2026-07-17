@@ -29,6 +29,13 @@ async def _create(client, **kwargs):
     return resp.json()
 
 
+def _video_request(url: str, collection_id: str | None = None) -> dict:
+    payload = {"content_type": "video", "parts": [{"url": url}]}
+    if collection_id is not None:
+        payload["collection_id"] = collection_id
+    return payload
+
+
 class TestCreateCollection:
     @pytest.mark.asyncio
     async def test_create_minimal(self, client):
@@ -294,7 +301,7 @@ class TestDeleteCollection:
         """删集合=解绑:job 保留但 collection_id 置 NULL。"""
         cid = (await _create(client))["id"]
         job_resp = await client.post(
-            "/api/jobs", json={"url": "BV1xx411c7mD", "collection_id": cid},
+            "/api/jobs", json=_video_request("BV1xx411c7mD", cid),
         )
         job_id = job_resp.json()["job_id"]
 
@@ -314,10 +321,10 @@ class TestJobCount:
     async def test_count_increments_on_job_create(self, client):
         cid = (await _create(client))["id"]
         await client.post(
-            "/api/jobs", json={"url": "BV1xx411c7mD", "collection_id": cid},
+            "/api/jobs", json=_video_request("BV1xx411c7mD", cid),
         )
         await client.post(
-            "/api/jobs", json={"url": "BV2yy411c7mD", "collection_id": cid},
+            "/api/jobs", json=_video_request("BV2yy411c7mD", cid),
         )
         resp = await client.get(f"/api/collections/{cid}")
         assert resp.json()["job_count"] == 2
@@ -326,7 +333,7 @@ class TestJobCount:
     async def test_count_decrements_on_job_delete(self, client):
         cid = (await _create(client))["id"]
         job_resp = await client.post(
-            "/api/jobs", json={"url": "BV1xx411c7mD", "collection_id": cid},
+            "/api/jobs", json=_video_request("BV1xx411c7mD", cid),
         )
         job_id = job_resp.json()["job_id"]
         assert (await client.get(f"/api/collections/{cid}")).json()["job_count"] == 1
@@ -452,10 +459,10 @@ class TestListCollectionJobs:
     async def test_list_jobs_in_collection(self, client):
         cid = (await _create(client))["id"]
         await client.post(
-            "/api/jobs", json={"url": "BV1xx411c7mD", "collection_id": cid},
+            "/api/jobs", json=_video_request("BV1xx411c7mD", cid),
         )
         # 不属于该集合的 job 不应出现。
-        await client.post("/api/jobs", json={"url": "BV9zz411c7mD"})
+        await client.post("/api/jobs", json=_video_request("BV9zz411c7mD"))
 
         resp = await client.get(f"/api/collections/{cid}/jobs")
         assert resp.status_code == 200
@@ -469,7 +476,7 @@ class TestListCollectionJobs:
         # 3 个不同 url = 3 个不同 lineage:同 url 会归一组只显 current。
         for bv in ("BV1xx411c7mD", "BV2yy422d8nE", "BV3zz533e9oF"):
             await client.post(
-                "/api/jobs", json={"url": bv, "collection_id": cid},
+                "/api/jobs", json=_video_request(bv, cid),
             )
         resp = await client.get(
             f"/api/collections/{cid}/jobs", params={"limit": 2, "offset": 0},

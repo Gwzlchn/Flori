@@ -102,7 +102,9 @@ def test_v7_migrates_jobs_steps_fts_occurrences_and_prompt_history(tmp_path):
         )
     }
 
-    assert run_migrations(database._conn, database._migration_steps()) == 7
+    assert run_migrations(
+        database._conn, database._migration_steps(), target_version=7
+    ) == 7
     after = {
         table: database._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         for table in before

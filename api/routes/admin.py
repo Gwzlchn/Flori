@@ -986,7 +986,8 @@ async def list_pipelines(
                  "needs": s.get("depends_on") or [],
                  "is_ai": s.get("pool") == "ai",
                  "prompt_locked": bool(s.get("prompt_locked")),
-                 "has_override": (name, s.get("name")) in overridden}
+                 "has_override": (name, s.get("name")) in overridden,
+                 "scope": s.get("scope", "job")}
                 for s in steps
             ],
         })

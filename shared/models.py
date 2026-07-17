@@ -84,6 +84,7 @@ class Job:
 class Step:
     job_id: str
     name: str
+    scope_key: str = "job"
     status: StepStatus = StepStatus.WAITING
     pool: str = ""
     input_hash: str | None = None
@@ -94,6 +95,22 @@ class Step:
     meta: dict = field(default_factory=dict)
     error: str | None = None
     retries: int = 0
+
+
+@dataclass
+class JobPart:
+    id: str
+    job_id: str
+    part_index: int
+    title: str | None = None
+    source_url: str | None = None
+    source_ref: str | None = None
+    source_digest: str | None = None
+    size_bytes: int | None = None
+    duration_ms: int | None = None
+    meta: dict = field(default_factory=dict)
+    created_at: datetime = field(default_factory=_utcnow)
+    updated_at: datetime = field(default_factory=_utcnow)
 
 
 @dataclass

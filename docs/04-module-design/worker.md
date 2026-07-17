@@ -300,6 +300,11 @@ class StorageBackend:
         ...
 ```
 
+`step` 参数是完整执行键。Part task 解析后把步骤工作目录切到 `parts/{part_id}/`，步骤进程看到的
+`--job-dir` 仍是一个自洽根；Job task 在根目录执行，fan-in 可读全部 Part。三种 backend 共用强制范围：
+Part 只读写自己的前缀，Job 可读全部但禁止写 Part 前缀。Gateway API 重复核验租约 scope，远端 Worker
+不能通过伪造相对路径越权。
+
 ### 三种实现（`shared/storage.py`）
 
 ```python

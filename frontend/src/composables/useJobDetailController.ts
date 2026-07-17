@@ -25,6 +25,7 @@ export function useJobDetailController(options: JobDetailControllerOptions = {})
   const loadError = ref('')
   const requestEpoch = ref(0)
   const ws = useJobWs(jobId as ComputedRef<string>)
+  const parts = computed(() => ws.parts?.value ?? job.value?.parts ?? [])
   const jobStatus = ref('processing')
   let activeRequest: AbortController | null = null
   let pollTimer: ReturnType<typeof setInterval> | null = null
@@ -64,6 +65,7 @@ export function useJobDetailController(options: JobDetailControllerOptions = {})
       job.value = detail
       mergeStatus(detail.status)
       ws.setInitialSteps(detail.steps)
+      ws.setInitialParts?.(detail.parts || [])
       global.setCrumbs([
         { t: '知识库', to: '/' },
         ...(detail.domain ? [{ t: detail.domain, to: `/kb/${encodeURIComponent(detail.domain)}` }] : []),
@@ -115,6 +117,7 @@ export function useJobDetailController(options: JobDetailControllerOptions = {})
     loadError,
     requestEpoch,
     steps: ws.steps,
+    parts,
     connected: ws.connected,
     jobStatus,
     fetchDetail,

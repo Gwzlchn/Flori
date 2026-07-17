@@ -73,8 +73,9 @@ async def _seed_artifacts(
 
 async def _complete_real_pipeline(scheduler, redis, db, config, job_id: str) -> None:
     """按真实归一化步骤表发送完成事件;已由 rules 跳过的步骤保持 skipped."""
-    for step in config.pipelines[db.get_job(job_id).pipeline]["steps"]:
-        name = step["name"]
+    steps = await scheduler._get_job_pipeline_steps(job_id)
+    assert steps is not None
+    for name in steps:
         status = await redis.get_step_status(job_id, name)
         if status == "skipped":
             continue

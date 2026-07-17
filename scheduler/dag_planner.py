@@ -28,7 +28,9 @@ class DagPlanner:
         pipeline = await self.owner.redis.get_job_pipeline(job_id)
         if not pipeline:
             return
-        steps = self.owner._get_pipeline_steps(pipeline)
+        steps = await self.owner._get_job_pipeline_steps(job_id)
+        if not steps:
+            return
         statuses = await self.owner.redis.get_all_step_statuses(job_id)
         info = await self.owner.redis.get_job_info(job_id)
         try:
@@ -107,7 +109,7 @@ class DagPlanner:
             if all_remaining_ready:
                 pipeline = await self.owner.redis.get_job_pipeline(job_id)
                 if pipeline:
-                    steps_cfg = self.owner._get_pipeline_steps(pipeline)
+                    steps_cfg = await self.owner._get_job_pipeline_steps(job_id) or {}
                     pool_ok: dict[str, bool] = {}  # 同 pool 只查一次,免逐步重复扫 worker
                     for step_name in not_done:
                         pool = steps_cfg.get(step_name, {}).get("pool", "")
@@ -172,7 +174,8 @@ class DagPlanner:
         pipeline = await self.owner.redis.get_job_pipeline(job_id)
         if not pipeline:
             return 0
-        steps_config = self.owner.config.pipelines.get(pipeline, {}).get("steps", [])
+        steps = await self.owner._get_job_pipeline_steps(job_id) or {}
+        steps_config = list(steps.values())
         statuses = await self.owner.redis.get_all_step_statuses(job_id)
         progress = self.owner._calc_progress(steps_config, statuses)
         await asyncio.to_thread(

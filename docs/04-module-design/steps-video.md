@@ -6,25 +6,20 @@
 
 ```mermaid
 graph LR
-    DL["01_download"] --> Scene["03_scene"]
-    Scene --> Frames["04_frames"]
-    Frames --> Dedup["05_dedup"]
-    Dedup --> OCR["06_ocr"]
-
-    DL --> Danmaku["07_danmaku"]
-    DL --> Punctuate["08_punctuate"]
-    DL --> Whisper["02_whisper<br/>(无字幕时)"]
-    Whisper --> Punctuate
-
-    OCR --> Mechanical["09_mechanical"]
-    Danmaku --> Mechanical
-    Punctuate --> Mechanical
-
-    Mechanical --> Smart["10_smart"]
-    Smart --> Review["11_review"]
+    subgraph Part["每个 Part 独立展开"]
+      DL["01_download"] --> Scene["03_scene"] --> Frames["04_frames"] --> Dedup["05_dedup"] --> OCR["06_ocr"]
+      DL --> Whisper["02_whisper"] --> Punctuate["08_punctuate"]
+      OCR --> Punctuate
+      DL --> Danmaku["07_danmaku"]
+    end
+    Punctuate --> Merge["09_merge_parts"]
+    Danmaku --> Merge
+    Merge --> Mechanical["09_mechanical"] --> Evidence["10_evidence"] --> Smart["11_smart"] --> Concepts["12_concepts"] --> Review["12_review"]
 ```
 
-> 步骤编号在每个 pipeline 内独立。当前顶层为 video、document、audio，具体步骤以 `configs/pipelines.yaml` 为准。
+> `01_download..08_punctuate` 是 Part scope，按有序 manifest 并行展开；`09_merge_parts` 是唯一 fan-in，
+> 按 `part_index` 合成 Job 级 transcript、provenance 与全局时间线。其后笔记、概念、评审和索引都只保留
+> Job 语义。具体依赖和 outputs 以 `configs/pipelines.yaml` 为准。
 
 ## Step 01: 下载 (step_01_download.py)
 
@@ -34,7 +29,7 @@ graph LR
 | 依赖 | 无 |
 | 超时 | 10min |
 | 重试 | 3 |
-| 输入 | job.json (url + source) |
+| 输入 | Part `job.json` (url + source) |
 | 输出 | input/source.mp4, input/subtitle.srt, input/danmaku.ass, input/metadata.json |
 
 ### 来源识别
@@ -43,7 +38,6 @@ graph LR
 |------|---------|--------|------|
 | B站 | `bilibili.com` 或 `BV` 开头 | yutto | AI 字幕 |
 | YouTube | `youtube.com` / `youtu.be` | yt-dlp | CC 字幕 |
-| 本地上传 | job.json 有 `upload: true` | 不需要 | 手动/Whisper |
 | 其他 | 兜底 | yt-dlp 通用 | 可能无 |
 
 ### Cookies

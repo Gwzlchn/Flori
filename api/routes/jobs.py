@@ -30,7 +30,7 @@ from shared.ai_routing import (
 )
 from shared.db import Database
 from shared.ids import lineage_key_of as _lineage_key_of
-from shared.models import Job, JobStatus, Step, StepStatus, derive_job_id
+from shared.models import Job, JobPart, JobStatus, Step, StepStatus, derive_job_id
 from shared.redis_client import RedisClient
 from shared.source_detect import detect_source
 from shared.source_registry import (
@@ -41,6 +41,7 @@ from shared.source_registry import (
     resolve_job_route,
 )
 from shared.step_base import def_digest_for, pipeline_digest_for
+from shared.step_scope import execution_step_key, part_id_from_scope, part_scope, stable_part_id
 from shared.storage import (
     ArtifactTooLarge,
     CREDENTIAL_REL,
@@ -444,16 +445,20 @@ async def create_job_core(
     source_position: int | None = None,
     config: AppConfig | None = None,
     defer_submit: bool = False,
+    parts: list[dict] | None = None,
 ) -> Job:
     """建 job 的核心流程(create_job 路由 + upload + 订阅同步共用)。返回 Job。
     upload=(ext, data/stream):源文件先原子发布,其余初始文件失败时整项清理。"""
     style_tags = style_tags or []
-    source = "upload" if upload is not None else detect_source(url or "")
+    if parts and upload is not None:
+        raise HTTPException(422, "video parts do not support upload")
+    route_url = parts[0]["url"] if parts else url
+    source = "upload" if upload is not None else detect_source(route_url or "")
     requested_type = getattr(content_type, "value", content_type)
     requested_kind = getattr(document_kind, "value", document_kind)
     try:
         route = resolve_job_route(
-            source, requested_type or _detect_content_type(url),
+            source, requested_type or _detect_content_type(route_url),
             document_kind=requested_kind,
             allow_internal=(actor == "subscription"),
         )
@@ -471,11 +476,55 @@ async def create_job_core(
         "smart_note": bool(resolved_smart),
         "mechanical_only": bool(mechanical_only),
     }
+    if ctype == "video" and not parts and actor == "subscription" and url:
+        # 订阅枚举仍以单个SourceItem交付;进入领域层后立即归一为单Part,
+        # 不给公开API保留旧的顶层url视频语法。
+        parts = [{"url": url, "title": None}]
 
     # 有意义的 id: jobs_{类别}_{inner}(bili=BV);撞已存在(同 BV 重投/上传随机撞库)加随机后缀。
-    job_id = derive_job_id(url, ctype, source)
-    if await asyncio.to_thread(db.get_job, job_id):
-        job_id = f"{job_id}_{secrets.token_hex(3)}"
+    manifest_digest = None
+    creation_fingerprint = None
+    if ctype == "video":
+        if not parts:
+            raise HTTPException(422, "video jobs require parts[]")
+        normalized_parts = [
+            {"part_index": index, "url": item["url"], "title": item.get("title")}
+            for index, item in enumerate(parts, start=1)
+        ]
+        manifest_bytes = json.dumps(
+            normalized_parts, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+        manifest_digest = f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
+        creation_payload = {
+            "manifest": normalized_parts,
+            "title": title,
+            "domain": domain,
+            "style_tags": sorted(set(style_tags)),
+            "collection_id": collection_id,
+            "smart_note": bool(resolved_smart),
+            "mechanical_only": bool(mechanical_only),
+        }
+        creation_bytes = json.dumps(
+            creation_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+        creation_fingerprint = f"sha256:{hashlib.sha256(creation_bytes).hexdigest()}"
+        job_id = f"jobs_video_{creation_fingerprint.split(':', 1)[1][:20]}"
+        existing = await asyncio.to_thread(db.get_job, job_id)
+        if (
+            existing is not None
+            and existing.source_digest == manifest_digest
+            and (existing.meta or {}).get("creation_fingerprint") == creation_fingerprint
+        ):
+            return existing
+        if existing is not None:
+            raise HTTPException(409, "video creation fingerprint conflicts with existing job")
+        url = None
+    else:
+        if parts:
+            raise HTTPException(422, "parts[] is only valid for video jobs")
+        job_id = derive_job_id(url, ctype, source)
+        if await asyncio.to_thread(db.get_job, job_id):
+            job_id = f"{job_id}_{secrets.token_hex(3)}"
     job_doc = {
         "id": job_id, "url": url, "source": source, "content_type": ctype,
         "document_kind": resolved_kind or None,
@@ -483,6 +532,46 @@ async def create_job_core(
         "domain": domain, "style_tags": style_tags, "created_at": _now_iso(),
         "flags": flags,
     }
+    db_parts: list[JobPart] | None = None
+    if parts:
+        db_parts = []
+        job_doc["parts"] = []
+        job_doc["creation_fingerprint"] = creation_fingerprint
+        for index, item in enumerate(parts, start=1):
+            part_id = stable_part_id(job_id, index)
+            part_source = detect_source(item["url"])
+            try:
+                part_route = resolve_job_route(
+                    part_source,
+                    "video",
+                    allow_internal=(actor == "subscription"),
+                )
+            except SourceRegistryError as exc:
+                raise HTTPException(
+                    422,
+                    f"unsupported video part P{index:02d}: {exc}",
+                ) from exc
+            part_doc = {
+                "job_id": job_id,
+                "part_id": part_id,
+                "part_index": index,
+                "title": item.get("title"),
+                "url": item["url"],
+                "source": part_route.source,
+                "content_type": "video",
+                "domain": domain,
+                "style_tags": style_tags,
+                "flags": flags,
+            }
+            job_doc["parts"].append(part_doc)
+            db_parts.append(JobPart(
+                id=part_id,
+                job_id=job_id,
+                part_index=index,
+                title=item.get("title"),
+                source_url=item["url"],
+                meta={"source": part_route.source},
+            ))
     # prompt 白盒:job 创建时由 api 解析该 pipeline+domain 的 prompt 覆盖(domain 优先于 global),
     # 写进 job.json 随 job 下发;worker 是 pure 进程无 DB,其 step_base 读取注入覆盖作 system prompt。
     overrides = await asyncio.to_thread(
@@ -490,6 +579,8 @@ async def create_job_core(
     )
     if overrides:
         job_doc["prompt_overrides"] = overrides
+        for part_doc in job_doc.get("parts", []):
+            part_doc["prompt_overrides"] = overrides
     initialization_marker: dict | None = None
     try:
         # 源文件先走不可见暂存并原子发布。job.json 随后失败时删除整个 job 前缀,
@@ -533,7 +624,13 @@ async def create_job_core(
             job_id, "job.json",
             json.dumps(job_doc, ensure_ascii=False, indent=2).encode("utf-8"),
         )
-        # SESSDATA 不进 job.json(那是会下发到远端 worker 的通用文档);写入本机侧载凭证文件,
+        for part_doc in job_doc.get("parts", []):
+            await storage.write_file(
+                job_id,
+                f"parts/{part_doc['part_id']}/job.json",
+                json.dumps(part_doc, ensure_ascii=False, indent=2).encode("utf-8"),
+            )
+        # 站点会话凭证不进 job.json(那是会下发到远端 worker 的通用文档);写入本机侧载凭证文件,
         # 由 storage/runner 保证绝不入中心存储、绝不下发远端(见 shared/storage.is_credential_file)。
         if source == "bilibili":
             sessdata = await asyncio.to_thread(_bili_sessdata, db)
@@ -547,6 +644,8 @@ async def create_job_core(
         raise
     # item_id:订阅来源去重键,落 meta 供删除时按 (collection_id, item_id) 精准清 ingested_items(彻底删除)。
     job_meta: dict = {"flags": flags}
+    if creation_fingerprint is not None:
+        job_meta["creation_fingerprint"] = creation_fingerprint
     if item_id:
         job_meta["source_item_id"] = item_id
         job_meta["source_present"] = True
@@ -559,10 +658,10 @@ async def create_job_core(
         id=job_id, content_type=ctype, pipeline=pipeline,
         document_kind=resolved_kind, url=url, title=title,
         domain=domain, source=source, style_tags=style_tags, collection_id=collection_id,
-        meta=job_meta, pipeline_digest=pdigest,
+        meta=job_meta, pipeline_digest=pdigest, source_digest=manifest_digest,
     )
     try:
-        await asyncio.to_thread(db.create_job, job)
+        await asyncio.to_thread(db.create_job, job, db_parts)
     except (Exception, asyncio.CancelledError) as exc:
         await _cleanup_failed_job(storage, job_id, exc)
         raise
@@ -624,23 +723,43 @@ def _pipeline_digest(config: AppConfig | None, pipeline: str) -> str | None:
 
 async def is_job_expired(storage: StorageBackend, config: AppConfig, job: Job) -> dict:
     """job 是否"过期"= 其某步 .done 存档的 def_digest 与当前 pipeline 该步 def_digest 不同。
-    逐步读 .done(权威,兼容无 pipeline_digest 的旧 job);老 .done 缺 def_digest 键 → 保守判过期。
+    Part 步逐 Part 读隔离目录下的 .done;老 .done 缺 def_digest 键 → 保守判过期。
     返回 {expired, first_changed_step}。"""
     try:
         steps = config.pipelines[job.pipeline]["steps"]
     except Exception:
         return {"expired": False, "first_changed_step": None}
+    part_ids: list[str] = []
+    if job.content_type == "video":
+        raw_job = await storage.read_file(job.id, "job.json")
+        try:
+            job_doc = json.loads(raw_job) if raw_job is not None else {}
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            job_doc = {}
+        if isinstance(job_doc, dict):
+            part_ids = [
+                str(item["part_id"])
+                for item in job_doc.get("parts", [])
+                if isinstance(item, dict) and item.get("part_id")
+            ]
     for s in steps:
         name = s.get("name")
-        raw = await storage.read_file(job.id, f".{name}.done")
-        if raw is None:
-            continue  # 该步未跑(无 .done),不算过期
-        try:
-            stored = json.loads(raw).get("def_digest")
-        except Exception:
-            stored = None
-        if stored is None or stored != def_digest_for(s.get("version"), s.get("ai")):
-            return {"expired": True, "first_changed_step": name}
+        markers = (
+            [f"parts/{part_id}/.{name}.done" for part_id in part_ids]
+            if s.get("scope", "job") == "part" else [f".{name}.done"]
+        )
+        for marker in markers:
+            raw = await storage.read_file(job.id, marker)
+            if raw is None:
+                continue  # 该步未跑(无 .done),不算过期
+            try:
+                stored = json.loads(raw).get("def_digest")
+            except Exception:
+                stored = None
+            if stored is None or stored != def_digest_for(
+                s.get("version"), s.get("ai"),
+            ):
+                return {"expired": True, "first_changed_step": name}
     return {"expired": False, "first_changed_step": None}
 
 
@@ -660,6 +779,7 @@ async def _create_job_snapshot_once(
     parent = await asyncio.to_thread(db.get_job, parent_job_id)
     if not parent:
         raise HTTPException(404, "job not found")
+    parent_parts = await asyncio.to_thread(db.get_parts, parent_job_id)
     try:
         route = resolve_job_route(
             parent.source or detect_source(parent.url or ""),
@@ -686,17 +806,37 @@ async def _create_job_snapshot_once(
             for name, step in by_name.items():
                 if name in reset_steps:
                     continue
-                if any(dep in reset_steps for dep in step.get("depends_on", [])):
+                dependencies = [
+                    *step.get("depends_on", []),
+                    *step.get("fan_in", []),
+                ]
+                if any(dep in reset_steps for dep in dependencies):
                     reset_steps.add(name)
                     changed = True
+    source_url = parent_parts[0].source_url if parent_parts else parent.url
     new_id = new_id_override or derive_job_id(
-        parent.url, route.content_type, route.source,
+        source_url, route.content_type, route.source,
     )
     if new_id_override is None and (
         new_id == parent.id or await asyncio.to_thread(db.get_job, new_id)
     ):
         new_id = f"{new_id}_{secrets.token_hex(3)}"   # 极小概率撞;绝不复用父 id
     lineage = parent.lineage_key or _lineage_key_of(parent.id)
+    target_parts = [
+        JobPart(
+            id=part.id,
+            job_id=new_id,
+            part_index=part.part_index,
+            title=part.title,
+            source_url=part.source_url,
+            source_ref=part.source_ref,
+            source_digest=part.source_digest,
+            size_bytes=part.size_bytes,
+            duration_ms=part.duration_ms,
+            meta=dict(part.meta),
+        )
+        for part in parent_parts
+    ]
     flags = dict((parent.meta or {}).get("flags") or {})
     if mechanical_only is not None:
         flags["mechanical_only"] = mechanical_only
@@ -706,31 +846,47 @@ async def _create_job_snapshot_once(
     try:
         if requested_roots:
             parent_steps = {
-                step.name: step
+                (step.scope_key, step.name): step
                 for step in await asyncio.to_thread(db.get_steps, parent.id)
             }
+            expected_nodes: list[tuple[str, str, dict]] = []
             for name, cfg in by_name.items():
                 if name in reset_steps:
                     continue
-                source_step = parent_steps.get(name)
+                if cfg.get("scope", "job") == "part":
+                    expected_nodes.extend(
+                        (part_scope(part.id), name, cfg) for part in target_parts
+                    )
+                else:
+                    expected_nodes.append(("job", name, cfg))
+            for scope_key, name, cfg in expected_nodes:
+                source_step = parent_steps.get((scope_key, name))
                 if source_step is None or source_step.status not in {
                     StepStatus.DONE, StepStatus.SKIPPED,
                 }:
                     raise HTTPException(
                         409,
-                        f"cannot preserve non-terminal upstream step: {name}",
+                        f"cannot preserve non-terminal upstream step: "
+                        f"{scope_key}/{name}",
                     )
+                part_id = part_id_from_scope(scope_key)
+                marker = (
+                    f"parts/{part_id}/.{name}.done"
+                    if part_id is not None else f".{name}.done"
+                )
                 if (
                     source_step.status == StepStatus.DONE
-                    and await storage.read_file(parent.id, f".{name}.done") is None
+                    and await storage.read_file(parent.id, marker) is None
                 ):
                     raise HTTPException(
                         409,
-                        f"cannot preserve upstream step without done marker: {name}",
+                        f"cannot preserve upstream step without done marker: "
+                        f"{scope_key}/{name}",
                     )
                 preserved_steps.append(Step(
                     job_id=new_id,
                     name=name,
+                    scope_key=scope_key,
                     status=source_step.status,
                     pool=cfg["pool"],
                     input_hash=source_step.input_hash,
@@ -760,7 +916,7 @@ async def _create_job_snapshot_once(
         doc.pop("pipeline", None)
         doc.update({
             "id": new_id,
-            "url": parent.url,
+            "url": None if parent_parts else parent.url,
             "source": route.source,
             "content_type": route.content_type,
             "document_kind": route.document_kind,
@@ -770,6 +926,28 @@ async def _create_job_snapshot_once(
             "created_at": _now_iso(),
             "flags": flags,
         })
+        if parent_parts:
+            part_docs = []
+            existing_part_docs = {
+                str(item.get("part_id")): dict(item)
+                for item in doc.get("parts", [])
+                if isinstance(item, dict) and item.get("part_id")
+            }
+            for part in target_parts:
+                part_doc = existing_part_docs.get(part.id, {})
+                part_doc.update({
+                    "job_id": new_id,
+                    "part_id": part.id,
+                    "part_index": part.part_index,
+                    "title": part.title,
+                    "url": part.source_url,
+                    "content_type": "video",
+                    "domain": parent.domain,
+                    "style_tags": parent.style_tags,
+                    "flags": flags,
+                })
+                part_docs.append(part_doc)
+            doc["parts"] = part_docs
         if rebuild_request is not None:
             doc["rebuild_request"] = rebuild_request
         # prompt 白盒:重建快照也重解析 prompt 覆盖,拾取最新编辑;父 job.json 里的旧覆盖会被替换。
@@ -787,18 +965,34 @@ async def _create_job_snapshot_once(
             new_id, "job.json",
             json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8"),
         )
+        for part_doc in doc.get("parts", []):
+            await storage.write_file(
+                new_id,
+                f"parts/{part_doc['part_id']}/job.json",
+                json.dumps(part_doc, ensure_ascii=False, indent=2).encode("utf-8"),
+            )
         cloned_files = await storage.list_files(new_id)
+        reset_targets: list[tuple[str, str]] = []
         for step_name in reset_steps:
-            await storage.delete_file(new_id, f".{step_name}.done")
-        output_patterns = {
-            pattern
-            for step_name in reset_steps
-            for pattern in by_name[step_name].get("outputs", [])
-            if isinstance(pattern, str)
-        }
-        for rel_path in cloned_files:
-            if any(fnmatch.fnmatch(rel_path, pattern) for pattern in output_patterns):
-                await storage.delete_file(new_id, rel_path)
+            cfg = by_name[step_name]
+            if cfg.get("scope", "job") == "part":
+                reset_targets.extend(
+                    (f"parts/{part.id}/", step_name) for part in target_parts
+                )
+            else:
+                reset_targets.append(("", step_name))
+        for prefix, step_name in reset_targets:
+            await storage.delete_file(new_id, f"{prefix}.{step_name}.done")
+            output_patterns = {
+                pattern for pattern in by_name[step_name].get("outputs", [])
+                if isinstance(pattern, str)
+            }
+            for rel_path in cloned_files:
+                if prefix and not rel_path.startswith(prefix):
+                    continue
+                candidate = rel_path[len(prefix):] if prefix else rel_path
+                if any(fnmatch.fnmatch(candidate, pattern) for pattern in output_patterns):
+                    await storage.delete_file(new_id, rel_path)
         # reservation 行先承载上游终态,再与 target current 状态一并发布。否则 new_job
         # 初始化会把全部步骤置 waiting,使 from_step 之前的下载/转写再次执行。
         for step in preserved_steps:
@@ -815,10 +1009,12 @@ async def _create_job_snapshot_once(
     job = Job(
         id=new_id, content_type=route.content_type, pipeline=route.pipeline,
         document_kind=route.document_kind or "",
-        url=parent.url, title=parent.title, domain=parent.domain, source=route.source,
+        url=None if parent_parts else parent.url,
+        title=parent.title, domain=parent.domain, source=route.source,
         style_tags=parent.style_tags, collection_id=parent.collection_id, meta=meta,
         lineage_key=lineage, is_current=True, parent_job_id=parent.id,
         pipeline_digest=_pipeline_digest(config, route.pipeline),
+        source_digest=parent.source_digest,
     )
     if reserved:
         ready_meta = dict(meta)
@@ -838,7 +1034,9 @@ async def _create_job_snapshot_once(
         job.is_current = True
     else:
         try:
-            await asyncio.to_thread(db.create_job, job)    # create_job 自动 demote 同 lineage 旧版
+            await asyncio.to_thread(
+                db.create_job, job, target_parts or None,
+            )    # create_job 自动 demote 同 lineage 旧版
         except (Exception, asyncio.CancelledError):
             # to_thread 取消时 SQL 可能已提交;有 DB 行就保留完整 target,由幂等重放续作。
             if not await asyncio.to_thread(db.get_job, new_id):
@@ -926,6 +1124,7 @@ async def create_job_snapshot(
     parent = await asyncio.to_thread(db.get_job, parent_job_id)
     if not parent:
         raise HTTPException(404, "job not found")
+    parent_parts = await asyncio.to_thread(db.get_parts, parent_job_id)
     try:
         route = resolve_job_route(
             parent.source or detect_source(parent.url or ""),
@@ -1027,17 +1226,36 @@ async def create_job_snapshot(
             reservation_meta = dict(parent.meta or {})
             reservation_meta["flags"] = flags
             reservation_meta["rebuild_request"] = claimed_record
+            reservation_parts = [
+                JobPart(
+                    id=part.id,
+                    job_id=target_id,
+                    part_index=part.part_index,
+                    title=part.title,
+                    source_url=part.source_url,
+                    source_ref=part.source_ref,
+                    source_digest=part.source_digest,
+                    size_bytes=part.size_bytes,
+                    duration_ms=part.duration_ms,
+                    meta=dict(part.meta),
+                )
+                for part in parent_parts
+            ]
             reservation = Job(
                 id=target_id, content_type=route.content_type, pipeline=route.pipeline,
-                document_kind=route.document_kind or "", url=parent.url,
+                document_kind=route.document_kind or "",
+                url=None if parent_parts else parent.url,
                 title=parent.title, domain=parent.domain, source=route.source,
                 style_tags=parent.style_tags, collection_id=None,
                 meta=reservation_meta, lineage_key=parent.lineage_key or _lineage_key_of(parent.id),
                 is_current=False, parent_job_id=parent.id,
                 pipeline_digest=_pipeline_digest(config, route.pipeline),
+                source_digest=parent.source_digest,
                 status=JobStatus.PROCESSING,
             )
-            await asyncio.to_thread(db.create_job, reservation)
+            await asyncio.to_thread(
+                db.create_job, reservation, reservation_parts or None,
+            )
         finally:
             await redis.release_job_control_lock(parent_job_id, action, token)
         break
@@ -1087,7 +1305,8 @@ async def create_job(
 ):
     # 注:url 接受 http(s) 链接或裸 BV 号(detect_source 解析),故不强校验 http(s) 前缀;
     # invalid_url 语义以 docs/03-contracts.md 为准。
-    source = detect_source(req.url or "")
+    first_url = req.parts[0].url if req.parts else req.url
+    source = detect_source(first_url or "")
     try:
         route = resolve_job_route(
             source,
@@ -1106,20 +1325,28 @@ async def create_job(
         resolved_domain = collection.domain
     await ensure_job_workers(
         redis=redis, config=config, content_type=route.content_type,
-        source=source, url=req.url, domain=resolved_domain,
+        source=source, url=first_url, domain=resolved_domain,
         style_tags=req.style_tags, smart_note=req.smart_note,
         mechanical_only=req.mechanical_only,
         document_kind=route.document_kind,
+        allow_waiting=route.content_type == "video",
     )
     job = await create_job_core(
         db, redis, storage, req.url, req.content_type,
         resolved_domain, req.style_tags, req.collection_id,
         smart_note=req.smart_note, document_kind=route.document_kind, config=config,
         mechanical_only=req.mechanical_only,
+        title=req.title,
+        parts=[part.model_dump() for part in req.parts] if req.parts else None,
     )
+    created_parts = await asyncio.to_thread(db.get_parts, job.id)
     return {"job_id": job.id, "content_type": job.content_type,
             "document_kind": job.document_kind or None, "pipeline": job.pipeline,
-            "status": "pending", "created_at": job.created_at.isoformat()}
+            "status": job.status.value, "created_at": job.created_at.isoformat(),
+            "parts": [
+                {"part_id": part.id, "part_index": part.part_index, "title": part.title}
+                for part in created_parts
+            ]}
 
 
 @router.post("/upload", status_code=201, response_model=JobCreatedResponse)
@@ -1138,6 +1365,8 @@ async def upload_job(
     storage: StorageBackend = Depends(get_storage),
     config: AppConfig = Depends(get_config),
 ):
+    if getattr(content_type, "value", content_type) == "video":
+        raise HTTPException(422, "video upload is replaced by parts[]")
     filename_type = _detect_content_type(None, file.filename)
     if filename_type is None:
         raise HTTPException(422, "unsupported_upload_type")
@@ -1299,6 +1528,7 @@ async def get_job(
         raise HTTPException(404, "job not found")
 
     steps = await asyncio.to_thread(db.get_steps, job_id)
+    parts = await asyncio.to_thread(db.get_parts, job_id)
     # collection_id → 集合名(供元信息显示);无归属或集合已删则 None。
     collection_name = None
     if job.collection_id:
@@ -1340,6 +1570,70 @@ async def get_job(
             }
     except Exception:
         pass
+    part_responses: list[dict] = []
+    if parts:
+        by_part: dict[str, list[Step]] = {part.id: [] for part in parts}
+        for step in steps:
+            part_id = part_id_from_scope(step.scope_key)
+            if part_id in by_part:
+                by_part[part_id].append(step)
+        total_duration = 0.0
+        for part in parts:
+            part_media: dict = {}
+            try:
+                raw = await storage.read_file(
+                    job_id, f"parts/{part.id}/input/metadata.json",
+                )
+                if raw:
+                    md = json.loads(raw.decode("utf-8"))
+                    part_media = {
+                        key: md[key]
+                        for key in (
+                            "duration_sec", "file_size_bytes", "resolution",
+                            "width", "height", "has_subtitle", "has_danmaku",
+                        )
+                        if md.get(key) is not None
+                    }
+                    total_duration += float(part_media.get("duration_sec") or 0)
+            except Exception:
+                pass
+            current_steps = by_part.get(part.id, [])
+            statuses = [step.status.value for step in current_steps]
+            if any(status == "failed" for status in statuses):
+                part_status = "failed"
+            elif any(status == "running" for status in statuses):
+                part_status = "running"
+            elif statuses and all(status in {"done", "skipped"} for status in statuses):
+                part_status = "done"
+            else:
+                part_status = "pending"
+            completed = sum(status in {"done", "skipped"} for status in statuses)
+            progress = round(100 * completed / len(statuses)) if statuses else 0
+            part_responses.append({
+                "part_id": part.id,
+                "part_index": part.part_index,
+                "title": part.title,
+                "url": part.source_url,
+                "status": part_status,
+                "progress_pct": progress,
+                "media": part_media,
+                "steps": [
+                    StepResponse(
+                        name=step.name,
+                        label=labels.get(step.name),
+                        status=step.status.value,
+                        started_at=step.started_at.isoformat() if step.started_at else None,
+                        finished_at=step.finished_at.isoformat() if step.finished_at else None,
+                        duration_sec=step.duration_sec,
+                        meta=step.meta,
+                        error=step.error,
+                        worker_id=step.worker_id,
+                    )
+                    for step in current_steps
+                ],
+            })
+        if total_duration:
+            media["duration_sec"] = total_duration
     # Document metadata 以 document.json 为真相源；旧 parsed.json 不再参与新文档链。
     source_profile = None
     if job.content_type == "document":
@@ -1445,8 +1739,9 @@ async def get_job(
                 duration_sec=s.duration_sec, meta=s.meta, error=s.error,
                 worker_id=s.worker_id,
             )
-            for s in steps
+            for s in steps if s.scope_key == "job"
         ],
+        parts=part_responses,
         prompt_versions=prompt_versions,
     )
 
@@ -1505,18 +1800,11 @@ async def job_usage(
     return {"usage": await asyncio.to_thread(db.list_usage_by_job, job_id)}
 
 
-@router.get("/{job_id}/steps/{step}/log", response_class=PlainTextResponse)
-async def get_step_log(
-    job_id: str,
-    step: str,
-    raw: int = 0,
-    storage: StorageBackend = Depends(get_storage),
-):
-    """返回某步骤的运行日志,供前端展开排错。经存储读,兼容本地/MinIO。
-    默认尾部截断 256KB;raw=1 返回完整日志(供下载)。"""
-    validate_path_segment(job_id, "job_id")
-    validate_path_segment(step, "step")
-    data = await storage.read_file(job_id, f"logs/{step}.log")
+async def _read_step_log(
+    storage: StorageBackend, job_id: str, rel_path: str, raw: int,
+) -> PlainTextResponse:
+    """读取并按公开日志契约截断单个scope的步骤日志。"""
+    data = await storage.read_file(job_id, rel_path)
     if data is None:
         raise HTTPException(404, "log not found")
     if not raw:
@@ -1526,25 +1814,65 @@ async def get_step_log(
     return PlainTextResponse(data.decode("utf-8", errors="replace"))
 
 
+@router.get("/{job_id}/steps/{step}/log", response_class=PlainTextResponse)
+async def get_step_log(
+    job_id: str, step: str, raw: int = 0,
+    storage: StorageBackend = Depends(get_storage),
+):
+    """返回Job级步骤日志;Part步骤必须使用显式Part日志路径。"""
+    validate_path_segment(job_id, "job_id")
+    validate_path_segment(step, "step")
+    return await _read_step_log(storage, job_id, f"logs/{step}.log", raw)
+
+
+@router.get(
+    "/{job_id}/parts/{part_id}/steps/{step}/log",
+    response_class=PlainTextResponse,
+)
+async def get_part_step_log(
+    job_id: str, part_id: str, step: str, raw: int = 0,
+    storage: StorageBackend = Depends(get_storage),
+    db: Database = Depends(get_db),
+):
+    """返回指定Part的步骤日志,拒绝跨Job伪造Part ID。"""
+    validate_path_segment(job_id, "job_id")
+    validate_path_segment(part_id, "part_id")
+    validate_path_segment(step, "step")
+    parts = await asyncio.to_thread(db.get_parts, job_id)
+    if part_id not in {part.id for part in parts}:
+        raise HTTPException(404, "job part not found")
+    return await _read_step_log(
+        storage, job_id, f"parts/{part_id}/logs/{step}.log", raw,
+    )
+
+
 @router.get("/{job_id}/ai-logs", response_model=AiLogsResponse)
 async def job_ai_logs(
     job_id: str,
     step: str | None = None,
+    part_id: str | None = None,
     storage: StorageBackend = Depends(get_storage),
+    db: Database = Depends(get_db),
 ):
-    """该 job 各 AI 步的完整 AI 审计日志(prompt 白盒化)。
-    读 output/ai_logs/{step}.jsonl —— 每次 LLM 调用一条(含路由/尝试链/prompt 渲染/输出/用量/raw),
-    按 job_id 归成一条 trace;给 step 时只返回该步。经 storage 读,兼容本地/MinIO。"""
+    """返回Job或显式Part scope的AI审计日志,不做跨scope隐式聚合。"""
     validate_path_segment(job_id, "job_id")
     if step is not None:
         validate_path_segment(step, "step")
+    if part_id is not None:
+        validate_path_segment(part_id, "part_id")
+        parts = await asyncio.to_thread(db.get_parts, job_id)
+        if part_id not in {part.id for part in parts}:
+            raise HTTPException(404, "job part not found")
+    scope_key = part_scope(part_id) if part_id is not None else "job"
+    prefix = f"parts/{part_id}/" if part_id is not None else ""
+    log_prefix = f"{prefix}output/ai_logs/"
     try:
         files = await storage.list_files(job_id)
     except Exception:
         files = []
-    targets = [f for f in files if f.startswith("output/ai_logs/") and f.endswith(".jsonl")]
+    targets = [f for f in files if f.startswith(log_prefix) and f.endswith(".jsonl")]
     if step is not None:
-        targets = [f for f in targets if f == f"output/ai_logs/{step}.jsonl"]
+        targets = [f for f in targets if f == f"{log_prefix}{step}.jsonl"]
     steps: list[dict] = []
     for rel in sorted(targets):
         data = await storage.read_file(job_id, rel)
@@ -1559,7 +1887,12 @@ async def job_ai_logs(
                 calls.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-        steps.append({"step": rel.rsplit("/", 1)[-1][: -len(".jsonl")], "calls": calls})
+        steps.append({
+            "scope_key": scope_key,
+            "part_id": part_id,
+            "step": rel.rsplit("/", 1)[-1][: -len(".jsonl")],
+            "calls": calls,
+        })
     return {"job_id": job_id, "steps": steps}
 
 
@@ -1672,14 +2005,66 @@ async def rerun_job(
     steps = pipeline.get("steps") if isinstance(pipeline, dict) else None
     allowed_steps = {
         str(step.get("name")) for step in steps or []
-        if isinstance(step, dict) and step.get("name")
+        if (
+            isinstance(step, dict)
+            and step.get("name")
+            and step.get("scope", "job") == "job"
+        )
     }
     if req.from_step not in allowed_steps:
-        raise HTTPException(422, "from_step is not part of the job pipeline")
+        raise HTTPException(422, "job rerun only accepts job-scoped steps")
     await redis.append_lifecycle_event("job_command", {
         "action": "rerun", "job_id": job_id, "from_step": req.from_step,
     })
     return {"job_id": job_id, "status": "processing", "from_step": req.from_step}
+
+
+@router.post(
+    "/{job_id}/parts/{part_id}/rerun",
+    response_model=JobRerunResponse,
+)
+async def rerun_job_part(
+    job_id: str,
+    part_id: str,
+    req: RerunRequest,
+    db: Database = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+    config: AppConfig = Depends(get_config),
+):
+    """只重跑目标Part的map步骤,并失效其Job级下游。"""
+    validate_path_segment(job_id, "job_id")
+    validate_path_segment(part_id, "part_id")
+    job = await asyncio.to_thread(db.get_job, job_id)
+    if not job:
+        raise HTTPException(404, "job not found")
+    parts = await asyncio.to_thread(db.get_parts, job_id)
+    if part_id not in {part.id for part in parts}:
+        raise HTTPException(404, "part not found")
+    pipeline = config.pipelines.get(job.pipeline)
+    steps = pipeline.get("steps") if isinstance(pipeline, dict) else None
+    allowed_steps = {
+        str(step.get("name")) for step in steps or []
+        if (
+            isinstance(step, dict)
+            and step.get("name")
+            and step.get("scope", "job") == "part"
+        )
+    }
+    if req.from_step not in allowed_steps:
+        raise HTTPException(422, "part rerun only accepts part-scoped steps")
+    execution_step = execution_step_key(part_scope(part_id), req.from_step)
+    await redis.append_lifecycle_event("job_command", {
+        "action": "rerun",
+        "job_id": job_id,
+        "part_id": part_id,
+        "from_step": execution_step,
+    })
+    return {
+        "job_id": job_id,
+        "status": "processing",
+        "from_step": req.from_step,
+        "part_id": part_id,
+    }
 
 
 @router.post("/{job_id}/rebuild", response_model=JobRebuildResponse)

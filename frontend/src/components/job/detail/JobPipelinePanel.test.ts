@@ -4,6 +4,34 @@ import { mount } from '@vue/test-utils'
 import JobPipelinePanel from './JobPipelinePanel.vue'
 
 describe('JobPipelinePanel AI 成本展示', () => {
+  it('Part步骤可选择自己的工作台scope并单独重试', async () => {
+    const step = {
+      name: '08_punctuate', label: '口播稿', status: 'failed',
+      started_at: null, finished_at: null, duration_sec: null,
+      meta: {}, error: 'boom', worker_id: null,
+    }
+    const wrapper = mount(JobPipelinePanel, {
+      props: {
+        jobId: 'job-1', steps: [],
+        parts: [{
+          part_id: 'pt_a', part_index: 1, title: '开场', url: null,
+          status: 'failed', progress_pct: 80, media: {}, steps: [step],
+        }],
+        dagSteps: [], statusByKey: {}, selectedStep: '08_punctuate', selectedPartId: 'pt_a',
+        usageByStep: {}, totalAi: { cost: 0, equiv: false, calls: 0 }, jobStatus: 'failed',
+        rebuilding: false, updateAvailable: false, promptRows: [],
+      },
+      global: { stubs: { StepWorkbench: true } },
+    })
+
+    const stepButton = wrapper.find('.part-steps button')
+    expect(stepButton.classes()).toContain('selected')
+    await stepButton.trigger('click')
+    expect(wrapper.emitted('selectPartStep')).toEqual([['pt_a', '08_punctuate']])
+    await wrapper.find('.part-retry').trigger('click')
+    expect(wrapper.emitted('rerunPart')).toEqual([['pt_a', '08_punctuate']])
+  })
+
   it('DAG 总计和节点固定两位小数且节点不显示约等号', () => {
     const wrapper = mount(JobPipelinePanel, {
       props: {

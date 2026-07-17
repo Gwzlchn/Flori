@@ -11,6 +11,8 @@ from pathlib import Path
 
 import yaml
 
+from .pipeline_scope import validate_pipeline_scopes
+
 
 _ENV_PATTERN = re.compile(r"\$\{(\w+)(?::-(.*?))?\}")
 
@@ -363,6 +365,8 @@ def _normalize_job(name: str, job: dict) -> dict:
 
     step["name"] = name
     step.setdefault("depends_on", [])
+    step.setdefault("fan_in", [])
+    step.setdefault("scope", "job")
     step.setdefault("image", "flori/step-base")
 
     # retry 可为 int 或 {max, when};归一化为旧的 retries 整数(worker/scheduler 只读次数)。
@@ -394,6 +398,8 @@ def normalize_pipeline(raw_pipeline: dict, *, default: dict | None = None,
             step = dict(s)
             step.setdefault("image", "flori/step-base")
             step.setdefault("depends_on", [])
+            step.setdefault("fan_in", [])
+            step.setdefault("scope", "job")
             steps.append(step)
         return {"steps": steps}
 
@@ -454,6 +460,7 @@ def normalize_pipelines(raw: dict, config_dir: Path | None = None) -> dict:
             body = {**body, "variables": {**global_vars, **(body.get("variables") or {})}}
         result[name] = normalize_pipeline(body, default=default, templates=templates)
     validate_provenance_pipeline_contract(result)
+    validate_pipeline_scopes(result)
     if strict_ai_contract:
         validate_ai_pipeline_contract(result)
     return result

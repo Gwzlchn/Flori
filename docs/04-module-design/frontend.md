@@ -104,7 +104,9 @@
 ### 内容详情（JobDetailView，`/content/:id`）
 
 - 内容信息（标题/来源/类型特有信息）
-- 步骤进度条（步骤数由 pipeline 决定，实时 WebSocket 更新；步骤名为各 pipeline 内 `01..N`）
+- Video 投递支持 1..128 个 Part、标题、拖拽排序；提交后顺序固化
+- Video 详情按 Part 卡片展示独立步骤/状态/进度，根区域展示合并后的 Job 步；WebSocket 用执行键只更新目标 Part
+- 点击 Part 步后，Workbench 的日志、AI 审计、产物和 rerun 都锁定该 Part；Job 步会清空 Part 选择
 - 产物入口（智能笔记 / 机械版 / 逐字稿 / 评审）；评审 `parse_failed` 时提示重评
 - 失败时显示错误 + 重试 / 重跑（含换 provider 重跑智能笔记 `rerun-smart`）
 

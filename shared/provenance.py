@@ -1736,9 +1736,13 @@ def _validate_support_artifact(
             raise ValueError(f"{label} does not match an audio transcript segment")
     elif kind == "video_subtitle":
         _require_nonnegative_int(selector.get("index"), f"{label}.selector.index")
+        part_id = locator.get("part_id")
+        expected_prefixes = {"input/"}
+        if part_id:
+            expected_prefixes.add(f"parts/{part_id}/input/")
         if (
             locator.get("kind") != "media"
-            or not path.startswith("input/")
+            or not any(path.startswith(prefix) for prefix in expected_prefixes)
             or not path.endswith(".srt")
         ):
             raise ValueError(f"{label} does not match a video subtitle")
@@ -1749,7 +1753,16 @@ def _validate_support_artifact(
         _require_nonnegative_int(
             selector.get("box_index"), f"{label}.selector.box_index",
         )
-        if locator.get("kind") != "image" or path != "intermediate/ocr.json":
+        asset_path = str(locator.get("asset_path") or "")
+        if asset_path.startswith("parts/"):
+            part_prefix = asset_path.split("/assets/", 1)[0]
+            expected_paths = {
+                "intermediate/ocr.json",
+                f"{part_prefix}/intermediate/ocr.json",
+            }
+        else:
+            expected_paths = {"intermediate/ocr.json"}
+        if locator.get("kind") != "image" or path not in expected_paths:
             raise ValueError(f"{label} does not match video OCR")
     else:
         page = _require_positive_int(selector.get("page"), f"{label}.selector.page")
@@ -1821,7 +1834,19 @@ def _validate_locator(locator: Any, artifact: Mapping[str, Any], field: str) -> 
     kind = locator.get("kind")
     if kind not in _LOCATOR_KEYS:
         raise ValueError(f"{field}.kind is unsupported")
-    _require_exact_keys(locator, _LOCATOR_KEYS[kind], field)
+    if kind == "media" and "part_id" in locator:
+        allowed = {*_LOCATOR_KEYS[kind], "part_id"}
+        timeline = {"timeline_start_ms", "timeline_end_ms"}
+        if frozenset(locator) not in {frozenset(allowed), frozenset(allowed | timeline)}:
+            raise ValueError(f"{field} has unexpected keys")
+        _require_id(locator["part_id"], f"{field}.part_id")
+        if timeline <= set(locator):
+            _require_range(
+                locator["timeline_start_ms"], locator["timeline_end_ms"],
+                f"{field}.timeline",
+            )
+    else:
+        _require_exact_keys(locator, _LOCATOR_KEYS[kind], field)
     if kind == "media":
         start, end = _require_range(locator["start_ms"], locator["end_ms"], field)
         duration = artifact["media_duration_ms"]

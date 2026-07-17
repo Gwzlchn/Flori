@@ -13,6 +13,7 @@ from shared.config import AppConfig, load_config
 from shared.db import Database
 from shared.models import AITask, Job, LLMRequest
 from shared.note_text import markdown_to_index_text
+from shared.pipeline_scope import expand_pipeline_steps
 from shared.redis_client import RedisClient
 from shared.study_suggestions import canonical_json, prefixed_sha256, validate_study_suggestion_prompt_snapshot
 from shared.storage import StorageBackend
@@ -442,11 +443,15 @@ class Scheduler:
     async def _required_tags_for_step(self, job_id: str, step_name: str, step_cfg: dict, job_info: dict | None = None) -> list[str]:
         return await self._task_router._required_tags_for_step(job_id, step_name, step_cfg, job_info)
 
-    async def _list_job_files(self, job_id: str) -> list[str]:
-        return await self._task_router._list_job_files(job_id)
+    async def _list_job_files(
+        self, job_id: str, part_id: str | None = None,
+    ) -> list[str]:
+        return await self._task_router._list_job_files(job_id, part_id)
 
-    async def check_condition(self, job_id: str, condition: str) -> bool:
-        return await self._task_router.check_condition(job_id, condition)
+    async def check_condition(
+        self, job_id: str, condition: str, part_id: str | None = None,
+    ) -> bool:
+        return await self._task_router.check_condition(job_id, condition, part_id)
 
     def _step_is_conditional(self, cfg: dict) -> bool:
         return self._task_router._step_is_conditional(cfg)
@@ -454,8 +459,10 @@ class Scheduler:
     async def _eval_step_condition(self, job_id: str, cfg: dict) -> bool:
         return await self._task_router._eval_step_condition(job_id, cfg)
 
-    async def _eval_rules(self, job_id: str, rules: list) -> bool:
-        return await self._task_router._eval_rules(job_id, rules)
+    async def _eval_rules(
+        self, job_id: str, rules: list, part_id: str | None = None,
+    ) -> bool:
+        return await self._task_router._eval_rules(job_id, rules, part_id)
 
     async def _pool_has_workers(self, pool: str) -> bool:
         return await self._task_router._pool_has_workers(pool)
@@ -547,7 +554,10 @@ class Scheduler:
         pipeline = await self.redis.get_job_pipeline(job_id)
         if not pipeline:
             return None
-        return self._get_pipeline_steps(pipeline)
+        get_parts = getattr(self.db, "get_parts", None)
+        parts = await asyncio.to_thread(get_parts, job_id) if get_parts else []
+        steps_list = self.config.pipelines.get(pipeline, {}).get("steps", [])
+        return expand_pipeline_steps(steps_list, parts)
 
     def _get_downstream(self, steps: dict[str, dict], from_step: str) -> list[str]:
         return self._dag_planner._get_downstream(steps, from_step)

@@ -372,7 +372,8 @@ class RecoveryCoordinator:
                 continue
 
             pipeline = await self.owner.redis.get_job_pipeline(job_id)
-            steps_cfg = self.owner._get_pipeline_steps(pipeline) if pipeline else {}
+            steps_cfg = await self.owner._get_job_pipeline_steps(job_id) if pipeline else {}
+            steps_cfg = steps_cfg or {}
             stuck: list[tuple[str, str]] = []
             progressable = False
             for step in ready:
@@ -400,12 +401,11 @@ class RecoveryCoordinator:
             if time.time() - first < self.owner._NO_WORKER_GRACE_SEC:
                 continue
             waited = round(time.time() - first)
-            self.owner._no_worker_since.pop(job_id, None)
+            self.owner._no_worker_since[job_id] = time.time()
             pairs = ", ".join(f"{s}(pool '{p}')" for s, p in stuck)
-            logger.warning("job_no_worker", job_id=job_id, stuck=pairs)
+            logger.warning("job_waiting_for_worker", job_id=job_id, stuck=pairs)
             await self.owner.redis.push_event(
                 "no_worker", job_id=job_id, step=stuck[0][0], pool=stuck[0][1], waited_sec=waited)
-            await self.owner.mark_job_failed(job_id, f"无可用 worker 执行步骤: {pairs}")
 
         # 清理已离开 active 集合的计时,避免泄漏。
         active_set = set(active_jobs)
@@ -415,14 +415,35 @@ class RecoveryCoordinator:
     async def _retry_failed(
         self, job_id: str, idempotency_key: str | None = None,
     ) -> None:
-        """重试失败 Job:从第一个 failed 步骤开始重跑。"""
+        """重试失败Job:每个相互独立的失败根各重跑一次。"""
         statuses = await self.owner.redis.get_all_step_statuses(job_id)
+        if not statuses:
+            job = await asyncio.to_thread(self.owner.db.get_job, job_id)
+            if job is None or job.status != JobStatus.FAILED:
+                return
+            await self.owner.submit_job(job)
+            statuses = await self.owner.redis.get_all_step_statuses(job_id)
         failed_steps = [s for s, st in statuses.items() if st == "failed"]
         if not failed_steps:
             return
-        first_failed = sorted(failed_steps)[0]
-        await self.owner.rerun(job_id, first_failed, idempotency_key=idempotency_key)
-        logger.info("job_retry", job_id=job_id, from_step=first_failed)
+        steps = await self.owner._get_job_pipeline_steps(job_id) or {}
+        failed = set(failed_steps)
+        failed_descendants = {
+            descendant
+            for step in failed
+            for descendant in self.owner._get_downstream(steps, step)
+            if descendant in failed
+        }
+        roots = [step for step in steps if step in failed - failed_descendants]
+        for index, root in enumerate(roots):
+            operation_key = (
+                f"{idempotency_key}:root:{index}:{root}"
+                if idempotency_key is not None else None
+            )
+            await self.owner.rerun(
+                job_id, root, idempotency_key=operation_key,
+            )
+        logger.info("job_retry", job_id=job_id, from_steps=roots)
 
     async def rerun(
         self, job_id: str, from_step: str,
@@ -432,7 +453,7 @@ class RecoveryCoordinator:
         pipeline = await self.owner.redis.get_job_pipeline(job_id)
         if not pipeline:
             return []
-        steps = self.owner._get_pipeline_steps(pipeline)
+        steps = await self.owner._get_job_pipeline_steps(job_id) or {}
         if from_step not in steps:
             logger.warning(
                 "job_rerun_invalid_step",
@@ -453,14 +474,20 @@ class RecoveryCoordinator:
 
         for step in reset_steps:
             await self.owner._revoke_step_execution(job_id, step)
-            done_file = self.owner.jobs_dir / job_id / f".{step}.done"
+            from shared.step_scope import parse_execution_step, part_id_from_scope
+            scope_key, template_step = parse_execution_step(step)
+            part_id = part_id_from_scope(scope_key)
+            prefix = f"parts/{part_id}/" if part_id else ""
+            done_file = self.owner.jobs_dir / job_id / prefix / f".{template_step}.done"
             await asyncio.to_thread(done_file.unlink, True)
             # 中心存储的 .done 必须一并删:MinIO 部署下 .done 在 bucket,只删本地是 no-op,
             # worker pull 回旧 .done 指纹命中直接跳过,rerun/「重跑该步」整体失效。
             # best-effort:删失败只告警不挡主流程(兜底=改步 version 失效指纹)。
             if self.owner.storage is not None:
                 try:
-                    await self.owner.storage.delete_file(job_id, f".{step}.done")
+                    await self.owner.storage.delete_file(
+                        job_id, f"{prefix}.{template_step}.done",
+                    )
                 except Exception:
                     logger.warning("rerun_central_done_delete_failed",
                                    job_id=job_id, step=step, exc_info=True)
@@ -510,11 +537,14 @@ class RecoveryCoordinator:
         )
         if not should_apply:
             return
-        steps = self.owner._get_pipeline_steps(pipeline)
+        steps = await self.owner._get_job_pipeline_steps(job_id) or {}
         # 状态真源:redis(运行态)优先,redis 无则用 DB,都无则 waiting,并保留已完成/已跑步骤状态.
         existing = await self.owner.redis.get_all_step_statuses(job_id)
+        from shared.step_scope import execution_step_key
         db_status = {
-            s.name: (s.status.value if isinstance(s.status, StepStatus) else s.status)
+            execution_step_key(s.scope_key, s.name): (
+                s.status.value if isinstance(s.status, StepStatus) else s.status
+            )
             for s in await asyncio.to_thread(self.owner.db.get_steps, job_id)
         }
 
@@ -538,7 +568,13 @@ class RecoveryCoordinator:
             else:
                 await asyncio.to_thread(
                     self.owner.db.upsert_step,
-                    Step(job_id=job_id, name=name, status=StepStatus(status), pool=cfg["pool"]),
+                    Step(
+                        job_id=job_id,
+                        name=cfg["template_step"],
+                        scope_key=cfg["scope_key"],
+                        status=StepStatus(status),
+                        pool=cfg["pool"],
+                    ),
                 )
 
         await asyncio.to_thread(

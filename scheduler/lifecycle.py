@@ -11,6 +11,7 @@ import structlog
 
 from shared.errors import RETRY_POLICY, get_retry_delay
 from shared.models import Job, JobStatus, Step, StepStatus
+from shared.step_scope import execution_step_key
 
 if TYPE_CHECKING:
     from scheduler.scheduler import Scheduler
@@ -29,8 +30,8 @@ class LifecycleCoordinator:
 
     async def submit_job(self, job: Job) -> None:
         """API 调用:提交新任务,初始化步骤状态,入队无依赖步骤。"""
-        pipeline_steps = self.owner._get_pipeline_steps(job.pipeline)
-        if not pipeline_steps:
+        pipeline_templates = self.owner._get_pipeline_steps(job.pipeline)
+        if not pipeline_templates:
             logger.warning("empty_pipeline", job_id=job.id, pipeline=job.pipeline)
             await asyncio.to_thread(
                 self.owner.db.update_job, job.id,
@@ -47,9 +48,12 @@ class LifecycleCoordinator:
             "flags": (job.meta or {}).get("flags", {}),
         })
 
+        pipeline_steps = await self.owner._get_job_pipeline_steps(job.id) or {}
+
         redis_status = await self.owner.redis.get_all_step_statuses(job.id)
         db_steps = {
-            item.name: item for item in await asyncio.to_thread(self.owner.db.get_steps, job.id)
+            execution_step_key(item.scope_key, item.name): item
+            for item in await asyncio.to_thread(self.owner.db.get_steps, job.id)
         }
         for name, cfg in pipeline_steps.items():
             status = redis_status.get(name)
@@ -65,7 +69,8 @@ class LifecycleCoordinator:
                     self.owner.db.upsert_step,
                     Step(
                         job_id=job.id,
-                        name=name,
+                        name=cfg["template_step"],
+                        scope_key=cfg["scope_key"],
                         status=StepStatus(status),
                         pool=cfg["pool"],
                     ),
@@ -248,6 +253,10 @@ class LifecycleCoordinator:
                 finished_at=datetime.now(timezone.utc),
                 retries=current_retries,
             )
+            await self.owner.redis.publish(f"events:{job_id}", {
+                "event": "step_failed", "step": step,
+                "error": error[:200], "retries": current_retries,
+            })
             await self.owner.mark_job_failed(job_id, f"{step}: {error[:200]}")
 
     async def _delayed_enqueue(self, delay: int, job_id: str, step: str) -> None:

@@ -36,6 +36,17 @@ export interface StepInfo {
   worker_id?: string | null     // 执行本步的 worker(「由 xxx 完成」)
 }
 
+export interface JobPartInfo {
+  part_id: string
+  part_index: number
+  title: string | null
+  url: string | null
+  status: string
+  progress_pct: number
+  media: JobMedia
+  steps: StepInfo[]
+}
+
 // 逐次 AI 调用明细(GET /api/jobs/{id}/usage;job 详情按步展示)。
 export interface StepUsage {
   step: string | null
@@ -84,7 +95,12 @@ export interface AiLogCall {
   ok?: boolean
   error?: string | null
 }
-export interface AiLogStep { step: string; calls: AiLogCall[] }
+export interface AiLogStep {
+  scope_key: string
+  part_id: string | null
+  step: string
+  calls: AiLogCall[]
+}
 export interface AiLogsResponse { job_id: string; steps: AiLogStep[] }
 
 export interface JobMedia {
@@ -121,6 +137,7 @@ export interface JobDetail extends JobSummary {
   artifacts: string[]           // 可见产物文件路径
   meta: Record<string, any>
   steps: StepInfo[]
+  parts: JobPartInfo[]
   prompt_versions?: Record<string, string>  // 十进制字符串,避免 int64 在 JavaScript 中丢精度
   update_available?: boolean    // 当前流程或 Prompt 相对该快照已有更新
   update_from_step?: string | null
@@ -517,7 +534,7 @@ export type EvidenceBoundingBox = [number, number, number, number]
 
 // locator 只是服务端的安全投影,不包含原始文件路径。前端不从它拼接 URL。
 export type CanonicalEvidenceLocator =
-  | { kind: 'media'; start_ms: number; end_ms: number }
+  | { kind: 'media'; start_ms: number; end_ms: number; part_id?: string | null; timeline_start_ms?: number | null; timeline_end_ms?: number | null }
   | { kind: 'pdf'; page: number; bbox: EvidenceBoundingBox | null }
   | { kind: 'text'; exact: string; prefix: string; suffix: string; dom_path: string | null }
   | { kind: 'image'; bbox: EvidenceBoundingBox; start_ms: number | null; end_ms: number | null; page: number | null }

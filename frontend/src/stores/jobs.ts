@@ -4,6 +4,30 @@ import { useApi } from '../composables/useApi'
 import type { JobSummary, JobDetail, JobListResponse, JobFacets, JobConcept } from '../types'
 import { contentTypeForUpload } from '../constants/sources'
 
+type CommonJobCreateFields = {
+  domain?: string
+  style_tags?: string[]
+  collection_id?: string
+  smart_note?: boolean
+  mechanical_only?: boolean
+  title?: string
+}
+
+type JobCreatePayload = CommonJobCreateFields & (
+  | {
+      content_type: 'video'
+      parts: { url: string; title?: string }[]
+      url?: never
+      document_kind?: never
+    }
+  | {
+      content_type?: 'document' | 'audio'
+      url: string
+      parts?: never
+      document_kind?: string
+    }
+)
+
 export const useJobStore = defineStore('jobs', () => {
   const api = useApi()
   const list = ref<JobSummary[]>([])
@@ -37,13 +61,14 @@ export const useJobStore = defineStore('jobs', () => {
     return api.get<JobDetail>(`/api/jobs/${jobId}`)
   }
 
-  async function createJob(payload: { url?: string; content_type?: string; document_kind?: string; domain?: string; style_tags?: string[]; collection_id?: string; smart_note?: boolean; mechanical_only?: boolean }) {
-    return api.post<{ job_id: string }>('/api/jobs', payload)
+  async function createJob(payload: JobCreatePayload) {
+    return api.post<{ job_id: string; parts?: { part_id: string; part_index: number }[] }>('/api/jobs', payload)
   }
 
   async function uploadJob(file: File, domain: string, styleTags: string[], documentKind?: string, mechanicalOnly = false) {
     const contentType = contentTypeForUpload(file.name)
     if (!contentType) throw new Error('不支持的上传文件类型')
+    if (contentType === 'video') throw new Error('视频请使用单/多 Part 投递')
     const form = new FormData()
     form.append('file', file)
     form.append('domain', domain)
@@ -71,6 +96,13 @@ export const useJobStore = defineStore('jobs', () => {
 
   async function rerunJob(jobId: string, fromStep: string) {
     return api.post(`/api/jobs/${jobId}/rerun`, { from_step: fromStep })
+  }
+
+  async function rerunJobPart(jobId: string, partId: string, fromStep: string) {
+    return api.post(
+      `/api/jobs/${jobId}/parts/${encodeURIComponent(partId)}/rerun`,
+      { from_step: fromStep },
+    )
   }
 
   async function continueAi(jobId: string): Promise<{ job_id: string; status: string }> {
@@ -116,5 +148,5 @@ export const useJobStore = defineStore('jobs', () => {
     return api.get<JobConcept[]>(`/api/jobs/${encodeURIComponent(jobId)}/concepts`)
   }
 
-  return { list, total, loading, fetchList, fetchDetail, createJob, uploadJob, retryJob, retryAllFailed, retryFailedInCollection, rerunJob, continueAi, rebuildJob, rebuildStale, deleteJob, deleteJobs, fetchFacets, fetchConcepts }
+  return { list, total, loading, fetchList, fetchDetail, createJob, uploadJob, retryJob, retryAllFailed, retryFailedInCollection, rerunJob, rerunJobPart, continueAi, rebuildJob, rebuildStale, deleteJob, deleteJobs, fetchFacets, fetchConcepts }
 })

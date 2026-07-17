@@ -60,6 +60,38 @@ beforeEach(() => {
 })
 
 describe('StepWorkbench 步骤级 AI 用量', () => {
+  it('Part工作台只使用自己的产物、日志和执行用量scope', async () => {
+    get.mockImplementation((url: string) => {
+      if (url.endsWith('/artifacts')) return Promise.resolve({
+        groups: [{
+          scope_key: 'part:pt_a', part_id: 'pt_a', step: '03_sections', label: '章节切分',
+          total_bytes: 3, files: [{ path: 'parts/pt_a/output/clip.mp4', kind: 'video', size: 3 }],
+        }],
+        total_bytes: 3,
+      })
+      if (url.endsWith('/usage')) return Promise.resolve({
+        usage: [{ ...usage[0], step: 'part:pt_a::03_sections' }],
+      })
+      return Promise.resolve({})
+    })
+    getText.mockResolvedValue('part-log')
+    const wrapper = mount(StepWorkbench, {
+      props: { jobId: 'job-1', steps, selectedStep: '03_sections', selectedPartId: 'pt_a' },
+      global: { stubs: { MarkdownViewer: true, AiLogPanel: true } },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('clip.mp4')
+    expect(wrapper.text()).toContain('AI 用量')
+    const logToggle = wrapper.findAll('button').find(button => button.text() === '展开')
+    await logToggle!.trigger('click')
+    await flushPromises()
+    expect(getText).toHaveBeenCalledWith(
+      '/api/jobs/job-1/parts/pt_a/steps/03_sections/log',
+    )
+    expect(wrapper.text()).toContain('part-log')
+  })
+
   it('CPU 步不展示整个 job 的 AI 总开销', async () => {
     const wrapper = mountWorkbench('03_sections')
     await flushPromises()

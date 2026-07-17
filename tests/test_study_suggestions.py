@@ -12,7 +12,7 @@ import pytest
 
 import shared.db as db_module
 from shared.db import Database
-from shared.migrations import v0007_unified_document as migration_current
+from shared.migrations import v0008_multipart_jobs as migration_current
 from shared.models import Collection, Job, JobStatus
 from shared.study_suggestions import (
     StudySuggestionConflictError,

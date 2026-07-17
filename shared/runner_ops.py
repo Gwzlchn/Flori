@@ -188,6 +188,20 @@ async def claim_step(
         await redis.publish(f"events:{claim['job_id']}", {
             "event": "step_start", "step": claim["step"], "worker": worker_id,
         })
+        from shared.source_detect import detect_source
+        from shared.step_scope import parse_execution_step, part_id_from_scope
+        scope_key, _ = parse_execution_step(claim["step"])
+        part_id = part_id_from_scope(scope_key)
+        if part_id is not None:
+            parts = await asyncio.to_thread(db.get_parts, claim["job_id"])
+            part = next((item for item in parts if item.id == part_id), None)
+            if part is None:
+                await redis.release_holders({claim["exec_id"]})
+                raise RuntimeError("claimed step references a missing part")
+            source = str((part.meta or {}).get("source") or "") or detect_source(
+                part.source_url or "",
+            )
+            claim = {**claim, "source": source}
         return claim
 
     return None

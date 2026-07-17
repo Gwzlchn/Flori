@@ -80,7 +80,11 @@ async def test_real_runner_uses_bounded_local_driver_and_preserves_tail(
         )
         # integration compose 把 INTEGRATION_HOST_TMP 以同路径挂进测试容器,
         # 因而这里既是容器内工作根,也是 Docker daemon 可见的宿主根.
-        runner = DockerStepRunner(f"worker-{suffix}", host_work_root=str(runner_root))
+        runner = DockerStepRunner(
+            f"worker-{suffix}",
+            host_work_root=str(runner_root),
+            container_work_root=str(runner_root),
+        )
         created = threading.Event()
         holder: dict[str, object] = {}
         container_collection = runner._client.containers

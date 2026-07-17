@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import sqlite3
 import stat
@@ -94,12 +95,60 @@ class DatabaseRuntime:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             with self.lock:
                 before = owner.schema_version()
+                self._require_offline_migration_ready(before)
                 if before < self.schema_limit and owner._has_user_schema():
                     owner._create_migration_backup(before)
                 run_migrations(self.connection, owner._migration_steps())
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
+
+    def _require_offline_migration_ready(self, before: int) -> None:
+        """生产v7视频库必须先完成对象stage,避免服务启动时只迁DB。"""
+        if (
+            os.environ.get("FLORI_REQUIRE_OFFLINE_MIGRATIONS") != "1"
+            or self.schema_limit < 8
+        ):
+            return
+        configured = os.environ.get("FLORI_MULTIPART_V8_READY_FILE")
+        marker_path = (
+            Path(configured) if configured
+            else self.path.parent / "multipart-v8.ready.json"
+        )
+        if before == 8 and marker_path.exists():
+            try:
+                marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    "multipart v8 migration marker is unreadable"
+                ) from exc
+            if marker.get("state") not in {"committed", "verified"}:
+                raise RuntimeError(
+                    "multipart v8 database commit is incomplete"
+                )
+            return
+        if before != 7:
+            return
+        video_count = int(self.connection.execute(
+            "SELECT COUNT(*) FROM jobs WHERE content_type='video'",
+        ).fetchone()[0])
+        if video_count == 0:
+            return
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                "multipart v8 object stage is required before database migration"
+            ) from exc
+        expected_path = str(self.path.resolve())
+        if (
+            marker.get("state") != "staged"
+            or marker.get("schema_from") != 7
+            or marker.get("schema_to") != 8
+            or marker.get("video_jobs") != video_count
+            or marker.get("db_path") != expected_path
+        ):
+            raise RuntimeError("multipart v8 object stage marker does not match database")
 
     def migration_steps(self) -> tuple[Migration, ...]:
         return self._migration_steps_provider()

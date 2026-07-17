@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, Query
 from shared.config import AppConfig
 from shared.db import Database
 from shared.redis_client import RedisClient
+from shared.step_scope import execution_step_key
 
 from api.deps import get_config, get_db, get_redis, verify_token
 
@@ -67,7 +68,9 @@ async def get_queue(
         w = worker_by_id.get(s.worker_id)
         return {
             "state": "running",
-            "job_id": s.job_id, "step": s.name, "pool": s.pool,
+            "job_id": s.job_id,
+            "step": execution_step_key(s.scope_key, s.name),
+            "pool": s.pool,
             "started_at": s.started_at.isoformat() if s.started_at else None,
             "worker_id": s.worker_id,
             "worker_type": w.type if w else None,

@@ -9,7 +9,7 @@ import pytest
 
 from api.routes.notes import _read_verification_artifact
 from shared.evidence_contract import MAX_EVIDENCE_BYTES, MAX_MECHANICAL_EVIDENCE_BYTES
-from shared.models import Job, LLMResponse
+from shared.models import Job, JobPart, LLMResponse
 from shared.review_contract import MAX_REVIEW_SOURCE_BYTES, parse_review, source_record
 
 
@@ -28,6 +28,37 @@ def _create_job_files(jobs_dir, job_id):
     (job_dir / "output" / "review.json").write_text(f'{{"overall": 4.0, "note_file": "{smart_ver}"}}')
     (job_dir / "assets" / "scene_0001.jpg").write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
     return job_dir
+
+
+class TestMultipartArtifacts:
+    @pytest.mark.asyncio
+    async def test_groups_part_outputs_by_scope(
+        self, client, app, test_config,
+    ):
+        job_id = "j_part_artifacts"
+        parts = [JobPart("pt_a", job_id, 1), JobPart("pt_b", job_id, 2)]
+        app.state.db.create_job(
+            Job(id=job_id, content_type="video", pipeline="video"), parts,
+        )
+        job_dir = test_config.jobs_dir / job_id
+        for part in parts:
+            source = job_dir / "parts" / part.id / "input" / "source.mp4"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(part.id.encode())
+        (job_dir / "output").mkdir(parents=True)
+        (job_dir / "output" / "notes_mechanical.md").write_text("root")
+
+        response = await client.get(f"/api/jobs/{job_id}/artifacts")
+        assert response.status_code == 200
+        groups = response.json()["groups"]
+        by_scope_step = {(group["scope_key"], group["step"]): group for group in groups}
+        assert by_scope_step[("part:pt_a", "01_download")]["files"][0]["path"] == (
+            "parts/pt_a/input/source.mp4"
+        )
+        assert by_scope_step[("part:pt_b", "01_download")]["files"][0]["path"] == (
+            "parts/pt_b/input/source.mp4"
+        )
+        assert by_scope_step[("job", "09_mechanical")]["part_id"] is None
 
 
 def _write_valid_review(job_dir, rel="output/review.json"):

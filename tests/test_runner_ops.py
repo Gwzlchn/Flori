@@ -16,7 +16,8 @@ import pytest
 from tests.conftest import make_fakeredis
 from tests.pubsub_helpers import subscription_barrier
 from shared import runner_ops
-from shared.models import Job, Step, StepStatus
+from shared.models import Job, JobPart, Step, StepStatus
+from shared.step_scope import execution_step_key, part_scope
 from tests.current_schema_db import clone_current_schema_database
 
 
@@ -145,6 +146,46 @@ class TestClaimStep:
         await redis.create_task_lease(WORKER_ID, "j1", "A", "new-exec")
         assert not await redis.validate_task_lease(WORKER_ID, "j1", "A", exec_id)
         assert await redis.validate_task_lease(WORKER_ID, "j1", "A", "new-exec")
+
+    @pytest.mark.asyncio
+    async def test_part_lease_cannot_complete_same_template_step_in_other_part(
+        self, redis, db,
+    ):
+        await _register_worker(redis, db)
+        job = Job(id="j1", content_type="video", pipeline="video")
+        db.create_job(job, [
+            JobPart(
+                "pt_01", job.id, 1,
+                source_url="BV1xx411c7mD", meta={"source": "bilibili"},
+            ),
+            JobPart(
+                "pt_02", job.id, 2,
+                source_url="https://youtu.be/dQw4w9WgXcQ",
+                meta={"source": "youtube"},
+            ),
+        ])
+        p01 = execution_step_key(part_scope("pt_01"), "01_download")
+        p02 = execution_step_key(part_scope("pt_02"), "01_download")
+        for priority, step in enumerate((p01, p02)):
+            await redis.enqueue_step("cpu", "j1", step, [], priority=priority)
+            await redis.set_step_status("j1", step, "ready")
+
+        claim = await runner_ops.claim_step(
+            redis, db, WORKER_ID, ["cpu"], POOL_LIMITS, {"vision"}, set(),
+        )
+
+        assert claim["step"] == p01
+        assert claim["source"] == "bilibili"
+        assert await redis.validate_task_lease(
+            WORKER_ID, "j1", p01, claim["exec_id"],
+        )
+        assert not await redis.validate_task_lease(
+            WORKER_ID, "j1", p02, claim["exec_id"],
+        )
+        assert await redis.begin_task_terminal(
+            WORKER_ID, "j1", p02, claim["exec_id"], "done",
+        ) == 0
+        assert await redis.get_step_status("j1", p02) == "ready"
 
     @pytest.mark.asyncio
     async def test_terminal_lease_allows_one_outcome_and_release_cleanup(self, redis, db):

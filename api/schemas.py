@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from shared.db import PROMPT_VERSION_EXCLUSIVE_MAX, PROMPT_VERSION_MIN
 from shared.document_registry import DOCUMENT_KIND_NAMES
@@ -43,10 +43,19 @@ PromptVersionSafeInteger = Annotated[
 ]
 
 
+class JobPartCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=1, max_length=4096)
+    title: str | None = Field(default=None, max_length=300)
+
+
 class JobCreateRequest(BaseModel):
-    model_config = ConfigDict(use_enum_values=True)
+    model_config = ConfigDict(use_enum_values=True, extra="forbid")
 
     url: str | None = None
+    parts: list[JobPartCreate] | None = Field(default=None, min_length=1, max_length=128)
+    title: str | None = Field(default=None, max_length=300)
     content_type: ContentType | None = None
     document_kind: DocumentKind | None = None
     domain: str = "general"
@@ -57,6 +66,17 @@ class JobCreateRequest(BaseModel):
     smart_note: bool | None = None
     # 仅执行非 AI 步骤;之后可通过 continue-ai 显式续跑完整 AI 链。
     mechanical_only: bool = False
+
+    @model_validator(mode="after")
+    def validate_video_parts(self):
+        if self.content_type == "video":
+            if self.url is not None or not self.parts:
+                raise ValueError("video jobs require parts[] and reject top-level url")
+            if self.document_kind is not None:
+                raise ValueError("video jobs reject document_kind")
+        elif self.parts is not None:
+            raise ValueError("parts[] is only valid for video jobs")
+        return self
 
 
 class JobCollectionUpdateRequest(BaseModel):
@@ -100,6 +120,7 @@ class JobDetailResponse(JobResponse):
     artifacts: list[str] = Field(default_factory=list)  # 可见产物文件路径(元信息标签页"产物路径")
     meta: dict = Field(default_factory=dict)
     steps: list[StepResponse] = Field(default_factory=list)
+    parts: list[JobPartResponse] = Field(default_factory=list)
     # 本任务各 AI 步派发时用的 prompt 覆盖版本号快照,从 job.json.prompt_overrides[step].version 读,
     # 无覆盖的步不出现。前端与当前激活版本(GET /api/prompts)比,不一致提示「重跑该步」,见 docs/03-contracts.md §1.15。
     prompt_versions: dict[str, str] = Field(default_factory=dict)
@@ -122,6 +143,17 @@ class StepResponse(BaseModel):
     worker_id: str | None = None      # 执行本步的 worker(前端「由 xxx 完成」)
 
 
+class JobPartResponse(BaseModel):
+    part_id: str
+    part_index: int
+    title: str | None = None
+    url: str | None = None
+    status: str
+    progress_pct: int
+    media: dict = Field(default_factory=dict)
+    steps: list[StepResponse] = Field(default_factory=list)
+
+
 class CanonicalEvidenceLink(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -136,6 +168,9 @@ class CanonicalMediaLocator(BaseModel):
     kind: Literal["media"]
     start_ms: int
     end_ms: int
+    part_id: str | None = None
+    timeline_start_ms: int | None = None
+    timeline_end_ms: int | None = None
 
 
 class CanonicalPdfLocator(BaseModel):

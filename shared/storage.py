@@ -378,6 +378,20 @@ def is_credential_file(rel: str) -> bool:
     return rel.replace("\\", "/").rsplit("/", 1)[-1] == ".credentials.json"
 
 
+def execution_artifact_allowed(
+    execution_step: str, rel_path: str, *, write: bool,
+) -> bool:
+    """按执行scope限制远端worker可见和可发布的对象前缀。"""
+    from shared.step_scope import parse_execution_step, part_id_from_scope
+
+    normalized = rel_path.replace("\\", "/")
+    scope_key, _ = parse_execution_step(execution_step)
+    part_id = part_id_from_scope(scope_key)
+    if part_id is not None:
+        return normalized.startswith(f"parts/{part_id}/")
+    return not (write and normalized.startswith("parts/"))
+
+
 def _is_staging_file(rel: str) -> bool:
     return rel.replace("\\", "/").startswith(_STAGING_PREFIX)
 
@@ -888,16 +902,21 @@ class RemoteStorage:
         )
 
     async def pull(self, job_id: str, step: str) -> Path:
-        return await asyncio.to_thread(self._pull_sync, job_id)
+        return await asyncio.to_thread(self._pull_sync, job_id, step)
 
-    def _pull_sync(self, job_id: str) -> Path:
-        work_dir = self._tmp_root / job_id
+    def _pull_sync(self, job_id: str, step: str) -> Path:
+        scope_token = hashlib.sha256(step.encode()).hexdigest()[:16]
+        work_dir = self._tmp_root / job_id / scope_token / uuid.uuid4().hex / "root"
         work_dir.mkdir(parents=True, exist_ok=True)
         snapshot: dict[str, tuple[int, float]] = {}
         prefix = f"{job_id}/"
         for obj in self._client().list_objects(self._bucket, prefix=prefix, recursive=True):
             rel = obj.object_name[len(prefix):]
-            if not rel or _is_internal_file(rel):
+            if (
+                not rel
+                or _is_internal_file(rel)
+                or not execution_artifact_allowed(step, rel, write=False)
+            ):
                 continue
             dest = work_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -908,15 +927,19 @@ class RemoteStorage:
         return work_dir
 
     async def push(self, job_id: str, step: str, work_dir: Path) -> None:
-        await asyncio.to_thread(self._push_sync, job_id, work_dir)
+        await asyncio.to_thread(self._push_sync, job_id, step, work_dir)
 
-    def _push_sync(self, job_id: str, work_dir: Path) -> None:
+    def _push_sync(self, job_id: str, step: str, work_dir: Path) -> None:
         snapshot = self._snapshots.get(str(work_dir), {})
         for path in work_dir.rglob("*"):
             if not path.is_file():
                 continue
             rel = str(path.relative_to(work_dir))
-            if is_credential_file(rel) or _is_internal_file(rel):
+            if (
+                is_credential_file(rel)
+                or _is_internal_file(rel)
+                or not execution_artifact_allowed(step, rel, write=True)
+            ):
                 continue  # 敏感凭证永不上行中心存储
             st = path.stat()
             prev = snapshot.get(rel)
@@ -929,7 +952,13 @@ class RemoteStorage:
 
     def _cleanup_sync(self, work_dir: Path) -> None:
         self._snapshots.pop(str(work_dir), None)
-        shutil.rmtree(work_dir, ignore_errors=True)
+        attempt_dir = work_dir.parent
+        shutil.rmtree(attempt_dir, ignore_errors=True)
+        for parent in (attempt_dir.parent, attempt_dir.parent.parent):
+            try:
+                parent.rmdir()
+            except OSError:
+                pass
 
     async def delete(
         self, job_id: str, *, defer_if_busy: bool = False,
@@ -1988,10 +2017,22 @@ class GatewayStorage:
     async def pull(self, job_id: str, step: str) -> Path:
         if self._reuse:
             await asyncio.to_thread(self._gc_stale, job_id)
-        work_dir = self._work_root / job_id
+        from shared.step_scope import parse_execution_step
+        scope_key, _ = parse_execution_step(step)
+        scope_token = hashlib.sha256(scope_key.encode()).hexdigest()[:16]
+        if self._reuse:
+            work_dir = (
+                self._work_root / job_id
+                if scope_key == "job"
+                else self._work_root / job_id / scope_token / "root"
+            )
+        else:
+            work_dir = self._work_root / job_id / scope_token / uuid.uuid4().hex / "root"
         work_dir.mkdir(parents=True, exist_ok=True)
         rels = await self.list_files(job_id)
         for rel in rels:
+            if not execution_artifact_allowed(step, rel, write=False):
+                continue
             dest = work_dir / rel
             # 复用模式:本机已有同名文件就不重拉(留住的 source.mp4 不走慢链路下行)。
             if self._reuse and dest.is_file():
@@ -2045,7 +2086,11 @@ class GatewayStorage:
             if not path.is_file():
                 continue
             rel = path.relative_to(work_dir).as_posix()
-            if is_credential_file(rel) or self._is_no_push(rel):
+            if (
+                is_credential_file(rel)
+                or self._is_no_push(step, rel)
+                or not execution_artifact_allowed(step, rel, write=True)
+            ):
                 continue  # 敏感凭证 / 大源文件等:不回传中心(凭证绝不上行;源文件配 NO_PUSH glob)
             st = path.stat()
             prev = snapshot.get(rel)
@@ -2083,15 +2128,33 @@ class GatewayStorage:
             _raise_gateway_auth(resp, f"/api/runner/jobs/{job_id}/artifacts/{rel}")
             resp.raise_for_status()
 
-    def _is_no_push(self, rel: str) -> bool:
-        return any(fnmatch.fnmatch(rel, pat) for pat in self._no_push)
+    def _is_no_push(self, step: str, rel: str) -> bool:
+        from shared.step_scope import parse_execution_step, part_id_from_scope
+
+        scope_key, _ = parse_execution_step(step)
+        part_id = part_id_from_scope(scope_key)
+        candidate = rel
+        if part_id is not None:
+            prefix = f"parts/{part_id}/"
+            if rel.startswith(prefix):
+                candidate = rel[len(prefix):]
+        return any(fnmatch.fnmatch(candidate, pattern) for pattern in self._no_push)
 
     async def cleanup(self, job_id: str, step: str, work_dir: Path) -> None:
         self._snapshots.pop(str(work_dir), None)
         # 复用模式留住 job 目录(同 job 后续步直接读本地),由 pull 时 TTL GC 回收。
         if self._reuse:
             return
-        await asyncio.to_thread(shutil.rmtree, work_dir, ignore_errors=True)
+        def _cleanup_attempt() -> None:
+            attempt_dir = work_dir.parent
+            shutil.rmtree(attempt_dir, ignore_errors=True)
+            for parent in (attempt_dir.parent, attempt_dir.parent.parent):
+                try:
+                    parent.rmdir()
+                except OSError:
+                    pass
+
+        await asyncio.to_thread(_cleanup_attempt)
 
     async def delete(
         self, job_id: str, *, defer_if_busy: bool = False,
@@ -2099,7 +2162,9 @@ class GatewayStorage:
         # worker 侧 gateway 不负责删中心产物(那是 API/中心存储的职责,删 job 在 API 端走 Local/Remote);
         # 这里仅清掉本机为该 job 留存的(复用)工作目录与快照,保证幂等。
         work_dir = self._work_root / job_id
-        self._snapshots.pop(str(work_dir), None)
+        for snapshot in list(self._snapshots):
+            if Path(snapshot) == work_dir or work_dir in Path(snapshot).parents:
+                self._snapshots.pop(snapshot, None)
         await asyncio.to_thread(shutil.rmtree, work_dir, ignore_errors=True)
 
     async def clone(self, src_job_id: str, dst_job_id: str) -> None:

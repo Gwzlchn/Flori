@@ -33,26 +33,66 @@ const jobStore = useJobStore()
 const showToast = inject<(m: string, t?: 'success' | 'error' | 'info') => void>('showToast', () => {})
 
 const {
-  jobId, job, loading, loadError, steps, jobStatus, connected,
+  jobId, job, loading, loadError, steps, parts, jobStatus, connected,
   fetchDetail, startPolling, stopPolling,
 } = useJobDetailController({ onReset: resetJobView, onLoaded: handleDetailLoaded })
 
 // 每个 job 的 DAG:流水线定义(含 needs)按 content_type 匹配 /api/pipelines,叠加各步实时状态着色。
-const pipelinesDef = ref<{ name: string; steps: { key: string; label: string | null; pool: string | null; needs: string[] }[] }[]>([])
+const pipelinesDef = ref<{ name: string; steps: { key: string; label: string | null; pool: string | null; needs: string[]; scope: 'job' | 'part' }[] }[]>([])
 const jobDagSteps = computed(() => pipelinesDef.value.find(p => p.name === job.value?.pipeline)?.steps || [])
 const stepStatusByKey = computed<Record<string, string>>(() => {
   const m: Record<string, string> = {}
   for (const s of steps.value) m[s.name] = s.status
+  const partStatuses = new Map<string, string[]>()
+  for (const part of parts.value) {
+    for (const step of part.steps) {
+      const statuses = partStatuses.get(step.name) || []
+      statuses.push(step.status)
+      partStatuses.set(step.name, statuses)
+    }
+  }
+  for (const [name, statuses] of partStatuses) {
+    if (statuses.includes('failed')) m[name] = 'failed'
+    else if (statuses.includes('running')) m[name] = 'running'
+    else if (statuses.includes('ready')) m[name] = 'ready'
+    else if (statuses.every(status => status === 'done' || status === 'skipped')) m[name] = 'done'
+    else m[name] = 'waiting'
+  }
   return m
 })
 // DAG 与工作台共享的选中步(点 DAG 节点即选)。默认恒为首步(下载);每次进流水线 tab 重置,
 // 不记忆上次点选(用户明确要求「都从下载开始」);同 tab 内点选不被 steps 刷新覆盖。
 const selectedStep = ref('')
-watch(steps, (s) => {
-  if (selectedStep.value && s.some(x => x.name === selectedStep.value)) return
-  if (!s.length) return
-  selectedStep.value = s[0].name
-}, { immediate: true })
+const selectedPartId = ref<string | null>(null)
+function selectPartStep(partId: string, step: string) {
+  selectedPartId.value = partId
+  selectedStep.value = step
+}
+function selectDagStep(step: string) {
+  const node = jobDagSteps.value.find(item => item.key === step)
+  if (node?.scope === 'part' || (!steps.value.some(item => item.name === step) && parts.value.length)) {
+    selectedPartId.value = selectedPartId.value || parts.value[0]?.part_id || null
+  } else {
+    selectedPartId.value = null
+  }
+  selectedStep.value = step
+}
+function selectFirstProcessingStep() {
+  const firstPart = parts.value[0]
+  if (firstPart?.steps?.length) {
+    selectPartStep(firstPart.part_id, firstPart.steps[0].name)
+  } else {
+    selectedPartId.value = null
+    selectedStep.value = steps.value[0]?.name || ''
+  }
+}
+watch([steps, parts], ([jobSteps, currentParts]) => {
+  const selectedSteps = selectedPartId.value
+    ? currentParts.find(part => part.part_id === selectedPartId.value)?.steps || []
+    : jobSteps
+  if (selectedStep.value && selectedSteps.some(step => step.name === selectedStep.value)) return
+  selectFirstProcessingStep()
+}, { immediate: true, deep: true })
 
 // AI 用量(逐次)→ 按步聚合 provider/开销喂 DAG 节点 + 全 job 总开销。
 const jobUsageRows = ref<{ step: string | null; provider: string; cost_usd: number }[]>([])
@@ -60,7 +100,8 @@ const usageByStep = computed<Record<string, { provider: string; cost: number; eq
   const m: Record<string, { provider: string; cost: number; equiv: boolean }> = {}
   for (const u of jobUsageRows.value) {
     if (!u.step) continue
-    const e = m[u.step] || (m[u.step] = { provider: u.provider, cost: 0, equiv: false })
+    const templateStep = u.step.includes('::') ? u.step.split('::', 2)[1] : u.step
+    const e = m[templateStep] || (m[templateStep] = { provider: u.provider, cost: 0, equiv: false })
     e.cost += u.cost_usd || 0
     if (u.provider === 'claude-cli') e.equiv = true
   }
@@ -158,6 +199,7 @@ function resetJobView() {
   pdfJumpPage.value = 0
   pdfJumpBboxes.value = []
   selectedStep.value = ''
+  selectedPartId.value = null
 }
 
 // 笔记 tab
@@ -733,7 +775,10 @@ function goConcept(c: JobConcept) {
 const selectedStepLabel = computed(() => {
   const d = jobDagSteps.value.find(x => x.key === selectedStep.value)
   if (d?.label) return d.label
-  const s = steps.value.find(x => x.name === selectedStep.value)
+  const selectedSteps = selectedPartId.value
+    ? parts.value.find(part => part.part_id === selectedPartId.value)?.steps || []
+    : steps.value
+  const s = selectedSteps.find(x => x.name === selectedStep.value)
   return s?.label || selectedStep.value
 })
 async function retryJob() {
@@ -752,12 +797,25 @@ async function continueAi() {
 }
 async function rerunFromStep() {
   if (!selectedStep.value) return
+  if (selectedPartId.value) {
+    await rerunPart(selectedPartId.value, selectedStep.value)
+    return
+  }
   if (!confirm(`从「${selectedStepLabel.value}」重新处理?该步骤及后续产物会在当前任务中重新生成。`)) return
   try {
     await jobStore.rerunJob(jobId.value, selectedStep.value)
     showToast(`从 ${selectedStepLabel.value} 开始重跑`, 'success')
     jobStatus.value = 'processing'
   } catch (e: any) { showToast(e?.message || '重跑失败', 'error') }
+}
+async function rerunPart(partId: string, fromStep: string) {
+  if (!confirm('只重试这个 Part?该 Part 的失败步骤及全场汇总会重新生成。')) return
+  try {
+    await jobStore.rerunJobPart(jobId.value, partId, fromStep)
+    showToast('已提交 Part 重试', 'success')
+    jobStatus.value = 'processing'
+    await fetchDetail()
+  } catch (e: any) { showToast(e?.message || 'Part 重试失败', 'error') }
 }
 
 // 本任务 prompt 版本(白盒版本管理)
@@ -833,7 +891,7 @@ async function confirmDelete() {
 watch(tab, (t) => {
   if (t === 'notes') ensureNotes()
   else if (t === 'concepts') ensureConcepts()
-  else if (t === 'proc') selectedStep.value = steps.value[0]?.name || ''  // 进流水线恒从「下载」开始
+  else if (t === 'proc') selectFirstProcessingStep()
 })
 // 详情就绪后若初始 tab 即笔记/概念,触发懒加载。
 watch(job, (j) => {
@@ -930,11 +988,11 @@ watch(job, (j) => {
 
       <!-- 流水线 -->
       <div v-show="tab === 'proc'">
-        <JobPipelinePanel :job-id="jobId" :steps="steps" :dag-steps="jobDagSteps"
-          :status-by-key="stepStatusByKey" :selected-step="selectedStep"
+        <JobPipelinePanel :job-id="jobId" :steps="steps" :parts="parts" :dag-steps="jobDagSteps"
+          :status-by-key="stepStatusByKey" :selected-step="selectedStep" :selected-part-id="selectedPartId"
           :usage-by-step="usageByStep" :total-ai="totalAi" :job-status="jobStatus" :rebuilding="rebuilding"
           :update-available="Boolean(job.update_available)" :prompt-rows="aiPromptRows"
-          @select-step="selectedStep = $event" @retry="retryJob" @rerun="rerunFromStep" @rebuild="rebuildJob" />
+          @select-step="selectDagStep" @select-part-step="selectPartStep" @retry="retryJob" @rerun="rerunFromStep" @rerun-part="rerunPart" @rebuild="rebuildJob" />
       </div>
 
       <!-- 元信息 -->

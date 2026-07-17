@@ -181,7 +181,9 @@ class TestCreateJobSessdataInjection:
             "bili_cookies", json.dumps({"sessdata": "INJECTED_SD", "uname": "u"})
         )
         r = await client.post(
-            "/api/jobs", json={"url": "https://www.bilibili.com/video/BV1xx411c7mD"}
+            "/api/jobs", json={"content_type": "video", "parts": [
+                {"url": "https://www.bilibili.com/video/BV1xx411c7mD"},
+            ]},
         )
         assert r.status_code == 201
         job_id = r.json()["job_id"]
@@ -195,7 +197,9 @@ class TestCreateJobSessdataInjection:
     async def test_bilibili_job_no_cookie_no_sessdata(self, client, db, test_config):
         """未登录时不写凭证文件,保持匿名下载现状。"""
         r = await client.post(
-            "/api/jobs", json={"url": "https://www.bilibili.com/video/BV1xx411c7mD"}
+            "/api/jobs", json={"content_type": "video", "parts": [
+                {"url": "https://www.bilibili.com/video/BV1xx411c7mD"},
+            ]},
         )
         assert r.status_code == 201
         job_id = r.json()["job_id"]
@@ -208,7 +212,9 @@ class TestCreateJobSessdataInjection:
         """非 B站源即便有 cookie 也不注入 sessdata。"""
         db.set_credential("bili_cookies", json.dumps({"sessdata": "SD"}))
         r = await client.post(
-            "/api/jobs", json={"url": "https://www.youtube.com/watch?v=abc"}
+            "/api/jobs", json={"content_type": "video", "parts": [
+                {"url": "https://www.youtube.com/watch?v=abc"},
+            ]},
         )
         assert r.status_code == 201
         job_id = r.json()["job_id"]

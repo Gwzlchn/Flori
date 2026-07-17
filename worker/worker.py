@@ -26,6 +26,7 @@ from shared.ask_citations import validate_ask_citations
 from shared.config import AppConfig, build_step_config
 from shared.models import AIUsage, DEFAULT_AI_MODEL, DEFAULT_AI_PROVIDER, LLMRequest, generate_worker_id
 from shared.runner_ops import parse_style_tags
+from shared.step_scope import parse_execution_step, part_id_from_scope
 from shared.storage import StorageBackend
 from shared.sysload import collect_node_load
 from shared.version import FLORI_VERSION
@@ -533,15 +534,20 @@ class Worker:
             return
 
         job_id = claim["job_id"]
-        step = claim["step"]
+        execution_step = claim["step"]
+        scope_key, step = parse_execution_step(execution_step)
+        part_id = part_id_from_scope(scope_key)
         pool = claim["pool"]
         exec_id = claim["exec_id"]
 
         start = time.time()
+        storage_dir = None
         work_dir = None
         auth_failed = False
         try:
-            work_dir = await self.storage.pull(job_id, step)
+            storage_dir = await self.storage.pull(job_id, execution_step)
+            work_dir = storage_dir if part_id is None else storage_dir / "parts" / part_id
+            work_dir.mkdir(parents=True, exist_ok=True)
 
             # pipeline/domain/style_tags/source:gateway 模式服务端已塞进 claim,直连模式在此回读。
             # 读失败会被本 try 接住转 report_failed,不冲垮主循环。
@@ -554,7 +560,7 @@ class Worker:
                 job_info = await self.transport.get_job_info(job_id)
                 domain = job_info.get("domain", "general")
                 style_tags = parse_style_tags(job_info.get("style_tags", "[]"))
-                source = job_info.get("source", "")
+                source = claim.get("source") or job_info.get("source", "")
             if not isinstance(style_tags, list):
                 style_tags = []
 
@@ -588,6 +594,7 @@ class Worker:
                 )
             ctx = StepContext(
                 job_id=job_id, step=step, work_dir=work_dir, exec_id=exec_id,
+                scope_key=scope_key, part_id=part_id,
                 step_cfg=step_cfg, module=module, image=image,
                 timeout_sec=effective_timeout,
                 pool=pool, use_gpu=use_gpu,
@@ -603,20 +610,20 @@ class Worker:
                 # 续约:让 DB/Redis 里的 "当前 task" 秒级新鲜 + 刷步进度心跳 + 推送运行中日志。
                 # 步进度心跳每 10s(仅子进程存活时由 monitor 调用),供 scheduler.check_stuck
                 # 对远程 job(产物不落调度器盘)判进度停滞。
-                await self.transport.update_status(self.worker_id, "busy", job_id, step)
-                await self.transport.report_step_alive(job_id, step)
-                await self._push_step_log(job_id, step, work_dir)
+                await self.transport.update_status(self.worker_id, "busy", job_id, execution_step)
+                await self.transport.report_step_alive(job_id, execution_step)
+                await self._push_step_log(job_id, step, work_dir, part_id=part_id)
 
             returncode, stderr = await self.runner.run_step(ctx, on_progress, on_tick)
             duration = time.time() - start
 
             if returncode == 0:
-                await self._collect_usage(job_id, step, work_dir)
+                await self._collect_usage(job_id, execution_step, step, work_dir)
                 # 产物必须先成功推上中心存储,才报 done。否则上游标了 done 但产物没上去,
                 # 下游步拉 work_dir 时 input_missing(如 candidates.json)。push 失败降级为步失败,
                 # 重试时重新生成并推送,绝不在产物缺失时标完成。
                 try:
-                    await self.storage.push(job_id, step, work_dir)
+                    await self.storage.push(job_id, execution_step, storage_dir)
                 except WorkerAuthRejected:
                     raise
                 except Exception as push_err:
@@ -638,8 +645,8 @@ class Worker:
             else:
                 # 步本身失败:失败也记用量(失败前已完成的 LLM 调用是真实开销,审计/计费不能缺账;
                 # exec_id UNIQUE 幂等,重试不重复计),再 best-effort 推产物(含日志)便于前端排错,报 failed。
-                await self._collect_usage(job_id, step, work_dir)
-                await self._push_safe(job_id, step, work_dir)
+                await self._collect_usage(job_id, execution_step, step, work_dir)
+                await self._push_safe(job_id, execution_step, storage_dir)
                 error_type, error_json_msg = self._parse_error(work_dir, step)
                 # 兜底:子进程 stderr 为空时,用 .{step}.error.json 的 message(真实异常文本),
                 # 避免前端只看到 "unknown error" 无从排错。
@@ -659,8 +666,10 @@ class Worker:
         except asyncio.TimeoutError:
             duration = time.time() - start
             if work_dir:
-                await self._collect_usage(job_id, step, work_dir)  # 失败也记用量(超时前的调用是真实开销)
-                await self._push_safe(job_id, step, work_dir)  # best-effort 推日志便于排错
+                await self._collect_usage(
+                    job_id, execution_step, step, work_dir,
+                )  # 失败也记用量(超时前的调用是真实开销)
+                await self._push_safe(job_id, execution_step, storage_dir)  # best-effort 推日志便于排错
             await self.transport.report_failed(
                 claim, "timeout", "timeout", duration, start, count_stats=False,
             )
@@ -672,8 +681,8 @@ class Worker:
         except Exception as e:
             duration = time.time() - start
             if work_dir:
-                await self._collect_usage(job_id, step, work_dir)  # 失败也记用量
-                await self._push_safe(job_id, step, work_dir)  # best-effort 推日志便于排错
+                await self._collect_usage(job_id, execution_step, step, work_dir)  # 失败也记用量
+                await self._push_safe(job_id, execution_step, storage_dir)  # best-effort 推日志便于排错
             error_msg = str(e)[:500]
             await self.transport.report_failed(
                 claim, error_msg, "processing", duration, start, count_stats=False,
@@ -684,14 +693,16 @@ class Worker:
             )
 
         finally:
-            if work_dir:
-                await self.storage.cleanup(job_id, step, work_dir)
+            if storage_dir:
+                await self.storage.cleanup(job_id, execution_step, storage_dir)
             if not auth_failed:
                 await self.transport.release(claim)
 
     # 运行中日志推送
 
-    async def _push_step_log(self, job_id: str, step: str, work_dir: Path) -> None:
+    async def _push_step_log(
+        self, job_id: str, step: str, work_dir: Path, *, part_id: str | None = None,
+    ) -> None:
         """把运行中日志推回存储。网络失败不致命,auth 失败停机。"""
         log_path = work_dir / "logs" / f"{step}.log"
         if not log_path.is_file():
@@ -705,7 +716,8 @@ class Worker:
                     data = b"...(truncated)...\n" + f.read()
             else:
                 data = log_path.read_bytes()
-            await self.storage.write_file(job_id, f"logs/{step}.log", data)
+            prefix = f"parts/{part_id}/" if part_id else ""
+            await self.storage.write_file(job_id, f"{prefix}logs/{step}.log", data)
         except WorkerAuthRejected:
             raise
         except Exception:
@@ -739,12 +751,15 @@ class Worker:
                 job_id=job_id, step=step,
             )
 
-    async def _collect_usage(self, job_id: str, step: str, work_dir: Path) -> None:
+    async def _collect_usage(
+        self, job_id: str, execution_step: str, step: str, work_dir: Path,
+    ) -> None:
         # usage 仅统计/计费侧效应:解析或网络失败只降级为"统计不准",绝不让步骤结论翻转。
         # 成功与失败路径都调(失败步在挂之前完成的 LLM 调用是真实开销,必须入账;exec_id UNIQUE 幂等)。
         try:
             usages = collect_usage_from_file(work_dir / "logs", step)
             for usage in usages:
+                usage.step = execution_step
                 usage.worker_id = self.worker_id   # 归因到执行节点(直连路径;网关路径 api 据 token 再认定)
                 await self.transport.record_ai_usage(usage)
         except WorkerAuthRejected:

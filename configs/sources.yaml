@@ -4,6 +4,7 @@ content_types:
   video:
     label: "视频"
     pipeline: "video"
+    public_upload: false
     upload_extensions: [".mp4", ".mkv", ".webm", ".flv", ".mov"]
   document:
     label: "文档"
@@ -51,6 +52,7 @@ job_sources:
     label: "本地文件"
     default_document_kind: "unknown"
     document_kinds: ["research_paper", "article", "whitepaper", "report", "book_chapter", "documentation", "standard", "thesis", "unknown"]
+    # 旧库中的upload视频仍需可重建;公开创建端点由public_upload=false和路由显式拒绝。
     content_types: ["video", "document", "audio"]
     patterns: ["^file://"]
     creatable: false

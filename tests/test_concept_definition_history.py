@@ -14,7 +14,7 @@ from shared.db import (
     ConceptNotFoundError,
     Database,
 )
-from shared.migrations import v0007_unified_document as migration_current
+from shared.migrations import v0008_multipart_jobs as migration_current
 
 
 _NOW = "2026-07-14T00:00:00+00:00"
@@ -209,7 +209,7 @@ def _raw_insert_definition_version(
 
 
 def test_current_schema_keeps_frozen_concept_and_document_invariants(db: Database) -> None:
-    assert db.schema_version() == 7
+    assert db.schema_version() == 8
     migration_current.validate(db._conn)
     tables = {
         str(row[0])

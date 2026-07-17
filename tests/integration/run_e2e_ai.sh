@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 端到端 AI 集成测试：真实 AI 笔记生成
 # 需要: KIMI_API_KEY 或 DEEPSEEK_API_KEY 环境变量
-# 需要: TEST_VIDEO_FILE 环境变量指向测试视频
+# 需要: TEST_VIDEO_URL 为 worker 可访问的视频 URL
 set -uo pipefail
 
 API="http://localhost:8000"
@@ -42,6 +42,10 @@ for s in d['steps']:
     err = (s.get('error','') or '')[:60]
     label = {'done':'OK','skipped':'SKIP','failed':'FAIL','waiting':'WAIT','ready':'READY','running':'RUN'}.get(s['status'],'?')
     print(f'  {label:5s} {s[\"name\"]:20s} {s[\"status\"]:10s} {dur:>8s}  {err}')
+for part in d.get('parts', []):
+    print(f'  PART  {part[\"part_index\"]}: {part.get(\"title\") or part[\"part_id\"]}')
+    for s in part.get('steps', []):
+        print(f'        {s[\"name\"]:20s} {s[\"status\"]:10s}')
 "
 }
 
@@ -79,15 +83,14 @@ verify_notes() {
 log "=== E2E 集成测试:真实 AI 笔记生成 ==="
 log ""
 
-VIDEO_FILE="${TEST_VIDEO_FILE:?请设置 TEST_VIDEO_FILE 环境变量}"
+VIDEO_URL="${TEST_VIDEO_URL:?请设置 TEST_VIDEO_URL 为 worker 可访问的视频 URL}"
 
-# TC-AI-1:视频上传到全 pipeline(含 AI 笔记)
-log "TC-AI-1: 视频上传到全 pipeline + AI 笔记 (domain=deep-learning)"
-log "  文件: $(du -m "$VIDEO_FILE" | cut -f1)MB"
-RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload?content_type=video" \
-  -F "file=@$VIDEO_FILE" \
-  -F "domain=deep-learning" \
-  -F 'style_tags=["case-study"]')
+# TC-AI-1:Video Part URL 到全 pipeline(含 AI 笔记)
+log "TC-AI-1: Video Part URL 到全 pipeline + AI 笔记 (domain=deep-learning)"
+log "  URL: $VIDEO_URL"
+RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs" \
+  -H "Content-Type: application/json" \
+  -d "{\"content_type\":\"video\",\"parts\":[{\"url\":\"$VIDEO_URL\",\"title\":\"E2E P01\"}],\"domain\":\"deep-learning\",\"style_tags\":[\"case-study\"]}")
 JOB1=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
 log "  Job: $JOB1"
 

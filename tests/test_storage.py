@@ -19,11 +19,13 @@ from shared.storage import (
     RemoteStorage,
     _parse_minio_version,
     create_storage,
+    execution_artifact_allowed,
     is_credential_file,
     publish_content_addressed_path,
     read_file_bounded,
     read_path_bounded,
 )
+from shared.step_scope import execution_step_key, part_scope
 
 
 def _rss_bytes() -> int:
@@ -65,6 +67,32 @@ class TestIsCredentialFile:
         assert not is_credential_file("job.json")
         assert not is_credential_file("output/notes.md")
         assert not is_credential_file("input/source.mp4")
+
+
+class TestExecutionArtifactScope:
+    def test_part_scope_only_sees_and_writes_own_prefix(self):
+        step = execution_step_key(part_scope("pt_a"), "01_download")
+        assert execution_artifact_allowed(
+            step, "parts/pt_a/input/source.mp4", write=False,
+        )
+        assert execution_artifact_allowed(
+            step, "parts/pt_a/output/notes.md", write=True,
+        )
+        assert not execution_artifact_allowed(step, "job.json", write=False)
+        assert not execution_artifact_allowed(
+            step, "parts/pt_b/input/source.mp4", write=True,
+        )
+
+    def test_job_scope_reads_all_but_cannot_write_part_prefixes(self):
+        assert execution_artifact_allowed(
+            "09_merge_parts", "parts/pt_a/output/notes.md", write=False,
+        )
+        assert execution_artifact_allowed(
+            "09_merge_parts", "output/notes.md", write=True,
+        )
+        assert not execution_artifact_allowed(
+            "09_merge_parts", "parts/pt_a/output/notes.md", write=True,
+        )
 
 
 class TestReadFileBounded:
@@ -2397,7 +2425,8 @@ class TestGatewayStorage(_GatewayStorageHelpers):
         client.stream.side_effect = _stream
 
         work_dir = await gw.pull("j1", "01")
-        assert work_dir == tmp_path / "work" / "j1"
+        assert work_dir.name == "root"
+        assert tmp_path / "work" / "j1" in work_dir.parents
         assert (work_dir / "job.json").read_bytes() == b"J"
         assert (work_dir / "out" / "n.md").read_bytes() == b"NOTE"
         # 清单调用带 token_getter 的认证头
@@ -2407,6 +2436,29 @@ class TestGatewayStorage(_GatewayStorageHelpers):
         # 快照记下,供 push 算增量
         snap = gw._snapshots[str(work_dir)]
         assert set(snap) == {"job.json", "out/n.md"}
+
+    @pytest.mark.asyncio
+    async def test_part_pull_only_downloads_own_prefix(self, tmp_path):
+        gw, client = self._gw(tmp_path)
+        client.get.return_value = self._resp(json_data={"files": [
+            "job.json",
+            "parts/pt_a/input/source.mp4",
+            "parts/pt_b/input/source.mp4",
+        ]})
+
+        def _stream(method, url, headers=None):
+            return self._stream_cm(b"A")
+
+        client.stream.side_effect = _stream
+        step = execution_step_key(part_scope("pt_a"), "01_download")
+        work_dir = await gw.pull("j1", step)
+
+        assert (work_dir / "parts" / "pt_a" / "input" / "source.mp4").read_bytes() == b"A"
+        assert not (work_dir / "job.json").exists()
+        assert not (work_dir / "parts" / "pt_b").exists()
+        assert [call.args[1] for call in client.stream.call_args_list] == [
+            "/api/runner/jobs/j1/artifacts/parts/pt_a/input/source.mp4",
+        ]
 
     @pytest.mark.asyncio
     async def test_pull_disconnect_preserves_target_and_cleans_staging(self, tmp_path):
@@ -2456,6 +2508,31 @@ class TestGatewayStorage(_GatewayStorageHelpers):
         content = client.put.call_args.kwargs["content"]
         # 大文件流式上传:content 是 async 生成器,消费后应还原完整字节
         assert b"".join([c async for c in content]) == b"NOTE"
+
+    @pytest.mark.asyncio
+    async def test_push_enforces_job_and_part_write_scope(self, tmp_path):
+        gw, client = self._gw(tmp_path)
+        client.put.return_value = self._resp()
+        work_dir = tmp_path / "work" / "j1"
+        (work_dir / "parts" / "pt_a").mkdir(parents=True)
+        (work_dir / "parts" / "pt_b").mkdir(parents=True)
+        (work_dir / "output").mkdir(parents=True)
+        (work_dir / "parts" / "pt_a" / "a.md").write_text("a")
+        (work_dir / "parts" / "pt_b" / "b.md").write_text("b")
+        (work_dir / "output" / "root.md").write_text("root")
+        gw._snapshots[str(work_dir)] = {}
+
+        await gw.push("j1", "09_merge_parts", work_dir)
+        assert [call.args[0] for call in client.put.call_args_list] == [
+            "/api/runner/jobs/j1/artifacts/output/root.md",
+        ]
+
+        client.put.reset_mock()
+        step = execution_step_key(part_scope("pt_a"), "01_download")
+        await gw.push("j1", step, work_dir)
+        assert [call.args[0] for call in client.put.call_args_list] == [
+            "/api/runner/jobs/j1/artifacts/parts/pt_a/a.md",
+        ]
 
     @pytest.mark.asyncio
     async def test_read_file_404_returns_none(self, tmp_path):
@@ -2572,6 +2649,26 @@ class TestGatewayStorageReuse(_GatewayStorageHelpers):
         # 帧图回传,source.mp4 被挡(留本机)
         assert "/api/runner/jobs/j1/artifacts/out/frame.jpg" in put_urls
         assert "/api/runner/jobs/j1/artifacts/input/source.mp4" not in put_urls
+
+    @pytest.mark.asyncio
+    async def test_part_no_push_matches_part_relative_path(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("STORAGE_NO_PUSH_GLOBS", "input/source.mp4")
+        gw, client = self._gw(tmp_path)
+        client.put.return_value = self._resp()
+        work_dir = tmp_path / "work" / "j1"
+        part_root = work_dir / "parts" / "pt_a"
+        (part_root / "input").mkdir(parents=True)
+        (part_root / "assets").mkdir()
+        (part_root / "input" / "source.mp4").write_bytes(b"BIGVIDEO")
+        (part_root / "assets" / "frame.jpg").write_bytes(b"IMG")
+        gw._snapshots[str(work_dir)] = {}
+        step = execution_step_key(part_scope("pt_a"), "04_frames")
+
+        await gw.push("j1", step, work_dir)
+
+        put_urls = [call.args[0] for call in client.put.call_args_list]
+        assert "/api/runner/jobs/j1/artifacts/parts/pt_a/assets/frame.jpg" in put_urls
+        assert "/api/runner/jobs/j1/artifacts/parts/pt_a/input/source.mp4" not in put_urls
 
     @pytest.mark.asyncio
     async def test_reuse_pull_skips_locally_present(self, tmp_path, monkeypatch):

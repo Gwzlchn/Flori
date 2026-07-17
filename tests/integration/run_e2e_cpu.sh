@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 端到端集成测试：下载 + CPU 步骤（不含 AI 笔记生成）
-# 覆盖：视频上传、视频 URL 下载、论文上传、论文 URL 下载
+# 覆盖：Video Part URL、视频平台 URL、论文上传、论文 URL 下载
 set -uo pipefail
 
 API="http://localhost:8000"
@@ -21,6 +21,8 @@ import sys, json
 d = json.load(sys.stdin)
 targets = '$target_steps'.split(',')
 steps = {s['name']: s['status'] for s in d['steps']}
+for part in d.get('parts', []):
+    steps.update({s['name']: s['status'] for s in part.get('steps', [])})
 all_done = all(steps.get(t) in ('done', 'skipped') for t in targets)
 any_failed = d['status'] == 'failed'
 if all_done:
@@ -61,6 +63,10 @@ for s in d['steps']:
     err = s.get('error','')[:60] if s.get('error') else ''
     icon = {'done':'✓','skipped':'⏭','failed':'✗','waiting':'⏳','ready':'🔄','running':'▶'}.get(s['status'],'?')
     print(f'  {icon} {s[\"name\"]:20s} {s[\"status\"]:10s} {dur:>8s}  {err}')
+for part in d.get('parts', []):
+    print(f'  Part {part[\"part_index\"]}: {part.get(\"title\") or part[\"part_id\"]}')
+    for s in part.get('steps', []):
+        print(f'    {s[\"name\"]:20s} {s[\"status\"]:10s}')
 "
 }
 
@@ -68,15 +74,14 @@ for s in d['steps']:
 log "═══ E2E 集成测试：下载 + CPU 步骤 ═══"
 log ""
 
-# ─── TC-1: 视频上传（最短的 58MB 视频）───
-VIDEO_FILE="${TEST_VIDEO_FILE:?请设置 TEST_VIDEO_FILE 环境变量指向一个测试用 mp4 文件}"
+# ─── TC-1: 通用 Video Part URL ───
+VIDEO_URL="${TEST_VIDEO_URL:?请设置 TEST_VIDEO_URL 为 worker 可访问的视频 URL}"
 
-log "TC-1: 视频上传 → CPU 步骤链"
-log "  文件: $(du -m "$VIDEO_FILE" | cut -f1)MB"
-RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload?content_type=video" \
-  -F "file=@$VIDEO_FILE" \
-  -F "domain=deep-learning" \
-  -F 'style_tags=["case-study"]')
+log "TC-1: Video Part URL → CPU 步骤链"
+log "  URL: $VIDEO_URL"
+RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs" \
+  -H "Content-Type: application/json" \
+  -d "{\"content_type\":\"video\",\"parts\":[{\"url\":\"$VIDEO_URL\",\"title\":\"E2E P01\"}],\"domain\":\"deep-learning\",\"style_tags\":[\"case-study\"]}")
 JOB1=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
 log "  Job: $JOB1"
 
@@ -88,7 +93,7 @@ if wait_steps_done "$JOB1" "$CPU_STEPS" 900; then
   # 验证产物
   MECH_LEN=$(curl --noproxy '*' -s "$API/api/jobs/$JOB1/notes/mechanical" | wc -c)
   if [ "$MECH_LEN" -gt 500 ]; then
-    pass "TC-1: 视频上传 CPU 步骤链完成 (mechanical=${MECH_LEN}字节)"
+    pass "TC-1: Video Part CPU 步骤链完成 (mechanical=${MECH_LEN}字节)"
   else
     fail "TC-1" "notes_mechanical 太短: ${MECH_LEN}字节"
   fi
@@ -105,7 +110,7 @@ BV_ID="BV11cXsBVEqc"
 log "  BV: $BV_ID (390s/6.5min)"
 RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs" \
   -H "Content-Type: application/json" \
-  -d "{\"url\": \"$BV_ID\", \"content_type\": \"video\", \"domain\": \"general\"}")
+  -d "{\"content_type\":\"video\",\"parts\":[{\"url\":\"$BV_ID\"}],\"domain\":\"general\"}")
 JOB2=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
 log "  Job: $JOB2"
 

@@ -12,12 +12,29 @@
             "title": "Calls",
             "type": "array"
           },
+          "part_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Part Id"
+          },
+          "scope_key": {
+            "title": "Scope Key",
+            "type": "string"
+          },
           "step": {
             "title": "Step",
             "type": "string"
           }
         },
         "required": [
+          "scope_key",
+          "part_id",
           "step",
           "calls"
         ],
@@ -353,6 +370,21 @@
             "title": "Label",
             "type": "string"
           },
+          "part_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Part Id"
+          },
+          "scope_key": {
+            "title": "Scope Key",
+            "type": "string"
+          },
           "step": {
             "title": "Step",
             "type": "string"
@@ -363,6 +395,8 @@
           }
         },
         "required": [
+          "scope_key",
+          "part_id",
           "step",
           "label",
           "total_bytes",
@@ -868,9 +902,42 @@
             "title": "Kind",
             "type": "string"
           },
+          "part_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Part Id"
+          },
           "start_ms": {
             "title": "Start Ms",
             "type": "integer"
+          },
+          "timeline_end_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timeline End Ms"
+          },
+          "timeline_start_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timeline Start Ms"
           }
         },
         "required": [
@@ -2456,6 +2523,7 @@
         "type": "object"
       },
       "JobCreateRequest": {
+        "additionalProperties": false,
         "properties": {
           "collection_id": {
             "anyOf": [
@@ -2498,6 +2566,22 @@
             "title": "Mechanical Only",
             "type": "boolean"
           },
+          "parts": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/JobPartCreate"
+                },
+                "maxItems": 128,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parts"
+          },
           "smart_note": {
             "anyOf": [
               {
@@ -2516,6 +2600,18 @@
             "title": "Style Tags",
             "type": "array"
           },
+          "title": {
+            "anyOf": [
+              {
+                "maxLength": 300,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
           "url": {
             "anyOf": [
               {
@@ -2529,6 +2625,36 @@
           }
         },
         "title": "JobCreateRequest",
+        "type": "object"
+      },
+      "JobCreatedPartResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "part_id": {
+            "title": "Part Id",
+            "type": "string"
+          },
+          "part_index": {
+            "title": "Part Index",
+            "type": "integer"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "part_id",
+          "part_index"
+        ],
+        "title": "JobCreatedPartResponse",
         "type": "object"
       },
       "JobCreatedResponse": {
@@ -2557,6 +2683,13 @@
           "job_id": {
             "title": "Job Id",
             "type": "string"
+          },
+          "parts": {
+            "items": {
+              "$ref": "#/components/schemas/JobCreatedPartResponse"
+            },
+            "title": "Parts",
+            "type": "array"
           },
           "pipeline": {
             "title": "Pipeline",
@@ -2655,6 +2788,13 @@
             "additionalProperties": true,
             "title": "Meta",
             "type": "object"
+          },
+          "parts": {
+            "items": {
+              "$ref": "#/components/schemas/JobPartResponse"
+            },
+            "title": "Parts",
+            "type": "array"
           },
           "pipeline": {
             "title": "Pipeline",
@@ -2844,6 +2984,96 @@
         "title": "JobListResponse",
         "type": "object"
       },
+      "JobPartCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "anyOf": [
+              {
+                "maxLength": 300,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "url": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "JobPartCreate",
+        "type": "object"
+      },
+      "JobPartResponse": {
+        "properties": {
+          "media": {
+            "additionalProperties": true,
+            "title": "Media",
+            "type": "object"
+          },
+          "part_id": {
+            "title": "Part Id",
+            "type": "string"
+          },
+          "part_index": {
+            "title": "Part Index",
+            "type": "integer"
+          },
+          "progress_pct": {
+            "title": "Progress Pct",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/StepResponse"
+            },
+            "title": "Steps",
+            "type": "array"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "part_id",
+          "part_index",
+          "status",
+          "progress_pct"
+        ],
+        "title": "JobPartResponse",
+        "type": "object"
+      },
       "JobRebuildResponse": {
         "additionalProperties": false,
         "properties": {
@@ -2949,6 +3179,17 @@
             "title": "Job Id",
             "type": "string"
           },
+          "part_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Part Id"
+          },
           "status": {
             "title": "Status",
             "type": "string"
@@ -2972,6 +3213,17 @@
           "job_id": {
             "title": "Job Id",
             "type": "string"
+          },
+          "part_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Part Id"
           },
           "provider": {
             "title": "Provider",
@@ -3615,6 +3867,14 @@
           "prompt_locked": {
             "title": "Prompt Locked",
             "type": "boolean"
+          },
+          "scope": {
+            "enum": [
+              "job",
+              "part"
+            ],
+            "title": "Scope",
+            "type": "string"
           }
         },
         "required": [
@@ -3624,7 +3884,8 @@
           "needs",
           "is_ai",
           "has_override",
-          "prompt_locked"
+          "prompt_locked",
+          "scope"
         ],
         "title": "PipelineStepResponse",
         "type": "object"
@@ -12715,7 +12976,7 @@
     },
     "/api/jobs/{job_id}/ai-logs": {
       "get": {
-        "description": "该 job 各 AI 步的完整 AI 审计日志(prompt 白盒化)。\n读 output/ai_logs/{step}.jsonl —— 每次 LLM 调用一条(含路由/尝试链/prompt 渲染/输出/用量/raw),\n按 job_id 归成一条 trace;给 step 时只返回该步。经 storage 读,兼容本地/MinIO。",
+        "description": "返回Job或显式Part scope的AI审计日志,不做跨scope隐式聚合。",
         "operationId": "job_ai_logs_api_jobs__job_id__ai_logs_get",
         "parameters": [
           {
@@ -12741,6 +13002,22 @@
                 }
               ],
               "title": "Step"
+            }
+          },
+          {
+            "in": "query",
+            "name": "part_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Part Id"
             }
           }
         ],

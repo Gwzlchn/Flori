@@ -3,7 +3,7 @@ import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useJobStore } from '../../stores/jobs'
 import { useGlobalStore } from '../../stores/global'
-import { Send, Upload, X } from 'lucide-vue-next'
+import { ArrowDown, ArrowUp, Plus, Send, Trash2, Upload, X } from 'lucide-vue-next'
 import {
   DOCUMENT_KIND_CATALOG,
   contentTypeForUpload,
@@ -20,6 +20,11 @@ const jobStore = useJobStore()
 const globalStore = useGlobalStore()
 
 const url = ref('')
+const sourceMode = ref<'single' | 'multipart_video'>('single')
+const videoTitle = ref('')
+const videoParts = ref([
+  { url: '', title: '' },
+])
 const domain = ref('general')
 // AI 智能笔记开关:auto=按文档体裁默认(article 关/其余开)、on=强制生成、off=强制不生成。
 const smartNote = ref<'auto' | 'on' | 'off'>('auto')
@@ -36,7 +41,14 @@ const domains = computed(() => {
   return list
 })
 const selectedUploadType = computed(() => file.value ? contentTypeForUpload(file.value.name) : undefined)
-const canChooseDocumentKind = computed(() => !file.value || selectedUploadType.value === 'document')
+const isMultipartVideo = computed(() => sourceMode.value === 'multipart_video')
+const canChooseDocumentKind = computed(() => !isMultipartVideo.value && (!file.value || selectedUploadType.value === 'document'))
+const canSubmit = computed(() => {
+  if (isMultipartVideo.value) {
+    return videoParts.value.length > 0 && videoParts.value.every(part => part.url.trim())
+  }
+  return Boolean(url.value.trim() || file.value)
+})
 
 onMounted(() => {
   globalStore.fetchProfiles()
@@ -60,13 +72,54 @@ function clearFile() {
   file.value = null
 }
 
+function setSourceMode(mode: 'single' | 'multipart_video') {
+  sourceMode.value = mode
+  error.value = ''
+  if (mode === 'multipart_video') {
+    file.value = null
+    url.value = ''
+    documentKind.value = ''
+  }
+}
+
+function addVideoPart() {
+  if (videoParts.value.length >= 128) return
+  videoParts.value.push({ url: '', title: '' })
+}
+
+function removeVideoPart(index: number) {
+  if (videoParts.value.length <= 1) return
+  videoParts.value.splice(index, 1)
+}
+
+function moveVideoPart(index: number, offset: -1 | 1) {
+  const target = index + offset
+  if (target < 0 || target >= videoParts.value.length) return
+  const [part] = videoParts.value.splice(index, 1)
+  videoParts.value.splice(target, 0, part)
+}
+
 async function submit() {
-  if (!url.value.trim() && !file.value) return
+  if (!canSubmit.value) return
   error.value = ''
   submitting.value = true
   try {
     let jobId: string
-    if (file.value) {
+    if (isMultipartVideo.value) {
+      const res = await jobStore.createJob({
+        content_type: 'video',
+        title: videoTitle.value.trim() || undefined,
+        parts: videoParts.value.map(part => ({
+          url: part.url.trim(),
+          ...(part.title.trim() ? { title: part.title.trim() } : {}),
+        })),
+        domain: domain.value,
+        style_tags: selectedTags.value,
+        ...(smartNote.value === 'auto' ? {} : { smart_note: smartNote.value === 'on' }),
+        ...(processingMode.value === 'mechanical_only' ? { mechanical_only: true } : {}),
+      })
+      jobId = res.job_id
+    } else if (file.value) {
       const res = await jobStore.uploadJob(
         file.value,
         domain.value,
@@ -101,14 +154,43 @@ async function submit() {
   <div data-submit-form :class="bare ? '' : 'bg-white rounded-xl border border-gray-200 p-4'">
     <h3 v-if="!bare" class="text-sm font-semibold text-gray-700 mb-3">快速投递</h3>
     <form @submit.prevent="submit" class="space-y-3">
-      <div class="flex gap-2">
+      <div class="source-tabs" role="tablist" aria-label="投递类型">
+        <button type="button" :class="{ active: !isMultipartVideo }" data-test="single-source-mode" @click="setSourceMode('single')">单链接 / 文件</button>
+        <button type="button" :class="{ active: isMultipartVideo }" data-test="multipart-video-mode" @click="setSourceMode('multipart_video')">视频 (单/多 Part)</button>
+      </div>
+
+      <div v-if="!isMultipartVideo" class="flex gap-2">
         <input
           v-model="url"
           type="text"
-          placeholder="粘贴 URL (BV号 / arXiv / 文章 / 音频链接)"
+          placeholder="粘贴文档 / 文章 / 音频 URL"
           :disabled="!!file"
           class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none disabled:bg-gray-50 disabled:text-gray-400"
         />
+      </div>
+
+      <div v-else class="multipart-editor" data-test="multipart-editor">
+        <input
+          v-model="videoTitle"
+          type="text"
+          placeholder="整场视频标题 (可选)"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+          data-test="multipart-title"
+        />
+        <div class="part-list">
+          <div v-for="(part, index) in videoParts" :key="index" class="part-row" :data-test="`part-row-${index + 1}`">
+            <span class="part-index">P{{ String(index + 1).padStart(2, '0') }}</span>
+            <input v-model="part.url" type="text" required placeholder="视频 URL / BV号" :data-test="`part-url-${index + 1}`" />
+            <input v-model="part.title" type="text" placeholder="小标题 (可选)" :data-test="`part-title-${index + 1}`" />
+            <div class="part-actions">
+              <button type="button" title="上移" :disabled="index === 0" @click="moveVideoPart(index, -1)"><ArrowUp :size="14" /></button>
+              <button type="button" title="下移" :disabled="index === videoParts.length - 1" @click="moveVideoPart(index, 1)"><ArrowDown :size="14" /></button>
+              <button type="button" title="删除" :disabled="videoParts.length === 1" @click="removeVideoPart(index)"><Trash2 :size="14" /></button>
+            </div>
+          </div>
+        </div>
+        <button type="button" class="add-part" data-test="add-part" :disabled="videoParts.length >= 128" @click="addVideoPart"><Plus :size="14" />添加 Part</button>
+        <p class="multipart-hint">按 P01 → PN 顺序处理；各 Part 独立转写，全部完成后只生成一套笔记。</p>
       </div>
 
       <div class="flex flex-wrap items-center gap-2">
@@ -154,7 +236,7 @@ async function submit() {
       </div>
 
       <div class="flex items-center gap-2">
-        <label class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded-lg cursor-pointer hover:bg-gray-50 transition-colors">
+        <label v-if="!isMultipartVideo" class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded-lg cursor-pointer hover:bg-gray-50 transition-colors">
           <Upload :size="14" />
           <span>上传文件</span>
           <input type="file" :accept="uploadAccept()" class="hidden" @change="onFileChange" />
@@ -168,7 +250,8 @@ async function submit() {
 
         <button
           type="submit"
-          :disabled="submitting || (!url.trim() && !file)"
+          :disabled="submitting || !canSubmit"
+          data-test="submit-job"
           class="flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
           <Send :size="14" />
@@ -180,3 +263,25 @@ async function submit() {
     </form>
   </div>
 </template>
+
+<style scoped>
+.source-tabs { display: inline-flex; padding: 3px; gap: 2px; border: 1px solid var(--line, #e5e7eb); border-radius: 9px; background: var(--raised, #f8fafc); }
+.source-tabs button { padding: 5px 10px; border-radius: 6px; color: var(--ink-500, #64748b); font-size: 12px; font-weight: 600; }
+.source-tabs button.active { color: var(--brand-700, #1d4ed8); background: white; box-shadow: 0 1px 2px rgb(15 23 42 / 8%); }
+.multipart-editor { display: flex; flex-direction: column; gap: 9px; padding: 11px; border: 1px solid var(--line, #e5e7eb); border-radius: 10px; background: var(--raised, #f8fafc); }
+.part-list { display: flex; flex-direction: column; gap: 7px; }
+.part-row { display: grid; grid-template-columns: 42px minmax(190px, 1.5fr) minmax(120px, .8fr) auto; gap: 7px; align-items: center; }
+.part-index { font: 700 12px/1 ui-monospace, monospace; color: var(--brand-700, #1d4ed8); }
+.part-row input { min-width: 0; padding: 7px 9px; border: 1px solid #d1d5db; border-radius: 7px; background: white; font-size: 12px; outline: none; }
+.part-row input:focus { border-color: #3b82f6; box-shadow: 0 0 0 2px rgb(59 130 246 / 15%); }
+.part-actions { display: flex; gap: 3px; }
+.part-actions button { padding: 5px; color: var(--ink-500, #64748b); border-radius: 5px; }
+.part-actions button:hover:not(:disabled) { background: white; color: var(--ink-800, #1e293b); }
+.part-actions button:disabled { opacity: .25; cursor: not-allowed; }
+.add-part { align-self: flex-start; display: inline-flex; align-items: center; gap: 5px; color: var(--brand-700, #1d4ed8); font-size: 12px; font-weight: 600; }
+.multipart-hint { margin: 0; color: var(--ink-500, #64748b); font-size: 11px; }
+@media (max-width: 720px) {
+  .part-row { grid-template-columns: 38px minmax(0, 1fr) auto; }
+  .part-row > input:nth-of-type(2) { grid-column: 2 / 4; }
+}
+</style>

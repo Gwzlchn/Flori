@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from shared.config import AppConfig
 from shared.db import Database
 from shared.redis_client import RedisClient
+from shared.step_scope import execution_step_key
 from shared.status import (
     DEFAULT_ONLINE_WINDOW_SEC,
     DEFAULT_STALE_WINDOW_SEC,
@@ -304,7 +305,7 @@ async def list_worker_tasks(
             "title": (briefs.get(s.job_id) or {}).get("title"),
             "content_type": (briefs.get(s.job_id) or {}).get("content_type"),
             "domain": (briefs.get(s.job_id) or {}).get("domain"),
-            "step": s.name,
+            "step": execution_step_key(s.scope_key, s.name),
             "status": s.status.value if hasattr(s.status, "value") else s.status,
             "started_at": _iso_utc(s.started_at),
             "finished_at": _iso_utc(s.finished_at),

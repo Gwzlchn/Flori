@@ -19,7 +19,7 @@ beforeEach(() => {
   installSourceCatalog({
     subscription_sources: [], job_sources: [],
     content_types: [
-      { type: 'video', label: '视频', upload_extensions: ['.mp4'] },
+      { type: 'video', label: '视频', upload_extensions: [] },
       { type: 'document', label: '文档', upload_extensions: ['.txt'] },
     ],
   })
@@ -135,7 +135,11 @@ describe('useJobStore 其它 action', () => {
   it('createJob POST /api/jobs 带 payload', async () => {
     post.mockResolvedValue({ job_id: 'new' })
     const store = useJobStore()
-    const payload = { url: 'http://x', content_type: 'video', domain: 'tech' }
+    const payload = {
+      content_type: 'video' as const,
+      parts: [{ url: 'http://x' }],
+      domain: 'tech',
+    }
     const res = await store.createJob(payload)
     expect(post).toHaveBeenCalledWith('/api/jobs', payload)
     expect(res).toEqual({ job_id: 'new' })
@@ -162,12 +166,25 @@ describe('useJobStore 其它 action', () => {
   it('uploadJob 纯机械模式写入 query', async () => {
     upload.mockResolvedValue({ job_id: 'up' })
     const store = useJobStore()
-    const file = new File(['x'], 'a.mp4', { type: 'video/mp4' })
+    const file = new File(['x'], 'a.txt', { type: 'text/plain' })
 
     await store.uploadJob(file, 'tech', [], undefined, true)
 
     const path = upload.mock.calls[0][0] as string
     expect(new URL(`http://local${path}`).searchParams.get('mechanical_only')).toBe('true')
+  })
+
+  it('uploadJob 不接受目录中意外残留的视频扩展名', async () => {
+    installSourceCatalog({
+      subscription_sources: [], job_sources: [],
+      content_types: [{ type: 'video', label: '视频', upload_extensions: ['.mp4'] }],
+    })
+    const file = new File(['x'], 'a.mp4', { type: 'video/mp4' })
+
+    await expect(useJobStore().uploadJob(file, 'tech', [])).rejects.toThrow(
+      '视频请使用单/多 Part 投递',
+    )
+    expect(upload).not.toHaveBeenCalled()
   })
 
   it('retryJob POST /api/jobs/:id/retry', async () => {

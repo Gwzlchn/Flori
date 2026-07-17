@@ -77,6 +77,12 @@ class SourceCatalogResponse(WireModel):
     source_profiles: list[SourceProfile]
 
 
+class JobCreatedPartResponse(WireModel):
+    part_id: str
+    part_index: int
+    title: str | None = None
+
+
 class JobCreatedResponse(WireModel):
     job_id: str
     content_type: str
@@ -84,6 +90,7 @@ class JobCreatedResponse(WireModel):
     pipeline: str
     status: str
     created_at: DateTimeString
+    parts: list[JobCreatedPartResponse] = Field(default_factory=list)
 
 
 class JobFacetsResponse(WireModel):
@@ -103,6 +110,7 @@ class JobRetryResponse(JobStatusResponse):
 
 class JobRerunResponse(JobStatusResponse):
     from_step: str
+    part_id: str | None = None
 
 
 class JobRerunSmartResponse(JobRerunResponse):
@@ -169,6 +177,8 @@ class JobConceptResponse(GlossaryTermResponse):
 
 
 class AiLogStep(WireModel):
+    scope_key: str
+    part_id: str | None
     step: str
     calls: list[dict[str, Any]]
 
@@ -199,6 +209,8 @@ class ArtifactFile(WireModel):
 
 
 class ArtifactGroup(WireModel):
+    scope_key: str
+    part_id: str | None
     step: str
     label: str
     total_bytes: int
@@ -479,6 +491,7 @@ class PipelineStepResponse(WireModel):
     is_ai: bool
     has_override: bool
     prompt_locked: bool
+    scope: Literal["job", "part"]
 
 
 class PipelineResponse(WireModel):

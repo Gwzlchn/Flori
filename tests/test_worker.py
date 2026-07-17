@@ -1615,8 +1615,8 @@ class TestCollectUsageOnFailure:
 
     def _spy(self, worker):
         calls = []
-        async def spy(job_id, step, work_dir):
-            calls.append((job_id, step))
+        async def spy(job_id, execution_step, step, work_dir):
+            calls.append((job_id, execution_step, step))
         worker._collect_usage = spy
         return calls
 
@@ -1636,7 +1636,7 @@ class TestCollectUsageOnFailure:
         claim = make_claim()
         await activate_claim(redis, claim, worker.worker_id)
         await worker.execute(claim)
-        assert calls == [("j_test_001", "A")]     # 失败路径也 collect
+        assert calls == [("j_test_001", "A", "A")]     # 失败路径也 collect
         assert len(await lifecycle_payloads(redis, "step_failed")) == 1
 
     @pytest.mark.asyncio
@@ -1653,7 +1653,7 @@ class TestCollectUsageOnFailure:
         calls = self._spy(worker)
 
         await worker.execute(make_claim())
-        assert calls == [("j_test_001", "A")]
+        assert calls == [("j_test_001", "A", "A")]
 
 
 class TestAITaskTranscript:

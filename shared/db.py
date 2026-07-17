@@ -31,6 +31,7 @@ from .models import (
     DEFAULT_AI_MODEL,
     DEFAULT_AI_PROVIDER,
     Job,
+    JobPart,
     JobStatus,
     Step,
     StepStatus,
@@ -52,6 +53,7 @@ from .status import (
     STALE,
     compute_worker_status,
 )
+from .step_scope import stable_part_id
 from .study import (
     MAX_SQLITE_INTEGER,
     STUDY_STATUSES,
@@ -980,11 +982,28 @@ class Database:
 
     # Job
 
-    def create_job(self, job: Job) -> None:
+    def create_job(self, job: Job, parts: list[JobPart] | None = None) -> None:
         # lineage_key 缺省由 id 反推(去时间戳),保证同源快照归一组。
+        if job.content_type == "video" and parts is None:
+            parts = [
+                JobPart(
+                    id=stable_part_id(job.id, 1),
+                    job_id=job.id,
+                    part_index=1,
+                    source_url=job.url,
+                    source_digest=job.source_digest,
+                    created_at=job.created_at,
+                    updated_at=job.updated_at,
+                )
+            ]
+        if job.content_type == "video" and not parts:
+            raise ValueError("video job requires at least one part")
+        if job.content_type != "video" and parts:
+            raise ValueError("only video jobs may contain parts")
         return _DatabaseAggregates.create_job(
             self,
             job,
+            parts,
         )
 
     def get_job(self, job_id: str) -> Job | None:
@@ -1178,6 +1197,9 @@ class Database:
             self,
             job_id,
         )
+
+    def get_parts(self, job_id: str) -> list[JobPart]:
+        return _JobsRepository.get_parts(self, job_id)
 
     def delete_step(self, job_id: str, step_name: str) -> None:
         """删单个步骤行(供 resubmit 对齐:删去当前 pipeline 不再有的步,避免 DB 残留旧步)。"""

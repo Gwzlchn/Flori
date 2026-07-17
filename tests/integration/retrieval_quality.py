@@ -239,9 +239,9 @@ def resolved_truth(fixture: dict, query: dict) -> list[dict]:
 async def _complete_pipeline(
     scheduler: Scheduler, redis, db: Database, config, job_id: str,
 ) -> None:
-    pipeline = db.get_job(job_id).pipeline
-    for step in config.pipelines[pipeline]["steps"]:
-        name = step["name"]
+    steps = await scheduler._get_job_pipeline_steps(job_id)
+    assert steps is not None
+    for name in steps:
         if await redis.get_step_status(job_id, name) == "skipped":
             continue
         await redis.set_step_status(job_id, name, "running")

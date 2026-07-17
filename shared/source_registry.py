@@ -84,6 +84,8 @@ def _validate_registry(raw: dict[str, Any]) -> None:
         extensions = spec.get("upload_extensions") or []
         if not isinstance(extensions, list):
             raise SourceRegistryError(f"content_types.{name}.upload_extensions must be a list")
+        if type(spec.get("public_upload", True)) is not bool:
+            raise SourceRegistryError(f"content_types.{name}.public_upload must be boolean")
         for extension in extensions:
             ext = str(extension).lower()
             if not ext.startswith(".") or ext in seen_extensions:
@@ -279,7 +281,15 @@ def subscription_source_spec(source_type: str) -> dict[str, Any] | None:
 def source_catalog() -> dict[str, Any]:
     """返回前端/OpenAPI 可消费的无检测实现细节视图。"""
     content_types = [
-        {"type": name, **copy.deepcopy(spec)}
+        {
+            "type": name,
+            "label": spec["label"],
+            "pipeline": spec["pipeline"],
+            "upload_extensions": (
+                copy.deepcopy(spec.get("upload_extensions") or [])
+                if spec.get("public_upload", True) else []
+            ),
+        }
         for name, spec in CONTENT_TYPE_SPECS.items()
     ]
     job_sources = [

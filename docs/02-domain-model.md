@@ -271,10 +271,11 @@ class Collection:
 ### Job（作业流水线）
 
 > **三层命名(领域核心,2026-06-27 统一)**:
-> - **Job(作业流水线)** = 一个内容项(视频/文档/音频)的整条处理流水线。论文、文章和白皮书是文档子类别。id `jobs_{src}_{原生id}`,jobs 表。
-> - **Step(步骤)** = 流水线里的一步(pipelines.yaml 定义 + 该 job 的步骤状态,job_steps 表 / Step 模型 / StepStatus)。
-> - **Task(任务)** = worker 认领执行的**最小单元** = 「某 Job 的某 Step 的一次执行」(claim={job_id,step,pool,exec_id},进 `queue:{pool}` 被 worker 认领)。**不是独立持久表**——一个 Task 落地为一条 job_steps 记录的一次执行;worker 的「当前任务」由 `current_job`+`current_step` 两字段表征。
-> 关系:Job 1 ──< N Step;每个 Step 的一次执行 = 一个 Task。**没有「子 job」**——job 含 step,worker 跑的是 task。
+> - **Job(作业流水线)** = 一个内容项的整条处理流水线。Document/Audio 各有一个顶层来源，Video 包含一个有序且不可变的 Part 清单。单来源 id 为 `jobs_{src}_{原生id}_{时间戳}`；Video 创建 id 为 `jobs_video_{creation fingerprint}`，jobs 表。
+> - **Part(视频分段)** = Video Job 的原始媒体边界，按 `part_index=1..N` 排序，记录独立 URL、标题和来源元数据。Part 不是子 Job，不拥有独立 lineage。
+> - **Step(步骤)** = pipeline 模板的一步，可声明 `scope=part|job`。Part 步按每个 Part 展开，Job 步只执行一次；`fan_in` 是 Part 到 Job 的唯一跨 scope 依赖。
+> - **Task(任务)** = worker 认领执行的**最小单元** = 某 Job 的某 scope Step 的一次执行。claim 的 `step` 为内部执行键；Job 步使用原步骤名，Part 步使用 `part:{part_id}::{step}`。Task 不是独立持久表。
+> 关系:Video Job 1 ──< N Part；Job/Part 各自拥有 Step；每个 Step 的一次执行 = 一个 Task。Part 只隔离原始媒体加工，合并后的笔记、概念、评审和检索仍属于 Job。
 
 ```python
 @dataclass
@@ -284,7 +285,7 @@ class Job:
     document_kind: str             # Document 必填；其他类型必须为空
     pipeline: str                  # 步骤链名 → pipelines.yaml
     collection_id: str | None      # 家集合（多对一，可空=未分类）
-    url: str | None
+    url: str | None                # Video 必须为空；Document/Audio 为顶层来源
     title: str | None
     domain: str                    # 继承自集合或独立指定（直接锚定领域）
     source: str                    # bilibili/youtube/arxiv/upload...（区分自动/手动来源）
@@ -296,6 +297,23 @@ class Job:
     created_at: datetime
     updated_at: datetime
     error: str | None
+```
+
+```python
+@dataclass
+class JobPart:
+    id: str                        # 同一 Job 内稳定，如 pt_<digest>
+    job_id: str
+    part_index: int                # 连续 1..N，创建后不可重排
+    title: str | None
+    source_url: str | None
+    source_ref: str | None
+    source_digest: str | None
+    size_bytes: int | None
+    duration_ms: int | None
+    meta: dict
+    created_at: datetime
+    updated_at: datetime
 ```
 
 `content_type` 表示顶层原始媒介与执行族，只允许 `video|document|audio`。`document_kind`
@@ -312,6 +330,11 @@ Document 的加工真相源是 `intermediate/document.json`，质量结论是
 每个 block、Figure、Table 和译文 segment 使用稳定 ID，并以独立 source fingerprint
 绑定 HTML locator、PDF page+bbox 和译文 range。质量状态只允许
 `complete|degraded|rejected`；歧义 crosswalk、低置信 OCR 或不可靠表格必须降级或拒绝，不能伪造精确定位。
+
+Video 的 Part 清单同时固化在 `job_parts` 与根 `job.json.parts[]`。Part 原始加工产物位于
+`parts/{part_id}/`，`01_download` 到 `08_punctuate` 在各 Part 内相互隔离；`09_merge_parts`
+按 `part_index` 确定性合并为 Job 级 transcript、provenance 和全局时间线。后续步骤不再携带 Part
+概念；证据 locator 在需要回到源媒体时显式保存 `part_id`、Part 内时间和合并时间。
 
 ### Concept / Term（概念节点 = 知识轴）
 
@@ -337,8 +360,8 @@ class Concept:                     # 表名仍为 glossary（历史）
 
 ### Step（步骤）/ Task（任务）/ Worker
 
-Step：`name`（各 pipeline 内 `01..N`）/status/pool/input_hash/worker_id/started_at/finished_at/duration_sec/meta/error/retries。
-Task（任务）：worker 认领执行的最小单元 = 某 Job 的某 Step 的一次执行(见上「三层命名」);非独立表,落地为 job_steps 记录的一次执行;经 `queue:{pool}` 派发、worker `claim` 认领。`GET /api/workers/{id}/tasks` 返回某 worker 的 task 历史(每条=一个 step 记录)。
+Step：`scope_key`（`job` 或 `part:{part_id}`）+ `name`（pipeline 模板步骤名）/status/pool/input_hash/worker_id/started_at/finished_at/duration_sec/meta/error/retries。
+Task（任务）：worker 认领执行的最小单元 = 某 Job 的某 scope Step 的一次执行；非独立表，落地为 `job_steps` 记录的一次执行，经 `queue:{pool}` 派发。Redis、租约、Worker 当前步骤和 AI usage 使用执行键消除同名 Part 步冲突；API/DB 展示时拆回 `scope_key + name`。`GET /api/workers/{id}/tasks` 返回某 worker 的 task 历史。
 Worker：两份存储（Redis 心跳 + SQLite 持久），字段见 §2.3 `workers` 表。其 `current_job`+`current_step` 表示「该 worker 当前正在跑的 task」(current_job 存的是该 task 所属的内容作业 job_id)。
 
 ## 2.2 状态机
@@ -366,7 +389,7 @@ stateDiagram-v2
     skipped --> [*]
 ```
 
-**Step 跳过条件（视频 pipeline，键 01..N）**：`02_whisper`（已有 .srt）/ `07_danmaku`（无 .ass）/ `08_punctuate`（无 .srt）。跳过标 `skipped`，不阻塞后续。
+**Step 跳过条件（视频 pipeline，键 01..N）**：每个 Part 独立判断 `02_whisper`（已有 .srt）/ `07_danmaku`（无 .ass）/ `08_punctuate`（无 .srt）。跳过标 `skipped`，不阻塞本 Part 后续和 Job fan-in。
 
 ## 2.3 数据库表结构
 
@@ -392,6 +415,19 @@ CREATE TABLE jobs (
 CREATE INDEX idx_jobs_status ON jobs(status);
 CREATE INDEX idx_jobs_collection ON jobs(collection_id);
 
+CREATE TABLE job_parts (
+    id TEXT NOT NULL,
+    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    part_index INTEGER NOT NULL CHECK (part_index >= 1),
+    title TEXT, source_url TEXT, source_ref TEXT, source_digest TEXT,
+    size_bytes INTEGER, duration_ms INTEGER,
+    meta TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    PRIMARY KEY (job_id, id),
+    UNIQUE (job_id, part_index)
+);
+CREATE INDEX idx_job_parts_job ON job_parts(job_id, part_index);
+
 -- 集合（订阅属性内联，无独立 subscriptions 表）
 CREATE TABLE collections (
     id TEXT PRIMARY KEY,                   -- col_{hex} / registry 派生的订阅 id
@@ -409,12 +445,13 @@ CREATE TABLE collections (
 
 CREATE TABLE job_steps (
     job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    scope_key TEXT NOT NULL DEFAULT 'job', -- job / part:{part_id}
     step TEXT NOT NULL,                    -- 各 pipeline 内 01..N
     status TEXT NOT NULL DEFAULT 'waiting',
     pool TEXT NOT NULL, input_hash TEXT, worker_id TEXT,
     started_at TEXT, finished_at TEXT, duration_sec REAL,
     meta TEXT, error TEXT, retries INTEGER DEFAULT 0,
-    PRIMARY KEY (job_id, step)
+    PRIMARY KEY (job_id, scope_key, step)
 );
 
 CREATE TABLE workers (

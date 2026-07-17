@@ -157,7 +157,9 @@ class TestDockerSuccess:
         container = _FakeContainer(status_code=0)
         fake_docker["client"] = _FakeClient(container)
 
-        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        runner = DockerStepRunner(
+            "w1", host_work_root=str(tmp_path), container_work_root=str(tmp_path)
+        )
         rc, _ = await runner.run_step(_ctx(work_dir), _noop_progress, _noop_tick)
 
         assert rc == 0
@@ -173,7 +175,13 @@ class TestDockerSuccess:
         assert kw["labels"] == {
             "flori.job": "j1", "flori.step": "A", "flori.worker": "w1",
         }
-        assert kw["environment"] == {"STEP_EXEC_ID": "e1", "PYTHONPATH": "/app"}
+        assert kw["environment"] == {
+            "STEP_EXEC_ID": "e1",
+            "STEP_JOB_ID": "j1",
+            "STEP_SCOPE_KEY": "job",
+            "STEP_PART_ID": "",
+            "PYTHONPATH": "/app",
+        }
         assert kw["log_config"].type == "local"
         assert kw["log_config"].config == {
             "max-size": "10m", "max-file": "3", "compress": "true",
@@ -192,7 +200,9 @@ class TestDockerSuccess:
         container = _FakeContainer(status_code=0)
         fake_docker["client"] = _FakeClient(container)
 
-        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        runner = DockerStepRunner(
+            "w1", host_work_root=str(tmp_path), container_work_root=str(tmp_path)
+        )
         await runner.run_step(_ctx(work_dir, use_gpu=True), _noop_progress, _noop_tick)
 
         dr = runner._client.containers.run_kwargs["device_requests"]
@@ -205,7 +215,9 @@ class TestDockerSuccess:
         container = _FakeContainer(status_code=0)
         fake_docker["client"] = _FakeClient(container)
 
-        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        runner = DockerStepRunner(
+            "w1", host_work_root=str(tmp_path), container_work_root=str(tmp_path)
+        )
         await runner.run_step(_ctx(work_dir, use_gpu=False), _noop_progress, _noop_tick)
 
         assert runner._client.containers.run_kwargs["device_requests"] is None
@@ -224,7 +236,9 @@ class TestNetworkPolicy:
         container = _FakeContainer(status_code=0)
         fake_docker["client"] = _FakeClient(container)
 
-        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        runner = DockerStepRunner(
+            "w1", host_work_root=str(tmp_path), container_work_root=str(tmp_path)
+        )
         await runner.run_step(_ctx(work_dir, pool=pool), _noop_progress, _noop_tick)
 
         # io 下载/ai 走默认网络,network_mode 不设(None)
@@ -239,7 +253,9 @@ class TestNetworkPolicy:
         container = _FakeContainer(status_code=0)
         fake_docker["client"] = _FakeClient(container)
 
-        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        runner = DockerStepRunner(
+            "w1", host_work_root=str(tmp_path), container_work_root=str(tmp_path)
+        )
         await runner.run_step(_ctx(work_dir, pool=pool), _noop_progress, _noop_tick)
 
         assert runner._client.containers.run_kwargs["network_mode"] == "none"
@@ -259,7 +275,9 @@ class TestSecretsWhitelist:
         container = _FakeContainer(status_code=0)
         fake_docker["client"] = _FakeClient(container)
 
-        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        runner = DockerStepRunner(
+            "w1", host_work_root=str(tmp_path), container_work_root=str(tmp_path)
+        )
         await runner.run_step(_ctx(work_dir, pool="cpu"), _noop_progress, _noop_tick)
 
         env = runner._client.containers.run_kwargs["environment"]
@@ -276,7 +294,9 @@ class TestSecretsWhitelist:
         container = _FakeContainer(status_code=0)
         fake_docker["client"] = _FakeClient(container)
 
-        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        runner = DockerStepRunner(
+            "w1", host_work_root=str(tmp_path), container_work_root=str(tmp_path)
+        )
         await runner.run_step(_ctx(work_dir, pool="cpu"), _noop_progress, _noop_tick)
 
         env = runner._client.containers.run_kwargs["environment"]
@@ -295,7 +315,9 @@ class TestSecretsWhitelist:
         container = _FakeContainer(status_code=0)
         fake_docker["client"] = _FakeClient(container)
 
-        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        runner = DockerStepRunner(
+            "w1", host_work_root=str(tmp_path), container_work_root=str(tmp_path)
+        )
         await runner.run_step(_ctx(work_dir, pool="ai"), _noop_progress, _noop_tick)
 
         env = runner._client.containers.run_kwargs["environment"]
@@ -319,7 +341,9 @@ class TestSecretsWhitelist:
         container = _FakeContainer(status_code=0)
         fake_docker["client"] = _FakeClient(container)
 
-        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        runner = DockerStepRunner(
+            "w1", host_work_root=str(tmp_path), container_work_root=str(tmp_path)
+        )
         await runner.run_step(_ctx(work_dir, pool=pool), _noop_progress, _noop_tick)
 
         env = runner._client.containers.run_kwargs["environment"]
@@ -340,7 +364,9 @@ class TestDockerCleanup:
         container = _FakeContainer(status_code=1)
         fake_docker["client"] = _FakeClient(container)
 
-        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        runner = DockerStepRunner(
+            "w1", host_work_root=str(tmp_path), container_work_root=str(tmp_path)
+        )
         rc, _ = await runner.run_step(_ctx(work_dir), _noop_progress, _noop_tick)
 
         assert rc == 1
@@ -353,7 +379,9 @@ class TestDockerCleanup:
         container = _FakeContainer(status_code=0, wait_delay=2.0)
         fake_docker["client"] = _FakeClient(container)
 
-        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        runner = DockerStepRunner(
+            "w1", host_work_root=str(tmp_path), container_work_root=str(tmp_path)
+        )
         with pytest.raises(asyncio.TimeoutError):
             await runner.run_step(_ctx(work_dir, timeout_sec=1), _noop_progress, _noop_tick)
 
@@ -391,7 +419,9 @@ class TestDockerCleanup:
 
         container = _TailContainer(status_code=0, wait_delay=0.2)
         fake_docker["client"] = _FakeClient(container)
-        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        runner = DockerStepRunner(
+            "w1", host_work_root=str(tmp_path), container_work_root=str(tmp_path)
+        )
 
         with pytest.raises(asyncio.TimeoutError):
             await runner.run_step(
@@ -422,7 +452,9 @@ class TestDockerCleanup:
         container = _StuckWaitContainer()
         fake_docker["client"] = _FakeClient(container)
         monkeypatch.setenv("FLORI_DOCKER_CONTROL_TIMEOUT_SEC", "0.05")
-        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        runner = DockerStepRunner(
+            "w1", host_work_root=str(tmp_path), container_work_root=str(tmp_path)
+        )
         started = time.monotonic()
         try:
             with pytest.raises(asyncio.TimeoutError):
@@ -450,7 +482,9 @@ class TestDockerCleanup:
         container = _KillFailsContainer(wait_delay=0.2)
         fake_docker["client"] = _FakeClient(container)
         monkeypatch.setenv("FLORI_DOCKER_CONTROL_TIMEOUT_SEC", "0.05")
-        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        runner = DockerStepRunner(
+            "w1", host_work_root=str(tmp_path), container_work_root=str(tmp_path)
+        )
         started = time.monotonic()
 
         with pytest.raises(asyncio.TimeoutError):
@@ -496,7 +530,9 @@ class TestDockerCleanup:
         container.logs = lambda stream=False, follow=False: stream_obj
         fake_docker["client"] = _FakeClient(container)
         monkeypatch.setenv("FLORI_DOCKER_CONTROL_TIMEOUT_SEC", "0.05")
-        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        runner = DockerStepRunner(
+            "w1", host_work_root=str(tmp_path), container_work_root=str(tmp_path)
+        )
         started = time.monotonic()
 
         returncode, tail = await runner.run_step(
@@ -538,7 +574,9 @@ class TestDockerCleanup:
         container = _RemoveReleasesContainer(status_code=0)
         fake_docker["client"] = _FakeClient(container)
         monkeypatch.setenv("FLORI_DOCKER_CONTROL_TIMEOUT_SEC", "0.05")
-        runner = DockerStepRunner("w1", host_work_root=str(tmp_path))
+        runner = DockerStepRunner(
+            "w1", host_work_root=str(tmp_path), container_work_root=str(tmp_path)
+        )
         started = time.monotonic()
 
         returncode, _tail = await runner.run_step(

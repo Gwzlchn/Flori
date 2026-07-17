@@ -3,8 +3,9 @@
 只依赖 stdlib + source_detect(低层,无循环导入)。id 仅作主键/URL slug;
 去重靠业务键(ingested_items 等),与 id 无关。
 
-- lineage_key(url,...) = jobs_{前缀}_{原生id}:同源稳定基础 id(去时间戳),同一内容的所有快照共用。
-- content_job_id(url,...) = lineage_key + 时间戳:所有 job 带时间戳,重投/重建 = 同 lineage 的新快照。
+- lineage_key(url,...) = jobs_{前缀}_{原生id}:单来源内容的稳定基础 id。
+- content_job_id(url,...) = lineage_key + 时间戳:Document/Audio 与内部单来源快照使用。
+- Video 创建由完整 Part manifest 和处理上下文生成确定性 `jobs_video_<fingerprint>`；重建仍沿用其 lineage。
 - subscription_collection_id / generate_worker_id / generate_collection_id 同此处维护。
 """
 

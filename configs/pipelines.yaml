@@ -66,18 +66,18 @@ video:
   jobs:
     "01_download":
       label: "下载"
+      scope: part
       run: steps.common.step_01_download
       pool: io
       retry: 3
       timeout: 2400   # 长视频(30min+)1080p 下载 + 推 MinIO 可能超默认 600s
-      on_complete:
-        - action: sync_metadata
       outputs: ["input/source.mp4", "input/source.mp3", "input/source.m4a",
                 "input/metadata.json", "input/*.srt", "input/*.ass",
                 "input/source.pdf", "input/source.html"]
 
     "02_whisper":
       label: "语音转写"
+      scope: part
       run: steps.video.step_02_whisper
       image: flori/step-gpu
       pool: cpu
@@ -92,6 +92,7 @@ video:
 
     "03_scene":
       label: "场景检测"
+      scope: part
       run: steps.video.step_03_scene
       image: flori/step-heavy
       pool: cpu
@@ -105,6 +106,7 @@ video:
 
     "04_frames":
       label: "关键帧"
+      scope: part
       extends: .cpu-step
       run: steps.video.step_04_frames
       image: flori/step-heavy
@@ -114,6 +116,7 @@ video:
 
     "05_dedup":
       label: "画面去重"
+      scope: part
       extends: .cpu-step
       run: steps.video.step_05_dedup
       image: flori/step-heavy
@@ -123,6 +126,7 @@ video:
 
     "06_ocr":
       label: "画面文字(OCR)"
+      scope: part
       extends: .cpu-step
       run: steps.video.step_06_ocr
       version: "2"
@@ -134,6 +138,7 @@ video:
 
     "07_danmaku":
       label: "弹幕"
+      scope: part
       run: steps.video.step_07_danmaku
       pool: io
       needs: ["01_download"]
@@ -146,6 +151,7 @@ video:
 
     "08_punctuate":
       label: "口播稿"
+      scope: part
       extends: .ai-step
       run: steps.video.step_08_punctuate
       version: "4"
@@ -164,6 +170,20 @@ video:
         fallback: {provider: $AI_PUNCT_FALLBACK_PROVIDER, model: $AI_PUNCT_FALLBACK_MODEL}
       outputs: ["output/transcript.md", "intermediate/source_segments.json", "output/provenance/transcript.json"]
 
+    "09_merge_parts":
+      label: "合并分段"
+      run: steps.video.step_09_merge_parts
+      pool: io
+      scope: job
+      fan_in: ["07_danmaku", "08_punctuate"]
+      timeout: 120
+      retry: 1
+      on_complete:
+        - action: sync_metadata
+      outputs: ["output/transcript.md", "intermediate/source_segments.json",
+                "intermediate/dedup.json", "intermediate/ocr.json", "intermediate/danmaku.json",
+                "output/provenance/transcript.json"]
+
     "09_mechanical":
       label: "机械版笔记"
       run: steps.video.step_09_mechanical
@@ -171,7 +191,7 @@ video:
       pool: io
       # 依赖 08:口播稿(标点版,源自原生字幕或 whisper 转写)必须先就绪再出机械版。否则无字幕视频
       # (如 YouTube 无 CC)只会得到纯 OCR 笔记、丢失口播主体内容。08 有 retry:5 容错。
-      needs: ["06_ocr", "07_danmaku", "08_punctuate"]
+      needs: ["09_merge_parts"]
       timeout: 30
       retry: 1
       on_complete:

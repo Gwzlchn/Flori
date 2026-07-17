@@ -13,7 +13,7 @@ from api.routes import jobs as jobs_route
 
 
 class _ChunkedUpload:
-    filename = "large.mp4"
+    filename = "large.mp3"
 
     def __init__(self, chunk: bytes, count: int, failure: Exception | None = None):
         self._chunk = chunk
@@ -64,15 +64,15 @@ async def test_upload_uses_stream_writer_and_accepts_exact_limit(
     storage.write_file = AsyncMock(wraps=original_write)
 
     response = await client.post(
-        "/api/jobs/upload?content_type=video",
-        files={"file": ("boundary.mp4", b"abcdef", "video/mp4")},
+        "/api/jobs/upload?content_type=audio",
+        files={"file": ("boundary.mp3", b"abcdef", "audio/mpeg")},
     )
 
     assert response.status_code == 201
     job_id = response.json()["job_id"]
     storage.write_stream.assert_awaited_once()
     args, kwargs = storage.write_stream.await_args
-    assert args[:2] == (job_id, "input/source.mp4")
+    assert args[:2] == (job_id, "input/source.mp3")
     assert kwargs["max_bytes"] == 6
     assert isinstance(kwargs["staging_token"], str)
     assert [call.args[1] for call in storage.write_file.await_args_list] == [
@@ -80,7 +80,7 @@ async def test_upload_uses_stream_writer_and_accepts_exact_limit(
         "job.json",
         jobs_route.INITIALIZATION_MARKER_REL,
     ]
-    assert await storage.read_file(job_id, "input/source.mp4") == b"abcdef"
+    assert await storage.read_file(job_id, "input/source.mp3") == b"abcdef"
     assert await storage.read_file(
         job_id, jobs_route.INITIALIZATION_MARKER_REL,
     ) is None
@@ -95,8 +95,8 @@ async def test_upload_limit_plus_one_leaves_no_job_object_or_event(
     monkeypatch.setattr(jobs_route, "MAX_UPLOAD_SIZE", 6)
 
     response = await client.post(
-        "/api/jobs/upload?content_type=video",
-        files={"file": ("oversize.mp4", b"abcdefg", "video/mp4")},
+        "/api/jobs/upload?content_type=audio",
+        files={"file": ("oversize.mp3", b"abcdefg", "audio/mpeg")},
     )
 
     assert response.status_code == 413
@@ -114,7 +114,9 @@ async def test_upload_disconnect_cleans_staging_db_and_event(
 
     with pytest.raises(ConnectionError, match="client disconnected"):
         await jobs_route.upload_job(
-            content_type="video",
+            content_type="audio",
+            document_kind=None,
+            mechanical_only=False,
             file=upload,
             domain="general",
             style_tags="[]",
@@ -146,8 +148,8 @@ async def test_upload_storage_failure_removes_published_source_before_db(
 
     with pytest.raises(OSError, match="job metadata write unavailable"):
         await client.post(
-            "/api/jobs/upload?content_type=video",
-            files={"file": ("failure.mp4", b"source", "video/mp4")},
+            "/api/jobs/upload?content_type=audio",
+            files={"file": ("failure.mp3", b"source", "audio/mpeg")},
         )
     assert _job_count(db) == 0
     assert list(app.state.config.jobs_dir.iterdir()) == []
@@ -170,8 +172,8 @@ async def test_job_metadata_failure_removes_source_db_and_event(
 
     with pytest.raises(OSError, match="job metadata unavailable"):
         await client.post(
-            "/api/jobs/upload?content_type=video",
-            files={"file": ("failure.mp4", b"source", "video/mp4")},
+            "/api/jobs/upload?content_type=audio",
+            files={"file": ("failure.mp3", b"source", "audio/mpeg")},
         )
     assert _job_count(db) == 0
     assert list(app.state.config.jobs_dir.iterdir()) == []
@@ -182,15 +184,15 @@ async def test_job_metadata_failure_removes_source_db_and_event(
 async def test_db_create_failure_removes_source_metadata_and_event(
     client, app, db, mock_redis, monkeypatch,
 ):
-    def fail_create(_job):
+    def fail_create(_job, _parts=None):
         raise RuntimeError("database create failed")
 
     monkeypatch.setattr(db, "create_job", fail_create)
 
     with pytest.raises(RuntimeError, match="database create failed"):
         await client.post(
-            "/api/jobs/upload?content_type=video",
-            files={"file": ("failure.mp4", b"source", "video/mp4")},
+            "/api/jobs/upload?content_type=audio",
+            files={"file": ("failure.mp3", b"source", "audio/mpeg")},
         )
     assert _job_count(db) == 0
     assert list(app.state.config.jobs_dir.iterdir()) == []
@@ -212,9 +214,9 @@ async def test_collection_count_failure_rolls_back_db_and_storage(
             mock_redis,
             app.state.storage,
             url=None,
-            content_type="video",
+            content_type="audio",
             collection_id="collection-missing",
-            upload=(".mp4", b"source"),
+            upload=(".mp3", b"source"),
             config=app.state.config,
         )
 
@@ -237,8 +239,8 @@ async def test_lifecycle_publish_failure_rolls_back_db_and_storage(
             mock_redis,
             app.state.storage,
             url=None,
-            content_type="video",
-            upload=(".mp4", b"source"),
+            content_type="audio",
+            upload=(".mp3", b"source"),
             config=app.state.config,
         )
 
@@ -269,8 +271,8 @@ async def test_cleanup_failure_is_logged_without_masking_original(
 
     with pytest.raises(OSError, match="source write failed") as raised:
         await client.post(
-            "/api/jobs/upload?content_type=video",
-            files={"file": ("failure.mp4", b"source", "video/mp4")},
+            "/api/jobs/upload?content_type=audio",
+            files={"file": ("failure.mp3", b"source", "audio/mpeg")},
         )
     assert any("cleanup unavailable" in note for note in raised.value.__notes__)
     logger.error.assert_called_once_with(
@@ -294,7 +296,9 @@ async def test_upload_route_memory_is_bounded_by_chunk(
     tracemalloc.start()
     tracemalloc.reset_peak()
     result = await jobs_route.upload_job(
-        content_type="video",
+        content_type="audio",
+        document_kind=None,
+        mechanical_only=False,
         file=upload,
         domain="general",
         style_tags="[]",

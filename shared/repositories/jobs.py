@@ -5,6 +5,7 @@ from __future__ import annotations
 from .seams import db as _db
 
 from ..db import (
+    JobPart,
     Step,
     StepStatus,
     _STEP_UPDATABLE,
@@ -13,6 +14,7 @@ from ..db import (
     json,
     timezone,
 )
+from ..step_scope import parse_execution_step, part_scope
 
 class JobsReadRepository:
     """只执行作业查询；事务和连接生命周期由 Database façade 持有。"""
@@ -345,9 +347,55 @@ class JobsRepository:
 
     def get_steps(self, job_id: str) -> list[Step]:
         rows = self._conn.execute(
-            "SELECT * FROM job_steps WHERE job_id=? ORDER BY step", (job_id,)
+            "SELECT * FROM job_steps WHERE job_id=? ORDER BY scope_key, step", (job_id,)
         ).fetchall()
         return [self._row_to_step(r) for r in rows]
+
+    def get_parts(self, job_id: str) -> list[JobPart]:
+        rows = self._conn.execute(
+            "SELECT * FROM job_parts WHERE job_id=? ORDER BY part_index", (job_id,)
+        ).fetchall()
+        return [
+            JobPart(
+                id=row["id"], job_id=row["job_id"], part_index=row["part_index"],
+                title=row["title"], source_url=row["source_url"],
+                source_ref=row["source_ref"], source_digest=row["source_digest"],
+                size_bytes=row["size_bytes"], duration_ms=row["duration_ms"],
+                meta=json.loads(row["meta"] or "{}"),
+                created_at=datetime.fromisoformat(row["created_at"]),
+                updated_at=datetime.fromisoformat(row["updated_at"]),
+            )
+            for row in rows
+        ]
+
+    def replace_parts_in_tx(
+        self, connection, job_id: str, parts: list[JobPart],
+    ) -> None:
+        if not 1 <= len(parts) <= 128:
+            raise ValueError("job parts must contain between 1 and 128 items")
+        indexes = [part.part_index for part in parts]
+        if indexes != list(range(1, len(parts) + 1)):
+            raise ValueError("job parts must use contiguous indexes starting at 1")
+        if any(part.job_id != job_id for part in parts):
+            raise ValueError("job part belongs to another job")
+        for part in parts:
+            part_scope(part.id)
+        connection.execute("DELETE FROM job_parts WHERE job_id=?", (job_id,))
+        for part in parts:
+            connection.execute(
+                """INSERT INTO job_parts
+                   (id, job_id, part_index, title, source_url, source_ref,
+                    source_digest, size_bytes, duration_ms, meta,
+                    created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    part.id, part.job_id, part.part_index, part.title,
+                    part.source_url, part.source_ref, part.source_digest,
+                    part.size_bytes, part.duration_ms,
+                    json.dumps(part.meta, ensure_ascii=False),
+                    part.created_at.isoformat(), part.updated_at.isoformat(),
+                ),
+            )
 
     def _strip_occurrences_for_jobs_in_tx(self, connection, job_ids: list[str]) -> None:
         """从 glossary.occurrences 摘除指向这些 job 的出现(保留概念与定义)。
@@ -390,12 +438,24 @@ class JobsRepository:
 
     def upsert_step_in_tx(self, connection, step: Step) -> None:
         connection.execute(
-            """INSERT OR REPLACE INTO job_steps
-               (job_id, step, status, pool, input_hash, worker_id,
+            """INSERT INTO job_steps
+               (job_id, scope_key, step, status, pool, input_hash, worker_id,
                 started_at, finished_at, duration_sec, meta, error, retries)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(job_id, scope_key, step) DO UPDATE SET
+                   status=excluded.status,
+                   pool=excluded.pool,
+                   input_hash=excluded.input_hash,
+                   worker_id=excluded.worker_id,
+                   started_at=excluded.started_at,
+                   finished_at=excluded.finished_at,
+                   duration_sec=excluded.duration_sec,
+                   meta=excluded.meta,
+                   error=excluded.error,
+                   retries=excluded.retries""",
             (
                 step.job_id,
+                step.scope_key,
                 step.name,
                 step.status.value if isinstance(step.status, StepStatus) else step.status,
                 step.pool,
@@ -412,8 +472,10 @@ class JobsRepository:
 
     def delete_step_in_tx(self, connection, job_id: str, step_name: str) -> None:
         """删单个步骤行(供 resubmit 对齐:删去当前 pipeline 不再有的步,避免 DB 残留旧步)。"""
+        scope_key, template_step = parse_execution_step(step_name)
         connection.execute(
-            "DELETE FROM job_steps WHERE job_id=? AND step=?", (job_id, step_name)
+            "DELETE FROM job_steps WHERE job_id=? AND scope_key=? AND step=?",
+            (job_id, scope_key, template_step),
         )
 
     def update_step_in_tx(
@@ -436,8 +498,9 @@ class JobsRepository:
             fields["finished_at"] = fields["finished_at"].isoformat()
 
         set_clause = ", ".join(f"{k}=?" for k in fields)
-        where = "job_id=? AND step=?"
-        values = list(fields.values()) + [job_id, step_name]
+        scope_key, template_step = parse_execution_step(step_name)
+        where = "job_id=? AND scope_key=? AND step=?"
+        values = list(fields.values()) + [job_id, scope_key, template_step]
         if only_if_active:
             where += " AND status NOT IN ('done','skipped')"
         connection.execute(

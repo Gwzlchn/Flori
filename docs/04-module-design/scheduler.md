@@ -5,7 +5,8 @@
 
 > 现状提示（正文多为早期设计示意，落地形态以代码为准）：
 > - pipeline 已改为 GitLab-CI 风格：`needs` 推导 DAG、`rules` 声明式跳过、`extends`/`variables`。见 `configs/pipelines.yaml` 与 [docs/03-contracts.md §4.1](../03-contracts.md)。正文的 `depends_on`/`condition` 对应现在的 `needs`/`rules`。
-> - 步骤名为各 pipeline 内独立 `01..N`（video 现为 `01_download`/`02_whisper`/…/`11_smart`/`12_review`）。正文示例里的旧步骤名以 `configs/pipelines.yaml` 为准。
+> - pipeline 模板步骤可声明 `scope=part|job`。Video Part 步展开成 `part:{part_id}::{step}` 执行键，
+>   `fan_in` 把所有 Part 实例汇入一个 Job 步；Document/Audio 保持 Job scope。
 > - worker 已 GitLab-runner 化：认领/上报走服务端 `/api/runner/jobs/*`，远程 worker 不直连 Redis。见 [worker.md](worker.md) 与 [ADR-0009](../adr/0009-worker-gateway-outbound-https.md)。
 > - scene 池已并入 cpu：`03_scene` 只是 cpu 池里的一个步骤，scene→cpu 互斥冻结已删。单机抢资源由 per-worker 并发度（`WORKER_CONCURRENCY`）控制，见 [ADR-0011](../adr/0011-worker-runtime-orchestration.md)。
 > - 核心不变量仍成立：DAG 推进、资源池上限与运行时覆盖、下载隔离到 io 池、B站 cookie 硬门控、优先级、孤儿回收、幂等。
@@ -36,6 +37,11 @@
 | `BackgroundServices` | durable lifecycle Stream、通知、周期任务、心跳和关闭 |
 
 组件之间只经 `Scheduler` 的显式 façade 协作。外部调用仍以 `Scheduler` 为入口；子模块不依赖 API package，未知完成副作用按失败处理并由终态对账重试。
+
+提交时先从 DB 读取不可变 Part 清单，再由 `shared.pipeline_scope.expand_pipeline_steps` 展开运行 DAG。
+DB 主键为 `(job_id,scope_key,step)`，Redis/租约使用执行键；完成、失败、重试、孤儿恢复和 no-worker
+对账始终携带同一个执行键。Part 条件只查看自己的存储前缀，混合来源 Part 的网络标签也按各自 URL
+计算。全局 retry 会找出全部独立失败根；Part rerun 只重置目标 Part map 分支，并失效 fan-in 及 Job 下游。
 
 ## 2. 核心流程
 

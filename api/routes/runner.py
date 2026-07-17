@@ -24,6 +24,7 @@ from shared.config import AppConfig
 from shared.db import Database
 from shared.models import AIUsage, Worker, generate_worker_id
 from shared.redis_client import RedisClient
+from shared.step_scope import parse_execution_step
 from shared.status import (
     DEFAULT_ONLINE_WINDOW_SEC,
     DEFAULT_STALE_WINDOW_SEC,
@@ -31,7 +32,12 @@ from shared.status import (
     STALE,
     compute_worker_status,
 )
-from shared.storage import ArtifactTooLarge, StorageBackend, is_credential_file
+from shared.storage import (
+    ArtifactTooLarge,
+    StorageBackend,
+    execution_artifact_allowed,
+    is_credential_file,
+)
 from api.deps import (
     get_config,
     get_db,
@@ -478,8 +484,13 @@ async def _enrich_claim(redis: RedisClient, claim: dict) -> dict:
     job_info = await redis.get_job_info(job_id)
     domain = job_info.get("domain", "general")
     style_tags = runner_ops.parse_style_tags(job_info.get("style_tags", "[]"))
-    return {**claim, "pipeline": pipeline, "domain": domain,
-            "style_tags": style_tags, "source": job_info.get("source", "")}
+    return {
+        **claim,
+        "pipeline": pipeline,
+        "domain": domain,
+        "style_tags": style_tags,
+        "source": claim.get("source") or job_info.get("source", ""),
+    }
 
 
 def _clamp_pool_limits(
@@ -868,7 +879,8 @@ async def get_dispatch_credential(
     await _require_task_lease(
         redis, worker_id, lease.job_id, lease.step, lease.exec_id, renew=True,
     )
-    if lease.step != "01_download":
+    _, template_step = parse_execution_step(lease.step)
+    if template_step != "01_download":
         raise HTTPException(status_code=403, detail="credential access requires download lease")
 
     if key not in DISPATCH_KEYS:
@@ -988,7 +1000,13 @@ async def list_artifacts(
         redis, worker_id, job_id, lease.step, lease.exec_id, renew=True,
     )
     files = await storage.list_files(job_id)
-    return {"files": [f for f in files if not is_credential_file(f)]}
+    return {
+        "files": [
+            f for f in files
+            if not is_credential_file(f)
+            and execution_artifact_allowed(lease.step, f, write=False)
+        ],
+    }
 
 
 @router.get("/jobs/{job_id}/artifacts/{rel:path}")
@@ -1011,6 +1029,8 @@ async def get_artifact(
     await _require_task_lease(
         redis, worker_id, job_id, lease.step, lease.exec_id, renew=True,
     )
+    if not execution_artifact_allowed(lease.step, rel, write=False):
+        raise HTTPException(403, "artifact is outside task scope")
     size = await storage.file_size(job_id, rel)
     if size is None:
         raise HTTPException(404, "artifact not found")
@@ -1070,6 +1090,8 @@ async def put_artifact(
     await _require_task_lease(
         redis, worker_id, job_id, lease.step, lease.exec_id, renew=True,
     )
+    if not execution_artifact_allowed(lease.step, rel, write=True):
+        raise HTTPException(403, "artifact is outside task scope")
     length_header = request.headers.get("content-length")
     try:
         expected_size = int(length_header) if length_header is not None else None

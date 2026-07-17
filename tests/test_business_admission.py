@@ -11,6 +11,10 @@ import pytest
 from api.main import create_app
 
 
+def _video_request(url: str = "BV1xx411c7mD") -> dict:
+    return {"content_type": "video", "parts": [{"url": url}]}
+
+
 def _live_workers() -> dict[str, dict[str, str]]:
     heartbeat = datetime.now(timezone.utc).isoformat()
     return {
@@ -71,17 +75,15 @@ async def _asgi_post_without_body(
 
 
 @pytest.mark.asyncio
-async def test_upload_no_workers_rejects_without_reading_body(db, test_config):
+async def test_removed_video_upload_rejects_without_reading_body(db, test_config):
     app = create_app(db=db, redis=_redis_for_workers({}), config=test_config)
 
     status, _headers, body, receive_calls = await _asgi_post_without_body(
         app, "/api/jobs/upload", "content_type=video",
     )
 
-    assert status == 503
-    assert json.loads(body) == {
-        "error": "no_workers", "message": "no workers can execute the requested pipeline",
-    }
+    assert status == 422
+    assert json.loads(body)["error"] == "invalid_request"
     assert receive_calls == 0
     assert db.list_jobs(limit=1)[0] == 0
     assert list(test_config.jobs_dir.iterdir()) == []
@@ -131,11 +133,11 @@ async def test_verified_token_principal_ignores_forwarded_for(
     headers = {"Authorization": "Bearer real-api-token"}
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         first = await client.post(
-            "/api/jobs", json={"url": "BV1xx411c7mD"},
+            "/api/jobs", json=_video_request("BV1xx411c7mD"),
             headers={**headers, "X-Forwarded-For": "198.51.100.1"},
         )
         second = await client.post(
-            "/api/jobs", json={"url": "BV1xx411c7mE"},
+            "/api/jobs", json=_video_request("BV1xx411c7mE"),
             headers={**headers, "X-Forwarded-For": "203.0.113.9"},
         )
 
@@ -159,7 +161,7 @@ async def test_invalid_token_does_not_create_rate_limit_key(
         transport=ASGITransport(app=app), base_url="http://test",
     ) as client:
         response = await client.post(
-            "/api/jobs", json={"url": "BV1xx411c7mD"},
+            "/api/jobs", json=_video_request(),
             headers={"Authorization": "Bearer invalid"},
         )
 
@@ -180,7 +182,7 @@ async def test_rate_limiter_failure_is_unavailable_without_persistence(
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test",
     ) as client:
-        response = await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        response = await client.post("/api/jobs", json=_video_request())
 
     assert response.status_code == 503
     assert response.json()["error"] == "unavailable"
@@ -201,7 +203,7 @@ async def test_malformed_rate_limit_config_is_stable_unavailable(
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test",
     ) as client:
-        response = await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        response = await client.post("/api/jobs", json=_video_request())
 
     assert response.status_code == 503
     assert response.json()["error"] == "unavailable"
@@ -235,7 +237,7 @@ async def test_invalid_create_shapes_remain_validation_422(
 
 
 @pytest.mark.asyncio
-async def test_malformed_worker_is_no_workers_not_internal_error(db, test_config):
+async def test_video_admission_waits_when_worker_inventory_is_malformed(db, test_config):
     workers = _live_workers()
     workers["ai"]["reject_tags"] = None
     app = create_app(db=db, redis=_redis_for_workers(workers), config=test_config)
@@ -245,10 +247,10 @@ async def test_malformed_worker_is_no_workers_not_internal_error(db, test_config
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test",
     ) as client:
-        response = await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        response = await client.post("/api/jobs", json=_video_request())
 
-    assert response.status_code == 503
-    assert response.json()["error"] == "no_workers"
+    assert response.status_code == 201
+    assert response.json()["status"] == "pending"
 
 
 @pytest.mark.asyncio
@@ -263,7 +265,7 @@ async def test_malformed_worker_status_config_is_unavailable(db, test_config):
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test",
     ) as client:
-        response = await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        response = await client.post("/api/jobs", json=_video_request())
 
     assert response.status_code == 503
     assert response.json()["error"] == "unavailable"
@@ -283,7 +285,7 @@ async def test_malformed_pipeline_root_is_unavailable_without_persistence(
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test",
     ) as client:
-        response = await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        response = await client.post("/api/jobs", json=_video_request())
 
     assert response.status_code == 503
     assert response.json()["error"] == "unavailable"
@@ -308,7 +310,7 @@ async def test_create_and_upload_share_one_operation_and_principal_bucket(
         transport=ASGITransport(app=app), base_url="http://test",
     ) as client:
         created = await client.post(
-            "/api/jobs", json={"url": "BV1xx411c7mD"},
+            "/api/jobs", json=_video_request(),
             headers={"Authorization": authorization},
         )
 
@@ -346,7 +348,7 @@ async def test_malformed_or_empty_pipeline_fails_closed_before_persistence(
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test",
     ) as client:
-        response = await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        response = await client.post("/api/jobs", json=_video_request())
 
     assert response.status_code == 503
     assert response.json()["error"] == "unavailable"
@@ -378,7 +380,7 @@ async def test_deep_json_is_stable_invalid_request_without_persistence(
 
 
 @pytest.mark.asyncio
-async def test_deep_upload_style_tags_is_stable_bad_request_without_persistence(
+async def test_removed_video_upload_rejects_before_deep_form_parsing(
     db, test_config,
 ):
     app = create_app(
@@ -397,8 +399,8 @@ async def test_deep_upload_style_tags_is_stable_bad_request_without_persistence(
             data={"style_tags": deep_style_tags},
         )
 
-    assert response.status_code == 400
-    assert response.json()["error"] == "bad_request"
+    assert response.status_code == 422
+    assert response.json()["error"] == "invalid_request"
     assert db.list_jobs(limit=1)[0] == 0
     assert list(test_config.jobs_dir.iterdir()) == []
 

@@ -11,6 +11,7 @@ from ..db import (
     DEFAULT_AI_MODEL,
     DEFAULT_AI_PROVIDER,
     Job,
+    JobPart,
     JobStatus,
     MAX_GENERATED_CARDS,
     MAX_SQLITE_INTEGER,
@@ -118,7 +119,7 @@ from ..db import (
 class DatabaseAggregates:
     """由 Database façade 调用，不持有独立连接或锁。"""
 
-    def create_job(self, job: Job) -> None:
+    def create_job(self, job: Job, parts: list[JobPart] | None = None) -> None:
         # lineage_key 缺省由 id 反推(去时间戳),保证同源快照归一组。
         lineage = job.lineage_key or _lineage_key_of(job.id)
         with self._lock:
@@ -156,6 +157,10 @@ class DatabaseAggregates:
                         job.parent_job_id,
                     ),
                 )
+                if parts is not None:
+                    _db._JobsRepository.replace_parts_in_tx(
+                        self, self._conn, job.id, parts,
+                    )
                 # 降级旧快照和证据失效必须同事务提交。
                 # 否则新 current 可见时旧证据仍会被接受。
                 if job.is_current and lineage:

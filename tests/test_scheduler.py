@@ -11,7 +11,9 @@ import pytest
 from tests.conftest import make_fakeredis
 from tests.pubsub_helpers import subscription_barrier
 from shared.config import AppConfig
-from shared.models import Collection, Job, JobStatus, StepStatus, Step, AIUsage, Worker
+from shared.models import Collection, Job, JobPart, JobStatus, StepStatus, Step, AIUsage, Worker
+from shared.pipeline_scope import expand_pipeline_steps
+from shared.step_scope import execution_step_key, part_scope
 from shared.step_base import def_digest_for, pipeline_digest_for
 from shared.storage import LocalStorage
 from scheduler.scheduler import Scheduler
@@ -218,6 +220,134 @@ class TestSubmitJob:
         assert await redis.get_all_step_statuses("chapter-b") == {}
 
 
+class TestMultipartVideoDag:
+    @pytest.mark.asyncio
+    async def test_mixed_source_parts_route_by_each_part_not_job_root(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+    ):
+        step = {
+            "name": "01_download", "scope": "part", "pool": "io",
+            "depends_on": [], "tags": [],
+        }
+        pipelines = {"video": {"steps": [step]}}
+        scheduler = Scheduler(
+            redis, db, make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir),
+        )
+        job = Job(
+            id="job_mixed_sources", content_type="video", pipeline="video",
+            source="bilibili",
+        )
+        parts = [
+            JobPart(
+                "pt_cn", job.id, 1,
+                source_url="https://www.bilibili.com/video/BV1xx411c7mD",
+                meta={"source": "bilibili"},
+            ),
+            JobPart(
+                "pt_global", job.id, 2,
+                source_url="https://www.youtube.com/watch?v=abc",
+                meta={"source": "youtube"},
+            ),
+        ]
+        db.create_job(job, parts)
+        expanded = expand_pipeline_steps([step], parts)
+
+        cn_key = execution_step_key(part_scope("pt_cn"), "01_download")
+        global_key = execution_step_key(part_scope("pt_global"), "01_download")
+        cn_tags = await scheduler._required_tags_for_step(
+            job.id, cn_key, expanded[cn_key], {"source": job.source},
+        )
+        global_tags = await scheduler._required_tags_for_step(
+            job.id, global_key, expanded[global_key], {"source": job.source},
+        )
+
+        assert "net-cn" in cn_tags and "net-global" not in cn_tags
+        assert "net-global" in global_tags and "net-cn" not in global_tags
+
+    @pytest.mark.asyncio
+    async def test_part_nodes_are_isolated_and_merge_waits_for_all_parts(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+    ):
+        pipelines = {"video": {"steps": [
+            {"name": "map_a", "scope": "part", "pool": "cpu", "depends_on": []},
+            {"name": "map_b", "scope": "part", "pool": "cpu", "depends_on": ["map_a"]},
+            {"name": "merge", "scope": "job", "pool": "io", "depends_on": [], "fan_in": ["map_b"]},
+            {"name": "reduce", "scope": "job", "pool": "cpu", "depends_on": ["merge"]},
+        ]}}
+        scheduler = _stub_workers_present(Scheduler(
+            redis, db, make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir),
+        ))
+        job = Job(id="job_multi", content_type="video", pipeline="video")
+        parts = [
+            JobPart("pt_a", job.id, 1, source_url="https://example.test/a"),
+            JobPart("pt_b", job.id, 2, source_url="https://example.test/b"),
+        ]
+        db.create_job(job, parts)
+
+        await scheduler.submit_job(job)
+        a_keys = [
+            execution_step_key(part_scope(part.id), "map_a") for part in parts
+        ]
+        b_keys = [
+            execution_step_key(part_scope(part.id), "map_b") for part in parts
+        ]
+        statuses = await redis.get_all_step_statuses(job.id)
+        assert set(statuses) == {*a_keys, *b_keys, "merge", "reduce"}
+        assert all(statuses[key] == "ready" for key in a_keys)
+        assert statuses["merge"] == "waiting"
+
+        for index, key in enumerate(a_keys):
+            await redis.set_step_status(job.id, key, "running")
+            await scheduler.on_step_done(job.id, key)
+            assert await redis.get_step_status(job.id, b_keys[index]) == "ready"
+        await redis.set_step_status(job.id, b_keys[0], "running")
+        await scheduler.on_step_done(job.id, b_keys[0])
+        assert await redis.get_step_status(job.id, "merge") == "waiting"
+        await redis.set_step_status(job.id, b_keys[1], "running")
+        await scheduler.on_step_done(job.id, b_keys[1])
+        assert await redis.get_step_status(job.id, "merge") == "ready"
+
+        db_nodes = {(step.scope_key, step.name) for step in db.get_steps(job.id)}
+        assert ("part:pt_a", "map_a") in db_nodes
+        assert ("part:pt_b", "map_a") in db_nodes
+
+    @pytest.mark.asyncio
+    async def test_retry_failed_resets_independent_part_roots(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+    ):
+        pipelines = {"video": {"steps": [
+            {"name": "map_a", "scope": "part", "pool": "cpu", "depends_on": []},
+            {"name": "map_b", "scope": "part", "pool": "cpu", "depends_on": ["map_a"]},
+            {"name": "merge", "scope": "job", "pool": "io", "depends_on": [], "fan_in": ["map_b"]},
+        ]}}
+        scheduler = _stub_workers_present(Scheduler(
+            redis, db, make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir),
+        ))
+        job = Job(id="job_retry_parts", content_type="video", pipeline="video")
+        parts = [JobPart("pt_a", job.id, 1), JobPart("pt_b", job.id, 2)]
+        db.create_job(job, parts)
+        await scheduler.submit_job(job)
+        map_a = [
+            execution_step_key(part_scope(part.id), "map_a") for part in parts
+        ]
+        map_b = [
+            execution_step_key(part_scope(part.id), "map_b") for part in parts
+        ]
+        for key in map_a:
+            await redis.set_step_status(job.id, key, "running")
+            await scheduler.on_step_done(job.id, key)
+        for key in map_b:
+            await redis.set_step_status(job.id, key, "failed")
+            db.update_step(job.id, key, status="failed")
+
+        await scheduler._retry_failed(job.id, idempotency_key="event-1")
+
+        assert [await redis.get_step_status(job.id, key) for key in map_b] == [
+            "ready", "ready",
+        ]
+        assert await redis.get_step_status(job.id, "merge") == "waiting"
+
+
 class TestSkipNoWorker:
     """覆盖 skip_no_worker 死锁打破器(_check_downstream 末段)。
     只在剩余未完成步骤全部为 ready 且其 pool 无 worker 时介入,并用
@@ -315,20 +445,19 @@ class TestSkipNoWorker:
         assert await redis.get_step_status("j_test_001", "A") == "ready"
 
 
-class TestNoWorkerFailFast:
-    """check_no_worker:无 running 且所有 ready 步的 pool 无 worker、超宽限期 → fail-fast,
-    避免未部署 gpu worker 时 audio 永久挂起。用真实 _pool_has_workers。"""
+class TestNoWorkerWaiting:
+    """缺少匹配 Worker 时任务保持可恢复的 pending/ready 状态。"""
 
     @pytest.mark.asyncio
-    async def test_stuck_job_fails_after_grace(self, redis, db, config):
+    async def test_stuck_job_waits_after_grace(self, redis, db, config):
         s = Scheduler(redis, db, config)
         s._NO_WORKER_GRACE_SEC = 0  # 立即判定,免等宽限
         job = make_job()
         db.create_job(job)
         await s.submit_job(job)  # A=ready(cpu 无 worker), B/C=waiting
         await s.check_no_worker()
-        assert "j_test_001" not in await redis.get_active_jobs()
-        assert (await asyncio.to_thread(db.get_job, "j_test_001")).status == JobStatus.FAILED
+        assert "j_test_001" in await redis.get_active_jobs()
+        assert (await asyncio.to_thread(db.get_job, "j_test_001")).status == JobStatus.PENDING
 
     @pytest.mark.asyncio
     async def test_within_grace_not_failed(self, redis, db, config):
@@ -401,11 +530,10 @@ class TestNoWorkerFailFast:
         await s.check_no_worker()
 
     @pytest.mark.asyncio
-    async def test_cn_download_no_zone_worker_fails(self, redis, db, config, tmp_path, tmp_jobs_dir, configs_dir):
-        """B站源的 01_download 落 io 池但 io worker 不覆盖 net-cn → 超宽限 fail-fast。
-        只看池不看 tag 会误判可推进、永久卡 ready。"""
+    async def test_cn_download_no_zone_worker_waits(self, redis, db, config, tmp_path, tmp_jobs_dir, configs_dir):
+        """B站下载缺少 net-cn Worker 时保留 ready,注册 Worker 后可继续。"""
         await self._bili_dl_job(redis, db, config, tmp_path, tmp_jobs_dir, configs_dir, "j_nozone", "")
-        assert "j_nozone" not in await redis.get_active_jobs()
+        assert "j_nozone" in await redis.get_active_jobs()
 
     @pytest.mark.asyncio
     async def test_cn_download_with_zone_worker_ok(self, redis, db, config, tmp_path, tmp_jobs_dir, configs_dir):
@@ -1967,6 +2095,30 @@ class TestRetryFailed:
         assert await redis.get_step_status("j_test_001", "A") == "done"
         assert await redis.get_step_status("j_test_001", "B") == "ready"
         assert await redis.get_step_status("j_test_001", "C") == "waiting"
+
+    @pytest.mark.asyncio
+    async def test_retries_failed_database_job_after_runtime_state_was_cleared(
+        self, scheduler, redis, db,
+    ):
+        job = make_job()
+        job.status = JobStatus.FAILED
+        db.create_job(job)
+        db.upsert_step(Step(
+            job_id=job.id, name="A", status=StepStatus.DONE, pool="cpu",
+        ))
+        db.upsert_step(Step(
+            job_id=job.id, name="B", status=StepStatus.FAILED, pool="cpu",
+        ))
+        db.upsert_step(Step(
+            job_id=job.id, name="C", status=StepStatus.WAITING, pool="cpu",
+        ))
+        assert await redis.get_all_step_statuses(job.id) == {}
+
+        await scheduler._retry_failed(job.id, idempotency_key="post-migration")
+
+        assert await redis.get_step_status(job.id, "A") == "done"
+        assert await redis.get_step_status(job.id, "B") == "ready"
+        assert await redis.get_step_status(job.id, "C") == "waiting"
 
 
 class TestDispatch:

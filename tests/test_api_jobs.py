@@ -11,9 +11,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 from shared.config import AppConfig, load_config
-from shared.models import Collection, Job, JobStatus, Step, StepStatus
+from shared.models import Collection, Job, JobPart, JobStatus, Step, StepStatus
+from shared.step_scope import part_scope
 from api.main import create_app
 from api.routes.jobs import _detect_content_type, _pipeline_for
+
+
+def _video_request(url: str = "BV1xx411c7mD", **values) -> dict:
+    return {"content_type": "video", "parts": [{"url": url}], **values}
 
 
 class TestDetectContentType:
@@ -81,22 +86,34 @@ class TestCreateJob:
         for cfg in app.state.config.pipelines[job.pipeline]["steps"]:
             is_ai = cfg["pool"] == "ai"
             status = StepStatus.SKIPPED if is_ai else StepStatus.DONE
-            app.state.db.upsert_step(Step(
-                job_id=job_id, name=cfg["name"], status=status,
-                pool=cfg["pool"], input_hash=f"parent:{cfg['name']}",
-            ))
-            if not is_ai:
-                await app.state.storage.write_file(
-                    job_id, f".{cfg['name']}.done", b'{"def_digest":"sha256:old"}',
-                )
+            scopes = (
+                [part_scope(part.id) for part in app.state.db.get_parts(job_id)]
+                if cfg.get("scope") == "part" else ["job"]
+            )
+            for scope_key in scopes:
+                app.state.db.upsert_step(Step(
+                    job_id=job_id, scope_key=scope_key,
+                    name=cfg["name"], status=status,
+                    pool=cfg["pool"], input_hash=f"parent:{cfg['name']}",
+                ))
+                if not is_ai:
+                    part_id = scope_key.removeprefix("part:")
+                    prefix = f"parts/{part_id}/" if scope_key != "job" else ""
+                    await app.state.storage.write_file(
+                        job_id, f"{prefix}.{cfg['name']}.done",
+                        b'{"def_digest":"sha256:old"}',
+                    )
         app.state.db.update_job(job_id, status=JobStatus.DONE)
 
     @pytest.mark.asyncio
     async def test_create_mechanical_only_persists_visible_mode(self, client, app):
-        resp = await client.post("/api/jobs", json={
-            "url": "https://www.bilibili.com/video/BV1xx411c7mD",
-            "mechanical_only": True,
-        })
+        resp = await client.post(
+            "/api/jobs",
+            json=_video_request(
+                "https://www.bilibili.com/video/BV1xx411c7mD",
+                mechanical_only=True,
+            ),
+        )
 
         assert resp.status_code == 201
         job_id = resp.json()["job_id"]
@@ -112,10 +129,13 @@ class TestCreateJob:
     async def test_continue_ai_forks_idempotent_full_snapshot(
         self, client, app, mock_redis
     ):
-        created = await client.post("/api/jobs", json={
-            "url": "https://www.bilibili.com/video/BV1xx411c7mD",
-            "mechanical_only": True,
-        })
+        created = await client.post(
+            "/api/jobs",
+            json=_video_request(
+                "https://www.bilibili.com/video/BV1xx411c7mD",
+                mechanical_only=True,
+            ),
+        )
         job_id = created.json()["job_id"]
         await self._complete_mechanical_job(app, job_id)
         mock_redis.append_lifecycle_event.reset_mock()
@@ -142,10 +162,13 @@ class TestCreateJob:
 
     @pytest.mark.asyncio
     async def test_continue_ai_rejects_inflight_mechanical_snapshot(self, client):
-        created = await client.post("/api/jobs", json={
-            "url": "https://www.bilibili.com/video/BV1xx411c7mD",
-            "mechanical_only": True,
-        })
+        created = await client.post(
+            "/api/jobs",
+            json=_video_request(
+                "https://www.bilibili.com/video/BV1xx411c7mD",
+                mechanical_only=True,
+            ),
+        )
         resp = await client.post(f"/api/jobs/{created.json()['job_id']}/continue-ai")
         assert resp.status_code == 409
 
@@ -153,10 +176,13 @@ class TestCreateJob:
     async def test_continue_ai_repairs_post_promotion_event_failure(
         self, client, app, mock_redis,
     ):
-        created = await client.post("/api/jobs", json={
-            "url": "https://www.bilibili.com/video/BV1xx411c7mD",
-            "mechanical_only": True,
-        })
+        created = await client.post(
+            "/api/jobs",
+            json=_video_request(
+                "https://www.bilibili.com/video/BV1xx411c7mD",
+                mechanical_only=True,
+            ),
+        )
         parent_id = created.json()["job_id"]
         await self._complete_mechanical_job(app, parent_id)
         mock_redis.append_lifecycle_event.side_effect = RuntimeError("event failed")
@@ -178,10 +204,13 @@ class TestCreateJob:
 
     @pytest.mark.asyncio
     async def test_create_url_job(self, client, mock_redis):
-        resp = await client.post("/api/jobs", json={
-            "url": "https://www.bilibili.com/video/BV1xx411c7mD",
-            "domain": "deep-learning",
-        })
+        resp = await client.post(
+            "/api/jobs",
+            json=_video_request(
+                "https://www.bilibili.com/video/BV1xx411c7mD",
+                domain="deep-learning",
+            ),
+        )
         assert resp.status_code == 201
         data = resp.json()
         assert "job_id" in data
@@ -191,6 +220,75 @@ class TestCreateJob:
         args = mock_redis.append_lifecycle_event.call_args
         assert args[0][0] == "job_command"  # channel name
         assert args[0][1]["action"] == "new_job"  # data content
+
+    @pytest.mark.asyncio
+    async def test_video_requires_parts_and_rejects_legacy_url(self, client):
+        response = await client.post("/api/jobs", json={
+            "content_type": "video",
+            "url": "BV1xx411c7mD",
+        })
+        assert response.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_create_multipart_video_without_workers_is_one_ordered_job(
+        self, client, mock_redis,
+    ):
+        mock_redis.list_worker_ids.return_value = []
+        payload = {
+            "content_type": "video",
+            "title": "一场直播",
+            "parts": [
+                {"url": "BV1xx411c7mD", "title": "开场"},
+                {"url": "BV1yy422d8nE", "title": "正文"},
+                {"url": "https://youtu.be/dQw4w9WgXcQ", "title": "答疑"},
+            ],
+        }
+        created = await client.post("/api/jobs", json=payload)
+        replay = await client.post("/api/jobs", json=payload)
+
+        assert created.status_code == 201
+        assert replay.status_code == 201
+        assert replay.json()["job_id"] == created.json()["job_id"]
+        assert [item["part_index"] for item in created.json()["parts"]] == [1, 2, 3]
+        listed = (await client.get("/api/jobs")).json()
+        assert listed["total"] == 1
+        detail = (
+            await client.get(f"/api/jobs/{created.json()['job_id']}")
+        ).json()
+        assert detail["title"] == "一场直播"
+        assert detail["steps"] == []
+        assert [item["title"] for item in detail["parts"]] == ["开场", "正文", "答疑"]
+        assert all(item["status"] == "pending" for item in detail["parts"])
+
+    @pytest.mark.asyncio
+    async def test_video_replay_identity_includes_processing_context(self, client):
+        base = {
+            "content_type": "video",
+            "parts": [{"url": "BV1xx411c7mD", "title": "P01"}],
+            "domain": "finance",
+        }
+        first = await client.post("/api/jobs", json=base)
+        replay = await client.post("/api/jobs", json=base)
+        changed = await client.post("/api/jobs", json={**base, "domain": "general"})
+
+        assert first.status_code == replay.status_code == changed.status_code == 201
+        assert replay.json()["job_id"] == first.json()["job_id"]
+        assert changed.json()["job_id"] != first.json()["job_id"]
+
+    @pytest.mark.asyncio
+    async def test_create_rejects_unsupported_later_video_part(self, client, app):
+        response = await client.post("/api/jobs", json={
+            "content_type": "video",
+            "parts": [
+                {"url": "BV1xx411c7mD"},
+                {"url": "ftp://example.test/hidden.mp4"},
+            ],
+        })
+
+        assert response.status_code == 422
+        assert "P02" in response.text
+        total, _ = app.state.db.list_jobs(limit=10)
+        assert total == 0
 
     @pytest.mark.asyncio
     async def test_create_arxiv_job(self, client):
@@ -205,19 +303,19 @@ class TestCreateJob:
 
     @pytest.mark.asyncio
     async def test_create_with_style_tags(self, client):
-        resp = await client.post("/api/jobs", json={
-            "url": "BV1xx411c7mD",
-            "style_tags": ["lecture", "case-study"],
-        })
+        resp = await client.post(
+            "/api/jobs",
+            json=_video_request(style_tags=["lecture", "case-study"]),
+        )
         assert resp.status_code == 201
 
     @pytest.mark.asyncio
     async def test_create_unknown_collection_rejected(self, client):
         # collection_id 不存在 → 400(防孤儿绑定 + job_count 漂移)
-        resp = await client.post("/api/jobs", json={
-            "url": "BV1xx411c7mD",
-            "collection_id": "c_does_not_exist",
-        })
+        resp = await client.post(
+            "/api/jobs",
+            json=_video_request(collection_id="c_does_not_exist"),
+        )
         assert resp.status_code == 400
 
     @pytest.mark.asyncio
@@ -320,7 +418,7 @@ class TestListJobs:
 
     @pytest.mark.asyncio
     async def test_list_after_create(self, client):
-        await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        await client.post("/api/jobs", json=_video_request())
         resp = await client.get("/api/jobs")
         assert resp.json()["total"] == 1
 
@@ -328,7 +426,7 @@ class TestListJobs:
 class TestGetJob:
     @pytest.mark.asyncio
     async def test_get_existing(self, client):
-        create_resp = await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        create_resp = await client.post("/api/jobs", json=_video_request())
         job_id = create_resp.json()["job_id"]
         resp = await client.get(f"/api/jobs/{job_id}")
         assert resp.status_code == 200
@@ -379,7 +477,7 @@ class TestGetJob:
 
     @pytest.mark.asyncio
     async def test_detail_reports_prompt_update_after_job_snapshot(self, client, app):
-        created = await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        created = await client.post("/api/jobs", json=_video_request())
         job_id = created.json()["job_id"]
         app.state.db.set_prompt_override(
             "global", None, "video", "11_smart", "新的智能笔记提示词",
@@ -394,7 +492,7 @@ class TestGetJob:
 class TestDeleteJob:
     @pytest.mark.asyncio
     async def test_delete(self, client):
-        create_resp = await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        create_resp = await client.post("/api/jobs", json=_video_request())
         job_id = create_resp.json()["job_id"]
         resp = await client.delete(f"/api/jobs/{job_id}")
         assert resp.status_code == 204
@@ -404,7 +502,7 @@ class TestDeleteJob:
     @pytest.mark.asyncio
     async def test_delete_purges_artifacts(self, client, app):
         # 删 job 必须经 storage 清产物(本地删目录 / MinIO 删 {job_id}/ 前缀),否则对象存储留孤儿。
-        create_resp = await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        create_resp = await client.post("/api/jobs", json=_video_request())
         job_id = create_resp.json()["job_id"]
         storage = app.state.storage
         await storage.write_file(job_id, "output/notes.md", b"note")
@@ -416,7 +514,7 @@ class TestDeleteJob:
     @pytest.mark.asyncio
     async def test_delete_clears_ai_usage_and_calls_queue_cleanup(self, client, app, db, mock_redis):
         from shared.models import AIUsage
-        create_resp = await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        create_resp = await client.post("/api/jobs", json=_video_request())
         job_id = create_resp.json()["job_id"]
         db.record_ai_usage(AIUsage(exec_id="e9", provider="claude-cli", model="sonnet",
                                    job_id=job_id, cost_usd=0.3))
@@ -559,18 +657,61 @@ class TestGetStepLog:
         resp = await client.get("/api/jobs/j1/steps/%2e%2e_secret/log")
         assert resp.status_code == 400
 
+    @pytest.mark.asyncio
+    async def test_part_log_and_ai_log_require_explicit_part_scope(
+        self, client, app, test_config,
+    ):
+        job_id = "j_part_logs"
+        part = JobPart("pt_a", job_id, 1, source_url="BV1xx411c7mD")
+        app.state.db.create_job(
+            Job(id=job_id, content_type="video", pipeline="video"), [part],
+        )
+        part_dir = test_config.jobs_dir / job_id / "parts" / part.id
+        (part_dir / "logs").mkdir(parents=True)
+        (part_dir / "logs" / "08_punctuate.log").write_text("part-log")
+        (part_dir / "output" / "ai_logs").mkdir(parents=True)
+        (part_dir / "output" / "ai_logs" / "08_punctuate.jsonl").write_text(
+            '{"call_index":0,"ok":true}\n',
+        )
+
+        part_log = await client.get(
+            f"/api/jobs/{job_id}/parts/{part.id}/steps/08_punctuate/log",
+        )
+        assert part_log.status_code == 200
+        assert part_log.text == "part-log"
+        assert (await client.get(
+            f"/api/jobs/{job_id}/steps/08_punctuate/log",
+        )).status_code == 404
+        assert (await client.get(
+            f"/api/jobs/{job_id}/parts/pt_other/steps/08_punctuate/log",
+        )).status_code == 404
+
+        root_logs = (await client.get(
+            f"/api/jobs/{job_id}/ai-logs?step=08_punctuate",
+        )).json()
+        assert root_logs["steps"] == []
+        part_logs = (await client.get(
+            f"/api/jobs/{job_id}/ai-logs?step=08_punctuate&part_id={part.id}",
+        )).json()
+        assert part_logs["steps"] == [{
+            "scope_key": "part:pt_a",
+            "part_id": "pt_a",
+            "step": "08_punctuate",
+            "calls": [{"call_index": 0, "ok": True}],
+        }]
+
 
 class TestRetryRerunResubmit:
     @pytest.mark.asyncio
     async def test_retry_non_failed(self, client):
-        create_resp = await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        create_resp = await client.post("/api/jobs", json=_video_request())
         job_id = create_resp.json()["job_id"]
         resp = await client.post(f"/api/jobs/{job_id}/retry")
         assert resp.status_code == 400
 
     @pytest.mark.asyncio
     async def test_rerun(self, client, mock_redis):
-        create_resp = await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        create_resp = await client.post("/api/jobs", json=_video_request())
         job_id = create_resp.json()["job_id"]
         resp = await client.post(
             f"/api/jobs/{job_id}/rerun",
@@ -585,8 +726,35 @@ class TestRetryRerunResubmit:
         assert payload["from_step"] == "11_smart"
 
     @pytest.mark.asyncio
+    async def test_part_rerun_uses_scoped_execution_step(self, client, mock_redis):
+        create_resp = await client.post("/api/jobs", json=_video_request())
+        body = create_resp.json()
+        job_id = body["job_id"]
+        part_id = body["parts"][0]["part_id"]
+
+        rejected = await client.post(
+            f"/api/jobs/{job_id}/rerun",
+            json={"from_step": "02_whisper"},
+        )
+        assert rejected.status_code == 422
+        resp = await client.post(
+            f"/api/jobs/{job_id}/parts/{part_id}/rerun",
+            json={"from_step": "02_whisper"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["part_id"] == part_id
+        _, payload = mock_redis.append_lifecycle_event.call_args[0]
+        assert payload == {
+            "action": "rerun",
+            "job_id": job_id,
+            "part_id": part_id,
+            "from_step": f"part:{part_id}::02_whisper",
+        }
+
+    @pytest.mark.asyncio
     async def test_resubmit(self, client, mock_redis):
-        create_resp = await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        create_resp = await client.post("/api/jobs", json=_video_request())
         job_id = create_resp.json()["job_id"]
         resp = await client.post(f"/api/jobs/{job_id}/resubmit")
         assert resp.status_code == 200
@@ -599,7 +767,7 @@ class TestRetryRerunResubmit:
         from shared.models import JobStatus
         ids = []
         for u in ("BV1xx411c7mD", "BV1yy422d8nE"):
-            jid = (await client.post("/api/jobs", json={"url": u})).json()["job_id"]
+            jid = (await client.post("/api/jobs", json=_video_request(u))).json()["job_id"]
             db.update_job(jid, status=JobStatus.FAILED)
             ids.append(jid)
         resp = await client.post("/api/jobs/retry-failed")
@@ -674,7 +842,7 @@ class TestProviderVersions:
 
     @pytest.mark.asyncio
     async def test_rerun_smart_unavailable_provider_rejected(self, client):
-        await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        await client.post("/api/jobs", json=_video_request())
         jid = (await client.get("/api/jobs")).json()["items"][0]["job_id"]
         resp = await client.post(f"/api/jobs/{jid}/rerun-smart", json={"provider": "anthropic"})
         assert resp.status_code == 400  # 无 key 不可用
@@ -683,7 +851,7 @@ class TestProviderVersions:
     async def test_rerun_rejects_unknown_provider_even_with_matching_api_env(
         self, client, app, mock_redis, monkeypatch,
     ):
-        await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        await client.post("/api/jobs", json=_video_request())
         jid = (await client.get("/api/jobs")).json()["items"][0]["job_id"]
         storage = app.state.storage
         await storage.write_file(jid, "job.json", b'{"id":"x"}')
@@ -714,7 +882,7 @@ class TestProviderVersions:
     async def test_rerun_malformed_job_metadata_is_stable_4xx_without_side_effects(
         self, client, app, mock_redis, raw,
     ):
-        await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        await client.post("/api/jobs", json=_video_request())
         jid = (await client.get("/api/jobs")).json()["items"][0]["job_id"]
         storage = app.state.storage
         await storage.write_file(jid, "job.json", raw)
@@ -732,7 +900,7 @@ class TestProviderVersions:
     async def test_rerun_requires_workers_for_both_target_step_tag_profiles(
         self, client, app, mock_redis,
     ):
-        await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        await client.post("/api/jobs", json=_video_request())
         jid = (await client.get("/api/jobs")).json()["items"][0]["job_id"]
         await app.state.storage.write_file(jid, "job.json", b'{"id":"x"}')
         mock_redis.get_worker_info.return_value = {
@@ -749,7 +917,7 @@ class TestProviderVersions:
 
     @pytest.mark.asyncio
     async def test_rerun_smart_claude_writes_override(self, client, app, mock_redis):
-        await client.post("/api/jobs", json={"url": "BV1xx411c7mD"})
+        await client.post("/api/jobs", json=_video_request())
         jid = (await client.get("/api/jobs")).json()["items"][0]["job_id"]
         # 预置 job.json(storage 本地)
         storage = app.state.storage
@@ -924,6 +1092,91 @@ class TestRebuildP2c:
         assert "pipeline" not in rebuilt_doc
 
     @pytest.mark.asyncio
+    async def test_video_partial_rebuild_preserves_each_part_scope(
+        self, client, app,
+    ):
+        db, storage, config = app.state.db, app.state.storage, app.state.config
+        created = await client.post("/api/jobs", json={
+            "content_type": "video",
+            "title": "跨 Part 重建",
+            "mechanical_only": True,
+            "parts": [
+                {"url": "BV1xx411c7mD", "title": "上半场"},
+                {"url": "BV1Q541167Qg", "title": "下半场"},
+            ],
+        })
+        assert created.status_code == 201
+        parent_id = created.json()["job_id"]
+        parts = db.get_parts(parent_id)
+        part_steps = [
+            cfg for cfg in config.pipelines["video"]["steps"]
+            if cfg.get("scope") == "part"
+        ]
+        for part in parts:
+            scope_key = part_scope(part.id)
+            for cfg in part_steps:
+                db.upsert_step(Step(
+                    job_id=parent_id,
+                    scope_key=scope_key,
+                    name=cfg["name"],
+                    status=StepStatus.DONE,
+                    pool=cfg["pool"],
+                    input_hash=f"{part.id}:{cfg['name']}",
+                ))
+                await storage.write_file(
+                    parent_id,
+                    f"parts/{part.id}/.{cfg['name']}.done",
+                    b'{"def_digest":"sha256:old"}',
+                )
+            await storage.write_file(
+                parent_id,
+                f"parts/{part.id}/input/subtitle.srt",
+                f"subtitle:{part.id}".encode(),
+            )
+        db.update_job(parent_id, status=JobStatus.DONE)
+
+        rebuilt = await client.post(f"/api/jobs/{parent_id}/rebuild", json={
+            "mechanical_only": True,
+            "from_step": "02_whisper",
+            "idempotency_key": "video-partial-rebuild",
+        })
+
+        assert rebuilt.status_code == 200
+        target_id = rebuilt.json()["job_id"]
+        target_parts = db.get_parts(target_id)
+        assert [part.id for part in target_parts] == [part.id for part in parts]
+        root_doc = json.loads((await storage.read_file(target_id, "job.json")).decode())
+        assert root_doc["url"] is None
+        assert [item["part_id"] for item in root_doc["parts"]] == [
+            part.id for part in parts
+        ]
+        child_steps = {
+            (step.scope_key, step.name): step for step in db.get_steps(target_id)
+        }
+        for part in parts:
+            scope_key = part_scope(part.id)
+            assert child_steps[(scope_key, "01_download")].input_hash == (
+                f"{part.id}:01_download"
+            )
+            assert child_steps[(scope_key, "03_scene")].input_hash == (
+                f"{part.id}:03_scene"
+            )
+            assert (scope_key, "02_whisper") not in child_steps
+            assert await storage.read_file(
+                target_id, f"parts/{part.id}/.01_download.done",
+            ) is not None
+            assert await storage.read_file(
+                target_id, f"parts/{part.id}/.02_whisper.done",
+            ) is None
+            assert await storage.read_file(
+                target_id, f"parts/{part.id}/input/subtitle.srt",
+            ) is None
+            part_doc = json.loads((await storage.read_file(
+                target_id, f"parts/{part.id}/job.json",
+            )).decode())
+            assert part_doc["job_id"] == target_id
+
+    @pytest.mark.asyncio
     async def test_rebuild_can_switch_snapshot_to_mechanical_from_validated_step(
         self, client, app, mock_redis,
     ):
@@ -1084,10 +1337,10 @@ class TestRebuildP2c:
         else:
             original_create = db.create_job
 
-            def fail_create(job):
+            def fail_create(job, parts=None):
                 if job.id == target_id:
                     raise RuntimeError("db failed")
-                return original_create(job)
+                return original_create(job, parts)
 
             monkeypatch.setattr(db, "create_job", fail_create)
 

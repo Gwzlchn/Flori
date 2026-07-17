@@ -611,9 +611,7 @@ export interface paths {
         };
         /**
          * Job Ai Logs
-         * @description 该 job 各 AI 步的完整 AI 审计日志(prompt 白盒化)。
-         *     读 output/ai_logs/{step}.jsonl —— 每次 LLM 调用一条(含路由/尝试链/prompt 渲染/输出/用量/raw),
-         *     按 job_id 归成一条 trace;给 step 时只返回该步。经 storage 读,兼容本地/MinIO。
+         * @description 返回Job或显式Part scope的AI审计日志,不做跨scope隐式聚合。
          */
         get: operations["job_ai_logs_api_jobs__job_id__ai_logs_get"];
         put?: never;
@@ -1504,6 +1502,10 @@ export interface components {
             calls: {
                 [key: string]: unknown;
             }[];
+            /** Part Id */
+            part_id: string | null;
+            /** Scope Key */
+            scope_key: string;
             /** Step */
             step: string;
         };
@@ -1595,6 +1597,10 @@ export interface components {
             files: components["schemas"]["ArtifactFile"][];
             /** Label */
             label: string;
+            /** Part Id */
+            part_id: string | null;
+            /** Scope Key */
+            scope_key: string;
             /** Step */
             step: string;
             /** Total Bytes */
@@ -1758,8 +1764,14 @@ export interface components {
              * @enum {string}
              */
             kind: "media";
+            /** Part Id */
+            part_id?: string | null;
             /** Start Ms */
             start_ms: number;
+            /** Timeline End Ms */
+            timeline_end_ms?: number | null;
+            /** Timeline Start Ms */
+            timeline_start_ms?: number | null;
         };
         /** CanonicalPdfLocator */
         CanonicalPdfLocator: {
@@ -2312,12 +2324,25 @@ export interface components {
              * @default false
              */
             mechanical_only: boolean;
+            /** Parts */
+            parts?: components["schemas"]["JobPartCreate"][] | null;
             /** Smart Note */
             smart_note?: boolean | null;
             /** Style Tags */
             style_tags?: string[];
+            /** Title */
+            title?: string | null;
             /** Url */
             url?: string | null;
+        };
+        /** JobCreatedPartResponse */
+        JobCreatedPartResponse: {
+            /** Part Id */
+            part_id: string;
+            /** Part Index */
+            part_index: number;
+            /** Title */
+            title?: string | null;
         };
         /** JobCreatedResponse */
         JobCreatedResponse: {
@@ -2332,6 +2357,8 @@ export interface components {
             document_kind: string | null;
             /** Job Id */
             job_id: string;
+            /** Parts */
+            parts?: components["schemas"]["JobCreatedPartResponse"][];
             /** Pipeline */
             pipeline: string;
             /** Status */
@@ -2372,6 +2399,8 @@ export interface components {
             meta?: {
                 [key: string]: unknown;
             };
+            /** Parts */
+            parts?: components["schemas"]["JobPartResponse"][];
             /** Pipeline */
             pipeline: string;
             /**
@@ -2440,6 +2469,34 @@ export interface components {
             /** Total */
             total: number;
         };
+        /** JobPartCreate */
+        JobPartCreate: {
+            /** Title */
+            title?: string | null;
+            /** Url */
+            url: string;
+        };
+        /** JobPartResponse */
+        JobPartResponse: {
+            /** Media */
+            media?: {
+                [key: string]: unknown;
+            };
+            /** Part Id */
+            part_id: string;
+            /** Part Index */
+            part_index: number;
+            /** Progress Pct */
+            progress_pct: number;
+            /** Status */
+            status: string;
+            /** Steps */
+            steps?: components["schemas"]["StepResponse"][];
+            /** Title */
+            title?: string | null;
+            /** Url */
+            url?: string | null;
+        };
         /** JobRebuildResponse */
         JobRebuildResponse: {
             /** From Step */
@@ -2473,6 +2530,8 @@ export interface components {
             from_step: string;
             /** Job Id */
             job_id: string;
+            /** Part Id */
+            part_id?: string | null;
             /** Status */
             status: string;
         };
@@ -2482,6 +2541,8 @@ export interface components {
             from_step: string;
             /** Job Id */
             job_id: string;
+            /** Part Id */
+            part_id?: string | null;
             /** Provider */
             provider: string;
             /** Review Step */
@@ -2699,6 +2760,11 @@ export interface components {
             pool: string | null;
             /** Prompt Locked */
             prompt_locked: boolean;
+            /**
+             * Scope
+             * @enum {string}
+             */
+            scope: "job" | "part";
         };
         /** PipelinesResponse */
         PipelinesResponse: {
@@ -8174,6 +8240,7 @@ export interface operations {
         parameters: {
             query?: {
                 step?: string | null;
+                part_id?: string | null;
             };
             header?: never;
             path: {

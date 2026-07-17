@@ -309,6 +309,43 @@ docker compose up -d api scheduler mcp-http worker-cpu worker-ai
 - 非法 WAL 或 hot journal、同时存在非空 WAL 与 rollback journal、空主库旁存在非空 sidecar、sidecar 为 symlink 或特殊文件，以及 WAL 路径连续三次无法取得稳定采样，都会 fail-closed。即使未来 schema 只存在于 committed crash WAL 中，也会在真实 DB/WAL 被改写或 SHM 被创建前拒绝启动。
 - 成功迁移后，旧镜像可能因为不支持更高 schema 而拒绝启动；镜像回滚不能替代数据库兼容性判断。
 
+### 6.2 Video 多 Part 离线切换
+
+引入 `job_parts` 的迁移同时改变 SQLite、对象键、根 `job.json` 和 Redis 执行身份，不能由服务启动时
+只迁数据库。生产 compose 强制 `FLORI_REQUIRE_OFFLINE_MIGRATIONS=1`：有 Video 的旧库缺少匹配 stage
+marker 时，新后端拒绝启动；数据库已切换但 marker 仍停在 staged 时同样拒绝，防止中断后带旧 Redis
+状态接单。
+
+维护窗内保留 Redis 与 MinIO，只停止所有 API/Scheduler/MCP/Worker 写入者，然后用新 API 镜像执行：
+
+```bash
+scripts/backup.sh
+docker compose stop api scheduler mcp-http worker-io worker-cpu worker-ai
+docker compose run --rm --no-deps api \
+  python -m shared.multipart_migration audit
+docker compose run --rm --no-deps api \
+  python -m shared.multipart_migration stage
+docker compose run --rm --no-deps api \
+  python -m shared.multipart_migration commit --ack-maintenance-window
+docker compose run --rm --no-deps api \
+  python -m shared.multipart_migration verify
+docker compose up -d
+```
+
+`stage` 为每个存量 Video 建 P01，用 Local 原子复制或 MinIO 服务端 copy 把 Part 产物复制到
+`parts/{part_id}/`。Local 前后核对 size+SHA-256；MinIO 以源 ETag 作条件复制，并分别记录源/目标的
+size+ETag。大对象服务端复制可能重算目标 ETag，不能要求两个 ETag 相等。此阶段不改根 manifest 和 SQLite。
+SQLite commit 同时把旧 Video 的 Part 步骤和对应 `ai_usage.step` 迁入 P01 scope，历史费用不会误归到
+Job 级 reduce 步骤。
+它边做边写 `db/multipart-v8-journal.json`，可安全续跑；全部完成后才发布
+`db/multipart-v8.ready.json`。`commit` 先要求 Redis 无 active job、排队 task、holder 和 runner lease，
+并复核 stage 时的完整 SQLite 逻辑指纹、journal 哈希、根 manifest 和每个复制对象；任一输入漂移都在
+切库前拒绝。通过后才发布根 manifest、事务迁移 SQLite、清旧执行态 Redis，任一数据库失败会恢复根
+manifest。`verify` 逐 Job 核对 DB Part、根/Part manifest 和全部复制对象并把 marker 置为 verified。
+
+原根媒体与旧产物不会在本次迁移中删除，便于审计；新 pipeline 只读 Part 路径。迁移后的旧镜像不支持
+新 schema/API，回滚必须在停写状态恢复升级前的完整 DR 备份，不能只回滚镜像或只替换 SQLite。
+
 ## 7. 备份 / 恢复 / 磁盘回收
 
 生产 compose 可使用命名卷或 bind mount。灾备脚本优先从运行中的 api、Redis、MinIO 容器发现真实 `/data` 挂载；也可用 `FLORI_DATA_DIR` / `FLORI_DATA_VOLUME`、`REDIS_DATA_DIR` / `REDIS_VOLUME`、`MINIO_DATA_DIR` / `MINIO_VOLUME` 显式指定。脚本只调用 Docker 一次性容器，宿主无需安装 Python、SQLite 或 Redis 工具，全部 `-h/--help` 可查。
@@ -334,6 +371,8 @@ scripts/backup.sh /mnt/nas/flori --minio-exclude .minio.sys/tmp
 - `workers/*/.cache` 是可重建的模型/下载缓存，可能包含上游工具维护的相对符号链接；归档固定排除该子树，但仍保留同一 worker 目录下的持久状态。其它符号链接继续 fail-closed。
 - `--data-exclude` / `--minio-exclude` 是默认关闭的受控逃生口，路径分别按 data / MinIO 根解析、可重复，最终写入对应 asset manifest 的 `excluded_external_subtrees`。只能排除经确认可重建的精确运行缓存；禁止排除整个 `.minio.sys`，其中的格式、bucket 配置、IAM、版本和生命周期等元数据属于恢复资产。不得用排除参数绕过业务资产的稳定性失败。
 - 完整 data 根会包含大源媒体，容量规划不能沿用旧版“只备 DB”的估算。需要缩短保留期时先用 `gc-jobs.sh` 管理可重下源文件。
+- 源资产默认以只读 bind 挂入备份容器。若只在已冻结的隔离副本上因 SQLite sidecar 无法打开，才可显式设
+  `FLORI_BACKUP_SOURCE_MOUNT_MODE=rw`；禁止用它绕过生产停写或直接放宽生产源挂载。
 - `BACKUP_RESULT_FILE` 输出机器可读状态；`FLORI_CONFIG_DIR=""` 可只跳过配置资产。真实 secret 值不得写进命令、日志或 tracked 配置。
 
 cron 建议（每天 03:00 备份，保留最近 14 份）：

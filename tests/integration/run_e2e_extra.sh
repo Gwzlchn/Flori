@@ -41,10 +41,14 @@ for s in d['steps']:
     err = (s.get('error','') or '')[:50]
     icon = {'done':'✓','skipped':'⏭','failed':'✗','waiting':'⏳','ready':'🔄','running':'▶'}.get(s['status'],'?')
     print(f'  {icon} {s[\"name\"]:20s} {s[\"status\"]:10s} {dur:>8s}  {err}')
+for part in d.get('parts', []):
+    print(f'  Part {part[\"part_index\"]}: {part.get(\"title\") or part[\"part_id\"]}')
+    for s in part.get('steps', []):
+        print(f'    {s[\"name\"]:20s} {s[\"status\"]:10s}')
 " 2>/dev/null
 }
 
-VIDEO_FILE="${TEST_VIDEO_FILE:?请设置 TEST_VIDEO_FILE}"
+VIDEO_URL="${TEST_VIDEO_URL:?请设置 TEST_VIDEO_URL 为 worker 可访问的视频 URL}"
 
 log "═══ 补充集成测试：并发 + 容错 + API ═══"
 log ""
@@ -52,19 +56,21 @@ log ""
 # ═══════════════════════════════════════
 # TC-5: 并发 3 个任务
 # ═══════════════════════════════════════
-log "TC-5: 并发 3 个任务（2 视频上传 + 1 PDF）"
+log "TC-5: 并发 3 个任务（2 Video Part + 1 PDF）"
 
 JOBS=()
 # 视频 1
-RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload?content_type=video" \
-  -F "file=@$VIDEO_FILE" -F "domain=deep-learning")
+RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs" \
+  -H "Content-Type: application/json" \
+  -d "{\"content_type\":\"video\",\"parts\":[{\"url\":\"$VIDEO_URL\"}],\"domain\":\"deep-learning\"}")
 JID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
 JOBS+=("$JID:video")
 log "  视频 1: $JID"
 
-# 视频 2（同一个文件，不同 domain）
-RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs/upload?content_type=video" \
-  -F "file=@$VIDEO_FILE" -F "domain=programming")
+# 视频 2（同一个 URL，不同 domain）
+RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs" \
+  -H "Content-Type: application/json" \
+  -d "{\"content_type\":\"video\",\"parts\":[{\"url\":\"$VIDEO_URL\"}],\"domain\":\"programming\"}")
 JID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
 JOBS+=("$JID:video")
 log "  视频 2: $JID"
@@ -133,7 +139,7 @@ log "TC-6: 失败 → 自动重试 → retry/rerun API"
 # 提交无效 B站 URL 触发下载失败
 RESP=$(curl --noproxy '*' -s -X POST "$API/api/jobs" \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://www.bilibili.com/video/BV_INVALID_99999", "content_type": "video", "domain": "general"}')
+  -d '{"content_type":"video","parts":[{"url":"https://www.bilibili.com/video/BV_INVALID_99999"}],"domain":"general"}')
 JOB_FAIL=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
 log "  无效 URL Job: $JOB_FAIL"
 
@@ -345,12 +351,10 @@ async def test():
 
     import httpx
     async with httpx.AsyncClient() as client:
-        with open('$VIDEO_FILE', 'rb') as f:
-            resp = await client.post(
-                '$API/api/jobs/upload?content_type=video',
-                files={'file': ('test.mp4', f, 'video/mp4')},
-                data={'domain': 'general'},
-            )
+        resp = await client.post(
+            '$API/api/jobs',
+            json={'content_type': 'video', 'parts': [{'url': '$VIDEO_URL'}], 'domain': 'general'},
+        )
         job_id = resp.json()['job_id']
 
     events = []

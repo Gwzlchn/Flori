@@ -13,6 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from tests.conftest import make_fakeredis
 from tests.pubsub_helpers import subscription_barrier
 from api.main import create_app
+from shared.step_scope import execution_step_key, part_scope
 
 REG_TOKEN = "flw-registration-secret"
 
@@ -1193,6 +1194,61 @@ class TestArtifacts:
         assert got.headers["content-type"] == "application/octet-stream"
 
     @pytest.mark.asyncio
+    async def test_part_lease_is_confined_to_own_artifact_prefix(
+        self, jobs_client, test_config, real_redis,
+    ):
+        worker_id, token = await _register_real(jobs_client)
+        step = execution_step_key(part_scope("pt_a"), "01_download")
+        exec_id = await _activate_lease(real_redis, worker_id, step=step)
+        h = _task_headers(token, "j1", step, exec_id)
+        job_dir = test_config.jobs_dir / "j1"
+        (job_dir / "parts" / "pt_a").mkdir(parents=True)
+        (job_dir / "parts" / "pt_b").mkdir(parents=True)
+        (job_dir / "job.json").write_text("root")
+        (job_dir / "parts" / "pt_a" / "own.md").write_text("own")
+        (job_dir / "parts" / "pt_b" / "other.md").write_text("other")
+
+        listed = await jobs_client.get("/api/runner/jobs/j1/artifacts", headers=h)
+        assert listed.status_code == 200
+        assert listed.json()["files"] == ["parts/pt_a/own.md"]
+        assert (await jobs_client.get(
+            "/api/runner/jobs/j1/artifacts/parts/pt_a/own.md", headers=h,
+        )).status_code == 200
+        assert (await jobs_client.get(
+            "/api/runner/jobs/j1/artifacts/parts/pt_b/other.md", headers=h,
+        )).status_code == 403
+        assert (await jobs_client.get(
+            "/api/runner/jobs/j1/artifacts/job.json", headers=h,
+        )).status_code == 403
+        assert (await jobs_client.put(
+            "/api/runner/jobs/j1/artifacts/parts/pt_a/new.md", content=b"new", headers=h,
+        )).status_code == 200
+        assert (await jobs_client.put(
+            "/api/runner/jobs/j1/artifacts/parts/pt_b/new.md", content=b"bad", headers=h,
+        )).status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_job_lease_can_read_parts_but_cannot_write_them(
+        self, jobs_client, test_config, real_redis,
+    ):
+        worker_id, token = await _register_real(jobs_client)
+        exec_id = await _activate_lease(real_redis, worker_id, step="09_merge_parts")
+        h = _task_headers(token, "j1", "09_merge_parts", exec_id)
+        job_dir = test_config.jobs_dir / "j1"
+        (job_dir / "parts" / "pt_a").mkdir(parents=True)
+        (job_dir / "parts" / "pt_a" / "notes.md").write_text("part")
+
+        assert (await jobs_client.get(
+            "/api/runner/jobs/j1/artifacts/parts/pt_a/notes.md", headers=h,
+        )).status_code == 200
+        assert (await jobs_client.put(
+            "/api/runner/jobs/j1/artifacts/parts/pt_a/new.md", content=b"bad", headers=h,
+        )).status_code == 403
+        assert (await jobs_client.put(
+            "/api/runner/jobs/j1/artifacts/output/root.md", content=b"ok", headers=h,
+        )).status_code == 200
+
+    @pytest.mark.asyncio
     async def test_credential_sidecar_not_listed_or_served(self, jobs_client, test_config, real_redis):
         """敏感凭证侧载文件:远端 worker 既列不到、也取不到(404),只供同机本地读。"""
         worker_id, token = await _register_real(jobs_client)
@@ -1494,6 +1550,24 @@ class TestDispatchCredentials(_CredentialLeaseClient):
         )
         assert resp.status_code == 200
         assert resp.json() == {"key": "bili_sessdata", "value": "mirrored-sess"}
+
+    @pytest.mark.asyncio
+    async def test_part_scoped_download_lease_can_read_credential(
+        self, client, redis_mock,
+    ):
+        _, token = await self._register_worker(client)
+        redis_mock.get_dispatch_credential.return_value = "part-sess"
+        resp = await client.get(
+            "/api/runner/credentials/bili_sessdata",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Flori-Lease-Job": "j1",
+                "X-Flori-Lease-Step": "part:pt_01::01_download",
+                "X-Flori-Lease-Exec": "exec-download",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["value"] == "part-sess"
 
     @pytest.mark.asyncio
     async def test_miss_falls_back_to_db_and_remirrors(self, client, redis_mock, db):

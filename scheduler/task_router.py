@@ -79,7 +79,9 @@ class TaskRouter:
         # zpopmin:分数越小越先出。priority=-done_count 让晚到步骤优先,但 02_whisper 处在链路早段
         # 会被各 job 的视觉步(04/05/06,同 cpu 池)长期抢占而饿死。给它静态加权(更小分数)抢先转写;
         # 出稿硬依赖转写,不加权会让出稿步空等。
-        priority = -done_count - _PRIORITY_BOOST.get(step_name, 0)
+        priority = -done_count - _PRIORITY_BOOST.get(
+            step_cfg.get("template_step", step_name), 0,
+        )
 
         await self.owner.redis.enqueue_step(
             pool, job_id, step_name, merged_tags, priority,
@@ -118,15 +120,20 @@ class TaskRouter:
         job_info: dict | None = None,
     ) -> list[str]:
         """计算 enqueue 与 no-worker 共用的硬标签,含 provider override。"""
+        template_step = step_cfg.get("template_step", step_name)
+        part_id = step_cfg.get("part_id")
+        artifact_prefix = f"parts/{part_id}/" if part_id else ""
         required = set(step_cfg.get("tags") or [])
         override = None
         capability_tags: set[str] = set()
         if step_cfg.get("pool") == "ai":
             async def has_nonempty_artifact(rel: str) -> bool:
                 if self.owner.storage is not None:
-                    data = await read_file_bounded(self.owner.storage, job_id, rel, 0)
+                    data = await read_file_bounded(
+                        self.owner.storage, job_id, f"{artifact_prefix}{rel}", 0,
+                    )
                     return bool(data)
-                path = self.owner.jobs_dir / job_id / rel
+                path = self.owner.jobs_dir / job_id / artifact_prefix / rel
                 try:
                     return await asyncio.to_thread(
                         lambda: path.is_file() and path.stat().st_size > 0,
@@ -169,7 +176,7 @@ class TaskRouter:
                 try:
                     doc = json.loads(raw)
                     override, shape_error = parse_ai_override(
-                        doc, step_name, self.owner.config.providers,
+                        doc, template_step, self.owner.config.providers,
                     )
                     if shape_error:
                         logger.warning(
@@ -187,13 +194,25 @@ class TaskRouter:
         nr = self.owner.config.net_routing or {}
         net_steps = set(nr.get("net_steps") or _NET_STEPS)
         info = job_info
-        if step_name in net_steps:
+        if template_step in net_steps:
             info = info or await self.owner.redis.get_job_info(job_id)
         info = info or {}
+        if part_id:
+            parts = await asyncio.to_thread(self.owner.db.get_parts, job_id)
+            part = next((item for item in parts if item.id == part_id), None)
+            if part is None:
+                raise InvalidAIOverrideError("invalid part scope")
+            part_url = part.source_url or ""
+            info = {
+                **info,
+                "url": part_url,
+                "source": str((part.meta or {}).get("source") or "")
+                or detect_source(part_url),
+            }
         source = (info.get("source") or "").strip() or detect_source(info.get("url", ""))
         try:
             return step_required_route_tags(
-                step_cfg, self.owner.config.providers,
+                {**step_cfg, "name": template_step}, self.owner.config.providers,
                 source=source, url=info.get("url", ""),
                 net_steps=net_steps,
                 override=override, capability_tags=capability_tags,
@@ -203,16 +222,24 @@ class TaskRouter:
                 f"invalid AI capability: {exc}",
             ) from exc
 
-    async def _list_job_files(self, job_id: str) -> list[str]:
+    async def _list_job_files(
+        self, job_id: str, part_id: str | None = None,
+    ) -> list[str]:
         """列出 job 现有产物的相对路径。分布式部署产物在对象存储(MinIO)、不在调度器本地盘,
         故优先走 storage;无 storage(单机/测试)回退本地 jobs_dir。条件/规则据此判存在。"""
         if self.owner.storage is not None:
             try:
-                return await self.owner.storage.list_files(job_id)
+                files = await self.owner.storage.list_files(job_id)
+                if part_id is None:
+                    return files
+                prefix = f"parts/{part_id}/"
+                return [item[len(prefix):] for item in files if item.startswith(prefix)]
             except Exception:
                 logger.warning("list_job_files_failed", job_id=job_id)
                 return []
         job_dir = self.owner.jobs_dir / job_id
+        if part_id:
+            job_dir = job_dir / "parts" / part_id
 
         def _local() -> list[str]:
             if not job_dir.exists():
@@ -221,8 +248,10 @@ class TaskRouter:
 
         return await asyncio.to_thread(_local)
 
-    async def check_condition(self, job_id: str, condition: str) -> bool:
-        files = await self.owner._list_job_files(job_id)
+    async def check_condition(
+        self, job_id: str, condition: str, part_id: str | None = None,
+    ) -> bool:
+        files = await self.owner._list_job_files(job_id, part_id)
         has_srt = any(fnmatch.fnmatch(f, "input/*.srt") for f in files)
         has_ass = any(fnmatch.fnmatch(f, "input/*.ass") for f in files)
         if condition == "no_subtitle":
@@ -240,18 +269,25 @@ class TaskRouter:
     async def _eval_step_condition(self, job_id: str, cfg: dict) -> bool:
         """求值 step 是否应运行:优先 condition 字符串,否则用声明式 rules。"""
         condition = cfg.get("condition")
+        part_id = cfg.get("part_id")
         if condition:
+            if part_id:
+                return await self.owner.check_condition(job_id, condition, part_id)
             return await self.owner.check_condition(job_id, condition)
         rules = cfg.get("rules")
         if rules:
+            if part_id:
+                return await self.owner._eval_rules(job_id, rules, part_id)
             return await self.owner._eval_rules(job_id, rules)
         return True
 
-    async def _eval_rules(self, job_id: str, rules: list) -> bool:
+    async def _eval_rules(
+        self, job_id: str, rules: list, part_id: str | None = None,
+    ) -> bool:
         """声明式 rules 求值器:自上而下首条命中生效,命中 when=skip 则跳过,
         支持 exists(相对 job 根的 glob)与 if_flag(投递开关),无命中默认运行。
         存在性查 storage(产物在 MinIO,不在调度器本地盘);if_flag 查 redis job info。"""
-        files = await self.owner._list_job_files(job_id)
+        files = await self.owner._list_job_files(job_id, part_id)
         _flags_cache: dict | None = None
 
         async def _flags() -> dict:

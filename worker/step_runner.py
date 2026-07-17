@@ -129,6 +129,8 @@ class StepContext:
     exec_id: str
     step_cfg: dict
     module: str
+    scope_key: str = "job"
+    part_id: str | None = None
     image: str = "flori/step-base"
     timeout_sec: int = 600
     pool: str = ""
@@ -244,6 +246,7 @@ class DockerStepRunner:
     + kill 复刻超时,labels 防泄漏。由 STEP_RUNTIME=docker 启用。"""
 
     def __init__(self, worker_id: str, host_work_root: str | None = None,
+                 container_work_root: str | None = None,
                  registry: str | None = None):
         import docker  # 延迟导入:subprocess 模式不强依赖 docker SDK。
 
@@ -251,6 +254,7 @@ class DockerStepRunner:
         self._worker_id = worker_id
         # DooD:bind-mount 必须用宿主路径,非 worker 容器内路径。None 时退化为原路径。
         self._host_work_root = host_work_root
+        self._container_work_root = Path(container_work_root or "/tmp/flori-work").resolve()
         # 镜像仓库前缀:把 pipelines 里的逻辑名 flori/step-X 解析成实仓名。
         self._registry = (registry or "").rstrip("/")
 
@@ -261,7 +265,10 @@ class DockerStepRunner:
             raise ValueError(
                 "DockerStepRunner requires HOST_WORK_DIR (DooD 需宿主侧 work 目录路径)"
             )
-        return str(Path(self._host_work_root) / work_dir.name)
+        resolved = work_dir.resolve()
+        if resolved != self._container_work_root and self._container_work_root not in resolved.parents:
+            raise ValueError("step work_dir escapes configured WORK_DIR")
+        return str(Path(self._host_work_root) / resolved.relative_to(self._container_work_root))
 
     def _resolve_image(self, image: str) -> str:
         # 逻辑名 flori/step-X 解析为 {registry}/flori-step-X(ghcr 扁平命名);
@@ -275,7 +282,14 @@ class DockerStepRunner:
         仅 ai 池补 env 里实际存在的 AI 密钥。非 ai 池绝不见 AI key,杜绝全量透传。
         PYTHONPATH=/app:步骤镜像代码在 /app,而容器 working_dir=/job,缺它则
         python3 -m steps.* 找不到模块(子进程模式靠 cwd=/app,docker 模式必须显式给)。"""
-        env = {"STEP_EXEC_ID": ctx.exec_id, "PYTHONPATH": "/app", **ctx.extra_env}
+        env = {
+            "STEP_EXEC_ID": ctx.exec_id,
+            "STEP_JOB_ID": ctx.job_id,
+            "STEP_SCOPE_KEY": ctx.scope_key,
+            "STEP_PART_ID": ctx.part_id or "",
+            "PYTHONPATH": "/app",
+            **ctx.extra_env,
+        }
         proxy = os.environ.get("HTTPS_PROXY")
         if proxy:
             env["HTTPS_PROXY"] = proxy
@@ -620,7 +634,14 @@ async def _run_progress_monitor(
 def _build_subprocess_env(ctx: StepContext) -> dict:
     """DENYLIST 构造子进程 env:继承全量系统 env,剥离控制面密钥;
     非 ai 池再剥离 AI 密钥;始终补 STEP_EXEC_ID。HTTPS_PROXY 等系统变量自然保留。"""
-    env = {**os.environ, "STEP_EXEC_ID": ctx.exec_id, **ctx.extra_env}
+    env = {
+        **os.environ,
+        "STEP_EXEC_ID": ctx.exec_id,
+        "STEP_JOB_ID": ctx.job_id,
+        "STEP_SCOPE_KEY": ctx.scope_key,
+        "STEP_PART_ID": ctx.part_id or "",
+        **ctx.extra_env,
+    }
     for key in _CONTROL_PLANE_SECRETS:
         env.pop(key, None)
     if ctx.pool != "ai":
@@ -643,6 +664,7 @@ def create_step_runner(worker_id: str) -> StepRunner:
         return DockerStepRunner(
             worker_id,
             host_work_root=os.environ.get("HOST_WORK_DIR"),
+            container_work_root=os.environ.get("WORK_DIR", "/tmp/flori-work"),
             registry=os.environ.get("FLORI_STEP_REGISTRY"),
         )
     return SubprocessStepRunner()
