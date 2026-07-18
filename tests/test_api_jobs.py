@@ -811,15 +811,28 @@ class TestRetryRerunResubmit:
         assert resp.status_code == 400
 
     @pytest.mark.asyncio
-    async def test_rerun(self, client, mock_redis):
-        create_resp = await client.post("/api/jobs", json=_video_request())
+    async def test_rerun(self, client, app, mock_redis):
+        create_resp = await client.post(
+            "/api/jobs",
+            json=_video_request(title="Authoritative course title"),
+        )
         job_id = create_resp.json()["job_id"]
+        job_doc = json.loads(await app.state.storage.read_file(job_id, "job.json"))
+        assert job_doc["title"] == "Authoritative course title"
+        job_doc.pop("title")
+        await app.state.storage.write_file(
+            job_id,
+            "job.json",
+            json.dumps(job_doc).encode("utf-8"),
+        )
         resp = await client.post(
             f"/api/jobs/{job_id}/rerun",
             json={"from_step": "11_smart"},
         )
         assert resp.status_code == 200
         assert resp.json()["from_step"] == "11_smart"
+        job_doc = json.loads(await app.state.storage.read_file(job_id, "job.json"))
+        assert job_doc["title"] == "Authoritative course title"
         # 真实副作用:job 以 rerun 命令被重新派发(而非只回显入参)。最后一次 publish 是 rerun。
         ch, payload = mock_redis.append_lifecycle_event.call_args[0]
         assert ch == "job_command"

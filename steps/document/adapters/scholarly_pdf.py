@@ -60,6 +60,7 @@ _AUTHOR_NOISE = {
     "abstract", "berkeley", "copyright", "department", "engineering",
     "institute", "laboratory", "national", "publication", "research",
     "report", "school", "sciences", "university", "working paper",
+    "bulletin", "office",
 }
 _MONTH_DATE_FORMATS = (
     "%B %d, %Y", "%b %d, %Y", "%B %Y", "%b %Y",
@@ -326,7 +327,10 @@ class ScholarlyPdfAdapter:
     ) -> dict[str, Any]:
         sidecar = self._sidecar_metadata()
         title = _compact_text(sidecar.get("title"))
+        job_title = _compact_text(self.job.get("title"))
         inferred_title = False
+        if not title and job_title and not is_suspicious_title(job_title):
+            title = job_title
         if not title:
             title = self._labeled_cover_value(pages, "title")
             inferred_title = bool(title)
@@ -346,14 +350,23 @@ class ScholarlyPdfAdapter:
         if inferred_title:
             self.reasons.append("pdf_title_inferred")
 
-        authors = self._sidecar_authors(sidecar)
-        if not authors:
-            authors = [
+        sidecar_authors = self._sidecar_authors(sidecar)
+        if sidecar_authors:
+            authors = sidecar_authors
+        else:
+            embedded_authors = [
                 item for item in self._split_author_text(info.get("Author", ""))
                 if self._looks_like_person(item)
             ]
-        if not authors:
-            authors = self._cover_authors(pages, title)
+            cover_authors = self._cover_authors(
+                pages,
+                title,
+                allow_single=bool(job_title or _compact_text(sidecar.get("title"))),
+            )
+            authors = max(
+                (embedded_authors, cover_authors),
+                key=lambda values: (len(values), sum(len(value) for value in values)),
+            )
 
         published_at = _normalize_date(
             sidecar.get("published_at") or sidecar.get("date")
@@ -407,7 +420,7 @@ class ScholarlyPdfAdapter:
         return [
             item for item in (
                 _compact_text(part)
-                for part in re.split(r"\s*(?:;|\band\b)\s*", text)
+                for part in re.split(r"\s*(?:;|\band\b)\s*", text, flags=re.I)
             ) if item
         ]
 
@@ -497,6 +510,13 @@ class ScholarlyPdfAdapter:
     @staticmethod
     def _normalize_author_name(value: str) -> str:
         text = _compact_text(value)
+        while re.search(r"\b[A-Z]\s+[A-Z]{2,}\b", text):
+            text = re.sub(r"\b([A-Z])\s+([A-Z]{2,})\b", r"\1\2", text)
+        if text.isupper():
+            text = " ".join(
+                token if len(re.sub(r"[^A-Z]", "", token)) <= 2 else token.title()
+                for token in text.split()
+            )
         for plain, accented in (
             ("a", "á"), ("e", "é"), ("i", "í"), ("o", "ó"), ("u", "ú"),
         ):
@@ -544,8 +564,16 @@ class ScholarlyPdfAdapter:
                 or lowered.rstrip(":").strip() in _COVER_LABELS
             ):
                 break
+            if authors and any(noise in lowered for noise in _AUTHOR_NOISE):
+                break
             if len(value) <= 2 and not value.isalpha():
                 continue
+            if len(value) == 1 and value.isalpha() and authors:
+                previous_item = authors[-1][1]
+                marker_height = item.bbox[3] - item.bbox[1]
+                author_height = previous_item.bbox[3] - previous_item.bbox[1]
+                if marker_height <= max(author_height * 0.75, 1):
+                    continue
             if lowered.startswith("and "):
                 candidate = cls._normalize_author_name(value[4:])
                 if cls._looks_like_person(candidate):
@@ -561,6 +589,18 @@ class ScholarlyPdfAdapter:
                     authors[-1] = (
                         cls._normalize_author_name(previous + separator + value), item,
                     )
+                    continue
+            if value.isupper() and re.search(r",|\bAND\b", value):
+                uppercase_authors = [
+                    cls._normalize_author_name(re.sub(r"^AND\s+", "", part, flags=re.I))
+                    for part in re.split(r"\s*,\s*|\s+\bAND\b\s+", value, flags=re.I)
+                    if _compact_text(part)
+                ]
+                uppercase_authors = [
+                    part for part in uppercase_authors if cls._looks_like_person(part)
+                ]
+                if len(uppercase_authors) >= 2:
+                    authors.extend((part, item) for part in uppercase_authors)
                     continue
             normalized = cls._normalize_author_name(re.sub(
                 r"(?<=[A-Za-zÀ-ÖØ-öø-ÿ])\d+\b", "", value,
@@ -578,6 +618,10 @@ class ScholarlyPdfAdapter:
                         authors.append((cls._normalize_author_name(part), item))
             elif cls._looks_like_person(normalized):
                 authors.append((normalized, item))
+            elif not authors and (
+                len(value.split()) >= 5 or value.rstrip().endswith((".", ":", ";"))
+            ):
+                break
         return list(dict.fromkeys(name for name, _item in authors))
 
     @staticmethod
@@ -591,7 +635,13 @@ class ScholarlyPdfAdapter:
         return False
 
     @classmethod
-    def _cover_authors(cls, pages: list[PageLayout], title: str) -> list[str]:
+    def _cover_authors(
+        cls,
+        pages: list[PageLayout],
+        title: str,
+        *,
+        allow_single: bool = False,
+    ) -> list[str]:
         if not title:
             return []
         primary: tuple[int, int, int] | None = None
@@ -605,7 +655,7 @@ class ScholarlyPdfAdapter:
         if primary:
             authors = cls._authors_after(pages[primary[0]], primary[2] + 1)
             if (
-                len(authors) >= 2
+                (len(authors) >= 2 or (allow_single and len(authors) == 1))
                 and not cls._author_list_is_abbreviated(
                     pages[primary[0]], primary[2] + 1,
                 )
@@ -629,8 +679,42 @@ class ScholarlyPdfAdapter:
 
     @staticmethod
     def _cover_date(pages: list[PageLayout]) -> str:
-        for page in pages[:3]:
-            for item in page.text_items[:100]:
+        version_dates: list[str] = []
+        season_years: list[str] = []
+        copyright_years: list[str] = []
+        for page_index, page in enumerate(pages[:3]):
+            limit = 140 if page_index == 0 else 100
+            for item in page.text_items[:limit]:
+                value = _compact_text(item.text)
+                lowered = value.casefold()
+                if re.search(r"\b(?:this version|update|revised)\b", lowered):
+                    month_year = re.search(
+                        r"\b(?:January|February|March|April|May|June|July|August|"
+                        r"September|October|November|December)"
+                        r"(?:\s+\d{1,2},)?\s+\d{4}\b",
+                        value,
+                        re.I,
+                    )
+                    normalized = _normalize_date(month_year.group(0) if month_year else value)
+                    if normalized:
+                        version_dates.append(normalized)
+                if match := re.search(
+                    r"\b(?:spring|summer|fall|autumn|winter)\s+((?:19|20)\d{2})\b",
+                    value,
+                    re.I,
+                ):
+                    season_years.append(match.group(1))
+                if match := re.search(
+                    r"(?:©|\bcopyright\b)\s*((?:19|20)\d{2})\b",
+                    value,
+                    re.I,
+                ):
+                    copyright_years.append(match.group(1))
+        if version_dates:
+            return max(version_dates)
+        for page_index, page in enumerate(pages[:3]):
+            limit = 140 if page_index == 0 else 100
+            for item in page.text_items[:limit]:
                 value = _compact_text(item.text)
                 if re.search(
                     r"\b(?:January|February|March|April|May|June|July|August|"
@@ -656,6 +740,10 @@ class ScholarlyPdfAdapter:
                 if short_publication_year:
                     year = int(short_publication_year.group(1))
                     return str(2000 + year if year < 30 else 1900 + year)
+        if season_years:
+            return max(season_years)
+        if copyright_years:
+            return max(copyright_years)
         return ""
 
     def _identifiers(

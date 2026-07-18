@@ -588,6 +588,7 @@ async def create_job_core(
             job_id = f"{job_id}_{secrets.token_hex(3)}"
     job_doc = {
         "id": job_id, "url": url, "source": source, "content_type": ctype,
+        "title": title,
         "document_kind": resolved_kind or None,
         "source_profile": route.source_profile,
         "domain": domain, "style_tags": style_tags, "created_at": _now_iso(),
@@ -2198,6 +2199,7 @@ async def rerun_job(
     req: RerunRequest,
     db: Database = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
+    storage: StorageBackend = Depends(get_storage),
     config: AppConfig = Depends(get_config),
 ):
     validate_path_segment(job_id, "job_id")
@@ -2216,6 +2218,20 @@ async def rerun_job(
     }
     if req.from_step not in allowed_steps:
         raise HTTPException(422, "job rerun only accepts job-scoped steps")
+    raw_job_doc = await storage.read_file(job_id, "job.json")
+    try:
+        job_doc = json.loads(raw_job_doc) if raw_job_doc is not None else None
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as exc:
+        raise HTTPException(409, "job.json 格式非法") from exc
+    if not isinstance(job_doc, dict):
+        raise HTTPException(409, "job.json 顶层必须是对象")
+    if job_doc.get("title") != job.title:
+        job_doc["title"] = job.title
+        await storage.write_file(
+            job_id,
+            "job.json",
+            json.dumps(job_doc, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
     await redis.append_lifecycle_event("job_command", {
         "action": "rerun", "job_id": job_id, "from_step": req.from_step,
     })

@@ -117,6 +117,8 @@ arXiv 推断为 `document/research_paper`，非 arXiv 直链 PDF 推断为 `docu
 
 `document_kind` 仅对 Document 有效，来自可扩展 registry；Document 未显式给出且来源不能可靠判定时写
 `unknown`，非 Document 携带 kind 返回 `422`。`document_kind` 表示体裁，不决定 HTML/PDF/OCR adapter。
+可选 `title` 同时写入数据库 Job 与下发给 Worker 的 `job.json.title`。Document adapter 把该值视为
+调用方提供的来源标题，优先于 PDF 容器内易受编译器、期刊页眉污染的 Title；未传时保持来源自动识别。
 投递指定 `collection_id` 时，省略 `domain` 或传 `general` 会继承集合 domain；显式传入其它 domain
 返回 `409`，避免 collection 与 job 的领域不变量漂移。upload 路径遵循同一规则。
 可选字段 `smart_note`（bool，默认 `null`）控制智能笔记及评审；`null` 时
@@ -418,7 +420,9 @@ curl -X POST 'http://localhost:8000/api/jobs/retry-failed?collection_id=col_xxx'
 
 #### POST /api/jobs/{id}/rerun — 强制重跑
 
-只接受 Job scope 步骤。从指定步骤开始重跑，清除该步骤及所有下游的 `.done` 标记。
+只接受 Job scope 步骤。从指定步骤开始重跑，清除该步骤及所有下游的 `.done` 标记。发布 rerun 命令前
+会用数据库中的当前 Job 标题回填 `job.json.title`，让缺少该字段的存量 Document 在重跑解析时使用同一
+权威标题；`job.json` 缺失、不是合法 JSON 或顶层不是对象时返回 `409`，且不发布命令。
 
 ```bash
 curl -X POST http://localhost:8000/api/jobs/j_xxx/rerun \

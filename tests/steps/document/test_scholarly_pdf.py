@@ -70,6 +70,21 @@ def test_cover_date_expands_short_year_from_venue_footer() -> None:
     assert ScholarlyPdfAdapter._cover_date([page]) == "2004"
 
 
+def test_cover_date_reads_late_first_page_journal_citation() -> None:
+    page = PageLayout(1, 600, 800, text_items=[
+        *[
+            LayoutItem(f"front matter {index}", [40, index * 4, 300, index * 4 + 3])
+            for index in range(105)
+        ],
+        LayoutItem(
+            "Journal of Financial Economics 104 (2012) 228-250",
+            [40, 720, 360, 735],
+        ),
+    ])
+
+    assert ScholarlyPdfAdapter._cover_date([page]) == "2012"
+
+
 @pytest.fixture
 def pdf_job(tmp_path: Path) -> tuple[Path, dict[str, str], bytes]:
     job_dir = tmp_path / "jobs_arxiv_2205.14135"
@@ -301,6 +316,158 @@ def test_pdf_sidecar_metadata_wins_over_container_metadata(
     assert metadata["published_at"] == "2018-12-24"
     assert metadata["publisher"] == "NBER"
     assert metadata["identifiers"]["nber_working_paper"] == "w25398"
+
+
+def test_pdf_job_title_wins_over_header_and_recovers_cover_authors(
+    monkeypatch: pytest.MonkeyPatch,
+    pdf_job: tuple[Path, dict[str, str], bytes],
+) -> None:
+    job_dir, job, _ = pdf_job
+    job = {
+        **job,
+        "title": "A Century of Evidence on Trend-Following Investing",
+    }
+    page = PageLayout(1, 612, 792, text_items=[
+        LayoutItem("VOLUME 44, NUMBER 1", [32, 22, 180, 35]),
+        LayoutItem("FALL 2017", [500, 22, 575, 35]),
+        LayoutItem("A Century of Evidence", [55, 150, 440, 180]),
+        LayoutItem("on Trend-Following Investing", [55, 181, 510, 211]),
+        LayoutItem(
+            "B RIAN H URST, Y AO H UA O OI, AND L ASSE H EJE P EDERSEN",
+            [55, 230, 555, 246],
+        ),
+    ])
+    monkeypatch.setattr(ScholarlyPdfAdapter, "_pdf_info", lambda self: {
+        "Pages": "16", "Title": "VOLUME 44, NUMBER 1",
+    })
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+    )
+
+    document, _quality = parse_pdf_document(job_dir, job)
+
+    metadata = document["metadata"]
+    assert metadata["titles"]["original"] == job["title"]
+    assert [author["name"] for author in metadata["authors"]] == [
+        "Brian Hurst", "Yao Hua Ooi", "Lasse Heje Pedersen",
+    ]
+    assert metadata["published_at"] == "2017"
+
+
+def test_pdf_cover_ignores_superscript_affiliations_after_fragmented_authors(
+    monkeypatch: pytest.MonkeyPatch,
+    pdf_job: tuple[Path, dict[str, str], bytes],
+) -> None:
+    job_dir, job, _ = pdf_job
+    job = {**job, "title": "Time Series Momentum"}
+    page = PageLayout(1, 612, 792, text_items=[
+        LayoutItem("Time Series Momentum", [41, 164, 196, 177]),
+        LayoutItem("Tobias J. Moskowitz", [41, 188, 143, 199]),
+        LayoutItem("a", [145, 186, 149, 193]),
+        LayoutItem(", Yao Hua Ooi", [155, 188, 225, 199]),
+        LayoutItem("b", [227, 186, 232, 193]),
+        LayoutItem(", Lasse Heje Pedersen", [232, 188, 341, 199]),
+        LayoutItem("c", [350, 186, 354, 193]),
+        LayoutItem(
+            "University of Chicago Booth School of Business and NBER, United States",
+            [45, 206, 256, 212],
+        ),
+    ])
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_pdf_info", lambda self: {"Pages": "23"},
+    )
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+    )
+
+    document, _quality = parse_pdf_document(job_dir, job)
+
+    assert [author["name"] for author in document["metadata"]["authors"]] == [
+        "Tobias J. Moskowitz", "Yao Hua Ooi", "Lasse Heje Pedersen",
+    ]
+
+
+def test_pdf_cover_single_author_replaces_missing_container_author(
+    monkeypatch: pytest.MonkeyPatch,
+    pdf_job: tuple[Path, dict[str, str], bytes],
+) -> None:
+    job_dir, job, _ = pdf_job
+    job = {**job, "title": "Portfolio Selection"}
+    page = PageLayout(1, 612, 792, text_items=[
+        LayoutItem("Portfolio Selection", [90, 70, 420, 96]),
+        LayoutItem("Harry Markowitz", [210, 112, 350, 130]),
+        LayoutItem("The Journal of Finance, Vol. 7, No. 1, 1952", [70, 150, 520, 168]),
+    ])
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_pdf_info", lambda self: {"Pages": "16"},
+    )
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+    )
+
+    document, _quality = parse_pdf_document(job_dir, job)
+
+    assert [author["name"] for author in document["metadata"]["authors"]] == [
+        "Harry Markowitz",
+    ]
+    assert document["metadata"]["published_at"] == "1952"
+
+
+def test_pdf_cover_complete_authors_replace_incomplete_container_author(
+    monkeypatch: pytest.MonkeyPatch,
+    pdf_job: tuple[Path, dict[str, str], bytes],
+) -> None:
+    job_dir, job, _ = pdf_job
+    title = "The Deflated Sharpe Ratio: Correcting for Selection Bias"
+    job = {**job, "title": title}
+    page = PageLayout(1, 612, 792, text_items=[
+        LayoutItem(title, [65, 70, 550, 100]),
+        LayoutItem("David H. Bailey", [100, 135, 230, 152]),
+        LayoutItem("Marcos López de Prado", [350, 135, 510, 152]),
+        LayoutItem("First version: April 15, 2014", [180, 190, 420, 205]),
+        LayoutItem("This version: July 31, 2014", [180, 210, 420, 225]),
+    ])
+    monkeypatch.setattr(ScholarlyPdfAdapter, "_pdf_info", lambda self: {
+        "Pages": "22", "Author": "Lopez de Prado, Marcos",
+    })
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+    )
+
+    document, _quality = parse_pdf_document(job_dir, job)
+
+    assert [author["name"] for author in document["metadata"]["authors"]] == [
+        "David H. Bailey", "Marcos López de Prado",
+    ]
+    assert document["metadata"]["published_at"] == "2014-07-31"
+
+
+def test_pdf_report_body_is_not_misclassified_as_authors(
+    monkeypatch: pytest.MonkeyPatch,
+    pdf_job: tuple[Path, dict[str, str], bytes],
+) -> None:
+    job_dir, job, _ = pdf_job
+    job = {**job, "title": "Investor Bulletin: Exchange-Traded Funds (ETFs)"}
+    page = PageLayout(1, 612, 792, text_items=[
+        LayoutItem("Investor Bulletin:", [45, 55, 230, 80]),
+        LayoutItem("Exchange-Traded Funds (ETFs)", [45, 81, 380, 106]),
+        LayoutItem(
+            "The SEC's Office of Investor Education and Advocacy",
+            [45, 140, 360, 155],
+        ),
+        LayoutItem("is issuing this Investor Bulletin to educate investors", [45, 156, 350, 171]),
+    ])
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_pdf_info", lambda self: {"Pages": "5"},
+    )
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+    )
+
+    document, _quality = parse_pdf_document(job_dir, job)
+
+    assert document["metadata"]["titles"]["original"] == job["title"]
+    assert document["metadata"]["authors"] == []
 
 
 def test_pdf_cover_combines_multiline_title_authors_date_and_report_id(
