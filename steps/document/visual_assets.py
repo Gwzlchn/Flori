@@ -6,6 +6,7 @@ import hashlib
 import ipaddress
 import math
 import os
+import re
 import socket
 import subprocess
 import warnings
@@ -76,6 +77,37 @@ def _pdf_region(locator: object) -> tuple[int, list[float]] | None:
     ):
         return None
     return page, values
+
+
+def _pdf_region_token(region: tuple[int, list[float]]) -> str:
+    page, bbox = region
+    payload = f"{page}:" + ",".join(f"{value:.3f}" for value in bbox)
+    return hashlib.sha256(payload.encode("ascii")).hexdigest()[:12]
+
+
+def _media_pdf_region(
+    media: Mapping[str, Any],
+    figure: Mapping[str, Any],
+    index: int,
+    count: int,
+) -> tuple[int, list[float]] | None:
+    own = _pdf_region(media.get("source_locator"))
+    if own is not None:
+        return own
+    region = _pdf_region(figure.get("source_locator"))
+    caption = str(figure.get("caption") or "")
+    if region is None or count != 2 or not re.search(
+        r"\bleft\s*:.*\bright\s*:", caption, re.I,
+    ):
+        return region
+    page, bbox = region
+    midpoint = (bbox[0] + bbox[2]) / 2
+    # 右 panel 的纵轴标签通常跨过几何中线,左图在中线前留少量间隙。
+    divider = midpoint - (bbox[2] - bbox[0]) * 0.03
+    split = [bbox[0], bbox[1], divider, bbox[3]] if index == 0 else [
+        divider, bbox[1], bbox[2], bbox[3],
+    ]
+    return page, split
 
 
 def _render_region(
@@ -323,18 +355,28 @@ def materialize_pdf_visuals(
     rendered = 0
     for figure in updated.get("figures", []):
         attempted = False
-        for media in figure.get("media", []):
-            if _artifact_exists(job_dir, media.get("artifact")):
+        media_items = figure.get("media", [])
+        for media_index, media in enumerate(media_items):
+            region = _media_pdf_region(
+                media, figure, media_index, len(media_items),
+            )
+            media_id = _safe_id(media["media_id"])
+            prefix = f"assets/document/{_safe_id(figure['figure_id'])}-{media_id}"
+            rel = (
+                f"{prefix}-{_pdf_region_token(region)}.png" if region else None
+            )
+            artifact = media.get("artifact")
+            if _artifact_exists(job_dir, artifact) and (
+                not str(artifact).startswith(prefix) or artifact == rel
+            ):
                 continue
             media["artifact"] = None
-            region = _pdf_region(media.get("source_locator") or figure.get("source_locator"))
             if region is None:
                 failures.append(f"figure_locator_unavailable:{figure['figure_id']}:{media['media_id']}")
                 continue
             attempted = True
-            media_id = _safe_id(media["media_id"])
-            rel = f"assets/document/{_safe_id(figure['figure_id'])}-{media_id}.png"
             try:
+                assert rel is not None
                 _render_region(source, job_dir / rel, page=region[0], bbox=region[1])
             except (OSError, subprocess.SubprocessError, ValueError):
                 failures.append(f"figure_render_failed:{figure['figure_id']}:{media_id}")
@@ -347,6 +389,17 @@ def materialize_pdf_visuals(
                 figure["extraction"],
                 "pdf_visual_render_incomplete" if attempted else "pdf_visual_locator_unavailable",
             )
+        else:
+            reasons = figure["extraction"].setdefault("reasons", [])
+            figure["extraction"]["reasons"] = [
+                reason for reason in reasons if reason not in {
+                    "html_visual_asset_incomplete",
+                    "pdf_visual_locator_unavailable",
+                    "pdf_visual_render_incomplete",
+                }
+            ]
+            if not figure["extraction"]["reasons"]:
+                figure["extraction"]["status"] = "complete"
 
     for table in updated.get("tables", []):
         representations = table.setdefault("representations", [])
@@ -354,6 +407,15 @@ def materialize_pdf_visuals(
         if crop is None:
             region = _pdf_region(table.get("source_locator"))
             if region is None:
+                if table.get("cells"):
+                    reasons = table["extraction"].setdefault("reasons", [])
+                    table["extraction"]["reasons"] = [
+                        reason for reason in reasons
+                        if reason != "pdf_table_crop_locator_unavailable"
+                    ]
+                    if not table["extraction"]["reasons"]:
+                        table["extraction"]["status"] = "complete"
+                    continue
                 failures.append(f"table_locator_unavailable:{table['table_id']}")
                 table["extraction"]["status"] = "degraded"
                 _append_reason(table["extraction"], "pdf_table_crop_locator_unavailable")
@@ -363,17 +425,22 @@ def materialize_pdf_visuals(
                 "source_locator": table.get("source_locator"),
             }
             representations.append(crop)
-        if _artifact_exists(job_dir, crop.get("artifact")):
+        region = _pdf_region(crop.get("source_locator") or table.get("source_locator"))
+        prefix = f"assets/document/{_safe_id(table['table_id'])}"
+        rel = f"{prefix}-{_pdf_region_token(region)}.png" if region else None
+        artifact = crop.get("artifact")
+        if _artifact_exists(job_dir, artifact) and (
+            not str(artifact).startswith(prefix) or artifact == rel
+        ):
             continue
         crop["artifact"] = None
-        region = _pdf_region(crop.get("source_locator") or table.get("source_locator"))
         if region is None:
             failures.append(f"table_locator_unavailable:{table['table_id']}")
             table["extraction"]["status"] = "degraded"
             _append_reason(table["extraction"], "pdf_table_crop_locator_unavailable")
             continue
-        rel = f"assets/document/{_safe_id(table['table_id'])}.png"
         try:
+            assert rel is not None
             _render_region(source, job_dir / rel, page=region[0], bbox=region[1])
         except (OSError, subprocess.SubprocessError, ValueError):
             failures.append(f"table_render_failed:{table['table_id']}")
@@ -383,12 +450,27 @@ def materialize_pdf_visuals(
         crop["artifact"] = rel
         rendered += 1
 
+    reasons = report.setdefault("reasons", [])
     if failures:
-        reasons = report.setdefault("reasons", [])
         if "pdf_visual_render_incomplete" not in reasons:
             reasons.append("pdf_visual_render_incomplete")
         if report.get("status") == "complete":
             report["status"] = "degraded"
+    else:
+        report["reasons"] = [
+            reason for reason in reasons if reason != "pdf_visual_render_incomplete"
+        ]
+    figures_complete = all(
+        all(_artifact_exists(job_dir, media.get("artifact")) for media in figure.get("media", []))
+        for figure in updated.get("figures", [])
+    )
+    if figures_complete:
+        report["reasons"] = [
+            reason for reason in report["reasons"]
+            if reason != "html_visual_asset_incomplete"
+        ]
+    if report.get("status") == "degraded" and not report["reasons"]:
+        report["status"] = "complete"
     report.setdefault("metrics", {})["visual_assets_rendered"] = rendered
     report["metrics"]["visual_asset_failures"] = len(failures)
     return (

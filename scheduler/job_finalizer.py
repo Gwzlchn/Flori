@@ -121,6 +121,7 @@ class JobFinalizer:
         try:
             raw = await self.owner.storage.read_file(job_id, "input/metadata.json")
             md = json.loads(raw.decode("utf-8", errors="replace")) if raw else {}
+            document: dict = {}
             # 下载元数据优先；Document parser 的 canonical metadata 只补齐空标题/日期。
             if not md.get("title") or not (md.get("published_at") or md.get("date")):
                 document_raw = await self.owner.storage.read_file(
@@ -154,8 +155,19 @@ class JobFinalizer:
                 from shared.titles import is_suspicious_title
                 job = await asyncio.to_thread(self.owner.db.get_job, job_id)
                 cur = (job.title or "").strip() if job else ""
-                better = (is_suspicious_title(cur) and not is_suspicious_title(title)
-                          and " " in title and len(title) > len(cur))
+                first_title = next((
+                    str(block.get("text") or "").strip()
+                    for block in document.get("blocks", [])
+                    if isinstance(block, dict) and block.get("kind") == "title"
+                ), "")
+                canonical_recovery = (
+                    cur and cur == first_title and cur != title
+                    and not is_suspicious_title(title)
+                )
+                better = (
+                    is_suspicious_title(cur) and not is_suspicious_title(title)
+                    and " " in title and len(title) > len(cur)
+                ) or canonical_recovery
                 if job and (not cur or better):
                     fields["title"] = title
             if not fields:

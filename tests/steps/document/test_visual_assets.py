@@ -87,8 +87,8 @@ def test_materializes_figure_panels_and_table_crop(tmp_path: Path, monkeypatch):
 
     figure_artifact = document["figures"][0]["media"][0]["artifact"]
     table_artifact = document["tables"][0]["representations"][0]["artifact"]
-    assert figure_artifact == "assets/document/fig_1-panel_a.png"
-    assert table_artifact == "assets/document/tbl_1.png"
+    assert figure_artifact.startswith("assets/document/fig_1-panel_a-")
+    assert table_artifact.startswith("assets/document/tbl_1-")
     with Image.open(job_dir / figure_artifact) as image:
         assert image.size == (4, 3)
     with Image.open(job_dir / table_artifact) as image:
@@ -136,9 +136,42 @@ def test_corrupt_existing_pdf_artifact_is_rerendered(tmp_path: Path, monkeypatch
     updated, _report = materialize_pdf_visuals(job_dir, document, _quality(job_dir.name))
 
     assert rendered is True
-    assert updated["figures"][0]["media"][0]["artifact"] == artifact
-    with Image.open(job_dir / artifact) as image:
+    updated_artifact = updated["figures"][0]["media"][0]["artifact"]
+    assert updated_artifact and updated_artifact != artifact
+    with Image.open(job_dir / updated_artifact) as image:
         assert image.size == (4, 3)
+
+
+def test_valid_legacy_pdf_artifact_is_rerendered_to_locator_addressed_path(
+    tmp_path: Path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "job_pdf"
+    (job_dir / "input").mkdir(parents=True)
+    (job_dir / "input/source.pdf").write_bytes(b"pdf")
+    document = _document(job_dir.name)
+    document["tables"] = []
+    legacy = "assets/document/fig_1-panel_a.png"
+    (job_dir / legacy).parent.mkdir(parents=True)
+    Image.new("RGB", (2, 2)).save(job_dir / legacy)
+    document["figures"][0]["media"][0]["artifact"] = legacy
+    rendered = False
+
+    def render(_source, destination, **_kwargs):
+        nonlocal rendered
+        rendered = True
+        Image.new("RGB", (4, 3)).save(destination)
+
+    monkeypatch.setattr("steps.document.visual_assets._render_region", render)
+
+    updated, _report = materialize_pdf_visuals(
+        job_dir, document, _quality(job_dir.name),
+    )
+
+    artifact = updated["figures"][0]["media"][0]["artifact"]
+    assert rendered is True
+    assert artifact and artifact != legacy
+    assert artifact.startswith("assets/document/fig_1-panel_a-")
 
 
 def test_corrupt_existing_pdf_artifact_degrades_when_rerender_fails(
@@ -184,6 +217,94 @@ def test_missing_or_invalid_pdf_locator_cannot_remain_complete(tmp_path: Path):
         "status": "degraded", "reasons": ["pdf_visual_locator_unavailable"],
     }
     assert report["metrics"]["visual_asset_failures"] == 1
+
+
+def test_missing_html_panel_falls_back_to_figure_pdf_locator(
+    tmp_path: Path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "job_pdf"
+    (job_dir / "input").mkdir(parents=True)
+    (job_dir / "input/source.pdf").write_bytes(b"pdf")
+    document = _document(job_dir.name)
+    document["tables"] = []
+    figure = document["figures"][0]
+    figure["caption"] = "Left: memory layout. Right: throughput."
+    figure["media"][0]["source_locator"] = {
+        "html": {"source_id": "html", "source_fingerprint": FINGERPRINT,
+                 "dom_path": "/figure/img", "exact": None},
+    }
+    (job_dir / "assets").mkdir()
+    Image.new("RGB", (3, 4)).save(job_dir / "assets/right.png")
+    figure["media"].append({
+        "media_id": "panel_b", "artifact": "assets/right.png",
+        "source_locator": {
+            "html": {"source_id": "html", "source_fingerprint": FINGERPRINT,
+                     "dom_path": "/figure/img[2]", "exact": None},
+        },
+    })
+    figure["extraction"] = {
+        "status": "degraded", "reasons": ["html_visual_asset_incomplete"],
+    }
+
+    rendered_bbox = None
+
+    def render(_source, destination, **kwargs):
+        nonlocal rendered_bbox
+        rendered_bbox = kwargs["bbox"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (4, 3)).save(destination)
+
+    monkeypatch.setattr("steps.document.visual_assets._render_region", render)
+
+    updated, report = materialize_pdf_visuals(
+        job_dir, document,
+        {**_quality(job_dir.name), "reasons": ["html_visual_asset_incomplete"]},
+    )
+
+    assert updated["figures"][0]["media"][0]["artifact"]
+    assert updated["figures"][0]["media"][1]["artifact"] == "assets/right.png"
+    assert rendered_bbox == [10.0, 20.0, 57.0, 120.0]
+    assert updated["figures"][0]["extraction"] == {
+        "status": "complete", "reasons": [],
+    }
+    assert "html_visual_asset_incomplete" not in report["reasons"]
+    assert report["metrics"]["visual_asset_failures"] == 0
+
+
+def test_semantic_table_does_not_require_pdf_crop(tmp_path: Path):
+    job_dir = tmp_path / "job_pdf"
+    (job_dir / "input").mkdir(parents=True)
+    (job_dir / "input/source.pdf").write_bytes(b"pdf")
+    document = _document(job_dir.name)
+    document["figures"] = []
+    table = document["tables"][0]
+    table["source_locator"] = {
+        "html": {"source_id": "html", "source_fingerprint": FINGERPRINT,
+                 "dom_path": "/table", "exact": None},
+    }
+    document["sources"].append({
+        "source_id": "html", "source_profile": "scholarly_html",
+        "capabilities": [], "fingerprint": FINGERPRINT,
+        "path": "input/source.html", "mime_type": "text/html", "immutable": True,
+    })
+    table["representations"] = []
+    table["cells"] = [{
+        "cell_id": "cell_1", "block_id": "blk_t", "row": 0, "col": 0,
+        "rowspan": 1, "colspan": 1, "role": "data", "text": "98.4",
+        "source_locator": table["source_locator"],
+    }]
+    table["extraction"] = {"status": "complete", "reasons": []}
+
+    updated, report = materialize_pdf_visuals(
+        job_dir, document, _quality(job_dir.name),
+    )
+
+    assert updated["tables"][0]["representations"] == []
+    assert updated["tables"][0]["extraction"] == {
+        "status": "complete", "reasons": [],
+    }
+    assert report["metrics"]["visual_asset_failures"] == 0
 
 
 def test_pdftocairo_singlefile_output_keeps_temporary_suffix(tmp_path: Path, monkeypatch):

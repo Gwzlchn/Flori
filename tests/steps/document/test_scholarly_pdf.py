@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -105,6 +106,121 @@ def test_digital_pdf_keeps_page_bbox_figures_tables_and_references(
     assert quality["reasons"] == ["pdf_table_structure_unavailable"]
     assert quality["metrics"]["layout_method"] == "fixture_layout"
     assert quality["metrics"]["figure_panel_count"] == 2
+
+
+def test_pdf_sidecar_metadata_wins_over_container_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    pdf_job: tuple[Path, dict[str, str], bytes],
+) -> None:
+    job_dir, job, _ = pdf_job
+    (job_dir / "input/metadata.json").write_text(json.dumps({
+        "title": "Empirical Asset Pricing via Machine Learning",
+        "author": "Shihao Gu; Bryan Kelly; Dacheng Xiu",
+        "published_at": "2018-12-24",
+        "sitename": "NBER",
+        "source_url": "https://www.nber.org/papers/w25398",
+    }), encoding="utf-8")
+    monkeypatch.setattr(ScholarlyPdfAdapter, "_pdf_info", lambda self: {
+        "Pages": "1", "Title": "NBER WORKING PAPER SERIES", "Author": "",
+    })
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_layout", lambda self: (_digital_pages(), "fixture_layout"),
+    )
+
+    document, _quality = parse_pdf_document(job_dir, job)
+
+    metadata = document["metadata"]
+    assert metadata["titles"]["original"] == (
+        "Empirical Asset Pricing via Machine Learning"
+    )
+    assert [author["name"] for author in metadata["authors"]] == [
+        "Shihao Gu", "Bryan Kelly", "Dacheng Xiu",
+    ]
+    assert metadata["published_at"] == "2018-12-24"
+    assert metadata["publisher"] == "NBER"
+    assert metadata["identifiers"]["nber_working_paper"] == "w25398"
+
+
+def test_pdf_cover_combines_multiline_title_authors_date_and_report_id(
+    monkeypatch: pytest.MonkeyPatch,
+    pdf_job: tuple[Path, dict[str, str], bytes],
+) -> None:
+    job_dir, job, _ = pdf_job
+    page = PageLayout(1, 612, 792, text_items=[
+        LayoutItem("Roofline: An Insightful Visual Performance Model for", [80, 95, 532, 112]),
+        LayoutItem("Floating-Point Programs and Multicore Architectures", [79, 113, 532, 130]),
+        LayoutItem("Samuel Webb Williams", [224, 257, 368, 270]),
+        LayoutItem("Andrew Waterman", [224, 272, 340, 285]),
+        LayoutItem("David A. Patterson", [224, 287, 341, 300]),
+        LayoutItem("Electrical Engineering and Computer Sciences", [224, 473, 513, 486]),
+        LayoutItem("Technical Report No. UCB/EECS-2008-134", [224, 536, 417, 545]),
+        LayoutItem("October 17, 2008", [224, 578, 332, 591]),
+    ])
+    monkeypatch.setattr(ScholarlyPdfAdapter, "_pdf_info", lambda self: {"Pages": "16"})
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+    )
+
+    document, _quality = parse_pdf_document(job_dir, job)
+
+    metadata = document["metadata"]
+    assert metadata["titles"]["original"] == (
+        "Roofline: An Insightful Visual Performance Model for "
+        "Floating-Point Programs and Multicore Architectures"
+    )
+    assert [author["name"] for author in metadata["authors"]] == [
+        "Samuel Webb Williams", "Andrew Waterman", "David A. Patterson",
+    ]
+    assert metadata["published_at"] == "2008-10-17"
+    assert metadata["identifiers"]["report_number"] == "UCB/EECS-2008-134"
+
+
+def test_pdf_labeled_cover_uses_article_title_and_complete_author_lineup(
+    monkeypatch: pytest.MonkeyPatch,
+    pdf_job: tuple[Path, dict[str, str], bytes],
+) -> None:
+    job_dir, job, _ = pdf_job
+    job = {
+        **job,
+        "url": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2326253",
+    }
+    page = PageLayout(1, 595, 842, text_items=[
+        LayoutItem("Lawrence Berkeley National Laboratory", [50, 58, 407, 74]),
+        LayoutItem("LBL Publications", [50, 78, 180, 92]),
+        LayoutItem("Title", [50, 111, 80, 123]),
+        LayoutItem("Backtest Overfitting in Financial Markets", [50, 127, 277, 141]),
+        LayoutItem("Authors", [50, 202, 103, 214]),
+        LayoutItem("Bailey, David H", [50, 219, 136, 233]),
+        LayoutItem("Borwein, Jonathan M", [50, 235, 165, 249]),
+        LayoutItem("Lopez de Prado, Marcos", [50, 252, 183, 266]),
+        LayoutItem("et al.", [50, 269, 79, 283]),
+        LayoutItem("Publication Date", [50, 298, 162, 310]),
+        LayoutItem("2016-02-09", [50, 314, 114, 328]),
+        LayoutItem("Backtest overfitting in financial markets", [128, 412, 468, 427]),
+        LayoutItem("David H. Bailey", [123, 444, 205, 455]),
+        LayoutItem("Jonathan M. Borwein", [241, 444, 352, 455]),
+        LayoutItem("Amir Salehipour", [383, 444, 468, 455]),
+        LayoutItem("Marcos Ló", [190, 464, 244, 475]),
+        LayoutItem("pez de Prado", [238, 464, 311, 475]),
+        LayoutItem("Qiji Zhu", [358, 464, 401, 475]),
+        LayoutItem("February 9, 2016", [254, 488, 340, 499]),
+        LayoutItem("Introduction", [96, 544, 185, 557]),
+    ])
+    monkeypatch.setattr(ScholarlyPdfAdapter, "_pdf_info", lambda self: {"Pages": "9"})
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+    )
+
+    document, _quality = parse_pdf_document(job_dir, job)
+
+    metadata = document["metadata"]
+    assert metadata["titles"]["original"] == "Backtest Overfitting in Financial Markets"
+    assert [author["name"] for author in metadata["authors"]] == [
+        "David H. Bailey", "Jonathan M. Borwein", "Amir Salehipour",
+        "Marcos López de Prado", "Qiji Zhu",
+    ]
+    assert metadata["published_at"] == "2016-02-09"
+    assert metadata["identifiers"]["ssrn_id"] == "2326253"
 
 
 def test_digital_pdf_restores_reliable_table_cells_with_bbox(
@@ -395,6 +511,57 @@ def test_multiline_figure_caption_uses_nearest_image_row(
         [60, 330, 275, 485], [285, 330, 500, 485],
     ]
     assert not any(block["text"].startswith("programs and") for block in document["blocks"])
+
+
+def test_vector_figure_with_top_caption_crops_until_note(
+    monkeypatch: pytest.MonkeyPatch,
+    pdf_job: tuple[Path, dict[str, str], bytes],
+) -> None:
+    job_dir, job, _ = pdf_job
+    page = PageLayout(1, 600, 800, text_items=[
+        LayoutItem("Paper title", [60, 40, 500, 65]),
+        LayoutItem("Figure 1: Regression Tree Example", [180, 80, 420, 100]),
+        LayoutItem("Category 1", [90, 230, 150, 245]),
+        LayoutItem("Category 2", [350, 230, 410, 245]),
+        LayoutItem("Note: The panels show equivalent models.", [60, 350, 500, 370]),
+    ])
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_pdf_info",
+        lambda self: {"Pages": "1", "Title": "Paper title"},
+    )
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+    )
+
+    document, _quality = parse_pdf_document(job_dir, job)
+
+    bbox = document["figures"][0]["media"][0]["source_locator"]["pdf"]["bboxes"][0]
+    assert bbox == [48.0, 100, 552.0, 350]
+
+
+def test_vector_figure_below_right_column_uses_bounded_crop(
+    monkeypatch: pytest.MonkeyPatch,
+    pdf_job: tuple[Path, dict[str, str], bytes],
+) -> None:
+    job_dir, job, _ = pdf_job
+    page = PageLayout(1, 600, 800, text_items=[
+        LayoutItem("Paper title", [60, 40, 500, 65]),
+        LayoutItem("Parameters", [340, 210, 410, 225]),
+        LayoutItem("KV Cache", [430, 220, 490, 235]),
+        LayoutItem("Figure 1: Memory layout and throughput.", [310, 316, 550, 336]),
+    ])
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_pdf_info",
+        lambda self: {"Pages": "1", "Title": "Paper title"},
+    )
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+    )
+
+    document, _quality = parse_pdf_document(job_dir, job)
+
+    bbox = document["figures"][0]["media"][0]["source_locator"]["pdf"]["bboxes"][0]
+    assert bbox == [310.0, 172.0, 552.0, 316]
 
 
 def test_pdf_primary_layout_extracts_images_only_in_temporary_directory(

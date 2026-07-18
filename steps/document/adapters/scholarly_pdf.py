@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
+
+from shared.titles import is_suspicious_title
 
 from ._common import (
     base_document,
@@ -33,6 +38,18 @@ _URL = re.compile(r"https?://[^\s<>()\[\]{}]+", re.I)
 _DOI = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", re.I)
 _SCAN_CHARS_PER_PAGE = 40
 _OCR_RELIABLE_THRESHOLD = 0.8
+_COVER_LABELS = {
+    "title", "authors", "author", "publication date", "date", "permalink",
+    "copyright information", "abstract", "introduction",
+}
+_AUTHOR_NOISE = {
+    "abstract", "berkeley", "copyright", "department", "engineering",
+    "institute", "laboratory", "national", "publication", "research",
+    "report", "school", "sciences", "university", "working paper",
+}
+_MONTH_DATE_FORMATS = (
+    "%B %d, %Y", "%b %d, %Y", "%B %Y", "%b %Y",
+)
 
 
 @dataclass(frozen=True)
@@ -67,6 +84,38 @@ def _valid_bboxes(bboxes: list[list[float]]) -> list[list[float]]:
     return [
         bbox for bbox in bboxes
         if len(bbox) == 4 and bbox[2] > bbox[0] and bbox[3] > bbox[1]
+    ]
+
+
+def _compact_text(value: object) -> str:
+    return " ".join(str(value or "").split()).strip()
+
+
+def _normalized_heading(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", _compact_text(value).casefold())
+
+
+def _normalize_date(value: object) -> str:
+    text = _compact_text(value)
+    if not text:
+        return ""
+    iso = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text)
+    if iso:
+        return iso.group(1)
+    for pattern in _MONTH_DATE_FORMATS:
+        try:
+            parsed = datetime.strptime(text, pattern)
+        except ValueError:
+            continue
+        return parsed.strftime("%Y-%m-%d" if "%d" in pattern else "%Y-%m")
+    return text
+
+
+def _author_records(values: list[str]) -> list[dict[str, Any]]:
+    return [
+        {"name": value, "affiliations": [], "emails": [], "notes": []}
+        for value in dict.fromkeys(_compact_text(item) for item in values)
+        if value
     ]
 
 
@@ -128,16 +177,8 @@ class ScholarlyPdfAdapter:
         if ocr_confidences and min(ocr_confidences) < _OCR_RELIABLE_THRESHOLD:
             self.reasons.append("scanned_pdf_ocr_low_confidence")
 
-        title = (info.get("Title") or "").strip()
-        if not title and pages:
-            title = next((item.text for item in pages[0].text_items if item.text), "")
-            if title:
-                self.reasons.append("pdf_title_inferred")
-        authors = [
-            {"name": name.strip(), "affiliations": [], "emails": [], "notes": []}
-            for name in re.split(r"\s*(?:,|;|\band\b)\s*", info.get("Author", ""))
-            if name.strip()
-        ]
+        metadata = self._paper_metadata(info, pages)
+        title = metadata["title"]
         rejected = scanned and not self.blocks
         if not pages or page_count <= 0:
             rejected = True
@@ -156,20 +197,7 @@ class ScholarlyPdfAdapter:
             source_path=self.path,
             source_fingerprint=self.fingerprint,
             source_url=self.job.get("url"),
-            metadata={
-                "title": title,
-                "original_title": title,
-                "authors": authors,
-                "institutions": [],
-                "abstract": "",
-                "keywords": [],
-                "publisher": "",
-                "venue": "",
-                "license": "",
-                "identifiers": {},
-                "pages": page_count,
-                "pdf_info": info,
-            },
+            metadata={**metadata, "pages": page_count, "pdf_info": info},
             blocks=self.blocks,
             assets=self.assets,
             references=self.references,
@@ -198,6 +226,332 @@ class ScholarlyPdfAdapter:
             },
         )
         return document, report
+
+    def _paper_metadata(
+        self,
+        info: dict[str, str],
+        pages: list[PageLayout],
+    ) -> dict[str, Any]:
+        sidecar = self._sidecar_metadata()
+        title = _compact_text(sidecar.get("title"))
+        inferred_title = False
+        if not title:
+            title = self._labeled_cover_value(pages, "title")
+            inferred_title = bool(title)
+        embedded_title = _compact_text(info.get("Title"))
+        embedded_token_title = (
+            embedded_title.isalpha()
+            and embedded_title.casefold() not in {"draft", "untitled"}
+        )
+        if (
+            not title and embedded_title
+            and (not is_suspicious_title(embedded_title) or embedded_token_title)
+        ):
+            title = embedded_title
+        if not title:
+            title = self._cover_title(pages)
+            inferred_title = bool(title)
+        if inferred_title:
+            self.reasons.append("pdf_title_inferred")
+
+        authors = self._sidecar_authors(sidecar)
+        if not authors:
+            authors = self._split_author_text(info.get("Author", ""))
+        if not authors:
+            authors = self._cover_authors(pages, title)
+
+        published_at = _normalize_date(
+            sidecar.get("published_at") or sidecar.get("date")
+        )
+        if not published_at:
+            published_at = _normalize_date(
+                self._labeled_cover_value(pages, "publication date")
+                or self._cover_date(pages)
+            )
+        identifiers = self._identifiers(sidecar, pages)
+        return {
+            "title": title,
+            "original_title": title,
+            "authors": _author_records(authors),
+            "institutions": [],
+            "abstract": _compact_text(sidecar.get("abstract")),
+            "keywords": sidecar.get("keywords")
+            if isinstance(sidecar.get("keywords"), list) else [],
+            "published_at": published_at,
+            "publisher": _compact_text(sidecar.get("sitename") or sidecar.get("publisher")),
+            "venue": _compact_text(sidecar.get("venue")),
+            "license": _compact_text(sidecar.get("license")),
+            "lang": _compact_text(sidecar.get("lang") or sidecar.get("language")) or None,
+            "identifiers": identifiers,
+        }
+
+    def _sidecar_metadata(self) -> dict[str, Any]:
+        path = self.job_dir / "input" / "metadata.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _sidecar_authors(sidecar: dict[str, Any]) -> list[str]:
+        raw = sidecar.get("authors")
+        if isinstance(raw, list):
+            return [
+                _compact_text(item.get("name") if isinstance(item, dict) else item)
+                for item in raw
+                if _compact_text(item.get("name") if isinstance(item, dict) else item)
+            ]
+        return ScholarlyPdfAdapter._split_author_text(sidecar.get("author", ""))
+
+    @staticmethod
+    def _split_author_text(value: object) -> list[str]:
+        text = _compact_text(value)
+        if not text:
+            return []
+        return [
+            item for item in (
+                _compact_text(part)
+                for part in re.split(r"\s*(?:;|\band\b)\s*", text)
+            ) if item
+        ]
+
+    @staticmethod
+    def _labeled_cover_value(
+        pages: list[PageLayout],
+        label: str,
+    ) -> str:
+        for page in pages[:2]:
+            for index, item in enumerate(page.text_items[:80]):
+                if _compact_text(item.text).casefold() != label:
+                    continue
+                for candidate in page.text_items[index + 1:index + 4]:
+                    value = _compact_text(candidate.text)
+                    if not value or value.casefold() in _COVER_LABELS:
+                        continue
+                    return value
+        return ""
+
+    @staticmethod
+    def _cover_title(pages: list[PageLayout]) -> str:
+        if not pages:
+            return ""
+        items = pages[0].text_items[:40]
+        for index, item in enumerate(items):
+            title = _compact_text(item.text)
+            if (
+                not title or title.casefold() in _COVER_LABELS
+                or is_suspicious_title(title)
+            ):
+                continue
+            parts = [title]
+            previous = item
+            for candidate in items[index + 1:index + 3]:
+                value = _compact_text(candidate.text)
+                height = max(previous.bbox[3] - previous.bbox[1], 1)
+                overlap = min(previous.bbox[2], candidate.bbox[2]) - max(
+                    previous.bbox[0], candidate.bbox[0],
+                )
+                gap = candidate.bbox[1] - previous.bbox[3]
+                if (
+                    not value or value.casefold() in _COVER_LABELS
+                    or gap < -2 or gap > max(5, height * 0.45) or overlap <= 0
+                ):
+                    break
+                parts.append(value)
+                previous = candidate
+            return " ".join(parts)
+        return ""
+
+    @staticmethod
+    def _title_span(page: PageLayout, title: str) -> tuple[int, int] | None:
+        target = _normalized_heading(title)
+        if not target:
+            return None
+        items = page.text_items[:80]
+        for start, item in enumerate(items):
+            combined = _normalized_heading(item.text)
+            if not combined or not target.startswith(combined):
+                continue
+            end = start
+            while combined != target and end + 1 < len(items):
+                candidate = combined + _normalized_heading(items[end + 1].text)
+                if not target.startswith(candidate):
+                    break
+                combined = candidate
+                end += 1
+            if combined == target:
+                return start, end
+        return None
+
+    @staticmethod
+    def _looks_like_person(value: str) -> bool:
+        text = _compact_text(value)
+        lowered = text.casefold()
+        if (
+            not text or len(text) > 80 or re.search(r"\d|https?://|@", text)
+            or lowered in _COVER_LABELS or lowered == "et al."
+            or any(noise in lowered for noise in _AUTHOR_NOISE)
+        ):
+            return False
+        words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ.'´-]*", text)
+        return 2 <= len(words) <= 8 and any(word[0].isupper() for word in words)
+
+    @staticmethod
+    def _normalize_author_name(value: str) -> str:
+        text = _compact_text(value)
+        for plain, accented in (
+            ("a", "á"), ("e", "é"), ("i", "í"), ("o", "ó"), ("u", "ú"),
+        ):
+            text = re.sub(
+                rf"([A-Za-z])´{plain}",
+                lambda match: match.group(1) + accented,
+                text,
+                flags=re.I,
+            )
+        return text.strip(" ,;*†‡§¶")
+
+    @classmethod
+    def _authors_after(
+        cls,
+        page: PageLayout,
+        start: int,
+    ) -> list[str]:
+        authors: list[tuple[str, LayoutItem]] = []
+        for item in page.text_items[start:start + 24]:
+            value = _compact_text(item.text)
+            if not value:
+                continue
+            lowered = value.casefold()
+            if (
+                _normalize_date(value) != value
+                or re.search(r"\b(?:19|20)\d{2}\b", value)
+                or lowered in {"abstract", "introduction", "publication date", "date"}
+            ):
+                break
+            if len(value) <= 2 and not value.isalpha():
+                continue
+            if authors and value[0].islower():
+                previous, previous_item = authors[-1]
+                same_row = abs(item.bbox[1] - previous_item.bbox[1]) <= max(
+                    item.bbox[3] - item.bbox[1], previous_item.bbox[3] - previous_item.bbox[1],
+                )
+                if same_row and item.bbox[0] - previous_item.bbox[2] <= 10:
+                    separator = "" if item.bbox[0] <= previous_item.bbox[2] + 2 else " "
+                    authors[-1] = (
+                        cls._normalize_author_name(previous + separator + value), item,
+                    )
+                    continue
+            if not cls._looks_like_person(value):
+                continue
+            normalized = cls._normalize_author_name(value)
+            if normalized.count(",") >= 2 or ", and " in normalized:
+                for part in re.split(r"\s*,\s*|\s+and\s+", normalized):
+                    if cls._looks_like_person(part):
+                        authors.append((cls._normalize_author_name(part), item))
+            else:
+                authors.append((normalized, item))
+        return list(dict.fromkeys(name for name, _item in authors))
+
+    @staticmethod
+    def _author_list_is_abbreviated(page: PageLayout, start: int) -> bool:
+        for item in page.text_items[start:start + 24]:
+            value = _compact_text(item.text).casefold().rstrip(".")
+            if value in {"et al", "and others"}:
+                return True
+            if re.search(r"\b(?:19|20)\d{2}\b", value):
+                break
+        return False
+
+    @classmethod
+    def _cover_authors(cls, pages: list[PageLayout], title: str) -> list[str]:
+        if not title:
+            return []
+        primary: tuple[int, int, int] | None = None
+        matches: list[tuple[int, int, int]] = []
+        for page_index, page in enumerate(pages[:3]):
+            span = cls._title_span(page, title)
+            if span:
+                match = (page_index, span[0], span[1])
+                matches.append(match)
+                primary = primary or match
+        if primary:
+            authors = cls._authors_after(pages[primary[0]], primary[2] + 1)
+            if (
+                len(authors) >= 2
+                and not cls._author_list_is_abbreviated(
+                    pages[primary[0]], primary[2] + 1,
+                )
+            ):
+                return authors
+        for page_index, _start, end in reversed(matches[1:]):
+            authors = cls._authors_after(pages[page_index], end + 1)
+            if len(authors) >= 2:
+                return authors
+        target = _normalized_heading(title)
+        for page in pages[:3]:
+            for index, item in enumerate(page.text_items[:100]):
+                if _normalized_heading(item.text) != target:
+                    continue
+                if primary and page is pages[primary[0]] and index == primary[1]:
+                    continue
+                authors = cls._authors_after(page, index + 1)
+                if len(authors) >= 2:
+                    return authors
+        return []
+
+    @staticmethod
+    def _cover_date(pages: list[PageLayout]) -> str:
+        for page in pages[:3]:
+            for item in page.text_items[:100]:
+                value = _compact_text(item.text)
+                if re.search(
+                    r"\b(?:January|February|March|April|May|June|July|August|"
+                    r"September|October|November|December)\s+\d{1,2},\s+\d{4}\b",
+                    value,
+                    re.I,
+                ):
+                    return value
+        return ""
+
+    def _identifiers(
+        self,
+        sidecar: dict[str, Any],
+        pages: list[PageLayout],
+    ) -> dict[str, str]:
+        raw_identifiers = sidecar.get("identifiers")
+        raw_identifiers = raw_identifiers if isinstance(raw_identifiers, dict) else {}
+        identifiers = {
+            str(key): _compact_text(value)
+            for key, value in raw_identifiers.items() if _compact_text(value)
+        }
+        for key in ("doi", "arxiv_id"):
+            if _compact_text(sidecar.get(key)):
+                identifiers[key] = _compact_text(sidecar[key])
+        urls = [
+            _compact_text(sidecar.get("source_url")),
+            _compact_text(sidecar.get("final_url")),
+            _compact_text(self.job.get("url")),
+        ]
+        for url in filter(None, urls):
+            parsed = urlparse(url)
+            if match := re.search(r"/papers/(w\d+)\b", parsed.path, re.I):
+                identifiers.setdefault("nber_working_paper", match.group(1).lower())
+            ssrn_id = parse_qs(parsed.query).get("abstract_id", [""])[0]
+            if ssrn_id.isdigit():
+                identifiers.setdefault("ssrn_id", ssrn_id)
+            if match := re.search(r"/(qt[0-9a-z]+)(?:/|\.pdf|$)", parsed.path, re.I):
+                identifiers.setdefault("escholarship_id", match.group(1).lower())
+            if match := re.search(r"/(?:abs|pdf)/(\d{4}\.\d{4,5})", parsed.path):
+                identifiers.setdefault("arxiv_id", match.group(1))
+        for page in pages[:2]:
+            for item in page.text_items[:100]:
+                text = _compact_text(item.text)
+                if match := re.search(r"\b(UCB/EECS-\d{4}-\d+)\b", text, re.I):
+                    identifiers.setdefault("report_number", match.group(1).upper())
+                if match := _DOI.search(text):
+                    identifiers.setdefault("doi", match.group(0).rstrip(".,;"))
+        return identifiers
 
     def _run(
         self,
@@ -442,6 +796,42 @@ class ScholarlyPdfAdapter:
             result.append((index, candidate))
         return result
 
+    @staticmethod
+    def _figure_column(page: PageLayout, caption: LayoutItem) -> tuple[float, float]:
+        margin = page.width * 0.08
+        if caption.bbox[2] <= page.width * 0.5:
+            return margin, page.width * 0.5 - 10
+        if caption.bbox[0] >= page.width * 0.5:
+            return page.width * 0.5 + 10, page.width - margin
+        return margin, page.width - margin
+
+    @classmethod
+    def _heuristic_figure_crop(
+        cls,
+        page: PageLayout,
+        caption: LayoutItem,
+    ) -> list[float]:
+        """无 raster bbox 时按 caption 方向和栏位保守截取 vector figure。"""
+        left, right = cls._figure_column(page, caption)
+        if caption.bbox[1] <= page.height * 0.2:
+            boundaries = [
+                item.bbox[1] for item in page.text_items
+                if item.bbox[1] > caption.bbox[3] + 3
+                and re.match(r"^(?:Notes?|Source)\s*[:.]", item.text.strip(), re.I)
+            ]
+            bottom = min(
+                boundaries,
+                default=min(page.height, caption.bbox[3] + page.height * 0.3),
+            )
+            return [left, caption.bbox[3], right, bottom]
+        height_ratio = 0.18 if right - left < page.width * 0.7 else 0.32
+        return [
+            left,
+            max(0.0, caption.bbox[1] - page.height * height_ratio),
+            right,
+            caption.bbox[1],
+        ]
+
     def _add_pdf_figure(
         self,
         page: PageLayout,
@@ -463,7 +853,8 @@ class ScholarlyPdfAdapter:
         )
         label = f"Figure {label_id}"
         figure_id = make_id("fig", self.fingerprint, page.number, label, caption.bbox)
-        eligible_panels = [
+        caption_above_figure = caption.bbox[1] <= page.height * 0.2
+        eligible_panels = [] if caption_above_figure else [
             bbox for bbox in page.image_bboxes
             if bbox[3] <= caption.bbox[1] + 3
             and caption.bbox[1] - bbox[1] <= max(page.height * 0.55, 1)
@@ -475,8 +866,7 @@ class ScholarlyPdfAdapter:
             if nearest_bottom is not None and nearest_bottom - bbox[3] <= row_tolerance
         ]
         if not candidate_panels:
-            crop = [0.0, max(0.0, caption.bbox[1] - page.height * 0.4), page.width, caption.bbox[1]]
-            candidate_panels = [crop]
+            candidate_panels = [self._heuristic_figure_crop(page, caption)]
             self.reasons.append("pdf_figure_crop_heuristic")
         block_id = self._add_block(
             "figure", caption.text, page.number, [caption.bbox], figure_id=figure_id,

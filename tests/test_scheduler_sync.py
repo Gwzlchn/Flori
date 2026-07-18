@@ -115,3 +115,25 @@ async def test_normal_title_still_not_overwritten():
     db = _DB(title="A Perfectly Good Existing Title")
     await _engine(storage, db)._sync_published_at("j1")
     assert "title" not in db.updates
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("current", [
+    "Roofline: An Insightful Visual Performance Model for",
+    "Lawrence Berkeley National Laboratory",
+])
+async def test_first_pdf_line_title_is_replaced_by_canonical_cover_title(current):
+    candidate = (
+        "Roofline: An Insightful Visual Performance Model for "
+        "Floating-Point Programs and Multicore Architectures"
+        if current.startswith("Roofline") else "Backtest Overfitting in Financial Markets"
+    )
+    storage = _Storage({"intermediate/document.json": {
+        "metadata": {"titles": {"original": candidate}},
+        "blocks": [{"kind": "title", "text": current}],
+    }})
+    db = _DB(title=current)
+
+    await _engine(storage, db)._sync_published_at("j1")
+
+    assert db.updates.get("title") == candidate
