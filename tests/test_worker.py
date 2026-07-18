@@ -795,6 +795,67 @@ class TestExecuteFullFlow:
         assert source.read_bytes() == b"trusted-video"
 
     @pytest.mark.asyncio
+    async def test_nas_source_change_during_step_blocks_artifact_publish_and_done(
+        self, worker, redis, db, tmp_jobs_dir, tmp_path,
+    ):
+        import hashlib
+
+        await worker.register()
+        root = tmp_path / "source-library"
+        root.mkdir()
+        source = root / "P01.mkv"
+        source.write_bytes(b"trusted-video")
+        digest = f"sha256:{hashlib.sha256(source.read_bytes()).hexdigest()}"
+        source_ref = build_source_ref("zg-library", "P01.mkv")
+        worker.source_library = SourceLibrary({"zg-library": root})
+        worker.tags.add("source-root:zg-library")
+        worker.config.pipelines["test"]["steps"] = [{
+            "name": "03_scene", "pool": "cpu", "depends_on": [],
+            "retries": 1, "module": "steps.video.step_03_scene", "timeout_sec": 60,
+        }]
+        job = make_job(job_id="j_source_changed")
+        part = JobPart(
+            "pt_01", job.id, 1, source_ref=source_ref,
+            source_digest=digest, size_bytes=source.stat().st_size,
+            meta={"source": "nas_source"},
+        )
+        db.create_job(job, [part])
+        step = execution_step_key(part_scope(part.id), "03_scene")
+        db.upsert_step(Step(
+            job_id=job.id, name="03_scene", scope_key=part_scope(part.id),
+            status=StepStatus.READY, pool="cpu",
+        ))
+        pushed = False
+
+        async def mock_run_step(ctx, on_progress, on_tick):
+            source.write_bytes(b"mutated-video")
+            return 0, ""
+
+        async def capture_push(job_id, execution_step, work_dir, *, exclude_paths=None):
+            nonlocal pushed
+            pushed = True
+
+        worker.runner.run_step = mock_run_step
+        worker.storage.push = capture_push
+        claim = make_claim(job_id=job.id, step=step)
+        claim.update({
+            "source": "nas_source",
+            "source_ref": source_ref,
+            "source_digest": digest,
+            "source_size_bytes": part.size_bytes,
+        })
+        await activate_claim(redis, claim, worker.worker_id)
+
+        await worker.execute(claim)
+
+        failed_events = await lifecycle_payloads(redis, "step_failed")
+        assert len(failed_events) == 1
+        assert "source identity changed during execution" in failed_events[0]["error"]
+        assert await lifecycle_payloads(redis, "step_completed") == []
+        assert pushed is False
+        assert not (tmp_jobs_dir / job.id / "parts" / part.id / "input" / "source.mp4").exists()
+
+    @pytest.mark.asyncio
     async def test_push_failure_on_success_reports_failed_not_done(self, worker, redis, db, tmp_jobs_dir):
         # returncode==0 但产物推送失败时必须报 failed(绝不标 done):否则下游拉不到输入,
         # 上游 done 但产物缺失即 input_missing。重试时会重新生成并推送。

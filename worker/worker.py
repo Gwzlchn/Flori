@@ -28,6 +28,7 @@ from shared.models import AIUsage, DEFAULT_AI_MODEL, DEFAULT_AI_PROVIDER, LLMReq
 from shared.runner_ops import parse_style_tags
 from shared.source_library import (
     SourceLibrary,
+    SourceReferenceError,
     configured_source_root_tags,
     parse_source_ref,
     source_root_tag,
@@ -650,6 +651,29 @@ class Worker:
 
             returncode, stderr = await self.runner.run_step(ctx, on_progress, on_tick)
             duration = time.time() - start
+
+            if source_ref is not None:
+                try:
+                    await asyncio.to_thread(
+                        self.source_library.verify,
+                        source_ref,
+                        claim.get("source_digest"),
+                        claim.get("source_size_bytes"),
+                    )
+                except SourceReferenceError as source_err:
+                    # NAS宿主可绕过容器ro挂载替换同名文件。产物发布前复验,
+                    # 避免把替换窗口内生成的结果绑定到旧digest。
+                    await self._collect_usage(job_id, execution_step, step, work_dir)
+                    await self.transport.report_failed(
+                        claim,
+                        f"source identity changed during execution: {source_err}"[:500],
+                        "processing", duration, start, count_stats=False,
+                    )
+                    logger.warning(
+                        "source_identity_changed_during_execution",
+                        worker_id=self.worker_id, job_id=job_id, step=step,
+                    )
+                    return
 
             if returncode == 0:
                 await self._collect_usage(job_id, execution_step, step, work_dir)

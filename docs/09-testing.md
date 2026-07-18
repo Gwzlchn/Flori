@@ -61,7 +61,7 @@ scripts/test.sh -- tests/steps/test_step_05_dedup.py
 | 引用解析 | 中文相对路径规范往返;绝对/`..`/NUL/反斜线/非视频拒绝;父目录和叶子symlink均不跟随 | `scripts/test.sh -m source_library` |
 | API/DB | 准入full SHA-256+大小不符时零Job副作用;幂等manifest绑source身份;详情不泄漏宿主路径 | `scripts/test.sh -m api_jobs` |
 | Scheduler/claim | 只有01-04与08步需`source-root:<id>`;错Worker不能原子claim;claim携带ref/digest/size而非绝对路径 | `scripts/test.sh -m scheduler -m runner_ops` |
-| Worker/runner | 执行前重验;临时`source.mp4` symlink执行后清理;DooD嵌套容器只读挂同一root | `scripts/test.sh -m worker -m step_runner_docker` |
+| Worker/runner | 执行前与产物发布前重验;执行中替换时不push、不done;临时`source.mp4` symlink执行后清理;DooD嵌套容器只读挂同一root | `scripts/test.sh -m worker -m step_runner_docker` |
 | Storage/删除 | Local/Remote/Gateway不列举、上传、clone或跟随源symlink;语义exclude在链接被意外替换为普通文件时仍拦上传;删Job后原片逐字节不变 | `scripts/test.sh -m storage -m api_jobs` |
 
 发布前还必须用隔离临时root生成可播视频,走真API、Scheduler、`worker-source`和真step容器;

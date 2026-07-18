@@ -125,12 +125,13 @@ Worker 执行前校验 job_id + step + url，不合法直接丢弃。
 NAS大视频不使用公开`file://`、上传或MinIO复制。公开API只接受已登记root ID、规范相对路径、full SHA-256和大小:
 
 - root绝对路径只位于宿主`.env`/运行时挂载,不进DB、`job.json`、Redis claim、API响应或日志字段。
-- API与Worker分别使用`openat + O_NOFOLLOW`逐段打开,拒绝绝对路径、`..`、NUL、symlink父目录/叶子、非普通文件、大小或digest不符。
+- API与Worker分别使用`openat + O_NOFOLLOW`逐段打开,拒绝绝对路径、`..`、NUL、symlink父目录/叶子、非普通文件、大小或digest不符。Worker在步骤结束、发布产物前再次验证full SHA-256;不符时不上传产物、不报done。
 - Scheduler仅把01-04原媒体步和需要原字节摘要构建来源清单的08步发给声明`source-root:<id>`且实际能打开root的Worker;错Worker、未挂载、缺失和替换均fail-closed。
 - API与专用Worker的source root bind mount固定为`:ro`;DooD step容器仅继承当前root的只读挂载。
 - Worker临时symlink是执行入口,不是artifact。Storage push使用受信任的语义exclude,并额外拒绝symlink列举/上传/clone;删Job仅删Job namespace,没有删source library的代码路径。
 
-这一边界防止Flori写入原片和路径逃逸;它不能防止NAS管理员在Flori运行期从宿主侧替换文件。运维上应将已投递目录视为不可变冷源;必须替换时用新manifest创建新Job,不要原地覆盖。
+这一边界防止Flori写入原片和路径逃逸,并能在发布前发现仍然存在的宿主侧替换。它不能防止NAS管理员在单步执行期替换文件后又恢复原字节;
+运维上应将已投递目录视为不可变冷源。必须替换时用新manifest创建新Job,不要原地覆盖。
 
 ### 受控取证下载
 

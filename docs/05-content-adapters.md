@@ -19,7 +19,8 @@ graph TD
 适配器是 `01_download` 步骤（`steps/common/step_01_download.py`）的内部实现——同一个步骤脚本，根据 content_type 和 source 选择不同的下载/转换逻辑。
 
 `nas_source` 是视频专用的零复制适配器。API先以已登记root、相对路径、大小和full SHA-256固定身份;
-Worker在直接读原片的01-04与08步前重验,再把原片临时映射为`input/source.mp4`。
+Worker在直接读原片的01-04与08步前重验,再把原片临时映射为`input/source.mp4`;步骤结束后、产物发布前再次重验,
+源身份变化时丢弃本步产物并失败。
 `01_download`只跑ffprobe可播性检查并写`metadata.json`,不复制或改名源;步结束后映射立即移除。
 Storage push按语义排除该路径,Local/Remote/Gateway也不列举、clone或跟随外部symlink,因此原片不进MinIO。
 
