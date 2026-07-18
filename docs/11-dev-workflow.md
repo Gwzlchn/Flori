@@ -114,32 +114,44 @@ services:
       - ${FLORI_DATA_DIR:-./data}:/data
 ```
 
-## 4. 统一交付工作流
+## 4. 分级交付工作流
 
-单个与多个交付单元共用同一状态机:
+项目执行入口是 `.agents/skills/flori-delivery-train/SKILL.md`。先判断本次授权到哪一层,再加载对应规则。Skill 只负责编排,不复制或覆盖 `CLAUDE.md` 的权威规则。
 
-```
-范围与不变量 → profile → 租约 → 实现 → 定向验证 → 风险审查
-             → 集成验证 → 价值提交 → 发布验证 → 回收
-```
+### 4.1 执行模式
 
-单单元是一个节点的发布列车。多单元只增加依赖调度、共享 owner、批次集成和统一发布,不另建一套开发流程。
+| 模式 | 触发边界 | 默认动作 |
+|------|----------|----------|
+| `consult` | 只读回答、诊断、审查、状态或方案讨论 | 只查相关证据并回复;不建工作项、不新选profile、不盘点无关Git/发布状态;正式reviewer继承被审候选风险门并可复跑必要验证 |
+| `change` | 修改tracked文件或持久本地项目记录 | 建一个精简工作项,实现并定向验证,停在可复核候选 |
+| `ship` | commit、push、PR、CI、版本、镜像或部署 | 先完成change,到达对应阶段时才加载发布规则 |
+| `operate` | 修改运行数据、内容投递状态、清理目标、凭据或生产资源 | 先固定目标、回滚/恢复和验收证据;需要发代码时再叠加ship |
 
-项目执行入口是 `.agents/skills/flori-delivery-train/SKILL.md`。Skill 只负责按本章编排动作,不复制或覆盖 `CLAUDE.md` 的权威规则;规约变化先改权威文档,再同步 skill。
+模式只按用户授权升级。`consult`若被要求写出持久设计稿,从首次写盘开始转为`change`;`change`不因代码已经可用就自动升级为`ship`。
 
-### 4.1 Profile 选择
+### 4.2 权威懒加载
 
-开工前分别选择三个 profile,写入工作项:
+1. 当前会话已注入`CLAUDE.md`时不重复读取。
+2. 文档路由不明确才读`docs/README.md`;普通consult直接读受影响文件。
+3. 创建/修改工作项才读`.local/processing/迭代记录规范.txt`;涉及worktree、multi、证据集成才读本文对应章节。
+4. 进入commit/CI/部署前才读`docs/12-cicd.md`对应章节。
+5. 内容投递、清理/重投或投递Bug才读`.local/delivery/README.txt`和受影响记录,不扫全目录。
+
+### 4.3 Profile 选择
+
+只有`change/ship/operate`分别选择三个profile并写入工作项:
 
 | 维度 | 取值 | 额外要求 |
 |------|------|----------|
 | 规模 | `single` / `multi` | `multi` 必须生成依赖 DAG、共享热点 owner 表和集成批次 |
 | 风险 | `normal` / `contract` / `critical` | `contract` 同步契约和消费方;`critical` 先冻结威胁/不变量矩阵,再写恶意与恢复测试 |
-| 发布 | `review-first` / `ci` / `full-deploy` | 分别停在用户复核、CI 全绿、完整本地与 ECS 外部验收 |
+| 发布 | `review-first` / `commit-only` / `ci` / `full-deploy` | 分别停在未提交候选、本地无版本价值提交、CI全绿、完整本地与ECS外部验收;纯运行运维可填不涉及 |
 
-安全边界、数据库迁移、灾备恢复、身份与权限默认是 `critical`。一个高风险单元不能因为规模是 `single` 而降低门禁;多个普通单元也不能仅因数量多就逐个重复全量测试和部署。
+实际修改或操作安全边界、数据库迁移、灾备恢复、身份、凭据与权限默认是`critical`。只读讨论这些主题仍是`consult`,只要求答案覆盖相关不变量和恢复边界,不提前运行实现/测试/发布门。一个高风险修改不能因为规模是`single`而降级。
 
-### 4.2 多单元发布列车
+只把高风险主题写成持久设计稿时使用`change/review-first`,风险profile用`normal`(设计本身修改外部契约时用`contract`),风险门记`critical-target`:记录设计级不变量/威胁/拒绝/回滚/恢复矩阵,实现把它作为依据前做一次独立设计审查;设计文档本身不跑恶意产品测试、CI或部署。
+
+### 4.4 多单元发布列车
 
 `multi` 开工前在列车工作项记录:
 
@@ -147,11 +159,11 @@ services:
 2. 可并行节点、共享热点串行链和每个热点的唯一 owner。
 3. 集成批次以及每批触发的跨单元测试、镜像和手验。
 4. 唯一列车 integrator、发布分支、目标版本和最终 push/deploy 条件。
-5. 以候选标识为键的证据账本;优先使用 checkpoint/tree SHA,未提交的 `review-first` 候选使用确定性 diff digest。单元 TXT 只引用证据 ID,不复制完整输出。
+5. 以候选标识为键的证据账本;优先使用checkpoint/tree SHA,未提交的`review-first`候选使用确定性diff digest。候选包含gitignored持久文件时,摘要必须显式覆盖这些文件。单元TXT只引用证据ID,不复制完整输出。
 
-每个单元在发布分支保留一个不 bump 的可回滚价值 commit。全部批次通过后,列车 integrator 创建一个 `build(release)` commit 统一 bump,再一次 push、CI 和部署。若必须提前 push,就在该边界结束当前列车并形成一次独立发布;后续节点进入下一列车。
+`review-first`阶段各单元保留可识别候选,不创建正式价值commit。进入`ship`且用户授权commit后,每个独立回滚边界才在发布分支形成一个不bump的价值commit;全部批次通过后由列车integrator创建一个`build(release)`commit统一bump,再一次push、CI和部署。
 
-### 4.3 Worktree 租约与停滞回收
+### 4.5 Worktree 租约与停滞回收
 
 并行会话或主工作树有未提交改动时,每个会话必须在租约制 worktree 中工作。`$FLORI_WORKING_DIR` 是仓库外工作区,本机真实路径只放 `.local/` 或 shell 环境,不要写入 git 文档。
 
@@ -176,54 +188,107 @@ git branch -d <final-branch>
 
 checkpoint 分支经 squash 后不会成为 `main` 祖先。integrator 必须先确认 checkpoint diff 已完整纳入最终 `main` SHA、worktree 无未归档改动,再回收 worktree并用 `git branch -D <checkpoint-branch>` 删除。本任务创建的远程分支已纳入后同步删除;`badges`、`mutation-data` 等自动数据分支例外。无法清理时必须在最终回复说明原因,并写入 `.local/processing/待办池.txt`。
 
-### 4.4 审查预算
+### 4.6 审查预算
 
 1. 开工前把已知不变量、攻击类别、拒绝条件和恢复场景转成检查表或红测试,不要等每轮 reviewer 临时扩充范围。
 2. `normal` 默认一次实现审查;`contract` / `critical` 默认一次实现审查加一次独立终审。发现新的 P0/P1 类别可以重开门禁;同类小修继续在当前轮关闭,P2/P3 新范围进入后续工作项。
-3. reviewer 优先验证风险矩阵、diff 和未覆盖边界,复用绑定 tree SHA 的已有证据;没有输入变化时不机械重跑全量套件。
+3. reviewer 优先验证风险矩阵、diff 和未覆盖边界,复用满足§5全部匹配维度的已有证据;证据仍有效时不机械重跑全量套件。
 4. checkpoint 是可恢复保存点,不是审查或正式提交单位。多轮反馈继续写入同一工作项时间线。
 
-### 4.5 提交规范
+### 4.7 提交规范
 
-> 权威定义在 `CLAUDE.md` §提交规范。本节只展示三种边界,规则改动只改权威源。
+> 本节只在进入`ship`并准备正式commit时加载。`CLAUDE.md`保留硬边界,具体格式单一来源在此。
+
+标题:
+
+- 单单元直接发布的价值commit,以及`single commit-only`晋级或多单元列车末尾的`build(release)`commit:`<type>(<scope>): <中文摘要>;<新版本>`。
+- 尚未单独push/部署的列车内价值commit,以及文档、公约、调研、测试或CI治理commit:`<type>(<scope>): <中文摘要>`,不带版本。
+- `type`只允许`feat/fix/refactor/chore/ops/contract/test/docs/perf/build`;`scope`使用受影响模块/领域的小写标识。
+- 摘要用中文说明“做了什么 + 为什么”,不写句号,逗号用半角`,`。
+- 修改API、WebSocket、Redis或文件Schema时使用`contract`类型,并在同一价值提交更新`docs/03-contracts.md`及消费方。
+
+版本:
+
+- 单一来源是`pyproject.toml`的`[project].version`;后端共用`shared.version.FLORI_VERSION`,前端从后端读取,`package.json`不跟随。
+- 普通改动patch+1并逢10进位;大重构minor+1且patch归0;架构级大重构major+1且后两段归0。
+- 版本代表一次实际发布。`single`直接发布在价值commit中bump一次;`single commit-only`晋级发布时新增一个`build(release)`commit统一bump;`multi`各价值commit不bump,列车末尾由唯一integrator创建一个`build(release)`commit统一bump。
+- checkpoint、未单独发布的列车内价值commit和非发布治理commit不bump。若列车分成两次push/部署,每次都是独立发布并各bump一次。
+- `commit-only`的本地价值commit不bump。若之后扩大到`ci/full-deploy`,保留该价值commit并新增一次`build(release)`版本提交,不重写已审候选。
+
+正文:
+
+1. 解释背景/动机和关键取舍,不要只罗列diff。
+2. 用`tests:`写明验证命令和结果。
+3. 修改对外接口时用`contract:`说明契约已同步。
+4. 正文后只保留一行`Co-Authored-By` trailer。型号使用实际agent型号;不要附加session URL、上下文长度或其它harness后缀。
+
+示例:
 
 ```
 feat(scheduler): 实现 DAG 推进逻辑              # 列车内价值 commit,未单独发布
 feat(scheduler): 实现 DAG 推进逻辑;0.2.0        # single 直接发布
 build(release): 发布本列车已验收价值;0.3.0      # multi 统一发布
+build(release): 发布已审单元价值;0.3.1          # single commit-only 后续晋级
+```
+
+非发布治理示例:
+
+```
+chore(workflow): 以交付单元收敛开发与发布治理
+```
+
+完整body示例:
+
+```
+feat(document): Document 对齐翻译与独立译文阅读面;0.8.0
+
+非中文Document需要可核验的中文阅读面。新增按稳定segment对齐的条件翻译,原生HTML/PDF保持不可变。
+- 02_parse:检测来源语言并发布Document Model与locator。
+- 04_translate:翻译自然语言segment,公式/引用/数字冻结校验后发布translation.json与translated.html。
+- 前端JobDetailView:译文高亮可反向跳回HTML segment或PDF page+bbox。
+tests:Document contract、translation alignment和reader定向测试通过。
+contract:docs/03-contracts.md已更新Document/Translation/locator文件契约。
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 ```
 
 ## 5. 验证阶梯与证据复用
 
 | 阶段 | 责任人 | 默认验证 | 输出证据 |
 |------|--------|----------|----------|
-| 实现 | agent | 新增、红测试和直接相关用例 | 候选标识、输入、命令、结果、产物路径 |
+| 实现 | agent | 新增、红测试和直接相关用例 | 候选标识、输入、命令、运行配置、依赖镜像、结果和产物路径 |
 | 审查 | reviewer | 风险矩阵、审查新增范围、无法核验项 | issue 类别、结论和复跑结果 |
 | 单元集成 | unit integrator | touched-path 并集、契约/迁移/消费方闭环 | 单元候选 SHA 与验收清单 |
 | 批次集成 | train integrator | 跨单元联调、对应镜像、API/Playwright 手验 | 批次 SHA 与集成证据 |
 | 发布 | CI/deployer | 全量门禁、镜像提升、部署和外部验证 | run URL、digest、版本、health |
 
-证据只有在候选标识、测试输入、运行配置和依赖镜像未变化时才可复用。单元之后合入了无关节点,原定向证据仍可引用,但批次集成不能省略。镜像默认每个集成批次构建一次;只有 Dockerfile、依赖、构建上下文或运行时输入变化才提前重建。
+证据只有在候选标识、测试输入、命令、运行配置和依赖镜像未变化时才可复用既有结果。单元之后合入了无关节点,原定向证据仍可引用,但批次集成不能省略。镜像默认每个集成批次构建一次;只有 Dockerfile、依赖、构建上下文或运行时输入变化才提前重建。
 
 ## 6. 收口规则
 
-### 6.1 单个交付单元
+### 6.1 Consult
 
-1. 填好三个 profile、验收目标、不变量、scope、owner 和回滚边界。
+1. 回答用户问题并标明未核实或受时间影响的边界。
+2. 没有写入、运行态修改或本任务资源时,不创建工作项,也不做worktree/分支/版本/发布收尾。
+3. 只有结论后续会复用或用户要求持久报告时才写盘,并从该写入开始按change记录。
+
+### 6.2 单个变更或操作单元
+
+1. 记录模式、profile、验收目标、回滚边界、scope、唯一integrator和可复用证据;agent租约、热点owner、版本、部署等条件字段只在触发时填写。
 2. 实现与定向验证后按风险 profile 完成审查。
 3. integrator squash checkpoint,执行单元集成并同步契约、迁移、消费方和必要文档。
-4. `review-first` 停在用户可检查状态;`ci` 或 `full-deploy` 的产品改动直接把该价值 commit 作为发布 commit 并 bump 一次。纯文档、公约、调研、测试或 CI 治理仍不 bump。
-5. 按 profile 完成 CI/部署,再回收 worktree 和分支。
+4. `review-first`停在未提交候选;`commit-only`形成已授权的本地无版本价值提交后停止;直接进入`ci/full-deploy`的产品改动把价值commit作为发布commit并bump一次。已有`commit-only`价值commit后再扩大终点时,另建一次`build(release)`版本提交。纯文档、公约、调研、测试或CI治理仍不bump。
+5. 只执行当前模式到达的检查。使用worktree时核对并报告本任务分支;进入ship后才检查origin、CI、版本和部署。
 
-### 6.2 多个交付单元
+### 6.3 多个交付单元
 
 1. 先冻结 DAG、串行热点链、集成批次、列车 integrator 和证据账本。
 2. 各单元按同一生命周期推进,只在依赖满足时做详细审计和实现。
-3. 单元完成后形成不 bump 的价值 commit;每批只跑一次跨单元集成与镜像构建。
+3. `review-first`单元完成后保留候选标识;进入`ship`且用户授权commit后才形成不bump的价值commit。每批只跑一次跨单元集成与镜像构建。
 4. 全部批次通过后创建一个发布 commit,一次 push、CI、版本发布和部署。
 5. 按证据账本生成完成矩阵,再统一回收 worktree、checkpoint、临时分支和实验资源。
 
-所有 profile 最终回复前都复查 `git worktree list --porcelain`、登记的全部分支(`--list` + `--merged/--no-merged main`)和 `git status --short --branch`。
+只有使用worktree的change、ship或需要Git回收的operate在最终回复前检查本任务worktree、登记分支和`git status`。可用`.agents/skills/flori-delivery-train/scripts/delivery-snapshot.sh`合并机械查询;候选含gitignored持久文件时用`--extra <label=path>`纳入复合摘要。不要因其它会话存在无关worktree就扩展本任务scope。
 
 ## 7. 扩展指南
 

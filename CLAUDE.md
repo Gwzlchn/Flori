@@ -66,78 +66,40 @@ ROADMAP.md                  → 里程碑和进度
 - 不做国际化（中文为主）
 - 不做用户系统（个人工具，Basic Auth）
 
-### 提交规范（跨会话 / 多 agent 统一，**权威在此处**）
+### 提交与发布硬边界
 
 > 最终进入 `main` 的正式提交按本节执行。分支 checkpoint 只用于保存可恢复进度，合入前必须整理，不按正式提交发布。与某个 agent 的 harness 默认（如型号后缀、session 链接）不一致时，**以本节为准**（CLAUDE.md OVERRIDE 默认行为）。
 
 **交付单元与提交边界**
-- `main` 上每个价值提交对应一个可独立验收、可独立回滚、部署后完整可用的价值单元。提交边界由验收与回滚边界决定，不由 agent、文件数、代码行数或反馈轮次决定。`multi` 末尾允许额外一个只承载版本与必要发布元数据的 `build(release)` 提交，它对应整列车发布边界，不伪装成新的功能单元。
+- `main` 上每个价值提交对应一个可独立验收、可独立回滚、部署后完整可用的价值单元。提交边界由验收与回滚边界决定，不由 agent、文件数、代码行数或反馈轮次决定。`multi` 末尾或 `single commit-only` 后续晋级发布时,允许额外一个只承载版本与必要发布元数据的 `build(release)` 提交；它对应发布边界，不伪装成新的功能单元。
 - 同一功能的多 agent 实现、多轮评审和 UI 调整留在同一交付单元。只有契约、部署顺序或回滚边界确实独立时才拆分。
 - 实现与回归测试、对外接口与 `docs/03-contracts.md`、数据迁移与消费方必须在同一交付单元闭环，不得把不可 build、不可测或不可部署的中间状态留在 `main`。
 - 分支允许 `wip:` / `fixup!` checkpoint。checkpoint 不 bump 版本、不进入 `main`；integrator 合入前必须用 squash 方式把全部 checkpoint 整合为待提交 diff，通过价值门后再创建一个正式提交。紧急生产修复、独立 revert 和独立 CI 修复可形成小而完整的正式提交。
 
-**统一交付协议与 profile**
-- 单个和多个交付单元使用同一生命周期：定义范围与不变量 → 选择 profile → 登记租约 → 实现 → 定向验证 → 风险审查 → 集成验证 → 价值提交 → 发布验证 → 回收。单单元是只有一个节点的发布列车，不维护第二套流程。
-- 开工前分别选择三个 profile：规模 `single | multi`，风险 `normal | contract | critical`，发布范围 `review-first | ci | full-deploy`。profile 决定附加门禁，不改变价值单元和回滚边界。
-- `multi` 必须先画依赖 DAG，登记共享热点 owner、可并行节点、串行链和集成批次；`single` 不需要伪造 DAG。安全边界、数据库迁移、灾备恢复、身份与权限默认属于 `critical`，即使只有一个单元也必须执行威胁/不变量矩阵、恶意测试和独立审查。
-- `review-first` 在用户确认前不得正式 commit、push 或部署；`ci` 到最终 push 与 required jobs 全绿为止；`full-deploy` 还必须完成本地/NAS、ECS 与外部验证。用户明确授权的终止条件优先，但不得借 profile 降低契约、安全或数据完整性门禁。
-- 多单元默认在一个发布分支保留各自可回滚的价值提交，按依赖批次集成；全部批次通过后只做一次版本发布、一次 push 和一次部署。不要为 agent、checkpoint、审查反馈或 CI 实验制造主线微提交，也不要把多个独立回滚边界压成一个巨型提交。
+**执行分流与统一交付协议**
+- 先按本次授权选择执行模式，再加载对应流程：`consult` = 只读回答/诊断/审查，不写持久文件、不改外部状态；`change` = 形成可复核修改，停在 commit/push/deploy 前；`ship` = 明确要求 commit、push、CI 或部署；`operate` = 修改运行数据、内容投递状态、凭据、清理目标或生产资源。模式可随用户扩大终点逐级增加，不得从 `consult/change` 擅自推断 `ship/operate`。
+- `consult` 只读取回答所需证据，不建工作项、不新选交付 profile、不做无关 Git/worktree/发布盘点，普通咨询不运行产品测试；正式 reviewer 继承被审候选的 risk gate,可复跑风险矩阵、契约、恶意测试和不可核验证据,但不因此转为`change`。若用户明确要求落盘计划或报告，该持久写入从 `change` 开始。
+- `change/ship/operate` 使用同一生命周期：定义范围与不变量 → 选择 profile → 必要时登记租约 → 实现/操作 → 定向验证 → 风险审查 → 到达用户指定终点 → 回收本单元资源。单单元是只有一个节点的发布列车。
+- 权威按阶段懒加载：`CLAUDE.md` 已在当前上下文时不重复读；文档路由不明才读 `docs/README.md`；涉及 worktree/multi/证据集成才读 `docs/11-dev-workflow.md` 对应章节；进入 commit/CI/部署才读 `docs/12-cicd.md` 对应章节；内容投递/清理才读受影响的 `.local/delivery` 记录。
+
+**交付 profile**
+- 只有 `change/ship/operate` 开工前选择三个 profile：规模 `single | multi`，风险 `normal | contract | critical`，发布范围 `review-first | commit-only | ci | full-deploy`。纯运行运维无代码发布时发布 profile 可记为“不涉及”。
+- `multi` 必须先画依赖 DAG，登记共享热点 owner、可并行节点、串行链和集成批次；`single` 不需要伪造 DAG。**实际修改或操作**安全边界、数据库迁移、灾备恢复、身份、凭据与权限默认属于 `critical`，必须执行威胁/不变量矩阵、恶意测试和独立审查；只读讨论这些主题仍是 `consult`，只在答案或设计中覆盖相关不变量与恢复边界。
+- 若只把上述高风险主题写成持久设计稿,执行模式是`change/review-first`,风险profile用`normal`(设计本身改外部契约时用`contract`),风险门标`critical-target`:记录设计级不变量/威胁/拒绝/回滚/恢复矩阵,实现依赖它之前做一次独立设计审查,但设计稿本身不运行恶意产品测试或发布门。
+- `review-first` 在用户确认前不得正式 commit、push 或部署；`commit-only`只形成已授权的本地无版本价值提交,不bump、不push,后续扩大到发布时另做唯一版本bump且不重写价值提交；`ci` 到最终 push 与 required jobs 全绿为止；`full-deploy` 还必须完成本地/NAS、ECS 与外部验证。用户明确授权的终止条件优先，但不得借 profile 降低契约、安全或数据完整性门禁。
+- 多单元在`review-first`阶段保留可识别候选,不创建正式价值commit。进入`ship`且用户授权commit后,才在发布分支为各独立回滚边界创建价值commit并按依赖批次集成；全部批次通过后只做一次版本发布、一次push和一次部署。
 
 **集成责任**
 - 每个交付单元指定唯一 integrator；`multi` 另指定唯一列车 integrator，负责 DAG、批次集成、最终版本、push、部署和全局回收。单单元时两者是同一人。
 - 子 agent 默认只在已登记的租约 worktree 和文件 scope 内实现、测试并报告结果；可创建 branch checkpoint，不得自行修改最终版本号、合入 `main`、push 或部署，除非被明确指定为 integrator。
 - `pyproject.toml`、`docs/03-contracts.md`、`shared/db.py`、`shared/models.py`、`configs/pipelines.yaml`、前端 router/types、CI 和 deploy 文件属于共享热点。一个交付单元内为每个热点指定单一 owner，其他 agent 通过 integrator 协调。
-- 集成前由 integrator 汇总全部 touched paths，运行并集相关测试、build 和手验；子 agent 各自绿灯不等于交付单元已通过。测试证据必须绑定候选标识、输入与命令，三者未变才可复用；候选标识优先用 checkpoint/tree SHA，未提交的 `review-first` 候选用确定性 diff digest。
+- 集成前由 integrator 汇总全部 touched paths，运行并集相关测试、build 和手验；子 agent 各自绿灯不等于交付单元已通过。测试证据必须绑定候选标识、输入、命令、运行配置、依赖镜像和结果；前五项未变才可复用结果。候选标识优先用 checkpoint/tree SHA，未提交的 `review-first` 候选用确定性 diff digest；若候选含 gitignored 持久文件,使用覆盖这些文件的复合摘要。
 
 **正式提交前价值门**
 - integrator 必须能明确回答：本提交交付的完整价值是什么，哪条测试/手验证明它，回滚是否能完整撤销该价值。
 - 若仍有本交付单元内的测试、契约、消费方、迁移或文档留到下一提交，或本次只是一轮反馈/保存点，则继续迭代，不创建正式提交。
 
-**标题**
-- 单单元直接发布，或多单元列车末尾的发布 commit：`<type>(<scope>): <中文摘要>;<新版本>`。
-- 尚未单独 push/部署的列车内价值 commit，以及文档、公约、调研、测试或 CI 治理 commit：`<type>(<scope>): <中文摘要>`，不带版本。
-- `type` ∈ `feat / fix / refactor / chore / ops / contract / test / docs / perf / build`（与迭代记录类型对齐）。
-- `scope` = 受影响模块/领域，小写：`document / jobs / ui / mcp / net-zone / concept-graph / build`…（尽量带，可省）。
-- 摘要用**中文**、一句话说清「做了什么 + 为什么」，**不写句号**，逗号用半角 `,`（沿用既有风格）。
-- 动了**对外接口**（API / WebSocket / Redis / 文件 Schema）→ 用 `contract:` 或 `contract(scope):`，并**同提交**更新 `docs/03-contracts.md`。
-
-**版本号**：单一来源 = `pyproject.toml` 的 `[project].version`（当前值以该文件为准，勿在文档里硬编码；api/scheduler/worker 共用 `shared.version.FLORI_VERSION`，前端从后端取、`package.json` 不跟随）。三档递增：
-- **普通改动** → patch（第 3 段）+1；**逢 10 进位**：每段满 10 向前进 1、本段归 0（`0.8.9 → 0.9.0`，`0.9.9 → 1.0.0`）。
-- **大的重构** → minor（中间段）+1，patch 归 0（如 `0.8.3 → 0.9.0`）。
-- **架构级大重构** → major（第 1 段）+1，后两段归 0（如 `0.8.3 → 1.0.0`）。
-- 版本代表一次实际发布，不代表每个内部价值提交。`single` 直接发布时在该价值 commit bump；`multi` 的各价值 commit 不 bump，列车全部验收后由列车 integrator 创建一个 `build(release)` 发布 commit，只改版本与必要发布元数据并 bump 一次。
-- branch checkpoint、列车内未单独发布的价值 commit 与非发布治理 commit 不修改版本。如果列车被拆成两次 push/部署，每次都成为独立发布并各 bump 一次。
-
-**正文 body**：解释「为什么这么改」，不是罗列 diff。建议顺序：
-1. 背景 / 动机（用户诉求或问题根因）；
-2. 关键改动点（按模块分条，带取舍）；
-3. `tests:` 验证了什么（跑了哪些、passed 数）；
-4. 动接口时一行 `contract:` 说明已同步 `docs/03-contracts.md`。
-
-**署名 trailer**：正文后**仅一行**，不要 `Claude-Session` URL、不要 `(1M context)` 等后缀：
-```
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
-```
-
-非发布治理示例：
-```
-chore(workflow): 以交付单元收敛开发与发布治理
-```
-（提交的 agent 非 Opus 时，把型号换成对应模型名，如 `Claude Sonnet 4.6`；其余格式不变。）
-
-**示例**：
-```
-feat(document): Document 对齐翻译与独立译文阅读面;0.8.0
-
-非中文 Document 需要可核验的中文阅读面。新增按稳定 segment 对齐的条件翻译,原生 HTML/PDF 保持不可变。
-- 02_parse:检测来源语言并发布 Document Model 与 locator。
-- 04_translate:翻译自然语言 segment,公式/引用/数字冻结校验后发布 translation.json 与 translated.html。
-- 前端 JobDetailView:译文高亮可反向跳回 HTML segment 或 PDF page+bbox。
-tests:Document contract + translation alignment + reader 定向测试通过。
-contract: docs/03-contracts.md 更新 Document/Translation/locator 文件契约。
-
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
-```
+只有进入`ship`并准备正式commit时才读取`docs/11-dev-workflow.md` §4.7的完整标题、版本、body和trailer规则。硬边界始终有效:对外接口与`docs/03-contracts.md`同提交;版本单一来源是`pyproject.toml`;checkpoint和非发布治理不bump;不得附加session URL或上下文后缀;Git身份只使用已配置值。
 
 ## 系统要求
 
@@ -230,18 +192,19 @@ flori/
   - `scripts/test.sh --integration` → 真 Redis、生产 Database 冷启动/迁移/DR 兼容、Docker daemon、Gateway Worker、pipeline 检索闭环和 AOF 恢复门。
   - `scripts/test.sh --external <场景|all>` → 显式公网 article / audio / RSS / YouTube 验证;缺 URL 返回非零，不计为通过。
 - **本地/CI 分工**：本地只跑【新增/相关】用例(`-m` 或 `--changed`);**全量回归 + 覆盖率门(75%) + 前端 vitest 交 CI**（`.github/workflows/ci.yml`:main 按 Dockerfile + 去版本 pyproject 内容键复用无源码测试 runtime，普通测试在全量 collection 前预分 15 组；轻文件保持完整，超过平均负载的巨型文件只做局部真实 collection 并按动态 nodeid 分组，组内 xdist 单项调度消除批量预取长尾。worker 1 分片 + 真依赖 integration 两分组与 runtime prepare 并行启动，detect 和 build-images 先占用 prepare 释放槽完成短控制链，coverage gate 随后预热并以当前 run/attempt 的全部成功生产 job 为屏障；制品下载、逐文件非空断言和 coverage combine 全部 fail-closed，判门后才允许候选镜像提升;PR 仍在各 runner 本地构建测试 stage;纯文档提交 `paths-ignore` 跳 CI;路径分类从最近完整成功 run 累计到当前 HEAD，前端-only 改动不重建后端镜像;同 ref 新 run 只取消旧测试/build，已启动的镜像发布不取消;schemathesis 独立每日 cron `fuzz.yml`）。
-- **证据复用阶梯**：实现 agent 跑新增/直接相关用例并记录候选标识、输入和命令；reviewer 只复跑风险矩阵、审查新增范围与无法核验的证据；integrator 每个集成批次跑一次 touched-path 并集、跨单元联调和对应镜像；最终 CI 负责全量。代码、测试输入或运行配置未变时不得机械重复同一全量验证，变更任一项则旧证据失效。
+- **证据复用阶梯**：实现 agent 跑新增/直接相关用例并记录候选标识、输入、命令、运行配置、依赖镜像和结果；reviewer 只复跑风险矩阵、审查新增范围与无法核验的证据；integrator 每个集成批次跑一次 touched-path 并集、跨单元联调和对应镜像；最终 CI 负责全量。前五项未变时不得机械重复同一全量验证，任一项变化则旧结果失效。
 
 ### 开发 / 测试 / 交付节奏（全容器内,宿主不装依赖）
 - 开发热更新：`docker compose -f docker-compose.dev.yml up -d`
 - 容器内测试：**唯一入口 `scripts/test.sh`**（见上 §测试规约;全量 `scripts/test.sh --all` 本地少用,全量回归交 CI）
+- `consult` 不因主题涉及代码就自动跑测试；只做回答所需的只读验证。`change/ship/operate` 才按下列验证阶梯执行。
 - **本地快测 + 按 profile 集成与发布**（提速节奏,务必遵守）：
   1. 本地只跑【新增 / 直接相关】用例（不跑全量）：**`scripts/test.sh -m <新模块>`**（或 `--changed` 只跑受影响用例;前端 `scripts/test.sh --fe`）。见 §测试规约。
      全量回归由 **CI 承担**：push/PR 自动跑后端普通混合预分 15 片 + worker 1 分片 + 真依赖 integration 两分组 + 覆盖率门(75%) + 前端 vitest（`.github/workflows/ci.yml`);schemathesis 独立每日 cron。
   2. **「子任务完成」判定** = 约定 scope 实现完成 + 相关用例绿 + 改动与验证清单已报告。子 agent 完成不等于交付单元可发布。
   3. **「交付单元完成」判定** = integrator 已整合全部 diff + 并集相关测试绿 + 本地 build 对应镜像 +（API 调用 或 Playwright MCP）手验通过 + 必要契约/文档已同步。
-  4. `single` 完成后按发布 profile 收口；`multi` 先创建不 bump 的本地价值 commit，待同一集成批次全部完成后统一跑跨单元联调和镜像构建，不按每个单元重复全量构建。
-  5. `review-first` 停在用户可检查的未提交或本地候选状态；`ci` 由 integrator 统一发布一次并追踪 required jobs；`full-deploy` 再完成 NAS 与 ECS 验证。后端发布一律三件套全建全滚（`scripts/build-uptest.sh scheduler api worker` + recreate 全部后端容器），前端-only 发布才可只滚 frontend。ECS 仍只走 git push → coverage gate → GHCR → Watchtower。
+  4. `single` 完成后按发布 profile 收口；`multi`在`review-first`保留候选,进入`ship`且授权commit后才创建不bump的本地价值commit。同一集成批次统一跑跨单元联调和镜像构建,不按每个单元重复全量构建。
+  5. `review-first` 停在用户可检查的未提交候选；`commit-only`形成已授权的本地无版本价值提交后停止；`ci` 由 integrator 统一 push 并追踪 required jobs；`full-deploy` 再完成 NAS 与 ECS 验证。后端发布一律三件套全建全滚（`scripts/build-uptest.sh scheduler api worker` + recreate 全部后端容器），前端-only 发布才可只滚 frontend。ECS 仍只走 git push → coverage gate → GHCR → Watchtower。
   6. **CI 红灯**：尚未发布的问题回到对应交付单元或列车，整理后在实验/发布分支 fix-forward，不向 `main` 连续推送试错微提交；已部署版本默认以小而完整的新发布修正，仅当线上功能明显坏才 `scripts/rollback.sh` 回滚。
 
 ### 本地活栈（NAS,override 叠加）
@@ -276,11 +239,11 @@ docker compose -f docker-compose.yml -f .local/docker-compose.uptest.yml --env-f
 - 最终回复前必须复查 `git worktree list --porcelain`、本交付单元登记的全部分支（`git branch --list <branch>`，并辅以 `git branch --merged main` / `--no-merged main`）、`git status --short --branch`。若 worktree 或本任务分支未清理,必须说明原因并写入 `.local/processing/待办池.txt`。
 - 脏 worktree 删除前,先把 `git status`、`git diff` 和必要的 `git log main..branch` 归档到 `$REPO/.local/processing/<YYYY-MM-DD>/worktree-archive/`。
 
-### 迭代工作记录（每次开发/运维都要保持的习惯）
-**粒度铁律：一个交付单元一个 txt**。一个工作项可覆盖多 agent、多轮评审和多个 branch checkpoint；全部步骤写入同一份时间线。checkpoint 只记在时间线，头部在集成完成后登记唯一的最终 `main` SHA。若确有独立验收/回滚边界而拆成多个正式提交，也同步拆成多个工作项。文件继续放在 `.local/processing/<YYYY-MM-DD>/`，**边做边更新且永不入 git**：
+### 迭代工作记录（change / ship / operate）
+`consult` 默认不创建工作项；只有用户要求持久报告，或调研结论将被后续实现/运维复用时才落到已有工作项或独立 `research/plan`。`change/ship/operate` 按**一个交付单元一个 txt**记录。一个工作项可覆盖多 agent、多轮评审和多个 branch checkpoint；checkpoint 只记在时间线，头部在集成完成后登记唯一的最终 `main` SHA。文件放在 `.local/processing/<YYYY-MM-DD>/`，边做边更新且永不入 git：
 - 命名 `NN-类型-简述.txt`（类型对齐 git：feat/fix/refactor/chore/ops/research/plan/docs/test）。
-- 头部：类型 / 状态（计划→进行中→已完成/阻塞）/ 创建·开始·结束·耗时（绝对时间 `YYYY-MM-DD HH:MM`）/ 分支·提交。
-- 正文（**详写、分节，不是一行**）：背景 → 计划（动手前写）→ 实际实现（与计划差异、踩坑）→ 涉及改动 → 验证 → 遗留 → **步骤时间线**（§7 必写：每个开发步骤都详记 `开始(date) → 结束(date) + 做了什么(详)`；checkpoint 与最终提交均在对应步骤标 SHA）。
+- 核心字段只保留类型、状态、真实起止时间、执行模式/profile、验收目标、回滚边界、scope、基线、唯一integrator、验证证据、结果和遗留。分支/worktree、agent租约、热点owner与列车账本仅触发时填写；版本/发布/部署字段仅`ship`填；投递三字段仅内容投递或投递Bug填写。
+- 正文保留背景、计划、实际、验证、遗留和步骤时间线；时间线只记录改变候选、风险或证据状态的实质里程碑，不为每个搜索、读取或机械命令单独记步骤。所有写入的时间戳仍必须来自当时的 `date`，不得估算。
 - 当天建 `00-当日索引.txt`；跨天未完的滚动进 `.local/processing/待办池.txt`。
 - 标准/模板/待办池放 `.local/processing/` 根目录（长存,不随日期清理）；完整规范见 `.local/processing/迭代记录规范.txt`。
 
@@ -290,16 +253,16 @@ docker compose -f docker-compose.yml -f .local/docker-compose.uptest.yml --env-f
 - 全目录迁移或schema变化时对`delivery-state.yaml`做一次全量运行库对账。日常投递前只增量核对目标source、开放Bug、相关current lineage和订阅集合;运行态写操作后立即回填受影响source。`active_subscription`只表示集合启用,不得把`last_sync_status: ok`误当成子Job投递成功。
 - batch文件名固定为`YYYY-MM-DD-两位序号.yaml`,日期取创建batch时的真实北京时间,完整时间写入文件。普通batch最多10个来源;用户追加内容必须新建下一序号batch。频道、Playlist和RSS还必须冻结fanout上限与停止条件。
 - 投递发现产品Bug时,立即暂停受影响来源并创建独立`$REPO/.local/delivery/bugs/YYYY-MM-DD-两位序号.yaml`;Bug记录必须固定发现batch、source/Job、processing修复工作项、修复版本和重投batch。
-- 投递驱动的代码修复另建`fix`交付单元,不并入`ops`投递工作项。所有processing工作项头部填写`投递关联`、`投递Bug`和`重投验收`;普通产品开发明确填`无`。
+- 投递驱动的代码修复另建`fix`交付单元,不并入`ops`投递工作项。只有内容投递、投递Bug和对应修复工作项填写`投递关联`、`投递Bug`、`重投验收`;普通产品开发不添加这三个条件字段。
 - 代码测试、commit或部署完成不等于投递Bug关闭。修复后必须新建最多10条的retry batch,用修复版本重新投递并通过来源/产物/质量门;只有重投验收通过才能把Bug标为`verified`。
 - 诊断证据和精确manifest保存前不得删除错误Job。可并存时先验新快照再删旧快照;实现限制必须先删时先做可恢复备份,只按固定Job ID操作,原始媒体与昂贵下载输入优先复用。
 
-### 调研结论即写盘（防 context 重复调研，省 token）
-调研/排查出的**非显然结论**别只留在对话里——一压缩就丢，下个会话又重查一遍（拖慢节奏 + 烧 token）。**研完即落盘，写在对的层**：
+### 可复用调研结论按需写盘（防重复调研，省 token）
+只读咨询不为留痕而留痕。调研/排查得到的**非显然且后续会复用**的结论才写在对应权威；一次性回答留在对话即可：
 - 非显然代码事实/坑（"X 靠 Y 实现"、"配置在 Z"、某 gotcha）→ **auto-memory**（`/remember`；每会话作为 system-reminder 重载，扛压缩）。
 - 稳定架构事实 → **CLAUDE.md / docs/ADR**；本次开发过程/发现 → **`.local/processing` worklog §3/§4/§7**。
 - 广搜（"X 在哪 / 找所有调用方 / Y 怎么流转"）→ 派 **Explore / general-purpose 子 agent 或 fork**，只把**结论**带回主 context（文件 dump 不进主 context，不触发压缩），结论再写盘。
-- 原则：花了 >2 分钟、之后还要用的结论，**移到下一步前先写盘**；代码引用一律 `file:line` 便于精准重读，不整文件重扫。
+- 原则：之后还要用、压缩后重查成本明显的结论，在移到下一步前写盘；代码引用用 `file:line` 便于精准重读，不整文件重扫。
 - 全程在 `.local/`（gitignored,永不入 git）；值得长存的决策升格 `docs/adr/`,接口变更进 `docs/03-contracts.md`。
 
 ## 已迁移项目记忆（Claude Code / Codex 共用）
@@ -307,11 +270,11 @@ docker compose -f docker-compose.yml -f .local/docker-compose.uptest.yml --env-f
 以下来自历史 memory，作为跨会话稳定约定与踩坑记录。真实凭证不写入本文件。
 
 ### 规则与偏好
-- 版本递增按三档执行：普通改动 patch +1（逢 10 进位），大的重构 minor +1，架构级重构 major +1。版本代表一次实际发布：single 直接发布时由价值 commit bump，multi 只由列车末尾 `build(release)` commit bump；branch checkpoint、列车内价值 commit 与非发布治理 commit 不 bump。
+- 版本递增按三档执行：普通改动 patch +1（逢 10 进位），大的重构 minor +1，架构级重构 major +1。版本代表一次实际发布：single 直接发布时由价值 commit bump；single 的 `commit-only` 后续晋级发布,或 multi 列车收口时,由额外的 `build(release)` commit bump；branch checkpoint、未发布价值 commit 与非发布治理 commit 不 bump。
 - 提交格式以本文件「提交规范」为准，覆盖 agent harness 默认。禁止 `Claude-Session` URL、`(1M context)` 等后缀；正文只保留一行 `Co-Authored-By` trailer。
 - 每个交付单元只有唯一 integrator 可创建正式提交、push、部署和回收 worktree。后台 fork/agent 默认只在租约 scope 内实现、测试和报告，不得自走完整发布链。
 - 现在是单人开发，`frontend/` 与 `design/` 也归当前 agent，可改功能、设计、UI。对外接口仍以 `docs/03-contracts.md` 为契约；接口变更同提交更新契约文档。
-- 每个交付单元维护一份 `.local/processing/<YYYY-MM-DD>/` 工作项：先写计划，再记录多 agent、多轮评审中的实际实现、踩坑、checkpoint、验证、遗留和步骤时间线。当天建 `00-当日索引.txt`，跨天未完滚动到待办池。
+- 每个 `change/ship/operate` 交付单元维护一份 `.local/processing/<YYYY-MM-DD>/` 工作项；`consult` 默认不建。工作项先写计划，再记录多 agent、多轮评审中的实际实现、checkpoint、验证与遗留；时间线只记实质里程碑。当天建 `00-当日索引.txt`，跨天未完滚动到待办池。
 - 写工作日志任何时间戳前必须运行 `date '+%Y-%m-%d %H:%M'` 取真实北京时间；不要估算，也不要写未来时间。
 - 多 agent 并行时代码改动按上文 Worktree 租约制执行；工作日志始终写 `$REPO/.local/processing/...`，项目文档中的 worktree 路径不写个人绝对路径。
 - 用户偏好彻底调研和多 agent 深挖，不以省 token 为优先。调研/审计/计划/过程笔记放 gitignored `.local/`，不要随手进 `docs/` 或提交。

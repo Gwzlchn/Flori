@@ -1,102 +1,75 @@
 ---
 name: flori-delivery-train
-description: Plan and execute Flori repository delivery through one unified lifecycle for either a single review-first change or multiple dependent units. Use when an agent (Codex or Claude Code) changes, reviews, tests, commits, releases, deploys, or coordinates agents/worktrees in the Flori repo and must select scale, risk, and release profiles, reuse evidence, enforce review gates, or close a release train without micro-commit churn.
+description: Orchestrate Flori repository work with a fast read-only consult path and staged change, ship, or operate gates. Use when Codex or Claude Code reviews, changes, tests, commits, releases, deploys, operates content/runtime state, or coordinates agents/worktrees in the Flori repo and must preserve value boundaries, risk gates, evidence reuse, or release integrity without loading unrelated workflow rules.
 ---
 
-# Flori Delivery Train
+# Flori Staged Delivery
 
-Use one delivery protocol for every change. Treat a single unit as a one-node train; add DAG scheduling and batch integration only for multiple units.
+Classify the requested action before loading process documents. Preserve rigor at the boundary being changed; do not run later delivery stages early.
 
-## Load authority
+## Select the execution mode
 
-1. Read `$REPO/CLAUDE.md`, `docs/README.md`, `docs/11-dev-workflow.md`, and `docs/12-cicd.md` before acting.
-2. Read `.local/processing/迭代记录规范.txt` and the current work item or create one before edits.
-3. For source curation, content delivery, cleanup/retry, or delivery-driven fixes, also read `.local/delivery/README.txt`, the affected catalog/state entries, batches, and Bug records before acting.
-4. Follow explicit user limits first. In particular, preserve review-first, no-commit, no-push, or no-deploy instructions.
-5. Treat repo governance as policy and this skill as execution guidance. Stop and report any conflict instead of silently overriding the repo.
-
-## Select profiles
-
-Record all three profiles in the work item:
-
-| Dimension | Values | Gate |
+| Mode | Boundary | Required process |
 |---|---|---|
-| Scale | `single`, `multi` | Add DAG, hotspot serialization, batches, and a train integrator only for `multi` |
-| Risk | `normal`, `contract`, `critical` | Synchronize contracts for `contract`; freeze invariants/threats and require adversarial tests plus independent review for `critical` |
-| Release | `review-first`, `ci`, `full-deploy` | Stop respectively at user review, required CI success, or local/NAS and ECS external verification |
+| `consult` | Read-only answer, diagnosis, review, status, or discussion; no durable artifact or external mutation | Inspect only relevant evidence and report. Do not create a work item, select new delivery profiles, inventory unrelated Git state, or run delivery cleanup. A formal reviewer inherits the candidate's risk gate. |
+| `change` | Edit tracked files or durable local project records; stop before commit/push/deploy | Create or update one work item, implement, run targeted validation, and leave a reviewable candidate. |
+| `ship` | Commit, push, PR, CI, version, image, or deployment is requested | Run `change`, then load and execute only the requested release stages. |
+| `operate` | Mutate runtime data, content delivery state, credentials, cleanup targets, or production resources | Record the operation, establish rollback/recovery evidence, and verify the external result. Add `ship` only when code also needs release. |
 
-Default security boundaries, database migrations, backup/restore, identity, credentials, and authorization to `critical`.
+Mode may advance when the user expands the finish line. Do not infer `ship` or `operate` from a `consult` or `change` request.
 
-## Start safely
+## Load authority lazily
 
-1. Inspect `git status --short --branch`, recent log, `git worktree list --porcelain`, relevant branches, and current deployment/CI state when in scope.
-2. Preserve unrelated user changes. Use a lease worktree when work is parallel, main is dirty, or isolation is needed.
-3. Define each unit by complete acceptance and rollback boundaries. Do not split by agent, file count, feedback round, or checkpoint.
-4. Record integrator, base, branch/worktree, file scope, hotspot owner, tests, first-artifact deadline, reclaim condition, profiles, dependencies, and evidence location.
-5. For `critical`, write the invariant, attack, rejection, rollback, and recovery matrix before implementation.
+1. Treat `$REPO/CLAUDE.md` as governance authority. If its current contents are already supplied in context, do not read it again.
+2. For `consult`, read only the files, runtime state, or history needed to answer. Read `docs/README.md` only when document routing is unclear.
+3. For `change`, read the current work item. Read `.local/processing/迭代记录规范.txt` only when creating or structurally changing a work item. Read the relevant sections of `docs/11-dev-workflow.md` only for worktrees, multiple units, evidence/review, or integration.
+4. For `ship`, read `docs/11-dev-workflow.md` §4.7 plus the relevant sections of `docs/12-cicd.md` immediately before commit/release work.
+5. For `operate`, read the affected runbook. For source curation, delivery, cleanup/retry, or delivery-driven fixes, read `.local/delivery/README.txt` plus only the affected catalog, state, batch, and Bug records.
+6. Follow explicit review-first, no-commit, no-push, no-deploy, and scope limits first. Stop on conflicts with governance.
 
-## Run a single unit
+## Profile only mutating work
 
-1. Implement the smallest complete vertical value, not a partial layer.
-2. Run new and directly related tests through `scripts/test.sh`. Set a unique `TEST_WARM_NAME` in a worktree.
-3. Bind evidence to a candidate identity, inputs, command, runtime image/config, and result. Prefer a checkpoint/tree SHA; use a deterministic diff digest for an uncommitted `review-first` candidate.
-4. Review according to risk, then have the unit integrator squash checkpoints and run touched-path integration, the affected build, and API or Playwright verification.
-5. For `review-first`, leave the result inspectable and uncommitted until the user approves. Merge a worktree diff back only when requested and safe for unrelated main changes.
-6. For a product-changing `ci` or `full-deploy` unit, use the value commit as the release commit and bump once. Do not bump pure docs, governance, research, test, or CI-tuning commits.
+For `change`, `ship`, and `operate`, record:
 
-## Run content delivery and its Bug lane
+- Scale: `single` or `multi`.
+- Risk: `normal`, `contract`, or `critical`.
+- Release: `review-first`, `commit-only`, `ci`, or `full-deploy` when code delivery is involved. `commit-only` creates a local no-version value commit and stops before push; a later release adds the single version bump without rewriting that value commit.
 
-1. Keep catalog facts, current delivery state, batches, Bug events, and processing worklogs in their separate authorities defined by `.local/delivery/README.txt`.
-2. Reconcile the intended source IDs, open Bugs, current lineages, and subscription collections before each batch. Run a full-catalog reconciliation only for migration, schema change, or detected drift. Treat subscription enumeration success and child-job delivery health as separate evidence.
-3. Create `batches/YYYY-MM-DD-NN.yaml` before runtime writes. Use the real local date and next unused two-digit sequence, cap an ordinary batch at ten sources, and freeze fanout bounds for subscription sources.
-4. Fill the processing work item's `投递关联` field with the batch and source IDs. Do not append extra sources to a full batch; create the next dated sequence.
-5. On a product defect, stop affected sources, set the batch to `blocked_bug`, create a separate dated Bug YAML, and open an independent `fix` work item with reciprocal `投递Bug` and `重投验收` fields.
-6. Preserve diagnostic metadata and an exact deletion manifest. Prefer validating a corrected lineage before pruning the bad one; when delete-first is unavoidable, require a recoverable backup and fixed Job IDs.
-7. A fix passing code gates or deployment reaches only `fixed_waiting_retry`. Create retry batches of at most ten sources after the fixed version is available; mark the Bug `verified` only after content-level acceptance passes.
+Actual changes to security boundaries, database migrations, backup/restore behavior, identity, credentials, authorization, or destructive production state default to `critical`. A read-only discussion or design review about those topics remains `consult`; include relevant invariants and recovery concerns in the answer without invoking implementation, test, or release gates.
 
-## Run multiple units
+A durable design for one of those boundaries is `change/review-first` with risk profile `normal` unless it changes a tracked external contract. Mark its risk gate `critical-target`, record a design-level invariant/threat/rejection/rollback/recovery matrix, and obtain one independent design review before implementation relies on it; do not run adversarial product tests or release gates for the design document itself.
 
-1. Build a dependency DAG with unit IDs, rollback boundaries, owners, serial hotspots, parallel nodes, and integration batches.
-2. Assign one train integrator. Unit integrators may assemble local value commits, but only the train integrator may perform the final bump, push, deploy, and global cleanup.
-3. Start detailed audit and implementation only after dependencies are stable. While blocked, allow one lightweight preflight of at most 15 minutes; do not periodically rescan the same files.
-4. Keep one no-version value commit per completed unit on the release branch. Do not push or deploy each node separately.
-5. Run cross-unit tests, builds, and manual checks once per integration batch. Rebuild early only when Dockerfile, dependencies, build context, or runtime inputs changed.
-6. After all batches pass, create one `build(release)` commit that bumps the version, then push once and perform CI/deployment once. If an early push is mandatory, close the current train as an independent release and move remaining units to a new train.
+`critical` requires an invariant/threat/rejection/rollback/recovery matrix, adversarial tests, and independent final review. `contract` requires the contract and consumers in the same value unit. `multi` adds a dependency DAG, serial hotspot owners, integration batches, and one train integrator.
 
-## Enforce agent liveness
+## Start a mutating unit
 
-1. Require a first verifiable artifact within 10 minutes unless the lease declares a justified longer command.
-2. Accept a heartbeat only when it contains a diff/checkpoint, an observable test/build process, completed evidence, or a reproducible blocker. Do not accept “planning” alone.
-3. Ping once at timeout. If no evidence appears within another 5 minutes, interrupt, archive useful state, reclaim the lease, and reassign.
-4. Never let two agents edit the same hotspot or operate the same Git worktree, image tag, container, version, push, or deployment resource.
+1. Define one independently acceptable and reversible value boundary.
+2. Inspect Git/deployment state only to the extent needed for the selected mode. Use `.agents/skills/flori-delivery-train/scripts/delivery-snapshot.sh start` for the compact Git baseline when Git changes are in scope.
+3. Preserve unrelated changes. Use a lease worktree when work is parallel, main is dirty, or isolation is needed.
+4. Keep the work item compact. Always record outcome, scope, baseline, mode/profiles, validation, and remaining work. Add agent leases, hotspot owners, release, deployment, and content-delivery fields only when triggered.
+5. Assign one integrator. For `multi`, freeze the DAG and shared owners before parallel implementation.
 
-## Reuse evidence and bound review
+## Implement and validate
 
-1. Reuse evidence only when candidate identity, inputs, command, runtime config, and dependency image still match.
-2. Let implementers run red and targeted tests. Let reviewers rerun the risk matrix, newly affected scope, and unverifiable evidence. Let integrators run batch integration. Let final CI run the full gate.
-3. Default `normal` to one implementation review. Default `contract` and `critical` to one implementation review plus one independent final review.
-4. Reopen a passed gate for a genuinely new P0/P1 class. Close same-class fixes inside the current round; move non-blocking P2/P3 expansion to a later unit.
-5. Treat checkpoints as recovery points, not review units or main commits.
+1. Build the smallest complete vertical value; keep contract, migration, consumers, tests, and required docs in the same unit.
+2. Run new and directly related tests through `scripts/test.sh`. Use a unique `TEST_WARM_NAME` in a worktree. Do not run product tests for governance-only or ordinary read-only documentation work; use proportional static validation. A formal reviewer of a `contract` or `critical` candidate may rerun reviewer-scoped contract, risk-matrix, adversarial, or otherwise unverifiable tests without converting the review into `change`.
+3. Bind reusable evidence to candidate identity, inputs, command, runtime config, dependency image, and result. A candidate that includes ignored durable files uses a composite digest covering those files. Reuse the result only while the first five dimensions remain unchanged.
+4. Let implementers run targeted tests, reviewers challenge changed risks and unverifiable evidence, integrators run touched-path integration, and final CI run the full gate. Do not repeat the same full suite at every role.
+5. Default `normal` to one implementation review. Default `contract` and `critical` to one implementation review plus one independent final review. Reopen only for a new P0/P1 class.
+6. For `review-first`, leave the candidate inspectable and uncommitted until the user approves.
 
-## Tune CI without main churn
+## Ship or operate only when selected
 
-1. Separate queue delay, workflow control time, and runner execution time. Use at least three comparable runs for a stable baseline when available.
-2. Simulate sharding and dependency changes from historical timing before pushing.
-3. Require each candidate to state the bottleneck, predicted saving, and protected invariants. Skip a real run when expected saving is below 10 seconds and no correctness issue is fixed.
-4. Use an experiment branch and at most three candidate cycles by default. Fix forward with a new SHA; never rerun a known bad SHA as proof.
-5. Consolidate the proven result into one main value commit. A user-specified hard SLA may require more experiments, but not more main micro-commits or weaker gates.
+- Preserve one value commit per acceptance/rollback boundary. Checkpoints are recovery points and must be squashed before main; do not create commits for agents or review rounds.
+- For `multi`, integrate by dependency batch, then bump once, push once, and deploy once. Run builds early only when build inputs changed.
+- For content delivery, follow `.local/delivery/README.txt`; keep catalog, state, batch, Bug, and processing authorities separate.
+- For CI tuning, follow `docs/12-cicd.md` and use historical simulation plus bounded experiment cycles; do not churn main.
+- For production/destructive operations, require a precise target manifest, recoverable backup when needed, fail-closed checks, and post-operation reconciliation.
 
-## Close and report
+## Close at the reached mode
 
-1. Update unit work items and the train evidence ledger with implementation, waits, review, integration, release timing, final SHAs, CI URLs, image digests, versions, health, and external checks as applicable. For content delivery, also reconcile catalog state, batch status, Bug status, and reciprocal processing links.
-2. Reconcile every acceptance item. Mark conditional work as implemented or explicitly not triggered with evidence.
-3. Reclaim merged worktrees, checkpoint branches, temporary branches, test containers, and experiment resources under repo rules.
-4. Verify `git status`, worktrees, merged/unmerged task branches, origin alignment when pushed, and `.local` ignore status.
-5. Report the completion matrix, commits, validation, CI/deployment evidence, remaining conditional items, and external limitations. Never claim success for skipped or unverified gates.
-
-## Operational pitfalls
-
-- Use the repo test entrypoint only; a worktree needs a unique warm test container.
-- Recreate the frontend container when a rebuilt bundle appears stale.
-- Store Playwright and other local evidence under the current `.local/processing` directory, never in tracked paths.
-- Do not expose secret values. Record only approved credential locations and verification outcomes.
+1. Reconcile acceptance items and report only evidence relevant to stages actually reached.
+2. For `change`, update the work item and leave the reviewable candidate; do not perform release-only checks.
+3. For `ship` or a worktree-backed `change`, use `.agents/skills/flori-delivery-train/scripts/delivery-snapshot.sh close <task-branch>` to verify relevant Git state. Add `--extra <label=path>` for ignored durable candidate files, then reclaim only resources created by this unit when authorized.
+4. For `operate`, reconcile the affected runtime/content authorities and recovery evidence.
+5. Never claim success for skipped or unverified gates. State which later modes were not requested.

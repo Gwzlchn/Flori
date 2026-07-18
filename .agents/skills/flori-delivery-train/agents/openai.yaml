@@ -1,4 +1,4 @@
 interface:
-  display_name: "Flori Delivery Train"
-  short_description: "统一 Flori 单元开发、多 agent 集成、CI 与部署发布列车"
-  default_prompt: "Use $flori-delivery-train to deliver this Flori change with the correct scale, risk, and release profiles."
+  display_name: "Flori Staged Delivery"
+  short_description: "按 consult/change/ship/operate 分级交付 Flori"
+  default_prompt: "Use $flori-delivery-train to handle this Flori task at the narrowest authorized mode while preserving the required risk and release gates."
