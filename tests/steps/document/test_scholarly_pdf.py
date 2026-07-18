@@ -2224,6 +2224,46 @@ def test_split_figure_caption_beats_longer_fig_reference_at_line_start(
     assert figure["source_locator"]["pdf"]["page"] == 1
 
 
+def test_fragmented_standalone_figure_label_beats_body_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    pdf_job: tuple[Path, dict[str, str], bytes],
+) -> None:
+    job_dir, job, _ = pdf_job
+    pages = [
+        PageLayout(1, 600, 800, text_items=[
+            LayoutItem(
+                "Figure 2. Any point to the left of the axis is not attainable.",
+                [42, 502, 510, 515],
+            ),
+        ]),
+        PageLayout(2, 600, 800, text_items=[
+            LayoutItem("FIG.", [270, 600, 300, 613]),
+            LayoutItem("2", [301, 600, 308, 613]),
+            LayoutItem("Body prose after the figure.", [60, 640, 500, 655]),
+        ], image_bboxes=[[70, 100, 530, 590]]),
+    ]
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_pdf_info",
+        lambda self: {"Pages": "2", "Title": "Paper title"},
+    )
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_layout", lambda self: (pages, "fixture_layout"),
+    )
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_page_layout_detections", lambda self, page: [],
+    )
+
+    document, _quality = parse_pdf_document(job_dir, job)
+
+    figure = document["figures"][0]
+    assert figure["label"] == "Figure 2"
+    assert figure["caption"] == "FIG. 2"
+    assert figure["source_locator"]["pdf"]["page"] == 2
+    assert figure["media"][0]["source_locator"]["pdf"]["bboxes"] == [
+        [70, 100, 530, 590],
+    ]
+
+
 def test_explicit_colon_caption_beats_bare_label_followed_by_body_prose(
     monkeypatch: pytest.MonkeyPatch,
     pdf_job: tuple[Path, dict[str, str], bytes],

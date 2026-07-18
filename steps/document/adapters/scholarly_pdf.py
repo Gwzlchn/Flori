@@ -953,8 +953,12 @@ class ScholarlyPdfAdapter:
             for item_index, item in enumerate(page.text_items):
                 if item_index in consumed:
                     continue
-                figure_match = _FIGURE_CAPTION.match(item.text)
-                table_match = _TABLE_CAPTION.match(item.text)
+                figure_match = self._visual_caption_match(
+                    page, item_index, _FIGURE_CAPTION,
+                )
+                table_match = self._visual_caption_match(
+                    page, item_index, _TABLE_CAPTION,
+                )
                 if allow_visuals and figure_match and (page.number, item_index) in figure_winners:
                     caption_items = self._figure_caption_items(page, item_index)
                     consumed.update(index for index, _item in caption_items[1:])
@@ -996,11 +1000,11 @@ class ScholarlyPdfAdapter:
             "figure_caption" if pattern is _FIGURE_CAPTION else "table_caption"
         )
         candidates: dict[
-            str, list[tuple[int, float, int, int, int, int, int, int]]
+            str, list[tuple[int, float, int, int, int, int, int, int, int]]
         ] = {}
         for page in pages:
             for index, item in enumerate(page.text_items):
-                match = pattern.match(item.text)
+                match = self._visual_caption_match(page, index, pattern)
                 if match is None or not self._caption_starts_row(page, index):
                     continue
                 caption_items = self._figure_caption_items(page, index)
@@ -1033,25 +1037,57 @@ class ScholarlyPdfAdapter:
                 explicit_delimiter = int(
                     item.text[match.end():].lstrip().startswith((":", "|", "\u2013", "\u2014"))
                 )
+                fragmented_standalone = int(
+                    match.end() > len(item.text) and not suffix
+                )
                 full_word = int(item.text.casefold().startswith("figure"))
                 candidates.setdefault(match.group(1).casefold(), []).append(
                     (
                         int(detector_confidence > 0), detector_confidence,
-                        explicit_delimiter, split_caption, full_word, score,
+                        fragmented_standalone, explicit_delimiter, split_caption,
+                        full_word, score,
                         page.number, index,
                     ),
                 )
         return {
             (page, index)
             for values in candidates.values()
-            for _detected, _confidence, _delimiter, _split, _word, _score, page, index in [max(
+            for (
+                _detected, _confidence, _fragmented, _delimiter, _split,
+                _word, _score, page, index,
+            ) in [max(
                 values,
                 key=lambda value: (
                     value[0], value[1], value[2], value[3], value[4], value[5],
-                    -value[6], -value[7],
+                    value[6], -value[7], -value[8],
                 ),
             )]
         }
+
+    @staticmethod
+    def _visual_caption_match(
+        page: PageLayout,
+        index: int,
+        pattern: re.Pattern[str],
+    ) -> re.Match[str] | None:
+        item = page.text_items[index]
+        direct = pattern.match(item.text)
+        if direct is not None or index + 1 >= len(page.text_items):
+            return direct
+        following = page.text_items[index + 1]
+        vertical_overlap = min(item.bbox[3], following.bbox[3]) - max(
+            item.bbox[1], following.bbox[1],
+        )
+        same_line = (
+            vertical_overlap >= min(
+                item.bbox[3] - item.bbox[1],
+                following.bbox[3] - following.bbox[1],
+            ) * 0.5
+            and -2 <= following.bbox[0] - item.bbox[2] <= 12
+        )
+        if not same_line:
+            return None
+        return pattern.match(f"{item.text} {following.text}")
 
     @staticmethod
     def _caption_starts_row(page: PageLayout, caption_index: int) -> bool:
@@ -1130,7 +1166,14 @@ class ScholarlyPdfAdapter:
             if same_line:
                 result.append((index, candidate))
                 continue
-            if _FIGURE_CAPTION.match(candidate.text) or _TABLE_CAPTION.match(candidate.text):
+            if (
+                ScholarlyPdfAdapter._visual_caption_match(
+                    page, index, _FIGURE_CAPTION,
+                )
+                or ScholarlyPdfAdapter._visual_caption_match(
+                    page, index, _TABLE_CAPTION,
+                )
+            ):
                 break
             previous_line = [previous]
             for _source, line_item in reversed(result[:-1]):
