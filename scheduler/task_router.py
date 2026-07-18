@@ -21,6 +21,12 @@ from shared.ai_routing import (
 )
 from shared.runner_ops import parse_style_tags
 from shared.source_detect import detect_source
+from shared.source_library import (
+    SOURCE_MEDIA_STEPS,
+    SourceReferenceError,
+    parse_source_ref,
+    source_root_tag,
+)
 from shared.storage import read_file_bounded
 
 if TYPE_CHECKING:
@@ -197,6 +203,7 @@ class TaskRouter:
         if template_step in net_steps:
             info = info or await self.owner.redis.get_job_info(job_id)
         info = info or {}
+        part = None
         if part_id:
             parts = await asyncio.to_thread(self.owner.db.get_parts, job_id)
             part = next((item for item in parts if item.id == part_id), None)
@@ -211,16 +218,28 @@ class TaskRouter:
             }
         source = (info.get("source") or "").strip() or detect_source(info.get("url", ""))
         try:
-            return step_required_route_tags(
+            route_tags = set(step_required_route_tags(
                 {**step_cfg, "name": template_step}, self.owner.config.providers,
                 source=source, url=info.get("url", ""),
                 net_steps=net_steps,
                 override=override, capability_tags=capability_tags,
-            )
+            ))
         except ValueError as exc:
             raise InvalidAIOverrideError(
                 f"invalid AI capability: {exc}",
             ) from exc
+        if (
+            part is not None
+            and part.source_ref
+            and template_step in SOURCE_MEDIA_STEPS
+        ):
+            try:
+                route_tags.add(source_root_tag(
+                    parse_source_ref(part.source_ref).root_id,
+                ))
+            except SourceReferenceError as exc:
+                raise InvalidAIOverrideError("invalid NAS source reference") from exc
+        return sorted(route_tags)
 
     async def _list_job_files(
         self, job_id: str, part_id: str | None = None,

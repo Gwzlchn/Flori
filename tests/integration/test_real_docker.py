@@ -154,3 +154,87 @@ async def test_real_runner_uses_bounded_local_driver_and_preserves_tail(
             runner._client.close()
         client.close()
         shutil.rmtree(runner_root, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_real_runner_mounts_nas_source_readonly() -> None:
+    """真实动态容器可读受控源软链,但不能改写只读NAS原件。"""
+    socket = Path("/var/run/docker.sock")
+    assert socket.is_socket(), "integration 栈必须挂载 Docker socket"
+
+    image = os.environ["DOCKER_TEST_IMAGE"]
+    host_tmp = Path(os.environ["INTEGRATION_HOST_TMP"])
+    suffix = uuid.uuid4().hex
+    runner_root = host_tmp / f"source-runner-{suffix}"
+    work_dir = runner_root / "job-real"
+    source_root = host_tmp / f"source-library-{suffix}"
+    source_file = source_root / "nested" / "sample.mp4"
+    source_bytes = b"immutable-nas-source"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(source_bytes)
+    (work_dir / "input").mkdir(parents=True)
+    (work_dir / "input" / "source.mp4").symlink_to(
+        "/sources/library/nested/sample.mp4",
+    )
+    (work_dir / "readonly_step.py").write_text(
+        "from pathlib import Path\n"
+        "source = Path('/job/input/source.mp4')\n"
+        "assert source.read_bytes() == b'immutable-nas-source'\n"
+        "try:\n"
+        "    source.write_bytes(b'mutated')\n"
+        "except OSError:\n"
+        "    pass\n"
+        "else:\n"
+        "    raise AssertionError('NAS source mount is writable')\n"
+        "Path('/job/out.txt').write_text('read-only-ok')\n",
+        encoding="utf-8",
+    )
+
+    runner: DockerStepRunner | None = None
+    client = docker.from_env()
+    try:
+        assert client.ping() is True
+        client.images.get(image)
+        ctx = StepContext(
+            job_id=f"source-{suffix}",
+            step="readonly",
+            work_dir=work_dir,
+            exec_id=f"exec-{suffix}",
+            step_cfg={
+                "step": {
+                    "name": "readonly",
+                    "pool": "cpu",
+                    "timeout_sec": 20,
+                    "retries": 1,
+                }
+            },
+            module="readonly_step",
+            image=image,
+            timeout_sec=20,
+            pool="cpu",
+            source_root_id="library",
+        )
+        runner = DockerStepRunner(
+            f"worker-{suffix}",
+            host_work_root=str(runner_root),
+            container_work_root=str(runner_root),
+            source_roots={"library": Path("/sources/library")},
+            host_source_roots={"library": source_root},
+        )
+
+        returncode, tail = await runner.run_step(ctx, _noop_progress, _noop_tick)
+
+        assert returncode == 0, tail
+        assert (work_dir / "out.txt").read_text(encoding="utf-8") == "read-only-ok"
+        assert source_file.read_bytes() == source_bytes
+    finally:
+        for container in client.containers.list(
+            all=True,
+            filters={"label": f"flori.job=source-{suffix}"},
+        ):
+            container.remove(force=True)
+        if runner is not None:
+            runner._client.close()
+        client.close()
+        shutil.rmtree(runner_root, ignore_errors=True)
+        shutil.rmtree(source_root, ignore_errors=True)

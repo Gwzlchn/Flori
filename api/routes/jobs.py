@@ -33,6 +33,13 @@ from shared.ids import lineage_key_of as _lineage_key_of
 from shared.models import Job, JobPart, JobStatus, Step, StepStatus, derive_job_id
 from shared.redis_client import RedisClient
 from shared.source_detect import detect_source
+from shared.source_library import (
+    SourceLibrary,
+    SourceReferenceError,
+    build_source_ref,
+    normalize_source_digest,
+    parse_source_ref,
+)
 from shared.source_registry import (
     SourceRegistryError,
     content_type_for_filename,
@@ -452,8 +459,47 @@ async def create_job_core(
     style_tags = style_tags or []
     if parts and upload is not None:
         raise HTTPException(422, "video parts do not support upload")
-    route_url = parts[0]["url"] if parts else url
-    source = "upload" if upload is not None else detect_source(route_url or "")
+    normalized_part_inputs: list[dict] | None = None
+    if parts:
+        normalized_part_inputs = []
+        library: SourceLibrary | None = None
+        for item in parts:
+            source_doc = item.get("source")
+            if source_doc is None:
+                normalized_part_inputs.append({
+                    "title": item.get("title"),
+                    "url": item.get("url"),
+                    "source_type": detect_source(item.get("url") or ""),
+                })
+                continue
+            try:
+                if not isinstance(source_doc, dict):
+                    raise SourceReferenceError("invalid source object")
+                source_ref = build_source_ref(
+                    source_doc.get("root_id"), source_doc.get("relative_path"),
+                )
+                source_digest = normalize_source_digest(source_doc.get("sha256"))
+                size_bytes = source_doc.get("size_bytes")
+                library = library or SourceLibrary.from_env()
+                await asyncio.to_thread(
+                    library.verify, source_ref, source_digest, size_bytes,
+                )
+            except SourceReferenceError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            normalized_part_inputs.append({
+                "title": item.get("title"),
+                "url": None,
+                "source_type": "nas_source",
+                "source_ref": source_ref,
+                "source_digest": source_digest,
+                "size_bytes": size_bytes,
+            })
+        parts = normalized_part_inputs
+    route_url = parts[0].get("url") if parts else url
+    source = (
+        "upload" if upload is not None
+        else parts[0]["source_type"] if parts else detect_source(route_url or "")
+    )
     requested_type = getattr(content_type, "value", content_type)
     requested_kind = getattr(document_kind, "value", document_kind)
     try:
@@ -479,7 +525,11 @@ async def create_job_core(
     if ctype == "video" and not parts and actor == "subscription" and url:
         # 订阅枚举仍以单个SourceItem交付;进入领域层后立即归一为单Part,
         # 不给公开API保留旧的顶层url视频语法。
-        parts = [{"url": url, "title": None}]
+        parts = [{
+            "url": url,
+            "title": None,
+            "source_type": detect_source(url),
+        }]
 
     # 有意义的 id: jobs_{类别}_{inner}(bili=BV);撞已存在(同 BV 重投/上传随机撞库)加随机后缀。
     manifest_digest = None
@@ -487,10 +537,21 @@ async def create_job_core(
     if ctype == "video":
         if not parts:
             raise HTTPException(422, "video jobs require parts[]")
-        normalized_parts = [
-            {"part_index": index, "url": item["url"], "title": item.get("title")}
-            for index, item in enumerate(parts, start=1)
-        ]
+        normalized_parts = []
+        for index, item in enumerate(parts, start=1):
+            manifest_item = {
+                "part_index": index,
+                "title": item.get("title"),
+            }
+            if item.get("source_ref"):
+                manifest_item.update({
+                    "source_ref": item["source_ref"],
+                    "source_digest": item["source_digest"],
+                    "size_bytes": item["size_bytes"],
+                })
+            else:
+                manifest_item["url"] = item["url"]
+            normalized_parts.append(manifest_item)
         manifest_bytes = json.dumps(
             normalized_parts, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ).encode("utf-8")
@@ -539,7 +600,7 @@ async def create_job_core(
         job_doc["creation_fingerprint"] = creation_fingerprint
         for index, item in enumerate(parts, start=1):
             part_id = stable_part_id(job_id, index)
-            part_source = detect_source(item["url"])
+            part_source = item["source_type"]
             try:
                 part_route = resolve_job_route(
                     part_source,
@@ -556,20 +617,29 @@ async def create_job_core(
                 "part_id": part_id,
                 "part_index": index,
                 "title": item.get("title"),
-                "url": item["url"],
+                "url": item.get("url"),
                 "source": part_route.source,
                 "content_type": "video",
                 "domain": domain,
                 "style_tags": style_tags,
                 "flags": flags,
             }
+            if item.get("source_ref"):
+                part_doc.update({
+                    "source_ref": item["source_ref"],
+                    "source_digest": item["source_digest"],
+                    "size_bytes": item["size_bytes"],
+                })
             job_doc["parts"].append(part_doc)
             db_parts.append(JobPart(
                 id=part_id,
                 job_id=job_id,
                 part_index=index,
                 title=item.get("title"),
-                source_url=item["url"],
+                source_url=item.get("url"),
+                source_ref=item.get("source_ref"),
+                source_digest=item.get("source_digest"),
+                size_bytes=item.get("size_bytes"),
                 meta={"source": part_route.source},
             ))
     # prompt 白盒:job 创建时由 api 解析该 pipeline+domain 的 prompt 覆盖(domain 优先于 global),
@@ -941,6 +1011,10 @@ async def _create_job_snapshot_once(
                     "part_index": part.part_index,
                     "title": part.title,
                     "url": part.source_url,
+                    "source": str((part.meta or {}).get("source") or ""),
+                    "source_ref": part.source_ref,
+                    "source_digest": part.source_digest,
+                    "size_bytes": part.size_bytes,
                     "content_type": "video",
                     "domain": parent.domain,
                     "style_tags": parent.style_tags,
@@ -1305,8 +1379,9 @@ async def create_job(
 ):
     # 注:url 接受 http(s) 链接或裸 BV 号(detect_source 解析),故不强校验 http(s) 前缀;
     # invalid_url 语义以 docs/03-contracts.md 为准。
-    first_url = req.parts[0].url if req.parts else req.url
-    source = detect_source(first_url or "")
+    first_part = req.parts[0] if req.parts else None
+    first_url = first_part.url if first_part else req.url
+    source = "nas_source" if first_part and first_part.source is not None else detect_source(first_url or "")
     try:
         route = resolve_job_route(
             source,
@@ -1572,6 +1647,10 @@ async def get_job(
         pass
     part_responses: list[dict] = []
     if parts:
+        try:
+            source_library = SourceLibrary.from_env()
+        except SourceReferenceError:
+            source_library = SourceLibrary({})
         by_part: dict[str, list[Step]] = {part.id: [] for part in parts}
         for step in steps:
             part_id = part_id_from_scope(step.scope_key)
@@ -1609,11 +1688,33 @@ async def get_job(
                 part_status = "pending"
             completed = sum(status in {"done", "skipped"} for status in statuses)
             progress = round(100 * completed / len(statuses)) if statuses else 0
+            source_response = None
+            if part.source_ref and part.source_digest and part.size_bytes:
+                try:
+                    reference = parse_source_ref(part.source_ref)
+                    source_response = {
+                        "root_id": reference.root_id,
+                        "relative_path": reference.relative_path,
+                        "sha256": part.source_digest.removeprefix("sha256:"),
+                        "size_bytes": part.size_bytes,
+                        "status": source_library.status(
+                            part.source_ref, part.size_bytes,
+                        ),
+                    }
+                except SourceReferenceError:
+                    source_response = {
+                        "root_id": "invalid",
+                        "relative_path": "",
+                        "sha256": part.source_digest.removeprefix("sha256:"),
+                        "size_bytes": part.size_bytes,
+                        "status": "invalid",
+                    }
             part_responses.append({
                 "part_id": part.id,
                 "part_index": part.part_index,
                 "title": part.title,
                 "url": part.source_url,
+                "source": source_response,
                 "status": part_status,
                 "progress_pct": progress,
                 "media": part_media,

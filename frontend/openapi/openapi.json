@@ -2987,6 +2987,16 @@
       "JobPartCreate": {
         "additionalProperties": false,
         "properties": {
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NasSourceCreate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "title": {
             "anyOf": [
               {
@@ -3000,15 +3010,19 @@
             "title": "Title"
           },
           "url": {
-            "maxLength": 4096,
-            "minLength": 1,
-            "title": "Url",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
           }
         },
-        "required": [
-          "url"
-        ],
         "title": "JobPartCreate",
         "type": "object"
       },
@@ -3030,6 +3044,16 @@
           "progress_pct": {
             "title": "Progress Pct",
             "type": "integer"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NasSourceResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "status": {
             "title": "Status",
@@ -3672,6 +3696,81 @@
           "target"
         ],
         "title": "MergeRequest",
+        "type": "object"
+      },
+      "NasSourceCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "relative_path": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Relative Path",
+            "type": "string"
+          },
+          "root_id": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+            "title": "Root Id",
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size_bytes": {
+            "minimum": 1.0,
+            "title": "Size Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "root_id",
+          "relative_path",
+          "sha256",
+          "size_bytes"
+        ],
+        "title": "NasSourceCreate",
+        "type": "object"
+      },
+      "NasSourceResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "relative_path": {
+            "title": "Relative Path",
+            "type": "string"
+          },
+          "root_id": {
+            "title": "Root Id",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "available",
+              "missing",
+              "changed",
+              "unmounted",
+              "invalid"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "root_id",
+          "relative_path",
+          "sha256",
+          "size_bytes",
+          "status"
+        ],
+        "title": "NasSourceResponse",
         "type": "object"
       },
       "NoteVersion": {

@@ -43,11 +43,37 @@ PromptVersionSafeInteger = Annotated[
 ]
 
 
+class NasSourceCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    root_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,62}$")
+    relative_path: str = Field(min_length=1, max_length=4096)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(strict=True, ge=1)
+
+
 class JobPartCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    url: str = Field(min_length=1, max_length=4096)
+    url: str | None = Field(default=None, min_length=1, max_length=4096)
+    source: NasSourceCreate | None = None
     title: str | None = Field(default=None, max_length=300)
+
+    @model_validator(mode="after")
+    def validate_source_choice(self):
+        if (self.url is None) == (self.source is None):
+            raise ValueError("each video part requires exactly one of url or source")
+        return self
+
+
+class NasSourceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    root_id: str
+    relative_path: str
+    sha256: str
+    size_bytes: int
+    status: Literal["available", "missing", "changed", "unmounted", "invalid"]
 
 
 class JobCreateRequest(BaseModel):
@@ -148,6 +174,7 @@ class JobPartResponse(BaseModel):
     part_index: int
     title: str | None = None
     url: str | None = None
+    source: NasSourceResponse | None = None
     status: str
     progress_pct: int
     media: dict = Field(default_factory=dict)

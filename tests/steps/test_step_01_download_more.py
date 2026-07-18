@@ -54,6 +54,27 @@ class TestInputHashes:
         assert step.input_hashes()["job"] != first
 
 
+class TestNasSourceMode:
+    def test_execute_reads_materialized_source_without_copy_or_download(self, tmp_path):
+        job_dir = _make_job_dir(tmp_path)
+        source = job_dir / "input" / "source.mp4"
+        source.write_bytes(b"materialized")
+        step = _make_step(
+            job_dir, tmp_path, url="", source="nas_source", content_type="video",
+        )
+        step._verify_download = MagicMock()
+        step._extract_metadata = MagicMock(return_value={"duration_sec": 12})
+        step._download_generic = MagicMock()
+        step._copy_local_file = MagicMock()
+
+        result = step.execute()
+
+        step._verify_download.assert_called_once_with(source)
+        step._download_generic.assert_not_called()
+        step._copy_local_file.assert_not_called()
+        assert result == {"source": "nas_source", "duration_sec": 12}
+
+
 # _read_sessdata
 
 class TestReadSessdata:

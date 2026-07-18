@@ -221,6 +221,47 @@ class TestSubmitJob:
 
 
 class TestMultipartVideoDag:
+    @pytest.mark.parametrize(
+        ("step_name", "expected"),
+        [
+            ("03_scene", ["source-root:zg-library"]),
+            ("08_punctuate", ["source-root:zg-library"]),
+            ("05_dedup", []),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_nas_source_part_binds_only_media_reading_steps(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir, step_name, expected,
+    ):
+        step = {
+            "name": step_name, "scope": "part", "pool": "cpu",
+            "depends_on": [], "tags": [],
+        }
+        pipelines = {"video": {"steps": [step]}}
+        scheduler = Scheduler(
+            redis, db, make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir),
+        )
+        job = Job(
+            id="job_nas_source", content_type="video", pipeline="video",
+            source="nas_source",
+        )
+        part = JobPart(
+            "pt_nas", job.id, 1,
+            source_ref="nas://zg-library/20250914/P01.mkv",
+            source_digest="sha256:" + "a" * 64,
+            size_bytes=42,
+            meta={"source": "nas_source"},
+        )
+        db.create_job(job, [part])
+        expanded = expand_pipeline_steps([step], [part])
+        key = execution_step_key(part_scope(part.id), step_name)
+
+        required = await scheduler._required_tags_for_step(
+            job.id, key, expanded[key], {"source": job.source},
+        )
+
+        assert required == expected
+
     @pytest.mark.asyncio
     async def test_mixed_source_parts_route_by_each_part_not_job_root(
         self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,

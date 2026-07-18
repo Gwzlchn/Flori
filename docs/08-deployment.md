@@ -163,6 +163,30 @@ docker compose up -d
 - 换目录：在 `.env` 设 `FLORI_INBOX_DIR=/srv/my-inbox`（宿主绝对路径），容器内仍是 `/data/inbox`。生产建议设到数据盘、与 `FLORI_DATA_DIR` 同源（如 `/volume2/DATA/flori/inbox`），运行时数据统一不进仓库树。
 - 安全：`file://` 分支绕过 SSRF 防护（本地文件非网络），`source_id` 是受信任的运维输入；个人工具 Basic Auth 场景风险可接受。挂载为只读（`:ro`）。
 
+### NAS大视频只读源库
+
+NAS source library与`local_dir`的用途不同:`local_dir`是会复制进Job的入箱,
+source library是不复制、不进MinIO、不随Job删除的大视频冷源。配置与启动:
+
+```bash
+# .env;路径必须是宿主绝对路径,只保留在本机配置
+FLORI_SOURCE_LIBRARY_ENABLED=1
+FLORI_SOURCE_LIBRARY_ROOT_ID=library
+FLORI_SOURCE_LIBRARY_DIR=<absolute NAS video library path>
+
+docker compose --profile distributed --profile source-library up -d
+```
+
+Compose把该目录以`:ro`挂到API和`worker-source`的`/sources/library`。API负责准入时full hash;
+`worker-source` 以`--pools io cpu ai`运行,且只在真实能打开root时自报`source-root:<id>`。
+08需要读取原字节生成来源清单,因此source Worker必须像普通AI Worker一样配置可用provider凭证;
+没有匹配AI能力时该步会等待,不会绕过root约束投递到看不到原片的Worker。
+使用`docker-compose.executor.yml`时还会把`FLORI_SOURCE_LIBRARY_DIR`作为DooD宿主路径,
+把同一root以ro挂给嵌套step容器;因此该值不得用相对路径。
+
+运维顺序是:先在源库外生成`relative_path + size_bytes + sha256`的manifest,再调
+`POST /api/jobs`。准入会再读全文件验证,执行前Worker还会重验;未挂载/文件缺失时Job可以pending等待正确Worker,已挂载但内容改变时步骤fail-closed。已投递文件应保持不可变;替换内容必须用新digest创建新Job。
+
 ## 3. 加公网：边缘机 Caddy + 反向 SSH 隧道
 
 核心机/NAS 在 NAT 内、零公网端口；由一台公网边缘机（如 ECS）跑 Caddy（自签 TLS + Basic Auth）做入口，核心机用 autossh 反向 SSH 隧道把自己的 api/redis/minio 暴露到边缘回环。配方在 tracked 的 `deploy/{edge,tunnel}`（`${ENV}` 模板 + `.env.example`），详见 `deploy/README.md` 与 [ADR-0009](adr/0009-worker-gateway-outbound-https.md)。（历史上曾计划用 Cloudflare Tunnel，见已 Superseded 的 [ADR-0006](adr/0006-gateway-cloudflare-tunnel.md)。）

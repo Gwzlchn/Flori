@@ -328,6 +328,25 @@ class TestLocalStorage:
         assert (job_dir / "test.txt").read_text() == "data"
 
     @pytest.mark.asyncio
+    async def test_external_source_symlink_is_not_listed_cloned_or_deleted(
+        self, storage, tmp_path,
+    ):
+        source = tmp_path / "source-library" / "P01.mkv"
+        source.parent.mkdir()
+        source.write_bytes(b"original")
+        job_input = tmp_path / "j_source" / "parts" / "pt_01" / "input"
+        job_input.mkdir(parents=True)
+        link = job_input / "source.mp4"
+        link.symlink_to(source)
+
+        assert await storage.list_files("j_source") == []
+        assert await storage.list_file_sizes("j_source") == {}
+        await storage.clone("j_source", "j_clone")
+        assert not (tmp_path / "j_clone" / "parts" / "pt_01" / "input" / "source.mp4").exists()
+        await storage.delete("j_source")
+        assert source.read_bytes() == b"original"
+
+    @pytest.mark.asyncio
     async def test_object_version_changes_after_same_size_replacement(
         self, storage, tmp_path,
     ):
@@ -616,6 +635,31 @@ class TestLocalStorage:
 
 
 class TestRemoteListFiles:
+    @pytest.mark.asyncio
+    async def test_push_excludes_external_source_path_and_never_follows_symlink(
+        self, tmp_path,
+    ):
+        rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
+        client = MagicMock()
+        rs._client = lambda: client
+        work = tmp_path / "work"
+        part_input = work / "parts" / "pt_01" / "input"
+        part_input.mkdir(parents=True)
+        source = tmp_path / "P01.mkv"
+        source.write_bytes(b"original")
+        (part_input / "source.mp4").symlink_to(source)
+        (part_input / "metadata.json").write_text("{}")
+        step = execution_step_key(part_scope("pt_01"), "01_download")
+
+        await rs.push(
+            "j1", step, work,
+            exclude_paths={"parts/pt_01/input/source.mp4"},
+        )
+
+        client.fput_object.assert_called_once_with(
+            "b", "j1/parts/pt_01/input/metadata.json",
+            str(part_input / "metadata.json"),
+        )
     @pytest.mark.asyncio
     async def test_clone_fails_closed_when_any_object_copy_fails(self, monkeypatch):
         rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=None)
@@ -2508,6 +2552,28 @@ class TestGatewayStorage(_GatewayStorageHelpers):
         content = client.put.call_args.kwargs["content"]
         # 大文件流式上传:content 是 async 生成器,消费后应还原完整字节
         assert b"".join([c async for c in content]) == b"NOTE"
+
+    @pytest.mark.asyncio
+    async def test_push_semantically_excludes_external_source_even_if_regular(
+        self, tmp_path,
+    ):
+        gw, client = self._gw(tmp_path)
+        client.put.return_value = self._resp()
+        work_dir = tmp_path / "work" / "j1"
+        part_input = work_dir / "parts" / "pt_01" / "input"
+        part_input.mkdir(parents=True)
+        (part_input / "source.mp4").write_bytes(b"must-not-upload")
+        (part_input / "metadata.json").write_text("{}")
+        step = execution_step_key(part_scope("pt_01"), "01_download")
+
+        await gw.push(
+            "j1", step, work_dir,
+            exclude_paths={"parts/pt_01/input/source.mp4"},
+        )
+
+        assert [call.args[0] for call in client.put.call_args_list] == [
+            "/api/runner/jobs/j1/artifacts/parts/pt_01/input/metadata.json",
+        ]
 
     @pytest.mark.asyncio
     async def test_push_enforces_job_and_part_write_scope(self, tmp_path):

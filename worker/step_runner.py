@@ -135,6 +135,7 @@ class StepContext:
     timeout_sec: int = 600
     pool: str = ""
     use_gpu: bool = False
+    source_root_id: str | None = None
     # 步骤专属注入 env(如下载步的中心分发凭证):只进子进程环境,随进程结束消亡,
     # 不碰 os.environ(worker 并发跑多任务,进程级 env 互斥会串台)。
     extra_env: dict = field(default_factory=dict)
@@ -247,7 +248,9 @@ class DockerStepRunner:
 
     def __init__(self, worker_id: str, host_work_root: str | None = None,
                  container_work_root: str | None = None,
-                 registry: str | None = None):
+                 registry: str | None = None,
+                 source_roots: dict[str, Path] | None = None,
+                 host_source_roots: dict[str, Path] | None = None):
         import docker  # 延迟导入:subprocess 模式不强依赖 docker SDK。
 
         self._client = docker.from_env()
@@ -257,6 +260,8 @@ class DockerStepRunner:
         self._container_work_root = Path(container_work_root or "/tmp/flori-work").resolve()
         # 镜像仓库前缀:把 pipelines 里的逻辑名 flori/step-X 解析成实仓名。
         self._registry = (registry or "").rstrip("/")
+        self._source_roots = source_roots or {}
+        self._host_source_roots = host_source_roots or {}
 
     def _host_path(self, work_dir: Path) -> str:
         # DooD bind-mount 必须用宿主路径。HOST_WORK_DIR 缺失时若退化为容器内路径,
@@ -336,11 +341,21 @@ class DockerStepRunner:
         }
 
         def _create_start():
+            volumes = {host_dir: {"bind": "/job", "mode": "rw"}}
+            if ctx.source_root_id is not None:
+                container_root = self._source_roots.get(ctx.source_root_id)
+                host_root = self._host_source_roots.get(ctx.source_root_id)
+                if container_root is None or host_root is None:
+                    raise ValueError("DockerStepRunner source root mount is not configured")
+                volumes[str(host_root)] = {
+                    "bind": str(container_root),
+                    "mode": "ro",
+                }
             return self._client.containers.run(
                 image=self._resolve_image(ctx.image),
                 command=command,
                 working_dir="/job",
-                volumes={host_dir: {"bind": "/job", "mode": "rw"}},
+                volumes=volumes,
                 environment=environment,
                 network_mode=network_mode,
                 device_requests=device_requests,
@@ -661,10 +676,16 @@ def _alive(container) -> bool:
 def create_step_runner(worker_id: str) -> StepRunner:
     runtime = os.environ.get("STEP_RUNTIME", "subprocess").lower()
     if runtime == "docker":
+        from shared.source_library import source_roots_from_env
+
         return DockerStepRunner(
             worker_id,
             host_work_root=os.environ.get("HOST_WORK_DIR"),
             container_work_root=os.environ.get("WORK_DIR", "/tmp/flori-work"),
             registry=os.environ.get("FLORI_STEP_REGISTRY"),
+            source_roots=source_roots_from_env(),
+            host_source_roots=source_roots_from_env(
+                env_name="FLORI_SOURCE_HOST_ROOTS_JSON",
+            ),
         )
     return SubprocessStepRunner()

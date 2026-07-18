@@ -104,9 +104,17 @@ def _content_type_from_create(
         if not isinstance(parts, list) or not parts:
             return None
         first = parts[0]
-        if not isinstance(first, dict) or not isinstance(first.get("url"), str):
+        if not isinstance(first, dict):
             return None
-        url = first["url"]
+        if isinstance(first.get("url"), str):
+            url = first["url"]
+        elif isinstance(first.get("source"), dict):
+            source_doc = first["source"]
+            if not isinstance(source_doc.get("root_id"), str):
+                return None
+            url = None
+        else:
+            return None
     if url is not None and not isinstance(url, str):
         return None
     if content_type is not None and not isinstance(content_type, str):
@@ -122,7 +130,7 @@ def _content_type_from_create(
     mechanical_only = payload.get("mechanical_only", False)
     if not isinstance(mechanical_only, bool):
         return None
-    source = detect_source(url or "")
+    source = "nas_source" if content_type == "video" and url is None else detect_source(url or "")
     document_kind = payload.get("document_kind")
     if document_kind is not None and not isinstance(document_kind, str):
         return None

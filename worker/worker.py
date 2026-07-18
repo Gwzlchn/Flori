@@ -26,6 +26,12 @@ from shared.ask_citations import validate_ask_citations
 from shared.config import AppConfig, build_step_config
 from shared.models import AIUsage, DEFAULT_AI_MODEL, DEFAULT_AI_PROVIDER, LLMRequest, generate_worker_id
 from shared.runner_ops import parse_style_tags
+from shared.source_library import (
+    SourceLibrary,
+    configured_source_root_tags,
+    parse_source_ref,
+    source_root_tag,
+)
 from shared.step_scope import parse_execution_step, part_id_from_scope
 from shared.storage import StorageBackend
 from shared.sysload import collect_node_load
@@ -229,6 +235,7 @@ def auto_discover_tags() -> set[str]:
     # 代理/SESSDATA 等都是 worker 本地的事,非路由 tag。
     # B站 SESSDATA 经 per-job 凭证文件传给 worker,下载步 step_01 自读。
     tags |= _probe_net_zones()
+    tags |= configured_source_root_tags()
     return tags
 
 
@@ -252,7 +259,10 @@ class Worker:
         # 服务端返回的 id 覆盖,register() 里回写 self.worker_id.
         self.worker_id = _resolve_worker_id(worker_type)
         self.pools = pools
-        self.tags = tags
+        # source-root 不接受CLI自报;只能由当前进程真实可打开的受控root派生。
+        self.tags = {
+            tag for tag in tags if not tag.startswith("source-root:")
+        } | configured_source_root_tags()
         self.reject_tags = reject_tags
         self.idle_timeout = int(os.environ.get("IDLE_TIMEOUT", "0"))
         # 本机并发度:同时在跑几个 step.异构机器据此自报容量(强机调大,弱机=1).
@@ -264,6 +274,7 @@ class Worker:
         self._fatal_error: WorkerFatalError | None = None
         # 中心配置热应用:已生效的 cfg_rev(注册/心跳带回期望配置,rev 更高才应用,幂等).
         self._cfg_applied_rev = 0
+        self.source_library = SourceLibrary.from_env()
         self.runner = create_step_runner(self.worker_id)
 
     # 生命周期
@@ -543,11 +554,33 @@ class Worker:
         start = time.time()
         storage_dir = None
         work_dir = None
+        source_link: Path | None = None
+        source_root_id: str | None = None
+        source_exclude_paths: set[str] = set()
         auth_failed = False
         try:
             storage_dir = await self.storage.pull(job_id, execution_step)
             work_dir = storage_dir if part_id is None else storage_dir / "parts" / part_id
             work_dir.mkdir(parents=True, exist_ok=True)
+
+            source_ref = claim.get("source_ref")
+            if source_ref is not None:
+                if part_id is None:
+                    raise ValueError("NAS source reference requires part scope")
+                reference = parse_source_ref(source_ref)
+                source_root_id = reference.root_id
+                if source_root_tag(source_root_id) not in self.tags:
+                    raise ValueError("worker does not declare the required source root")
+                source_exclude_paths.add(
+                    f"parts/{part_id}/input/source.mp4",
+                )
+                source_link = await asyncio.to_thread(
+                    self.source_library.materialize,
+                    source_ref,
+                    claim.get("source_digest"),
+                    claim.get("source_size_bytes"),
+                    work_dir,
+                )
 
             # pipeline/domain/style_tags/source:gateway 模式服务端已塞进 claim,直连模式在此回读。
             # 读失败会被本 try 接住转 report_failed,不冲垮主循环。
@@ -598,6 +631,7 @@ class Worker:
                 step_cfg=step_cfg, module=module, image=image,
                 timeout_sec=effective_timeout,
                 pool=pool, use_gpu=use_gpu,
+                source_root_id=source_root_id,
                 extra_env=await self._download_credentials_env(step, source),
             )
 
@@ -623,7 +657,10 @@ class Worker:
                 # 下游步拉 work_dir 时 input_missing(如 candidates.json)。push 失败降级为步失败,
                 # 重试时重新生成并推送,绝不在产物缺失时标完成。
                 try:
-                    await self.storage.push(job_id, execution_step, storage_dir)
+                    await self.storage.push(
+                        job_id, execution_step, storage_dir,
+                        exclude_paths=source_exclude_paths,
+                    )
                 except WorkerAuthRejected:
                     raise
                 except Exception as push_err:
@@ -646,7 +683,10 @@ class Worker:
                 # 步本身失败:失败也记用量(失败前已完成的 LLM 调用是真实开销,审计/计费不能缺账;
                 # exec_id UNIQUE 幂等,重试不重复计),再 best-effort 推产物(含日志)便于前端排错,报 failed。
                 await self._collect_usage(job_id, execution_step, step, work_dir)
-                await self._push_safe(job_id, execution_step, storage_dir)
+                await self._push_safe(
+                    job_id, execution_step, storage_dir,
+                    exclude_paths=source_exclude_paths,
+                )
                 error_type, error_json_msg = self._parse_error(work_dir, step)
                 # 兜底:子进程 stderr 为空时,用 .{step}.error.json 的 message(真实异常文本),
                 # 避免前端只看到 "unknown error" 无从排错。
@@ -669,7 +709,10 @@ class Worker:
                 await self._collect_usage(
                     job_id, execution_step, step, work_dir,
                 )  # 失败也记用量(超时前的调用是真实开销)
-                await self._push_safe(job_id, execution_step, storage_dir)  # best-effort 推日志便于排错
+                await self._push_safe(
+                    job_id, execution_step, storage_dir,
+                    exclude_paths=source_exclude_paths,
+                )  # best-effort 推日志便于排错
             await self.transport.report_failed(
                 claim, "timeout", "timeout", duration, start, count_stats=False,
             )
@@ -682,7 +725,10 @@ class Worker:
             duration = time.time() - start
             if work_dir:
                 await self._collect_usage(job_id, execution_step, step, work_dir)  # 失败也记用量
-                await self._push_safe(job_id, execution_step, storage_dir)  # best-effort 推日志便于排错
+                await self._push_safe(
+                    job_id, execution_step, storage_dir,
+                    exclude_paths=source_exclude_paths,
+                )  # best-effort 推日志便于排错
             error_msg = str(e)[:500]
             await self.transport.report_failed(
                 claim, error_msg, "processing", duration, start, count_stats=False,
@@ -693,6 +739,7 @@ class Worker:
             )
 
         finally:
+            self.source_library.dematerialize(source_link)
             if storage_dir:
                 await self.storage.cleanup(job_id, execution_step, storage_dir)
             if not auth_failed:
@@ -739,10 +786,15 @@ class Worker:
                 pass
         return "unknown", ""
 
-    async def _push_safe(self, job_id: str, step: str, work_dir: Path) -> None:
+    async def _push_safe(
+        self, job_id: str, step: str, work_dir: Path, *,
+        exclude_paths: set[str] | None = None,
+    ) -> None:
         """把本步产物推回存储。网络失败不遮蔽步骤错误,auth 失败停机。"""
         try:
-            await self.storage.push(job_id, step, work_dir)
+            await self.storage.push(
+                job_id, step, work_dir, exclude_paths=exclude_paths,
+            )
         except WorkerAuthRejected:
             raise
         except Exception:

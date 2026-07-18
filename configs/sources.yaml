@@ -57,6 +57,10 @@ job_sources:
     patterns: ["^file://"]
     creatable: false
     internal: true
+  nas_source:
+    label: "NAS只读源"
+    default_content_type: "video"
+    content_types: ["video"]
   http_article:
     label: "网页文档"
     default_content_type: "document"

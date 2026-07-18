@@ -190,9 +190,10 @@ async def claim_step(
         })
         from shared.source_detect import detect_source
         from shared.step_scope import parse_execution_step, part_id_from_scope
-        scope_key, _ = parse_execution_step(claim["step"])
+        scope_key, step = parse_execution_step(claim["step"])
         part_id = part_id_from_scope(scope_key)
         if part_id is not None:
+            from shared.source_library import SOURCE_MEDIA_STEPS
             parts = await asyncio.to_thread(db.get_parts, claim["job_id"])
             part = next((item for item in parts if item.id == part_id), None)
             if part is None:
@@ -201,7 +202,16 @@ async def claim_step(
             source = str((part.meta or {}).get("source") or "") or detect_source(
                 part.source_url or "",
             )
-            claim = {**claim, "source": source}
+            claim = {
+                **claim,
+                "source": source,
+            }
+            if step in SOURCE_MEDIA_STEPS and part.source_ref:
+                claim.update({
+                    "source_ref": part.source_ref,
+                    "source_digest": part.source_digest,
+                    "source_size_bytes": part.size_bytes,
+                })
         return claim
 
     return None

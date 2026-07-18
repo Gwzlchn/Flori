@@ -121,7 +121,8 @@ def fake_docker(monkeypatch):
 
 
 def _ctx(
-    work_dir: Path, *, use_gpu=False, image="flori/step-base", timeout_sec=10, pool="cpu"
+    work_dir: Path, *, use_gpu=False, image="flori/step-base", timeout_sec=10, pool="cpu",
+    source_root_id=None,
 ) -> StepContext:
     return StepContext(
         job_id="j1",
@@ -134,6 +135,7 @@ def _ctx(
         timeout_sec=timeout_sec,
         pool=pool,
         use_gpu=use_gpu,
+        source_root_id=source_root_id,
     )
 
 
@@ -192,6 +194,36 @@ class TestDockerSuccess:
         assert "step_cfg" not in kw["environment"]
         # 容器必被强删
         assert container.removed and container.remove_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_nas_source_root_is_mounted_read_only_at_same_container_path(
+        self, fake_docker, tmp_path,
+    ):
+        work_root = tmp_path / "work"
+        work_dir = work_root / "j1"
+        work_dir.mkdir(parents=True)
+        host_source = tmp_path / "host-source"
+        host_source.mkdir()
+        container = _FakeContainer(status_code=0)
+        fake_docker["client"] = _FakeClient(container)
+        runner = DockerStepRunner(
+            "w1",
+            host_work_root=str(work_root),
+            container_work_root=str(work_root),
+            source_roots={"zg-library": Path("/sources/zg-library")},
+            host_source_roots={"zg-library": host_source},
+        )
+
+        await runner.run_step(
+            _ctx(work_dir, source_root_id="zg-library"),
+            _noop_progress,
+            _noop_tick,
+        )
+
+        assert runner._client.containers.run_kwargs["volumes"] == {
+            str(work_dir): {"bind": "/job", "mode": "rw"},
+            str(host_source): {"bind": "/sources/zg-library", "mode": "ro"},
+        }
 
     @pytest.mark.asyncio
     async def test_use_gpu_true_adds_device_request(self, fake_docker, tmp_path):

@@ -435,7 +435,10 @@ def _parse_minio_version(info: dict) -> str | None:
 
 class StorageBackend(Protocol):
     async def pull(self, job_id: str, step: str) -> Path: ...
-    async def push(self, job_id: str, step: str, work_dir: Path) -> None: ...
+    async def push(
+        self, job_id: str, step: str, work_dir: Path, *,
+        exclude_paths: set[str] | None = None,
+    ) -> None: ...
     async def cleanup(self, job_id: str, step: str, work_dir: Path) -> None: ...
     # 删 job 时清掉该 job 的全部产物:LocalStorage 删 job 目录、RemoteStorage 删 {job_id}/ 前缀对象。
     # 幂等(无产物即 no-op),避免 MinIO/分布式部署删 job 后中心存储留孤儿产物。
@@ -535,7 +538,10 @@ class LocalStorage:
     async def pull(self, job_id: str, step: str) -> Path:
         return self._safe_path(job_id)
 
-    async def push(self, job_id: str, step: str, work_dir: Path) -> None:
+    async def push(
+        self, job_id: str, step: str, work_dir: Path, *,
+        exclude_paths: set[str] | None = None,
+    ) -> None:
         pass
 
     async def cleanup(self, job_id: str, step: str, work_dir: Path) -> None:
@@ -580,7 +586,7 @@ class LocalStorage:
             out = []
             for n in names:
                 rel = os.path.relpath(os.path.join(directory, n), base).replace("\\", "/")
-                if is_credential_file(rel):
+                if is_credential_file(rel) or Path(directory, n).is_symlink():
                     out.append(n)
             return out
 
@@ -768,7 +774,11 @@ class LocalStorage:
         return [
             p.relative_to(root).as_posix()
             for p in root.rglob("*")
-            if p.is_file() and not _is_internal_file(p.relative_to(root).as_posix())
+            if (
+                not p.is_symlink()
+                and p.is_file()
+                and not _is_internal_file(p.relative_to(root).as_posix())
+            )
         ]
 
     async def list_file_sizes(self, job_id: str) -> dict[str, int]:
@@ -782,7 +792,11 @@ class LocalStorage:
         return {
             p.relative_to(root).as_posix(): p.stat().st_size
             for p in root.rglob("*")
-            if p.is_file() and not _is_internal_file(p.relative_to(root).as_posix())
+            if (
+                not p.is_symlink()
+                and p.is_file()
+                and not _is_internal_file(p.relative_to(root).as_posix())
+            )
         }
 
     async def health(self) -> dict:
@@ -803,8 +817,11 @@ class LocalStorage:
         if root.is_dir():
             for dirpath, _dirs, files in os.walk(root):
                 for name in files:
+                    path = os.path.join(dirpath, name)
+                    if os.path.islink(path):
+                        continue
                     try:
-                        total += os.path.getsize(os.path.join(dirpath, name))
+                        total += os.path.getsize(path)
                         objects += 1
                     except OSError:
                         continue
@@ -926,17 +943,26 @@ class RemoteStorage:
         self._snapshots[str(work_dir)] = snapshot
         return work_dir
 
-    async def push(self, job_id: str, step: str, work_dir: Path) -> None:
-        await asyncio.to_thread(self._push_sync, job_id, step, work_dir)
+    async def push(
+        self, job_id: str, step: str, work_dir: Path, *,
+        exclude_paths: set[str] | None = None,
+    ) -> None:
+        await asyncio.to_thread(
+            self._push_sync, job_id, step, work_dir, exclude_paths or set(),
+        )
 
-    def _push_sync(self, job_id: str, step: str, work_dir: Path) -> None:
+    def _push_sync(
+        self, job_id: str, step: str, work_dir: Path,
+        exclude_paths: set[str],
+    ) -> None:
         snapshot = self._snapshots.get(str(work_dir), {})
         for path in work_dir.rglob("*"):
-            if not path.is_file():
+            if path.is_symlink() or not path.is_file():
                 continue
-            rel = str(path.relative_to(work_dir))
+            rel = path.relative_to(work_dir).as_posix()
             if (
-                is_credential_file(rel)
+                rel in exclude_paths
+                or is_credential_file(rel)
                 or _is_internal_file(rel)
                 or not execution_artifact_allowed(step, rel, write=True)
             ):
@@ -2058,7 +2084,7 @@ class GatewayStorage:
         # 快照覆盖 work_dir 全部本机文件(含复用留下的),push 才能据此跳过未改动的文件。
         snapshot: dict[str, tuple[int, float]] = {}
         for path in work_dir.rglob("*"):
-            if path.is_file():
+            if not path.is_symlink() and path.is_file():
                 st = path.stat()
                 snapshot[path.relative_to(work_dir).as_posix()] = (st.st_size, st.st_mtime)
         self._snapshots[str(work_dir)] = snapshot
@@ -2080,14 +2106,19 @@ class GatewayStorage:
             except OSError:
                 continue
 
-    async def push(self, job_id: str, step: str, work_dir: Path) -> None:
+    async def push(
+        self, job_id: str, step: str, work_dir: Path, *,
+        exclude_paths: set[str] | None = None,
+    ) -> None:
         snapshot = self._snapshots.get(str(work_dir), {})
+        excluded = exclude_paths or set()
         for path in work_dir.rglob("*"):
-            if not path.is_file():
+            if path.is_symlink() or not path.is_file():
                 continue
             rel = path.relative_to(work_dir).as_posix()
             if (
-                is_credential_file(rel)
+                rel in excluded
+                or is_credential_file(rel)
                 or self._is_no_push(step, rel)
                 or not execution_artifact_allowed(step, rel, write=True)
             ):

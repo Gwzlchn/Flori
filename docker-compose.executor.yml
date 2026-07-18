@@ -20,3 +20,10 @@ services:
       - STEP_RUNTIME=docker
       # 把 pipelines 里的逻辑名 flori/step-X 解析到实仓 ghcr.io/<owner>/flori-step-X。
       - FLORI_STEP_REGISTRY=${FLORI_STEP_REGISTRY:-ghcr.io/gwzlchn}
+
+  worker-source:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - STEP_RUNTIME=docker
+      - FLORI_STEP_REGISTRY=${FLORI_STEP_REGISTRY:-ghcr.io/gwzlchn}

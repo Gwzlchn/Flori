@@ -2471,10 +2471,11 @@ export interface components {
         };
         /** JobPartCreate */
         JobPartCreate: {
+            source?: components["schemas"]["NasSourceCreate"] | null;
             /** Title */
             title?: string | null;
             /** Url */
-            url: string;
+            url?: string | null;
         };
         /** JobPartResponse */
         JobPartResponse: {
@@ -2488,6 +2489,7 @@ export interface components {
             part_index: number;
             /** Progress Pct */
             progress_pct: number;
+            source?: components["schemas"]["NasSourceResponse"] | null;
             /** Status */
             status: string;
             /** Steps */
@@ -2704,6 +2706,33 @@ export interface components {
         MergeRequest: {
             /** Target */
             target: string;
+        };
+        /** NasSourceCreate */
+        NasSourceCreate: {
+            /** Relative Path */
+            relative_path: string;
+            /** Root Id */
+            root_id: string;
+            /** Sha256 */
+            sha256: string;
+            /** Size Bytes */
+            size_bytes: number;
+        };
+        /** NasSourceResponse */
+        NasSourceResponse: {
+            /** Relative Path */
+            relative_path: string;
+            /** Root Id */
+            root_id: string;
+            /** Sha256 */
+            sha256: string;
+            /** Size Bytes */
+            size_bytes: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "available" | "missing" | "changed" | "unmounted" | "invalid";
         };
         /** NoteVersion */
         NoteVersion: {

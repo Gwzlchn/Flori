@@ -157,6 +157,7 @@ E2E 分层见 [`scripts/test.sh`](scripts/test.sh) 与 [`docs/09-testing.md`](do
 - [x] 论文、文章、白皮书等体裁共用 Document pipeline 与 kind-scoped Prompt
 - [x] 播客 / 音频支持（单集音频 URL + 上传；audio pipeline：whisper→分段→smart_podcast→review；RSS / Atom 订阅已提供首版）
 - [x] Video 原生多 Part Job（有序 Part manifest、Part scope 并行加工、Job fan-in 合并、作用域日志/产物/重跑与离线全资产迁移）
+- [x] NAS大视频只读源引用（root+相对路径准入、full SHA-256身份、source-root Worker路由、不进MinIO、删Job不删原片）
 
 ### M7 · 多租户 + 商业化
 

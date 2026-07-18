@@ -183,7 +183,7 @@ def step_required_route_tags(
             step.get("ai"), providers_config, override=override,
             required_tags=sorted(ai_capabilities),
         ))
-    if source != "upload" and step.get("name") in net_steps:
+    if source not in {"upload", "nas_source"} and step.get("name") in net_steps:
         required.add(required_zone(source, url))
     return sorted(required)
 

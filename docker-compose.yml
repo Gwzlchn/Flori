@@ -90,6 +90,9 @@ services:
       # 生产经 .env 设到数据盘如 /volume2/DATA/flori/inbox,运行时数据永不放仓库树。
       # api 跑 enumerate_source→scan_dir(枚举,只读即可);与 worker-cpu 挂同一容器内路径。
       - ${FLORI_INBOX_DIR:-.local/inbox}:/data/inbox:ro
+      # 受控NAS大视频源库:只读挂到稳定容器路径;API只存root ID+相对路径。
+      # 默认未启用;生产必须把FLORI_SOURCE_LIBRARY_DIR设为宿主绝对路径。
+      - ${FLORI_SOURCE_LIBRARY_DIR:-.local/source-library}:/sources/library:ro
       # 默认 prompt 模板外挂(只读,同 worker):命名卷 flori-data 会 shadow 镜像烤入的 /data/prompts,
       # 故 api 也须挂此子路径,否则 prompt 白盒 GET /api/prompts 读不到默认模板(展示为空)。
       # 即便没挂,api 仍会回退读镜像烤入的 /app/configs/prompts/templates(双保险,见 routes/prompts.py)。
@@ -107,6 +110,9 @@ services:
       # 空=凭证以明文落库;设一把 Fernet key 即加密(见 docs/07-security §密钥管理)。
       FLORI_SECRET_KEY: ${FLORI_SECRET_KEY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
+      FLORI_SOURCE_LIBRARY_ENABLED: ${FLORI_SOURCE_LIBRARY_ENABLED:-0}
+      FLORI_SOURCE_LIBRARY_ROOT_ID: ${FLORI_SOURCE_LIBRARY_ROOT_ID:-library}
+      FLORI_SOURCE_LIBRARY_CONTAINER_DIR: /sources/library
     logging: *default-logging
     healthcheck:
       # 编排只看 liveness.Redis/DB/Worker 故障由 readiness 报告,不触发 API 重启风暴.
@@ -225,6 +231,42 @@ services:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       DRY_RUN: ${DRY_RUN:-0}
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    depends_on:
+      - redis
+
+  # 受控NAS原片执行节点:领取01-04及08的source-root硬标签任务。
+  # 用`--profile source-library`显式启动;未启用时不改变普通部署。
+  worker-source:
+    container_name: flori-worker-source
+    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    profiles: ["source-library"]
+    command: python -m worker.main --pools io cpu ai
+    logging: *default-logging
+    volumes:
+      - ${FLORI_DATA_DIR:-flori-data}:/data
+      - ${HOST_WORK_DIR:-flori-work}:/tmp/flori-work
+      - ${FLORI_SOURCE_LIBRARY_DIR:-.local/source-library}:/sources/library:ro
+      - ${FLORI_TEMPLATES_DIR:-./configs/prompts/templates}:/data/prompts/templates:ro
+    environment:
+      <<: *common-env
+      STEP_RUNTIME: ${STEP_RUNTIME:-subprocess}
+      WORK_DIR: /tmp/flori-work
+      WORKER_NAME: source-library
+      HOST_WORK_DIR: ${HOST_WORK_DIR:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      DRY_RUN: ${DRY_RUN:-0}
+      FLORI_SOURCE_LIBRARY_ENABLED: ${FLORI_SOURCE_LIBRARY_ENABLED:-0}
+      FLORI_SOURCE_LIBRARY_ROOT_ID: ${FLORI_SOURCE_LIBRARY_ROOT_ID:-library}
+      FLORI_SOURCE_LIBRARY_CONTAINER_DIR: /sources/library
+      # 只供DooD DockerStepRunner把同一宿主源根继续以ro挂载给step容器。
+      FLORI_SOURCE_LIBRARY_HOST_DIR: ${FLORI_SOURCE_LIBRARY_DIR:-}
     security_opt:
       - no-new-privileges:true
     labels:

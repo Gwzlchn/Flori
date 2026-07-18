@@ -34,6 +34,7 @@ services:
       - ${FLORI_DATA_DIR:-./data}:/data
       # local_dir 订阅约定监听目录(放文件进宿主 ${FLORI_INBOX_DIR:-.local/inbox} 即被枚举入库);与 worker 挂同一容器路径。
       - ${FLORI_INBOX_DIR:-.local/inbox}:/data/inbox
+      - ${FLORI_SOURCE_LIBRARY_DIR:-.local/source-library}:/sources/library:ro
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DATA_DIR=/data
@@ -47,6 +48,9 @@ services:
       - FLORI_READINESS_PROBE_TTL_SEC=${FLORI_READINESS_PROBE_TTL_SEC:-5}
       - FLORI_READINESS_PROBE_TIMEOUT_SEC=${FLORI_READINESS_PROBE_TIMEOUT_SEC:-3}
       - API_RELOAD=1   # 开发热更新(生产默认关,避免 StatReload 常驻)
+      - FLORI_SOURCE_LIBRARY_ENABLED=${FLORI_SOURCE_LIBRARY_ENABLED:-0}
+      - FLORI_SOURCE_LIBRARY_ROOT_ID=${FLORI_SOURCE_LIBRARY_ROOT_ID:-library}
+      - FLORI_SOURCE_LIBRARY_CONTAINER_DIR=/sources/library
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health/live"]
       interval: 30s
@@ -124,6 +128,37 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - DRY_RUN=${DRY_RUN:-0}
+    depends_on:
+      - redis
+
+  worker-source:
+    build:
+      context: .
+      dockerfile: docker/base.Dockerfile
+      target: worker
+    command: python -m worker.main --pools io cpu ai
+    restart: unless-stopped
+    profiles: ["source-library"]
+    logging: *default-logging
+    volumes:
+      - ./shared:/app/shared
+      - ./worker:/app/worker
+      - ./steps:/app/steps
+      - ./configs:/app/configs
+      - ${FLORI_DATA_DIR:-./data}:/data
+      - ${FLORI_SOURCE_LIBRARY_DIR:-.local/source-library}:/sources/library:ro
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATA_DIR=/data
+      - CONFIG_DIR=/app/configs
+      - WORKER_NAME=source-library
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - DRY_RUN=${DRY_RUN:-0}
+      - FLORI_SOURCE_LIBRARY_ENABLED=${FLORI_SOURCE_LIBRARY_ENABLED:-0}
+      - FLORI_SOURCE_LIBRARY_ROOT_ID=${FLORI_SOURCE_LIBRARY_ROOT_ID:-library}
+      - FLORI_SOURCE_LIBRARY_CONTAINER_DIR=/sources/library
+      - FLORI_SOURCE_LIBRARY_HOST_DIR=${FLORI_SOURCE_LIBRARY_DIR:-}
     depends_on:
       - redis
 

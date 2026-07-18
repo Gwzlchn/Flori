@@ -272,7 +272,7 @@ class Collection:
 
 > **三层命名(领域核心,2026-06-27 统一)**:
 > - **Job(作业流水线)** = 一个内容项的整条处理流水线。Document/Audio 各有一个顶层来源，Video 包含一个有序且不可变的 Part 清单。单来源 id 为 `jobs_{src}_{原生id}_{时间戳}`；Video 创建 id 为 `jobs_video_{creation fingerprint}`，jobs 表。
-> - **Part(视频分段)** = Video Job 的原始媒体边界，按 `part_index=1..N` 排序，记录独立 URL、标题和来源元数据。Part 不是子 Job，不拥有独立 lineage。
+> - **Part(视频分段)** = Video Job 的原始媒体边界，按 `part_index=1..N` 排序，记录独立 URL 或不可变NAS source reference、标题和来源元数据。Part 不是子 Job，不拥有独立 lineage。
 > - **Step(步骤)** = pipeline 模板的一步，可声明 `scope=part|job`。Part 步按每个 Part 展开，Job 步只执行一次；`fan_in` 是 Part 到 Job 的唯一跨 scope 依赖。
 > - **Task(任务)** = worker 认领执行的**最小单元** = 某 Job 的某 scope Step 的一次执行。claim 的 `step` 为内部执行键；Job 步使用原步骤名，Part 步使用 `part:{part_id}::{step}`。Task 不是独立持久表。
 > 关系:Video Job 1 ──< N Part；Job/Part 各自拥有 Step；每个 Step 的一次执行 = 一个 Task。Part 只隔离原始媒体加工，合并后的笔记、概念、评审和检索仍属于 Job。
@@ -335,6 +335,10 @@ Video 的 Part 清单同时固化在 `job_parts` 与根 `job.json.parts[]`。Par
 `parts/{part_id}/`，`01_download` 到 `08_punctuate` 在各 Part 内相互隔离；`09_merge_parts`
 按 `part_index` 确定性合并为 Job 级 transcript、provenance 和全局时间线。后续步骤不再携带 Part
 概念；证据 locator 在需要回到源媒体时显式保存 `part_id`、Part 内时间和合并时间。
+
+`source_url` 与 `source_ref` 二选一。NAS Part 的 `source_ref` 只含root ID与规范相对路径,
+`source_digest` 必须是full SHA-256,`size_bytes`必须大于0。登记root的绝对路径只存在运行时env;
+01-04与08步按`source-root:<root_id>`绑到可读NAS的Worker:前四步直接处理媒体,08用原字节摘要生成可核验来源清单。其他步只消费中心小产物。原片是Job namespace外的只读输入,不是artifact;删除、clone、rerun和GC均不拥有它的删除权。
 
 ### Concept / Term（概念节点 = 知识轴）
 

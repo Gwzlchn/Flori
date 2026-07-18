@@ -13,8 +13,10 @@ import pytest
 
 from tests.conftest import make_fakeredis
 from shared.config import AppConfig
-from shared.models import AITask, Job, LLMRequest, LLMResponse, Step, StepStatus
+from shared.models import AITask, Job, JobPart, LLMRequest, LLMResponse, Step, StepStatus
+from shared.source_library import SourceLibrary, build_source_ref
 from shared.storage import LocalStorage
+from shared.step_scope import execution_step_key, part_scope
 from worker.worker import (
     Worker, auto_discover_tags, _resolve_worker_id, _probe_net_zones,
     compute_effective_timeout, _read_media_duration, _codex_logged_in,
@@ -411,6 +413,32 @@ class TestAutoDiscoverTags:
                     assert "vision" not in tags
                     assert "gpu" not in tags
 
+    def test_readable_configured_source_root_adds_capability_tag(
+        self, tmp_path, monkeypatch,
+    ):
+        root = tmp_path / "source-library"
+        root.mkdir()
+        monkeypatch.setenv(
+            "FLORI_SOURCE_ROOTS_JSON",
+            json.dumps({"zg-library": str(root)}),
+        )
+        with patch("shutil.which", return_value=None):
+            assert "source-root:zg-library" in auto_discover_tags()
+
+    def test_worker_rejects_forged_source_root_tag(
+        self, redis, db, config, storage, monkeypatch,
+    ):
+        monkeypatch.delenv("FLORI_SOURCE_ROOTS_JSON", raising=False)
+        monkeypatch.setenv("FLORI_SOURCE_LIBRARY_ENABLED", "0")
+
+        candidate = Worker(
+            transport=RedisTransport(redis, db), config=config, storage=storage,
+            worker_type="cpu", pools=["cpu"],
+            tags={"source-root:forged"}, reject_tags=set(),
+        )
+
+        assert "source-root:forged" not in candidate.tags
+
     def test_claude_binary_present_but_not_authed(self):
         # 镜像自带 claude 二进制但无凭证(纯 gateway worker)时不该标 vision/claude-cli.
         env = {k: v for k, v in os.environ.items()
@@ -706,6 +734,65 @@ class TestExecuteFullFlow:
         assert db.get_steps("j_test_001")[0].status == StepStatus.READY
 
         assert await redis.get_pool_count("cpu") == 0
+
+    @pytest.mark.asyncio
+    async def test_nas_source_is_verified_materialized_excluded_and_removed(
+        self, worker, redis, db, tmp_jobs_dir, tmp_path,
+    ):
+        import hashlib
+
+        await worker.register()
+        root = tmp_path / "source-library"
+        root.mkdir()
+        source = root / "P01.mkv"
+        source.write_bytes(b"trusted-video")
+        digest = f"sha256:{hashlib.sha256(source.read_bytes()).hexdigest()}"
+        source_ref = build_source_ref("zg-library", "P01.mkv")
+        worker.source_library = SourceLibrary({"zg-library": root})
+        worker.tags.add("source-root:zg-library")
+        worker.config.pipelines["test"]["steps"] = [{
+            "name": "03_scene", "pool": "cpu", "depends_on": [],
+            "retries": 1, "module": "steps.video.step_03_scene", "timeout_sec": 60,
+        }]
+        job = make_job(job_id="j_source")
+        part = JobPart(
+            "pt_01", job.id, 1, source_ref=source_ref,
+            source_digest=digest, size_bytes=source.stat().st_size,
+            meta={"source": "nas_source"},
+        )
+        db.create_job(job, [part])
+        step = execution_step_key(part_scope(part.id), "03_scene")
+        db.upsert_step(Step(
+            job_id=job.id, name="03_scene", scope_key=part_scope(part.id),
+            status=StepStatus.READY, pool="cpu",
+        ))
+        seen = {}
+
+        async def mock_run_step(ctx, on_progress, on_tick):
+            link = ctx.work_dir / "input" / "source.mp4"
+            assert link.is_symlink() and link.resolve() == source
+            assert ctx.source_root_id == "zg-library"
+            return 0, ""
+
+        async def capture_push(job_id, execution_step, work_dir, *, exclude_paths=None):
+            seen["exclude_paths"] = exclude_paths
+
+        worker.runner.run_step = mock_run_step
+        worker.storage.push = capture_push
+        claim = make_claim(job_id=job.id, step=step)
+        claim.update({
+            "source": "nas_source",
+            "source_ref": source_ref,
+            "source_digest": digest,
+            "source_size_bytes": source.stat().st_size,
+        })
+        await activate_claim(redis, claim, worker.worker_id)
+
+        await worker.execute(claim)
+
+        assert seen["exclude_paths"] == {"parts/pt_01/input/source.mp4"}
+        assert not (tmp_jobs_dir / job.id / "parts" / part.id / "input" / "source.mp4").exists()
+        assert source.read_bytes() == b"trusted-video"
 
     @pytest.mark.asyncio
     async def test_push_failure_on_success_reports_failed_not_done(self, worker, redis, db, tmp_jobs_dir):

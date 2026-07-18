@@ -4,7 +4,7 @@
 
 ## 1. 适配器模型
 
-每种内容来源对应一个适配器。适配器负责：下载原始内容 + 生成统一的 input/ 目录结构。
+每种内容来源对应一个适配器。适配器负责：下载或安全引用原始内容 + 生成统一的 input/ 目录结构。
 内容类型、可创建来源、上传扩展名和订阅来源的权威注册表是
 [`configs/sources.yaml`](../configs/sources.yaml)；API 的 OpenAPI enum、入队校验、本地目录扫描和
 前端来源目录均从它派生。新增来源必须同时实现真实适配器，完整性测试会拒绝 registry 与实现不一致。
@@ -17,6 +17,11 @@ graph TD
 ```
 
 适配器是 `01_download` 步骤（`steps/common/step_01_download.py`）的内部实现——同一个步骤脚本，根据 content_type 和 source 选择不同的下载/转换逻辑。
+
+`nas_source` 是视频专用的零复制适配器。API先以已登记root、相对路径、大小和full SHA-256固定身份;
+Worker在直接读原片的01-04与08步前重验,再把原片临时映射为`input/source.mp4`。
+`01_download`只跑ffprobe可播性检查并写`metadata.json`,不复制或改名源;步结束后映射立即移除。
+Storage push按语义排除该路径,Local/Remote/Gateway也不列举、clone或跟随外部symlink,因此原片不进MinIO。
 
 ### 1.1 多模态 provenance sidecar
 

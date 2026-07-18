@@ -83,6 +83,13 @@ class DownloadStep(StepBase):
             self._copy_local_file(url, content_type)
             if content_type == "document":
                 self._normalize_document_input(self.job_dir / "input")
+        elif source == "nas_source":
+            # Worker已将通过full SHA-256重验的NAS原片以临时只读链接物化。
+            # 本步只验证可播性和写metadata,不复制、改名或上传原片。
+            if content_type != "video":
+                raise ValueError("NAS source only supports video")
+            self.log.info("nas_source_mode")
+            self._verify_download(self.job_dir / "input" / "source.mp4")
         elif source == "upload":
             self.log.info("upload_mode", content_type=content_type)
             if content_type == "video":

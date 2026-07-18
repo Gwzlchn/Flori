@@ -222,6 +222,80 @@ class TestCreateJob:
         assert args[0][1]["action"] == "new_job"  # data content
 
     @pytest.mark.asyncio
+    async def test_create_nas_source_part_persists_immutable_reference(
+        self, client, app, monkeypatch, tmp_path,
+    ):
+        root = tmp_path / "source-library"
+        source = root / "20250914-交易节奏" / "P01.mkv"
+        source.parent.mkdir(parents=True)
+        payload = b"trusted-video"
+        source.write_bytes(payload)
+        monkeypatch.setenv(
+            "FLORI_SOURCE_ROOTS_JSON",
+            json.dumps({"zg-library": str(root)}),
+        )
+        digest = hashlib.sha256(payload).hexdigest()
+
+        response = await client.post("/api/jobs", json={
+            "content_type": "video",
+            "title": "一场直播",
+            "parts": [{
+                "title": "第一部分",
+                "source": {
+                    "root_id": "zg-library",
+                    "relative_path": "20250914-交易节奏/P01.mkv",
+                    "sha256": digest,
+                    "size_bytes": len(payload),
+                },
+            }],
+        })
+
+        assert response.status_code == 201, response.text
+        job_id = response.json()["job_id"]
+        part = app.state.db.get_parts(job_id)[0]
+        assert part.source_url is None
+        assert part.source_ref.startswith("nas://zg-library/")
+        assert part.source_digest == f"sha256:{digest}"
+        assert part.size_bytes == len(payload)
+        detail = (await client.get(f"/api/jobs/{job_id}")).json()
+        assert detail["parts"][0]["source"] == {
+            "root_id": "zg-library",
+            "relative_path": "20250914-交易节奏/P01.mkv",
+            "sha256": digest,
+            "size_bytes": len(payload),
+            "status": "available",
+        }
+        assert str(root) not in json.dumps(detail, ensure_ascii=False)
+
+    @pytest.mark.asyncio
+    async def test_create_nas_source_rejects_digest_mismatch_without_side_effect(
+        self, client, app, monkeypatch, tmp_path,
+    ):
+        root = tmp_path / "source-library"
+        root.mkdir()
+        (root / "P01.mkv").write_bytes(b"trusted-video")
+        monkeypatch.setenv(
+            "FLORI_SOURCE_ROOTS_JSON",
+            json.dumps({"zg-library": str(root)}),
+        )
+        before = len(app.state.db.list_jobs())
+
+        response = await client.post("/api/jobs", json={
+            "content_type": "video",
+            "parts": [{
+                "source": {
+                    "root_id": "zg-library",
+                    "relative_path": "P01.mkv",
+                    "sha256": "0" * 64,
+                    "size_bytes": len(b"trusted-video"),
+                },
+            }],
+        })
+
+        assert response.status_code == 422
+        assert len(app.state.db.list_jobs()) == before
+
+    @pytest.mark.asyncio
     async def test_video_requires_parts_and_rejects_legacy_url(self, client):
         response = await client.post("/api/jobs", json={
             "content_type": "video",
@@ -510,6 +584,33 @@ class TestDeleteJob:
         resp = await client.delete(f"/api/jobs/{job_id}")
         assert resp.status_code == 204
         assert await storage.read_file(job_id, "output/notes.md") is None  # 产物已清
+
+    @pytest.mark.asyncio
+    async def test_delete_nas_source_job_never_deletes_original(
+        self, client, monkeypatch, tmp_path,
+    ):
+        root = tmp_path / "source-library"
+        root.mkdir()
+        source = root / "P01.mkv"
+        payload = b"trusted-video"
+        source.write_bytes(payload)
+        monkeypatch.setenv(
+            "FLORI_SOURCE_ROOTS_JSON", json.dumps({"library": str(root)}),
+        )
+        created = await client.post("/api/jobs", json={
+            "content_type": "video",
+            "parts": [{"source": {
+                "root_id": "library",
+                "relative_path": "P01.mkv",
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size_bytes": len(payload),
+            }}],
+        })
+
+        response = await client.delete(f"/api/jobs/{created.json()['job_id']}")
+
+        assert response.status_code == 204
+        assert source.read_bytes() == payload
 
     @pytest.mark.asyncio
     async def test_delete_clears_ai_usage_and_calls_queue_cleanup(self, client, app, db, mock_redis):

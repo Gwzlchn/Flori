@@ -187,6 +187,47 @@ class TestClaimStep:
         ) == 0
         assert await redis.get_step_status("j1", p02) == "ready"
 
+    @pytest.mark.parametrize(
+        ("step_name", "carries_identity"),
+        [("03_scene", True), ("08_punctuate", True), ("05_dedup", False)],
+    )
+    @pytest.mark.asyncio
+    async def test_nas_part_claim_carries_reference_identity_without_host_path(
+        self, redis, db, step_name, carries_identity,
+    ):
+        await _register_worker(redis, db)
+        job = Job(id="j_nas", content_type="video", pipeline="video")
+        part = JobPart(
+            "pt_nas", job.id, 1,
+            source_ref="nas://zg-library/20250914/P01.mkv",
+            source_digest="sha256:" + "a" * 64,
+            size_bytes=123,
+            meta={"source": "nas_source"},
+        )
+        db.create_job(job, [part])
+        step = execution_step_key(part_scope(part.id), step_name)
+        await redis.enqueue_step(
+            "cpu", job.id, step, [], priority=0,
+            require_tags=["source-root:zg-library"],
+        )
+        await redis.set_step_status(job.id, step, "ready")
+
+        claim = await runner_ops.claim_step(
+            redis, db, WORKER_ID, ["cpu"], POOL_LIMITS,
+            {"source-root:zg-library"}, set(),
+        )
+
+        assert claim["source"] == "nas_source"
+        if carries_identity:
+            assert claim["source_ref"] == part.source_ref
+            assert claim["source_digest"] == part.source_digest
+            assert claim["source_size_bytes"] == 123
+        else:
+            assert "source_ref" not in claim
+            assert "source_digest" not in claim
+            assert "source_size_bytes" not in claim
+        assert "/volume" not in json.dumps(claim)
+
     @pytest.mark.asyncio
     async def test_terminal_lease_allows_one_outcome_and_release_cleanup(self, redis, db):
         await _register_worker(redis, db)
