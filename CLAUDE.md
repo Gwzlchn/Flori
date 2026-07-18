@@ -284,6 +284,16 @@ docker compose -f docker-compose.yml -f .local/docker-compose.uptest.yml --env-f
 - 当天建 `00-当日索引.txt`；跨天未完的滚动进 `.local/processing/待办池.txt`。
 - 标准/模板/待办池放 `.local/processing/` 根目录（长存,不随日期清理）；完整规范见 `.local/processing/迭代记录规范.txt`。
 
+### 内容投递台账与投递 Bug 闭环
+- 内容来源策展、批量投递、清理重投或投递驱动的修复开工前,必须先读`$REPO/.local/delivery/README.txt`、涉及的catalog、batch和Bug记录。长期来源与当前投递状态不得继续写进日期worklog。
+- `$REPO/.local/delivery/catalog/<domain>.yaml`按真实domain分片,但属于一套逻辑目录。来源ID和规范化URL全局唯一;subscription是来源的可选属性,不得另建订阅来源类别或平行清单。订阅属性必须固定规范化`source_type`和`source_id`,Bilibili UP使用数字mid,避免URL与mid形成重复集合。
+- 全目录迁移或schema变化时对`delivery-state.yaml`做一次全量运行库对账。日常投递前只增量核对目标source、开放Bug、相关current lineage和订阅集合;运行态写操作后立即回填受影响source。`active_subscription`只表示集合启用,不得把`last_sync_status: ok`误当成子Job投递成功。
+- batch文件名固定为`YYYY-MM-DD-两位序号.yaml`,日期取创建batch时的真实北京时间,完整时间写入文件。普通batch最多10个来源;用户追加内容必须新建下一序号batch。频道、Playlist和RSS还必须冻结fanout上限与停止条件。
+- 投递发现产品Bug时,立即暂停受影响来源并创建独立`$REPO/.local/delivery/bugs/YYYY-MM-DD-两位序号.yaml`;Bug记录必须固定发现batch、source/Job、processing修复工作项、修复版本和重投batch。
+- 投递驱动的代码修复另建`fix`交付单元,不并入`ops`投递工作项。所有processing工作项头部填写`投递关联`、`投递Bug`和`重投验收`;普通产品开发明确填`无`。
+- 代码测试、commit或部署完成不等于投递Bug关闭。修复后必须新建最多10条的retry batch,用修复版本重新投递并通过来源/产物/质量门;只有重投验收通过才能把Bug标为`verified`。
+- 诊断证据和精确manifest保存前不得删除错误Job。可并存时先验新快照再删旧快照;实现限制必须先删时先做可恢复备份,只按固定Job ID操作,原始媒体与昂贵下载输入优先复用。
+
 ### 调研结论即写盘（防 context 重复调研，省 token）
 调研/排查出的**非显然结论**别只留在对话里——一压缩就丢，下个会话又重查一遍（拖慢节奏 + 烧 token）。**研完即落盘，写在对的层**：
 - 非显然代码事实/坑（"X 靠 Y 实现"、"配置在 Z"、某 gotcha）→ **auto-memory**（`/remember`；每会话作为 system-reminder 重载，扛压缩）。

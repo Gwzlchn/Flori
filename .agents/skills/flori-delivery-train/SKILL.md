@@ -11,8 +11,9 @@ Use one delivery protocol for every change. Treat a single unit as a one-node tr
 
 1. Read `$REPO/CLAUDE.md`, `docs/README.md`, `docs/11-dev-workflow.md`, and `docs/12-cicd.md` before acting.
 2. Read `.local/processing/迭代记录规范.txt` and the current work item or create one before edits.
-3. Follow explicit user limits first. In particular, preserve review-first, no-commit, no-push, or no-deploy instructions.
-4. Treat repo governance as policy and this skill as execution guidance. Stop and report any conflict instead of silently overriding the repo.
+3. For source curation, content delivery, cleanup/retry, or delivery-driven fixes, also read `.local/delivery/README.txt`, the affected catalog/state entries, batches, and Bug records before acting.
+4. Follow explicit user limits first. In particular, preserve review-first, no-commit, no-push, or no-deploy instructions.
+5. Treat repo governance as policy and this skill as execution guidance. Stop and report any conflict instead of silently overriding the repo.
 
 ## Select profiles
 
@@ -42,6 +43,16 @@ Default security boundaries, database migrations, backup/restore, identity, cred
 4. Review according to risk, then have the unit integrator squash checkpoints and run touched-path integration, the affected build, and API or Playwright verification.
 5. For `review-first`, leave the result inspectable and uncommitted until the user approves. Merge a worktree diff back only when requested and safe for unrelated main changes.
 6. For a product-changing `ci` or `full-deploy` unit, use the value commit as the release commit and bump once. Do not bump pure docs, governance, research, test, or CI-tuning commits.
+
+## Run content delivery and its Bug lane
+
+1. Keep catalog facts, current delivery state, batches, Bug events, and processing worklogs in their separate authorities defined by `.local/delivery/README.txt`.
+2. Reconcile the intended source IDs, open Bugs, current lineages, and subscription collections before each batch. Run a full-catalog reconciliation only for migration, schema change, or detected drift. Treat subscription enumeration success and child-job delivery health as separate evidence.
+3. Create `batches/YYYY-MM-DD-NN.yaml` before runtime writes. Use the real local date and next unused two-digit sequence, cap an ordinary batch at ten sources, and freeze fanout bounds for subscription sources.
+4. Fill the processing work item's `投递关联` field with the batch and source IDs. Do not append extra sources to a full batch; create the next dated sequence.
+5. On a product defect, stop affected sources, set the batch to `blocked_bug`, create a separate dated Bug YAML, and open an independent `fix` work item with reciprocal `投递Bug` and `重投验收` fields.
+6. Preserve diagnostic metadata and an exact deletion manifest. Prefer validating a corrected lineage before pruning the bad one; when delete-first is unavoidable, require a recoverable backup and fixed Job IDs.
+7. A fix passing code gates or deployment reaches only `fixed_waiting_retry`. Create retry batches of at most ten sources after the fixed version is available; mark the Bug `verified` only after content-level acceptance passes.
 
 ## Run multiple units
 
@@ -77,7 +88,7 @@ Default security boundaries, database migrations, backup/restore, identity, cred
 
 ## Close and report
 
-1. Update unit work items and the train evidence ledger with implementation, waits, review, integration, release timing, final SHAs, CI URLs, image digests, versions, health, and external checks as applicable.
+1. Update unit work items and the train evidence ledger with implementation, waits, review, integration, release timing, final SHAs, CI URLs, image digests, versions, health, and external checks as applicable. For content delivery, also reconcile catalog state, batch status, Bug status, and reciprocal processing links.
 2. Reconcile every acceptance item. Mark conditional work as implemented or explicitly not triggered with evidence.
 3. Reclaim merged worktrees, checkpoint branches, temporary branches, test containers, and experiment resources under repo rules.
 4. Verify `git status`, worktrees, merged/unmerged task branches, origin alignment when pushed, and `.local` ignore status.
