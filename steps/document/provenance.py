@@ -50,14 +50,20 @@ def _html_support_range(
             flags=re.I | re.S,
         )
         for match in pattern.finditer(source):
-            raw = match.group("text")
-            left = len(raw) - len(raw.lstrip())
-            right = len(raw.rstrip())
-            raw = raw[left:right]
-            visible = re.sub(r"\s+", " ", html_lib.unescape(raw)).strip()
-            if raw and visible == normalized_exact:
-                start = match.start("text") + left
-                tag_candidates.append((start, start + len(raw), raw))
+            raw_tag_text = match.group("text")
+            visible = re.sub(
+                r"\s+", " ", html_lib.unescape(raw_tag_text),
+            ).strip()
+            if normalized_exact not in visible:
+                continue
+            for candidate in direct:
+                if candidate and raw_tag_text.count(candidate) == 1:
+                    relative_start = raw_tag_text.index(candidate)
+                    start = match.start("text") + relative_start
+                    tag_candidates.append(
+                        (start, start + len(candidate), candidate)
+                    )
+                    break
         if len(tag_candidates) == 1:
             return tag_candidates[0]
 

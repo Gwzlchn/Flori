@@ -305,7 +305,7 @@ def test_source_manifest_uses_dom_path_tag_to_disambiguate_repeated_html_text(
     title = "DP5142 How Inefficient is the 1/N Asset-Allocation Strategy?"
     source = (
         f'<meta name="citation_title" content="{title}" />'
-        f"<title>{title}</title>"
+        f"<title>{title} | CEPR</title>"
         f"<h1>{title}</h1>"
     )
     (job_dir / "input" / "source.html").write_text(source, encoding="utf-8")
