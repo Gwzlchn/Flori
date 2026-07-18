@@ -231,7 +231,9 @@ class DatabaseRuntime:
                     self.connection.commit()
                 return result
             except BaseException:
-                if rollback_on_error and not nested and self.connection.in_transaction:
+                # 外层 transaction owner 不能把失败写留给后续请求提交,否则该连接会
+                # 跨请求持有 WAL 写锁。嵌套调用仍由真正的外层 owner 决定回滚边界。
+                if not nested and self.connection.in_transaction:
                     self.connection.rollback()
                 raise
 

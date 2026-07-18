@@ -513,6 +513,11 @@ def _committed_wal_user_version(path: Path) -> int:
                     # 正常写事务会短暂改动 WAL；退避后仍须取得稳定副本，否则 fail-closed。
                     _time.sleep(0.01 * (attempt + 1))
                 continue
+        if isinstance(last_change, _ProbeFilesChanged):
+            try:
+                return _read_only_committed_user_version(path)
+            except (OSError, sqlite3.DatabaseError, ValueError):
+                pass
         raise UnsupportedSchemaVersionError(
             "SQLite DB/WAL 无法取得稳定副本，拒绝写性打开"
         ) from last_change
@@ -522,6 +527,21 @@ def _committed_wal_user_version(path: Path) -> int:
         raise UnsupportedSchemaVersionError(
             f"SQLite WAL 无法安全预恢复，拒绝写性打开: {exc}"
         ) from exc
+
+
+def _read_only_committed_user_version(path: Path) -> int:
+    """WAL持续变化时从SQLite只读一致视图取已提交版本,不触发迁移或写恢复。"""
+    connection = sqlite3.connect(
+        f"{path.resolve().as_uri()}?mode=ro",
+        uri=True,
+        timeout=5.0,
+    )
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA busy_timeout=5000")
+        return int(connection.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        connection.close()
 
 
 def _file_snapshot_signature(path: Path) -> tuple[int, int, int, int]:

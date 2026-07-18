@@ -2045,7 +2045,7 @@ def test_wal_probe_retries_once_after_snapshot_change(
     assert _sqlite_bundle_state(path) == before
 
 
-def test_wal_probe_fails_closed_after_three_snapshot_changes(
+def test_wal_probe_uses_read_only_view_after_three_snapshot_changes(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -2065,12 +2065,30 @@ def test_wal_probe_fails_closed_after_three_snapshot_changes(
 
     monkeypatch.setattr(db_module, "_assert_file_signatures", always_changed)
 
-    with pytest.raises(
-        UnsupportedSchemaVersionError,
-        match="无法取得稳定副本",
-    ):
-        db_module._committed_wal_user_version(path)
+    assert db_module._committed_wal_user_version(path) == SCHEMA_VERSION
     assert calls == 3
+    assert _sqlite_bundle_state(path) == before
+
+
+def test_read_only_fallback_still_rejects_future_schema_before_writable_open(
+    tmp_path: Path,
+    monkeypatch,
+):
+    path = tmp_path / "future-wal-read-only-fallback.db"
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE sentinel(value TEXT)")
+    connection.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
+    connection.commit()
+    connection.close()
+    before = _sqlite_bundle_state(path)
+
+    def always_changed(_signatures):
+        raise db_module._ProbeFilesChanged("active writer")
+
+    monkeypatch.setattr(db_module, "_assert_file_signatures", always_changed)
+
+    with pytest.raises(UnsupportedSchemaVersionError, match="高于当前程序上限"):
+        Database(path)
     assert _sqlite_bundle_state(path) == before
 
 

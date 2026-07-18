@@ -6,7 +6,10 @@ import hashlib
 import importlib
 import inspect
 import json
+import sqlite3
 from pathlib import Path
+
+import pytest
 
 import shared.db as db_module
 from shared.db import Database
@@ -70,6 +73,54 @@ def test_database_schema_foreign_keys_indexes_triggers_and_fts_are_frozen(db):
 def test_database_runtime_is_the_single_connection_and_lock_owner(db):
     assert db._conn is db._runtime.connection
     assert db._lock is db._runtime.lock
+
+
+def test_runtime_rolls_back_failed_outer_write_but_preserves_nested_owner(db):
+    db._conn.execute("CREATE TABLE runtime_rollback_probe(value TEXT NOT NULL)")
+    db._conn.commit()
+
+    def write_then_fail(_owner, connection: sqlite3.Connection, value: str):
+        connection.execute(
+            "INSERT INTO runtime_rollback_probe(value) VALUES (?)", (value,)
+        )
+        raise RuntimeError("fault after write")
+
+    with pytest.raises(RuntimeError, match="fault after write"):
+        db._runtime.run_transaction(
+            db,
+            write_then_fail,
+            ("outer",),
+            {},
+            begin_immediate=False,
+            commit_on_success=True,
+            commit_if_false=True,
+            rollback_on_error=False,
+        )
+    assert not db._conn.in_transaction
+    assert db._conn.execute(
+        "SELECT value FROM runtime_rollback_probe"
+    ).fetchall() == []
+
+    db._conn.execute("BEGIN IMMEDIATE")
+    db._conn.execute(
+        "INSERT INTO runtime_rollback_probe(value) VALUES ('owner')"
+    )
+    with pytest.raises(RuntimeError, match="fault after write"):
+        db._runtime.run_transaction(
+            db,
+            write_then_fail,
+            ("nested",),
+            {},
+            begin_immediate=False,
+            commit_on_success=True,
+            commit_if_false=True,
+            rollback_on_error=False,
+        )
+    assert db._conn.in_transaction
+    assert [row[0] for row in db._conn.execute(
+        "SELECT value FROM runtime_rollback_probe ORDER BY rowid"
+    )] == ["owner", "nested"]
+    db._conn.rollback()
 
 
 def test_jobs_repository_is_commit_free_and_facade_is_explicit():
