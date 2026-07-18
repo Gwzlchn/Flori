@@ -117,6 +117,19 @@ RUN if [ "$INSTALL_CLAUDE_CODE" = "0" ]; then echo "claude-code skipped for synt
     claude --version
 RUN --mount=type=cache,target=/root/.cache/pip pip install ".[steps,gpu,worker]" \
     && python -c "import yt_dlp_ejs"
+# Document布局模型只在02_parse懒加载;统一worker镜像让所有CPU worker具备同一能力。
+ARG DOCUMENT_LAYOUT_MODEL_URL="https://huggingface.co/wybxc/DocLayout-YOLO-DocStructBench-onnx/resolve/89c9fe92dd1384e26612846b4ab68a811dc98d61/doclayout_yolo_docstructbench_imgsz1024.onnx?download=true"
+ARG DOCUMENT_LAYOUT_MODEL_SHA256="fece9af02f618b603ff7921ccec6861d13e7e1f9830e091dfb7e8ad9311e5b21"
+RUN mkdir -p /app/models/document-layout \
+    && curl -fL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 \
+        --speed-limit 1024 --speed-time 300 --max-time 900 \
+        "$DOCUMENT_LAYOUT_MODEL_URL" -o /tmp/document-layout.onnx \
+    && echo "$DOCUMENT_LAYOUT_MODEL_SHA256  /tmp/document-layout.onnx" | sha256sum -c - \
+    && mv /tmp/document-layout.onnx /app/models/document-layout/doclayout-yolo.onnx
+ENV FLORI_DOCUMENT_LAYOUT_MODEL=/app/models/document-layout/doclayout-yolo.onnx \
+    FLORI_DOCUMENT_LAYOUT_MODEL_SHA256=${DOCUMENT_LAYOUT_MODEL_SHA256} \
+    FLORI_DOCUMENT_LAYOUT_CONFIDENCE=0.2 \
+    FLORI_DOCUMENT_LAYOUT_THREADS=4
 # net-zone CN 域名表:构建时从 GitHub 上游(felixonmars/dnsmasq-china-list)拉取,不自维护 → /app/data/cn_domains.txt
 # (运行时 shared.net_zone 只读不拉)。只用 curl、不依赖应用源码 → 放在 COPY 源码之前(改源码不重新联网拉)。
 # 国内(=1)优先 gitee(~4s),jsdelivr/ghproxy 兜底;海外(=0)走 github raw。

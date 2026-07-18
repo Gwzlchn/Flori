@@ -308,7 +308,7 @@ document:
       run: steps.document.step_02_parse
       image: flori/step-heavy
       needs: ["01_download"]
-      version: "3"
+      version: "4"
       timeout: 1800
       on_complete:
         - action: sync_metadata

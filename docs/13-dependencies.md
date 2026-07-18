@@ -42,6 +42,7 @@
 | arXiv LaTeXML HTML | Document `02_parse` | 上游内容 | 学术 HTML 直接保留 DOM、公式和引用结构，不先转换为 Markdown |
 | [PyMuPDF](https://github.com/pymupdf/PyMuPDF) | Document `02_parse` | AGPL-3.0 | 扫描 PDF 逐页渲染、OCR 坐标换算和 Figure/Table 区域提取 |
 | [RapidOCR](https://github.com/RapidAI/RapidOCR) | Document `02_parse` | Apache-2.0 | 扫描 PDF 无可靠文本层时生成带置信度的 OCR locator |
+| [DocLayout-YOLO ONNX](https://huggingface.co/wybxc/DocLayout-YOLO-DocStructBench-onnx) | Document `02_parse` | AGPL-3.0 | CPU 生成 Figure/Table 候选框；镜像固定模型提交与 SHA256，PDF 坐标和 caption 仍是语义归属依据 |
 | [marker](https://github.com/VikParuchuri/marker) | **待评估** | GPL-3.0 | PDF → Markdown，含公式/表格/图片 |
 | [MinerU](https://github.com/opendatalab/MinerU) | **待评估** | AGPL-3.0 | 上海 AI Lab，中文论文效果好 |
 | [Nougat](https://github.com/facebookresearch/nougat) | 待评估 | MIT | Meta，学术论文专用 |
@@ -98,7 +99,7 @@
 
 | License | 影响 | 涉及工具 |
 |---------|------|---------|
-| **AGPL-3.0** | 网络使用与镜像分发需关注源码提供义务 | PyMuPDF(Document PDF/OCR), MinerU(未采用), MinIO |
+| **AGPL-3.0** | 网络使用与镜像分发需关注源码提供义务 | PyMuPDF(Document PDF/OCR), DocLayout-YOLO ONNX, MinerU(未采用), MinIO |
 | **Apache-2.0** | 公网入口（替代 Cloudflare Tunnel） | Caddy |
 | **GPL-3.0** | 分发需开源 | yutto, pysrt, marker |
 | MIT/Apache/BSD | 无限制 | 其他大部分工具 |

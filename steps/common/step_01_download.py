@@ -324,12 +324,17 @@ class DownloadStep(StepBase):
         for base in (f"https://arxiv.org/html/{arxiv_id}",
                      f"https://ar5iv.labs.arxiv.org/html/{arxiv_id}"):
             html, final_url = self._fetch_html(base, timeout=60)
-            # ar5iv 对无 HTML 的论文回 200 落地页(含 ar5iv 提示语),官方 404 → None;
-            # 粗判:LaTeXML 产物必有 ltx_ 标记。
-            if html and "ltx_" in html:
+            # ar5iv 对无 HTML 的论文回 200 落地页. 官方偶尔以200提前断流,
+            # 仅有ltx_不足以证明整篇到齐,截断源必须继续回退ar5iv或PDF.
+            if html and "ltx_" in html and self._arxiv_html_is_complete(html):
                 # 图 base 用重定向后的最终 URL(官方 html/<id> 302 到 …/<id>v<N>,相对 src 相对它)。
                 self._arxiv_html_base = final_url or base
                 break
+            if html and "ltx_" in html:
+                self.log.warning(
+                    "arxiv_html_incomplete", arxiv_id=arxiv_id,
+                    base=final_url or base, bytes=len(html),
+                )
             html = None
         if not html:
             self.log.info("arxiv_html_unavailable", arxiv_id=arxiv_id)
@@ -338,6 +343,13 @@ class DownloadStep(StepBase):
         self.artifacts.write("input/source.html", html)
         self.log.info("arxiv_html_fetched", arxiv_id=arxiv_id, base=self._arxiv_html_base,
                       bytes=len(html))
+
+    @staticmethod
+    def _arxiv_html_is_complete(html: str) -> bool:
+        """arXiv/ar5iv都返回完整HTML文档;缺闭合尾标记视为200提前断流."""
+        return bool(
+            re.search(r"</body\s*>\s*</html\s*>\s*$", html, re.I)
+        )
 
     def _localize_html_images(self, html: str, base_url: str) -> str:
         """下载 HTML 内 <img src> 到 job 根 assets/,src 重写为 assets/<扁平名>。

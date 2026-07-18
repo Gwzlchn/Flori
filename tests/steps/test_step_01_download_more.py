@@ -796,7 +796,10 @@ class TestFetchArxivHtml:
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, source="arxiv", content_type="document",
                           document_kind="research_paper")
-        html = '<div class="ltx_page_main"><img src="x1v2/x1.png"></div>'
+        html = (
+            '<html><body><div class="ltx_page_main">'
+            '<img src="x1v2/x1.png"></div></body></html>'
+        )
         with patch.object(step, "_fetch_html", return_value=(html, "https://arxiv.org/html/x1")), \
                 patch.object(step.commands, "run", return_value=SimpleNamespace(stdout="")) as run:
             step._fetch_arxiv_html("1810.04805")
@@ -814,11 +817,45 @@ class TestFetchArxivHtml:
             step._fetch_arxiv_html("9901.00001")
         assert not (job_dir / "input" / "source.html").exists()
 
+    def test_incomplete_official_html_falls_back_to_complete_ar5iv(self, tmp_path):
+        job_dir = _make_job_dir(tmp_path)
+        step = _make_step(job_dir, tmp_path, source="arxiv", content_type="document",
+                          document_kind="research_paper")
+        truncated = '<html><body><div class="ltx_page_main"><math><mi>x</mi>'
+        complete = '<html><body><div class="ltx_page_main">ok</div></body></html>'
+        with patch.object(
+            step, "_fetch_html",
+            side_effect=[
+                (truncated, "https://arxiv.org/html/2205.14135v2"),
+                (complete, "https://ar5iv.labs.arxiv.org/html/2205.14135"),
+            ],
+        ):
+            step._fetch_arxiv_html("2205.14135")
+
+        assert (job_dir / "input/source.html").read_text() == complete
+        assert step._arxiv_html_base == "https://ar5iv.labs.arxiv.org/html/2205.14135"
+
+    def test_all_incomplete_arxiv_html_sources_leave_pdf_as_primary(self, tmp_path):
+        job_dir = _make_job_dir(tmp_path)
+        step = _make_step(job_dir, tmp_path, source="arxiv", content_type="document",
+                          document_kind="research_paper")
+        truncated = '<html><body><div class="ltx_page_main"><math><mi>x</mi>'
+        with patch.object(
+            step, "_fetch_html",
+            side_effect=[(truncated, "official"), (truncated, "ar5iv")],
+        ):
+            step._fetch_arxiv_html("2205.14135")
+
+        assert not (job_dir / "input/source.html").exists()
+
     def test_image_download_failure_keeps_absolute_url(self, tmp_path):
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, source="arxiv", content_type="document",
                           document_kind="research_paper")
-        html = '<div class="ltx_page_main"><img src="x1v2/x1.png"></div>'
+        html = (
+            '<html><body><div class="ltx_page_main">'
+            '<img src="x1v2/x1.png"></div></body></html>'
+        )
         with patch.object(step, "_fetch_html", return_value=(html, "https://arxiv.org/html/x1")), \
                 patch.object(step.commands, "run", side_effect=RuntimeError("curl fail")):
             step._fetch_arxiv_html("1810.04805")

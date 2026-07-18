@@ -39,6 +39,13 @@ class HtmlNode:
         def walk(node: HtmlNode) -> None:
             if node.tag in excluded:
                 return
+            if node.tag == "math":
+                alttext = node.attrs.get("alttext", "").strip()
+                if alttext:
+                    parts.append(alttext)
+                    return
+            if node.tag in {"annotation", "annotation-xml"}:
+                return
             for child in node.children:
                 if isinstance(child, str):
                     parts.append(child)

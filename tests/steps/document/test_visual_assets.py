@@ -12,6 +12,7 @@ from PIL import Image
 from shared.document_contract import DOCUMENT_SCHEMA_VERSION
 from steps.document.adapters import parse_scholarly_html
 from steps.document.visual_assets import (
+    BlankPdfRegionError,
     _download_remote_image,
     _render_region,
     _verified_image,
@@ -112,6 +113,34 @@ def test_render_failure_degrades_without_dropping_visual(tmp_path: Path, monkeyp
     assert document["tables"][0]["representations"][0]["artifact"] is None
     assert quality["metrics"]["visual_asset_failures"] == 2
     assert "pdf_visual_render_incomplete" in quality["reasons"]
+
+
+def test_source_blank_pdf_region_is_reported_as_source_fidelity_issue(
+    tmp_path: Path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "job_pdf"
+    (job_dir / "input").mkdir(parents=True)
+    (job_dir / "input/source.pdf").write_bytes(b"pdf")
+    document = _document(job_dir.name)
+    document["tables"] = []
+    monkeypatch.setattr(
+        "steps.document.visual_assets._render_region",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            BlankPdfRegionError("blank source region"),
+        ),
+    )
+
+    updated, report = materialize_pdf_visuals(
+        job_dir, document, _quality(job_dir.name),
+    )
+
+    assert updated["figures"][0]["extraction"] == {
+        "status": "degraded", "reasons": ["pdf_visual_source_blank"],
+    }
+    assert "pdf_visual_source_blank" in report["reasons"]
+    assert "pdf_visual_render_incomplete" not in report["reasons"]
+    assert report["metrics"]["visual_asset_failures"] == 1
 
 
 def test_corrupt_existing_pdf_artifact_is_rerendered(tmp_path: Path, monkeypatch):
@@ -219,6 +248,62 @@ def test_missing_or_invalid_pdf_locator_cannot_remain_complete(tmp_path: Path):
     assert report["metrics"]["visual_asset_failures"] == 1
 
 
+def test_pdf_media_locator_unions_all_bboxes_before_render(
+    tmp_path: Path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "job_pdf"
+    (job_dir / "input").mkdir(parents=True)
+    (job_dir / "input/source.pdf").write_bytes(b"pdf")
+    document = _document(job_dir.name)
+    document["tables"] = []
+    media = document["figures"][0]["media"][0]
+    media["source_locator"] = {"pdf": {
+        "source_id": "pdf", "source_fingerprint": FINGERPRINT,
+        "page": 1,
+        "bboxes": [
+            [10, 20, 110, 120], [120, 20, 220, 120],
+            [10, 130, 110, 230], [120, 130, 220, 230],
+        ],
+    }}
+    rendered_bbox = None
+
+    def render(_source, destination, **kwargs):
+        nonlocal rendered_bbox
+        rendered_bbox = kwargs["bbox"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (4, 3)).save(destination)
+
+    monkeypatch.setattr("steps.document.visual_assets._render_region", render)
+
+    updated, report = materialize_pdf_visuals(
+        job_dir, document, _quality(job_dir.name),
+    )
+
+    assert rendered_bbox == [10.0, 20.0, 220.0, 230.0]
+    assert updated["figures"][0]["media"][0]["artifact"]
+    assert report["metrics"]["visual_asset_failures"] == 0
+
+
+def test_empty_figure_media_cannot_remain_complete(tmp_path: Path):
+    job_dir = tmp_path / "job_pdf"
+    (job_dir / "input").mkdir(parents=True)
+    (job_dir / "input/source.pdf").write_bytes(b"pdf")
+    document = _document(job_dir.name)
+    document["tables"] = []
+    document["figures"][0]["media"] = []
+
+    updated, report = materialize_pdf_visuals(
+        job_dir, document, _quality(job_dir.name),
+    )
+
+    assert updated["figures"][0]["extraction"] == {
+        "status": "degraded", "reasons": ["pdf_visual_media_missing"],
+    }
+    assert report["metrics"]["visual_asset_failures"] == 1
+    assert "pdf_visual_render_incomplete" in report["reasons"]
+
+
 def test_missing_html_panel_falls_back_to_figure_pdf_locator(
     tmp_path: Path,
     monkeypatch,
@@ -272,6 +357,86 @@ def test_missing_html_panel_falls_back_to_figure_pdf_locator(
     assert report["metrics"]["visual_asset_failures"] == 0
 
 
+def test_labeled_html_panels_split_pdf_fallback_horizontally(
+    tmp_path: Path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "job_pdf"
+    (job_dir / "input").mkdir(parents=True)
+    (job_dir / "input/source.pdf").write_bytes(b"pdf")
+    document = _document(job_dir.name)
+    document["tables"] = []
+    figure = document["figures"][0]
+    figure["source_locator"] = _locator([10, 20, 210, 120])
+    figure["media"] = [
+        {
+            "media_id": "panel_a", "artifact": None, "role": "(a) ShareGPT",
+            "width": 460, "height": 346,
+            "source_locator": {"html": {"source_id": "html", "dom_path": "/a"}},
+        },
+        {
+            "media_id": "panel_b", "artifact": None, "role": "(b) Alpaca",
+            "width": 460, "height": 346,
+            "source_locator": {"html": {"source_id": "html", "dom_path": "/b"}},
+        },
+    ]
+    rendered: list[list[float]] = []
+
+    def render(_source, destination, **kwargs):
+        rendered.append(kwargs["bbox"])
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (4, 3)).save(destination)
+
+    monkeypatch.setattr("steps.document.visual_assets._render_region", render)
+
+    updated, _report = materialize_pdf_visuals(
+        job_dir, document, _quality(job_dir.name),
+    )
+
+    assert rendered == [[10.0, 20.0, 110.0, 120.0], [110.0, 20.0, 210.0, 120.0]]
+    assert all(item["artifact"] for item in updated["figures"][0]["media"])
+
+
+def test_wide_html_rows_split_pdf_fallback_vertically(
+    tmp_path: Path,
+    monkeypatch,
+):
+    job_dir = tmp_path / "job_pdf"
+    (job_dir / "input").mkdir(parents=True)
+    (job_dir / "input/source.pdf").write_bytes(b"pdf")
+    document = _document(job_dir.name)
+    document["tables"] = []
+    figure = document["figures"][0]
+    figure["source_locator"] = _locator([10, 20, 210, 120])
+    figure["media"] = [
+        {
+            "media_id": "row_a", "artifact": None, "role": "Refer to caption",
+            "width": 390, "height": 75,
+            "source_locator": {"html": {"source_id": "html", "dom_path": "/a"}},
+        },
+        {
+            "media_id": "row_b", "artifact": None, "role": "Refer to caption",
+            "width": 390, "height": 72,
+            "source_locator": {"html": {"source_id": "html", "dom_path": "/b"}},
+        },
+    ]
+    rendered: list[list[float]] = []
+
+    def render(_source, destination, **kwargs):
+        rendered.append(kwargs["bbox"])
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (4, 3)).save(destination)
+
+    monkeypatch.setattr("steps.document.visual_assets._render_region", render)
+
+    updated, _report = materialize_pdf_visuals(
+        job_dir, document, _quality(job_dir.name),
+    )
+
+    assert rendered == [[10.0, 20.0, 210.0, 70.0], [10.0, 70.0, 210.0, 120.0]]
+    assert all(item["artifact"] for item in updated["figures"][0]["media"])
+
+
 def test_semantic_table_does_not_require_pdf_crop(tmp_path: Path):
     job_dir = tmp_path / "job_pdf"
     (job_dir / "input").mkdir(parents=True)
@@ -279,15 +444,7 @@ def test_semantic_table_does_not_require_pdf_crop(tmp_path: Path):
     document = _document(job_dir.name)
     document["figures"] = []
     table = document["tables"][0]
-    table["source_locator"] = {
-        "html": {"source_id": "html", "source_fingerprint": FINGERPRINT,
-                 "dom_path": "/table", "exact": None},
-    }
-    document["sources"].append({
-        "source_id": "html", "source_profile": "scholarly_html",
-        "capabilities": [], "fingerprint": FINGERPRINT,
-        "path": "input/source.html", "mime_type": "text/html", "immutable": True,
-    })
+    table["source_locator"] = _locator([20, 130, 180, 260])
     table["representations"] = []
     table["cells"] = [{
         "cell_id": "cell_1", "block_id": "blk_t", "row": 0, "col": 0,
@@ -314,7 +471,9 @@ def test_pdftocairo_singlefile_output_keeps_temporary_suffix(tmp_path: Path, mon
 
     def fake_run(command, **_kwargs):
         output_root = Path(command[-1])
-        Image.new("RGB", (2, 2)).save(Path(f"{output_root}.png"))
+        image = Image.new("RGB", (2, 2), "white")
+        image.putpixel((0, 0), (0, 0, 0))
+        image.save(Path(f"{output_root}.png"))
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr("steps.document.visual_assets.subprocess.run", fake_run)
@@ -323,6 +482,25 @@ def test_pdftocairo_singlefile_output_keeps_temporary_suffix(tmp_path: Path, mon
 
     with Image.open(destination) as image:
         assert image.size == (2, 2)
+    assert not list(destination.parent.glob(".*.tmp*"))
+
+
+def test_pdftocairo_rejects_blank_crop(tmp_path: Path, monkeypatch):
+    source = tmp_path / "source.pdf"
+    destination = tmp_path / "assets" / "figure.png"
+    source.write_bytes(b"pdf")
+
+    def fake_run(command, **_kwargs):
+        output_root = Path(command[-1])
+        Image.new("RGB", (2, 2), "white").save(Path(f"{output_root}.png"))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr("steps.document.visual_assets.subprocess.run", fake_run)
+
+    with pytest.raises(BlankPdfRegionError, match="blank image"):
+        _render_region(source, destination, page=1, bbox=[10, 20, 110, 120])
+
+    assert not destination.exists()
     assert not list(destination.parent.glob(".*.tmp*"))
 
 
@@ -377,7 +555,7 @@ def test_real_pdftocairo_output_is_decodable(tmp_path: Path):
     source = Path("tests/fixtures/sample.pdf")
     destination = tmp_path / "sample-region.png"
 
-    _render_region(source, destination, page=1, bbox=[0, 0, 50, 50])
+    _render_region(source, destination, page=1, bbox=[50, 50, 350, 80])
 
     with Image.open(destination) as image:
         assert image.width > 0 and image.height > 0
@@ -413,6 +591,32 @@ def test_remote_html_figure_is_snapshotted_to_local_artifact(tmp_path: Path, mon
     assert report["metrics"]["html_visual_assets_localized"] == 1
     assert report["status"] == "complete"
     assert "html_asset_remote" not in report["reasons"]
+
+
+def test_missing_html_asset_reuses_matching_extracted_pdf_raster(tmp_path: Path):
+    job_dir = tmp_path / "job_html_pdf_raster"
+    (job_dir / "input").mkdir(parents=True)
+    raw = b"""<html><body><article><h1>Paper</h1><p>Body.</p>
+      <figure><img src="assets/missing.png" width="100" height="50" alt="panel">
+      <figcaption>Figure 1: Extracted panel.</figcaption></figure>
+      </article></body></html>"""
+    (job_dir / "input/source.html").write_bytes(raw)
+    Image.new("RGB", (400, 200), "blue").save(job_dir / "input/source-3_1.png")
+    document, quality = parse_scholarly_html(job_dir, {
+        "job_id": job_dir.name, "document_kind": "research_paper",
+        "source_fingerprint": "sha256:" + hashlib.sha256(raw).hexdigest(),
+    })
+
+    updated, report = materialize_html_visuals(job_dir, document, quality)
+
+    media = updated["figures"][0]["media"][0]
+    assert media["artifact"] == "input/source-3_1.png"
+    assert (media["width"], media["height"]) == (400, 200)
+    assert updated["figures"][0]["extraction"] == {
+        "status": "complete", "reasons": [],
+    }
+    assert report["metrics"]["html_visual_assets_localized"] == 1
+    assert "html_visual_asset_incomplete" not in report["reasons"]
 
 
 def test_corrupt_local_html_figure_degrades_instead_of_claiming_complete(tmp_path: Path):

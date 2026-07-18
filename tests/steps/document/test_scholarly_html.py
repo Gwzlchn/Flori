@@ -11,10 +11,23 @@ from PIL import Image
 
 from shared.document_contract import validate_document, validate_quality
 from steps.document.adapters import parse_scholarly_html
+from steps.document.adapters._html_tree import parse_html_tree
 
 
 def _fingerprint(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def test_html_text_uses_math_alttext_once_and_ignores_annotations() -> None:
+    root = parse_html_tree("""
+    <p>At <math alttext="t+1"><semantics><mrow><mi>t</mi><mo>+</mo><mn>1</mn></mrow>
+      <annotation-xml><apply><ci>t</ci><cn>1</cn></apply></annotation-xml>
+      <annotation>t+1</annotation></semantics></math> now.</p>
+    <p>Fallback <math><semantics><mi>x</mi><annotation>x</annotation></semantics></math>.</p>
+    """)
+    paragraphs = list(root.descendants(lambda node: node.tag == "p"))
+
+    assert [node.text() for node in paragraphs] == ["At t+1 now.", "Fallback x."]
 
 
 @pytest.fixture
@@ -376,3 +389,131 @@ def test_scholarly_html_rejects_source_fingerprint_mismatch(tmp_path: Path) -> N
             "job_id": job_dir.name,
             "source_fingerprint": "sha256:" + "0" * 64,
         })
+
+
+def test_listing_float_is_code_and_never_consumes_figure_number(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job_listing"
+    (job_dir / "input").mkdir(parents=True)
+    raw = b"""<html><body><article><h1>Paper</h1>
+      <figure class="ltx_float ltx_lstlisting"><pre>return x</pre>
+        <figcaption>Code 1: Identity implementation.</figcaption></figure>
+      <figure class="ltx_figure"><figcaption>Figure 1: Real model.</figcaption>
+        <img src="assets/model.png" alt="model"></figure>
+    </article></body></html>"""
+    (job_dir / "input" / "source.html").write_bytes(raw)
+    (job_dir / "assets").mkdir()
+    Image.new("RGB", (5, 4)).save(job_dir / "assets" / "model.png")
+
+    document, _quality = parse_scholarly_html(job_dir, {
+        "job_id": job_dir.name,
+        "document_kind": "research_paper",
+        "source_fingerprint": _fingerprint(raw),
+    })
+
+    assert [item["label"] for item in document["figures"]] == ["Figure 1"]
+    assert any(
+        block["kind"] == "code" and "Identity" in block["text"]
+        for block in document["blocks"]
+    )
+
+
+def test_empty_figure_wrapper_preserves_nested_appendix_without_fake_visual(
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "job_empty_wrapper"
+    (job_dir / "input").mkdir(parents=True)
+    raw = b"""<html><body><article><h1>Paper</h1>
+      <figure class="ltx_figure"><section class="ltx_appendix">
+        <h2>Appendix B Results</h2><p>Nested appendix body.</p>
+      </section></figure>
+    </article></body></html>"""
+    (job_dir / "input" / "source.html").write_bytes(raw)
+
+    document, _quality = parse_scholarly_html(job_dir, {
+        "job_id": job_dir.name,
+        "document_kind": "research_paper",
+        "source_fingerprint": _fingerprint(raw),
+    })
+
+    assert document["figures"] == []
+    assert any(block["text"] == "Appendix B Results" for block in document["blocks"])
+    assert any(block["text"] == "Nested appendix body." for block in document["blocks"])
+
+
+def test_uncaptioned_media_uses_image_label_without_colliding_with_figure(
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "job_unlabeled_media"
+    (job_dir / "input").mkdir(parents=True)
+    (job_dir / "assets").mkdir()
+    Image.new("RGB", (5, 4)).save(job_dir / "assets" / "overview.png")
+    Image.new("RGB", (5, 4)).save(job_dir / "assets" / "result.png")
+    raw = b"""<html><body><article><h1>Paper</h1>
+      <figure class="ltx_figure"><img src="assets/overview.png" alt="Overview"></figure>
+      <figure class="ltx_figure"><img src="assets/result.png" alt="Result">
+        <figcaption>Figure 1: Numbered result.</figcaption></figure>
+    </article></body></html>"""
+    (job_dir / "input" / "source.html").write_bytes(raw)
+
+    document, _quality = parse_scholarly_html(job_dir, {
+        "job_id": job_dir.name,
+        "document_kind": "research_paper",
+        "source_fingerprint": _fingerprint(raw),
+    })
+
+    assert [item["label"] for item in document["figures"]] == [
+        "Image 1", "Figure 1",
+    ]
+
+
+def test_uncaptioned_outer_wrapper_preserves_captioned_panel_figures(
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "job_panel_wrapper"
+    (job_dir / "input").mkdir(parents=True)
+    (job_dir / "assets").mkdir()
+    Image.new("RGB", (8, 5)).save(job_dir / "assets" / "left.png")
+    Image.new("RGB", (6, 5)).save(job_dir / "assets" / "right.png")
+    raw = b"""<html><body><article><h1>Paper</h1>
+      <figure class="ltx_figure"><div>
+        <figure class="ltx_figure_panel"><img src="assets/left.png">
+          <figcaption>Figure 4: Throughput.</figcaption></figure>
+        <figure class="ltx_figure_panel"><img src="assets/right.png">
+          <figcaption>Figure 5: Model scale.</figcaption></figure>
+      </div></figure>
+    </article></body></html>"""
+    (job_dir / "input" / "source.html").write_bytes(raw)
+
+    document, _quality = parse_scholarly_html(job_dir, {
+        "job_id": job_dir.name,
+        "document_kind": "research_paper",
+        "source_fingerprint": _fingerprint(raw),
+    })
+
+    assert [(item["label"], item["caption"]) for item in document["figures"]] == [
+        ("Figure 4", "Figure 4: Throughput."),
+        ("Figure 5", "Figure 5: Model scale."),
+    ]
+
+
+def test_list_preserves_top_level_uncaptioned_figure_children(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job_list_figures"
+    (job_dir / "input").mkdir(parents=True)
+    (job_dir / "assets").mkdir()
+    Image.new("RGB", (10, 4)).save(job_dir / "assets" / "first.png")
+    Image.new("RGB", (10, 4)).save(job_dir / "assets" / "second.png")
+    raw = b"""<html><body><article><h1>Paper</h1><ul>
+      <li>First case<figure><img src="assets/first.png" width="100" height="40"></figure></li>
+      <li>Second case<figure><img src="assets/second.png" width="100" height="40"></figure></li>
+    </ul></article></body></html>"""
+    (job_dir / "input" / "source.html").write_bytes(raw)
+
+    document, _quality = parse_scholarly_html(job_dir, {
+        "job_id": job_dir.name,
+        "document_kind": "research_paper",
+        "source_fingerprint": _fingerprint(raw),
+    })
+
+    assert [item["label"] for item in document["figures"]] == ["Image 1", "Image 2"]
+    assert [(item["media"][0]["width"], item["media"][0]["height"])
+            for item in document["figures"]] == [(100, 40), (100, 40)]

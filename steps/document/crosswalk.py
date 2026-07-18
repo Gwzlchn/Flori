@@ -69,8 +69,59 @@ def _merge_pdf_locator(
     return True
 
 
-def _visual_key(item: Mapping[str, Any]) -> str:
-    return _normalized(item.get("label") or item.get("caption"))
+def _explicit_visual_label(item: Mapping[str, Any]) -> str:
+    label = _normalized(item.get("label"))
+    caption = _normalized(item.get("caption"))
+    return label if label and label in caption else ""
+
+
+def _visual_match(
+    visual: Mapping[str, Any],
+    html_visuals: list[Mapping[str, Any]],
+    pdf_visuals: list[Mapping[str, Any]],
+    claimed: set[int],
+) -> tuple[Mapping[str, Any] | None, float, str, str]:
+    """按 caption 优先且全局唯一匹配 visual;同一 PDF visual 只能消费一次."""
+    caption = _normalized(visual.get("caption"))
+    if len(caption) >= 8:
+        exact = [
+            (index, item) for index, item in enumerate(pdf_visuals)
+            if _normalized(item.get("caption")) == caption
+        ]
+        if len(exact) == 1:
+            index, candidate = exact[0]
+            if index not in claimed:
+                return candidate, 1.0, "matched", "visual_caption_exact_unique"
+            return None, 0.0, "ambiguous", "visual_caption_exact_unique"
+        if len(exact) > 1:
+            return None, 0.0, "ambiguous", "visual_caption_exact_unique"
+
+    label = _explicit_visual_label(visual)
+    if label:
+        html_label_count = sum(_explicit_visual_label(item) == label for item in html_visuals)
+        pdf_label_matches = [
+            (index, item) for index, item in enumerate(pdf_visuals)
+            if _explicit_visual_label(item) == label
+        ]
+        if html_label_count == 1 and len(pdf_label_matches) == 1:
+            index, candidate = pdf_label_matches[0]
+            if index not in claimed:
+                return candidate, 1.0, "matched", "visual_label_exact_unique"
+            return None, 0.0, "ambiguous", "visual_label_exact_unique"
+        if pdf_label_matches:
+            return None, 0.0, "ambiguous", "visual_label_exact_unique"
+
+    augmented = [
+        {**item, "text": item.get("caption"), "_crosswalk_index": index}
+        for index, item in enumerate(pdf_visuals)
+    ]
+    candidate, confidence, status = _match(visual.get("caption"), augmented)
+    if status != "matched" or candidate is None:
+        return None, confidence, status, "visual_caption_contained_unique"
+    index = int(candidate["_crosswalk_index"])
+    if index in claimed:
+        return None, 0.0, "ambiguous", "visual_caption_contained_unique"
+    return pdf_visuals[index], confidence, status, "visual_caption_contained_unique"
 
 
 def attach_pdf_crosswalk(
@@ -111,24 +162,18 @@ def attach_pdf_crosswalk(
             ambiguous += 1
 
     for field in ("figures", "tables"):
-        pdf_visuals = [item for item in pdf_document[field] if _visual_key(item)]
+        html_visuals = list(updated[field])
+        pdf_visuals = list(pdf_document[field])
+        claimed: set[int] = set()
         for visual in updated[field]:
-            key = _visual_key(visual)
-            label_matches = [item for item in pdf_visuals if _visual_key(item) == key]
-            if len(label_matches) == 1:
-                candidate = label_matches[0]
-                confidence, status = 1.0, "matched"
-            elif len(label_matches) > 1:
-                candidate = None
-                confidence, status = 0.0, "ambiguous"
-            else:
-                caption_match, confidence, status = _match(
-                    visual.get("caption"),
-                    [{**item, "text": item.get("caption")} for item in pdf_document[field]],
-                )
-                candidate = caption_match
+            candidate, confidence, status, method = _visual_match(
+                visual, html_visuals, pdf_visuals, claimed,
+            )
             if status == "matched":
                 visual_matched += 1
+                claimed.add(next(
+                    index for index, item in enumerate(pdf_visuals) if item is candidate
+                ))
             elif status == "ambiguous":
                 visual_ambiguous += 1
             locator = visual.get("source_locator")
@@ -136,11 +181,25 @@ def attach_pdf_crosswalk(
                 locator["crosswalk"] = {
                     "status": status,
                     "confidence": confidence,
-                    "method": "visual_label_or_caption_unique",
+                    "method": method,
                 }
                 pdf_locator = candidate.get("source_locator", {}).get("pdf") if candidate else None
                 if status == "matched" and isinstance(pdf_locator, Mapping):
                     locator["pdf"] = deepcopy(dict(pdf_locator))
+                    if field == "figures" and not visual.get("media"):
+                        visual["media"] = deepcopy(candidate.get("media") or [])
+                        referenced = {
+                            str(media.get("asset_id"))
+                            for media in visual["media"] if media.get("asset_id")
+                        }
+                        existing_assets = {
+                            str(asset.get("asset_id")) for asset in updated.get("assets", [])
+                        }
+                        updated.setdefault("assets", []).extend(
+                            deepcopy(asset) for asset in pdf_document.get("assets", [])
+                            if str(asset.get("asset_id")) in referenced
+                            and str(asset.get("asset_id")) not in existing_assets
+                        )
                     block = next(
                         (item for item in updated["blocks"] if item["block_id"] == visual["block_id"]),
                         None,
@@ -155,6 +214,11 @@ def attach_pdf_crosswalk(
         "pdf_crosswalk_visuals": visual_matched,
         "pdf_crosswalk_visual_ambiguous": visual_ambiguous,
         "pdf_source_quality": pdf_quality["status"],
+    })
+    metrics.update({
+        f"pdf_{key}": value
+        for key, value in pdf_quality.get("metrics", {}).items()
+        if str(key).startswith("layout_detector_")
     })
     if pdf_quality["status"] == "rejected":
         report.setdefault("reasons", []).append("pdf_crosswalk_source_rejected")

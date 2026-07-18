@@ -31,6 +31,7 @@ _NOISE_CLASSES = frozenset({
 })
 _FIGURE_LABEL = re.compile(r"(?:Figure|Fig\.?|图)\s*([A-Za-z]?\d+(?:[.:-]\d+)*)", re.I)
 _TABLE_LABEL = re.compile(r"(?:Table|表)\s*([A-Za-z]?\d+(?:[.:-]\d+)*)", re.I)
+_CODE_LABEL = re.compile(r"^(?:Code|Listing)\s*\d+\b", re.I)
 _EMAIL = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 _ARXIV_PATH = re.compile(r"/(?:abs|html|pdf)/([0-9]{4}\.[0-9]{4,5})(v\d+)?(?:\.pdf)?(?:$|[/?#])", re.I)
 
@@ -426,9 +427,9 @@ class ScholarlyHtmlAdapter:
                 if isinstance(child, HtmlNode):
                     self._visit(child)
             return
-        if semantic_kind == "algorithm":
+        if semantic_kind in {"algorithm", "code"}:
             # ar5iv 用 <figure> 承载算法，但算法不能占用 Figure 编号或图表目录。
-            self._add_block("algorithm", node.text(exclude=_NOISE_TAGS), node)
+            self._add_block(semantic_kind, node.text(exclude=_NOISE_TAGS), node)
             return
         if node.tag == "figure":
             if _class_contains(node, "table"):
@@ -450,6 +451,32 @@ class ScholarlyHtmlAdapter:
                     if table is not None:
                         self._add_table(table, wrapper=node)
             else:
+                caption_node = self._caption_node(node)
+                caption = caption_node.text() if caption_node else ""
+                if _CODE_LABEL.match(caption) or _class_contains(node, "listing", "lstlisting"):
+                    self._add_block("code", node.text(exclude=_NOISE_TAGS), node)
+                    return
+                nested_captioned = [
+                    child for child in node.descendants(
+                        lambda item: item.tag == "figure",
+                    )
+                    if self._nearest_figure(child) is node
+                    and (child_caption := self._caption_node(child)) is not None
+                    and _FIGURE_LABEL.search(child_caption.text())
+                ]
+                if not caption and nested_captioned:
+                    for child in node.children:
+                        if isinstance(child, HtmlNode):
+                            self._visit(child)
+                    return
+                media = list(node.descendants(
+                    lambda child: child.tag in {"img", "svg", "object", "embed"},
+                ))
+                if not caption and not media:
+                    for child in node.children:
+                        if isinstance(child, HtmlNode):
+                            self._visit(child)
+                    return
                 self._add_figure(node)
             return
         if node.tag == "table":
@@ -485,6 +512,18 @@ class ScholarlyHtmlAdapter:
             for child in node.children:
                 if isinstance(child, HtmlNode) and child.tag == "li":
                     self._add_block("list_item", child.text(), child, parent_id=list_id)
+            for visual in node.descendants(
+                lambda child: child.tag in {"figure", "table"},
+            ):
+                parent = visual.parent
+                nested = False
+                while parent is not None and parent is not node:
+                    if parent.tag in {"figure", "table"}:
+                        nested = True
+                        break
+                    parent = parent.parent
+                if not nested:
+                    self._visit(visual)
             return
         if node.tag in {"p", "blockquote", "pre"}:
             kind = {"p": "paragraph", "blockquote": "quote", "pre": "code"}[node.tag]
@@ -506,6 +545,7 @@ class ScholarlyHtmlAdapter:
         classes = " ".join(node.classes).lower()
         for needle, kind in (
             ("theorem", "theorem"), ("proof", "proof"), ("algorithm", "algorithm"),
+            ("listing", "code"), ("lstlisting", "code"),
             ("appendix", "appendix"), ("footnote", "footnote"),
         ):
             if needle in classes:
@@ -576,7 +616,8 @@ class ScholarlyHtmlAdapter:
         caption_node = self._caption_node(node)
         caption = caption_node.text() if caption_node else ""
         match = _FIGURE_LABEL.search(caption)
-        label = f"Figure {match.group(1)}" if match else f"Figure {len(self.figures) + 1}"
+        unlabeled = sum(item["label"].startswith("Image ") for item in self.figures) + 1
+        label = f"Figure {match.group(1)}" if match else f"Image {unlabeled}"
         figure_id = make_id("fig", self.fingerprint, dom_path(node), label)
         block_id = self._add_block("figure", caption, node, figure_id=figure_id)
         if caption_node and caption:
@@ -749,11 +790,21 @@ class ScholarlyHtmlAdapter:
             "size_bytes": size_bytes,
             "state": state,
             "alt": node.attrs.get("alt", ""),
+            "width": self._image_dimension(node.attrs.get("width")),
+            "height": self._image_dimension(node.attrs.get("height")),
             "figure_id": figure_id,
             "source_locator": html_locator(self.fingerprint, dom_path(node)),
         })
         self._asset_by_node[id(node)] = asset_id
         return asset_id
+
+    @staticmethod
+    def _image_dimension(value: str | None) -> int | None:
+        match = re.match(r"\s*(\d+(?:\.\d+)?)", str(value or ""))
+        if match is None:
+            return None
+        parsed = round(float(match.group(1)))
+        return parsed if parsed > 0 else None
 
     def _collect_references(self) -> None:
         unsafe_found = False
