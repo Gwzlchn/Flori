@@ -29,6 +29,7 @@ from shared.errors import (
 )
 from shared.models import AIUsage, Worker as WorkerModel
 from shared.redis_client import RedisClient
+from shared.step_output_commit import StaleCommitError
 
 
 class WorkerTransport(Protocol):
@@ -64,7 +65,12 @@ class WorkerTransport(Protocol):
         tags: set[str], reject_tags: set[str],
     ) -> dict | None: ...
 
-    async def report_done(self, claim: dict, duration: float, started_at: float) -> None: ...
+    # commit_token:成功路径 manifest 提交协议的一次性凭据(§2.6-8,done 与 token 同源);
+    # None = 本步未发布 manifest(dual 阶段无 outputs 声明等保守跳过),走既有语义。
+    async def report_done(
+        self, claim: dict, duration: float, started_at: float,
+        commit_token: dict | None = None,
+    ) -> None: ...
 
     async def report_failed(
         self, claim: dict, error: str, error_type: str,
@@ -72,6 +78,16 @@ class WorkerTransport(Protocol):
     ) -> None: ...
 
     async def release(self, claim: dict) -> None: ...
+
+    # 步骤产物 commit fence(§2.6-3/4):begin 签发一次性 token(None=围栏拒绝,陈旧执行);
+    # confirm 校验 token(phase 非空时原子推进阶段),promote 前后与 manifest 发布前逐次调用。
+    async def begin_step_commit(
+        self, claim: dict, candidate_digest: str,
+    ) -> dict | None: ...
+
+    async def confirm_step_commit(
+        self, claim: dict, token: dict, phase: str = "",
+    ) -> bool: ...
 
     # 资源池 / 队列认领 + 步骤状态机(细粒度)
     # worker.execute 只用上面的粗粒度方法(request_step/report_*/release 等)。下面这些细粒度
@@ -213,10 +229,49 @@ class RedisTransport:
             self._redis, self._db, worker_id, pools, pool_limits, tags, reject_tags,
         )
 
-    async def report_done(self, claim, duration, started_at):
+    async def report_done(self, claim, duration, started_at, commit_token=None):
+        if commit_token is not None:
+            # done 与 manifest 同 token(§2.6-8):token 已失效说明执行被换代,不得上报。
+            if not await self._redis.validate_step_commit(
+                claim["job_id"], claim["step"], commit_token,
+            ):
+                return
         await runner_ops.report_step_done(
             self._redis, self._db, self._worker_id, claim, duration, started_at,
         )
+        if commit_token is not None:
+            await self._redis.finish_step_commit(
+                claim["job_id"], claim["step"], commit_token,
+            )
+
+    async def begin_step_commit(self, claim, candidate_digest):
+        token, reason = await self._redis.begin_step_commit(
+            job_id=claim["job_id"], step=claim["step"], exec_id=claim["exec_id"],
+            generation=int(claim["generation"]), candidate_digest=candidate_digest,
+            worker_id=self._worker_id,
+        )
+        if token is None:
+            # 围栏拒绝=执行已换代,抛错跳过 done;返回 None 语义保留给
+            # "中心不支持提交协议"(gateway 混跑窗口),两类日志事件名分开。
+            structlog.get_logger(component="worker_transport").warning(
+                "step_commit_fence_rejected", job_id=claim["job_id"],
+                step=claim["step"], exec_id=claim["exec_id"], reason=reason,
+            )
+            raise StaleCommitError(f"commit fence rejected: {reason}")
+        return token
+
+    async def confirm_step_commit(self, claim, token, phase=""):
+        ok = await self._redis.validate_step_commit(
+            claim["job_id"], claim["step"], token, phase=phase,
+        )
+        if not ok:
+            # 诊断分流(审查 P2-4):key 消失=TTL 过期/已消费;仍在但校验失败=执行已换代。
+            state = await self._redis.get_step_commit(claim["job_id"], claim["step"])
+            structlog.get_logger(component="worker_transport").warning(
+                "step_commit_token_expired" if state is None else "step_commit_superseded",
+                job_id=claim["job_id"], step=claim["step"], exec_id=claim["exec_id"],
+            )
+        return ok
 
     async def report_failed(self, claim, error, error_type, duration,
                             started_at, count_stats):

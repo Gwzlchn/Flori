@@ -33,8 +33,22 @@ from shared.source_library import (
     parse_source_ref,
     source_root_tag,
 )
+from shared.step_manifest import ManifestError, manifest_relative_path
+from shared.step_output_commit import (
+    StaleCommitError,
+    StepOutputError,
+    build_commit_record,
+    build_step_manifest,
+    collect_step_outputs,
+    diagnostics_globs,
+    load_candidate_record,
+    read_previous_manifest,
+    stale_output_paths,
+)
+from shared.step_completion import step_definition_digest_for
 from shared.step_scope import parse_execution_step, part_id_from_scope
-from shared.storage import StorageBackend
+from shared.step_semantic_definition import SemanticDefinitionError
+from shared.storage import StepCommitFenceRejected, StorageBackend
 from shared.sysload import collect_node_load
 from shared.version import FLORI_VERSION
 from worker.step_runner import StepContext, create_step_runner
@@ -555,6 +569,7 @@ class Worker:
         start = time.time()
         storage_dir = None
         work_dir = None
+        audit_globs: list[str] = []
         source_link: Path | None = None
         source_root_id: str | None = None
         source_exclude_paths: set[str] = set()
@@ -607,6 +622,31 @@ class Worker:
             raw = next((s for s in raw_steps if s["name"] == step), None)
             if raw is None:
                 raise ValueError(f"step '{step}' not found in pipeline '{pipeline}'")
+            audit_globs = [
+                pattern
+                for pattern in (raw.get("output_policy") or {}).get("audit_globs") or []
+                if isinstance(pattern, str) and pattern
+            ]
+            # 有 outputs 声明的步派发前算好语义定义摘要并注入子进程 config:
+            # should_run 据此对 manifest 做 manifest 优先判定(dual,§2.11),失败即步失败(fail-closed)。
+            definition_digest: str | None = None
+            if raw.get("outputs"):
+                definition_digest = self._step_definition_digest(
+                    pipeline, raw, domain,
+                    style_tags if isinstance(style_tags, list) else [],
+                )
+                step_cfg["step"]["definition_digest"] = definition_digest
+            # NAS 源身份注入(读写对称):should_run 侧并入同样的 source_* 键后
+            # 计算 current_input,与 manifest 的 input_fingerprints 同一 current。
+            if claim.get("source_ref"):
+                source_fingerprints = {"source_ref": str(claim["source_ref"])}
+                if claim.get("source_digest"):
+                    source_fingerprints["source_digest"] = str(claim["source_digest"])
+                if claim.get("source_size_bytes") is not None:
+                    source_fingerprints["source_size_bytes"] = str(
+                        claim["source_size_bytes"],
+                    )
+                step_cfg["step"]["source_fingerprints"] = source_fingerprints
             module = raw["module"]
             image = raw.get("image", "flori/step-base")
             use_gpu = ("gpu" in self.tags) and (
@@ -698,11 +738,51 @@ class Worker:
                         job_id=job_id, step=step, error=str(push_err)[:200],
                     )
                 else:
-                    await self.transport.report_done(claim, duration, start)
-                    logger.info(
-                        "step_done", worker_id=self.worker_id,
-                        job_id=job_id, step=step, duration=round(duration, 1),
-                    )
+                    # manifest 提交协议(§2.6):push 之后、done 之前发布 final manifest。
+                    # 双写保守序:.done 与 push 行为不变,manifest 是额外产物;
+                    # 无 outputs 声明/candidate 缺失时保守跳过(token=None,走既有 done 语义)。
+                    stale_commit = False
+                    commit_token: dict | None = None
+                    try:
+                        commit_token = await self._publish_step_manifest(
+                            claim, execution_step, scope_key, step, part_id,
+                            work_dir, pipeline, raw, definition_digest,
+                            start, duration, source_exclude_paths,
+                        )
+                    except WorkerAuthRejected:
+                        raise
+                    except (StaleCommitError, StepCommitFenceRejected) as fence_err:
+                        # 执行已被换代:done/failed 都不上报(中心会拒绝),只释放。
+                        stale_commit = True
+                        logger.warning(
+                            "step_commit_stale", worker_id=self.worker_id,
+                            job_id=job_id, step=step, exec_id=exec_id,
+                            error=str(fence_err)[:200],
+                        )
+                        await self._cleanup_staging_safe(job_id, exec_id, step)
+                    except Exception as commit_err:
+                        stale_commit = True  # 不上报 done;按失败收口
+                        await self.transport.report_failed(
+                            claim,
+                            f"manifest commit failed: {type(commit_err).__name__}: {commit_err}"[:500],
+                            "storage", duration, start, count_stats=False,
+                        )
+                        logger.warning(
+                            "step_manifest_commit_failed", worker_id=self.worker_id,
+                            job_id=job_id, step=step, error=str(commit_err)[:200],
+                        )
+                        await self._cleanup_staging_safe(job_id, exec_id, step)
+                    if not stale_commit:
+                        await self.transport.report_done(
+                            claim, duration, start, commit_token=commit_token,
+                        )
+                        logger.info(
+                            "step_done", worker_id=self.worker_id,
+                            job_id=job_id, step=step, duration=round(duration, 1),
+                        )
+                        if commit_token is not None:
+                            # §2.6-9:staging 最后清理;失败仅告警,孤儿由 TTL 清理兜底。
+                            await self._cleanup_staging_safe(job_id, exec_id, step)
             else:
                 # 步本身失败:失败也记用量(失败前已完成的 LLM 调用是真实开销,审计/计费不能缺账;
                 # exec_id UNIQUE 幂等,重试不重复计),再 best-effort 推产物(含日志)便于前端排错,报 failed。
@@ -710,6 +790,7 @@ class Worker:
                 await self._push_safe(
                     job_id, execution_step, storage_dir,
                     exclude_paths=source_exclude_paths,
+                    audit_globs=audit_globs,
                 )
                 error_type, error_json_msg = self._parse_error(work_dir, step)
                 # 兜底:子进程 stderr 为空时,用 .{step}.error.json 的 message(真实异常文本),
@@ -736,6 +817,7 @@ class Worker:
                 await self._push_safe(
                     job_id, execution_step, storage_dir,
                     exclude_paths=source_exclude_paths,
+                    audit_globs=audit_globs,
                 )  # best-effort 推日志便于排错
             await self.transport.report_failed(
                 claim, "timeout", "timeout", duration, start, count_stats=False,
@@ -752,6 +834,7 @@ class Worker:
                 await self._push_safe(
                     job_id, execution_step, storage_dir,
                     exclude_paths=source_exclude_paths,
+                    audit_globs=audit_globs,
                 )  # best-effort 推日志便于排错
             error_msg = str(e)[:500]
             await self.transport.report_failed(
@@ -768,6 +851,215 @@ class Worker:
                 await self.storage.cleanup(job_id, execution_step, storage_dir)
             if not auth_failed:
                 await self.transport.release(claim)
+
+    # manifest 提交协议(设计稿 §2.6 九步:begin_commit→staging→promote→read-back→
+    # manifest-last→同 token done→staging 清理;§2.5 输出所有权与成功校验)
+
+    async def _cleanup_staging_safe(
+        self, job_id: str, exec_id: str, step: str,
+    ) -> None:
+        """执行 staging best-effort 清理(成功与失败分支共用);孤儿由 TTL 清理兜底。"""
+        try:
+            await self.storage.cleanup_execution_staging(job_id, exec_id)
+        except WorkerAuthRejected:
+            raise
+        except Exception:
+            logger.warning(
+                "staging_cleanup_failed", worker_id=self.worker_id,
+                job_id=job_id, step=step,
+            )
+
+    def _step_definition_digest(
+        self, pipeline: str, raw_step: dict, domain: str, style_tags: list,
+    ) -> str:
+        """统一语义定义摘要(AI/CPU 同规则);单一算式在 shared.step_completion,
+        与 api 过期判定/scheduler 对账/backfill 共用,防读写两端漂移。"""
+        try:
+            return step_definition_digest_for(
+                pipeline, raw_step, config=self.config,
+                domain=domain, style_tags=style_tags,
+            )
+        except (SemanticDefinitionError, ManifestError) as exc:
+            raise StepOutputError(f"semantic definition digest failed: {exc}") from exc
+
+    @staticmethod
+    def _check_output_policy(raw_step: dict, output_paths: list[str]) -> None:
+        """output_policy 只在显式声明时执行(dual 保守序:未声明的步骤行为不变)。"""
+        import fnmatch as _fnmatch
+
+        policy = raw_step.get("output_policy") or {}
+        if policy.get("allow_empty") is False and not output_paths:
+            raise StepOutputError("outputs are empty but allow_empty is false")
+        for group in policy.get("required_any") or []:
+            if not any(
+                _fnmatch.fnmatch(path, member)
+                for path in output_paths for member in group
+            ):
+                raise StepOutputError(f"required_any group unsatisfied: {group}")
+
+    async def _publish_step_manifest(
+        self,
+        claim: dict,
+        execution_step: str,
+        scope_key: str,
+        step: str,
+        part_id: str | None,
+        work_dir: Path,
+        pipeline: str,
+        raw_step: dict,
+        definition_digest: str | None,
+        start: float,
+        duration: float,
+        source_exclude_paths: set[str],
+    ) -> dict | None:
+        """构造并按 commit fence 协议发布 final manifest;返回 commit token。
+
+        返回 None = 本步不发布 manifest(无 outputs 声明/candidate 缺失/claim 缺
+        generation 或 part_index),保持既有 done 语义(阶段 A 双写保守跳过)。
+        抛 StaleCommitError/StepCommitFenceRejected = 执行已换代;其余异常 = 提交失败。
+        """
+        job_id = claim["job_id"]
+        exec_id = claim["exec_id"]
+        outputs_globs = raw_step.get("outputs")
+        if not outputs_globs:
+            return None
+        generation = claim.get("generation")
+        if type(generation) is not int:
+            logger.warning(
+                "manifest_skipped_no_generation", job_id=job_id, step=step,
+            )
+            return None
+        part_index = claim.get("part_index")
+        if part_id is not None and type(part_index) is not int:
+            logger.warning(
+                "manifest_skipped_no_part_index", job_id=job_id, step=step,
+            )
+            return None
+        candidate = load_candidate_record(work_dir, step)
+        if candidate is None:
+            # 步骤镜像旧于 worker(未写 candidate)等:保守跳过,不阻断既有交付。
+            logger.warning(
+                "manifest_skipped_no_candidate", job_id=job_id, step=step,
+            )
+            return None
+        fingerprints = dict(candidate["input_fingerprints"])
+        source_ref = claim.get("source_ref")
+        if source_ref:
+            # NAS 源不是 output(integrator 决策 2):源身份并入 input fingerprints,
+            # 校验器绝不从中心存储拉源对象。
+            fingerprints.setdefault("source_ref", str(source_ref))
+            if claim.get("source_digest"):
+                fingerprints.setdefault("source_digest", str(claim["source_digest"]))
+            if claim.get("source_size_bytes") is not None:
+                fingerprints.setdefault(
+                    "source_size_bytes", str(claim["source_size_bytes"]),
+                )
+        if definition_digest is None:
+            return None
+        previous = await read_previous_manifest(self.storage, job_id, scope_key, step)
+        # 幂等跳过 + 中心 manifest 与当前 input/definition digest 一致 → 省去整套重发 IO
+        # (含流式哈希;审查 P3-7);仅缺失/不一致时自愈重发。
+        if candidate.get("reused") and previous is not None:
+            from shared.step_manifest import compute_input_digest
+
+            if (
+                previous["compatibility"]["input_digest"]
+                == compute_input_digest(dict(fingerprints))
+                and previous["compatibility"]["definition_digest"] == definition_digest
+            ):
+                logger.info(
+                    "manifest_reuse_skip_republish", job_id=job_id, step=step,
+                )
+                return None
+        prefix = f"parts/{part_id}/" if part_id else ""
+        scope_excludes = {
+            path[len(prefix):] if prefix and path.startswith(prefix) else path
+            for path in source_exclude_paths
+        }
+        # gateway NO_PUSH 的大源文件中心无副本,manifest 不得声明(否则 read-back 必挂
+        # 或被迫二次过慢链路);豁免路径留本机,契约收敛在 Unit C。
+        no_push = getattr(self.storage, "_is_no_push", None)
+        path_filter = (
+            (lambda job_rel: not no_push(execution_step, job_rel))
+            if callable(no_push) else None
+        )
+        outputs = await asyncio.to_thread(
+            lambda: collect_step_outputs(
+                work_dir, outputs_globs, scope_key=scope_key,
+                exclude_paths=scope_excludes, path_filter=path_filter,
+            ),
+        )
+        self._check_output_policy(raw_step, [entry.path for entry in outputs])
+        now = datetime.now(timezone.utc)
+        producer = {
+            "flori_version": FLORI_VERSION,
+            "build_sha": os.environ.get("FLORI_GIT_COMMIT") or None,
+            "worker_id": self.worker_id,
+            "runner": os.environ.get("STEP_RUNTIME", "subprocess").lower(),
+            "image": raw_step.get("image", "flori/step-base"),
+            "image_digest": None,
+            "tool_versions": {},
+        }
+        manifest, _manifest_bytes, manifest_digest = build_step_manifest(
+            job_id=job_id, scope_key=scope_key, step=step,
+            part_index=part_index if part_id is not None else None,
+            exec_id=exec_id, job_generation=generation,
+            attempt=(
+                claim["attempt"]
+                if type(claim.get("attempt")) is int and claim["attempt"] >= 1 else 1
+            ),
+            started_at=datetime.fromtimestamp(start, timezone.utc).isoformat(
+                timespec="seconds",
+            ),
+            committed_at=now.isoformat(timespec="seconds"),
+            duration_sec=duration,
+            input_fingerprints=fingerprints,
+            definition_digest=definition_digest,
+            outputs=outputs,
+            producer=producer,
+        )
+        stale_paths = stale_output_paths(previous, outputs)
+        # begin 先于 staging(混跑窗口,审查 P3-8):旧中心 404/405 → None,
+        # 未产生任何 staging 副作用即回退既有 done 语义;围栏拒绝由 transport 抛 StaleCommitError。
+        token = await self.transport.begin_step_commit(claim, manifest_digest)
+        if token is None:
+            logger.warning(
+                "manifest_skipped_center_unsupported", job_id=job_id, step=step,
+            )
+            return None
+        # §2.6-2:candidate 进执行 staging namespace,不覆盖 canonical(token TTL 覆盖全程)。
+        for entry in outputs:
+            await self.storage.stage_step_output(
+                job_id, exec_id, entry.job_rel, work_dir / entry.path,
+                size_bytes=entry.size_bytes, sha256=entry.sha256,
+            )
+
+        async def _verify(phase: str = "") -> bool:
+            return await self.transport.confirm_step_commit(claim, token, phase)
+
+        record = build_commit_record(
+            job_id=job_id, execution_step=execution_step, exec_id=exec_id,
+            token=token, manifest_digest=manifest_digest,
+            output_job_rels=[entry.job_rel for entry in outputs],
+        )
+        await self.storage.commit_step_outputs(
+            job_id, execution_step, exec_id,
+            outputs=[
+                {
+                    "path": entry.job_rel,
+                    "size_bytes": entry.size_bytes,
+                    "sha256": entry.sha256,
+                }
+                for entry in outputs
+            ],
+            manifest=manifest,
+            manifest_rel=manifest_relative_path(scope_key, step),
+            stale_paths=stale_paths,
+            token=token,
+            commit_record=record,
+            verify_token=_verify,
+        )
+        return token
 
     # 运行中日志推送
 
@@ -811,20 +1103,27 @@ class Worker:
         return "unknown", ""
 
     async def _push_safe(
-        self, job_id: str, step: str, work_dir: Path, *,
+        self, job_id: str, execution_step: str, work_dir: Path, *,
         exclude_paths: set[str] | None = None,
+        audit_globs: list[str] | None = None,
     ) -> None:
-        """把本步产物推回存储。网络失败不遮蔽步骤错误,auth 失败停机。"""
+        """失败/超时路径只回传有界诊断:AI 审计 namespace、日志、progress/meta/error
+        白名单 + step 声明的 output_policy.audit_globs,业务输出一律不推。
+        网络失败不遮蔽步骤错误,auth 失败停机。"""
         try:
+            scope_key, step = parse_execution_step(execution_step)
             await self.storage.push(
-                job_id, step, work_dir, exclude_paths=exclude_paths,
+                job_id, execution_step, work_dir, exclude_paths=exclude_paths,
+                only_globs=diagnostics_globs(
+                    step, scope_key, audit_globs=audit_globs,
+                ),
             )
         except WorkerAuthRejected:
             raise
         except Exception:
             logger.warning(
                 "storage_push_failed", worker_id=self.worker_id,
-                job_id=job_id, step=step,
+                job_id=job_id, step=execution_step,
             )
 
     async def _collect_usage(

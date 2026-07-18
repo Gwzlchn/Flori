@@ -32,8 +32,12 @@ from shared.status import (
     STALE,
     compute_worker_status,
 )
+from shared.step_manifest import is_internal_namespace_path, manifest_relative_path
+from shared.step_output_commit import build_commit_record
 from shared.storage import (
     ArtifactTooLarge,
+    StepCommitFenceRejected,
+    StepCommitIntegrityError,
     StorageBackend,
     execution_artifact_allowed,
     is_credential_file,
@@ -564,6 +568,11 @@ async def complete_step(
 ):
     validate_path_segment(job_id, "job_id")
     validate_path_segment(step, "step")
+    # manifest 提交协议:done 与 manifest 同 token(§2.6-8),token 失效即陈旧执行。
+    if req.commit_token is not None and not await redis.validate_step_commit(
+        job_id, step, req.commit_token,
+    ):
+        return {"ok": False, "stale": True}
     first = await _begin_terminal(
         redis, worker_id, job_id, step, req.exec_id, "done", req.pool,
     )
@@ -583,6 +592,8 @@ async def complete_step(
         raise
     if not accepted:
         return {"ok": False, "stale": True}
+    if req.commit_token is not None:
+        await redis.finish_step_commit(job_id, step, req.commit_token)
     return {"ok": True, "duplicate": False}
 
 
@@ -1085,6 +1096,9 @@ async def put_artifact(
         # 与 get_artifact 对称:禁止经网关回传写入凭证侧载文件(.credentials.json),
         # 防任意已注册 worker 植入一个同机下载步随后会读的凭证文件。
         raise HTTPException(403, "writing credential files is not allowed")
+    if is_internal_namespace_path(rel):
+        # .flori 内部命名空间(manifest/staging)只能经 commit 协议写入,防伪造 final manifest。
+        raise HTTPException(403, "writing internal namespace is not allowed")
     if lease.job_id != job_id:
         raise HTTPException(status_code=403, detail="task lease path mismatch")
     await _require_task_lease(
@@ -1131,3 +1145,263 @@ async def put_artifact(
         raise HTTPException(422, str(exc))
     await redis.incr_traffic("push", worker_id, result["size"])
     return {"ok": True, **result}
+
+
+# 步骤产物提交协议(设计稿 §2.6):commit fence 签发/校验与中心侧 staging/promote。
+# Gateway worker 不直连 Redis/MinIO,同一 Lua 语义经这些端点执行。
+
+
+class RunnerCommitBeginRequest(BaseModel):
+    candidate_digest: str
+
+
+class RunnerCommitConfirmRequest(BaseModel):
+    token: dict
+    phase: str = ""
+
+
+class RunnerStagingCopyRequest(BaseModel):
+    path: str
+    size_bytes: int = Field(ge=0)
+    sha256: str
+
+
+class RunnerStepCommitRequest(BaseModel):
+    token: dict
+    outputs: list[dict] = Field(default_factory=list)
+    manifest: dict
+    manifest_rel: str = ""
+    stale_paths: list[str] = Field(default_factory=list)
+
+
+@router.post("/jobs/{job_id}/steps/{step}/commit/begin")
+async def begin_step_commit(
+    job_id: str,
+    step: str,
+    req: RunnerCommitBeginRequest,
+    lease: RunnerTaskLeaseHeaders = Depends(_task_lease_headers),
+    worker_id: str = Depends(verify_worker_token),
+    redis: RedisClient = Depends(get_redis),
+):
+    """原子校验实时 job generation/step exec/running/租约后签发一次性 commit token;
+    围栏拒绝(陈旧执行/在途 commit)返回 409。"""
+    validate_path_segment(job_id, "job_id")
+    validate_path_segment(step, "step")
+    if lease.job_id != job_id or lease.step != step:
+        raise HTTPException(status_code=403, detail="task lease path mismatch")
+    await _require_task_lease(redis, worker_id, job_id, step, lease.exec_id, renew=True)
+    generation = await redis.get_step_generation(job_id, step)
+    if generation is None:
+        raise HTTPException(status_code=409, detail="step generation unknown")
+    token, reason = await redis.begin_step_commit(
+        job_id=job_id, step=step, exec_id=lease.exec_id, generation=generation,
+        candidate_digest=req.candidate_digest, worker_id=worker_id,
+    )
+    if token is None:
+        raise HTTPException(status_code=409, detail=f"commit fence rejected: {reason}")
+    return {"token": token}
+
+
+@router.post("/jobs/{job_id}/steps/{step}/commit/confirm")
+async def confirm_step_commit(
+    job_id: str,
+    step: str,
+    req: RunnerCommitConfirmRequest,
+    lease: RunnerTaskLeaseHeaders = Depends(_task_lease_headers),
+    worker_id: str = Depends(verify_worker_token),
+    redis: RedisClient = Depends(get_redis),
+):
+    """promote 前后逐次校验 commit token;phase 非空时原子推进围栏阶段。"""
+    validate_path_segment(job_id, "job_id")
+    validate_path_segment(step, "step")
+    if lease.job_id != job_id or lease.step != step:
+        raise HTTPException(status_code=403, detail="task lease path mismatch")
+    await _require_task_lease(
+        redis, worker_id, job_id, step, lease.exec_id, renew=True,
+        require_active=False,
+    )
+    # phase 白名单:围栏只有一个合法推进(manifest_published),其余值拒绝(审查落地项)。
+    if req.phase not in ("", "manifest_published"):
+        raise HTTPException(422, "invalid commit phase")
+    ok = await redis.validate_step_commit(job_id, step, req.token, phase=req.phase)
+    return {"ok": ok}
+
+
+@router.post("/jobs/{job_id}/staging/copy")
+async def stage_from_canonical(
+    job_id: str,
+    req: RunnerStagingCopyRequest,
+    lease: RunnerTaskLeaseHeaders = Depends(_task_lease_headers),
+    worker_id: str = Depends(verify_worker_token),
+    storage: StorageBackend = Depends(get_storage),
+    redis: RedisClient = Depends(get_redis),
+):
+    """canonical 已有同尺寸对象时服务端复制进执行 staging(免二次过慢链路);
+    read-back 在 promote 后对 canonical 全量重验,复制来源不影响完整性结论。"""
+    validate_path_segment(job_id, "job_id")
+    _validate_rel(req.path)
+    if lease.job_id != job_id:
+        raise HTTPException(status_code=403, detail="task lease path mismatch")
+    await _require_task_lease(
+        redis, worker_id, job_id, lease.step, lease.exec_id, renew=True,
+    )
+    if not execution_artifact_allowed(lease.step, req.path, write=True):
+        raise HTTPException(403, "artifact is outside task scope")
+    if is_credential_file(req.path) or is_internal_namespace_path(req.path):
+        raise HTTPException(403, "staging this path is not allowed")
+    staged = await storage.stage_from_canonical(
+        job_id, lease.exec_id, req.path, size_bytes=req.size_bytes,
+    )
+    return {"staged": bool(staged)}
+
+
+@router.put("/jobs/{job_id}/staging/{rel:path}")
+async def put_staging_artifact(
+    job_id: str,
+    rel: str,
+    request: Request,
+    lease: RunnerTaskLeaseHeaders = Depends(_task_lease_headers),
+    worker_id: str = Depends(verify_worker_token),
+    storage: StorageBackend = Depends(get_storage),
+    redis: RedisClient = Depends(get_redis),
+):
+    """candidate 输出直传执行 staging namespace(canonical 复制不可用时的兜底通道)。"""
+    validate_path_segment(job_id, "job_id")
+    _validate_rel(rel)
+    if is_credential_file(rel) or is_internal_namespace_path(rel):
+        raise HTTPException(403, "staging this path is not allowed")
+    if lease.job_id != job_id:
+        raise HTTPException(status_code=403, detail="task lease path mismatch")
+    await _require_task_lease(
+        redis, worker_id, job_id, lease.step, lease.exec_id, renew=True,
+    )
+    if not execution_artifact_allowed(lease.step, rel, write=True):
+        raise HTTPException(403, "artifact is outside task scope")
+    length_header = request.headers.get("content-length")
+    try:
+        expected_size = int(length_header) if length_header is not None else None
+    except ValueError:
+        raise HTTPException(400, "invalid content length")
+    if expected_size is not None and (expected_size < 0 or expected_size > _ARTIFACT_MAX_BYTES):
+        raise HTTPException(413, "artifact too large")
+    expected_sha256 = request.headers.get("x-content-sha256")
+
+    async def _checked_upload() -> AsyncIterator[bytes]:
+        checked_at = time.monotonic()
+        async for chunk in request.stream():
+            if time.monotonic() - checked_at >= 30:
+                await _require_task_lease(
+                    redis, worker_id, job_id, lease.step, lease.exec_id, renew=True,
+                )
+                checked_at = time.monotonic()
+            yield chunk
+
+    try:
+        result = await storage.write_execution_staging_stream(
+            job_id, lease.exec_id, rel, _checked_upload(),
+            expected_size=expected_size, expected_sha256=expected_sha256,
+            max_bytes=_ARTIFACT_MAX_BYTES,
+        )
+    except ArtifactTooLarge:
+        raise HTTPException(413, "artifact too large")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    await redis.incr_traffic("push", worker_id, result["size"])
+    return {"ok": True, **result}
+
+
+@router.post("/jobs/{job_id}/steps/{step}/commit")
+async def commit_step_outputs(
+    job_id: str,
+    step: str,
+    req: RunnerStepCommitRequest,
+    lease: RunnerTaskLeaseHeaders = Depends(_task_lease_headers),
+    worker_id: str = Depends(verify_worker_token),
+    storage: StorageBackend = Depends(get_storage),
+    redis: RedisClient = Depends(get_redis),
+):
+    """中心侧执行九步协议 6/7 步:token 保护下 staging→canonical promote、
+    read-back、按旧 manifest 精确删旧输出、manifest 最后原子发布。"""
+    validate_path_segment(job_id, "job_id")
+    validate_path_segment(step, "step")
+    if lease.job_id != job_id or lease.step != step:
+        raise HTTPException(status_code=403, detail="task lease path mismatch")
+    await _require_task_lease(redis, worker_id, job_id, step, lease.exec_id, renew=True)
+    if req.token.get("exec_id") != lease.exec_id:
+        raise HTTPException(status_code=409, detail="commit token exec mismatch")
+    if not await redis.validate_step_commit(job_id, step, req.token):
+        raise HTTPException(status_code=409, detail="commit fence rejected the token")
+    for entry in req.outputs:
+        rel = entry.get("path")
+        if type(rel) is not str or not rel:
+            raise HTTPException(422, "invalid output entry path")
+        _validate_rel(rel)
+        if (
+            is_credential_file(rel)
+            or is_internal_namespace_path(rel)
+            or not execution_artifact_allowed(lease.step, rel, write=True)
+        ):
+            raise HTTPException(403, f"output outside task scope: {rel}")
+        if type(entry.get("size_bytes")) is not int or entry["size_bytes"] < 0:
+            raise HTTPException(422, f"invalid output size: {rel}")
+        if type(entry.get("sha256")) is not str:
+            raise HTTPException(422, f"invalid output sha256: {rel}")
+    # stale_paths 与 outputs 同一守卫环(审查 P1):跨步/跨 Part/内部命名空间/凭证
+    # 的删除请求一律 4xx,拒绝即零删除(storage 层另有纵深防御)。
+    for rel in req.stale_paths:
+        if type(rel) is not str or not rel:
+            raise HTTPException(422, "invalid stale path entry")
+        _validate_rel(rel)
+        if (
+            is_credential_file(rel)
+            or is_internal_namespace_path(rel)
+            or not execution_artifact_allowed(lease.step, rel, write=True)
+        ):
+            raise HTTPException(403, f"stale path outside task scope: {rel}")
+    # manifest 路径由服务端按执行键权威计算,不采信客户端 manifest_rel。
+    scope_key, template_step = parse_execution_step(step)
+    try:
+        manifest_rel = manifest_relative_path(scope_key, template_step)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    record = build_commit_record(
+        job_id=job_id, execution_step=step, exec_id=lease.exec_id,
+        token=req.token, manifest_digest=str(req.token.get("candidate_digest")),
+        output_job_rels=[entry["path"] for entry in req.outputs],
+    )
+
+    async def _verify(phase: str = "") -> bool:
+        return await redis.validate_step_commit(job_id, step, req.token, phase=phase)
+
+    try:
+        await storage.commit_step_outputs(
+            job_id, step, lease.exec_id,
+            outputs=req.outputs, manifest=req.manifest, manifest_rel=manifest_rel,
+            stale_paths=req.stale_paths, token=req.token, commit_record=record,
+            verify_token=_verify,
+        )
+    except StepCommitFenceRejected as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except StepCommitIntegrityError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {"ok": True}
+
+
+@router.delete("/jobs/{job_id}/staging")
+async def cleanup_execution_staging(
+    job_id: str,
+    lease: RunnerTaskLeaseHeaders = Depends(_task_lease_headers),
+    worker_id: str = Depends(verify_worker_token),
+    storage: StorageBackend = Depends(get_storage),
+    redis: RedisClient = Depends(get_redis),
+):
+    """清理当前执行的 staging namespace(§2.6-9);done 回执后调用,故不要求 running。"""
+    validate_path_segment(job_id, "job_id")
+    if lease.job_id != job_id:
+        raise HTTPException(status_code=403, detail="task lease path mismatch")
+    await _require_task_lease(
+        redis, worker_id, job_id, lease.step, lease.exec_id,
+        require_active=False,
+    )
+    await storage.cleanup_execution_staging(job_id, lease.exec_id)
+    return {"ok": True}

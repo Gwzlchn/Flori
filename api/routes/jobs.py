@@ -792,13 +792,26 @@ def _pipeline_digest(config: AppConfig | None, pipeline: str) -> str | None:
 
 
 async def is_job_expired(storage: StorageBackend, config: AppConfig, job: Job) -> dict:
-    """job 是否"过期"= 其某步 .done 存档的 def_digest 与当前 pipeline 该步 def_digest 不同。
-    Part 步逐 Part 读隔离目录下的 .done;老 .done 缺 def_digest 键 → 保守判过期。
-    返回 {expired, first_changed_step}。"""
+    """job 是否"过期"= 某步的持久完成证据与当前定义不符(§2.11 阶段A dual)。
+
+    manifest 优先:有效 manifest 的 compatibility.definition_digest 与当前语义定义
+    摘要比对;无 manifest 时 fallback 既有 .done def_digest 比对(manifest-only 模式
+    不再读 .done)。老 .done 缺 def_digest 键 → 保守判过期。返回 {expired, first_changed_step}。"""
+    from shared.runner_ops import parse_style_tags
+    from shared.step_completion import (
+        MODE_MANIFEST_ONLY,
+        completion_mode,
+        read_valid_manifest,
+        step_definition_digest_for,
+    )
+    from shared.step_scope import part_scope
+
     try:
         steps = config.pipelines[job.pipeline]["steps"]
     except Exception:
         return {"expired": False, "first_changed_step": None}
+    mode = completion_mode()
+    style_tags = parse_style_tags(job.style_tags)
     part_ids: list[str] = []
     if job.content_type == "video":
         raw_job = await storage.read_file(job.id, "job.json")
@@ -814,14 +827,32 @@ async def is_job_expired(storage: StorageBackend, config: AppConfig, job: Job) -
             ]
     for s in steps:
         name = s.get("name")
-        markers = (
-            [f"parts/{part_id}/.{name}.done" for part_id in part_ids]
-            if s.get("scope", "job") == "part" else [f".{name}.done"]
+        scopes = (
+            [part_scope(part_id) for part_id in part_ids]
+            if s.get("scope", "job") == "part" else ["job"]
         )
-        for marker in markers:
-            raw = await storage.read_file(job.id, marker)
+        current_semantic: str | None = None
+        for scope_key in scopes:
+            manifest = await read_valid_manifest(storage, job.id, scope_key, name)
+            if manifest is not None:
+                if current_semantic is None:
+                    try:
+                        current_semantic = step_definition_digest_for(
+                            job.pipeline, s, config=config,
+                            domain=job.domain, style_tags=style_tags,
+                        )
+                    except Exception:
+                        # 语义定义无法构建(如新增未分类字段):保守判过期,提示重建。
+                        return {"expired": True, "first_changed_step": name}
+                if manifest["compatibility"]["definition_digest"] != current_semantic:
+                    return {"expired": True, "first_changed_step": name}
+                continue
+            if mode == MODE_MANIFEST_ONLY:
+                continue  # manifest-only:无 manifest = 未完成,不据 .done 判过期
+            prefix = f"parts/{scope_key.split(':', 1)[1]}/" if scope_key != "job" else ""
+            raw = await storage.read_file(job.id, f"{prefix}.{name}.done")
             if raw is None:
-                continue  # 该步未跑(无 .done),不算过期
+                continue  # 该步未跑,不算过期
             try:
                 stored = json.loads(raw).get("def_digest")
             except Exception:
@@ -831,6 +862,64 @@ async def is_job_expired(storage: StorageBackend, config: AppConfig, job: Job) -
             ):
                 return {"expired": True, "first_changed_step": name}
     return {"expired": False, "first_changed_step": None}
+
+
+async def _reissue_step_manifests(
+    storage: StorageBackend, *, parent_id: str, new_id: str,
+    by_name: dict, reset_steps: set[str], part_ids: list[str],
+) -> None:
+    """fork 播种的 manifest 重签发:不字节复制旧 manifest,以新 job_id 重新校验签发。
+
+    父 manifest 缺失/损坏时静默跳过(dual 阶段 .done 播种仍可证明;manifest-only
+    下该步会被对账降级重跑,方向安全)。"""
+    from shared.step_completion import read_valid_manifest
+    from shared.step_manifest import manifest_relative_path, validate_manifest
+    from shared.step_scope import part_scope
+
+    for name, cfg in by_name.items():
+        if name in reset_steps:
+            continue
+        scopes = (
+            [part_scope(part_id) for part_id in part_ids]
+            if cfg.get("scope", "job") == "part" else ["job"]
+        )
+        for scope_key in scopes:
+            manifest = await read_valid_manifest(storage, parent_id, scope_key, name)
+            if manifest is None:
+                continue
+            # 不盲信父声明:对子 job 实际克隆文件流式重算 SHA-256+size,任一不符
+            # 拒绝该步重签发(留给对账降级),防同长度篡改被披上新权威。
+            from shared.storage import sha256_file
+
+            prefix = f"parts/{scope_key.split(':', 1)[1]}/" if scope_key != "job" else ""
+            verified = True
+            for entry in manifest["outputs"]:
+                rel = f"{prefix}{entry['path']}"
+                size = await storage.file_size(new_id, rel)
+                sha = await sha256_file(storage, new_id, rel)
+                if (
+                    size != entry["size_bytes"]
+                    or sha is None
+                    or f"sha256:{sha}" != entry["sha256"]
+                ):
+                    verified = False
+                    break
+            if not verified:
+                continue
+            reissued = json.loads(json.dumps(manifest))
+            reissued["job_id"] = new_id
+            original_exec = str(reissued["execution"]["exec_id"])
+            reissued["execution"]["exec_id"] = (
+                f"clone:{parent_id}:{original_exec}"[:200]
+            )
+            reissued["producer"]["kind"] = "clone_reissue"
+            try:
+                encoded = validate_manifest(reissued)
+            except Exception:
+                continue  # 身份改写后不再合法(极端):不发布伪权威
+            await storage.write_file(
+                new_id, manifest_relative_path(scope_key, name), encoded,
+            )
 
 
 async def _create_job_snapshot_once(
@@ -944,15 +1033,20 @@ async def _create_job_snapshot_once(
                     f"parts/{part_id}/.{name}.done"
                     if part_id is not None else f".{name}.done"
                 )
-                if (
-                    source_step.status == StepStatus.DONE
-                    and await storage.read_file(parent.id, marker) is None
-                ):
-                    raise HTTPException(
-                        409,
-                        f"cannot preserve upstream step without done marker: "
-                        f"{scope_key}/{name}",
-                    )
+                if source_step.status == StepStatus.DONE:
+                    from shared.step_completion import read_valid_manifest
+
+                    has_manifest = await read_valid_manifest(
+                        storage, parent.id, scope_key, name,
+                    ) is not None
+                    if not has_manifest and await storage.read_file(
+                        parent.id, marker,
+                    ) is None:
+                        raise HTTPException(
+                            409,
+                            f"cannot preserve upstream step without completion proof: "
+                            f"{scope_key}/{name}",
+                        )
                 preserved_steps.append(Step(
                     job_id=new_id,
                     name=name,
@@ -1067,6 +1161,14 @@ async def _create_job_snapshot_once(
                 candidate = rel_path[len(prefix):] if prefix else rel_path
                 if any(fnmatch.fnmatch(candidate, pattern) for pattern in output_patterns):
                     await storage.delete_file(new_id, rel_path)
+        # manifest 重签发(§2.10):clone 不复制 .flori 内部命名空间(manifest 绑定
+        # job_id 身份);为保留步骤以新身份重新签发等价 manifest,输出哈希不变,
+        # 溯源经 exec_id=clone:{parent} 与 producer.kind=clone_reissue 保留。
+        await _reissue_step_manifests(
+            storage, parent_id=parent.id, new_id=new_id,
+            by_name=by_name, reset_steps=reset_steps,
+            part_ids=[part.id for part in target_parts],
+        )
         # reservation 行先承载上游终态,再与 target current 状态一并发布。否则 new_job
         # 初始化会把全部步骤置 waiting,使 from_step 之前的下载/转写再次执行。
         for step in preserved_steps:

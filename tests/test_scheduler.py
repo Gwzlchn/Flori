@@ -2225,10 +2225,24 @@ class TestDispatch:
         reset = await scheduler.rerun("j_rr_central", "B")
         assert set(reset) == {"B", "C"}
         deleted = {c.args for c in fake_storage.delete_file.await_args_list}
-        assert deleted == {("j_rr_central", ".B.done"), ("j_rr_central", ".C.done")}
+        # rerun 同时删中心 .done(dual)与目标及下游 final manifest(§2.10-3)。
+        assert deleted == {
+            ("j_rr_central", ".B.done"), ("j_rr_central", ".C.done"),
+            ("j_rr_central", ".flori/steps/B/manifest.json"),
+            ("j_rr_central", ".flori/steps/C/manifest.json"),
+        }
 
-        # 删失败(网络抖动)→ 告警继续,rerun 仍完成重置
+        # manifest/输出删除失败 → 整个 rerun 失败交 PEL 重投重试(方向唯一性,
+        # 审查 A2);.done 删除仍 best-effort 告警继续(dual 兼容位)。
         fake_storage.delete_file.side_effect = RuntimeError("minio down")
+        with pytest.raises(RuntimeError, match="minio down"):
+            await scheduler.rerun("j_rr_central", "C")
+
+        async def only_done_marker_fails(job_id, rel):
+            if rel.endswith(".done"):
+                raise RuntimeError("minio down")
+
+        fake_storage.delete_file.side_effect = only_done_marker_fails
         reset = await scheduler.rerun("j_rr_central", "C")
         assert reset == ["C"]
 

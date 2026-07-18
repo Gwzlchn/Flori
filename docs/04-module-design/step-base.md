@@ -348,3 +348,10 @@ if __name__ == "__main__":
 | 09_mechanical | intermediate/{ocr,dedup,danmaku}.json + output/transcript.md | 全部可读 |
 | 10_smart | output/notes_mechanical.md | 大小 >100 字节 |
 | 11_review | output/notes_smart.md + notes_mechanical.md | 两个都存在 |
+
+
+## manifest-v1 双写(docs/03-contracts.md §7.1 dual 阶段)
+
+- `should_run()`:scope 根 `.flori/steps/{step}/manifest.json` 优先——有效 done manifest 且 `input_digest`(input_hashes 并入 worker 注入的 NAS `source_*` 指纹后计算,与生产端同一 current)/`definition_digest`(worker 经 step config 注入)均一致才跳过;manifest 在但不兼容必跑;缺失时 dual 退回 `.done` 判定,manifest-only 直接跑。
+- definition 比对仅在 worker 注入摘要时执行:混跑窗口(旧 worker 派发)缺注入时按 input_digest 单独判定,属降级语义;若改为保守必跑会让混跑期全量重跑,刻意不取。
+- 成功与幂等跳过路径写 `.{step}.manifest-candidate.json`(输入指纹单次采集,跳过路径带 `reused` 标记);`.done` 写入字节契约不变。指纹违反有界/无密钥契约 fail-closed 转步骤失败;空串值合法(输入不存在)。

@@ -118,7 +118,8 @@ class TestClaimStep:
         )
 
         assert claim == {"job_id": "j1", "step": "A", "pool": "cpu",
-                         "exec_id": claim["exec_id"], "generation": 1}
+                         "exec_id": claim["exec_id"], "generation": 1,
+                         "attempt": 1}
         assert claim["exec_id"].startswith(f"{WORKER_ID}:")
         assert await redis.get_step_status("j1", "A") == "running"
         assert await redis.get_pool_count("cpu") == 1

@@ -53,6 +53,22 @@ class ArtifactIO:
         path = self.job_dir / f".{self.step_name}.meta.json"
         path.write_text(json.dumps(meta, ensure_ascii=False, indent=2))
 
+    def write_manifest_candidate(
+        self, input_fingerprints: dict, *, reused: bool = False,
+    ) -> None:
+        """写 manifest candidate 采集文件(设计稿 §2.5):子进程独有的输入指纹单次采集,
+        Worker 据此组装 final manifest。与 .done 双写互不影响;失败路径不写。
+        指纹违反有界/无密钥契约时抛错(fail-closed,由 run() 统一转步骤失败)。"""
+        from .step_output_commit import build_candidate_record, candidate_filename
+
+        record = build_candidate_record(
+            self.step_name, input_fingerprints, reused=reused,
+        )
+        path = self.job_dir / candidate_filename(self.step_name)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.rename(path)
+
     def write_error(self, error_type: str, message: str, trace: str = "") -> None:
         path = self.job_dir / f".{self.step_name}.error.json"
         path.write_text(json.dumps({

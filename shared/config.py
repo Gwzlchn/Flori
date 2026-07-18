@@ -234,6 +234,120 @@ def validate_provenance_pipeline_contract(pipelines: dict) -> None:
                             )
 
 
+_OUTPUT_POLICY_KEYS = {"allow_empty", "required_any", "audit_globs", "overlap_with"}
+
+
+def _validate_output_glob(pattern, where: str) -> None:
+    if not isinstance(pattern, str) or not pattern:
+        raise ValueError(f"outputs glob must be a non-empty string: {where}")
+    if (
+        pattern.startswith("/")
+        or "\\" in pattern
+        or "\x00" in pattern
+        or any(seg in ("", ".", "..") for seg in pattern.split("/"))
+    ):
+        raise ValueError(f"outputs glob is not a safe relative pattern: {where}: {pattern!r}")
+    if any(seg == ".flori" for seg in pattern.split("/")):
+        raise ValueError(f"outputs glob must not claim internal namespace: {where}: {pattern!r}")
+
+
+def _validate_output_policy(policy, step_names: set[str], where: str) -> None:
+    if policy is None:
+        return
+    if not isinstance(policy, dict):
+        raise ValueError(f"output_policy must be a mapping: {where}")
+    unknown = sorted(set(policy) - _OUTPUT_POLICY_KEYS)
+    if unknown:
+        raise ValueError(f"output_policy has unknown keys {unknown}: {where}")
+    if "allow_empty" in policy and not isinstance(policy["allow_empty"], bool):
+        raise ValueError(f"output_policy.allow_empty must be bool: {where}")
+    required_any = policy.get("required_any")
+    if required_any is not None:
+        if not isinstance(required_any, list) or not required_any:
+            raise ValueError(f"output_policy.required_any must be a non-empty list: {where}")
+        for group in required_any:
+            if not isinstance(group, list) or not group:
+                raise ValueError(
+                    f"output_policy.required_any entries must be non-empty lists: {where}"
+                )
+            for item in group:
+                _validate_output_glob(item, f"{where}/required_any")
+    audit_globs = policy.get("audit_globs")
+    if audit_globs is not None:
+        if not isinstance(audit_globs, list):
+            raise ValueError(f"output_policy.audit_globs must be a list: {where}")
+        for item in audit_globs:
+            if not isinstance(item, str) or not item:
+                raise ValueError(f"output_policy.audit_globs entries must be strings: {where}")
+    overlap_with = policy.get("overlap_with")
+    if overlap_with is not None:
+        if not isinstance(overlap_with, list) or not all(
+            isinstance(item, str) and item for item in overlap_with
+        ):
+            raise ValueError(f"output_policy.overlap_with must be a list of step names: {where}")
+        missing = sorted(set(overlap_with) - step_names)
+        if missing:
+            raise ValueError(
+                f"output_policy.overlap_with references unknown steps {missing}: {where}"
+            )
+
+
+def _globs_overlap(left: str, right: str) -> bool:
+    """glob 对是否可能命中同一文件的保守近似:相等或互相 fnmatch(把对方当字面串)。"""
+    return (
+        left == right
+        or fnmatch.fnmatch(left, right)
+        or fnmatch.fnmatch(right, left)
+    )
+
+
+def validate_output_ownership(pipelines: dict) -> None:
+    """outputs 作为所有权单一事实源的加载期校验(设计稿 §2.5)。
+
+    同 pipeline 同 scope 的两步 outputs glob 有交叠时,必须有一方在
+    output_policy.overlap_with 显式声明对方;未声明重叠拒绝启动(fail-closed)。
+    """
+    for pipeline, body in pipelines.items():
+        steps = [s for s in body.get("steps", []) if isinstance(s, dict)]
+        step_names = {s.get("name") for s in steps if isinstance(s.get("name"), str)}
+        declared: dict[str, set[str]] = {}
+        for step in steps:
+            name = step.get("name")
+            where = f"{pipeline}/{name}"
+            outputs = step.get("outputs")
+            if outputs is not None:
+                if not isinstance(outputs, list):
+                    raise ValueError(f"outputs must be a list: {where}")
+                for pattern in outputs:
+                    _validate_output_glob(pattern, where)
+            _validate_output_policy(step.get("output_policy"), step_names, where)
+            policy = step.get("output_policy") or {}
+            declared[name] = set(policy.get("overlap_with") or [])
+        for index, left in enumerate(steps):
+            for right in steps[index + 1:]:
+                if left.get("scope", "job") != right.get("scope", "job"):
+                    continue  # Part 与 Job 的同名相对路径落在不同 scope 根,互不侵占
+                left_name, right_name = left.get("name"), right.get("name")
+                overlapping = sorted(
+                    f"{a} ~ {b}"
+                    for a in (left.get("outputs") or [])
+                    for b in (right.get("outputs") or [])
+                    if _globs_overlap(a, b)
+                )
+                if not overlapping:
+                    continue
+                if (
+                    right_name in declared.get(left_name, set())
+                    or left_name in declared.get(right_name, set())
+                ):
+                    continue
+                raise ValueError(
+                    f"undeclared output ownership overlap in pipeline {pipeline!r}: "
+                    f"{left_name} vs {right_name}: {overlapping}; declare it via "
+                    "output_policy.overlap_with on the later owner"
+                )
+
+
 def resolve_env_vars(text: str) -> str:
     """替换 ${VAR} 和 ${VAR:-default} 格式的环境变量引用。
     - 有值:替换为环境变量值
@@ -461,6 +575,7 @@ def normalize_pipelines(raw: dict, config_dir: Path | None = None) -> dict:
         result[name] = normalize_pipeline(body, default=default, templates=templates)
     validate_provenance_pipeline_contract(result)
     validate_pipeline_scopes(result)
+    validate_output_ownership(result)
     if strict_ai_contract:
         validate_ai_pipeline_contract(result)
     return result

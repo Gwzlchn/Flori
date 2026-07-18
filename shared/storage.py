@@ -30,6 +30,11 @@ from typing import AsyncIterable, AsyncIterator, Callable, Protocol
 
 from shared.errors import WorkerAuthRejected
 from shared.runner_ops import current_task_lease
+from shared.step_manifest import (
+    ManifestError,
+    is_internal_namespace_path,
+    validate_manifest,
+)
 
 
 # B站登录态等敏感凭证的本地侧载文件:只供同机(LocalStorage)下载步本地读取,
@@ -41,11 +46,41 @@ _GLOBAL_STAGING_PREFIX = ".flori-staging/"
 _GLOBAL_INITIALIZATION_PREFIX = ".flori-initializing/"
 _STAGING_LIFECYCLE_RULE_ID = "flori-staging-recovery"
 _MINIO_STREAM_PART_SIZE = 5 * 1024 * 1024
+# S3/MinIO 单次 copy_object 上限;超过必须 compose_object 分段服务端拷贝。
+_MINIO_COPY_LIMIT = 5 * 1024 * 1024 * 1024
 _STREAM_EOF = object()
+
+# 执行 staging 命名空间(设计稿 §2.6):对象键 .flori/staging/{job_id}/{exec_id}/{job_rel}。
+# 处于 .flori 内部命名空间,永不作为业务产物 push/pull/list/clone(见 _is_internal_file)。
+EXECUTION_STAGING_PREFIX = ".flori/staging/"
+# commit 记录:第一次 promote 前写入执行 staging 根,含 promote_started,
+# 供 §2.7 恢复决策表(RecoveryFacts.promote_started)观察半提交窗口。
+COMMIT_RECORD_FILENAME = ".commit.json"
+
+_SAFE_SEGMENT_RE = re.compile(r"^[^/\\\x00]{1,200}$")
+
+
+def _assert_staging_segment(value: str, field: str) -> str:
+    """staging 路径段校验:exec_id 含 ':'(Linux/MinIO 合法),仍禁分隔符/NUL/穿越段。"""
+    if (
+        type(value) is not str
+        or value in (".", "..")
+        or not _SAFE_SEGMENT_RE.fullmatch(value)
+    ):
+        raise ValueError(f"{field}: unsafe staging segment {value!r}")
+    return value
 
 
 class ArtifactTooLarge(ValueError):
     pass
+
+
+class StepCommitFenceRejected(RuntimeError):
+    """commit token 校验失败(过期/换代/被轮换);中止提交,不发布 manifest,不上报 done。"""
+
+
+class StepCommitIntegrityError(ValueError):
+    """read-back 或 manifest digest 与 token 绑定不符;提交中止,不发布 manifest。"""
 
 
 @dataclass(frozen=True)
@@ -397,8 +432,87 @@ def _is_staging_file(rel: str) -> bool:
 
 
 def _is_internal_file(rel: str) -> bool:
+    # .flori 内部命名空间(manifest/staging)不作为业务产物往返:push/pull/list/clone 一律隔离。
     normalized = rel.replace("\\", "/")
-    return normalized == INITIALIZATION_MARKER_REL or _is_staging_file(normalized)
+    return (
+        normalized == INITIALIZATION_MARKER_REL
+        or _is_staging_file(normalized)
+        or is_internal_namespace_path(normalized)
+    )
+
+
+def _canonical_manifest_bytes(manifest: dict, token: dict) -> bytes:
+    """校验 final manifest 并核对与 commit token 的 candidate 绑定;两处(worker/中心)同套防线。"""
+    try:
+        encoded = validate_manifest(manifest)
+    except ManifestError as exc:
+        raise StepCommitIntegrityError(f"manifest invalid: {exc}") from exc
+    digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    if digest != token.get("candidate_digest"):
+        raise StepCommitIntegrityError(
+            "manifest digest does not match commit token candidate_digest"
+        )
+    return encoded
+
+
+def _guard_commit_path(execution_step: str, rel: str, kind: str) -> None:
+    """promote/删除环的 scope 边界纵深防御:越权路径即围栏拒绝(审查 P1)。"""
+    if (
+        type(rel) is not str
+        or not rel
+        or _is_internal_file(rel)
+        or is_credential_file(rel)
+        or not execution_artifact_allowed(execution_step, rel, write=True)
+    ):
+        raise StepCommitFenceRejected(
+            f"{kind} path outside execution scope: {rel!r}"
+        )
+
+
+def _verify_manifest_binding(
+    manifest: dict, *, job_id: str, execution_step: str, exec_id: str,
+    outputs: list[dict],
+) -> list[dict]:
+    """manifest 发布前交叉校验(审查 P2-3):身份等于租约执行身份,声明输出集与实际
+    已 promote 集在 path/size/sha256 一一相等;返回声明集(job 相对),read-back 以此为准。"""
+    from shared.step_scope import parse_execution_step, part_id_from_scope
+
+    scope_key, template_step = parse_execution_step(execution_step)
+    if manifest.get("job_id") != job_id:
+        raise StepCommitIntegrityError("manifest job_id does not match execution")
+    if manifest["scope"]["scope_key"] != scope_key:
+        raise StepCommitIntegrityError("manifest scope does not match execution")
+    if manifest["step"] != template_step:
+        raise StepCommitIntegrityError("manifest step does not match execution")
+    if manifest["execution"]["exec_id"] != exec_id:
+        raise StepCommitIntegrityError("manifest exec_id does not match execution")
+    part_id = part_id_from_scope(scope_key)
+    prefix = f"parts/{part_id}/" if part_id else ""
+    declared = [
+        {
+            "path": f"{prefix}{entry['path']}",
+            "size_bytes": entry["size_bytes"],
+            "sha256": entry["sha256"],
+        }
+        for entry in manifest["outputs"]
+    ]
+    declared_set = {
+        (entry["path"], entry["size_bytes"], entry["sha256"]) for entry in declared
+    }
+    provided_set = {
+        (entry.get("path"), entry.get("size_bytes"), entry.get("sha256"))
+        for entry in outputs
+    }
+    if declared_set != provided_set or len(declared) != len(outputs):
+        raise StepCommitIntegrityError(
+            "manifest outputs do not match committed output set"
+        )
+    return declared
+
+
+async def _verify_commit_token(verify_token, phase: str = "") -> None:
+    if not await verify_token(phase):
+        raise StepCommitFenceRejected("commit token is no longer valid")
 
 
 def _is_s3_not_found(error: BaseException) -> bool:
@@ -435,11 +549,44 @@ def _parse_minio_version(info: dict) -> str | None:
 
 class StorageBackend(Protocol):
     async def pull(self, job_id: str, step: str) -> Path: ...
+    # only_globs:失败/超时路径的诊断白名单(fnmatch,job 相对);None=全推(成功路径既有语义)。
     async def push(
         self, job_id: str, step: str, work_dir: Path, *,
         exclude_paths: set[str] | None = None,
+        only_globs: list[str] | None = None,
     ) -> None: ...
     async def cleanup(self, job_id: str, step: str, work_dir: Path) -> None: ...
+    # 步骤产物提交协议(设计稿 §2.6):candidate 先进执行 staging namespace,
+    # commit token 保护下 promote 到 canonical,read-back 通过后 manifest 最后原子发布。
+    # source=None 表示中心侧按 canonical 现状复制(stage_from_canonical 语义)。
+    async def stage_step_output(
+        self, job_id: str, exec_id: str, rel_path: str, source: Path | None, *,
+        size_bytes: int, sha256: str,
+    ) -> None: ...
+    # 中心侧服务:canonical 对象存在且 size 匹配时服务端复制进 staging;返回是否成功。
+    async def stage_from_canonical(
+        self, job_id: str, exec_id: str, rel_path: str, *, size_bytes: int,
+    ) -> bool: ...
+    # 中心侧服务:gateway staging 上传落盘(分块校验后进入执行 staging namespace)。
+    async def write_execution_staging_stream(
+        self, job_id: str, exec_id: str, rel_path: str, chunks: AsyncIterable[bytes], *,
+        expected_size: int | None = None, expected_sha256: str | None = None,
+        max_bytes: int | None = None,
+    ) -> dict: ...
+    # 九步协议的 6/7 步:commit 记录先落 staging(promote_started 持久证据)→ 每个输出
+    # promote 前后 verify_token → read-back(size/sha256)→ 按旧 manifest 精确删旧输出 →
+    # manifest 最后原子发布。任一步失败抛错且不发布 manifest。
+    async def commit_step_outputs(
+        self, job_id: str, execution_step: str, exec_id: str, *,
+        outputs: list[dict], manifest: dict, manifest_rel: str,
+        stale_paths: list[str], token: dict, commit_record: bytes,
+        verify_token,
+    ) -> None: ...
+    async def cleanup_execution_staging(self, job_id: str, exec_id: str) -> None: ...
+    # staging TTL 清理:active_exec_ids 保护在途执行,stale_before_epoch 之前的孤儿清除。
+    async def cleanup_stale_execution_staging(
+        self, *, active_exec_ids: set[str], stale_before_epoch: float,
+    ) -> int: ...
     # 删 job 时清掉该 job 的全部产物:LocalStorage 删 job 目录、RemoteStorage 删 {job_id}/ 前缀对象。
     # 幂等(无产物即 no-op),避免 MinIO/分布式部署删 job 后中心存储留孤儿产物。
     async def delete(
@@ -495,10 +642,20 @@ class StorageBackend(Protocol):
 
 
 class LocalStorage:
-    """本地部署:数据就在本机,pull/push 都是 no-op。"""
+    """本地部署:数据就在本机,pull/push 默认 no-op(work_dir 即 canonical job 目录)。
+
+    FLORI_LOCAL_ATTEMPT_ISOLATION=1 时启用隔离 attempt(设计稿 §2.6):pull 复制
+    committed 视图到独立工作目录(真实复制,不以可写 hardlink 暴露 canonical),
+    push 只回写快照外新增/改动的文件。默认关闭,保持既有语义(双写保守序)。
+    """
 
     def __init__(self, jobs_dir: Path):
         self.jobs_dir = jobs_dir
+        self._isolate = os.environ.get(
+            "FLORI_LOCAL_ATTEMPT_ISOLATION", "",
+        ) not in ("", "0", "false")
+        # 隔离模式:pull 时记录快照(relpath -> (size, mtime)),push 只回写增量。
+        self._snapshots: dict[str, dict[str, tuple[int, float]]] = {}
 
     def _safe_path(self, job_id: str, rel_path: str = "") -> Path:
         # 兜底防穿越:job_id 不得逃出 jobs_dir、rel 不得逃出其 job 目录,
@@ -536,19 +693,326 @@ class LocalStorage:
         return self._safe_path(job_id, rel_path)
 
     async def pull(self, job_id: str, step: str) -> Path:
-        return self._safe_path(job_id)
+        canonical = self._safe_path(job_id)
+        if not self._isolate:
+            return canonical
+        return await asyncio.to_thread(self._pull_isolated_sync, job_id, step, canonical)
+
+    def _attempts_root(self) -> Path:
+        return self.jobs_dir / ".flori" / "attempts"
+
+    def _pull_isolated_sync(self, job_id: str, step: str, canonical: Path) -> Path:
+        scope_token = hashlib.sha256(step.encode()).hexdigest()[:16]
+        work_dir = self._attempts_root() / job_id / scope_token / uuid.uuid4().hex / "root"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        snapshot: dict[str, tuple[int, float]] = {}
+        if canonical.is_dir():
+            for path in canonical.rglob("*"):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                rel = path.relative_to(canonical).as_posix()
+                if _is_internal_file(rel):
+                    continue
+                dest = work_dir / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                # 真实复制而非 hardlink:hardlink 共享 inode,步骤原地写会击穿 canonical。
+                shutil.copy2(path, dest)
+                st = dest.stat()
+                snapshot[rel] = (st.st_size, st.st_mtime)
+        self._snapshots[str(work_dir)] = snapshot
+        return work_dir
 
     async def push(
         self, job_id: str, step: str, work_dir: Path, *,
         exclude_paths: set[str] | None = None,
+        only_globs: list[str] | None = None,
     ) -> None:
-        pass
+        if not self._isolate:
+            return
+        canonical = self._safe_path(job_id)
+        if Path(work_dir).resolve() == canonical.resolve():
+            return
+        await asyncio.to_thread(
+            self._push_isolated_sync, job_id, step, Path(work_dir),
+            exclude_paths or set(), only_globs,
+        )
+
+    def _push_isolated_sync(
+        self, job_id: str, step: str, work_dir: Path,
+        exclude_paths: set[str], only_globs: list[str] | None,
+    ) -> None:
+        snapshot = self._snapshots.get(str(work_dir), {})
+        for path in work_dir.rglob("*"):
+            if path.is_symlink() or not path.is_file():
+                continue
+            rel = path.relative_to(work_dir).as_posix()
+            if (
+                rel in exclude_paths
+                or is_credential_file(rel)
+                or _is_internal_file(rel)
+                or not execution_artifact_allowed(step, rel, write=True)
+            ):
+                continue
+            if only_globs is not None and not any(
+                fnmatch.fnmatch(rel, pattern) for pattern in only_globs
+            ):
+                continue
+            st = path.stat()
+            prev = snapshot.get(rel)
+            if prev is not None and prev == (st.st_size, st.st_mtime):
+                continue
+            target = self._safe_path(job_id, rel)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_name(f".{target.name}.flori-part-{uuid.uuid4().hex}")
+            try:
+                shutil.copy2(path, tmp)
+                os.replace(tmp, target)
+            finally:
+                tmp.unlink(missing_ok=True)
 
     async def cleanup(self, job_id: str, step: str, work_dir: Path) -> None:
-        pass
+        if not self._isolate:
+            return
+        self._snapshots.pop(str(work_dir), None)
+
+        def _cleanup_attempt() -> None:
+            attempt_dir = Path(work_dir).parent
+            if self._attempts_root() not in attempt_dir.parents:
+                return
+            shutil.rmtree(attempt_dir, ignore_errors=True)
+            for parent in (attempt_dir.parent, attempt_dir.parent.parent):
+                try:
+                    parent.rmdir()
+                except OSError:
+                    pass
+
+        await asyncio.to_thread(_cleanup_attempt)
 
     async def wait_for_finalizers(self) -> None:
         pass
+
+    # 步骤产物提交协议(§2.6)
+
+    def _execution_staging_dir(self, job_id: str, exec_id: str) -> Path:
+        self._safe_path(job_id)
+        _assert_staging_segment(job_id, "job_id")
+        _assert_staging_segment(exec_id, "exec_id")
+        return self.jobs_dir / ".flori" / "staging" / job_id / exec_id
+
+    @staticmethod
+    def _staged_rel(root: Path, rel: str) -> Path:
+        if (
+            type(rel) is not str or not rel or rel.startswith("/")
+            or "\x00" in rel or "\\" in rel
+            or any(seg in ("", ".", "..") for seg in rel.split("/"))
+        ):
+            raise ValueError(f"invalid staging rel path: {rel!r}")
+        return root / rel
+
+    @staticmethod
+    def _link_or_copy_replace(source: Path, target: Path) -> None:
+        """staging<->canonical 之间的原子放置:优先同盘硬链接(零拷贝),失败退真实复制。"""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(f".{target.name}.flori-promote-{uuid.uuid4().hex}")
+        try:
+            try:
+                os.link(source, tmp, follow_symlinks=False)
+            except OSError:
+                shutil.copy2(source, tmp)
+            os.replace(tmp, target)
+            _fsync_directory(target.parent)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    @staticmethod
+    def _hash_file_sync(path: Path) -> tuple[int, str]:
+        digest = hashlib.sha256()
+        total = 0
+        with open(path, "rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+                total += len(chunk)
+        return total, f"sha256:{digest.hexdigest()}"
+
+    async def stage_step_output(
+        self, job_id: str, exec_id: str, rel_path: str, source: Path | None, *,
+        size_bytes: int, sha256: str,
+    ) -> None:
+        if source is None:
+            if not await self.stage_from_canonical(
+                job_id, exec_id, rel_path, size_bytes=size_bytes,
+            ):
+                raise OSError(f"canonical object unavailable for staging: {rel_path}")
+            return
+        root = self._execution_staging_dir(job_id, exec_id)
+        dest = self._staged_rel(root, rel_path)
+        await asyncio.to_thread(self._link_or_copy_replace, Path(source), dest)
+
+    async def stage_from_canonical(
+        self, job_id: str, exec_id: str, rel_path: str, *, size_bytes: int,
+    ) -> bool:
+        def _copy() -> bool:
+            try:
+                src = self._safe_path(job_id, rel_path)
+            except ValueError:
+                return False
+            try:
+                st = src.lstat()
+            except FileNotFoundError:
+                return False
+            if not stat.S_ISREG(st.st_mode) or st.st_size != size_bytes:
+                return False
+            dest = self._staged_rel(
+                self._execution_staging_dir(job_id, exec_id), rel_path,
+            )
+            self._link_or_copy_replace(src, dest)
+            return True
+
+        return await asyncio.to_thread(_copy)
+
+    async def write_execution_staging_stream(
+        self, job_id: str, exec_id: str, rel_path: str, chunks: AsyncIterable[bytes], *,
+        expected_size: int | None = None, expected_sha256: str | None = None,
+        max_bytes: int | None = None,
+    ) -> dict:
+        target = self._staged_rel(
+            self._execution_staging_dir(job_id, exec_id), rel_path,
+        )
+        await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+        tmp = target.with_name(f".{target.name}.flori-part-{uuid.uuid4().hex}")
+        digest = hashlib.sha256()
+        total = 0
+        fp = await asyncio.to_thread(open, tmp, "wb")
+        try:
+            async for chunk in chunks:
+                if not isinstance(chunk, bytes):
+                    raise TypeError("staging stream yielded non-bytes")
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if max_bytes is not None and total > max_bytes:
+                    raise ArtifactTooLarge(f"staged output exceeds {max_bytes} bytes")
+                digest.update(chunk)
+                await asyncio.to_thread(fp.write, chunk)
+            await asyncio.to_thread(fp.flush)
+            await asyncio.to_thread(os.fsync, fp.fileno())
+            await asyncio.to_thread(fp.close)
+            fp = None
+            actual = digest.hexdigest()
+            if expected_size is not None and total != expected_size:
+                raise ValueError("staged output size mismatch")
+            if expected_sha256 and not hmac.compare_digest(
+                actual, expected_sha256.lower().removeprefix("sha256:"),
+            ):
+                raise ValueError("staged output checksum mismatch")
+            await asyncio.to_thread(os.replace, tmp, target)
+            await asyncio.to_thread(_fsync_directory, target.parent)
+            return {"size": total, "sha256": actual}
+        finally:
+            if fp is not None:
+                await asyncio.to_thread(fp.close)
+            await asyncio.to_thread(tmp.unlink, True)
+
+    async def commit_step_outputs(
+        self, job_id: str, execution_step: str, exec_id: str, *,
+        outputs: list[dict], manifest: dict, manifest_rel: str,
+        stale_paths: list[str], token: dict, commit_record: bytes,
+        verify_token,
+    ) -> None:
+        manifest_bytes = _canonical_manifest_bytes(manifest, token)
+        # 发布前交叉校验(P2-3):身份=租约执行身份,声明集=实际提交集;read-back 以声明集为准。
+        declared = _verify_manifest_binding(
+            manifest, job_id=job_id, execution_step=execution_step,
+            exec_id=exec_id, outputs=outputs,
+        )
+        kept = {out.get("path") for out in outputs}
+        # 越权路径(跨步/跨 Part/内部命名空间/凭证)在任何副作用前整体拒绝(P1,零删除零 promote)。
+        for out in outputs:
+            _guard_commit_path(execution_step, out.get("path"), "output")
+        for rel in stale_paths:
+            if rel not in kept:
+                _guard_commit_path(execution_step, rel, "stale")
+        staging_root = self._execution_staging_dir(job_id, exec_id)
+        # commit 记录先于第一次 promote 落盘:promote_started 持久证据(§2.7 行 1/2)。
+        await asyncio.to_thread(
+            write_path_atomic, staging_root / COMMIT_RECORD_FILENAME, commit_record,
+        )
+        for out in outputs:
+            rel = out["path"]
+            src = self._staged_rel(staging_root, rel)
+            if not src.is_file():
+                raise StepCommitIntegrityError(f"staged output missing: {rel}")
+            await _verify_commit_token(verify_token)
+            target = self._safe_path(job_id, rel)
+            await asyncio.to_thread(self._link_or_copy_replace, src, target)
+            await _verify_commit_token(verify_token)
+        for out in declared:
+            target = self._safe_path(job_id, out["path"])
+            try:
+                size, sha = await asyncio.to_thread(self._hash_file_sync, target)
+            except OSError as exc:
+                raise StepCommitIntegrityError(
+                    f"read-back failed: {out['path']}"
+                ) from exc
+            if size != out["size_bytes"] or sha != out["sha256"]:
+                raise StepCommitIntegrityError(
+                    f"read-back mismatch: {out['path']}"
+                )
+        for rel in stale_paths:
+            if rel in kept:
+                continue
+            path = self._safe_path(job_id, rel)
+            await asyncio.to_thread(path.unlink, True)
+        await _verify_commit_token(verify_token)
+        # manifest 最后原子发布:temp+fsync+os.replace+fsync(parent)(write_path_atomic)。
+        await asyncio.to_thread(
+            write_path_atomic, self._safe_path(job_id, manifest_rel), manifest_bytes,
+        )
+        await _verify_commit_token(verify_token, "manifest_published")
+
+    async def cleanup_execution_staging(self, job_id: str, exec_id: str) -> None:
+        root = self._execution_staging_dir(job_id, exec_id)
+
+        def _cleanup() -> None:
+            shutil.rmtree(root, ignore_errors=True)
+            for parent in (root.parent, root.parent.parent):
+                try:
+                    parent.rmdir()
+                except OSError:
+                    pass
+
+        await asyncio.to_thread(_cleanup)
+
+    async def cleanup_stale_execution_staging(
+        self, *, active_exec_ids: set[str], stale_before_epoch: float,
+    ) -> int:
+        root = self.jobs_dir / ".flori" / "staging"
+
+        def _cleanup() -> int:
+            removed = 0
+            if not root.is_dir():
+                return 0
+            for job_dir in root.iterdir():
+                if not job_dir.is_dir():
+                    continue
+                for exec_dir in job_dir.iterdir():
+                    if not exec_dir.is_dir() or exec_dir.name in active_exec_ids:
+                        continue
+                    try:
+                        modified = exec_dir.stat().st_mtime
+                    except FileNotFoundError:
+                        continue
+                    if modified >= stale_before_epoch:
+                        continue
+                    shutil.rmtree(exec_dir, ignore_errors=True)
+                    removed += 1
+                try:
+                    job_dir.rmdir()
+                except OSError:
+                    pass
+            return removed
+
+        return await asyncio.to_thread(_cleanup)
 
     async def delete(
         self, job_id: str, *, defer_if_busy: bool = False,
@@ -556,6 +1020,9 @@ class LocalStorage:
         root = self._safe_path(job_id)
         staging = self._staging_path(job_id, "placeholder").parent
         initializing = self._initialization_path(job_id).parent
+        # 执行 staging 与隔离 attempt 同属该 job 的运行时残留,删 job 一并清。
+        execution_staging = self.jobs_dir / ".flori" / "staging" / job_id
+        attempts = self._attempts_root() / job_id
 
         def _delete_tree(path: Path) -> None:
             try:
@@ -566,8 +1033,12 @@ class LocalStorage:
         await asyncio.to_thread(_delete_tree, root)
         await asyncio.to_thread(_delete_tree, staging)
         await asyncio.to_thread(_delete_tree, initializing)
+        await asyncio.to_thread(_delete_tree, execution_staging)
+        await asyncio.to_thread(_delete_tree, attempts)
         await asyncio.to_thread(self._remove_empty_staging_parents, staging)
         await asyncio.to_thread(self._remove_empty_staging_parents, initializing)
+        await asyncio.to_thread(self._remove_empty_staging_parents, execution_staging)
+        await asyncio.to_thread(self._remove_empty_staging_parents, attempts)
 
     def _remove_empty_staging_parents(self, staging_job_dir: Path) -> None:
         for path in (staging_job_dir, staging_job_dir.parent):
@@ -577,7 +1048,8 @@ class LocalStorage:
                 pass
 
     async def clone(self, src_job_id: str, dst_job_id: str) -> None:
-        # 整目录复制(含 .done dotfile,供 fork 播种);排除凭证侧载文件,不克隆到新 job。源不存在=no-op。
+        # 整目录复制(含 .done dotfile,供 fork 播种);排除凭证侧载文件与 .flori 内部命名空间
+        # (manifest 绑定 job_id 身份,不得字节复制到新 job,设计稿 §2.10)。源不存在=no-op。
         src = self._safe_path(src_job_id)
         dst = self._safe_path(dst_job_id)
 
@@ -586,7 +1058,11 @@ class LocalStorage:
             out = []
             for n in names:
                 rel = os.path.relpath(os.path.join(directory, n), base).replace("\\", "/")
-                if is_credential_file(rel) or Path(directory, n).is_symlink():
+                if (
+                    is_credential_file(rel)
+                    or is_internal_namespace_path(rel)
+                    or Path(directory, n).is_symlink()
+                ):
                     out.append(n)
             return out
 
@@ -946,14 +1422,17 @@ class RemoteStorage:
     async def push(
         self, job_id: str, step: str, work_dir: Path, *,
         exclude_paths: set[str] | None = None,
+        only_globs: list[str] | None = None,
     ) -> None:
         await asyncio.to_thread(
             self._push_sync, job_id, step, work_dir, exclude_paths or set(),
+            only_globs,
         )
 
     def _push_sync(
         self, job_id: str, step: str, work_dir: Path,
         exclude_paths: set[str],
+        only_globs: list[str] | None = None,
     ) -> None:
         snapshot = self._snapshots.get(str(work_dir), {})
         for path in work_dir.rglob("*"):
@@ -967,6 +1446,10 @@ class RemoteStorage:
                 or not execution_artifact_allowed(step, rel, write=True)
             ):
                 continue  # 敏感凭证永不上行中心存储
+            if only_globs is not None and not any(
+                fnmatch.fnmatch(rel, pattern) for pattern in only_globs
+            ):
+                continue  # 失败路径诊断白名单:业务输出不上行(设计稿 §2.5-5)
             st = path.stat()
             prev = snapshot.get(rel)
             if prev is not None and prev == (st.st_size, st.st_mtime):
@@ -1112,6 +1595,7 @@ class RemoteStorage:
             f"{job_id}/",
             f"{_GLOBAL_STAGING_PREFIX}{job_id}/",
             f"{_GLOBAL_INITIALIZATION_PREFIX}{job_id}/",
+            f"{EXECUTION_STAGING_PREFIX}{job_id}/",
         )
         objs = []
         for prefix in prefixes:
@@ -1707,8 +2191,15 @@ class RemoteStorage:
             raise OSError("staging cleanup partial: " + "; ".join(errors))
         return removed
 
+    # 需要 lifecycle 兜底回收的 staging 前缀:上传暂存 + 执行 staging namespace
+    # (崩溃遗留的 candidate/commit 记录经 1 天 Expiration 自动回收,语义与上传暂存一致)。
+    _STAGING_LIFECYCLE_RULES = (
+        (_STAGING_LIFECYCLE_RULE_ID, _GLOBAL_STAGING_PREFIX),
+        ("flori-exec-staging-recovery", EXECUTION_STAGING_PREFIX),
+    )
+
     def _ensure_staging_lifecycle_sync(self) -> None:
-        """使用 MinIO 公共 lifecycle API 回收进程崩溃留下的 multipart。"""
+        """使用 MinIO 公共 lifecycle API 回收进程崩溃留下的 multipart 与孤儿 staging。"""
         from minio.commonconfig import ENABLED, Filter
         from minio.lifecycleconfig import (
             AbortIncompleteMultipartUpload,
@@ -1725,38 +2216,41 @@ class RemoteStorage:
                 raise
             current = None
         rules = list(getattr(current, "rules", None) or [])
-        existing = next(
-            (
-                rule for rule in rules
-                if getattr(rule, "rule_id", None) == _STAGING_LIFECYCLE_RULE_ID
-            ),
-            None,
-        )
-        if existing is not None and (
-            getattr(existing, "status", None) == ENABLED
-            and getattr(getattr(existing, "rule_filter", None), "prefix", None)
-            == _GLOBAL_STAGING_PREFIX
-            and getattr(
-                getattr(existing, "abort_incomplete_multipart_upload", None),
-                "days_after_initiation",
-                None,
-            ) == 1
-            and getattr(getattr(existing, "expiration", None), "days", None) == 1
+
+        def _rule_ok(rule, prefix: str) -> bool:
+            return (
+                getattr(rule, "status", None) == ENABLED
+                and getattr(getattr(rule, "rule_filter", None), "prefix", None)
+                == prefix
+                and getattr(
+                    getattr(rule, "abort_incomplete_multipart_upload", None),
+                    "days_after_initiation",
+                    None,
+                ) == 1
+                and getattr(getattr(rule, "expiration", None), "days", None) == 1
+            )
+
+        by_id = {getattr(rule, "rule_id", None): rule for rule in rules}
+        if all(
+            rule_id in by_id and _rule_ok(by_id[rule_id], prefix)
+            for rule_id, prefix in self._STAGING_LIFECYCLE_RULES
         ):
             return
+        managed_ids = {rule_id for rule_id, _ in self._STAGING_LIFECYCLE_RULES}
         rules = [
             rule for rule in rules
-            if getattr(rule, "rule_id", None) != _STAGING_LIFECYCLE_RULE_ID
+            if getattr(rule, "rule_id", None) not in managed_ids
         ]
-        rules.append(Rule(
-            ENABLED,
-            Filter(prefix=_GLOBAL_STAGING_PREFIX),
-            rule_id=_STAGING_LIFECYCLE_RULE_ID,
-            abort_incomplete_multipart_upload=AbortIncompleteMultipartUpload(
-                days_after_initiation=1,
-            ),
-            expiration=Expiration(days=1),
-        ))
+        for rule_id, prefix in self._STAGING_LIFECYCLE_RULES:
+            rules.append(Rule(
+                ENABLED,
+                Filter(prefix=prefix),
+                rule_id=rule_id,
+                abort_incomplete_multipart_upload=AbortIncompleteMultipartUpload(
+                    days_after_initiation=1,
+                ),
+                expiration=Expiration(days=1),
+            ))
         client.set_bucket_lifecycle(self._bucket, LifecycleConfig(rules))
 
     def _write_file_sync(self, job_id: str, rel_path: str, data: bytes) -> None:
@@ -1884,6 +2378,247 @@ class RemoteStorage:
             if rel and not _is_internal_file(rel):
                 out[rel] = obj.size or 0
         return out
+
+    # 步骤产物提交协议(§2.6)
+
+    @staticmethod
+    def _execution_staging_key(job_id: str, exec_id: str, rel: str = "") -> str:
+        _assert_staging_segment(job_id, "job_id")
+        _assert_staging_segment(exec_id, "exec_id")
+        if rel:
+            if (
+                rel.startswith("/") or "\x00" in rel or "\\" in rel
+                or any(seg in ("", ".", "..") for seg in rel.split("/"))
+            ):
+                raise ValueError(f"invalid staging rel path: {rel!r}")
+        return f"{EXECUTION_STAGING_PREFIX}{job_id}/{exec_id}/{rel}"
+
+    def _server_side_copy_sync(
+        self, source_key: str, target_key: str, size: int | None,
+    ) -> None:
+        # copy_object 单次上限 5GiB;更大用 compose_object 分段服务端拷贝,仍不经本机下行。
+        from minio.commonconfig import ComposeSource, CopySource
+
+        if size is not None and size >= _MINIO_COPY_LIMIT:
+            self._client().compose_object(
+                self._bucket, target_key,
+                [ComposeSource(self._bucket, source_key)],
+            )
+        else:
+            self._client().copy_object(
+                self._bucket, target_key, CopySource(self._bucket, source_key),
+            )
+
+    def _hash_object_sync(self, object_key: str) -> tuple[int, str]:
+        digest = hashlib.sha256()
+        total = 0
+        resp = None
+        try:
+            resp = self._client().get_object(self._bucket, object_key)
+            while chunk := resp.read(1024 * 1024):
+                digest.update(chunk)
+                total += len(chunk)
+        finally:
+            if resp is not None:
+                resp.close()
+                resp.release_conn()
+        return total, f"sha256:{digest.hexdigest()}"
+
+    async def stage_step_output(
+        self, job_id: str, exec_id: str, rel_path: str, source: Path | None, *,
+        size_bytes: int, sha256: str,
+    ) -> None:
+        # push 成功路径已把输出上传到 canonical:优先服务端复制进 staging,免二次上行。
+        # read-back 在 promote 后对 canonical 全量重验 sha,复制来源不影响完整性结论。
+        if await self.stage_from_canonical(
+            job_id, exec_id, rel_path, size_bytes=size_bytes,
+        ):
+            return
+        if source is None:
+            raise OSError(f"canonical object unavailable for staging: {rel_path}")
+        key = self._execution_staging_key(job_id, exec_id, rel_path)
+        await asyncio.to_thread(
+            self._client().fput_object, self._bucket, key, str(source),
+        )
+
+    async def stage_from_canonical(
+        self, job_id: str, exec_id: str, rel_path: str, *, size_bytes: int,
+    ) -> bool:
+        def _copy() -> bool:
+            from minio.error import S3Error
+
+            canonical = f"{job_id}/{rel_path}"
+            try:
+                st = self._client().stat_object(self._bucket, canonical)
+            except S3Error as exc:
+                if _is_s3_not_found(exc):
+                    return False
+                raise
+            if st.size != size_bytes:
+                return False
+            key = self._execution_staging_key(job_id, exec_id, rel_path)
+            self._server_side_copy_sync(canonical, key, st.size)
+            return True
+
+        return await asyncio.to_thread(_copy)
+
+    async def write_execution_staging_stream(
+        self, job_id: str, exec_id: str, rel_path: str, chunks: AsyncIterable[bytes], *,
+        expected_size: int | None = None, expected_sha256: str | None = None,
+        max_bytes: int | None = None,
+    ) -> dict:
+        key = self._execution_staging_key(job_id, exec_id, rel_path)
+        self._tmp_root.mkdir(parents=True, exist_ok=True)
+        tmp = self._tmp_root / f".flori-stagebuf-{uuid.uuid4().hex}"
+        digest = hashlib.sha256()
+        total = 0
+        fp = await asyncio.to_thread(open, tmp, "wb")
+        try:
+            async for chunk in chunks:
+                if not isinstance(chunk, bytes):
+                    raise TypeError("staging stream yielded non-bytes")
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if max_bytes is not None and total > max_bytes:
+                    raise ArtifactTooLarge(f"staged output exceeds {max_bytes} bytes")
+                digest.update(chunk)
+                await asyncio.to_thread(fp.write, chunk)
+            await asyncio.to_thread(fp.close)
+            fp = None
+            actual = digest.hexdigest()
+            if expected_size is not None and total != expected_size:
+                raise ValueError("staged output size mismatch")
+            if expected_sha256 and not hmac.compare_digest(
+                actual, expected_sha256.lower().removeprefix("sha256:"),
+            ):
+                raise ValueError("staged output checksum mismatch")
+            await asyncio.to_thread(
+                self._client().fput_object, self._bucket, key, str(tmp),
+            )
+            return {"size": total, "sha256": actual}
+        finally:
+            if fp is not None:
+                await asyncio.to_thread(fp.close)
+            await asyncio.to_thread(tmp.unlink, True)
+
+    async def commit_step_outputs(
+        self, job_id: str, execution_step: str, exec_id: str, *,
+        outputs: list[dict], manifest: dict, manifest_rel: str,
+        stale_paths: list[str], token: dict, commit_record: bytes,
+        verify_token,
+    ) -> None:
+        from minio.error import S3Error
+
+        manifest_bytes = _canonical_manifest_bytes(manifest, token)
+        # 发布前交叉校验(P2-3)+ 越权路径整体拒绝(P1,任何副作用之前)。
+        declared = _verify_manifest_binding(
+            manifest, job_id=job_id, execution_step=execution_step,
+            exec_id=exec_id, outputs=outputs,
+        )
+        kept = {out.get("path") for out in outputs}
+        for out in outputs:
+            _guard_commit_path(execution_step, out.get("path"), "output")
+        for rel in stale_paths:
+            if rel not in kept:
+                _guard_commit_path(execution_step, rel, "stale")
+        record_key = self._execution_staging_key(
+            job_id, exec_id, COMMIT_RECORD_FILENAME,
+        )
+        # commit 记录先落 staging namespace(promote_started 持久证据,§2.7 行 1/2)。
+        await asyncio.to_thread(
+            self._client().put_object, self._bucket, record_key,
+            io.BytesIO(commit_record), len(commit_record),
+        )
+        for out in outputs:
+            rel = out["path"]
+            staged_key = self._execution_staging_key(job_id, exec_id, rel)
+            await _verify_commit_token(verify_token)
+            try:
+                await asyncio.to_thread(
+                    self._server_side_copy_sync, staged_key,
+                    f"{job_id}/{rel}", out.get("size_bytes"),
+                )
+            except S3Error as exc:
+                if _is_s3_not_found(exc):
+                    raise StepCommitIntegrityError(
+                        f"staged output missing: {rel}"
+                    ) from exc
+                raise
+            await _verify_commit_token(verify_token)
+        for out in declared:
+            try:
+                size, sha = await asyncio.to_thread(
+                    self._hash_object_sync, f"{job_id}/{out['path']}",
+                )
+            except S3Error as exc:
+                raise StepCommitIntegrityError(
+                    f"read-back failed: {out['path']}"
+                ) from exc
+            if size != out["size_bytes"] or sha != out["sha256"]:
+                raise StepCommitIntegrityError(f"read-back mismatch: {out['path']}")
+        for rel in stale_paths:
+            if rel in kept:
+                continue
+            await self.delete_file(job_id, rel)
+        await _verify_commit_token(verify_token)
+        # manifest 最后发布:单对象 PUT 即原子可见性边界。
+        await asyncio.to_thread(
+            self._client().put_object, self._bucket, f"{job_id}/{manifest_rel}",
+            io.BytesIO(manifest_bytes), len(manifest_bytes),
+        )
+        await _verify_commit_token(verify_token, "manifest_published")
+
+    async def cleanup_execution_staging(self, job_id: str, exec_id: str) -> None:
+        prefix = self._execution_staging_key(job_id, exec_id)
+
+        def _cleanup() -> None:
+            from minio.deleteobjects import DeleteObject
+
+            client = self._client()
+            objs = [
+                DeleteObject(o.object_name)
+                for o in client.list_objects(
+                    self._bucket, prefix=prefix, recursive=True,
+                )
+            ]
+            if objs:
+                list(client.remove_objects(self._bucket, objs))
+
+        await asyncio.to_thread(_cleanup)
+
+    async def cleanup_stale_execution_staging(
+        self, *, active_exec_ids: set[str], stale_before_epoch: float,
+    ) -> int:
+        def _cleanup() -> int:
+            client = self._client()
+            removed = 0
+            for obj in client.list_objects(
+                self._bucket, prefix=EXECUTION_STAGING_PREFIX, recursive=True,
+            ):
+                name = getattr(obj, "object_name", "")
+                remainder = name[len(EXECUTION_STAGING_PREFIX):]
+                parts = remainder.split("/", 2)
+                if len(parts) < 3:
+                    continue
+                _job, exec_id, _rest = parts
+                if exec_id in active_exec_ids:
+                    continue
+                modified = getattr(obj, "last_modified", None)
+                if not isinstance(modified, datetime):
+                    continue
+                if modified.tzinfo is None:
+                    modified = modified.replace(tzinfo=timezone.utc)
+                if modified.timestamp() >= stale_before_epoch:
+                    continue
+                try:
+                    client.remove_object(self._bucket, name)
+                    removed += 1
+                except Exception:
+                    continue
+            return removed
+
+        return await asyncio.to_thread(_cleanup)
 
     async def health(self) -> dict:
         # bucket_exists 是 HEAD bucket(O(1)),勿用 list_objects(全量扫)。minio SDK 同步 → to_thread。
@@ -2109,6 +2844,7 @@ class GatewayStorage:
     async def push(
         self, job_id: str, step: str, work_dir: Path, *,
         exclude_paths: set[str] | None = None,
+        only_globs: list[str] | None = None,
     ) -> None:
         snapshot = self._snapshots.get(str(work_dir), {})
         excluded = exclude_paths or set()
@@ -2119,10 +2855,15 @@ class GatewayStorage:
             if (
                 rel in excluded
                 or is_credential_file(rel)
+                or _is_internal_file(rel)
                 or self._is_no_push(step, rel)
                 or not execution_artifact_allowed(step, rel, write=True)
             ):
                 continue  # 敏感凭证 / 大源文件等:不回传中心(凭证绝不上行;源文件配 NO_PUSH glob)
+            if only_globs is not None and not any(
+                fnmatch.fnmatch(rel, pattern) for pattern in only_globs
+            ):
+                continue  # 失败路径诊断白名单:业务输出不上行(设计稿 §2.5-5)
             st = path.stat()
             prev = snapshot.get(rel)
             if prev is not None and prev == (st.st_size, st.st_mtime):
@@ -2282,6 +3023,109 @@ class GatewayStorage:
 
     async def wait_for_finalizers(self) -> None:
         pass
+
+    # 步骤产物提交协议(§2.6):staging/promote/manifest 全部由中心侧执行,
+    # worker 只经 runner 端点提交意图与字节;exec 身份由任务租约头携带,不进 URL。
+
+    async def stage_step_output(
+        self, job_id: str, exec_id: str, rel_path: str, source: Path | None, *,
+        size_bytes: int, sha256: str,
+    ) -> None:
+        import httpx
+
+        endpoint = f"/api/runner/jobs/{job_id}/staging/copy"
+        resp = await self._client().post(
+            endpoint, headers=self._auth(job_id),
+            json={"path": rel_path, "size_bytes": size_bytes, "sha256": sha256},
+        )
+        _raise_gateway_auth(resp, endpoint)
+        resp.raise_for_status()
+        if resp.json().get("staged"):
+            return  # push 已把该输出上传 canonical,中心服务端复制进 staging,免二次过慢链路
+        if source is None:
+            raise OSError(f"canonical object unavailable for staging: {rel_path}")
+
+        async def _chunks(fp=Path(source)):
+            with open(fp, "rb") as handle:
+                while chunk := handle.read(1 << 20):
+                    yield chunk
+
+        headers = self._auth(job_id)
+        headers.update({
+            "Content-Length": str(size_bytes),
+            "X-Content-SHA256": sha256.removeprefix("sha256:"),
+        })
+        put_endpoint = f"/api/runner/jobs/{job_id}/staging/{rel_path}"
+        resp = await self._client().put(
+            put_endpoint, headers=headers, content=_chunks(),
+            timeout=httpx.Timeout(900, connect=15),
+        )
+        _raise_gateway_auth(resp, put_endpoint)
+        resp.raise_for_status()
+
+    async def stage_from_canonical(
+        self, job_id: str, exec_id: str, rel_path: str, *, size_bytes: int,
+    ) -> bool:
+        # 中心侧能力;worker 侧经 stage_step_output 的 copy 请求间接使用。
+        return False
+
+    async def write_execution_staging_stream(
+        self, job_id: str, exec_id: str, rel_path: str, chunks: AsyncIterable[bytes], *,
+        expected_size: int | None = None, expected_sha256: str | None = None,
+        max_bytes: int | None = None,
+    ) -> dict:
+        raise NotImplementedError(
+            "GatewayStorage.write_execution_staging_stream: staging persistence runs on central storage"
+        )
+
+    async def commit_step_outputs(
+        self, job_id: str, execution_step: str, exec_id: str, *,
+        outputs: list[dict], manifest: dict, manifest_rel: str,
+        stale_paths: list[str], token: dict, commit_record: bytes,
+        verify_token,
+    ) -> None:
+        import httpx
+
+        # 早停:中心会权威复验 token,这里先廉价拒绝明显陈旧的执行。
+        await _verify_commit_token(verify_token)
+        endpoint = f"/api/runner/jobs/{job_id}/steps/{execution_step}/commit"
+        resp = await self._client().post(
+            endpoint, headers=self._auth(job_id),
+            json={
+                "token": token,
+                "outputs": outputs,
+                "manifest": manifest,
+                "manifest_rel": manifest_rel,
+                "stale_paths": stale_paths,
+            },
+            timeout=httpx.Timeout(900, connect=15),
+        )
+        _raise_gateway_auth(resp, endpoint)
+        if resp.status_code == 409:
+            raise StepCommitFenceRejected("central commit fence rejected the token")
+        if resp.status_code == 422:
+            raise StepCommitIntegrityError(resp.text[:300])
+        resp.raise_for_status()
+
+    async def cleanup_execution_staging(self, job_id: str, exec_id: str) -> None:
+        import httpx
+
+        endpoint = f"/api/runner/jobs/{job_id}/staging"
+        try:
+            resp = await self._client().delete(
+                endpoint, headers=self._auth(job_id),
+            )
+            _raise_gateway_auth(resp, endpoint)
+            resp.raise_for_status()
+        except WorkerAuthRejected:
+            raise
+        except httpx.HTTPError:
+            pass  # staging 清理是 best-effort;孤儿由中心 TTL 清理兜底
+
+    async def cleanup_stale_execution_staging(
+        self, *, active_exec_ids: set[str], stale_before_epoch: float,
+    ) -> int:
+        return 0
 
     async def list_files(self, job_id: str) -> list[str]:
         resp = await self._client().get(

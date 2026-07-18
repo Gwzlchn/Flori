@@ -210,6 +210,79 @@ end
 return nil
 """
 
+_LUA_BEGIN_STEP_COMMIT = """
+-- commit fence 签发(设计稿 §2.6-3/4):同一原子块内实时校验 job generation、
+-- step exec_id、running 状态与任务租约,全部通过才签发一次性 commit token。
+-- KEYS: job hash,steps hash,step_exec hash,step_generation hash,lease key,commit key.
+-- ARGV: step,exec_id,generation,candidate_digest,token_id,ttl,worker_id,job_id.
+if redis.call('HGET', KEYS[1], 'lifecycle_generation') ~= ARGV[3] then
+    return {0, 'stale_generation'}
+end
+if redis.call('HGET', KEYS[2], ARGV[1]) ~= 'running' then
+    return {0, 'not_running'}
+end
+if redis.call('HGET', KEYS[3], ARGV[1]) ~= ARGV[2] then
+    return {0, 'stale_exec'}
+end
+if redis.call('HGET', KEYS[4], ARGV[1]) ~= ARGV[3] then
+    return {0, 'stale_step_generation'}
+end
+if redis.call('HGET', KEYS[5], 'exec_id') ~= ARGV[2]
+    or redis.call('HGET', KEYS[5], 'job_id') ~= ARGV[8]
+    or redis.call('HGET', KEYS[5], 'step') ~= ARGV[1] then
+    return {0, 'lease_invalid'}
+end
+if ARGV[7] ~= '' and redis.call('HGET', KEYS[5], 'worker_id') ~= ARGV[7] then
+    return {0, 'lease_invalid'}
+end
+-- 陈旧遗留 token(上面已证本执行是当前执行)与同执行重试都直接轮换:
+-- 单一 active token,旧 token 随 DEL 即刻失效。
+redis.call('DEL', KEYS[6])
+redis.call('HSET', KEYS[6],
+    'token_id', ARGV[5], 'exec_id', ARGV[2], 'job_generation', ARGV[3],
+    'candidate_digest', ARGV[4], 'phase', 'committing')
+redis.call('EXPIRE', KEYS[6], tonumber(ARGV[6]))
+return {1, ARGV[5]}
+"""
+
+_LUA_VALIDATE_STEP_COMMIT = """
+-- promote 前后逐次校验(§2.6:每次 promote 前后必须过围栏);TTL 过期即 key 消失,
+-- 自动判 0。校验通过顺带 EXPIRE 续期(身份四元组不变,长 promote 不被 TTL 饿死;
+-- 换代仍在 job generation CAS 上即刻拒绝,不因续期放宽)。ARGV[5] 非空时原子推进 phase。
+-- KEYS: job hash,commit key. ARGV: token_id,exec_id,generation,candidate_digest,new_phase,ttl.
+if redis.call('HGET', KEYS[2], 'token_id') ~= ARGV[1]
+    or redis.call('HGET', KEYS[2], 'exec_id') ~= ARGV[2]
+    or redis.call('HGET', KEYS[2], 'job_generation') ~= ARGV[3]
+    or redis.call('HGET', KEYS[2], 'candidate_digest') ~= ARGV[4] then
+    return 0
+end
+if redis.call('HGET', KEYS[1], 'lifecycle_generation') ~= ARGV[3] then
+    return 0
+end
+if ARGV[5] ~= '' then
+    redis.call('HSET', KEYS[2], 'phase', ARGV[5])
+end
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[6]))
+return 1
+"""
+
+_LUA_FINISH_STEP_COMMIT = """
+-- done 回执消费 token(§2.6-8):要求 manifest_published 阶段,同一 token 只消费一次。
+-- KEYS: job hash,commit key. ARGV: token_id,exec_id,generation,candidate_digest.
+if redis.call('HGET', KEYS[2], 'token_id') ~= ARGV[1]
+    or redis.call('HGET', KEYS[2], 'exec_id') ~= ARGV[2]
+    or redis.call('HGET', KEYS[2], 'job_generation') ~= ARGV[3]
+    or redis.call('HGET', KEYS[2], 'candidate_digest') ~= ARGV[4]
+    or redis.call('HGET', KEYS[2], 'phase') ~= 'manifest_published' then
+    return 0
+end
+if redis.call('HGET', KEYS[1], 'lifecycle_generation') ~= ARGV[3] then
+    return 0
+end
+redis.call('DEL', KEYS[2])
+return 1
+"""
+
 _LUA_APPEND_TERMINAL = """
 -- 校验当前 execution/generation/job 未终态后,以 exec_id 单次追加 terminal Stream。
 local job_id = ARGV[1]
@@ -1446,6 +1519,116 @@ class RedisClient:
         raw = await self.r.hget(f"job:{job_id}:step_generation", step)
         return int(raw) if raw is not None else None
 
+    # 步骤产物 commit fence(设计稿 §2.6):token 是一次性提交凭据,
+    # promote/manifest 发布/done 回执全程携带同一身份四元组(token_id/exec/generation/candidate)。
+
+    STEP_COMMIT_TTL_SEC = 600
+
+    @staticmethod
+    def _step_commit_key(job_id: str, step: str) -> str:
+        return f"job:{job_id}:step_commit:{step}"
+
+    @staticmethod
+    def _commit_token_fields(token: dict) -> tuple[str, str, str, str] | None:
+        """wire token 身份四元组;结构不符返回 None(调用方按校验失败处理,不猜)。"""
+        if type(token) is not dict:
+            return None
+        token_id = token.get("token_id")
+        exec_id = token.get("exec_id")
+        generation = token.get("job_generation")
+        digest = token.get("candidate_digest")
+        if (
+            type(token_id) is not str or not token_id
+            or type(exec_id) is not str or not exec_id
+            or type(generation) is not int or generation < 0
+            or type(digest) is not str or not digest
+        ):
+            return None
+        return token_id, exec_id, str(generation), digest
+
+    async def begin_step_commit(
+        self, *, job_id: str, step: str, exec_id: str, generation: int,
+        candidate_digest: str, worker_id: str = "",
+        ttl_sec: int | None = None,
+    ) -> tuple[dict | None, str]:
+        """原子校验实时 job generation/step exec/running/租约后签发 token。
+
+        返回 (wire token, reason)。generation 用 Lua 内 HGET 实时值 CAS,
+        不接受调用方快照(claim 后 rerun 换代窗口内快照会放行旧执行)。
+        """
+        token_id = secrets.token_hex(16)
+        result = await self.r.eval(
+            _LUA_BEGIN_STEP_COMMIT,
+            6,
+            f"job:{job_id}",
+            f"job:{job_id}:steps",
+            f"job:{job_id}:step_exec",
+            f"job:{job_id}:step_generation",
+            self._task_lease_key(exec_id),
+            self._step_commit_key(job_id, step),
+            step,
+            exec_id,
+            str(generation),
+            candidate_digest,
+            token_id,
+            str(ttl_sec or self.STEP_COMMIT_TTL_SEC),
+            worker_id,
+            job_id,
+        )
+        if int(result[0]) != 1:
+            return None, str(result[1])
+        return {
+            "token_id": token_id,
+            "exec_id": exec_id,
+            "job_generation": generation,
+            "candidate_digest": candidate_digest,
+        }, "issued"
+
+    async def validate_step_commit(
+        self, job_id: str, step: str, token: dict, *, phase: str = "",
+    ) -> bool:
+        fields = self._commit_token_fields(token)
+        if fields is None:
+            return False
+        result = await self.r.eval(
+            _LUA_VALIDATE_STEP_COMMIT,
+            2,
+            f"job:{job_id}",
+            self._step_commit_key(job_id, step),
+            fields[0], fields[1], fields[2], fields[3],
+            phase,
+            str(self.STEP_COMMIT_TTL_SEC),
+        )
+        return int(result) == 1
+
+    async def finish_step_commit(self, job_id: str, step: str, token: dict) -> bool:
+        fields = self._commit_token_fields(token)
+        if fields is None:
+            return False
+        result = await self.r.eval(
+            _LUA_FINISH_STEP_COMMIT,
+            2,
+            f"job:{job_id}",
+            self._step_commit_key(job_id, step),
+            fields[0], fields[1], fields[2], fields[3],
+        )
+        return int(result) == 1
+
+    async def get_step_commit(self, job_id: str, step: str) -> dict | None:
+        """在途 commit 观察(rerun/rebuild/delete 判 §2.6-5 等待或 409;恢复清理用)。"""
+        data = await self.r.hgetall(self._step_commit_key(job_id, step))
+        if not data:
+            return None
+        try:
+            data["job_generation"] = int(data["job_generation"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        return data
+
+    async def clear_step_commit(self, job_id: str, step: str) -> None:
+        """恢复清理:换代/删除后撤销遗留 token(幂等)。"""
+        await self.r.delete(self._step_commit_key(job_id, step))
+
     @staticmethod
     def _task_lease_key(exec_id: str) -> str:
         return f"runner:lease:{exec_id}"
@@ -1614,6 +1797,8 @@ class RedisClient:
         for sub in ("steps", "retries", "step_worker", "step_exec", "step_generation",
                     "step_resources", "step_progress"):
             await self.r.hdel(f"job:{job_id}:{sub}", step)
+        # 遗留 commit token 一并撤销(独立 key 带 TTL,不清也会过期;清了立刻拒绝迟到提交)。
+        await self.clear_step_commit(job_id, step)
 
     async def cleanup_job(self, job_id: str) -> None:
         keys = [

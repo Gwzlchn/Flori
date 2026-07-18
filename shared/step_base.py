@@ -80,12 +80,20 @@ class StepBase:
                 raise InputMissingError(f"Missing: {missing}")
             if not self.should_run():
                 self.log.info("skip: up-to-date")
+                # 幂等跳过也刷新 candidate(reused 标记):中心 manifest 已一致时 Worker
+                # 省去重发 IO,仅缺/不一致时自愈重发(审查 P3-7)。
+                self.artifacts.write_manifest_candidate(
+                    self.input_hashes(), reused=True,
+                )
                 return
 
             started_at = time.time()
             result = self.execute()
             duration = time.time() - started_at
             self.mark_done()
+            # candidate 采集与 .done 双写(设计稿 §2.11 阶段 A):.done 字节契约不变,
+            # candidate 只承载 Worker 组装 manifest 所需的子进程事实。
+            self.artifacts.write_manifest_candidate(self.input_hashes())
             self.artifacts.write_meta({
                 "status": "done",
                 "duration_sec": round(duration, 1),
@@ -134,7 +142,58 @@ class StepBase:
         ai = self.config.get("ai", {}) if isinstance(self.config, dict) else {}
         return def_digest_for(step.get("version", "1"), ai)
 
+    def _read_local_manifest(self) -> dict | None:
+        """读 scope 根下已发布 manifest;缺失/损坏/远端不可见(pull 不带内部命名空间)返回 None。"""
+        import json as _json
+
+        from .step_manifest import ManifestError, validate_manifest
+
+        path = self.job_dir / ".flori" / "steps" / self.step_name / "manifest.json"
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8"))
+            validate_manifest(data)
+        except (OSError, ValueError, ManifestError):
+            return None
+        return data
+
     def should_run(self) -> bool:
+        # manifest 优先(§2.11 阶段A dual):有效 done manifest 且 input/definition digest
+        # 均与当前一致才可跳过;manifest 在但不兼容时必跑,不再看 .done。
+        from .step_completion import MODE_MANIFEST_ONLY, completion_mode
+
+        manifest = self._read_local_manifest()
+        if manifest is not None and manifest.get("outcome") == "done":
+            try:
+                from .step_manifest import compute_input_digest
+
+                fingerprints = dict(self.input_hashes())
+                # NAS 源身份(worker 经 step config 注入):与 manifest 生产端同序
+                # setdefault 合并,两端计算同一个 current(读写对称)。
+                source_fingerprints = (
+                    self.config.get("step", {}).get("source_fingerprints")
+                    if isinstance(self.config, dict) else None
+                )
+                if isinstance(source_fingerprints, dict):
+                    for key, value in source_fingerprints.items():
+                        fingerprints.setdefault(key, value)
+                current_input = compute_input_digest(fingerprints)
+            except Exception:
+                return True
+            expected_definition = (
+                self.config.get("step", {}).get("definition_digest")
+                if isinstance(self.config, dict) else None
+            )
+            compatibility = manifest["compatibility"]
+            if compatibility["input_digest"] != current_input:
+                return True
+            if (
+                expected_definition is not None
+                and compatibility["definition_digest"] != expected_definition
+            ):
+                return True
+            return False
+        if completion_mode() == MODE_MANIFEST_ONLY:
+            return True
         if not self.artifacts.done_path.exists():
             return True
         stored = self.artifacts.read_done()

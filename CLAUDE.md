@@ -328,7 +328,7 @@ docker compose -f docker-compose.yml -f .local/docker-compose.uptest.yml --env-f
 - `flori.wiki` HTTPS 证书来自 DNS-01 续期流程；未备案杭州 ECS 存在 SNI 阻断现实。证书/续期脚本、Caddy 和 tunnel 改动前先查 `.local/acme/` 与部署文件。
 - 已上线的“工厂非仓库”能力包括概念图谱、跨源综合问答、概念雷达/周报。相关后端端点、MCP 工具和前端视图要保持一致；图谱深链初开要注意容器尺寸和 canvas 0x0 问题。
 - 前端视觉验收用 Dockerized Playwright MCP：常驻容器 `playwright-mcp`（官方 `mcr.microsoft.com/playwright/mcp`，`--network host`），Claude Code 与 Codex 统一以 `http://127.0.0.1:8931/mcp` 接入；挂本机 coding 根到 `/workspace`，输出落 `/tmp/flori-work/playwright-mcp`。常规 UI 验证至少覆盖 3 个 CSS viewport：4K 显示器 `3840x2160`、14 寸 MacBook `1512x982`、iPhone 16 Pro Max `440x956`。
-- NAS 部署/重跑：`api`、`scheduler` 是长驻进程，代码改动需重启；步骤子进程通常自动重载。强制重跑某步要理解 `.done` 与 input hash，必要时删对应 done marker 或走专门 rerun API。
+- NAS 部署/重跑：`api`、`scheduler` 是长驻进程，代码改动需重启；步骤子进程通常自动重载。步骤完成权威自 manifest-v1 起是 `{job}/.flori/steps/{step}/manifest.json`（`STEP_COMPLETION_MODE=dual` 迁移期 manifest 优先、`.done` fallback 双写）；强制重跑走 rerun API（会撤销在途 commit、按旧 manifest 精确删输出与 manifest、再删 `.done`），手工只删 done marker 已不再充分。
 - 下载网络路由使用 worker 自动探测的 `net-cn` / `net-global` 区域 tag。旧 `net-proxy` / `net-direct` / `bili` 路由 tag 已废弃；URL 分类在 scheduler enqueue 时决定，代理是 worker 本地问题。
 - 并发槽模型是 holder SET，不是裸计数器：`pool:{pool}:holders` / `res:{resource}:holders`，`used = SCARD`，holder 是 `exec_id`。释放用 `SREM`，幂等；查槽不要再看旧 `:count`。
 - pre-commit 密钥扫描钩子可能有已知误报，但真实 PAT、AI key、真实主机 IP、NAS 私有路径、MinIO 真密钥不能 `--no-verify` 放过。合并前源分支要自查，因为 merge/ff 不触发 pre-commit。

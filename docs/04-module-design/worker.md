@@ -452,3 +452,8 @@ WORKDIR /app
 COPY steps/ steps/
 COPY shared/ shared/
 ```
+
+
+## manifest-v1 提交协议(九步;契约见 docs/03-contracts.md §7.5)
+
+成功路径:rc=0 → push(既有,双写期不变)→ 按 outputs glob 展开精确输出并校验(普通文件/路径边界/无凭证/无 symlink;NO_PUSH 与 >10GiB 豁免)→ 流式 SHA-256 → 组装 final manifest(digest 即 commit token 的 candidate_digest)→ `begin_step_commit`(围栏拒绝=换代,跳过 done;404/405=中心不支持,走既有 done)→ staging → token 保护下 promote + read-back → manifest 最后原子发布 → 同 token 上报 done → 清理 staging。失败/超时路径只回传诊断白名单(`output/ai_logs/*`、`logs/*`、`.{step}.progress/.meta.json/.error.json` + step 声明的 `output_policy.audit_globs`),不推业务输出、不发布 manifest。幂等跳过(candidate `reused`)且中心 manifest 与当前 digest 一致时省去整套重发。

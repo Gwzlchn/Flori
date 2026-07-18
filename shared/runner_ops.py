@@ -188,6 +188,9 @@ async def claim_step(
         await redis.publish(f"events:{claim['job_id']}", {
             "event": "step_start", "step": claim["step"], "worker": worker_id,
         })
+        # manifest.execution.attempt 的事实来源:当前重试计数 + 1(审查落地项)。
+        retries = await redis.get_step_retries(claim["job_id"], claim["step"])
+        claim = {**claim, "attempt": int(retries) + 1}
         from shared.source_detect import detect_source
         from shared.step_scope import parse_execution_step, part_id_from_scope
         scope_key, step = parse_execution_step(claim["step"])
@@ -205,6 +208,8 @@ async def claim_step(
             claim = {
                 **claim,
                 "source": source,
+                # manifest scope 块需要 part_index(§2.3);随 claim 下发,worker 不回读 DB。
+                "part_index": part.part_index,
             }
             if step in SOURCE_MEDIA_STEPS and part.source_ref:
                 claim.update({

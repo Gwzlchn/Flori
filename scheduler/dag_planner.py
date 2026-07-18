@@ -63,6 +63,10 @@ class DagPlanner:
                             "event": "step_skipped", "step": name,
                             "reason": "mechanical_only",
                         })
+                        # 确定性 skip 是持久完成事实(§2.8),签发 skipped manifest。
+                        await self._publish_skipped_manifest(
+                            job_id, cfg, "mechanical_only",
+                        )
                         statuses[name] = "skipped"
                         progressed = True
                     continue
@@ -77,6 +81,8 @@ class DagPlanner:
                         await self.owner.redis.publish(f"events:{job_id}", {
                             "event": "step_skipped", "step": name,
                         })
+                        # rules/condition 对当前证据确定性求值为 false:同上签发。
+                        await self._publish_skipped_manifest(job_id, cfg, "rule_false")
                         statuses[name] = "skipped"
                         progressed = True
                     continue
@@ -142,6 +148,88 @@ class DagPlanner:
                     fresh2 = await self.owner.redis.get_all_step_statuses(job_id)
                     if fresh2 and all(v in ("done", "skipped") for v in fresh2.values()):
                         await self.owner.mark_job_done(job_id)
+
+    async def _publish_skipped_manifest(
+        self, job_id: str, cfg: dict, reason: str,
+    ) -> None:
+        """scheduler 签发确定性 skipped manifest(§2.8);best-effort,失败不阻调度。
+
+        no_worker 跳过绝不进入这里:环境性 skip 无 manifest,重启对账时重新求值。
+        """
+        if self.owner.storage is None:
+            return
+        try:
+            from shared.runner_ops import parse_style_tags
+            from shared.step_completion import (
+                build_skipped_manifest,
+                step_definition_digest_for,
+            )
+            from shared.step_manifest import manifest_relative_path
+            from shared.version import FLORI_VERSION
+
+            from shared.step_manifest import canonical_digest
+
+            pipeline = await self.owner.redis.get_job_pipeline(job_id)
+            info = await self.owner.redis.get_job_info(job_id)
+            definition_digest = step_definition_digest_for(
+                pipeline, cfg, config=self.owner.config,
+                domain=info.get("domain", "general"),
+                style_tags=parse_style_tags(info.get("style_tags", "[]")),
+            )
+            generation = await self.owner.redis.get_job_generation(job_id)
+            # 证据摘要:rule_false 绑定规则语义块与求值证据(命中文件集+flags);
+            # mechanical_only 以 flags 摘要充 condition 证据。可与重放求值交叉核对。
+            try:
+                flags = json.loads(info.get("flags") or "{}")
+            except (TypeError, ValueError):
+                flags = {}
+            rule_digest = None
+            condition_digest = None
+            if reason == "rule_false":
+                semantic_rules = {
+                    "rules": cfg.get("rules"), "condition": cfg.get("condition"),
+                }
+                rule_digest = canonical_digest(semantic_rules)
+                import fnmatch as _fnmatch
+
+                files = await self.owner._list_job_files(
+                    job_id, cfg.get("part_id"),
+                )
+                globs = [
+                    rule.get("exists") for rule in (cfg.get("rules") or [])
+                    if isinstance(rule, dict) and rule.get("exists")
+                ]
+                evidence = sorted({
+                    item for item in files
+                    for pattern in globs if _fnmatch.fnmatch(item, pattern)
+                })
+                condition_digest = canonical_digest(
+                    {"flags": flags, "matched_files": evidence},
+                )
+            elif reason == "mechanical_only":
+                condition_digest = canonical_digest({"flags": flags})
+            _manifest, encoded = build_skipped_manifest(
+                job_id=job_id,
+                scope_key=cfg["scope_key"],
+                step=cfg["template_step"],
+                part_index=cfg.get("part_index"),
+                job_generation=generation,
+                reason_code=reason,
+                definition_digest=definition_digest,
+                rule_digest=rule_digest,
+                condition_digest=condition_digest,
+                flori_version=FLORI_VERSION,
+            )
+            await self.owner.storage.write_file(
+                job_id,
+                manifest_relative_path(cfg["scope_key"], cfg["template_step"]),
+                encoded,
+            )
+        except Exception:
+            logger.warning(
+                "skipped_manifest_publish_failed",
+                job_id=job_id, step=cfg.get("name"), reason=reason, exc_info=True,
+            )
 
     def _get_downstream(self, steps: dict[str, dict], from_step: str) -> list[str]:
         """递归获取 from_step 的所有下游步骤。"""

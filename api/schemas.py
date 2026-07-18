@@ -671,6 +671,8 @@ class RunnerCompleteRequest(BaseModel):
     exec_id: str
     duration: float
     started_at: float
+    # manifest 提交协议的一次性 commit token(§2.6-8);None=未发布 manifest 的既有语义。
+    commit_token: dict | None = None
 
 
 class RunnerFailRequest(BaseModel):

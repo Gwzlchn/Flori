@@ -174,10 +174,19 @@ async def test_gateway_production_worker_execute_closes_task_lifecycle(
         await Scheduler(redis, db, test_config, storage=app.state.storage)._dispatch(terminal)
         await redis.ack_lifecycle_event(message_id)
 
-        expected_artifact = b"failed-artifact" if step_fails else b"completed-artifact"
-        assert await app.state.storage.read_file(
-            job_id, "output/result.bin",
-        ) == expected_artifact
+        if step_fails:
+            # 失败无业务提交(docs/03-contracts.md §7):失败路径只上行诊断白名单,
+            # 业务产物不得进中心;错误诊断必须在。
+            assert await app.state.storage.read_file(
+                job_id, "output/result.bin",
+            ) is None
+            assert await app.state.storage.read_file(
+                job_id, ".01_download.error.json",
+            ) is not None
+        else:
+            assert await app.state.storage.read_file(
+                job_id, "output/result.bin",
+            ) == b"completed-artifact"
         assert db.get_usage_summary(job_id=job_id)["calls"] == 1
         step = db.get_steps(job_id)[0]
         expected_status = StepStatus.FAILED if step_fails else StepStatus.DONE

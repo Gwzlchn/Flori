@@ -89,6 +89,8 @@ video:
         - exists: "input/*.srt"
           when: skip
       outputs: ["input/subtitle.srt"]
+      # 01_download 可能带回原生字幕(input/*.srt);whisper 只在其缺席时产出,后写者持有。
+      output_policy: {overlap_with: ["01_download"]}
 
     "03_scene":
       label: "场景检测"
@@ -266,6 +268,8 @@ video:
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
+      # 核验步以最终版覆盖 11_smart 先写的 provenance/smart.json,后写者持有(§2.5)。
+      output_policy: {overlap_with: ["11_smart"]}
       outputs: ["output/provenance/smart.json", "output/provenance/semantic_batch.json"]
 
     "12_review":
@@ -309,6 +313,8 @@ document:
       on_complete:
         - action: sync_metadata
       outputs: ["intermediate/document.json", "intermediate/quality.json", "intermediate/source_segments.json", "intermediate/needs_translation.json", "assets/*"]
+      # 解析补写页内图片(assets/*),与 01_download 带回的资产同域,后写者持有。
+      output_policy: {overlap_with: ["01_download"]}
 
     "03_structure":
       label: "结构验收"
@@ -322,6 +328,8 @@ document:
           candidates:
             - {note_type: original, path: "intermediate/document_index.md", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/original.json", provenance_step: "03_structure", provenance_since_version: "1"}
       outputs: ["intermediate/document.json", "intermediate/quality.json", "intermediate/source_segments.json", "intermediate/document_index.md", "output/provenance/original.json"]
+      # 结构验收在 02_parse 的结构中间产物上原位修订,后写者持有。
+      output_policy: {overlap_with: ["02_parse"]}
 
     "04_translate":
       label: "翻译"
@@ -394,6 +402,8 @@ document:
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
+      # 核验步以最终版覆盖 05_smart/04_translate 先写的 provenance,后写者持有(§2.5)。
+      output_policy: {overlap_with: ["05_smart", "04_translate"]}
       outputs: ["output/provenance/smart.json", "output/provenance/translated.json", "output/provenance/semantic_batch.json"]
 
     "08_review":
@@ -499,6 +509,8 @@ audio:
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
+      # 核验步以最终版覆盖 04_smart_podcast 先写的 provenance/smart.json,后写者持有(§2.5)。
+      output_policy: {overlap_with: ["04_smart_podcast"]}
       outputs: ["output/provenance/smart.json", "output/provenance/semantic_batch.json"]
 
     "05_review":

@@ -510,6 +510,12 @@ class Scheduler:
     async def reconcile_slots(self) -> None:
         return await self._recovery.reconcile_slots()
 
+    async def reconcile_step_manifests(self, job_id: str) -> None:
+        return await self._recovery.reconcile_step_manifests(job_id)
+
+    async def cleanup_execution_staging_orphans(self) -> None:
+        return await self._recovery.cleanup_execution_staging_orphans()
+
     async def check_stuck(self) -> None:
         return await self._recovery.check_stuck()
 

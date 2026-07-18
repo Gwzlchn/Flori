@@ -2678,6 +2678,16 @@ Payload: {"event":"ai_task_start|ai_task_done|ai_task_failed","task_id":"at_xxx"
 
 pipeline 认领在单个 Lua 中完成全队列能力匹配、pool/resource holder、`ready -> running`、worker/exec/generation/progress 和 task lease 写入；不兼容队头不得阻塞后续可执行任务。step terminal 写入前原子核对当前 step status、exec_id、step/job generation 和 job 终态门，陈旧 worker 不能推进新一代执行。`step_started`、`events:{job_id}` 和 AI task 事件仍是可丢的展示/唤醒 Pub/Sub，不参与权威状态恢复；Stream 已持久后的 Pub/Sub 通知失败不得让命令 API 返回失败。
 
+### 步骤产物 commit fence(manifest-v1,详见 §7.5)
+
+```
+job:{job_id}:step_commit:{execution_step}   # HASH: token_id / exec_id / job_generation /
+                                            #       candidate_digest / phase(committing|manifest_published)
+                                            # TTL 600s;begin 原子签发(校验实时 generation/exec/running/租约),
+                                            # validate 校验通过顺带续期,finish(done 回执)消费即 DEL,
+                                            # rerun 有界等待后 clear 撤销;delete_step_status 一并清除。
+```
+
 ## 4. 文件 Schema
 
 ### 4.1 pipelines.yaml — 步骤链定义
@@ -3321,6 +3331,77 @@ RETRY_POLICY = {
 注意：此处的重试次数和 `pipelines.yaml` 中每个 job 定义的 `retry` 取**较小值**。pipelines.yaml 是步骤级上限，RETRY_POLICY 是错误类型级上限。
 
 ---
+
+## 7. Step Manifest v1(步骤完成权威)
+
+> 生产/消费实现:`shared/step_manifest.py`(schema/canonical/路径)、`shared/step_commit.py`(围栏状态机)、`shared/storage.py`(staging/promote/manifest-last)、`shared/step_output_commit.py`(输出展开与采集)、`shared/step_completion.py`(dual 读端)。迁移工具 `shared/step_manifest_migration.py` + `scripts/migrate-step-manifests.sh`。
+
+### 7.1 完成权威与投影
+
+- durable completion authority = 中心存储中校验通过的 step manifest;SQLite `job_steps.status` 与 Redis 步状态只是可修复的运行投影。
+- `STEP_COMPLETION_MODE=dual|manifest-only`(默认 dual):dual 下 manifest 优先、缺失时退回 `.done` 既有语义;manifest-only 下缺失/损坏即降 waiting 并失效 DAG 下游。dual 是迁移期形态,完成阶段 C 验证后切 manifest-only 并删除兼容代码。
+- 对账表(scheduler 启动执行,先修投影再恢复入队):有效 manifest + 投影落后 → 修复为 done/skipped 并幂等重放 on_complete;manifest 缺失/损坏/输出校验失败 + DB done → manifest-only 下降 waiting 失效下游(下游闭包一律删 manifest,状态仅对 done/skipped 置 waiting)。
+- generation 不参与对账裁决:旧代 manifest 由 rerun 删除流程负责清除(删除失败让整个 lifecycle 命令失败,PEL 重投重试整个 rerun,幂等);backfill(`job_generation=0`)与 clone 重签发(保留父代 generation)因此合法。未动步骤的旧代 manifest 是合法完成事实。
+
+### 7.2 对象布局
+
+```
+{job_id}/.flori/steps/{step}/manifest.json                    # Job scope
+{job_id}/parts/{part_id}/.flori/steps/{step}/manifest.json    # Part scope
+.flori/staging/{job_id}/{exec_id}/{job_relative_path}         # 执行 staging namespace
+.flori/staging/{job_id}/{exec_id}/.commit.json                # commit 记录(promote_started 持久证据)
+```
+
+`.flori` 内部命名空间不作为业务产物往返:push/pull/list/clone 全部隔离,runner 产物 PUT 拒绝写入(防伪造 manifest);读(GET)允许,worker 据此取上一份 manifest 计算精确删除集。clone/fork 不字节复制 manifest,由 API 以新 job_id 重新签发(`producer.kind=clone_reissue`,溯源在 `execution.exec_id=clone:{parent_id}:{原 exec_id}`)。MinIO lifecycle 对两个 staging 前缀(`.flori-staging/`、`.flori/staging/`)配 1 天 Expiration + AbortIncompleteMultipartUpload 兜底;scheduler 周期(10 min)按活跃 exec_id 集合回收孤儿执行 staging(宽限 3×token TTL)。
+
+### 7.3 manifest-v1 文件契约
+
+字段清单(自足):`format=flori-step-manifest`、`format_version=1`、`job_id`、`scope{kind,scope_key,part_id,part_index}`、`step`、`outcome=done|skipped`、`execution{exec_id,job_generation,attempt,started_at,committed_at,duration_sec}`、`compatibility{input_fingerprints,input_digest,definition_digest}`、`producer{flori_version,build_sha,worker_id,runner,image,image_digest,tool_versions[,kind]}`、`outputs[{path,size_bytes,sha256,media_type}]`、`skip{reason_code,rule_digest,condition_digest}|null`。
+
+校验裁决(fail-closed,全部在 `validate_manifest`):
+
+- canonical JSON = UTF-8 + sort_keys + 紧凑分隔符,禁 NaN/Infinity,-0.0 归一 0.0,拒 lone surrogate 与 C0/DEL 控制字符。
+- outputs 按 UTF-8 path 升序且唯一;路径拒绝绝对路径、空段、`.`/`..`、反斜杠、NUL、`.flori` 命名空间自引用(大小写不敏感)、job scope 越界 `parts/`。
+- manifest canonical 上限 1 MiB、outputs 上限 100000,超限拒绝不截断。
+- `input_fingerprints` 有界 str->str(空串值合法 = "该输入不存在",与 `.done.input_hashes` 语义对齐)、无密钥样式;`input_digest` 必须等于 fingerprints 的 canonical 摘要。
+- 整数字段(size_bytes/part_index/job_generation/attempt 等)上界 int64(2^63-1),bool 拒绝伪装 int,超界拒绝不截断。
+- 时间 UTC RFC3339;摘要一律小写 `sha256:{64hex}`;`skip.rule_digest/condition_digest` 可为 null;`skip.reason_code=no_worker` 等环境性 skip 被 schema 拒绝(不是持久完成事实)。
+- manifest 本体摘要不写入自身(防自引用);提交期由 commit token 的 `candidate_digest` 绑定,持久场景直接对 canonical 字节重算,不做 DB 缓存。
+
+NAS 只读源不是 output:`01_download` NAS 分支产物只有 `input/metadata.json`,源身份以 `source_ref/source_digest/source_size_bytes` 并入 `compatibility.input_fingerprints`,校验器绝不从中心存储拉源对象(源完整性由 `job_parts` + `shared/source_library.py` 承担)。gateway `STORAGE_NO_PUSH_GLOBS` 与 >10 GiB 超限输出同款豁免:不在 manifest 即不被完成权威证明,备份/下游按 manifest 语义忽略。
+
+### 7.4 pipelines outputs 所有权与 output_policy
+
+`configs/pipelines.yaml` 各步 `outputs` glob 是输出所有权单一事实源(fnmatch 语义)。可选 `output_policy` 块:
+
+```yaml
+output_policy:
+  allow_empty: false            # 显式声明才强制;缺省不校验(dual 保守序)
+  required_any: [["input/source.mp4", "input/source.mp3"]]
+  audit_globs: ["output/ai_logs/**"]   # 失败/超时路径的诊断白名单增补(并入固定白名单)
+  overlap_with: ["11_smart"]    # 同 scope 输出交叠必须显式声明,未声明拒绝启动
+```
+
+同一路径被多步先后拥有时归最后合法写者的 manifest;加载器对同 pipeline 同 scope 的未声明交叠 fail-closed。
+
+### 7.5 提交协议 runner 端点(gateway worker)
+
+worker 侧 Local/Remote 直连存储执行同一协议;gateway 经以下端点(全部要求 per-worker token + 任务租约头):
+
+| 端点 | 语义 |
+|---|---|
+| `POST /api/runner/jobs/{job_id}/steps/{step}/commit/begin` `{candidate_digest}` | Lua 原子校验实时 job generation/step exec/running/租约后签发一次性 commit token;拒绝 409。响应 `{token:{token_id,exec_id,job_generation,candidate_digest}}` |
+| `POST .../steps/{step}/commit/confirm` `{token,phase}` | promote 前后逐次校验(成功顺带续期 TTL 600s);phase 白名单 `""`/`manifest_published` |
+| `POST /api/runner/jobs/{job_id}/staging/copy` `{path,size_bytes,sha256}` | canonical 同尺寸对象服务端复制进执行 staging(免二次过慢链路);响应 `{staged:bool}` |
+| `PUT /api/runner/jobs/{job_id}/staging/{rel}` | candidate 字节直传 staging(copy 不可用时的兜底);拒凭证/内部命名空间 |
+| `POST .../steps/{step}/commit` `{token,outputs,manifest,stale_paths}` | 中心执行 promote→read-back(size+SHA)→按旧 manifest 精确删旧输出→manifest 最后原子发布;`manifest_rel` 服务端权威计算;outputs 与 stale_paths 均过 scope 守卫;manifest 身份/输出集与提交集交叉校验(409=围栏拒绝,422=完整性拒绝) |
+| `DELETE /api/runner/jobs/{job_id}/staging` | 清当前执行 staging(done 回执后的第九步清理;孤儿由 lifecycle + scheduler 周期回收兜底) |
+
+`POST .../steps/{step}/complete` 增可选 `commit_token`:带 token 时 done 与 manifest 同源,token 失效返回 `{ok:false,stale:true}`,落账后消费 token(一次性)。旧中心 404/405 时 worker 保守跳过 manifest 走既有 done(混跑窗口)。
+
+### 7.6 迁移(§2.11)
+
+`scripts/migrate-step-manifests.sh report|backfill|verify|cleanup`:report 默认只读;backfill 按 DB v8 scope 读 `.done` + 按 outputs 所有权全量 SHA 采集后签发 `producer.kind=legacy_done_backfill`(`exec_id=legacy:{确定性摘要}`);缺 `def_digest` 默认 `legacy_definition_unverified` 只报告,`--accept-legacy-definition=current` 才以当前语义定义签发;done 但 marker/输出不完整只进不一致报告。verify = 阶段 C 双向闭合:遍历全部 expanded steps(含非终态,manifest 在而 DB 非终态记失败)+ 物理 `.flori/steps/*` 清单孤儿检测 + 全量 SHA 重验;skipped 侧 backfill 以同源判定(mechanical_only/规则确定性 false)重推导并签发 `producer.kind=legacy_skip_backfill`,no_worker/不可重推导只进报告。cleanup 只删 `.{step}.done`(须 verify 全绿 + exact DR 之后)。
 
 ## MCP(把知识库作为 MCP 提供给 agent)
 

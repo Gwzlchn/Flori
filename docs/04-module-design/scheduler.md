@@ -397,3 +397,12 @@ OCR 当前仅 rapidocr (CPU)，paddleocr-GPU 尚未接入
 ```
 
 某池的就绪步长期无在线 worker 时，调度器按 `NO_WORKER_GRACE_SEC` 宽限（代码默认 90s，compose 部署设 12h）后 fail-fast，给出明确错误而非静默挂起。
+
+
+## manifest-v1 消费(读端/对账/rerun/skip;契约见 docs/03-contracts.md §7)
+
+- 启动恢复顺序:每个 active job 先 `reconcile_step_manifests`(修投影+幂等重放副作用),再补投 ready/回收 running。
+- rerun:换代后对每个 reset 步有界等待在途 commit(≤3s,generation CAS 已保证旧 token 全拒)并撤销 token,按旧 manifest 精确删除其输出与 manifest(删除失败让 lifecycle 命令失败,PEL 重投重试整个 rerun),再删 `.done`(dual);Part rerun 失效边界由展开 DAG 决定,只波及该 Part 下游与 Job reduce。
+- 确定性 skip(mechanical_only/rule_false)由 scheduler 签发 skipped manifest(`producer.kind=scheduler_skip`);no_worker 属环境性不签发,重启对账重新求值,不能重推导即转 waiting。
+- 周期任务:每 10 min 按活跃 exec_id 集合清理孤儿执行 staging(宽限 3×commit token TTL)。
+- provenance 版本边界门:manifest 优先(按语义定义摘要枚举历史版本),缺失时 dual 退回 `.done` def_digest。

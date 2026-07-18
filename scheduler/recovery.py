@@ -41,6 +41,15 @@ class RecoveryCoordinator:
                 await self.owner.redis.remove_active_job(job_id)
                 continue
 
+            # §2.7 启动顺序:先按 manifest 修复投影/重放副作用,再恢复入队。
+            try:
+                await self.owner.reconcile_step_manifests(job_id)
+            except Exception:
+                logger.warning(
+                    "manifest_reconcile_failed", job_id=job_id, exc_info=True,
+                )
+            statuses = await self.owner.redis.get_all_step_statuses(job_id)
+
             for step, status in statuses.items():
                 if status == "running":
                     worker_id = await self.owner.redis.get_step_worker(job_id, step)
@@ -478,6 +487,37 @@ class RecoveryCoordinator:
             scope_key, template_step = parse_execution_step(step)
             part_id = part_id_from_scope(scope_key)
             prefix = f"parts/{part_id}/" if part_id else ""
+            # §2.6-5:遇在途 commit 有界等待;generation 已换代,旧 token 的每次 promote
+            # 前后校验都会被 CAS 拒绝,等待只为收敛残留,超时即撤销 token。
+            commit = await self.owner.redis.get_step_commit(job_id, step)
+            if commit:
+                deadline = time.time() + 3
+                while commit and time.time() < deadline:
+                    await asyncio.sleep(0.2)
+                    commit = await self.owner.redis.get_step_commit(job_id, step)
+                await self.owner.redis.clear_step_commit(job_id, step)
+            # §2.10-3:删目标及下游 final manifest,并按各自旧 manifest 精确删除其输出。
+            # Part rerun 的失效边界由展开 DAG 决定(fan-in 边已展开进 depends_on),
+            # 只波及该 Part 下游与 Job reduce,其余 Part 保持。
+            if self.owner.storage is not None:
+                from shared.step_completion import read_valid_manifest
+                from shared.step_manifest import manifest_relative_path
+
+                manifest = await read_valid_manifest(
+                    self.owner.storage, job_id, scope_key, template_step,
+                )
+                # 删除失败不吞:异常让整个 lifecycle 命令失败,PEL 重投重试整个 rerun
+                # (begin_job_generation 的 idempotency token 在 complete 前保持 applying,
+                # 重放会重新执行删除;delete_file 幂等)。旧代 manifest 的清除责任在此,
+                # 对账不做 generation 裁决(backfill generation=0 与 clone 保留父代因此合法)。
+                if manifest is not None:
+                    for entry in manifest["outputs"]:
+                        await self.owner.storage.delete_file(
+                            job_id, f"{prefix}{entry['path']}",
+                        )
+                await self.owner.storage.delete_file(
+                    job_id, manifest_relative_path(scope_key, template_step),
+                )
             done_file = self.owner.jobs_dir / job_id / prefix / f".{template_step}.done"
             await asyncio.to_thread(done_file.unlink, True)
             # 中心存储的 .done 必须一并删:MinIO 部署下 .done 在 bucket,只删本地是 no-op,
@@ -594,3 +634,175 @@ class RecoveryCoordinator:
         """旧命令不再原地改快照;API 现以不可变 full snapshot 实现继续 AI。"""
         logger.warning("legacy_continue_ai_ignored", job_id=job_id)
         return []
+
+    async def _demote_step_and_downstream(
+        self, job_id: str, step: str, steps: dict, statuses: dict, reason: str,
+    ) -> None:
+        """§2.1 对账表行 3/4:done/skipped 降 waiting 并失效 DAG 下游(连带删下游 manifest,
+        防下一次对账用仍有效的下游 manifest 把投影翻回 done)。"""
+        from shared.step_manifest import manifest_relative_path
+        from shared.step_scope import parse_execution_step
+
+        # 下游闭包不按当前状态过滤:failed/running 等状态的下游 manifest 若不删,
+        # 同轮对账稍后会据其把投影翻回 done(方向唯一性被破坏)。
+        targets = [step] + self.owner._get_downstream(steps, step)
+        for item in targets:
+            scope_key, template_step = parse_execution_step(item)
+            if self.owner.storage is not None:
+                try:
+                    await self.owner.storage.delete_file(
+                        job_id, manifest_relative_path(scope_key, template_step),
+                    )
+                except Exception:
+                    pass
+            if item != step and statuses.get(item) not in ("done", "skipped", "waiting"):
+                continue  # 状态仅对 done/skipped 置 waiting(waiting 幂等);running/failed 由各自机制收敛
+            await self.owner.redis.set_step_status(job_id, item, "waiting")
+            await self.owner.redis.reset_step_retries(job_id, item)
+            await asyncio.to_thread(
+                self.owner.db.update_step, job_id, item,
+                status="waiting", error=None,
+                started_at=None, finished_at=None, duration_sec=None,
+            )
+            statuses[item] = "waiting"
+        logger.warning(
+            "manifest_reconcile_demoted", job_id=job_id, step=step,
+            reason=reason, downstream=len(targets) - 1,
+        )
+
+    async def reconcile_step_manifests(self, job_id: str) -> None:
+        """启动对账(§2.1 五行表 + §2.7 启动顺序):manifest 是完成事实,DB/Redis 只是投影。
+
+        dual 模式下 manifest 缺失时 .done 仍是权威(不降级);manifest-only 下缺失/损坏
+        即降 waiting 并失效下游。修复投影后由 _recover 既有流程重放副作用与入队。
+        """
+        if self.owner.storage is None:
+            return
+        from shared.step_completion import (
+            MODE_MANIFEST_ONLY,
+            completion_mode,
+            read_valid_manifest,
+            verify_manifest_outputs_metadata,
+        )
+        from shared.step_scope import parse_execution_step
+
+        mode = completion_mode()
+        steps = await self.owner._get_job_pipeline_steps(job_id) or {}
+        if not steps:
+            return
+        statuses = await self.owner.redis.get_all_step_statuses(job_id)
+        repaired = False
+        for name, cfg in steps.items():
+            status = statuses.get(name)
+            if status == "running":
+                continue  # 在途执行由 orphan/commit fence 收敛,不在对账内翻转
+            scope_key, template_step = parse_execution_step(name)
+            manifest = await read_valid_manifest(
+                self.owner.storage, job_id, scope_key, template_step,
+            )
+            if manifest is not None:
+                outputs_ok = await verify_manifest_outputs_metadata(
+                    self.owner.storage, job_id, manifest,
+                )
+                if not outputs_ok:
+                    # 行 3:输出与声明不符。dual 阶段只告警(.done 仍在,避免启动风暴);
+                    # manifest-only 即降级失效下游。
+                    if mode == MODE_MANIFEST_ONLY and status in ("done", "skipped"):
+                        await self._demote_step_and_downstream(
+                            job_id, name, steps, statuses, "manifest_outputs_invalid",
+                        )
+                    else:
+                        logger.warning(
+                            "manifest_outputs_mismatch", job_id=job_id, step=name,
+                        )
+                    continue
+                desired = "done" if manifest["outcome"] == "done" else "skipped"
+                if status not in ("done", "skipped"):
+                    # 行 2:manifest 有效而投影落后(崩溃窗口 §2.7 行 3)→ 修复投影。
+                    await self.owner.redis.set_step_status(job_id, name, desired)
+                    await asyncio.to_thread(
+                        self.owner.db.update_step, job_id, name, status=desired,
+                    )
+                    statuses[name] = desired
+                    repaired = True
+                    logger.info(
+                        "manifest_reconcile_repaired", job_id=job_id,
+                        step=name, status=desired,
+                    )
+                continue
+            # manifest 缺失
+            if status == "done" and mode != MODE_MANIFEST_ONLY:
+                # dual 遥测:切 manifest-only 前据此计数评估 backfill 覆盖度。
+                logger.warning(
+                    "manifest_missing_dual", job_id=job_id, step=name,
+                )
+            if status == "done" and mode == MODE_MANIFEST_ONLY:
+                await self._demote_step_and_downstream(
+                    job_id, name, steps, statuses, "manifest_missing",
+                )
+                continue
+            if status == "skipped":
+                # §2.8:无 skipped manifest 的 skip 重新求值;可确定性重推导才保留,
+                # 否则(典型 no_worker)转 waiting,由调度按当前环境重新决定。
+                keep = False
+                info = await self.owner.redis.get_job_info(job_id)
+                try:
+                    flags = json.loads(info.get("flags") or "{}")
+                except (TypeError, ValueError):
+                    flags = {}
+                if flags.get("mechanical_only") is True and cfg.get("pool") == "ai":
+                    keep = True
+                elif self.owner._step_is_conditional(cfg):
+                    try:
+                        keep = not await self.owner._eval_step_condition(job_id, cfg)
+                    except Exception:
+                        keep = True  # 条件求值失败保持现状,不放大故障
+                if not keep:
+                    await self.owner.redis.set_step_status(job_id, name, "waiting")
+                    await asyncio.to_thread(
+                        self.owner.db.update_step, job_id, name, status="waiting",
+                    )
+                    statuses[name] = "waiting"
+                    repaired = True
+                    logger.info(
+                        "environmental_skip_reset", job_id=job_id, step=name,
+                    )
+        if repaired:
+            # 行 2 修复后幂等重放完成副作用(§2.7 步骤 4);重复副作用由 effects 自身幂等门挡。
+            try:
+                await self.owner._reconcile_completed_effects(job_id)
+            except Exception:
+                logger.warning(
+                    "manifest_reconcile_effects_failed", job_id=job_id, exc_info=True,
+                )
+
+    _STAGING_CLEANUP_INTERVAL_SEC = 600
+    _STAGING_STALE_GRACE_SEC = 1800  # 3x commit token TTL:崩溃残留才回收,在途绝不清
+
+    async def cleanup_execution_staging_orphans(self) -> None:
+        """周期回收孤儿执行 staging(§2.6-9 的 TTL 兜底);活跃执行经 exec_id 集合保护。"""
+        storage = self.owner.storage
+        if storage is None or not hasattr(storage, "cleanup_stale_execution_staging"):
+            return
+        now = time.time()
+        last = getattr(self.owner, "_staging_cleanup_at", 0.0)
+        if now - last < self._STAGING_CLEANUP_INTERVAL_SEC:
+            return
+        self.owner._staging_cleanup_at = now
+        live: set[str] = set()
+        try:
+            for job_id in await self.owner.redis.get_active_jobs():
+                statuses = await self.owner.redis.get_all_step_statuses(job_id)
+                for step, status in statuses.items():
+                    if status == "running":
+                        exec_id = await self.owner.redis.get_step_exec_id(job_id, step)
+                        if exec_id:
+                            live.add(exec_id)
+            removed = await storage.cleanup_stale_execution_staging(
+                active_exec_ids=live,
+                stale_before_epoch=now - self._STAGING_STALE_GRACE_SEC,
+            )
+            if removed:
+                logger.info("execution_staging_cleaned", removed=removed)
+        except Exception:
+            logger.warning("execution_staging_cleanup_failed", exc_info=True)

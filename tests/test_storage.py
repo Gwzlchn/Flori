@@ -698,7 +698,7 @@ class TestRemoteListFiles:
         rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
         objs = [MagicMock(object_name="j1/job.json"), MagicMock(object_name="j1/out/n.md")]
         client = MagicMock()
-        client.list_objects.side_effect = [objs, [], []]
+        client.list_objects.side_effect = [objs, [], [], []]
         client.remove_objects.return_value = []  # 无删除错误
         rs._client = lambda: client
 
@@ -706,6 +706,7 @@ class TestRemoteListFiles:
 
         assert [call.kwargs["prefix"] for call in client.list_objects.call_args_list] == [
             "j1/", ".flori-staging/j1/", ".flori-initializing/j1/",
+            ".flori/staging/j1/",
         ]
         bucket, deletes = client.remove_objects.call_args.args
         assert bucket == "b"
@@ -759,7 +760,7 @@ class TestRemoteListFiles:
         await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
 
         assert await asyncio.to_thread(delete_scan_started.wait, 1)
-        assert len(client.list_objects.call_args_list) == 3
+        assert len(client.list_objects.call_args_list) == 4
         assert "j1" not in rs._delete_requested
         assert "j1" not in rs._delete_tasks
         assert "j1" not in rs._job_locks
@@ -770,6 +771,7 @@ class TestRemoteListFiles:
         client = MagicMock()
         client.list_objects.side_effect = [
             [MagicMock(object_name="j1/job.json")],
+            [],
             [],
             [],
         ]
@@ -943,7 +945,7 @@ class TestRemoteStreaming:
         config = client.set_bucket_lifecycle.call_args.args[1]
         assert config.rules[0] is existing
         assert [rule.rule_id for rule in config.rules] == [
-            "keep-existing", "flori-staging-recovery",
+            "keep-existing", "flori-staging-recovery", "flori-exec-staging-recovery",
         ]
         client.remove_object.assert_called_once_with(
             "b", ".flori-staging/stale/token-a",
@@ -967,7 +969,10 @@ class TestRemoteStreaming:
         ) == 0
         config = client.set_bucket_lifecycle.call_args.args[1]
         assert [rule.rule_id for rule in config.rules] == [
-            "flori-staging-recovery",
+            "flori-staging-recovery", "flori-exec-staging-recovery",
+        ]
+        assert [rule.rule_filter.prefix for rule in config.rules] == [
+            ".flori-staging/", ".flori/staging/",
         ]
 
     @pytest.mark.asyncio
@@ -987,10 +992,11 @@ class TestRemoteStreaming:
         )
 
         config = client.set_bucket_lifecycle.call_args.args[1]
-        assert len(config.rules) == 1
+        assert len(config.rules) == 2
         assert config.rules[0] is not invalid
         assert config.rules[0].rule_id == "flori-staging-recovery"
         assert config.rules[0].status == "Enabled"
+        assert config.rules[1].rule_id == "flori-exec-staging-recovery"
 
     @pytest.mark.asyncio
     async def test_lifecycle_set_failure_aborts_cleanup(self, tmp_path):
@@ -2078,7 +2084,7 @@ class TestRemoteStreaming:
         await asyncio.wait_for(delete_waiter, timeout=1)
         await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
 
-        assert len(client.list_objects.call_args_list) == 3
+        assert len(client.list_objects.call_args_list) == 4
         assert "j1" not in rs._delete_requested
         assert "j1" not in rs._job_locks
 
@@ -2125,7 +2131,7 @@ class TestRemoteStreaming:
         assert len(copy_targets) == 2
         assert copy_targets[0].endswith(".backup")
         assert copy_targets[1] == "j1/out/a.bin"
-        assert len(client.list_objects.call_args_list) == 3
+        assert len(client.list_objects.call_args_list) == 4
 
     @pytest.mark.asyncio
     async def test_delete_barrier_blocks_normal_writer_publish(self, tmp_path):
@@ -2161,7 +2167,7 @@ class TestRemoteStreaming:
         await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
 
         client.copy_object.assert_not_called()
-        assert len(client.list_objects.call_args_list) == 3
+        assert len(client.list_objects.call_args_list) == 4
 
     @pytest.mark.asyncio
     async def test_delete_during_normal_publish_waits_then_removes_job(self, tmp_path):
@@ -2212,7 +2218,7 @@ class TestRemoteStreaming:
         await asyncio.wait_for(rs.wait_for_finalizers(), timeout=1)
 
         assert order.index("publish_done") < order.index("delete_scan")
-        assert order.count("delete_scan") == 3
+        assert order.count("delete_scan") == 4
 
     @pytest.mark.asyncio
     async def test_successful_delete_releases_state_for_reused_job_id(self, tmp_path):
@@ -2244,7 +2250,7 @@ class TestRemoteStreaming:
         rs = RemoteStorage("h:9000", "k", "s", "b", False, tmp_root=tmp_path)
         client = MagicMock()
         client.list_objects.side_effect = [
-            [MagicMock(object_name="j1/source.bin")], [], [],
+            [MagicMock(object_name="j1/source.bin")], [], [], [],
         ]
         client.remove_objects.return_value = [
             MagicMock(code="AccessDenied", object_name="j1/source.bin"),
@@ -2261,7 +2267,7 @@ class TestRemoteStreaming:
         with pytest.raises(OSError, match="deletion"):
             await rs.write_stream("j1", "out/a.bin", source())
 
-        client.list_objects.side_effect = [[], [], []]
+        client.list_objects.side_effect = [[], [], [], []]
         client.remove_objects.return_value = []
         await rs.delete("j1")
         assert "j1" not in rs._delete_requested

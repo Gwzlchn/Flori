@@ -16,6 +16,7 @@ import httpx
 import structlog
 
 from shared.version import FLORI_VERSION
+from shared.step_output_commit import StaleCommitError
 from shared.runner_ops import (
     TaskLease,
     bind_task_lease,
@@ -394,16 +395,62 @@ class GatewayTransport:
             error=str(last_exc)[:200],
         )
 
-    async def report_done(self, claim, duration, started_at):
+    async def report_done(self, claim, duration, started_at, commit_token=None):
         job_id, step = claim["job_id"], claim["step"]
+        body = {
+            "pool": claim["pool"], "exec_id": claim["exec_id"],
+            "duration": duration, "started_at": started_at,
+        }
+        if commit_token is not None:
+            body["commit_token"] = commit_token
         await self._report_best_effort(
             f"/api/runner/jobs/{job_id}/steps/{step}/complete",
-            {
-                "pool": claim["pool"], "exec_id": claim["exec_id"],
-                "duration": duration, "started_at": started_at,
-            },
+            body,
             op="report_done", job_id=job_id, step=step,
         )
+
+    async def begin_step_commit(self, claim, candidate_digest):
+        job_id, step = claim["job_id"], claim["step"]
+        url = f"/api/runner/jobs/{job_id}/steps/{step}/commit/begin"
+        resp = await self._http.post(
+            url, headers=self._lease_auth(),
+            json={"candidate_digest": candidate_digest},
+        )
+        self._raise_auth_status(resp, url)
+        if resp.status_code in (404, 405):
+            # 混跑窗口:旧中心无提交协议端点,保守跳过 manifest 走既有 done 语义。
+            logger.warning(
+                "gateway_step_commit_unsupported", job_id=job_id, step=step,
+                status=resp.status_code,
+            )
+            return None
+        if resp.status_code in (403, 409):
+            logger.warning(
+                "gateway_step_commit_fence_rejected", job_id=job_id, step=step,
+                status=resp.status_code,
+            )
+            raise StaleCommitError("central commit fence rejected this execution")
+        resp.raise_for_status()
+        token = self._json(resp, url).get("token")
+        return token if isinstance(token, dict) else None
+
+    async def confirm_step_commit(self, claim, token, phase=""):
+        job_id, step = claim["job_id"], claim["step"]
+        url = f"/api/runner/jobs/{job_id}/steps/{step}/commit/confirm"
+        resp = await self._http.post(
+            url, headers=self._lease_auth(),
+            json={"token": token, "phase": phase},
+        )
+        self._raise_auth_status(resp, url)
+        if resp.status_code in (403, 404, 405, 409):
+            # 404/405 = 旧中心(混跑窗口),与围栏拒绝同样按 token 失效保守中止提交。
+            logger.warning(
+                "gateway_step_commit_confirm_rejected", job_id=job_id, step=step,
+                status=resp.status_code,
+            )
+            return False
+        resp.raise_for_status()
+        return bool(self._json(resp, url).get("ok"))
 
     async def report_failed(self, claim, error, error_type, duration,
                             started_at, count_stats):

@@ -398,3 +398,11 @@ DRY_RUN=1 docker compose up
 | 08_punctuate | ~30s | ~1min |
 | 10_smart | ~3min | ~5min |
 | **总计** | **~8min** | **~15min** |
+
+
+## manifest-v1 测试矩阵
+
+- `tests/test_step_manifest.py` / `test_step_commit.py`:canonical 稳定性、schema fail-closed、围栏状态机与恢复决策表。
+- `tests/test_step_output_commit.py`:逐故障点注入(`test_fence_rejection_at_each_checkpoint_blocks_manifest` 等)、换代拒绝(`test_old_exec_cannot_promote_or_publish_after_new_generation`)、Part 并发隔离(`test_two_parts_commit_concurrently_without_crosstalk`)、失败仅诊断(`test_failure_pushes_only_diagnostics_whitelist`)、三后端协议等价(`TestRemoteCommitProtocol`/`TestGatewayCommitEndpoints`)、TTL 续期、stale 越权、幽灵输出。
+- `tests/test_step_completion.py`:对账修复幂等(`TestReconcileRepairsProjection`)、缺/损降级失效下游(`TestManifestMissingDemotion`)、Part rerun 失效边界(`TestPartRerunInvalidationBoundary`)、AI/CPU 同一 stale 算法(`TestUnifiedStaleAlgorithm`)、skip 恢复(`TestSkipRecovery`)、backfill 全流程与 fail-closed(`TestBackfill`)。
+- dual→manifest-only→cleanup→exact DR 回滚演练与 `--integration` 崩溃恢复门在切换 manifest-only 前执行,见迁移工单。

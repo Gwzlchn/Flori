@@ -332,6 +332,35 @@ class EffectDispatcher:
         ):
             return False
 
+        # manifest 优先(§2.11 阶段A):有效 manifest 时按语义定义摘要枚举历史版本判早期完成。
+        from shared.step_completion import (
+            MODE_MANIFEST_ONLY,
+            completion_mode,
+            read_valid_manifest,
+            semantic_digest_for_version,
+        )
+
+        manifest = await read_valid_manifest(
+            self.owner.storage, job.id, "job", step_name,
+        )
+        if manifest is not None:
+            from shared.runner_ops import parse_style_tags
+
+            try:
+                historical = {
+                    semantic_digest_for_version(
+                        job.pipeline, producer, version,
+                        config=self.owner.config, domain=job.domain,
+                        style_tags=parse_style_tags(job.style_tags),
+                    )
+                    for version in range(1, provenance_since)
+                }
+            except Exception:
+                return False
+            return manifest["compatibility"]["definition_digest"] in historical
+        if completion_mode() == MODE_MANIFEST_ONLY:
+            return False
+
         raw_done = await read_file_bounded(
             self.owner.storage, job.id, f".{step_name}.done", _MAX_STEP_DONE_BYTES,
         )

@@ -1405,7 +1405,7 @@ class TestRebuildP2c:
         })
 
         assert response.status_code == 409
-        assert "without done marker" in response.text
+        assert "without completion proof" in response.text
         assert db.get_job(parent_id).is_current is True
         assert [job.id for job in db.lineage_versions(parent_id)] == [parent_id]
 

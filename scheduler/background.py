@@ -233,6 +233,7 @@ class BackgroundServices:
                 await self.owner.check_no_worker()
                 await self.owner.cleanup_stale_workers()
                 await self.owner.reconcile_slots()
+                await self.owner.cleanup_execution_staging_orphans()
                 await self.owner.reconcile_completion_effects()
                 await self.owner.reconcile_study_suggestion_batches()
                 await self.owner.check_radar_digest()
