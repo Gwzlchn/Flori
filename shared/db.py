@@ -919,10 +919,19 @@ def _optional_sha256(value: str | None, field: str) -> str | None:
 
 def _parse_dt(s: str | None) -> datetime | None:
     """解析 ISO 时间串为 aware-UTC。旧库里存的 naive 串补上 UTC tzinfo,
-    避免与 aware 的 now() 相减时崩 'can't subtract offset-naive and offset-aware'。"""
+    避免与 aware 的 now() 相减时崩 'can't subtract offset-naive and offset-aware'.
+    旧数据可能含年月精度或非日期脏值;年月按月初读取,无法解析则视为空."""
     if s is None:
         return None
-    dt = datetime.fromisoformat(s)
+    value = str(s).strip()
+    if len(value) == 7 and value[4] == "-":
+        value += "-01"
+    elif len(value) == 4 and value.isdigit():
+        value += "-01-01"
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt

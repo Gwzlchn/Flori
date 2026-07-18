@@ -19,6 +19,33 @@ from redis.exceptions import (
 from shared.status import DEFAULT_ONLINE_WINDOW_SEC
 
 
+def worker_info_from_model(
+    worker,
+    *,
+    at: datetime,
+    status: str | None = None,
+    concurrency: int | None = None,
+) -> dict[str, str]:
+    """把持久化 worker 行恢复为 Redis 存活记录;丢失的瞬态字段使用安全空值."""
+    started_at = worker.started_at or worker.first_seen or at
+    return {
+        "type": worker.type,
+        "pools": ",".join(worker.pools),
+        "tags": ",".join(sorted(worker.tags)),
+        "reject_tags": ",".join(sorted(worker.reject_tags)),
+        "hostname": worker.hostname or "",
+        "status": status or worker.status or "idle",
+        "admin_status": worker.admin_status or "",
+        "concurrency": str(concurrency or worker.concurrency or 1),
+        "remote_addr": worker.remote_addr or "",
+        "spec": "{}",
+        "started_at": started_at.isoformat(),
+        "last_heartbeat": at.isoformat(),
+        "current_job": worker.current_job or "",
+        "current_step": worker.current_step or "",
+    }
+
+
 # Lua 脚本
 
 _LUA_ACQUIRE_SLOT = """
@@ -133,6 +160,14 @@ if redis.call('SCARD', KEYS[2]) >= limit then return nil end
 
 local worker_tags = cjson.decode(ARGV[5])
 local reject_tags = cjson.decode(ARGV[6])
+local worker_source_roots = {}
+local has_source_root = false
+for _, tag in ipairs(worker_tags) do
+    if string.sub(tag, 1, 12) == 'source-root:' then
+        worker_source_roots[tag] = true
+        has_source_root = true
+    end
+end
 local function contains(items, wanted)
     for _, value in ipairs(items or {}) do
         if value == wanted then return true end
@@ -141,7 +176,15 @@ local function contains(items, wanted)
 end
 local function matches(task)
     if task['kind'] == 'ai' then return false end
-    for _, tag in ipairs(task['require_tags'] or {}) do
+    local required = task['require_tags'] or {}
+    if has_source_root then
+        local same_root = false
+        for _, tag in ipairs(required) do
+            if worker_source_roots[tag] then same_root = true end
+        end
+        if not same_root then return false end
+    end
+    for _, tag in ipairs(required) do
         if not contains(worker_tags, tag) then return false end
     end
     for _, tag in ipairs(task['tags'] or {}) do
@@ -403,7 +446,15 @@ local accepted = cjson.decode(ARGV[6])
 local rejected = cjson.decode(ARGV[7])
 local accepted_set = {}
 local rejected_set = {}
+local source_roots = {}
+local has_source_root = false
 for _, tag in ipairs(accepted) do accepted_set[tag] = true end
+for _, tag in ipairs(accepted) do
+    if string.sub(tag, 1, 12) == 'source-root:' then
+        source_roots[tag] = true
+        has_source_root = true
+    end
+end
 for _, tag in ipairs(rejected) do rejected_set[tag] = true end
 local entries = redis.call('ZRANGE', KEYS[1], 0, tonumber(ARGV[5]) - 1, 'WITHSCORES')
 for index = 1, #entries, 2 do
@@ -415,6 +466,13 @@ for index = 1, #entries, 2 do
         local eligible = true
         local required = task['require_tags'] or {}
         local tags = task['tags'] or {}
+        if has_source_root then
+            local same_root = false
+            for _, tag in ipairs(required) do
+                if source_roots[tag] then same_root = true end
+            end
+            if not same_root then eligible = false end
+        end
         for _, tag in ipairs(required) do
             if not accepted_set[tag] then eligible = false end
         end
@@ -1858,10 +1916,17 @@ class RedisClient:
         await self.r.hset(f"worker:{worker_id}", mapping=info)
         await self.r.expire(f"worker:{worker_id}", ttl)
 
-    async def heartbeat(self, worker_id: str, ttl: int = DEFAULT_ONLINE_WINDOW_SEC) -> None:
+    async def heartbeat(
+        self, worker_id: str, ttl: int = DEFAULT_ONLINE_WINDOW_SEC,
+    ) -> bool:
+        """刷新 worker 存活时间;返回刷新前是否存在完整注册记录."""
         key = f"worker:{worker_id}"
-        await self.r.hset(key, "last_heartbeat", datetime.now(timezone.utc).isoformat())
-        await self.r.expire(key, ttl)
+        async with self.r.pipeline(transaction=True) as pipe:
+            pipe.exists(key)
+            pipe.hset(key, "last_heartbeat", datetime.now(timezone.utc).isoformat())
+            pipe.expire(key, ttl)
+            existed, _written, _expiry = await pipe.execute()
+        return bool(existed)
 
     async def set_worker_field(self, worker_id: str, field: str, value: str) -> None:
         await self.r.hset(f"worker:{worker_id}", field, value)

@@ -416,9 +416,15 @@ class TestWorker:
     @pytest.mark.asyncio
     async def test_heartbeat_updates_last_heartbeat(self, rc):
         await rc.register_worker("cpu-1", {"type": "cpu", "status": "idle"}, ttl=30)
-        await rc.heartbeat("cpu-1", ttl=30)
+        assert await rc.heartbeat("cpu-1", ttl=30) is True
         info = await rc.get_worker_info("cpu-1")
         assert "last_heartbeat" in info
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_reports_expired_registration(self, rc):
+        assert await rc.heartbeat("cpu-expired", ttl=30) is False
+        info = await rc.get_worker_info("cpu-expired")
+        assert set(info) == {"last_heartbeat"}
 
     @pytest.mark.asyncio
     async def test_nonexistent_worker(self, rc):
@@ -838,6 +844,29 @@ class TestAITaskQueue:
         assert recovered == [{"task_id": "at_claimed_crash", "action": "requeued"}]
         assert await rc.r.zcard("queue:ai") == 1
         assert await rc.reconcile_ai_task_claims(now_epoch=1_062) == []
+
+    @pytest.mark.asyncio
+    async def test_source_root_worker_only_claims_ai_task_for_same_root(self, rc):
+        ordinary = {
+            "kind": "ai", "task_id": "at_ordinary", "request": {},
+            "require_tags": [],
+        }
+        source = {
+            "kind": "ai", "task_id": "at_source", "request": {},
+            "require_tags": ["source-root:zg-library"],
+        }
+        await rc.enqueue_ai_task_once(ordinary, priority=-2)
+        await rc.enqueue_ai_task_once(source, priority=-1)
+
+        claim = await rc.claim_ai_task(
+            worker_id="worker-source", now_epoch=1_000,
+            tags={"source-root:zg-library"},
+        )
+
+        assert claim["task_id"] == "at_source"
+        assert await rc.r.zscore(
+            "queue:ai", json.dumps(ordinary, sort_keys=True),
+        ) is not None
 
     @pytest.mark.asyncio
     async def test_expired_executing_claim_is_ambiguous_and_never_auto_requeued(self, rc):

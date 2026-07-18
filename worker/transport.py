@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
@@ -28,7 +28,7 @@ from shared.errors import (
     WorkerFatalError,
 )
 from shared.models import AIUsage, Worker as WorkerModel
-from shared.redis_client import RedisClient
+from shared.redis_client import RedisClient, worker_info_from_model
 from shared.step_output_commit import StaleCommitError
 
 
@@ -189,7 +189,18 @@ class RedisTransport:
 
     async def heartbeat(self, worker_id, load=None, applied_cfg_rev=0,
                         concurrency: int | None = None):
-        await self._redis.heartbeat(worker_id)
+        presence_existed = await self._redis.heartbeat(worker_id)
+        if presence_existed is False:
+            existing = await asyncio.to_thread(self._db.get_worker, worker_id)
+            if existing:
+                await self._redis.register_worker(
+                    worker_id,
+                    worker_info_from_model(
+                        existing,
+                        at=datetime.now(timezone.utc),
+                        concurrency=concurrency,
+                    ),
+                )
         # live 负载落 redis worker hash 的 load 字段(JSON);/api/workers 读出透传到 WorkerResponse.load。
         # 仅 redis(实时态,不进 DB);采集为空则不写,保留上次。
         if load:

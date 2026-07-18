@@ -23,7 +23,7 @@ from shared.ask_citations import validate_bound_ask_citations
 from shared.config import AppConfig
 from shared.db import Database
 from shared.models import AIUsage, Worker, generate_worker_id
-from shared.redis_client import RedisClient
+from shared.redis_client import RedisClient, worker_info_from_model
 from shared.step_scope import parse_execution_step
 from shared.status import (
     DEFAULT_ONLINE_WINDOW_SEC,
@@ -429,7 +429,21 @@ async def heartbeat(
     """刷新 Redis TTL + DB last_heartbeat。"""
     if req.worker_id != worker_id:
         raise HTTPException(status_code=403, detail="token/worker_id mismatch")
-    await redis.heartbeat(worker_id, ttl=_worker_ttl(config))
+    presence_existed = await redis.heartbeat(worker_id, ttl=_worker_ttl(config))
+    if presence_existed is False:
+        existing = await asyncio.to_thread(db.get_worker, worker_id)
+        if existing:
+            now = datetime.now(timezone.utc)
+            await redis.register_worker(
+                worker_id,
+                worker_info_from_model(
+                    existing,
+                    at=now,
+                    status=req.status,
+                    concurrency=req.concurrency,
+                ),
+                ttl=_worker_ttl(config),
+            )
     for item in (req.running or [])[:64]:
         if not isinstance(item, dict):
             continue

@@ -66,6 +66,25 @@ async def _register_worker(redis, db, worker_id=WORKER_ID):
 
 class TestClaimStep:
     @pytest.mark.asyncio
+    async def test_source_root_worker_skips_ordinary_pipeline_steps(self, redis, db):
+        await _register_worker(redis, db)
+        await redis.enqueue_step("cpu", "j_plain", "02_parse", [], priority=-2)
+        await redis.set_step_status("j_plain", "02_parse", "ready")
+        await redis.enqueue_step(
+            "cpu", "j_source", "03_scene", [], priority=-1,
+            require_tags=["source-root:zg-library"],
+        )
+        await redis.set_step_status("j_source", "03_scene", "ready")
+
+        source_claim = await runner_ops.claim_step(
+            redis, db, WORKER_ID, ["cpu"], POOL_LIMITS,
+            {"source-root:zg-library"}, set(),
+        )
+
+        assert source_claim["job_id"] == "j_source"
+        assert await redis.get_step_status("j_plain", "02_parse") == "ready"
+
+    @pytest.mark.asyncio
     async def test_ai_queue_claim_is_atomic_and_bound_to_holder(self, redis, db):
         await _register_worker(redis, db)
         payload = {

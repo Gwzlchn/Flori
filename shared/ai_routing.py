@@ -78,7 +78,11 @@ def worker_satisfies_requirements(
         return False
     pools = {part.strip() for part in pools_raw.split(",") if part.strip()}
     tags = {part.strip() for part in tags_raw.split(",") if part.strip()}
-    return pool in pools and set(required_tags).issubset(tags)
+    required = set(required_tags)
+    source_roots = {tag for tag in tags if tag.startswith("source-root:")}
+    if source_roots and source_roots.isdisjoint(required):
+        return False
+    return pool in pools and required.issubset(tags)
 
 
 def provider_required_tag(provider: str, providers_config: dict | None = None) -> str:

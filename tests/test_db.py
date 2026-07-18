@@ -75,6 +75,31 @@ class TestJobCRUD:
     def test_get_nonexistent(self, db):
         assert db.get_job("nope") is None
 
+    def test_get_job_tolerates_invalid_legacy_published_at(self, db, sample_job):
+        db.create_job(sample_job)
+        db._conn.execute(
+            "UPDATE jobs SET published_at=? WHERE id=?",
+            ("noted in margin. Published May 20, 2014.", sample_job.id),
+        )
+        db._conn.commit()
+
+        assert db.get_job(sample_job.id).published_at is None
+
+    @pytest.mark.parametrize(("raw", "expected"), [
+        ("2023-07", "2023-07-01"),
+        ("2023", "2023-01-01"),
+    ])
+    def test_get_job_accepts_legacy_partial_published_at(
+        self, db, sample_job, raw, expected,
+    ):
+        db.create_job(sample_job)
+        db._conn.execute(
+            "UPDATE jobs SET published_at=? WHERE id=?", (raw, sample_job.id),
+        )
+        db._conn.commit()
+
+        assert db.get_job(sample_job.id).published_at.date().isoformat() == expected
+
     def test_list_all(self, db, sample_job):
         db.create_job(sample_job)
         j2 = Job(

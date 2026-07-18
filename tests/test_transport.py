@@ -717,6 +717,19 @@ class TestRedisTransportLifecycle:
         assert after >= before
 
     @pytest.mark.asyncio
+    async def test_heartbeat_restores_expired_redis_presence(self, redis, db):
+        t = await _registered(redis, db)
+        await redis.delete_worker(WORKER_ID)
+
+        await t.heartbeat(WORKER_ID, concurrency=3)
+
+        info = await redis.get_worker_info(WORKER_ID)
+        assert info["type"] == "cpu"
+        assert info["pools"] == "cpu,io"
+        assert info["tags"] == "vision"
+        assert info["concurrency"] == "3"
+
+    @pytest.mark.asyncio
     async def test_update_status_writes_redis_fields_and_db(self, redis, db):
         t = await _registered(redis, db)
 

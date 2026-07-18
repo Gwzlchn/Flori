@@ -11,6 +11,7 @@ from shared.ai_routing import (
     provider_required_tags,
     step_required_capability_tags,
     step_required_capability_tags_sync,
+    worker_satisfies_requirements,
 )
 from shared.models import AITask, LLMRequest
 
@@ -27,6 +28,21 @@ def test_provider_projection(provider, tag):
 def test_unknown_provider_fails_closed():
     with pytest.raises(ValueError, match="unknown"):
         provider_required_tag("typo-provider")
+
+
+def test_source_root_worker_is_exclusive_to_same_root_tasks():
+    worker = {
+        "status": "idle",
+        "admin_status": "",
+        "pools": "cpu,io,ai",
+        "tags": "source-root:zg-library",
+    }
+
+    assert not worker_satisfies_requirements(worker, "cpu", set())
+    assert not worker_satisfies_requirements(worker, "cpu", {"net-global"})
+    assert worker_satisfies_requirements(
+        worker, "cpu", {"source-root:zg-library"},
+    )
 
 
 def test_all_executable_tiers_are_required_and_override_is_single():

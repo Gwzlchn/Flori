@@ -255,6 +255,30 @@ class TestHeartbeat:
         assert resp.json() == {"ok": True, "desired_config": None, "cfg_rev": 0}
 
     @pytest.mark.asyncio
+    async def test_heartbeat_restores_expired_worker_presence(
+        self, client, redis_mock,
+    ):
+        worker_id, token = await self._register_worker(client)
+        redis_mock.register_worker.reset_mock()
+        redis_mock.heartbeat.return_value = False
+
+        resp = await client.post(
+            "/api/runner/heartbeat",
+            json={"worker_id": worker_id, "status": "busy", "concurrency": 3},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert resp.status_code == 200
+        redis_mock.register_worker.assert_awaited_once()
+        args, kwargs = redis_mock.register_worker.call_args
+        assert args[0] == worker_id
+        assert args[1]["type"] == "cpu"
+        assert args[1]["pools"] == "cpu,io"
+        assert args[1]["status"] == "busy"
+        assert args[1]["concurrency"] == "3"
+        assert kwargs["ttl"] == 30
+
+    @pytest.mark.asyncio
     async def test_heartbeat_writes_live_load(self, client, redis_mock):
         # 心跳带 load → 经网关写 redis worker hash 的 load 字段(JSON)。
         import json as _json
