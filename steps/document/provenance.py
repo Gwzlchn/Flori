@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import html as html_lib
 import json
+import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -28,6 +30,34 @@ OCR_EXACT_EVIDENCE_THRESHOLD = 0.8
 DOCUMENT_INDEX_PATH = "intermediate/document_index.md"
 
 
+def _html_support_range(source: str, exact: str) -> tuple[int, int, str] | None:
+    """定位原始 HTML 中真实连续文本;内联标签拆开的块退到最长唯一文本节点。"""
+    direct = (exact, html_lib.escape(exact, quote=False))
+    for candidate in direct:
+        if candidate and source.count(candidate) == 1:
+            start = source.index(candidate)
+            return start, start + len(candidate), candidate
+
+    normalized_exact = re.sub(r"\s+", " ", html_lib.unescape(exact)).strip()
+    candidates: list[tuple[int, int, str, int]] = []
+    for match in re.finditer(r">([^<]+)<", source, flags=re.S):
+        raw = match.group(1)
+        left = len(raw) - len(raw.lstrip())
+        right = len(raw.rstrip())
+        raw = raw[left:right]
+        if not raw or source.count(raw) != 1:
+            continue
+        visible = re.sub(r"\s+", " ", html_lib.unescape(raw)).strip()
+        if len(visible) < 8 or visible not in normalized_exact:
+            continue
+        start = match.start(1) + left
+        candidates.append((start, start + len(raw), raw, len(visible)))
+    if not candidates:
+        return None
+    start, end, raw, _length = max(candidates, key=lambda item: (item[3], -item[0]))
+    return start, end, raw
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -44,16 +74,20 @@ def _html_segment(
         return None
     start = html.get("start")
     end = html.get("end")
-    if type(start) is not int or type(end) is not int or not 0 <= start < end <= len(source):
-        if source.count(exact) != 1:
+    raw_exact = exact
+    if (
+        type(start) is not int
+        or type(end) is not int
+        or not 0 <= start < end <= len(source)
+        or source[start:end] != exact
+    ):
+        support = _html_support_range(source, exact)
+        if support is None:
             return None
-        start = source.index(exact)
-        end = start + len(exact)
-    if source[start:end] != exact:
-        return None
+        start, end, raw_exact = support
     canonical = {
         "kind": "text",
-        "exact": exact,
+        "exact": raw_exact,
         "prefix": str(html.get("prefix") or source[max(0, start - 32):start]),
         "suffix": str(html.get("suffix") or source[end:end + 32]),
         "dom_path": str(html.get("dom_path") or ""),
@@ -65,7 +99,7 @@ def _html_segment(
         "end": end,
         "section": str(block.get("parent_id") or block["block_id"]),
         "locator": canonical,
-        "support_text": bounded_support_text(exact),
+        "support_text": bounded_support_text(html_lib.unescape(raw_exact)),
         "support_artifact": {
             "kind": "html",
             "path": "input/source.html",

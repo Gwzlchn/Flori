@@ -97,7 +97,17 @@ def _valid_bboxes(bboxes: list[list[float]]) -> list[list[float]]:
     """保留有实际面积的 PDF 区域；退化字形仍由 page locator 表达。"""
     return [
         bbox for bbox in bboxes
-        if len(bbox) == 4 and bbox[2] > bbox[0] and bbox[3] > bbox[1]
+        if (
+            len(bbox) == 4
+            and all(
+                type(value) in (int, float)
+                and math.isfinite(float(value))
+                and value >= 0
+                for value in bbox
+            )
+            and bbox[2] > bbox[0]
+            and bbox[3] > bbox[1]
+        )
     ]
 
 

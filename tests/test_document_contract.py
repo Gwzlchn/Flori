@@ -256,3 +256,42 @@ def test_source_manifest_uses_html_as_primary_when_pdf_crosswalk_exists(tmp_path
     assert {artifact["source_id"] for artifact in manifest["source_artifacts"]} == {
         "html", "pdf",
     }
+
+
+def test_source_manifest_uses_unique_raw_text_node_when_inline_html_splits_block(
+    tmp_path,
+):
+    job_dir = tmp_path / "jobs_document_fixture"
+    (job_dir / "input").mkdir(parents=True)
+    source = (
+        "<article><p>Evidence <strong>inside</strong> a split paragraph "
+        "remains traceable &amp; exact.</p></article>"
+    )
+    (job_dir / "input" / "source.html").write_text(source, encoding="utf-8")
+    document = _document()
+    document["blocks"] = [
+        {
+            **document["blocks"][-1],
+            "parent_id": None,
+            "text": "Evidence inside a split paragraph remains traceable & exact.",
+            "locator": {
+                "html": {
+                    **document["blocks"][-1]["locator"]["html"],
+                    "exact": (
+                        "Evidence inside a split paragraph remains traceable & exact."
+                    ),
+                }
+            },
+        }
+    ]
+
+    manifest = build_document_source_manifest(job_dir, document)
+
+    segment = manifest["segments"][0]
+    assert segment["locator"]["exact"] == (
+        "a split paragraph remains traceable &amp; exact."
+    )
+    assert source[segment["start"]:segment["end"]] == segment["locator"]["exact"]
+    assert segment["support_text"] == (
+        "a split paragraph remains traceable & exact."
+    )

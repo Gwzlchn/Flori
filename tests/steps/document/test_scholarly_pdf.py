@@ -19,6 +19,7 @@ from steps.document.adapters.scholarly_pdf import (
     LayoutItem,
     PageLayout,
     ScholarlyPdfAdapter,
+    _valid_bboxes,
 )
 from steps.document.layout_detector import (
     DocumentLayoutDetector,
@@ -26,6 +27,14 @@ from steps.document.layout_detector import (
     LayoutDetectorError,
 )
 from steps.document.provenance import build_document_source_manifest
+
+
+def test_pdf_bbox_filter_drops_page_external_and_nonfinite_coordinates():
+    assert _valid_bboxes([
+        [-41.0, 758.0, -31.0, 787.0],
+        [0.0, 1.0, float("inf"), 2.0],
+        [10.0, 20.0, 30.0, 40.0],
+    ]) == [[10.0, 20.0, 30.0, 40.0]]
 
 
 def _fingerprint(data: bytes) -> str:
