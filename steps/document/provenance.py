@@ -30,8 +30,10 @@ OCR_EXACT_EVIDENCE_THRESHOLD = 0.8
 DOCUMENT_INDEX_PATH = "intermediate/document_index.md"
 
 
-def _html_support_range(source: str, exact: str) -> tuple[int, int, str] | None:
-    """定位原始 HTML 中真实连续文本;内联标签拆开的块退到最长唯一文本节点。"""
+def _html_support_range(
+    source: str, exact: str, dom_path: str,
+) -> tuple[int, int, str] | None:
+    """定位原始 HTML 连续文本;重复文本先用 locator 末级标签消歧。"""
     direct = (exact, html_lib.escape(exact, quote=False))
     for candidate in direct:
         if candidate and source.count(candidate) == 1:
@@ -39,6 +41,26 @@ def _html_support_range(source: str, exact: str) -> tuple[int, int, str] | None:
             return start, start + len(candidate), candidate
 
     normalized_exact = re.sub(r"\s+", " ", html_lib.unescape(exact)).strip()
+    tag_match = re.search(r"/([A-Za-z][\w:-]*)\[\d+\]$", dom_path)
+    if tag_match:
+        tag = re.escape(tag_match.group(1))
+        tag_candidates: list[tuple[int, int, str]] = []
+        pattern = re.compile(
+            rf"<{tag}\b[^>]*>(?P<text>[^<]*)</{tag}\s*>",
+            flags=re.I | re.S,
+        )
+        for match in pattern.finditer(source):
+            raw = match.group("text")
+            left = len(raw) - len(raw.lstrip())
+            right = len(raw.rstrip())
+            raw = raw[left:right]
+            visible = re.sub(r"\s+", " ", html_lib.unescape(raw)).strip()
+            if raw and visible == normalized_exact:
+                start = match.start("text") + left
+                tag_candidates.append((start, start + len(raw), raw))
+        if len(tag_candidates) == 1:
+            return tag_candidates[0]
+
     candidates: list[tuple[int, int, str, int]] = []
     for match in re.finditer(r">([^<]+)<", source, flags=re.S):
         raw = match.group(1)
@@ -81,7 +103,7 @@ def _html_segment(
         or not 0 <= start < end <= len(source)
         or source[start:end] != exact
     ):
-        support = _html_support_range(source, exact)
+        support = _html_support_range(source, exact, str(html.get("dom_path") or ""))
         if support is None:
             return None
         start, end, raw_exact = support

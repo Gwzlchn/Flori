@@ -295,3 +295,39 @@ def test_source_manifest_uses_unique_raw_text_node_when_inline_html_splits_block
     assert segment["support_text"] == (
         "a split paragraph remains traceable & exact."
     )
+
+
+def test_source_manifest_uses_dom_path_tag_to_disambiguate_repeated_html_text(
+    tmp_path,
+):
+    job_dir = tmp_path / "jobs_document_fixture"
+    (job_dir / "input").mkdir(parents=True)
+    title = "DP5142 How Inefficient is the 1/N Asset-Allocation Strategy?"
+    source = (
+        f'<meta name="citation_title" content="{title}" />'
+        f"<title>{title}</title>"
+        f"<h1>{title}</h1>"
+    )
+    (job_dir / "input" / "source.html").write_text(source, encoding="utf-8")
+    document = _document()
+    document["blocks"] = [
+        {
+            **document["blocks"][0],
+            "parent_id": None,
+            "text": title,
+            "locator": {
+                "html": {
+                    **document["blocks"][0]["locator"]["html"],
+                    "dom_path": "/html[1]/head[1]/title[1]",
+                    "exact": title,
+                }
+            },
+        }
+    ]
+
+    manifest = build_document_source_manifest(job_dir, document)
+
+    segment = manifest["segments"][0]
+    assert segment["locator"]["exact"] == title
+    assert source[segment["start"]:segment["end"]] == title
+    assert source[segment["start"] - len("<title>"):segment["start"]] == "<title>"
