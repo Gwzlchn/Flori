@@ -904,15 +904,40 @@ class ScholarlyPdfAdapter:
         pattern: re.Pattern[str],
     ) -> set[tuple[int, int]]:
         """同一编号只保留信息最完整的caption,裸编号或正文引用不能重复占位."""
-        candidates: dict[str, list[tuple[int, int, int, int, int, int]]] = {}
+        caption_kind = (
+            "figure_caption" if pattern is _FIGURE_CAPTION else "table_caption"
+        )
+        candidates: dict[
+            str, list[tuple[int, float, int, int, int, int, int, int]]
+        ] = {}
         for page in pages:
             for index, item in enumerate(page.text_items):
                 match = pattern.match(item.text)
                 if match is None or not self._caption_starts_row(page, index):
                     continue
-                caption = _caption_text([
-                    value for _source, value in self._figure_caption_items(page, index)
-                ])
+                caption_items = self._figure_caption_items(page, index)
+                caption = _caption_text([value for _source, value in caption_items])
+                caption_bbox = _bbox_union([value.bbox for _source, value in caption_items])
+                caption_area = max(
+                    1.0,
+                    (caption_bbox[2] - caption_bbox[0])
+                    * (caption_bbox[3] - caption_bbox[1]),
+                )
+                detector_confidence = max((
+                    detection.confidence
+                    for detection in self._page_layout_detections(page)
+                    if detection.kind == caption_kind
+                    and self._intersection_area(
+                        caption_bbox, list(detection.bbox),
+                    ) >= min(
+                        caption_area,
+                        max(
+                            1.0,
+                            (detection.bbox[2] - detection.bbox[0])
+                            * (detection.bbox[3] - detection.bbox[1]),
+                        ),
+                    ) * 0.2
+                ), default=0.0)
                 suffix = caption[match.end():].strip(" .:|\u2013\u2014-")
                 score = len(_compact_text(suffix))
                 first_suffix = item.text[match.end():].strip(" .:|\u2013\u2014-")
@@ -923,6 +948,7 @@ class ScholarlyPdfAdapter:
                 full_word = int(item.text.casefold().startswith("figure"))
                 candidates.setdefault(match.group(1).casefold(), []).append(
                     (
+                        int(detector_confidence > 0), detector_confidence,
                         explicit_delimiter, split_caption, full_word, score,
                         page.number, index,
                     ),
@@ -930,10 +956,11 @@ class ScholarlyPdfAdapter:
         return {
             (page, index)
             for values in candidates.values()
-            for _delimiter, _split, _word, _score, page, index in [max(
+            for _detected, _confidence, _delimiter, _split, _word, _score, page, index in [max(
                 values,
                 key=lambda value: (
-                    value[0], value[1], value[2], value[3], -value[4], -value[5],
+                    value[0], value[1], value[2], value[3], value[4], value[5],
+                    -value[6], -value[7],
                 ),
             )]
         }

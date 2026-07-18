@@ -2091,6 +2091,65 @@ def test_explicit_colon_caption_beats_bare_label_followed_by_body_prose(
     assert figure["source_locator"]["pdf"]["page"] == 2
 
 
+@pytest.mark.parametrize(
+    ("kind", "reference", "caption", "detection_kind", "visual_kind", "field"),
+    [
+        (
+            "figure", "Fig. 5. shows the positions discussed in this long paragraph.",
+            "Fig. 5. Net speculator positions.", "figure_caption", "figure", "figures",
+        ),
+        (
+            "table", "Table 4. shows that the funds have little serial correlation.",
+            "Table 4. Monthly and annual Sharpe ratio estimates.",
+            "table_caption", "table", "tables",
+        ),
+    ],
+)
+def test_layout_caption_detection_beats_longer_split_prose_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    pdf_job: tuple[Path, dict[str, str], bytes],
+    kind: str,
+    reference: str,
+    caption: str,
+    detection_kind: str,
+    visual_kind: str,
+    field: str,
+) -> None:
+    job_dir, job, _ = pdf_job
+    label = "Fig. 5." if kind == "figure" else "Table 4."
+    pages = [
+        PageLayout(1, 600, 800, text_items=[
+            LayoutItem(label, [320, 300, 365, 315]),
+            LayoutItem(reference.removeprefix(label).strip(), [367, 300, 560, 315]),
+        ]),
+        PageLayout(2, 600, 800, text_items=[
+            LayoutItem(label, [60, 400, 105, 415]),
+            LayoutItem(caption.removeprefix(label).strip(), [107, 400, 500, 415]),
+        ]),
+    ]
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_pdf_info",
+        lambda self: {"Pages": "2", "Title": "Paper title"},
+    )
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_layout", lambda self: (pages, "fixture_layout"),
+    )
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter,
+        "_page_layout_detections",
+        lambda self, page: [] if page.number == 1 else [
+            LayoutDetection(detection_kind, 0.95, (55, 395, 505, 420)),
+            LayoutDetection(visual_kind, 0.97, (60, 100, 500, 390)),
+        ],
+    )
+
+    document, _quality = parse_pdf_document(job_dir, job)
+
+    assert len(document[field]) == 1
+    assert document[field][0]["caption"] == caption
+    assert document[field][0]["source_locator"]["pdf"]["page"] == 2
+
+
 def test_midline_figure_reference_is_not_treated_as_caption(
     monkeypatch: pytest.MonkeyPatch,
     pdf_job: tuple[Path, dict[str, str], bytes],
