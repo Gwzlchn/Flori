@@ -85,6 +85,20 @@ class JobFinalizer:
                 logger.info(
                     "search_index_reconciled", job_id=job.id, pipeline=job.pipeline,
                 )
+        pending_occurrences = await asyncio.to_thread(
+            self.owner.db.list_unreconciled_concept_occurrence_jobs,
+        )
+        for job in pending_occurrences:
+            try:
+                await self.owner.reconcile_concept_occurrences_only(job.id)
+            except Exception:
+                # FTS 已存在也不能丢失重试谓词:durable marker 只在成功后写入。
+                logger.warning(
+                    "concept_occurrence_replay_failed",
+                    job_id=job.id,
+                    pipeline=job.pipeline,
+                    exc_info=True,
+                )
 
     async def _advance_book_chain(self, job_id: str) -> None:
         """book 章序:本 job 属 book_toc 集合且到终态后,按 created_at 序 submit 下一待投章.

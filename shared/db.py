@@ -1137,6 +1137,12 @@ class Database:
             **fields,
         )
 
+    def activate_imported_job(self, job_id: str) -> bool:
+        return _DatabaseAggregates.activate_imported_job(self, job_id)
+
+    def is_imported_job_activated(self, job_id: str) -> bool:
+        return _DatabaseAggregates.is_imported_job_activated(self, job_id)
+
     def move_job_to_collection(
         self,
         job_id: str,
@@ -2114,6 +2120,8 @@ class Database:
         domain: str,
         job_id: str,
         mapping: dict[str, list[str]],
+        projection_source_digest: str | None = None,
+        expected_projection_source_digest: str | None = None,
     ) -> bool:
         """原子对账一个 job 的全部 concept/evidence 映射，移除消失概念。"""
         return _DatabaseAggregates.replace_job_concept_occurrences(
@@ -2121,6 +2129,8 @@ class Database:
             domain=domain,
             job_id=job_id,
             mapping=mapping,
+            projection_source_digest=projection_source_digest,
+            expected_projection_source_digest=expected_projection_source_digest,
         )
 
     def list_concept_occurrences(
@@ -2479,6 +2489,17 @@ class Database:
             self,
             limit,
         )
+
+    def list_unreconciled_concept_occurrence_jobs(
+        self, limit: int = 100,
+    ) -> list[Job]:
+        """返回 FTS 已就绪但 occurrence durable marker 缺失的当前 Job。"""
+        return _SearchRepository.list_unreconciled_concept_occurrence_jobs(
+            self, limit,
+        )
+
+    def get_concept_occurrence_projection_source(self, job_id: str) -> str | None:
+        return _SearchRepository.get_concept_occurrence_projection_source(self, job_id)
 
     def index_job_notes(
         self,

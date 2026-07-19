@@ -56,7 +56,8 @@ from .step_scope import _SEGMENT_RE
 
 
 REPOSITORY_FORMAT = "flori-portable-repository/v1"
-SNAPSHOT_FORMAT = "flori-portable-snapshot/v1"
+LEGACY_SNAPSHOT_FORMAT = "flori-portable-snapshot/v1"
+SNAPSHOT_FORMAT = "flori-portable-snapshot/v2"
 SOURCE_MANIFEST_FORMAT = f"{MANIFEST_FORMAT}/v{MANIFEST_FORMAT_VERSION}"
 
 # snapshot.records 的分组契约(§2.3):组名固定,每组只允许承载列出的 kind。
@@ -72,10 +73,11 @@ SNAPSHOT_RECORD_GROUPS: Mapping[str, frozenset[str]] = {
     }),
 }
 
-_SNAPSHOT_TOP_KEYS = frozenset({
+_LEGACY_SNAPSHOT_TOP_KEYS = frozenset({
     "format", "repository_format", "source", "selector", "records", "blob_refs",
     "relations_digest", "policy",
 })
+_SNAPSHOT_TOP_KEYS = _LEGACY_SNAPSHOT_TOP_KEYS | {"completeness"}
 _SNAPSHOT_SOURCE_KEYS = frozenset({"app_version", "db_user_version", "manifest_format"})
 # selector 进入 snapshot identity:局部快照与全量快照即使记录集合恰好相同也是
 # 两个不同事实(前者不代表"系统全貌"),digest 必须可区分。
@@ -92,10 +94,17 @@ _SNAPSHOT_POLICY_FIXED = {
 _SNAPSHOT_POLICY_KEYS = frozenset(
     set(_SNAPSHOT_POLICY_FIXED) | {"secrets_included", "secret_scan_exceptions"}
 )
+_SNAPSHOT_COMPLETENESS_KEYS = frozenset({
+    "terminal_steps", "manifests_seen", "manifests_missing", "manifests_excluded",
+    "ai_config_complete", "user_config_complete", "secret_scan_complete",
+    "media_self_contained", "external_media_roots", "portable_ready",
+    "readiness_reasons",
+})
 
 _RECEIPT_REQUIRED_KEYS = frozenset({"run_id", "observed_at", "outcome"})
 _RECEIPT_OPTIONAL_KEYS = frozenset({
     "snapshot_digest", "hit_existing_snapshot", "stats", "source_instance", "error",
+    "request_digest",
 })
 _RECEIPT_OUTCOMES = frozenset({"success", "failed", "in_progress"})
 
@@ -232,6 +241,46 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
+def _absolute_path_without_symlinks(path: Path) -> Path:
+    """规范化仓库路径并拒绝任一已存在祖先分量的 symlink。"""
+    absolute = Path(os.path.abspath(path))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        try:
+            value = os.lstat(current)
+        except FileNotFoundError:
+            break
+        if stat_module.S_ISLNK(value.st_mode):
+            raise RepositoryError(
+                f"repository path contains a symlink component: {current}"
+            )
+    if absolute.resolve(strict=False) != absolute:
+        raise RepositoryError(f"repository path resolution drifted: {absolute}")
+    return absolute
+
+
+def _ensure_directory_durable(path: Path) -> None:
+    """创建目录链并同步每一级父目录,避免断电后只剩引用不见对象目录。"""
+    missing: list[Path] = []
+    current = path
+    while not current.exists():
+        missing.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    if current.is_symlink() or not current.is_dir():
+        raise RepositoryCorruptionError(f"repository directory {current} is unsafe")
+    for directory in reversed(missing):
+        try:
+            os.mkdir(directory)
+        except FileExistsError:
+            pass
+        if directory.is_symlink() or not directory.is_dir():
+            raise RepositoryCorruptionError(f"repository directory {directory} is unsafe")
+        _fsync_dir(directory.parent)
+
+
 class ContentRepository:
     """flori-portable-repository/v1 的本地目录实现。
 
@@ -250,13 +299,13 @@ class ContentRepository:
     @classmethod
     def create(cls, root: Path) -> "ContentRepository":
         """初始化空仓库;目标目录已存在且非空则拒绝,不做任何覆盖或迁移。"""
-        root = Path(root)
-        if root.exists():
-            if not root.is_dir() or any(root.iterdir()):
+        root = _absolute_path_without_symlinks(Path(root))
+        if root.exists() or root.is_symlink():
+            if root.is_symlink() or not root.is_dir() or any(root.iterdir()):
                 raise RepositoryError(f"repository root {root} exists and is not empty")
-        root.mkdir(parents=True, exist_ok=True)
+        _ensure_directory_durable(root)
         for name in ("blobs/sha256", "records", "snapshots", "refs", "receipts", "tmp", "locks"):
-            (root / name).mkdir(parents=True)
+            _ensure_directory_durable(root / name)
         marker = canonical_json_bytes({"format": REPOSITORY_FORMAT})
         tmp = root / "tmp" / f"repository-{secrets.token_hex(8)}.json"
         tmp.write_bytes(marker)
@@ -267,9 +316,11 @@ class ContentRepository:
     @classmethod
     def open(cls, root: Path) -> "ContentRepository":
         """打开既有仓库并验 format:未知版本拒绝打开,升级须显式迁移(§2.2 规则 7)。"""
-        root = Path(root)
+        root = _absolute_path_without_symlinks(Path(root))
+        if root.is_symlink() or not root.is_dir():
+            raise RepositoryError(f"{root} is not a safe portable content repository")
         marker_path = root / "repository.json"
-        if not marker_path.is_file():
+        if marker_path.is_symlink() or not marker_path.is_file():
             raise RepositoryError(f"{root} is not a portable content repository")
         try:
             marker = load_bounded_json(
@@ -284,6 +335,12 @@ class ContentRepository:
                 f"unsupported repository format {marker['format']!r}; "
                 f"this build only reads {REPOSITORY_FORMAT}"
             )
+        for name in ("blobs", "blobs/sha256", "records", "snapshots", "refs", "receipts", "tmp", "locks"):
+            directory = root / name
+            if directory.is_symlink() or not directory.is_dir():
+                raise RepositoryCorruptionError(
+                    f"repository directory {name!r} is missing or unsafe"
+                )
         return cls(root)
 
 
@@ -314,7 +371,7 @@ class ContentRepository:
         用 os.link 而非 rename:link 在目标已存在时失败,天然 create-if-absent,
         并发同 digest 写入也不会互相覆盖。已存在路径必须重新核对(§2.2 规则 5)。
         """
-        final.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_directory_durable(final.parent)
         try:
             os.link(tmp, final)
         except FileExistsError:
@@ -560,12 +617,20 @@ class ContentRepository:
         """
         if type(body) is not dict:
             raise RepositoryError("snapshot: must be an object")
-        if set(body) != _SNAPSHOT_TOP_KEYS:
+        snapshot_format = body.get("format")
+        if snapshot_format not in {LEGACY_SNAPSHOT_FORMAT, SNAPSHOT_FORMAT}:
             raise RepositoryError(
-                f"snapshot: keys must be exactly {sorted(_SNAPSHOT_TOP_KEYS)}"
+                "snapshot.format: must be one of "
+                f"{[LEGACY_SNAPSHOT_FORMAT, SNAPSHOT_FORMAT]!r}"
             )
-        if body["format"] != SNAPSHOT_FORMAT:
-            raise RepositoryError(f"snapshot.format: must be {SNAPSHOT_FORMAT!r}")
+        expected_top_keys = (
+            _LEGACY_SNAPSHOT_TOP_KEYS
+            if snapshot_format == LEGACY_SNAPSHOT_FORMAT else _SNAPSHOT_TOP_KEYS
+        )
+        if set(body) != expected_top_keys:
+            raise RepositoryError(
+                f"snapshot: keys must be exactly {sorted(expected_top_keys)}"
+            )
         if body["repository_format"] != REPOSITORY_FORMAT:
             raise RepositoryError(
                 f"snapshot.repository_format: must be {REPOSITORY_FORMAT!r}"
@@ -638,15 +703,93 @@ class ContentRepository:
                 "snapshot.policy: secrets_included must be true exactly when "
                 "secret_scan_exceptions is non-empty"
             )
+        if snapshot_format == SNAPSHOT_FORMAT:
+            completeness = body["completeness"]
+            if type(completeness) is not dict \
+                    or set(completeness) != _SNAPSHOT_COMPLETENESS_KEYS:
+                raise RepositoryError(
+                    "snapshot.completeness: keys must be exactly "
+                    f"{sorted(_SNAPSHOT_COMPLETENESS_KEYS)}"
+                )
+            for key in (
+                "terminal_steps", "manifests_seen", "manifests_missing",
+                "manifests_excluded",
+            ):
+                if type(completeness[key]) is not int or completeness[key] < 0:
+                    raise RepositoryError(
+                        f"snapshot.completeness.{key}: must be int >= 0"
+                    )
+            for key in (
+                "ai_config_complete", "user_config_complete", "secret_scan_complete",
+                "media_self_contained", "portable_ready",
+            ):
+                if type(completeness[key]) is not bool:
+                    raise RepositoryError(f"snapshot.completeness.{key}: must be bool")
+            self._validate_sorted_strings(
+                completeness["external_media_roots"],
+                "snapshot.completeness.external_media_roots",
+            )
+            self._validate_sorted_strings(
+                completeness["readiness_reasons"],
+                "snapshot.completeness.readiness_reasons",
+            )
+            if completeness["media_self_contained"] is bool(
+                completeness["external_media_roots"]
+            ):
+                raise RepositoryError(
+                    "snapshot.completeness: external_media_roots must be empty exactly "
+                    "when media_self_contained is true"
+                )
+            expected_reasons: set[str] = set()
+            if completeness["manifests_missing"]:
+                expected_reasons.add("missing_step_manifests")
+            if completeness["manifests_excluded"]:
+                expected_reasons.add("excluded_step_manifests")
+            if not completeness["ai_config_complete"]:
+                expected_reasons.add("ai_config_incomplete")
+            if not completeness["user_config_complete"]:
+                expected_reasons.add("user_config_incomplete")
+            if not completeness["secret_scan_complete"]:
+                expected_reasons.add("secret_scan_incomplete")
+            if policy_block["secret_scan_exceptions"]:
+                expected_reasons.add("secret_scan_exceptions")
+            if not completeness["media_self_contained"]:
+                expected_reasons.add("external_media_dependencies")
+            # unknown omission 没有计数键,因为 v2 completeness 键集已经固定。
+            # 声明该诊断原因只能把 ready 收紧为 false,不能伪造可恢复性。
+            if "unknown_artifacts_omitted" in completeness["readiness_reasons"]:
+                expected_reasons.add("unknown_artifacts_omitted")
+            if completeness["readiness_reasons"] != sorted(expected_reasons):
+                raise RepositoryError(
+                    "snapshot.completeness.readiness_reasons do not match flags/counts"
+                )
+            if completeness["portable_ready"] is not (not expected_reasons):
+                raise RepositoryError(
+                    "snapshot.completeness.portable_ready must be true exactly when "
+                    "readiness_reasons is empty"
+                )
         try:
             # policy 的契约键名含 "secrets_included",会撞 secret-name 扫描;键集已被
             # 上面钉死,藏不进 payload,故排除之。但放行清单是操作者自由输入,
             # 单独送扫,不能跟着键名一起豁免。
             scan_json_for_secrets(
-                {key: value for key, value in body.items() if key != "policy"},
+                {
+                    key: value for key, value in body.items()
+                    if key not in {"policy", "completeness"}
+                },
                 "snapshot",
             )
             scan_json_for_secrets(exceptions, "snapshot.policy.secret_scan_exceptions")
+            if snapshot_format == SNAPSHOT_FORMAT:
+                # completeness 键集固定且含 secret_scan_complete；只扫其中自由字符串值。
+                scan_json_for_secrets(
+                    completeness["external_media_roots"],
+                    "snapshot.completeness.external_media_roots",
+                )
+                scan_json_for_secrets(
+                    completeness["readiness_reasons"],
+                    "snapshot.completeness.readiness_reasons",
+                )
             encoded = canonical_json_bytes(body)
         except (PolicyError, ManifestError) as exc:
             raise RepositoryError(f"snapshot: {exc}") from exc
@@ -762,6 +905,10 @@ class ContentRepository:
         record_cache 供刚写完这批 record 的调用方(备份编排)复用已验证 body,
         免整份快照重读;缓存内容必须来自本进程刚校验过的写入。
         """
+        if type(body) is not dict or body.get("format") != SNAPSHOT_FORMAT:
+            raise RepositoryError(
+                f"new snapshots must use format {SNAPSHOT_FORMAT!r}"
+            )
         encoded = self._validate_snapshot_body(body)
         assert type(body) is dict
         self._check_snapshot_closure(body, cache=record_cache if record_cache is not None else {})
@@ -802,6 +949,21 @@ class ContentRepository:
                 raise RepositoryCorruptionError(f"snapshot {digest}: {exc}") from exc
             self._verified_snapshots.add(digest)
         assert type(body) is dict
+        if body["format"] == LEGACY_SNAPSHOT_FORMAT:
+            body = dict(body)
+            body["completeness"] = {
+                "terminal_steps": 0,
+                "manifests_seen": 0,
+                "manifests_missing": 0,
+                "manifests_excluded": 0,
+                "ai_config_complete": False,
+                "user_config_complete": False,
+                "secret_scan_complete": False,
+                "media_self_contained": False,
+                "external_media_roots": ["legacy-unknown"],
+                "portable_ready": False,
+                "readiness_reasons": ["legacy_snapshot_without_completeness"],
+            }
         return body
 
     def iter_snapshots(self) -> Iterator[str]:
@@ -899,6 +1061,12 @@ class ContentRepository:
                 raise RepositoryError(
                     f"receipt.snapshot_digest: snapshot {snapshot_digest} not found"
                 )
+        request_digest = body.get("request_digest")
+        if request_digest is not None:
+            try:
+                validate_digest(request_digest, "receipt.request_digest")
+            except ManifestError as exc:
+                raise RepositoryError(str(exc)) from exc
         if "hit_existing_snapshot" in body and type(body["hit_existing_snapshot"]) is not bool:
             raise RepositoryError("receipt.hit_existing_snapshot: must be bool")
         if "stats" in body and type(body["stats"]) is not dict:
@@ -1048,12 +1216,17 @@ class ContentRepository:
         """回收 tmp/ 残留(§2.8.6)。调用方必须持写锁,否则会删掉并发写入的中间文件。"""
         base = self.root / "tmp"
         removed = 0
-        if not base.is_dir():
-            return removed
+        if base.is_symlink() or not base.is_dir():
+            raise RepositoryCorruptionError("repository tmp directory is missing or unsafe")
         for entry in os.scandir(base):
-            if entry.is_file(follow_symlinks=False):
-                os.unlink(entry.path)
-                removed += 1
+            if entry.is_dir(follow_symlinks=False):
+                raise RepositoryCorruptionError(
+                    f"repository tmp contains unexpected directory {entry.name!r}"
+                )
+            os.unlink(entry.path)
+            removed += 1
+        if removed:
+            _fsync_dir(base)
         return removed
 
 

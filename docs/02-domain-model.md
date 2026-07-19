@@ -373,6 +373,8 @@ Worker：两份存储（Redis 心跳 + SQLite 持久），字段见 §2.3 `worke
 ```mermaid
 stateDiagram-v2
     [*] --> pending : 创建
+    [*] --> pending_activation : 便携导入后仍有待运行步骤
+    pending_activation --> pending : POST /jobs/{id}/activate
     pending --> downloading : 01_download
     downloading --> processing : 下载完成
     processing --> done : 全部步骤完成
@@ -380,6 +382,10 @@ stateDiagram-v2
     failed --> processing : POST /jobs/{id}/retry
     done --> [*]
 ```
+
+`pending_activation` 是恢复后的当前状态,不是备份时历史状态的副本。便携导入只按当前
+pipeline 与已恢复 manifest 重投影可复用步骤,不会自动入队；操作者显式激活后原子转为
+`pending`。因此重复导入仍只有一份 `jobs.status`,不存在 original/runtime 双状态。
 ```mermaid
 stateDiagram-v2
     [*] --> waiting : 提交
@@ -506,6 +512,16 @@ CREATE TABLE concept_occurrences (
     FOREIGN KEY(job_id, domain) REFERENCES jobs(id, domain),
     FOREIGN KEY(evidence_id, job_id) REFERENCES canonical_evidence(evidence_id, job_id)
 );                                      -- 同一 job 可有多个精确 evidence
+
+CREATE TABLE concept_occurrence_projection (
+    job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+    reconciled_at TEXT NOT NULL
+);                                      -- 可重建 marker,不进入 portable snapshot
+
+CREATE TABLE restored_job_activations (
+    job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+    activated_at TEXT NOT NULL
+);                                      -- pending 重放凭据,不是第二份状态
 
 CREATE TABLE ai_usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

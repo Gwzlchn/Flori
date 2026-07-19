@@ -75,6 +75,11 @@ def test_fixed_archive_restores_through_production_cli_and_database(
         str(targets["config"]),
         "--schema-manifest",
         str(_SCHEMA_MANIFEST),
+        "--expected-deployment-id",
+        "integration-restore-target",
+        "--allow-cross-deployment",
+        "--cross-deployment-confirmation",
+        "REPLACE_OTHER_FLORI_DEPLOYMENT",
         "--result-file",
         str(result_path),
         "--owner-uid",
@@ -93,6 +98,8 @@ def test_fixed_archive_restores_through_production_cli_and_database(
     assert completed.returncode == 0, completed.stdout + completed.stderr
     result = json.loads(result_path.read_text(encoding="utf-8"))
     assert result["status"] == "success"
+    assert result["deployment"]["current_id"] == "integration-restore-target"
+    assert result["deployment"]["cross_deployment_override"] is True
     assert result["checks"] == {
         "archive_members": "ok",
         "checksums": "ok",

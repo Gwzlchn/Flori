@@ -85,6 +85,140 @@ def test_build_http_app_smoke(monkeypatch, tmp_path):
 
     app = build_http_app()
     assert callable(app)
+    app.close()
+
+
+def test_mcp_default_server_blocks_import_until_lifespan_resources_close(
+    monkeypatch, tmp_path,
+):
+    from shared import content_maintenance as maintenance
+    from api.mcp_server.http_app import build_http_app
+
+    monkeypatch.setenv("CONFIG_DIR", "/app/configs")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv(maintenance.LOCK_DIR_ENV, str(tmp_path / "locks"))
+    monkeypatch.delenv("MINIO_URL", raising=False)
+    monkeypatch.setenv("FLORI_MCP_ALLOW_NO_AUTH", "1")
+    app = build_http_app()
+    resources = app.maintenance_lease.resources
+    with pytest.raises(maintenance.MaintenanceLockError, match="blocked"):
+        maintenance.acquire_maintenance_lease(
+            resources, exclusive=True, owner="content-import",
+        )
+    app.close()
+    exclusive = maintenance.acquire_maintenance_lease(
+        resources, exclusive=True, owner="content-import",
+    )
+    exclusive.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_holder_blocks_content_import_and_release_allows_it(
+    monkeypatch, tmp_path,
+):
+    from shared import content_import
+    from shared import content_maintenance as maintenance
+    from api.mcp_server.http_app import build_http_app
+
+    monkeypatch.setenv("CONFIG_DIR", "/app/configs")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv(maintenance.LOCK_DIR_ENV, str(tmp_path / "locks"))
+    monkeypatch.delenv("MINIO_URL", raising=False)
+    monkeypatch.setenv("FLORI_MCP_ALLOW_NO_AUTH", "1")
+    app = build_http_app()
+
+    class Storage:
+        jobs_dir = tmp_path / "jobs"
+
+    Storage.jobs_dir.mkdir(exist_ok=True)
+
+    async def imported(**_kwargs):
+        return "imported"
+
+    monkeypatch.setattr(content_import, "_run_import_locked", imported)
+    kwargs = {
+        "repository": object(),
+        "snapshot": "latest",
+        "target_db_path": app.database._path,
+        "storage": Storage(),
+        "journal_path": tmp_path / "import-journal.sqlite3",
+        "target_generation": "gen-mcp-lock",
+    }
+    with pytest.raises(maintenance.MaintenanceLockError, match="blocked"):
+        await content_import.run_import(**kwargs)
+    app.close()
+    assert await content_import.run_import(**kwargs) == "imported"
+
+
+def test_mcp_initialization_failure_releases_maintenance_lease(
+    monkeypatch, tmp_path,
+):
+    from api.mcp_server import server
+
+    monkeypatch.setenv("CONFIG_DIR", "/app/configs")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    closed = False
+    database_closed = False
+
+    class Lease:
+        def close(self):
+            nonlocal closed
+            closed = True
+
+    class BrokenDatabase:
+        def __init__(self, _path):
+            pass
+
+        def init_schema(self):
+            raise RuntimeError("database init failed")
+
+        def close(self):
+            nonlocal database_closed
+            database_closed = True
+
+    monkeypatch.setattr(server, "acquire_service_lease", lambda **_kwargs: Lease())
+    monkeypatch.setattr(server, "Database", BrokenDatabase)
+    with pytest.raises(RuntimeError, match="database init failed"):
+        server.build_default_server(stateless_http=True)
+    assert closed
+    assert database_closed
+
+
+def test_mcp_http_app_construction_failure_releases_database_and_lease(
+    monkeypatch, tmp_path,
+):
+    from mcp.server.fastmcp import FastMCP
+    from shared import content_maintenance as maintenance
+    from api.mcp_server import server
+    from api.mcp_server.http_app import build_http_app
+
+    monkeypatch.setenv("CONFIG_DIR", "/app/configs")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv(maintenance.LOCK_DIR_ENV, str(tmp_path / "locks"))
+    monkeypatch.delenv("MINIO_URL", raising=False)
+    leases = []
+    real_acquire = server.acquire_service_lease
+
+    def capture_lease(**kwargs):
+        lease = real_acquire(**kwargs)
+        leases.append(lease)
+        return lease
+
+    monkeypatch.setattr(server, "acquire_service_lease", capture_lease)
+    monkeypatch.setattr(
+        FastMCP, "streamable_http_app",
+        lambda _self: (_ for _ in ()).throw(RuntimeError("ASGI init failed")),
+    )
+    with pytest.raises(RuntimeError, match="ASGI init failed"):
+        build_http_app()
+    assert len(leases) == 1
+    assert leases[0]._descriptors == []
+    assert leases[0]._directory_fd is None
+    # 构造失败不能遗留共享锁；同进程随后可取得同资源的独占维护租约。
+    exclusive = maintenance.acquire_maintenance_lease(
+        leases[0].resources, exclusive=True, owner="content-import",
+    )
+    exclusive.close()
 
 
 # 限流 RateLimitASGI(纯 ASGI 时间窗计数器,最外层)

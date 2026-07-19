@@ -46,6 +46,32 @@ dr = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(dr)
 
 
+@pytest.fixture(autouse=True)
+def _stable_test_deployment(monkeypatch):
+    monkeypatch.setenv("FLORI_DEPLOYMENT_ID", "test-deployment")
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        [],
+        ["create", "--help"],
+        ["validate", "--help"],
+        ["restore", "--help"],
+        ["drill", "--help"],
+    ],
+)
+def test_dr_cli_parser_smoke(arguments) -> None:
+    completed = subprocess.run(
+        ["python", str(_MODULE_PATH), *arguments, "--help"] if not arguments
+        else ["python", str(_MODULE_PATH), *arguments],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def _fixture_roots(
     root: Path,
     *,
@@ -145,6 +171,7 @@ def _create(
         output=archive,
         generation="test-generation",
         app_version="test",
+        deployment_id="test-deployment",
         redis_mode=redis_mode,
         schema_manifest_path=schema_manifest_path,
     )
@@ -740,6 +767,7 @@ def test_snapshot_covers_all_persistent_assets_and_restores_empty_environment(tm
     assert backup["archive_sha256"]
     assert archive.with_suffix(archive.suffix + ".sha256").is_file()
     assert manifest["sqlite"]["integrity_check"] == "ok"
+    assert manifest["deployment"] == {"id": "test-deployment"}
     assert manifest["assets"]["data"]["included"] is True
     assert manifest["assets"]["redis"]["included"] is True
     assert manifest["assets"]["minio"]["included"] is True
@@ -805,6 +833,7 @@ def test_reconstructible_worker_cache_is_excluded_without_hiding_worker_state(
         config_root=sources["config"],
         output=archive,
         generation="worker-cache",
+        deployment_id="test-deployment",
     )
     manifest = dr.validate_archive(archive)
 
@@ -838,6 +867,7 @@ def test_explicit_minio_exclude_keeps_business_and_durable_internal_metadata(
         config_root=sources["config"],
         output=archive,
         generation="minio-exclude",
+        deployment_id="test-deployment",
         minio_excludes=(".minio.sys/tmp",),
     )
     manifest = dr.validate_archive(archive)
@@ -858,6 +888,7 @@ def test_cli_accepts_materialized_redis_mode():
         "--redis", "/redis",
         "--output", "/output/backup.tar.gz",
         "--generation", "test-generation",
+        "--deployment-id", "test-deployment",
         "--redis-mode", "materialized-rdb-aof",
     ])
 
@@ -877,6 +908,7 @@ def test_nested_minio_mount_is_not_duplicated_or_removed_by_data_switch(tmp_path
         config_root=sources["config"],
         output=archive,
         generation="nested-generation",
+        deployment_id="test-deployment",
     )
     manifest = dr.validate_archive(archive)
     assert manifest["assets"]["data"]["excluded_external_subtrees"] == ["minio"]
@@ -916,6 +948,60 @@ def test_corrupt_archive_is_fail_closed_before_target_change(tmp_path: Path):
     assert sentinel.read_bytes() == b"current"
     assert _inventory(targets["redis"]) == []
     assert not list((tmp_path / "target").rglob(".flori-dr-*"))
+
+
+def test_restore_rejects_wrong_deployment_before_creating_targets(tmp_path: Path):
+    archive, _ = _create(tmp_path / "snapshot")
+    targets = {
+        name: tmp_path / "empty-target" / name
+        for name in ("data", "redis", "minio", "config")
+    }
+    with pytest.raises(dr.SnapshotError, match="deployment ID"):
+        dr.restore_snapshot(
+            archive_path=archive,
+            targets=targets,
+            expected_deployment_id="another-deployment",
+        )
+    assert not (tmp_path / "empty-target").exists()
+
+
+def test_cross_deployment_restore_requires_both_explicit_confirmations(tmp_path: Path):
+    archive, _ = _create(tmp_path / "snapshot")
+    refused_targets = _target_roots(tmp_path / "refused")
+    with pytest.raises(dr.SnapshotError, match="高风险确认"):
+        dr.restore_snapshot(
+            archive_path=archive,
+            targets=refused_targets,
+            expected_deployment_id="clone-target",
+            allow_cross_deployment=True,
+        )
+    accepted_targets = _target_roots(tmp_path / "accepted")
+    result = dr.restore_snapshot(
+        archive_path=archive,
+        targets=accepted_targets,
+        expected_deployment_id="clone-target",
+        allow_cross_deployment=True,
+        cross_deployment_confirmation=dr.CROSS_DEPLOYMENT_CONFIRMATION,
+    )
+    assert result["deployment"] == {
+        "archive_id": "test-deployment",
+        "current_id": "clone-target",
+        "matched": False,
+        "cross_deployment_override": True,
+    }
+
+
+def test_create_rejects_unbound_deployment_identity(tmp_path: Path):
+    sources = _fixture_roots(tmp_path / "source")
+    archive = tmp_path / "backups" / "unbound.tar.gz"
+    with pytest.raises(dr.SnapshotError, match="非unbound"):
+        dr.create_snapshot(
+            data_root=sources["data"],
+            redis_root=sources["redis"],
+            output=archive,
+            generation="unbound",
+        )
+    assert not archive.exists()
 
 
 def test_mid_commit_failure_rolls_back_each_prepared_target_once_in_reverse(
@@ -1663,6 +1749,7 @@ def test_source_with_tampered_sqlite_ledger_is_not_published_as_backup(tmp_path:
             config_root=sources["config"],
             output=archive,
             generation="tampered-source",
+            deployment_id="test-deployment",
         )
 
     assert not archive.exists()
@@ -1710,6 +1797,7 @@ def test_backup_create_rejects_schema_that_cannot_start_application(
             config_root=sources["config"],
             output=archive,
             generation=f"invalid-{case}",
+            deployment_id="test-deployment",
         )
 
     assert not archive.exists()
@@ -1800,7 +1888,12 @@ def test_fixed_legacy_format_v1_archive_remains_restorable(tmp_path: Path):
 
     validated = dr.validate_archive(legacy)
     targets = _target_roots(tmp_path / "legacy-target")
-    result = dr.restore_snapshot(archive_path=legacy, targets=targets)
+    result = dr.restore_snapshot(
+        archive_path=legacy,
+        targets=targets,
+        allow_cross_deployment=True,
+        cross_deployment_confirmation=dr.CROSS_DEPLOYMENT_CONFIRMATION,
+    )
 
     assert validated["format_version"] == 1
     assert validated["sqlite"]["user_version"] == 0
@@ -1845,9 +1938,70 @@ def test_existing_archive_is_never_overwritten(tmp_path: Path):
             redis_root=sources["redis"],
             output=archive,
             generation="same-generation",
+            deployment_id="test-deployment",
         )
 
     assert archive.read_bytes() == b"known-good"
+
+
+def test_create_rejects_output_directory_inside_source_tree(tmp_path: Path):
+    sources = _fixture_roots(tmp_path / "source")
+    output = sources["data"] / "backups" / "snapshot.tar.gz"
+    with pytest.raises(dr.SnapshotError, match="证据路径"):
+        dr.create_snapshot(
+            data_root=sources["data"],
+            redis_root=sources["redis"],
+            minio_root=sources["minio"],
+            config_root=sources["config"],
+            output=output,
+            generation="unsafe-output",
+            deployment_id="test-deployment",
+        )
+    assert not output.exists()
+
+
+def test_evidence_boundary_indexes_each_root_once_for_multiple_outputs(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    data_root = tmp_path / "targets" / "data"
+    roots = (data_root, data_root / "nested-target", tmp_path / "targets" / "redis")
+    for root in roots:
+        (root / "nested").mkdir(parents=True)
+    evidence = tuple(
+        tmp_path / "evidence" / name
+        for name in ("archive.tar.gz", "archive.tar.gz.sha256", "result.json")
+    )
+    real_walk = dr.os.walk
+    traversals = 0
+
+    def counted_walk(*args, **kwargs):
+        nonlocal traversals
+        traversals += 1
+        return real_walk(*args, **kwargs)
+
+    monkeypatch.setattr(dr.os, "walk", counted_walk)
+    dr._assert_evidence_outside_roots(evidence, roots)
+    assert traversals == 2
+
+
+def test_restore_result_cannot_replace_target_database(tmp_path: Path):
+    archive, _result = _create(tmp_path / "snapshot")
+    targets = _fixture_roots(tmp_path / "target")
+    database = targets["data"] / "db" / "analyzer.db"
+    before = database.read_bytes()
+    code = dr.main([
+        "restore",
+        "--archive", str(archive),
+        "--data-target", str(targets["data"]),
+        "--redis-target", str(targets["redis"]),
+        "--minio-target", str(targets["minio"]),
+        "--config-target", str(targets["config"]),
+        "--expected-deployment-id", "test-deployment",
+        "--result-file", str(database),
+        "--schema-manifest", str(_SCHEMA_MANIFEST_PATH),
+    ])
+    assert code == 1
+    assert database.read_bytes() == before
 
 
 def test_empty_environment_drill_writes_machine_readable_rpo_rto(tmp_path: Path):

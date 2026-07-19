@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { ChevronDown, ExternalLink, GitBranch, Info, RotateCcw, Trash2 } from 'lucide-vue-next'
+import { ChevronDown, ExternalLink, GitBranch, Info, Play, RotateCcw, Trash2 } from 'lucide-vue-next'
 import StatusBadge from '../../common/StatusBadge.vue'
 import { contentTypeLabel, documentKindLabel } from '../../../utils/contentType'
 import { SOURCE_PROFILE_LABELS } from '../../../constants/sources'
@@ -20,7 +20,7 @@ defineProps<{
   anyRunning: boolean
 }>()
 
-defineEmits<{ retry: []; delete: [] }>()
+defineEmits<{ activate: []; retry: []; delete: [] }>()
 const showArtifacts = ref(false)
 
 function fmtBitrate(kbps?: number): string {
@@ -90,6 +90,7 @@ function authorNames(value: unknown): string {
       <ul v-show="showArtifacts" class="art-list"><li v-for="path in job.artifacts" :key="path" class="mono">{{ path }}</li></ul>
     </div>
     <div style="margin-top:16px;display:flex;gap:8px">
+      <button v-if="jobStatus === 'pending_activation'" class="btn pri" @click="$emit('activate')"><Play :size="14" />激活并继续</button>
       <button v-if="jobStatus === 'failed'" class="btn" @click="$emit('retry')"><RotateCcw :size="14" />从失败处继续</button>
       <button class="btn danger" @click="$emit('delete')"><Trash2 :size="14" />删除内容</button>
     </div>

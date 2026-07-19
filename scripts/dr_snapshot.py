@@ -24,6 +24,7 @@ from typing import Any, Callable
 
 FORMAT_NAME = "flori-disaster-recovery"
 FORMAT_VERSION = 2
+CROSS_DEPLOYMENT_CONFIRMATION = "REPLACE_OTHER_FLORI_DEPLOYMENT"
 SUPPORTED_FORMAT_VERSIONS = frozenset({1, FORMAT_VERSION})
 MANIFEST_NAME = "manifest.json"
 TRANSACTION_FILE = ".flori-dr-transaction.json"
@@ -522,16 +523,30 @@ def create_snapshot(
     minio_root: Path | None = None,
     config_root: Path | None = None,
     app_version: str = "unknown",
+    deployment_id: str = "unbound",
     redis_mode: str = "offline-volume",
     data_excludes: tuple[str, ...] = (),
     minio_excludes: tuple[str, ...] = (),
     schema_manifest_path: Path | None = None,
     _schema_support_override: dict[str, Any] | None = None,
+    _boundary_checked: bool = False,
 ) -> dict[str, Any]:
     """生成完整快照,只有全部资产和校验通过才原子发布归档."""
+    if not _boundary_checked:
+        _assert_evidence_outside_roots(
+            (output, output.with_suffix(output.suffix + ".sha256")),
+            tuple(path for path in (data_root, redis_root, minio_root, config_root) if path),
+        )
     started_monotonic = time.monotonic()
     started_at = _utc_now()
     generation = _safe_generation(generation)
+    if (
+        not deployment_id or deployment_id == "unbound" or len(deployment_id) > 128
+        or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for ch in deployment_id)
+    ):
+        raise SnapshotError(
+            "deployment_id 必须是稳定非unbound标识且只允许 1..128 位 [A-Za-z0-9_.-]"
+        )
     excluded_subtrees = _excluded_subtrees(data_excludes, "数据")
     excluded_minio_subtrees = _excluded_subtrees(minio_excludes, "MinIO")
     if minio_root is not None and minio_root.exists():
@@ -658,6 +673,7 @@ def create_snapshot(
                 "rpo_window_seconds": round(time.monotonic() - started_monotonic, 6),
             },
             "producer": {"app_version": app_version},
+            "deployment": {"id": deployment_id},
             "compatibility": {
                 "min_restore_format": FORMAT_VERSION,
                 "sqlite_user_version": sqlite_meta["user_version"],
@@ -1558,14 +1574,30 @@ def restore_snapshot(
     schema_manifest_path: Path | None = None,
     fail_after_commits: int | None = None,
     _schema_support_override: dict[str, Any] | None = None,
+    _boundary_checked: bool = False,
+    expected_deployment_id: str | None = None,
+    allow_cross_deployment: bool = False,
+    cross_deployment_confirmation: str | None = None,
 ) -> dict[str, Any]:
     """校验后两阶段切换所有目标;accept 开始后异常只统一前滚。"""
+    if not _boundary_checked:
+        _assert_evidence_outside_roots(
+            (archive_path, archive_path.with_suffix(archive_path.suffix + ".sha256")),
+            tuple(targets.values()),
+        )
     started_at = _utc_now()
     started_monotonic = time.monotonic()
     _validate_target_roots(targets)
-    for target in targets.values():
-        target.mkdir(parents=True, exist_ok=True)
-    preserves = _target_preserves(targets)
+    current_deployment = expected_deployment_id or os.environ.get("FLORI_DEPLOYMENT_ID")
+    if (
+        not current_deployment or current_deployment == "unbound"
+        or len(current_deployment) > 128
+        or any(
+            ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+            for ch in current_deployment
+        )
+    ):
+        raise SnapshotError("恢复必须提供稳定非unbound expected deployment ID")
     _validate_archive_sidecar(archive_path)
     with tempfile.TemporaryDirectory(prefix="flori-dr-restore-") as temporary:
         extracted = Path(temporary)
@@ -1577,6 +1609,20 @@ def restore_snapshot(
             schema_manifest_path=schema_manifest_path,
             _schema_support_override=_schema_support_override,
         )
+        archive_deployment = (manifest.get("deployment") or {}).get("id")
+        deployment_matches = archive_deployment == current_deployment
+        if not deployment_matches and not (
+            allow_cross_deployment
+            and cross_deployment_confirmation == CROSS_DEPLOYMENT_CONFIRMATION
+        ):
+            raise SnapshotError(
+                "归档deployment ID与当前部署不一致;跨机克隆必须同时显式启用"
+                " allow_cross_deployment 并提供高风险确认: "
+                f"archive={archive_deployment or 'missing'}, current={current_deployment}"
+            )
+        for target in targets.values():
+            target.mkdir(parents=True, exist_ok=True)
+        preserves = _target_preserves(targets)
         generation = manifest["generation"]
         included = {
             name
@@ -1704,6 +1750,12 @@ def restore_snapshot(
         "preserved_target_entries": {
             name: sorted(values) for name, values in preserves.items() if values
         },
+        "deployment": {
+            "archive_id": archive_deployment,
+            "current_id": current_deployment,
+            "matched": deployment_matches,
+            "cross_deployment_override": not deployment_matches,
+        },
         "checks": {
             "archive_members": "ok",
             "checksums": "ok",
@@ -1770,6 +1822,7 @@ def run_empty_environment_drill(
             generation="drill",
             redis_mode="offline-volume",
             app_version="drill",
+            deployment_id="isolated-drill",
             schema_manifest_path=schema_manifest_path,
             _schema_support_override=schema_support,
         )
@@ -1786,6 +1839,7 @@ def run_empty_environment_drill(
                 targets=target,
                 schema_manifest_path=schema_manifest_path,
                 _schema_support_override=schema_support,
+                expected_deployment_id="isolated-drill",
             )
         except SnapshotError:
             pass
@@ -1800,6 +1854,7 @@ def run_empty_environment_drill(
             targets=target,
             schema_manifest_path=schema_manifest_path,
             _schema_support_override=schema_support,
+            expected_deployment_id="isolated-drill",
         )
         connection = sqlite3.connect(target["data"] / "db" / "analyzer.db")
         row = connection.execute("SELECT title FROM jobs WHERE id='jobs_drill'").fetchone()
@@ -1831,6 +1886,7 @@ def run_empty_environment_drill(
                 schema_manifest_path=schema_manifest_path,
                 fail_after_commits=1,
                 _schema_support_override=schema_support,
+                expected_deployment_id="isolated-drill",
             )
         except SnapshotError:
             pass
@@ -1868,6 +1924,61 @@ def _path_or_none(value: str | None) -> Path | None:
     return Path(value) if value else None
 
 
+def _directory_identity_index(roots: tuple[Path, ...]) -> frozenset[tuple[int, int]]:
+    """一次遍历目标目录实体，供同一命令的全部 evidence 复用。"""
+    identities: set[tuple[int, int]] = set()
+    for root in sorted(set(roots), key=lambda item: len(item.parts)):
+        if not root.is_dir():
+            continue
+        try:
+            root_info = root.stat(follow_symlinks=False)
+            root_identity = (root_info.st_dev, root_info.st_ino)
+            if root_identity in identities:
+                continue
+            for current, directories, _files in os.walk(root, followlinks=False):
+                base = Path(current)
+                info = base.stat(follow_symlinks=False)
+                identities.add((info.st_dev, info.st_ino))
+                directories[:] = [
+                    name for name in directories
+                    if not (base / name).is_symlink()
+                ]
+        except OSError as exc:
+            raise SnapshotError(f"无法建立恢复边界目录身份索引: {root}: {exc}") from exc
+    return frozenset(identities)
+
+
+def _evidence_aliases_tree(
+    evidence: Path,
+    root: Path,
+    root_directory_identities: frozenset[tuple[int, int]],
+) -> bool:
+    evidence_abs = Path(os.path.abspath(evidence))
+    root_abs = Path(os.path.abspath(root))
+    if evidence_abs == root_abs or root_abs in evidence_abs.parents:
+        return True
+    if evidence_abs in root_abs.parents:
+        return True
+    parent = evidence_abs.parent
+    if parent.exists():
+        info = parent.stat(follow_symlinks=False)
+        if (info.st_dev, info.st_ino) in root_directory_identities:
+            return True
+    return False
+
+
+def _assert_evidence_outside_roots(
+    evidence_paths: tuple[Path, ...], roots: tuple[Path, ...],
+) -> None:
+    root_directory_identities = _directory_identity_index(roots)
+    for evidence in evidence_paths:
+        for root in roots:
+            if _evidence_aliases_tree(evidence, root, root_directory_identities):
+                raise SnapshotError(
+                    f"灾备证据路径不得与数据源或恢复目标重叠: {evidence} <> {root}"
+                )
+
+
 def _chown_if_requested(path: Path | None, uid: int | None, gid: int | None) -> None:
     if path is not None and path.exists() and uid is not None and gid is not None:
         os.chown(path, uid, gid)
@@ -1885,6 +1996,7 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--output", required=True)
     create.add_argument("--generation", required=True)
     create.add_argument("--app-version", default="unknown")
+    create.add_argument("--deployment-id", required=True)
     create.add_argument(
         "--redis-mode",
         choices=("rdb", "offline-volume", "materialized-rdb-aof"),
@@ -1916,6 +2028,9 @@ def _parser() -> argparse.ArgumentParser:
     restore.add_argument("--owner-uid", type=int)
     restore.add_argument("--owner-gid", type=int)
     restore.add_argument("--schema-manifest")
+    restore.add_argument("--expected-deployment-id", required=True)
+    restore.add_argument("--allow-cross-deployment", action="store_true")
+    restore.add_argument("--cross-deployment-confirmation")
 
     drill = subparsers.add_parser("drill", help="运行隔离空环境恢复演练")
     drill.add_argument("--result-file")
@@ -1931,6 +2046,22 @@ def main(argv: list[str] | None = None) -> int:
     requested_result_file = result_file
     try:
         if args.command == "create":
+            sources = tuple(path for path in (
+                Path(args.data), Path(args.redis), _path_or_none(args.minio),
+                _path_or_none(args.config),
+            ) if path is not None)
+            try:
+                _assert_evidence_outside_roots(
+                    tuple(path for path in (
+                        Path(args.output),
+                        Path(args.output).with_suffix(Path(args.output).suffix + ".sha256"),
+                        result_file,
+                    ) if path is not None),
+                    sources,
+                )
+            except SnapshotError:
+                result_file = None
+                raise
             result = create_snapshot(
                 data_root=Path(args.data),
                 redis_root=Path(args.redis),
@@ -1939,12 +2070,20 @@ def main(argv: list[str] | None = None) -> int:
                 output=Path(args.output),
                 generation=args.generation,
                 app_version=args.app_version,
+                deployment_id=args.deployment_id,
                 redis_mode=args.redis_mode,
                 data_excludes=tuple(args.data_exclude),
                 minio_excludes=tuple(args.minio_exclude),
                 schema_manifest_path=_path_or_none(args.schema_manifest),
+                _boundary_checked=True,
             )
         elif args.command == "validate":
+            if result_file is not None and (
+                result_file == Path(args.archive)
+                or result_file == Path(args.archive).with_suffix(Path(args.archive).suffix + ".sha256")
+            ):
+                result_file = None
+                raise SnapshotError("校验result不得覆盖archive或sha256 sidecar")
             manifest = validate_archive(
                 Path(args.archive),
                 args.max_db_user_version,
@@ -1953,7 +2092,13 @@ def main(argv: list[str] | None = None) -> int:
             result = {
                 "status": "success",
                 "operation": "validate",
+                "format": manifest["format"],
+                "format_version": manifest["format_version"],
                 "generation": manifest["generation"],
+                "created_at": manifest["created_at"],
+                "deployment_id": (
+                    manifest.get("deployment") or {}
+                ).get("id"),
                 "assets": manifest["assets"],
                 "checks": {"members": "ok", "checksums": "ok", "sqlite": "ok", "compatibility": "ok"},
             }
@@ -1963,11 +2108,27 @@ def main(argv: list[str] | None = None) -> int:
                 targets["minio"] = Path(args.minio_target)
             if args.config_target:
                 targets["config"] = Path(args.config_target)
+            try:
+                _assert_evidence_outside_roots(
+                    tuple(path for path in (
+                        Path(args.archive),
+                        Path(args.archive).with_suffix(Path(args.archive).suffix + ".sha256"),
+                        result_file,
+                    ) if path is not None),
+                    tuple(targets.values()),
+                )
+            except SnapshotError:
+                result_file = None
+                raise
             result = restore_snapshot(
                 archive_path=Path(args.archive),
                 targets=targets,
                 max_db_user_version=args.max_db_user_version,
                 schema_manifest_path=_path_or_none(args.schema_manifest),
+                _boundary_checked=True,
+                expected_deployment_id=args.expected_deployment_id,
+                allow_cross_deployment=args.allow_cross_deployment,
+                cross_deployment_confirmation=args.cross_deployment_confirmation,
             )
         else:
             result = run_empty_environment_drill(

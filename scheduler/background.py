@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 import structlog
 
+from shared.models import JobStatus
 from shared.status import OFFLINE, PAUSED
 from shared.version import FLORI_VERSION
 
@@ -163,6 +164,18 @@ class BackgroundServices:
         status = msg.get("status")
         command = msg.get("command") or msg.get("action")
         stream_id = msg.get("_stream_id")
+
+        if command in {"rerun", "resubmit", "continue_ai", "retry"}:
+            guarded_job = await asyncio.to_thread(
+                self.owner.db.get_job, msg.get("job_id", ""),
+            )
+            if guarded_job and guarded_job.status == JobStatus.PENDING_ACTIVATION:
+                logger.warning(
+                    "job_activation_required",
+                    job_id=guarded_job.id,
+                    command=command,
+                )
+                return
 
         if status == "running":
             await self.owner.on_step_started(

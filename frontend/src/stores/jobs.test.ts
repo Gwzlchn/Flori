@@ -194,6 +194,13 @@ describe('useJobStore 其它 action', () => {
     expect(post).toHaveBeenCalledWith('/api/jobs/j1/retry')
   })
 
+  it('activateJob POST /api/jobs/:id/activate', async () => {
+    post.mockResolvedValue({ job_id: 'j1', status: 'pending' })
+    const store = useJobStore()
+    await store.activateJob('j1')
+    expect(post).toHaveBeenCalledWith('/api/jobs/j1/activate')
+  })
+
   it('rerunJob POST /api/jobs/:id/rerun 带 from_step', async () => {
     post.mockResolvedValue({})
     const store = useJobStore()

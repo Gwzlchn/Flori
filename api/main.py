@@ -28,6 +28,7 @@ class _RunnerPollAccessFilter(logging.Filter):
         return True
 
 from shared.config import load_config
+from shared.content_maintenance import acquire_service_lease
 from shared.db import Database
 from shared.logging_setup import setup_logging
 from shared.redis_client import RedisClient
@@ -97,20 +98,41 @@ def create_app(
     async def lifespan(app: FastAPI):
         # api 进程启动时刻(供 /api/status 的 api 组件算 uptime_sec)。两条资源路径都记。
         app.state.started_at = datetime.now(timezone.utc)
+        maintenance_lease = None
         if not hasattr(app.state, "db") or app.state.db is None:
             cfg = load_config(
                 config_dir=os.environ.get("CONFIG_DIR", "/data/configs"),
                 data_dir=os.environ.get("DATA_DIR", "/data"),
             )
-            app.state.config = cfg
-            app.state.db = Database(cfg.db_path)
-            app.state.db.init_schema()
-            app.state.redis = RedisClient(os.environ.get("REDIS_URL", "redis://redis:6379/0"))
-            await app.state.redis.connect()
-            app.state.storage = create_storage(cfg.jobs_dir)
-            app.state._own_resources = True
+            maintenance_lease = acquire_service_lease(
+                db_path=cfg.db_path,
+                jobs_dir=cfg.jobs_dir,
+                object_bucket=os.environ.get("MINIO_BUCKET"),
+                config_root=cfg.prompts_dir,
+                owner="api",
+            )
+            try:
+                app.state.config = cfg
+                app.state.db = Database(cfg.db_path)
+                app.state.db.init_schema()
+                app.state.redis = RedisClient(os.environ.get("REDIS_URL", "redis://redis:6379/0"))
+                await app.state.redis.connect()
+                app.state.storage = create_storage(cfg.jobs_dir)
+                app.state._own_resources = True
+            except BaseException:
+                maintenance_lease.close()
+                raise
         else:
             app.state._own_resources = False
+            cfg = getattr(app.state, "config", None)
+            if cfg is not None:
+                maintenance_lease = acquire_service_lease(
+                    db_path=cfg.db_path,
+                    jobs_dir=cfg.jobs_dir,
+                    object_bucket=os.environ.get("MINIO_BUCKET"),
+                    config_root=cfg.prompts_dir,
+                    owner="api",
+                )
 
         # 周期自动同步订阅(默认每 6h;SUBSCRIPTION_SYNC_HOURS=0 关闭)。
         sync_task = None
@@ -130,41 +152,55 @@ def create_app(
                     app.state.minio_cap.loop(app.state.storage)
                 )
 
-        yield
-
-        if upload_recovery_task:
-            upload_recovery_task.cancel()
-            await asyncio.gather(upload_recovery_task, return_exceptions=True)
-        wait_for_finalizers = getattr(
-            getattr(app.state, "storage", None), "wait_for_finalizers", None,
-        )
-        if callable(wait_for_finalizers):
+        try:
+            yield
+        finally:
             try:
-                await asyncio.wait_for(
-                    wait_for_finalizers(),
-                    timeout=_UPLOAD_FINALIZER_DRAIN_TIMEOUT_SEC,
+                recovery_tasks = list(
+                    getattr(app.state, "recovery_tasks", {}).values()
                 )
-            except TimeoutError:
-                import structlog
-                structlog.get_logger(component="upload-recovery").error(
-                    "upload_finalizer_drain_timeout",
-                    timeout_sec=_UPLOAD_FINALIZER_DRAIN_TIMEOUT_SEC,
-                    recovery="initialization_marker_reconciler",
+                for task in recovery_tasks:
+                    task.cancel()
+                if recovery_tasks:
+                    await asyncio.gather(*recovery_tasks, return_exceptions=True)
+                if upload_recovery_task:
+                    upload_recovery_task.cancel()
+                    await asyncio.gather(upload_recovery_task, return_exceptions=True)
+                wait_for_finalizers = getattr(
+                    getattr(app.state, "storage", None), "wait_for_finalizers", None,
                 )
-            except Exception:
-                import structlog
-                structlog.get_logger(component="upload-recovery").exception(
-                    "upload_finalizer_drain_failed",
-                )
-        if sync_task:
-            sync_task.cancel()
-        if pricing_task:
-            pricing_task.cancel()
-        if capacity_task:
-            capacity_task.cancel()
-        if getattr(app.state, "_own_resources", False):
-            await app.state.redis.close()
-            app.state.db.close()
+                if callable(wait_for_finalizers):
+                    try:
+                        await asyncio.wait_for(
+                            wait_for_finalizers(),
+                            timeout=_UPLOAD_FINALIZER_DRAIN_TIMEOUT_SEC,
+                        )
+                    except TimeoutError:
+                        import structlog
+                        structlog.get_logger(component="upload-recovery").error(
+                            "upload_finalizer_drain_timeout",
+                            timeout_sec=_UPLOAD_FINALIZER_DRAIN_TIMEOUT_SEC,
+                            recovery="initialization_marker_reconciler",
+                        )
+                    except Exception:
+                        import structlog
+                        structlog.get_logger(component="upload-recovery").exception(
+                            "upload_finalizer_drain_failed",
+                        )
+                if sync_task:
+                    sync_task.cancel()
+                if pricing_task:
+                    pricing_task.cancel()
+                if capacity_task:
+                    capacity_task.cancel()
+                if getattr(app.state, "_own_resources", False):
+                    try:
+                        await app.state.redis.close()
+                    finally:
+                        app.state.db.close()
+            finally:
+                if maintenance_lease is not None:
+                    maintenance_lease.close()
 
     app = FastAPI(title="AI Knowledge Base", lifespan=lifespan)
 
@@ -226,11 +262,12 @@ def create_app(
     app.state.pricing = PricingStore()
     # MinIO 容量缓存(无条件置,build_full_status 读;loop 仅生产在 lifespan 起,测试/注入态空快照→不填)。
     app.state.minio_cap = MinioCapacityStore()
+    app.state.recovery_tasks = {}
 
     from api.routes import (
         jobs, notes, workers, ws, auth, admin, profiles, runner, bili,
         collections, search, glossary, domains, mcp, ask, radar, queue,
-        ai_tasks, prompts, study, sources, evidence,
+        ai_tasks, prompts, study, sources, evidence, recovery,
     )
     app.include_router(jobs.router)
     app.include_router(jobs.providers_router)
@@ -255,6 +292,7 @@ def create_app(
     app.include_router(study.router)
     app.include_router(sources.router)
     app.include_router(evidence.router)
+    app.include_router(recovery.router)
 
     return app
 

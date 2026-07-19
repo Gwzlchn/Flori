@@ -11,6 +11,8 @@ from pathlib import Path
 import structlog
 
 from shared.config import load_config
+from shared.content_maintenance import acquire_service_lease
+from shared.source_library import source_roots_from_env
 from shared.db import Database
 from shared.errors import WorkerFatalError
 from shared.redis_client import RedisClient
@@ -40,26 +42,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-async def main() -> None:
-    args = parse_args()
-
-    data_dir = os.environ.get("DATA_DIR", "/data")
-    # 默认从镜像烤入的 /app/configs 读(无状态 worker 不必显式传 CONFIG_DIR);
-    # docker/base.Dockerfile 把 configs/ 复制到 /app/configs。挂 /data 卷的部署可显式覆盖。
-    config_dir = os.environ.get("CONFIG_DIR", "/app/configs")
-    config = load_config(config_dir=config_dir, data_dir=data_dir)
-
-    gateway_url = os.environ.get("GATEWAY_URL")
-    redis_url = os.environ.get("REDIS_URL")
-
-    # 三种模式:
-    #  1) GATEWAY_URL 未设(本地/单机):redis+db 直连,RedisTransport,本地/远端存储。
-    #  2) GATEWAY_URL 设 + REDIS_URL 设(混合):redis+db 作内层兜底,产物走 gateway。
-    #  3) GATEWAY_URL 设 + REDIS_URL 未设(真零隧道):跳过 redis+db,只出站 HTTPS。
+async def _initialize_runtime(args, config, gateway_url: str | None, redis_url: str | None):
+    """构造 worker 运行资源;调用方在异常时负责释放 maintenance lease。"""
     redis: RedisClient | None = None
     db: Database | None = None
     if gateway_url is None or redis_url:
-        # 未设 GATEWAY_URL 时用默认本机地址;混合模式用显式 REDIS_URL。
         effective_redis_url = redis_url or "redis://localhost:6379/0"
         redis = RedisClient(effective_redis_url)
         await redis.connect()
@@ -69,9 +56,7 @@ async def main() -> None:
         db.init_schema()
 
     transport = create_transport(redis, db)
-
     if gateway_url:
-        # 产物经网关中转:token_getter 绑定 transport,用 register/resume 后的 worker token。
         work_dir = Path(os.environ.get("WORK_DIR", "/tmp/flori-work"))
         storage = GatewayStorage(
             gateway_url,
@@ -83,7 +68,6 @@ async def main() -> None:
         storage = create_storage(config.jobs_dir)
 
     pools = args.pools
-    # worker_type 仅作显示标签,路由一律按 pools;从 pools 集合派生:单池="cpu",多池="cpu+gpu"。
     worker_type = "+".join(sorted(set(pools)))
     tags = auto_discover_tags() | (set(args.tags) if args.tags else set())
     reject_tags = set(args.reject_tags) if args.reject_tags else set()
@@ -91,12 +75,45 @@ async def main() -> None:
         args.concurrency if args.concurrency is not None
         else int(os.environ.get("WORKER_CONCURRENCY", "1"))
     )
-
     worker = Worker(
         transport=transport, config=config, storage=storage,
         worker_type=worker_type, pools=pools,
         tags=tags, reject_tags=reject_tags, concurrency=concurrency,
     )
+    return transport, db, redis, worker
+
+
+async def main() -> None:
+    args = parse_args()
+
+    data_dir = os.environ.get("DATA_DIR", "/data")
+    # 默认从镜像烤入的 /app/configs 读(无状态 worker 不必显式传 CONFIG_DIR);
+    # docker/base.Dockerfile 把 configs/ 复制到 /app/configs。挂 /data 卷的部署可显式覆盖。
+    config_dir = os.environ.get("CONFIG_DIR", "/app/configs")
+    config = load_config(config_dir=config_dir, data_dir=data_dir)
+
+    gateway_url = os.environ.get("GATEWAY_URL")
+    redis_url = os.environ.get("REDIS_URL")
+    maintenance_lease = None
+    if gateway_url is None or redis_url:
+        maintenance_lease = acquire_service_lease(
+            db_path=config.db_path,
+            jobs_dir=config.jobs_dir,
+            object_bucket=os.environ.get("MINIO_BUCKET"),
+            config_root=config.prompts_dir,
+            source_roots=source_roots_from_env().values(),
+            owner="worker",
+        )
+
+    # 三种模式的资源构造都在 lease 内。初始化失败也必须显式释放,不能等进程退出。
+    try:
+        transport, db, redis, worker = await _initialize_runtime(
+            args, config, gateway_url, redis_url,
+        )
+    except BaseException:
+        if maintenance_lease is not None:
+            maintenance_lease.close()
+        raise
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -107,11 +124,19 @@ async def main() -> None:
     finally:
         # 先优雅关 transport,再关 db/redis。gateway 模式才有 httpx AsyncClient 要释放;
         # 直连 RedisTransport.close 为 no-op、不触碰 redis/db,故无双关。
-        await transport.close()
-        if db is not None:
-            db.close()
-        if redis is not None:
-            await redis.close()
+        try:
+            await transport.close()
+        finally:
+            try:
+                if db is not None:
+                    db.close()
+            finally:
+                try:
+                    if redis is not None:
+                        await redis.close()
+                finally:
+                    if maintenance_lease is not None:
+                        maintenance_lease.close()
 
 
 if __name__ == "__main__":

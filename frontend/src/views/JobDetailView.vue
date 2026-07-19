@@ -788,6 +788,13 @@ async function retryJob() {
     jobStatus.value = 'processing'
   } catch (e: any) { showToast(e?.message || '重试失败', 'error') }
 }
+async function activateJob() {
+  try {
+    await jobStore.activateJob(jobId.value)
+    showToast('已激活恢复任务', 'success')
+    jobStatus.value = 'pending'
+  } catch (e: any) { showToast(e?.message || '激活失败', 'error') }
+}
 async function continueAi() {
   try {
     const result = await jobStore.continueAi(jobId.value)
@@ -999,7 +1006,7 @@ watch(job, (j) => {
       <div v-show="tab === 'info'">
         <JobInfoPanel :job="job" :job-status="jobStatus" :source-display="sourceDisplay" :bv="bv"
           :collection-id="collectionId" :collection-name="collectionName" :gen-end="genEnd"
-          :gen-dur-sec="genDurSec" :any-running="anyRunning" @retry="retryJob" @delete="showDelete = true" />
+          :gen-dur-sec="genDurSec" :any-running="anyRunning" @activate="activateJob" @retry="retryJob" @delete="showDelete = true" />
       </div>
     </template>
 

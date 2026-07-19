@@ -25,6 +25,7 @@ def _utcnow() -> datetime:
 
 
 class JobStatus(str, enum.Enum):
+    PENDING_ACTIVATION = "pending_activation"
     PENDING = "pending"
     DOWNLOADING = "downloading"
     PROCESSING = "processing"

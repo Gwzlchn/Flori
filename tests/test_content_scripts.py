@@ -34,6 +34,17 @@ case "$1" in
   volume) exit "${FAKE_VOLUME_RC:-0}" ;;
   ps) printf '%s' "${FAKE_RUNNING_CONTAINERS:-}"; exit "${FAKE_PS_RC:-0}" ;;
 esac
+if [ -n "${FAKE_MOVE_RESULT_PARENT:-}" ]; then
+  mv "$FAKE_MOVE_RESULT_PARENT" "$FAKE_MOVED_RESULT_PARENT"
+  mkdir "$FAKE_MOVE_RESULT_PARENT"
+  printf '{"ok":true}\n' > "$FAKE_MOVED_RESULT_PARENT/$FAKE_RESULT_LEAF"
+fi
+if [ -n "${FAKE_MOVE_SOURCE_ROOT:-}" ]; then
+  mv "$FAKE_MOVE_SOURCE_ROOT" "$FAKE_MOVED_SOURCE_ROOT"
+  mkdir "$FAKE_MOVE_SOURCE_ROOT"
+  [ -z "${FAKE_SOURCE_RESULT_FILE:-}" ] || \
+    printf '{"ok":true}\n' > "$FAKE_SOURCE_RESULT_FILE"
+fi
 exit 0
 """
 
@@ -61,7 +72,9 @@ def shell(tmp_path):
             "FLORI_DATA_DIR": str(data_dir),
         })
         for key in ("MINIO_URL", "MINIO_BUCKET", "FLORI_DR_RECEIPT",
-                    "FLORI_REMOTE_WORKERS_QUIESCED", "IMAGE_TAG"):
+                    "FLORI_REMOTE_WORKERS_QUIESCED",
+                    "FLORI_ACCEPT_INCOMPLETE_PORTABLE", "FLORI_LIVE_CONFIG_ROOT",
+                    "IMAGE_TAG"):
             environment.pop(key, None)
         environment.update(env_overrides or {})
         return subprocess.run(
@@ -162,6 +175,18 @@ class TestBackupScript:
         assert "--ref latest" in call
         assert f"{shell['repo']}:/content-repo" in call
 
+    def test_result_cannot_replace_source_database(self, shell) -> None:
+        database = shell["data"] / "db" / "analyzer.db"
+        database.parent.mkdir(parents=True)
+        database.write_bytes(b"sqlite-sentinel")
+        completed = shell["run"](
+            BACKUP, "--repo", str(shell["repo"]),
+            "--result-file", str(database),
+        )
+        assert completed.returncode == 2
+        assert database.read_bytes() == b"sqlite-sentinel"
+        assert not [call for call in _calls(shell["log"]) if call.startswith("run ")]
+
     def test_verify_subcommand_skips_the_data_mount_and_backup_args(self, shell) -> None:
         completed = shell["run"](BACKUP, "--repo", str(shell["repo"]), "--verify")
         assert completed.returncode == 0, completed.stderr
@@ -194,6 +219,21 @@ class TestBackupScript:
         call = _last_run(shell["log"])
         assert "--full-rehash" in call and "--run-id run-abc" in call
 
+    def test_vendor_media_mounts_explicit_source_root_read_only(self, shell, tmp_path) -> None:
+        source = tmp_path / "nas-media"
+        source.mkdir()
+        completed = shell["run"](
+            BACKUP, "--repo", str(shell["repo"]), "--vendor-media",
+            "--source-root", f"media-a={source}",
+        )
+        assert completed.returncode == 0, completed.stderr
+        call = _last_run(shell["log"])
+        assert f"{source}:/source-roots/media-a:ro" in call
+        assert 'FLORI_SOURCE_ROOTS_JSON={"media-a":"/source-roots/media-a"}' in call
+        assert "--vendor-media" in call
+        args = assert_argv_parses(shell["log"])
+        assert args.vendor_media is True
+
     def test_invalid_run_id_is_rejected_before_starting_a_container(self, shell) -> None:
         completed = shell["run"](
             BACKUP, "--repo", str(shell["repo"]), "--run-id", "bad id!",
@@ -206,6 +246,21 @@ class TestBackupScript:
         shell["run"](BACKUP, "--repo", str(shell["repo"]), "--work-dir", str(work))
         call = _last_run(shell["log"])
         assert f"{work}:/work" in call and "--work-dir /work" in call
+
+    def test_explicit_user_config_root_is_mounted_read_only(self, shell, tmp_path) -> None:
+        prompts = tmp_path / "runtime-prompts"
+        prompts.mkdir()
+        completed = shell["run"](
+            BACKUP, "--repo", str(shell["repo"]),
+            "--user-config-dir", str(prompts),
+        )
+        assert completed.returncode == 0, completed.stderr
+        call = _last_run(shell["log"])
+        assert f"{prompts}:/user-config:ro" in call
+        assert "--user-config-dir /user-config" in call
+        assert f"--user-config-source-id {prompts}" in call
+        args = assert_argv_parses(shell["log"])
+        assert args.user_config_dir == "/user-config"
 
     def test_allow_unknown_file_is_mounted_read_only(self, shell, tmp_path) -> None:
         allowlist = tmp_path / "allow.txt"
@@ -310,8 +365,102 @@ class TestImportScript:
         assert completed.returncode == 0, completed.stderr
         call = _last_run(shell["log"])
         assert "--jobs-dir /data/import-staging/jobs" in call
+        assert "--config-root /data/import-staging/prompts" in call
         assert "--into-live" not in call
         assert f"{shell['repo']}:/content-repo:ro" in call
+
+    def test_config_root_and_source_root_reach_explicit_write_namespaces(
+        self, shell, tmp_path,
+    ) -> None:
+        source = tmp_path / "restored-media"
+        source.mkdir()
+        completed = shell["run"](
+            IMPORT, *self._base(shell),
+            "--config-root", "/data/import-staging/custom-prompts",
+            "--source-root", f"nas-main={source}",
+        )
+        assert completed.returncode == 0, completed.stderr
+        call = _last_run(shell["log"])
+        assert "--config-root /data/import-staging/custom-prompts" in call
+        assert f"{source}:/source-targets/nas-main-" in call
+        assert ":rw" in call
+        assert "--source-root nas-main=/source-targets/nas-main-" in call
+        args = assert_argv_parses(shell["log"])
+        assert args.config_root == "/data/import-staging/custom-prompts"
+        assert len(args.source_root) == 1
+        assert args.source_root[0].startswith("nas-main=/source-targets/nas-main-")
+        assert len(args.source_root_identity) == 1
+        assert args.source_root_identity[0].startswith("nas-main=")
+
+    def test_live_config_root_without_into_live_is_refused(self, shell) -> None:
+        completed = shell["run"](
+            IMPORT, *self._base(shell), "--config-root", "/data/prompts",
+        )
+        assert completed.returncode == 2
+        assert "--into-live" in completed.stderr
+
+    def test_source_root_symlink_is_refused_before_container_start(
+        self, shell, tmp_path,
+    ) -> None:
+        real = tmp_path / "real-media"
+        real.mkdir()
+        alias = tmp_path / "alias-media"
+        alias.symlink_to(real, target_is_directory=True)
+        completed = shell["run"](
+            IMPORT, *self._base(shell), "--source-root", f"nas-main={alias}",
+        )
+        assert completed.returncode == 2
+        assert "符号链接" in completed.stderr
+        assert not [call for call in _calls(shell["log"]) if call.startswith("run ")]
+
+    def test_source_root_overlapping_repository_is_refused_before_container_start(
+        self, shell,
+    ) -> None:
+        source = shell["repo"] / "media"
+        source.mkdir()
+        completed = shell["run"](
+            IMPORT, *self._base(shell), "--source-root", f"nas-main={source}",
+        )
+        assert completed.returncode == 2
+        assert "不得与便携仓库重叠" in completed.stderr
+        assert not [call for call in _calls(shell["log"]) if call.startswith("run ")]
+
+    def test_result_cannot_replace_source_root_blob(self, shell, tmp_path) -> None:
+        source = tmp_path / "source-media"
+        source.mkdir()
+        media = source / "course.mp4"
+        media.write_bytes(b"media-sentinel")
+        completed = shell["run"](
+            IMPORT, *self._base(shell),
+            "--source-root", f"nas-main={source}",
+            "--result-file", str(media),
+        )
+        assert completed.returncode == 2
+        assert media.read_bytes() == b"media-sentinel"
+        assert not [call for call in _calls(shell["log"]) if call.startswith("run ")]
+
+    def test_source_root_replaced_during_container_run_revokes_success(
+        self, shell, tmp_path,
+    ) -> None:
+        source = tmp_path / "restored-media"
+        source.mkdir()
+        moved = tmp_path / "restored-media-old"
+        result_file = tmp_path / "import-result.json"
+        completed = shell["run"](
+            IMPORT, *self._base(shell),
+            "--source-root", f"nas-main={source}",
+            "--result-file", str(result_file),
+            env_overrides={
+                "FAKE_MOVE_SOURCE_ROOT": str(source),
+                "FAKE_MOVED_SOURCE_ROOT": str(moved),
+                "FAKE_SOURCE_RESULT_FILE": str(result_file),
+            },
+        )
+        assert completed.returncode == 1
+        assert source.is_dir() and moved.is_dir()
+        result = json.loads(result_file.read_text(encoding="utf-8"))
+        assert result["ok"] is False
+        assert "宿主路径实体" in result["error"]
 
     def test_plan_and_verify_only_are_forwarded(self, shell) -> None:
         shell["run"](IMPORT, *self._base(shell), "--plan")
@@ -394,7 +543,9 @@ class TestImportScript:
         assert completed.returncode == 0, completed.stderr
         assert "--plan" in _last_run(shell["log"])
 
-    def test_into_live_refuses_while_scheduler_is_running(self, shell, tmp_path) -> None:
+    def test_into_live_does_not_guess_service_state_from_container_names(
+        self, shell, tmp_path,
+    ) -> None:
         receipt = tmp_path / "dr.json"
         receipt.write_text("{}", encoding="utf-8")
         completed = shell["run"](
@@ -406,17 +557,25 @@ class TestImportScript:
                 "FLORI_REMOTE_WORKERS_QUIESCED": "1",
             },
         )
-        assert completed.returncode == 1
-        assert "flori-scheduler" in completed.stderr
+        assert completed.returncode == 0, completed.stderr
+        assert not [call for call in _calls(shell["log"]) if call.startswith("ps ")]
+        assert "python -m shared.content_import" in _last_run(shell["log"])
 
-    def test_into_live_fails_closed_when_docker_query_fails(self, shell) -> None:
-        """旧实现的 || true 把 daemon 不可达吞成"没有 worker 在跑",直接放行。"""
+    def test_into_live_service_gate_is_the_python_maintenance_lock(
+        self, shell, tmp_path,
+    ) -> None:
+        receipt = tmp_path / "dr.json"
+        receipt.write_text("{}", encoding="utf-8")
         completed = shell["run"](
             IMPORT, "--repo", str(shell["repo"]), "--db", "/data/db/analyzer.db",
-            "--into-live", env_overrides={"FAKE_PS_RC": "1"},
+            "--into-live", env_overrides={
+                "FAKE_PS_RC": "1",
+                "FLORI_REMOTE_WORKERS_QUIESCED": "1",
+                "FLORI_DR_RECEIPT": str(receipt),
+            },
         )
-        assert completed.returncode == 1
-        assert "quiesce" in completed.stderr
+        assert completed.returncode == 0, completed.stderr
+        assert not [call for call in _calls(shell["log"]) if call.startswith("ps ")]
 
     def test_into_live_requires_remote_worker_attestation(self, shell) -> None:
         completed = shell["run"](
@@ -452,6 +611,9 @@ class TestImportScript:
         assert completed.returncode == 0, completed.stderr
         call = _last_run(shell["log"])
         assert f"{tmp_path}:/dr-receipt:ro" in call
+        assert f"{REPO / 'scripts/dr_snapshot.py'}:/tool/dr_snapshot.py:ro" in call
+        assert f"{REPO / 'shared/migrations'}:/tool/migrations:ro" in call
+        assert "FLORI_DR_VALIDATOR=/tool/dr_snapshot.py" in call
         assert "--dr-receipt /dr-receipt/dr.json" in call
         assert "--into-live" in call
         assert "--jobs-dir /data/jobs" in call
@@ -512,21 +674,31 @@ class TestShellArgvMatchesArgparse:
     def test_import_every_optional_flag_parses(self, shell, tmp_path) -> None:
         receipt = tmp_path / "dr.json"
         receipt.write_text("{}", encoding="utf-8")
+        source = tmp_path / "source-target"
+        source.mkdir()
         completed = shell["run"](
             IMPORT, "--repo", str(shell["repo"]), "--db", "/data/db/analyzer.db",
             "--into-live", "--target", "merge", "--target-generation", "gen-x1",
             "--snapshot", "sha256:" + "a" * 64, "--apply-user-state",
             "--skip-index-rebuild", "--allow-partial",
+            "--config-root", "/data/prompts",
+            "--source-root", f"nas-main={source}",
+            "--allow-incomplete-portable-snapshot",
             "--result-file", str(tmp_path / "r.json"),
             env_overrides={
                 "FLORI_REMOTE_WORKERS_QUIESCED": "1",
                 "FLORI_DR_RECEIPT": str(receipt),
+                "FLORI_ACCEPT_INCOMPLETE_PORTABLE": "1",
             },
         )
         assert completed.returncode == 0, completed.stderr
         args = assert_argv_parses(shell["log"])
         assert args.into_live and args.target == "merge"
         assert args.apply_user_state and args.skip_index_rebuild and args.allow_partial
+        assert args.config_root == "/data/prompts"
+        assert len(args.source_root) == 1
+        assert args.source_root[0].startswith("nas-main=/source-targets/nas-main-")
+        assert args.allow_incomplete_portable_snapshot
 
     def test_import_plan_argv_parses(self, shell) -> None:
         completed = shell["run"](
@@ -597,3 +769,151 @@ class TestUsageEarlyExitWritesResult:
         completed = shell["run"](script, "--result-file", str(result), "--help")
         assert completed.returncode == 0
         assert not result.exists()
+
+    @pytest.mark.parametrize("script", SCRIPTS, ids=lambda path: path.name)
+    def test_result_parent_must_be_precreated(self, shell, tmp_path, script) -> None:
+        result = tmp_path / "missing-parent" / "r.json"
+        if script == BACKUP:
+            args = ["--repo", str(shell["repo"]), "--result-file", str(result)]
+        elif script == IMPORT:
+            args = [
+                "--repo", str(shell["repo"]), "--db", "/data/import/new.db",
+                "--result-file", str(result),
+            ]
+        else:
+            args = [
+                "--repo", str(shell["repo"]), "--mark", "--result-file", str(result),
+            ]
+        completed = shell["run"](script, *args)
+        assert completed.returncode != 0
+        assert "预先创建" in completed.stderr
+        assert not result.exists()
+        assert not [call for call in _calls(shell["log"]) if call.startswith("run ")]
+
+    @pytest.mark.parametrize("script", SCRIPTS, ids=lambda path: path.name)
+    def test_result_file_inside_repository_is_rejected_on_host(
+        self, shell, script,
+    ) -> None:
+        result = shell["repo"] / "result.json"
+        completed = shell["run"](
+            script, "--repo", str(shell["repo"]),
+            "--result-file", str(result), "--no-such-flag",
+        )
+        assert completed.returncode == 2
+        assert not result.exists()
+        assert "仓库之外" in completed.stderr
+        assert not _calls(shell["log"])
+
+    @pytest.mark.parametrize("script", SCRIPTS, ids=lambda path: path.name)
+    def test_result_directory_symlink_alias_to_repository_is_rejected(
+        self, shell, tmp_path, script,
+    ) -> None:
+        alias = tmp_path / "repo-alias"
+        alias.symlink_to(shell["repo"], target_is_directory=True)
+        completed = shell["run"](
+            script, "--repo", str(shell["repo"]),
+            "--result-file", str(alias / "result.json"), "--no-such-flag",
+        )
+        assert completed.returncode == 2
+        assert not (shell["repo"] / "result.json").exists()
+        assert not _calls(shell["log"])
+
+    @pytest.mark.parametrize("script", SCRIPTS, ids=lambda path: path.name)
+    def test_result_directory_moved_into_repository_during_container_is_cleaned(
+        self, shell, tmp_path, script,
+    ) -> None:
+        result_parent = tmp_path / f"{script.stem}-race"
+        result_parent.mkdir()
+        moved = shell["repo"] / f"stolen-{script.stem}"
+        result = result_parent / "result.json"
+        environment = {
+            "FAKE_MOVE_RESULT_PARENT": str(result_parent),
+            "FAKE_MOVED_RESULT_PARENT": str(moved),
+            "FAKE_RESULT_LEAF": result.name,
+        }
+        if script == BACKUP:
+            args = ["--repo", str(shell["repo"]), "--result-file", str(result)]
+        elif script == IMPORT:
+            args = [
+                "--repo", str(shell["repo"]), "--db", "/data/import/new.db",
+                "--result-file", str(result),
+            ]
+        else:
+            args = [
+                "--repo", str(shell["repo"]), "--mark", "--result-file", str(result),
+            ]
+        completed = shell["run"](script, *args, env_overrides=environment)
+        assert completed.returncode == 74
+        assert "已撤销结果" in completed.stderr
+        assert not (moved / result.name).exists()
+        assert not result.exists()
+
+    def test_backup_result_directory_moved_into_data_during_container_is_cleaned(
+        self, shell, tmp_path,
+    ) -> None:
+        result_parent = tmp_path / "backup-data-race"
+        result_parent.mkdir()
+        moved = shell["data"] / "stolen-results"
+        result = result_parent / "result.json"
+        completed = shell["run"](
+            BACKUP, "--repo", str(shell["repo"]), "--result-file", str(result),
+            env_overrides={
+                "FAKE_MOVE_RESULT_PARENT": str(result_parent),
+                "FAKE_MOVED_RESULT_PARENT": str(moved),
+                "FAKE_RESULT_LEAF": result.name,
+            },
+        )
+        assert completed.returncode == 74
+        assert "受保护数据树" in completed.stderr
+        assert not (moved / result.name).exists()
+
+    def test_import_result_directory_moved_into_source_during_container_is_cleaned(
+        self, shell, tmp_path,
+    ) -> None:
+        source = tmp_path / "source-target"
+        source.mkdir()
+        result_parent = tmp_path / "import-source-race"
+        result_parent.mkdir()
+        moved = source / "stolen-results"
+        result = result_parent / "result.json"
+        completed = shell["run"](
+            IMPORT,
+            "--repo", str(shell["repo"]),
+            "--db", "/data/import/new.db",
+            "--source-root", f"nas-main={source}",
+            "--result-file", str(result),
+            env_overrides={
+                "FAKE_MOVE_RESULT_PARENT": str(result_parent),
+                "FAKE_MOVED_RESULT_PARENT": str(moved),
+                "FAKE_RESULT_LEAF": result.name,
+            },
+        )
+        assert completed.returncode == 74
+        assert "受保护数据树" in completed.stderr
+        assert not (moved / result.name).exists()
+
+    @pytest.mark.parametrize("script", SCRIPTS, ids=lambda path: path.name)
+    def test_multiline_special_characters_are_valid_json(
+        self, shell, tmp_path, script,
+    ) -> None:
+        result = tmp_path / f"{script.stem}.json"
+        missing = tmp_path / 'missing\n"quoted"\\path\tend'
+        if script == BACKUP:
+            args = [
+                "--repo", str(shell["repo"]), "--data-dir", str(missing),
+                "--result-file", str(result),
+            ]
+        elif script == IMPORT:
+            args = [
+                "--repo", str(missing), "--db", "/data/import/new.db",
+                "--result-file", str(result),
+            ]
+        else:
+            args = [
+                "--repo", str(missing), "--mark", "--result-file", str(result),
+            ]
+        completed = shell["run"](script, *args)
+        assert completed.returncode != 0
+        payload = json.loads(result.read_text(encoding="utf-8"))
+        assert payload["ok"] is False
+        assert "missing\n" in payload["error"]

@@ -17,16 +17,16 @@
 #   scripts/content-gc.sh --repo <dir> --break-lock
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/content-result.sh"
+
 IMAGE="${FLORI_CONTENT_GC_IMAGE:-flori:${IMAGE_TAG:-uptest}}"
 
 # 早退也必须留下机器可读结果:自动化按 --result-file 判生死,shell 直接 exit
 # 会让调用方读到上一次的陈旧 JSON 或什么都读不到。参数错(usage)同样受这条约束,
 # 所以两条早退路径共用它。
 write_failure_result() {
-  [ -n "$RESULT_FILE" ] || return 0
-  mkdir -p "$(dirname "$RESULT_FILE")"
-  printf '{\n  "error": "%s",\n  "ok": false\n}\n' \
-    "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')" > "$RESULT_FILE"
+  content_write_failure_result "" "$1"
 }
 
 # 只打印文件头的注释块;写死行号会把 set -euo pipefail / IMAGE= 当帮助printf 出来。
@@ -47,12 +47,21 @@ fail() {
 
 # --result-file 先于主解析扫一遍:参数错发生在解析途中,等轮到它才赋值就太晚了。
 RESULT_FILE=""
+PRESCAN_REPO=""
 for _index in $(seq 1 $#); do
   if [ "${!_index}" = "--result-file" ]; then
     _next=$((_index + 1))
     [ "$_next" -le $# ] && RESULT_FILE="${!_next}"
   fi
+  if [ "${!_index}" = "--repo" ]; then
+    _next=$((_index + 1))
+    [ "$_next" -le $# ] && PRESCAN_REPO="${!_next}"
+  fi
 done
+if ! content_validate_result_boundary "$PRESCAN_REPO" "$RESULT_FILE"; then
+  unsafe_result="$RESULT_FILE"; RESULT_FILE=""
+  fail 2 "--result-file 必须在便携仓库之外且路径不能含符号链接: $unsafe_result"
+fi
 
 REPO_DIR=""
 MODE=""
@@ -99,10 +108,14 @@ fi
 
 DOCKER_ARGS=(run --rm -v "$MOUNT")
 RESULT_ARGS=()
+RESULT_ROOT_IDENTITY=""
 if [ -n "$RESULT_FILE" ]; then
-  mkdir -p "$(dirname "$RESULT_FILE")"
+  [ -d "$(dirname "$RESULT_FILE")" ] || fail 2 \
+    "result-file父目录必须由操作者预先创建: $(dirname "$RESULT_FILE")"
   RESULT_DIR="$(cd "$(dirname "$RESULT_FILE")" && pwd)"
+  RESULT_ROOT_IDENTITY="$(stat -Lc '%d:%i' -- "$RESULT_DIR")"
   DOCKER_ARGS+=(-v "$RESULT_DIR:/result")
+  DOCKER_ARGS+=(-e "FLORI_RESULT_ROOT_IDENTITY=$RESULT_ROOT_IDENTITY")
   RESULT_ARGS=(--result-file "/result/$(basename "$RESULT_FILE")")
 fi
 
@@ -112,4 +125,11 @@ CMD=(python -m shared.content_gc --repo /content-repo "--$MODE" "${RESULT_ARGS[@
 [ "$APPLY" -eq 0 ] || CMD+=(--apply)
 [ "$ALLOW_NO_ANCHOR" -eq 0 ] || CMD+=(--allow-no-anchor)
 
-exec docker "${DOCKER_ARGS[@]}" "$IMAGE" "${CMD[@]}"
+if content_run_with_result_guard \
+    "$REPO_DIR" "$RESULT_FILE" "$RESULT_ROOT_IDENTITY" 0 \
+    docker "${DOCKER_ARGS[@]}" "$IMAGE" "${CMD[@]}"; then
+  exit 0
+else
+  status=$?
+  exit "$status"
+fi

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import asyncio
 import fnmatch
+import hashlib
 import json
 import re
 
@@ -498,13 +499,18 @@ class EffectDispatcher:
         采集源:优先 output/concepts.json,回退 output/review.json。"""
         job = await asyncio.to_thread(self.owner.db.get_job, job_id)
         domain = (job.domain if job else "") or "general"
+        expected_projection_source = await asyncio.to_thread(
+            self.owner.db.get_concept_occurrence_projection_source, job_id,
+        )
 
-        async def reconcile_empty(reason: str) -> None:
+        async def reconcile_empty(reason: str, source_digest: str) -> None:
             await asyncio.to_thread(
                 self.owner.db.replace_job_concept_occurrences,
                 domain=domain,
                 job_id=job_id,
                 mapping={},
+                projection_source_digest=source_digest,
+                expected_projection_source_digest=expected_projection_source,
             )
             logger.info(
                 "concept_occurrences_reconciled",
@@ -513,41 +519,15 @@ class EffectDispatcher:
                 reason=reason,
             )
 
-        data = await self.owner.storage.read_file(job_id, "output/concepts.json")
-        from_review = False
-        if not data:
-            data = await self.owner._read_verification_artifact(
-                job_id, "output/review.json",
-            )
-            from_review = bool(data)
-        if not data:
-            await reconcile_empty("source_missing")
+        review, from_review, source_error, source_digest = await self._load_concept_source(
+            job_id, job,
+        )
+        if review is None:
+            await reconcile_empty(source_error or "source_invalid", source_digest)
             return
-        try:
-            review = json.loads(data.decode("utf-8", errors="replace"))
-        except (json.JSONDecodeError, ValueError):
-            await reconcile_empty("source_invalid")
-            return
-        if not isinstance(review, dict):
-            await reconcile_empty("source_invalid")
-            return
-        # 旧版/抢救/截断评审只供诊断,不能沉淀术语或关系边。
-        if from_review:
-            async def reader(rel: str) -> bytes | None:
-                return await self.owner._read_verification_artifact(job_id, rel)
-
-            review = await verify_persisted_review(
-                review, job_id=job_id, pipeline=job.pipeline if job else None,
-                read_file=reader,
-            )
-            if review.get("review_reliable") is not True:
-                logger.info("glossary_review_rejected", job_id=job_id,
-                            reasons=review.get("reliability_reasons") or ["legacy_schema"])
-                await reconcile_empty("review_unreliable")
-                return
         key_terms = review.get("key_terms") or []
         if not isinstance(key_terms, list):
-            await reconcile_empty("key_terms_invalid")
+            await reconcile_empty("key_terms_invalid", source_digest)
             return
         content_type = job.content_type if job else ""
         collected = 0
@@ -580,6 +560,8 @@ class EffectDispatcher:
             job_id,
             key_terms,
             None if from_review else review.get("evidence_note_type"),
+            projection_source_digest=source_digest,
+            expected_projection_source_digest=expected_projection_source,
         )
         self.owner._schedule_concept_resynthesis(domain, synthesis_candidates)
         logger.info("glossary_collected", job_id=job_id, count=collected, edges=edges)
@@ -588,6 +570,119 @@ class EffectDispatcher:
             job_id=job_id,
             count=occurrences,
         )
+
+    async def _load_concept_source(
+        self, job_id: str, job: Job | None,
+    ) -> tuple[dict | None, bool, str | None, str]:
+        """读取并验证概念来源;术语采集与纯 occurrence 重放共用同一拒绝边界。"""
+        data = await self.owner.storage.read_file(job_id, "output/concepts.json")
+        from_review = False
+        source_kind = "concepts"
+        if not data:
+            data = await self.owner._read_verification_artifact(
+                job_id, "output/review.json",
+            )
+            from_review = bool(data)
+            source_kind = "review"
+        if not data:
+            digest = "sha256:" + hashlib.sha256(b"source_missing").hexdigest()
+            return None, from_review, "source_missing", digest
+        source_material = source_kind.encode("utf-8") + b"\0" + data
+        source_digest = "sha256:" + hashlib.sha256(source_material).hexdigest()
+        try:
+            review = json.loads(data.decode("utf-8", errors="replace"))
+        except (json.JSONDecodeError, ValueError):
+            return None, from_review, "source_invalid", source_digest
+        if not isinstance(review, dict):
+            return None, from_review, "source_invalid", source_digest
+        if from_review:
+            async def reader(rel: str) -> bytes | None:
+                return await self.owner._read_verification_artifact(job_id, rel)
+
+            review = await verify_persisted_review(
+                review,
+                job_id=job_id,
+                pipeline=job.pipeline if job else None,
+                read_file=reader,
+            )
+            source_digest = "sha256:" + hashlib.sha256(
+                source_material + b"\0" + json.dumps(
+                    review, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if review.get("review_reliable") is not True:
+                logger.info(
+                    "glossary_review_rejected",
+                    job_id=job_id,
+                    reasons=review.get("reliability_reasons") or ["legacy_schema"],
+                )
+                return None, from_review, "review_unreliable", source_digest
+        return review, from_review, None, source_digest
+
+    async def reconcile_concept_occurrences_only(self, job_id: str) -> int:
+        """从已恢复产物重放 occurrence 投影;不新增术语、不触发 AI 综合。"""
+        job = await asyncio.to_thread(self.owner.db.get_job, job_id)
+        domain = (job.domain if job else "") or "general"
+        expected_projection_source = await asyncio.to_thread(
+            self.owner.db.get_concept_occurrence_projection_source, job_id,
+        )
+        review, from_review, source_error, source_digest = await self._load_concept_source(
+            job_id, job,
+        )
+        if expected_projection_source == source_digest:
+            return 0
+        if review is None:
+            await asyncio.to_thread(
+                self.owner.db.replace_job_concept_occurrences,
+                domain=domain,
+                job_id=job_id,
+                mapping={},
+                projection_source_digest=source_digest,
+                expected_projection_source_digest=expected_projection_source,
+            )
+            logger.info(
+                "concept_occurrences_reconciled",
+                job_id=job_id,
+                count=0,
+                reason=source_error,
+                mode="projection_replay",
+            )
+            return 0
+        key_terms = review.get("key_terms") or []
+        if not isinstance(key_terms, list):
+            await asyncio.to_thread(
+                self.owner.db.replace_job_concept_occurrences,
+                domain=domain,
+                job_id=job_id,
+                mapping={},
+                projection_source_digest=source_digest,
+                expected_projection_source_digest=expected_projection_source,
+            )
+            logger.info(
+                "concept_occurrences_reconciled",
+                job_id=job_id,
+                count=0,
+                reason="key_terms_invalid",
+                mode="projection_replay",
+            )
+            return 0
+        occurrences, _ = await asyncio.to_thread(
+            self.owner._replace_concept_occurrences,
+            domain,
+            job_id,
+            key_terms,
+            None if from_review else review.get("evidence_note_type"),
+            projection_source_digest=source_digest,
+            expected_projection_source_digest=expected_projection_source,
+        )
+        logger.info(
+            "concept_occurrences_reconciled",
+            job_id=job_id,
+            count=occurrences,
+            mode="projection_replay",
+        )
+        return occurrences
 
     async def _read_verification_artifact(
         self, job_id: str, rel: str,
@@ -628,6 +723,9 @@ class EffectDispatcher:
         job_id: str,
         key_terms: list,
         evidence_note_type: object,
+        *,
+        projection_source_digest: str | None = None,
+        expected_projection_source_digest: str | None = None,
     ) -> tuple[int, list[tuple[str, str, int]]]:
         """把 producer 的来源段引用映射为当前 canonical IDs 后全量对账。"""
         from shared.concepts import resolve
@@ -699,6 +797,8 @@ class EffectDispatcher:
             domain=domain,
             job_id=job_id,
             mapping=mapping,
+            projection_source_digest=projection_source_digest,
+            expected_projection_source_digest=expected_projection_source_digest,
         )
         rows_by_term = {row["term"]: row for row in glossary_rows}
         candidates: list[tuple[str, str, int]] = []

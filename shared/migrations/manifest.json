@@ -1,7 +1,7 @@
 {
   "format": "flori-sqlite-migrations",
   "minimum_supported_version": 0,
-  "current_version": 8,
+  "current_version": 9,
   "ledger_version": 2,
   "migrations": [
     {
@@ -43,6 +43,11 @@
       "version": 8,
       "name": "multipart-video-jobs",
       "checksum": "ca469d2b824ee18de78f1a188f5f016e8c66a7b5b0b9e24662ec52ae47136cdc"
+    },
+    {
+      "version": 9,
+      "name": "recovery-projection-ledgers",
+      "checksum": "8f77086b96d05c137876b885727fd0508476f3c02c799cfab8a857c33853510c"
     }
   ]
 }

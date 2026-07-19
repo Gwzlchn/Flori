@@ -7,7 +7,7 @@ import BiliLogin from '../components/settings/BiliLogin.vue'
 import CookieUpload from '../components/auth/CookieUpload.vue'
 import McpConnectCard from '../components/system/McpConnectCard.vue'
 import type { AuthStatus } from '../types'
-import { Settings, QrCode, Server, Activity, Info, BookOpen, ChevronRight, Youtube, FileCode2 } from 'lucide-vue-next'
+import { Settings, QrCode, Server, Activity, Info, BookOpen, ChevronRight, Youtube, FileCode2, DatabaseBackup } from 'lucide-vue-next'
 
 const api = useApi()
 
@@ -91,6 +91,14 @@ onMounted(loadAuth)
     <!-- 运维 -->
     <div class="card pad" style="margin-bottom:18px">
       <div class="card-h"><Server :size="15" />运维</div>
+      <div class="row" style="cursor:pointer" @click="$router.push('/settings/recovery')">
+        <span class="type-pill" style="background:var(--brand-50);color:var(--brand-600)"><DatabaseBackup :size="17" /></span>
+        <div class="body">
+          <div class="title">备份与还原</div>
+          <div class="meta"><span>增量保存有效产物与视频,清库前生成安全恢复交接</span></div>
+        </div>
+        <ChevronRight :size="16" class="dim" />
+      </div>
       <div class="row" style="cursor:pointer" @click="$router.push('/system?from=settings')">
         <span class="type-pill" style="background:var(--mut-bg);color:var(--ink-600)"><Activity :size="17" /></span>
         <div class="body">

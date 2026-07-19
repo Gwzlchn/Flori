@@ -8,7 +8,7 @@ const props = defineProps<{ status: string }>()
 
 // 状态 → 徽章配色类(视觉,本组件专属;文案见 utils/status)。
 const COLOR: Record<string, string> = {
-  pending: 'b-mut', downloading: 'b-info', processing: 'b-run', done: 'b-ok', failed: 'b-bad',
+  pending_activation: 'b-warn', pending: 'b-mut', downloading: 'b-info', processing: 'b-run', done: 'b-ok', failed: 'b-bad',
   waiting: 'b-mut', ready: 'b-mut', running: 'b-run', skipped: 'b-mut',
   idle: 'b-ok', busy: 'b-info',
   'online-idle': 'b-ok', 'online-busy': 'b-info', paused: 'b-warn', offline: 'b-mut', stale: 'b-bad',

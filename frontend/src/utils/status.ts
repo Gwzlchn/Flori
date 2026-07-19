@@ -2,7 +2,7 @@
 // 视觉配色(badge/pill 类)仍由各组件按自身样式体系决定;这里只管文案的单一来源。
 export const STATUS_LABELS: Record<string, string> = {
   // job
-  pending: '等待', downloading: '下载中', processing: '处理中',
+  pending_activation: '待激活', pending: '等待', downloading: '下载中', processing: '处理中',
   done: '已完成', failed: '失败',
   // step
   waiting: '等待', ready: '就绪', running: '运行中', skipped: '跳过',

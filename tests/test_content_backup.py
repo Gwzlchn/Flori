@@ -84,11 +84,15 @@ def insert_job(
 def insert_part(
     env, part_id: str, job_id: str, index: int, *,
     source_url: str | None = None, source_ref: str | None = None,
+    source_digest: str | None = None, size_bytes: int | None = None,
 ):
     db_exec(env.db, (
         "INSERT INTO job_parts (id, job_id, part_index, source_url, source_ref,"
-        " created_at, updated_at) VALUES (?,?,?,?,?,?,?)"
-    ), (part_id, job_id, index, source_url, source_ref, T_CREATED, T_CREATED))
+        " source_digest, size_bytes, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)"
+    ), (
+        part_id, job_id, index, source_url, source_ref, source_digest, size_bytes,
+        T_CREATED, T_CREATED,
+    ))
     env.parts.setdefault(job_id, []).append((index, part_id))
 
 
@@ -260,6 +264,28 @@ def count_files(root: Path, subdir: str) -> int:
 
 
 class TestFullBackup:
+    async def test_tmp_spool_symlink_cannot_truncate_external_target(self, env, monkeypatch):
+        await seed_video_job(env)
+        target = env.tmp / "do-not-touch"
+        target.write_bytes(b"protected")
+        spool_nonce = "f" * 32
+        real_clean = env.repo.clean_tmp
+        real_token_hex = content_backup.secrets.token_hex
+
+        def clean_then_occupy() -> int:
+            removed = real_clean()
+            (env.repo.tmp_dir / f"spool-{spool_nonce}").symlink_to(target)
+            return removed
+
+        monkeypatch.setattr(env.repo, "clean_tmp", clean_then_occupy)
+        monkeypatch.setattr(
+            content_backup.secrets, "token_hex",
+            lambda size: spool_nonce if size == 16 else real_token_hex(size),
+        )
+        with pytest.raises(BackupError, match="occupied before exclusive create"):
+            await do_backup(env)
+        assert target.read_bytes() == b"protected"
+
     async def test_backup_and_repeat_zero_growth(self, env):
         insert_collection(env, "col_1")
         await seed_video_job(env)
@@ -570,6 +596,9 @@ class TestSelectionGates:
         result = await do_backup(env, "run_allow", allow_unknown=True)
         assert result.stats["unknown_paths"] == 1
         assert result.report["jobs"]["job_alpha"]["unknown_paths"] == ["notes/orphan.md"]
+        snapshot = env.repo.get_snapshot(result.snapshot_digest)
+        assert snapshot["completeness"]["portable_ready"] is False
+        assert "unknown_artifacts_omitted" in snapshot["completeness"]["readiness_reasons"]
 
     async def test_alien_part_dir_is_unknown(self, env):
         await seed_video_job(env)
@@ -636,6 +665,22 @@ class TestSelectionGates:
 
 
 class TestRedactionAndExternalSources:
+    async def test_file_urls_are_omitted_from_portable_records(self, env):
+        host_path = str(env.tmp / "private" / "video.mp4")
+        insert_job(env, "job_file", url=f"file://{host_path}")
+        insert_part(env, "pt_file", "job_file", 1, source_url=f"file://{host_path}")
+        result = await do_backup(env)
+        body = env.repo.get_snapshot(result.snapshot_digest)
+        job = next(
+            env.repo.get_record("job_core", digest)
+            for digest in body["records"]["jobs"]
+            if env.repo.has_record("job_core", digest)
+        )
+        part = env.repo.get_record("part_core", body["records"]["parts"][0])
+        assert "url" not in job
+        assert "source_url" not in part
+        assert host_path not in json.dumps(body, ensure_ascii=False)
+
     async def test_urls_redacted_in_records(self, env):
         job_id = "job_url"
         insert_job(
@@ -671,6 +716,31 @@ class TestRedactionAndExternalSources:
         assert result.stats["external_source_parts"] == 1
         assert result.stats["nas_source_roots"] == ["media-a"]
         assert result.stats["blobs_created"] == 1  # 只有 metadata blob
+        snapshot = env.repo.get_snapshot(result.snapshot_digest)
+        assert snapshot["completeness"]["media_self_contained"] is False
+        assert snapshot["completeness"]["external_media_roots"] == ["media-a"]
+
+    async def test_vendor_media_stores_verified_source_in_cas(self, env, monkeypatch):
+        source_root = env.tmp / "source-media"
+        source = source_root / "videos" / "lecture.mp4"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(MEDIA_ONE)
+        monkeypatch.setenv(
+            "FLORI_SOURCE_ROOTS_JSON", json.dumps({"media-a": str(source_root)}),
+        )
+        insert_job(env, "job_vendor")
+        insert_part(
+            env, "pt_vendor", "job_vendor", 1,
+            source_ref="nas://media-a/videos/lecture.mp4",
+            source_digest=sha(MEDIA_ONE), size_bytes=len(MEDIA_ONE),
+        )
+        result = await do_backup(env, vendor_media=True)
+        snapshot = env.repo.get_snapshot(result.snapshot_digest)
+        part = env.repo.get_record("part_core", snapshot["records"]["parts"][0])
+        assert part["source_blob"] == sha(MEDIA_ONE)
+        assert env.repo.read_blob(part["source_blob"]) == MEDIA_ONE
+        assert snapshot["completeness"]["media_self_contained"] is True
+        assert snapshot["completeness"]["external_media_roots"] == []
 
     async def test_invalid_source_ref_rejected(self, env):
         job_id = "job_badref"
@@ -733,6 +803,12 @@ class TestPartialSnapshots:
 
 
 class TestRunIdRecovery:
+    async def test_successful_run_id_is_bound_to_canonical_request(self, env):
+        await seed_video_job(env)
+        await do_backup(env, "run_bound", ref="named")
+        with pytest.raises(BackupError, match="identical canonical request"):
+            await do_backup(env, "run_bound", ref="named", full_rehash=True)
+
     async def test_reused_run_requires_ref_in_place(self, env):
         """B1 复现:上次成功但 ref 没落位时,同 run_id 重跑必须补设而非空转。"""
         await seed_video_job(env)
@@ -793,6 +869,22 @@ class TestIncrementalRehash:
         assert second.stats["step_results_incremental"] == 1
         assert second.stats["blobs_created"] == 1
         assert env.repo.has_blob(sha(MEDIA_ONE))
+
+    async def test_incremental_still_rehashes_every_text_output(self, env):
+        insert_job(env, "job_text", content_type="document", document_kind="article")
+        insert_step(
+            env, "job_text", "job", "02_parse", "done",
+            started_at=T_STARTED, finished_at=T_FINISHED,
+        )
+        text = b"# durable note\ntext is rescanned on every backup\n"
+        await commit_step(
+            env, "job_text", "job", "02_parse", {"output/note.md": text},
+        )
+        first = await do_backup(env, "run_text_1")
+        second = await do_backup(env, "run_text_2")
+        assert first.stats["blob_bytes_rehashed"] == len(text)
+        assert second.stats["step_results_incremental"] == 1
+        assert second.stats["blob_bytes_rehashed"] == len(text)
 
 
 class TestRelationRecords:
@@ -910,33 +1002,80 @@ class TestTimestampsAndRedaction:
 
 
 class TestReportingExtras:
+    async def test_global_user_configs_are_collected_from_explicit_root(self, env):
+        root = env.tmp / "prompts"
+        (root / "profiles").mkdir(parents=True)
+        (root / "styles").mkdir()
+        (root / "templates").mkdir()
+        (root / "hot.md").write_text("当前 prompt\n", encoding="utf-8")
+        (root / "profiles" / "fast.yaml").write_text("model: fast\n", encoding="utf-8")
+        result = await do_backup(env, user_config_dir=root)
+        snapshot = env.repo.get_snapshot(result.snapshot_digest)
+        records = [
+            env.repo.get_record("user_config", digest)
+            for digest in snapshot["records"]["business_ledgers"]
+            if env.repo.has_record("user_config", digest)
+        ]
+        assert {(item["path"], item["kind"]) for item in records} == {
+            ("prompts/hot.md", "prompts"),
+            ("prompts/profiles/fast.yaml", "profiles"),
+        }
+        assert snapshot["completeness"]["user_config_complete"] is True
+
+    async def test_unknown_user_config_path_fails_closed(self, env):
+        root = env.tmp / "prompts"
+        root.mkdir()
+        (root / "credentials.json").write_text("{}", encoding="utf-8")
+        with pytest.raises(BackupError, match="unknown user config path"):
+            await do_backup(env, user_config_dir=root)
+
     async def test_job_json_ai_override_flagged(self, env):
-        """C7:job.json 携带 AI 覆盖配置的 Job 必须显名(其 blob 收纳属 P2b)。"""
+        """job.json 只归档 AI 配置子集,不复制整个 runtime sidecar。"""
         part_ids = await seed_video_job(env)
         await write_job_json(
-            env, "job_alpha", part_ids, ai_override={"provider": "claude"},
+            env, "job_alpha", part_ids,
+            ai_overrides={"05_vision": "claude"},
+            prompt_overrides={"06_summary": {"version": 3, "content": "hot"}},
         )
         result = await do_backup(env)
-        assert result.report["jobs_with_job_json_ai_override"] == ["job_alpha"]
+        assert result.report["jobs_with_job_ai_config"] == ["job_alpha"]
+        snapshot = env.repo.get_snapshot(result.snapshot_digest)
+        configs = [
+            env.repo.get_record("user_config", digest)
+            for digest in snapshot["records"]["business_ledgers"]
+            if env.repo.has_record("user_config", digest)
+        ]
+        config = next(item for item in configs if item["kind"] == "job_ai_config")
+        assert config["path"] == "jobs/job_alpha/ai-config.json"
+        assert json.loads(env.repo.read_blob(config["blob"])) == {
+            "ai_overrides": {"05_vision": "claude"},
+            "prompt_overrides": {
+                "06_summary": {"content": "hot", "version": 3},
+            },
+        }
 
-    async def test_oversized_text_blob_records_a_truncated_scan(self, env, monkeypatch):
-        """超过扫描缓冲的 blob 只看了个开头,报告必须说出来,不能与"全扫过"同形。"""
-        monkeypatch.setattr(content_backup, "MAX_BLOB_SCAN_BYTES", 64)
+    async def test_secret_split_across_storage_chunk_is_rejected(self, env):
+        """签名参数跨 1 MiB chunk 边界也不能逃过完整扫描。"""
         job_id = "job_big"
         insert_job(env, job_id, content_type="document", document_kind="article")
         insert_step(
             env, job_id, "job", "01_download", "done",
             started_at=T_STARTED, finished_at=T_FINISHED,
         )
-        await commit_step(
-            env, job_id, "job", "01_download", {"output/notes.md": b"n" * 500},
-        )
-        result = await do_backup(env)
+        prefix = b"n" * (1024 * 1024 - len(b"https://x.example/v?sig="))
+        data = prefix + b"https://x.example/v?sig=" + b"abcdef123456"
+        await commit_step(env, job_id, "job", "01_download", {"output/notes.md": data})
+        with pytest.raises(BackupError, match="contains a secret-shaped value"):
+            await do_backup(env)
 
-        assert result.report["blob_scans_truncated"] == [
-            {"path": f"{job_id}:output/notes.md", "size_bytes": 500, "scanned_bytes": 64},
-        ]
-        assert result.stats["blob_scans_truncated"] == 1
+    async def test_secret_after_four_megabytes_is_rejected(self, env):
+        job_id = "job_tail"
+        insert_job(env, job_id, content_type="document", document_kind="article")
+        insert_step(env, job_id, "job", "01_download", "done")
+        data = b"n" * (4 * 1024 * 1024 + 37) + b"?auth_token=abcdef123456"
+        await commit_step(env, job_id, "job", "01_download", {"output/notes.md": data})
+        with pytest.raises(BackupError, match="contains a secret-shaped value"):
+            await do_backup(env)
 
     async def test_fully_scanned_blob_is_not_reported_as_truncated(self, env):
         await seed_video_job(env)
@@ -954,7 +1093,13 @@ class TestReportingExtras:
         allowlist = env.tmp / "approved.txt"
         allowlist.write_text("job_alpha:notes/a.md\njob_alpha:notes/b.md\n")
         result = await do_backup(env, "run_ok", unknown_allowlist=allowlist)
-        assert result.stats["unknown_paths"] == 0
+        assert result.stats["unknown_paths"] == 2
+        assert result.report["jobs"]["job_alpha"]["approved_unknown_paths"] == [
+            "notes/a.md", "notes/b.md",
+        ]
+        snapshot = env.repo.get_snapshot(result.snapshot_digest)
+        assert snapshot["completeness"]["portable_ready"] is False
+        assert "unknown_artifacts_omitted" in snapshot["completeness"]["readiness_reasons"]
 
     async def test_allowlist_entry_is_exact_match(self, env):
         await seed_video_job(env)

@@ -22,6 +22,7 @@ from api.services import kb
 from api.services import concepts as concept_service
 from api.services.evidence import attach_canonical_evidence
 from api.schemas import ConceptTermDetailResponse
+from shared.content_maintenance import acquire_service_lease
 from shared.db import Database
 from shared.storage import StorageBackend
 
@@ -278,7 +279,28 @@ def build_default_server(*, stateless_http: bool = False) -> FastMCP:
         config_dir=os.environ.get("CONFIG_DIR", "/data/configs"),
         data_dir=os.environ.get("DATA_DIR", "/data"),
     )
-    db = Database(cfg.db_path)
-    db.init_schema()  # 幂等:表已存在则 no-op
-    storage = create_storage(cfg.jobs_dir)
-    return build_server(db, storage, stateless_http=stateless_http)
+    maintenance_lease = acquire_service_lease(
+        db_path=cfg.db_path,
+        jobs_dir=cfg.jobs_dir,
+        object_bucket=os.environ.get("MINIO_BUCKET"),
+        config_root=cfg.prompts_dir,
+        owner="mcp-http",
+    )
+    db: Database | None = None
+    try:
+        db = Database(cfg.db_path)
+        db.init_schema()  # 幂等:表已存在则 no-op
+        storage = create_storage(cfg.jobs_dir)
+        mcp = build_server(db, storage, stateless_http=stateless_http)
+    except BaseException:
+        try:
+            if db is not None:
+                db.close()
+        finally:
+            maintenance_lease.close()
+        raise
+    # HTTP ASGI生命周期负责先关DB再释放租约。属性只在默认生产构造路径存在,
+    # 注入db/storage的纯工具测试仍保持无全局资源副作用。
+    mcp._flori_maintenance_lease = maintenance_lease
+    mcp._flori_database = db
+    return mcp

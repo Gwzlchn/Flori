@@ -83,6 +83,12 @@ export const useJobStore = defineStore('jobs', () => {
     return api.post(`/api/jobs/${jobId}/retry`)
   }
 
+  async function activateJob(jobId: string): Promise<{ job_id: string; status: string }> {
+    return api.post<{ job_id: string; status: string }>(
+      `/api/jobs/${encodeURIComponent(jobId)}/activate`,
+    )
+  }
+
   async function retryAllFailed(): Promise<{ retried: number }> {
     return api.post<{ retried: number }>('/api/jobs/retry-failed')
   }
@@ -148,5 +154,5 @@ export const useJobStore = defineStore('jobs', () => {
     return api.get<JobConcept[]>(`/api/jobs/${encodeURIComponent(jobId)}/concepts`)
   }
 
-  return { list, total, loading, fetchList, fetchDetail, createJob, uploadJob, retryJob, retryAllFailed, retryFailedInCollection, rerunJob, rerunJobPart, continueAi, rebuildJob, rebuildStale, deleteJob, deleteJobs, fetchFacets, fetchConcepts }
+  return { list, total, loading, fetchList, fetchDetail, createJob, uploadJob, activateJob, retryJob, retryAllFailed, retryFailedInCollection, rerunJob, rerunJobPart, continueAi, rebuildJob, rebuildStale, deleteJob, deleteJobs, fetchFacets, fetchConcepts }
 })

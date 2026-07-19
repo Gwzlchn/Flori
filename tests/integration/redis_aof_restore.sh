@@ -16,6 +16,7 @@ for required in scripts/backup.sh scripts/restore.sh scripts/dr_snapshot.py; do
     exit 1
   }
 done
+export FLORI_DEPLOYMENT_ID="integration-redis-aof"
 
 case "${TEST_WARM_NAME:-flori-test}" in
   *[!A-Za-z0-9_.-]*) echo "TEST_WARM_NAME 含非法字符" >&2; exit 1 ;;
@@ -39,7 +40,7 @@ SOURCE_MINIO_CONTAINER="${SUFFIX}-minio-source"
 TARGET_MINIO_CONTAINER="${SUFFIX}-minio-target"
 GENERATION="integration-aof-$$"
 ARCHIVE="$BACKUPS/flori-backup-${GENERATION}.tar.gz"
-BACKUP_RESULT="$ROOT/backup-result.json"
+BACKUP_RESULT="$BACKUPS/backup-result.json"
 RESTORE_RESULT="$ROOT/restore-result.json"
 MINIO_ENV_FILE="$ROOT/minio.env"
 MINIO_BUCKET="flori-integration"
@@ -257,7 +258,9 @@ verify_minio_backup_manifest() {
 import json
 from pathlib import Path
 
-result = json.loads(Path("/evidence/backup-result.json").read_text(encoding="utf-8"))
+result = json.loads(
+    Path("/evidence/backups/backup-result.json").read_text(encoding="utf-8")
+)
 expected = json.loads(Path("/evidence/source-object.json").read_text(encoding="utf-8"))
 manifest = result["manifest"]
 asset = manifest["assets"]["minio"]

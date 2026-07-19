@@ -32,6 +32,7 @@ services:
       - ./api:/app/api
       - ./configs:/app/configs
       - ${FLORI_DATA_DIR:-./data}:/data
+      - ${FLORI_CONTENT_REPOSITORY_DIR:-.local/content-repository}:/content-repo
       # local_dir 订阅约定监听目录(放文件进宿主 ${FLORI_INBOX_DIR:-.local/inbox} 即被枚举入库);与 worker 挂同一容器路径。
       - ${FLORI_INBOX_DIR:-.local/inbox}:/data/inbox
       - ${FLORI_SOURCE_LIBRARY_DIR:-.local/source-library}:/sources/library:ro
@@ -51,6 +52,8 @@ services:
       - FLORI_SOURCE_LIBRARY_ENABLED=${FLORI_SOURCE_LIBRARY_ENABLED:-0}
       - FLORI_SOURCE_LIBRARY_ROOT_ID=${FLORI_SOURCE_LIBRARY_ROOT_ID:-library}
       - FLORI_SOURCE_LIBRARY_CONTAINER_DIR=/sources/library
+      - FLORI_CONTENT_REPOSITORY=/content-repo
+      - FLORI_DEPLOYMENT_ID=${FLORI_DEPLOYMENT_ID:-}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health/live"]
       interval: 30s

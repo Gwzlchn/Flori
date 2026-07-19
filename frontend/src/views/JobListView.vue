@@ -72,6 +72,7 @@ const fDomain = ref<Set<string>>(new Set())
 // 状态枚举(Job)。downloading/processing/pending 合并为「处理中」一档展示但底层映射到多状态。
 const STATUS_OPTS: { key: string; label: string; match: string[] }[] = [
   { key: 'done', label: '已完成', match: ['done'] },
+  { key: 'pending_activation', label: '待激活', match: ['pending_activation'] },
   { key: 'processing', label: '处理中', match: ['downloading', 'processing', 'pending'] },
   { key: 'failed', label: '失败', match: ['failed'] },
 ]

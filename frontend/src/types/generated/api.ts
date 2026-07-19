@@ -602,6 +602,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/jobs/{job_id}/activate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Activate Imported Job
+         * @description 显式激活恢复任务;完成态和普通运行态都不能借此重置。
+         */
+        post: operations["activate_imported_job_api_jobs__job_id__activate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/jobs/{job_id}/ai-logs": {
         parameters: {
             query?: never;
@@ -1055,6 +1075,66 @@ export interface paths {
         get: operations["get_prompt_version_api_prompts__pipeline___step__versions__version__get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/recovery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Recovery Status
+         * @description 读取便携仓库、有效快照、视频闭包与后台备份状态。
+         */
+        get: operations["get_recovery_status_api_recovery_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/recovery/backups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start Recovery Backup
+         * @description 启动隔离子进程创建增量便携备份;失败不会推进 latest。
+         */
+        post: operations["start_recovery_backup_api_recovery_backups_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/recovery/restore-plans": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Prepare Restore Plan
+         * @description 全链检查快照并生成离线恢复交接;本端点不写线上DB或产物。
+         */
+        post: operations["prepare_restore_plan_api_recovery_restore_plans_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3051,6 +3131,203 @@ export interface components {
             idempotency_key?: string | null;
             /** Mechanical Only */
             mechanical_only?: boolean | null;
+        };
+        /** RecoveryBackupRequest */
+        RecoveryBackupRequest: {
+            /**
+             * Full Rehash
+             * @default false
+             */
+            full_rehash: boolean;
+            /**
+             * Vendor Media
+             * @default false
+             */
+            vendor_media: boolean;
+        };
+        /** RecoveryBackupStartedResponse */
+        RecoveryBackupStartedResponse: {
+            operation: components["schemas"]["RecoveryOperationResponse"];
+        };
+        /** RecoveryCompletenessResponse */
+        RecoveryCompletenessResponse: {
+            /** Ai Config Complete */
+            ai_config_complete: boolean;
+            /** External Media Roots */
+            external_media_roots: string[];
+            /** Manifests Excluded */
+            manifests_excluded: number;
+            /** Manifests Missing */
+            manifests_missing: number;
+            /** Manifests Seen */
+            manifests_seen: number;
+            /** Media Self Contained */
+            media_self_contained: boolean;
+            /** Portable Ready */
+            portable_ready: boolean;
+            /** Readiness Reasons */
+            readiness_reasons: string[];
+            /** Secret Scan Complete */
+            secret_scan_complete: boolean;
+            /** Terminal Steps */
+            terminal_steps: number;
+            /** User Config Complete */
+            user_config_complete: boolean;
+        };
+        /** RecoveryOperationResponse */
+        RecoveryOperationResponse: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Error */
+            error: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /**
+             * Format
+             * @constant
+             */
+            format: "flori-recovery-operation/v1";
+            /** Full Rehash */
+            full_rehash: boolean;
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @constant
+             */
+            kind: "backup";
+            /** Receipt Id */
+            receipt_id: string | null;
+            /** Snapshot Digest */
+            snapshot_digest: string | null;
+            /** Started At */
+            started_at: string | null;
+            /** Stats */
+            stats: {
+                [key: string]: unknown;
+            };
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "queued" | "running" | "success" | "failed" | "interrupted";
+            /** Vendor Media */
+            vendor_media: boolean;
+        };
+        /** RecoveryRestoreCommandsResponse */
+        RecoveryRestoreCommandsResponse: {
+            /** Exact Dr */
+            exact_dr: string;
+            /** Plan */
+            plan: string;
+            /** Restore */
+            restore: string;
+            /** Verify */
+            verify: string;
+        };
+        /** RecoveryRestorePlanRequest */
+        RecoveryRestorePlanRequest: {
+            /** Snapshot Digest */
+            snapshot_digest: string;
+        };
+        /** RecoveryRestorePlanResponse */
+        RecoveryRestorePlanResponse: {
+            /** App Version */
+            app_version: string;
+            /** Bytes To Write */
+            bytes_to_write: number;
+            commands: components["schemas"]["RecoveryRestoreCommandsResponse"];
+            /** Counts */
+            counts: {
+                [key: string]: number | null;
+            };
+            /** Deployment Id */
+            deployment_id: string;
+            /**
+             * Format
+             * @constant
+             */
+            format: "flori-restore-handoff/v1";
+            /**
+             * Generated At
+             * Format: date-time
+             */
+            generated_at: string;
+            /** Id */
+            id: string;
+            /** Plan Digest */
+            plan_digest: string;
+            /** Required Source Roots */
+            required_source_roots: string[];
+            /** Reused */
+            reused: boolean;
+            /** Snapshot Digest */
+            snapshot_digest: string;
+            /** Target Generation */
+            target_generation: string;
+            /**
+             * Target Mode
+             * @constant
+             */
+            target_mode: "empty";
+        };
+        /** RecoverySnapshotResponse */
+        RecoverySnapshotResponse: {
+            completeness: components["schemas"]["RecoveryCompletenessResponse"];
+            /** Created At */
+            created_at: string | null;
+            /** Digest */
+            digest: string;
+            /** Partial */
+            partial: boolean;
+            /** Portable Ready */
+            portable_ready: boolean;
+            /** Readiness Reasons */
+            readiness_reasons: string[];
+            /** Refs */
+            refs: string[];
+            /** Source App Version */
+            source_app_version: string;
+            /** Stats */
+            stats: {
+                [key: string]: unknown;
+            };
+        };
+        /** RecoveryStatusResponse */
+        RecoveryStatusResponse: {
+            /** Deployment Id Configured */
+            deployment_id_configured: boolean;
+            /** Error */
+            error: string | null;
+            /** Host Repository Env */
+            host_repository_env: string;
+            latest: components["schemas"]["RecoverySnapshotResponse"] | null;
+            /** Media Vendoring Available */
+            media_vendoring_available: boolean;
+            /** Online Restore Supported */
+            online_restore_supported: boolean;
+            /** Operations */
+            operations: components["schemas"]["RecoveryOperationResponse"][];
+            /** Repository Path */
+            repository_path: string;
+            /** Snapshots */
+            snapshots: components["schemas"]["RecoverySnapshotResponse"][];
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "empty" | "ready" | "incomplete" | "locked" | "error";
+            write_lock: components["schemas"]["RecoveryWriteLockResponse"] | null;
+        };
+        /** RecoveryWriteLockResponse */
+        RecoveryWriteLockResponse: {
+            /** Acquired At */
+            acquired_at: string | null;
+            /** Owner */
+            owner: string | null;
         };
         /** RerunRequest */
         RerunRequest: {
@@ -8265,6 +8542,127 @@ export interface operations {
             };
         };
     };
+    activate_imported_job_api_jobs__job_id__activate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobStatusResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Requested Range Not Satisfiable */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Bad Gateway */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     job_ai_logs_api_jobs__job_id__ai_logs_get: {
         parameters: {
             query?: {
@@ -11101,6 +11499,371 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PromptVersionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Requested Range Not Satisfiable */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Bad Gateway */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_recovery_status_api_recovery_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecoveryStatusResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Requested Range Not Satisfiable */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Bad Gateway */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    start_recovery_backup_api_recovery_backups_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RecoveryBackupRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecoveryBackupStartedResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Requested Range Not Satisfiable */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Bad Gateway */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    prepare_restore_plan_api_recovery_restore_plans_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RecoveryRestorePlanRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecoveryRestorePlanResponse"];
                 };
             };
             /** @description Bad Request */

@@ -12,6 +12,7 @@ DB 行到 record 的映射(serializer)由 content_backup 单元实现,这里只�
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import json
 import re
@@ -129,6 +130,43 @@ def scan_text_for_secrets(text: str, field: str) -> None:
     for pattern in _POLICY_SECRET_RES:
         if pattern.search(text):
             raise PolicyError(f"{field}: value matches sensitive pattern")
+
+
+class StreamingSecretScanner:
+    """有界内存扫描完整 UTF-8 字节流,并保留跨 chunk 的匹配窗口。"""
+
+    # 必须覆盖 _EMBEDDED_URL_RE 的最大匹配长度(8192)及前后键名/分隔符。
+    # 低于这个窗口会让跨 1 MiB 存储 chunk 的长签名 URL 逃过扫描。
+    _OVERLAP_CHARS = 16 * 1024
+
+    def __init__(self, field: str, *, raise_on_match: bool = True):
+        self.field = field
+        self.raise_on_match = raise_on_match
+        self.matched = False
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._tail = ""
+        self._finished = False
+
+    def feed(self, chunk: bytes) -> None:
+        if self._finished:
+            raise PolicyError(f"{self.field}: scanner is already finished")
+        self._scan(self._decoder.decode(chunk, final=False))
+
+    def finish(self) -> None:
+        if self._finished:
+            return
+        self._scan(self._decoder.decode(b"", final=True))
+        self._finished = True
+
+    def _scan(self, text: str) -> None:
+        combined = self._tail + text
+        try:
+            scan_text_for_secrets(combined, self.field)
+        except PolicyError:
+            self.matched = True
+            if self.raise_on_match:
+                raise
+        self._tail = combined[-self._OVERLAP_CHARS:]
 
 
 def _check_text_hygiene(text: str, field: str, *, is_key: bool = False) -> None:
@@ -515,6 +553,7 @@ STUDY_TABLE_PRIMARY_KEYS: Mapping[str, tuple[str, ...]] = {
 
 USER_CONFIG_KINDS = frozenset({
     "prompts", "profiles", "styles", "templates", "domain_config",
+    "job_ai_config",
 })
 
 # E 类禁止入库(§2.4E):即使出现在 legacy_archive 的表名里也拒绝。
@@ -526,7 +565,8 @@ FORBIDDEN_TABLES = frozenset({"app_credentials", "worker_tokens"})
 REBUILDABLE_TABLES = frozenset({
     "job_steps", "workers", "schema_migrations", "note_chunks",
     "note_chunks_fts5", "notes_fts5", "canonical_evidence",
-    "concept_occurrences", "flori_stat_probe",
+    "concept_occurrences", "concept_occurrence_projection",
+    "restored_job_activations", "flori_stat_probe",
     "content_imports", "content_import_records",
 })
 
@@ -609,6 +649,10 @@ def _validate_part_core(body: Mapping) -> None:
         redacted = redact_url(body["source_url"], "part_core.source_url")
         if redacted.url != body["source_url"]:
             raise PolicyError("part_core.source_url: must be a redacted canonical URL")
+    if "source_blob" in body:
+        _wrap_manifest_error(validate_digest, body["source_blob"], "part_core.source_blob")
+        if body.get("source_digest") != body["source_blob"]:
+            raise PolicyError("part_core.source_blob: must equal source_digest")
 
 
 def _validate_step_result(body: Mapping) -> None:
@@ -885,7 +929,7 @@ RECORD_POLICIES: Mapping[str, RecordPolicy] = {
             frozenset({"id", "job_id", "part_index", "created_at"}),
             frozenset({
                 "title", "source_url", "source_ref", "source_digest",
-                "size_bytes", "duration_ms", "meta", "updated_at",
+                "source_blob", "size_bytes", "duration_ms", "meta", "updated_at",
             }),
             _validate_part_core,
         ),
@@ -1051,6 +1095,8 @@ def record_blob_refs(kind: str, body: Mapping) -> tuple[str, ...]:
         return tuple(sorted(set(body["output_blobs"].values())))
     if kind == "user_config":
         return (body["blob"],)
+    if kind == "part_core" and body.get("source_blob") is not None:
+        return (body["source_blob"],)
     if kind == "failure_event":
         log_blob = body.get("log_blob")
         return (log_blob,) if log_blob is not None else ()

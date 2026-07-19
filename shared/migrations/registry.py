@@ -12,6 +12,7 @@ from . import v0005_canonical_evidence as migration_v5
 from . import v0006_concept_definition_history as migration_v6
 from . import v0007_unified_document as migration_v7
 from . import v0008_multipart_jobs as migration_v8
+from . import v0009_concept_projection_ledger as migration_v9
 from .runner import Migration
 
 
@@ -25,6 +26,7 @@ MIGRATION_MODULES: tuple[ModuleType, ...] = (
     migration_v6,
     migration_v7,
     migration_v8,
+    migration_v9,
 )
 
 

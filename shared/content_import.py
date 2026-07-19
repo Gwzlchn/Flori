@@ -20,11 +20,12 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
 import sys
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Mapping, Sequence
 
 import structlog
@@ -44,6 +45,13 @@ from .content_repository import (
     RepositoryError,
     SNAPSHOT_RECORD_GROUPS,
 )
+from .content_result import (
+    ResultDestination,
+    ResultFileError,
+    emit_result,
+    ensure_output_roots_disjoint,
+    prepare_result_destination,
+)
 from .db import SCHEMA_VERSION, Database
 from .models import JobPart, Step, StepStatus
 from .pipeline_scope import expand_pipeline_steps
@@ -55,6 +63,11 @@ from .content_import_journal import (
     STATUS_PROJECTING,
     ContentImportJournal,
     ImportJournalError,
+)
+from .content_maintenance import (
+    MaintenanceLockError,
+    acquire_import_target_lease,
+    path_resources,
 )
 from .step_completion import (
     DETERMINISTIC_SKIP_REASONS,
@@ -75,8 +88,9 @@ _log = structlog.get_logger(__name__)
 _CHUNK_SIZE = 1024 * 1024
 # 物化阶段的 FK 闭包顺序(§2.10 阶段2);顺序即依赖,不得重排。
 MATERIALIZE_ORDER = (
-    "collection", "ingested_item", "user_config",
+    "collection", "ingested_item",
     "job_core", "job_user_state", "part_core",
+    "user_config",
     "step_result",
     "prompt_override", "prompt_override_version",
     # definition_version 必须先于 glossary:glossary.current_definition_version_id
@@ -98,6 +112,8 @@ REASON_UNKNOWN_PIPELINE = "unknown_pipeline"
 # 默认写隔离 staging 而不是线上对象根:导入是重建演练,默认不该碰生产产物。
 # 要写线上必须由入口脚本显式 --into-live 指定。
 DEFAULT_IMPORT_STAGING = "/data/import-staging/jobs"
+DEFAULT_CONFIG_STAGING = "/data/import-staging/prompts"
+DEFAULT_LIVE_CONFIG_ROOT = "/data/prompts"
 # journal 默认落在与任何目标库都无父子关系的稳定位置:阶段5 丢弃目标库目录时
 # 不能把唯一的崩溃证据一起删掉。
 DEFAULT_JOURNAL_PATH = "/data/content-import/journal.sqlite3"
@@ -113,6 +129,8 @@ class _AlreadyImported(ImportError_):
 
 MODE_EMPTY = "empty"
 MODE_MERGE = "merge"
+PORTABLE_SNAPSHOT_V1 = "flori-portable-snapshot/v1"
+PORTABLE_SNAPSHOT_V2 = "flori-portable-snapshot/v2"
 
 ACTION_INSERT = "insert"
 ACTION_NOOP = "noop"
@@ -124,6 +142,11 @@ CONFLICT_JOB_IDENTITY = "job_identity"
 CONFLICT_STEP_MANIFEST = "step_manifest"
 CONFLICT_LEDGER = "immutable_ledger"
 CONFLICT_USER_STATE = "user_state"
+
+_GLOBAL_CONFIG_KINDS = frozenset({"prompts", "profiles", "styles", "templates"})
+_JOB_AI_CONFIG_KEYS = frozenset({
+    "ai_override", "ai_overrides", "prompt_override", "prompt_overrides", "ai_config",
+})
 
 
 @dataclass(frozen=True)
@@ -174,6 +197,10 @@ def _unit_of(kind: str, body: Mapping) -> str:
     if kind in ("job_core", "job_user_state", "part_core", "step_result",
                 "failure_event", "job_relation"):
         return f"job:{body.get('job_id') or body.get('id')}"
+    if kind == "user_config" and body.get("kind") == "job_ai_config":
+        parts = PurePosixPath(str(body.get("path") or "")).parts
+        if len(parts) == 3 and parts[0] == "jobs":
+            return f"job:{parts[1]}"
     return f"{kind}:{_natural_key_of(kind, body)}"
 
 
@@ -281,9 +308,15 @@ def _target_ledger_digest(
     if lookup is None:
         return None
     table, where, params = lookup
-    row = connection.execute(
+    rows = connection.execute(
         f"SELECT * FROM {table} WHERE {where}", params(body),
-    ).fetchone()
+    ).fetchall()
+    # ai_task_logs 的历史 schema 只有自增 rowid,没有自然键唯一约束。
+    # 导入侧必须显式要求复合键恰好一行,否则 INSERT OR IGNORE
+    # 会在崩溃重放时悠然增殖审计记录。
+    if kind == "ai_task_log" and len(rows) != 1:
+        return None if not rows else "sha256:" + "0" * 64
+    row = rows[0] if rows else None
     if row is None:
         return None
     target_kind, target_body = _serialize_ledger_row(table, row)
@@ -337,6 +370,30 @@ def _target_part_ids(connection: sqlite3.Connection, job_id: str) -> list[str]:
     ]
 
 
+def _target_part_core_digest(
+    connection: sqlite3.Connection, job_id: str, part_id: str,
+    *, include_source_blob: bool = False,
+) -> str | None:
+    """Part 身份包含完整业务核心,不只是 ID 和顺序。"""
+    from .content_backup import _serialize_part_core
+
+    row = connection.execute(
+        "SELECT * FROM job_parts WHERE job_id=? AND id=?", (job_id, part_id),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        body = _serialize_part_core(row)
+        if include_source_blob:
+            source_digest = body.get("source_digest")
+            if not source_digest:
+                return "sha256:" + "0" * 64
+            body["source_blob"] = source_digest
+        return _digest_of("part_core", body)
+    except (PolicyError, ImportError_):
+        return "sha256:" + "0" * 64
+
+
 async def _target_step_result_digest(
     storage, job_id: str, scope_key: str, step: str,
 ) -> str | None:
@@ -361,6 +418,9 @@ async def classify_merge(
     connection: sqlite3.Connection,
     storage,
     records: Sequence[tuple[str, str, dict]],
+    repository: ContentRepository | None = None,
+    config_root: Path | None = None,
+    source_roots: Mapping[str, Path] | None = None,
     apply_user_state: bool = False,
 ) -> MergeClassification:
     """§2.9 merge 七条规则的判定;只读,不写任何东西。
@@ -369,6 +429,8 @@ async def classify_merge(
     而是有冲突的单元根本不进 materialize。
     """
     result = MergeClassification()
+    selected_config_root = Path(config_root or DEFAULT_CONFIG_STAGING)
+    selected_source_roots = source_roots or {}
     snapshot_parts: dict[str, list[tuple[int, str]]] = {}
     for kind, digest, body in records:
         if kind == "part_core":
@@ -405,12 +467,44 @@ async def classify_merge(
                 else:
                     action = ACTION_NOOP
         elif kind == "part_core":
-            existing = connection.execute(
-                "SELECT 1 FROM job_parts WHERE job_id=? AND id=?",
-                (body["job_id"], body["id"]),
-            ).fetchone()
-            if existing is not None:
-                action = ACTION_NOOP  # 身份一致性已由 job_core 规则统一裁决
+            target = _target_part_core_digest(
+                connection, body["job_id"], body["id"],
+                include_source_blob="source_blob" in body,
+            )
+            if target is not None:
+                if target == digest:
+                    action = ACTION_NOOP
+                    if "source_blob" in body:
+                        from .source_library import SourceReferenceError, parse_source_ref
+
+                        try:
+                            source_ref = parse_source_ref(body.get("source_ref"))
+                        except SourceReferenceError:
+                            source_ref = None
+                        root = (
+                            selected_source_roots.get(source_ref.root_id)
+                            if source_ref is not None else None
+                        )
+                        if root is None:
+                            action = ACTION_INSERT
+                        else:
+                            observed = await _sha256_local(
+                                root, source_ref.relative_path,
+                            )
+                            if observed is None:
+                                action = ACTION_INSERT
+                            elif observed != body["source_blob"]:
+                                conflict = MergeConflict(
+                                    unit, kind, natural_key, CONFLICT_JOB_IDENTITY,
+                                    observed, digest,
+                                    "vendored source target exists with different content",
+                                )
+                else:
+                    conflict = MergeConflict(
+                        unit, kind, natural_key, CONFLICT_JOB_IDENTITY,
+                        target, digest,
+                        "part immutable core differs from target",
+                    )
         elif kind == "job_user_state":
             # 规则 6:用户状态默认保留目标,仅显式 --apply-user-state 且前置匹配才改。
             row = connection.execute(
@@ -464,7 +558,64 @@ async def classify_merge(
                 action, conflict = _ledger_verdict(
                     unit, kind, natural_key, target, digest,
                 )
-        elif kind in ("failure_event", "legacy_archive", "job_relation", "user_config"):
+        elif kind == "user_config":
+            target: str | None
+            config_kind = body["kind"]
+            if config_kind in _GLOBAL_CONFIG_KINDS:
+                try:
+                    rel = _Materializer._validated_config_path(
+                        config_kind, body["path"],
+                    )
+                except ImportError_:
+                    rel = ""
+                observed = await _sha256_local(selected_config_root, rel) if rel else None
+                target = None if observed is None else (
+                    digest if observed == body["blob"] else observed
+                )
+            elif config_kind == "domain_config":
+                prefix, _, rel = body["path"].rpartition("/")
+                observed = await _sha256_object(storage, prefix, rel)
+                target = None if observed is None else (
+                    digest if observed == body["blob"] else observed
+                )
+            elif config_kind == "job_ai_config":
+                path = PurePosixPath(body["path"])
+                raw = (
+                    await storage.read_file(path.parts[1], "job.json")
+                    if len(path.parts) == 3 else None
+                )
+                try:
+                    expected = json.loads(repository.read_blob(body["blob"])) \
+                        if repository is not None else None
+                    observed_doc = json.loads(raw) if raw else None
+                except (
+                    RepositoryError, json.JSONDecodeError, UnicodeDecodeError, TypeError,
+                ):
+                    expected = observed_doc = None
+                if not isinstance(observed_doc, dict):
+                    target = None
+                elif not isinstance(expected, dict) or any(
+                    key in observed_doc and observed_doc[key] != value
+                    for key, value in expected.items()
+                ):
+                    target = "sha256:" + "0" * 64
+                elif all(key in observed_doc for key in expected):
+                    target = digest
+                else:
+                    target = None
+            else:
+                target = "sha256:" + "0" * 64
+            if target is None:
+                action = ACTION_INSERT
+            elif target == digest:
+                action = ACTION_NOOP
+            else:
+                conflict = MergeConflict(
+                    unit, kind, natural_key, CONFLICT_USER_STATE,
+                    target, digest,
+                    "target user configuration differs; import refuses to overwrite",
+                )
+        elif kind in ("failure_event", "legacy_archive", "job_relation"):
             # 这些在活动库没有落表面(P3a 起即 no-op 物化),merge 下同样无需比对。
             action = ACTION_NOOP
 
@@ -520,6 +671,8 @@ async def _classify_for_merge(
     target_db_path: Path,
     storage,
     apply_user_state: bool,
+    config_root: Path,
+    source_roots: Mapping[str, Path],
 ) -> MergeClassification:
     """merge 分类的唯一入口;CLI 的 --plan 与真正导入共用它,避免两条路分叉。
 
@@ -540,7 +693,8 @@ async def _classify_for_merge(
     probe.row_factory = sqlite3.Row
     try:
         return await classify_merge(
-            connection=probe, storage=storage, records=records,
+            connection=probe, storage=storage, repository=repository,
+            config_root=config_root, source_roots=source_roots, records=records,
             apply_user_state=apply_user_state,
         )
     finally:
@@ -715,6 +869,19 @@ class ImportPlan:
     mode: str = MODE_EMPTY
     merge_conflicts: list[dict] = field(default_factory=list)
     user_state_kept: list[dict] = field(default_factory=list)
+    request_digest: str = ""
+    snapshot_format: str = ""
+    portable_ready: bool = False
+    readiness_reason: str | None = None
+    readiness_reasons: list[str] = field(default_factory=list)
+    completeness: dict = field(default_factory=dict)
+    config_root: str = ""
+    required_source_roots: list[str] = field(default_factory=list)
+    missing_source_root_mappings: list[str] = field(default_factory=list)
+    global_config_files: int = 0
+    global_config_bytes: int = 0
+    vendored_source_parts: int = 0
+    vendored_source_bytes: int = 0
 
     @property
     def ok(self) -> bool:
@@ -739,6 +906,284 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _storage_identity(storage) -> str:
+    """返回不含凭据的规范存储身份;导入幂等不能跨根或跨桶复用。"""
+    jobs_dir = getattr(storage, "jobs_dir", None)
+    if jobs_dir is not None:
+        return f"local:{Path(jobs_dir).resolve()}"
+    bucket = getattr(storage, "bucket", None)
+    endpoint = getattr(storage, "_endpoint", None)
+    secure = bool(getattr(storage, "_secure", False))
+    if bucket is None or endpoint is None:
+        raise ImportError_(
+            "import storage does not expose a stable local root or object namespace"
+        )
+    return f"object:{'https' if secure else 'http'}://{endpoint}/{bucket}"
+
+
+def _relative_parts(rel: str, *, label: str) -> tuple[str, ...]:
+    if not isinstance(rel, str) or "\\" in rel or "\x00" in rel:
+        raise ImportError_(f"invalid {label} relative path {rel!r}")
+    path = PurePosixPath(rel)
+    if (
+        path.is_absolute()
+        or not path.parts
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or path.as_posix() != rel
+    ):
+        raise ImportError_(f"invalid {label} relative path {rel!r}")
+    return path.parts
+
+
+def _directory_open_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+
+def _open_controlled_directory(
+    path: Path, *, label: str, create: bool,
+) -> int:
+    """从文件系统根逐层固定目录实体,可选创建缺失分量。"""
+    if not path.is_absolute():
+        raise ImportError_(f"{label} must be an absolute path")
+    flags = _directory_open_flags()
+    current = os.open(path.anchor, flags)
+    try:
+        for part in path.parts[1:]:
+            try:
+                child = os.open(part, flags, dir_fd=current)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(part, mode=0o750, dir_fd=current)
+                    os.fsync(current)
+                except FileExistsError:
+                    # 并发创建仍必须经过下面的 O_NOFOLLOW openat 复验。
+                    pass
+                child = os.open(part, flags, dir_fd=current)
+            os.close(current)
+            current = child
+        return current
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def _open_relative_parent(
+    root_fd: int, rel: str, *, label: str, create: bool,
+) -> tuple[int, str]:
+    """从已固定的目标根打开相对父目录,不重新解析可变根路径。"""
+    relative = _relative_parts(rel, label=label)
+    flags = _directory_open_flags()
+    current = os.dup(root_fd)
+    try:
+        for part in relative[:-1]:
+            try:
+                child = os.open(part, flags, dir_fd=current)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(part, mode=0o750, dir_fd=current)
+                    os.fsync(current)
+                except FileExistsError:
+                    pass
+                child = os.open(part, flags, dir_fd=current)
+            os.close(current)
+            current = child
+        return current, relative[-1]
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def _open_controlled_parent(
+    root: Path, rel: str, *, label: str, create: bool,
+) -> tuple[int, str]:
+    """逐层用 dirfd + O_NOFOLLOW 固定目录,消除 symlink swap 窗口。"""
+    root_fd = _open_controlled_directory(root, label=label, create=create)
+    try:
+        return _open_relative_parent(
+            root_fd, rel, label=label, create=create,
+        )
+    finally:
+        os.close(root_fd)
+
+
+def _opened_directory_descends_from(
+    directory_fd: int, ancestor: os.stat_result,
+) -> bool:
+    """沿真实 .. 关系检查目录仍在已固定目标根内。"""
+    current_fd = os.dup(directory_fd)
+    flags = _directory_open_flags()
+    try:
+        while True:
+            current = os.fstat(current_fd)
+            if (current.st_dev, current.st_ino) == (ancestor.st_dev, ancestor.st_ino):
+                return True
+            parent_fd = os.open("..", flags, dir_fd=current_fd)
+            parent = os.fstat(parent_fd)
+            if (parent.st_dev, parent.st_ino) == (current.st_dev, current.st_ino):
+                os.close(parent_fd)
+                return False
+            os.close(current_fd)
+            current_fd = parent_fd
+    finally:
+        os.close(current_fd)
+
+
+def _opened_directory_aliases_tree(directory_fd: int, tree_root: Path) -> bool:
+    """识别目录位于仓库中或通过bind mount复用仓库任一目录实体。"""
+    try:
+        tree_identity = tree_root.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise ImportError_(f"cannot inspect content repository root: {exc}") from exc
+    if _opened_directory_descends_from(directory_fd, tree_identity):
+        return True
+    opened = os.fstat(directory_fd)
+    try:
+        for _path, directory_names, _files, tree_fd in os.fwalk(
+            tree_root, topdown=True, follow_symlinks=False,
+        ):
+            directory_names[:] = [
+                name for name in directory_names
+                if not stat.S_ISLNK(os.stat(
+                    name, dir_fd=tree_fd, follow_symlinks=False,
+                ).st_mode)
+            ]
+            current = os.fstat(tree_fd)
+            if (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino):
+                return True
+    except OSError as exc:
+        raise ImportError_(
+            f"cannot inspect content repository directory identities: {exc}"
+        ) from exc
+    return False
+
+
+def _hash_open_file(fd: int) -> str:
+    hasher = hashlib.sha256()
+    os.lseek(fd, 0, os.SEEK_SET)
+    while chunk := os.read(fd, _CHUNK_SIZE):
+        hasher.update(chunk)
+    return "sha256:" + hasher.hexdigest()
+
+
+def _hash_controlled_local(root: Path, rel: str, *, label: str) -> str | None:
+    try:
+        parent_fd, name = _open_controlled_parent(
+            root, rel, label=label, create=False,
+        )
+    except (FileNotFoundError, NotADirectoryError, OSError, ImportError_):
+        return None
+    try:
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except (FileNotFoundError, OSError):
+            return None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None
+            return _hash_open_file(fd)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+
+
+@dataclass(frozen=True)
+class ImportRequest:
+    """决定导入写入结果的规范请求;唯一摘要同时供 plan 与 journal 使用。"""
+
+    snapshot_digest: str
+    target_db_path: str
+    target_storage: str
+    mode: str
+    apply_user_state: bool
+    allow_partial: bool
+    schema_version: int
+    config_digest: str
+    target_config_root: str = ""
+    target_source_roots: tuple[tuple[str, str, str], ...] = ()
+    allow_incomplete_portable_snapshot: bool = False
+
+    @property
+    def digest(self) -> str:
+        return canonical_digest({
+            "snapshot_digest": self.snapshot_digest,
+            "target_db_path": self.target_db_path,
+            "target_storage": self.target_storage,
+            "mode": self.mode,
+            "apply_user_state": self.apply_user_state,
+            "allow_partial": self.allow_partial,
+            "schema_version": self.schema_version,
+            "config_digest": self.config_digest,
+            "target_config_root": self.target_config_root,
+            "target_source_roots": [list(item) for item in self.target_source_roots],
+            "allow_incomplete_portable_snapshot": (
+                self.allow_incomplete_portable_snapshot
+            ),
+        })
+
+
+def _config_digest(config: AppConfig) -> str:
+    """pipeline 语义变更会改变投影结果,必须进请求身份。"""
+    return canonical_digest({"pipelines": config.pipelines})
+
+
+def _normalized_source_roots(
+    roots: Mapping[str, Path] | None,
+) -> dict[str, Path]:
+    from .source_library import SourceReferenceError, build_source_ref
+
+    result: dict[str, Path] = {}
+    for root_id, raw_path in sorted((roots or {}).items()):
+        try:
+            build_source_ref(root_id, "identity-probe.mp4")
+        except SourceReferenceError as exc:
+            raise ImportError_(f"invalid source root id {root_id!r}") from exc
+        path = Path(raw_path)
+        if not path.is_absolute():
+            raise ImportError_(f"source root {root_id!r} must be an absolute path")
+        result[root_id] = Path(os.path.abspath(path))
+    return result
+
+
+def _source_root_identities(roots: Mapping[str, Path]) -> dict[str, str]:
+    identities: dict[str, str] = {}
+    for root_id, path in sorted(roots.items()):
+        try:
+            info = path.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise ImportError_(f"source root {root_id!r} is not readable: {path}: {exc}") from exc
+        if not stat.S_ISDIR(info.st_mode):
+            raise ImportError_(f"source root {root_id!r} is not a directory: {path}")
+        identities[root_id] = f"{info.st_dev}:{info.st_ino}"
+    return identities
+
+
+def _verify_source_root_identities(
+    roots: Mapping[str, Path], expected: Mapping[str, str] | None,
+) -> dict[str, str]:
+    actual = _source_root_identities(roots)
+    if expected is not None:
+        normalized_expected = dict(sorted(expected.items()))
+        if set(normalized_expected) != set(actual):
+            raise ImportError_("source root identity keys do not match --source-root mappings")
+        for root_id, observed in actual.items():
+            if normalized_expected[root_id] != observed:
+                raise ImportError_(
+                    f"source root {root_id!r} changed before container validation: "
+                    f"{normalized_expected[root_id]} != {observed}"
+                )
+    return actual
+
+
 def _resolve_snapshot(repository: ContentRepository, ref_or_digest: str) -> str:
     """ref 名或 digest 都接受;digest 形态优先按 digest 解析。"""
     if ref_or_digest.startswith("sha256:"):
@@ -747,6 +1192,36 @@ def _resolve_snapshot(repository: ContentRepository, ref_or_digest: str) -> str:
         return repository.get_ref(ref_or_digest)
     except RepositoryError as exc:
         raise ImportError_(f"cannot resolve snapshot {ref_or_digest!r}: {exc}") from exc
+
+
+def _snapshot_readiness(
+    body: Mapping,
+) -> tuple[bool, str | None, list[str], dict]:
+    """把 snapshot 兼容性与 portable 完整性分开;旧 v1 可读但不冒充可恢复。"""
+    snapshot_format = body.get("format")
+    if snapshot_format == PORTABLE_SNAPSHOT_V1:
+        reason = "legacy_snapshot_without_completeness"
+        return False, reason, [reason], {}
+    if snapshot_format != PORTABLE_SNAPSHOT_V2:
+        reason = "unsupported_snapshot_format"
+        return False, reason, [reason], {}
+    completeness = body.get("completeness")
+    if not isinstance(completeness, dict):
+        reason = "snapshot_completeness_missing"
+        return False, reason, [reason], {}
+    ready = completeness.get("portable_ready") is True
+    raw_reasons = completeness.get("readiness_reasons")
+    reasons = (
+        list(raw_reasons)
+        if isinstance(raw_reasons, list)
+        and all(isinstance(item, str) and item for item in raw_reasons)
+        else []
+    )
+    if ready:
+        reasons = []
+    elif not reasons:
+        reasons = ["snapshot_completeness_not_ready"]
+    return ready, reasons[0] if reasons else None, reasons, dict(completeness)
 
 
 def _iter_snapshot_records(
@@ -781,6 +1256,7 @@ def build_plan(
     config: AppConfig | None = None,
     mode: str = MODE_EMPTY,
     classification: "MergeClassification | None" = None,
+    request: "ImportRequest | None" = None,
 ) -> tuple[ImportPlan, dict, list[tuple[str, str, dict]]]:
     """阶段0 安全门:全链校验 + 计划产出;返回 (plan, snapshot body, records)。
 
@@ -796,6 +1272,13 @@ def build_plan(
     except RepositoryError as exc:
         raise ImportError_(f"snapshot {digest} rejected: {exc}") from exc
 
+    (
+        portable_ready,
+        readiness_reason,
+        readiness_reasons,
+        completeness,
+    ) = _snapshot_readiness(body)
+
     conflicts: list[str] = []
     selector = body["selector"]
     if selector["partial"] and not allow_partial and mode == MODE_EMPTY:
@@ -810,6 +1293,38 @@ def build_plan(
         records = _iter_snapshot_records(repository, body)
     except (RepositoryError, PolicyError) as exc:
         raise ImportError_(f"record chain verification failed: {exc}") from exc
+
+    required_source_roots: set[str] = set()
+    vendored_source_parts = 0
+    vendored_source_bytes = 0
+    global_config_files = 0
+    global_config_bytes = 0
+    from .source_library import SourceReferenceError, parse_source_ref
+
+    for kind, _record_digest, record in records:
+        if kind == "part_core" and "source_blob" in record:
+            try:
+                source_ref = parse_source_ref(record.get("source_ref"))
+            except SourceReferenceError as exc:
+                raise ImportError_(
+                    f"vendored part {record.get('id')} has invalid source_ref: {exc}"
+                ) from exc
+            required_source_roots.add(source_ref.root_id)
+            vendored_source_parts += 1
+            vendored_source_bytes += int(record.get("size_bytes") or 0)
+        elif kind == "user_config" and record.get("kind") in _GLOBAL_CONFIG_KINDS:
+            global_config_files += 1
+            global_config_bytes += int(record.get("size_bytes") or 0)
+    provided_source_roots = (
+        {key for key, _path, _identity in request.target_source_roots}
+        if request is not None else set()
+    )
+    missing_source_roots = sorted(required_source_roots - provided_source_roots)
+    if request is not None and missing_source_roots:
+        conflicts.append(
+            "vendored source media requires missing --source-root mappings: "
+            + ", ".join(missing_source_roots)
+        )
 
     bytes_to_write = 0
     for blob in body["blob_refs"]:
@@ -898,6 +1413,7 @@ def build_plan(
         "selector": selector,
         "schema_version": SCHEMA_VERSION,
         "mode": mode,
+        "request_digest": request.digest if request is not None else None,
     }
     plan = ImportPlan(
         snapshot_digest=digest,
@@ -911,6 +1427,19 @@ def build_plan(
         mode=mode,
         merge_conflicts=merge_conflicts,
         user_state_kept=user_state_kept,
+        request_digest=request.digest if request is not None else "",
+        snapshot_format=str(body.get("format") or ""),
+        portable_ready=portable_ready,
+        readiness_reason=readiness_reason,
+        readiness_reasons=readiness_reasons,
+        completeness=completeness,
+        config_root=request.target_config_root if request is not None else "",
+        required_source_roots=sorted(required_source_roots),
+        missing_source_root_mappings=missing_source_roots,
+        global_config_files=global_config_files,
+        global_config_bytes=global_config_bytes,
+        vendored_source_parts=vendored_source_parts,
+        vendored_source_bytes=vendored_source_bytes,
     )
     return plan, body, records
 
@@ -1010,6 +1539,8 @@ class _Materializer:
         journal: ContentImportJournal,
         import_id: str,
         processed: set[str],
+        config_root: Path,
+        source_roots: Mapping[str, Path],
         commit_each: bool = True,
     ) -> None:
         self.repository = repository
@@ -1018,6 +1549,8 @@ class _Materializer:
         self.journal = journal
         self.import_id = import_id
         self.processed = processed
+        self.config_root = Path(config_root)
+        self.source_roots = {key: Path(value) for key, value in source_roots.items()}
         # merge 直写活动库时整批裹在一个显式事务里,逐条 commit 会当场把它提交掉,
         # 让"中途失败不留半写状态"这条不变量失效。
         self.commit_each = commit_each
@@ -1058,8 +1591,8 @@ class _Materializer:
         handler = getattr(self, f"_put_{kind}", None)
         if handler is None:
             raise ImportError_(f"no materializer for record kind {kind!r}")
-        natural_key = await handler(body) if asyncio.iscoroutinefunction(handler) \
-            else handler(body)
+        result = handler(body)
+        natural_key = await result if asyncio.iscoroutine(result) else result
         if self.commit_each:
             self.connection.commit()
         self.stats["records_inserted"] += 1
@@ -1090,7 +1623,7 @@ class _Materializer:
         )
         return body["id"]
 
-    def _put_job_core(self, body: dict) -> str:
+    async def _put_job_core(self, body: dict) -> str:
         # status/progress/error 刻意写初始值:真值由阶段3 投影产生(§2.9)。
         self.connection.execute(
             """INSERT OR IGNORE INTO jobs
@@ -1111,6 +1644,22 @@ class _Materializer:
                 body.get("parent_job_id"),
             ),
         )
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        job_doc = {
+            "id": body["id"],
+            "url": body.get("url"),
+            "source": body.get("source"),
+            "content_type": body["content_type"],
+            "title": body.get("title"),
+            "document_kind": body.get("document_kind") or None,
+            "domain": body.get("domain", "general"),
+            "style_tags": body.get("style_tags") or [],
+            "created_at": body["created_at"],
+            "flags": meta.get("flags") if isinstance(meta.get("flags"), dict) else {},
+        }
+        if isinstance(meta.get("creation_fingerprint"), str):
+            job_doc["creation_fingerprint"] = meta["creation_fingerprint"]
+        await self._merge_job_document(body["id"], "job.json", job_doc)
         return body["id"]
 
     def _put_job_user_state(self, body: dict) -> str:
@@ -1120,7 +1669,34 @@ class _Materializer:
         )
         return body["job_id"]
 
-    def _put_part_core(self, body: dict) -> str:
+    async def _put_part_core(self, body: dict) -> str:
+        source_blob = body.get("source_blob")
+        if source_blob is not None:
+            if source_blob != body.get("source_digest"):
+                raise ImportError_(
+                    f"part {body['id']} source_blob must equal source_digest"
+                )
+            from .source_library import SourceReferenceError, parse_source_ref
+
+            try:
+                source_ref = parse_source_ref(body.get("source_ref"))
+            except SourceReferenceError as exc:
+                raise ImportError_(
+                    f"part {body['id']} has invalid vendored source_ref: {exc}"
+                ) from exc
+            root = self.source_roots.get(source_ref.root_id)
+            if root is None:
+                raise ImportError_(
+                    f"part {body['id']} requires --source-root "
+                    f"{source_ref.root_id}=TARGET_DIR"
+                )
+            await self._publish_local_blob(
+                root,
+                source_ref.relative_path,
+                source_blob,
+                body["size_bytes"],
+                label=f"source root {source_ref.root_id}",
+            )
         self.connection.execute(
             """INSERT OR IGNORE INTO job_parts
                (id, job_id, part_index, title, source_url, source_ref,
@@ -1133,6 +1709,57 @@ class _Materializer:
                 body.get("duration_ms"), self._json_text(body.get("meta")),
                 body["created_at"], body.get("updated_at", body["created_at"]),
             ),
+        )
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        part_doc = {
+            "job_id": body["job_id"],
+            "part_id": body["id"],
+            "part_index": body["part_index"],
+            "title": body.get("title"),
+            "url": body.get("source_url"),
+            "source": meta.get("source"),
+            "content_type": "video",
+        }
+        if body.get("source_ref"):
+            part_doc.update({
+                "source_ref": body["source_ref"],
+                "source_digest": body.get("source_digest"),
+                "size_bytes": body.get("size_bytes"),
+            })
+        raw = await self.storage.read_file(body["job_id"], "job.json")
+        if not raw:
+            raise ImportError_(f"job.json missing before part {body['id']} restore")
+        try:
+            job_doc = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as exc:
+            raise ImportError_(f"job {body['job_id']} job.json is invalid") from exc
+        if not isinstance(job_doc, dict):
+            raise ImportError_(f"job {body['job_id']} job.json must be an object")
+        parts = job_doc.get("parts")
+        if parts is None:
+            parts = []
+            job_doc["parts"] = parts
+        if not isinstance(parts, list) or any(not isinstance(item, dict) for item in parts):
+            raise ImportError_(f"job {body['job_id']} job.json parts is invalid")
+        existing = next(
+            (item for item in parts if item.get("part_id") == body["id"]), None,
+        )
+        if existing is None:
+            parts.append(part_doc)
+            parts.sort(key=lambda item: int(item.get("part_index") or 0))
+        else:
+            for key, value in part_doc.items():
+                if key in existing and existing[key] != value:
+                    raise ImportError_(
+                        f"job.json part {body['id']} field {key} conflicts with snapshot"
+                    )
+                existing[key] = value
+        await self.storage.write_file(
+            body["job_id"], "job.json",
+            json.dumps(job_doc, ensure_ascii=False, sort_keys=True).encode("utf-8"),
+        )
+        await self._merge_job_document(
+            body["job_id"], f"parts/{body['id']}/job.json", part_doc,
         )
         return f"{body['job_id']}/{body['id']}"
 
@@ -1231,13 +1858,22 @@ class _Materializer:
         return body["exec_id"]
 
     def _put_ai_task_log(self, body: dict) -> str:
+        expected = _digest_of("ai_task_log", body)
+        existing = _target_ledger_digest(self.connection, "ai_task_log", body)
+        if existing is not None:
+            if existing == expected:
+                return f"{body['task_id']}/{body['created_at']}/{body['exec_id']}"
+            raise ImportError_(
+                "ai_task_log composite identity already exists with different or "
+                "duplicated content"
+            )
         columns = sorted(body)
         placeholders = ",".join("?" for _ in columns)
         self.connection.execute(
-            f"INSERT OR IGNORE INTO ai_task_logs ({','.join(columns)}) VALUES ({placeholders})",
+            f"INSERT INTO ai_task_logs ({','.join(columns)}) VALUES ({placeholders})",
             tuple(body[column] for column in columns),
         )
-        return f"{body['task_id']}/{body['created_at']}"
+        return f"{body['task_id']}/{body['created_at']}/{body['exec_id']}"
 
     def _put_failure_event(self, body: dict) -> str:
         # 无 step_failure_events 表(P2b 才建):本单元只把失败审计留在仓库,
@@ -1253,13 +1889,360 @@ class _Materializer:
         return body["job_id"]
 
     async def _put_user_config(self, body: dict) -> str:
-        """用户维护的配置文件回写对象存储(当前只有集合 terms.json)。
+        """用户配置按明确写面恢复;全局配置绝不落进 Job 对象根。
 
         走 _publish_object 的 read-back 校验:异 hash 拒绝覆盖,不猜哪份更新。
         """
+        kind = body["kind"]
+        if kind == "job_ai_config":
+            await self._restore_job_ai_config(body)
+            return body["path"]
+        if kind in _GLOBAL_CONFIG_KINDS:
+            path = self._validated_config_path(kind, body["path"])
+            await self._publish_local_blob(
+                self.config_root,
+                path,
+                body["blob"],
+                body["size_bytes"],
+                label="config root",
+            )
+            return body["path"]
+        if kind != "domain_config":
+            raise ImportError_(f"unsupported user_config kind {kind!r}")
         prefix, _, rel = body["path"].rpartition("/")
         await self._publish_object(prefix, rel, body["blob"], body["size_bytes"])
         return body["path"]
+
+    async def _merge_job_document(
+        self, job_id: str, rel: str, fields: Mapping,
+    ) -> None:
+        raw = await self.storage.read_file(job_id, rel)
+        if raw:
+            try:
+                document = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as exc:
+                raise ImportError_(f"{job_id}/{rel} is invalid JSON") from exc
+            if not isinstance(document, dict):
+                raise ImportError_(f"{job_id}/{rel} must be a JSON object")
+        else:
+            document = {}
+        for key, value in fields.items():
+            if key in document and document[key] != value:
+                raise ImportError_(
+                    f"{job_id}/{rel} field {key} conflicts with snapshot"
+                )
+            document[key] = value
+        await self.storage.write_file(
+            job_id,
+            rel,
+            json.dumps(document, ensure_ascii=False, sort_keys=True).encode("utf-8"),
+        )
+
+    async def _read_small_blob(self, digest: str, size_bytes: int) -> bytes:
+        if size_bytes > 4 * 1024 * 1024:
+            raise ImportError_(f"configuration blob {digest} exceeds 4 MiB")
+        chunks: list[bytes] = []
+        total = 0
+        with self.repository.open_blob_stream(digest) as source:
+            while True:
+                chunk = await asyncio.to_thread(source.read, _CHUNK_SIZE)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+        if total != size_bytes:
+            raise ImportError_(
+                f"configuration blob {digest} size mismatch ({total} != {size_bytes})"
+            )
+        data = b"".join(chunks)
+        observed = "sha256:" + hashlib.sha256(data).hexdigest()
+        if observed != digest:
+            raise ImportError_(f"configuration blob {digest} failed digest verification")
+        return data
+
+    async def _restore_job_ai_config(self, body: Mapping) -> None:
+        path = PurePosixPath(body["path"])
+        if (
+            len(path.parts) != 3
+            or path.parts[0] != "jobs"
+            or path.parts[2] != "ai-config.json"
+        ):
+            raise ImportError_(f"invalid job_ai_config path {body['path']!r}")
+        job_id = path.parts[1]
+        data = await self._read_small_blob(body["blob"], body["size_bytes"])
+        try:
+            fields = json.loads(data)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as exc:
+            raise ImportError_(f"job AI config for {job_id} is invalid JSON") from exc
+        if not isinstance(fields, dict):
+            raise ImportError_(f"job AI config for {job_id} must be an object")
+        unknown = sorted(set(fields) - _JOB_AI_CONFIG_KEYS)
+        if unknown:
+            raise ImportError_(
+                f"job AI config for {job_id} contains forbidden keys {unknown}"
+            )
+        ai_overrides = fields.get("ai_overrides")
+        if ai_overrides is not None:
+            if not isinstance(ai_overrides, dict):
+                raise ImportError_(f"job AI config for {job_id} ai_overrides is invalid")
+            from .ai_routing import parse_ai_override
+
+            for step in ai_overrides:
+                if not isinstance(step, str) or not step:
+                    raise ImportError_(
+                        f"job AI config for {job_id} has an invalid AI step"
+                    )
+                _provider, reason = parse_ai_override(
+                    {"ai_overrides": ai_overrides}, step,
+                )
+                if reason is not None:
+                    raise ImportError_(
+                        f"job AI config for {job_id} ai_overrides.{step}: {reason}"
+                    )
+        prompt_overrides = fields.get("prompt_overrides")
+        if prompt_overrides is not None:
+            if not isinstance(prompt_overrides, dict):
+                raise ImportError_(
+                    f"job AI config for {job_id} prompt_overrides is invalid"
+                )
+            from .prompt_resolver import PromptResolutionError, parse_prompt_override
+
+            for step in prompt_overrides:
+                if not isinstance(step, str) or not step:
+                    raise ImportError_(
+                        f"job AI config for {job_id} has an invalid prompt step"
+                    )
+                try:
+                    parse_prompt_override(prompt_overrides, step)
+                except PromptResolutionError as exc:
+                    raise ImportError_(
+                        f"job AI config for {job_id} prompt_overrides.{step}: {exc}"
+                    ) from exc
+        if "ai_config" in fields and not isinstance(fields["ai_config"], dict):
+            raise ImportError_(f"job AI config for {job_id} ai_config is invalid")
+        await self._merge_job_document(job_id, "job.json", fields)
+
+    @staticmethod
+    def _validated_config_path(kind: str, raw: str) -> str:
+        parts = _relative_parts(raw, label="global config")
+        if parts[0] != "prompts":
+            raise ImportError_(f"global config path {raw!r} is outside prompts/")
+        if kind == "prompts":
+            if len(parts) != 2 or not parts[1].endswith(".md"):
+                raise ImportError_(
+                    f"prompt config path {raw!r} must be prompts/<name>.md"
+                )
+        elif (
+            kind not in {"profiles", "styles", "templates"}
+            or len(parts) < 3
+            or parts[1] != kind
+        ):
+            raise ImportError_(
+                f"global config path {raw!r} does not match kind {kind!r}"
+            )
+        # --config-root 已表示目标 prompts 根,不能再多写一层 prompts/prompts。
+        return PurePosixPath(*parts[1:]).as_posix()
+
+    async def _publish_local_blob(
+        self,
+        root: Path,
+        rel: str,
+        digest: str,
+        size_bytes: int,
+        *,
+        label: str,
+    ) -> None:
+        """create-if-absent 发布本地 blob;拒绝路径穿越、symlink 与异内容覆盖。"""
+        verified_size = await asyncio.to_thread(self.repository.verify_blob, digest)
+        if verified_size != size_bytes:
+            raise ImportError_(
+                f"{label} blob {digest} size mismatch ({verified_size} != {size_bytes})"
+            )
+
+        def publish() -> tuple[bool, int]:
+            root_fd = _open_controlled_directory(root, label=label, create=True)
+            root_identity = os.fstat(root_fd)
+
+            def validate_root() -> None:
+                try:
+                    current = os.stat(root, follow_symlinks=False)
+                except OSError as exc:
+                    raise ImportError_(
+                        f"{label} root changed during publication: {root}"
+                    ) from exc
+                if (
+                    not stat.S_ISDIR(current.st_mode)
+                    or (current.st_dev, current.st_ino)
+                    != (root_identity.st_dev, root_identity.st_ino)
+                    or _opened_directory_aliases_tree(
+                        root_fd, self.repository.root,
+                    )
+                ):
+                    raise ImportError_(
+                        f"{label} root changed or aliases the content repository: {root}"
+                    )
+
+            temporary = ""
+            parent_fd: int | None = None
+            try:
+                validate_root()
+                parent_fd, target_name = _open_relative_parent(
+                    root_fd, rel, label=label, create=True,
+                )
+                temporary = f".{target_name}.import-{uuid.uuid4().hex}"
+
+                def validate_parent() -> None:
+                    validate_root()
+                    try:
+                        current_parent_fd, current_target_name = _open_relative_parent(
+                            root_fd, rel, label=label, create=False,
+                        )
+                    except (OSError, ImportError_) as exc:
+                        raise ImportError_(
+                            f"{label} parent path changed during publication: {rel}"
+                        ) from exc
+                    try:
+                        opened_parent = os.fstat(parent_fd)
+                        current_parent = os.fstat(current_parent_fd)
+                        path_changed = (
+                            current_target_name != target_name
+                            or (opened_parent.st_dev, opened_parent.st_ino)
+                            != (current_parent.st_dev, current_parent.st_ino)
+                        )
+                    finally:
+                        os.close(current_parent_fd)
+                    if (
+                        path_changed
+                        or not _opened_directory_descends_from(parent_fd, root_identity)
+                        or _opened_directory_aliases_tree(
+                            parent_fd, self.repository.root,
+                        )
+                    ):
+                        raise ImportError_(
+                            f"{label} parent moved outside its root or into the "
+                            f"content repository: {rel}"
+                        )
+
+                validate_parent()
+                try:
+                    existing_fd = os.open(
+                        target_name,
+                        os.O_RDONLY | os.O_NOFOLLOW,
+                        dir_fd=parent_fd,
+                    )
+                except FileNotFoundError:
+                    existing_fd = None
+                if existing_fd is not None:
+                    try:
+                        if not stat.S_ISREG(os.fstat(existing_fd).st_mode):
+                            raise ImportError_(
+                                f"{label} target is not a regular file: {rel}"
+                            )
+                        observed = _hash_open_file(existing_fd)
+                    finally:
+                        os.close(existing_fd)
+                    if observed != digest:
+                        raise ImportError_(
+                            f"{label} target {rel} conflicts ({observed} != {digest})"
+                        )
+                    validate_parent()
+                    return False, 0
+
+                temp_fd = os.open(
+                    temporary,
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o640,
+                    dir_fd=parent_fd,
+                )
+                try:
+                    written = 0
+                    with self.repository.open_blob_stream(digest) as source:
+                        while True:
+                            chunk = source.read(_CHUNK_SIZE)
+                            if not chunk:
+                                break
+                            view = memoryview(chunk)
+                            while view:
+                                consumed = os.write(temp_fd, view)
+                                view = view[consumed:]
+                            written += len(chunk)
+                    os.fsync(temp_fd)
+                    if written != size_bytes or _hash_open_file(temp_fd) != digest:
+                        raise ImportError_(
+                            f"{label} staged blob verification failed: {rel}"
+                        )
+                    temporary_info = os.fstat(temp_fd)
+                finally:
+                    os.close(temp_fd)
+                validate_parent()
+                try:
+                    os.link(
+                        temporary,
+                        target_name,
+                        src_dir_fd=parent_fd,
+                        dst_dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError:
+                    validate_parent()
+                    raced_fd = os.open(
+                        target_name,
+                        os.O_RDONLY | os.O_NOFOLLOW,
+                        dir_fd=parent_fd,
+                    )
+                    try:
+                        same = (
+                            stat.S_ISREG(os.fstat(raced_fd).st_mode)
+                            and _hash_open_file(raced_fd) == digest
+                        )
+                    finally:
+                        os.close(raced_fd)
+                    if not same:
+                        raise ImportError_(
+                            f"{label} target raced with different content: {rel}"
+                        )
+                    validate_parent()
+                    return False, 0
+                os.fsync(parent_fd)
+                try:
+                    validate_parent()
+                except ImportError_:
+                    try:
+                        published = os.stat(
+                            target_name,
+                            dir_fd=parent_fd,
+                            follow_symlinks=False,
+                        )
+                        if (published.st_dev, published.st_ino) == (
+                            temporary_info.st_dev, temporary_info.st_ino,
+                        ):
+                            os.unlink(target_name, dir_fd=parent_fd)
+                            os.fsync(parent_fd)
+                    except FileNotFoundError:
+                        pass
+                    raise
+                return True, written
+            finally:
+                if parent_fd is not None:
+                    try:
+                        os.unlink(temporary, dir_fd=parent_fd)
+                        os.fsync(parent_fd)
+                    except FileNotFoundError:
+                        pass
+                    os.close(parent_fd)
+                os.close(root_fd)
+
+        try:
+            created, written = await asyncio.to_thread(publish)
+        except ImportError_:
+            raise
+        except OSError as exc:
+            raise ImportError_(f"{label} path is unsafe or unavailable: {rel}") from exc
+        if created:
+            self.stats["objects_written"] += 1
+            self.stats["bytes_written"] += written
+        else:
+            self.stats["objects_reused"] += 1
 
 
     async def _put_step_result(self, body: dict) -> str:
@@ -1364,6 +2347,7 @@ async def rebuild_projection(
     storage,
     config: AppConfig,
     job_ids: Sequence[str] | None = None,
+    commit_each: bool = True,
 ) -> dict:
     """阶段3:按当前 pipeline 重投影 job_steps 与 jobs 聚合状态。
 
@@ -1414,10 +2398,24 @@ async def rebuild_projection(
                 outcome.reasons.get(REASON_UNKNOWN_PIPELINE, 0) + 1
             )
             _apply_job_aggregate(connection, job_id, {}, [])
-            connection.commit()
+            if commit_each:
+                connection.commit()
             continue
         steps_list = pipeline_cfg.get("steps", [])
         expanded = expand_pipeline_steps(steps_list, parts)
+        desired_steps = {
+            (str(cfg.get("scope_key", "job")), str(cfg["template_step"]))
+            for cfg in expanded.values()
+        }
+        for stale in connection.execute(
+            "SELECT scope_key, step FROM job_steps WHERE job_id=?", (job_id,),
+        ).fetchall():
+            key = (str(stale[0]), str(stale[1]))
+            if key not in desired_steps:
+                connection.execute(
+                    "DELETE FROM job_steps WHERE job_id=? AND scope_key=? AND step=?",
+                    (job_id, *key),
+                )
         try:
             style_tags = json.loads(job_row["style_tags"] or "[]")
         except ValueError:
@@ -1449,9 +2447,11 @@ async def rebuild_projection(
             if reason:
                 outcome.reasons[reason] = outcome.reasons.get(reason, 0) + 1
         _apply_job_aggregate(connection, job_id, statuses, list(expanded.values()))
-        connection.commit()
+        if commit_each:
+            connection.commit()
     _rebuild_collection_counts(connection)
-    connection.commit()
+    if commit_each:
+        connection.commit()
     return {
         "steps": outcome.steps, "done": outcome.done, "skipped": outcome.skipped,
         "waiting": outcome.waiting, "reasons": outcome.reasons,
@@ -1472,7 +2472,9 @@ def _upsert_step_row(
         """INSERT INTO job_steps (job_id, scope_key, step, status, pool, meta)
            VALUES (?,?,?,?,?,?)
            ON CONFLICT(job_id, scope_key, step) DO UPDATE SET
-             status=excluded.status, pool=excluded.pool, meta=excluded.meta""",
+             status=excluded.status, pool=excluded.pool,
+             input_hash=NULL, worker_id=NULL, started_at=NULL, finished_at=NULL,
+             duration_sec=NULL, meta=excluded.meta, error=NULL, retries=0""",
         (
             job_id, cfg.get("scope_key", "job"), cfg["template_step"],
             status.value, str(cfg.get("pool") or ""), meta,
@@ -1488,6 +2490,156 @@ async def _sha256_object(storage, job_id: str, rel: str) -> str | None:
     async for chunk in stream:
         hasher.update(chunk)
     return "sha256:" + hasher.hexdigest()
+
+
+async def _sha256_local(root: Path, rel: str) -> str | None:
+    return await asyncio.to_thread(
+        _hash_controlled_local, root, rel, label="local restore root",
+    )
+
+
+async def _materialized_record_matches(
+    connection: sqlite3.Connection,
+    storage,
+    repository: ContentRepository,
+    config_root: Path,
+    source_roots: Mapping[str, Path],
+    kind: str,
+    digest: str,
+    body: Mapping,
+) -> bool:
+    """逐 record 证明目标事实与快照摘要一致;续跑不信任 journal 自报。"""
+    if kind == "job_core":
+        return _target_job_core_digest(connection, body["id"]) == digest
+    if kind == "part_core":
+        matches = _target_part_core_digest(
+            connection, body["job_id"], body["id"],
+            include_source_blob="source_blob" in body,
+        ) == digest
+        if not matches or "source_blob" not in body:
+            return matches
+        from .source_library import SourceReferenceError, parse_source_ref
+
+        try:
+            source_ref = parse_source_ref(body.get("source_ref"))
+        except SourceReferenceError:
+            return False
+        root = source_roots.get(source_ref.root_id)
+        return root is not None and await _sha256_local(
+            Path(root), source_ref.relative_path,
+        ) == body["source_blob"]
+    if kind == "job_user_state":
+        row = connection.execute(
+            "SELECT collection_id FROM jobs WHERE id=?", (body["job_id"],),
+        ).fetchone()
+        if row is None:
+            return False
+        current = {
+            "job_id": body["job_id"],
+            "collection_id": row[0],
+            "revision": _user_state_revision(row[0], body["job_id"]),
+        }
+        return _digest_of(kind, current) == digest
+    if kind == "step_result":
+        manifest = await read_valid_manifest(
+            storage, body["job_id"], body["scope_key"], body["step"],
+        )
+        if manifest is None or manifest != body["manifest"]:
+            return False
+        part_id = manifest["scope"]["part_id"]
+        prefix = f"parts/{part_id}/" if part_id else ""
+        for entry in manifest["outputs"]:
+            if await _sha256_object(
+                storage, body["job_id"], prefix + entry["path"],
+            ) != entry["sha256"]:
+                return False
+        return _digest_of(kind, {
+            "job_id": body["job_id"],
+            "scope_key": body["scope_key"],
+            "step": body["step"],
+            "manifest": manifest,
+            "output_blobs": {
+                entry["path"]: entry["sha256"] for entry in manifest["outputs"]
+            },
+        }) == digest
+    if kind == "user_config":
+        if body["kind"] == "job_ai_config":
+            path = PurePosixPath(body["path"])
+            if len(path.parts) != 3 or path.parts[0] != "jobs":
+                return False
+            if body["size_bytes"] > 4 * 1024 * 1024:
+                return False
+            try:
+                expected = json.loads(repository.read_blob(body["blob"]))
+            except (RepositoryError, json.JSONDecodeError, UnicodeDecodeError, TypeError):
+                return False
+            raw = await storage.read_file(path.parts[1], "job.json")
+            try:
+                observed = json.loads(raw) if raw else None
+            except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+                return False
+            return (
+                isinstance(expected, dict)
+                and isinstance(observed, dict)
+                and not (set(expected) - _JOB_AI_CONFIG_KEYS)
+                and all(observed.get(key) == value for key, value in expected.items())
+            )
+        if body["kind"] in _GLOBAL_CONFIG_KINDS:
+            try:
+                rel = _Materializer._validated_config_path(
+                    body["kind"], body["path"],
+                )
+            except ImportError_:
+                return False
+            return await _sha256_local(config_root, rel) == body["blob"]
+        prefix, _, rel = body["path"].rpartition("/")
+        return await _sha256_object(storage, prefix, rel) == body["blob"]
+    if kind == "study":
+        return _target_study_digest(connection, body) == digest
+    if kind in _LEDGER_LOOKUP:
+        return _target_ledger_digest(connection, kind, body) == digest
+    if kind in ("failure_event", "legacy_archive", "job_relation"):
+        # 这三类是便携仓库中的审计/关系事实,不投影为活动 DB 状态。
+        return True
+    raise ImportError_(f"no target closure verifier for record kind {kind!r}")
+
+
+async def _verify_materialized_closure(
+    connection: sqlite3.Connection,
+    storage,
+    repository: ContentRepository,
+    config_root: Path,
+    source_roots: Mapping[str, Path],
+    records: Sequence[tuple[str, str, dict]],
+    *,
+    expected: set[str] | None = None,
+) -> list[str]:
+    """全量校验应已落地的 record 与对象;返回首批不一致摘要。"""
+    mismatches: list[str] = []
+    for kind, digest, body in records:
+        if expected is not None and digest not in expected:
+            continue
+        if not await _materialized_record_matches(
+            connection, storage, repository, config_root, source_roots,
+            kind, digest, body,
+        ):
+            mismatches.append(f"{kind}:{_natural_key_of(kind, body)}:{digest}")
+            if len(mismatches) >= 20:
+                break
+    return mismatches
+
+
+def _job_ids_for_digests(
+    records: Sequence[tuple[str, str, dict]], digests: set[str],
+) -> set[str]:
+    result: set[str] = set()
+    for kind, digest, body in records:
+        if digest not in digests:
+            continue
+        job_id = body.get("job_id") or (body.get("id") if kind == "job_core" else None)
+        if isinstance(job_id, str) and job_id:
+            result.add(job_id)
+    return result
 
 
 async def _project_step(
@@ -1550,10 +2702,10 @@ def _apply_job_aggregate(
     finished = sum(1 for value in statuses.values() if value in ("done", "skipped"))
     if statuses and finished == len(statuses):
         status = "done"
-    elif finished:
-        status = "processing"
     else:
-        status = "pending"
+        # 恢复只重建可复用状态,不等于授权开始执行。显式 activate 后才进入 pending,
+        # scheduler 启动恢复也因此不会把刚导入的任务自动跑起来。
+        status = "pending_activation"
     connection.execute(
         "UPDATE jobs SET status=?, progress_pct=?, error=NULL, updated_at=? WHERE id=?",
         (status, progress, _now(), job_id),
@@ -1586,9 +2738,8 @@ async def rebuild_search_index(
     盖住了另一个 bug。这里把归属显式交还给 scheduler,并报告待补齐的 Job 数,
     让"恢复后启动 scheduler 即补齐"成为可验证的步骤而不是巧合。
 
-    concept_occurrences 仍无重放通道:reconcile 只过 index_note 效果
-    (job_finalizer.py:75-78),collect_glossary 被过滤掉。它需要单独的重建入口,
-    不在本单元内造。
+    index_note 成功后会走纯 CPU concept occurrence 重放;它只替换出现投影,
+    不新增术语、不触发概念综合或其他 AI 副作用。
     """
     pending = [
         row[0] for row in connection.execute(
@@ -1600,11 +2751,10 @@ async def rebuild_search_index(
         "notes_indexed": 0,
         "owned_by": "scheduler.JobFinalizer.reconcile_completion_effects",
         "awaiting_backfill": pending,
-        "deferred": ["concept_occurrences"],
+        "deferred": [],
         "note": (
             "start the scheduler against this database to backfill notes_fts5 / "
-            "note_chunks / canonical_evidence; concept_occurrences has no replay "
-            "channel yet"
+            "note_chunks / canonical_evidence / concept_occurrences"
         ),
     }
 
@@ -1666,6 +2816,84 @@ async def run_import(
     rebuild_index: bool = True,
     mode: str = MODE_EMPTY,
     apply_user_state: bool = False,
+    live_authorization: dict | None = None,
+    into_live: bool = False,
+    allow_incomplete_portable_snapshot: bool = False,
+    config_root: Path | None = None,
+    source_roots: Mapping[str, Path] | None = None,
+    expected_source_root_identities: Mapping[str, str] | None = None,
+) -> ImportResult:
+    """按 DB + storage namespace 独占后执行导入,所有调用方共用同一道门。"""
+    live_resources: tuple[str, ...] = ()
+    if live_authorization is not None:
+        raw_resources = live_authorization.get("maintenance_resources", ())
+        if not isinstance(raw_resources, (list, tuple)) or not all(
+            isinstance(item, str) for item in raw_resources
+        ):
+            raise MaintenanceLockError("live authorization has invalid maintenance resources")
+        live_resources = tuple(raw_resources)
+    selected_config_root = Path(
+        config_root
+        if config_root is not None
+        else DEFAULT_LIVE_CONFIG_ROOT if into_live else DEFAULT_CONFIG_STAGING
+    )
+    if not selected_config_root.is_absolute():
+        raise ImportError_("config root must be an absolute path")
+    selected_config_root = Path(os.path.abspath(selected_config_root))
+    normalized_source_roots = _normalized_source_roots(source_roots)
+    source_root_identities = _verify_source_root_identities(
+        normalized_source_roots, expected_source_root_identities,
+    )
+    extra_resources = set(live_resources)
+    extra_resources.update(path_resources("config-root", selected_config_root))
+    for root in normalized_source_roots.values():
+        extra_resources.update(path_resources("source-root", root))
+    # 一次按全资源排序拿齐锁,避免先拿 target 再拿 config/source/live root 的 ABBA 死锁。
+    with acquire_import_target_lease(
+        db_path=target_db_path,
+        storage=storage,
+        extra_resources=extra_resources,
+    ):
+        return await _run_import_locked(
+            repository=repository,
+            snapshot=snapshot,
+            target_db_path=target_db_path,
+            storage=storage,
+            journal_path=journal_path,
+            target_generation=target_generation,
+            config_dir=config_dir,
+            allow_partial=allow_partial,
+            verify_blobs=verify_blobs,
+            rebuild_index=rebuild_index,
+            mode=mode,
+            apply_user_state=apply_user_state,
+            into_live=into_live,
+            allow_incomplete_portable_snapshot=allow_incomplete_portable_snapshot,
+            config_root=selected_config_root,
+            source_roots=normalized_source_roots,
+            source_root_identities=source_root_identities,
+        )
+
+
+async def _run_import_locked(
+    *,
+    repository: ContentRepository,
+    snapshot: str,
+    target_db_path: Path,
+    storage,
+    journal_path: Path,
+    target_generation: str,
+    config_dir: Path | None = None,
+    allow_partial: bool = False,
+    verify_blobs: bool = True,
+    rebuild_index: bool = True,
+    mode: str = MODE_EMPTY,
+    apply_user_state: bool = False,
+    into_live: bool = False,
+    allow_incomplete_portable_snapshot: bool = False,
+    config_root: Path | None = None,
+    source_roots: Mapping[str, Path] | None = None,
+    source_root_identities: Mapping[str, str] | None = None,
 ) -> ImportResult:
     """导入全流程(§2.10 阶段0-4);失败抛 ImportError_ 且不切换任何配置。
 
@@ -1704,14 +2932,75 @@ async def run_import(
     journal: ContentImportJournal | None = None
     try:
         journal = ContentImportJournal(journal_path)
-        # 幂等短路与绑定核对都在 try 之外的语义位置:早期版本把这条提前返回
-        # 放进 try 内,except 会把 status=complete 的成功证据就地改写成 failed。
-        done = journal.find(resolved, target_generation)
-        if done is not None and done.status == STATUS_COMPLETE and mode == MODE_EMPTY:
-            raise _AlreadyImported(
-                f"snapshot {resolved} already imported into generation "
-                f"{target_generation} (import {done.import_id}); nothing to do"
+        config = load_config(config_dir) if config_dir else load_config()
+        selected_config_root = Path(
+            config_root
+            if config_root is not None
+            else DEFAULT_LIVE_CONFIG_ROOT if into_live else DEFAULT_CONFIG_STAGING
+        )
+        if not selected_config_root.is_absolute():
+            raise ImportError_("config root must be an absolute path")
+        selected_config_root = Path(os.path.abspath(selected_config_root))
+        normalized_source_roots = _normalized_source_roots(source_roots)
+        actual_source_root_identities = _verify_source_root_identities(
+            normalized_source_roots, source_root_identities,
+        )
+        live_prompt_roots = {
+            Path(os.path.abspath(Path(config.prompts_dir))),
+            Path(os.path.abspath(Path(DEFAULT_LIVE_CONFIG_ROOT))),
+        }
+        if (
+            not into_live
+            and selected_config_root in live_prompt_roots
+        ):
+            raise ImportError_(
+                "isolated import refuses to write the active prompts root; use a "
+                "staging --config-root or authorize --into-live"
             )
+        target_path = str(target_db_path.resolve())
+        storage_identity = _storage_identity(storage)
+        incomplete_override = bool(
+            into_live
+            and allow_incomplete_portable_snapshot
+            and os.environ.get("FLORI_ACCEPT_INCOMPLETE_PORTABLE") == "1"
+        )
+        request = ImportRequest(
+            snapshot_digest=resolved,
+            target_db_path=target_path,
+            target_storage=storage_identity,
+            mode=mode,
+            apply_user_state=apply_user_state,
+            allow_partial=allow_partial,
+            schema_version=SCHEMA_VERSION,
+            config_digest=_config_digest(config),
+            target_config_root=str(selected_config_root),
+            target_source_roots=tuple(
+                (key, str(path), actual_source_root_identities[key])
+                for key, path in sorted(normalized_source_roots.items())
+            ),
+            allow_incomplete_portable_snapshot=incomplete_override,
+        )
+        # 幂等短路必须先核对整个请求和物理目标;同 generation
+        # 换库或换桶时不得把旧 complete 当作新目标的成功证据。
+        done = journal.find(resolved, target_generation)
+        completed_replay = False
+        if done is not None and done.status == STATUS_COMPLETE and mode == MODE_EMPTY:
+            current_token = _target_binding_token(target_db_path)
+            if (
+                not done.request_digest
+                or done.request_digest != request.digest
+                or done.mode != mode
+                or done.target_db_path != target_path
+                or not done.target_token
+                or current_token != done.target_token
+                or done.target_storage != storage_identity
+            ):
+                raise ImportError_(
+                    f"completed journal import {done.import_id} is bound to a different "
+                    "database, storage namespace, mode, or import policy; use a new "
+                    "--target-generation"
+                )
+            completed_replay = True
         replay_merge = (
             mode == MODE_MERGE and done is not None and done.status == STATUS_COMPLETE
         )
@@ -1721,44 +3010,45 @@ async def run_import(
             done = None
         # 续跑资格:条目处于未完成态、有已登记进度、且目标库绑定 token 仍然一致。
         pending = done
-        processed_seen = bool(
-            journal.processed_digests(pending.import_id)
-        ) if pending is not None else False
         resuming = False
-        if pending is not None and processed_seen:
-            if pending.status in (STATUS_COMPLETE, STATUS_FAILED) and \
-                    pending.status == STATUS_COMPLETE:
-                resuming = False
-            else:
-                current_token = _target_binding_token(target_db_path)
+        if pending is not None and pending.status != STATUS_COMPLETE:
+            if not pending.request_digest or pending.request_digest != request.digest:
+                raise ImportError_(
+                    f"journal progress for {pending.import_id} belongs to a different "
+                    "database, storage namespace, mode, or import policy; use a new "
+                    "--target-generation"
+                )
+            current_token = _target_binding_token(target_db_path)
+            if pending.target_token:
                 same_target = (
-                    pending.target_db_path == str(Path(target_db_path).resolve())
-                    and pending.target_token
+                    pending.target_db_path == target_path
                     and current_token == pending.target_token
+                    and pending.target_storage == storage_identity
                 )
                 if not same_target:
-                    # 目标库被丢弃/换掉:旧进度描述的是另一个库,沿用它会把
-                    # 已登记 digest 全部跳过,得到空库却报成功。
                     raise ImportError_(
                         f"journal progress for {pending.import_id} was recorded against a "
-                        f"different target database (token mismatch); the previous target "
-                        "was discarded or replaced. Use a new --target-generation, or "
-                        "delete that journal entry, then re-run a full import"
+                        "different target database or storage namespace. Use a new "
+                        "--target-generation"
                     )
+                # 已绑定的 pending/failed 即使尚无 processed record 也必须续跑:
+                # 第一次 DB commit 与 journal mark 之间硬崩正是零进度窗口。
                 resuming = True
-        config = load_config(config_dir) if config_dir else load_config()
         classification: MergeClassification | None = None
         if mode == MODE_MERGE:
             classification = await _classify_for_merge(
                 repository=repository, snapshot=resolved,
                 target_db_path=target_db_path, storage=storage,
                 apply_user_state=apply_user_state,
+                config_root=selected_config_root,
+                source_roots=normalized_source_roots,
             )
         plan, body, records = build_plan(
             repository=repository, snapshot=resolved, target_db_path=target_db_path,
             allow_partial=allow_partial, verify_blobs=verify_blobs,
-            resuming=resuming, config=config, mode=mode,
+            resuming=resuming or completed_replay, config=config, mode=mode,
             classification=classification,
+            request=request,
         )
         if mode == MODE_MERGE:
             # merge 的冲突不是"停止导入",而是"这些单元不动";其余照常物化。
@@ -1766,15 +3056,49 @@ async def run_import(
                 item for item in plan.conflicts
                 if "merge conflicts" not in item
             ]
+        if into_live and not plan.portable_ready and not incomplete_override:
+            raise ImportError_(
+                "snapshot is not portable-ready "
+                f"({plan.readiness_reason}); writing a live target requires both "
+                "--allow-incomplete-portable-snapshot and "
+                "FLORI_ACCEPT_INCOMPLETE_PORTABLE=1"
+            )
         if not plan.ok:
             raise ImportError_(
                 "import plan has unresolved conflicts: " + "; ".join(plan.conflicts)
+            )
+        if completed_replay:
+            probe = sqlite3.connect(target_db_path)
+            probe.row_factory = sqlite3.Row
+            try:
+                mismatches = await _verify_materialized_closure(
+                    probe, storage, repository, selected_config_root,
+                    normalized_source_roots, records,
+                )
+                if mismatches:
+                    raise ImportError_(
+                        "completed journal target no longer matches the imported "
+                        f"snapshot: {mismatches[:5]}"
+                    )
+                database = Database(target_db_path)
+                try:
+                    verify_target(
+                        database=database, connection=probe, plan=plan,
+                        projection=done.summary.get("projection", {}),
+                    )
+                finally:
+                    database.close()
+            finally:
+                probe.close()
+            raise _AlreadyImported(
+                f"snapshot {resolved} already imported into generation "
+                f"{target_generation} (import {done.import_id}); nothing to do"
             )
         try:
             entry = journal.begin(
                 import_id=import_id, snapshot_digest=plan.snapshot_digest,
                 target_generation=target_generation, plan_digest=plan.plan_digest,
-                mode=mode,
+                request_digest=request.digest, mode=mode,
             )
         except ImportJournalError as exc:
             raise ImportError_(str(exc)) from exc
@@ -1794,17 +3118,27 @@ async def run_import(
         try:
             token = _target_binding_token(target_db_path)
             journal.bind_target(
-                import_id, str(Path(target_db_path).resolve()), token,
+                import_id, target_path, token, storage_identity,
             )
-            processed = journal.processed_digests(import_id) if resuming else set()
+            actions = journal.processed_actions(import_id) if resuming else {}
+            processed = set(actions)
+            resume_projection_jobs = _job_ids_for_digests(
+                records,
+                {digest for digest, action in actions.items() if action == ACTION_INSERT},
+            )
             if resuming:
-                # journal 说写过、库里却查不到,说明进度描述的不是这个库的现状:
-                # 抽样兜底,任一缺失即整体作废重来,不带着假进度往下走。
-                missing = _sample_missing_records(connection, records, processed)
-                if missing:
+                must_exist = {
+                    digest for digest, action in actions.items()
+                    if action in (ACTION_INSERT, ACTION_NOOP)
+                }
+                mismatches = await _verify_materialized_closure(
+                    connection, storage, repository, selected_config_root,
+                    normalized_source_roots, records, expected=must_exist,
+                )
+                if mismatches:
                     _log.warning(
                         "content_import_progress_invalidated",
-                        import_id=import_id, sample=missing[:3],
+                        import_id=import_id, mismatches=mismatches[:3],
                     )
                     journal.clear_records(import_id)
                     processed = set()
@@ -1814,67 +3148,90 @@ async def run_import(
             materializer = _Materializer(
                 repository=repository, connection=connection, storage=storage,
                 journal=journal, import_id=import_id, processed=processed,
+                config_root=selected_config_root,
+                source_roots=normalized_source_roots,
                 commit_each=classification is None,
             )
             selected = (
                 classification.clean_records(records)
                 if classification is not None else records
             )
-            if classification is None:
-                await materializer.materialize(selected)
-            else:
-                # merge 直写活动库:中途 fail-closed 不能留半写状态(比如一个
-                # status=pending、零 job_steps 的 Job,scheduler 会当真去调度)。
-                # 对象侧靠 manifest-last 本就安全,这里只需把 DB 侧裹进事务。
-                connection.execute("BEGIN")
-                try:
-                    await materializer.materialize(selected)
-                except BaseException:
-                    connection.rollback()
-                    # DB 侧整体回滚后,journal 里的 processed 条目描述的是已被撤销的
-                    # 写入;留着它们会让续跑跳过这些 record,得到"少了一半却报成功"。
-                    try:
-                        journal.clear_records(import_id)
-                    except ImportJournalError as journal_exc:  # noqa: BLE001
-                        _log.warning(
-                            "merge_rollback_journal_clear_failed", error=str(journal_exc),
+            merge_transaction = classification is not None
+            if merge_transaction:
+                connection.execute("BEGIN IMMEDIATE")
+            try:
+                if classification is not None:
+                    locked = await classify_merge(
+                        connection=connection, storage=storage,
+                        repository=repository,
+                        config_root=selected_config_root,
+                        source_roots=normalized_source_roots,
+                        records=records,
+                        apply_user_state=apply_user_state,
+                    )
+                    if locked.actions != classification.actions:
+                        raise ImportError_(
+                            "merge target changed between plan and locked write; retry "
+                            "after all writers are quiesced"
                         )
-                    raise
-                connection.commit()
-            if classification is None:
-                _assert_job_relations(records, materializer.handled)
-            else:
-                # merge 下部分单元被有意跳过,边集不完整是正常结果;但边仍必须
-                # 落在快照自己的 record 集合里,悬空引用照样是损坏。
-                _assert_job_relations(
-                    records, materializer.handled,
-                    extra_known={
-                        digest for digest, action in classification.actions.items()
-                        if action in (ACTION_NOOP, ACTION_SKIP, ACTION_CONFLICT)
-                    },
-                )
-                _record_skipped(journal, import_id, classification, records)
+                await materializer.materialize(selected)
+                if classification is None:
+                    _assert_job_relations(records, materializer.handled)
+                else:
+                    _assert_job_relations(
+                        records, materializer.handled,
+                        extra_known={
+                            digest for digest, action in classification.actions.items()
+                            if action in (ACTION_NOOP, ACTION_SKIP, ACTION_CONFLICT)
+                        },
+                    )
+                    _record_skipped(journal, import_id, classification, records)
 
-            journal.set_status(import_id, STATUS_PROJECTING)
-            projected_jobs = (
-                sorted(_materialized_job_ids(materializer, selected))
-                if classification is not None else None
-            )
-            projection = await rebuild_projection(
-                connection=connection, storage=storage, config=config,
-                job_ids=projected_jobs,
-            )
-            if projected_jobs is not None:
-                projection["projected_jobs"] = projected_jobs
-            if rebuild_index:
-                projection["search"] = await rebuild_search_index(
-                    database=database, connection=connection,
-                    storage=storage, config=config,
+                journal.set_status(import_id, STATUS_PROJECTING)
+                projected_jobs = None
+                if classification is not None:
+                    projected_jobs = sorted(
+                        _materialized_job_ids(materializer, selected)
+                        | resume_projection_jobs
+                    )
+                projection = await rebuild_projection(
+                    connection=connection, storage=storage, config=config,
+                    job_ids=projected_jobs, commit_each=not merge_transaction,
                 )
-            verification = verify_target(
-                database=database, connection=connection, plan=plan,
-                projection=projection,
-            )
+                if projected_jobs is not None:
+                    projection["projected_jobs"] = projected_jobs
+                if rebuild_index:
+                    projection["search"] = await rebuild_search_index(
+                        database=database, connection=connection,
+                        storage=storage, config=config,
+                    )
+                expected = None
+                if classification is not None:
+                    expected = {
+                        digest for digest, action in classification.actions.items()
+                        if action in (ACTION_INSERT, ACTION_NOOP)
+                    }
+                mismatches = await _verify_materialized_closure(
+                    connection, storage, repository, selected_config_root,
+                    normalized_source_roots, records, expected=expected,
+                )
+                if mismatches:
+                    raise ImportError_(
+                        "target does not contain the complete imported record/object "
+                        f"closure: {mismatches[:5]}"
+                    )
+                verification = verify_target(
+                    database=database, connection=connection, plan=plan,
+                    projection=projection,
+                )
+                if merge_transaction:
+                    connection.commit()
+            except BaseException:
+                if merge_transaction and connection.in_transaction:
+                    connection.rollback()
+                # merge 的对象发布不能随 SQLite 回滚。保留 insert action
+                # 让下次续跑强制投影相关 Job,并逐对象重验之前的进度。
+                raise
         finally:
             connection.close()
             database.close()
@@ -1928,18 +3285,15 @@ async def run_import(
 
 
 
-def _emit(payload: dict, result_file: str | None) -> None:
-    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2, default=str)
-    if result_file:
-        Path(result_file).parent.mkdir(parents=True, exist_ok=True)
-        Path(result_file).write_text(text + "\n", encoding="utf-8")
-    print(text)
+def _emit(payload: dict, result_file: ResultDestination | None) -> None:
+    emit_result(payload, result_file)
 
 
 def _plan_payload(plan: ImportPlan) -> dict:
     return {
         "snapshot_digest": plan.snapshot_digest,
         "plan_digest": plan.plan_digest,
+        "request_digest": plan.request_digest,
         "counts": plan.counts,
         "bytes_to_write": plan.bytes_to_write,
         "disk_free_bytes": plan.disk_free_bytes,
@@ -1951,6 +3305,18 @@ def _plan_payload(plan: ImportPlan) -> dict:
         "target_mode": plan.mode,
         "merge_conflicts": plan.merge_conflicts,
         "user_state_kept": plan.user_state_kept,
+        "snapshot_format": plan.snapshot_format,
+        "portable_ready": plan.portable_ready,
+        "readiness_reason": plan.readiness_reason,
+        "readiness_reasons": plan.readiness_reasons,
+        "completeness": plan.completeness,
+        "config_root": plan.config_root,
+        "required_source_roots": plan.required_source_roots,
+        "missing_source_root_mappings": plan.missing_source_root_mappings,
+        "global_config_files": plan.global_config_files,
+        "global_config_bytes": plan.global_config_bytes,
+        "vendored_source_parts": plan.vendored_source_parts,
+        "vendored_source_bytes": plan.vendored_source_bytes,
         "ok": plan.ok,
     }
 
@@ -1986,12 +3352,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="对象存储模式下的写入桶;隔离导入必须给出与生产桶不同的名字",
     )
     parser.add_argument(
+        "--config-root",
+        default=None,
+        help=(
+            "目标 prompts 根;隔离默认 /data/import-staging/prompts,"
+            "--into-live 默认 /data/prompts"
+        ),
+    )
+    parser.add_argument(
+        "--source-root",
+        action="append",
+        default=[],
+        metavar="ROOT_ID=TARGET_DIR",
+        help="vendored NAS 原媒体恢复映射;可重复指定且不猜生产路径",
+    )
+    parser.add_argument(
+        "--source-root-identity",
+        action="append",
+        default=[],
+        metavar="ROOT_ID=DEV:INO",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--into-live", action="store_true",
         help="确认本次要写线上面(库/产物根/生产桶);需配合 --dr-receipt",
     )
     parser.add_argument(
         "--dr-receipt", default=None,
         help="最近一次 exact DR 的 result JSON;写线上面时必需且会被解析校验",
+    )
+    parser.add_argument(
+        "--allow-incomplete-portable-snapshot",
+        action="store_true",
+        help=(
+            "接受不完整 portable snapshot 写入线上面;还必须显式设置 "
+            "FLORI_ACCEPT_INCOMPLETE_PORTABLE=1"
+        ),
     )
     parser.add_argument("--allow-partial", action="store_true")
     parser.add_argument("--skip-index-rebuild", action="store_true")
@@ -2000,9 +3396,83 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _parse_source_root_args(values: Sequence[str]) -> dict[str, Path]:
+    parsed: dict[str, Path] = {}
+    for value in values:
+        root_id, separator, raw_path = value.partition("=")
+        if not separator or not root_id or not raw_path or root_id in parsed:
+            raise ImportError_(
+                f"invalid --source-root {value!r}; expected unique ROOT_ID=TARGET_DIR"
+            )
+        parsed[root_id] = Path(raw_path)
+    return _normalized_source_roots(parsed)
+
+
+def _parse_source_root_identity_args(values: Sequence[str]) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for value in values:
+        root_id, separator, identity = value.partition("=")
+        pieces = identity.split(":")
+        if (
+            not separator or not root_id or root_id in parsed
+            or len(pieces) != 2 or any(not piece.isdigit() for piece in pieces)
+        ):
+            raise ImportError_(
+                f"invalid --source-root-identity {value!r}; expected unique ROOT_ID=DEV:INO"
+            )
+        parsed[root_id] = identity
+    return parsed
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    try:
+        source_roots = _parse_source_root_args(args.source_root)
+        expected_source_root_identities = _parse_source_root_identity_args(
+            args.source_root_identity,
+        )
+        if source_roots and not expected_source_root_identities:
+            raise ImportError_(
+                "--source-root requires wrapper-bound --source-root-identity values"
+            )
+        source_root_identities = _verify_source_root_identities(
+            source_roots, expected_source_root_identities,
+        )
+    except ImportError_ as exc:
+        emit_result({"ok": False, "error": str(exc)}, None)
+        return 2
+    config_root = Path(
+        args.config_root
+        or (DEFAULT_LIVE_CONFIG_ROOT if args.into_live else DEFAULT_CONFIG_STAGING)
+    )
+    if not config_root.is_absolute():
+        emit_result({"ok": False, "error": "--config-root must be absolute"}, None)
+        return 2
+
+    target_db = Path(args.db)
+    journal_path = Path(args.journal)
+    jobs_root = Path(args.jobs_dir)
+    try:
+        container_data_root = Path("/data") if Path("/data") in target_db.parents else None
+        target_roots = (
+            *((container_data_root,) if container_data_root else ()),
+            jobs_root,
+            config_root,
+            journal_path.parent,
+            *source_roots.values(),
+        )
+        ensure_output_roots_disjoint((Path(args.repo),), target_roots)
+        args.result_file = prepare_result_destination(
+            args.result_file,
+            args.repo,
+            protected_roots=target_roots,
+            protected_files=(target_db, journal_path),
+        )
+    except ResultFileError as exc:
+        emit_result({"ok": False, "error": str(exc)}, None)
+        return 2
 
     if args.list_imports:
         try:
@@ -2031,8 +3501,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         _emit({"ok": False, "error": str(exc)}, args.result_file)
         return 1
 
-    target_db = Path(args.db)
-    journal_path = Path(args.journal)
     if target_db.parent.resolve() in journal_path.resolve().parents or \
             journal_path.resolve().parent == target_db.parent.resolve():
         _emit({
@@ -2057,6 +3525,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         _emit({
             "ok": True, "mode": "verify-only",
             "snapshot_digest": plan.snapshot_digest,
+            "snapshot_format": plan.snapshot_format,
+            "portable_ready": plan.portable_ready,
+            "readiness_reason": plan.readiness_reason,
+            "completeness": plan.completeness,
             "records_verified": plan.counts["insert"],
             "blobs_verified": plan.counts["blobs"],
             "bytes_verified": plan.bytes_to_write,
@@ -2071,18 +3543,41 @@ def main(argv: Sequence[str] | None = None) -> int:
         # merge 下必须先分类再出计划,否则计划里的 plan_digest 与真实导入不一致。
         try:
             config = load_config(args.config_dir) if args.config_dir else load_config()
+            request = ImportRequest(
+                snapshot_digest=_resolve_snapshot(repository, args.snapshot),
+                target_db_path=str(target_db.resolve()),
+                target_storage=_storage_identity(storage),
+                mode=args.target,
+                apply_user_state=args.apply_user_state,
+                allow_partial=args.allow_partial,
+                schema_version=SCHEMA_VERSION,
+                config_digest=_config_digest(config),
+                target_config_root=str(Path(os.path.abspath(config_root))),
+                target_source_roots=tuple(
+                    (key, str(path), source_root_identities[key])
+                    for key, path in sorted(source_roots.items())
+                ),
+                allow_incomplete_portable_snapshot=bool(
+                    args.into_live
+                    and args.allow_incomplete_portable_snapshot
+                    and os.environ.get("FLORI_ACCEPT_INCOMPLETE_PORTABLE") == "1"
+                ),
+            )
             classification = None
             if args.target == MODE_MERGE:
                 classification = asyncio.run(_classify_for_merge(
                     repository=repository, snapshot=args.snapshot,
                     target_db_path=target_db, storage=storage,
                     apply_user_state=args.apply_user_state,
+                    config_root=Path(os.path.abspath(config_root)),
+                    source_roots=source_roots,
                 ))
             plan, _body, _records = build_plan(
                 repository=repository, snapshot=args.snapshot,
                 target_db_path=target_db, allow_partial=args.allow_partial,
                 verify_blobs=False, config=config, mode=args.target,
                 classification=classification,
+                request=request,
             )
         except (ImportError_, RepositoryError, PolicyError) as exc:
             _emit({"ok": False, "error": str(exc)}, args.result_file)
@@ -2096,7 +3591,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         authorization = assert_write_authorized(
             db_path=target_db, jobs_dir=Path(args.jobs_dir),
-            object_bucket=args.object_bucket, into_live=args.into_live,
+            object_bucket=args.object_bucket, config_root=config_root,
+            source_roots=list(source_roots.values()),
+            into_live=args.into_live,
             dr_receipt=args.dr_receipt or os.environ.get("FLORI_DR_RECEIPT") or None,
         )
     except LiveTargetError as exc:
@@ -2119,6 +3616,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             rebuild_index=not args.skip_index_rebuild,
             mode=args.target,
             apply_user_state=args.apply_user_state,
+            live_authorization=authorization,
+            into_live=args.into_live,
+            allow_incomplete_portable_snapshot=(
+                args.allow_incomplete_portable_snapshot
+            ),
+            config_root=config_root,
+            source_roots=source_roots,
+            expected_source_root_identities=source_root_identities,
         ))
     except _AlreadyImported as exc:
         # 重复导入是设计中的 no-op(§2.9),不是失败:自动化按退出码判生死,
@@ -2128,6 +3633,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "already_imported": True, "detail": str(exc),
         }, args.result_file)
         return 0
+    except (LiveTargetError, MaintenanceLockError) as exc:
+        _emit({"ok": False, "mode": "import", "error": str(exc)}, args.result_file)
+        return 2
     except (ImportError_, RepositoryError, PolicyError, ImportJournalError) as exc:
         _emit({"ok": False, "target_generation": generation, "error": str(exc)},
               args.result_file)
@@ -2144,7 +3652,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         "verification": result.verification,
         "merge": result.merge_report,
         "snapshot_guard": result.snapshot_guard,
-        "authorization": authorization,
+        "authorization": {
+            **authorization,
+            "portable_snapshot": {
+                "ready": result.plan.portable_ready,
+                "reason": result.plan.readiness_reason,
+                "override_requested": bool(
+                    args.allow_incomplete_portable_snapshot
+                ),
+                "environment_confirmed": (
+                    os.environ.get("FLORI_ACCEPT_INCOMPLETE_PORTABLE") == "1"
+                ),
+                "override_accepted": bool(
+                    args.into_live
+                    and not result.plan.portable_ready
+                    and args.allow_incomplete_portable_snapshot
+                    and os.environ.get("FLORI_ACCEPT_INCOMPLETE_PORTABLE") == "1"
+                ),
+            },
+            "config_root": str(Path(os.path.abspath(config_root))),
+            "source_roots": {
+                key: str(path) for key, path in sorted(source_roots.items())
+            },
+        },
     }, args.result_file)
     return 0
 

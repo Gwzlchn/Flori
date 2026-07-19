@@ -297,6 +297,48 @@ class DatabaseAggregates:
                     self._conn.rollback()
                 raise
 
+    def activate_imported_job(self, job_id: str) -> bool:
+        """只允许恢复态原子进入 pending;其他状态不被这个入口改写。"""
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                activated_at = _db._now_iso()
+                cursor = self._conn.execute(
+                    """UPDATE jobs
+                       SET status=?, error=NULL, updated_at=?
+                       WHERE id=? AND status=?""",
+                    (
+                        JobStatus.PENDING.value,
+                        activated_at,
+                        job_id,
+                        JobStatus.PENDING_ACTIVATION.value,
+                    ),
+                )
+                changed = cursor.rowcount == 1
+                if changed:
+                    self._conn.execute(
+                        """INSERT INTO restored_job_activations(job_id, activated_at)
+                           VALUES (?, ?)
+                           ON CONFLICT(job_id) DO UPDATE SET
+                             activated_at=excluded.activated_at""",
+                        (job_id, activated_at),
+                    )
+                self._conn.commit()
+                return changed
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    def is_imported_job_activated(self, job_id: str) -> bool:
+        """pending 重放仅接受由恢复态 CAS 留下的 durable receipt。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM restored_job_activations WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+        return row is not None
+
     def move_job_to_collection(
         self,
         job_id: str,
@@ -841,8 +883,10 @@ class DatabaseAggregates:
         domain: str,
         job_id: str,
         mapping: dict[str, list[str]],
+        projection_source_digest: str | None = None,
+        expected_projection_source_digest: str | None = None,
     ) -> bool:
-        """原子对账一个 job 的全部 concept/evidence 映射，移除消失概念。"""
+        """原子对账 occurrence;给源摘要时同事务CAS发布投影账本。"""
         if not isinstance(mapping, dict) or any(
             not isinstance(term, str) or not term.strip()
             for term in mapping
@@ -857,6 +901,15 @@ class DatabaseAggregates:
             for term, evidence_ids in normalized.items()
             for evidence_id in evidence_ids
         )
+        if projection_source_digest is not None and (
+            len(projection_source_digest) != 71
+            or not projection_source_digest.startswith("sha256:")
+            or any(ch not in "0123456789abcdef" for ch in projection_source_digest[7:])
+        ):
+            raise ValueError("projection_source_digest 必须是 sha256 摘要")
+        projection_digest = "sha256:" + hashlib.sha256(
+            json.dumps(expected, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
         with self._lock:
             try:
                 self._conn.execute("BEGIN IMMEDIATE")
@@ -866,6 +919,17 @@ class DatabaseAggregates:
                 ).fetchone()
                 if job is None or job["domain"] != domain:
                     raise ConceptEvidenceError("job 不存在或 domain 不属于请求 concept")
+                if projection_source_digest is not None:
+                    marker = self._conn.execute(
+                        """SELECT source_digest FROM concept_occurrence_projection
+                           WHERE job_id=?""",
+                        (job_id,),
+                    ).fetchone()
+                    current_source = str(marker["source_digest"]) if marker else None
+                    if current_source != expected_projection_source_digest:
+                        raise ConceptConflictError(
+                            "concept occurrence projection source changed during replay"
+                        )
                 if normalized:
                     terms = sorted(normalized)
                     placeholders = ",".join("?" for _ in terms)
@@ -920,25 +984,36 @@ class DatabaseAggregates:
                         (domain, job_id),
                     ).fetchall()
                 ]
-                if existing == expected:
-                    self._conn.commit()
-                    return False
-                self._conn.execute(
-                    "DELETE FROM concept_occurrences WHERE domain=? AND job_id=?",
-                    (domain, job_id),
-                )
+                changed = existing != expected
+                if changed:
+                    self._conn.execute(
+                        "DELETE FROM concept_occurrences WHERE domain=? AND job_id=?",
+                        (domain, job_id),
+                    )
                 now = _db._now_iso()
-                self._conn.executemany(
-                    """INSERT INTO concept_occurrences
-                       (domain, term, job_id, evidence_id, created_at)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    [
-                        (domain, term, job_id, evidence_id, now)
-                        for term, evidence_id in expected
-                    ],
-                )
+                if changed:
+                    self._conn.executemany(
+                        """INSERT INTO concept_occurrences
+                           (domain, term, job_id, evidence_id, created_at)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        [
+                            (domain, term, job_id, evidence_id, now)
+                            for term, evidence_id in expected
+                        ],
+                    )
+                if projection_source_digest is not None:
+                    self._conn.execute(
+                        """INSERT INTO concept_occurrence_projection
+                           (job_id, source_digest, projection_digest, reconciled_at)
+                           VALUES (?, ?, ?, ?)
+                           ON CONFLICT(job_id) DO UPDATE SET
+                             source_digest=excluded.source_digest,
+                             projection_digest=excluded.projection_digest,
+                             reconciled_at=excluded.reconciled_at""",
+                        (job_id, projection_source_digest, projection_digest, now),
+                    )
                 self._conn.commit()
-                return True
+                return changed
             except BaseException:
                 if self._conn.in_transaction:
                     self._conn.rollback()
@@ -1331,6 +1406,12 @@ class DatabaseAggregates:
                         note_type=note_type,
                         records=canonical_evidence,
                     )
+                # occurrence 依赖当前 canonical evidence。索引与 evidence 新版本已提交、
+                # glossary 对账尚未运行的崩溃窗口必须由周期任务重新拾取。
+                self._conn.execute(
+                    "DELETE FROM concept_occurrence_projection WHERE job_id=?",
+                    (job_id,),
+                )
 
     def create_study_suggestion_batch(
         self,

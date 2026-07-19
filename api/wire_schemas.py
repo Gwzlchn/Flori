@@ -508,6 +508,104 @@ class PipelinesResponse(WireModel):
     pipelines: list[PipelineResponse]
 
 
+class RecoveryCompletenessResponse(WireModel):
+    terminal_steps: int
+    manifests_seen: int
+    manifests_missing: int
+    manifests_excluded: int
+    ai_config_complete: bool
+    user_config_complete: bool
+    secret_scan_complete: bool
+    media_self_contained: bool
+    external_media_roots: list[str]
+    portable_ready: bool
+    readiness_reasons: list[str]
+
+
+class RecoverySnapshotResponse(WireModel):
+    digest: str
+    refs: list[str]
+    created_at: DateTimeString | None
+    source_app_version: str
+    partial: bool
+    portable_ready: bool
+    readiness_reasons: list[str]
+    completeness: RecoveryCompletenessResponse
+    stats: dict[str, Any]
+
+
+class RecoveryWriteLockResponse(WireModel):
+    owner: str | None
+    acquired_at: DateTimeString | None
+
+
+class RecoveryOperationResponse(WireModel):
+    format: Literal["flori-recovery-operation/v1"]
+    id: str
+    kind: Literal["backup"]
+    status: Literal["queued", "running", "success", "failed", "interrupted"]
+    created_at: DateTimeString
+    started_at: DateTimeString | None
+    finished_at: DateTimeString | None
+    vendor_media: bool
+    full_rehash: bool
+    snapshot_digest: str | None
+    receipt_id: str | None
+    stats: dict[str, Any]
+    error: str | None
+
+
+class RecoveryStatusResponse(WireModel):
+    state: Literal["empty", "ready", "incomplete", "locked", "error"]
+    repository_path: str
+    host_repository_env: str
+    write_lock: RecoveryWriteLockResponse | None
+    latest: RecoverySnapshotResponse | None
+    snapshots: list[RecoverySnapshotResponse]
+    media_vendoring_available: bool
+    deployment_id_configured: bool
+    online_restore_supported: bool
+    operations: list[RecoveryOperationResponse]
+    error: str | None
+
+
+class RecoveryBackupRequest(WireModel):
+    vendor_media: bool = False
+    full_rehash: bool = False
+
+
+class RecoveryBackupStartedResponse(WireModel):
+    operation: RecoveryOperationResponse
+
+
+class RecoveryRestorePlanRequest(WireModel):
+    snapshot_digest: str
+
+
+class RecoveryRestoreCommandsResponse(WireModel):
+    verify: str
+    exact_dr: str
+    plan: str
+    restore: str
+
+
+class RecoveryRestorePlanResponse(WireModel):
+    format: Literal["flori-restore-handoff/v1"]
+    id: str
+    target_generation: str
+    snapshot_digest: str
+    plan_digest: str
+    deployment_id: str
+    app_version: str
+    target_mode: Literal["empty"]
+    generated_at: DateTimeString
+    counts: dict[str, int | None]
+    bytes_to_write: int
+    required_source_roots: list[str]
+    commands: RecoveryRestoreCommandsResponse
+    reused: bool
+
+
 class PromptOverrideScope(WireModel):
     scope: str
     domain: str | None

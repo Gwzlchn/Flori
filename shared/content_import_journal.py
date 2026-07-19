@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 JOURNAL_FORMAT = "flori-content-import-journal/v1"
-JOURNAL_USER_VERSION = 2
+JOURNAL_USER_VERSION = 3
 
 STATUS_PREPARING = "preparing"
 STATUS_MATERIALIZING = "materializing"
@@ -41,9 +41,12 @@ CREATE TABLE IF NOT EXISTS content_imports (
     target_generation TEXT NOT NULL CHECK (length(trim(target_generation)) > 0),
     plan_digest TEXT NOT NULL
         CHECK (length(plan_digest) = 71 AND substr(plan_digest, 1, 7) = 'sha256:'),
+    request_digest TEXT NOT NULL
+        CHECK (length(request_digest) = 71 AND substr(request_digest, 1, 7) = 'sha256:'),
     -- 目标绑定:库被丢弃重建后 token 变化,旧进度立即失效(防"空库报成功")。
     target_db_path TEXT NOT NULL DEFAULT '',
     target_token TEXT NOT NULL DEFAULT '',
+    target_storage TEXT NOT NULL DEFAULT '',
     mode TEXT NOT NULL DEFAULT 'empty' CHECK (mode IN ('empty', 'merge')),
     status TEXT NOT NULL
         CHECK (status IN ('preparing', 'materializing', 'projecting',
@@ -83,10 +86,12 @@ class ImportEntry:
     snapshot_digest: str
     target_generation: str
     plan_digest: str
+    request_digest: str
     mode: str
     status: str
     target_db_path: str
     target_token: str
+    target_storage: str
     started_at: str
     completed_at: str | None
     summary: dict
@@ -103,7 +108,7 @@ class ContentImportJournal:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self._conn = sqlite3.connect(self.path)
+            self._conn = sqlite3.connect(self.path, timeout=30)
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(_SCHEMA_SQL)
@@ -116,6 +121,17 @@ class ContentImportJournal:
         version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
         if version == 0:
             self._conn.execute(f"PRAGMA user_version={JOURNAL_USER_VERSION}")
+        elif version == 2:
+            # v2 条目可继续列出供审计,但缺少请求/存储身份,不得被新代码续跑。
+            # 空字符串作为 legacy 哨兵,begin 会 fail-closed 要求新 generation。
+            with self._conn:
+                self._conn.execute(
+                    "ALTER TABLE content_imports ADD COLUMN request_digest TEXT NOT NULL DEFAULT ''"
+                )
+                self._conn.execute(
+                    "ALTER TABLE content_imports ADD COLUMN target_storage TEXT NOT NULL DEFAULT ''"
+                )
+                self._conn.execute(f"PRAGMA user_version={JOURNAL_USER_VERSION}")
         elif version != JOURNAL_USER_VERSION:
             self._conn.close()
             raise ImportJournalError(
@@ -140,6 +156,7 @@ class ContentImportJournal:
         snapshot_digest: str,
         target_generation: str,
         plan_digest: str,
+        request_digest: str,
         target_db_path: str = "",
         target_token: str = "",
         mode: str = "empty",
@@ -149,26 +166,46 @@ class ContentImportJournal:
         既有条目的 plan_digest 不同意味着计划变了,resume 不能沿用旧进度,
         直接拒绝而不是悄悄接着跑。
         """
-        existing = self.find(snapshot_digest, target_generation)
-        if existing is not None:
-            if existing.plan_digest != plan_digest:
-                raise ImportJournalError(
-                    f"journal 已有同目标导入 {existing.import_id},但 plan_digest 不同;"
-                    "请先清理旧 journal 条目或使用新的 target_generation"
-                )
-            return existing
-        with self._conn:
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            existing = self.find(snapshot_digest, target_generation)
+            if existing is not None:
+                if not existing.request_digest:
+                    raise ImportJournalError(
+                        f"journal 已有 legacy 导入 {existing.import_id},但没有目标请求身份;"
+                        "使用新的 target_generation 重跑,旧条目保留供审计"
+                    )
+                if existing.request_digest != request_digest or existing.mode != mode:
+                    raise ImportJournalError(
+                        f"journal 已有同 snapshot/generation 导入 {existing.import_id},"
+                        "但数据库、存储目标、模式或策略不同;"
+                        "请使用新的 target_generation"
+                    )
+                if existing.plan_digest != plan_digest:
+                    raise ImportJournalError(
+                        f"journal 已有同目标导入 {existing.import_id},但 plan_digest 不同;"
+                        "请使用新的 target_generation"
+                    )
+                self._conn.commit()
+                return existing
             self._conn.execute(
                 """INSERT INTO content_imports
                    (import_id, snapshot_digest, target_generation, plan_digest,
-                    target_db_path, target_token, mode, status, started_at, summary)
-                   VALUES (?,?,?,?,?,?,?,?,?,'{}')""",
+                    request_digest, target_db_path, target_token, target_storage,
+                    mode, status, started_at, summary)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,'{}')""",
                 (
                     import_id, snapshot_digest, target_generation, plan_digest,
-                    target_db_path, target_token, mode, STATUS_PREPARING, _now(),
+                    request_digest, target_db_path, target_token, "", mode,
+                    STATUS_PREPARING, _now(),
                 ),
             )
-        return self.get(import_id)
+            self._conn.commit()
+            return self.get(import_id)
+        except BaseException:
+            if self._conn.in_transaction:
+                self._conn.rollback()
+            raise
 
     def get(self, import_id: str) -> ImportEntry:
         row = self._conn.execute(
@@ -194,12 +231,32 @@ class ContentImportJournal:
         ).fetchone()
         return _entry(row) if row is not None else None
 
-    def bind_target(self, import_id: str, target_db_path: str, token: str) -> None:
+    def bind_target(
+        self, import_id: str, target_db_path: str, token: str,
+        target_storage: str,
+    ) -> None:
         """把导入条目绑定到具体目标库;token 变了即代表库被换过/重建过。"""
         with self._conn:
+            row = self._conn.execute(
+                "SELECT target_db_path, target_token, target_storage FROM content_imports "
+                "WHERE import_id=?", (import_id,),
+            ).fetchone()
+            if row is None:
+                raise ImportJournalError(f"journal 无此导入: {import_id}")
+            previous = tuple(str(row[key] or "") for key in (
+                "target_db_path", "target_token", "target_storage",
+            ))
+            requested = (target_db_path, token, target_storage)
+            if any(previous) and previous != requested:
+                raise ImportJournalError(
+                    f"journal 导入 {import_id} 已绑定另一目标;"
+                    "拒绝改写数据库或存储身份"
+                )
             self._conn.execute(
-                "UPDATE content_imports SET target_db_path=?, target_token=? WHERE import_id=?",
-                (target_db_path, token, import_id),
+                """UPDATE content_imports
+                   SET target_db_path=?, target_token=?, target_storage=?
+                   WHERE import_id=?""",
+                (*requested, import_id),
             )
 
     def set_status(
@@ -259,6 +316,16 @@ class ContentImportJournal:
             )
         return {row[0] for row in rows}
 
+    def processed_actions(self, import_id: str) -> dict[str, str]:
+        """返回已处理 record 的动作;续跑校验必须区分 insert/noop/skip。"""
+        return {
+            str(row[0]): str(row[1])
+            for row in self._conn.execute(
+                "SELECT record_digest, action FROM content_import_records WHERE import_id=?",
+                (import_id,),
+            )
+        }
+
     def action_counts(self, import_id: str) -> dict[str, int]:
         rows = self._conn.execute(
             """SELECT action, COUNT(*) FROM content_import_records
@@ -281,10 +348,12 @@ def _entry(row: sqlite3.Row) -> ImportEntry:
         snapshot_digest=row["snapshot_digest"],
         target_generation=row["target_generation"],
         plan_digest=row["plan_digest"],
+        request_digest=row["request_digest"],
         mode=row["mode"],
         status=row["status"],
         target_db_path=row["target_db_path"],
         target_token=row["target_token"],
+        target_storage=row["target_storage"],
         started_at=row["started_at"],
         completed_at=row["completed_at"],
         summary=json.loads(row["summary"]),

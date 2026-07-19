@@ -108,6 +108,11 @@ INITIALIZATION_HEARTBEAT_SEC = 30
 _LOG = structlog.get_logger()
 
 # 同模块第二个路由:/api/providers(不能挂在 /api/jobs 下,否则被 /{job_id} 截胡)。
+
+
+def _require_activated_for_execution(job: Job) -> None:
+    if job.status == JobStatus.PENDING_ACTIVATION:
+        raise HTTPException(409, "activate the restored job before running it")
 providers_router = APIRouter(prefix="/api/providers", tags=["providers"],
                             dependencies=[Depends(verify_token)])
 
@@ -2206,6 +2211,7 @@ async def rerun_job(
     job = await asyncio.to_thread(db.get_job, job_id)
     if not job:
         raise HTTPException(404, "job not found")
+    _require_activated_for_execution(job)
     pipeline = config.pipelines.get(job.pipeline)
     steps = pipeline.get("steps") if isinstance(pipeline, dict) else None
     allowed_steps = {
@@ -2256,6 +2262,7 @@ async def rerun_job_part(
     job = await asyncio.to_thread(db.get_job, job_id)
     if not job:
         raise HTTPException(404, "job not found")
+    _require_activated_for_execution(job)
     parts = await asyncio.to_thread(db.get_parts, job_id)
     if part_id not in {part.id for part in parts}:
         raise HTTPException(404, "part not found")
@@ -2302,6 +2309,7 @@ async def rebuild_job(
     parent = await asyncio.to_thread(db.get_job, job_id)
     if not parent:
         raise HTTPException(404, "job not found")
+    _require_activated_for_execution(parent)
     operation_key = request.idempotency_key
     if operation_key is None:
         prompt_overrides = await asyncio.to_thread(
@@ -2366,6 +2374,8 @@ async def rebuild_stale(
     _, jobs = await asyncio.to_thread(db.list_jobs, None, None, 10000, 0, None, None, False, True)
     rebuilt = []
     for job in jobs:
+        if job.status == JobStatus.PENDING_ACTIVATION:
+            continue
         record = (job.meta or {}).get("rebuild_request") or {}
         if (
             isinstance(record, dict)
@@ -2513,6 +2523,7 @@ async def rerun_smart(
     job = await asyncio.to_thread(db.get_job, job_id)
     if not job:
         raise HTTPException(404, "job not found")
+    _require_activated_for_execution(job)
     try:
         smart_step, review_step = pipeline_ai_roles(job.pipeline)
     except ValueError as exc:
@@ -2561,8 +2572,58 @@ async def resubmit_job(
     job = await asyncio.to_thread(db.get_job, job_id)
     if not job:
         raise HTTPException(404, "job not found")
+    _require_activated_for_execution(job)
     await redis.append_lifecycle_event("job_command", {"action": "resubmit", "job_id": job_id})
     return {"job_id": job_id, "status": "processing"}
+
+
+@router.post("/{job_id}/activate", response_model=JobStatusResponse)
+async def activate_imported_job(
+    job_id: str,
+    db: Database = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+    config: AppConfig = Depends(get_config),
+):
+    """显式激活恢复任务;完成态和普通运行态都不能借此重置。"""
+    validate_path_segment(job_id, "job_id")
+    job = await asyncio.to_thread(db.get_job, job_id)
+    if not job:
+        raise HTTPException(404, "job not found")
+    if job.status not in {JobStatus.PENDING_ACTIVATION, JobStatus.PENDING}:
+        raise HTTPException(409, "job is not pending activation")
+    if job.status == JobStatus.PENDING and not await asyncio.to_thread(
+        db.is_imported_job_activated, job_id,
+    ):
+        raise HTTPException(409, "job is pending but has no restored activation receipt")
+    parts = await asyncio.to_thread(db.get_parts, job_id)
+    first_url = parts[0].url if parts else job.url
+    await ensure_job_workers(
+        redis=redis,
+        config=config,
+        content_type=job.content_type,
+        source=job.source or detect_source(first_url or ""),
+        url=first_url,
+        domain=job.domain,
+        style_tags=job.style_tags,
+        smart_note=bool((job.meta or {}).get("flags", {}).get("smart_note", True)),
+        mechanical_only=bool(
+            (job.meta or {}).get("flags", {}).get("mechanical_only", False)
+        ),
+        document_kind=job.document_kind or None,
+        allow_waiting=job.content_type == "video",
+    )
+    if job.status == JobStatus.PENDING_ACTIVATION:
+        activated = await asyncio.to_thread(db.activate_imported_job, job_id)
+        if not activated:
+            current = await asyncio.to_thread(db.get_job, job_id)
+            if current is None or current.status != JobStatus.PENDING:
+                raise HTTPException(409, "job activation state changed")
+    await redis.append_lifecycle_event(
+        "job_command",
+        {"action": "new_job", "job_id": job_id, "pipeline": job.pipeline},
+    )
+    audit("job", job_id, "activate", actor="api", detail={"from": "restore"})
+    return {"job_id": job_id, "status": JobStatus.PENDING.value}
 
 
 @router.post("/{job_id}/continue-ai", response_model=JobStatusResponse)
@@ -2578,6 +2639,7 @@ async def continue_job_ai(
     job = await asyncio.to_thread(db.get_job, job_id)
     if not job:
         raise HTTPException(404, "job not found")
+    _require_activated_for_execution(job)
     flags = dict((job.meta or {}).get("flags") or {})
     if flags.get("mechanical_only") is not True:
         raise HTTPException(409, "job is not in mechanical_only mode")

@@ -377,7 +377,7 @@ DRY_RUN=1 docker compose up
 | migration | 历史 checksum 不变；上一版本到当前版本升级；故障后 DDL、ledger、`user_version` 全部回滚；exact current schema；无 vector/embedding 占位 | `scripts/test.sh -- tests/test_db_migrations.py` |
 | DB / API | 伪 evidence id、跨 batch、domain/concept/hash/quote 失效、revision 竞态、bool/负数/SQLite 64 位边界、101 项、同 request 异 payload、整批回滚 | `scripts/test.sh -- tests/test_study_suggestions.py` |
 | Redis | 多调用方对同 task id 只有一个原子 enqueue-once；marker、ZSET 和等待时间戳一起提交；重放不恢复已弹出的旧任务 | `scripts/test.sh -- tests/test_redis_client.py` |
-| DR | 当前 suggestion 表和不可变审计可被快照、验证、恢复并重新打开；未来 schema 拒绝恢复 | `scripts/test.sh -- tests/test_backup_restore.py` |
+| DR | 当前业务表与不可变审计可快照/验证/恢复;错误deployment在建目标前拒绝,跨部署双确认;证据与目标隔离;未来schema拒绝 | `scripts/test.sh -- tests/test_backup_restore.py` |
 | UI | 生成、跨刷新轮询、失败重试、证据预览、编辑、同 batch 批量接受/拒绝、409 刷新和掌握度 | `scripts/test.sh --fe frontend/src/views/StudyView.test.ts` |
 | 真依赖闭环 | 真 Redis + production Worker + controlled AI Gateway；Scheduler 重启/收割后只产生一份 suggestion/card/operation，接受后 due，真实 `good` 评分后 mastery=80 | `scripts/test.sh --integration` |
 
@@ -416,9 +416,15 @@ DRY_RUN=1 docker compose up
 | `tests/test_content_policy.py` | 数据分类 allowlist、URL 脱敏(两道门共用名称表)、审计文本门、路径安全、有界 JSON |
 | `tests/test_content_repository.py` | CAS 幂等、snapshot 确定性与闭包、refs/receipts、写锁、GC mark/sweep、scrub |
 | `tests/test_content_backup.py` | 选择/幂等/M1-M2 一致性/失败审计/未知项门/增量/CLI |
-| `tests/test_content_import.py` | plan、空库物化、journal resume、投影四分支、验收、CLI |
+| `tests/test_content_import.py` | plan、请求/journal 身份、零记录续跑、空库/merge 原子物化、配置与媒体恢复、目标目录改名/移入仓库竞态、待激活投影、完整闭包、验收、CLI |
+| `tests/test_content_import_guard.py` | 线上目标识别、双重不完整快照放行、DR 部署身份与逐目标资产覆盖、归档/sidecar/摘要绑定 |
+| `tests/test_content_maintenance.py` / `tests/test_mcp_http.py` | DB/产物/配置/来源根维护锁、跨角色物理 inode、API/scheduler/worker/MCP与导入互斥、MCP初始化/退出释放、远端确认 |
+| `tests/test_content_result.py` | result与DB/数据/来源/work/repository边界、一次目录身份索引、wrapper挂载身份、逐层`O_NOFOLLOW`、父目录竞态与原子JSON发布 |
+| `tests/test_content_scripts.py` | 三个wrapper参数接线、早退JSON、result父目录移入repository/data/source撤销、source root宿主路径运行中替换与成功回执撤销 |
 | `tests/test_content_merge_gc.py` | merge 七条规则、冲突零修改、GC 保留与清扫、scrub、**CLI 级 merge** |
 | `tests/test_content_threat_matrix.py` | §2.15 威胁矩阵逐行:secret/伪造/篡改/穿越/symlink/压缩炸弹 |
+| `tests/test_api_recovery.py` | 设置页仓库状态、视频闭包、受控子目录、同时请求单一胜者、写锁拒绝、repository/work物理别名写前拒绝、API重启中断态、恢复交接固定代际、全blob重哈希、幂等与线上DB零修改 |
+| `frontend/src/views/RecoverySettingsView.test.ts` | 空/完整/不完整/锁定状态、原视频选项、备份请求、风险确认、恢复交接与命令复制 |
 
 关键回归门(退化过、必须一直绿):
 
@@ -433,3 +439,20 @@ DRY_RUN=1 docker compose up
    merge 曾经"测试全绿但 CLI 根本不传 mode",纯 API 级用例发现不了。
 7. **冲突单元零修改**:断言逐表行内容完全不变,不是只断言"报了冲突"。
 8. **无关 Job 运行态不被动**:merge 只重投影本次物化的 Job。
+9. **不完整快照不能误入线上**:v1 或 `portable_ready=false` 必须双重 override,其中任一
+   缺失均在首字节写入前拒绝。
+10. **完整事务边界**:记录物化、运行投影和验收同属一个 `BEGIN IMMEDIATE`;任一异常
+    回滚全部 DB 行,配置/媒体文件以 staging + 摘要 read-back 补偿或幂等续跑。
+11. **恢复不暗中执行**:未完成 Job 只到 `pending_activation`;只有激活 API 的 CAS 和
+    生命周期命令能进入 pending,重复激活只补发同一命令。
+12. **敌手路径**:仓库、result、配置与来源根的任一祖先 symlink、parent swap、硬链接
+    身份冲突、异摘要覆盖都必须 fail-closed。配置/source发布期间把已打开父目录改名或
+    移入仓库时必须删除本次发布inode并失败,旧目录和仓库内都不能留下目标blob。wrapper
+    运行期间替换宿主source root时必须以非零退出并覆盖容器已写的success result。
+13. **投影账本原子性**:`concept_occurrences` 替换与 source/projection digest marker 同事务;
+    索引提交先失效旧 marker,旧 source CAS 失败不得覆盖新投影,相同 source 重放是 no-op。
+14. **exact DR 可回滚性**:deployment ID 不匹配、DB/jobs/config 对应 `/data` 子树被排除、
+    或生产 MinIO 未收录/含排除项时,线上导入必须在首字节写入前拒绝。
+15. **在线控制面不执行还原**:`POST /api/recovery/restore-plans` 只读仓库并写独立交接单;
+    线上DB/产物摘要前后不变。重复请求复用同一handoff;API重启后的旧running操作显示为
+    interrupted,仓库锁存在时不得自动破锁或启动第二个写进程。

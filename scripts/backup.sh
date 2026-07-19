@@ -5,6 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/lib/content-result.sh"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-flori}"
 BACKUP_DIR="${BACKUP_DIR:-./backups}"
 FLORI_DATA_DIR_WAS_SET="${FLORI_DATA_DIR+x}"
@@ -31,6 +32,7 @@ FLORI_REDIS_IMAGE="${FLORI_REDIS_IMAGE:-redis:7-alpine}"
 REDIS_MATERIALIZE_TIMEOUT="${REDIS_MATERIALIZE_TIMEOUT:-60}"
 BACKUP_GENERATION="${BACKUP_GENERATION:-}"
 BACKUP_RESULT_FILE="${BACKUP_RESULT_FILE:-}"
+FLORI_DEPLOYMENT_ID="${FLORI_DEPLOYMENT_ID:-}"
 DATA_EXCLUDES=()
 MINIO_EXCLUDES=()
 TEMP_REDIS_VOLUME=""
@@ -69,6 +71,7 @@ flori-backup-<generation>.tar.gz、.sha256 与机器可读 result JSON。任一�
   FLORI_CONFIG_DIR / FLORI_SCHEMA_MANIFEST / FLORI_DR_IMAGE
   FLORI_BACKUP_SOURCE_MOUNT_MODE=ro|rw（默认 ro；仅隔离副本需要 SQLite sidecar 时用 rw）
   BACKUP_GENERATION / BACKUP_RESULT_FILE
+  FLORI_DEPLOYMENT_ID          持久部署标识(非密钥,同一实例不可变化)
   --data-exclude / --minio-exclude 可重复,分别作用于对应资产;排除项写入 manifest
   FLORI_REDIS_IMAGE / REDIS_MATERIALIZE_TIMEOUT
 EOF
@@ -158,6 +161,24 @@ absolute_existing_dir() {
   (cd "$path" && pwd)
 }
 
+assert_backup_output_disjoint() {
+  local label="$1" source="$2"
+  if content_paths_overlap "$BACKUP_DIR" "$source"; then
+    echo "错误: exact DR输出目录不得与${label}源目录重叠: $BACKUP_DIR <> $source" >&2
+    exit 1
+  fi
+}
+
+BACKUP_DIR="$(realpath -m -- "$BACKUP_DIR")"
+for source_spec in \
+    "data|$FLORI_DATA_DIR" \
+    "Redis|$REDIS_DATA_DIR" \
+    "MinIO|$MINIO_DATA_DIR" \
+    "config|$FLORI_CONFIG_DIR"; do
+  source_label="${source_spec%%|*}"
+  source_path="${source_spec#*|}"
+  [ -z "$source_path" ] || assert_backup_output_disjoint "$source_label" "$source_path"
+done
 mkdir -p "$BACKUP_DIR"
 BACKUP_DIR="$(cd "$BACKUP_DIR" && pwd)"
 
@@ -174,12 +195,23 @@ case "$FLORI_BACKUP_SOURCE_MOUNT_MODE" in
   ro|rw) ;;
   *) echo "错误: FLORI_BACKUP_SOURCE_MOUNT_MODE 必须是 ro 或 rw" >&2; exit 1 ;;
 esac
+case "$FLORI_DEPLOYMENT_ID" in
+  *[!A-Za-z0-9_.-]*|''|unbound)
+    echo "错误: FLORI_DEPLOYMENT_ID 必须是稳定非unbound标识且只允许 [A-Za-z0-9_.-]" >&2
+    exit 1
+    ;;
+esac
 ARCHIVE_NAME="flori-backup-${BACKUP_GENERATION}.tar.gz"
 ARCHIVE="$BACKUP_DIR/$ARCHIVE_NAME"
 [ ! -e "$ARCHIVE" ] || { echo "错误: 备份已存在，拒绝覆盖: $ARCHIVE" >&2; exit 1; }
 
 if [ -z "$BACKUP_RESULT_FILE" ]; then
   BACKUP_RESULT_FILE="$ARCHIVE.result.json"
+fi
+RESULT_PARENT="$(realpath -m -- "$(dirname "$BACKUP_RESULT_FILE")")"
+if [ "$RESULT_PARENT" != "$BACKUP_DIR" ]; then
+  echo "错误: --result-file 必须与 exact DR 归档同目录,保证 receipt/archive/sidecar 可一起校验" >&2
+  exit 1
 fi
 mkdir -p "$(dirname "$BACKUP_RESULT_FILE")"
 RESULT_DIR="$(cd "$(dirname "$BACKUP_RESULT_FILE")" && pwd)"
@@ -208,6 +240,7 @@ done
 
 if [ -n "$FLORI_DATA_DIR" ]; then
   FLORI_DATA_DIR="$(absolute_existing_dir "$FLORI_DATA_DIR")"
+  assert_backup_output_disjoint "data" "$FLORI_DATA_DIR"
   DOCKER_ARGS+=(-v "$FLORI_DATA_DIR:/source-data:$FLORI_BACKUP_SOURCE_MOUNT_MODE")
   DATA_LABEL="bind"
 else
@@ -277,6 +310,7 @@ materialize_redis_aof() {
 
 if [ -n "$REDIS_DATA_DIR" ]; then
   REDIS_DATA_DIR="$(absolute_existing_dir "$REDIS_DATA_DIR")"
+  assert_backup_output_disjoint "Redis" "$REDIS_DATA_DIR"
   REDIS_SOURCE_MOUNT="$REDIS_DATA_DIR"
 else
   docker volume inspect "$REDIS_VOLUME" >/dev/null 2>&1 || {
@@ -296,6 +330,7 @@ CREATE_ARGS+=(--redis-mode "$REDIS_MODE")
 MINIO_INCLUDED=0
 if [ -n "$MINIO_DATA_DIR" ]; then
   MINIO_DATA_DIR="$(absolute_existing_dir "$MINIO_DATA_DIR")"
+  assert_backup_output_disjoint "MinIO" "$MINIO_DATA_DIR"
   DOCKER_ARGS+=(-v "$MINIO_DATA_DIR:/source-minio:$FLORI_BACKUP_SOURCE_MOUNT_MODE")
   CREATE_ARGS+=(--minio /source-minio)
   MINIO_INCLUDED=1
@@ -323,6 +358,7 @@ fi
 
 if [ -n "$FLORI_CONFIG_DIR" ]; then
   FLORI_CONFIG_DIR="$(absolute_existing_dir "$FLORI_CONFIG_DIR")"
+  assert_backup_output_disjoint "config" "$FLORI_CONFIG_DIR"
   DOCKER_ARGS+=(-v "$FLORI_CONFIG_DIR:/source-config:ro")
   CREATE_ARGS+=(--config /source-config)
 fi
@@ -332,6 +368,7 @@ if [ -z "$APP_VERSION" ] && [ -f "$REPO/pyproject.toml" ]; then
   APP_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$REPO/pyproject.toml" | head -1)"
 fi
 CREATE_ARGS+=(--app-version "${APP_VERSION:-unknown}")
+CREATE_ARGS+=(--deployment-id "$FLORI_DEPLOYMENT_ID")
 
 echo "==> Flori 完整灾备快照开始"
 echo "    generation: $BACKUP_GENERATION"

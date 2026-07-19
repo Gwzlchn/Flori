@@ -140,11 +140,14 @@ class TestSecretsNeverReachRepository:
 
         result = await do_backup(source, secret_blob_allowlist=allowlist)
 
-        policy = source.repo.get_snapshot(result.snapshot_digest)["policy"]
+        snapshot = source.repo.get_snapshot(result.snapshot_digest)
+        policy = snapshot["policy"]
         assert policy["secrets_included"] is True
         assert policy["secret_scan_exceptions"] == [f"{job_id}:input/metadata.json"]
         assert result.report["secret_blob_exceptions"] == [f"{job_id}:input/metadata.json"]
         assert result.stats["blob_scan_exceptions"] == 1
+        assert snapshot["completeness"]["secret_scan_complete"] is True
+        assert "secret_scan_exceptions" in snapshot["completeness"]["readiness_reasons"]
 
     async def test_private_key_in_failure_message_fails_closed(self, source):
         job_id = "job_key"

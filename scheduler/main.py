@@ -9,6 +9,7 @@ import signal
 import structlog
 
 from shared.config import load_config
+from shared.content_maintenance import acquire_service_lease
 from shared.db import Database
 from shared.redis_client import RedisClient
 from shared.storage import create_storage
@@ -24,20 +25,31 @@ async def main() -> None:
     config_dir = os.environ.get("CONFIG_DIR", "/data/configs")
 
     config = load_config(config_dir=config_dir, data_dir=data_dir)
+    maintenance_lease = acquire_service_lease(
+        db_path=config.db_path,
+        jobs_dir=config.jobs_dir,
+        object_bucket=os.environ.get("MINIO_BUCKET"),
+        config_root=config.prompts_dir,
+        owner="scheduler",
+    )
 
-    redis = RedisClient(redis_url)
-    await redis.connect()
-    await redis.ping()
-    logger.info("redis_connected", url=redis_url)
+    try:
+        redis = RedisClient(redis_url)
+        await redis.connect()
+        await redis.ping()
+        logger.info("redis_connected", url=redis_url)
 
-    db = Database(config.db_path)
-    db.init_schema()
-    logger.info("db_ready", path=str(config.db_path))
+        db = Database(config.db_path)
+        db.init_schema()
+        logger.info("db_ready", path=str(config.db_path))
 
-    # storage 供 on_step_done 读笔记/评审产物(本地或 MinIO,由 env 决定)。
-    storage = create_storage(config.jobs_dir)
+        # storage 供 on_step_done 读笔记/评审产物(本地或 MinIO,由 env 决定)。
+        storage = create_storage(config.jobs_dir)
 
-    scheduler = Scheduler(redis, db, config, storage=storage)
+        scheduler = Scheduler(redis, db, config, storage=storage)
+    except BaseException:
+        maintenance_lease.close()
+        raise
 
     loop = asyncio.get_running_loop()
     shutdown_task: asyncio.Task | None = None
@@ -54,11 +66,18 @@ async def main() -> None:
     try:
         await scheduler.run()
     finally:
-        if shutdown_task is not None:
-            await shutdown_task  # 等 graceful shutdown(取消延迟任务)完成
-        db.close()
-        await redis.close()
-        logger.info("scheduler_exit")
+        try:
+            if shutdown_task is not None:
+                await shutdown_task  # 等 graceful shutdown(取消延迟任务)完成
+        finally:
+            try:
+                db.close()
+            finally:
+                try:
+                    await redis.close()
+                finally:
+                    maintenance_lease.close()
+                    logger.info("scheduler_exit")
 
 
 if __name__ == "__main__":

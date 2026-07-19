@@ -96,6 +96,7 @@ describe('SettingsView', () => {
     expect(t).toContain('AI 工作流')
     expect(t).toContain('流水线 & 提示词')
     expect(t).toContain('运维')
+    expect(t).toContain('备份与还原')
     expect(t).toContain('系统与 Worker')
     expect(t).toContain('关于 Flori')
   })
@@ -110,5 +111,17 @@ describe('SettingsView', () => {
     const systemRow = w.findAll('.row').find((row) => row.text().includes('系统与 Worker'))
     await systemRow!.trigger('click')
     expect($router.push).toHaveBeenCalledWith('/system?from=settings')
+  })
+
+  it('从设置页进入备份与还原页', async () => {
+    api.get.mockResolvedValue({
+      bilibili: { has_cookies: false, status: 'pending' },
+      youtube: { has_cookies: false, status: 'pending' },
+    })
+    const w = mountView()
+    await flushPromises()
+    const recoveryRow = w.findAll('.row').find((row) => row.text().includes('备份与还原'))
+    await recoveryRow!.trigger('click')
+    expect($router.push).toHaveBeenCalledWith('/settings/recovery')
   })
 })

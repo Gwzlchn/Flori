@@ -17,13 +17,17 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
+import secrets
 import sqlite3
+import stat
 import sys
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Callable, Mapping, Sequence
+from urllib.parse import urlsplit
 
 import structlog
 
@@ -31,8 +35,8 @@ from .content_policy import (
     MAX_AUDIT_TEXT_CHARS,
     MAX_RECORD_CANONICAL_BYTES,
     PolicyError,
+    StreamingSecretScanner,
     classify_table,
-    scan_text_for_secrets,
     redact_url,
     redact_urls_in_json,
     validate_record,
@@ -45,9 +49,23 @@ from .content_repository import (
     RepositoryError,
     validate_ref_name,
 )
+from .content_result import (
+    ResultDestination,
+    ResultFileError,
+    emit_result,
+    ensure_output_roots_disjoint,
+    prepare_result_destination,
+)
 from .db import SCHEMA_VERSION
 from .migrations import migration_steps
-from .source_library import SourceReferenceError, parse_source_ref
+from .source_library import (
+    SourceIdentityMismatch,
+    SourceLibrary,
+    SourceReferenceError,
+    parse_source_ref,
+    source_roots_from_env,
+)
+from .storage import read_path_bounded
 from .step_completion import DETERMINISTIC_SKIP_REASONS
 from .step_manifest import (
     ManifestError,
@@ -79,9 +97,22 @@ _INCOMPLETE_SUFFIXES = (
     ".crdownload", ".partial", ".aria2",
 )
 
-# job.json 里影响 AI 行为的键:它们的 blob 收纳延后到 P2b,受影响 Job 必须在
-# 报告里显名,避免 P3 演练误判已闭环。
-_JOB_JSON_AI_KEYS = ("ai_override", "prompt_overrides", "prompt_override", "ai_config")
+# job.json 里影响 AI 行为的键:只归档这些规范子集,不复制整个运行 sidecar。
+_JOB_JSON_AI_KEYS = (
+    # 当前 producer/consumer 真键(api/routes/jobs.py,shared/ai_routing.py)。
+    "ai_overrides", "prompt_overrides",
+    # 兼容早期/外部导入 sidecar;仍只取显式子集,不归档整个 job.json。
+    "ai_override", "prompt_override", "ai_config",
+)
+
+# /data/prompts 仅这几个相对命名空间属于运行态可变用户配置。未知路径 fail-closed,
+# 防止把凭据或临时文件误收进明文仓库。
+_USER_CONFIG_LAYOUT: Mapping[str, tuple[frozenset[str], str]] = {
+    "": (frozenset({".md"}), "prompts"),
+    "profiles": (frozenset({".yaml", ".yml"}), "profiles"),
+    "styles": (frozenset({".yaml", ".yml"}), "styles"),
+    "templates": (frozenset({".md"}), "templates"),
+}
 
 # 各表的 JSON 文本列:序列化为结构化对象,消除文本格式差异造成的伪新 record。
 # 名称带 _json 后缀的账本列(如 evidence_json)保持原文本,它们参与既有指纹。
@@ -114,7 +145,7 @@ _TERMINAL_RECEIPT_OUTCOMES = frozenset({"success", "failed"})
 # 编排面(与 notes_fts5 同一划分)。新增编排写入必须同步登记,否则备份会 fail-closed。
 # tests/test_artifact_declaration_contract.py 用 AST 扫描守住这条对账。
 ORCHESTRATION_CLAIMED_PATHS = frozenset({
-    "job.json",            # P2b 前 blob 延后收纳,见 report.deferred
+    "job.json",            # 仅 AI 配置规范子集按 user_config 收纳,完整 sidecar 可重建
     "input/term_map.json",  # scheduler/effects.py _export_term_map,提交与 rerun 各重算一次
 })
 
@@ -123,10 +154,6 @@ _TEXT_BLOB_SUFFIXES = frozenset({
     ".json", ".jsonl", ".md", ".txt", ".yaml", ".yml", ".csv", ".srt", ".vtt", ".ass",
     ".html", ".htm", ".xml", ".log",
 })
-# 扫描缓冲上限:超出只扫前缀并在报告里记账,不因为一个大 JSON 就放弃整条防线。
-MAX_BLOB_SCAN_BYTES = 4 * 1024 * 1024
-
-
 def _is_text_blob(storage_rel: str) -> bool:
     return PurePosixPath(storage_rel).suffix.lower() in _TEXT_BLOB_SUFFIXES
 
@@ -151,6 +178,7 @@ class BackupResult:
     reused_run: bool
     stats: dict
     report: dict
+    request_digest: str
 
 
 class _Inconsistent(Exception):
@@ -262,6 +290,17 @@ def _row_dict(row: sqlite3.Row, *, drop: frozenset[str] = frozenset()) -> dict:
     }
 
 
+def _portable_source_url(value: str, field: str) -> str | None:
+    """本地绝对路径不进快照;内容身份由 source digest 与 manifest blob 承担。"""
+    try:
+        scheme = urlsplit(value).scheme.casefold()
+    except ValueError as exc:
+        raise BackupError(f"{field}: source URL is invalid") from exc
+    if scheme == "file":
+        return None
+    return redact_url(value, field).url
+
+
 def _is_incomplete_artifact(path: str) -> bool:
     """下载器/写入器留下的半成品命名;精确后缀,不做模糊猜测。"""
     name = path.rsplit("/", 1)[-1].casefold()
@@ -371,8 +410,9 @@ def _serialize_job_core(row: sqlite3.Row) -> dict:
         if value:
             body[key] = value
     if row["url"]:
-        # 明文仓库不落签名 URL:canonical locator 是唯一保留形态(§2.13-2)。
-        body["url"] = redact_url(row["url"], "jobs.url").url
+        portable_url = _portable_source_url(row["url"], "jobs.url")
+        if portable_url is not None:
+            body["url"] = portable_url
     body["is_current"] = int(row["is_current"])
     for key in sorted(_JOB_JSON_COLUMNS):
         parsed = _parse_json_column(row[key], f"jobs.{key}")
@@ -381,7 +421,7 @@ def _serialize_job_core(row: sqlite3.Row) -> dict:
     return body
 
 
-def _serialize_part_core(row: sqlite3.Row) -> dict:
+def _serialize_part_core(row: sqlite3.Row, *, source_blob: str | None = None) -> dict:
     body: dict = {
         "id": row["id"],
         "job_id": row["job_id"],
@@ -393,10 +433,14 @@ def _serialize_part_core(row: sqlite3.Row) -> dict:
         if value:
             body[key] = value
     if row["source_url"]:
-        body["source_url"] = redact_url(row["source_url"], "job_parts.source_url").url
+        portable_url = _portable_source_url(row["source_url"], "job_parts.source_url")
+        if portable_url is not None:
+            body["source_url"] = portable_url
     for key in ("size_bytes", "duration_ms"):
         if row[key] is not None:
             body[key] = int(row[key])
+    if source_blob is not None:
+        body["source_blob"] = source_blob
     parsed = _parse_json_column(row["meta"], "job_parts.meta")
     if parsed is not None:
         body["meta"] = parsed
@@ -479,9 +523,11 @@ class _JobArtifacts:
     blob_digests: set[str] = field(default_factory=set)
     exclusions: list[ManifestExclusion] = field(default_factory=list)
     unknown_paths: list[str] = field(default_factory=list)
+    approved_unknown_paths: list[str] = field(default_factory=list)
     missing_manifests: list[str] = field(default_factory=list)
     terminal_steps: int = 0
-    ai_override_in_job_json: bool = False
+    ai_config: dict | None = None
+    ai_config_complete: bool = True
 
 
 class _BackupRun:
@@ -500,6 +546,8 @@ class _BackupRun:
         allow_unknown: bool,
         allowed_unknown: frozenset[str],
         allowed_secret_blobs: frozenset[str] = frozenset(),
+        user_config_dir: Path | None,
+        vendor_media: bool,
         full_rehash: bool,
         consistency_retries: int,
         work_dir: Path,
@@ -515,6 +563,8 @@ class _BackupRun:
         self.allow_unknown = allow_unknown
         self.allowed_unknown = allowed_unknown
         self.allowed_secret_blobs = allowed_secret_blobs
+        self.user_config_dir = Path(user_config_dir) if user_config_dir is not None else None
+        self.vendor_media = vendor_media
         self.full_rehash = full_rehash
         self.consistency_retries = consistency_retries
         self.work_dir = work_dir
@@ -525,9 +575,6 @@ class _BackupRun:
         }
         self.report: dict = {
             "jobs": {},
-            # 集合 terms.json 已按 user_config 收纳;prompts/profiles/styles/templates
-            # 那几类配置文件仍待 P2b。
-            "deferred": ["user_config_prompt_files", "job_json_blob"],
             "normalized_naive_timestamps": 0,
             "url_redactions": {},
         }
@@ -536,7 +583,6 @@ class _BackupRun:
         self.published_blobs: set[str] = set()
         # 都用集合:一致性重读会把同一 blob 扫多遍,清单必须幂等(且要进 digest)。
         self.secret_exceptions: set[str] = set()
-        self.truncated_scans: dict[str, int] = {}
         self.manifests_seen = 0
         self.manifests_missing = 0
         self.records_total = 0
@@ -628,9 +674,7 @@ class _BackupRun:
             if not data:
                 continue
             # 与产物 blob 同一条密钥防线:用户手写的文件同样可能粘进凭证。
-            self._scan_blob_bytes(
-                collection_id, rel, bytearray(data[:MAX_BLOB_SCAN_BYTES]), len(data),
-            )
+            self._scan_blob_bytes(collection_id, rel, data)
             put = self.repository.put_blob_bytes(data)
             if put.created:
                 self.stats["blobs_created"] += 1
@@ -648,6 +692,106 @@ class _BackupRun:
                 "media_type": "application/json",
             }))
         return digests, blob_refs
+
+    def _put_user_config_blob(
+        self, *, scan_owner: str, path: str, kind: str, data: bytes, media_type: str,
+    ) -> tuple[str, str]:
+        """完整扫描并收纳一个小型用户配置;返回 (record digest, blob digest)。"""
+        self._scan_blob_bytes(scan_owner, path, data)
+        put = self.repository.put_blob_bytes(data)
+        if put.created:
+            self.stats["blobs_created"] += 1
+            self.published_blobs.add(put.digest)
+        else:
+            self.stats["blobs_reused"] += 1
+        self.stats["blob_bytes_total"] += put.size_bytes
+        self.stats["blob_bytes_rehashed"] += put.size_bytes
+        digest = self._put_record("user_config", {
+            "path": path,
+            "kind": kind,
+            "blob": put.digest,
+            "size_bytes": put.size_bytes,
+            "media_type": media_type,
+        })
+        return digest, put.digest
+
+    def _collect_user_configs(self) -> tuple[list[str], set[str], bool]:
+        """收纳 /data/prompts 的允许子集;未提供根时显式标为不完整。"""
+        if self.user_config_dir is None:
+            return [], set(), False
+        root = self.user_config_dir
+        if not root.exists():
+            return [], set(), True
+        if root.is_symlink() or not root.is_dir():
+            raise BackupError(f"user config root must be a non-symlink directory: {root}")
+        files: list[tuple[Path, str, str]] = []
+        for entry in sorted(root.iterdir(), key=lambda item: item.name):
+            if entry.is_symlink():
+                raise BackupError(f"user config path must not be a symlink: {entry}")
+            if entry.is_file():
+                suffixes, kind = _USER_CONFIG_LAYOUT[""]
+                if entry.suffix.casefold() not in suffixes:
+                    raise BackupError(f"unknown user config path: {entry.name}")
+                files.append((entry, entry.name, kind))
+                continue
+            if not entry.is_dir() or entry.name not in _USER_CONFIG_LAYOUT:
+                raise BackupError(f"unknown user config path: {entry.name}")
+            suffixes, kind = _USER_CONFIG_LAYOUT[entry.name]
+            for child in sorted(entry.iterdir(), key=lambda item: item.name):
+                relative = f"{entry.name}/{child.name}"
+                if child.is_symlink() or not child.is_file():
+                    raise BackupError(f"user config path must be a regular file: {relative}")
+                if child.suffix.casefold() not in suffixes:
+                    raise BackupError(f"unknown user config path: {relative}")
+                files.append((child, relative, kind))
+        digests: list[str] = []
+        blobs: set[str] = set()
+        for file_path, relative, kind in files:
+            try:
+                data = read_path_bounded(
+                    file_path,
+                    MAX_RECORD_CANONICAL_BYTES,
+                    trusted_root=root,
+                )
+            except OSError as exc:
+                raise BackupError(f"cannot safely read user config {relative}: {exc}") from exc
+            if len(data) > MAX_RECORD_CANONICAL_BYTES:
+                raise BackupError(f"user config exceeds size limit: {relative}")
+            try:
+                data.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as exc:
+                raise BackupError(f"user config is not valid UTF-8: {relative}") from exc
+            record, blob = self._put_user_config_blob(
+                scan_owner="user-config",
+                path=f"prompts/{relative}",
+                kind=kind,
+                data=data,
+                media_type=(
+                    "text/markdown" if file_path.suffix.casefold() == ".md"
+                    else "application/yaml"
+                ),
+            )
+            digests.append(record)
+            blobs.add(blob)
+        return digests, blobs, True
+
+    def _collect_job_ai_config(
+        self, job_id: str, ai_config: Mapping,
+    ) -> tuple[str, str]:
+        """仅归档 job.json 中影响 AI 行为的规范子集。"""
+        prepared, reasons = redact_urls_in_json(dict(ai_config), f"{job_id}.ai_config")
+        if reasons:
+            bucket = self.report["url_redactions"].setdefault("job_ai_config", {})
+            for reason in reasons:
+                bucket[reason] = bucket.get(reason, 0) + 1
+        data = canonical_json_bytes(prepared)
+        return self._put_user_config_blob(
+            scan_owner=job_id,
+            path=f"jobs/{job_id}/ai-config.json",
+            kind="job_ai_config",
+            data=data,
+            media_type="application/json",
+        )
 
 
     async def _read_manifest(self, job_id: str, rel: str) -> tuple[bytes | None, dict | None]:
@@ -668,30 +812,61 @@ class _BackupRun:
 
     async def _hash_storage_object(
         self, job_id: str, storage_rel: str, *, spool: Path | None,
-        sniff: bytearray | None = None,
     ) -> tuple[str, int]:
-        """流式 SHA;sniff 非空时顺带截留前缀字节供密钥扫描,不为此再读一遍对象。"""
+        """流式 SHA;文本对象同步完整扫描,不为密钥门再读一遍对象。"""
         stream = await self.storage.open_stream(job_id, storage_rel)
         if stream is None:
             raise _Inconsistent(f"object missing: {job_id}/{storage_rel}")
         hasher = hashlib.sha256()
         total = 0
-        writer = open(spool, "wb") if spool is not None else None
+        try:
+            writer = open(spool, "xb") if spool is not None else None
+        except FileExistsError as exc:
+            raise BackupError(
+                f"repository spool path was occupied before exclusive create: {spool.name}"
+            ) from exc
+        scan_key = f"{job_id}:{storage_rel}"
+        scan_allowed = scan_key in self.allowed_secret_blobs
+        scanner = (
+            StreamingSecretScanner(
+                f"blob {storage_rel}", raise_on_match=not scan_allowed,
+            )
+            if _is_text_blob(storage_rel) else None
+        )
         try:
             async for chunk in stream:
                 hasher.update(chunk)
                 total += len(chunk)
                 if writer is not None:
                     writer.write(chunk)
-                if sniff is not None and len(sniff) < MAX_BLOB_SCAN_BYTES:
-                    sniff.extend(chunk[:MAX_BLOB_SCAN_BYTES - len(sniff)])
+                if scanner is not None:
+                    try:
+                        scanner.feed(chunk)
+                    except PolicyError as exc:
+                        raise BackupError(
+                            f"blob {scan_key} contains a secret-shaped value ({exc}); "
+                            "fix the producer or approve this exact path"
+                        ) from exc
+            if scanner is not None:
+                try:
+                    scanner.finish()
+                except PolicyError as exc:
+                    raise BackupError(
+                        f"blob {scan_key} contains a secret-shaped value ({exc}); "
+                        "fix the producer or approve this exact path"
+                    ) from exc
+                if scanner.matched:
+                    self.secret_exceptions.add(scan_key)
         finally:
             if writer is not None:
                 writer.close()
+            close_stream = getattr(stream, "aclose", None)
+            if close_stream is not None:
+                await close_stream()
         return "sha256:" + hasher.hexdigest(), total
 
     def _scan_blob_bytes(
-        self, job_id: str, storage_rel: str, sniff: bytearray, size: int,
+        self, job_id: str, storage_rel: str, data: bytes,
     ) -> None:
         """文本产物的明文密钥门。
 
@@ -701,23 +876,22 @@ class _BackupRun:
         是在没人看过的字节上断言的。命中即整次失败,交人工修产出侧或显式放行。
         """
         key = f"{job_id}:{storage_rel}"
-        # 超过缓冲上限的只扫了前缀,尾部字节没人看过。记账让它可见,别让
-        # "扫过了"和"扫了个开头"在报告里长一个样。
-        if size > MAX_BLOB_SCAN_BYTES:
-            self.truncated_scans[key] = size
-        text = bytes(sniff).decode("utf-8", errors="replace")
+        scanner = StreamingSecretScanner(
+            f"blob {storage_rel}",
+            raise_on_match=key not in self.allowed_secret_blobs,
+        )
         try:
-            scan_text_for_secrets(text, f"blob {storage_rel}")
+            scanner.feed(data)
+            scanner.finish()
         except PolicyError as exc:
-            if key in self.allowed_secret_blobs:
-                self.secret_exceptions.add(key)
-                return
             raise BackupError(
                 f"blob {key} contains a secret-shaped value ({exc}); portable snapshots "
                 "assert secrets_included=false, so this fails closed. Fix the producing "
                 "step (redact before writing) or approve the path via "
                 "--allow-secret-blob-file after review"
             ) from exc
+        if scanner.matched:
+            self.secret_exceptions.add(key)
 
     async def _collect_output_blob(
         self, job_id: str, storage_rel: str, entry: dict, tally: dict[str, int],
@@ -731,31 +905,24 @@ class _BackupRun:
         declared = entry["sha256"]
         # 复用已有 blob 时同样扫:仓库里躺着的旧泄漏也必须被喊出来,而不是
         # 因为"上次已经收过"就永远沉默。
-        sniff = bytearray() if _is_text_blob(storage_rel) else None
         if self.repository.has_blob(declared):
             observed, size = await self._hash_storage_object(
-                job_id, storage_rel, spool=None, sniff=sniff,
+                job_id, storage_rel, spool=None,
             )
             if observed != declared or size != entry["size_bytes"]:
                 raise _Inconsistent(f"output drift: {job_id}/{storage_rel}")
-            if sniff is not None:
-                self._scan_blob_bytes(job_id, storage_rel, sniff, size)
             # 本次运行刚发布的才算 created 的重复命中,其余是跨运行复用。
             tally["blobs_reused"] += 1
             tally["blob_bytes_total"] += size
             tally["blob_bytes_rehashed"] += size
             return
-        spool = self.repository.tmp_dir / (
-            f"spool-{hashlib.sha256(f'{job_id}/{storage_rel}'.encode()).hexdigest()[:32]}"
-        )
+        spool = self.repository.tmp_dir / f"spool-{secrets.token_hex(16)}"
         try:
             observed, size = await self._hash_storage_object(
-                job_id, storage_rel, spool=spool, sniff=sniff,
+                job_id, storage_rel, spool=spool,
             )
             if observed != declared or size != entry["size_bytes"]:
                 raise _Inconsistent(f"output drift: {job_id}/{storage_rel}")
-            if sniff is not None:
-                self._scan_blob_bytes(job_id, storage_rel, sniff, size)
             put = self.repository.adopt_blob_file(spool)
             if put.digest != declared:
                 raise BackupError(f"spool digest drift for {job_id}/{storage_rel}")
@@ -769,13 +936,14 @@ class _BackupRun:
         finally:
             spool.unlink(missing_ok=True)
 
-    def _incremental_hit(self, body: Mapping, manifest: dict) -> str | None:
+    async def _incremental_hit(self, body: Mapping, manifest: dict) -> str | None:
         """内容寻址增量:同 step_result record 已在仓库且全部 blob 在位则跳过重读。
 
         正确性由内容寻址保证:record digest 覆盖整份 manifest(含每个 output 的
         size/sha),blob key 就是字节 SHA,三者齐备等价于重读一遍。位腐蚀由
-        --verify/scrub 与 --full-rehash 负责,不摊进日常增量(12GB 级日常备份
-        全量重读不可行)。
+        --verify/scrub 与 --full-rehash 负责,不摊进日常增量(12GB 级媒体全量重读
+        不可行)。文本输出例外:每次都完整重读并扫描,否则新 v2 快照不能诚实断言
+        secret_scan_complete=true。
         """
         if self.full_rehash:
             return None
@@ -785,6 +953,24 @@ class _BackupRun:
         for entry in manifest["outputs"]:
             if not self.repository.has_blob(entry["sha256"]):
                 return None
+        part_id = manifest["scope"]["part_id"]
+        prefix = f"parts/{part_id}/" if part_id else ""
+        scanned_bytes = 0
+        for entry in manifest["outputs"]:
+            storage_rel = prefix + entry["path"]
+            if not _is_text_blob(storage_rel):
+                continue
+            try:
+                observed, size = await self._hash_storage_object(
+                    body["job_id"], storage_rel, spool=None,
+                )
+            except _Inconsistent:
+                return None
+            if observed != entry["sha256"] or size != entry["size_bytes"]:
+                return None
+            scanned_bytes += size
+        self.stats["blob_bytes_total"] += scanned_bytes
+        self.stats["blob_bytes_rehashed"] += scanned_bytes
         return digest
 
     async def _collect_step(
@@ -840,7 +1026,7 @@ class _BackupRun:
                     entry["path"]: entry["sha256"] for entry in manifest["outputs"]
                 },
             }
-            hit = self._incremental_hit(record_body, manifest)
+            hit = await self._incremental_hit(record_body, manifest)
             if hit is not None:
                 # 快路径不读 outputs,没有"读字节"的时间窗,因此无需 M2 复读。
                 self.stats["step_results_incremental"] += 1
@@ -869,8 +1055,10 @@ class _BackupRun:
             f"consistency retries exhausted at {job_id}/{scope_key}/{step}: {last_reason}"
         )
 
-    async def _check_job_json(self, job_id: str, part_ids: list[str]) -> bool:
-        """核对根 job.json 的 Part 清单;返回是否含 AI 覆盖配置。
+    async def _check_job_json(
+        self, job_id: str, part_ids: list[str],
+    ) -> tuple[dict | None, bool]:
+        """核对根 job.json 的 Part 清单;返回 (AI 配置规范子集,是否完整)。
 
         DB 有 Part 而 job.json 缺 parts 键(或非数组)是清单损坏,不再放行。
         """
@@ -878,14 +1066,17 @@ class _BackupRun:
         if raw is None:
             if part_ids:
                 raise BackupError(f"{job_id}: job.json missing while database has parts")
-            return False
+            return None, False
         try:
             root = json.loads(raw)
         except ValueError as exc:
             raise BackupError(f"{job_id}/job.json is not valid JSON") from exc
         if type(root) is not dict:
             raise BackupError(f"{job_id}/job.json must be an object")
-        has_ai_override = any(root.get(key) for key in _JOB_JSON_AI_KEYS)
+        ai_config = {
+            key: root[key] for key in _JOB_JSON_AI_KEYS
+            if root.get(key) is not None
+        }
         declared_raw = root.get("parts")
         if type(declared_raw) is not list:
             if part_ids:
@@ -893,11 +1084,11 @@ class _BackupRun:
                     f"{job_id}/job.json has no parts array while database has "
                     f"{len(part_ids)} parts"
                 )
-            return has_ai_override
+            return ai_config or None, True
         declared = [entry.get("part_id") for entry in declared_raw if type(entry) is dict]
         if declared != part_ids:
             raise BackupError(f"{job_id}/job.json parts manifest disagrees with database")
-        return has_ai_override
+        return ai_config or None, True
 
     def _classify_residue(
         self,
@@ -934,7 +1125,9 @@ class _BackupRun:
                 partials.setdefault(scope, []).append(
                     {"path": scope_rel, "size_bytes": int(sizes[path])}
                 )
-            elif f"{job_id}:{path}" not in self.allowed_unknown:
+            elif f"{job_id}:{path}" in self.allowed_unknown:
+                artifacts.approved_unknown_paths.append(path)
+            else:
                 artifacts.unknown_paths.append(path)
         for entries in partials.values():
             entries.sort(key=lambda item: item["path"])
@@ -953,7 +1146,9 @@ class _BackupRun:
                     f"job {job_id}: part_index sequence broken at position {position}"
                 )
         part_index_map = {row["id"]: int(row["part_index"]) for row in part_rows}
-        artifacts.ai_override_in_job_json = await self._check_job_json(job_id, part_ids)
+        artifacts.ai_config, artifacts.ai_config_complete = await self._check_job_json(
+            job_id, part_ids,
+        )
 
         step_rows = state.steps[job_id]
         eligible_manifests: dict[str, dict] = {}
@@ -1109,6 +1304,76 @@ class _BackupRun:
                 roots.add(parsed.root_id)
         return count, sorted(roots)
 
+    def _vendor_source_blob(self, row: sqlite3.Row, library: SourceLibrary) -> str:
+        """把一个受控 NAS 源完整校验后收进 CAS,且拒绝读中替换。"""
+        source_ref = row["source_ref"]
+        expected_digest = row["source_digest"]
+        expected_size = row["size_bytes"]
+        if not expected_digest or expected_size is None:
+            raise BackupError(
+                f"part {row['id']}: vendor-media requires source_digest and size_bytes"
+            )
+        try:
+            snapshot = library.verify(source_ref, expected_digest, int(expected_size))
+            root = library.roots[snapshot.reference.root_id]
+            fd = library._open_relative(root, snapshot.reference.relative_path)
+        except (SourceReferenceError, SourceIdentityMismatch, OSError) as exc:
+            raise BackupError(f"part {row['id']}: cannot verify source media: {exc}") from exc
+        spool = self.repository.tmp_dir / f"spool-{secrets.token_hex(16)}"
+        hasher = hashlib.sha256()
+        total = 0
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                raise BackupError(f"part {row['id']}: source media is not a safe regular file")
+            with open(spool, "xb") as writer:
+                while chunk := os.read(fd, 4 * 1024 * 1024):
+                    hasher.update(chunk)
+                    total += len(chunk)
+                    writer.write(chunk)
+                after = os.fstat(fd)
+                writer.flush()
+                os.fsync(writer.fileno())
+            fingerprint = lambda value: (
+                value.st_dev, value.st_ino, value.st_size,
+                value.st_mtime_ns, value.st_ctime_ns,
+            )
+            if fingerprint(before) != fingerprint(after):
+                raise BackupError(f"part {row['id']}: source media changed during ingest")
+            observed = f"sha256:{hasher.hexdigest()}"
+            if observed != snapshot.digest or total != snapshot.size_bytes:
+                raise BackupError(f"part {row['id']}: source media identity changed")
+            # verify 的缓存路径仍会重开源文件并核对指纹,封住路径在 close 后被替换。
+            library.verify(source_ref, snapshot.digest, snapshot.size_bytes)
+            put = self.repository.adopt_blob_file(spool)
+            if put.digest != snapshot.digest:
+                raise BackupError(f"part {row['id']}: vendored blob digest drift")
+            if put.created:
+                self.stats["blobs_created"] += 1
+                self.published_blobs.add(put.digest)
+            else:
+                self.stats["blobs_reused"] += 1
+            self.stats["blob_bytes_total"] += put.size_bytes
+            self.stats["blob_bytes_rehashed"] += put.size_bytes
+            return put.digest
+        finally:
+            os.close(fd)
+            spool.unlink(missing_ok=True)
+
+    def _vendor_source_media(self, state: _BusinessState) -> dict[str, str]:
+        if not self.vendor_media:
+            return {}
+        try:
+            library = SourceLibrary.from_env()
+        except SourceReferenceError as exc:
+            raise BackupError(f"vendor-media source roots are invalid: {exc}") from exc
+        vendored: dict[str, str] = {}
+        for job_id in sorted(state.parts):
+            for row in state.parts[job_id]:
+                if row["source_ref"]:
+                    vendored[row["id"]] = self._vendor_source_blob(row, library)
+        return vendored
+
     async def execute(self) -> tuple[dict, dict, dict]:
         """跑完采集并发布 snapshot 与 ref;返回 (snapshot 信息, stats, report)。"""
         state, db_user_version, categories = self._load_state()
@@ -1124,10 +1389,19 @@ class _BackupRun:
         config_digests, config_blobs = await self._collect_collection_configs(state)
         ledger_digests.extend(config_digests)
         blob_refs.update(config_blobs)
+        global_config_digests, global_config_blobs, user_config_complete = (
+            self._collect_user_configs()
+        )
+        ledger_digests.extend(global_config_digests)
+        blob_refs.update(global_config_blobs)
+        vendored_source_blobs = self._vendor_source_media(state)
+        blob_refs.update(vendored_source_blobs.values())
         exclusions: list[ManifestExclusion] = []
-        unknown_total = 0
+        unapproved_unknown_total = 0
+        unknown_omitted_total = 0
         terminal_total = 0
-        ai_override_jobs: list[str] = []
+        ai_config_jobs: list[str] = []
+        ai_config_complete = True
 
         for job in state.jobs:
             job_id = job["id"]
@@ -1148,7 +1422,12 @@ class _BackupRun:
                 job_group.append(user_state)
                 relation["user_state"] = user_state
             part_digests = [
-                self._put_record("part_core", _serialize_part_core(row))
+                self._put_record(
+                    "part_core",
+                    _serialize_part_core(
+                        row, source_blob=vendored_source_blobs.get(row["id"]),
+                    ),
+                )
                 for row in state.parts[job_id]
             ]
             part_group.extend(part_digests)
@@ -1163,10 +1442,19 @@ class _BackupRun:
             # 每 Job 一条关系 record:P3 可按 Job diff 定位冲突,不必解整张摘要。
             relation_digests.append(self._put_record("job_relation", relation))
             exclusions.extend(artifacts.exclusions)
-            unknown_total += len(artifacts.unknown_paths)
+            unapproved_unknown_total += len(artifacts.unknown_paths)
+            unknown_omitted_total += (
+                len(artifacts.unknown_paths) + len(artifacts.approved_unknown_paths)
+            )
             terminal_total += artifacts.terminal_steps
-            if artifacts.ai_override_in_job_json:
-                ai_override_jobs.append(job_id)
+            if artifacts.ai_config is not None:
+                ai_config_record, ai_config_blob = self._collect_job_ai_config(
+                    job_id, artifacts.ai_config,
+                )
+                ledger_digests.append(ai_config_record)
+                blob_refs.add(ai_config_blob)
+                ai_config_jobs.append(job_id)
+            ai_config_complete = ai_config_complete and artifacts.ai_config_complete
 
             job_report = self.report["jobs"].setdefault(job_id, {})
             job_report.update({
@@ -1179,10 +1467,11 @@ class _BackupRun:
                     for item in artifacts.exclusions
                 ],
                 "unknown_paths": artifacts.unknown_paths,
+                "approved_unknown_paths": artifacts.approved_unknown_paths,
             })
 
         job_group.extend(relation_digests)
-        if unknown_total and not self.allow_unknown:
+        if unapproved_unknown_total and not self.allow_unknown:
             candidates = [
                 f"{job_id}:{path}"
                 for job_id, entry in sorted(self.report["jobs"].items())
@@ -1190,14 +1479,37 @@ class _BackupRun:
             ]
             self.report["unknown_exception_candidates"] = candidates
             raise BackupError(
-                f"{unknown_total} unknown storage paths are neither manifest outputs, "
+                f"{unapproved_unknown_total} unknown storage paths are neither manifest outputs, "
                 f"runtime sidecars nor recognizable partial downloads (§5.2.23): "
                 f"{candidates[:5]}; approve them via --allow-unknown-file after review"
             )
-        if unknown_total:
-            self.report["unknown_accepted_without_review"] = unknown_total
+        if unapproved_unknown_total:
+            self.report["unknown_accepted_without_review"] = unapproved_unknown_total
 
         external_parts, nas_roots = self._external_source_stats(state)
+        unresolved_nas_roots = [] if not external_parts or self.vendor_media else nas_roots
+        media_self_contained = not unresolved_nas_roots
+        # 全部文本字节都经过 streaming scanner；精确 allowlist 只改变命中处置，
+        # 不截断后续扫描。例外单列 readiness reason，不把 scan_complete 说成 false。
+        secret_scan_complete = True
+        readiness_reasons: list[str] = []
+        if unknown_omitted_total:
+            # 全局放行和逐路径审阅都只批准生成诊断快照,不证明被省略字节可重建。
+            # 未收录的业务字节绝不包装成可清库恢复的完整闭包。
+            readiness_reasons.append("unknown_artifacts_omitted")
+        if self.manifests_missing:
+            readiness_reasons.append("missing_step_manifests")
+        if exclusions:
+            readiness_reasons.append("excluded_step_manifests")
+        if not user_config_complete:
+            readiness_reasons.append("user_config_incomplete")
+        if not ai_config_complete:
+            readiness_reasons.append("ai_config_incomplete")
+        if self.secret_exceptions:
+            readiness_reasons.append("secret_scan_exceptions")
+        if not media_self_contained:
+            readiness_reasons.append("external_media_dependencies")
+        readiness_reasons.sort()
         # relations_digest 退化为 per-job relation record 的聚合。
         relations_digest = canonical_digest(sorted(relation_digests))
         snapshot_body = {
@@ -1229,6 +1541,19 @@ class _BackupRun:
                 "secret_scan_exceptions": sorted(self.secret_exceptions),
                 "runtime_state_included": False,
             },
+            "completeness": {
+                "terminal_steps": terminal_total,
+                "manifests_seen": self.manifests_seen,
+                "manifests_missing": self.manifests_missing,
+                "manifests_excluded": len(exclusions),
+                "ai_config_complete": ai_config_complete,
+                "user_config_complete": user_config_complete,
+                "secret_scan_complete": secret_scan_complete,
+                "media_self_contained": media_self_contained,
+                "external_media_roots": unresolved_nas_roots,
+                "portable_ready": not readiness_reasons,
+                "readiness_reasons": readiness_reasons,
+            },
         }
         try:
             snapshot = self.repository.put_snapshot(
@@ -1241,20 +1566,15 @@ class _BackupRun:
         for item in exclusions:
             reason = item.reason.split(":", 1)[0]
             excluded_reasons[reason] = excluded_reasons.get(reason, 0) + 1
-        if ai_override_jobs:
-            self.report["jobs_with_job_json_ai_override"] = ai_override_jobs
+        if ai_config_jobs:
+            self.report["jobs_with_job_ai_config"] = ai_config_jobs
         if self.secret_exceptions:
             self.report["secret_blob_exceptions"] = sorted(self.secret_exceptions)
-        if self.truncated_scans:
-            self.report["blob_scans_truncated"] = [
-                {"path": key, "size_bytes": size, "scanned_bytes": MAX_BLOB_SCAN_BYTES}
-                for key, size in sorted(self.truncated_scans.items())
-            ]
         self.stats.update({
             # receipt 里也留一份计数:报告是本地 result JSON,receipt 才是仓库内的账。
             # 键名避开 "secret" 字样:receipt 整体过 secret-name 扫描,会被误判。
             "blob_scan_exceptions": len(self.secret_exceptions),
-            "blob_scans_truncated": len(self.truncated_scans),
+            "blob_scans_truncated": 0,
             "jobs": len(state.jobs),
             "parts": sum(len(rows) for rows in state.parts.values()),
             "step_results": len(set(step_group)),
@@ -1267,7 +1587,9 @@ class _BackupRun:
             "excluded_reasons": excluded_reasons,
             "external_source_parts": external_parts,
             "nas_source_roots": nas_roots,
-            "unknown_paths": unknown_total,
+            "vendored_source_parts": len(vendored_source_blobs),
+            "portable_ready": not readiness_reasons,
+            "unknown_paths": unknown_omitted_total,
             "partial_snapshot": self.job_ids is not None,
         })
         self.repository.set_ref(self.ref, snapshot.digest)
@@ -1310,6 +1632,57 @@ def _last_terminal_receipt(
     return None
 
 
+def _storage_request_identity(storage) -> dict[str, str]:
+    """生成不含凭据的存储来源身份,只进入请求摘要而不落明文 receipt。"""
+    identity = {
+        "backend": f"{type(storage).__module__}.{type(storage).__qualname__}",
+    }
+    for attribute in ("jobs_dir", "_bucket", "_endpoint", "_base_url"):
+        value = getattr(storage, attribute, None)
+        if value is not None:
+            identity[attribute.lstrip("_")] = str(value)
+    return identity
+
+
+def _backup_request_digest(
+    *,
+    db_path: Path,
+    storage,
+    ref: str,
+    job_ids: Sequence[str] | None,
+    source_instance: str | None,
+    app_version: str,
+    allow_unknown: bool,
+    allowed_unknown: frozenset[str],
+    allowed_secret_blobs: frozenset[str],
+    full_rehash: bool,
+    user_config_dir: Path | None,
+    user_config_source_id: str | None,
+    vendor_media: bool,
+    consistency_retries: int,
+) -> str:
+    body = {
+        "format": "flori-content-backup-request/v1",
+        "db_path": str(Path(db_path).resolve()),
+        "storage": _storage_request_identity(storage),
+        "ref": ref,
+        "job_ids": sorted(set(job_ids)) if job_ids is not None else None,
+        "source_instance": source_instance,
+        "app_version": app_version,
+        "allow_unknown": allow_unknown,
+        "unknown_allowlist": sorted(allowed_unknown),
+        "blob_scan_allowlist": sorted(allowed_secret_blobs),
+        "full_rehash": full_rehash,
+        "user_config_dir": (
+            str(Path(user_config_dir).resolve()) if user_config_dir is not None else None
+        ),
+        "user_config_source_id": user_config_source_id,
+        "vendor_media": vendor_media,
+        "consistency_retries": consistency_retries,
+    }
+    return canonical_digest(body)
+
+
 async def run_backup(
     *,
     db_path: Path,
@@ -1324,6 +1697,9 @@ async def run_backup(
     unknown_allowlist: Path | None = None,
     secret_blob_allowlist: Path | None = None,
     full_rehash: bool = False,
+    user_config_dir: Path | None = None,
+    user_config_source_id: str | None = None,
+    vendor_media: bool = False,
     consistency_retries: int = DEFAULT_CONSISTENCY_RETRIES,
     now_fn: Callable[[], str] | None = None,
     work_dir: Path | None = None,
@@ -1349,10 +1725,33 @@ async def run_backup(
     now = now_fn or _default_now
     allowed_unknown = _load_unknown_allowlist(unknown_allowlist)
     allowed_secret_blobs = _load_unknown_allowlist(secret_blob_allowlist)
+    request_digest = _backup_request_digest(
+        db_path=db_path,
+        storage=storage,
+        ref=ref,
+        job_ids=job_ids,
+        source_instance=source_instance,
+        app_version=app_version,
+        allow_unknown=allow_unknown,
+        allowed_unknown=allowed_unknown,
+        allowed_secret_blobs=allowed_secret_blobs,
+        full_rehash=full_rehash,
+        user_config_dir=user_config_dir,
+        user_config_source_id=user_config_source_id,
+        vendor_media=vendor_media,
+        consistency_retries=consistency_retries,
+    )
 
     terminal = _last_terminal_receipt(repository, run_id)
     if terminal is not None and terminal[1]["outcome"] == "success":
         receipt_id, body = terminal
+        previous_request = body.get("request_digest")
+        if previous_request != request_digest:
+            detail = "missing request digest" if previous_request is None else "different request digest"
+            raise BackupError(
+                f"run_id {run_id!r} already completed with a {detail}; "
+                "reuse is allowed only for the identical canonical request"
+            )
         digest = body["snapshot_digest"]
         # 成功回执必须蕴含 ref 已就位;不成立说明上次在 set_ref 附近中断,补跑。
         ref_ok = repository.has_snapshot(digest)
@@ -1369,6 +1768,7 @@ async def run_backup(
                 reused_run=True,
                 stats=dict(body.get("stats", {})),
                 report={"reused_run": True},
+                request_digest=request_digest,
             )
 
     with repository.write_lock(f"backup-{run_id}"):
@@ -1376,6 +1776,7 @@ async def run_backup(
         # 进行中标记(§2.8-4 三态):崩溃后可据此判断上次是否跑到一半。
         repository.write_receipt({
             "run_id": run_id, "observed_at": now(), "outcome": "in_progress",
+            "request_digest": request_digest,
         })
         with tempfile.TemporaryDirectory(
             prefix="flori-content-backup-", dir=str(work_dir) if work_dir else None,
@@ -1391,6 +1792,8 @@ async def run_backup(
                 allow_unknown=allow_unknown,
                 allowed_unknown=allowed_unknown,
                 allowed_secret_blobs=allowed_secret_blobs,
+                user_config_dir=user_config_dir,
+                vendor_media=vendor_media,
                 full_rehash=full_rehash,
                 consistency_retries=consistency_retries,
                 work_dir=Path(work),
@@ -1399,7 +1802,7 @@ async def run_backup(
             try:
                 snapshot, stats, report = await run.execute()
             except BaseException as exc:
-                _write_failure_receipt(repository, run_id, now, exc)
+                _write_failure_receipt(repository, run_id, request_digest, now, exc)
                 raise
             # 终态 receipt 在 set_ref 之后:成功回执必须蕴含 ref 已就位。
             receipt_id = repository.write_receipt({
@@ -1407,6 +1810,7 @@ async def run_backup(
                 "observed_at": now(),
                 "outcome": "success",
                 "snapshot_digest": snapshot["digest"],
+                "request_digest": request_digest,
                 "hit_existing_snapshot": not snapshot["created"],
                 "stats": stats,
                 **({"source_instance": source_instance} if source_instance else {}),
@@ -1418,11 +1822,13 @@ async def run_backup(
                 reused_run=False,
                 stats=stats,
                 report=report,
+                request_digest=request_digest,
             )
 
 
 def _write_failure_receipt(
-    repository: ContentRepository, run_id: str, now_fn: Callable[[], str], exc: BaseException,
+    repository: ContentRepository, run_id: str, request_digest: str,
+    now_fn: Callable[[], str], exc: BaseException,
 ) -> None:
     """尽力而为的失败 receipt(§2.8-4 恢复协议线索);它自己的失败绝不掩盖原始错误。"""
     try:
@@ -1430,6 +1836,7 @@ def _write_failure_receipt(
             "run_id": run_id,
             "observed_at": now_fn(),
             "outcome": "failed",
+            "request_digest": request_digest,
             "error": str(exc)[:2000],
         })
     except Exception as receipt_exc:  # noqa: BLE001
@@ -1455,12 +1862,8 @@ def _open_or_create_repository(path: Path) -> ContentRepository:
     return ContentRepository.create(path)
 
 
-def _emit_result(payload: dict, result_file: str | None) -> None:
-    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
-    if result_file:
-        Path(result_file).parent.mkdir(parents=True, exist_ok=True)
-        Path(result_file).write_text(text + "\n", encoding="utf-8")
-    print(text)
+def _emit_result(payload: dict, result_file: ResultDestination | None) -> None:
+    emit_result(payload, result_file)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1491,8 +1894,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backup.add_argument(
         "--full-rehash", action="store_true",
-        help="强制重读全部产物字节,不走内容寻址增量;密钥扫描只在读字节时发生,"
-             "增量会跳过已在仓库的 blob,故新仓库/改扫描规则后须跑一次建立基线",
+        help="文本输出每轮都会重读并扫描;本选项额外重读二进制CAS,用于全介质"
+             "摘要与位腐蚀审计,不作为密钥扫描基线",
+    )
+    backup.add_argument(
+        "--user-config-dir", default="/data/prompts",
+        help="运行态可变用户配置根;仅收 prompts/profiles/styles/templates 允许路径",
+    )
+    backup.add_argument(
+        "--user-config-source-id", default=None, help=argparse.SUPPRESS,
+    )
+    backup.add_argument(
+        "--vendor-media", action="store_true",
+        help="校验 source_ref/source_digest/size_bytes 后把外部 NAS 源媒体收入 CAS",
     )
     backup.add_argument("--work-dir", default=None, help="DB 副本等大临时文件的落盘目录")
     backup.add_argument("--retries", type=int, default=DEFAULT_CONSISTENCY_RETRIES)
@@ -1508,6 +1922,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "verify":
+        try:
+            args.result_file = prepare_result_destination(args.result_file, args.repo)
+        except ResultFileError as exc:
+            emit_result({"ok": False, "error": str(exc)}, None)
+            return 2
         try:
             repository = ContentRepository.open(Path(args.repo))
             report = repository.scrub()
@@ -1537,6 +1956,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     from .storage import create_storage
     from .version import FLORI_VERSION
 
+    db_file = Path(args.db)
+    jobs_root = Path(args.jobs_dir)
+    config_root = Path(args.user_config_dir) if args.user_config_dir else None
+    work_root = Path(args.work_dir) if args.work_dir else None
+    try:
+        source_roots = tuple(source_roots_from_env().values())
+        container_data_root = Path("/data") if Path("/data") in db_file.parents else None
+        data_roots = tuple(path for path in (
+            container_data_root,
+            jobs_root,
+            config_root,
+            *source_roots,
+        ) if path is not None)
+        output_roots = tuple(path for path in (Path(args.repo), work_root) if path is not None)
+        ensure_output_roots_disjoint(output_roots, data_roots)
+        if work_root is not None:
+            ensure_output_roots_disjoint((work_root,), (Path(args.repo),))
+        args.result_file = prepare_result_destination(
+            args.result_file,
+            args.repo,
+            protected_roots=(*data_roots, *((work_root,) if work_root else ())),
+            protected_files=(db_file,),
+        )
+    except (ResultFileError, SourceReferenceError) as exc:
+        emit_result({"ok": False, "error": str(exc)}, None)
+        return 2
+
     run_id = args.run_id or datetime.now(timezone.utc).strftime("run-%Y%m%dT%H%M%SZ")
     if args.jobs is not None and args.ref == "latest":
         _emit_result({
@@ -1546,7 +1992,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         }, args.result_file)
         return 2
     # 存在性 preflight 在容器内做:宿主与容器看到的是不同挂载视图。
-    db_file = Path(args.db)
     if not db_file.is_file():
         _emit_result(
             {"ok": False, "run_id": run_id, "error": f"database not found: {db_file}"},
@@ -1570,6 +2015,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 Path(args.allow_secret_blob_file) if args.allow_secret_blob_file else None
             ),
             full_rehash=args.full_rehash,
+            user_config_dir=Path(args.user_config_dir) if args.user_config_dir else None,
+            user_config_source_id=args.user_config_source_id,
+            vendor_media=args.vendor_media,
             consistency_retries=args.retries,
             work_dir=Path(args.work_dir) if args.work_dir else None,
         ))
@@ -1585,6 +2033,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "reused_run": result.reused_run,
         "stats": result.stats,
         "report": result.report,
+        "request_digest": result.request_digest,
     }, args.result_file)
     return 0
 

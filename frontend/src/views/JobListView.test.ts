@@ -107,6 +107,21 @@ describe('JobListView 页头与筛选骨架', () => {
     expect(t).toContain('处理中')
     expect(t).toContain('失败')
   })
+
+  it('待激活状态只渲染一个筛选 chip', async () => {
+    setupApi({
+      facets: {
+        status: { pending_activation: 2 },
+        source: {},
+        domain: {},
+      },
+    })
+    const w = await mountView()
+    const statusChips = w.findAll('.fgroup')[0].findAll('.chip')
+    const activationChips = statusChips.filter(chip => chip.text().startsWith('待激活'))
+    expect(activationChips).toHaveLength(1)
+    expect(activationChips[0].text()).toContain('2')
+  })
 })
 
 describe('JobListView 状态分支', () => {

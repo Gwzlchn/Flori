@@ -30,6 +30,9 @@ class LifecycleCoordinator:
 
     async def submit_job(self, job: Job) -> None:
         """API 调用:提交新任务,初始化步骤状态,入队无依赖步骤。"""
+        if job.status == JobStatus.PENDING_ACTIVATION:
+            logger.warning("job_activation_required", job_id=job.id)
+            return
         pipeline_templates = self.owner._get_pipeline_steps(job.pipeline)
         if not pipeline_templates:
             logger.warning("empty_pipeline", job_id=job.id, pipeline=job.pipeline)

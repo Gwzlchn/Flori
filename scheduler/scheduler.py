@@ -366,14 +366,25 @@ class Scheduler:
     async def _collect_glossary(self, job_id: str) -> None:
         return await self._effects._collect_glossary(job_id)
 
+    async def reconcile_concept_occurrences_only(self, job_id: str) -> int:
+        return await self._effects.reconcile_concept_occurrences_only(job_id)
+
     async def _read_verification_artifact(self, job_id: str, rel: str) -> bytes | None:
         return await self._effects._read_verification_artifact(job_id, rel)
 
     def _write_concept_relations(self, domain: str, items: list[tuple[str, str, list]]) -> int:
         return self._effects._write_concept_relations(domain, items)
 
-    def _replace_concept_occurrences(self, domain: str, job_id: str, key_terms: list, evidence_note_type: object) -> tuple[int, list[tuple[str, str, int]]]:
-        return self._effects._replace_concept_occurrences(domain, job_id, key_terms, evidence_note_type)
+    def _replace_concept_occurrences(
+        self, domain: str, job_id: str, key_terms: list, evidence_note_type: object,
+        *, projection_source_digest: str | None = None,
+        expected_projection_source_digest: str | None = None,
+    ) -> tuple[int, list[tuple[str, str, int]]]:
+        return self._effects._replace_concept_occurrences(
+            domain, job_id, key_terms, evidence_note_type,
+            projection_source_digest=projection_source_digest,
+            expected_projection_source_digest=expected_projection_source_digest,
+        )
 
     def _schedule_concept_resynthesis(self, domain: str, candidates: list[tuple[str, str, int]]) -> None:
         return self._effects._schedule_concept_resynthesis(domain, candidates)

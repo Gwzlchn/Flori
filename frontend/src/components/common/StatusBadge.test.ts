@@ -16,6 +16,12 @@ describe('StatusBadge', () => {
     expect(w.classes()).toContain('b-mut')
   })
 
+  it('恢复待激活状态使用独立文案与警示色', () => {
+    const w = mount(StatusBadge, { props: { status: 'pending_activation' } })
+    expect(w.text()).toBe('待激活')
+    expect(w.classes()).toContain('b-warn')
+  })
+
   it('skipped → 虚线类、且不带失败色', () => {
     const w = mount(StatusBadge, { props: { status: 'skipped' } })
     expect(w.classes()).toContain('b-dashed')

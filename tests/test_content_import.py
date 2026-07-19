@@ -16,11 +16,13 @@ import pytest
 
 from shared.content_import import (
     ContentImportError,
+    _verify_source_root_identities,
     build_plan,
     main,
     run_import,
 )
 from shared.content_repository import ContentRepository
+from shared.db import SCHEMA_VERSION
 from shared.content_import_journal import (
     STATUS_COMPLETE,
     STATUS_MATERIALIZING,
@@ -50,6 +52,21 @@ from tests.test_content_backup import (
 
 # 投影阶段要按仓库真实 pipelines.yaml 展开步骤,不能落到容器默认 /data/configs。
 _CONFIGS_DIR = Path(__file__).parent.parent / "configs"
+
+
+def test_source_root_identity_detects_directory_swap(tmp_path) -> None:
+    target = tmp_path / "source-target"
+    target.mkdir()
+    info = target.stat()
+    expected = {"nas-main": f"{info.st_dev}:{info.st_ino}"}
+    assert _verify_source_root_identities(
+        {"nas-main": target}, expected,
+    ) == expected
+
+    target.rename(tmp_path / "displaced-source-target")
+    target.mkdir()
+    with pytest.raises(ContentImportError, match="changed before container validation"):
+        _verify_source_root_identities({"nas-main": target}, expected)
 
 
 @pytest.fixture
@@ -341,6 +358,31 @@ class TestProjectionBranches:
 
 
 class TestPlan:
+    def test_v2_readiness_consumes_producer_completeness_shape(self):
+        import shared.content_import as module
+
+        completeness = {
+            "terminal_steps": 8,
+            "manifests_seen": 8,
+            "manifests_missing": 0,
+            "manifests_excluded": 0,
+            "ai_config_complete": True,
+            "user_config_complete": True,
+            "secret_scan_complete": True,
+            "media_self_contained": True,
+            "external_media_roots": [],
+            "portable_ready": True,
+            "readiness_reasons": [],
+        }
+
+        ready, reason, reasons, projected = module._snapshot_readiness({
+            "format": "flori-portable-snapshot/v2",
+            "completeness": completeness,
+        })
+
+        assert ready is True and reason is None and reasons == []
+        assert projected == completeness
+
     async def test_plan_is_readonly_and_machine_readable(self, source, target):
         await seed_video_job(source)
         await do_backup(source)
@@ -386,6 +428,62 @@ class TestPlan:
         assert not plan.ok
         assert any("not empty" in item for item in plan.conflicts)
 
+    async def test_incomplete_snapshot_live_write_requires_double_risk_acceptance(
+        self, source, target, tmp_path, monkeypatch,
+    ):
+        await seed_video_job(source)
+        await do_backup(source)
+        monkeypatch.delenv("FLORI_ACCEPT_INCOMPLETE_PORTABLE", raising=False)
+
+        with pytest.raises(
+            ContentImportError,
+            match="--allow-incomplete-portable-snapshot.*FLORI_ACCEPT_INCOMPLETE_PORTABLE",
+        ):
+            await do_import(
+                source,
+                target,
+                into_live=True,
+                allow_incomplete_portable_snapshot=True,
+                config_root=tmp_path / "live-prompts",
+            )
+        assert not target.db.exists()
+
+        monkeypatch.setenv("FLORI_ACCEPT_INCOMPLETE_PORTABLE", "1")
+        result = await do_import(
+            source,
+            target,
+            into_live=True,
+            allow_incomplete_portable_snapshot=True,
+            config_root=tmp_path / "live-prompts",
+        )
+        assert result.plan.portable_ready is False
+        assert result.plan.readiness_reason == "user_config_incomplete"
+
+    def test_v1_snapshot_is_readable_but_never_inferred_portable_ready(self):
+        from shared.content_import import _snapshot_readiness
+
+        ready, reason, reasons, completeness = _snapshot_readiness({
+            "format": "flori-portable-snapshot/v1",
+        })
+        assert ready is False
+        assert reason == "legacy_snapshot_without_completeness"
+        assert reasons == ["legacy_snapshot_without_completeness"]
+        assert completeness == {}
+
+    async def test_isolated_import_rejects_real_live_prompts_root(self, source, target):
+        from shared.content_import import DEFAULT_LIVE_CONFIG_ROOT
+
+        await seed_video_job(source)
+        await do_backup(source)
+
+        with pytest.raises(ContentImportError, match="active prompts root"):
+            await do_import(
+                source,
+                target,
+                config_root=Path(DEFAULT_LIVE_CONFIG_ROOT),
+            )
+        assert not target.db.exists()
+
     async def test_freshly_migrated_empty_target_is_accepted(
         self, source, target, current_schema_db_template,
     ):
@@ -412,6 +510,26 @@ class TestPlan:
 
 
 class TestEmptyImport:
+    async def test_portable_v2_ready_snapshot_roundtrips_without_override(
+        self, source, target, tmp_path,
+    ):
+        await seed_video_job(source)
+        prompts = tmp_path / "prompts"
+        prompts.mkdir()
+        backup = await do_backup(source, user_config_dir=prompts)
+        snapshot = source.repo.get_snapshot(backup.snapshot_digest)
+        assert snapshot["format"] == "flori-portable-snapshot/v2"
+        assert snapshot["completeness"]["portable_ready"] is True
+
+        result = await do_import(
+            source,
+            target,
+            config_root=tmp_path / "restored-prompts",
+        )
+        assert result.plan.portable_ready is True
+        assert result.plan.readiness_reasons == []
+        assert result.verification["schema_version"] == SCHEMA_VERSION
+
     async def test_full_roundtrip_rebuilds_current_schema(self, source, target):
         """§5.2.12:空库导入,FK/integrity/migration validator 全过。"""
         insert_collection(source, "col_1")
@@ -421,7 +539,7 @@ class TestEmptyImport:
         await do_backup(source)
 
         result = await do_import(source, target)
-        assert result.verification["schema_version"] == 8
+        assert result.verification["schema_version"] == SCHEMA_VERSION
         assert result.verification["counts"]["jobs"] == 1
         assert result.verification["counts"]["job_parts"] == 2
         assert result.verification["counts"]["ai_usage"] == 1
@@ -519,6 +637,137 @@ class TestIdempotency:
         with pytest.raises(ContentImportError, match="refuses to overwrite"):
             await do_import(source, target)
         assert target_path.read_bytes() == b"SQUATTER", "拒绝时不得覆盖既有对象"
+
+    async def test_request_identity_rejects_same_generation_with_new_storage(
+        self, source, target,
+    ):
+        await seed_video_job(source)
+        await do_backup(source)
+        await do_import(source, target)
+        other_storage = LocalStorage(target.root / "other-jobs")
+
+        with pytest.raises(ContentImportError, match="different database, storage"):
+            await run_import(
+                repository=source.repo,
+                snapshot="latest",
+                target_db_path=target.db,
+                storage=other_storage,
+                journal_path=target.journal,
+                target_generation="gen-1",
+                config_dir=_CONFIGS_DIR,
+            )
+
+
+def test_journal_claim_is_atomic_across_process_connections(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    path = tmp_path / "claim.sqlite3"
+    barrier = Barrier(2)
+    digest = "sha256:" + "a" * 64
+    plan = "sha256:" + "b" * 64
+    request = "sha256:" + "c" * 64
+
+    def claim(import_id):
+        with ContentImportJournal(path) as journal:
+            barrier.wait()
+            return journal.begin(
+                import_id=import_id,
+                snapshot_digest=digest,
+                target_generation="gen-atomic",
+                plan_digest=plan,
+                request_digest=request,
+            ).import_id
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        claimed = list(executor.map(claim, ("imp_first", "imp_second")))
+
+    assert len(set(claimed)) == 1
+    with ContentImportJournal(path) as journal:
+        assert len(journal.list_all()) == 1
+
+
+class TestMergeSafety:
+    async def test_part_core_conflict_compares_full_identity(self, source, target):
+        await seed_video_job(source)
+        await do_backup(source, "run-before")
+        await do_import(source, target)
+        db_exec(
+            source.db,
+            "UPDATE job_parts SET title='changed title' WHERE id='pt_alpha1'",
+        )
+        await do_backup(source, "run-after")
+
+        result = await do_import(
+            source, target, generation="gen-merge", mode="merge",
+        )
+
+        conflicts = result.merge_report["conflicts"]
+        assert any(
+            item["kind"] == "part_core" and item["conflict"] == "job_identity"
+            for item in conflicts
+        )
+        [part] = query(
+            target.db, "SELECT title FROM job_parts WHERE id='pt_alpha1'",
+        )
+        assert part["title"] != "changed title"
+
+    async def test_duplicate_ai_audit_identity_is_not_treated_as_noop(
+        self, source, target,
+    ):
+        insert_job(source, "job_audit", content_type="document", document_kind="article")
+        db_exec(source.db, (
+            "INSERT INTO ai_task_logs "
+            "(task_id, exec_id, step_name, domain, provider, model, ok, created_at) "
+            "VALUES ('task-1','exec-1','notes','ml','claude','model',1,?)"
+        ), (T_CREATED,))
+        await do_backup(source)
+        await do_import(source, target)
+        db_exec(target.db, (
+            "INSERT INTO ai_task_logs "
+            "(task_id, exec_id, step_name, domain, provider, model, ok, created_at) "
+            "SELECT task_id, exec_id, step_name, domain, provider, model, ok, created_at "
+            "FROM ai_task_logs LIMIT 1"
+        ))
+
+        with pytest.raises(ContentImportError, match="immutable ledger conflicts"):
+            await do_import(
+                source, target, generation="gen-merge-audit", mode="merge",
+            )
+
+    async def test_projection_failure_rolls_back_merge_database(
+        self, source, target, monkeypatch,
+    ):
+        insert_job(source, "job_existing", content_type="document", document_kind="article")
+        await do_backup(source, "run-base")
+        await do_import(source, target)
+        insert_job(source, "job_new", content_type="document", document_kind="article")
+        await do_backup(source, "run-new")
+        import shared.content_import as module
+
+        original = module.verify_target
+        monkeypatch.setattr(
+            module,
+            "verify_target",
+            lambda **kwargs: (_ for _ in ()).throw(_Kill("merge verification")),
+        )
+        with pytest.raises(_Kill):
+            await do_import(
+                source, target, generation="gen-merge-rollback", mode="merge",
+            )
+        monkeypatch.setattr(module, "verify_target", original)
+
+        assert query(target.db, "SELECT id FROM jobs ORDER BY id") == [
+            {"id": "job_existing"},
+        ]
+        result = await do_import(
+            source, target, generation="gen-merge-rollback", mode="merge",
+        )
+        # journal 中的 insert 记录会先被全量闭包校验发现 DB 已回滚,随后清进度重放。
+        assert result.resumed is False
+        assert query(target.db, "SELECT id FROM jobs ORDER BY id") == [
+            {"id": "job_existing"}, {"id": "job_new"},
+        ]
 
 
 class TestResume:
@@ -724,6 +973,16 @@ class TestStageFiveDiscard:
 
 
 class TestProjection:
+    async def test_incomplete_restore_waits_for_explicit_activation(self, source, target):
+        await seed_video_job(source)
+        await do_backup(source)
+
+        result = await do_import(source, target)
+
+        assert result.projection["waiting"] > 0
+        [job] = query(target.db, "SELECT status, error FROM jobs WHERE id='job_alpha'")
+        assert job == {"status": "pending_activation", "error": None}
+
     async def test_incompatible_definition_becomes_waiting(self, source, target, tmp_path):
         """§5.2.16:旧 definition manifest 导入新配置一律 waiting,不伪装 done。"""
         await seed_video_job(source)
@@ -856,9 +1115,268 @@ class TestSearchRebuild:
         # list_unindexed_done_jobs 谓词永远为假,canonical_evidence 永久为空
         assert search["notes_indexed"] == 0
         assert search["owned_by"].endswith("reconcile_completion_effects")
-        assert "concept_occurrences" in search["deferred"]
+        assert search["deferred"] == []
+        assert "concept_occurrences" in search["note"]
         assert query(target.db, "SELECT COUNT(*) c FROM notes_fts5")[0]["c"] == 0
         assert query(target.db, "SELECT COUNT(*) c FROM note_chunks")[0]["c"] == 0
+
+
+def _unit_materializer(tmp_path, *, source_roots=None):
+    import shared.content_import as module
+
+    repository = ContentRepository.create(tmp_path / "unit-repo")
+    connection = sqlite3.connect(":memory:")
+    storage = LocalStorage(tmp_path / "unit-jobs")
+    journal = SimpleNamespace(record_processed=lambda *args, **kwargs: None)
+    materializer = module._Materializer(
+        repository=repository,
+        connection=connection,
+        storage=storage,
+        journal=journal,
+        import_id="imp_unit",
+        processed=set(),
+        config_root=tmp_path / "prompts",
+        source_roots=source_roots or {},
+    )
+    return materializer, repository, storage, connection
+
+
+class TestPortableV2WriteSurfaces:
+    @pytest.mark.parametrize(("kind", "record_path", "target_rel"), [
+        ("prompts", "prompts/semantic.md", "semantic.md"),
+        ("profiles", "prompts/profiles/general.yaml", "profiles/general.yaml"),
+        ("styles", "prompts/styles/academic.yaml", "styles/academic.yaml"),
+        ("templates", "prompts/templates/review.md", "templates/review.md"),
+    ])
+    async def test_global_config_paths_are_restored_under_prompts_root(
+        self, tmp_path, kind, record_path, target_rel,
+    ):
+        materializer, repository, _storage, connection = _unit_materializer(tmp_path)
+        try:
+            payload = f"{kind}-config".encode()
+            blob = repository.put_blob_bytes(payload)
+            body = {
+                "kind": kind,
+                "path": record_path,
+                "blob": blob.digest,
+                "size_bytes": len(payload),
+            }
+
+            await materializer._put_user_config(body)
+            await materializer._put_user_config(body)
+
+            assert (tmp_path / "prompts" / target_rel).read_bytes() == payload
+            assert materializer.stats["objects_written"] == 1
+            assert materializer.stats["objects_reused"] == 1
+        finally:
+            connection.close()
+
+    async def test_global_config_rejects_symlink_parent_and_conflicting_file(
+        self, tmp_path,
+    ):
+        materializer, repository, _storage, connection = _unit_materializer(tmp_path)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (tmp_path / "prompts").mkdir()
+        (tmp_path / "prompts" / "profiles").symlink_to(
+            outside, target_is_directory=True,
+        )
+        payload = b"profile"
+        blob = repository.put_blob_bytes(payload)
+        body = {
+            "kind": "profiles",
+            "path": "prompts/profiles/general.yaml",
+            "blob": blob.digest,
+            "size_bytes": len(payload),
+        }
+        try:
+            with pytest.raises(ContentImportError, match="unsafe|unavailable"):
+                await materializer._put_user_config(body)
+            assert not (outside / "general.yaml").exists()
+
+            (tmp_path / "prompts" / "profiles").unlink()
+            (tmp_path / "prompts" / "profiles").mkdir()
+            (tmp_path / "prompts" / "profiles" / "general.yaml").write_bytes(b"other")
+            with pytest.raises(ContentImportError, match="conflicts"):
+                await materializer._put_user_config(body)
+        finally:
+            connection.close()
+
+    async def test_global_config_parent_swap_cannot_redirect_write(
+        self, tmp_path, monkeypatch,
+    ):
+        materializer, repository, _storage, connection = _unit_materializer(tmp_path)
+        profiles = tmp_path / "prompts" / "profiles"
+        profiles.mkdir(parents=True)
+        outside = tmp_path / "swap-outside"
+        outside.mkdir()
+        payload = b"profile"
+        blob = repository.put_blob_bytes(payload)
+        real_link = __import__("os").link
+        swapped = False
+
+        def swap_then_link(*args, **kwargs):
+            nonlocal swapped
+            if not swapped:
+                swapped = True
+                profiles.rename(profiles.with_name("profiles-pinned"))
+                profiles.symlink_to(outside, target_is_directory=True)
+            return real_link(*args, **kwargs)
+
+        monkeypatch.setattr("shared.content_import.os.link", swap_then_link)
+        try:
+            with pytest.raises(ContentImportError, match="moved|changed|repository"):
+                await materializer._put_user_config({
+                    "kind": "profiles",
+                    "path": "prompts/profiles/general.yaml",
+                    "blob": blob.digest,
+                    "size_bytes": len(payload),
+                })
+            assert not (outside / "general.yaml").exists()
+            assert not (
+                tmp_path / "prompts" / "profiles-pinned" / "general.yaml"
+            ).exists()
+        finally:
+            connection.close()
+
+    async def test_global_config_parent_moved_into_repository_is_rolled_back(
+        self, tmp_path, monkeypatch,
+    ):
+        materializer, repository, _storage, connection = _unit_materializer(tmp_path)
+        profiles = tmp_path / "prompts" / "profiles"
+        profiles.mkdir(parents=True)
+        stolen = repository.root / "stolen-profiles"
+        payload = b"profile"
+        blob = repository.put_blob_bytes(payload)
+        real_link = __import__("os").link
+        moved = False
+
+        def move_into_repository_then_link(*args, **kwargs):
+            nonlocal moved
+            if not moved:
+                moved = True
+                profiles.rename(stolen)
+                profiles.mkdir()
+            return real_link(*args, **kwargs)
+
+        monkeypatch.setattr(
+            "shared.content_import.os.link", move_into_repository_then_link,
+        )
+        try:
+            with pytest.raises(ContentImportError, match="moved|repository"):
+                await materializer._put_user_config({
+                    "kind": "profiles",
+                    "path": "prompts/profiles/general.yaml",
+                    "blob": blob.digest,
+                    "size_bytes": len(payload),
+                })
+            assert not (stolen / "general.yaml").exists()
+            assert not (profiles / "general.yaml").exists()
+        finally:
+            connection.close()
+
+    async def test_job_ai_config_accepts_provider_map_without_overwriting(
+        self, tmp_path,
+    ):
+        materializer, repository, storage, connection = _unit_materializer(tmp_path)
+        job_id = "job_ai_restore"
+        await storage.write_file(job_id, "job.json", b'{"id":"job_ai_restore"}')
+        payload = json.dumps({
+            "ai_overrides": {"11_smart": "claude-cli"},
+            "prompt_overrides": {
+                "11_smart": {"content": "prompt", "version": 1},
+            },
+        }).encode()
+        blob = repository.put_blob_bytes(payload)
+        body = {
+            "kind": "job_ai_config",
+            "path": f"jobs/{job_id}/ai-config.json",
+            "blob": blob.digest,
+            "size_bytes": len(payload),
+        }
+        try:
+            await materializer._put_user_config(body)
+            await materializer._put_user_config(body)
+            restored = json.loads(await storage.read_file(job_id, "job.json"))
+            assert restored["id"] == job_id
+            assert restored["ai_overrides"] == {"11_smart": "claude-cli"}
+        finally:
+            connection.close()
+
+    async def test_source_blob_requires_mapping_and_rejects_symlink_parent(
+        self, tmp_path,
+    ):
+        media = b"vendored-media"
+        source_root = tmp_path / "source-root"
+        materializer, repository, _storage, connection = _unit_materializer(
+            tmp_path, source_roots={"archive": source_root},
+        )
+        blob = repository.put_blob_bytes(media)
+        try:
+            await materializer._publish_local_blob(
+                source_root,
+                "videos/course.mp4",
+                blob.digest,
+                len(media),
+                label="source root archive",
+            )
+            assert (source_root / "videos" / "course.mp4").read_bytes() == media
+
+            shutil.rmtree(source_root)
+            outside = tmp_path / "source-outside"
+            outside.mkdir()
+            source_root.mkdir()
+            (source_root / "videos").symlink_to(outside, target_is_directory=True)
+            with pytest.raises(ContentImportError, match="unsafe|unavailable"):
+                await materializer._publish_local_blob(
+                    source_root,
+                    "videos/course.mp4",
+                    blob.digest,
+                    len(media),
+                    label="source root archive",
+                )
+            assert not (outside / "course.mp4").exists()
+        finally:
+            connection.close()
+
+    async def test_source_root_moved_into_repository_is_rolled_back(
+        self, tmp_path, monkeypatch,
+    ):
+        media = b"vendored-media"
+        source_root = tmp_path / "source-root"
+        source_root.mkdir()
+        materializer, repository, _storage, connection = _unit_materializer(
+            tmp_path, source_roots={"archive": source_root},
+        )
+        blob = repository.put_blob_bytes(media)
+        stolen = repository.root / "stolen-source-root"
+        real_link = __import__("os").link
+        moved = False
+
+        def move_into_repository_then_link(*args, **kwargs):
+            nonlocal moved
+            if not moved:
+                moved = True
+                source_root.rename(stolen)
+                source_root.mkdir()
+            return real_link(*args, **kwargs)
+
+        monkeypatch.setattr(
+            "shared.content_import.os.link", move_into_repository_then_link,
+        )
+        try:
+            with pytest.raises(ContentImportError, match="changed|repository"):
+                await materializer._publish_local_blob(
+                    source_root,
+                    "videos/course.mp4",
+                    blob.digest,
+                    len(media),
+                    label="source root archive",
+                )
+            assert not (stolen / "videos" / "course.mp4").exists()
+            assert not (source_root / "videos" / "course.mp4").exists()
+        finally:
+            connection.close()
 
 
 class TestCli:

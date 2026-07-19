@@ -12,7 +12,6 @@ from ..db import (
     _clean_search_query,
     _fts_match_query,
     _normalized_body_sha256,
-    _now_iso,
     _sha256_text,
     _substring_snippet,
     _two_cjk_query,
@@ -35,6 +34,35 @@ class SearchRepository:
                 (max(1, min(int(limit), 1000)),),
             ).fetchall()
         return [self._row_to_job(row) for row in rows]
+
+    def list_unreconciled_concept_occurrence_jobs(
+        self, limit: int = 100,
+    ) -> list[Job]:
+        """返回已建索引但 occurrence 投影尚未确认完成的当前 Job。"""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM jobs
+                   WHERE status='done' AND is_current=1
+                     AND EXISTS (
+                       SELECT 1 FROM notes_fts5 WHERE notes_fts5.job_id=jobs.id
+                     )
+                     AND NOT EXISTS (
+                       SELECT 1 FROM concept_occurrence_projection p
+                       WHERE p.job_id=jobs.id
+                     )
+                   ORDER BY created_at ASC LIMIT ?""",
+                (max(1, min(int(limit), 1000)),),
+            ).fetchall()
+        return [self._row_to_job(row) for row in rows]
+
+    def get_concept_occurrence_projection_source(self, job_id: str) -> str | None:
+        """返回当前投影绑定的源摘要;缺失时由scheduler重放。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT source_digest FROM concept_occurrence_projection WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+        return str(row["source_digest"]) if row is not None else None
 
     def canonical_evidence_database_states(
         self,

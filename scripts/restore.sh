@@ -5,6 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/lib/content-result.sh"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-flori}"
 FLORI_DATA_DIR_WAS_SET="${FLORI_DATA_DIR+x}"
 FLORI_DATA_VOLUME_WAS_SET="${FLORI_DATA_VOLUME+x}"
@@ -26,12 +27,15 @@ FLORI_MAX_DB_USER_VERSION="${FLORI_MAX_DB_USER_VERSION:-}"
 FLORI_SCHEMA_MANIFEST="${FLORI_SCHEMA_MANIFEST:-$REPO/shared/migrations/manifest.json}"
 FLORI_DR_IMAGE="${FLORI_DR_IMAGE:-python:3.11-slim}"
 RESTORE_RESULT_FILE="${RESTORE_RESULT_FILE:-}"
+FLORI_DEPLOYMENT_ID="${FLORI_DEPLOYMENT_ID:-}"
 
 ARCHIVE=""
 ASSUME_YES=0
 DO_STOP=1
 DO_RESTART=0
 CHECK_ONLY=0
+ALLOW_CROSS_DEPLOYMENT=0
+CROSS_DEPLOYMENT_CONFIRMATION=""
 
 usage() {
   cat <<'EOF'
@@ -44,6 +48,10 @@ usage() {
   --restart             恢复成功后重启本脚本停止的容器；默认保持停止以便人工验收。
   --check               只校验归档、校验和、SQLite 完整性与兼容门，不修改目标。
   --result-file <JSON>  写出机器可读的 RTO/校验/资产结果。
+  --allow-cross-deployment
+                        仅跨机克隆/迁移使用；允许归档部署ID与当前部署不同。
+  --confirm-cross-deployment REPLACE_OTHER_FLORI_DEPLOYMENT
+                        与上项同时提供的第二次高风险确认，缺一不可。
 
 恢复协议:
   1. 只读解包并校验成员、sha256、SQLite integrity_check 和版本兼容性。
@@ -70,6 +78,12 @@ while [ "$#" -gt 0 ]; do
       RESTORE_RESULT_FILE="$2"
       shift 2
       ;;
+    --allow-cross-deployment) ALLOW_CROSS_DEPLOYMENT=1; shift ;;
+    --confirm-cross-deployment)
+      [ "$#" -ge 2 ] || usage 1
+      CROSS_DEPLOYMENT_CONFIRMATION="$2"
+      shift 2
+      ;;
     -*) echo "未知选项: $1" >&2; usage 1 ;;
     *)
       [ -z "$ARCHIVE" ] || { echo "多余参数: $1" >&2; usage 1; }
@@ -88,6 +102,23 @@ command -v docker >/dev/null 2>&1 || { echo "错误: 找不到 docker" >&2; exit
 FLORI_SCHEMA_MANIFEST="$(cd "$(dirname "$FLORI_SCHEMA_MANIFEST")" && pwd)/$(basename "$FLORI_SCHEMA_MANIFEST")"
 FLORI_SCHEMA_DIR="$(dirname "$FLORI_SCHEMA_MANIFEST")"
 FLORI_SCHEMA_NAME="$(basename "$FLORI_SCHEMA_MANIFEST")"
+if [ "$CHECK_ONLY" -eq 0 ]; then
+  case "$FLORI_DEPLOYMENT_ID" in
+    *[!A-Za-z0-9_.-]*|''|unbound)
+      echo "错误: 恢复要求 FLORI_DEPLOYMENT_ID 为稳定非unbound标识" >&2
+      exit 1
+      ;;
+  esac
+fi
+if [ "$CHECK_ONLY" -eq 0 ] && [ "$ALLOW_CROSS_DEPLOYMENT" -eq 1 ]; then
+  [ "$CROSS_DEPLOYMENT_CONFIRMATION" = "REPLACE_OTHER_FLORI_DEPLOYMENT" ] || {
+    echo "错误: 跨部署恢复必须同时提供精确的第二次高风险确认" >&2
+    exit 1
+  }
+elif [ "$CHECK_ONLY" -eq 0 ] && [ -n "$CROSS_DEPLOYMENT_CONFIRMATION" ]; then
+  echo "错误: --confirm-cross-deployment 必须与 --allow-cross-deployment 同时使用" >&2
+  exit 1
+fi
 
 discover_data_mount() {
   local container="$1" destination="$2" descriptor type name source
@@ -158,10 +189,40 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+if [ -z "$RESTORE_RESULT_FILE" ]; then
+  RESTORE_RESULT_FILE="$ARCHIVE.restore-result.json"
+fi
+RESULT_DIR="$(realpath -m -- "$(dirname "$RESTORE_RESULT_FILE")")"
+RESULT_NAME="$(basename "$RESTORE_RESULT_FILE")"
+
+assert_restore_evidence_disjoint() {
+  local label="$1" target="$2"
+  # 证据父目录是目标的普通祖先时允许(例如同一 /mnt 下的 backups 与 data);
+  # 只拒绝证据实体落入目标树或bind alias到其子目录。
+  if content_path_is_in_repository_tree "$target" "$ARCHIVE_DIR" \
+      || content_path_is_in_repository_tree "$target" "$RESULT_DIR"; then
+    echo "错误: archive/result证据目录不得与${label}恢复目标重叠: $target" >&2
+    exit 1
+  fi
+}
+
 MINIO_INCLUDED=0
 CONFIG_INCLUDED=0
 echo "$VALIDATION_JSON" | grep -Eq '"minio": \{[^}]*"included": true' && MINIO_INCLUDED=1 || true
 echo "$VALIDATION_JSON" | grep -Eq '"config": \{[^}]*"included": true' && CONFIG_INCLUDED=1 || true
+
+# 所有词法/现存实体边界检查先于 mkdir。参数错误不能在归档目录或恢复目标里
+# 留下 result/target 空目录，更不能为后续覆盖制造递归输入。
+[ -z "$FLORI_DATA_DIR" ] || assert_restore_evidence_disjoint "data" "$FLORI_DATA_DIR"
+[ -z "$REDIS_DATA_DIR" ] || assert_restore_evidence_disjoint "Redis" "$REDIS_DATA_DIR"
+if [ "$MINIO_INCLUDED" -eq 1 ] && [ -n "$MINIO_DATA_DIR" ]; then
+  assert_restore_evidence_disjoint "MinIO" "$MINIO_DATA_DIR"
+fi
+if [ "$CONFIG_INCLUDED" -eq 1 ] && [ -n "$RESTORE_CONFIG_DIR" ]; then
+  assert_restore_evidence_disjoint "config" "$RESTORE_CONFIG_DIR"
+fi
+mkdir -p "$RESULT_DIR"
+RESULT_DIR="$(cd "$RESULT_DIR" && pwd)"
 
 echo ""
 echo "!! 即将停止写入者并原子替换持久状态:"
@@ -198,14 +259,22 @@ DOCKER_ARGS=(run --rm
 RESTORE_ARGS=(python /tool/dr_snapshot.py restore
   --archive "/archive/$ARCHIVE_NAME"
   --schema-manifest "/tool/migrations/$FLORI_SCHEMA_NAME"
+  --expected-deployment-id "$FLORI_DEPLOYMENT_ID"
   --data-target /target-data
   --redis-target /target-redis
   --owner-uid "$(id -u)"
   --owner-gid "$(id -g)")
+if [ "$ALLOW_CROSS_DEPLOYMENT" -eq 1 ]; then
+  RESTORE_ARGS+=(
+    --allow-cross-deployment
+    --cross-deployment-confirmation "$CROSS_DEPLOYMENT_CONFIRMATION"
+  )
+fi
 TARGET_SOURCES=()
 
 if [ -n "$FLORI_DATA_DIR" ]; then
   FLORI_DATA_DIR="$(prepare_bind_target "$FLORI_DATA_DIR")"
+  assert_restore_evidence_disjoint "data" "$FLORI_DATA_DIR"
   DOCKER_ARGS+=(-v "$FLORI_DATA_DIR:/target-data")
   TARGET_SOURCES+=("$FLORI_DATA_DIR")
 else
@@ -216,6 +285,7 @@ fi
 
 if [ -n "$REDIS_DATA_DIR" ]; then
   REDIS_DATA_DIR="$(prepare_bind_target "$REDIS_DATA_DIR")"
+  assert_restore_evidence_disjoint "Redis" "$REDIS_DATA_DIR"
   DOCKER_ARGS+=(-v "$REDIS_DATA_DIR:/target-redis")
   TARGET_SOURCES+=("$REDIS_DATA_DIR")
 else
@@ -227,6 +297,7 @@ fi
 if [ "$MINIO_INCLUDED" -eq 1 ]; then
   if [ -n "$MINIO_DATA_DIR" ]; then
     MINIO_DATA_DIR="$(prepare_bind_target "$MINIO_DATA_DIR")"
+    assert_restore_evidence_disjoint "MinIO" "$MINIO_DATA_DIR"
     DOCKER_ARGS+=(-v "$MINIO_DATA_DIR:/target-minio")
     TARGET_SOURCES+=("$MINIO_DATA_DIR")
   else
@@ -239,17 +310,12 @@ fi
 
 if [ "$CONFIG_INCLUDED" -eq 1 ] && [ -n "$RESTORE_CONFIG_DIR" ]; then
   RESTORE_CONFIG_DIR="$(prepare_bind_target "$RESTORE_CONFIG_DIR")"
+  assert_restore_evidence_disjoint "config" "$RESTORE_CONFIG_DIR"
   DOCKER_ARGS+=(-v "$RESTORE_CONFIG_DIR:/target-config")
   RESTORE_ARGS+=(--config-target /target-config)
   TARGET_SOURCES+=("$RESTORE_CONFIG_DIR")
 fi
 
-if [ -z "$RESTORE_RESULT_FILE" ]; then
-  RESTORE_RESULT_FILE="$ARCHIVE.restore-result.json"
-fi
-mkdir -p "$(dirname "$RESTORE_RESULT_FILE")"
-RESULT_DIR="$(cd "$(dirname "$RESTORE_RESULT_FILE")" && pwd)"
-RESULT_NAME="$(basename "$RESTORE_RESULT_FILE")"
 DOCKER_ARGS+=(-v "$RESULT_DIR:/result")
 RESTORE_ARGS+=(--result-file "/result/$RESULT_NAME")
 if [ -n "$FLORI_MAX_DB_USER_VERSION" ]; then

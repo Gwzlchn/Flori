@@ -718,6 +718,75 @@ class TestCollectionName:
         resp = await client.post("/api/jobs/nonexistent_id/resubmit")
         assert resp.status_code == 404
 
+    @pytest.mark.asyncio
+    async def test_restored_job_activation_is_retryable(self, client, app, mock_redis):
+        job_id = "restored_activation"
+        app.state.db.create_job(Job(
+            id=job_id,
+            content_type="document",
+            document_kind="article",
+            pipeline="document",
+            status=JobStatus.PENDING_ACTIVATION,
+        ))
+
+        first = await client.post(f"/api/jobs/{job_id}/activate")
+        second = await client.post(f"/api/jobs/{job_id}/activate")
+
+        assert first.status_code == second.status_code == 200
+        assert first.json()["status"] == second.json()["status"] == "pending"
+        assert app.state.db.get_job(job_id).status == JobStatus.PENDING
+        commands = [
+            call.args[1]
+            for call in mock_redis.append_lifecycle_event.call_args_list
+            if call.args[0] == "job_command"
+        ]
+        assert commands[-2:] == [
+            {"action": "new_job", "job_id": job_id, "pipeline": "document"},
+            {"action": "new_job", "job_id": job_id, "pipeline": "document"},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_ordinary_pending_job_cannot_impersonate_activation_retry(
+        self, client, app, mock_redis,
+    ):
+        job_id = "ordinary_pending"
+        app.state.db.create_job(Job(
+            id=job_id,
+            content_type="document",
+            document_kind="article",
+            pipeline="document",
+            status=JobStatus.PENDING,
+        ))
+
+        response = await client.post(f"/api/jobs/{job_id}/activate")
+
+        assert response.status_code == 409
+        assert "activation receipt" in response.text
+        mock_redis.append_lifecycle_event.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_restored_job_cannot_rerun_before_activation(self, client, app):
+        job_id = "restored_guard"
+        app.state.db.create_job(Job(
+            id=job_id,
+            content_type="document",
+            document_kind="article",
+            pipeline="document",
+            status=JobStatus.PENDING_ACTIVATION,
+        ))
+
+        response = await client.post(
+            f"/api/jobs/{job_id}/rerun", json={"from_step": "01_download"},
+        )
+
+        assert response.status_code == 409
+        app.state.db.update_job(
+            job_id,
+            meta={"flags": {"mechanical_only": True}},
+        )
+        continued = await client.post(f"/api/jobs/{job_id}/continue-ai")
+        assert continued.status_code == 409
+
 
 class TestGetStepLog:
     @pytest.mark.asyncio
@@ -1576,3 +1645,23 @@ class TestRebuildP2c:
         assert repeated.status_code == 200
         assert repeated.json()["rebuilt"] == 0
         assert len(db.lineage_versions("jobs_paper_stale")) == first_count
+
+    @pytest.mark.asyncio
+    async def test_rebuild_stale_skips_pending_activation(
+        self, client, app, monkeypatch,
+    ):
+        app.state.db.create_job(Job(
+            id="jobs_restored_stale",
+            content_type="document",
+            pipeline="document",
+            document_kind="research_paper",
+            status=JobStatus.PENDING_ACTIVATION,
+        ))
+        expired = AsyncMock(return_value={"expired": True, "first_changed_step": "01_download"})
+        monkeypatch.setattr("api.routes.jobs.is_job_expired", expired)
+
+        response = await client.post("/api/jobs/rebuild-stale")
+
+        assert response.status_code == 200
+        assert response.json() == {"rebuilt": 0, "items": []}
+        expired.assert_not_awaited()

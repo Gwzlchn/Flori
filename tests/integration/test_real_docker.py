@@ -11,6 +11,7 @@ from pathlib import Path
 
 import docker
 import pytest
+from docker.types import Mount
 
 from worker.step_runner import DockerStepRunner, StepContext
 
@@ -24,6 +25,105 @@ async def _noop_progress(_event: str, _payload: dict) -> None:
 
 async def _noop_tick() -> None:
     pass
+
+
+def _run_boundary_probe(
+    client,
+    *,
+    image: str,
+    command: str,
+    mounts: list[Mount],
+    label: str,
+) -> tuple[int, str]:
+    container = client.containers.run(
+        image,
+        ["python", "-c", command],
+        detach=True,
+        network_disabled=True,
+        environment={
+            "PYTHONPATH": "/app",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        labels={"flori.test": label},
+        mounts=mounts,
+    )
+    try:
+        result = container.wait(timeout=30)
+        return int(result["StatusCode"]), container.logs().decode("utf-8", errors="replace")
+    finally:
+        container.remove(force=True)
+
+
+def test_recovery_worker_rejects_real_repository_and_work_bind_aliases() -> None:
+    """真实dual-bind下repository/work都必须在任何写入前fail-closed。"""
+    socket = Path("/var/run/docker.sock")
+    assert socket.is_socket(), "integration 栈必须挂载 Docker socket"
+
+    image = os.environ["INTEGRATION_TEST_IMAGE"]
+    host_tmp = Path(os.environ["INTEGRATION_HOST_TMP"])
+    host_repo = Path(os.environ["FLORI_INTEGRATION_DR_HOST_REPO"])
+    suffix = uuid.uuid4().hex
+    alias_root = host_tmp / f"recovery-alias-{suffix}"
+    safe_repository = host_tmp / f"recovery-repository-{suffix}"
+    alias_root.mkdir()
+    safe_repository.mkdir()
+    label = f"recovery-bind-{suffix}"
+    client = docker.from_env()
+    try:
+        assert client.ping() is True
+        client.images.get(image)
+        repository_code = (
+            "from pathlib import Path; "
+            "from api.recovery import validate_repository_physical_boundary; "
+            "validate_repository_physical_boundary(Path('/data'))"
+        )
+        repository_status, repository_log = _run_boundary_probe(
+            client,
+            image=image,
+            command=repository_code,
+            label=label,
+            mounts=[
+                Mount("/app", str(host_repo), type="bind", read_only=True),
+                Mount("/data", str(alias_root), type="bind"),
+                Mount("/content-repo", str(alias_root), type="bind"),
+            ],
+        )
+        assert repository_status != 0
+        assert "physically aliases protected data root" in repository_log
+        assert list(alias_root.iterdir()) == []
+
+        work_code = (
+            "import os; "
+            "os.environ['WORK_DIR'] = '/alias-parent/not-yet-created'; "
+            "from pathlib import Path; "
+            "from api.recovery_worker import _prepare_work_dir; "
+            "_prepare_work_dir(Path('/data'), Path('/content-repo'))"
+        )
+        work_status, work_log = _run_boundary_probe(
+            client,
+            image=image,
+            command=work_code,
+            label=label,
+            mounts=[
+                Mount("/app", str(host_repo), type="bind", read_only=True),
+                Mount("/data", str(alias_root), type="bind"),
+                Mount("/alias-parent", str(alias_root), type="bind"),
+                Mount("/content-repo", str(safe_repository), type="bind"),
+            ],
+        )
+        assert work_status != 0
+        assert "physically aliases protected data root" in work_log
+        assert list(alias_root.iterdir()) == []
+        assert list(safe_repository.iterdir()) == []
+    finally:
+        for container in client.containers.list(
+            all=True,
+            filters={"label": f"flori.test={label}"},
+        ):
+            container.remove(force=True)
+        client.close()
+        shutil.rmtree(alias_root, ignore_errors=True)
+        shutil.rmtree(safe_repository, ignore_errors=True)
 
 
 @pytest.mark.asyncio

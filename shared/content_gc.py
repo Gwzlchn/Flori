@@ -11,25 +11,26 @@ sweep 会删对象,必须与 backup 互斥,因此在写锁内执行。import 只
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 from typing import Sequence
 
 from .content_policy import PolicyError
 from .content_repository import ContentRepository, RepositoryError
+from .content_result import (
+    ResultDestination,
+    ResultFileError,
+    emit_result,
+    prepare_result_destination,
+)
 
 # 默认保留最近多少条 receipt 引用的 snapshot(§2.14-2 保留集合的一部分)。
 DEFAULT_KEEP_RECEIPTS = 20
 DEFAULT_GRACE_DAYS = 7
 
 
-def _emit(payload: dict, result_file: str | None) -> None:
-    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2, default=str)
-    if result_file:
-        Path(result_file).parent.mkdir(parents=True, exist_ok=True)
-        Path(result_file).write_text(text + "\n", encoding="utf-8")
-    print(text)
+def _emit(payload: dict, result_file: ResultDestination | None) -> None:
+    emit_result(payload, result_file)
 
 
 def _has_monthly_anchor(repository: ContentRepository) -> bool:
@@ -78,6 +79,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    try:
+        args.result_file = prepare_result_destination(args.result_file, args.repo)
+    except ResultFileError as exc:
+        emit_result({"ok": False, "error": str(exc)}, None)
+        return 2
 
     if not (args.mark or args.sweep or args.scrub or args.break_lock):
         _emit({"ok": False, "error": "one of --mark/--sweep/--scrub/--break-lock is required"},

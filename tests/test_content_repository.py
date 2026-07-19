@@ -6,8 +6,10 @@ from pathlib import Path
 
 import pytest
 
+import shared.content_repository as content_repository
 from shared.content_policy import PolicyError
 from shared.content_repository import (
+    LEGACY_SNAPSHOT_FORMAT,
     REPOSITORY_FORMAT,
     SNAPSHOT_FORMAT,
     SOURCE_MANIFEST_FORMAT,
@@ -161,6 +163,19 @@ def build_snapshot(
             "secret_scan_exceptions": [],
             "runtime_state_included": False,
         },
+        "completeness": {
+            "terminal_steps": 0,
+            "manifests_seen": 0,
+            "manifests_missing": 0,
+            "manifests_excluded": 0,
+            "ai_config_complete": True,
+            "user_config_complete": True,
+            "secret_scan_complete": True,
+            "media_self_contained": True,
+            "external_media_roots": [],
+            "portable_ready": True,
+            "readiness_reasons": [],
+        },
     }
 
 
@@ -224,6 +239,52 @@ class TestLifecycle:
         )
         with pytest.raises(RepositoryError, match="unsupported repository format"):
             ContentRepository.open(repo.root)
+
+    def test_open_rejects_symlinked_repository_directory(self, tmp_path):
+        repo = ContentRepository.create(tmp_path / "repo")
+        real_tmp = repo.root / "tmp-real"
+        (repo.root / "tmp").rename(real_tmp)
+        (repo.root / "tmp").symlink_to(real_tmp, target_is_directory=True)
+        with pytest.raises(RepositoryError, match="missing or unsafe"):
+            ContentRepository.open(repo.root)
+
+    def test_create_and_open_reject_symlinked_ancestor(self, tmp_path):
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        with pytest.raises(RepositoryError, match="symlink component"):
+            ContentRepository.create(link / "new-repo")
+
+        repo = ContentRepository.create(real / "existing-repo")
+        with pytest.raises(RepositoryError, match="symlink component"):
+            ContentRepository.open(link / repo.root.name)
+
+    def test_clean_tmp_unlinks_symlink_without_touching_target(self, tmp_path):
+        repo = ContentRepository.create(tmp_path / "repo")
+        target = tmp_path / "target"
+        target.write_bytes(b"protected")
+        link = repo.tmp_dir / "spool-known"
+        link.symlink_to(target)
+        assert repo.clean_tmp() == 1
+        assert not link.exists()
+        assert target.read_bytes() == b"protected"
+
+    def test_new_directories_fsync_their_parent(self, tmp_path, monkeypatch):
+        seen: list[Path] = []
+        real_fsync = content_repository._fsync_dir
+
+        def observe(path: Path) -> None:
+            seen.append(Path(path))
+            real_fsync(path)
+
+        monkeypatch.setattr(content_repository, "_fsync_dir", observe)
+        root = tmp_path / "nested" / "repo"
+        repo = ContentRepository.create(root)
+        put = repo.put_blob_bytes(BLOB_SHARED)
+        assert tmp_path in seen
+        assert root in seen
+        assert repo.blob_path(put.digest).parent.parent in seen
 
 
 class TestBlobs:
@@ -386,6 +447,23 @@ class TestRecords:
 
 
 class TestSnapshots:
+    def test_legacy_v1_snapshot_is_readable_but_not_portable_ready(self, tmp_path):
+        repo = ContentRepository.create(tmp_path / "repo")
+        legacy = build_snapshot()
+        legacy["format"] = LEGACY_SNAPSHOT_FORMAT
+        del legacy["completeness"]
+        raw = canonical_json_bytes(legacy)
+        digest = sha(raw)
+        target = repo._snapshot_path(digest)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+        loaded = repo.get_snapshot(digest)
+        assert loaded["format"] == LEGACY_SNAPSHOT_FORMAT
+        assert loaded["completeness"]["portable_ready"] is False
+        assert loaded["completeness"]["readiness_reasons"] == [
+            "legacy_snapshot_without_completeness",
+        ]
+
     def test_repeat_backup_zero_growth(self, tmp_path):
         ctx = seed_repository(tmp_path / "repo")
         repo = ctx["repo"]
@@ -518,6 +596,11 @@ class TestSnapshots:
             honest["policy"],
             secrets_included=True,
             secret_scan_exceptions=["job_a:input/metadata.json"],
+        )
+        honest["completeness"] = dict(
+            honest["completeness"],
+            portable_ready=False,
+            readiness_reasons=["secret_scan_exceptions"],
         )
         published = repo.put_snapshot(honest)
         assert repo.get_snapshot(published.digest)["policy"]["secret_scan_exceptions"] == [

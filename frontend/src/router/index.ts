@@ -29,6 +29,7 @@ const router = createRouter({
 
     { path: '/settings', name: 'settings', component: () => import('../views/SettingsView.vue') },
     { path: '/settings/prompts', name: 'settings-prompts', component: () => import('../views/PromptsView.vue') },
+    { path: '/settings/recovery', name: 'settings-recovery', component: () => import('../views/RecoverySettingsView.vue') },
     { path: '/about', name: 'about', component: () => import('../views/AboutView.vue') },
 
     // 旧路径兼容(防止过渡期遗留跳转 404,重建完成后清理)

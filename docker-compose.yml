@@ -85,6 +85,8 @@ services:
       - "${API_BIND_IP:-127.0.0.1}:${API_PORT:-8000}:8000"
     volumes:
       - ${FLORI_DATA_DIR:-flori-data}:/data
+      # 便携内容仓库必须与/data物理隔离挂载,否则备份输入和输出会自包含。
+      - ${FLORI_CONTENT_REPOSITORY_DIR:-.local/content-repository}:/content-repo
       # local_dir 订阅来源约定监听目录:把文件放进 ${FLORI_INBOX_DIR},即被 source_type=local_dir、
       # source_id=/data/inbox 的订阅枚举入库。默认 .local/inbox(gitignored 本地区);
       # 生产经 .env 设到数据盘如 /volume2/DATA/flori/inbox,运行时数据永不放仓库树。
@@ -113,6 +115,8 @@ services:
       FLORI_SOURCE_LIBRARY_ENABLED: ${FLORI_SOURCE_LIBRARY_ENABLED:-0}
       FLORI_SOURCE_LIBRARY_ROOT_ID: ${FLORI_SOURCE_LIBRARY_ROOT_ID:-library}
       FLORI_SOURCE_LIBRARY_CONTAINER_DIR: /sources/library
+      FLORI_CONTENT_REPOSITORY: /content-repo
+      FLORI_DEPLOYMENT_ID: ${FLORI_DEPLOYMENT_ID:-}
     logging: *default-logging
     healthcheck:
       # 编排只看 liveness.Redis/DB/Worker 故障由 readiness 报告,不触发 API 重启风暴.

@@ -4811,6 +4811,563 @@
         "title": "RebuildRequest",
         "type": "object"
       },
+      "RecoveryBackupRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "full_rehash": {
+            "default": false,
+            "title": "Full Rehash",
+            "type": "boolean"
+          },
+          "vendor_media": {
+            "default": false,
+            "title": "Vendor Media",
+            "type": "boolean"
+          }
+        },
+        "title": "RecoveryBackupRequest",
+        "type": "object"
+      },
+      "RecoveryBackupStartedResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "$ref": "#/components/schemas/RecoveryOperationResponse"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "title": "RecoveryBackupStartedResponse",
+        "type": "object"
+      },
+      "RecoveryCompletenessResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "ai_config_complete": {
+            "title": "Ai Config Complete",
+            "type": "boolean"
+          },
+          "external_media_roots": {
+            "items": {
+              "type": "string"
+            },
+            "title": "External Media Roots",
+            "type": "array"
+          },
+          "manifests_excluded": {
+            "title": "Manifests Excluded",
+            "type": "integer"
+          },
+          "manifests_missing": {
+            "title": "Manifests Missing",
+            "type": "integer"
+          },
+          "manifests_seen": {
+            "title": "Manifests Seen",
+            "type": "integer"
+          },
+          "media_self_contained": {
+            "title": "Media Self Contained",
+            "type": "boolean"
+          },
+          "portable_ready": {
+            "title": "Portable Ready",
+            "type": "boolean"
+          },
+          "readiness_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Readiness Reasons",
+            "type": "array"
+          },
+          "secret_scan_complete": {
+            "title": "Secret Scan Complete",
+            "type": "boolean"
+          },
+          "terminal_steps": {
+            "title": "Terminal Steps",
+            "type": "integer"
+          },
+          "user_config_complete": {
+            "title": "User Config Complete",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "terminal_steps",
+          "manifests_seen",
+          "manifests_missing",
+          "manifests_excluded",
+          "ai_config_complete",
+          "user_config_complete",
+          "secret_scan_complete",
+          "media_self_contained",
+          "external_media_roots",
+          "portable_ready",
+          "readiness_reasons"
+        ],
+        "title": "RecoveryCompletenessResponse",
+        "type": "object"
+      },
+      "RecoveryOperationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "format": {
+            "const": "flori-recovery-operation/v1",
+            "title": "Format",
+            "type": "string"
+          },
+          "full_rehash": {
+            "title": "Full Rehash",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "const": "backup",
+            "title": "Kind",
+            "type": "string"
+          },
+          "receipt_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Receipt Id"
+          },
+          "snapshot_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Digest"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "stats": {
+            "additionalProperties": true,
+            "title": "Stats",
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "success",
+              "failed",
+              "interrupted"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "vendor_media": {
+            "title": "Vendor Media",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "format",
+          "id",
+          "kind",
+          "status",
+          "created_at",
+          "started_at",
+          "finished_at",
+          "vendor_media",
+          "full_rehash",
+          "snapshot_digest",
+          "receipt_id",
+          "stats",
+          "error"
+        ],
+        "title": "RecoveryOperationResponse",
+        "type": "object"
+      },
+      "RecoveryRestoreCommandsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "exact_dr": {
+            "title": "Exact Dr",
+            "type": "string"
+          },
+          "plan": {
+            "title": "Plan",
+            "type": "string"
+          },
+          "restore": {
+            "title": "Restore",
+            "type": "string"
+          },
+          "verify": {
+            "title": "Verify",
+            "type": "string"
+          }
+        },
+        "required": [
+          "verify",
+          "exact_dr",
+          "plan",
+          "restore"
+        ],
+        "title": "RecoveryRestoreCommandsResponse",
+        "type": "object"
+      },
+      "RecoveryRestorePlanRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "snapshot_digest": {
+            "title": "Snapshot Digest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_digest"
+        ],
+        "title": "RecoveryRestorePlanRequest",
+        "type": "object"
+      },
+      "RecoveryRestorePlanResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "app_version": {
+            "title": "App Version",
+            "type": "string"
+          },
+          "bytes_to_write": {
+            "title": "Bytes To Write",
+            "type": "integer"
+          },
+          "commands": {
+            "$ref": "#/components/schemas/RecoveryRestoreCommandsResponse"
+          },
+          "counts": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Counts",
+            "type": "object"
+          },
+          "deployment_id": {
+            "title": "Deployment Id",
+            "type": "string"
+          },
+          "format": {
+            "const": "flori-restore-handoff/v1",
+            "title": "Format",
+            "type": "string"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "required_source_roots": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Source Roots",
+            "type": "array"
+          },
+          "reused": {
+            "title": "Reused",
+            "type": "boolean"
+          },
+          "snapshot_digest": {
+            "title": "Snapshot Digest",
+            "type": "string"
+          },
+          "target_generation": {
+            "title": "Target Generation",
+            "type": "string"
+          },
+          "target_mode": {
+            "const": "empty",
+            "title": "Target Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "format",
+          "id",
+          "target_generation",
+          "snapshot_digest",
+          "plan_digest",
+          "deployment_id",
+          "app_version",
+          "target_mode",
+          "generated_at",
+          "counts",
+          "bytes_to_write",
+          "required_source_roots",
+          "commands",
+          "reused"
+        ],
+        "title": "RecoveryRestorePlanResponse",
+        "type": "object"
+      },
+      "RecoverySnapshotResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "completeness": {
+            "$ref": "#/components/schemas/RecoveryCompletenessResponse"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "digest": {
+            "title": "Digest",
+            "type": "string"
+          },
+          "partial": {
+            "title": "Partial",
+            "type": "boolean"
+          },
+          "portable_ready": {
+            "title": "Portable Ready",
+            "type": "boolean"
+          },
+          "readiness_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Readiness Reasons",
+            "type": "array"
+          },
+          "refs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Refs",
+            "type": "array"
+          },
+          "source_app_version": {
+            "title": "Source App Version",
+            "type": "string"
+          },
+          "stats": {
+            "additionalProperties": true,
+            "title": "Stats",
+            "type": "object"
+          }
+        },
+        "required": [
+          "digest",
+          "refs",
+          "created_at",
+          "source_app_version",
+          "partial",
+          "portable_ready",
+          "readiness_reasons",
+          "completeness",
+          "stats"
+        ],
+        "title": "RecoverySnapshotResponse",
+        "type": "object"
+      },
+      "RecoveryStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "deployment_id_configured": {
+            "title": "Deployment Id Configured",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "host_repository_env": {
+            "title": "Host Repository Env",
+            "type": "string"
+          },
+          "latest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecoverySnapshotResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "media_vendoring_available": {
+            "title": "Media Vendoring Available",
+            "type": "boolean"
+          },
+          "online_restore_supported": {
+            "title": "Online Restore Supported",
+            "type": "boolean"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/RecoveryOperationResponse"
+            },
+            "title": "Operations",
+            "type": "array"
+          },
+          "repository_path": {
+            "title": "Repository Path",
+            "type": "string"
+          },
+          "snapshots": {
+            "items": {
+              "$ref": "#/components/schemas/RecoverySnapshotResponse"
+            },
+            "title": "Snapshots",
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "empty",
+              "ready",
+              "incomplete",
+              "locked",
+              "error"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "write_lock": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecoveryWriteLockResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "state",
+          "repository_path",
+          "host_repository_env",
+          "write_lock",
+          "latest",
+          "snapshots",
+          "media_vendoring_available",
+          "deployment_id_configured",
+          "online_restore_supported",
+          "operations",
+          "error"
+        ],
+        "title": "RecoveryStatusResponse",
+        "type": "object"
+      },
+      "RecoveryWriteLockResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "acquired_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Acquired At"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner"
+          }
+        },
+        "required": [
+          "owner",
+          "acquired_at"
+        ],
+        "title": "RecoveryWriteLockResponse",
+        "type": "object"
+      },
       "RerunRequest": {
         "properties": {
           "from_step": {
@@ -13073,6 +13630,154 @@
         ]
       }
     },
+    "/api/jobs/{job_id}/activate": {
+      "post": {
+        "description": "显式激活恢复任务;完成态和普通运行态都不能借此重置。",
+        "operationId": "activate_imported_job_api_jobs__job_id__activate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "416": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested Range Not Satisfiable"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Activate Imported Job",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
     "/api/jobs/{job_id}/ai-logs": {
       "get": {
         "description": "返回Job或显式Part scope的AI审计日志,不做跨scope隐式聚合。",
@@ -16865,6 +17570,437 @@
         "summary": "Get Prompt Version",
         "tags": [
           "prompts"
+        ]
+      }
+    },
+    "/api/recovery": {
+      "get": {
+        "description": "读取便携仓库、有效快照、视频闭包与后台备份状态。",
+        "operationId": "get_recovery_status_api_recovery_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "416": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested Range Not Satisfiable"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Recovery Status",
+        "tags": [
+          "recovery"
+        ]
+      }
+    },
+    "/api/recovery/backups": {
+      "post": {
+        "description": "启动隔离子进程创建增量便携备份;失败不会推进 latest。",
+        "operationId": "start_recovery_backup_api_recovery_backups_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecoveryBackupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryBackupStartedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "416": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested Range Not Satisfiable"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Start Recovery Backup",
+        "tags": [
+          "recovery"
+        ]
+      }
+    },
+    "/api/recovery/restore-plans": {
+      "post": {
+        "description": "全链检查快照并生成离线恢复交接;本端点不写线上DB或产物。",
+        "operationId": "prepare_restore_plan_api_recovery_restore_plans_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecoveryRestorePlanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryRestorePlanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "416": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested Range Not Satisfiable"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Prepare Restore Plan",
+        "tags": [
+          "recovery"
         ]
       }
     },

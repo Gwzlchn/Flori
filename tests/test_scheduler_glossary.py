@@ -14,8 +14,8 @@ from types import SimpleNamespace
 import pytest
 
 from scheduler.scheduler import Scheduler
-from shared.db import Database
-from shared.models import Job
+from shared.db import ConceptConflictError, Database
+from shared.models import Job, JobStatus
 
 
 class _StorageStub:
@@ -136,6 +136,7 @@ class _DBStub:
         self.canonical_by_segment: dict[str, list[str]] = {}
         self.canonical_queries: list[dict] = []
         self.occurrence_replacements: list[dict] = []
+        self.occurrence_projection_sources: dict[str, str] = {}
         self.definition_states: dict[str, dict] = {}
 
     def get_job(self, job_id: str):
@@ -180,12 +181,23 @@ class _DBStub:
             for segment_id in source_segment_ids
         }
 
-    def replace_job_concept_occurrences(self, *, domain, job_id, mapping):
+    def replace_job_concept_occurrences(
+        self, *, domain, job_id, mapping,
+        projection_source_digest=None,
+        expected_projection_source_digest=None,
+    ):
+        if projection_source_digest is not None:
+            assert self.occurrence_projection_sources.get(job_id) \
+                == expected_projection_source_digest
+            self.occurrence_projection_sources[job_id] = projection_source_digest
         self.occurrence_replacements.append({
             "domain": domain,
             "job_id": job_id,
             "mapping": {term: list(ids) for term, ids in mapping.items()},
         })
+
+    def get_concept_occurrence_projection_source(self, job_id: str):
+        return self.occurrence_projection_sources.get(job_id)
 
 
 def _make_engine(storage, db):
@@ -483,6 +495,137 @@ async def test_missing_artifacts_use_real_database_keyword_reconcile(tmp_path):
         assert db.list_concept_occurrences(
             "general", "unused", include_invalid=True,
         ) == []
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_occurrence_projection_replay_has_no_glossary_or_ai_side_effects():
+    concepts = {
+        "evidence_note_type": "original",
+        "key_terms": [{
+            "term": "RRF",
+            "definition": "rank fusion",
+            "evidence_source_segment_ids": [_SEGMENT_A],
+        }],
+    }
+    db = _DBStub()
+    db.calls.append({
+        "term": "RRF", "zh_name": "", "domain": "ml", "job_id": "seed",
+        "content_type": "document", "location": None, "definition": "",
+        "document_kind": "article",
+    })
+    db.canonical_by_segment = {_SEGMENT_A: ["ev-rrf"]}
+    engine = _make_engine(_ConceptsStorageStub(concepts), db)
+    before = list(db.calls)
+
+    first = await engine.reconcile_concept_occurrences_only("j_restore")
+    second = await engine.reconcile_concept_occurrences_only("j_restore")
+
+    assert first == 1
+    assert second == 0
+    assert db.calls == before
+    assert db.relations == []
+    assert db.occurrence_replacements[-1:] == [
+        {"domain": "ml", "job_id": "j_restore", "mapping": {"RRF": ["ev-rrf"]}},
+    ]
+    assert db.occurrence_projection_sources["j_restore"].startswith("sha256:")
+
+
+def test_occurrence_projection_ledger_preserves_retry_after_fts_success(tmp_path):
+    db = Database(tmp_path / "occurrence-ledger.db")
+    db.init_schema()
+    try:
+        db.create_job(Job(
+            id="job-retry-occurrence",
+            content_type="document",
+            pipeline="document",
+            document_kind="article",
+            status=JobStatus.DONE,
+        ))
+        db.index_job_notes(
+            "job-retry-occurrence", "original", "title", "body",
+            content_type="document", domain="general",
+        )
+        assert [
+            job.id for job in db.list_unreconciled_concept_occurrence_jobs()
+        ] == ["job-retry-occurrence"]
+
+        # occurrence 处理失败时不会调用 marker,下一轮仍能拾取同一个 Job。
+        assert [
+            job.id for job in db.list_unreconciled_concept_occurrence_jobs()
+        ] == ["job-retry-occurrence"]
+        db.replace_job_concept_occurrences(
+            domain="general",
+            job_id="job-retry-occurrence",
+            mapping={},
+            projection_source_digest="sha256:" + "1" * 64,
+            expected_projection_source_digest=None,
+        )
+        assert db.list_unreconciled_concept_occurrence_jobs() == []
+
+        # FTS/canonical evidence 新版本与旧 marker 不能同时可见。模拟索引提交后、
+        # glossary 对账前崩溃,周期查询必须重新认领这个 Job。
+        db.index_job_notes(
+            "job-retry-occurrence", "original", "title-v2", "body-v2",
+            content_type="document", domain="general",
+        )
+        assert db.get_concept_occurrence_projection_source(
+            "job-retry-occurrence",
+        ) is None
+        assert [
+            job.id for job in db.list_unreconciled_concept_occurrence_jobs()
+        ] == ["job-retry-occurrence"]
+    finally:
+        db.close()
+
+
+def test_occurrence_projection_source_publish_is_compare_and_swap(tmp_path):
+    db = Database(tmp_path / "occurrence-cas.db")
+    db.init_schema()
+    source_a = "sha256:" + "a" * 64
+    source_b = "sha256:" + "b" * 64
+    try:
+        db.create_job(Job(
+            id="job-occurrence-cas",
+            content_type="document",
+            pipeline="document",
+            document_kind="article",
+            status=JobStatus.DONE,
+        ))
+        db.replace_job_concept_occurrences(
+            domain="general",
+            job_id="job-occurrence-cas",
+            mapping={},
+            projection_source_digest=source_a,
+            expected_projection_source_digest=None,
+        )
+        assert db.get_concept_occurrence_projection_source(
+            "job-occurrence-cas",
+        ) == source_a
+
+        with pytest.raises(ConceptConflictError, match="source changed"):
+            db.replace_job_concept_occurrences(
+                domain="general",
+                job_id="job-occurrence-cas",
+                mapping={},
+                projection_source_digest=source_b,
+                expected_projection_source_digest=None,
+            )
+        assert db.get_concept_occurrence_projection_source(
+            "job-occurrence-cas",
+        ) == source_a
+
+        db.replace_job_concept_occurrences(
+            domain="general",
+            job_id="job-occurrence-cas",
+            mapping={},
+            projection_source_digest=source_b,
+            expected_projection_source_digest=source_a,
+        )
+        assert db.get_concept_occurrence_projection_source(
+            "job-occurrence-cas",
+        ) == source_b
     finally:
         db.close()
 

@@ -284,6 +284,40 @@ class DomainScopeASGI:
         return seg or None  # /mcp/ 时 seg 为空,返回 None
 
 
+class MaintenanceLeaseASGI:
+    """把MCP默认数据库和共享维护租约绑定到ASGI lifespan。"""
+
+    def __init__(self, app, *, database, maintenance_lease) -> None:
+        self.app = app
+        self.database = database
+        self.maintenance_lease = maintenance_lease
+        self.closed = False
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self.database.close()
+        finally:
+            self.maintenance_lease.close()
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope.get("type") != "lifespan":
+            await self.app(scope, receive, send)
+            return
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
 def build_http_app():
     """构造带鉴权的 streamable-http ASGI app(默认挂 /mcp)。供 uvicorn 启动。"""
     from mcp.server.transport_security import TransportSecuritySettings
@@ -291,24 +325,35 @@ def build_http_app():
     from api.mcp_server.server import build_default_server
 
     mcp = build_default_server(stateless_http=True)
+    try:
+        # DNS-rebinding 保护:其威胁模型是浏览器被诱导直连 localhost MCP。本服务总在
+        # 反向代理(Caddy/隧道)+ Bearer token 之后,经代理后 Host=公网域名会被默认保护判为非法。
+        # 故按部署主机放行:FLORI_MCP_ALLOWED_HOSTS=逗号分隔。配置可省略端口,这里按公开端口补齐。
+        hosts_env = os.environ.get("FLORI_MCP_ALLOWED_HOSTS", "").strip()
+        if hosts_env and hosts_env != "*":
+            hosts = _expand_allowed_hosts([h.strip() for h in hosts_env.split(",") if h.strip()])
+            mcp.settings.transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=hosts,
+                allowed_origins=_expand_allowed_origins(hosts),
+            )
+        else:
+            mcp.settings.transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=False
+            )
 
-    # DNS-rebinding 保护:其威胁模型是浏览器被诱导直连 localhost MCP。本服务总在
-    # 反向代理(Caddy/隧道)+ Bearer token 之后,经代理后 Host=公网域名会被默认保护判为非法。
-    # 故按部署主机放行:FLORI_MCP_ALLOWED_HOSTS=逗号分隔。配置可省略端口,这里按公开端口补齐。
-    hosts_env = os.environ.get("FLORI_MCP_ALLOWED_HOSTS", "").strip()
-    if hosts_env and hosts_env != "*":
-        hosts = _expand_allowed_hosts([h.strip() for h in hosts_env.split(",") if h.strip()])
-        mcp.settings.transport_security = TransportSecuritySettings(
-            enable_dns_rebinding_protection=True,
-            allowed_hosts=hosts,
-            allowed_origins=_expand_allowed_origins(hosts),
+        app = mcp.streamable_http_app()  # Starlette ASGI;path 默认 /mcp
+        # 限流在最外层,挡掉的请求不耗鉴权;鉴权次之;
+        # 作用域中间件最内,把 /mcp/{domain} 改写到 /mcp 并 set contextvar。
+        protected = RateLimitASGI(TokenAuthASGI(DomainScopeASGI(app)))
+        return MaintenanceLeaseASGI(
+            protected,
+            database=mcp._flori_database,
+            maintenance_lease=mcp._flori_maintenance_lease,
         )
-    else:
-        mcp.settings.transport_security = TransportSecuritySettings(
-            enable_dns_rebinding_protection=False
-        )
-
-    app = mcp.streamable_http_app()  # Starlette ASGI;path 默认 /mcp
-    # 限流在最外层,挡掉的请求不耗鉴权;鉴权次之;
-    # 作用域中间件最内,把 /mcp/{domain} 改写到 /mcp 并 set contextvar。
-    return RateLimitASGI(TokenAuthASGI(DomainScopeASGI(app)))
+    except BaseException:
+        try:
+            mcp._flori_database.close()
+        finally:
+            mcp._flori_maintenance_lease.close()
+        raise

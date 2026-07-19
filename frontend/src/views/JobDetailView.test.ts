@@ -17,11 +17,14 @@ vi.mock('vue-router', () => ({
 const fetchDetail = vi.fn()
 const fetchConcepts = vi.fn()
 const retryJob = vi.fn()
+const activateJob = vi.fn()
 const rerunJob = vi.fn()
 const continueAi = vi.fn()
 const deleteJob = vi.fn()
 vi.mock('../stores/jobs', () => ({
-  useJobStore: () => ({ fetchDetail, fetchConcepts, retryJob, rerunJob, continueAi, deleteJob }),
+  useJobStore: () => ({
+    fetchDetail, fetchConcepts, retryJob, activateJob, rerunJob, continueAi, deleteJob,
+  }),
 }))
 
 const setCrumbs = vi.fn()
@@ -555,6 +558,23 @@ describe('JobDetailView 笔记 tab', () => {
 })
 
 describe('JobDetailView 流水线 tab 操作', () => {
+  it('待激活恢复任务只从元信息入口显式激活', async () => {
+    fetchDetail.mockResolvedValue(makeDetail({ status: 'pending_activation' }))
+    activateJob.mockResolvedValue({ job_id: 'job_BV1abc', status: 'pending' })
+    const w = mountView()
+    await flushPromises()
+    wsJobStatus.value = 'pending_activation'
+    const infoBtn = w.find('.tabs').findAll('button').find(b => b.text().includes('元信息'))
+    await infoBtn!.trigger('click')
+    await flushPromises()
+    const activate = w.findAll('button').find(b => b.text().includes('激活并继续'))
+    expect(activate).toBeTruthy()
+    await activate!.trigger('click')
+    await flushPromises()
+    expect(activateJob).toHaveBeenCalledWith('job_BV1abc')
+    expect(w.text()).not.toContain('激活并继续')
+  })
+
   it('failed 态在流水线 tab 显示重试按钮并调用 store.retryJob', async () => {
     fetchDetail.mockResolvedValue(makeDetail({ status: 'failed' }))
     retryJob.mockResolvedValue(undefined)

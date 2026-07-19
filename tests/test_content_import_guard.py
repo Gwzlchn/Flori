@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -22,10 +23,15 @@ def live_layout(tmp_path, monkeypatch):
     """把线上面锚到 tmp,避免测试依赖容器内的 /data 真实存在。"""
     live_db = tmp_path / "data" / "db" / "analyzer.db"
     live_jobs = tmp_path / "data" / "jobs"
+    live_config = tmp_path / "data" / "prompts"
     live_jobs.mkdir(parents=True)
+    live_config.mkdir(parents=True)
     live_db.parent.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv(guard.LIVE_DB_PATH_ENV, str(live_db))
     monkeypatch.setenv(guard.LIVE_JOBS_DIR_ENV, str(live_jobs))
+    monkeypatch.setenv(guard.LIVE_CONFIG_ROOT_ENV, str(live_config))
+    monkeypatch.setenv(guard.LIVE_DATA_ROOT_ENV, str(tmp_path / "data"))
+    monkeypatch.setenv(guard.DEPLOYMENT_ID_ENV, "test-deployment")
     monkeypatch.delenv("MINIO_URL", raising=False)
     monkeypatch.delenv("MINIO_BUCKET", raising=False)
     monkeypatch.delenv(guard.REMOTE_QUIESCE_ENV, raising=False)
@@ -33,6 +39,7 @@ def live_layout(tmp_path, monkeypatch):
     return {
         "db": live_db,
         "jobs": live_jobs,
+        "config": live_config,
         "staging_db": tmp_path / "staging" / "new.db",
         "staging_jobs": tmp_path / "staging" / "jobs",
     }
@@ -40,22 +47,75 @@ def live_layout(tmp_path, monkeypatch):
 
 def _dr_receipt(path, *, age_seconds: int = 60, **overrides) -> str:
     created = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    archive = path.parent / "flori-backup-gen.tar.gz"
+    archive.write_text(
+        f"exact-dr-archive|gen-20260717T000000Z|{created.isoformat()}",
+        encoding="utf-8",
+    )
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    archive.with_suffix(archive.suffix + ".sha256").write_text(
+        f"{digest}  {archive.name}\n", encoding="utf-8",
+    )
     body = {
         "status": "success",
         "operation": "backup",
         "generation": "gen-20260717T000000Z",
-        "archive": "/backups/flori-backup-gen.tar.gz",
-        "archive_sha256": "a" * 64,
+        "archive": f"/output/{archive.name}",
+        "archive_sha256": digest,
         "manifest": {
             "format": "flori-disaster-recovery",
             "format_version": 2,
             "generation": "gen-20260717T000000Z",
             "created_at": created.isoformat(),
+            "deployment": {"id": "test-deployment"},
+            "assets": {
+                "data": {
+                    "included": True,
+                    "excluded_external_subtrees": [],
+                },
+                "redis": {"included": True},
+                "minio": {
+                    "included": True,
+                    "excluded_external_subtrees": [],
+                },
+                "config": {"included": True},
+            },
         },
     }
     body.update(overrides)
     path.write_text(json.dumps(body), encoding="utf-8")
     return str(path)
+
+
+@pytest.fixture(autouse=True)
+def _stub_full_dr_validation(monkeypatch):
+    """归档内部全链由 backup/restore 测试覆盖;本文件聚焦 receipt 与真实字节绑定。"""
+    def validate(archive):
+        _prefix, generation, created_at = archive.read_text(encoding="utf-8").split("|", 2)
+        return {
+            "status": "success",
+            "operation": "validate",
+            "format": guard.DR_FORMAT_NAME,
+            "format_version": 2,
+            "generation": generation,
+            "created_at": created_at,
+            "deployment_id": "test-deployment",
+            "assets": {
+                "data": {
+                    "included": True,
+                    "excluded_external_subtrees": [],
+                },
+                "redis": {"included": True},
+                "minio": {
+                    "included": True,
+                    "excluded_external_subtrees": [],
+                },
+                "config": {"included": True},
+            },
+            "checks": {"members": "ok", "checksums": "ok"},
+        }
+
+    monkeypatch.setattr(guard, "_validate_dr_archive", validate)
 
 
 class TestLiveTargetResolution:
@@ -83,6 +143,77 @@ class TestLiveTargetResolution:
             db_path=live_layout["staging_db"], jobs_dir=live_layout["jobs"] / "sub",
             object_bucket=None,
         ) == [guard.TARGET_ARTIFACT_ROOT]
+
+    def test_live_config_root_is_detected_with_other_targets_isolated(
+        self, live_layout,
+    ) -> None:
+        assert guard.resolve_live_targets(
+            db_path=live_layout["staging_db"],
+            jobs_dir=live_layout["staging_jobs"],
+            object_bucket=None,
+            config_root=live_layout["config"],
+        ) == [guard.TARGET_CONFIG_ROOT]
+
+    def test_config_alias_to_live_jobs_is_classified_as_artifact_target(
+        self, live_layout,
+    ) -> None:
+        assert guard.resolve_live_targets(
+            db_path=live_layout["staging_db"],
+            jobs_dir=live_layout["staging_jobs"],
+            object_bucket=None,
+            config_root=live_layout["jobs"],
+        ) == [guard.TARGET_ARTIFACT_ROOT]
+
+    def test_source_alias_to_live_jobs_is_classified_as_artifact_target(
+        self, live_layout,
+    ) -> None:
+        assert guard.resolve_live_targets(
+            db_path=live_layout["staging_db"],
+            jobs_dir=live_layout["staging_jobs"],
+            object_bucket=None,
+            source_roots=[live_layout["jobs"]],
+        ) == [guard.TARGET_ARTIFACT_ROOT]
+
+    def test_database_inside_live_jobs_cannot_be_disguised_as_staging(
+        self, live_layout,
+    ) -> None:
+        assert guard.resolve_live_targets(
+            db_path=live_layout["jobs"] / "hidden.db",
+            jobs_dir=live_layout["staging_jobs"],
+            object_bucket=None,
+        ) == [guard.TARGET_ARTIFACT_ROOT]
+
+    def test_symlink_alias_to_live_database_is_rejected(
+        self, live_layout, tmp_path,
+    ) -> None:
+        live_layout["db"].touch()
+        alias = tmp_path / "db-alias"
+        alias.symlink_to(live_layout["db"])
+        with pytest.raises(LiveTargetError, match="符号链接"):
+            guard.resolve_live_targets(
+                db_path=alias, jobs_dir=live_layout["staging_jobs"], object_bucket=None,
+            )
+
+    def test_symlink_parent_to_live_jobs_is_rejected(
+        self, live_layout, tmp_path,
+    ) -> None:
+        alias = tmp_path / "jobs-alias"
+        alias.symlink_to(live_layout["jobs"], target_is_directory=True)
+        with pytest.raises(LiveTargetError, match="符号链接"):
+            guard.resolve_live_targets(
+                db_path=live_layout["staging_db"], jobs_dir=alias / "child",
+                object_bucket=None,
+            )
+
+    def test_hardlink_alias_to_live_database_is_detected(
+        self, live_layout, tmp_path,
+    ) -> None:
+        live_layout["db"].touch()
+        alias = tmp_path / "db-hardlink"
+        alias.hardlink_to(live_layout["db"])
+        assert guard.resolve_live_targets(
+            db_path=alias, jobs_dir=live_layout["staging_jobs"], object_bucket=None,
+        ) == [guard.TARGET_DATABASE]
 
     def test_object_mode_without_explicit_bucket_is_live(
         self, live_layout, monkeypatch,
@@ -141,6 +272,12 @@ class TestWriteAuthorization:
         with pytest.raises(LiveTargetError, match="没有 --into-live"):
             self._authorize(live_layout, db_path=live_layout["db"])
 
+    def test_live_config_write_also_requires_full_live_authorization(
+        self, live_layout,
+    ) -> None:
+        with pytest.raises(LiveTargetError, match="没有 --into-live"):
+            self._authorize(live_layout, config_root=live_layout["config"])
+
     def test_object_mode_default_import_is_refused(
         self, live_layout, monkeypatch,
     ) -> None:
@@ -173,7 +310,82 @@ class TestWriteAuthorization:
             dr_receipt=_dr_receipt(tmp_path / "dr.json"),
         )
         assert report["live_targets"] == [guard.TARGET_DATABASE]
-        assert report["dr_receipt"]["archive_sha256"] == "a" * 64
+        assert len(report["dr_receipt"]["archive_sha256"]) == 64
+        assert report["dr_receipt"]["validation"]["checksums"] == "ok"
+        assert report["dr_receipt"]["deployment_id"] == "test-deployment"
+        assert report["dr_receipt"]["coverage"]["covered_targets"] == [
+            guard.TARGET_DATABASE,
+        ]
+
+    def test_live_write_requires_persistent_deployment_id(
+        self, live_layout, monkeypatch, tmp_path,
+    ) -> None:
+        monkeypatch.setenv(guard.REMOTE_QUIESCE_ENV, "1")
+        monkeypatch.delenv(guard.DEPLOYMENT_ID_ENV)
+        with pytest.raises(LiveTargetError, match=guard.DEPLOYMENT_ID_ENV):
+            self._authorize(
+                live_layout, db_path=live_layout["db"], into_live=True,
+                dr_receipt=_dr_receipt(tmp_path / "dr.json"),
+            )
+
+    def test_live_write_rejects_unbound_deployment_id(
+        self, live_layout, monkeypatch, tmp_path,
+    ) -> None:
+        monkeypatch.setenv(guard.REMOTE_QUIESCE_ENV, "1")
+        monkeypatch.setenv(guard.DEPLOYMENT_ID_ENV, "unbound")
+        with pytest.raises(LiveTargetError, match="非unbound"):
+            self._authorize(
+                live_layout, db_path=live_layout["db"], into_live=True,
+                dr_receipt=_dr_receipt(tmp_path / "dr.json"),
+            )
+
+    def test_live_write_rejects_another_deployment_archive(
+        self, live_layout, monkeypatch, tmp_path,
+    ) -> None:
+        monkeypatch.setenv(guard.REMOTE_QUIESCE_ENV, "1")
+        monkeypatch.setenv(guard.DEPLOYMENT_ID_ENV, "another-deployment")
+        with pytest.raises(LiveTargetError, match="deployment id"):
+            self._authorize(
+                live_layout, db_path=live_layout["db"], into_live=True,
+                dr_receipt=_dr_receipt(tmp_path / "dr.json"),
+            )
+
+    def test_dr_coverage_rejects_excluded_live_jobs(self, live_layout) -> None:
+        manifest = {
+            "assets": {
+                "data": {
+                    "included": True,
+                    "excluded_external_subtrees": ["jobs"],
+                },
+            },
+        }
+        with pytest.raises(LiveTargetError, match="排除了"):
+            guard._dr_asset_coverage(manifest, [guard.TARGET_ARTIFACT_ROOT])
+
+    def test_dr_coverage_rejects_excluded_live_database(self, live_layout) -> None:
+        manifest = {
+            "assets": {
+                "data": {
+                    "included": True,
+                    "excluded_external_subtrees": ["db"],
+                },
+            },
+        }
+        with pytest.raises(LiveTargetError, match="排除了"):
+            guard._dr_asset_coverage(manifest, [guard.TARGET_DATABASE])
+
+    def test_dr_coverage_rejects_missing_minio_asset(
+        self, live_layout, monkeypatch,
+    ) -> None:
+        monkeypatch.setenv("MINIO_URL", "minio:9000")
+        manifest = {
+            "assets": {
+                "data": {"included": True, "excluded_external_subtrees": []},
+                "minio": {"included": False, "reason": "not-configured"},
+            },
+        }
+        with pytest.raises(LiveTargetError, match="minio"):
+            guard._dr_asset_coverage(manifest, [guard.TARGET_OBJECT_STORE])
 
     def test_into_live_against_isolated_target_is_refused(self, live_layout) -> None:
         """开关与目标不符时不静默放行:那通常意味着操作者以为自己在写别的地方。"""
@@ -197,6 +409,68 @@ class TestDrReceiptVerification:
         path = tmp_path / "dr.json"
         _dr_receipt(path, status="failed")
         with pytest.raises(LiveTargetError, match="成功的 exact DR"):
+            guard.verify_dr_receipt(path)
+
+    def test_missing_archive_is_rejected(self, tmp_path) -> None:
+        path = tmp_path / "dr.json"
+        _dr_receipt(path)
+        (tmp_path / "flori-backup-gen.tar.gz").unlink()
+        with pytest.raises(LiveTargetError, match="归档不存在"):
+            guard.verify_dr_receipt(path)
+
+    def test_archive_sha_must_match_receipt(self, tmp_path) -> None:
+        path = tmp_path / "dr.json"
+        _dr_receipt(path)
+        archive = tmp_path / "flori-backup-gen.tar.gz"
+        archive.write_bytes(b"tampered")
+        with pytest.raises(LiveTargetError, match="SHA 与 receipt"):
+            guard.verify_dr_receipt(path)
+
+    def test_missing_archive_sidecar_is_rejected(self, tmp_path) -> None:
+        path = tmp_path / "dr.json"
+        _dr_receipt(path)
+        (tmp_path / "flori-backup-gen.tar.gz.sha256").unlink()
+        with pytest.raises(LiveTargetError, match="缺少 sha256 sidecar"):
+            guard.verify_dr_receipt(path)
+
+    def test_tampered_archive_sidecar_is_rejected(self, tmp_path) -> None:
+        path = tmp_path / "dr.json"
+        _dr_receipt(path)
+        sidecar = tmp_path / "flori-backup-gen.tar.gz.sha256"
+        sidecar.write_text(f"{'0' * 64}  flori-backup-gen.tar.gz\n", encoding="utf-8")
+        with pytest.raises(LiveTargetError, match="sidecar"):
+            guard.verify_dr_receipt(path)
+
+    def test_receipt_cannot_make_an_old_archive_look_fresh(self, tmp_path) -> None:
+        path = tmp_path / "dr.json"
+        _dr_receipt(path, age_seconds=guard.DEFAULT_DR_MAX_AGE_SEC + 600)
+        body = json.loads(path.read_text(encoding="utf-8"))
+        body["manifest"]["created_at"] = datetime.now(timezone.utc).isoformat()
+        path.write_text(json.dumps(body), encoding="utf-8")
+        with pytest.raises(LiveTargetError, match="created_at"):
+            guard.verify_dr_receipt(path)
+
+    def test_symlink_archive_is_rejected(self, tmp_path) -> None:
+        path = tmp_path / "dr.json"
+        _dr_receipt(path)
+        archive = tmp_path / "flori-backup-gen.tar.gz"
+        actual = tmp_path / "elsewhere.tar.gz"
+        archive.rename(actual)
+        archive.symlink_to(actual)
+        with pytest.raises(LiveTargetError, match="符号链接"):
+            guard.verify_dr_receipt(path)
+
+    def test_validator_generation_must_match_receipt(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        path = tmp_path / "dr.json"
+        _dr_receipt(path)
+        monkeypatch.setattr(guard, "_validate_dr_archive", lambda _archive: {
+            "status": "success", "operation": "validate",
+            "generation": "different", "created_at": datetime.now(timezone.utc).isoformat(),
+            "checks": {},
+        })
+        with pytest.raises(LiveTargetError, match="generation"):
             guard.verify_dr_receipt(path)
 
     def test_wrong_manifest_format_is_rejected(self, tmp_path) -> None:
