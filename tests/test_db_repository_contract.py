@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 import shared.db as db_module
-from shared.db import Database
+from shared.db import Database, SCHEMA_VERSION
 from shared.repositories.jobs import JobsReadRepository
 from shared.repositories.maintenance import MaintenanceRepository
 
@@ -20,9 +20,11 @@ from shared.repositories.maintenance import MaintenanceRepository
 _PUBLIC_CONTRACT_SHA256 = (
     "53cb7804c8cbc5d49a056f5fc69f3b54aeb5eeaf59d568071488834630841d36"
 )
-_SCHEMA_CONTRACT_SHA256 = (
-    "906a33e4b9119fe384b1342c67ceb139de1f3b83f8a308abfca3120f77c81c2c"
-)
+# 按 schema 版本冻结指纹: 已登记版本上的任何 schema 漂移都会失败.
+# 新增迁移时在这里补一行新版本的摘要, 补这一行就是"我确认 schema 变了"的显式动作.
+_SCHEMA_CONTRACT_SHA256_BY_VERSION = {
+    8: "906a33e4b9119fe384b1342c67ceb139de1f3b83f8a308abfca3120f77c81c2c",
+}
 
 
 def _digest(value: object) -> str:
@@ -65,9 +67,13 @@ def test_database_schema_foreign_keys_indexes_triggers_and_fts_are_frozen(db):
             "WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
         )
     }
-    assert _digest({"schema": schema, "fks": foreign_keys}) == (
-        _SCHEMA_CONTRACT_SHA256
+    actual = _digest({"schema": schema, "fks": foreign_keys})
+    expected = _SCHEMA_CONTRACT_SHA256_BY_VERSION.get(SCHEMA_VERSION)
+    assert expected is not None, (
+        f"schema v{SCHEMA_VERSION} 未登记指纹; 确认本次 schema 变更符合预期后, "
+        f"把 {actual} 登记进 _SCHEMA_CONTRACT_SHA256_BY_VERSION"
     )
+    assert actual == expected
 
 
 def test_database_runtime_is_the_single_connection_and_lock_owner(db):

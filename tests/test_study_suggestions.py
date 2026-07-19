@@ -12,7 +12,7 @@ import pytest
 
 import shared.db as db_module
 from shared.db import Database
-from shared.migrations import v0008_multipart_jobs as migration_current
+from shared.migrations.registry import current_migration_module
 from shared.models import Collection, Job, JobStatus
 from shared.study_suggestions import (
     StudySuggestionConflictError,
@@ -24,6 +24,9 @@ from shared.study_suggestions import (
     validate_operation_items,
 )
 
+
+# 断言的是"当前 schema 的不变量", 不是某个具体版本号.
+migration_current = current_migration_module()
 
 UTC = timezone.utc
 

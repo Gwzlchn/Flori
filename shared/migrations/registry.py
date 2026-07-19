@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import ModuleType
+
 from . import v0001_legacy_baseline as migration_v1
 from . import v0002_immutable_ledger as migration_v2
 from . import v0003_srs_consistency as migration_v3
@@ -13,63 +15,37 @@ from . import v0008_multipart_jobs as migration_v8
 from .runner import Migration
 
 
+# 链的唯一来源, 元组顺序即版本顺序. 新增迁移只在末尾追加并同步 manifest.json.
+MIGRATION_MODULES: tuple[ModuleType, ...] = (
+    migration_v1,
+    migration_v2,
+    migration_v3,
+    migration_v4,
+    migration_v5,
+    migration_v6,
+    migration_v7,
+    migration_v8,
+)
+
+
 def migration_steps() -> tuple[Migration, ...]:
     """返回代码迁移注册表，DB 启动与灾备验证共用此入口。"""
-    return (
+    return tuple(
         Migration(
-            version=migration_v1.VERSION,
-            name=migration_v1.NAME,
-            payload=migration_v1.source_payload(),
-            apply=migration_v1.apply,
-            validate=migration_v1.validate,
-        ),
-        Migration(
-            version=migration_v2.VERSION,
-            name=migration_v2.NAME,
-            payload=migration_v2.source_payload(),
-            apply=migration_v2.apply,
-            validate=migration_v2.validate,
-        ),
-        Migration(
-            version=migration_v3.VERSION,
-            name=migration_v3.NAME,
-            payload=migration_v3.source_payload(),
-            apply=migration_v3.apply,
-            validate=migration_v3.validate,
-        ),
-        Migration(
-            version=migration_v4.VERSION,
-            name=migration_v4.NAME,
-            payload=migration_v4.source_payload(),
-            apply=migration_v4.apply,
-            validate=migration_v4.validate,
-        ),
-        Migration(
-            version=migration_v5.VERSION,
-            name=migration_v5.NAME,
-            payload=migration_v5.source_payload(),
-            apply=migration_v5.apply,
-            validate=migration_v5.validate,
-        ),
-        Migration(
-            version=migration_v6.VERSION,
-            name=migration_v6.NAME,
-            payload=migration_v6.source_payload(),
-            apply=migration_v6.apply,
-            validate=migration_v6.validate,
-        ),
-        Migration(
-            version=migration_v7.VERSION,
-            name=migration_v7.NAME,
-            payload=migration_v7.source_payload(),
-            apply=migration_v7.apply,
-            validate=migration_v7.validate,
-        ),
-        Migration(
-            version=migration_v8.VERSION,
-            name=migration_v8.NAME,
-            payload=migration_v8.source_payload(),
-            apply=migration_v8.apply,
-            validate=migration_v8.validate,
-        ),
+            version=module.VERSION,
+            name=module.NAME,
+            payload=module.source_payload(),
+            apply=module.apply,
+            validate=module.validate,
+        )
+        for module in MIGRATION_MODULES
     )
+
+
+def current_migration_module() -> ModuleType:
+    """返回链尾迁移模块, 它持有当前 schema 的 CURRENT_SCHEMA_SQL 和完整 validator.
+
+    需要"当前 schema"的调用方走这个入口, 不要 import 具体的 vNNNN 模块,
+    否则每次追加迁移都得改一遍链尾引用.
+    """
+    return MIGRATION_MODULES[-1]

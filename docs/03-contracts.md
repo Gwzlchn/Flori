@@ -3204,10 +3204,10 @@ SQLite schema 由不可变 migration manifest、代码 registry 和数据库 led
 - ledger 字段固定为 `version/name/checksum/applied_at`。达到 `ledger_version` 后，`schema_migrations` 必须精确覆盖 `1..PRAGMA user_version`，每条记录匹配 manifest，且 `applied_at` 为非空字符串。
 - 当前 schema 数字不在本文硬编码，以 tracked manifest 为单一来源。
 - SRS 迁移只追加当前 schema: `study_cards.revision`，reviews/logs 的 UTC epoch 微秒，log 的全局 request id/fingerprint/revision before+after/immutable outcome。历史 v1/v2 payload 与 checksum 不修改；当前 validator 校验全部 schema，不在合法新版 schema 上调用旧版 exact validator。
-- `multipart-video-jobs` 是跨 SQLite/对象存储/Redis 的离线迁移，不能只调用通用 DB runner。完整协议为
-  `audit → stage → commit → verify`，以 journal 和 ready marker 做幂等恢复；部署命令与中断门见
-  `docs/08-deployment.md §6.2`。每个存量 Video 迁成一个 P01，原 `01..08` step 改为该 Part scope，新增
-  `09_merge_parts` Job step，顶层 `jobs.url` 清空并以有序 Part manifest digest 取代单 URL digest。
+- `multipart-video-jobs` 定义的 schema 形状仍然有效：每个存量 Video 是一个 P01，原 `01..08` step 属该
+  Part scope，`09_merge_parts` 是 Job step，顶层 `jobs.url` 为空并以有序 Part manifest digest 取代单 URL
+  digest。它当年的跨 SQLite/对象存储/Redis 离线迁移工具已随生产迁移完成退役，协议实现在 git 历史；仍
+  生效的只有拒绝 v7 Video 库只迁数据库的启动门，见 `docs/08-deployment.md §6.2`。
 
 ### 4.13 DR archive manifest v2
 

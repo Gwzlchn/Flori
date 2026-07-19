@@ -13,9 +13,13 @@ from shared.db import (
     ConceptEvidenceError,
     ConceptNotFoundError,
     Database,
+    SCHEMA_VERSION,
 )
-from shared.migrations import v0008_multipart_jobs as migration_current
+from shared.migrations.registry import current_migration_module
 
+
+# 断言的是"当前 schema 的不变量", 不是某个具体版本号.
+migration_current = current_migration_module()
 
 _NOW = "2026-07-14T00:00:00+00:00"
 
@@ -209,7 +213,7 @@ def _raw_insert_definition_version(
 
 
 def test_current_schema_keeps_frozen_concept_and_document_invariants(db: Database) -> None:
-    assert db.schema_version() == 8
+    assert db.schema_version() == SCHEMA_VERSION
     migration_current.validate(db._conn)
     tables = {
         str(row[0])

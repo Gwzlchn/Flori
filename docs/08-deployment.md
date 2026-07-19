@@ -333,42 +333,15 @@ docker compose up -d api scheduler mcp-http worker-cpu worker-ai
 - 非法 WAL 或 hot journal、同时存在非空 WAL 与 rollback journal、空主库旁存在非空 sidecar、sidecar 为 symlink 或特殊文件，以及 WAL 路径连续三次无法取得稳定采样，都会 fail-closed。即使未来 schema 只存在于 committed crash WAL 中，也会在真实 DB/WAL 被改写或 SHM 被创建前拒绝启动。
 - 成功迁移后，旧镜像可能因为不支持更高 schema 而拒绝启动；镜像回滚不能替代数据库兼容性判断。
 
-### 6.2 Video 多 Part 离线切换
+### 6.2 Video 多 Part 离线切换（已退役）
 
-引入 `job_parts` 的迁移同时改变 SQLite、对象键、根 `job.json` 和 Redis 执行身份，不能由服务启动时
-只迁数据库。生产 compose 强制 `FLORI_REQUIRE_OFFLINE_MIGRATIONS=1`：有 Video 的旧库缺少匹配 stage
-marker 时，新后端拒绝启动；数据库已切换但 marker 仍停在 staged 时同样拒绝，防止中断后带旧 Redis
-状态接单。
+schema v7 到 v8 的 Video 多 Part 切换是一次性离线迁移，需要同时搬 SQLite、对象键、根 `job.json` 和
+Redis 执行身份。生产库已完成该迁移，配套的 `shared.multipart_migration` 工具随之退役，历史实现和
+运行手册在 git 里。
 
-维护窗内保留 Redis 与 MinIO，只停止所有 API/Scheduler/MCP/Worker 写入者，然后用新 API 镜像执行：
-
-```bash
-scripts/backup.sh
-docker compose stop api scheduler mcp-http worker-io worker-cpu worker-ai
-docker compose run --rm --no-deps api \
-  python -m shared.multipart_migration audit
-docker compose run --rm --no-deps api \
-  python -m shared.multipart_migration stage
-docker compose run --rm --no-deps api \
-  python -m shared.multipart_migration commit --ack-maintenance-window
-docker compose run --rm --no-deps api \
-  python -m shared.multipart_migration verify
-docker compose up -d
-```
-
-`stage` 为每个存量 Video 建 P01，用 Local 原子复制或 MinIO 服务端 copy 把 Part 产物复制到
-`parts/{part_id}/`。Local 前后核对 size+SHA-256；MinIO 以源 ETag 作条件复制，并分别记录源/目标的
-size+ETag。大对象服务端复制可能重算目标 ETag，不能要求两个 ETag 相等。此阶段不改根 manifest 和 SQLite。
-SQLite commit 同时把旧 Video 的 Part 步骤和对应 `ai_usage.step` 迁入 P01 scope，历史费用不会误归到
-Job 级 reduce 步骤。
-它边做边写 `db/multipart-v8-journal.json`，可安全续跑；全部完成后才发布
-`db/multipart-v8.ready.json`。`commit` 先要求 Redis 无 active job、排队 task、holder 和 runner lease，
-并复核 stage 时的完整 SQLite 逻辑指纹、journal 哈希、根 manifest 和每个复制对象；任一输入漂移都在
-切库前拒绝。通过后才发布根 manifest、事务迁移 SQLite、清旧执行态 Redis，任一数据库失败会恢复根
-manifest。`verify` 逐 Job 核对 DB Part、根/Part manifest 和全部复制对象并把 marker 置为 verified。
-
-原根媒体与旧产物不会在本次迁移中删除，便于审计；新 pipeline 只读 Part 路径。迁移后的旧镜像不支持
-新 schema/API，回滚必须在停写状态恢复升级前的完整 DR 备份，不能只回滚镜像或只替换 SQLite。
+启动门仍然保留：生产 compose 的 `FLORI_REQUIRE_OFFLINE_MIGRATIONS=1` 会拒绝让停在 v7 且仍有 Video
+的旧库只迁数据库启动。真要复活这种库，先从 git 历史取回该工具，或在停写状态恢复对应年代的完整 DR
+备份，不要绕过启动门。
 
 ## 7. 备份 / 恢复 / 磁盘回收
 

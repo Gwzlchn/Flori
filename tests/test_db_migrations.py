@@ -23,7 +23,6 @@ from shared.migrations import v0004_study_suggestions as migration_v4
 from shared.migrations import v0005_canonical_evidence as migration_v5
 from shared.migrations import v0006_concept_definition_history as migration_v6
 from shared.migrations import v0007_unified_document as migration_v7
-from shared.migrations import v0008_multipart_jobs as migration_v8
 from shared.migrations import (
     Migration,
     MigrationExecutionError,
@@ -32,7 +31,11 @@ from shared.migrations import (
     run_migrations,
     validate_registry,
 )
+from shared.migrations.registry import current_migration_module
 
+
+# 链尾迁移持有当前 schema; 追加新迁移时这里自动跟随, 不改测试.
+migration_current = current_migration_module()
 
 FIXTURES = Path(__file__).parent / "fixtures" / "migrations"
 LEGACY_GLOSSARY_TABLE = "glossary_bak_clean_20260617"
@@ -578,9 +581,12 @@ def test_registry_is_contiguous_and_matches_immutable_manifest(tmp_path: Path):
         database.close()
 
     assert manifest == load_manifest()
-    assert SCHEMA_VERSION == 8
-    assert [entry["version"] for entry in manifest["migrations"]] == list(range(1, 9))
-    assert len({entry["checksum"] for entry in manifest["migrations"]}) == 8
+    assert SCHEMA_VERSION == len(manifest["migrations"])
+    assert migration_current.VERSION == SCHEMA_VERSION
+    assert [entry["version"] for entry in manifest["migrations"]] == list(
+        range(1, SCHEMA_VERSION + 1)
+    )
+    assert len({entry["checksum"] for entry in manifest["migrations"]}) == SCHEMA_VERSION
 
 
 def test_database_rejects_registry_divergence_before_filesystem_touch(
@@ -821,7 +827,7 @@ def test_v3_migrates_legacy_srs_rows_to_epoch_revision_and_audit_fields(
         assert database._conn.execute(
             "SELECT COUNT(*) FROM study_review_logs WHERE card_id='legacy-card'"
         ).fetchone()[0] == 1
-        migration_v8.validate(database._conn)
+        migration_current.validate(database._conn)
     finally:
         database.close()
 
@@ -1243,7 +1249,10 @@ def test_live_shape_legacy_glossary_backup_is_preserved_byte_for_byte(
         assert _legacy_glossary_rows(reopened._conn) == before
     finally:
         reopened.close()
-    backup = tmp_path / "migration-backups" / "legacy-preserve.pre-v1-to-v8.db"
+    backup = (
+        tmp_path / "migration-backups"
+        / f"legacy-preserve.pre-v1-to-v{SCHEMA_VERSION}.db"
+    )
     backup_connection = sqlite3.connect(backup)
     try:
         assert _legacy_glossary_rows(backup_connection) == before
@@ -1270,7 +1279,7 @@ def test_legacy_preserve_allowlist_rejects_shape_drift(
     database._conn.execute(unsafe_sql)
 
     with pytest.raises(sqlite3.DatabaseError, match="历史保留表"):
-        migration_v8.validate(database._conn)
+        migration_current.validate(database._conn)
     database.close()
 
 
@@ -1308,7 +1317,7 @@ def test_legacy_preserve_allowlist_rejects_schema_references(
         )
 
     with pytest.raises(sqlite3.DatabaseError):
-        migration_v8.validate(database._conn)
+        migration_current.validate(database._conn)
     database.close()
 
 
@@ -1317,7 +1326,10 @@ def test_repeated_init_keeps_ledger_and_backup_stable(tmp_path: Path):
     database = Database(path)
     database.init_schema()
     before = _ledger(database)
-    backup = tmp_path / "migration-backups" / "repeat.pre-v1-to-v8.db"
+    backup = (
+        tmp_path / "migration-backups"
+        / f"repeat.pre-v1-to-v{SCHEMA_VERSION}.db"
+    )
     before_backup = _sha256(backup)
 
     database.init_schema()
@@ -2376,9 +2388,11 @@ def test_incomplete_v1_schema_fails_invariant_check_without_version_advance(tmp_
         database.close()
 
 
-def test_conflicting_ledger_row_is_detected_before_commit_and_rolls_back_v9(
+def test_conflicting_ledger_row_is_detected_before_commit_and_rolls_back(
     tmp_path: Path,
 ):
+    # 合成一个"链尾 +1"的迁移, 版本相对当前链算, 追加真迁移后不需要改这个用例.
+    next_version = SCHEMA_VERSION + 1
     path = tmp_path / "ledger-conflict.db"
     database = Database(path)
     database.init_schema()
@@ -2389,147 +2403,158 @@ def test_conflicting_ledger_row_is_detected_before_commit_and_rolls_back_v9(
     )
     database._conn.commit()
 
-    payload = "future-v9-ledger-conflict-fixture"
+    payload = "future-ledger-conflict-fixture"
 
-    def apply_v9(connection: sqlite3.Connection) -> None:
-        connection.execute("CREATE TABLE future_v9(value TEXT NOT NULL)")
-        connection.execute("INSERT INTO future_v9 VALUES ('must-rollback')")
+    def apply_next(connection: sqlite3.Connection) -> None:
+        connection.execute("CREATE TABLE future_next(value TEXT NOT NULL)")
+        connection.execute("INSERT INTO future_next VALUES ('must-rollback')")
         connection.execute(
             "INSERT INTO schema_migrations(version, name, checksum, applied_at) "
-            "VALUES (9, 'conflict', ?, 'now')",
-            ("0" * 64,),
+            "VALUES (?, 'conflict', ?, 'now')",
+            (next_version, "0" * 64),
         )
 
     migrations = (
         *database._migration_steps(),
-        Migration(9, "future-v9", payload, apply_v9),
+        Migration(next_version, "future-next", payload, apply_next),
     )
     manifest = load_manifest()
-    manifest["current_version"] = 9
+    manifest["current_version"] = next_version
     manifest["migrations"].append(
         {
-            "version": 9,
-            "name": "future-v9",
+            "version": next_version,
+            "name": "future-next",
             "checksum": hashlib.sha256(payload.encode()).hexdigest(),
         }
     )
-    manifest_path = tmp_path / "manifest-v9.json"
+    manifest_path = tmp_path / "manifest-next.json"
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
     )
 
-    with pytest.raises(MigrationHistoryError, match="v9.*不一致"):
+    with pytest.raises(MigrationHistoryError, match=f"v{next_version}.*不一致"):
         run_migrations(
             database._conn,
             migrations,
             manifest_path=manifest_path,
         )
     try:
-        assert database.schema_version() == 8
+        assert database.schema_version() == SCHEMA_VERSION
         assert database._conn.execute(
             "SELECT title FROM jobs WHERE id='sentinel'"
         ).fetchone()[0] == "before"
         assert database._conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='future_v9'"
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='future_next'"
         ).fetchone() is None
         assert database._conn.execute(
-            "SELECT 1 FROM schema_migrations WHERE version=9"
+            "SELECT 1 FROM schema_migrations WHERE version=?", (next_version,)
         ).fetchone() is None
     finally:
         database.close()
 
 
-def test_pending_v8_to_v10_chain_rolls_back_every_step_when_v10_fails(
+def test_pending_two_step_chain_rolls_back_every_step_when_last_fails(
     tmp_path: Path,
 ):
+    # 两级合成迁移都相对当前链尾编号, 验证的是 pending chain 的原子性.
+    first = SCHEMA_VERSION + 1
+    second = SCHEMA_VERSION + 2
     path = tmp_path / "atomic-chain.db"
     database = Database(path)
     database.init_schema()
 
-    def apply_v9(connection: sqlite3.Connection) -> None:
-        connection.execute("CREATE TABLE future_v9(value TEXT NOT NULL)")
-        connection.execute("INSERT INTO future_v9 VALUES ('v9')")
+    def apply_first(connection: sqlite3.Connection) -> None:
+        connection.execute("CREATE TABLE future_first(value TEXT NOT NULL)")
+        connection.execute("INSERT INTO future_first VALUES ('first')")
 
-    def apply_v10(connection: sqlite3.Connection) -> None:
-        connection.execute("CREATE TABLE future_v10(value TEXT NOT NULL)")
-        connection.execute("INSERT INTO future_v10 VALUES ('v10')")
+    def apply_second(connection: sqlite3.Connection) -> None:
+        connection.execute("CREATE TABLE future_second(value TEXT NOT NULL)")
+        connection.execute("INSERT INTO future_second VALUES ('second')")
 
-    schema_v9 = migration_v8.CURRENT_SCHEMA_SQL + "\nCREATE TABLE future_v9(value TEXT NOT NULL);\n"
-    schema_v10 = schema_v9 + "\nCREATE TABLE future_v10(value TEXT NOT NULL);\n"
+    schema_first = (
+        migration_current.CURRENT_SCHEMA_SQL
+        + "\nCREATE TABLE future_first(value TEXT NOT NULL);\n"
+    )
+    schema_second = (
+        schema_first + "\nCREATE TABLE future_second(value TEXT NOT NULL);\n"
+    )
 
-    def validate_v9(connection: sqlite3.Connection) -> None:
-        migration_v1._validate_complete_schema(connection, schema_v9)
+    def validate_first(connection: sqlite3.Connection) -> None:
+        migration_v1._validate_complete_schema(connection, schema_first)
 
-    def validate_v10(connection: sqlite3.Connection) -> None:
-        migration_v1._validate_complete_schema(connection, schema_v10)
+    def validate_second(connection: sqlite3.Connection) -> None:
+        migration_v1._validate_complete_schema(connection, schema_second)
 
-    payload_v9 = "synthetic-atomic-v9"
-    payload_v10 = "synthetic-atomic-v10"
+    payload_first = "synthetic-atomic-first"
+    payload_second = "synthetic-atomic-second"
     migrations = (
         *database._migration_steps(),
-        Migration(9, "synthetic-v9", payload_v9, apply_v9, validate_v9),
-        Migration(10, "synthetic-v10", payload_v10, apply_v10, validate_v10),
+        Migration(first, "synthetic-first", payload_first, apply_first, validate_first),
+        Migration(
+            second, "synthetic-second", payload_second, apply_second, validate_second
+        ),
     )
     manifest = load_manifest()
-    manifest["current_version"] = 10
+    manifest["current_version"] = second
     manifest["migrations"].extend(
         [
             {
-                "version": 9,
-                "name": "synthetic-v9",
-                "checksum": hashlib.sha256(payload_v9.encode()).hexdigest(),
+                "version": first,
+                "name": "synthetic-first",
+                "checksum": hashlib.sha256(payload_first.encode()).hexdigest(),
             },
             {
-                "version": 10,
-                "name": "synthetic-v10",
-                "checksum": hashlib.sha256(payload_v10.encode()).hexdigest(),
+                "version": second,
+                "name": "synthetic-second",
+                "checksum": hashlib.sha256(payload_second.encode()).hexdigest(),
             },
         ]
     )
-    manifest_path = tmp_path / "manifest-v10.json"
+    manifest_path = tmp_path / "manifest-future.json"
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
     )
 
-    def fail_v10(version: int, _connection: sqlite3.Connection) -> None:
-        if version == 10:
-            raise RuntimeError("v10 后段故障")
+    def fail_second(version: int, _connection: sqlite3.Connection) -> None:
+        if version == second:
+            raise RuntimeError("链尾后段故障")
 
-    with pytest.raises(MigrationExecutionError, match="回滚到 v8"):
+    with pytest.raises(MigrationExecutionError, match=f"回滚到 v{SCHEMA_VERSION}"):
         run_migrations(
             database._conn,
             migrations,
             manifest_path=manifest_path,
-            fault_injector=fail_v10,
+            fault_injector=fail_second,
         )
 
-    assert database.schema_version() == 8
+    assert database.schema_version() == SCHEMA_VERSION
     assert database._conn.execute(
-        "SELECT name FROM sqlite_master WHERE name IN ('future_v9', 'future_v10')"
+        "SELECT name FROM sqlite_master "
+        "WHERE name IN ('future_first', 'future_second')"
     ).fetchall() == []
     assert [
         row[0]
         for row in database._conn.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-    ] == list(range(1, 9))
+    ] == list(range(1, SCHEMA_VERSION + 1))
 
     assert run_migrations(
         database._conn, migrations, manifest_path=manifest_path
-    ) == 10
+    ) == second
     try:
         assert database._conn.execute(
-            "SELECT value FROM future_v9"
-        ).fetchone()[0] == "v9"
+            "SELECT value FROM future_first"
+        ).fetchone()[0] == "first"
         assert database._conn.execute(
-            "SELECT value FROM future_v10"
-        ).fetchone()[0] == "v10"
+            "SELECT value FROM future_second"
+        ).fetchone()[0] == "second"
         assert [
             row[0]
             for row in database._conn.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
-        ] == list(range(1, 11))
+        ] == list(range(1, second + 1))
     finally:
         database.close()
 
@@ -2563,7 +2588,7 @@ def test_future_complete_validator_rejects_same_name_trigger_or_view_sql_tamper(
         "CREATE TRIGGER future_jobs_guard BEFORE DELETE ON jobs "
         "BEGIN SELECT RAISE(ABORT, 'blocked'); END;\n"
     )
-    expected_schema = migration_v8.CURRENT_SCHEMA_SQL + "\n" + future_objects
+    expected_schema = migration_current.CURRENT_SCHEMA_SQL + "\n" + future_objects
     migration_v1._execute_sql_script(database._conn, future_objects)
     migration_v1._validate_complete_schema(database._conn, expected_schema)
 
@@ -2588,7 +2613,7 @@ def test_complete_validator_and_database_reject_fts_shadow_extra_column(
         lambda sql: _add_shadow_column(sql, shadow_table),
     )
     with pytest.raises(sqlite3.DatabaseError, match=shadow_table):
-        migration_v8.validate(database._conn)
+        migration_current.validate(database._conn)
     database.close()
 
     reopened = None
@@ -2618,7 +2643,7 @@ def test_complete_validator_rejects_fts_content_blocking_check(
     )
     try:
         with pytest.raises(sqlite3.DatabaseError, match=content_table):
-            migration_v8.validate(database._conn)
+            migration_current.validate(database._conn)
     finally:
         database.close()
 
@@ -2641,7 +2666,7 @@ def test_complete_validator_keeps_normal_fts_writes_working(tmp_path: Path):
             "'正常标题', '章节', '正常写入分块检索', '{}')"
         )
         database._conn.commit()
-        migration_v8.validate(database._conn)
+        migration_current.validate(database._conn)
         assert database._conn.execute(
             "SELECT job_id FROM notes_fts5 WHERE notes_fts5 MATCH '正常写入'"
         ).fetchone()[0] == "job-fts"
@@ -2671,7 +2696,7 @@ def test_sqlite_sequence_shape_is_part_of_complete_schema(
     )
     try:
         with pytest.raises(sqlite3.DatabaseError, match="sqlite_sequence"):
-            migration_v8.validate(database._conn)
+            migration_current.validate(database._conn)
     finally:
         database.close()
 
@@ -2696,7 +2721,7 @@ def test_reserved_sqlite_prefix_extra_object_is_not_globally_ignored(tmp_path: P
     database._conn.commit()
     try:
         with pytest.raises(sqlite3.DatabaseError, match="sqlite_poison"):
-            migration_v8.validate(database._conn)
+            migration_current.validate(database._conn)
     finally:
         database.close()
 
@@ -2711,7 +2736,7 @@ def test_sqlite_analyze_statistics_are_the_only_ignored_internal_tables(
         assert database._conn.execute(
             "SELECT 1 FROM sqlite_master WHERE name='sqlite_stat1'"
         ).fetchone()[0] == 1
-        migration_v8.validate(database._conn)
+        migration_current.validate(database._conn)
     finally:
         database.close()
 
@@ -2727,7 +2752,7 @@ def test_ignored_sqlite_statistics_must_keep_native_shape(tmp_path: Path):
     )
     try:
         with pytest.raises(sqlite3.DatabaseError, match="sqlite_stat1"):
-            migration_v8.validate(database._conn)
+            migration_current.validate(database._conn)
     finally:
         database.close()
 
@@ -2814,7 +2839,7 @@ def test_comment_cannot_impersonate_removed_autoincrement(tmp_path: Path):
     )
     try:
         with pytest.raises(sqlite3.DatabaseError, match="ai_usage.*写语义"):
-            migration_v8.validate(database._conn)
+            migration_current.validate(database._conn)
     finally:
         database.close()
 
@@ -2856,7 +2881,7 @@ def test_comment_cannot_impersonate_removed_write_constraint(
 ):
     database = Database(tmp_path / f"comment-{object_name}.db")
     database.init_schema()
-    expected_schema = migration_v8.CURRENT_SCHEMA_SQL + "\n" + future_sql
+    expected_schema = migration_current.CURRENT_SCHEMA_SQL + "\n" + future_sql
     migration_v1._execute_sql_script(database._conn, future_sql)
     migration_v1._validate_complete_schema(database._conn, expected_schema)
     _rewrite_schema_sql(
@@ -2883,7 +2908,7 @@ def test_harmless_comment_does_not_change_real_constraint_semantics(
         "CREATE TABLE marker_harmless("
         "value TEXT CHECK(length(value)>0));"
     )
-    expected_schema = migration_v8.CURRENT_SCHEMA_SQL + "\n" + future_sql
+    expected_schema = migration_current.CURRENT_SCHEMA_SQL + "\n" + future_sql
     migration_v1._execute_sql_script(database._conn, future_sql)
     _rewrite_schema_sql(
         database._conn,
@@ -2924,7 +2949,7 @@ def test_sqlite_stat4_without_stat1_is_not_a_safe_statistics_shape(
     database._conn.commit()
     try:
         with pytest.raises(sqlite3.DatabaseError, match="sqlite_stat1"):
-            migration_v8.validate(database._conn)
+            migration_current.validate(database._conn)
     finally:
         database.close()
 
@@ -2939,7 +2964,7 @@ def test_default_literal_case_is_not_normalized_away(tmp_path: Path):
     )
     try:
         with pytest.raises(sqlite3.DatabaseError, match="workers.status"):
-            migration_v8.validate(database._conn)
+            migration_current.validate(database._conn)
     finally:
         database.close()
 
@@ -2985,7 +3010,7 @@ def test_quoted_literal_case_drift_is_rejected_for_every_schema_object(
 ):
     database = Database(tmp_path / f"literal-{object_name}.db")
     database.init_schema()
-    expected_schema = migration_v8.CURRENT_SCHEMA_SQL + "\n" + future_sql
+    expected_schema = migration_current.CURRENT_SCHEMA_SQL + "\n" + future_sql
     migration_v1._execute_sql_script(database._conn, future_sql)
     migration_v1._validate_complete_schema(database._conn, expected_schema)
     _rewrite_schema_sql(
@@ -3097,7 +3122,9 @@ def test_two_processes_serialize_backup_and_migration_from_v1(tmp_path: Path):
     finally:
         database.close()
     backups = list((tmp_path / "migration-backups").glob("*.db"))
-    assert [backup.name for backup in backups] == ["concurrent.pre-v1-to-v8.db"]
+    assert [backup.name for backup in backups] == [
+        f"concurrent.pre-v1-to-v{SCHEMA_VERSION}.db"
+    ]
     connection = sqlite3.connect(backups[0])
     try:
         assert connection.execute("PRAGMA user_version").fetchone() == (1,)
