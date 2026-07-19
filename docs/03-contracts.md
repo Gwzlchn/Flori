@@ -601,9 +601,11 @@ GET /api/jobs/{id}/document/source?segment=&exact=      → text/html
 GET /api/jobs/{id}/document/translation?segment=&exact= → text/html
 ```
 
-`source` 仅从不可变 `input/source.html` 生成安全阅读副本，`translation` 从
-`output/translated.html` 二次净化后返回。两者都移除 script、事件处理器、表单、站点 chrome 和外部资源，
-重写受控本地 assets，设置 CSP，并由前端空权限 sandbox iframe 承载；不会修改持久化原文件。
+`source` 对 `generic_html` 从已校验的 `intermediate/document.json` 生成规范正文投影；不可变
+`input/source.html` 仍是原始证据与 HTML locator 真源，但不会把站点导航、页脚和依赖原站 CSS/脚本的
+完整 DOM 重放进阅读面。`scholarly_html` 继续从不可变HTML生成安全副本,保留MathML/SVG等论文语义结构。
+`translation` 从 `output/translated.html` 二次净化后返回。两者都拒绝活动脚本和外部资源，重写受控本地
+assets，设置 CSP，并由前端空权限 sandbox iframe 承载；不会修改持久化原文件。
 `segment` 是最大 128 字符的稳定 segment ID，`exact` 最大 512 字符；命中时滚动并高亮对应 segment/词组。
 未找到 segment 时仍安全渲染文档但不猜位置。PDF 原文走 `media`，前端 PDF.js 使用应用内深链的
 `page+bbox` 绘制 overlay。Document 不提供 `notes/mechanical`，也不生成、读取或回退到

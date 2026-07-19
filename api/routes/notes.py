@@ -35,6 +35,7 @@ from api.services.document_reader import (
     DOCUMENT_HTML_MAX_BYTES,
     document_html_headers,
     render_document_html,
+    render_document_model_html,
 )
 from api.wire_schemas import (
     API_ERROR_RESPONSES,
@@ -407,7 +408,7 @@ async def get_document_source(
     exact: str | None = Query(default=None, min_length=1, max_length=512),
     storage: StorageBackend = Depends(get_storage),
 ):
-    """返回原始 HTML 的安全阅读副本；原始字节保持不可变且永不直接执行。"""
+    """返回Document Model正文投影;原始HTML只作为不可变证据和locator真源。"""
     _validate_job_id(job_id)
     source = await _bounded_document_artifact(
         storage, job_id, "input/source.html", "document HTML source not found",
@@ -423,11 +424,18 @@ async def get_document_source(
         model = validate_document(json.loads(model_data), expected_job_id=job_id)
     except (DocumentContractError, json.JSONDecodeError, UnicodeDecodeError):
         raise HTTPException(422, "document model is invalid")
-    return Response(
-        content=render_document_html(
+    if model.get("source_profile") == "generic_html":
+        content = render_document_model_html(
+            model, job_id=job_id,
+            target_segment=segment, target_exact=exact,
+        )
+    else:
+        content = render_document_html(
             source, job_id=job_id, document=model,
             target_segment=segment, target_exact=exact,
-        ),
+        )
+    return Response(
+        content=content,
         media_type="text/html; charset=utf-8",
         headers=document_html_headers(),
     )

@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from api.services.document_reader import render_document_html
+from api.services.document_reader import render_document_html, render_document_model_html
 from shared.document_contract import DOCUMENT_SCHEMA_VERSION
 
 
@@ -103,16 +103,59 @@ def test_reader_highlights_target_segment_and_exact_text():
     assert '<mark class="flori-exact-target">target term</mark>' in rendered
 
 
+def test_model_reader_renders_metadata_and_drops_site_dom():
+    raw = b"<html><body><nav>Site navigation</nav><article><p>Safe body</p></article><footer>Site footer</footer></body></html>"
+    document = _document("job_doc", raw)
+    document["metadata"].update({
+        "titles": {"original": "Clean article", "zh": None},
+        "authors": [{"name": "Ada Reader"}],
+        "published_at": "2026-07-19",
+        "abstract": "A clean abstract.",
+    })
+    document["blocks"].append({
+        "block_id": "blk_figure",
+        "parent_id": None,
+        "order": 1,
+        "kind": "figure",
+        "text": "Figure 1",
+        "locator": document["blocks"][0]["locator"],
+    })
+    document["figures"] = [{
+        "block_id": "blk_figure",
+        "label": "Figure 1",
+        "caption": "Local chart",
+        "media": [{"artifact": "assets/chart.png", "alt": "Chart alt"}],
+    }]
+
+    rendered = render_document_model_html(document, job_id="job_doc").decode()
+
+    assert "Clean article" in rendered
+    assert "Ada Reader" in rendered
+    assert "2026-07-19" in rendered
+    assert "A clean abstract." in rendered
+    assert "Safe body" in rendered
+    assert "Site navigation" not in rendered
+    assert "Site footer" not in rendered
+    assert 'id="source-blk_intro"' in rendered
+    assert '/api/jobs/job_doc/artifact?path=assets%2Fchart.png' in rendered
+    assert 'alt="Chart alt"' in rendered
+
+
 @pytest.mark.asyncio
 async def test_document_source_route_is_csp_isolated(client, test_config):
     job_id = "job_doc_reader"
     job_dir = test_config.jobs_dir / job_id
     (job_dir / "input").mkdir(parents=True)
     (job_dir / "intermediate").mkdir()
-    raw = b"<html><body><article><p>Safe body</p></article></body></html>"
+    raw = b"<html><body><nav>Site navigation</nav><article><p>Raw DOM only</p></article><footer>Site footer</footer></body></html>"
     (job_dir / "input/source.html").write_bytes(raw)
+    document = _document(job_id, raw)
+    document["source_profile"] = "generic_html"
+    document["capabilities"] = ["html", "embedded_media"]
+    document["sources"][0]["source_profile"] = "generic_html"
+    document["sources"][0]["capabilities"] = ["html", "embedded_media"]
     (job_dir / "intermediate/document.json").write_text(
-        json.dumps(_document(job_id, raw)), encoding="utf-8",
+        json.dumps(document), encoding="utf-8",
     )
 
     response = await client.get(f"/api/jobs/{job_id}/document/source")
@@ -123,6 +166,9 @@ async def test_document_source_route_is_csp_isolated(client, test_config):
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["referrer-policy"] == "no-referrer"
     assert 'id="source-blk_intro"' in response.text
+    assert "Site navigation" not in response.text
+    assert "Site footer" not in response.text
+    assert "Raw DOM only" not in response.text
     assert (job_dir / "input/source.html").read_bytes() == raw
 
     targeted = await client.get(
@@ -132,6 +178,24 @@ async def test_document_source_route_is_csp_isolated(client, test_config):
     assert targeted.status_code == 200
     assert 'class="flori-source-target"' in targeted.text
     assert '<mark class="flori-exact-target">Safe body</mark>' in targeted.text
+
+
+@pytest.mark.asyncio
+async def test_scholarly_html_source_keeps_sanitized_mathml(client, test_config):
+    job_id = "job_scholarly_reader"
+    job_dir = test_config.jobs_dir / job_id
+    (job_dir / "input").mkdir(parents=True)
+    (job_dir / "intermediate").mkdir()
+    raw = b'<html><body><article><p>Safe body</p><math><mi>x</mi><mo>=</mo><mn>1</mn></math></article></body></html>'
+    (job_dir / "input/source.html").write_bytes(raw)
+    (job_dir / "intermediate/document.json").write_text(
+        json.dumps(_document(job_id, raw)), encoding="utf-8",
+    )
+
+    response = await client.get(f"/api/jobs/{job_id}/document/source")
+
+    assert response.status_code == 200
+    assert '<math><mi>x</mi><mo>=</mo><mn>1</mn></math>' in response.text
 
 
 @pytest.mark.asyncio

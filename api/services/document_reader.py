@@ -51,6 +51,8 @@ table{display:block;max-width:100%;overflow:auto;border-collapse:collapse}th,td{
 pre,code{font-family:"SFMono-Regular",Consolas,monospace}pre{overflow:auto;padding:1em;border-radius:8px;background:#f5f7fa}blockquote{border-left:4px solid #d4dce7;padding-left:1em;color:#526174}
 math{font-family:"STIX Two Math","Cambria Math",serif}.flori-source-anchor{display:block;position:relative;top:-12px;visibility:hidden}
 .flori-source-target{outline:3px solid #f4b942;outline-offset:5px;background:#fff7d6;scroll-margin-top:18px}.flori-exact-target{border-radius:3px;background:#ffe47a;color:inherit}
+.flori-document-header{padding-bottom:1.25rem;border-bottom:1px solid #e4e9f0}.flori-document-meta{display:flex;flex-wrap:wrap;gap:.4rem 1rem;color:#5a6778;font-size:.92rem}
+.flori-abstract{margin:1.35rem 0;padding:1rem 1.15rem;border-left:4px solid #8aa9c7;background:#f7f9fc}.flori-abstract-label{display:block;margin-bottom:.35rem;color:#526174;font-size:.82rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
 @media(max-width:640px){.flori-document{padding:18px 16px 48px;font-size:16px}h1{font-size:1.65rem}h2{font-size:1.3rem}}
 """.strip()
 
@@ -102,6 +104,291 @@ def source_anchor_map(document: Mapping[str, Any]) -> dict[str, str]:
         if isinstance(path, str) and isinstance(block_id, str) and path not in result:
             result[path] = block_id
     return result
+
+
+def _model_text(
+    value: object,
+    *,
+    target: bool = False,
+    target_exact: str | None = None,
+) -> str:
+    text = str(value or "")
+    if target and target_exact and target_exact in text:
+        before, matched, after = text.partition(target_exact)
+        return (
+            html.escape(before)
+            + f'<mark class="flori-exact-target">{html.escape(matched)}</mark>'
+            + html.escape(after)
+        )
+    return html.escape(text)
+
+
+def _model_block_attrs(block: Mapping[str, Any], target_segment: str | None) -> str:
+    block_id = str(block.get("block_id") or "")
+    if not block_id:
+        return ""
+    target = block_id == target_segment
+    anchor = html.escape(f"source-{block_id}", quote=True)
+    class_name = ' class="flori-source-target"' if target else ""
+    return f' id="{anchor}"{class_name}'
+
+
+def _metadata_title(metadata: Mapping[str, Any]) -> str:
+    titles = metadata.get("titles")
+    if isinstance(titles, Mapping):
+        return str(titles.get("original") or titles.get("zh") or "").strip()
+    return str(metadata.get("title") or "").strip()
+
+
+def _metadata_authors(metadata: Mapping[str, Any]) -> list[str]:
+    values = metadata.get("authors")
+    if not isinstance(values, list):
+        return []
+    result: list[str] = []
+    for value in values:
+        name = value.get("name") if isinstance(value, Mapping) else value
+        normalized = str(name or "").strip()
+        if normalized and normalized not in result:
+            result.append(normalized)
+    return result
+
+
+def _normalized_text(value: object) -> str:
+    return "".join(str(value or "").split()).casefold()
+
+
+def _abstract_wrapper(block: Mapping[str, Any], abstract: str) -> bool:
+    if block.get("kind") != "paragraph" or len(abstract) < 200:
+        return False
+    block_text = _normalized_text(block.get("text"))
+    abstract_text = _normalized_text(abstract)
+    return bool(
+        block_text and abstract_text in block_text
+        and len(abstract_text) / max(len(block_text), 1) >= 0.8
+    )
+
+
+def _model_figure_html(
+    figure: Mapping[str, Any],
+    assets: Mapping[str, Mapping[str, Any]],
+    *,
+    job_id: str,
+    attrs: str,
+) -> str:
+    images: list[str] = []
+    rendered_paths: set[str] = set()
+
+    def add_image(path: object, *, mime: object = "", alt: object = "") -> None:
+        normalized_path = str(path or "")
+        normalized_mime = str(mime or "")
+        if (
+            not normalized_path
+            or normalized_path in rendered_paths
+            or (normalized_mime and not normalized_mime.startswith("image/"))
+        ):
+            return
+        source = _asset_url(job_id, normalized_path)
+        if source is None:
+            return
+        rendered_paths.add(normalized_path)
+        images.append(
+            f'<img src="{html.escape(source, quote=True)}" '
+            f'alt="{html.escape(str(alt or ""), quote=True)}">'
+        )
+
+    fallback_alt = figure.get("caption") or figure.get("label") or ""
+    asset_ids: list[str] = []
+    for media in figure.get("media") or []:
+        if not isinstance(media, Mapping):
+            continue
+        asset_id = str(media.get("asset_id") or "")
+        asset = assets.get(asset_id) if asset_id else None
+        add_image(
+            media.get("artifact")
+            or (asset or {}).get("local_path")
+            or (asset or {}).get("path"),
+            mime=(asset or {}).get("mime_type"),
+            alt=media.get("alt") or (asset or {}).get("alt") or fallback_alt,
+        )
+        if asset_id:
+            asset_ids.append(asset_id)
+    for value in figure.get("asset_ids") or []:
+        if isinstance(value, str):
+            asset_ids.append(value)
+    for panel in figure.get("panels") or []:
+        if isinstance(panel, Mapping) and isinstance(panel.get("asset_id"), str):
+            asset_ids.append(str(panel["asset_id"]))
+    for media in figure.get("media") or []:
+        if isinstance(media, Mapping) and isinstance(media.get("asset_id"), str):
+            asset_ids.append(str(media["asset_id"]))
+    for asset_id in dict.fromkeys(asset_ids):
+        asset = assets.get(asset_id)
+        if not asset:
+            continue
+        path = str(asset.get("local_path") or asset.get("path") or "")
+        add_image(
+            path,
+            mime=asset.get("mime_type"),
+            alt=asset.get("alt") or fallback_alt,
+        )
+    caption = str(figure.get("caption") or figure.get("label") or "").strip()
+    body = "".join(images)
+    if caption:
+        body += f"<figcaption>{html.escape(caption)}</figcaption>"
+    return f"<figure{attrs}>{body}</figure>" if body else ""
+
+
+def _model_table_html(table: Mapping[str, Any], *, attrs: str) -> str:
+    rows: list[list[Mapping[str, Any]]] = []
+    cells = table.get("cells")
+    if isinstance(cells, list) and cells:
+        grouped: dict[int, list[Mapping[str, Any]]] = {}
+        for cell in cells:
+            if not isinstance(cell, Mapping):
+                continue
+            try:
+                row = int(cell.get("row") or 0)
+            except (TypeError, ValueError):
+                row = 0
+            grouped.setdefault(row, []).append(cell)
+        for row in sorted(grouped):
+            rows.append(sorted(
+                grouped[row],
+                key=lambda cell: int(cell.get("col") or 0),
+            ))
+    elif isinstance(table.get("rows"), list):
+        for row in table["rows"]:
+            if isinstance(row, Mapping) and isinstance(row.get("cells"), list):
+                rows.append([cell for cell in row["cells"] if isinstance(cell, Mapping)])
+    caption = str(table.get("caption") or table.get("label") or "").strip()
+    parts = [f"<table{attrs}>"]
+    if caption:
+        parts.append(f"<caption>{html.escape(caption)}</caption>")
+    for row in rows:
+        parts.append("<tr>")
+        for cell in row:
+            role = str(cell.get("role") or cell.get("kind") or "")
+            tag = "th" if role in {"column_header", "row_header", "header"} else "td"
+            rowspan = max(1, int(cell.get("rowspan") or 1))
+            colspan = max(1, int(cell.get("colspan") or 1))
+            parts.append(
+                f'<{tag} rowspan="{rowspan}" colspan="{colspan}">'
+                f'{html.escape(str(cell.get("text") or ""))}</{tag}>'
+            )
+        parts.append("</tr>")
+    parts.append("</table>")
+    return "".join(parts)
+
+
+def render_document_model_html(
+    document: Mapping[str, Any],
+    *,
+    job_id: str,
+    target_segment: str | None = None,
+    target_exact: str | None = None,
+) -> bytes:
+    """把已校验Document Model投影成正文阅读面,不重放站点DOM。"""
+    metadata = document.get("metadata")
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    title = _metadata_title(metadata)
+    authors = _metadata_authors(metadata)
+    published = str(metadata.get("published_at") or "").strip()
+    publisher = str(metadata.get("publisher") or metadata.get("venue") or "").strip()
+    abstract = str(metadata.get("abstract") or "").strip()
+
+    parts = ['<header class="flori-document-header">']
+    if title:
+        parts.append(f"<h1>{html.escape(title)}</h1>")
+    meta_items = []
+    if authors:
+        meta_items.append(f"<span>{html.escape(', '.join(authors))}</span>")
+    if published:
+        meta_items.append(f"<time>{html.escape(published)}</time>")
+    if publisher:
+        meta_items.append(f"<span>{html.escape(publisher)}</span>")
+    if meta_items:
+        parts.append('<div class="flori-document-meta">' + "".join(meta_items) + "</div>")
+    parts.append("</header>")
+    if abstract:
+        parts.append(
+            '<section class="flori-abstract"><span class="flori-abstract-label">Abstract</span>'
+            f"<p>{html.escape(abstract)}</p></section>"
+        )
+
+    blocks = [item for item in document.get("blocks") or [] if isinstance(item, Mapping)]
+    assets = {
+        str(item.get("asset_id")): item
+        for item in document.get("assets") or []
+        if isinstance(item, Mapping) and item.get("asset_id")
+    }
+    figures = {
+        str(item.get("block_id")): item
+        for item in document.get("figures") or []
+        if isinstance(item, Mapping) and item.get("block_id")
+    }
+    tables = {
+        str(item.get("block_id")): item
+        for item in document.get("tables") or []
+        if isinstance(item, Mapping) and item.get("block_id")
+    }
+    list_children: dict[str, list[Mapping[str, Any]]] = {}
+    for block in blocks:
+        parent_id = block.get("parent_id")
+        if isinstance(parent_id, str):
+            list_children.setdefault(parent_id, []).append(block)
+
+    for block in sorted(blocks, key=lambda item: int(item.get("order") or 0)):
+        kind = str(block.get("kind") or "paragraph")
+        block_id = str(block.get("block_id") or "")
+        text = str(block.get("text") or "")
+        if kind in {"caption", "table_cell", "list_item"}:
+            continue
+        if kind == "title" and title and _normalized_text(text) == _normalized_text(title):
+            continue
+        if abstract and _abstract_wrapper(block, abstract):
+            continue
+        attrs = _model_block_attrs(block, target_segment)
+        target = block_id == target_segment
+        rendered_text = _model_text(text, target=target, target_exact=target_exact)
+        if kind == "title":
+            parts.append(f"<h1{attrs}>{rendered_text}</h1>")
+        elif kind == "heading":
+            level = min(6, max(2, int(block.get("level") or 2)))
+            parts.append(f"<h{level}{attrs}>{rendered_text}</h{level}>")
+        elif kind == "quote":
+            parts.append(f"<blockquote{attrs}>{rendered_text}</blockquote>")
+        elif kind == "code":
+            parts.append(f"<pre{attrs}><code>{rendered_text}</code></pre>")
+        elif kind == "list":
+            tag = "ol" if block.get("ordered") else "ul"
+            items = list_children.get(block_id, [])
+            parts.append(f"<{tag}{attrs}>")
+            for item in sorted(items, key=lambda value: int(value.get("order") or 0)):
+                item_target = str(item.get("block_id") or "") == target_segment
+                item_attrs = _model_block_attrs(item, target_segment)
+                parts.append(
+                    f"<li{item_attrs}>{_model_text(item.get('text'), target=item_target, target_exact=target_exact)}</li>"
+                )
+            parts.append(f"</{tag}>")
+        elif kind == "figure" and block_id in figures:
+            parts.append(_model_figure_html(
+                figures[block_id], assets, job_id=job_id, attrs=attrs,
+            ))
+        elif kind == "table" and block_id in tables:
+            parts.append(_model_table_html(tables[block_id], attrs=attrs))
+        elif kind == "footnote":
+            parts.append(f"<p{attrs}><small>{rendered_text}</small></p>")
+        elif text:
+            parts.append(f"<p{attrs}>{rendered_text}</p>")
+
+    page_title = title or "文档原文"
+    page = (
+        '<!doctype html><html lang="und"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        f"<title>{html.escape(page_title)}</title><style>{_DOCUMENT_STYLE}</style></head>"
+        f'<body><main class="flori-document">{"".join(parts)}</main></body></html>'
+    )
+    return page.encode("utf-8")
 
 
 class _SafeDocumentParser(HTMLParser):
