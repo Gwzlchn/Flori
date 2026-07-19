@@ -24,6 +24,9 @@ MAX_NOTE_MAPPINGS = 20_000
 MAX_SUPPORT_TEXT_BYTES = 4096
 MAX_SEMANTIC_CANDIDATES = 100
 MAX_SEMANTIC_ATTESTATION_PROMPT_BYTES = 64 * 1024
+# 语义存证绑定的 ai_log 只认这个前缀;恢复侧 evidence_contract 会按该路径重读文件,
+# 所以它同时是"备份必须捞到"的契约路径。产出侧 shared/step_ai.py 与产物声明共用此常量。
+SEMANTIC_AI_LOG_PREFIX = "output/ai_logs/"
 MAX_SEMANTIC_AI_LOG_BYTES = 2 * 1024 * 1024
 MAX_SEMANTIC_AI_LOG_RECORDS = 128
 
@@ -917,7 +920,7 @@ def _validate_semantic_ai_log_binding(
     binding = _require_mapping(value, field)
     _require_exact_keys(binding, _SEMANTIC_AI_LOG_KEYS, field)
     _require_relative_path(binding["path"], f"{field}.path")
-    if not str(binding["path"]).startswith("output/ai_logs/"):
+    if not str(binding["path"]).startswith(SEMANTIC_AI_LOG_PREFIX):
         raise ValueError(f"{field}.path is invalid")
     if type(binding["call_index"]) is not int or binding["call_index"] < 0:
         raise ValueError(f"{field}.call_index is invalid")

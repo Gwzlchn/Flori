@@ -1325,6 +1325,8 @@ class RemoteStorage:
         self._access_key = access_key
         self._secret_key = secret_key
         self._bucket = bucket
+        # 对象存储没有本地产物根,隔离边界只能由桶名表达;导入侧的线上面判定读它。
+        self.bucket = bucket
         self._secure = secure
         self._tmp_root = tmp_root
         # pull 时记录每个 work_dir 的文件快照(relpath -> (size, mtime)),供 push 算增量。
@@ -3193,15 +3195,20 @@ class GatewayStorage:
             self._client_obj = None
 
 
-def create_storage(jobs_dir: Path) -> StorageBackend:
-    """设了 MINIO_URL 用对象存储(分布式 worker),否则本地。"""
+def create_storage(jobs_dir: Path, *, bucket: str | None = None) -> StorageBackend:
+    """设了 MINIO_URL 用对象存储(分布式 worker),否则本地。
+
+    对象存储分支【不看 jobs_dir】:对象键里没有本地路径这一层。因此调用方若把
+    jobs_dir 当隔离手段用,必须同时给出 bucket,否则拿到的就是生产桶。导入侧
+    走 shared.content_import_guard.create_import_storage,不裸调本函数。
+    """
     endpoint = os.environ.get("MINIO_URL")
     if endpoint:
         return RemoteStorage(
             endpoint=endpoint,
             access_key=os.environ.get("MINIO_ACCESS_KEY", ""),
             secret_key=os.environ.get("MINIO_SECRET_KEY", ""),
-            bucket=os.environ.get("MINIO_BUCKET", "flori"),
+            bucket=bucket or os.environ.get("MINIO_BUCKET", "flori"),
             secure=os.environ.get("MINIO_SECURE", "0") == "1",
             tmp_root=Path(os.environ.get("WORK_DIR", "/tmp/flori-work")),
         )

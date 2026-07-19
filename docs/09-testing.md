@@ -406,3 +406,30 @@ DRY_RUN=1 docker compose up
 - `tests/test_step_output_commit.py`:逐故障点注入(`test_fence_rejection_at_each_checkpoint_blocks_manifest` 等)、换代拒绝(`test_old_exec_cannot_promote_or_publish_after_new_generation`)、Part 并发隔离(`test_two_parts_commit_concurrently_without_crosstalk`)、失败仅诊断(`test_failure_pushes_only_diagnostics_whitelist`)、三后端协议等价(`TestRemoteCommitProtocol`/`TestGatewayCommitEndpoints`)、TTL 续期、stale 越权、幽灵输出。
 - `tests/test_step_completion.py`:对账修复幂等(`TestReconcileRepairsProjection`)、缺/损降级失效下游(`TestManifestMissingDemotion`)、Part rerun 失效边界(`TestPartRerunInvalidationBoundary`)、AI/CPU 同一 stale 算法(`TestUnifiedStaleAlgorithm`)、skip 恢复(`TestSkipRecovery`)、backfill 全流程与 fail-closed(`TestBackfill`)。
 - dual→manifest-only→cleanup→exact DR 回滚演练与 `--integration` 崩溃恢复门在切换 manifest-only 前执行,见迁移工单。
+
+## portable content backup 测试矩阵
+
+对应设计稿 05 号 §5.2 与 §2.15。全部走 `scripts/test.sh`,无外部依赖。
+
+| 文件 | 覆盖 |
+|---|---|
+| `tests/test_content_policy.py` | 数据分类 allowlist、URL 脱敏(两道门共用名称表)、审计文本门、路径安全、有界 JSON |
+| `tests/test_content_repository.py` | CAS 幂等、snapshot 确定性与闭包、refs/receipts、写锁、GC mark/sweep、scrub |
+| `tests/test_content_backup.py` | 选择/幂等/M1-M2 一致性/失败审计/未知项门/增量/CLI |
+| `tests/test_content_import.py` | plan、空库物化、journal resume、投影四分支、验收、CLI |
+| `tests/test_content_merge_gc.py` | merge 七条规则、冲突零修改、GC 保留与清扫、scrub、**CLI 级 merge** |
+| `tests/test_content_threat_matrix.py` | §2.15 威胁矩阵逐行:secret/伪造/篡改/穿越/symlink/压缩炸弹 |
+
+关键回归门(退化过、必须一直绿):
+
+1. **多 Job 端到端**:投影必须单连接,否则第 2 个 Job 起 `database is locked`。
+2. **真 definition_digest**:覆盖 done / skipped / 产物不符 / 上游压制下游 四分支。
+   只用假摘要会让所有用例停在 waiting,把投影逻辑整片盲区化。
+3. **四个 kill 边界**:materializing 中途、DB commit 与 journal 登记之间、projecting
+   中途、complete 之前;resume 必须幂等且不撞 UNIQUE。
+4. **阶段5 丢库后 resume**:必须拒绝或重来,**绝不能报成功**。
+5. **幂等重跑**不得把 `status=complete` 改写成 `failed`。
+6. **CLI 级覆盖**:凡有出货入口的能力,必须有一条走 `main()`/脚本真实参数的用例。
+   merge 曾经"测试全绿但 CLI 根本不传 mode",纯 API 级用例发现不了。
+7. **冲突单元零修改**:断言逐表行内容完全不变,不是只断言"报了冲突"。
+8. **无关 Job 运行态不被动**:merge 只重投影本次物化的 Job。

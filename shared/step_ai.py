@@ -19,6 +19,7 @@ from .ai_routing import (
     step_required_capability_tags_sync,
 )
 from .models import AIUsage, DEFAULT_AI_MODEL, LLMRequest, LLMResponse
+from .provenance import SEMANTIC_AI_LOG_PREFIX
 from .step_artifacts import ArtifactIO, file_hash
 from .structured_output import StructuredOutputParser
 
@@ -240,7 +241,7 @@ class AIInvocation:
         return result, parse_failed
 
     def _log_path(self) -> Path:
-        return self.job_dir / "output" / "ai_logs" / f"{self.step_name}.jsonl"
+        return self.job_dir / f"{SEMANTIC_AI_LOG_PREFIX}{self.step_name}.jsonl"
 
     def _load_existing_logs(self) -> None:
         try:
@@ -358,7 +359,10 @@ class AIInvocation:
             }
         try:
             data = Path(source).read_bytes()
-            rel = f"output/ai_logs/{self.step_name}.turns.{self.call_index}.jsonl"
+            rel = (
+                f"{SEMANTIC_AI_LOG_PREFIX}{self.step_name}"
+                f".turns.{self.call_index}.jsonl"
+            )
             destination = self.job_dir / rel
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(data)

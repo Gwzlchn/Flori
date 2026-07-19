@@ -170,7 +170,8 @@ video:
       ai:
         primary: {provider: $AI_PUNCT_PRIMARY_PROVIDER, model: $AI_PUNCT_PRIMARY_MODEL}
         fallback: {provider: $AI_PUNCT_FALLBACK_PROVIDER, model: $AI_PUNCT_FALLBACK_MODEL}
-      outputs: ["output/transcript.md", "intermediate/source_segments.json", "output/provenance/transcript.json"]
+      outputs: ["output/transcript.md", "intermediate/source_segments.json", "output/provenance/transcript.json",
+                "output/ai_logs/08_punctuate.jsonl", "output/ai_logs/08_punctuate.turns.*.jsonl"]
 
     "09_merge_parts":
       label: "合并分段"
@@ -184,7 +185,7 @@ video:
         - action: sync_metadata
       outputs: ["output/transcript.md", "intermediate/source_segments.json",
                 "intermediate/dedup.json", "intermediate/ocr.json", "intermediate/danmaku.json",
-                "output/provenance/transcript.json"]
+                "output/provenance/transcript.json", "assets/*"]
 
     "09_mechanical":
       label: "机械版笔记"
@@ -217,7 +218,8 @@ video:
       ai:
         primary: {provider: claude-cli, model: "claude-opus-4-8[1m]"}
         fallback: {provider: claude-cli, model: "claude-opus-4-8[1m]"}
-      outputs: ["output/evidence.json", "output/evidence/*"]
+      outputs: ["output/evidence.json", "output/evidence/*",
+                "output/ai_logs/10_evidence.jsonl", "output/ai_logs/10_evidence.turns.*.jsonl"]
 
     "11_smart":
       label: "智能版笔记"
@@ -232,7 +234,8 @@ video:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
         text_fallback: {provider: $AI_SMART_TEXT_PROVIDER, model: $AI_SMART_TEXT_MODEL}
-      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json", "output/provenance_candidates/smart.json"]
+      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json", "output/provenance_candidates/smart.json",
+                "output/ai_logs/11_smart.jsonl", "output/ai_logs/11_smart.turns.*.jsonl"]
 
     "12_concepts":
       label: "概念 + 摘要"
@@ -252,7 +255,8 @@ video:
           candidates:
             - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "11_semantic_attestation", provenance_since_version: "2", legacy_provenance_step: "11_smart", legacy_provenance_since_version: "3"}
         - action: collect_glossary
-      outputs: ["output/concepts.json"]
+      outputs: ["output/concepts.json",
+                "output/ai_logs/12_concepts.jsonl", "output/ai_logs/12_concepts.turns.*.jsonl"]
 
     "11_semantic_attestation":
       label: "语义证据独立核验"
@@ -270,7 +274,8 @@ video:
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
       # 核验步以最终版覆盖 11_smart 先写的 provenance/smart.json,后写者持有(§2.5)。
       output_policy: {overlap_with: ["11_smart"]}
-      outputs: ["output/provenance/smart.json", "output/provenance/semantic_batch.json"]
+      outputs: ["output/provenance/smart.json", "output/provenance/semantic_batch.json",
+                "output/ai_logs/11_semantic_attestation.jsonl", "output/ai_logs/11_semantic_attestation.turns.*.jsonl"]
 
     "12_review":
       label: "评审"
@@ -286,7 +291,8 @@ video:
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
       on_complete:
         - action: collect_glossary
-      outputs: ["output/review.json", "output/review_input.md", "output/review_sources/*", "output/versions/review_*", "output/versions/review_input_*"]
+      outputs: ["output/review.json", "output/review_input.md", "output/review_sources/*", "output/versions/review_*", "output/versions/review_input_*",
+                "output/ai_logs/12_review.jsonl", "output/ai_logs/12_review.turns.*.jsonl"]
 
 document:
   # 所有文档共用 DAG；document_kind 决定 Prompt profile，source_profile 决定解析 adapter。
@@ -327,7 +333,11 @@ document:
         - action: index_note
           candidates:
             - {note_type: original, path: "intermediate/document_index.md", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/original.json", provenance_step: "03_structure", provenance_since_version: "1"}
-      outputs: ["intermediate/document.json", "intermediate/quality.json", "intermediate/source_segments.json", "intermediate/document_index.md", "output/provenance/original.json"]
+      # pdf_page_support.json 是 source_segments.json 里 support_artifact 指向的证据复算依赖
+      # (docs/03-contracts.md §Document provenance)。本步 publish_document_source_manifest 写它,
+      # 漏声明会让便携备份按 manifest 选产物时整份丢掉,恢复后 canonical_evidence 永久重建失败。
+      # 只有 PDF 来源会产生它;outputs 是 glob 匹配已存在文件,HTML 来源缺该文件不报错。
+      outputs: ["intermediate/document.json", "intermediate/quality.json", "intermediate/source_segments.json", "intermediate/pdf_page_support.json", "intermediate/document_index.md", "output/provenance/original.json"]
       # 结构验收在 02_parse 的结构中间产物上原位修订,后写者持有。
       output_policy: {overlap_with: ["02_parse"]}
 
@@ -349,7 +359,8 @@ document:
         fallback: {provider: $AI_TRANSLATE_FALLBACK_PROVIDER, model: $AI_TRANSLATE_FALLBACK_MODEL}
       on_complete:
         - action: collect_term_pairs
-      outputs: ["output/translation.json", "output/translated.html", "output/provenance/translated.json", "output/provenance_candidates/translated.json"]
+      outputs: ["output/translation.json", "output/translated.html", "output/provenance/translated.json", "output/provenance_candidates/translated.json",
+                "output/ai_logs/04_translate.jsonl", "output/ai_logs/04_translate.turns.*.jsonl"]
 
     "05_smart":
       label: "智能版笔记"
@@ -366,7 +377,8 @@ document:
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
-      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json", "output/provenance_candidates/smart.json"]
+      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json", "output/provenance_candidates/smart.json",
+                "output/ai_logs/05_smart.jsonl", "output/ai_logs/05_smart.turns.*.jsonl"]
 
     "07_concepts":
       label: "概念 + 摘要"
@@ -387,7 +399,8 @@ document:
             - {note_type: translated, path: "output/translated.html", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/translated.json", provenance_step: "06_semantic_attestation", provenance_since_version: "1"}
             - {note_type: original, path: "intermediate/document_index.md", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/original.json", provenance_step: "03_structure", provenance_since_version: "1"}
         - action: collect_glossary
-      outputs: ["output/concepts.json"]
+      outputs: ["output/concepts.json",
+                "output/ai_logs/07_concepts.jsonl", "output/ai_logs/07_concepts.turns.*.jsonl"]
 
     "06_semantic_attestation":
       label: "语义证据独立核验"
@@ -404,7 +417,8 @@ document:
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
       # 核验步以最终版覆盖 05_smart/04_translate 先写的 provenance,后写者持有(§2.5)。
       output_policy: {overlap_with: ["05_smart", "04_translate"]}
-      outputs: ["output/provenance/smart.json", "output/provenance/translated.json", "output/provenance/semantic_batch.json"]
+      outputs: ["output/provenance/smart.json", "output/provenance/translated.json", "output/provenance/semantic_batch.json",
+                "output/ai_logs/06_semantic_attestation.jsonl", "output/ai_logs/06_semantic_attestation.turns.*.jsonl"]
 
     "08_review":
       label: "评审"
@@ -422,7 +436,8 @@ document:
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
       on_complete:
         - action: collect_glossary
-      outputs: ["output/review.json", "output/review_input.md", "output/review_sources/*", "output/versions/review_*", "output/versions/review_input_*"]
+      outputs: ["output/review.json", "output/review_input.md", "output/review_sources/*", "output/versions/review_*", "output/versions/review_input_*",
+                "output/ai_logs/08_review.jsonl", "output/ai_logs/08_review.turns.*.jsonl"]
 
 audio:
   # provider 统一 claude-cli + 显式模型,由带 claude-cli tag 的 ai worker 认领。
@@ -435,7 +450,9 @@ audio:
       retry: 3
       on_complete:
         - action: sync_metadata
-      outputs: ["input/source.mp3", "input/source.m4a", "input/source.mp4", "input/metadata.json"]
+      outputs: ["input/source.mp3", "input/source.m4a", "input/source.mp4",
+                "input/source.wav", "input/source.aac", "input/source.flac",
+                "input/metadata.json"]
 
     # 转写复用 video 的 whisper 步。
     "02_whisper":
@@ -475,7 +492,8 @@ audio:
       ai:
         primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
-      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json", "output/provenance_candidates/smart.json"]
+      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json", "output/provenance_candidates/smart.json",
+                "output/ai_logs/04_smart_podcast.jsonl", "output/ai_logs/04_smart_podcast.turns.*.jsonl"]
 
     "05_concepts":
       label: "概念 + 摘要"
@@ -494,7 +512,8 @@ audio:
           candidates:
             - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "04_semantic_attestation", provenance_since_version: "2", legacy_provenance_step: "04_smart_podcast", legacy_provenance_since_version: "2"}
         - action: collect_glossary
-      outputs: ["output/concepts.json"]
+      outputs: ["output/concepts.json",
+                "output/ai_logs/05_concepts.jsonl", "output/ai_logs/05_concepts.turns.*.jsonl"]
 
     "04_semantic_attestation":
       label: "语义证据独立核验"
@@ -511,7 +530,8 @@ audio:
         fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
       # 核验步以最终版覆盖 04_smart_podcast 先写的 provenance/smart.json,后写者持有(§2.5)。
       output_policy: {overlap_with: ["04_smart_podcast"]}
-      outputs: ["output/provenance/smart.json", "output/provenance/semantic_batch.json"]
+      outputs: ["output/provenance/smart.json", "output/provenance/semantic_batch.json",
+                "output/ai_logs/04_semantic_attestation.jsonl", "output/ai_logs/04_semantic_attestation.turns.*.jsonl"]
 
     "05_review":
       label: "评审"
@@ -525,4 +545,5 @@ audio:
         fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
       on_complete:
         - action: collect_glossary
-      outputs: ["output/review.json", "output/review_input.md", "output/review_sources/*", "output/versions/review_*", "output/versions/review_input_*"]
+      outputs: ["output/review.json", "output/review_input.md", "output/review_sources/*", "output/versions/review_*", "output/versions/review_input_*",
+                "output/ai_logs/05_review.jsonl", "output/ai_logs/05_review.turns.*.jsonl"]

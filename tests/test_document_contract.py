@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import fnmatch
+from pathlib import Path
 
 import pytest
 
@@ -21,7 +23,10 @@ from shared.document_registry import (
     document_catalog,
     validate_document_kind,
 )
-from steps.document.provenance import build_document_source_manifest
+from steps.document.provenance import (
+    build_document_source_manifest,
+    publish_document_source_manifest,
+)
 
 
 FINGERPRINT = "sha256:" + "a" * 64
@@ -331,3 +336,103 @@ def test_source_manifest_uses_dom_path_tag_to_disambiguate_repeated_html_text(
     assert segment["locator"]["exact"] == title
     assert source[segment["start"]:segment["end"]] == title
     assert source[segment["start"] - len("<title>"):segment["start"]] == "<title>"
+
+
+def _pdf_only_document():
+    """PDF 为唯一来源的 Document:segment 走 pdf 分支,才会产出 support_artifact。"""
+    pdf_fingerprint = "sha256:" + "b" * 64
+    document = _document()
+    document["source_profile"] = "digital_pdf"
+    document["capabilities"] = ["pdf", "text_layer", "page_bbox"]
+    document["primary_source_id"] = "pdf"
+    document["sources"] = [{
+        "source_id": "pdf", "source_profile": "digital_pdf",
+        "capabilities": ["pdf", "text_layer", "page_bbox"],
+        "fingerprint": pdf_fingerprint, "path": "input/source.pdf",
+        "mime_type": "application/pdf", "immutable": True,
+    }]
+    pdf_locator = {
+        "pdf": {
+            "source_id": "pdf", "source_fingerprint": pdf_fingerprint,
+            "page": 1, "bboxes": [[10, 20, 30, 40]], "ocr_confidence": None,
+        },
+    }
+    for block in document["blocks"]:
+        block["locator"] = copy.deepcopy(pdf_locator)
+    for group in ("figures", "tables"):
+        for item in document[group]:
+            item["source_locator"] = copy.deepcopy(pdf_locator)
+    return document
+
+
+def _document_pipeline_step(step_name: str) -> dict:
+    from shared.config import load_pipelines
+
+    steps = load_pipelines(
+        Path(__file__).resolve().parents[1] / "configs" / "pipelines.yaml"
+    )["document"]["steps"]
+    return next(step for step in steps if step["name"] == step_name)
+
+
+def test_support_artifact_paths_are_declared_outputs_of_producing_step(tmp_path):
+    """support_artifact 指向的文件必须在写它那个步骤的 outputs 声明内。
+
+    漏声明不会让任何步骤失败:文件照常写进 job 目录,证据复算在本机也照常通过。
+    只有便携备份按 manifest 选产物时才暴露 —— 它整份丢掉未声明的文件,恢复后
+    build_canonical_evidence_records_with_reader 找不到 support artifact,
+    canonical_evidence 永久重建失败(P4 演练实测 7/11 document job 卡死)。
+    因此这条不变量只能由契约测试守,不能指望步骤自测发现。
+    """
+    job_dir = tmp_path / "jobs_document_fixture"
+    (job_dir / "input").mkdir(parents=True)
+    (job_dir / "input" / "source.pdf").write_bytes(b"%PDF-1.4\nfixture\n")
+
+    manifest = build_document_source_manifest(job_dir, _pdf_only_document())
+
+    referenced = {
+        segment["support_artifact"]["path"]
+        for segment in manifest["segments"]
+        if segment.get("support_artifact")
+    }
+    assert referenced, "fixture must produce at least one support_artifact"
+
+    declared = _document_pipeline_step("03_structure")["outputs"]
+    undeclared = sorted(
+        path for path in referenced
+        if not any(fnmatch.fnmatch(path, pattern) for pattern in declared)
+    )
+    assert not undeclared, (
+        f"support_artifact 路径未被 03_structure outputs 声明: {undeclared}; "
+        f"declared={declared}"
+    )
+
+
+def _tree(job_dir):
+    return {
+        path.relative_to(job_dir).as_posix()
+        for path in job_dir.rglob("*") if path.is_file()
+    }
+
+
+def test_publishing_source_manifest_writes_only_declared_outputs(tmp_path):
+    """反向守:03_structure 真正落盘的文件不得超出 outputs 声明。
+
+    比较的是 publish 前后的差集,而不是"排除 input/"。旧写法整体跳过 input/,
+    正好是 source.{wav,aac,flac} 与 term_map.json 藏身的地方——一整个目录的
+    盲区。差集写法只放过本来就存在的上游产物,新写进 input/ 的文件照样要声明。
+    """
+    job_dir = tmp_path / "jobs_document_fixture"
+    (job_dir / "input").mkdir(parents=True)
+    (job_dir / "input" / "source.pdf").write_bytes(b"%PDF-1.4\nfixture\n")
+    before = _tree(job_dir)
+
+    publish_document_source_manifest(job_dir, _pdf_only_document())
+
+    declared = _document_pipeline_step("03_structure")["outputs"]
+    written = sorted(_tree(job_dir) - before)
+    assert written, "publish 必须落盘产物"
+    undeclared = [
+        path for path in written
+        if not any(fnmatch.fnmatch(path, pattern) for pattern in declared)
+    ]
+    assert not undeclared, f"落盘但未声明的产物: {undeclared}; declared={declared}"

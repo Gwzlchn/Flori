@@ -448,3 +448,181 @@ COMPOSE_FILES="-f docker-compose.yml -f .local/docker-compose.uptest.yml" script
 固定到不可变的 `:<sha>` 标签后，watchtower 不会再把它滚到 `:latest`（标签不同）。恢复自动更新：重新用 `:latest` 部署（`docker compose up -d <服务>`）。
 
 `rollback.sh` 只回滚镜像，目标镜像必须支持当前数据库 schema。若数据库已迁移到旧镜像不支持的版本，应在停写状态恢复完整 DR 备份；只有确认其它持久资产没有变化时，才可使用经过校验的 migration safety snapshot 回退 SQLite。不得强行启动不兼容的旧镜像。
+
+## 8. 两轨备份:exact DR 与 portable content backup
+
+系统有**两套互不替代**的备份轨道。选错轨道比不备份更危险,因为它给出虚假的恢复
+预期。判据只有一条:**你要恢复的是"某一时刻的运行环境",还是"业务内容本身"**。
+
+| | exact DR(§7) | portable content backup |
+|---|---|---|
+| 入口 | `scripts/backup.sh` / `restore.sh` | `scripts/content-backup.sh` / `content-import.sh` / `content-gc.sh` |
+| 收录 | SQLite + Redis + MinIO + `/data` 整卷 | 业务事实 + 失败审计 + **有效 manifest 证明的产物** |
+| 含凭据 | **是**(必须受访问控制) | **否**(allowlist + secret scan 双门) |
+| 含运行态 | 是(队列、租约、心跳) | 否 |
+| 恢复语义 | 回到**那一刻的整机状态** | 在**当前 Schema** 上重建内容,状态由当前 pipeline 重投影 |
+| 跨 Schema | 否(恢复旧 SQLite) | **是**(空库由当前 migration 创建) |
+| 去重 | 否(整卷) | 是(内容寻址 CAS) |
+| 典型场景 | 磁盘故障、实施前回滚点、误删回退 | 清库重建、迁移到新机、增量归档、复现某批 Job |
+
+**边界(不要混用)**:
+- portable import **不是回滚手段**。实施 portable 前必须先做一次 exact DR 并
+  `restore.sh --check`(§2.10 阶段0)。
+- exact DR **不能**跨 Schema 重建,也不能作为可共享的明文内容仓库。
+- portable 仓库自身需要**至少两份物理副本**才算备份;CAS 只解决逻辑重复,
+  不解决单盘故障。
+
+### 8.1 只读备份
+
+```bash
+# 默认读命名卷 flori-data,增量;首次会全量哈希
+scripts/content-backup.sh --repo /volume2/DATA/content-repo \
+    --result-file /volume2/DATA/content-repo/last-backup.json
+
+# 仓库自洽性校验(不证业务正确性)
+scripts/content-backup.sh --repo /volume2/DATA/content-repo --verify
+```
+
+**首次必做:建立密钥扫描基线**。文本 blob 的明文密钥扫描只在**真正读字节**时发生,
+而增量路径(`_incremental_hit`)在 step_result record 与全部 blob 都已在仓库时直接跳过
+重读——于是**在扫描上线之前就已经收进仓库的 blob 从来没被扫过**,日常增量也永远不会
+补扫。给已有仓库建立基线要显式跑一次全量重读:
+
+```bash
+scripts/content-backup.sh --repo /volume2/DATA/content-repo --full-rehash \
+    --result-file /volume2/DATA/content-repo/rehash-baseline.json
+```
+
+这一趟很慢(12 GB 级仓库要全量重读),但只需在**仓库首次建立**和**扫描规则变更后**
+各跑一次。跑完检查 result JSON:命中密钥会整次 fail-closed 并给出路径,审阅后用
+`--allow-secret-blob-file` 放行;放行项会写进 `snapshot.policy.secret_scan_exceptions`
+并把 `secrets_included` 置真,跟着快照走。`report.blob_scans_truncated` 列出超过 4 MB
+扫描缓冲、**只扫了前缀**的 blob,这些尾部字节仍未经检查,需要人工判断。
+
+生产侧真正零写的做法(推荐,尤其在不停服时):先用 `:ro` 把 SQLite 三件套
+(`analyzer.db`/`-wal`/`-shm`)复制到隔离 scratch,再对副本备份,`jobs/` 全程 `:ro`。
+不停服时备份会与 scheduler/worker 并发,M1/M2 协议(§2.7-4)会 fail-closed 而不是
+把竞态吞成"增量",因此**并发下失败或覆盖率偏低是预期结果,不要放宽门去换好看的数字**。
+
+验收指标看 result JSON 的 `stats`:
+- `manifests_seen` / `manifests_missing` / `terminal_steps` —— manifest 覆盖率。
+  存量 Job 在 2.2.x 之前没有 manifest,**低覆盖率是预期**,由 04 的 backfill 解决。
+- `unknown_paths` 必须为 0,否则给出可审的例外清单再 `--allow-unknown-file` 放行。
+- `external_source_parts` / `nas_source_roots` —— NAS 引用型 Part 不自带媒体字节,
+  恢复时依赖对应 source root 仍然在位。
+- `excluded_reasons` —— 排除原因分布。
+
+### 8.2 清库恢复完整流程
+
+> # 当前仓库无法恢复你的系统
+>
+> 这不是"覆盖率偏低",是**本流程现在跑不出可用结果**。P4 演练实测:最新快照只
+> 捕获了生产字节的 **0.303%**、终态步的 **13.6%**;补齐产物声明后,用旧快照重导
+> 只剩 **22 个 done step**(声明变更改了语义摘要,旧 manifest 一律投影为 stale)。
+> 也就是说:**本节是等一次完整重备之后才成立的操作手册**,不是今天的恢复预案。
+> 今天的恢复手段只有 exact DR(`scripts/restore.sh`)。
+>
+> 先做这三件事,再考虑走本节:
+> 1. 跑一次完整 exact DR(`scripts/backup.sh`),它是唯一的回滚兜底;
+> 2. 跑一次全量 portable 备份,让新的产物声明进入快照;
+> 3. 用 `--plan` 核对 `terminal_steps` 与 `manifests_missing`,确认覆盖率可接受。
+
+> **前置现实检查(P4 演练发现)**:阶段0 不是形式。`--into-live` 会硬校验
+> `FLORI_DR_RECEIPT` 指向 24h 内的 exact DR result JSON(内容会被解析,mtime
+> 骗不过去),而生产当前**一份 `flori-backup-*.tar.gz` 都没有**(`/data/backups`
+> 下只有历次重置期的 DB 快照)。也就是说照本流程操作会在第 0 步被自己的门拦住,
+> 必须先对整个对象存储(当前约 12.4 GB)跑一次完整 exact DR。
+> 请把这次 DR 的耗时算进恢复窗口。
+
+```bash
+# 0) 前置:exact DR 兜底(portable 不是回滚手段)
+scripts/backup.sh /mnt/nas/flori --result-file /mnt/nas/flori/dr.json
+scripts/restore.sh /mnt/nas/flori/flori-backup-<gen>.tar.gz --check
+
+# 1) 只读预演:看清要写多少、有没有冲突(bytes_to_write 是真实字节数)
+scripts/content-import.sh --repo <repo> --db /data/db/analyzer.db --plan
+
+# 2) 停写:scheduler/worker 停机。docker ps 只看得到本机容器,跨机 worker 要人工确认,
+#    确认后设 FLORI_REMOTE_WORKERS_QUIESCED=1(缺它导入会拒绝写线上面)
+docker compose stop scheduler worker-cpu worker-ai
+export FLORI_REMOTE_WORKERS_QUIESCED=1
+export FLORI_DR_RECEIPT=/mnt/nas/flori/dr.json
+
+# 3) 导入到全新库(绝不复制快照的 schema_migrations)
+scripts/content-import.sh --repo <repo> --db /data/db/analyzer.db --into-live \
+    --target-generation gen-$(date -u +%Y%m%dT%H%M%SZ) \
+    --result-file /data/content-import/last.json
+
+# 4) 先只起 scheduler(不起 worker):它会补索引/概念,但没有 worker 就派不出活。
+#    确认 pending 规模、把各池上限压到 0 之后,再分批放行 worker(见下)
+docker compose up -d scheduler
+```
+
+> **启动 scheduler 之前必须做的事(否则会重下约 12GB 并重跑全部 AI 步)**:
+> 导入不 enqueue,但 `scheduler/recovery.py` 启动时会列出**全部** `status='pending'`
+> 的 Job 并逐个 `submit_job()`。恢复库里只有少数 Job 有可复用步骤,其余会被投影成
+> `pending`,于是一启动就是一场全量重跑——直接违反"不在普通 import 中隐式 enqueue
+> 或自动重跑"的设计约束。可操作的抑制手段(择一):
+> - **先只起 scheduler、不起 worker**:索引与概念补齐照常进行(它们不经 worker),
+>   而下载/AI 步没有 worker 认领,不会真的跑起来;
+> - 同时把各池上限压到 0(`PUT /api/config/pool-limits`,写 redis
+>   `pool_limit_overrides`,即时对直连与网关两路 worker 生效),确认
+>   `projection.search.awaiting_backfill` 与 pending 计数后再逐池放开;
+> - 需要单独停某个 Job 用 `POST /api/jobs/{id}/cancel`。
+>
+> 另有一个没有恢复路径的状态:备份时处于 `processing` 的 Job。启动时的唯一 DB 扫描
+> 只看 `pending`,而 Redis 恢复后是空的,因此它们既不会被重新派发也不会被标失败,
+> 需要人工 rerun。
+
+**恢复后的索引与概念补齐(重要,分两段)**:
+
+导入**刻意不写** `notes_fts5`。补齐由 scheduler 既有的幂等通道负责:
+`JobFinalizer.reconcile_completion_effects`(`scheduler/job_finalizer.py`)由后台周期
+循环触发,谓词是纯 SQL 的 `list_unindexed_done_jobs`(`status='done'` 且 `notes_fts5`
+里没有该 job),**不依赖 Redis**,因此对刚恢复的库直接生效。
+
+> 这里有一个必须记住的反直觉点:**导入侧一旦先把 `notes_fts5` 填上,上面那个谓词
+> 就永远为假**,scheduler 再也不会认领这些 Job,`canonical_evidence` 于是永久为空。
+> 所以"导入不建 FTS"不是偷懒,是正确的所有权划分。import 的 result JSON 里
+> `projection.search.awaiting_backfill` 列出待补齐 Job,`owned_by` 标明归属。
+
+启动 scheduler 后应观察到 `notes_fts5` / `note_chunks` / `canonical_evidence`
+由空变为有数据。**`concept_occurrences` 目前没有重放通道**(reconcile 只重放
+index_note 效果,`collect_glossary` 被过滤),需等待专用重建入口;在它落地前,
+概念图谱需要对相关 Job 显式 rerun 概念步骤才能恢复。
+
+> **补齐会卡在哪(P4 演练实测)**:补齐要求 manifest 声明过的产物**全部**在恢复库里。
+> 若某个证据复算依赖没被任何步骤声明为 output,它就不进快照,恢复后
+> `build_canonical_evidence_records_with_reader` 抛 `support artifact is missing`,
+> 该 Job 每拍重试且**永不收敛**。首次演练 11 个待补齐 Job 里有 7 个因
+> `intermediate/pdf_page_support.json` 漏声明而卡死(已在 03_structure 补声明)。
+> 那条 support_artifact 契约测试只覆盖 document/03_structure 一个步、一类字段,
+> **守不住这一类问题**;跨流水线的泛化对账在
+> `tests/test_artifact_declaration_contract.py`(契约回读路径、编排面直写路径、
+> 下载步扩展名、合并步 assets),它才是这一类的防线。
+> 排查顺序:看 scheduler 日志里的 `completion_effect_failed` -> 确认缺哪个文件 ->
+> 回查该文件是否在产出步骤的 `outputs` 声明内。补声明会让相关步骤 manifest 变
+> stale 并触发重跑,这是预期行为。
+
+### 8.3 回滚路径
+
+- **切换前失败**:丢弃新库与 import staging,原环境未被触碰(§2.10 阶段5)。
+  journal 是独立文件(`/data/content-import/journal.sqlite3`),**不放在目标库目录内**,
+  因此丢弃目标库不会连崩溃证据一起删,可用 `--list-imports` 排查。
+- **中断**:同 `--target-generation` 重跑即续跑;目标库被丢弃重建后绑定指纹会变,
+  工具会拒绝沿用旧进度并要求新 generation(防"空库报成功")。
+- **切换后发现问题**:停写,用阶段0 的 exact DR 恢复。
+
+### 8.4 磁盘回收(GC)
+
+```bash
+scripts/content-gc.sh --repo <repo> --mark                 # 只读,看可达集合
+scripts/content-gc.sh --repo <repo> --sweep                # 默认 dry-run
+scripts/content-gc.sh --repo <repo> --sweep --apply --grace-days 7
+scripts/content-gc.sh --repo <repo> --scrub                # 全量重算完整性
+```
+
+保留集合 = `latest` + 每月锚点 `monthly-YYYY-MM`(备份成功自动建,当月不覆盖)+
+手工 named refs + 最近 N 条 receipt 引用。sweep 与 backup 互斥(同一把写锁),
+import 只读仓库不被阻塞;dry-run 不取锁,只读挂载也能跑。grace period 按**引用组**
+判定,不会出现"留下 snapshot 却删掉它引用的 record/blob"。

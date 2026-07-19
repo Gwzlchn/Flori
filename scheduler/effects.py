@@ -430,6 +430,13 @@ class EffectDispatcher:
                         tmap.update(json.loads(raw.decode("utf-8", errors="replace")))
                     except (json.JSONDecodeError, ValueError):
                         logger.warning("collection_terms_invalid", collection=job.collection_id)
+                else:
+                    # 退回"只用 glossary"是真降级:书内前几章还没回流术语时属正常,
+                    # 但恢复后 terms.json 丢了也长这样。喊出来,别让两者无法区分。
+                    logger.warning(
+                        "collection_terms_absent",
+                        collection=job.collection_id, job_id=job.id,
+                    )
             if not tmap:
                 return
             await self.owner.storage.write_file(

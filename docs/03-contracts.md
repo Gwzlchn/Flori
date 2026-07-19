@@ -3463,3 +3463,177 @@ v2(未做):写工具(submit);sqlite-vec 语义后端。
 ### 迭代约定(新增工具)
 service 函数(单一来源)→ `@mcp.tool()` 薄包(写好面向 LLM 的 docstring)→ pytest 集成(进 CI)→ 本节同提交更新(`contract:`)→
 Inspector 眼检 → 版本 +1。工具少而精;签名**只增可选参数**保向后兼容(它是 agent 的公开契约)。
+
+## 8. 便携内容仓库(portable content repository)
+
+与 §7 的 Step Manifest 一样,这里定义的是**文件契约**:仓库里的每个字节都由内容
+寻址,消费方只认摘要,不认路径。它与灾备归档(`scripts/backup.sh` 的 DR format v2)
+是两套独立契约,互不替代,对照见 `docs/08-deployment.md` §8。
+
+### 8.1 仓库布局与版本
+
+```
+<repo>/
+  repository.json          {"format": "flori-portable-repository/v1"}
+  blobs/sha256/<前2位>/<64位hex>
+  records/<kind>/<64位hex>.json
+  snapshots/<64位hex>.json
+  refs/<name>              单行 sha256:<64hex>
+  receipts/<20位epoch微秒>-<8位hex>.json
+  tmp/  locks/
+```
+
+- **blob key = 文件字节的 SHA-256**,不是对象路径、URL、MinIO ETag 或数据库 id。
+- **record digest = canonical JSON body 的 SHA-256**。canonical 定义复用
+  `shared/step_manifest.canonical_json_bytes`(UTF-8 / sort_keys / 紧凑分隔符 /
+  拒 NaN 与 lone surrogate),不另立一套。
+- 打开时校验 `repository.json` 的 format;未知版本只读兼容,禁止静默重写。
+- 一切写入先落 `tmp/`,校验通过后 create-if-absent 发布;同 digest 已存在必须重新
+  核对字节,不同即判损坏且**永不覆盖**。
+
+### 8.2 record kinds
+
+| kind | 自然键 | 说明 |
+|---|---|---|
+| `job_core` | `id` | Job 不可变身份,不含 status/progress/error |
+| `job_user_state` | `job_id` | 用户归类;带 `revision` 前置摘要 |
+| `part_core` | `job_id/id` | 有序 Part 清单的一项 |
+| `step_result` | `job_id/scope_key/step` | manifest + output blob 映射,不可拆分 |
+| `failure_event` | `exec_id` | 不可变失败审计,不恢复为活动状态 |
+| `job_relation` | `job_id` | Job 维度引用索引,供按 Job diff |
+| `collection` / `ingested_item` | `id` / `collection_id/item_id` | 业务账本 |
+| `glossary` / `definition_version` | `domain/term` / `definition_version_id` | 概念与定义历史 |
+| `prompt_override(_version)` | scope/domain/pipeline/document_kind/step[/version] | |
+| `study` | `table/主键` | 九张学习账本的信封 |
+| `ai_usage` / `ai_task_log` | `exec_id` / `task_id+created_at+exec_id` | 调用审计 |
+| `user_config` / `legacy_archive` | `path` / `table#chunk` | 前者收对象存储里人工维护的配置文件 |
+
+`user_config` 当前只产出 `collections/{id}/terms.json`(`kind=domain_config`):它是
+**人工维护的书籍术语表,不是派生物**。`input/term_map.json` 由 glossary **加**它算出,
+而 glossary 是 DB 行早就进快照,漏掉这张表恢复后 `_export_term_map` 会安静退回
+"只用 glossary",整本书的译名少一截且无任何信号。导入侧按 `path` 原样回写对象存储,
+read-back 校验,异 hash 拒绝覆盖。prompts/profiles/styles/templates 那几类配置文件
+仍待 P2b(`report.deferred`)。
+
+字段 allowlist 的单一来源是 `shared/content_policy.RECORD_POLICIES`。**活动状态字段
+(jobs.status/progress_pct/error、collections.job_count 等)与自增 rowid 不在
+allowlist 内**,出现即拒:状态只有一份,由导入后的投影产生。
+
+### 8.3 snapshot 根契约
+
+```json
+{
+  "format": "flori-portable-snapshot/v1",
+  "repository_format": "flori-portable-repository/v1",
+  "source": {"app_version": "...", "db_user_version": 8,
+             "manifest_format": "flori-step-manifest/v1"},
+  "selector": {"partial": false, "job_ids": []},
+  "records": {"jobs": [...], "parts": [...], "step_results": [...],
+              "failures": [...], "business_ledgers": [...]},
+  "blob_refs": ["sha256:..."],
+  "relations_digest": "sha256:...",
+  "policy": {"successful_artifacts_only": true, "secrets_included": false,
+             "secret_scan_exceptions": [], "runtime_state_included": false}
+}
+```
+
+不变量:
+
+1. 键集合**精确**等于上表;出现 `observed_at`/主机名之类字段即拒。时间、统计与
+   "是否命中既有 snapshot"只进 receipt,因此同一逻辑状态恒得同一 digest。
+2. 全部数组按 digest 严格升序且去重。
+3. `blob_refs` 必须**严格等于**全部 record 声明的 blob 并集(多列会让 GC 永久保活
+   无佐证字节,少列即悬空引用)。
+4. `selector.partial` 为真当且仅当 `job_ids` 非空;selector 进入 snapshot 身份,
+   局部快照与全量快照即使记录集合相同也是两个 digest。
+5. `failure_event` 的 `ai_usage_refs`/`ai_task_log_refs` 与 `job_relation` 的每条边
+   都必须落在快照自己的对应分组内。
+6. `policy.successful_artifacts_only` 恒 true、`runtime_state_included` 恒 false,
+   类型必须是 bool。
+7. `policy.secrets_included` **不是定值**:它必须与 `secret_scan_exceptions`
+   双向一致——放行清单非空则恒为 true,为空则恒为 false。操作者用
+   `--allow-secret-blob-file` 批准过的字节没人能证明它不含密钥,把 false 写死等于
+   让快照替人担保。清单按 `job_id:path` 严格升序去重,进 snapshot digest,
+   因此改动放行范围必然是另一个快照。
+
+### 8.4 receipt 与 refs
+
+- receipt 文件名前缀是**零填充 epoch 微秒**,字典序即真实时序(GC 的保留窗口依赖
+  这一点;不能用显示串,小数秒与 `+00:00` 会破坏排序)。
+- 三态 `outcome`: `in_progress` / `success` / `failed`。一次备份写两条(开始 + 终态),
+  因此"最近 N 条"的窗口按**带 `snapshot_digest` 的 receipt** 计数。
+- `refs/latest` 最后原子替换;任何校验失败都不得更新 ref。
+- 保留集合 = `latest` + 每月锚点 `monthly-YYYY-MM`(备份成功后自动创建,当月已存在
+  则不覆盖)+ 手工 named refs + 最近 N 条 receipt 引用。
+
+### 8.5 CLI 契约
+
+三个入口都在容器内运行,输出机器可读 JSON(`--result-file` 可另存)。
+
+| 命令 | 用途 | 退出码 |
+|---|---|---|
+| `scripts/content-backup.sh --repo <dir>` | 只读增量备份 | 0 成功 / 1 失败 / 2 参数错 |
+| `scripts/content-backup.sh --repo <dir> --verify` | 仓库自洽性校验 | 0 无问题 / 1 有问题 |
+| `scripts/content-import.sh --repo <dir> --db <path>` | 导入(`--target empty\|merge`) | 0 / 1 / 2 参数错 |
+| `scripts/content-import.sh ... --plan` | 只读计划 | 0 无冲突 / 1 有冲突 |
+| `scripts/content-gc.sh --repo <dir> --mark\|--sweep\|--scrub` | GC 三阶段 | 0 / 1 / 2 参数错 |
+
+关键约定:
+
+- **`--job` 是局部快照,必须显式 `--ref <名字>`**,不得覆盖 `latest`。
+- 三个入口的 shell 层早退也写 `--result-file` JSON(`{"ok": false, "error": …}`),
+  且退出码与容器内 python 同因同码:参数错 `2`,环境/前置不成立 `1`。
+- 文本类 blob(`.json/.jsonl/.md/.txt/.html/.srt` 等)在收纳时逐个做明文密钥扫描,
+  命中即整次备份 fail-closed。审阅后可用 `--allow-secret-blob-file <清单>`
+  (逐行 `job_id:path`)放行;放行项进 `snapshot.policy.secret_scan_exceptions`
+  并把 `secrets_included` 置真(§8.3-7),同时进 receipt `stats.blob_scan_exceptions`。
+- **扫描只在真正读字节时发生**,内容寻址增量会跳过已在仓库的 blob。因此扫描规则
+  上线前收进去的字节从未被扫过,须显式跑一次 `--full-rehash` 建立基线(见
+  `docs/08-deployment.md` §8.1);超过 4 MB 扫描缓冲的 blob 只扫前缀,记进
+  `report.blob_scans_truncated`。
+- GC `--sweep --apply` 在仓库没有任何月度锚点 ref 时**拒绝执行**(告警在删除之前,
+  不是之后);明知会失去较早恢复点时用 `--allow-no-anchor` 显式放行。
+- 备份默认拒绝"既非 manifest 产物、又非运行期 sidecar、也不是可识别半成品"的路径;
+  放行要走 `--allow-unknown-file <清单>`(逐行 `job_id:path` 精确匹配)。
+- **隔离与放行看目标身份,不看开关**。目标解析到线上库(`/data/db/analyzer.db`)、
+  线上产物根(`/data/jobs` 及其子目录)、或(设了 `MINIO_URL` 时)生产桶
+  `MINIO_BUCKET`,都算写线上面,必须同时满足:显式 `--into-live`、本机
+  scheduler/worker 已停(docker 查询失败即拒绝,不 fail-open)、
+  `FLORI_REMOTE_WORKERS_QUIESCED=1`(跨机 worker 的人工确认)、
+  `--dr-receipt`/`FLORI_DR_RECEIPT` 指向够新的 exact DR result JSON。
+  只读路径(`--plan` / `--verify-only`)不过写入门。
+- **对象存储下 `--jobs-dir` 不构成隔离**:对象键里没有本地路径这一层。隔离必须靠
+  `--object-bucket <与生产桶不同的桶>`;设了 `MINIO_URL` 却没给出隔离桶,又没有
+  `--into-live`,一律 fail-closed 退出码 2,而不是默默写生产桶。
+- **DR receipt 会被解析**:校验 `status=success`、`operation=backup`、合法
+  `archive_sha256`、`manifest.format=flori-disaster-recovery`,新鲜度取自
+  `manifest.created_at`(不是文件 mtime)。`FLORI_DR_MAX_AGE_SEC` 可收紧,
+  但硬上限 7 天,超过即拒绝。
+- merge 模式下分类器与写入面必须对着同一个产物根:本地按 `<data>/db` 与
+  `<data>/jobs` 同根比对,对象存储按"库的线上性与桶的生产性必须一致"比对。
+- journal 是独立 SQLite,默认 `/data/content-import/journal.sqlite3`,**不得放在目标
+  库目录内**(阶段5 丢弃目标库会连崩溃证据一起删)。
+- `--verify` / `--verify-only` 只证**仓库自洽**,不证"快照捕获了正确的业务状态";
+  payload 的 `scope` 字段如实声明这一点。
+- 按 **digest** 导入(`--snapshot sha256:…`)期间会挂一个 `import-<import_id>` 保活 ref,
+  防并发 GC 清掉没有任何 ref 指着的裸 digest 快照,导入结束(成功或失败)即摘。
+  仓库以只读方式挂载时挂不上:这是**可接受降级**,导入照常进行,结果 JSON 的
+  `snapshot_guard` 如实报 `{held:false, error:…}`。此时不要并发跑 GC。
+- 重复导入同一 `(snapshot, target_generation)` 是 no-op,退出码 **0**,
+  payload 带 `already_imported: true`;它不是失败,自动化不应据此中止。
+
+### 8.6 恢复后的字段语义(哪些是事实,哪些被重投影)
+
+导入不复制备份时的运行态,因此下列字段在恢复库里**不等于**原库:
+
+| 字段 | 恢复后 | 原因 |
+|---|---|---|
+| `jobs.status` / `progress_pct` / `error` | 由当前 pipeline + 已恢复 manifest 重投影 | 状态只有一份(§2.9) |
+| `jobs.updated_at` | 被重置为导入时刻 | 它跟踪的可变列本身就是重投影产物,不是业务事实 |
+| `jobs.created_at` | 原样恢复 | 业务事实 |
+| `job_parts.*`(含 `updated_at`) | 原样恢复 | Part 无重投影状态,整行都是业务事实 |
+| `notes_fts5` / `note_chunks` / `canonical_evidence` | 空,由 scheduler 补齐 | 索引所有权归 scheduler(§8.2) |
+| `concept_occurrences` | 空,且当前无重放通道 | 需显式 rerun 概念步骤 |
+
+`jobs.updated_at` 被重置意味着**恢复后"最近更新"排序会全部塌到同一时刻**;
+需要按真实时间排序的视图应使用 `created_at` 或步骤 manifest 的 `committed_at`。
