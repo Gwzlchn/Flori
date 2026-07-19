@@ -13,6 +13,7 @@ from shared.step_manifest import (
     canonical_json_bytes,
     check_reusable,
     compute_input_digest,
+    validate_job_id,
     is_internal_namespace_path,
     manifest_digest,
     manifest_object_key,
@@ -604,3 +605,22 @@ def test_reusable_caller_contract_errors_raise() -> None:
     kwargs["current_input_fingerprints"] = {"job": "xoxb-" + "a" * 12}
     with pytest.raises(ManifestError):
         check_reusable(manifest, **kwargs)
+
+
+class TestRealWorldJobIdShapes:
+    """来源原生 id 带点(arXiv)必须能进 manifest:2.2.0 曾把 part_id 的正则套到
+    job_id 上,使生产 22 个 arxiv document job 无法产出 manifest 并被误判失败。"""
+
+    @pytest.mark.parametrize("job_id", [
+        "jobs_arxiv_1011.6402_2607181756536760",
+        "jobs_arxiv_2302.13971_260718175653da88",
+        "jobs_video_BV1xx411c7mD_260718175653",
+        "jobs_doc_a1b2c3d4_260718175653",
+    ])
+    def test_production_job_id_shapes_are_accepted(self, job_id):
+        assert validate_job_id(job_id) == job_id
+
+    @pytest.mark.parametrize("job_id", [".", "..", "a/b", "a\\b", "a\x00b", "", "x" * 201, "../etc"])
+    def test_dangerous_job_ids_still_rejected(self, job_id):
+        with pytest.raises(ManifestError):
+            validate_job_id(job_id)

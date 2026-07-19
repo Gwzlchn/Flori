@@ -21,8 +21,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Iterable, Mapping
 
-# _SEGMENT_RE 是 scope 身份的单一来源;job_id/part_id/step 名共用同一约束,
-# 复制正则会造成两处漂移,故这里直接引用内部常量。
+# _SEGMENT_RE 是 part_id 与 step 名的单一来源(生成式标识,可以严);job_id 另立
+# _JOB_ID_RE,因为它承载来源原生 id,arXiv 号等本就带点。复制正则会造成漂移,故引用常量。
 from .step_scope import (
     JOB_SCOPE,
     _SEGMENT_RE,
@@ -50,6 +50,10 @@ MAX_INPUT_FINGERPRINT_VALUE_CHARS = 2_000
 MAX_INPUT_FINGERPRINT_CANONICAL_BYTES = 512 * 1024
 
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# job_id 比 part_id 宽一个点:来源原生 id 带点(arXiv 1011.6402)。点只允许出现在
+# 中间且不连续,故 . / .. / .foo / foo. / a..b 全部落空,分隔符与控制字符同样排除。
+_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$")
+_JOB_ID_MAX = 200
 # RFC3339 且必须显式 UTC;先正则限定字面形态,再用 fromisoformat 验日历合法性。
 _RFC3339_UTC_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|\+00:00)$"
@@ -198,7 +202,12 @@ def validate_digest(value: object, field: str) -> str:
 
 
 def validate_job_id(job_id: object) -> str:
-    if type(job_id) is not str or not _SEGMENT_RE.fullmatch(job_id):
+    """job_id 允许点: arXiv 等来源的原生 id 带点(jobs_arxiv_1011.6402_...),
+    不能套用 part_id 那条为生成式 pt_<hex> 写的 _SEGMENT_RE。路径安全由 . 与 .. 的
+    整体拒绝加 _assert_safe_path_segment 的纵深防御承担, 点本身不构成穿越。"""
+    if type(job_id) is not str or len(job_id) > _JOB_ID_MAX:
+        raise ManifestError("job_id: invalid identifier")
+    if not _JOB_ID_RE.fullmatch(job_id):
         raise ManifestError("job_id: invalid identifier")
     return job_id
 
