@@ -28,6 +28,7 @@ class TestEnums:
     def test_job_status_values(self):
         assert set(JobStatus) == {
             JobStatus.PENDING,
+            JobStatus.PENDING_ACTIVATION,
             JobStatus.DOWNLOADING,
             JobStatus.PROCESSING,
             JobStatus.DONE,

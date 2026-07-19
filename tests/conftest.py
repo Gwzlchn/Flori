@@ -11,6 +11,7 @@ from httpx import ASGITransport, AsyncClient
 
 from api.main import create_app
 from shared.config import load_config
+from shared.content_maintenance import LOCK_DIR_ENV
 from shared.redis_client import RedisClient
 from tests.current_schema_db import (
     build_current_schema_template,
@@ -20,6 +21,18 @@ from tests.current_schema_db import (
 # 测试环境视为可信本地:默认放行无 token 鉴权(verify_token fail-closed 的逃生口),
 # 否则所有命中受保护端点、未设 API_TOKEN 的用例都会 503。需测 fail-closed 的用例自行清此项。
 os.environ.setdefault("API_ALLOW_NO_AUTH", "1")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_content_maintenance_locks(tmp_path_factory):
+    """每个pytest worker使用独立锁目录,worker内仍保留真实互斥。"""
+    previous = os.environ.get(LOCK_DIR_ENV)
+    os.environ[LOCK_DIR_ENV] = str(tmp_path_factory.mktemp("maintenance-locks"))
+    yield
+    if previous is None:
+        os.environ.pop(LOCK_DIR_ENV, None)
+    else:
+        os.environ[LOCK_DIR_ENV] = previous
 
 
 # 出网熔断(autouse,全套件)
