@@ -174,7 +174,7 @@ class TestVariables:
         pipelines = load_pipelines(configs_dir / "pipelines.yaml")
         expected = {
             "video": {"08_punctuate": "4", "11_smart": "5"},
-            "document": {"02_parse": "3", "04_translate": "1", "05_smart": "1"},
+            "document": {"02_parse": "4", "04_translate": "1", "05_smart": "1"},
             "audio": {"03_transcript_parse": "3", "04_smart_podcast": "4"},
         }
         for pipeline, versions in expected.items():
