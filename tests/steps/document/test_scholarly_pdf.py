@@ -13,6 +13,7 @@ from shared.document_contract import validate_document, validate_quality
 from steps.document.adapters import parse_pdf_document
 from steps.document.adapters.scholarly_pdf import (
     _caption_text,
+    _EXHIBIT_CAPTION,
     _FIGURE_CAPTION,
     _TABLE_CAPTION,
     _normalize_date,
@@ -948,6 +949,102 @@ def test_prose_table_references_are_not_registered_as_tables(
 def test_visual_caption_labels_accept_common_separators(separator: str) -> None:
     assert _FIGURE_CAPTION.match(f"Figure A1 {separator} Result")
     assert _TABLE_CAPTION.match(f"Table 2 {separator} Result")
+    assert _EXHIBIT_CAPTION.match(f"Exhibit B1 {separator} Result")
+    assert _EXHIBIT_CAPTION.match(f"E XHIBIT B1 {separator} Result")
+
+
+def test_exhibit_uses_layout_semantics_and_merges_full_width_table_panels(
+    monkeypatch: pytest.MonkeyPatch,
+    pdf_job: tuple[Path, dict[str, str], bytes],
+) -> None:
+    job_dir, job, _ = pdf_job
+    page = PageLayout(1, 600, 800, text_items=[
+        LayoutItem("Paper title", [60, 20, 500, 40]),
+        LayoutItem("EXHIBIT 1: Performance by regime", [60, 50, 360, 70]),
+        LayoutItem("Panel A", [60, 120, 140, 135]),
+        LayoutItem("10.4%", [180, 120, 240, 135]),
+        LayoutItem("Panel B", [320, 120, 400, 135]),
+        LayoutItem("11.2%", [440, 120, 500, 135]),
+        LayoutItem("EXHIBIT 2: Long-run returns", [60, 400, 360, 420]),
+        LayoutItem("Note: annual observations.", [60, 660, 300, 675]),
+    ])
+
+    class FakeDetector:
+        model_identity = "sha256:fixture"
+
+        @staticmethod
+        def detect_pdf_page(
+            _source: Path,
+            *,
+            page: int,
+            page_width: float,
+            page_height: float,
+        ) -> list[LayoutDetection]:
+            assert (page, page_width, page_height) == (1, 600, 800)
+            return [
+                LayoutDetection("table_caption", 0.95, (55, 48, 365, 72)),
+                LayoutDetection("table", 0.97, (50, 100, 285, 250)),
+                LayoutDetection("table", 0.96, (315, 100, 550, 250)),
+                # 中性Exhibit以视觉主体为准;低置信caption误类不能把图变成表。
+                LayoutDetection("table_caption", 0.24, (55, 398, 365, 422)),
+                LayoutDetection("figure", 0.98, (60, 450, 540, 650)),
+            ]
+
+    monkeypatch.setattr(
+        DocumentLayoutDetector,
+        "from_env",
+        classmethod(lambda cls: FakeDetector()),
+    )
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_pdf_info",
+        lambda self: {"Pages": "1", "Title": "Paper title"},
+    )
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+    )
+
+    document, quality = parse_pdf_document(job_dir, job)
+
+    assert [item["label"] for item in document["tables"]] == ["Exhibit 1"]
+    assert [item["label"] for item in document["figures"]] == ["Exhibit 2"]
+    assert document["tables"][0]["source_locator"]["pdf"]["bboxes"] == [
+        [48.0, 98.0, 552.0, 252.0],
+    ]
+    assert document["figures"][0]["source_locator"]["pdf"]["bboxes"] == [
+        [58.0, 448.0, 542.0, 652.0],
+    ]
+    assert quality["metrics"]["layout_detector_pages"] == 1
+    assert quality["metrics"]["layout_detector_figure_matches"] == 1
+    assert quality["metrics"]["layout_detector_table_matches"] == 1
+
+
+def test_exhibit_without_layout_semantics_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    pdf_job: tuple[Path, dict[str, str], bytes],
+) -> None:
+    job_dir, job, _ = pdf_job
+    page = PageLayout(1, 600, 800, text_items=[
+        LayoutItem("Paper title", [60, 20, 500, 40]),
+        LayoutItem("EXHIBIT 1: Ambiguous visual", [60, 100, 360, 120]),
+    ])
+    monkeypatch.setattr(
+        DocumentLayoutDetector,
+        "from_env",
+        classmethod(lambda cls: None),
+    )
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_pdf_info",
+        lambda self: {"Pages": "1", "Title": "Paper title"},
+    )
+    monkeypatch.setattr(
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+    )
+
+    document, quality = parse_pdf_document(job_dir, job)
+
+    assert document["figures"] == []
+    assert document["tables"] == []
+    assert "pdf_exhibit_kind_ambiguous" in quality["reasons"]
 
 
 def test_multiline_figure_caption_uses_complete_nearest_image_cluster(

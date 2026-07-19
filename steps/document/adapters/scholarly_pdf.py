@@ -43,6 +43,11 @@ _TABLE_CAPTION = re.compile(
     r"(?=\s*(?:[.:|\u2013\u2014-]|$))",
     re.I,
 )
+_EXHIBIT_CAPTION = re.compile(
+    r"^E\s*X\s*H\s*I\s*B\s*I\s*T\s*([A-Za-z]?\d+(?:[.:-]\d+)*)\b"
+    r"(?=\s*(?:[.:|\u2013\u2014-]|$))",
+    re.I,
+)
 _SECTION_HEADING = re.compile(
     r"^(?:(?:\d+(?:\.\d+)*\.?)|(?:[A-Z]\.(?:\d+(?:\.\d+)*\.?)))\s+\S",
 )
@@ -947,6 +952,7 @@ class ScholarlyPdfAdapter:
     def _build_content(self, pages: list[PageLayout], *, allow_visuals: bool) -> None:
         figure_winners = self._visual_caption_winners(pages, _FIGURE_CAPTION)
         table_winners = self._visual_caption_winners(pages, _TABLE_CAPTION)
+        exhibit_winners = self._visual_caption_winners(pages, _EXHIBIT_CAPTION)
         first_text = True
         for page in pages:
             consumed: set[int] = set()
@@ -958,6 +964,9 @@ class ScholarlyPdfAdapter:
                 )
                 table_match = self._visual_caption_match(
                     page, item_index, _TABLE_CAPTION,
+                )
+                exhibit_match = self._visual_caption_match(
+                    page, item_index, _EXHIBIT_CAPTION,
                 )
                 if allow_visuals and figure_match and (page.number, item_index) in figure_winners:
                     caption_items = self._figure_caption_items(page, item_index)
@@ -979,6 +988,27 @@ class ScholarlyPdfAdapter:
                         )
                     )
                     continue
+                if allow_visuals and exhibit_match and (page.number, item_index) in exhibit_winners:
+                    caption_items = self._figure_caption_items(page, item_index)
+                    caption_values = [value for _index, value in caption_items]
+                    exhibit_kind = self._exhibit_visual_kind(page, caption_values)
+                    if exhibit_kind == "figure":
+                        consumed.update(index for index, _item in caption_items[1:])
+                        self._add_pdf_figure(
+                            page, caption_values, exhibit_match.group(1),
+                            label_prefix="Exhibit", full_width=True,
+                        )
+                        continue
+                    if exhibit_kind == "table":
+                        consumed.update(index for index, _item in caption_items[1:])
+                        consumed.update(self._add_pdf_table(
+                            page, caption_values, exhibit_match.group(1),
+                            {index for index, _value in caption_items},
+                            label_prefix="Exhibit", full_width=True,
+                        ))
+                        continue
+                    if "pdf_exhibit_kind_ambiguous" not in self.reasons:
+                        self.reasons.append("pdf_exhibit_kind_ambiguous")
                 kind = "title" if first_text and page.number == 1 else "paragraph"
                 first_text = False
                 block_id = self._add_block(
@@ -996,8 +1026,10 @@ class ScholarlyPdfAdapter:
         pattern: re.Pattern[str],
     ) -> set[tuple[int, int]]:
         """同一编号只保留信息最完整的caption,裸编号或正文引用不能重复占位."""
-        caption_kind = (
-            "figure_caption" if pattern is _FIGURE_CAPTION else "table_caption"
+        caption_kinds = (
+            {"figure_caption"} if pattern is _FIGURE_CAPTION
+            else {"table_caption"} if pattern is _TABLE_CAPTION
+            else {"figure_caption", "table_caption"}
         )
         candidates: dict[
             str, list[tuple[int, float, int, int, int, int, int, int, int]]
@@ -1018,7 +1050,7 @@ class ScholarlyPdfAdapter:
                 detector_confidence = max((
                     detection.confidence
                     for detection in self._page_layout_detections(page)
-                    if detection.kind == caption_kind
+                    if detection.kind in caption_kinds
                     and self._intersection_area(
                         caption_bbox, list(detection.bbox),
                     ) >= min(
@@ -1040,7 +1072,7 @@ class ScholarlyPdfAdapter:
                 fragmented_standalone = int(
                     match.end() > len(item.text) and not suffix
                 )
-                full_word = int(item.text.casefold().startswith("figure"))
+                full_word = int(item.text.casefold().startswith(("figure", "exhibit")))
                 candidates.setdefault(match.group(1).casefold(), []).append(
                     (
                         int(detector_confidence > 0), detector_confidence,
@@ -1063,6 +1095,64 @@ class ScholarlyPdfAdapter:
                 ),
             )]
         }
+
+    def _exhibit_visual_kind(
+        self,
+        page: PageLayout,
+        caption_items: list[LayoutItem],
+    ) -> str | None:
+        """EXHIBIT是中性标签;只用布局模型的caption或邻近视觉类别决定图表语义。"""
+        caption_bbox = _bbox_union([item.bbox for item in caption_items])
+        caption_area = max(
+            1.0,
+            (caption_bbox[2] - caption_bbox[0])
+            * (caption_bbox[3] - caption_bbox[1]),
+        )
+        scores = {"figure": 0.0, "table": 0.0}
+        detections = self._page_layout_detections(page)
+        caption_center = (caption_bbox[0] + caption_bbox[2]) / 2
+        nearby: list[tuple[float, float, str]] = []
+        for detection in detections:
+            if detection.kind not in {"figure", "table"}:
+                continue
+            bbox = list(detection.bbox)
+            if bbox[1] >= caption_bbox[3] - 3:
+                distance = max(0.0, bbox[1] - caption_bbox[3])
+            elif bbox[3] <= caption_bbox[1] + 3:
+                distance = max(0.0, caption_bbox[1] - bbox[3]) + page.height * 0.05
+            else:
+                continue
+            if distance > page.height * 0.25:
+                continue
+            center = (bbox[0] + bbox[2]) / 2
+            score = (
+                distance / max(page.height, 1.0)
+                + abs(center - caption_center) / max(page.width, 1.0) * 0.02
+            )
+            nearby.append((score, -detection.confidence, detection.kind))
+        if nearby:
+            return min(nearby)[2]
+
+        for detection in detections:
+            if detection.kind not in {"figure_caption", "table_caption"}:
+                continue
+            detection_bbox = list(detection.bbox)
+            detection_area = max(
+                1.0,
+                (detection_bbox[2] - detection_bbox[0])
+                * (detection_bbox[3] - detection_bbox[1]),
+            )
+            if self._intersection_area(caption_bbox, detection_bbox) < min(
+                caption_area, detection_area,
+            ) * 0.2:
+                continue
+            kind = "figure" if detection.kind == "figure_caption" else "table"
+            scores[kind] = max(scores[kind], detection.confidence)
+        if max(scores.values()) > 0:
+            winner = max(scores, key=scores.get)
+            loser = "table" if winner == "figure" else "figure"
+            return winner if scores[winner] - scores[loser] >= 0.05 else None
+        return None
 
     @staticmethod
     def _visual_caption_match(
@@ -1173,6 +1263,9 @@ class ScholarlyPdfAdapter:
                 or ScholarlyPdfAdapter._visual_caption_match(
                     page, index, _TABLE_CAPTION,
                 )
+                or ScholarlyPdfAdapter._visual_caption_match(
+                    page, index, _EXHIBIT_CAPTION,
+                )
             ):
                 break
             previous_line = [previous]
@@ -1271,6 +1364,8 @@ class ScholarlyPdfAdapter:
         page: PageLayout,
         caption: LayoutItem,
         kind: str,
+        *,
+        full_width: bool = False,
     ) -> list[float]:
         """用caption给模型候选分配语义;低关联框不得覆盖确定性回退。"""
         if kind not in {"figure", "table"}:
@@ -1278,7 +1373,10 @@ class ScholarlyPdfAdapter:
         detections = self._page_layout_detections(page)
         if not detections:
             return []
-        if kind == "figure":
+        if full_width:
+            column_left, column_right = page.width * 0.04, page.width * 0.96
+            preferred_direction = "below"
+        elif kind == "figure":
             column_left, column_right = self._figure_column(page, caption)
             preferred_direction = "above"
         else:
@@ -1329,6 +1427,26 @@ class ScholarlyPdfAdapter:
             return []
         _score, _confidence, index, direction, bbox = min(ranked)
         claimed.add((kind, index))
+        if full_width:
+            merged = [bbox]
+            for candidate_index, detection in enumerate(detections):
+                if (
+                    detection.kind != kind
+                    or candidate_index == index
+                    or (kind, candidate_index) in claimed
+                ):
+                    continue
+                candidate = list(detection.bbox)
+                vertical_overlap = min(bbox[3], candidate[3]) - max(bbox[1], candidate[1])
+                shorter_height = min(bbox[3] - bbox[1], candidate[3] - candidate[1])
+                horizontal_gap = max(0.0, max(bbox[0], candidate[0]) - min(bbox[2], candidate[2]))
+                if (
+                    vertical_overlap >= shorter_height * 0.5
+                    and horizontal_gap <= page.width * 0.08
+                ):
+                    merged.append(candidate)
+                    claimed.add((kind, candidate_index))
+            bbox = _bbox_union(merged)
         padding = 2.0
         region = [
             max(0.0, bbox[0] - padding),
@@ -1504,6 +1622,7 @@ class ScholarlyPdfAdapter:
                 re.match(r"^(?:Notes?|Source)\s*[:.]", item.text.strip(), re.I)
                 or _FIGURE_CAPTION.match(item.text)
                 or _TABLE_CAPTION.match(item.text)
+                or _EXHIBIT_CAPTION.match(item.text)
             )
 
         visual_boundaries: list[list[float]] = []
@@ -1515,6 +1634,11 @@ class ScholarlyPdfAdapter:
                 ]))
             elif _TABLE_CAPTION.match(item.text):
                 visual_boundaries.append(item.bbox)
+            elif _EXHIBIT_CAPTION.match(item.text):
+                visual_boundaries.append(_bbox_union([
+                    value.bbox
+                    for _source, value in cls._figure_caption_items(page, index)
+                ]))
             elif re.match(r"^(?:Notes?|Source)\s*[:.]", item.text.strip(), re.I):
                 visual_boundaries.append(item.bbox)
 
@@ -1718,6 +1842,9 @@ class ScholarlyPdfAdapter:
         page: PageLayout,
         caption_items: list[LayoutItem],
         label_id: str,
+        *,
+        label_prefix: str = "Figure",
+        full_width: bool = False,
     ) -> None:
         caption = LayoutItem(
             _caption_text(caption_items),
@@ -1732,10 +1859,12 @@ class ScholarlyPdfAdapter:
                 default=None,
             ),
         )
-        label = f"Figure {label_id}"
+        label = f"{label_prefix} {label_id}"
         figure_id = make_id("fig", self.fingerprint, page.number, label, caption.bbox)
         components = self._figure_image_cluster(page, caption)
-        detected_region = self._detected_visual_region(page, caption, "figure")
+        detected_region = self._detected_visual_region(
+            page, caption, "figure", full_width=full_width,
+        )
         overview = detected_region or _bbox_union(components)
         if detected_region:
             self._layout_detector_figure_matches += 1
@@ -1768,6 +1897,11 @@ class ScholarlyPdfAdapter:
                     ]))
                 elif _TABLE_CAPTION.match(item.text):
                     visual_boundaries.append(item.bbox)
+                elif _EXHIBIT_CAPTION.match(item.text):
+                    visual_boundaries.append(_bbox_union([
+                        value.bbox
+                        for _source, value in self._figure_caption_items(page, index)
+                    ]))
                 elif re.match(r"^(?:Notes?|Source)\s*[:.]", item.text.strip(), re.I):
                     visual_boundaries.append(item.bbox)
             height = overview[3] - overview[1]
@@ -2102,7 +2236,9 @@ class ScholarlyPdfAdapter:
                     or (not selected and gap > 18)
                     or self._row_is_section(row)
                     or any(
-                    _FIGURE_CAPTION.match(item.text) or _TABLE_CAPTION.match(item.text)
+                    _FIGURE_CAPTION.match(item.text)
+                    or _TABLE_CAPTION.match(item.text)
+                    or _EXHIBIT_CAPTION.match(item.text)
                     for _index, item in row
                     )
                 ):
@@ -2252,6 +2388,7 @@ class ScholarlyPdfAdapter:
                 and (
                     _FIGURE_CAPTION.match(item.text)
                     or _TABLE_CAPTION.match(item.text)
+                    or _EXHIBIT_CAPTION.match(item.text)
                     or self._row_is_section([(index, item)])
                 )
                 for index, item in enumerate(page.text_items)
@@ -2280,6 +2417,7 @@ class ScholarlyPdfAdapter:
                     and (
                         _FIGURE_CAPTION.match(item.text)
                         or _TABLE_CAPTION.match(item.text)
+                        or _EXHIBIT_CAPTION.match(item.text)
                     )
                     for index, item in enumerate(page.text_items)
                 ):
@@ -2367,6 +2505,9 @@ class ScholarlyPdfAdapter:
         caption_items: list[LayoutItem],
         label_id: str,
         caption_indexes: set[int],
+        *,
+        label_prefix: str = "Table",
+        full_width: bool = False,
     ) -> set[int]:
         caption = LayoutItem(
             _caption_text(caption_items),
@@ -2381,9 +2522,11 @@ class ScholarlyPdfAdapter:
                 default=None,
             ),
         )
-        label = f"Table {label_id}"
+        label = f"{label_prefix} {label_id}"
         table_id = make_id("tbl", self.fingerprint, page.number, label, caption.bbox)
-        detected_region = self._detected_visual_region(page, caption, "table")
+        detected_region = self._detected_visual_region(
+            page, caption, "table", full_width=full_width,
+        )
         if detected_region:
             crop = detected_region
             region_items = self._items_in_region(page, crop, caption_indexes)
@@ -2415,6 +2558,7 @@ class ScholarlyPdfAdapter:
             (index, item) for index, item in region_items
             if not _FIGURE_CAPTION.match(item.text)
             and not _TABLE_CAPTION.match(item.text)
+            and not _EXHIBIT_CAPTION.match(item.text)
         ]
         rows = self._layout_rows(cell_candidates)
         structured_rows = [
