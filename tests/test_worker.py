@@ -92,6 +92,28 @@ def worker(redis, db, config, storage):
     return w
 
 
+@pytest.mark.asyncio
+async def test_gateway_worker_registration_does_not_read_local_barrier(
+    redis, db, config, storage, monkeypatch,
+):
+    def forbidden_barrier(_data_dir):
+        raise AssertionError("gateway worker must use the API maintenance gate")
+
+    monkeypatch.setattr("worker.worker.barrier_phase", forbidden_barrier)
+    gateway_worker = Worker(
+        transport=RedisTransport(redis, db),
+        config=config,
+        storage=storage,
+        worker_type="cpu",
+        pools=["cpu"],
+        tags=set(),
+        reject_tags=set(),
+        local_barrier=False,
+    )
+
+    await gateway_worker.register()
+
+
 def make_job(pipeline="test", job_id="j_test_001"):
     return Job(id=job_id, content_type="video", pipeline=pipeline, domain="general")
 

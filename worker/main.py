@@ -79,6 +79,7 @@ async def _initialize_runtime(args, config, gateway_url: str | None, redis_url: 
         transport=transport, config=config, storage=storage,
         worker_type=worker_type, pools=pools,
         tags=tags, reject_tags=reject_tags, concurrency=concurrency,
+        local_barrier=gateway_url is None,
     )
     return transport, db, redis, worker
 

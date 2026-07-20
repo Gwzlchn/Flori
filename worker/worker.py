@@ -266,6 +266,7 @@ class Worker:
         tags: set[str],
         reject_tags: set[str],
         concurrency: int = 1,
+        local_barrier: bool = True,
     ):
         self.transport = transport
         self.config = config
@@ -284,6 +285,9 @@ class Worker:
         # 本机并发度:同时在跑几个 step.异构机器据此自报容量(强机调大,弱机=1).
         # 全局每池槽位(pools.yaml limit)仍是系统级天花板,本数只决定单 worker 的并行上限.
         self.concurrency = max(1, concurrency)
+        # Gateway 的认领请求由 API 屏障统一拒绝。远程 worker 没有共享 /data,
+        # 读取本地屏障既无权威性,也会把只读或无挂载节点卡死在启动阶段。
+        self._local_barrier = local_barrier
         self._shutdown = False
         # Gateway worker 的长期 token 被拒时不能自愈复活;跨 slot 用锁压成一条 fatal 日志。
         self._auth_lock = asyncio.Lock()
@@ -292,6 +296,12 @@ class Worker:
         self._cfg_applied_rev = 0
         self.source_library = SourceLibrary.from_env()
         self.runner = create_step_runner(self.worker_id)
+
+    def _snapshotting(self) -> bool:
+        return (
+            self._local_barrier
+            and barrier_phase(self.config.data_dir) == PHASE_SNAPSHOTTING
+        )
 
     # 生命周期
 
@@ -349,7 +359,7 @@ class Worker:
         # 网络层失败与 5xx 可退避重试;4xx/auth/contract/config 直接交入口结构化退出。
         retry_sec = float(os.environ.get("REGISTER_RETRY_SEC", "3"))
         while not self._shutdown:
-            if barrier_phase(self.config.data_dir) == PHASE_SNAPSHOTTING:
+            if self._snapshotting():
                 await asyncio.sleep(retry_sec)
                 continue
             try:
@@ -397,7 +407,7 @@ class Worker:
         interval = int((self.config.pools.get("worker_status") or {}).get("heartbeat_interval_sec", 10))
         while not self._shutdown:
             try:
-                if barrier_phase(self.config.data_dir) == PHASE_SNAPSHOTTING:
+                if self._snapshotting():
                     await asyncio.sleep(interval)
                     continue
                 # 本机 live 负载(cpu%/mem%/loadavg,纯 /proc,便宜非阻塞);采集失败=各项 None,不致命.
