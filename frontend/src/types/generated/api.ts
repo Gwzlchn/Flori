@@ -1121,6 +1121,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/recovery/exact-dr": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start Exact Dr
+         * @description 拒绝新写入并排空 Worker 后创建、校验完整 exact DR 三件套。
+         */
+        post: operations["start_exact_dr_api_recovery_exact_dr_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/recovery/restore-plans": {
         parameters: {
             query?: never;
@@ -2166,6 +2186,80 @@ export interface components {
             reliability_state: "verified" | "legacy_unverified" | "unreliable";
             /** Schema Version */
             schema_version: number | null;
+        };
+        /** ExactDrDrainResponse */
+        ExactDrDrainResponse: {
+            /** Holders */
+            holders: number;
+            /** Quiet Samples */
+            quiet_samples: number;
+            /** Running Steps */
+            running_steps: number;
+        };
+        /** ExactDrOperationResponse */
+        ExactDrOperationResponse: {
+            /** Archive Name */
+            archive_name: string;
+            /** Archive Sha256 */
+            archive_sha256: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            drain: components["schemas"]["ExactDrDrainResponse"];
+            /** Error */
+            error: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /**
+             * Format
+             * @constant
+             */
+            format: "flori-exact-dr-operation/v1";
+            /** Generation */
+            generation: string;
+            /** Id */
+            id: string;
+            /** Receipt Name */
+            receipt_name: string;
+            /** Sidecar Name */
+            sidecar_name: string;
+            /** Size Bytes */
+            size_bytes: number | null;
+            /** Started At */
+            started_at: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "draining" | "snapshotting" | "verifying" | "success" | "failed" | "interrupted";
+        };
+        /** ExactDrStartRequest */
+        ExactDrStartRequest: {
+            /** Confirmation */
+            confirmation: string;
+        };
+        /** ExactDrStartedResponse */
+        ExactDrStartedResponse: {
+            operation: components["schemas"]["ExactDrOperationResponse"];
+        };
+        /** ExactDrStatusResponse */
+        ExactDrStatusResponse: {
+            /** Configured */
+            configured: boolean;
+            /** Confirmation */
+            confirmation: string;
+            /** Drain Timeout Sec */
+            drain_timeout_sec: number;
+            operation: components["schemas"]["ExactDrOperationResponse"] | null;
+            /** Output Path */
+            output_path: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "idle" | "draining" | "snapshotting" | "verifying" | "success" | "failed" | "interrupted";
         };
         /** FullStatusResponse */
         FullStatusResponse: {
@@ -3302,6 +3396,7 @@ export interface components {
             deployment_id_configured: boolean;
             /** Error */
             error: string | null;
+            exact_dr: components["schemas"]["ExactDrStatusResponse"];
             /** Host Repository Env */
             host_repository_env: string;
             latest: components["schemas"]["RecoverySnapshotResponse"] | null;
@@ -11741,6 +11836,129 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RecoveryBackupStartedResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Requested Range Not Satisfiable */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Bad Gateway */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    start_exact_dr_api_recovery_exact_dr_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExactDrStartRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExactDrStartedResponse"];
                 };
             };
             /** @description Bad Request */

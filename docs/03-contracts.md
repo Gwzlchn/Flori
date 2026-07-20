@@ -2434,7 +2434,7 @@ Response `200`：`steps` 为三条顶层 pipeline 的全部 AI 步（`pool=='ai'
 
 ### 1.16 前端 selected OpenAPI wire
 
-前端稳定 JSON 契约由 `frontend/openapi/selected-paths.json` 显式选择，`scripts/generate-frontend-wire.sh` 生成确定性的 `frontend/openapi/openapi.json` 和 `frontend/src/types/generated/api.ts`。当前清单覆盖 sources、jobs/notes、status/system、workers、study、review/evidence、locator/concept、search/ask、AI tasks、prompts 和 recovery，共 88 个 HTTP operation。新增 operation 必须显式进入清单，不按 path 前缀自动扩张。
+前端稳定 JSON 契约由 `frontend/openapi/selected-paths.json` 显式选择，`scripts/generate-frontend-wire.sh` 生成确定性的 `frontend/openapi/openapi.json` 和 `frontend/src/types/generated/api.ts`。当前清单覆盖 sources、jobs/notes、status/system、workers、study、review/evidence、locator/concept、search/ask、AI tasks、prompts 和 recovery，共 89 个 HTTP operation。新增 operation 必须显式进入清单，不按 path 前缀自动扩张。
 
 所选 operation 的每个 JSON 2xx 响应必须声明精确 response model；声明的错误响应统一为 `ErrorResponse {error,message}`。`GET /api/health/ready` 的 503 是 readiness 阻断投影而非错误信封，显式复用 `ReadinessResponse`。WebSocket、纯文本、二进制、Range 响应，以及 `meta/extra` 和审计诊断原始字段继续保留手写边界，不进入自动生成类型。
 
@@ -3721,7 +3721,7 @@ allowlist 内**,出现即拒:状态只有一份,由导入后的投影产生。
 
 ### 8.7 系统设置备份与还原 API
 
-三个端点都使用业务 API 的 Bearer 鉴权。服务端固定读取
+四个端点都使用业务 API 的 Bearer 鉴权。服务端固定读取
 `FLORI_CONTENT_REPOSITORY`(容器默认 `/content-repo`)与当前 `DATA_DIR`;请求体不接受
 宿主路径、目标数据库、仓库 ref 或 shell 片段。
 
@@ -3735,6 +3735,12 @@ allowlist 内**,出现即拒:状态只有一份,由导入后的投影产生。
 `stats` 来自对应成功 receipt,只用于展示。API 重启后仍为 `queued/running` 且不再属于
 当前进程的 operation 在响应中映射为 `interrupted`,不得继续显示假运行态。仓库写锁只
 返回 `owner/acquired_at`,不暴露 token、PID 或主机名。
+
+响应中的 `exact_dr` 是唯一的在线灾备操作状态,包含 `configured/output_path/state/operation/
+confirmation/drain_timeout_sec`。`operation.status` 只允许 `draining | snapshotting | verifying |
+success | failed | interrupted`;成功记录只返回三件套文件名、归档 SHA-256 和大小,不返回宿主路径,
+也不通过浏览器传输归档。API 重启会把未完成操作标为 `interrupted`,并且只在控制记录与屏障 owner
+完全一致时自动释放陈旧屏障;未知或损坏屏障 fail-closed。
 
 #### POST /api/recovery/backups
 
@@ -3752,6 +3758,45 @@ source root 已配置且可读时接受。操作记录写入
 启动前与子进程实际写入前都会扫描目录inode,拒绝repository/work root通过
 bind mount物理别名到`DATA_DIR`/jobs/prompts或source root。该全树检查不在设置页的
 2秒状态轮询中执行,避免对视频产物树反复遍历。
+
+#### POST /api/recovery/exact-dr
+
+请求体只接受精确风险确认:
+
+```json
+{"confirmation":"创建完整灾备"}
+```
+
+返回 `202 {"operation": ...}`。同一时间只能有一个 portable 或 exact DR 操作。服务端先持久化
+operation owner intent,再发布 `/data/exact-dr-control/barrier.json` 的 `draining` 屏障;因此硬重启落在
+任一边界时都能按 owner 回收,不会产生无操作记录的未知屏障。此后只放行 `OPTIONS`、`GET|HEAD /api/recovery`
+和在途 Worker 的完成、失败、心跳上报,其它请求立即返回 `503 exact_dr_maintenance`。部分 GET 会租约、
+轮询或探测写入状态,因此不按 HTTP 方法猜测只读。portable 备份即使在屏障发布前通过中间件,也会在
+共享启动锁内重新检查屏障并拒绝。所有 pool/resource holder 和 DB running step 连续两次为空后,屏障
+单向进入 `snapshotting`:API 等待已进入写请求完成并暂停自身后台写任务;Worker 停止全部后续状态写入;
+Scheduler 取消并等待核心任务、辅助任务和 executor 线程完成,关闭 DB/Redis 后发布 owner-bound 确认。
+
+复制前 API 通过逐组件 `O_NOFOLLOW` 打开 SQLite 主库并持有 `BEGIN IMMEDIATE` 写栅栏,把同一文件
+描述符及其 `dev/ino` 直接继承给快照子进程;子进程不得按路径二次打开另一份数据库。Redis 完成
+`SAVE + BGREWRITEAOF`,确认
+Redis 7 AOF manifest、活动 base/increment 文件均已落盘后执行 `CLIENT PAUSE WRITE`。这两个跨进程
+栅栏覆盖 API、Worker、Scheduler、MCP 和运维旁路写入,直到归档校验结束才释放。API 进程重启会先
+执行 `CLIENT UNPAUSE`,再清理失败操作和归属自己的陈旧屏障,避免 Redis 永久停写。
+两个栅栏都建立后还会再次读取 Redis holders 与 DB running steps;发现晚到 claim 即拒绝本代。
+
+API 直接调用镜像内 `dr_snapshot.py create` 与 `validate`,不使用 Docker socket,也不依赖独立
+`dr-operator`。成功才发布同 generation 的 `.tar.gz`、`.tar.gz.sha256`、result `.json` 三件套;
+任一源树在复制窗口变化、排空超时、Scheduler 未确认、摘要/成员/SQLite/迁移链校验失败时整个操作
+失败。create receipt 与 validate result 必须逐项绑定 operation、generation、deployment、归档路径、
+sidecar、最终 SHA-256、完整 assets 和规定 capture mode;validate 后还会重算归档摘要,拒绝校验后替换。
+materialized Redis 资产必须在 `appendonlydir` 包含且只包含一组同序号的 `.base.rdb + .incr.aof`:
+base 校验 `REDIS` 头,increment 校验完整 RESP command 边界。RDB-only 或垃圾 base 源不能冒充
+生产 `appendonly yes` 可恢复备份;validate/restore 会重新执行同一语义校验,不能只靠文件摘要通过。
+archive、sidecar 与最终 receipt 都用原子 no-replace 发布。create 先把 receipt 写进不含归档的受控隐藏
+目录;只有栅栏和后台写入安全恢复后,才按已校验 receipt 内容摘要发布根目录最终 JSON。该 JSON 是恢复
+授权标记,显式传入隐藏 pending 路径也会因同目录没有 archive 而拒绝。`exact-dr-control` 与
+`recovery-control` 固定从归档排除,屏障不进入 Redis 快照。成功、普通失败或取消会清理未完成三件套
+并释放自己的屏障;如果残留清理或写栅栏释放失败,操作保持失败维护态并要求人工处理,不得 fail-open。
 
 #### POST /api/recovery/restore-plans
 

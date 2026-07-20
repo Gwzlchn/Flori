@@ -36,6 +36,10 @@ function recoveryStatus(over: Record<string, any> = {}) {
     host_repository_env: 'FLORI_CONTENT_REPOSITORY_DIR', write_lock: null,
     latest, snapshots: [latest], media_vendoring_available: true,
     deployment_id_configured: true, online_restore_supported: false,
+    exact_dr: {
+      configured: true, output_path: '/exact-dr', state: 'idle', operation: null,
+      confirmation: '创建完整灾备', drain_timeout_sec: 3600,
+    },
     operations: [], error: null, ...over,
   }
 }
@@ -144,5 +148,48 @@ describe('RecoverySettingsView', () => {
     expect(wrapper.text()).toContain('不要自动破锁')
     const button = wrapper.findAll('button').find(item => item.text().includes('创建增量备份'))!
     expect(button.attributes('disabled')).toBeDefined()
+  })
+
+  it('风险确认后排空并创建exact DR且展示三件套', async () => {
+    api.get.mockResolvedValue(recoveryStatus())
+    api.post.mockResolvedValue({ operation: { id: 'exact-dr-1' } })
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.text()).toContain('整机灾备 exact DR')
+    expect(wrapper.text()).toContain('浏览器不传输大归档')
+    const confirm = wrapper.find('input[placeholder="输入:创建完整灾备"]')
+    const button = wrapper.findAll('button').find(item => item.text().includes('排空并创建 exact DR'))!
+    expect(button.attributes('disabled')).toBeDefined()
+    await confirm.setValue('创建完整灾备')
+    expect(button.attributes('disabled')).toBeUndefined()
+    await button.trigger('click')
+    await flushPromises()
+    expect(api.post).toHaveBeenCalledWith('/api/recovery/exact-dr', {
+      confirmation: '创建完整灾备',
+    })
+    expect(toast).toHaveBeenCalledWith('已停止新写入,正在排空 Worker', 'success')
+    wrapper.unmount()
+
+    api.get.mockResolvedValue(recoveryStatus({
+      exact_dr: {
+        configured: true, output_path: '/exact-dr', state: 'success',
+        confirmation: '创建完整灾备', drain_timeout_sec: 3600,
+        operation: {
+          id: 'exact-dr-success', status: 'success', created_at: '2026-07-20T00:00:00Z',
+          finished_at: '2026-07-20T01:00:00Z', generation: 'g1',
+          archive_name: 'flori-backup-g1.tar.gz',
+          sidecar_name: 'flori-backup-g1.tar.gz.sha256',
+          receipt_name: 'flori-backup-g1.json', archive_sha256: 'a'.repeat(64),
+          size_bytes: 1024, drain: { holders: 0, running_steps: 0, quiet_samples: 2 },
+          error: null,
+        },
+      },
+    }))
+    const completed = mountView()
+    await flushPromises()
+    const trio = completed.find('[data-test="exact-dr-trio"]')
+    expect(trio.text()).toContain('flori-backup-g1.tar.gz')
+    expect(trio.text()).toContain('flori-backup-g1.tar.gz.sha256')
+    expect(trio.text()).toContain('flori-backup-g1.json')
   })
 })

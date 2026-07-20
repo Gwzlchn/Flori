@@ -1843,6 +1843,49 @@ class TestDelayedTaskTracking:
         assert len(scheduler._delayed_tasks) == 0
 
     @pytest.mark.asyncio
+    async def test_exact_dr_drain_cancels_and_joins_auxiliary_writer(
+        self, scheduler,
+    ):
+        entered = asyncio.Event()
+
+        async def writer():
+            entered.set()
+            await asyncio.sleep(900)
+
+        writer_task = asyncio.create_task(writer())
+        scheduler._digest_harvest_tasks.add(writer_task)
+        await entered.wait()
+        shutdown_task = asyncio.create_task(scheduler.shutdown(drain=True))
+        await shutdown_task
+        assert writer_task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_exact_dr_drain_waits_for_auxiliary_cancel_cleanup(
+        self, scheduler,
+    ):
+        cleanup_started = asyncio.Event()
+        cleanup_release = asyncio.Event()
+
+        async def writer():
+            try:
+                await asyncio.sleep(900)
+            except asyncio.CancelledError:
+                cleanup_started.set()
+                await cleanup_release.wait()
+                raise
+
+        writer_task = asyncio.create_task(writer())
+        scheduler._digest_harvest_tasks.add(writer_task)
+        await asyncio.sleep(0)
+        shutdown_task = asyncio.create_task(scheduler.shutdown(drain=True))
+        await cleanup_started.wait()
+        assert shutdown_task.done() is False
+
+        cleanup_release.set()
+        await shutdown_task
+        assert writer_task.cancelled()
+
+    @pytest.mark.asyncio
     async def test_cancel_is_clean_no_enqueue(self, scheduler, redis, db):
         # 真实 _delayed_enqueue:delay 未到就取消 → enqueue 不发生,A 不被改回 ready
         job = make_job()

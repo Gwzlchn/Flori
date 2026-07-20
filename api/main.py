@@ -7,6 +7,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import FastAPI
 
@@ -33,6 +34,8 @@ from shared.db import Database
 from shared.logging_setup import setup_logging
 from shared.redis_client import RedisClient
 from shared.storage import create_storage
+from shared.exact_dr_maintenance import read_barrier
+from api.exact_dr import ExactDrError, ExactDrMutationGate
 from api.pricing_store import PricingStore
 from api.minio_capacity_store import MinioCapacityStore
 
@@ -135,17 +138,43 @@ def create_app(
                 )
 
         # 周期自动同步订阅(默认每 6h;SUBSCRIPTION_SYNC_HOURS=0 关闭)。
-        sync_task = None
-        pricing_task = None
+        mutable_background_tasks: dict[str, asyncio.Task] = {}
         capacity_task = None
-        upload_recovery_task = None
+        background_lock = asyncio.Lock()
+
+        async def pause_exact_dr_background_writers() -> None:
+            async with background_lock:
+                tasks = list(mutable_background_tasks.values())
+                mutable_background_tasks.clear()
+                for task in tasks:
+                    task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
+        async def resume_exact_dr_background_writers() -> None:
+            if not getattr(app.state, "_own_resources", False):
+                return
+            async with background_lock:
+                if mutable_background_tasks:
+                    return
+                mutable_background_tasks.update({
+                    "upload_recovery": asyncio.create_task(
+                        _initialization_recovery_loop(app)
+                    ),
+                    "subscription_sync": asyncio.create_task(_subscription_sync_loop(app)),
+                    "pricing": asyncio.create_task(
+                        app.state.pricing.daily_loop(app.state.storage)
+                    ),
+                })
+
+        app.state.pause_exact_dr_background_writers = pause_exact_dr_background_writers
+        app.state.resume_exact_dr_background_writers = resume_exact_dr_background_writers
+        # API 若在 Redis CLIENT PAUSE WRITE 期间退出,重启必须先解除本代暂停再清理旧代。
+        if await asyncio.to_thread(read_barrier, cfg.data_dir) is not None:
+            await app.state.redis.resume_writes_after_exact_dr()
+        await app.state.exact_dr_gate.recover_stale(Path(cfg.data_dir))
         if getattr(app.state, "_own_resources", False):
-            upload_recovery_task = asyncio.create_task(
-                _initialization_recovery_loop(app)
-            )
-            sync_task = asyncio.create_task(_subscription_sync_loop(app))
-            # LiteLLM 价表:启动从 MinIO 载入 + 每日拉最新(仅生产起;测试/注入态空表→runner 回退)。
-            pricing_task = asyncio.create_task(app.state.pricing.daily_loop(app.state.storage))
+            await resume_exact_dr_background_writers()
             # MinIO 容量:后台每 10min 全量扫一次,内存缓存供 /api/status 读(绝不同步阻塞)。
             if app.state.storage is not None:
                 capacity_task = asyncio.create_task(
@@ -156,6 +185,10 @@ def create_app(
             yield
         finally:
             try:
+                exact_task = getattr(app.state, "exact_dr_task", None)
+                if exact_task is not None and not exact_task.done():
+                    exact_task.cancel()
+                    await asyncio.gather(exact_task, return_exceptions=True)
                 recovery_tasks = list(
                     getattr(app.state, "recovery_tasks", {}).values()
                 )
@@ -163,9 +196,7 @@ def create_app(
                     task.cancel()
                 if recovery_tasks:
                     await asyncio.gather(*recovery_tasks, return_exceptions=True)
-                if upload_recovery_task:
-                    upload_recovery_task.cancel()
-                    await asyncio.gather(upload_recovery_task, return_exceptions=True)
+                await pause_exact_dr_background_writers()
                 wait_for_finalizers = getattr(
                     getattr(app.state, "storage", None), "wait_for_finalizers", None,
                 )
@@ -187,10 +218,6 @@ def create_app(
                         structlog.get_logger(component="upload-recovery").exception(
                             "upload_finalizer_drain_failed",
                         )
-                if sync_task:
-                    sync_task.cancel()
-                if pricing_task:
-                    pricing_task.cancel()
                 if capacity_task:
                     capacity_task.cancel()
                 if getattr(app.state, "_own_resources", False):
@@ -244,6 +271,25 @@ def create_app(
     from urllib.parse import unquote as _unquote
 
     @app.middleware("http")
+    async def _exact_dr_write_barrier(request: _Request, call_next):
+        entered = False
+        try:
+            entered = await app.state.exact_dr_gate.enter_request(
+                request.method,
+                request.url.path,
+            )
+        except ExactDrError as exc:
+            return _JSONResponse(
+                status_code=503,
+                content={"error": "exact_dr_maintenance", "message": str(exc)},
+                headers={"Retry-After": "5"},
+            )
+        try:
+            return await call_next(request)
+        finally:
+            await app.state.exact_dr_gate.leave_request(entered)
+
+    @app.middleware("http")
     async def _reject_null_bytes(request: _Request, call_next):
         if "\x00" in _unquote(request.url.path) or "\x00" in _unquote(request.url.query):
             return _JSONResponse(
@@ -263,6 +309,8 @@ def create_app(
     # MinIO 容量缓存(无条件置,build_full_status 读;loop 仅生产在 lifespan 起,测试/注入态空快照→不填)。
     app.state.minio_cap = MinioCapacityStore()
     app.state.recovery_tasks = {}
+    app.state.exact_dr_task = None
+    app.state.exact_dr_gate = ExactDrMutationGate()
 
     from api.routes import (
         jobs, notes, workers, ws, auth, admin, profiles, runner, bili,

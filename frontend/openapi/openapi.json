@@ -1961,6 +1961,236 @@
         "title": "EvidenceProjectionResponse",
         "type": "object"
       },
+      "ExactDrDrainResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "holders": {
+            "title": "Holders",
+            "type": "integer"
+          },
+          "quiet_samples": {
+            "title": "Quiet Samples",
+            "type": "integer"
+          },
+          "running_steps": {
+            "title": "Running Steps",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "holders",
+          "running_steps",
+          "quiet_samples"
+        ],
+        "title": "ExactDrDrainResponse",
+        "type": "object"
+      },
+      "ExactDrOperationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "archive_name": {
+            "title": "Archive Name",
+            "type": "string"
+          },
+          "archive_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archive Sha256"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "drain": {
+            "$ref": "#/components/schemas/ExactDrDrainResponse"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "format": {
+            "const": "flori-exact-dr-operation/v1",
+            "title": "Format",
+            "type": "string"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "receipt_name": {
+            "title": "Receipt Name",
+            "type": "string"
+          },
+          "sidecar_name": {
+            "title": "Sidecar Name",
+            "type": "string"
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Bytes"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "enum": [
+              "draining",
+              "snapshotting",
+              "verifying",
+              "success",
+              "failed",
+              "interrupted"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "format",
+          "id",
+          "status",
+          "created_at",
+          "started_at",
+          "finished_at",
+          "generation",
+          "archive_name",
+          "sidecar_name",
+          "receipt_name",
+          "archive_sha256",
+          "size_bytes",
+          "drain",
+          "error"
+        ],
+        "title": "ExactDrOperationResponse",
+        "type": "object"
+      },
+      "ExactDrStartRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmation": {
+            "title": "Confirmation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "confirmation"
+        ],
+        "title": "ExactDrStartRequest",
+        "type": "object"
+      },
+      "ExactDrStartedResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "$ref": "#/components/schemas/ExactDrOperationResponse"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "title": "ExactDrStartedResponse",
+        "type": "object"
+      },
+      "ExactDrStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "confirmation": {
+            "title": "Confirmation",
+            "type": "string"
+          },
+          "drain_timeout_sec": {
+            "title": "Drain Timeout Sec",
+            "type": "integer"
+          },
+          "operation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExactDrOperationResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "output_path": {
+            "title": "Output Path",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "idle",
+              "draining",
+              "snapshotting",
+              "verifying",
+              "success",
+              "failed",
+              "interrupted"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "configured",
+          "output_path",
+          "state",
+          "operation",
+          "confirmation",
+          "drain_timeout_sec"
+        ],
+        "title": "ExactDrStatusResponse",
+        "type": "object"
+      },
       "FullStatusResponse": {
         "additionalProperties": false,
         "properties": {
@@ -5256,6 +5486,9 @@
             ],
             "title": "Error"
           },
+          "exact_dr": {
+            "$ref": "#/components/schemas/ExactDrStatusResponse"
+          },
           "host_repository_env": {
             "title": "Host Repository Env",
             "type": "string"
@@ -5329,6 +5562,7 @@
           "deployment_id_configured",
           "online_restore_supported",
           "operations",
+          "exact_dr",
           "error"
         ],
         "title": "RecoveryStatusResponse",
@@ -17852,6 +18086,153 @@
           }
         ],
         "summary": "Start Recovery Backup",
+        "tags": [
+          "recovery"
+        ]
+      }
+    },
+    "/api/recovery/exact-dr": {
+      "post": {
+        "description": "拒绝新写入并排空 Worker 后创建、校验完整 exact DR 三件套。",
+        "operationId": "start_exact_dr_api_recovery_exact_dr_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExactDrStartRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExactDrStartedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "416": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested Range Not Satisfiable"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Start Exact Dr",
         "tags": [
           "recovery"
         ]

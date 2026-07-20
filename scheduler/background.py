@@ -61,25 +61,38 @@ class BackgroundServices:
         资源上限改动需重启 scheduler 才重推(资源集稳定,极少改)。"""
         await self.owner.redis.set_resource_limits(self.owner.config.resources or {})
 
-    async def shutdown(self) -> None:
+    async def shutdown(self, *, drain: bool = False) -> None:
         logger.info("scheduler_shutdown")
         self.owner._shutdown = True
-        if self.owner._pubsub_task and not self.owner._pubsub_task.done():
-            self.owner._pubsub_task.cancel()
-        if self.owner._stream_task and not self.owner._stream_task.done():
-            self.owner._stream_task.cancel()
-        if self.owner._periodic_task and not self.owner._periodic_task.done():
-            self.owner._periodic_task.cancel()
-        if self.owner._heartbeat_task and not self.owner._heartbeat_task.done():
-            self.owner._heartbeat_task.cancel()
-        pending = [t for t in self.owner._delayed_tasks if not t.done()]
-        pending.extend(
+        core = [
+            task for task in (
+                self.owner._pubsub_task,
+                self.owner._stream_task,
+                self.owner._periodic_task,
+                self.owner._heartbeat_task,
+            )
+            if task is not None and not task.done()
+        ]
+        self.owner._concept_synthesis_pending.clear()
+        for task in core:
+            task.cancel()
+        if core:
+            await asyncio.gather(*core, return_exceptions=True)
+
+        pending = {
+            task for task in self.owner._delayed_tasks
+            if not task.done()
+        }
+        pending.update(
+            task for task in self.owner._digest_harvest_tasks
+            if not task.done()
+        )
+        pending.update(
             task for task in self.owner._concept_synthesis_tasks.values()
             if not task.done()
         )
-        self.owner._concept_synthesis_pending.clear()
-        for t in pending:
-            t.cancel()
+        for task in pending:
+            task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
 

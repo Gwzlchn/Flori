@@ -98,8 +98,8 @@ class Scheduler:
     async def _publish_resource_limits(self) -> None:
         return await self._background._publish_resource_limits()
 
-    async def shutdown(self) -> None:
-        return await self._background.shutdown()
+    async def shutdown(self, *, drain: bool = False) -> None:
+        return await self._background.shutdown(drain=drain)
 
     def _on_delayed_done(self, task: asyncio.Task) -> None:
         return self._background._on_delayed_done(task)

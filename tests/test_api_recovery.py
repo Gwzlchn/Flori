@@ -7,7 +7,7 @@ import hashlib
 
 import pytest
 
-from api import recovery, recovery_worker
+from api import exact_dr, recovery, recovery_worker
 from shared.content_repository import (
     REPOSITORY_FORMAT,
     SNAPSHOT_FORMAT,
@@ -16,6 +16,7 @@ from shared.content_repository import (
 )
 from shared.content_result import ResultFileError
 from shared.step_manifest import canonical_digest
+from shared.exact_dr_maintenance import acquire_barrier, read_barrier
 
 
 def _ready_snapshot(*, portable_ready: bool = True) -> dict:
@@ -84,7 +85,106 @@ async def test_recovery_status_empty_repository(client, test_config, tmp_path, m
     assert body["state"] == "empty"
     assert body["latest"] is None
     assert body["online_restore_supported"] is False
+    assert body["exact_dr"]["state"] == "idle"
     assert (test_config.data_dir / "recovery-control" / "control.json").is_file()
+
+
+@pytest.mark.asyncio
+async def test_exact_dr_endpoint_fail_fast_blocks_new_writes_but_keeps_status(
+    app, client, test_config, tmp_path, monkeypatch,
+):
+    repository_path = tmp_path.parent / f"{tmp_path.name}-portable-exact"
+    repository_path.mkdir()
+    output = tmp_path.parent / f"{tmp_path.name}-exact-output"
+    monkeypatch.setenv(recovery.REPOSITORY_ENV, str(repository_path))
+    monkeypatch.setenv(exact_dr.OUTPUT_ENV, str(output))
+    monkeypatch.setenv("FLORI_DEPLOYMENT_ID", "flori-test")
+    release = asyncio.Event()
+    monkeypatch.setattr("api.routes.recovery.validate_exact_dr_start", lambda: None)
+
+    async def fake_run(fake_app, operation_id):
+        await release.wait()
+        await fake_app.state.exact_dr_gate.finish(
+            test_config.data_dir,
+            operation_id=operation_id,
+        )
+
+    monkeypatch.setattr("api.routes.recovery.run_exact_dr", fake_run)
+    bad = await client.post(
+        "/api/recovery/exact-dr",
+        json={"confirmation": "wrong"},
+    )
+    assert bad.status_code == 409
+
+    started = await client.post(
+        "/api/recovery/exact-dr",
+        json={"confirmation": exact_dr.CONFIRMATION},
+    )
+    assert started.status_code == 202
+    assert started.json()["operation"]["status"] == "draining"
+
+    blocked = await client.post("/api/recovery/backups", json={})
+    assert blocked.status_code == 503
+    assert blocked.json()["error"] == "exact_dr_maintenance"
+    blocked_get = await client.get("/api/bili/login/poll", params={"qrcode_key": "x"})
+    assert blocked_get.status_code == 503
+    status_response = await client.get("/api/recovery")
+    assert status_response.status_code == 200
+    assert status_response.json()["exact_dr"]["state"] == "draining"
+
+    release.set()
+    await app.state.exact_dr_task
+
+
+@pytest.mark.asyncio
+async def test_exact_dr_start_cancellation_releases_owner_barrier(
+    app, client, test_config, monkeypatch,
+):
+    monkeypatch.setattr("api.routes.recovery.validate_exact_dr_start", lambda: None)
+
+    async def acquire_then_cancel(data_dir, *, operation_id, created_at):
+        acquire_barrier(
+            data_dir,
+            operation_id=operation_id,
+            created_at=created_at,
+        )
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(app.state.exact_dr_gate, "begin_draining", acquire_then_cancel)
+
+    with pytest.raises(RuntimeError, match="No response returned"):
+        await client.post(
+            "/api/recovery/exact-dr",
+            json={"confirmation": exact_dr.CONFIRMATION},
+        )
+
+    assert read_barrier(test_config.data_dir) is None
+    assert exact_dr.read_operation(test_config.data_dir)["status"] == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_portable_backup_rechecks_exact_dr_after_entering_start_lock(
+    app, client, test_config, monkeypatch,
+):
+    gate = app.state.exact_dr_gate
+    await gate.begin_draining(
+        test_config.data_dir,
+        operation_id="exact-dr-portable-race",
+        created_at="2026-07-20T00:00:00+00:00",
+    )
+    async def bypass_middleware(*_args):
+        return False
+
+    monkeypatch.setattr(gate, "enter_request", bypass_middleware)
+    try:
+        response = await client.post("/api/recovery/backups", json={})
+        assert response.status_code == 409
+        assert "exact DR" in response.json()["message"]
+    finally:
+        await gate.finish(
+            test_config.data_dir,
+            operation_id="exact-dr-portable-race",
+        )
 
 
 @pytest.mark.asyncio
@@ -536,3 +636,26 @@ async def test_api_shutdown_cancels_recovery_background_tasks(app, tmp_path, mon
 
     assert task.cancelled()
     assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_api_restart_unpauses_redis_before_recovering_stale_exact_dr(
+    app, test_config, tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("FLORI_MAINTENANCE_LOCK_DIR", str(tmp_path / "locks"))
+    output = tmp_path / "exact-output"
+    output.mkdir()
+    monkeypatch.setenv(exact_dr.OUTPUT_ENV, str(output))
+    operation = exact_dr.new_operation(test_config.data_dir)
+    acquire_barrier(
+        test_config.data_dir,
+        operation_id=operation["id"],
+        created_at=operation["created_at"],
+    )
+    app.state.redis.resume_writes_after_exact_dr.reset_mock()
+
+    async with app.router.lifespan_context(app):
+        assert read_barrier(test_config.data_dir) is None
+
+    app.state.redis.resume_writes_after_exact_dr.assert_awaited_once()
+    assert exact_dr.read_operation(test_config.data_dir)["status"] == "interrupted"

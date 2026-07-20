@@ -562,7 +562,7 @@ async def request_job(
     while True:
         claim = await runner_ops.claim_step(
             redis, db, worker_id, allowed, effective_limits,
-            set(req.tags), set(req.reject_tags),
+            set(req.tags), set(req.reject_tags), data_dir=config.data_dir,
         )
         if claim is not None:
             return {"claim": await _enrich_claim(redis, claim)}

@@ -36,7 +36,8 @@ frontend/dist/
 tests/
 docs/
 design/
-scripts/
+scripts/*
+!scripts/dr_snapshot.py
 .github/
 
 # OS / IDE

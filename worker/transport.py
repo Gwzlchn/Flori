@@ -27,6 +27,7 @@ from shared.errors import (
     WorkerContractError,
     WorkerFatalError,
 )
+from shared.exact_dr_maintenance import PHASE_SNAPSHOTTING, barrier_phase
 from shared.models import AIUsage, Worker as WorkerModel
 from shared.redis_client import RedisClient, worker_info_from_model
 from shared.step_output_commit import StaleCommitError
@@ -143,13 +144,22 @@ class WorkerTransport(Protocol):
 class RedisTransport:
     """直连 redis_client + db,逐方法转调。"""
 
-    def __init__(self, redis: RedisClient, db: Database):
+    def __init__(
+        self, redis: RedisClient, db: Database, *, data_dir: Path | None = None,
+    ):
         self._redis = redis
         self._db = db
+        self._data_dir = data_dir
         # 粗粒度上报需要 worker_id,注册/认领时记下,report_*/release 据此回写。
         self._worker_id = ""
         # 直连模式不经网关代理产物,无 per-worker token(满足 Protocol、避免误用时 AttributeError)。
         self.worker_token = ""
+
+    def _snapshotting(self) -> bool:
+        return (
+            self._data_dir is not None
+            and barrier_phase(self._data_dir) == PHASE_SNAPSHOTTING
+        )
 
     # 生命周期 / 心跳
     async def register(self, worker_id, worker_type, pools, tags,
@@ -189,6 +199,8 @@ class RedisTransport:
 
     async def heartbeat(self, worker_id, load=None, applied_cfg_rev=0,
                         concurrency: int | None = None):
+        if self._snapshotting():
+            return None
         presence_existed = await self._redis.heartbeat(worker_id)
         if presence_existed is False:
             existing = await asyncio.to_thread(self._db.get_worker, worker_id)
@@ -222,6 +234,8 @@ class RedisTransport:
 
     async def update_status(self, worker_id, status,
                             current_job="", current_step=""):
+        if self._snapshotting():
+            return
         await self._redis.set_worker_field(worker_id, "status", status)
         await self._redis.set_worker_field(worker_id, "current_job", current_job)
         await self._redis.set_worker_field(worker_id, "current_step", current_step)
@@ -236,8 +250,13 @@ class RedisTransport:
 
     async def request_step(self, worker_id, pools, pool_limits, tags, reject_tags):
         self._worker_id = worker_id
+        if self._data_dir is None:
+            return await runner_ops.claim_step(
+                self._redis, self._db, worker_id, pools, pool_limits, tags, reject_tags,
+            )
         return await runner_ops.claim_step(
             self._redis, self._db, worker_id, pools, pool_limits, tags, reject_tags,
+            data_dir=self._data_dir,
         )
 
     async def report_done(self, claim, duration, started_at, commit_token=None):
@@ -445,7 +464,7 @@ def default_worker_id_file() -> str:
 
 
 def create_transport(
-    redis: RedisClient | None, db: Database | None,
+    redis: RedisClient | None, db: Database | None, *, data_dir: Path | None = None,
 ) -> WorkerTransport:
     """按 env 切换:GATEWAY_URL 有值时使用 GatewayTransport(出站 HTTPS),否则 RedisTransport(直连)。
 
@@ -460,6 +479,6 @@ def create_transport(
             base_url,
             registration_token=os.environ.get("WORKER_REGISTRATION_TOKEN", ""),
             id_file=default_worker_id_file(),
-            inner=RedisTransport(redis, db) if redis is not None else None,
+            inner=RedisTransport(redis, db, data_dir=data_dir) if redis is not None else None,
         )
-    return RedisTransport(redis, db)
+    return RedisTransport(redis, db, data_dir=data_dir)

@@ -55,7 +55,7 @@ async def _initialize_runtime(args, config, gateway_url: str | None, redis_url: 
         db = Database(config.db_path)
         db.init_schema()
 
-    transport = create_transport(redis, db)
+    transport = create_transport(redis, db, data_dir=config.data_dir)
     if gateway_url:
         work_dir = Path(os.environ.get("WORK_DIR", "/tmp/flori-work"))
         storage = GatewayStorage(

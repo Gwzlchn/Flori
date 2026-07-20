@@ -51,6 +51,7 @@ from shared.step_semantic_definition import SemanticDefinitionError
 from shared.storage import StepCommitFenceRejected, StorageBackend
 from shared.sysload import collect_node_load
 from shared.version import FLORI_VERSION
+from shared.exact_dr_maintenance import PHASE_SNAPSHOTTING, barrier_phase
 from worker.step_runner import StepContext, create_step_runner
 from worker.transport import (
     WorkerAuthRejected,
@@ -348,6 +349,9 @@ class Worker:
         # 网络层失败与 5xx 可退避重试;4xx/auth/contract/config 直接交入口结构化退出。
         retry_sec = float(os.environ.get("REGISTER_RETRY_SEC", "3"))
         while not self._shutdown:
+            if barrier_phase(self.config.data_dir) == PHASE_SNAPSHOTTING:
+                await asyncio.sleep(retry_sec)
+                continue
             try:
                 self.worker_id = await self.transport.register(
                     worker_id=self.worker_id, worker_type=self.worker_type,
@@ -393,6 +397,9 @@ class Worker:
         interval = int((self.config.pools.get("worker_status") or {}).get("heartbeat_interval_sec", 10))
         while not self._shutdown:
             try:
+                if barrier_phase(self.config.data_dir) == PHASE_SNAPSHOTTING:
+                    await asyncio.sleep(interval)
+                    continue
                 # 本机 live 负载(cpu%/mem%/loadavg,纯 /proc,便宜非阻塞);采集失败=各项 None,不致命.
                 cfg_payload = await self.transport.heartbeat(
                     self.worker_id, load=collect_node_load(),

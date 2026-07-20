@@ -39,6 +39,28 @@ interface BackupOperation {
   stats: Record<string, any>
   error: string | null
 }
+interface ExactDrOperation {
+  id: string
+  status: 'draining' | 'snapshotting' | 'verifying' | 'success' | 'failed' | 'interrupted'
+  created_at: string
+  finished_at: string | null
+  generation: string
+  archive_name: string
+  sidecar_name: string
+  receipt_name: string
+  archive_sha256: string | null
+  size_bytes: number | null
+  drain: { holders: number; running_steps: number; quiet_samples: number }
+  error: string | null
+}
+interface ExactDrStatus {
+  configured: boolean
+  output_path: string
+  state: 'idle' | ExactDrOperation['status']
+  operation: ExactDrOperation | null
+  confirmation: string
+  drain_timeout_sec: number
+}
 interface RecoveryStatus {
   state: 'empty' | 'ready' | 'incomplete' | 'locked' | 'error'
   repository_path: string
@@ -50,6 +72,7 @@ interface RecoveryStatus {
   deployment_id_configured: boolean
   online_restore_supported: boolean
   operations: BackupOperation[]
+  exact_dr: ExactDrStatus
   error: string | null
 }
 interface RestorePlan {
@@ -79,6 +102,8 @@ const fullRehash = ref(false)
 const selectedDigest = ref('')
 const handoff = ref<RestorePlan | null>(null)
 const confirmText = ref('')
+const exactDrConfirmText = ref('')
+const startingExactDr = ref(false)
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let disposed = false
 
@@ -86,6 +111,15 @@ const hasActiveBackup = computed(() => status.value?.operations.some(
   operation => operation.status === 'queued' || operation.status === 'running',
 ) ?? false)
 const latest = computed(() => status.value?.latest ?? null)
+const exactDrActive = computed(() => ['draining', 'snapshotting', 'verifying'].includes(
+  status.value?.exact_dr.state ?? '',
+))
+const canStartExactDr = computed(() => Boolean(
+  status.value?.exact_dr.configured
+  && !exactDrActive.value
+  && !hasActiveBackup.value
+  && exactDrConfirmText.value === status.value?.exact_dr.confirmation,
+))
 const canPrepareRestore = computed(() => Boolean(
   selectedDigest.value
   && status.value?.deployment_id_configured
@@ -107,10 +141,11 @@ function shortDigest(value: string | null | undefined): string {
 function formatTime(value: string | null | undefined): string {
   return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
 }
-function statusLabel(value: RecoveryStatus['state'] | BackupOperation['status']): string {
+function statusLabel(value: RecoveryStatus['state'] | BackupOperation['status'] | ExactDrStatus['state']): string {
   return ({
     empty: '尚无备份', ready: '可恢复', incomplete: '备份不完整', locked: '仓库被占用', error: '异常',
     queued: '等待中', running: '备份中', success: '成功', failed: '失败', interrupted: '已中断',
+    idle: '尚未创建', draining: '正在排空', snapshotting: '正在快照', verifying: '正在校验',
   } as Record<string, string>)[value] || value
 }
 
@@ -122,7 +157,10 @@ async function load(silent = false) {
     if (disposed) return
     status.value = value
     if (!selectedDigest.value && value.latest) selectedDigest.value = value.latest.digest
-    if (value.operations.some(item => item.status === 'queued' || item.status === 'running')) {
+    if (
+      value.operations.some(item => item.status === 'queued' || item.status === 'running')
+      || ['draining', 'snapshotting', 'verifying'].includes(value.exact_dr.state)
+    ) {
       schedulePoll()
     }
   } catch (e: any) {
@@ -153,6 +191,23 @@ async function startBackup() {
     showToast(e?.message || '备份启动失败', 'error')
   } finally {
     starting.value = false
+  }
+}
+async function startExactDr() {
+  if (!canStartExactDr.value) return
+  startingExactDr.value = true
+  try {
+    await api.post('/api/recovery/exact-dr', {
+      confirmation: exactDrConfirmText.value,
+    })
+    exactDrConfirmText.value = ''
+    showToast('已停止新写入,正在排空 Worker', 'success')
+    await load(true)
+    schedulePoll()
+  } catch (e: any) {
+    showToast(e?.message || 'exact DR 启动失败', 'error')
+  } finally {
+    startingExactDr.value = false
   }
 }
 async function prepareRestore() {
@@ -235,6 +290,40 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
+      <div class="card pad recovery-card exact-dr-card">
+        <div class="card-head">
+          <div><div class="card-h"><DatabaseBackup :size="15" />整机灾备 exact DR</div><p>拒绝新写入,停止 Worker 领取并排空当前步骤后,生成数据库、Redis、MinIO与配置的完整归档。</p></div>
+          <span class="state-pill" :class="`op-${status.exact_dr.state}`">{{ statusLabel(status.exact_dr.state) }}</span>
+        </div>
+        <div class="facts">
+          <div><span>容器输出目录</span><code>{{ status.exact_dr.output_path }}</code></div>
+          <div><span>归档</span><code>{{ status.exact_dr.operation?.archive_name || '—' }}</code></div>
+          <div><span>大小</span><b>{{ formatBytes(status.exact_dr.operation?.size_bytes ?? undefined) }}</b></div>
+          <div><span>完成时间</span><b>{{ formatTime(status.exact_dr.operation?.finished_at) }}</b></div>
+        </div>
+        <div class="notice warn"><ShieldAlert :size="15" />成功后在NAS目录生成同代三件套: <code>.tar.gz</code>、<code>.tar.gz.sha256</code>、结果 <code>.json</code>。浏览器不传输大归档。</div>
+        <div v-if="exactDrActive" class="dr-progress" data-test="exact-dr-progress">
+          <b>{{ statusLabel(status.exact_dr.state) }}</b>
+          <span v-if="status.exact_dr.state === 'draining'">剩余 {{ status.exact_dr.operation?.drain.running_steps ?? 0 }} 个运行步骤 / {{ status.exact_dr.operation?.drain.holders ?? 0 }} 个资源持有者</span>
+          <span v-else-if="status.exact_dr.state === 'snapshotting'">API与Scheduler已停写,正在复制稳定数据源</span>
+          <span v-else>正在重新解包并核对成员、摘要与数据库迁移链</span>
+        </div>
+        <div v-if="status.exact_dr.operation?.status === 'success'" class="trio" data-test="exact-dr-trio">
+          <code>{{ status.exact_dr.operation.archive_name }}</code>
+          <code>{{ status.exact_dr.operation.sidecar_name }}</code>
+          <code>{{ status.exact_dr.operation.receipt_name }}</code>
+          <small>SHA256 {{ shortDigest(status.exact_dr.operation.archive_sha256) }}</small>
+        </div>
+        <div v-if="status.exact_dr.operation?.error" class="notice danger"><ShieldAlert :size="15" />{{ status.exact_dr.operation.error }}</div>
+        <div v-if="!status.exact_dr.configured" class="notice danger"><ShieldAlert :size="15" />先配置稳定的 FLORI_DEPLOYMENT_ID 与独立灾备输出目录。</div>
+        <div class="exact-dr-actions">
+          <label>风险确认<input v-model="exactDrConfirmText" class="input" :placeholder="`输入:${status.exact_dr.confirmation}`" autocomplete="off" /></label>
+          <button class="btn danger-btn" :disabled="startingExactDr || !canStartExactDr" @click="startExactDr">
+            <RefreshCw :size="14" :class="{ spin: startingExactDr || exactDrActive }" />{{ exactDrActive ? statusLabel(status.exact_dr.state) : '排空并创建 exact DR' }}
+          </button>
+        </div>
+      </div>
+
       <div class="card pad recovery-card">
         <div class="card-head"><div><div class="card-h"><RotateCcw :size="15" />清库还原</div><p>在线页面只生成恢复计划。真正还原必须在API、Scheduler、MCP与全部Worker停写后执行。</p></div></div>
         <div class="notice danger"><ShieldAlert :size="15" />portable 不是回滚。执行前必须先创建并校验 exact DR;本页不会直接清空正在使用的数据库。</div>
@@ -279,5 +368,5 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.recovery-page{max-width:980px}.back-link{border:0;background:none;color:var(--ink-600);display:flex;align-items:center;gap:5px;padding:0;margin-bottom:14px;cursor:pointer}.page-title{display:flex;gap:10px;align-items:flex-start;margin-bottom:20px}.page-title h1{font-size:20px;margin:0 0 4px}.page-title p,.card-head p,.video-box p{font-size:13px;color:var(--ink-600);margin:0}.recovery-card{margin-bottom:18px}.card-head{display:flex;justify-content:space-between;gap:18px;margin-bottom:15px}.card-head>div{min-width:0}.state-pill{align-self:flex-start;font-size:12px;padding:4px 9px;border-radius:999px;background:var(--mut-bg);white-space:nowrap}.recovery-state-ready,.op-success{background:#ecfdf3;color:#15803d}.recovery-state-incomplete,.recovery-state-locked,.op-interrupted{background:#fff7ed;color:#c2410c}.recovery-state-error,.op-failed{background:#fef2f2;color:#dc2626}.op-running,.op-queued{background:var(--brand-50);color:var(--brand-700)}.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}.facts>div{background:var(--mut-bg);border-radius:8px;padding:10px;min-width:0}.facts span,.facts b,.facts code{display:block;font-size:12px}.facts span{color:var(--ink-500);margin-bottom:5px}.facts code{overflow:hidden;text-overflow:ellipsis}.notice{display:flex;align-items:flex-start;gap:7px;padding:9px 11px;border-radius:8px;font-size:12px;margin:10px 0;min-width:0;overflow-wrap:anywhere}.notice.danger{background:#fef2f2;color:#b91c1c}.notice.warn{background:#fff7ed;color:#9a3412}.video-box{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:10px;border:1px solid var(--line);border-radius:9px;padding:12px;margin:12px 0}.video-box>span{font-size:12px;color:var(--ink-500)}.options{display:flex;gap:16px;align-items:center;flex-wrap:wrap;font-size:12px}.options label{display:flex;gap:6px;align-items:center}.options small{color:var(--ink-500)}.actions{display:flex;gap:12px;align-items:center;margin-top:14px}.actions button{display:flex;align-items:center;gap:6px}.actions span{font-size:12px;color:var(--ink-500)}.restore-form{display:grid;grid-template-columns:1fr 220px auto;gap:10px;align-items:end;margin-top:14px}.restore-form label{font-size:12px;color:var(--ink-600)}.restore-form .input{display:block;width:100%;margin-top:5px}.handoff{margin-top:16px;border-top:1px solid var(--line);padding-top:14px}.handoff-title{display:flex;align-items:center;flex-wrap:wrap;gap:6px;font-size:13px;font-weight:600}.handoff-title>div{min-width:0;overflow-wrap:anywhere}.handoff-title span{margin-left:auto;color:var(--ink-500);font-weight:400;overflow-wrap:anywhere}.handoff ol{padding-left:22px}.handoff li{margin:12px 0}.handoff li>div{display:flex;justify-content:space-between;align-items:center}.copy-btn{border:0;background:none;color:var(--brand-600);display:flex;gap:4px;align-items:center;cursor:pointer}.handoff pre{white-space:pre-wrap;word-break:break-all;background:#101827;color:#dbeafe;padding:10px;border-radius:7px;font-size:11px}.operation{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line)}.operation:first-of-type{border-top:0}.operation b,.operation small,.operation em{display:block;font-size:12px}.operation small{color:var(--ink-500);margin-top:3px}.operation em{color:#dc2626;margin-top:3px;font-style:normal}.operation>span:last-child{font-size:12px;color:var(--ink-500)}.error-state{display:flex;justify-content:space-between}.muted{color:var(--ink-500);font-size:13px}.spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}@media(max-width:760px){.facts{grid-template-columns:1fr 1fr}.restore-form{grid-template-columns:1fr}.actions{align-items:flex-start;flex-direction:column}.video-box{grid-template-columns:auto 1fr}.video-box>span{grid-column:2}.operation{grid-template-columns:auto 1fr}.operation>span:last-child{display:none}.handoff-title span{width:100%;margin-left:22px}}
+.recovery-page{max-width:980px}.back-link{border:0;background:none;color:var(--ink-600);display:flex;align-items:center;gap:5px;padding:0;margin-bottom:14px;cursor:pointer}.page-title{display:flex;gap:10px;align-items:flex-start;margin-bottom:20px}.page-title h1{font-size:20px;margin:0 0 4px}.page-title p,.card-head p,.video-box p{font-size:13px;color:var(--ink-600);margin:0}.recovery-card{margin-bottom:18px}.card-head{display:flex;justify-content:space-between;gap:18px;margin-bottom:15px}.card-head>div{min-width:0}.state-pill{align-self:flex-start;font-size:12px;padding:4px 9px;border-radius:999px;background:var(--mut-bg);white-space:nowrap}.recovery-state-ready,.op-success{background:#ecfdf3;color:#15803d}.recovery-state-incomplete,.recovery-state-locked,.op-interrupted{background:#fff7ed;color:#c2410c}.recovery-state-error,.op-failed{background:#fef2f2;color:#dc2626}.op-running,.op-queued,.op-draining,.op-snapshotting,.op-verifying{background:var(--brand-50);color:var(--brand-700)}.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}.facts>div{background:var(--mut-bg);border-radius:8px;padding:10px;min-width:0}.facts span,.facts b,.facts code{display:block;font-size:12px}.facts span{color:var(--ink-500);margin-bottom:5px}.facts code{overflow:hidden;text-overflow:ellipsis}.notice{display:flex;align-items:flex-start;gap:7px;padding:9px 11px;border-radius:8px;font-size:12px;margin:10px 0;min-width:0;overflow-wrap:anywhere}.notice.danger{background:#fef2f2;color:#b91c1c}.notice.warn{background:#fff7ed;color:#9a3412}.video-box{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:10px;border:1px solid var(--line);border-radius:9px;padding:12px;margin:12px 0}.video-box>span{font-size:12px;color:var(--ink-500)}.options{display:flex;gap:16px;align-items:center;flex-wrap:wrap;font-size:12px}.options label{display:flex;gap:6px;align-items:center}.options small{color:var(--ink-500)}.actions{display:flex;gap:12px;align-items:center;margin-top:14px}.actions button{display:flex;align-items:center;gap:6px}.actions span{font-size:12px;color:var(--ink-500)}.dr-progress{display:flex;justify-content:space-between;gap:12px;padding:11px 12px;border:1px solid var(--brand-200);border-radius:8px;background:var(--brand-50);font-size:12px}.trio{display:grid;grid-template-columns:1fr;gap:5px;padding:11px 12px;border:1px solid var(--line);border-radius:8px}.trio code{font-size:12px;overflow-wrap:anywhere}.trio small{color:var(--ink-500)}.exact-dr-actions{display:grid;grid-template-columns:minmax(240px,1fr) auto;gap:10px;align-items:end;margin-top:14px}.exact-dr-actions label{font-size:12px;color:var(--ink-600)}.exact-dr-actions .input{display:block;width:100%;margin-top:5px}.danger-btn{display:flex;align-items:center;gap:6px;color:#b91c1c}.restore-form{display:grid;grid-template-columns:1fr 220px auto;gap:10px;align-items:end;margin-top:14px}.restore-form label{font-size:12px;color:var(--ink-600)}.restore-form .input{display:block;width:100%;margin-top:5px}.handoff{margin-top:16px;border-top:1px solid var(--line);padding-top:14px}.handoff-title{display:flex;align-items:center;flex-wrap:wrap;gap:6px;font-size:13px;font-weight:600}.handoff-title>div{min-width:0;overflow-wrap:anywhere}.handoff-title span{margin-left:auto;color:var(--ink-500);font-weight:400;overflow-wrap:anywhere}.handoff ol{padding-left:22px}.handoff li{margin:12px 0}.handoff li>div{display:flex;justify-content:space-between;align-items:center}.copy-btn{border:0;background:none;color:var(--brand-600);display:flex;gap:4px;align-items:center;cursor:pointer}.handoff pre{white-space:pre-wrap;word-break:break-all;background:#101827;color:#dbeafe;padding:10px;border-radius:7px;font-size:11px}.operation{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line)}.operation:first-of-type{border-top:0}.operation b,.operation small,.operation em{display:block;font-size:12px}.operation small{color:var(--ink-500);margin-top:3px}.operation em{color:#dc2626;margin-top:3px;font-style:normal}.operation>span:last-child{font-size:12px;color:var(--ink-500)}.error-state{display:flex;justify-content:space-between}.muted{color:var(--ink-500);font-size:13px}.spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}@media(max-width:760px){.facts{grid-template-columns:1fr 1fr}.restore-form,.exact-dr-actions{grid-template-columns:1fr}.actions{align-items:flex-start;flex-direction:column}.dr-progress{flex-direction:column}.video-box{grid-template-columns:auto 1fr}.video-box>span{grid-column:2}.operation{grid-template-columns:auto 1fr}.operation>span:last-child{display:none}.handoff-title span{width:100%;margin-left:22px}}
 </style>

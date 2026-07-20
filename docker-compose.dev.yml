@@ -13,6 +13,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    command: redis-server --appendonly yes
     logging: *default-logging
     volumes:
       - redis-data:/data
@@ -31,7 +32,11 @@ services:
       - ./shared:/app/shared
       - ./api:/app/api
       - ./configs:/app/configs
+      - ./scripts/dr_snapshot.py:/app/scripts/dr_snapshot.py:ro
       - ${FLORI_DATA_DIR:-./data}:/data
+      - redis-data:/dr-source/redis:ro
+      - ${MINIO_DATA_DIR:-minio-data}:/dr-source/minio:ro
+      - ${FLORI_DR_BACKUP_DIR:-.local/exact-dr}:/exact-dr
       - ${FLORI_CONTENT_REPOSITORY_DIR:-.local/content-repository}:/content-repo
       # local_dir 订阅约定监听目录(放文件进宿主 ${FLORI_INBOX_DIR:-.local/inbox} 即被枚举入库);与 worker 挂同一容器路径。
       - ${FLORI_INBOX_DIR:-.local/inbox}:/data/inbox
@@ -54,6 +59,10 @@ services:
       - FLORI_SOURCE_LIBRARY_CONTAINER_DIR=/sources/library
       - FLORI_CONTENT_REPOSITORY=/content-repo
       - FLORI_DEPLOYMENT_ID=${FLORI_DEPLOYMENT_ID:-}
+      - FLORI_EXACT_DR_DIR=/exact-dr
+      - FLORI_EXACT_DR_DRAIN_TIMEOUT_SEC=${FLORI_EXACT_DR_DRAIN_TIMEOUT_SEC:-3600}
+      - FLORI_DR_OWNER_UID=${FLORI_DR_OWNER_UID:-}
+      - FLORI_DR_OWNER_GID=${FLORI_DR_OWNER_GID:-}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health/live"]
       interval: 30s
@@ -196,3 +205,4 @@ services:
 
 volumes:
   redis-data:
+  minio-data:

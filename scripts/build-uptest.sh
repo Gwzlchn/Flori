@@ -67,6 +67,10 @@ work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 ctx="${work}/context"
 mkdir -p "$ctx"
 rsync -a --delete --exclude-from="${REPO}/.dockerignore" "${REPO}/" "$ctx/"
+# .dockerignore 的 ! 例外是 Docker 语法,rsync --exclude-from 不会按同样语义恢复文件。
+# API 运行时直接执行灾备脚本,构建临时上下文必须显式带入这一个 tracked 文件。
+mkdir -p "$ctx/scripts"
+cp "${REPO}/scripts/dr_snapshot.py" "$ctx/scripts/dr_snapshot.py"
 sed -i 's/^version = .*/version = "0.0.0"/' "${ctx}/pyproject.toml"
 # NAS/ACL 复制到 /tmp 后可能变成 0600,非 root worker 会读不了 /app 源码。
 find "$ctx" -type d -exec chmod 755 {} +

@@ -10,6 +10,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -294,27 +295,47 @@ def _scan_tree(
     excluded: Callable[[Path], bool] | None = None,
 ) -> dict[str, tuple[int, int, int, int, int]]:
     """记录正则文件的大小、mtime 和 mode,并拒绝会逃出资产根的链接."""
-    if not root.is_dir():
-        raise SnapshotError(f"资产根不存在或不是目录: {root}")
     result: dict[str, tuple[int, int, int, int, int]] = {}
-    for path in sorted(root.rglob("*")):
-        rel = path.relative_to(root)
-        if _is_internal(rel) or (excluded and excluded(rel)):
-            continue
-        info = path.lstat()
-        if stat.S_ISLNK(info.st_mode):
-            raise SnapshotError(f"资产中不允许符号链接: {rel.as_posix()}")
-        if stat.S_ISDIR(info.st_mode):
-            continue
-        if not stat.S_ISREG(info.st_mode):
-            raise SnapshotError(f"资产中不允许特殊文件: {rel.as_posix()}")
-        result[rel.as_posix()] = (
-            info.st_size,
-            info.st_mtime_ns,
-            stat.S_IMODE(info.st_mode),
-            info.st_uid,
-            info.st_gid,
-        )
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        root_fd = os.open(root, flags)
+    except OSError as exc:
+        raise SnapshotError(f"资产根不存在、不安全或不是目录: {root}({exc})") from exc
+    try:
+        for directory, dirnames, filenames, directory_fd in os.fwalk(
+            ".", topdown=True, follow_symlinks=False, dir_fd=root_fd,
+        ):
+            base = Path() if directory == "." else Path(directory)
+            kept_dirs: list[str] = []
+            for name in sorted(dirnames):
+                rel = base / name
+                if _is_internal(rel) or (excluded and excluded(rel)):
+                    continue
+                info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if stat.S_ISLNK(info.st_mode):
+                    raise SnapshotError(f"资产中不允许符号链接: {rel.as_posix()}")
+                if not stat.S_ISDIR(info.st_mode):
+                    raise SnapshotError(f"资产中不允许特殊文件: {rel.as_posix()}")
+                kept_dirs.append(name)
+            dirnames[:] = kept_dirs
+            for name in sorted(filenames):
+                rel = base / name
+                if _is_internal(rel) or (excluded and excluded(rel)):
+                    continue
+                info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if stat.S_ISLNK(info.st_mode):
+                    raise SnapshotError(f"资产中不允许符号链接: {rel.as_posix()}")
+                if not stat.S_ISREG(info.st_mode):
+                    raise SnapshotError(f"资产中不允许特殊文件: {rel.as_posix()}")
+                result[rel.as_posix()] = (
+                    info.st_size,
+                    info.st_mtime_ns,
+                    stat.S_IMODE(info.st_mode),
+                    info.st_uid,
+                    info.st_gid,
+                )
+    finally:
+        os.close(root_fd)
     return result
 
 
@@ -326,26 +347,80 @@ def _copy_stable_tree(
     """拷贝前后比较源目录,捕捉演练或备份窗口内的并发写."""
     before = _scan_tree(source, excluded)
     destination.mkdir(parents=True, exist_ok=True)
-    for path in sorted(source.rglob("*")):
-        rel = path.relative_to(source)
-        if _is_internal(rel) or (excluded and excluded(rel)):
-            continue
-        target = destination / rel
-        info = path.lstat()
-        if stat.S_ISLNK(info.st_mode):
-            raise SnapshotError(f"资产中不允许符号链接: {rel.as_posix()}")
-        if stat.S_ISDIR(info.st_mode):
-            target.mkdir(parents=True, exist_ok=True)
-            os.chmod(target, stat.S_IMODE(info.st_mode))
-            with contextlib.suppress(PermissionError):
-                os.chown(target, info.st_uid, info.st_gid)
-        elif stat.S_ISREG(info.st_mode):
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, target)
-            with contextlib.suppress(PermissionError):
-                os.chown(target, info.st_uid, info.st_gid)
-        else:
-            raise SnapshotError(f"资产中不允许特殊文件: {rel.as_posix()}")
+    root_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    root_fd = os.open(source, root_flags)
+    try:
+        for directory, dirnames, filenames, directory_fd in os.fwalk(
+            ".", topdown=True, follow_symlinks=False, dir_fd=root_fd,
+        ):
+            base = Path() if directory == "." else Path(directory)
+            kept_dirs: list[str] = []
+            for name in sorted(dirnames):
+                rel = base / name
+                if _is_internal(rel) or (excluded and excluded(rel)):
+                    continue
+                info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if stat.S_ISLNK(info.st_mode):
+                    raise SnapshotError(f"资产中不允许符号链接: {rel.as_posix()}")
+                if not stat.S_ISDIR(info.st_mode):
+                    raise SnapshotError(f"资产中不允许特殊文件: {rel.as_posix()}")
+                target = destination / rel
+                target.mkdir(parents=True, exist_ok=True)
+                os.chmod(target, stat.S_IMODE(info.st_mode))
+                with contextlib.suppress(PermissionError):
+                    os.chown(target, info.st_uid, info.st_gid)
+                kept_dirs.append(name)
+            dirnames[:] = kept_dirs
+            for name in sorted(filenames):
+                rel = base / name
+                if _is_internal(rel) or (excluded and excluded(rel)):
+                    continue
+                before_open = os.stat(
+                    name, dir_fd=directory_fd, follow_symlinks=False,
+                )
+                if not stat.S_ISREG(before_open.st_mode):
+                    kind = "符号链接" if stat.S_ISLNK(before_open.st_mode) else "特殊文件"
+                    raise SnapshotError(f"资产中不允许{kind}: {rel.as_posix()}")
+                source_fd = os.open(
+                    name,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=directory_fd,
+                )
+                try:
+                    opened = os.fstat(source_fd)
+                    identity = lambda info: (
+                        info.st_dev,
+                        info.st_ino,
+                        info.st_size,
+                        info.st_mtime_ns,
+                        stat.S_IMODE(info.st_mode),
+                        info.st_uid,
+                        info.st_gid,
+                    )
+                    if identity(opened) != identity(before_open):
+                        raise SnapshotError(
+                            f"源资产在打开前被替换: {rel.as_posix()}"
+                        )
+                    target = destination / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with target.open("xb") as output:
+                        while True:
+                            chunk = os.read(source_fd, 1024 * 1024)
+                            if not chunk:
+                                break
+                            output.write(chunk)
+                    after_copy = os.fstat(source_fd)
+                    if identity(after_copy) != identity(opened):
+                        raise SnapshotError(
+                            f"源资产在复制时发生变化: {rel.as_posix()}"
+                        )
+                    os.chmod(target, stat.S_IMODE(opened.st_mode))
+                    with contextlib.suppress(PermissionError):
+                        os.chown(target, opened.st_uid, opened.st_gid)
+                finally:
+                    os.close(source_fd)
+    finally:
+        os.close(root_fd)
     after = _scan_tree(source, excluded)
     if before != after:
         raise SnapshotError("快照窗口内源资产发生变化，拒绝发布混代备份")
@@ -426,11 +501,61 @@ def _validate_sqlite_migration_history(
     return expected
 
 
-def _snapshot_sqlite(source: Path, destination: Path) -> dict[str, Any]:
-    if not source.is_file():
-        raise SnapshotError(f"SQLite 主库不存在: {source}")
+def _open_regular_source_nofollow(path: Path) -> int:
+    absolute = Path(os.path.abspath(path))
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    directory_fd = os.open(absolute.anchor or "/", directory_flags)
+    try:
+        for component in absolute.parent.parts[1:]:
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        file_fd = os.open(
+            absolute.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+    finally:
+        os.close(directory_fd)
+    info = os.fstat(file_fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        os.close(file_fd)
+        raise SnapshotError(f"SQLite 主库不是单链接普通文件: {path}")
+    return file_fd
+
+
+def _snapshot_sqlite(
+    source: Path,
+    destination: Path,
+    *,
+    source_fd: int | None = None,
+    expected_device: int | None = None,
+    expected_inode: int | None = None,
+) -> dict[str, Any]:
+    owns_source_fd = source_fd is None
+    if source_fd is None:
+        source_fd = _open_regular_source_nofollow(source)
+    source_info = os.fstat(source_fd)
+    if not stat.S_ISREG(source_info.st_mode) or source_info.st_nlink != 1:
+        if owns_source_fd:
+            os.close(source_fd)
+        raise SnapshotError("SQLite source fd不是单链接普通文件")
+    if bool(expected_device is None) != bool(expected_inode is None):
+        if owns_source_fd:
+            os.close(source_fd)
+        raise SnapshotError("SQLite source inode绑定参数不完整")
+    if expected_device is not None and (
+        source_info.st_dev != expected_device or source_info.st_ino != expected_inode
+    ):
+        if owns_source_fd:
+            os.close(source_fd)
+        raise SnapshotError("SQLite source fd与API写栅栏inode不一致")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    uri = f"file:{source.resolve().as_posix()}?mode=ro"
+    uri = f"file:/proc/self/fd/{source_fd}?mode=ro"
     src = sqlite3.connect(uri, uri=True, timeout=30)
     dst = sqlite3.connect(destination)
     try:
@@ -446,7 +571,14 @@ def _snapshot_sqlite(source: Path, destination: Path) -> dict[str, Any]:
     finally:
         dst.close()
         src.close()
-    source_info = source.stat()
+    after_backup = os.fstat(source_fd)
+    if (after_backup.st_dev, after_backup.st_ino) != (
+        source_info.st_dev,
+        source_info.st_ino,
+    ):
+        raise SnapshotError("SQLite source inode在快照期间改变")
+    if owns_source_fd:
+        os.close(source_fd)
     os.chmod(destination, stat.S_IMODE(source_info.st_mode))
     with contextlib.suppress(PermissionError):
         os.chown(destination, source_info.st_uid, source_info.st_gid)
@@ -477,8 +609,61 @@ def _asset_inventory(root: Path, archive_prefix: str) -> tuple[dict[str, dict[st
     return files, len(files), total_bytes
 
 
-def _validate_redis_payload(root: Path) -> str:
+def _validate_redis_payload(root: Path, redis_mode: str) -> str:
     dump = root / "dump.rdb"
+    if redis_mode == "materialized-rdb-aof":
+        expected_manifest = root / "appendonlydir" / "appendonly.aof.manifest"
+        manifests = list(root.rglob("appendonly.aof.manifest"))
+        if len(manifests) != 1 or manifests[0] != expected_manifest:
+            raise SnapshotError(
+                "materialized Redis 资产必须在 appendonlydir 包含唯一 AOF manifest"
+            )
+        manifest = expected_manifest
+        entries: list[tuple[str, int, str]] = []
+        for line in manifest.read_text(encoding="utf-8").splitlines():
+            if not line:
+                continue
+            match = re.fullmatch(
+                r"file ([A-Za-z0-9._-]+) seq [1-9][0-9]* type ([bih])",
+                line,
+            )
+            if match is None:
+                raise SnapshotError("Redis AOF manifest 条目非法")
+            entries.append((match.group(1), int(line.split()[3]), match.group(2)))
+        base = [entry for entry in entries if entry[2] == "b"]
+        increments = [entry for entry in entries if entry[2] == "i"]
+        history = [entry for entry in entries if entry[2] == "h"]
+        if len(base) != 1 or len(increments) != 1 or history:
+            raise SnapshotError("Redis AOF manifest 必须只含唯一 active base/increment")
+        base_name, base_seq, _ = base[0]
+        incr_name, incr_seq, _ = increments[0]
+        base_match = re.fullmatch(
+            r"appendonly\.aof\.([1-9][0-9]*)\.base\.rdb", base_name,
+        )
+        incr_match = re.fullmatch(
+            r"appendonly\.aof\.([1-9][0-9]*)\.incr\.aof", incr_name,
+        )
+        if (
+            base_match is None
+            or incr_match is None
+            or int(base_match.group(1)) != base_seq
+            or int(incr_match.group(1)) != incr_seq
+            or base_seq != incr_seq
+        ):
+            raise SnapshotError("Redis AOF base/increment 文件名或序号非法")
+        for name, _seq, kind in (base[0], increments[0]):
+            path = manifest.parent / name
+            if not path.is_file() or path.is_symlink():
+                raise SnapshotError(f"Redis AOF manifest 引用缺失:{name}")
+            if kind == "b" and path.stat().st_size == 0:
+                raise SnapshotError("Redis AOF base 为空")
+            if kind == "b":
+                with path.open("rb") as stream:
+                    if stream.read(5) != b"REDIS":
+                        raise SnapshotError("Redis AOF base RDB 头部非法")
+            else:
+                _validate_resp_aof(path)
+        return "aof-manifest-v1"
     if dump.is_file():
         with dump.open("rb") as stream:
             header = stream.read(9)
@@ -495,10 +680,72 @@ def _validate_redis_payload(root: Path) -> str:
     return "aof"
 
 
+def _validate_resp_aof(path: Path) -> None:
+    """校验 Redis 7 increment AOF 的完整 RESP command 边界;空文件合法。"""
+    with path.open("rb") as stream:
+        while True:
+            prefix = stream.read(1)
+            if not prefix:
+                return
+            if prefix == b"#":
+                line = stream.readline(128)
+                if not line.endswith(b"\r\n") or not line.startswith(b"TS:"):
+                    raise SnapshotError("Redis increment AOF 时间戳行非法")
+                continue
+            if prefix != b"*":
+                raise SnapshotError("Redis increment AOF 不是合法 RESP array")
+            raw_count = stream.readline(32)
+            if not raw_count.endswith(b"\r\n"):
+                raise SnapshotError("Redis increment AOF array 长度截断")
+            try:
+                count = int(raw_count[:-2])
+            except ValueError as exc:
+                raise SnapshotError("Redis increment AOF array 长度非法") from exc
+            if not 1 <= count <= 1_000_000:
+                raise SnapshotError("Redis increment AOF array 长度越界")
+            for _ in range(count):
+                if stream.read(1) != b"$":
+                    raise SnapshotError("Redis increment AOF 只接受 bulk command")
+                raw_length = stream.readline(32)
+                if not raw_length.endswith(b"\r\n"):
+                    raise SnapshotError("Redis increment AOF bulk 长度截断")
+                try:
+                    length = int(raw_length[:-2])
+                except ValueError as exc:
+                    raise SnapshotError("Redis increment AOF bulk 长度非法") from exc
+                if length < 0 or length > path.stat().st_size:
+                    raise SnapshotError("Redis increment AOF bulk 长度越界")
+                stream.seek(length, os.SEEK_CUR)
+                if stream.read(2) != b"\r\n":
+                    raise SnapshotError("Redis increment AOF bulk 内容截断")
+
+
+def _publish_file_noreplace(temporary: Path, output: Path) -> None:
+    """用同目录 hard-link 原子发布完整文件,存在同名代时绝不覆盖。"""
+    directory_fd = os.open(
+        output.parent,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        try:
+            os.link(
+                temporary.name,
+                output.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError as exc:
+            raise SnapshotError(f"输出快照已存在，拒绝覆盖: {output}") from exc
+        os.fsync(directory_fd)
+        os.unlink(temporary.name, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def _tar_stage(stage: Path, output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
-    if output.exists():
-        raise SnapshotError(f"输出快照已存在，拒绝覆盖: {output}")
     temporary = output.with_name(f".{output.name}.{uuid.uuid4().hex}.partial")
     try:
         with tarfile.open(temporary, "w:gz", format=tarfile.PAX_FORMAT) as archive:
@@ -507,8 +754,7 @@ def _tar_stage(stage: Path, output: Path) -> None:
         with temporary.open("rb") as stream:
             os.fsync(stream.fileno())
         os.chmod(temporary, 0o600)
-        os.replace(temporary, output)
-        _fsync_dir(output.parent)
+        _publish_file_noreplace(temporary, output)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
@@ -530,6 +776,9 @@ def create_snapshot(
     schema_manifest_path: Path | None = None,
     _schema_support_override: dict[str, Any] | None = None,
     _boundary_checked: bool = False,
+    sqlite_source_fd: int | None = None,
+    sqlite_source_device: int | None = None,
+    sqlite_source_inode: int | None = None,
 ) -> dict[str, Any]:
     """生成完整快照,只有全部资产和校验通过才原子发布归档."""
     if not _boundary_checked:
@@ -576,6 +825,9 @@ def create_snapshot(
         sqlite_meta = _snapshot_sqlite(
             data_root / "db" / "analyzer.db",
             data_destination / "db" / "analyzer.db",
+            source_fd=sqlite_source_fd,
+            expected_device=sqlite_source_device,
+            expected_inode=sqlite_source_inode,
         )
         schema_support = _schema_support_override or _schema_support(schema_manifest_path)
         db_version = int(sqlite_meta["user_version"])
@@ -609,7 +861,7 @@ def create_snapshot(
             _copy_stable_tree(redis_root, redis_destination)
         else:
             raise SnapshotError(f"不支持的 Redis 快照模式: {redis_mode}")
-        redis_format = _validate_redis_payload(redis_destination)
+        redis_format = _validate_redis_payload(redis_destination, redis_mode)
 
         included_roots: dict[str, Path] = {
             "data": data_destination,
@@ -705,13 +957,27 @@ def create_snapshot(
             )
         _write_json_atomic(stage / MANIFEST_NAME, manifest)
         _tar_stage(stage, output)
+    published_archive = output.stat(follow_symlinks=False)
     digest = _sha256(output)
     sidecar = output.with_suffix(output.suffix + ".sha256")
     sidecar_tmp = sidecar.with_name(f".{sidecar.name}.{uuid.uuid4().hex}.tmp")
     sidecar_tmp.write_text(f"{digest}  {output.name}\n", encoding="utf-8")
     os.chmod(sidecar_tmp, 0o600)
-    os.replace(sidecar_tmp, sidecar)
-    _fsync_dir(output.parent)
+    with sidecar_tmp.open("rb") as stream:
+        os.fsync(stream.fileno())
+    try:
+        _publish_file_noreplace(sidecar_tmp, sidecar)
+    except BaseException:
+        sidecar_tmp.unlink(missing_ok=True)
+        with contextlib.suppress(FileNotFoundError):
+            current = output.stat(follow_symlinks=False)
+            if (current.st_dev, current.st_ino) == (
+                published_archive.st_dev,
+                published_archive.st_ino,
+            ):
+                output.unlink()
+        _fsync_dir(output.parent)
+        raise
     return {
         "status": "success",
         "operation": "backup",
@@ -993,6 +1259,17 @@ def validate_extracted(
             or metadata["total_bytes"] < 0
         ):
             raise SnapshotError(f"manifest.assets.{name} 计数字段非法")
+    redis_meta = assets["redis"]
+    redis_mode = redis_meta.get("capture_mode")
+    if (
+        redis_meta.get("path") != "assets/redis"
+        or not isinstance(redis_mode, str)
+        or redis_mode not in {"rdb", "offline-volume", "materialized-rdb-aof"}
+    ):
+        raise SnapshotError("manifest.assets.redis 捕获模式或路径非法")
+    redis_schema = _validate_redis_payload(root / "assets" / "redis", redis_mode)
+    if redis_meta.get("schema_version") != redis_schema:
+        raise SnapshotError("Redis 资产格式与 manifest schema_version 不一致")
     return manifest
 
 
@@ -2008,6 +2285,9 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--owner-uid", type=int)
     create.add_argument("--owner-gid", type=int)
     create.add_argument("--schema-manifest")
+    create.add_argument("--sqlite-source-fd", type=int)
+    create.add_argument("--sqlite-source-dev", type=int)
+    create.add_argument("--sqlite-source-ino", type=int)
 
     validate = subparsers.add_parser("validate", help="只读校验快照")
     validate.add_argument("--archive", required=True)
@@ -2076,6 +2356,9 @@ def main(argv: list[str] | None = None) -> int:
                 minio_excludes=tuple(args.minio_exclude),
                 schema_manifest_path=_path_or_none(args.schema_manifest),
                 _boundary_checked=True,
+                sqlite_source_fd=args.sqlite_source_fd,
+                sqlite_source_device=args.sqlite_source_dev,
+                sqlite_source_inode=args.sqlite_source_ino,
             )
         elif args.command == "validate":
             if result_file is not None and (

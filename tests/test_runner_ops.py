@@ -66,6 +66,29 @@ async def _register_worker(redis, db, worker_id=WORKER_ID):
 
 class TestClaimStep:
     @pytest.mark.asyncio
+    async def test_exact_dr_barrier_stops_claim_without_dequeue(
+        self, redis, db, tmp_path,
+    ):
+        from shared.exact_dr_maintenance import acquire_barrier
+
+        await _register_worker(redis, db)
+        await redis.enqueue_step("cpu", "j_dr", "02_parse", [], priority=-1)
+        await redis.set_step_status("j_dr", "02_parse", "ready")
+        acquire_barrier(
+            tmp_path,
+            operation_id="exact-dr-test",
+            created_at="2026-07-20T00:00:00+00:00",
+        )
+
+        claim = await runner_ops.claim_step(
+            redis, db, WORKER_ID, ["cpu"], POOL_LIMITS, set(), set(),
+            data_dir=tmp_path,
+        )
+
+        assert claim is None
+        assert await redis.get_step_status("j_dr", "02_parse") == "ready"
+
+    @pytest.mark.asyncio
     async def test_source_root_worker_skips_ordinary_pipeline_steps(self, redis, db):
         await _register_worker(redis, db)
         await redis.enqueue_step("cpu", "j_plain", "02_parse", [], priority=-2)
@@ -566,6 +589,35 @@ class TestReportFailed:
 
 
 class TestRelease:
+    @pytest.mark.asyncio
+    async def test_pool_holder_is_released_after_all_finalizer_writes(
+        self, redis, db, monkeypatch,
+    ):
+        await _register_worker(redis, db)
+        await redis.try_acquire_slot("cpu", 1, "e")
+        original = redis.mark_task_lease_released
+        entered = asyncio.Event()
+        unblock = asyncio.Event()
+
+        async def blocked_finalizer(*args, **kwargs):
+            entered.set()
+            await unblock.wait()
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(redis, "mark_task_lease_released", blocked_finalizer)
+        task = asyncio.create_task(runner_ops.release_step(
+            redis,
+            db,
+            WORKER_ID,
+            {"job_id": "j1", "step": "A", "pool": "cpu", "exec_id": "e"},
+        ))
+        await entered.wait()
+        assert await redis.get_pool_count("cpu") == 1
+
+        unblock.set()
+        await task
+        assert await redis.get_pool_count("cpu") == 0
+
     @pytest.mark.asyncio
     async def test_release_slot_and_idle(self, redis, db):
         await _register_worker(redis, db)

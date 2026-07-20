@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import hashlib
 import secrets
@@ -1368,6 +1369,43 @@ class RedisClient:
         except Exception:
             pass
         return out
+
+    async def get_all_holders_strict(self) -> set[str]:
+        """exact DR 排空使用的 fail-closed holder 扫描,Redis 错误不得伪装为空。"""
+        out: set[str] = set()
+        for key in await self._scan_holder_keys():
+            out |= set(await self.r.smembers(key) or [])
+        return out
+
+    async def prepare_exact_dr_persistence(self, *, timeout_sec: float = 60) -> None:
+        """把已排空的数据同时固化到 RDB/AOF,归档可直接按生产 appendonly 配置启动。"""
+        await self.r.save()
+        persistence = await self.r.info("persistence")
+        if int(persistence.get("aof_enabled", 0)) != 1:
+            raise RuntimeError("Redis appendonly 未启用,拒绝创建不可直接恢复的 exact DR")
+        if int(persistence.get("aof_rewrite_in_progress", 0)) == 0:
+            try:
+                await self.r.bgrewriteaof()
+            except ResponseError as exc:
+                if "already in progress" not in str(exc).lower():
+                    raise
+        deadline = time.monotonic() + timeout_sec
+        while True:
+            persistence = await self.r.info("persistence")
+            if int(persistence.get("aof_rewrite_in_progress", 0)) == 0:
+                if persistence.get("aof_last_bgrewrite_status") != "ok":
+                    raise RuntimeError("Redis AOF 重写失败")
+                return
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Redis AOF 重写超时")
+            await asyncio.sleep(0.25)
+
+    async def pause_writes_for_exact_dr(self, *, timeout_ms: int = 86_400_000) -> None:
+        """序列化地暂停全部 Redis 写命令,屏障崩溃时由超时或 API 重启解除。"""
+        await self.r.execute_command("CLIENT", "PAUSE", timeout_ms, "WRITE")
+
+    async def resume_writes_after_exact_dr(self) -> None:
+        await self.r.execute_command("CLIENT", "UNPAUSE")
 
     async def release_holders(self, holders: set[str]) -> int:
         """定向释放:把给定 holder(=exec_id)集合从所有 pool/res holder 集合里 SREM 掉,幂等。

@@ -67,6 +67,7 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install ".[api,mcp]" \
 COPY shared/ shared/
 COPY configs/ configs/
 COPY api/ api/
+COPY scripts/dr_snapshot.py scripts/dr_snapshot.py
 # prompts_dir 运行时 = /data/prompts(config.data_dir/'prompts');api 的 /api/profiles 读 profiles。
 # 生产 /data 是命名卷,首建空卷时被 seed,之后持久化(rebuild 不覆盖卷内旧内容,需手动同步)。
 COPY configs/prompts/ /data/prompts/

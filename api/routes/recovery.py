@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import sys
 from contextlib import suppress
 
@@ -11,6 +12,15 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from api.deps import get_config, verify_token
+from api.exact_dr import (
+    CONFIRMATION as EXACT_DR_CONFIRMATION,
+    ExactDrError,
+    new_operation as new_exact_dr_operation,
+    run_exact_dr,
+    status_payload as exact_dr_status_payload,
+    validate_start_configuration as validate_exact_dr_start,
+    write_operation as write_exact_dr_operation,
+)
 from api.recovery import (
     RecoveryControlError,
     build_restore_handoff,
@@ -24,6 +34,8 @@ from api.recovery import (
 )
 from api.wire_schemas import (
     API_ERROR_RESPONSES,
+    ExactDrStartRequest,
+    ExactDrStartedResponse,
     RecoveryBackupRequest,
     RecoveryBackupStartedResponse,
     RecoveryRestorePlanRequest,
@@ -122,13 +134,106 @@ async def get_recovery_status(request: Request, config=Depends(get_config)):
     try:
         tasks = _active_tasks(request)
         active = {operation_id for operation_id, task in tasks.items() if not task.done()}
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             repository_status,
             data_dir=config.data_dir,
             active_operation_ids=active,
         )
-    except RecoveryControlError as exc:
+        exact_task = getattr(request.app.state, "exact_dr_task", None)
+        result["exact_dr"] = await asyncio.to_thread(
+            exact_dr_status_payload,
+            config.data_dir,
+            active=bool(exact_task and not exact_task.done()),
+        )
+        return result
+    except (RecoveryControlError, ExactDrError) as exc:
         raise HTTPException(503, str(exc)) from exc
+
+
+@router.post(
+    "/exact-dr",
+    response_model=ExactDrStartedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def start_exact_dr(
+    body: ExactDrStartRequest,
+    request: Request,
+    config=Depends(get_config),
+):
+    """拒绝新写入并排空 Worker 后创建、校验完整 exact DR 三件套。"""
+    if not secrets.compare_digest(
+        body.confirmation.encode("utf-8"),
+        EXACT_DR_CONFIRMATION.encode("utf-8"),
+    ):
+        raise HTTPException(409, f"风险确认不匹配,请输入:{EXACT_DR_CONFIRMATION}")
+    async with _backup_start_lock(request):
+        tasks = _active_tasks(request)
+        if any(not task.done() for task in tasks.values()):
+            raise HTTPException(409, "便携备份正在运行,不能同时创建 exact DR")
+        exact_task = getattr(request.app.state, "exact_dr_task", None)
+        if exact_task is not None and not exact_task.done():
+            raise HTTPException(409, "已有 exact DR 操作正在运行")
+        operation = None
+        try:
+            await asyncio.to_thread(validate_exact_dr_start)
+            operation = await asyncio.to_thread(
+                new_exact_dr_operation,
+                config.data_dir,
+                persist=False,
+            )
+            await asyncio.to_thread(
+                write_exact_dr_operation,
+                config.data_dir,
+                operation,
+            )
+            await request.app.state.exact_dr_gate.begin_draining(
+                config.data_dir,
+                operation_id=operation["id"],
+                created_at=operation["created_at"],
+            )
+        except BaseException as exc:
+            if operation is not None:
+                cleanup_task = asyncio.create_task(
+                    request.app.state.exact_dr_gate.finish(
+                        config.data_dir,
+                        operation_id=operation["id"],
+                    )
+                )
+                with suppress(BaseException):
+                    await asyncio.shield(cleanup_task)
+                operation.update(
+                    status=(
+                        "interrupted"
+                        if isinstance(exc, asyncio.CancelledError)
+                        else "failed"
+                    ),
+                    finished_at=utc_now(),
+                    error=(
+                        "exact DR 启动被取消;未创建灾备归档"
+                        if isinstance(exc, asyncio.CancelledError)
+                        else f"exact DR 启动失败:{str(exc)[:800]}"
+                    ),
+                )
+                with suppress(Exception):
+                    await asyncio.to_thread(
+                        write_exact_dr_operation,
+                        config.data_dir,
+                        operation,
+                    )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            if isinstance(exc, (OSError, ExactDrError)):
+                raise HTTPException(503, str(exc)) from exc
+            raise
+        task = asyncio.create_task(run_exact_dr(request.app, operation["id"]))
+        request.app.state.exact_dr_task = task
+
+        def _clear_exact_dr_task(done_task: asyncio.Task) -> None:
+            if getattr(request.app.state, "exact_dr_task", None) is done_task:
+                request.app.state.exact_dr_task = None
+
+        task.add_done_callback(_clear_exact_dr_task)
+        return {"operation": operation}
 
 
 @router.post(
@@ -143,6 +248,12 @@ async def start_recovery_backup(
 ):
     """启动隔离子进程创建增量便携备份;失败不会推进 latest。"""
     async with _backup_start_lock(request):
+        exact_task = getattr(request.app.state, "exact_dr_task", None)
+        if (
+            request.app.state.exact_dr_gate.phase is not None
+            or exact_task is not None and not exact_task.done()
+        ):
+            raise HTTPException(409, "exact DR 正在运行,不能同时创建便携备份")
         tasks = _active_tasks(request)
         if any(not task.done() for task in tasks.values()):
             raise HTTPException(409, "已有备份操作正在运行")

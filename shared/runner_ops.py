@@ -14,9 +14,11 @@ from dataclasses import dataclass
 import json
 import secrets
 import time
+from pathlib import Path
 
 from shared.db import Database
 from shared.redis_client import RedisClient
+from shared.exact_dr_maintenance import barrier_phase
 
 
 @dataclass(frozen=True)
@@ -109,9 +111,11 @@ async def pop_matching(
 
 async def claim_step(
     redis: RedisClient, db: Database, worker_id: str,
-    pools, pool_limits, tags, reject_tags,
+    pools, pool_limits, tags, reject_tags, *, data_dir: Path | None = None,
 ) -> dict | None:
     """从池队列认领一步,返回最小 claim {job_id, step, pool, exec_id} 或 None。"""
+    if data_dir is not None and barrier_phase(data_dir) is not None:
+        return None
     info = await redis.get_worker_info(worker_id)
     if (info.get("admin_status") if info else None) == "paused":
         return None
@@ -263,8 +267,8 @@ async def release_step(
     holder = claim.get("exec_id")   # = 占槽时的 holder,本执行唯一;按它 SREM 释放自己的槽/资源,幂等。
     # 独立 AI task:无 job:steps,跳过 exec_id 守卫 / 资源回读;仅释放池槽 + 置 idle。
     if claim.get("kind") == "ai":
-        await redis.release_slot(pool, holder)
         await _set_status(redis, db, worker_id, "idle")
+        await redis.release_slot(pool, holder)
         return
     job_id, step = claim["job_id"], claim["step"]
     # exec_id 守卫:若该步已被更新的执行接管(check_stuck 重排后 worker B 以新 exec_id 认领),
@@ -273,11 +277,10 @@ async def release_step(
     current_exec = await redis.get_step_exec_id(job_id, step)
     if (current_exec is not None and holder is not None
             and current_exec != holder):
-        await redis.release_slot(pool, holder)   # 幂等:释放自己(陈旧)的 holder,防其残留泄漏
         await redis.revoke_task_lease(holder)
         await _set_status(redis, db, worker_id, "idle")
+        await redis.release_slot(pool, holder)   # 最后释放自己的 holder,作为全部收尾写入的 fence。
         return
-    await redis.release_slot(pool, holder)
     # 归还本步占用的资源槽(从 redis 读,gateway release 请求不回传资源列表);清记录防重复归还。
     resources = await redis.get_step_resources(job_id, step)
     if resources:
@@ -288,3 +291,5 @@ async def release_step(
     await redis.mark_task_lease_released(
         worker_id, job_id, step, holder, pool,
     )
+    # pool holder 是排空观测的最后一道 fence;此前任一步失败都必须保留它,禁止快照越过收尾写入。
+    await redis.release_slot(pool, holder)

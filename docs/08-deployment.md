@@ -380,6 +380,33 @@ scripts/backup.sh /mnt/nas/flori --minio-exclude .minio.sys/tmp
 - `FLORI_DEPLOYMENT_ID` 是非密钥稳定实例标识。`backup.sh`和直接`dr_snapshot.py create`
   都拒绝空值或`unbound`;同一部署不得随版本、容器或主机重启变化。
 
+系统设置 `/settings/recovery` 也可创建同格式 exact DR。生产 compose 把 Redis/MinIO 数据卷以
+只读方式挂到 API 的 `/dr-source/{redis,minio}`,把 `${FLORI_DR_BACKUP_DIR}` 挂到 `/exact-dr`,
+不挂 Docker socket。开发 compose 的 API 与 MinIO 也必须引用同一个 `${MINIO_DATA_DIR:-minio-data}`
+源,且开发/生产 Redis 都必须以 `--appendonly yes` 启动。在线入口只接受 compose 内
+`MINIO_URL=minio:9000`;外部或自定义 MinIO 没有可信物理卷身份,页面会显示未配置并 fail-closed,
+不能拿一个无关空目录冒充对象存储。页面触发后由 API fail-fast 拒绝新业务请求、停止
+Worker 新认领、等待当前步骤排空,再让 Scheduler 取消并 join 全部后台任务及 executor 线程。随后 API
+通过稳定 `O_NOFOLLOW` 文件描述符持有 SQLite `BEGIN IMMEDIATE` 写栅栏,并把同一 inode 继承给
+快照子进程;同时执行 Redis `SAVE + BGREWRITEAOF + CLIENT PAUSE WRITE`,
+两个栅栏建立后还会复核无晚到 Worker claim,再运行 create + validate。最终 result JSON 是恢复授权
+标记,在 Redis/SQLite/屏障都安全收口后才从隐藏目录原子发布。成功目录包含同代归档、sidecar 与 JSON;
+页面只显示文件名、
+大小和摘要。常用配置:
+
+```env
+FLORI_DR_BACKUP_DIR=/volume2/DATA/flori-deploy-dr
+FLORI_EXACT_DR_DRAIN_TIMEOUT_SEC=3600
+# 可选,两项同时设置后把三件套归属改回宿主运维账号
+FLORI_DR_OWNER_UID=1000
+FLORI_DR_OWNER_GID=1000
+```
+
+排空或复制期间失败即整次失败,不会继续使用不稳定输入;处理完仍在运行的步骤或源文件变化后重新
+点击即可。普通失败会删除未完成三件套并恢复 Redis/API 写入;残留清理或写栅栏释放失败时屏障保持,
+必须先由运维清理再恢复流量。API 重启先执行 Redis `CLIENT UNPAUSE`,再回收归属自己的陈旧操作。
+在线入口不执行 restore,破坏性恢复仍必须使用 `scripts/restore.sh` 的停服事务。
+
 cron 建议（每天 03:00 备份，保留最近 14 份）：
 ```cron
 0 3 * * * cd /opt/flori && BACKUP_DIR=/mnt/nas/flori scripts/backup.sh \
@@ -468,7 +495,7 @@ COMPOSE_FILES="-f docker-compose.yml -f .local/docker-compose.uptest.yml" script
 
 | | exact DR(§7) | portable content backup |
 |---|---|---|
-| 入口 | `scripts/backup.sh` / `restore.sh` | `scripts/content-backup.sh` / `content-import.sh` / `content-gc.sh` |
+| 入口 | 设置页创建 / `scripts/backup.sh` / `restore.sh` | 设置页增量备份 / `scripts/content-backup.sh` / `content-import.sh` / `content-gc.sh` |
 | 收录 | SQLite + Redis + MinIO + `/data` 整卷 | 业务事实 + 失败审计 + **有效 manifest 证明的产物** |
 | 含凭据 | **是**(必须受访问控制) | **否**(allowlist + secret scan 双门) |
 | 含运行态 | 是(队列、租约、心跳) | 否 |
@@ -490,6 +517,9 @@ COMPOSE_FILES="-f docker-compose.yml -f .local/docker-compose.uptest.yml" script
 “创建增量备份”会在 API 容器内启动隔离子进程,不需要 Docker socket;关闭或重启 API
 会中断该操作,下次进入页面会显示 `interrupted`。仓库无 TTL 写锁不会被页面自动清除,
 必须确认旧进程已死后走 CLI 运维处理。
+同页“排空并创建 exact DR”是回滚点入口:它在后台完成停写、排空、归档和只读复验,将大文件直接
+留在 `${FLORI_DR_BACKUP_DIR}`,不经浏览器下载。它不负责 restore,也不替代 portable 的跨 Schema
+重建语义。
 同一宿主目录不得同时bind到`/data`和`/content-repo`或`/tmp/flori-work`;备份启动
 与子进程写前会按目录inode复验,发现别名将fail-closed且不创建operation/仓库。
 

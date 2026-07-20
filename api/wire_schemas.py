@@ -555,6 +555,42 @@ class RecoveryOperationResponse(WireModel):
     error: str | None
 
 
+class ExactDrDrainResponse(WireModel):
+    holders: int
+    running_steps: int
+    quiet_samples: int
+
+
+class ExactDrOperationResponse(WireModel):
+    format: Literal["flori-exact-dr-operation/v1"]
+    id: str
+    status: Literal[
+        "draining", "snapshotting", "verifying", "success", "failed", "interrupted"
+    ]
+    created_at: DateTimeString
+    started_at: DateTimeString | None
+    finished_at: DateTimeString | None
+    generation: str
+    archive_name: str
+    sidecar_name: str
+    receipt_name: str
+    archive_sha256: str | None
+    size_bytes: int | None
+    drain: ExactDrDrainResponse
+    error: str | None
+
+
+class ExactDrStatusResponse(WireModel):
+    configured: bool
+    output_path: str
+    state: Literal[
+        "idle", "draining", "snapshotting", "verifying", "success", "failed", "interrupted"
+    ]
+    operation: ExactDrOperationResponse | None
+    confirmation: str
+    drain_timeout_sec: int
+
+
 class RecoveryStatusResponse(WireModel):
     state: Literal["empty", "ready", "incomplete", "locked", "error"]
     repository_path: str
@@ -566,6 +602,7 @@ class RecoveryStatusResponse(WireModel):
     deployment_id_configured: bool
     online_restore_supported: bool
     operations: list[RecoveryOperationResponse]
+    exact_dr: ExactDrStatusResponse
     error: str | None
 
 
@@ -576,6 +613,14 @@ class RecoveryBackupRequest(WireModel):
 
 class RecoveryBackupStartedResponse(WireModel):
     operation: RecoveryOperationResponse
+
+
+class ExactDrStartRequest(WireModel):
+    confirmation: str
+
+
+class ExactDrStartedResponse(WireModel):
+    operation: ExactDrOperationResponse
 
 
 class RecoveryRestorePlanRequest(WireModel):

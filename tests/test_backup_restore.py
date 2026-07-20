@@ -7,6 +7,7 @@ import importlib.util
 import hashlib
 import io
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -141,7 +142,17 @@ def _fixture_roots(
     (roots["data"] / "prompts" / "profiles" / "general.yaml").write_text("role: test\n", encoding="utf-8")
     (roots["redis"] / "dump.rdb").write_bytes(b"REDIS-RDB")
     (roots["redis"] / "appendonlydir").mkdir()
-    (roots["redis"] / "appendonlydir" / "appendonly.aof").write_bytes(b"AOF")
+    (roots["redis"] / "appendonlydir" / "appendonly.aof.1.base.rdb").write_bytes(
+        b"REDIS-RDB"
+    )
+    (roots["redis"] / "appendonlydir" / "appendonly.aof.1.incr.aof").write_bytes(
+        b"*1\r\n$4\r\nPING\r\n"
+    )
+    (roots["redis"] / "appendonlydir" / "appendonly.aof.manifest").write_text(
+        "file appendonly.aof.1.base.rdb seq 1 type b\n"
+        "file appendonly.aof.1.incr.aof seq 1 type i\n",
+        encoding="utf-8",
+    )
     (roots["minio"] / "flori" / "jobs_test").mkdir(parents=True)
     (roots["minio"] / "flori" / "jobs_test" / "artifact.bin").write_bytes(b"OBJECT")
     (roots["config"] / "pipelines.yaml").write_text("pipelines: {}\n", encoding="utf-8")
@@ -777,7 +788,7 @@ def test_snapshot_covers_all_persistent_assets_and_restores_empty_environment(tm
     assert "assets/data/prompts/profiles/general.yaml" in declared
     assert "assets/data/db/analyzer.db" in declared
     assert "assets/redis/dump.rdb" in declared
-    assert "assets/redis/appendonlydir/appendonly.aof" in declared
+    assert "assets/redis/appendonlydir/appendonly.aof.manifest" in declared
     assert "assets/minio/flori/jobs_test/artifact.bin" in declared
     assert "assets/config/pipelines.yaml" in declared
 
@@ -807,9 +818,191 @@ def test_running_redis_mode_archives_materialized_rdb_and_aof(tmp_path: Path):
     assert manifest["assets"]["redis"]["capture_mode"] == "materialized-rdb-aof"
     redis_files = sorted(path for path in manifest["files"] if path.startswith("assets/redis/"))
     assert redis_files == [
-        "assets/redis/appendonlydir/appendonly.aof",
+        "assets/redis/appendonlydir/appendonly.aof.1.base.rdb",
+        "assets/redis/appendonlydir/appendonly.aof.1.incr.aof",
+        "assets/redis/appendonlydir/appendonly.aof.manifest",
         "assets/redis/dump.rdb",
     ]
+
+
+def test_materialized_redis_mode_rejects_rdb_without_aof_manifest(tmp_path: Path):
+    sources = _fixture_roots(tmp_path / "source")
+    shutil.rmtree(sources["redis"] / "appendonlydir")
+
+    with pytest.raises(dr.SnapshotError, match="AOF manifest"):
+        dr.create_snapshot(
+            data_root=sources["data"],
+            redis_root=sources["redis"],
+            minio_root=sources["minio"],
+            config_root=sources["config"],
+            output=tmp_path / "bad.tar.gz",
+            generation="bad-materialized",
+            deployment_id="test-deployment",
+            redis_mode="materialized-rdb-aof",
+        )
+
+
+def test_validate_and_restore_reject_rdb_only_archive_claiming_materialized_aof(
+    tmp_path: Path,
+):
+    sources = _fixture_roots(tmp_path / "source")
+    shutil.rmtree(sources["redis"] / "appendonlydir")
+    archive = tmp_path / "rdb-only.tar.gz"
+    dr.create_snapshot(
+        data_root=sources["data"],
+        redis_root=sources["redis"],
+        minio_root=sources["minio"],
+        config_root=sources["config"],
+        output=archive,
+        generation="rdb-only",
+        deployment_id="test-deployment",
+        redis_mode="offline-volume",
+    )
+
+    def claim_materialized(manifest: dict) -> None:
+        redis = manifest["assets"]["redis"]
+        redis["capture_mode"] = "materialized-rdb-aof"
+        redis["schema_version"] = "aof-manifest-v1"
+
+    crafted = _rewrite_manifest(tmp_path, archive, claim_materialized)
+
+    with pytest.raises(dr.SnapshotError, match="AOF manifest"):
+        dr.validate_archive(crafted)
+    with pytest.raises(dr.SnapshotError, match="AOF manifest"):
+        dr.restore_snapshot(
+            archive_path=crafted,
+            targets=_target_roots(tmp_path / "targets"),
+        )
+
+
+def test_materialized_redis_manifest_in_wrong_directory_is_rejected(tmp_path: Path):
+    sources = _fixture_roots(tmp_path / "source")
+    misplaced = sources["redis"] / "wrong"
+    misplaced.mkdir()
+    shutil.move(
+        sources["redis"] / "appendonlydir" / "appendonly.aof.manifest",
+        misplaced / "appendonly.aof.manifest",
+    )
+
+    with pytest.raises(dr.SnapshotError, match="appendonlydir"):
+        dr.create_snapshot(
+            data_root=sources["data"],
+            redis_root=sources["redis"],
+            minio_root=sources["minio"],
+            config_root=sources["config"],
+            output=tmp_path / "wrong-manifest.tar.gz",
+            generation="wrong-manifest",
+            deployment_id="test-deployment",
+            redis_mode="materialized-rdb-aof",
+        )
+
+
+def test_validate_and_restore_reject_garbage_materialized_aof_base(tmp_path: Path):
+    archive, _ = _create(tmp_path, redis_mode="materialized-rdb-aof")
+    extracted = tmp_path / "garbage-base"
+    extracted.mkdir()
+    dr._extract_archive(archive, extracted)
+    manifest_path = extracted / dr.MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    base_rel = "assets/redis/appendonlydir/appendonly.aof.1.base.rdb"
+    base = extracted / base_rel
+    base.write_bytes(b"not-a-redis-rdb")
+    manifest["files"][base_rel]["size"] = base.stat().st_size
+    manifest["files"][base_rel]["sha256"] = hashlib.sha256(base.read_bytes()).hexdigest()
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    crafted = tmp_path / "garbage-base.tar.gz"
+    dr._tar_stage(extracted, crafted)
+    digest = hashlib.sha256(crafted.read_bytes()).hexdigest()
+    crafted.with_suffix(crafted.suffix + ".sha256").write_text(
+        f"{digest}  {crafted.name}\n", encoding="utf-8",
+    )
+
+    with pytest.raises(dr.SnapshotError, match="RDB 头部"):
+        dr.validate_archive(crafted)
+    with pytest.raises(dr.SnapshotError, match="RDB 头部"):
+        dr.restore_snapshot(
+            archive_path=crafted,
+            targets=_target_roots(tmp_path / "garbage-targets"),
+        )
+
+
+def test_sqlite_snapshot_binds_inherited_inode_across_path_swap(tmp_path: Path):
+    source = tmp_path / "analyzer.db"
+    original = sqlite3.connect(source)
+    original.execute("CREATE TABLE proof(value TEXT)")
+    original.execute("INSERT INTO proof VALUES ('fenced')")
+    original.commit()
+    original.close()
+    source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    source_info = os.fstat(source_fd)
+    moved = tmp_path / "analyzer-fenced.db"
+    source.rename(moved)
+    replacement = sqlite3.connect(source)
+    replacement.execute("CREATE TABLE proof(value TEXT)")
+    replacement.execute("INSERT INTO proof VALUES ('replacement')")
+    replacement.commit()
+    replacement.close()
+    destination = tmp_path / "snapshot.db"
+    try:
+        dr._snapshot_sqlite(
+            source,
+            destination,
+            source_fd=source_fd,
+            expected_device=source_info.st_dev,
+            expected_inode=source_info.st_ino,
+        )
+    finally:
+        os.close(source_fd)
+
+    copied = sqlite3.connect(destination)
+    try:
+        assert copied.execute("SELECT value FROM proof").fetchone() == ("fenced",)
+    finally:
+        copied.close()
+
+
+def test_atomic_file_publication_never_overwrites_existing_generation(tmp_path: Path):
+    temporary = tmp_path / ".candidate.partial"
+    output = tmp_path / "snapshot.tar.gz"
+    temporary.write_bytes(b"candidate")
+    output.write_bytes(b"existing")
+
+    with pytest.raises(dr.SnapshotError, match="拒绝覆盖"):
+        dr._publish_file_noreplace(temporary, output)
+
+    assert output.read_bytes() == b"existing"
+    assert temporary.read_bytes() == b"candidate"
+
+
+def test_stable_tree_copy_rejects_file_swapped_to_symlink(
+    tmp_path: Path, monkeypatch,
+):
+    source = tmp_path / "source-tree"
+    source.mkdir()
+    payload = source / "payload.txt"
+    payload.write_text("inside", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    real_open = dr.os.open
+    swapped = False
+
+    def racing_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if path == "payload.txt" and kwargs.get("dir_fd") is not None and not swapped:
+            swapped = True
+            payload.unlink()
+            payload.symlink_to(outside)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(dr.os, "open", racing_open)
+
+    with pytest.raises(OSError):
+        dr._copy_stable_tree(source, tmp_path / "copied")
+    assert swapped is True
+    assert not (tmp_path / "copied" / "payload.txt").exists()
 
 
 def test_reconstructible_worker_cache_is_excluded_without_hiding_worker_state(

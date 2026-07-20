@@ -63,6 +63,7 @@
     {"method":"GET","path":"/api/prompts/{pipeline}/{step}/versions/{version}","operation_id":"get_prompt_version_api_prompts__pipeline___step__versions__version__get"},
     {"method":"GET","path":"/api/recovery","operation_id":"get_recovery_status_api_recovery_get"},
     {"method":"POST","path":"/api/recovery/backups","operation_id":"start_recovery_backup_api_recovery_backups_post"},
+    {"method":"POST","path":"/api/recovery/exact-dr","operation_id":"start_exact_dr_api_recovery_exact_dr_post"},
     {"method":"POST","path":"/api/recovery/restore-plans","operation_id":"prepare_restore_plan_api_recovery_restore_plans_post"},
     {"method":"GET","path":"/api/search","operation_id":"search_notes_api_search_get"},
     {"method":"GET","path":"/api/sources","operation_id":"list_sources_api_sources_get"},
