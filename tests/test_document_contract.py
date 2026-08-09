@@ -23,6 +23,7 @@ from shared.document_registry import (
     document_catalog,
     validate_document_kind,
 )
+from steps.document import provenance as document_provenance
 from steps.document.provenance import (
     build_document_source_manifest,
     publish_document_source_manifest,
@@ -336,6 +337,35 @@ def test_source_manifest_uses_dom_path_tag_to_disambiguate_repeated_html_text(
     assert segment["locator"]["exact"] == title
     assert source[segment["start"]:segment["end"]] == title
     assert source[segment["start"] - len("<title>"):segment["start"]] == "<title>"
+
+
+def test_html_support_index_scans_general_text_nodes_once(monkeypatch):
+    source = "".join(
+        f"<div>Block {index}\n evidence text</div>"
+        for index in range(200)
+    )
+    index = document_provenance._HtmlSupportIndex(source)
+    original_finditer = document_provenance.re.finditer
+    scans = 0
+
+    def counting_finditer(pattern, string, flags=0):
+        nonlocal scans
+        if pattern == r">([^<]+)<":
+            scans += 1
+        return original_finditer(pattern, string, flags=flags)
+
+    monkeypatch.setattr(document_provenance.re, "finditer", counting_finditer)
+
+    for block_index in range(200):
+        support = document_provenance._html_support_range(
+            source,
+            f"Block {block_index} evidence text",
+            "",
+            index,
+        )
+        assert support is not None
+
+    assert scans == 1
 
 
 def _pdf_only_document():

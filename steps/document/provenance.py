@@ -30,27 +30,75 @@ OCR_EXACT_EVIDENCE_THRESHOLD = 0.8
 DOCUMENT_INDEX_PATH = "intermediate/document_index.md"
 
 
+class _HtmlSupportIndex:
+    """复用 HTML 文本节点扫描结果,避免每个 block 都重扫完整源文档。"""
+
+    def __init__(self, source: str):
+        self.source = source
+        self._direct: dict[str, tuple[int, int, str] | None] = {}
+        self._tags: dict[str, list[tuple[int, str]]] = {}
+        self._general: list[tuple[int, int, str, str, int]] | None = None
+
+    def unique(self, candidate: str) -> tuple[int, int, str] | None:
+        if not candidate:
+            return None
+        if candidate not in self._direct:
+            start = self.source.find(candidate)
+            if start < 0 or self.source.find(candidate, start + len(candidate)) >= 0:
+                self._direct[candidate] = None
+            else:
+                self._direct[candidate] = (start, start + len(candidate), candidate)
+        return self._direct[candidate]
+
+    def tag_nodes(self, tag: str) -> list[tuple[int, str]]:
+        if tag not in self._tags:
+            pattern = re.compile(
+                rf"<{re.escape(tag)}\b[^>]*>(?P<text>[^<]*)</{re.escape(tag)}\s*>",
+                flags=re.I | re.S,
+            )
+            self._tags[tag] = [
+                (match.start("text"), match.group("text"))
+                for match in pattern.finditer(self.source)
+            ]
+        return self._tags[tag]
+
+    def general_nodes(self) -> list[tuple[int, int, str, str, int]]:
+        if self._general is None:
+            nodes: list[tuple[int, int, str, str, int]] = []
+            for match in re.finditer(r">([^<]+)<", self.source, flags=re.S):
+                original = match.group(1)
+                left = len(original) - len(original.lstrip())
+                right = len(original.rstrip())
+                raw = original[left:right]
+                if not raw or self.unique(raw) is None:
+                    continue
+                visible = re.sub(r"\s+", " ", html_lib.unescape(raw)).strip()
+                if len(visible) < 8:
+                    continue
+                start = match.start(1) + left
+                nodes.append((start, start + len(raw), raw, visible, len(visible)))
+            self._general = nodes
+        return self._general
+
+
 def _html_support_range(
-    source: str, exact: str, dom_path: str,
+    source: str,
+    exact: str,
+    dom_path: str,
+    support_index: _HtmlSupportIndex | None = None,
 ) -> tuple[int, int, str] | None:
     """定位原始 HTML 连续文本;重复文本先用 locator 末级标签消歧。"""
+    index = support_index or _HtmlSupportIndex(source)
     direct = (exact, html_lib.escape(exact, quote=False))
     for candidate in direct:
-        if candidate and source.count(candidate) == 1:
-            start = source.index(candidate)
-            return start, start + len(candidate), candidate
+        if found := index.unique(candidate):
+            return found
 
     normalized_exact = re.sub(r"\s+", " ", html_lib.unescape(exact)).strip()
     tag_match = re.search(r"/([A-Za-z][\w:-]*)\[\d+\]$", dom_path)
     if tag_match:
-        tag = re.escape(tag_match.group(1))
         tag_candidates: list[tuple[int, int, str]] = []
-        pattern = re.compile(
-            rf"<{tag}\b[^>]*>(?P<text>[^<]*)</{tag}\s*>",
-            flags=re.I | re.S,
-        )
-        for match in pattern.finditer(source):
-            raw_tag_text = match.group("text")
+        for text_start, raw_tag_text in index.tag_nodes(tag_match.group(1)):
             visible = re.sub(
                 r"\s+", " ", html_lib.unescape(raw_tag_text),
             ).strip()
@@ -59,7 +107,7 @@ def _html_support_range(
             for candidate in direct:
                 if candidate and raw_tag_text.count(candidate) == 1:
                     relative_start = raw_tag_text.index(candidate)
-                    start = match.start("text") + relative_start
+                    start = text_start + relative_start
                     tag_candidates.append(
                         (start, start + len(candidate), candidate)
                     )
@@ -68,18 +116,10 @@ def _html_support_range(
             return tag_candidates[0]
 
     candidates: list[tuple[int, int, str, int]] = []
-    for match in re.finditer(r">([^<]+)<", source, flags=re.S):
-        raw = match.group(1)
-        left = len(raw) - len(raw.lstrip())
-        right = len(raw.rstrip())
-        raw = raw[left:right]
-        if not raw or source.count(raw) != 1:
+    for start, end, raw, visible, visible_len in index.general_nodes():
+        if visible not in normalized_exact:
             continue
-        visible = re.sub(r"\s+", " ", html_lib.unescape(raw)).strip()
-        if len(visible) < 8 or visible not in normalized_exact:
-            continue
-        start = match.start(1) + left
-        candidates.append((start, start + len(raw), raw, len(visible)))
+        candidates.append((start, end, raw, visible_len))
     if not candidates:
         return None
     start, end, raw, _length = max(candidates, key=lambda item: (item[3], -item[0]))
@@ -92,6 +132,7 @@ def _sha256(path: Path) -> str:
 
 def _html_segment(
     block: Mapping[str, Any], source: str, source_sha: str,
+    support_index: _HtmlSupportIndex | None = None,
 ) -> dict[str, Any] | None:
     locator = block.get("locator")
     html = locator.get("html") if isinstance(locator, Mapping) else None
@@ -109,7 +150,9 @@ def _html_segment(
         or not 0 <= start < end <= len(source)
         or source[start:end] != exact
     ):
-        support = _html_support_range(source, exact, str(html.get("dom_path") or ""))
+        support = _html_support_range(
+            source, exact, str(html.get("dom_path") or ""), support_index,
+        )
         if support is None:
             return None
         start, end, raw_exact = support
@@ -226,6 +269,7 @@ def build_document_source_manifest(job_dir: Path, document: Mapping[str, Any]) -
     if html_path.is_file():
         source = html_path.read_text(encoding="utf-8")
         source_sha = _sha256(html_path)
+        support_index = _HtmlSupportIndex(source)
         artifacts.append({
             "source_id": "html", "path": "input/source.html", "sha256": source_sha,
             "revision": next(
@@ -236,7 +280,7 @@ def build_document_source_manifest(job_dir: Path, document: Mapping[str, Any]) -
             "media_duration_ms": None, "page_count": None,
         })
         for block in blocks:
-            item = _html_segment(block, source, source_sha)
+            item = _html_segment(block, source, source_sha, support_index)
             if item is None:
                 continue
             segments.append(item)
