@@ -307,13 +307,20 @@ async def test_ai_claim_is_atomic_across_clients_and_stale_owner_is_rejected(
     payload = {
         "kind": "ai", "task_id": "integration-ai-claim",
         "batch_id": "ssb-integration", "attempt": 2, "revision": 7,
+        "allowed_providers": ["claude-cli", "codex-cli", "qoder-cli"],
         "request": {},
     }
     await first.enqueue_ai_task_once(payload)
 
     claims = await asyncio.gather(
-        first.claim_ai_task(worker_id="worker-a", lease_seconds=60, now_epoch=100),
-        second.claim_ai_task(worker_id="worker-b", lease_seconds=60, now_epoch=100),
+        first.claim_ai_task(
+            worker_id="worker-a", tags={"claude-cli"},
+            lease_seconds=60, now_epoch=100,
+        ),
+        second.claim_ai_task(
+            worker_id="worker-b", tags={"codex-cli"},
+            lease_seconds=60, now_epoch=100,
+        ),
     )
     winner = next(claim for claim in claims if claim is not None)
     assert sum(claim is not None for claim in claims) == 1
@@ -338,11 +345,13 @@ async def test_real_redis_executing_expiry_is_ambiguous_without_requeue(
     payload = {
         "kind": "ai", "task_id": "integration-ai-ambiguous",
         "batch_id": "ssb-ambiguous", "attempt": 1, "revision": 2,
+        "allowed_providers": ["claude-cli"],
         "request": {},
     }
     await integration_redis.enqueue_ai_task_once(payload)
     claim = await integration_redis.claim_ai_task(
-        worker_id="worker-paid", lease_seconds=10, now_epoch=200,
+        worker_id="worker-paid", tags={"claude-cli"},
+        lease_seconds=10, now_epoch=200,
     )
     assert await integration_redis.mark_ai_task_executing(
         task_id=payload["task_id"], batch_id=payload["batch_id"],
@@ -362,11 +371,13 @@ async def test_real_redis_cancel_wrongtype_preserves_claim_and_expiry(
     payload = {
         "kind": "ai", "task_id": "integration-cancel-wrongtype",
         "batch_id": "ssb-cancel-wrongtype", "attempt": 1, "revision": 2,
+        "allowed_providers": ["claude-cli"],
         "step": "synthesis", "request": {},
     }
     await integration_redis.enqueue_ai_task_once(payload)
     await integration_redis.claim_ai_task(
         worker_id="worker-cancel", claim_id="claim-cancel",
+        tags={"claude-cli"},
         lease_seconds=60, now_epoch=300,
     )
     expiry_before = await integration_redis.r.zscore(

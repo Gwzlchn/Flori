@@ -87,6 +87,9 @@ async def test_ai_any_of_claim_materializes_one_concrete_provider(redis):
     )
     assert claim["provider"] == "qoder-cli"
     assert claim["allowed_providers"] == list(CONCRETE_CLI_PROVIDERS)
+    assert claim["tags"] == []
+    assert claim["require_tags"] == []
+    assert claim["request"]["messages"] == []
     assert "model" not in claim
 
 

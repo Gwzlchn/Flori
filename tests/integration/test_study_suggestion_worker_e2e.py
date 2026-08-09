@@ -145,6 +145,7 @@ async def test_production_worker_reap_restart_and_mastery_closure(
         tags={"claude-cli"},
         reject_tags=set(),
         concurrency=1,
+        cli_provider="claude-cli",
     )
     await worker.register()
     claim = await worker.transport.request_step(

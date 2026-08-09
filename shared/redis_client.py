@@ -570,8 +570,7 @@ for index = 1, #entries, 2 do
                         'requeue_count', requeue_count)
                     redis.call('ZADD', KEYS[3], ARGV[3], task_id)
                     redis.call('HDEL', KEYS[2], 'ai|ai|' .. task_id)
-                    task['provider'] = selected_provider
-                    return {cjson.encode(task), score, requeue_count}
+                    return {raw, score, requeue_count, tostring(selected_provider)}
                 end
             end
         end
@@ -956,8 +955,9 @@ class RedisClient:
         )
         if not result:
             return None
-        raw_json, score, requeue_count = result
+        raw_json, score, requeue_count, selected_provider = result
         payload = json.loads(raw_json)
+        payload["provider"] = selected_provider
         return {
             **payload,
             "state": "claimed",

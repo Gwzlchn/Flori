@@ -112,12 +112,14 @@ class TestClaimStep:
         await _register_worker(redis, db)
         payload = {
             "kind": "ai", "task_id": "at-runner", "step": "synthesis",
+            "allowed_providers": ["claude-cli"],
             "request": {}, "tags": [], "require_tags": ["vision"],
         }
         await redis.enqueue_ai_task_once(payload)
 
         claim = await runner_ops.claim_step(
-            redis, db, WORKER_ID, ["ai"], {"ai": 1}, {"vision"}, {"private"},
+            redis, db, WORKER_ID, ["ai"], {"ai": 1},
+            {"vision", "claude-cli"}, {"private"},
         )
 
         assert claim["task_id"] == "at-runner" and claim["state"] == "claimed"
@@ -132,6 +134,7 @@ class TestClaimStep:
         await _register_worker(redis, db)
         payload = {
             "kind": "ai", "task_id": "at-publish-fail", "step": "synthesis",
+            "allowed_providers": ["claude-cli"],
             "request": {}, "tags": [], "require_tags": ["vision"],
         }
         await redis.enqueue_ai_task_once(payload)
@@ -139,7 +142,8 @@ class TestClaimStep:
 
         with pytest.raises(RuntimeError, match="publish down"):
             await runner_ops.claim_step(
-                redis, db, WORKER_ID, ["ai"], {"ai": 1}, {"vision"}, {"private"},
+                redis, db, WORKER_ID, ["ai"], {"ai": 1},
+                {"vision", "claude-cli"}, {"private"},
             )
 
         assert await redis.r.zcard("queue:ai") == 1
