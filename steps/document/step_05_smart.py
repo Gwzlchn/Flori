@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 from shared.document_contract import validate_document, validate_translation
@@ -47,9 +48,8 @@ class DocumentSmartStep(StepBase):
             raise ValueError("document smart note requires source manifest")
         body, body_source, zh_title = self._body(document)
         prompt = self._build_prompt(document, body, source_manifest)
-        result = self.ai.call(prompt, max_tokens=8192)
-        result, exact, semantic = extract_attestable_document_markers(
-            result, source_manifest, ai=self.ai,
+        result, exact, semantic = self._generate_attestable_note(
+            prompt, source_manifest,
         )
         result = self._strip_model_title(result)
         note_title = f"{zh_title} - 笔记"
@@ -78,6 +78,34 @@ class DocumentSmartStep(StepBase):
             "provenance_status": provenance["status"],
             "semantic_candidates": candidate_state["candidates"],
         }
+
+    def _generate_attestable_note(
+        self, prompt: str, source_manifest: dict,
+    ) -> tuple[str, list[dict], list[dict]]:
+        """生成并验证来源 marker;首轮失败时把精确错误反馈给唯一一次重试。"""
+        attempt_prompt = prompt
+        last_error: ValueError | None = None
+        for _attempt in range(2):
+            result = self.ai.call(attempt_prompt, max_tokens=8192)
+            try:
+                return extract_attestable_document_markers(
+                    result, source_manifest, ai=self.ai,
+                )
+            except ValueError as exc:
+                last_error = exc
+                feedback = json.dumps(
+                    {"validation_error": str(exc)},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                attempt_prompt = (
+                    f"{prompt}\n\n"
+                    "上一次笔记未通过确定性来源校验。重新生成完整笔记，不要只返回局部修正。"
+                    "每个[[source:ID]]在整篇输出中最多出现一次，不得编造或改写ID。"
+                    f"校验反馈={feedback}"
+                )
+        assert last_error is not None
+        raise last_error
 
     def _body(self, document: dict) -> tuple[str, str, str]:
         metadata = document.get("metadata") or {}

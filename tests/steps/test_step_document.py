@@ -488,6 +488,71 @@ def test_smart_note_title_is_deterministic_and_uses_translation(tmp_path, monkey
     assert result["source"] == "translation"
 
 
+def test_smart_note_retries_with_exact_marker_validation_feedback(tmp_path, monkeypatch):
+    job = _fixture(tmp_path)
+    config = make_step_config(
+        tmp_path, step_name="05_smart", pool="ai", pipeline="document",
+    )
+    config["step"]["prompt_template"] = "05_smart_document"
+    step = DocumentSmartStep("05_smart", job, config)
+    prompts: list[str] = []
+
+    def call(prompt, **_kwargs):
+        prompts.append(prompt)
+        step.ai.last_response = LLMResponse(
+            content="", model="m", provider="anthropic", session_id="smart-session",
+        )
+        step.ai.last_provider = "anthropic"
+        step.ai.last_model = "m"
+        if len(prompts) == 1:
+            return (
+                "## 核心\n\n延迟为 3 ms。[[source:S1.P1]]\n\n"
+                "## 证据\n\n来源再次报告延迟。[[source:S1.P1]]"
+            )
+        return "## 核心\n\n延迟为 3 ms。[[source:S1.P1]]"
+
+    monkeypatch.setattr(step.ai, "call", call)
+
+    result = step.execute()
+    note = (job / result["note_file"]).read_text(encoding="utf-8")
+    assert "延迟为 3 ms" in note
+    assert len(prompts) == 2
+    assert "validation_error" not in prompts[0]
+    assert "note source marker is duplicated" in prompts[1]
+    assert "每个[[source:ID]]在整篇输出中最多出现一次" in prompts[1]
+
+
+def test_smart_note_rejects_duplicate_markers_after_retry_without_publishing(
+    tmp_path, monkeypatch,
+):
+    job = _fixture(tmp_path)
+    config = make_step_config(
+        tmp_path, step_name="05_smart", pool="ai", pipeline="document",
+    )
+    config["step"]["prompt_template"] = "05_smart_document"
+    step = DocumentSmartStep("05_smart", job, config)
+    calls = 0
+
+    def call(_prompt, **_kwargs):
+        nonlocal calls
+        calls += 1
+        step.ai.last_response = LLMResponse(
+            content="", model="m", provider="anthropic", session_id="smart-session",
+        )
+        return (
+            "## 核心\n\n延迟为 3 ms。[[source:S1.P1]]\n\n"
+            "## 证据\n\n来源再次报告延迟。[[source:S1.P1]]"
+        )
+
+    monkeypatch.setattr(step.ai, "call", call)
+
+    with pytest.raises(ValueError, match="source marker is duplicated"):
+        step.execute()
+    assert calls == 2
+    assert not (job / "output" / "provenance" / "smart.json").exists()
+    assert not (job / "output" / "provenance_candidates" / "smart.json").exists()
+
+
 def test_document_concepts_never_read_legacy_original_markdown(tmp_path):
     job = _fixture(tmp_path)
     (job / "output" / "original.md").write_text("LEGACY MUST NOT BE READ", encoding="utf-8")
