@@ -29,6 +29,7 @@ x-worker-env: &worker-env
 services:
   worker-cpu:
     image: ghcr.io/${IMAGE_OWNER:?IMAGE_OWNER is required}/flori-worker:${IMAGE_TAG:-latest}
+    init: true
     container_name: flori-worker-cpu
     restart: unless-stopped
     logging: *default-logging
@@ -47,6 +48,7 @@ services:
 
   worker-ai:
     image: ghcr.io/${IMAGE_OWNER:?IMAGE_OWNER is required}/flori-worker:${IMAGE_TAG:-latest}
+    init: true
     container_name: flori-worker-ai
     restart: unless-stopped
     logging: *default-logging

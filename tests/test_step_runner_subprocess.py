@@ -1,7 +1,6 @@
-"""SubprocessStepRunner 零回归 + 工厂选型测试。
+"""SubprocessStepRunner 生命周期与工厂选型测试。
 
-证明从 worker._run_step 搬入 SubprocessStepRunner 后行为字节级不变:
-配置写入/清理、stdout/stderr 流式落盘、失败尾部返回、超时标记、进度转发。
+覆盖配置清理、日志流式落盘、进度转发,以及超时/取消/回调异常的进程组回收。
 """
 
 from __future__ import annotations
@@ -9,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -18,6 +18,7 @@ from worker.step_runner import (
     StepContext,
     SubprocessStepRunner,
     _BoundedLogWriter,
+    _abort_subprocess_group,
     create_step_runner,
 )
 
@@ -71,7 +72,9 @@ def with_pythonpath(tmp_path):
 
 class TestSubprocessSuccess:
     @pytest.mark.asyncio
-    async def test_success_writes_config_and_collects_output(self, with_pythonpath):
+    async def test_success_writes_config_and_collects_output(
+        self, with_pythonpath, monkeypatch,
+    ):
         root = with_pythonpath
         work_dir = root / "j_test"
         work_dir.mkdir()
@@ -85,6 +88,10 @@ class TestSubprocessSuccess:
         )
         # stub 在 work_dir 内运行(StepBase 现状由 --job-dir 决定 cwd;这里直接断言日志即可)
         runner = SubprocessStepRunner()
+        monkeypatch.setattr(
+            "worker.step_runner.os.killpg",
+            lambda *_: pytest.fail("completed process group must not be signalled"),
+        )
         rc, stderr = await runner.run_step(_ctx(work_dir, module), _noop_progress, _noop_tick)
 
         assert (rc, stderr) == (0, "")
@@ -172,6 +179,44 @@ class TestSubprocessSuccess:
         assert "older step log truncated" in text
         assert "tail-marker" in text
 
+    @pytest.mark.asyncio
+    async def test_success_waits_for_short_descendant_that_closed_stdio(
+        self, with_pythonpath, monkeypatch,
+    ):
+        root = with_pythonpath
+        work_dir = root / "j_short_detached_stdio"
+        work_dir.mkdir()
+        finished = work_dir / "short-descendant-finished"
+        child_pid = work_dir / "short-descendant.pid"
+        child = (
+            "import os, time\n"
+            "from pathlib import Path\n"
+            f"Path({str(child_pid)!r}).write_text(str(os.getpid()))\n"
+            "time.sleep(0.2)\n"
+            f"Path({str(finished)!r}).write_text('done')\n"
+        )
+        module = _write_stub(
+            root,
+            "_stub_short_detached_stdio",
+            "spawn",
+            "import subprocess, sys\n"
+            f"subprocess.Popen([sys.executable, '-c', {child!r}], "
+            "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+            "stderr=subprocess.DEVNULL)\n",
+        )
+        monkeypatch.setattr(
+            "worker.step_runner.os.killpg",
+            lambda *_: pytest.fail("successful supervisor must not signal an old PGID"),
+        )
+        started = time.monotonic()
+        rc, _ = await SubprocessStepRunner().run_step(
+            _ctx(work_dir, module), _noop_progress, _noop_tick,
+        )
+
+        assert rc == 0
+        assert time.monotonic() - started >= 0.15
+        assert finished.read_text() == "done"
+        assert not Path(f"/proc/{child_pid.read_text()}").exists()
 
 class TestBoundedLogWriter:
     def test_large_write_is_capped_and_keeps_newest_tail(self, tmp_path, monkeypatch):
@@ -285,6 +330,420 @@ class TestSubprocessTimeout:
         log = (work_dir / "logs" / "A.log").read_text()
         assert "before_hang" in log
         assert "--- TIMEOUT after 1s ---" in log
+
+    @pytest.mark.asyncio
+    async def test_timeout_kills_descendant_process_group(self, with_pythonpath):
+        root = with_pythonpath
+        work_dir = root / "j_tree_timeout"
+        work_dir.mkdir()
+        survivor = work_dir / "descendant-survived"
+        child = (
+            "import time\n"
+            "from pathlib import Path\n"
+            "time.sleep(0.8)\n"
+            f"Path({str(survivor)!r}).write_text('alive')\n"
+        )
+        module = _write_stub(
+            root,
+            "_stub_tree_timeout",
+            "hang",
+            "import subprocess, sys, time\n"
+            f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+            "print('descendant_started', flush=True)\n"
+            "time.sleep(30)\n",
+        )
+        runner = SubprocessStepRunner()
+        started = time.monotonic()
+        with pytest.raises(asyncio.TimeoutError):
+            await runner.run_step(
+                _ctx(work_dir, module, timeout_sec=0.2),
+                _noop_progress,
+                _noop_tick,
+            )
+        assert time.monotonic() - started < 2
+        await asyncio.sleep(0.9)
+        assert not survivor.exists()
+
+    @pytest.mark.asyncio
+    async def test_timeout_kills_group_after_leader_exits(self, with_pythonpath):
+        root = with_pythonpath
+        work_dir = root / "j_leader_exit_timeout"
+        work_dir.mkdir()
+        survivor = work_dir / "leader-exit-timeout-descendant-survived"
+        child = (
+            "import time\n"
+            "from pathlib import Path\n"
+            "time.sleep(0.8)\n"
+            f"Path({str(survivor)!r}).write_text('alive')\n"
+        )
+        module = _write_stub(
+            root,
+            "_stub_leader_exit_timeout",
+            "spawn",
+            "import subprocess, sys\n"
+            f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+            "print('leader_done', flush=True)\n",
+        )
+        started = time.monotonic()
+        with pytest.raises(asyncio.TimeoutError):
+            await SubprocessStepRunner().run_step(
+                _ctx(work_dir, module, timeout_sec=0.2),
+                _noop_progress,
+                _noop_tick,
+            )
+        assert time.monotonic() - started < 2
+        await asyncio.sleep(0.9)
+        assert not survivor.exists()
+
+    @pytest.mark.asyncio
+    async def test_timeout_kills_descendant_that_closed_stdio(
+        self, with_pythonpath,
+    ):
+        root = with_pythonpath
+        work_dir = root / "j_detached_stdio_timeout"
+        work_dir.mkdir()
+        survivor = work_dir / "detached-stdio-descendant-survived"
+        child = (
+            "import time\n"
+            "from pathlib import Path\n"
+            "time.sleep(0.8)\n"
+            f"Path({str(survivor)!r}).write_text('alive')\n"
+        )
+        module = _write_stub(
+            root,
+            "_stub_detached_stdio_timeout",
+            "spawn",
+            "import subprocess, sys\n"
+            f"subprocess.Popen([sys.executable, '-c', {child!r}], "
+            "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+            "stderr=subprocess.DEVNULL)\n"
+            "print('target_done', flush=True)\n",
+        )
+        started = time.monotonic()
+        with pytest.raises(asyncio.TimeoutError):
+            await SubprocessStepRunner().run_step(
+                _ctx(work_dir, module, timeout_sec=0.2),
+                _noop_progress,
+                _noop_tick,
+            )
+        assert time.monotonic() - started < 2
+        await asyncio.sleep(0.9)
+        assert not survivor.exists()
+
+    @pytest.mark.asyncio
+    async def test_log_failure_kills_descendant_process_group(
+        self, with_pythonpath, monkeypatch,
+    ):
+        root = with_pythonpath
+        work_dir = root / "j_tree_log_failure"
+        work_dir.mkdir()
+        survivor = work_dir / "log-failure-descendant-survived"
+        child = (
+            "import time\n"
+            "from pathlib import Path\n"
+            "time.sleep(0.8)\n"
+            f"Path({str(survivor)!r}).write_text('alive')\n"
+        )
+        module = _write_stub(
+            root,
+            "_stub_tree_log_failure",
+            "hang",
+            "import subprocess, sys, time\n"
+            f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+            "print('descendant_started', flush=True)\n"
+            "time.sleep(30)\n",
+        )
+        original_write = _BoundedLogWriter.write
+
+        def fail_on_child_start(writer, data):
+            text = data.decode(errors="replace") if isinstance(data, bytes) else data
+            if "descendant_started" in text:
+                raise OSError("log write failed")
+            return original_write(writer, data)
+
+        monkeypatch.setattr(_BoundedLogWriter, "write", fail_on_child_start)
+        runner = SubprocessStepRunner()
+        with pytest.raises(OSError, match="log write failed"):
+            await runner.run_step(
+                _ctx(work_dir, module, timeout_sec=30),
+                _noop_progress,
+                _noop_tick,
+            )
+        await asyncio.sleep(0.9)
+        assert not survivor.exists()
+        assert not (work_dir / ".A.config.json").exists()
+        assert "TIMEOUT" not in (work_dir / "logs/A.log").read_text()
+
+    @pytest.mark.asyncio
+    async def test_log_failure_kills_group_after_leader_exits(
+        self, with_pythonpath, monkeypatch,
+    ):
+        root = with_pythonpath
+        work_dir = root / "j_leader_exit_log_failure"
+        work_dir.mkdir()
+        survivor = work_dir / "leader-exit-log-descendant-survived"
+        child = (
+            "import time\n"
+            "from pathlib import Path\n"
+            "time.sleep(0.2)\n"
+            "print('child_output', flush=True)\n"
+            "time.sleep(0.6)\n"
+            f"Path({str(survivor)!r}).write_text('alive')\n"
+        )
+        module = _write_stub(
+            root,
+            "_stub_leader_exit_log_failure",
+            "spawn",
+            "import subprocess, sys\n"
+            f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+            "print('leader_done', flush=True)\n",
+        )
+        original_write = _BoundedLogWriter.write
+
+        def fail_on_child_output(writer, data):
+            text = data.decode(errors="replace") if isinstance(data, bytes) else data
+            if "child_output" in text:
+                raise OSError("forced drain failure after leader exit")
+            return original_write(writer, data)
+
+        monkeypatch.setattr(_BoundedLogWriter, "write", fail_on_child_output)
+        with pytest.raises(OSError, match="forced drain failure after leader exit"):
+            await SubprocessStepRunner().run_step(
+                _ctx(work_dir, module, timeout_sec=30),
+                _noop_progress,
+                _noop_tick,
+            )
+        await asyncio.sleep(0.9)
+        assert not survivor.exists()
+
+    @pytest.mark.asyncio
+    async def test_tick_failure_kills_descendant_process_group(
+        self, with_pythonpath, monkeypatch,
+    ):
+        root = with_pythonpath
+        work_dir = root / "j_tree_tick_failure"
+        work_dir.mkdir()
+        survivor = work_dir / "tick-failure-descendant-survived"
+        child = (
+            "import time\n"
+            "from pathlib import Path\n"
+            "time.sleep(0.8)\n"
+            f"Path({str(survivor)!r}).write_text('alive')\n"
+        )
+        module = _write_stub(
+            root,
+            "_stub_tree_tick_failure",
+            "hang",
+            "import subprocess, sys, time\n"
+            f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+            "print('descendant_started', flush=True)\n"
+            "time.sleep(30)\n",
+        )
+        real_sleep = asyncio.sleep
+
+        async def fast_monitor_sleep(seconds):
+            await real_sleep(0.1 if seconds == 10 else seconds)
+
+        async def fail_tick() -> None:
+            raise RuntimeError("tick failed")
+
+        monkeypatch.setattr("worker.step_runner.asyncio.sleep", fast_monitor_sleep)
+        runner = SubprocessStepRunner()
+        with pytest.raises(RuntimeError, match="tick failed"):
+            await runner.run_step(
+                _ctx(work_dir, module, timeout_sec=30),
+                _noop_progress,
+                fail_tick,
+            )
+        await real_sleep(0.9)
+        assert not survivor.exists()
+        assert not (work_dir / ".A.config.json").exists()
+        assert "TIMEOUT" not in (work_dir / "logs/A.log").read_text()
+
+    @pytest.mark.asyncio
+    async def test_tick_timeout_error_is_not_step_deadline(
+        self, with_pythonpath, monkeypatch,
+    ):
+        work_dir = with_pythonpath / "j_tick_timeout_error"
+        work_dir.mkdir()
+        module = _write_stub(
+            with_pythonpath,
+            "_stub_tick_timeout_error",
+            "hang",
+            "import time\nprint('started', flush=True)\ntime.sleep(30)\n",
+        )
+        real_sleep = asyncio.sleep
+
+        async def fast_monitor_sleep(seconds):
+            await real_sleep(0.05 if seconds == 10 else seconds)
+
+        async def fail_tick() -> None:
+            raise asyncio.TimeoutError("heartbeat timed out")
+
+        monkeypatch.setattr("worker.step_runner.asyncio.sleep", fast_monitor_sleep)
+        runner = SubprocessStepRunner()
+        with pytest.raises(asyncio.TimeoutError, match="heartbeat timed out"):
+            await runner.run_step(
+                _ctx(work_dir, module, timeout_sec=30),
+                _noop_progress,
+                fail_tick,
+            )
+        assert "TIMEOUT" not in (work_dir / "logs/A.log").read_text()
+
+    @pytest.mark.asyncio
+    async def test_spawn_failure_removes_step_config(
+        self, with_pythonpath, monkeypatch,
+    ):
+        work_dir = with_pythonpath / "j_spawn_failure"
+        work_dir.mkdir()
+
+        async def fail_spawn(*args, **kwargs):
+            raise OSError("spawn failed")
+
+        monkeypatch.setattr(
+            "worker.step_runner.asyncio.create_subprocess_exec", fail_spawn,
+        )
+        runner = SubprocessStepRunner()
+        with pytest.raises(OSError, match="spawn failed"):
+            await runner.run_step(
+                _ctx(work_dir, "missing.module"), _noop_progress, _noop_tick,
+            )
+        assert not (work_dir / ".A.config.json").exists()
+
+
+class TestSubprocessAbort:
+    class FakeProcess:
+        def __init__(self, returncode):
+            self.pid = 43210
+            self.returncode = returncode
+
+        async def wait(self):
+            self.returncode = -9 if self.returncode is None else self.returncode
+            return self.returncode
+
+    @pytest.mark.asyncio
+    async def test_reaped_leader_with_closed_pipes_is_not_signalled(self, monkeypatch):
+        proc = self.FakeProcess(returncode=0)
+        drain = asyncio.get_running_loop().create_future()
+        drain.set_result(None)
+        monkeypatch.setattr(
+            "worker.step_runner.os.killpg",
+            lambda *_: pytest.fail("released PGID must not be signalled"),
+        )
+
+        await _abort_subprocess_group(proc, proc.pid, drain)
+
+    @pytest.mark.asyncio
+    @pytest.mark.asyncio
+    async def test_missing_process_group_is_already_reclaimed(self, monkeypatch):
+        proc = self.FakeProcess(returncode=None)
+        drain = asyncio.get_running_loop().create_future()
+        drain.set_result(None)
+
+        def missing(*_):
+            raise ProcessLookupError
+
+        monkeypatch.setattr("worker.step_runner.os.killpg", missing)
+        await _abort_subprocess_group(proc, proc.pid, drain)
+        assert proc.returncode == -9
+
+    @pytest.mark.asyncio
+    async def test_permission_error_is_not_hidden(self, monkeypatch):
+        proc = self.FakeProcess(returncode=None)
+        drain = asyncio.get_running_loop().create_future()
+        drain.set_result(None)
+
+        def denied(*_):
+            raise PermissionError("kill denied")
+
+        monkeypatch.setattr("worker.step_runner.os.killpg", denied)
+        with pytest.raises(PermissionError, match="kill denied"):
+            await _abort_subprocess_group(proc, proc.pid, drain)
+
+    @pytest.mark.asyncio
+    async def test_cancellation_kills_descendant_process_group(self, with_pythonpath):
+        root = with_pythonpath
+        work_dir = root / "j_tree_cancel"
+        work_dir.mkdir()
+        survivor = work_dir / "cancelled-descendant-survived"
+        child = (
+            "import time\n"
+            "from pathlib import Path\n"
+            "time.sleep(0.8)\n"
+            f"Path({str(survivor)!r}).write_text('alive')\n"
+        )
+        module = _write_stub(
+            root,
+            "_stub_tree_cancel",
+            "hang",
+            "import subprocess, sys, time\n"
+            f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+            "print('descendant_started', flush=True)\n"
+            "time.sleep(30)\n",
+        )
+        runner = SubprocessStepRunner()
+        task = asyncio.create_task(
+            runner.run_step(
+                _ctx(work_dir, module, timeout_sec=30),
+                _noop_progress,
+                _noop_tick,
+            )
+        )
+        log_path = work_dir / "logs/A.log"
+        for _ in range(50):
+            if log_path.is_file() and "descendant_started" in log_path.read_text():
+                break
+            await asyncio.sleep(0.02)
+        else:
+            pytest.fail("descendant did not start")
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.9)
+        assert not survivor.exists()
+
+    @pytest.mark.asyncio
+    async def test_cancellation_kills_group_after_leader_exits(self, with_pythonpath):
+        root = with_pythonpath
+        work_dir = root / "j_leader_exit_cancel"
+        work_dir.mkdir()
+        survivor = work_dir / "leader-exit-cancel-descendant-survived"
+        child = (
+            "import time\n"
+            "from pathlib import Path\n"
+            "time.sleep(0.8)\n"
+            f"Path({str(survivor)!r}).write_text('alive')\n"
+        )
+        module = _write_stub(
+            root,
+            "_stub_leader_exit_cancel",
+            "spawn",
+            "import subprocess, sys\n"
+            f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+            "print('leader_done', flush=True)\n",
+        )
+        task = asyncio.create_task(
+            SubprocessStepRunner().run_step(
+                _ctx(work_dir, module, timeout_sec=30),
+                _noop_progress,
+                _noop_tick,
+            )
+        )
+        log_path = work_dir / "logs/A.log"
+        for _ in range(50):
+            if log_path.is_file() and "leader_done" in log_path.read_text():
+                break
+            await asyncio.sleep(0.02)
+        else:
+            pytest.fail("leader did not finish")
+        await asyncio.sleep(0.1)
+        started = time.monotonic()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert time.monotonic() - started < 2
+        await asyncio.sleep(0.9)
+        assert not survivor.exists()
 
 
 # 进度转发

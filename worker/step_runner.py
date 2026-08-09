@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,6 +41,11 @@ _LOG_LOW_WATERMARK_RATIO = 0.75
 _DOCKER_LOG_MAX_SIZE = "10m"
 _DOCKER_LOG_MAX_FILE = "3"
 _DEFAULT_DOCKER_CONTROL_TIMEOUT_SEC = 5.0
+_SUBPROCESS_ABORT_TIMEOUT_SEC = 5.0
+
+
+class _SubprocessDeadlineExceeded(Exception):
+    """内部区分步骤预算耗尽与日志/心跳回调自身的 TimeoutError。"""
 
 
 def _step_log_max_bytes() -> int:
@@ -173,26 +179,13 @@ class SubprocessStepRunner:
         # python/ffmpeg,故用 DENYLIST 而非白名单,仅剥离步骤永不需要的敏感密钥。
         env = _build_subprocess_env(ctx)
 
-        proc = await asyncio.create_subprocess_exec(
-            "python3", "-m", ctx.module,
-            "--job-dir", str(work_dir),
-            "--step-config", str(config_path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-
-        # 运行中即可见:边读管道边追加到 logs/{step}.log(stdout/stderr 合一,带前缀)。
-        log_dir = work_dir / "logs"
-        log_dir.mkdir(exist_ok=True)
-        log_path = log_dir / f"{step}.log"
-        # append 而非 truncate:幂等跳过(只输出一行 skip: up-to-date)不覆盖上次真跑的处理日志;
-        # 重跑在已有日志后追加分隔头,保留历史,避免出现有产物没日志。
-        had_content = log_path.exists() and log_path.stat().st_size > 0
-        log_file = _BoundedLogWriter(log_path)
-        if had_content:
-            log_file.write(f"\n===== re-run {step} =====\n")
-            log_file.flush()
+        proc: asyncio.subprocess.Process | None = None
+        process_group_id: int | None = None
+        log_file: _BoundedLogWriter | None = None
+        monitor_task: asyncio.Task | None = None
+        drain_task: asyncio.Future | None = None
+        completion_task: asyncio.Task | None = None
+        timed_out = False
         stderr_tail: list[str] = []
 
         async def _drain(stream: asyncio.StreamReader, prefix: str) -> None:
@@ -201,6 +194,8 @@ class SubprocessStepRunner:
                 if not line:
                     break
                 text = line.decode(errors="replace")
+                if log_file is None:
+                    raise RuntimeError("step log writer is not initialized")
                 log_file.write(prefix + text if prefix else text)
                 log_file.flush()
                 if prefix:
@@ -208,39 +203,162 @@ class SubprocessStepRunner:
                     if len(stderr_tail) > 50:
                         del stderr_tail[0]
 
-        monitor_task = asyncio.create_task(
-            _run_progress_monitor(ctx, on_progress, on_tick, lambda: proc.returncode is None)
-        )
-        drain_task = asyncio.gather(
-            _drain(proc.stdout, ""),
-            _drain(proc.stderr, "[stderr] "),
-        )
-
-        timed_out = False
         try:
-            await asyncio.wait_for(asyncio.shield(drain_task), timeout=timeout)
-            await proc.wait()
-        except asyncio.TimeoutError:
-            timed_out = True
-            proc.kill()
-            await proc.wait()
-            await drain_task
-        finally:
-            monitor_task.cancel()
-            try:
+            proc = await asyncio.create_subprocess_exec(
+                "python3", "-m", "worker.subprocess_supervisor", "--",
+                "python3", "-m", ctx.module,
+                "--job-dir", str(work_dir),
+                "--step-config", str(config_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+                # supervisor是session leader,同组后代未退出时不回收leader;
+                # 异常路径因此可以安全按PGID清组,不猜测已复用的数字ID。
+                start_new_session=True,
+            )
+            process_group_id = proc.pid
+
+            # 运行中即可见:边读管道边追加到 logs/{step}.log(stdout/stderr 合一,带前缀)。
+            log_dir = work_dir / "logs"
+            log_dir.mkdir(exist_ok=True)
+            log_path = log_dir / f"{step}.log"
+            # append 而非 truncate:幂等跳过不覆盖上次真跑的处理日志;
+            # 重跑在已有日志后追加分隔头,保留历史。
+            had_content = log_path.exists() and log_path.stat().st_size > 0
+            log_file = _BoundedLogWriter(log_path)
+            if had_content:
+                log_file.write(f"\n===== re-run {step} =====\n")
+                log_file.flush()
+
+            assert proc.stdout is not None and proc.stderr is not None
+            monitor_task = asyncio.create_task(
+                _run_progress_monitor(
+                    ctx, on_progress, on_tick, lambda: proc.returncode is None,
+                )
+            )
+            drain_task = asyncio.gather(
+                _drain(proc.stdout, ""),
+                _drain(proc.stderr, "[stderr] "),
+            )
+            completion_task = asyncio.create_task(
+                _wait_subprocess_completion(proc, drain_task)
+            )
+            deadline = asyncio.get_running_loop().time() + timeout
+            done, _ = await asyncio.wait(
+                {completion_task, monitor_task},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                raise _SubprocessDeadlineExceeded
+            if monitor_task in done:
                 await monitor_task
-            except asyncio.CancelledError:
-                pass
-            if timed_out:
-                log_file.write(f"\n--- TIMEOUT after {timeout}s ---\n")
-            log_file.flush()
-            log_file.close()
+            remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+            completed, _ = await asyncio.wait({completion_task}, timeout=remaining)
+            if completion_task not in completed:
+                raise _SubprocessDeadlineExceeded
+            await completion_task
+            if monitor_task.done():
+                await monitor_task
+        except _SubprocessDeadlineExceeded:
+            timed_out = True
+            if proc is not None and process_group_id is not None:
+                await _abort_subprocess_group(proc, process_group_id, drain_task)
+        except BaseException:
+            if proc is not None and process_group_id is not None:
+                await _abort_subprocess_group(proc, process_group_id, drain_task)
+            raise
+        finally:
+            if monitor_task is not None:
+                await _cancel_task_bounded(monitor_task, "monitor", proc)
+            if completion_task is not None:
+                await _cancel_task_bounded(completion_task, "completion", proc)
+            if log_file is not None:
+                if timed_out:
+                    log_file.write(f"\n--- TIMEOUT after {timeout}s ---\n")
+                log_file.close()
             config_path.unlink(missing_ok=True)
 
         if timed_out:
             raise asyncio.TimeoutError()
 
+        assert proc is not None and proc.returncode is not None
         return proc.returncode, "".join(stderr_tail)
+
+
+async def _wait_subprocess_completion(
+    proc: asyncio.subprocess.Process,
+    drain_task: asyncio.Future,
+) -> None:
+    """同时等直接子进程与两条管道 EOF,避免孤儿子进程持有管道时误判完成。"""
+    await asyncio.gather(proc.wait(), drain_task)
+
+
+async def _abort_subprocess_group(
+    proc: asyncio.subprocess.Process,
+    process_group_id: int,
+    drain_task: asyncio.Future | None,
+) -> None:
+    """先同步杀新 session 进程组,再有界回收直接子进程与管道。"""
+    # supervisor只在同组后代全部退出后才退出。leader已回收时PGID
+    # 可能已被复用,禁止再发信号;未回收时PGID仍由本runner持有。
+    if proc.returncode is None:
+        _signal_subprocess_group(process_group_id)
+
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(proc.wait()), timeout=_SUBPROCESS_ABORT_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("subprocess_reap_timeout", pid=proc.pid)
+
+    if drain_task is None:
+        return
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(drain_task), timeout=_SUBPROCESS_ABORT_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        drain_task.cancel()
+        await asyncio.gather(drain_task, return_exceptions=True)
+        logger.warning("subprocess_drain_timeout", pid=proc.pid)
+    except Exception as error:
+        # 异常路径只做回收,原始日志/心跳/取消异常由调用者保留。
+        logger.warning(
+            "subprocess_secondary_drain_failed",
+            pid=proc.pid,
+            error_type=type(error).__name__,
+        )
+
+
+def _signal_subprocess_group(process_group_id: int) -> None:
+    """终止已由调用方证明归属本runner的进程组。"""
+    try:
+        os.killpg(process_group_id, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+async def _cancel_task_bounded(
+    task: asyncio.Future,
+    label: str,
+    proc: asyncio.subprocess.Process | None,
+) -> None:
+    """取消辅助任务但不让忽略取消的回调阻塞 runner 收尾。"""
+    if task.done():
+        await asyncio.gather(task, return_exceptions=True)
+        return
+    task.cancel()
+    done, _ = await asyncio.wait({task}, timeout=_SUBPROCESS_ABORT_TIMEOUT_SEC)
+    if task in done:
+        await asyncio.gather(task, return_exceptions=True)
+        return
+    task.cancel()
+    logger.warning(
+        "subprocess_auxiliary_cancel_timeout",
+        task=label,
+        pid=proc.pid if proc is not None else None,
+    )
 
 class DockerStepRunner:
     """每步一容器:work_dir bind-mount 到 /job,GPU 经 DeviceRequest,container.wait

@@ -189,6 +189,7 @@ services:
   worker-cpu:
     container_name: flori-worker-cpu
     image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker:${IMAGE_TAG:-latest}
+    init: true
     restart: unless-stopped
     command: python -m worker.main --pools cpu
     logging: *default-logging
@@ -223,6 +224,7 @@ services:
   worker-ai:
     container_name: flori-worker-ai
     image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker:${IMAGE_TAG:-latest}
+    init: true
     restart: unless-stopped
     command: python -m worker.main --pools ai
     logging: *default-logging
@@ -255,6 +257,7 @@ services:
   worker-source:
     container_name: flori-worker-source
     image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker:${IMAGE_TAG:-latest}
+    init: true
     restart: unless-stopped
     profiles: ["source-library"]
     command: python -m worker.main --pools io cpu ai

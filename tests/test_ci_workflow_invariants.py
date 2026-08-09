@@ -6,10 +6,31 @@ import yaml
 
 
 WORKFLOW = Path(__file__).parents[1] / ".github/workflows/ci.yml"
+ROOT = WORKFLOW.parents[2]
 
 
 def load_workflow() -> dict:
     return yaml.safe_load(WORKFLOW.read_text())
+
+
+def test_all_worker_main_compose_services_use_docker_init() -> None:
+    compose_paths = (
+        ROOT / "docker-compose.yml",
+        ROOT / "docker-compose.dev.yml",
+        ROOT / "docker-compose.integration.yml",
+        ROOT / "deploy/edge/worker.yml",
+    )
+    matched: list[str] = []
+    for path in compose_paths:
+        services = yaml.safe_load(path.read_text())["services"]
+        for service_name, service in services.items():
+            command = service.get("command", "")
+            command_text = " ".join(command) if isinstance(command, list) else command
+            if "worker.main" not in command_text:
+                continue
+            matched.append(f"{path.name}:{service_name}")
+            assert service.get("init") is True, matched[-1]
+    assert len(matched) == 11
 
 
 def test_cancelable_jobs_use_scoped_job_concurrency() -> None:

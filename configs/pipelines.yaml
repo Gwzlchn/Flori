@@ -236,7 +236,7 @@ video:
       run: steps.utils.step_semantic_attestation
       version: "2"
       needs: ["11_smart"]
-      timeout: 180
+      timeout: 900
       tags: []
       # 协议 prompt:tracked 模板可读,prompt_locked 禁前端覆盖(响应 schema 与解析器成对,改模板须 bump version)。
       prompt_template: semantic_attestation
@@ -375,7 +375,7 @@ document:
       run: steps.utils.step_semantic_attestation
       version: "1"
       needs: ["05_smart", "04_translate"]
-      timeout: 180
+      timeout: 900
       tags: []
       prompt_template: semantic_attestation
       prompt_locked: true
@@ -484,7 +484,7 @@ audio:
       run: steps.utils.step_semantic_attestation
       version: "2"
       needs: ["04_smart_podcast"]
-      timeout: 180
+      timeout: 900
       tags: []
       prompt_template: semantic_attestation
       prompt_locked: true

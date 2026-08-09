@@ -93,6 +93,7 @@ services:
       - redis
 
   worker-cpu:
+    init: true
     build:
       context: .
       dockerfile: docker/base.Dockerfile
@@ -118,6 +119,7 @@ services:
       - redis
 
   worker-ai:
+    init: true
     build:
       context: .
       dockerfile: docker/base.Dockerfile
@@ -144,6 +146,7 @@ services:
       - redis
 
   worker-source:
+    init: true
     build:
       context: .
       dockerfile: docker/base.Dockerfile

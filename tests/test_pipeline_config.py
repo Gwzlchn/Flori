@@ -230,7 +230,7 @@ class TestSemanticAttestationPipeline:
 
             attestor = jobs[attestors[pipeline]]
             assert any(path.startswith("output/provenance/") for path in attestor["outputs"])
-            assert attestor["timeout"] == 180
+            assert attestor["timeout"] == 900
             assert depends_on(concepts[pipeline], attestors[pipeline])
             index_actions = [
                 action for action in jobs[concepts[pipeline]].get("on_complete", [])
