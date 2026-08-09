@@ -8,13 +8,15 @@ from __future__ import annotations
 import asyncio
 import json
 import hashlib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from scheduler.effects import ConceptSourceUnavailableError
 from scheduler.scheduler import Scheduler
-from shared.db import ConceptConflictError, Database
+from shared.db import ConceptConflictError, Database, _EMPTY_CONCEPT_PROJECTION_DIGEST
 from shared.models import Job, JobStatus
 
 
@@ -137,7 +139,10 @@ class _DBStub:
         self.canonical_queries: list[dict] = []
         self.occurrence_replacements: list[dict] = []
         self.occurrence_projection_sources: dict[str, str] = {}
+        self.occurrence_projection_empty: dict[str, bool] = {}
         self.definition_states: dict[str, dict] = {}
+        self.replay_states: dict[str, dict] = {}
+        self.replay_failures: list[dict] = []
 
     def get_job(self, job_id: str):
         return self._job
@@ -185,20 +190,58 @@ class _DBStub:
         self, *, domain, job_id, mapping,
         projection_source_digest=None,
         expected_projection_source_digest=None,
+        projection_empty_reason="no_canonical_evidence",
     ):
         if projection_source_digest is not None:
             assert self.occurrence_projection_sources.get(job_id) \
                 == expected_projection_source_digest
             self.occurrence_projection_sources[job_id] = projection_source_digest
+            self.occurrence_projection_empty[job_id] = not mapping
+            if mapping:
+                self.replay_states.pop(job_id, None)
+            else:
+                self.replay_states[job_id] = {
+                    "state": "verified_empty",
+                    "reason": projection_empty_reason,
+                    "source_digest": projection_source_digest,
+                }
         self.occurrence_replacements.append({
             "domain": domain,
             "job_id": job_id,
             "mapping": {term: list(ids) for term, ids in mapping.items()},
         })
 
+    def get_concept_occurrence_projection_pair(self, job_id: str):
+        from shared.db import _EMPTY_CONCEPT_PROJECTION_DIGEST
+
+        source = self.occurrence_projection_sources.get(job_id)
+        if source is None:
+            return None
+        empty = self.occurrence_projection_empty.get(job_id, True)
+        return (source, _EMPTY_CONCEPT_PROJECTION_DIGEST if empty else "sha256:nonempty")
+
+    def get_concept_occurrence_replay_state(self, job_id: str):
+        return self.replay_states.get(job_id)
+
     def get_concept_occurrence_projection_source(self, job_id: str):
         return self.occurrence_projection_sources.get(job_id)
 
+    def record_concept_occurrence_replay_failure(
+        self, job_id, *, reason, retry_base_seconds, retry_cap_seconds, now=None,
+    ):
+        previous = self.replay_states.get(job_id) or {}
+        attempt = int(previous.get("attempt_count") or 0) + 1
+        state = {
+            "job_id": job_id, "state": "retry", "reason": reason,
+            "attempt_count": attempt,
+            "last_attempt_at": "stub-now", "next_retry_at": "stub-later",
+        }
+        self.replay_states[job_id] = state
+        self.replay_failures.append({
+            "job_id": job_id, "reason": reason,
+            "base": retry_base_seconds, "cap": retry_cap_seconds,
+        })
+        return dict(state)
 
 def _make_engine(storage, db):
     # _collect_glossary 仅用 self.storage / self.db;config 只需提供 jobs_dir。
@@ -412,7 +455,7 @@ async def test_repeated_completion_is_idempotent_and_removed_term_is_omitted():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "failure", ["missing", "malformed", "non_object", "unreliable"],
+    "failure", ["malformed", "non_object", "unreliable"],
 )
 async def test_untrustworthy_replay_clears_previous_job_occurrences(failure):
     class MutableStorage:
@@ -458,9 +501,7 @@ async def test_untrustworthy_replay_clears_previous_job_occurrences(failure):
     await engine._collect_glossary("j_replay")
     assert db.occurrence_replacements[-1]["mapping"] == {"A": ["ev-a"]}
 
-    if failure == "missing":
-        storage.concepts = storage.review = None
-    elif failure == "malformed":
+    if failure == "malformed":
         storage.concepts = b"{broken"
     elif failure == "non_object":
         storage.concepts = b"[]"
@@ -470,6 +511,46 @@ async def test_untrustworthy_replay_clears_previous_job_occurrences(failure):
     await engine._collect_glossary("j_replay")
 
     assert db.occurrence_replacements[-1]["mapping"] == {}
+
+
+@pytest.mark.asyncio
+async def test_unreadable_source_keeps_occurrences_and_fails_completion_gate():
+    # 真源整体读不到属环境性失败:不清旧投影、不落空 marker,抛错让完成门重试。
+    class VanishingStorage:
+        def __init__(self):
+            self.concepts = json.dumps({
+                "evidence_note_type": "original",
+                "key_terms": [{
+                    "term": "A",
+                    "evidence_source_segment_ids": [_SEGMENT_A],
+                }],
+            }).encode()
+
+        async def read_file(self, job_id, rel):
+            if rel == "output/concepts.json":
+                return self.concepts
+            return None
+
+        async def file_size(self, job_id, rel):
+            data = await self.read_file(job_id, rel)
+            return len(data) if data is not None else None
+
+        async def open_stream(self, job_id, rel, **kwargs):
+            return None
+
+    storage = VanishingStorage()
+    db = _DBStub()
+    db.canonical_by_segment = {_SEGMENT_A: ["ev-a"]}
+    engine = _make_engine(storage, db)
+    await engine._collect_glossary("j_replay")
+    marker = db.occurrence_projection_sources["j_replay"]
+
+    storage.concepts = None
+    with pytest.raises(ConceptSourceUnavailableError):
+        await engine._collect_glossary("j_replay")
+
+    assert db.occurrence_replacements[-1]["mapping"] == {"A": ["ev-a"]}
+    assert db.occurrence_projection_sources["j_replay"] == marker
 
 
 @pytest.mark.asyncio
@@ -491,10 +572,12 @@ async def test_missing_artifacts_use_real_database_keyword_reconcile(tmp_path):
             id="job-missing", content_type="document", pipeline="document",
             document_kind="article",
         ))
-        await _make_engine(EmptyStorage(), db)._collect_glossary("job-missing")
+        with pytest.raises(ConceptSourceUnavailableError):
+            await _make_engine(EmptyStorage(), db)._collect_glossary("job-missing")
         assert db.list_concept_occurrences(
             "general", "unused", include_invalid=True,
         ) == []
+        assert db.get_concept_occurrence_projection_source("job-missing") is None
     finally:
         db.close()
 
@@ -561,16 +644,45 @@ def test_occurrence_projection_ledger_preserves_retry_after_fts_success(tmp_path
             mapping={},
             projection_source_digest="sha256:" + "1" * 64,
             expected_projection_source_digest=None,
+            projection_empty_reason="truly_empty",
         )
+        # 空投影发布同事务落 verified_empty 判定:离开候选池,不再周期重读。
+        state = db.get_concept_occurrence_replay_state("job-retry-occurrence")
+        assert state["state"] == "verified_empty"
+        assert state["reason"] == "truly_empty"
+        assert state["source_digest"] == "sha256:" + "1" * 64
         assert db.list_unreconciled_concept_occurrence_jobs() == []
 
-        # FTS/canonical evidence 新版本与旧 marker 不能同时可见。模拟索引提交后、
+        # 生产事故形态(pre-v10 固化行/崩溃窗口):空 marker 没有判定行。
+        # 必须回到候选池,由 reconcile 读源收敛,而不是永久离池。
+        db._conn.execute(
+            "DELETE FROM concept_occurrence_replay_state WHERE job_id=?",
+            ("job-retry-occurrence",),
+        )
+        db._conn.commit()
+        assert [
+            job.id for job in db.list_unreconciled_concept_occurrence_jobs()
+        ] == ["job-retry-occurrence"]
+
+        # 非空投影才彻底不需要判定行;直接改写 projection_digest 模拟成功重放后的行。
+        db._conn.execute(
+            """UPDATE concept_occurrence_projection
+               SET projection_digest=? WHERE job_id=?""",
+            ("sha256:" + "2" * 64, "job-retry-occurrence"),
+        )
+        db._conn.commit()
+        assert db.list_unreconciled_concept_occurrence_jobs() == []
+
+        # FTS/canonical evidence 新版本与旧 marker/判定不能同时可见。模拟索引提交后、
         # glossary 对账前崩溃,周期查询必须重新认领这个 Job。
         db.index_job_notes(
             "job-retry-occurrence", "original", "title-v2", "body-v2",
             content_type="document", domain="general",
         )
         assert db.get_concept_occurrence_projection_source(
+            "job-retry-occurrence",
+        ) is None
+        assert db.get_concept_occurrence_replay_state(
             "job-retry-occurrence",
         ) is None
         assert [
@@ -628,6 +740,173 @@ def test_occurrence_projection_source_publish_is_compare_and_swap(tmp_path):
         ) == source_b
     finally:
         db.close()
+
+
+def test_empty_projection_digest_constant_matches_published_rows(tmp_path):
+    # 锚定常量与真实发布行一致,防止序列化漂移;末段哈希即生产库空投影行的指纹。
+    assert _EMPTY_CONCEPT_PROJECTION_DIGEST == (
+        "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    )
+    db = Database(tmp_path / "occurrence-empty-digest.db")
+    db.init_schema()
+    try:
+        db.create_job(Job(
+            id="job-empty-digest",
+            content_type="document",
+            pipeline="document",
+            document_kind="article",
+            status=JobStatus.DONE,
+        ))
+        db.replace_job_concept_occurrences(
+            domain="general",
+            job_id="job-empty-digest",
+            mapping={},
+            projection_source_digest="sha256:" + "a" * 64,
+            expected_projection_source_digest=None,
+        )
+        row = db._conn.execute(
+            "SELECT projection_digest FROM concept_occurrence_projection WHERE job_id=?",
+            ("job-empty-digest",),
+        ).fetchone()
+        assert row["projection_digest"] == _EMPTY_CONCEPT_PROJECTION_DIGEST
+    finally:
+        db.close()
+
+
+class _AllMissingStorage:
+    async def read_file(self, job_id, rel):
+        return None
+
+    async def file_size(self, job_id, rel):
+        return None
+
+    async def open_stream(self, job_id, rel, **kwargs):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_replay_defers_without_marker_when_source_unreadable():
+    # 环境性读不到真源:不落 durable marker,改记持久退避账本(source_missing),
+    # 重试资格保留但不再每拍占用候选窗口。
+    db = _DBStub()
+    engine = _make_engine(_AllMissingStorage(), db)
+
+    assert await engine.reconcile_concept_occurrences_only("j_missing") == 0
+
+    assert db.occurrence_replacements == []
+    assert db.occurrence_projection_sources == {}
+    assert db.replay_failures == [{
+        "job_id": "j_missing", "reason": "source_missing",
+        "base": 300, "cap": 86400,
+    }]
+    assert db.replay_states["j_missing"]["state"] == "retry"
+
+
+class _FlippableConceptsStorage:
+    def __init__(self, payload: dict | None):
+        self.payload = payload
+
+    async def read_file(self, job_id, rel):
+        if rel == "output/concepts.json" and self.payload is not None:
+            return json.dumps(self.payload, ensure_ascii=False).encode("utf-8")
+        return None
+
+    async def file_size(self, job_id, rel):
+        data = await self.read_file(job_id, rel)
+        return len(data) if data is not None else None
+
+    async def open_stream(self, job_id, rel, **kwargs):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_stale_empty_marker_replays_to_full_projection_roundtrip():
+    # 生产形态:老代码把读不到真源固化成空投影 marker。真源恢复可读后,
+    # 重放必须发现 digest 不符,把空投影修回非空,并在之后保持幂等。
+    stale_digest = "sha256:" + hashlib.sha256(b"source_missing").hexdigest()
+    db = _DBStub(domain="ml")
+    db.canonical_by_segment = {_SEGMENT_A: ["ev-a"]}
+    db.calls.append({
+        "term": "Alpha", "zh_name": "", "domain": "ml", "job_id": "seed",
+        "content_type": "document", "location": None, "definition": "",
+        "document_kind": "article",
+    })
+    db.occurrence_projection_sources["j_fixated"] = stale_digest
+    db.occurrence_replacements.append(
+        {"domain": "ml", "job_id": "j_fixated", "mapping": {}},
+    )
+    storage = _FlippableConceptsStorage({
+        "evidence_note_type": "original",
+        "key_terms": [{
+            "term": "Alpha",
+            "evidence_source_segment_ids": [_SEGMENT_A],
+        }],
+    })
+    engine = _make_engine(storage, db)
+
+    first = await engine.reconcile_concept_occurrences_only("j_fixated")
+    second = await engine.reconcile_concept_occurrences_only("j_fixated")
+
+    assert first == 1
+    assert second == 0
+    assert db.occurrence_replacements[-1] == {
+        "domain": "ml", "job_id": "j_fixated", "mapping": {"Alpha": ["ev-a"]},
+    }
+    assert len(db.occurrence_replacements) == 2
+    marker = db.occurrence_projection_sources["j_fixated"]
+    assert marker != stale_digest
+    assert marker.startswith("sha256:")
+
+
+@pytest.mark.asyncio
+async def test_sentinel_marker_with_missing_source_defers_then_replays():
+    # 旧 marker 存的是 source_missing 哨兵摘要且真源仍读不到:不得短路进确认缓存,
+    # 同进程内真源一就绪就要立即重放,不等调度器重启。
+    stale_digest = "sha256:" + hashlib.sha256(b"source_missing").hexdigest()
+    db = _DBStub(domain="ml")
+    db.canonical_by_segment = {_SEGMENT_A: ["ev-a"]}
+    db.calls.append({
+        "term": "Alpha", "zh_name": "", "domain": "ml", "job_id": "seed",
+        "content_type": "document", "location": None, "definition": "",
+        "document_kind": "article",
+    })
+    db.occurrence_projection_sources["j_sentinel"] = stale_digest
+    storage = _FlippableConceptsStorage(None)
+    engine = _make_engine(storage, db)
+
+    assert await engine.reconcile_concept_occurrences_only("j_sentinel") == 0
+    assert db.occurrence_projection_sources["j_sentinel"] == stale_digest
+    assert db.occurrence_replacements == []
+
+    storage.payload = {
+        "evidence_note_type": "original",
+        "key_terms": [{
+            "term": "Alpha",
+            "evidence_source_segment_ids": [_SEGMENT_A],
+        }],
+    }
+    assert await engine.reconcile_concept_occurrences_only("j_sentinel") == 1
+    assert db.occurrence_replacements[-1]["mapping"] == {"Alpha": ["ev-a"]}
+    assert db.occurrence_projection_sources["j_sentinel"] != stale_digest
+
+
+@pytest.mark.asyncio
+async def test_truly_empty_source_publishes_marker_idempotently():
+    # 真源可读且确实没有概念:空投影是正确结果,落 digest 绑定的 marker 并保持幂等。
+    db = _DBStub()
+    storage = _FlippableConceptsStorage({"key_terms": []})
+    engine = _make_engine(storage, db)
+
+    first = await engine.reconcile_concept_occurrences_only("j_empty")
+    marker = db.occurrence_projection_sources["j_empty"]
+    second = await engine.reconcile_concept_occurrences_only("j_empty")
+
+    assert first == 0 and second == 0
+    assert db.occurrence_replacements == [
+        {"domain": "ml", "job_id": "j_empty", "mapping": {}},
+    ]
+    assert marker.startswith("sha256:")
+    assert db.occurrence_projection_sources["j_empty"] == marker
 
 
 @pytest.mark.asyncio
@@ -799,3 +1078,388 @@ async def test_resynthesis_failure_is_best_effort_and_shutdown_cancels(monkeypat
 
     assert cancelled.is_set()
     assert all(task.done() for task in shutdown_engine._concept_synthesis_tasks.values())
+
+
+class _PerJobConceptsStorage:
+    """按 job 提供 concepts.json;None=两路缺失,unreachable 集合=读抛异常。"""
+
+    def __init__(self, payloads: dict):
+        self.payloads = dict(payloads)
+        self.reads: dict[str, int] = {}
+        self.unreachable: set[str] = set()
+
+    async def read_file(self, job_id, rel):
+        if rel != "output/concepts.json":
+            return None
+        self.reads[job_id] = self.reads.get(job_id, 0) + 1
+        if job_id in self.unreachable:
+            raise OSError("storage unavailable")
+        payload = self.payloads.get(job_id)
+        if payload is None:
+            return None
+        if isinstance(payload, (bytes, bytearray)):
+            return bytes(payload)
+        return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    async def file_size(self, job_id, rel):
+        return None
+
+    async def open_stream(self, job_id, rel, **kwargs):
+        return None
+
+
+def _seed_indexed_job(db, job_id: str, created_at: datetime) -> None:
+    db.create_job(Job(
+        id=job_id, content_type="document", pipeline="document",
+        document_kind="article", status=JobStatus.DONE, created_at=created_at,
+    ))
+    db.index_job_notes(
+        job_id, "original", job_id, "body",
+        content_type="document", domain="general",
+    )
+
+
+async def _drain_once(engine, db, now: str | None = None) -> list:
+    batch = db.list_unreconciled_concept_occurrence_jobs(now=now)
+    for job in batch:
+        await engine.reconcile_concept_occurrences_only(job.id)
+    return batch
+
+
+_BASE_CREATED = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_hundred_true_empty_rows_do_not_starve_fixable_tail(tmp_path):
+    # 100 个真实空集占满第一窗;它们判定后离池,第二拍必须轮到第 101 个。
+    db = Database(tmp_path / "starve-empty.db")
+    try:
+        db.init_schema()
+        ids = [f"job-{i:03d}" for i in range(101)]
+        for i, job_id in enumerate(ids):
+            _seed_indexed_job(db, job_id, _BASE_CREATED + timedelta(minutes=i))
+        storage = _PerJobConceptsStorage({
+            job_id: {"key_terms": []} for job_id in ids
+        })
+        engine = _make_engine(storage, db)
+
+        first_batch = await _drain_once(engine, db)
+        assert [job.id for job in first_batch] == ids[:100]
+        assert db.get_concept_occurrence_projection_source(ids[100]) is None
+
+        second_batch = await _drain_once(engine, db)
+        assert [job.id for job in second_batch] == [ids[100]]
+        assert db.get_concept_occurrence_projection_source(ids[100]) is not None
+        tail_state = db.get_concept_occurrence_replay_state(ids[100])
+        assert tail_state["state"] == "verified_empty"
+        assert tail_state["reason"] == "truly_empty"
+        assert db.list_unreconciled_concept_occurrence_jobs() == []
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_hundred_source_missing_rows_do_not_starve_fixable_tail(tmp_path):
+    # 100 个真源缺失进退避轨让出窗口;第 101 个第二拍就被处理。
+    # 缺失者保留有界重试:到期重新入选,再失败退避继续后移。
+    db = Database(tmp_path / "starve-missing.db")
+    try:
+        db.init_schema()
+        ids = [f"job-{i:03d}" for i in range(101)]
+        for i, job_id in enumerate(ids):
+            _seed_indexed_job(db, job_id, _BASE_CREATED + timedelta(minutes=i))
+        storage = _PerJobConceptsStorage({ids[100]: {"key_terms": []}})
+        engine = _make_engine(storage, db)
+
+        first_batch = await _drain_once(engine, db)
+        assert [job.id for job in first_batch] == ids[:100]
+        sample = db.get_concept_occurrence_replay_state(ids[0])
+        assert sample["state"] == "retry"
+        assert sample["reason"] == "source_missing"
+        assert sample["attempt_count"] == 1
+
+        second_batch = await _drain_once(engine, db)
+        assert [job.id for job in second_batch] == [ids[100]]
+        assert db.get_concept_occurrence_projection_source(ids[100]) is not None
+        assert db.list_unreconciled_concept_occurrence_jobs() == []
+
+        # 未到期不入选;到期后重新入选,失败一次退避继续后移。
+        due_at = (
+            datetime.now(timezone.utc) + timedelta(hours=2)
+        ).isoformat()
+        due_batch = db.list_unreconciled_concept_occurrence_jobs(now=due_at)
+        assert [job.id for job in due_batch] == ids[:100]
+        await engine.reconcile_concept_occurrences_only(ids[0])
+        retried = db.get_concept_occurrence_replay_state(ids[0])
+        assert retried["attempt_count"] == 2
+        assert retried["next_retry_at"] > sample["next_retry_at"]
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_verified_empty_not_reread_and_survives_restart(tmp_path):
+    # 判定持久:不再每拍重读真源;换新 engine(调度器重启)也不回炉。
+    db = Database(tmp_path / "verified-durable.db")
+    try:
+        db.init_schema()
+        _seed_indexed_job(db, "job-empty", _BASE_CREATED)
+        storage = _PerJobConceptsStorage({"job-empty": {"key_terms": []}})
+        engine = _make_engine(storage, db)
+
+        assert [job.id for job in await _drain_once(engine, db)] == ["job-empty"]
+        assert storage.reads["job-empty"] == 1
+
+        for _ in range(5):
+            assert await _drain_once(engine, db) == []
+        assert storage.reads["job-empty"] == 1
+
+        restarted = _make_engine(storage, db)
+        assert await _drain_once(restarted, db) == []
+        far_future = (
+            datetime.now(timezone.utc) + timedelta(days=30)
+        ).isoformat()
+        assert db.list_unreconciled_concept_occurrence_jobs(now=far_future) == []
+        assert storage.reads["job-empty"] == 1
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_transient_storage_failure_recovers_and_converges(tmp_path):
+    db = Database(tmp_path / "transient-storage.db")
+    try:
+        db.init_schema()
+        _seed_indexed_job(db, "job-flaky", _BASE_CREATED)
+        storage = _PerJobConceptsStorage({"job-flaky": {"key_terms": []}})
+        storage.unreachable.add("job-flaky")
+        engine = _make_engine(storage, db)
+
+        assert [job.id for job in await _drain_once(engine, db)] == ["job-flaky"]
+        state = db.get_concept_occurrence_replay_state("job-flaky")
+        assert state["state"] == "retry"
+        assert state["reason"] == "storage_unreachable"
+        assert db.get_concept_occurrence_projection_source("job-flaky") is None
+        assert db.list_unreconciled_concept_occurrence_jobs() == []
+
+        storage.unreachable.clear()
+        due_at = (
+            datetime.now(timezone.utc) + timedelta(hours=1)
+        ).isoformat()
+        assert [
+            job.id for job in await _drain_once(engine, db, now=due_at)
+        ] == ["job-flaky"]
+        assert db.get_concept_occurrence_projection_source("job-flaky") is not None
+        assert db.get_concept_occurrence_replay_state(
+            "job-flaky",
+        )["state"] == "verified_empty"
+        assert db.list_unreconciled_concept_occurrence_jobs() == []
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_deterministic_invalid_content_settles_without_rereads(tmp_path):
+    # JSON 坏字节是确定性拒绝:一次读源落判定,之后不再入选、不再重读、不再刷日志。
+    db = Database(tmp_path / "invalid-settles.db")
+    try:
+        db.init_schema()
+        _seed_indexed_job(db, "job-broken", _BASE_CREATED)
+        storage = _PerJobConceptsStorage({"job-broken": b"{broken"})
+        engine = _make_engine(storage, db)
+
+        assert [job.id for job in await _drain_once(engine, db)] == ["job-broken"]
+        state = db.get_concept_occurrence_replay_state("job-broken")
+        assert state["state"] == "verified_empty"
+        assert state["reason"] == "source_invalid"
+        assert storage.reads["job-broken"] == 1
+
+        for _ in range(5):
+            assert await _drain_once(engine, db) == []
+        assert storage.reads["job-broken"] == 1
+    finally:
+        db.close()
+
+
+def test_replay_failure_ledger_guards_and_bounded_backoff(tmp_path):
+    db = Database(tmp_path / "replay-ledger.db")
+    try:
+        db.init_schema()
+        _seed_indexed_job(db, "job-ledger", _BASE_CREATED)
+        digest = "sha256:" + "a" * 64
+        db.replace_job_concept_occurrences(
+            domain="general", job_id="job-ledger", mapping={},
+            projection_source_digest=digest,
+            expected_projection_source_digest=None,
+            projection_empty_reason="truly_empty",
+        )
+        # 判定仍绑定当前 marker:失败记录是 CAS 败者,不得覆盖判定。
+        assert db.record_concept_occurrence_replay_failure(
+            "job-ledger", reason="replay_error",
+            retry_base_seconds=60, retry_cap_seconds=3600,
+        ) is None
+        assert db.get_concept_occurrence_replay_state(
+            "job-ledger",
+        )["state"] == "verified_empty"
+
+        # 非空投影已离池:同样不写退避账本。
+        db._conn.execute(
+            """UPDATE concept_occurrence_projection
+               SET projection_digest=? WHERE job_id=?""",
+            ("sha256:" + "2" * 64, "job-ledger"),
+        )
+        db._conn.commit()
+        assert db.record_concept_occurrence_replay_failure(
+            "job-ledger", reason="replay_error",
+            retry_base_seconds=60, retry_cap_seconds=3600,
+        ) is None
+
+        # 回到可修复空投影形态:退避指数增长且被 cap 封顶,attempt 单调。
+        db._conn.execute(
+            """UPDATE concept_occurrence_projection
+               SET projection_digest=? WHERE job_id=?""",
+            (_EMPTY_CONCEPT_PROJECTION_DIGEST, "job-ledger"),
+        )
+        db._conn.execute(
+            "DELETE FROM concept_occurrence_replay_state WHERE job_id=?",
+            ("job-ledger",),
+        )
+        db._conn.commit()
+        fixed_now = "2026-01-01T00:00:00+00:00"
+        base_dt = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        expected_delays = [300, 600, 1200, 2400, 4800, 9600, 19200, 38400,
+                           76800, 86400, 86400, 86400]
+        for attempt, delay in enumerate(expected_delays, start=1):
+            state = db.record_concept_occurrence_replay_failure(
+                "job-ledger", reason="source_missing",
+                retry_base_seconds=300, retry_cap_seconds=86400, now=fixed_now,
+            )
+            assert state["attempt_count"] == attempt
+            assert state["next_retry_at"] == (
+                base_dt + timedelta(seconds=delay)
+            ).isoformat()
+        persisted = db.get_concept_occurrence_replay_state("job-ledger")
+        assert persisted["state"] == "retry"
+        assert persisted["reason"] == "source_missing"
+        assert persisted["attempt_count"] == len(expected_delays)
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cas_conflict_does_not_clobber_verdict(tmp_path):
+    # 重放读源期间另一执行者先发布判定:本次 CAS 必败,失败记录必须让路,
+    # 胜者的 verified_empty 与 marker 原样保留,job 不回炉。
+    db = Database(tmp_path / "cas-conflict.db")
+    try:
+        db.init_schema()
+        _seed_indexed_job(db, "job-race", _BASE_CREATED)
+        winner_digest = "sha256:" + "a" * 64
+
+        class RacingStorage(_PerJobConceptsStorage):
+            def __init__(self):
+                super().__init__({"job-race": {"key_terms": []}})
+                self.raced = False
+
+            async def read_file(self, job_id, rel):
+                if rel == "output/concepts.json" and not self.raced:
+                    self.raced = True
+                    db.replace_job_concept_occurrences(
+                        domain="general", job_id=job_id, mapping={},
+                        projection_source_digest=winner_digest,
+                        expected_projection_source_digest=None,
+                        projection_empty_reason="truly_empty",
+                    )
+                return await super().read_file(job_id, rel)
+
+        engine = _make_engine(RacingStorage(), db)
+        with pytest.raises(ConceptConflictError):
+            await engine.reconcile_concept_occurrences_only("job-race")
+
+        assert db.get_concept_occurrence_projection_source(
+            "job-race",
+        ) == winner_digest
+        state = db.get_concept_occurrence_replay_state("job-race")
+        assert state["state"] == "verified_empty"
+        assert state["source_digest"] == winner_digest
+        assert db.list_unreconciled_concept_occurrence_jobs() == []
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_matching_digest_with_nonempty_source_must_recompute():
+    db = _DBStub(domain="ml")
+    db.canonical_by_segment = {_SEGMENT_A: ["ev-a"]}
+    db.calls.append({
+        "term": "Alpha", "zh_name": "", "domain": "ml", "job_id": "seed",
+        "content_type": "document", "location": None, "definition": "",
+        "document_kind": "article",
+    })
+    source = {
+        "evidence_note_type": "original",
+        "key_terms": [{"term": "Alpha", "evidence_source_segment_ids": [_SEGMENT_A]}],
+    }
+    payload = json.dumps(source, ensure_ascii=False).encode("utf-8")
+    real_digest = "sha256:" + hashlib.sha256(b"concepts\0" + payload).hexdigest()
+    db.occurrence_projection_sources["j_wrong"] = real_digest
+    db.occurrence_projection_empty["j_wrong"] = True
+    db.occurrence_replacements.append(
+        {"domain": "ml", "job_id": "j_wrong", "mapping": {}},
+    )
+    storage = _PerJobConceptsStorage({"j_wrong": payload})
+    engine = _make_engine(storage, db)
+
+    produced = await engine.reconcile_concept_occurrences_only("j_wrong")
+
+    assert produced == 1
+    assert db.occurrence_replacements[-1] == {
+        "domain": "ml", "job_id": "j_wrong", "mapping": {"Alpha": ["ev-a"]},
+    }
+    assert db.replay_states.get("j_wrong") is None
+
+
+@pytest.mark.asyncio
+async def test_legacy_empty_marker_with_matching_source_becomes_verified(tmp_path):
+    # 15340ba 时代合法的空投影行(真实源摘要,无判定行):一次复核读源确认
+    # 真重算确认空集后固化为 verified_empty,不再回炉。
+    db = Database(tmp_path / "legacy-legit-empty.db")
+    try:
+        db.init_schema()
+        _seed_indexed_job(db, "job-legacy", _BASE_CREATED)
+        payload = json.dumps(
+            {"key_terms": []}, ensure_ascii=False,
+        ).encode("utf-8")
+        real_digest = "sha256:" + hashlib.sha256(
+            b"concepts\0" + payload,
+        ).hexdigest()
+        db.replace_job_concept_occurrences(
+            domain="general", job_id="job-legacy", mapping={},
+            projection_source_digest=real_digest,
+            expected_projection_source_digest=None,
+            projection_empty_reason="truly_empty",
+        )
+        db._conn.execute(
+            "DELETE FROM concept_occurrence_replay_state WHERE job_id=?",
+            ("job-legacy",),
+        )
+        db._conn.commit()
+        storage = _PerJobConceptsStorage({"job-legacy": payload})
+        engine = _make_engine(storage, db)
+
+        assert [job.id for job in await _drain_once(engine, db)] == ["job-legacy"]
+        state = db.get_concept_occurrence_replay_state("job-legacy")
+        assert state["state"] == "verified_empty"
+        assert state["reason"] == "truly_empty"
+        assert state["source_digest"] == real_digest
+        row = db._conn.execute(
+            "SELECT source_digest, projection_digest"
+            " FROM concept_occurrence_projection WHERE job_id=?",
+            ("job-legacy",),
+        ).fetchone()
+        assert row[0] == real_digest
+        assert row[1] == _EMPTY_CONCEPT_PROJECTION_DIGEST
+        assert db.list_unreconciled_concept_occurrence_jobs() == []
+        assert storage.reads["job-legacy"] == 1
+    finally:
+        db.close()

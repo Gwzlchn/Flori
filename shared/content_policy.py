@@ -566,6 +566,7 @@ REBUILDABLE_TABLES = frozenset({
     "job_steps", "workers", "schema_migrations", "note_chunks",
     "note_chunks_fts5", "notes_fts5", "canonical_evidence",
     "concept_occurrences", "concept_occurrence_projection",
+    "concept_occurrence_replay_state",
     "restored_job_activations", "flori_stat_probe",
     "content_imports", "content_import_records",
 })

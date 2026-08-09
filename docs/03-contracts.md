@@ -3201,6 +3201,20 @@ v2 manifest 顶层字段必须精确为 `schema_version / job_id / ocr_refs / ev
   FTS/canonical evidence 时在同一索引事务删除旧 marker;索引提交后 occurrence 重放前
   即使崩溃,scheduler 后续周期仍会拾取。来源字节变化时旧调用不能覆盖新投影。
   marker 是可重建投影,不进入便携快照。
+  周期重放的持久状态在 `concept_occurrence_replay_state`(schema v10,同为可重建
+  状态):发布空投影时同事务落 `verified_empty` 判定并绑定 `source_digest`,该 job
+  从此离开重放候选池,不再周期重读真源;发布非空投影时删除状态行;索引重建随
+  marker 一并删除状态行。真源读取按五类分界:读异常=`storage_unreachable`、两路
+  文件均不存在=`source_missing`(均为环境性,写 `retry` 状态:attempt_count、
+  last_attempt_at、next_retry_at 指数退避,cap 分别 15 分钟/24 小时,永不放弃)、
+  JSON 无效或非对象=`source_invalid`、review 重验不可靠且期间无读异常=
+  `review_unreliable`(均为确定性,发布绑定摘要的空判定;重验期间有读异常一律归
+  `storage_unreachable`,不许把存储抖动固化成判定)、可读且概念确实为空=
+  `truly_empty`。候选查询排除绑定当前 marker 的 `verified_empty` 行与未到
+  `next_retry_at` 的 `retry` 行,并按 next_retry_at 再 created_at 排序;每次尝试
+  必然持久推进状态(离池或退避后移),LIMIT 窗口必然轮转,固定失败行不会饿死
+  尾部。存量空投影 marker 由 v10 迁移回填为立即到期的 `retry`
+  (reason=`legacy_empty_projection`),首轮重放各自收敛。
   `related.rel` ∈
   `prerequisite`/`is_a`/`part_of`/`related`,只允许引用本次 `key_terms` 中的其它概念。
   采集时两端经 `shared.concepts.resolve` 归一到实体主名;目标未入库不建边(待其被采集后

@@ -18,13 +18,14 @@ from shared.repositories.maintenance import MaintenanceRepository
 
 
 _PUBLIC_CONTRACT_SHA256 = (
-    "42574e687a271d0a636ca1c787b0f83db47ddbf1bbf178200be1a035e792d40b"
+    "8a4f49baf9cc725ea764bc89504aa50cd24a08e8279081ffeba8190d246c357e"
 )
 # 按 schema 版本冻结指纹: 已登记版本上的任何 schema 漂移都会失败.
 # 新增迁移时在这里补一行新版本的摘要, 补这一行就是"我确认 schema 变了"的显式动作.
 _SCHEMA_CONTRACT_SHA256_BY_VERSION = {
     8: "906a33e4b9119fe384b1342c67ceb139de1f3b83f8a308abfca3120f77c81c2c",
     9: "974a89066d89d9fe12be2c9ad17111b357501699e2fd68bf45a0953cd22743c6",
+    10: "23daf2ec53e6495fe6eff4db4df0198807f731a3136bcda15996f9af021efa1f",
 }
 
 
@@ -183,6 +184,7 @@ def test_cross_domain_transactions_have_one_explicit_owner():
         "rename_domain",
         "replace_concept_occurrences_for_job",
         "replace_job_concept_occurrences",
+        "record_concept_occurrence_replay_failure",
         "append_concept_definition_version",
         "merge_glossary_terms",
         "index_job_notes",

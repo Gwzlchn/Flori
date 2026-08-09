@@ -92,7 +92,8 @@ class JobFinalizer:
             try:
                 await self.owner.reconcile_concept_occurrences_only(job.id)
             except Exception:
-                # FTS 已存在也不能丢失重试谓词:durable marker 只在成功后写入。
+                # 成功结论与失败退避都已在 reconcile 内持久化;这里只留诊断日志,
+                # 未分类异常靠 replay_error 退避保证窗口轮转不饿死尾部。
                 logger.warning(
                     "concept_occurrence_replay_failed",
                     job_id=job.id,

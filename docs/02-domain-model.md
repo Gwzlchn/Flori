@@ -515,8 +515,21 @@ CREATE TABLE concept_occurrences (
 
 CREATE TABLE concept_occurrence_projection (
     job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+    source_digest TEXT NOT NULL,           -- 概念真源字节(+review 重验结论)的 sha256
+    projection_digest TEXT NOT NULL,       -- 已发布 (term,evidence) 集合的 sha256
     reconciled_at TEXT NOT NULL
 );                                      -- 可重建 marker,不进入 portable snapshot
+
+CREATE TABLE concept_occurrence_replay_state (
+    job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+    state TEXT NOT NULL,                   -- verified_empty(判定) / retry(退避账本)
+    reason TEXT NOT NULL,                  -- 判定或失败分类,可观测
+    source_digest TEXT,                    -- verified_empty 绑定的源摘要
+    attempt_count INTEGER NOT NULL,
+    last_attempt_at TEXT,
+    next_retry_at TEXT,                    -- retry 到期时间,候选窗口按它轮转
+    updated_at TEXT NOT NULL
+);                                      -- 可重建状态,不进入 portable snapshot
 
 CREATE TABLE restored_job_activations (
     job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,

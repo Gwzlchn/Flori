@@ -780,6 +780,14 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 
+# 空 mapping 时 replace_job_concept_occurrences 发布的 projection_digest(sha256 of "[]")。
+# 重放谓词用它在 SQL 里辨认空投影行;与真源指纹比对留给 reconcile 读源后短路判定。
+# 私有名:db 公开面被 test_db_repository_contract 冻结,此常量只是谓词实现细节。
+_EMPTY_CONCEPT_PROJECTION_DIGEST = (
+    "sha256:" + hashlib.sha256(b"[]").hexdigest()
+)
+
+
 def _normalized_body_sha256(text: str) -> str:
     """按稳定换行与 Unicode 形态计算 chunk 指纹。"""
     normalized = unicodedata.normalize(
@@ -2122,6 +2130,7 @@ class Database:
         mapping: dict[str, list[str]],
         projection_source_digest: str | None = None,
         expected_projection_source_digest: str | None = None,
+        projection_empty_reason: str = "no_canonical_evidence",
     ) -> bool:
         """原子对账一个 job 的全部 concept/evidence 映射，移除消失概念。"""
         return _DatabaseAggregates.replace_job_concept_occurrences(
@@ -2131,6 +2140,7 @@ class Database:
             mapping=mapping,
             projection_source_digest=projection_source_digest,
             expected_projection_source_digest=expected_projection_source_digest,
+            projection_empty_reason=projection_empty_reason,
         )
 
     def list_concept_occurrences(
@@ -2491,15 +2501,42 @@ class Database:
         )
 
     def list_unreconciled_concept_occurrence_jobs(
-        self, limit: int = 100,
+        self, limit: int = 100, *, now: str | None = None,
     ) -> list[Job]:
-        """返回 FTS 已就绪但 occurrence durable marker 缺失的当前 Job。"""
+        """返回 FTS 已就绪且 occurrence 投影待对账的当前 Job。
+        绑定当前 marker 的 verified_empty 判定离开候选池;retry 状态按
+        next_retry_at 退避,窗口按到期时间轮转,固定失败行不会饿死尾部。"""
         return _SearchRepository.list_unreconciled_concept_occurrence_jobs(
-            self, limit,
+            self, limit, now=now,
         )
+
+    def get_concept_occurrence_projection_pair(self, job_id: str) -> tuple[str, str] | None:
+        return _SearchRepository.get_concept_occurrence_projection_pair(self, job_id)
 
     def get_concept_occurrence_projection_source(self, job_id: str) -> str | None:
         return _SearchRepository.get_concept_occurrence_projection_source(self, job_id)
+
+    def get_concept_occurrence_replay_state(self, job_id: str) -> dict | None:
+        """返回 occurrence 重放的持久状态行(判定或退避账本)。"""
+        return _SearchRepository.get_concept_occurrence_replay_state(self, job_id)
+
+    def record_concept_occurrence_replay_failure(
+        self,
+        job_id: str,
+        *,
+        reason: str,
+        retry_base_seconds: int,
+        retry_cap_seconds: int,
+        now: str | None = None,
+    ) -> dict | None:
+        """持久记录一次重放失败并推进有界退避;job 已离池时返回 None。"""
+        return _DatabaseAggregates.record_concept_occurrence_replay_failure(
+            self, job_id,
+            reason=reason,
+            retry_base_seconds=retry_base_seconds,
+            retry_cap_seconds=retry_cap_seconds,
+            now=now,
+        )
 
     def index_job_notes(
         self,

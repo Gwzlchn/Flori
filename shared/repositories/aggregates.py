@@ -22,6 +22,7 @@ from ..db import (
     StudySuggestionFaultInjector,
     StudySuggestionNotFoundError,
     _JOB_UPDATABLE,
+    _EMPTY_CONCEPT_PROJECTION_DIGEST,
     _concept_source_set,
     _lineage_key_of,
     _norm_related,
@@ -115,6 +116,31 @@ from ..db import (
     utc_now,
     uuid,
 )
+
+def _require_replay_reason(reason: object) -> str:
+    if not isinstance(reason, str) or not 1 <= len(reason) <= 64:
+        raise ValueError("replay reason 必须是 1..64 字符的字符串")
+    return reason
+
+
+def _upsert_verified_empty_state(
+    connection, job_id: str, *, source_digest: str, reason: str, now: str,
+) -> None:
+    """落绑定源摘要的空集判定;保留 attempt 历史,清 next_retry 使其离开重试轨。"""
+    connection.execute(
+        """INSERT INTO concept_occurrence_replay_state
+           (job_id, state, reason, source_digest, attempt_count,
+            last_attempt_at, next_retry_at, updated_at)
+           VALUES (?, 'verified_empty', ?, ?, 0, NULL, NULL, ?)
+           ON CONFLICT(job_id) DO UPDATE SET
+             state='verified_empty',
+             reason=excluded.reason,
+             source_digest=excluded.source_digest,
+             next_retry_at=NULL,
+             updated_at=excluded.updated_at""",
+        (job_id, reason, source_digest, now),
+    )
+
 
 class DatabaseAggregates:
     """由 Database façade 调用，不持有独立连接或锁。"""
@@ -885,13 +911,17 @@ class DatabaseAggregates:
         mapping: dict[str, list[str]],
         projection_source_digest: str | None = None,
         expected_projection_source_digest: str | None = None,
+        projection_empty_reason: str = "no_canonical_evidence",
     ) -> bool:
-        """原子对账 occurrence;给源摘要时同事务CAS发布投影账本。"""
+        """原子对账 occurrence;给源摘要时同事务CAS发布投影账本。
+        发布空投影时同事务落 verified_empty 判定(绑定源摘要),该 job 退出重放
+        候选池;发布非空投影时删除状态行,退避账本随之作废。"""
         if not isinstance(mapping, dict) or any(
             not isinstance(term, str) or not term.strip()
             for term in mapping
         ):
             raise ValueError("mapping 必须是 term 到 canonical evidence IDs 的对象")
+        _require_replay_reason(projection_empty_reason)
         normalized: dict[str, list[str]] = {}
         for term, evidence_ids in mapping.items():
             source_json, _ = _concept_source_set(evidence_ids)
@@ -1012,8 +1042,109 @@ class DatabaseAggregates:
                              reconciled_at=excluded.reconciled_at""",
                         (job_id, projection_source_digest, projection_digest, now),
                     )
+                    if expected:
+                        self._conn.execute(
+                            """DELETE FROM concept_occurrence_replay_state
+                               WHERE job_id=?""",
+                            (job_id,),
+                        )
+                    else:
+                        _upsert_verified_empty_state(
+                            self._conn, job_id,
+                            source_digest=projection_source_digest,
+                            reason=projection_empty_reason,
+                            now=now,
+                        )
                 self._conn.commit()
                 return changed
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    def record_concept_occurrence_replay_failure(
+        self,
+        job_id: str,
+        *,
+        reason: str,
+        retry_base_seconds: int,
+        retry_cap_seconds: int,
+        now: str | None = None,
+    ) -> dict | None:
+        """记录一次重放失败:attempt+1,next_retry 指数退避并封顶。
+        job 已离开候选池(非空投影,或判定仍绑定当前 marker)时不写,避免 CAS
+        竞争的败者覆盖胜者结论;此时返回 None。"""
+        _require_replay_reason(reason)
+        base = require_plain_int(
+            retry_base_seconds, "retry_base_seconds",
+            minimum=1, maximum=MAX_SQLITE_INTEGER,
+        )
+        cap = require_plain_int(
+            retry_cap_seconds, "retry_cap_seconds",
+            minimum=base, maximum=MAX_SQLITE_INTEGER,
+        )
+        now_dt = _parse_dt(now) if now is not None else None
+        if now is not None and now_dt is None:
+            raise ValueError("now 必须是 ISO 时间串")
+        if now_dt is None:
+            now_dt = utc_now()
+        now_iso = now_dt.isoformat()
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                marker = self._conn.execute(
+                    """SELECT source_digest, projection_digest
+                       FROM concept_occurrence_projection WHERE job_id=?""",
+                    (job_id,),
+                ).fetchone()
+                if (
+                    marker is not None
+                    and str(marker["projection_digest"])
+                    != _EMPTY_CONCEPT_PROJECTION_DIGEST
+                ):
+                    self._conn.rollback()
+                    return None
+                state = self._conn.execute(
+                    """SELECT state, source_digest, attempt_count
+                       FROM concept_occurrence_replay_state WHERE job_id=?""",
+                    (job_id,),
+                ).fetchone()
+                if (
+                    state is not None
+                    and str(state["state"]) == "verified_empty"
+                    and marker is not None
+                    and state["source_digest"] == marker["source_digest"]
+                ):
+                    self._conn.rollback()
+                    return None
+                attempt = (int(state["attempt_count"]) if state else 0) + 1
+                # 指数上限 20 防大整数;delay 始终被 cap 封顶,重试永不停止。
+                delay = min(cap, base * (2 ** min(attempt - 1, 20)))
+                next_retry = (now_dt + timedelta(seconds=delay)).isoformat()
+                self._conn.execute(
+                    """INSERT INTO concept_occurrence_replay_state
+                       (job_id, state, reason, source_digest, attempt_count,
+                        last_attempt_at, next_retry_at, updated_at)
+                       VALUES (?, 'retry', ?, NULL, ?, ?, ?, ?)
+                       ON CONFLICT(job_id) DO UPDATE SET
+                         state='retry',
+                         reason=excluded.reason,
+                         source_digest=NULL,
+                         attempt_count=excluded.attempt_count,
+                         last_attempt_at=excluded.last_attempt_at,
+                         next_retry_at=excluded.next_retry_at,
+                         updated_at=excluded.updated_at""",
+                    (job_id, reason, attempt, now_iso, next_retry, now_iso),
+                )
+                self._conn.commit()
+                return {
+                    "job_id": job_id,
+                    "state": "retry",
+                    "reason": reason,
+                    "attempt_count": attempt,
+                    "last_attempt_at": now_iso,
+                    "next_retry_at": next_retry,
+                }
             except BaseException:
                 if self._conn.in_transaction:
                     self._conn.rollback()
@@ -1408,8 +1539,13 @@ class DatabaseAggregates:
                     )
                 # occurrence 依赖当前 canonical evidence。索引与 evidence 新版本已提交、
                 # glossary 对账尚未运行的崩溃窗口必须由周期任务重新拾取。
+                # 旧判定与退避账本只对旧快照成立,与 marker 同事务作废。
                 self._conn.execute(
                     "DELETE FROM concept_occurrence_projection WHERE job_id=?",
+                    (job_id,),
+                )
+                self._conn.execute(
+                    "DELETE FROM concept_occurrence_replay_state WHERE job_id=?",
                     (job_id,),
                 )
 

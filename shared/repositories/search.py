@@ -6,6 +6,7 @@ from .seams import db as _db
 
 from ..db import (
     Job,
+    _EMPTY_CONCEPT_PROJECTION_DIGEST,
     _MAX_NOTE_EVIDENCE_PROJECTION,
     _canonical_ids_from_evidence_json,
     _chunk_note_body,
@@ -36,9 +37,16 @@ class SearchRepository:
         return [self._row_to_job(row) for row in rows]
 
     def list_unreconciled_concept_occurrence_jobs(
-        self, limit: int = 100,
+        self, limit: int = 100, *, now: str | None = None,
     ) -> list[Job]:
-        """返回已建索引但 occurrence 投影尚未确认完成的当前 Job。"""
+        """返回已建索引但 occurrence 投影尚未确认完成的当前 Job。
+        入选:marker 缺失,或投影为空且没有绑定当前 source_digest 的 verified_empty
+        判定。retry 状态未到 next_retry_at 的行暂不入选,防止固定失败行反复占满
+        LIMIT 窗口。排序按 next_retry_at 升序(无状态行视为最早),再按 created_at;
+        每次重放尝试都会持久推进状态(判定离池或 next_retry_at 后移),窗口必然轮转,
+        尾部不会被前排饿死。非空投影只会被索引重建删 marker 或完成路径 CAS 更新,
+        不需要周期回炉。"""
+        now_iso = now if now is not None else _db._now_iso()
         with self._lock:
             rows = self._conn.execute(
                 """SELECT * FROM jobs
@@ -48,12 +56,46 @@ class SearchRepository:
                      )
                      AND NOT EXISTS (
                        SELECT 1 FROM concept_occurrence_projection p
-                       WHERE p.job_id=jobs.id
+                       WHERE p.job_id=jobs.id AND p.projection_digest != ?
                      )
-                   ORDER BY created_at ASC LIMIT ?""",
-                (max(1, min(int(limit), 1000)),),
+                     AND NOT EXISTS (
+                       SELECT 1 FROM concept_occurrence_replay_state s
+                       WHERE s.job_id=jobs.id
+                         AND (
+                           (
+                             s.state='verified_empty'
+                             AND EXISTS (
+                               SELECT 1 FROM concept_occurrence_projection p2
+                               WHERE p2.job_id=jobs.id
+                                 AND p2.source_digest=s.source_digest
+                             )
+                           )
+                           OR (s.state='retry' AND s.next_retry_at > ?)
+                         )
+                     )
+                   ORDER BY COALESCE(
+                     (SELECT s2.next_retry_at
+                      FROM concept_occurrence_replay_state s2
+                      WHERE s2.job_id=jobs.id), ''
+                   ) ASC, created_at ASC
+                   LIMIT ?""",
+                (
+                    _EMPTY_CONCEPT_PROJECTION_DIGEST,
+                    now_iso,
+                    max(1, min(int(limit), 1000)),
+                ),
             ).fetchall()
         return [self._row_to_job(row) for row in rows]
+
+    def get_concept_occurrence_projection_pair(self, job_id: str) -> tuple[str, str] | None:
+        """返回投影绑定的(源摘要, 投影摘要)。空投影 marker 不能证明投影正确。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT source_digest, projection_digest"
+                " FROM concept_occurrence_projection WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+        return (str(row[0]), str(row[1])) if row else None
 
     def get_concept_occurrence_projection_source(self, job_id: str) -> str | None:
         """返回当前投影绑定的源摘要;缺失时由scheduler重放。"""
@@ -63,6 +105,37 @@ class SearchRepository:
                 (job_id,),
             ).fetchone()
         return str(row["source_digest"]) if row is not None else None
+
+    def get_concept_occurrence_replay_state(self, job_id: str) -> dict | None:
+        """返回重放状态行(判定或退避账本);无状态行返回 None。"""
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT job_id, state, reason, source_digest, attempt_count,
+                          last_attempt_at, next_retry_at, updated_at
+                   FROM concept_occurrence_replay_state WHERE job_id=?""",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "job_id": str(row["job_id"]),
+            "state": str(row["state"]),
+            "reason": str(row["reason"]),
+            "source_digest": (
+                str(row["source_digest"])
+                if row["source_digest"] is not None else None
+            ),
+            "attempt_count": int(row["attempt_count"]),
+            "last_attempt_at": (
+                str(row["last_attempt_at"])
+                if row["last_attempt_at"] is not None else None
+            ),
+            "next_retry_at": (
+                str(row["next_retry_at"])
+                if row["next_retry_at"] is not None else None
+            ),
+            "updated_at": str(row["updated_at"]),
+        }
 
     def canonical_evidence_database_states(
         self,

@@ -1042,6 +1042,69 @@ def test_v5_to_v6_seeds_definition_history_without_forging_occurrences(
     database.close()
 
 
+def test_v9_to_v10_backfills_fixated_empty_projections_as_due_retry(
+    tmp_path: Path,
+) -> None:
+    """生产库 35 行形态:空数组投影摘要 + source_missing 哨兵源摘要。
+    迁移必须把它们标为立即到期的 retry(可修复),而不是 verified_empty;
+    非空投影行不得获得任何回填状态。"""
+    empty_projection = "sha256:" + hashlib.sha256(b"[]").hexdigest()
+    sentinel_source = "sha256:" + hashlib.sha256(b"source_missing").hexdigest()
+    database = Database(tmp_path / "replay-v10.db")
+    run_migrations(database._conn, database._migration_steps(), target_version=9)
+    for job_id, status in (("job-fixated", "done"), ("job-full", "done")):
+        database._conn.execute(
+            """INSERT INTO jobs
+               (id,content_type,document_kind,pipeline,title,domain,status,
+                is_current,created_at,updated_at)
+               VALUES (?,?,?,?,?,?,?,1,?,?)""",
+            (job_id, "document", "article", "document", job_id, "general",
+             status, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+    database._conn.execute(
+        """INSERT INTO concept_occurrence_projection
+           (job_id, source_digest, projection_digest, reconciled_at)
+           VALUES ('job-fixated', ?, ?, '2026-01-02T00:00:00+00:00')""",
+        (sentinel_source, empty_projection),
+    )
+    database._conn.execute(
+        """INSERT INTO concept_occurrence_projection
+           (job_id, source_digest, projection_digest, reconciled_at)
+           VALUES ('job-full', ?, ?, '2026-01-02T00:00:00+00:00')""",
+        (sentinel_source, "sha256:" + "9" * 64),
+    )
+    database._conn.execute(
+        """INSERT INTO notes_fts5
+           (job_id, content_type, note_type, collection_id, domain, title, body)
+           VALUES ('job-fixated', 'document', 'original', '', 'general',
+                   't', 'b')"""
+    )
+    database._conn.commit()
+
+    assert run_migrations(
+        database._conn, database._migration_steps(),
+    ) == SCHEMA_VERSION
+    migration_current.validate(database._conn)
+
+    state = database.get_concept_occurrence_replay_state("job-fixated")
+    assert state == {
+        "job_id": "job-fixated",
+        "state": "retry",
+        "reason": "legacy_empty_projection",
+        "source_digest": None,
+        "attempt_count": 0,
+        "last_attempt_at": None,
+        "next_retry_at": "1970-01-01T00:00:00+00:00",
+        "updated_at": "1970-01-01T00:00:00+00:00",
+    }
+    assert database.get_concept_occurrence_replay_state("job-full") is None
+    # 回填行立即到期,升级后第一拍就回到候选窗口。
+    assert [
+        job.id for job in database.list_unreconciled_concept_occurrence_jobs()
+    ] == ["job-fixated"]
+    database.close()
+
+
 def test_v5_to_v6_failure_rolls_back_schema_seed_ledger_and_version(
     tmp_path: Path,
 ) -> None:

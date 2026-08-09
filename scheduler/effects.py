@@ -12,7 +12,7 @@ import re
 
 import structlog
 
-from shared.db import _chunk_note_body
+from shared.db import _EMPTY_CONCEPT_PROJECTION_DIGEST, _chunk_note_body
 from shared.evidence_contract import (
     MAX_CANONICAL_SIDECAR_BYTES,
     build_canonical_evidence_records_with_reader,
@@ -32,6 +32,24 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(component="scheduler")
 
 _MAX_STEP_DONE_BYTES = 64 * 1024
+
+
+class ConceptSourceUnavailableError(RuntimeError):
+    """概念真源当前读不到(环境性,如对象存储未就绪)。
+    与 step_completion 的 no_worker 同一原则:环境性失败不许持久化成确定性空集,
+    抛出让完成门保持失败,周期对账继续重试。"""
+
+
+# 重放失败按原因走有界指数退避:(base_seconds, cap_seconds)。
+# cap 决定最坏收敛延迟:存储抖动恢复后 15 分钟内跟上;真源两路缺失可能是
+# 恢复前置窗口也可能是永久丢失,最慢一天探一次;未分类异常取中间档。
+# 永不放弃重试,只降频;固定失败行因 next_retry_at 后移而让出候选窗口。
+_REPLAY_RETRY_POLICY = {
+    "storage_unreachable": (60, 900),
+    "source_missing": (300, 86400),
+    "replay_error": (60, 3600),
+}
+
 
 def _markdown_to_text(md: str) -> str:
     """兼容旧调用点；归一化实现只保留在 shared.note_text。"""
@@ -511,6 +529,7 @@ class EffectDispatcher:
                 mapping={},
                 projection_source_digest=source_digest,
                 expected_projection_source_digest=expected_projection_source,
+                projection_empty_reason=reason,
             )
             logger.info(
                 "concept_occurrences_reconciled",
@@ -523,6 +542,10 @@ class EffectDispatcher:
             job_id, job,
         )
         if review is None:
+            if source_error in ("source_missing", "storage_unreachable"):
+                raise ConceptSourceUnavailableError(
+                    f"concept source unavailable for {job_id}: {source_error}"
+                )
             await reconcile_empty(source_error or "source_invalid", source_digest)
             return
         key_terms = review.get("key_terms") or []
@@ -574,14 +597,43 @@ class EffectDispatcher:
     async def _load_concept_source(
         self, job_id: str, job: Job | None,
     ) -> tuple[dict | None, bool, str | None, str]:
-        """读取并验证概念来源;术语采集与纯 occurrence 重放共用同一拒绝边界。"""
-        data = await self.owner.storage.read_file(job_id, "output/concepts.json")
+        """读取并验证概念来源;术语采集与纯 occurrence 重放共用同一拒绝边界。
+        失败分类是持久状态的输入,边界必须稳定:
+        - 读抛异常 = storage_unreachable(环境性,可重试);
+        - 两路都不存在 = source_missing(环境性,可重试,可能是恢复前置窗口);
+        - 字节可读但 JSON 坏或非对象 = source_invalid(确定性,绑定源摘要);
+        - review 重验判不可靠且期间无读异常 = review_unreliable(确定性);
+        - 重验期间任何读异常都归 storage_unreachable,不许把存储抖动固化成
+          不可靠判定(重验结论参与摘要,抖动期结论会绑错摘要且不再重读)。"""
+        unreachable = (
+            None, False, "storage_unreachable",
+            "sha256:" + hashlib.sha256(b"storage_unreachable").hexdigest(),
+        )
+        try:
+            data = await self.owner.storage.read_file(job_id, "output/concepts.json")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "concept_source_read_failed", job_id=job_id,
+                artifact="output/concepts.json", exc_info=True,
+            )
+            return unreachable
         from_review = False
         source_kind = "concepts"
         if not data:
-            data = await self.owner._read_verification_artifact(
-                job_id, "output/review.json",
-            )
+            try:
+                data = await self.owner._read_verification_artifact(
+                    job_id, "output/review.json",
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "concept_source_read_failed", job_id=job_id,
+                    artifact="output/review.json", exc_info=True,
+                )
+                return unreachable
             from_review = bool(data)
             source_kind = "review"
         if not data:
@@ -596,8 +648,15 @@ class EffectDispatcher:
         if not isinstance(review, dict):
             return None, from_review, "source_invalid", source_digest
         if from_review:
+            read_failures = 0
+
             async def reader(rel: str) -> bytes | None:
-                return await self.owner._read_verification_artifact(job_id, rel)
+                nonlocal read_failures
+                try:
+                    return await self.owner._read_verification_artifact(job_id, rel)
+                except Exception:
+                    read_failures += 1
+                    raise
 
             review = await verify_persisted_review(
                 review,
@@ -612,6 +671,12 @@ class EffectDispatcher:
                 ).encode("utf-8")
             ).hexdigest()
             if review.get("review_reliable") is not True:
+                if read_failures:
+                    logger.warning(
+                        "concept_source_read_failed", job_id=job_id,
+                        artifact="review_sources", read_failures=read_failures,
+                    )
+                    return unreachable
                 logger.info(
                     "glossary_review_rejected",
                     job_id=job_id,
@@ -621,7 +686,25 @@ class EffectDispatcher:
         return review, from_review, None, source_digest
 
     async def reconcile_concept_occurrences_only(self, job_id: str) -> int:
-        """从已恢复产物重放 occurrence 投影;不新增术语、不触发 AI 综合。"""
+        """从已恢复产物重放 occurrence 投影;不新增术语、不触发 AI 综合。
+        不变量:每次尝试都持久推进状态。成功发布或落判定即离开候选池,
+        分类失败进有界退避,未分类异常也先记退避再抛出。候选池完全由 SQL
+        状态驱动,无进程内缓存,调度器重启不重置进度。"""
+        try:
+            return await self._reconcile_concept_occurrences_inner(job_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            try:
+                await self._record_replay_failure(job_id, "replay_error")
+            except Exception:
+                logger.warning(
+                    "concept_replay_failure_record_failed",
+                    job_id=job_id, exc_info=True,
+                )
+            raise
+
+    async def _reconcile_concept_occurrences_inner(self, job_id: str) -> int:
         job = await asyncio.to_thread(self.owner.db.get_job, job_id)
         domain = (job.domain if job else "") or "general"
         expected_projection_source = await asyncio.to_thread(
@@ -630,7 +713,34 @@ class EffectDispatcher:
         review, from_review, source_error, source_digest = await self._load_concept_source(
             job_id, job,
         )
-        if expected_projection_source == source_digest:
+        if review is None and source_error in (
+            "storage_unreachable", "source_missing",
+        ):
+            # 环境性失败:不落 marker、不落判定,只推进持久退避账本。
+            # 旧 marker 哪怕存的是 source_missing 哨兵摘要也不短路,
+            # 真源就绪后的首次到期重试立即重放。
+            await self._record_replay_failure(job_id, source_error)
+            return 0
+        # 短路只认判定行,不认 marker。marker 只说明"发布过这个投影",不代表投影正确:
+        # 候选池里的错误空投影恰恰是源有概念却被投影成空,它们的 marker 存的就是真实源摘要,
+        # 按 marker 摘要短路会把错误永久认证下来。判定行则代表真按这份源算过且结果确实为空。
+        verdict = await asyncio.to_thread(
+            self.owner.db.get_concept_occurrence_replay_state, job_id,
+        )
+        if (
+            isinstance(verdict, dict)
+            and verdict.get("state") == "verified_empty"
+            and verdict.get("source_digest") == source_digest
+        ):
+            return 0
+        pair = await asyncio.to_thread(
+            self.owner.db.get_concept_occurrence_projection_pair, job_id,
+        )
+        if (
+            pair is not None
+            and pair[0] == source_digest
+            and pair[1] != _EMPTY_CONCEPT_PROJECTION_DIGEST
+        ):
             return 0
         if review is None:
             await asyncio.to_thread(
@@ -640,6 +750,7 @@ class EffectDispatcher:
                 mapping={},
                 projection_source_digest=source_digest,
                 expected_projection_source_digest=expected_projection_source,
+                projection_empty_reason=source_error or "source_invalid",
             )
             logger.info(
                 "concept_occurrences_reconciled",
@@ -658,6 +769,7 @@ class EffectDispatcher:
                 mapping={},
                 projection_source_digest=source_digest,
                 expected_projection_source_digest=expected_projection_source,
+                projection_empty_reason="key_terms_invalid",
             )
             logger.info(
                 "concept_occurrences_reconciled",
@@ -683,6 +795,26 @@ class EffectDispatcher:
             mode="projection_replay",
         )
         return occurrences
+
+    async def _record_replay_failure(self, job_id: str, reason: str) -> None:
+        """把一次失败写进退避账本;job 已被并发结论带离候选池时静默跳过。"""
+        base, cap = _REPLAY_RETRY_POLICY[reason]
+        state = await asyncio.to_thread(
+            self.owner.db.record_concept_occurrence_replay_failure,
+            job_id,
+            reason=reason,
+            retry_base_seconds=base,
+            retry_cap_seconds=cap,
+        )
+        if state is not None:
+            logger.info(
+                "concept_occurrence_replay_deferred",
+                job_id=job_id,
+                reason=reason,
+                attempt=state["attempt_count"],
+                next_retry_at=state["next_retry_at"],
+                mode="projection_replay",
+            )
 
     async def _read_verification_artifact(
         self, job_id: str, rel: str,
@@ -734,6 +866,7 @@ class EffectDispatcher:
             isinstance(evidence_note_type, str)
             and evidence_note_type in {"smart", "translated", "original"}
         ) else None
+        empty_reason = "truly_empty" if not key_terms else "no_canonical_evidence"
         requested_ids: list[str] = []
         if note_type:
             for item in key_terms:
@@ -799,6 +932,7 @@ class EffectDispatcher:
             mapping=mapping,
             projection_source_digest=projection_source_digest,
             expected_projection_source_digest=expected_projection_source_digest,
+            projection_empty_reason=empty_reason,
         )
         rows_by_term = {row["term"]: row for row in glossary_rows}
         candidates: list[tuple[str, str, int]] = []
