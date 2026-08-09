@@ -2120,7 +2120,7 @@ prompt 路径不入快照。Scheduler 重启、Redis 丢失和显式 retry 都�
 
 查询参数 `domain` 可选。只聚合 active/suspended、绑定概念且至少有一次真实 review log 的卡片；每张卡取最新评分，`again/hard/good/easy` 分别映射 `0/50/80/100`，再按概念取平均。返回项含 `score`、`level=fragile|learning|mastered`、`reviewed_cards`、`reviews_total` 和 `last_reviewed_at`；没有真实评分的自动卡不进入结果。
 
-建议接口的结构化业务错误使用 `404/409/422`，常见 `message.code` 包括 `study_suggestion_batch_not_found`、`study_suggestion_not_found`、`study_suggestion_request_id_conflict`、`study_suggestion_revision_stale`、`study_suggestion_evidence_unavailable`、`study_suggestion_duplicate`、`study_suggestion_terminal` 和 `study_suggestion_constraint_conflict`。
+建议接口的结构化业务错误使用 `404/409/422`，信封为 `ErrorResponse {error, message}`：`error` 是业务机器码，`message` 是人类可读字符串。常见 `error` 包括 `study_suggestion_batch_not_found`、`study_suggestion_not_found`、`study_suggestion_request_id_conflict`、`study_suggestion_revision_stale`、`study_suggestion_evidence_unavailable`、`study_suggestion_duplicate`、`study_suggestion_terminal` 和 `study_suggestion_constraint_conflict`；请求语义非法时 `422 error=study_request_invalid`。
 
 #### POST /api/study/cards — 创建卡片
 
@@ -2201,10 +2201,10 @@ Response `200`: `{"total": n, "items": [StudyCard...]}`。
 处理顺序固定在一个 `BEGIN IMMEDIATE` 事务内: 全局 request replay → 卡片存在性 → active-only → revision CAS → 调度/review → immutable log → commit。同 key 且 canonical payload 相同时返回首次保存的完全相同 `StudyCard`，不再写库；同 key 异 payload、陈旧 revision 或非 active 卡片返回结构化 `409`。不存在返回结构化 `404`。
 
 ```json
-{"error":"conflict","message":{"code":"study_revision_stale","message":"study card revision is stale"}}
+{"error":"study_revision_stale","message":"study card revision is stale"}
 ```
 
-`409 message.code` 可为 `study_request_id_conflict` / `study_revision_stale` / `study_revision_exhausted` / `study_card_not_active` / `study_status_transition_invalid`；`study_revision_exhausted` 表示卡片 revision 已到 SQLite 64 位上限，服务端拒绝继续写入而不产生部分提交。`404 message.code=study_card_not_found`。
+`409` 的 `error` 可为 `study_request_id_conflict` / `study_revision_stale` / `study_revision_exhausted` / `study_card_not_active` / `study_status_transition_invalid`；`study_revision_exhausted` 表示卡片 revision 已到 SQLite 64 位上限，服务端拒绝继续写入而不产生部分提交。`404` 的 `error=study_card_not_found`；卡片有 accepted 建议审计链时删除返回 `409 error=study_card_audit_protected`。
 
 #### POST /api/study/cards/{card_id}/status — 改卡片状态
 
@@ -3325,7 +3325,7 @@ Response body:
 {"error": "not_found", "message": "job not found"}
 ```
 
-Selected OpenAPI operation 声明的非 2xx JSON 响应统一引用 `ErrorResponse`，运行时校验错误也投影为相同的 `error/message` 两字段，不暴露 FastAPI 默认 `detail` 结构。唯一显式例外是 `GET /api/health/ready`：HTTP 503 表示 readiness 阻断状态，响应仍为完整 `ReadinessResponse`，便于发布门读取各项检查。
+Selected OpenAPI operation 声明的非 2xx JSON 响应统一引用 `ErrorResponse`，运行时校验错误也投影为相同的 `error/message` 两字段，不暴露 FastAPI 默认 `detail` 结构。`message` 恒为字符串，不得放结构化对象；业务机器码一律进 `error`。`error` 默认由 HTTP 状态码派生（如 `not_found` / `conflict`），study 与任务入口等业务端点用服务端受信任的更细业务机器码覆盖，因此客户端不应假设 `error` 与状态码一一对应。唯一显式例外是 `GET /api/health/ready`：HTTP 503 表示 readiness 阻断状态，响应仍为完整 `ReadinessResponse`，便于发布门读取各项检查。
 
 > 契约与实现现状（避免再漂移）：
 > - `POST /api/jobs` 的 `url` 接受 http(s) 链接**或裸 B 站 BV 号**（`detect_source` 解析），不强制

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from api.services.study import schedule_next_review
+from api.wire_schemas import ErrorResponse
 from shared.study import (
     AGAIN_DELAY_SECONDS,
     MAX_INTERVAL_DAYS,
@@ -355,7 +356,10 @@ class TestStudyApi:
             },
         )
         assert missing.status_code == 404
-        assert missing.json()["message"]["code"] == "study_card_not_found"
+        body = missing.json()
+        assert body["error"] == "study_card_not_found"
+        assert isinstance(body["message"], str)
+        ErrorResponse.model_validate(body)
 
         card = (
             await client.post(
@@ -377,7 +381,10 @@ class TestStudyApi:
             },
         )
         assert blocked.status_code == 409
-        assert blocked.json()["message"]["code"] == "study_card_not_active"
+        blocked_body = blocked.json()
+        assert blocked_body["error"] == "study_card_not_active"
+        assert isinstance(blocked_body["message"], str)
+        ErrorResponse.model_validate(blocked_body)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

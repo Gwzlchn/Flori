@@ -7,7 +7,7 @@ import sqlite3
 import uuid
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
 from shared.db import Database
@@ -26,6 +26,7 @@ from shared.study_suggestions import (
     resolve_study_suggestion_prompt,
 )
 from api.deps import get_config, get_db, validate_path_segment, verify_token
+from api.errors import CodedHTTPException
 from api.wire_schemas import API_ERROR_RESPONSES
 
 
@@ -353,38 +354,22 @@ async def get_study_stats(
 
 
 def _raise_study_error(exc: Exception) -> None:
+    # 机器码进信封 error 字段,message 保持人类可读字符串(ErrorResponse 契约)。
     if isinstance(exc, StudyNotFoundError):
-        raise HTTPException(
-            status_code=404,
-            detail={"code": exc.code, "message": str(exc)},
-        ) from exc
+        raise CodedHTTPException(404, exc.code, str(exc)) from exc
     if isinstance(exc, StudyConflictError):
-        raise HTTPException(
-            status_code=409,
-            detail={"code": exc.code, "message": str(exc)},
-        ) from exc
+        raise CodedHTTPException(409, exc.code, str(exc)) from exc
     if isinstance(exc, ValueError):
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "study_request_invalid", "message": str(exc)},
-        ) from exc
+        raise CodedHTTPException(422, "study_request_invalid", str(exc)) from exc
     if isinstance(exc, StudySuggestionNotFoundError):
-        raise HTTPException(
-            status_code=404,
-            detail={"code": exc.code, "message": str(exc)},
-        ) from exc
+        raise CodedHTTPException(404, exc.code, str(exc)) from exc
     if isinstance(exc, StudySuggestionConflictError):
-        raise HTTPException(
-            status_code=409,
-            detail={"code": exc.code, "message": str(exc)},
-        ) from exc
+        raise CodedHTTPException(409, exc.code, str(exc)) from exc
     if isinstance(exc, sqlite3.IntegrityError):
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "study_suggestion_constraint_conflict",
-                "message": "request conflicts with a committed study fact",
-            },
+        raise CodedHTTPException(
+            409,
+            "study_suggestion_constraint_conflict",
+            "request conflicts with a committed study fact",
         ) from exc
     raise exc
 
@@ -435,10 +420,7 @@ async def get_suggestion_batch(
     validate_path_segment(batch_id, "batch_id")
     batch = await asyncio.to_thread(db.get_study_suggestion_batch, batch_id)
     if batch is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"code": "study_suggestion_batch_not_found", "message": "batch not found"},
-        )
+        raise CodedHTTPException(404, "study_suggestion_batch_not_found", "batch not found")
     return StudySuggestionBatchResponse(**batch)
 
 
@@ -601,13 +583,11 @@ async def delete_card(card_id: str, db: Database = Depends(get_db)):
     try:
         ok = await asyncio.to_thread(db.delete_study_card, card_id)
     except sqlite3.IntegrityError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "study_card_audit_protected",
-                "message": "accepted suggestion card is protected by its audit trail",
-            },
+        raise CodedHTTPException(
+            409,
+            "study_card_audit_protected",
+            "accepted suggestion card is protected by its audit trail",
         ) from exc
     if not ok:
-        raise HTTPException(404, "card not found")
+        raise CodedHTTPException(404, StudyNotFoundError.code, "card not found")
     return Response(status_code=204)

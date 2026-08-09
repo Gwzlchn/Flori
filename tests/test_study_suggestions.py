@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import shared.db as db_module
+from api.wire_schemas import ErrorResponse
 from shared.db import Database
 from shared.migrations.registry import current_migration_module
 from shared.models import Collection, Job, JobStatus
@@ -3360,6 +3361,10 @@ class TestStudySuggestionApi:
     async def test_missing_and_idempotency_conflict_are_structured(self, client, db):
         missing = await client.get("/api/study/suggestion-batches/ssb_missing")
         assert missing.status_code == 404
+        missing_body = missing.json()
+        assert missing_body["error"] == "study_suggestion_batch_not_found"
+        assert isinstance(missing_body["message"], str)
+        ErrorResponse.model_validate(missing_body)
         _seed(db)
         payload = {
             "request_id": "same-api-key",
@@ -3373,6 +3378,10 @@ class TestStudySuggestionApi:
         payload["max_cards"] = 6
         conflict = await client.post("/api/study/suggestion-batches", json=payload)
         assert conflict.status_code == 409
+        conflict_body = conflict.json()
+        assert conflict_body["error"] == "study_suggestion_request_id_conflict"
+        assert isinstance(conflict_body["message"], str)
+        ErrorResponse.model_validate(conflict_body)
 
     @pytest.mark.asyncio
     async def test_operation_boundaries_are_422_not_500(self, client):
@@ -3416,6 +3425,8 @@ class TestStudySuggestionApi:
         response = await client.delete(f"/api/study/cards/{card['card_id']}")
 
         assert response.status_code == 409
-        assert response.json()["message"]["code"] == "study_card_audit_protected"
+        body = response.json()
+        assert body["error"] == "study_card_audit_protected"
+        assert isinstance(body["message"], str)
         assert not db._conn.in_transaction
         assert db.get_study_card(card["card_id"]) is not None

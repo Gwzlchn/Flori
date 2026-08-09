@@ -6,10 +6,11 @@ import json
 import os
 from typing import Any, Callable
 
-from fastapi import HTTPException, Request
+from fastapi import Request
 from fastapi.routing import APIRoute
 
 from api.deps import authenticate_api_request
+from api.errors import CodedHTTPException
 from shared.job_admission import pipeline_requirements, workers_cover_pipeline
 from shared.source_detect import detect_source
 from shared.source_registry import (
@@ -20,12 +21,8 @@ from shared.source_registry import (
 )
 
 
-class BusinessAdmissionError(HTTPException):
+class BusinessAdmissionError(CodedHTTPException):
     """携带受信任机器码的业务入口拒绝。"""
-
-    def __init__(self, status_code: int, error_code: str, detail: str, headers=None):
-        super().__init__(status_code=status_code, detail=detail, headers=headers)
-        self.error_code = error_code
 
 
 def job_admission_guard(kind: str):

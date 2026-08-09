@@ -22,6 +22,7 @@ import pytest
 schemathesis = pytest.importorskip("schemathesis")
 
 from hypothesis import HealthCheck, settings
+from schemathesis.checks import not_a_server_error
 
 from api.main import create_app
 from shared.redis_client import RedisClient
@@ -39,7 +40,15 @@ def fake_redis():
 
 
 @pytest.fixture
-def fuzz_app(db, fake_redis, test_config):
+def fuzz_app(db, fake_redis, test_config, monkeypatch):
+    # POST /api/pricing/refresh 会真拉公网价表:慢且代理抖动即 502 → not_a_server_error 假红。
+    # 与 test_api_admin 同法 stub 掉,保持 fuzz 密闭(不出网)。
+    import api.pricing_store as ps
+
+    async def _static_pricing(*a, **k):
+        return {"claude-opus-4-8": {"input_cost_per_token": 5e-06}}
+
+    monkeypatch.setattr(ps, "fetch_litellm_pricing", _static_pricing)
     # 注入 tmp sqlite + fakeredis → create_app 设好 app.state,lifespan 不连真资源。
     return create_app(db=db, redis=fake_redis, config=test_config)
 
@@ -62,4 +71,10 @@ schema = schemathesis.pytest.from_fixture("api_schema")
 )
 def test_api_conformance(case):
     # conftest 已设 API_ALLOW_NO_AUTH=1,受保护端点不会因缺 token 而 503。
+    if case.operation.method.upper() == "GET" and case.operation.path == "/api/health/ready":
+        # readiness 503 是契约声明的阻断投影(OpenAPI responses={503: ReadinessResponse}),
+        # 不是崩溃;本测试环境无 scheduler 心跳/Worker,该端点必然 503。
+        # 只豁免 not_a_server_error,响应体仍受 schema 一致性检查。
+        case.call_and_validate(excluded_checks=[not_a_server_error])
+        return
     case.call_and_validate()

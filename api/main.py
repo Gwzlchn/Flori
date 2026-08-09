@@ -231,7 +231,8 @@ def create_app(
 
     app = FastAPI(title="AI Knowledge Base", lifespan=lifespan)
 
-    # 错误体统一 {error, message},见 docs/03-contracts.md §5。error 用状态码派生机器码。
+    # 错误体统一 {error, message},见 docs/03-contracts.md §5。error 默认由状态码派生,
+    # CodedHTTPException 子类携带更细的受信任业务机器码;message 恒为人类可读字符串。
     from fastapi import Request as _Request
     from fastapi.exceptions import RequestValidationError as _RequestValidationError
     from fastapi.responses import JSONResponse as _JSONResponse
@@ -246,10 +247,10 @@ def create_app(
 
     @app.exception_handler(_StarletteHTTPException)
     async def _http_exc_handler(request: _Request, exc: _StarletteHTTPException):
-        from api.business_admission import BusinessAdmissionError
+        from api.errors import CodedHTTPException
 
         error_code = (
-            exc.error_code if isinstance(exc, BusinessAdmissionError)
+            exc.error_code if isinstance(exc, CodedHTTPException)
             else _STATUS_ERROR_CODE.get(exc.status_code, "error")
         )
         return _JSONResponse(
