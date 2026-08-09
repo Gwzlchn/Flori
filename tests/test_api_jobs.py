@@ -1002,8 +1002,13 @@ class TestProviderVersions:
         resp = await client.get("/api/providers")
         assert resp.status_code == 200
         provs = {p["name"]: p for p in resp.json()["providers"]}
+        assert {"anthropic", "claude-cli", "codex-cli", "qoder-cli"} <= set(provs)
         assert provs["claude-cli"]["available"] is True
         assert provs["anthropic"]["available"] is False
+        assert {
+            name for name, provider in provs.items() if provider["label"] == "CLI"
+        } == {"claude-cli", "codex-cli", "qoder-cli"}
+        assert all("candidates" not in provider for provider in provs.values())
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("worker", [
@@ -1111,6 +1116,134 @@ class TestProviderVersions:
         doc = _j.loads((await storage.read_file(jid, "job.json")).decode())
         assert doc["ai_overrides"]["11_smart"] == "claude-cli"
         assert doc["ai_overrides"]["12_review"] == "claude-cli"
+
+    @pytest.mark.asyncio
+    async def test_rerun_smart_params_write_param_overrides(self, client, app, mock_redis):
+        await client.post("/api/jobs", json=_video_request())
+        jid = (await client.get("/api/jobs")).json()["items"][0]["job_id"]
+        storage = app.state.storage
+        await storage.write_file(jid, "job.json", b'{"id":"x"}')
+        resp = await client.post(f"/api/jobs/{jid}/rerun-smart", json={
+            "provider": "claude-cli", "model": "claude-sonnet-4-6",
+            "reasoning_effort": "high",
+        })
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["model"] == "claude-sonnet-4-6" and body["reasoning_effort"] == "high"
+        doc = json.loads((await storage.read_file(jid, "job.json")).decode())
+        expected = {"model": "claude-sonnet-4-6", "reasoning_effort": "high"}
+        assert doc["ai_param_overrides"]["11_smart"] == expected
+        assert doc["ai_param_overrides"]["12_review"] == expected
+
+    @pytest.mark.asyncio
+    async def test_rerun_smart_rejects_removed_virtual_provider(self, client, app, mock_redis):
+        await client.post("/api/jobs", json=_video_request())
+        jid = (await client.get("/api/jobs")).json()["items"][0]["job_id"]
+        storage = app.state.storage
+        await storage.write_file(jid, "job.json", b'{"id":"x"}')
+        mock_redis.publish.reset_mock()
+        resp = await client.post(f"/api/jobs/{jid}/rerun-smart", json={
+            "provider": "cli-agent", "reasoning_effort": "high",
+        })
+        assert resp.status_code == 400
+        assert (await storage.read_file(jid, "job.json")) == b'{"id":"x"}'
+        mock_redis.publish.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_rerun_smart_effort_out_of_domain_rejected(self, client, app, mock_redis):
+        await client.post("/api/jobs", json=_video_request())
+        jid = (await client.get("/api/jobs")).json()["items"][0]["job_id"]
+        storage = app.state.storage
+        await storage.write_file(jid, "job.json", b'{"id":"x"}')
+        resp = await client.post(f"/api/jobs/{jid}/rerun-smart", json={
+            "provider": "claude-cli", "reasoning_effort": "turbo",
+        })
+        assert resp.status_code == 400
+        assert (await storage.read_file(jid, "job.json")) == b'{"id":"x"}'
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("body", "code"), [
+        # codex 的档位域按模型声明, 当前一代到 ultra 为止; 越界值必须被拒。
+        ({"provider": "codex-cli", "reasoning_effort": "hyper"},
+         "reasoning_effort_not_in_provider_domain"),
+        # 同一个模型名在别家合法、在本家不合法, 证明域是按 provider 判的。
+        ({"provider": "codex-cli", "model": "Cantus"},
+         "model_not_in_provider_domain"),
+        ({"provider": "qoder-cli", "reasoning_effort": "turbo"},
+         "reasoning_effort_not_in_provider_domain"),
+        ({"provider": "claude-cli", "model": "ultimate"},
+         "model_not_in_provider_domain"),
+    ])
+    async def test_rerun_smart_param_rejections_carry_stable_codes(
+        self, client, app, mock_redis, body, code,
+    ):
+        await client.post("/api/jobs", json=_video_request())
+        jid = (await client.get("/api/jobs")).json()["items"][0]["job_id"]
+        storage = app.state.storage
+        await storage.write_file(jid, "job.json", b'{"id":"x"}')
+        # 让三个 CLI 都有在线 worker,否则会先被准入门拦掉,测不到参数取值域。
+        worker = dict(mock_redis.get_worker_info.return_value)
+        worker["tags"] += ",codex-cli,qoder-cli"
+        mock_redis.get_worker_info.return_value = worker
+        mock_redis.publish.reset_mock()
+
+        resp = await client.post(f"/api/jobs/{jid}/rerun-smart", json=body)
+
+        assert resp.status_code == 400
+        assert resp.json()["error"] == code
+        assert body["provider"] in resp.json()["message"]
+        assert (await storage.read_file(jid, "job.json")) == b'{"id":"x"}'
+        mock_redis.publish.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_rerun_smart_clears_stale_param_overrides(self, client, app, mock_redis):
+        """换 provider 不带参数时必须清掉两步旧参数,防旧 model 名落到新 provider 的取值域。"""
+        await client.post("/api/jobs", json=_video_request())
+        jid = (await client.get("/api/jobs")).json()["items"][0]["job_id"]
+        storage = app.state.storage
+        stale = {"ai_param_overrides": {
+            "11_smart": {"model": "old"}, "12_review": {"model": "old"},
+            "other_step": {"model": "keep"},
+        }}
+        await storage.write_file(jid, "job.json", json.dumps(stale).encode())
+        resp = await client.post(
+            f"/api/jobs/{jid}/rerun-smart", json={"provider": "claude-cli"},
+        )
+        assert resp.status_code == 200
+        doc = json.loads((await storage.read_file(jid, "job.json")).decode())
+        assert "11_smart" not in doc.get("ai_param_overrides", {})
+        assert "12_review" not in doc.get("ai_param_overrides", {})
+        assert doc["ai_param_overrides"]["other_step"] == {"model": "keep"}
+
+    @pytest.mark.asyncio
+    async def test_list_providers_exposes_selector_metadata(self, client):
+        provs = {
+            item["name"]: item
+            for item in (await client.get("/api/providers")).json()["providers"]
+        }
+        assert provs["claude-cli"]["reasoning_efforts"] == [
+            "low", "medium", "high", "xhigh", "max",
+        ]
+        assert provs["codex-cli"]["reasoning_efforts"] == [
+            "low", "medium", "high", "xhigh", "max", "ultra",
+        ]
+        # 档位域按模型下发, 前端据此收窄选项;只给并集会让 UI 提供该模型不支持的组合。
+        by_model = provs["codex-cli"]["reasoning_efforts_by_model"]
+        assert set(by_model) == set(provs["codex-cli"]["models"])
+        assert "ultra" in by_model["gpt-5.6-sol"]
+        assert "ultra" not in by_model["gpt-5.4"]
+        # 域取自 codex 服务端模型清单, 不含已下线的 gpt-5-codex。
+        assert "gpt-5-codex" not in provs["codex-cli"]["models"]
+        assert provs["codex-cli"]["default_model"] in provs["codex-cli"]["models"]
+        assert provs["codex-cli"]["default_model"] == "gpt-5.6-sol"
+        assert provs["codex-cli"]["default_reasoning_effort"] == "xhigh"
+        assert provs["claude-cli"]["default_model"] == "opus5"
+        assert provs["claude-cli"]["default_reasoning_effort"] == "xhigh"
+        assert provs["qoder-cli"]["default_model"] == "ultimate"
+        assert provs["qoder-cli"]["default_reasoning_effort"] == "max"
+        assert provs["anthropic"]["label"] == "API"
+        assert provs["anthropic"]["models"]
+        assert all("candidates" not in provider for provider in provs.values())
 
     @pytest.mark.asyncio
     @pytest.mark.asyncio

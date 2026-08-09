@@ -15,7 +15,7 @@ class DedupStep(StepBase):
             missing.append("intermediate/candidates.json")
         return missing
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         return {
             "candidates": file_hash(self.job_dir / "intermediate" / "candidates.json"),
             "config": json.dumps(self.config.get("domain", {}).get("dedup", {}), sort_keys=True),

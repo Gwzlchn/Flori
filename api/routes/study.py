@@ -10,6 +10,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
+from shared.ai_selection import provider_config
 from shared.db import Database
 from shared.config import AppConfig
 from shared.study import (
@@ -152,6 +153,7 @@ class StudySuggestionBatchCreate(StrictRequest):
     job_ids: list[str] | None = Field(None, max_length=100)
     concept_terms: list[str] | None = Field(None, max_length=100)
     max_cards: StrictInt = Field(10, ge=1, le=MAX_GENERATED_CARDS)
+    provider: Literal["claude-cli", "codex-cli", "qoder-cli"] = "claude-cli"
 
     @field_validator("request_id", "domain")
     @classmethod
@@ -385,6 +387,13 @@ async def create_suggestion_batch(
     config: AppConfig = Depends(get_config),
 ):
     """固化证据输入并创建持久 AI 批次."""
+    model = provider_config(config.providers, req.provider).get("model")
+    if not isinstance(model, str) or not model.strip():
+        raise CodedHTTPException(
+            503,
+            "study_provider_default_model_missing",
+            f"provider '{req.provider}' 未配置默认模型",
+        )
     try:
         batch = await asyncio.to_thread(
             db.create_study_suggestion_batch,
@@ -393,6 +402,8 @@ async def create_suggestion_batch(
             job_ids=req.job_ids,
             concept_terms=req.concept_terms,
             max_cards=req.max_cards,
+            provider=req.provider,
+            model=model.strip(),
             prompt_snapshot=resolve_study_suggestion_prompt(
                 hot_dir=config.prompts_dir / "templates",
                 image_dir=config.config_dir / "prompts" / "templates",

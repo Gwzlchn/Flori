@@ -3245,6 +3245,8 @@ class TestStudySuggestionApi:
         )
         assert created.status_code == 202
         batch = created.json()
+        assert batch["provider"] == "claude-cli"
+        assert batch["model"] == "opus5"
         db.mark_study_suggestion_batch_queued(
             batch["batch_id"], task_id=batch["task_id"], expected_revision=1
         )
@@ -3305,12 +3307,36 @@ class TestStudySuggestionApi:
         assert mastery.json() == {"total": 0, "items": []}
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(("provider", "model"), [
+        ("codex-cli", "gpt-5.6-sol"),
+        ("qoder-cli", "ultimate"),
+    ])
+    async def test_create_persists_selected_concrete_provider_default_model(
+        self, client, db, provider, model,
+    ):
+        _seed(db)
+        created = await client.post(
+            "/api/study/suggestion-batches",
+            json={
+                "request_id": f"api-batch-{provider}",
+                "domain": "ml",
+                "job_ids": ["jobs_study_1"],
+                "provider": provider,
+            },
+        )
+
+        assert created.status_code == 202
+        assert created.json()["provider"] == provider
+        assert created.json()["model"] == model
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "payload",
         [
             {"request_id": "x", "domain": "ml", "max_cards": True},
             {"request_id": "x", "domain": "ml", "max_cards": 0},
             {"request_id": "x", "domain": "ml", "max_cards": 51},
+            {"request_id": "x", "domain": "ml", "provider": "anthropic"},
             {"request_id": "x", "domain": "ml", "extra": "bad"},
             {"request_id": "   ", "domain": "ml"},
         ],

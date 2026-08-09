@@ -5,11 +5,11 @@ from __future__ import annotations
 from .seams import db as _db
 
 from ..db import (
+    DEFAULT_AI_MODEL,
+    DEFAULT_AI_PROVIDER,
     ConceptConflictError,
     ConceptEvidenceError,
     ConceptNotFoundError,
-    DEFAULT_AI_MODEL,
-    DEFAULT_AI_PROVIDER,
     Job,
     JobPart,
     JobStatus,
@@ -1562,7 +1562,10 @@ class DatabaseAggregates:
         prompt_snapshot: dict[str, object] | None = None,
         deadline_seconds: int = 1_800,
     ) -> dict:
-        """在一个快照事务中固化候选的 chunk 和 concept 输入."""
+        """在一个快照事务中固化候选的 chunk 和 concept 输入.
+
+        provider/model 随批次持久化并进 input_fingerprint:新批次默认固定具体 Claude CLI,
+        已落库的旧批次重放时仍读自己那一列,不被默认值改写。"""
         normalized_request_id = require_external_request_id(request_id)
         normalized_domain = require_identifier(domain, "domain", max_length=256)
         normalized_provider = require_identifier(provider, "provider", max_length=128)

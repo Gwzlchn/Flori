@@ -45,7 +45,7 @@
 ### 取证步
 - video pipeline 的 `10_evidence` 依赖 `09_mechanical`，`11_smart` 再依赖取证步；非案例内容由步骤自门控快速跳过。
 - **仅案例类条件触发**：步骤检查 style_tags 含 case-study 或域为案例域，心法/通用类不跑。
-- **绑 claude-cli worker**：模型只有 WebSearch 权限，只返回候选 URL；不得使用 Bash/curl，也不得声称已读取正文。正文下载、可信度和 case-match 均由服务端决定。
+- **绑 websearch 能力的 CLI worker**:任务允许 claude-cli、codex-cli、qoder-cli 三种 concrete provider,由满足 `websearch` 能力门的绑定 Worker 原子认领并物化真实 provider。模型只有 WebSearch 权限,只返回候选 URL;不得使用 Bash/curl,也不得声称已读取正文。正文下载、可信度和 case-match 均由服务端决定,证据可验证性由能力门控、具体 provider 审计与服务端校验保证,不依赖某个固定 CLI。
 
 ### 决定 1 — case-match 硬门
 用机械稿 OCR 文号/案号锚点比对抓回正文；只有权威 host 且至少一个锚点逐字命中才 `eligible=true`。其余统一降为 low，smart/review 不把它当权威上下文，API 不暴露可点击链接。抓错案子代价最大，宁缺毋滥。

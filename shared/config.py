@@ -11,6 +11,11 @@ from pathlib import Path
 
 import yaml
 
+from .ai_routing import (
+    AI_ROUTE_ALLOWED_PROVIDERS_REQUIRED,
+    allowed_providers_from_ai,
+    validate_provider_defaults,
+)
 from .pipeline_scope import validate_pipeline_scopes
 
 
@@ -32,7 +37,6 @@ _FIELD_ALIASES = {
 
 # 顶层非 pipeline 的保留键(模板/默认/包含/变量),归一化时不当作内容类型。
 _RESERVED_TOP_KEYS = {"default", "include", "variables"}
-_AI_TIERS = {"primary", "fallback", "text_fallback"}
 
 
 def _pipeline_variable_references(value) -> set[str]:
@@ -85,13 +89,18 @@ def _validate_shared_ai_variables(raw: dict) -> None:
 
 
 def validate_ai_pipeline_contract(pipelines: dict, providers: dict | None = None) -> None:
-    """校验归一化 AI route,不改变 tier 顺序或调用次数."""
-    known = None
+    """校验流水线 AI route 只使用 concrete-provider OR 集合。"""
     if providers is not None:
         provider_map = providers.get("providers") if isinstance(providers, dict) else None
         if not isinstance(provider_map, dict):
             raise ValueError("providers config must contain a providers mapping")
-        known = set(provider_map)
+        # provider 自己的默认值越界没人显式选,却是每次调用的实际取值,加载期就拦。
+        defaults = validate_provider_defaults(providers)
+        if defaults:
+            raise ValueError(
+                "invalid provider defaults: "
+                + "; ".join(item.message() for item in defaults)
+            )
     for pipeline, body in pipelines.items():
         for step in body.get("steps", []):
             if step.get("pool") != "ai":
@@ -99,31 +108,12 @@ def validate_ai_pipeline_contract(pipelines: dict, providers: dict | None = None
             ai = step.get("ai")
             if not isinstance(ai, dict) or not ai:
                 raise ValueError(f"AI route is missing: {pipeline}/{step.get('name')}")
-            illegal = sorted(set(ai) - _AI_TIERS)
-            if illegal:
+            if set(ai) != {"allowed_providers"}:
                 raise ValueError(
-                    f"invalid AI tier for {pipeline}/{step.get('name')}: {illegal}"
+                    f"{AI_ROUTE_ALLOWED_PROVIDERS_REQUIRED}: "
+                    f"{pipeline}/{step.get('name')}"
                 )
-            for tier, route in ai.items():
-                if not isinstance(route, dict) or set(route) != {"provider", "model"}:
-                    raise ValueError(
-                        f"invalid AI route shape: {pipeline}/{step.get('name')}/{tier}"
-                    )
-                provider = route.get("provider")
-                model = route.get("model")
-                if not isinstance(provider, str) or not provider.strip():
-                    raise ValueError("AI provider must be a non-empty string")
-                if not isinstance(model, str) or not model.strip():
-                    raise ValueError("AI model must be a non-empty string")
-                if (
-                    _PIPE_VAR_PATTERN.search(provider)
-                    or _PIPE_VAR_PATTERN.search(model)
-                ):
-                    raise ValueError(
-                        f"unresolved AI variable: {pipeline}/{step.get('name')}/{tier}"
-                    )
-                if known is not None and provider not in known:
-                    raise ValueError(f"unknown AI provider: {provider}")
+            allowed_providers_from_ai(ai, providers)
 
 
 def validate_provenance_pipeline_contract(pipelines: dict) -> None:
@@ -548,14 +538,6 @@ def normalize_pipelines(raw: dict, config_dir: Path | None = None) -> dict:
     if config_dir is not None:
         raw = _collect_includes(raw, config_dir)
 
-    strict_ai_contract = any(
-        isinstance(name, str) and name.startswith("AI_")
-        for name in (
-            (raw.get("variables") or {})
-            if isinstance(raw.get("variables") or {}, dict)
-            else {}
-        )
-    )
     _validate_shared_ai_variables(raw)
 
     default = raw.get("default") or {}
@@ -576,8 +558,7 @@ def normalize_pipelines(raw: dict, config_dir: Path | None = None) -> dict:
     validate_provenance_pipeline_contract(result)
     validate_pipeline_scopes(result)
     validate_output_ownership(result)
-    if strict_ai_contract:
-        validate_ai_pipeline_contract(result)
+    validate_ai_pipeline_contract(result)
     return result
 
 

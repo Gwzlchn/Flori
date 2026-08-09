@@ -37,15 +37,12 @@ class EvidenceStep(StepBase):
             return ["output/notes_mechanical.md"]
         return []
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         if not self._is_case():
             return {"skip": "non-case"}
         mech = self.job_dir / "output" / "notes_mechanical.md"
-        # 指纹=机械稿(锚点来源)+provider+模板;锚点不变不重抓,省外网/省钱。
-        h = {
-            "mechanical": file_hash(mech) if mech.exists() else "",
-            "provider": self.ai.override_provider(),
-        }
+        # 锚点来自机械稿,锚点不变就不重抓,省外网和钱。
+        h = {"mechanical": file_hash(mech) if mech.exists() else ""}
         t = self.ai.template_hash("10_evidence")
         if t:
             h["template"] = t

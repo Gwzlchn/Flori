@@ -17,11 +17,10 @@ class PodcastReviewStep(StepBase):
             missing.append("intermediate/transcript.json")
         return missing
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         hashes = {
             "smart": file_hash(self.artifacts.latest_smart_note()) if self.artifacts.latest_smart_note() else "",
             "transcript": file_hash(self.job_dir / "intermediate" / "transcript.json"),
-            "provider": self.ai.override_provider(),
         }
         hashes["template"] = self.ai.template_hash(self.ai.primary_prompt_template())
         return hashes

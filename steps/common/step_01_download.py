@@ -62,7 +62,7 @@ class DownloadStep(StepBase):
             return ["job.json"]
         return []
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         return {
             "job": file_hash(self.job_dir / "job.json"),
         }

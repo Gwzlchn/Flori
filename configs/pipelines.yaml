@@ -16,31 +16,6 @@ default:
   # 在该步下加/改 `version: "2"` 即可,无需改代码。换 ai 模型也会自动触发。详见 shared/step_base._def_digest。
   version: "1"
 
-# 三类 pipeline 共用的 AI 角色变量.22 个键各定义一次,route 只引用,不在内容类型内重抄.
-variables:
-  AI_CONCEPTS_PRIMARY_PROVIDER: claude-cli
-  AI_CONCEPTS_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-  AI_CONCEPTS_FALLBACK_PROVIDER: claude-cli
-  AI_CONCEPTS_FALLBACK_MODEL: "claude-opus-4-8[1m]"
-  AI_SMART_PRIMARY_PROVIDER: claude-cli
-  AI_SMART_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-  AI_SMART_FALLBACK_PROVIDER: claude-cli
-  AI_SMART_FALLBACK_MODEL: "claude-opus-4-8[1m]"
-  AI_SMART_TEXT_PROVIDER: claude-cli
-  AI_SMART_TEXT_MODEL: "claude-opus-4-8[1m]"
-  AI_REVIEW_PRIMARY_PROVIDER: claude-cli
-  AI_REVIEW_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-  AI_REVIEW_FALLBACK_PROVIDER: claude-cli
-  AI_REVIEW_FALLBACK_MODEL: "claude-opus-4-8[1m]"
-  AI_PUNCT_PRIMARY_PROVIDER: claude-cli
-  AI_PUNCT_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-  AI_PUNCT_FALLBACK_PROVIDER: claude-cli
-  AI_PUNCT_FALLBACK_MODEL: "claude-opus-4-8[1m]"
-  AI_TRANSLATE_PRIMARY_PROVIDER: claude-cli
-  AI_TRANSLATE_PRIMARY_MODEL: "claude-opus-4-8[1m]"
-  AI_TRANSLATE_FALLBACK_PROVIDER: claude-cli
-  AI_TRANSLATE_FALLBACK_MODEL: "claude-opus-4-8[1m]"
-
 # 隐藏模板('.' 前缀,不直接运行):同类步只写差异,extends 按键深合并。
 .cpu-step:
   pool: cpu
@@ -168,8 +143,7 @@ video:
         - exists: "input/*.srt"
           when: on
       ai:
-        primary: {provider: $AI_PUNCT_PRIMARY_PROVIDER, model: $AI_PUNCT_PRIMARY_MODEL}
-        fallback: {provider: $AI_PUNCT_FALLBACK_PROVIDER, model: $AI_PUNCT_FALLBACK_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
       outputs: ["output/transcript.md", "intermediate/source_segments.json", "output/provenance/transcript.json",
                 "output/ai_logs/08_punctuate.jsonl", "output/ai_logs/08_punctuate.turns.*.jsonl"]
 
@@ -211,13 +185,14 @@ video:
       # 案例取证,理由见 ADR-0012。仅案例类(domain=finance / style_tags 含 case-study)触发,步内自门控。
       # 其余写空 skip,秒返回不挡 smart。在 smart 之前跑——11_smart 依赖它以引 [E#] 一手来源。
       needs: ["09_mechanical"]
-      tags: []
-      timeout: 1800   # Claude 只搜索候选,正文由服务端受控下载并校验
+      # 本步产出进 canonical evidence 的权威来源。它需要的是 websearch 能力而非某个 provider:
+      # 不同搜索后端可能给出不同的候选来源集,证据链的可复现性由能力标签门控 + 服务端受控
+      # 下载校验保证,不靠钉死 CLI;能力标签让不具备 websearch 的 provider 自动 fail-closed。
+      tags: ["websearch"]
+      timeout: 1800   # CLI 只搜索候选,正文由服务端受控下载并校验
       retry: 1        # 外网/反爬易抖,不像评审那样 5 次硬刚
-      # 取证固定用 Claude CLI 显式模型;换模型会变 def_digest → 步自动过期可重跑。
       ai:
-        primary: {provider: claude-cli, model: "claude-opus-4-8[1m]"}
-        fallback: {provider: claude-cli, model: "claude-opus-4-8[1m]"}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
       outputs: ["output/evidence.json", "output/evidence/*",
                 "output/ai_logs/10_evidence.jsonl", "output/ai_logs/10_evidence.turns.*.jsonl"]
 
@@ -231,9 +206,7 @@ video:
       tags: ["vision"]
       timeout: 1800   # claude-cli 逐张 Read 帧图(最多 20+ 张),与 provider 超时上限对齐
       ai:
-        primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
-        fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
-        text_fallback: {provider: $AI_SMART_TEXT_PROVIDER, model: $AI_SMART_TEXT_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
       outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json", "output/provenance_candidates/smart.json",
                 "output/ai_logs/11_smart.jsonl", "output/ai_logs/11_smart.turns.*.jsonl"]
 
@@ -248,8 +221,7 @@ video:
       timeout: 120
       tags: []
       ai:
-        primary: {provider: $AI_CONCEPTS_PRIMARY_PROVIDER, model: $AI_CONCEPTS_PRIMARY_MODEL}
-        fallback: {provider: $AI_CONCEPTS_FALLBACK_PROVIDER, model: $AI_CONCEPTS_FALLBACK_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
       on_complete:
         - action: index_note
           candidates:
@@ -270,8 +242,7 @@ video:
       prompt_template: semantic_attestation
       prompt_locked: true
       ai:
-        primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
-        fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
       # 核验步以最终版覆盖 11_smart 先写的 provenance/smart.json,后写者持有(§2.5)。
       output_policy: {overlap_with: ["11_smart"]}
       outputs: ["output/provenance/smart.json", "output/provenance/semantic_batch.json",
@@ -287,8 +258,7 @@ video:
       tags: []
       timeout: 1800   # claude-cli 对大 prompt(笔记+机械稿)生成评审较慢,给足时间
       ai:
-        primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
-        fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
       on_complete:
         - action: collect_glossary
       outputs: ["output/review.json", "output/review_input.md", "output/review_sources/*", "output/versions/review_*", "output/versions/review_input_*",
@@ -355,8 +325,7 @@ document:
           when: on
         - when: skip
       ai:
-        primary: {provider: $AI_TRANSLATE_PRIMARY_PROVIDER, model: $AI_TRANSLATE_PRIMARY_MODEL}
-        fallback: {provider: $AI_TRANSLATE_FALLBACK_PROVIDER, model: $AI_TRANSLATE_FALLBACK_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
       on_complete:
         - action: collect_term_pairs
       outputs: ["output/translation.json", "output/translated.html", "output/provenance/translated.json", "output/provenance_candidates/translated.json",
@@ -375,8 +344,7 @@ document:
           when: on
         - when: skip
       ai:
-        primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
-        fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
       outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json", "output/provenance_candidates/smart.json",
                 "output/ai_logs/05_smart.jsonl", "output/ai_logs/05_smart.turns.*.jsonl"]
 
@@ -390,8 +358,7 @@ document:
       timeout: 120
       tags: []
       ai:
-        primary: {provider: $AI_CONCEPTS_PRIMARY_PROVIDER, model: $AI_CONCEPTS_PRIMARY_MODEL}
-        fallback: {provider: $AI_CONCEPTS_FALLBACK_PROVIDER, model: $AI_CONCEPTS_FALLBACK_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
       on_complete:
         - action: index_note
           candidates:
@@ -413,8 +380,7 @@ document:
       prompt_template: semantic_attestation
       prompt_locked: true
       ai:
-        primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
-        fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
       # 核验步以最终版覆盖 05_smart/04_translate 先写的 provenance,后写者持有(§2.5)。
       output_policy: {overlap_with: ["05_smart", "04_translate"]}
       outputs: ["output/provenance/smart.json", "output/provenance/translated.json", "output/provenance/semantic_batch.json",
@@ -432,15 +398,14 @@ document:
           when: on
         - when: skip
       ai:
-        primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
-        fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
       on_complete:
         - action: collect_glossary
       outputs: ["output/review.json", "output/review_input.md", "output/review_sources/*", "output/versions/review_*", "output/versions/review_input_*",
                 "output/ai_logs/08_review.jsonl", "output/ai_logs/08_review.turns.*.jsonl"]
 
 audio:
-  # provider 统一 claude-cli + 显式模型,由带 claude-cli tag 的 ai worker 认领。
+  # AI 步由三个具体 CLI worker 以 allowed_providers OR 语义认领。
   jobs:
     "01_download":
       label: "下载"
@@ -490,8 +455,7 @@ audio:
       needs: ["03_transcript_parse"]
       tags: []
       ai:
-        primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
-        fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
       outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json", "output/provenance_candidates/smart.json",
                 "output/ai_logs/04_smart_podcast.jsonl", "output/ai_logs/04_smart_podcast.turns.*.jsonl"]
 
@@ -505,8 +469,7 @@ audio:
       timeout: 120
       tags: []
       ai:
-        primary: {provider: $AI_CONCEPTS_PRIMARY_PROVIDER, model: $AI_CONCEPTS_PRIMARY_MODEL}
-        fallback: {provider: $AI_CONCEPTS_FALLBACK_PROVIDER, model: $AI_CONCEPTS_FALLBACK_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
       on_complete:
         - action: index_note
           candidates:
@@ -526,8 +489,7 @@ audio:
       prompt_template: semantic_attestation
       prompt_locked: true
       ai:
-        primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
-        fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
       # 核验步以最终版覆盖 04_smart_podcast 先写的 provenance/smart.json,后写者持有(§2.5)。
       output_policy: {overlap_with: ["04_smart_podcast"]}
       outputs: ["output/provenance/smart.json", "output/provenance/semantic_batch.json",
@@ -541,8 +503,7 @@ audio:
       needs: ["05_concepts"]
       tags: []
       ai:
-        primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
-        fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
       on_complete:
         - action: collect_glossary
       outputs: ["output/review.json", "output/review_input.md", "output/review_sources/*", "output/versions/review_*", "output/versions/review_input_*",

@@ -1,6 +1,6 @@
 """跨源综合问答路由 POST /api/ask.
 
-本路由只负责检索、拼 prompt 并投递 AI task 给 ai-worker。claude 调用、gateway、
+本路由只负责检索、拼 prompt 并投递 AI task 给 ai-worker。AI 调用、gateway、
 pricing 与用量记账都在 worker 侧完成。答案与审计经 /api/ai-tasks/{task_id}/{result,log}
 读取.
 """
@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from shared.ask_citations import build_source_manifest
+from shared.ai_routing import CONCRETE_CLI_PROVIDERS
 from shared.db import Database
 from shared.models import AITask, LLMRequest
 from shared.redis_client import RedisClient
@@ -100,6 +101,10 @@ async def ask(
             request=request_obj,
             step_name="synthesis",
             domain=req.domain,
+            provider="",
+            model="",
+            # 调度约束是真实 provider 的 OR 集合;claim 时才原子物化执行者。
+            allowed_providers=list(CONCRETE_CLI_PROVIDERS),
             audit_context={"ask_source_manifest": source_manifest},
         ).to_task_payload()
         await redis.enqueue_ai_task(payload)

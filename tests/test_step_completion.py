@@ -577,7 +577,7 @@ class _ProbeStep(StepBase):
     def execute(self):
         return {}
 
-    def input_hashes(self):
+    def step_input_hashes(self):
         source = self.job_dir / "input" / "data.json"
         return {"data": file_hash(source)} if source.exists() else {}
 

@@ -25,7 +25,7 @@ class SmartStep(StepBase):
             return ["output/notes_mechanical.md"]
         return []
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         hashes: dict[str, str] = {
             "mechanical": file_hash(self.job_dir / "output" / "notes_mechanical.md"),
         }
@@ -39,8 +39,6 @@ class SmartStep(StepBase):
         source_manifest = self.job_dir / "intermediate" / "source_segments.json"
         if source_manifest.exists():
             hashes["source_segments"] = file_hash(source_manifest)
-        # provider 覆盖纳入指纹:换 provider 重跑时指纹变化,绕过幂等跳过。
-        hashes["provider"] = self.ai.override_provider()
         return hashes
 
     def execute(self) -> dict | None:

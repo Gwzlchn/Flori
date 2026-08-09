@@ -10,13 +10,21 @@ from pathlib import Path
 
 
 DEFAULT_AI_PROVIDER = "claude-cli"
-DEFAULT_AI_MODEL = "claude-opus-4-8[1m]"
-DEFAULT_CODEX_MODEL = "gpt-5-codex"
+DEFAULT_AI_MODEL = "opus5"
+DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
+DEFAULT_QODER_MODEL = "ultimate"
 DEFAULT_KIMI_MODEL = "moonshot-v1-128k"
+# provider 缺省模型的单一来源:各家模型名互不通用,跨 provider 沿用同一个默认必错。
 DEFAULT_PROVIDER_MODELS = {
     DEFAULT_AI_PROVIDER: DEFAULT_AI_MODEL,
     "codex-cli": DEFAULT_CODEX_MODEL,
+    "qoder-cli": DEFAULT_QODER_MODEL,
     "kimi": DEFAULT_KIMI_MODEL,
+}
+DEFAULT_PROVIDER_REASONING_EFFORTS = {
+    "claude-cli": "xhigh",
+    "codex-cli": "xhigh",
+    "qoder-cli": "max",
 }
 
 
@@ -189,7 +197,6 @@ class AIUsage:
     cached: bool = False
     created_at: datetime = field(default_factory=_utcnow)
 
-
 @dataclass
 class LLMRequest:
     messages: list[dict]
@@ -202,12 +209,17 @@ class LLMRequest:
     # claude-cli 不读此项(由 step_base._extract_json/_salvage_scores 兜底解析 JSON)。
     response_format: str | None = None
     # 取证等需联网/工具的步骤:放开指定工具(如 ["WebSearch","Bash"])。仅 claude-cli provider 读,
-    # 转为 --allowedTools <tools> --max-turns;其它 provider 忽略.None=用默认两档(images 用 Read,否则禁工具).
+    # 转为 --allowedTools <tools> --max-turns;codex-cli 只接受 Read(read-only 沙箱读文件),
+    # 其余工具 fail-closed。None=用默认两档(images 用 Read,否则禁工具)。
     allowed_tools: list[str] | None = None
     max_turns: int | None = None
-    # 放行目录(claude-cli --add-dir):allowed_tools 含 Read 且要读 prompt 里引用的本地文件
-    # (如 pdf-only 直喂 input/source.pdf)时必须给,否则 Read 出沙箱失败。仅 claude-cli 读。
+    # 放行目录(claude/qoder --add-dir):allowed_tools 含 Read 且要读 prompt 里引用的本地文件
+    # (如 pdf-only 直喂 input/source.pdf)时必须给,否则 Read 出沙箱失败。
+    # codex 不读这项:它的 --add-dir 是可写目录,承载不了读授权,见 CodexCLIProvider。
     add_dirs: list[str] = field(default_factory=list)
+    # 推理档位,仅 CLI provider 读:claude --effort / qoder --reasoning-effort /
+    # codex -c model_reasoning_effort。None=用 providers.yaml 的 provider 默认,再缺省交 CLI 自定。
+    reasoning_effort: str | None = None
 
     def to_jsonable(self) -> dict:
         """JSON 安全序列化,images 的 Path 转 str;供 AI task 内联投递,见 AITask。"""
@@ -222,6 +234,7 @@ class LLMRequest:
             "allowed_tools": self.allowed_tools,
             "add_dirs": list(self.add_dirs or []),
             "max_turns": self.max_turns,
+            "reasoning_effort": self.reasoning_effort,
         }
 
     @classmethod
@@ -237,6 +250,7 @@ class LLMRequest:
             allowed_tools=d.get("allowed_tools"),
             max_turns=d.get("max_turns"),
             add_dirs=list(d.get("add_dirs") or []),
+            reasoning_effort=d.get("reasoning_effort"),
         )
 
 
@@ -259,6 +273,14 @@ class LLMResponse:
     ttft_ms: float | None = None         # 首 token 延迟(provider 提供时)
     finish_reason: str | None = None     # stop_reason / finish_reason
     tier_used: str | None = None         # 实际命中的 tier(primary/fallback/text_fallback),由 gateway 写
+    # 有效 AI 选择(gateway 写)。provider/model 上面两个字段始终是解析后的真实后端;
+    # requested_* 保留具体请求值。reasoning_effort 是真正传给
+    # provider 的档位,source 见 shared/ai_selection.py,provider 默认生效时不会只留 None。
+    requested_provider: str | None = None
+    requested_model: str | None = None
+    requested_reasoning_effort: str | None = None
+    reasoning_effort: str | None = None
+    reasoning_effort_source: str | None = None
     attempts: list[dict] = field(default_factory=list)   # 逐 tier 尝试链,由 gateway 写
     raw: dict | None = None              # provider 原始返回(尽量保真),供审计 raw
     # claude CLI 会话 transcript 本地路径(agentic 中间轮全轨迹;provider 按 session_id 定位,
@@ -278,29 +300,53 @@ class LLMResponse:
 class AITask:
     """独立 AI 任务:不挂 job,不走 storage,内联 LLMRequest 载荷,结果内联回 airesult:{task_id}.
     供 /api/ask 和 /digest 把单次 CLI/API 调用交给 ai-worker 异步执行.
-    入队 queue:ai(kind='ai',require_tags=[provider access tag]);无 job_id,故与 pipeline-step task 区分."""
+    入队 queue:ai。显式 provider 用 require_tags 硬门;自动路由用 allowed_providers OR 集合。
+    无 job_id,故与 pipeline-step task 区分。"""
     task_id: str
     request: LLMRequest
     step_name: str = "ai"          # gateway 路由步名(如 synthesis/digest),也作 ai_usage.step
     domain: str | None = None      # 观测/归因(可空)
-    provider: str = DEFAULT_AI_PROVIDER
-    model: str = DEFAULT_AI_MODEL
+    provider: str = ""
+    model: str = ""
+    allowed_providers: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)                            # 软标签(reject 过滤用)
     require_tags: list[str] = field(default_factory=list)  # 硬门控:仅有对应 AI 接入方式的 worker 认领
     # 检索来源等不可变执行上下文,随任务与审计持久化.
     audit_context: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        from .ai_routing import provider_required_tag
+        from .ai_routing import CONCRETE_CLI_PROVIDERS, provider_required_tag
 
-        default_model = DEFAULT_PROVIDER_MODELS.get(self.provider)
-        if default_model and (
-            not self.model
-            or (self.provider != DEFAULT_AI_PROVIDER and self.model == DEFAULT_AI_MODEL)
+        if (
+            not isinstance(self.allowed_providers, list)
+            or not all(type(item) is str and item.strip() for item in self.allowed_providers)
         ):
-            self.model = default_model
-        # 调用方可以追加能力标签,但不能移除 provider 接入硬门。
-        self.require_tags = sorted(set(self.require_tags + [provider_required_tag(self.provider)]))
+            raise ValueError("allowed_providers 必须是字符串列表")
+        self.allowed_providers = [item.strip() for item in self.allowed_providers]
+        if len(set(self.allowed_providers)) != len(self.allowed_providers):
+            raise ValueError("allowed_providers 不得重复")
+        concrete = set(CONCRETE_CLI_PROVIDERS)
+        if self.provider:
+            if self.allowed_providers:
+                raise ValueError("provider 与 allowed_providers 互斥")
+            default_model = DEFAULT_PROVIDER_MODELS.get(self.provider)
+            if default_model and not self.model:
+                self.model = default_model
+            self.require_tags = sorted(set(
+                self.require_tags + [provider_required_tag(self.provider)]
+            ))
+        else:
+            if not self.allowed_providers:
+                raise ValueError("AI task 必须声明具体 provider 或 allowed_providers")
+            unknown = sorted(set(self.allowed_providers) - concrete)
+            if unknown:
+                raise ValueError(f"allowed_providers 含不支持的 provider: {unknown}")
+            if self.model:
+                raise ValueError("allowed_providers task 在 claim 前不得声明单一 model")
+            forged = sorted(set(self.require_tags).intersection(concrete))
+            if forged:
+                raise ValueError("allowed_providers task 不得把 provider 写进 AND require_tags")
+            self.require_tags = sorted(set(self.require_tags))
         if type(self.audit_context) is not dict:
             raise ValueError("audit_context 必须是 JSON 对象")
         try:
@@ -319,13 +365,16 @@ class AITask:
             "task_id": self.task_id,
             "step": self.step_name,
             "domain": self.domain,
-            "provider": self.provider,
-            "model": self.model,
             "request": self.request.to_jsonable(),
             "tags": sorted(self.tags),
             "require_tags": sorted(self.require_tags),
             "pool": "ai",
         }
+        if self.provider:
+            payload["provider"] = self.provider
+            payload["model"] = self.model
+        if self.allowed_providers:
+            payload["allowed_providers"] = list(self.allowed_providers)
         if self.audit_context:
             payload["audit_context"] = self.audit_context
         return payload
@@ -337,8 +386,9 @@ class AITask:
             request=LLMRequest.from_jsonable(d.get("request", {})),
             step_name=d.get("step", "ai"),
             domain=d.get("domain"),
-            provider=d.get("provider", DEFAULT_AI_PROVIDER),
-            model=d.get("model", DEFAULT_AI_MODEL),
+            provider=d.get("provider", ""),
+            model=d.get("model", ""),
+            allowed_providers=list(d.get("allowed_providers", [])),
             tags=list(d.get("tags", [])),
             require_tags=list(d.get("require_tags", [])),
             audit_context=d.get("audit_context", {}),

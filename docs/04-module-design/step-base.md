@@ -44,6 +44,9 @@ class StepBase:
         return []
 
     def input_hashes(self) -> dict[str, str]:
+        """最终方法:合并 step_input_hashes() 与有效 AI 选择指纹。"""
+
+    def step_input_hashes(self) -> dict[str, str]:
         return {}
 ```
 
@@ -55,12 +58,12 @@ class StepBase:
 
 ### 2.1 指纹计算
 
-每步通过 `input_hashes()` 定义自己的指纹——hash 的是实际输入文件的内容和相关配置：
+每步通过 `step_input_hashes()` 定义自己的指纹——hash 的是实际输入文件的内容和相关配置：
 
 ```python
 # CPU 步骤示例（确定性）
 class OcrStep(StepBase):
-    def input_hashes(self):
+    def step_input_hashes(self):
         return {
             "dedup": file_hash(self.job_dir / "intermediate/dedup.json"),
             "config": json.dumps(self.config.get("ocr", {}), sort_keys=True),
@@ -68,13 +71,19 @@ class OcrStep(StepBase):
 
 # LLM 步骤示例（非确定性）
 class SmartStep(StepBase):
-    def input_hashes(self):
+    def step_input_hashes(self):
         return {
             "mechanical": file_hash(self.job_dir / "output/notes_mechanical.md"),
             "prompt": file_hash(Path("/data/prompts/smart_notes.md")),
             "profile": json.dumps(self.load_profile(), sort_keys=True),
         }
 ```
+
+`input_hashes()` 是最终方法,步骤不要覆盖。它在 `step_input_hashes()` 之上并入 `ai_selection`——
+本次调用最终生效的 AI 选择摘要(job 级 provider/model/推理档位覆盖、认领时物化的具体
+CLI provider、provider 配置兜底出来的模型与档位、启用的能力)。pipeline 定义里的
+`allowed_providers` 归 `def_digest`,不重复进这里。计算与投影规则见 `shared/ai_selection.py`;
+不走 AI 的步骤不带这个键。
 
 ### 2.2 .done 标记
 
@@ -315,7 +324,7 @@ class OcrStep(StepBase):
             return ["intermediate/dedup.json"]
         return []
 
-    def input_hashes(self):
+    def step_input_hashes(self):
         return {
             "dedup": file_hash(self.job_dir / "intermediate" / "dedup.json"),
             "config": json.dumps(self.config.get("ocr", {}), sort_keys=True),

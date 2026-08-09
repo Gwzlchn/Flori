@@ -7,6 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from shared.ai_routing import (
+    AI_ROUTE_ALLOWED_PROVIDERS_REQUIRED,
+    CONCRETE_CLI_PROVIDERS,
+)
 from shared.config import (
     load_yaml,
     load_pipelines,
@@ -39,21 +43,26 @@ class TestExtends:
         assert s["timeout_sec"] == 1800   # 子覆盖模板
         assert s["retries"] == 1          # 未覆盖的继承
 
-    def test_deep_merge_ai_block(self):
+    def test_deep_merge_nested_block(self):
         raw = {
-            ".ai-step": {"pool": "ai", "ai": {"primary": {"provider": "anthropic", "model": "x"},
-                                              "fallback": {"provider": "deepseek", "model": "y"}}},
-            "p": {"jobs": {"A": {"extends": ".ai-step", "run": "m.a",
-                                 "ai": {"primary": {"model": "z"}}}}},
+            ".cpu-step": {"pool": "cpu", "settings": {
+                "primary": {"provider": "a", "model": "x"},
+                "fallback": {"provider": "b", "model": "y"},
+            }},
+            "p": {"jobs": {"A": {"extends": ".cpu-step", "run": "m.a",
+                                 "settings": {"primary": {"model": "z"}}}}},
         }
         s = normalize_pipelines(raw)["p"]["steps"][0]
         # 深合并:primary.model 被覆盖,primary.provider 与 fallback 保留。
-        assert s["ai"]["primary"] == {"provider": "anthropic", "model": "z"}
-        assert s["ai"]["fallback"] == {"provider": "deepseek", "model": "y"}
+        assert s["settings"]["primary"] == {"provider": "a", "model": "z"}
+        assert s["settings"]["fallback"] == {"provider": "b", "model": "y"}
 
     def test_multi_level_extends(self):
         raw = {
-            ".ai-step": {"pool": "ai", "timeout": 600, "retry": 2},
+            ".ai-step": {
+                "pool": "ai", "timeout": 600, "retry": 2,
+                "ai": {"allowed_providers": ["claude-cli"]},
+            },
             ".review": {"extends": ".ai-step", "timeout": 120},
             "p": {"jobs": {"A": {"extends": ".review", "run": "m.a"}}},
         }
@@ -94,26 +103,26 @@ class TestVariables:
         assert s["timeout_sec"] == 1800 and isinstance(s["timeout_sec"], int)
         assert s["retries"] == 1 and isinstance(s["retries"], int)
 
-    def test_var_in_ai_block(self):
+    def test_var_in_ai_allowed_providers(self):
         raw = {
             "p": {
-                "variables": {"PROV": "kimi", "MODEL": "moonshot-v1-8k"},
+                "variables": {"PROV": "qoder-cli"},
                 "jobs": {"A": {"run": "m.a", "pool": "ai",
-                               "ai": {"primary": {"provider": "$PROV", "model": "$MODEL"}}}},
+                               "ai": {"allowed_providers": ["$PROV"]}}},
             }
         }
         s = normalize_pipelines(raw)["p"]["steps"][0]
-        assert s["ai"]["primary"] == {"provider": "kimi", "model": "moonshot-v1-8k"}
+        assert s["ai"] == {"allowed_providers": ["qoder-cli"]}
 
     def test_pipeline_var_overrides_global(self):
         raw = {
-            "variables": {"PROV": "anthropic"},
-            "p": {"variables": {"PROV": "kimi"},
+            "variables": {"PROV": "claude-cli"},
+            "p": {"variables": {"PROV": "codex-cli"},
                   "jobs": {"A": {"run": "m.a", "pool": "ai",
-                                 "ai": {"primary": {"provider": "$PROV"}}}}},
+                                 "ai": {"allowed_providers": ["$PROV"]}}}},
         }
         s = normalize_pipelines(raw)["p"]["steps"][0]
-        assert s["ai"]["primary"]["provider"] == "kimi"
+        assert s["ai"]["allowed_providers"] == ["codex-cli"]
 
     def test_ocr_timeout_single_source_no_drift(self, configs_dir):
         """06_ocr 的 timeout/retry 只在 variables 定义一次;prod 与 integration 覆盖
@@ -129,22 +138,23 @@ class TestVariables:
             "default": {"image": "flori/step-base", "timeout": 600, "retry": 0},
             ".cpu-step": {"pool": "cpu", "timeout": 120, "retry": 1},
             "video": {
-                "variables": {"OCR_TIMEOUT": 1800, "OCR_RETRIES": 1, "PROV": "anthropic"},
+                "variables": {"OCR_TIMEOUT": 1800, "OCR_RETRIES": 1,
+                              "PROV": "claude-cli"},
                 "jobs": {
                     "06_ocr": {"extends": ".cpu-step", "run": "steps.video.step_06_ocr",
                                "image": "flori/step-heavy", "needs": ["05_dedup"],
                                "timeout": "$OCR_TIMEOUT", "retry": "$OCR_RETRIES"},
                     "11_smart": {"run": "m.s", "pool": "ai",
-                                 "ai": {"primary": {"provider": "$PROV"}}},
+                                 "ai": {"allowed_providers": ["$PROV"]}},
                 },
             },
         }
         prod_norm = normalize_pipelines(raw)
-        # integration overlay:仅覆盖 PROV → kimi,OCR_* 不重写。
+        # integration overlay:仅覆盖 PROV,OCR_* 不重写。
         raw_int = {
             **{k: raw[k] for k in (".cpu-step", "default")},
             "video": {**raw["video"],
-                      "variables": {**raw["video"]["variables"], "PROV": "kimi"}},
+                      "variables": {**raw["video"]["variables"], "PROV": "codex-cli"}},
         }
         int_norm = normalize_pipelines(raw_int)
 
@@ -155,8 +165,8 @@ class TestVariables:
         # provider 是两侧唯一差异。
         prod_smart = next(s for s in prod_norm["video"]["steps"] if s["name"] == "11_smart")
         int_smart = next(s for s in int_norm["video"]["steps"] if s["name"] == "11_smart")
-        assert prod_smart["ai"]["primary"]["provider"] == "anthropic"
-        assert int_smart["ai"]["primary"]["provider"] == "kimi"
+        assert prod_smart["ai"]["allowed_providers"] == ["claude-cli"]
+        assert int_smart["ai"]["allowed_providers"] == ["codex-cli"]
 
     def test_video_manifest_producer_waits_for_ocr(self, configs_dir):
         pipeline = load_pipelines(configs_dir / "pipelines.yaml")["video"]
@@ -234,13 +244,11 @@ class TestSemanticAttestationPipeline:
 
 
 class TestAIRoleContract:
-    def test_real_config_has_22_shared_variables_and_15_routes(self, configs_dir):
+    def test_real_config_has_no_virtual_role_variables_and_15_routes(self, configs_dir):
         raw = load_yaml(configs_dir / "pipelines.yaml")
-        ai_variables = {
-            key: value for key, value in raw["variables"].items()
-            if key.startswith("AI_")
-        }
-        assert len(ai_variables) == 22
+        assert not any(
+            key.startswith("AI_") for key in (raw.get("variables") or {})
+        )
         for pipeline in ("video", "document", "audio"):
             assert not any(
                 key.startswith("AI_")
@@ -266,29 +274,32 @@ class TestAIRoleContract:
             ("audio", "05_review"),
             ("audio", "04_semantic_attestation"),
         }
-        expected_route = {
-            "primary": {"provider": "claude-cli", "model": "claude-opus-4-8[1m]"},
-            "fallback": {"provider": "claude-cli", "model": "claude-opus-4-8[1m]"},
-        }
+        allowed_route = {"allowed_providers": list(CONCRETE_CLI_PROVIDERS)}
         for key, route in routes.items():
-            assert route["primary"] == expected_route["primary"], key
-            assert route["fallback"] == expected_route["fallback"], key
-        assert routes[("video", "11_smart")]["text_fallback"] == expected_route["primary"]
-        assert sum(len(route) for route in routes.values()) == 31
+            assert route == allowed_route, key
+        assert sum(len(route) for route in routes.values()) == len(routes)
+        validate_ai_pipeline_contract(
+            pipelines, load_yaml(configs_dir / "providers.yaml"),
+        )
+        evidence_step = next(
+            step for step in pipelines["video"]["steps"]
+            if step["name"] == "10_evidence"
+        )
+        assert "websearch" in (evidence_step.get("tags") or [])
 
     def test_shared_ai_variables_reject_undefined_unused_and_empty(self):
         base = {
-            "variables": {"AI_PRIMARY_PROVIDER": "known", "AI_PRIMARY_MODEL": "m"},
+            "variables": {"AI_PROVIDER": "claude-cli"},
             "p": {"jobs": {"A": {
                 "run": "m.a", "pool": "ai",
-                "ai": {"primary": {
-                    "provider": "$AI_PRIMARY_PROVIDER", "model": "$AI_PRIMARY_MODEL",
-                }},
+                "ai": {"allowed_providers": ["$AI_PROVIDER"]},
             }}},
         }
-        assert normalize_pipelines(base)["p"]["steps"][0]["ai"]["primary"]["provider"] == "known"
+        assert normalize_pipelines(base)["p"]["steps"][0]["ai"] == {
+            "allowed_providers": ["claude-cli"],
+        }
 
-        unused = {**base, "variables": {**base["variables"], "AI_UNUSED_MODEL": "x"}}
+        unused = {**base, "variables": {**base["variables"], "AI_UNUSED_PROVIDER": "x"}}
         with pytest.raises(ValueError, match="unused"):
             normalize_pipelines(unused)
 
@@ -296,32 +307,69 @@ class TestAIRoleContract:
             **base,
             "p": {"jobs": {"A": {
                 "run": "m.a", "pool": "ai",
-                "ai": {"primary": {
-                    "provider": "$AI_PRIMARY_PROVIDER", "model": "$AI_MISSING_MODEL",
-                }},
+                "ai": {"allowed_providers": ["$AI_MISSING_PROVIDER"]},
             }}},
         }
         with pytest.raises(ValueError, match="undefined"):
             normalize_pipelines(undefined)
 
-        empty = {**base, "variables": {**base["variables"], "AI_PRIMARY_MODEL": ""}}
+        empty = {**base, "variables": {**base["variables"], "AI_PROVIDER": ""}}
         with pytest.raises(ValueError, match="non-empty"):
             normalize_pipelines(empty)
 
-    def test_ai_routes_reject_illegal_tier_shape_and_unknown_provider(self):
+    @pytest.mark.parametrize("ai", [
+        {"primary": {"provider": "claude-cli", "model": "opus5"}},
+        {"fallback": {"provider": "codex-cli", "model": "gpt-5.6-sol"}},
+        {"text_fallback": {"provider": "qoder-cli", "model": "ultimate"}},
+        {
+            "allowed_providers": ["claude-cli"],
+            "primary": {"provider": "claude-cli", "model": "opus5"},
+        },
+    ])
+    def test_ai_routes_reject_legacy_tiers_with_stable_code(self, ai):
         pipelines = {"p": {"steps": [{
-            "name": "A", "pool": "ai",
-            "ai": {"primary": {"provider": "known", "model": "m"},
-                   "shadow": {"provider": "known", "model": "m"}},
+            "name": "A", "pool": "ai", "ai": ai,
         }]}}
-        with pytest.raises(ValueError, match="invalid AI tier"):
+
+        with pytest.raises(ValueError, match=AI_ROUTE_ALLOWED_PROVIDERS_REQUIRED):
             validate_ai_pipeline_contract(pipelines)
 
-        pipelines["p"]["steps"][0]["ai"] = {
-            "primary": {"provider": "unknown", "model": "m"},
-        }
-        with pytest.raises(ValueError, match="unknown AI provider"):
-            validate_ai_pipeline_contract(pipelines, {"providers": {"known": {}}})
+    def test_provider_defaults_outside_own_domain_fail_at_load(self):
+        pipelines = {"p": {"steps": [{
+            "name": "A", "pool": "ai",
+            "ai": {"allowed_providers": ["qoder-cli"]},
+        }]}}
+        providers = {"providers": {"qoder-cli": {
+            "type": "qoder_cli", "model": "ultimate", "models": ["ultimate"],
+            "reasoning_effort": "turbo",
+            "reasoning_efforts": ["low", "high", "max"],
+        }}}
+
+        with pytest.raises(ValueError, match="reasoning_effort_not_in_provider_domain"):
+            validate_ai_pipeline_contract(pipelines, providers)
+
+    def test_allowed_provider_must_exist_in_loaded_config(self):
+        providers = {"providers": {"claude-cli": {
+            "type": "claude_cli", "model": "opus5", "models": ["opus5"],
+            "reasoning_effort": "xhigh", "reasoning_efforts": ["xhigh"],
+        }}}
+        pipelines = {"p": {"steps": [{
+            "name": "A", "pool": "ai",
+            "ai": {"allowed_providers": ["codex-cli"]},
+        }]}}
+
+        with pytest.raises(ValueError, match="unknown AI provider: codex-cli"):
+            validate_ai_pipeline_contract(pipelines, providers)
+
+    def test_allowed_providers_reject_non_concrete_cli(self):
+        providers = {"providers": {"openai": {"type": "openai", "model": "gpt"}}}
+        pipelines = {"p": {"steps": [{
+            "name": "A", "pool": "ai",
+            "ai": {"allowed_providers": ["openai"]},
+        }]}}
+
+        with pytest.raises(ValueError, match="unsupported concrete CLI provider"):
+            validate_ai_pipeline_contract(pipelines, providers)
 
 
 # rules:声明式跳过/运行(归一化映射为 condition,行为等价)
@@ -336,6 +384,7 @@ class TestRules:
 
     def test_exists_on_srt_maps_to_has_subtitle(self):
         raw = {"p": {"jobs": {"A": {"run": "m.a", "pool": "ai",
+                                    "ai": {"allowed_providers": ["claude-cli"]},
                                     "rules": [{"exists": "input/*.srt", "when": "on"}]}}}}
         s = normalize_pipelines(raw)["p"]["steps"][0]
         assert s["condition"] == "has_subtitle"
@@ -606,9 +655,7 @@ class TestNormalizedContractStable:
         for s in p["video"]["steps"]:
             assert {"name", "module", "image", "pool", "depends_on"} <= set(s)
 
-    def test_ai_block_provider_model_dict(self, configs_dir):
+    def test_ai_block_uses_concrete_allowed_providers(self, configs_dir):
         p = load_pipelines(configs_dir / "pipelines.yaml")
         smart = next(s for s in p["video"]["steps"] if s["name"] == "11_smart")
-        assert smart["ai"]["primary"]["provider"] == "claude-cli"  # 默认走 Claude CLI 接入方式
-        assert smart["ai"]["primary"]["model"] == "claude-opus-4-8[1m]"
-        assert "text_fallback" in smart["ai"]
+        assert smart["ai"] == {"allowed_providers": list(CONCRETE_CLI_PROVIDERS)}

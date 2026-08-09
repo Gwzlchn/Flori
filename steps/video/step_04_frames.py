@@ -64,7 +64,7 @@ class FramesStep(StepBase):
             missing.append("input/source.mp4")
         return missing
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         return {
             "scenes": file_hash(self.job_dir / "intermediate" / "scenes.json"),
             "frame_pick": json.dumps(self.config.get("domain", {}).get("frame_pick", {}), sort_keys=True),

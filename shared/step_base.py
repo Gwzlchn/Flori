@@ -72,7 +72,7 @@ class StepBase:
 
     def run(self) -> None:
         try:
-            self.ai.override_provider()
+            self.ai.validate_overrides()
             missing = self.validate_inputs()
             if missing:
                 from .errors import InputMissingError
@@ -135,6 +135,20 @@ class StepBase:
         return []
 
     def input_hashes(self) -> dict[str, str]:
+        """输入指纹的唯一出口,子步不要覆盖它。
+
+        有效 AI 选择在这里统一并入。交给各步自己加总会漏,漏掉的步换了 provider、模型
+        或推理档位后仍被幂等判成 up-to-date 而静默跳过,恢复和断点续跑都会拿到旧产物。
+        指纹内容见 shared/ai_selection.py,只承担 def_digest 覆盖不到的那部分。
+        """
+        hashes = dict(self.step_input_hashes())
+        selection = self.ai.selection_fingerprint()
+        if selection:
+            hashes["ai_selection"] = selection
+        return hashes
+
+    def step_input_hashes(self) -> dict[str, str]:
+        """步骤自身输入产物的指纹。只写本步真正读的文件与参数,不要再手写 AI 选择。"""
         return {}
 
     def _def_digest(self) -> str:

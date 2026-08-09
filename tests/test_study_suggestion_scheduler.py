@@ -212,7 +212,7 @@ async def test_deadline_cancels_only_before_provider_execution(
         claim = await redis.claim_ai_task(
             worker_id="deadline-worker",
             claim_id="deadline-claim",
-            tags={"claude-cli"},
+            tags={queued["provider"]},
             lease_seconds=3_600,
         )
         assert claim is not None

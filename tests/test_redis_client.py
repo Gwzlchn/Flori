@@ -757,7 +757,7 @@ class TestAITaskQueue:
         payload = AITask(
             task_id="at_x",
             request=LLMRequest(messages=[{"role": "user", "content": "q"}]),
-            step_name="synthesis", domain="dl",
+            step_name="synthesis", domain="dl", provider="claude-cli",
         ).to_task_payload()
         await rc.enqueue_ai_task(payload, priority=-1)
         listed = await rc.list_queue("ai")
@@ -774,6 +774,7 @@ class TestAITaskQueue:
             "kind": "ai",
             "task_id": "at_once",
             "step": "synthesis",
+            "provider": "openai",
             "request": {"messages": [{"role": "user", "content": "first"}]},
         }
 
@@ -792,7 +793,7 @@ class TestAITaskQueue:
 
     @pytest.mark.asyncio
     async def test_enqueue_ai_task_once_rejects_same_id_with_different_payload(self, rc):
-        first = {"kind": "ai", "task_id": "at_conflict", "request": {"value": 1}}
+        first = {"kind": "ai", "task_id": "at_conflict", "provider": "openai", "request": {"value": 1}}
         conflicting = {**first, "request": {"value": 2}}
         assert await rc.enqueue_ai_task_once(first) is True
 
@@ -806,7 +807,7 @@ class TestAITaskQueue:
 
     @pytest.mark.asyncio
     async def test_enqueue_ai_task_once_replay_does_not_recreate_queue_entry(self, rc):
-        payload = {"kind": "ai", "task_id": "at_replay", "request": {}}
+        payload = {"kind": "ai", "task_id": "at_replay", "provider": "openai", "request": {}}
         assert await rc.enqueue_ai_task_once(payload) is True
         await rc.r.zrem("queue:ai", json.dumps(payload, sort_keys=True))
 
@@ -817,6 +818,7 @@ class TestAITaskQueue:
     async def test_expired_claim_before_execution_requeues_same_ai_task_once(self, rc):
         payload = {
             "kind": "ai",
+            "provider": "openai",
             "task_id": "at_claimed_crash",
             "batch_id": "ssb_claimed_crash",
             "attempt": 1,
@@ -848,11 +850,11 @@ class TestAITaskQueue:
     @pytest.mark.asyncio
     async def test_source_root_worker_only_claims_ai_task_for_same_root(self, rc):
         ordinary = {
-            "kind": "ai", "task_id": "at_ordinary", "request": {},
+            "kind": "ai", "task_id": "at_ordinary", "provider": "openai", "request": {},
             "require_tags": [],
         }
         source = {
-            "kind": "ai", "task_id": "at_source", "request": {},
+            "kind": "ai", "task_id": "at_source", "provider": "openai", "request": {},
             "require_tags": ["source-root:zg-library"],
         }
         await rc.enqueue_ai_task_once(ordinary, priority=-2)
@@ -869,9 +871,33 @@ class TestAITaskQueue:
         ) is not None
 
     @pytest.mark.asyncio
+    async def test_worker_without_capability_tags_cannot_claim_ai_task(self, rc):
+        # 安全矩阵 A:require_tags ⊆ worker.tags 是硬门;没有 concrete CLI 探测
+        # 标签的 worker(伪造被启动侧拦截后只剩普通标签)认领不到能力任务。
+        task = {
+            "kind": "ai", "task_id": "at_capability", "provider": "claude-cli", "request": {},
+            "require_tags": ["claude-cli", "read"],
+        }
+        await rc.enqueue_ai_task_once(task)
+
+        denied = await rc.claim_ai_task(
+            worker_id="worker-plain", now_epoch=1_000,
+            tags={"vision", "home-desktop"},
+        )
+        assert denied is None
+        assert await rc.r.zcard("queue:ai") == 1
+
+        granted = await rc.claim_ai_task(
+            worker_id="worker-cli", now_epoch=1_001,
+            tags={"claude-cli", "read", "websearch", "vision"},
+        )
+        assert granted["task_id"] == "at_capability"
+
+    @pytest.mark.asyncio
     async def test_expired_executing_claim_is_ambiguous_and_never_auto_requeued(self, rc):
         payload = {
             "kind": "ai",
+            "provider": "openai",
             "task_id": "at_paid_crash",
             "batch_id": "ssb_paid_crash",
             "attempt": 3,
@@ -899,7 +925,7 @@ class TestAITaskQueue:
     @pytest.mark.asyncio
     async def test_ai_claim_cas_rejects_cross_owner_batch_attempt_revision_and_token(self, rc):
         payload = {
-            "kind": "ai", "task_id": "at_bound", "batch_id": "ssb_bound",
+            "kind": "ai", "task_id": "at_bound", "provider": "openai", "batch_id": "ssb_bound",
             "attempt": 4, "revision": 9, "request": {},
         }
         await rc.enqueue_ai_task_once(payload)
@@ -926,7 +952,7 @@ class TestAITaskQueue:
     @pytest.mark.asyncio
     async def test_original_ai_payload_is_frozen_at_claim(self, rc):
         payload = {
-            "kind": "ai", "task_id": "at_manifest", "batch_id": "ssb_manifest",
+            "kind": "ai", "task_id": "at_manifest", "provider": "openai", "batch_id": "ssb_manifest",
             "attempt": 1, "revision": 1,
             "audit_context": {"ask_source_manifest": {"manifest_sha256": "a" * 64}},
         }
@@ -945,7 +971,7 @@ class TestAITaskQueue:
     @pytest.mark.asyncio
     async def test_claimed_task_is_requeued_at_most_once(self, rc):
         payload = {
-            "kind": "ai", "task_id": "at_once_retry", "batch_id": "ssb_once",
+            "kind": "ai", "task_id": "at_once_retry", "provider": "openai", "batch_id": "ssb_once",
             "attempt": 1, "revision": 2, "request": {},
         }
         await rc.enqueue_ai_task_once(payload)
@@ -965,7 +991,7 @@ class TestAITaskQueue:
     @pytest.mark.asyncio
     async def test_stale_claim_cannot_renew_or_finish_new_execution(self, rc):
         payload = {
-            "kind": "ai", "task_id": "at_stale_finish", "batch_id": "ssb_stale",
+            "kind": "ai", "task_id": "at_stale_finish", "provider": "openai", "batch_id": "ssb_stale",
             "attempt": 1, "revision": 2, "request": {},
         }
         await rc.enqueue_ai_task_once(payload)
@@ -996,7 +1022,7 @@ class TestAITaskQueue:
     @pytest.mark.asyncio
     async def test_cancel_before_execution_is_exact_and_releases_claim_resources(self, rc):
         payload = {
-            "kind": "ai", "task_id": "at_cancel", "batch_id": "ssb_cancel",
+            "kind": "ai", "task_id": "at_cancel", "provider": "openai", "batch_id": "ssb_cancel",
             "attempt": 1, "revision": 2, "step": "synthesis", "request": {},
         }
         await rc.enqueue_ai_task_once(payload)
@@ -1017,7 +1043,7 @@ class TestAITaskQueue:
     @pytest.mark.asyncio
     async def test_cancel_wrongtype_has_no_partial_writes(self, rc):
         payload = {
-            "kind": "ai", "task_id": "at_cancel_wrongtype",
+            "kind": "ai", "task_id": "at_cancel_wrongtype", "provider": "openai",
             "batch_id": "ssb_cancel_wrongtype", "attempt": 1, "revision": 2,
             "step": "synthesis", "request": {},
         }
@@ -1068,7 +1094,9 @@ class TestAITaskQueue:
     async def test_dequeue_ai_task_cleans_enqueued(self, rc):
         from shared.models import AITask, LLMRequest
         await rc.enqueue_ai_task(
-            AITask(task_id="at_d", request=LLMRequest(messages=[])).to_task_payload()
+            AITask(
+                task_id="at_d", request=LLMRequest(messages=[]), provider="claude-cli",
+            ).to_task_payload()
         )
         raw, parsed, score = await rc.dequeue_step_raw("ai")
         assert parsed["kind"] == "ai" and parsed["task_id"] == "at_d"

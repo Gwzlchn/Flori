@@ -12,7 +12,7 @@ class DanmakuStep(StepBase):
             return ["input/*.ass"]
         return []
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         ass_files = sorted((self.job_dir / "input").glob("*.ass"))
         hashes = {}
         for f in ass_files:

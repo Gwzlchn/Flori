@@ -26,7 +26,7 @@ class PunctuateStep(StepBase):
         sub, _ = self._pick()
         return [] if sub else ["input/*.srt"]
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         sub, is_zh = self._pick()
         if not sub:
             return {}

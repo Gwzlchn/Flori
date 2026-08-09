@@ -723,7 +723,8 @@ class EffectDispatcher:
             return 0
         # 短路只认判定行,不认 marker。marker 只说明"发布过这个投影",不代表投影正确:
         # 候选池里的错误空投影恰恰是源有概念却被投影成空,它们的 marker 存的就是真实源摘要,
-        # 按 marker 摘要短路会把错误永久认证下来。判定行则代表真按这份源算过且结果确实为空。
+        # 按 marker 摘要短路会把错误永久认证下来(旧实现的缺陷)。判定行则代表
+        # "真按这份源算过且结果确实为空",据此短路安全。其余情况一律重算 mapping。
         verdict = await asyncio.to_thread(
             self.owner.db.get_concept_occurrence_replay_state, job_id,
         )
@@ -741,6 +742,7 @@ class EffectDispatcher:
             and pair[0] == source_digest
             and pair[1] != _EMPTY_CONCEPT_PROJECTION_DIGEST
         ):
+            # 非空投影且源未变:确实没有可做的事。空投影不走这条,必须重算。
             return 0
         if review is None:
             await asyncio.to_thread(

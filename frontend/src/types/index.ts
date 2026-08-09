@@ -570,6 +570,21 @@ export interface TopicConcept {
   is_topic: boolean
 }
 
+// GET /api/providers 单项;端点不在 selected OpenAPI,手写对齐 docs/03-contracts.md §1.14。
+export type ConcreteCliProvider = 'claude-cli' | 'codex-cli' | 'qoder-cli'
+
+export interface AiProviderInfo {
+  name: string
+  type: string
+  available: boolean
+  label: string
+  models: string[]                          // provider 的 model 白名单
+  default_model: string | null
+  reasoning_efforts: string[]               // 并集,仅用于未细分档位的 provider 与展示兜底
+  reasoning_efforts_by_model: Record<string, string[]>  // 非空时以它为准入域,按所选模型取
+  default_reasoning_effort: string | null
+}
+
 // 术语:与后端 GlossaryTermResponse 严格对齐。
 export interface GlossaryTerm {
   domain: string
@@ -827,7 +842,7 @@ export interface StudySuggestionBatch {
   revision: number
   attempt: number
   task_id: string
-  provider: string
+  provider: ConcreteCliProvider
   model: string
   max_cards: number
   error_code: string | null

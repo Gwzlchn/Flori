@@ -30,6 +30,7 @@ from typing import Callable, Mapping, Sequence
 
 import structlog
 
+from .ai_routing import validate_job_ai_document
 from .config import AppConfig, load_config
 from .content_import_guard import (
     LiveTargetError,
@@ -144,8 +145,11 @@ CONFLICT_LEDGER = "immutable_ledger"
 CONFLICT_USER_STATE = "user_state"
 
 _GLOBAL_CONFIG_KINDS = frozenset({"prompts", "profiles", "styles", "templates"})
+# 与 shared/content_backup.py 的 _JOB_JSON_AI_KEYS 同一集合:备份收哪些键,恢复就必须
+# 认哪些键,少一个就让带该键的快照整批不可恢复。
 _JOB_AI_CONFIG_KEYS = frozenset({
-    "ai_override", "ai_overrides", "prompt_override", "prompt_overrides", "ai_config",
+    "ai_override", "ai_overrides", "ai_param_overrides",
+    "prompt_override", "prompt_overrides", "ai_config",
 })
 
 
@@ -1194,6 +1198,23 @@ def _resolve_snapshot(repository: ContentRepository, ref_or_digest: str) -> str:
         raise ImportError_(f"cannot resolve snapshot {ref_or_digest!r}: {exc}") from exc
 
 
+def _job_ai_config_conflicts(
+    job_id: str, document: object, providers_config: Mapping | None,
+) -> list[str]:
+    """按目标环境 providers 配置复核一份 job AI 配置;空列表表示可恢复。
+
+    源环境合法不等于目标环境合法:三个 CLI 的档位取值域各不相同,provider 也可能在
+    目标环境根本没配。计划阶段和物化阶段共用本函数,拒绝口径与机器码完全一致。
+    """
+    conflicts = []
+    for step, violation in validate_job_ai_document(
+        document, dict(providers_config or {}),
+    ):
+        where = f"job {job_id} step '{step}'" if step else f"job {job_id}"
+        conflicts.append(f"{where}: {violation.message()}")
+    return conflicts
+
+
 def _snapshot_readiness(
     body: Mapping,
 ) -> tuple[bool, str | None, list[str], dict]:
@@ -1243,6 +1264,38 @@ def _iter_snapshot_records(
             else:
                 raise ImportError_(f"record {digest} missing from repository")
     return result
+
+
+def _ai_config_conflicts(
+    repository: ContentRepository,
+    records: Sequence[tuple[str, str, dict]],
+    config: AppConfig,
+) -> list[str]:
+    """计划阶段就按目标 providers 配置判 job AI 覆盖能否执行。
+
+    物化阶段也会拦,但那时清库恢复已经在写目标环境;操作者必须在离线交接单和
+    --plan/--verify-only 上先看到是哪个 job、哪个 step、哪个字段不兼容。
+    """
+    conflicts: list[str] = []
+    for kind, _digest, body in records:
+        if kind != "user_config" or body.get("kind") != "job_ai_config":
+            continue
+        parts = PurePosixPath(str(body.get("path") or "")).parts
+        if len(parts) != 3 or parts[0] != "jobs":
+            conflicts.append(f"job AI config has an invalid path {body.get('path')!r}")
+            continue
+        try:
+            document = json.loads(repository.read_blob(body["blob"]))
+        except (RepositoryError, KeyError, json.JSONDecodeError,
+                UnicodeDecodeError, TypeError) as exc:
+            conflicts.append(
+                f"job {parts[1]} AI config blob is unreadable: {type(exc).__name__}"
+            )
+            continue
+        conflicts.extend(
+            _job_ai_config_conflicts(parts[1], document, config.providers)
+        )
+    return conflicts
 
 
 def build_plan(
@@ -1390,6 +1443,7 @@ def build_plan(
                 f"snapshot references pipelines missing from current config: "
                 f"{unknown_pipelines}; those jobs cannot be projected"
             )
+        conflicts.extend(_ai_config_conflicts(repository, records, config))
 
     target_db_path = Path(target_db_path)
     # merge 的前提就是目标库有数据,空库门只属于 empty 模式。
@@ -1541,6 +1595,7 @@ class _Materializer:
         processed: set[str],
         config_root: Path,
         source_roots: Mapping[str, Path],
+        providers_config: Mapping | None,
         commit_each: bool = True,
     ) -> None:
         self.repository = repository
@@ -1550,6 +1605,8 @@ class _Materializer:
         self.import_id = import_id
         self.processed = processed
         self.config_root = Path(config_root)
+        # 目标环境的 providers.yaml:job.json 的 AI 覆盖按它复核,不按快照来源环境。
+        self.providers_config = dict(providers_config or {})
         self.source_roots = {key: Path(value) for key, value in source_roots.items()}
         # merge 直写活动库时整批裹在一个显式事务里,逐条 commit 会当场把它提交掉,
         # 让"中途失败不留半写状态"这条不变量失效。
@@ -1981,24 +2038,11 @@ class _Materializer:
             raise ImportError_(
                 f"job AI config for {job_id} contains forbidden keys {unknown}"
             )
-        ai_overrides = fields.get("ai_overrides")
-        if ai_overrides is not None:
-            if not isinstance(ai_overrides, dict):
-                raise ImportError_(f"job AI config for {job_id} ai_overrides is invalid")
-            from .ai_routing import parse_ai_override
-
-            for step in ai_overrides:
-                if not isinstance(step, str) or not step:
-                    raise ImportError_(
-                        f"job AI config for {job_id} has an invalid AI step"
-                    )
-                _provider, reason = parse_ai_override(
-                    {"ai_overrides": ai_overrides}, step,
-                )
-                if reason is not None:
-                    raise ImportError_(
-                        f"job AI config for {job_id} ai_overrides.{step}: {reason}"
-                    )
+        conflicts = _job_ai_config_conflicts(job_id, fields, self.providers_config)
+        if conflicts:
+            raise ImportError_(
+                "job AI config cannot run in this target: " + "; ".join(conflicts)
+            )
         prompt_overrides = fields.get("prompt_overrides")
         if prompt_overrides is not None:
             if not isinstance(prompt_overrides, dict):
@@ -3150,6 +3194,7 @@ async def _run_import_locked(
                 journal=journal, import_id=import_id, processed=processed,
                 config_root=selected_config_root,
                 source_roots=normalized_source_roots,
+                providers_config=config.providers,
                 commit_each=classification is None,
             )
             selected = (

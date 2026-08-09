@@ -11,6 +11,7 @@ import structlog
 
 from shared.config import AppConfig, load_config
 from shared.db import Database
+from shared.ai_routing import CONCRETE_CLI_PROVIDERS
 from shared.models import AITask, Job, LLMRequest
 from shared.note_text import markdown_to_index_text
 from shared.pipeline_scope import expand_pipeline_steps
@@ -188,6 +189,7 @@ class Scheduler:
                 ),
                 step_name="digest",
                 domain=domain,
+                allowed_providers=list(CONCRETE_CLI_PROVIDERS),
                 audit_context={"digest_source_manifest": source_manifest},
             ).to_task_payload()
             await self.redis.enqueue_ai_task(payload)
@@ -478,8 +480,13 @@ class Scheduler:
     async def _pool_has_workers(self, pool: str) -> bool:
         return await self._task_router._pool_has_workers(pool)
 
-    async def _pool_has_workers_for(self, pool: str, require_tags: list[str]) -> bool:
-        return await self._task_router._pool_has_workers_for(pool, require_tags)
+    async def _pool_has_workers_for(
+        self, pool: str, require_tags: list[str],
+        allowed_providers: list[str] | None = None,
+    ) -> bool:
+        return await self._task_router._pool_has_workers_for(
+            pool, require_tags, allowed_providers,
+        )
 
     # Job 状态
 

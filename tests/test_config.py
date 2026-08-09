@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from shared.ai_routing import CONCRETE_CLI_PROVIDERS
 from shared.config import (
     AppConfig,
     _coerce_scalar,
@@ -140,9 +141,35 @@ class TestBuildStepConfig:
         cfg = load_config(config_dir=configs_dir, data_dir=tmp_data_dir)
         step_cfg = build_step_config(cfg, "video", "11_smart")
 
-        assert "primary" in step_cfg["ai"]
-        assert step_cfg["ai"]["primary"]["provider"] == "claude-cli"  # 默认走 Claude CLI 接入方式
-        assert "text_fallback" in step_cfg["ai"]
+        assert step_cfg["ai"] == {
+            "allowed_providers": list(CONCRETE_CLI_PROVIDERS),
+        }
+
+    def test_qoder_cli_pins_context_window_and_reasoning(self, configs_dir, tmp_data_dir):
+        """档位契约:qodercli 不显式给 --context-window 会降 180K,模板必须钉死 1M;
+        推理档位默认 max 放 reasoning_effort(可按调用覆盖),不再钉死在 command。"""
+        cfg = load_config(config_dir=configs_dir, data_dir=tmp_data_dir)
+        qoder = cfg.providers["providers"]["qoder-cli"]
+        cmd = qoder["command"]
+        assert cmd[cmd.index("--context-window") + 1] == "1000000"
+        assert "--reasoning-effort" not in cmd
+        assert qoder["reasoning_effort"] == "max"
+        assert qoder["model"] == "ultimate"
+        assert qoder["type"] == "qoder_cli"
+
+    def test_concrete_cli_providers_have_exact_types_and_defaults(
+        self, configs_dir, tmp_data_dir,
+    ):
+        cfg = load_config(config_dir=configs_dir, data_dir=tmp_data_dir)
+        providers = cfg.providers["providers"]
+        assert {
+            name: (providers[name]["type"], providers[name]["model"], providers[name]["reasoning_effort"])
+            for name in CONCRETE_CLI_PROVIDERS
+        } == {
+            "claude-cli": ("claude_cli", "opus5", "xhigh"),
+            "codex-cli": ("codex_cli", "gpt-5.6-sol", "xhigh"),
+            "qoder-cli": ("qoder_cli", "ultimate", "max"),
+        }
 
     def test_document_smart_has_no_legacy_markdown_capability_rule(self, configs_dir, tmp_data_dir):
         cfg = load_config(config_dir=configs_dir, data_dir=tmp_data_dir)

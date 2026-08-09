@@ -388,7 +388,7 @@ GET /api/jobs/j_xxx/parts/pt_a1b2/steps/08_punctuate/log → 指定 Part
 
 > **AI worker 接入方式 / provider 审计对齐**:Claude CLI、Codex CLI、Kimi API key 都归同一种 `ai` worker,差异只在接入方式/凭证方式。审计必须保留具体 `provider`、`requested_model`、`effective_model`(可解析时)、`worker_id`、`worker_tags`、`ai_access_method` 与 `credential_kind`。`pool=ai` 只表示资源池,不能推断接入方式。CLI provider 有 transcript sidecar;API-key provider 无 CLI transcript 时写 `{"file": null, "reason": "non_cli_provider"}`,但其它 prompt/response/usage/cost 字段必须与 CLI provider 同形。
 
-> **`transcript` 字段(agentic 全轨迹白盒)**:claude-cli 的多轮 agentic 调用(取证 WebSearch/Bash、视觉逐图 Read)顶层 json 只回最终汇总,中间轮工具轨迹在 CLI 自写的会话 transcript 里;codex-cli 的非交互调用以 `codex exec --json` JSONL event stream 作为 trace。审计层按 provider 返回的 `transcript_path` 回收,拷为 job 产物 sidecar `output/ai_logs/{step}.turns.{call_index}.jsonl`(随产物入 storage、随删 job 级联删),记录内留引用:`{"file": "output/ai_logs/….turns.N.jsonl", "turns": 行数, "bytes": 大小, "source": 原路径}`;不可得(非 CLI provider / HOME 未挂 / 会话无档)为 `{"file": null, "reason": …}`。失败调用经尝试链 `attempts[].transcript_path` 同样回收。
+> **`transcript` 字段(agentic 全轨迹白盒)**:claude-cli 的多轮 agentic 调用(取证 WebSearch/Bash、视觉逐图 Read)顶层 json 只回最终汇总,中间轮工具轨迹在 CLI 自写的会话 transcript 里;codex-cli 的非交互调用以 `codex exec --json` JSONL event stream 作为 trace;qoder-cli 与 claude-cli 同构,transcript 落在其 config-dir 的会话目录。审计层按 provider 返回的 `transcript_path` 回收,拷为 job 产物 sidecar `output/ai_logs/{step}.turns.{call_index}.jsonl`(随产物入 storage、随删 job 级联删),记录内留引用:`{"file": "output/ai_logs/….turns.N.jsonl", "turns": 行数, "bytes": 大小, "source": 原路径}`;不可得(非 CLI provider / HOME 未挂 / 会话无档)为 `{"file": null, "reason": …}`。失败调用经尝试链 `attempts[].transcript_path` 同样回收。
 
 > **`phase` 字段(外杀留痕)**:每次调用【发起前】先落一条 `phase:"pending"` 记录(输入侧全量:渲染后 prompt/system、模板来源、input_hashes、ts_start;`ok:null`)并即刻 flush;调用完成后**原位替换**为 `phase:"final"` 完整记录。步被外杀(如步超时 SIGKILL)时磁盘仅存 pending 条 → 该调用的输入仍可审计,ts_start 可与 worker 家目录 transcript 按时间窗对上;失败/超时路径 worker 会 best-effort 把 `output/ai_logs/*` 推回中心存储,故 API 可见。workdir 复用重试时续写同一 jsonl(历史记录保留、`call_index` 续增),上次执行的 pending 不会被覆盖。
 
@@ -580,21 +580,36 @@ curl -X POST http://localhost:8000/api/jobs/j_xxx/rerun-smart \
   -d '{"provider": "anthropic"}'
 ```
 
-请求体:`{"provider":"anthropic"}`(必填)。provider 必须存在于当前运行配置，且智能步、评审步各自都有在线、未暂停、属于目标 pool 并满足硬标签的 Worker。两步可由不同 Worker 满足；Document 始终读取结构化 document/translation 产物，不以旧 Markdown 触发读文件回退。
+请求体:`{"provider":"anthropic"}`(必填),可选 `model` 与 `reasoning_effort`(前端 provider/模型/档位选择器用)。provider 必须存在于当前运行配置，且智能步、评审步各自都有在线、未暂停、属于目标 pool 并满足硬标签的 Worker。两步可由不同 Worker 满足；Document 始终读取结构化 document/translation 产物，不以旧 Markdown 触发读文件回退。
+
+`model` / `reasoning_effort` 覆盖规则:
+- 只能与当前配置中的**具体** provider 搭配;不存在虚拟或运行时再解析的 provider。
+- `model`:必须命中该 provider 声明的 `models` 白名单。**CLI provider 同样有白名单**,模型名不是自由字符串:跨环境恢复时无从判断源环境的模型名在目标环境是否可用,故未声明该域即拒绝任何 model 覆盖。
+- `reasoning_effort`:域按**有效模型**取。provider 声明了 `reasoning_efforts_by_model` 时以该映射为准入域(有效模型 = 本次 `model` 覆盖值,未覆盖则为 provider 默认模型);映射里没有该模型即拒绝,不回落全局并集。未声明该映射的 provider 才用 `reasoning_efforts`;两者都未声明即不接受档位覆盖,`400`。
+- 取值域与默认值经 `GET /api/providers` 的 `models` / `default_model` / `reasoning_efforts` / `reasoning_efforts_by_model` / `default_reasoning_effort` 下发,见 §1.14。
 
 写入 `job.json`（关键字段）：
 ```json
-{"ai_overrides": {"11_smart": "anthropic", "12_review": "anthropic"}}
+{
+  "ai_overrides": {"11_smart": "anthropic", "12_review": "anthropic"},
+  "ai_param_overrides": {"11_smart": {"model": "claude-sonnet-4-6", "reasoning_effort": "high"},
+                          "12_review": {"model": "claude-sonnet-4-6", "reasoning_effort": "high"}}
+}
 ```
 
-> `job.json` 另有 `prompt_overrides`(白盒编辑,见 §1.15):`{step: {content, version, document_kind, scope}}`,并兼容存量 `{step: content}` 字符串形态。job 创建时由 API 按 `(scope, domain, pipeline, document_kind, step)` 解析当时激活的 DB 覆盖,固化进 job 后再下发给 pure Worker。覆盖键始终使用 pipeline 运行时步骤名,正文模板名可由 pipeline 显式映射。Worker 与 Prompt API 通过同一解析契约读取覆盖和默认模板,与 `ai_overrides`(provider 覆盖)正交。
+`ai_param_overrides` 仅当请求带参数时写入;不带参数的 rerun 会**清除**两个角色步的既有参数覆盖(防旧 model 名残留到新 provider 的取值域)。其它步骤键不受影响。步骤执行端(`shared.ai_routing.parse_ai_param_override` + `shared.step_ai`)按同样规则 fail-closed:参数覆盖缺 provider 覆盖、provider 不存在或形状非法都判 `input_invalid`。参数覆盖走**输入指纹**(智能/评审步的 `provider` 指纹项变为 `provider|model=…;reasoning_effort=…` 复合串)驱动重跑;`def_digest` 仍只由 pipeline 定义(version + ai 配置)决定,job 级覆盖不改变它。
+
+> `job.json` 另有 `prompt_overrides`(白盒编辑,见 §1.15):`{step: {content, version, document_kind, scope}}`,并兼容存量 `{step: content}` 字符串形态。job 创建时由 API 按 `(scope, domain, pipeline, document_kind, step)` 解析当时激活的 DB 覆盖,固化进 job 后再下发给 pure Worker。覆盖键始终使用 pipeline 运行时步骤名,正文模板名可由 pipeline 显式映射。Worker 与 Prompt API 通过同一解析契约读取覆盖和默认模板,与 `ai_overrides`(provider 覆盖)/`ai_param_overrides`(参数覆盖)正交。
 
 Response `200`:
 ```json
-{"job_id": "j_20260516_abc123", "status": "processing", "provider": "anthropic", "from_step": "11_smart", "review_step": "12_review"}
+{"job_id": "j_20260516_abc123", "status": "processing", "provider": "anthropic",
+ "model": "claude-sonnet-4-6", "reasoning_effort": "high",
+ "from_step": "11_smart", "review_step": "12_review"}
 ```
+`model` / `reasoning_effort` 未覆盖时回 `null`。
 
-错误语义:job 不存在返回 `404`;pipeline 没有智能/评审角色、provider 未配置、没有匹配 Worker 或 provider 不支持所需能力返回 `400`;`job.json` 不是合法 JSON、顶层不是对象或 `ai_overrides` 不是对象返回 `409`;请求体缺字段或类型错误返回 `422`。所有失败都发生在写 `job.json` 和发布 rerun 命令之前,保持零副作用。成功时才把两个角色的 provider 覆盖写进 `job.json`,并从智能步发布 rerun。
+错误语义:job 不存在返回 `404`;pipeline 没有智能/评审角色、provider 未配置、没有匹配 Worker、provider 不支持所需能力、参数覆盖违反上述规则返回 `400`;`job.json` 不是合法 JSON、顶层不是对象、`ai_overrides` 或 `ai_param_overrides` 不是对象返回 `409`;请求体缺字段或类型错误返回 `422`。所有失败都发生在写 `job.json` 和发布 rerun 命令之前,保持零副作用。成功时才把两个角色的 provider(和可选参数)覆盖写进 `job.json`,并从智能步发布 rerun。
 
 ### 1.2 笔记与产物
 
@@ -755,7 +770,7 @@ GET /api/jobs/{id}/notes/transcript     → text/markdown (逐字稿)
      "cache_creation_tokens": 40000, "cache_read_tokens": 250000,
      "cost_usd": 1.10, "cache_hit_rate_pct": 42.4}
   ],
-  "//cost": "claude-cli CLI 成本为「等价 API 成本」（非真实账单），前端按 provider==claude-cli 标「(等价)」"
+  "//cost": "CLI provider 的 cost 记 basis=cli-equiv 而非按价表计价:claude-cli 取 CLI 自报的 total_cost_usd（等价 API 成本，非真实账单）；qoder-cli 与 codex-cli 是订阅制，cost_usd 恒 0，token 用量照实记。前端对 CLI provider 标「(等价)」"
 }
 ```
 
@@ -1047,7 +1062,7 @@ POST   /api/runner/ai-tasks/{task_id}/result               → AI claim 回写�
 POST   /api/runner/ai-tasks/{task_id}/log                  → AI claim 回写白盒审计;task/exec/step 由租约覆盖
 POST   /api/runner/ai-tasks/{task_id}/finish               → AI claim 进入 succeeded/failed 并由服务端发布终态事件
 POST   /api/runner/ai-tasks/{task_id}/release              → AI claim 释放池槽
-POST   /api/runner/usage                                   → 记录一次 AI 用量（exec_id 去重）。body 含 worker_id（api 以鉴权 token 认定为准）、input/output_tokens、cache_creation/cache_read_input_tokens（命中率=read/(input+read+creation)）、cost_usd、duration_sec、num_turns、cached；claude-cli 经 `claude -p --output-format json` 取真实 usage+total_cost_usd。api 侧据 LiteLLM 价表（每天拉 `model_prices_and_context_window.json` 存 MinIO `_pricing/litellm.json`,缓存感知 per-token 单价）对**非 cli** provider 填权威 cost_usd（命中时覆盖上报值；空表/未命中回退上报值）；claude-cli 用其 CLI total_cost_usd（CLI 等价 API 成本,不覆盖）
+POST   /api/runner/usage                                   → 记录一次 AI 用量（exec_id 去重）。body 含 worker_id（api 以鉴权 token 认定为准）、input/output_tokens、cache_creation/cache_read_input_tokens（命中率=read/(input+read+creation)）、cost_usd、duration_sec、num_turns、cached；claude-cli 经 `claude -p --output-format json` 取真实 usage+total_cost_usd,qoder-cli 经 `qodercli -p -o json` 取同构顶层 JSON 的 usage(订阅制,cost_usd 恒 0),codex-cli 经 `codex exec --json` JSONL 的 turn.completed usage(订阅制,cost_usd 恒 0)。api 侧据 LiteLLM 价表（每天拉 `model_prices_and_context_window.json` 存 MinIO `_pricing/litellm.json`,缓存感知 per-token 单价）对**非 cli** provider 填权威 cost_usd（命中时覆盖上报值；空表/未命中回退上报值）；三类 CLI provider 用各自 CLI 上报值不覆盖(basis=cli-equiv)
 GET    /api/runner/jobs/{id}/artifacts                     → 产物清单（GatewayStorage.pull 据此）
 GET    /api/runner/jobs/{id}/artifacts/{rel}              → 流式取单个产物；支持单段 Range，计实际发送的 traffic:pull
 PUT    /api/runner/jobs/{id}/artifacts/{rel}              → 流式回传单个产物；校验大小/SHA-256 后原子发布，计成功写入的 traffic:push
@@ -1104,7 +1119,9 @@ artifact GET 响应带 `Accept-Ranges: bytes` 与 `Content-Length`；单段 `Ran
 #### 1.7.2 Worker 运行配置中心化（`PUT /api/workers/{id}/config`）
 
 <!-- contract: worker 运行配置中心化(启动参数最小化;心跳热下发;Watchtower 原参重建即最新) -->
-worker 启动参数收敛为永不变化的最小集：`GATEWAY_URL` + `WORKER_REGISTRATION_TOKEN` + `WORKER_NAME`（`--pools` 仅作首次注册的初始能力）。中心运行配置当前只支持 `concurrency`;`pools` / `tags` / `reject_tags` 是 worker 自报能力,不接受中心配置接口修改。
+worker 启动参数收敛为稳定最小集：`GATEWAY_URL` + `WORKER_REGISTRATION_TOKEN` + `WORKER_NAME`（`--pools` 仅作首次注册的初始能力）；CLI worker 另需 `FLORI_CLI_PROVIDER` 显式绑定一个 concrete CLI。中心运行配置当前只支持 `concurrency`;`pools` / `tags` / `reject_tags` 是 worker 自报能力,不接受中心配置接口修改。
+
+**受保护能力标签**:provider 投影标签(`claude-cli` / `qoder-cli` / `codex-cli` / `anthropic-api` / `deepseek-api` / `kimi-api` / `openai-api` / `local`)与路由能力标签(`read` / `websearch`)只能由 worker 启动时的运行时探测自证(二进制 + 凭证 + 配置 feature),集合是**内置常量加已加载配置的动态投影**:内置部分单一来源为 `shared/ai_routing.py PROTECTED_CAPABILITY_TAGS`,运行时再由 `protected_capability_tags(providers_config)` 并入 `providers.yaml` 里每个 API provider 的投影标签。发现侧与保护侧必须对称:API 类按解析后的密钥自证(未解析的 `${VAR}` 占位不算密钥);CLI worker 必须用 `FLORI_CLI_PROVIDER` 显式绑定 `claude-cli|codex-cli|qoder-cli` 中的一个,且仅在对应二进制与凭证探测通过后注册这个 provider 标签及其真实能力。一个进程不因同机存在其它凭证而注册第二种 CLI。校验分两段:进程入口先用内置常量拒绝(早于任何 IO),`load_config` 之后再用动态集合补一次,仍早于注册与认领。`--tags` 手工传入任何受保护标签时 worker 拒绝启动(`forged_capability_tags`),不静默剥离;`source-root:*` 前缀标签同样不接受自报,由进程真实可打开的受控 root 派生。
 
 - 写入：`PUT /api/workers/{id}/config`，body 只允许 `{"concurrency": 1..64}`;空 body 返回 `400`,携带 `pools` / `tags` / `reject_tags` 等未知字段返回 `422`。写 DB `workers.desired_config`（JSON）并单调递增 `cfg_rev`。Response：`{"cfg_rev": N, "desired_config": {"concurrency": N}}`。
 - 下发：`register` / `resume` 响应与每拍 `heartbeat` 响应携带 `desired_config` + `cfg_rev`;worker 比对本地已生效 rev,更高才应用（幂等）。
@@ -1546,7 +1563,7 @@ Response `200`：
 
 #### POST /api/domains/{domain}/digest — 本周摘要（按需调 LLM）
 
-先算同款雷达，再从窗口内 current/done job 的 canonical note chunks 冻结 `digest_sources` manifest，最后用 `digest` builder 拼 prompt → **投递独立 AI task（`queue:ai`，§3.1）给 ai-worker** 异步生成中文周报。**API 进程不调 claude**（用量 `ai_usage`/白盒审计 `ai_task_logs` 在 worker 侧记）。与 GET radar 分离：页面先秒开雷达，用户点「生成本周摘要」再触发本端点。`window_days` 同 radar（`1..90`，越界 `422`）。
+先算同款雷达，再从窗口内 current/done job 的 canonical note chunks 冻结 `digest_sources` manifest，最后用 `digest` builder 拼 prompt → **投递独立 AI task（`queue:ai`，§3.1）给 ai-worker** 异步生成中文周报。任务声明 `allowed_providers: [claude-cli, codex-cli, qoder-cli]`,由满足能力门的绑定 Worker 原子认领并物化具体 provider。**API 进程不调用 CLI**（用量 `ai_usage`/白盒审计 `ai_task_logs` 在 worker 侧记）。与 GET radar 分离：页面先秒开雷达，用户点「生成本周摘要」再触发本端点。`window_days` 同 radar（`1..90`，越界 `422`）。
 
 `digest_sources` 清单绑定 `task_id/domain/window`，每条绑定 canonical `source_id/job_id/note_type/chunk_id`、excerpt/chunk hash 和 source fingerprint，清单再签 `manifest_sha256`。硬上限为 16 个 source、每 job 2 个 source、单 excerpt 1200 字符、excerpt 总计 12000 字符，最终 system+user prompt 按 UTF-8 不得超过 32 KiB。候选顺序按 job 公平分配，超界只在 manifest 记 `selection_truncated=true`，不会改变雷达窗口统计或静默伪装成全量证据。title/section/excerpt 全部按不可信 JSON 数据渲染，生成温度固定为 0。
 
@@ -1893,7 +1910,7 @@ job 端点按当前 note chunk 快照分页返回投影 `{"total":N,"items":[...
 
 自然语言提问 → 跨语料检索相关笔记 → LLM 综合出**带引用**的答案，内联标注 `[来源N]`、并附「共识 / 分歧」段。需 `verify_token`。
 
-**检索缓解**：服务端先把问句**拆词**（去停用词/标点，CJK 连续串做 2–4 字滑窗，ascii 词保留）并叠加**术语表里出现在问句中的术语**，得到一组（≤6）派生查询。检索只查 `note_chunks_fts5` 证据块（由 `index_job_notes` 从笔记正文切分生成），对所有派生查询做确定性 RRF；排序以分数和稳定身份打破并列，并保证一个 `job_id` 最多进入一个 chunk，避免同一笔记挤占来源位。无 chunk 命中即无来源。综合走 `claude-cli` 接入方式。
+**检索缓解**：服务端先把问句**拆词**（去停用词/标点，CJK 连续串做 2–4 字滑窗，ascii 词保留）并叠加**术语表里出现在问句中的术语**，得到一组（≤6）派生查询。检索只查 `note_chunks_fts5` 证据块（由 `index_job_notes` 从笔记正文切分生成），对所有派生查询做确定性 RRF；排序以分数和稳定身份打破并列，并保证一个 `job_id` 最多进入一个 chunk，避免同一笔记挤占来源位。无 chunk 命中即无来源。综合任务声明 `allowed_providers: [claude-cli, codex-cli, qoder-cli]`,不预先钉死某一种 CLI。
 
 请求体：
 
@@ -1908,7 +1925,7 @@ curl -X POST http://localhost:8000/api/ask -H 'Content-Type: application/json' \
   -d '{"question":"反向传播和梯度下降有什么区别？","domain":"deep-learning"}'
 ```
 
-**异步**：检索/拼 prompt 后**投递独立 AI task（`queue:ai`，§3.1）给 ai-worker**（claude 全在 ai-worker，P1），API 不在进程内调 claude。
+**异步**：检索/拼 prompt 后**投递独立 AI task（`queue:ai`，§3.1）给 ai-worker**，API 不在进程内调用 CLI。
 
 Response `202`（`sources` 提交时已算好；`answer_markdown` 经 `GET /api/ai-tasks/{task_id}/result` 轮询取，ask 读 `answer_markdown` 别名，内 `[来源N]` 与 `sources` 下标 +1 对应）：
 ```json
@@ -1981,10 +1998,10 @@ Digest task 的 `source_manifest` 与 `citation_validation` 同样只从 origina
 
 #### GET /api/ai-tasks/{task_id}/log — 独立 AI task 白盒审计
 
-镜像 DAG 的 `GET /api/jobs/{id}/ai-logs`：读 `ai_task_logs`（§3.1），返回该 task 每次 claude 调用的完整审计（路由/尝试链/渲染 prompt/输出/raw/用量/`transcript` agentic 全轨迹），最近在前。
+镜像 DAG 的 `GET /api/jobs/{id}/ai-logs`：读 `ai_task_logs`（§3.1），返回该 task 每次 CLI 调用的完整审计（路由/尝试链/渲染 prompt/输出/raw/用量/`transcript` agentic 全轨迹），最近在前。
 
 ```json
-{"task_id":"at_…","count":1,"calls":[{"task_id":"at_…","exec_id":"…","step":"synthesis","domain":"ml","provider":"claude-cli","model":"claude-opus-4-8[1m]","ok":true,"error":null,"created_at":"…","record":{"routing":{"attempts":[…]},"prompt":{"system":"…","messages":[…]},"output":"…","raw":{…},"transcript":{"jsonl":"…","turns":12,"truncated":false,"path":"…"},"usage":{…}}}]}
+{"task_id":"at_…","count":1,"calls":[{"task_id":"at_…","exec_id":"…","step":"synthesis","domain":"ml","provider":"claude-cli","model":"opus5","ok":true,"error":null,"created_at":"…","record":{"routing":{"attempts":[…]},"prompt":{"system":"…","messages":[…]},"output":"…","raw":{…},"transcript":{"jsonl":"…","turns":12,"truncated":false,"path":"…"},"usage":{…}}}]}
 ```
 
 > `record.transcript`(agentic 全轨迹白盒):AI task 不挂 job、无 storage 产物区,CLI 会话 transcript **全文内嵌** `record_json`(`{"jsonl": 全文, "turns", "truncated", "path"}`;>5MB 截断并 `truncated:true`;不可得为 `{"jsonl": null, "reason": …}`)。Ask 审计另持久化 `record.audit_context.ask_source_manifest` 与 `record.citation_validation`，即使 Redis 结果 TTL 到期也能按本次来源复算。
@@ -2042,11 +2059,12 @@ Digest task 的 `source_manifest` 与 `citation_validation` 同样只从 origina
   "domain": "deep-learning",
   "job_ids": ["j_..."],
   "concept_terms": ["反向传播"],
-  "max_cards": 10
+  "max_cards": 10,
+  "provider": "codex-cli"
 }
 ```
 
-`request_id` 是 1–128 字符的全局幂等 key；`job_ids` 和 `concept_terms` 各最多 100 项且不得重复；`max_cards` 为 1–50。服务端在单个 `BEGIN IMMEDIATE` 事务中固化当前 note chunks、已采纳概念、证据 locator、正文/引用 hash、AI 请求和 prompt 原始字节，之后才由 Scheduler 投递 AI task。没有可用证据、job 不属于该 domain、job 未完成或概念未采纳时 fail-closed。同一 `request_id` 的相同 canonical payload 返回既有批次，异 payload 返回 `409 study_suggestion_request_id_conflict`。
+`request_id` 是 1–128 字符的全局幂等 key；`job_ids` 和 `concept_terms` 各最多 100 项且不得重复；`max_cards` 为 1–50。`provider` 可省略,但给出时只能是 `claude-cli|codex-cli|qoder-cli` 中当前可用的 concrete provider;省略固定选择 `claude-cli`。服务端在单个 `BEGIN IMMEDIATE` 事务中固化当前 note chunks、已采纳概念、证据 locator、正文/引用 hash、AI 请求、prompt 原始字节,以及创建当时的 provider/default model 快照,之后才由 Scheduler 投递 AI task。批次不接受 model 或 reasoning effort 覆盖;执行档位取已固化 provider 的当前配置默认。没有可用证据、job 不属于该 domain、job 未完成或概念未采纳时 fail-closed。同一 `request_id` 的相同 canonical payload 返回既有批次，异 payload 返回 `409 study_suggestion_request_id_conflict`。
 
 内部 `llm_request.prompt_snapshot` 固定为:
 
@@ -2092,7 +2110,7 @@ prompt 路径不入快照。Scheduler 重启、Redis 丢失和显式 retry 都�
 
 #### POST /api/study/suggestion-batches/{batch_id}/retry — 重试失败批次
 
-请求体: `{"request_id":"study-retry:018f...","expected_revision":4}`。仅 `failed` 批次可重试；保留原输入、证据和 prompt 快照，增加 `attempt/revision` 并生成新 `task_id`。同 request payload 重放返回首次结果；旧 task 的 Redis 结果或审计不得推进新 attempt。返回 `202 StudySuggestionBatch`。
+请求体: `{"request_id":"study-retry:018f...","expected_revision":4}`。仅 `failed` 批次可重试；保留原输入、证据、prompt、provider 与 model 快照，增加 `attempt/revision` 并生成新 `task_id`。重试不能改 provider/model,也不按当前默认模型重算。同 request payload 重放返回首次结果；旧 task 的 Redis 结果或审计不得推进新 attempt。返回 `202 StudySuggestionBatch`。
 
 #### GET /api/study/suggestions — 建议列表
 
@@ -2292,21 +2310,65 @@ Response `200`（数组）：
 ```json
 {
   "providers": [
-    {"name": "anthropic", "type": "api", "available": true,  "label": "API"},
-    {"name": "claude-cli", "type": "cli", "available": true,  "label": "CLI"},
-    {"name": "codex-cli",  "type": "codex_cli", "available": true, "label": "CLI"},
-    {"name": "kimi",      "type": "openai_compatible", "available": true, "label": "API"},
-    {"name": "openai",    "type": "api", "available": false, "label": "API"}
+    {"name": "anthropic", "type": "anthropic", "available": true,  "label": "API",
+     "models": ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
+     "default_model": null, "reasoning_efforts": [], "reasoning_efforts_by_model": {},
+     "default_reasoning_effort": null},
+    {"name": "claude-cli", "type": "claude_cli", "available": true, "label": "CLI",
+     "models": ["opus5", "claude-opus-4-8[1m]", "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
+     "default_model": "opus5",
+     "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+     "reasoning_efforts_by_model": {
+       "opus5": ["low", "medium", "high", "xhigh", "max"],
+       "claude-opus-4-8[1m]": ["low", "medium", "high", "xhigh", "max"],
+       "claude-opus-4-8": ["low", "medium", "high", "xhigh", "max"],
+       "claude-sonnet-4-6": ["low", "medium", "high", "xhigh", "max"],
+       "claude-haiku-4-5": ["low", "medium", "high", "xhigh", "max"]},
+     "default_reasoning_effort": "xhigh"},
+    {"name": "codex-cli",  "type": "codex_cli", "available": true, "label": "CLI",
+     "models": ["gpt-5.6-sol", "gpt-5.6-sol-wm", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"],
+     "default_model": "gpt-5.6-sol",
+     "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+     "reasoning_efforts_by_model": {
+       "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
+       "gpt-5.6-sol-wm": ["low", "medium", "high", "xhigh", "max", "ultra"],
+       "gpt-5.6-terra": ["low", "medium", "high", "xhigh", "max", "ultra"],
+       "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
+       "gpt-5.5": ["low", "medium", "high", "xhigh"],
+       "gpt-5.4": ["low", "medium", "high", "xhigh"],
+       "gpt-5.4-mini": ["low", "medium", "high", "xhigh"],
+       "gpt-5.3-codex-spark": ["low", "medium", "high", "xhigh"]},
+     "default_reasoning_effort": "xhigh"},
+    {"name": "qoder-cli",  "type": "qoder_cli", "available": true, "label": "CLI",
+     "models": ["ultimate", "Cantus", "Ultimate", "Performance", "Efficient", "Lite", "Qwen3.8-Max", "Qwen3.7-Max", "Qwen3.7-Plus", "Kimi-K3", "Kimi-K2.7-Code"],
+     "default_model": "ultimate",
+     "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+     "reasoning_efforts_by_model": {}, "default_reasoning_effort": "max"}
   ]
 }
 ```
 
 - `name`：provider 键（`providers.yaml` 中的键）。
-- `type`：取自 provider 配置的 `type`（如 `anthropic` / `openai` / `openai_compatible` / `cli` / `codex_cli`）。
+- `type`：取自 provider 配置的 `type`（如 `anthropic` / `openai` / `openai_compatible` / `claude_cli` / `codex_cli` / `qoder_cli`）。CLI 类型只允许后三种内置值,自定义 CLI 类型在配置加载期拒绝。
 - `available`:provider 存在于当前配置,且 Redis 在线快照中至少有一个未暂停、非 offline、属于 `ai` pool 且具备该 provider 硬标签的 Worker。
-- `label`：`type == "cli"` 或 `type == "codex_cli"` 时为 `"CLI"`，否则 `"API"`（前端展示用）。
+- `label`：`type` 属于 `{claude_cli, codex_cli, qoder_cli}` 时为 `"CLI"`，否则 `"API"`（前端展示用）。
+- `models` / `reasoning_efforts`：覆盖的合法取值域，空列表表示该 provider 未声明该域、任何覆盖一律拒绝。
+- `reasoning_efforts_by_model`：**非空时它才是档位准入域**，按所选模型取；`reasoning_efforts` 退化为并集，只用于展示兜底与未细分档位的 provider。
+  声明了该映射的 provider 必须为自己 `models` 里的每个模型都给出非空子域，否则配置加载期即拒绝启动；
+  运行期遇到映射里没有的模型也直接拒绝覆盖，不回落并集（回落等于 fail-open）。
+  前端必须按所选模型过滤档位选项，并在换模型后清掉已不在新域内的旧选择。
+- `models` / `default_model`:模型选择器数据,也是覆盖的合法域。**API 与 CLI provider 都用白名单**,`model` 覆盖必须命中;空列表表示未声明该域、任何 model 覆盖一律拒绝。`default_model` 是 providers.yaml 钉死的默认。
+- `reasoning_efforts` / `reasoning_efforts_by_model` / `default_reasoning_effort`:推理档位选择器数据。`reasoning_efforts_by_model` 非空时**它才是准入域**,按所选模型取;`reasoning_efforts` 退化为并集,只用于展示兜底与未细分档位的 provider。两者都为空的 provider 不接受档位覆盖;`default_reasoning_effort=null` 表示未覆盖时交 CLI 自身默认。
 
-`available=true` 是通用 provider 可用性,不保证某个具体步骤的 `vision` / `read` 等额外能力。进入 `queue:ai` 后仍按完整 `require_tags` 硬门控;`rerun-smart` 还会对智能步与评审步分别重算静态标签和条件能力,因此 provider 在本端点可用仍可能被特定 rerun 拒绝。
+普通 pipeline、Ask 与 Radar 不造第四个 provider,而是在任务上声明
+`allowed_providers: [claude-cli, codex-cli, qoder-cli]`。队列认领在同一原子操作里从在线 Worker
+绑定的具体 provider 中选一个,并把它写入 claim。claim 前任务不带 `provider/model`;claim 后返回
+具体 `provider`,Worker 再按该 provider 配置物化默认 model 与 reasoning effort。执行、结果、
+`ai_usage`、`ai_logs` 与白盒审计中的 `provider` 始终是这个具体值。`allowed_providers` 是集合,
+不表达顺序、主备或同一 attempt 内自动切换;provider 调用失败仍按任务自己的重试/失败契约处理。
+新 attempt 重新入队后保留原集合,可以由另一种 concrete CLI 的 Worker 认领。
+
+`available=true` 是通用 provider 可用性,不保证某个具体步骤的 `vision` / `read` / `websearch` 等额外能力。进入 `queue:ai` 后先以 `allowed_providers` 对 Worker 绑定的 provider 做 OR 匹配,再以完整 `require_tags` 做能力 AND 门控;`rerun-smart` 还会对智能步与评审步分别重算静态标签和条件能力,因此 provider 在本端点可用仍可能被特定 rerun 拒绝。
 
 `POST /api/jobs/{id}/rerun-smart` 的 `provider` 必须是本端点列出且 `available=true` 的 provider。
 
@@ -2483,23 +2545,24 @@ Score:  priority (负数，越小越优先)
 
 ```
 Key:    queue:ai
-Member: {"kind":"ai","task_id":"at_xxx","step":"synthesis|digest","domain":"<domain>|null",
-         "provider":"<configured-provider>","model":"<explicit-model>",
-         "request":<LLMRequest jsonable>,"tags":[...],"require_tags":["<provider-tag>","<capability-tag>"],
+Member: {"kind":"ai","task_id":"at_xxx","step":"synthesis|digest|study_suggestions","domain":"<domain>|null",
+         "allowed_providers":["claude-cli","codex-cli","qoder-cli"],
+         "request":<LLMRequest jsonable>,"tags":[...],"require_tags":["<capability-tag>"],
          "audit_context":<optional JSON object>,"pool":"ai"}  (JSON string)
 ```
 
 `step=study_suggestions` 额外携带 `batch_id/attempt/revision/generator_fingerprint/input_fingerprint/prompt_snapshot/task_payload_sha256`。prompt、generator 和 task payload 这三类跨组件 hash 使用 `sha256:<64 lowercase hex>`；`input_fingerprint` 保持 64 位小写 hex。`task_payload_sha256` 覆盖除自身和认领运行字段外的 canonical JSON，Scheduler 入队和 Worker 调 provider 前都必须校验。
 
-- `request` = `shared.models.LLMRequest.to_jsonable()`（messages/system/max_tokens/temperature/allowed_tools…；images 序列化为 str 路径，AI-RPC 路径一般不带图）。
+- `request` = `shared.models.LLMRequest.to_jsonable()`（messages/system/max_tokens/temperature/allowed_tools/reasoning_effort…；images 序列化为 str 路径，AI-RPC 路径一般不带图）。`reasoning_effort` 可选,仅三类 CLI provider 消费(claude `--effort`、qoder `--reasoning-effort`、codex `-c model_reasoning_effort`);缺省用 providers.yaml 的 provider 默认,再缺省交 CLI 自定。`allowed_tools` 的映射按 provider 各异:claude 透传 `--allowedTools`(Read/WebSearch/Bash 等);qoder 透传 `--allowed-tools`(可用性取决于其内置工具表,实测含 WebSearch/WebFetch);codex 映射 `Read`(read-only 沙箱 + `--add-dir` 声明,模型用读命令看文件,无写)与 `WebSearch`(`-c web_search=live` 开启 Responses API 服务端原生 web_search,该工具在服务端执行,不受本地 read-only 沙箱断网限制),含其它工具(Bash 等)一律 fail-closed 报错。
 - `audit_context` 可选、最大 512 KiB，必须是 JSON object。`step=synthesis` 必须携带 `ask_source_manifest`，并由 manifest hash、source fingerprint、artifact/body SHA 与同一个 `task_id` 形成不可变信任链；其他 AI task 缺省不写该字段。
-- `provider/model` = 本次独立 AI task 请求的 provider 与模型,必须显式带出。缺失视为非法 AI task,不得补默认 provider/model。
-- `require_tags` = provider 与运行能力的完整硬门控:Claude/Codex CLI 分别用 `claude-cli` / `codex-cli`;API provider 使用 `<provider>-api`(`anthropic-api` / `deepseek-api` / `kimi-api` / `openai-api`);需要文件 Read 时另加 `read`。无全部标签的 `ai` worker 不得认领该 task。
-- `model` 必须是具体模型名。CLI provider 与 API-key provider 都不得使用模型占位符。
+- `allowed_providers` 是非空 concrete provider 去重列表。Ask、Radar 与普通 pipeline 默认列出三种 CLI;Study 创建时把请求指定或默认的单个 provider 固化为单元素列表。列表是 OR 条件,不表达优先级或 fallback。
+- 排队 member 不带 `provider/model`。认领 Lua 只允许 `FLORI_CLI_PROVIDER` 绑定值命中 `allowed_providers` 的 Worker 参与,并在移出队列、占 holder、创建 claim 的同一次原子操作中把具体 `provider` 写入 claim。claim 响应携带该值;Worker 再按 provider 配置和任务允许的覆盖物化具体 model/reasoning effort。
+- `require_tags` 只保留运行能力的 AND 门控,如 `read` / `websearch` / `vision`;它不重复编码 provider。Worker 必须同时满足全部 `require_tags`,并独立满足上一条 provider OR 条件。
+- 结果 payload、`ai_usage.provider`、`ai_task_logs.provider` 与尝试链都必须记录 claim 中的具体 provider;model 与 reasoning effort 记录实际物化值。同一 attempt 内不得换 provider;既有 retry 重新入队后可由列表里的另一 concrete provider 认领。
 - pipeline-step task 的 member **不带 `kind`**（向后兼容，缺省即 `step`）。
 - `queue:enqueued` field（§3.x 等待时长用）：step task=`{pool}|{job_id}|{step}`；**ai task=`{pool}|ai|{task_id}`**。
 - 幂等投递: `ai:submitted:{task_id}` 保存 canonical task JSON 并带 7 天 TTL。相同 task 重放不重复入队；同 task_id 异 payload 直接冲突，不能覆盖。
-- 原子认领: 一个 Lua 操作把 ZSET member 移出队列并写 `ai:claim:{task_id}` HASH，同时写 `ai:claims:expiry` ZSET；不存在 `ZPOPMIN` 后再建租约的任务丢失窗口。claim 精确绑定 `(task_id,batch_id,attempt,revision,worker_id,claim_id)`，状态为 `claimed → executing → succeeded|failed`，任何字段不匹配的 renew/finish 都失败。
+- 原子认领: 一个 Lua 操作完成 `allowed_providers` OR、`require_tags` AND 匹配,把 ZSET member 移出队列并写 `ai:claim:{task_id}` HASH，同时写 `ai:claims:expiry` ZSET；不存在 `ZPOPMIN` 后再建租约的任务丢失窗口。claim 精确绑定 `(task_id,batch_id,attempt,revision,worker_id,claim_id,provider)`，状态为 `claimed → executing → succeeded|failed`，任何字段不匹配的 renew/finish 都失败。
 - 崩溃恢复: `claimed` 到期最多安全回队一次并记录 `requeue_count=1`；再次到期进入 `ambiguous`。`executing` 表示 provider 可能已经产生副作用，到期只进入 `ambiguous`，绝不自动重试。Worker 在 provider 调用前 CAS 到 executing，调用期间续租，先写 Redis 结果和 DB 审计，再 CAS 终态。终态或 ambiguous 的迟到 worker 无权续租或覆盖新执行。
 - 持久 deadline: 仍在 queue 的 task 必须原子移除 exact member 后才能把 DB 批次标为 timeout；`claimed` 只能用完整 `(task_id,batch_id,attempt,revision)` 在 provider 前 CAS 为 `canceled`。取消竞争失败不得推进 DB。持有活租约的 `executing` 不受业务 deadline 强制终止，继续等待 Worker 终态或租约到期转 `ambiguous`。
 - 成功后处理: provider 成功与结果/审计/终态/事件发布分层处理。finish CAS 返回 false 或异常时保留成功 `airesult` 和唯一成功审计，claim 留在 `executing` 等待租约收敛；事件发布仅 best-effort，失败不得覆盖成功结果、追加 provider-failed 审计或把 claim 转成 failed。
@@ -2582,7 +2645,7 @@ Type:   HASH
 Fields:
   type:           "cpu" | "gpu" | "ai" | "io"
   pools:          "scene,cpu,io"
-  tags:           "vision,read,claude-cli,codex-cli,kimi-api" ← 能力标签
+  tags:           "vision,read,claude-cli"                ← 受保护能力标签;CLI provider 最多一个
   reject_tags:    "private,confidential"              ← 排斥标签（可选）
   hostname:       "gpu-server" | ""
   status:         "idle" | "busy" | "offline"        ← 运行时态(busy/idle，非对外公共态)
@@ -2591,7 +2654,7 @@ Fields:
   current_step:   "03_scene" | ""
   gpu_name:       "RTX 4090" | ""
   remote_addr:    "1.2.3.4" | ""                      ← 网关 worker 连接来源 IP；本机直连为空
-  spec:           JSON {version,cpu,mem_mb,platform,python}  ← worker 自报版本/机器配置(redis-only,前端详情展示)
+  spec:           JSON {version,cpu,mem_mb,platform,python,cli_provider}  ← worker 自报版本/机器配置 + 显式绑定的 concrete CLI(redis-only,前端详情展示)
   load:           JSON {cpu_pct,mem_pct,loadavg}        ← worker 心跳自报本机 live 负载(redis-only;纯 /proc 采,各项可为 null)
   started_at:     ISO timestamp
   last_heartbeat: ISO timestamp
@@ -2604,16 +2667,32 @@ Redis 为实时状态；持久记录（统计/历史/备注）存 SQLite workers
 
 | AI 接入方式 | 必需 tag | credential_kind | 典型 worker 命名 | 凭证位置/环境 |
 |----------|----------|-----------------|------------------|---------------|
-| `claude-cli` | `claude-cli` + `read` | `cli_auth` | `claude-1` | `$HOME/.claude/.credentials.json` 或等效 Claude CLI 登录态 |
-| `codex-cli` | `codex-cli` | `cli_auth` | `codex-1` | `$CODEX_HOME/auth.json` 或 `$HOME/.codex/auth.json` |
+| `claude-cli` | `claude-cli` + `read` + `websearch` | `cli_auth` | `claude-1` | `FLORI_CLI_PROVIDER=claude-cli`;`$HOME/.claude/.credentials.json` 或等效 Claude CLI 登录态 |
+| `qoder-cli` | `qoder-cli` + `read` + `websearch` | `cli_auth` | `qoder-1` | `FLORI_CLI_PROVIDER=qoder-cli`;`$QODER_CONFIG_DIR/.auth/user`,缺省 `$HOME/.qoder/.auth/user` |
+| `codex-cli` | `codex-cli` + `websearch`；`read` 需沙箱探测通过 | `cli_auth` | `codex-1` | `FLORI_CLI_PROVIDER=codex-cli`;`$CODEX_HOME/auth.json` 或 `$HOME/.codex/auth.json` |
 | `anthropic` | `anthropic-api` | `api_key` | `anthropic-1` | `ANTHROPIC_API_KEY` |
 | `deepseek` | `deepseek-api` | `api_key` | `deepseek-1` | `DEEPSEEK_API_KEY` |
 | `kimi` | `kimi-api` | `api_key` | `kimi-1` | `KIMI_API_KEY` |
 | `openai` | `openai-api` | `api_key` | `openai-1` | `OPENAI_API_KEY` |
 
-同一 `ai` worker 进程可同时带多个接入方式 tag,但仅当该 worker **实际**具备对应凭证。匹配条件固定为 `require_tags ⊆ worker.tags`,全部硬标签都必须满足,不能只判断任意交集。`read` 是独立运行能力,不由 `pool=ai` 或 provider tag 隐含。注册和心跳事件必须记录 `worker_id/pools/tags/ai_access_methods`;删除 worker 后相应 per-worker token 吊销,旧 worker 即使仍有 AI 凭证也必须因 runner token `401/403` 退出。
+**三个 CLI 的能力并非在所有部署下都等价。**text 与 websearch 三者对等:websearch 走各自服务端的原生搜索工具,
+不依赖本机沙箱。`read` 不对等:claude 与 qoder 把 Read 限制在 cwd 加 `--add-dir`,是真正的读取白名单;
+codex 的读文件是让模型跑 shell 命令并由 bubblewrap 圈起来,只能做到"整盘 read 加逐条 deny"的黑名单,
+deny 名单之外的路径(含其它 Job 的产物目录)仍可读。
 
-Web UI `/system` 的「接入新 Worker」向导只负责生成启动参数,不直接改中心 worker 记录:勾选 `ai` 后出现「AI 接入方式」选择器。选择 `Claude CLI` 生成 `--pools ai ... --tags claude-cli read`;选择 `Codex CLI` 生成 `--tags codex-cli`;选择 `Kimi API key` 生成 `--tags kimi-api` 并在部署文件里要求 `KIMI_API_KEY`。Codex CLI 和 Kimi 不得生成 `read`;该选择器不得生成 `--pools claude` / `--pools codex` / `--pools kimi`,也不得把接入方式写成 worker type。
+更关键的是 codex 的沙箱在容器默认安全选项下**起不来**:Docker 默认 seccomp 挡
+`unshare(CLONE_NEWUSER)`,此时每条模型 shell 命令都失败而 `codex exec` 仍返回 0,
+步骤会拿着"什么都没读到"的结论正常收尾。因此 codex 的 `read` 标签以**沙箱可用为前提自证**:
+worker 启动时用 codex 自己的沙箱入口做一次零成本探测,探不通就不打 `read`,
+只保留 `codex-cli`、`vision` 与 `websearch`,需要 Read 的步骤自然不会派给它。
+要在容器里启用需给该 AI worker `seccomp=unconfined` 与 `apparmor=unconfined`,
+那是用容器自身的外层约束换 codex 的内层沙箱,取舍见 `docs/08-deployment.md`。
+
+每个 CLI `ai` worker 进程必须通过 `FLORI_CLI_PROVIDER` 绑定一个 concrete CLI,只注册该 provider 及其探测通过的能力。绑定缺失、值不在三种 CLI 内、对应二进制或凭证未就绪都在注册前 fail-closed;同机其它 CLI 凭证不参与发现。要使用多份凭证,启动多个独立 Worker。上表全部必需 tag 与 API 投影 tag 都是受保护标签(§1.7.2),`--tags` 手填直接拒绝启动。任务匹配分两层:`allowed_providers` 对绑定 provider 做 OR,`require_tags ⊆ worker.tags` 对 `read/websearch/vision` 等能力做 AND。能力不会跨 Worker 合并,因此 qoder 的 `read` 不会被算到 codex 上。
+
+**三类 CLI 的默认能力并不等价。**text 与 websearch 对等(claude 内置 WebSearch 工具,codex 走服务端原生 web_search,qoder 内置工具表含 WebSearch,三者都不依赖本机沙箱)。`read` 不对等:claude 与 qoder 把 Read 限制在 cwd 加 `--add-dir`,是真正的读取白名单;codex 靠模型跑 shell 命令加 bubblewrap 圈定,只能做到"整盘 read 加逐条 deny"的黑名单,且**容器默认安全选项下沙箱根本起不来**,因此 codex 默认**不自证 `read`**(启动时零成本探测沙箱,探不通就不打该标签)。要启用需放宽该 codex worker 的容器安全选项,取舍见 `docs/08-deployment.md`。注册和心跳事件必须记录 `worker_id/pools/tags/ai_access_methods/cli_provider`;删除 worker 后相应 per-worker token 吊销,旧 worker 即使仍有 AI 凭证也必须因 runner token `401/403` 退出。
+
+Web UI `/system` 的「接入新 Worker」向导只负责生成启动参数,不直接改中心 worker 记录,且**不生成任何受保护能力标签**(`--tags` 只透传用户手填的普通标签):勾选 `ai` 后出现「AI 接入方式」选择器,只提供 `Claude CLI` / `Qoder CLI` / `Codex CLI` 三项。部署文件生成 `FLORI_CLI_PROVIDER=<claude-cli|qoder-cli|codex-cli>`,并提示把对应已登录的 `.claude` / `.qoder` / `.codex` 放进状态目录(容器内 `/home/worker/`)。能力标签(`claude-cli`、`read`、`websearch` 等)一律由 worker 启动时探测自证;该选择器不得生成受保护 `--tags`,不得生成 provider 名形式的 `--pools`,也不得把接入方式写成 worker type。
 
 #### 组件心跳 + 系统事件流（系统健康总览页）
 
@@ -2758,10 +2837,14 @@ default:
 | `capability_rules` | 按当前产物决定的条件能力;目前支持 `read: {unless_any_nonempty: [安全相对路径...]}` |
 | `rules` | 条件门：`exists` 命中后 `when: on`（启用）或 `when: skip`（跳过） |
 | `prompt_template` | 可选的 tracked 正文模板名;省略时等于运行时步骤名 |
-| `ai` | AI provider 路由：`primary` / `fallback` / `text_fallback`，各取 `{provider, model}` |
+| `ai` | AI 路由：`allowed_providers` 为非空 concrete provider 去重列表 |
 | `on_complete` | 步骤完成后的幂等副作用列表；每项为 `{action,...}`，支持 `sync_metadata`、`index_note`、`collect_glossary`、`collect_term_pairs` |
 
-全局 `variables` 是 AI provider/model 单一事实源；各 pipeline 只声明自身额外参数，job 用 `$VAR` 引用。
+provider 的默认 model/reasoning effort 单一事实源是 `configs/providers.yaml`;pipeline 只声明
+`allowed_providers`,不重抄跨 provider 不通用的模型名。
+`pipeline.ai` 只接受这一种外部形态;旧 `primary` / `fallback` / `text_fallback` 或与新字段混用
+均在配置加载期以 `ai_route_allowed_providers_required` 拒绝。claim 后为单次执行生成的 `primary`
+只属于 Worker 内部物化结果,不是可写回 pipeline 的配置契约。
 
 `on_complete` 是完成副作用的唯一声明源，scheduler 不维护内容类型或步骤白名单。
 `index_note.candidates` 按顺序选择首个存在的 `{note_type,path,source_manifest,provenance}`；Document 只允许
@@ -2782,11 +2865,19 @@ scope，`09_merge_parts` 以 `fan_in: [07_danmaku,08_punctuate]` 等待每个 Pa
 入口 admission 与 scheduler 使用同一规则,避免入口放行后仍入 AI 队列。`continue-ai` 不原地改运行态;
 它 fork full 快照并重置所有 AI 根的 DAG 下游,机械父快照保持不可变。
 
-> **AI provider / model 显式规则**：`ai.provider` 和 `ai.model` 必须在任务配置或载荷中显式出现,不得由 `pool=ai`、worker 名称或运行时默认推断 provider。pipeline 和独立 AI task 必须使用具体模型名（如 `claude-opus-4-8[1m]`、Codex CLI 可接受的模型名、`moonshot-v1-128k`）。缺 provider 或缺 model 是契约错误,不得用运行时默认值补齐。
+> **AI provider / model 物化规则**：普通 pipeline 的 `ai.allowed_providers` 必须显式列出
+> `claude-cli|codex-cli|qoder-cli` 中至少一个 concrete provider。排队 payload 不带 provider/model;
+> 认领时按 Worker 的 `FLORI_CLI_PROVIDER` 原子物化具体 provider,执行前再从该 provider 配置物化
+> 默认 model/reasoning effort。job 级 rerun 覆盖可把列表收窄成指定 concrete provider,并按 §1.1
+> 校验可选 model/effort。缺列表、空列表、未知值或重复值都是配置错误。
 
-> **AI tier 保真**：当前 Video、Document、Audio 三条 pipeline 的 `primary/fallback/text_fallback` 是尝试顺序，不是可去重的集合。即使相邻 tier 的 provider/model 相同，也保留独立尝试语义；retry、usage、AI log 和 payload 不折叠。
+> **一次认领只执行一个 provider**：`allowed_providers` 是本次可认领集合,不是 provider 内部尝试链。
+> provider 调用失败后当前 attempt 结束,不得在同一 attempt 串行切换。既有 step/task retry 重新入队时
+> 保留原列表,下一 attempt 可以被另一种 concrete CLI 的 Worker 认领;每次 attempt 的审计、usage 和
+> AI log 都记录各自真实 provider/model/effort。
 
-> **AI 接入方式 tag 路由**:`claude-cli` → `claude-cli`;`codex-cli` → `codex-cli`;API provider → `<provider>-api`;`local` → `local`。没有 override 时,任务要求 pipeline 所有可执行 tier 的 provider tag;有 override 时只要求所选 provider tag。`pool=ai` 只是容量队列,接入方式 tag 才表示该 worker 具备哪种 AI 凭证。
+> **AI 接入方式与能力分层**：`allowed_providers` 对 Worker 显式绑定的 provider 做 OR 选择;
+> `tags` 与条件能力投影成 `require_tags`,继续做 AND。`pool=ai` 只是容量队列,不能代替这两层门控。
 
 `capability_rules` 的 `unless_any_nonempty` 表示：列出的任一产物存在且非空时不要求该能力，全部缺失或为空时才要求。路径必须是 job 内安全相对路径，未知能力、空路径、绝对路径或穿越路径均 fail-closed。scheduler 在入队、no-worker 对账和 rerun 时按中心存储计算，执行端按本地实际产物复核，任一侧不满足都不得静默回退。
 
@@ -2797,13 +2888,6 @@ video:
   variables:
     OCR_TIMEOUT: 1800
     OCR_RETRIES: 1
-    AI_SMART_PRIMARY_PROVIDER: anthropic
-    AI_SMART_PRIMARY_MODEL: claude-sonnet-4-6
-    AI_SMART_FALLBACK_PROVIDER: openai
-    AI_SMART_FALLBACK_MODEL: gpt-4o
-    AI_SMART_TEXT_PROVIDER: deepseek
-    AI_SMART_TEXT_MODEL: deepseek-v4-pro
-    # ...（review / punct 的 provider 变量略）
   jobs:
     "01_download":
       run: steps.common.step_01_download
@@ -2847,8 +2931,7 @@ video:
         - exists: "input/*.srt"
           when: on                     # 有字幕（含 whisper 产出）才标点
       ai:
-        primary: {provider: $AI_PUNCT_PRIMARY_PROVIDER, model: $AI_PUNCT_PRIMARY_MODEL}
-        fallback: {provider: $AI_PUNCT_FALLBACK_PROVIDER, model: $AI_PUNCT_FALLBACK_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
 
     "09_merge_parts":
       run: steps.video.step_09_merge_parts
@@ -2860,9 +2943,9 @@ video:
       extends: .ai-step
       run: steps.video.step_evidence
       needs: ["09_mechanical"]
+      tags: ["websearch"]
       ai:
-        primary: {provider: claude-cli, model: "claude-opus-4-8[1m]"}
-        fallback: {provider: claude-cli, model: "claude-opus-4-8[1m]"}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
 
     "11_smart":
       extends: .ai-step
@@ -2870,9 +2953,7 @@ video:
       needs: ["09_mechanical", "10_evidence"]
       tags: ["vision"]
       ai:
-        primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
-        fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
-        text_fallback: {provider: $AI_SMART_TEXT_PROVIDER, model: $AI_SMART_TEXT_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
 
     "12_concepts":
       extends: .ai-step
@@ -2880,16 +2961,14 @@ video:
       prompt_template: 05_concepts
       needs: ["11_smart"]
       ai:
-        primary: {provider: $AI_CONCEPTS_PRIMARY_PROVIDER, model: $AI_CONCEPTS_PRIMARY_MODEL}
-        fallback: {provider: $AI_CONCEPTS_FALLBACK_PROVIDER, model: $AI_CONCEPTS_FALLBACK_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
 
     "12_review":
       extends: .review
       run: steps.video.step_12_review
       needs: ["12_concepts"]
       ai:
-        primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
-        fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
 ```
 
 **各顶层内容族的 job 链**（`needs` 推导）：
@@ -3121,7 +3200,14 @@ net_routing:
 
 ### 4.9 evidence.json — 权威来源（案例取证，ADR-0012）
 
-案例类 video(`domain=finance` 或 `style_tags` 含 `case-study`)由 `10_evidence` 产出 `output/evidence.json`;非案例类由步骤自门控跳过。模型只允许返回最多 12 个 `{title,url,publisher,reason}` 候选,不得自行下载正文或声明可信度。服务端禁代理抓取,对原始 URL 与每次 redirect 逐跳重验 scheme、userinfo、端口、DNS 与全球 IP,拒绝内网/环回/链路本地/保留地址;同时限制 MIME、编码、正文大小和最多 5 次 redirect。
+案例类 video(`domain=finance` 或 `style_tags` 含 `case-study`)由 `10_evidence` 产出 `output/evidence.json`;非案例类由步骤自门控跳过。该步声明三种 concrete CLI 的 `allowed_providers`,并以 `websearch` 能力标签做 AND 门控;认领时原子物化具体 provider,不预先钉死某一种 CLI。
+
+**不承诺可复现,承诺可验证与可审计。**三类 CLI 的联网搜索后端不同,同一输入在不同 worker 上
+可能得到不同候选来源集,重跑也可能因搜索结果随时间变化而不同。能力标签门控保证的是
+"执行者确实具备联网搜索能力",服务端受控下载校验保证的是"落库的每一条来源都经过同一套
+安全与完整性校验",两者都不构成候选集层面的可复现性。因此每次执行必须留下足以事后核验的取证记录:
+发起的查询、执行时间、执行端解析后的真实 provider 与 model、模型返回的候选集(或候选摘要)、
+以及对应的 AI log ID。审计据此可以回答"这条证据当时是怎么来的",而不是假设它能被原样重放。模型只允许返回最多 12 个 `{title,url,publisher,reason}` 候选,不得自行下载正文或声明可信度。服务端禁代理抓取,对原始 URL 与每次 redirect 逐跳重验 scheme、userinfo、端口、DNS 与全球 IP,拒绝内网/环回/链路本地/保留地址;同时限制 MIME、编码、正文大小和最多 5 次 redirect。
 
 v2 manifest 顶层字段必须精确为 `schema_version / job_id / ocr_refs / evidence / rejected / total_bytes / candidate_parse_failed / provider`:
 
@@ -3564,6 +3650,11 @@ Inspector 眼检 → 版本 +1。工具少而精;签名**只增可选参数**保
 配置记录均绑定 blob 摘要与大小。导入侧把全局配置恢复到独立 `config_root`,把 Job AI
 配置合并回目标 Job 的 `job.json`;同摘要幂等,异摘要或路径不安全时拒绝。配置根不是
 Job 产物根,也不能放在便携仓库内。
+
+历史兼容只保留拒绝 tombstone:任一 portable record 出现 provider 值 `cli-agent`、type
+`cli_agent`、model `auto` 与该历史 provider 的组合,或环境键 `FLORI_CLI_AGENT_PROVIDER`,
+verify/plan/import 都必须 fail-closed,不得映射成 Claude、按当前在线 Worker猜测,或把它暴露为
+当前 provider。这条规则只用于识别并拒绝旧快照,不表示产品仍支持第四种 CLI。
 
 字段 allowlist 的单一来源是 `shared/content_policy.RECORD_POLICIES`。**活动状态字段
 (jobs.status/progress_pct/error、collections.job_count 等)与自增 rowid 不在

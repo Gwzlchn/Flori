@@ -15,7 +15,7 @@ class OcrStep(StepBase):
             return ["intermediate/dedup.json"]
         return []
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         return {
             "dedup": file_hash(self.job_dir / "intermediate" / "dedup.json"),
             "config": json.dumps(self.config.get("domain", {}).get("ocr", {}), sort_keys=True),

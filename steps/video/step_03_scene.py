@@ -13,7 +13,7 @@ class SceneStep(StepBase):
             return ["input/source.mp4"]
         return []
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         return {
             "video": file_hash(self.job_dir / "input" / "source.mp4"),
             "config": json.dumps(self.config.get("domain", {}).get("scene", {}), sort_keys=True),

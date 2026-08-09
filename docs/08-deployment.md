@@ -100,7 +100,9 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
       - DATA_DIR=/data
-      # API Key（按需配置，至少一个）
+      # CLI worker 必填且只绑定一种;同机三种 CLI 用三个独立 Worker 服务
+      - FLORI_CLI_PROVIDER=${FLORI_CLI_PROVIDER:-claude-cli}
+      # API Key provider 仅在需要指定 API 重跑时按需配置
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
@@ -472,6 +474,69 @@ cron 建议（每周日 04:00 回收 30 天前源媒体、磁盘紧张才动手�
 - **动态步骤容器与步骤文件日志**：`DockerStepRunner` 创建的临时容器同样显式使用 `local` driver `10m x 3`，不会因脱离 Compose 而失去上限。步骤 `step.log` 由 `FLORI_STEP_LOG_MAX_BYTES` 限制容量并原子保留尾部。
 - **api liveness**：Compose healthcheck 与 Caddy upstream 探测 `/api/health/live`。它只说明 API 进程能够响应，不把 Redis、存储或 Worker 故障误判为容器死亡并触发重启风暴。
 - **接单 readiness**：调度或流量门禁使用 `/api/health/ready`。磁盘不足、SQLite/Redis/中心存储不可写、scheduler 过期或 required pool 无可接单 Worker 时返回 503；可选能力离线只返回 200 degraded。完整字段和阈值见 `docs/03-contracts.md`。
+
+### 7.5.1 AI 能力变更的原子升级顺序
+
+Flori 只支持三种 CLI provider,配置默认值固定为:
+
+| provider | type | model | reasoning_effort |
+|---|---|---|---|
+| `claude-cli` | `claude_cli` | `opus5` | `xhigh` |
+| `codex-cli` | `codex_cli` | `gpt-5.6-sol` | `xhigh` |
+| `qoder-cli` | `qoder_cli` | `ultimate` | `max` |
+
+普通 AI 任务的 `allowed_providers` 可同时列出三者,但队列认领会原子选定一个具体 provider。
+执行、日志、usage 和审计从不保存集合或中间别名。
+
+新增或收窄 CLI 能力标签时，顺序错了会让 AI 队列静默停摆：worker 的能力标签由启动时的运行时
+探测生成，未随本次滚动重建的 worker 保留旧标签，而新 pipeline 要求的标签它没有，于是
+不再认领任何 AI 步，且不会报错。按下列顺序执行，中间任何一步失败都不要继续：
+
+1. **构建三件套** `scripts/build-uptest.sh scheduler api worker`。worker 镜像通过三个项目的官方
+   latest 安装方式取得 CLI,不在仓库钉版本或 SHA;构建必须实际执行三条 `--version`,任一失败即
+   fail-closed。同一 Git 提交在不同时刻重建可能得到不同二进制,发布证据必须保存构建日志中的
+   实际版本与最终镜像摘要,不能只用 commit SHA 声称二进制相同。
+2. **准备 worker home**。每个 CLI worker 一份独立凭证目录。Claude 可直接运行
+   `scripts/seed-worker-home.sh <name>`;Qoder/Codex 分别运行
+   `SEED_TOOLS=qoder scripts/seed-worker-home.sh <name>` 与
+   `SEED_TOOLS=codex scripts/seed-worker-home.sh <name>`。脚本只复制认证必需文件;Codex 只复制
+   `.codex/auth.json`,不会把宿主 `config.toml` 的沙箱或审批策略带进 worker。
+   每个 CLI worker 必须设置 `FLORI_CLI_PROVIDER=claude-cli|codex-cli|qoder-cli` 并只绑定一种
+   concrete CLI。同机多份凭证应启动多个独立 Worker,不能由一个进程自动选择。
+3. **重建全部受影响 worker**，不能只滚一部分。包括远程和裸金属节点：它们不随 NAS 栈滚动，
+   必须单独重启才会重新探测能力。
+4. **验证能力注册**：`GET /api/workers` 逐个确认新标签已出现，`GET /api/providers` 确认
+   `available` 与预期一致。
+5. **确认无误后再放开 AI 队列**。
+
+回退同理反向执行：先恢复 pipeline 的能力要求，再滚 worker，避免出现"pipeline 要求新能力、
+worker 已回退"的空窗。
+
+> **provider 默认档位的变更不追溯。**改 `configs/providers.yaml` 的默认 `reasoning_effort`
+> 只影响此后真实发起的调用，既有已成功的 manifest 不会因此失效、不会自动重跑。
+> 想让存量 Job 用新档位，必须显式 rerun。这与 pipeline 定义变更走 `def_digest` 触发重跑
+> 是两条不同路径，不要混淆。
+
+### 7.5.2 codex-cli 的 read 能力与容器安全选项的取舍
+
+codex 读文件靠让模型跑 shell 命令,再由 bubblewrap 建 user namespace 圈住。容器默认
+seccomp 会挡 `unshare(CLONE_NEWUSER)`,沙箱起不来。实测(worker 镜像内):
+
+| 容器选项 | bubblewrap |
+|---|---|
+| 默认 | 失败 `No permissions to create a new namespace` |
+| `--security-opt seccomp=unconfined` | 失败 `Failed to make / slave` |
+| `seccomp=unconfined` + `apparmor=unconfined` | 可用 |
+| `--privileged` | 可用 |
+
+**默认不放宽。**worker 启动时探测沙箱,探不通就不自证 `read`,codex 只接纯文本与 websearch 步,
+需要 Read 的步骤由 claude 或 qoder 承担。这是 fail-closed 的安全默认,不需要任何配置。
+
+要让 codex 也能接 Read 步,给该 AI worker 加 `seccomp=unconfined` 与 `apparmor=unconfined`。
+这笔交易要想清楚:换来的是 codex 的内层 denylist 沙箱(保护凭证与 deny 名单里的路径),
+付出的是这个 codex worker 容器失去 seccomp 与 apparmor 约束,并经手派给它的 job 数据。
+即使放宽,codex 仍是黑名单而非白名单,其它 Job 的产物目录对它可读。
+只在能接受这两点时启用。
 
 ### 7.6 版本固定 / 回滚 — `scripts/rollback.sh`
 

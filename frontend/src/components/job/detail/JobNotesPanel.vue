@@ -2,11 +2,11 @@
 import { ChevronDown, ExternalLink, FileText, Languages, List, RefreshCw, Star } from 'lucide-vue-next'
 import MarkdownViewer from '../../notes/MarkdownViewer.vue'
 import DocumentPdfViewer from '../../document/DocumentPdfViewer.vue'
-import type { CanonicalEvidenceProjection } from '../../../types'
+import type { AiProviderInfo, CanonicalEvidenceProjection } from '../../../types'
 
 type NoteVariant = 'smart' | 'original' | 'translated' | 'pdf'
 interface Version { provider: string; model: string; version: string; file: string; review_file: string | null; overall: number | null; review_state?: string | null }
-interface Provider { name: string; type: string; available: boolean; label: string }
+type Provider = AiProviderInfo
 interface Heading { id: string; text: string; level: number }
 interface Term { term: string; zh_name?: string; aliases?: string[] }
 

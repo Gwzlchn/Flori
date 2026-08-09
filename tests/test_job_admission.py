@@ -126,7 +126,7 @@ def test_pool_or_provider_tag_mismatch_is_rejected(test_config):
         domain="general", style_tags=[], flags={"smart_note": False},
     )
     wrong_pool = [_worker("io,cpu", "claude-cli")]
-    wrong_provider = [_worker("io,cpu,ai", "codex-cli")]
+    wrong_provider = [_worker("io,cpu,ai", "openai-api")]
 
     assert not workers_cover_pipeline(wrong_pool, requirements, test_config)
     assert not workers_cover_pipeline(wrong_provider, requirements, test_config)
@@ -140,6 +140,7 @@ def test_different_workers_may_cover_different_pipeline_steps(test_config):
     workers = [
         _worker("io", ""),
         _worker("cpu", ""),
+        # 默认 AI 步允许三种 concrete CLI 中的任意一种。
         _worker("ai", "claude-cli"),
     ]
 

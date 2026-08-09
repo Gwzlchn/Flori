@@ -131,7 +131,8 @@ def _terminal_status(
             status = "truncated"
         elif reason in {"content_filter", "error", "failed"}:
             status = "error"
-    elif provider == "claude-cli":
+    elif provider in {"claude-cli", "qoder-cli"}:
+        # qoder-cli 顶层 JSON 与 claude 同构(is_error/subtype),终态判定共用一套规则。
         if type(raw_error) is not bool:
             return "unknown"
         if raw_error is True:
@@ -162,7 +163,7 @@ def completion_from_response(response: LLMResponse) -> dict[str, Any]:
         if type(response.finish_reason) is str else ""
     )
     raw = response.raw if isinstance(response.raw, dict) else {}
-    if provider == "claude-cli":
+    if provider in {"claude-cli", "qoder-cli"}:
         value = raw.get("is_error")
         raw_error = value if type(value) is bool else None
     elif provider == "codex-cli":
@@ -459,7 +460,7 @@ def _completion_is_strict(
         errors.append("completion_schema_version_invalid")
         valid = False
     raw_error = completion.get("raw_error")
-    if review_provider in {"claude-cli", "codex-cli"}:
+    if review_provider in {"claude-cli", "codex-cli", "qoder-cli"}:
         if raw_error is None:
             errors.append("completion_terminal_proof_missing")
             valid = False

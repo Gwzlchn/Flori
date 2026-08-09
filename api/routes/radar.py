@@ -1,7 +1,7 @@
 """概念趋势雷达 + 本周摘要路由(均挂 verify_token).
 
 GET /api/domains/{domain}/radar 只做 DB 计算,不调 LLM。POST /api/domains/{domain}/digest
-投递 AI task 给 ai-worker,API 不在进程内调 claude。雷达与摘要分离:页面先用 GET
+投递 AI task 给 ai-worker,API 不在进程内调 LLM。雷达与摘要分离:页面先用 GET
 快速渲染各板块;用户生成摘要时再走 POST,返回 202 和 task_id。前端经
 /api/ai-tasks/{task_id}/result 取 markdown.
 """
@@ -14,6 +14,7 @@ import uuid
 import structlog
 from fastapi import APIRouter, Depends, Query
 
+from shared.ai_routing import CONCRETE_CLI_PROVIDERS
 from shared.db import Database
 from shared.models import AITask, LLMRequest
 from shared.redis_client import RedisClient
@@ -94,6 +95,10 @@ async def post_digest(
         request=request_obj,
         step_name="digest",
         domain=domain,
+        provider="",
+        model="",
+        # 调度约束是真实 provider 的 OR 集合;claim 时才原子物化执行者。
+        allowed_providers=list(CONCRETE_CLI_PROVIDERS),
         audit_context={"digest_source_manifest": source_manifest},
     ).to_task_payload()
     try:

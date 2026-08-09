@@ -42,6 +42,9 @@ OWNER="${OWNER,,}"
 # 真实语义版本,注入镜像 ENV FLORI_VERSION。构建上下文用临时副本,不改宿主 pyproject。
 VER="$(sed -n 's/^version = "\(.*\)"/\1/p' "${REPO}/pyproject.toml" | head -1)"
 SHA="$(git -C "$REPO" rev-parse --short=12 HEAD 2>/dev/null || echo local)"
+# 每次本地 worker build 都刷新官方 latest CLI 安装层。该值只破 Docker cache,
+# 不进入运行时版本契约;需要复现旧镜像时应直接使用其 immutable digest。
+CLI_REFRESH="${CLI_INSTALL_REFRESH:-$(date -u '+%Y%m%dT%H%M%SZ')-$$}"
 PROXY_HOST="${FLORI_BUILD_PROXY_HOST:-}"
 if [ -z "$PROXY_HOST" ]; then
   PROXY_HOST="$(ip -4 addr show docker0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1 || true)"
@@ -98,7 +101,7 @@ services:
       context: ${ctx}
       dockerfile: docker/base.Dockerfile
       target: worker
-      args: { USE_USTC_MIRROR: "${USTC}", FLORI_VERSION: "${VER}" }
+      args: { USE_USTC_MIRROR: "${USTC}", FLORI_VERSION: "${VER}", CLI_INSTALL_REFRESH: "${CLI_REFRESH}" }
       cache_from: [ "type=registry,ref=ghcr.io/${OWNER}/flori-worker:buildcache" ]
     image: ghcr.io/${OWNER}/flori-worker:${TAG}
   frontend:

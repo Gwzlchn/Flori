@@ -36,7 +36,7 @@ class DummyStep(StepBase):
             return ["input/data.json"]
         return []
 
-    def input_hashes(self):
+    def step_input_hashes(self):
         f = self.job_dir / "input" / "data.json"
         if f.exists():
             return {"data": file_hash(f)}
@@ -79,7 +79,7 @@ def test_step_override_invalid_shapes_fail_closed_without_mutating_ai(tmp_path, 
     step = DummyStep(tmp_path, config={"ai": ai.copy(), "providers": {"providers": {}}})
 
     with pytest.raises(InputInvalidError, match="invalid AI override"):
-        step.ai.override_provider()
+        step.ai.validate_overrides()
     with pytest.raises(InputInvalidError, match="invalid AI override"):
         step.ai.apply_provider_override()
 
@@ -131,12 +131,156 @@ def test_step_override_parser_normalizes_valid_provider(tmp_path):
         "providers": {"providers": {"openai": {"models": ["gpt-test"]}}},
     })
 
-    assert step.ai.override_provider() == "openai"
+    assert step.ai.selection()["override"] == {"provider": "openai"}
     step.ai.apply_provider_override()
 
     assert step.config["ai"] == {
         "primary": {"provider": "openai", "model": "gpt-test"},
     }
+
+
+def test_step_param_override_flows_to_selection_and_tier(tmp_path):
+    """model/effort 覆盖进有效选择与合成 tier;def_digest 不掺 job 级覆盖。"""
+    (tmp_path / "job.json").write_text(json.dumps({
+        "ai_overrides": {"test_step": "openai"},
+        "ai_param_overrides": {"test_step": {"model": "gpt-x", "reasoning_effort": "high"}},
+    }), encoding="utf-8")
+    step = DummyStep(tmp_path, config={
+        "ai": {"primary": {"provider": "claude-cli", "model": "primary"}},
+        "providers": {"providers": {"openai": {
+            "models": ["gpt-test", "gpt-x"], "reasoning_efforts": ["high"],
+        }}},
+    })
+
+    selection = step.ai.selection()
+    assert selection["override"] == {
+        "provider": "openai", "model": "gpt-x", "reasoning_effort": "high",
+    }
+    assert selection["tiers"] == [{
+        "tier": "primary",
+        "declared_provider": "openai",
+        "provider": "openai",
+        "provider_source": "declaration",
+        "model": "gpt-x",
+        "model_source": "override",
+        "reasoning_effort": "high",
+        "reasoning_effort_source": "request",
+        "features": [],
+    }]
+    step.ai.apply_provider_override()
+    assert step.config["ai"] == {"primary": {"provider": "openai", "model": "gpt-x"}}
+
+
+def test_step_param_override_effort_flows_into_request(tmp_path):
+    from shared.ai_gateway import AIGateway
+
+    (tmp_path / "job.json").write_text(json.dumps({
+        "ai_overrides": {"test_step": "openai"},
+        "ai_param_overrides": {"test_step": {"reasoning_effort": "high"}},
+    }), encoding="utf-8")
+    step = DummyStep(tmp_path, config={
+        "ai": {"primary": {"provider": "claude-cli", "model": "primary"}},
+        "providers": {"providers": {"openai": {
+            "models": ["gpt-test"], "reasoning_efforts": ["high"],
+        }}},
+    })
+    seen = {}
+
+    async def fake_call(self, step_name, request):
+        seen["request"] = request
+        return LLMResponse(content="ok", model="gpt-test", provider="openai",
+                           finish_reason="stop")
+
+    with patch.object(AIGateway, "call", fake_call):
+        assert step.ai.call("prompt") == "ok"
+    assert seen["request"].reasoning_effort == "high"
+    assert step.config["ai"] == {"primary": {"provider": "openai", "model": "gpt-test"}}
+
+
+def test_step_param_override_without_provider_fails_closed(tmp_path):
+    (tmp_path / "job.json").write_text(json.dumps({
+        "ai_param_overrides": {"test_step": {"model": "gpt-x"}},
+    }), encoding="utf-8")
+    ai = {"primary": {"provider": "claude-cli", "model": "primary"}}
+    step = DummyStep(tmp_path, config={
+        "ai": ai.copy(),
+        "providers": {"providers": {"claude-cli": {"type": "cli"}}},
+    })
+
+    with pytest.raises(InputInvalidError, match="param_override_requires_provider"):
+        step.ai.validate_overrides()
+    with pytest.raises(InputInvalidError, match="param_override_requires_provider"):
+        step.ai.apply_provider_override()
+    assert step.config["ai"] == ai
+
+
+_STEP_PROVIDERS = {"providers": {
+    "claude-cli": {
+        "type": "claude_cli", "model": "opus5",
+        "models": ["opus5", "claude-sonnet-4-6"],
+        "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+    },
+    "codex-cli": {
+        "type": "codex_cli", "model": "gpt-5.6-sol", "models": ["gpt-5.6-sol"],
+        "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+    },
+}}
+
+
+def _override_step(tmp_path, document):
+    (tmp_path / "job.json").write_text(json.dumps(document), encoding="utf-8")
+    return DummyStep(tmp_path, config={
+        "ai": {"primary": {"provider": "claude-cli", "model": "opus5"}},
+        "providers": _STEP_PROVIDERS,
+    })
+
+
+@pytest.mark.parametrize(("document", "code"), [
+    ({"ai_overrides": {"test_step": "codex-cli"},
+      "ai_param_overrides": {"test_step": {"reasoning_effort": "max"}}},
+     "reasoning_effort_not_in_provider_domain"),
+    ({"ai_overrides": {"test_step": "claude-cli"},
+      "ai_param_overrides": {"test_step": {"model": "gpt-5-codex"}}},
+     "model_not_in_provider_domain"),
+    ({"ai_overrides": {"test_step": "ghost-cli"},
+      "ai_param_overrides": {"test_step": {"reasoning_effort": "high"}}},
+     "unknown_provider"),
+])
+def test_step_rejects_param_override_outside_local_domain(tmp_path, document, code):
+    """跨环境搬来的 job.json:执行端按本机 providers 配置复核,不带越界值进 CLI。"""
+    step = _override_step(tmp_path, document)
+
+    # override_provider 已随手工指纹实现一并删除,校验入口改为 validate_overrides。
+    with pytest.raises(InputInvalidError, match=code):
+        step.ai.validate_overrides()
+    with pytest.raises(InputInvalidError, match=code):
+        step.ai.apply_provider_override()
+
+
+def test_step_accepts_legacy_job_json_without_param_overrides(tmp_path):
+    """老 job.json 只有 provider 覆盖,新增的取值域门不得把它拦下。"""
+    step = _override_step(tmp_path, {"ai_overrides": {"test_step": "claude-cli"}})
+
+    step.ai.validate_overrides()
+    step.ai.apply_provider_override()
+    assert step.config["ai"] == {
+        "primary": {"provider": "claude-cli", "model": "opus5"},
+    }
+
+
+def test_step_rejects_retired_provider_value(tmp_path):
+    """历史已移除的 provider 值不得继续执行。"""
+    (tmp_path / "job.json").write_text(json.dumps({
+        "ai_overrides": {"test_step": "cli-agent"},
+        "ai_param_overrides": {"test_step": {"reasoning_effort": "max"}},
+    }), encoding="utf-8")
+    step = DummyStep(tmp_path, config={
+        "ai": {"primary": {"provider": "claude-cli", "model": "opus5"}},
+        "providers": _STEP_PROVIDERS,
+    })
+
+    with pytest.raises(InputInvalidError, match="unknown_provider"):
+        step.ai.validate_overrides()
 
 
 def test_step_rechecks_read_capability_after_enqueue_artifact_race(tmp_path):

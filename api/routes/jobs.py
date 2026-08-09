@@ -21,11 +21,13 @@ from fastapi.responses import PlainTextResponse
 from shared.audit import audit
 from shared.config import AppConfig
 from shared.ai_routing import (
+    CLI_PROVIDER_TYPES,
     READ_TOOL_TAG,
     pipeline_ai_roles,
     provider_is_configured,
     provider_required_tags,
     step_required_capability_tags,
+    validate_ai_param_override,
     worker_satisfies_requirements,
 )
 from shared.db import Database
@@ -63,6 +65,7 @@ from api.business_admission import (
     ensure_job_workers,
     job_admission_guard,
 )
+from api.errors import CodedHTTPException
 from api.schemas import (
     ContentType,
     DocumentKind,
@@ -134,7 +137,18 @@ async def list_providers(
             "available": _provider_available(
                 name, config.providers, workers, [("ai", [])],
             ),
-            "label": "CLI" if pc.get("type") in {"cli", "codex_cli"} else "API",
+            "label": "CLI" if pc.get("type") in CLI_PROVIDER_TYPES else "API",
+            # 前端 model/effort 选择器元数据,也是覆盖的取值域。
+            "models": [str(m) for m in (pc.get("models") or [])],
+            "default_model": pc.get("model"),
+            "reasoning_efforts": [str(e) for e in (pc.get("reasoning_efforts") or [])],
+            # 档位域按模型细分时以本表为准:reasoning_efforts 是并集,只够展示,
+            # 用它当准入域会让 UI 提供该模型其实不支持的组合,提交后才 400。
+            "reasoning_efforts_by_model": {
+                str(k): [str(e) for e in (v or [])]
+                for k, v in (pc.get("reasoning_efforts_by_model") or {}).items()
+            },
+            "default_reasoning_effort": pc.get("reasoning_effort"),
         })
     return {"providers": out}
 
@@ -2536,6 +2550,21 @@ async def rerun_smart(
         req.provider, config.providers, workers, requirements,
     ):
         raise HTTPException(400, f"provider '{req.provider}' 无匹配在线 worker")
+    model_override = (req.model or "").strip()
+    effort_override = (req.reasoning_effort or "").strip()
+    if (req.model is not None and not model_override) or (
+        req.reasoning_effort is not None and not effort_override
+    ):
+        raise HTTPException(400, "model/reasoning_effort 覆盖必须是非空字符串")
+    params: dict[str, str] = {}
+    if model_override:
+        params["model"] = model_override
+    if effort_override:
+        params["reasoning_effort"] = effort_override
+    # 判定与导入/恢复/执行端同源:这里放行的覆盖必须在任何目标环境都能原样复核。
+    violation = validate_ai_param_override(req.provider, params, config.providers)
+    if violation is not None:
+        raise CodedHTTPException(400, violation.code, violation.message())
     # 把 provider 覆盖写进 job.json(智能/评审步会读),worker rerun 时 pull 到新 job.json。
     raw = await storage.read_file(job_id, "job.json")
     try:
@@ -2552,12 +2581,29 @@ async def rerun_smart(
         raise HTTPException(409, "job.json ai_overrides 必须是对象")
     doc["ai_overrides"][smart_step] = req.provider
     doc["ai_overrides"][review_step] = req.provider
+    param_overrides = doc.get("ai_param_overrides")
+    if param_overrides is None and "ai_param_overrides" not in doc:
+        param_overrides = {}
+    if not isinstance(param_overrides, dict):
+        raise HTTPException(409, "job.json ai_param_overrides 必须是对象")
+    # 未带参数也要清掉两步的旧参数覆盖:换 provider 后残留的 model/effort 会指向错误取值域。
+    for step in (smart_step, review_step):
+        if params:
+            param_overrides[step] = dict(params)
+        else:
+            param_overrides.pop(step, None)
+    if param_overrides:
+        doc["ai_param_overrides"] = param_overrides
+    else:
+        doc.pop("ai_param_overrides", None)
     await storage.write_file(job_id, "job.json",
                              json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8"))
     await redis.append_lifecycle_event("job_command", {
         "action": "rerun", "job_id": job_id, "from_step": smart_step,
     })
     return {"job_id": job_id, "status": "processing", "provider": req.provider,
+            "model": model_override or None,
+            "reasoning_effort": effort_override or None,
             "from_step": smart_step, "review_step": review_step}
 
 

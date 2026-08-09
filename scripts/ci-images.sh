@@ -90,6 +90,12 @@ start_build() {
       --build-arg "FLORI_VERSION=$FLORI_VERSION"
       --cache-from "type=registry,ref=ghcr.io/$OWNER_LC/$image:buildcache"
     )
+    if [ "$image" = "flori-worker" ]; then
+      # latest CLI 安装层不能沿用旧 registry cache。GitHub run/attempt 只用于刷新缓存,
+      # 不代表 CLI 版本;实际版本由镜像构建中的三个 --version 记录。
+      cli_refresh="${CLI_INSTALL_REFRESH:-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}}"
+      command+=(--build-arg "CLI_INSTALL_REFRESH=$cli_refresh")
+    fi
     if [ "$MODE" = "candidate" ]; then
       command+=(
         --cache-to "type=registry,ref=ghcr.io/$OWNER_LC/$image:buildcache,mode=max"

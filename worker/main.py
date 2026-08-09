@@ -10,16 +10,17 @@ from pathlib import Path
 
 import structlog
 
+from shared.ai_gateway import resolve_bound_cli_provider
 from shared.config import load_config
 from shared.content_maintenance import acquire_service_lease
 from shared.source_library import source_roots_from_env
 from shared.db import Database
-from shared.errors import WorkerFatalError
+from shared.errors import AIProviderError, WorkerFatalError
 from shared.redis_client import RedisClient
 from shared.storage import GatewayStorage, create_storage
 
 from .transport import create_transport
-from .worker import Worker, auto_discover_tags
+from .worker import Worker, auto_discover_tags, validate_manual_tags
 
 logger = structlog.get_logger(component="worker")
 
@@ -42,7 +43,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-async def _initialize_runtime(args, config, gateway_url: str | None, redis_url: str | None):
+async def _initialize_runtime(
+    args, config, gateway_url: str | None, redis_url: str | None,
+    cli_provider: str | None,
+):
     """构造 worker 运行资源;调用方在异常时负责释放 maintenance lease。"""
     redis: RedisClient | None = None
     db: Database | None = None
@@ -69,7 +73,9 @@ async def _initialize_runtime(args, config, gateway_url: str | None, redis_url: 
 
     pools = args.pools
     worker_type = "+".join(sorted(set(pools)))
-    tags = auto_discover_tags() | (set(args.tags) if args.tags else set())
+    tags = auto_discover_tags(config.providers, cli_provider) | (
+        set(args.tags) if args.tags else set()
+    )
     reject_tags = set(args.reject_tags) if args.reject_tags else set()
     concurrency = (
         args.concurrency if args.concurrency is not None
@@ -80,18 +86,37 @@ async def _initialize_runtime(args, config, gateway_url: str | None, redis_url: 
         worker_type=worker_type, pools=pools,
         tags=tags, reject_tags=reject_tags, concurrency=concurrency,
         local_barrier=gateway_url is None,
+        cli_provider=cli_provider,
     )
     return transport, db, redis, worker
 
 
 async def main() -> None:
     args = parse_args()
+    # 两段校验。第一段用内置常量,在任何 IO 之前:内置受保护标签的伪造根本走不到读配置。
+    # 第二段在 load_config 之后补上动态 provider 的投影标签,仍早于注册与认领。
+    manual_tags = set(args.tags) if args.tags else set()
+    validate_manual_tags(manual_tags)
 
     data_dir = os.environ.get("DATA_DIR", "/data")
     # 默认从镜像烤入的 /app/configs 读(无状态 worker 不必显式传 CONFIG_DIR);
     # docker/base.Dockerfile 把 configs/ 复制到 /app/configs。挂 /data 卷的部署可显式覆盖。
     config_dir = os.environ.get("CONFIG_DIR", "/app/configs")
     config = load_config(config_dir=config_dir, data_dir=data_dir)
+
+    validate_manual_tags(manual_tags, config.providers)
+
+    # CLI worker 只接受显式 concrete 绑定。多套凭证不触发自动选择,
+    # 未绑定的进程也不会注册任何 CLI provider 标签。
+    try:
+        cli_provider = resolve_bound_cli_provider(config.providers)
+    except AIProviderError as e:
+        raise WorkerFatalError(str(e), reason="cli_provider_invalid") from e
+    if cli_provider is not None:
+        logger.info(
+            "cli_provider_bound",
+            provider=cli_provider,
+        )
 
     gateway_url = os.environ.get("GATEWAY_URL")
     redis_url = os.environ.get("REDIS_URL")
@@ -109,7 +134,7 @@ async def main() -> None:
     # 三种模式的资源构造都在 lease 内。初始化失败也必须显式释放,不能等进程退出。
     try:
         transport, db, redis, worker = await _initialize_runtime(
-            args, config, gateway_url, redis_url,
+            args, config, gateway_url, redis_url, cli_provider,
         )
     except BaseException:
         if maintenance_lease is not None:

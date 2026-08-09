@@ -41,7 +41,7 @@ class TranscriptParseStep(StepBase):
             return ["input/subtitle.srt"]
         return []
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         hashes = {
             "subtitle": file_hash(self.job_dir / "input" / "subtitle.srt"),
         }

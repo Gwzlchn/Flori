@@ -21,7 +21,7 @@ class ReviewStep(StepBase):
             missing.append("output/notes_mechanical.md")
         return missing
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         smart = self.artifacts.latest_smart_note()
         ev = self.job_dir / "output" / "evidence.json"
         hashes = {
@@ -29,8 +29,6 @@ class ReviewStep(StepBase):
             "mechanical": file_hash(self.job_dir / "output" / "notes_mechanical.md"),
             # 取证产物纳入指纹:evidence 更新→重评(核 [E#] 忠实性)。非案例类无则空。
             "evidence": file_hash(ev) if ev.exists() else "",
-            # provider 覆盖纳入指纹:换 provider 重跑时强制重评。
-            "provider": self.ai.override_provider(),
         }
         hashes["template"] = self.ai.template_hash(self.ai.primary_prompt_template())
         return hashes

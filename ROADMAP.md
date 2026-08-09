@@ -10,6 +10,7 @@
 | 状态 | 能力 |
 |------|------|
 | 完整 | 来源 registry、OpenAPI 枚举、API 入队前 fail-closed 与前端来源目录同源 |
+| 完整 | AI 执行后端只支持 claude-cli / codex-cli / qoder-cli 三种 concrete CLI；普通 AI 步声明 `allowed_providers`，由任一满足能力门的绑定 Worker 原子认领并物化真实 provider，无虚拟 provider 或隐式主备；取证步另按 websearch 能力门控；模型与推理档位可按调用覆盖 |
 | first-pass | Video / Document / Audio 三类流水线与多体裁文档摄入；FTS5 Search、跨源 Ask 与 MCP；集合订阅；概念图与评审；手工建卡 SRS；知识雷达；远程 Worker 网关 |
 | first-pass | Canonical evidence 已接通视频/音频时间、HTML 段落、PDF 页码+bbox、OCR image bbox 与 smart exact-quote 的 producer / resolver / Search/Ask/MCP/内容详情；跨语言与语义改写使用独立 attestation |
 | 未开始 | 原生客户端、通知 / PWA、自动分类、知识缺口与矛盾检测、证据型自动卡片 |

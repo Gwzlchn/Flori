@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from shared.content_import import (
     ContentImportError,
@@ -44,6 +45,7 @@ from tests.test_content_backup import (
     ensure_job_json,
     seed_video_job,
     sha,
+    write_job_json,
     T_CREATED,
     T_FINISHED,
     T_STARTED,
@@ -355,6 +357,129 @@ class TestProjectionBranches:
         )
         assert not plan.ok
         assert any("pipelines missing" in item for item in plan.conflicts)
+
+
+def _target_configs(tmp_path: Path, mutate) -> Path:
+    """复制一份 configs 并改 providers.yaml,模拟取值域不同的目标环境。"""
+    root = tmp_path / "target-configs"
+    shutil.copytree(_CONFIGS_DIR, root)
+    path = root / "providers.yaml"
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    mutate(document["providers"])
+    path.write_text(
+        yaml.safe_dump(document, allow_unicode=True, sort_keys=False), encoding="utf-8",
+    )
+    return root
+
+
+class TestTargetEnvironmentAIParams:
+    """AI 覆盖必须按目标环境复核:源环境合法不等于这里能跑。"""
+
+    async def _seed(self, source, *, overrides, params=None):
+        part_ids = await seed_video_job(source)
+        extra = {"ai_overrides": overrides}
+        if params is not None:
+            extra["ai_param_overrides"] = params
+        await write_job_json(source, "job_alpha", part_ids, **extra)
+        await do_backup(source)
+
+    def _plan(self, source, target, config_dir):
+        from shared.config import load_config
+
+        return build_plan(
+            repository=source.repo, snapshot="latest", target_db_path=target.db,
+            config=load_config(config_dir),
+        )[0]
+
+    async def test_param_overrides_survive_round_trip_into_matching_target(
+        self, source, target,
+    ):
+        """ai_param_overrides 是备份归档键,导入侧必须认它,否则整批快照不可恢复。"""
+        params = {"model": "claude-sonnet-4-6", "reasoning_effort": "max"}
+        await self._seed(
+            source,
+            overrides={"11_smart": "claude-cli", "12_review": "claude-cli"},
+            params={"11_smart": params, "12_review": params},
+        )
+
+        await do_import(source, target)
+
+        restored = json.loads(await target.storage.read_file("job_alpha", "job.json"))
+        assert restored["ai_param_overrides"] == {"11_smart": params, "12_review": params}
+        assert restored["ai_overrides"]["11_smart"] == "claude-cli"
+
+    async def test_effort_outside_target_domain_blocks_plan_and_restore(
+        self, source, target, tmp_path,
+    ):
+        """备份后目标环境收窄档位取值域:计划和恢复都必须拒,且指出 job/step/字段。"""
+        await self._seed(
+            source,
+            overrides={"11_smart": "claude-cli"},
+            params={"11_smart": {"reasoning_effort": "max"}},
+        )
+        narrowed = _target_configs(tmp_path, lambda providers: providers["claude-cli"].update(
+            reasoning_efforts=["low", "medium", "high", "xhigh"],
+            reasoning_efforts_by_model={
+                model: ["low", "medium", "high", "xhigh"]
+                for model in providers["claude-cli"]["models"]
+            },
+        ))
+
+        plan = self._plan(source, target, narrowed)
+
+        assert not plan.ok
+        [conflict] = [
+            item for item in plan.conflicts
+            if "reasoning_effort_not_in_provider_domain" in item
+        ]
+        assert "job_alpha" in conflict and "11_smart" in conflict
+        assert "claude-cli" in conflict and "max" in conflict
+        with pytest.raises(
+            ContentImportError, match="reasoning_effort_not_in_provider_domain",
+        ):
+            await do_import(source, target, config_dir=narrowed)
+        assert not target.db.exists()
+
+    async def test_model_outside_target_domain_blocks_plan(
+        self, source, target, tmp_path,
+    ):
+        await self._seed(
+            source,
+            overrides={"11_smart": "claude-cli"},
+            params={"11_smart": {"model": "claude-sonnet-4-6"}},
+        )
+        narrowed = _target_configs(tmp_path, lambda providers: providers["claude-cli"].update(
+            models=["opus5"],
+            reasoning_efforts_by_model={"opus5": ["low", "medium", "high", "xhigh", "max"]},
+        ))
+
+        plan = self._plan(source, target, narrowed)
+
+        assert not plan.ok
+        assert any(
+            "model_not_in_provider_domain" in item and "claude-sonnet-4-6" in item
+            for item in plan.conflicts
+        )
+
+    async def test_provider_missing_from_target_blocks_plan(self, source, target):
+        await self._seed(source, overrides={"11_smart": "ghost-cli"})
+
+        plan = self._plan(source, target, _CONFIGS_DIR)
+
+        assert not plan.ok
+        assert any(
+            "unknown_provider" in item and "11_smart" in item
+            for item in plan.conflicts
+        )
+
+    async def test_unchanged_target_keeps_snapshot_importable(self, source, target):
+        await self._seed(
+            source,
+            overrides={"11_smart": "codex-cli"},
+            params={"11_smart": {"reasoning_effort": "xhigh"}},
+        )
+
+        assert self._plan(source, target, _CONFIGS_DIR).ok
 
 
 class TestPlan:
@@ -1121,7 +1246,32 @@ class TestSearchRebuild:
         assert query(target.db, "SELECT COUNT(*) c FROM note_chunks")[0]["c"] == 0
 
 
-def _unit_materializer(tmp_path, *, source_roots=None):
+# 目标环境 providers 配置的最小可信副本:三个 CLI 的档位取值域互不相同,
+# 跨环境恢复的判定全靠它,不能用空 dict 糊过去。
+_TARGET_PROVIDERS = {"providers": {
+    "claude-cli": {
+        "type": "claude_cli",
+        "model": "opus5",
+        "models": ["opus5", "claude-sonnet-4-6"],
+        "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+    },
+    "codex-cli": {
+        "type": "codex_cli",
+        "model": "gpt-5.6-sol",
+        "models": ["gpt-5.6-sol"],
+        "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+    },
+    "qoder-cli": {
+        "type": "qoder_cli",
+        "model": "Cantus",
+        "models": ["Cantus"],
+        "reasoning_effort": "max",
+        "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+    },
+}}
+
+
+def _unit_materializer(tmp_path, *, source_roots=None, providers_config=None):
     import shared.content_import as module
 
     repository = ContentRepository.create(tmp_path / "unit-repo")
@@ -1137,6 +1287,9 @@ def _unit_materializer(tmp_path, *, source_roots=None):
         processed=set(),
         config_root=tmp_path / "prompts",
         source_roots=source_roots or {},
+        providers_config=(
+            _TARGET_PROVIDERS if providers_config is None else providers_config
+        ),
     )
     return materializer, repository, storage, connection
 
@@ -1300,6 +1453,73 @@ class TestPortableV2WriteSurfaces:
             restored = json.loads(await storage.read_file(job_id, "job.json"))
             assert restored["id"] == job_id
             assert restored["ai_overrides"] == {"11_smart": "claude-cli"}
+        finally:
+            connection.close()
+
+    @pytest.mark.parametrize(("fields", "code"), [
+        # 手改 ai-config blob:历史已移除的 provider 值不得恢复。
+        ({"ai_overrides": {"11_smart": "cli-agent"},
+          "ai_param_overrides": {"11_smart": {"model": "Cantus"}}},
+         "unknown_provider"),
+        # 只留参数、抹掉 provider:各 tier 模型语义不同,不能猜。
+        ({"ai_param_overrides": {"11_smart": {"reasoning_effort": "high"}}},
+         "param_override_requires_provider"),
+        ({"ai_overrides": {"11_smart": "ghost-cli"}}, "unknown_provider"),
+        ({"ai_overrides": {"11_smart": "codex-cli"},
+          "ai_param_overrides": {"11_smart": {"reasoning_effort": "max"}}},
+         "reasoning_effort_not_in_provider_domain"),
+        ({"ai_overrides": {"11_smart": "qoder-cli"},
+          "ai_param_overrides": {"11_smart": {"reasoning_effort": "turbo"}}},
+         "reasoning_effort_not_in_provider_domain"),
+        ({"ai_overrides": {"11_smart": "qoder-cli"},
+          "ai_param_overrides": {"11_smart": {"model": "gpt-5-codex"}}},
+         "model_not_in_provider_domain"),
+        ({"ai_overrides": "claude-cli"}, "ai_overrides_not_object"),
+        ({"ai_param_overrides": {"11_smart": {"temperature": "1"}}},
+         "unknown_param_override_key"),
+    ])
+    async def test_tampered_job_ai_config_is_rejected_without_touching_job_json(
+        self, tmp_path, fields, code,
+    ):
+        materializer, repository, storage, connection = _unit_materializer(tmp_path)
+        job_id = "job_ai_tampered"
+        original = b'{"id":"job_ai_tampered"}'
+        await storage.write_file(job_id, "job.json", original)
+        payload = json.dumps(fields).encode()
+        blob = repository.put_blob_bytes(payload)
+        try:
+            with pytest.raises(ContentImportError, match=code):
+                await materializer._put_user_config({
+                    "kind": "job_ai_config",
+                    "path": f"jobs/{job_id}/ai-config.json",
+                    "blob": blob.digest,
+                    "size_bytes": len(payload),
+                })
+            assert await storage.read_file(job_id, "job.json") == original
+        finally:
+            connection.close()
+
+    async def test_job_ai_config_restores_param_overrides_inside_domain(self, tmp_path):
+        materializer, repository, storage, connection = _unit_materializer(tmp_path)
+        job_id = "job_ai_params"
+        await storage.write_file(job_id, "job.json", b'{"id":"job_ai_params"}')
+        fields = {
+            "ai_overrides": {"11_smart": "qoder-cli"},
+            "ai_param_overrides": {"11_smart": {
+                "model": "Cantus", "reasoning_effort": "max",
+            }},
+        }
+        payload = json.dumps(fields).encode()
+        blob = repository.put_blob_bytes(payload)
+        try:
+            await materializer._put_user_config({
+                "kind": "job_ai_config",
+                "path": f"jobs/{job_id}/ai-config.json",
+                "blob": blob.digest,
+                "size_bytes": len(payload),
+            })
+            restored = json.loads(await storage.read_file(job_id, "job.json"))
+            assert restored["ai_param_overrides"] == fields["ai_param_overrides"]
         finally:
             connection.close()
 

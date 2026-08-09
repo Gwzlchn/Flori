@@ -37,7 +37,7 @@ class MergePartsStep(StepBase):
             return ["job.json"]
         return []
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         hashes = {"manifest": file_hash(self.job_dir / "job.json")}
         for part in self._parts():
             root = self.job_dir / "parts" / part["part_id"]

@@ -524,3 +524,25 @@ def test_external_workflow_requires_explicit_urls_and_single_entrypoint() -> Non
     assert run.startswith("bash scripts/test.sh --external")
     for kind in ("ARTICLE", "AUDIO", "RSS", "YOUTUBE"):
         assert f"FLORI_EXTERNAL_{kind}_URL" in job["env"]
+
+
+def test_worker_cli_installers_follow_official_latest_channels_and_refresh_cache() -> None:
+    repo = WORKFLOW.parents[2]
+    dockerfile = (repo / "docker" / "base.Dockerfile").read_text()
+    installer = (repo / "docker" / "install-cli-tools.sh").read_text()
+    ci_images = (repo / "scripts" / "ci-images.sh").read_text()
+    local_build = (repo / "scripts" / "build-uptest.sh").read_text()
+
+    assert "CLI_INSTALL_REFRESH" in dockerfile
+    assert "timeout 1800 sh /tmp/install-cli-tools.sh" in dockerfile
+    assert "CLI_INSTALL_REFRESH" in ci_images
+    assert "CLI_INSTALL_REFRESH" in local_build
+    assert "https://claude.ai/install.sh" in installer
+    assert "https://qoder.com/install" in installer
+    assert "https://chatgpt.com/codex/install.sh" in installer
+    assert "CODEX_RELEASE=latest" in installer
+    assert installer.count("timeout 1800") == 3
+    assert "VERSION=" not in installer
+    assert "SHA256" not in installer
+    for command in ("claude --version", "qodercli --version", "codex --version"):
+        assert command in installer

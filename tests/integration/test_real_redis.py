@@ -95,7 +95,10 @@ async def test_two_apps_compete_for_one_shared_job_quota(
     monkeypatch.setenv("FLORI_JOBS_CREATE_RATE_LIMIT", "1")
     monkeypatch.setenv("FLORI_JOBS_CREATE_RATE_WINDOW_SEC", "60")
     worker = {
-        "pools": "io,cpu,ai", "tags": "claude-cli,read,vision,net-cn,net-global",
+        # 与 auto_discover_tags 同源:Claude worker 只带绑定的 provider 与自证能力,
+        # 这些受保护标签由 worker 运行时自证,不再经 --tags 手填。
+        "pools": "io,cpu,ai",
+        "tags": "claude-cli,read,websearch,vision,net-cn,net-global",
         "reject_tags": "", "status": "idle", "admin_status": "active",
         "last_heartbeat": datetime.now(timezone.utc).isoformat(),
     }

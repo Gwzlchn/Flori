@@ -9,7 +9,6 @@ import fakeredis.aioredis
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from api.main import create_app
 from shared.config import load_config
 from shared.content_maintenance import LOCK_DIR_ENV
 from shared.redis_client import RedisClient
@@ -73,7 +72,8 @@ def make_redis_mock() -> AsyncMock:
     rc.list_worker_ids.return_value = ["w-all"]
     rc.get_worker_info.return_value = {
         "pools": "io,cpu,ai",
-        "tags": "claude-cli,vision,read,net-cn,net-global",
+        # 默认模拟一个 Claude CLI worker;read/websearch 是独立运行能力。
+        "tags": "claude-cli,vision,read,websearch,net-cn,net-global",
         "reject_tags": "",
         "status": "idle",
         "admin_status": "active",
@@ -84,6 +84,9 @@ def make_redis_mock() -> AsyncMock:
 
 @pytest.fixture
 def app(db, test_config):
+    # 延迟导入让非 API 模块可以独立 collection,避免被路由约束。
+    from api.main import create_app
+
     return create_app(db=db, redis=make_redis_mock(), config=test_config)
 
 

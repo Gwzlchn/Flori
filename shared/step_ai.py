@@ -14,10 +14,14 @@ from .ai_gateway import AIGateway, record_usage_to_file
 from .ai_routing import (
     InvalidAIOverrideError,
     READ_TOOL_TAG,
+    WEBSEARCH_TOOL_TAG,
     ai_required_tags,
     parse_ai_override,
+    parse_ai_param_override,
     step_required_capability_tags_sync,
+    validate_ai_param_override,
 )
+from .ai_selection import override_tier_model, selection_digest, selection_snapshot
 from .models import AIUsage, DEFAULT_AI_MODEL, LLMRequest, LLMResponse
 from .provenance import SEMANTIC_AI_LOG_PREFIX
 from .step_artifacts import ArtifactIO, file_hash
@@ -26,6 +30,9 @@ from .structured_output import StructuredOutputParser
 
 class AIInvocation:
     """封装单步 AI 路由、Prompt 解析和逐调用审计状态。"""
+
+    # 区分 job.json 缺失与内容为 JSON null:null 必须走形状校验 fail-closed。
+    _JOB_DOC_MISSING = object()
 
     def __init__(
         self,
@@ -64,41 +71,89 @@ class AIInvocation:
             model = DEFAULT_AI_MODEL
         return provider, model
 
-    def _read_override(self) -> str:
+    def _load_job_document(self):
+        """job.json 缺失回哨兵;不可读或非法 JSON fail-closed,不让脏覆盖静默失效。"""
         try:
-            job = json.loads((self.job_dir / "job.json").read_text(encoding="utf-8"))
+            return json.loads((self.job_dir / "job.json").read_text(encoding="utf-8"))
         except FileNotFoundError:
-            return ""
+            return self._JOB_DOC_MISSING
         except OSError as exc:
             self.log.warning("ai_override_read_failed", reason="job_json_unreadable")
             raise InvalidAIOverrideError("invalid AI override: job_json_unreadable") from exc
         except (json.JSONDecodeError, ValueError, TypeError) as exc:
             self.log.warning("ai_override_read_failed", reason="job_json_invalid")
             raise InvalidAIOverrideError("invalid AI override: job_json_invalid") from exc
+
+    def _read_overrides(self) -> tuple[str, dict[str, str]]:
+        """读本步 provider 与 model/effort 覆盖,并按本机 providers 配置复核取值域。
+
+        参数覆盖必须伴随具体 provider 覆盖:无 provider 时各 tier 模型语义不同,
+        自动路由的 provider 在 claim 前尚未确定。取值域判定与 API 和导入端同源,
+        跨环境搬来的 job.json 在这里就 fail-closed,不带着越界档位进 CLI。
+        """
+        job = self._load_job_document()
+        if job is self._JOB_DOC_MISSING:
+            return "", {}
         override, shape_error = parse_ai_override(
             job, self.step_name, self.config.get("providers", {}),
         )
         if shape_error:
             self.log.warning("ai_override_invalid", reason=shape_error)
             raise InvalidAIOverrideError(f"invalid AI override: {shape_error}")
-        return override or ""
+        params, param_error = parse_ai_param_override(job, self.step_name)
+        if param_error:
+            self.log.warning("ai_override_invalid", reason=param_error)
+            raise InvalidAIOverrideError(f"invalid AI override: {param_error}")
+        violation = validate_ai_param_override(
+            override or "", params, self.config.get("providers", {}),
+        )
+        if violation is not None:
+            self.log.warning(
+                "ai_override_invalid", reason=violation.code,
+                provider=violation.provider, field=violation.field,
+            )
+            raise InvalidAIOverrideError(f"invalid AI override: {violation.code}")
+        return override or "", params
 
-    def override_provider(self) -> str:
-        """读取本步 provider 覆盖,供输入指纹和调用路由共用。"""
-        return self._read_override()
+    def _read_override(self) -> str:
+        provider, _ = self._read_overrides()
+        return provider
+
+    def validate_overrides(self) -> None:
+        """在步骤跑之前把 job 级 AI 覆盖的形状问题暴露出来,脏覆盖不得静默失效。"""
+        self._read_overrides()
+
+    def selection(self) -> dict:
+        """本步最终生效的 AI 选择,供审计与输入指纹共用同一份结论。"""
+        provider, params = self._read_overrides()
+        return selection_snapshot(
+            providers_config=self.config.get("providers", {}),
+            ai_config=self.config.get("ai"),
+            override_provider=provider,
+            override_params=params,
+        )
+
+    def selection_fingerprint(self) -> str:
+        """有效 AI 选择的输入指纹值。本步压根不走 AI 时返回空串,StepBase 据此略过该键,
+        免得给非 AI 步凭空加一个恒定字段、把它们已发布的摘要全推翻。"""
+        if not isinstance(self.config.get("ai"), dict) or not self.config["ai"]:
+            if not self._read_override():
+                return ""
+        return selection_digest(self.selection())
 
     def apply_provider_override(
         self, *, required_capabilities=(), actual_capabilities: bool = False,
     ) -> None:
-        provider = self._read_override()
+        provider, params = self._read_overrides()
         selected_ai = self.config.get("ai")
         if provider:
-            provider_config = (
-                self.config.get("providers", {}).get("providers", {}).get(provider, {})
-            )
-            models = provider_config.get("models", [])
-            model = models[0] if models else (provider_config.get("model") or "unknown")
-            selected_ai = {"primary": {"provider": provider, "model": model}}
+            # 合成 tier 的模型与指纹快照共用 override_tier_model,两处不得各算各的。
+            selected_ai = {"primary": {
+                "provider": provider,
+                "model": override_tier_model(
+                    self.config.get("providers", {}), provider, params,
+                ),
+            }}
 
         try:
             if actual_capabilities:
@@ -123,17 +178,23 @@ class AIInvocation:
 
     def call(self, prompt: str, images: list[Path] | None = None, **kwargs) -> str:
         allowed_tools = kwargs.get("allowed_tools")
+        # 工具名到路由能力的映射与 provider 无关:Read/WebSearch 是跨 CLI 的工具语义,
+        # 能力缺失在发起调用前 fail-closed,不等执行端报 unmapped。
+        tool_capabilities = {"read": READ_TOOL_TAG, "websearch": WEBSEARCH_TOOL_TAG}
         required_capabilities = {
-            READ_TOOL_TAG
+            tool_capabilities[tool.strip().lower()]
             for tool in (
                 allowed_tools if isinstance(allowed_tools, (list, tuple)) else []
             )
-            if type(tool) is str and tool.strip().lower() == "read"
+            if type(tool) is str and tool.strip().lower() in tool_capabilities
         }
         self.apply_provider_override(
             required_capabilities=required_capabilities,
             actual_capabilities=True,
         )
+        _, override_params = self._read_overrides()
+        if override_params.get("reasoning_effort") and "reasoning_effort" not in kwargs:
+            kwargs["reasoning_effort"] = override_params["reasoning_effort"]
         if self.gateway is None:
             self.gateway = AIGateway(
                 self.config.get("providers", {}),
@@ -450,6 +511,13 @@ class AIInvocation:
         else:
             attempts, tier_used = (getattr(error, "attempts", []) or []), None
         content_type = job_meta.get("content_type") or config.get("content_type")
+        # 全败时没有 response,执行侧事实只能取最后一次尝试;两条路径的字段名保持一致,
+        # 审计侧不必分支就能读到请求原值与生效档位。
+        last_attempt = attempts[-1] if attempts else {}
+        try:
+            selection = self.selection()
+        except Exception:
+            selection = {}
         return {
             "job_id": os.environ.get("STEP_JOB_ID", self.job_dir.name),
             "step": self.step_name,
@@ -483,8 +551,32 @@ class AIInvocation:
             "routing": {
                 "requested_ai": config.get("ai"),
                 "tier_used": tier_used,
-                "provider": getattr(response, "provider", None),
-                "model": getattr(response, "model", None),
+                # provider/model 恒为认领后物化的真实后端。
+                "provider": (
+                    getattr(response, "provider", None) or last_attempt.get("provider")
+                ),
+                "model": getattr(response, "model", None) or last_attempt.get("model"),
+                "requested_provider": (
+                    getattr(response, "requested_provider", None)
+                    or last_attempt.get("requested_provider")
+                ),
+                "requested_model": (
+                    getattr(response, "requested_model", None)
+                    or last_attempt.get("requested_model")
+                ),
+                "requested_reasoning_effort": (
+                    getattr(response, "requested_reasoning_effort", None)
+                    or last_attempt.get("requested_reasoning_effort")
+                ),
+                "reasoning_effort": (
+                    getattr(response, "reasoning_effort", None)
+                    or last_attempt.get("reasoning_effort")
+                ),
+                "reasoning_effort_source": (
+                    getattr(response, "reasoning_effort_source", None)
+                    or last_attempt.get("reasoning_effort_source")
+                ),
+                "selection": selection,
                 "attempts": attempts,
             },
             "latency": {
@@ -502,6 +594,7 @@ class AIInvocation:
                 "response_format": request.response_format,
                 "allowed_tools": request.allowed_tools,
                 "max_turns": request.max_turns,
+                "reasoning_effort": request.reasoning_effort,
                 "images_count": len(images or []),
             },
             "prompt": {
@@ -534,7 +627,8 @@ class AIInvocation:
                 "cost_usd": getattr(response, "cost_usd", 0.0),
                 "basis": (
                     "cli-equiv"
-                    if getattr(response, "provider", None) == "claude-cli"
+                    if getattr(response, "provider", None)
+                    in {"claude-cli", "codex-cli", "qoder-cli"}
                     else "priced"
                 ),
             },

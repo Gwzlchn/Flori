@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 import json
 import os
+from functools import lru_cache
 import time
 from datetime import datetime
 from pathlib import Path
@@ -14,10 +15,15 @@ from uuid import uuid4
 
 import structlog
 
+from .ai_routing import AI_PARAM_MODEL_DOMAIN_MISSING, validate_ai_param_override
 from .errors import AIProviderError, AIRateLimitError, AllProvidersFailedError
 from .models import AIUsage, DEFAULT_AI_MODEL, LLMRequest, LLMResponse
 
 _log = structlog.get_logger(component="ai_gateway")
+
+# 走 CLI 子进程的 provider type。按 type 而非名字判:自定义 CLI provider 也必须过参数复核。
+from .ai_routing import CLI_PROVIDER_TYPES as _CLI_PROVIDER_TYPES
+from .ai_routing import resolve_api_credential
 
 
 # 成本表(USD per 1M tokens)
@@ -76,6 +82,223 @@ def _extract_cli_model(obj: dict) -> str:
         if isinstance(best, str) and best:
             return best
     return ""
+
+
+# CLI 额度/限流关键词:命中归 AIRateLimitError 走长退避等配额恢复(而非快速重试转终态)。
+_CLI_RATE_LIMIT_MARKERS = (
+    "rate limit", "rate_limit", "usage limit", "429",
+    "overloaded", "quota", "too many requests", "limit reached",
+)
+
+
+def _detail_is_rate_limited(detail: str) -> bool:
+    low = detail.lower()
+    return any(marker in low for marker in _CLI_RATE_LIMIT_MARKERS)
+
+
+@lru_cache(maxsize=1)
+def codex_sandbox_available() -> bool:
+    """codex 的 read 能力是否真能用:探沙箱能不能起来,而不是只看二进制与凭证在不在。
+
+    codex 的读文件是让模型跑 shell 命令,由 bubblewrap 建 user namespace 圈起来。
+    容器默认 seccomp 挡 unshare(CLONE_NEWUSER),沙箱起不来,此时每条模型命令都失败
+    而 codex exec 仍然 rc=0 —— 步骤会拿着"什么都没读到"的结论正常返回。
+    所以 read 必须以沙箱可用为前提自证,否则调度器会把取证类步骤派给一台干不了的 worker。
+
+    要在容器里启用,AI worker 需 seccomp=unconfined 加 apparmor=unconfined;
+    那是拿容器自身的外层约束换 codex 的内层沙箱,代价见 docs/08-deployment.md。
+    探针走 codex 自己的沙箱入口,不假设底层是 bubblewrap 还是 Landlock,零 API 成本。
+    结果按进程缓存:宿主能力在 worker 生命周期内不变。
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("codex"):
+        return False
+    try:
+        proc = subprocess.run(
+            ["codex", "sandbox", "--", "/bin/true"],
+            capture_output=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def cli_provider_ready(provider: str) -> bool:
+    """CLI 就绪判据的唯一入口:二进制在且本机有凭证。
+    不能只看二进制:镜像统一烤入全部 CLI,凭证决定这台 worker 实际能用哪个。"""
+    import shutil
+
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    if provider == "claude-cli":
+        if not shutil.which("claude"):
+            return False
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            return True
+        cred = Path(
+            os.environ.get("CLAUDE_CONFIG_DIR") or Path(home) / ".claude",
+        ) / ".credentials.json"
+        try:
+            return cred.is_file() and cred.stat().st_size > 0
+        except OSError:
+            return False
+    if provider == "codex-cli":
+        if not shutil.which("codex"):
+            return False
+        cred = Path(
+            os.environ.get("CODEX_HOME") or Path(home) / ".codex",
+        ) / "auth.json"
+        try:
+            return cred.is_file() and cred.stat().st_size > 0
+        except OSError:
+            return False
+    if provider == "qoder-cli":
+        if not shutil.which("qodercli"):
+            return False
+        cred = Path(
+            os.environ.get("QODER_CONFIG_DIR") or Path(home) / ".qoder",
+        ) / ".auth" / "user"
+        try:
+            return cred.is_file() and cred.stat().st_size > 0
+        except OSError:
+            return False
+    return False
+
+
+CLI_PROVIDER_ENV = "FLORI_CLI_PROVIDER"
+
+
+def resolve_bound_cli_provider(providers_config: dict | None) -> str | None:
+    """解析 worker 显式绑定的 concrete CLI;未设置返回 None,绝不按本机凭证自动任选。"""
+    from .ai_routing import CLI_PROVIDER_TYPES_BY_NAME
+
+    selected = (os.environ.get(CLI_PROVIDER_ENV) or "").strip()
+    if not selected:
+        return None
+    expected_type = CLI_PROVIDER_TYPES_BY_NAME.get(selected)
+    if expected_type is None:
+        raise AIProviderError(
+            f"{CLI_PROVIDER_ENV}={selected!r} 非法:只允许 claude-cli/codex-cli/qoder-cli"
+        )
+    providers = (providers_config or {}).get("providers") or {}
+    entry = providers.get(selected)
+    if not isinstance(entry, dict) or entry.get("type") != expected_type:
+        raise AIProviderError(
+            f"{CLI_PROVIDER_ENV}={selected!r} 与 provider 配置不一致:"
+            f"需要 type={expected_type}"
+        )
+    if not cli_provider_ready(selected):
+        raise AIProviderError(
+            f"{CLI_PROVIDER_ENV}={selected!r} 未就绪:需要对应二进制与凭证"
+        )
+    return selected
+
+
+# AI 子进程环境最小白名单:CLI 起得来所需的通用项 + 各 CLI 自己的配置根与原生凭证。
+# worker 进程环境里的 Flori secrets(worker/registration token、MinIO、API_TOKEN、
+# 其它 provider 的 API key、Redis/Gateway 地址)一律不继承;providers.yaml 的 env
+# 覆盖仍在白名单之上生效,作为显式配置的逃生口。
+_CLI_ENV_COMMON_PASSTHROUGH = (
+    # 进程基础:PATH 找二进制,HOME 定位默认配置根,TMPDIR 临时文件。
+    "PATH", "HOME", "TMPDIR",
+    # 语言/时区/终端:CLI 输出 unicode 与时间戳依赖。
+    "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TZ", "TERM",
+    # 出网代理与 CA:CLI 联网(鉴权刷新/WebSearch)走本机代理与证书配置。
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS",
+    # XDG 家族:容器里常用来重定向 CLI 状态/缓存目录。
+    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME",
+)
+# 各 CLI 只拿自己的配置根与原生凭证,不给其它 provider 的 key。
+# ANTHROPIC_API_KEY 是 claude CLI 的原生鉴权路径(就绪判据同源),属该 CLI 自己的凭证。
+_CLI_ENV_PROVIDER_PASSTHROUGH: dict[str, tuple[str, ...]] = {
+    "claude-cli": ("CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "DISABLE_UPDATES"),
+    "codex-cli": ("CODEX_HOME",),
+    "qoder-cli": ("QODER_CONFIG_DIR",),
+}
+
+
+def build_cli_env(provider: str, overrides: dict | None = None) -> dict[str, str]:
+    """AI 子进程环境:白名单继承 + provider 配置 env 覆盖,绝不透传整份 os.environ。"""
+    keys = _CLI_ENV_COMMON_PASSTHROUGH + _CLI_ENV_PROVIDER_PASSTHROUGH.get(provider, ())
+    env = {key: val for key in keys if (val := os.environ.get(key)) is not None}
+    for key, val in (overrides or {}).items():
+        env[str(key)] = str(val)
+    return env
+
+
+# 模板禁改的安全参数:沙箱/审批/权限跳过/工具面/目录授权/profile 由 provider 代码强制,
+# 模板预置等于绕过 read-only 与工具门控不变量,fail-closed 拒绝而非尊重。
+_CLAUDE_FORBIDDEN_TEMPLATE_ARGS = frozenset({
+    "--dangerously-skip-permissions", "--permission-mode", "--permission-prompt-tool",
+    "--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools",
+    "--tools", "--add-dir", "--settings", "--mcp-config", "--strict-mcp-config",
+})
+_QODER_FORBIDDEN_TEMPLATE_ARGS = _CLAUDE_FORBIDDEN_TEMPLATE_ARGS
+_CODEX_FORBIDDEN_TEMPLATE_ARGS = frozenset({
+    "--dangerously-bypass-approvals-and-sandbox", "--yolo", "--full-auto",
+    "--sandbox", "-s", "--ask-for-approval", "-a", "--add-dir",
+    "--profile", "-p", "--cd", "-C",
+    # --enable/--disable 只是 `-c features.<name>=` 的别名,等于绕过下面的 -c 键审查。
+    "--enable", "--disable",
+    # 钩子信任开关:放开后未经信任的 hook 也会执行,而 hook 跑在沙箱外。
+    "--dangerously-bypass-hook-trust",
+})
+# -c 可达且能绕开沙箱的配置根。前四个直接弱化沙箱与审批;后面几个都在沙箱外拿到执行或
+# 出网能力:notify 与 hooks 由 codex 自己 spawn,mcp_servers 是常驻子进程,
+# model_provider/model_providers/chatgpt_base_url 能把 prompt 和鉴权头引到任意端点。
+# permissions 与 default_permissions 由代码构造:模板改写它们等于改写读取拒绝名单。
+_CODEX_FORBIDDEN_CONFIG_ROOTS = frozenset({
+    "sandbox_mode", "approval_policy", "sandbox_workspace_write", "shell_environment_policy",
+    "notify", "hooks", "mcp_servers",
+    "model_provider", "model_providers", "chatgpt_base_url",
+    "permissions", "default_permissions",
+})
+
+# 读取拒绝名单的固定项:凭证、cookie 与容器控制面,任何步骤都没有读它们的正当理由。
+# 各 CLI 的配置根另按 env 动态解析,见 _deny_read_paths。
+_CODEX_DENY_READ_FIXED = (
+    "/var/run/docker.sock", "/run/docker.sock",
+    "/data/cookies",
+)
+# 部署侧追加拒绝路径,冒号分隔。挂载面因部署而异,不进代码。
+_CODEX_DENY_READ_ENV = "FLORI_CODEX_DENY_READ"
+# codex 用 profile 名索引权限档案,名字本身无语义,固定一个不与用户档案重名的值。
+_CODEX_PROFILE_NAME = "flori-locked"
+
+
+def _reject_unsafe_template(
+    provider: str,
+    template: list[str],
+    forbidden: frozenset[str],
+    forbidden_config_roots: frozenset[str] = frozenset(),
+) -> None:
+    """command template 含安全参数时抛错;--flag=value 与 -c key=value 两种形态都查。"""
+    parts = [str(part) for part in template]
+    hits = sorted({
+        part.split("=", 1)[0] for part in parts
+        if part.startswith("-") and part.split("=", 1)[0] in forbidden
+    })
+    if hits:
+        raise AIProviderError(
+            f"{provider} command template 不得预置安全参数 {','.join(hits)}:"
+            "沙箱/审批/权限/工具面/目录授权由代码强制,模板冲突一律拒绝(fail-closed)。"
+        )
+    if not forbidden_config_roots:
+        return
+    config_values = [
+        parts[i + 1] for i, part in enumerate(parts[:-1]) if part in ("-c", "--config")
+    ] + [part.split("=", 1)[1] for part in parts if part.startswith("--config=")]
+    for value in config_values:
+        root = value.split("=", 1)[0].split(".", 1)[0].strip()
+        if root in forbidden_config_roots:
+            raise AIProviderError(
+                f"{provider} command template 不得用 -c 覆盖安全配置键 {root!r}:"
+                "沙箱与审批策略由代码强制,模板冲突一律拒绝(fail-closed)。"
+            )
 
 
 # Provider 实现
@@ -299,12 +522,17 @@ class ClaudeCLIProvider:
     """Claude CLI 接入(subprocess 调用)。"""
 
     def __init__(self, command_template: list[str], env: dict | None = None,
-                 model: str | None = None):
+                 model: str | None = None, reasoning_effort: str | None = None):
+        _reject_unsafe_template(
+            "claude-cli", command_template or [], _CLAUDE_FORBIDDEN_TEMPLATE_ARGS,
+        )
         self._command_template = command_template
         self._env = env or {}
         # provider 默认模型(providers.yaml claude-cli.model,如 claude-opus-4-8[1m])。
         # 不配则不传 --model,沿用挂载 HOME 里 CLI 自己的默认——可用但不可复现(宿主换模型会静默跟变),建议配置钉死。
         self._model = model
+        # provider 默认推理档位(providers.yaml reasoning_effort)。优先级:请求级 > 此默认 > CLI 自定。
+        self._reasoning_effort = reasoning_effort
 
     @staticmethod
     def _find_transcript(session_id: str | None, env: dict) -> str | None:
@@ -358,6 +586,10 @@ class ClaudeCLIProvider:
         model_arg = request.model or self._model
         if model_arg and "--model" not in cmd:
             cmd += ["--model", model_arg]
+        # 推理档位(claude --effort,域 low/medium/high/xhigh/max):请求级 > provider 默认;模板钉死时尊重模板。
+        effort = request.reasoning_effort or self._reasoning_effort
+        if effort and "--effort" not in cmd:
+            cmd += ["--effort", effort]
         if request.allowed_tools:
             # 取证等联网步骤:放开指定工具(如 WebSearch + Bash),让 claude agentic 搜+抓+抽。
             # 与 images 分支互斥(取证不喂帧图);max_turns 给足,多轮流程为搜索、直连 curl、抽取。
@@ -381,7 +613,7 @@ class ClaudeCLIProvider:
             # 工具禁掉后只能产出 1 个文本轮,max-turns 1 即安全(实测 ~14-35s)。
             cmd += ["--tools", "", "--max-turns", "1"]
 
-        env = {**os.environ, **self._env}
+        env = build_cli_env("claude-cli", self._env)
         # 取证等放开工具的 agentic 调用(多轮搜索/抓取)给足 30min;否则按图数给。
         timeout = 1800 if request.allowed_tools else min(600 + 25 * len(request.images or []), 1800)
         start = time.time()
@@ -409,12 +641,7 @@ class ClaudeCLIProvider:
 
         if proc.returncode != 0:
             detail = (stderr.decode() + stdout.decode())[:500]
-            # CLI 额度/限流:归为 AIRateLimitError 走长退避等配额恢复(而非快速重试转终态)。
-            low = detail.lower()
-            if any(k in low for k in (
-                "rate limit", "rate_limit", "usage limit", "429",
-                "overloaded", "quota", "too many requests", "limit reached",
-            )):
+            if _detail_is_rate_limited(detail):
                 err: Exception = AIRateLimitError(f"CLI rate-limited: {detail}")
             else:
                 err = AIProviderError(f"CLI failed: {detail}")
@@ -483,27 +710,105 @@ class ClaudeCLIProvider:
 
 
 class CodexCLIProvider:
-    """Codex CLI 接入(subprocess 调用,`codex exec --json`)."""
+    """Codex CLI 接入(subprocess 调用,`codex exec --json`)。
+
+    隔离模型与 claude/qoder 不同,实测结论记在这里,别按 claude 的心智模型推断。
+    Linux 上沙箱是 bubblewrap。`--sandbox read-only` 等价 `--ro-bind / /` 加
+    `--unshare-net`:禁写禁网但整盘可读,`--cd` 只定工作根,收窄不了读取范围。
+    要收窄读取只能改用 permissions 档案,而 `--sandbox` 会把档案整体顶掉,所以这里不传
+    该 flag,靠 `default_permissions` 生效;档案万一没生效,codex 默认档位仍是 read-only,
+    不会比原来更宽。档案取"整盘 read 加逐条 deny":只列允许根会让 /lib64 之类进不了沙箱,
+    动态链接的二进制全起不来。
+
+    因此能保证:不可写、不可直连外网、工作根是每次调用新建的空目录、模型 shell 拿不到
+    worker 环境里的 Flori secrets、拒绝名单内的凭证与 cookie 读到 Permission denied。
+    仍保证不了的:名单外的路径整盘可读,尤其其它 Job 的产物目录,那要靠容器挂载面收窄。
+    另外容器默认 seccomp 挡 unshare(CLONE_NEWUSER) 时 bubblewrap 起不来,此时模型的
+    shell 命令全部失败,Read 类请求按无依据处理直接失败,见 complete。"""
 
     def __init__(self, command_template: list[str], env: dict | None = None,
-                 model: str | None = None):
+                 model: str | None = None, reasoning_effort: str | None = None):
+        _reject_unsafe_template(
+            "codex-cli", command_template or [], _CODEX_FORBIDDEN_TEMPLATE_ARGS,
+            _CODEX_FORBIDDEN_CONFIG_ROOTS,
+        )
         self._command_template = command_template
         self._env = env or {}
         self._model = model
+        self._reasoning_effort = reasoning_effort
 
     @staticmethod
     def _has_flag(cmd: list[str], *names: str) -> bool:
         return any(part in names for part in cmd)
 
     @staticmethod
+    def _has_config_key(cmd: list[str], key: str) -> bool:
+        """模板可能用 `-c key=value` 钉死配置;逐对扫描,避免误判其它 -c 键。"""
+        for i, part in enumerate(cmd[:-1]):
+            if part in ("-c", "--config") and cmd[i + 1].split("=", 1)[0] == key:
+                return True
+        return False
+
+    @staticmethod
     def _classify_error(detail: str) -> Exception:
-        low = detail.lower()
-        if any(k in low for k in (
-            "rate limit", "rate_limit", "usage limit", "429",
-            "overloaded", "quota", "too many requests", "limit reached",
-        )):
+        if _detail_is_rate_limited(detail):
             return AIRateLimitError(f"Codex CLI rate-limited: {detail[:500]}")
         return AIProviderError(f"Codex CLI failed: {detail[:500]}")
+
+    # bwrap 构建失败时的固定说法。容器默认 seccomp 挡 unshare(CLONE_NEWUSER),
+    # 部分内核还会挡挂载传播变更。取词要贴死 bwrap 原文,免得模型正文谈到沙箱就误判。
+    _SANDBOX_UNAVAILABLE_MARKERS = (
+        "bwrap: No permissions to create a new namespace",
+        "bwrap: Failed to make / slave",
+        "Codex's Linux sandbox uses bubblewrap",
+    )
+
+    @classmethod
+    def _sandbox_unavailable_marker(cls, raw: str) -> str | None:
+        return next((m for m in cls._SANDBOX_UNAVAILABLE_MARKERS if m in raw), None)
+
+    @staticmethod
+    def _deny_read_paths(env: dict[str, str]) -> list[str]:
+        """模型 shell 不该读到的路径。只返回当前真实存在的:codex 为拒绝项创建挂载点,
+        指向不存在的路径会让整个沙箱构建失败(bwrap "Can't create file at ...")。"""
+        home = env.get("HOME") or os.path.expanduser("~")
+        candidates = [
+            env.get("CODEX_HOME") or str(Path(home) / ".codex"),
+            env.get("CLAUDE_CONFIG_DIR") or str(Path(home) / ".claude"),
+            env.get("QODER_CONFIG_DIR") or str(Path(home) / ".qoder"),
+            *_CODEX_DENY_READ_FIXED,
+        ]
+        # token 路径取自 worker 进程环境:该变量刻意不在子进程白名单里,但拒绝名单要用它。
+        if token_file := os.environ.get("WORKER_TOKEN_FILE"):
+            candidates.append(token_file)
+        candidates += [
+            p for p in (os.environ.get(_CODEX_DENY_READ_ENV) or "").split(":") if p.strip()
+        ]
+        seen: dict[str, None] = {}
+        for raw in candidates:
+            try:
+                path = Path(raw).expanduser()
+                if path.exists():
+                    seen.setdefault(str(path), None)
+            except OSError:
+                continue
+        return list(seen)
+
+    @classmethod
+    def _permissions_override(cls, env: dict[str, str]) -> list[str]:
+        """构造 codex 权限档案的 -c 覆盖对。
+
+        整盘 read 加逐条 deny,而不是只列允许根:codex 会把允许根规范化后逐个 bind,
+        窄名单下 /lib64 之类的路径进不去沙箱,动态链接的二进制全部起不来。
+        deny 项由 --tmpfs 挂空目录实现,读到的是 Permission denied。
+        写与出网不受影响,仍然全禁,与 read-only 档位一致。"""
+        entries = ['"/"="read"'] + [
+            f'{json.dumps(p)}="deny"' for p in cls._deny_read_paths(env)
+        ]
+        return [
+            "-c", f"permissions.{_CODEX_PROFILE_NAME}.filesystem={{{','.join(entries)}}}",
+            "-c", f"default_permissions={_CODEX_PROFILE_NAME}",
+        ]
 
     @staticmethod
     def _parse_events(raw: str) -> tuple[dict | None, dict | None, int, list[dict], str | None]:
@@ -542,17 +847,28 @@ class CodexCLIProvider:
         return thread, usage, turns, errors, last_message
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
-        if request.allowed_tools:
+        # Read 映射到 read-only 沙箱的文件读取;WebSearch 映射到 Responses API 原生
+        # web_search 工具——它在服务端执行,不进本地沙箱,--sandbox read-only 的断网
+        # 约束管不到它,不存在假证据问题。其余 Claude 工具语义(Bash 等)仍不映射:
+        # 静默降级会产出假证据,必须 fail-closed。
+        tools = [str(t).strip() for t in (request.allowed_tools or [])]
+        unmapped = [t for t in tools if t.lower() not in ("read", "websearch")]
+        if unmapped:
             raise AIProviderError(
-                "Codex CLI MVP only supports text/image requests; "
-                "Claude-style allowed_tools are not mapped"
+                "Codex CLI only maps the Read and WebSearch tools; "
+                f"unmapped tools requested: {','.join(unmapped)}"
             )
+        read_request = any(t.lower() == "read" for t in tools)
+        web_search_request = any(t.lower() == "websearch" for t in tools)
 
         prompt_content = ""
         if request.system:
             prompt_content += f"[System]\n{request.system}\n\n"
         for msg in request.messages:
             prompt_content += f"[{msg['role'].title()}]\n{msg['content']}\n\n"
+        if read_request:
+            # codex 无 Read 工具:read-only 沙箱里模型用 shell 读命令(cat 等)看文件,提示语对齐语义。
+            prompt_content += "\n涉及的本地文件请直接用读命令(如 cat)查看原文。\n"
 
         run_root = Path(os.environ.get("FLORI_CODEX_TRACE_DIR", "/tmp/flori-work/codex-runs"))
         run_dir = run_root / f"{int(time.time() * 1000)}-{os.getpid()}-{uuid4().hex[:8]}"
@@ -564,36 +880,67 @@ class CodexCLIProvider:
         events_path = run_dir / "events.jsonl"
         final_path = run_dir / "final.txt"
 
+        env = build_cli_env("codex-cli", self._env)
         cmd = list(self._command_template)
         if not cmd:
             cmd = ["codex", "exec"]
-        if not self._has_flag(cmd, "-a", "--ask-for-approval"):
-            cmd += ["-a", "never"]
+        # 可弱化的安全参数(approval/sandbox/working dir)无条件由代码追加,不看模板:
+        # 模板在构造期已被拒绝携带同名 flag,不存在"模板钉死则尊重"的分支。
+        # 保护性布尔开关(--ignore-user-config 等)无值可弱化,模板带上等价,条件追加防重复。
+        # --ignore-user-config 恒在:宿主 ~/.codex/config.toml 常配 danger-full-access 与
+        # approval never,一旦继承用户配置就等于放开模型 shell 全权限;需要的配置键
+        # (model_reasoning_effort、web_search 等)一律经 -c 显式传入。
+        # 审批策略只能走 -c:codex exec 没有 -a/--ask-for-approval flag,传了会被参数解析
+        # 判成 unexpected argument,整个调用以 rc=2 退出。
+        cmd += ["-c", "approval_policy=never"]
         if not self._has_flag(cmd, "--ignore-user-config"):
             cmd += ["--ignore-user-config"]
         if not self._has_flag(cmd, "--ignore-rules"):
             cmd += ["--ignore-rules"]
         if not self._has_flag(cmd, "--skip-git-repo-check"):
             cmd += ["--skip-git-repo-check"]
-        if not self._has_flag(cmd, "--sandbox", "-s"):
-            cmd += ["--sandbox", "read-only"]
+        # 无 --strict-config 时 codex 静默忽略不认识的 -c 键。安全键被静默忽略等于沙箱悄悄
+        # 变宽,web_search 被静默忽略则产出没有联网依据的假证据,两者都必须响而不是默。
+        if not self._has_flag(cmd, "--strict-config"):
+            cmd += ["--strict-config"]
+        # 不传 --sandbox:该 flag 会整体顶掉权限档案,deny 名单被静默忽略。省掉它时
+        # codex 的默认档位仍是 read-only,即档案万一没生效也不会比原来更宽。
+        cmd += self._permissions_override(env)
+        # 模型 shell 的环境走 core 白名单,不整份继承 codex 进程环境:CODEX_HOME 与代理
+        # URL 里可能带的凭据会出现在模型可读的 /proc/self/environ 里。取值域 core/all/none
+        # 由 --strict-config 实测得到;none 连 PATH 一起清掉,读命令找不到二进制,故取 core。
+        cmd += ["-c", "shell_environment_policy.inherit=core"]
         if not self._has_flag(cmd, "--ephemeral"):
             cmd += ["--ephemeral"]
+        # 工作根是每次调用新建的空目录,模型的相对路径操作落不到任何既有产物上。
+        cmd += ["--cd", str(work_dir)]
         if not self._has_flag(cmd, "--json"):
             cmd += ["--json"]
         if not self._has_flag(cmd, "-o", "--output-last-message"):
             cmd += ["-o", str(final_path)]
-        if not self._has_flag(cmd, "--cd", "-C"):
-            cmd += ["--cd", str(work_dir)]
+        # add_dirs 不透传:codex 的 --add-dir 是"额外可写目录",与 claude/qoder 的读授权
+        # 语义相反。read-only 下它换不到任何读收益,却会在沙箱档位一旦放宽时变成写授权。
+        # 读取范围由沙箱决定,见本类 docstring。
         model_arg = request.model or self._model
         if model_arg and not self._has_flag(cmd, "--model", "-m"):
             cmd += ["--model", model_arg]
+        # 推理档位:codex 无专用 flag,走 -c model_reasoning_effort(取值域由服务端按模型声明,
+        # 当前一代为 low/medium/high/xhigh[/max]);请求级 > provider 默认;模板已钉同键时尊重模板。
+        effort = request.reasoning_effort or self._reasoning_effort
+        if effort and not self._has_config_key(cmd, "model_reasoning_effort"):
+            cmd += ["-c", f"model_reasoning_effort={effort}"]
+        # web_search 只能走 -c:codex exec 没有交互 CLI 的 --search flag。键与取值域
+        # (disabled/cached/indexed/live 字符串枚举)经 --strict-config 实测。因为恒带
+        # --ignore-user-config,宿主配置里的 web_search 不会漏入,必须在此显式开启;
+        # 取证要一手来源,固定 live。模板已钉同键时尊重模板。
+        if web_search_request and not self._has_config_key(cmd, "web_search"):
+            cmd += ["-c", "web_search=live"]
         for img in request.images or []:
             cmd += ["--image", str(Path(img).resolve())]
         cmd += ["-"]
 
-        env = {**os.environ, **self._env}
-        timeout = min(600 + 25 * len(request.images or []), 1800)
+        # 工具请求(Read/WebSearch)与 claude 的 allowed_tools 同窗;纯文本/图片按图数给。
+        timeout = 1800 if tools else min(600 + 25 * len(request.images or []), 1800)
         start = time.time()
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -624,6 +971,14 @@ class CodexCLIProvider:
         if proc.returncode != 0:
             detail = (stderr.decode(errors="replace") + raw)[-1000:]
             err = self._classify_error(detail)
+            err.transcript_path = str(events_path)  # type: ignore[attr-defined]
+            raise err
+        # 沙箱起不来时 codex 不报错,只是让每条 shell 命令带着 bwrap 的错误返回,rc 仍是 0。
+        # 请求要 Read 却一个文件都没真读到,产出的就是无依据的结论,必须失败而不是照收。
+        if read_request and (hit := self._sandbox_unavailable_marker(raw)):
+            err = AIProviderError(
+                f"Codex CLI sandbox unavailable, local reads all failed: {hit}"
+            )
             err.transcript_path = str(events_path)  # type: ignore[attr-defined]
             raise err
 
@@ -668,6 +1023,172 @@ class CodexCLIProvider:
         )
 
 
+class QoderCLIProvider:
+    """Qoder CLI 接入(subprocess 调用)。`qodercli -p -o json` 顶层 JSON 与 claude CLI 同构
+    (result/usage/num_turns/session_id/subtype/is_error),解析路径共用同一套字段。"""
+
+    def __init__(self, command_template: list[str], env: dict | None = None,
+                 model: str | None = None, reasoning_effort: str | None = None):
+        _reject_unsafe_template(
+            "qoder-cli", command_template or [], _QODER_FORBIDDEN_TEMPLATE_ARGS,
+        )
+        self._command_template = command_template
+        self._env = env or {}
+        self._model = model
+        self._reasoning_effort = reasoning_effort
+
+    @staticmethod
+    def _find_transcript(session_id: str | None, env: dict) -> str | None:
+        """按 session_id 定位 qodercli 自写的会话 transcript:
+        `$QODER_CONFIG_DIR|$HOME/.qoder/projects/<cwd编码>/<session_id>.jsonl`。
+        找不到(HOME 未挂/无档)回 None,绝不影响主流程。"""
+        if not session_id:
+            return None
+        try:
+            cfg_dir = env.get("QODER_CONFIG_DIR") or str(
+                Path(env.get("HOME") or os.path.expanduser("~")) / ".qoder")
+            hits = sorted(Path(cfg_dir).glob(f"projects/*/{session_id}.jsonl"))
+            return str(hits[0]) if hits else None
+        except Exception:
+            return None
+
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        prompt_content = ""
+        if request.system:
+            prompt_content += f"[System]\n{request.system}\n\n"
+        for msg in request.messages:
+            prompt_content += f"[{msg['role'].title()}]\n{msg['content']}\n\n"
+
+        # 视觉:与 claude 同方式,把帧图绝对路径写进 prompt 放开 Read 工具逐张查看;
+        # 帧目录用 --add-dir 加入可访问范围。
+        extra_dirs: set[str] = set()
+        if request.images:
+            missing = []
+            for p in request.images:
+                ap = str(Path(p).resolve())
+                extra_dirs.add(str(Path(ap).parent))
+                if ap not in prompt_content:
+                    missing.append(ap)
+            if missing:
+                prompt_content += "\n截图(用 Read 工具逐张查看):\n" + "\n".join(missing) + "\n"
+
+        cmd = [part for part in self._command_template if "{prompt_file}" not in part]
+        # 结构化输出强制 json(同 claude:剔除模板可能带的输出格式再钉死),拿真实 usage 和终态。
+        for flag in ("-o", "--output-format"):
+            if flag in cmd:
+                _i = cmd.index(flag)
+                del cmd[_i:_i + 2]
+        cmd += ["-o", "json"]
+        model_arg = request.model or self._model
+        if model_arg and "--model" not in cmd and "-m" not in cmd:
+            cmd += ["--model", model_arg]
+        # 推理档位(qoder --reasoning-effort):请求级 > provider 默认;模板钉死时尊重模板。
+        # CLI 自己不校验取值,越界档位会被服务端静默换成默认;取值域在 AIGateway
+        # 落地前按 providers.yaml 复核并拒绝,到这里的值一定合法。
+        effort = request.reasoning_effort or self._reasoning_effort
+        if effort and "--reasoning-effort" not in cmd:
+            cmd += ["--reasoning-effort", effort]
+        if request.allowed_tools:
+            # 联网/取证类请求透传工具名。qodercli 无 --max-turns,轮数无界,靠下方 timeout 兜底;
+            # 工具集取决于 qodercli 内置工具表(对二进制 strings 实测含 WebSearch/WebFetch,
+            # 与 Read/Bash/Grep 等并列),WebSearch 经 --allowed-tools 透传即生效,无独立开关。
+            cmd += ["--allowed-tools", *request.allowed_tools]
+            for d in request.add_dirs or []:
+                cmd += ["--add-dir", d]
+        elif request.images:
+            cmd += ["--allowed-tools", "Read"]
+            for d in sorted(extra_dirs):
+                cmd += ["--add-dir", d]
+        else:
+            # 纯文本调用:--tools "" 禁用全部工具,强制单次纯文本生成(与 claude 的坑同源:
+            # 默认带工具会多轮 agentic 空转)。qodercli 无 --max-turns,禁工具后自然单轮。
+            cmd += ["--tools", ""]
+
+        env = build_cli_env("qoder-cli", self._env)
+        timeout = 1800 if request.allowed_tools else min(600 + 25 * len(request.images or []), 1800)
+        start = time.time()
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(prompt_content.encode()), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
+            raise AIProviderError(f"Qoder CLI timeout after {timeout}s")
+        duration = time.time() - start
+
+        if proc.returncode != 0:
+            detail = (stderr.decode() + stdout.decode())[:500]
+            if _detail_is_rate_limited(detail):
+                err: Exception = AIRateLimitError(f"Qoder CLI rate-limited: {detail}")
+            else:
+                err = AIProviderError(f"Qoder CLI failed: {detail}")
+            try:
+                obj = json.loads(stdout.decode().strip())
+                sid = obj.get("session_id") if isinstance(obj, dict) else None
+                err.transcript_path = self._find_transcript(sid, env)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            raise err
+
+        raw = stdout.decode().strip()
+        # 解析失败(非 json 输出)回退原始文本 + 零统计,不让步骤失败。
+        content, in_tok, out_tok = raw, 0, 0
+        cc = cr = turns = 0
+        model = model_arg or "unknown"
+        raw_obj: dict | None = None
+        session_id = None
+        api_ms = None
+        finish_reason = None
+        try:
+            obj = json.loads(raw)
+            if isinstance(obj, dict):
+                raw_obj = obj
+                content = obj.get("result", raw) or raw
+                u = obj.get("usage") or {}
+                in_tok = int(u.get("input_tokens", 0) or 0)
+                out_tok = int(u.get("output_tokens", 0) or 0)
+                cc = int(u.get("cache_creation_input_tokens", 0) or 0)
+                cr = int(u.get("cache_read_input_tokens", 0) or 0)
+                turns = int(obj.get("num_turns", 0) or 0)
+                model = _extract_cli_model(obj) or model
+                session_id = obj.get("session_id")
+                _api = obj.get("duration_api_ms") or obj.get("duration_ms")
+                api_ms = float(_api) if isinstance(_api, (int, float)) else None
+                finish_reason = obj.get("subtype") or obj.get("stop_reason")
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+        # Qoder 是包月订阅,无按量成本:cost 恒 0,token 用量照实入账(用于用量观测,不折算等价美元)。
+        return LLMResponse(
+            content=content,
+            model=model,
+            provider="qoder-cli",
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cache_creation_input_tokens=cc,
+            cache_read_input_tokens=cr,
+            cost_usd=0.0,
+            duration_sec=round(duration, 2),
+            num_turns=turns,
+            cached=cr > 0,
+            session_id=session_id,
+            api_ms=api_ms,
+            finish_reason=finish_reason,
+            raw=raw_obj,
+            transcript_path=self._find_transcript(session_id, env),
+        )
+
+
 # Gateway
 
 
@@ -694,9 +1215,15 @@ class AIGateway:
         rate_limited = False     # 任一 provider 限流 → 整体按 ai_rate_limit 走长退避
         # 逐 tier 尝试链,含成功/失败。成功时写进返回 response.attempts,全败时写进异常 .attempts,供 AI 审计。
         attempts: list[dict] = []
+        # 请求原值要在进循环前取:下面每个 tier 都会覆写 request.model。
+        requested_effort = request.reasoning_effort
 
-        def _attempt(tier: str, cfg: dict, *, ok: bool, err: Exception | None = None) -> dict:
-            a = {"tier": tier, "provider": cfg.get("provider"), "model": cfg.get("model"), "ok": ok}
+        def _attempt(
+            tier: str, declared: dict, resolved: dict | None,
+            *, ok: bool, err: Exception | None = None,
+        ) -> dict:
+            audit = self._attempt_selection(declared, resolved, requested_effort)
+            a = {"tier": tier, **audit, "ok": ok}
             if err is not None:
                 a["error_class"] = type(err).__name__
                 a["error"] = str(err)[:500]
@@ -708,42 +1235,53 @@ class AIGateway:
         for tier in ["primary", "fallback"]:
             if tier not in ai_config:
                 continue
-            cfg = ai_config[tier]
-            request.model = cfg["model"]
+            declared = ai_config[tier]
+            resolved: dict | None = None
             try:
-                provider = self._get_provider(cfg["provider"])
+                resolved = self._resolve_tier(declared, request)
+                request.model = resolved["model"]
+                provider = self._get_provider(resolved["provider"])
                 response = await provider.complete(request)
-                attempts.append(_attempt(tier, cfg, ok=True))
+                attempts.append(_attempt(tier, declared, resolved, ok=True))
                 response.tier_used = tier
                 response.attempts = attempts
+                self._annotate_selection(response, declared, resolved, requested_effort)
                 return response
             except (AIProviderError, AIRateLimitError) as e:
                 rate_limited = rate_limited or isinstance(e, AIRateLimitError)
-                attempts.append(_attempt(tier, cfg, ok=False, err=e))
+                attempts.append(_attempt(tier, declared, resolved, ok=False, err=e))
                 _log.warning("provider_failed", step=step_name, tier=tier,
-                             provider=cfg.get("provider"), model=cfg.get("model"),
+                             provider=(resolved or declared).get("provider"),
+                             model=(resolved or declared).get("model"),
                              rate_limited=isinstance(e, AIRateLimitError), error=str(e)[:400])
-                errors.append(f"{tier}/{cfg.get('provider')}: {str(e)[:200]}")
+                errors.append(f"{tier}/{(resolved or declared).get('provider')}: {str(e)[:200]}")
                 continue
 
         if has_images and "text_fallback" in ai_config:
-            cfg = ai_config["text_fallback"]
-            # 用副本调用,别原地改调用方的 request(去图/换模型会污染后续重试/复用)。
-            fb_request = dataclasses.replace(request, model=cfg["model"], images=[])
+            declared = ai_config["text_fallback"]
+            resolved = None
             try:
-                provider = self._get_provider(cfg["provider"])
+                # 文本兜底按去图请求解析与复核 feature:vision 不是纯文本兜底的必需能力。
+                resolved = self._resolve_tier(declared, dataclasses.replace(request, images=[]))
+                # 用副本调用,别原地改调用方的 request(去图/换模型会污染后续重试/复用)。
+                fb_request = dataclasses.replace(request, model=resolved["model"], images=[])
+                provider = self._get_provider(resolved["provider"])
                 response = await provider.complete(fb_request)
-                attempts.append(_attempt("text_fallback", cfg, ok=True))
+                attempts.append(_attempt("text_fallback", declared, resolved, ok=True))
                 response.tier_used = "text_fallback"
                 response.attempts = attempts
+                self._annotate_selection(response, declared, resolved, requested_effort)
                 return response
             except (AIProviderError, AIRateLimitError) as e:
                 rate_limited = rate_limited or isinstance(e, AIRateLimitError)
-                attempts.append(_attempt("text_fallback", cfg, ok=False, err=e))
+                attempts.append(_attempt("text_fallback", declared, resolved, ok=False, err=e))
                 _log.warning("provider_failed", step=step_name, tier="text_fallback",
-                             provider=cfg.get("provider"), model=cfg.get("model"),
+                             provider=(resolved or declared).get("provider"),
+                             model=(resolved or declared).get("model"),
                              rate_limited=isinstance(e, AIRateLimitError), error=str(e)[:400])
-                errors.append(f"text_fallback/{cfg.get('provider')}: {str(e)[:200]}")
+                errors.append(
+                    f"text_fallback/{(resolved or declared).get('provider')}: {str(e)[:200]}",
+                )
 
         raise AllProvidersFailedError(
             f"All providers failed for step {step_name} :: " + " || ".join(errors),
@@ -751,12 +1289,116 @@ class AIGateway:
             attempts=attempts,
         )
 
+    def _attempt_selection(
+        self, declared: dict, resolved: dict | None, requested_effort: str | None,
+    ) -> dict:
+        """一次尝试的请求原值与实际生效值。resolved 为 None 表示 tier 还没解析成真实
+        provider 就失败了,此时执行侧字段留空,虚拟 provider 只出现在 requested_provider。"""
+        from .ai_selection import effective_model, effective_reasoning_effort
+
+        provider = (resolved or {}).get("provider")
+        if provider is None:
+            model, effort, effort_source = None, None, None
+        else:
+            model, _ = effective_model(
+                self._providers_config, provider, (resolved or {}).get("model"),
+            )
+            effort, effort_source = effective_reasoning_effort(
+                self._providers_config, provider, requested_effort,
+            )
+        return {
+            "requested_provider": declared.get("provider"),
+            "requested_model": declared.get("model"),
+            "requested_reasoning_effort": requested_effort,
+            "provider": provider,
+            "model": model,
+            "reasoning_effort": effort,
+            "reasoning_effort_source": effort_source,
+        }
+
+    def _annotate_selection(
+        self,
+        response: LLMResponse,
+        declared: dict,
+        resolved: dict,
+        requested_effort: str | None,
+    ) -> None:
+        """把有效选择回填到响应。response.provider/model 仍由 provider 自己写(CLI 回报的
+        真实模型比配置更权威),这里只补请求原值与档位。"""
+        selection = self._attempt_selection(declared, resolved, requested_effort)
+        response.requested_provider = selection["requested_provider"]
+        response.requested_model = selection["requested_model"]
+        response.requested_reasoning_effort = selection["requested_reasoning_effort"]
+        response.reasoning_effort = selection["reasoning_effort"]
+        response.reasoning_effort_source = selection["reasoning_effort_source"]
+
     def _get_step_ai_config(self, step_name: str) -> dict:
         steps = self._pipelines_config.get("steps", [])
         for s in steps:
             if s.get("name") == step_name:
                 return s.get("ai", {})
         return {}
+
+    def _resolve_tier(self, cfg: dict, request: LLMRequest) -> dict:
+        """复核 concrete tier 的能力与参数;provider 缺失或未知由创建层 fail-closed。"""
+        resolved = dict(cfg)
+        self._verify_cli_request_features(resolved.get("provider"), request)
+        self._verify_cli_request_params(resolved, request)
+        return resolved
+
+    def _verify_cli_request_params(self, resolved: dict, request: LLMRequest) -> None:
+        """CLI 落地前复核本次生效的 model 与推理档位,越界一律拒绝。
+
+        这是最后一道:三个 CLI 对越界档位都不报错,claude/qoder 按自家默认跑、codex 由
+        服务端兜底,静默降级会产出一份看起来正常但档位不对的笔记。生效值口径必须与各
+        provider complete 一致,即请求级优先、provider 默认兜底。
+        """
+        provider = resolved.get("provider")
+        cfg = (self._providers_config.get("providers") or {}).get(provider)
+        if not isinstance(cfg, dict) or cfg.get("type") not in _CLI_PROVIDER_TYPES:
+            # 非 CLI provider 不消费 reasoning_effort;未配置的 provider 由 _create_provider 拒绝。
+            return
+        effective = {
+            "model": resolved.get("model") or cfg.get("model"),
+            "reasoning_effort": request.reasoning_effort or cfg.get("reasoning_effort"),
+        }
+        params = {
+            key: value for key, value in effective.items()
+            if type(value) is str and value.strip()
+        }
+        violation = validate_ai_param_override(
+            str(provider), params, self._providers_config,
+        )
+        # 未声明模型取值域时无从核对,交 CLI 自己报错;档位没有这条豁免。
+        if violation is None or violation.code == AI_PARAM_MODEL_DOMAIN_MISSING:
+            return
+        raise AIProviderError(violation.message())
+
+    def _verify_cli_request_features(self, provider: Any, request: LLMRequest) -> None:
+        """选定 CLI provider 后按运行配置 features 复核请求所需能力。
+        静态 capability 映射只反映实现支持;配置摘掉 feature 必须在执行端也 fail-closed。"""
+        if provider not in ("claude-cli", "codex-cli", "qoder-cli"):
+            return
+        needed = set()
+        for tool in request.allowed_tools or []:
+            t = str(tool).strip().lower()
+            if t == "read":
+                needed.add("read")
+            elif t == "websearch":
+                needed.add("websearch")
+        if request.images:
+            needed.add("vision")
+        if not needed:
+            return
+        cfg = (self._providers_config.get("providers") or {}).get(provider)
+        features = cfg.get("features") if isinstance(cfg, dict) else None
+        enabled = {f for f in features if type(f) is str} if isinstance(features, list) else set()
+        missing = sorted(needed - enabled)
+        if missing:
+            raise AIProviderError(
+                f"provider '{provider}' config features 缺少本次请求需要的能力 "
+                f"{','.join(missing)}:配置未启用即视为不可用(fail-closed)。"
+            )
 
     def _get_provider(self, name: str):
         if name not in self._providers:
@@ -766,8 +1408,9 @@ class AIGateway:
     def _create_provider(self, name: str):
         cfg = self._providers_config.get("providers", {}).get(name, {})
         ptype = cfg.get("type", "")
-        # 密钥不随 step_cfg 落盘;配置缺省时按 {NAME}_API_KEY 约定从环境读。
-        api_key = cfg.get("api_key") or os.environ.get(f"{name.upper()}_API_KEY", "")
+        # 密钥解析与 worker 的能力自证同源(shared.ai_routing.resolve_api_credential),
+        # 两处各写一份会出现 Gateway 调得通、worker 却永远不注册标签的死角。
+        api_key = resolve_api_credential(name, cfg)
 
         if ptype == "anthropic":
             return AnthropicProvider(api_key=api_key)
@@ -777,17 +1420,26 @@ class AIGateway:
                 api_key=api_key,
                 provider_name=name,
             )
-        elif ptype == "cli":
+        elif ptype == "claude_cli":
             return ClaudeCLIProvider(
                 command_template=cfg.get("command", []),
                 env=cfg.get("env"),
                 model=cfg.get("model"),
+                reasoning_effort=cfg.get("reasoning_effort"),
             )
         elif ptype == "codex_cli":
             return CodexCLIProvider(
                 command_template=cfg.get("command", []),
                 env=cfg.get("env"),
                 model=cfg.get("model"),
+                reasoning_effort=cfg.get("reasoning_effort"),
+            )
+        elif ptype == "qoder_cli":
+            return QoderCLIProvider(
+                command_template=cfg.get("command", []),
+                env=cfg.get("env"),
+                model=cfg.get("model"),
+                reasoning_effort=cfg.get("reasoning_effort"),
             )
         else:
             raise AIProviderError(f"Unknown provider type: {ptype}")

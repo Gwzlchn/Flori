@@ -25,6 +25,49 @@ def test_repository_shell_entrypoints_are_executable() -> None:
     assert non_executable == []
 
 
+def test_seed_worker_home_supports_codex_without_copying_host_config(
+    tmp_path: Path,
+) -> None:
+    source_home = tmp_path / "source-home"
+    source_codex = source_home / ".codex"
+    data_dir = tmp_path / "data"
+    source_codex.mkdir(parents=True)
+    source_auth = source_codex / "auth.json"
+    source_auth.write_text('{"token":"first"}', encoding="utf-8")
+    (source_codex / "config.toml").write_text(
+        'sandbox_mode = "danger-full-access"\n', encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment.update({
+        "HOME": str(source_home),
+        "FLORI_DATA_DIR": str(data_dir),
+        "SEED_TOOLS": "codex",
+    })
+    command = ["bash", str(REPO / "scripts/seed-worker-home.sh"), "codex-1"]
+
+    subprocess.run(command, check=True, env=environment, capture_output=True, text=True)
+    target = data_dir / "workers/codex-1/.codex/auth.json"
+    assert target.read_text(encoding="utf-8") == '{"token":"first"}'
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert stat.S_IMODE(target.parent.stat().st_mode) == 0o700
+    assert not (target.parent / "config.toml").exists()
+
+    source_auth.write_text('{"token":"second"}', encoding="utf-8")
+    target.chmod(0o644)
+    subprocess.run(command, check=True, env=environment, capture_output=True, text=True)
+    assert target.read_text(encoding="utf-8") == '{"token":"first"}'
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+    subprocess.run(
+        command,
+        check=True,
+        env={**environment, "FORCE": "1"},
+        capture_output=True,
+        text=True,
+    )
+    assert target.read_text(encoding="utf-8") == '{"token":"second"}'
+
+
 def _numeric_value(node: ast.AST) -> float | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) \
             and not isinstance(node.value, bool):
@@ -868,6 +911,13 @@ printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
     calls = log.read_text(encoding="utf-8").splitlines()
     assert len(calls) == 4
     assert all("--cache-from" in call for call in calls)
+    worker_call = next(call for call in calls if "flori-worker:buildcache" in call)
+    assert "--build-arg CLI_INSTALL_REFRESH=local-0" in worker_call
+    assert all(
+        "CLI_INSTALL_REFRESH" not in call
+        for call in calls
+        if "flori-worker:buildcache" not in call
+    )
     assert not any("--push" in call or "--cache-to" in call for call in calls)
     assert not any("--metadata-file" in call or "--tag" in call for call in calls)
 

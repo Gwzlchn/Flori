@@ -10,16 +10,18 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import yaml
 
 from tests.conftest import make_fakeredis
 from shared.config import AppConfig
+from shared.errors import AllProvidersFailedError
 from shared.models import AITask, Job, JobPart, LLMRequest, LLMResponse, Step, StepStatus
 from shared.source_library import SourceLibrary, build_source_ref
 from shared.storage import LocalStorage
 from shared.step_scope import execution_step_key, part_scope
 from worker.worker import (
     Worker, auto_discover_tags, _resolve_worker_id, _probe_net_zones,
-    compute_effective_timeout, _read_media_duration, _codex_logged_in,
+    compute_effective_timeout, _read_media_duration, validate_manual_tags,
 )
 from worker.transport import RedisTransport
 from tests.current_schema_db import clone_current_schema_database
@@ -27,6 +29,20 @@ from tests.current_schema_db import clone_current_schema_database
 
 # Fixtures
 
+
+
+# 能力标签依赖 providers.yaml 的 features 与解析后的密钥,用发布配置测才能抓出配置与代码的漂移。
+# 必须在调用点解析 ${VAR}:生产拿到的 config.providers 是解析后的,直接喂原始 YAML 会让
+# 未定义变量保留字面量而被就绪判据当成"有密钥",测出来的行为和线上不是一回事。
+_PROVIDERS_YAML = (
+    Path(__file__).parent.parent / "configs" / "providers.yaml"
+).read_text(encoding="utf-8")
+
+
+def _real_providers() -> dict:
+    from shared.config import resolve_env_vars
+
+    return yaml.safe_load(resolve_env_vars(_PROVIDERS_YAML))
 
 @pytest.fixture
 def tmp_jobs_dir(tmp_path):
@@ -71,7 +87,7 @@ def config(tmp_path, tmp_jobs_dir, configs_dir):
             }
         },
         pools={"pools": {"cpu": {"limit": 3}, "io": {"limit": 999}, "scene": {"limit": 1}}},
-        providers={},
+        providers=_real_providers(),
     )
 
 
@@ -88,6 +104,7 @@ def worker(redis, db, config, storage):
         pools=["scene", "cpu", "io"],
         tags={"vision", "gpu"},
         reject_tags={"private"},
+        cli_provider="claude-cli",
     )
     return w
 
@@ -406,22 +423,26 @@ class TestIdleTimeout:
 
 class TestAutoDiscoverTags:
     @pytest.fixture(autouse=True)
-    def _no_real_net_probe(self):
+    def _isolated_probes(self, tmp_path, monkeypatch):
         # auto_discover_tags 内含 net-zone 网络探测;默认屏蔽真探测,返回空 zone,
         # 避免单测联网/卡。net-zone 专项用例自行 patch _probe_reachable 验证逻辑。
-        with patch("worker.worker._probe_net_zones", return_value=set()), \
-             patch("worker.worker._codex_logged_in", return_value=False):
+        # CLI 凭证探测走真实代码路径(shared.ai_gateway.cli_provider_ready),
+        # 配置根指向空目录隔离宿主真实登录态。
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "no-claude"))
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "no-codex"))
+        monkeypatch.setenv("QODER_CONFIG_DIR", str(tmp_path / "no-qoder"))
+        with patch("worker.worker._probe_net_zones", return_value=set()):
             yield
 
     def test_anthropic_key(self):
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}, clear=False):
-            tags = auto_discover_tags()
+            tags = auto_discover_tags(_real_providers())
             assert "vision" in tags
             assert "anthropic-api" in tags
 
     def test_deepseek_key(self):
         with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "ds-test"}, clear=False):
-            tags = auto_discover_tags()
+            tags = auto_discover_tags(_real_providers())
             assert "text-only" in tags
             assert "deepseek-api" in tags
 
@@ -431,7 +452,7 @@ class TestAutoDiscoverTags:
         with patch.dict(os.environ, env, clear=True):
             with patch("shutil.which", return_value=None):
                 with patch("os.path.exists", return_value=False):
-                    tags = auto_discover_tags()
+                    tags = auto_discover_tags(_real_providers())
                     assert "vision" not in tags
                     assert "gpu" not in tags
 
@@ -445,7 +466,7 @@ class TestAutoDiscoverTags:
             json.dumps({"zg-library": str(root)}),
         )
         with patch("shutil.which", return_value=None):
-            assert "source-root:zg-library" in auto_discover_tags()
+            assert "source-root:zg-library" in auto_discover_tags(_real_providers())
 
     def test_worker_rejects_forged_source_root_tag(
         self, redis, db, config, storage, monkeypatch,
@@ -462,50 +483,245 @@ class TestAutoDiscoverTags:
         assert "source-root:forged" not in candidate.tags
 
     def test_claude_binary_present_but_not_authed(self):
-        # 镜像自带 claude 二进制但无凭证(纯 gateway worker)时不该标 vision/claude-cli.
+        # 显式绑定但无凭证必须启动失败,不能降级成普通 worker。
         env = {k: v for k, v in os.environ.items()
                if k not in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OLLAMA_URL")}
         with patch.dict(os.environ, env, clear=True):
-            with patch("shutil.which", return_value="/usr/bin/claude"):
-                with patch("worker.worker._claude_logged_in", return_value=False):
-                    tags = auto_discover_tags()
-                    assert "vision" not in tags
-                    assert "claude-cli" not in tags
+            with patch("shutil.which", lambda name: "/usr/bin/claude" if name == "claude" else None):
+                from shared.errors import WorkerFatalError
 
-    def test_claude_logged_in_adds_vision_and_cli(self):
-        # Claude CLI 已登录(~/.claude/.credentials.json 在)时标 vision + claude-cli.
+                with pytest.raises(WorkerFatalError, match="not ready"):
+                    auto_discover_tags(_real_providers(), "claude-cli")
+
+    def test_claude_logged_in_adds_vision_and_cli(self, tmp_path):
+        # Claude CLI 已登录(配置根下 .credentials.json 非空)时标 vision + claude-cli.
+        cfg = tmp_path / "claude-cfg"
+        cfg.mkdir()
+        (cfg / ".credentials.json").write_text("token", encoding="utf-8")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OLLAMA_URL")}
+        env["CLAUDE_CONFIG_DIR"] = str(cfg)
+        with patch.dict(os.environ, env, clear=True):
+            with patch("shutil.which", lambda name: "/usr/bin/claude" if name == "claude" else None):
+                tags = auto_discover_tags(_real_providers(), "claude-cli")
+                assert "vision" in tags
+                assert "claude-cli" in tags
+                assert "read" in tags
+                assert "websearch" in tags
+
+    def test_claude_probe_honors_claude_config_dir_over_home(self, tmp_path, monkeypatch):
+        # 凭证只在 CLAUDE_CONFIG_DIR、HOME/.claude 为空时也必须判就绪,与 gateway readiness 同源。
+        from shared.ai_gateway import cli_provider_ready
+
+        home = tmp_path / "home"
+        (home / ".claude").mkdir(parents=True)
+        cfg = tmp_path / "claude-cfg"
+        cfg.mkdir()
+        (cfg / ".credentials.json").write_text("token", encoding="utf-8")
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        with patch("shutil.which", lambda name: "/usr/bin/claude" if name == "claude" else None):
+            monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+            assert cli_provider_ready("claude-cli") is True
+            monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty"))
+            assert cli_provider_ready("claude-cli") is False
+
+    def test_qoder_logged_in_adds_its_cli_tags(self, tmp_path):
+        qoder_home = tmp_path / "qoder-cfg"
+        (qoder_home / ".auth").mkdir(parents=True)
+        (qoder_home / ".auth" / "user").write_text("token", encoding="utf-8")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OLLAMA_URL")}
+        env["QODER_CONFIG_DIR"] = str(qoder_home)
+
+        def fake_which(name):
+            return "/usr/bin/qodercli" if name == "qodercli" else None
+
+        with patch.dict(os.environ, env, clear=True):
+            with patch("shutil.which", side_effect=fake_which):
+                tags = auto_discover_tags(_real_providers(), "qoder-cli")
+                assert "qoder-cli" in tags
+                assert "vision" in tags
+                assert "read" in tags
+                assert "websearch" in tags
+                assert "claude-cli" not in tags
+
+    def test_qoder_binary_present_but_not_authed(self):
+        # 显式绑定 qoder 但无凭证必须启动失败。
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OLLAMA_URL")}
+
+        def fake_which(name):
+            return "/usr/bin/qodercli" if name == "qodercli" else None
+
+        with patch.dict(os.environ, env, clear=True):
+            with patch("shutil.which", side_effect=fake_which):
+                from shared.errors import WorkerFatalError
+
+                with pytest.raises(WorkerFatalError, match="not ready"):
+                    auto_discover_tags(_real_providers(), "qoder-cli")
+
+    def test_qoder_ready_checks_auth_user_file(self, tmp_path, monkeypatch):
+        from shared.ai_gateway import cli_provider_ready
+
+        home = tmp_path / ".qoder"
+        (home / ".auth").mkdir(parents=True)
+        monkeypatch.setenv("QODER_CONFIG_DIR", str(home))
+        with patch("shutil.which", lambda name: "/usr/bin/qodercli" if name == "qodercli" else None):
+            assert cli_provider_ready("qoder-cli") is False
+            (home / ".auth" / "user").write_text("token", encoding="utf-8")
+            assert cli_provider_ready("qoder-cli") is True
+
+    def test_custom_api_provider_self_proves_its_tag(self):
+        """reviewer 复现:动态 provider 标签进了受保护集合、手填被拒, 若发现侧只认内置四家,
+        自定义 provider 配了也永远拿不到投影标签, 于是永远满足不了调度硬标签。
+        发现必须对全部配置 provider 通用。"""
+        cfg = {"providers": {
+            "custom-api": {
+                "type": "openai_compatible", "api_key": "sk-real",
+                "models": ["m1"], "features": ["vision"],
+            },
+            "no-key": {
+                "type": "openai_compatible", "api_key": "${NOT_SET_ANYWHERE}",
+                "models": ["m2"], "features": [],
+            },
+        }}
         env = {k: v for k, v in os.environ.items()
                if k not in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OLLAMA_URL")}
         with patch.dict(os.environ, env, clear=True):
-            with patch("shutil.which", return_value="/usr/bin/claude"):
-                with patch("worker.worker._claude_logged_in", return_value=True):
-                    tags = auto_discover_tags()
-                    assert "vision" in tags
-                    assert "claude-cli" in tags
-                    assert "read" in tags
+            with patch("shutil.which", return_value=None):
+                tags = auto_discover_tags(cfg)
+        from shared.ai_routing import provider_required_tag
 
-    def test_codex_logged_in_adds_vision_and_cli(self):
+        # 用投影函数算期望标签, 不手抄:两侧一起写错就测不出来。
+        assert provider_required_tag("custom-api", cfg) in tags
+        assert "vision" in tags
+        # 未解析的 ${VAR} 不是密钥:配置加载对未定义变量保留原文, 朴素非空判断会误判成就绪。
+        assert provider_required_tag("no-key", cfg) not in tags
+
+    def test_env_fallback_credential_is_discovered_like_gateway(self):
+        """Gateway 允许配置不写 api_key、改从 {NAME}_API_KEY 环境回退。
+        worker 若只看 entry["api_key"], 就会出现 Gateway 调得通、worker 永远不注册标签的死角。
+        两侧必须共用 resolve_api_credential。"""
+        from shared.ai_routing import provider_required_tag, resolve_api_credential
+
+        cfg = {"providers": {"custom-api": {
+            "type": "openai_compatible", "models": ["m1"], "features": [],
+        }}}
+        entry = cfg["providers"]["custom-api"]
         env = {k: v for k, v in os.environ.items()
                if k not in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OLLAMA_URL")}
+        env["CUSTOM-API_API_KEY"] = "sk-env"
+        with patch.dict(os.environ, env, clear=True):
+            with patch("shutil.which", return_value=None):
+                tags = auto_discover_tags(cfg)
+            assert resolve_api_credential("custom-api", entry) == "sk-env"
+        assert provider_required_tag("custom-api", cfg) in tags
+
+    def test_codex_logged_in_adds_peer_cli_tags(self, tmp_path):
+        # codex 已登录且沙箱可用时与 claude/qoder 完全对等;沙箱是 read 的额外前提,见下一条用例。
+        codex_home = tmp_path / "codex-cfg"
+        codex_home.mkdir()
+        (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OLLAMA_URL")}
+        env["CODEX_HOME"] = str(codex_home)
 
         def fake_which(name):
             return "/usr/bin/codex" if name == "codex" else None
 
         with patch.dict(os.environ, env, clear=True):
             with patch("shutil.which", side_effect=fake_which):
-                with patch("worker.worker._codex_logged_in", return_value=True):
-                    tags = auto_discover_tags()
-                    assert "codex-cli" in tags
-                    assert "vision" in tags
-                    assert "read" not in tags
+                with patch("shared.ai_gateway.codex_sandbox_available", return_value=True):
+                    tags = auto_discover_tags(_real_providers(), "codex-cli")
+                assert "codex-cli" in tags
+                assert "vision" in tags
+                assert "read" in tags
+                assert "websearch" in tags
+                assert "claude-cli" not in tags and "qoder-cli" not in tags
 
-    def test_codex_logged_in_checks_codex_home(self, tmp_path, monkeypatch):
+    def test_selected_codex_does_not_inherit_qoder_read(self, tmp_path):
+        """能力标签串台反向用例:codex 与 qoder 同时就绪、显式选中 codex 且 codex 沙箱不可用时,
+        qoder 的 read 不得被算到 codex 头上。否则调度器放行 Read 任务而执行端解析成读不了的那个。"""
+        codex_home = tmp_path / "codex-cfg"
+        codex_home.mkdir()
+        (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+        qoder_home = tmp_path / "qoder-cfg"
+        (qoder_home / ".auth").mkdir(parents=True)
+        (qoder_home / ".auth" / "user").write_text("tok", encoding="utf-8")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OLLAMA_URL")}
+        env["CODEX_HOME"] = str(codex_home)
+        env["QODER_CONFIG_DIR"] = str(qoder_home)
+        env["FLORI_CLI_PROVIDER"] = "codex-cli"
+
+        def fake_which(name):
+            return f"/usr/bin/{name}" if name in ("codex", "qodercli") else None
+
+        with patch.dict(os.environ, env, clear=True):
+            with patch("shutil.which", side_effect=fake_which):
+                with patch("shared.ai_gateway.codex_sandbox_available", return_value=False):
+                    tags = auto_discover_tags(_real_providers(), "codex-cli")
+        assert "codex-cli" in tags
+        assert "read" not in tags
+        # 未被选中的 qoder 不进注册面:它的能力不代表本机执行端会用它。
+        assert "qoder-cli" not in tags
+
+    def test_selected_qoder_keeps_its_own_read(self, tmp_path):
+        """对照:同样两个 CLI 就绪但选中 qoder 时,read 必须在,证明上一条不是门形同虚设。"""
+        codex_home = tmp_path / "codex-cfg"
+        codex_home.mkdir()
+        (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+        qoder_home = tmp_path / "qoder-cfg"
+        (qoder_home / ".auth").mkdir(parents=True)
+        (qoder_home / ".auth" / "user").write_text("tok", encoding="utf-8")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OLLAMA_URL")}
+        env["CODEX_HOME"] = str(codex_home)
+        env["QODER_CONFIG_DIR"] = str(qoder_home)
+        env["FLORI_CLI_PROVIDER"] = "qoder-cli"
+
+        def fake_which(name):
+            return f"/usr/bin/{name}" if name in ("codex", "qodercli") else None
+
+        with patch.dict(os.environ, env, clear=True):
+            with patch("shutil.which", side_effect=fake_which):
+                tags = auto_discover_tags(_real_providers(), "qoder-cli")
+        assert "qoder-cli" in tags and "read" in tags
+        assert "codex-cli" not in tags
+
+    def test_codex_without_working_sandbox_does_not_claim_read(self, tmp_path):
+        """沙箱起不来时 codex 不自证 read:模型 shell 全失败而 codex exec 仍 rc=0,
+        自证 read 会让取证类步骤派给一台读不到任何东西的 worker。
+        codex-cli 仍在,纯文本与 websearch 步照常可接。"""
+        codex_home = tmp_path / "codex-cfg"
+        codex_home.mkdir()
+        (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OLLAMA_URL")}
+        env["CODEX_HOME"] = str(codex_home)
+
+        def fake_which(name):
+            return "/usr/bin/codex" if name == "codex" else None
+
+        with patch.dict(os.environ, env, clear=True):
+            with patch("shutil.which", side_effect=fake_which):
+                with patch("shared.ai_gateway.codex_sandbox_available", return_value=False):
+                    tags = auto_discover_tags(_real_providers(), "codex-cli")
+                assert "codex-cli" in tags
+                assert "websearch" in tags
+                assert "read" not in tags
+
+    def test_codex_ready_checks_codex_home(self, tmp_path, monkeypatch):
+        from shared.ai_gateway import cli_provider_ready
+
         home = tmp_path / ".codex"
         home.mkdir()
         auth = home / "auth.json"
         auth.write_text("{}", encoding="utf-8")
         monkeypatch.setenv("CODEX_HOME", str(home))
-        assert _codex_logged_in() is True
+        with patch("shutil.which", lambda name: "/usr/bin/codex" if name == "codex" else None):
+            assert cli_provider_ready("codex-cli") is True
 
     _CRED_ENV = ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
                  "KIMI_API_KEY", "OLLAMA_URL",
@@ -521,7 +737,7 @@ class TestAutoDiscoverTags:
         # SESSDATA 是 worker 本地凭证(下载步自读),不自报 'bili' 路由 tag。
         with patch.dict(os.environ, self._clean_env(BILI_SESSDATA="x", DATA_DIR="/no-such"), clear=True):
             with patch("shutil.which", return_value=None):
-                assert "bili" not in auto_discover_tags()
+                assert "bili" not in auto_discover_tags(_real_providers())
 
     def test_openai_key_never_advertises_claude_read_capability(self):
         with patch.dict(
@@ -529,7 +745,7 @@ class TestAutoDiscoverTags:
             clear=True,
         ):
             with patch("shutil.which", return_value=None):
-                tags = auto_discover_tags()
+                tags = auto_discover_tags(_real_providers())
                 assert "openai-api" in tags
                 assert "read" not in tags
 
@@ -538,16 +754,126 @@ class TestAutoDiscoverTags:
         with patch.dict(os.environ, self._clean_env(DATA_DIR="/no-such"), clear=True):
             with patch("shutil.which", return_value=None):
                 with patch("worker.worker._probe_net_zones", return_value={"net-cn", "net-global"}):
-                    tags = auto_discover_tags()
+                    tags = auto_discover_tags(_real_providers())
                     assert "net-cn" in tags and "net-global" in tags
 
     def test_no_cred_no_bili_no_net_proxy(self, tmp_path):
         # 无凭证时无 bili;路由走 net-zone 探测,不产生 net-proxy tag(本用例 autouse 屏蔽探测为空).
         with patch.dict(os.environ, self._clean_env(DATA_DIR=str(tmp_path)), clear=True):
             with patch("shutil.which", return_value=None):
-                tags = auto_discover_tags()
+                tags = auto_discover_tags(_real_providers())
                 assert "bili" not in tags
                 assert "net-proxy" not in tags
+
+
+class TestProtectedManualTags:
+    """安全矩阵 A:受保护能力标签不可经 --tags 手工授予,启动直接失败。"""
+    def test_dynamic_provider_tag_cannot_be_forged(self):
+        """受保护集合必须按已加载配置派生:providers.yaml 里新增的 provider 也能投影出标签,
+        只用内置常量会让 custom-api 这类动态标签手工传进来。"""
+        from shared.errors import WorkerFatalError
+
+        cfg = {"providers": {"custom": {"type": "openai_compatible", "features": []}}}
+        with pytest.raises(WorkerFatalError, match="custom-api"):
+            validate_manual_tags({"custom-api"}, cfg)
+        # 不给配置时内置集合仍拦住内置标签,证明第一段校验没被削弱。
+        with pytest.raises(WorkerFatalError, match="read"):
+            validate_manual_tags({"read"})
+
+
+    def test_protected_set_matches_projection_sources(self):
+        from shared.ai_routing import PROTECTED_CAPABILITY_TAGS
+
+        assert PROTECTED_CAPABILITY_TAGS == {
+            "claude-cli", "qoder-cli", "codex-cli",
+            "anthropic-api", "deepseek-api", "kimi-api", "openai-api",
+            "local", "read", "websearch",
+        }
+
+    @pytest.mark.parametrize("tag", sorted({
+        "claude-cli", "qoder-cli", "codex-cli",
+        "anthropic-api", "deepseek-api", "kimi-api", "openai-api",
+        "local", "read", "websearch",
+    }))
+    def test_each_protected_tag_fails_startup(self, tag):
+        from shared.errors import WorkerFatalError
+
+        with pytest.raises(WorkerFatalError) as ei:
+            validate_manual_tags({tag, "home-desktop"})
+        assert ei.value.reason == "forged_capability_tags"
+        assert tag in str(ei.value)
+        assert "自证" in str(ei.value)
+
+    def test_plain_tags_pass(self):
+        validate_manual_tags({"home-desktop", "vision", "net-cn"})
+        validate_manual_tags(set())
+
+    @pytest.mark.asyncio
+    async def test_worker_main_rejects_forged_tags_before_any_io(self, monkeypatch):
+        # 进程入口即失败:不触碰 redis/db/lease。
+        import argparse
+        import worker.main as worker_main
+        from shared.errors import WorkerFatalError
+
+        monkeypatch.setattr(worker_main, "parse_args", lambda: argparse.Namespace(
+            pools=["ai"], tags=["claude-cli"], reject_tags=None, concurrency=None,
+        ))
+        monkeypatch.setattr(worker_main, "load_config", None)  # 走到 load_config 即视为泄漏
+        with pytest.raises(WorkerFatalError) as ei:
+            await worker_main.main()
+        assert ei.value.reason == "forged_capability_tags"
+
+
+class TestConcreteCliStartupValidation:
+    """每个 worker 只能绑定一个可自证的 concrete CLI。"""
+
+    _PROVIDERS = {"providers": {
+        "claude-cli": {"type": "claude_cli", "command": ["claude", "-p"], "model": "opus5"},
+        "qoder-cli": {"type": "qoder_cli", "command": ["qodercli", "-p"], "model": "ultimate"},
+        "codex-cli": {"type": "codex_cli", "command": ["codex", "exec"], "model": "gpt-5.6-sol"},
+    }}
+
+    def test_unset_binding_registers_no_cli(self, monkeypatch):
+        from shared.ai_gateway import resolve_bound_cli_provider
+
+        monkeypatch.delenv("FLORI_CLI_PROVIDER", raising=False)
+        assert resolve_bound_cli_provider(self._PROVIDERS) is None
+
+    def test_unknown_binding_fails(self, monkeypatch):
+        from shared.ai_gateway import resolve_bound_cli_provider
+        from shared.errors import AIProviderError
+
+        monkeypatch.setenv("FLORI_CLI_PROVIDER", "other-cli")
+        with pytest.raises(AIProviderError, match="FLORI_CLI_PROVIDER"):
+            resolve_bound_cli_provider(self._PROVIDERS)
+
+    def test_unready_binding_fails(self, monkeypatch):
+        from shared.ai_gateway import resolve_bound_cli_provider
+        from shared.errors import AIProviderError
+
+        monkeypatch.setenv("FLORI_CLI_PROVIDER", "codex-cli")
+        monkeypatch.setattr("shared.ai_gateway.cli_provider_ready", lambda name: False)
+        with pytest.raises(AIProviderError, match="未就绪"):
+            resolve_bound_cli_provider(self._PROVIDERS)
+
+    def test_ready_binding_is_selected_even_if_other_credentials_exist(self, monkeypatch):
+        from shared.ai_gateway import resolve_bound_cli_provider
+
+        monkeypatch.setenv("FLORI_CLI_PROVIDER", "qoder-cli")
+        monkeypatch.setattr("shared.ai_gateway.cli_provider_ready", lambda name: True)
+        assert resolve_bound_cli_provider(self._PROVIDERS) == "qoder-cli"
+
+    def test_selection_lands_in_worker_spec(self, redis, db, config, storage):
+        from worker.worker import _worker_spec
+
+        candidate = Worker(
+            transport=RedisTransport(redis, db), config=config, storage=storage,
+            worker_type="ai", pools=["ai"], tags=set(), reject_tags=set(),
+            cli_provider="claude-cli",
+        )
+        assert candidate.cli_provider == "claude-cli"
+        assert _worker_spec("claude-cli")["cli_provider"] == "claude-cli"
+        assert _worker_spec()["cli_provider"] is None
 
 
 class TestNetZoneProbe:
@@ -1345,7 +1671,7 @@ class TestAITaskExecution:
     """worker 认领并执行独立 AI task(kind='ai'),含白盒审计、错误回执、认领路由。"""
 
     def _ai_claim(self, task_id="at_1", step="synthesis", domain="dl",
-                  provider="claude-cli", model="claude-opus-4-8[1m]", audit_context=None):
+                  provider="claude-cli", model="opus5", audit_context=None):
         claim = {
             "kind": "ai", "task_id": task_id, "step": step, "pool": "ai", "exec_id": "w:1",
             "request": LLMRequest(messages=[{"role": "user", "content": "Q"}], system="S").to_jsonable(),
@@ -1391,7 +1717,10 @@ class TestAITaskExecution:
         assert rec["output"].startswith("反向传播") and rec["prompt"]["system"] == "S"
         assert rec["audit_context"]["ask_source_manifest"]["task_id"] == "at_ok"
         assert rec["citation_validation"]["status"] == "valid"
-        assert rec["routing"]["requested"] == {"provider": "claude-cli", "model": "claude-opus-4-8[1m]"}
+        assert rec["routing"]["requested"] == {
+            "provider": "claude-cli", "model": "opus5",
+            "reasoning_effort": None,
+        }
         assert rec["routing"]["attempts"] == [{"tier": "primary"}]
         assert rec["usage"]["input_tokens"] == 100
         # 3) 成本归因 ai_usage(job_id null, step=synthesis)
@@ -1414,7 +1743,7 @@ class TestAITaskExecution:
     @pytest.mark.asyncio
     async def test_execute_uses_requested_codex_provider(self, worker, redis, db, monkeypatch):
         seen = {}
-        resp = LLMResponse(content="ANSWER", model="gpt-5-codex", provider="codex-cli",
+        resp = LLMResponse(content="ANSWER", model="gpt-5.6-sol", provider="codex-cli",
                            attempts=[{"tier": "primary", "provider": "codex-cli", "ok": True}])
 
         def fake_gateway(providers, pipelines):
@@ -1422,24 +1751,41 @@ class TestAITaskExecution:
             return _FakeGateway(resp=resp)
 
         monkeypatch.setattr("worker.worker.AIGateway", fake_gateway)
+        worker.cli_provider = "codex-cli"
         await worker._execute_ai_task(
-            self._ai_claim("at_codex", provider="codex-cli", model="gpt-5-codex")
+            self._ai_claim("at_codex", provider="codex-cli", model="gpt-5.6-sol")
         )
         primary = seen["pipelines"]["steps"][0]["ai"]["primary"]
-        assert primary == {"provider": "codex-cli", "model": "gpt-5-codex"}
+        assert primary == {"provider": "codex-cli", "model": "gpt-5.6-sol", "provider_source": "declaration"}
         logs = db.get_ai_task_logs("at_codex")
         assert logs[0]["provider"] == "codex-cli"
         rec = json.loads(logs[0]["record_json"])
-        assert rec["routing"]["requested"] == {"provider": "codex-cli", "model": "gpt-5-codex"}
+        assert rec["routing"]["requested"] == {
+            "provider": "codex-cli", "model": "gpt-5.6-sol", "reasoning_effort": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_failed_concrete_provider_task_keeps_attribution(
+        self, worker, redis, db, monkeypatch,
+    ):
+        failure = AllProvidersFailedError("down", attempts=[])
+        monkeypatch.setattr(
+            "worker.worker.AIGateway", lambda p, pl: _FakeGateway(exc=failure),
+        )
+        await worker._execute_ai_task(self._ai_claim("at_cli_fail", provider="claude-cli"))
+        logs = db.get_ai_task_logs("at_cli_fail")
+        assert logs[0]["provider"] == "claude-cli"
 
     @pytest.mark.asyncio
     async def test_claim_routes_ai_task_gated_by_tag(self, redis, db, config, storage):
         # 有 claude-cli tag 的 ai-worker 能认领,且 claim 是 ai 形态(无 job_id,带 request)
         w = Worker(transport=RedisTransport(redis, db), config=config, storage=storage,
-                   worker_type="ai", pools=["ai"], tags={"claude-cli"}, reject_tags=set())
+                   worker_type="ai", pools=["ai"], tags={"claude-cli"}, reject_tags=set(),
+                   cli_provider="claude-cli")
         await w.register()
         await redis.enqueue_ai_task(
-            AITask(task_id="at_c", request=LLMRequest(messages=[]), step_name="synthesis").to_task_payload())
+            AITask(task_id="at_c", request=LLMRequest(messages=[]), step_name="synthesis",
+                   provider="claude-cli").to_task_payload())
         claim = await request_step(w)
         assert claim is not None and claim["kind"] == "ai"
         assert claim["task_id"] == "at_c" and claim["step"] == "synthesis"
@@ -1449,20 +1795,22 @@ class TestAITaskExecution:
                     worker_type="cpu", pools=["ai"], tags=set(), reject_tags=set())
         await w2.register()
         await redis.enqueue_ai_task(
-            AITask(task_id="at_c2", request=LLMRequest(messages=[]), step_name="digest").to_task_payload())
+            AITask(task_id="at_c2", request=LLMRequest(messages=[]), step_name="digest",
+                   provider="claude-cli").to_task_payload())
         assert await request_step(w2) is None
 
     @pytest.mark.asyncio
     async def test_claim_routes_codex_ai_task_gated_by_tag(self, redis, db, config, storage):
         w = Worker(transport=RedisTransport(redis, db), config=config, storage=storage,
-                   worker_type="ai", pools=["ai"], tags={"codex-cli"}, reject_tags=set())
+                   worker_type="ai", pools=["ai"], tags={"codex-cli"}, reject_tags=set(),
+                   cli_provider="codex-cli")
         await w.register()
         await redis.enqueue_ai_task(
             AITask(task_id="at_codex", request=LLMRequest(messages=[]),
                    provider="codex-cli").to_task_payload())
         claim = await request_step(w)
         assert claim is not None and claim["provider"] == "codex-cli"
-        assert claim["model"] == "gpt-5-codex"
+        assert claim["model"] == "gpt-5.6-sol"
         assert claim["require_tags"] == ["codex-cli"]
 
     @pytest.mark.asyncio
@@ -1472,11 +1820,13 @@ class TestAITaskExecution:
         w = Worker(
             transport=RedisTransport(redis, db), config=config, storage=storage,
             worker_type="ai", pools=["ai"], tags={"claude-cli"}, reject_tags=set(),
+            cli_provider="claude-cli",
         )
         await w.register()
         payload = AITask(
             task_id="at_managed_success",
             request=LLMRequest(messages=[{"role": "user", "content": "Q"}]),
+            provider="claude-cli",
         ).to_task_payload()
         await redis.enqueue_ai_task_once(payload)
         claim = await request_step(w)
@@ -1501,10 +1851,12 @@ class TestAITaskExecution:
         w = Worker(
             transport=RedisTransport(redis, db), config=config, storage=storage,
             worker_type="ai", pools=["ai"], tags={"claude-cli"}, reject_tags=set(),
+            cli_provider="claude-cli",
         )
         await w.register()
         payload = AITask(
             task_id="at_managed_stale", request=LLMRequest(messages=[]),
+            provider="claude-cli",
         ).to_task_payload()
         await redis.enqueue_ai_task_once(payload)
         claim = await request_step(w)
@@ -1532,11 +1884,13 @@ class TestAITaskExecution:
         w = Worker(
             transport=RedisTransport(redis, db), config=config, storage=storage,
             worker_type="ai", pools=["ai"], tags={"claude-cli"}, reject_tags=set(),
+            cli_provider="claude-cli",
         )
         await w.register()
         payload = AITask(
             task_id=f"at_post_success_{post_success_failure}",
             request=LLMRequest(messages=[{"role": "user", "content": "Q"}]),
+            provider="claude-cli",
         ).to_task_payload()
         await redis.enqueue_ai_task_once(payload)
         claim = await request_step(w)
@@ -1833,7 +2187,7 @@ class TestAITaskTranscript:
         return {
             "kind": "ai", "task_id": task_id, "step": "synthesis", "pool": "ai", "exec_id": "w:1",
             "request": LLMRequest(messages=[{"role": "user", "content": "Q"}], system="S").to_jsonable(),
-            "domain": None,
+            "domain": None, "provider": "claude-cli", "model": "opus5",
         }
 
     @pytest.mark.asyncio

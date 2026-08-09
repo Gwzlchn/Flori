@@ -111,7 +111,7 @@ class ConceptsStep(StepBase):
             return []
         return ["output/versions/notes_smart_*.md"]
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         source = self._resolve_concept_source()
         if source is None:
             return {}

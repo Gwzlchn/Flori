@@ -76,12 +76,10 @@ ENV FLORI_BUILD_SHA=${FLORI_BUILD_SHA}
 ARG FLORI_VERSION=
 ENV FLORI_VERSION=${FLORI_VERSION}
 
-# worker:重镜像 —— ffmpeg(steps 调 ffmpeg/ffprobe + PyAV 解码)+ claude-code native binary(claude-cli)
+# worker:重镜像 —— ffmpeg(steps 调 ffmpeg/ffprobe + PyAV 解码)+ 三个 CLI agent 二进制
 #    + [steps,gpu,worker] + cn_domains bake(net-zone CN 表)+ /data/prompts seed(AI 步读 profiles)
 FROM deno AS worker
 ARG USE_USTC_MIRROR=1
-ARG CLAUDE_CODE_VERSION=v2.1.202
-ARG INSTALL_CLAUDE_CODE=1
 # poppler-utils:Document PDF adapter 用 pdfinfo、pdftohtml XML 和 pdftotext bbox 建立文本层;
 #               PyMuPDF 负责扫描 PDF 页渲染和视觉区域,不把逆向 Markdown 当真相源。
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -89,33 +87,17 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get -o Acquire::Retries=10 update \
     && apt-get -o Acquire::Retries=10 -o APT::Keep-Downloaded-Packages=true \
         install -y --no-install-recommends ffmpeg poppler-utils
-# Claude Code CLI:claude-cli provider 需要 `claude` 在 PATH。旧包管理器安装已废弃,这里消费 GitHub release
-# native binary,并用同 release 的 SHASUMS256.txt 校验,避免 registry/Node 版本漂移。
-RUN if [ "$INSTALL_CLAUDE_CODE" = "0" ]; then echo "claude-code skipped for synthetic integration"; exit 0; fi; \
-    set -eux; \
-    case "${TARGETARCH:-amd64}" in \
-        amd64) claude_asset="claude-linux-x64.tar.gz" ;; \
-        arm64) claude_asset="claude-linux-arm64.tar.gz" ;; \
-        *) echo "unsupported TARGETARCH=${TARGETARCH:-}" >&2; exit 1 ;; \
-    esac; \
-    base="https://github.com/anthropics/claude-code/releases/download/${CLAUDE_CODE_VERSION}"; \
-    download() { \
-        url="$1"; out="$2"; \
-        for attempt in 1 2 3 4 5; do \
-            curl -fL --retry 2 --retry-all-errors --retry-delay 5 --connect-timeout 30 \
-                --speed-limit 1024 --speed-time 300 -C - "$url" -o "$out" && return 0; \
-            sleep "$((attempt * 5))"; \
-        done; \
-        return 1; \
-    }; \
-    download "${base}/${claude_asset}" "/tmp/${claude_asset}"; \
-    download "${base}/SHASUMS256.txt" /tmp/SHASUMS256.txt; \
-    cd /tmp; \
-    grep "  ${claude_asset}$" SHASUMS256.txt | sha256sum -c -; \
-    tar -xzf "/tmp/${claude_asset}" -C /usr/local/bin claude; \
-    chmod 0755 /usr/local/bin/claude; \
-    rm -f "/tmp/${claude_asset}" /tmp/SHASUMS256.txt; \
-    claude --version
+# 三种 CLI 统一安装层:每次 cache miss 从三家官方 latest 通道安装,不在仓库保存版本或校验和。
+# CLI_INSTALL_REFRESH 不承载版本语义。构建入口每次注入新值,避免 registry cache 固化旧 latest。
+# INSTALL_*=0 供合成集成栈跳过(docker-compose.integration.yml)。
+ARG CLI_INSTALL_REFRESH=manual
+ARG INSTALL_CLAUDE_CODE=1
+ARG INSTALL_QODER_CLI=1
+ARG INSTALL_CODEX_CLI=1
+COPY docker/install-cli-tools.sh /tmp/install-cli-tools.sh
+RUN echo "CLI install refresh: ${CLI_INSTALL_REFRESH}" \
+    && timeout 1800 sh /tmp/install-cli-tools.sh \
+    && rm -f /tmp/install-cli-tools.sh
 RUN --mount=type=cache,target=/root/.cache/pip pip install ".[steps,gpu,worker]" \
     && python -c "import yt_dlp_ejs"
 # Document布局模型只在02_parse懒加载;统一worker镜像让所有CPU worker具备同一能力。
@@ -153,7 +135,8 @@ ARG FLORI_BUILD_SHA=
 ENV FLORI_BUILD_SHA=${FLORI_BUILD_SHA}
 ARG FLORI_VERSION=
 ENV FLORI_VERSION=${FLORI_VERSION}
-ENV DISABLE_UPDATES=1
+ENV DISABLE_AUTOUPDATER=1 \
+    DISABLE_UPDATES=1
 
 # test-runtime 不含源码,供 CI 构建一次后由各 runner 拉取;测试源码通过 Compose bind mount 注入.
 FROM common AS test-runtime

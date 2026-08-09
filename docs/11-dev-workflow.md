@@ -324,7 +324,7 @@ class TranslateStep(StepBase):
             return ["output/transcript.md"]
         return []
 
-    def input_hashes(self):
+    def step_input_hashes(self):
         return {
             "transcript": file_hash(self.job_dir / "output/transcript.md"),
             "config": json.dumps(self.config.get("translate", {}), sort_keys=True),
@@ -448,10 +448,12 @@ whisper 等转写步排在 cpu 池（刻意不进 gpu 池，避免无 GPU worker
 
 **扩展 Worker 能力**：
 ```bash
-# 没有类型注册表：能力 = 启动参数 --pools 集合，路由只按池匹配（type 仅为显示标签，由 pools 派生）
-python -m worker.main --pools ai         # 专门跑 AI 步骤
+# CLI Worker 显式绑定一个 concrete provider,provider 标签与 read/websearch 由运行时探测自证
+FLORI_CLI_PROVIDER=claude-cli python -m worker.main --pools ai
 python -m worker.main --pools cpu gpu    # 强机：cpu、gpu 池都消费
 # 需要额外依赖（如 whisper）时基于 worker 镜像加装 [gpu] extra，再照常 --pools 启动
 ```
 
-Worker 只需一条通路（本机直连 Redis，或远程经网关出站 HTTPS）+ 用 `--pools` 声明消费哪些池。加减 Worker 不影响调度器——多一个消费者就多一个并行度。
+Worker 只需一条通路（本机直连 Redis，或远程经网关出站 HTTPS）+ 用 `--pools` 声明消费哪些池。
+CLI Worker 另需 `FLORI_CLI_PROVIDER=claude-cli|codex-cli|qoder-cli`,一个进程只绑定一种。AI 任务先按
+`allowed_providers` 做 OR,再按能力标签做 AND。加减 Worker 不影响调度器——多一个消费者就多一个并行度。

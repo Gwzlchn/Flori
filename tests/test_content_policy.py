@@ -754,3 +754,31 @@ class TestDigestStability:
         body = make_job_core()
         shuffled = dict(reversed(list(body.items())))
         assert canonical_digest(body) == canonical_digest(shuffled)
+
+def test_audit_ledger_rejects_retired_provider_value_in_both_tables():
+    """便携恢复走策略层加裸 SQL, 绕过了运行时 AIUsage 与 runner 端点的 fail-closed。
+    篡改过的快照不得把历史已移除的 provider 值重新写回审计账本。
+    无法确定真实 provider 的历史记录应拒绝, 不猜测改写。"""
+    from shared.content_policy import (
+        PolicyError, _validate_ai_task_log, _validate_ai_usage,
+    )
+
+    exec_id = "e" * 32
+    created = "2026-01-01T00:00:00+00:00"
+    with pytest.raises(PolicyError, match="ai_usage.provider"):
+        _validate_ai_usage(
+            {"exec_id": exec_id, "created_at": created, "provider": "cli-agent"},
+        )
+    with pytest.raises(PolicyError, match="ai_task_log.provider"):
+        _validate_ai_task_log({
+            "task_id": "t1", "created_at": created,
+            "exec_id": exec_id, "provider": "cli-agent",
+        })
+    # 对照:解析后的真实 provider 必须放行, 证明不是一刀切拒绝。
+    _validate_ai_usage(
+        {"exec_id": exec_id, "created_at": created, "provider": "claude-cli"},
+    )
+    _validate_ai_task_log({
+        "task_id": "t1", "created_at": created,
+        "exec_id": exec_id, "provider": "qoder-cli",
+    })

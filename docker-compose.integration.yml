@@ -57,6 +57,8 @@ services:
       target: worker
       args:
         INSTALL_CLAUDE_CODE: "0"
+        INSTALL_QODER_CLI: "0"
+        INSTALL_CODEX_CLI: "0"
     command: python -m worker.main --pools cpu
     volumes:
       - ./shared:/app/shared
@@ -80,6 +82,8 @@ services:
       target: worker
       args:
         INSTALL_CLAUDE_CODE: "0"
+        INSTALL_QODER_CLI: "0"
+        INSTALL_CODEX_CLI: "0"
     command: python -m worker.main --pools io
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -107,8 +111,21 @@ services:
       target: worker
       args:
         INSTALL_CLAUDE_CODE: "0"
-    # DRY_RUN 不调用 Claude CLI,但入口能力门仍需覆盖生产路由标签。
-    command: python -m worker.main --pools ai --tags vision claude-cli
+        INSTALL_QODER_CLI: "0"
+        INSTALL_CODEX_CLI: "0"
+    # DRY_RUN 不调用 Claude CLI,但入口能力门仍需覆盖生产路由标签。受保护标签不可手填
+    # (worker 会拒绝启动),合成栈按生产同一探测路径自证:落 claude 存根二进制 + 非空凭证,
+    # FLORI_CLI_PROVIDER 显式绑定 claude-cli,auto_discover_tags 据此打出
+    # claude-cli/read/websearch/vision,不从同机其它凭证推断第二种 CLI。
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p "$${HOME:-/root}/.claude"
+        printf synthetic > "$${HOME:-/root}/.claude/.credentials.json"
+        printf '#!/bin/sh\necho 0.0.0-synthetic\n' > /usr/local/bin/claude
+        chmod 0755 /usr/local/bin/claude
+        exec python -m worker.main --pools ai
     volumes:
       - ./shared:/app/shared
       - ./worker:/app/worker
@@ -119,6 +136,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - DATA_DIR=/data
       - CONFIG_DIR=/app/configs
+      - FLORI_CLI_PROVIDER=claude-cli
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - KIMI_API_KEY=${KIMI_API_KEY:-}

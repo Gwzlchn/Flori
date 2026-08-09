@@ -14,6 +14,8 @@ import structlog
 from shared.ai_routing import (
     InvalidAIOverrideError,
     parse_ai_override,
+    provider_required_tag,
+    step_allowed_providers,
     step_required_route_tags,
     step_required_capability_tags,
     step_task_tags,
@@ -78,6 +80,9 @@ class TaskRouter:
             style_tags=parse_style_tags((job_info or {}).get("style_tags", "[]")),
             required_tags=require_tags,
         )
+        provider, allowed_providers = self._provider_route(
+            step_cfg, require_tags,
+        )
 
         await self.owner.redis.set_step_status(job_id, step_name, "ready")
         statuses = await self.owner.redis.get_all_step_statuses(job_id)
@@ -93,6 +98,8 @@ class TaskRouter:
             pool, job_id, step_name, merged_tags, priority,
             require_tags=require_tags,
             resources=step_cfg.get("resources") or [],
+            provider=provider or None,
+            allowed_providers=allowed_providers or None,
         )
 
         await asyncio.to_thread(
@@ -104,6 +111,30 @@ class TaskRouter:
 
         logger.info("step_enqueued", job_id=job_id, step=step_name, pool=pool, priority=priority)
         return True
+
+    def _provider_route(
+        self, step_cfg: dict, require_tags: list[str],
+    ) -> tuple[str, list[str]]:
+        """从同一组 route 结果拆出 explicit provider 或 OR 集合,两者互斥。"""
+        if step_cfg.get("pool") != "ai":
+            return "", []
+        required = set(require_tags)
+        configured = (self.owner.config.providers or {}).get("providers") or {}
+        explicit: list[str] = []
+        for name in configured:
+            try:
+                if provider_required_tag(str(name), self.owner.config.providers) in required:
+                    explicit.append(str(name))
+            except ValueError:
+                continue
+        if len(explicit) > 1:
+            raise InvalidAIOverrideError("invalid AI route: multiple concrete providers required")
+        if explicit:
+            return explicit[0], []
+        allowed = step_allowed_providers(
+            step_cfg, self.owner.config.providers,
+        )
+        return "", allowed
 
     async def _fail_invalid_ai_override(
         self, job_id: str, step_name: str, reason: str,
@@ -360,7 +391,10 @@ class TaskRouter:
                 return True
         return False
 
-    async def _pool_has_workers_for(self, pool: str, require_tags: list[str]) -> bool:
+    async def _pool_has_workers_for(
+        self, pool: str, require_tags: list[str],
+        allowed_providers: list[str] | None = None,
+    ) -> bool:
         """同 _pool_has_workers,但额外要求在线 worker 的 tags 满足 require_tags(硬门控)。
         require_tags 为空时等价 _pool_has_workers;check_no_worker 若只看池不看 tag,
         池有 worker 但无人满足 require_tags 时(如境外内容 require net-global 却无覆盖全球的
@@ -370,6 +404,8 @@ class TaskRouter:
         workers = await self.owner.redis.list_worker_ids()
         for wid in workers:
             info = await self.owner.redis.get_worker_info(wid)
-            if worker_satisfies_requirements(info, pool, req):
+            if worker_satisfies_requirements(
+                info, pool, req, allowed_providers or [],
+            ):
                 return True
         return False

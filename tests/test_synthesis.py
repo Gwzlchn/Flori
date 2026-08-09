@@ -351,13 +351,20 @@ class TestAskEndpoint:
         for s in data["sources"]:
             assert {"job_id", "title", "domain", "content_type", "evidence"} <= set(s)
             assert s["evidence"]["chunk_id"]
-        # 真投了一个 synthesis AI task 进 queue:ai(claude 在 worker 跑,API 没调)。
+        # 真投了一个 synthesis AI task 进 queue:ai(CLI 在 worker 跑,API 没调)。
         queued = await ask_app.state.redis.list_queue("ai")
         assert len(queued) == 1
         assert queued[0]["kind"] == "ai" and queued[0]["task_id"] == data["task_id"]
-        assert queued[0]["step"] == "synthesis" and queued[0]["require_tags"] == ["claude-cli"]
+        assert queued[0]["step"] == "synthesis" and queued[0]["require_tags"] == []
         raw = await ask_app.state.redis.r.zrange("queue:ai", 0, 0)
         task_payload = json.loads(raw[0])
+        assert "provider" not in task_payload and "model" not in task_payload
+        assert task_payload["allowed_providers"] == [
+            "claude-cli", "codex-cli", "qoder-cli",
+        ]
+        assert task_payload["allowed_providers"] == [
+            "claude-cli", "codex-cli", "qoder-cli",
+        ]
         manifest = task_payload["audit_context"]["ask_source_manifest"]
         assert manifest["task_id"] == data["task_id"]
         assert len(manifest["sources"]) == data["retrieved_count"]

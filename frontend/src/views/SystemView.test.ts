@@ -474,12 +474,14 @@ describe('SystemView', () => {
     expect(t).not.toContain('BILI_' + 'SE' + 'SS' + 'DATA')  // io 凭证走中心分发,不进 worker env。
     expect(t).toContain('HF_ENDPOINT')              // cpu/gpu → whisper HF 国内镜像
     expect(w.find('pre').text()).not.toContain('GATEWAY_TLS_INSECURE') // 命令默认严格校验(页面提示文案除外)
-    expect(t).toContain('--tags claude-cli read')   // Claude 的 PDF Read 能力独立落成硬 tag
-    expect(t).toContain('状态目录内使用 .claude')   // CLI 凭证在 worker 独立 HOME
+    // 受保护能力标签由 worker 启动自证,向导只绑定具体 CLI provider。
+    expect(w.find('pre').text()).not.toContain('--tags')
+    expect(w.find('pre').text()).toContain('FLORI_CLI_PROVIDER')
+    expect(t).toContain('.claude 放进状态目录')   // CLI 凭证在 worker 独立 HOME
     expect(w.find('pre').text()).not.toContain('${HOME}/.claude')
   })
 
-  it('AI 接入方式切换会更新接入 tag 与凭证环境变量', async () => {
+  it('CLI provider 切换只更新 worker 绑定,不生成受保护能力标签', async () => {
     const store = useWorkerStore()
     stubStoreData(store)
     const w = mountView({ workers: [] })
@@ -487,19 +489,34 @@ describe('SystemView', () => {
     await w.find('input[type="checkbox"][value="ai"]').setValue(true)
     await flushPromises()
     const select = w.find('[data-testid="ai-access-method"]')
-    expect(w.find('pre').text()).toContain('--tags claude-cli read')
+    expect(w.find('pre').text()).toContain('FLORI_CLI_PROVIDER: "claude-cli"')
+    expect(w.find('pre').text()).not.toContain('--tags')
+
+    await select.setValue('qoder-cli')
+    await flushPromises()
+    expect(w.find('pre').text()).toContain('FLORI_CLI_PROVIDER: "qoder-cli"')
+    expect(w.find('pre').text()).not.toContain('--tags')
+    expect(w.text()).toContain('.qoder 放进状态目录')
 
     await select.setValue('codex-cli')
     await flushPromises()
-    expect(w.find('pre').text()).toContain('--tags codex-cli')
-    expect(w.find('pre').text()).not.toContain('--tags codex-cli read')
-    expect(w.text()).toContain('状态目录内使用 .codex')
+    expect(w.find('pre').text()).toContain('FLORI_CLI_PROVIDER: "codex-cli"')
+    expect(w.text()).toContain('.codex 放进状态目录')
+    expect(select.findAll('option').map(option => option.attributes('value'))).toEqual([
+      'claude-cli', 'qoder-cli', 'codex-cli',
+    ])
+  })
 
-    await select.setValue('kimi-api')
+  it('手填普通标签仍进 --tags,不附带能力标签', async () => {
+    const store = useWorkerStore()
+    stubStoreData(store)
+    const w = mountView({ workers: [] })
     await flushPromises()
-    const cmd = w.find('pre').text()
-    expect(cmd).toContain('--tags kimi-api')
-    expect(cmd).not.toContain('--tags kimi-api read')
-    expect(cmd).toContain('KIMI_API_KEY')
+    await w.find('input[type="checkbox"][value="ai"]').setValue(true)
+    const tagInput = w.findAll('input.input').find(i => i.attributes('placeholder') === 'home-desktop vision')
+    await tagInput!.setValue('home-desktop')
+    await flushPromises()
+    expect(w.find('pre').text()).toContain('--tags home-desktop')
+    expect(w.find('pre').text()).not.toContain('--tags claude-cli')
   })
 })

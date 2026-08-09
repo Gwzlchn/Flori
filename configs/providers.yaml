@@ -1,6 +1,5 @@
-# provider 池。pipelines.yaml 默认链主用 claude-cli;
-# kimi/openai/local 不在默认链,仅供前端选 provider 重跑时手动挑选(按是否配 key 标灰),
-# 经 ai_gateway 按 type 分发动态使用——非死配置,勿删。
+# provider 池。pipelines.yaml 的默认 AI 任务在三个 concrete CLI 间做 OR 路由;
+# API provider 不在默认链,只供前端显式重跑选择(按是否配 key 标灰),由 ai_gateway 按 type 分发。
 providers:
   anthropic:
     type: anthropic
@@ -29,26 +28,96 @@ providers:
     features: [vision]
 
   claude-cli:
-    type: cli
+    type: claude_cli
     # prompt 经 stdin 喂入;有帧图时 provider 动态追加 --allowedTools Read --add-dir。
     # 输出格式由 provider 强制 `--output-format json`(取真实 usage/cache/total_cost_usd/num_turns);
     # 这里不写 --output-format(写了也会被 provider 剔除改 json)。
     command: ["claude", "-p"]
-    # 默认模型(yaml 单一来源,钉死可复现):不配则沿用挂载 HOME 里 CLI 自己的默认模型。
-    # 优先级:pipelines.yaml 步级 model > 此默认 > CLI 默认。换模型会变 def_digest。
-    # [1m] 后缀 = 1M 上下文。
-    model: "claude-opus-4-8[1m]"
-    features: [vision, read]
+    # 默认模型与档位显式钉死。OR 路由在 worker claim 后才按命中的 concrete provider
+    # 物化这组值,队列里不使用跨 CLI 的 auto 模型占位。
+    model: opus5
+    # 按调用覆盖 model 的取值域,也是前端选择器的选项。必须声明:未声明时任何环境都
+    # 拒绝 model 覆盖,因为跨环境恢复无从判断源环境的模型名在这里是否可用。
+    models:
+      - opus5
+      - "claude-opus-4-8[1m]"
+      - claude-opus-4-8
+      - claude-sonnet-4-6
+      - claude-haiku-4-5
+    features: [vision, read, websearch]
+    # 推理档位(--effort)只列固定 CLI 实际接受的值。
+    reasoning_effort: xhigh
+    reasoning_efforts: [low, medium, high, xhigh, max]
+    reasoning_efforts_by_model:
+      opus5: [low, medium, high, xhigh, max]
+      "claude-opus-4-8[1m]": [low, medium, high, xhigh, max]
+      claude-opus-4-8: [low, medium, high, xhigh, max]
+      claude-sonnet-4-6: [low, medium, high, xhigh, max]
+      claude-haiku-4-5: [low, medium, high, xhigh, max]
     cost_usd: 0
 
   codex-cli:
     type: codex_cli
-    # prompt 经 stdin 喂入;provider 动态追加 --json/-o/--sandbox read-only/--image.
-    # 首版只承诺纯文本/图片,不映射 Claude 的 Read/WebSearch/Bash allowed_tools 语义.
+    # prompt 经 stdin 喂入;provider 动态追加 --json/-o/--sandbox read-only/--image/--add-dir。
+    # allowed_tools 映射 Read(read-only 沙箱读文件)与 WebSearch(-c web_search=live 开启
+    # Responses API 服务端原生工具,不受本地沙箱断网限制);Bash 等不映射,fail-closed。
     command: ["codex", "exec"]
     # Codex CLI 接入方式也必须显式指定模型,避免跟随本机 CLI 默认值漂移。
-    model: gpt-5-codex
-    features: [vision]
+    model: gpt-5.6-sol
+    reasoning_effort: xhigh
+    # 域取自 codex 服务端下发的模型清单(本机缓存 $CODEX_HOME/models_cache.json 的 models[].slug)。
+    # 换代时 codex 会刷新该缓存,这里要跟着更新,否则 fail-closed 会拒掉新模型。
+    models:
+      - gpt-5.6-sol
+      - gpt-5.6-sol-wm
+      - gpt-5.6-terra
+      - gpt-5.6-luna
+      - gpt-5.5
+      - gpt-5.4
+      - gpt-5.4-mini
+      - gpt-5.3-codex-spark
+    features: [vision, read, websearch]
+    # 推理档位走 -c model_reasoning_effort(codex 无专用 flag)。
+    # 档位域按模型声明,不是全局统一:同一个 ultra 在 sol 上合法、在 5.4 上不存在。
+    # reasoning_efforts 是并集,只用于前端展示与未声明模型的兜底;
+    # 真正的准入判定走 reasoning_efforts_by_model,按有效模型取域,避免放行 CLI 会静默降级的组合。
+    # 域取自 codex 服务端下发的 models[].supported_reasoning_levels,换代随缓存更新。
+    reasoning_efforts: [low, medium, high, xhigh, max, ultra]
+    reasoning_efforts_by_model:
+      gpt-5.6-sol: [low, medium, high, xhigh, max, ultra]
+      gpt-5.6-sol-wm: [low, medium, high, xhigh, max, ultra]
+      gpt-5.6-terra: [low, medium, high, xhigh, max, ultra]
+      gpt-5.6-luna: [low, medium, high, xhigh, max]
+      gpt-5.5: [low, medium, high, xhigh]
+      gpt-5.4: [low, medium, high, xhigh]
+      gpt-5.4-mini: [low, medium, high, xhigh]
+      gpt-5.3-codex-spark: [low, medium, high, xhigh]
+    cost_usd: 0
+
+  qoder-cli:
+    type: qoder_cli
+    # prompt 经 stdin 喂入;输出由 provider 强制 `-o json`(顶层 JSON 与 claude -p 同构)。
+    # 不显式给 --context-window 时 CLI 会降到 180K,必须写满 1M。
+    command: ["qodercli", "-p", "--context-window", "1000000"]
+    model: ultimate
+    # 域取自 qodercli --list-models 实测输出;Auto 是 CLI 自选档,Flori 要求显式模型故不列。
+    models:
+      - ultimate
+      - Cantus
+      - Ultimate
+      - Performance
+      - Efficient
+      - Lite
+      - Qwen3.8-Max
+      - Qwen3.7-Max
+      - Qwen3.7-Plus
+      - Kimi-K3
+      - Kimi-K2.7-Code
+    features: [vision, read, websearch]
+    # 档位默认 max(原钉死在 command,现移到可按调用覆盖的默认值);域来自 Qoder 官方文档。
+    reasoning_effort: max
+    reasoning_efforts: [low, medium, high, xhigh, max]
+    # Qoder 包月订阅,无按量成本;token 用量照实记,cost 恒 0。
     cost_usd: 0
 
   kimi:

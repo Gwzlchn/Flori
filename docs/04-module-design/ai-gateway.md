@@ -1,14 +1,14 @@
 # AI 网关
 
-> 统一的 LLM 调用层。Pipeline 步骤和前端交互都通过它访问 AI，支持多 Provider、多模型、路由、对比、降级。
+> 统一的 LLM 调用层。Pipeline 步骤和前端交互都通过它访问 AI,任务认领先物化 concrete provider,Gateway 只执行该 provider。
 
 ## 1. 为什么需要网关
 
-- 不同步骤对模型能力/成本要求不同（标点用廉价模型，笔记用强模型）
-- 同一步骤想用多个 Provider 生成对比结果
+- 不同步骤对模型能力要求不同
+- 多种 concrete CLI Worker 需要共享同一任务队列
 - 前端需要交互式 AI（笔记问答）
 - 统一管理 API key、配额、限流、成本追踪
-- Provider 故障时自动降级到备选
+- provider、模型、档位与能力需要完整审计
 
 ## 2. 架构
 
@@ -22,13 +22,15 @@ graph TD
     subgraph Gateway["AI Gateway"]
         direction TB
         subgraph Core["核心功能"]
-            Router["路由决策<br/>（哪个模型?）"]
-            Retry["重试/降级<br/>（失败换谁?）"]
+            Router["物化执行<br/>（认领结果对应哪个 provider?）"]
+            Retry["失败归类<br/>（交给任务 retry）"]
             Cost["成本追踪<br/>（花了多少?）"]
         end
         subgraph Providers["Provider 适配层"]
             Anthropic["Anthropic<br/>(Claude)"]
             ClaudeCLI["Claude CLI<br/>(订阅)"]
+            CodexCLI["Codex CLI<br/>(订阅)"]
+            QoderCLI["Qoder CLI<br/>(订阅)"]
             OpenAI["OpenAI<br/>(GPT)"]
             DeepSeek["DeepSeek<br/>(兼容)"]
             Local["本地<br/>(Ollama)"]
@@ -64,7 +66,7 @@ class LLMRequest:
 class LLMResponse:
     content: str
     model: str                     # 实际使用的模型
-    provider: str                  # "anthropic" / "openai" / "deepseek" / "local"
+    provider: str                  # claim 物化的 concrete provider,如 "claude-cli" / "codex-cli"
     input_tokens: int
     output_tokens: int
     cost_usd: float                # 本次调用成本
@@ -77,10 +79,11 @@ class LLMResponse:
 | 方式 | 说明 | 成本模型 | 适合场景 |
 |------|------|---------|---------|
 | **API Key** | 直接调 Provider HTTP API | 按 token 计费 | 生产批量处理 |
-| **CLI 订阅** | subprocess 调 `claude` CLI | 订阅月费内 | 轻量使用/开发阶段 |
+| **CLI 订阅** | subprocess 调 Claude/Codex/Qoder CLI | 订阅月费内 | 默认 AI 执行路径 |
 | **本地模型** | 调本地 Ollama/vLLM | 免费（电费+硬件） | 简单任务/隐私敏感 |
 
-CLI 订阅方式有额度限制，适合日处理量不大或开发调试阶段。超出额度后 Gateway 自动降级到 API Key 或其他 Provider。
+CLI 订阅方式有各自额度限制。任务以 `allowed_providers` 允许三种 CLI Worker 竞争认领;
+一次认领后 Gateway 不在同一 attempt 内切换 provider。失败交给既有 step/task retry,下一 attempt 可由另一种 CLI 认领。
 
 ### 已支持 Provider
 
@@ -98,9 +101,11 @@ CLI 订阅方式有额度限制，适合日处理量不大或开发调试阶段�
 
 | Provider | CLI 命令 | 订阅计划 | 说明 |
 |----------|---------|---------|------|
-| Claude | `claude -p` | Pro/Max | 月度 Agent SDK Credit 内免费，超出按 API 价 |
+| Claude | `claude -p` | Pro/Max | `type=claude_cli`,默认 `opus5 + xhigh` |
+| Codex | `codex exec` | ChatGPT 订阅 | `type=codex_cli`,默认 `gpt-5.6-sol + xhigh` |
+| Qoder | `qodercli -p` | Qoder 订阅 | `type=qoder_cli`,默认 `ultimate + max` |
 
-CLI Provider 的实现是 subprocess 调用 + stdout 解析，与 API Provider 对调用方透明。prompt 走 stdin（无 ARG_MAX 限制），并强制 `--output-format json` 拿真实 usage 与成本：
+CLI Provider 的实现是 subprocess 调用 + stdout 解析，与 API Provider 对调用方透明。prompt 走 stdin（无 ARG_MAX 限制）；Claude、Codex、Qoder 分别强制自己的机器可读输出格式。以下是 Claude 适配示意：
 
 ```python
 class ClaudeCLIProvider:
@@ -137,9 +142,8 @@ OpenAI 兼容 Provider（DeepSeek/Kimi/Qwen/Ollama/vLLM）只需配置 `base_url
 ### providers.yaml
 
 ```yaml
-# provider 池。pipelines.yaml 默认链只用 claude-cli/anthropic/deepseek;
-# kimi/openai/local 不在默认链,仅供前端「选 provider 重跑」手动挑选(按是否配 key 标灰),
-# 经 ai_gateway 按 type 分发动态使用——非死配置,勿删。
+# provider 池。普通 pipeline 通过 allowed_providers 允许三种 concrete CLI Worker 认领;
+# API provider 仍可供前端指定 provider 重跑。
 providers:
   anthropic:
     type: anthropic
@@ -168,12 +172,33 @@ providers:
     features: [vision]
 
   claude-cli:
-    type: cli
+    type: claude_cli
     # prompt 经 stdin 喂入;有帧图时 provider 动态追加 --allowedTools Read --add-dir。
     # 输出格式由 provider 强制 `--output-format json`(取真实 usage/cache/total_cost_usd/num_turns);
     # 这里不写 --output-format(写了也会被 provider 剔除改 json)。
     command: ["claude", "-p"]
-    features: [vision]
+    model: opus5
+    models: [opus5, "claude-opus-4-8[1m]", claude-opus-4-8, claude-sonnet-4-6, claude-haiku-4-5]
+    reasoning_effort: xhigh
+    reasoning_efforts: [low, medium, high, xhigh, max]
+    features: [vision, read, websearch]
+    cost_usd: 0
+
+  codex-cli:
+    type: codex_cli
+    command: ["codex", "exec"]
+    model: gpt-5.6-sol
+    reasoning_effort: xhigh
+    features: [vision, read, websearch]
+    cost_usd: 0
+
+  qoder-cli:
+    type: qoder_cli
+    command: ["qodercli", "-p", "--context-window", "1000000"]
+    model: ultimate
+    reasoning_effort: max
+    reasoning_efforts: [low, medium, high, xhigh, max]
+    features: [vision, read, websearch]
     cost_usd: 0
 
   kimi:
@@ -214,7 +239,7 @@ providers:
 
 ### 步骤路由配置（pipelines.yaml）
 
-pipeline 为 GitLab-CI 风格（`variables`/`extends`/`needs`/`rules`，见 [docs/03-contracts.md §4.1](../03-contracts.md)），每个 AI job 的 `ai` 段路由 provider/model（`variables` 为单一事实源，job 用 `$VAR` 引用）：
+pipeline 为 GitLab-CI 风格（`variables`/`extends`/`needs`/`rules`，见 [docs/03-contracts.md §4.1](../03-contracts.md)），每个 AI job 的 `ai` 段只声明可认领的 concrete provider 集合：
 
 ```yaml
 video:
@@ -222,28 +247,24 @@ video:
     "08_punctuate":
       extends: .ai-step
       ai:
-        primary: {provider: $AI_PUNCT_PRIMARY_PROVIDER, model: $AI_PUNCT_PRIMARY_MODEL}
-        fallback: {provider: $AI_PUNCT_FALLBACK_PROVIDER, model: $AI_PUNCT_FALLBACK_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
 
     "11_smart":
       extends: .ai-step
       tags: ["vision"]                 # 视觉 pass 需要视觉能力的 Worker
       ai:
-        primary: {provider: $AI_SMART_PRIMARY_PROVIDER, model: $AI_SMART_PRIMARY_MODEL}
-        fallback: {provider: $AI_SMART_FALLBACK_PROVIDER, model: $AI_SMART_FALLBACK_MODEL}
-        # 文本 pass / 纯文本降级
-        text_fallback: {provider: $AI_SMART_TEXT_PROVIDER, model: $AI_SMART_TEXT_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
 
     "12_review":
       extends: .review
       ai:
-        primary: {provider: $AI_REVIEW_PRIMARY_PROVIDER, model: $AI_REVIEW_PRIMARY_MODEL}
-        fallback: {provider: $AI_REVIEW_FALLBACK_PROVIDER, model: $AI_REVIEW_FALLBACK_MODEL}
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
 ```
 
-当前 provider/model 默认值只在 `configs/pipelines.yaml` 的 variables 定义。Video、Document、Audio 三条链引用同一角色变量，Document 体裁不能另建 provider 分支。
+默认 model/reasoning effort 只在 `configs/providers.yaml` 定义。Video、Document、Audio 三条链使用同一 concrete CLI 集合,Document 体裁不能另建 provider 分支。
 
-`tags` 控制哪个 Worker 能接这个任务（亲和性），`ai` 控制 Gateway 在该 Worker 上用哪个 Provider/Model。两层独立。
+`allowed_providers` 对 Worker 绑定 provider 做 OR,`tags` 对运行能力做 AND。认领原子写入具体 provider,
+Gateway 再用该 provider 的默认 model/effort;两层都不能由 `pool=ai` 代替。
 
 ## 5. 多 Provider 对比生成
 
@@ -270,7 +291,7 @@ video:
 
 ```
 /data/jobs/{id}/output/
-├── notes_smart.md                    # 用户选定的最终版（或默认 primary）
+├── notes_smart.md                    # 用户选定的最终版
 ├── notes_smart.anthropic.md          # Claude 生成版
 ├── notes_smart.openai.md             # GPT 生成版
 ├── notes_smart.deepseek.md           # DeepSeek 生成版
@@ -324,7 +345,9 @@ GET  /api/ai-tasks/{task_id}/result    # 轮询取答案（pending / error / don
 GET  /api/ai-tasks/{task_id}/log       # 白盒审计（路由/尝试链/渲染 prompt/用量）
 ```
 
-独立 AI task 固定路由 claude-cli（订阅），不走 pipelines.yaml 的步骤级 `ai` 配置。
+独立 AI task 与普通 pipeline 一样声明
+`allowed_providers: [claude-cli, codex-cli, qoder-cli]`。排队时不带 provider/model;
+认领时物化具体 provider,Worker 再按该 provider 配置物化默认 model/effort。
 
 ### 使用场景
 
@@ -333,30 +356,23 @@ GET  /api/ai-tasks/{task_id}/log       # 白盒审计（路由/尝试链/渲染 
 | 跨源综合问答 | `POST /api/ask` | 跨语料检索相关笔记拼 context，生成带来源的综合回答 |
 | 概念雷达周报 | `POST /api/radar/digest` | 按概念雷达数据生成中文周报 |
 
-## 7. 路由与降级
+## 7. 认领与执行
 
 ```python
 class AIGateway:
-    async def call(self, step_name: str, request: LLMRequest) -> LLMResponse:
-        config = self._get_step_ai_config(step_name)
-
-        # 依次尝试 primary → fallback
-        for tier in ["primary", "fallback"]:
-            if tier not in config:
-                continue
-            try:
-                provider = self._get_provider(config[tier]["provider"])
-                return await provider.complete(request)
-            except (AIProviderError, AIRateLimitError) as e:
-                logger.warning("provider_failed", tier=tier, error=str(e))
-                continue
-
-        # 带图请求最后可走 text_fallback:去图、换纯文本模型再试
-
-        raise AllProvidersFailedError(...)  # 任一层限流则整体归 ai_rate_limit,走长退避
+    async def call(
+        self,
+        provider_name: str,
+        request: LLMRequest,
+    ) -> LLMResponse:
+        # provider_name 来自原子 claim,不是 Gateway 二次选择。
+        provider = self._get_provider(provider_name)
+        return await provider.complete(request)
 ```
 
-全部失败时异常携带逐层尝试链（attempts），随 error.json 落盘供排错；成功响应也带 attempts 与 tier_used 供审计。
+一次 attempt 只有一个 concrete provider。调用失败随 error.json 和审计落盘,再由既有 step/task retry
+重新入队;新 attempt 保留 `allowed_providers`,可以被另一种绑定 Worker 认领。Gateway 不在一次调用里
+串行 fallback,避免同一 exec_id 混入多个 provider 的副作用与审计。
 
 ## 8. 成本追踪
 
@@ -430,4 +446,4 @@ class SmartStep(StepBase):
         }
 ```
 
-`AIInvocation` 负责 PromptResolver、provider capability、Gateway、usage、pending/final AI log 和 transcript。步骤代码不关心底层用的是 Claude 还是 DeepSeek,Gateway 根据 pipelines.yaml 的 `ai` 配置自动路由。
+`AIInvocation` 负责 PromptResolver、provider capability、Gateway、usage、pending/final AI log 和 transcript。步骤代码不关心底层是哪种 CLI;provider 由认领结果确定,Gateway 只按该 concrete provider 执行。

@@ -17,13 +17,12 @@ class DocumentReviewStep(StepBase):
                 missing.append(path)
         return missing
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         smart = self.artifacts.latest_smart_note()
         hashes = {
             "smart": file_hash(smart) if smart else "",
             "document": file_hash(self.job_dir / "intermediate/document.json"),
             "quality": file_hash(self.job_dir / "intermediate/quality.json"),
-            "provider": self.ai.override_provider(),
         }
         translation = self.job_dir / "output" / "translation.json"
         if translation.is_file():

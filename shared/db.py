@@ -27,9 +27,9 @@ import structlog
 from .concepts import norm_related as _norm_related
 from .models import (
     AIUsage,
-    Collection,
     DEFAULT_AI_MODEL,
     DEFAULT_AI_PROVIDER,
+    Collection,
     Job,
     JobPart,
     JobStatus,

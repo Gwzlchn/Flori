@@ -22,7 +22,7 @@ class SemanticAttestationStep(StepBase):
         # 上游 producer 可因规则跳过;无候选也必须执行以撤销旧 batch commit。
         return []
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         hashes = semantic_attestation_input_hashes(self.job_dir)
         source = self.job_dir / "intermediate" / "source_segments.json"
         owned = {

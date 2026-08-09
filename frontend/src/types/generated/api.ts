@@ -2717,10 +2717,14 @@ export interface components {
             from_step: string;
             /** Job Id */
             job_id: string;
+            /** Model */
+            model?: string | null;
             /** Part Id */
             part_id?: string | null;
             /** Provider */
             provider: string;
+            /** Reasoning Effort */
+            reasoning_effort?: string | null;
             /** Review Step */
             review_step: string;
             /** Status */
@@ -3431,8 +3435,12 @@ export interface components {
         };
         /** RerunSmartRequest */
         RerunSmartRequest: {
+            /** Model */
+            model?: string | null;
             /** Provider */
             provider: string;
+            /** Reasoning Effort */
+            reasoning_effort?: string | null;
         };
         /** ReviewProjectionResponse */
         ReviewProjectionResponse: {
@@ -3889,6 +3897,12 @@ export interface components {
              * @default 10
              */
             max_cards: number;
+            /**
+             * Provider
+             * @default claude-cli
+             * @enum {string}
+             */
+            provider: "claude-cli" | "codex-cli" | "qoder-cli";
             /** Request Id */
             request_id: string;
         };

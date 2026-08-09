@@ -557,6 +557,130 @@ describe('JobDetailView 笔记 tab', () => {
   })
 })
 
+describe('JobDetailView 换 provider 重跑(model/effort 覆盖)', () => {
+  // CLI 只有三个具体类型;既有 API provider 仍可手动重跑。
+  const providerList = [
+    { name: 'anthropic', type: 'anthropic', available: true, label: 'API',
+      models: ['claude-opus-4-8', 'claude-sonnet-4-6'], default_model: 'claude-sonnet-4-6',
+      reasoning_efforts: [], reasoning_efforts_by_model: {}, default_reasoning_effort: null },
+    { name: 'claude-cli', type: 'claude_cli', available: true, label: 'CLI',
+      models: ['opus5', 'claude-opus-4-8[1m]', 'claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
+      default_model: 'opus5',
+      reasoning_efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      reasoning_efforts_by_model: {
+        opus5: ['low', 'medium', 'high', 'xhigh', 'max'],
+        'claude-opus-4-8[1m]': ['low', 'medium', 'high', 'xhigh', 'max'],
+        'claude-opus-4-8': ['low', 'medium', 'high', 'xhigh', 'max'],
+        'claude-sonnet-4-6': ['low', 'medium', 'high', 'xhigh', 'max'],
+        'claude-haiku-4-5': ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
+      default_reasoning_effort: 'xhigh' },
+    { name: 'codex-cli', type: 'codex_cli', available: true, label: 'CLI',
+      models: ['gpt-5.6-sol', 'gpt-5.4'], default_model: 'gpt-5.6-sol',
+      reasoning_efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+      reasoning_efforts_by_model: {
+        'gpt-5.6-sol': ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+        'gpt-5.4': ['low', 'medium', 'high', 'xhigh'],
+      },
+      default_reasoning_effort: 'xhigh' },
+    { name: 'qoder-cli', type: 'qoder_cli', available: true, label: 'CLI',
+      models: ['ultimate', 'Cantus'], default_model: 'ultimate',
+      reasoning_efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      reasoning_efforts_by_model: {},
+      default_reasoning_effort: 'max' },
+  ]
+
+  async function mountWithRerunConfirm(providerName: string) {
+    fetchDetail.mockResolvedValue(makeDetail({ status: 'done' }))
+    api.get.mockImplementation((url: string) => {
+      if (url.includes('note-versions')) return Promise.resolve({ versions: [{
+        provider: 'p', model: 'm', version: '20260101-000000', file: 'f.md', review_file: null, overall: 4,
+      }] })
+      if (url.includes('/api/providers')) return Promise.resolve({ providers: providerList })
+      return Promise.resolve([])
+    })
+    api.getText.mockResolvedValue('# 笔记')
+    const w = mountView()
+    await flushPromises()
+    await w.findAll('button').find(b => b.text().includes('换 provider 重跑'))!.trigger('click')
+    await flushPromises()
+    const item = w.find('.provider-menu').findAll('button').find(b => b.text().includes(providerName))
+    await item!.trigger('click')
+    await flushPromises()
+    return w
+  }
+  const confirmRerun = async (w: ReturnType<typeof mountView>) => {
+    await w.find('.modal').findAll('button').find(b => b.text().includes('开始重跑'))!.trigger('click')
+    await flushPromises()
+  }
+
+  it('API provider 继续使用模型白名单,不渲染 CLI 档位', async () => {
+    const w = await mountWithRerunConfirm('anthropic')
+    const model = w.find('[data-testid="rerun-model"]')
+    expect((model.element as HTMLSelectElement).value).toBe('claude-sonnet-4-6')
+    expect(w.find('[data-testid="rerun-effort"]').exists()).toBe(false)
+    await confirmRerun(w)
+    expect(api.post).toHaveBeenCalledWith('/api/jobs/job_BV1abc/rerun-smart',
+      { provider: 'anthropic', model: 'claude-sonnet-4-6' })
+  })
+
+  it('claude-cli 预选 opus5 + xhigh 并按具体 provider 提交', async () => {
+    const w = await mountWithRerunConfirm('claude-cli')
+    const model = w.find('[data-testid="rerun-model"]')
+    expect(model.exists()).toBe(true)
+    expect((model.element as HTMLSelectElement).value).toBe('opus5')
+    const effort = w.find('[data-testid="rerun-effort"]')
+    expect((effort.element as HTMLSelectElement).value).toBe('xhigh')
+
+    await confirmRerun(w)
+    expect(api.post).toHaveBeenCalledWith('/api/jobs/job_BV1abc/rerun-smart',
+      { provider: 'claude-cli', model: 'opus5', reasoning_effort: 'xhigh' })
+  })
+
+  it('codex-cli 档位下拉按默认模型收窄,不是全局并集', async () => {
+    // 全局 reasoning_efforts 含 max/ultra, 但默认模型 gpt-5.6-sol 的域才是准入域。
+    const w = await mountWithRerunConfirm('codex-cli')
+    const effort = w.find('[data-testid="rerun-effort"]')
+    expect(effort.exists()).toBe(true)
+    expect(effort.findAll('option').map(o => o.text())).toEqual(
+      ['默认', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+    )
+
+    await effort.setValue('high')
+    await confirmRerun(w)
+    expect(api.post).toHaveBeenCalledWith('/api/jobs/job_BV1abc/rerun-smart',
+      { provider: 'codex-cli', model: 'gpt-5.6-sol', reasoning_effort: 'high' })
+  })
+
+  it('换模型后档位域随之收窄,已不合法的旧选择被清掉而不是带着提交', async () => {
+    // reviewer 复现:UI 用全局并集当选项时用户能选到 gpt-5.4 + ultra, 提交后才 400。
+    const w = await mountWithRerunConfirm('codex-cli')
+    await w.find('[data-testid="rerun-effort"]').setValue('ultra')
+    await w.find('[data-testid="rerun-model"]').setValue('gpt-5.4')
+    await flushPromises()
+
+    const effort = w.find('[data-testid="rerun-effort"]')
+    expect(effort.findAll('option').map(o => o.text())).toEqual(
+      ['默认', 'low', 'medium', 'high', 'xhigh'],
+    )
+    expect((effort.element as HTMLSelectElement).value).toBe('')
+
+    await confirmRerun(w)
+    expect(api.post).toHaveBeenCalledWith('/api/jobs/job_BV1abc/rerun-smart',
+      { provider: 'codex-cli', model: 'gpt-5.4' })
+  })
+
+  it('qoder-cli 预选 default_reasoning_effort,直接确认即发送该档位', async () => {
+    const w = await mountWithRerunConfirm('qoder-cli')
+    const effort = w.find('[data-testid="rerun-effort"]')
+    expect((effort.element as HTMLSelectElement).value).toBe('max')
+
+    await confirmRerun(w)
+    expect(api.post).toHaveBeenCalledWith('/api/jobs/job_BV1abc/rerun-smart',
+      { provider: 'qoder-cli', model: 'ultimate', reasoning_effort: 'max' })
+  })
+})
+
 describe('JobDetailView 流水线 tab 操作', () => {
   it('待激活恢复任务只从元信息入口显式激活', async () => {
     fetchDetail.mockResolvedValue(makeDetail({ status: 'pending_activation' }))

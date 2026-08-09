@@ -313,15 +313,15 @@ const workerStateDir = ref(defaultStateDir(workerName.value))
 watch(workerName, (name) => {
   if (!stateDirTouched.value) workerStateDir.value = defaultStateDir(name)
 })
+// CLI/read/websearch 等能力标签受保护:
+// 只能由 worker 启动时运行时探测自证,向导不生成 --tags 能力,伪造会让 worker 拒绝启动。
+// 一个 worker 只绑定一个具体 CLI provider;多个 CLI 用多个 worker 实例表达。
 const AI_ACCESS_METHODS = [
-  { id: 'claude-cli', label: 'Claude CLI', tags: ['claude-cli', 'read'] },
-  { id: 'codex-cli', label: 'Codex CLI', tags: ['codex-cli'] },
-  { id: 'kimi-api', label: 'Kimi API key', tags: ['kimi-api'] },
+  { id: 'claude-cli', label: 'Claude CLI' },
+  { id: 'qoder-cli', label: 'Qoder CLI' },
+  { id: 'codex-cli', label: 'Codex CLI' },
 ] as const
 const aiAccessMethod = ref<(typeof AI_ACCESS_METHODS)[number]['id']>('claude-cli')
-const selectedAiAccess = computed(() =>
-  AI_ACCESS_METHODS.find((m) => m.id === aiAccessMethod.value) ?? AI_ACCESS_METHODS[0],
-)
 
 const gatewayUrl = computed(() => {
   const o = typeof window !== 'undefined' ? window.location?.origin : ''
@@ -342,7 +342,7 @@ const dockerCredLines = computed(() => {
   // 按勾选的能力取并集:勾 ai→接入方式凭证。多池同机全都要。
   let s = ''
   if (selectedPools.value.includes('ai')) {
-    if (aiAccessMethod.value === 'kimi-api') s += '  -e KIMI_API_KEY=<KEY> \\\n'
+    s += `  -e FLORI_CLI_PROVIDER=${aiAccessMethod.value} \\\n`
   }
   // io 无需任何凭证 env:B站/YouTube cookie 由中心在任务认领时自动下发(1.1.85 凭证分发)。
   return s
@@ -352,9 +352,9 @@ const dockerCredLines = computed(() => {
 const dockerCacheLines = computed(() => (needsCache.value
   ? '  -v whisper-cache:/cache \\\n  -e MODEL_CACHE_DIR=/cache \\\n  -e HF_ENDPOINT=https://hf-mirror.com \\\n  -e HF_HUB_DISABLE_XET=1 \\\n' : ''))
 const tagsArg = computed(() => {
-  const auto = selectedPools.value.includes('ai') ? [...selectedAiAccess.value.tags] : []
+  // 只透传手填的普通标签(如 home-desktop);能力标签受保护,由 worker 运行时自证。
   const manual = newTags.value.split(/[\s,]+/).filter(Boolean)
-  const t = [...new Set([...auto, ...manual])].sort()
+  const t = [...new Set(manual)].sort()
   return t.length ? ` --tags ${t.join(' ')}` : ''
 })
 // 唯一能力表达:--pools <所勾选>。
@@ -384,7 +384,7 @@ function composeEnvLines(): string {
     lines.push(['HF_HUB_DISABLE_XET', '1'])
   }
   if (selectedPools.value.includes('ai')) {
-    if (aiAccessMethod.value === 'kimi-api') lines.push(['KIMI_API_KEY', '${KIMI_API_KEY:?set KIMI_API_KEY}'])
+    lines.push(['FLORI_CLI_PROVIDER', aiAccessMethod.value])
   }
   return lines.map(([k, v]) => `      ${k}: ${yamlString(v)}`).join('\n')
 }

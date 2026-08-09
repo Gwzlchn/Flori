@@ -463,6 +463,52 @@ async def test_restore_plan_rejects_incomplete_snapshot_before_handoff(
     assert "external_media_dependencies" in response.json()["message"]
 
 
+def _seed_repository_with_job_ai_config(path, fields: dict):
+    """快照只带一条 job AI 配置 record,用来验目标环境取值域门。"""
+    import json
+
+    repository = ContentRepository.create(path)
+    payload = json.dumps(fields).encode()
+    blob = repository.put_blob_bytes(payload)
+    record = repository.put_record("user_config", {
+        "path": "jobs/job_alpha/ai-config.json",
+        "kind": "job_ai_config",
+        "blob": blob.digest,
+        "size_bytes": len(payload),
+        "media_type": "application/json",
+    })
+    body = _ready_snapshot()
+    body["records"]["business_ledgers"] = [record.digest]
+    body["blob_refs"] = [blob.digest]
+    snapshot = repository.put_snapshot(body)
+    repository.set_ref("latest", snapshot.digest)
+    return repository, snapshot.digest
+
+
+@pytest.mark.asyncio
+async def test_restore_plan_rejects_ai_params_outside_target_domain(
+    client, tmp_path, monkeypatch,
+):
+    """越界档位:离线交接单必须在恢复前指出 job/step/provider/字段。"""
+    repository_path = tmp_path.parent / f"{tmp_path.name}-portable-ai-domain"
+    _repository, digest = _seed_repository_with_job_ai_config(repository_path, {
+        "ai_overrides": {"11_smart": "codex-cli"},
+        "ai_param_overrides": {"11_smart": {"reasoning_effort": "hyper"}},
+    })
+    monkeypatch.setenv(recovery.REPOSITORY_ENV, str(repository_path))
+    monkeypatch.setenv("FLORI_DEPLOYMENT_ID", "flori-test")
+
+    response = await client.post(
+        "/api/recovery/restore-plans",
+        json={"snapshot_digest": digest},
+    )
+
+    assert response.status_code == 409
+    message = response.json()["message"]
+    assert "reasoning_effort_not_in_provider_domain" in message
+    assert "job_alpha" in message and "11_smart" in message and "codex-cli" in message
+
+
 def test_interrupted_operation_is_not_reported_as_running(test_config):
     operation = recovery.new_backup_operation(
         data_dir=test_config.data_dir,

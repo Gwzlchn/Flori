@@ -599,12 +599,19 @@ class TestRadarRoutes:
         body = r.json()
         assert body["task_id"] and body["task_id"].startswith("at_")
         assert body["window"]["days"] == 7
-        # 投了一个 digest AI task 进 queue:ai(claude 在 ai-worker 跑,API 不调);用量/审计在 worker 侧。
+        # 投了一个 digest AI task 进 queue:ai(CLI 在 ai-worker 跑,API 不调);用量/审计在 worker 侧。
         redis = app.state.redis
         assert redis.enqueue_ai_task.await_count == 1
         payload = redis.enqueue_ai_task.await_args.args[0]
         assert payload["kind"] == "ai" and payload["step"] == "digest"
-        assert payload["domain"] == "finance" and payload["require_tags"] == ["claude-cli"]
+        assert payload["domain"] == "finance" and payload["require_tags"] == []
+        assert "provider" not in payload and "model" not in payload
+        assert payload["allowed_providers"] == [
+            "claude-cli", "codex-cli", "qoder-cli",
+        ]
+        assert payload["allowed_providers"] == [
+            "claude-cli", "codex-cli", "qoder-cli",
+        ]
         assert payload["task_id"] == body["task_id"]
         assert payload["request"]["temperature"] == 0
         manifest = payload["audit_context"]["digest_source_manifest"]

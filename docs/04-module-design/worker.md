@@ -209,38 +209,36 @@ Worker 崩溃后 Redis 心跳 30s 过期自动消失。SQLite 记录保留，状
 
 Worker 启动时声明能力标签和排斥标签，取任务时只接匹配的步骤。
 
-**匹配规则**（两个条件同时满足）：
-1. `step.tags ⊆ worker.tags`（步骤需求 ⊆ Worker 能力）
-2. `step.tags ∩ worker.reject_tags = ∅`（步骤标签不在 Worker 排斥列表中）
+**匹配规则**（三个条件同时满足）：
+1. AI 任务的 `allowed_providers` 包含 Worker 由 `FLORI_CLI_PROVIDER` 绑定的 concrete provider（OR）
+2. `step.tags ⊆ worker.tags`（运行能力需求 ⊆ Worker 能力，AND）
+3. `step.tags ∩ worker.reject_tags = ∅`（步骤标签不在 Worker 排斥列表中）
 
 ```bash
-# 能力标签
-python -m worker.main --pools ai --tags vision claude-cli
+# CLI provider 与能力标签由探测自证,不能手填
+FLORI_CLI_PROVIDER=claude-cli python -m worker.main --pools ai
 python -m worker.main --pools gpu cpu --tags gpu vision
 
 # 排斥标签（不接受某些领域的任务）
-python -m worker.main --pools ai --tags vision --reject-tags private confidential
+FLORI_CLI_PROVIDER=claude-cli python -m worker.main --pools ai --reject-tags private confidential
 ```
 
-也支持自动发现（根据环境变量推断）：
+CLI Worker 先显式绑定 provider,再只探测该 provider 的二进制、凭证与能力：
 
 ```python
 def auto_discover_tags(self) -> set:
     tags = set()
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        tags.add("vision")               # Anthropic 模型支持视觉
-    if shutil.which("claude"):
-        tags.update(["vision", "claude-cli"])
-    if os.environ.get("DEEPSEEK_API_KEY"):
-        tags.add("text-only")
+    provider = require_concrete_cli_provider(os.environ["FLORI_CLI_PROVIDER"])
+    assert_cli_binary_and_credential_ready(provider)
+    tags.add(provider)
+    tags.update(probe_provider_capabilities(provider))
     if os.path.exists("/usr/bin/nvidia-smi"):
         tags.add("gpu")
-    if os.environ.get("OLLAMA_URL"):
-        tags.add("local")
     return tags
 ```
 
-手动 `--tags` 优先；未指定时用自动发现。
+`claude-cli` / `codex-cli` / `qoder-cli` / `read` / `websearch` 等受保护标签只能来自探测;
+手动 `--tags` 含任一受保护值时 Worker 拒绝启动。同机存在其它 CLI 凭证不会使一个进程注册多种 provider。
 
 **常用能力标签**（步骤声明需求，Worker 声明拥有）：
 
@@ -249,6 +247,8 @@ def auto_discover_tags(self) -> set:
 | `vision` | 支持图片输入 | 11_smart（视觉 pass） | 有 Claude/GPT-4o 的 Worker |
 | `gpu` | 有 GPU 硬件 | 02_whisper | GPU 机器 |
 | `claude-cli` | Claude CLI 订阅 | — | 家目录(workers/<名>/)已 seed 凭证的 Worker |
+| `codex-cli` | Codex CLI 订阅 | — | `FLORI_CLI_PROVIDER=codex-cli` 且凭证探测通过的 Worker |
+| `qoder-cli` | Qoder CLI 订阅 | — | `FLORI_CLI_PROVIDER=qoder-cli` 且凭证探测通过的 Worker |
 | `cn-network` | 可访问中国网络 | 01_download (B站) | 在国内网络的 Worker |
 | `heavy` | 大内存/高配额 | 长视频处理 | 高配机器 |
 

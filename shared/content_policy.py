@@ -872,9 +872,23 @@ def _has_control_chars(text: str) -> bool:
     )
 
 
+RETIRED_PROVIDER_VALUES = frozenset({"cli-agent"})
+
+
+def _reject_retired_provider(body: Mapping, table: str) -> None:
+    """拒绝历史已删除的 provider 值;这是恢复兼容 tombstone,不是运行时 provider 注册表。"""
+    provider = body.get("provider")
+    if provider in RETIRED_PROVIDER_VALUES:
+        raise PolicyError(
+            f"{table}.provider 不接受已删除的 provider {provider!r}:"
+            "审计账本必须记解析后的真实执行后端。该记录需先在源环境修正或隔离为 legacy audit。",
+        )
+
+
 def _validate_ai_usage(body: Mapping) -> None:
     _validate_exec_id(body["exec_id"], "ai_usage.exec_id")
     _require_nonempty_str_fields(body, "ai_usage", ("created_at",))
+    _reject_retired_provider(body, "ai_usage")
 
 
 def _validate_ai_task_log(body: Mapping) -> None:
@@ -883,6 +897,7 @@ def _validate_ai_task_log(body: Mapping) -> None:
     _require_nonempty_str_fields(
         body, "ai_task_log", ("task_id", "created_at", "exec_id"),
     )
+    _reject_retired_provider(body, "ai_task_log")
     if "error" in body and body["error"] is not None:
         validate_audit_text(body["error"], "ai_task_log.error")
 

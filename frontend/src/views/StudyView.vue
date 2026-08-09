@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { useApi } from '../composables/useApi'
 import { fmtClock, fmtDateTime } from '../utils/datetime'
 import type {
-  StudyCard, StudyCardListResponse, StudyMasteryItem, StudyMasteryResponse,
+  ConcreteCliProvider, StudyCard, StudyCardListResponse, StudyMasteryItem, StudyMasteryResponse,
   StudyStats, StudySuggestion, StudySuggestionBatch, StudySuggestionListResponse,
   StudySuggestionOperationsResponse,
 } from '../types'
@@ -36,6 +36,12 @@ const operating = ref(false)
 const selectedSuggestionIds = ref<string[]>([])
 const rejectReason = ref('')
 const maxCards = ref(10)
+const suggestionProvider = ref<ConcreteCliProvider>('claude-cli')
+const suggestionProviders: Array<{ value: ConcreteCliProvider; label: string }> = [
+  { value: 'claude-cli', label: 'Claude CLI' },
+  { value: 'codex-cli', label: 'Codex CLI' },
+  { value: 'qoder-cli', label: 'Qoder CLI' },
+]
 const suggestionDrafts = reactive<Record<string, {
   card_type: 'basic' | 'cloze' | 'qa'
   front: string
@@ -271,6 +277,7 @@ async function generateSuggestions() {
   const signature = JSON.stringify({
     domain: generationDomain.value,
     max_cards: maxCards.value,
+    provider: suggestionProvider.value,
   })
   pendingBatchCreate = requestFor(
     pendingBatchCreate,
@@ -282,6 +289,7 @@ async function generateSuggestions() {
       request_id: pendingBatchCreate.request_id,
       domain: generationDomain.value,
       max_cards: maxCards.value,
+      provider: suggestionProvider.value,
     })
     pendingBatchCreate = null
     localStorage.setItem('study_suggestion_batch_id', currentBatch.value.batch_id)
@@ -667,6 +675,12 @@ onUnmounted(() => {
           <p class="section-lead">候选只有经人工接受后才会进入复习队列。</p>
         </div>
         <div class="generate-controls">
+          <label>
+            CLI
+            <select v-model="suggestionProvider" class="input suggestion-provider" data-testid="study-provider">
+              <option v-for="provider in suggestionProviders" :key="provider.value" :value="provider.value">{{ provider.label }}</option>
+            </select>
+          </label>
           <label>
             数量
             <input v-model.number="maxCards" class="input suggestion-max" type="number" min="1" max="50" />

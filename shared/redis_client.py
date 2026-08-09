@@ -175,6 +175,9 @@ local function contains(items, wanted)
     end
     return false
 end
+local function is_concrete_cli(provider)
+    return provider == 'claude-cli' or provider == 'codex-cli' or provider == 'qoder-cli'
+end
 local function matches(task)
     if task['kind'] == 'ai' then return false end
     local required = task['require_tags'] or {}
@@ -191,7 +194,30 @@ local function matches(task)
     for _, tag in ipairs(task['tags'] or {}) do
         if contains(reject_tags, tag) then return false end
     end
-    return true
+    local selected_provider = task['provider']
+    local allowed = task['allowed_providers']
+    if allowed ~= nil then
+        if type(allowed) ~= 'table' or #allowed == 0
+            or (type(selected_provider) == 'string' and selected_provider ~= '') then
+            return false
+        end
+        selected_provider = nil
+        local matches = 0
+        for _, provider in ipairs(allowed) do
+            if type(provider) ~= 'string' or provider == '' then return false end
+            if contains(worker_tags, provider) then
+                matches = matches + 1
+                selected_provider = provider
+            end
+        end
+        if matches ~= 1 then return false end
+    elseif pool == 'ai' then
+        if type(selected_provider) ~= 'string' or selected_provider == '' then return false end
+        if is_concrete_cli(selected_provider) and not contains(worker_tags, selected_provider) then
+            return false
+        end
+    end
+    return true, selected_provider
 end
 
 local items = redis.call('ZRANGE', KEYS[1], 0, -1, 'WITHSCORES')
@@ -202,7 +228,9 @@ for index = 1, #items, 2 do
         redis.call('ZREM', KEYS[1], raw)
         redis.call('XADD', 'flori:lifecycle:poison', '*',
             'source', KEYS[1], 'payload', raw, 'reason', 'invalid_json')
-    elseif matches(task) then
+    else
+        local matched, selected_provider = matches(task)
+        if matched then
         local job_id = task['job_id']
         local step = task['step']
         local status_key = 'job:' .. job_id .. ':steps'
@@ -245,9 +273,17 @@ for index = 1, #items, 2 do
                     'worker_id', worker, 'job_id', job_id, 'step', step,
                     'exec_id', exec_id, 'pool', pool, 'generation', generation)
                 redis.call('EXPIRE', lease_key, tonumber(ARGV[7]))
-                return cjson.encode({job_id=job_id, step=step, pool=pool,
-                    exec_id=exec_id, generation=tonumber(generation)})
+                local claim = {job_id=job_id, step=step, pool=pool,
+                    exec_id=exec_id, generation=tonumber(generation)}
+                if type(selected_provider) == 'string' and selected_provider ~= '' then
+                    claim['provider'] = selected_provider
+                end
+                if type(task['allowed_providers']) == 'table' then
+                    claim['allowed_providers'] = task['allowed_providers']
+                end
+                return cjson.encode(claim)
             end
+        end
         end
     end
 end
@@ -457,6 +493,9 @@ for _, tag in ipairs(accepted) do
     end
 end
 for _, tag in ipairs(rejected) do rejected_set[tag] = true end
+local function is_concrete_cli(provider)
+    return provider == 'claude-cli' or provider == 'codex-cli' or provider == 'qoder-cli'
+end
 local entries = redis.call('ZRANGE', KEYS[1], 0, tonumber(ARGV[5]) - 1, 'WITHSCORES')
 for index = 1, #entries, 2 do
     local raw = entries[index]
@@ -480,6 +519,30 @@ for index = 1, #entries, 2 do
         for _, tag in ipairs(tags) do
             if rejected_set[tag] then eligible = false end
         end
+        local selected_provider = task['provider']
+        local allowed = task['allowed_providers']
+        if allowed ~= nil then
+            if type(allowed) ~= 'table' or #allowed == 0
+                or (type(selected_provider) == 'string' and selected_provider ~= '') then
+                eligible = false
+            else
+                selected_provider = nil
+                local matches = 0
+                for _, provider in ipairs(allowed) do
+                    if type(provider) ~= 'string' or provider == '' then
+                        eligible = false
+                    elseif accepted_set[provider] then
+                        matches = matches + 1
+                        selected_provider = provider
+                    end
+                end
+                if matches ~= 1 then eligible = false end
+            end
+        elseif type(selected_provider) ~= 'string' or selected_provider == '' then
+            eligible = false
+        elseif is_concrete_cli(selected_provider) and not accepted_set[selected_provider] then
+            eligible = false
+        end
         if eligible then
             local task_id = task['task_id']
             local claim_key = KEYS[4] .. task_id
@@ -501,12 +564,14 @@ for index = 1, #entries, 2 do
                         'state', 'claimed',
                         'lease_until', ARGV[3],
                         'lease_seconds', ARGV[8],
+                        'provider', tostring(selected_provider),
                         'raw_json', raw,
                         'score', score,
                         'requeue_count', requeue_count)
                     redis.call('ZADD', KEYS[3], ARGV[3], task_id)
                     redis.call('HDEL', KEYS[2], 'ai|ai|' .. task_id)
-                    return {raw, score, requeue_count}
+                    task['provider'] = selected_provider
+                    return {cjson.encode(task), score, requeue_count}
                 end
             end
         end
@@ -731,7 +796,21 @@ class RedisClient:
         priority: int,
         require_tags: list[str] | None = None,
         resources: list[str] | None = None,
+        provider: str | None = None,
+        allowed_providers: list[str] | None = None,
     ) -> None:
+        if provider and allowed_providers:
+            raise ValueError("provider 与 allowed_providers 互斥")
+        if allowed_providers is not None:
+            from shared.ai_routing import CONCRETE_CLI_PROVIDERS
+
+            if (
+                not isinstance(allowed_providers, list) or not allowed_providers
+                or not all(type(item) is str and item for item in allowed_providers)
+                or len(set(allowed_providers)) != len(allowed_providers)
+                or not set(allowed_providers).issubset(CONCRETE_CLI_PROVIDERS)
+            ):
+                raise ValueError("allowed_providers 必须是非空且不重复的 concrete CLI 列表")
         payload = {
             "job_id": job_id, "step": step, "tags": sorted(tags),
             "require_tags": sorted(require_tags) if require_tags else [],
@@ -739,6 +818,10 @@ class RedisClient:
         # 仅在声明了资源槽时才写 resources 键:无声明时 task JSON 不含该键(向后兼容)。
         if resources:
             payload["resources"] = sorted(resources)
+        if provider:
+            payload["provider"] = provider
+        if allowed_providers:
+            payload["allowed_providers"] = list(allowed_providers)
         task = json.dumps(payload, sort_keys=True)
         await self.r.zadd(f"queue:{pool}", {task: priority})
         # 入队时间戳存独立 hash(不进 ZSET 成员,避免改成员破坏 ZADD 去重),供展示已等待多久。
@@ -1244,6 +1327,8 @@ class RedisClient:
                     "job_id": t.get("job_id"), "step": t.get("step"), "priority": int(score),
                     "enqueued_at": float(at_raw) if at_raw else None,
                     "tags": t.get("tags", []), "require_tags": t.get("require_tags", []),
+                    "provider": t.get("provider"),
+                    "allowed_providers": t.get("allowed_providers", []),
                     "resources": t.get("resources", []),
                 })
             return out

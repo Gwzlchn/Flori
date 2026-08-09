@@ -498,7 +498,7 @@ class TestJobsRequest:
         assert resp.status_code == 200
         claim = resp.json()["claim"]
         assert claim["kind"] == "ai" and claim["task_id"] == "at_codex"
-        assert claim["provider"] == "codex-cli" and claim["model"] == "gpt-5-codex"
+        assert claim["provider"] == "codex-cli" and claim["model"] == "gpt-5.6-sol"
         assert claim["require_tags"] == ["codex-cli"]
         assert claim["exec_id"].startswith(f"{worker_id}:")
         assert "job_id" not in claim
@@ -1127,6 +1127,20 @@ class TestUsage:
         assert summary["total_cost_usd"] == pytest.approx(0.5)
 
     @pytest.mark.asyncio
+    async def test_rejects_virtual_provider(self, jobs_client, db, real_redis):
+        """历史已删除的 provider 不能重新进入成本账本。"""
+        worker_id, token = await _register_real(jobs_client)
+        lease_exec = await _activate_lease(real_redis, worker_id)
+        resp = await jobs_client.post(
+            "/api/runner/usage",
+            json={"exec_id": "e_virtual", "provider": "cli-agent", "model": "auto",
+                  "job_id": "j1", "step": "A"},
+            headers=_task_headers(token, "j1", "A", lease_exec),
+        )
+        assert resp.status_code == 400
+        assert db.get_usage_summary(job_id="j1")["total_cost_usd"] == 0
+
+    @pytest.mark.asyncio
     async def test_cost_filled_from_litellm_pricing(self, jobs_app, jobs_client, db, real_redis):
         """非 cli provider:api 侧 LiteLLM 价表命中 → 覆盖 worker 上报成本(权威,缓存感知)。"""
         jobs_app.state.pricing._table = {
@@ -1162,6 +1176,21 @@ class TestUsage:
             headers=_task_headers(token, "jc", "A", lease_exec),
         )
         assert db.get_usage_summary(job_id="jc")["total_cost_usd"] == pytest.approx(0.123)
+
+    @pytest.mark.asyncio
+    async def test_codex_cli_cost_not_overridden(self, jobs_app, jobs_client, db, real_redis):
+        """codex-cli 订阅制 cost 恒 0:gpt-5-codex 会裸键命中价表,必须豁免否则伪造账单。"""
+        jobs_app.state.pricing._table = {"gpt-5-codex": {"input_cost_per_token": 5e-06}}
+        worker_id, token = await _register_real(jobs_client)
+        lease_exec = await _activate_lease(real_redis, worker_id, "jx", "A")
+        await jobs_client.post(
+            "/api/runner/usage",
+            json={"exec_id": "p2x", "provider": "codex-cli", "model": "gpt-5-codex",
+                  "job_id": "jx", "step": "A", "input_tokens": 1_000_000, "output_tokens": 0,
+                  "cost_usd": 0.0},
+            headers=_task_headers(token, "jx", "A", lease_exec),
+        )
+        assert db.get_usage_summary(job_id="jx")["total_cost_usd"] == pytest.approx(0.0)
 
     @pytest.mark.asyncio
     async def test_duplicate_usage_not_double_billed(self, jobs_client, db, real_redis):

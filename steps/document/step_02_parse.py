@@ -25,7 +25,7 @@ class DocumentParseStep(StepBase):
             missing.append("input/source.html|input/source.pdf")
         return missing
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         hashes = {"job": file_hash(self.job_dir / "job.json")}
         for name in ("source.html", "source.pdf", "metadata.json"):
             path = self.job_dir / "input" / name

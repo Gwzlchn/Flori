@@ -369,9 +369,28 @@ describe('StudyView', () => {
       request_id: expect.stringMatching(/^study-suggestion-batch:/),
       domain: 'general',
       max_cards: 10,
+      provider: 'claude-cli',
     })
     expect(localStorage.getItem('study_suggestion_batch_id')).toBe('sb_new')
     expect(w.text()).toContain('生成批次 queued')
+    w.unmount()
+  })
+
+  it('生成批次只能选择三个具体 CLI provider', async () => {
+    post.mockResolvedValue(batch({ batch_id: 'sb_qoder', provider: 'qoder-cli', model: 'ultimate' }))
+    const w = await mountView()
+    const select = w.find('[data-testid="study-provider"]')
+    expect(select.findAll('option').map(option => option.attributes('value'))).toEqual([
+      'claude-cli', 'codex-cli', 'qoder-cli',
+    ])
+
+    await select.setValue('qoder-cli')
+    await w.find('button.generate-suggestions').trigger('click')
+    await flushPromises()
+
+    expect(post).toHaveBeenCalledWith('/api/study/suggestion-batches', expect.objectContaining({
+      provider: 'qoder-cli',
+    }))
     w.unmount()
   })
 

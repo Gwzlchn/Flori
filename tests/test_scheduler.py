@@ -10,7 +10,7 @@ import pytest
 
 from tests.conftest import make_fakeredis
 from tests.pubsub_helpers import subscription_barrier
-from shared.config import AppConfig
+from shared.config import AppConfig, load_yaml
 from shared.models import Collection, Job, JobPart, JobStatus, StepStatus, Step, AIUsage, Worker
 from shared.pipeline_scope import expand_pipeline_steps
 from shared.step_scope import execution_step_key, part_scope
@@ -527,8 +527,8 @@ class TestNoWorkerWaiting:
         s = Scheduler(redis, db, config)
         calls = []
 
-        async def _has_workers(pool, require_tags):
-            calls.append((pool, tuple(require_tags)))
+        async def _has_workers(pool, require_tags, allowed_providers=None):
+            calls.append((pool, tuple(require_tags), tuple(allowed_providers or [])))
             return True
 
         s._pool_has_workers_for = _has_workers
@@ -539,7 +539,7 @@ class TestNoWorkerWaiting:
 
         await s.check_no_worker()
 
-        assert calls == [("cpu", ())]
+        assert calls == [("cpu", (), ())]
         assert set(await redis.get_active_jobs()) == {
             "j_test_001", "j_test_002", "j_test_003",
         }
@@ -695,12 +695,15 @@ class TestSkipPropagation:
                     # 故意把多级 AI 下游写在依赖之前,冻结 YAML key 非拓扑序的契约。
                     "concepts": {
                         "run": "m.concepts", "pool": "ai", "needs": ["attestation"],
+                        "ai": {"allowed_providers": ["claude-cli"]},
                     },
                     "attestation": {
                         "run": "m.attestation", "pool": "ai", "needs": ["materialize"],
+                        "ai": {"allowed_providers": ["claude-cli"]},
                     },
                     "translate": {
                         "run": "m.translate", "pool": "ai", "needs": ["parse"],
+                        "ai": {"allowed_providers": ["claude-cli"]},
                     },
                     "materialize": {
                         "run": "m.materialize", "pool": "io", "needs": ["translate"],
@@ -1183,12 +1186,14 @@ class TestNewFormatConsumption:
                     },
                     "punctuate": {
                         "run": "m.pu", "pool": "ai", "needs": ["download"],
+                        "ai": {"allowed_providers": ["claude-cli"]},
                         "rules": [{"exists": "input/*.srt", "when": "on"}],
                     },
                 }
             },
         }
         config = make_config(tmp_path, tmp_jobs_dir, self._normalized(raw_new), configs_dir)
+        config.providers = load_yaml(configs_dir / "providers.yaml")
         sched = _stub_workers_present(Scheduler(redis, db, config))
 
         job = make_job(pipeline="nf")
@@ -2386,6 +2391,26 @@ class TestEnqueueTags:
         await sched.submit_job(job)
         item, _ = await redis.dequeue_step("ai")
         assert item["require_tags"] == ["claude-cli", "openai-api", "vision"]
+
+    @pytest.mark.asyncio
+    async def test_allowed_providers_stay_out_of_and_tags(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+    ):
+        from shared.ai_routing import CONCRETE_CLI_PROVIDERS
+
+        pipelines = {"peer": {"steps": [{
+            "name": "A", "pool": "ai", "depends_on": [], "tags": ["vision"],
+            "ai": {"allowed_providers": list(CONCRETE_CLI_PROVIDERS)},
+        }]}}
+        config = make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir)
+        config.providers = load_yaml(configs_dir / "providers.yaml")
+        sched = Scheduler(redis, db, config)
+        job = Job(id="j_allowed_provider_tags", content_type="video", pipeline="peer")
+        db.create_job(job)
+        await sched.submit_job(job)
+        item, _ = await redis.dequeue_step("ai")
+        assert item["require_tags"] == ["vision"]
+        assert item["allowed_providers"] == list(CONCRETE_CLI_PROVIDERS)
 
     @pytest.mark.asyncio
     async def test_job_override_replaces_pipeline_provider_tiers(

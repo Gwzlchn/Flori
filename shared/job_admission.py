@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from shared.ai_routing import (
+    allowed_providers_from_ai,
     step_required_route_tags,
     step_task_tags,
     worker_satisfies_requirements,
@@ -20,6 +21,8 @@ class StepRequirement:
     pool: str
     required_tags: frozenset[str]
     task_tags: frozenset[str]
+    provider: str | None = None
+    allowed_providers: frozenset[str] = frozenset()
 
 
 def _may_run(step: dict, flags: dict[str, bool]) -> bool:
@@ -85,11 +88,27 @@ def pipeline_requirements(
         task_tags = set(step_task_tags(
             step, domain=domain, style_tags=style_tags, required_tags=required,
         ))
+        provider: str | None = None
+        allowed = frozenset()
+        if pool == "ai":
+            ai = step.get("ai") if isinstance(step.get("ai"), dict) else {}
+            allowed = frozenset(allowed_providers_from_ai(ai, config.providers))
+            if not allowed:
+                declared = {
+                    route.get("provider")
+                    for route in ai.values()
+                    if isinstance(route, dict) and type(route.get("provider")) is str
+                }
+                if len(declared) != 1:
+                    raise ValueError("AI step must declare one provider or allowed_providers")
+                provider = str(next(iter(declared)))
         out.append(StepRequirement(
             name=name,
             pool=pool,
             required_tags=frozenset(required),
             task_tags=frozenset(task_tags),
+            provider=provider,
+            allowed_providers=allowed,
         ))
     if not out:
         raise ValueError("pipeline has no reachable steps")
@@ -117,8 +136,13 @@ def worker_can_run(
     )
     if status not in {ONLINE_IDLE, ONLINE_BUSY}:
         return False
+    if requirement.pool == "ai" and not (
+        requirement.provider or requirement.allowed_providers
+    ):
+        return False
     if not worker_satisfies_requirements(
         worker, requirement.pool, requirement.required_tags,
+        requirement.allowed_providers,
     ):
         return False
     reject_raw = worker.get("reject_tags", "")

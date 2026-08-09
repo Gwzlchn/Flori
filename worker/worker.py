@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 import platform
-import shutil
 import socket
 import time
 from datetime import datetime, timezone
@@ -24,7 +23,11 @@ import structlog
 from shared.ai_gateway import AIGateway, collect_usage_from_file
 from shared.ask_citations import validate_ask_citations
 from shared.config import AppConfig, build_step_config
-from shared.models import AIUsage, DEFAULT_AI_MODEL, DEFAULT_AI_PROVIDER, LLMRequest, generate_worker_id
+from shared.models import (
+    AIUsage,
+    LLMRequest,
+    generate_worker_id,
+)
 from shared.runner_ops import parse_style_tags
 from shared.source_library import (
     SourceLibrary,
@@ -94,7 +97,7 @@ def _read_media_duration(work_dir: Path) -> float | None:
     return float(dur) if isinstance(dur, (int, float)) else None
 
 
-def _worker_spec() -> dict:
+def _worker_spec(cli_provider: str | None = None) -> dict:
     """worker 自报版本 + 机器配置.版本取构建时注入的 FLORI_VERSION,便于查代码漂移."""
     from shared.version import FLORI_VERSION
     spec: dict = {
@@ -102,6 +105,8 @@ def _worker_spec() -> dict:
         "cpu": os.cpu_count(),
         "platform": platform.platform(),
         "python": platform.python_version(),
+        # concrete CLI 绑定随注册可观测;无 CLI 能力的 worker 为 None。
+        "cli_provider": cli_provider,
     }
     try:
         with open("/proc/meminfo", encoding="utf-8") as f:
@@ -157,28 +162,6 @@ def _resolve_worker_id(worker_type: str) -> str:
     return worker_id
 
 
-def _claude_logged_in() -> bool:
-    """claude-cli 是否真有可用凭证(CLI 登录态)。token 落在 $HOME/.claude/.credentials.json
-    (claude-cli 用 refreshToken 自动续期就地回写)。仅判二进制在不在会误标,见 auto_discover_tags。"""
-    home = os.environ.get("HOME") or os.path.expanduser("~")
-    cred = Path(home) / ".claude" / ".credentials.json"
-    try:
-        return cred.is_file() and cred.stat().st_size > 0
-    except OSError:
-        return False
-
-
-def _codex_logged_in() -> bool:
-    """codex-cli 是否有可用凭证.file storage 凭证在 `$CODEX_HOME/auth.json` 或 `$HOME/.codex/auth.json`."""
-    home = os.environ.get("HOME") or os.path.expanduser("~")
-    codex_home = os.environ.get("CODEX_HOME") or str(Path(home) / ".codex")
-    cred = Path(codex_home) / "auth.json"
-    try:
-        return cred.is_file() and cred.stat().st_size > 0
-    except OSError:
-        return False
-
-
 def _probe_reachable(url: str, timeout: float = 6.0, retries: int = 2) -> bool:
     """试连 URL(走本机网络,含自带代理)。拿到任何 HTTP 响应(含 4xx/5xx)= 可达;
     仅网络层失败(连不上/超时/DNS)= 不可达。用于自动判定 net-zone。"""
@@ -213,35 +196,78 @@ def _probe_net_zones() -> set[str]:
     return zones
 
 
-def auto_discover_tags() -> set[str]:
-    from shared.ai_routing import provider_capability_tags, provider_required_tag
+def validate_manual_tags(
+    manual_tags: set[str], providers_config: dict | None = None,
+) -> None:
+    """--tags 手工标签进程入口校验:受保护能力标签一律拒绝,fail-closed 不静默剥离。
+    受保护集合从已加载配置动态派生,否则 providers.yaml 里新增的 provider 投影标签
+    不在内置常量里,手工传入就能伪造。"""
+    from shared.ai_routing import protected_capability_tags
+
+    forged = sorted(manual_tags & protected_capability_tags(providers_config))
+    if forged:
+        raise WorkerFatalError(
+            f"--tags 不接受受保护能力标签 [{', '.join(forged)}]:provider 投影标签与"
+            "路由能力标签只能由 worker 启动时的运行时探测自证(二进制 + 凭证 + 配置),"
+            "手工声明等于伪造能力。移除这些标签后重启;能力真实就绪时会自动打上。",
+            reason="forged_capability_tags",
+        )
+
+
+def auto_discover_tags(
+    providers_config: dict | None = None, cli_provider: str | None = None,
+) -> set[str]:
+    from shared.ai_gateway import (
+        cli_provider_ready, codex_sandbox_available,
+    )
+    from shared.ai_routing import (
+        CLI_PROVIDER_TYPES, READ_TOOL_TAG, provider_capability_tags,
+        provider_required_tag, resolve_api_credential,
+    )
 
     tags = set()
-    has_anthropic_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
-    # claude-cli/vision 须真能用才标,而非"镜像里有 claude 二进制就标":否则纯 gateway worker
-    # (镜像自带 claude 但无凭证)会误标,一旦作 ai worker 就会认领 11_smart/取证/评审再因无登录失败.
-    # 判据:二进制在 且 (CLI 已登录 或 有 ANTHROPIC_API_KEY).
-    claude_ready = bool(shutil.which("claude")) and (has_anthropic_key or _claude_logged_in())
-    if has_anthropic_key or claude_ready:
+    providers_map = (providers_config or {}).get("providers")
+    providers_map = providers_map if isinstance(providers_map, dict) else {}
+    # 只注册 FLORI_CLI_PROVIDER 显式绑定的一个 CLI。即使本机多套凭证都就绪,
+    # 未绑定的 provider 也不会被发现或自动选择。
+    selected = cli_provider
+    if selected:
+        if not cli_provider_ready(selected):
+            raise WorkerFatalError(
+                f"bound CLI provider {selected!r} is not ready",
+                reason="cli_provider_not_ready",
+            )
+        tags.add(provider_required_tag(selected, providers_config))
         tags.add("vision")
-    if has_anthropic_key:
-        tags.add(provider_required_tag("anthropic"))
-    if claude_ready:
-        tags.add(provider_required_tag("claude-cli"))
-        tags.update(provider_capability_tags("claude-cli"))
-    codex_ready = bool(shutil.which("codex")) and _codex_logged_in()
-    if codex_ready:
-        tags.add(provider_required_tag("codex-cli"))
-        tags.add("vision")
-    if os.environ.get("DEEPSEEK_API_KEY"):
-        tags.add(provider_required_tag("deepseek"))
-        tags.add("text-only")
-    if os.environ.get("KIMI_API_KEY"):
-        tags.add(provider_required_tag("kimi"))
-        tags.add("text-only")
-    if os.environ.get("OPENAI_API_KEY"):
-        tags.add(provider_required_tag("openai"))
-        tags.add("vision")
+        caps = provider_capability_tags(selected, providers_config)
+        # codex 的 read 额外要求沙箱真能起来:容器默认 seccomp 下 bubblewrap 建不了 namespace,
+        # 模型命令全失败而 codex exec 仍 rc=0,自证 read 会让取证步派给干不了的 worker。
+        if selected == "codex-cli" and READ_TOOL_TAG in caps and not codex_sandbox_available():
+            caps = caps - {READ_TOOL_TAG}
+            logger.warning(
+                "codex_sandbox_unavailable",
+                detail="沙箱起不来,本机 codex 不自证 read 能力",
+                remedy="AI worker 需 seccomp=unconfined 与 apparmor=unconfined 才能启用",
+            )
+        tags.update(caps)
+        logger.info("cli_provider_tags", provider=selected)
+    # API provider 一律按已加载配置通用发现, 不逐个硬编码环境变量名:
+    # 受保护标签集合按配置动态派生后, 只发现内置四家会让自定义 provider 永远拿不到投影标签,
+    # 手填又被拒, 于是它配了也永远不满足调度硬标签。就绪判据与 Gateway 的密钥解析同源(含 {NAME}_API_KEY 环境回退)。
+    for name, entry in sorted(providers_map.items(), key=lambda i: str(i[0])):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") in CLI_PROVIDER_TYPES:
+            continue  # CLI 只走上面的显式绑定路径
+        if name == "local":
+            continue  # 本地 ollama 由 OLLAMA_URL 单独门控, 其 api_key 是字面量
+        if not resolve_api_credential(name, entry):
+            continue
+        tags.add(provider_required_tag(name, providers_config))
+        features = entry.get("features")
+        features = features if isinstance(features, list) else []
+        tags.add("vision" if "vision" in features else "text-only")
+        tags.update(provider_capability_tags(name, providers_config))
     from steps.utils.device import has_nvidia_gpu
     if has_nvidia_gpu():  # PATH 感知 + 真实探测,与 steps.utils.device 单一判据
         tags.add("gpu")
@@ -253,6 +279,56 @@ def auto_discover_tags() -> set[str]:
     tags |= _probe_net_zones()
     tags |= configured_source_root_tags()
     return tags
+
+
+def materialize_claimed_ai_route(
+    providers_config: dict,
+    provider: object,
+    *,
+    allowed_providers: object = None,
+    requested_model: object = None,
+) -> dict:
+    """把原子 claim 选中的 provider 物化为 Gateway concrete tier。
+
+    Redis 只裁决 OR 集合,不复制模型配置。模型与档位在 worker 当前配置复核后生效,
+    避免队列携带跨 CLI 的单一占位模型。provider_source 让动态选择进入输入指纹。
+    """
+    from shared.ai_routing import (
+        CONCRETE_CLI_PROVIDERS,
+        validate_ai_param_override,
+    )
+
+    if type(provider) is not str or not provider:
+        raise ValueError("AI claim missing concrete provider")
+    providers = (providers_config or {}).get("providers")
+    entry = providers.get(provider) if isinstance(providers, dict) else None
+    if not isinstance(entry, dict):
+        raise ValueError(f"AI claim provider is not configured: {provider}")
+    if allowed_providers is not None:
+        if (
+            not isinstance(allowed_providers, list) or not allowed_providers
+            or not all(type(item) is str for item in allowed_providers)
+        ):
+            raise ValueError("AI claim allowed_providers is invalid")
+        if provider not in allowed_providers:
+            raise ValueError("AI claim provider is outside allowed_providers")
+        if provider not in CONCRETE_CLI_PROVIDERS:
+            raise ValueError("AI claim selected a non-concrete CLI provider")
+    model = requested_model or entry.get("model")
+    if type(model) is not str or not model:
+        raise ValueError(f"AI claim provider has no default model: {provider}")
+    params = {"model": model}
+    effort = entry.get("reasoning_effort")
+    if type(effort) is str and effort:
+        params["reasoning_effort"] = effort
+    violation = validate_ai_param_override(provider, params, providers_config)
+    if violation is not None:
+        raise ValueError(violation.message())
+    return {"primary": {
+        "provider": provider,
+        "model": model,
+        "provider_source": "claim" if allowed_providers is not None else "declaration",
+    }}
 
 
 class Worker:
@@ -267,6 +343,7 @@ class Worker:
         reject_tags: set[str],
         concurrency: int = 1,
         local_barrier: bool = True,
+        cli_provider: str | None = None,
     ):
         self.transport = transport
         self.config = config
@@ -281,6 +358,7 @@ class Worker:
             tag for tag in tags if not tag.startswith("source-root:")
         } | configured_source_root_tags()
         self.reject_tags = reject_tags
+        self.cli_provider = cli_provider
         self.idle_timeout = int(os.environ.get("IDLE_TIMEOUT", "0"))
         # 本机并发度:同时在跑几个 step.异构机器据此自报容量(强机调大,弱机=1).
         # 全局每池槽位(pools.yaml limit)仍是系统级天花板,本数只决定单 worker 的并行上限.
@@ -328,6 +406,7 @@ class Worker:
             "worker_start", worker_id=self.worker_id,
             type=self.worker_type, pools=self.pools, concurrency=self.concurrency,
             tags=sorted(self.tags), reject_tags=sorted(self.reject_tags),
+            cli_provider=self.cli_provider,
         )
         try:
             await asyncio.gather(
@@ -367,7 +446,8 @@ class Worker:
                     worker_id=self.worker_id, worker_type=self.worker_type,
                     pools=self.pools, tags=self.tags, reject_tags=self.reject_tags,
                     hostname=socket.gethostname(), now=datetime.now(timezone.utc),
-                    concurrency=self.concurrency, spec=_worker_spec(),
+                    concurrency=self.concurrency,
+                    spec=_worker_spec(self.cli_provider),
                 )
                 # 注册响应携带的中心期望配置(transport 属性侧带,免改 ABC 返回签名):
                 # 首拍即齐,claim supervisor 起跑前生效,最小三参数裸启也能吃到中心并发/池.
@@ -639,6 +719,18 @@ class Worker:
             raw = next((s for s in raw_steps if s["name"] == step), None)
             if raw is None:
                 raise ValueError(f"step '{step}' not found in pipeline '{pipeline}'")
+            if raw.get("pool") == "ai":
+                selected_provider = claim.get("provider")
+                allowed = claim.get("allowed_providers")
+                if (
+                    selected_provider in {"claude-cli", "codex-cli", "qoder-cli"}
+                    and selected_provider != self.cli_provider
+                ):
+                    raise ValueError("AI claim provider does not match worker CLI binding")
+                step_cfg["ai"] = materialize_claimed_ai_route(
+                    self.config.providers, selected_provider,
+                    allowed_providers=allowed,
+                )
             audit_globs = [
                 pattern
                 for pattern in (raw.get("output_policy") or {}).get("audit_globs") or []
@@ -1174,8 +1266,10 @@ class Worker:
         domain = claim.get("domain")
         start = time.time()
         ts_start = datetime.now(timezone.utc)
-        provider_name = claim.get("provider") or DEFAULT_AI_PROVIDER
-        model_name = claim.get("model") or DEFAULT_AI_MODEL
+        provider_name = claim.get("provider")
+        allowed = claim.get("allowed_providers")
+        materialized_ai: dict | None = None
+        model_name = ""
         audit_context = claim.get("audit_context") if type(claim.get("audit_context")) is dict else {}
         source_manifest = audit_context.get("ask_source_manifest")
         managed_claim = bool(claim.get("claim_id"))
@@ -1183,6 +1277,16 @@ class Worker:
         renew_task: asyncio.Task | None = None
         req: LLMRequest | None = None
         try:
+            if (
+                provider_name in {"claude-cli", "codex-cli", "qoder-cli"}
+                and provider_name != self.cli_provider
+            ):
+                raise ValueError("AI task provider does not match worker CLI binding")
+            materialized_ai = materialize_claimed_ai_route(
+                self.config.providers, provider_name, allowed_providers=allowed,
+                requested_model=claim.get("model"),
+            )
+            model_name = materialized_ai["primary"]["model"]
             if step_name == "study_suggestions":
                 from shared.study_suggestions import validate_study_suggestion_task_payload
 
@@ -1201,7 +1305,7 @@ class Worker:
                 gateway = AIGateway(
                     self.config.providers,
                     {"steps": [{"name": step_name,
-                                "ai": {"primary": {"provider": provider_name, "model": model_name}}}]},
+                                "ai": materialized_ai}]},
                 )
                 resp = await gateway.call(step_name, req)
             except Exception as e:
@@ -1358,7 +1462,7 @@ class Worker:
 
     async def _write_ai_task_audit(
         self, task_id, step_name, domain, exec_id, req, resp, error, ts_start, duration,
-        requested_provider=DEFAULT_AI_PROVIDER, requested_model=DEFAULT_AI_MODEL,
+        requested_provider="", requested_model="",
         *, audit_context=None, citation_validation=None,
     ) -> bool:
         """构建并落一条 AI task 白盒审计,对齐 DAG ai_logs 的路由/尝试链/渲染 prompt/输出/raw/用量/全轨迹."""
@@ -1367,6 +1471,24 @@ class Worker:
             attempts, tier_used, raw = resp.attempts, resp.tier_used, resp.raw
         else:
             attempts, tier_used, raw = (getattr(error, "attempts", []) or []), None, None
+        # 全败时执行侧事实只能取最后一次尝试。claim 已物化具体 provider,
+        # 解析前失败也可安全归因到该具体后端。
+        last_attempt = attempts[-1] if attempts else {}
+        resolved_provider = (
+            resp.provider if resp is not None else last_attempt.get("provider")
+        )
+        resolved_model = resp.model if resp is not None else last_attempt.get("model")
+        if resolved_provider is None and requested_provider:
+            resolved_provider = requested_provider
+            resolved_model = resolved_model or requested_model
+        effective_effort = (
+            resp.reasoning_effort if resp is not None
+            else last_attempt.get("reasoning_effort")
+        )
+        effort_source = (
+            resp.reasoning_effort_source if resp is not None
+            else last_attempt.get("reasoning_effort_source")
+        )
         record = {
             "task_id": task_id, "kind": "ai", "step": step_name, "domain": domain, "exec_id": exec_id,
             "ok": ok, "error": (str(error)[:1000] if error else None),
@@ -1377,7 +1499,13 @@ class Worker:
                 "git_commit": os.environ.get("FLORI_GIT_COMMIT"),
             },
             "routing": {
-                "requested": {"provider": requested_provider, "model": requested_model},
+                "requested": {
+                    "provider": requested_provider, "model": requested_model,
+                    "reasoning_effort": req.reasoning_effort,
+                },
+                "resolved": {"provider": resolved_provider, "model": resolved_model},
+                "reasoning_effort": effective_effort,
+                "reasoning_effort_source": effort_source,
                 "tier_used": tier_used, "attempts": attempts,
             },
             "prompt": {
@@ -1401,8 +1529,8 @@ class Worker:
         }
         log = {
             "task_id": task_id, "exec_id": exec_id, "step_name": step_name, "domain": domain,
-            "provider": (resp.provider if resp is not None else requested_provider),
-            "model": (resp.model if resp is not None else requested_model),
+            "provider": resolved_provider,
+            "model": resolved_model,
             "ok": ok, "error": (str(error)[:1000] if error else None),
             "input_tokens": (resp.input_tokens if resp else 0),
             "output_tokens": (resp.output_tokens if resp else 0),

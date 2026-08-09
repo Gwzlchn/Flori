@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from shared import runner_ops
 from shared.ask_citations import validate_bound_ask_citations
 from shared.config import AppConfig
+from shared.content_policy import RETIRED_PROVIDER_VALUES
 from shared.db import Database
 from shared.models import AIUsage, Worker, generate_worker_id
 from shared.redis_client import RedisClient, worker_info_from_model
@@ -942,6 +943,11 @@ async def record_usage(
             redis, worker_id, lease.job_id, lease.step, lease.exec_id,
             renew=True,
         )
+    if req.provider in RETIRED_PROVIDER_VALUES:
+        # 历史已删除值只作拒绝 tombstone。落账必须是真实执行后端。
+        raise HTTPException(
+            status_code=400, detail="usage provider must be a resolved provider",
+        )
     usage = AIUsage(
         exec_id=req.exec_id,
         provider=req.provider,
@@ -958,8 +964,9 @@ async def record_usage(
         num_turns=req.num_turns,
         cached=req.cached,
     )
-    # 用 LiteLLM 价表填权威成本. claude-cli CLI 用 CLI total_cost_usd,空表或未命中则保留上报值.
-    if req.provider != "claude-cli":
+    # 用 LiteLLM 价表填权威成本. CLI provider 用 CLI 上报值(claude 自报等价成本;qoder/codex 订阅制
+    # 恒 0)不覆盖——gpt-5-codex 这类模型名会裸键命中价表,不豁免会伪造账单. 空表或未命中保留上报值.
+    if req.provider not in ("claude-cli", "codex-cli", "qoder-cli"):
         pricing = getattr(request.app.state, "pricing", None)
         if pricing is not None:
             c = pricing.cost(req.provider, req.model, req.input_tokens, req.output_tokens,

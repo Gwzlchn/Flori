@@ -369,7 +369,7 @@ class RecoveryCoordinator:
         active_jobs = await self.owner.redis.get_active_jobs()
         # Worker 可用性在单轮扫描内是全局事实。active jobs 多时跨 job 复用,
         # 避免每个 ready step 都重复扫 worker registry。
-        pool_ok: dict[tuple[str, frozenset[str]], bool] = {}
+        pool_ok: dict[tuple[str, frozenset[str], tuple[str, ...]], bool] = {}
         for job_id in active_jobs:
             statuses = await self.owner.redis.get_all_step_statuses(job_id)
             if not statuses or any(v == "running" for v in statuses.values()):
@@ -395,9 +395,12 @@ class RecoveryCoordinator:
                     stuck = []
                     progressable = True
                     break
-                key = (pool, frozenset(req))
+                _, allowed = self.owner._task_router._provider_route(cfg, req)
+                key = (pool, frozenset(req), tuple(allowed))
                 if key not in pool_ok:
-                    pool_ok[key] = await self.owner._pool_has_workers_for(pool, req)
+                    pool_ok[key] = await self.owner._pool_has_workers_for(
+                        pool, req, allowed,
+                    )
                 if pool_ok[key]:
                     progressable = True
                     break

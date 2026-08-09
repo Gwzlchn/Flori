@@ -40,7 +40,7 @@ def mock_redis():
     redis.consume_rate_limit.return_value = (True, 1, 60)
     redis.list_worker_ids.return_value = ["w-all"]
     redis.get_worker_info.return_value = {
-        "pools": "io,cpu,ai", "tags": "claude-cli,vision,read",
+        "pools": "io,cpu,ai", "tags": "claude-cli,vision,read,websearch",
         "reject_tags": "", "status": "idle", "admin_status": "active",
         "last_heartbeat": datetime.now(timezone.utc).isoformat(),
     }

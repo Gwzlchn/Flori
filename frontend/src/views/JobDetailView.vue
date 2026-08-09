@@ -18,7 +18,8 @@ import type {
 } from '../components/document/types'
 import { contentTypeIcon, contentTypePill, contentTypeLabel } from '../utils/contentType'
 import { jobSourceLabel } from '../constants/sources'
-import type { CanonicalEvidenceProjection, JobDetail, GlossaryTerm, JobConcept } from '../types'
+import type { AiProviderInfo, CanonicalEvidenceProjection, JobDetail, GlossaryTerm, JobConcept } from '../types'
+import type { RerunSmartRequestWire } from '../types/wire'
 import {
   BookOpen, Lightbulb, GitBranch, Info, RefreshCw, RotateCcw, ShieldCheck,
   Image as ImageIcon,
@@ -271,11 +272,14 @@ function onPdfPageJump(p: number) {
 // 有无智能笔记:有版本即有。
 const hasSmartNote = computed(() => versions.value.length > 0)
 
-type Provider = { name: string; type: string; available: boolean; label: string }
+type Provider = AiProviderInfo
 const providers = ref<Provider[]>([])
 const showRerun = ref(false)
 const rerunning = ref(false)
 const pendingProvider = ref<Provider | null>(null)
+// '' = 不覆盖(交后端/CLI 默认),确认时不进请求体。
+const pendingModel = ref('')
+const pendingEffort = ref('')
 
 // 评审
 const review = ref<Record<string, any> | null>(null)
@@ -673,9 +677,34 @@ function verLabel(v: Version): string {
   return m ? `${m[2]}/${m[3]} ${m[4]}:${m[5]}` : v.version
 }
 
+// 档位准入域按所选模型取:reasoning_efforts_by_model 非空时以它为准,
+// 全局 reasoning_efforts 只是并集,拿它当选项会让用户选到该模型不支持的档位,提交才 400。
+const effortOptions = computed<string[]>(() => {
+  const p = pendingProvider.value
+  if (!p) return []
+  const byModel = p.reasoning_efforts_by_model || {}
+  if (Object.keys(byModel).length === 0) return p.reasoning_efforts
+  const model = pendingModel.value || p.default_model || ''
+  return byModel[model] ?? []
+})
+// 换模型后旧档位可能已不在新域里,必须清掉,否则会带着非法值提交。
+watch(effortOptions, (options) => {
+  if (pendingEffort.value && !options.includes(pendingEffort.value)) pendingEffort.value = ''
+})
+
 function rerunWith(p: Provider) {
   if (!p.available || rerunning.value) return
   showRerun.value = false
+  // 默认值只在后端下发的取值域内预选,避免配置漂移后提交非法组合。
+  const modelSelectable = !!p.default_model && p.models.includes(p.default_model)
+  const byModel = p.reasoning_efforts_by_model || {}
+  const presetModel = modelSelectable ? p.default_model! : ''
+  const presetDomain = Object.keys(byModel).length
+    ? (byModel[presetModel] ?? [])
+    : p.reasoning_efforts
+  const effortSelectable = !!p.default_reasoning_effort && presetDomain.includes(p.default_reasoning_effort)
+  pendingModel.value = presetModel
+  pendingEffort.value = effortSelectable ? p.default_reasoning_effort! : ''
   pendingProvider.value = p
 }
 async function confirmRerun() {
@@ -684,8 +713,12 @@ async function confirmRerun() {
   if (!p) return
   rerunning.value = true
   try {
-    await api.post(`/api/jobs/${jobId.value}/rerun-smart`, { provider: p.name })
-    showToast(`已用 ${p.name} 开始重跑，完成后会出现新版本`, 'success')
+    const body: RerunSmartRequestWire = { provider: p.name }
+    if (pendingModel.value) body.model = pendingModel.value
+    if (pendingEffort.value) body.reasoning_effort = pendingEffort.value
+    await api.post(`/api/jobs/${jobId.value}/rerun-smart`, body)
+    const label = [p.name, body.model, body.reasoning_effort].filter(Boolean).join(' / ')
+    showToast(`已用 ${label} 开始重跑，完成后会出现新版本`, 'success')
     pollForVersion(p.name)
   } catch (e: any) {
     showToast(e?.message || '重跑失败', 'error')
@@ -1019,6 +1052,21 @@ watch(job, (j) => {
         </div>
         <div class="bd" style="font-size:13.5px;color:var(--ink-700)">
           用 <b>{{ pendingProvider.name }}</b>（{{ pendingProvider.label }}）重新生成智能笔记？将新增一个版本，原版本保留。
+          <label v-if="pendingProvider.models.length" class="override-row">
+            <span>模型</span>
+            <select v-model="pendingModel" class="input" data-testid="rerun-model">
+              <option value="">默认</option>
+              <option v-for="m in pendingProvider.models" :key="m" :value="m">{{ m }}</option>
+            </select>
+          </label>
+          <!-- 档位域为空 = 该 provider 或该模型不接受档位覆盖,整个控件不渲染。 -->
+          <label v-if="effortOptions.length" class="override-row">
+            <span>推理档位</span>
+            <select v-model="pendingEffort" class="input" data-testid="rerun-effort">
+              <option value="">默认</option>
+              <option v-for="e in effortOptions" :key="e" :value="e">{{ e }}</option>
+            </select>
+          </label>
         </div>
         <div class="ft">
           <button class="btn" @click="pendingProvider = null">取消</button>
@@ -1030,3 +1078,10 @@ watch(job, (j) => {
     <JobDeleteDialog v-if="showDelete" @cancel="showDelete = false" @confirm="confirmDelete" />
   </div>
 </template>
+
+<style scoped>
+.override-row { display: grid; grid-template-columns: 72px minmax(0, 1fr); align-items: center; gap: 10px; margin-top: 12px; }
+.override-row > span { font-size: 12px; color: var(--ink-500); white-space: nowrap; }
+.override-row .input { min-height: 32px; padding: 6px 9px; font-size: 12.5px; }
+.override-note { margin: 12px 0 0; font-size: 12px; color: var(--ink-500); }
+</style>

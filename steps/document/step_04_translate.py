@@ -45,7 +45,7 @@ class DocumentTranslateStep(StepBase):
             if not (self.job_dir / path).is_file()
         ]
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         hashes = {
             "document": file_hash(self.job_dir / "intermediate/document.json"),
             "quality": file_hash(self.job_dir / "intermediate/quality.json"),

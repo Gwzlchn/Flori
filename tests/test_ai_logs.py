@@ -71,7 +71,13 @@ class TestGatewayAttempts:
         gw._providers["p"] = type("P", (), {"complete": ok})()
         resp = await gw.call("s", LLMRequest(messages=[{"role": "user", "content": "t"}]))
         assert resp.tier_used == "primary"
-        assert resp.attempts == [{"tier": "primary", "provider": "p", "model": "m", "ok": True}]
+        assert resp.attempts == [{
+            "tier": "primary", "ok": True,
+            "requested_provider": "p", "requested_model": "m",
+            "requested_reasoning_effort": None,
+            "provider": "p", "model": "m",
+            "reasoning_effort": None, "reasoning_effort_source": "unset",
+        }]
 
     @pytest.mark.asyncio
     async def test_fallback_records_chain(self, monkeypatch):
@@ -357,3 +363,119 @@ class TestPendingPhase:
         assert len(recs) == 2                                            # 旧 pending 未被吞
         assert recs[0]["phase"] == "pending" and recs[0]["prompt"]["rendered"]["user"] == "killed call"
         assert recs[1]["phase"] == "final" and recs[1]["call_index"] == 1
+
+
+# 有效档位与解析后的 provider 进审计
+
+_CLI_PROVIDERS_CONFIG = {
+    "providers": {
+        "claude-cli": {"type": "claude_cli", "model": "opus5",
+                       "reasoning_effort": "xhigh", "features": ["read"]},
+        "qoder-cli": {"type": "qoder_cli", "model": "ultimate",
+                      "reasoning_effort": "max", "features": ["read"]},
+    },
+}
+
+
+class TestEffectiveSelectionAudit:
+    @pytest.mark.asyncio
+    async def test_provider_default_effort_is_recorded_not_left_none(self, monkeypatch):
+        """档位来自 providers.yaml 默认时,审计要写出这个值和它的来源。"""
+        monkeypatch.delenv("DRY_RUN", raising=False)
+        gw = AIGateway(
+            _CLI_PROVIDERS_CONFIG,
+            {"steps": [{"name": "s", "ai": {
+                "primary": {"provider": "claude-cli", "model": "opus5"}}}]},
+        )
+
+        async def ok(self, request):
+            return LLMResponse(content="ok", model="opus5",
+                               provider="claude-cli")
+
+        gw._providers["claude-cli"] = type("P", (), {"complete": ok})()
+        resp = await gw.call("s", LLMRequest(messages=[{"role": "user", "content": "t"}]))
+        assert resp.reasoning_effort == "xhigh"
+        assert resp.reasoning_effort_source == "provider_default"
+        assert resp.attempts[0]["reasoning_effort"] == "xhigh"
+        assert resp.attempts[0]["requested_reasoning_effort"] is None
+
+    @pytest.mark.asyncio
+    async def test_request_effort_overrides_provider_default_in_audit(self, monkeypatch):
+        monkeypatch.delenv("DRY_RUN", raising=False)
+        gw = AIGateway(
+            _CLI_PROVIDERS_CONFIG,
+            {"steps": [{"name": "s", "ai": {
+                "primary": {"provider": "claude-cli", "model": "m"}}}]},
+        )
+
+        async def ok(self, request):
+            return LLMResponse(content="ok", model="m", provider="claude-cli")
+
+        gw._providers["claude-cli"] = type("P", (), {"complete": ok})()
+        resp = await gw.call("s", LLMRequest(
+            messages=[{"role": "user", "content": "t"}], reasoning_effort="low",
+        ))
+        assert (resp.requested_reasoning_effort, resp.reasoning_effort) == ("low", "low")
+        assert resp.reasoning_effort_source == "request"
+
+    def test_step_log_records_requested_and_effective_selection(self, tmp_path):
+        step = _Step(tmp_path, {
+            "step": {"name": "11_smart"},
+            "ai": {"primary": {"provider": "qoder-cli", "model": "ultimate"}},
+            "providers": _CLI_PROVIDERS_CONFIG,
+        })
+        step.ai.gateway = _FakeGW(response=_mk_response(
+            provider="qoder-cli", model="ultimate",
+            requested_provider="qoder-cli", requested_model="ultimate",
+            requested_reasoning_effort=None,
+            reasoning_effort="max", reasoning_effort_source="provider_default",
+        ))
+        step.ai.call("prompt")
+
+        (record,) = _read_log(tmp_path)
+        routing = record["routing"]
+        assert routing["provider"] == "qoder-cli"
+        assert routing["requested_provider"] == "qoder-cli"
+        assert routing["reasoning_effort"] == "max"
+        assert routing["reasoning_effort_source"] == "provider_default"
+        assert routing["selection"]["tiers"][0]["declared_provider"] == "qoder-cli"
+
+    def test_step_log_of_a_total_failure_keeps_attempt_semantics(self, tmp_path):
+        step = _Step(tmp_path, {
+            "step": {"name": "11_smart"},
+            "ai": {"primary": {"provider": "claude-cli", "model": "opus5"}},
+            "providers": _CLI_PROVIDERS_CONFIG,
+        })
+        step.ai.gateway = _FakeGW(exc=AllProvidersFailedError("down", attempts=[{
+            "tier": "primary", "ok": False,
+            "requested_provider": "claude-cli", "requested_model": "opus5",
+            "requested_reasoning_effort": None,
+            "provider": "claude-cli", "model": "opus5",
+            "reasoning_effort": "xhigh", "reasoning_effort_source": "provider_default",
+        }]))
+        with pytest.raises(AllProvidersFailedError):
+            step.ai.call("prompt")
+
+        (record,) = _read_log(tmp_path)
+        routing = record["routing"]
+        assert record["ok"] is False
+        assert routing["provider"] == "claude-cli"
+        assert routing["requested_provider"] == "claude-cli"
+        assert routing["reasoning_effort"] == "xhigh"
+        assert routing["reasoning_effort_source"] == "provider_default"
+
+    def test_usage_ledger_records_the_resolved_provider(self, tmp_path):
+        from shared.ai_gateway import collect_usage_from_file
+
+        step = _Step(tmp_path, {
+            "step": {"name": "11_smart"},
+            "ai": {"primary": {"provider": "qoder-cli", "model": "ultimate"}},
+            "providers": _CLI_PROVIDERS_CONFIG,
+        })
+        step.ai.gateway = _FakeGW(response=_mk_response(
+            provider="qoder-cli", model="ultimate", requested_provider="qoder-cli",
+        ))
+        step.ai.call("prompt")
+
+        (usage,) = collect_usage_from_file(tmp_path / "logs", "11_smart")
+        assert (usage.provider, usage.model) == ("qoder-cli", "ultimate")

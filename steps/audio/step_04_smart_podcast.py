@@ -30,7 +30,7 @@ class SmartPodcastStep(StepBase):
             return ["intermediate/transcript.json"]
         return []
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         hashes: dict[str, str] = {
             "transcript": file_hash(self.job_dir / "intermediate" / "transcript.json"),
         }

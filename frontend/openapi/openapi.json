@@ -3468,6 +3468,17 @@
             "title": "Job Id",
             "type": "string"
           },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
           "part_id": {
             "anyOf": [
               {
@@ -3482,6 +3493,17 @@
           "provider": {
             "title": "Provider",
             "type": "string"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
           },
           "review_step": {
             "title": "Review Step",
@@ -5617,9 +5639,33 @@
       },
       "RerunSmartRequest": {
         "properties": {
+          "model": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
           "provider": {
             "title": "Provider",
             "type": "string"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
           }
         },
         "required": [
@@ -7040,6 +7086,16 @@
             "minimum": 1.0,
             "title": "Max Cards",
             "type": "integer"
+          },
+          "provider": {
+            "default": "claude-cli",
+            "enum": [
+              "claude-cli",
+              "codex-cli",
+              "qoder-cli"
+            ],
+            "title": "Provider",
+            "type": "string"
           },
           "request_id": {
             "maxLength": 128,

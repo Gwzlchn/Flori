@@ -116,6 +116,8 @@ class JobRerunResponse(JobStatusResponse):
 class JobRerunSmartResponse(JobRerunResponse):
     provider: str
     review_step: str
+    model: str | None = None
+    reasoning_effort: str | None = None
 
 
 class JobRebuildResponse(JobStatusResponse):

@@ -284,6 +284,8 @@ class RerunRequest(BaseModel):
 
 class RerunSmartRequest(BaseModel):
     provider: str
+    model: str | None = Field(None, max_length=200)
+    reasoning_effort: str | None = Field(None, max_length=32)
 
 
 class RebuildRequest(BaseModel):

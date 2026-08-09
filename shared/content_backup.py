@@ -100,7 +100,7 @@ _INCOMPLETE_SUFFIXES = (
 # job.json 里影响 AI 行为的键:只归档这些规范子集,不复制整个运行 sidecar。
 _JOB_JSON_AI_KEYS = (
     # 当前 producer/consumer 真键(api/routes/jobs.py,shared/ai_routing.py)。
-    "ai_overrides", "prompt_overrides",
+    "ai_overrides", "ai_param_overrides", "prompt_overrides",
     # 兼容早期/外部导入 sidecar;仍只取显式子集,不归档整个 job.json。
     "ai_override", "prompt_override", "ai_config",
 )

@@ -88,7 +88,8 @@ class SearchRepository:
         return [self._row_to_job(row) for row in rows]
 
     def get_concept_occurrence_projection_pair(self, job_id: str) -> tuple[str, str] | None:
-        """返回投影绑定的(源摘要, 投影摘要)。空投影 marker 不能证明投影正确。"""
+        """返回投影绑定的(源摘要, 投影摘要)。判断能否按 marker 短路要看投影是不是空集:
+        空投影的 marker 摘要相等只说明源没变, 不代表投影正确。"""
         with self._lock:
             row = self._conn.execute(
                 "SELECT source_digest, projection_digest"

@@ -214,11 +214,11 @@ class _DBStub:
     def get_concept_occurrence_projection_pair(self, job_id: str):
         from shared.db import _EMPTY_CONCEPT_PROJECTION_DIGEST
 
-        source = self.occurrence_projection_sources.get(job_id)
-        if source is None:
+        src = self.occurrence_projection_sources.get(job_id)
+        if src is None:
             return None
         empty = self.occurrence_projection_empty.get(job_id, True)
-        return (source, _EMPTY_CONCEPT_PROJECTION_DIGEST if empty else "sha256:nonempty")
+        return (src, _EMPTY_CONCEPT_PROJECTION_DIGEST if empty else "sha256:nonempty")
 
     def get_concept_occurrence_replay_state(self, job_id: str):
         return self.replay_states.get(job_id)
@@ -1389,6 +1389,11 @@ async def test_concurrent_cas_conflict_does_not_clobber_verdict(tmp_path):
 
 @pytest.mark.asyncio
 async def test_matching_digest_with_nonempty_source_must_recompute():
+    """原缺陷的直接反例:marker 摘要与真源一致但投影是空的, 而源里有真概念且证据可映射。
+
+    旧实现按 marker 摘要短路直接落 verified_empty, 把错误永久认证下来。
+    marker 只说明发布过这个投影, 不说明投影正确;必须重算, 算出非空就得改回非空。
+    """
     db = _DBStub(domain="ml")
     db.canonical_by_segment = {_SEGMENT_A: ["ev-a"]}
     db.calls.append({
@@ -1402,6 +1407,7 @@ async def test_matching_digest_with_nonempty_source_must_recompute():
     }
     payload = json.dumps(source, ensure_ascii=False).encode("utf-8")
     real_digest = "sha256:" + hashlib.sha256(b"concepts\0" + payload).hexdigest()
+    # 错误现场:源有概念且证据可映射, 却按真实源摘要发布了空投影, 且无判定行。
     db.occurrence_projection_sources["j_wrong"] = real_digest
     db.occurrence_projection_empty["j_wrong"] = True
     db.occurrence_replacements.append(
@@ -1422,7 +1428,7 @@ async def test_matching_digest_with_nonempty_source_must_recompute():
 @pytest.mark.asyncio
 async def test_legacy_empty_marker_with_matching_source_becomes_verified(tmp_path):
     # 15340ba 时代合法的空投影行(真实源摘要,无判定行):一次复核读源确认
-    # 真重算确认空集后固化为 verified_empty,不再回炉。
+    # digest 一致后固化为 verified_empty,不重发布、不再回炉。
     db = Database(tmp_path / "legacy-legit-empty.db")
     try:
         db.init_schema()
@@ -1444,14 +1450,21 @@ async def test_legacy_empty_marker_with_matching_source_becomes_verified(tmp_pat
             ("job-legacy",),
         )
         db._conn.commit()
+        reconciled_at = db._conn.execute(
+            "SELECT reconciled_at FROM concept_occurrence_projection WHERE job_id=?",
+            ("job-legacy",),
+        ).fetchone()[0]
         storage = _PerJobConceptsStorage({"job-legacy": payload})
         engine = _make_engine(storage, db)
 
         assert [job.id for job in await _drain_once(engine, db)] == ["job-legacy"]
         state = db.get_concept_occurrence_replay_state("job-legacy")
         assert state["state"] == "verified_empty"
+        # 不再按 marker 摘要认证;真重算一次,算出来确实为空才落判定。
         assert state["reason"] == "truly_empty"
         assert state["source_digest"] == real_digest
+        # 旧实现按 marker 摘要短路, 所以 marker 原样不动;现在必须真重算一次,
+        # reconciled_at 会刷新。要守的不变量是投影内容没被改坏:仍绑同一源摘要且仍为空集。
         row = db._conn.execute(
             "SELECT source_digest, projection_digest"
             " FROM concept_occurrence_projection WHERE job_id=?",

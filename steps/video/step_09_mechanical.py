@@ -68,7 +68,7 @@ class MechanicalStep(StepBase):
     # 时间节粒度:口播按节成段,该节的截图/OCR 并置在同一节内,三者按时间往下读。
     BEAT_SEC = 30
 
-    def input_hashes(self) -> dict[str, str]:
+    def step_input_hashes(self) -> dict[str, str]:
         hashes = {
             "render": self.RENDER_VERSION,
             "dedup": file_hash(self.job_dir / "intermediate" / "dedup.json"),
