@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from shared.document_contract import (
     TRANSLATION_SCHEMA_VERSION,
     primary_document_source,
@@ -153,21 +155,36 @@ class DocumentTranslateStep(StepBase):
     def _translate_batch(self, batch: list[dict]) -> dict[str, str]:
         template = self.ai.load_prompt_template(self.ai.primary_prompt_template())
         prompt = template.replace("<<INPUT>>", translation_prompt_payload(batch))
+        attempt_prompt = prompt
         last_error: Exception | None = None
         for _attempt in range(2):
             result, parse_failed = self.ai.call_json(
-                prompt,
+                attempt_prompt,
                 fallback={"segments": []},
                 max_tokens=16384,
             )
             if parse_failed:
                 last_error = ValueError("translation response is not JSON")
+                attempt_prompt = self._retry_prompt(prompt, last_error)
                 continue
             try:
                 return validate_batch_response(batch, result)
             except ValueError as exc:
                 last_error = exc
+                attempt_prompt = self._retry_prompt(prompt, exc)
         raise InputInvalidError(f"translation validation failed: {last_error}")
+
+    @staticmethod
+    def _retry_prompt(prompt: str, error: Exception) -> str:
+        feedback = json.dumps(
+            {"validation_error": str(error)}, ensure_ascii=False, separators=(",", ":"),
+        )
+        return (
+            f"{prompt}\n\n"
+            "上一次响应未通过确定性校验。重新生成完整JSON，不要只返回局部修正。"
+            "protected_tokens必须逐字出现，不得通过单位、数量级或数制换算改变数字。"
+            f"校验反馈={feedback}"
+        )
 
     def _semantic_candidates(
         self, segments: list[dict], normalized_body: str,

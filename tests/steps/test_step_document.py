@@ -409,6 +409,41 @@ def test_translation_numeric_validation_rejects_signed_range_extension(source, t
         )
 
 
+def test_document_translation_retry_includes_exact_validation_feedback(tmp_path, monkeypatch):
+    job = _fixture(tmp_path)
+    config = make_step_config(
+        tmp_path, step_name="04_translate", pool="ai", pipeline="document",
+    )
+    config["step"]["prompt_template"] = "04_translate_document"
+    step = DocumentTranslateStep("04_translate", job, config)
+    batch = [{
+        "translation_request_id": "segment",
+        "kind": "paragraph",
+        "source_text": "a model with 175 billion parameters",
+        "protected_tokens": ["175"],
+    }]
+    prompts: list[str] = []
+
+    def call_json(prompt, **_kwargs):
+        prompts.append(prompt)
+        text = (
+            "一个具有 1750 亿参数的模型"
+            if len(prompts) == 1
+            else "一个具有 175 billion 参数的模型"
+        )
+        return {"segments": [{"id": "segment", "text": text}]}, False
+
+    monkeypatch.setattr(step.ai, "call_json", call_json)
+
+    assert step._translate_batch(batch) == {
+        "segment": "一个具有 175 billion 参数的模型",
+    }
+    assert len(prompts) == 2
+    assert "validation_error" not in prompts[0]
+    assert "translation changed protected token for segment: 175" in prompts[1]
+    assert "不得通过单位、数量级或数制换算改变数字" in prompts[1]
+
+
 def test_smart_note_title_is_deterministic_and_uses_translation(tmp_path, monkeypatch):
     job = _fixture(tmp_path)
     translate_config = make_step_config(
