@@ -542,6 +542,9 @@ def test_worker_cli_installers_follow_official_latest_channels_and_refresh_cache
     assert "https://chatgpt.com/codex/install.sh" in installer
     assert "CODEX_RELEASE=latest" in installer
     assert installer.count("timeout 1800") == 3
+    assert installer.count("FLORI_CLI_VERSION ") == 3
+    assert 'grep -Fc "FLORI_CLI_VERSION $cli="' in ci_images
+    assert "版本证据缺失或重复" in ci_images
     assert "VERSION=" not in installer
     assert "SHA256" not in installer
     for command in ("claude --version", "qodercli --version", "codex --version"):

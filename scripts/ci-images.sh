@@ -147,6 +147,18 @@ for index in "${!PIDS[@]}"; do
   image="${NAMES[$index]}"
   if wait "$pid"; then
     echo "== $image $MODE success =="
+    if [ "$image" = "flori-worker" ] \
+        && { [ "$MODE" = "candidate" ] || [ "$MODE" = "check" ]; }; then
+      for cli in claude qoder codex; do
+        count=$(grep -Fc "FLORI_CLI_VERSION $cli=" "$RUN_TMP/$image.log" || true)
+        if [ "$count" != "1" ]; then
+          echo "$image 的 $cli 版本证据缺失或重复" >&2
+          failed=1
+        else
+          grep -F "FLORI_CLI_VERSION $cli=" "$RUN_TMP/$image.log"
+        fi
+      done
+    fi
   else
     echo "== $image $MODE failed ==" >&2
     failed=1

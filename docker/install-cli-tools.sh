@@ -35,7 +35,9 @@ install_claude() {
         'exec /usr/local/lib/flori-cli/claude "$@"' \
         > /usr/local/bin/claude
     chmod 0755 /usr/local/bin/claude
-    claude --version
+    version="$(claude --version)"
+    [ -n "$version" ] || { echo "Claude version output is empty" >&2; return 1; }
+    printf 'FLORI_CLI_VERSION claude=%s\n' "$version"
 }
 
 install_qoder() {
@@ -61,7 +63,9 @@ install_qoder() {
         'exec /usr/local/lib/flori-cli/qodercli --settings /etc/flori/qoder-settings.json "$@"' \
         > /usr/local/bin/qodercli
     chmod 0755 /usr/local/bin/qodercli
-    qodercli --version
+    version="$(qodercli --version)"
+    [ -n "$version" ] || { echo "Qoder version output is empty" >&2; return 1; }
+    printf 'FLORI_CLI_VERSION qoder=%s\n' "$version"
 }
 
 install_codex() {
@@ -78,7 +82,9 @@ install_codex() {
     CODEX_INSTALL_DIR=/usr/local/bin \
     CODEX_HOME=/usr/local/lib/codex \
         timeout 1800 sh "$installer"
-    codex --version
+    version="$(codex --version)"
+    [ -n "$version" ] || { echo "Codex version output is empty" >&2; return 1; }
+    printf 'FLORI_CLI_VERSION codex=%s\n' "$version"
 }
 
 install_claude
