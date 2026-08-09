@@ -234,7 +234,7 @@ video:
       label: "语义证据独立核验"
       extends: .ai-step
       run: steps.utils.step_semantic_attestation
-      version: "2"
+      version: "3"
       needs: ["11_smart"]
       timeout: 900
       tags: []
@@ -373,7 +373,7 @@ document:
       label: "语义证据独立核验"
       extends: .ai-step
       run: steps.utils.step_semantic_attestation
-      version: "1"
+      version: "2"
       needs: ["05_smart", "04_translate"]
       timeout: 900
       tags: []
@@ -482,7 +482,7 @@ audio:
       label: "语义证据独立核验"
       extends: .ai-step
       run: steps.utils.step_semantic_attestation
-      version: "2"
+      version: "3"
       needs: ["04_smart_podcast"]
       timeout: 900
       tags: []

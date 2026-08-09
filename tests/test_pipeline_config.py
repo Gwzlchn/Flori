@@ -205,6 +205,7 @@ class TestSemanticAttestationPipeline:
             "document": "06_semantic_attestation",
             "audio": "04_semantic_attestation",
         }
+        attestor_versions = {"video": "3", "document": "2", "audio": "3"}
         concepts = {"video": "12_concepts", "document": "07_concepts", "audio": "05_concepts"}
         for pipeline, steps in producers.items():
             jobs = raw[pipeline]["jobs"]
@@ -229,6 +230,7 @@ class TestSemanticAttestationPipeline:
                 assert depends_on(attestors[pipeline], producer)
 
             attestor = jobs[attestors[pipeline]]
+            assert attestor["version"] == attestor_versions[pipeline]
             assert any(path.startswith("output/provenance/") for path in attestor["outputs"])
             assert attestor["timeout"] == 900
             assert depends_on(concepts[pipeline], attestors[pipeline])

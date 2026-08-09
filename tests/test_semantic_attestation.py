@@ -17,11 +17,14 @@ from shared.evidence_contract import (
 )
 from shared.models import LLMResponse
 from shared.provenance import (
+    SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION,
+    build_semantic_attestation_prompt,
     build_provenance_manifest,
     build_source_manifest,
     canonical_json_bytes,
     make_segment_id,
     materialize_semantic_attestations,
+    semantic_attestation_batch_id,
     write_provenance_manifest,
     write_source_manifest,
 )
@@ -231,8 +234,9 @@ def _replace_note_candidates_with_claims(
 class _Attestor:
     step_name = "06_semantic_attestation"
 
-    def __init__(self, job_dir: Path) -> None:
+    def __init__(self, job_dir: Path, *, response_schema: int = 3) -> None:
         self.job_dir = job_dir
+        self.response_schema = response_schema
         self.last_response = None
         self.call_index = 0
         self.log = _Log()
@@ -248,12 +252,15 @@ class _Attestor:
     def call(self, prompt: str, **_kwargs) -> str:
         request = json.loads(prompt.split("INPUT=", 1)[1])
         decisions = [{
-            "candidate_id": item["candidate_id"],
+            "decision_id": item["decision_id"],
             "decision": "supported",
             "confidence_ppm": 990_000,
             "reason_codes": ["semantic_equivalent", "critical_facts_match"],
         } for item in request["items"]]
-        content = json.dumps({"schema_version": 1, "decisions": decisions})
+        content = json.dumps({
+            "schema_version": self.response_schema,
+            "decisions": decisions,
+        })
         self.last_response = LLMResponse(
             content=content,
             provider="claude-cli",
@@ -668,8 +675,9 @@ def test_candidate_note_type_must_match_manifest_path_before_ai_call(
     assert not (job_dir / "output/provenance/semantic_batch.json").exists()
 
 
-def test_dual_note_types_are_attested_in_one_call(tmp_path: Path) -> None:
-    job_dir, source, _note_data, segment_id = _job(tmp_path)
+@pytest.mark.asyncio
+async def test_dual_note_types_are_attested_in_one_call(tmp_path: Path) -> None:
+    job_dir, source, note_data, segment_id = _job(tmp_path)
     _add_smart_candidate(job_dir, source, segment_id)
     persist_semantic_candidates(
         job_dir, pipeline="document", note_type="translated",
@@ -691,6 +699,7 @@ def test_dual_note_types_are_attested_in_one_call(tmp_path: Path) -> None:
     assert [item["note_type"] for item in commit["provenance_manifests"]] == [
         "smart", "translated",
     ]
+    assert len(await _records(job_dir, note_data)) == 1
 
 
 def test_batch_candidate_limit_allows_dual_fifty_with_one_call(tmp_path: Path) -> None:
@@ -733,6 +742,9 @@ def test_batch_selects_smart_then_translated_with_one_bounded_call(
     assert [item["note_type"] for item in items] == ["smart"] * 51 + [
         "translated"
     ] * 49
+    assert [item["decision_id"] for item in items] == [
+        f"d{index:03d}" for index in range(100)
+    ]
     assert result["note_types"] == 2
     assert result["budget_rejected"] == 51 and result["degraded"] is True
     assert result["accepted"] + result["rejected"] - result["budget_rejected"] == 100
@@ -832,6 +844,70 @@ async def test_ai_log_record_replacement_and_unbounded_history_fail_closed(
         await _records(job_dir, note_data)
     log_path.write_bytes(original + b"{}\n" * 128)
     with pytest.raises(CanonicalEvidenceError, match="too many records"):
+        await _records(job_dir, note_data)
+
+
+@pytest.mark.asyncio
+async def test_reader_rejects_resigned_v3_decision_ref_tamper(
+    tmp_path: Path,
+) -> None:
+    job_dir, _source, note_data, segment_id = _job(tmp_path)
+    persist_semantic_candidates(
+        job_dir, pipeline="document", note_type="translated",
+        note_artifact="output/translated.md", candidates=[{
+            "anchor": "该模型不超过 5 kg。", "prefix": "", "suffix": "",
+            "section": "translated", "source_segment_id": segment_id,
+            "transform_kind": "translated",
+            "producer_component": "04_translate",
+            "producer_invocation_id": "producer-session",
+        }],
+    )
+    finalize_pending_semantic_provenance(
+        job_dir, pipeline="document", ai=_Attestor(job_dir),
+    )
+    log_path = job_dir / "output/ai_logs/06_semantic_attestation.jsonl"
+    record = json.loads(log_path.read_text())
+    response = json.loads(record["output"]["content"])
+    response["decisions"][0]["decision_id"] = "D000"
+    response_content = json.dumps(response)
+    record["output"]["content"] = response_content
+    log_path.write_bytes(canonical_json_bytes(record) + b"\n")
+
+    commit_path = job_dir / "output/provenance/semantic_batch.json"
+    commit = json.loads(commit_path.read_text())
+    ai_log = commit["ai_log"]
+    ai_log["response_content_sha256"] = _sha(response_content.encode())
+    ai_log["response_decision_sha256"] = _sha(
+        canonical_json_bytes(response["decisions"])
+    )
+    ai_log["record_sha256"] = _sha(canonical_json_bytes(record))
+    commit["batch_id"] = semantic_attestation_batch_id(
+        job_id=commit["job_id"],
+        pipeline=commit["pipeline"],
+        attestor_component=commit["attestor_component"],
+        candidate_manifests=commit["candidate_manifests"],
+        ai_log=ai_log,
+    )
+
+    provenance_path = job_dir / "output/provenance/translated.json"
+    provenance = json.loads(provenance_path.read_text())
+    attestation = provenance["segments"][0]["attestation"]
+    attestation["batch_id"] = commit["batch_id"]
+    attestation["ai_log"] = {
+        **ai_log,
+        "response_decision_sha256": _sha(
+            canonical_json_bytes(response["decisions"][0])
+        ),
+    }
+    provenance_data = canonical_json_bytes(provenance)
+    provenance_path.write_bytes(provenance_data)
+    next(
+        item for item in commit["provenance_manifests"]
+        if item["note_type"] == "translated"
+    )["sha256"] = _sha(provenance_data)
+    commit_path.write_bytes(canonical_json_bytes(commit))
+
+    with pytest.raises(CanonicalEvidenceError, match="decision set changed"):
         await _records(job_dir, note_data)
 
 
@@ -1056,3 +1132,167 @@ def test_materializer_rejects_missing_or_reordered_selected_decisions(
             batch_id="0" * 64,
             response_candidate_ids=candidate_ids,
         )
+
+
+def _v3_decision(decision_id: object) -> dict:
+    return {
+        "decision_id": decision_id,
+        "decision": "rejected",
+        "confidence_ppm": 990_000,
+        "reason_codes": ["semantic_mismatch"],
+    }
+
+
+def test_legacy_direct_parser_compatibility_does_not_relax_v3_write_gate(
+    tmp_path: Path,
+) -> None:
+    job_dir, source, _note_data, segment_id = _job(tmp_path)
+    _replace_note_candidates(
+        job_dir, source, segment_id, note_type="translated", count=2,
+    )
+    manifest = json.loads((
+        job_dir / "output/provenance_candidates/translated.json"
+    ).read_text())
+    candidate_ids = [item["candidate_id"] for item in manifest["candidates"]]
+    response_text = json.dumps({
+        "schema_version": 1,
+        "decisions": [{
+            "candidate_id": candidate_id,
+            "decision": "rejected",
+            "confidence_ppm": 990_000,
+            "reason_codes": ["semantic_mismatch"],
+        } for candidate_id in candidate_ids],
+    })
+    kwargs = {
+        "response_text": response_text,
+        "attestor_component": "06_semantic_attestation",
+        "attestor_invocation_id": "attestor-session",
+        "attestor_provider": "qoder-cli",
+        "attestor_model": "ultimate",
+        "attestor_prompt": "prompt",
+        "ai_log_binding": {},
+        "batch_id": "0" * 64,
+        "response_candidate_ids": candidate_ids,
+    }
+    accepted, rejected = materialize_semantic_attestations(
+        manifest, source, **kwargs,
+    )
+    assert accepted == []
+    assert [item["candidate_id"] for item in rejected] == candidate_ids
+    with pytest.raises(ValueError, match="response schema is invalid"):
+        materialize_semantic_attestations(
+            manifest,
+            source,
+            required_response_schema=SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION,
+            **kwargs,
+        )
+
+
+def test_writer_rejects_legacy_response_without_partial_publish(
+    tmp_path: Path,
+) -> None:
+    job_dir, _source, _note_data, segment_id = _job(tmp_path)
+    persist_semantic_candidates(
+        job_dir, pipeline="document", note_type="translated",
+        note_artifact="output/translated.md", candidates=[{
+            "anchor": "该模型不超过 5 kg。", "prefix": "", "suffix": "",
+            "section": "translated", "source_segment_id": segment_id,
+            "transform_kind": "translated",
+            "producer_component": "04_translate",
+            "producer_invocation_id": "producer-session",
+        }],
+    )
+    provenance_path = job_dir / "output/provenance/translated.json"
+    before = provenance_path.read_bytes()
+    with pytest.raises(ValueError, match="response schema is invalid"):
+        finalize_pending_semantic_provenance(
+            job_dir,
+            pipeline="document",
+            ai=_Attestor(job_dir, response_schema=1),
+        )
+    assert provenance_path.read_bytes() == before
+    assert not (job_dir / "output/provenance/semantic_batch.json").exists()
+
+
+@pytest.mark.parametrize(
+    "decision_ids",
+    [
+        ["d000"],
+        ["d000", "d001", "d002"],
+        ["d000", "d000"],
+        ["d001", "d000"],
+        ["d000", "d002"],
+        [0, "d001"],
+        ["D000", "d001"],
+    ],
+    ids=["missing", "extra", "duplicate", "reordered", "skipped", "type", "case"],
+)
+def test_v3_materializer_rejects_invalid_decision_ref_vectors(
+    tmp_path: Path,
+    decision_ids: list[object],
+) -> None:
+    job_dir, source, _note_data, segment_id = _job(tmp_path)
+    _replace_note_candidates(
+        job_dir, source, segment_id, note_type="translated", count=2,
+    )
+    manifest = json.loads((
+        job_dir / "output/provenance_candidates/translated.json"
+    ).read_text())
+    candidate_ids = [item["candidate_id"] for item in manifest["candidates"]]
+    with pytest.raises(ValueError, match="response is incomplete"):
+        materialize_semantic_attestations(
+            manifest,
+            source,
+            response_text=json.dumps({
+                "schema_version": 3,
+                "decisions": [_v3_decision(item) for item in decision_ids],
+            }),
+            attestor_component="06_semantic_attestation",
+            attestor_invocation_id="attestor-session",
+            attestor_provider="qoder-cli",
+            attestor_model="ultimate",
+            attestor_prompt="prompt",
+            ai_log_binding={},
+            batch_id="0" * 64,
+            response_candidate_ids=candidate_ids,
+        )
+
+
+def test_v3_short_refs_map_back_to_full_candidate_ids(tmp_path: Path) -> None:
+    job_dir, source, _note_data, segment_id = _job(tmp_path)
+    _replace_note_candidates(
+        job_dir, source, segment_id, note_type="translated", count=3,
+    )
+    manifest = json.loads((
+        job_dir / "output/provenance_candidates/translated.json"
+    ).read_text())
+    candidate_ids = [item["candidate_id"] for item in manifest["candidates"]]
+    prompt = build_semantic_attestation_prompt(
+        manifest, source, protocol="Return the required response.",
+    )
+    request = json.loads(prompt.split("INPUT=", 1)[1])
+    assert [item["decision_id"] for item in request["items"]] == [
+        "d000", "d001", "d002",
+    ]
+    assert all(candidate_id not in prompt for candidate_id in candidate_ids)
+
+    accepted, rejected = materialize_semantic_attestations(
+        manifest,
+        source,
+        response_text=json.dumps({
+            "schema_version": 3,
+            "decisions": [
+                _v3_decision(f"d{index:03d}") for index in range(3)
+            ],
+        }),
+        attestor_component="06_semantic_attestation",
+        attestor_invocation_id="attestor-session",
+        attestor_provider="qoder-cli",
+        attestor_model="ultimate",
+        attestor_prompt=prompt,
+        ai_log_binding={},
+        batch_id="0" * 64,
+        response_candidate_ids=candidate_ids,
+    )
+    assert accepted == []
+    assert [item["candidate_id"] for item in rejected] == candidate_ids

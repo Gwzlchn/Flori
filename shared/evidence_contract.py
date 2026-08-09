@@ -27,9 +27,11 @@ from .provenance import (
     MAX_PROVENANCE_BYTES,
     MAX_SOURCE_ARTIFACTS,
     MAX_SOURCE_SEGMENTS,
+    SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION,
     canonical_json,
     canonical_json_bytes,
     select_semantic_attestation_batch,
+    semantic_attestation_decision_refs,
     semantic_attestation_batch_id,
     sha256_bytes,
     validate_locator,
@@ -1485,27 +1487,45 @@ async def _verify_semantic_attestation_batch(
         raise CanonicalEvidenceError("semantic attestor rendered prompt changed")
     try:
         response = json.loads(response_content)
+        response_schema = response["schema_version"]
         decisions = response["decisions"]
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         raise CanonicalEvidenceError("semantic attestor response is invalid") from exc
     if (
-        type(decisions) is not list
+        not isinstance(response, dict)
+        or set(response) != {"schema_version", "decisions"}
+        or type(response_schema) is not int
+        or response_schema != SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION
+        or type(decisions) is not list
         or _sha256_hex(canonical_json_bytes(decisions))
         != ai_log_binding["response_decision_sha256"]
     ):
         raise CanonicalEvidenceError("semantic attestor decisions changed")
+    if response_schema == SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION:
+        identity_key = "decision_id"
+        expected_decision_ids = [
+            ref[identity_key]
+            for ref in semantic_attestation_decision_refs(selected_candidate_ids)
+        ]
+    else:
+        identity_key = "candidate_id"
+        expected_decision_ids = selected_candidate_ids
     actual_decision_ids = [
-        item.get("candidate_id") if isinstance(item, dict) else None
+        item.get(identity_key) if isinstance(item, dict) else None
         for item in decisions
     ]
-    decision_by_id = {
-        item.get("candidate_id"): item for item in decisions if isinstance(item, dict)
+    expected_decision_fields = {
+        identity_key, "decision", "confidence_ppm", "reason_codes",
     }
     if (
-        len(decision_by_id) != len(decisions)
-        or actual_decision_ids != selected_candidate_ids
+        actual_decision_ids != expected_decision_ids
+        or any(
+            not isinstance(item, dict) or set(item) != expected_decision_fields
+            for item in decisions
+        )
     ):
         raise CanonicalEvidenceError("semantic attestor decision set changed")
+    decision_by_id = dict(zip(selected_candidate_ids, decisions, strict=True))
 
     source_sha = _sha256_hex(canonical_json_bytes(source_manifest))
     for mapping in mappings:
@@ -1545,7 +1565,7 @@ async def _verify_semantic_attestation_batch(
             or decision.get("confidence_ppm") != attestation.get("confidence_ppm")
             or decision.get("reason_codes") != attestation.get("reason_codes")
             or set(decision) != {
-                "candidate_id", "decision", "confidence_ppm", "reason_codes",
+                identity_key, "decision", "confidence_ppm", "reason_codes",
             }
         ):
             raise CanonicalEvidenceError("semantic attestation binding changed")

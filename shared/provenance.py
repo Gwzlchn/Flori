@@ -24,6 +24,7 @@ MAX_NOTE_MAPPINGS = 20_000
 MAX_SUPPORT_TEXT_BYTES = 4096
 MAX_SEMANTIC_CANDIDATES = 100
 MAX_SEMANTIC_ATTESTATION_PROMPT_BYTES = 64 * 1024
+SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION = 3
 # 语义存证绑定的 ai_log 只认这个前缀;恢复侧 evidence_contract 会按该路径重读文件,
 # 所以它同时是"备份必须捞到"的契约路径。产出侧 shared/step_ai.py 与产物声明共用此常量。
 SEMANTIC_AI_LOG_PREFIX = "output/ai_logs/"
@@ -1330,6 +1331,24 @@ def _contains_cjk(value: str) -> bool:
     return any("\u3400" <= char <= "\u9fff" for char in value)
 
 
+def semantic_attestation_decision_refs(
+    candidate_ids: Sequence[str],
+) -> list[dict[str, str]]:
+    """按本批全局候选顺序生成短决策引用,并保留服务端映回关系。"""
+    ids = list(candidate_ids)
+    if len(ids) > MAX_SEMANTIC_CANDIDATES:
+        raise ValueError("semantic attestation decision refs exceed count limit")
+    if (
+        any(type(candidate_id) is not str or not candidate_id for candidate_id in ids)
+        or len(ids) != len(set(ids))
+    ):
+        raise ValueError("semantic attestation decision ref candidates are invalid")
+    return [
+        {"decision_id": f"d{index:03d}", "candidate_id": candidate_id}
+        for index, candidate_id in enumerate(ids)
+    ]
+
+
 def build_semantic_attestation_prompt(
     candidate_manifest: Mapping[str, Any] | Sequence[Mapping[str, Any]],
     source_manifest: Mapping[str, Any],
@@ -1351,7 +1370,7 @@ def build_semantic_attestation_prompt(
     source_segments = {
         item["segment_id"]: item for item in source_manifest["segments"]
     }
-    items = []
+    ordered_candidates: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
     note_type_order = {
         note_type: index for index, note_type in enumerate(_SEMANTIC_NOTE_TYPES)
     }
@@ -1362,16 +1381,28 @@ def build_semantic_attestation_prompt(
         ),
     ):
         for candidate in manifest["candidates"]:
-            segment = source_segments[candidate["source_segment_id"]]
-            items.append({
-                "candidate_id": candidate["candidate_id"],
-                "note_type": manifest["note_type"],
-                "transform_kind": candidate["transform_kind"],
-                "claim": candidate["anchor"],
-                "canonical_source": segment["support_text"],
-                "locator": segment["locator"],
-            })
-    request = canonical_json({"schema_version": 2, "items": items})
+            ordered_candidates.append((manifest, candidate))
+    refs = semantic_attestation_decision_refs([
+        candidate["candidate_id"]
+        for _manifest, candidate in ordered_candidates
+    ])
+    items = []
+    for ref, (manifest, candidate) in zip(
+        refs, ordered_candidates, strict=True,
+    ):
+        segment = source_segments[candidate["source_segment_id"]]
+        items.append({
+            "decision_id": ref["decision_id"],
+            "note_type": manifest["note_type"],
+            "transform_kind": candidate["transform_kind"],
+            "claim": candidate["anchor"],
+            "canonical_source": segment["support_text"],
+            "locator": segment["locator"],
+        })
+    request = canonical_json({
+        "schema_version": SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION,
+        "items": items,
+    })
     prompt = f"{protocol.rstrip()}\n\nINPUT={request}"
     if len(prompt.encode("utf-8")) > MAX_SEMANTIC_ATTESTATION_PROMPT_BYTES:
         raise ValueError(_SEMANTIC_PROMPT_BUDGET_ERROR)
@@ -1474,6 +1505,7 @@ def materialize_semantic_attestations(
     ai_log_binding: Mapping[str, Any],
     batch_id: str,
     response_candidate_ids: Sequence[str] | None = None,
+    required_response_schema: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """严格解析独立响应;低置信和冲突只进拒绝诊断,不生成 mapping。"""
     try:
@@ -1482,7 +1514,16 @@ def materialize_semantic_attestations(
         raise ValueError("semantic attestor response is not strict JSON") from exc
     if not isinstance(response, Mapping) or set(response) != {"schema_version", "decisions"}:
         raise ValueError("semantic attestor response fields are invalid")
-    if response["schema_version"] not in {1, 2} or type(response["decisions"]) is not list:
+    response_schema = response["schema_version"]
+    if (
+        type(response_schema) is not int
+        or response_schema not in {1, 2, SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION}
+        or (
+            required_response_schema is not None
+            and response_schema != required_response_schema
+        )
+        or type(response["decisions"]) is not list
+    ):
         raise ValueError("semantic attestor response schema is invalid")
     candidates = candidate_manifest["candidates"]
     decisions = response["decisions"]
@@ -1491,13 +1532,21 @@ def materialize_semantic_attestations(
         if response_candidate_ids is None
         else response_candidate_ids
     )
-    if (
-        len(decisions) != len(expected_ids)
-        or [item.get("candidate_id") if isinstance(item, Mapping) else None for item in decisions]
-        != expected_ids
-    ):
+    if response_schema == SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION:
+        refs = semantic_attestation_decision_refs(expected_ids)
+        identity_key = "decision_id"
+        expected_response_ids = [ref[identity_key] for ref in refs]
+    else:
+        identity_key = "candidate_id"
+        expected_response_ids = expected_ids
+    actual_response_ids = [
+        item.get(identity_key) if isinstance(item, Mapping) else None
+        for item in decisions
+    ]
+    if len(decisions) != len(expected_ids) or actual_response_ids != expected_response_ids:
         raise ValueError("semantic attestor response is incomplete")
-    decision_by_id = {item["candidate_id"]: item for item in decisions}
+    decision_by_id = dict(zip(expected_ids, decisions, strict=True))
+    identity_by_id = dict(zip(expected_ids, expected_response_ids, strict=True))
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     selected_ids = set(expected_ids)
@@ -1505,12 +1554,13 @@ def materialize_semantic_attestations(
         if candidate["candidate_id"] not in selected_ids:
             continue
         decision = decision_by_id[candidate["candidate_id"]]
+        expected_identity = identity_by_id[candidate["candidate_id"]]
         if (
             not isinstance(decision, Mapping)
             or set(decision) != {
-                "candidate_id", "decision", "confidence_ppm", "reason_codes",
+                identity_key, "decision", "confidence_ppm", "reason_codes",
             }
-            or decision.get("candidate_id") != candidate["candidate_id"]
+            or decision.get(identity_key) != expected_identity
         ):
             raise ValueError("semantic attestor decision identity is invalid")
         outcome = decision.get("decision")

@@ -1845,7 +1845,11 @@ Search、Ask、MCP 和内容详情共用同一个 evidence identity 与三态投
   上限或加入某候选会超出字节上限时，该候选记为 `budget_rejected`，继续尝试后续候选，不截断字段，
   不为其生成 mapping；存在这类拒绝时步骤结果标记 `degraded=true`，而不是让整个批次失败。完整候选 manifests
   仍必须绑定 batch ID 和 commit hash。reader 必须先完整复验 manifests，再用同一选择函数复算子集；
-  prompt 和 decisions 必须恰好绑定该子集且保持顺序，任何未选候选的 mapping 均 fail-closed。只有
+  response schema v3 不让模型抄写完整 candidate ID；服务端按选中子集的全局顺序生成小写短引用
+  `d000..d099`，prompt 只携带 `decision_id`，writer 和 reader 用同一纯函数严格映回完整 candidate ID。
+  decisions 必须恰好按顺序返回全部短引用；缺失、额外、重复、乱序、跳号、类型错误、大小写变化或额外字段
+  均 fail-closed，不做模糊纠错或按位置猜测。prompt 和 decisions 必须恰好绑定该子集，任何未选候选的
+  mapping 均 fail-closed。只有
   `confidence_ppm >= 950000` 且 decision 同时声明 `semantic_equivalent` 和
   `critical_facts_match` 时，才生成
   `verification_policy=semantic_attestation_v1` 的 provenance v3 mapping；数字、单位、货币、比例、
@@ -2407,7 +2411,7 @@ Prompt version 的合法范围是 SQLite 有符号 64 位正整数 `1..2^63-1`�
 
 覆盖键使用 pipeline 运行时步骤名,模板名可由 `prompt_template` 映射。`11_smart` 有主模板 `11_smart.md` 和视觉变体 `11_smart.vision.md`;该步覆盖只替换主模板,不污染视觉 pass。`08_punctuate` 没有同名主模板,覆盖替换当次实际选中的 `.zh` 或 `.translate` 变体。video 概念步运行时身份为 `12_concepts`,正文通过 `prompt_template: 05_concepts` 复用 tracked 模板;它的 done/progress/AI log/prompt override 仍全部使用 `12_concepts`。
 
-**协议锁定步(`prompt_locked`)**:步骤配置 `prompt_locked: true` 表示该步 prompt 是与服务端校验逻辑成对的协议文本,只可读不可覆盖。当前锁定步为三条 pipeline 的语义核验步 `11/06/04_semantic_attestation`,共用 tracked 模板 `semantic_attestation.md`。列表与详情正常返回模板内容并带 `locked: true`;`PUT`/`activate`/`DELETE` 一律 `403`。Worker 解析时同样跳过 job 覆盖(存量脏覆盖不生效)。修改协议正文只能改仓库模板文件并随代码评审发布;协议语义变化须同步 `materialize_semantic_attestations` 解析器并 bump 步骤 `version`。
+**协议锁定步(`prompt_locked`)**:步骤配置 `prompt_locked: true` 表示该步 prompt 是与服务端校验逻辑成对的协议文本,只可读不可覆盖。当前锁定步为三条 pipeline 的语义核验步 `11/06/04_semantic_attestation`,共用 tracked 模板 `semantic_attestation.md`。列表与详情正常返回模板内容并带 `locked: true`;`PUT`/`activate`/`DELETE` 一律 `403`。Worker 解析时同样跳过 job 覆盖(存量脏覆盖不生效)。修改协议正文只能改仓库模板文件并随代码评审发布;协议语义变化须同步 `materialize_semantic_attestations` 解析器并 bump 步骤 `version`。当前 response schema 为 v3,使用服务端派生的 `d000..d099` 短引用;旧 v1/v2 response 仅保留直接解析兼容,既有批次因 reader 用当前受信模板复算 prompt 而 fail-closed,必须重跑语义核验步,不得把旧响应模糊迁移为 v3。
 
 三个评审步 `05_review/08_review/12_review` 使用同一占位符契约 `{{intro}}/{{dimensions}}/{{score_example}}/{{ref_block}}`。audio 与 video 的 tracked 骨架逐字相同；Document 的 `08_review.md` 额外强调公式、视觉注册表和 locator，但仍由相同运行期参数注入。`score_keys` 由评分维度配置决定,不从模板反向解析。覆盖删除 `{{ref_block}}` 时,完整参照块追加到末尾,避免被评内容丢失。
 

@@ -13,6 +13,7 @@ from shared.provenance import (
     MAX_SEMANTIC_AI_LOG_BYTES,
     MAX_SEMANTIC_AI_LOG_RECORDS,
     SEMANTIC_ATTESTATION_POLICY,
+    SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION,
     SEMANTIC_BATCH_COMMIT_PATH,
     build_provenance_candidate_manifest,
     build_provenance_manifest,
@@ -277,6 +278,7 @@ def finalize_pending_semantic_provenance(
                 ai_log_binding=ai_log_binding,
                 batch_id=batch_id,
                 response_candidate_ids=selected_candidate_ids,
+                required_response_schema=SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION,
             )
         provenance_path = job_dir / "output" / "provenance" / f"{item['note_type']}.json"
         provenance = validate_provenance_manifest(
