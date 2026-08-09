@@ -187,12 +187,18 @@ graph LR
 
     dl --> danmaku["07_danmaku"]
     dl --> punctuate["08_punctuate<br/>(条件)"]
+    whisper --> punctuate
+    ocr --> punctuate
 
-    ocr --> mechanical["09_mechanical"]
-    danmaku --> mechanical
-
-    mechanical --> smart["10_smart"]
-    smart --> review_v["11_review"]
+    punctuate --> merge["09_merge_parts"]
+    danmaku --> merge
+    merge --> mechanical["09_mechanical"]
+    mechanical --> evidence["10_evidence"]
+    mechanical --> smart["11_smart"]
+    evidence --> smart
+    smart --> attest["11_semantic_attestation"]
+    attest --> concepts["12_concepts"]
+    concepts --> review_v["12_review"]
 
     style whisper fill:#fff3cd,stroke:#d97706
     style punctuate fill:#fff3cd,stroke:#d97706
@@ -219,7 +225,8 @@ HTML/PDF/OCR adapter 只按 source profile/capability 选择。audio 复用 vide
 
 ### 视频步骤 DAG 详解
 
-无依赖的步骤并行执行。`09_mechanical` 等待 `06_ocr` + `07_danmaku` 汇合（机械版优先用 `08_punctuate` 标点稿，没有则直接读原始字幕，故不硬依赖 AI 步）。
+无依赖的步骤并行执行。Part 级 `07_danmaku` 与 `08_punctuate` 由 `09_merge_parts` 唯一
+fan-in 成 Job 级来源、时间线和 assets；`09_mechanical` 只消费该合并结果。
 
 ## 5. 资源池模型
 
@@ -229,13 +236,13 @@ HTML/PDF/OCR adapter 只按 source profile/capability 选择。audio 复用 vide
 
 | 池名 | 并发上限 | 说明 | 示例步骤 |
 |------|---------|------|---------|
-| io | 不限 | 轻量 IO | 01_download（各 pipeline）, 07_danmaku(v), 09_mechanical(v) |
-| scene | 1 | CPU 全占，与 cpu 池互斥 | 03_scene(v) |
-| cpu | 3 | 中等 CPU | 04_frames/05_dedup/06_ocr(v)、02_whisper(v)、02_parse/03_structure(d)、03_transcript_parse(au) |
-| ai | 2 | LLM 并发（按 Provider 各自限速） | 08_punctuate/10_smart/11_review(v)、04_translate/05_smart/06_semantic_attestation/07_concepts/08_review(d)、04_smart_podcast/05_review(au) |
-| gpu | 1 | GPU 独占 | 02_whisper(au)（video 的 02_whisper 落 cpu 池兜底） |
+| io | 1024 | 轻量 IO；单机容量由 Worker concurrency 限制 | 01_download（各 pipeline）, 07_danmaku(v), 09_merge_parts/09_mechanical(v) |
+| cpu | 1024 | CPU 步骤；单机容量由 Worker concurrency 限制 | 02_whisper/03_scene/04_frames/05_dedup/06_ocr(v)、02_parse/03_structure(d)、03_transcript_parse(au) |
+| ai | 1024 | LLM 步骤；再按具体 Provider 与 Worker concurrency 限速 | 08_punctuate/10_evidence/11_smart/11_semantic_attestation/12_concepts/12_review(v)、04_translate/05_smart/06_semantic_attestation/07_concepts/08_review(d)、04_smart_podcast/04_semantic_attestation/05_concepts/05_review(au) |
+| gpu | 1024 | 可选 GPU 能力池；单机容量由 Worker concurrency 限制 | 02_whisper(au) |
 
-**互斥规则**：scene 运行时冻结 cpu 池（场景检测吃满全部核心）。
+表中是 `configs/pools.yaml` 的默认系统天花板，可由运行时 override 收紧。Worker 实际订阅池和
+单机并发由 `--pools` / `WORKER_CONCURRENCY` 显式声明，没有隐藏的 pool 互斥或 fallback。
 
 **优先级**：已完成步骤越多的 Job 优先调度（减少在制品，用户更快看到第一批结果）。
 

@@ -360,11 +360,11 @@ class RecoveryCoordinator:
                     )
 
     async def check_no_worker(self) -> None:
-        """无法推进的 job 持续超宽限期则 fail-fast,避免永久卡住。
+        """无法推进的 Job 保持等待,超宽限期后周期上报 no_worker。
 
         判定:无 running 步,且所有 ready 步所在 pool 都无在线 worker.
         典型是未部署 gpu worker 时 audio 的 02_whisper 卡在 queue:gpu。
-        给出明确错误而非静默挂起;宽限期容忍 worker 短暂重启。
+        宽限期抑制短暂重启告警;到期只告警并重置计时,不把环境缺口固化为失败。
         """
         active_jobs = await self.owner.redis.get_active_jobs()
         # Worker 可用性在单轮扫描内是全局事实。active jobs 多时跨 job 复用,

@@ -380,7 +380,7 @@ DELETE /api/profiles/{domain}/terms/{term}  → 删除术语
 
 步骤指纹使用 resolver 已固化的正文 SHA-256,不另行重读模板。job 覆盖、`/data` 热编辑或镜像 tracked 文件中实际命中的任何正文变化都会改变指纹。高优先级文件损坏时失败,不会通过回退到另一正文制造一个伪稳定指纹。
 
-`11_smart` 的幂等输入至少包含机械稿、主模板快照、视觉模板快照、Domain Profile、排序后的 Style Hints、取证产物和 provider 覆盖。Profile 或 Style 变化后 resubmit,`11_smart` 及其下游 `12_concepts/12_review` 按 DAG 失效;采纳 glossary 候选并回流到 Profile 也会改变该指纹。
+`11_smart` 的幂等输入至少包含机械稿、主模板快照、视觉模板快照、Domain Profile、排序后的 Style Hints、取证产物和 provider 覆盖。Profile 或 Style 变化后 resubmit,`11_smart` 及其下游 `11_semantic_attestation/12_concepts/12_review` 按 DAG 失效;采纳 glossary 候选并回流到 Profile 也会改变该指纹。
 
 概念步指纹使用已解析来源快照的类型和 SHA-256。validate、input hash 和 execute 复用这份快照,避免在新智能笔记或译文并发写入时计算一份指纹却执行另一份正文。
 

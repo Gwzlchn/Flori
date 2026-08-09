@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from redis.exceptions import ResponseError
 
-from shared.redis_client import AIEnqueueConflictError
+from shared.redis_client import AIEnqueueConflictError, _LUA_CLAIM_PIPELINE_STEP
 from tests.conftest import make_fakeredis
 
 
@@ -63,6 +63,18 @@ class TestApiRateLimit:
 
 
 class TestQueue:
+    def test_invalid_payload_uses_bounded_lifecycle_poison_contract(self):
+        poison_write = _LUA_CLAIM_PIPELINE_STEP.split(
+            "redis.call('XADD', 'flori:lifecycle:poison'", 1,
+        )[1].split("else", 1)[0]
+
+        assert "'MAXLEN', '~', 1000" in poison_write
+        for field in ("source_id", "topic", "payload", "error", "attempts"):
+            assert f"'{field}'" in poison_write
+        assert "string.sub(raw, 1, 16384)" in poison_write
+        assert "'source'" not in poison_write
+        assert "'reason'" not in poison_write
+
     @pytest.mark.asyncio
     async def test_enqueue_dequeue_priority(self, rc):
         await rc.enqueue_step("cpu", "j_a", "06_ocr", ["cpu"], priority=-5)

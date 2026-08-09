@@ -182,6 +182,32 @@ async def test_pipeline_claim_and_terminal_fence_are_atomic_across_clients(
     assert sorted(terminals) == [0, 1]
 
 
+async def test_invalid_pipeline_payload_uses_lifecycle_poison_contract(
+    integration_redis,
+) -> None:
+    invalid_payload = "x" * 17_000
+    await integration_redis.r.zadd("queue:cpu", {invalid_payload: 0})
+
+    claim = await integration_redis.claim_pipeline_step_atomic(
+        pool="cpu", worker_id="worker-a", exec_id="exec-a",
+        default_limit=1, tags=set(), reject_tags=set(),
+    )
+
+    assert claim is None
+    assert await integration_redis.r.zcard("queue:cpu") == 0
+    entries = await integration_redis.r.xrange(
+        integration_redis.LIFECYCLE_POISON_STREAM,
+    )
+    assert len(entries) == 1
+    assert entries[0][1] == {
+        "source_id": "queue:cpu",
+        "topic": "pipeline_step_claim",
+        "payload": "x" * 16_384,
+        "error": "invalid_json",
+        "attempts": "1",
+    }
+
+
 async def test_lifecycle_stream_survives_offline_and_reclaims_unacked(
     real_redis_clients,
 ) -> None:

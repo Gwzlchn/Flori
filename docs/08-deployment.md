@@ -285,7 +285,7 @@ docker run -d --restart unless-stopped \
   -e WORKER_REGISTRATION_TOKEN=<管理页铸造的 flw- token> \
   -e WORKER_NAME=cpu-1 \                       # 确定性 id;同机多 worker 各给唯一名,不撞
   -e CONFIG_DIR=/app/configs \
-  ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori:latest \
+  ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker:latest \
   python -m worker.main --pools cpu
 ```
 

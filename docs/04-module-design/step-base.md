@@ -120,9 +120,11 @@ def should_run(self) -> bool:
 场景：修改 06_ocr 的 confidence_threshold 0.6 → 0.5
 
 06_ocr  → config hash 变了 → 重跑 → ocr.json 内容变了
+09_merge_parts → Part manifest 变了 → 重跑 → Job 级 ocr/source manifest 变了
 09_mechanical → input_hashes() 中 ocr.json hash 变了 → 重跑 → mechanical.md 变了
-10_smart → input_hashes() 中 mechanical.md hash 变了 → 重跑
-11_review → input_hashes() 中 smart.md hash 变了 → 重跑
+11_smart → input_hashes() 中 mechanical.md hash 变了 → 重跑
+11_semantic_attestation → smart provenance 候选变了 → 重跑
+12_concepts/12_review → 已核验 smart note 输入变了 → 重跑
 
 01-05, 07, 08 → 输入没变 → 跳过 ✓
 ```
@@ -153,9 +155,10 @@ def force_rerun(job_dir: Path, from_step: str, pipeline_steps: list):
         done_file.unlink(missing_ok=True)
 ```
 
-API: `POST /api/jobs/{id}/rerun  Body: {"from_step": "10_smart"}`
+API: `POST /api/jobs/{id}/rerun  Body: {"from_step": "11_smart"}`
 
-效果：清除 10_smart 和 11_review 的 `.done` → 调度器重新提交 → Worker 执行时 `should_run()` 返回 True。
+效果：清除 11_smart 及其下游 11_semantic_attestation、12_concepts、12_review 的 `.done`
+→ 调度器重新提交 → Worker 执行时 `should_run()` 返回 True。
 
 ## 3. 进度上报（两层）
 
@@ -185,7 +188,7 @@ async def execute_with_heartbeat(self, job_id, step, job_dir, cmd, timeout):
     return proc.returncode, stdout, stderr
 ```
 
-效果：即使 10_smart 跑 5 分钟没有内部进度，心跳进度文件也每 10 秒更新一次。卡住检测能看到 `updated_at` 停止更新。
+效果：即使 11_smart 跑 5 分钟没有内部进度，心跳进度文件也每 10 秒更新一次。卡住检测能看到 `updated_at` 停止更新。
 
 ### 第二层：步骤内细粒度进度（步骤自己报）
 
@@ -218,9 +221,13 @@ def report(self, current: int, total: int, message: str = ""):
 | 06_ocr | step: 帧/待识别 | `85/162 (52%)` |
 | 07_danmaku | Worker 心跳 | `running 1s` |
 | 08_punctuate | step: 块/总块 | `2/3 (67%)` |
+| 09_merge_parts | Worker 心跳 | `running 1s` |
 | 09_mechanical | Worker 心跳 | `running 2s` |
-| 10_smart | Worker 心跳 | `running 180s` |
-| 11_review | Worker 心跳 | `running 45s` |
+| 10_evidence | Worker 心跳 | `running 120s` |
+| 11_smart | Worker 心跳 | `running 180s` |
+| 11_semantic_attestation | Worker 心跳 | `running 30s` |
+| 12_concepts | Worker 心跳 | `running 60s` |
+| 12_review | Worker 心跳 | `running 45s` |
 
 前端根据 `source` 字段决定显示方式：
 - `source: "step"` → 显示 `████████░░ 52%  85/162 帧`
@@ -354,9 +361,13 @@ if __name__ == "__main__":
 | 06_ocr | intermediate/dedup.json | 至少 1 个 keep=true |
 | 07_danmaku | input/*.ass | 无则跳过（条件步骤） |
 | 08_punctuate | input/*.srt | 无则跳过（条件步骤） |
-| 09_mechanical | intermediate/{ocr,dedup,danmaku}.json + output/transcript.md | 全部可读 |
-| 10_smart | output/notes_mechanical.md | 大小 >100 字节 |
-| 11_review | output/notes_smart.md + notes_mechanical.md | 两个都存在 |
+| 09_merge_parts | 各 Part manifest 与 fan-in 产物 | Part 完整、顺序唯一、产物可读 |
+| 09_mechanical | Job 级 intermediate/{ocr,dedup,danmaku,source_segments}.json + output/transcript.md | 必需输入可读 |
+| 10_evidence | output/notes_mechanical.md（案例类） | 非案例类允许空证据结果 |
+| 11_smart | output/notes_mechanical.md | 大小 >100 字节 |
+| 11_semantic_attestation | 智能笔记 + provenance 候选 + source manifest | 引用可解析且边界受限 |
+| 12_concepts | 最新智能笔记 | 产物可解析 |
+| 12_review | 最新智能笔记 + notes_mechanical.md | 两个都存在 |
 
 
 ## manifest-v1 双写(docs/03-contracts.md §7.1 dual 阶段)

@@ -226,8 +226,13 @@ for index = 1, #items, 2 do
     local ok, task = pcall(cjson.decode, raw)
     if not ok or type(task) ~= 'table' then
         redis.call('ZREM', KEYS[1], raw)
-        redis.call('XADD', 'flori:lifecycle:poison', '*',
-            'source', KEYS[1], 'payload', raw, 'reason', 'invalid_json')
+        redis.call('XADD', 'flori:lifecycle:poison',
+            'MAXLEN', '~', 1000, '*',
+            'source_id', KEYS[1],
+            'topic', 'pipeline_step_claim',
+            'payload', string.sub(raw, 1, 16384),
+            'error', 'invalid_json',
+            'attempts', '1')
     else
         local matched, selected_provider = matches(task)
         if matched then

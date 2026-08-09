@@ -377,9 +377,8 @@ class TaskRouter:
 
     async def _pool_has_workers(self, pool: str) -> bool:
         """检查某个 pool 是否有可认领新任务的 worker;排除 paused/offline.
-        claim_step 对 paused 直接拒认领;若 pool 只剩 paused,no-worker 判定/死锁打破器会误判为可推进,
-        ready 步既无人认领又不被 fail-fast/skip,永久卡 ready。
-        暂停态算"无可用 worker":暂停期下载好的 job 进到该池会等候,超 NO_WORKER_GRACE_SEC 才 fail。"""
+        claim_step 对 paused 直接拒认领;若 pool 只剩 paused,no-worker 判定/死锁打破器会误判为可推进。
+        暂停态算"无可用 worker":就绪步保持等待,超 NO_WORKER_GRACE_SEC 后周期告警。"""
         workers = await self.owner.redis.list_worker_ids()
         for wid in workers:
             info = await self.owner.redis.get_worker_info(wid)
@@ -398,8 +397,8 @@ class TaskRouter:
         """同 _pool_has_workers,但额外要求在线 worker 的 tags 满足 require_tags(硬门控)。
         require_tags 为空时等价 _pool_has_workers;check_no_worker 若只看池不看 tag,
         池有 worker 但无人满足 require_tags 时(如境外内容 require net-global 却无覆盖全球的
-        worker)会躲过 fail-fast、永久卡 ready 且无报错;用本函数后超 NO_WORKER_GRACE_SEC
-        给明确失败。"""
+        worker)会躲过 no_worker 告警;本函数让调度器在超 NO_WORKER_GRACE_SEC 后明确报告
+        能力缺口,同时保留 ready 状态等待匹配 Worker。"""
         req = {t for t in (require_tags or []) if t}
         workers = await self.owner.redis.list_worker_ids()
         for wid in workers:

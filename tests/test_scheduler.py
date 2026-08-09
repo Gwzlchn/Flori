@@ -408,7 +408,7 @@ class TestSkipNoWorker:
     @pytest.mark.asyncio
     async def test_all_ready_no_worker_required_step_not_skipped(self, redis, db, config):
         # 仅剩 A=ready(必需步,无 condition/rules)、其余 done/skipped、cpu 无 worker:
-        # 死锁打破器不 skip 必需步——留给 check_no_worker 超宽限 fail-fast,避免不完整却显示完成。
+        # 死锁打破器不 skip 必需步:留给 check_no_worker 告警并等待,避免不完整却显示完成。
         s = Scheduler(redis, db, config)
         job = make_job()
         db.create_job(job)
@@ -578,7 +578,7 @@ class TestNoWorkerWaiting:
 
     @pytest.mark.asyncio
     async def test_cn_download_with_zone_worker_ok(self, redis, db, config, tmp_path, tmp_jobs_dir, configs_dir):
-        """io worker 覆盖 net-cn → 满足 B站下载 require {net-cn},不 fail-fast。"""
+        """io worker 覆盖 net-cn → 满足 B站下载 require {net-cn},不触发无 Worker 告警。"""
         await self._bili_dl_job(redis, db, config, tmp_path, tmp_jobs_dir, configs_dir, "j_haszone", "net-cn")
         assert "j_haszone" in await redis.get_active_jobs()
 

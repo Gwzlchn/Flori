@@ -75,7 +75,7 @@ class Scheduler:
         self._concept_synthesis_pending: dict[
             tuple[str, str], tuple[str, int]
         ] = {}
-        # job_id -> 首次被判定"无 worker 可推进"的时刻,超宽限期才 fail-fast(容忍 worker 重启)。
+        # job_id -> 首次被判定"无 worker 可推进"的时刻;超宽限期才告警,并继续等待 Worker 恢复。
         self._no_worker_since: dict[str, float] = {}
         # (job_id, step) -> 首次发现"在跑步骤的 worker 上报的 current_step 不是本步"的时刻,
         # 超宽限期才回收(容忍认领后首拍心跳延迟),防 gateway 认领响应丢失导致的永久卡 running。
@@ -537,9 +537,8 @@ class Scheduler:
     async def check_stuck(self) -> None:
         return await self._recovery.check_stuck()
 
-    # 默认 90s 宽限即 fail-fast(无可用 worker 的 job)。可经 env 调大,用于
-    # "只跑部分 worker"的运维窗口(如夜间仅 ECS download worker,其余步骤明天再跑),
-    # 避免下载完的 job 因缺 scene/cpu/ai worker 被误判失败。
+    # 默认 90s 后首次报告无可用 Worker,随后按同一周期重复告警。部署可经 env 调大,
+    # 减少"只跑部分 Worker"运维窗口内的噪声;Job 始终保持 pending/ready,等待能力恢复。
     _NO_WORKER_GRACE_SEC = int(os.environ.get("NO_WORKER_GRACE_SEC", "90"))
 
     async def check_no_worker(self) -> None:

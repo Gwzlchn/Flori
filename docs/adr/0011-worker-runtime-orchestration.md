@@ -1,9 +1,12 @@
-# ADR-0011: Worker 运行时编排 —— 暂停/恢复、per-worker 并发、12h 宽限、download→io
+# ADR-0011: Worker 运行时编排 —— 暂停/恢复、per-worker 并发、12h 告警周期、download→io
 
 > 承接 [ADR-0009](0009-worker-gateway-outbound-https.md)（worker 接入通路）。本 ADR 记录
 > worker 接入之后的**运行时编排**实现决策。源于 2026-06-22 用户三问的调研（`.local/processing/2026-06-22/14-*`）
 > 与随后的拍板——用户否决了「用宿主 cron 做时段调度 / 保留 download 类型 / per-machine 并发属 YAGNI」
 > 的保守建议，要求**完整实现**暂停按钮、异构机器并发、改名。本 ADR 以实现为准。
+>
+> 后续修订：`NO_WORKER_GRACE_SEC` 现在是 `no_worker` 告警周期，不再是失败截止时间。环境性
+> 能力缺口必须保留 `pending/ready`，待匹配 Worker 恢复后继续执行；下文相关决定按此修订解释。
 
 ## 背景
 
@@ -26,7 +29,7 @@
 | | B. 维持单 worker 串行 | 简单但表达不了异构容量（用户已否决） |
 | 多 GPU | 每机一个声明 `--pools gpu cpu` 的 worker + 调 `gpu.limit` **[采纳]** | 无设备亲和（用所有卡，YAGNI） |
 | 能力表达 | `download`→`io`，随后收敛为显式 `--pools` 集合 **[采纳]** | 路由原语就是 pool；一台机器可声明多种能力 |
-| 宽限 | `NO_WORKER_GRACE_SEC` 默认改 12h **[采纳]** | 暂停某类 worker 后，下载好的 job 等 12h 才 fail-fast |
+| 告警周期 | `NO_WORKER_GRACE_SEC` 部署默认 12h **[采纳并修订]** | 暂停某类 Worker 后，Job 持续等待；每 12h 报告一次能力缺口 |
 
 ## 决定
 
@@ -48,8 +51,9 @@
 4. **能力改为显式池集合**：历史交付先把 `download` 改名为 `io`，当前 CLI 进一步移除单一
    `--type` 映射，统一由 `--pools io|cpu|ai|gpu ...` 声明一个或多个能力；路由只认 pool + tags。
 
-5. **无-worker 宽限默认 12h**：`scheduler` 的 `NO_WORKER_GRACE_SEC` 在 `docker-compose.yml` 默认 `43200`。
-   被暂停的 worker 在 `_pool_has_workers` 算「无可用」→ 只剩它服务的池里就绪步等 12h 才 fail-fast。
+5. **无 Worker 告警周期默认 12h**：`scheduler` 的 `NO_WORKER_GRACE_SEC` 在 `docker-compose.yml` 默认 `43200`。
+   被暂停的 Worker 在 `_pool_has_workers` 算「无可用」；只剩它服务的池里就绪步保持等待，
+   每 12h 产生一次 `no_worker` 事件与告警，不改变 Job 或步骤状态。
 
 ## 理由
 
@@ -57,7 +61,7 @@
 2. 容器即并发单元 + per-worker 并发度，既保留「全局池上限保护共享资源」又让异构机器表达自身容量，不引入线程复杂度。
 3. 多 GPU 用「加 worker + 调 limit」满足当前需求；设备亲和成本高、收益低，留到真多卡并行再做。
 4. 类型名 `io` 诚实指代池，消除「download 是路由原语」的误解（实际只是 `[io]` 默认）。
-5. 12h 宽限把暂停/夜间运维窗口内的 job 从「90s 被误杀」改为「等候到次日」，与暂停按钮配套。
+5. 12h 告警周期让暂停/夜间运维窗口内的 Job 持续等待，同时保留可观测信号，与暂停按钮配套。
 
 ## 与其它 ADR 的关系
 

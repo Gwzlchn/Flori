@@ -14,7 +14,7 @@ graph LR
     end
     Punctuate --> Merge["09_merge_parts"]
     Danmaku --> Merge
-    Merge --> Mechanical["09_mechanical"] --> Evidence["10_evidence"] --> Smart["11_smart"] --> Concepts["12_concepts"] --> Review["12_review"]
+    Merge --> Mechanical["09_mechanical"] --> Evidence["10_evidence"] --> Smart["11_smart"] --> Attestation["11_semantic_attestation"] --> Concepts["12_concepts"] --> Review["12_review"]
 ```
 
 > `01_download..08_punctuate` 是 Part scope，按有序 manifest 并行展开；`09_merge_parts` 是唯一 fan-in，
@@ -54,7 +54,7 @@ B站 1080P 需要登录态(SESSDATA 由中心分发,worker 认领时注入 env,d
 
 | 项目 | 值 |
 |------|---|
-| 池 | gpu（回退 cpu，但极慢） |
+| 池 | cpu（步骤内检测到 GPU 时可加速） |
 | 依赖 | 01_download |
 | 条件 | input/ 下无 .srt 文件 |
 | 超时 | 30min |
@@ -145,13 +145,13 @@ dedup:
 
 | 项目 | 值 |
 |------|---|
-| 池 | cpu / gpu |
+| 池 | cpu |
 | 依赖 | 05_dedup |
 | 超时 | 5min |
 | 输入 | intermediate/dedup.json + assets/*.jpg (keep=true) |
 | 输出 | intermediate/ocr.json |
 
-CPU 用 RapidOCR (ONNX)，GPU 用 PaddleOCR。通过 `device.py` 自动选路径。
+使用 RapidOCR (ONNX)。当前未接入 PaddleOCR GPU 路径。
 
 ### 验证
 
@@ -176,76 +176,121 @@ CPU 用 RapidOCR (ONNX)，GPU 用 PaddleOCR。通过 `device.py` 自动选路径
 | 项目 | 值 |
 |------|---|
 | 池 | ai |
-| 依赖 | 01_download（或 02_whisper） |
+| scope | Part |
+| 依赖 | 01_download + 02_whisper + 06_ocr |
 | 条件 | input/ 下有 .srt 文件 |
-| 超时 | 5min |
-| 输入 | input/*.srt |
-| 输出 | output/transcript.md |
+| 超时 | 30min |
+| 输入 | input/*.srt + intermediate/ocr.json |
+| 输出 | output/transcript.md + intermediate/source_segments.json + output/provenance/transcript.json |
 
-AI 自动生成的字幕没有标点。用 Claude 给每行补标点，保留 `[MM:SS]` 时间戳。
+为字幕补标点并把字幕段、OCR 帧及其 locator 绑定成 Part 级 canonical source manifest。
+原生字幕使 `02_whisper` 跳过时仍满足依赖；没有字幕时本步按规则跳过。长文本会分块处理，
+合并时保留时间范围与 provenance，不要求输出行数等于 SRT cue 数。
 
-长视频（>30000 字符）自动分块处理。
+## Step 09: 合并分段 (step_09_merge_parts.py)
 
-### 验证
+| 项目 | 值 |
+|------|---|
+| 池 | io |
+| scope | Job |
+| fan-in | 07_danmaku + 08_punctuate |
+| 超时 | 2min |
+| 输入 | 各 Part 的 transcript、source segments、OCR、去重帧、弹幕、provenance 与 assets |
+| 输出 | Job 级同名合并产物与 assets |
 
-- transcript.md 保留 `[MM:SS]` 时间戳
-- 包含中文标点
-- 行数与原 SRT 一致 (±10%)
+这是 Part DAG 到 Job DAG 的唯一 fan-in。合并必须按 `part_index` 保持来源顺序，重映射
+全局时间线和 locator，并拒绝缺 Part 或重复 Part；后续步骤只消费 Job 级产物。
 
 ## Step 09: 机械版笔记 (step_09_mechanical.py)
 
 | 项目 | 值 |
 |------|---|
 | 池 | io (纯 Python 拼接) |
-| 依赖 | 06_ocr + 07_danmaku |
+| 依赖 | 09_merge_parts |
 | 超时 | 30s |
-| 输入 | intermediate/dedup.json + ocr.json + danmaku.json + output/transcript.md |
-| 输出 | output/notes_mechanical.md |
+| 输入 | Job 级 transcript + source segments + dedup + OCR + danmaku |
+| 输出 | output/notes_mechanical.md + output/provenance/mechanical.json |
 
 将截图、OCR、弹幕、逐字稿按时间线拼接成 Markdown。自动按时间切分章节（每 ~3 分钟一章）。
 
-这是给 10_smart 的输入素材，也可独立阅读。
+这是给取证与智能笔记的确定性输入素材，也可独立阅读。
 
-## Step 10: 智能版笔记 (step_10_smart.py)
+## Step 10: 权威来源 (step_evidence.py)
 
 | 项目 | 值 |
 |------|---|
 | 池 | ai |
 | 依赖 | 09_mechanical |
-| 超时 | 10min |
-| 输入 | output/notes_mechanical.md + assets/*.jpg（最多 10 张） |
-| 输出 | output/versions/notes_smart_*.md（版本化落盘，含生成时间/方式/模型） |
+| 能力门 | websearch |
+| 超时 | 30min |
+| 输入 | output/notes_mechanical.md |
+| 输出 | output/evidence.json + output/evidence/* |
 
-AI 将机械版素材重组为结构化笔记：提炼要点、解释术语、组织章节、引用关键截图。
+案例类内容搜索候选权威来源，再由服务端受控下载并校验；非案例类写空结果并快速返回。
+本步只提供可引用的 `[E#]` 证据，不替代原始视频 locator。
 
-Prompt 模板在 `{prompts_dir}/10_smart.md`，叠加领域 Profile（`profiles/{domain}.yaml`）和风格标签（`styles/{tag}.yaml`）。
+## Step 11: 智能版笔记 (step_11_smart.py)
+
+| 项目 | 值 |
+|------|---|
+| 池 | ai |
+| 依赖 | 09_mechanical + 10_evidence |
+| 能力门 | vision |
+| 超时 | 30min |
+| 输入 | 机械稿 + 权威来源 + assets/*.jpg |
+| 输出 | output/versions/notes_smart_* + provenance 候选 |
+
+AI 将机械版素材重组为结构化笔记，并把关键截图和权威来源纳入论证。视觉 pass 与成稿 pass
+分离，避免工具调用过程污染正文；最终来源声明要到下一步独立核验后才成为可信 provenance。
+
+Prompt 模板在 `{prompts_dir}/11_smart.md`，视觉 pass 使用 `11_smart.vision.md`，并叠加领域
+Profile（`profiles/{domain}.yaml`）和风格标签（`styles/{tag}.yaml`）。
 
 ### 两段式生成
 
 把"看图"（必须 agentic、多轮 Read）与"成稿"（必须单轮纯文本输出）解耦，正文不再被 agentic 跑偏/丢正文污染：
 
 1. **视觉 pass**（仅当有截图时）：claude 带 `Read` 工具逐张查看截图，**只产出"逐帧视觉描述"清单**（文件名 | OCR 给不出的视觉信息：箭头指向、红框、K 线/分时形态、配色、版式等），不写笔记正文、不保存文件。
-   - **限 10 张**：多图时 claude 每轮 Read 的上下文超线性膨胀会拖垮（实测 20 张 >18min），故 `assets/*.jpg` 排序后只取前 10 张。
+   - 图片数量受步骤实现的视觉预算限制，避免上下文随图片数超线性膨胀。
 2. **文本 pass**：用 机械稿 + 视觉描述清单走**纯文本单轮**生成（`--tools "" --max-turns 1`），不再读图，把视觉要点按文件名内嵌为 `![中文描述](文件名)`。
 
 无截图时跳过视觉 pass，直接走文本 pass。落盘时 `_sanitize_smart_note` 退居兜底净化（agentic 口水/围栏残留），而非主力。
 
-### 验证
-
-- 最新版 notes_smart_*.md >500 字符
-- 包含 `##` 章节标题
-- 引用的 `![](文件名)` 对应的截图在 assets/ 下存在
-- 不含 "作为AI" / "我无法" 等拒绝话术
-
-## Step 11: 质量评审 (step_11_review.py)
+## Step 11: 语义证据独立核验 (step_semantic_attestation.py)
 
 | 项目 | 值 |
 |------|---|
 | 池 | ai |
-| 依赖 | 10_smart |
+| 依赖 | 11_smart |
+| 超时 | 3min |
+| 输入 | 智能笔记 + source segments + provenance 候选 |
+| 输出 | output/provenance/smart.json + output/provenance/semantic_batch.json |
+
+独立于成稿调用核验跨语言、释义和语义改写声明。只有通过核验的声明进入最终 smart provenance；
+失败或无法定位的声明必须 fail-closed，不得用成稿模型的自证替代。
+
+## Step 12: 概念与摘要 (step_concepts.py)
+
+| 项目 | 值 |
+|------|---|
+| 池 | ai |
+| 依赖 | 11_semantic_attestation |
 | 超时 | 2min |
-| 输入 | output/notes_mechanical.md + 最新版 notes_smart_*.md |
-| 输出 | output/review.json（标注评的是哪一版 note_file + 生成时间/方式/模型） |
+| 输入 | 最新智能笔记与已核验 provenance |
+| 输出 | output/concepts.json |
+
+提取概念、摘要和术语候选。完成副作用负责索引 smart note 和收集 glossary；索引使用核验后的
+provenance，不直接信任 `11_smart` 的候选声明。
+
+## Step 12: 质量评审 (step_12_review.py)
+
+| 项目 | 值 |
+|------|---|
+| 池 | ai |
+| 依赖 | 12_concepts |
+| 超时 | 30min |
+| 输入 | 机械稿 + 最新智能笔记 + evidence + concepts |
+| 输出 | output/review.json + 版本化 review 输入与结果 |
 
 对比机械版与智能版，输出**扁平 JSON**（不嵌套 scores 子对象）。六个维度为顶层整数键（1-5）：
 
@@ -281,7 +326,7 @@ python3 -m steps.video.step_06_ocr --job-dir /data/test/BV1example001
 python3 verify_step.py --step 06_ocr --job-dir /data/test/BV1example001
 
 # 全流程验证
-for step in 03_scene 04_frames 05_dedup 06_ocr 07_danmaku 08_punctuate 09_mechanical 10_smart 11_review; do
+for step in 03_scene 04_frames 05_dedup 06_ocr 07_danmaku 08_punctuate 09_merge_parts 09_mechanical 10_evidence 11_smart 11_semantic_attestation 12_concepts 12_review; do
     python3 verify_step.py --step $step --job-dir /data/test/BV1example001
 done
 ```

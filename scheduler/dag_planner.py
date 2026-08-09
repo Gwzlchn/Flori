@@ -123,9 +123,8 @@ class DagPlanner:
                             pool_ok[pool] = await self.owner._pool_has_workers(pool)
                         if pool_ok[pool]:
                             continue
-                        # 缺 worker 只 skip 条件步(可选步缺能力=合理跳过);必需步不 skip,留给
-                        # check_no_worker 超宽限 fail-fast,避免末端必需步被静默 skip 后 job
-                        # 不完整却显示完成(对齐 pools.yaml fail-fast 注释)。
+                        # 缺 Worker 只 skip 条件步(可选步缺能力=合理跳过);必需步保留 ready,
+                        # 由 check_no_worker 周期告警并等待能力恢复,避免不完整却显示完成。
                         if not self.owner._step_is_conditional(steps_cfg.get(step_name, {})):
                             continue
                         # CAS 保护 ready 到 skipped 的转换:若该步骤刚被 worker 抢成 running,

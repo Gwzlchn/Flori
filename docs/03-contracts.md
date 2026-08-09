@@ -905,60 +905,47 @@ Response `200`:
 #### GET /api/workers — Worker 列表
 
 ```json
-{
-  "workers": [
-    {
-      "id": "ai-a1b2c3d4",
-      "type": "ai",
-      "pools": ["ai"],
-      "hostname": "office-pc",
-      "status": "busy",
-      "current_job": "j_20260516_abc123",
-      "current_step": "11_smart",
-      "tasks_completed": 142,
-      "tasks_failed": 3,
-      "total_duration_sec": 28800.0,
-      "traffic": {"pull": 8589934592, "push": 1073741824},
-      "first_seen": "2026-05-10T08:00:00+08:00",
-      "started_at": "2026-05-17T09:00:00+08:00",
-      "last_heartbeat": "2026-05-17T12:30:15+08:00",
-      "admin_note": "内网机器，有 Claude Max 账号"
-    },
-    {
-      "id": "gpu-e5f6g7h8",
-      "type": "gpu",
-      "pools": ["gpu", "cpu"],
-      "concurrency": 1,
-      "hostname": "gpu-server",
-      "gpu_name": "RTX 4090",
-      "spec": {"version": "0.2.0+f1d86f0", "cpu": 16, "mem_mb": 32000, "platform": "Linux-x86_64", "python": "3.11.9"},
-      "status": "idle",
-      "tasks_completed": 88,
-      "tasks_failed": 1,
-      "first_seen": "2026-05-12T10:00:00+08:00",
-      "last_heartbeat": "2026-05-17T12:30:10+08:00"
-    }
-  ]
-}
+[
+  {
+    "id": "ai-a1b2c3d4",
+    "type": "ai",
+    "pools": ["ai"],
+    "hostname": "office-pc",
+    "status": "online-busy",
+    "current_job": "j_20260516_abc123",
+    "current_step": "11_smart",
+    "tasks_completed": 142,
+    "tasks_failed": 3,
+    "total_duration_sec": 28800.0,
+    "traffic": {"pull": 8589934592, "push": 1073741824},
+    "first_seen": "2026-05-10T08:00:00+08:00",
+    "started_at": "2026-05-17T09:00:00+08:00",
+    "last_heartbeat": "2026-05-17T12:30:15+08:00",
+    "admin_note": "内网机器，有 Claude Max 账号"
+  },
+  {
+    "id": "gpu-e5f6g7h8",
+    "type": "gpu",
+    "pools": ["gpu", "cpu"],
+    "concurrency": 1,
+    "hostname": "gpu-server",
+    "gpu_name": "RTX 4090",
+    "spec": {"version": "0.2.0+f1d86f0", "cpu": 16, "mem_mb": 32000, "platform": "Linux-x86_64", "python": "3.11.9"},
+    "status": "online-idle",
+    "tasks_completed": 88,
+    "tasks_failed": 1,
+    "first_seen": "2026-05-12T10:00:00+08:00",
+    "last_heartbeat": "2026-05-17T12:30:10+08:00"
+  }
+]
 ```
 
 > `traffic`（redis-only，默认 `{}`）：该 worker 经网关产物代理的中转流量累计字节 `{pull, push}`——`pull`=出库(NAS→worker，worker 拉取产物)、`push`=入库(worker→NAS，worker 回传产物)。按 `worker_id` 从 redis `traffic:{pull,push}` hash（§3.4）归因填充；从未中转过的 worker 为 `{"pull": 0, "push": 0}`。`GET /api/workers/{id}` 同样带此字段。
 
 #### GET /api/workers/{id} — Worker 详情
 
-除上述字段外，额外返回最近执行的任务历史：
-
-```json
-{
-  "id": "ai-a1b2c3d4",
-  "...": "...",
-  "recent_tasks": [
-    {"job_id": "j_xxx", "step": "11_smart", "status": "done", "duration_sec": 45.2, "finished_at": "..."},
-    {"job_id": "j_yyy", "step": "12_review", "status": "done", "duration_sec": 12.1, "finished_at": "..."},
-    {"job_id": "j_zzz", "step": "11_smart", "status": "failed", "error": "timeout", "finished_at": "..."}
-  ]
-}
-```
+返回单个 Worker 对象，字段与列表元素一致，不内嵌任务历史。最近执行记录由
+`GET /api/workers/{id}/tasks?limit=` 单独查询，避免详情响应随历史条数膨胀。
 
 #### PUT /api/workers/{id} — 更新 Worker 配置
 
@@ -2750,7 +2737,9 @@ TTL:    300 秒；只在正常 release 后留下，用于同一 release 幂等�
 
 判定优先级：`paused`（仅在线生效）→ `offline` → `stale` → `online-busy` → `online-idle`。窗口阈值取自 `configs/pools.yaml` 的 `worker_status` 段，缺省回退内置默认。容器跑 UTC，故由后端统一派生，前端只渲染、不再用本地时区自算。`admin_status=paused` 是持久管理意图,worker 离线或重建导致 Redis 注册过期时不会被 stale worker GC 删除;恢复前仍不得认领新任务。
 
-> 暂停态的调度交互：被暂停的 worker 在 `scheduler._pool_has_workers` 里算「无可用 worker」，故只剩暂停 worker 服务的池里、已就绪的步会等待，超 `NO_WORKER_GRACE_SEC`（默认 12h）才被 fail-fast。配合「夜间只跑 io worker / 白天暂停某类 worker」的运维窗口。
+> 暂停态的调度交互：被暂停的 Worker 在 `scheduler._pool_has_workers` 里算「无可用 Worker」。
+> 只剩暂停 Worker 服务的池里，已就绪步骤继续保持 `ready`；超过 `NO_WORKER_GRACE_SEC`
+> （compose 默认 12h）后产生 `no_worker` 事件并周期告警，不把 Job 标记失败。恢复匹配 Worker 后可继续认领。
 
 ### 3.5 持久生命周期事件与展示通知
 
@@ -2899,13 +2888,11 @@ video:
       run: steps.video.step_02_whisper
       scope: part
       image: flori/step-gpu
-      pool: gpu
+      pool: cpu
       needs: ["01_download"]
-      timeout: 1800                     # 静态下限(短集)
-      timeout_per_min: 90              # 可选:超时随媒体时长伸缩(每分钟音/视频 90s 墙钟预算)
-      timeout_max_sec: 21600           # 可选:动态超时上限(6h,防失控)
+      timeout: 1800
       retry: 2
-      tags: ["gpu"]
+      tags: []
       rules:
         - exists: "input/*.srt"
           when: skip                   # 已有字幕则跳过 whisper
@@ -2923,10 +2910,10 @@ video:
       extends: .ai-step
       run: steps.video.step_08_punctuate
       scope: part
-      version: "3"
+      version: "4"
       needs: ["01_download", "02_whisper", "06_ocr"]
-      timeout: 300
-      retry: 3
+      timeout: 1800
+      retry: 5
       rules:
         - exists: "input/*.srt"
           when: on                     # 有字幕（含 whisper 产出）才标点
@@ -2955,11 +2942,20 @@ video:
       ai:
         allowed_providers: [claude-cli, codex-cli, qoder-cli]
 
+    "11_semantic_attestation":
+      extends: .ai-step
+      run: steps.utils.step_semantic_attestation
+      prompt_template: semantic_attestation
+      prompt_locked: true
+      needs: ["11_smart"]
+      ai:
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
+
     "12_concepts":
       extends: .ai-step
       run: steps.common.step_concepts
       prompt_template: 05_concepts
-      needs: ["11_smart"]
+      needs: ["11_semantic_attestation"]
       ai:
         allowed_providers: [claude-cli, codex-cli, qoder-cli]
 
@@ -2973,7 +2969,7 @@ video:
 
 **各顶层内容族的 job 链**（`needs` 推导）：
 
-- **video**:`01_download` → `03_scene` → `04_frames` → `05_dedup` → `06_ocr`;`02_whisper` 由 `01_download` 旁路触发;`08_punctuate` 汇合 `01_download` + `02_whisper` + `06_ocr`,一次发布含字幕与 OCR 图像段的来源清单;`09_mechanical` 再汇合 `06_ocr` + `07_danmaku` + `08_punctuate` → `10_evidence` → `11_smart` → `11_semantic_attestation` → `12_concepts` → `12_review`。`11_smart` 同时依赖 `09_mechanical` 与 `10_evidence`。
+- **video**:`01_download` → `03_scene` → `04_frames` → `05_dedup` → `06_ocr`;`02_whisper` 由 `01_download` 旁路触发;`08_punctuate` 汇合 `01_download` + `02_whisper` + `06_ocr`,一次发布含字幕与 OCR 图像段的 Part 来源清单;`09_merge_parts` fan-in 各 Part 的 `07_danmaku` + `08_punctuate` → `09_mechanical` → `10_evidence` → `11_smart` → `11_semantic_attestation` → `12_concepts` → `12_review`。`11_smart` 同时依赖 `09_mechanical` 与 `10_evidence`。
 - **document**：`01_download → 02_parse → 03_structure → 04_translate(条件) → 05_smart(条件) → 06_semantic_attestation → 07_concepts → 08_review(条件)`。
   - 所有论文、文章、白皮书等业务体裁共用此 DAG，`document_kind` 只选择展示/Prompt/评审 profile；adapter 只按 source profile/capability 选择。
   - `02_parse` 同时登记实际存在的 HTML/PDF source，各自绑定 source ID 与 fingerprint；HTML 产稳定 DOM locator，数字 PDF 产 page+bbox/text layer，扫描 PDF 产带置信度 OCR locator。HTML↔PDF 只有唯一高置信文本匹配才建立 crosswalk，歧义时 fail-closed。
@@ -3249,7 +3245,7 @@ v2 manifest 顶层字段必须精确为 `schema_version / job_id / ocr_refs / ev
 
 每次读取重新验证 `job_id`、顶层精确 schema、E# 与固定文件名、规范相对路径、sha256、bytes/chars、总字节、当前机械稿锚点及所有派生字段。API 投影的 `manifest_state` 为 `verified / partial / invalid / legacy`,`reliability_state` 为 `verified / unreliable / legacy_unverified`。只有读时重新验证通过的高置信一手项可保留 `final_url`、`artifact` 与 `link_safe=true`;低可信、legacy、无效或未验证项必须清空 URL 与 artifact。
 
-`11_smart` 只以 `[E1]..[E12]` 引用已绑定正文,`12_review` 服务端重验引用的来源资格、金额/数字/单位与所在上下文(DAG:`09_mechanical → 10_evidence → 11_smart → 12_concepts → 12_review`)。citation 总状态为 `valid / unverified / invalid / not_applicable`;畸形或越界 E 引用 fail-closed。
+`11_smart` 只以 `[E1]..[E12]` 引用已绑定正文,`12_review` 服务端重验引用的来源资格、金额/数字/单位与所在上下文(DAG:`09_mechanical → 10_evidence → 11_smart → 11_semantic_attestation → 12_concepts → 12_review`)。citation 总状态为 `valid / unverified / invalid / not_applicable`;畸形或越界 E 引用 fail-closed。
 
 `GET /api/jobs/{id}/evidence` 返回上述安全投影,不是原始 manifest。文件不存在返回 `404`;非法 JSON、非对象或超过顶层读取上限返回 `422`;可解析的 legacy/partial/invalid 返回 `200` 诊断投影。
 

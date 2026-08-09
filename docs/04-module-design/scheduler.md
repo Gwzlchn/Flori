@@ -193,20 +193,21 @@ Job C 刚开始      → score = 0  (最低)
 场景：视频无弹幕
 
 07_danmaku rules:[exists danmaku → on] → 不满足 → skipped
-09_mechanical needs=[06_ocr, 07_danmaku, 08_punctuate]
-  → 07_danmaku=skipped 视为满足 → 等 06_ocr 和 08_punctuate 即可
+09_merge_parts fan_in=[07_danmaku, 08_punctuate]
+  → 07_danmaku=skipped 视为满足 → 等所有 Part 的 08_punctuate 后合并
+09_mechanical needs=[09_merge_parts]
 ```
 
 跳过后立即触发一次 `on_step_done` 检查，让下游步骤有机会推进。
 
-### 特殊情况：02_whisper → 08_punctuate
+### 特殊情况：原生字幕使 02_whisper 跳过
 
-08_punctuate 的 DAG 依赖只写了 `01_download`，但 `rules` 是 `exists input/*.srt → when: on`（有字幕才标点）。
+08_punctuate 明确依赖 `01_download + 02_whisper + 06_ocr`，规则是
+`exists input/*.srt → when: on`（有字幕才生成口播稿与来源清单）。
 
-- 有字幕的视频：01_download 完成后 srt 已存在 → 08 立即就绪
-- 无字幕的视频：01_download 完成后无 srt → 08 的 rules 不满足 → 标记 skipped
-  - 但 02_whisper 生成了 srt → whisper 完成后调度器重新检查所有 waiting/skipped 步骤
-  - 此时 08 的 rules 满足 → 从 skipped 恢复为 ready → 入队执行
+- 有原生字幕：`02_whisper` 按规则 skipped，但 skipped 满足依赖；等 `06_ocr` 完成后 08 就绪。
+- 无原生字幕：`02_whisper` 先生成 SRT；等它与 `06_ocr` 都完成后 08 就绪。
+- 转写仍未产生 SRT：08 按规则 skipped，fan-in 继续以其它 Part 产物和弹幕合并。
 
 `on_step_done` 中不仅检查 waiting 步骤，也重新检查 skipped 步骤的 rules 是否因新产物而满足。
 
@@ -396,7 +397,9 @@ Worker 取到步骤 → steps/utils/device.py 探测 nvidia-smi
 OCR 当前仅 rapidocr (CPU)，paddleocr-GPU 尚未接入
 ```
 
-某池的就绪步长期无在线 worker 时，调度器按 `NO_WORKER_GRACE_SEC` 宽限（代码默认 90s，compose 部署设 12h）后 fail-fast，给出明确错误而非静默挂起。
+某池的就绪步长期无在线 Worker 时，调度器让 Job 保持 `pending`、步骤保持 `ready`，等待能力恢复。
+超过 `NO_WORKER_GRACE_SEC`（代码默认 90s，compose 部署设 12h）后发送 `no_worker` 事件并记录告警，
+随后重置计时并按同一周期重复报告，不把环境性能力缺口固化为失败。
 
 
 ## manifest-v1 消费(读端/对账/rerun/skip;契约见 docs/03-contracts.md §7)
