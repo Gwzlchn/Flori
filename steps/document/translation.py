@@ -18,11 +18,16 @@ TRANSLATABLE_KINDS = frozenset({
     "algorithm", "appendix", "callout",
 })
 PASSTHROUGH_KINDS = frozenset({"code", "formula"})
+_NUMERIC_TOKEN_PATTERN = (
+    r"[+\-−]?\d+(?:[.,]\d+)*"
+    r"(?:\s*(?:%|％|×|x(?![A-Za-z_])|"
+    r"(?:ms|s|GB|MB|KB|TB|Hz|kHz|MHz|GHz|B|K|M)(?![A-Za-z0-9_])))?"
+)
+_NUMERIC_TOKEN_RE = re.compile(rf"(?P<token>{_NUMERIC_TOKEN_PATTERN})", re.IGNORECASE)
 _PROTECTED_RE = re.compile(
     r"(?:https?://\S+|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}|"
     r"\$[^$\n]+\$|\\\([^\n]+?\\\)|\\\[[\s\S]+?\\\]|"
-    r"\[[0-9,;\-–— ]+\]|(?:[+\-−]?\d+(?:[.,]\d+)*)\s*"
-    r"(?:%|％|ms|s|GB|MB|KB|TB|Hz|kHz|MHz|GHz|B|K|M|×|x)?)",
+    rf"\[[0-9,;\-–— ]+\]|(?:{_NUMERIC_TOKEN_PATTERN}))",
     re.IGNORECASE,
 )
 _SPLIT_MARKERS = (
@@ -38,6 +43,29 @@ def text_hash(text: str) -> str:
 def protected_tokens(text: str) -> list[str]:
     """抽取译文不得改写的公式、数量、引用、地址和邮箱。"""
     return list(dict.fromkeys(match.group(0) for match in _PROTECTED_RE.finditer(text)))
+
+
+def _protected_token_present(token: str, text: str) -> bool:
+    """数量 token 必须以完整词法单元出现，避免被更长数字或标识符冒充。"""
+    numeric = _NUMERIC_TOKEN_RE.fullmatch(token)
+    if numeric is None:
+        return token in text
+    unit_match = re.search(r"(?:%|％|×|[A-Za-z]+)$", token)
+    unit = unit_match.group(0) if unit_match else None
+    if unit is None:
+        suffix = r"(?!\d|[.,]\d)"
+    elif unit.casefold() == "x":
+        suffix = r"(?![A-Za-z_])"
+    elif unit.isascii() and unit.isalpha():
+        suffix = r"(?![A-Za-z0-9_])"
+    else:
+        suffix = ""
+    if token.startswith(("+", "-", "−")):
+        prefix = r"(?<![+\-−])"
+    else:
+        prefix = r"(?<![\d.+\-−])(?<!\d,)"
+    pattern = rf"{prefix}{re.escape(token)}{suffix}"
+    return re.search(pattern, text) is not None
 
 
 def translation_units(document: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -167,7 +195,10 @@ def validate_batch_response(
         text = item.get("text")
         if not isinstance(text, str) or not text.strip():
             raise ValueError("translation response contains empty text")
-        missing = [token for token in source["protected_tokens"] if token not in text]
+        missing = [
+            token for token in source["protected_tokens"]
+            if not _protected_token_present(str(token), text)
+        ]
         if missing:
             raise ValueError(
                 "translation changed protected token for "

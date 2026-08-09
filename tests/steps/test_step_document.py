@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from shared.document_contract import (
     DOCUMENT_SCHEMA_VERSION,
     TRANSLATION_SCHEMA_VERSION,
@@ -19,6 +21,7 @@ from steps.document.step_07_concepts import DocumentConceptsStep
 from steps.document.step_08_review import DocumentReviewStep
 from steps.document.translation import (
     materialize_translation_segments,
+    protected_tokens,
     translation_batches,
     translation_units,
     validate_batch_response,
@@ -288,6 +291,122 @@ def test_translation_splits_oversized_block_into_contiguous_one_to_many_ranges(t
         "segments": segments,
     }
     assert validate_translation(artifact, expected_job_id=job.name)["coverage"] == coverage
+
+
+def test_translation_protected_tokens_do_not_absorb_ascii_word_prefixes():
+    source = (
+        "ZeRO-3 by 70% for 175 and 530 billion parameters takes 3 months "
+        "on 100 servers; latency is 3 ms, memory is 80 GB, and speed is 2x."
+    )
+
+    tokens = protected_tokens(source)
+
+    assert tokens == ["-3", "70%", "175", "530", "3", "100", "3 ms", "80 GB", "2x"]
+    assert all(not token.endswith((" ", "\t", "\n")) for token in tokens)
+    assert validate_batch_response(
+        [{"translation_request_id": "segment", "protected_tokens": tokens}],
+        {"segments": [{
+            "id": "segment",
+            "text": (
+                "ZeRO-3 提升 70%，覆盖 175 与 530 十亿参数，需要 3 个月、"
+                "100 台服务器；延迟 3 ms，内存 80 GB，速度 2x。"
+            ),
+        }]},
+    ) == {"segment": (
+        "ZeRO-3 提升 70%，覆盖 175 与 530 十亿参数，需要 3 个月、"
+        "100 台服务器；延迟 3 ms，内存 80 GB，速度 2x。"
+    )}
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("3 months on 100 servers", ["3", "100"]),
+        ("3 m2, 100 s_worker, and 5 msfoo", ["3", "2", "100", "5"]),
+        ("3 m, 100 s, 3 ms, 80 GB, and 2x", ["3 m", "100 s", "3 ms", "80 GB", "2x"]),
+        ("a 2x4 grid", ["2x", "4"]),
+    ],
+)
+def test_translation_protected_tokens_enforce_numeric_and_unit_boundaries(source, expected):
+    assert protected_tokens(source) == expected
+
+
+@pytest.mark.parametrize(
+    ("tokens", "translated"),
+    [
+        (["3", "100"], "需要 30 个月和 1000 台服务器。"),
+        (["3 m"], "长度为 3 models。"),
+        (["3 m", "100 s", "3 ms", "80 GB", "2x"], "长度 3 米，耗时 100 秒，延迟 3 毫秒，内存 80 GB，速度 2x。"),
+    ],
+)
+def test_translation_rejects_numeric_or_unit_prefix_substitutions(tokens, translated):
+    with pytest.raises(ValueError, match="translation changed protected token"):
+        validate_batch_response(
+            [{"translation_request_id": "segment", "protected_tokens": tokens}],
+            {"segments": [{"id": "segment", "text": translated}]},
+        )
+
+
+def test_translation_batch_split_does_not_cut_real_unit():
+    source = "abcdefgh 80 GB tail"
+    batches = translation_batches([{
+        "source_segment_id": "S1",
+        "translated_segment_id": "T1",
+        "parent_id": None,
+        "order": 0,
+        "kind": "paragraph",
+        "source_text": source,
+        "protected_tokens": protected_tokens(source),
+        "transform_kind": "translated",
+    }], max_chars=10)
+
+    fragments = [item["source_text"] for batch in batches for item in batch]
+    assert "".join(fragments) == source
+    assert any("80 GB" in fragment for fragment in fragments)
+
+
+def test_translation_numeric_validation_allows_punctuation_but_not_number_extension():
+    batch = [{"translation_request_id": "segment", "protected_tokens": ["3"]}]
+
+    assert validate_batch_response(
+        batch,
+        {"segments": [{"id": "segment", "text": "包含 A,3 项。"}]},
+    ) == {"segment": "包含 A,3 项。"}
+    for text in ("值为 13。", "值为 -3。", "值为 .3。", "值为 1,3。", "值为 3.0。"):
+        with pytest.raises(ValueError, match="translation changed protected token"):
+            validate_batch_response(
+                batch,
+                {"segments": [{"id": "segment", "text": text}]},
+            )
+
+
+@pytest.mark.parametrize("text", ["range 1-3", "latency 3-5 ms", "date 2026-08-10"])
+def test_translation_numeric_validation_preserves_signed_ranges_and_dates(text):
+    tokens = protected_tokens(text)
+
+    assert validate_batch_response(
+        [{"translation_request_id": "segment", "protected_tokens": tokens}],
+        {"segments": [{"id": "segment", "text": text}]},
+    ) == {"segment": text}
+
+
+@pytest.mark.parametrize(
+    ("source", "translated"),
+    [
+        ("range 1-3", "range 1-30"),
+        ("latency 3-5 ms", "latency 3-50 ms"),
+        ("date 2026-08-10", "date 2026-080-10"),
+    ],
+)
+def test_translation_numeric_validation_rejects_signed_range_extension(source, translated):
+    with pytest.raises(ValueError, match="translation changed protected token"):
+        validate_batch_response(
+            [{
+                "translation_request_id": "segment",
+                "protected_tokens": protected_tokens(source),
+            }],
+            {"segments": [{"id": "segment", "text": translated}]},
+        )
 
 
 def test_smart_note_title_is_deterministic_and_uses_translation(tmp_path, monkeypatch):
