@@ -1839,9 +1839,15 @@ Search、Ask、MCP 和内容详情共用同一个 evidence identity 与三态投
   component 和 invocation identity。候选文件只能作为待核验输入，不能直接进入 canonical evidence。
 - 三类 pipeline 在 producer 与 concepts 之间增加独立语义核验步：video 为
   `11_semantic_attestation`，Document 为 `06_semantic_attestation`，audio 为
-  `04_semantic_attestation`。同一 job 的 smart/translated 候选合并为一次 AI 调用；批次总候选最多
-  100 条，UTF-8 prompt 最多 64 KiB，超限在调用前 fail-closed。只有 `confidence_ppm >= 950000`
-  且 decision 同时声明 `semantic_equivalent` 和 `critical_facts_match` 时，才生成
+  `04_semantic_attestation`。同一 job 仍只允许一次 AI 调用和一条日志。调用前必须完整校验
+  smart/translated manifests 及跨 manifest 候选 ID 唯一性，再按 smart→translated、各 manifest 原顺序
+  确定性选择单次调用子集；子集最多 100 条，按受控协议渲染后的 UTF-8 prompt 最多 64 KiB。达到条数
+  上限或加入某候选会超出字节上限时，该候选记为 `budget_rejected`，继续尝试后续候选，不截断字段，
+  不为其生成 mapping；存在这类拒绝时步骤结果标记 `degraded=true`，而不是让整个批次失败。完整候选 manifests
+  仍必须绑定 batch ID 和 commit hash。reader 必须先完整复验 manifests，再用同一选择函数复算子集；
+  prompt 和 decisions 必须恰好绑定该子集且保持顺序，任何未选候选的 mapping 均 fail-closed。只有
+  `confidence_ppm >= 950000` 且 decision 同时声明 `semantic_equivalent` 和
+  `critical_facts_match` 时，才生成
   `verification_policy=semantic_attestation_v1` 的 provenance v3 mapping；数字、单位、货币、比例、
   否定、主体或范围冲突一律拒绝，不得回退到 exact quote 或弱匹配。
 - 对独立语义核验上线前已经完成的存量任务，Scheduler 只在 pipeline candidate 显式登记旧 producer

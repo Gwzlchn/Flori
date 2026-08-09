@@ -10,18 +10,17 @@ from typing import Any, Mapping, Sequence
 from shared.errors import AIProviderError
 from shared.note_text import markdown_to_index_text
 from shared.provenance import (
-    MAX_SEMANTIC_CANDIDATES,
     MAX_SEMANTIC_AI_LOG_BYTES,
     MAX_SEMANTIC_AI_LOG_RECORDS,
     SEMANTIC_ATTESTATION_POLICY,
     SEMANTIC_BATCH_COMMIT_PATH,
     build_provenance_candidate_manifest,
     build_provenance_manifest,
-    build_semantic_attestation_prompt,
     build_semantic_batch_commit,
     canonical_json_bytes,
     materialize_semantic_attestations,
     semantic_attestation_batch_id,
+    select_semantic_attestation_batch,
     validate_provenance_candidate_manifest,
     validate_provenance_manifest,
     validate_semantic_batch_commit,
@@ -135,7 +134,15 @@ def finalize_pending_semantic_provenance(
     source_path = job_dir / SOURCE_MANIFEST_PATH
     if not source_path.is_file():
         (job_dir / SEMANTIC_BATCH_COMMIT_PATH).unlink(missing_ok=True)
-        return {"note_types": 0, "accepted": 0, "rejected": 0, "failed": 0, "calls": 0}
+        return {
+            "note_types": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "budget_rejected": 0,
+            "degraded": False,
+            "failed": 0,
+            "calls": 0,
+        }
     source_data = source_path.read_bytes()
     source_manifest = validate_source_manifest(_load_canonical(source_data, "source manifest"))
     if source_manifest["job_id"] != job_dir.name or source_manifest["pipeline"] != pipeline:
@@ -149,8 +156,6 @@ def finalize_pending_semantic_provenance(
             continue
         candidate_data = candidate_path.read_bytes()
         candidate_manifest = _load_canonical(candidate_data, "semantic candidates")
-        if candidate_manifest.get("status") == "no_source":
-            continue
         note_artifact = candidate_manifest.get("note_artifact")
         if type(note_artifact) is not str:
             raise ValueError("semantic candidate note artifact is invalid")
@@ -162,6 +167,8 @@ def finalize_pending_semantic_provenance(
             note_bytes=note_bytes,
             normalized_body=normalized_body,
         )
+        if candidate_manifest["note_type"] != note_type:
+            raise ValueError("semantic candidate note_type does not match its path")
         loaded.append({
             "note_type": note_type,
             "path": candidate_path,
@@ -178,25 +185,41 @@ def finalize_pending_semantic_provenance(
 
     if not loaded:
         (job_dir / SEMANTIC_BATCH_COMMIT_PATH).unlink(missing_ok=True)
-        return {"note_types": 0, "accepted": 0, "rejected": 0, "failed": 0, "calls": 0}
+        return {
+            "note_types": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "budget_rejected": 0,
+            "degraded": False,
+            "failed": 0,
+            "calls": 0,
+        }
 
     candidates = [
         candidate
         for item in loaded
         for candidate in item["manifest"]["candidates"]
     ]
-    if len(candidates) > MAX_SEMANTIC_CANDIDATES:
-        raise ValueError("semantic attestation batch candidates exceed limit")
     response_text: str | None = None
     response = None
-    prompt: str | None = None
-    ai_log_binding: dict[str, Any] | None = None
-    calls = 0
+    selection = {
+        "selected_candidate_ids": [],
+        "budget_rejected_candidate_ids": [],
+        "prompt": None,
+    }
     if candidates:
-        prompt = build_semantic_attestation_prompt(
-            [item["manifest"] for item in loaded], source_manifest,
+        selection = select_semantic_attestation_batch(
+            [item["manifest"] for item in loaded],
+            source_manifest,
             protocol=ai.load_prompt_template("semantic_attestation"),
         )
+    selected_candidate_ids = selection["selected_candidate_ids"]
+    budget_rejected_candidate_ids = selection["budget_rejected_candidate_ids"]
+    prompt = selection["prompt"]
+    ai_log_binding: dict[str, Any] | None = None
+    calls = 0
+    if selected_candidate_ids:
+        assert isinstance(prompt, str)
         try:
             response_text = ai.call(prompt, response_format="json", temperature=0)
             calls = 1
@@ -228,15 +251,18 @@ def finalize_pending_semantic_provenance(
         candidate_manifests=candidate_artifacts,
         ai_log=ai_log_binding,
     )
-    all_candidate_ids = [item["candidate_id"] for item in candidates]
     accepted_total = 0
-    rejected_total = 0
+    rejected_total = len(budget_rejected_candidate_ids)
+    selected_candidate_id_set = set(selected_candidate_ids)
     pending: list[dict[str, Any]] = []
     for item in loaded:
         manifest = item["manifest"]
         accepted: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
-        if manifest["candidates"]:
+        if any(
+            candidate["candidate_id"] in selected_candidate_id_set
+            for candidate in manifest["candidates"]
+        ):
             assert response_text is not None and response is not None
             assert prompt is not None and ai_log_binding is not None
             accepted, rejected = materialize_semantic_attestations(
@@ -250,7 +276,7 @@ def finalize_pending_semantic_provenance(
                 attestor_prompt=prompt,
                 ai_log_binding=ai_log_binding,
                 batch_id=batch_id,
-                response_candidate_ids=all_candidate_ids,
+                response_candidate_ids=selected_candidate_ids,
             )
         provenance_path = job_dir / "output" / "provenance" / f"{item['note_type']}.json"
         provenance = validate_provenance_manifest(
@@ -308,6 +334,8 @@ def finalize_pending_semantic_provenance(
         "note_types": len(pending),
         "accepted": accepted_total,
         "rejected": rejected_total,
+        "budget_rejected": len(budget_rejected_candidate_ids),
+        "degraded": bool(budget_rejected_candidate_ids),
         "failed": 0,
         "calls": calls,
         "batch_id": batch_id,

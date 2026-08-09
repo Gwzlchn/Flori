@@ -29,7 +29,7 @@ from .provenance import (
     MAX_SOURCE_SEGMENTS,
     canonical_json,
     canonical_json_bytes,
-    build_semantic_attestation_prompt,
+    select_semantic_attestation_batch,
     semantic_attestation_batch_id,
     sha256_bytes,
     validate_locator,
@@ -1407,9 +1407,17 @@ async def _verify_semantic_attestation_batch(
         ):
             raise CanonicalEvidenceError("semantic batch provenance is incomplete")
 
+    try:
+        selection = select_semantic_attestation_batch(
+            candidate_manifests,
+            source_manifest,
+            protocol=attestation_protocol(),
+        )
+    except ValueError as exc:
+        raise CanonicalEvidenceError(str(exc)) from exc
+    selected_candidate_ids = selection["selected_candidate_ids"]
+    selected_candidate_id_set = set(selected_candidate_ids)
     ai_log_binding = commit.get("ai_log")
-    if not isinstance(ai_log_binding, dict):
-        raise CanonicalEvidenceError("semantic batch has no attestor log")
     expected_batch_id = semantic_attestation_batch_id(
         job_id=job_id,
         pipeline=pipeline,
@@ -1419,6 +1427,17 @@ async def _verify_semantic_attestation_batch(
     )
     if expected_batch_id != commit["batch_id"]:
         raise CanonicalEvidenceError("semantic batch identity changed")
+    if not selected_candidate_ids:
+        if ai_log_binding is not None:
+            raise CanonicalEvidenceError("semantic batch has an unexpected attestor log")
+        if any(
+            mapping.get("verification_policy") == SEMANTIC_ATTESTATION_POLICY
+            for mapping in mappings
+        ):
+            raise CanonicalEvidenceError("unselected semantic candidate was materialized")
+        return
+    if not isinstance(ai_log_binding, dict):
+        raise CanonicalEvidenceError("semantic batch has no attestor log")
     log_data = await read_file(ai_log_binding["path"], MAX_SEMANTIC_AI_LOG_BYTES)
     if not isinstance(log_data, bytes) or len(log_data) > MAX_SEMANTIC_AI_LOG_BYTES:
         raise CanonicalEvidenceError("semantic attestor ai_log is missing or exceeds size limit")
@@ -1459,9 +1478,9 @@ async def _verify_semantic_attestation_batch(
         raise CanonicalEvidenceError("semantic attestor ai_log identity changed")
     # 用 reader 自己信任的协议文本复算期望 prompt,防被篡改的渲染混入决策;协议文本
     # 与 attestor 同源(tracked 模板,无覆盖),模板变更会使旧 batch 复验失败(须重跑核验步)。
-    expected_prompt = build_semantic_attestation_prompt(
-        candidate_manifests, source_manifest, protocol=attestation_protocol(),
-    )
+    expected_prompt = selection["prompt"]
+    if not isinstance(expected_prompt, str):
+        raise CanonicalEvidenceError("semantic attestation selection has no prompt")
     if prompt != expected_prompt:
         raise CanonicalEvidenceError("semantic attestor rendered prompt changed")
     try:
@@ -1475,10 +1494,17 @@ async def _verify_semantic_attestation_batch(
         != ai_log_binding["response_decision_sha256"]
     ):
         raise CanonicalEvidenceError("semantic attestor decisions changed")
+    actual_decision_ids = [
+        item.get("candidate_id") if isinstance(item, dict) else None
+        for item in decisions
+    ]
     decision_by_id = {
         item.get("candidate_id"): item for item in decisions if isinstance(item, dict)
     }
-    if len(decision_by_id) != len(decisions) or set(decision_by_id) != set(candidates_by_id):
+    if (
+        len(decision_by_id) != len(decisions)
+        or actual_decision_ids != selected_candidate_ids
+    ):
         raise CanonicalEvidenceError("semantic attestor decision set changed")
 
     source_sha = _sha256_hex(canonical_json_bytes(source_manifest))
@@ -1487,6 +1513,8 @@ async def _verify_semantic_attestation_batch(
             continue
         attestation = mapping.get("attestation") or {}
         candidate_id = attestation.get("candidate_id")
+        if candidate_id not in selected_candidate_id_set:
+            raise CanonicalEvidenceError("unselected semantic candidate was materialized")
         bound = candidates_by_id.get(candidate_id)
         if bound is None:
             raise CanonicalEvidenceError("semantic attestation candidate is missing")

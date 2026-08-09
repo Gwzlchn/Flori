@@ -29,6 +29,10 @@ MAX_SEMANTIC_ATTESTATION_PROMPT_BYTES = 64 * 1024
 SEMANTIC_AI_LOG_PREFIX = "output/ai_logs/"
 MAX_SEMANTIC_AI_LOG_BYTES = 2 * 1024 * 1024
 MAX_SEMANTIC_AI_LOG_RECORDS = 128
+_SEMANTIC_NOTE_TYPES = ("smart", "translated")
+_SEMANTIC_PROMPT_BUDGET_ERROR = (
+    "semantic attestation prompt exceeds UTF-8 byte budget"
+)
 
 DIRECT_LOCATOR_POLICY = "direct_locator_v1"
 EXACT_QUOTE_POLICY = "exact_quote_v1"
@@ -1348,7 +1352,15 @@ def build_semantic_attestation_prompt(
         item["segment_id"]: item for item in source_manifest["segments"]
     }
     items = []
-    for manifest in sorted(manifests, key=lambda item: str(item["note_type"])):
+    note_type_order = {
+        note_type: index for index, note_type in enumerate(_SEMANTIC_NOTE_TYPES)
+    }
+    for manifest in sorted(
+        manifests,
+        key=lambda item: note_type_order.get(
+            str(item["note_type"]), len(note_type_order),
+        ),
+    ):
         for candidate in manifest["candidates"]:
             segment = source_segments[candidate["source_segment_id"]]
             items.append({
@@ -1362,8 +1374,91 @@ def build_semantic_attestation_prompt(
     request = canonical_json({"schema_version": 2, "items": items})
     prompt = f"{protocol.rstrip()}\n\nINPUT={request}"
     if len(prompt.encode("utf-8")) > MAX_SEMANTIC_ATTESTATION_PROMPT_BYTES:
-        raise ValueError("semantic attestation prompt exceeds UTF-8 byte budget")
+        raise ValueError(_SEMANTIC_PROMPT_BUDGET_ERROR)
     return prompt
+
+
+def select_semantic_attestation_batch(
+    candidate_manifests: Sequence[Mapping[str, Any]],
+    source_manifest: Mapping[str, Any],
+    *,
+    protocol: str,
+) -> dict[str, Any]:
+    """从已完整校验的 manifests 选出单次调用可容纳的稳定候选子集。
+
+    选择只丢弃超出 count/UTF-8 prompt 预算的单项,不会截断字段。调用方仍须把完整
+    manifests 绑定到批次身份,reader 也必须用本函数复算同一子集。
+    """
+    if not protocol.strip():
+        raise ValueError("semantic attestation protocol is empty")
+    note_type_order = {
+        note_type: index for index, note_type in enumerate(_SEMANTIC_NOTE_TYPES)
+    }
+    manifests = list(candidate_manifests)
+    seen_note_types: set[str] = set()
+    seen_candidate_ids: set[str] = set()
+    ordered_candidates: list[tuple[str, Mapping[str, Any]]] = []
+    for manifest in sorted(
+        manifests,
+        key=lambda item: note_type_order.get(
+            str(item.get("note_type")), len(note_type_order),
+        ),
+    ):
+        note_type = manifest.get("note_type")
+        if note_type not in note_type_order or note_type in seen_note_types:
+            raise ValueError("semantic attestation manifest note_type is invalid")
+        seen_note_types.add(note_type)
+        candidates = manifest.get("candidates")
+        if type(candidates) is not list:
+            raise ValueError("semantic attestation manifest candidates are invalid")
+        for candidate in candidates:
+            if not isinstance(candidate, Mapping):
+                raise ValueError("semantic attestation candidate is invalid")
+            candidate_id = candidate.get("candidate_id")
+            if type(candidate_id) is not str or candidate_id in seen_candidate_ids:
+                raise ValueError("semantic candidate id is duplicated across batch")
+            seen_candidate_ids.add(candidate_id)
+            ordered_candidates.append((note_type, candidate))
+
+    selected: list[tuple[str, Mapping[str, Any]]] = []
+    budget_rejected: list[str] = []
+    prompt: str | None = None
+    for note_type, candidate in ordered_candidates:
+        candidate_id = str(candidate["candidate_id"])
+        if len(selected) >= MAX_SEMANTIC_CANDIDATES:
+            budget_rejected.append(candidate_id)
+            continue
+        attempted = [*selected, (note_type, candidate)]
+        attempted_manifests = [{
+            "note_type": current_note_type,
+            "candidates": [
+                item for item_note_type, item in attempted
+                if item_note_type == current_note_type
+            ],
+        } for current_note_type in _SEMANTIC_NOTE_TYPES if any(
+            item_note_type == current_note_type for item_note_type, _item in attempted
+        )]
+        try:
+            attempted_prompt = build_semantic_attestation_prompt(
+                attempted_manifests,
+                source_manifest,
+                protocol=protocol,
+            )
+        except ValueError as exc:
+            if str(exc) != _SEMANTIC_PROMPT_BUDGET_ERROR:
+                raise
+            budget_rejected.append(candidate_id)
+            continue
+        selected = attempted
+        prompt = attempted_prompt
+
+    return {
+        "selected_candidate_ids": [
+            str(candidate["candidate_id"]) for _note_type, candidate in selected
+        ],
+        "budget_rejected_candidate_ids": budget_rejected,
+        "prompt": prompt,
+    }
 
 
 def materialize_semantic_attestations(
@@ -1391,7 +1486,11 @@ def materialize_semantic_attestations(
         raise ValueError("semantic attestor response schema is invalid")
     candidates = candidate_manifest["candidates"]
     decisions = response["decisions"]
-    expected_ids = list(response_candidate_ids or [item["candidate_id"] for item in candidates])
+    expected_ids = list(
+        [item["candidate_id"] for item in candidates]
+        if response_candidate_ids is None
+        else response_candidate_ids
+    )
     if (
         len(decisions) != len(expected_ids)
         or [item.get("candidate_id") if isinstance(item, Mapping) else None for item in decisions]
@@ -1401,7 +1500,10 @@ def materialize_semantic_attestations(
     decision_by_id = {item["candidate_id"]: item for item in decisions}
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
+    selected_ids = set(expected_ids)
     for candidate in candidates:
+        if candidate["candidate_id"] not in selected_ids:
+            continue
         decision = decision_by_id[candidate["candidate_id"]]
         if (
             not isinstance(decision, Mapping)
