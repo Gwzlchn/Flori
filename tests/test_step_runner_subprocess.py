@@ -575,7 +575,7 @@ class TestSubprocessTimeout:
         real_sleep = asyncio.sleep
 
         async def fast_monitor_sleep(seconds):
-            await real_sleep(0.05 if seconds == 10 else seconds)
+            await real_sleep(0 if seconds == 10 else seconds)
 
         async def fail_tick() -> None:
             raise asyncio.TimeoutError("heartbeat timed out")
