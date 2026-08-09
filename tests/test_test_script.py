@@ -842,6 +842,12 @@ for argument in "$@"; do
   if [ "$previous" = "--metadata-file" ]; then metadata="$argument"; fi
   previous="$argument"
 done
+case " $* " in
+  *" --target worker "*)
+    printf '%s\n' 'FLORI_CLI_VERSION claude=test' \
+      'FLORI_CLI_VERSION qoder=test' 'FLORI_CLI_VERSION codex=test'
+    ;;
+esac
 printf '{"containerimage.digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}\n' > "$metadata"
 """,
         encoding="utf-8",
@@ -883,6 +889,12 @@ def test_ci_image_check_builds_products_without_push(tmp_path: Path) -> None:
     fake_docker.write_text(
         """#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+case " $* " in
+  *" --target worker "*)
+    printf '%s\n' 'FLORI_CLI_VERSION claude=test' \
+      'FLORI_CLI_VERSION qoder=test' 'FLORI_CLI_VERSION codex=test'
+    ;;
+esac
 """,
         encoding="utf-8",
     )
@@ -920,6 +932,36 @@ printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
     )
     assert not any("--push" in call or "--cache-to" in call for call in calls)
     assert not any("--metadata-file" in call or "--tag" in call for call in calls)
+
+
+def test_ci_image_worker_build_rejects_missing_cli_version_evidence(
+    tmp_path: Path,
+) -> None:
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_docker.chmod(0o755)
+    environment = os.environ.copy()
+    environment.update({
+        "PATH": f"{tmp_path}:{environment['PATH']}",
+        "RUNNER_TEMP": str(tmp_path),
+        "OWNER_LC": "example",
+        "FLORI_VERSION": "9.9.9",
+        "GITHUB_SHA": "1234567890abcdef1234567890abcdef12345678",
+        "GITHUB_REF": "refs/pull/7/merge",
+    })
+
+    completed = subprocess.run(
+        ["bash", str(REPO / "scripts/ci-images.sh"), "check", "true", "false"],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    for cli in ("claude", "qoder", "codex"):
+        assert f"flori-worker 的 {cli} 版本证据缺失或重复" in completed.stderr
 
 
 def test_ci_image_promote_uses_exact_candidate_and_release_tags(tmp_path: Path) -> None:
