@@ -1,22 +1,25 @@
 """exact DR 停写屏障的安全边界。"""
 
-import json
 import asyncio
+import errno
 import hashlib
+import json
 import os
 import sqlite3
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from pathlib import Path
 
 import pytest
 
 from shared.content_import_guard import LiveTargetError, verify_dr_receipt
 from shared.exact_dr_maintenance import (
+    BARRIER_NAME,
     ExactDrBarrierError,
     PHASE_DRAINING,
     PHASE_SNAPSHOTTING,
+    SCHEDULER_ACK_NAME,
     acquire_barrier,
     advance_barrier,
     barrier_path,
@@ -25,6 +28,7 @@ from shared.exact_dr_maintenance import (
     scheduler_quiesced,
     write_scheduler_quiesced,
 )
+from shared.step_manifest import canonical_json_bytes
 from api import exact_dr
 
 
@@ -81,6 +85,187 @@ def test_corrupt_or_symlink_barrier_fails_closed(tmp_path):
         read_barrier(data)
 
 
+def test_barrier_read_reopens_atomically_replaced_inode(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    acquire_barrier(
+        data, operation_id="exact-dr-owner", created_at="2026-07-20T00:00:00+00:00",
+    )
+    replacement = data / "exact-dr-control" / ".replacement.json"
+    replacement.write_bytes(canonical_json_bytes({
+        **read_barrier(data),
+        "phase": PHASE_SNAPSHOTTING,
+        "updated_at": "2026-07-20T00:01:00+00:00",
+    }))
+    real_open = os.open
+    replaced = False
+
+    def replace_after_open(name, flags, *args, **kwargs):
+        nonlocal replaced
+        fd = real_open(name, flags, *args, **kwargs)
+        if name == BARRIER_NAME and not replaced:
+            replaced = True
+            directory_fd = kwargs["dir_fd"]
+            os.replace(
+                replacement.name,
+                BARRIER_NAME,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+        return fd
+
+    monkeypatch.setattr(os, "open", replace_after_open)
+
+    assert read_barrier(data)["phase"] == PHASE_SNAPSHOTTING
+
+
+def test_barrier_read_reopens_renamed_inode(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    acquire_barrier(
+        data, operation_id="exact-dr-old", created_at="2026-07-20T00:00:00+00:00",
+    )
+    replacement = data / "exact-dr-control" / ".replacement.json"
+    replacement.write_bytes(canonical_json_bytes({
+        "format": "flori-exact-dr-barrier/v1",
+        "operation_id": "exact-dr-new",
+        "phase": PHASE_DRAINING,
+        "created_at": "2026-07-20T00:01:00+00:00",
+        "updated_at": "2026-07-20T00:01:00+00:00",
+    }))
+    real_open = os.open
+    replaced = False
+
+    def rename_after_open(name, flags, *args, **kwargs):
+        nonlocal replaced
+        fd = real_open(name, flags, *args, **kwargs)
+        if name == BARRIER_NAME and not replaced:
+            replaced = True
+            directory_fd = kwargs["dir_fd"]
+            os.rename(
+                BARRIER_NAME,
+                ".old-barrier.json",
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            os.replace(
+                replacement.name,
+                BARRIER_NAME,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+        return fd
+
+    monkeypatch.setattr(os, "open", rename_after_open)
+
+    assert read_barrier(data)["operation_id"] == "exact-dr-new"
+
+
+def test_barrier_read_rejects_continuous_replacement(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    acquire_barrier(
+        data, operation_id="exact-dr-owner", created_at="2026-07-20T00:00:00+00:00",
+    )
+    current = read_barrier(data)
+    replacements = []
+    for index in range(8):
+        replacement = data / "exact-dr-control" / f".replacement-{index}.json"
+        replacement.write_bytes(canonical_json_bytes({
+            **current,
+            "updated_at": f"2026-07-20T00:00:{index + 1:02d}+00:00",
+        }))
+        replacements.append(replacement)
+    real_open = os.open
+
+    def replace_after_open(name, flags, *args, **kwargs):
+        fd = real_open(name, flags, *args, **kwargs)
+        if name == BARRIER_NAME and replacements:
+            replacement = replacements.pop(0)
+            directory_fd = kwargs["dir_fd"]
+            os.replace(
+                replacement.name,
+                BARRIER_NAME,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+        return fd
+
+    monkeypatch.setattr(os, "open", replace_after_open)
+
+    with pytest.raises(ExactDrBarrierError, match="changed while reading"):
+        read_barrier(data)
+
+
+def test_barrier_read_rejects_hardlink_alias(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    acquire_barrier(
+        data, operation_id="exact-dr-owner", created_at="2026-07-20T00:00:00+00:00",
+    )
+    os.link(barrier_path(data), tmp_path / "barrier-alias.json")
+
+    with pytest.raises(ExactDrBarrierError, match="bounded regular file"):
+        read_barrier(data)
+
+
+def test_barrier_read_wraps_named_stat_io_error(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    acquire_barrier(
+        data, operation_id="exact-dr-owner", created_at="2026-07-20T00:00:00+00:00",
+    )
+    real_stat = os.stat
+
+    def fail_barrier_stat(name, *args, **kwargs):
+        if name == BARRIER_NAME and kwargs.get("dir_fd") is not None:
+            raise OSError(errno.EIO, "injected stat failure")
+        return real_stat(name, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", fail_barrier_stat)
+
+    with pytest.raises(ExactDrBarrierError, match="cannot stat exact DR barrier"):
+        read_barrier(data)
+
+
+def test_release_reopens_swapped_barrier_before_owner_check(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    acquire_barrier(
+        data, operation_id="exact-dr-old", created_at="2026-07-20T00:00:00+00:00",
+    )
+    replacement = data / "exact-dr-control" / ".replacement.json"
+    replacement.write_bytes(canonical_json_bytes({
+        "format": "flori-exact-dr-barrier/v1",
+        "operation_id": "exact-dr-new",
+        "phase": PHASE_DRAINING,
+        "created_at": "2026-07-20T00:01:00+00:00",
+        "updated_at": "2026-07-20T00:01:00+00:00",
+    }))
+    real_open = os.open
+    replaced = False
+
+    def replace_after_open(name, flags, *args, **kwargs):
+        nonlocal replaced
+        fd = real_open(name, flags, *args, **kwargs)
+        if name == BARRIER_NAME and not replaced:
+            replaced = True
+            directory_fd = kwargs["dir_fd"]
+            os.replace(
+                replacement.name,
+                BARRIER_NAME,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+        return fd
+
+    monkeypatch.setattr(os, "open", replace_after_open)
+
+    with pytest.raises(ExactDrBarrierError, match="another"):
+        release_barrier(data, operation_id="exact-dr-old")
+    assert read_barrier(data)["operation_id"] == "exact-dr-new"
+
+
 def test_control_root_rename_swap_cannot_redirect_barrier_read(tmp_path):
     data = tmp_path / "data"
     data.mkdir()
@@ -123,6 +308,51 @@ def test_scheduler_ack_is_bound_to_current_snapshotting_operation(tmp_path):
         scheduler_quiesced(data, operation_id="exact-dr-other")
     release_barrier(data, operation_id="exact-dr-owner")
     assert scheduler_quiesced(data, operation_id="exact-dr-owner") is False
+
+
+def test_scheduler_ack_read_reopens_atomically_replaced_inode(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    acquire_barrier(
+        data, operation_id="exact-dr-owner", created_at="2026-07-20T00:00:00+00:00",
+    )
+    advance_barrier(
+        data,
+        operation_id="exact-dr-owner",
+        phase=PHASE_SNAPSHOTTING,
+        updated_at="2026-07-20T00:01:00+00:00",
+    )
+    write_scheduler_quiesced(
+        data, operation_id="exact-dr-owner", at="2026-07-20T00:01:01+00:00",
+    )
+    replacement = data / "exact-dr-control" / ".ack-replacement.json"
+    replacement.write_bytes(canonical_json_bytes({
+        "format": "flori-exact-dr-barrier/v1",
+        "operation_id": "exact-dr-other",
+        "service": "scheduler",
+        "quiesced_at": "2026-07-20T00:01:02+00:00",
+    }))
+    real_open = os.open
+    replaced = False
+
+    def replace_after_open(name, flags, *args, **kwargs):
+        nonlocal replaced
+        fd = real_open(name, flags, *args, **kwargs)
+        if name == SCHEDULER_ACK_NAME and not replaced:
+            replaced = True
+            directory_fd = kwargs["dir_fd"]
+            os.replace(
+                replacement.name,
+                SCHEDULER_ACK_NAME,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+        return fd
+
+    monkeypatch.setattr(os, "open", replace_after_open)
+
+    with pytest.raises(ExactDrBarrierError, match="identity"):
+        scheduler_quiesced(data, operation_id="exact-dr-owner")
 
 
 @pytest.mark.asyncio
@@ -314,6 +544,37 @@ def test_operation_control_rejects_ancestor_symlink_fifo_and_hardlink(tmp_path):
     os.link(outside_file, operation_path)
     with pytest.raises(exact_dr.ExactDrError, match="regular file"):
         exact_dr.read_operation(data)
+
+
+def test_operation_read_reopens_atomically_replaced_inode(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    operation = exact_dr.new_operation(data)
+    replacement = data / "exact-dr-control" / ".operation-replacement.json"
+    replacement.write_bytes(canonical_json_bytes({
+        **operation,
+        "drain": {**operation["drain"], "quiet_samples": 1},
+    }))
+    real_open = os.open
+    replaced = False
+
+    def replace_after_open(name, flags, *args, **kwargs):
+        nonlocal replaced
+        fd = real_open(name, flags, *args, **kwargs)
+        if name == "operation.json" and not replaced:
+            replaced = True
+            directory_fd = kwargs["dir_fd"]
+            os.replace(
+                replacement.name,
+                "operation.json",
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+        return fd
+
+    monkeypatch.setattr(os, "open", replace_after_open)
+
+    assert exact_dr.read_operation(data)["drain"]["quiet_samples"] == 1
 
 
 def test_receipt_publish_never_overwrites_or_accepts_swapped_pending(

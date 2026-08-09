@@ -22,6 +22,7 @@ PHASE_DRAINING = "draining"
 PHASE_SNAPSHOTTING = "snapshotting"
 _PHASES = frozenset({PHASE_DRAINING, PHASE_SNAPSHOTTING})
 _OPERATION_ID_RE = re.compile(r"exact-dr-[A-Za-z0-9_.-]{1,96}")
+_CONTROL_READ_ATTEMPTS = 8
 
 
 class ExactDrBarrierError(RuntimeError):
@@ -126,21 +127,83 @@ def _validate_barrier(body: Mapping[str, Any]) -> dict[str, Any]:
     return dict(body)
 
 
-def _read_barrier_at(directory_fd: int) -> dict[str, Any] | None:
+def _read_control_file_at(
+    directory_fd: int,
+    *,
+    name: str,
+    max_bytes: int,
+    label: str,
+) -> bytes | None:
+    """读取当前命名的稳定控制文件;原子替换中的旧 fd 只允许有界重开。"""
     flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(BARRIER_NAME, flags, dir_fd=directory_fd)
-    except FileNotFoundError:
+    for _ in range(_CONTROL_READ_ATTEMPTS):
+        try:
+            fd = os.open(name, flags, dir_fd=directory_fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ExactDrBarrierError(f"cannot open {label}: {exc}") from exc
+        try:
+            before = os.fstat(fd)
+            if before.st_nlink == 0:
+                continue
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or before.st_size > max_bytes
+            ):
+                raise ExactDrBarrierError(f"{label} is not a bounded regular file")
+            raw = os.read(fd, max_bytes + 1)
+            after = os.fstat(fd)
+            if after.st_nlink == 0:
+                continue
+            if (
+                not stat.S_ISREG(after.st_mode)
+                or after.st_nlink != 1
+                or after.st_size > max_bytes
+            ):
+                raise ExactDrBarrierError(f"{label} is not a bounded regular file")
+            if (
+                len(raw) != after.st_size
+                or before.st_size != after.st_size
+                or before.st_mtime_ns != after.st_mtime_ns
+                or before.st_ctime_ns != after.st_ctime_ns
+            ):
+                continue
+            try:
+                named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise ExactDrBarrierError(f"cannot stat {label}: {exc}") from exc
+            if (
+                not stat.S_ISREG(named.st_mode)
+                or named.st_nlink != 1
+                or named.st_size > max_bytes
+            ):
+                raise ExactDrBarrierError(f"{label} is not a bounded regular file")
+            if (
+                (named.st_dev, named.st_ino) != (after.st_dev, after.st_ino)
+                or named.st_size != after.st_size
+                or named.st_mtime_ns != after.st_mtime_ns
+                or named.st_ctime_ns != after.st_ctime_ns
+            ):
+                continue
+            return raw
+        finally:
+            os.close(fd)
+    raise ExactDrBarrierError(f"{label} changed while reading")
+
+
+def _read_barrier_at(directory_fd: int) -> dict[str, Any] | None:
+    raw = _read_control_file_at(
+        directory_fd,
+        name=BARRIER_NAME,
+        max_bytes=4096,
+        label="exact DR barrier",
+    )
+    if raw is None:
         return None
-    except OSError as exc:
-        raise ExactDrBarrierError(f"cannot open exact DR barrier: {exc}") from exc
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096:
-            raise ExactDrBarrierError("exact DR barrier is not a bounded regular file")
-        raw = os.read(fd, 4097)
-    finally:
-        os.close(fd)
     try:
         body = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
@@ -291,24 +354,18 @@ def write_scheduler_quiesced(data_dir: str | Path, *, operation_id: str, at: str
 
 
 def scheduler_quiesced(data_dir: str | Path, *, operation_id: str) -> bool:
-    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
     directory_fd = open_control_root(data_dir)
     try:
-        fd = os.open(SCHEDULER_ACK_NAME, flags, dir_fd=directory_fd)
-    except FileNotFoundError:
-        os.close(directory_fd)
-        return False
-    except OSError as exc:
-        os.close(directory_fd)
-        raise ExactDrBarrierError(f"cannot open scheduler ack: {exc}") from exc
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096:
-            raise ExactDrBarrierError("scheduler ack is not a bounded regular file")
-        raw = os.read(fd, 4097)
+        raw = _read_control_file_at(
+            directory_fd,
+            name=SCHEDULER_ACK_NAME,
+            max_bytes=4096,
+            label="scheduler ack",
+        )
     finally:
-        os.close(fd)
         os.close(directory_fd)
+    if raw is None:
+        return False
     try:
         body = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:

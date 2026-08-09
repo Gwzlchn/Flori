@@ -24,6 +24,7 @@ from shared.exact_dr_maintenance import (
     ExactDrBarrierError,
     PHASE_DRAINING,
     PHASE_SNAPSHOTTING,
+    _read_control_file_at,
     acquire_barrier,
     advance_barrier,
     control_root,
@@ -380,27 +381,23 @@ def write_operation(data_dir: Path, operation: Mapping[str, Any]) -> None:
 
 
 def read_operation(data_dir: Path) -> dict[str, Any] | None:
-    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
     try:
         directory_fd = open_control_root(data_dir)
     except ExactDrBarrierError as exc:
         raise ExactDrError(str(exc)) from exc
     try:
-        fd = os.open("operation.json", flags, dir_fd=directory_fd)
-    except FileNotFoundError:
-        os.close(directory_fd)
-        return None
-    except OSError as exc:
-        os.close(directory_fd)
-        raise ExactDrError(f"cannot open exact DR operation: {exc}") from exc
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 64 * 1024:
-            raise ExactDrError("exact DR operation file is not a bounded regular file")
-        raw = os.read(fd, 64 * 1024 + 1)
+        raw = _read_control_file_at(
+            directory_fd,
+            name="operation.json",
+            max_bytes=64 * 1024,
+            label="exact DR operation file",
+        )
+    except ExactDrBarrierError as exc:
+        raise ExactDrError(str(exc)) from exc
     finally:
-        os.close(fd)
         os.close(directory_fd)
+    if raw is None:
+        return None
     try:
         body = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
