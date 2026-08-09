@@ -19,6 +19,8 @@
 # 注:不用 `# syntax=...` 指令(会去 docker.io 拉 frontend 镜像,被 NAS 代理 reset);
 #    --mount=type=cache 靠引擎内置 BuildKit frontend 即可(已实测 `docker compose build` 支持)。
 
+ARG CLI_TOOLS_IMAGE=cli-tools
+
 # common:共享底座(python + pip 源 + core 依赖,无源码)
 FROM python:3.11-slim AS common
 # 默认 USTC 镜像源(国内构建快);海外 CI runner 传 --build-arg USE_USTC_MIRROR=0 用官方源。
@@ -40,6 +42,62 @@ COPY pyproject.toml .
 RUN --mount=type=cache,target=/root/.cache/pip pip install "."
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
+
+# 三种 CLI 独立成稳定工具 stage。CI 先解析官方 channel 版本,版本组合不变时复用该 stage digest。
+# builder 只负责联网安装;最终 cli-tools 不包含临时 HOME、下载缓存或应用依赖。
+FROM python:3.11-slim AS cli-tools-builder
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+ARG CLI_INSTALL_REFRESH=manual
+ARG CLAUDE_CLI_VERSION=
+ARG QODER_CLI_VERSION=
+ARG CODEX_CLI_VERSION=
+ARG INSTALL_CLAUDE_CODE=1
+ARG INSTALL_QODER_CLI=1
+ARG INSTALL_CODEX_CLI=1
+COPY docker/install-cli-tools.sh /tmp/install-cli-tools.sh
+RUN echo "CLI install key: ${CLI_INSTALL_REFRESH}" \
+    && CLAUDE_CLI_VERSION="${CLAUDE_CLI_VERSION}" \
+       QODER_CLI_VERSION="${QODER_CLI_VERSION}" \
+       CODEX_CLI_VERSION="${CODEX_CLI_VERSION}" \
+       INSTALL_CLAUDE_CODE="${INSTALL_CLAUDE_CODE}" \
+       INSTALL_QODER_CLI="${INSTALL_QODER_CLI}" \
+       INSTALL_CODEX_CLI="${INSTALL_CODEX_CLI}" \
+       timeout 1800 sh /tmp/install-cli-tools.sh \
+    && rm -f /tmp/install-cli-tools.sh \
+    && mkdir -p /opt/flori-cli-root/usr/local/bin \
+        /opt/flori-cli-root/usr/local/lib/flori-cli \
+        /opt/flori-cli-root/usr/local/lib/codex \
+        /opt/flori-cli-root/etc/flori \
+    && for path in claude qodercli codex codex-code-mode-host; do \
+         if [ -e "/usr/local/bin/$path" ] || [ -L "/usr/local/bin/$path" ]; then \
+           cp -a "/usr/local/bin/$path" /opt/flori-cli-root/usr/local/bin/; \
+         fi; \
+       done \
+    && if [ -d /usr/local/lib/flori-cli ]; then \
+         cp -a /usr/local/lib/flori-cli/. /opt/flori-cli-root/usr/local/lib/flori-cli/; \
+       fi \
+    && if [ -d /usr/local/lib/codex ]; then \
+         cp -a /usr/local/lib/codex/. /opt/flori-cli-root/usr/local/lib/codex/; \
+       fi \
+    && if [ -d /etc/flori ]; then \
+         cp -a /etc/flori/. /opt/flori-cli-root/etc/flori/; \
+       fi
+
+FROM debian:bookworm-slim AS cli-tools
+ARG CLI_TOOLS_SOURCE_DIGEST=
+ARG CLAUDE_CLI_VERSION=
+ARG QODER_CLI_VERSION=
+ARG CODEX_CLI_VERSION=
+COPY --from=cli-tools-builder /opt/flori-cli-root/ /
+LABEL io.flori.cli.claude="${CLAUDE_CLI_VERSION}" \
+      io.flori.cli.qoder="${QODER_CLI_VERSION}" \
+      io.flori.cli.codex="${CODEX_CLI_VERSION}" \
+      io.flori.cli.source="${CLI_TOOLS_SOURCE_DIGEST}"
+
+# CI 有稳定基座时按 immutable digest 注入外部镜像;缺省引用上面的内部 stage。
+FROM ${CLI_TOOLS_IMAGE} AS cli-tools-source
 
 # api 的 YouTube playlist 枚举与 worker 下载共用同一受支持 JS runtime。
 FROM common AS deno
@@ -87,17 +145,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get -o Acquire::Retries=10 update \
     && apt-get -o Acquire::Retries=10 -o APT::Keep-Downloaded-Packages=true \
         install -y --no-install-recommends ffmpeg poppler-utils
-# 三种 CLI 统一安装层:每次 cache miss 从三家官方 latest 通道安装,不在仓库保存版本或校验和。
-# CLI_INSTALL_REFRESH 不承载版本语义。构建入口每次注入新值,避免 registry cache 固化旧 latest。
-# INSTALL_*=0 供合成集成栈跳过(docker-compose.integration.yml)。
-ARG CLI_INSTALL_REFRESH=manual
-ARG INSTALL_CLAUDE_CODE=1
-ARG INSTALL_QODER_CLI=1
-ARG INSTALL_CODEX_CLI=1
-COPY docker/install-cli-tools.sh /tmp/install-cli-tools.sh
-RUN echo "CLI install refresh: ${CLI_INSTALL_REFRESH}" \
-    && timeout 1800 sh /tmp/install-cli-tools.sh \
-    && rm -f /tmp/install-cli-tools.sh
+# 稳定 cli-tools stage 的文件层在应用发布之间保持 digest 不变;业务源码不会进入该 stage。
+COPY --from=cli-tools-source /usr/local/bin/ /usr/local/bin/
+COPY --from=cli-tools-source /usr/local/lib/flori-cli/ /usr/local/lib/flori-cli/
+COPY --from=cli-tools-source /usr/local/lib/codex/ /usr/local/lib/codex/
+COPY --from=cli-tools-source /etc/flori/ /etc/flori/
 RUN --mount=type=cache,target=/root/.cache/pip pip install ".[steps,gpu,worker]" \
     && python -c "import yt_dlp_ejs"
 # Document布局模型只在02_parse懒加载;统一worker镜像让所有CPU worker具备同一能力。

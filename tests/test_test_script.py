@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import os
+import shutil
 import stat
 import subprocess
 import tomllib
@@ -12,6 +14,97 @@ from pathlib import Path
 
 
 REPO = Path(__file__).parents[1]
+
+_CLI_VERSIONS = {
+    "claude": "2.1.220",
+    "qoder": "1.1.17",
+    "codex": "0.147.0",
+}
+_CLI_TOOLS_DIGEST = "sha256:" + "c" * 64
+
+
+def _cli_tools_source_digest(repo: Path = REPO) -> str:
+    docker_lines = (repo / "docker/base.Dockerfile").read_text(
+        encoding="utf-8",
+    ).splitlines(keepends=True)
+    start = docker_lines.index("FROM python:3.11-slim AS cli-tools-builder\n")
+    end = docker_lines.index("FROM ${CLI_TOOLS_IMAGE} AS cli-tools-source\n")
+    stage = "".join(docker_lines[start : end + 1]).encode()
+    installer = (repo / "docker/install-cli-tools.sh").read_bytes()
+    inputs = (
+        f"installer={hashlib.sha256(installer).hexdigest()}\n"
+        f"docker-stage={hashlib.sha256(stage).hexdigest()}\n"
+    ).encode()
+    return "sha256:" + hashlib.sha256(inputs).hexdigest()
+
+
+def _cli_tools_inspect_json(
+    *,
+    claude: str = "2.1.220",
+    qoder: str = "1.1.17",
+    codex: str = "0.147.0",
+    source: str | None = None,
+) -> str:
+    source = source or _cli_tools_source_digest()
+    return (
+        f'{{"manifest":{{"digest":"{_CLI_TOOLS_DIGEST}"}},'
+        f'"image":{{"config":{{"Labels":{{'
+        f'"io.flori.cli.claude":"{claude}",'
+        f'"io.flori.cli.qoder":"{qoder}",'
+        f'"io.flori.cli.codex":"{codex}",'
+        f'"io.flori.cli.source":"{source}"}}}}}}}}'
+    )
+
+
+def _cli_tools_inspect_fake(
+    *,
+    claude: str = "2.1.220",
+    qoder: str = "1.1.17",
+    codex: str = "0.147.0",
+    source: str | None = None,
+) -> str:
+    payload = _cli_tools_inspect_json(
+        claude=claude,
+        qoder=qoder,
+        codex=codex,
+        source=source,
+    )
+    return f'''case " $* " in
+  *" buildx imagetools inspect "*)
+    printf '%s\n' '{payload}'
+    exit 0
+    ;;
+esac
+'''
+
+
+def _write_fake_cli_channel_curl(
+    tmp_path: Path,
+    *,
+    claude: str = "2.1.220",
+    qoder: str = "1.1.17",
+    codex: str = "0.147.0",
+) -> None:
+    fake_curl = tmp_path / "curl"
+    fake_curl.write_text(
+        f'''#!/bin/sh
+out=""
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "-o" ]; then out="$argument"; fi
+  previous="$argument"
+done
+[ -n "$out" ] || {{ echo "fake curl requires -o" >&2; exit 9; }}
+case " $* " in
+  *" https://downloads.claude.ai/claude-code-releases/stable "*) printf '%s\n' '{claude}' > "$out" ;;
+  *" https://qoder-ide.oss-accelerate.aliyuncs.com/qodercli/channels/manifest.json "*) printf '%s\n' '{{"latest":"{qoder}"}}' > "$out" ;;
+  *" https://releases.openai.com/codex/channels/latest "*) printf '%s\n' '{{"tag_name":"rust-v{codex}"}}' > "$out" ;;
+  *) echo "unexpected channel URL: $*" >&2; exit 9 ;;
+esac
+''',
+        encoding="utf-8",
+    )
+    fake_curl.chmod(0o755)
 
 
 def test_repository_shell_entrypoints_are_executable() -> None:
@@ -776,10 +869,11 @@ def test_ci_test_runtime_pull_rejects_invalid_repo_digest(tmp_path: Path) -> Non
 def test_ci_image_runner_launches_all_selected_builds_and_propagates_failure(
     tmp_path: Path,
 ) -> None:
+    _write_fake_cli_channel_curl(tmp_path)
     fake_docker = tmp_path / "docker"
     log = tmp_path / "docker.log"
     fake_docker.write_text(
-        """#!/bin/sh
+        "#!/bin/sh\n" + _cli_tools_inspect_fake() + """
 printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
 metadata=""
 previous=""
@@ -819,13 +913,14 @@ exit 0
 
     assert completed.returncode == 1
     calls = log.read_text(encoding="utf-8").splitlines()
-    assert len(calls) == 4
-    assert sum("--file docker/base.Dockerfile" in call for call in calls) == 3
-    assert sum("--file frontend/Dockerfile" in call for call in calls) == 1
+    product_calls = [call for call in calls if call.startswith("buildx build ")]
+    assert len(product_calls) == 4
+    assert sum("--file docker/base.Dockerfile" in call for call in product_calls) == 3
+    assert sum("--file frontend/Dockerfile" in call for call in product_calls) == 1
     assert all(
         "--push" in call
         and ":candidate-1234567890abcdef1234567890abcdef12345678" in call
-        for call in calls
+        for call in product_calls
     )
     assert "flori-api candidate failed" in completed.stderr
     assert not (tmp_path / "candidate-digests.tsv").exists()
@@ -833,9 +928,10 @@ exit 0
 
 
 def test_ci_image_candidate_writes_immutable_digest_manifest(tmp_path: Path) -> None:
+    _write_fake_cli_channel_curl(tmp_path)
     fake_docker = tmp_path / "docker"
     fake_docker.write_text(
-        """#!/bin/sh
+        "#!/bin/sh\n" + _cli_tools_inspect_fake() + """
 metadata=""
 previous=""
 for argument in "$@"; do
@@ -844,8 +940,8 @@ for argument in "$@"; do
 done
 case " $* " in
   *" --target worker "*)
-    printf '%s\n' 'FLORI_CLI_VERSION claude=test' \
-      'FLORI_CLI_VERSION qoder=test' 'FLORI_CLI_VERSION codex=test'
+    printf '%s\n' 'FLORI_CLI_VERSION claude=2.1.220' \
+      'FLORI_CLI_VERSION qoder=1.1.17' 'FLORI_CLI_VERSION codex=0.147.0'
     ;;
 esac
 printf '{"containerimage.digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}\n' > "$metadata"
@@ -881,18 +977,71 @@ printf '{"containerimage.digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
         "flori-scheduler", "flori-api", "flori-worker",
     }
     assert all(line.endswith("sha256:" + "b" * 64) for line in lines)
+    cli_evidence = (digest_file.parent / "cli-tools.tsv").read_text(
+        encoding="utf-8",
+    )
+    assert "claude\t2.1.220" in cli_evidence
+    assert "qoder\t1.1.17" in cli_evidence
+    assert "codex\t0.147.0" in cli_evidence
+    assert f"source\t{_cli_tools_source_digest()}" in cli_evidence
+    assert f"cli-tools\tghcr.io/{environment['OWNER_LC']}/flori-cli-tools:" in cli_evidence
+    assert f"@{_CLI_TOOLS_DIGEST}" in cli_evidence
+
+
+def test_ci_image_frontend_only_candidate_does_not_require_cli_evidence(
+    tmp_path: Path,
+) -> None:
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text(
+        """#!/bin/sh
+metadata=""
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "--metadata-file" ]; then metadata="$argument"; fi
+  previous="$argument"
+done
+printf '%s\n' '{"containerimage.digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}' > "$metadata"
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    digest_file = tmp_path / "artifacts/candidate-digests.tsv"
+    environment = os.environ.copy()
+    environment.update({
+        "PATH": f"{tmp_path}:{environment['PATH']}",
+        "RUNNER_TEMP": str(tmp_path),
+        "OWNER_LC": "exampleowner",
+        "FLORI_VERSION": "9.9.9",
+        "GITHUB_SHA": "1234567890abcdef1234567890abcdef12345678",
+        "GITHUB_REF": "refs/heads/main",
+        "CI_IMAGE_DIGEST_FILE": str(digest_file),
+    })
+    completed = subprocess.run(
+        ["bash", str(REPO / "scripts/ci-images.sh"), "candidate", "false", "true"],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert digest_file.read_text(encoding="utf-8") == (
+        "flori-frontend\tsha256:" + "b" * 64 + "\n"
+    )
+    assert not (digest_file.parent / "cli-tools.tsv").exists()
 
 
 def test_ci_image_check_builds_products_without_push(tmp_path: Path) -> None:
+    _write_fake_cli_channel_curl(tmp_path)
     fake_docker = tmp_path / "docker"
     log = tmp_path / "docker.log"
     fake_docker.write_text(
-        """#!/bin/sh
+        "#!/bin/sh\n" + _cli_tools_inspect_fake() + """
 printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
 case " $* " in
   *" --target worker "*)
-    printf '%s\n' 'FLORI_CLI_VERSION claude=test' \
-      'FLORI_CLI_VERSION qoder=test' 'FLORI_CLI_VERSION codex=test'
+    printf '%s\n' 'FLORI_CLI_VERSION claude=2.1.220' \
+      'FLORI_CLI_VERSION qoder=1.1.17' 'FLORI_CLI_VERSION codex=0.147.0'
     ;;
 esac
 """,
@@ -921,24 +1070,343 @@ esac
 
     assert completed.returncode == 0, completed.stderr
     calls = log.read_text(encoding="utf-8").splitlines()
-    assert len(calls) == 4
-    assert all("--cache-from" in call for call in calls)
+    product_calls = [call for call in calls if call.startswith("buildx build ")]
+    assert len(product_calls) == 4
+    assert all("--cache-from" in call for call in product_calls)
     worker_call = next(call for call in calls if "flori-worker:buildcache" in call)
-    assert "--build-arg CLI_INSTALL_REFRESH=local-0" in worker_call
+    key = hashlib.sha256(
+        (
+            "claude=2.1.220\nqoder=1.1.17\ncodex=0.147.0\n"
+            f"source={_cli_tools_source_digest()}\n"
+        ).encode(),
+    ).hexdigest()
+    assert f"--build-arg CLI_INSTALL_REFRESH={key}" in worker_call
+    assert (
+        f"--build-arg CLI_TOOLS_SOURCE_DIGEST={_cli_tools_source_digest()}"
+        in worker_call
+    )
+    assert "--build-arg CLAUDE_CLI_VERSION=2.1.220" in worker_call
+    assert "--build-arg QODER_CLI_VERSION=1.1.17" in worker_call
+    assert "--build-arg CODEX_CLI_VERSION=0.147.0" in worker_call
+    assert f"CLI_TOOLS_IMAGE=ghcr.io/{environment['OWNER_LC']}/flori-cli-tools:" in worker_call
+    assert f"@{_CLI_TOOLS_DIGEST}" in worker_call
     assert all(
         "CLI_INSTALL_REFRESH" not in call
-        for call in calls
+        for call in product_calls
         if "flori-worker:buildcache" not in call
     )
-    assert not any("--push" in call or "--cache-to" in call for call in calls)
-    assert not any("--metadata-file" in call or "--tag" in call for call in calls)
+    assert not any("--push" in call or "--cache-to" in call for call in product_calls)
+    assert not any("--metadata-file" in call or "--tag" in call for call in product_calls)
+
+
+def test_ci_image_cli_cache_key_depends_on_versions_and_cli_sources_not_run_id(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / "docker.log"
+
+    def worker_call(qoder: str, run_id: str) -> str:
+        _write_fake_cli_channel_curl(tmp_path, qoder=qoder)
+        fake_docker = tmp_path / "docker"
+        fake_docker.write_text(
+            "#!/bin/sh\n" + _cli_tools_inspect_fake(qoder=qoder) + """
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+""",
+            encoding="utf-8",
+        )
+        fake_docker.chmod(0o755)
+        log.write_text("", encoding="utf-8")
+        environment = os.environ.copy()
+        environment.update({
+            "PATH": f"{tmp_path}:{environment['PATH']}",
+            "FAKE_DOCKER_LOG": str(log),
+            "RUNNER_TEMP": str(tmp_path),
+            "OWNER_LC": "exampleowner",
+            "FLORI_VERSION": "9.9.9",
+            "GITHUB_SHA": "1234567890abcdef1234567890abcdef12345678",
+            "GITHUB_REF": "refs/pull/7/merge",
+            "GITHUB_RUN_ID": run_id,
+            "GITHUB_RUN_ATTEMPT": "7",
+        })
+        completed = subprocess.run(
+            ["bash", str(REPO / "scripts/ci-images.sh"), "check", "true", "false"],
+            cwd=REPO,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        return next(
+            call for call in log.read_text(encoding="utf-8").splitlines()
+            if "flori-worker:buildcache" in call
+        )
+
+    first = worker_call("1.1.17", "100")
+    same_versions = worker_call("1.1.17", "999")
+    changed_version = worker_call("1.1.18", "1000")
+    first_key = next(part for part in first.split() if part.startswith("CLI_INSTALL_REFRESH="))
+    same_key = next(
+        part for part in same_versions.split() if part.startswith("CLI_INSTALL_REFRESH=")
+    )
+    changed_key = next(
+        part for part in changed_version.split() if part.startswith("CLI_INSTALL_REFRESH=")
+    )
+    assert first_key == same_key
+    assert changed_key != first_key
+    assert "GITHUB_RUN_ID" not in first + same_versions + changed_version
+
+
+def test_ci_image_cli_cache_key_tracks_installer_and_docker_stage_only(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    (project / "docker").mkdir(parents=True)
+    (project / "scripts").mkdir()
+    shutil.copy2(REPO / "docker/base.Dockerfile", project / "docker/base.Dockerfile")
+    shutil.copy2(
+        REPO / "docker/install-cli-tools.sh",
+        project / "docker/install-cli-tools.sh",
+    )
+    shutil.copy2(REPO / "scripts/ci-images.sh", project / "scripts/ci-images.sh")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_fake_cli_channel_curl(fake_bin)
+    log = tmp_path / "docker.log"
+
+    def cache_key() -> str:
+        fake_docker = fake_bin / "docker"
+        fake_docker.write_text(
+            "#!/bin/sh\n"
+            + _cli_tools_inspect_fake(source=_cli_tools_source_digest(project))
+            + "printf '%s\\n' \"$*\" >> \"$FAKE_DOCKER_LOG\"\n",
+            encoding="utf-8",
+        )
+        fake_docker.chmod(0o755)
+        log.write_text("", encoding="utf-8")
+        environment = os.environ.copy()
+        environment.update({
+            "PATH": f"{fake_bin}:{environment['PATH']}",
+            "FAKE_DOCKER_LOG": str(log),
+            "RUNNER_TEMP": str(tmp_path),
+            "OWNER_LC": "exampleowner",
+            "FLORI_VERSION": "9.9.9",
+            "GITHUB_SHA": "1234567890abcdef1234567890abcdef12345678",
+            "GITHUB_REF": "refs/pull/7/merge",
+        })
+        completed = subprocess.run(
+            ["bash", "scripts/ci-images.sh", "check", "true", "false"],
+            cwd=project,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        worker_call = next(
+            call for call in log.read_text(encoding="utf-8").splitlines()
+            if "flori-worker:buildcache" in call
+        )
+        return next(
+            part.removeprefix("CLI_INSTALL_REFRESH=")
+            for part in worker_call.split()
+            if part.startswith("CLI_INSTALL_REFRESH=")
+        )
+
+    baseline = cache_key()
+    (project / "shared").mkdir()
+    (project / "shared/example.py").write_text("VALUE = 1\n", encoding="utf-8")
+    assert cache_key() == baseline
+
+    installer = project / "docker/install-cli-tools.sh"
+    installer.write_text(
+        installer.read_text(encoding="utf-8") + "\n# cache-key fixture\n",
+        encoding="utf-8",
+    )
+    installer_changed = cache_key()
+    assert installer_changed != baseline
+
+    dockerfile = project / "docker/base.Dockerfile"
+    dockerfile.write_text(
+        dockerfile.read_text(encoding="utf-8").replace(
+            "FROM ${CLI_TOOLS_IMAGE} AS cli-tools-source",
+            "# cache-key fixture\nFROM ${CLI_TOOLS_IMAGE} AS cli-tools-source",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    assert cache_key() != installer_changed
+
+
+def test_ci_image_rejects_invalid_official_cli_channel_before_docker(
+    tmp_path: Path,
+) -> None:
+    _write_fake_cli_channel_curl(tmp_path, qoder="latest")
+    environment = os.environ.copy()
+    environment.update({
+        "PATH": f"{tmp_path}:{environment['PATH']}",
+        "RUNNER_TEMP": str(tmp_path),
+        "OWNER_LC": "exampleowner",
+        "FLORI_VERSION": "9.9.9",
+        "GITHUB_SHA": "1234567890abcdef1234567890abcdef12345678",
+        "GITHUB_REF": "refs/pull/7/merge",
+    })
+    completed = subprocess.run(
+        ["bash", str(REPO / "scripts/ci-images.sh"), "check", "true", "false"],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert "qoder official channel returned an invalid version" in completed.stderr
+
+
+def test_ci_image_caps_all_official_channel_resolution_at_thirty_minutes(
+    tmp_path: Path,
+) -> None:
+    fake_timeout = tmp_path / "timeout"
+    fake_timeout.write_text("#!/bin/sh\nexit 124\n", encoding="utf-8")
+    fake_timeout.chmod(0o755)
+    docker_called = tmp_path / "docker-called"
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' called > '{docker_called}'\nexit 9\n",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    environment = os.environ.copy()
+    environment.update({
+        "PATH": f"{tmp_path}:{environment['PATH']}",
+        "RUNNER_TEMP": str(tmp_path),
+        "OWNER_LC": "exampleowner",
+        "FLORI_VERSION": "9.9.9",
+        "GITHUB_SHA": "1234567890abcdef1234567890abcdef12345678",
+        "GITHUB_REF": "refs/pull/7/merge",
+    })
+    completed = subprocess.run(
+        ["bash", str(REPO / "scripts/ci-images.sh"), "check", "true", "false"],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 124
+    assert "官方 CLI channel 解析超过 1800 秒总预算" in completed.stderr
+    assert not docker_called.exists()
+
+
+def test_ci_image_rejects_cli_base_with_mismatched_version_labels(
+    tmp_path: Path,
+) -> None:
+    _write_fake_cli_channel_curl(tmp_path)
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text(
+        "#!/bin/sh\n" + _cli_tools_inspect_fake(qoder="9.9.9"),
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    environment = os.environ.copy()
+    environment.update({
+        "PATH": f"{tmp_path}:{environment['PATH']}",
+        "RUNNER_TEMP": str(tmp_path),
+        "OWNER_LC": "exampleowner",
+        "FLORI_VERSION": "9.9.9",
+        "GITHUB_SHA": "1234567890abcdef1234567890abcdef12345678",
+        "GITHUB_REF": "refs/pull/7/merge",
+    })
+    completed = subprocess.run(
+        ["bash", str(REPO / "scripts/ci-images.sh"), "check", "true", "false"],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert "镜像标签与官方 channel/source 输入不一致" in completed.stderr
+
+
+def test_ci_image_candidate_builds_missing_cli_base_once(tmp_path: Path) -> None:
+    _write_fake_cli_channel_curl(tmp_path)
+    fake_docker = tmp_path / "docker"
+    log = tmp_path / "docker.log"
+    inspect_json = _cli_tools_inspect_json()
+    fake_docker.write_text(
+        f"""#!/bin/sh
+case " $* " in
+  *" buildx imagetools inspect "*"@sha256:"*) printf '%s\n' '{inspect_json}'; exit 0 ;;
+  *" buildx imagetools inspect "*) echo 'manifest unknown' >&2; exit 1 ;;
+esac
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+metadata=""
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "--metadata-file" ]; then metadata="$argument"; fi
+  previous="$argument"
+done
+case " $* " in
+  *" --target cli-tools "*)
+    printf '%s\n' '#17 1.1 FLORI_CLI_VERSION claude=2.1.220' \
+      '#17 1.2 FLORI_CLI_VERSION qoder=1.1.17' \
+      '#17 1.3 FLORI_CLI_VERSION codex=0.147.0'
+    printf '%s\n' '{{"containerimage.digest":"{_CLI_TOOLS_DIGEST}"}}' > "$metadata"
+    ;;
+  *)
+    [ -z "$metadata" ] || printf '%s\n' '{{"containerimage.digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}' > "$metadata"
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    digest_file = tmp_path / "artifacts/candidate-digests.tsv"
+    environment = os.environ.copy()
+    environment.update({
+        "PATH": f"{tmp_path}:{environment['PATH']}",
+        "FAKE_DOCKER_LOG": str(log),
+        "RUNNER_TEMP": str(tmp_path),
+        "OWNER_LC": "exampleowner",
+        "FLORI_VERSION": "9.9.9",
+        "GITHUB_SHA": "1234567890abcdef1234567890abcdef12345678",
+        "GITHUB_REF": "refs/heads/main",
+        "CI_IMAGE_DIGEST_FILE": str(digest_file),
+    })
+    completed = subprocess.run(
+        ["bash", str(REPO / "scripts/ci-images.sh"), "candidate", "true", "false"],
+        cwd=REPO,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    calls = log.read_text(encoding="utf-8").splitlines()
+    cli_builds = [call for call in calls if "--target cli-tools" in call]
+    assert len(cli_builds) == 1
+    assert "--provenance=false" in cli_builds[0]
+    assert "--no-cache-filter cli-tools-builder" in cli_builds[0]
+    assert "--cache-to type=inline" in cli_builds[0]
+    assert f"cli-tools\tghcr.io/exampleowner/flori-cli-tools:" in (
+        digest_file.parent / "cli-tools.tsv"
+    ).read_text(encoding="utf-8")
 
 
 def test_ci_image_worker_build_rejects_missing_cli_version_evidence(
     tmp_path: Path,
 ) -> None:
+    _write_fake_cli_channel_curl(tmp_path)
     fake_docker = tmp_path / "docker"
-    fake_docker.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_docker.write_text(
+        """#!/bin/sh
+case " $* " in
+  *" buildx imagetools inspect "*) echo 'manifest unknown' >&2; exit 1 ;;
+esac
+exit 0
+""",
+        encoding="utf-8",
+    )
     fake_docker.chmod(0o755)
     environment = os.environ.copy()
     environment.update({
@@ -961,7 +1429,7 @@ def test_ci_image_worker_build_rejects_missing_cli_version_evidence(
 
     assert completed.returncode == 1
     for cli in ("claude", "qoder", "codex"):
-        assert f"flori-worker 的 {cli} 版本证据缺失或重复" in completed.stderr
+        assert f"cli-tools 的 {cli} 实装版本证据缺失" in completed.stderr
 
 
 def test_ci_image_promote_uses_exact_candidate_and_release_tags(tmp_path: Path) -> None:

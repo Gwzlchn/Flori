@@ -540,12 +540,29 @@ def test_worker_cli_installers_follow_official_latest_channels_and_refresh_cache
     assert "https://claude.ai/install.sh" in installer
     assert "https://qoder.com/install" in installer
     assert "https://chatgpt.com/codex/install.sh" in installer
-    assert "CODEX_RELEASE=latest" in installer
-    assert installer.count("timeout 1800") == 3
-    assert installer.count("FLORI_CLI_VERSION ") == 3
-    assert 'grep -Fc "FLORI_CLI_VERSION $cli="' in ci_images
-    assert "版本证据缺失或重复" in ci_images
-    assert "VERSION=" not in installer
+    assert 'CODEX_RELEASE="${CODEX_CLI_VERSION:-latest}"' in installer
+    assert installer.count("timeout 1800") >= 3
+    for cli in ("claude", "qoder", "codex"):
+        assert f"record_version {cli}" in installer
+    assert 'grep -Eo "FLORI_CLI_VERSION ${cli}=[0-9A-Za-z.+-]+"' in ci_images
+    assert "版本证据缺失、重复或与 channel 不一致" in ci_images
     assert "SHA256" not in installer
+    assert "FROM debian:bookworm-slim AS cli-tools" in dockerfile
+    assert "FROM ${CLI_TOOLS_IMAGE} AS cli-tools-source" in dockerfile
+    assert "COPY --from=cli-tools-source" in dockerfile
+    assert 'io.flori.cli.source="${CLI_TOOLS_SOURCE_DIGEST}"' in dockerfile
+    assert "--target cli-tools" in ci_images
+    assert "--no-cache-filter cli-tools-builder" in ci_images
+    assert "resolve_cli_source_digest" in ci_images
+    assert "sha256sum docker/install-cli-tools.sh" in ci_images
+    assert 'FROM python:3.11-slim AS cli-tools-builder' in ci_images
+    assert 'FROM ${CLI_TOOLS_IMAGE} AS cli-tools-source' in ci_images
+    assert 'stage_digest=$(sha256sum "$stage_file"' in ci_images
+    assert "source=%s" in ci_images
+    assert "timeout --foreground --kill-after=30s 1800" in ci_images
+    assert "flori-cli-tools:versions-" in ci_images
+    assert 'CLI_TOOLS_IMAGE=$CLI_TOOLS_REF@$CLI_TOOLS_DIGEST' in ci_images
+    assert "cli-tools.tsv" in ci_images
+    assert "printf 'source\\t%s\\n'" in ci_images
     for command in ("claude --version", "qodercli --version", "codex --version"):
         assert command in installer

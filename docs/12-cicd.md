@@ -22,6 +22,15 @@ Registry: ghcr.io/<owner>/flori-{api,scheduler,worker,frontend}
 Tags:     latest, <git-short-sha>
 ```
 
+`flori-cli-tools` 是 Worker 的内部稳定工具镜像,不直接部署。CI 每次 Worker 构建前读取 Claude stable、
+Qoder latest 和 Codex latest 的官方 channel 元数据,以三项实际版本、installer 内容和 Dockerfile 中
+cli-tools stage 内容的组合摘要选择 `versions-<digest>` tag。官方 channel 三次读取共享 30 分钟外层预算。
+tag 不存在时才通过三家官方 installer 构建并发布;存在时必须校验镜像版本标签、source digest 与
+channel/source 输入一致,然后按 immutable image digest 作为 Worker 的 CLI source stage。应用版本、业务
+源码或 GitHub run id 不参与该摘要,因此 CLI 与安装层定义未变时 Worker 继续复用相同的大文件层;任一
+channel 版本或安装层输入变化都会生成新摘要并重新安装。仓库不保存 CLI 版本或手写厂商 SHA,installer
+的 `--version` 结果必须与本次 channel 解析值完全一致。
+
 用户一键部署：
 ```bash
 git clone https://github.com/<owner>/flori
@@ -62,7 +71,7 @@ sudo ./svc.sh install && sudo ./svc.sh start
 - `fe-test`：容器化 vue-tsc、selected OpenAPI TypeScript 生成物漂移检查、Vitest 和覆盖率共用一次依赖安装。CI 用 `npm ci` 且下载 cache 按 OS/arch/Node/lockfile 跨 run 复用，本地保留 `npm install` 热卷；三个只读静态门并行后再跑 Vitest，与后端并行。覆盖率无法解析时 fail-closed。Python OpenAPI 快照漂移由 normal unit 直接检查。
 - `coverage-badge`：仅 main。把前后端覆盖率写成 shields endpoint JSON,force-push 到 `badges` 数据分支,README 徽章读它。
 - `fuzz.yml`（每日 cron + 可手动）：**Schemathesis 模糊/契约**,`pytest -m fuzz tests/test_openapi_fuzz.py`。in-process 从 `/openapi.json` 自动派生用例喂每个端点,断言不 5xx(`not_a_server_error` + `response_schema_conformance`,检查集见仓库根 `schemathesis.toml`)。曾借此揪出分页 `offset` 溢出 SQLite int64 的 500 并修复。从 push CI 拆出,不再拖慢每次 push 的关键路径。
-- `build-images` / `push-images`：两者都用单 runner 并行处理四镜像，任一镜像失败则整体失败。PR 的 `build-images` 以只读 cache 验证全部受影响产品 stage，不 push 制品；main 与测试并行构建并 push 仅当前 full SHA 的 `candidate-*`，该 tag 不被 Watchtower 消费，不是发布，同时把每个镜像的 immutable digest 作为 run-scoped artifact 交给发布门。`push-images` 必须等 coverage gate、前端、两路 integration、路径检测和候选构建全绿，然后严格从 `image@sha256:*` 提升生成 `latest` 和 `sha-*`，不信任可变候选 tag，也不在门后重建；瞬时 registry 错误最多重试三次。GHCR 不提供跨四个 repository 的原子 tag 事务；任一提升失败会令 job 失败并要求 fix-forward，但极短窗口内可能只有部分 repository 已更新 `latest`。
+- `build-images` / `push-images`：两者都用单 runner 并行处理四镜像，任一镜像失败则整体失败。PR 的 `build-images` 以只读 cache 验证全部受影响产品 stage，不 push 制品；若新 CLI channel 版本尚无稳定工具镜像,PR 在当前 Worker build 内实装验证但不发布。main 先复用或创建带版本标签的 `flori-cli-tools:versions-*`,再与测试并行构建并 push 仅当前 full SHA 的 `candidate-*`。候选 tag 不被 Watchtower 消费,不是发布。run-scoped artifact 同时保存每个产品镜像的 immutable digest、三项 CLI 实装版本和 cli-tools immutable digest。`push-images` 必须等 coverage gate、前端、两路 integration、路径检测和候选构建全绿，然后严格从 `image@sha256:*` 提升生成 `latest` 和 `sha-*`，不信任可变候选 tag，也不在门后重建；瞬时 registry 错误最多重试三次。GHCR 不提供跨四个 repository 的原子 tag 事务；任一提升失败会令 job 失败并要求 fix-forward，但极短窗口内可能只有部分 repository 已更新 `latest`。
 - `detect` 在短 `prepare-test-runtime` 完成、释放首层 runner 槽后启动，以最近一次完整成功的 main CI SHA 为已发布基线，累计分类到当前 HEAD。A 改后端后即使被 B 的连续 push 取消，B 也会在基线到 HEAD 的 diff 里看到 A，不会漏发后端。GitHub API、Git 祖先或历史基线异常时强制前后端全建，宁可多建不得漏发。合法纯版本/pyproject 注释和 Dockerfile 普通纯注释变化不触发运行镜像；Docker parser directive、heredoc 或任何指令变化仍保守重建。
 - 同 ref 的新 run 以 job 级 concurrency 取消旧单测、前端测试、路径检测和镜像预构建；`push-images` 是单一不可取消的发布 job，`cancel-in-progress: false` 保证已启动的发布不被后续 run 半途取消。未启动的旧排队可由最新 HEAD 取代，累计基线保证中间改动不丢失。
 - `step-images.yml`：步骤执行镜像（`flori-step-base` / `flori-step-heavy` / `flori-step-gpu`）独立于主 CI，`workflow_dispatch` 手动触发，同样只构 amd64。
