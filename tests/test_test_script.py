@@ -1184,6 +1184,10 @@ def test_ci_image_cli_cache_key_tracks_installer_and_docker_stage_only(
         fake_docker.chmod(0o755)
         log.write_text("", encoding="utf-8")
         environment = os.environ.copy()
+        # 临时项目也有 shared/。它的 Python 子进程不能把夹具路径写进父级 coverage 数据。
+        for key in tuple(environment):
+            if key.startswith("COV_CORE_"):
+                environment.pop(key)
         environment.update({
             "PATH": f"{fake_bin}:{environment['PATH']}",
             "FAKE_DOCKER_LOG": str(log),
