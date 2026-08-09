@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import sqlite3
 import threading
 import unicodedata
 
@@ -532,6 +533,27 @@ class TestAIUsage:
         aggregate = db.get_usage_aggregate()
         assert aggregate["total_credit_reports"] == 1
         assert aggregate["by_model"][0]["credit_reports"] == 1
+
+    def test_duplicate_usage_ends_transaction_before_new_usage(self, db):
+        first = AIUsage(
+            exec_id="dup-first", provider="qoder-cli", model="ultimate", credits=2.5,
+        )
+        second = AIUsage(
+            exec_id="new-second", provider="qoder-cli", model="ultimate", credits=3.5,
+        )
+        assert db.record_ai_usage(first) is True
+        assert db.record_ai_usage(first) is False
+        assert db.record_ai_usage(first) is False
+        assert not db._conn.in_transaction
+        assert db.record_ai_usage(second) is True
+
+        external = sqlite3.connect(db._path, timeout=0.2)
+        try:
+            assert external.execute("SELECT COUNT(*) FROM ai_usage").fetchone()[0] == 2
+            external.execute("BEGIN IMMEDIATE")
+            external.rollback()
+        finally:
+            external.close()
 
     def test_summary_empty(self, db):
         summary = db.get_usage_summary()
@@ -1710,3 +1732,22 @@ class TestAITaskLogs:
         })
         row = db.get_ai_task_logs("at_e")[0]
         assert row["ok"] == 0 and "provider down" in row["error"]
+
+    def test_failed_log_insert_ends_transaction(self, db):
+        assert db.record_ai_task_log({
+            "task_id": "at_missing_created_at",
+            "provider": "qoder-cli",
+            "model": "ultimate",
+            "cost_usd": 0,
+            "credits": 1.0,
+            "record": {},
+            "created_at": None,
+        }) is False
+        assert not db._conn.in_transaction
+
+        external = sqlite3.connect(db._path, timeout=0.2)
+        try:
+            external.execute("BEGIN IMMEDIATE")
+            external.rollback()
+        finally:
+            external.close()

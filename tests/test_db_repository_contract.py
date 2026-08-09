@@ -132,6 +132,52 @@ def test_runtime_rolls_back_failed_outer_write_but_preserves_nested_owner(db):
     db._conn.rollback()
 
 
+def test_runtime_false_result_ends_outer_transaction_without_committing(db):
+    db._conn.execute("CREATE TABLE runtime_false_probe(value TEXT NOT NULL)")
+    db._conn.commit()
+
+    def write_then_return_false(_owner, connection: sqlite3.Connection):
+        connection.execute(
+            "INSERT INTO runtime_false_probe(value) VALUES ('uncommitted')"
+        )
+        return False
+
+    assert db._runtime.run_transaction(
+        db,
+        write_then_return_false,
+        (),
+        {},
+        begin_immediate=False,
+        commit_on_success=True,
+        commit_if_false=False,
+        rollback_on_error=False,
+    ) is False
+    assert not db._conn.in_transaction
+    assert db._conn.execute(
+        "SELECT value FROM runtime_false_probe"
+    ).fetchall() == []
+
+    db._conn.execute("BEGIN IMMEDIATE")
+    db._conn.execute(
+        "INSERT INTO runtime_false_probe(value) VALUES ('outer-owner')"
+    )
+    assert db._runtime.run_transaction(
+        db,
+        write_then_return_false,
+        (),
+        {},
+        begin_immediate=False,
+        commit_on_success=True,
+        commit_if_false=False,
+        rollback_on_error=False,
+    ) is False
+    assert db._conn.in_transaction
+    assert [row[0] for row in db._conn.execute(
+        "SELECT value FROM runtime_false_probe ORDER BY rowid"
+    )] == ["outer-owner", "uncommitted"]
+    db._conn.rollback()
+
+
 def test_jobs_repository_is_commit_free_and_facade_is_explicit():
     source = inspect.getsource(JobsReadRepository)
     assert ".commit(" not in source

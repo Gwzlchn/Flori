@@ -229,6 +229,13 @@ class DatabaseRuntime:
                     and (commit_if_false or result is not False)
                 ):
                     self.connection.commit()
+                elif (
+                    commit_on_success
+                    and not nested
+                    and result is False
+                    and self.connection.in_transaction
+                ):
+                    self.connection.rollback()
                 return result
             except BaseException:
                 # 外层 transaction owner 不能把失败写留给后续请求提交,否则该连接会
