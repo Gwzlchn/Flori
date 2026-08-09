@@ -80,7 +80,9 @@ function stubStoreData(store: any, opts: { full?: any; usage?: any; events?: any
   ;(store.fetchFullStatus as any).mockResolvedValue(opts.full ?? fullStatus())
   ;(store.fetchUsage as any).mockResolvedValue(opts.usage ?? { calls: 0, by_model: [], cache_hit_rate_pct: 0,
     total_input_tokens: 0, total_output_tokens: 0, total_cache_creation_tokens: 0,
-    total_cache_read_tokens: 0, total_cost_usd: 0, total_num_turns: 0, total_duration_sec: 0 })
+    total_cache_read_tokens: 0, total_cost_usd: 0, total_credits: 0,
+    total_credit_reports: 0,
+    total_num_turns: 0, total_duration_sec: 0 })
   ;(store.fetchEvents as any).mockResolvedValue({ events: opts.events ?? [] })
   ;(store.fetchPoolLimits as any).mockResolvedValue({ cpu: { default: 4, override: null } })
 }
@@ -341,17 +343,24 @@ describe('SystemView', () => {
     vi.useRealTimers()
   })
 
-  it('AI 用量聚合：有调用时展示命中率与成本', async () => {
+  it('AI 用量聚合分开展示美元成本与 Qoder credits', async () => {
     const store = useWorkerStore()
     stubStoreData(store, {
       usage: {
-        calls: 5, total_input_tokens: 1000, total_output_tokens: 200,
+        calls: 6, total_input_tokens: 1000, total_output_tokens: 200,
         total_cache_creation_tokens: 100, total_cache_read_tokens: 400,
-        total_cost_usd: 0.5, total_num_turns: 10, total_duration_sec: 20,
+        total_cost_usd: 0.5, total_credits: 2.2650132450000005,
+        total_credit_reports: 1,
+        total_num_turns: 10, total_duration_sec: 20,
         cache_hit_rate_pct: 26.7,
         by_model: [{ provider: 'claude-cli', model: 'claude-opus', calls: 5,
           input_tokens: 1000, output_tokens: 200, cache_creation_tokens: 100,
-          cache_read_tokens: 400, cost_usd: 0.5, cache_hit_rate_pct: 26.7 }],
+          cache_read_tokens: 400, cost_usd: 0.5, credits: 0,
+          credit_reports: 0, cache_hit_rate_pct: 26.7 },
+        { provider: 'qoder-cli', model: 'ultimate', calls: 1,
+          input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0,
+          cache_read_tokens: 0, cost_usd: 0, credits: 2.2650132450000005,
+          credit_reports: 1, cache_hit_rate_pct: 0 }],
       },
     })
     const w = mountView({ workers: [] })
@@ -360,6 +369,53 @@ describe('SystemView', () => {
     expect(t).toContain('AI 用量')
     expect(t).toContain('26.7%')
     expect(t).toContain('（等价）')   // claude-cli 成本标等价
+    expect(t).toContain('$0.5000 USD')
+    expect(t).toContain('2.2650 credits')
+    expect(t).toContain('Qoder credits')
+    const qoderRow = w.findAll('.prov-flat').find(row => row.text().includes('qoder-cli'))
+    expect(qoderRow?.text()).toContain('2.2650 credits')
+    expect(qoderRow?.text()).not.toContain('$0.0000')
+  })
+
+  it('Qoder 聚合区分未上报与部分上报', async () => {
+    const store = useWorkerStore()
+    stubStoreData(store, {
+      usage: {
+        calls: 2, total_input_tokens: 0, total_output_tokens: 0,
+        total_cache_creation_tokens: 0, total_cache_read_tokens: 0,
+        total_cost_usd: 0, total_credits: 1.5, total_credit_reports: 1,
+        total_num_turns: 0, total_duration_sec: 0, cache_hit_rate_pct: 0,
+        by_model: [{
+          provider: 'qoder-cli', model: 'ultimate', calls: 2,
+          input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0,
+          cache_read_tokens: 0, cost_usd: 0, credits: 1.5,
+          credit_reports: 1, cache_hit_rate_pct: 0,
+        }],
+      },
+    })
+    const partial = mountView({ workers: [] })
+    await flushPromises()
+    expect(partial.text()).toContain('1.5000 credits（部分未上报）')
+    partial.unmount()
+
+    stubStoreData(store, {
+      usage: {
+        calls: 2, total_input_tokens: 0, total_output_tokens: 0,
+        total_cache_creation_tokens: 0, total_cache_read_tokens: 0,
+        total_cost_usd: 0, total_credits: 0, total_credit_reports: 0,
+        total_num_turns: 0, total_duration_sec: 0, cache_hit_rate_pct: 0,
+        by_model: [{
+          provider: 'qoder-cli', model: 'ultimate', calls: 2,
+          input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0,
+          cache_read_tokens: 0, cost_usd: 0, credits: 0,
+          credit_reports: 0, cache_hit_rate_pct: 0,
+        }],
+      },
+    })
+    const missing = mountView({ workers: [] })
+    await flushPromises()
+    expect(missing.text()).toContain('credits 未上报')
+    expect(missing.text()).not.toContain('0.0000 credits')
   })
 
   // 组件 down/降级的状态呈现由核心组件卡承担,归 ComponentCard 测试,此处不覆盖。

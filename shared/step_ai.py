@@ -238,6 +238,7 @@ class AIInvocation:
             provider=response.provider,
             model=response.model,
             cost_usd=response.cost_usd,
+            credits=response.credits,
             tokens=f"{response.input_tokens}+{response.output_tokens}",
         )
         step_exec_id = os.environ.get(
@@ -256,6 +257,7 @@ class AIInvocation:
                 cache_creation_input_tokens=response.cache_creation_input_tokens,
                 cache_read_input_tokens=response.cache_read_input_tokens,
                 cost_usd=response.cost_usd,
+                credits=response.credits,
                 duration_sec=response.duration_sec,
                 num_turns=response.num_turns,
                 cached=response.cached,
@@ -625,10 +627,13 @@ class AIInvocation:
             },
             "cost": {
                 "cost_usd": getattr(response, "cost_usd", 0.0),
+                "credits": getattr(response, "credits", None),
                 "basis": (
-                    "cli-equiv"
+                    "provider-credit"
+                    if getattr(response, "provider", None) == "qoder-cli"
+                    else "cli-equiv"
                     if getattr(response, "provider", None)
-                    in {"claude-cli", "codex-cli", "qoder-cli"}
+                    in {"claude-cli", "codex-cli"}
                     else "priced"
                 ),
             },

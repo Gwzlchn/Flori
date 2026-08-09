@@ -1431,7 +1431,8 @@ class Worker:
                 input_tokens=resp.input_tokens, output_tokens=resp.output_tokens,
                 cache_creation_input_tokens=resp.cache_creation_input_tokens,
                 cache_read_input_tokens=resp.cache_read_input_tokens,
-                cost_usd=resp.cost_usd, duration_sec=resp.duration_sec,
+                cost_usd=resp.cost_usd, credits=resp.credits,
+                duration_sec=resp.duration_sec,
                 num_turns=resp.num_turns, cached=resp.cached,
             ))
         except Exception:
@@ -1523,7 +1524,8 @@ class Worker:
                 "input_tokens": resp.input_tokens, "output_tokens": resp.output_tokens,
                 "cache_creation_input_tokens": resp.cache_creation_input_tokens,
                 "cache_read_input_tokens": resp.cache_read_input_tokens,
-                "cost_usd": resp.cost_usd, "duration_sec": resp.duration_sec,
+                "cost_usd": resp.cost_usd, "credits": resp.credits,
+                "duration_sec": resp.duration_sec,
                 "num_turns": resp.num_turns, "cached": resp.cached, "session_id": resp.session_id,
             } if resp is not None else None),
         }
@@ -1537,6 +1539,7 @@ class Worker:
             "cache_creation_input_tokens": (resp.cache_creation_input_tokens if resp else 0),
             "cache_read_input_tokens": (resp.cache_read_input_tokens if resp else 0),
             "cost_usd": (resp.cost_usd if resp else 0.0),
+            "credits": (resp.credits if resp else None),
             "duration_sec": (resp.duration_sec if resp else duration),
             "num_turns": (resp.num_turns if resp else 0),
             "record": record,

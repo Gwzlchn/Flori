@@ -23,7 +23,12 @@ from shared.ask_citations import validate_bound_ask_citations
 from shared.config import AppConfig
 from shared.content_policy import RETIRED_PROVIDER_VALUES
 from shared.db import Database
-from shared.models import AIUsage, Worker, generate_worker_id
+from shared.models import (
+    AIUsage,
+    Worker,
+    generate_worker_id,
+    validate_ai_metering_units,
+)
 from shared.redis_client import RedisClient, worker_info_from_model
 from shared.step_scope import parse_execution_step
 from shared.status import (
@@ -706,6 +711,18 @@ def _ai_claim_kwargs(claim: dict, worker_id: str) -> dict:
     }
 
 
+def _validate_credit_unit(
+    provider: str,
+    credits: object,
+    cost_usd: object,
+    label: str,
+) -> None:
+    try:
+        validate_ai_metering_units(provider, cost_usd, credits)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{label} {exc}") from exc
+
+
 @router.post("/ai-tasks/{task_id}/executing")
 async def mark_ai_task_executing(
     task_id: str,
@@ -751,7 +768,7 @@ async def set_ai_task_result(
     worker_id: str = Depends(verify_worker_token),
     redis: RedisClient = Depends(get_redis),
 ):
-    await _require_ai_claim(
+    claim = await _require_ai_claim(
         redis, worker_id, task_id, lease, states={"executing"},
     )
     # 服务端锚点必须先存在。Worker 只能提交结果副本,不能凭结果重建锚点。
@@ -759,6 +776,25 @@ async def set_ai_task_result(
     if original is None:
         raise HTTPException(status_code=409, detail="AI task provenance anchor missing")
     result = dict(req.result)
+    result_provider = result.get("provider")
+    claim_provider = claim.get("provider")
+    if result_provider is not None and result_provider != claim_provider:
+        raise HTTPException(status_code=400, detail="AI result provider mismatch")
+    result_provider = claim_provider
+    result["provider"] = result_provider
+    original_model = str(original.get("model") or "")
+    if (
+        original_model
+        and "error" not in result
+        and result.get("model") != original_model
+    ):
+        raise HTTPException(status_code=400, detail="AI result model mismatch")
+    _validate_credit_unit(
+        str(result_provider),
+        result.get("credits"),
+        result.get("cost_usd"),
+        "AI result",
+    )
     if lease.step == "synthesis":
         audit_context = original.get("audit_context")
         original_manifest = (
@@ -801,10 +837,24 @@ async def record_ai_task_log(
     db: Database = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
 ):
-    await _require_ai_claim(
+    claim = await _require_ai_claim(
         redis, worker_id, task_id, lease, states={"executing"},
     )
+    original = await redis.get_ai_task_original_payload(task_id)
+    if original is None:
+        raise HTTPException(status_code=409, detail="AI task provenance anchor missing")
     record = dict(req.log)
+    if record.get("provider") != claim.get("provider"):
+        raise HTTPException(status_code=400, detail="AI audit provider mismatch")
+    _validate_credit_unit(
+        str(record.get("provider")),
+        record.get("credits"),
+        record.get("cost_usd"),
+        "AI audit",
+    )
+    original_model = str(original.get("model") or "")
+    if original_model and record.get("model") != original_model:
+        raise HTTPException(status_code=400, detail="AI audit model mismatch")
     record.update({
         "task_id": task_id, "exec_id": lease.exec_id, "step_name": lease.step,
     })
@@ -814,6 +864,12 @@ async def record_ai_task_log(
         raw_record.update({
             "task_id": task_id, "exec_id": lease.exec_id, "step": lease.step,
         })
+        raw_usage = raw_record.get("usage")
+        if type(raw_usage) is dict:
+            raw_usage = dict(raw_usage)
+            raw_usage["cost_usd"] = record.get("cost_usd", 0.0)
+            raw_usage["credits"] = record.get("credits")
+            raw_record["usage"] = raw_usage
         record["record"] = raw_record
     written = await asyncio.to_thread(db.record_ai_task_log, record)
     if not written:
@@ -930,10 +986,11 @@ async def record_usage(
     redis: RedisClient = Depends(get_redis),
 ):
     """在当前任务租约内记录 AI 调用用量(exec_id UNIQUE,重复上报幂等)."""
+    ai_claim: dict | None = None
     if req.job_id is None:
         if req.step != lease.step or req.exec_id != lease.exec_id:
             raise HTTPException(status_code=403, detail="usage AI task lease mismatch")
-        await _require_ai_claim(
+        ai_claim = await _require_ai_claim(
             redis, worker_id, lease.job_id, lease, states={"executing"},
         )
     else:
@@ -943,11 +1000,21 @@ async def record_usage(
             redis, worker_id, lease.job_id, lease.step, lease.exec_id,
             renew=True,
         )
+    if ai_claim is not None:
+        if req.provider != ai_claim.get("provider"):
+            raise HTTPException(status_code=400, detail="usage provider mismatch")
+        original = await redis.get_ai_task_original_payload(lease.job_id)
+        if original is None:
+            raise HTTPException(status_code=409, detail="AI task provenance anchor missing")
+        original_model = str(original.get("model") or "")
+        if original_model and req.model != original_model:
+            raise HTTPException(status_code=400, detail="usage model mismatch")
     if req.provider in RETIRED_PROVIDER_VALUES:
         # 历史已删除值只作拒绝 tombstone。落账必须是真实执行后端。
         raise HTTPException(
             status_code=400, detail="usage provider must be a resolved provider",
         )
+    _validate_credit_unit(req.provider, req.credits, req.cost_usd, "usage")
     usage = AIUsage(
         exec_id=req.exec_id,
         provider=req.provider,
@@ -960,6 +1027,7 @@ async def record_usage(
         cache_creation_input_tokens=req.cache_creation_input_tokens,
         cache_read_input_tokens=req.cache_read_input_tokens,
         cost_usd=req.cost_usd,
+        credits=req.credits,
         duration_sec=req.duration_sec,
         num_turns=req.num_turns,
         cached=req.cached,

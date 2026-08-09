@@ -26,13 +26,13 @@ const usage = [
   {
     step: '04_translate', worker_id: 'ai-1', provider: 'claude-cli', model: 'opus',
     input_tokens: 1000, output_tokens: 200, cache_creation_tokens: 100,
-    cache_read_tokens: 400, cost_usd: 0.25, duration_sec: 20, num_turns: 1,
+    cache_read_tokens: 400, cost_usd: 0.25, credits: null, duration_sec: 20, num_turns: 1,
     cache_hit_rate_pct: 26.7,
   },
   {
     step: '04_translate', worker_id: 'ai-1', provider: 'claude-cli', model: 'opus',
     input_tokens: 2000, output_tokens: 300, cache_creation_tokens: 0,
-    cache_read_tokens: 500, cost_usd: 0.5, duration_sec: 30, num_turns: 1,
+    cache_read_tokens: 500, cost_usd: 0.5, credits: null, duration_sec: 30, num_turns: 1,
     cache_hit_rate_pct: 20,
   },
 ]
@@ -121,6 +121,38 @@ describe('StepWorkbench 步骤级 AI 用量', () => {
 
     expect(wrapper.text()).toContain('收起审计日志')
     expect(wrapper.find('[data-test="ai-log-panel"]').text()).toContain('审计 04_translate')
+  })
+
+  it('Qoder 步骤展示 credit 且不把零美元冒充为成本', async () => {
+    get.mockImplementation((url: string) => {
+      if (url.endsWith('/artifacts')) return Promise.resolve({ groups: [], total_bytes: 0 })
+      if (url.endsWith('/usage')) return Promise.resolve({ usage: [{
+        ...usage[0], provider: 'qoder-cli', model: 'ultimate',
+        input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0,
+        cost_usd: 0, credits: 2.2650132450000005,
+      }] })
+      return Promise.resolve({})
+    })
+    const wrapper = mountWorkbench('04_translate')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('2.2650 credits')
+    expect(wrapper.text()).not.toContain('$0.0000')
+  })
+
+  it('Qoder credit 为 null 时显示未上报而不是零', async () => {
+    get.mockImplementation((url: string) => {
+      if (url.endsWith('/artifacts')) return Promise.resolve({ groups: [], total_bytes: 0 })
+      if (url.endsWith('/usage')) return Promise.resolve({ usage: [{
+        ...usage[0], provider: 'qoder-cli', model: 'ultimate', cost_usd: 0, credits: null,
+      }] })
+      return Promise.resolve({})
+    })
+    const wrapper = mountWorkbench('04_translate')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('credits 未上报')
+    expect(wrapper.text()).not.toContain('0.0000 credits')
   })
 
   it('重跑入口只作为所选步骤的上下文操作出现', async () => {

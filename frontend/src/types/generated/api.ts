@@ -1618,8 +1618,12 @@ export interface components {
         };
         /** AiTaskLogCall */
         AiTaskLogCall: {
+            /** Cost Usd */
+            cost_usd: number;
             /** Created At */
             created_at: string | null;
+            /** Credits */
+            credits: number | null;
             /** Domain */
             domain: string | null;
             /** Error */
@@ -1662,6 +1666,8 @@ export interface components {
             content?: string | null;
             /** Cost Usd */
             cost_usd?: number | null;
+            /** Credits */
+            credits?: number | null;
             /** Error */
             error?: string | null;
             /** Markdown */
@@ -2806,6 +2812,8 @@ export interface components {
             cache_read_tokens: number;
             /** Cost Usd */
             cost_usd: number;
+            /** Credits */
+            credits: number | null;
             /** Duration Sec */
             duration_sec: number;
             /** Input Tokens */
@@ -4151,6 +4159,10 @@ export interface components {
             total_cache_read_tokens: number;
             /** Total Cost Usd */
             total_cost_usd: number;
+            /** Total Credit Reports */
+            total_credit_reports: number;
+            /** Total Credits */
+            total_credits: number;
             /** Total Duration Sec */
             total_duration_sec: number;
             /** Total Input Tokens */
@@ -4172,6 +4184,10 @@ export interface components {
             calls: number;
             /** Cost Usd */
             cost_usd: number;
+            /** Credit Reports */
+            credit_reports: number;
+            /** Credits */
+            credits: number;
             /** Input Tokens */
             input_tokens: number;
             /** Model */

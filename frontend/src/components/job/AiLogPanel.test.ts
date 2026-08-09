@@ -80,6 +80,32 @@ describe('AiLogPanel', () => {
     expect(w.findAll('details.audit-call').every(call => call.attributes('open') == null)).toBe(true)
   })
 
+  it('Qoder审计显示原生credits并区分null与0', async () => {
+    mockLogs([
+      callFixture({
+        call_index: 0,
+        routing: { provider: 'qoder-cli', model: 'ultimate', attempts: [] },
+        cost: { cost_usd: 0, credits: 2.265013245, basis: 'provider-credit' },
+      }),
+      callFixture({
+        call_index: 1,
+        routing: { provider: 'qoder-cli', model: 'ultimate', attempts: [] },
+        cost: { cost_usd: 0, credits: null, basis: 'provider-credit' },
+      }),
+      callFixture({
+        call_index: 2,
+        routing: { provider: 'qoder-cli', model: 'ultimate', attempts: [] },
+        cost: { cost_usd: 0, credits: 0, basis: 'provider-credit' },
+      }),
+    ])
+    const w = await mountPanel()
+
+    expect(w.text()).toContain('2.2650 credits')
+    expect(w.text()).toContain('credits 未上报')
+    expect(w.text()).toContain('0.0000 credits')
+    expect(w.text()).not.toContain('$0.0000')
+  })
+
   it('空态提示', async () => {
     mockLogs([])
     const w = await mountPanel()

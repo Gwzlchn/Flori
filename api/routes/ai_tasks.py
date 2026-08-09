@@ -95,7 +95,8 @@ async def ai_task_result(task_id: str, redis: RedisClient = Depends(get_redis)):
     return {
         "status": "done", "task_id": task_id,
         "content": content, "answer_markdown": content, "markdown": content,
-        "provider": res.get("provider"), "model": res.get("model"), "cost_usd": res.get("cost_usd"),
+        "provider": res.get("provider"), "model": res.get("model"),
+        "cost_usd": res.get("cost_usd"), "credits": res.get("credits"),
         "source_manifest": source_manifest,
         "citation_validation": citation_validation,
     }
@@ -118,6 +119,8 @@ async def ai_task_log(task_id: str, db: Database = Depends(get_db)):
             "step": r.get("step_name"), "domain": r.get("domain"),
             "provider": r.get("provider"), "model": r.get("model"),
             "ok": bool(r.get("ok")), "error": r.get("error"),
+            "cost_usd": float(r.get("cost_usd") or 0),
+            "credits": r.get("credits"),
             "created_at": r.get("created_at"),
             "record": rec,
         })

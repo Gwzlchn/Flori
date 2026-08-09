@@ -1,7 +1,7 @@
 {
   "format": "flori-sqlite-migrations",
   "minimum_supported_version": 0,
-  "current_version": 10,
+  "current_version": 11,
   "ledger_version": 2,
   "migrations": [
     {
@@ -53,6 +53,11 @@
       "version": 10,
       "name": "concept-replay-retry-states",
       "checksum": "c1b823066c93ca4c9a0479327ff44fe0bb075c24b4f3a7f054baa01c9ee7e564"
+    },
+    {
+      "version": 11,
+      "name": "qoder-credit-accounting",
+      "checksum": "76f418bac69de5b28a78af2ed30a26aa876d98a7056c1a0b26102036a5fdecef"
     }
   ]
 }

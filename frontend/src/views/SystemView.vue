@@ -473,11 +473,12 @@ const usageByProvider = computed(() => {
   for (const r of u.by_model) {
     let g = m.get(r.provider)
     if (!g) {
-      g = { provider: r.provider, calls: 0, input: 0, output: 0, cc: 0, cr: 0, cost: 0, models: [] as any[] }
+      g = { provider: r.provider, calls: 0, input: 0, output: 0, cc: 0, cr: 0, cost: 0, credits: 0, creditReports: 0, models: [] as any[] }
       m.set(r.provider, g)
     }
     g.calls += r.calls; g.input += r.input_tokens; g.output += r.output_tokens
-    g.cc += r.cache_creation_tokens; g.cr += r.cache_read_tokens; g.cost += r.cost_usd
+    g.cc += r.cache_creation_tokens; g.cr += r.cache_read_tokens
+    g.cost += r.cost_usd; g.credits += r.credits; g.creditReports += r.credit_reports
     g.models.push(r)
   }
   return [...m.values()]

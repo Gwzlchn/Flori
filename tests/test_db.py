@@ -521,16 +521,38 @@ class TestAIUsage:
         assert summary["total_cost_usd"] == pytest.approx(0.0105)
 
     def test_exec_id_dedup(self, db):
-        u = AIUsage(exec_id="dup-id", provider="test", model="test")
+        u = AIUsage(
+            exec_id="dup-id", provider="qoder-cli", model="ultimate", credits=2.5,
+        )
         assert db.record_ai_usage(u) is True
         assert db.record_ai_usage(u) is False
         summary = db.get_usage_summary()
         assert summary["calls"] == 1
+        assert summary["total_credits"] == pytest.approx(2.5)
+        aggregate = db.get_usage_aggregate()
+        assert aggregate["total_credit_reports"] == 1
+        assert aggregate["by_model"][0]["credit_reports"] == 1
 
     def test_summary_empty(self, db):
         summary = db.get_usage_summary()
         assert summary["calls"] == 0
         assert summary["total_cost_usd"] == 0
+        assert summary["total_credits"] == 0
+
+    @pytest.mark.parametrize(
+        "usage",
+        [
+            AIUsage(exec_id="bad-credit", provider="anthropic", model="claude", credits=1),
+            AIUsage(exec_id="bad-usd", provider="qoder-cli", model="ultimate",
+                    cost_usd=0.01),
+            AIUsage(exec_id="bad-range", provider="qoder-cli", model="ultimate",
+                    credits=1.5e308),
+        ],
+    )
+    def test_rejects_cross_unit_or_out_of_range_usage(self, db, usage):
+        with pytest.raises(ValueError):
+            db.record_ai_usage(usage)
+        assert db.get_usage_summary()["calls"] == 0
 
 
 class TestCollection:
@@ -1644,8 +1666,9 @@ class TestAITaskLogs:
         import json
         ok = db.record_ai_task_log({
             "task_id": "at_x", "exec_id": "w:1", "step_name": "synthesis", "domain": "dl",
-            "provider": "claude-cli", "model": "claude-opus-4-8[1m]", "ok": True,
-            "input_tokens": 10, "output_tokens": 5, "cost_usd": 0.12,
+            "provider": "qoder-cli", "model": "ultimate", "ok": True,
+            "input_tokens": 10, "output_tokens": 5, "cost_usd": 0,
+            "credits": 2.25,
             "duration_sec": 2.0, "num_turns": 1,
             "record": {"output": "hi", "prompt": {"system": "S"},
                        "routing": {"attempts": [{"tier": "primary"}]}},
@@ -1655,10 +1678,29 @@ class TestAITaskLogs:
         logs = db.get_ai_task_logs("at_x")
         assert len(logs) == 1
         row = logs[0]
-        assert row["provider"] == "claude-cli" and row["step_name"] == "synthesis"
-        assert row["ok"] == 1 and row["cost_usd"] == 0.12
+        assert row["provider"] == "qoder-cli" and row["step_name"] == "synthesis"
+        assert row["ok"] == 1 and row["cost_usd"] == 0
+        assert row["credits"] == pytest.approx(2.25)
         assert json.loads(row["record_json"])["output"] == "hi"
         assert db.get_ai_task_logs("missing") == []
+
+    @pytest.mark.parametrize(
+        "provider,cost_usd,credits",
+        [
+            ("anthropic", 0, 1),
+            ("qoder-cli", 0.01, None),
+            ("qoder-cli", 0, 1.5e308),
+        ],
+    )
+    def test_rejects_cross_unit_or_out_of_range_log(
+        self, db, provider, cost_usd, credits,
+    ):
+        assert db.record_ai_task_log({
+            "task_id": "at_bad", "provider": provider, "model": "m",
+            "cost_usd": cost_usd, "credits": credits, "record": {},
+            "created_at": "2026-06-27T00:00:00+00:00",
+        }) is False
+        assert db.get_ai_task_logs("at_bad") == []
 
     def test_record_error_row(self, db):
         db.record_ai_task_log({

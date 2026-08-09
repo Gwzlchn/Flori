@@ -11,3 +11,9 @@ export function fmtBytes(n: number | null | undefined, fallback = '—'): string
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
   return `${v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2)} ${units[i]}`
 }
+
+// Qoder credit 与美元不可换算;null 表示 CLI 未上报,不能当成 0。
+export function fmtCredits(n: number | null | undefined, fallback = 'credits 未上报'): string {
+  if (n == null || !Number.isFinite(n) || n < 0) return fallback
+  return `${n.toFixed(4)} credits`
+}

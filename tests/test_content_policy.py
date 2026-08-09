@@ -782,3 +782,25 @@ def test_audit_ledger_rejects_retired_provider_value_in_both_tables():
         "task_id": "t1", "created_at": created,
         "exec_id": exec_id, "provider": "qoder-cli",
     })
+
+
+@pytest.mark.parametrize("kind", ["ai_usage", "ai_task_log"])
+def test_audit_ledger_keeps_qoder_credits_separate_from_usd(kind):
+    base = {
+        "exec_id": "exec-credit",
+        "created_at": "2026-01-01T00:00:00+00:00",
+    }
+    if kind == "ai_task_log":
+        base["task_id"] = "task-credit"
+
+    validate_record(kind, {
+        **base, "provider": "qoder-cli", "cost_usd": 0, "credits": 2.25,
+    })
+    with pytest.raises(PolicyError, match="only valid for qoder-cli"):
+        validate_record(kind, {
+            **base, "provider": "anthropic", "cost_usd": 0, "credits": 2.25,
+        })
+    with pytest.raises(PolicyError, match="cost_usd must be zero"):
+        validate_record(kind, {
+            **base, "provider": "qoder-cli", "cost_usd": 0.01, "credits": 2.25,
+        })

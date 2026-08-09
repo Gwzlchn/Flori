@@ -682,6 +682,28 @@ describe('JobDetailView 换 provider 重跑(model/effort 覆盖)', () => {
 })
 
 describe('JobDetailView 流水线 tab 操作', () => {
+  it('Qoder Job 用量在 DAG 汇总中展示 credit 而不是零美元', async () => {
+    api.get.mockImplementation((url: string) => {
+      if (url.endsWith('/usage')) return Promise.resolve({ usage: [{
+        step: 'download', worker_id: 'qoder-1', provider: 'qoder-cli', model: 'ultimate',
+        input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0,
+        cost_usd: 0, credits: 2.2650132450000005, duration_sec: 10, num_turns: 1,
+        cache_hit_rate_pct: 0,
+      }] })
+      if (url === '/api/pipelines') return Promise.resolve({ pipelines: [{
+        name: 'video', steps: [{ key: 'download', label: '智能笔记', pool: 'ai', needs: [] }],
+      }] })
+      return Promise.resolve([])
+    })
+    const w = mountView()
+    await flushPromises()
+    await w.findAll('.tabs button').find(button => button.text().includes('流水线'))!.trigger('click')
+    await flushPromises()
+
+    expect(w.text()).toContain('2.2650 credits')
+    expect(w.text()).not.toContain('$0.00')
+  })
+
   it('待激活恢复任务只从元信息入口显式激活', async () => {
     fetchDetail.mockResolvedValue(makeDetail({ status: 'pending_activation' }))
     activateJob.mockResolvedValue({ job_id: 'job_BV1abc', status: 'pending' })

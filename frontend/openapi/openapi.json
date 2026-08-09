@@ -66,6 +66,10 @@
       "AiTaskLogCall": {
         "additionalProperties": false,
         "properties": {
+          "cost_usd": {
+            "title": "Cost Usd",
+            "type": "number"
+          },
           "created_at": {
             "anyOf": [
               {
@@ -77,6 +81,17 @@
               }
             ],
             "title": "Created At"
+          },
+          "credits": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credits"
           },
           "domain": {
             "anyOf": [
@@ -174,6 +189,8 @@
           "model",
           "ok",
           "error",
+          "cost_usd",
+          "credits",
           "created_at",
           "record"
         ],
@@ -254,6 +271,17 @@
               }
             ],
             "title": "Cost Usd"
+          },
+          "credits": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credits"
           },
           "error": {
             "anyOf": [
@@ -3722,6 +3750,17 @@
             "title": "Cost Usd",
             "type": "number"
           },
+          "credits": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credits"
+          },
           "duration_sec": {
             "title": "Duration Sec",
             "type": "number"
@@ -3779,6 +3818,7 @@
           "cache_creation_tokens",
           "cache_read_tokens",
           "cost_usd",
+          "credits",
           "duration_sec",
           "num_turns",
           "cache_hit_rate_pct"
@@ -7851,6 +7891,14 @@
             "title": "Total Cost Usd",
             "type": "number"
           },
+          "total_credit_reports": {
+            "title": "Total Credit Reports",
+            "type": "integer"
+          },
+          "total_credits": {
+            "title": "Total Credits",
+            "type": "number"
+          },
           "total_duration_sec": {
             "title": "Total Duration Sec",
             "type": "number"
@@ -7875,6 +7923,8 @@
           "total_cache_creation_tokens",
           "total_cache_read_tokens",
           "total_cost_usd",
+          "total_credits",
+          "total_credit_reports",
           "total_num_turns",
           "total_duration_sec",
           "cache_hit_rate_pct",
@@ -7906,6 +7956,14 @@
             "title": "Cost Usd",
             "type": "number"
           },
+          "credit_reports": {
+            "title": "Credit Reports",
+            "type": "integer"
+          },
+          "credits": {
+            "title": "Credits",
+            "type": "number"
+          },
           "input_tokens": {
             "title": "Input Tokens",
             "type": "integer"
@@ -7932,6 +7990,8 @@
           "cache_creation_tokens",
           "cache_read_tokens",
           "cost_usd",
+          "credits",
+          "credit_reports",
           "cache_hit_rate_pct"
         ],
         "title": "UsageByModelResponse",

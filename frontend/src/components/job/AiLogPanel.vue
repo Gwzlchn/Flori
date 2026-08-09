@@ -2,6 +2,7 @@
 import { ref, watch, onMounted } from 'vue'
 import { useApi } from '../../composables/useApi'
 import { fmtDuration } from '../../utils/datetime'
+import { fmtCredits } from '../../utils/format'
 import type { AiLogCall, AiLogsResponse } from '../../types'
 import { Check, X, Copy, ChevronRight } from 'lucide-vue-next'
 
@@ -30,6 +31,11 @@ onMounted(load)
 watch(() => [props.step, props.partId], load)
 
 const fmtCost = (v?: number) => `$${(v ?? 0).toFixed(4)}`
+const fmtCharge = (call: AiLogCall) => (
+  call.routing?.provider === 'qoder-cli' || call.cost?.basis === 'provider-credit'
+    ? fmtCredits(call.cost?.credits)
+    : fmtCost(call.cost?.cost_usd)
+)
 const num = (v?: number) => (v ?? 0).toLocaleString()
 function copy(text?: string | null) { if (text != null) navigator.clipboard?.writeText(text) }
 function pretty(v: any): string { try { return JSON.stringify(v, null, 2) } catch { return String(v) } }
@@ -59,7 +65,7 @@ function pretty(v: any): string { try { return JSON.stringify(v, null, 2) } catc
               <span class="text-gray-500">{{ c.routing?.model }}</span>
               <span v-if="c.routing?.tier_used" class="px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">{{ c.routing.tier_used }}</span>
               <span class="ml-auto text-gray-800 font-medium">
-                {{ fmtCost(c.cost?.cost_usd) }}<span v-if="c.cost?.basis === 'cli-equiv'" class="text-gray-400">（等价）</span>
+                {{ fmtCharge(c) }}<span v-if="c.cost?.basis === 'cli-equiv'" class="text-gray-400">（等价）</span>
               </span>
             </div>
             <div class="mt-1 pl-5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-gray-500">

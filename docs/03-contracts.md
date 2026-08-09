@@ -756,23 +756,34 @@ GET /api/jobs/{id}/notes/transcript     → text/markdown (逐字稿)
 
 #### GET /api/usage — AI 用量聚合
 
-全量 AI 调用聚合（系统健康总览页「系统状态」展示）：累计 token/缓存/成本 + 平均缓存命中率 + 按 model 分。命中率 = `cache_read /(input + cache_read + cache_creation)`。
+全量 AI 调用聚合（系统健康总览页「系统状态」展示）：累计 token/缓存/USD 成本/Qoder credits + 平均缓存命中率 + 按 model 分。命中率 = `cache_read /(input + cache_read + cache_creation)`。
 
 ```json
 {
   "calls": 128, "total_input_tokens": 410233, "total_output_tokens": 88210,
   "total_cache_creation_tokens": 51200, "total_cache_read_tokens": 302100,
-  "total_cost_usd": 1.234567, "total_num_turns": 256, "total_duration_sec": 1820.5,
+  "total_cost_usd": 1.234567, "total_credits": 12.345678,
+  "total_credit_reports": 32,
+  "total_num_turns": 256, "total_duration_sec": 1820.5,
   "cache_hit_rate_pct": 39.6,
   "by_model": [
     {"provider": "claude-cli", "model": "claude-opus-4", "calls": 96,
      "input_tokens": 300000, "output_tokens": 60000,
      "cache_creation_tokens": 40000, "cache_read_tokens": 250000,
-     "cost_usd": 1.10, "cache_hit_rate_pct": 42.4}
+     "cost_usd": 1.10, "credits": 0, "credit_reports": 0,
+     "cache_hit_rate_pct": 42.4},
+    {"provider": "qoder-cli", "model": "ultimate", "calls": 32,
+     "input_tokens": 0, "output_tokens": 0,
+     "cache_creation_tokens": 0, "cache_read_tokens": 0,
+     "cost_usd": 0, "credits": 12.345678, "credit_reports": 32,
+     "cache_hit_rate_pct": 0}
   ],
-  "//cost": "CLI provider 的 cost 记 basis=cli-equiv 而非按价表计价:claude-cli 取 CLI 自报的 total_cost_usd（等价 API 成本，非真实账单）；qoder-cli 与 codex-cli 是订阅制，cost_usd 恒 0，token 用量照实记。前端对 CLI provider 标「(等价)」"
+  "//units": "claude-cli 的 cost_usd 是等价 API 成本；codex-cli cost_usd 恒 0；qoder-cli cost_usd 恒 0，并把 CLI 顶层 total_credits 原样计入独立 credits 量纲。逐次 credits 为 null 表示 CLI 未上报，与 0 不同。"
 }
 ```
+
+`credit_reports` 是该聚合中 `credits` 非 null 的调用数。Qoder 调用存在但该值为 0 时，前端显示未上报；介于 0 与 calls 之间时显示部分未上报，不能把 `SUM` 的 0 当作真实额度 0。
+只有 `provider=qoder-cli` 可以上报 credits，且它的 `cost_usd` 必须为 0；在线 runner 与便携恢复策略都拒绝跨单位记录，聚合查询也只统计 Qoder 行，避免非 Qoder 数据污染顶部指标。
 
 #### GET /api/pricing — LiteLLM 价表状态
 
@@ -1049,7 +1060,7 @@ POST   /api/runner/ai-tasks/{task_id}/result               → AI claim 回写�
 POST   /api/runner/ai-tasks/{task_id}/log                  → AI claim 回写白盒审计;task/exec/step 由租约覆盖
 POST   /api/runner/ai-tasks/{task_id}/finish               → AI claim 进入 succeeded/failed 并由服务端发布终态事件
 POST   /api/runner/ai-tasks/{task_id}/release              → AI claim 释放池槽
-POST   /api/runner/usage                                   → 记录一次 AI 用量（exec_id 去重）。body 含 worker_id（api 以鉴权 token 认定为准）、input/output_tokens、cache_creation/cache_read_input_tokens（命中率=read/(input+read+creation)）、cost_usd、duration_sec、num_turns、cached；claude-cli 经 `claude -p --output-format json` 取真实 usage+total_cost_usd,qoder-cli 经 `qodercli -p -o json` 取同构顶层 JSON 的 usage(订阅制,cost_usd 恒 0),codex-cli 经 `codex exec --json` JSONL 的 turn.completed usage(订阅制,cost_usd 恒 0)。api 侧据 LiteLLM 价表（每天拉 `model_prices_and_context_window.json` 存 MinIO `_pricing/litellm.json`,缓存感知 per-token 单价）对**非 cli** provider 填权威 cost_usd（命中时覆盖上报值；空表/未命中回退上报值）；三类 CLI provider 用各自 CLI 上报值不覆盖(basis=cli-equiv)
+POST   /api/runner/usage                                   → 记录一次 AI 用量（exec_id 去重）。body 含 worker_id（api 以鉴权 token 认定为准）、input/output_tokens、cache_creation/cache_read_input_tokens（命中率=read/(input+read+creation)）、cost_usd、`credits: finite number 0..1e308 | null`、duration_sec、num_turns、cached；claude-cli 经 `claude -p --output-format json` 取真实 usage+total_cost_usd,qoder-cli 经 `qodercli -p -o json` 取同构顶层 JSON 的 usage 与顶层 total_credits(订阅制,cost_usd 恒 0；字段缺失或非法记 credits=null,不伪造 0),codex-cli 经 `codex exec --json` JSONL 的 turn.completed usage(订阅制,cost_usd 恒 0)。独立 AI task 的 provider 必须等于服务端 claim；Study 等显式 model 快照还必须精确匹配服务端锚点。api 侧据 LiteLLM 价表（每天拉 `model_prices_and_context_window.json` 存 MinIO `_pricing/litellm.json`,缓存感知 per-token 单价）对**非 cli** provider 填权威 cost_usd（命中时覆盖上报值；空表/未命中回退上报值）；CLI 原生 credits 与 USD 不换算
 GET    /api/runner/jobs/{id}/artifacts                     → 产物清单（GatewayStorage.pull 据此）
 GET    /api/runner/jobs/{id}/artifacts/{rel}              → 流式取单个产物；支持单段 Range，计实际发送的 traffic:pull
 PUT    /api/runner/jobs/{id}/artifacts/{rel}              → 流式回传单个产物；校验大小/SHA-256 后原子发布，计成功写入的 traffic:push
@@ -1977,6 +1988,7 @@ Response `202`（`sources` 提交时已算好；`answer_markdown` 经 `GET /api/
 | `error` | 失败：`{"status":"error","task_id":...,"error":"...","source_manifest":...|null,"citation_validation":...|null}` |
 | `done` | 完成：`{"status":"done","task_id":...,"content":"...","answer_markdown":"...","markdown":"...","provider":...,"model":...,"cost_usd":...,"source_manifest":...|null,"citation_validation":...|null}` |
 
+`done` 响应还带 `credits: number|null`，语义与 `/api/runner/usage` 一致。
 `answer_markdown`/`markdown` 均 = `content`（ask 读前者、digest 读后者）。前端也可 `WS /api/ws/jobs/{task_id}` 收 `ai_task_done`（§3.5）后再取本端点。
 
 Ask 的 `citation_validation` 由 Worker 先做本地检查，Gateway 写入结果和 API 读取结果时再以 URL 中的 `task_id` 重算，并与入队端冻结在 `ai:anchor:{task_id}` 的 `audit_context.ask_source_manifest` 精确比对，不信任远端 Worker 自报 `valid` 或替换整套来源。识别格式只允许 `[来源N]`。返回 `status=valid|unverified|invalid`、`checked/items/errors`，以及 `metrics.structural_precision/source_precision/claim_precision/coverage`。unknown index、跨 task manifest、原始 manifest 缺失、结果 manifest 缺失或替换、manifest/source/body hash 篡改、非逐字支撑 claim、畸形标签和零引用均 fail-closed，绝不标为 `valid`。
@@ -2542,9 +2554,9 @@ Member: {"kind":"ai","task_id":"at_xxx","step":"synthesis|digest|study_suggestio
 
 - `request` = `shared.models.LLMRequest.to_jsonable()`（messages/system/max_tokens/temperature/allowed_tools/reasoning_effort…；images 序列化为 str 路径，AI-RPC 路径一般不带图）。`reasoning_effort` 可选,仅三类 CLI provider 消费(claude `--effort`、qoder `--reasoning-effort`、codex `-c model_reasoning_effort`);缺省用 providers.yaml 的 provider 默认,再缺省交 CLI 自定。`allowed_tools` 的映射按 provider 各异:claude 透传 `--allowedTools`(Read/WebSearch/Bash 等);qoder 透传 `--allowed-tools`(可用性取决于其内置工具表,实测含 WebSearch/WebFetch);codex 映射 `Read`(read-only 沙箱 + `--add-dir` 声明,模型用读命令看文件,无写)与 `WebSearch`(`-c web_search=live` 开启 Responses API 服务端原生 web_search,该工具在服务端执行,不受本地 read-only 沙箱断网限制),含其它工具(Bash 等)一律 fail-closed 报错。
 - `audit_context` 可选、最大 512 KiB，必须是 JSON object。`step=synthesis` 必须携带 `ask_source_manifest`，并由 manifest hash、source fingerprint、artifact/body SHA 与同一个 `task_id` 形成不可变信任链；其他 AI task 缺省不写该字段。
-- `allowed_providers` 是非空 concrete provider 去重列表。Ask、Radar 与普通 pipeline 默认列出三种 CLI;Study 创建时把请求指定或默认的单个 provider 固化为单元素列表。列表是 OR 条件,不表达优先级或 fallback。
-- 排队 member 不带 `provider/model`。认领 Lua 只允许 `FLORI_CLI_PROVIDER` 绑定值命中 `allowed_providers` 的 Worker 参与,并在移出队列、占 holder、创建 claim 的同一次原子操作中把具体 `provider` 写入 claim。claim 响应携带该值;Worker 再按 provider 配置和任务允许的覆盖物化具体 model/reasoning effort。
-- `require_tags` 只保留运行能力的 AND 门控,如 `read` / `websearch` / `vision`;它不重复编码 provider。Worker 必须同时满足全部 `require_tags`,并独立满足上一条 provider OR 条件。
+- Ask、Radar 与普通 pipeline 使用非空 concrete `allowed_providers` 去重列表,默认列出三种 CLI。列表是 OR 条件,不表达优先级或 fallback。Study 不走 OR 路由:创建时把请求指定或默认的单个 `provider/model` 快照直接写入排队 member,重试保持不变。
+- Ask、Radar 与普通 pipeline 的排队 member 不带 `provider/model`。认领 Lua 只允许 `FLORI_CLI_PROVIDER` 绑定值命中 `allowed_providers` 的 Worker 参与,并在移出队列、占 holder、创建 claim 的同一次原子操作中物化具体 `provider`。Study 认领时校验 Worker 具备已固化 provider 的能力;model 继续由原 member/服务端锚点快照固化。Worker 按 provider 配置为 OR 路由物化 model,并为两种任务物化 reasoning effort。
+- OR 路由的 `require_tags` 只保留运行能力的 AND 门控,如 `read` / `websearch` / `vision`,不重复编码 provider。Study 的固定 provider 仍同时写入对应 provider 硬标签。Worker 必须满足全部 `require_tags`,并通过对应的 OR 或固定 provider 门。
 - 结果 payload、`ai_usage.provider`、`ai_task_logs.provider` 与尝试链都必须记录 claim 中的具体 provider;model 与 reasoning effort 记录实际物化值。同一 attempt 内不得换 provider;既有 retry 重新入队后可由列表里的另一 concrete provider 认领。
 - pipeline-step task 的 member **不带 `kind`**（向后兼容，缺省即 `step`）。
 - `queue:enqueued` field（§3.x 等待时长用）：step task=`{pool}|{job_id}|{step}`；**ai task=`{pool}|ai|{task_id}`**。
@@ -2558,6 +2570,8 @@ Member: {"kind":"ai","task_id":"at_xxx","step":"synthesis|digest|study_suggestio
 - 自动周报（09 工单 P3）：`radar:digest:auto:{domain}:{YYYY-MM-DD}`（STRING SET NX，TTL 3 天，当日投递防重锁）；`radar:digest:latest:{domain}`（STRING JSON，无 TTL，最新一期 `{task_id, queued_at, [markdown, generated_at, error]}`——scheduler 收割 `airesult` 后搬入长存，`GET /api/domains/{d}/digest/latest` 读它）。
 - 完成事件：worker 执行后 `publish events:{task_id}`（`ai_task_start/ai_task_done/ai_task_failed`，见 §3.5），供 `/ask`、`/digest` 经 `WS /api/ws/jobs/{task_id}`（端点对任意 id 通用）或轮询取信号。
 - **白盒审计**：ai-worker 每次执行写一条 DB 表 **`ai_task_logs`**（按 `task_id`；对齐 DAG 步的 `output/ai_logs/{step}.jsonl`）。索引列：`exec_id/step_name/domain/provider/model/ok/error/各 token/cost_usd/duration_sec/num_turns/created_at`；`record_json` 存全量审计（路由/尝试链/渲染 prompt[system+messages]/输出/raw/用量/worker/ai_access_method/credential_kind/transcript）。Ask 额外存 `audit_context.ask_source_manifest` 与 `citation_validation`。与 `ai_usage`（成本归因）**并存不合并**（白盒 vs 计费两套）。查看端点见 P1-3。
+
+- Qoder 白盒审计在 `ai_task_logs.credits` 与 `record_json.usage.credits` 写同一原生额度；null 代表 provider 未上报。DAG 的 `output/ai_logs/{step}.jsonl` 同样在 `cost.credits` 记录该值。credits 与 USD 不换算。
 
 ### 3.2 资源池计数（holder 集合，根治幽灵泄漏）
 

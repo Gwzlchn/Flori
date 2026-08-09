@@ -663,6 +663,23 @@ class TestSelectionGates:
         with pytest.raises(BackupError, match="exec_id is required"):
             await do_backup(env)
 
+    async def test_corrupt_non_qoder_credits_fail_integrity_gate(self, env):
+        connection = sqlite3.connect(env.db)
+        try:
+            connection.execute("PRAGMA ignore_check_constraints=ON")
+            connection.execute(
+                "INSERT INTO ai_usage "
+                "(exec_id, provider, model, cost_usd, credits, created_at) "
+                "VALUES ('bad-credit', 'anthropic', 'claude', 0, 2.5, ?)",
+                (T_CREATED,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with pytest.raises(BackupError, match="integrity_check"):
+            await do_backup(env)
+
 
 class TestRedactionAndExternalSources:
     async def test_file_urls_are_omitted_from_portable_records(self, env):

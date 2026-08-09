@@ -1105,6 +1105,64 @@ def test_v9_to_v10_backfills_fixated_empty_projections_as_due_retry(
     database.close()
 
 
+def test_v10_to_v11_adds_nullable_credits_without_forging_zero(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "credits-v11.db")
+    run_migrations(database._conn, database._migration_steps(), target_version=10)
+    database._conn.execute(
+        """INSERT INTO ai_usage
+           (exec_id, provider, model, input_tokens, output_tokens, cost_usd, created_at)
+           VALUES ('legacy-usage', 'qoder-cli', 'ultimate', 0, 0, 0,
+                   '2026-01-01T00:00:00+00:00')"""
+    )
+    database._conn.execute(
+        """INSERT INTO ai_task_logs
+           (task_id, exec_id, provider, model, record_json, created_at)
+           VALUES ('legacy-task', 'legacy-task-exec', 'qoder-cli', 'ultimate', '{}',
+                   '2026-01-01T00:00:00+00:00')"""
+    )
+    database._conn.commit()
+
+    assert run_migrations(database._conn, database._migration_steps()) == 11
+    migration_current.validate(database._conn)
+    assert database._conn.execute(
+        "SELECT credits FROM ai_usage WHERE exec_id='legacy-usage'"
+    ).fetchone()[0] is None
+    assert database._conn.execute(
+        "SELECT credits FROM ai_task_logs WHERE task_id='legacy-task'"
+    ).fetchone()[0] is None
+    for invalid in (-1, float("inf"), "garbage", "nan"):
+        with pytest.raises(sqlite3.IntegrityError):
+            database._conn.execute(
+                "UPDATE ai_usage SET credits=? WHERE exec_id='legacy-usage'",
+                (invalid,),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            database._conn.execute(
+                "UPDATE ai_task_logs SET credits=? WHERE task_id='legacy-task'",
+                (invalid,),
+            )
+    for table, where in (
+        ("ai_usage", "exec_id='legacy-usage'"),
+        ("ai_task_logs", "task_id='legacy-task'"),
+    ):
+        with pytest.raises(sqlite3.IntegrityError):
+            database._conn.execute(
+                f"UPDATE {table} SET provider='anthropic', credits=2.5 WHERE {where}"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            database._conn.execute(
+                f"UPDATE {table} SET provider='qoder-cli', cost_usd=0.01 WHERE {where}"
+            )
+    with pytest.raises(sqlite3.IntegrityError):
+        database._conn.execute(
+            "UPDATE ai_task_logs SET provider=NULL, credits=2.5 "
+            "WHERE task_id='legacy-task'"
+        )
+    database.close()
+
+
 def test_v5_to_v6_failure_rolls_back_schema_seed_ledger_and_version(
     tmp_path: Path,
 ) -> None:

@@ -1166,6 +1166,49 @@ class TestImmutableLedgers:
         assert [row["input_tokens"] for row in rows] == [100, 101, 102]
         assert sum(row["cost_usd"] for row in rows) == pytest.approx(0.75)
 
+    async def test_qoder_credits_roundtrip_preserves_null_zero_and_idempotence(
+        self, source, target,
+    ):
+        job_id = "job_qoder_credit"
+        insert_job(source, job_id, content_type="document", document_kind="article")
+        for index, credits in enumerate((None, 0.0, 2.5)):
+            db_exec(source.db, (
+                "INSERT INTO ai_usage (exec_id, job_id, step, provider, model,"
+                " cost_usd, credits, created_at) VALUES (?,?,?,?,?,?,?,?)"
+            ), (
+                f"qoder_exec_{index}", job_id, "05_smart", "qoder-cli",
+                "ultimate", 0.0, credits, T_CREATED,
+            ))
+            db_exec(source.db, (
+                "INSERT INTO ai_task_logs (task_id, exec_id, step_name, provider,"
+                " model, cost_usd, credits, record_json, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?)"
+            ), (
+                f"qoder_task_{index}", f"qoder_task_exec_{index}", "digest",
+                "qoder-cli", "ultimate", 0.0, credits, "{}", T_CREATED,
+            ))
+
+        await do_backup(source)
+        await do_import(source, target)
+        with pytest.raises(ContentImportError, match="already imported"):
+            await do_import(source, target)
+
+        rows = query(
+            target.db,
+            "SELECT exec_id, cost_usd, credits FROM ai_usage ORDER BY exec_id",
+        )
+        assert len(rows) == 3
+        assert [row["credits"] for row in rows] == [None, 0.0, 2.5]
+        assert sum(row["cost_usd"] for row in rows) == 0
+        assert query(target.db, "SELECT COUNT(*) AS n FROM ai_usage")[0]["n"] == 3
+        task_rows = query(
+            target.db,
+            "SELECT task_id, cost_usd, credits FROM ai_task_logs ORDER BY task_id",
+        )
+        assert len(task_rows) == 3
+        assert [row["credits"] for row in task_rows] == [None, 0.0, 2.5]
+        assert sum(row["cost_usd"] for row in task_rows) == 0
+
     async def test_study_ledger_rows_roundtrip(self, source, target):
         insert_job(source, "job_s", content_type="document", document_kind="article")
         db_exec(source.db, (

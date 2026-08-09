@@ -3,6 +3,11 @@ import { mount } from '@vue/test-utils'
 
 import JobPipelinePanel from './JobPipelinePanel.vue'
 
+const emptyTotal = {
+  provider: '', cost: 0, equiv: false, showUsd: false, hasQoder: false,
+  credits: null, creditsPartial: false, qoderCalls: 0, creditReports: 0, calls: 0,
+}
+
 describe('JobPipelinePanel AI 成本展示', () => {
   it('Part步骤可选择自己的工作台scope并单独重试', async () => {
     const step = {
@@ -18,7 +23,7 @@ describe('JobPipelinePanel AI 成本展示', () => {
           status: 'failed', progress_pct: 80, media: {}, steps: [step],
         }],
         dagSteps: [], statusByKey: {}, selectedStep: '08_punctuate', selectedPartId: 'pt_a',
-        usageByStep: {}, totalAi: { cost: 0, equiv: false, calls: 0 }, jobStatus: 'failed',
+        usageByStep: {}, totalAi: emptyTotal, jobStatus: 'failed',
         rebuilding: false, updateAvailable: false, promptRows: [],
       },
       global: { stubs: { StepWorkbench: true } },
@@ -43,8 +48,15 @@ describe('JobPipelinePanel AI 成本展示', () => {
         ],
         statusByKey: { '01_download': 'done', '04_translate': 'done' },
         selectedStep: '04_translate',
-        usageByStep: { '04_translate': { provider: 'claude-cli', cost: 4.9346, equiv: true } },
-        totalAi: { cost: 6.4855, equiv: true, calls: 2 },
+        usageByStep: { '04_translate': {
+          provider: 'claude-cli', cost: 4.9346, equiv: true, showUsd: true,
+          hasQoder: false, credits: null, creditsPartial: false, qoderCalls: 0, creditReports: 0,
+        } },
+        totalAi: {
+          provider: 'claude-cli', cost: 6.4855, equiv: true, showUsd: true,
+          hasQoder: false, credits: null, creditsPartial: false,
+          qoderCalls: 0, creditReports: 0, calls: 2,
+        },
         jobStatus: 'done',
         rebuilding: false,
         updateAvailable: false,
@@ -60,11 +72,55 @@ describe('JobPipelinePanel AI 成本展示', () => {
     expect(wrapper.text()).not.toContain('≈')
   })
 
+  it('Qoder DAG 总计和节点展示 credit,不展示误导性零美元', () => {
+    const qoderUsage = {
+      provider: 'qoder-cli', cost: 0, equiv: false, showUsd: false,
+      hasQoder: true, credits: 2.2650132450000005, creditsPartial: false,
+      qoderCalls: 1, creditReports: 1,
+    }
+    const wrapper = mount(JobPipelinePanel, {
+      props: {
+        jobId: 'job-qoder', steps: [],
+        dagSteps: [{ key: '04_smart', label: '智能笔记', pool: 'ai', needs: [] }],
+        statusByKey: { '04_smart': 'done' }, selectedStep: '04_smart',
+        usageByStep: { '04_smart': qoderUsage },
+        totalAi: { ...qoderUsage, calls: 1 },
+        jobStatus: 'done', rebuilding: false, updateAvailable: false, promptRows: [],
+      },
+      global: { stubs: { StepWorkbench: true } },
+    })
+
+    expect(wrapper.text()).toContain('2.2650 credits')
+    expect(wrapper.text()).not.toContain('$0.00')
+  })
+
+  it('Qoder credit 未上报时不冒充为 0 credit', () => {
+    const missingUsage = {
+      provider: 'qoder-cli', cost: 0, equiv: false, showUsd: false,
+      hasQoder: true, credits: null, creditsPartial: false,
+      qoderCalls: 1, creditReports: 0,
+    }
+    const wrapper = mount(JobPipelinePanel, {
+      props: {
+        jobId: 'job-qoder-missing', steps: [],
+        dagSteps: [{ key: '04_smart', label: '智能笔记', pool: 'ai', needs: [] }],
+        statusByKey: { '04_smart': 'done' }, selectedStep: '04_smart',
+        usageByStep: { '04_smart': missingUsage },
+        totalAi: { ...missingUsage, calls: 1 },
+        jobStatus: 'done', rebuilding: false, updateAvailable: false, promptRows: [],
+      },
+      global: { stubs: { StepWorkbench: true } },
+    })
+
+    expect(wrapper.text()).toContain('credits 未上报')
+    expect(wrapper.text()).not.toContain('0.0000 credits')
+  })
+
   it('失败任务全局只提供从失败处继续,步骤重跑留在步骤详情', () => {
     const wrapper = mount(JobPipelinePanel, {
       props: {
         jobId: 'job-1', steps: [], dagSteps: [], statusByKey: {}, selectedStep: '01_download',
-        usageByStep: {}, totalAi: { cost: 0, equiv: false, calls: 0 }, jobStatus: 'failed',
+        usageByStep: {}, totalAi: emptyTotal, jobStatus: 'failed',
         rebuilding: false, updateAvailable: false, promptRows: [],
       },
       global: { stubs: { StepWorkbench: true } },
@@ -79,7 +135,7 @@ describe('JobPipelinePanel AI 成本展示', () => {
     const wrapper = mount(JobPipelinePanel, {
       props: {
         jobId: 'job-1', steps: [], dagSteps: [], statusByKey: {}, selectedStep: '',
-        usageByStep: {}, totalAi: { cost: 0, equiv: false, calls: 0 }, jobStatus: 'done',
+        usageByStep: {}, totalAi: emptyTotal, jobStatus: 'done',
         rebuilding: false, updateAvailable: true, promptRows: [],
       },
       global: { stubs: { StepWorkbench: true } },
@@ -95,7 +151,7 @@ describe('JobPipelinePanel AI 成本展示', () => {
     const wrapper = mount(JobPipelinePanel, {
       props: {
         jobId: 'job-1', steps: [], dagSteps: [], statusByKey: {}, selectedStep: '01_download',
-        usageByStep: {}, totalAi: { cost: 0, equiv: false, calls: 0 }, jobStatus: 'failed',
+        usageByStep: {}, totalAi: emptyTotal, jobStatus: 'failed',
         rebuilding: false, updateAvailable: true, promptRows: [],
       },
       global: { stubs: { StepWorkbench: true } },

@@ -708,6 +708,7 @@ class RunnerUsageRequest(BaseModel):
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
     cost_usd: float = 0.0
+    credits: float | None = Field(default=None, ge=0, le=1.0e308, allow_inf_nan=False)
     duration_sec: float = 0.0
     num_turns: int = 0
     cached: bool = False

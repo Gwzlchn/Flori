@@ -3,12 +3,11 @@ import { computed } from 'vue'
 import { Coins, FileText, GitBranch, RotateCcw } from 'lucide-vue-next'
 import PipelineDag from '../../PipelineDag.vue'
 import StepWorkbench from '../StepWorkbench.vue'
-import type { JobPartInfo, StepInfo } from '../../../types'
+import { fmtCredits } from '../../../utils/format'
+import type { AiUsageCharge, AiUsageTotal, JobPartInfo, StepInfo } from '../../../types'
 
 interface DagStep { key: string; label: string | null; pool: string | null; needs: string[]; scope?: 'job' | 'part' }
 interface PromptRow { step: string; label: string; used: string; current: string | null; stale: boolean }
-interface TotalAi { cost: number; equiv: boolean; calls: number }
-
 const props = defineProps<{
   jobId: string
   steps: StepInfo[]
@@ -17,8 +16,8 @@ const props = defineProps<{
   statusByKey: Record<string, string>
   selectedStep: string
   selectedPartId?: string | null
-  usageByStep: Record<string, { provider: string; cost: number; equiv: boolean }>
-  totalAi: TotalAi
+  usageByStep: Record<string, AiUsageCharge>
+  totalAi: AiUsageTotal
   jobStatus: string
   rebuilding: boolean
   updateAvailable: boolean
@@ -35,6 +34,7 @@ defineEmits<{
 }>()
 
 const fmtCost = (value: number) => `$${(value ?? 0).toFixed(2)}`
+const partialCreditLabel = (usage: AiUsageCharge) => usage.creditsPartial ? '（部分未上报）' : ''
 const firstFailedStep = (part: JobPartInfo) => (
   part.steps.find(step => step.status === 'failed')?.name || part.steps[0]?.name || ''
 )
@@ -74,7 +74,7 @@ const workbenchSteps = computed(() => selectedPart.value?.steps || props.steps)
         <span><i style="background:var(--bad)" />失败</span><span><i style="background:var(--ink-300)" />跳过/待运行</span>
         <span style="color:var(--ink-300)">|</span><span><i class="pool ai" />AI</span><span><i class="pool cpu" />CPU</span><span><i class="pool gpu" />GPU</span>
       </span>
-      <span v-if="totalAi.calls" class="total-ai"><Coins :size="13" />AI 总开销 {{ fmtCost(totalAi.cost) }}<span v-if="totalAi.equiv">（等价）</span></span>
+      <span v-if="totalAi.calls" class="total-ai"><Coins :size="13" />AI 总开销 <template v-if="totalAi.showUsd">{{ fmtCost(totalAi.cost) }}<span v-if="totalAi.equiv">（等价）</span></template><template v-if="totalAi.hasQoder"><span v-if="totalAi.showUsd"> · </span>{{ fmtCredits(totalAi.credits) }}{{ partialCreditLabel(totalAi) }}</template></span>
     </div>
     <PipelineDag :steps="dagSteps" :status-by-key="statusByKey" :selected="selectedStep" :usage-by-step="usageByStep" style="margin-top:10px" @select="$emit('selectStep', $event)" />
   </div>

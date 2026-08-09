@@ -1558,6 +1558,7 @@ class TestQoderCLIProvider:
         """包月订阅无按量成本:即便 CLI 回 total_cost_usd 也强制 0;token 用量照实。"""
         payload = {
             "result": "结构化笔记", "model": "Cantus", "total_cost_usd": 1.23,
+            "total_credits": 2.2650132450000005,
             "num_turns": 2, "session_id": "sid-1", "subtype": "success", "is_error": False,
             "usage": {"input_tokens": 10, "output_tokens": 5,
                       "cache_creation_input_tokens": 3, "cache_read_input_tokens": 7},
@@ -1576,10 +1577,42 @@ class TestQoderCLIProvider:
         assert r.input_tokens == 10 and r.output_tokens == 5
         assert r.cache_creation_input_tokens == 3 and r.cache_read_input_tokens == 7
         assert r.cost_usd == 0.0 and r.num_turns == 2 and r.cached is True
+        assert r.credits == pytest.approx(2.2650132450000005)
         assert r.finish_reason == "success"
         cmd = seen["cmd"]
         assert cmd[cmd.index("-o") + 1] == "json"
         assert "--model" in cmd and cmd[cmd.index("--model") + 1] == "Cantus"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("raw_credits", "expected"),
+        [
+            (None, None),
+            (0, 0.0),
+            (-1, None),
+            ("2.5", None),
+            (float("inf"), None),
+            (10**400, None),
+            (True, None),
+        ],
+    )
+    async def test_credits_are_nullable_and_fail_closed(
+        self, monkeypatch, raw_credits, expected,
+    ):
+        payload = {"result": "ok", "usage": {}}
+        if raw_credits is not None:
+            payload["total_credits"] = raw_credits
+
+        async def fake_exec(*_args, **_kwargs):
+            return _FakeProc(json.dumps(payload).encode())
+
+        monkeypatch.setattr("shared.ai_gateway.asyncio.create_subprocess_exec", fake_exec)
+        response = await QoderCLIProvider(["qodercli", "-p"]).complete(
+            LLMRequest(messages=[{"role": "user", "content": "x"}]),
+        )
+
+        assert response.credits == expected
+        assert response.content == "ok"
 
     @pytest.mark.asyncio
     async def test_forces_json_replacing_template_output_format(self, monkeypatch):

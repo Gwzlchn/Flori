@@ -7,6 +7,7 @@ from ..db import (
     json,
     sqlite3,
 )
+from ..models import validate_ai_metering_units
 
 
 class TelemetryRepository:
@@ -58,7 +59,9 @@ class TelemetryRepository:
                 COUNT(*) as calls,
                 COALESCE(SUM(input_tokens), 0) as total_input,
                 COALESCE(SUM(output_tokens), 0) as total_output,
-                COALESCE(SUM(cost_usd), 0) as total_cost
+                COALESCE(SUM(cost_usd), 0) as total_cost,
+                COALESCE(SUM(CASE WHEN provider='qoder-cli' THEN credits END), 0)
+                    as total_credits
             FROM ai_usage {where}""",
             params,
         ).fetchone()
@@ -68,6 +71,7 @@ class TelemetryRepository:
             "total_input_tokens": row["total_input"],
             "total_output_tokens": row["total_output"],
             "total_cost_usd": row["total_cost"],
+            "total_credits": row["total_credits"],
         }
 
     def get_usage_aggregate(self) -> dict:
@@ -82,6 +86,10 @@ class TelemetryRepository:
                     COALESCE(SUM(cache_creation_input_tokens),0) AS cc_tok,
                     COALESCE(SUM(cache_read_input_tokens),0) AS cr_tok,
                     COALESCE(SUM(cost_usd),0) AS cost,
+                    COALESCE(SUM(CASE WHEN provider='qoder-cli' THEN credits END),0)
+                        AS credits,
+                    COUNT(CASE WHEN provider='qoder-cli' THEN credits END)
+                        AS credit_reports,
                     COALESCE(SUM(num_turns),0) AS turns,
                     COALESCE(SUM(duration_sec),0) AS dur
                 FROM ai_usage""",
@@ -93,8 +101,13 @@ class TelemetryRepository:
                     COALESCE(SUM(output_tokens),0) AS out_tok,
                     COALESCE(SUM(cache_creation_input_tokens),0) AS cc_tok,
                     COALESCE(SUM(cache_read_input_tokens),0) AS cr_tok,
-                    COALESCE(SUM(cost_usd),0) AS cost
-                FROM ai_usage GROUP BY provider, model ORDER BY cost DESC""",
+                    COALESCE(SUM(cost_usd),0) AS cost,
+                    COALESCE(SUM(CASE WHEN provider='qoder-cli' THEN credits END),0)
+                        AS credits,
+                    COUNT(CASE WHEN provider='qoder-cli' THEN credits END)
+                        AS credit_reports
+                FROM ai_usage GROUP BY provider, model
+                ORDER BY cost DESC, credits DESC""",
             ).fetchall()
 
         def _hit_rate(in_tok: int, cc: int, cr: int) -> float:
@@ -108,6 +121,8 @@ class TelemetryRepository:
             "total_cache_creation_tokens": total["cc_tok"],
             "total_cache_read_tokens": total["cr_tok"],
             "total_cost_usd": round(total["cost"], 6),
+            "total_credits": round(total["credits"], 6),
+            "total_credit_reports": total["credit_reports"],
             "total_num_turns": total["turns"],
             "total_duration_sec": round(total["dur"], 1),
             "cache_hit_rate_pct": _hit_rate(total["in_tok"], total["cc_tok"], total["cr_tok"]),
@@ -117,6 +132,8 @@ class TelemetryRepository:
                     "input_tokens": r["in_tok"], "output_tokens": r["out_tok"],
                     "cache_creation_tokens": r["cc_tok"], "cache_read_tokens": r["cr_tok"],
                     "cost_usd": round(r["cost"], 6),
+                    "credits": round(r["credits"], 6),
+                    "credit_reports": r["credit_reports"],
                     "cache_hit_rate_pct": _hit_rate(r["in_tok"], r["cc_tok"], r["cr_tok"]),
                 }
                 for r in rows
@@ -131,7 +148,7 @@ class TelemetryRepository:
                 """SELECT step, worker_id, provider, model,
                     input_tokens, output_tokens,
                     cache_creation_input_tokens, cache_read_input_tokens,
-                    cost_usd, duration_sec, num_turns, created_at
+                    cost_usd, credits, duration_sec, num_turns, created_at
                 FROM ai_usage WHERE job_id=? ORDER BY created_at""",
                 (job_id,),
             ).fetchall()
@@ -145,7 +162,11 @@ class TelemetryRepository:
                 "input_tokens": r["input_tokens"], "output_tokens": r["output_tokens"],
                 "cache_creation_tokens": r["cache_creation_input_tokens"],
                 "cache_read_tokens": r["cache_read_input_tokens"],
-                "cost_usd": round(r["cost_usd"], 6), "duration_sec": r["duration_sec"],
+                "cost_usd": round(r["cost_usd"], 6),
+                "credits": (
+                    round(r["credits"], 6) if r["credits"] is not None else None
+                ),
+                "duration_sec": r["duration_sec"],
                 "num_turns": r["num_turns"], "cache_hit_rate_pct": hit,
             })
         return out
@@ -164,14 +185,17 @@ class TelemetryRepository:
         return {"done": by.get("done", 0), "failed": by.get("failed", 0)}
 
     def record_ai_usage_in_tx(self, connection, usage: AIUsage) -> bool:
+        validate_ai_metering_units(
+            usage.provider, usage.cost_usd, usage.credits,
+        )
         try:
             connection.execute(
                 """INSERT INTO ai_usage
                    (exec_id, job_id, step, worker_id, provider, model,
                     input_tokens, output_tokens,
                     cache_creation_input_tokens, cache_read_input_tokens,
-                    cost_usd, duration_sec, num_turns, cached, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    cost_usd, credits, duration_sec, num_turns, cached, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     usage.exec_id,
                     usage.job_id,
@@ -184,6 +208,7 @@ class TelemetryRepository:
                     usage.cache_creation_input_tokens,
                     usage.cache_read_input_tokens,
                     usage.cost_usd,
+                    usage.credits,
                     usage.duration_sec,
                     usage.num_turns,
                     1 if usage.cached else 0,
@@ -199,19 +224,23 @@ class TelemetryRepository:
         log = 索引列(task_id/exec_id/step_name/domain/provider/model/ok/error/各 token/cost/duration/num_turns)
         + record(全量审计 dict,存进 record_json)+ created_at。best-effort,不让审计失败影响主流程。"""
         try:
+            validate_ai_metering_units(
+                log.get("provider"), log.get("cost_usd"), log.get("credits"),
+            )
             connection.execute(
                 """INSERT INTO ai_task_logs
                    (task_id, exec_id, step_name, domain, provider, model, ok, error,
                     input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
-                    cost_usd, duration_sec, num_turns, record_json, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    cost_usd, credits, duration_sec, num_turns, record_json, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     log.get("task_id"), log.get("exec_id"), log.get("step_name"),
                     log.get("domain"), log.get("provider"), log.get("model"),
                     1 if log.get("ok", True) else 0, log.get("error"),
                     log.get("input_tokens", 0), log.get("output_tokens", 0),
                     log.get("cache_creation_input_tokens", 0), log.get("cache_read_input_tokens", 0),
-                    log.get("cost_usd", 0.0), log.get("duration_sec", 0.0), log.get("num_turns", 0),
+                    log.get("cost_usd", 0.0), log.get("credits"),
+                    log.get("duration_sec", 0.0), log.get("num_turns", 0),
                     json.dumps(log.get("record", {}), ensure_ascii=False, default=str),
                     log.get("created_at"),
                 ),

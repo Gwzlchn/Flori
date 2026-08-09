@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import enum
 import json
+import math
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,32 @@ DEFAULT_PROVIDER_REASONING_EFFORTS = {
     "codex-cli": "xhigh",
     "qoder-cli": "max",
 }
+MAX_AI_CREDITS = 1.0e308
+
+
+def validate_ai_metering_units(
+    provider: object,
+    cost_usd: object,
+    credits: object,
+) -> None:
+    """校验 USD 与 provider 原生额度互不串量纲。"""
+    if credits is not None:
+        if provider != "qoder-cli":
+            raise ValueError("credits only valid for qoder-cli")
+        if (
+            type(credits) not in (int, float)
+            or not math.isfinite(float(credits))
+            or float(credits) < 0
+            or float(credits) > MAX_AI_CREDITS
+        ):
+            raise ValueError("credits must be finite, non-negative, and within range")
+    if provider == "qoder-cli" and cost_usd is not None:
+        if (
+            type(cost_usd) not in (int, float)
+            or not math.isfinite(float(cost_usd))
+            or float(cost_usd) != 0
+        ):
+            raise ValueError("qoder-cli cost_usd must be zero")
 
 
 def _utcnow() -> datetime:
@@ -192,6 +219,7 @@ class AIUsage:
     cache_creation_input_tokens: int = 0   # 写缓存 token
     cache_read_input_tokens: int = 0       # 读缓存 token;命中率=read/(input+read+creation)
     cost_usd: float = 0.0
+    credits: float | None = None       # provider 原生额度;None=未上报,不得与 0 混同
     duration_sec: float = 0.0
     num_turns: int = 0                # claude -p agentic 轮数
     cached: bool = False
@@ -264,6 +292,7 @@ class LLMResponse:
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
     cost_usd: float = 0.0
+    credits: float | None = None
     duration_sec: float = 0.0
     num_turns: int = 0
     cached: bool = False

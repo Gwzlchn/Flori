@@ -3,14 +3,15 @@
 // (源步右缘 → 目标步左缘)。节点标池(cpu/ai/io/gpu);AI 步附 provider + 开销。
 // statusByKey(每个 job 视图)给定时点按状态着色,否则按池。纯 CSS + SVG,无图布局库;过宽横滚。
 import { computed, ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { fmtCredits } from '../utils/format'
+import type { AiUsageCharge } from '../types'
 
 interface Step { key: string; label: string | null; pool: string | null; needs: string[] }
-interface UsageInfo { provider: string; cost: number; equiv: boolean }
 const props = defineProps<{
   steps: Step[]
   statusByKey?: Record<string, string>
   selected?: string
-  usageByStep?: Record<string, UsageInfo>
+  usageByStep?: Record<string, AiUsageCharge>
 }>()
 const emit = defineEmits<{ (e: 'select', key: string): void }>()
 
@@ -45,11 +46,17 @@ function dotCls(s: Step): string {
   return 'pl-' + (s.pool || 'io')
 }
 const fmtCost = (v: number) => `$${(v ?? 0).toFixed(2)}`
+function chargeText(usage: AiUsageCharge): string {
+  const parts: string[] = []
+  if (usage.showUsd) parts.push(`${fmtCost(usage.cost)}${usage.equiv ? '（等价）' : ''}`)
+  if (usage.hasQoder) parts.push(`${fmtCredits(usage.credits)}${usage.creditsPartial ? '（部分未上报）' : ''}`)
+  return parts.join(' · ')
+}
 // hover 提示依次给步骤、池、AI 步的 provider 开销。节点本体保持窄,详情挪到 tooltip。
 function nodeTitle(s: Step): string {
   let t = `${s.label || s.key} · ${s.pool || 'io'} 池`
   const u = props.usageByStep?.[s.key]
-  if (u) t += ` · ${u.provider} ${fmtCost(u.cost)}${u.equiv ? '（等价）' : ''}`
+  if (u) t += ` · ${u.provider} ${chargeText(u)}`
   return t
 }
 
@@ -125,7 +132,7 @@ watch(
         <span class="dag-dot" :class="dotCls(s)"></span>
         <span class="dag-text">
           <span class="dag-label">{{ s.label || s.key }}</span>
-          <span v-if="usageByStep && usageByStep[s.key]" class="dag-cost">{{ fmtCost(usageByStep[s.key].cost) }}</span>
+          <span v-if="usageByStep && usageByStep[s.key]" class="dag-cost">{{ chargeText(usageByStep[s.key]) }}</span>
         </span>
       </div>
     </div>

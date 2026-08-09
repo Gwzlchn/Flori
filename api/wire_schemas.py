@@ -165,6 +165,7 @@ class JobUsageRow(WireModel):
     cache_creation_tokens: int
     cache_read_tokens: int
     cost_usd: float
+    credits: float | None
     duration_sec: float
     num_turns: int
     cache_hit_rate_pct: float
@@ -462,6 +463,8 @@ class UsageByModelResponse(WireModel):
     cache_creation_tokens: int
     cache_read_tokens: int
     cost_usd: float
+    credits: float
+    credit_reports: int
     cache_hit_rate_pct: float
 
 
@@ -472,6 +475,8 @@ class UsageAggregateResponse(WireModel):
     total_cache_creation_tokens: int
     total_cache_read_tokens: int
     total_cost_usd: float
+    total_credits: float
+    total_credit_reports: int
     total_num_turns: int
     total_duration_sec: float
     cache_hit_rate_pct: float
@@ -746,6 +751,7 @@ class AiTaskResultResponse(WireModel):
     provider: str | None = None
     model: str | None = None
     cost_usd: float | None = None
+    credits: float | None = None
     source_manifest: dict[str, Any] | None = None
     citation_validation: dict[str, Any] | None = None
 
@@ -759,6 +765,8 @@ class AiTaskLogCall(WireModel):
     model: str | None
     ok: bool
     error: str | None
+    cost_usd: float
+    credits: float | None
     created_at: DateTimeString | None
     record: dict[str, Any]
 

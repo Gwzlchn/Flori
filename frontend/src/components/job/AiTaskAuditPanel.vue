@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useApi } from '../../composables/useApi'
+import { fmtCredits } from '../../utils/format'
 import type { AiTaskLogResponse, AiTaskLogCall } from '../../types'
 import { Check, X, Copy } from 'lucide-vue-next'
 
@@ -30,6 +31,11 @@ onMounted(load)
 
 const num = (v?: number) => (v ?? 0).toLocaleString()
 const fmtCost = (v?: number) => `$${(v ?? 0).toFixed(4)}`
+const fmtCharge = (call: AiTaskLogCall) => (
+  call.provider === 'qoder-cli'
+    ? fmtCredits(call.record?.usage?.credits ?? call.credits)
+    : fmtCost(call.record?.usage?.cost_usd ?? call.cost_usd)
+)
 function copy(t?: string | null) { if (t != null) navigator.clipboard?.writeText(t) }
 function pretty(v: any): string { try { return JSON.stringify(v, null, 2) } catch { return String(v) } }
 function userText(c: AiTaskLogCall): string {
@@ -55,7 +61,7 @@ function userText(c: AiTaskLogCall): string {
           <span class="font-mono text-gray-800">{{ c.provider || '—' }}</span>
           <span class="text-gray-500">{{ c.model }}</span>
           <span v-if="c.record?.routing?.tier_used" class="px-1 rounded bg-gray-200 text-gray-600">{{ c.record.routing.tier_used }}</span>
-          <span class="ml-auto text-gray-800 font-medium">{{ fmtCost(c.record?.usage?.cost_usd) }}</span>
+          <span class="ml-auto text-gray-800 font-medium">{{ fmtCharge(c) }}<span v-if="c.provider === 'claude-cli'" class="text-gray-400">（等价）</span></span>
         </div>
         <!-- 用量 -->
         <div class="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-gray-500 mb-1.5">

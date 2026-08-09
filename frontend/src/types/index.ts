@@ -58,9 +58,27 @@ export interface StepUsage {
   cache_creation_tokens: number
   cache_read_tokens: number
   cost_usd: number
+  credits: number | null
   duration_sec: number
   num_turns: number
   cache_hit_rate_pct: number
+}
+
+// Job 视图的步骤级开销汇总;美元和 Qoder credit 是两个独立量纲。
+export interface AiUsageCharge {
+  provider: string
+  cost: number
+  equiv: boolean
+  showUsd: boolean
+  hasQoder: boolean
+  credits: number | null
+  creditsPartial: boolean
+  qoderCalls: number
+  creditReports: number
+}
+
+export interface AiUsageTotal extends AiUsageCharge {
+  calls: number
 }
 
 // 完整 AI 审计日志(prompt 白盒化):每次 LLM 调用一条。字段尽量全,UI 可只用子集。
@@ -85,7 +103,7 @@ export interface AiLogCall {
   output?: { content?: string | null; num_turns?: number | null; finish_reason?: string | null }
   output_processed?: { json_parse?: { ok?: boolean; salvaged?: boolean }; parse_failed?: boolean; extracted?: any } | null
   usage?: { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number }
-  cost?: { cost_usd?: number; basis?: string }
+  cost?: { cost_usd?: number; credits?: number | null; basis?: string }
   raw?: any
   injected?: { domain_profile?: { name?: string | null; hash?: string | null }; style_tags?: string[]; terminology_snapshot?: string[] | null }
   input_hashes?: Record<string, string>
@@ -352,6 +370,8 @@ export interface UsageByModel {
   cache_creation_tokens: number
   cache_read_tokens: number
   cost_usd: number
+  credits: number
+  credit_reports: number
   cache_hit_rate_pct: number
 }
 export interface UsageAggregate {
@@ -361,6 +381,8 @@ export interface UsageAggregate {
   total_cache_creation_tokens: number
   total_cache_read_tokens: number
   total_cost_usd: number
+  total_credits: number
+  total_credit_reports: number
   total_num_turns: number
   total_duration_sec: number
   cache_hit_rate_pct: number
@@ -749,6 +771,7 @@ export interface AiTaskResult {
   provider?: string
   model?: string
   cost_usd?: number
+  credits?: number | null
   error?: string
   citation_validation?: {
     kind?: string
@@ -769,6 +792,8 @@ export interface AiTaskLogCall {
   model?: string
   ok: boolean
   error?: string | null
+  cost_usd?: number
+  credits?: number | null
   created_at?: string
   record?: any  // {routing:{requested,tier_used,attempts}, prompt:{system,messages,...}, output, raw, usage, flori}
 }

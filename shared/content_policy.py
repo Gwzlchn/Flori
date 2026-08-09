@@ -35,6 +35,7 @@ from .step_manifest import (
     validate_manifest,
     validate_output_path,
 )
+from .models import validate_ai_metering_units
 from .step_scope import (
     _SEGMENT_RE,
     execution_step_key,
@@ -889,6 +890,7 @@ def _validate_ai_usage(body: Mapping) -> None:
     _validate_exec_id(body["exec_id"], "ai_usage.exec_id")
     _require_nonempty_str_fields(body, "ai_usage", ("created_at",))
     _reject_retired_provider(body, "ai_usage")
+    _validate_optional_credits(body, "ai_usage")
 
 
 def _validate_ai_task_log(body: Mapping) -> None:
@@ -898,8 +900,18 @@ def _validate_ai_task_log(body: Mapping) -> None:
         body, "ai_task_log", ("task_id", "created_at", "exec_id"),
     )
     _reject_retired_provider(body, "ai_task_log")
+    _validate_optional_credits(body, "ai_task_log")
     if "error" in body and body["error"] is not None:
         validate_audit_text(body["error"], "ai_task_log.error")
+
+
+def _validate_optional_credits(body: Mapping, table: str) -> None:
+    try:
+        validate_ai_metering_units(
+            body.get("provider"), body.get("cost_usd"), body.get("credits"),
+        )
+    except ValueError as exc:
+        raise PolicyError(f"{table}: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -1029,7 +1041,7 @@ RECORD_POLICIES: Mapping[str, RecordPolicy] = {
                 "job_id", "step", "worker_id", "provider", "model",
                 "input_tokens", "output_tokens",
                 "cache_creation_input_tokens", "cache_read_input_tokens",
-                "cost_usd", "duration_sec", "num_turns", "cached",
+                "cost_usd", "credits", "duration_sec", "num_turns", "cached",
             }),
             _validate_ai_usage,
         ),
@@ -1040,7 +1052,7 @@ RECORD_POLICIES: Mapping[str, RecordPolicy] = {
                 "step_name", "domain", "provider", "model", "ok",
                 "error", "input_tokens", "output_tokens",
                 "cache_creation_input_tokens", "cache_read_input_tokens",
-                "cost_usd", "duration_sec", "num_turns", "record_json",
+                "cost_usd", "credits", "duration_sec", "num_turns", "record_json",
             }),
             _validate_ai_task_log,
         ),

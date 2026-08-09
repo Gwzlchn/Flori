@@ -525,7 +525,7 @@ class TestGatewayAITaskLease:
         original = self._manifest(task_id, "可信事实。", "aaaa")
         await real_redis.enqueue_ai_task(AITask(
             task_id=task_id, request=LLMRequest(messages=[]),
-            provider="codex-cli", step_name="synthesis",
+            provider="codex-cli", model="gpt-5.6-sol", step_name="synthesis",
             audit_context={"ask_source_manifest": original},
         ).to_task_payload())
         response = await jobs_client.post(
@@ -591,6 +591,7 @@ class TestGatewayAITaskLease:
             f"/api/runner/ai-tasks/{task_id}/result", headers=headers,
             json={"result": {
                 "content": "伪造事实 [来源1]。", "source_manifest": replacement,
+                "model": "gpt-5.6-sol",
                 "citation_validation": {"status": "valid"},
             }},
         )
@@ -602,11 +603,61 @@ class TestGatewayAITaskLease:
             "audit_context"
         ]["ask_source_manifest"] == original
 
+        bad_result = await jobs_client.post(
+            f"/api/runner/ai-tasks/{task_id}/result", headers=headers,
+            json={"result": {
+                "content": "x", "model": "gpt-5.6-sol", "credits": 1.0,
+            }},
+        )
+        assert bad_result.status_code == 400
+        bad_log = await jobs_client.post(
+            f"/api/runner/ai-tasks/{task_id}/log", headers=headers,
+            json={"log": {
+                "provider": "codex-cli", "model": "gpt-5.6-sol", "credits": 1.0,
+                "record": {}, "created_at": "2026-07-14T00:00:00+00:00",
+            }},
+        )
+        assert bad_log.status_code == 400
+        wrong_model_result = await jobs_client.post(
+            f"/api/runner/ai-tasks/{task_id}/result", headers=headers,
+            json={"result": {"content": "x", "model": "other-model"}},
+        )
+        assert wrong_model_result.status_code == 400
+        wrong_model_log = await jobs_client.post(
+            f"/api/runner/ai-tasks/{task_id}/log", headers=headers,
+            json={"log": {
+                "provider": "codex-cli", "model": "other-model",
+                "record": {}, "created_at": "2026-07-14T00:00:00+00:00",
+            }},
+        )
+        assert wrong_model_log.status_code == 400
+
+        usage_body = {
+            "exec_id": claim["exec_id"], "step": claim["step"],
+            "provider": "qoder-cli", "model": "gpt-5.6-sol",
+        }
+        wrong_provider_usage = await jobs_client.post(
+            "/api/runner/usage", headers=headers, json=usage_body,
+        )
+        assert wrong_provider_usage.status_code == 400
+        wrong_model_usage = await jobs_client.post(
+            "/api/runner/usage", headers=headers,
+            json={**usage_body, "provider": "codex-cli", "model": "other-model"},
+        )
+        assert wrong_model_usage.status_code == 400
+        assert db.get_usage_summary()["calls"] == 0
+        good_usage = await jobs_client.post(
+            "/api/runner/usage", headers=headers,
+            json={**usage_body, "provider": "codex-cli"},
+        )
+        assert good_usage.status_code == 200
+        assert db.get_usage_summary()["calls"] == 1
+
         log_response = await jobs_client.post(
             f"/api/runner/ai-tasks/{task_id}/log", headers=headers,
             json={"log": {
                 "task_id": "at_other", "exec_id": "stolen", "step_name": "digest",
-                "provider": "codex-cli", "model": "test", "ok": True,
+                "provider": "codex-cli", "model": "gpt-5.6-sol", "ok": True,
                 "record": {"task_id": "at_other", "output": "x"},
                 "created_at": "2026-07-14T00:00:00+00:00",
             }},
@@ -642,6 +693,7 @@ class TestGatewayAITaskLease:
             f"/api/runner/ai-tasks/{task_id}/result", headers=headers,
             json={"result": {
                 "content": f"伪造摘要 [来源:ce_{'f' * 64}]",
+                "model": "gpt-5.6-sol",
                 "citation_validation": {"status": "valid", "reliable": True},
                 "source_manifest": {"worker": "replacement"},
                 "digest_source_manifest": {"worker": "replacement"},
@@ -1125,6 +1177,7 @@ class TestUsage:
         assert summary["total_input_tokens"] == 10
         assert summary["total_output_tokens"] == 20
         assert summary["total_cost_usd"] == pytest.approx(0.5)
+        assert summary["total_credits"] == 0
 
     @pytest.mark.asyncio
     async def test_rejects_virtual_provider(self, jobs_client, db, real_redis):
@@ -1197,15 +1250,62 @@ class TestUsage:
         """同 exec_id 二次上报(worker 重试/双发)→ 200 ok 但不翻倍计费;端点 docstring 承诺去重。"""
         worker_id, token = await _register_real(jobs_client)
         lease_exec = await _activate_lease(real_redis, worker_id, "j9", "A")
-        body = {"exec_id": "dup1", "provider": "anthropic", "model": "claude",
+        body = {"exec_id": "dup1", "provider": "qoder-cli", "model": "ultimate",
                 "job_id": "j9", "step": "A", "input_tokens": 10,
-                "output_tokens": 20, "cost_usd": 0.5}
+                "output_tokens": 20, "cost_usd": 0.0, "credits": 2.5}
         h = _task_headers(token, "j9", "A", lease_exec)
         assert (await jobs_client.post("/api/runner/usage", json=body, headers=h)).status_code == 200
         assert (await jobs_client.post("/api/runner/usage", json=body, headers=h)).status_code == 200
         summary = db.get_usage_summary(job_id="j9")
         assert summary["calls"] == 1
-        assert summary["total_cost_usd"] == pytest.approx(0.5)
+        assert summary["total_cost_usd"] == 0
+        assert summary["total_credits"] == pytest.approx(2.5)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"provider": "anthropic", "model": "claude", "credits": 1.0},
+            {"provider": "qoder-cli", "model": "ultimate", "cost_usd": 0.01},
+        ],
+    )
+    async def test_rejects_cross_unit_usage(
+        self, jobs_client, db, real_redis, body,
+    ):
+        worker_id, token = await _register_real(jobs_client)
+        lease_exec = await _activate_lease(real_redis, worker_id, "j-unit", "A")
+        payload = {"exec_id": "bad-unit", "job_id": "j-unit", "step": "A", **body}
+        response = await jobs_client.post(
+            "/api/runner/usage",
+            json=payload,
+            headers=_task_headers(token, "j-unit", "A", lease_exec),
+        )
+
+        assert response.status_code == 400
+        assert db.get_usage_summary(job_id="j-unit")["calls"] == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("credits", [-1, "nan", "inf"])
+    async def test_rejects_invalid_credits(
+        self, jobs_client, db, real_redis, credits,
+    ):
+        worker_id, token = await _register_real(jobs_client)
+        lease_exec = await _activate_lease(real_redis, worker_id, "jc-invalid", "A")
+        response = await jobs_client.post(
+            "/api/runner/usage",
+            json={
+                "exec_id": f"invalid-{credits}",
+                "provider": "qoder-cli",
+                "model": "ultimate",
+                "job_id": "jc-invalid",
+                "step": "A",
+                "credits": credits,
+            },
+            headers=_task_headers(token, "jc-invalid", "A", lease_exec),
+        )
+
+        assert response.status_code == 422
+        assert db.get_usage_summary(job_id="jc-invalid")["calls"] == 0
 
 
 # 产物代理端点:worker token 鉴权,经 API 读写 storage

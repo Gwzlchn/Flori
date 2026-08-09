@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import math
 import os
 from functools import lru_cache
 import time
@@ -17,7 +18,7 @@ import structlog
 
 from .ai_routing import AI_PARAM_MODEL_DOMAIN_MISSING, validate_ai_param_override
 from .errors import AIProviderError, AIRateLimitError, AllProvidersFailedError
-from .models import AIUsage, DEFAULT_AI_MODEL, LLMRequest, LLMResponse
+from .models import AIUsage, DEFAULT_AI_MODEL, LLMRequest, LLMResponse, MAX_AI_CREDITS
 
 _log = structlog.get_logger(component="ai_gateway")
 
@@ -1150,6 +1151,7 @@ class QoderCLIProvider:
         session_id = None
         api_ms = None
         finish_reason = None
+        credits = None
         try:
             obj = json.loads(raw)
             if isinstance(obj, dict):
@@ -1166,7 +1168,19 @@ class QoderCLIProvider:
                 _api = obj.get("duration_api_ms") or obj.get("duration_ms")
                 api_ms = float(_api) if isinstance(_api, (int, float)) else None
                 finish_reason = obj.get("subtype") or obj.get("stop_reason")
-        except (json.JSONDecodeError, ValueError, TypeError):
+                raw_credits = obj.get("total_credits")
+                if type(raw_credits) in (int, float):
+                    try:
+                        numeric_credits = float(raw_credits)
+                    except (OverflowError, ValueError):
+                        numeric_credits = None
+                    if (
+                        numeric_credits is not None
+                        and math.isfinite(numeric_credits)
+                        and 0 <= numeric_credits <= MAX_AI_CREDITS
+                    ):
+                        credits = numeric_credits
+        except (json.JSONDecodeError, ValueError, TypeError, OverflowError):
             pass
         # Qoder 是包月订阅,无按量成本:cost 恒 0,token 用量照实入账(用于用量观测,不折算等价美元)。
         return LLMResponse(
@@ -1178,6 +1192,7 @@ class QoderCLIProvider:
             cache_creation_input_tokens=cc,
             cache_read_input_tokens=cr,
             cost_usd=0.0,
+            credits=credits,
             duration_sec=round(duration, 2),
             num_turns=turns,
             cached=cr > 0,
@@ -1465,6 +1480,7 @@ def record_usage_to_file(usage: AIUsage, log_dir: Path) -> None:
         "cache_creation_input_tokens": usage.cache_creation_input_tokens,
         "cache_read_input_tokens": usage.cache_read_input_tokens,
         "cost_usd": usage.cost_usd,
+        "credits": usage.credits,
         "duration_sec": usage.duration_sec,
         "num_turns": usage.num_turns,
         "cached": usage.cached,
@@ -1492,6 +1508,7 @@ def collect_usage_from_file(log_dir: Path, step: str) -> list[AIUsage]:
             cache_creation_input_tokens=e.get("cache_creation_input_tokens", 0),
             cache_read_input_tokens=e.get("cache_read_input_tokens", 0),
             cost_usd=e.get("cost_usd", 0.0),
+            credits=e.get("credits"),
             duration_sec=e.get("duration_sec", 0.0),
             num_turns=e.get("num_turns", 0),
             cached=e.get("cached", False),

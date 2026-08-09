@@ -4,7 +4,7 @@ import { useApi } from '../../composables/useApi'
 import MarkdownViewer from '../notes/MarkdownViewer.vue'
 import AiLogPanel from './AiLogPanel.vue'
 import { fmtDateTime, fmtDuration } from '../../utils/datetime'
-import { fmtBytes } from '../../utils/format'
+import { fmtBytes, fmtCredits } from '../../utils/format'
 import { statusLabel } from '../../utils/status'
 import type { StepInfo, StepUsage } from '../../types'
 import { Check, X, Minus, Loader, Clock, ChevronRight, FileText, Braces, Package, Coins, HardDrive, RotateCcw } from 'lucide-vue-next'
@@ -131,6 +131,7 @@ const selUsageSummary = computed(() => {
   const rows = selUsage.value
   if (!rows.length) return null
   let input = 0, output = 0, cacheRead = 0, cacheCreation = 0, cost = 0, claudeCli = false
+  let credits = 0, qoderCalls = 0, creditReports = 0, showUsd = false
   for (const row of rows) {
     input += row.input_tokens
     output += row.output_tokens
@@ -138,6 +139,15 @@ const selUsageSummary = computed(() => {
     cacheCreation += row.cache_creation_tokens
     cost += row.cost_usd || 0
     if (row.provider === 'claude-cli') claudeCli = true
+    if (row.provider === 'qoder-cli') {
+      qoderCalls += 1
+      if (row.credits != null) {
+        credits += row.credits
+        creditReports += 1
+      }
+    } else {
+      showUsd = true
+    }
   }
   const cacheDenom = input + cacheRead + cacheCreation
   return {
@@ -147,6 +157,10 @@ const selUsageSummary = computed(() => {
     cacheRead,
     cacheCreation,
     cost,
+    showUsd,
+    qoderCalls,
+    credits: creditReports ? credits : null,
+    creditsPartial: creditReports > 0 && creditReports < qoderCalls,
     hit: cacheDenom ? Math.round((cacheRead / cacheDenom) * 1000) / 10 : 0,
     claudeCli,
   }
@@ -266,7 +280,8 @@ onMounted(async () => {
               <Coins :size="13" class="text-gray-500" />
               <span class="font-semibold text-gray-700">AI 用量</span>
               <ChevronRight :size="12" :class="aiLogOpen ? 'rotate-90' : ''" class="transition-transform text-blue-600" />
-              <span class="font-medium text-gray-800">{{ fmtCost(selUsageSummary.cost) }}<span class="text-gray-400">{{ selUsageSummary.claudeCli ? '（等价）' : '' }}</span></span>
+              <span v-if="selUsageSummary.showUsd" class="font-medium text-gray-800">{{ fmtCost(selUsageSummary.cost) }}<span class="text-gray-400">{{ selUsageSummary.claudeCli ? '（等价）' : '' }}</span></span>
+              <span v-if="selUsageSummary.qoderCalls" class="font-medium text-gray-800">{{ fmtCredits(selUsageSummary.credits) }}<span v-if="selUsageSummary.creditsPartial" class="text-gray-400">（部分未上报）</span></span>
               <span class="text-gray-500">{{ selUsageSummary.calls }} 次</span>
               <span class="text-gray-500">入 {{ selUsageSummary.input.toLocaleString() }}</span>
               <span class="text-gray-500">出 {{ selUsageSummary.output.toLocaleString() }}</span>

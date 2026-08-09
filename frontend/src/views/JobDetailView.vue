@@ -18,7 +18,7 @@ import type {
 } from '../components/document/types'
 import { contentTypeIcon, contentTypePill, contentTypeLabel } from '../utils/contentType'
 import { jobSourceLabel } from '../constants/sources'
-import type { AiProviderInfo, CanonicalEvidenceProjection, JobDetail, GlossaryTerm, JobConcept } from '../types'
+import type { AiProviderInfo, AiUsageCharge, AiUsageTotal, CanonicalEvidenceProjection, JobDetail, GlossaryTerm, JobConcept, StepUsage } from '../types'
 import type { RerunSmartRequestWire } from '../types/wire'
 import {
   BookOpen, Lightbulb, GitBranch, Info, RefreshCw, RotateCcw, ShieldCheck,
@@ -96,22 +96,56 @@ watch([steps, parts], ([jobSteps, currentParts]) => {
 }, { immediate: true, deep: true })
 
 // AI 用量(逐次)→ 按步聚合 provider/开销喂 DAG 节点 + 全 job 总开销。
-const jobUsageRows = ref<{ step: string | null; provider: string; cost_usd: number }[]>([])
-const usageByStep = computed<Record<string, { provider: string; cost: number; equiv: boolean }>>(() => {
-  const m: Record<string, { provider: string; cost: number; equiv: boolean }> = {}
+const jobUsageRows = ref<StepUsage[]>([])
+const usageByStep = computed<Record<string, AiUsageCharge>>(() => {
+  const m: Record<string, AiUsageCharge> = {}
   for (const u of jobUsageRows.value) {
     if (!u.step) continue
     const templateStep = u.step.includes('::') ? u.step.split('::', 2)[1] : u.step
-    const e = m[templateStep] || (m[templateStep] = { provider: u.provider, cost: 0, equiv: false })
+    const e = m[templateStep] || (m[templateStep] = {
+      provider: u.provider, cost: 0, equiv: false, showUsd: false,
+      hasQoder: false, credits: null, creditsPartial: false,
+      qoderCalls: 0, creditReports: 0,
+    })
+    if (e.provider !== u.provider) e.provider = '多个 provider'
     e.cost += u.cost_usd || 0
     if (u.provider === 'claude-cli') e.equiv = true
+    if (u.provider === 'qoder-cli') {
+      e.hasQoder = true
+      e.qoderCalls += 1
+      if (u.credits != null) {
+        e.credits = (e.credits ?? 0) + u.credits
+        e.creditReports += 1
+      }
+      e.creditsPartial = e.creditReports > 0 && e.creditReports < e.qoderCalls
+    } else {
+      e.showUsd = true
+    }
   }
   return m
 })
-const totalAi = computed(() => {
-  let cost = 0, equiv = false
-  for (const u of jobUsageRows.value) { cost += u.cost_usd || 0; if (u.provider === 'claude-cli') equiv = true }
-  return { cost, equiv, calls: jobUsageRows.value.length }
+const totalAi = computed<AiUsageTotal>(() => {
+  const total: AiUsageTotal = {
+    provider: '多个 provider', cost: 0, equiv: false, showUsd: false,
+    hasQoder: false, credits: null, creditsPartial: false,
+    qoderCalls: 0, creditReports: 0, calls: jobUsageRows.value.length,
+  }
+  for (const u of jobUsageRows.value) {
+    total.cost += u.cost_usd || 0
+    if (u.provider === 'claude-cli') total.equiv = true
+    if (u.provider === 'qoder-cli') {
+      total.hasQoder = true
+      total.qoderCalls += 1
+      if (u.credits != null) {
+        total.credits = (total.credits ?? 0) + u.credits
+        total.creditReports += 1
+      }
+      total.creditsPartial = total.creditReports > 0 && total.creditReports < total.qoderCalls
+    } else {
+      total.showUsd = true
+    }
+  }
+  return total
 })
 
 // 同源 lineage 的所有快照:时间倒序;>1 则头部出历史版本跳转下拉。
@@ -163,7 +197,7 @@ async function handleDetailLoaded(_detail: JobDetail) {
   void loadEvidence()
   void loadDocumentArtifacts()
   api.get<{ pipelines?: any[] }>('/api/pipelines').then(r => { if (jobId.value === fid) pipelinesDef.value = Array.isArray(r) ? r : (r?.pipelines ?? []) }).catch(() => {})
-  api.get<{ usage?: any[] }>(`/api/jobs/${fid}/usage`).then(r => { if (jobId.value === fid) jobUsageRows.value = r?.usage || [] }).catch(() => {})
+  api.get<{ usage?: StepUsage[] }>(`/api/jobs/${fid}/usage`).then(r => { if (jobId.value === fid) jobUsageRows.value = r?.usage || [] }).catch(() => {})
   void loadPromptVersions()
   tab.value = route.query.tab === 'figures' ? 'figures' : 'notes'
   if (route.query.view === 'source' && hasSourceHtml.value) noteVariant.value = 'original'
