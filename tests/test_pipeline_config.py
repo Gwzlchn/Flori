@@ -63,12 +63,12 @@ class TestExtends:
                 "pool": "ai", "timeout": 600, "retry": 2,
                 "ai": {"allowed_providers": ["claude-cli"]},
             },
-            ".review": {"extends": ".ai-step", "timeout": 120},
+            ".review": {"extends": ".ai-step", "timeout": 1800},
             "p": {"jobs": {"A": {"extends": ".review", "run": "m.a"}}},
         }
         s = normalize_pipelines(raw)["p"]["steps"][0]
         assert s["pool"] == "ai"      # 来自 .ai-step
-        assert s["timeout_sec"] == 120  # 被 .review 覆盖
+        assert s["timeout_sec"] == 1800  # 被 .review 覆盖
         assert s["retries"] == 2      # 来自 .ai-step
 
     def test_default_applies_under_extends(self):
@@ -283,6 +283,17 @@ class TestAIRoleContract:
         validate_ai_pipeline_contract(
             pipelines, load_yaml(configs_dir / "providers.yaml"),
         )
+        review_steps = {
+            (pipeline, step["name"]): (step["timeout_sec"], step["version"])
+            for pipeline, body in pipelines.items()
+            for step in body["steps"]
+            if step["name"] in {"05_review", "08_review", "12_review"}
+        }
+        assert review_steps == {
+            ("video", "12_review"): (1800, "2"),
+            ("document", "08_review"): (1800, "1"),
+            ("audio", "05_review"): (1800, "2"),
+        }
         evidence_step = next(
             step for step in pipelines["video"]["steps"]
             if step["name"] == "10_evidence"

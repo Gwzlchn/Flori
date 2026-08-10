@@ -31,7 +31,8 @@ default:
 
 .review:
   pool: ai
-  timeout: 120
+  # CLI评审会读取完整笔记与证据集;执行窗口与video评审一致,避免provider返回前被worker杀死。
+  timeout: 1800
   retry: 5
 
 video:
