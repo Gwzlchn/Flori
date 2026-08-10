@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from shared.concept_evidence import ConceptEvidenceSnapshot
 from shared.document_contract import validate_document, validate_translation
 from shared.errors import InputInvalidError
 from steps.common.step_concepts import (
@@ -49,6 +50,9 @@ class DocumentConceptsStep(ConceptsStep):
                 provenance_data=self._read_optional_bytes(
                     self.job_dir / "output" / "provenance" / "translated.json",
                 ),
+                evidence_snapshot=ConceptEvidenceSnapshot(
+                    anchors=(), provenance_nonempty=False, truncated=False,
+                ),
             )
             self._concept_source_snapshot = source
             return source
@@ -79,6 +83,9 @@ class DocumentConceptsStep(ConceptsStep):
                 self.job_dir / "intermediate" / "source_segments.json",
             ),
             provenance_data=None,
+            evidence_snapshot=ConceptEvidenceSnapshot(
+                anchors=(), provenance_nonempty=False, truncated=False,
+            ),
         )
         self._concept_source_snapshot = source
         return source
