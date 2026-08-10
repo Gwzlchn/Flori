@@ -55,6 +55,19 @@ class SearchRepository:
                      AND EXISTS (
                        SELECT 1 FROM notes_fts5 WHERE notes_fts5.job_id=jobs.id
                      )
+                     AND NOT EXISTS (
+                       SELECT 1 FROM concept_occurrence_replay_state current_retry
+                       WHERE current_retry.job_id=jobs.id
+                         AND current_retry.projector_version = ?
+                         AND current_retry.state='retry'
+                         AND current_retry.next_retry_at > ?
+                     )
+                     AND NOT EXISTS (
+                       SELECT 1 FROM concept_occurrence_projection current_nonempty
+                       WHERE current_nonempty.job_id=jobs.id
+                         AND current_nonempty.projector_version = ?
+                         AND current_nonempty.projection_digest != ?
+                     )
                      AND (
                        EXISTS (
                          SELECT 1 FROM concept_occurrence_projection stale_p
@@ -97,6 +110,10 @@ class SearchRepository:
                    ) ASC, created_at ASC
                    LIMIT ?""",
                 (
+                    CURRENT_CONCEPT_PROJECTOR_VERSION,
+                    now_iso,
+                    CURRENT_CONCEPT_PROJECTOR_VERSION,
+                    _EMPTY_CONCEPT_PROJECTION_DIGEST,
                     CURRENT_CONCEPT_PROJECTOR_VERSION,
                     CURRENT_CONCEPT_PROJECTOR_VERSION,
                     _EMPTY_CONCEPT_PROJECTION_DIGEST,

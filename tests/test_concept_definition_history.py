@@ -284,6 +284,82 @@ def test_stale_verified_empty_replays_once_and_publishes_current_version(
     assert db.list_unreconciled_concept_occurrence_jobs() == []
 
 
+def test_stale_projection_respects_current_retry_backoff(db: Database) -> None:
+    job_id = "job-stale-retry-backoff"
+    _insert_job(db, job_id, domain="ml")
+    db.index_job_notes(
+        job_id, "original", "title", "body",
+        content_type="document", domain="ml",
+    )
+    db._conn.execute(
+        """INSERT INTO concept_occurrence_projection
+           (job_id, source_digest, projection_digest, reconciled_at)
+           VALUES (?, ?, ?, ?)""",
+        (job_id, "sha256:" + "a" * 64, "sha256:" + "b" * 64, _NOW),
+    )
+    db._conn.commit()
+
+    assert [
+        job.id for job in db.list_unreconciled_concept_occurrence_jobs(now=_NOW)
+    ] == [job_id]
+
+    state = db.record_concept_occurrence_replay_failure(
+        job_id,
+        reason="storage_unreachable",
+        retry_base_seconds=60,
+        retry_cap_seconds=900,
+        now=_NOW,
+    )
+    assert state is not None
+    assert state["attempt_count"] == 1
+    assert state["projector_version"] == CURRENT_CONCEPT_PROJECTOR_VERSION
+    assert state["next_retry_at"] == "2026-07-14T00:01:00+00:00"
+
+    assert db.list_unreconciled_concept_occurrence_jobs(now=_NOW) == []
+    assert db.list_unreconciled_concept_occurrence_jobs(
+        now="2026-07-14T00:00:59+00:00",
+    ) == []
+    assert db.get_concept_occurrence_replay_state(job_id)["attempt_count"] == 1
+    assert [
+        job.id for job in db.list_unreconciled_concept_occurrence_jobs(
+            now="2026-07-14T00:01:00+00:00",
+        )
+    ] == [job_id]
+
+
+def test_current_nonempty_projection_ignores_stale_retry_state(db: Database) -> None:
+    job_id = "job-current-nonempty-stale-state"
+    _insert_job(db, job_id, domain="ml")
+    db.index_job_notes(
+        job_id, "original", "title", "body",
+        content_type="document", domain="ml",
+    )
+    db._conn.execute(
+        """INSERT INTO concept_occurrence_projection
+           (job_id, source_digest, projection_digest, reconciled_at,
+            projector_version)
+           VALUES (?, ?, ?, ?, ?)""",
+        (
+            job_id, "sha256:" + "c" * 64, "sha256:" + "d" * 64, _NOW,
+            CURRENT_CONCEPT_PROJECTOR_VERSION,
+        ),
+    )
+    db._conn.execute(
+        """INSERT INTO concept_occurrence_replay_state
+           (job_id, state, reason, source_digest, attempt_count,
+            last_attempt_at, next_retry_at, updated_at)
+           VALUES (?, 'retry', 'legacy_writer', NULL, 7, ?, ?, ?)""",
+        (job_id, _NOW, "2099-01-01T00:00:00+00:00", _NOW),
+    )
+    db._conn.commit()
+
+    for now in (_NOW, "2099-01-02T00:00:00+00:00"):
+        assert db.list_unreconciled_concept_occurrence_jobs(now=now) == []
+    state = db.get_concept_occurrence_replay_state(job_id)
+    assert state["projector_version"] == 1
+    assert state["attempt_count"] == 7
+
+
 def test_projection_version_cas_and_empty_to_nonempty_are_atomic(
     db: Database,
 ) -> None:
