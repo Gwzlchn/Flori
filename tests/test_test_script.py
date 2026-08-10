@@ -807,6 +807,158 @@ def test_ci_test_runtime_tag_does_not_require_github_output(tmp_path: Path) -> N
     )
 
 
+def _runtime_tag_from_fixture(root: Path) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment.update({
+        "OWNER_LC": "example-owner",
+        "GITHUB_REF": "refs/heads/main",
+    })
+    environment.pop("GITHUB_OUTPUT", None)
+    return subprocess.run(
+        [
+            "bash",
+            str(REPO / "scripts/ci-test-runtime.sh"),
+            "tag",
+            "normal",
+        ],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_ci_test_runtime_key_tracks_only_runtime_inputs(tmp_path: Path) -> None:
+    fixture = tmp_path / "repo"
+    (fixture / "docker").mkdir(parents=True)
+    dockerfile = fixture / "docker/base.Dockerfile"
+    pyproject = fixture / "pyproject.toml"
+    shutil.copy(REPO / "docker/base.Dockerfile", dockerfile)
+    shutil.copy(REPO / "pyproject.toml", pyproject)
+
+    baseline = _runtime_tag_from_fixture(fixture)
+    assert baseline.returncode == 0, baseline.stderr
+    baseline_tag = baseline.stdout.strip()
+
+    original_dockerfile = dockerfile.read_text(encoding="utf-8")
+    dockerfile.write_text(
+        original_dockerfile.replace(
+            "FROM deno AS api",
+            "RUN echo scheduler-only-change\n\nFROM deno AS api",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    unrelated = _runtime_tag_from_fixture(fixture)
+    assert unrelated.returncode == 0, unrelated.stderr
+    assert unrelated.stdout.strip() == baseline_tag
+
+    dockerfile.write_text(
+        original_dockerfile.replace(
+            "FROM python:3.11-slim AS cli-tools-builder",
+            "RUN echo common-change\n\n"
+            "FROM python:3.11-slim AS cli-tools-builder",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    common_change = _runtime_tag_from_fixture(fixture)
+    assert common_change.returncode == 0, common_change.stderr
+    assert common_change.stdout.strip() != baseline_tag
+
+    dockerfile.write_text(
+        original_dockerfile.replace(
+            "FROM test-runtime AS test",
+            "RUN echo test-runtime-change\n\nFROM test-runtime AS test",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    normal_runtime_change = _runtime_tag_from_fixture(fixture)
+    assert normal_runtime_change.returncode == 0, normal_runtime_change.stderr
+    assert normal_runtime_change.stdout.strip() != baseline_tag
+
+    dockerfile.write_text(
+        original_dockerfile.replace(
+            "FROM test-worker-runtime AS test-worker",
+            "RUN echo worker-runtime-change\n\n"
+            "FROM test-worker-runtime AS test-worker",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    worker_runtime_change = _runtime_tag_from_fixture(fixture)
+    assert worker_runtime_change.returncode == 0, worker_runtime_change.stderr
+    assert worker_runtime_change.stdout.strip() != baseline_tag
+
+    dockerfile.write_text(original_dockerfile, encoding="utf-8")
+    original_pyproject = pyproject.read_text(encoding="utf-8")
+    pyproject.write_text(
+        "\n".join(
+            'version = "999.0.0"' if line.startswith("version = ") else line
+            for line in original_pyproject.splitlines()
+        ) + "\n",
+        encoding="utf-8",
+    )
+    version_only = _runtime_tag_from_fixture(fixture)
+    assert version_only.returncode == 0, version_only.stderr
+    assert version_only.stdout.strip() == baseline_tag
+
+    pyproject.write_text(
+        original_pyproject + "\n# dependency-input-change\n",
+        encoding="utf-8",
+    )
+    dependency_input = _runtime_tag_from_fixture(fixture)
+    assert dependency_input.returncode == 0, dependency_input.stderr
+    assert dependency_input.stdout.strip() != baseline_tag
+
+
+def test_ci_test_runtime_key_rejects_untracked_stage_inputs(tmp_path: Path) -> None:
+    fixture = tmp_path / "repo"
+    (fixture / "docker").mkdir(parents=True)
+    dockerfile = fixture / "docker/base.Dockerfile"
+    shutil.copy(REPO / "docker/base.Dockerfile", dockerfile)
+    shutil.copy(REPO / "pyproject.toml", fixture / "pyproject.toml")
+    original = dockerfile.read_text(encoding="utf-8")
+    mutations = (
+        (
+            "COPY pyproject.toml .",
+            "COPY pyproject.toml .\nCOPY dependency-lock.txt .",
+            "COPY 输入未纳入内容键",
+        ),
+        (
+            "COPY pyproject.toml .",
+            "COPY pyproject.toml .\nADD dependency-lock.txt .",
+            "存在未跟踪的构建上下文输入",
+        ),
+        (
+            "RUN --mount=type=cache,target=/root/.cache/pip pip install \".\"",
+            "RUN --mount=type=bind,target=/src pip install /src",
+            "存在未跟踪的构建上下文输入",
+        ),
+        (
+            "RUN --mount=type=cache,target=/root/.cache/pip pip install \".\"",
+            "RUN --mount=target=/src pip install /src",
+            "存在未跟踪的构建上下文输入",
+        ),
+        (
+            "FROM common AS test-runtime",
+            "FROM hidden-runtime AS test-runtime",
+            "继承链未纳入内容键",
+        ),
+    )
+
+    for needle, replacement, error in mutations:
+        dockerfile.write_text(
+            original.replace(needle, replacement, 1),
+            encoding="utf-8",
+        )
+        completed = _runtime_tag_from_fixture(fixture)
+        assert completed.returncode == 2
+        assert error in completed.stderr
+
+
 def test_ci_test_runtime_pull_retries_then_tags_immutable_digest(
     tmp_path: Path,
 ) -> None:

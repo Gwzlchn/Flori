@@ -62,7 +62,7 @@ sudo ./svc.sh install && sudo ./svc.sh start
 `e2e.yml`（Document PDF E2E，手动）+
 `step-images.yml`（按步执行镜像，手动）+ `mutation.yml`（变异测试，每日 cron + 手动）：
 
-- `prepare-test-runtime`：仅 main 发布无源码测试依赖层。先以 Dockerfile 和去版本 pyproject 的内容键探测 GHCR；命中时直接解析 immutable digest，不 setup Buildx；未命中时并行构建 normal / worker runtime，worker 同时读取普通与自身 registry cache。main consumer 与它并行启动，按同一内容键限时等待；coverage gate 直接依赖 prepare，cache miss 或构建失败不会被隐藏。PR no-op 并由各 runner 构建当前 checkout 的最终 test stage。
+- `prepare-test-runtime`：仅 main 发布无源码测试依赖层。内容键只绑定 Dockerfile 的 `common` / `test-runtime` / `test-worker-runtime` 有效指令、去版本 pyproject 和固定构建参数；Scheduler/API/Worker/Frontend stage 变更不会伪失效。runtime 继承链固定；新增`COPY` / `ADD`或任何非cache的`RUN --mount`输入而未纳入键时 fail-closed。命中时直接解析 GHCR immutable digest，不 setup Buildx；未命中时并行构建 normal / worker runtime，worker 同时读取普通与自身 registry cache。main consumer 与它并行启动，按同一内容键限时等待；coverage gate 直接依赖 prepare，cache miss 或构建失败不会被隐藏。PR no-op 并由各 runner 构建当前 checkout 的最终 test stage。
 - `unit-normal` / `unit-worker`：push / PR 到 main 触发；普通 job 在全量 pytest collection 前做确定性混合 LPT 预分 15 shard。每个历史 node 权重包含 call duration 与固定 collection / fixture / xdist 调度税，避免大量极短用例被系统性低估。轻文件保持完整，未知新文件用已有文件中位数估重；超过单组平均历史负载的巨型文件先局部真实 collection，再把全部实际 nodeid 分散到各组。新增、删除和参数化 nodeid 随当次 collection 进入计划，各组调度项并集完整且互不重叠；normal 的 xdist 使用单项调度，避免默认批量预取在单 worker 形成尾块。worker / step / media job 拆 1 shard，
   每片固定 4 个 xdist worker，避免 runner CPU 暴露数变化导致时长漂移。workflow 通过 `scripts/test.sh --ci-normal/--ci-worker`
   调用 pytest；worker 单分片保留 pytest-split。真实调用媒体工具的 canonical evidence E2E 归 worker 镜像。main 的所有 runner 拉内容键 tag 后从本地 `RepoDigests` 校验精确 digest，再通过 Compose 挂当前源码，不重复 setup Buildx 或 build/load；PR 保留各 runner 的 GHA cache build。各 shard 产部分覆盖率并上传 artifact，本地开发仍统一走 `scripts/test.sh`。

@@ -13,10 +13,77 @@ case "$MODE" in
   *) echo "未知测试运行时模式: $MODE" >&2; exit 2 ;;
 esac
 
-# 版本值不会改变依赖集合. 输入摘要让普通源码提交直接复用既有 runtime tag.
+# 版本值不会改变依赖集合. 产品 stage 也不是测试 runtime 的输入,不应令它失效.
+RUNTIME_PLATFORM="linux/amd64"
+RUNTIME_USE_USTC_MIRROR="0"
+
+runtime_dockerfile_input() {
+  awk '
+    function selected(value) {
+      return value == "common" \
+        || value == "test-runtime" \
+        || value == "test-worker-runtime"
+    }
+    toupper($1) == "FROM" {
+      stage = ""
+      for (field = 1; field < NF; field++) {
+        if (toupper($field) == "AS") {
+          stage = tolower($(field + 1))
+          break
+        }
+      }
+    }
+    selected(stage) \
+      && $0 !~ /^[[:space:]]*#/ \
+      && $0 !~ /^[[:space:]]*$/ { print }
+  ' docker/base.Dockerfile
+}
+
+# 当前 runtime stage 只从构建上下文读 pyproject. 新增 COPY 时必须先把对应
+# 内容纳入键,否则旧 tag 会伪装成新依赖环境.
+runtime_copy_instructions="$(
+  runtime_dockerfile_input | awk 'toupper($1) == "COPY" { print }'
+)"
+if [ "$runtime_copy_instructions" != "COPY pyproject.toml ." ]; then
+  echo "测试 runtime COPY 输入未纳入内容键" >&2
+  exit 2
+fi
+runtime_from_instructions="$(
+  runtime_dockerfile_input | awk 'toupper($1) == "FROM" { print }'
+)"
+expected_runtime_from_instructions="$(printf '%s\n' \
+  'FROM python:3.11-slim AS common' \
+  'FROM common AS test-runtime' \
+  'FROM test-runtime AS test-worker-runtime')"
+if [ "$runtime_from_instructions" != "$expected_runtime_from_instructions" ]; then
+  echo "测试 runtime 继承链未纳入内容键" >&2
+  exit 2
+fi
+runtime_untracked_inputs="$(
+  runtime_dockerfile_input | awk '
+    toupper($1) == "ADD" { print; next }
+    index($0, "--mount=") > 0 {
+      remainder = $0
+      invalid = 0
+      while (match(remainder, /--mount=[^[:space:]]+/)) {
+        mount = substr(remainder, RSTART, RLENGTH)
+        if (mount !~ /^--mount=type=cache(,|$)/) invalid = 1
+        remainder = substr(remainder, RSTART + RLENGTH)
+      }
+      if (invalid) print
+    }
+  '
+)"
+if [ -n "$runtime_untracked_inputs" ]; then
+  echo "测试 runtime 存在未跟踪的构建上下文输入" >&2
+  exit 2
+fi
+
 RUNTIME_KEY="$({
-  sha256sum docker/base.Dockerfile
+  runtime_dockerfile_input | sha256sum
   sed 's/^version = .*/version = "0.0.0"/' pyproject.toml | sha256sum
+  printf 'platform=%s\nuse_ustc_mirror=%s\n' \
+    "$RUNTIME_PLATFORM" "$RUNTIME_USE_USTC_MIRROR" | sha256sum
 } | sha256sum | cut -c1-32)"
 
 runtime_name() {
@@ -144,8 +211,8 @@ start_runtime() {
   docker buildx build \
     --file docker/base.Dockerfile \
     --target "$target" \
-    --platform linux/amd64 \
-    --build-arg USE_USTC_MIRROR=0 \
+    --platform "$RUNTIME_PLATFORM" \
+    --build-arg "USE_USTC_MIRROR=$RUNTIME_USE_USTC_MIRROR" \
     "${cache_from[@]}" \
     --cache-to "type=registry,ref=ghcr.io/$OWNER_LC/$cache:buildcache,mode=max" \
     --metadata-file "$metadata" \
