@@ -547,6 +547,21 @@ def test_external_workflow_requires_explicit_urls_and_single_entrypoint() -> Non
         assert f"FLORI_EXTERNAL_{kind}_URL" in job["env"]
 
 
+def test_scheduler_image_carries_only_its_lazy_api_services() -> None:
+    dockerfile = (WORKFLOW.parents[2] / "docker/base.Dockerfile").read_text()
+    scheduler_stage = dockerfile.split("FROM common AS scheduler", 1)[1].split(
+        "\nFROM ", 1,
+    )[0]
+
+    assert "COPY api/__init__.py api/__init__.py" in scheduler_stage
+    assert "COPY api/services/ api/services/" in scheduler_stage
+    assert "COPY api/ api/" not in scheduler_stage
+    assert (
+        'RUN python -c "from api.services import concepts, evidence, radar"'
+        in scheduler_stage
+    )
+
+
 def test_worker_cli_installers_follow_official_latest_channels_and_refresh_cache() -> None:
     repo = WORKFLOW.parents[2]
     dockerfile = (repo / "docker" / "base.Dockerfile").read_text()

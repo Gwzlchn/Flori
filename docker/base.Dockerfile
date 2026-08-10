@@ -1,6 +1,6 @@
 # 多 stage 镜像拆分:各后端服务只装自己需要的依赖/系统包,镜像各自精简。
 #   common  : python + curl + pip 镜像源 + core 依赖(不含源码)——所有 stage 共享底座
-#   scheduler: 仅 core(scheduler/ + tunnel_stats/)—— 无 ffmpeg/claude/重 extras,最小
+#   scheduler: core + scheduler惰性服务边界——无 routes/ffmpeg/CLI/重 extras
 #   api     : +[api,mcp](api/ + mcp_server)—— api 不调 claude,无 ffmpeg/claude
 #   worker  : +ffmpeg+claude-code binary + [steps,gpu,worker] —— 唯一跑 claude、唯一重镜像
 #   test    : 全 pip extras + [test] 依赖,无 ffmpeg/claude 二进制、无 cn bake —— 仅给测试。
@@ -107,12 +107,16 @@ COPY docker/install-deno.sh /tmp/install-deno.sh
 RUN DENO_VERSION="${DENO_VERSION}" TARGETARCH="${TARGETARCH}" sh /tmp/install-deno.sh \
     && rm -f /tmp/install-deno.sh
 
-# scheduler:仅 core(调度器 + 通联上报)
+# scheduler:core + 调度器惰性调用的服务层,不携带 API routes
 FROM common AS scheduler
 COPY shared/ shared/
 COPY configs/ configs/
+COPY api/__init__.py api/__init__.py
+COPY api/services/ api/services/
 COPY scheduler/ scheduler/
 COPY tunnel_stats/ tunnel_stats/
+# Scheduler 惰性调用 Radar 与概念重综合;构建时验证精确复制的服务边界可导入。
+RUN python -c "from api.services import concepts, evidence, radar"
 ARG FLORI_BUILD_SHA=
 ENV FLORI_BUILD_SHA=${FLORI_BUILD_SHA}
 ARG FLORI_VERSION=

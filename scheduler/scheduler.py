@@ -142,8 +142,7 @@ class Scheduler:
         d = today or datetime.now(timezone.utc).date()
         if d.weekday() != dow % 7:
             return 0
-        # api.services.radar 是纯函数服务层(只依赖 shared.db),调度器可安全复用;
-        # 惰性导入避免 scheduler 启动期背上 api 包。
+        # api.services 由 scheduler target 精确复制,不引入 routes 或其它 API 层。
         from api.services import radar as radar_service
         import uuid
 
