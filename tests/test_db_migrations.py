@@ -23,6 +23,7 @@ from shared.migrations import v0004_study_suggestions as migration_v4
 from shared.migrations import v0005_canonical_evidence as migration_v5
 from shared.migrations import v0006_concept_definition_history as migration_v6
 from shared.migrations import v0007_unified_document as migration_v7
+from shared.migrations import v0011_qoder_credit_accounting as migration_v11
 from shared.migrations import (
     Migration,
     MigrationExecutionError,
@@ -1096,12 +1097,70 @@ def test_v9_to_v10_backfills_fixated_empty_projections_as_due_retry(
         "last_attempt_at": None,
         "next_retry_at": "1970-01-01T00:00:00+00:00",
         "updated_at": "1970-01-01T00:00:00+00:00",
+        "projector_version": 1,
     }
     assert database.get_concept_occurrence_replay_state("job-full") is None
     # 回填行立即到期,升级后第一拍就回到候选窗口。
     assert [
         job.id for job in database.list_unreconciled_concept_occurrence_jobs()
     ] == ["job-fixated"]
+    database.close()
+
+
+def test_v11_to_v12_backfills_projector_version_and_current_schema(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "projector-v12.db")
+    run_migrations(database._conn, database._migration_steps(), target_version=11)
+    source_digest = "sha256:" + "a" * 64
+    projection_digest = "sha256:" + hashlib.sha256(b"[]").hexdigest()
+    database._conn.execute(
+        """INSERT INTO jobs
+           (id,content_type,document_kind,pipeline,title,domain,status,
+            is_current,created_at,updated_at)
+           VALUES ('job-v11','document','article','document','job-v11','general',
+                   'done',1,'2026-01-01T00:00:00+00:00',
+                   '2026-01-01T00:00:00+00:00')"""
+    )
+    database._conn.execute(
+        """INSERT INTO concept_occurrence_projection
+           (job_id, source_digest, projection_digest, reconciled_at)
+           VALUES ('job-v11', ?, ?, '2026-01-02T00:00:00+00:00')""",
+        (source_digest, projection_digest),
+    )
+    database._conn.execute(
+        """INSERT INTO concept_occurrence_replay_state
+           (job_id, state, reason, source_digest, attempt_count,
+            last_attempt_at, next_retry_at, updated_at)
+           VALUES ('job-v11', 'verified_empty', 'truly_empty', ?, 3,
+                   '2026-01-02T00:00:00+00:00', NULL,
+                   '2026-01-02T00:00:00+00:00')""",
+        (source_digest,),
+    )
+    database._conn.commit()
+
+    assert run_migrations(database._conn, database._migration_steps()) == 12
+    migration_current.validate(database._conn)
+    assert database.get_concept_occurrence_projection_pair("job-v11") == (
+        source_digest, projection_digest, 1,
+    )
+    assert database.get_concept_occurrence_replay_state(
+        "job-v11",
+    )["projector_version"] == 1
+    for table in (
+        "concept_occurrence_projection", "concept_occurrence_replay_state",
+    ):
+        column = next(
+            row for row in database._conn.execute(f"PRAGMA table_info({table})")
+            if row["name"] == "projector_version"
+        )
+        assert column["type"] == "INTEGER"
+        assert column["notnull"] == 1
+        assert column["dflt_value"] == "1"
+        with pytest.raises(sqlite3.IntegrityError):
+            database._conn.execute(
+                f"UPDATE {table} SET projector_version=0 WHERE job_id='job-v11'"
+            )
     database.close()
 
 
@@ -1124,8 +1183,10 @@ def test_v10_to_v11_adds_nullable_credits_without_forging_zero(
     )
     database._conn.commit()
 
-    assert run_migrations(database._conn, database._migration_steps()) == 11
-    migration_current.validate(database._conn)
+    assert run_migrations(
+        database._conn, database._migration_steps(), target_version=11,
+    ) == 11
+    migration_v11.validate(database._conn)
     assert database._conn.execute(
         "SELECT credits FROM ai_usage WHERE exec_id='legacy-usage'"
     ).fetchone()[0] is None

@@ -208,6 +208,13 @@ def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def validate_source_segment_id(value: Any) -> str:
+    """校验 source/provenance 共用的 segment ID 域,不假定 producer 前缀。"""
+    if type(value) is not str or _ID_RE.fullmatch(value) is None:
+        raise ValueError("source segment id is invalid")
+    return value
+
+
 def make_segment_id(
     source_id: str,
     *,
@@ -302,7 +309,7 @@ def validate_source_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
             else _SOURCE_SEGMENT_KEYS_V1
         )
         _require_exact_keys(segment, segment_keys, label)
-        segment_id = _require_id(segment["segment_id"], f"{label}.segment_id")
+        segment_id = validate_source_segment_id(segment["segment_id"])
         if segment_id in segment_ids:
             raise ValueError(f"duplicate segment_id: {segment_id}")
         segment_ids.add(segment_id)
@@ -464,7 +471,7 @@ def validate_provenance_manifest(
         )
         seen_refs: set[str] = set()
         for ref_index, ref in enumerate(refs):
-            ref = _require_id(ref, f"{label}.source_segment_ids[{ref_index}]")
+            ref = validate_source_segment_id(ref)
             if ref in seen_refs:
                 raise ValueError(f"duplicate source segment ref: {ref}")
             if ref not in known_segments:
@@ -618,7 +625,7 @@ def build_semantic_attestation_mapping(
     _require_sha256(batch_id, "semantic batch_id")
     if validated_source["job_id"] != job_id:
         raise ValueError("semantic attestation source belongs to another job")
-    source_segment_id = _require_id(source_segment_id, "source_segment_id")
+    source_segment_id = validate_source_segment_id(source_segment_id)
     segment = next(
         (
             item for item in validated_source["segments"]
@@ -1079,8 +1086,8 @@ def validate_provenance_candidate_manifest(
         prefix = _require_text(candidate["prefix"], f"{label}.prefix")
         suffix = _require_text(candidate["suffix"], f"{label}.suffix")
         _require_optional_text(candidate["section"], f"{label}.section", allow_empty=False)
-        source_segment_id = _require_id(
-            candidate["source_segment_id"], f"{label}.source_segment_id",
+        source_segment_id = validate_source_segment_id(
+            candidate["source_segment_id"],
         )
         segment = source_segments.get(source_segment_id)
         if segment is None:

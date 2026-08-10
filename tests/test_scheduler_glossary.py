@@ -14,9 +14,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from scheduler.effects import ConceptSourceUnavailableError
+from scheduler.effects import (
+    ConceptSourceUnavailableError,
+    _concept_projection_source_digest,
+)
 from scheduler.scheduler import Scheduler
-from shared.db import ConceptConflictError, Database, _EMPTY_CONCEPT_PROJECTION_DIGEST
+from shared.concept_projection import CURRENT_CONCEPT_PROJECTOR_VERSION
+from shared.db import (
+    ConceptConflictError,
+    Database,
+    _EMPTY_CONCEPT_PROJECTION_DIGEST,
+)
 from shared.models import Job, JobStatus
 
 
@@ -140,6 +148,7 @@ class _DBStub:
         self.occurrence_replacements: list[dict] = []
         self.occurrence_projection_sources: dict[str, str] = {}
         self.occurrence_projection_empty: dict[str, bool] = {}
+        self.occurrence_projection_versions: dict[str, int] = {}
         self.definition_states: dict[str, dict] = {}
         self.replay_states: dict[str, dict] = {}
         self.replay_failures: list[dict] = []
@@ -190,13 +199,22 @@ class _DBStub:
         self, *, domain, job_id, mapping,
         projection_source_digest=None,
         expected_projection_source_digest=None,
+        expected_projection_projector_version=None,
         projection_empty_reason="no_canonical_evidence",
     ):
         if projection_source_digest is not None:
             assert self.occurrence_projection_sources.get(job_id) \
                 == expected_projection_source_digest
+            current_version = (
+                self.occurrence_projection_versions.get(job_id, 1)
+                if job_id in self.occurrence_projection_sources else None
+            )
+            assert current_version == expected_projection_projector_version
             self.occurrence_projection_sources[job_id] = projection_source_digest
             self.occurrence_projection_empty[job_id] = not mapping
+            self.occurrence_projection_versions[job_id] = (
+                CURRENT_CONCEPT_PROJECTOR_VERSION
+            )
             if mapping:
                 self.replay_states.pop(job_id, None)
             else:
@@ -204,6 +222,7 @@ class _DBStub:
                     "state": "verified_empty",
                     "reason": projection_empty_reason,
                     "source_digest": projection_source_digest,
+                    "projector_version": CURRENT_CONCEPT_PROJECTOR_VERSION,
                 }
         self.occurrence_replacements.append({
             "domain": domain,
@@ -218,7 +237,11 @@ class _DBStub:
         if src is None:
             return None
         empty = self.occurrence_projection_empty.get(job_id, True)
-        return (src, _EMPTY_CONCEPT_PROJECTION_DIGEST if empty else "sha256:nonempty")
+        return (
+            src,
+            _EMPTY_CONCEPT_PROJECTION_DIGEST if empty else "sha256:nonempty",
+            self.occurrence_projection_versions.get(job_id, 1),
+        )
 
     def get_concept_occurrence_replay_state(self, job_id: str):
         return self.replay_states.get(job_id)
@@ -247,6 +270,30 @@ def _make_engine(storage, db):
     # _collect_glossary 仅用 self.storage / self.db;config 只需提供 jobs_dir。
     config = SimpleNamespace(jobs_dir=Path("/tmp/does-not-matter"))
     return Scheduler(redis=None, db=db, config=config, storage=storage)
+
+
+def _set_projection_digest_at_current_version(db, job_id: str, digest: str) -> None:
+    """模拟 current writer 发布，绕过专门识别旧 UPDATE writer 的兼容触发器。"""
+    row = db._conn.execute(
+        "SELECT source_digest, reconciled_at"
+        " FROM concept_occurrence_projection WHERE job_id=?",
+        (job_id,),
+    ).fetchone()
+    assert row is not None
+    db._conn.execute(
+        "DELETE FROM concept_occurrence_projection WHERE job_id=?",
+        (job_id,),
+    )
+    db._conn.execute(
+        """INSERT INTO concept_occurrence_projection
+           (job_id, source_digest, projection_digest, reconciled_at,
+            projector_version)
+           VALUES (?, ?, ?, ?, ?)""",
+        (
+            job_id, row["source_digest"], digest, row["reconciled_at"],
+            CURRENT_CONCEPT_PROJECTOR_VERSION,
+        ),
+    )
 
 
 @pytest.mark.asyncio
@@ -395,6 +442,8 @@ async def test_prefers_concepts_json_when_present():
 
 _SEGMENT_A = "seg_" + "a" * 64
 _SEGMENT_B = "seg_" + "b" * 64
+_SEGMENT_BLOCK = "blk_0e9bbed914442b095874"
+_SEGMENT_HIERARCHICAL = "S1.P1"
 
 
 @pytest.mark.asyncio
@@ -424,6 +473,61 @@ async def test_concept_source_segments_resolve_to_canonical_occurrences():
     assert db.occurrence_replacements[-1]["mapping"] == {
         "Transformer": ["ev-a", "ev-b"],
     }
+
+
+@pytest.mark.asyncio
+async def test_concept_source_segment_contract_accepts_producer_ids_and_rejects_junk():
+    concepts = {
+        "evidence_note_type": "smart",
+        "key_terms": [{
+            "term": "Transformer",
+            "definition": "d",
+            "evidence_source_segment_ids": [
+                _SEGMENT_BLOCK,
+                _SEGMENT_HIERARCHICAL,
+                "_leading",
+                "a" * 129,
+                _SEGMENT_BLOCK,
+            ],
+        }],
+    }
+    db = _DBStub(domain="dl")
+    db.canonical_by_segment = {
+        _SEGMENT_BLOCK: ["ev-block"],
+        _SEGMENT_HIERARCHICAL: ["ev-hierarchical"],
+    }
+    engine = _make_engine(_ConceptsStorageStub(concepts), db)
+
+    await engine._collect_glossary("j-producer-ids")
+
+    assert db.canonical_queries == [{
+        "job_id": "j-producer-ids",
+        "note_type": "smart",
+        "source_segment_ids": [_SEGMENT_BLOCK, _SEGMENT_HIERARCHICAL],
+    }]
+    assert db.occurrence_replacements[-1]["mapping"] == {
+        "Transformer": ["ev-block", "ev-hierarchical"],
+    }
+
+
+def test_concept_source_segment_mapping_rejects_over_budget_input():
+    db = _DBStub(domain="dl")
+    engine = _make_engine(_ConceptsStorageStub({"key_terms": []}), db)
+
+    with pytest.raises(ValueError, match="source refs exceed binding budget"):
+        engine._replace_concept_occurrences(
+            "dl",
+            "j-over-budget",
+            [{
+                "term": "Transformer",
+                "evidence_source_segment_ids": [
+                    f"blk_{index}" for index in range(501)
+                ],
+            }],
+            "smart",
+        )
+
+    assert db.canonical_queries == []
 
 
 @pytest.mark.asyncio
@@ -664,11 +768,9 @@ def test_occurrence_projection_ledger_preserves_retry_after_fts_success(tmp_path
             job.id for job in db.list_unreconciled_concept_occurrence_jobs()
         ] == ["job-retry-occurrence"]
 
-        # 非空投影才彻底不需要判定行;直接改写 projection_digest 模拟成功重放后的行。
-        db._conn.execute(
-            """UPDATE concept_occurrence_projection
-               SET projection_digest=? WHERE job_id=?""",
-            ("sha256:" + "2" * 64, "job-retry-occurrence"),
+        # 非空投影才彻底不需要判定行;模拟 current writer 成功发布后的行。
+        _set_projection_digest_at_current_version(
+            db, "job-retry-occurrence", "sha256:" + "2" * 64,
         )
         db._conn.commit()
         assert db.list_unreconciled_concept_occurrence_jobs() == []
@@ -716,7 +818,7 @@ def test_occurrence_projection_source_publish_is_compare_and_swap(tmp_path):
             "job-occurrence-cas",
         ) == source_a
 
-        with pytest.raises(ConceptConflictError, match="source changed"):
+        with pytest.raises(ConceptConflictError, match="source or version changed"):
             db.replace_job_concept_occurrences(
                 domain="general",
                 job_id="job-occurrence-cas",
@@ -734,6 +836,9 @@ def test_occurrence_projection_source_publish_is_compare_and_swap(tmp_path):
             mapping={},
             projection_source_digest=source_b,
             expected_projection_source_digest=source_a,
+            expected_projection_projector_version=(
+                CURRENT_CONCEPT_PROJECTOR_VERSION
+            ),
         )
         assert db.get_concept_occurrence_projection_source(
             "job-occurrence-cas",
@@ -1303,10 +1408,8 @@ def test_replay_failure_ledger_guards_and_bounded_backoff(tmp_path):
         )["state"] == "verified_empty"
 
         # 非空投影已离池:同样不写退避账本。
-        db._conn.execute(
-            """UPDATE concept_occurrence_projection
-               SET projection_digest=? WHERE job_id=?""",
-            ("sha256:" + "2" * 64, "job-ledger"),
+        _set_projection_digest_at_current_version(
+            db, "job-ledger", "sha256:" + "2" * 64,
         )
         db._conn.commit()
         assert db.record_concept_occurrence_replay_failure(
@@ -1406,7 +1509,7 @@ async def test_matching_digest_with_nonempty_source_must_recompute():
         "key_terms": [{"term": "Alpha", "evidence_source_segment_ids": [_SEGMENT_A]}],
     }
     payload = json.dumps(source, ensure_ascii=False).encode("utf-8")
-    real_digest = "sha256:" + hashlib.sha256(b"concepts\0" + payload).hexdigest()
+    real_digest = _concept_projection_source_digest("concepts", payload)
     # 错误现场:源有概念且证据可映射, 却按真实源摘要发布了空投影, 且无判定行。
     db.occurrence_projection_sources["j_wrong"] = real_digest
     db.occurrence_projection_empty["j_wrong"] = True
@@ -1426,8 +1529,38 @@ async def test_matching_digest_with_nonempty_source_must_recompute():
 
 
 @pytest.mark.asyncio
+async def test_stale_projector_version_never_short_circuits_verified_empty():
+    payload = {"key_terms": []}
+    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    digest = _concept_projection_source_digest("concepts", raw)
+    db = _DBStub(domain="ml")
+    db.occurrence_projection_sources["j_v1"] = digest
+    db.occurrence_projection_empty["j_v1"] = True
+    db.occurrence_projection_versions["j_v1"] = 1
+    db.replay_states["j_v1"] = {
+        "state": "verified_empty",
+        "reason": "truly_empty",
+        "source_digest": digest,
+        "projector_version": 1,
+    }
+    engine = _make_engine(_PerJobConceptsStorage({"j_v1": raw}), db)
+
+    assert await engine.reconcile_concept_occurrences_only("j_v1") == 0
+    assert len(db.occurrence_replacements) == 1
+    assert db.occurrence_projection_versions["j_v1"] == (
+        CURRENT_CONCEPT_PROJECTOR_VERSION
+    )
+    assert db.replay_states["j_v1"]["projector_version"] == (
+        CURRENT_CONCEPT_PROJECTOR_VERSION
+    )
+
+    assert await engine.reconcile_concept_occurrences_only("j_v1") == 0
+    assert len(db.occurrence_replacements) == 1
+
+
+@pytest.mark.asyncio
 async def test_legacy_empty_marker_with_matching_source_becomes_verified(tmp_path):
-    # 15340ba 时代合法的空投影行(真实源摘要,无判定行):一次复核读源确认
+    # 旧版合法的空投影行(真实源摘要,无判定行):一次复核读源确认
     # digest 一致后固化为 verified_empty,不重发布、不再回炉。
     db = Database(tmp_path / "legacy-legit-empty.db")
     try:
@@ -1436,12 +1569,12 @@ async def test_legacy_empty_marker_with_matching_source_becomes_verified(tmp_pat
         payload = json.dumps(
             {"key_terms": []}, ensure_ascii=False,
         ).encode("utf-8")
-        real_digest = "sha256:" + hashlib.sha256(
+        legacy_digest = "sha256:" + hashlib.sha256(
             b"concepts\0" + payload,
         ).hexdigest()
         db.replace_job_concept_occurrences(
             domain="general", job_id="job-legacy", mapping={},
-            projection_source_digest=real_digest,
+            projection_source_digest=legacy_digest,
             expected_projection_source_digest=None,
             projection_empty_reason="truly_empty",
         )
@@ -1462,7 +1595,9 @@ async def test_legacy_empty_marker_with_matching_source_becomes_verified(tmp_pat
         assert state["state"] == "verified_empty"
         # 不再按 marker 摘要认证;真重算一次,算出来确实为空才落判定。
         assert state["reason"] == "truly_empty"
-        assert state["source_digest"] == real_digest
+        current_digest = _concept_projection_source_digest("concepts", payload)
+        assert state["source_digest"] == current_digest
+        assert state["projector_version"] == CURRENT_CONCEPT_PROJECTOR_VERSION
         # 旧实现按 marker 摘要短路, 所以 marker 原样不动;现在必须真重算一次,
         # reconciled_at 会刷新。要守的不变量是投影内容没被改坏:仍绑同一源摘要且仍为空集。
         row = db._conn.execute(
@@ -1470,7 +1605,7 @@ async def test_legacy_empty_marker_with_matching_source_becomes_verified(tmp_pat
             " FROM concept_occurrence_projection WHERE job_id=?",
             ("job-legacy",),
         ).fetchone()
-        assert row[0] == real_digest
+        assert row[0] == current_digest
         assert row[1] == _EMPTY_CONCEPT_PROJECTION_DIGEST
         assert db.list_unreconciled_concept_occurrence_jobs() == []
         assert storage.reads["job-legacy"] == 1

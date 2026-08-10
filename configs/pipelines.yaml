@@ -216,10 +216,11 @@ video:
       extends: .ai-step
       run: steps.common.step_concepts
       prompt_template: 05_concepts
-      version: "5"
+      version: "6"
       # 统一概念步:视频以最新版智能笔记为源(必有,11_smart 必跑)。
       needs: ["11_semantic_attestation"]
-      timeout: 120
+      # 证据绑定反馈最多追加一次完整 CLI 调用,预算必须覆盖两轮慢 provider。
+      timeout: 1800
       tags: []
       ai:
         allowed_providers: [claude-cli, codex-cli, qoder-cli]
@@ -354,9 +355,10 @@ document:
       extends: .ai-step
       run: steps.document.step_07_concepts
       prompt_template: 05_concepts
-      version: "1"
+      version: "2"
       needs: ["06_semantic_attestation"]
-      timeout: 120
+      # 证据绑定反馈最多追加一次完整 CLI 调用,预算必须覆盖两轮慢 provider。
+      timeout: 1800
       tags: []
       ai:
         allowed_providers: [claude-cli, codex-cli, qoder-cli]
@@ -464,10 +466,11 @@ audio:
       label: "概念 + 摘要"
       extends: .ai-step
       run: steps.common.step_concepts
-      version: "5"
+      version: "6"
       # 统一概念步:播客以智能笔记为源。
       needs: ["04_semantic_attestation"]
-      timeout: 120
+      # 证据绑定反馈最多追加一次完整 CLI 调用,预算必须覆盖两轮慢 provider。
+      timeout: 1800
       tags: []
       ai:
         allowed_providers: [claude-cli, codex-cli, qoder-cli]

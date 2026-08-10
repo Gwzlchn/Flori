@@ -7,7 +7,11 @@ import hashlib
 
 import pytest
 
-from shared.concept_evidence import attach_concept_source_segments
+import shared.concept_evidence as concept_evidence
+from shared.concept_evidence import (
+    attach_concept_source_segments,
+    validate_concept_evidence_snapshot,
+)
 from shared.note_text import markdown_to_index_text
 from shared.provenance import (
     build_provenance_manifest,
@@ -93,7 +97,7 @@ def _sidecars(
     return note, source, provenance, [item["segment_id"] for item in segments]
 
 
-def _attach(key_terms, *, note, source, provenance, **overrides):
+def _snapshot(*, note, source, provenance, **overrides):
     arguments = {
         "job_id": "job-concepts",
         "pipeline": "document",
@@ -103,11 +107,19 @@ def _attach(key_terms, *, note, source, provenance, **overrides):
         "normalized_body": markdown_to_index_text(note.decode()),
         "source_manifest_path": "intermediate/source_segments.json",
         "source_manifest_data": canonical_json_bytes(source),
-        "provenance_path": "output/provenance/original.json",
         "provenance_data": canonical_json_bytes(provenance),
     }
     arguments.update(overrides)
-    return attach_concept_source_segments(key_terms, **arguments)
+    return validate_concept_evidence_snapshot(**arguments)
+
+
+def _attach(key_terms, *, note, source, provenance, **overrides):
+    return attach_concept_source_segments(
+        key_terms,
+        snapshot=_snapshot(
+            note=note, source=source, provenance=provenance, **overrides,
+        ),
+    )
 
 
 def test_exact_anchor_matches_multiple_terms_and_multiple_anchors():
@@ -115,6 +127,7 @@ def test_exact_anchor_matches_multiple_terms_and_multiple_anchors():
     terms = [
         {"term": "Transformer", "evidence_source_segment_ids": ["seg_" + "f" * 64]},
         {"term": "注意力机制", "zh_name": None},
+        {"term": "Attention mechanism", "zh_name": "注意力机制"},
         {"term": "form"},
     ]
 
@@ -122,7 +135,9 @@ def test_exact_anchor_matches_multiple_terms_and_multiple_anchors():
 
     assert attached[0]["evidence_source_segment_ids"] == segment_ids
     assert attached[1]["evidence_source_segment_ids"] == [segment_ids[0]]
-    assert attached[2]["evidence_source_segment_ids"] == []
+    assert attached[2]["evidence_source_segment_ids"] == [segment_ids[0]]
+    assert attached[3]["evidence_source_segment_ids"] == []
+    assert attached[0]["evidence_source_segment_ids"] != ["seg_" + "f" * 64]
 
 
 @pytest.mark.parametrize(
@@ -137,14 +152,13 @@ def test_exact_anchor_matches_multiple_terms_and_multiple_anchors():
 )
 def test_invalid_identity_path_hash_or_sidecar_fails_closed(overrides):
     note, source, provenance, _ = _sidecars()
-    attached = _attach(
-        [{"term": "Transformer", "evidence_source_segment_ids": ["forged"]}],
-        note=note,
-        source=source,
-        provenance=provenance,
-        **overrides,
-    )
-    assert attached[0]["evidence_source_segment_ids"] == []
+    with pytest.raises((TypeError, ValueError)):
+        _snapshot(
+            note=note,
+            source=source,
+            provenance=provenance,
+            **overrides,
+        )
 
 
 def test_valid_empty_translation_provenance_never_binds():
@@ -160,7 +174,6 @@ def test_valid_empty_translation_provenance_never_binds():
         provenance=provenance,
         note_type="translated",
         note_path="output/translated.html",
-        provenance_path="output/provenance/translated.json",
     )
     assert attached[0]["evidence_source_segment_ids"] == []
 
@@ -170,12 +183,43 @@ def test_source_manifest_hash_change_fails_closed():
     changed_source = copy.deepcopy(source)
     changed_source["source_artifacts"][0]["sha256"] = "0" * 64
 
-    attached = _attach(
-        [{"term": "Transformer"}],
-        note=note,
-        source=source,
-        provenance=provenance,
-        source_manifest_data=canonical_json_bytes(changed_source),
+    with pytest.raises(ValueError):
+        _snapshot(
+            note=note,
+            source=source,
+            provenance=provenance,
+            source_manifest_data=canonical_json_bytes(changed_source),
+        )
+
+
+def test_prompt_anchor_budget_selects_only_complete_utf8_items(monkeypatch):
+    note, source, provenance, _ = _sidecars()
+    first = "Alpha Transformer 注意力机制。"
+    monkeypatch.setattr(
+        concept_evidence,
+        "MAX_CONCEPT_EVIDENCE_ANCHORS_BYTES",
+        len(canonical_json_bytes({"anchors": [first]})),
     )
 
-    assert attached[0]["evidence_source_segment_ids"] == []
+    snapshot = _snapshot(note=note, source=source, provenance=provenance)
+
+    assert snapshot.prompt_anchors() == (first,)
+    assert snapshot.truncated is True
+
+    monkeypatch.setattr(
+        concept_evidence,
+        "MAX_CONCEPT_EVIDENCE_ANCHORS_BYTES",
+        len(canonical_json_bytes({"anchors": [first]})) - 1,
+    )
+    snapshot = _snapshot(note=note, source=source, provenance=provenance)
+    assert snapshot.prompt_anchors() == ("Beta Transformer works.",)
+
+
+def test_nonempty_provenance_with_no_complete_anchor_in_budget_fails(monkeypatch):
+    note, source, provenance, _ = _sidecars()
+    monkeypatch.setattr(
+        concept_evidence, "MAX_CONCEPT_EVIDENCE_ANCHORS_BYTES", 8,
+    )
+
+    with pytest.raises(ValueError, match="anchors exceed prompt budget"):
+        _snapshot(note=note, source=source, provenance=provenance)

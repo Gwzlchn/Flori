@@ -139,6 +139,12 @@ class TestClassifyTable:
     def test_rebuildable_and_forbidden(self):
         assert classify_table("job_steps")[0] == CATEGORY_REBUILDABLE
         assert classify_table("schema_migrations")[0] == CATEGORY_REBUILDABLE
+        assert classify_table(
+            "concept_occurrence_projection",
+        )[0] == CATEGORY_REBUILDABLE
+        assert classify_table(
+            "concept_occurrence_replay_state",
+        )[0] == CATEGORY_REBUILDABLE
         assert classify_table("app_credentials")[0] == CATEGORY_FORBIDDEN
         assert classify_table("worker_tokens")[0] == CATEGORY_FORBIDDEN
 

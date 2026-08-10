@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .seams import db as _db
 
+from ..concept_projection import CURRENT_CONCEPT_PROJECTOR_VERSION
 from ..db import (
     DEFAULT_AI_MODEL,
     DEFAULT_AI_PROVIDER,
@@ -127,18 +128,26 @@ def _upsert_verified_empty_state(
     connection, job_id: str, *, source_digest: str, reason: str, now: str,
 ) -> None:
     """落绑定源摘要的空集判定;保留 attempt 历史,清 next_retry 使其离开重试轨。"""
+    previous = connection.execute(
+        """SELECT attempt_count, last_attempt_at
+           FROM concept_occurrence_replay_state WHERE job_id=?""",
+        (job_id,),
+    ).fetchone()
+    attempt_count = int(previous["attempt_count"]) if previous is not None else 0
+    last_attempt_at = previous["last_attempt_at"] if previous is not None else None
+    connection.execute(
+        "DELETE FROM concept_occurrence_replay_state WHERE job_id=?",
+        (job_id,),
+    )
     connection.execute(
         """INSERT INTO concept_occurrence_replay_state
            (job_id, state, reason, source_digest, attempt_count,
-            last_attempt_at, next_retry_at, updated_at)
-           VALUES (?, 'verified_empty', ?, ?, 0, NULL, NULL, ?)
-           ON CONFLICT(job_id) DO UPDATE SET
-             state='verified_empty',
-             reason=excluded.reason,
-             source_digest=excluded.source_digest,
-             next_retry_at=NULL,
-             updated_at=excluded.updated_at""",
-        (job_id, reason, source_digest, now),
+            last_attempt_at, next_retry_at, updated_at, projector_version)
+           VALUES (?, 'verified_empty', ?, ?, ?, ?, NULL, ?, ?)""",
+        (
+            job_id, reason, source_digest, attempt_count, last_attempt_at, now,
+            CURRENT_CONCEPT_PROJECTOR_VERSION,
+        ),
     )
 
 
@@ -911,6 +920,7 @@ class DatabaseAggregates:
         mapping: dict[str, list[str]],
         projection_source_digest: str | None = None,
         expected_projection_source_digest: str | None = None,
+        expected_projection_projector_version: int | None = None,
         projection_empty_reason: str = "no_canonical_evidence",
     ) -> bool:
         """原子对账 occurrence;给源摘要时同事务CAS发布投影账本。
@@ -937,6 +947,14 @@ class DatabaseAggregates:
             or any(ch not in "0123456789abcdef" for ch in projection_source_digest[7:])
         ):
             raise ValueError("projection_source_digest 必须是 sha256 摘要")
+        if (
+            expected_projection_projector_version is not None
+            and (
+                type(expected_projection_projector_version) is not int
+                or expected_projection_projector_version < 1
+            )
+        ):
+            raise ValueError("expected_projection_projector_version 必须是正整数")
         projection_digest = "sha256:" + hashlib.sha256(
             json.dumps(expected, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
@@ -951,14 +969,23 @@ class DatabaseAggregates:
                     raise ConceptEvidenceError("job 不存在或 domain 不属于请求 concept")
                 if projection_source_digest is not None:
                     marker = self._conn.execute(
-                        """SELECT source_digest FROM concept_occurrence_projection
+                        """SELECT source_digest, projector_version
+                           FROM concept_occurrence_projection
                            WHERE job_id=?""",
                         (job_id,),
                     ).fetchone()
                     current_source = str(marker["source_digest"]) if marker else None
-                    if current_source != expected_projection_source_digest:
+                    current_version = (
+                        int(marker["projector_version"])
+                        if marker is not None else None
+                    )
+                    if (
+                        current_source != expected_projection_source_digest
+                        or current_version != expected_projection_projector_version
+                    ):
                         raise ConceptConflictError(
-                            "concept occurrence projection source changed during replay"
+                            "concept occurrence projection source or version "
+                            "changed during replay"
                         )
                 if normalized:
                     terms = sorted(normalized)
@@ -1033,14 +1060,18 @@ class DatabaseAggregates:
                     )
                 if projection_source_digest is not None:
                     self._conn.execute(
+                        "DELETE FROM concept_occurrence_projection WHERE job_id=?",
+                        (job_id,),
+                    )
+                    self._conn.execute(
                         """INSERT INTO concept_occurrence_projection
-                           (job_id, source_digest, projection_digest, reconciled_at)
-                           VALUES (?, ?, ?, ?)
-                           ON CONFLICT(job_id) DO UPDATE SET
-                             source_digest=excluded.source_digest,
-                             projection_digest=excluded.projection_digest,
-                             reconciled_at=excluded.reconciled_at""",
-                        (job_id, projection_source_digest, projection_digest, now),
+                           (job_id, source_digest, projection_digest, reconciled_at,
+                            projector_version)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (
+                            job_id, projection_source_digest, projection_digest, now,
+                            CURRENT_CONCEPT_PROJECTOR_VERSION,
+                        ),
                     )
                     if expected:
                         self._conn.execute(
@@ -1093,26 +1124,32 @@ class DatabaseAggregates:
             try:
                 self._conn.execute("BEGIN IMMEDIATE")
                 marker = self._conn.execute(
-                    """SELECT source_digest, projection_digest
+                    """SELECT source_digest, projection_digest, projector_version
                        FROM concept_occurrence_projection WHERE job_id=?""",
                     (job_id,),
                 ).fetchone()
                 if (
                     marker is not None
+                    and int(marker["projector_version"])
+                    == CURRENT_CONCEPT_PROJECTOR_VERSION
                     and str(marker["projection_digest"])
                     != _EMPTY_CONCEPT_PROJECTION_DIGEST
                 ):
                     self._conn.rollback()
                     return None
                 state = self._conn.execute(
-                    """SELECT state, source_digest, attempt_count
+                    """SELECT state, source_digest, attempt_count, projector_version
                        FROM concept_occurrence_replay_state WHERE job_id=?""",
                     (job_id,),
                 ).fetchone()
                 if (
                     state is not None
+                    and int(state["projector_version"])
+                    == CURRENT_CONCEPT_PROJECTOR_VERSION
                     and str(state["state"]) == "verified_empty"
                     and marker is not None
+                    and int(marker["projector_version"])
+                    == CURRENT_CONCEPT_PROJECTOR_VERSION
                     and state["source_digest"] == marker["source_digest"]
                 ):
                     self._conn.rollback()
@@ -1122,19 +1159,18 @@ class DatabaseAggregates:
                 delay = min(cap, base * (2 ** min(attempt - 1, 20)))
                 next_retry = (now_dt + timedelta(seconds=delay)).isoformat()
                 self._conn.execute(
+                    "DELETE FROM concept_occurrence_replay_state WHERE job_id=?",
+                    (job_id,),
+                )
+                self._conn.execute(
                     """INSERT INTO concept_occurrence_replay_state
                        (job_id, state, reason, source_digest, attempt_count,
-                        last_attempt_at, next_retry_at, updated_at)
-                       VALUES (?, 'retry', ?, NULL, ?, ?, ?, ?)
-                       ON CONFLICT(job_id) DO UPDATE SET
-                         state='retry',
-                         reason=excluded.reason,
-                         source_digest=NULL,
-                         attempt_count=excluded.attempt_count,
-                         last_attempt_at=excluded.last_attempt_at,
-                         next_retry_at=excluded.next_retry_at,
-                         updated_at=excluded.updated_at""",
-                    (job_id, reason, attempt, now_iso, next_retry, now_iso),
+                        last_attempt_at, next_retry_at, updated_at, projector_version)
+                       VALUES (?, 'retry', ?, NULL, ?, ?, ?, ?, ?)""",
+                    (
+                        job_id, reason, attempt, now_iso, next_retry, now_iso,
+                        CURRENT_CONCEPT_PROJECTOR_VERSION,
+                    ),
                 )
                 self._conn.commit()
                 return {
@@ -1144,6 +1180,7 @@ class DatabaseAggregates:
                     "attempt_count": attempt,
                     "last_attempt_at": now_iso,
                     "next_retry_at": next_retry,
+                    "projector_version": CURRENT_CONCEPT_PROJECTOR_VERSION,
                 }
             except BaseException:
                 if self._conn.in_transaction:

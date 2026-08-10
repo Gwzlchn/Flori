@@ -8,6 +8,7 @@ import sqlite3
 
 import pytest
 
+from shared.concept_projection import CURRENT_CONCEPT_PROJECTOR_VERSION
 from shared.db import (
     ConceptConflictError,
     ConceptEvidenceError,
@@ -227,6 +228,192 @@ def test_current_schema_keeps_frozen_concept_and_document_invariants(db: Databas
         for row in db._conn.execute("PRAGMA table_info(glossary)").fetchall()
     }
     assert {"current_definition_version_id", "lock_revision"} <= glossary_columns
+
+
+def test_stale_verified_empty_replays_once_and_publishes_current_version(
+    db: Database,
+) -> None:
+    _insert_job(db, "job-stale-projector", domain="ml")
+    db.index_job_notes(
+        "job-stale-projector", "original", "title", "body",
+        content_type="document", domain="ml",
+    )
+    source_digest = "sha256:" + "a" * 64
+    empty_digest = "sha256:" + hashlib.sha256(b"[]").hexdigest()
+    db._conn.execute(
+        """INSERT INTO concept_occurrence_projection
+           (job_id, source_digest, projection_digest, reconciled_at)
+           VALUES ('job-stale-projector', ?, ?, ?)""",
+        (source_digest, empty_digest, _NOW),
+    )
+    db._conn.execute(
+        """INSERT INTO concept_occurrence_replay_state
+           (job_id, state, reason, source_digest, attempt_count,
+            last_attempt_at, next_retry_at, updated_at)
+           VALUES ('job-stale-projector', 'verified_empty', 'truly_empty', ?,
+                   2, ?, NULL, ?)""",
+        (source_digest, _NOW, _NOW),
+    )
+    db._conn.commit()
+
+    assert db.get_concept_occurrence_projection_pair(
+        "job-stale-projector",
+    ) == (source_digest, empty_digest, 1)
+    assert db.get_concept_occurrence_replay_state(
+        "job-stale-projector",
+    )["projector_version"] == 1
+    assert [
+        job.id for job in db.list_unreconciled_concept_occurrence_jobs()
+    ] == ["job-stale-projector"]
+
+    assert not db.replace_job_concept_occurrences(
+        domain="ml",
+        job_id="job-stale-projector",
+        mapping={},
+        projection_source_digest=source_digest,
+        expected_projection_source_digest=source_digest,
+        expected_projection_projector_version=1,
+        projection_empty_reason="truly_empty",
+    )
+    assert db.get_concept_occurrence_projection_pair(
+        "job-stale-projector",
+    ) == (source_digest, empty_digest, CURRENT_CONCEPT_PROJECTOR_VERSION)
+    state = db.get_concept_occurrence_replay_state("job-stale-projector")
+    assert state["projector_version"] == CURRENT_CONCEPT_PROJECTOR_VERSION
+    assert state["attempt_count"] == 2
+    assert db.list_unreconciled_concept_occurrence_jobs() == []
+
+
+def test_projection_version_cas_and_empty_to_nonempty_are_atomic(
+    db: Database,
+) -> None:
+    _insert_job(db, "job-projector-cas", domain="ml")
+    evidence_id = _insert_evidence(db, "job-projector-cas", "segment:1")
+    db.upsert_glossary_term("ml", "RRF", "rank fusion")
+    source_a = "sha256:" + "a" * 64
+    source_b = "sha256:" + "b" * 64
+    db.replace_job_concept_occurrences(
+        domain="ml", job_id="job-projector-cas", mapping={},
+        projection_source_digest=source_a,
+        expected_projection_source_digest=None,
+        expected_projection_projector_version=None,
+        projection_empty_reason="truly_empty",
+    )
+    before_pair = db.get_concept_occurrence_projection_pair("job-projector-cas")
+    before_state = db.get_concept_occurrence_replay_state("job-projector-cas")
+
+    with pytest.raises(ConceptConflictError, match="source or version changed"):
+        db.replace_job_concept_occurrences(
+            domain="ml", job_id="job-projector-cas", mapping={"RRF": [evidence_id]},
+            projection_source_digest=source_b,
+            expected_projection_source_digest=source_a,
+            expected_projection_projector_version=1,
+        )
+    assert db.get_concept_occurrence_projection_pair("job-projector-cas") == before_pair
+    assert db.get_concept_occurrence_replay_state("job-projector-cas") == before_state
+    assert db.list_concept_occurrences("ml", "RRF") == []
+
+    assert db.replace_job_concept_occurrences(
+        domain="ml", job_id="job-projector-cas", mapping={"RRF": [evidence_id]},
+        projection_source_digest=source_b,
+        expected_projection_source_digest=source_a,
+        expected_projection_projector_version=CURRENT_CONCEPT_PROJECTOR_VERSION,
+    )
+    pair = db.get_concept_occurrence_projection_pair("job-projector-cas")
+    assert pair[0] == source_b
+    assert pair[2] == CURRENT_CONCEPT_PROJECTOR_VERSION
+    assert db.get_concept_occurrence_replay_state("job-projector-cas") is None
+    assert [
+        item["evidence_id"] for item in db.list_concept_occurrences("ml", "RRF")
+    ] == [evidence_id]
+
+    db.index_job_notes(
+        "job-projector-cas", "original", "title", "body",
+        content_type="document", domain="ml",
+    )
+    db._conn.execute(
+        """INSERT INTO concept_occurrence_replay_state
+           (job_id, state, reason, source_digest, attempt_count,
+            last_attempt_at, next_retry_at, updated_at)
+           VALUES ('job-projector-cas', 'retry', 'legacy_writer', NULL, 1,
+                   ?, '2099-01-01T00:00:00+00:00', ?)""",
+        (_NOW, _NOW),
+    )
+    db._conn.commit()
+    assert [
+        job.id for job in db.list_unreconciled_concept_occurrence_jobs()
+    ] == ["job-projector-cas"]
+
+
+def test_legacy_upserts_downgrade_v2_and_new_writer_restores_v2(
+    db: Database,
+) -> None:
+    _insert_job(db, "job-legacy-writer", domain="ml")
+    db.index_job_notes(
+        "job-legacy-writer", "original", "title", "body",
+        content_type="document", domain="ml",
+    )
+    source_a = "sha256:" + "a" * 64
+    source_b = "sha256:" + "b" * 64
+    empty_digest = "sha256:" + hashlib.sha256(b"[]").hexdigest()
+    db.replace_job_concept_occurrences(
+        domain="ml", job_id="job-legacy-writer", mapping={},
+        projection_source_digest=source_a,
+        expected_projection_source_digest=None,
+        expected_projection_projector_version=None,
+        projection_empty_reason="truly_empty",
+    )
+    db._conn.execute("PRAGMA recursive_triggers=ON")
+    db._conn.execute(
+        """INSERT INTO concept_occurrence_projection
+           (job_id, source_digest, projection_digest, reconciled_at)
+           VALUES ('job-legacy-writer', ?, ?, ?)
+           ON CONFLICT(job_id) DO UPDATE SET
+             source_digest=excluded.source_digest,
+             projection_digest=excluded.projection_digest,
+             reconciled_at=excluded.reconciled_at""",
+        (source_b, "sha256:" + "9" * 64, "2026-01-02T00:00:00+00:00"),
+    )
+    db._conn.execute(
+        """INSERT INTO concept_occurrence_replay_state
+           (job_id, state, reason, source_digest, attempt_count,
+            last_attempt_at, next_retry_at, updated_at)
+           VALUES ('job-legacy-writer', 'verified_empty', 'legacy_writer', ?,
+                   0, NULL, NULL, '2026-01-02T00:00:00+00:00')
+           ON CONFLICT(job_id) DO UPDATE SET
+             state=excluded.state,
+             reason=excluded.reason,
+             source_digest=excluded.source_digest,
+             next_retry_at=NULL,
+             updated_at=excluded.updated_at""",
+        (source_b,),
+    )
+    db._conn.commit()
+
+    assert db.get_concept_occurrence_projection_pair(
+        "job-legacy-writer",
+    ) == (source_b, "sha256:" + "9" * 64, 1)
+    assert db.get_concept_occurrence_replay_state(
+        "job-legacy-writer",
+    )["projector_version"] == 1
+    assert [
+        job.id for job in db.list_unreconciled_concept_occurrence_jobs()
+    ] == ["job-legacy-writer"]
+
+    assert not db.replace_job_concept_occurrences(
+        domain="ml", job_id="job-legacy-writer", mapping={},
+        projection_source_digest=source_b,
+        expected_projection_source_digest=source_b,
+        expected_projection_projector_version=1,
+        projection_empty_reason="truly_empty",
+    )
+    assert db.get_concept_occurrence_projection_pair(
+        "job-legacy-writer",
+    ) == (source_b, empty_digest, CURRENT_CONCEPT_PROJECTOR_VERSION)
+    assert db.get_concept_occurrence_replay_state(
+        "job-legacy-writer",
+    )["projector_version"] == CURRENT_CONCEPT_PROJECTOR_VERSION
+    assert db.list_unreconciled_concept_occurrence_jobs() == []
 
 
 def test_job_reconciliation_keeps_multiple_evidence_and_removes_disappeared_terms(

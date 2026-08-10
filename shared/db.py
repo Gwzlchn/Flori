@@ -2130,6 +2130,7 @@ class Database:
         mapping: dict[str, list[str]],
         projection_source_digest: str | None = None,
         expected_projection_source_digest: str | None = None,
+        expected_projection_projector_version: int | None = None,
         projection_empty_reason: str = "no_canonical_evidence",
     ) -> bool:
         """原子对账一个 job 的全部 concept/evidence 映射，移除消失概念。"""
@@ -2140,6 +2141,9 @@ class Database:
             mapping=mapping,
             projection_source_digest=projection_source_digest,
             expected_projection_source_digest=expected_projection_source_digest,
+            expected_projection_projector_version=(
+                expected_projection_projector_version
+            ),
             projection_empty_reason=projection_empty_reason,
         )
 
@@ -2504,13 +2508,15 @@ class Database:
         self, limit: int = 100, *, now: str | None = None,
     ) -> list[Job]:
         """返回 FTS 已就绪且 occurrence 投影待对账的当前 Job。
-        绑定当前 marker 的 verified_empty 判定离开候选池;retry 状态按
-        next_retry_at 退避,窗口按到期时间轮转,固定失败行不会饿死尾部。"""
+        旧 projector 版本无条件回炉;当前版本 verified_empty 可离池,retry
+        按 next_retry_at 退避,窗口按到期时间轮转。"""
         return _SearchRepository.list_unreconciled_concept_occurrence_jobs(
             self, limit, now=now,
         )
 
-    def get_concept_occurrence_projection_pair(self, job_id: str) -> tuple[str, str] | None:
+    def get_concept_occurrence_projection_pair(
+        self, job_id: str,
+    ) -> tuple[str, str, int] | None:
         return _SearchRepository.get_concept_occurrence_projection_pair(self, job_id)
 
     def get_concept_occurrence_projection_source(self, job_id: str) -> str | None:

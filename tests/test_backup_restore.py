@@ -1907,6 +1907,38 @@ def test_future_program_accepts_current_snapshot_when_history_prefix_matches(
     assert manifest["sqlite"]["user_version"] == _CURRENT_SCHEMA_VERSION
 
 
+def test_current_exact_dr_contains_projector_version_schema(tmp_path: Path):
+    archive, _ = _create(tmp_path, user_version=_CURRENT_SCHEMA_VERSION)
+    manifest = dr.validate_archive(archive)
+    extracted = tmp_path / "inspect-current-projector"
+    extracted.mkdir()
+    dr._extract_archive(archive, extracted)
+    connection = sqlite3.connect(extracted / manifest["sqlite"]["path"])
+    try:
+        for table in (
+            "concept_occurrence_projection",
+            "concept_occurrence_replay_state",
+        ):
+            column = next(
+                row for row in connection.execute(f"PRAGMA table_info({table})")
+                if row[1] == "projector_version"
+            )
+            assert column[2] == "INTEGER"
+            assert column[3] == 1
+            assert column[4] == "1"
+        triggers = {
+            row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_schema WHERE type='trigger'"
+            )
+        }
+        assert {
+            "concept_projection_legacy_writer_version",
+            "concept_replay_state_legacy_writer_version",
+        } <= triggers
+    finally:
+        connection.close()
+
+
 def test_same_user_version_with_divergent_migration_checksum_is_rejected(tmp_path: Path):
     archive, _ = _create(tmp_path, user_version=2)
 

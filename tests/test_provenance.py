@@ -22,6 +22,7 @@ from shared.provenance import (
     make_segment_id,
     sha256_bytes,
     validate_provenance_manifest,
+    validate_source_segment_id,
     validate_source_manifest,
     write_json_atomic,
     write_provenance_manifest,
@@ -228,6 +229,23 @@ def test_canonical_json_and_segment_id_are_byte_stable() -> None:
     assert canonical_json_bytes(_source_manifest()).endswith(b"\n")
     with pytest.raises(ValueError, match="canonical JSON"):
         canonical_json({"bad": float("nan")})
+
+
+@pytest.mark.parametrize(
+    "segment_id",
+    ["blk_0e9bbed914442b095874", "seg_" + "a" * 64, "S1.P1"],
+)
+def test_source_segment_id_accepts_shared_contract_domain(segment_id: str) -> None:
+    assert validate_source_segment_id(segment_id) == segment_id
+
+
+@pytest.mark.parametrize(
+    "segment_id",
+    ["", "_leading", "slash/value", "空白", "a" * 129, None, 7, True],
+)
+def test_source_segment_id_rejects_invalid_or_overlong_values(segment_id) -> None:
+    with pytest.raises(ValueError, match="source segment id"):
+        validate_source_segment_id(segment_id)
 
 
 def test_atomic_writers_are_idempotent_and_hash_bound(tmp_path: Path) -> None:

@@ -332,6 +332,38 @@ class TestFullBackup:
         assert result.stats["jobs"] == 0
         assert env.repo.get_ref("latest") == result.snapshot_digest
 
+    async def test_projector_ledgers_remain_rebuildable_not_portable(self, env):
+        await seed_video_job(env)
+        source_digest = "sha256:" + "c" * 64
+        projection_digest = "sha256:" + hashlib.sha256(b"[]").hexdigest()
+        db_exec(
+            env.db,
+            """INSERT INTO concept_occurrence_projection
+               (job_id, source_digest, projection_digest, reconciled_at,
+                projector_version)
+               VALUES ('job_alpha', ?, ?, ?, 2)""",
+            (source_digest, projection_digest, T_FINISHED),
+        )
+        db_exec(
+            env.db,
+            """INSERT INTO concept_occurrence_replay_state
+               (job_id, state, reason, source_digest, attempt_count,
+                last_attempt_at, next_retry_at, updated_at, projector_version)
+               VALUES ('job_alpha', 'verified_empty', 'portable_exclusion_probe',
+                       ?, 0, NULL, NULL, ?, 2)""",
+            (source_digest, T_FINISHED),
+        )
+
+        result = await do_backup(env)
+        snapshot = env.repo.get_snapshot(result.snapshot_digest)
+        assert "concept_occurrence_projection" not in snapshot["records"]
+        assert "concept_occurrence_replay_state" not in snapshot["records"]
+        assert all(
+            b"portable_exclusion_probe" not in path.read_bytes()
+            for path in (env.repo.root / "records").rglob("*")
+            if path.is_file()
+        )
+
     async def test_snapshot_contents_pass_repository_verification(self, env):
         await seed_video_job(env)
         result = await do_backup(env)

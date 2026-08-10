@@ -386,9 +386,9 @@ GET /api/jobs/j_xxx/parts/pt_a1b2/steps/08_punctuate/log → 指定 Part
 每条记录含:路由(provider/api/model/tier_used + 逐 tier `attempts` 尝试链)、延迟、prompt、输出、
 `transcript`、用量、成本、原始返回、溯源与 `ok/error`。模板元数据和 `rendered` 来自同一解析快照。
 
-> **AI worker 接入方式 / provider 审计对齐**:Claude CLI、Codex CLI、Kimi API key 都归同一种 `ai` worker,差异只在接入方式/凭证方式。审计必须保留具体 `provider`、`requested_model`、`effective_model`(可解析时)、`worker_id`、`worker_tags`、`ai_access_method` 与 `credential_kind`。`pool=ai` 只表示资源池,不能推断接入方式。CLI provider 有 transcript sidecar;API-key provider 无 CLI transcript 时写 `{"file": null, "reason": "non_cli_provider"}`,但其它 prompt/response/usage/cost 字段必须与 CLI provider 同形。
+> **AI worker 接入方式 / provider 审计对齐**:`claude-cli`、`codex-cli`、`qoder-cli` 都归 `ai` worker,但任务与审计只记录实际认领的具体 provider,不存在虚拟 provider。审计必须保留具体 `provider`、`requested_model`、`effective_model`(可解析时)、`worker_id`、`worker_tags`、`ai_access_method` 与 `credential_kind`。`pool=ai` 只表示资源池,不能推断接入方式。三类 CLI provider 都按各自格式回收 transcript sidecar;不可得时写 `{"file": null, "reason": ...}`,其它 prompt/response/usage/cost 字段保持同形。
 
-> **`transcript` 字段(agentic 全轨迹白盒)**:claude-cli 的多轮 agentic 调用(取证 WebSearch/Bash、视觉逐图 Read)顶层 json 只回最终汇总,中间轮工具轨迹在 CLI 自写的会话 transcript 里;codex-cli 的非交互调用以 `codex exec --json` JSONL event stream 作为 trace;qoder-cli 与 claude-cli 同构,transcript 落在其 config-dir 的会话目录。审计层按 provider 返回的 `transcript_path` 回收,拷为 job 产物 sidecar `output/ai_logs/{step}.turns.{call_index}.jsonl`(随产物入 storage、随删 job 级联删),记录内留引用:`{"file": "output/ai_logs/….turns.N.jsonl", "turns": 行数, "bytes": 大小, "source": 原路径}`;不可得(非 CLI provider / HOME 未挂 / 会话无档)为 `{"file": null, "reason": …}`。失败调用经尝试链 `attempts[].transcript_path` 同样回收。
+> **`transcript` 字段(agentic 全轨迹白盒)**:claude-cli 的多轮 agentic 调用(取证 WebSearch/Bash、视觉逐图 Read)顶层 json 只回最终汇总,中间轮工具轨迹在 CLI 自写的会话 transcript 里;codex-cli 的非交互调用以 `codex exec --json` JSONL event stream 作为 trace;qoder-cli 与 claude-cli 同构,transcript 落在其 config-dir 的会话目录。审计层按 provider 返回的 `transcript_path` 回收,拷为 job 产物 sidecar `output/ai_logs/{step}.turns.{call_index}.jsonl`(随产物入 storage、随删 job 级联删),记录内留引用:`{"file": "output/ai_logs/….turns.N.jsonl", "turns": 行数, "bytes": 大小, "source": 原路径}`;不可得(CLI 未产出 / HOME 未挂 / 会话无档)为 `{"file": null, "reason": …}`。失败调用经尝试链 `attempts[].transcript_path` 同样回收。
 
 > **`phase` 字段(外杀留痕)**:每次调用【发起前】先落一条 `phase:"pending"` 记录(输入侧全量:渲染后 prompt/system、模板来源、input_hashes、ts_start;`ok:null`)并即刻 flush;调用完成后**原位替换**为 `phase:"final"` 完整记录。步被外杀(如步超时 SIGKILL)时磁盘仅存 pending 条 → 该调用的输入仍可审计,ts_start 可与 worker 家目录 transcript 按时间窗对上;失败/超时路径 worker 会 best-effort 把 `output/ai_logs/*` 推回中心存储,故 API 可见。workdir 复用重试时续写同一 jsonl(历史记录保留、`call_index` 续增),上次执行的 pending 不会被覆盖。
 
@@ -3297,18 +3297,33 @@ v2 manifest 顶层字段必须精确为 `schema_version / job_id / ocr_refs / ev
 
 - **`output/concepts.json`**(三类顶层链的 concepts 步产出,scheduler `_collect_glossary` 优先采集):
   顶层可带 `evidence_note_type=smart|translated|transcript`；`key_terms` 元素
-  `{term,definition,zh_name|null,related:[{term,rel}],evidence_source_segment_ids:[seg_<64hex>]}`。
-  evidence refs 不信任模型自报：producer 只从已重验 path/hash/job/pipeline 的 provenance anchor 中，
-  对 term/zh_name 做唯一逐字命中后覆盖生成；Latin 名称按 token boundary。Scheduler 在 canonical
+  `{term,definition,zh_name|null,related:[{term,rel}],evidence_source_segment_ids:[source_segment_id]}`。
+  `source_segment_id` 与 source/provenance 共用
+  `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` 域,可由 producer 使用 `blk_*`、`seg_*`、`S1.P1`
+  等稳定标识；前缀或 hash 长度不承载可信含义。evidence refs 不信任模型自报：producer 在同次执行中
+  冻结 note、source manifest 与 smart provenance 字节，完成 path/hash/job/pipeline 全量重验后，按 manifest
+  顺序选择至多 128 个完整 anchor，其 canonical JSON UTF-8 总量不超过 32 KiB。prompt 与绑定只使用这份
+  同一快照，不截断 anchor，不在重试前重读路径。每个 term 或非空 zh_name 必须逐字命中所选 anchor；
+  Latin/数字名称还要求 token boundary。模型返回的 refs 无条件清空，再由服务端覆盖生成；不做模糊匹配、
+  别名猜测或“唯一 evidence 绑定全部概念”。key_terms 最多 64 项，term/zh_name 最多 256 UTF-8 bytes，
+  related 每项最多 64 条，单次投影最多接收 500 个去重后的来源段 ID。可信 provenance 非空时，
+  解析失败、结构非法、空 key_terms 或任一概念没有绑定会把
+  机器可读 JSON 反馈给同一输入快照并且只重试一次；第二次仍不合格以 `input_invalid` 失败，不得发布新的
+  `concepts.json` 或完成 manifest。三条 concepts 步骤的执行窗口统一为 1800 秒,覆盖两次完整 CLI 调用。
+  通过完整验证但 `segments=[]` 的 provenance 可诚实退化为空绑定。
+  Scheduler 在 canonical
   index 完成后把 `(job,note_type,source_segment_id)` 映射为当前 evidence ID，并按整 job 原子替换
   `concept_occurrences`；本次空/坏/不可靠输入会清旧精确映射，不删除 glossary 实体。
-  occurrence 全量替换与 `concept_occurrence_projection(source_digest,projection_digest)`
-  在同一个 `BEGIN IMMEDIATE` 内按旧 `source_digest` 做 CAS 后原子发布。每次重建
+  occurrence 全量替换与
+  `concept_occurrence_projection(source_digest,projection_digest,projector_version)`
+  在同一个 `BEGIN IMMEDIATE` 内按旧 `(source_digest,projector_version)` 做 CAS 后原子发布。
+  `source_digest` 摘要域显式包含 projector 算法版本,当前
+  `CURRENT_CONCEPT_PROJECTOR_VERSION=2`。每次重建
   FTS/canonical evidence 时在同一索引事务删除旧 marker;索引提交后 occurrence 重放前
   即使崩溃,scheduler 后续周期仍会拾取。来源字节变化时旧调用不能覆盖新投影。
   marker 是可重建投影,不进入便携快照。
-  周期重放的持久状态在 `concept_occurrence_replay_state`(schema v10,同为可重建
-  状态):发布空投影时同事务落 `verified_empty` 判定并绑定 `source_digest`,该 job
+  周期重放的持久状态在 `concept_occurrence_replay_state`(同为可重建状态):发布空投影时
+  同事务落 `verified_empty` 判定并绑定 `source_digest` 与 `projector_version`,该 job
   从此离开重放候选池,不再周期重读真源;发布非空投影时删除状态行;索引重建随
   marker 一并删除状态行。真源读取按五类分界:读异常=`storage_unreachable`、两路
   文件均不存在=`source_missing`(均为环境性,写 `retry` 状态:attempt_count、
@@ -3316,8 +3331,11 @@ v2 manifest 顶层字段必须精确为 `schema_version / job_id / ocr_refs / ev
   JSON 无效或非对象=`source_invalid`、review 重验不可靠且期间无读异常=
   `review_unreliable`(均为确定性,发布绑定摘要的空判定;重验期间有读异常一律归
   `storage_unreachable`,不许把存储抖动固化成判定)、可读且概念确实为空=
-  `truly_empty`。候选查询排除绑定当前 marker 的 `verified_empty` 行与未到
-  `next_retry_at` 的 `retry` 行,并按 next_retry_at 再 created_at 排序;每次尝试
+  `truly_empty`。schema v12 为 projection 与 replay state 增加非空 projector 版本,
+  旧行记为 1。候选查询只排除当前版本且绑定当前 marker 的 `verified_empty` 行和当前版本
+  非空投影；旧版本无条件入队。新 scheduler 固定写版本 2,滚动期间旧 writer 写回版本 1 后
+  仍会被再次判旧。其余候选排除未到 `next_retry_at` 的 `retry` 行,并按 next_retry_at
+  再 created_at 排序;每次尝试
   必然持久推进状态(离池或退避后移),LIMIT 窗口必然轮转,固定失败行不会饿死
   尾部。存量空投影 marker 由 v10 迁移回填为立即到期的 `retry`
   (reason=`legacy_empty_projection`),首轮重放各自收敛。

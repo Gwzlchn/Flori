@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from .provenance import (
@@ -14,77 +15,143 @@ from .provenance import (
 )
 
 
+MAX_CONCEPT_EVIDENCE_ANCHORS = 128
+MAX_CONCEPT_EVIDENCE_ANCHORS_BYTES = 32 * 1024
+MAX_CONCEPT_EVIDENCE_SOURCE_IDS = 500
+MAX_CONCEPT_KEY_TERMS = 64
+MAX_CONCEPT_TERM_BYTES = 256
+MAX_CONCEPT_RELATED = 64
 _CJK_RE = re.compile(r"[\u3400-\u9fff]")
+
+
+@dataclass(frozen=True)
+class ConceptEvidenceAnchor:
+    """一次完整校验后冻结的 anchor 与来源段绑定。"""
+
+    anchor: str
+    source_segment_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ConceptEvidenceSnapshot:
+    """prompt 与确定性绑定共用的有界 provenance 快照。"""
+
+    anchors: tuple[ConceptEvidenceAnchor, ...]
+    provenance_nonempty: bool
+    truncated: bool
+
+    def prompt_anchors(self) -> tuple[str, ...]:
+        return tuple(item.anchor for item in self.anchors)
+
+
+def validate_concept_evidence_snapshot(
+    *,
+    job_id: str,
+    pipeline: str,
+    note_type: str,
+    note_path: str,
+    note_bytes: bytes,
+    normalized_body: str,
+    source_manifest_path: str,
+    source_manifest_data: bytes,
+    provenance_data: bytes,
+) -> ConceptEvidenceSnapshot:
+    """完整重验 sidecars 后冻结有界 anchor;身份或预算异常直接拒绝。"""
+    source_manifest = validate_source_manifest(
+        _load_canonical_json(source_manifest_data, field="source manifest"),
+    )
+    if (
+        source_manifest["job_id"] != job_id
+        or source_manifest["pipeline"] != pipeline
+    ):
+        raise ValueError("source manifest identity mismatch")
+    provenance = validate_provenance_manifest(
+        _load_canonical_json(provenance_data, field="note provenance"),
+        source_manifest=source_manifest,
+        note_bytes=note_bytes,
+        normalized_body=normalized_body,
+    )
+    if (
+        provenance["job_id"] != job_id
+        or provenance["note_type"] != note_type
+        or provenance["note_artifact"] != note_path
+        or provenance["source_manifest"] != source_manifest_path
+    ):
+        raise ValueError("note provenance identity mismatch")
+
+    mappings = provenance["segments"]
+    selected: dict[str, list[str]] = {}
+    truncated = False
+    for mapping in mappings:
+        anchor = mapping["anchor"]
+        if anchor in selected:
+            refs = selected[anchor]
+            for segment_id in mapping["source_segment_ids"]:
+                if segment_id not in refs:
+                    refs.append(segment_id)
+            continue
+        if len(selected) >= MAX_CONCEPT_EVIDENCE_ANCHORS:
+            truncated = True
+            continue
+        candidate_anchors = [*selected, anchor]
+        encoded = canonical_json_bytes({"anchors": candidate_anchors})
+        if len(encoded) > MAX_CONCEPT_EVIDENCE_ANCHORS_BYTES:
+            truncated = True
+            continue
+        selected[anchor] = list(mapping["source_segment_ids"])
+
+    if mappings and not selected:
+        raise ValueError("concept evidence anchors exceed prompt budget")
+    unique_source_ids = {
+        segment_id for refs in selected.values() for segment_id in refs
+    }
+    if len(unique_source_ids) > MAX_CONCEPT_EVIDENCE_SOURCE_IDS:
+        raise ValueError("concept evidence source refs exceed binding budget")
+    return ConceptEvidenceSnapshot(
+        anchors=tuple(
+            ConceptEvidenceAnchor(anchor=anchor, source_segment_ids=tuple(refs))
+            for anchor, refs in selected.items()
+        ),
+        provenance_nonempty=bool(mappings),
+        truncated=truncated or len(selected) < len({item["anchor"] for item in mappings}),
+    )
 
 
 def attach_concept_source_segments(
     key_terms: Any,
     *,
-    job_id: str,
-    pipeline: str,
-    note_type: str | None,
-    note_path: str,
-    note_bytes: bytes,
-    normalized_body: str,
-    source_manifest_path: str,
-    source_manifest_data: bytes | None,
-    provenance_path: str | None,
-    provenance_data: bytes | None,
+    snapshot: ConceptEvidenceSnapshot,
 ) -> list[Any]:
-    """覆盖模型自报 refs;任何身份或 hash 校验失败都返回空绑定。"""
+    """覆盖模型自报 refs，只按同次 prompt 使用的冻结 anchors 重新绑定。"""
     terms = _copy_terms_with_empty_evidence(key_terms)
-    if (
-        not note_type
-        or not provenance_path
-        or source_manifest_data is None
-        or provenance_data is None
-    ):
-        return terms
-
-    try:
-        source_manifest = _load_canonical_json(
-            source_manifest_data, field="source manifest",
-        )
-        provenance = _load_canonical_json(
-            provenance_data, field="note provenance",
-        )
-        source_manifest = validate_source_manifest(source_manifest)
-        if (
-            source_manifest["job_id"] != job_id
-            or source_manifest["pipeline"] != pipeline
-        ):
-            raise ValueError("source manifest identity mismatch")
-        provenance = validate_provenance_manifest(
-            provenance,
-            source_manifest=source_manifest,
-            note_bytes=note_bytes,
-            normalized_body=normalized_body,
-        )
-        if (
-            provenance["job_id"] != job_id
-            or provenance["note_type"] != note_type
-            or provenance["note_artifact"] != note_path
-            or provenance["source_manifest"] != source_manifest_path
-        ):
-            raise ValueError("note provenance identity mismatch")
-    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
-        return terms
-
-    mappings = provenance["segments"]
     for item in terms:
         if not isinstance(item, dict):
             continue
         candidates = _term_candidates(item)
         refs: list[str] = []
-        for mapping in mappings:
-            anchor = mapping["anchor"]
-            if not any(_literal_term_in_anchor(candidate, anchor) for candidate in candidates):
+        for mapping in snapshot.anchors:
+            if not any(
+                _literal_term_in_anchor(candidate, mapping.anchor)
+                for candidate in candidates
+            ):
                 continue
-            for segment_id in mapping["source_segment_ids"]:
+            for segment_id in mapping.source_segment_ids:
                 if segment_id not in refs:
                     refs.append(segment_id)
         item["evidence_source_segment_ids"] = refs
     return terms
+
+
+def all_concept_terms_have_evidence(key_terms: Any) -> bool:
+    """判断每个概念是否都有至少一个服务端重建的来源段绑定。"""
+    if type(key_terms) is not list or not key_terms:
+        return False
+    return all(
+        isinstance(item, Mapping)
+        and type(item.get("evidence_source_segment_ids")) is list
+        and bool(item["evidence_source_segment_ids"])
+        for item in key_terms
+    )
 
 
 def _load_canonical_json(data: bytes, *, field: str) -> Mapping[str, Any]:

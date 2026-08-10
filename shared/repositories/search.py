@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .seams import db as _db
 
+from ..concept_projection import CURRENT_CONCEPT_PROJECTOR_VERSION
 from ..db import (
     Job,
     _EMPTY_CONCEPT_PROJECTION_DIGEST,
@@ -40,12 +41,12 @@ class SearchRepository:
         self, limit: int = 100, *, now: str | None = None,
     ) -> list[Job]:
         """返回已建索引但 occurrence 投影尚未确认完成的当前 Job。
-        入选:marker 缺失,或投影为空且没有绑定当前 source_digest 的 verified_empty
-        判定。retry 状态未到 next_retry_at 的行暂不入选,防止固定失败行反复占满
+        入选:marker/state 的 projector 版本过期,marker 缺失,或投影为空且没有
+        绑定当前 source_digest 的 verified_empty 判定。当前版本 retry 状态未到
+        next_retry_at 的行暂不入选,防止固定失败行反复占满
         LIMIT 窗口。排序按 next_retry_at 升序(无状态行视为最早),再按 created_at;
         每次重放尝试都会持久推进状态(判定离池或 next_retry_at 后移),窗口必然轮转,
-        尾部不会被前排饿死。非空投影只会被索引重建删 marker 或完成路径 CAS 更新,
-        不需要周期回炉。"""
+        尾部不会被前排饿死。只有当前 projector 版本的非空投影可以离池。"""
         now_iso = now if now is not None else _db._now_iso()
         with self._lock:
             rows = self._conn.execute(
@@ -54,24 +55,40 @@ class SearchRepository:
                      AND EXISTS (
                        SELECT 1 FROM notes_fts5 WHERE notes_fts5.job_id=jobs.id
                      )
-                     AND NOT EXISTS (
-                       SELECT 1 FROM concept_occurrence_projection p
-                       WHERE p.job_id=jobs.id AND p.projection_digest != ?
-                     )
-                     AND NOT EXISTS (
-                       SELECT 1 FROM concept_occurrence_replay_state s
-                       WHERE s.job_id=jobs.id
-                         AND (
-                           (
-                             s.state='verified_empty'
-                             AND EXISTS (
-                               SELECT 1 FROM concept_occurrence_projection p2
-                               WHERE p2.job_id=jobs.id
-                                 AND p2.source_digest=s.source_digest
-                             )
-                           )
-                           OR (s.state='retry' AND s.next_retry_at > ?)
+                     AND (
+                       EXISTS (
+                         SELECT 1 FROM concept_occurrence_projection stale_p
+                         WHERE stale_p.job_id=jobs.id
+                           AND stale_p.projector_version != ?
+                       )
+                       OR EXISTS (
+                         SELECT 1 FROM concept_occurrence_replay_state stale_s
+                         WHERE stale_s.job_id=jobs.id
+                           AND stale_s.projector_version != ?
+                       )
+                       OR (
+                         NOT EXISTS (
+                           SELECT 1 FROM concept_occurrence_projection p
+                           WHERE p.job_id=jobs.id AND p.projection_digest != ?
                          )
+                         AND NOT EXISTS (
+                           SELECT 1 FROM concept_occurrence_replay_state s
+                           WHERE s.job_id=jobs.id
+                             AND s.projector_version = ?
+                             AND (
+                               (
+                                 s.state='verified_empty'
+                                 AND EXISTS (
+                                   SELECT 1 FROM concept_occurrence_projection p2
+                                   WHERE p2.job_id=jobs.id
+                                     AND p2.projector_version = ?
+                                     AND p2.source_digest=s.source_digest
+                                 )
+                               )
+                               OR (s.state='retry' AND s.next_retry_at > ?)
+                             )
+                         )
+                       )
                      )
                    ORDER BY COALESCE(
                      (SELECT s2.next_retry_at
@@ -80,23 +97,31 @@ class SearchRepository:
                    ) ASC, created_at ASC
                    LIMIT ?""",
                 (
+                    CURRENT_CONCEPT_PROJECTOR_VERSION,
+                    CURRENT_CONCEPT_PROJECTOR_VERSION,
                     _EMPTY_CONCEPT_PROJECTION_DIGEST,
+                    CURRENT_CONCEPT_PROJECTOR_VERSION,
+                    CURRENT_CONCEPT_PROJECTOR_VERSION,
                     now_iso,
                     max(1, min(int(limit), 1000)),
                 ),
             ).fetchall()
         return [self._row_to_job(row) for row in rows]
 
-    def get_concept_occurrence_projection_pair(self, job_id: str) -> tuple[str, str] | None:
-        """返回投影绑定的(源摘要, 投影摘要)。判断能否按 marker 短路要看投影是不是空集:
-        空投影的 marker 摘要相等只说明源没变, 不代表投影正确。"""
+    def get_concept_occurrence_projection_pair(
+        self, job_id: str,
+    ) -> tuple[str, str, int] | None:
+        """返回投影绑定的源摘要,投影摘要与 projector 版本。
+
+        空投影的 marker 摘要相等只说明源没变,不代表投影正确。
+        """
         with self._lock:
             row = self._conn.execute(
-                "SELECT source_digest, projection_digest"
+                "SELECT source_digest, projection_digest, projector_version"
                 " FROM concept_occurrence_projection WHERE job_id=?",
                 (job_id,),
             ).fetchone()
-        return (str(row[0]), str(row[1])) if row else None
+        return (str(row[0]), str(row[1]), int(row[2])) if row else None
 
     def get_concept_occurrence_projection_source(self, job_id: str) -> str | None:
         """返回当前投影绑定的源摘要;缺失时由scheduler重放。"""
@@ -112,7 +137,7 @@ class SearchRepository:
         with self._lock:
             row = self._conn.execute(
                 """SELECT job_id, state, reason, source_digest, attempt_count,
-                          last_attempt_at, next_retry_at, updated_at
+                          last_attempt_at, next_retry_at, updated_at, projector_version
                    FROM concept_occurrence_replay_state WHERE job_id=?""",
                 (job_id,),
             ).fetchone()
@@ -136,6 +161,7 @@ class SearchRepository:
                 if row["next_retry_at"] is not None else None
             ),
             "updated_at": str(row["updated_at"]),
+            "projector_version": int(row["projector_version"]),
         }
 
     def canonical_evidence_database_states(

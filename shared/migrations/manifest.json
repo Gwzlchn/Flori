@@ -1,7 +1,7 @@
 {
   "format": "flori-sqlite-migrations",
   "minimum_supported_version": 0,
-  "current_version": 11,
+  "current_version": 12,
   "ledger_version": 2,
   "migrations": [
     {
@@ -58,6 +58,11 @@
       "version": 11,
       "name": "qoder-credit-accounting",
       "checksum": "76f418bac69de5b28a78af2ed30a26aa876d98a7056c1a0b26102036a5fdecef"
+    },
+    {
+      "version": 12,
+      "name": "concept-projector-version",
+      "checksum": "db8a970b6325df264c75e39ce8e2196e0a49351e5283c4683b1f26002acf6d35"
     }
   ]
 }

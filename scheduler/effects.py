@@ -8,10 +8,11 @@ import asyncio
 import fnmatch
 import hashlib
 import json
-import re
 
 import structlog
 
+from shared.concept_evidence import MAX_CONCEPT_EVIDENCE_SOURCE_IDS
+from shared.concept_projection import CURRENT_CONCEPT_PROJECTOR_VERSION
 from shared.db import _EMPTY_CONCEPT_PROJECTION_DIGEST, _chunk_note_body
 from shared.evidence_contract import (
     MAX_CANONICAL_SIDECAR_BYTES,
@@ -20,6 +21,7 @@ from shared.evidence_contract import (
 from shared.models import Job
 from shared.note_text import markdown_to_index_text
 from shared.prompt_resolver import PromptResolver
+from shared.provenance import validate_source_segment_id
 from shared.review_contract import verify_persisted_review
 from shared.step_base import def_digest_for, pipeline_digest_for
 from shared.terms import zh_name_from_glossary_row
@@ -32,6 +34,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(component="scheduler")
 
 _MAX_STEP_DONE_BYTES = 64 * 1024
+_CONCEPT_PROJECTOR_DIGEST_DOMAIN = b"flori-concept-occurrence-projector"
 
 
 class ConceptSourceUnavailableError(RuntimeError):
@@ -49,6 +52,17 @@ _REPLAY_RETRY_POLICY = {
     "source_missing": (300, 86400),
     "replay_error": (60, 3600),
 }
+
+
+def _concept_projection_source_digest(source_kind: str, payload: bytes) -> str:
+    """计算带 projector 版本域的真源摘要,防止旧算法结果被当成当前结论。"""
+    material = b"\0".join((
+        _CONCEPT_PROJECTOR_DIGEST_DOMAIN,
+        str(CURRENT_CONCEPT_PROJECTOR_VERSION).encode("ascii"),
+        source_kind.encode("utf-8"),
+        payload,
+    ))
+    return "sha256:" + hashlib.sha256(material).hexdigest()
 
 
 def _markdown_to_text(md: str) -> str:
@@ -517,8 +531,14 @@ class EffectDispatcher:
         采集源:优先 output/concepts.json,回退 output/review.json。"""
         job = await asyncio.to_thread(self.owner.db.get_job, job_id)
         domain = (job.domain if job else "") or "general"
-        expected_projection_source = await asyncio.to_thread(
-            self.owner.db.get_concept_occurrence_projection_source, job_id,
+        expected_projection_pair = await asyncio.to_thread(
+            self.owner.db.get_concept_occurrence_projection_pair, job_id,
+        )
+        expected_projection_source = (
+            expected_projection_pair[0] if expected_projection_pair is not None else None
+        )
+        expected_projector_version = (
+            expected_projection_pair[2] if expected_projection_pair is not None else None
         )
 
         async def reconcile_empty(reason: str, source_digest: str) -> None:
@@ -529,6 +549,7 @@ class EffectDispatcher:
                 mapping={},
                 projection_source_digest=source_digest,
                 expected_projection_source_digest=expected_projection_source,
+                expected_projection_projector_version=expected_projector_version,
                 projection_empty_reason=reason,
             )
             logger.info(
@@ -585,6 +606,7 @@ class EffectDispatcher:
             None if from_review else review.get("evidence_note_type"),
             projection_source_digest=source_digest,
             expected_projection_source_digest=expected_projection_source,
+            expected_projection_projector_version=expected_projector_version,
         )
         self.owner._schedule_concept_resynthesis(domain, synthesis_candidates)
         logger.info("glossary_collected", job_id=job_id, count=collected, edges=edges)
@@ -607,7 +629,7 @@ class EffectDispatcher:
           不可靠判定(重验结论参与摘要,抖动期结论会绑错摘要且不再重读)。"""
         unreachable = (
             None, False, "storage_unreachable",
-            "sha256:" + hashlib.sha256(b"storage_unreachable").hexdigest(),
+            _concept_projection_source_digest("storage_unreachable", b""),
         )
         try:
             data = await self.owner.storage.read_file(job_id, "output/concepts.json")
@@ -637,10 +659,9 @@ class EffectDispatcher:
             from_review = bool(data)
             source_kind = "review"
         if not data:
-            digest = "sha256:" + hashlib.sha256(b"source_missing").hexdigest()
+            digest = _concept_projection_source_digest("source_missing", b"")
             return None, from_review, "source_missing", digest
-        source_material = source_kind.encode("utf-8") + b"\0" + data
-        source_digest = "sha256:" + hashlib.sha256(source_material).hexdigest()
+        source_digest = _concept_projection_source_digest(source_kind, data)
         try:
             review = json.loads(data.decode("utf-8", errors="replace"))
         except (json.JSONDecodeError, ValueError):
@@ -664,12 +685,13 @@ class EffectDispatcher:
                 pipeline=job.pipeline if job else None,
                 read_file=reader,
             )
-            source_digest = "sha256:" + hashlib.sha256(
-                source_material + b"\0" + json.dumps(
+            source_digest = _concept_projection_source_digest(
+                f"{source_kind}:verified",
+                data + b"\0" + json.dumps(
                     review, ensure_ascii=False, sort_keys=True,
                     separators=(",", ":"),
                 ).encode("utf-8")
-            ).hexdigest()
+            )
             if review.get("review_reliable") is not True:
                 if read_failures:
                     logger.warning(
@@ -707,8 +729,14 @@ class EffectDispatcher:
     async def _reconcile_concept_occurrences_inner(self, job_id: str) -> int:
         job = await asyncio.to_thread(self.owner.db.get_job, job_id)
         domain = (job.domain if job else "") or "general"
-        expected_projection_source = await asyncio.to_thread(
-            self.owner.db.get_concept_occurrence_projection_source, job_id,
+        expected_projection_pair = await asyncio.to_thread(
+            self.owner.db.get_concept_occurrence_projection_pair, job_id,
+        )
+        expected_projection_source = (
+            expected_projection_pair[0] if expected_projection_pair is not None else None
+        )
+        expected_projector_version = (
+            expected_projection_pair[2] if expected_projection_pair is not None else None
         )
         review, from_review, source_error, source_digest = await self._load_concept_source(
             job_id, job,
@@ -732,6 +760,7 @@ class EffectDispatcher:
             isinstance(verdict, dict)
             and verdict.get("state") == "verified_empty"
             and verdict.get("source_digest") == source_digest
+            and verdict.get("projector_version") == CURRENT_CONCEPT_PROJECTOR_VERSION
         ):
             return 0
         pair = await asyncio.to_thread(
@@ -741,6 +770,7 @@ class EffectDispatcher:
             pair is not None
             and pair[0] == source_digest
             and pair[1] != _EMPTY_CONCEPT_PROJECTION_DIGEST
+            and pair[2] == CURRENT_CONCEPT_PROJECTOR_VERSION
         ):
             # 非空投影且源未变:确实没有可做的事。空投影不走这条,必须重算。
             return 0
@@ -752,6 +782,7 @@ class EffectDispatcher:
                 mapping={},
                 projection_source_digest=source_digest,
                 expected_projection_source_digest=expected_projection_source,
+                expected_projection_projector_version=expected_projector_version,
                 projection_empty_reason=source_error or "source_invalid",
             )
             logger.info(
@@ -771,6 +802,7 @@ class EffectDispatcher:
                 mapping={},
                 projection_source_digest=source_digest,
                 expected_projection_source_digest=expected_projection_source,
+                expected_projection_projector_version=expected_projector_version,
                 projection_empty_reason="key_terms_invalid",
             )
             logger.info(
@@ -789,6 +821,7 @@ class EffectDispatcher:
             None if from_review else review.get("evidence_note_type"),
             projection_source_digest=source_digest,
             expected_projection_source_digest=expected_projection_source,
+            expected_projection_projector_version=expected_projector_version,
         )
         logger.info(
             "concept_occurrences_reconciled",
@@ -860,6 +893,7 @@ class EffectDispatcher:
         *,
         projection_source_digest: str | None = None,
         expected_projection_source_digest: str | None = None,
+        expected_projection_projector_version: int | None = None,
     ) -> tuple[int, list[tuple[str, str, int]]]:
         """把 producer 的来源段引用映射为当前 canonical IDs 后全量对账。"""
         from shared.concepts import resolve
@@ -878,12 +912,16 @@ class EffectDispatcher:
                 if not isinstance(refs, list):
                     continue
                 for ref in refs:
-                    if (
-                        isinstance(ref, str)
-                        and re.fullmatch(r"seg_[0-9a-f]{64}", ref)
-                        and ref not in requested_ids
-                    ):
-                        requested_ids.append(ref)
+                    try:
+                        segment_id = validate_source_segment_id(ref)
+                    except ValueError:
+                        continue
+                    if segment_id not in requested_ids:
+                        if len(requested_ids) >= MAX_CONCEPT_EVIDENCE_SOURCE_IDS:
+                            raise ValueError(
+                                "concept evidence source refs exceed binding budget"
+                            )
+                        requested_ids.append(segment_id)
 
         canonical_by_segment = (
             self.owner.db.canonical_evidence_ids_for_source_segments(
@@ -934,6 +972,9 @@ class EffectDispatcher:
             mapping=mapping,
             projection_source_digest=projection_source_digest,
             expected_projection_source_digest=expected_projection_source_digest,
+            expected_projection_projector_version=(
+                expected_projection_projector_version
+            ),
             projection_empty_reason=empty_reason,
         )
         rows_by_term = {row["term"]: row for row in glossary_rows}

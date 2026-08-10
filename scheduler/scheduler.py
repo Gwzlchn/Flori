@@ -381,11 +381,15 @@ class Scheduler:
         self, domain: str, job_id: str, key_terms: list, evidence_note_type: object,
         *, projection_source_digest: str | None = None,
         expected_projection_source_digest: str | None = None,
+        expected_projection_projector_version: int | None = None,
     ) -> tuple[int, list[tuple[str, str, int]]]:
         return self._effects._replace_concept_occurrences(
             domain, job_id, key_terms, evidence_note_type,
             projection_source_digest=projection_source_digest,
             expected_projection_source_digest=expected_projection_source_digest,
+            expected_projection_projector_version=(
+                expected_projection_projector_version
+            ),
         )
 
     def _schedule_concept_resynthesis(self, domain: str, candidates: list[tuple[str, str, int]]) -> None:
