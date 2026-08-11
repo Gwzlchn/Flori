@@ -235,6 +235,78 @@ def test_source_anchors_preserve_inline_math_flow_in_both_reader_styles():
         assert ".flori-source-anchor{display:block;" not in rendered
 
 
+def test_snapshot_reader_uses_bound_image_width_as_pixel_density():
+    path = "input/html_assets/figure.png"
+    raw = (
+        f'<html><body><img src="{path}" width="297" height="130" '
+        'style="width:auto;height:235px;float:right"></body></html>'
+    ).encode()
+
+    rendered = render_document_html(
+        raw,
+        job_id="job_density",
+        snapshot_css="img{width:auto!important}",
+        snapshot_resource_digests={path: "a" * 64},
+    ).decode()
+
+    assert f'width="297" height="130"' in rendered
+    assert rendered.count("style=\"") == 1
+    assert (
+        'style="float:right;width:297px!important;max-width:100%!important;'
+        'height:auto!important;max-height:none!important"'
+        in rendered
+    )
+    assert f"/api/jobs/job_density/document/resource?path={path.replace('/', '%2F')}" in rendered
+
+
+@pytest.mark.parametrize(
+    ("source", "snapshot_resources"),
+    [
+        ("input/html_assets/figure.png", None),
+        ("input/html_assets/unbound.png", {"input/html_assets/figure.png": "a" * 64}),
+        ("data:image/png;base64,AAAA", {"input/html_assets/figure.png": "a" * 64}),
+    ],
+)
+def test_reader_does_not_force_density_for_unbound_images(source, snapshot_resources):
+    rendered = render_document_html(
+        f'<html><body><img src="{source}" width="297" height="130"></body></html>'.encode(),
+        job_id="job_density",
+        snapshot_css="" if snapshot_resources is not None else None,
+        snapshot_resource_digests=snapshot_resources,
+    ).decode()
+
+    assert "width:297px!important" not in rendered
+
+
+def test_snapshot_reader_rejects_non_integer_density_width():
+    path = "input/html_assets/figure.png"
+    rendered = render_document_html(
+        f'<html><body><img src="{path}" width="100%" height="130"></body></html>'.encode(),
+        job_id="job_density",
+        snapshot_css="",
+        snapshot_resource_digests={path: "a" * 64},
+    ).decode()
+
+    assert 'width="100%"' in rendered
+    assert "width:100%px" not in rendered
+
+
+def test_snapshot_reader_does_not_mix_duplicate_image_attributes():
+    bound = "input/html_assets/figure.png"
+    rendered = render_document_html(
+        (
+            f'<html><body><img src="input/html_assets/unbound.png" src="{bound}" '
+            'width="100%" width="297"></body></html>'
+        ).encode(),
+        job_id="job_density",
+        snapshot_css="",
+        snapshot_resource_digests={bound: "a" * 64},
+    ).decode()
+
+    assert "width:297px!important" not in rendered
+    assert "/document/resource" not in rendered
+
+
 def test_reader_materializes_translation_artifact_images():
     rendered = render_document_html(
         b'<html><body><img data-artifact="assets/chart.png" alt="chart"></body></html>',

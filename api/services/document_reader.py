@@ -314,6 +314,25 @@ def _asset_url(
     return f"/api/jobs/{quote(job_id, safe='')}/artifact?path={quote(local, safe='')}"
 
 
+def _snapshot_image_density_style(
+    attrs: Mapping[str, str],
+    snapshot_resource_digests: Mapping[str, str] | None,
+) -> str | None:
+    """用上游版面宽度消费高密度快照图片;只接受已绑定资源和有界整数。"""
+    if snapshot_resource_digests is None:
+        return None
+    local = _safe_local_path(attrs.get("src", ""))
+    if local is None or local not in snapshot_resource_digests:
+        return None
+    width = _safe_dimension_attr(attrs.get("width", ""))
+    if width is None or not width.isdigit():
+        return None
+    return (
+        f"width:{width}px!important;max-width:100%!important;"
+        "height:auto!important;max-height:none!important"
+    )
+
+
 def build_snapshot_css(
     stylesheets: list[tuple[Mapping[str, object], bytes]],
     *,
@@ -794,6 +813,14 @@ class _SafeDocumentParser(HTMLParser):
     ) -> str:
         safe: list[str] = []
         attr_map = {key.lower(): value or "" for key, value in attrs}
+        first_attr_map: dict[str, str] = {}
+        for key, value in attrs:
+            first_attr_map.setdefault(key.lower(), value or "")
+        density_style = (
+            _snapshot_image_density_style(first_attr_map, self.snapshot_resource_digests)
+            if tag == "img" else None
+        )
+        style_seen = False
         if tag == "img" and not attr_map.get("src") and attr_map.get("data-artifact"):
             source = _asset_url(
                 self.job_id, attr_map["data-artifact"], self.snapshot_resource_digests,
@@ -831,7 +858,15 @@ class _SafeDocumentParser(HTMLParser):
             if name == "data-source-segment":
                 continue
             if name == "style":
+                style_seen = True
                 rendered_style = _safe_inline_style(raw) if tag in _SAFE_STYLE_TAGS else None
+                if density_style is not None:
+                    preserved = [
+                        declaration for declaration in (rendered_style or "").split(";")
+                        if declaration.partition(":")[0]
+                        not in {"height", "max-height", "max-width", "width"}
+                    ]
+                    rendered_style = ";".join([*preserved, density_style])
                 if rendered_style is not None:
                     safe.append(f'style="{html.escape(rendered_style, quote=True)}"')
                 continue
@@ -871,6 +906,8 @@ class _SafeDocumentParser(HTMLParser):
                 if len(raw) > 65536:
                     continue
                 safe.append(f'{name}="{html.escape(raw, quote=True)}"')
+        if density_style is not None and not style_seen:
+            safe.append(f'style="{density_style}"')
         if target and not class_seen:
             safe.append('class="flori-source-target"')
         return (" " + " ".join(safe)) if safe else ""
