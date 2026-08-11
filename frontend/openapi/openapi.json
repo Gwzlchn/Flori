@@ -15376,7 +15376,7 @@
     },
     "/api/jobs/{job_id}/rerun-smart": {
       "post": {
-        "description": "用指定 provider 重跑智能笔记 + 评审,生成新版本(旧版本保留)。",
+        "description": "用指定 provider 重跑智能笔记、概念与评审,生成新版本(旧版本保留)。",
         "operationId": "rerun_smart_api_jobs__job_id__rerun_smart_post",
         "parameters": [
           {
