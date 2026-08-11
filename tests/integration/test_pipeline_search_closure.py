@@ -13,7 +13,10 @@ from scheduler.scheduler import Scheduler
 from shared.models import Job, JobStatus
 from shared.step_base import def_digest_for
 from shared.storage import LocalStorage
-from tests.integration.provenance_fixture import publish_provenance_fixture
+from tests.integration.provenance_fixture import (
+    publish_provenance_fixture,
+    publish_step_manifest_fixture,
+)
 
 
 pytestmark = pytest.mark.integration
@@ -75,10 +78,20 @@ async def _complete_real_pipeline(scheduler, redis, db, config, job_id: str) -> 
     """按真实归一化步骤表发送完成事件;已由 rules 跳过的步骤保持 skipped."""
     steps = await scheduler._get_job_pipeline_steps(job_id)
     assert steps is not None
-    for name in steps:
+    job = db.get_job(job_id)
+    assert job is not None
+    for name, step_config in steps.items():
         status = await redis.get_step_status(job_id, name)
         if status == "skipped":
             continue
+        await publish_step_manifest_fixture(
+            scheduler.storage,
+            job=job,
+            config=config,
+            step_name=name,
+            step_config=step_config,
+            job_generation=await redis.get_job_generation(job_id),
+        )
         await redis.set_step_status(job_id, name, "running")
         await scheduler.on_step_done(job_id, name, duration=0.01, worker="test-worker")
 
@@ -161,10 +174,14 @@ async def test_pipeline_completion_reaches_search_ask_and_mcp(
 
         before = _index_counts(db, job_id)
         concept_before = db.get_glossary_term(domain, "闭环主概念")
-        assert len(concept_before["occurrences"]) == 1
-        assert concept_before["related"] == [
-            {"term": "闭环辅概念", "rel": "prerequisite"},
-        ]
+        if document_kind == "article":
+            # mechanical-only article 不执行知识 AI 主干,因此没有待发布概念。
+            assert concept_before is None
+        else:
+            assert len(concept_before["occurrences"]) == 1
+            assert concept_before["related"] == [
+                {"term": "闭环辅概念", "rel": "prerequisite"},
+            ]
 
         # 重复 complete 被 CAS 丢弃;终态 reconcile 会重放声明,两者都不能累加索引或概念边.
         index_step = next(
@@ -178,8 +195,11 @@ async def test_pipeline_completion_reaches_search_ask_and_mcp(
 
         assert _index_counts(db, job_id) == before
         concept_after = db.get_glossary_term(domain, "闭环主概念")
-        assert len(concept_after["occurrences"]) == 1
-        assert concept_after["related"] == concept_before["related"]
+        if document_kind == "article":
+            assert concept_after is None
+        else:
+            assert len(concept_after["occurrences"]) == 1
+            assert concept_after["related"] == concept_before["related"]
     finally:
         await redis.r.flushdb()
 
@@ -230,6 +250,75 @@ async def test_missing_index_artifact_keeps_job_active_for_reconcile(
         await scheduler.reconcile_completion_effects()
         assert db.get_job(job.id).status == JobStatus.DONE
         assert db.search_notes("周期对账")[0] == 1
+    finally:
+        await redis.r.flushdb()
+
+
+@pytest.mark.asyncio
+async def test_document_publish_missing_smart_preserves_original_until_reconcile(
+    db, test_config, integration_redis,
+):
+    redis = integration_redis
+    storage = LocalStorage(test_config.jobs_dir)
+    job = Job(
+        id="j_document_smart_late",
+        content_type="document",
+        pipeline="document",
+        document_kind="research_paper",
+        domain="closure",
+        meta={"flags": {"smart_note": True}},
+    )
+    db.create_job(job)
+    await _seed_artifacts(
+        storage, job.id, "document", "research_paper", "延迟智能证据",
+    )
+    smart_path = "output/versions/notes_smart_anthropic_opus_20260714-012500.md"
+    smart_data = await storage.read_file(job.id, smart_path)
+    assert smart_data is not None
+    await storage.delete_file(job.id, smart_path)
+    await storage.delete_file(job.id, "output/provenance/smart.json")
+    scheduler = Scheduler(redis, db, test_config, storage=storage)
+
+    async def _workers_present(_pool):
+        return True
+
+    scheduler._pool_has_workers = _workers_present
+    try:
+        await scheduler.submit_job(job)
+        await _complete_real_pipeline(scheduler, redis, db, test_config, job.id)
+
+        assert db.get_job(job.id).status == JobStatus.PENDING
+        assert job.id in await redis.get_active_jobs()
+        assert [
+            row[0] for row in db._conn.execute(
+                "SELECT note_type FROM notes_fts5 WHERE job_id=? ORDER BY note_type",
+                (job.id,),
+            ).fetchall()
+        ] == ["original"]
+
+        await storage.write_file(job.id, smart_path, smart_data)
+        original_path = "intermediate/document_index.md"
+        original_data = await storage.read_file(job.id, original_path)
+        assert original_data is not None
+        await publish_provenance_fixture(
+            storage,
+            job_id=job.id,
+            pipeline=job.pipeline,
+            notes={
+                "original": (original_path, original_data),
+                "smart": (smart_path, smart_data),
+            },
+        )
+        await redis.r.hset(f"job:{job.id}:finalizer", "lease_until", "0")
+        await scheduler.reconcile_completion_effects()
+
+        assert db.get_job(job.id).status == JobStatus.DONE
+        assert [
+            row[0] for row in db._conn.execute(
+                "SELECT note_type FROM notes_fts5 WHERE job_id=? ORDER BY note_type",
+                (job.id,),
+            ).fetchall()
+        ] == ["smart"]
     finally:
         await redis.r.flushdb()
 

@@ -323,8 +323,18 @@ class Scheduler:
     async def _run_completion_effects(self, job_id: str, step: str, effects: list) -> bool:
         return await self._effects._run_completion_effects(job_id, step, effects)
 
-    async def _index_first_available_note(self, job_id: str, candidates: list[dict]) -> None:
-        return await self._effects._index_first_available_note(job_id, candidates)
+    async def _index_first_available_note(
+        self,
+        job_id: str,
+        candidates: list[dict],
+        *,
+        supersede_note_types: list[str] | None = None,
+    ) -> None:
+        return await self._effects._index_first_available_note(
+            job_id,
+            candidates,
+            supersede_note_types=supersede_note_types,
+        )
 
     async def _index_job_notes(
         self, job_id: str, note_type: str, rel: str, data: bytes, *,

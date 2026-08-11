@@ -8,9 +8,16 @@ import json
 import pytest
 
 from api.routes.notes import _read_verification_artifact
+from shared.document_contract import canonical_quality_text
 from shared.evidence_contract import MAX_EVIDENCE_BYTES, MAX_MECHANICAL_EVIDENCE_BYTES
 from shared.models import Job, JobPart, LLMResponse
-from shared.review_contract import MAX_REVIEW_SOURCE_BYTES, parse_review, source_record
+from shared.review_contract import (
+    MAX_REVIEW_SOURCE_BYTES,
+    build_document_review_pack,
+    parse_review,
+    persist_review_source,
+    source_record,
+)
 
 
 def _create_job_files(jobs_dir, job_id):
@@ -124,10 +131,28 @@ def _write_valid_review(job_dir, rel="output/review.json"):
         json.dumps({"summary": "摘要", "key_terms": []}, ensure_ascii=False),
         encoding="utf-8",
     )
-    document_text, document_record = source_record(
-        job_dir, document_rel, label="document",
+    provenance = {
+        "schema_version": 3,
+        "job_id": job_dir.name,
+        "note_type": "smart",
+        "segments": [],
+    }
+    provenance_path = job_dir / "output/provenance/smart.json"
+    provenance_path.parent.mkdir(parents=True, exist_ok=True)
+    provenance_path.write_text(
+        json.dumps(provenance, ensure_ascii=False), encoding="utf-8",
     )
-    quality_text, quality_record = source_record(job_dir, quality_rel, label="quality")
+    document_data = (job_dir / document_rel).read_bytes()
+    document_text, document_record = persist_review_source(
+        job_dir,
+        build_document_review_pack(document, document_data, {"key_terms": []}, provenance),
+        label="document",
+    )
+    quality_text, quality_record = persist_review_source(
+        job_dir,
+        canonical_quality_text(quality, expected_job_id=job_dir.name),
+        label="quality",
+    )
     concepts_text, concepts_record = source_record(
         job_dir, concepts_rel, label="concepts",
     )

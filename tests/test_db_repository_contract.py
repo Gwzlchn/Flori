@@ -18,7 +18,7 @@ from shared.repositories.maintenance import MaintenanceRepository
 
 
 _PUBLIC_CONTRACT_SHA256 = (
-    "e10028c7f6ba633337184ccf1869a4bd9ac3a232a524ecc1c92105df4f7e3986"
+    "261745f965c4f7a6cfe83b37b4ce3d793755093ceef7e10917ef28c47448ce45"
 )
 # 按 schema 版本冻结指纹: 已登记版本上的任何 schema 漂移都会失败.
 # 新增迁移时在这里补一行新版本的摘要, 补这一行就是"我确认 schema 变了"的显式动作.

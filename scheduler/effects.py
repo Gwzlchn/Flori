@@ -161,7 +161,9 @@ class EffectDispatcher:
                     await self.owner._sync_published_at(job_id)
                 elif action == "index_note":
                     await self.owner._index_first_available_note(
-                        job_id, effect.get("candidates") or [],
+                        job_id,
+                        effect.get("candidates") or [],
+                        supersede_note_types=effect.get("supersede_note_types"),
                     )
                 elif action == "collect_glossary":
                     await self.owner._collect_glossary(job_id)
@@ -172,22 +174,37 @@ class EffectDispatcher:
                 logger.info(
                     "completion_effect_done", job_id=job_id, step=step, action=action,
                 )
-            except Exception:
+            except Exception as exc:
                 logger.warning(
                     "completion_effect_failed", job_id=job_id, step=step,
-                    action=action, exc_info=True,
+                    action=action, error_type=type(exc).__name__, error=str(exc),
+                    exc_info=True,
                 )
                 return False
         return True
 
     async def _index_first_available_note(
-        self, job_id: str, candidates: list[dict],
+        self,
+        job_id: str,
+        candidates: list[dict],
+        *,
+        supersede_note_types: list[str] | None = None,
     ) -> None:
         """按配置顺序索引首个存在的笔记产物,避免回退来源重复进入 Ask。"""
         candidate_types = [note_type for note_type in (
             str(candidate.get("note_type") or "").strip()
             for candidate in candidates if isinstance(candidate, dict)
         ) if note_type]
+        if supersede_note_types is not None:
+            if (
+                not isinstance(supersede_note_types, list)
+                or not supersede_note_types
+                or any(type(item) is not str or not item for item in supersede_note_types)
+                or len(set(supersede_note_types)) != len(supersede_note_types)
+                or not set(candidate_types) <= set(supersede_note_types)
+            ):
+                raise ValueError("index_note supersede_note_types is invalid")
+            candidate_types = list(supersede_note_types)
         files: list[str] | None = None
         for candidate in candidates:
             if not isinstance(candidate, dict):

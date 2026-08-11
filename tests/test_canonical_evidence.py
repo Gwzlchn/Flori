@@ -427,6 +427,87 @@ async def test_canonical_evidence_reindex_is_idempotent_and_old_id_becomes_stale
 
 
 @pytest.mark.asyncio
+async def test_note_supersede_invalidates_evidence_and_rolls_back_as_one_transaction(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    note = b"# Intro\n\nClaim evidence."
+    source, provenance, support_files = _sidecars(note)
+    original_provenance = json.loads(provenance)
+    original_provenance["note_type"] = "original"
+    storage = MemoryStorage({
+        **support_files,
+        "output/notes.md": note,
+        "input/source.html": b"alpha Claim evidence beta",
+        "intermediate/source_segments.json": source,
+        "output/provenance/original.json": canonical_json_bytes(
+            original_provenance
+        ),
+    })
+    body, records = await _records(note, storage, note_type="original")
+    evidence_id = records[0]["evidence_id"]
+    db = _database(tmp_path / "canonical-supersede.db")
+    try:
+        db.index_job_notes(
+            "job-evidence", "original", "Original", body,
+            "document", "general", "", ["original"], records,
+        )
+        batch = db.create_study_suggestion_batch(
+            request_id="supersede-study",
+            domain="general",
+            job_ids=["job-evidence"],
+            concept_terms=[],
+            max_cards=1,
+        )
+        study_evidence_id = batch["llm_request"]["evidence"][0]["evidence_id"]
+        original_replace = db._replace_note_chunks_locked
+
+        def fail_smart_chunks(**kwargs):
+            if kwargs["note_type"] == "smart":
+                raise RuntimeError("injected smart chunk failure")
+            return original_replace(**kwargs)
+
+        monkeypatch.setattr(db, "_replace_note_chunks_locked", fail_smart_chunks)
+        with pytest.raises(RuntimeError, match="injected smart chunk failure"):
+            db.index_job_notes(
+                "job-evidence", "smart", "Smart", "Smart replacement body.",
+                "document", "general", "", ["smart", "original"], [],
+            )
+
+        state = db.canonical_evidence_database_states([evidence_id])[evidence_id]
+        study_state = db._conn.execute(
+            "SELECT status, invalid_reason FROM study_suggestion_evidence "
+            "WHERE evidence_id=?",
+            (study_evidence_id,),
+        ).fetchone()
+        assert (state["status"], state["reason"]) == ("valid", None)
+        assert tuple(study_state) == ("valid", None)
+        assert db.search_notes("Claim evidence")[0] == 1
+        assert db.search_notes("Smart replacement")[0] == 0
+
+        monkeypatch.setattr(db, "_replace_note_chunks_locked", original_replace)
+        db.index_job_notes(
+            "job-evidence", "smart", "Smart", "Smart replacement body.",
+            "document", "general", "", ["smart", "original"], [],
+        )
+
+        state = db.canonical_evidence_database_states([evidence_id])[evidence_id]
+        study_state = db._conn.execute(
+            "SELECT status, invalid_reason FROM study_suggestion_evidence "
+            "WHERE evidence_id=?",
+            (study_evidence_id,),
+        ).fetchone()
+        assert (state["status"], state["reason"]) == (
+            "missing", "note_superseded",
+        )
+        assert study_state["status"] != "valid"
+        assert study_state["invalid_reason"]
+        assert db.search_notes("Claim evidence")[0] == 0
+        assert db.search_notes("Smart replacement")[0] == 1
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
 async def test_resolver_rejects_database_policy_fingerprint_drift(tmp_path: Path) -> None:
     note = b"# Intro\n\nClaim evidence."
     source, provenance, support_files = _sidecars(note)

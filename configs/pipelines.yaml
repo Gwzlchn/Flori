@@ -410,6 +410,7 @@ document:
       effects_required_outputs: ["output/publication.json"]
       on_complete:
         - action: index_note
+          supersede_note_types: [smart, original]
           candidates:
             - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "08_review", provenance_since_version: "2"}
         - action: collect_glossary

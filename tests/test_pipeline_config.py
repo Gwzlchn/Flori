@@ -662,6 +662,16 @@ class TestCompletionEffects:
             "provenance_step": "08_review",
             "provenance_since_version": "2",
         }]
+        assert effects[1][1]["supersede_note_types"] == ["smart", "original"]
+
+    @pytest.mark.parametrize("value", [[], ["smart", "smart"], [""], ["original"]])
+    def test_index_supersede_note_types_fail_closed(self, value):
+        raw = self._provenance_pipeline()
+        raw["p"]["jobs"]["indexer"]["on_complete"][0][
+            "supersede_note_types"
+        ] = value
+        with pytest.raises(ValueError, match="supersede_note_types"):
+            normalize_pipelines(raw)
 
     def test_provenance_boundary_survives_later_producer_version_bump(self):
         pipeline = normalize_pipelines(self._provenance_pipeline())["p"]

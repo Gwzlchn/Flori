@@ -1059,6 +1059,22 @@ class TestNotesFTS:
         total, _ = db.search_notes("讲解模型")
         assert total == 2
 
+    def test_index_supersedes_only_declared_types_for_same_job(self, db):
+        db.index_job_notes("j1", "original", "J1 原文", "J1 原文唯一词。")
+        db.index_job_notes("j1", "mechanical", "J1 机械", "J1 机械唯一词。")
+        db.index_job_notes("j2", "original", "J2 原文", "J2 原文唯一词。")
+
+        db.index_job_notes(
+            "j1", "smart", "J1 智能", "J1 智能唯一词。",
+            supersede_note_types=["smart", "original"],
+        )
+
+        assert db.search_notes("J1 原文唯一词")[0] == 0
+        assert db.search_note_chunks("J1 原文唯一词")[0] == 0
+        assert db.search_notes("J1 智能唯一词")[0] == 1
+        assert db.search_notes("J1 机械唯一词")[0] == 1
+        assert db.search_notes("J2 原文唯一词")[0] == 1
+
     def test_search_filter_collection(self, db):
         db.index_job_notes("j1", "smart", "a", "讲注意力机制。", collection_id="c1")
         db.index_job_notes("j2", "smart", "b", "讲注意力机制。", collection_id="c2")

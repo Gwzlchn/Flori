@@ -31,6 +31,8 @@ import os
 import sys
 from pathlib import Path
 
+from shared.step_output_commit import build_candidate_record, candidate_filename
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -44,6 +46,9 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     result = b"failed-artifact" if job["fake_fail"] else b"completed-artifact"
     (output_dir / "result.bin").write_bytes(result)
+    (work_dir / candidate_filename("01_download")).write_text(json.dumps(
+        build_candidate_record("01_download", {})
+    ))
 
     logs_dir = work_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -99,7 +104,7 @@ async def test_gateway_production_worker_execute_closes_task_lifecycle(
     _install_fake_step(tmp_path, monkeypatch)
 
     raw_step = next(
-        item for item in test_config.pipelines["video"]["steps"]
+        item for item in test_config.pipelines["audio"]["steps"]
         if item["name"] == "01_download"
     )
     raw_step.update(
@@ -131,13 +136,13 @@ async def test_gateway_production_worker_execute_closes_task_lifecycle(
     try:
         await worker.register()
         db.create_job(Job(
-            id=job_id, content_type="video", pipeline="video", domain="general",
+            id=job_id, content_type="audio", pipeline="audio", domain="general",
         ))
         db.upsert_step(Step(
             job_id=job_id, name="01_download", status=StepStatus.READY, pool="cpu",
         ))
         await redis.init_job(
-            job_id, "video", {"source": "upload", "domain": "general", "style_tags": "[]"},
+            job_id, "audio", {"source": "upload", "domain": "general", "style_tags": "[]"},
         )
         await redis.set_step_status(job_id, "01_download", "ready")
         await redis.set_resource_limits({resource: 1})

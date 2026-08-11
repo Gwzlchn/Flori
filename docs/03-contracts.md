@@ -2836,12 +2836,12 @@ default:
 .ai-step:
   pool: ai
   timeout: 600
-  retry: 2
+  retry: 5
 
 .review:
   pool: ai
-  timeout: 120
-  retry: 2
+  timeout: 1800
+  retry: 5
 ```
 
 **job 字段**：
@@ -2871,9 +2871,12 @@ provider 的默认 model/reasoning effort 单一事实源是 `configs/providers.
 只属于 Worker 内部物化结果,不是可写回 pipeline 的配置契约。
 
 `on_complete` 是完成副作用的唯一声明源，scheduler 不维护内容类型或步骤白名单。
-`index_note.candidates` 按顺序选择首个存在的 `{note_type,path,source_manifest,provenance}`；Document 只允许
-版本化 smart note 或 `output/translated.html`，不回退原文 Markdown。步骤完成后的全文、证据块和候选来源
-替换在同一 SQLite 事务中幂等执行；job 进 done 前重放所有已完成步骤的声明，失败时保持 active 并由周期对账收敛。
+`index_note.candidates` 按顺序选择首个存在的 `{note_type,path,source_manifest,provenance}`。
+`supersede_note_types` 可显式声明本次成功索引后同事务淘汰的同 Job 笔记类型,但不增加候选或提供降级回退。
+Document 的 `03_structure` 可先发布 original 检索投影;`09_publish` 只有选中版本化 smart note 后才以
+`[smart, original]` 原子替换,smart 缺失时不得用 original 冒充统一评审后的发布结果。步骤完成后的全文、
+证据块和候选来源替换在同一 SQLite 事务中幂等执行;job 进 done 前重放所有已完成步骤的声明,失败时保持
+active 并由周期对账收敛。
 
 pipeline 中的 `step.name` 是模板身份。Job scope 的执行身份保持该名字；Part scope 展开为内部执行键
 `part:{part_id}::{step.name}`，DB 则以 `(job_id,scope_key,step)` 保存。Redis 队列、CAS、租约、Worker

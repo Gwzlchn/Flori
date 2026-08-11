@@ -207,6 +207,40 @@ def validate_provenance_pipeline_contract(pipelines: dict) -> None:
                     raise ValueError(
                         f"index_note candidates are invalid: {pipeline}/{owner.get('name')}"
                     )
+                candidate_note_types = [
+                    candidate.get("note_type")
+                    for candidate in candidates
+                    if isinstance(candidate, dict)
+                ]
+                if (
+                    len(candidate_note_types) != len(candidates)
+                    or any(
+                        type(item) is not str
+                        or re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", item) is None
+                        for item in candidate_note_types
+                    )
+                ):
+                    raise ValueError(
+                        f"index_note candidate note_type is invalid: "
+                        f"{pipeline}/{owner.get('name')}"
+                    )
+                supersede_note_types = effect.get("supersede_note_types")
+                if supersede_note_types is not None and (
+                    not isinstance(supersede_note_types, list)
+                    or not supersede_note_types
+                    or len(supersede_note_types) > 32
+                    or any(
+                        type(item) is not str
+                        or re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", item) is None
+                        for item in supersede_note_types
+                    )
+                    or len(set(supersede_note_types)) != len(supersede_note_types)
+                    or not set(candidate_note_types) <= set(supersede_note_types)
+                ):
+                    raise ValueError(
+                        "index_note supersede_note_types are invalid: "
+                        f"{pipeline}/{owner.get('name')}"
+                    )
                 for index, candidate in enumerate(candidates):
                     if not isinstance(candidate, dict):
                         raise ValueError(

@@ -25,7 +25,10 @@ from shared.config import load_config
 from shared.db import Database
 from shared.models import Job, JobStatus
 from shared.storage import LocalStorage
-from tests.integration.provenance_fixture import publish_provenance_fixture
+from tests.integration.provenance_fixture import (
+    publish_provenance_fixture,
+    publish_step_manifest_fixture,
+)
 
 
 FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "retrieval_quality"
@@ -241,9 +244,19 @@ async def _complete_pipeline(
 ) -> None:
     steps = await scheduler._get_job_pipeline_steps(job_id)
     assert steps is not None
-    for name in steps:
+    job = db.get_job(job_id)
+    assert job is not None
+    for name, step_config in steps.items():
         if await redis.get_step_status(job_id, name) == "skipped":
             continue
+        await publish_step_manifest_fixture(
+            scheduler.storage,
+            job=job,
+            config=config,
+            step_name=name,
+            step_config=step_config,
+            job_generation=await redis.get_job_generation(job_id),
+        )
         await redis.set_step_status(job_id, name, "running")
         await scheduler.on_step_done(
             job_id, name, duration=0.001, worker="retrieval-quality-fixture",
