@@ -146,7 +146,7 @@ p,ul,ol,blockquote,pre,figure,table{margin:1em 0}a{color:#1769aa;text-decoration
 figure{margin:1.5em auto;padding:14px;border:1px solid #e4e9f0;border-radius:10px;background:#fbfcfe}figcaption,caption{color:#5a6778;font-size:.92em;text-align:left}
 table{display:block;max-width:100%;overflow:auto;border-collapse:collapse}th,td{border:1px solid #d8dee8;padding:.45em .65em;vertical-align:top}th{background:#f3f6fa}
 pre,code{font-family:"SFMono-Regular",Consolas,monospace}pre{overflow:auto;padding:1em;border-radius:8px;background:#f5f7fa}blockquote{border-left:4px solid #d4dce7;padding-left:1em;color:#526174}
-math{font-family:"STIX Two Math","Cambria Math",serif}.flori-source-anchor{display:block;position:relative;top:-12px;visibility:hidden}
+math{font-family:"STIX Two Math","Cambria Math",serif}.flori-source-anchor{display:inline!important;position:relative;top:-12px;visibility:hidden}
 .flori-source-target{outline:3px solid #f4b942;outline-offset:5px;background:#fff7d6;scroll-margin-top:18px}.flori-exact-target{border-radius:3px;background:#ffe47a;color:inherit}
 .flori-document-header{padding-bottom:1.25rem;border-bottom:1px solid #e4e9f0}.flori-document-meta{display:flex;flex-wrap:wrap;gap:.4rem 1rem;color:#5a6778;font-size:.92rem}
 .flori-abstract{margin:1.35rem 0;padding:1rem 1.15rem;border-left:4px solid #8aa9c7;background:#f7f9fc}.flori-abstract-label{display:block;margin-bottom:.35rem;color:#526174;font-size:.82rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
@@ -159,7 +159,7 @@ _DOCUMENT_SNAPSHOT_FRAME_STYLE = """
 html,body{margin:0;min-height:100%;background:#fff;color:#111}
 .flori-document{min-height:100vh}
 img,svg{max-width:100%;height:auto}
-.flori-source-anchor{display:block;position:relative;top:-12px;visibility:hidden}
+.flori-source-anchor{display:inline!important;position:relative;top:-12px;visibility:hidden}
 .flori-source-target{outline:3px solid #f4b942;outline-offset:5px;background:#fff7d6;scroll-margin-top:18px}
 .flori-exact-target{border-radius:3px;background:#ffe47a;color:inherit}
 """.strip()
@@ -931,7 +931,10 @@ class _SafeDocumentParser(HTMLParser):
             target = bool(self.target_segment and block_id == self.target_segment)
             if block_id:
                 anchor = html.escape(f"source-{block_id}", quote=True)
-                self._append(f'<span id="{anchor}" class="flori-source-anchor"></span>')
+                self._append(
+                    f'<span id="{anchor}" class="flori-source-anchor" '
+                    'style="display:inline!important"></span>'
+                )
             self._append(
                 f"<{normalized}{self._attrs(normalized, attrs, target=target)}>"
             )

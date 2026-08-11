@@ -199,6 +199,42 @@ def test_reader_sanitizes_active_content_and_preserves_source_bytes():
     assert "/api/jobs/job_doc/artifact?path=assets%2Ffigure%201.png" in rendered
 
 
+def test_source_anchors_preserve_inline_math_flow_in_both_reader_styles():
+    raw = b"<html><body><article><p>Before <math><mi>x</mi></math> after.</p></article></body></html>"
+    document = _document("job_inline_anchor", raw)
+    document["blocks"].append({
+        "block_id": "blk_math",
+        "parent_id": "blk_intro",
+        "order": 1,
+        "kind": "math",
+        "text": "x",
+        "locator": {
+            "html": {
+                "source_id": "html",
+                "source_fingerprint": _fingerprint(raw),
+                "dom_path": "/html[1]/body[1]/article[1]/p[1]/math[1]",
+                "exact": "x",
+            },
+        },
+    })
+
+    for snapshot_css in (None, ""):
+        rendered = render_document_html(
+            raw,
+            job_id="job_inline_anchor",
+            document=document,
+            snapshot_css=snapshot_css,
+        ).decode()
+
+        assert (
+            '<span id="source-blk_math" class="flori-source-anchor" '
+            'style="display:inline!important"></span><math>'
+            in rendered
+        )
+        assert ".flori-source-anchor{display:inline!important;" in rendered
+        assert ".flori-source-anchor{display:block;" not in rendered
+
+
 def test_reader_materializes_translation_artifact_images():
     rendered = render_document_html(
         b'<html><body><img data-artifact="assets/chart.png" alt="chart"></body></html>',
